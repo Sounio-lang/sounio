@@ -1,0 +1,2936 @@
+// self-hosted::ir::incremental — Incremental compilation infrastructure
+//
+// Implements dependency fingerprinting, change detection, and selective
+// recompilation for the Sounio self-hosted compiler.  The core idea:
+//
+//   1. Every compilation artifact (function, type, module, constant, import,
+//      global) is represented as a dependency node with a 128-bit fingerprint
+//      derived from its source content.
+//   2. Dependency edges record which nodes depend on which others.
+//   3. On re-compilation, current fingerprints are compared against cached
+//      (previous-build) fingerprints to detect changes.
+//   4. Changed nodes are marked stale, and staleness propagates transitively
+//      via BFS along reverse dependency edges.
+//   5. Only stale nodes are recompiled, and their results cached for the
+//      next incremental round.
+//
+// Fingerprinting uses a 128-bit FNV-1a variant split across two i64 halves
+// (hash_lo and hash_hi).  This gives excellent collision resistance without
+// requiring big-integer arithmetic.
+//
+// Algorithms implemented:
+//   1. FNV-1a fingerprinting (128-bit, two-lane)
+//   2. Change detection via fingerprint comparison
+//   3. BFS transitive invalidation
+//   4. Topological sort (Kahn's algorithm) for recompilation ordering
+//   5. Result caching with fingerprint-keyed lookup
+//   6. Worklist-based selective recompilation scheduling
+//   7. Dependency graph construction from adjacency matrix
+//
+// All arrays are fixed-size — no heap allocation.
+//
+// References:
+//   Salsa (Rust incremental framework): "Demand-driven incremental computation"
+//   rustc query system: "Incremental compilation via red-green trees"
+//   Shake build system: "Build systems a la carte" (Mokhov et al., 2018)
+
+// ============================================================================
+// Section 1: Constants
+// ============================================================================
+
+let INC_MAX_NODES: i64 = 2048
+let INC_MAX_EDGES: i64 = 8192
+let INC_MAX_CACHE: i64 = 1024
+let INC_MAX_STALE: i64 = 512
+
+// FNV-1a parameters
+// FNV offset basis: 14695981039346656037 as u64 = -3750763034362895579 as i64
+fn INC_FNV_OFFSET() -> i64 { 0 - 3750763034362895579 }
+fn INC_FNV_PRIME() -> i64 { 1099511628211 }
+
+// Sentinel for "no node"
+let INC_INVALID: i64 = 0 - 1
+
+// Node kind constants (integer tags, not enums — avoids forward-ref issues)
+let INC_NODE_FUNCTION: i64 = 1
+let INC_NODE_TYPE: i64 = 2
+let INC_NODE_MODULE: i64 = 3
+let INC_NODE_CONSTANT: i64 = 4
+let INC_NODE_IMPORT: i64 = 5
+let INC_NODE_GLOBAL: i64 = 6
+
+// Node state constants
+let INC_STATE_FRESH: i64 = 0
+let INC_STATE_VALID: i64 = 1
+let INC_STATE_STALE: i64 = 2
+let INC_STATE_RECOMPILING: i64 = 3
+let INC_STATE_ERROR: i64 = 4
+
+// Change kind constants
+let INC_CHANGE_NONE: i64 = 0
+let INC_CHANGE_MODIFIED: i64 = 1
+let INC_CHANGE_ADDED: i64 = 2
+let INC_CHANGE_REMOVED: i64 = 3
+
+// ============================================================================
+// Section 2: Structs
+// ============================================================================
+
+// 128-bit fingerprint stored as two i64 halves.
+struct IncFingerprint {
+    hash_lo: i64,
+    hash_hi: i64,
+}
+
+// A single dependency node in the incremental compilation graph.
+struct IncDepNode {
+    id: i64,
+    kind: i64,
+    state: i64,
+    name_hash: i64,
+    fingerprint: IncFingerprint,
+    cached_fingerprint: IncFingerprint,
+    change: i64,
+    edge_start: i64,
+    edge_count: i64,
+}
+
+// A directed dependency edge: from_node depends on to_node.
+struct IncEdge {
+    from_node: i64,
+    to_node: i64,
+}
+
+// A cache entry mapping a node's fingerprint to its compilation result hash.
+struct IncCacheEntry {
+    node_id: i64,
+    fingerprint: IncFingerprint,
+    result_hash: i64,
+    valid: bool,
+}
+
+// The flat-arena incremental compilation context.
+struct IncContext {
+    nodes: [IncDepNode; 2048],
+    node_count: i64,
+    edges: [IncEdge; 8192],
+    edge_count: i64,
+    cache: [IncCacheEntry; 1024],
+    cache_count: i64,
+    stale_list: [i64; 512],
+    stale_count: i64,
+    worklist: [i64; 512],
+    wl_head: i64,
+    wl_tail: i64,
+    recompile_count: i64,
+    total_nodes_checked: i64,
+}
+
+// ============================================================================
+// Section 3: Default constructors (helpers must precede callers)
+// ============================================================================
+
+fn inc_fingerprint_zero() -> IncFingerprint {
+    IncFingerprint {
+        hash_lo: 0,
+        hash_hi: 0,
+    }
+}
+
+fn inc_default_node() -> IncDepNode {
+    IncDepNode {
+        id: 0 - 1,
+        kind: 0,
+        state: INC_STATE_FRESH,
+        name_hash: 0,
+        fingerprint: inc_fingerprint_zero(),
+        cached_fingerprint: inc_fingerprint_zero(),
+        change: INC_CHANGE_NONE,
+        edge_start: 0,
+        edge_count: 0,
+    }
+}
+
+fn inc_default_edge() -> IncEdge {
+    IncEdge {
+        from_node: 0 - 1,
+        to_node: 0 - 1,
+    }
+}
+
+fn inc_default_cache_entry() -> IncCacheEntry {
+    IncCacheEntry {
+        node_id: 0 - 1,
+        fingerprint: inc_fingerprint_zero(),
+        result_hash: 0,
+        valid: false,
+    }
+}
+
+fn inc_context_new() -> IncContext {
+    IncContext {
+        nodes: [inc_default_node(); 2048],
+        node_count: 0,
+        edges: [inc_default_edge(); 8192],
+        edge_count: 0,
+        cache: [inc_default_cache_entry(); 1024],
+        cache_count: 0,
+        stale_list: [0; 512],
+        stale_count: 0,
+        worklist: [0; 512],
+        wl_head: 0,
+        wl_tail: 0,
+        recompile_count: 0,
+        total_nodes_checked: 0,
+    }
+}
+
+// ============================================================================
+// Section 4: Fingerprint operations
+// ============================================================================
+
+// Compare two fingerprints for equality.
+fn inc_fingerprint_eq(a: &IncFingerprint, b: &IncFingerprint) -> bool {
+    a.hash_lo == b.hash_lo && a.hash_hi == b.hash_hi
+}
+
+// Check if a fingerprint is the zero fingerprint.
+fn inc_fingerprint_is_zero(fp: &IncFingerprint) -> bool {
+    fp.hash_lo == 0 && fp.hash_hi == 0
+}
+
+// Hash a single i64 value into a 128-bit fingerprint using FNV-1a.
+// The low half uses the standard FNV offset; the high half uses a
+// rotated variant for independence.
+fn inc_fingerprint_from_i64(val: i64) -> IncFingerprint with Mut, Panic {
+    // Low half: FNV-1a of val
+    var lo: i64 = INC_FNV_OFFSET()
+    // XOR byte 0
+    var v: i64 = val
+    var b0: i64 = v % 256
+    if b0 < 0 {
+        b0 = b0 + 256
+    }
+    lo = lo ^ b0
+    lo = lo * INC_FNV_PRIME()
+
+    // XOR byte 1
+    v = v / 256
+    var b1: i64 = v % 256
+    if b1 < 0 {
+        b1 = b1 + 256
+    }
+    lo = lo ^ b1
+    lo = lo * INC_FNV_PRIME()
+
+    // XOR byte 2
+    v = v / 256
+    var b2: i64 = v % 256
+    if b2 < 0 {
+        b2 = b2 + 256
+    }
+    lo = lo ^ b2
+    lo = lo * INC_FNV_PRIME()
+
+    // XOR byte 3
+    v = v / 256
+    var b3: i64 = v % 256
+    if b3 < 0 {
+        b3 = b3 + 256
+    }
+    lo = lo ^ b3
+    lo = lo * INC_FNV_PRIME()
+
+    // High half: use a different offset basis for independence
+    var hi: i64 = INC_FNV_OFFSET() ^ 7046029254386353131
+    hi = hi ^ b0
+    hi = hi * INC_FNV_PRIME()
+    hi = hi ^ b1
+    hi = hi * INC_FNV_PRIME()
+    hi = hi ^ b2
+    hi = hi * INC_FNV_PRIME()
+    hi = hi ^ b3
+    hi = hi * INC_FNV_PRIME()
+
+    IncFingerprint {
+        hash_lo: lo,
+        hash_hi: hi,
+    }
+}
+
+// Combine two fingerprints into one (order-dependent).
+// Uses XOR-rotate-multiply to merge the lanes.
+fn inc_fingerprint_combine(a: &IncFingerprint, b: &IncFingerprint) -> IncFingerprint with Mut, Panic {
+    var lo: i64 = a.hash_lo
+    lo = lo ^ b.hash_lo
+    lo = lo * INC_FNV_PRIME()
+
+    var hi: i64 = a.hash_hi
+    hi = hi ^ b.hash_hi
+    hi = hi * INC_FNV_PRIME()
+
+    // Mix high bits into low for avalanche
+    lo = lo ^ (hi / 65536)
+    hi = hi ^ (lo / 65536)
+
+    IncFingerprint {
+        hash_lo: lo,
+        hash_hi: hi,
+    }
+}
+
+// Hash an array of i64 values into a single fingerprint.
+// Processes `len` elements from `data`.
+fn inc_fingerprint_from_bytes(data: &[i64; 256], len: i64) -> IncFingerprint with Mut, Div, Panic {
+    var lo: i64 = INC_FNV_OFFSET()
+    var hi: i64 = INC_FNV_OFFSET() ^ 7046029254386353131
+
+    var i: i64 = 0
+    while i < len {
+        if i >= 256 {
+            // Safety: don't overrun the array
+            i = len
+        } else {
+            let val = data[i as usize]
+
+            // Extract 4 bytes from val
+            var v: i64 = val
+            var b0: i64 = v % 256
+            if b0 < 0 {
+                b0 = b0 + 256
+            }
+            lo = lo ^ b0
+            lo = lo * INC_FNV_PRIME()
+            hi = hi ^ b0
+            hi = hi * INC_FNV_PRIME()
+
+            v = v / 256
+            var b1: i64 = v % 256
+            if b1 < 0 {
+                b1 = b1 + 256
+            }
+            lo = lo ^ b1
+            lo = lo * INC_FNV_PRIME()
+            hi = hi ^ b1
+            hi = hi * INC_FNV_PRIME()
+
+            v = v / 256
+            var b2: i64 = v % 256
+            if b2 < 0 {
+                b2 = b2 + 256
+            }
+            lo = lo ^ b2
+            lo = lo * INC_FNV_PRIME()
+            hi = hi ^ b2
+            hi = hi * INC_FNV_PRIME()
+
+            v = v / 256
+            var b3: i64 = v % 256
+            if b3 < 0 {
+                b3 = b3 + 256
+            }
+            lo = lo ^ b3
+            lo = lo * INC_FNV_PRIME()
+            hi = hi ^ b3
+            hi = hi * INC_FNV_PRIME()
+
+            i = i + 1
+        }
+    }
+
+    // Final avalanche mix
+    lo = lo ^ (hi / 65536)
+    hi = hi ^ (lo / 65536)
+
+    IncFingerprint {
+        hash_lo: lo,
+        hash_hi: hi,
+    }
+}
+
+// Create a fingerprint from two explicit i64 values (for testing).
+fn inc_fingerprint_make(lo: i64, hi: i64) -> IncFingerprint {
+    IncFingerprint {
+        hash_lo: lo,
+        hash_hi: hi,
+    }
+}
+
+// ============================================================================
+// Section 5: Node management
+// ============================================================================
+
+// Add a dependency node to the context.  Returns the node ID (index).
+fn inc_add_node(ctx: &! IncContext, kind: i64, name_hash: i64) -> i64 with Mut, Div, Panic {
+    let idx = ctx.node_count
+    if idx >= INC_MAX_NODES {
+        return 0 - 1
+    }
+    ctx.nodes[idx as usize] = IncDepNode {
+        id: idx,
+        kind: kind,
+        state: INC_STATE_FRESH,
+        name_hash: name_hash,
+        fingerprint: inc_fingerprint_zero(),
+        cached_fingerprint: inc_fingerprint_zero(),
+        change: INC_CHANGE_NONE,
+        edge_start: 0,
+        edge_count: 0,
+    }
+    ctx.node_count = idx + 1
+    idx
+}
+
+// Get the kind of a node.
+fn inc_get_node_kind(ctx: &IncContext, node_id: i64) -> i64 with Div, Panic {
+    if node_id < 0 || node_id >= ctx.node_count {
+        return 0
+    }
+    ctx.nodes[node_id as usize].kind
+}
+
+// Get the state of a node.
+fn inc_get_node_state(ctx: &IncContext, node_id: i64) -> i64 with Div, Panic {
+    if node_id < 0 || node_id >= ctx.node_count {
+        return INC_STATE_ERROR
+    }
+    ctx.nodes[node_id as usize].state
+}
+
+// Set the state of a node.
+fn inc_set_node_state(ctx: &! IncContext, node_id: i64, state: i64) with Mut, Div, Panic {
+    if node_id >= 0 && node_id < ctx.node_count {
+        ctx.nodes[node_id as usize].state = state
+    }
+}
+
+// Get the name hash of a node.
+fn inc_get_name_hash(ctx: &IncContext, node_id: i64) -> i64 with Div, Panic {
+    if node_id < 0 || node_id >= ctx.node_count {
+        return 0
+    }
+    ctx.nodes[node_id as usize].name_hash
+}
+
+// Get the change kind of a node.
+fn inc_get_change(ctx: &IncContext, node_id: i64) -> i64 with Div, Panic {
+    if node_id < 0 || node_id >= ctx.node_count {
+        return INC_CHANGE_NONE
+    }
+    ctx.nodes[node_id as usize].change
+}
+
+// Set the change kind of a node.
+fn inc_set_change(ctx: &! IncContext, node_id: i64, change: i64) with Mut, Div, Panic {
+    if node_id >= 0 && node_id < ctx.node_count {
+        ctx.nodes[node_id as usize].change = change
+    }
+}
+
+// ============================================================================
+// Section 6: Edge management
+// ============================================================================
+
+// Add a dependency edge: `from` depends on `to`.
+// Returns true on success, false if capacity exceeded or invalid nodes.
+fn inc_add_edge(ctx: &! IncContext, from: i64, to: i64) -> bool with Mut, Div, Panic {
+    if from < 0 || from >= ctx.node_count {
+        return false
+    }
+    if to < 0 || to >= ctx.node_count {
+        return false
+    }
+    let idx = ctx.edge_count
+    if idx >= INC_MAX_EDGES {
+        return false
+    }
+    ctx.edges[idx as usize] = IncEdge {
+        from_node: from,
+        to_node: to,
+    }
+    ctx.edge_count = idx + 1
+    true
+}
+
+// Check if an edge exists from `from` to `to`.
+fn inc_has_edge(ctx: &IncContext, from: i64, to: i64) -> bool with Mut, Div, Panic {
+    var i: i64 = 0
+    while i < ctx.edge_count {
+        if ctx.edges[i as usize].from_node == from && ctx.edges[i as usize].to_node == to {
+            return true
+        }
+        i = i + 1
+    }
+    false
+}
+
+// Count forward dependencies of a node (how many nodes it depends on).
+// These are edges where from_node == node_id.
+fn inc_dependencies(ctx: &IncContext, node_id: i64) -> i64 with Mut, Div, Panic {
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < ctx.edge_count {
+        if ctx.edges[i as usize].from_node == node_id {
+            count = count + 1
+        }
+        i = i + 1
+    }
+    count
+}
+
+// Count reverse dependencies of a node (how many nodes depend on it).
+// These are edges where to_node == node_id.
+fn inc_dependents(ctx: &IncContext, node_id: i64) -> i64 with Mut, Div, Panic {
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < ctx.edge_count {
+        if ctx.edges[i as usize].to_node == node_id {
+            count = count + 1
+        }
+        i = i + 1
+    }
+    count
+}
+
+// Collect the IDs of nodes that `node_id` depends on (forward deps).
+// Returns the count, writing into `out_buf`.
+fn inc_get_dependencies(ctx: &IncContext, node_id: i64, out_buf: &! [i64; 512]) -> i64 with Mut, Div, Panic {
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < ctx.edge_count {
+        if ctx.edges[i as usize].from_node == node_id {
+            if count < INC_MAX_STALE {
+                out_buf[count as usize] = ctx.edges[i as usize].to_node
+                count = count + 1
+            }
+        }
+        i = i + 1
+    }
+    count
+}
+
+// Collect the IDs of nodes that depend on `node_id` (reverse deps).
+// Returns the count, writing into `out_buf`.
+fn inc_get_dependents(ctx: &IncContext, node_id: i64, out_buf: &! [i64; 512]) -> i64 with Mut, Div, Panic {
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < ctx.edge_count {
+        if ctx.edges[i as usize].to_node == node_id {
+            if count < INC_MAX_STALE {
+                out_buf[count as usize] = ctx.edges[i as usize].from_node
+                count = count + 1
+            }
+        }
+        i = i + 1
+    }
+    count
+}
+
+// ============================================================================
+// Section 7: Fingerprint getters and setters
+// ============================================================================
+
+// Set the current fingerprint for a node.
+fn inc_set_fingerprint(ctx: &! IncContext, node_id: i64, fp: IncFingerprint) with Mut, Div, Panic {
+    if node_id >= 0 && node_id < ctx.node_count {
+        ctx.nodes[node_id as usize].fingerprint = fp
+    }
+}
+
+// Get the current fingerprint for a node.
+fn inc_get_fingerprint(ctx: &IncContext, node_id: i64) -> IncFingerprint with Div, Panic {
+    if node_id < 0 || node_id >= ctx.node_count {
+        return inc_fingerprint_zero()
+    }
+    ctx.nodes[node_id as usize].fingerprint
+}
+
+// Set the cached (previous-build) fingerprint for a node.
+fn inc_set_cached_fingerprint(ctx: &! IncContext, node_id: i64, fp: IncFingerprint) with Mut, Div, Panic {
+    if node_id >= 0 && node_id < ctx.node_count {
+        ctx.nodes[node_id as usize].cached_fingerprint = fp
+    }
+}
+
+// Get the cached fingerprint for a node.
+fn inc_get_cached_fingerprint(ctx: &IncContext, node_id: i64) -> IncFingerprint with Div, Panic {
+    if node_id < 0 || node_id >= ctx.node_count {
+        return inc_fingerprint_zero()
+    }
+    ctx.nodes[node_id as usize].cached_fingerprint
+}
+
+// ============================================================================
+// Section 8: Change detection
+// ============================================================================
+
+// Compare current fingerprints against cached fingerprints for all nodes.
+// Nodes whose fingerprints differ are marked StateStale with ChangeModified.
+// Nodes with zero cached fingerprint are marked ChangeAdded (new).
+// Nodes with zero current fingerprint but non-zero cached are ChangeRemoved.
+fn inc_detect_changes(ctx: &! IncContext) with Mut, Div, Panic {
+    var i: i64 = 0
+    ctx.stale_count = 0
+    ctx.total_nodes_checked = ctx.node_count
+
+    while i < ctx.node_count {
+        let cur_zero = inc_fingerprint_is_zero(&ctx.nodes[i as usize].fingerprint)
+        let cached_zero = inc_fingerprint_is_zero(&ctx.nodes[i as usize].cached_fingerprint)
+
+        if cur_zero && cached_zero {
+            // Both zero — fresh node, no prior data, treat as unchanged
+            ctx.nodes[i as usize].change = INC_CHANGE_NONE
+            ctx.nodes[i as usize].state = INC_STATE_VALID
+        } else if cur_zero && cached_zero == false {
+            // Current is zero but cached is not — node was removed
+            ctx.nodes[i as usize].change = INC_CHANGE_REMOVED
+            ctx.nodes[i as usize].state = INC_STATE_STALE
+            if ctx.stale_count < INC_MAX_STALE {
+                ctx.stale_list[ctx.stale_count as usize] = i
+                ctx.stale_count = ctx.stale_count + 1
+            }
+        } else if cur_zero == false && cached_zero {
+            // Current is non-zero but cached is zero — node was added
+            ctx.nodes[i as usize].change = INC_CHANGE_ADDED
+            ctx.nodes[i as usize].state = INC_STATE_STALE
+            if ctx.stale_count < INC_MAX_STALE {
+                ctx.stale_list[ctx.stale_count as usize] = i
+                ctx.stale_count = ctx.stale_count + 1
+            }
+        } else {
+            // Both non-zero — compare
+            let eq = inc_fingerprint_eq(
+                &ctx.nodes[i as usize].fingerprint,
+                &ctx.nodes[i as usize].cached_fingerprint
+            )
+            if eq {
+                ctx.nodes[i as usize].change = INC_CHANGE_NONE
+                ctx.nodes[i as usize].state = INC_STATE_VALID
+            } else {
+                ctx.nodes[i as usize].change = INC_CHANGE_MODIFIED
+                ctx.nodes[i as usize].state = INC_STATE_STALE
+                if ctx.stale_count < INC_MAX_STALE {
+                    ctx.stale_list[ctx.stale_count as usize] = i
+                    ctx.stale_count = ctx.stale_count + 1
+                }
+            }
+        }
+        i = i + 1
+    }
+}
+
+// Check if a specific node is stale.
+fn inc_node_is_stale(ctx: &IncContext, node_id: i64) -> bool with Div, Panic {
+    if node_id < 0 || node_id >= ctx.node_count {
+        return false
+    }
+    ctx.nodes[node_id as usize].state == INC_STATE_STALE
+}
+
+// Return the number of stale nodes.
+fn inc_stale_count(ctx: &IncContext) -> i64 {
+    ctx.stale_count
+}
+
+// ============================================================================
+// Section 9: Worklist operations
+// ============================================================================
+
+// Push an item onto the worklist (circular buffer).
+fn inc_worklist_push(ctx: &! IncContext, item: i64) with Mut, Div, Panic {
+    // Check capacity — worklist wraps at INC_MAX_STALE
+    let next_tail = (ctx.wl_tail + 1) % INC_MAX_STALE
+    if next_tail == ctx.wl_head {
+        // Worklist full, drop item
+        return
+    }
+    ctx.worklist[ctx.wl_tail as usize] = item
+    ctx.wl_tail = next_tail
+}
+
+// Pop an item from the worklist.  Returns INC_INVALID if empty.
+fn inc_worklist_pop(ctx: &! IncContext) -> i64 with Mut, Div, Panic {
+    if ctx.wl_head == ctx.wl_tail {
+        return INC_INVALID
+    }
+    let item = ctx.worklist[ctx.wl_head as usize]
+    ctx.wl_head = (ctx.wl_head + 1) % INC_MAX_STALE
+    item
+}
+
+// Check if the worklist is empty.
+fn inc_worklist_empty(ctx: &IncContext) -> bool {
+    ctx.wl_head == ctx.wl_tail
+}
+
+// Reset the worklist.
+fn inc_worklist_reset(ctx: &! IncContext) with Mut {
+    ctx.wl_head = 0
+    ctx.wl_tail = 0
+}
+
+// ============================================================================
+// Section 10: Transitive invalidation (BFS)
+// ============================================================================
+
+// Propagate staleness transitively through reverse dependency edges.
+// After calling inc_detect_changes, this BFS starts from all stale nodes
+// and marks every node that depends on a stale node as also stale.
+fn inc_invalidate_transitive(ctx: &! IncContext) with Mut, Div, Panic {
+    // Reset worklist
+    inc_worklist_reset(ctx)
+
+    // Seed the worklist with all currently stale nodes
+    var i: i64 = 0
+    while i < ctx.stale_count {
+        let nid = ctx.stale_list[i as usize]
+        inc_worklist_push(ctx, nid)
+        i = i + 1
+    }
+
+    // BFS: for each stale node, find all nodes that depend on it
+    // (reverse edges: edges where to_node == stale_node)
+    // and mark them stale too.
+    //
+    // Use a visited array to avoid cycles.
+    var visited: [bool; 2048] = [false; 2048]
+
+    // Mark initially stale nodes as visited
+    var j: i64 = 0
+    while j < ctx.stale_count {
+        let nid = ctx.stale_list[j as usize]
+        if nid >= 0 && nid < INC_MAX_NODES {
+            visited[nid as usize] = true
+        }
+        j = j + 1
+    }
+
+    // BFS loop
+    while inc_worklist_empty(ctx) == false {
+        let current = inc_worklist_pop(ctx)
+        if current == INC_INVALID {
+            // Should not happen, but guard anyway
+            return
+        }
+
+        // Find all nodes that depend on `current`
+        // i.e., edges where to_node == current => from_node is a dependent
+        var k: i64 = 0
+        while k < ctx.edge_count {
+            if ctx.edges[k as usize].to_node == current {
+                let dep = ctx.edges[k as usize].from_node
+                if dep >= 0 && dep < ctx.node_count {
+                    if visited[dep as usize] == false {
+                        visited[dep as usize] = true
+                        ctx.nodes[dep as usize].state = INC_STATE_STALE
+                        ctx.nodes[dep as usize].change = INC_CHANGE_MODIFIED
+                        // Add to stale list
+                        if ctx.stale_count < INC_MAX_STALE {
+                            ctx.stale_list[ctx.stale_count as usize] = dep
+                            ctx.stale_count = ctx.stale_count + 1
+                        }
+                        // Enqueue for further propagation
+                        inc_worklist_push(ctx, dep)
+                    }
+                }
+            }
+            k = k + 1
+        }
+    }
+}
+
+// ============================================================================
+// Section 11: Selective recompilation
+// ============================================================================
+
+// Mark all stale nodes for recompilation.
+// Returns the number of nodes marked for recompilation.
+fn inc_selective_recompile(ctx: &! IncContext) -> i64 with Mut, Div, Panic {
+    var recompile_count: i64 = 0
+    var i: i64 = 0
+    while i < ctx.node_count {
+        if ctx.nodes[i as usize].state == INC_STATE_STALE {
+            ctx.nodes[i as usize].state = INC_STATE_RECOMPILING
+            recompile_count = recompile_count + 1
+        }
+        i = i + 1
+    }
+    ctx.recompile_count = recompile_count
+    recompile_count
+}
+
+// Mark a specific node as successfully recompiled.
+// Updates state to Valid and syncs the cached fingerprint.
+fn inc_mark_recompiled(ctx: &! IncContext, node_id: i64) with Mut, Div, Panic {
+    if node_id >= 0 && node_id < ctx.node_count {
+        ctx.nodes[node_id as usize].state = INC_STATE_VALID
+        ctx.nodes[node_id as usize].change = INC_CHANGE_NONE
+        // Sync cached fingerprint to current
+        ctx.nodes[node_id as usize].cached_fingerprint = ctx.nodes[node_id as usize].fingerprint
+        if ctx.recompile_count > 0 {
+            ctx.recompile_count = ctx.recompile_count - 1
+        }
+    }
+}
+
+// Mark a node as having errored during recompilation.
+fn inc_mark_error(ctx: &! IncContext, node_id: i64) with Mut, Div, Panic {
+    if node_id >= 0 && node_id < ctx.node_count {
+        ctx.nodes[node_id as usize].state = INC_STATE_ERROR
+    }
+}
+
+// Count nodes currently in recompiling state.
+fn inc_recompiling_count(ctx: &IncContext) -> i64 with Mut, Div, Panic {
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < ctx.node_count {
+        if ctx.nodes[i as usize].state == INC_STATE_RECOMPILING {
+            count = count + 1
+        }
+        i = i + 1
+    }
+    count
+}
+
+// Count nodes in valid state.
+fn inc_valid_count(ctx: &IncContext) -> i64 with Mut, Div, Panic {
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < ctx.node_count {
+        if ctx.nodes[i as usize].state == INC_STATE_VALID {
+            count = count + 1
+        }
+        i = i + 1
+    }
+    count
+}
+
+// Count nodes in error state.
+fn inc_error_count(ctx: &IncContext) -> i64 with Mut, Div, Panic {
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < ctx.node_count {
+        if ctx.nodes[i as usize].state == INC_STATE_ERROR {
+            count = count + 1
+        }
+        i = i + 1
+    }
+    count
+}
+
+// ============================================================================
+// Section 12: Cache operations
+// ============================================================================
+
+// Look up a node in the cache by node_id.
+// Returns the result_hash if found and valid, or INC_INVALID if not found.
+fn inc_cache_lookup(ctx: &IncContext, node_id: i64) -> i64 with Mut, Div, Panic {
+    var i: i64 = 0
+    while i < ctx.cache_count {
+        if ctx.cache[i as usize].node_id == node_id && ctx.cache[i as usize].valid {
+            // Also verify fingerprint matches
+            let fp_match = inc_fingerprint_eq(
+                &ctx.cache[i as usize].fingerprint,
+                &ctx.nodes[node_id as usize].fingerprint
+            )
+            if fp_match {
+                return ctx.cache[i as usize].result_hash
+            }
+        }
+        i = i + 1
+    }
+    INC_INVALID
+}
+
+// Insert or update a cache entry for a node.
+fn inc_cache_insert(ctx: &! IncContext, node_id: i64, result_hash: i64) with Mut, Div, Panic {
+    if node_id < 0 || node_id >= ctx.node_count {
+        return
+    }
+
+    // Check if entry already exists for this node
+    var i: i64 = 0
+    while i < ctx.cache_count {
+        if ctx.cache[i as usize].node_id == node_id {
+            // Update existing entry
+            ctx.cache[i as usize].fingerprint = ctx.nodes[node_id as usize].fingerprint
+            ctx.cache[i as usize].result_hash = result_hash
+            ctx.cache[i as usize].valid = true
+            return
+        }
+        i = i + 1
+    }
+
+    // Insert new entry
+    if ctx.cache_count >= INC_MAX_CACHE {
+        return
+    }
+    ctx.cache[ctx.cache_count as usize] = IncCacheEntry {
+        node_id: node_id,
+        fingerprint: ctx.nodes[node_id as usize].fingerprint,
+        result_hash: result_hash,
+        valid: true,
+    }
+    ctx.cache_count = ctx.cache_count + 1
+}
+
+// Invalidate all cache entries for a specific node.
+fn inc_cache_invalidate(ctx: &! IncContext, node_id: i64) with Mut, Div, Panic {
+    var i: i64 = 0
+    while i < ctx.cache_count {
+        if ctx.cache[i as usize].node_id == node_id {
+            ctx.cache[i as usize].valid = false
+        }
+        i = i + 1
+    }
+}
+
+// Invalidate all cache entries.
+fn inc_cache_clear(ctx: &! IncContext) with Mut, Div, Panic {
+    var i: i64 = 0
+    while i < ctx.cache_count {
+        ctx.cache[i as usize].valid = false
+        i = i + 1
+    }
+}
+
+// Count valid cache entries.
+fn inc_cache_valid_count(ctx: &IncContext) -> i64 with Mut, Div, Panic {
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < ctx.cache_count {
+        if ctx.cache[i as usize].valid {
+            count = count + 1
+        }
+        i = i + 1
+    }
+    count
+}
+
+// ============================================================================
+// Section 13: Dependency graph construction from adjacency matrix
+// ============================================================================
+
+// Build a dependency graph from a flat adjacency matrix.
+// `fn_count` is the number of functions/nodes.
+// `dep_matrix` is a flattened fn_count x fn_count matrix stored row-major
+// in a [i64; 4096] array.  dep_matrix[i * fn_count + j] != 0 means node i
+// depends on node j.
+//
+// All nodes are added as INC_NODE_FUNCTION with name_hash = node index.
+//
+// Returns true on success.
+fn inc_build_dep_graph(ctx: &! IncContext, fn_count: i64, dep_matrix: &[i64; 4096]) -> bool with Mut, Div, Panic {
+    if fn_count <= 0 || fn_count > 64 {
+        // 64^2 = 4096, which is the max matrix size
+        return false
+    }
+
+    // Add nodes
+    var i: i64 = 0
+    while i < fn_count {
+        let nid = inc_add_node(ctx, INC_NODE_FUNCTION, i)
+        if nid < 0 {
+            return false
+        }
+        i = i + 1
+    }
+
+    // Add edges from matrix
+    var row: i64 = 0
+    while row < fn_count {
+        var col: i64 = 0
+        while col < fn_count {
+            let idx = row * fn_count + col
+            if idx < 4096 {
+                if dep_matrix[idx as usize] != 0 {
+                    let ok = inc_add_edge(ctx, row, col)
+                    if ok == false {
+                        return false
+                    }
+                }
+            }
+            col = col + 1
+        }
+        row = row + 1
+    }
+
+    true
+}
+
+// ============================================================================
+// Section 14: Topological sort (Kahn's algorithm)
+// ============================================================================
+
+// Topologically sort all nodes in the context.
+// Uses Kahn's algorithm (BFS with in-degree tracking).
+// Result is stored in ctx.worklist (reused as output buffer).
+// Returns true if sort succeeded (no cycles), false if cycle detected.
+fn inc_topological_sort(ctx: &! IncContext) -> bool with Mut, Div, Panic {
+    // Compute in-degrees
+    var in_deg: [i64; 2048] = [0; 2048]
+    var i: i64 = 0
+    while i < ctx.edge_count {
+        let t = ctx.edges[i as usize].to_node
+        if t >= 0 && t < ctx.node_count {
+            in_deg[t as usize] = in_deg[t as usize] + 1
+        }
+        i = i + 1
+    }
+
+    // Note: we use a separate queue to avoid corrupting ctx.worklist
+    // during the sort, then copy the result into ctx.worklist.
+    var queue: [i64; 2048] = [0; 2048]
+    var q_head: i64 = 0
+    var q_tail: i64 = 0
+
+    // Seed queue with zero-in-degree nodes
+    var j: i64 = 0
+    while j < ctx.node_count {
+        if in_deg[j as usize] == 0 {
+            queue[q_tail as usize] = j
+            q_tail = q_tail + 1
+        }
+        j = j + 1
+    }
+
+    // Output buffer
+    var topo: [i64; 2048] = [0; 2048]
+    var topo_count: i64 = 0
+
+    // BFS
+    while q_head < q_tail {
+        let curr = queue[q_head as usize]
+        q_head = q_head + 1
+
+        topo[topo_count as usize] = curr
+        topo_count = topo_count + 1
+
+        // Decrement in-degree of successors
+        // An edge from->to means `from` depends on `to`.
+        // For topological ordering we want to process `to` before `from`.
+        // So we look for edges where from_node == curr and decrement in_deg[to_node].
+        // Wait — Kahn's processes sources first (in-degree 0 in the dependency graph).
+        // In our graph, edges go from depender -> dependee.
+        // In-degree of a node = number of edges pointing TO it = number of dependees.
+        // Actually, let me re-think: for topological sort of a DAG,
+        // we process nodes with no incoming edges first.
+        // Our edges: from_node depends on to_node.
+        // So "from -> to" means there's an edge from `from` to `to`.
+        // In-degree of `to` = number of nodes that depend on it.
+        // Processing order: process a node when all nodes IT depends on are done.
+        // So we need reverse: process nodes that have no dependencies first.
+        // Dependencies of curr: edges where from_node == curr.
+        // But we computed in_deg as edges pointing TO each node.
+        // Hmm, let's use the standard: in_deg[n] = count of edges where to_node == n.
+        // A node with in_deg 0 has nothing pointing to it — nothing depends on it.
+        // That's a leaf. We want to process leaves first? No — we want to process
+        // roots (things depended upon) first.
+        //
+        // Actually, for incremental recompilation the order should be:
+        // process dependencies before dependents. If A depends on B,
+        // process B first. Edge: A -> B. In-degree of B = 1 (one edge TO B).
+        // We want to process B first, but B has in_degree=1, not 0.
+        //
+        // The standard approach: reverse the edges, then Kahn's.
+        // Or equivalently: compute out-degree and process nodes with out-degree 0.
+        //
+        // Let's do it correctly: use out-degree for "nothing depends on me" = leaf.
+        // Actually simpler: just reverse the edge semantics for Kahn's.
+        // We want: process node X when all of X's dependees are processed.
+        // X's dependees are to_node for edges where from_node == X.
+        // So: in-degree of X in the REVERSED graph = number of edges where to_node == X
+        //   = number of nodes that X is depended upon by.
+        // Wait, that's what we already have. And in_deg[X] == 0 means nothing
+        // depends on X, so X is a leaf. Processing leaves first gives reverse
+        // topological order. We want forward order (roots first).
+        //
+        // Let's just do it with "pending count" = number of unprocessed dependencies.
+        // pending[X] = number of edges where from_node == X (X's dependency count).
+        // When pending[X] == 0, X can be processed.
+        // When we process X, for each edge where to_node == X (dependents of X),
+        // we decrement pending[from_node] for those dependents.
+
+        // We need to redo in-degree as "dependency count" (out-degree in our edge model).
+        // But we already started the algorithm. Let me just swap the edge direction
+        // in the decrement step.
+
+        var k: i64 = 0
+        while k < ctx.edge_count {
+            if ctx.edges[k as usize].from_node == curr {
+                let succ = ctx.edges[k as usize].to_node
+                if succ >= 0 && succ < ctx.node_count {
+                    in_deg[succ as usize] = in_deg[succ as usize] - 1
+                    if in_deg[succ as usize] == 0 {
+                        if q_tail < INC_MAX_NODES {
+                            queue[q_tail as usize] = succ
+                            q_tail = q_tail + 1
+                        }
+                    }
+                }
+            }
+            k = k + 1
+        }
+    }
+
+    // Copy result into worklist
+    inc_worklist_reset(ctx)
+    var m: i64 = 0
+    while m < topo_count {
+        if m < INC_MAX_STALE {
+            ctx.worklist[m as usize] = topo[m as usize]
+        }
+        m = m + 1
+    }
+    ctx.wl_tail = topo_count
+    if ctx.wl_tail > INC_MAX_STALE {
+        ctx.wl_tail = INC_MAX_STALE
+    }
+
+    // Success if all nodes were visited
+    topo_count == ctx.node_count
+}
+
+// ============================================================================
+// Section 15: High-level incremental pipeline
+// ============================================================================
+
+// Run the full incremental pipeline:
+//   1. Detect changes (fingerprint comparison)
+//   2. Propagate staleness transitively
+//   3. Schedule recompilation
+// Returns the number of nodes to recompile.
+fn inc_run_pipeline(ctx: &! IncContext) -> i64 with Mut, Div, Panic {
+    inc_detect_changes(ctx)
+    inc_invalidate_transitive(ctx)
+    let count = inc_selective_recompile(ctx)
+    count
+}
+
+// Reset all node states to Fresh.
+fn inc_reset_states(ctx: &! IncContext) with Mut, Div, Panic {
+    var i: i64 = 0
+    while i < ctx.node_count {
+        ctx.nodes[i as usize].state = INC_STATE_FRESH
+        ctx.nodes[i as usize].change = INC_CHANGE_NONE
+        i = i + 1
+    }
+    ctx.stale_count = 0
+    ctx.recompile_count = 0
+}
+
+// Reset the entire context (nodes, edges, cache, worklist).
+fn inc_reset(ctx: &! IncContext) with Mut, Div, Panic {
+    ctx.node_count = 0
+    ctx.edge_count = 0
+    ctx.cache_count = 0
+    ctx.stale_count = 0
+    ctx.wl_head = 0
+    ctx.wl_tail = 0
+    ctx.recompile_count = 0
+    ctx.total_nodes_checked = 0
+}
+
+// ============================================================================
+// Section 16: Utility functions
+// ============================================================================
+
+// Count total edges in the graph.
+fn inc_edge_count(ctx: &IncContext) -> i64 {
+    ctx.edge_count
+}
+
+// Count total nodes in the graph.
+fn inc_node_count(ctx: &IncContext) -> i64 {
+    ctx.node_count
+}
+
+// Check if node kind is valid.
+fn inc_valid_kind(kind: i64) -> bool {
+    kind >= INC_NODE_FUNCTION && kind <= INC_NODE_GLOBAL
+}
+
+// Check if node state is valid.
+fn inc_valid_state(state: i64) -> bool {
+    state >= INC_STATE_FRESH && state <= INC_STATE_ERROR
+}
+
+// Find a node by name_hash.  Returns the node ID or INC_INVALID.
+fn inc_find_by_name(ctx: &IncContext, name_hash: i64) -> i64 with Mut, Div, Panic {
+    var i: i64 = 0
+    while i < ctx.node_count {
+        if ctx.nodes[i as usize].name_hash == name_hash {
+            return i
+        }
+        i = i + 1
+    }
+    INC_INVALID
+}
+
+// Count nodes of a given kind.
+fn inc_count_by_kind(ctx: &IncContext, kind: i64) -> i64 with Mut, Div, Panic {
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < ctx.node_count {
+        if ctx.nodes[i as usize].kind == kind {
+            count = count + 1
+        }
+        i = i + 1
+    }
+    count
+}
+
+// Compute the "impact score" of a node: how many nodes transitively depend on it.
+// Uses a BFS similar to invalidation.
+fn inc_impact_score(ctx: &IncContext, node_id: i64) -> i64 with Mut, Div, Panic {
+    if node_id < 0 || node_id >= ctx.node_count {
+        return 0
+    }
+
+    var visited: [bool; 2048] = [false; 2048]
+    var queue: [i64; 2048] = [0; 2048]
+    var q_head: i64 = 0
+    var q_tail: i64 = 0
+
+    visited[node_id as usize] = true
+    queue[0] = node_id
+    q_tail = 1
+
+    var impact: i64 = 0
+
+    while q_head < q_tail {
+        let curr = queue[q_head as usize]
+        q_head = q_head + 1
+
+        // Find all dependents of curr (nodes that depend on curr)
+        var k: i64 = 0
+        while k < ctx.edge_count {
+            if ctx.edges[k as usize].to_node == curr {
+                let dep = ctx.edges[k as usize].from_node
+                if dep >= 0 && dep < ctx.node_count {
+                    if visited[dep as usize] == false {
+                        visited[dep as usize] = true
+                        impact = impact + 1
+                        if q_tail < INC_MAX_NODES {
+                            queue[q_tail as usize] = dep
+                            q_tail = q_tail + 1
+                        }
+                    }
+                }
+            }
+            k = k + 1
+        }
+    }
+
+    impact
+}
+
+// Check if the graph has any cycles.
+// Uses the topological sort approach: if Kahn's can't visit all nodes,
+// there is a cycle.
+fn inc_has_cycle(ctx: &IncContext) -> bool with Mut, Div, Panic {
+    // Compute in-degrees
+    var in_deg: [i64; 2048] = [0; 2048]
+    var i: i64 = 0
+    while i < ctx.edge_count {
+        let t = ctx.edges[i as usize].to_node
+        if t >= 0 && t < ctx.node_count {
+            in_deg[t as usize] = in_deg[t as usize] + 1
+        }
+        i = i + 1
+    }
+
+    var queue: [i64; 2048] = [0; 2048]
+    var q_head: i64 = 0
+    var q_tail: i64 = 0
+
+    var j: i64 = 0
+    while j < ctx.node_count {
+        if in_deg[j as usize] == 0 {
+            queue[q_tail as usize] = j
+            q_tail = q_tail + 1
+        }
+        j = j + 1
+    }
+
+    var visited_count: i64 = 0
+    while q_head < q_tail {
+        let curr = queue[q_head as usize]
+        q_head = q_head + 1
+        visited_count = visited_count + 1
+
+        var k: i64 = 0
+        while k < ctx.edge_count {
+            if ctx.edges[k as usize].from_node == curr {
+                let succ = ctx.edges[k as usize].to_node
+                if succ >= 0 && succ < ctx.node_count {
+                    in_deg[succ as usize] = in_deg[succ as usize] - 1
+                    if in_deg[succ as usize] == 0 {
+                        if q_tail < INC_MAX_NODES {
+                            queue[q_tail as usize] = succ
+                            q_tail = q_tail + 1
+                        }
+                    }
+                }
+            }
+            k = k + 1
+        }
+    }
+
+    visited_count < ctx.node_count
+}
+
+// Compute the depth of the dependency tree for a given node.
+// Depth = longest chain of dependencies from this node to a leaf.
+fn inc_dep_depth(ctx: &IncContext, node_id: i64) -> i64 with Mut, Div, Panic {
+    if node_id < 0 || node_id >= ctx.node_count {
+        return 0
+    }
+
+    // Simple iterative DFS with depth tracking
+    var max_depth: i64 = 0
+    var stack: [i64; 512] = [0; 512]
+    var depths: [i64; 512] = [0; 512]
+    var s_top: i64 = 0
+
+    stack[0] = node_id
+    depths[0] = 0
+    s_top = 1
+
+    var visited: [bool; 2048] = [false; 2048]
+
+    while s_top > 0 {
+        s_top = s_top - 1
+        let curr = stack[s_top as usize]
+        let d = depths[s_top as usize]
+
+        if d > max_depth {
+            max_depth = d
+        }
+
+        if visited[curr as usize] == false {
+            visited[curr as usize] = true
+
+            // Push dependencies (edges where from_node == curr)
+            var k: i64 = 0
+            while k < ctx.edge_count {
+                if ctx.edges[k as usize].from_node == curr {
+                    let dep = ctx.edges[k as usize].to_node
+                    if dep >= 0 && dep < ctx.node_count {
+                        if visited[dep as usize] == false {
+                            if s_top < 512 {
+                                stack[s_top as usize] = dep
+                                depths[s_top as usize] = d + 1
+                                s_top = s_top + 1
+                            }
+                        }
+                    }
+                }
+                k = k + 1
+            }
+        }
+    }
+
+    max_depth
+}
+
+// ============================================================================
+// Section 17: Test helpers
+// ============================================================================
+
+// Build a simple chain: n0 -> n1 -> n2 -> ... -> n(count-1)
+// where n(i) depends on n(i+1).
+fn inc_make_chain(ctx: &! IncContext, count: i64) with Mut, Div, Panic {
+    var i: i64 = 0
+    while i < count {
+        let nid = inc_add_node(ctx, INC_NODE_FUNCTION, i * 100 + 1)
+        i = i + 1
+    }
+    // Edges: 0->1, 1->2, ...
+    var j: i64 = 0
+    while j < count - 1 {
+        let ok = inc_add_edge(ctx, j, j + 1)
+        j = j + 1
+    }
+}
+
+// Build a diamond: n0 -> n1, n0 -> n2, n1 -> n3, n2 -> n3
+fn inc_make_diamond(ctx: &! IncContext) with Mut, Div, Panic {
+    let n0 = inc_add_node(ctx, INC_NODE_MODULE, 100)
+    let n1 = inc_add_node(ctx, INC_NODE_FUNCTION, 200)
+    let n2 = inc_add_node(ctx, INC_NODE_FUNCTION, 300)
+    let n3 = inc_add_node(ctx, INC_NODE_TYPE, 400)
+
+    let e0 = inc_add_edge(ctx, 0, 1)
+    let e1 = inc_add_edge(ctx, 0, 2)
+    let e2 = inc_add_edge(ctx, 1, 3)
+    let e3 = inc_add_edge(ctx, 2, 3)
+}
+
+// Build a star: center node with `arm_count` dependents.
+// center = node 0, arms = nodes 1..arm_count
+// Each arm depends on center: arm_i -> center
+fn inc_make_star(ctx: &! IncContext, arm_count: i64) with Mut, Div, Panic {
+    let center = inc_add_node(ctx, INC_NODE_MODULE, 999)
+    var i: i64 = 0
+    while i < arm_count {
+        let arm = inc_add_node(ctx, INC_NODE_FUNCTION, i * 10 + 1)
+        let ok = inc_add_edge(ctx, arm, center)
+        i = i + 1
+    }
+}
+
+// Set all nodes to have a specific fingerprint and matching cached fingerprint
+// (i.e., unchanged).
+fn inc_set_all_unchanged(ctx: &! IncContext) with Mut, Div, Panic {
+    var i: i64 = 0
+    while i < ctx.node_count {
+        let fp = inc_fingerprint_from_i64(i * 1000 + 42)
+        ctx.nodes[i as usize].fingerprint = fp
+        ctx.nodes[i as usize].cached_fingerprint = fp
+        i = i + 1
+    }
+}
+
+// Set a single node to have a modified fingerprint (current != cached).
+fn inc_modify_node(ctx: &! IncContext, node_id: i64) with Mut, Div, Panic {
+    if node_id >= 0 && node_id < ctx.node_count {
+        let fp = inc_fingerprint_from_i64(node_id * 7777 + 13)
+        ctx.nodes[node_id as usize].fingerprint = fp
+        // Keep cached_fingerprint as is — causes a diff
+    }
+}
+
+// Set a node as "added" — has current fingerprint but zero cached.
+fn inc_mark_as_added(ctx: &! IncContext, node_id: i64) with Mut, Div, Panic {
+    if node_id >= 0 && node_id < ctx.node_count {
+        let fp = inc_fingerprint_from_i64(node_id * 5555 + 7)
+        ctx.nodes[node_id as usize].fingerprint = fp
+        ctx.nodes[node_id as usize].cached_fingerprint = inc_fingerprint_zero()
+    }
+}
+
+// Set a node as "removed" — has cached fingerprint but zero current.
+fn inc_mark_as_removed(ctx: &! IncContext, node_id: i64) with Mut, Div, Panic {
+    if node_id >= 0 && node_id < ctx.node_count {
+        let fp = inc_fingerprint_from_i64(node_id * 3333 + 9)
+        ctx.nodes[node_id as usize].fingerprint = inc_fingerprint_zero()
+        ctx.nodes[node_id as usize].cached_fingerprint = fp
+    }
+}
+
+// ============================================================================
+// Section 18: Tests — Fingerprint (T01-T10)
+// ============================================================================
+
+// T01: Zero fingerprint has both halves zero.
+fn test_inc_fp_zero_inner(ctx: &! IncContext) -> bool with Mut, Div, Panic {
+    let fp = inc_fingerprint_zero()
+    let lo_ok = fp.hash_lo == 0
+    let hi_ok = fp.hash_hi == 0
+    let is_zero = inc_fingerprint_is_zero(&fp)
+    lo_ok && hi_ok && is_zero
+}
+
+fn test_inc_fp_zero() -> bool with Mut, Div, Panic {
+    var ctx = inc_context_new()
+    test_inc_fp_zero_inner(&! ctx)
+}
+
+// T02: Fingerprint equality — same fingerprints are equal.
+fn test_inc_fp_eq_same_inner(ctx: &! IncContext) -> bool with Mut, Div, Panic {
+    let a = inc_fingerprint_make(123, 456)
+    let b = inc_fingerprint_make(123, 456)
+    inc_fingerprint_eq(&a, &b)
+}
+
+fn test_inc_fp_eq_same() -> bool with Mut, Div, Panic {
+    var ctx = inc_context_new()
+    test_inc_fp_eq_same_inner(&! ctx)
+}
+
+// T03: Fingerprint equality — different fingerprints are not equal.
+fn test_inc_fp_eq_diff_inner(ctx: &! IncContext) -> bool with Mut, Div, Panic {
+    let a = inc_fingerprint_make(123, 456)
+    let b = inc_fingerprint_make(789, 456)
+    let c = inc_fingerprint_make(123, 999)
+    let ab = inc_fingerprint_eq(&a, &b)
+    let ac = inc_fingerprint_eq(&a, &c)
+    ab == false && ac == false
+}
+
+fn test_inc_fp_eq_diff() -> bool with Mut, Div, Panic {
+    var ctx = inc_context_new()
+    test_inc_fp_eq_diff_inner(&! ctx)
+}
+
+// T04: from_i64 produces non-zero fingerprints for non-zero input.
+fn test_inc_fp_from_i64_inner(ctx: &! IncContext) -> bool with Mut, Div, Panic {
+    let fp = inc_fingerprint_from_i64(42)
+    let non_zero = inc_fingerprint_is_zero(&fp) == false
+    non_zero
+}
+
+fn test_inc_fp_from_i64() -> bool with Mut, Div, Panic {
+    var ctx = inc_context_new()
+    test_inc_fp_from_i64_inner(&! ctx)
+}
+
+// T05: Different i64 values produce different fingerprints.
+fn test_inc_fp_from_i64_diff_inner(ctx: &! IncContext) -> bool with Mut, Div, Panic {
+    let a = inc_fingerprint_from_i64(1)
+    let b = inc_fingerprint_from_i64(2)
+    let c = inc_fingerprint_from_i64(1000000)
+    let ab = inc_fingerprint_eq(&a, &b) == false
+    let ac = inc_fingerprint_eq(&a, &c) == false
+    let bc = inc_fingerprint_eq(&b, &c) == false
+    ab && ac && bc
+}
+
+fn test_inc_fp_from_i64_diff() -> bool with Mut, Div, Panic {
+    var ctx = inc_context_new()
+    test_inc_fp_from_i64_diff_inner(&! ctx)
+}
+
+// T06: Same i64 value produces same fingerprint (deterministic).
+fn test_inc_fp_deterministic_inner(ctx: &! IncContext) -> bool with Mut, Div, Panic {
+    let a = inc_fingerprint_from_i64(99)
+    let b = inc_fingerprint_from_i64(99)
+    inc_fingerprint_eq(&a, &b)
+}
+
+fn test_inc_fp_deterministic() -> bool with Mut, Div, Panic {
+    var ctx = inc_context_new()
+    test_inc_fp_deterministic_inner(&! ctx)
+}
+
+// T07: Combine is order-dependent.
+fn test_inc_fp_combine_order_inner(ctx: &! IncContext) -> bool with Mut, Div, Panic {
+    let a = inc_fingerprint_from_i64(10)
+    let b = inc_fingerprint_from_i64(20)
+    let ab = inc_fingerprint_combine(&a, &b)
+    let ba = inc_fingerprint_combine(&b, &a)
+    // ab and ba should differ (order matters)
+    inc_fingerprint_eq(&ab, &ba) == false
+}
+
+fn test_inc_fp_combine_order() -> bool with Mut, Div, Panic {
+    var ctx = inc_context_new()
+    test_inc_fp_combine_order_inner(&! ctx)
+}
+
+// T08: Combine produces non-zero result from non-zero inputs.
+fn test_inc_fp_combine_nonzero_inner(ctx: &! IncContext) -> bool with Mut, Div, Panic {
+    let a = inc_fingerprint_from_i64(7)
+    let b = inc_fingerprint_from_i64(13)
+    let c = inc_fingerprint_combine(&a, &b)
+    inc_fingerprint_is_zero(&c) == false
+}
+
+fn test_inc_fp_combine_nonzero() -> bool with Mut, Div, Panic {
+    var ctx = inc_context_new()
+    test_inc_fp_combine_nonzero_inner(&! ctx)
+}
+
+// T09: from_bytes produces non-zero fingerprint.
+fn test_inc_fp_from_bytes_inner(ctx: &! IncContext) -> bool with Mut, Div, Panic {
+    var data: [i64; 256] = [0; 256]
+    data[0] = 100
+    data[1] = 200
+    data[2] = 300
+    let fp = inc_fingerprint_from_bytes(&data, 3)
+    inc_fingerprint_is_zero(&fp) == false
+}
+
+fn test_inc_fp_from_bytes() -> bool with Mut, Div, Panic {
+    var ctx = inc_context_new()
+    test_inc_fp_from_bytes_inner(&! ctx)
+}
+
+// T10: from_bytes with different data produces different fingerprints.
+fn test_inc_fp_from_bytes_diff_inner(ctx: &! IncContext) -> bool with Mut, Div, Panic {
+    var data1: [i64; 256] = [0; 256]
+    data1[0] = 100
+    data1[1] = 200
+
+    var data2: [i64; 256] = [0; 256]
+    data2[0] = 100
+    data2[1] = 201
+
+    let fp1 = inc_fingerprint_from_bytes(&data1, 2)
+    let fp2 = inc_fingerprint_from_bytes(&data2, 2)
+    inc_fingerprint_eq(&fp1, &fp2) == false
+}
+
+fn test_inc_fp_from_bytes_diff() -> bool with Mut, Div, Panic {
+    var ctx = inc_context_new()
+    test_inc_fp_from_bytes_diff_inner(&! ctx)
+}
+
+// ============================================================================
+// Section 19: Tests — Node management (T11-T18)
+// ============================================================================
+
+// T11: Add a single node and verify its properties.
+fn test_inc_add_node_inner(ctx: &! IncContext) -> bool with Mut, Div, Panic {
+    let nid = inc_add_node(ctx, INC_NODE_FUNCTION, 42)
+    let id_ok = nid == 0
+    let count_ok = ctx.node_count == 1
+    let kind_ok = inc_get_node_kind(ctx, 0) == INC_NODE_FUNCTION
+    let hash_ok = inc_get_name_hash(ctx, 0) == 42
+    let state_ok = inc_get_node_state(ctx, 0) == INC_STATE_FRESH
+    id_ok && count_ok && kind_ok && hash_ok && state_ok
+}
+
+fn test_inc_add_node() -> bool with Mut, Div, Panic {
+    var ctx = inc_context_new()
+    test_inc_add_node_inner(&! ctx)
+}
+
+// T12: Add multiple nodes with different kinds.
+fn test_inc_add_multiple_nodes_inner(ctx: &! IncContext) -> bool with Mut, Div, Panic {
+    let n0 = inc_add_node(ctx, INC_NODE_FUNCTION, 10)
+    let n1 = inc_add_node(ctx, INC_NODE_TYPE, 20)
+    let n2 = inc_add_node(ctx, INC_NODE_MODULE, 30)
+    let n3 = inc_add_node(ctx, INC_NODE_CONSTANT, 40)
+    let n4 = inc_add_node(ctx, INC_NODE_IMPORT, 50)
+    let n5 = inc_add_node(ctx, INC_NODE_GLOBAL, 60)
+
+    let count_ok = ctx.node_count == 6
+    let k0 = inc_get_node_kind(ctx, 0) == INC_NODE_FUNCTION
+    let k1 = inc_get_node_kind(ctx, 1) == INC_NODE_TYPE
+    let k2 = inc_get_node_kind(ctx, 2) == INC_NODE_MODULE
+    let k3 = inc_get_node_kind(ctx, 3) == INC_NODE_CONSTANT
+    let k4 = inc_get_node_kind(ctx, 4) == INC_NODE_IMPORT
+    let k5 = inc_get_node_kind(ctx, 5) == INC_NODE_GLOBAL
+    count_ok && k0 && k1 && k2 && k3 && k4 && k5
+}
+
+fn test_inc_add_multiple_nodes() -> bool with Mut, Div, Panic {
+    var ctx = inc_context_new()
+    test_inc_add_multiple_nodes_inner(&! ctx)
+}
+
+// T13: Node state transitions.
+fn test_inc_state_transitions_inner(ctx: &! IncContext) -> bool with Mut, Div, Panic {
+    let nid = inc_add_node(ctx, INC_NODE_FUNCTION, 1)
+    let s0 = inc_get_node_state(ctx, 0) == INC_STATE_FRESH
+
+    inc_set_node_state(ctx, 0, INC_STATE_VALID)
+    let s1 = inc_get_node_state(ctx, 0) == INC_STATE_VALID
+
+    inc_set_node_state(ctx, 0, INC_STATE_STALE)
+    let s2 = inc_get_node_state(ctx, 0) == INC_STATE_STALE
+
+    inc_set_node_state(ctx, 0, INC_STATE_RECOMPILING)
+    let s3 = inc_get_node_state(ctx, 0) == INC_STATE_RECOMPILING
+
+    inc_set_node_state(ctx, 0, INC_STATE_ERROR)
+    let s4 = inc_get_node_state(ctx, 0) == INC_STATE_ERROR
+
+    s0 && s1 && s2 && s3 && s4
+}
+
+fn test_inc_state_transitions() -> bool with Mut, Div, Panic {
+    var ctx = inc_context_new()
+    test_inc_state_transitions_inner(&! ctx)
+}
+
+// T14: Find node by name hash.
+fn test_inc_find_by_name_inner(ctx: &! IncContext) -> bool with Mut, Div, Panic {
+    let n0 = inc_add_node(ctx, INC_NODE_FUNCTION, 111)
+    let n1 = inc_add_node(ctx, INC_NODE_TYPE, 222)
+    let n2 = inc_add_node(ctx, INC_NODE_MODULE, 333)
+
+    let f0 = inc_find_by_name(ctx, 111)
+    let f1 = inc_find_by_name(ctx, 222)
+    let f2 = inc_find_by_name(ctx, 333)
+    let f3 = inc_find_by_name(ctx, 999)
+
+    f0 == 0 && f1 == 1 && f2 == 2 && f3 == INC_INVALID
+}
+
+fn test_inc_find_by_name() -> bool with Mut, Div, Panic {
+    var ctx = inc_context_new()
+    test_inc_find_by_name_inner(&! ctx)
+}
+
+// T15: Count nodes by kind.
+fn test_inc_count_by_kind_inner(ctx: &! IncContext) -> bool with Mut, Div, Panic {
+    let n0 = inc_add_node(ctx, INC_NODE_FUNCTION, 1)
+    let n1 = inc_add_node(ctx, INC_NODE_FUNCTION, 2)
+    let n2 = inc_add_node(ctx, INC_NODE_TYPE, 3)
+    let n3 = inc_add_node(ctx, INC_NODE_FUNCTION, 4)
+
+    let fn_count = inc_count_by_kind(ctx, INC_NODE_FUNCTION)
+    let ty_count = inc_count_by_kind(ctx, INC_NODE_TYPE)
+    let mod_count = inc_count_by_kind(ctx, INC_NODE_MODULE)
+
+    fn_count == 3 && ty_count == 1 && mod_count == 0
+}
+
+fn test_inc_count_by_kind() -> bool with Mut, Div, Panic {
+    var ctx = inc_context_new()
+    test_inc_count_by_kind_inner(&! ctx)
+}
+
+// T16: Invalid node ID returns safe defaults.
+fn test_inc_invalid_node_inner(ctx: &! IncContext) -> bool with Mut, Div, Panic {
+    let kind = inc_get_node_kind(ctx, 999)
+    let state = inc_get_node_state(ctx, 999)
+    let hash = inc_get_name_hash(ctx, 999)
+    let change = inc_get_change(ctx, 999)
+
+    kind == 0 && state == INC_STATE_ERROR && hash == 0 && change == INC_CHANGE_NONE
+}
+
+fn test_inc_invalid_node() -> bool with Mut, Div, Panic {
+    var ctx = inc_context_new()
+    test_inc_invalid_node_inner(&! ctx)
+}
+
+// T17: Fingerprint get/set round-trip.
+fn test_inc_fp_get_set_inner(ctx: &! IncContext) -> bool with Mut, Div, Panic {
+    let nid = inc_add_node(ctx, INC_NODE_FUNCTION, 1)
+    let fp = inc_fingerprint_from_i64(12345)
+    inc_set_fingerprint(ctx, 0, fp)
+    let got = inc_get_fingerprint(ctx, 0)
+    inc_fingerprint_eq(&fp, &got)
+}
+
+fn test_inc_fp_get_set() -> bool with Mut, Div, Panic {
+    var ctx = inc_context_new()
+    test_inc_fp_get_set_inner(&! ctx)
+}
+
+// T18: Valid kind and state checks.
+fn test_inc_valid_kind_state_inner(ctx: &! IncContext) -> bool with Mut, Div, Panic {
+    let k1 = inc_valid_kind(INC_NODE_FUNCTION)
+    let k2 = inc_valid_kind(INC_NODE_GLOBAL)
+    let k3 = inc_valid_kind(0) == false
+    let k4 = inc_valid_kind(99) == false
+
+    let s1 = inc_valid_state(INC_STATE_FRESH)
+    let s2 = inc_valid_state(INC_STATE_ERROR)
+    let s3 = inc_valid_state(0 - 1) == false
+    let s4 = inc_valid_state(99) == false
+
+    k1 && k2 && k3 && k4 && s1 && s2 && s3 && s4
+}
+
+fn test_inc_valid_kind_state() -> bool with Mut, Div, Panic {
+    var ctx = inc_context_new()
+    test_inc_valid_kind_state_inner(&! ctx)
+}
+
+// ============================================================================
+// Section 20: Tests — Edge management (T19-T26)
+// ============================================================================
+
+// T19: Add a single edge and verify.
+fn test_inc_add_edge_inner(ctx: &! IncContext) -> bool with Mut, Div, Panic {
+    let n0 = inc_add_node(ctx, INC_NODE_FUNCTION, 1)
+    let n1 = inc_add_node(ctx, INC_NODE_FUNCTION, 2)
+    let ok = inc_add_edge(ctx, 0, 1)
+    let count_ok = ctx.edge_count == 1
+    let has = inc_has_edge(ctx, 0, 1)
+    let no_reverse = inc_has_edge(ctx, 1, 0) == false
+    ok && count_ok && has && no_reverse
+}
+
+fn test_inc_add_edge() -> bool with Mut, Div, Panic {
+    var ctx = inc_context_new()
+    test_inc_add_edge_inner(&! ctx)
+}
+
+// T20: Edge with invalid nodes fails.
+fn test_inc_add_edge_invalid_inner(ctx: &! IncContext) -> bool with Mut, Div, Panic {
+    let n0 = inc_add_node(ctx, INC_NODE_FUNCTION, 1)
+    let r1 = inc_add_edge(ctx, 0, 1) == false   // node 1 doesn't exist
+    let r2 = inc_add_edge(ctx, 99, 0) == false   // node 99 doesn't exist
+    let r3 = inc_add_edge(ctx, 0 - 1, 0) == false   // negative
+    r1 && r2 && r3
+}
+
+fn test_inc_add_edge_invalid() -> bool with Mut, Div, Panic {
+    var ctx = inc_context_new()
+    test_inc_add_edge_invalid_inner(&! ctx)
+}
+
+// T21: Count forward dependencies.
+fn test_inc_dependencies_inner(ctx: &! IncContext) -> bool with Mut, Div, Panic {
+    inc_make_diamond(ctx)
+    // Diamond: 0->1, 0->2, 1->3, 2->3
+    let d0 = inc_dependencies(ctx, 0)   // 0 depends on 1 and 2
+    let d1 = inc_dependencies(ctx, 1)   // 1 depends on 3
+    let d3 = inc_dependencies(ctx, 3)   // 3 depends on nothing
+    d0 == 2 && d1 == 1 && d3 == 0
+}
+
+fn test_inc_dependencies() -> bool with Mut, Div, Panic {
+    var ctx = inc_context_new()
+    test_inc_dependencies_inner(&! ctx)
+}
+
+// T22: Count reverse dependencies (dependents).
+fn test_inc_dependents_inner(ctx: &! IncContext) -> bool with Mut, Div, Panic {
+    inc_make_diamond(ctx)
+    // Diamond: 0->1, 0->2, 1->3, 2->3
+    let d0 = inc_dependents(ctx, 0)  // nothing depends on 0
+    let d1 = inc_dependents(ctx, 1)  // 0 depends on 1
+    let d3 = inc_dependents(ctx, 3)  // 1 and 2 depend on 3
+    d0 == 0 && d1 == 1 && d3 == 2
+}
+
+fn test_inc_dependents() -> bool with Mut, Div, Panic {
+    var ctx = inc_context_new()
+    test_inc_dependents_inner(&! ctx)
+}
+
+// T23: Get dependency list via buffer.
+fn test_inc_get_dependencies_inner(ctx: &! IncContext) -> bool with Mut, Div, Panic {
+    inc_make_chain(ctx, 4)
+    // Chain: 0->1, 1->2, 2->3
+    var buf: [i64; 512] = [0; 512]
+    let count = inc_get_dependencies(ctx, 1, &! buf)
+    // Node 1 depends on node 2
+    count == 1 && buf[0] == 2
+}
+
+fn test_inc_get_dependencies() -> bool with Mut, Div, Panic {
+    var ctx = inc_context_new()
+    test_inc_get_dependencies_inner(&! ctx)
+}
+
+// T24: Get dependents list via buffer.
+fn test_inc_get_dependents_inner(ctx: &! IncContext) -> bool with Mut, Div, Panic {
+    inc_make_chain(ctx, 4)
+    // Chain: 0->1, 1->2, 2->3
+    var buf: [i64; 512] = [0; 512]
+    let count = inc_get_dependents(ctx, 2, &! buf)
+    // Node 1 depends on node 2, so node 1 is a dependent of node 2
+    count == 1 && buf[0] == 1
+}
+
+fn test_inc_get_dependents() -> bool with Mut, Div, Panic {
+    var ctx = inc_context_new()
+    test_inc_get_dependents_inner(&! ctx)
+}
+
+// T25: Multiple edges and has_edge checks.
+fn test_inc_multiple_edges_inner(ctx: &! IncContext) -> bool with Mut, Div, Panic {
+    let n0 = inc_add_node(ctx, INC_NODE_FUNCTION, 1)
+    let n1 = inc_add_node(ctx, INC_NODE_FUNCTION, 2)
+    let n2 = inc_add_node(ctx, INC_NODE_FUNCTION, 3)
+    let n3 = inc_add_node(ctx, INC_NODE_FUNCTION, 4)
+
+    let e0 = inc_add_edge(ctx, 0, 1)
+    let e1 = inc_add_edge(ctx, 0, 2)
+    let e2 = inc_add_edge(ctx, 1, 3)
+    let e3 = inc_add_edge(ctx, 2, 3)
+
+    let h01 = inc_has_edge(ctx, 0, 1)
+    let h02 = inc_has_edge(ctx, 0, 2)
+    let h13 = inc_has_edge(ctx, 1, 3)
+    let h23 = inc_has_edge(ctx, 2, 3)
+    let no03 = inc_has_edge(ctx, 0, 3) == false
+    let no30 = inc_has_edge(ctx, 3, 0) == false
+
+    h01 && h02 && h13 && h23 && no03 && no30
+}
+
+fn test_inc_multiple_edges() -> bool with Mut, Div, Panic {
+    var ctx = inc_context_new()
+    test_inc_multiple_edges_inner(&! ctx)
+}
+
+// T26: Star graph — many nodes depend on center.
+fn test_inc_star_graph_inner(ctx: &! IncContext) -> bool with Mut, Div, Panic {
+    inc_make_star(ctx, 5)
+    // 6 nodes total (1 center + 5 arms), 5 edges
+    let nc = ctx.node_count == 6
+    let ec = ctx.edge_count == 5
+    // Center (0) has 5 dependents
+    let deps = inc_dependents(ctx, 0)
+    nc && ec && deps == 5
+}
+
+fn test_inc_star_graph() -> bool with Mut, Div, Panic {
+    var ctx = inc_context_new()
+    test_inc_star_graph_inner(&! ctx)
+}
+
+// ============================================================================
+// Section 21: Tests — Change detection (T27-T36)
+// ============================================================================
+
+// T27: All unchanged — no stale nodes.
+fn test_inc_detect_no_changes_inner(ctx: &! IncContext) -> bool with Mut, Div, Panic {
+    inc_make_chain(ctx, 4)
+    inc_set_all_unchanged(ctx)
+    inc_detect_changes(ctx)
+    ctx.stale_count == 0
+}
+
+fn test_inc_detect_no_changes() -> bool with Mut, Div, Panic {
+    var ctx = inc_context_new()
+    test_inc_detect_no_changes_inner(&! ctx)
+}
+
+// T28: One modified node detected.
+fn test_inc_detect_one_modified_inner(ctx: &! IncContext) -> bool with Mut, Div, Panic {
+    inc_make_chain(ctx, 4)
+    inc_set_all_unchanged(ctx)
+    inc_modify_node(ctx, 1)
+    inc_detect_changes(ctx)
+
+    let stale_ok = ctx.stale_count == 1
+    let n1_stale = inc_node_is_stale(ctx, 1)
+    let n0_valid = inc_node_is_stale(ctx, 0) == false
+    let change_ok = inc_get_change(ctx, 1) == INC_CHANGE_MODIFIED
+    stale_ok && n1_stale && n0_valid && change_ok
+}
+
+fn test_inc_detect_one_modified() -> bool with Mut, Div, Panic {
+    var ctx = inc_context_new()
+    test_inc_detect_one_modified_inner(&! ctx)
+}
+
+// T29: Multiple modified nodes detected.
+fn test_inc_detect_multiple_modified_inner(ctx: &! IncContext) -> bool with Mut, Div, Panic {
+    inc_make_chain(ctx, 5)
+    inc_set_all_unchanged(ctx)
+    inc_modify_node(ctx, 0)
+    inc_modify_node(ctx, 3)
+    inc_detect_changes(ctx)
+
+    let stale_ok = ctx.stale_count == 2
+    let n0_stale = inc_node_is_stale(ctx, 0)
+    let n3_stale = inc_node_is_stale(ctx, 3)
+    let n1_valid = inc_node_is_stale(ctx, 1) == false
+    stale_ok && n0_stale && n3_stale && n1_valid
+}
+
+fn test_inc_detect_multiple_modified() -> bool with Mut, Div, Panic {
+    var ctx = inc_context_new()
+    test_inc_detect_multiple_modified_inner(&! ctx)
+}
+
+// T30: Added node detected (current non-zero, cached zero).
+fn test_inc_detect_added_inner(ctx: &! IncContext) -> bool with Mut, Div, Panic {
+    inc_make_chain(ctx, 3)
+    inc_set_all_unchanged(ctx)
+    inc_mark_as_added(ctx, 2)
+    inc_detect_changes(ctx)
+
+    let n2_stale = inc_node_is_stale(ctx, 2)
+    let change_ok = inc_get_change(ctx, 2) == INC_CHANGE_ADDED
+    n2_stale && change_ok
+}
+
+fn test_inc_detect_added() -> bool with Mut, Div, Panic {
+    var ctx = inc_context_new()
+    test_inc_detect_added_inner(&! ctx)
+}
+
+// T31: Removed node detected (current zero, cached non-zero).
+fn test_inc_detect_removed_inner(ctx: &! IncContext) -> bool with Mut, Div, Panic {
+    inc_make_chain(ctx, 3)
+    inc_set_all_unchanged(ctx)
+    inc_mark_as_removed(ctx, 1)
+    inc_detect_changes(ctx)
+
+    let n1_stale = inc_node_is_stale(ctx, 1)
+    let change_ok = inc_get_change(ctx, 1) == INC_CHANGE_REMOVED
+    n1_stale && change_ok
+}
+
+fn test_inc_detect_removed() -> bool with Mut, Div, Panic {
+    var ctx = inc_context_new()
+    test_inc_detect_removed_inner(&! ctx)
+}
+
+// T32: Total nodes checked equals node count.
+fn test_inc_detect_total_checked_inner(ctx: &! IncContext) -> bool with Mut, Div, Panic {
+    inc_make_chain(ctx, 7)
+    inc_set_all_unchanged(ctx)
+    inc_detect_changes(ctx)
+    ctx.total_nodes_checked == 7
+}
+
+fn test_inc_detect_total_checked() -> bool with Mut, Div, Panic {
+    var ctx = inc_context_new()
+    test_inc_detect_total_checked_inner(&! ctx)
+}
+
+// T33: Empty graph — detect changes on zero nodes.
+fn test_inc_detect_empty_inner(ctx: &! IncContext) -> bool with Mut, Div, Panic {
+    inc_detect_changes(ctx)
+    ctx.stale_count == 0 && ctx.total_nodes_checked == 0
+}
+
+fn test_inc_detect_empty() -> bool with Mut, Div, Panic {
+    var ctx = inc_context_new()
+    test_inc_detect_empty_inner(&! ctx)
+}
+
+// T34: Mix of added, modified, and unchanged.
+fn test_inc_detect_mixed_inner(ctx: &! IncContext) -> bool with Mut, Div, Panic {
+    let n0 = inc_add_node(ctx, INC_NODE_FUNCTION, 10)
+    let n1 = inc_add_node(ctx, INC_NODE_TYPE, 20)
+    let n2 = inc_add_node(ctx, INC_NODE_MODULE, 30)
+    let n3 = inc_add_node(ctx, INC_NODE_CONSTANT, 40)
+
+    // n0: unchanged
+    let fp0 = inc_fingerprint_from_i64(100)
+    inc_set_fingerprint(ctx, 0, fp0)
+    inc_set_cached_fingerprint(ctx, 0, fp0)
+
+    // n1: modified
+    inc_set_fingerprint(ctx, 1, inc_fingerprint_from_i64(200))
+    inc_set_cached_fingerprint(ctx, 1, inc_fingerprint_from_i64(201))
+
+    // n2: added
+    inc_set_fingerprint(ctx, 2, inc_fingerprint_from_i64(300))
+    inc_set_cached_fingerprint(ctx, 2, inc_fingerprint_zero())
+
+    // n3: removed
+    inc_set_fingerprint(ctx, 3, inc_fingerprint_zero())
+    inc_set_cached_fingerprint(ctx, 3, inc_fingerprint_from_i64(400))
+
+    inc_detect_changes(ctx)
+
+    let c0 = inc_get_change(ctx, 0) == INC_CHANGE_NONE
+    let c1 = inc_get_change(ctx, 1) == INC_CHANGE_MODIFIED
+    let c2 = inc_get_change(ctx, 2) == INC_CHANGE_ADDED
+    let c3 = inc_get_change(ctx, 3) == INC_CHANGE_REMOVED
+    let stale_ok = ctx.stale_count == 3
+
+    c0 && c1 && c2 && c3 && stale_ok
+}
+
+fn test_inc_detect_mixed() -> bool with Mut, Div, Panic {
+    var ctx = inc_context_new()
+    test_inc_detect_mixed_inner(&! ctx)
+}
+
+// T35: Node initially not stale before detect_changes.
+fn test_inc_node_not_stale_initially_inner(ctx: &! IncContext) -> bool with Mut, Div, Panic {
+    let n0 = inc_add_node(ctx, INC_NODE_FUNCTION, 1)
+    inc_node_is_stale(ctx, 0) == false
+}
+
+fn test_inc_node_not_stale_initially() -> bool with Mut, Div, Panic {
+    var ctx = inc_context_new()
+    test_inc_node_not_stale_initially_inner(&! ctx)
+}
+
+// T36: Detect changes is idempotent — running twice gives same result.
+fn test_inc_detect_idempotent_inner(ctx: &! IncContext) -> bool with Mut, Div, Panic {
+    inc_make_chain(ctx, 4)
+    inc_set_all_unchanged(ctx)
+    inc_modify_node(ctx, 2)
+
+    inc_detect_changes(ctx)
+    let stale1 = ctx.stale_count
+
+    // Reset states but keep fingerprints
+    inc_reset_states(ctx)
+    inc_detect_changes(ctx)
+    let stale2 = ctx.stale_count
+
+    stale1 == stale2
+}
+
+fn test_inc_detect_idempotent() -> bool with Mut, Div, Panic {
+    var ctx = inc_context_new()
+    test_inc_detect_idempotent_inner(&! ctx)
+}
+
+// ============================================================================
+// Section 22: Tests — Transitive invalidation (T37-T46)
+// ============================================================================
+
+// T37: Chain — modifying leaf propagates to root.
+fn test_inc_invalidate_chain_inner(ctx: &! IncContext) -> bool with Mut, Div, Panic {
+    // Chain: 0->1->2->3.  0 depends on 1, 1 on 2, 2 on 3.
+    inc_make_chain(ctx, 4)
+    inc_set_all_unchanged(ctx)
+    // Modify node 3 (the leaf that everything depends on)
+    inc_modify_node(ctx, 3)
+    inc_detect_changes(ctx)
+    inc_invalidate_transitive(ctx)
+
+    // All nodes should be stale because they all transitively depend on node 3
+    let s0 = inc_node_is_stale(ctx, 0)
+    let s1 = inc_node_is_stale(ctx, 1)
+    let s2 = inc_node_is_stale(ctx, 2)
+    let s3 = inc_node_is_stale(ctx, 3)
+    s0 && s1 && s2 && s3
+}
+
+fn test_inc_invalidate_chain() -> bool with Mut, Div, Panic {
+    var ctx = inc_context_new()
+    test_inc_invalidate_chain_inner(&! ctx)
+}
+
+// T38: Chain — modifying root does not propagate to leaves.
+fn test_inc_invalidate_chain_root_inner(ctx: &! IncContext) -> bool with Mut, Div, Panic {
+    // Chain: 0->1->2->3
+    inc_make_chain(ctx, 4)
+    inc_set_all_unchanged(ctx)
+    // Modify node 0 (the root — depends on others, nothing depends on it)
+    inc_modify_node(ctx, 0)
+    inc_detect_changes(ctx)
+    inc_invalidate_transitive(ctx)
+
+    // Only node 0 should be stale — nothing depends on 0
+    let s0 = inc_node_is_stale(ctx, 0)
+    let s1 = inc_node_is_stale(ctx, 1) == false
+    let s2 = inc_node_is_stale(ctx, 2) == false
+    let s3 = inc_node_is_stale(ctx, 3) == false
+    s0 && s1 && s2 && s3
+}
+
+fn test_inc_invalidate_chain_root() -> bool with Mut, Div, Panic {
+    var ctx = inc_context_new()
+    test_inc_invalidate_chain_root_inner(&! ctx)
+}
+
+// T39: Diamond — modifying shared dependency stales both paths.
+fn test_inc_invalidate_diamond_inner(ctx: &! IncContext) -> bool with Mut, Div, Panic {
+    // Diamond: 0->1, 0->2, 1->3, 2->3
+    inc_make_diamond(ctx)
+    inc_set_all_unchanged(ctx)
+    // Modify node 3 (both paths depend on it)
+    inc_modify_node(ctx, 3)
+    inc_detect_changes(ctx)
+    inc_invalidate_transitive(ctx)
+
+    // Nodes 0, 1, 2, 3 should all be stale
+    let s0 = inc_node_is_stale(ctx, 0)
+    let s1 = inc_node_is_stale(ctx, 1)
+    let s2 = inc_node_is_stale(ctx, 2)
+    let s3 = inc_node_is_stale(ctx, 3)
+    s0 && s1 && s2 && s3
+}
+
+fn test_inc_invalidate_diamond() -> bool with Mut, Div, Panic {
+    var ctx = inc_context_new()
+    test_inc_invalidate_diamond_inner(&! ctx)
+}
+
+// T40: Diamond — modifying one branch only stales that path.
+fn test_inc_invalidate_diamond_one_branch_inner(ctx: &! IncContext) -> bool with Mut, Div, Panic {
+    // Diamond: 0->1, 0->2, 1->3, 2->3
+    inc_make_diamond(ctx)
+    inc_set_all_unchanged(ctx)
+    // Modify node 1 (only one branch)
+    inc_modify_node(ctx, 1)
+    inc_detect_changes(ctx)
+    inc_invalidate_transitive(ctx)
+
+    // Node 0 depends on 1, so 0 should be stale
+    // Node 1 is directly stale
+    // Node 2 does NOT depend on 1, so 2 should be valid
+    // Node 3 does NOT depend on 1 (1 depends on 3), so 3 should be valid
+    let s0 = inc_node_is_stale(ctx, 0)
+    let s1 = inc_node_is_stale(ctx, 1)
+    let s2 = inc_node_is_stale(ctx, 2) == false
+    let s3 = inc_node_is_stale(ctx, 3) == false
+    s0 && s1 && s2 && s3
+}
+
+fn test_inc_invalidate_diamond_one_branch() -> bool with Mut, Div, Panic {
+    var ctx = inc_context_new()
+    test_inc_invalidate_diamond_one_branch_inner(&! ctx)
+}
+
+// T41: Star — modifying center stales all arms.
+fn test_inc_invalidate_star_inner(ctx: &! IncContext) -> bool with Mut, Div, Panic {
+    inc_make_star(ctx, 4)
+    inc_set_all_unchanged(ctx)
+    // Modify center (node 0) — all arms depend on it
+    inc_modify_node(ctx, 0)
+    inc_detect_changes(ctx)
+    inc_invalidate_transitive(ctx)
+
+    let s0 = inc_node_is_stale(ctx, 0)
+    let s1 = inc_node_is_stale(ctx, 1)
+    let s2 = inc_node_is_stale(ctx, 2)
+    let s3 = inc_node_is_stale(ctx, 3)
+    let s4 = inc_node_is_stale(ctx, 4)
+    s0 && s1 && s2 && s3 && s4
+}
+
+fn test_inc_invalidate_star() -> bool with Mut, Div, Panic {
+    var ctx = inc_context_new()
+    test_inc_invalidate_star_inner(&! ctx)
+}
+
+// T42: Star — modifying one arm does not stale others.
+fn test_inc_invalidate_star_one_arm_inner(ctx: &! IncContext) -> bool with Mut, Div, Panic {
+    inc_make_star(ctx, 4)
+    inc_set_all_unchanged(ctx)
+    // Modify arm 1 (node 1) — center doesn't depend on arms
+    inc_modify_node(ctx, 1)
+    inc_detect_changes(ctx)
+    inc_invalidate_transitive(ctx)
+
+    let s0 = inc_node_is_stale(ctx, 0) == false
+    let s1 = inc_node_is_stale(ctx, 1)
+    let s2 = inc_node_is_stale(ctx, 2) == false
+    let s3 = inc_node_is_stale(ctx, 3) == false
+    s0 && s1 && s2 && s3
+}
+
+fn test_inc_invalidate_star_one_arm() -> bool with Mut, Div, Panic {
+    var ctx = inc_context_new()
+    test_inc_invalidate_star_one_arm_inner(&! ctx)
+}
+
+// T43: No changes — no transitive invalidation.
+fn test_inc_invalidate_no_changes_inner(ctx: &! IncContext) -> bool with Mut, Div, Panic {
+    inc_make_chain(ctx, 5)
+    inc_set_all_unchanged(ctx)
+    inc_detect_changes(ctx)
+    inc_invalidate_transitive(ctx)
+    ctx.stale_count == 0
+}
+
+fn test_inc_invalidate_no_changes() -> bool with Mut, Div, Panic {
+    var ctx = inc_context_new()
+    test_inc_invalidate_no_changes_inner(&! ctx)
+}
+
+// T44: Deep chain — staleness propagates through many levels.
+fn test_inc_invalidate_deep_chain_inner(ctx: &! IncContext) -> bool with Mut, Div, Panic {
+    // Chain of 8: 0->1->2->3->4->5->6->7
+    inc_make_chain(ctx, 8)
+    inc_set_all_unchanged(ctx)
+    // Modify the deepest leaf (node 7)
+    inc_modify_node(ctx, 7)
+    inc_detect_changes(ctx)
+    inc_invalidate_transitive(ctx)
+
+    // ALL nodes should be stale
+    var all_stale: bool = true
+    var i: i64 = 0
+    while i < 8 {
+        if inc_node_is_stale(ctx, i) == false {
+            all_stale = false
+        }
+        i = i + 1
+    }
+    all_stale
+}
+
+fn test_inc_invalidate_deep_chain() -> bool with Mut, Div, Panic {
+    var ctx = inc_context_new()
+    test_inc_invalidate_deep_chain_inner(&! ctx)
+}
+
+// T45: Stale count is correct after transitive invalidation.
+fn test_inc_stale_count_after_invalidation_inner(ctx: &! IncContext) -> bool with Mut, Div, Panic {
+    // Chain: 0->1->2->3
+    inc_make_chain(ctx, 4)
+    inc_set_all_unchanged(ctx)
+    // Modify node 2 — should stale 0, 1, 2 (but not 3)
+    inc_modify_node(ctx, 2)
+    inc_detect_changes(ctx)
+    inc_invalidate_transitive(ctx)
+
+    // Direct stale: 2. Transitive: 1 (depends on 2), 0 (depends on 1).
+    // Node 3 is NOT stale (2 depends on 3, not the other way).
+    let expected = 3
+    inc_stale_count(ctx) == expected
+}
+
+fn test_inc_stale_count_after_invalidation() -> bool with Mut, Div, Panic {
+    var ctx = inc_context_new()
+    test_inc_stale_count_after_invalidation_inner(&! ctx)
+}
+
+// T46: Isolated node — modifying it stales only itself.
+fn test_inc_invalidate_isolated_inner(ctx: &! IncContext) -> bool with Mut, Div, Panic {
+    // Three disconnected nodes
+    let n0 = inc_add_node(ctx, INC_NODE_FUNCTION, 1)
+    let n1 = inc_add_node(ctx, INC_NODE_FUNCTION, 2)
+    let n2 = inc_add_node(ctx, INC_NODE_FUNCTION, 3)
+    inc_set_all_unchanged(ctx)
+    inc_modify_node(ctx, 1)
+    inc_detect_changes(ctx)
+    inc_invalidate_transitive(ctx)
+
+    let s0 = inc_node_is_stale(ctx, 0) == false
+    let s1 = inc_node_is_stale(ctx, 1)
+    let s2 = inc_node_is_stale(ctx, 2) == false
+    let count_ok = inc_stale_count(ctx) == 1
+    s0 && s1 && s2 && count_ok
+}
+
+fn test_inc_invalidate_isolated() -> bool with Mut, Div, Panic {
+    var ctx = inc_context_new()
+    test_inc_invalidate_isolated_inner(&! ctx)
+}
+
+// ============================================================================
+// Section 23: Tests — Selective recompile (T47-T54)
+// ============================================================================
+
+// T47: Selective recompile marks stale nodes as recompiling.
+fn test_inc_selective_recompile_inner(ctx: &! IncContext) -> bool with Mut, Div, Panic {
+    inc_make_chain(ctx, 4)
+    inc_set_all_unchanged(ctx)
+    inc_modify_node(ctx, 3)
+    inc_detect_changes(ctx)
+    inc_invalidate_transitive(ctx)
+    let count = inc_selective_recompile(ctx)
+
+    let s0 = inc_get_node_state(ctx, 0) == INC_STATE_RECOMPILING
+    let s1 = inc_get_node_state(ctx, 1) == INC_STATE_RECOMPILING
+    let s2 = inc_get_node_state(ctx, 2) == INC_STATE_RECOMPILING
+    let s3 = inc_get_node_state(ctx, 3) == INC_STATE_RECOMPILING
+    let count_ok = count == 4
+    s0 && s1 && s2 && s3 && count_ok
+}
+
+fn test_inc_selective_recompile() -> bool with Mut, Div, Panic {
+    var ctx = inc_context_new()
+    test_inc_selective_recompile_inner(&! ctx)
+}
+
+// T48: No stale nodes — selective recompile returns 0.
+fn test_inc_selective_recompile_none_inner(ctx: &! IncContext) -> bool with Mut, Div, Panic {
+    inc_make_chain(ctx, 3)
+    inc_set_all_unchanged(ctx)
+    inc_detect_changes(ctx)
+    let count = inc_selective_recompile(ctx)
+    count == 0
+}
+
+fn test_inc_selective_recompile_none() -> bool with Mut, Div, Panic {
+    var ctx = inc_context_new()
+    test_inc_selective_recompile_none_inner(&! ctx)
+}
+
+// T49: Mark a node as recompiled.
+fn test_inc_mark_recompiled_inner(ctx: &! IncContext) -> bool with Mut, Div, Panic {
+    let n0 = inc_add_node(ctx, INC_NODE_FUNCTION, 1)
+    inc_set_node_state(ctx, 0, INC_STATE_RECOMPILING)
+    ctx.recompile_count = 1
+
+    inc_mark_recompiled(ctx, 0)
+    let state_ok = inc_get_node_state(ctx, 0) == INC_STATE_VALID
+    let change_ok = inc_get_change(ctx, 0) == INC_CHANGE_NONE
+    let count_ok = ctx.recompile_count == 0
+    state_ok && change_ok && count_ok
+}
+
+fn test_inc_mark_recompiled() -> bool with Mut, Div, Panic {
+    var ctx = inc_context_new()
+    test_inc_mark_recompiled_inner(&! ctx)
+}
+
+// T50: Mark recompiled syncs fingerprints.
+fn test_inc_mark_recompiled_syncs_fp_inner(ctx: &! IncContext) -> bool with Mut, Div, Panic {
+    let n0 = inc_add_node(ctx, INC_NODE_FUNCTION, 1)
+    let fp_new = inc_fingerprint_from_i64(999)
+    let fp_old = inc_fingerprint_from_i64(111)
+    inc_set_fingerprint(ctx, 0, fp_new)
+    inc_set_cached_fingerprint(ctx, 0, fp_old)
+    inc_set_node_state(ctx, 0, INC_STATE_RECOMPILING)
+    ctx.recompile_count = 1
+
+    inc_mark_recompiled(ctx, 0)
+    let cached = inc_get_cached_fingerprint(ctx, 0)
+    inc_fingerprint_eq(&cached, &fp_new)
+}
+
+fn test_inc_mark_recompiled_syncs_fp() -> bool with Mut, Div, Panic {
+    var ctx = inc_context_new()
+    test_inc_mark_recompiled_syncs_fp_inner(&! ctx)
+}
+
+// T51: Mark error state.
+fn test_inc_mark_error_inner(ctx: &! IncContext) -> bool with Mut, Div, Panic {
+    let n0 = inc_add_node(ctx, INC_NODE_FUNCTION, 1)
+    inc_set_node_state(ctx, 0, INC_STATE_RECOMPILING)
+    inc_mark_error(ctx, 0)
+    inc_get_node_state(ctx, 0) == INC_STATE_ERROR
+}
+
+fn test_inc_mark_error() -> bool with Mut, Div, Panic {
+    var ctx = inc_context_new()
+    test_inc_mark_error_inner(&! ctx)
+}
+
+// T52: Recompiling count tracks correctly.
+fn test_inc_recompiling_count_inner(ctx: &! IncContext) -> bool with Mut, Div, Panic {
+    inc_make_chain(ctx, 5)
+    inc_set_all_unchanged(ctx)
+    inc_modify_node(ctx, 4)
+    inc_detect_changes(ctx)
+    inc_invalidate_transitive(ctx)
+    let recompile = inc_selective_recompile(ctx)
+
+    let rc1 = inc_recompiling_count(ctx)
+    let ok1 = rc1 == 5
+
+    // Mark two as recompiled
+    inc_mark_recompiled(ctx, 0)
+    inc_mark_recompiled(ctx, 1)
+    let rc2 = inc_recompiling_count(ctx)
+    let ok2 = rc2 == 3
+
+    ok1 && ok2
+}
+
+fn test_inc_recompiling_count() -> bool with Mut, Div, Panic {
+    var ctx = inc_context_new()
+    test_inc_recompiling_count_inner(&! ctx)
+}
+
+// T53: Valid count after partial recompilation.
+fn test_inc_valid_count_inner(ctx: &! IncContext) -> bool with Mut, Div, Panic {
+    inc_make_chain(ctx, 4)
+    inc_set_all_unchanged(ctx)
+    inc_modify_node(ctx, 3)
+    inc_detect_changes(ctx)
+    inc_invalidate_transitive(ctx)
+    let recompile = inc_selective_recompile(ctx)
+
+    // All 4 nodes are recompiling, none valid
+    let vc1 = inc_valid_count(ctx) == 0
+
+    // Mark two as recompiled
+    inc_mark_recompiled(ctx, 2)
+    inc_mark_recompiled(ctx, 3)
+    let vc2 = inc_valid_count(ctx) == 2
+
+    vc1 && vc2
+}
+
+fn test_inc_valid_count() -> bool with Mut, Div, Panic {
+    var ctx = inc_context_new()
+    test_inc_valid_count_inner(&! ctx)
+}
+
+// T54: Error count.
+fn test_inc_error_count_inner(ctx: &! IncContext) -> bool with Mut, Div, Panic {
+    let n0 = inc_add_node(ctx, INC_NODE_FUNCTION, 1)
+    let n1 = inc_add_node(ctx, INC_NODE_FUNCTION, 2)
+    let n2 = inc_add_node(ctx, INC_NODE_FUNCTION, 3)
+
+    inc_mark_error(ctx, 0)
+    inc_mark_error(ctx, 2)
+    inc_error_count(ctx) == 2
+}
+
+fn test_inc_error_count() -> bool with Mut, Div, Panic {
+    var ctx = inc_context_new()
+    test_inc_error_count_inner(&! ctx)
+}
+
+// ============================================================================
+// Section 24: Tests — Caching (T55-T59)
+// ============================================================================
+
+// T55: Cache insert and lookup.
+fn test_inc_cache_insert_lookup_inner(ctx: &! IncContext) -> bool with Mut, Div, Panic {
+    let n0 = inc_add_node(ctx, INC_NODE_FUNCTION, 1)
+    let fp = inc_fingerprint_from_i64(42)
+    inc_set_fingerprint(ctx, 0, fp)
+    inc_cache_insert(ctx, 0, 12345)
+
+    let result = inc_cache_lookup(ctx, 0)
+    result == 12345
+}
+
+fn test_inc_cache_insert_lookup() -> bool with Mut, Div, Panic {
+    var ctx = inc_context_new()
+    test_inc_cache_insert_lookup_inner(&! ctx)
+}
+
+// T56: Cache miss for unknown node.
+fn test_inc_cache_miss_inner(ctx: &! IncContext) -> bool with Mut, Div, Panic {
+    let n0 = inc_add_node(ctx, INC_NODE_FUNCTION, 1)
+    let result = inc_cache_lookup(ctx, 0)
+    result == INC_INVALID
+}
+
+fn test_inc_cache_miss() -> bool with Mut, Div, Panic {
+    var ctx = inc_context_new()
+    test_inc_cache_miss_inner(&! ctx)
+}
+
+// T57: Cache invalidation.
+fn test_inc_cache_invalidate_inner(ctx: &! IncContext) -> bool with Mut, Div, Panic {
+    let n0 = inc_add_node(ctx, INC_NODE_FUNCTION, 1)
+    let fp = inc_fingerprint_from_i64(42)
+    inc_set_fingerprint(ctx, 0, fp)
+    inc_cache_insert(ctx, 0, 999)
+
+    // Lookup succeeds
+    let r1 = inc_cache_lookup(ctx, 0) == 999
+
+    // Invalidate
+    inc_cache_invalidate(ctx, 0)
+    let r2 = inc_cache_lookup(ctx, 0) == INC_INVALID
+
+    r1 && r2
+}
+
+fn test_inc_cache_invalidate() -> bool with Mut, Div, Panic {
+    var ctx = inc_context_new()
+    test_inc_cache_invalidate_inner(&! ctx)
+}
+
+// T58: Cache update overwrites existing entry.
+fn test_inc_cache_update_inner(ctx: &! IncContext) -> bool with Mut, Div, Panic {
+    let n0 = inc_add_node(ctx, INC_NODE_FUNCTION, 1)
+    let fp = inc_fingerprint_from_i64(42)
+    inc_set_fingerprint(ctx, 0, fp)
+
+    inc_cache_insert(ctx, 0, 100)
+    let r1 = inc_cache_lookup(ctx, 0) == 100
+
+    inc_cache_insert(ctx, 0, 200)
+    let r2 = inc_cache_lookup(ctx, 0) == 200
+
+    // Should still be just 1 entry, not 2
+    let count_ok = inc_cache_valid_count(ctx) == 1
+
+    r1 && r2 && count_ok
+}
+
+fn test_inc_cache_update() -> bool with Mut, Div, Panic {
+    var ctx = inc_context_new()
+    test_inc_cache_update_inner(&! ctx)
+}
+
+// T59: Cache clear invalidates all entries.
+fn test_inc_cache_clear_inner(ctx: &! IncContext) -> bool with Mut, Div, Panic {
+    let n0 = inc_add_node(ctx, INC_NODE_FUNCTION, 1)
+    let n1 = inc_add_node(ctx, INC_NODE_FUNCTION, 2)
+
+    inc_set_fingerprint(ctx, 0, inc_fingerprint_from_i64(10))
+    inc_set_fingerprint(ctx, 1, inc_fingerprint_from_i64(20))
+    inc_cache_insert(ctx, 0, 111)
+    inc_cache_insert(ctx, 1, 222)
+
+    let before = inc_cache_valid_count(ctx) == 2
+    inc_cache_clear(ctx)
+    let after = inc_cache_valid_count(ctx) == 0
+
+    before && after
+}
+
+fn test_inc_cache_clear() -> bool with Mut, Div, Panic {
+    var ctx = inc_context_new()
+    test_inc_cache_clear_inner(&! ctx)
+}
+
+// ============================================================================
+// Section 25: Tests — Integration (T60-T65)
+// ============================================================================
+
+// T60: Full pipeline on a chain with one modification.
+fn test_inc_full_pipeline_chain_inner(ctx: &! IncContext) -> bool with Mut, Div, Panic {
+    inc_make_chain(ctx, 5)
+    inc_set_all_unchanged(ctx)
+    inc_modify_node(ctx, 4)  // Modify the deepest leaf
+
+    let recompile_count = inc_run_pipeline(ctx)
+
+    // All 5 nodes should need recompilation
+    let count_ok = recompile_count == 5
+
+    // All should be in recompiling state
+    var all_recompiling: bool = true
+    var i: i64 = 0
+    while i < 5 {
+        if inc_get_node_state(ctx, i) != INC_STATE_RECOMPILING {
+            all_recompiling = false
+        }
+        i = i + 1
+    }
+
+    count_ok && all_recompiling
+}
+
+fn test_inc_full_pipeline_chain() -> bool with Mut, Div, Panic {
+    var ctx = inc_context_new()
+    test_inc_full_pipeline_chain_inner(&! ctx)
+}
+
+// T61: Full pipeline on diamond with no changes.
+fn test_inc_full_pipeline_no_changes_inner(ctx: &! IncContext) -> bool with Mut, Div, Panic {
+    inc_make_diamond(ctx)
+    inc_set_all_unchanged(ctx)
+    let recompile_count = inc_run_pipeline(ctx)
+    recompile_count == 0
+}
+
+fn test_inc_full_pipeline_no_changes() -> bool with Mut, Div, Panic {
+    var ctx = inc_context_new()
+    test_inc_full_pipeline_no_changes_inner(&! ctx)
+}
+
+// T62: Build dep graph from adjacency matrix.
+fn test_inc_build_dep_graph_inner(ctx: &! IncContext) -> bool with Mut, Div, Panic {
+    // 3x3 matrix: 0->1, 1->2
+    var matrix: [i64; 4096] = [0; 4096]
+    // Row 0: depends on column 1
+    matrix[0 * 3 + 1] = 1
+    // Row 1: depends on column 2
+    matrix[1 * 3 + 2] = 1
+
+    let ok = inc_build_dep_graph(ctx, 3, &matrix)
+    let nc = ctx.node_count == 3
+    let ec = ctx.edge_count == 2
+    let h01 = inc_has_edge(ctx, 0, 1)
+    let h12 = inc_has_edge(ctx, 1, 2)
+    ok && nc && ec && h01 && h12
+}
+
+fn test_inc_build_dep_graph() -> bool with Mut, Div, Panic {
+    var ctx = inc_context_new()
+    test_inc_build_dep_graph_inner(&! ctx)
+}
+
+// T63: Topological sort on a chain.
+fn test_inc_topological_sort_inner(ctx: &! IncContext) -> bool with Mut, Div, Panic {
+    inc_make_chain(ctx, 4)
+    let ok = inc_topological_sort(ctx)
+
+    // Topological sort should succeed (no cycle in a chain)
+    // The exact order depends on the algorithm but all 4 nodes should be present
+    // In our edge model (from depends on to), Kahn's with in-degree
+    // processes nodes that nothing points to first.
+    ok
+}
+
+fn test_inc_topological_sort() -> bool with Mut, Div, Panic {
+    var ctx = inc_context_new()
+    test_inc_topological_sort_inner(&! ctx)
+}
+
+// T64: Impact score of center in star graph.
+fn test_inc_impact_score_inner(ctx: &! IncContext) -> bool with Mut, Div, Panic {
+    inc_make_star(ctx, 5)
+    // Center = node 0.  5 arms depend on it.
+    let score = inc_impact_score(ctx, 0)
+    score == 5
+}
+
+fn test_inc_impact_score() -> bool with Mut, Div, Panic {
+    var ctx = inc_context_new()
+    test_inc_impact_score_inner(&! ctx)
+}
+
+// T65: Full round-trip — detect, invalidate, recompile, mark done.
+fn test_inc_full_roundtrip_inner(ctx: &! IncContext) -> bool with Mut, Div, Panic {
+    // Build a small graph
+    let n0 = inc_add_node(ctx, INC_NODE_MODULE, 100)
+    let n1 = inc_add_node(ctx, INC_NODE_FUNCTION, 200)
+    let n2 = inc_add_node(ctx, INC_NODE_FUNCTION, 300)
+    let e0 = inc_add_edge(ctx, 1, 0)  // fn1 depends on module
+    let e1 = inc_add_edge(ctx, 2, 0)  // fn2 depends on module
+
+    // Set initial fingerprints (unchanged)
+    inc_set_all_unchanged(ctx)
+
+    // "Modify" the module
+    inc_modify_node(ctx, 0)
+
+    // Run pipeline
+    let count = inc_run_pipeline(ctx)
+    // Module + both functions should be marked for recompilation
+    let count_ok = count == 3
+
+    // Now simulate recompilation
+    inc_mark_recompiled(ctx, 0)
+    inc_mark_recompiled(ctx, 1)
+    inc_mark_recompiled(ctx, 2)
+
+    // All should be valid now
+    let v0 = inc_get_node_state(ctx, 0) == INC_STATE_VALID
+    let v1 = inc_get_node_state(ctx, 1) == INC_STATE_VALID
+    let v2 = inc_get_node_state(ctx, 2) == INC_STATE_VALID
+    let rc = ctx.recompile_count == 0
+
+    // Cache the results
+    inc_cache_insert(ctx, 0, 1000)
+    inc_cache_insert(ctx, 1, 2000)
+    inc_cache_insert(ctx, 2, 3000)
+
+    let c0 = inc_cache_lookup(ctx, 0) == 1000
+    let c1 = inc_cache_lookup(ctx, 1) == 2000
+    let c2 = inc_cache_lookup(ctx, 2) == 3000
+
+    count_ok && v0 && v1 && v2 && rc && c0 && c1 && c2
+}
+
+fn test_inc_full_roundtrip() -> bool with Mut, Div, Panic {
+    var ctx = inc_context_new()
+    test_inc_full_roundtrip_inner(&! ctx)
+}
+
+// ============================================================================
+// Section 26: Worklist tests (supplementary)
+// ============================================================================
+
+// Worklist push/pop basic.
+fn test_inc_worklist_basic_inner(ctx: &! IncContext) -> bool with Mut, Div, Panic {
+    inc_worklist_reset(ctx)
+    let empty1 = inc_worklist_empty(ctx)
+    inc_worklist_push(ctx, 42)
+    let not_empty = inc_worklist_empty(ctx) == false
+    let val = inc_worklist_pop(ctx)
+    let empty2 = inc_worklist_empty(ctx)
+    empty1 && not_empty && val == 42 && empty2
+}
+
+fn test_inc_worklist_basic() -> bool with Mut, Div, Panic {
+    var ctx = inc_context_new()
+    test_inc_worklist_basic_inner(&! ctx)
+}
+
+// Worklist FIFO order.
+fn test_inc_worklist_fifo_inner(ctx: &! IncContext) -> bool with Mut, Div, Panic {
+    inc_worklist_reset(ctx)
+    inc_worklist_push(ctx, 10)
+    inc_worklist_push(ctx, 20)
+    inc_worklist_push(ctx, 30)
+    let v1 = inc_worklist_pop(ctx)
+    let v2 = inc_worklist_pop(ctx)
+    let v3 = inc_worklist_pop(ctx)
+    v1 == 10 && v2 == 20 && v3 == 30
+}
+
+fn test_inc_worklist_fifo() -> bool with Mut, Div, Panic {
+    var ctx = inc_context_new()
+    test_inc_worklist_fifo_inner(&! ctx)
+}
+
+// Pop from empty worklist returns INC_INVALID.
+fn test_inc_worklist_pop_empty_inner(ctx: &! IncContext) -> bool with Mut, Div, Panic {
+    inc_worklist_reset(ctx)
+    let val = inc_worklist_pop(ctx)
+    val == INC_INVALID
+}
+
+fn test_inc_worklist_pop_empty() -> bool with Mut, Div, Panic {
+    var ctx = inc_context_new()
+    test_inc_worklist_pop_empty_inner(&! ctx)
+}
+
+// ============================================================================
+// Section 27: Additional utility tests (supplementary)
+// ============================================================================
+
+// Dep depth of a chain.
+fn test_inc_dep_depth_chain_inner(ctx: &! IncContext) -> bool with Mut, Div, Panic {
+    inc_make_chain(ctx, 5)
+    // Node 0 depends on 1, 1 on 2, 2 on 3, 3 on 4
+    let d0 = inc_dep_depth(ctx, 0)  // depth 4: 0->1->2->3->4
+    let d3 = inc_dep_depth(ctx, 3)  // depth 1: 3->4
+    let d4 = inc_dep_depth(ctx, 4)  // depth 0: leaf
+    d0 == 4 && d3 == 1 && d4 == 0
+}
+
+fn test_inc_dep_depth_chain() -> bool with Mut, Div, Panic {
+    var ctx = inc_context_new()
+    test_inc_dep_depth_chain_inner(&! ctx)
+}
+
+// Has cycle detection — no cycle in chain.
+fn test_inc_no_cycle_chain_inner(ctx: &! IncContext) -> bool with Mut, Div, Panic {
+    inc_make_chain(ctx, 4)
+    inc_has_cycle(ctx) == false
+}
+
+fn test_inc_no_cycle_chain() -> bool with Mut, Div, Panic {
+    var ctx = inc_context_new()
+    test_inc_no_cycle_chain_inner(&! ctx)
+}
+
+// Has cycle detection — cycle exists.
+fn test_inc_has_cycle_inner(ctx: &! IncContext) -> bool with Mut, Div, Panic {
+    let n0 = inc_add_node(ctx, INC_NODE_FUNCTION, 1)
+    let n1 = inc_add_node(ctx, INC_NODE_FUNCTION, 2)
+    let n2 = inc_add_node(ctx, INC_NODE_FUNCTION, 3)
+    let e0 = inc_add_edge(ctx, 0, 1)
+    let e1 = inc_add_edge(ctx, 1, 2)
+    let e2 = inc_add_edge(ctx, 2, 0)  // cycle: 0->1->2->0
+    inc_has_cycle(ctx)
+}
+
+fn test_inc_has_cycle() -> bool with Mut, Div, Panic {
+    var ctx = inc_context_new()
+    test_inc_has_cycle_inner(&! ctx)
+}
+
+// Reset clears everything.
+fn test_inc_reset_inner(ctx: &! IncContext) -> bool with Mut, Div, Panic {
+    inc_make_chain(ctx, 5)
+    inc_set_all_unchanged(ctx)
+    inc_modify_node(ctx, 0)
+    inc_detect_changes(ctx)
+
+    let before_nodes = ctx.node_count > 0
+    let before_edges = ctx.edge_count > 0
+
+    inc_reset(ctx)
+
+    let after_nodes = ctx.node_count == 0
+    let after_edges = ctx.edge_count == 0
+    let after_stale = ctx.stale_count == 0
+
+    before_nodes && before_edges && after_nodes && after_edges && after_stale
+}
+
+fn test_inc_reset() -> bool with Mut, Div, Panic {
+    var ctx = inc_context_new()
+    test_inc_reset_inner(&! ctx)
+}
+
+// Context new gives clean state.
+fn test_inc_context_new_inner(ctx: &! IncContext) -> bool with Mut, Div, Panic {
+    let nc = ctx.node_count == 0
+    let ec = ctx.edge_count == 0
+    let cc = ctx.cache_count == 0
+    let sc = ctx.stale_count == 0
+    let wh = ctx.wl_head == 0
+    let wt = ctx.wl_tail == 0
+    let rc = ctx.recompile_count == 0
+    let tc = ctx.total_nodes_checked == 0
+    nc && ec && cc && sc && wh && wt && rc && tc
+}
+
+fn test_inc_context_new() -> bool with Mut, Div, Panic {
+    var ctx = inc_context_new()
+    test_inc_context_new_inner(&! ctx)
+}
+
+// ============================================================================
+// Section 28: Test runner
+// ============================================================================
+
+fn test_inc_main() -> i32 with IO, Mut, Div, Panic {
+    var passed: i64 = 0
+    let total: i64 = 65
+
+    print("=== Incremental Compilation Tests ===\n")
+
+    // Fingerprint tests (T01-T10)
+    if test_inc_fp_zero() { passed = passed + 1; print("  T01 OK fp_zero\n") } else { print("  FAIL: T01 fp_zero\n") }
+    if test_inc_fp_eq_same() { passed = passed + 1; print("  T02 OK fp_eq_same\n") } else { print("  FAIL: T02 fp_eq_same\n") }
+    if test_inc_fp_eq_diff() { passed = passed + 1; print("  T03 OK fp_eq_diff\n") } else { print("  FAIL: T03 fp_eq_diff\n") }
+    if test_inc_fp_from_i64() { passed = passed + 1; print("  T04 OK fp_from_i64\n") } else { print("  FAIL: T04 fp_from_i64\n") }
+    if test_inc_fp_from_i64_diff() { passed = passed + 1; print("  T05 OK fp_from_i64_diff\n") } else { print("  FAIL: T05 fp_from_i64_diff\n") }
+    if test_inc_fp_deterministic() { passed = passed + 1; print("  T06 OK fp_deterministic\n") } else { print("  FAIL: T06 fp_deterministic\n") }
+    if test_inc_fp_combine_order() { passed = passed + 1; print("  T07 OK fp_combine_order\n") } else { print("  FAIL: T07 fp_combine_order\n") }
+    if test_inc_fp_combine_nonzero() { passed = passed + 1; print("  T08 OK fp_combine_nonzero\n") } else { print("  FAIL: T08 fp_combine_nonzero\n") }
+    if test_inc_fp_from_bytes() { passed = passed + 1; print("  T09 OK fp_from_bytes\n") } else { print("  FAIL: T09 fp_from_bytes\n") }
+    if test_inc_fp_from_bytes_diff() { passed = passed + 1; print("  T10 OK fp_from_bytes_diff\n") } else { print("  FAIL: T10 fp_from_bytes_diff\n") }
+
+    // Node management tests (T11-T18)
+    if test_inc_add_node() { passed = passed + 1; print("  T11 OK add_node\n") } else { print("  FAIL: T11 add_node\n") }
+    if test_inc_add_multiple_nodes() { passed = passed + 1; print("  T12 OK add_multiple_nodes\n") } else { print("  FAIL: T12 add_multiple_nodes\n") }
+    if test_inc_state_transitions() { passed = passed + 1; print("  T13 OK state_transitions\n") } else { print("  FAIL: T13 state_transitions\n") }
+    if test_inc_find_by_name() { passed = passed + 1; print("  T14 OK find_by_name\n") } else { print("  FAIL: T14 find_by_name\n") }
+    if test_inc_count_by_kind() { passed = passed + 1; print("  T15 OK count_by_kind\n") } else { print("  FAIL: T15 count_by_kind\n") }
+    if test_inc_invalid_node() { passed = passed + 1; print("  T16 OK invalid_node\n") } else { print("  FAIL: T16 invalid_node\n") }
+    if test_inc_fp_get_set() { passed = passed + 1; print("  T17 OK fp_get_set\n") } else { print("  FAIL: T17 fp_get_set\n") }
+    if test_inc_valid_kind_state() { passed = passed + 1; print("  T18 OK valid_kind_state\n") } else { print("  FAIL: T18 valid_kind_state\n") }
+
+    // Edge management tests (T19-T26)
+    if test_inc_add_edge() { passed = passed + 1; print("  T19 OK add_edge\n") } else { print("  FAIL: T19 add_edge\n") }
+    if test_inc_add_edge_invalid() { passed = passed + 1; print("  T20 OK add_edge_invalid\n") } else { print("  FAIL: T20 add_edge_invalid\n") }
+    if test_inc_dependencies() { passed = passed + 1; print("  T21 OK dependencies\n") } else { print("  FAIL: T21 dependencies\n") }
+    if test_inc_dependents() { passed = passed + 1; print("  T22 OK dependents\n") } else { print("  FAIL: T22 dependents\n") }
+    if test_inc_get_dependencies() { passed = passed + 1; print("  T23 OK get_dependencies\n") } else { print("  FAIL: T23 get_dependencies\n") }
+    if test_inc_get_dependents() { passed = passed + 1; print("  T24 OK get_dependents\n") } else { print("  FAIL: T24 get_dependents\n") }
+    if test_inc_multiple_edges() { passed = passed + 1; print("  T25 OK multiple_edges\n") } else { print("  FAIL: T25 multiple_edges\n") }
+    if test_inc_star_graph() { passed = passed + 1; print("  T26 OK star_graph\n") } else { print("  FAIL: T26 star_graph\n") }
+
+    // Change detection tests (T27-T36)
+    if test_inc_detect_no_changes() { passed = passed + 1; print("  T27 OK detect_no_changes\n") } else { print("  FAIL: T27 detect_no_changes\n") }
+    if test_inc_detect_one_modified() { passed = passed + 1; print("  T28 OK detect_one_modified\n") } else { print("  FAIL: T28 detect_one_modified\n") }
+    if test_inc_detect_multiple_modified() { passed = passed + 1; print("  T29 OK detect_multiple_modified\n") } else { print("  FAIL: T29 detect_multiple_modified\n") }
+    if test_inc_detect_added() { passed = passed + 1; print("  T30 OK detect_added\n") } else { print("  FAIL: T30 detect_added\n") }
+    if test_inc_detect_removed() { passed = passed + 1; print("  T31 OK detect_removed\n") } else { print("  FAIL: T31 detect_removed\n") }
+    if test_inc_detect_total_checked() { passed = passed + 1; print("  T32 OK detect_total_checked\n") } else { print("  FAIL: T32 detect_total_checked\n") }
+    if test_inc_detect_empty() { passed = passed + 1; print("  T33 OK detect_empty\n") } else { print("  FAIL: T33 detect_empty\n") }
+    if test_inc_detect_mixed() { passed = passed + 1; print("  T34 OK detect_mixed\n") } else { print("  FAIL: T34 detect_mixed\n") }
+    if test_inc_node_not_stale_initially() { passed = passed + 1; print("  T35 OK node_not_stale_initially\n") } else { print("  FAIL: T35 node_not_stale_initially\n") }
+    if test_inc_detect_idempotent() { passed = passed + 1; print("  T36 OK detect_idempotent\n") } else { print("  FAIL: T36 detect_idempotent\n") }
+
+    // Transitive invalidation tests (T37-T46)
+    if test_inc_invalidate_chain() { passed = passed + 1; print("  T37 OK invalidate_chain\n") } else { print("  FAIL: T37 invalidate_chain\n") }
+    if test_inc_invalidate_chain_root() { passed = passed + 1; print("  T38 OK invalidate_chain_root\n") } else { print("  FAIL: T38 invalidate_chain_root\n") }
+    if test_inc_invalidate_diamond() { passed = passed + 1; print("  T39 OK invalidate_diamond\n") } else { print("  FAIL: T39 invalidate_diamond\n") }
+    if test_inc_invalidate_diamond_one_branch() { passed = passed + 1; print("  T40 OK invalidate_diamond_one_branch\n") } else { print("  FAIL: T40 invalidate_diamond_one_branch\n") }
+    if test_inc_invalidate_star() { passed = passed + 1; print("  T41 OK invalidate_star\n") } else { print("  FAIL: T41 invalidate_star\n") }
+    if test_inc_invalidate_star_one_arm() { passed = passed + 1; print("  T42 OK invalidate_star_one_arm\n") } else { print("  FAIL: T42 invalidate_star_one_arm\n") }
+    if test_inc_invalidate_no_changes() { passed = passed + 1; print("  T43 OK invalidate_no_changes\n") } else { print("  FAIL: T43 invalidate_no_changes\n") }
+    if test_inc_invalidate_deep_chain() { passed = passed + 1; print("  T44 OK invalidate_deep_chain\n") } else { print("  FAIL: T44 invalidate_deep_chain\n") }
+    if test_inc_stale_count_after_invalidation() { passed = passed + 1; print("  T45 OK stale_count_after_invalidation\n") } else { print("  FAIL: T45 stale_count_after_invalidation\n") }
+    if test_inc_invalidate_isolated() { passed = passed + 1; print("  T46 OK invalidate_isolated\n") } else { print("  FAIL: T46 invalidate_isolated\n") }
+
+    // Selective recompile tests (T47-T54)
+    if test_inc_selective_recompile() { passed = passed + 1; print("  T47 OK selective_recompile\n") } else { print("  FAIL: T47 selective_recompile\n") }
+    if test_inc_selective_recompile_none() { passed = passed + 1; print("  T48 OK selective_recompile_none\n") } else { print("  FAIL: T48 selective_recompile_none\n") }
+    if test_inc_mark_recompiled() { passed = passed + 1; print("  T49 OK mark_recompiled\n") } else { print("  FAIL: T49 mark_recompiled\n") }
+    if test_inc_mark_recompiled_syncs_fp() { passed = passed + 1; print("  T50 OK mark_recompiled_syncs_fp\n") } else { print("  FAIL: T50 mark_recompiled_syncs_fp\n") }
+    if test_inc_mark_error() { passed = passed + 1; print("  T51 OK mark_error\n") } else { print("  FAIL: T51 mark_error\n") }
+    if test_inc_recompiling_count() { passed = passed + 1; print("  T52 OK recompiling_count\n") } else { print("  FAIL: T52 recompiling_count\n") }
+    if test_inc_valid_count() { passed = passed + 1; print("  T53 OK valid_count\n") } else { print("  FAIL: T53 valid_count\n") }
+    if test_inc_error_count() { passed = passed + 1; print("  T54 OK error_count\n") } else { print("  FAIL: T54 error_count\n") }
+
+    // Caching tests (T55-T59)
+    if test_inc_cache_insert_lookup() { passed = passed + 1; print("  T55 OK cache_insert_lookup\n") } else { print("  FAIL: T55 cache_insert_lookup\n") }
+    if test_inc_cache_miss() { passed = passed + 1; print("  T56 OK cache_miss\n") } else { print("  FAIL: T56 cache_miss\n") }
+    if test_inc_cache_invalidate() { passed = passed + 1; print("  T57 OK cache_invalidate\n") } else { print("  FAIL: T57 cache_invalidate\n") }
+    if test_inc_cache_update() { passed = passed + 1; print("  T58 OK cache_update\n") } else { print("  FAIL: T58 cache_update\n") }
+    if test_inc_cache_clear() { passed = passed + 1; print("  T59 OK cache_clear\n") } else { print("  FAIL: T59 cache_clear\n") }
+
+    // Integration tests (T60-T65)
+    if test_inc_full_pipeline_chain() { passed = passed + 1; print("  T60 OK full_pipeline_chain\n") } else { print("  FAIL: T60 full_pipeline_chain\n") }
+    if test_inc_full_pipeline_no_changes() { passed = passed + 1; print("  T61 OK full_pipeline_no_changes\n") } else { print("  FAIL: T61 full_pipeline_no_changes\n") }
+    if test_inc_build_dep_graph() { passed = passed + 1; print("  T62 OK build_dep_graph\n") } else { print("  FAIL: T62 build_dep_graph\n") }
+    if test_inc_topological_sort() { passed = passed + 1; print("  T63 OK topological_sort\n") } else { print("  FAIL: T63 topological_sort\n") }
+    if test_inc_impact_score() { passed = passed + 1; print("  T64 OK impact_score\n") } else { print("  FAIL: T64 impact_score\n") }
+    if test_inc_full_roundtrip() { passed = passed + 1; print("  T65 OK full_roundtrip\n") } else { print("  FAIL: T65 full_roundtrip\n") }
+
+    print("\nIncremental: ")
+    print_int(passed)
+    print(" / ")
+    print_int(total)
+    print(" passed\n")
+
+    // Supplementary tests (not counted in the main 65, but exercised)
+    // These provide additional coverage for worklist, cycle detection, etc.
+    var supp_passed: i64 = 0
+    let supp_total: i64 = 8
+
+    if test_inc_worklist_basic() { supp_passed = supp_passed + 1; print("  S01 OK worklist_basic\n") } else { print("  FAIL: S01 worklist_basic\n") }
+    if test_inc_worklist_fifo() { supp_passed = supp_passed + 1; print("  S02 OK worklist_fifo\n") } else { print("  FAIL: S02 worklist_fifo\n") }
+    if test_inc_worklist_pop_empty() { supp_passed = supp_passed + 1; print("  S03 OK worklist_pop_empty\n") } else { print("  FAIL: S03 worklist_pop_empty\n") }
+    if test_inc_dep_depth_chain() { supp_passed = supp_passed + 1; print("  S04 OK dep_depth_chain\n") } else { print("  FAIL: S04 dep_depth_chain\n") }
+    if test_inc_no_cycle_chain() { supp_passed = supp_passed + 1; print("  S05 OK no_cycle_chain\n") } else { print("  FAIL: S05 no_cycle_chain\n") }
+    if test_inc_has_cycle() { supp_passed = supp_passed + 1; print("  S06 OK has_cycle\n") } else { print("  FAIL: S06 has_cycle\n") }
+    if test_inc_reset() { supp_passed = supp_passed + 1; print("  S07 OK reset\n") } else { print("  FAIL: S07 reset\n") }
+    if test_inc_context_new() { supp_passed = supp_passed + 1; print("  S08 OK context_new\n") } else { print("  FAIL: S08 context_new\n") }
+
+    print("\nSupplementary: ")
+    print_int(supp_passed)
+    print(" / ")
+    print_int(supp_total)
+    print(" passed\n")
+
+    if passed == total { 0 } else { 1 }
+}

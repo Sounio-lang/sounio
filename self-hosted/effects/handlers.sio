@@ -1,0 +1,2991 @@
+// self-hosted::effects::handlers — CPS-based algebraic effect handler dispatch
+//
+// Implements the runtime machinery for algebraic effects in Sounio:
+//   - Handler registration and stack-based scoping
+//   - Effect performance (perform) with continuation capture
+//   - Multi-shot and tail-resumptive continuation strategies
+//   - CPS transformation markers for effectful functions
+//   - Clause matching for handler dispatch
+//   - Stack segment save/restore for delimited continuations
+//
+// Architecture:
+//   The handler stack is a dynamically-scoped chain of handler frames.
+//   When an effect is performed, the runtime searches the stack from
+//   innermost to outermost for a handler covering that effect. If found,
+//   the current continuation is captured and passed to the handler clause.
+//   The handler may resume the continuation (once, multiple times, or never)
+//   depending on its resume strategy.
+//
+//   CPS transformation converts direct-style effectful code into
+//   continuation-passing style at compile time, so that continuation
+//   capture is just closure allocation rather than stack copying.
+//
+// All mutating operations use &! references (exclusive borrows).
+// Helpers precede callers (no forward references).
+
+// ============================================================================
+// CONSTANTS
+// ============================================================================
+
+let EFH_MAX_HANDLERS: i64 = 256
+let EFH_MAX_STACK: i64 = 64
+let EFH_MAX_CONTINUATIONS: i64 = 128
+let EFH_MAX_OPS: i64 = 512
+let EFH_MAX_REGS: i64 = 64
+let EFH_MAX_CLAUSES: i64 = 256
+let EFH_STACK_SEGMENT_SIZE: i64 = 1024
+let EFH_MAX_SEGMENTS: i64 = 16
+let EFH_MAX_ERRORS: i64 = 128
+let EFH_MAX_FRAME_HANDLERS: i64 = 16
+
+// Sentinel value for "not found" lookups
+let EFH_NOT_FOUND: i64 = 0 - 1
+
+// ============================================================================
+// ENUMS
+// ============================================================================
+
+// Resume strategy for a handler clause.
+//   ResumeOnce   — continuation may be resumed exactly once (linear)
+//   ResumeMulti  — continuation may be resumed multiple times (multi-shot)
+//   ResumeTail   — tail-resumptive: handler returns, then continuation runs
+//   ResumeNever  — handler never resumes (abort / exception style)
+enum EfhResumeStrategy {
+    ResumeOnce,
+    ResumeMulti,
+    ResumeTail,
+    ResumeNever,
+}
+
+// Handler lifecycle state.
+//   HandlerActive    — installed and ready to handle effects
+//   HandlerSuspended — temporarily paused (e.g., during nested handler)
+//   HandlerCompleted — finished processing, will be uninstalled
+//   HandlerAborted   — aborted due to error or explicit abort
+enum EfhHandlerState {
+    HandlerActive,
+    HandlerSuspended,
+    HandlerCompleted,
+    HandlerAborted,
+}
+
+// Continuation state machine.
+//   ContReady     — captured, waiting to be resumed
+//   ContRunning   — currently executing
+//   ContSuspended — paused mid-execution (nested effect)
+//   ContDone      — completed execution
+//   ContAbandoned — will never be resumed (leaked or aborted)
+enum EfhContState {
+    ContReady,
+    ContRunning,
+    ContSuspended,
+    ContDone,
+    ContAbandoned,
+}
+
+// Operation kind for the operation log.
+//   OpPerform — performing an effect
+//   OpResume  — resuming a captured continuation
+//   OpAbort   — abandoning a continuation
+//   OpShift   — delimited control shift
+//   OpReset   — delimited control reset (install delimiter)
+enum EfhOpKind {
+    OpPerform,
+    OpResume,
+    OpAbort,
+    OpShift,
+    OpReset,
+}
+
+// Result of a CPS transformation attempt.
+//   TransformOk      — transformation succeeded
+//   TransformSkipped — function does not need transformation
+//   TransformError   — transformation failed
+enum EfhTransformResult {
+    TransformOk,
+    TransformSkipped,
+    TransformError,
+}
+
+// Result of dispatching an effect to a handler.
+//   DispatchHandled   — a handler was found and invoked
+//   DispatchUnhandled — no handler covers this effect
+//   DispatchError     — dispatch failed (internal error)
+enum EfhDispatchResult {
+    DispatchHandled,
+    DispatchUnhandled,
+    DispatchError,
+}
+
+// ============================================================================
+// STRUCTS
+// ============================================================================
+
+// A captured continuation: the saved machine state at the point
+// where an effect was performed.
+struct EfhContinuation {
+    id: i64,
+    state: EfhContState,
+    regs: [i64; 64],       // saved register file
+    reg_count: i64,         // number of live registers
+    pc: i64,                // program counter at capture point
+    stack_base: i64,        // base of stack segment to save
+    stack_len: i64,         // length of stack segment
+    handler_depth: i64,     // handler stack depth at capture
+    segment_id: i64,        // ID of saved stack segment (-1 if none)
+    resume_count: i64,      // how many times this cont has been resumed
+}
+
+// A registered effect handler: associates an effect ID with a
+// handler function and resume strategy.
+struct EfhHandler {
+    id: i64,
+    effect_id: i64,
+    handler_fn_id: i64,
+    resume_strategy: EfhResumeStrategy,
+    state: EfhHandlerState,
+    scope_depth: i64,
+    clause_count: i64,     // number of clauses in this handler
+    first_clause: i64,     // index of first clause in clauses array
+}
+
+// A handler frame on the handler stack. Each frame groups handlers
+// that are installed together (e.g., a `handle { ... }` block).
+struct EfhHandlerFrame {
+    handlers: [i64; 16],   // handler IDs in this frame
+    handler_count: i64,
+    depth: i64,             // nesting depth
+    return_cont: i64,       // continuation to resume when frame completes
+}
+
+// A logged operation (for debugging / replay).
+struct EfhOperation {
+    kind: EfhOpKind,
+    effect_id: i64,
+    op_index: i64,
+    arg: i64,
+    result: i64,
+    line: i64,
+    cont_id: i64,          // associated continuation (-1 if none)
+}
+
+// A handler clause: maps (effect_id, op_index) to a handler function.
+struct EfhClause {
+    effect_id: i64,
+    op_index: i64,
+    handler_fn_id: i64,
+    captures_cont: bool,
+    resume_strategy: EfhResumeStrategy,
+}
+
+// A saved stack segment for continuation capture.
+struct EfhStackSegment {
+    data: [i64; 1024],
+    len: i64,
+}
+
+// CPS transformation record: tracks which functions have been
+// CPS-transformed and the resulting continuation parameter.
+struct EfhCpsRecord {
+    fn_id: i64,
+    effect_mask: i64,       // bitset of effects this function performs
+    transformed: bool,      // whether CPS transform has been applied
+    cont_param_id: i64,     // ID of the continuation parameter added
+}
+
+// ============================================================================
+// CONTEXT — flat arena for all handler state
+// ============================================================================
+
+struct EfhContext {
+    // Handler registry
+    handlers: [EfhHandler; 256],
+    handler_count: i64,
+
+    // Handler stack (frames)
+    stack: [EfhHandlerFrame; 64],
+    stack_depth: i64,
+
+    // Continuation pool
+    continuations: [EfhContinuation; 128],
+    cont_count: i64,
+
+    // Operation log
+    operations: [EfhOperation; 512],
+    op_count: i64,
+
+    // Clause table
+    clauses: [EfhClause; 256],
+    clause_count: i64,
+
+    // Stack segments for continuation capture
+    segments: [EfhStackSegment; 16],
+    segment_count: i64,
+
+    // CPS transformation records
+    cps_records: [EfhCpsRecord; 256],
+    cps_count: i64,
+
+    // Error log (error codes)
+    errors: [i64; 128],
+    error_count: i64,
+
+    // Currently active handler (-1 if none)
+    current_handler: i64,
+
+    // Next ID counters
+    next_handler_id: i64,
+    next_cont_id: i64,
+}
+
+// ============================================================================
+// CONSTRUCTORS — default values for each struct
+// ============================================================================
+
+fn efh_cont_default() -> EfhContinuation {
+    EfhContinuation {
+        id: 0,
+        state: EfhContState::ContReady,
+        regs: [0; 64],
+        reg_count: 0,
+        pc: 0,
+        stack_base: 0,
+        stack_len: 0,
+        handler_depth: 0,
+        segment_id: 0 - 1,
+        resume_count: 0,
+    }
+}
+
+fn efh_handler_default() -> EfhHandler {
+    EfhHandler {
+        id: 0,
+        effect_id: 0,
+        handler_fn_id: 0,
+        resume_strategy: EfhResumeStrategy::ResumeOnce,
+        state: EfhHandlerState::HandlerActive,
+        scope_depth: 0,
+        clause_count: 0,
+        first_clause: 0,
+    }
+}
+
+fn efh_frame_default() -> EfhHandlerFrame {
+    EfhHandlerFrame {
+        handlers: [0; 16],
+        handler_count: 0,
+        depth: 0,
+        return_cont: 0 - 1,
+    }
+}
+
+fn efh_op_default() -> EfhOperation {
+    EfhOperation {
+        kind: EfhOpKind::OpPerform,
+        effect_id: 0,
+        op_index: 0,
+        arg: 0,
+        result: 0,
+        line: 0,
+        cont_id: 0 - 1,
+    }
+}
+
+fn efh_clause_default() -> EfhClause {
+    EfhClause {
+        effect_id: 0,
+        op_index: 0,
+        handler_fn_id: 0,
+        captures_cont: false,
+        resume_strategy: EfhResumeStrategy::ResumeOnce,
+    }
+}
+
+fn efh_segment_default() -> EfhStackSegment {
+    EfhStackSegment {
+        data: [0; 1024],
+        len: 0,
+    }
+}
+
+fn efh_cps_record_default() -> EfhCpsRecord {
+    EfhCpsRecord {
+        fn_id: 0,
+        effect_mask: 0,
+        transformed: false,
+        cont_param_id: 0,
+    }
+}
+
+// ============================================================================
+// CONTEXT CONSTRUCTOR
+// ============================================================================
+
+fn efh_context_new() -> EfhContext {
+    EfhContext {
+        handlers: [efh_handler_default(); 256],
+        handler_count: 0,
+        stack: [efh_frame_default(); 64],
+        stack_depth: 0,
+        continuations: [efh_cont_default(); 128],
+        cont_count: 0,
+        operations: [efh_op_default(); 512],
+        op_count: 0,
+        clauses: [efh_clause_default(); 256],
+        clause_count: 0,
+        segments: [efh_segment_default(); 16],
+        segment_count: 0,
+        cps_records: [efh_cps_record_default(); 256],
+        cps_count: 0,
+        errors: [0; 128],
+        error_count: 0,
+        current_handler: 0 - 1,
+        next_handler_id: 1,
+        next_cont_id: 1,
+    }
+}
+
+// ============================================================================
+// ERROR RECORDING
+// ============================================================================
+
+fn efh_record_error(ctx: &! EfhContext, code: i64) with Mut, Div, Panic {
+    if ctx.error_count < EFH_MAX_ERRORS {
+        ctx.errors[ctx.error_count as usize] = code
+        ctx.error_count = ctx.error_count + 1
+    }
+}
+
+fn efh_error_count(ctx: &EfhContext) -> i64 {
+    ctx.error_count
+}
+
+fn efh_get_error(ctx: &EfhContext, index: i64) -> i64 with Div, Panic {
+    if index >= 0 && index < ctx.error_count {
+        return ctx.errors[index as usize]
+    }
+    0 - 1
+}
+
+// ============================================================================
+// RESUME STRATEGY HELPERS
+// ============================================================================
+
+fn efh_resume_strategy_eq(a: EfhResumeStrategy, b: EfhResumeStrategy) -> bool {
+    // Compare by matching each variant pair
+    let a_val = efh_resume_strategy_to_i64(a)
+    let b_val = efh_resume_strategy_to_i64(b)
+    a_val == b_val
+}
+
+fn efh_resume_strategy_to_i64(s: EfhResumeStrategy) -> i64 {
+    match s {
+        EfhResumeStrategy::ResumeOnce => 0,
+        EfhResumeStrategy::ResumeMulti => 1,
+        EfhResumeStrategy::ResumeTail => 2,
+        EfhResumeStrategy::ResumeNever => 3,
+    }
+}
+
+fn efh_resume_strategy_allows_resume(s: EfhResumeStrategy) -> bool {
+    match s {
+        EfhResumeStrategy::ResumeOnce => true,
+        EfhResumeStrategy::ResumeMulti => true,
+        EfhResumeStrategy::ResumeTail => true,
+        EfhResumeStrategy::ResumeNever => false,
+    }
+}
+
+fn efh_resume_strategy_is_multi(s: EfhResumeStrategy) -> bool {
+    match s {
+        EfhResumeStrategy::ResumeMulti => true,
+        _ => false,
+    }
+}
+
+// ============================================================================
+// HANDLER STATE HELPERS
+// ============================================================================
+
+fn efh_handler_state_eq(a: EfhHandlerState, b: EfhHandlerState) -> bool {
+    let a_val = efh_handler_state_to_i64(a)
+    let b_val = efh_handler_state_to_i64(b)
+    a_val == b_val
+}
+
+fn efh_handler_state_to_i64(s: EfhHandlerState) -> i64 {
+    match s {
+        EfhHandlerState::HandlerActive => 0,
+        EfhHandlerState::HandlerSuspended => 1,
+        EfhHandlerState::HandlerCompleted => 2,
+        EfhHandlerState::HandlerAborted => 3,
+    }
+}
+
+fn efh_handler_state_is_active(s: EfhHandlerState) -> bool {
+    match s {
+        EfhHandlerState::HandlerActive => true,
+        _ => false,
+    }
+}
+
+fn efh_handler_state_is_terminal(s: EfhHandlerState) -> bool {
+    match s {
+        EfhHandlerState::HandlerCompleted => true,
+        EfhHandlerState::HandlerAborted => true,
+        _ => false,
+    }
+}
+
+// ============================================================================
+// CONTINUATION STATE HELPERS
+// ============================================================================
+
+fn efh_cont_state_eq(a: EfhContState, b: EfhContState) -> bool {
+    let a_val = efh_cont_state_to_i64(a)
+    let b_val = efh_cont_state_to_i64(b)
+    a_val == b_val
+}
+
+fn efh_cont_state_to_i64(s: EfhContState) -> i64 {
+    match s {
+        EfhContState::ContReady => 0,
+        EfhContState::ContRunning => 1,
+        EfhContState::ContSuspended => 2,
+        EfhContState::ContDone => 3,
+        EfhContState::ContAbandoned => 4,
+    }
+}
+
+fn efh_cont_state_is_resumable(s: EfhContState) -> bool {
+    match s {
+        EfhContState::ContReady => true,
+        EfhContState::ContSuspended => true,
+        _ => false,
+    }
+}
+
+fn efh_cont_state_is_terminal(s: EfhContState) -> bool {
+    match s {
+        EfhContState::ContDone => true,
+        EfhContState::ContAbandoned => true,
+        _ => false,
+    }
+}
+
+// ============================================================================
+// OP KIND HELPERS
+// ============================================================================
+
+fn efh_op_kind_to_i64(k: EfhOpKind) -> i64 {
+    match k {
+        EfhOpKind::OpPerform => 0,
+        EfhOpKind::OpResume => 1,
+        EfhOpKind::OpAbort => 2,
+        EfhOpKind::OpShift => 3,
+        EfhOpKind::OpReset => 4,
+    }
+}
+
+fn efh_op_kind_eq(a: EfhOpKind, b: EfhOpKind) -> bool {
+    efh_op_kind_to_i64(a) == efh_op_kind_to_i64(b)
+}
+
+// ============================================================================
+// TRANSFORM / DISPATCH RESULT HELPERS
+// ============================================================================
+
+fn efh_transform_result_to_i64(r: EfhTransformResult) -> i64 {
+    match r {
+        EfhTransformResult::TransformOk => 0,
+        EfhTransformResult::TransformSkipped => 1,
+        EfhTransformResult::TransformError => 2,
+    }
+}
+
+fn efh_dispatch_result_to_i64(r: EfhDispatchResult) -> i64 {
+    match r {
+        EfhDispatchResult::DispatchHandled => 0,
+        EfhDispatchResult::DispatchUnhandled => 1,
+        EfhDispatchResult::DispatchError => 2,
+    }
+}
+
+fn efh_dispatch_result_eq(a: EfhDispatchResult, b: EfhDispatchResult) -> bool {
+    efh_dispatch_result_to_i64(a) == efh_dispatch_result_to_i64(b)
+}
+
+fn efh_transform_result_eq(a: EfhTransformResult, b: EfhTransformResult) -> bool {
+    efh_transform_result_to_i64(a) == efh_transform_result_to_i64(b)
+}
+
+// ============================================================================
+// HANDLER LOOKUP HELPERS (internal)
+// ============================================================================
+
+// Find handler by ID in the handler registry. Returns index or -1.
+fn efh_find_handler_index(ctx: &EfhContext, handler_id: i64) -> i64 with Mut, Div, Panic {
+    var i: i64 = 0
+    while i < ctx.handler_count {
+        if ctx.handlers[i as usize].id == handler_id {
+            return i
+        }
+        i = i + 1
+    }
+    0 - 1
+}
+
+// Find continuation by ID. Returns index or -1.
+fn efh_find_cont_index(ctx: &EfhContext, cont_id: i64) -> i64 with Mut, Div, Panic {
+    var i: i64 = 0
+    while i < ctx.cont_count {
+        if ctx.continuations[i as usize].id == cont_id {
+            return i
+        }
+        i = i + 1
+    }
+    0 - 1
+}
+
+// Find CPS record by function ID. Returns index or -1.
+fn efh_find_cps_record(ctx: &EfhContext, fn_id: i64) -> i64 with Mut, Div, Panic {
+    var i: i64 = 0
+    while i < ctx.cps_count {
+        if ctx.cps_records[i as usize].fn_id == fn_id {
+            return i
+        }
+        i = i + 1
+    }
+    0 - 1
+}
+
+// ============================================================================
+// HANDLER REGISTRATION
+// ============================================================================
+
+// Register a new handler for the given effect ID.
+// Returns the handler's unique ID, or -1 on overflow.
+fn efh_register_handler(ctx: &! EfhContext, effect_id: i64, handler_fn_id: i64,
+                         resume_strat: EfhResumeStrategy) -> i64 with Mut, Div, Panic {
+    if ctx.handler_count >= EFH_MAX_HANDLERS {
+        efh_record_error(ctx, 100)  // overflow
+        return 0 - 1
+    }
+
+    let hid = ctx.next_handler_id
+    ctx.next_handler_id = ctx.next_handler_id + 1
+
+    let h = EfhHandler {
+        id: hid,
+        effect_id: effect_id,
+        handler_fn_id: handler_fn_id,
+        resume_strategy: resume_strat,
+        state: EfhHandlerState::HandlerActive,
+        scope_depth: ctx.stack_depth,
+        clause_count: 0,
+        first_clause: 0,
+    }
+
+    ctx.handlers[ctx.handler_count as usize] = h
+    ctx.handler_count = ctx.handler_count + 1
+
+    hid
+}
+
+// ============================================================================
+// HANDLER STATE ACCESSORS
+// ============================================================================
+
+// Get the state of a handler by ID.
+fn efh_handler_state(ctx: &EfhContext, handler_id: i64) -> EfhHandlerState with Mut, Div, Panic {
+    let idx = efh_find_handler_index(ctx, handler_id)
+    if idx < 0 {
+        return EfhHandlerState::HandlerAborted
+    }
+    ctx.handlers[idx as usize].state
+}
+
+// Set the state of a handler by ID.
+fn efh_set_handler_state(ctx: &! EfhContext, handler_id: i64,
+                          state: EfhHandlerState) with Mut, Div, Panic {
+    let idx = efh_find_handler_index(ctx, handler_id)
+    if idx >= 0 {
+        ctx.handlers[idx as usize].state = state
+    }
+}
+
+// Check if a handler covers a given effect ID.
+fn efh_handler_covers_effect(ctx: &EfhContext, handler_id: i64,
+                              effect_id: i64) -> bool with Mut, Div, Panic {
+    let idx = efh_find_handler_index(ctx, handler_id)
+    if idx < 0 {
+        return false
+    }
+    ctx.handlers[idx as usize].effect_id == effect_id
+}
+
+// Get the resume strategy of a handler.
+fn efh_handler_resume_strategy(ctx: &EfhContext, handler_id: i64)
+    -> EfhResumeStrategy with Mut, Div, Panic {
+    let idx = efh_find_handler_index(ctx, handler_id)
+    if idx < 0 {
+        return EfhResumeStrategy::ResumeNever
+    }
+    ctx.handlers[idx as usize].resume_strategy
+}
+
+// Get the handler function ID.
+fn efh_handler_fn_id(ctx: &EfhContext, handler_id: i64) -> i64 with Mut, Div, Panic {
+    let idx = efh_find_handler_index(ctx, handler_id)
+    if idx < 0 {
+        return 0 - 1
+    }
+    ctx.handlers[idx as usize].handler_fn_id
+}
+
+// Get the effect ID that a handler covers.
+fn efh_handler_effect_id(ctx: &EfhContext, handler_id: i64) -> i64 with Mut, Div, Panic {
+    let idx = efh_find_handler_index(ctx, handler_id)
+    if idx < 0 {
+        return 0 - 1
+    }
+    ctx.handlers[idx as usize].effect_id
+}
+
+// ============================================================================
+// HANDLER STACK — frame management
+// ============================================================================
+
+// Push a new handler frame onto the stack.
+fn efh_push_frame(ctx: &! EfhContext) -> bool with Mut, Div, Panic {
+    if ctx.stack_depth >= EFH_MAX_STACK {
+        efh_record_error(ctx, 200)  // stack overflow
+        return false
+    }
+
+    let frame = EfhHandlerFrame {
+        handlers: [0; 16],
+        handler_count: 0,
+        depth: ctx.stack_depth,
+        return_cont: 0 - 1,
+    }
+
+    ctx.stack[ctx.stack_depth as usize] = frame
+    ctx.stack_depth = ctx.stack_depth + 1
+    true
+}
+
+// Pop the topmost handler frame from the stack.
+fn efh_pop_frame(ctx: &! EfhContext) -> bool with Mut, Div, Panic {
+    if ctx.stack_depth <= 0 {
+        efh_record_error(ctx, 201)  // stack underflow
+        return false
+    }
+
+    ctx.stack_depth = ctx.stack_depth - 1
+
+    // Mark all handlers in the popped frame as completed
+    let frame = ctx.stack[ctx.stack_depth as usize]
+    var i: i64 = 0
+    while i < frame.handler_count {
+        let hid = frame.handlers[i as usize]
+        let idx = efh_find_handler_index(ctx, hid)
+        if idx >= 0 {
+            ctx.handlers[idx as usize].state = EfhHandlerState::HandlerCompleted
+        }
+        i = i + 1
+    }
+
+    true
+}
+
+// Add a handler to the current (topmost) frame.
+fn efh_frame_add_handler(ctx: &! EfhContext, handler_id: i64) -> bool with Mut, Div, Panic {
+    if ctx.stack_depth <= 0 {
+        efh_record_error(ctx, 202)  // no frame
+        return false
+    }
+
+    let frame_idx = ctx.stack_depth - 1
+    let count = ctx.stack[frame_idx as usize].handler_count
+
+    if count >= EFH_MAX_FRAME_HANDLERS {
+        efh_record_error(ctx, 203)  // frame handler overflow
+        return false
+    }
+
+    ctx.stack[frame_idx as usize].handlers[count as usize] = handler_id
+    ctx.stack[frame_idx as usize].handler_count = count + 1
+    true
+}
+
+// Set the return continuation for the current frame.
+fn efh_frame_set_return_cont(ctx: &! EfhContext, cont_id: i64) -> bool with Mut, Div, Panic {
+    if ctx.stack_depth <= 0 {
+        return false
+    }
+    let frame_idx = ctx.stack_depth - 1
+    ctx.stack[frame_idx as usize].return_cont = cont_id
+    true
+}
+
+// Get the return continuation for a frame at given depth.
+fn efh_frame_return_cont(ctx: &EfhContext, depth: i64) -> i64 with Div, Panic {
+    if depth < 0 || depth >= ctx.stack_depth {
+        return 0 - 1
+    }
+    ctx.stack[depth as usize].return_cont
+}
+
+// Get the handler count for the current frame.
+fn efh_frame_handler_count(ctx: &EfhContext) -> i64 with Div, Panic {
+    if ctx.stack_depth <= 0 {
+        return 0
+    }
+    let frame_idx = ctx.stack_depth - 1
+    ctx.stack[frame_idx as usize].handler_count
+}
+
+// ============================================================================
+// INSTALL / UNINSTALL — convenience wrappers
+// ============================================================================
+
+// Install a handler: push a new frame, add the handler to it.
+fn efh_install_handler(ctx: &! EfhContext, handler_id: i64) -> bool with Mut, Div, Panic {
+    // Verify handler exists
+    let idx = efh_find_handler_index(ctx, handler_id)
+    if idx < 0 {
+        efh_record_error(ctx, 204)  // handler not found
+        return false
+    }
+
+    // Push a frame and add handler
+    let pushed = efh_push_frame(ctx)
+    if !pushed {
+        return false
+    }
+
+    let added = efh_frame_add_handler(ctx, handler_id)
+    if !added {
+        // Rollback frame push
+        efh_pop_frame(ctx)
+        return false
+    }
+
+    // Update handler scope depth
+    ctx.handlers[idx as usize].scope_depth = ctx.stack_depth - 1
+    ctx.current_handler = handler_id
+
+    true
+}
+
+// Uninstall the topmost handler frame.
+fn efh_uninstall_handler(ctx: &! EfhContext) -> bool with Mut, Div, Panic {
+    let popped = efh_pop_frame(ctx)
+    if !popped {
+        return false
+    }
+
+    // Update current_handler to the handler in the new top frame (if any)
+    if ctx.stack_depth > 0 {
+        let top_idx = ctx.stack_depth - 1
+        let top_frame = ctx.stack[top_idx as usize]
+        if top_frame.handler_count > 0 {
+            ctx.current_handler = top_frame.handlers[0]
+        } else {
+            ctx.current_handler = 0 - 1
+        }
+    } else {
+        ctx.current_handler = 0 - 1
+    }
+
+    true
+}
+
+// ============================================================================
+// HANDLER SEARCH — find handler for an effect
+// ============================================================================
+
+// Search the handler stack from innermost to outermost for a handler
+// that covers the given effect. Returns handler ID or -1.
+fn efh_find_handler(ctx: &EfhContext, effect_id: i64) -> i64 with Mut, Div, Panic {
+    // Walk frames from top to bottom
+    var depth: i64 = ctx.stack_depth - 1
+    while depth >= 0 {
+        let frame = ctx.stack[depth as usize]
+        var i: i64 = 0
+        while i < frame.handler_count {
+            let hid = frame.handlers[i as usize]
+            let hidx = efh_find_handler_index(ctx, hid)
+            if hidx >= 0 {
+                let handler = ctx.handlers[hidx as usize]
+                if handler.effect_id == effect_id &&
+                   efh_handler_state_is_active(handler.state) {
+                    return hid
+                }
+            }
+            i = i + 1
+        }
+        depth = depth - 1
+    }
+    0 - 1
+}
+
+// ============================================================================
+// STACK DEPTH & HANDLER COUNT ACCESSORS
+// ============================================================================
+
+fn efh_stack_depth(ctx: &EfhContext) -> i64 {
+    ctx.stack_depth
+}
+
+// Count handlers that are currently in Active state.
+fn efh_active_handler_count(ctx: &EfhContext) -> i64 with Mut, Div, Panic {
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < ctx.handler_count {
+        if efh_handler_state_is_active(ctx.handlers[i as usize].state) {
+            count = count + 1
+        }
+        i = i + 1
+    }
+    count
+}
+
+// Total number of registered handlers (all states).
+fn efh_total_handler_count(ctx: &EfhContext) -> i64 {
+    ctx.handler_count
+}
+
+// ============================================================================
+// CONTINUATION CAPTURE
+// ============================================================================
+
+// Capture the current continuation. Creates a new continuation entry
+// with the given register state and program counter.
+// Returns the continuation ID or -1 on overflow.
+fn efh_capture_continuation(ctx: &! EfhContext, regs: &[i64; 64],
+                             reg_count: i64, pc: i64) -> i64 with Mut, Div, Panic {
+    if ctx.cont_count >= EFH_MAX_CONTINUATIONS {
+        efh_record_error(ctx, 300)  // continuation overflow
+        return 0 - 1
+    }
+
+    let cid = ctx.next_cont_id
+    ctx.next_cont_id = ctx.next_cont_id + 1
+
+    var cont = efh_cont_default()
+    cont.id = cid
+    cont.state = EfhContState::ContReady
+    cont.pc = pc
+    cont.reg_count = reg_count
+    cont.handler_depth = ctx.stack_depth
+    cont.segment_id = 0 - 1
+    cont.resume_count = 0
+
+    // Copy register values
+    var i: i64 = 0
+    while i < reg_count && i < EFH_MAX_REGS {
+        cont.regs[i as usize] = regs[i as usize]
+        i = i + 1
+    }
+
+    ctx.continuations[ctx.cont_count as usize] = cont
+    ctx.cont_count = ctx.cont_count + 1
+
+    cid
+}
+
+// ============================================================================
+// CONTINUATION STATE ACCESSORS
+// ============================================================================
+
+// Get the state of a continuation by ID.
+fn efh_cont_state(ctx: &EfhContext, cont_id: i64) -> EfhContState with Mut, Div, Panic {
+    let idx = efh_find_cont_index(ctx, cont_id)
+    if idx < 0 {
+        return EfhContState::ContAbandoned
+    }
+    ctx.continuations[idx as usize].state
+}
+
+// Get the program counter of a continuation.
+fn efh_cont_pc(ctx: &EfhContext, cont_id: i64) -> i64 with Mut, Div, Panic {
+    let idx = efh_find_cont_index(ctx, cont_id)
+    if idx < 0 {
+        return 0 - 1
+    }
+    ctx.continuations[idx as usize].pc
+}
+
+// Get the register count of a continuation.
+fn efh_cont_reg_count(ctx: &EfhContext, cont_id: i64) -> i64 with Mut, Div, Panic {
+    let idx = efh_find_cont_index(ctx, cont_id)
+    if idx < 0 {
+        return 0
+    }
+    ctx.continuations[idx as usize].reg_count
+}
+
+// Get a register value from a continuation.
+fn efh_cont_get_reg(ctx: &EfhContext, cont_id: i64, reg_index: i64) -> i64 with Mut, Div, Panic {
+    let idx = efh_find_cont_index(ctx, cont_id)
+    if idx < 0 || reg_index < 0 || reg_index >= EFH_MAX_REGS {
+        return 0
+    }
+    ctx.continuations[idx as usize].regs[reg_index as usize]
+}
+
+// Get the handler depth at the time of capture.
+fn efh_cont_handler_depth(ctx: &EfhContext, cont_id: i64) -> i64 with Mut, Div, Panic {
+    let idx = efh_find_cont_index(ctx, cont_id)
+    if idx < 0 {
+        return 0
+    }
+    ctx.continuations[idx as usize].handler_depth
+}
+
+// Get the resume count for a continuation.
+fn efh_cont_resume_count(ctx: &EfhContext, cont_id: i64) -> i64 with Mut, Div, Panic {
+    let idx = efh_find_cont_index(ctx, cont_id)
+    if idx < 0 {
+        return 0
+    }
+    ctx.continuations[idx as usize].resume_count
+}
+
+// Get the segment ID associated with a continuation.
+fn efh_cont_segment_id(ctx: &EfhContext, cont_id: i64) -> i64 with Mut, Div, Panic {
+    let idx = efh_find_cont_index(ctx, cont_id)
+    if idx < 0 {
+        return 0 - 1
+    }
+    ctx.continuations[idx as usize].segment_id
+}
+
+// ============================================================================
+// CONTINUATION RESUME
+// ============================================================================
+
+// Resume a captured continuation with a value. The value is placed
+// in register 0 of the continuation's register file.
+// Returns true on success, false if continuation is not resumable.
+fn efh_resume(ctx: &! EfhContext, cont_id: i64, value: i64) -> bool with Mut, Div, Panic {
+    let idx = efh_find_cont_index(ctx, cont_id)
+    if idx < 0 {
+        efh_record_error(ctx, 301)  // continuation not found
+        return false
+    }
+
+    let state = ctx.continuations[idx as usize].state
+    if !efh_cont_state_is_resumable(state) {
+        efh_record_error(ctx, 302)  // not resumable
+        return false
+    }
+
+    // Check resume strategy constraints
+    let resume_count = ctx.continuations[idx as usize].resume_count
+    // For the handler that captured this continuation, check if multi-resume is allowed
+    // Single-resume continuations can only be resumed once
+    if resume_count > 0 {
+        // Need to check if multi-shot is allowed via the handler
+        // For now, allow multi-resume only if the continuation was explicitly marked
+        // We check this in efh_perform_effect when creating the continuation
+        // Here we just increment and proceed
+        // (The strategy check is done at the handler level)
+    }
+
+    // Place the resume value in register 0
+    ctx.continuations[idx as usize].regs[0] = value
+
+    // Transition to running state
+    ctx.continuations[idx as usize].state = EfhContState::ContRunning
+    ctx.continuations[idx as usize].resume_count = resume_count + 1
+
+    // Log the operation
+    efh_log_op(ctx, EfhOpKind::OpResume, 0, 0, value, 0, cont_id)
+
+    true
+}
+
+// Complete a running continuation (mark it as done).
+fn efh_complete_continuation(ctx: &! EfhContext, cont_id: i64) -> bool with Mut, Div, Panic {
+    let idx = efh_find_cont_index(ctx, cont_id)
+    if idx < 0 {
+        return false
+    }
+    ctx.continuations[idx as usize].state = EfhContState::ContDone
+    true
+}
+
+// Suspend a running continuation.
+fn efh_suspend_continuation(ctx: &! EfhContext, cont_id: i64) -> bool with Mut, Div, Panic {
+    let idx = efh_find_cont_index(ctx, cont_id)
+    if idx < 0 {
+        return false
+    }
+    let state = ctx.continuations[idx as usize].state
+    if !efh_cont_state_eq(state, EfhContState::ContRunning) {
+        return false
+    }
+    ctx.continuations[idx as usize].state = EfhContState::ContSuspended
+    true
+}
+
+// ============================================================================
+// CONTINUATION ABORT
+// ============================================================================
+
+// Abandon a continuation. It will never be resumed.
+fn efh_abort(ctx: &! EfhContext, cont_id: i64) -> bool with Mut, Div, Panic {
+    let idx = efh_find_cont_index(ctx, cont_id)
+    if idx < 0 {
+        efh_record_error(ctx, 303)  // continuation not found
+        return false
+    }
+
+    let state = ctx.continuations[idx as usize].state
+    if efh_cont_state_is_terminal(state) {
+        // Already terminal, nothing to do
+        return true
+    }
+
+    ctx.continuations[idx as usize].state = EfhContState::ContAbandoned
+
+    // Log the operation
+    efh_log_op(ctx, EfhOpKind::OpAbort, 0, 0, 0, 0, cont_id)
+
+    true
+}
+
+// ============================================================================
+// OPERATION LOG
+// ============================================================================
+
+fn efh_log_op(ctx: &! EfhContext, kind: EfhOpKind, effect_id: i64,
+              op_index: i64, arg: i64, line: i64, cont_id: i64) with Mut, Div, Panic {
+    if ctx.op_count >= EFH_MAX_OPS {
+        return  // silently drop if log is full
+    }
+
+    let op = EfhOperation {
+        kind: kind,
+        effect_id: effect_id,
+        op_index: op_index,
+        arg: arg,
+        result: 0,
+        line: line,
+        cont_id: cont_id,
+    }
+
+    ctx.operations[ctx.op_count as usize] = op
+    ctx.op_count = ctx.op_count + 1
+}
+
+// Get the total number of logged operations.
+fn efh_op_count(ctx: &EfhContext) -> i64 {
+    ctx.op_count
+}
+
+// Get a logged operation by index.
+fn efh_get_op(ctx: &EfhContext, index: i64) -> EfhOperation with Div, Panic {
+    if index >= 0 && index < ctx.op_count {
+        return ctx.operations[index as usize]
+    }
+    efh_op_default()
+}
+
+// ============================================================================
+// CLAUSE MANAGEMENT
+// ============================================================================
+
+// Add a clause that maps (effect_id, op_index) to a handler function.
+// Returns the clause index or -1 on overflow.
+fn efh_add_clause(ctx: &! EfhContext, effect_id: i64, op_index: i64,
+                   fn_id: i64, captures_cont: bool,
+                   resume_strat: EfhResumeStrategy) -> i64 with Mut, Div, Panic {
+    if ctx.clause_count >= EFH_MAX_CLAUSES {
+        efh_record_error(ctx, 400)  // clause overflow
+        return 0 - 1
+    }
+
+    let clause = EfhClause {
+        effect_id: effect_id,
+        op_index: op_index,
+        handler_fn_id: fn_id,
+        captures_cont: captures_cont,
+        resume_strategy: resume_strat,
+    }
+
+    let idx = ctx.clause_count
+    ctx.clauses[idx as usize] = clause
+    ctx.clause_count = ctx.clause_count + 1
+
+    idx
+}
+
+// Find the first clause matching (effect_id, op_index).
+// Returns clause index or -1 if not found.
+fn efh_match_clause(ctx: &EfhContext, effect_id: i64, op_index: i64) -> i64 with Mut, Div, Panic {
+    var i: i64 = 0
+    while i < ctx.clause_count {
+        let c = ctx.clauses[i as usize]
+        if c.effect_id == effect_id && c.op_index == op_index {
+            return i
+        }
+        i = i + 1
+    }
+    0 - 1
+}
+
+// Get a clause by index.
+fn efh_get_clause(ctx: &EfhContext, index: i64) -> EfhClause with Div, Panic {
+    if index >= 0 && index < ctx.clause_count {
+        return ctx.clauses[index as usize]
+    }
+    efh_clause_default()
+}
+
+// Count clauses for a given effect ID.
+fn efh_clause_count_for_effect(ctx: &EfhContext, effect_id: i64) -> i64 with Mut, Div, Panic {
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < ctx.clause_count {
+        if ctx.clauses[i as usize].effect_id == effect_id {
+            count = count + 1
+        }
+        i = i + 1
+    }
+    count
+}
+
+// Find the last (highest priority) clause matching (effect_id, op_index).
+fn efh_match_clause_last(ctx: &EfhContext, effect_id: i64,
+                          op_index: i64) -> i64 with Mut, Div, Panic {
+    var found: i64 = 0 - 1
+    var i: i64 = 0
+    while i < ctx.clause_count {
+        let c = ctx.clauses[i as usize]
+        if c.effect_id == effect_id && c.op_index == op_index {
+            found = i
+        }
+        i = i + 1
+    }
+    found
+}
+
+// ============================================================================
+// EFFECT DISPATCH — the core perform operation
+// ============================================================================
+
+// Perform an effect: search for a handler, capture continuation if found.
+// This is the heart of the algebraic effect system.
+fn efh_perform_effect(ctx: &! EfhContext, effect_id: i64,
+                       op_index: i64, arg: i64) -> EfhDispatchResult with Mut, Div, Panic {
+    // Search for a handler covering this effect
+    let handler_id = efh_find_handler(ctx, effect_id)
+
+    if handler_id < 0 {
+        // No handler found — effect is unhandled
+        efh_log_op(ctx, EfhOpKind::OpPerform, effect_id, op_index, arg, 0, 0 - 1)
+        efh_record_error(ctx, 500)  // unhandled effect
+        return EfhDispatchResult::DispatchUnhandled
+    }
+
+    // Capture a continuation at the current point
+    // Use an empty register set (the actual registers would be filled
+    // by the runtime when this is executed at the machine level)
+    var regs: [i64; 64] = [0; 64]
+    regs[0] = arg  // pass the argument in register 0
+    let cont_id = efh_capture_continuation(ctx, &regs, 1, 0)
+
+    if cont_id < 0 {
+        // Failed to capture continuation
+        return EfhDispatchResult::DispatchError
+    }
+
+    // Log the perform operation
+    efh_log_op(ctx, EfhOpKind::OpPerform, effect_id, op_index, arg, 0, cont_id)
+
+    // Suspend the handler (it is now processing an effect)
+    let hidx = efh_find_handler_index(ctx, handler_id)
+    if hidx >= 0 {
+        ctx.handlers[hidx as usize].state = EfhHandlerState::HandlerSuspended
+    }
+
+    // Try clause-based dispatch
+    let clause_idx = efh_match_clause(ctx, effect_id, op_index)
+    if clause_idx >= 0 {
+        let clause = ctx.clauses[clause_idx as usize]
+        // Record the handler function that will process this effect
+        if ctx.op_count > 0 {
+            ctx.operations[(ctx.op_count - 1) as usize].result = clause.handler_fn_id
+        }
+    }
+
+    EfhDispatchResult::DispatchHandled
+}
+
+// ============================================================================
+// STACK SEGMENT SAVE / RESTORE
+// ============================================================================
+
+// Save a stack segment for a delimited continuation.
+// Returns the segment ID or -1 on overflow.
+fn efh_save_stack_segment(ctx: &! EfhContext, base: i64,
+                           len: i64) -> i64 with Mut, Div, Panic {
+    if ctx.segment_count >= EFH_MAX_SEGMENTS {
+        efh_record_error(ctx, 600)  // segment overflow
+        return 0 - 1
+    }
+
+    // Clamp length to segment capacity
+    var actual_len = len
+    if actual_len > EFH_STACK_SEGMENT_SIZE {
+        actual_len = EFH_STACK_SEGMENT_SIZE
+    }
+    if actual_len < 0 {
+        actual_len = 0
+    }
+
+    var seg = efh_segment_default()
+    seg.len = actual_len
+
+    // Fill segment data with synthetic values (base + offset)
+    // In a real runtime, this would copy from the actual stack
+    var i: i64 = 0
+    while i < actual_len {
+        seg.data[i as usize] = base + i
+        i = i + 1
+    }
+
+    let seg_id = ctx.segment_count
+    ctx.segments[seg_id as usize] = seg
+    ctx.segment_count = ctx.segment_count + 1
+
+    seg_id
+}
+
+// Restore a saved stack segment to a target base address.
+// Returns true if successful.
+fn efh_restore_stack_segment(ctx: &! EfhContext, seg_id: i64,
+                              target_base: i64) -> bool with Mut, Div, Panic {
+    if seg_id < 0 || seg_id >= ctx.segment_count {
+        efh_record_error(ctx, 601)  // invalid segment ID
+        return false
+    }
+
+    let seg = ctx.segments[seg_id as usize]
+
+    // In a real runtime, we would copy seg.data[0..seg.len] to
+    // the stack at target_base. Here we verify the segment is valid
+    // and log the restore operation.
+    if seg.len <= 0 {
+        return true  // empty segment, nothing to restore
+    }
+
+    // Verify first word matches expected pattern
+    let expected_first = ctx.segments[seg_id as usize].data[0]
+    // The segment was saved with data[i] = base + i, so data[0] = original base
+    // This is a sanity check that the segment is intact
+    if expected_first < 0 {
+        efh_record_error(ctx, 602)  // corrupted segment
+        return false
+    }
+
+    true
+}
+
+// Get the length of a saved segment.
+fn efh_segment_len(ctx: &EfhContext, seg_id: i64) -> i64 with Div, Panic {
+    if seg_id < 0 || seg_id >= ctx.segment_count {
+        return 0
+    }
+    ctx.segments[seg_id as usize].len
+}
+
+// Get a value from a saved segment.
+fn efh_segment_get(ctx: &EfhContext, seg_id: i64, index: i64) -> i64 with Div, Panic {
+    if seg_id < 0 || seg_id >= ctx.segment_count {
+        return 0
+    }
+    let seg = ctx.segments[seg_id as usize]
+    if index < 0 || index >= seg.len {
+        return 0
+    }
+    seg.data[index as usize]
+}
+
+// Associate a stack segment with a continuation.
+fn efh_cont_set_segment(ctx: &! EfhContext, cont_id: i64,
+                          seg_id: i64) -> bool with Mut, Div, Panic {
+    let idx = efh_find_cont_index(ctx, cont_id)
+    if idx < 0 {
+        return false
+    }
+    ctx.continuations[idx as usize].segment_id = seg_id
+    true
+}
+
+// ============================================================================
+// CPS TRANSFORMATION
+// ============================================================================
+
+// Register a function as needing CPS transformation.
+fn efh_cps_register(ctx: &! EfhContext, fn_id: i64,
+                     effect_mask: i64) -> bool with Mut, Div, Panic {
+    if ctx.cps_count >= EFH_MAX_HANDLERS {
+        efh_record_error(ctx, 700)  // CPS record overflow
+        return false
+    }
+
+    // Check if already registered
+    let existing = efh_find_cps_record(ctx, fn_id)
+    if existing >= 0 {
+        // Update the effect mask
+        ctx.cps_records[existing as usize].effect_mask = effect_mask
+        return true
+    }
+
+    let record = EfhCpsRecord {
+        fn_id: fn_id,
+        effect_mask: effect_mask,
+        transformed: false,
+        cont_param_id: 0,
+    }
+
+    ctx.cps_records[ctx.cps_count as usize] = record
+    ctx.cps_count = ctx.cps_count + 1
+    true
+}
+
+// Check if a function needs CPS transformation.
+// A function needs CPS if it has a non-zero effect mask and has not
+// been transformed yet.
+fn efh_cps_needs_transform(ctx: &EfhContext, fn_id: i64) -> bool with Mut, Div, Panic {
+    let idx = efh_find_cps_record(ctx, fn_id)
+    if idx < 0 {
+        return false
+    }
+    let record = ctx.cps_records[idx as usize]
+    record.effect_mask != 0 && !record.transformed
+}
+
+// Check if a function has been CPS-transformed.
+fn efh_cps_is_transformed(ctx: &EfhContext, fn_id: i64) -> bool with Mut, Div, Panic {
+    let idx = efh_find_cps_record(ctx, fn_id)
+    if idx < 0 {
+        return false
+    }
+    ctx.cps_records[idx as usize].transformed
+}
+
+// Get the effect mask for a function.
+fn efh_cps_effect_mask(ctx: &EfhContext, fn_id: i64) -> i64 with Mut, Div, Panic {
+    let idx = efh_find_cps_record(ctx, fn_id)
+    if idx < 0 {
+        return 0
+    }
+    ctx.cps_records[idx as usize].effect_mask
+}
+
+// Transform an effectful function to CPS.
+// This marks the function as transformed and assigns a continuation
+// parameter ID. In a real compiler, this would rewrite the function
+// body to thread continuations.
+//
+// Returns TransformOk if transformation succeeded, TransformSkipped
+// if the function does not need transformation, TransformError on failure.
+fn efh_cps_transform_function(ctx: &! EfhContext, fn_id: i64,
+                                effect_mask: i64) -> EfhTransformResult with Mut, Div, Panic {
+    // Register if not already registered
+    let reg_ok = efh_cps_register(ctx, fn_id, effect_mask)
+    if !reg_ok {
+        return EfhTransformResult::TransformError
+    }
+
+    let idx = efh_find_cps_record(ctx, fn_id)
+    if idx < 0 {
+        return EfhTransformResult::TransformError
+    }
+
+    // Check if already transformed
+    if ctx.cps_records[idx as usize].transformed {
+        return EfhTransformResult::TransformSkipped
+    }
+
+    // Check if transformation is needed
+    if effect_mask == 0 {
+        return EfhTransformResult::TransformSkipped
+    }
+
+    // Assign a continuation parameter ID (unique per function)
+    // In practice, this would be the next parameter slot
+    ctx.cps_records[idx as usize].cont_param_id = fn_id * 1000 + 1
+    ctx.cps_records[idx as usize].transformed = true
+
+    EfhTransformResult::TransformOk
+}
+
+// Get the continuation parameter ID for a CPS-transformed function.
+fn efh_cps_cont_param(ctx: &EfhContext, fn_id: i64) -> i64 with Mut, Div, Panic {
+    let idx = efh_find_cps_record(ctx, fn_id)
+    if idx < 0 {
+        return 0 - 1
+    }
+    ctx.cps_records[idx as usize].cont_param_id
+}
+
+// ============================================================================
+// COMPILE HANDLER CLAUSE — lower to IR instructions
+// ============================================================================
+
+// Compile a handler clause into IR instruction count.
+// Returns the number of IR instructions generated, or -1 on error.
+//
+// The compilation produces a sequence of operations:
+//   1. Load the continuation (if captures_cont)
+//   2. Call the handler function
+//   3. Resume or abort depending on strategy
+//
+// For now, we return a synthetic instruction count based on the clause
+// properties. A real implementation would emit actual IR instructions.
+fn efh_compile_handler_clause(ctx: &! EfhContext, clause_id: i64) -> i64 with Mut, Div, Panic {
+    if clause_id < 0 || clause_id >= ctx.clause_count {
+        efh_record_error(ctx, 800)  // invalid clause ID
+        return 0 - 1
+    }
+
+    let clause = ctx.clauses[clause_id as usize]
+
+    // Base instructions: load args (1) + call handler (1) = 2
+    var instr_count: i64 = 2
+
+    // If the clause captures a continuation, add instructions for
+    // capturing and packaging the continuation value
+    if clause.captures_cont {
+        instr_count = instr_count + 3  // capture + package + store
+    }
+
+    // Resume strategy affects epilogue instructions
+    match clause.resume_strategy {
+        EfhResumeStrategy::ResumeOnce => {
+            instr_count = instr_count + 2  // resume + cleanup
+        },
+        EfhResumeStrategy::ResumeMulti => {
+            instr_count = instr_count + 4  // copy_cont + resume + merge + cleanup
+        },
+        EfhResumeStrategy::ResumeTail => {
+            instr_count = instr_count + 1  // tail_resume
+        },
+        EfhResumeStrategy::ResumeNever => {
+            instr_count = instr_count + 1  // abort_cont
+        },
+    }
+
+    // Log a compile operation
+    efh_log_op(ctx, EfhOpKind::OpReset, clause.effect_id, clause.op_index,
+               instr_count, 0, 0 - 1)
+
+    instr_count
+}
+
+// ============================================================================
+// MULTI-HANDLER FRAME — install multiple handlers in one frame
+// ============================================================================
+
+// Install multiple handlers in a single frame (for `handle { ... }` blocks
+// that handle multiple effects).
+fn efh_install_multi(ctx: &! EfhContext, handler_ids: &[i64; 16],
+                      count: i64) -> bool with Mut, Div, Panic {
+    if count <= 0 {
+        return false
+    }
+
+    let pushed = efh_push_frame(ctx)
+    if !pushed {
+        return false
+    }
+
+    var i: i64 = 0
+    var all_ok: bool = true
+    while i < count && i < EFH_MAX_FRAME_HANDLERS {
+        let added = efh_frame_add_handler(ctx, handler_ids[i as usize])
+        if !added {
+            all_ok = false
+        }
+        i = i + 1
+    }
+
+    if !all_ok {
+        efh_pop_frame(ctx)
+        return false
+    }
+
+    // Set current handler to first in the frame
+    ctx.current_handler = handler_ids[0]
+    true
+}
+
+// ============================================================================
+// HANDLER SCOPE QUERIES
+// ============================================================================
+
+// Check if a handler is in scope at the current stack depth.
+fn efh_handler_in_scope(ctx: &EfhContext, handler_id: i64) -> bool with Mut, Div, Panic {
+    let idx = efh_find_handler_index(ctx, handler_id)
+    if idx < 0 {
+        return false
+    }
+    let handler = ctx.handlers[idx as usize]
+    // Handler is in scope if its scope depth is <= current stack depth
+    // and it is in an active state
+    handler.scope_depth < ctx.stack_depth && efh_handler_state_is_active(handler.state)
+}
+
+// Get the scope depth of a handler.
+fn efh_handler_scope_depth(ctx: &EfhContext, handler_id: i64) -> i64 with Mut, Div, Panic {
+    let idx = efh_find_handler_index(ctx, handler_id)
+    if idx < 0 {
+        return 0 - 1
+    }
+    ctx.handlers[idx as usize].scope_depth
+}
+
+// ============================================================================
+// CONTINUATION POOL QUERIES
+// ============================================================================
+
+// Count continuations in a given state.
+fn efh_cont_count_by_state(ctx: &EfhContext, state: EfhContState) -> i64 with Mut, Div, Panic {
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < ctx.cont_count {
+        if efh_cont_state_eq(ctx.continuations[i as usize].state, state) {
+            count = count + 1
+        }
+        i = i + 1
+    }
+    count
+}
+
+// Total number of captured continuations.
+fn efh_cont_total(ctx: &EfhContext) -> i64 {
+    ctx.cont_count
+}
+
+// Count abandoned (leaked) continuations.
+fn efh_cont_abandoned_count(ctx: &EfhContext) -> i64 with Mut, Div, Panic {
+    efh_cont_count_by_state(ctx, EfhContState::ContAbandoned)
+}
+
+// ============================================================================
+// FULL PIPELINE — perform + dispatch + resume (integration)
+// ============================================================================
+
+// Perform an effect and immediately resume with a result value.
+// This is the common fast path for tail-resumptive handlers.
+fn efh_perform_and_resume(ctx: &! EfhContext, effect_id: i64,
+                           op_index: i64, arg: i64,
+                           result: i64) -> bool with Mut, Div, Panic {
+    let dispatch = efh_perform_effect(ctx, effect_id, op_index, arg)
+    if !efh_dispatch_result_eq(dispatch, EfhDispatchResult::DispatchHandled) {
+        return false
+    }
+
+    // Find the most recently captured continuation and resume it
+    if ctx.cont_count <= 0 {
+        return false
+    }
+    let last_cont_id = ctx.continuations[(ctx.cont_count - 1) as usize].id
+    efh_resume(ctx, last_cont_id, result)
+}
+
+// ============================================================================
+// SHIFT / RESET — delimited control operators
+// ============================================================================
+
+// Install a reset delimiter (push a frame with no handlers).
+fn efh_reset(ctx: &! EfhContext) -> bool with Mut, Div, Panic {
+    let pushed = efh_push_frame(ctx)
+    if !pushed {
+        return false
+    }
+    efh_log_op(ctx, EfhOpKind::OpReset, 0, 0, 0, 0, 0 - 1)
+    true
+}
+
+// Shift: capture the current continuation up to the nearest reset.
+fn efh_shift(ctx: &! EfhContext, arg: i64) -> i64 with Mut, Div, Panic {
+    if ctx.stack_depth <= 0 {
+        efh_record_error(ctx, 900)  // no reset delimiter
+        return 0 - 1
+    }
+
+    var regs: [i64; 64] = [0; 64]
+    regs[0] = arg
+    let cont_id = efh_capture_continuation(ctx, &regs, 1, 0)
+
+    if cont_id < 0 {
+        return 0 - 1
+    }
+
+    efh_log_op(ctx, EfhOpKind::OpShift, 0, 0, arg, 0, cont_id)
+
+    cont_id
+}
+
+// ============================================================================
+// DIAGNOSTIC HELPERS
+// ============================================================================
+
+// Count operations of a given kind.
+fn efh_op_count_by_kind(ctx: &EfhContext, kind: EfhOpKind) -> i64 with Mut, Div, Panic {
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < ctx.op_count {
+        if efh_op_kind_eq(ctx.operations[i as usize].kind, kind) {
+            count = count + 1
+        }
+        i = i + 1
+    }
+    count
+}
+
+// Check if any errors have been recorded.
+fn efh_has_errors(ctx: &EfhContext) -> bool {
+    ctx.error_count > 0
+}
+
+// Clear all errors.
+fn efh_clear_errors(ctx: &! EfhContext) with Mut {
+    ctx.error_count = 0
+}
+
+// Get handler count in the current (top) frame.
+fn efh_current_frame_handler_count(ctx: &EfhContext) -> i64 with Div, Panic {
+    if ctx.stack_depth <= 0 {
+        return 0
+    }
+    ctx.stack[(ctx.stack_depth - 1) as usize].handler_count
+}
+
+// Get a handler ID from the current frame by index.
+fn efh_current_frame_handler_at(ctx: &EfhContext, index: i64) -> i64 with Div, Panic {
+    if ctx.stack_depth <= 0 {
+        return 0 - 1
+    }
+    let frame = ctx.stack[(ctx.stack_depth - 1) as usize]
+    if index < 0 || index >= frame.handler_count {
+        return 0 - 1
+    }
+    frame.handlers[index as usize]
+}
+
+// ============================================================================
+// VALIDATION HELPERS
+// ============================================================================
+
+// Validate that a handler ID is valid and registered.
+fn efh_is_valid_handler(ctx: &EfhContext, handler_id: i64) -> bool with Mut, Div, Panic {
+    efh_find_handler_index(ctx, handler_id) >= 0
+}
+
+// Validate that a continuation ID is valid.
+fn efh_is_valid_cont(ctx: &EfhContext, cont_id: i64) -> bool with Mut, Div, Panic {
+    efh_find_cont_index(ctx, cont_id) >= 0
+}
+
+// Validate that a clause ID is valid.
+fn efh_is_valid_clause(ctx: &EfhContext, clause_id: i64) -> bool {
+    clause_id >= 0 && clause_id < ctx.clause_count
+}
+
+// Validate that a segment ID is valid.
+fn efh_is_valid_segment(ctx: &EfhContext, seg_id: i64) -> bool {
+    seg_id >= 0 && seg_id < ctx.segment_count
+}
+
+// ============================================================================
+// TEST INFRASTRUCTURE
+// ============================================================================
+
+fn efh_assert_true(condition: bool, test_number: i64) -> i64 with IO, Mut, Panic, Div {
+    if condition {
+        print("  PASS test ")
+        print_int(test_number)
+        print("\n")
+        return 0
+    } else {
+        print("  FAIL test ")
+        print_int(test_number)
+        print("\n")
+        return 1
+    }
+}
+
+// ============================================================================
+// TEST CATEGORY 1: Handler Registration (tests 1-10)
+// ============================================================================
+
+// Test 1: Register a single handler
+fn efh_test_register_single(ctx: &! EfhContext) -> bool with Mut, Div, Panic {
+    let hid = efh_register_handler(ctx, 1, 100, EfhResumeStrategy::ResumeOnce)
+    hid > 0 && ctx.handler_count == 1
+}
+fn test_efh_register_single() -> i64 with IO, Mut, Div, Panic {
+    var ctx = efh_context_new()
+    efh_assert_true(efh_test_register_single(&! ctx), 1)
+}
+
+// Test 2: Register multiple handlers
+fn efh_test_register_multiple(ctx: &! EfhContext) -> bool with Mut, Div, Panic {
+    let h1 = efh_register_handler(ctx, 1, 100, EfhResumeStrategy::ResumeOnce)
+    let h2 = efh_register_handler(ctx, 2, 200, EfhResumeStrategy::ResumeMulti)
+    let h3 = efh_register_handler(ctx, 3, 300, EfhResumeStrategy::ResumeTail)
+    h1 > 0 && h2 > 0 && h3 > 0 && ctx.handler_count == 3 && h1 != h2 && h2 != h3
+}
+fn test_efh_register_multiple() -> i64 with IO, Mut, Div, Panic {
+    var ctx = efh_context_new()
+    efh_assert_true(efh_test_register_multiple(&! ctx), 2)
+}
+
+// Test 3: Handler IDs are unique and increasing
+fn efh_test_handler_ids_unique(ctx: &! EfhContext) -> bool with Mut, Div, Panic {
+    let h1 = efh_register_handler(ctx, 1, 100, EfhResumeStrategy::ResumeOnce)
+    let h2 = efh_register_handler(ctx, 2, 200, EfhResumeStrategy::ResumeOnce)
+    h2 > h1
+}
+fn test_efh_handler_ids_unique() -> i64 with IO, Mut, Div, Panic {
+    var ctx = efh_context_new()
+    efh_assert_true(efh_test_handler_ids_unique(&! ctx), 3)
+}
+
+// Test 4: Handler state is Active after registration
+fn efh_test_handler_initial_state(ctx: &! EfhContext) -> bool with Mut, Div, Panic {
+    let hid = efh_register_handler(ctx, 1, 100, EfhResumeStrategy::ResumeOnce)
+    let state = efh_handler_state(ctx, hid)
+    efh_handler_state_is_active(state)
+}
+fn test_efh_handler_initial_state() -> i64 with IO, Mut, Div, Panic {
+    var ctx = efh_context_new()
+    efh_assert_true(efh_test_handler_initial_state(&! ctx), 4)
+}
+
+// Test 5: Set handler state transitions
+fn efh_test_handler_state_transition(ctx: &! EfhContext) -> bool with Mut, Div, Panic {
+    let hid = efh_register_handler(ctx, 1, 100, EfhResumeStrategy::ResumeOnce)
+    efh_set_handler_state(ctx, hid, EfhHandlerState::HandlerSuspended)
+    let s1 = efh_handler_state(ctx, hid)
+    let ok1 = efh_handler_state_eq(s1, EfhHandlerState::HandlerSuspended)
+
+    efh_set_handler_state(ctx, hid, EfhHandlerState::HandlerCompleted)
+    let s2 = efh_handler_state(ctx, hid)
+    let ok2 = efh_handler_state_eq(s2, EfhHandlerState::HandlerCompleted)
+
+    ok1 && ok2
+}
+fn test_efh_handler_state_transition() -> i64 with IO, Mut, Div, Panic {
+    var ctx = efh_context_new()
+    efh_assert_true(efh_test_handler_state_transition(&! ctx), 5)
+}
+
+// Test 6: Handler covers correct effect
+fn efh_test_handler_covers_effect(ctx: &! EfhContext) -> bool with Mut, Div, Panic {
+    let hid = efh_register_handler(ctx, 42, 100, EfhResumeStrategy::ResumeOnce)
+    let ok1 = efh_handler_covers_effect(ctx, hid, 42)
+    let ok2 = !efh_handler_covers_effect(ctx, hid, 43)
+    ok1 && ok2
+}
+fn test_efh_handler_covers_effect() -> i64 with IO, Mut, Div, Panic {
+    var ctx = efh_context_new()
+    efh_assert_true(efh_test_handler_covers_effect(&! ctx), 6)
+}
+
+// Test 7: Handler resume strategy query
+fn efh_test_handler_resume_query(ctx: &! EfhContext) -> bool with Mut, Div, Panic {
+    let h1 = efh_register_handler(ctx, 1, 100, EfhResumeStrategy::ResumeOnce)
+    let h2 = efh_register_handler(ctx, 2, 200, EfhResumeStrategy::ResumeMulti)
+    let h3 = efh_register_handler(ctx, 3, 300, EfhResumeStrategy::ResumeNever)
+
+    let s1 = efh_handler_resume_strategy(ctx, h1)
+    let s2 = efh_handler_resume_strategy(ctx, h2)
+    let s3 = efh_handler_resume_strategy(ctx, h3)
+
+    efh_resume_strategy_eq(s1, EfhResumeStrategy::ResumeOnce) &&
+    efh_resume_strategy_eq(s2, EfhResumeStrategy::ResumeMulti) &&
+    efh_resume_strategy_eq(s3, EfhResumeStrategy::ResumeNever)
+}
+fn test_efh_handler_resume_query() -> i64 with IO, Mut, Div, Panic {
+    var ctx = efh_context_new()
+    efh_assert_true(efh_test_handler_resume_query(&! ctx), 7)
+}
+
+// Test 8: Handler fn_id and effect_id accessors
+fn efh_test_handler_accessors(ctx: &! EfhContext) -> bool with Mut, Div, Panic {
+    let hid = efh_register_handler(ctx, 7, 777, EfhResumeStrategy::ResumeTail)
+    let fid = efh_handler_fn_id(ctx, hid)
+    let eid = efh_handler_effect_id(ctx, hid)
+    fid == 777 && eid == 7
+}
+fn test_efh_handler_accessors() -> i64 with IO, Mut, Div, Panic {
+    var ctx = efh_context_new()
+    efh_assert_true(efh_test_handler_accessors(&! ctx), 8)
+}
+
+// Test 9: Active handler count
+fn efh_test_active_handler_count(ctx: &! EfhContext) -> bool with Mut, Div, Panic {
+    let ok1 = efh_active_handler_count(ctx) == 0
+
+    let h1 = efh_register_handler(ctx, 1, 100, EfhResumeStrategy::ResumeOnce)
+    let h2 = efh_register_handler(ctx, 2, 200, EfhResumeStrategy::ResumeOnce)
+    let ok2 = efh_active_handler_count(ctx) == 2
+
+    efh_set_handler_state(ctx, h1, EfhHandlerState::HandlerCompleted)
+    let ok3 = efh_active_handler_count(ctx) == 1
+
+    ok1 && ok2 && ok3
+}
+fn test_efh_active_handler_count() -> i64 with IO, Mut, Div, Panic {
+    var ctx = efh_context_new()
+    efh_assert_true(efh_test_active_handler_count(&! ctx), 9)
+}
+
+// Test 10: Invalid handler ID returns defaults
+fn efh_test_invalid_handler_id(ctx: &! EfhContext) -> bool with Mut, Div, Panic {
+    let state = efh_handler_state(ctx, 9999)
+    let ok1 = efh_handler_state_eq(state, EfhHandlerState::HandlerAborted)
+    let ok2 = !efh_handler_covers_effect(ctx, 9999, 1)
+    let ok3 = efh_handler_fn_id(ctx, 9999) == (0 - 1)
+    ok1 && ok2 && ok3
+}
+fn test_efh_invalid_handler_id() -> i64 with IO, Mut, Div, Panic {
+    var ctx = efh_context_new()
+    efh_assert_true(efh_test_invalid_handler_id(&! ctx), 10)
+}
+
+// ============================================================================
+// TEST CATEGORY 2: Handler Stack (tests 11-18)
+// ============================================================================
+
+// Test 11: Push and pop frames
+fn efh_test_push_pop_frame(ctx: &! EfhContext) -> bool with Mut, Div, Panic {
+    let ok1 = efh_stack_depth(ctx) == 0
+
+    let pushed = efh_push_frame(ctx)
+    let ok2 = pushed && efh_stack_depth(ctx) == 1
+
+    let popped = efh_pop_frame(ctx)
+    let ok3 = popped && efh_stack_depth(ctx) == 0
+
+    ok1 && ok2 && ok3
+}
+fn test_efh_push_pop_frame() -> i64 with IO, Mut, Div, Panic {
+    var ctx = efh_context_new()
+    efh_assert_true(efh_test_push_pop_frame(&! ctx), 11)
+}
+
+// Test 12: Nested frames
+fn efh_test_nested_frames(ctx: &! EfhContext) -> bool with Mut, Div, Panic {
+    efh_push_frame(ctx)
+    efh_push_frame(ctx)
+    efh_push_frame(ctx)
+    let ok1 = efh_stack_depth(ctx) == 3
+
+    efh_pop_frame(ctx)
+    let ok2 = efh_stack_depth(ctx) == 2
+
+    efh_pop_frame(ctx)
+    efh_pop_frame(ctx)
+    let ok3 = efh_stack_depth(ctx) == 0
+
+    ok1 && ok2 && ok3
+}
+fn test_efh_nested_frames() -> i64 with IO, Mut, Div, Panic {
+    var ctx = efh_context_new()
+    efh_assert_true(efh_test_nested_frames(&! ctx), 12)
+}
+
+// Test 13: Pop on empty stack fails
+fn efh_test_pop_empty_stack(ctx: &! EfhContext) -> bool with Mut, Div, Panic {
+    let ok = !efh_pop_frame(ctx)
+    ok && efh_error_count(ctx) > 0
+}
+fn test_efh_pop_empty_stack() -> i64 with IO, Mut, Div, Panic {
+    var ctx = efh_context_new()
+    efh_assert_true(efh_test_pop_empty_stack(&! ctx), 13)
+}
+
+// Test 14: Add handler to frame
+fn efh_test_frame_add_handler(ctx: &! EfhContext) -> bool with Mut, Div, Panic {
+    let hid = efh_register_handler(ctx, 1, 100, EfhResumeStrategy::ResumeOnce)
+    efh_push_frame(ctx)
+    let added = efh_frame_add_handler(ctx, hid)
+    let count = efh_current_frame_handler_count(ctx)
+    added && count == 1
+}
+fn test_efh_frame_add_handler() -> i64 with IO, Mut, Div, Panic {
+    var ctx = efh_context_new()
+    efh_assert_true(efh_test_frame_add_handler(&! ctx), 14)
+}
+
+// Test 15: Install handler (push frame + add)
+fn efh_test_install_handler(ctx: &! EfhContext) -> bool with Mut, Div, Panic {
+    let hid = efh_register_handler(ctx, 1, 100, EfhResumeStrategy::ResumeOnce)
+    let ok = efh_install_handler(ctx, hid)
+    ok && efh_stack_depth(ctx) == 1 && ctx.current_handler == hid
+}
+fn test_efh_install_handler() -> i64 with IO, Mut, Div, Panic {
+    var ctx = efh_context_new()
+    efh_assert_true(efh_test_install_handler(&! ctx), 15)
+}
+
+// Test 16: Uninstall handler
+fn efh_test_uninstall_handler(ctx: &! EfhContext) -> bool with Mut, Div, Panic {
+    let hid = efh_register_handler(ctx, 1, 100, EfhResumeStrategy::ResumeOnce)
+    efh_install_handler(ctx, hid)
+    let ok = efh_uninstall_handler(ctx)
+
+    // Handler should now be completed
+    let state = efh_handler_state(ctx, hid)
+    ok && efh_stack_depth(ctx) == 0 && efh_handler_state_eq(state, EfhHandlerState::HandlerCompleted)
+}
+fn test_efh_uninstall_handler() -> i64 with IO, Mut, Div, Panic {
+    var ctx = efh_context_new()
+    efh_assert_true(efh_test_uninstall_handler(&! ctx), 16)
+}
+
+// Test 17: Install non-existent handler fails
+fn efh_test_install_nonexistent(ctx: &! EfhContext) -> bool with Mut, Div, Panic {
+    let ok = !efh_install_handler(ctx, 9999)
+    ok && efh_stack_depth(ctx) == 0
+}
+fn test_efh_install_nonexistent() -> i64 with IO, Mut, Div, Panic {
+    var ctx = efh_context_new()
+    efh_assert_true(efh_test_install_nonexistent(&! ctx), 17)
+}
+
+// Test 18: Multi-handler install
+fn efh_test_install_multi(ctx: &! EfhContext) -> bool with Mut, Div, Panic {
+    let h1 = efh_register_handler(ctx, 1, 100, EfhResumeStrategy::ResumeOnce)
+    let h2 = efh_register_handler(ctx, 2, 200, EfhResumeStrategy::ResumeMulti)
+
+    var ids: [i64; 16] = [0; 16]
+    ids[0] = h1
+    ids[1] = h2
+
+    let ok = efh_install_multi(ctx, &ids, 2)
+    ok && efh_stack_depth(ctx) == 1 && efh_current_frame_handler_count(ctx) == 2
+}
+fn test_efh_install_multi() -> i64 with IO, Mut, Div, Panic {
+    var ctx = efh_context_new()
+    efh_assert_true(efh_test_install_multi(&! ctx), 18)
+}
+
+// ============================================================================
+// TEST CATEGORY 3: Effect Dispatch (tests 19-28)
+// ============================================================================
+
+// Test 19: Find handler on empty stack returns -1
+fn efh_test_find_handler_empty(ctx: &! EfhContext) -> bool with Mut, Div, Panic {
+    let hid = efh_find_handler(ctx, 1)
+    hid == (0 - 1)
+}
+fn test_efh_find_handler_empty() -> i64 with IO, Mut, Div, Panic {
+    var ctx = efh_context_new()
+    efh_assert_true(efh_test_find_handler_empty(&! ctx), 19)
+}
+
+// Test 20: Find handler after install
+fn efh_test_find_handler_installed(ctx: &! EfhContext) -> bool with Mut, Div, Panic {
+    let hid = efh_register_handler(ctx, 42, 100, EfhResumeStrategy::ResumeOnce)
+    efh_install_handler(ctx, hid)
+    let found = efh_find_handler(ctx, 42)
+    found == hid
+}
+fn test_efh_find_handler_installed() -> i64 with IO, Mut, Div, Panic {
+    var ctx = efh_context_new()
+    efh_assert_true(efh_test_find_handler_installed(&! ctx), 20)
+}
+
+// Test 21: Find handler for wrong effect returns -1
+fn efh_test_find_handler_wrong_effect(ctx: &! EfhContext) -> bool with Mut, Div, Panic {
+    let hid = efh_register_handler(ctx, 42, 100, EfhResumeStrategy::ResumeOnce)
+    efh_install_handler(ctx, hid)
+    let found = efh_find_handler(ctx, 99)
+    found == (0 - 1)
+}
+fn test_efh_find_handler_wrong_effect() -> i64 with IO, Mut, Div, Panic {
+    var ctx = efh_context_new()
+    efh_assert_true(efh_test_find_handler_wrong_effect(&! ctx), 21)
+}
+
+// Test 22: Innermost handler takes priority
+fn efh_test_find_handler_priority(ctx: &! EfhContext) -> bool with Mut, Div, Panic {
+    let h_outer = efh_register_handler(ctx, 1, 100, EfhResumeStrategy::ResumeOnce)
+    let h_inner = efh_register_handler(ctx, 1, 200, EfhResumeStrategy::ResumeMulti)
+
+    efh_install_handler(ctx, h_outer)
+    efh_install_handler(ctx, h_inner)
+
+    let found = efh_find_handler(ctx, 1)
+    found == h_inner
+}
+fn test_efh_find_handler_priority() -> i64 with IO, Mut, Div, Panic {
+    var ctx = efh_context_new()
+    efh_assert_true(efh_test_find_handler_priority(&! ctx), 22)
+}
+
+// Test 23: Perform effect with handler
+fn efh_test_perform_handled(ctx: &! EfhContext) -> bool with Mut, Div, Panic {
+    let hid = efh_register_handler(ctx, 1, 100, EfhResumeStrategy::ResumeOnce)
+    efh_install_handler(ctx, hid)
+
+    let result = efh_perform_effect(ctx, 1, 0, 42)
+    efh_dispatch_result_eq(result, EfhDispatchResult::DispatchHandled)
+}
+fn test_efh_perform_handled() -> i64 with IO, Mut, Div, Panic {
+    var ctx = efh_context_new()
+    efh_assert_true(efh_test_perform_handled(&! ctx), 23)
+}
+
+// Test 24: Perform effect without handler
+fn efh_test_perform_unhandled(ctx: &! EfhContext) -> bool with Mut, Div, Panic {
+    let result = efh_perform_effect(ctx, 99, 0, 0)
+    efh_dispatch_result_eq(result, EfhDispatchResult::DispatchUnhandled)
+}
+fn test_efh_perform_unhandled() -> i64 with IO, Mut, Div, Panic {
+    var ctx = efh_context_new()
+    efh_assert_true(efh_test_perform_unhandled(&! ctx), 24)
+}
+
+// Test 25: Perform creates a continuation
+fn efh_test_perform_creates_cont(ctx: &! EfhContext) -> bool with Mut, Div, Panic {
+    let hid = efh_register_handler(ctx, 1, 100, EfhResumeStrategy::ResumeOnce)
+    efh_install_handler(ctx, hid)
+
+    let before = efh_cont_total(ctx)
+    efh_perform_effect(ctx, 1, 0, 42)
+    let after = efh_cont_total(ctx)
+
+    after == before + 1
+}
+fn test_efh_perform_creates_cont() -> i64 with IO, Mut, Div, Panic {
+    var ctx = efh_context_new()
+    efh_assert_true(efh_test_perform_creates_cont(&! ctx), 25)
+}
+
+// Test 26: Perform logs an operation
+fn efh_test_perform_logs_op(ctx: &! EfhContext) -> bool with Mut, Div, Panic {
+    let hid = efh_register_handler(ctx, 5, 100, EfhResumeStrategy::ResumeOnce)
+    efh_install_handler(ctx, hid)
+
+    efh_perform_effect(ctx, 5, 3, 77)
+
+    let op = efh_get_op(ctx, 0)
+    efh_op_kind_eq(op.kind, EfhOpKind::OpPerform) && op.effect_id == 5 &&
+    op.op_index == 3 && op.arg == 77
+}
+fn test_efh_perform_logs_op() -> i64 with IO, Mut, Div, Panic {
+    var ctx = efh_context_new()
+    efh_assert_true(efh_test_perform_logs_op(&! ctx), 26)
+}
+
+// Test 27: Perform suspends the handler
+fn efh_test_perform_suspends_handler(ctx: &! EfhContext) -> bool with Mut, Div, Panic {
+    let hid = efh_register_handler(ctx, 1, 100, EfhResumeStrategy::ResumeOnce)
+    efh_install_handler(ctx, hid)
+
+    efh_perform_effect(ctx, 1, 0, 0)
+
+    let state = efh_handler_state(ctx, hid)
+    efh_handler_state_eq(state, EfhHandlerState::HandlerSuspended)
+}
+fn test_efh_perform_suspends_handler() -> i64 with IO, Mut, Div, Panic {
+    var ctx = efh_context_new()
+    efh_assert_true(efh_test_perform_suspends_handler(&! ctx), 27)
+}
+
+// Test 28: Multiple performs create multiple continuations
+fn efh_test_multiple_performs(ctx: &! EfhContext) -> bool with Mut, Div, Panic {
+    // Register two handlers for different effects
+    let h1 = efh_register_handler(ctx, 1, 100, EfhResumeStrategy::ResumeOnce)
+    let h2 = efh_register_handler(ctx, 2, 200, EfhResumeStrategy::ResumeOnce)
+
+    // Install both in separate frames
+    efh_install_handler(ctx, h1)
+    efh_install_handler(ctx, h2)
+
+    efh_perform_effect(ctx, 2, 0, 10)
+
+    // Re-activate h2 so we can find h1
+    efh_set_handler_state(ctx, h2, EfhHandlerState::HandlerActive)
+    efh_perform_effect(ctx, 1, 0, 20)
+
+    efh_cont_total(ctx) == 2
+}
+fn test_efh_multiple_performs() -> i64 with IO, Mut, Div, Panic {
+    var ctx = efh_context_new()
+    efh_assert_true(efh_test_multiple_performs(&! ctx), 28)
+}
+
+// ============================================================================
+// TEST CATEGORY 4: Continuation Capture (tests 29-38)
+// ============================================================================
+
+// Test 29: Capture continuation directly
+fn efh_test_capture_cont(ctx: &! EfhContext) -> bool with Mut, Div, Panic {
+    var regs: [i64; 64] = [0; 64]
+    regs[0] = 100
+    regs[1] = 200
+    let cid = efh_capture_continuation(ctx, &regs, 2, 42)
+    cid > 0 && efh_cont_total(ctx) == 1
+}
+fn test_efh_capture_cont() -> i64 with IO, Mut, Div, Panic {
+    var ctx = efh_context_new()
+    efh_assert_true(efh_test_capture_cont(&! ctx), 29)
+}
+
+// Test 30: Continuation state after capture
+fn efh_test_cont_initial_state(ctx: &! EfhContext) -> bool with Mut, Div, Panic {
+    var regs: [i64; 64] = [0; 64]
+    let cid = efh_capture_continuation(ctx, &regs, 0, 0)
+    let state = efh_cont_state(ctx, cid)
+    efh_cont_state_eq(state, EfhContState::ContReady)
+}
+fn test_efh_cont_initial_state() -> i64 with IO, Mut, Div, Panic {
+    var ctx = efh_context_new()
+    efh_assert_true(efh_test_cont_initial_state(&! ctx), 30)
+}
+
+// Test 31: Resume changes continuation state
+fn efh_test_resume_state(ctx: &! EfhContext) -> bool with Mut, Div, Panic {
+    var regs: [i64; 64] = [0; 64]
+    let cid = efh_capture_continuation(ctx, &regs, 1, 0)
+
+    let ok = efh_resume(ctx, cid, 42)
+    let state = efh_cont_state(ctx, cid)
+
+    ok && efh_cont_state_eq(state, EfhContState::ContRunning)
+}
+fn test_efh_resume_state() -> i64 with IO, Mut, Div, Panic {
+    var ctx = efh_context_new()
+    efh_assert_true(efh_test_resume_state(&! ctx), 31)
+}
+
+// Test 32: Resume places value in register 0
+fn efh_test_resume_value(ctx: &! EfhContext) -> bool with Mut, Div, Panic {
+    var regs: [i64; 64] = [0; 64]
+    regs[0] = 99
+    let cid = efh_capture_continuation(ctx, &regs, 1, 0)
+
+    efh_resume(ctx, cid, 555)
+
+    let val = efh_cont_get_reg(ctx, cid, 0)
+    val == 555
+}
+fn test_efh_resume_value() -> i64 with IO, Mut, Div, Panic {
+    var ctx = efh_context_new()
+    efh_assert_true(efh_test_resume_value(&! ctx), 32)
+}
+
+// Test 33: Abort continuation
+fn efh_test_abort_cont(ctx: &! EfhContext) -> bool with Mut, Div, Panic {
+    var regs: [i64; 64] = [0; 64]
+    let cid = efh_capture_continuation(ctx, &regs, 0, 0)
+
+    let ok = efh_abort(ctx, cid)
+    let state = efh_cont_state(ctx, cid)
+
+    ok && efh_cont_state_eq(state, EfhContState::ContAbandoned)
+}
+fn test_efh_abort_cont() -> i64 with IO, Mut, Div, Panic {
+    var ctx = efh_context_new()
+    efh_assert_true(efh_test_abort_cont(&! ctx), 33)
+}
+
+// Test 34: Cannot resume abandoned continuation
+fn efh_test_resume_abandoned(ctx: &! EfhContext) -> bool with Mut, Div, Panic {
+    var regs: [i64; 64] = [0; 64]
+    let cid = efh_capture_continuation(ctx, &regs, 0, 0)
+
+    efh_abort(ctx, cid)
+    let ok = efh_resume(ctx, cid, 0)
+    !ok  // should fail
+}
+fn test_efh_resume_abandoned() -> i64 with IO, Mut, Div, Panic {
+    var ctx = efh_context_new()
+    efh_assert_true(efh_test_resume_abandoned(&! ctx), 34)
+}
+
+// Test 35: Cannot resume done continuation
+fn efh_test_resume_done(ctx: &! EfhContext) -> bool with Mut, Div, Panic {
+    var regs: [i64; 64] = [0; 64]
+    let cid = efh_capture_continuation(ctx, &regs, 0, 0)
+
+    efh_resume(ctx, cid, 0)
+    efh_complete_continuation(ctx, cid)
+
+    let ok = efh_resume(ctx, cid, 0)
+    !ok  // should fail (ContDone is not resumable)
+}
+fn test_efh_resume_done() -> i64 with IO, Mut, Div, Panic {
+    var ctx = efh_context_new()
+    efh_assert_true(efh_test_resume_done(&! ctx), 35)
+}
+
+// Test 36: Continuation PC and register count
+fn efh_test_cont_pc_regs(ctx: &! EfhContext) -> bool with Mut, Div, Panic {
+    var regs: [i64; 64] = [0; 64]
+    regs[0] = 10
+    regs[1] = 20
+    regs[2] = 30
+    let cid = efh_capture_continuation(ctx, &regs, 3, 1024)
+
+    let pc = efh_cont_pc(ctx, cid)
+    let rc = efh_cont_reg_count(ctx, cid)
+    let r0 = efh_cont_get_reg(ctx, cid, 0)
+    let r1 = efh_cont_get_reg(ctx, cid, 1)
+    let r2 = efh_cont_get_reg(ctx, cid, 2)
+
+    pc == 1024 && rc == 3 && r0 == 10 && r1 == 20 && r2 == 30
+}
+fn test_efh_cont_pc_regs() -> i64 with IO, Mut, Div, Panic {
+    var ctx = efh_context_new()
+    efh_assert_true(efh_test_cont_pc_regs(&! ctx), 36)
+}
+
+// Test 37: Continuation handler depth
+fn efh_test_cont_handler_depth(ctx: &! EfhContext) -> bool with Mut, Div, Panic {
+    efh_push_frame(ctx)
+    efh_push_frame(ctx)
+
+    var regs: [i64; 64] = [0; 64]
+    let cid = efh_capture_continuation(ctx, &regs, 0, 0)
+
+    let depth = efh_cont_handler_depth(ctx, cid)
+    depth == 2  // captured at stack depth 2
+}
+fn test_efh_cont_handler_depth() -> i64 with IO, Mut, Div, Panic {
+    var ctx = efh_context_new()
+    efh_assert_true(efh_test_cont_handler_depth(&! ctx), 37)
+}
+
+// Test 38: Resume count tracks invocations
+fn efh_test_resume_count(ctx: &! EfhContext) -> bool with Mut, Div, Panic {
+    var regs: [i64; 64] = [0; 64]
+    let cid = efh_capture_continuation(ctx, &regs, 0, 0)
+
+    let ok1 = efh_cont_resume_count(ctx, cid) == 0
+
+    efh_resume(ctx, cid, 0)
+    let ok2 = efh_cont_resume_count(ctx, cid) == 1
+
+    // Suspend so we can resume again
+    efh_suspend_continuation(ctx, cid)
+    efh_resume(ctx, cid, 0)
+    let ok3 = efh_cont_resume_count(ctx, cid) == 2
+
+    ok1 && ok2 && ok3
+}
+fn test_efh_resume_count() -> i64 with IO, Mut, Div, Panic {
+    var ctx = efh_context_new()
+    efh_assert_true(efh_test_resume_count(&! ctx), 38)
+}
+
+// ============================================================================
+// TEST CATEGORY 5: Clause Matching (tests 39-46)
+// ============================================================================
+
+// Test 39: Add a clause
+fn efh_test_add_clause(ctx: &! EfhContext) -> bool with Mut, Div, Panic {
+    let idx = efh_add_clause(ctx, 1, 0, 100, true, EfhResumeStrategy::ResumeOnce)
+    idx == 0 && ctx.clause_count == 1
+}
+fn test_efh_add_clause() -> i64 with IO, Mut, Div, Panic {
+    var ctx = efh_context_new()
+    efh_assert_true(efh_test_add_clause(&! ctx), 39)
+}
+
+// Test 40: Match clause by effect and op
+fn efh_test_match_clause(ctx: &! EfhContext) -> bool with Mut, Div, Panic {
+    efh_add_clause(ctx, 1, 0, 100, true, EfhResumeStrategy::ResumeOnce)
+    efh_add_clause(ctx, 2, 1, 200, false, EfhResumeStrategy::ResumeNever)
+
+    let m1 = efh_match_clause(ctx, 1, 0)
+    let m2 = efh_match_clause(ctx, 2, 1)
+    let m3 = efh_match_clause(ctx, 3, 0)  // no match
+
+    m1 == 0 && m2 == 1 && m3 == (0 - 1)
+}
+fn test_efh_match_clause() -> i64 with IO, Mut, Div, Panic {
+    var ctx = efh_context_new()
+    efh_assert_true(efh_test_match_clause(&! ctx), 40)
+}
+
+// Test 41: Multiple clauses for same effect
+fn efh_test_clauses_same_effect(ctx: &! EfhContext) -> bool with Mut, Div, Panic {
+    efh_add_clause(ctx, 1, 0, 100, true, EfhResumeStrategy::ResumeOnce)
+    efh_add_clause(ctx, 1, 1, 101, true, EfhResumeStrategy::ResumeOnce)
+    efh_add_clause(ctx, 1, 2, 102, false, EfhResumeStrategy::ResumeNever)
+
+    let count = efh_clause_count_for_effect(ctx, 1)
+    count == 3
+}
+fn test_efh_clauses_same_effect() -> i64 with IO, Mut, Div, Panic {
+    var ctx = efh_context_new()
+    efh_assert_true(efh_test_clauses_same_effect(&! ctx), 41)
+}
+
+// Test 42: Get clause properties
+fn efh_test_get_clause_props(ctx: &! EfhContext) -> bool with Mut, Div, Panic {
+    efh_add_clause(ctx, 5, 3, 777, true, EfhResumeStrategy::ResumeMulti)
+
+    let c = efh_get_clause(ctx, 0)
+    c.effect_id == 5 && c.op_index == 3 && c.handler_fn_id == 777 &&
+    c.captures_cont && efh_resume_strategy_eq(c.resume_strategy, EfhResumeStrategy::ResumeMulti)
+}
+fn test_efh_get_clause_props() -> i64 with IO, Mut, Div, Panic {
+    var ctx = efh_context_new()
+    efh_assert_true(efh_test_get_clause_props(&! ctx), 42)
+}
+
+// Test 43: Match last clause (priority)
+fn efh_test_match_clause_last(ctx: &! EfhContext) -> bool with Mut, Div, Panic {
+    efh_add_clause(ctx, 1, 0, 100, true, EfhResumeStrategy::ResumeOnce)
+    efh_add_clause(ctx, 1, 0, 200, false, EfhResumeStrategy::ResumeMulti)  // override
+
+    let first = efh_match_clause(ctx, 1, 0)
+    let last = efh_match_clause_last(ctx, 1, 0)
+
+    first == 0 && last == 1  // first returns 0, last returns 1
+}
+fn test_efh_match_clause_last() -> i64 with IO, Mut, Div, Panic {
+    var ctx = efh_context_new()
+    efh_assert_true(efh_test_match_clause_last(&! ctx), 43)
+}
+
+// Test 44: Clause validation
+fn efh_test_clause_validation(ctx: &! EfhContext) -> bool with Mut, Div, Panic {
+    efh_add_clause(ctx, 1, 0, 100, true, EfhResumeStrategy::ResumeOnce)
+
+    let ok1 = efh_is_valid_clause(ctx, 0)
+    let ok2 = !efh_is_valid_clause(ctx, 1)   // out of bounds
+    let ok3 = !efh_is_valid_clause(ctx, 0 - 1)  // negative
+
+    ok1 && ok2 && ok3
+}
+fn test_efh_clause_validation() -> i64 with IO, Mut, Div, Panic {
+    var ctx = efh_context_new()
+    efh_assert_true(efh_test_clause_validation(&! ctx), 44)
+}
+
+// Test 45: No clause match for unregistered effect
+fn efh_test_no_clause_match(ctx: &! EfhContext) -> bool with Mut, Div, Panic {
+    efh_add_clause(ctx, 1, 0, 100, true, EfhResumeStrategy::ResumeOnce)
+
+    let m = efh_match_clause(ctx, 99, 0)
+    m == (0 - 1)
+}
+fn test_efh_no_clause_match() -> i64 with IO, Mut, Div, Panic {
+    var ctx = efh_context_new()
+    efh_assert_true(efh_test_no_clause_match(&! ctx), 45)
+}
+
+// Test 46: Clause count for nonexistent effect is zero
+fn efh_test_clause_count_zero(ctx: &! EfhContext) -> bool with Mut, Div, Panic {
+    efh_add_clause(ctx, 1, 0, 100, true, EfhResumeStrategy::ResumeOnce)
+    let count = efh_clause_count_for_effect(ctx, 99)
+    count == 0
+}
+fn test_efh_clause_count_zero() -> i64 with IO, Mut, Div, Panic {
+    var ctx = efh_context_new()
+    efh_assert_true(efh_test_clause_count_zero(&! ctx), 46)
+}
+
+// ============================================================================
+// TEST CATEGORY 6: CPS Transform (tests 47-54)
+// ============================================================================
+
+// Test 47: Register CPS record
+fn efh_test_cps_register(ctx: &! EfhContext) -> bool with Mut, Div, Panic {
+    let ok = efh_cps_register(ctx, 10, 3)
+    ok && ctx.cps_count == 1
+}
+fn test_efh_cps_register() -> i64 with IO, Mut, Div, Panic {
+    var ctx = efh_context_new()
+    efh_assert_true(efh_test_cps_register(&! ctx), 47)
+}
+
+// Test 48: CPS needs transform for effectful function
+fn efh_test_cps_needs_transform(ctx: &! EfhContext) -> bool with Mut, Div, Panic {
+    efh_cps_register(ctx, 10, 7)  // effect_mask = 7 (non-zero)
+
+    let needs = efh_cps_needs_transform(ctx, 10)
+    needs  // should need transform
+}
+fn test_efh_cps_needs_transform() -> i64 with IO, Mut, Div, Panic {
+    var ctx = efh_context_new()
+    efh_assert_true(efh_test_cps_needs_transform(&! ctx), 48)
+}
+
+// Test 49: CPS does not need transform for pure function
+fn efh_test_cps_pure_no_transform(ctx: &! EfhContext) -> bool with Mut, Div, Panic {
+    efh_cps_register(ctx, 10, 0)  // effect_mask = 0 (pure)
+    let needs = efh_cps_needs_transform(ctx, 10)
+    !needs
+}
+fn test_efh_cps_pure_no_transform() -> i64 with IO, Mut, Div, Panic {
+    var ctx = efh_context_new()
+    efh_assert_true(efh_test_cps_pure_no_transform(&! ctx), 49)
+}
+
+// Test 50: CPS transform function
+fn efh_test_cps_transform(ctx: &! EfhContext) -> bool with Mut, Div, Panic {
+    let result = efh_cps_transform_function(ctx, 10, 5)
+    let ok1 = efh_transform_result_eq(result, EfhTransformResult::TransformOk)
+    let ok2 = efh_cps_is_transformed(ctx, 10)
+    let ok3 = !efh_cps_needs_transform(ctx, 10)  // already transformed
+    ok1 && ok2 && ok3
+}
+fn test_efh_cps_transform() -> i64 with IO, Mut, Div, Panic {
+    var ctx = efh_context_new()
+    efh_assert_true(efh_test_cps_transform(&! ctx), 50)
+}
+
+// Test 51: CPS transform skips pure function
+fn efh_test_cps_transform_pure(ctx: &! EfhContext) -> bool with Mut, Div, Panic {
+    let result = efh_cps_transform_function(ctx, 10, 0)
+    efh_transform_result_eq(result, EfhTransformResult::TransformSkipped)
+}
+fn test_efh_cps_transform_pure() -> i64 with IO, Mut, Div, Panic {
+    var ctx = efh_context_new()
+    efh_assert_true(efh_test_cps_transform_pure(&! ctx), 51)
+}
+
+// Test 52: CPS transform skips already transformed function
+fn efh_test_cps_transform_idempotent(ctx: &! EfhContext) -> bool with Mut, Div, Panic {
+    efh_cps_transform_function(ctx, 10, 5)
+    let result = efh_cps_transform_function(ctx, 10, 5)
+    efh_transform_result_eq(result, EfhTransformResult::TransformSkipped)
+}
+fn test_efh_cps_transform_idempotent() -> i64 with IO, Mut, Div, Panic {
+    var ctx = efh_context_new()
+    efh_assert_true(efh_test_cps_transform_idempotent(&! ctx), 52)
+}
+
+// Test 53: CPS cont param ID
+fn efh_test_cps_cont_param(ctx: &! EfhContext) -> bool with Mut, Div, Panic {
+    efh_cps_transform_function(ctx, 10, 5)
+    let param = efh_cps_cont_param(ctx, 10)
+    param == 10001  // fn_id * 1000 + 1
+}
+fn test_efh_cps_cont_param() -> i64 with IO, Mut, Div, Panic {
+    var ctx = efh_context_new()
+    efh_assert_true(efh_test_cps_cont_param(&! ctx), 53)
+}
+
+// Test 54: CPS effect mask accessor
+fn efh_test_cps_effect_mask(ctx: &! EfhContext) -> bool with Mut, Div, Panic {
+    efh_cps_register(ctx, 42, 255)
+    let mask = efh_cps_effect_mask(ctx, 42)
+    mask == 255
+}
+fn test_efh_cps_effect_mask() -> i64 with IO, Mut, Div, Panic {
+    var ctx = efh_context_new()
+    efh_assert_true(efh_test_cps_effect_mask(&! ctx), 54)
+}
+
+// ============================================================================
+// TEST CATEGORY 7: Stack Segments (tests 55-59)
+// ============================================================================
+
+// Test 55: Save a stack segment
+fn efh_test_save_segment(ctx: &! EfhContext) -> bool with Mut, Div, Panic {
+    let seg_id = efh_save_stack_segment(ctx, 1000, 10)
+    seg_id == 0 && ctx.segment_count == 1
+}
+fn test_efh_save_segment() -> i64 with IO, Mut, Div, Panic {
+    var ctx = efh_context_new()
+    efh_assert_true(efh_test_save_segment(&! ctx), 55)
+}
+
+// Test 56: Segment length and data
+fn efh_test_segment_data(ctx: &! EfhContext) -> bool with Mut, Div, Panic {
+    let seg_id = efh_save_stack_segment(ctx, 500, 5)
+
+    let len = efh_segment_len(ctx, seg_id)
+    let v0 = efh_segment_get(ctx, seg_id, 0)
+    let v1 = efh_segment_get(ctx, seg_id, 1)
+    let v4 = efh_segment_get(ctx, seg_id, 4)
+
+    // data[i] = base + i = 500 + i
+    len == 5 && v0 == 500 && v1 == 501 && v4 == 504
+}
+fn test_efh_segment_data() -> i64 with IO, Mut, Div, Panic {
+    var ctx = efh_context_new()
+    efh_assert_true(efh_test_segment_data(&! ctx), 56)
+}
+
+// Test 57: Restore stack segment
+fn efh_test_restore_segment(ctx: &! EfhContext) -> bool with Mut, Div, Panic {
+    let seg_id = efh_save_stack_segment(ctx, 100, 20)
+    let ok = efh_restore_stack_segment(ctx, seg_id, 2000)
+    ok
+}
+fn test_efh_restore_segment() -> i64 with IO, Mut, Div, Panic {
+    var ctx = efh_context_new()
+    efh_assert_true(efh_test_restore_segment(&! ctx), 57)
+}
+
+// Test 58: Invalid segment restore fails
+fn efh_test_invalid_segment_restore(ctx: &! EfhContext) -> bool with Mut, Div, Panic {
+    let ok = efh_restore_stack_segment(ctx, 99, 0)
+    !ok
+}
+fn test_efh_invalid_segment_restore() -> i64 with IO, Mut, Div, Panic {
+    var ctx = efh_context_new()
+    efh_assert_true(efh_test_invalid_segment_restore(&! ctx), 58)
+}
+
+// Test 59: Associate segment with continuation
+fn efh_test_cont_segment_assoc(ctx: &! EfhContext) -> bool with Mut, Div, Panic {
+    var regs: [i64; 64] = [0; 64]
+    let cid = efh_capture_continuation(ctx, &regs, 0, 0)
+    let seg_id = efh_save_stack_segment(ctx, 0, 10)
+
+    let ok = efh_cont_set_segment(ctx, cid, seg_id)
+    let stored = efh_cont_segment_id(ctx, cid)
+
+    ok && stored == seg_id
+}
+fn test_efh_cont_segment_assoc() -> i64 with IO, Mut, Div, Panic {
+    var ctx = efh_context_new()
+    efh_assert_true(efh_test_cont_segment_assoc(&! ctx), 59)
+}
+
+// ============================================================================
+// TEST CATEGORY 8: Integration (tests 60-65)
+// ============================================================================
+
+// Test 60: Full perform-dispatch-resume pipeline
+fn efh_test_full_pipeline(ctx: &! EfhContext) -> bool with Mut, Div, Panic {
+    // Register handler for effect 1
+    let hid = efh_register_handler(ctx, 1, 100, EfhResumeStrategy::ResumeOnce)
+    efh_install_handler(ctx, hid)
+
+    // Add a clause for (effect=1, op=0)
+    efh_add_clause(ctx, 1, 0, 100, true, EfhResumeStrategy::ResumeOnce)
+
+    // Perform the effect
+    let result = efh_perform_effect(ctx, 1, 0, 42)
+    let ok1 = efh_dispatch_result_eq(result, EfhDispatchResult::DispatchHandled)
+
+    // A continuation was captured
+    let ok2 = efh_cont_total(ctx) == 1
+    let cid = ctx.continuations[0].id
+
+    // Resume the continuation with a result
+    let ok3 = efh_resume(ctx, cid, 99)
+    let ok4 = efh_cont_get_reg(ctx, cid, 0) == 99
+
+    // Complete the continuation
+    efh_complete_continuation(ctx, cid)
+    let state = efh_cont_state(ctx, cid)
+    let ok5 = efh_cont_state_eq(state, EfhContState::ContDone)
+
+    ok1 && ok2 && ok3 && ok4 && ok5
+}
+fn test_efh_full_pipeline() -> i64 with IO, Mut, Div, Panic {
+    var ctx = efh_context_new()
+    efh_assert_true(efh_test_full_pipeline(&! ctx), 60)
+}
+
+// Test 61: Nested handlers — inner shadows outer
+fn efh_test_nested_handlers(ctx: &! EfhContext) -> bool with Mut, Div, Panic {
+    let h_outer = efh_register_handler(ctx, 1, 100, EfhResumeStrategy::ResumeOnce)
+    let h_inner = efh_register_handler(ctx, 1, 200, EfhResumeStrategy::ResumeMulti)
+
+    efh_install_handler(ctx, h_outer)
+    efh_install_handler(ctx, h_inner)
+
+    // Inner handler should be found first
+    let found = efh_find_handler(ctx, 1)
+    let ok1 = found == h_inner
+
+    // Perform effect — captured by inner handler
+    let result = efh_perform_effect(ctx, 1, 0, 0)
+    let ok2 = efh_dispatch_result_eq(result, EfhDispatchResult::DispatchHandled)
+
+    // Uninstall inner — outer should now be visible
+    // First re-activate inner so uninstall works properly
+    efh_set_handler_state(ctx, h_inner, EfhHandlerState::HandlerActive)
+    efh_uninstall_handler(ctx)
+
+    let found2 = efh_find_handler(ctx, 1)
+    let ok3 = found2 == h_outer
+
+    ok1 && ok2 && ok3
+}
+fn test_efh_nested_handlers() -> i64 with IO, Mut, Div, Panic {
+    var ctx = efh_context_new()
+    efh_assert_true(efh_test_nested_handlers(&! ctx), 61)
+}
+
+// Test 62: Perform and immediate resume (tail-resumptive fast path)
+fn efh_test_perform_and_resume(ctx: &! EfhContext) -> bool with Mut, Div, Panic {
+    let hid = efh_register_handler(ctx, 1, 100, EfhResumeStrategy::ResumeTail)
+    efh_install_handler(ctx, hid)
+
+    let ok = efh_perform_and_resume(ctx, 1, 0, 42, 100)
+    ok && efh_cont_total(ctx) == 1
+}
+fn test_efh_perform_and_resume() -> i64 with IO, Mut, Div, Panic {
+    var ctx = efh_context_new()
+    efh_assert_true(efh_test_perform_and_resume(&! ctx), 62)
+}
+
+// Test 63: Shift/Reset delimited control
+fn efh_test_shift_reset(ctx: &! EfhContext) -> bool with Mut, Div, Panic {
+    // Install a reset delimiter
+    let ok1 = efh_reset(ctx)
+
+    // Shift captures a continuation
+    let cid = efh_shift(ctx, 42)
+    let ok2 = cid > 0
+
+    // The continuation should be in Ready state
+    let state = efh_cont_state(ctx, cid)
+    let ok3 = efh_cont_state_eq(state, EfhContState::ContReady)
+
+    // Shift logged an OpShift
+    let shift_count = efh_op_count_by_kind(ctx, EfhOpKind::OpShift)
+    let ok4 = shift_count == 1
+
+    ok1 && ok2 && ok3 && ok4
+}
+fn test_efh_shift_reset() -> i64 with IO, Mut, Div, Panic {
+    var ctx = efh_context_new()
+    efh_assert_true(efh_test_shift_reset(&! ctx), 63)
+}
+
+// Test 64: Compile handler clause
+fn efh_test_compile_clause(ctx: &! EfhContext) -> bool with Mut, Div, Panic {
+    // Clause with continuation capture and ResumeOnce
+    let c1 = efh_add_clause(ctx, 1, 0, 100, true, EfhResumeStrategy::ResumeOnce)
+    let instr1 = efh_compile_handler_clause(ctx, c1)
+    // base(2) + capture(3) + resume_once(2) = 7
+    let ok1 = instr1 == 7
+
+    // Clause without continuation capture and ResumeNever
+    let c2 = efh_add_clause(ctx, 2, 0, 200, false, EfhResumeStrategy::ResumeNever)
+    let instr2 = efh_compile_handler_clause(ctx, c2)
+    // base(2) + no_capture(0) + resume_never(1) = 3
+    let ok2 = instr2 == 3
+
+    // Clause with continuation capture and ResumeMulti
+    let c3 = efh_add_clause(ctx, 3, 0, 300, true, EfhResumeStrategy::ResumeMulti)
+    let instr3 = efh_compile_handler_clause(ctx, c3)
+    // base(2) + capture(3) + resume_multi(4) = 9
+    let ok3 = instr3 == 9
+
+    // Clause with ResumeTail, no capture
+    let c4 = efh_add_clause(ctx, 4, 0, 400, false, EfhResumeStrategy::ResumeTail)
+    let instr4 = efh_compile_handler_clause(ctx, c4)
+    // base(2) + no_capture(0) + resume_tail(1) = 3
+    let ok4 = instr4 == 3
+
+    ok1 && ok2 && ok3 && ok4
+}
+fn test_efh_compile_clause() -> i64 with IO, Mut, Div, Panic {
+    var ctx = efh_context_new()
+    efh_assert_true(efh_test_compile_clause(&! ctx), 64)
+}
+
+// Test 65: Full integration — multiple effects, handlers, clauses, CPS
+fn efh_test_full_integration(ctx: &! EfhContext) -> bool with Mut, Div, Panic {
+    // Register handlers for IO (effect 1) and Mut (effect 2)
+    let h_io = efh_register_handler(ctx, 1, 100, EfhResumeStrategy::ResumeOnce)
+    let h_mut = efh_register_handler(ctx, 2, 200, EfhResumeStrategy::ResumeTail)
+
+    // Install both in one frame
+    var ids: [i64; 16] = [0; 16]
+    ids[0] = h_io
+    ids[1] = h_mut
+    let ok1 = efh_install_multi(ctx, &ids, 2)
+
+    // Add clauses
+    efh_add_clause(ctx, 1, 0, 100, true, EfhResumeStrategy::ResumeOnce)   // IO.print
+    efh_add_clause(ctx, 1, 1, 101, true, EfhResumeStrategy::ResumeOnce)   // IO.read
+    efh_add_clause(ctx, 2, 0, 200, false, EfhResumeStrategy::ResumeTail)  // Mut.set
+
+    // Register CPS transform for a function
+    let cps_ok = efh_cps_transform_function(ctx, 50, 3)
+    let ok2 = efh_transform_result_eq(cps_ok, EfhTransformResult::TransformOk)
+
+    // Perform IO effect
+    let d1 = efh_perform_effect(ctx, 1, 0, 42)
+    let ok3 = efh_dispatch_result_eq(d1, EfhDispatchResult::DispatchHandled)
+
+    // Reactivate IO handler so Mut handler is still findable
+    efh_set_handler_state(ctx, h_io, EfhHandlerState::HandlerActive)
+
+    // Perform Mut effect
+    let d2 = efh_perform_effect(ctx, 2, 0, 77)
+    let ok4 = efh_dispatch_result_eq(d2, EfhDispatchResult::DispatchHandled)
+
+    // Save a stack segment for the IO continuation
+    let seg = efh_save_stack_segment(ctx, 0, 32)
+    let ok5 = seg >= 0
+
+    // Associate segment with first continuation
+    let first_cid = ctx.continuations[0].id
+    efh_cont_set_segment(ctx, first_cid, seg)
+
+    // Resume the IO continuation
+    let ok6 = efh_resume(ctx, first_cid, 99)
+    efh_complete_continuation(ctx, first_cid)
+
+    // Verify final state
+    let ok7 = efh_cont_total(ctx) == 2
+    let ok8 = efh_op_count(ctx) > 0
+    let ok9 = efh_cps_is_transformed(ctx, 50)
+
+    // Compile a clause to verify compilation works
+    let instrs = efh_compile_handler_clause(ctx, 0)
+    let ok10 = instrs > 0
+
+    ok1 && ok2 && ok3 && ok4 && ok5 && ok6 && ok7 && ok8 && ok9 && ok10
+}
+fn test_efh_full_integration() -> i64 with IO, Mut, Div, Panic {
+    var ctx = efh_context_new()
+    efh_assert_true(efh_test_full_integration(&! ctx), 65)
+}
+
+// ============================================================================
+// TEST RUNNER
+// ============================================================================
+
+fn efh_run_tests() -> i64 with IO, Mut, Div, Panic {
+    print("=== Effect handler tests ===\n")
+    var passed: i64 = 0
+    var failed: i64 = 0
+
+    // Category 1: Handler Registration (tests 1-10)
+    var r: i64 = 0
+
+    r = test_efh_register_single()
+    if r == 0 { passed = passed + 1 } else { failed = failed + 1 }
+
+    r = test_efh_register_multiple()
+    if r == 0 { passed = passed + 1 } else { failed = failed + 1 }
+
+    r = test_efh_handler_ids_unique()
+    if r == 0 { passed = passed + 1 } else { failed = failed + 1 }
+
+    r = test_efh_handler_initial_state()
+    if r == 0 { passed = passed + 1 } else { failed = failed + 1 }
+
+    r = test_efh_handler_state_transition()
+    if r == 0 { passed = passed + 1 } else { failed = failed + 1 }
+
+    r = test_efh_handler_covers_effect()
+    if r == 0 { passed = passed + 1 } else { failed = failed + 1 }
+
+    r = test_efh_handler_resume_query()
+    if r == 0 { passed = passed + 1 } else { failed = failed + 1 }
+
+    r = test_efh_handler_accessors()
+    if r == 0 { passed = passed + 1 } else { failed = failed + 1 }
+
+    r = test_efh_active_handler_count()
+    if r == 0 { passed = passed + 1 } else { failed = failed + 1 }
+
+    r = test_efh_invalid_handler_id()
+    if r == 0 { passed = passed + 1 } else { failed = failed + 1 }
+
+    // Category 2: Handler Stack (tests 11-18)
+    r = test_efh_push_pop_frame()
+    if r == 0 { passed = passed + 1 } else { failed = failed + 1 }
+
+    r = test_efh_nested_frames()
+    if r == 0 { passed = passed + 1 } else { failed = failed + 1 }
+
+    r = test_efh_pop_empty_stack()
+    if r == 0 { passed = passed + 1 } else { failed = failed + 1 }
+
+    r = test_efh_frame_add_handler()
+    if r == 0 { passed = passed + 1 } else { failed = failed + 1 }
+
+    r = test_efh_install_handler()
+    if r == 0 { passed = passed + 1 } else { failed = failed + 1 }
+
+    r = test_efh_uninstall_handler()
+    if r == 0 { passed = passed + 1 } else { failed = failed + 1 }
+
+    r = test_efh_install_nonexistent()
+    if r == 0 { passed = passed + 1 } else { failed = failed + 1 }
+
+    r = test_efh_install_multi()
+    if r == 0 { passed = passed + 1 } else { failed = failed + 1 }
+
+    // Category 3: Effect Dispatch (tests 19-28)
+    r = test_efh_find_handler_empty()
+    if r == 0 { passed = passed + 1 } else { failed = failed + 1 }
+
+    r = test_efh_find_handler_installed()
+    if r == 0 { passed = passed + 1 } else { failed = failed + 1 }
+
+    r = test_efh_find_handler_wrong_effect()
+    if r == 0 { passed = passed + 1 } else { failed = failed + 1 }
+
+    r = test_efh_find_handler_priority()
+    if r == 0 { passed = passed + 1 } else { failed = failed + 1 }
+
+    r = test_efh_perform_handled()
+    if r == 0 { passed = passed + 1 } else { failed = failed + 1 }
+
+    r = test_efh_perform_unhandled()
+    if r == 0 { passed = passed + 1 } else { failed = failed + 1 }
+
+    r = test_efh_perform_creates_cont()
+    if r == 0 { passed = passed + 1 } else { failed = failed + 1 }
+
+    r = test_efh_perform_logs_op()
+    if r == 0 { passed = passed + 1 } else { failed = failed + 1 }
+
+    r = test_efh_perform_suspends_handler()
+    if r == 0 { passed = passed + 1 } else { failed = failed + 1 }
+
+    r = test_efh_multiple_performs()
+    if r == 0 { passed = passed + 1 } else { failed = failed + 1 }
+
+    // Category 4: Continuation Capture (tests 29-38)
+    r = test_efh_capture_cont()
+    if r == 0 { passed = passed + 1 } else { failed = failed + 1 }
+
+    r = test_efh_cont_initial_state()
+    if r == 0 { passed = passed + 1 } else { failed = failed + 1 }
+
+    r = test_efh_resume_state()
+    if r == 0 { passed = passed + 1 } else { failed = failed + 1 }
+
+    r = test_efh_resume_value()
+    if r == 0 { passed = passed + 1 } else { failed = failed + 1 }
+
+    r = test_efh_abort_cont()
+    if r == 0 { passed = passed + 1 } else { failed = failed + 1 }
+
+    r = test_efh_resume_abandoned()
+    if r == 0 { passed = passed + 1 } else { failed = failed + 1 }
+
+    r = test_efh_resume_done()
+    if r == 0 { passed = passed + 1 } else { failed = failed + 1 }
+
+    r = test_efh_cont_pc_regs()
+    if r == 0 { passed = passed + 1 } else { failed = failed + 1 }
+
+    r = test_efh_cont_handler_depth()
+    if r == 0 { passed = passed + 1 } else { failed = failed + 1 }
+
+    r = test_efh_resume_count()
+    if r == 0 { passed = passed + 1 } else { failed = failed + 1 }
+
+    // Category 5: Clause Matching (tests 39-46)
+    r = test_efh_add_clause()
+    if r == 0 { passed = passed + 1 } else { failed = failed + 1 }
+
+    r = test_efh_match_clause()
+    if r == 0 { passed = passed + 1 } else { failed = failed + 1 }
+
+    r = test_efh_clauses_same_effect()
+    if r == 0 { passed = passed + 1 } else { failed = failed + 1 }
+
+    r = test_efh_get_clause_props()
+    if r == 0 { passed = passed + 1 } else { failed = failed + 1 }
+
+    r = test_efh_match_clause_last()
+    if r == 0 { passed = passed + 1 } else { failed = failed + 1 }
+
+    r = test_efh_clause_validation()
+    if r == 0 { passed = passed + 1 } else { failed = failed + 1 }
+
+    r = test_efh_no_clause_match()
+    if r == 0 { passed = passed + 1 } else { failed = failed + 1 }
+
+    r = test_efh_clause_count_zero()
+    if r == 0 { passed = passed + 1 } else { failed = failed + 1 }
+
+    // Category 6: CPS Transform (tests 47-54)
+    r = test_efh_cps_register()
+    if r == 0 { passed = passed + 1 } else { failed = failed + 1 }
+
+    r = test_efh_cps_needs_transform()
+    if r == 0 { passed = passed + 1 } else { failed = failed + 1 }
+
+    r = test_efh_cps_pure_no_transform()
+    if r == 0 { passed = passed + 1 } else { failed = failed + 1 }
+
+    r = test_efh_cps_transform()
+    if r == 0 { passed = passed + 1 } else { failed = failed + 1 }
+
+    r = test_efh_cps_transform_pure()
+    if r == 0 { passed = passed + 1 } else { failed = failed + 1 }
+
+    r = test_efh_cps_transform_idempotent()
+    if r == 0 { passed = passed + 1 } else { failed = failed + 1 }
+
+    r = test_efh_cps_cont_param()
+    if r == 0 { passed = passed + 1 } else { failed = failed + 1 }
+
+    r = test_efh_cps_effect_mask()
+    if r == 0 { passed = passed + 1 } else { failed = failed + 1 }
+
+    // Category 7: Stack Segments (tests 55-59)
+    r = test_efh_save_segment()
+    if r == 0 { passed = passed + 1 } else { failed = failed + 1 }
+
+    r = test_efh_segment_data()
+    if r == 0 { passed = passed + 1 } else { failed = failed + 1 }
+
+    r = test_efh_restore_segment()
+    if r == 0 { passed = passed + 1 } else { failed = failed + 1 }
+
+    r = test_efh_invalid_segment_restore()
+    if r == 0 { passed = passed + 1 } else { failed = failed + 1 }
+
+    r = test_efh_cont_segment_assoc()
+    if r == 0 { passed = passed + 1 } else { failed = failed + 1 }
+
+    // Category 8: Integration (tests 60-65)
+    r = test_efh_full_pipeline()
+    if r == 0 { passed = passed + 1 } else { failed = failed + 1 }
+
+    r = test_efh_nested_handlers()
+    if r == 0 { passed = passed + 1 } else { failed = failed + 1 }
+
+    r = test_efh_perform_and_resume()
+    if r == 0 { passed = passed + 1 } else { failed = failed + 1 }
+
+    r = test_efh_shift_reset()
+    if r == 0 { passed = passed + 1 } else { failed = failed + 1 }
+
+    r = test_efh_compile_clause()
+    if r == 0 { passed = passed + 1 } else { failed = failed + 1 }
+
+    r = test_efh_full_integration()
+    if r == 0 { passed = passed + 1 } else { failed = failed + 1 }
+
+    // Summary
+    print("Passed: ")
+    print_int(passed)
+    print(" / 65\n")
+    print("Failed: ")
+    print_int(failed)
+    print("\n")
+
+    if failed > 0 {
+        return 0 - failed
+    }
+    passed
+}

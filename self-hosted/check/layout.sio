@@ -1,0 +1,2588 @@
+// Type layout computation for the self-hosted Sounio compiler
+//
+// Computes size, alignment, field offsets, ABI padding, and discriminant
+// layout for all type kinds.  Supports default (Sounio), C-compatible,
+// packed, transparent, and alignment-overridden representations.
+//
+// Architecture:
+//   LayTypeKind       — tag for primitive / composite type kinds
+//   LayRepr           — representation strategy (default, C, packed, etc.)
+//   LayDiscriminantSize — discriminant width for enums
+//   LayFieldOrder     — field ordering strategy for struct layout
+//   LayField          — single field: offset, size, align, padding
+//   LayLayout         — complete layout: size, align, stride, fields
+//   LayVariantLayout  — single enum variant layout
+//   LayEnumLayout     — full enum layout with discriminant + variants
+//   LayTypeDesc       — type descriptor registered in the context
+//   LayCacheEntry     — layout cache entry
+//   LayContext        — flat arena holding types and cache
+//
+// All names use the `lay_` prefix to avoid global namespace collisions.
+// Helpers always precede their callers (no forward references).
+//
+// The key design decision: lay_compute is the single recursive entry
+// point.  All specific layout functions (struct, array, enum, tuple)
+// accept pre-resolved field sizes and alignments as arrays, avoiding
+// circular dependencies between functions.
+
+// ============================================================
+// Section 1: Constants
+// ============================================================
+
+let LAY_MAX_FIELDS: i64 = 256
+let LAY_MAX_VARIANTS: i64 = 128
+let LAY_MAX_TYPES: i64 = 1024
+let LAY_MAX_CACHE: i64 = 512
+let LAY_PTR_SIZE: i64 = 8
+let LAY_PTR_ALIGN: i64 = 8
+let LAY_MAX_ALIGN: i64 = 64
+let LAY_INVALID: i64 = 0 - 1
+
+// ============================================================
+// Section 2: Enumerations
+// ============================================================
+
+enum LayTypeKind {
+    TkI8,
+    TkI16,
+    TkI32,
+    TkI64,
+    TkF32,
+    TkF64,
+    TkBool,
+    TkPtr,
+    TkRef,
+    TkMutRef,
+    TkArray,
+    TkStruct,
+    TkEnum,
+    TkTuple,
+    TkUnit,
+    TkNever,
+    TkOpaque,
+}
+
+enum LayRepr {
+    ReprDefault,
+    ReprC,
+    ReprPacked,
+    ReprTransparent,
+    ReprAligned,
+}
+
+enum LayDiscriminantSize {
+    Disc8,
+    Disc16,
+    Disc32,
+    Disc64,
+}
+
+enum LayFieldOrder {
+    OrderDeclared,
+    OrderOptimized,
+    OrderAlphabetical,
+}
+
+// ============================================================
+// Section 3: Structs
+// ============================================================
+
+struct LayField {
+    name_hash: i64,
+    type_id: i64,
+    offset: i64,
+    size: i64,
+    align: i64,
+    padding_before: i64,
+}
+
+struct LayLayout {
+    size: i64,
+    align: i64,
+    stride: i64,
+    field_count: i64,
+    fields: [LayField; 256],
+}
+
+struct LayVariantLayout {
+    variant_id: i64,
+    payload_size: i64,
+    payload_align: i64,
+    field_count: i64,
+    fields: [LayField; 64],
+}
+
+struct LayEnumLayout {
+    disc_size: LayDiscriminantSize,
+    disc_offset: i64,
+    total_size: i64,
+    total_align: i64,
+    variant_count: i64,
+    variants: [LayVariantLayout; 128],
+    is_niche_opt: bool,
+}
+
+struct LayTypeDesc {
+    id: i64,
+    kind: LayTypeKind,
+    repr: LayRepr,
+    extra_align: i64,
+    element_type: i64,
+    element_count: i64,
+    field_types: [i64; 256],
+    field_names: [i64; 256],
+    field_count: i64,
+    variant_count: i64,
+}
+
+struct LayCacheEntry {
+    type_id: i64,
+    layout: LayLayout,
+    valid: bool,
+}
+
+struct LayContext {
+    types: [LayTypeDesc; 1024],
+    type_count: i64,
+    cache: [LayCacheEntry; 512],
+    cache_count: i64,
+    target_ptr_size: i64,
+    target_max_align: i64,
+}
+
+// Pre-resolved field information for passing to layout functions.
+// Avoids circular dependencies: lay_compute resolves fields, then
+// passes the resolved sizes/alignments to the specific layout function.
+struct LayResolvedFields {
+    sizes: [i64; 256],
+    aligns: [i64; 256],
+    name_hashes: [i64; 256],
+    type_ids: [i64; 256],
+    count: i64,
+}
+
+// ============================================================
+// Section 4: Default constructors
+// ============================================================
+
+fn lay_field_empty() -> LayField {
+    LayField {
+        name_hash: 0,
+        type_id: 0,
+        offset: 0,
+        size: 0,
+        align: 0,
+        padding_before: 0,
+    }
+}
+
+fn lay_layout_empty() -> LayLayout {
+    LayLayout {
+        size: 0,
+        align: 1,
+        stride: 0,
+        field_count: 0,
+        fields: [lay_field_empty(); 256],
+    }
+}
+
+fn lay_variant_layout_empty() -> LayVariantLayout {
+    LayVariantLayout {
+        variant_id: 0,
+        payload_size: 0,
+        payload_align: 1,
+        field_count: 0,
+        fields: [lay_field_empty(); 64],
+    }
+}
+
+fn lay_enum_layout_empty() -> LayEnumLayout {
+    LayEnumLayout {
+        disc_size: LayDiscriminantSize::Disc8,
+        disc_offset: 0,
+        total_size: 0,
+        total_align: 1,
+        variant_count: 0,
+        variants: [lay_variant_layout_empty(); 128],
+        is_niche_opt: false,
+    }
+}
+
+fn lay_type_desc_empty() -> LayTypeDesc {
+    LayTypeDesc {
+        id: 0,
+        kind: LayTypeKind::TkUnit,
+        repr: LayRepr::ReprDefault,
+        extra_align: 0,
+        element_type: 0,
+        element_count: 0,
+        field_types: [0; 256],
+        field_names: [0; 256],
+        field_count: 0,
+        variant_count: 0,
+    }
+}
+
+fn lay_cache_entry_empty() -> LayCacheEntry {
+    LayCacheEntry {
+        type_id: LAY_INVALID,
+        layout: lay_layout_empty(),
+        valid: false,
+    }
+}
+
+fn lay_resolved_fields_empty() -> LayResolvedFields {
+    LayResolvedFields {
+        sizes: [0; 256],
+        aligns: [0; 256],
+        name_hashes: [0; 256],
+        type_ids: [0; 256],
+        count: 0,
+    }
+}
+
+// ============================================================
+// Section 5: Alignment and stride helpers
+// ============================================================
+
+// Round `offset` up to the next multiple of `align`.
+// Precondition: align > 0.
+fn lay_align_up(offset: i64, align: i64) -> i64 {
+    if align <= 1 {
+        return offset
+    }
+    let remainder = offset - (offset / align) * align
+    if remainder == 0 {
+        return offset
+    }
+    return offset + (align - remainder)
+}
+
+// Compute stride: the distance between consecutive array elements.
+// stride = align_up(size, align)
+fn lay_stride(size: i64, align: i64) -> i64 {
+    lay_align_up(size, align)
+}
+
+// Check whether a value is a power of two (positive only).
+fn lay_is_power_of_two(v: i64) -> bool {
+    if v <= 0 { return false }
+    if v == 1 { return true }
+    if v == 2 { return true }
+    if v == 4 { return true }
+    if v == 8 { return true }
+    if v == 16 { return true }
+    if v == 32 { return true }
+    if v == 64 { return true }
+    if v == 128 { return true }
+    if v == 256 { return true }
+    if v == 512 { return true }
+    if v == 1024 { return true }
+    if v == 2048 { return true }
+    if v == 4096 { return true }
+    return false
+}
+
+// Return the maximum of two values.
+fn lay_max(a: i64, b: i64) -> i64 {
+    if a >= b { return a }
+    return b
+}
+
+// Return the minimum of two values.
+fn lay_min(a: i64, b: i64) -> i64 {
+    if a <= b { return a }
+    return b
+}
+
+// ============================================================
+// Section 6: Primitive size and alignment
+// ============================================================
+
+// Size of a primitive type in bytes.
+fn lay_primitive_size(kind: LayTypeKind) -> i64 {
+    match kind {
+        LayTypeKind::TkI8    => 1,
+        LayTypeKind::TkBool  => 1,
+        LayTypeKind::TkI16   => 2,
+        LayTypeKind::TkI32   => 4,
+        LayTypeKind::TkF32   => 4,
+        LayTypeKind::TkI64   => 8,
+        LayTypeKind::TkF64   => 8,
+        LayTypeKind::TkPtr   => LAY_PTR_SIZE,
+        LayTypeKind::TkRef   => LAY_PTR_SIZE,
+        LayTypeKind::TkMutRef => LAY_PTR_SIZE,
+        LayTypeKind::TkUnit   => 0,
+        LayTypeKind::TkNever  => 0,
+        LayTypeKind::TkOpaque => 0,
+        LayTypeKind::TkArray  => 0,
+        LayTypeKind::TkStruct => 0,
+        LayTypeKind::TkEnum   => 0,
+        LayTypeKind::TkTuple  => 0
+    }
+}
+
+// Natural alignment of a primitive type in bytes.
+fn lay_primitive_align(kind: LayTypeKind) -> i64 {
+    match kind {
+        LayTypeKind::TkI8    => 1,
+        LayTypeKind::TkBool  => 1,
+        LayTypeKind::TkI16   => 2,
+        LayTypeKind::TkI32   => 4,
+        LayTypeKind::TkF32   => 4,
+        LayTypeKind::TkI64   => 8,
+        LayTypeKind::TkF64   => 8,
+        LayTypeKind::TkPtr   => LAY_PTR_ALIGN,
+        LayTypeKind::TkRef   => LAY_PTR_ALIGN,
+        LayTypeKind::TkMutRef => LAY_PTR_ALIGN,
+        LayTypeKind::TkUnit   => 1,
+        LayTypeKind::TkNever  => 1,
+        LayTypeKind::TkOpaque => 1,
+        LayTypeKind::TkArray  => 1,
+        LayTypeKind::TkStruct => 1,
+        LayTypeKind::TkEnum   => 1,
+        LayTypeKind::TkTuple  => 1
+    }
+}
+
+// Check if a type kind is primitive (has known size without recursion).
+fn lay_is_primitive(kind: LayTypeKind) -> bool {
+    match kind {
+        LayTypeKind::TkI8     => true,
+        LayTypeKind::TkI16    => true,
+        LayTypeKind::TkI32    => true,
+        LayTypeKind::TkI64    => true,
+        LayTypeKind::TkF32    => true,
+        LayTypeKind::TkF64    => true,
+        LayTypeKind::TkBool   => true,
+        LayTypeKind::TkPtr    => true,
+        LayTypeKind::TkRef    => true,
+        LayTypeKind::TkMutRef => true,
+        LayTypeKind::TkUnit   => true,
+        LayTypeKind::TkNever  => true,
+        LayTypeKind::TkOpaque => false,
+        LayTypeKind::TkArray  => false,
+        LayTypeKind::TkStruct => false,
+        LayTypeKind::TkEnum   => false,
+        LayTypeKind::TkTuple  => false
+    }
+}
+
+// Helper: check if kind is TkStruct
+fn lay_is_struct(kind: LayTypeKind) -> bool {
+    match kind {
+        LayTypeKind::TkStruct => true,
+        LayTypeKind::TkI8     => false,
+        LayTypeKind::TkI16    => false,
+        LayTypeKind::TkI32    => false,
+        LayTypeKind::TkI64    => false,
+        LayTypeKind::TkF32    => false,
+        LayTypeKind::TkF64    => false,
+        LayTypeKind::TkBool   => false,
+        LayTypeKind::TkPtr    => false,
+        LayTypeKind::TkRef    => false,
+        LayTypeKind::TkMutRef => false,
+        LayTypeKind::TkUnit   => false,
+        LayTypeKind::TkNever  => false,
+        LayTypeKind::TkOpaque => false,
+        LayTypeKind::TkArray  => false,
+        LayTypeKind::TkEnum   => false,
+        LayTypeKind::TkTuple  => false
+    }
+}
+
+// Helper: check if kind is TkArray
+fn lay_is_array(kind: LayTypeKind) -> bool {
+    match kind {
+        LayTypeKind::TkArray  => true,
+        LayTypeKind::TkI8     => false,
+        LayTypeKind::TkI16    => false,
+        LayTypeKind::TkI32    => false,
+        LayTypeKind::TkI64    => false,
+        LayTypeKind::TkF32    => false,
+        LayTypeKind::TkF64    => false,
+        LayTypeKind::TkBool   => false,
+        LayTypeKind::TkPtr    => false,
+        LayTypeKind::TkRef    => false,
+        LayTypeKind::TkMutRef => false,
+        LayTypeKind::TkUnit   => false,
+        LayTypeKind::TkNever  => false,
+        LayTypeKind::TkOpaque => false,
+        LayTypeKind::TkStruct => false,
+        LayTypeKind::TkEnum   => false,
+        LayTypeKind::TkTuple  => false
+    }
+}
+
+// Helper: check if kind is TkTuple
+fn lay_is_tuple(kind: LayTypeKind) -> bool {
+    match kind {
+        LayTypeKind::TkTuple  => true,
+        LayTypeKind::TkI8     => false,
+        LayTypeKind::TkI16    => false,
+        LayTypeKind::TkI32    => false,
+        LayTypeKind::TkI64    => false,
+        LayTypeKind::TkF32    => false,
+        LayTypeKind::TkF64    => false,
+        LayTypeKind::TkBool   => false,
+        LayTypeKind::TkPtr    => false,
+        LayTypeKind::TkRef    => false,
+        LayTypeKind::TkMutRef => false,
+        LayTypeKind::TkUnit   => false,
+        LayTypeKind::TkNever  => false,
+        LayTypeKind::TkOpaque => false,
+        LayTypeKind::TkStruct => false,
+        LayTypeKind::TkArray  => false,
+        LayTypeKind::TkEnum   => false
+    }
+}
+
+// Helper: check if kind is TkEnum
+fn lay_is_enum(kind: LayTypeKind) -> bool {
+    match kind {
+        LayTypeKind::TkEnum   => true,
+        LayTypeKind::TkI8     => false,
+        LayTypeKind::TkI16    => false,
+        LayTypeKind::TkI32    => false,
+        LayTypeKind::TkI64    => false,
+        LayTypeKind::TkF32    => false,
+        LayTypeKind::TkF64    => false,
+        LayTypeKind::TkBool   => false,
+        LayTypeKind::TkPtr    => false,
+        LayTypeKind::TkRef    => false,
+        LayTypeKind::TkMutRef => false,
+        LayTypeKind::TkUnit   => false,
+        LayTypeKind::TkNever  => false,
+        LayTypeKind::TkOpaque => false,
+        LayTypeKind::TkStruct => false,
+        LayTypeKind::TkArray  => false,
+        LayTypeKind::TkTuple  => false
+    }
+}
+
+// Helper: check if repr is ReprC
+fn lay_is_repr_c(repr: LayRepr) -> bool {
+    match repr {
+        LayRepr::ReprC           => true,
+        LayRepr::ReprDefault     => false,
+        LayRepr::ReprPacked      => false,
+        LayRepr::ReprTransparent => false,
+        LayRepr::ReprAligned     => false
+    }
+}
+
+// Helper: check if repr is ReprPacked
+fn lay_is_repr_packed(repr: LayRepr) -> bool {
+    match repr {
+        LayRepr::ReprPacked      => true,
+        LayRepr::ReprDefault     => false,
+        LayRepr::ReprC           => false,
+        LayRepr::ReprTransparent => false,
+        LayRepr::ReprAligned     => false
+    }
+}
+
+// ============================================================
+// Section 7: Discriminant helpers
+// ============================================================
+
+// Determine the minimum discriminant size for a given variant count.
+fn lay_discriminant_size(variant_count: i64) -> LayDiscriminantSize {
+    if variant_count <= 256 {
+        return LayDiscriminantSize::Disc8
+    }
+    if variant_count <= 65536 {
+        return LayDiscriminantSize::Disc16
+    }
+    if variant_count <= 2147483647 {
+        return LayDiscriminantSize::Disc32
+    }
+    return LayDiscriminantSize::Disc64
+}
+
+// Convert a discriminant size tag to its byte count.
+fn lay_disc_size_bytes(disc: LayDiscriminantSize) -> i64 {
+    match disc {
+        LayDiscriminantSize::Disc8  => 1,
+        LayDiscriminantSize::Disc16 => 2,
+        LayDiscriminantSize::Disc32 => 4,
+        LayDiscriminantSize::Disc64 => 8
+    }
+}
+
+// Natural alignment of a discriminant (same as its size).
+fn lay_disc_align(disc: LayDiscriminantSize) -> i64 {
+    lay_disc_size_bytes(disc)
+}
+
+// ============================================================
+// Section 8: Context construction
+// ============================================================
+
+// Create a new layout context targeting x86-64 (8-byte pointers).
+fn lay_context_new() -> LayContext {
+    LayContext {
+        types: [lay_type_desc_empty(); 1024],
+        type_count: 0,
+        cache: [lay_cache_entry_empty(); 512],
+        cache_count: 0,
+        target_ptr_size: 8,
+        target_max_align: 64,
+    }
+}
+
+// Create a new layout context targeting 32-bit (4-byte pointers).
+fn lay_context_new_32bit() -> LayContext {
+    LayContext {
+        types: [lay_type_desc_empty(); 1024],
+        type_count: 0,
+        cache: [lay_cache_entry_empty(); 512],
+        cache_count: 0,
+        target_ptr_size: 4,
+        target_max_align: 32,
+    }
+}
+
+// ============================================================
+// Section 9: Type registration
+// ============================================================
+
+// Register a new type in the context and return its type ID.
+// Returns LAY_INVALID if the type table is full.
+fn lay_register_type(ctx: &! LayContext, kind: LayTypeKind, repr: LayRepr) -> i64 with Mut, Div, Panic {
+    if ctx.type_count >= LAY_MAX_TYPES {
+        return LAY_INVALID
+    }
+    let id = ctx.type_count
+    var desc = lay_type_desc_empty()
+    desc.id = id
+    desc.kind = kind
+    desc.repr = repr
+    ctx.types[id as usize] = desc
+    ctx.type_count = ctx.type_count + 1
+    return id
+}
+
+// Set the field types and name hashes for a struct or tuple type.
+fn lay_set_fields(ctx: &! LayContext, type_id: i64, types: &[i64; 256], names: &[i64; 256], count: i64) with Mut, Div, Panic {
+    if type_id < 0 { return }
+    if type_id >= ctx.type_count { return }
+    let limit = lay_min(count, LAY_MAX_FIELDS)
+    var desc = ctx.types[type_id as usize]
+    var i = 0
+    while i < limit {
+        desc.field_types[i as usize] = types[i as usize]
+        desc.field_names[i as usize] = names[i as usize]
+        i = i + 1
+    }
+    desc.field_count = limit
+    ctx.types[type_id as usize] = desc
+}
+
+// Set array element type and element count for an array type.
+fn lay_set_array_info(ctx: &! LayContext, type_id: i64, element_type: i64, count: i64) with Mut, Div, Panic {
+    if type_id < 0 { return }
+    if type_id >= ctx.type_count { return }
+    var desc = ctx.types[type_id as usize]
+    desc.element_type = element_type
+    desc.element_count = count
+    ctx.types[type_id as usize] = desc
+}
+
+// Set extra alignment override for a type (used by ReprAligned).
+fn lay_set_extra_align(ctx: &! LayContext, type_id: i64, align: i64) with Mut, Div, Panic {
+    if type_id < 0 { return }
+    if type_id >= ctx.type_count { return }
+    var desc = ctx.types[type_id as usize]
+    desc.extra_align = align
+    ctx.types[type_id as usize] = desc
+}
+
+// Set the number of variants for an enum type.
+fn lay_set_variant_count(ctx: &! LayContext, type_id: i64, count: i64) with Mut, Div, Panic {
+    if type_id < 0 { return }
+    if type_id >= ctx.type_count { return }
+    var desc = ctx.types[type_id as usize]
+    desc.variant_count = count
+    ctx.types[type_id as usize] = desc
+}
+
+// ============================================================
+// Section 10: Cache operations
+// ============================================================
+
+// Look up a type layout in the cache.
+// Returns the cache index if found, or LAY_INVALID on cache miss.
+fn lay_cache_lookup(ctx: &LayContext, type_id: i64) -> i64 with Mut, Div, Panic {
+    var i = 0
+    while i < ctx.cache_count {
+        let entry = ctx.cache[i as usize]
+        if entry.valid && entry.type_id == type_id {
+            return i
+        }
+        i = i + 1
+    }
+    return LAY_INVALID
+}
+
+// Insert a layout into the cache.
+fn lay_cache_insert(ctx: &! LayContext, type_id: i64, layout: &LayLayout) with Mut, Div, Panic {
+    // Check if already cached; update in place
+    var i = 0
+    while i < ctx.cache_count {
+        if ctx.cache[i as usize].type_id == type_id {
+            var entry = ctx.cache[i as usize]
+            entry.layout = *layout
+            entry.valid = true
+            ctx.cache[i as usize] = entry
+            return
+        }
+        i = i + 1
+    }
+    // Insert new entry
+    if ctx.cache_count < LAY_MAX_CACHE {
+        var entry = lay_cache_entry_empty()
+        entry.type_id = type_id
+        entry.layout = *layout
+        entry.valid = true
+        ctx.cache[ctx.cache_count as usize] = entry
+        ctx.cache_count = ctx.cache_count + 1
+    } else {
+        // Ring buffer: overwrite at position (type_id mod capacity)
+        var slot = type_id
+        if slot < 0 { slot = 0 - slot }
+        slot = slot - (slot / LAY_MAX_CACHE) * LAY_MAX_CACHE
+        var entry = ctx.cache[slot as usize]
+        entry.type_id = type_id
+        entry.layout = *layout
+        entry.valid = true
+        ctx.cache[slot as usize] = entry
+    }
+}
+
+// Retrieve a cached layout by cache index.
+fn lay_cache_get(ctx: &LayContext, cache_idx: i64) -> LayLayout with Div, Panic {
+    if cache_idx < 0 { return lay_layout_empty() }
+    if cache_idx >= ctx.cache_count { return lay_layout_empty() }
+    return ctx.cache[cache_idx as usize].layout
+}
+
+// Invalidate a specific type's cache entry.
+fn lay_cache_invalidate(ctx: &! LayContext, type_id: i64) with Mut, Div, Panic {
+    var i = 0
+    while i < ctx.cache_count {
+        if ctx.cache[i as usize].type_id == type_id {
+            var entry = ctx.cache[i as usize]
+            entry.valid = false
+            ctx.cache[i as usize] = entry
+            return
+        }
+        i = i + 1
+    }
+}
+
+// ============================================================
+// Section 11: Primitive layout computation
+// ============================================================
+
+// Compute layout for a primitive type kind.
+// For pointer-sized types, uses the context's target pointer size.
+fn lay_compute_primitive(ctx: &LayContext, kind: LayTypeKind) -> LayLayout {
+    var result = lay_layout_empty()
+    let is_ptr = match kind {
+        LayTypeKind::TkPtr    => true,
+        LayTypeKind::TkRef    => true,
+        LayTypeKind::TkMutRef => true,
+        LayTypeKind::TkI8     => false,
+        LayTypeKind::TkI16    => false,
+        LayTypeKind::TkI32    => false,
+        LayTypeKind::TkI64    => false,
+        LayTypeKind::TkF32    => false,
+        LayTypeKind::TkF64    => false,
+        LayTypeKind::TkBool   => false,
+        LayTypeKind::TkUnit   => false,
+        LayTypeKind::TkNever  => false,
+        LayTypeKind::TkOpaque => false,
+        LayTypeKind::TkArray  => false,
+        LayTypeKind::TkStruct => false,
+        LayTypeKind::TkEnum   => false,
+        LayTypeKind::TkTuple  => false
+    }
+    if is_ptr {
+        result.size = ctx.target_ptr_size
+        result.align = ctx.target_ptr_size
+        result.stride = ctx.target_ptr_size
+    } else {
+        result.size = lay_primitive_size(kind)
+        result.align = lay_primitive_align(kind)
+        if result.size == 0 {
+            result.stride = 0
+        } else {
+            result.stride = lay_stride(result.size, result.align)
+        }
+    }
+    return result
+}
+
+// ============================================================
+// Section 12: Non-recursive layout functions
+// These accept pre-resolved field sizes/alignments, avoiding
+// any need to call lay_compute (which is defined later).
+// ============================================================
+
+// Compute struct layout from pre-resolved fields.
+// Fields laid out in declaration order with natural alignment padding.
+fn lay_layout_struct_from_resolved(rf: &LayResolvedFields) -> LayLayout with Mut, Div, Panic {
+    var result = lay_layout_empty()
+    var offset = 0
+    var max_align = 1
+    var i = 0
+    while i < rf.count {
+        var f = lay_field_empty()
+        f.name_hash = rf.name_hashes[i as usize]
+        f.type_id = rf.type_ids[i as usize]
+        f.size = rf.sizes[i as usize]
+        f.align = rf.aligns[i as usize]
+        let aligned_offset = lay_align_up(offset, f.align)
+        f.padding_before = aligned_offset - offset
+        f.offset = aligned_offset
+        result.fields[i as usize] = f
+        offset = aligned_offset + f.size
+        if f.align > max_align {
+            max_align = f.align
+        }
+        i = i + 1
+    }
+    result.field_count = rf.count
+    result.align = max_align
+    result.size = lay_align_up(offset, max_align)
+    result.stride = lay_stride(result.size, result.align)
+    return result
+}
+
+// Compute C-compatible struct layout from pre-resolved fields.
+// Follows the System V ABI: declaration order, natural alignment,
+// total size padded to struct alignment.
+fn lay_layout_struct_c_from_resolved(rf: &LayResolvedFields) -> LayLayout with Mut, Div, Panic {
+    // C-compatible layout follows the same rules as default Sounio layout
+    return lay_layout_struct_from_resolved(rf)
+}
+
+// Compute packed struct layout from pre-resolved fields.
+// All fields packed with no alignment padding (align = 1).
+fn lay_layout_struct_packed_from_resolved(rf: &LayResolvedFields) -> LayLayout with Mut, Div, Panic {
+    var result = lay_layout_empty()
+    var offset = 0
+    var i = 0
+    while i < rf.count {
+        var f = lay_field_empty()
+        f.name_hash = rf.name_hashes[i as usize]
+        f.type_id = rf.type_ids[i as usize]
+        f.size = rf.sizes[i as usize]
+        f.align = 1
+        f.padding_before = 0
+        f.offset = offset
+        result.fields[i as usize] = f
+        offset = offset + f.size
+        i = i + 1
+    }
+    result.field_count = rf.count
+    result.align = 1
+    result.size = offset
+    result.stride = offset
+    return result
+}
+
+// Sort resolved fields by alignment descending (for optimized layout).
+// Insertion sort, stable for equal alignment.
+fn lay_sort_resolved_by_align(rf: &! LayResolvedFields) with Mut, Div, Panic {
+    if rf.count <= 1 { return }
+    var i = 1
+    while i < rf.count {
+        let key_size = rf.sizes[i as usize]
+        let key_align = rf.aligns[i as usize]
+        let key_name = rf.name_hashes[i as usize]
+        let key_tid = rf.type_ids[i as usize]
+        var j = i - 1
+        var done = false
+        while j >= 0 && done == false {
+            if rf.aligns[j as usize] < key_align {
+                rf.sizes[(j + 1) as usize] = rf.sizes[j as usize]
+                rf.aligns[(j + 1) as usize] = rf.aligns[j as usize]
+                rf.name_hashes[(j + 1) as usize] = rf.name_hashes[j as usize]
+                rf.type_ids[(j + 1) as usize] = rf.type_ids[j as usize]
+                j = j - 1
+            } else {
+                done = true
+            }
+        }
+        rf.sizes[(j + 1) as usize] = key_size
+        rf.aligns[(j + 1) as usize] = key_align
+        rf.name_hashes[(j + 1) as usize] = key_name
+        rf.type_ids[(j + 1) as usize] = key_tid
+        i = i + 1
+    }
+}
+
+// Compute optimized struct layout from pre-resolved fields.
+// Fields are sorted by alignment (descending) before layout.
+fn lay_layout_struct_optimized_from_resolved(rf: &! LayResolvedFields) -> LayLayout with Mut, Div, Panic {
+    lay_sort_resolved_by_align(rf)
+    return lay_layout_struct_from_resolved(rf)
+}
+
+// ============================================================
+// Section 13: Enum layout from pre-resolved variant payloads
+// ============================================================
+
+// Compute full enum layout given variant count and the pre-resolved
+// variant payloads.  Each variant's payload size and alignment are
+// provided in the resolved fields structure (one entry per variant).
+fn lay_layout_enum_from_resolved(
+    vcount: i64,
+    variant_sizes: &[i64; 128],
+    variant_aligns: &[i64; 128],
+    extra_align: i64
+) -> LayEnumLayout with Mut, Div, Panic {
+    var result = lay_enum_layout_empty()
+    if vcount <= 0 { return result }
+    result.variant_count = vcount
+    result.disc_size = lay_discriminant_size(vcount)
+    let disc_bytes = lay_disc_size_bytes(result.disc_size)
+    let disc_a = lay_disc_align(result.disc_size)
+    // Find the maximum payload size and alignment
+    var max_payload_size = 0
+    var max_payload_align = 1
+    var vi = 0
+    while vi < vcount {
+        if vi < LAY_MAX_VARIANTS {
+            var vl = lay_variant_layout_empty()
+            vl.variant_id = vi
+            vl.payload_size = variant_sizes[vi as usize]
+            vl.payload_align = variant_aligns[vi as usize]
+            result.variants[vi as usize] = vl
+            if vl.payload_size > max_payload_size {
+                max_payload_size = vl.payload_size
+            }
+            if vl.payload_align > max_payload_align {
+                max_payload_align = vl.payload_align
+            }
+        }
+        vi = vi + 1
+    }
+    // Discriminant first, then payload with alignment
+    result.disc_offset = 0
+    let overall_align = lay_max(disc_a, max_payload_align)
+    let payload_offset = lay_align_up(disc_bytes, max_payload_align)
+    let total_raw = payload_offset + max_payload_size
+    result.total_align = overall_align
+    result.total_size = lay_align_up(total_raw, overall_align)
+    // Apply extra alignment
+    if extra_align > result.total_align {
+        result.total_align = extra_align
+        result.total_size = lay_align_up(result.total_size, result.total_align)
+    }
+    // Niche optimization: single-variant enums need no discriminant
+    if vcount == 1 {
+        result.is_niche_opt = true
+        result.disc_size = LayDiscriminantSize::Disc8
+        result.total_size = max_payload_size
+        if max_payload_size == 0 {
+            result.total_align = 1
+        } else {
+            result.total_align = max_payload_align
+        }
+        result.total_size = lay_align_up(result.total_size, result.total_align)
+    }
+    return result
+}
+
+// ============================================================
+// Section 14: Field query helpers
+// ============================================================
+
+// Get the offset of a field by index from a completed layout.
+fn lay_field_offset(layout: &LayLayout, field_idx: i64) -> i64 with Div, Panic {
+    if field_idx < 0 { return 0 }
+    if field_idx >= layout.field_count { return 0 }
+    return layout.fields[field_idx as usize].offset
+}
+
+// Compute total padding bytes in a layout (size minus sum of field sizes).
+fn lay_total_padding(layout: &LayLayout) -> i64 with Mut, Div, Panic {
+    var field_sizes = 0
+    var i = 0
+    while i < layout.field_count {
+        field_sizes = field_sizes + layout.fields[i as usize].size
+        i = i + 1
+    }
+    let padding = layout.size - field_sizes
+    if padding < 0 { return 0 }
+    return padding
+}
+
+// Return the trailing padding of a layout (after the last field to the end).
+fn lay_trailing_padding(layout: &LayLayout) -> i64 with Div, Panic {
+    if layout.field_count == 0 { return layout.size }
+    let last_idx = layout.field_count - 1
+    let last_field = layout.fields[last_idx as usize]
+    let end_of_last = last_field.offset + last_field.size
+    let trailing = layout.size - end_of_last
+    if trailing < 0 { return 0 }
+    return trailing
+}
+
+// Check if two layouts have the same size, alignment, and stride.
+fn lay_layout_eq(a: &LayLayout, b: &LayLayout) -> bool {
+    a.size == b.size && a.align == b.align && a.stride == b.stride
+}
+
+// Check if a layout has zero size (ZST).
+fn lay_is_zst(layout: &LayLayout) -> bool {
+    layout.size == 0
+}
+
+// Return the number of padding bytes before a specific field.
+fn lay_field_padding(layout: &LayLayout, field_idx: i64) -> i64 with Div, Panic {
+    if field_idx < 0 { return 0 }
+    if field_idx >= layout.field_count { return 0 }
+    return layout.fields[field_idx as usize].padding_before
+}
+
+// ============================================================
+// Section 15: Deprecated standalone sort (for direct calls)
+// ============================================================
+
+// Sort fields descending by alignment (largest alignment first).
+// Uses insertion sort (suitable for field counts up to 256).
+fn lay_sort_fields_by_align(fields: &! [LayField; 256], count: i64) with Mut, Div, Panic {
+    if count <= 1 { return }
+    var i = 1
+    while i < count {
+        let key = fields[i as usize]
+        var j = i - 1
+        var done = false
+        while j >= 0 && done == false {
+            if fields[j as usize].align < key.align {
+                fields[(j + 1) as usize] = fields[j as usize]
+                j = j - 1
+            } else {
+                done = true
+            }
+        }
+        fields[(j + 1) as usize] = key
+        i = i + 1
+    }
+}
+
+// ============================================================
+// Section 16: Top-level recursive layout dispatcher
+// ============================================================
+
+// Compute the layout for any registered type.
+// This is the single recursive entry point.  It resolves field
+// layouts by calling itself recursively, then passes pre-resolved
+// data to the non-recursive layout functions defined above.
+fn lay_compute(ctx: &! LayContext, type_id: i64) -> LayLayout with Mut, Div, Panic {
+    if type_id < 0 { return lay_layout_empty() }
+    if type_id >= ctx.type_count { return lay_layout_empty() }
+    // Check cache
+    let cidx = lay_cache_lookup(ctx, type_id)
+    if cidx != LAY_INVALID {
+        return lay_cache_get(ctx, cidx)
+    }
+    let desc = ctx.types[type_id as usize]
+    var result = lay_layout_empty()
+    let is_prim = lay_is_primitive(desc.kind)
+    if is_prim {
+        result = lay_compute_primitive(ctx, desc.kind)
+    } else {
+        if lay_is_struct(desc.kind) || lay_is_tuple(desc.kind) {
+            // Resolve all field sizes and alignments recursively
+            var rf = lay_resolved_fields_empty()
+            rf.count = desc.field_count
+            var fi = 0
+            while fi < desc.field_count {
+                let ft = desc.field_types[fi as usize]
+                let fl = lay_compute(ctx, ft)
+                rf.sizes[fi as usize] = fl.size
+                rf.aligns[fi as usize] = fl.align
+                rf.name_hashes[fi as usize] = desc.field_names[fi as usize]
+                rf.type_ids[fi as usize] = ft
+                fi = fi + 1
+            }
+            // Dispatch by repr
+            if lay_is_repr_c(desc.repr) {
+                result = lay_layout_struct_c_from_resolved(&rf)
+            } else {
+                if lay_is_repr_packed(desc.repr) {
+                    result = lay_layout_struct_packed_from_resolved(&rf)
+                } else {
+                    result = lay_layout_struct_from_resolved(&rf)
+                }
+            }
+        } else {
+            if lay_is_array(desc.kind) {
+                // Resolve element layout recursively
+                let elem_type = desc.element_type
+                var elem_size = 0
+                var elem_align = 1
+                if elem_type >= 0 && elem_type < ctx.type_count {
+                    let el = lay_compute(ctx, elem_type)
+                    elem_size = el.size
+                    elem_align = el.align
+                }
+                let elem_stride = lay_stride(elem_size, elem_align)
+                let count = desc.element_count
+                if count <= 0 {
+                    result.size = 0
+                    result.align = elem_align
+                    result.stride = 0
+                } else {
+                    result.size = elem_stride * count
+                    result.align = elem_align
+                    result.stride = lay_stride(result.size, result.align)
+                }
+                // Record a single "field" representing the element
+                var ef = lay_field_empty()
+                ef.size = elem_size
+                ef.align = elem_align
+                ef.type_id = elem_type
+                ef.offset = 0
+                result.fields[0 as usize] = ef
+                result.field_count = 1
+            } else {
+                if lay_is_enum(desc.kind) {
+                    // For enums, resolve each variant's payload.
+                    // Variant i uses fields from (i * 64) to ((i+1)*64 - 1).
+                    var vsizes: [i64; 128] = [0; 128]
+                    var valigns: [i64; 128] = [0; 128]
+                    var vi = 0
+                    while vi < desc.variant_count && vi < LAY_MAX_VARIANTS {
+                        let base = vi * 64
+                        // Lay out variant fields to get payload size/align
+                        var voffset = 0
+                        var vmax_align = 1
+                        var vfi = 0
+                        var vdone = false
+                        while vfi < 64 && vdone == false {
+                            let idx = base + vfi
+                            if idx >= LAY_MAX_FIELDS {
+                                vdone = true
+                            } else {
+                                let ft = desc.field_types[idx as usize]
+                                if ft == 0 && vfi > 0 {
+                                    vdone = true
+                                } else {
+                                    if ft != 0 {
+                                        let fl = lay_compute(ctx, ft)
+                                        let ao = lay_align_up(voffset, fl.align)
+                                        voffset = ao + fl.size
+                                        if fl.align > vmax_align {
+                                            vmax_align = fl.align
+                                        }
+                                    }
+                                    vfi = vfi + 1
+                                }
+                            }
+                        }
+                        vsizes[vi as usize] = voffset
+                        valigns[vi as usize] = vmax_align
+                        vi = vi + 1
+                    }
+                    let el = lay_layout_enum_from_resolved(
+                        desc.variant_count, &vsizes, &valigns, desc.extra_align
+                    )
+                    result.size = el.total_size
+                    result.align = el.total_align
+                    result.stride = lay_stride(el.total_size, el.total_align)
+                }
+            }
+        }
+    }
+    // Apply extra alignment override
+    let desc2 = ctx.types[type_id as usize]
+    if desc2.extra_align > result.align {
+        result.align = desc2.extra_align
+        result.size = lay_align_up(result.size, result.align)
+        result.stride = lay_stride(result.size, result.align)
+    }
+    // Insert into cache
+    lay_cache_insert(ctx, type_id, &result)
+    return result
+}
+
+// ============================================================
+// Section 17: Convenience wrappers that use lay_compute
+// These functions exist for the public API specified in the module
+// spec; they call lay_compute which handles caching and recursion.
+// ============================================================
+
+// Compute struct layout with default Sounio rules.
+fn lay_compute_struct(ctx: &! LayContext, type_id: i64) -> LayLayout with Mut, Div, Panic {
+    if type_id < 0 { return lay_layout_empty() }
+    if type_id >= ctx.type_count { return lay_layout_empty() }
+    let desc = ctx.types[type_id as usize]
+    var rf = lay_resolved_fields_empty()
+    rf.count = desc.field_count
+    var i = 0
+    while i < desc.field_count {
+        let ft = desc.field_types[i as usize]
+        let fl = lay_compute(ctx, ft)
+        rf.sizes[i as usize] = fl.size
+        rf.aligns[i as usize] = fl.align
+        rf.name_hashes[i as usize] = desc.field_names[i as usize]
+        rf.type_ids[i as usize] = ft
+        i = i + 1
+    }
+    return lay_layout_struct_from_resolved(&rf)
+}
+
+// Compute C-compatible struct layout.
+fn lay_compute_struct_c(ctx: &! LayContext, type_id: i64) -> LayLayout with Mut, Div, Panic {
+    if type_id < 0 { return lay_layout_empty() }
+    if type_id >= ctx.type_count { return lay_layout_empty() }
+    let desc = ctx.types[type_id as usize]
+    var rf = lay_resolved_fields_empty()
+    rf.count = desc.field_count
+    var i = 0
+    while i < desc.field_count {
+        let ft = desc.field_types[i as usize]
+        let fl = lay_compute(ctx, ft)
+        rf.sizes[i as usize] = fl.size
+        rf.aligns[i as usize] = fl.align
+        rf.name_hashes[i as usize] = desc.field_names[i as usize]
+        rf.type_ids[i as usize] = ft
+        i = i + 1
+    }
+    return lay_layout_struct_c_from_resolved(&rf)
+}
+
+// Compute packed struct layout.
+fn lay_compute_struct_packed(ctx: &! LayContext, type_id: i64) -> LayLayout with Mut, Div, Panic {
+    if type_id < 0 { return lay_layout_empty() }
+    if type_id >= ctx.type_count { return lay_layout_empty() }
+    let desc = ctx.types[type_id as usize]
+    var rf = lay_resolved_fields_empty()
+    rf.count = desc.field_count
+    var i = 0
+    while i < desc.field_count {
+        let ft = desc.field_types[i as usize]
+        let fl = lay_compute(ctx, ft)
+        rf.sizes[i as usize] = fl.size
+        rf.aligns[i as usize] = fl.align
+        rf.name_hashes[i as usize] = desc.field_names[i as usize]
+        rf.type_ids[i as usize] = ft
+        i = i + 1
+    }
+    return lay_layout_struct_packed_from_resolved(&rf)
+}
+
+// Compute optimized struct layout (field reordering).
+fn lay_compute_struct_optimized(ctx: &! LayContext, type_id: i64) -> LayLayout with Mut, Div, Panic {
+    if type_id < 0 { return lay_layout_empty() }
+    if type_id >= ctx.type_count { return lay_layout_empty() }
+    let desc = ctx.types[type_id as usize]
+    var rf = lay_resolved_fields_empty()
+    rf.count = desc.field_count
+    var i = 0
+    while i < desc.field_count {
+        let ft = desc.field_types[i as usize]
+        let fl = lay_compute(ctx, ft)
+        rf.sizes[i as usize] = fl.size
+        rf.aligns[i as usize] = fl.align
+        rf.name_hashes[i as usize] = desc.field_names[i as usize]
+        rf.type_ids[i as usize] = ft
+        i = i + 1
+    }
+    return lay_layout_struct_optimized_from_resolved(&! rf)
+}
+
+// Compute array layout.
+fn lay_compute_array(ctx: &! LayContext, type_id: i64) -> LayLayout with Mut, Div, Panic {
+    return lay_compute(ctx, type_id)
+}
+
+// Compute tuple layout.
+fn lay_compute_tuple(ctx: &! LayContext, type_id: i64) -> LayLayout with Mut, Div, Panic {
+    return lay_compute(ctx, type_id)
+}
+
+// Compute enum layout.
+fn lay_compute_enum(ctx: &! LayContext, type_id: i64) -> LayEnumLayout with Mut, Div, Panic {
+    if type_id < 0 { return lay_enum_layout_empty() }
+    if type_id >= ctx.type_count { return lay_enum_layout_empty() }
+    let desc = ctx.types[type_id as usize]
+    var vsizes: [i64; 128] = [0; 128]
+    var valigns: [i64; 128] = [0; 128]
+    var vi = 0
+    while vi < desc.variant_count && vi < LAY_MAX_VARIANTS {
+        let base = vi * 64
+        var voffset = 0
+        var vmax_align = 1
+        var vfi = 0
+        var vdone = false
+        while vfi < 64 && vdone == false {
+            let idx = base + vfi
+            if idx >= LAY_MAX_FIELDS {
+                vdone = true
+            } else {
+                let ft = desc.field_types[idx as usize]
+                if ft == 0 && vfi > 0 {
+                    vdone = true
+                } else {
+                    if ft != 0 {
+                        let fl = lay_compute(ctx, ft)
+                        let ao = lay_align_up(voffset, fl.align)
+                        voffset = ao + fl.size
+                        if fl.align > vmax_align {
+                            vmax_align = fl.align
+                        }
+                    }
+                    vfi = vfi + 1
+                }
+            }
+        }
+        vsizes[vi as usize] = voffset
+        valigns[vi as usize] = vmax_align
+        vi = vi + 1
+    }
+    return lay_layout_enum_from_resolved(
+        desc.variant_count, &vsizes, &valigns, desc.extra_align
+    )
+}
+
+// ============================================================
+// Section 18: Test assertion helper
+// ============================================================
+
+fn lay_assert(cond: bool, test_num: i64) -> i64 with IO {
+    if cond {
+        print("PASS: layout test ")
+        print_int(test_num)
+        print("\n")
+        return 0
+    }
+    print("FAIL: layout test ")
+    print_int(test_num)
+    print("\n")
+    return 1
+}
+
+// ============================================================
+// Section 19: Tests — Primitive layouts (tests 1-8)
+// ============================================================
+
+// Test 1: i8 layout — size=1, align=1
+fn test_lay_01_i8_inner(ctx: &! LayContext) -> bool with Mut, Div, Panic {
+    let id = lay_register_type(ctx, LayTypeKind::TkI8, LayRepr::ReprDefault)
+    let l = lay_compute(ctx, id)
+    l.size == 1 && l.align == 1 && l.stride == 1
+}
+fn test_lay_01_i8() -> i64 with IO, Mut, Div, Panic {
+    var ctx = lay_context_new()
+    lay_assert(test_lay_01_i8_inner(&! ctx), 1)
+}
+
+// Test 2: i16 layout — size=2, align=2
+fn test_lay_02_i16_inner(ctx: &! LayContext) -> bool with Mut, Div, Panic {
+    let id = lay_register_type(ctx, LayTypeKind::TkI16, LayRepr::ReprDefault)
+    let l = lay_compute(ctx, id)
+    l.size == 2 && l.align == 2 && l.stride == 2
+}
+fn test_lay_02_i16() -> i64 with IO, Mut, Div, Panic {
+    var ctx = lay_context_new()
+    lay_assert(test_lay_02_i16_inner(&! ctx), 2)
+}
+
+// Test 3: i32 layout — size=4, align=4
+fn test_lay_03_i32_inner(ctx: &! LayContext) -> bool with Mut, Div, Panic {
+    let id = lay_register_type(ctx, LayTypeKind::TkI32, LayRepr::ReprDefault)
+    let l = lay_compute(ctx, id)
+    l.size == 4 && l.align == 4 && l.stride == 4
+}
+fn test_lay_03_i32() -> i64 with IO, Mut, Div, Panic {
+    var ctx = lay_context_new()
+    lay_assert(test_lay_03_i32_inner(&! ctx), 3)
+}
+
+// Test 4: i64 layout — size=8, align=8
+fn test_lay_04_i64_inner(ctx: &! LayContext) -> bool with Mut, Div, Panic {
+    let id = lay_register_type(ctx, LayTypeKind::TkI64, LayRepr::ReprDefault)
+    let l = lay_compute(ctx, id)
+    l.size == 8 && l.align == 8 && l.stride == 8
+}
+fn test_lay_04_i64() -> i64 with IO, Mut, Div, Panic {
+    var ctx = lay_context_new()
+    lay_assert(test_lay_04_i64_inner(&! ctx), 4)
+}
+
+// Test 5: f32 layout — size=4, align=4
+fn test_lay_05_f32_inner(ctx: &! LayContext) -> bool with Mut, Div, Panic {
+    let id = lay_register_type(ctx, LayTypeKind::TkF32, LayRepr::ReprDefault)
+    let l = lay_compute(ctx, id)
+    l.size == 4 && l.align == 4 && l.stride == 4
+}
+fn test_lay_05_f32() -> i64 with IO, Mut, Div, Panic {
+    var ctx = lay_context_new()
+    lay_assert(test_lay_05_f32_inner(&! ctx), 5)
+}
+
+// Test 6: f64 layout — size=8, align=8
+fn test_lay_06_f64_inner(ctx: &! LayContext) -> bool with Mut, Div, Panic {
+    let id = lay_register_type(ctx, LayTypeKind::TkF64, LayRepr::ReprDefault)
+    let l = lay_compute(ctx, id)
+    l.size == 8 && l.align == 8 && l.stride == 8
+}
+fn test_lay_06_f64() -> i64 with IO, Mut, Div, Panic {
+    var ctx = lay_context_new()
+    lay_assert(test_lay_06_f64_inner(&! ctx), 6)
+}
+
+// Test 7: bool layout — size=1, align=1
+fn test_lay_07_bool_inner(ctx: &! LayContext) -> bool with Mut, Div, Panic {
+    let id = lay_register_type(ctx, LayTypeKind::TkBool, LayRepr::ReprDefault)
+    let l = lay_compute(ctx, id)
+    l.size == 1 && l.align == 1 && l.stride == 1
+}
+fn test_lay_07_bool() -> i64 with IO, Mut, Div, Panic {
+    var ctx = lay_context_new()
+    lay_assert(test_lay_07_bool_inner(&! ctx), 7)
+}
+
+// Test 8: ptr layout — size=8, align=8 on 64-bit
+fn test_lay_08_ptr_inner(ctx: &! LayContext) -> bool with Mut, Div, Panic {
+    let id = lay_register_type(ctx, LayTypeKind::TkPtr, LayRepr::ReprDefault)
+    let l = lay_compute(ctx, id)
+    l.size == 8 && l.align == 8 && l.stride == 8
+}
+fn test_lay_08_ptr() -> i64 with IO, Mut, Div, Panic {
+    var ctx = lay_context_new()
+    lay_assert(test_lay_08_ptr_inner(&! ctx), 8)
+}
+
+// ============================================================
+// Section 20: Tests — Struct layout (tests 9-18)
+// ============================================================
+
+// Test 9: Simple struct {i32, i32} — size=8, align=4
+fn test_lay_09_simple_struct_inner(ctx: &! LayContext) -> bool with Mut, Div, Panic {
+    let t_i32 = lay_register_type(ctx, LayTypeKind::TkI32, LayRepr::ReprDefault)
+    let s = lay_register_type(ctx, LayTypeKind::TkStruct, LayRepr::ReprDefault)
+    var types: [i64; 256] = [0; 256]
+    var names: [i64; 256] = [0; 256]
+    types[0 as usize] = t_i32
+    types[1 as usize] = t_i32
+    names[0 as usize] = 100
+    names[1 as usize] = 200
+    lay_set_fields(ctx, s, &types, &names, 2)
+    let l = lay_compute(ctx, s)
+    l.size == 8 && l.align == 4 && l.field_count == 2
+}
+fn test_lay_09_simple_struct() -> i64 with IO, Mut, Div, Panic {
+    var ctx = lay_context_new()
+    lay_assert(test_lay_09_simple_struct_inner(&! ctx), 9)
+}
+
+// Test 10: Struct {i8, i64} — size=16 (padding after i8), align=8
+fn test_lay_10_padding_struct_inner(ctx: &! LayContext) -> bool with Mut, Div, Panic {
+    let t_i8 = lay_register_type(ctx, LayTypeKind::TkI8, LayRepr::ReprDefault)
+    let t_i64 = lay_register_type(ctx, LayTypeKind::TkI64, LayRepr::ReprDefault)
+    let s = lay_register_type(ctx, LayTypeKind::TkStruct, LayRepr::ReprDefault)
+    var types: [i64; 256] = [0; 256]
+    var names: [i64; 256] = [0; 256]
+    types[0 as usize] = t_i8
+    types[1 as usize] = t_i64
+    names[0 as usize] = 100
+    names[1 as usize] = 200
+    lay_set_fields(ctx, s, &types, &names, 2)
+    let l = lay_compute(ctx, s)
+    // i8 at 0 (1 byte), then 7 bytes padding, i64 at 8, total = 16, align = 8
+    l.size == 16 && l.align == 8 && l.fields[1 as usize].offset == 8
+}
+fn test_lay_10_padding_struct() -> i64 with IO, Mut, Div, Panic {
+    var ctx = lay_context_new()
+    lay_assert(test_lay_10_padding_struct_inner(&! ctx), 10)
+}
+
+// Test 11: Struct {i64, i8} — trailing padding, size=16, align=8
+fn test_lay_11_trailing_pad_inner(ctx: &! LayContext) -> bool with Mut, Div, Panic {
+    let t_i8 = lay_register_type(ctx, LayTypeKind::TkI8, LayRepr::ReprDefault)
+    let t_i64 = lay_register_type(ctx, LayTypeKind::TkI64, LayRepr::ReprDefault)
+    let s = lay_register_type(ctx, LayTypeKind::TkStruct, LayRepr::ReprDefault)
+    var types: [i64; 256] = [0; 256]
+    var names: [i64; 256] = [0; 256]
+    types[0 as usize] = t_i64
+    types[1 as usize] = t_i8
+    names[0 as usize] = 100
+    names[1 as usize] = 200
+    lay_set_fields(ctx, s, &types, &names, 2)
+    let l = lay_compute(ctx, s)
+    // i64 at 0 (8 bytes), i8 at 8 (1 byte), trailing pad to align=8: size = 16
+    let ok_size = l.size == 16
+    let ok_align = l.align == 8
+    let trailing = lay_trailing_padding(&l)
+    let ok_trailing = trailing == 7
+    ok_size && ok_align && ok_trailing
+}
+fn test_lay_11_trailing_pad() -> i64 with IO, Mut, Div, Panic {
+    var ctx = lay_context_new()
+    lay_assert(test_lay_11_trailing_pad_inner(&! ctx), 11)
+}
+
+// Test 12: Struct {i32, i8, i32} — interleaved padding
+fn test_lay_12_interleaved_pad_inner(ctx: &! LayContext) -> bool with Mut, Div, Panic {
+    let t_i8 = lay_register_type(ctx, LayTypeKind::TkI8, LayRepr::ReprDefault)
+    let t_i32 = lay_register_type(ctx, LayTypeKind::TkI32, LayRepr::ReprDefault)
+    let s = lay_register_type(ctx, LayTypeKind::TkStruct, LayRepr::ReprDefault)
+    var types: [i64; 256] = [0; 256]
+    var names: [i64; 256] = [0; 256]
+    types[0 as usize] = t_i32
+    types[1 as usize] = t_i8
+    types[2 as usize] = t_i32
+    names[0 as usize] = 100
+    names[1 as usize] = 200
+    names[2 as usize] = 300
+    lay_set_fields(ctx, s, &types, &names, 3)
+    let l = lay_compute(ctx, s)
+    // i32 at 0 (4), i8 at 4 (1), pad 3 bytes, i32 at 8 (4), total = 12, align = 4
+    l.size == 12 && l.align == 4 && l.fields[2 as usize].offset == 8
+}
+fn test_lay_12_interleaved_pad() -> i64 with IO, Mut, Div, Panic {
+    var ctx = lay_context_new()
+    lay_assert(test_lay_12_interleaved_pad_inner(&! ctx), 12)
+}
+
+// Test 13: Nested struct — struct containing another struct
+fn test_lay_13_nested_struct_inner(ctx: &! LayContext) -> bool with Mut, Div, Panic {
+    let t_i32 = lay_register_type(ctx, LayTypeKind::TkI32, LayRepr::ReprDefault)
+    // Inner struct: {i32, i32} — size=8, align=4
+    let inner = lay_register_type(ctx, LayTypeKind::TkStruct, LayRepr::ReprDefault)
+    var inner_types: [i64; 256] = [0; 256]
+    var inner_names: [i64; 256] = [0; 256]
+    inner_types[0 as usize] = t_i32
+    inner_types[1 as usize] = t_i32
+    inner_names[0 as usize] = 10
+    inner_names[1 as usize] = 20
+    lay_set_fields(ctx, inner, &inner_types, &inner_names, 2)
+    // Outer struct: {i32, inner_struct} — should be size=12, align=4
+    let outer = lay_register_type(ctx, LayTypeKind::TkStruct, LayRepr::ReprDefault)
+    var outer_types: [i64; 256] = [0; 256]
+    var outer_names: [i64; 256] = [0; 256]
+    outer_types[0 as usize] = t_i32
+    outer_types[1 as usize] = inner
+    outer_names[0 as usize] = 30
+    outer_names[1 as usize] = 40
+    lay_set_fields(ctx, outer, &outer_types, &outer_names, 2)
+    let l = lay_compute(ctx, outer)
+    // i32 at 0 (4), inner at 4 (size=8, align=4) -> total=12, align=4
+    l.size == 12 && l.align == 4 && l.fields[1 as usize].offset == 4
+}
+fn test_lay_13_nested_struct() -> i64 with IO, Mut, Div, Panic {
+    var ctx = lay_context_new()
+    lay_assert(test_lay_13_nested_struct_inner(&! ctx), 13)
+}
+
+// Test 14: Empty struct — size=0, align=1
+fn test_lay_14_empty_struct_inner(ctx: &! LayContext) -> bool with Mut, Div, Panic {
+    let s = lay_register_type(ctx, LayTypeKind::TkStruct, LayRepr::ReprDefault)
+    var types: [i64; 256] = [0; 256]
+    var names: [i64; 256] = [0; 256]
+    lay_set_fields(ctx, s, &types, &names, 0)
+    let l = lay_compute(ctx, s)
+    l.size == 0 && l.align == 1 && l.field_count == 0
+}
+fn test_lay_14_empty_struct() -> i64 with IO, Mut, Div, Panic {
+    var ctx = lay_context_new()
+    lay_assert(test_lay_14_empty_struct_inner(&! ctx), 14)
+}
+
+// Test 15: Single-field struct {i64} — size=8, align=8
+fn test_lay_15_single_field_inner(ctx: &! LayContext) -> bool with Mut, Div, Panic {
+    let t_i64 = lay_register_type(ctx, LayTypeKind::TkI64, LayRepr::ReprDefault)
+    let s = lay_register_type(ctx, LayTypeKind::TkStruct, LayRepr::ReprDefault)
+    var types: [i64; 256] = [0; 256]
+    var names: [i64; 256] = [0; 256]
+    types[0 as usize] = t_i64
+    names[0 as usize] = 100
+    lay_set_fields(ctx, s, &types, &names, 1)
+    let l = lay_compute(ctx, s)
+    l.size == 8 && l.align == 8 && l.stride == 8 && l.field_count == 1
+}
+fn test_lay_15_single_field() -> i64 with IO, Mut, Div, Panic {
+    var ctx = lay_context_new()
+    lay_assert(test_lay_15_single_field_inner(&! ctx), 15)
+}
+
+// Test 16: Struct {i8, i16, i32, i64} — increasing sizes
+fn test_lay_16_increasing_inner(ctx: &! LayContext) -> bool with Mut, Div, Panic {
+    let t_i8  = lay_register_type(ctx, LayTypeKind::TkI8, LayRepr::ReprDefault)
+    let t_i16 = lay_register_type(ctx, LayTypeKind::TkI16, LayRepr::ReprDefault)
+    let t_i32 = lay_register_type(ctx, LayTypeKind::TkI32, LayRepr::ReprDefault)
+    let t_i64 = lay_register_type(ctx, LayTypeKind::TkI64, LayRepr::ReprDefault)
+    let s = lay_register_type(ctx, LayTypeKind::TkStruct, LayRepr::ReprDefault)
+    var types: [i64; 256] = [0; 256]
+    var names: [i64; 256] = [0; 256]
+    types[0 as usize] = t_i8
+    types[1 as usize] = t_i16
+    types[2 as usize] = t_i32
+    types[3 as usize] = t_i64
+    names[0 as usize] = 1
+    names[1 as usize] = 2
+    names[2 as usize] = 3
+    names[3 as usize] = 4
+    lay_set_fields(ctx, s, &types, &names, 4)
+    let l = lay_compute(ctx, s)
+    // i8@0(1), pad 1, i16@2(2), i32@4(4), i64@8(8) => total=16, align=8
+    let ok_size = l.size == 16
+    let ok_align = l.align == 8
+    let ok_f0 = l.fields[0 as usize].offset == 0
+    let ok_f1 = l.fields[1 as usize].offset == 2
+    let ok_f2 = l.fields[2 as usize].offset == 4
+    let ok_f3 = l.fields[3 as usize].offset == 8
+    ok_size && ok_align && ok_f0 && ok_f1 && ok_f2 && ok_f3
+}
+fn test_lay_16_increasing() -> i64 with IO, Mut, Div, Panic {
+    var ctx = lay_context_new()
+    lay_assert(test_lay_16_increasing_inner(&! ctx), 16)
+}
+
+// Test 17: Struct total padding calculation
+fn test_lay_17_total_padding_inner(ctx: &! LayContext) -> bool with Mut, Div, Panic {
+    let t_i8  = lay_register_type(ctx, LayTypeKind::TkI8, LayRepr::ReprDefault)
+    let t_i64 = lay_register_type(ctx, LayTypeKind::TkI64, LayRepr::ReprDefault)
+    let s = lay_register_type(ctx, LayTypeKind::TkStruct, LayRepr::ReprDefault)
+    var types: [i64; 256] = [0; 256]
+    var names: [i64; 256] = [0; 256]
+    types[0 as usize] = t_i8
+    types[1 as usize] = t_i64
+    names[0 as usize] = 1
+    names[1 as usize] = 2
+    lay_set_fields(ctx, s, &types, &names, 2)
+    let l = lay_compute(ctx, s)
+    // size=16, field sizes = 1+8 = 9, padding = 7
+    let padding = lay_total_padding(&l)
+    padding == 7
+}
+fn test_lay_17_total_padding() -> i64 with IO, Mut, Div, Panic {
+    var ctx = lay_context_new()
+    lay_assert(test_lay_17_total_padding_inner(&! ctx), 17)
+}
+
+// Test 18: Struct field offset query
+fn test_lay_18_field_offset_inner(ctx: &! LayContext) -> bool with Mut, Div, Panic {
+    let t_i8  = lay_register_type(ctx, LayTypeKind::TkI8, LayRepr::ReprDefault)
+    let t_i32 = lay_register_type(ctx, LayTypeKind::TkI32, LayRepr::ReprDefault)
+    let t_i64 = lay_register_type(ctx, LayTypeKind::TkI64, LayRepr::ReprDefault)
+    let s = lay_register_type(ctx, LayTypeKind::TkStruct, LayRepr::ReprDefault)
+    var types: [i64; 256] = [0; 256]
+    var names: [i64; 256] = [0; 256]
+    types[0 as usize] = t_i8
+    types[1 as usize] = t_i32
+    types[2 as usize] = t_i64
+    names[0 as usize] = 1
+    names[1 as usize] = 2
+    names[2 as usize] = 3
+    lay_set_fields(ctx, s, &types, &names, 3)
+    let l = lay_compute(ctx, s)
+    // i8@0, i32@4, i64@8
+    let o0 = lay_field_offset(&l, 0)
+    let o1 = lay_field_offset(&l, 1)
+    let o2 = lay_field_offset(&l, 2)
+    o0 == 0 && o1 == 4 && o2 == 8
+}
+fn test_lay_18_field_offset() -> i64 with IO, Mut, Div, Panic {
+    var ctx = lay_context_new()
+    lay_assert(test_lay_18_field_offset_inner(&! ctx), 18)
+}
+
+// ============================================================
+// Section 21: Tests — C-compatible layout (tests 19-24)
+// ============================================================
+
+// Test 19: C struct {i32, i32} matches default
+fn test_lay_19_c_simple_inner(ctx: &! LayContext) -> bool with Mut, Div, Panic {
+    let t_i32 = lay_register_type(ctx, LayTypeKind::TkI32, LayRepr::ReprDefault)
+    let s = lay_register_type(ctx, LayTypeKind::TkStruct, LayRepr::ReprC)
+    var types: [i64; 256] = [0; 256]
+    var names: [i64; 256] = [0; 256]
+    types[0 as usize] = t_i32
+    types[1 as usize] = t_i32
+    names[0 as usize] = 100
+    names[1 as usize] = 200
+    lay_set_fields(ctx, s, &types, &names, 2)
+    let l = lay_compute(ctx, s)
+    l.size == 8 && l.align == 4
+}
+fn test_lay_19_c_simple() -> i64 with IO, Mut, Div, Panic {
+    var ctx = lay_context_new()
+    lay_assert(test_lay_19_c_simple_inner(&! ctx), 19)
+}
+
+// Test 20: C struct {i8, i64} — guaranteed C ABI padding
+fn test_lay_20_c_padding_inner(ctx: &! LayContext) -> bool with Mut, Div, Panic {
+    let t_i8  = lay_register_type(ctx, LayTypeKind::TkI8, LayRepr::ReprDefault)
+    let t_i64 = lay_register_type(ctx, LayTypeKind::TkI64, LayRepr::ReprDefault)
+    let s = lay_register_type(ctx, LayTypeKind::TkStruct, LayRepr::ReprC)
+    var types: [i64; 256] = [0; 256]
+    var names: [i64; 256] = [0; 256]
+    types[0 as usize] = t_i8
+    types[1 as usize] = t_i64
+    names[0 as usize] = 100
+    names[1 as usize] = 200
+    lay_set_fields(ctx, s, &types, &names, 2)
+    let l = lay_compute(ctx, s)
+    l.size == 16 && l.align == 8 && l.fields[1 as usize].offset == 8
+}
+fn test_lay_20_c_padding() -> i64 with IO, Mut, Div, Panic {
+    var ctx = lay_context_new()
+    lay_assert(test_lay_20_c_padding_inner(&! ctx), 20)
+}
+
+// Test 21: C struct preserves declaration order
+fn test_lay_21_c_order_inner(ctx: &! LayContext) -> bool with Mut, Div, Panic {
+    let t_i64 = lay_register_type(ctx, LayTypeKind::TkI64, LayRepr::ReprDefault)
+    let t_i8  = lay_register_type(ctx, LayTypeKind::TkI8, LayRepr::ReprDefault)
+    let t_i32 = lay_register_type(ctx, LayTypeKind::TkI32, LayRepr::ReprDefault)
+    let s = lay_register_type(ctx, LayTypeKind::TkStruct, LayRepr::ReprC)
+    var types: [i64; 256] = [0; 256]
+    var names: [i64; 256] = [0; 256]
+    types[0 as usize] = t_i64
+    types[1 as usize] = t_i8
+    types[2 as usize] = t_i32
+    names[0 as usize] = 1
+    names[1 as usize] = 2
+    names[2 as usize] = 3
+    lay_set_fields(ctx, s, &types, &names, 3)
+    let l = lay_compute(ctx, s)
+    // i64@0(8), i8@8(1), pad 3, i32@12(4), total=16, align=8
+    let ok_off = l.fields[0 as usize].offset == 0
+    let ok_o1 = l.fields[1 as usize].offset == 8
+    let ok_o2 = l.fields[2 as usize].offset == 12
+    let ok_size = l.size == 16
+    ok_off && ok_o1 && ok_o2 && ok_size
+}
+fn test_lay_21_c_order() -> i64 with IO, Mut, Div, Panic {
+    var ctx = lay_context_new()
+    lay_assert(test_lay_21_c_order_inner(&! ctx), 21)
+}
+
+// Test 22: C struct with all same-size fields (no padding)
+fn test_lay_22_c_no_padding_inner(ctx: &! LayContext) -> bool with Mut, Div, Panic {
+    let t_i32 = lay_register_type(ctx, LayTypeKind::TkI32, LayRepr::ReprDefault)
+    let s = lay_register_type(ctx, LayTypeKind::TkStruct, LayRepr::ReprC)
+    var types: [i64; 256] = [0; 256]
+    var names: [i64; 256] = [0; 256]
+    types[0 as usize] = t_i32
+    types[1 as usize] = t_i32
+    types[2 as usize] = t_i32
+    names[0 as usize] = 1
+    names[1 as usize] = 2
+    names[2 as usize] = 3
+    lay_set_fields(ctx, s, &types, &names, 3)
+    let l = lay_compute(ctx, s)
+    let padding = lay_total_padding(&l)
+    l.size == 12 && l.align == 4 && padding == 0
+}
+fn test_lay_22_c_no_padding() -> i64 with IO, Mut, Div, Panic {
+    var ctx = lay_context_new()
+    lay_assert(test_lay_22_c_no_padding_inner(&! ctx), 22)
+}
+
+// Test 23: C struct {bool, i16} — bool then i16
+fn test_lay_23_c_bool_i16_inner(ctx: &! LayContext) -> bool with Mut, Div, Panic {
+    let t_bool = lay_register_type(ctx, LayTypeKind::TkBool, LayRepr::ReprDefault)
+    let t_i16  = lay_register_type(ctx, LayTypeKind::TkI16, LayRepr::ReprDefault)
+    let s = lay_register_type(ctx, LayTypeKind::TkStruct, LayRepr::ReprC)
+    var types: [i64; 256] = [0; 256]
+    var names: [i64; 256] = [0; 256]
+    types[0 as usize] = t_bool
+    types[1 as usize] = t_i16
+    names[0 as usize] = 1
+    names[1 as usize] = 2
+    lay_set_fields(ctx, s, &types, &names, 2)
+    let l = lay_compute(ctx, s)
+    // bool@0(1), pad 1, i16@2(2) => size=4, align=2
+    l.size == 4 && l.align == 2 && l.fields[1 as usize].offset == 2
+}
+fn test_lay_23_c_bool_i16() -> i64 with IO, Mut, Div, Panic {
+    var ctx = lay_context_new()
+    lay_assert(test_lay_23_c_bool_i16_inner(&! ctx), 23)
+}
+
+// Test 24: C struct trailing padding {i64, i8}
+fn test_lay_24_c_trailing_inner(ctx: &! LayContext) -> bool with Mut, Div, Panic {
+    let t_i64 = lay_register_type(ctx, LayTypeKind::TkI64, LayRepr::ReprDefault)
+    let t_i8  = lay_register_type(ctx, LayTypeKind::TkI8, LayRepr::ReprDefault)
+    let s = lay_register_type(ctx, LayTypeKind::TkStruct, LayRepr::ReprC)
+    var types: [i64; 256] = [0; 256]
+    var names: [i64; 256] = [0; 256]
+    types[0 as usize] = t_i64
+    types[1 as usize] = t_i8
+    names[0 as usize] = 1
+    names[1 as usize] = 2
+    lay_set_fields(ctx, s, &types, &names, 2)
+    let l = lay_compute(ctx, s)
+    // i64@0(8), i8@8(1), trailing pad 7 => size=16, align=8
+    let trailing = lay_trailing_padding(&l)
+    l.size == 16 && l.align == 8 && trailing == 7
+}
+fn test_lay_24_c_trailing() -> i64 with IO, Mut, Div, Panic {
+    var ctx = lay_context_new()
+    lay_assert(test_lay_24_c_trailing_inner(&! ctx), 24)
+}
+
+// ============================================================
+// Section 22: Tests — Packed layout (tests 25-29)
+// ============================================================
+
+// Test 25: Packed {i8, i64} — no padding, size=9
+fn test_lay_25_packed_no_pad_inner(ctx: &! LayContext) -> bool with Mut, Div, Panic {
+    let t_i8  = lay_register_type(ctx, LayTypeKind::TkI8, LayRepr::ReprDefault)
+    let t_i64 = lay_register_type(ctx, LayTypeKind::TkI64, LayRepr::ReprDefault)
+    let s = lay_register_type(ctx, LayTypeKind::TkStruct, LayRepr::ReprPacked)
+    var types: [i64; 256] = [0; 256]
+    var names: [i64; 256] = [0; 256]
+    types[0 as usize] = t_i8
+    types[1 as usize] = t_i64
+    names[0 as usize] = 1
+    names[1 as usize] = 2
+    lay_set_fields(ctx, s, &types, &names, 2)
+    let l = lay_compute(ctx, s)
+    l.size == 9 && l.align == 1
+}
+fn test_lay_25_packed_no_pad() -> i64 with IO, Mut, Div, Panic {
+    var ctx = lay_context_new()
+    lay_assert(test_lay_25_packed_no_pad_inner(&! ctx), 25)
+}
+
+// Test 26: Packed {i32, i8, i32} — size=9, align=1
+fn test_lay_26_packed_mixed_inner(ctx: &! LayContext) -> bool with Mut, Div, Panic {
+    let t_i8  = lay_register_type(ctx, LayTypeKind::TkI8, LayRepr::ReprDefault)
+    let t_i32 = lay_register_type(ctx, LayTypeKind::TkI32, LayRepr::ReprDefault)
+    let s = lay_register_type(ctx, LayTypeKind::TkStruct, LayRepr::ReprPacked)
+    var types: [i64; 256] = [0; 256]
+    var names: [i64; 256] = [0; 256]
+    types[0 as usize] = t_i32
+    types[1 as usize] = t_i8
+    types[2 as usize] = t_i32
+    names[0 as usize] = 1
+    names[1 as usize] = 2
+    names[2 as usize] = 3
+    lay_set_fields(ctx, s, &types, &names, 3)
+    let l = lay_compute(ctx, s)
+    // i32@0(4), i8@4(1), i32@5(4) => size=9, align=1
+    l.size == 9 && l.align == 1 && l.fields[2 as usize].offset == 5
+}
+fn test_lay_26_packed_mixed() -> i64 with IO, Mut, Div, Panic {
+    var ctx = lay_context_new()
+    lay_assert(test_lay_26_packed_mixed_inner(&! ctx), 26)
+}
+
+// Test 27: Packed total padding is zero
+fn test_lay_27_packed_zero_pad_inner(ctx: &! LayContext) -> bool with Mut, Div, Panic {
+    let t_i8  = lay_register_type(ctx, LayTypeKind::TkI8, LayRepr::ReprDefault)
+    let t_i64 = lay_register_type(ctx, LayTypeKind::TkI64, LayRepr::ReprDefault)
+    let s = lay_register_type(ctx, LayTypeKind::TkStruct, LayRepr::ReprPacked)
+    var types: [i64; 256] = [0; 256]
+    var names: [i64; 256] = [0; 256]
+    types[0 as usize] = t_i8
+    types[1 as usize] = t_i64
+    types[2 as usize] = t_i8
+    names[0 as usize] = 1
+    names[1 as usize] = 2
+    names[2 as usize] = 3
+    lay_set_fields(ctx, s, &types, &names, 3)
+    let l = lay_compute(ctx, s)
+    let padding = lay_total_padding(&l)
+    padding == 0
+}
+fn test_lay_27_packed_zero_pad() -> i64 with IO, Mut, Div, Panic {
+    var ctx = lay_context_new()
+    lay_assert(test_lay_27_packed_zero_pad_inner(&! ctx), 27)
+}
+
+// Test 28: Packed field alignment is always 1
+fn test_lay_28_packed_align_inner(ctx: &! LayContext) -> bool with Mut, Div, Panic {
+    let t_i64 = lay_register_type(ctx, LayTypeKind::TkI64, LayRepr::ReprDefault)
+    let t_f64 = lay_register_type(ctx, LayTypeKind::TkF64, LayRepr::ReprDefault)
+    let s = lay_register_type(ctx, LayTypeKind::TkStruct, LayRepr::ReprPacked)
+    var types: [i64; 256] = [0; 256]
+    var names: [i64; 256] = [0; 256]
+    types[0 as usize] = t_i64
+    types[1 as usize] = t_f64
+    names[0 as usize] = 1
+    names[1 as usize] = 2
+    lay_set_fields(ctx, s, &types, &names, 2)
+    let l = lay_compute(ctx, s)
+    let ok_a0 = l.fields[0 as usize].align == 1
+    let ok_a1 = l.fields[1 as usize].align == 1
+    ok_a0 && ok_a1 && l.align == 1
+}
+fn test_lay_28_packed_align() -> i64 with IO, Mut, Div, Panic {
+    var ctx = lay_context_new()
+    lay_assert(test_lay_28_packed_align_inner(&! ctx), 28)
+}
+
+// Test 29: Packed empty struct
+fn test_lay_29_packed_empty_inner(ctx: &! LayContext) -> bool with Mut, Div, Panic {
+    let s = lay_register_type(ctx, LayTypeKind::TkStruct, LayRepr::ReprPacked)
+    var types: [i64; 256] = [0; 256]
+    var names: [i64; 256] = [0; 256]
+    lay_set_fields(ctx, s, &types, &names, 0)
+    let l = lay_compute(ctx, s)
+    l.size == 0 && l.align == 1
+}
+fn test_lay_29_packed_empty() -> i64 with IO, Mut, Div, Panic {
+    var ctx = lay_context_new()
+    lay_assert(test_lay_29_packed_empty_inner(&! ctx), 29)
+}
+
+// ============================================================
+// Section 23: Tests — Optimized layout (tests 30-35)
+// ============================================================
+
+// Test 30: Optimized {i8, i64, i8} — reorders to {i64, i8, i8}
+fn test_lay_30_opt_reorder_inner(ctx: &! LayContext) -> bool with Mut, Div, Panic {
+    let t_i8  = lay_register_type(ctx, LayTypeKind::TkI8, LayRepr::ReprDefault)
+    let t_i64 = lay_register_type(ctx, LayTypeKind::TkI64, LayRepr::ReprDefault)
+    let s = lay_register_type(ctx, LayTypeKind::TkStruct, LayRepr::ReprDefault)
+    var types: [i64; 256] = [0; 256]
+    var names: [i64; 256] = [0; 256]
+    types[0 as usize] = t_i8
+    types[1 as usize] = t_i64
+    types[2 as usize] = t_i8
+    names[0 as usize] = 1
+    names[1 as usize] = 2
+    names[2 as usize] = 3
+    lay_set_fields(ctx, s, &types, &names, 3)
+    let l = lay_compute_struct_optimized(ctx, s)
+    // Sorted: i64(align=8), i8(align=1), i8(align=1)
+    // i64@0(8), i8@8(1), i8@9(1) => size = align_up(10, 8) = 16
+    l.size == 16 && l.align == 8
+}
+fn test_lay_30_opt_reorder() -> i64 with IO, Mut, Div, Panic {
+    var ctx = lay_context_new()
+    lay_assert(test_lay_30_opt_reorder_inner(&! ctx), 30)
+}
+
+// Test 31: Optimized reduces padding vs declared order
+fn test_lay_31_opt_less_padding_inner(ctx: &! LayContext) -> bool with Mut, Div, Panic {
+    let t_i8  = lay_register_type(ctx, LayTypeKind::TkI8, LayRepr::ReprDefault)
+    let t_i32 = lay_register_type(ctx, LayTypeKind::TkI32, LayRepr::ReprDefault)
+    let t_i64 = lay_register_type(ctx, LayTypeKind::TkI64, LayRepr::ReprDefault)
+    let s = lay_register_type(ctx, LayTypeKind::TkStruct, LayRepr::ReprDefault)
+    var types: [i64; 256] = [0; 256]
+    var names: [i64; 256] = [0; 256]
+    // Declared: i8, i64, i8, i32 => many gaps
+    types[0 as usize] = t_i8
+    types[1 as usize] = t_i64
+    types[2 as usize] = t_i8
+    types[3 as usize] = t_i32
+    names[0 as usize] = 1
+    names[1 as usize] = 2
+    names[2 as usize] = 3
+    names[3 as usize] = 4
+    lay_set_fields(ctx, s, &types, &names, 4)
+    let declared = lay_compute_struct(ctx, s)
+    lay_cache_invalidate(ctx, s)
+    let optimized = lay_compute_struct_optimized(ctx, s)
+    let pad_declared = lay_total_padding(&declared)
+    let pad_optimized = lay_total_padding(&optimized)
+    pad_optimized <= pad_declared
+}
+fn test_lay_31_opt_less_padding() -> i64 with IO, Mut, Div, Panic {
+    var ctx = lay_context_new()
+    lay_assert(test_lay_31_opt_less_padding_inner(&! ctx), 31)
+}
+
+// Test 32: Optimized uniform fields — same size, no change
+fn test_lay_32_opt_uniform_inner(ctx: &! LayContext) -> bool with Mut, Div, Panic {
+    let t_i32 = lay_register_type(ctx, LayTypeKind::TkI32, LayRepr::ReprDefault)
+    let s = lay_register_type(ctx, LayTypeKind::TkStruct, LayRepr::ReprDefault)
+    var types: [i64; 256] = [0; 256]
+    var names: [i64; 256] = [0; 256]
+    types[0 as usize] = t_i32
+    types[1 as usize] = t_i32
+    types[2 as usize] = t_i32
+    names[0 as usize] = 1
+    names[1 as usize] = 2
+    names[2 as usize] = 3
+    lay_set_fields(ctx, s, &types, &names, 3)
+    let declared = lay_compute_struct(ctx, s)
+    lay_cache_invalidate(ctx, s)
+    let optimized = lay_compute_struct_optimized(ctx, s)
+    declared.size == optimized.size
+}
+fn test_lay_32_opt_uniform() -> i64 with IO, Mut, Div, Panic {
+    var ctx = lay_context_new()
+    lay_assert(test_lay_32_opt_uniform_inner(&! ctx), 32)
+}
+
+// Test 33: Optimized single field — no change
+fn test_lay_33_opt_single_inner(ctx: &! LayContext) -> bool with Mut, Div, Panic {
+    let t_i64 = lay_register_type(ctx, LayTypeKind::TkI64, LayRepr::ReprDefault)
+    let s = lay_register_type(ctx, LayTypeKind::TkStruct, LayRepr::ReprDefault)
+    var types: [i64; 256] = [0; 256]
+    var names: [i64; 256] = [0; 256]
+    types[0 as usize] = t_i64
+    names[0 as usize] = 1
+    lay_set_fields(ctx, s, &types, &names, 1)
+    let optimized = lay_compute_struct_optimized(ctx, s)
+    optimized.size == 8 && optimized.align == 8
+}
+fn test_lay_33_opt_single() -> i64 with IO, Mut, Div, Panic {
+    var ctx = lay_context_new()
+    lay_assert(test_lay_33_opt_single_inner(&! ctx), 33)
+}
+
+// Test 34: Optimized {i8, i32, i8, i16} — sorted by descending align
+fn test_lay_34_opt_4fields_inner(ctx: &! LayContext) -> bool with Mut, Div, Panic {
+    let t_i8  = lay_register_type(ctx, LayTypeKind::TkI8, LayRepr::ReprDefault)
+    let t_i16 = lay_register_type(ctx, LayTypeKind::TkI16, LayRepr::ReprDefault)
+    let t_i32 = lay_register_type(ctx, LayTypeKind::TkI32, LayRepr::ReprDefault)
+    let s = lay_register_type(ctx, LayTypeKind::TkStruct, LayRepr::ReprDefault)
+    var types: [i64; 256] = [0; 256]
+    var names: [i64; 256] = [0; 256]
+    types[0 as usize] = t_i8
+    types[1 as usize] = t_i32
+    types[2 as usize] = t_i8
+    types[3 as usize] = t_i16
+    names[0 as usize] = 1
+    names[1 as usize] = 2
+    names[2 as usize] = 3
+    names[3 as usize] = 4
+    lay_set_fields(ctx, s, &types, &names, 4)
+    let l = lay_compute_struct_optimized(ctx, s)
+    // Sorted: i32(4), i16(2), i8(1), i8(1)
+    // i32@0(4), i16@4(2), i8@6(1), i8@7(1) => size=8, align=4
+    l.size == 8 && l.align == 4
+}
+fn test_lay_34_opt_4fields() -> i64 with IO, Mut, Div, Panic {
+    var ctx = lay_context_new()
+    lay_assert(test_lay_34_opt_4fields_inner(&! ctx), 34)
+}
+
+// Test 35: Optimized preserves field count
+fn test_lay_35_opt_field_count_inner(ctx: &! LayContext) -> bool with Mut, Div, Panic {
+    let t_i8  = lay_register_type(ctx, LayTypeKind::TkI8, LayRepr::ReprDefault)
+    let t_i32 = lay_register_type(ctx, LayTypeKind::TkI32, LayRepr::ReprDefault)
+    let t_i64 = lay_register_type(ctx, LayTypeKind::TkI64, LayRepr::ReprDefault)
+    let s = lay_register_type(ctx, LayTypeKind::TkStruct, LayRepr::ReprDefault)
+    var types: [i64; 256] = [0; 256]
+    var names: [i64; 256] = [0; 256]
+    types[0 as usize] = t_i8
+    types[1 as usize] = t_i64
+    types[2 as usize] = t_i32
+    names[0 as usize] = 1
+    names[1 as usize] = 2
+    names[2 as usize] = 3
+    lay_set_fields(ctx, s, &types, &names, 3)
+    let l = lay_compute_struct_optimized(ctx, s)
+    l.field_count == 3
+}
+fn test_lay_35_opt_field_count() -> i64 with IO, Mut, Div, Panic {
+    var ctx = lay_context_new()
+    lay_assert(test_lay_35_opt_field_count_inner(&! ctx), 35)
+}
+
+// ============================================================
+// Section 24: Tests — Enum layout (tests 36-43)
+// ============================================================
+
+// Test 36: Simple enum with 2 empty variants — disc=1 byte
+fn test_lay_36_enum_2_empty_inner(ctx: &! LayContext) -> bool with Mut, Div, Panic {
+    let e = lay_register_type(ctx, LayTypeKind::TkEnum, LayRepr::ReprDefault)
+    lay_set_variant_count(ctx, e, 2)
+    let el = lay_compute_enum(ctx, e)
+    let disc_bytes = lay_disc_size_bytes(el.disc_size)
+    disc_bytes == 1 && el.variant_count == 2
+}
+fn test_lay_36_enum_2_empty() -> i64 with IO, Mut, Div, Panic {
+    var ctx = lay_context_new()
+    lay_assert(test_lay_36_enum_2_empty_inner(&! ctx), 36)
+}
+
+// Test 37: Enum discriminant sizing — 256 variants fits in 1 byte
+fn test_lay_37_disc_256_inner() -> bool {
+    let d = lay_discriminant_size(256)
+    lay_disc_size_bytes(d) == 1
+}
+fn test_lay_37_disc_256() -> i64 with IO {
+    lay_assert(test_lay_37_disc_256_inner(), 37)
+}
+
+// Test 38: Enum discriminant sizing — 257 variants needs 2 bytes
+fn test_lay_38_disc_257_inner() -> bool {
+    let d = lay_discriminant_size(257)
+    lay_disc_size_bytes(d) == 2
+}
+fn test_lay_38_disc_257() -> i64 with IO {
+    lay_assert(test_lay_38_disc_257_inner(), 38)
+}
+
+// Test 39: Enum discriminant sizing — 65536 variants fits in 2 bytes
+fn test_lay_39_disc_65536_inner() -> bool {
+    let d = lay_discriminant_size(65536)
+    lay_disc_size_bytes(d) == 2
+}
+fn test_lay_39_disc_65536() -> i64 with IO {
+    lay_assert(test_lay_39_disc_65536_inner(), 39)
+}
+
+// Test 40: Enum discriminant sizing — 65537 variants needs 4 bytes
+fn test_lay_40_disc_65537_inner() -> bool {
+    let d = lay_discriminant_size(65537)
+    lay_disc_size_bytes(d) == 4
+}
+fn test_lay_40_disc_65537() -> i64 with IO {
+    lay_assert(test_lay_40_disc_65537_inner(), 40)
+}
+
+// Test 41: Enum with payload variant
+fn test_lay_41_enum_payload_inner(ctx: &! LayContext) -> bool with Mut, Div, Panic {
+    let t_i32 = lay_register_type(ctx, LayTypeKind::TkI32, LayRepr::ReprDefault)
+    let e = lay_register_type(ctx, LayTypeKind::TkEnum, LayRepr::ReprDefault)
+    // Set variant 0 with one i32 field (stored in field_types[0])
+    var desc = ctx.types[e as usize]
+    desc.variant_count = 2
+    desc.field_types[0 as usize] = t_i32
+    ctx.types[e as usize] = desc
+    let el = lay_compute_enum(ctx, e)
+    // disc(1) + pad to align 4 + payload(4) => total = 8, align = 4
+    el.total_size == 8 && el.total_align == 4
+}
+fn test_lay_41_enum_payload() -> i64 with IO, Mut, Div, Panic {
+    var ctx = lay_context_new()
+    lay_assert(test_lay_41_enum_payload_inner(&! ctx), 41)
+}
+
+// Test 42: Enum with i64 payload — alignment drives total
+fn test_lay_42_enum_i64_payload_inner(ctx: &! LayContext) -> bool with Mut, Div, Panic {
+    let t_i64 = lay_register_type(ctx, LayTypeKind::TkI64, LayRepr::ReprDefault)
+    let e = lay_register_type(ctx, LayTypeKind::TkEnum, LayRepr::ReprDefault)
+    var desc = ctx.types[e as usize]
+    desc.variant_count = 3
+    desc.field_types[0 as usize] = t_i64
+    ctx.types[e as usize] = desc
+    let el = lay_compute_enum(ctx, e)
+    // disc(1) + pad to align 8 + payload(8) => total = 16, align = 8
+    el.total_size == 16 && el.total_align == 8
+}
+fn test_lay_42_enum_i64_payload() -> i64 with IO, Mut, Div, Panic {
+    var ctx = lay_context_new()
+    lay_assert(test_lay_42_enum_i64_payload_inner(&! ctx), 42)
+}
+
+// Test 43: Single-variant enum — niche optimization
+fn test_lay_43_enum_niche_inner(ctx: &! LayContext) -> bool with Mut, Div, Panic {
+    let t_i32 = lay_register_type(ctx, LayTypeKind::TkI32, LayRepr::ReprDefault)
+    let e = lay_register_type(ctx, LayTypeKind::TkEnum, LayRepr::ReprDefault)
+    var desc = ctx.types[e as usize]
+    desc.variant_count = 1
+    desc.field_types[0 as usize] = t_i32
+    ctx.types[e as usize] = desc
+    let el = lay_compute_enum(ctx, e)
+    el.is_niche_opt && el.total_size == 4 && el.total_align == 4
+}
+fn test_lay_43_enum_niche() -> i64 with IO, Mut, Div, Panic {
+    var ctx = lay_context_new()
+    lay_assert(test_lay_43_enum_niche_inner(&! ctx), 43)
+}
+
+// ============================================================
+// Section 25: Tests — Array layout (tests 44-48)
+// ============================================================
+
+// Test 44: [i32; 4] — size=16, align=4
+fn test_lay_44_array_i32_inner(ctx: &! LayContext) -> bool with Mut, Div, Panic {
+    let t_i32 = lay_register_type(ctx, LayTypeKind::TkI32, LayRepr::ReprDefault)
+    let a = lay_register_type(ctx, LayTypeKind::TkArray, LayRepr::ReprDefault)
+    lay_set_array_info(ctx, a, t_i32, 4)
+    let l = lay_compute(ctx, a)
+    l.size == 16 && l.align == 4
+}
+fn test_lay_44_array_i32() -> i64 with IO, Mut, Div, Panic {
+    var ctx = lay_context_new()
+    lay_assert(test_lay_44_array_i32_inner(&! ctx), 44)
+}
+
+// Test 45: [i64; 3] — size=24, align=8
+fn test_lay_45_array_i64_inner(ctx: &! LayContext) -> bool with Mut, Div, Panic {
+    let t_i64 = lay_register_type(ctx, LayTypeKind::TkI64, LayRepr::ReprDefault)
+    let a = lay_register_type(ctx, LayTypeKind::TkArray, LayRepr::ReprDefault)
+    lay_set_array_info(ctx, a, t_i64, 3)
+    let l = lay_compute(ctx, a)
+    l.size == 24 && l.align == 8
+}
+fn test_lay_45_array_i64() -> i64 with IO, Mut, Div, Panic {
+    var ctx = lay_context_new()
+    lay_assert(test_lay_45_array_i64_inner(&! ctx), 45)
+}
+
+// Test 46: [i8; 10] — size=10, align=1
+fn test_lay_46_array_i8_inner(ctx: &! LayContext) -> bool with Mut, Div, Panic {
+    let t_i8 = lay_register_type(ctx, LayTypeKind::TkI8, LayRepr::ReprDefault)
+    let a = lay_register_type(ctx, LayTypeKind::TkArray, LayRepr::ReprDefault)
+    lay_set_array_info(ctx, a, t_i8, 10)
+    let l = lay_compute(ctx, a)
+    l.size == 10 && l.align == 1
+}
+fn test_lay_46_array_i8() -> i64 with IO, Mut, Div, Panic {
+    var ctx = lay_context_new()
+    lay_assert(test_lay_46_array_i8_inner(&! ctx), 46)
+}
+
+// Test 47: Empty array [i32; 0] — size=0
+fn test_lay_47_array_empty_inner(ctx: &! LayContext) -> bool with Mut, Div, Panic {
+    let t_i32 = lay_register_type(ctx, LayTypeKind::TkI32, LayRepr::ReprDefault)
+    let a = lay_register_type(ctx, LayTypeKind::TkArray, LayRepr::ReprDefault)
+    lay_set_array_info(ctx, a, t_i32, 0)
+    let l = lay_compute(ctx, a)
+    l.size == 0
+}
+fn test_lay_47_array_empty() -> i64 with IO, Mut, Div, Panic {
+    var ctx = lay_context_new()
+    lay_assert(test_lay_47_array_empty_inner(&! ctx), 47)
+}
+
+// Test 48: Nested array — array of structs
+fn test_lay_48_array_of_struct_inner(ctx: &! LayContext) -> bool with Mut, Div, Panic {
+    let t_i32 = lay_register_type(ctx, LayTypeKind::TkI32, LayRepr::ReprDefault)
+    let t_i8  = lay_register_type(ctx, LayTypeKind::TkI8, LayRepr::ReprDefault)
+    // struct {i32, i8} => size=8, align=4 (trailing pad)
+    let s = lay_register_type(ctx, LayTypeKind::TkStruct, LayRepr::ReprDefault)
+    var types: [i64; 256] = [0; 256]
+    var names: [i64; 256] = [0; 256]
+    types[0 as usize] = t_i32
+    types[1 as usize] = t_i8
+    names[0 as usize] = 1
+    names[1 as usize] = 2
+    lay_set_fields(ctx, s, &types, &names, 2)
+    // Array of 3 such structs
+    let a = lay_register_type(ctx, LayTypeKind::TkArray, LayRepr::ReprDefault)
+    lay_set_array_info(ctx, a, s, 3)
+    let l = lay_compute(ctx, a)
+    // struct stride = 8, array size = 8 * 3 = 24
+    l.size == 24 && l.align == 4
+}
+fn test_lay_48_array_of_struct() -> i64 with IO, Mut, Div, Panic {
+    var ctx = lay_context_new()
+    lay_assert(test_lay_48_array_of_struct_inner(&! ctx), 48)
+}
+
+// ============================================================
+// Section 26: Tests — Alignment and stride (tests 49-54)
+// ============================================================
+
+// Test 49: align_up basic cases
+fn test_lay_49_align_up_inner() -> bool {
+    let a1 = lay_align_up(0, 4)
+    let a2 = lay_align_up(1, 4)
+    let a3 = lay_align_up(4, 4)
+    let a4 = lay_align_up(5, 8)
+    let a5 = lay_align_up(7, 1)
+    a1 == 0 && a2 == 4 && a3 == 4 && a4 == 8 && a5 == 7
+}
+fn test_lay_49_align_up() -> i64 with IO {
+    lay_assert(test_lay_49_align_up_inner(), 49)
+}
+
+// Test 50: stride computation
+fn test_lay_50_stride_inner() -> bool {
+    let s1 = lay_stride(5, 4)
+    let s2 = lay_stride(8, 8)
+    let s3 = lay_stride(1, 1)
+    let s4 = lay_stride(9, 8)
+    s1 == 8 && s2 == 8 && s3 == 1 && s4 == 16
+}
+fn test_lay_50_stride() -> i64 with IO {
+    lay_assert(test_lay_50_stride_inner(), 50)
+}
+
+// Test 51: Extra alignment override
+fn test_lay_51_extra_align_inner(ctx: &! LayContext) -> bool with Mut, Div, Panic {
+    let t_i32 = lay_register_type(ctx, LayTypeKind::TkI32, LayRepr::ReprAligned)
+    let s = lay_register_type(ctx, LayTypeKind::TkStruct, LayRepr::ReprAligned)
+    var types: [i64; 256] = [0; 256]
+    var names: [i64; 256] = [0; 256]
+    types[0 as usize] = t_i32
+    names[0 as usize] = 1
+    lay_set_fields(ctx, s, &types, &names, 1)
+    lay_set_extra_align(ctx, s, 16)
+    let l = lay_compute(ctx, s)
+    // i32 is 4 bytes but align overridden to 16 => size = 16, align = 16
+    l.align == 16 && l.size == 16
+}
+fn test_lay_51_extra_align() -> i64 with IO, Mut, Div, Panic {
+    var ctx = lay_context_new()
+    lay_assert(test_lay_51_extra_align_inner(&! ctx), 51)
+}
+
+// Test 52: Unit type is ZST
+fn test_lay_52_unit_zst_inner(ctx: &! LayContext) -> bool with Mut, Div, Panic {
+    let u = lay_register_type(ctx, LayTypeKind::TkUnit, LayRepr::ReprDefault)
+    let l = lay_compute(ctx, u)
+    let is_zst = lay_is_zst(&l)
+    is_zst && l.size == 0
+}
+fn test_lay_52_unit_zst() -> i64 with IO, Mut, Div, Panic {
+    var ctx = lay_context_new()
+    lay_assert(test_lay_52_unit_zst_inner(&! ctx), 52)
+}
+
+// Test 53: Never type is ZST
+fn test_lay_53_never_zst_inner(ctx: &! LayContext) -> bool with Mut, Div, Panic {
+    let n = lay_register_type(ctx, LayTypeKind::TkNever, LayRepr::ReprDefault)
+    let l = lay_compute(ctx, n)
+    lay_is_zst(&l)
+}
+fn test_lay_53_never_zst() -> i64 with IO, Mut, Div, Panic {
+    var ctx = lay_context_new()
+    lay_assert(test_lay_53_never_zst_inner(&! ctx), 53)
+}
+
+// Test 54: 32-bit target pointer size
+fn test_lay_54_32bit_ptr_inner(ctx: &! LayContext) -> bool with Mut, Div, Panic {
+    let p = lay_register_type(ctx, LayTypeKind::TkPtr, LayRepr::ReprDefault)
+    let l = lay_compute(ctx, p)
+    l.size == 4 && l.align == 4
+}
+fn test_lay_54_32bit_ptr() -> i64 with IO, Mut, Div, Panic {
+    var ctx = lay_context_new_32bit()
+    lay_assert(test_lay_54_32bit_ptr_inner(&! ctx), 54)
+}
+
+// ============================================================
+// Section 27: Tests — Caching (tests 55-57)
+// ============================================================
+
+// Test 55: Cache hit — second compute is cached
+fn test_lay_55_cache_hit_inner(ctx: &! LayContext) -> bool with Mut, Div, Panic {
+    let t_i32 = lay_register_type(ctx, LayTypeKind::TkI32, LayRepr::ReprDefault)
+    // First compute — should miss cache and insert
+    let l1 = lay_compute(ctx, t_i32)
+    // Second compute — should hit cache
+    let cidx = lay_cache_lookup(ctx, t_i32)
+    cidx != LAY_INVALID && l1.size == 4
+}
+fn test_lay_55_cache_hit() -> i64 with IO, Mut, Div, Panic {
+    var ctx = lay_context_new()
+    lay_assert(test_lay_55_cache_hit_inner(&! ctx), 55)
+}
+
+// Test 56: Cache miss — unregistered type
+fn test_lay_56_cache_miss_inner(ctx: &! LayContext) -> bool with Mut, Div, Panic {
+    let cidx = lay_cache_lookup(ctx, 999)
+    cidx == LAY_INVALID
+}
+fn test_lay_56_cache_miss() -> i64 with IO, Mut, Div, Panic {
+    var ctx = lay_context_new()
+    lay_assert(test_lay_56_cache_miss_inner(&! ctx), 56)
+}
+
+// Test 57: Cache invalidation
+fn test_lay_57_cache_invalidate_inner(ctx: &! LayContext) -> bool with Mut, Div, Panic {
+    let t_i64 = lay_register_type(ctx, LayTypeKind::TkI64, LayRepr::ReprDefault)
+    let l1 = lay_compute(ctx, t_i64)
+    // Verify cached
+    let before = lay_cache_lookup(ctx, t_i64)
+    let ok_before = before != LAY_INVALID
+    // Invalidate
+    lay_cache_invalidate(ctx, t_i64)
+    let after = lay_cache_lookup(ctx, t_i64)
+    let ok_after = after == LAY_INVALID
+    ok_before && ok_after
+}
+fn test_lay_57_cache_invalidate() -> i64 with IO, Mut, Div, Panic {
+    var ctx = lay_context_new()
+    lay_assert(test_lay_57_cache_invalidate_inner(&! ctx), 57)
+}
+
+// ============================================================
+// Section 28: Tests — Integration (tests 58-60)
+// ============================================================
+
+// Test 58: Complex nested type — struct containing array and another struct
+fn test_lay_58_complex_nested_inner(ctx: &! LayContext) -> bool with Mut, Div, Panic {
+    let t_i8  = lay_register_type(ctx, LayTypeKind::TkI8, LayRepr::ReprDefault)
+    let t_i32 = lay_register_type(ctx, LayTypeKind::TkI32, LayRepr::ReprDefault)
+    let t_i64 = lay_register_type(ctx, LayTypeKind::TkI64, LayRepr::ReprDefault)
+    // Inner struct: {i32, i8} => size=8, align=4
+    let inner = lay_register_type(ctx, LayTypeKind::TkStruct, LayRepr::ReprDefault)
+    var inner_types: [i64; 256] = [0; 256]
+    var inner_names: [i64; 256] = [0; 256]
+    inner_types[0 as usize] = t_i32
+    inner_types[1 as usize] = t_i8
+    inner_names[0 as usize] = 10
+    inner_names[1 as usize] = 20
+    lay_set_fields(ctx, inner, &inner_types, &inner_names, 2)
+    // Array: [i32; 4] => size=16, align=4
+    let arr = lay_register_type(ctx, LayTypeKind::TkArray, LayRepr::ReprDefault)
+    lay_set_array_info(ctx, arr, t_i32, 4)
+    // Outer struct: {i64, inner, arr}
+    let outer = lay_register_type(ctx, LayTypeKind::TkStruct, LayRepr::ReprDefault)
+    var outer_types: [i64; 256] = [0; 256]
+    var outer_names: [i64; 256] = [0; 256]
+    outer_types[0 as usize] = t_i64
+    outer_types[1 as usize] = inner
+    outer_types[2 as usize] = arr
+    outer_names[0 as usize] = 30
+    outer_names[1 as usize] = 40
+    outer_names[2 as usize] = 50
+    lay_set_fields(ctx, outer, &outer_types, &outer_names, 3)
+    let l = lay_compute(ctx, outer)
+    // i64@0(8), inner@8(8, align=4), arr@16(16, align=4) => total=32, align=8
+    l.size == 32 && l.align == 8 && l.fields[1 as usize].offset == 8
+}
+fn test_lay_58_complex_nested() -> i64 with IO, Mut, Div, Panic {
+    var ctx = lay_context_new()
+    lay_assert(test_lay_58_complex_nested_inner(&! ctx), 58)
+}
+
+// Test 59: Layout equality comparison
+fn test_lay_59_layout_eq_inner(ctx: &! LayContext) -> bool with Mut, Div, Panic {
+    let t1 = lay_register_type(ctx, LayTypeKind::TkI32, LayRepr::ReprDefault)
+    let t2 = lay_register_type(ctx, LayTypeKind::TkI32, LayRepr::ReprDefault)
+    let l1 = lay_compute(ctx, t1)
+    let l2 = lay_compute(ctx, t2)
+    // Both are i32 with identical layout
+    let eq = lay_layout_eq(&l1, &l2)
+    // Compare with a different type
+    let t3 = lay_register_type(ctx, LayTypeKind::TkI64, LayRepr::ReprDefault)
+    let l3 = lay_compute(ctx, t3)
+    let neq = lay_layout_eq(&l1, &l3) == false
+    eq && neq
+}
+fn test_lay_59_layout_eq() -> i64 with IO, Mut, Div, Panic {
+    var ctx = lay_context_new()
+    lay_assert(test_lay_59_layout_eq_inner(&! ctx), 59)
+}
+
+// Test 60: Ref and MutRef layout on 64-bit target
+fn test_lay_60_ref_layout_inner(ctx: &! LayContext) -> bool with Mut, Div, Panic {
+    let t_ref = lay_register_type(ctx, LayTypeKind::TkRef, LayRepr::ReprDefault)
+    let t_mut = lay_register_type(ctx, LayTypeKind::TkMutRef, LayRepr::ReprDefault)
+    let l_ref = lay_compute(ctx, t_ref)
+    let l_mut = lay_compute(ctx, t_mut)
+    let ok_ref = l_ref.size == 8 && l_ref.align == 8
+    let ok_mut = l_mut.size == 8 && l_mut.align == 8
+    let eq = lay_layout_eq(&l_ref, &l_mut)
+    ok_ref && ok_mut && eq
+}
+fn test_lay_60_ref_layout() -> i64 with IO, Mut, Div, Panic {
+    var ctx = lay_context_new()
+    lay_assert(test_lay_60_ref_layout_inner(&! ctx), 60)
+}
+
+// ============================================================
+// Section 29: Test runner
+// ============================================================
+
+fn lay_run_tests() -> i64 with IO, Mut, Div, Panic {
+    print("=== Layout computation tests ===\n")
+    var passed = 0
+    var failed = 0
+
+    // Primitive layouts (1-8)
+    let t01 = test_lay_01_i8()
+    if t01 == 0 { passed = passed + 1 } else { failed = failed + 1 }
+
+    let t02 = test_lay_02_i16()
+    if t02 == 0 { passed = passed + 1 } else { failed = failed + 1 }
+
+    let t03 = test_lay_03_i32()
+    if t03 == 0 { passed = passed + 1 } else { failed = failed + 1 }
+
+    let t04 = test_lay_04_i64()
+    if t04 == 0 { passed = passed + 1 } else { failed = failed + 1 }
+
+    let t05 = test_lay_05_f32()
+    if t05 == 0 { passed = passed + 1 } else { failed = failed + 1 }
+
+    let t06 = test_lay_06_f64()
+    if t06 == 0 { passed = passed + 1 } else { failed = failed + 1 }
+
+    let t07 = test_lay_07_bool()
+    if t07 == 0 { passed = passed + 1 } else { failed = failed + 1 }
+
+    let t08 = test_lay_08_ptr()
+    if t08 == 0 { passed = passed + 1 } else { failed = failed + 1 }
+
+    // Struct layout (9-18)
+    let t09 = test_lay_09_simple_struct()
+    if t09 == 0 { passed = passed + 1 } else { failed = failed + 1 }
+
+    let t10 = test_lay_10_padding_struct()
+    if t10 == 0 { passed = passed + 1 } else { failed = failed + 1 }
+
+    let t11 = test_lay_11_trailing_pad()
+    if t11 == 0 { passed = passed + 1 } else { failed = failed + 1 }
+
+    let t12 = test_lay_12_interleaved_pad()
+    if t12 == 0 { passed = passed + 1 } else { failed = failed + 1 }
+
+    let t13 = test_lay_13_nested_struct()
+    if t13 == 0 { passed = passed + 1 } else { failed = failed + 1 }
+
+    let t14 = test_lay_14_empty_struct()
+    if t14 == 0 { passed = passed + 1 } else { failed = failed + 1 }
+
+    let t15 = test_lay_15_single_field()
+    if t15 == 0 { passed = passed + 1 } else { failed = failed + 1 }
+
+    let t16 = test_lay_16_increasing()
+    if t16 == 0 { passed = passed + 1 } else { failed = failed + 1 }
+
+    let t17 = test_lay_17_total_padding()
+    if t17 == 0 { passed = passed + 1 } else { failed = failed + 1 }
+
+    let t18 = test_lay_18_field_offset()
+    if t18 == 0 { passed = passed + 1 } else { failed = failed + 1 }
+
+    // C-compatible layout (19-24)
+    let t19 = test_lay_19_c_simple()
+    if t19 == 0 { passed = passed + 1 } else { failed = failed + 1 }
+
+    let t20 = test_lay_20_c_padding()
+    if t20 == 0 { passed = passed + 1 } else { failed = failed + 1 }
+
+    let t21 = test_lay_21_c_order()
+    if t21 == 0 { passed = passed + 1 } else { failed = failed + 1 }
+
+    let t22 = test_lay_22_c_no_padding()
+    if t22 == 0 { passed = passed + 1 } else { failed = failed + 1 }
+
+    let t23 = test_lay_23_c_bool_i16()
+    if t23 == 0 { passed = passed + 1 } else { failed = failed + 1 }
+
+    let t24 = test_lay_24_c_trailing()
+    if t24 == 0 { passed = passed + 1 } else { failed = failed + 1 }
+
+    // Packed layout (25-29)
+    let t25 = test_lay_25_packed_no_pad()
+    if t25 == 0 { passed = passed + 1 } else { failed = failed + 1 }
+
+    let t26 = test_lay_26_packed_mixed()
+    if t26 == 0 { passed = passed + 1 } else { failed = failed + 1 }
+
+    let t27 = test_lay_27_packed_zero_pad()
+    if t27 == 0 { passed = passed + 1 } else { failed = failed + 1 }
+
+    let t28 = test_lay_28_packed_align()
+    if t28 == 0 { passed = passed + 1 } else { failed = failed + 1 }
+
+    let t29 = test_lay_29_packed_empty()
+    if t29 == 0 { passed = passed + 1 } else { failed = failed + 1 }
+
+    // Optimized layout (30-35)
+    let t30 = test_lay_30_opt_reorder()
+    if t30 == 0 { passed = passed + 1 } else { failed = failed + 1 }
+
+    let t31 = test_lay_31_opt_less_padding()
+    if t31 == 0 { passed = passed + 1 } else { failed = failed + 1 }
+
+    let t32 = test_lay_32_opt_uniform()
+    if t32 == 0 { passed = passed + 1 } else { failed = failed + 1 }
+
+    let t33 = test_lay_33_opt_single()
+    if t33 == 0 { passed = passed + 1 } else { failed = failed + 1 }
+
+    let t34 = test_lay_34_opt_4fields()
+    if t34 == 0 { passed = passed + 1 } else { failed = failed + 1 }
+
+    let t35 = test_lay_35_opt_field_count()
+    if t35 == 0 { passed = passed + 1 } else { failed = failed + 1 }
+
+    // Enum layout (36-43)
+    let t36 = test_lay_36_enum_2_empty()
+    if t36 == 0 { passed = passed + 1 } else { failed = failed + 1 }
+
+    let t37 = test_lay_37_disc_256()
+    if t37 == 0 { passed = passed + 1 } else { failed = failed + 1 }
+
+    let t38 = test_lay_38_disc_257()
+    if t38 == 0 { passed = passed + 1 } else { failed = failed + 1 }
+
+    let t39 = test_lay_39_disc_65536()
+    if t39 == 0 { passed = passed + 1 } else { failed = failed + 1 }
+
+    let t40 = test_lay_40_disc_65537()
+    if t40 == 0 { passed = passed + 1 } else { failed = failed + 1 }
+
+    let t41 = test_lay_41_enum_payload()
+    if t41 == 0 { passed = passed + 1 } else { failed = failed + 1 }
+
+    let t42 = test_lay_42_enum_i64_payload()
+    if t42 == 0 { passed = passed + 1 } else { failed = failed + 1 }
+
+    let t43 = test_lay_43_enum_niche()
+    if t43 == 0 { passed = passed + 1 } else { failed = failed + 1 }
+
+    // Array layout (44-48)
+    let t44 = test_lay_44_array_i32()
+    if t44 == 0 { passed = passed + 1 } else { failed = failed + 1 }
+
+    let t45 = test_lay_45_array_i64()
+    if t45 == 0 { passed = passed + 1 } else { failed = failed + 1 }
+
+    let t46 = test_lay_46_array_i8()
+    if t46 == 0 { passed = passed + 1 } else { failed = failed + 1 }
+
+    let t47 = test_lay_47_array_empty()
+    if t47 == 0 { passed = passed + 1 } else { failed = failed + 1 }
+
+    let t48 = test_lay_48_array_of_struct()
+    if t48 == 0 { passed = passed + 1 } else { failed = failed + 1 }
+
+    // Alignment and stride (49-54)
+    let t49 = test_lay_49_align_up()
+    if t49 == 0 { passed = passed + 1 } else { failed = failed + 1 }
+
+    let t50 = test_lay_50_stride()
+    if t50 == 0 { passed = passed + 1 } else { failed = failed + 1 }
+
+    let t51 = test_lay_51_extra_align()
+    if t51 == 0 { passed = passed + 1 } else { failed = failed + 1 }
+
+    let t52 = test_lay_52_unit_zst()
+    if t52 == 0 { passed = passed + 1 } else { failed = failed + 1 }
+
+    let t53 = test_lay_53_never_zst()
+    if t53 == 0 { passed = passed + 1 } else { failed = failed + 1 }
+
+    let t54 = test_lay_54_32bit_ptr()
+    if t54 == 0 { passed = passed + 1 } else { failed = failed + 1 }
+
+    // Caching (55-57)
+    let t55 = test_lay_55_cache_hit()
+    if t55 == 0 { passed = passed + 1 } else { failed = failed + 1 }
+
+    let t56 = test_lay_56_cache_miss()
+    if t56 == 0 { passed = passed + 1 } else { failed = failed + 1 }
+
+    let t57 = test_lay_57_cache_invalidate()
+    if t57 == 0 { passed = passed + 1 } else { failed = failed + 1 }
+
+    // Integration (58-60)
+    let t58 = test_lay_58_complex_nested()
+    if t58 == 0 { passed = passed + 1 } else { failed = failed + 1 }
+
+    let t59 = test_lay_59_layout_eq()
+    if t59 == 0 { passed = passed + 1 } else { failed = failed + 1 }
+
+    let t60 = test_lay_60_ref_layout()
+    if t60 == 0 { passed = passed + 1 } else { failed = failed + 1 }
+
+    // Summary
+    print("\nLayout tests: ")
+    print_int(passed)
+    print(" passed, ")
+    print_int(failed)
+    print(" failed out of 60\n")
+
+    if failed > 0 {
+        return 0 - failed
+    }
+    return passed
+}

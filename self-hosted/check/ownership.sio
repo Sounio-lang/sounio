@@ -1,0 +1,2836 @@
+// Ownership checker — move semantics, linear/affine enforcement, borrow
+// validation, and automatic drop insertion for the self-hosted compiler.
+//
+// This module implements a single-pass ownership analysis over a flat arena
+// of variable-info records.  Every variable has a state machine:
+//
+//   Uninit -> Owned -> { Moved | Borrowed | BorrowedMut | Dropped }
+//
+// The checker enforces:
+//   - Use-after-move detection
+//   - Double-free prevention
+//   - Borrow conflicts (shared+exclusive, double exclusive)
+//   - Linear types must be consumed exactly once
+//   - Affine types may be consumed at most once
+//   - Copy types may be freely duplicated
+//   - Scope-based automatic drop insertion
+//   - Branch merging (if/else ownership state join)
+//
+// All data structures are flat arrays (arena pattern) for self-hosted use.
+// All function and struct names use the `own_` prefix to avoid namespace
+// collisions.
+
+// ============================================================
+// Constants
+// ============================================================
+
+let OWN_MAX_VARS: i64 = 1024
+let OWN_MAX_BORROWS: i64 = 512
+let OWN_MAX_DROPS: i64 = 512
+let OWN_MAX_SCOPES: i64 = 128
+let OWN_MAX_ERRORS: i64 = 256
+let OWN_MAX_PATHS: i64 = 2048
+
+// ============================================================
+// Enum: OwnState — variable ownership state
+// ============================================================
+
+enum OwnState {
+    StateUninit,
+    StateOwned,
+    StateMoved,
+    StateBorrowed,
+    StateBorrowedMut,
+    StatePartiallyMoved,
+    StateDropped,
+}
+
+// ============================================================
+// Enum: OwnBorrowKind — borrow flavour
+// ============================================================
+
+enum OwnBorrowKind {
+    BorrowShared,
+    BorrowExclusive,
+}
+
+// ============================================================
+// Enum: OwnErrorKind — ownership error classification
+// ============================================================
+
+enum OwnErrorKind {
+    ErrUseAfterMove,
+    ErrDoubleFree,
+    ErrMissingDrop,
+    ErrBorrowWhileMutBorrowed,
+    ErrMutBorrowWhileBorrowed,
+    ErrMoveWhileBorrowed,
+    ErrUninitUse,
+    ErrPartialMove,
+}
+
+// ============================================================
+// Enum: OwnDropStrategy — how a variable should be dropped
+// ============================================================
+
+enum OwnDropStrategy {
+    DropAtScopeEnd,
+    DropAtLastUse,
+    DropManual,
+    DropNever,
+}
+
+// ============================================================
+// Enum: OwnTypeKind — type linearity classification
+// ============================================================
+
+enum OwnTypeKind {
+    TyLinear,
+    TyAffine,
+    TyCopy,
+    TyDrop,
+}
+
+// ============================================================
+// Struct: OwnVarInfo — per-variable ownership metadata
+// ============================================================
+
+struct OwnVarInfo {
+    id: i64,
+    state: OwnState,
+    type_kind: OwnTypeKind,
+    borrow_count: i64,
+    mut_borrow_count: i64,
+    scope_depth: i64,
+    defined_at: i64,
+    moved_at: i64,
+    dropped_at: i64,
+}
+
+fn own_empty_var_info() -> OwnVarInfo {
+    OwnVarInfo {
+        id: 0 - 1,
+        state: OwnState::StateUninit,
+        type_kind: OwnTypeKind::TyCopy,
+        borrow_count: 0,
+        mut_borrow_count: 0,
+        scope_depth: 0,
+        defined_at: 0,
+        moved_at: 0 - 1,
+        dropped_at: 0 - 1,
+    }
+}
+
+// ============================================================
+// Struct: OwnBorrowInfo — active borrow record
+// ============================================================
+
+struct OwnBorrowInfo {
+    borrow_id: i64,
+    var_id: i64,
+    kind: OwnBorrowKind,
+    scope_depth: i64,
+    created_at: i64,
+}
+
+fn own_empty_borrow_info() -> OwnBorrowInfo {
+    OwnBorrowInfo {
+        borrow_id: 0 - 1,
+        var_id: 0 - 1,
+        kind: OwnBorrowKind::BorrowShared,
+        scope_depth: 0,
+        created_at: 0,
+    }
+}
+
+// ============================================================
+// Struct: OwnDropPoint — scheduled drop location
+// ============================================================
+
+struct OwnDropPoint {
+    var_id: i64,
+    scope_depth: i64,
+    line: i64,
+    strategy: OwnDropStrategy,
+}
+
+fn own_empty_drop_point() -> OwnDropPoint {
+    OwnDropPoint {
+        var_id: 0 - 1,
+        scope_depth: 0,
+        line: 0,
+        strategy: OwnDropStrategy::DropNever,
+    }
+}
+
+// ============================================================
+// Struct: OwnScope — scope boundary
+// ============================================================
+
+struct OwnScope {
+    depth: i64,
+    var_start: i64,
+    var_end: i64,
+    borrow_start: i64,
+    is_loop: bool,
+}
+
+fn own_empty_scope() -> OwnScope {
+    OwnScope {
+        depth: 0,
+        var_start: 0,
+        var_end: 0,
+        borrow_start: 0,
+        is_loop: false,
+    }
+}
+
+// ============================================================
+// Struct: OwnError — recorded ownership violation
+// ============================================================
+
+struct OwnError {
+    kind: OwnErrorKind,
+    var_id: i64,
+    line: i64,
+    detail: i64,
+}
+
+fn own_empty_error() -> OwnError {
+    OwnError {
+        kind: OwnErrorKind::ErrUseAfterMove,
+        var_id: 0 - 1,
+        line: 0,
+        detail: 0,
+    }
+}
+
+// ============================================================
+// Struct: OwnContext — the full ownership-checking arena
+// ============================================================
+
+struct OwnContext {
+    vars: [OwnVarInfo; 1024],
+    var_count: i64,
+    borrows: [OwnBorrowInfo; 512],
+    borrow_count: i64,
+    drops: [OwnDropPoint; 512],
+    drop_count: i64,
+    scopes: [OwnScope; 128],
+    scope_depth: i64,
+    errors: [OwnError; 256],
+    error_count: i64,
+    paths: [i64; 2048],
+    path_count: i64,
+}
+
+// ============================================================
+// Context constructor
+// ============================================================
+
+fn own_context_new() -> OwnContext {
+    OwnContext {
+        vars: [own_empty_var_info(); 1024],
+        var_count: 0,
+        borrows: [own_empty_borrow_info(); 512],
+        borrow_count: 0,
+        drops: [own_empty_drop_point(); 512],
+        drop_count: 0,
+        scopes: [own_empty_scope(); 128],
+        scope_depth: 0,
+        errors: [own_empty_error(); 256],
+        error_count: 0,
+        paths: [0; 2048],
+        path_count: 0,
+    }
+}
+
+// ============================================================
+// State comparison helpers (must precede callers)
+// ============================================================
+
+fn own_state_eq(a: OwnState, b: OwnState) -> bool {
+    match a {
+        OwnState::StateUninit => match b {
+            OwnState::StateUninit => true
+            _ => false
+        }
+        OwnState::StateOwned => match b {
+            OwnState::StateOwned => true
+            _ => false
+        }
+        OwnState::StateMoved => match b {
+            OwnState::StateMoved => true
+            _ => false
+        }
+        OwnState::StateBorrowed => match b {
+            OwnState::StateBorrowed => true
+            _ => false
+        }
+        OwnState::StateBorrowedMut => match b {
+            OwnState::StateBorrowedMut => true
+            _ => false
+        }
+        OwnState::StatePartiallyMoved => match b {
+            OwnState::StatePartiallyMoved => true
+            _ => false
+        }
+        OwnState::StateDropped => match b {
+            OwnState::StateDropped => true
+            _ => false
+        }
+    }
+}
+
+fn own_state_is_uninit(s: OwnState) -> bool {
+    own_state_eq(s, OwnState::StateUninit)
+}
+
+fn own_state_is_owned(s: OwnState) -> bool {
+    own_state_eq(s, OwnState::StateOwned)
+}
+
+fn own_state_is_moved(s: OwnState) -> bool {
+    own_state_eq(s, OwnState::StateMoved)
+}
+
+fn own_state_is_borrowed(s: OwnState) -> bool {
+    own_state_eq(s, OwnState::StateBorrowed)
+}
+
+fn own_state_is_borrowed_mut(s: OwnState) -> bool {
+    own_state_eq(s, OwnState::StateBorrowedMut)
+}
+
+fn own_state_is_partially_moved(s: OwnState) -> bool {
+    own_state_eq(s, OwnState::StatePartiallyMoved)
+}
+
+fn own_state_is_dropped(s: OwnState) -> bool {
+    own_state_eq(s, OwnState::StateDropped)
+}
+
+// ============================================================
+// Type-kind comparison helpers
+// ============================================================
+
+fn own_type_kind_eq(a: OwnTypeKind, b: OwnTypeKind) -> bool {
+    match a {
+        OwnTypeKind::TyLinear => match b {
+            OwnTypeKind::TyLinear => true
+            _ => false
+        }
+        OwnTypeKind::TyAffine => match b {
+            OwnTypeKind::TyAffine => true
+            _ => false
+        }
+        OwnTypeKind::TyCopy => match b {
+            OwnTypeKind::TyCopy => true
+            _ => false
+        }
+        OwnTypeKind::TyDrop => match b {
+            OwnTypeKind::TyDrop => true
+            _ => false
+        }
+    }
+}
+
+fn own_type_is_linear(k: OwnTypeKind) -> bool {
+    own_type_kind_eq(k, OwnTypeKind::TyLinear)
+}
+
+fn own_type_is_affine(k: OwnTypeKind) -> bool {
+    own_type_kind_eq(k, OwnTypeKind::TyAffine)
+}
+
+fn own_type_is_copy(k: OwnTypeKind) -> bool {
+    own_type_kind_eq(k, OwnTypeKind::TyCopy)
+}
+
+fn own_type_is_drop(k: OwnTypeKind) -> bool {
+    own_type_kind_eq(k, OwnTypeKind::TyDrop)
+}
+
+// ============================================================
+// Borrow-kind comparison helpers
+// ============================================================
+
+fn own_borrow_kind_eq(a: OwnBorrowKind, b: OwnBorrowKind) -> bool {
+    match a {
+        OwnBorrowKind::BorrowShared => match b {
+            OwnBorrowKind::BorrowShared => true
+            _ => false
+        }
+        OwnBorrowKind::BorrowExclusive => match b {
+            OwnBorrowKind::BorrowExclusive => true
+            _ => false
+        }
+    }
+}
+
+fn own_borrow_is_shared(k: OwnBorrowKind) -> bool {
+    own_borrow_kind_eq(k, OwnBorrowKind::BorrowShared)
+}
+
+fn own_borrow_is_exclusive(k: OwnBorrowKind) -> bool {
+    own_borrow_kind_eq(k, OwnBorrowKind::BorrowExclusive)
+}
+
+// ============================================================
+// Error-kind comparison helper
+// ============================================================
+
+fn own_error_kind_eq(a: OwnErrorKind, b: OwnErrorKind) -> bool {
+    match a {
+        OwnErrorKind::ErrUseAfterMove => match b {
+            OwnErrorKind::ErrUseAfterMove => true
+            _ => false
+        }
+        OwnErrorKind::ErrDoubleFree => match b {
+            OwnErrorKind::ErrDoubleFree => true
+            _ => false
+        }
+        OwnErrorKind::ErrMissingDrop => match b {
+            OwnErrorKind::ErrMissingDrop => true
+            _ => false
+        }
+        OwnErrorKind::ErrBorrowWhileMutBorrowed => match b {
+            OwnErrorKind::ErrBorrowWhileMutBorrowed => true
+            _ => false
+        }
+        OwnErrorKind::ErrMutBorrowWhileBorrowed => match b {
+            OwnErrorKind::ErrMutBorrowWhileBorrowed => true
+            _ => false
+        }
+        OwnErrorKind::ErrMoveWhileBorrowed => match b {
+            OwnErrorKind::ErrMoveWhileBorrowed => true
+            _ => false
+        }
+        OwnErrorKind::ErrUninitUse => match b {
+            OwnErrorKind::ErrUninitUse => true
+            _ => false
+        }
+        OwnErrorKind::ErrPartialMove => match b {
+            OwnErrorKind::ErrPartialMove => true
+            _ => false
+        }
+    }
+}
+
+// ============================================================
+// Drop-strategy comparison helper
+// ============================================================
+
+fn own_drop_strategy_eq(a: OwnDropStrategy, b: OwnDropStrategy) -> bool {
+    match a {
+        OwnDropStrategy::DropAtScopeEnd => match b {
+            OwnDropStrategy::DropAtScopeEnd => true
+            _ => false
+        }
+        OwnDropStrategy::DropAtLastUse => match b {
+            OwnDropStrategy::DropAtLastUse => true
+            _ => false
+        }
+        OwnDropStrategy::DropManual => match b {
+            OwnDropStrategy::DropManual => true
+            _ => false
+        }
+        OwnDropStrategy::DropNever => match b {
+            OwnDropStrategy::DropNever => true
+            _ => false
+        }
+    }
+}
+
+// ============================================================
+// Bounds-checking helpers
+// ============================================================
+
+fn own_var_in_bounds(ctx: &OwnContext, var_id: i64) -> bool {
+    if var_id < 0 { return false }
+    if var_id >= ctx.var_count { return false }
+    true
+}
+
+fn own_borrow_in_bounds(ctx: &OwnContext, borrow_id: i64) -> bool {
+    if borrow_id < 0 { return false }
+    if borrow_id >= ctx.borrow_count { return false }
+    true
+}
+
+// ============================================================
+// Error recording
+// ============================================================
+
+fn own_add_error(ctx: &! OwnContext, kind: OwnErrorKind, var_id: i64, line: i64) with Mut, Div, Panic {
+    if ctx.error_count < OWN_MAX_ERRORS {
+        ctx.errors[ctx.error_count as usize] = OwnError {
+            kind: kind,
+            var_id: var_id,
+            line: line,
+            detail: 0,
+        }
+        ctx.error_count = ctx.error_count + 1
+    }
+}
+
+fn own_add_error_with_detail(ctx: &! OwnContext, kind: OwnErrorKind, var_id: i64, line: i64, detail: i64) with Mut, Div, Panic {
+    if ctx.error_count < OWN_MAX_ERRORS {
+        ctx.errors[ctx.error_count as usize] = OwnError {
+            kind: kind,
+            var_id: var_id,
+            line: line,
+            detail: detail,
+        }
+        ctx.error_count = ctx.error_count + 1
+    }
+}
+
+fn own_has_errors(ctx: &OwnContext) -> bool {
+    ctx.error_count > 0
+}
+
+fn own_error_count(ctx: &OwnContext) -> i64 {
+    ctx.error_count
+}
+
+fn own_get_error(ctx: &OwnContext, idx: i64) -> OwnError with Div, Panic {
+    if idx >= 0 && idx < ctx.error_count {
+        return ctx.errors[idx as usize]
+    }
+    own_empty_error()
+}
+
+fn own_last_error_kind(ctx: &OwnContext) -> OwnErrorKind with Div, Panic {
+    if ctx.error_count > 0 {
+        return ctx.errors[(ctx.error_count - 1) as usize].kind
+    }
+    OwnErrorKind::ErrUseAfterMove
+}
+
+// ============================================================
+// Variable declaration and state management
+// ============================================================
+
+fn own_declare_var(ctx: &! OwnContext, type_kind: OwnTypeKind, line: i64) -> i64 with Mut, Div, Panic {
+    if ctx.var_count >= OWN_MAX_VARS {
+        return 0 - 1
+    }
+    let id = ctx.var_count
+    ctx.vars[id as usize] = OwnVarInfo {
+        id: id,
+        state: OwnState::StateOwned,
+        type_kind: type_kind,
+        borrow_count: 0,
+        mut_borrow_count: 0,
+        scope_depth: ctx.scope_depth,
+        defined_at: line,
+        moved_at: 0 - 1,
+        dropped_at: 0 - 1,
+    }
+    ctx.var_count = ctx.var_count + 1
+    id
+}
+
+fn own_declare_var_uninit(ctx: &! OwnContext, type_kind: OwnTypeKind, line: i64) -> i64 with Mut, Div, Panic {
+    if ctx.var_count >= OWN_MAX_VARS {
+        return 0 - 1
+    }
+    let id = ctx.var_count
+    ctx.vars[id as usize] = OwnVarInfo {
+        id: id,
+        state: OwnState::StateUninit,
+        type_kind: type_kind,
+        borrow_count: 0,
+        mut_borrow_count: 0,
+        scope_depth: ctx.scope_depth,
+        defined_at: line,
+        moved_at: 0 - 1,
+        dropped_at: 0 - 1,
+    }
+    ctx.var_count = ctx.var_count + 1
+    id
+}
+
+fn own_set_state(ctx: &! OwnContext, var_id: i64, state: OwnState) with Mut, Div, Panic {
+    if own_var_in_bounds(ctx, var_id) {
+        ctx.vars[var_id as usize].state = state
+    }
+}
+
+fn own_get_state(ctx: &OwnContext, var_id: i64) -> OwnState with Div, Panic {
+    if own_var_in_bounds(ctx, var_id) {
+        return ctx.vars[var_id as usize].state
+    }
+    OwnState::StateUninit
+}
+
+fn own_get_type_kind(ctx: &OwnContext, var_id: i64) -> OwnTypeKind with Div, Panic {
+    if own_var_in_bounds(ctx, var_id) {
+        return ctx.vars[var_id as usize].type_kind
+    }
+    OwnTypeKind::TyCopy
+}
+
+fn own_get_scope_depth(ctx: &OwnContext, var_id: i64) -> i64 with Div, Panic {
+    if own_var_in_bounds(ctx, var_id) {
+        return ctx.vars[var_id as usize].scope_depth
+    }
+    0
+}
+
+fn own_get_defined_at(ctx: &OwnContext, var_id: i64) -> i64 with Div, Panic {
+    if own_var_in_bounds(ctx, var_id) {
+        return ctx.vars[var_id as usize].defined_at
+    }
+    0 - 1
+}
+
+fn own_get_moved_at(ctx: &OwnContext, var_id: i64) -> i64 with Div, Panic {
+    if own_var_in_bounds(ctx, var_id) {
+        return ctx.vars[var_id as usize].moved_at
+    }
+    0 - 1
+}
+
+// ============================================================
+// Query helpers — active borrows for a variable
+// ============================================================
+
+fn own_active_borrows_for(ctx: &OwnContext, var_id: i64) -> i64 with Mut, Div, Panic {
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < ctx.borrow_count {
+        if ctx.borrows[i as usize].var_id == var_id {
+            count = count + 1
+        }
+        i = i + 1
+    }
+    count
+}
+
+fn own_active_mut_borrows_for(ctx: &OwnContext, var_id: i64) -> i64 with Mut, Div, Panic {
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < ctx.borrow_count {
+        if ctx.borrows[i as usize].var_id == var_id {
+            if own_borrow_is_exclusive(ctx.borrows[i as usize].kind) {
+                count = count + 1
+            }
+        }
+        i = i + 1
+    }
+    count
+}
+
+fn own_active_shared_borrows_for(ctx: &OwnContext, var_id: i64) -> i64 with Mut, Div, Panic {
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < ctx.borrow_count {
+        if ctx.borrows[i as usize].var_id == var_id {
+            if own_borrow_is_shared(ctx.borrows[i as usize].kind) {
+                count = count + 1
+            }
+        }
+        i = i + 1
+    }
+    count
+}
+
+// ============================================================
+// Type-kind queries on variables
+// ============================================================
+
+fn own_is_linear(ctx: &OwnContext, var_id: i64) -> bool with Div, Panic {
+    if own_var_in_bounds(ctx, var_id) {
+        return own_type_is_linear(ctx.vars[var_id as usize].type_kind)
+    }
+    false
+}
+
+fn own_is_affine(ctx: &OwnContext, var_id: i64) -> bool with Div, Panic {
+    if own_var_in_bounds(ctx, var_id) {
+        return own_type_is_affine(ctx.vars[var_id as usize].type_kind)
+    }
+    false
+}
+
+fn own_is_copy(ctx: &OwnContext, var_id: i64) -> bool with Div, Panic {
+    if own_var_in_bounds(ctx, var_id) {
+        return own_type_is_copy(ctx.vars[var_id as usize].type_kind)
+    }
+    false
+}
+
+fn own_is_drop(ctx: &OwnContext, var_id: i64) -> bool with Div, Panic {
+    if own_var_in_bounds(ctx, var_id) {
+        return own_type_is_drop(ctx.vars[var_id as usize].type_kind)
+    }
+    false
+}
+
+// ============================================================
+// Variable use checking — can this variable be read right now?
+// ============================================================
+
+fn own_check_use(ctx: &! OwnContext, var_id: i64, line: i64) -> bool with Mut, Div, Panic {
+    if own_var_in_bounds(ctx, var_id) == false {
+        return false
+    }
+    let state = ctx.vars[var_id as usize].state
+
+    // Uninit: cannot use
+    if own_state_is_uninit(state) {
+        own_add_error(ctx, OwnErrorKind::ErrUninitUse, var_id, line)
+        return false
+    }
+
+    // Moved: cannot use
+    if own_state_is_moved(state) {
+        own_add_error_with_detail(ctx, OwnErrorKind::ErrUseAfterMove, var_id, line, ctx.vars[var_id as usize].moved_at)
+        return false
+    }
+
+    // Dropped: cannot use
+    if own_state_is_dropped(state) {
+        own_add_error(ctx, OwnErrorKind::ErrDoubleFree, var_id, line)
+        return false
+    }
+
+    // Partially moved: cannot use (must reinitialize first)
+    if own_state_is_partially_moved(state) {
+        own_add_error(ctx, OwnErrorKind::ErrPartialMove, var_id, line)
+        return false
+    }
+
+    // Owned, Borrowed, BorrowedMut: all fine for read access
+    true
+}
+
+// ============================================================
+// Move checking — can this variable be moved right now?
+// ============================================================
+
+fn own_check_move(ctx: &! OwnContext, var_id: i64, line: i64) -> bool with Mut, Div, Panic {
+    if own_var_in_bounds(ctx, var_id) == false {
+        return false
+    }
+    let state = ctx.vars[var_id as usize].state
+
+    // Copy types are never moved, they are implicitly copied
+    if own_is_copy(ctx, var_id) {
+        return true
+    }
+
+    // Uninit: cannot move
+    if own_state_is_uninit(state) {
+        own_add_error(ctx, OwnErrorKind::ErrUninitUse, var_id, line)
+        return false
+    }
+
+    // Already moved
+    if own_state_is_moved(state) {
+        own_add_error_with_detail(ctx, OwnErrorKind::ErrUseAfterMove, var_id, line, ctx.vars[var_id as usize].moved_at)
+        return false
+    }
+
+    // Already dropped
+    if own_state_is_dropped(state) {
+        own_add_error(ctx, OwnErrorKind::ErrDoubleFree, var_id, line)
+        return false
+    }
+
+    // Cannot move while borrowed
+    if own_state_is_borrowed(state) {
+        own_add_error(ctx, OwnErrorKind::ErrMoveWhileBorrowed, var_id, line)
+        return false
+    }
+    if own_state_is_borrowed_mut(state) {
+        own_add_error(ctx, OwnErrorKind::ErrMoveWhileBorrowed, var_id, line)
+        return false
+    }
+
+    // Partially moved
+    if own_state_is_partially_moved(state) {
+        own_add_error(ctx, OwnErrorKind::ErrPartialMove, var_id, line)
+        return false
+    }
+
+    true
+}
+
+// ============================================================
+// Ownership transfer (move)
+// ============================================================
+
+fn own_transfer(ctx: &! OwnContext, var_id: i64, line: i64) -> bool with Mut, Div, Panic {
+    if own_var_in_bounds(ctx, var_id) == false {
+        return false
+    }
+
+    // Copy types: no state change, always succeeds
+    if own_is_copy(ctx, var_id) {
+        return true
+    }
+
+    let ok = own_check_move(ctx, var_id, line)
+    if ok == false {
+        return false
+    }
+
+    ctx.vars[var_id as usize].state = OwnState::StateMoved
+    ctx.vars[var_id as usize].moved_at = line
+    true
+}
+
+// ============================================================
+// Shared borrow checking and creation
+// ============================================================
+
+fn own_check_borrow_shared(ctx: &! OwnContext, var_id: i64, line: i64) -> bool with Mut, Div, Panic {
+    if own_var_in_bounds(ctx, var_id) == false {
+        return false
+    }
+    let state = ctx.vars[var_id as usize].state
+
+    // Cannot borrow uninit, moved, or dropped
+    if own_state_is_uninit(state) {
+        own_add_error(ctx, OwnErrorKind::ErrUninitUse, var_id, line)
+        return false
+    }
+    if own_state_is_moved(state) {
+        own_add_error(ctx, OwnErrorKind::ErrUseAfterMove, var_id, line)
+        return false
+    }
+    if own_state_is_dropped(state) {
+        own_add_error(ctx, OwnErrorKind::ErrDoubleFree, var_id, line)
+        return false
+    }
+
+    // Cannot shared-borrow while exclusively borrowed
+    if own_state_is_borrowed_mut(state) {
+        own_add_error(ctx, OwnErrorKind::ErrBorrowWhileMutBorrowed, var_id, line)
+        return false
+    }
+
+    // Partially moved: disallow borrow
+    if own_state_is_partially_moved(state) {
+        own_add_error(ctx, OwnErrorKind::ErrPartialMove, var_id, line)
+        return false
+    }
+
+    true
+}
+
+fn own_borrow_shared(ctx: &! OwnContext, var_id: i64, line: i64) -> i64 with Mut, Div, Panic {
+    let ok = own_check_borrow_shared(ctx, var_id, line)
+    if ok == false {
+        return 0 - 1
+    }
+
+    if ctx.borrow_count >= OWN_MAX_BORROWS {
+        return 0 - 1
+    }
+
+    let bid = ctx.borrow_count
+    ctx.borrows[bid as usize] = OwnBorrowInfo {
+        borrow_id: bid,
+        var_id: var_id,
+        kind: OwnBorrowKind::BorrowShared,
+        scope_depth: ctx.scope_depth,
+        created_at: line,
+    }
+    ctx.borrow_count = ctx.borrow_count + 1
+
+    // Update variable state
+    ctx.vars[var_id as usize].borrow_count = ctx.vars[var_id as usize].borrow_count + 1
+    ctx.vars[var_id as usize].state = OwnState::StateBorrowed
+    bid
+}
+
+// ============================================================
+// Exclusive borrow checking and creation
+// ============================================================
+
+fn own_check_borrow_exclusive(ctx: &! OwnContext, var_id: i64, line: i64) -> bool with Mut, Div, Panic {
+    if own_var_in_bounds(ctx, var_id) == false {
+        return false
+    }
+    let state = ctx.vars[var_id as usize].state
+
+    // Cannot borrow uninit, moved, or dropped
+    if own_state_is_uninit(state) {
+        own_add_error(ctx, OwnErrorKind::ErrUninitUse, var_id, line)
+        return false
+    }
+    if own_state_is_moved(state) {
+        own_add_error(ctx, OwnErrorKind::ErrUseAfterMove, var_id, line)
+        return false
+    }
+    if own_state_is_dropped(state) {
+        own_add_error(ctx, OwnErrorKind::ErrDoubleFree, var_id, line)
+        return false
+    }
+
+    // Cannot exclusive-borrow while any borrow is active
+    if own_state_is_borrowed(state) {
+        own_add_error(ctx, OwnErrorKind::ErrMutBorrowWhileBorrowed, var_id, line)
+        return false
+    }
+    if own_state_is_borrowed_mut(state) {
+        own_add_error(ctx, OwnErrorKind::ErrBorrowWhileMutBorrowed, var_id, line)
+        return false
+    }
+
+    // Partially moved: disallow borrow
+    if own_state_is_partially_moved(state) {
+        own_add_error(ctx, OwnErrorKind::ErrPartialMove, var_id, line)
+        return false
+    }
+
+    true
+}
+
+fn own_borrow_exclusive(ctx: &! OwnContext, var_id: i64, line: i64) -> i64 with Mut, Div, Panic {
+    let ok = own_check_borrow_exclusive(ctx, var_id, line)
+    if ok == false {
+        return 0 - 1
+    }
+
+    if ctx.borrow_count >= OWN_MAX_BORROWS {
+        return 0 - 1
+    }
+
+    let bid = ctx.borrow_count
+    ctx.borrows[bid as usize] = OwnBorrowInfo {
+        borrow_id: bid,
+        var_id: var_id,
+        kind: OwnBorrowKind::BorrowExclusive,
+        scope_depth: ctx.scope_depth,
+        created_at: line,
+    }
+    ctx.borrow_count = ctx.borrow_count + 1
+
+    // Update variable state
+    ctx.vars[var_id as usize].mut_borrow_count = ctx.vars[var_id as usize].mut_borrow_count + 1
+    ctx.vars[var_id as usize].state = OwnState::StateBorrowedMut
+    bid
+}
+
+// ============================================================
+// Borrow release
+// ============================================================
+
+fn own_release_borrow(ctx: &! OwnContext, borrow_id: i64) with Mut, Div, Panic {
+    if own_borrow_in_bounds(ctx, borrow_id) == false {
+        return
+    }
+
+    let info = ctx.borrows[borrow_id as usize]
+    let vid = info.var_id
+
+    if own_var_in_bounds(ctx, vid) == false {
+        return
+    }
+
+    // Decrement the appropriate borrow counter
+    if own_borrow_is_shared(info.kind) {
+        if ctx.vars[vid as usize].borrow_count > 0 {
+            ctx.vars[vid as usize].borrow_count = ctx.vars[vid as usize].borrow_count - 1
+        }
+    } else {
+        if ctx.vars[vid as usize].mut_borrow_count > 0 {
+            ctx.vars[vid as usize].mut_borrow_count = ctx.vars[vid as usize].mut_borrow_count - 1
+        }
+    }
+
+    // Remove the borrow by shifting remaining borrows down
+    var i = borrow_id
+    while i < ctx.borrow_count - 1 {
+        ctx.borrows[i as usize] = ctx.borrows[(i + 1) as usize]
+        // Fix up borrow IDs after shift
+        ctx.borrows[i as usize].borrow_id = i
+        i = i + 1
+    }
+    ctx.borrow_count = ctx.borrow_count - 1
+
+    // Restore variable state based on remaining borrows
+    if ctx.vars[vid as usize].mut_borrow_count > 0 {
+        ctx.vars[vid as usize].state = OwnState::StateBorrowedMut
+    } else if ctx.vars[vid as usize].borrow_count > 0 {
+        ctx.vars[vid as usize].state = OwnState::StateBorrowed
+    } else {
+        // No borrows remaining — back to owned (if not moved/dropped)
+        let cur = ctx.vars[vid as usize].state
+        if own_state_is_borrowed(cur) || own_state_is_borrowed_mut(cur) {
+            ctx.vars[vid as usize].state = OwnState::StateOwned
+        }
+    }
+}
+
+// ============================================================
+// Release all borrows for a specific variable
+// ============================================================
+
+fn own_release_all_borrows_for(ctx: &! OwnContext, var_id: i64) with Mut, Div, Panic {
+    // Walk backwards to avoid index shifting issues
+    var i = ctx.borrow_count - 1
+    while i >= 0 {
+        if ctx.borrows[i as usize].var_id == var_id {
+            own_release_borrow(ctx, i)
+        }
+        i = i - 1
+    }
+}
+
+// ============================================================
+// Scope management
+// ============================================================
+
+fn own_enter_scope(ctx: &! OwnContext, is_loop: bool) with Mut, Div, Panic {
+    if ctx.scope_depth >= OWN_MAX_SCOPES {
+        return
+    }
+    ctx.scopes[ctx.scope_depth as usize] = OwnScope {
+        depth: ctx.scope_depth,
+        var_start: ctx.var_count,
+        var_end: ctx.var_count,
+        borrow_start: ctx.borrow_count,
+        is_loop: is_loop,
+    }
+    ctx.scope_depth = ctx.scope_depth + 1
+}
+
+fn own_exit_scope(ctx: &! OwnContext) with Mut, Div, Panic {
+    if ctx.scope_depth <= 0 {
+        return
+    }
+    let scope_idx = ctx.scope_depth - 1
+    let scope = ctx.scopes[scope_idx as usize]
+
+    // Release borrows created in this scope
+    var bi = ctx.borrow_count - 1
+    while bi >= scope.borrow_start {
+        own_release_borrow(ctx, bi)
+        bi = bi - 1
+    }
+
+    // Insert drops for variables declared in this scope that are still owned
+    var vi = scope.var_start
+    while vi < ctx.var_count {
+        let st = ctx.vars[vi as usize].state
+        if own_state_is_owned(st) || own_state_is_borrowed(st) || own_state_is_borrowed_mut(st) {
+            // Linear types must be consumed — error if still owned at scope end
+            if own_type_is_linear(ctx.vars[vi as usize].type_kind) {
+                own_add_error(ctx, OwnErrorKind::ErrMissingDrop, vi, ctx.vars[vi as usize].defined_at)
+            }
+            // Insert a drop point
+            own_insert_drop(ctx, vi, 0 - 1, OwnDropStrategy::DropAtScopeEnd)
+            ctx.vars[vi as usize].state = OwnState::StateDropped
+        }
+        vi = vi + 1
+    }
+
+    ctx.scope_depth = ctx.scope_depth - 1
+}
+
+fn own_current_scope_depth(ctx: &OwnContext) -> i64 {
+    ctx.scope_depth
+}
+
+fn own_scope_is_loop(ctx: &OwnContext, depth: i64) -> bool with Div, Panic {
+    if depth >= 0 && depth < ctx.scope_depth {
+        return ctx.scopes[depth as usize].is_loop
+    }
+    false
+}
+
+// ============================================================
+// Drop insertion
+// ============================================================
+
+fn own_insert_drop(ctx: &! OwnContext, var_id: i64, line: i64, strategy: OwnDropStrategy) with Mut, Div, Panic {
+    if ctx.drop_count >= OWN_MAX_DROPS {
+        return
+    }
+    ctx.drops[ctx.drop_count as usize] = OwnDropPoint {
+        var_id: var_id,
+        scope_depth: ctx.scope_depth,
+        line: line,
+        strategy: strategy,
+    }
+    ctx.drop_count = ctx.drop_count + 1
+}
+
+fn own_drop_count(ctx: &OwnContext) -> i64 {
+    ctx.drop_count
+}
+
+fn own_get_drop(ctx: &OwnContext, idx: i64) -> OwnDropPoint with Div, Panic {
+    if idx >= 0 && idx < ctx.drop_count {
+        return ctx.drops[idx as usize]
+    }
+    own_empty_drop_point()
+}
+
+// ============================================================
+// Compute drops — schedule drop points for all live variables
+// that need deterministic destruction
+// ============================================================
+
+fn own_compute_drops(ctx: &! OwnContext) with Mut, Div, Panic {
+    var i: i64 = 0
+    while i < ctx.var_count {
+        let st = ctx.vars[i as usize].state
+        let tk = ctx.vars[i as usize].type_kind
+
+        // Copy types never need explicit drops
+        if own_type_is_copy(tk) {
+            i = i + 1
+            // continue — skip to next iteration
+        } else if own_state_is_owned(st) {
+            // Owned and not consumed — needs a drop
+            if own_type_is_linear(tk) {
+                // Linear type still alive — this is an error (should have been consumed)
+                own_add_error(ctx, OwnErrorKind::ErrMissingDrop, i, ctx.vars[i as usize].defined_at)
+            }
+            // Schedule drop at scope end for affine/drop types
+            own_insert_drop(ctx, i, 0 - 1, OwnDropStrategy::DropAtScopeEnd)
+            ctx.vars[i as usize].state = OwnState::StateDropped
+            i = i + 1
+        } else if own_state_is_borrowed(st) || own_state_is_borrowed_mut(st) {
+            // Still borrowed — release borrows first, then schedule drop
+            own_release_all_borrows_for(ctx, i)
+            own_insert_drop(ctx, i, 0 - 1, OwnDropStrategy::DropAtScopeEnd)
+            ctx.vars[i as usize].state = OwnState::StateDropped
+            i = i + 1
+        } else {
+            // Moved, dropped, uninit, or partially moved — no drop needed
+            i = i + 1
+        }
+    }
+}
+
+// ============================================================
+// Snapshot / restore — for branch merging
+// ============================================================
+
+fn own_snapshot(ctx: &OwnContext) -> i64 with Mut, Div, Panic {
+    // Store variable states into the paths array
+    // Returns the starting index in ctx.paths
+    let snap_start = ctx.path_count
+    var i: i64 = 0
+    while i < ctx.var_count {
+        if snap_start + i < OWN_MAX_PATHS {
+            // Encode state as integer for storage
+            let state = ctx.vars[i as usize].state
+            var code: i64 = 0
+            if own_state_is_uninit(state) { code = 0 }
+            if own_state_is_owned(state) { code = 1 }
+            if own_state_is_moved(state) { code = 2 }
+            if own_state_is_borrowed(state) { code = 3 }
+            if own_state_is_borrowed_mut(state) { code = 4 }
+            if own_state_is_partially_moved(state) { code = 5 }
+            if own_state_is_dropped(state) { code = 6 }
+            // We cannot mutate ctx here since it is &OwnContext,
+            // so we just return snap_start — the caller must use
+            // own_snapshot_mut instead.
+        }
+        i = i + 1
+    }
+    snap_start
+}
+
+fn own_snapshot_mut(ctx: &! OwnContext) -> i64 with Mut, Div, Panic {
+    let snap_start = ctx.path_count
+    var i: i64 = 0
+    while i < ctx.var_count {
+        let slot = snap_start + i
+        if slot < OWN_MAX_PATHS {
+            let state = ctx.vars[i as usize].state
+            var code: i64 = 0
+            if own_state_is_uninit(state) { code = 0 }
+            if own_state_is_owned(state) { code = 1 }
+            if own_state_is_moved(state) { code = 2 }
+            if own_state_is_borrowed(state) { code = 3 }
+            if own_state_is_borrowed_mut(state) { code = 4 }
+            if own_state_is_partially_moved(state) { code = 5 }
+            if own_state_is_dropped(state) { code = 6 }
+            ctx.paths[slot as usize] = code
+        }
+        i = i + 1
+    }
+    ctx.path_count = snap_start + ctx.var_count
+    snap_start
+}
+
+fn own_state_from_code(code: i64) -> OwnState {
+    if code == 0 { return OwnState::StateUninit }
+    if code == 1 { return OwnState::StateOwned }
+    if code == 2 { return OwnState::StateMoved }
+    if code == 3 { return OwnState::StateBorrowed }
+    if code == 4 { return OwnState::StateBorrowedMut }
+    if code == 5 { return OwnState::StatePartiallyMoved }
+    if code == 6 { return OwnState::StateDropped }
+    OwnState::StateUninit
+}
+
+fn own_state_to_code(state: OwnState) -> i64 {
+    if own_state_is_uninit(state) { return 0 }
+    if own_state_is_owned(state) { return 1 }
+    if own_state_is_moved(state) { return 2 }
+    if own_state_is_borrowed(state) { return 3 }
+    if own_state_is_borrowed_mut(state) { return 4 }
+    if own_state_is_partially_moved(state) { return 5 }
+    if own_state_is_dropped(state) { return 6 }
+    0
+}
+
+fn own_restore_snapshot(ctx: &! OwnContext, snap: i64) with Mut, Div, Panic {
+    var i: i64 = 0
+    while i < ctx.var_count {
+        let slot = snap + i
+        if slot < OWN_MAX_PATHS {
+            let code = ctx.paths[slot as usize]
+            ctx.vars[i as usize].state = own_state_from_code(code)
+        }
+        i = i + 1
+    }
+}
+
+// ============================================================
+// Branch merging — join states from two control flow branches
+//
+// Rules:
+//   Owned + Owned   => Owned
+//   Moved + Moved   => Moved
+//   Owned + Moved   => PartiallyMoved (inconsistent — warning)
+//   Dropped + Owned => PartiallyMoved
+//   Borrowed + *    => use the non-borrowed side (borrows are scoped)
+//   same + same     => same
+//   otherwise       => PartiallyMoved
+// ============================================================
+
+fn own_merge_state(a: OwnState, b: OwnState) -> OwnState {
+    // Same state: keep it
+    if own_state_eq(a, b) {
+        return a
+    }
+
+    // Both uninit: uninit
+    if own_state_is_uninit(a) && own_state_is_uninit(b) {
+        return OwnState::StateUninit
+    }
+
+    // Both moved or both dropped: keep that
+    if own_state_is_moved(a) && own_state_is_dropped(b) {
+        return OwnState::StateMoved
+    }
+    if own_state_is_dropped(a) && own_state_is_moved(b) {
+        return OwnState::StateMoved
+    }
+
+    // Owned in one branch, moved/dropped in other: partially moved
+    if own_state_is_owned(a) && own_state_is_moved(b) {
+        return OwnState::StatePartiallyMoved
+    }
+    if own_state_is_moved(a) && own_state_is_owned(b) {
+        return OwnState::StatePartiallyMoved
+    }
+    if own_state_is_owned(a) && own_state_is_dropped(b) {
+        return OwnState::StatePartiallyMoved
+    }
+    if own_state_is_dropped(a) && own_state_is_owned(b) {
+        return OwnState::StatePartiallyMoved
+    }
+
+    // Borrowed states — prefer non-borrow for merge (borrows are scope-local)
+    if own_state_is_borrowed(a) || own_state_is_borrowed_mut(a) {
+        return b
+    }
+    if own_state_is_borrowed(b) || own_state_is_borrowed_mut(b) {
+        return a
+    }
+
+    // Default: partially moved
+    OwnState::StatePartiallyMoved
+}
+
+fn own_merge_branches(ctx: &! OwnContext, then_snap: i64, else_snap: i64) -> bool with Mut, Div, Panic {
+    var ok = true
+    var i: i64 = 0
+    while i < ctx.var_count {
+        let then_slot = then_snap + i
+        let else_slot = else_snap + i
+        if then_slot < OWN_MAX_PATHS && else_slot < OWN_MAX_PATHS {
+            let then_state = own_state_from_code(ctx.paths[then_slot as usize])
+            let else_state = own_state_from_code(ctx.paths[else_slot as usize])
+            let merged = own_merge_state(then_state, else_state)
+
+            // If the merged result is partially moved and the original
+            // type is linear, this is an error — linear values must be
+            // consumed on ALL paths, not just some.
+            if own_state_is_partially_moved(merged) {
+                if own_type_is_linear(ctx.vars[i as usize].type_kind) {
+                    own_add_error(ctx, OwnErrorKind::ErrPartialMove, i, ctx.vars[i as usize].defined_at)
+                    ok = false
+                }
+            }
+
+            ctx.vars[i as usize].state = merged
+        }
+        i = i + 1
+    }
+    ok
+}
+
+// ============================================================
+// Full function check — validate all variables reach a valid
+// end state by function exit
+// ============================================================
+
+fn own_check_linear_at_end(ctx: &! OwnContext) -> bool with Mut, Div, Panic {
+    var ok = true
+    var i: i64 = 0
+    while i < ctx.var_count {
+        let tk = ctx.vars[i as usize].type_kind
+        let st = ctx.vars[i as usize].state
+
+        if own_type_is_linear(tk) {
+            // Linear vars must be moved or dropped — not owned at end
+            if own_state_is_owned(st) || own_state_is_borrowed(st) || own_state_is_borrowed_mut(st) {
+                own_add_error(ctx, OwnErrorKind::ErrMissingDrop, i, ctx.vars[i as usize].defined_at)
+                ok = false
+            }
+        }
+        i = i + 1
+    }
+    ok
+}
+
+fn own_check_no_dangling_borrows(ctx: &! OwnContext) -> bool with Mut, Div, Panic {
+    // At function end, no borrows should be active
+    if ctx.borrow_count > 0 {
+        // Release remaining borrows
+        while ctx.borrow_count > 0 {
+            own_release_borrow(ctx, ctx.borrow_count - 1)
+        }
+    }
+    true
+}
+
+fn own_check_function(ctx: &! OwnContext) -> bool with Mut, Div, Panic {
+    // 1. Check for linear values that were never consumed
+    let linear_ok = own_check_linear_at_end(ctx)
+
+    // 2. Release dangling borrows
+    let borrow_ok = own_check_no_dangling_borrows(ctx)
+
+    // 3. Compute drop points for remaining owned values
+    own_compute_drops(ctx)
+
+    let err_ok = own_has_errors(ctx) == false
+    linear_ok && borrow_ok && err_ok
+}
+
+// ============================================================
+// Utility: count variables in a given state
+// ============================================================
+
+fn own_count_in_state(ctx: &OwnContext, state: OwnState) -> i64 with Mut, Div, Panic {
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < ctx.var_count {
+        if own_state_eq(ctx.vars[i as usize].state, state) {
+            count = count + 1
+        }
+        i = i + 1
+    }
+    count
+}
+
+// ============================================================
+// Utility: reset context for fresh analysis
+// ============================================================
+
+fn own_reset(ctx: &! OwnContext) with Mut, Div, Panic {
+    ctx.var_count = 0
+    ctx.borrow_count = 0
+    ctx.drop_count = 0
+    ctx.scope_depth = 0
+    ctx.error_count = 0
+    ctx.path_count = 0
+}
+
+// ============================================================
+// Utility: find the first error of a given kind
+// ============================================================
+
+fn own_find_error(ctx: &OwnContext, kind: OwnErrorKind) -> i64 with Mut, Div, Panic {
+    var i: i64 = 0
+    while i < ctx.error_count {
+        if own_error_kind_eq(ctx.errors[i as usize].kind, kind) {
+            return i
+        }
+        i = i + 1
+    }
+    0 - 1
+}
+
+// ============================================================
+// Utility: count errors of a given kind
+// ============================================================
+
+fn own_count_errors_of_kind(ctx: &OwnContext, kind: OwnErrorKind) -> i64 with Mut, Div, Panic {
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < ctx.error_count {
+        if own_error_kind_eq(ctx.errors[i as usize].kind, kind) {
+            count = count + 1
+        }
+        i = i + 1
+    }
+    count
+}
+
+// ============================================================
+// Utility: get the number of variables in the current scope
+// ============================================================
+
+fn own_scope_var_count(ctx: &OwnContext) -> i64 with Div, Panic {
+    if ctx.scope_depth <= 0 {
+        return ctx.var_count
+    }
+    let scope_start = ctx.scopes[(ctx.scope_depth - 1) as usize].var_start
+    ctx.var_count - scope_start
+}
+
+// ============================================================
+// Utility: mark a variable as initialized (Uninit -> Owned)
+// ============================================================
+
+fn own_initialize(ctx: &! OwnContext, var_id: i64) with Mut, Div, Panic {
+    if own_var_in_bounds(ctx, var_id) {
+        let st = ctx.vars[var_id as usize].state
+        if own_state_is_uninit(st) {
+            ctx.vars[var_id as usize].state = OwnState::StateOwned
+        }
+    }
+}
+
+// ============================================================
+// Utility: explicitly drop a variable
+// ============================================================
+
+fn own_explicit_drop(ctx: &! OwnContext, var_id: i64, line: i64) -> bool with Mut, Div, Panic {
+    if own_var_in_bounds(ctx, var_id) == false {
+        return false
+    }
+    let st = ctx.vars[var_id as usize].state
+
+    if own_state_is_dropped(st) {
+        own_add_error(ctx, OwnErrorKind::ErrDoubleFree, var_id, line)
+        return false
+    }
+    if own_state_is_moved(st) {
+        own_add_error(ctx, OwnErrorKind::ErrDoubleFree, var_id, line)
+        return false
+    }
+    if own_state_is_uninit(st) {
+        own_add_error(ctx, OwnErrorKind::ErrUninitUse, var_id, line)
+        return false
+    }
+
+    // Release borrows if any
+    own_release_all_borrows_for(ctx, var_id)
+
+    ctx.vars[var_id as usize].state = OwnState::StateDropped
+    ctx.vars[var_id as usize].dropped_at = line
+    own_insert_drop(ctx, var_id, line, OwnDropStrategy::DropManual)
+    true
+}
+
+// ============================================================
+// Utility: reinitialize a moved variable (for patterns like
+// "move out, then reassign")
+// ============================================================
+
+fn own_reinitialize(ctx: &! OwnContext, var_id: i64, line: i64) with Mut, Div, Panic {
+    if own_var_in_bounds(ctx, var_id) {
+        let st = ctx.vars[var_id as usize].state
+        if own_state_is_moved(st) || own_state_is_partially_moved(st) || own_state_is_uninit(st) {
+            ctx.vars[var_id as usize].state = OwnState::StateOwned
+            ctx.vars[var_id as usize].moved_at = 0 - 1
+            ctx.vars[var_id as usize].borrow_count = 0
+            ctx.vars[var_id as usize].mut_borrow_count = 0
+        }
+    }
+}
+
+// ============================================================
+// Utility: partial move of a field (for struct field access)
+// ============================================================
+
+fn own_partial_move(ctx: &! OwnContext, var_id: i64, line: i64) -> bool with Mut, Div, Panic {
+    if own_var_in_bounds(ctx, var_id) == false {
+        return false
+    }
+    let st = ctx.vars[var_id as usize].state
+
+    // Copy types cannot be partially moved
+    if own_is_copy(ctx, var_id) {
+        return true
+    }
+
+    if own_state_is_uninit(st) {
+        own_add_error(ctx, OwnErrorKind::ErrUninitUse, var_id, line)
+        return false
+    }
+    if own_state_is_moved(st) {
+        own_add_error(ctx, OwnErrorKind::ErrUseAfterMove, var_id, line)
+        return false
+    }
+    if own_state_is_dropped(st) {
+        own_add_error(ctx, OwnErrorKind::ErrDoubleFree, var_id, line)
+        return false
+    }
+    if own_state_is_borrowed(st) || own_state_is_borrowed_mut(st) {
+        own_add_error(ctx, OwnErrorKind::ErrMoveWhileBorrowed, var_id, line)
+        return false
+    }
+
+    ctx.vars[var_id as usize].state = OwnState::StatePartiallyMoved
+    ctx.vars[var_id as usize].moved_at = line
+    true
+}
+
+// ============================================================
+// Utility: count of drops scheduled for a variable
+// ============================================================
+
+fn own_drops_for_var(ctx: &OwnContext, var_id: i64) -> i64 with Mut, Div, Panic {
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < ctx.drop_count {
+        if ctx.drops[i as usize].var_id == var_id {
+            count = count + 1
+        }
+        i = i + 1
+    }
+    count
+}
+
+// ============================================================
+// Utility: check if any borrow is active
+// ============================================================
+
+fn own_any_borrows_active(ctx: &OwnContext) -> bool {
+    ctx.borrow_count > 0
+}
+
+// ============================================================
+// Utility: total var count
+// ============================================================
+
+fn own_var_count(ctx: &OwnContext) -> i64 {
+    ctx.var_count
+}
+
+// ============================================================
+// Utility: get borrow info
+// ============================================================
+
+fn own_get_borrow(ctx: &OwnContext, borrow_id: i64) -> OwnBorrowInfo with Div, Panic {
+    if own_borrow_in_bounds(ctx, borrow_id) {
+        return ctx.borrows[borrow_id as usize]
+    }
+    own_empty_borrow_info()
+}
+
+// ============================================================
+//                    TEST INFRASTRUCTURE
+// ============================================================
+
+fn own_assert_true(cond: bool, test_id: i64) -> i64 with IO, Mut, Panic, Div {
+    if cond {
+        print("  PASS test ")
+        print_int(test_id)
+        print("\n")
+        return 0
+    } else {
+        print("  FAIL test ")
+        print_int(test_id)
+        print("\n")
+        return 1
+    }
+}
+
+// ============================================================
+//             CATEGORY 1: Basic Ownership (12 tests)
+// ============================================================
+
+// Test 1: Context construction produces empty context
+fn own_test_1_inner(ctx: &! OwnContext) -> bool with Mut, Div, Panic {
+    own_var_count(ctx) == 0
+    && own_error_count(ctx) == 0
+    && own_drop_count(ctx) == 0
+    && own_current_scope_depth(ctx) == 0
+    && own_any_borrows_active(ctx) == false
+}
+
+fn own_test_1() -> i64 with IO, Mut, Div, Panic {
+    var ctx = own_context_new()
+    own_assert_true(own_test_1_inner(&! ctx), 1)
+}
+
+// Test 2: Declare a copy variable — state is Owned
+fn own_test_2_inner(ctx: &! OwnContext) -> bool with Mut, Div, Panic {
+    let id = own_declare_var(ctx, OwnTypeKind::TyCopy, 10)
+    id == 0
+    && own_var_count(ctx) == 1
+    && own_state_is_owned(own_get_state(ctx, id))
+    && own_is_copy(ctx, id)
+}
+
+fn own_test_2() -> i64 with IO, Mut, Div, Panic {
+    var ctx = own_context_new()
+    own_assert_true(own_test_2_inner(&! ctx), 2)
+}
+
+// Test 3: Declare a linear variable — state is Owned, type is TyLinear
+fn own_test_3_inner(ctx: &! OwnContext) -> bool with Mut, Div, Panic {
+    let id = own_declare_var(ctx, OwnTypeKind::TyLinear, 20)
+    own_state_is_owned(own_get_state(ctx, id))
+    && own_is_linear(ctx, id)
+    && own_get_defined_at(ctx, id) == 20
+}
+
+fn own_test_3() -> i64 with IO, Mut, Div, Panic {
+    var ctx = own_context_new()
+    own_assert_true(own_test_3_inner(&! ctx), 3)
+}
+
+// Test 4: Declare an affine variable
+fn own_test_4_inner(ctx: &! OwnContext) -> bool with Mut, Div, Panic {
+    let id = own_declare_var(ctx, OwnTypeKind::TyAffine, 30)
+    own_is_affine(ctx, id) && own_state_is_owned(own_get_state(ctx, id))
+}
+
+fn own_test_4() -> i64 with IO, Mut, Div, Panic {
+    var ctx = own_context_new()
+    own_assert_true(own_test_4_inner(&! ctx), 4)
+}
+
+// Test 5: Declare a drop variable
+fn own_test_5_inner(ctx: &! OwnContext) -> bool with Mut, Div, Panic {
+    let id = own_declare_var(ctx, OwnTypeKind::TyDrop, 40)
+    own_is_drop(ctx, id) && own_state_is_owned(own_get_state(ctx, id))
+}
+
+fn own_test_5() -> i64 with IO, Mut, Div, Panic {
+    var ctx = own_context_new()
+    own_assert_true(own_test_5_inner(&! ctx), 5)
+}
+
+// Test 6: Declare uninit variable — state is Uninit
+fn own_test_6_inner(ctx: &! OwnContext) -> bool with Mut, Div, Panic {
+    let id = own_declare_var_uninit(ctx, OwnTypeKind::TyCopy, 50)
+    own_state_is_uninit(own_get_state(ctx, id))
+}
+
+fn own_test_6() -> i64 with IO, Mut, Div, Panic {
+    var ctx = own_context_new()
+    own_assert_true(own_test_6_inner(&! ctx), 6)
+}
+
+// Test 7: Initialize an uninit variable transitions to Owned
+fn own_test_7_inner(ctx: &! OwnContext) -> bool with Mut, Div, Panic {
+    let id = own_declare_var_uninit(ctx, OwnTypeKind::TyAffine, 60)
+    own_initialize(ctx, id)
+    own_state_is_owned(own_get_state(ctx, id))
+}
+
+fn own_test_7() -> i64 with IO, Mut, Div, Panic {
+    var ctx = own_context_new()
+    own_assert_true(own_test_7_inner(&! ctx), 7)
+}
+
+// Test 8: Move an owned variable transitions to Moved
+fn own_test_8_inner(ctx: &! OwnContext) -> bool with Mut, Div, Panic {
+    let id = own_declare_var(ctx, OwnTypeKind::TyAffine, 70)
+    let ok = own_transfer(ctx, id, 75)
+    ok && own_state_is_moved(own_get_state(ctx, id))
+    && own_get_moved_at(ctx, id) == 75
+}
+
+fn own_test_8() -> i64 with IO, Mut, Div, Panic {
+    var ctx = own_context_new()
+    own_assert_true(own_test_8_inner(&! ctx), 8)
+}
+
+// Test 9: Set and get state directly
+fn own_test_9_inner(ctx: &! OwnContext) -> bool with Mut, Div, Panic {
+    let id = own_declare_var(ctx, OwnTypeKind::TyCopy, 80)
+    own_set_state(ctx, id, OwnState::StateMoved)
+    let is_moved = own_state_is_moved(own_get_state(ctx, id))
+    own_set_state(ctx, id, OwnState::StateDropped)
+    let is_dropped = own_state_is_dropped(own_get_state(ctx, id))
+    is_moved && is_dropped
+}
+
+fn own_test_9() -> i64 with IO, Mut, Div, Panic {
+    var ctx = own_context_new()
+    own_assert_true(own_test_9_inner(&! ctx), 9)
+}
+
+// Test 10: Multiple variable declarations get sequential IDs
+fn own_test_10_inner(ctx: &! OwnContext) -> bool with Mut, Div, Panic {
+    let a = own_declare_var(ctx, OwnTypeKind::TyCopy, 1)
+    let b = own_declare_var(ctx, OwnTypeKind::TyLinear, 2)
+    let c = own_declare_var(ctx, OwnTypeKind::TyAffine, 3)
+    a == 0 && b == 1 && c == 2 && own_var_count(ctx) == 3
+}
+
+fn own_test_10() -> i64 with IO, Mut, Div, Panic {
+    var ctx = own_context_new()
+    own_assert_true(own_test_10_inner(&! ctx), 10)
+}
+
+// Test 11: Copy types are never moved (transfer succeeds but state stays Owned)
+fn own_test_11_inner(ctx: &! OwnContext) -> bool with Mut, Div, Panic {
+    let id = own_declare_var(ctx, OwnTypeKind::TyCopy, 100)
+    let ok = own_transfer(ctx, id, 110)
+    ok && own_state_is_owned(own_get_state(ctx, id))
+}
+
+fn own_test_11() -> i64 with IO, Mut, Div, Panic {
+    var ctx = own_context_new()
+    own_assert_true(own_test_11_inner(&! ctx), 11)
+}
+
+// Test 12: Scope depth tracks correctly
+fn own_test_12_inner(ctx: &! OwnContext) -> bool with Mut, Div, Panic {
+    let d0 = own_current_scope_depth(ctx)
+    own_enter_scope(ctx, false)
+    let d1 = own_current_scope_depth(ctx)
+    own_enter_scope(ctx, true)
+    let d2 = own_current_scope_depth(ctx)
+    own_exit_scope(ctx)
+    let d3 = own_current_scope_depth(ctx)
+    own_exit_scope(ctx)
+    let d4 = own_current_scope_depth(ctx)
+    d0 == 0 && d1 == 1 && d2 == 2 && d3 == 1 && d4 == 0
+}
+
+fn own_test_12() -> i64 with IO, Mut, Div, Panic {
+    var ctx = own_context_new()
+    own_assert_true(own_test_12_inner(&! ctx), 12)
+}
+
+// ============================================================
+//          CATEGORY 2: Use-After-Move (8 tests)
+// ============================================================
+
+// Test 13: Use after move produces ErrUseAfterMove
+fn own_test_13_inner(ctx: &! OwnContext) -> bool with Mut, Div, Panic {
+    let id = own_declare_var(ctx, OwnTypeKind::TyAffine, 10)
+    let m = own_transfer(ctx, id, 15)
+    let u = own_check_use(ctx, id, 20)
+    m && u == false && own_error_count(ctx) == 1
+    && own_error_kind_eq(own_last_error_kind(ctx), OwnErrorKind::ErrUseAfterMove)
+}
+
+fn own_test_13() -> i64 with IO, Mut, Div, Panic {
+    var ctx = own_context_new()
+    own_assert_true(own_test_13_inner(&! ctx), 13)
+}
+
+// Test 14: Double move produces ErrUseAfterMove
+fn own_test_14_inner(ctx: &! OwnContext) -> bool with Mut, Div, Panic {
+    let id = own_declare_var(ctx, OwnTypeKind::TyAffine, 10)
+    let m1 = own_transfer(ctx, id, 15)
+    let m2 = own_transfer(ctx, id, 20)
+    m1 && m2 == false && own_error_count(ctx) == 1
+}
+
+fn own_test_14() -> i64 with IO, Mut, Div, Panic {
+    var ctx = own_context_new()
+    own_assert_true(own_test_14_inner(&! ctx), 14)
+}
+
+// Test 15: Use after drop produces ErrDoubleFree
+fn own_test_15_inner(ctx: &! OwnContext) -> bool with Mut, Div, Panic {
+    let id = own_declare_var(ctx, OwnTypeKind::TyAffine, 10)
+    let d = own_explicit_drop(ctx, id, 15)
+    let u = own_check_use(ctx, id, 20)
+    d && u == false
+    && own_error_kind_eq(own_last_error_kind(ctx), OwnErrorKind::ErrDoubleFree)
+}
+
+fn own_test_15() -> i64 with IO, Mut, Div, Panic {
+    var ctx = own_context_new()
+    own_assert_true(own_test_15_inner(&! ctx), 15)
+}
+
+// Test 16: Use of uninit variable produces ErrUninitUse
+fn own_test_16_inner(ctx: &! OwnContext) -> bool with Mut, Div, Panic {
+    let id = own_declare_var_uninit(ctx, OwnTypeKind::TyCopy, 10)
+    let u = own_check_use(ctx, id, 15)
+    u == false
+    && own_error_kind_eq(own_last_error_kind(ctx), OwnErrorKind::ErrUninitUse)
+}
+
+fn own_test_16() -> i64 with IO, Mut, Div, Panic {
+    var ctx = own_context_new()
+    own_assert_true(own_test_16_inner(&! ctx), 16)
+}
+
+// Test 17: Move of uninit variable produces error
+fn own_test_17_inner(ctx: &! OwnContext) -> bool with Mut, Div, Panic {
+    let id = own_declare_var_uninit(ctx, OwnTypeKind::TyAffine, 10)
+    let m = own_check_move(ctx, id, 15)
+    m == false
+    && own_error_kind_eq(own_last_error_kind(ctx), OwnErrorKind::ErrUninitUse)
+}
+
+fn own_test_17() -> i64 with IO, Mut, Div, Panic {
+    var ctx = own_context_new()
+    own_assert_true(own_test_17_inner(&! ctx), 17)
+}
+
+// Test 18: Reinitialize after move allows use again
+fn own_test_18_inner(ctx: &! OwnContext) -> bool with Mut, Div, Panic {
+    let id = own_declare_var(ctx, OwnTypeKind::TyAffine, 10)
+    let m = own_transfer(ctx, id, 15)
+    own_reinitialize(ctx, id, 20)
+    let u = own_check_use(ctx, id, 25)
+    m && u && own_error_count(ctx) == 0
+}
+
+fn own_test_18() -> i64 with IO, Mut, Div, Panic {
+    var ctx = own_context_new()
+    own_assert_true(own_test_18_inner(&! ctx), 18)
+}
+
+// Test 19: Use after move records the move location in detail
+fn own_test_19_inner(ctx: &! OwnContext) -> bool with Mut, Div, Panic {
+    let id = own_declare_var(ctx, OwnTypeKind::TyAffine, 10)
+    let m = own_transfer(ctx, id, 42)
+    let u = own_check_use(ctx, id, 50)
+    let err = own_get_error(ctx, 0)
+    m && u == false && err.detail == 42
+}
+
+fn own_test_19() -> i64 with IO, Mut, Div, Panic {
+    var ctx = own_context_new()
+    own_assert_true(own_test_19_inner(&! ctx), 19)
+}
+
+// Test 20: Use of partially moved variable produces error
+fn own_test_20_inner(ctx: &! OwnContext) -> bool with Mut, Div, Panic {
+    let id = own_declare_var(ctx, OwnTypeKind::TyAffine, 10)
+    let pm = own_partial_move(ctx, id, 15)
+    let u = own_check_use(ctx, id, 20)
+    pm && u == false
+    && own_error_kind_eq(own_last_error_kind(ctx), OwnErrorKind::ErrPartialMove)
+}
+
+fn own_test_20() -> i64 with IO, Mut, Div, Panic {
+    var ctx = own_context_new()
+    own_assert_true(own_test_20_inner(&! ctx), 20)
+}
+
+// ============================================================
+//          CATEGORY 3: Shared Borrows (10 tests)
+// ============================================================
+
+// Test 21: Shared borrow of owned variable succeeds
+fn own_test_21_inner(ctx: &! OwnContext) -> bool with Mut, Div, Panic {
+    let id = own_declare_var(ctx, OwnTypeKind::TyAffine, 10)
+    let bid = own_borrow_shared(ctx, id, 15)
+    bid >= 0
+    && own_state_is_borrowed(own_get_state(ctx, id))
+    && own_active_borrows_for(ctx, id) == 1
+}
+
+fn own_test_21() -> i64 with IO, Mut, Div, Panic {
+    var ctx = own_context_new()
+    own_assert_true(own_test_21_inner(&! ctx), 21)
+}
+
+// Test 22: Multiple shared borrows allowed
+fn own_test_22_inner(ctx: &! OwnContext) -> bool with Mut, Div, Panic {
+    let id = own_declare_var(ctx, OwnTypeKind::TyAffine, 10)
+    let b1 = own_borrow_shared(ctx, id, 15)
+    let b2 = own_borrow_shared(ctx, id, 16)
+    let b3 = own_borrow_shared(ctx, id, 17)
+    b1 >= 0 && b2 >= 0 && b3 >= 0
+    && own_active_borrows_for(ctx, id) == 3
+    && own_error_count(ctx) == 0
+}
+
+fn own_test_22() -> i64 with IO, Mut, Div, Panic {
+    var ctx = own_context_new()
+    own_assert_true(own_test_22_inner(&! ctx), 22)
+}
+
+// Test 23: Release shared borrow restores state
+fn own_test_23_inner(ctx: &! OwnContext) -> bool with Mut, Div, Panic {
+    let id = own_declare_var(ctx, OwnTypeKind::TyAffine, 10)
+    let bid = own_borrow_shared(ctx, id, 15)
+    own_release_borrow(ctx, bid)
+    own_state_is_owned(own_get_state(ctx, id))
+    && own_active_borrows_for(ctx, id) == 0
+}
+
+fn own_test_23() -> i64 with IO, Mut, Div, Panic {
+    var ctx = own_context_new()
+    own_assert_true(own_test_23_inner(&! ctx), 23)
+}
+
+// Test 24: Shared borrow of moved variable fails
+fn own_test_24_inner(ctx: &! OwnContext) -> bool with Mut, Div, Panic {
+    let id = own_declare_var(ctx, OwnTypeKind::TyAffine, 10)
+    let m = own_transfer(ctx, id, 15)
+    let bid = own_borrow_shared(ctx, id, 20)
+    m && bid == (0 - 1)
+    && own_error_kind_eq(own_last_error_kind(ctx), OwnErrorKind::ErrUseAfterMove)
+}
+
+fn own_test_24() -> i64 with IO, Mut, Div, Panic {
+    var ctx = own_context_new()
+    own_assert_true(own_test_24_inner(&! ctx), 24)
+}
+
+// Test 25: Shared borrow of dropped variable fails
+fn own_test_25_inner(ctx: &! OwnContext) -> bool with Mut, Div, Panic {
+    let id = own_declare_var(ctx, OwnTypeKind::TyDrop, 10)
+    let d = own_explicit_drop(ctx, id, 15)
+    let bid = own_borrow_shared(ctx, id, 20)
+    d && bid == (0 - 1)
+    && own_error_kind_eq(own_last_error_kind(ctx), OwnErrorKind::ErrDoubleFree)
+}
+
+fn own_test_25() -> i64 with IO, Mut, Div, Panic {
+    var ctx = own_context_new()
+    own_assert_true(own_test_25_inner(&! ctx), 25)
+}
+
+// Test 26: Shared borrow of uninit variable fails
+fn own_test_26_inner(ctx: &! OwnContext) -> bool with Mut, Div, Panic {
+    let id = own_declare_var_uninit(ctx, OwnTypeKind::TyAffine, 10)
+    let bid = own_borrow_shared(ctx, id, 15)
+    bid == (0 - 1)
+    && own_error_kind_eq(own_last_error_kind(ctx), OwnErrorKind::ErrUninitUse)
+}
+
+fn own_test_26() -> i64 with IO, Mut, Div, Panic {
+    var ctx = own_context_new()
+    own_assert_true(own_test_26_inner(&! ctx), 26)
+}
+
+// Test 27: Release multiple shared borrows one at a time
+fn own_test_27_inner(ctx: &! OwnContext) -> bool with Mut, Div, Panic {
+    let id = own_declare_var(ctx, OwnTypeKind::TyAffine, 10)
+    let b1 = own_borrow_shared(ctx, id, 15)
+    let b2 = own_borrow_shared(ctx, id, 16)
+    // Release second first
+    own_release_borrow(ctx, b2)
+    let still_borrowed = own_state_is_borrowed(own_get_state(ctx, id))
+    // Now the first borrow is at index 0
+    own_release_borrow(ctx, 0)
+    let now_owned = own_state_is_owned(own_get_state(ctx, id))
+    still_borrowed && now_owned
+}
+
+fn own_test_27() -> i64 with IO, Mut, Div, Panic {
+    var ctx = own_context_new()
+    own_assert_true(own_test_27_inner(&! ctx), 27)
+}
+
+// Test 28: Shared borrow check on partially moved fails
+fn own_test_28_inner(ctx: &! OwnContext) -> bool with Mut, Div, Panic {
+    let id = own_declare_var(ctx, OwnTypeKind::TyAffine, 10)
+    let pm = own_partial_move(ctx, id, 15)
+    let ok = own_check_borrow_shared(ctx, id, 20)
+    pm && ok == false
+    && own_error_kind_eq(own_last_error_kind(ctx), OwnErrorKind::ErrPartialMove)
+}
+
+fn own_test_28() -> i64 with IO, Mut, Div, Panic {
+    var ctx = own_context_new()
+    own_assert_true(own_test_28_inner(&! ctx), 28)
+}
+
+// Test 29: Shared borrow of copy type succeeds, state is Borrowed
+fn own_test_29_inner(ctx: &! OwnContext) -> bool with Mut, Div, Panic {
+    let id = own_declare_var(ctx, OwnTypeKind::TyCopy, 10)
+    let bid = own_borrow_shared(ctx, id, 15)
+    bid >= 0 && own_state_is_borrowed(own_get_state(ctx, id))
+}
+
+fn own_test_29() -> i64 with IO, Mut, Div, Panic {
+    var ctx = own_context_new()
+    own_assert_true(own_test_29_inner(&! ctx), 29)
+}
+
+// Test 30: Shared borrow active count reflects additions and releases
+fn own_test_30_inner(ctx: &! OwnContext) -> bool with Mut, Div, Panic {
+    let id = own_declare_var(ctx, OwnTypeKind::TyAffine, 10)
+    let c0 = own_active_shared_borrows_for(ctx, id)
+    let b1 = own_borrow_shared(ctx, id, 15)
+    let c1 = own_active_shared_borrows_for(ctx, id)
+    let b2 = own_borrow_shared(ctx, id, 16)
+    let c2 = own_active_shared_borrows_for(ctx, id)
+    own_release_borrow(ctx, 0)
+    let c3 = own_active_shared_borrows_for(ctx, id)
+    c0 == 0 && c1 == 1 && c2 == 2 && c3 == 1
+}
+
+fn own_test_30() -> i64 with IO, Mut, Div, Panic {
+    var ctx = own_context_new()
+    own_assert_true(own_test_30_inner(&! ctx), 30)
+}
+
+// ============================================================
+//        CATEGORY 4: Exclusive Borrows (10 tests)
+// ============================================================
+
+// Test 31: Exclusive borrow of owned variable succeeds
+fn own_test_31_inner(ctx: &! OwnContext) -> bool with Mut, Div, Panic {
+    let id = own_declare_var(ctx, OwnTypeKind::TyAffine, 10)
+    let bid = own_borrow_exclusive(ctx, id, 15)
+    bid >= 0
+    && own_state_is_borrowed_mut(own_get_state(ctx, id))
+    && own_active_mut_borrows_for(ctx, id) == 1
+}
+
+fn own_test_31() -> i64 with IO, Mut, Div, Panic {
+    var ctx = own_context_new()
+    own_assert_true(own_test_31_inner(&! ctx), 31)
+}
+
+// Test 32: Release exclusive borrow restores to Owned
+fn own_test_32_inner(ctx: &! OwnContext) -> bool with Mut, Div, Panic {
+    let id = own_declare_var(ctx, OwnTypeKind::TyAffine, 10)
+    let bid = own_borrow_exclusive(ctx, id, 15)
+    own_release_borrow(ctx, bid)
+    own_state_is_owned(own_get_state(ctx, id))
+    && own_active_mut_borrows_for(ctx, id) == 0
+}
+
+fn own_test_32() -> i64 with IO, Mut, Div, Panic {
+    var ctx = own_context_new()
+    own_assert_true(own_test_32_inner(&! ctx), 32)
+}
+
+// Test 33: Exclusive borrow of moved variable fails
+fn own_test_33_inner(ctx: &! OwnContext) -> bool with Mut, Div, Panic {
+    let id = own_declare_var(ctx, OwnTypeKind::TyAffine, 10)
+    let m = own_transfer(ctx, id, 15)
+    let bid = own_borrow_exclusive(ctx, id, 20)
+    m && bid == (0 - 1)
+    && own_error_kind_eq(own_last_error_kind(ctx), OwnErrorKind::ErrUseAfterMove)
+}
+
+fn own_test_33() -> i64 with IO, Mut, Div, Panic {
+    var ctx = own_context_new()
+    own_assert_true(own_test_33_inner(&! ctx), 33)
+}
+
+// Test 34: Exclusive borrow of dropped variable fails
+fn own_test_34_inner(ctx: &! OwnContext) -> bool with Mut, Div, Panic {
+    let id = own_declare_var(ctx, OwnTypeKind::TyDrop, 10)
+    let d = own_explicit_drop(ctx, id, 15)
+    let bid = own_borrow_exclusive(ctx, id, 20)
+    d && bid == (0 - 1)
+    && own_error_kind_eq(own_last_error_kind(ctx), OwnErrorKind::ErrDoubleFree)
+}
+
+fn own_test_34() -> i64 with IO, Mut, Div, Panic {
+    var ctx = own_context_new()
+    own_assert_true(own_test_34_inner(&! ctx), 34)
+}
+
+// Test 35: Exclusive borrow of uninit variable fails
+fn own_test_35_inner(ctx: &! OwnContext) -> bool with Mut, Div, Panic {
+    let id = own_declare_var_uninit(ctx, OwnTypeKind::TyAffine, 10)
+    let bid = own_borrow_exclusive(ctx, id, 15)
+    bid == (0 - 1)
+    && own_error_kind_eq(own_last_error_kind(ctx), OwnErrorKind::ErrUninitUse)
+}
+
+fn own_test_35() -> i64 with IO, Mut, Div, Panic {
+    var ctx = own_context_new()
+    own_assert_true(own_test_35_inner(&! ctx), 35)
+}
+
+// Test 36: Exclusive borrow of partially moved fails
+fn own_test_36_inner(ctx: &! OwnContext) -> bool with Mut, Div, Panic {
+    let id = own_declare_var(ctx, OwnTypeKind::TyAffine, 10)
+    let pm = own_partial_move(ctx, id, 15)
+    let bid = own_borrow_exclusive(ctx, id, 20)
+    pm && bid == (0 - 1)
+    && own_error_kind_eq(own_last_error_kind(ctx), OwnErrorKind::ErrPartialMove)
+}
+
+fn own_test_36() -> i64 with IO, Mut, Div, Panic {
+    var ctx = own_context_new()
+    own_assert_true(own_test_36_inner(&! ctx), 36)
+}
+
+// Test 37: Exclusive borrow of copy type succeeds
+fn own_test_37_inner(ctx: &! OwnContext) -> bool with Mut, Div, Panic {
+    let id = own_declare_var(ctx, OwnTypeKind::TyCopy, 10)
+    let bid = own_borrow_exclusive(ctx, id, 15)
+    bid >= 0 && own_state_is_borrowed_mut(own_get_state(ctx, id))
+}
+
+fn own_test_37() -> i64 with IO, Mut, Div, Panic {
+    var ctx = own_context_new()
+    own_assert_true(own_test_37_inner(&! ctx), 37)
+}
+
+// Test 38: Exclusive borrow then release then re-borrow succeeds
+fn own_test_38_inner(ctx: &! OwnContext) -> bool with Mut, Div, Panic {
+    let id = own_declare_var(ctx, OwnTypeKind::TyAffine, 10)
+    let b1 = own_borrow_exclusive(ctx, id, 15)
+    own_release_borrow(ctx, b1)
+    let b2 = own_borrow_exclusive(ctx, id, 20)
+    b1 >= 0 && b2 >= 0 && own_error_count(ctx) == 0
+}
+
+fn own_test_38() -> i64 with IO, Mut, Div, Panic {
+    var ctx = own_context_new()
+    own_assert_true(own_test_38_inner(&! ctx), 38)
+}
+
+// Test 39: Exclusive borrow active count reflects changes
+fn own_test_39_inner(ctx: &! OwnContext) -> bool with Mut, Div, Panic {
+    let id = own_declare_var(ctx, OwnTypeKind::TyAffine, 10)
+    let c0 = own_active_mut_borrows_for(ctx, id)
+    let bid = own_borrow_exclusive(ctx, id, 15)
+    let c1 = own_active_mut_borrows_for(ctx, id)
+    own_release_borrow(ctx, bid)
+    let c2 = own_active_mut_borrows_for(ctx, id)
+    c0 == 0 && c1 == 1 && c2 == 0
+}
+
+fn own_test_39() -> i64 with IO, Mut, Div, Panic {
+    var ctx = own_context_new()
+    own_assert_true(own_test_39_inner(&! ctx), 39)
+}
+
+// Test 40: Exclusive borrow check does not record error for copy+owned
+fn own_test_40_inner(ctx: &! OwnContext) -> bool with Mut, Div, Panic {
+    let id = own_declare_var(ctx, OwnTypeKind::TyCopy, 10)
+    let ok = own_check_borrow_exclusive(ctx, id, 15)
+    ok && own_error_count(ctx) == 0
+}
+
+fn own_test_40() -> i64 with IO, Mut, Div, Panic {
+    var ctx = own_context_new()
+    own_assert_true(own_test_40_inner(&! ctx), 40)
+}
+
+// ============================================================
+//         CATEGORY 5: Borrow Conflicts (10 tests)
+// ============================================================
+
+// Test 41: Shared borrow while exclusive borrow is active fails
+fn own_test_41_inner(ctx: &! OwnContext) -> bool with Mut, Div, Panic {
+    let id = own_declare_var(ctx, OwnTypeKind::TyAffine, 10)
+    let b1 = own_borrow_exclusive(ctx, id, 15)
+    let b2 = own_borrow_shared(ctx, id, 20)
+    b1 >= 0 && b2 == (0 - 1)
+    && own_error_kind_eq(own_last_error_kind(ctx), OwnErrorKind::ErrBorrowWhileMutBorrowed)
+}
+
+fn own_test_41() -> i64 with IO, Mut, Div, Panic {
+    var ctx = own_context_new()
+    own_assert_true(own_test_41_inner(&! ctx), 41)
+}
+
+// Test 42: Exclusive borrow while shared borrow is active fails
+fn own_test_42_inner(ctx: &! OwnContext) -> bool with Mut, Div, Panic {
+    let id = own_declare_var(ctx, OwnTypeKind::TyAffine, 10)
+    let b1 = own_borrow_shared(ctx, id, 15)
+    let b2 = own_borrow_exclusive(ctx, id, 20)
+    b1 >= 0 && b2 == (0 - 1)
+    && own_error_kind_eq(own_last_error_kind(ctx), OwnErrorKind::ErrMutBorrowWhileBorrowed)
+}
+
+fn own_test_42() -> i64 with IO, Mut, Div, Panic {
+    var ctx = own_context_new()
+    own_assert_true(own_test_42_inner(&! ctx), 42)
+}
+
+// Test 43: Exclusive borrow while another exclusive borrow is active fails
+fn own_test_43_inner(ctx: &! OwnContext) -> bool with Mut, Div, Panic {
+    let id = own_declare_var(ctx, OwnTypeKind::TyAffine, 10)
+    let b1 = own_borrow_exclusive(ctx, id, 15)
+    let b2 = own_borrow_exclusive(ctx, id, 20)
+    b1 >= 0 && b2 == (0 - 1)
+    && own_error_kind_eq(own_last_error_kind(ctx), OwnErrorKind::ErrBorrowWhileMutBorrowed)
+}
+
+fn own_test_43() -> i64 with IO, Mut, Div, Panic {
+    var ctx = own_context_new()
+    own_assert_true(own_test_43_inner(&! ctx), 43)
+}
+
+// Test 44: Move while shared borrow is active fails
+fn own_test_44_inner(ctx: &! OwnContext) -> bool with Mut, Div, Panic {
+    let id = own_declare_var(ctx, OwnTypeKind::TyAffine, 10)
+    let b = own_borrow_shared(ctx, id, 15)
+    let m = own_transfer(ctx, id, 20)
+    b >= 0 && m == false
+    && own_error_kind_eq(own_last_error_kind(ctx), OwnErrorKind::ErrMoveWhileBorrowed)
+}
+
+fn own_test_44() -> i64 with IO, Mut, Div, Panic {
+    var ctx = own_context_new()
+    own_assert_true(own_test_44_inner(&! ctx), 44)
+}
+
+// Test 45: Move while exclusive borrow is active fails
+fn own_test_45_inner(ctx: &! OwnContext) -> bool with Mut, Div, Panic {
+    let id = own_declare_var(ctx, OwnTypeKind::TyAffine, 10)
+    let b = own_borrow_exclusive(ctx, id, 15)
+    let m = own_transfer(ctx, id, 20)
+    b >= 0 && m == false
+    && own_error_kind_eq(own_last_error_kind(ctx), OwnErrorKind::ErrMoveWhileBorrowed)
+}
+
+fn own_test_45() -> i64 with IO, Mut, Div, Panic {
+    var ctx = own_context_new()
+    own_assert_true(own_test_45_inner(&! ctx), 45)
+}
+
+// Test 46: Release shared borrow then exclusive borrow succeeds
+fn own_test_46_inner(ctx: &! OwnContext) -> bool with Mut, Div, Panic {
+    let id = own_declare_var(ctx, OwnTypeKind::TyAffine, 10)
+    let b1 = own_borrow_shared(ctx, id, 15)
+    own_release_borrow(ctx, b1)
+    let b2 = own_borrow_exclusive(ctx, id, 20)
+    b2 >= 0 && own_error_count(ctx) == 0
+}
+
+fn own_test_46() -> i64 with IO, Mut, Div, Panic {
+    var ctx = own_context_new()
+    own_assert_true(own_test_46_inner(&! ctx), 46)
+}
+
+// Test 47: Release exclusive borrow then shared borrow succeeds
+fn own_test_47_inner(ctx: &! OwnContext) -> bool with Mut, Div, Panic {
+    let id = own_declare_var(ctx, OwnTypeKind::TyAffine, 10)
+    let b1 = own_borrow_exclusive(ctx, id, 15)
+    own_release_borrow(ctx, b1)
+    let b2 = own_borrow_shared(ctx, id, 20)
+    b2 >= 0 && own_error_count(ctx) == 0
+}
+
+fn own_test_47() -> i64 with IO, Mut, Div, Panic {
+    var ctx = own_context_new()
+    own_assert_true(own_test_47_inner(&! ctx), 47)
+}
+
+// Test 48: Two different variables can have independent exclusive borrows
+fn own_test_48_inner(ctx: &! OwnContext) -> bool with Mut, Div, Panic {
+    let a = own_declare_var(ctx, OwnTypeKind::TyAffine, 10)
+    let b = own_declare_var(ctx, OwnTypeKind::TyAffine, 11)
+    let ba = own_borrow_exclusive(ctx, a, 15)
+    let bb = own_borrow_exclusive(ctx, b, 16)
+    ba >= 0 && bb >= 0 && own_error_count(ctx) == 0
+}
+
+fn own_test_48() -> i64 with IO, Mut, Div, Panic {
+    var ctx = own_context_new()
+    own_assert_true(own_test_48_inner(&! ctx), 48)
+}
+
+// Test 49: Release all borrows for a variable clears all
+fn own_test_49_inner(ctx: &! OwnContext) -> bool with Mut, Div, Panic {
+    let id = own_declare_var(ctx, OwnTypeKind::TyAffine, 10)
+    let b1 = own_borrow_shared(ctx, id, 15)
+    let b2 = own_borrow_shared(ctx, id, 16)
+    own_release_all_borrows_for(ctx, id)
+    own_active_borrows_for(ctx, id) == 0
+    && own_state_is_owned(own_get_state(ctx, id))
+}
+
+fn own_test_49() -> i64 with IO, Mut, Div, Panic {
+    var ctx = own_context_new()
+    own_assert_true(own_test_49_inner(&! ctx), 49)
+}
+
+// Test 50: Drop while shared borrow — borrows are released then drop occurs
+fn own_test_50_inner(ctx: &! OwnContext) -> bool with Mut, Div, Panic {
+    let id = own_declare_var(ctx, OwnTypeKind::TyDrop, 10)
+    let b = own_borrow_shared(ctx, id, 15)
+    // Release the borrow first, then explicit drop
+    own_release_borrow(ctx, b)
+    let d = own_explicit_drop(ctx, id, 20)
+    d && own_state_is_dropped(own_get_state(ctx, id))
+    && own_error_count(ctx) == 0
+}
+
+fn own_test_50() -> i64 with IO, Mut, Div, Panic {
+    var ctx = own_context_new()
+    own_assert_true(own_test_50_inner(&! ctx), 50)
+}
+
+// ============================================================
+//             CATEGORY 6: Scoping (8 tests)
+// ============================================================
+
+// Test 51: Variable declared in scope is visible
+fn own_test_51_inner(ctx: &! OwnContext) -> bool with Mut, Div, Panic {
+    own_enter_scope(ctx, false)
+    let id = own_declare_var(ctx, OwnTypeKind::TyCopy, 10)
+    let ok = own_check_use(ctx, id, 15)
+    own_exit_scope(ctx)
+    ok && own_error_count(ctx) == 0
+}
+
+fn own_test_51() -> i64 with IO, Mut, Div, Panic {
+    var ctx = own_context_new()
+    own_assert_true(own_test_51_inner(&! ctx), 51)
+}
+
+// Test 52: Scope exit drops owned variables
+fn own_test_52_inner(ctx: &! OwnContext) -> bool with Mut, Div, Panic {
+    own_enter_scope(ctx, false)
+    let id = own_declare_var(ctx, OwnTypeKind::TyDrop, 10)
+    own_exit_scope(ctx)
+    own_state_is_dropped(own_get_state(ctx, id))
+    && own_drop_count(ctx) == 1
+}
+
+fn own_test_52() -> i64 with IO, Mut, Div, Panic {
+    var ctx = own_context_new()
+    own_assert_true(own_test_52_inner(&! ctx), 52)
+}
+
+// Test 53: Scope exit with linear var still owned produces MissingDrop error
+fn own_test_53_inner(ctx: &! OwnContext) -> bool with Mut, Div, Panic {
+    own_enter_scope(ctx, false)
+    let id = own_declare_var(ctx, OwnTypeKind::TyLinear, 10)
+    own_exit_scope(ctx)
+    own_error_count(ctx) == 1
+    && own_error_kind_eq(own_last_error_kind(ctx), OwnErrorKind::ErrMissingDrop)
+}
+
+fn own_test_53() -> i64 with IO, Mut, Div, Panic {
+    var ctx = own_context_new()
+    own_assert_true(own_test_53_inner(&! ctx), 53)
+}
+
+// Test 54: Scope exit does not error for moved variables
+fn own_test_54_inner(ctx: &! OwnContext) -> bool with Mut, Div, Panic {
+    own_enter_scope(ctx, false)
+    let id = own_declare_var(ctx, OwnTypeKind::TyLinear, 10)
+    let m = own_transfer(ctx, id, 15)
+    own_exit_scope(ctx)
+    m && own_error_count(ctx) == 0
+}
+
+fn own_test_54() -> i64 with IO, Mut, Div, Panic {
+    var ctx = own_context_new()
+    own_assert_true(own_test_54_inner(&! ctx), 54)
+}
+
+// Test 55: Nested scopes work correctly
+fn own_test_55_inner(ctx: &! OwnContext) -> bool with Mut, Div, Panic {
+    own_enter_scope(ctx, false)
+    let a = own_declare_var(ctx, OwnTypeKind::TyCopy, 10)
+    own_enter_scope(ctx, false)
+    let b = own_declare_var(ctx, OwnTypeKind::TyCopy, 20)
+    own_exit_scope(ctx)
+    let d1 = own_current_scope_depth(ctx)
+    own_exit_scope(ctx)
+    let d2 = own_current_scope_depth(ctx)
+    d1 == 1 && d2 == 0 && own_var_count(ctx) == 2
+}
+
+fn own_test_55() -> i64 with IO, Mut, Div, Panic {
+    var ctx = own_context_new()
+    own_assert_true(own_test_55_inner(&! ctx), 55)
+}
+
+// Test 56: Scope exit releases borrows created in that scope
+fn own_test_56_inner(ctx: &! OwnContext) -> bool with Mut, Div, Panic {
+    let id = own_declare_var(ctx, OwnTypeKind::TyAffine, 5)
+    own_enter_scope(ctx, false)
+    let bid = own_borrow_shared(ctx, id, 10)
+    let before = own_active_borrows_for(ctx, id)
+    own_exit_scope(ctx)
+    let after = own_active_borrows_for(ctx, id)
+    before == 1 && after == 0
+    && own_state_is_owned(own_get_state(ctx, id))
+}
+
+fn own_test_56() -> i64 with IO, Mut, Div, Panic {
+    var ctx = own_context_new()
+    own_assert_true(own_test_56_inner(&! ctx), 56)
+}
+
+// Test 57: Loop scope is correctly tracked
+fn own_test_57_inner(ctx: &! OwnContext) -> bool with Mut, Div, Panic {
+    own_enter_scope(ctx, true)
+    let is_lp = own_scope_is_loop(ctx, 0)
+    own_exit_scope(ctx)
+    is_lp
+}
+
+fn own_test_57() -> i64 with IO, Mut, Div, Panic {
+    var ctx = own_context_new()
+    own_assert_true(own_test_57_inner(&! ctx), 57)
+}
+
+// Test 58: Non-loop scope is correctly tracked
+fn own_test_58_inner(ctx: &! OwnContext) -> bool with Mut, Div, Panic {
+    own_enter_scope(ctx, false)
+    let is_lp = own_scope_is_loop(ctx, 0)
+    own_exit_scope(ctx)
+    is_lp == false
+}
+
+fn own_test_58() -> i64 with IO, Mut, Div, Panic {
+    var ctx = own_context_new()
+    own_assert_true(own_test_58_inner(&! ctx), 58)
+}
+
+// ============================================================
+//          CATEGORY 7: Branch Merging (7 tests)
+// ============================================================
+
+// Test 59: Merge Owned + Owned => Owned
+fn own_test_59_inner(ctx: &! OwnContext) -> bool with Mut, Div, Panic {
+    let id = own_declare_var(ctx, OwnTypeKind::TyAffine, 10)
+
+    // Snapshot current (Owned)
+    let snap1 = own_snapshot_mut(ctx)
+    // Both branches leave it as Owned — same snapshot
+    let snap2 = own_snapshot_mut(ctx)
+    let ok = own_merge_branches(ctx, snap1, snap2)
+    ok && own_state_is_owned(own_get_state(ctx, id))
+}
+
+fn own_test_59() -> i64 with IO, Mut, Div, Panic {
+    var ctx = own_context_new()
+    own_assert_true(own_test_59_inner(&! ctx), 59)
+}
+
+// Test 60: Merge Moved + Moved => Moved
+fn own_test_60_inner(ctx: &! OwnContext) -> bool with Mut, Div, Panic {
+    let id = own_declare_var(ctx, OwnTypeKind::TyAffine, 10)
+
+    // Branch 1: move it
+    let m1 = own_transfer(ctx, id, 15)
+    let snap1 = own_snapshot_mut(ctx)
+
+    // Branch 2: also move it (simulate by restoring to Moved via set_state)
+    // Already moved, so snap2 = same state
+    let snap2 = own_snapshot_mut(ctx)
+
+    let ok = own_merge_branches(ctx, snap1, snap2)
+    ok && own_state_is_moved(own_get_state(ctx, id))
+}
+
+fn own_test_60() -> i64 with IO, Mut, Div, Panic {
+    var ctx = own_context_new()
+    own_assert_true(own_test_60_inner(&! ctx), 60)
+}
+
+// Test 61: Merge Owned + Moved => PartiallyMoved
+fn own_test_61_inner(ctx: &! OwnContext) -> bool with Mut, Div, Panic {
+    let id = own_declare_var(ctx, OwnTypeKind::TyAffine, 10)
+
+    // Branch 1: keep owned
+    let snap1 = own_snapshot_mut(ctx)
+
+    // Branch 2: move it
+    let m = own_transfer(ctx, id, 15)
+    let snap2 = own_snapshot_mut(ctx)
+
+    let ok = own_merge_branches(ctx, snap1, snap2)
+    // For affine types, partial move is OK (no error)
+    own_state_is_partially_moved(own_get_state(ctx, id))
+}
+
+fn own_test_61() -> i64 with IO, Mut, Div, Panic {
+    var ctx = own_context_new()
+    own_assert_true(own_test_61_inner(&! ctx), 61)
+}
+
+// Test 62: Merge Owned + Moved for linear type => error
+fn own_test_62_inner(ctx: &! OwnContext) -> bool with Mut, Div, Panic {
+    let id = own_declare_var(ctx, OwnTypeKind::TyLinear, 10)
+
+    // Branch 1: keep owned
+    let snap1 = own_snapshot_mut(ctx)
+
+    // Branch 2: move it
+    let m = own_transfer(ctx, id, 15)
+    let snap2 = own_snapshot_mut(ctx)
+
+    let ok = own_merge_branches(ctx, snap1, snap2)
+    ok == false
+    && own_error_kind_eq(own_last_error_kind(ctx), OwnErrorKind::ErrPartialMove)
+}
+
+fn own_test_62() -> i64 with IO, Mut, Div, Panic {
+    var ctx = own_context_new()
+    own_assert_true(own_test_62_inner(&! ctx), 62)
+}
+
+// Test 63: Merge with both sides uninit stays uninit
+fn own_test_63_inner(ctx: &! OwnContext) -> bool with Mut, Div, Panic {
+    let id = own_declare_var_uninit(ctx, OwnTypeKind::TyCopy, 10)
+    let snap1 = own_snapshot_mut(ctx)
+    let snap2 = own_snapshot_mut(ctx)
+    let ok = own_merge_branches(ctx, snap1, snap2)
+    ok && own_state_is_uninit(own_get_state(ctx, id))
+}
+
+fn own_test_63() -> i64 with IO, Mut, Div, Panic {
+    var ctx = own_context_new()
+    own_assert_true(own_test_63_inner(&! ctx), 63)
+}
+
+// Test 64: Merge Dropped + Moved => Moved
+fn own_test_64_inner(ctx: &! OwnContext) -> bool with Mut, Div, Panic {
+    let id = own_declare_var(ctx, OwnTypeKind::TyDrop, 10)
+
+    // Branch 1: drop it
+    let d = own_explicit_drop(ctx, id, 15)
+    let snap1 = own_snapshot_mut(ctx)
+
+    // Branch 2: simulate moved
+    own_set_state(ctx, id, OwnState::StateMoved)
+    let snap2 = own_snapshot_mut(ctx)
+
+    let ok = own_merge_branches(ctx, snap1, snap2)
+    own_state_is_moved(own_get_state(ctx, id))
+}
+
+fn own_test_64() -> i64 with IO, Mut, Div, Panic {
+    var ctx = own_context_new()
+    own_assert_true(own_test_64_inner(&! ctx), 64)
+}
+
+// Test 65: Merge preserves multiple variables independently
+fn own_test_65_inner(ctx: &! OwnContext) -> bool with Mut, Div, Panic {
+    let a = own_declare_var(ctx, OwnTypeKind::TyAffine, 10)
+    let b = own_declare_var(ctx, OwnTypeKind::TyAffine, 11)
+
+    // Branch 1: move a, keep b
+    let m = own_transfer(ctx, a, 15)
+    let snap1 = own_snapshot_mut(ctx)
+
+    // Branch 2: keep a, move b — restore a first
+    own_set_state(ctx, a, OwnState::StateOwned)
+    let m2 = own_transfer(ctx, b, 20)
+    let snap2 = own_snapshot_mut(ctx)
+
+    let ok = own_merge_branches(ctx, snap1, snap2)
+    // Both should be partially moved (for affine, no error)
+    own_state_is_partially_moved(own_get_state(ctx, a))
+    && own_state_is_partially_moved(own_get_state(ctx, b))
+}
+
+fn own_test_65() -> i64 with IO, Mut, Div, Panic {
+    var ctx = own_context_new()
+    own_assert_true(own_test_65_inner(&! ctx), 65)
+}
+
+// ============================================================
+//           CATEGORY 8: Linear Types (5 tests)
+// ============================================================
+
+// Test 66: Linear type consumed via move — no error at function check
+fn own_test_66_inner(ctx: &! OwnContext) -> bool with Mut, Div, Panic {
+    let id = own_declare_var(ctx, OwnTypeKind::TyLinear, 10)
+    let m = own_transfer(ctx, id, 15)
+    let ok = own_check_linear_at_end(ctx)
+    m && ok && own_error_count(ctx) == 0
+}
+
+fn own_test_66() -> i64 with IO, Mut, Div, Panic {
+    var ctx = own_context_new()
+    own_assert_true(own_test_66_inner(&! ctx), 66)
+}
+
+// Test 67: Linear type consumed via explicit drop — no error
+fn own_test_67_inner(ctx: &! OwnContext) -> bool with Mut, Div, Panic {
+    let id = own_declare_var(ctx, OwnTypeKind::TyLinear, 10)
+    let d = own_explicit_drop(ctx, id, 15)
+    let ok = own_check_linear_at_end(ctx)
+    d && ok && own_error_count(ctx) == 0
+}
+
+fn own_test_67() -> i64 with IO, Mut, Div, Panic {
+    var ctx = own_context_new()
+    own_assert_true(own_test_67_inner(&! ctx), 67)
+}
+
+// Test 68: Linear type NOT consumed — ErrMissingDrop at function check
+fn own_test_68_inner(ctx: &! OwnContext) -> bool with Mut, Div, Panic {
+    let id = own_declare_var(ctx, OwnTypeKind::TyLinear, 10)
+    // Do NOT consume it
+    let ok = own_check_linear_at_end(ctx)
+    ok == false
+    && own_error_kind_eq(own_last_error_kind(ctx), OwnErrorKind::ErrMissingDrop)
+}
+
+fn own_test_68() -> i64 with IO, Mut, Div, Panic {
+    var ctx = own_context_new()
+    own_assert_true(own_test_68_inner(&! ctx), 68)
+}
+
+// Test 69: Affine type NOT consumed — no error (affine can be dropped implicitly)
+fn own_test_69_inner(ctx: &! OwnContext) -> bool with Mut, Div, Panic {
+    let id = own_declare_var(ctx, OwnTypeKind::TyAffine, 10)
+    // Do NOT consume it — affine is fine
+    let ok = own_check_linear_at_end(ctx)
+    ok && own_error_count(ctx) == 0
+}
+
+fn own_test_69() -> i64 with IO, Mut, Div, Panic {
+    var ctx = own_context_new()
+    own_assert_true(own_test_69_inner(&! ctx), 69)
+}
+
+// Test 70: Linear type with borrow still active at end — MissingDrop
+fn own_test_70_inner(ctx: &! OwnContext) -> bool with Mut, Div, Panic {
+    let id = own_declare_var(ctx, OwnTypeKind::TyLinear, 10)
+    let bid = own_borrow_shared(ctx, id, 15)
+    // Linear variable is still borrowed (not consumed)
+    let ok = own_check_linear_at_end(ctx)
+    ok == false
+    && own_error_kind_eq(own_last_error_kind(ctx), OwnErrorKind::ErrMissingDrop)
+}
+
+fn own_test_70() -> i64 with IO, Mut, Div, Panic {
+    var ctx = own_context_new()
+    own_assert_true(own_test_70_inner(&! ctx), 70)
+}
+
+// ============================================================
+//           CATEGORY 9: Integration (5 tests)
+// ============================================================
+
+// Test 71: Full function check — all copy variables, passes
+fn own_test_71_inner(ctx: &! OwnContext) -> bool with Mut, Div, Panic {
+    let a = own_declare_var(ctx, OwnTypeKind::TyCopy, 1)
+    let b = own_declare_var(ctx, OwnTypeKind::TyCopy, 2)
+    let c = own_declare_var(ctx, OwnTypeKind::TyCopy, 3)
+    let ok1 = own_check_use(ctx, a, 5)
+    let ok2 = own_check_use(ctx, b, 6)
+    let ok3 = own_check_use(ctx, c, 7)
+    let fok = own_check_function(ctx)
+    ok1 && ok2 && ok3 && fok
+}
+
+fn own_test_71() -> i64 with IO, Mut, Div, Panic {
+    var ctx = own_context_new()
+    own_assert_true(own_test_71_inner(&! ctx), 71)
+}
+
+// Test 72: Full function check — linear consumed, affine unused, passes
+fn own_test_72_inner(ctx: &! OwnContext) -> bool with Mut, Div, Panic {
+    let lin = own_declare_var(ctx, OwnTypeKind::TyLinear, 1)
+    let aff = own_declare_var(ctx, OwnTypeKind::TyAffine, 2)
+    let m = own_transfer(ctx, lin, 10)
+    // aff is not consumed, which is fine for affine
+    let fok = own_check_function(ctx)
+    m && fok
+}
+
+fn own_test_72() -> i64 with IO, Mut, Div, Panic {
+    var ctx = own_context_new()
+    own_assert_true(own_test_72_inner(&! ctx), 72)
+}
+
+// Test 73: Full function check — linear NOT consumed, fails
+fn own_test_73_inner(ctx: &! OwnContext) -> bool with Mut, Div, Panic {
+    let lin = own_declare_var(ctx, OwnTypeKind::TyLinear, 1)
+    // Do not consume lin
+    let fok = own_check_function(ctx)
+    fok == false
+    && own_count_errors_of_kind(ctx, OwnErrorKind::ErrMissingDrop) >= 1
+}
+
+fn own_test_73() -> i64 with IO, Mut, Div, Panic {
+    var ctx = own_context_new()
+    own_assert_true(own_test_73_inner(&! ctx), 73)
+}
+
+// Test 74: Full pipeline — declare, scope, borrow, release, move, drop check
+fn own_test_74_inner(ctx: &! OwnContext) -> bool with Mut, Div, Panic {
+    // Declare two variables at the top scope
+    let outer_lin = own_declare_var(ctx, OwnTypeKind::TyLinear, 1)
+    let outer_copy = own_declare_var(ctx, OwnTypeKind::TyCopy, 2)
+
+    // Enter a scope
+    own_enter_scope(ctx, false)
+    let inner_aff = own_declare_var(ctx, OwnTypeKind::TyAffine, 10)
+
+    // Borrow the outer copy var
+    let bid = own_borrow_shared(ctx, outer_copy, 12)
+    let use_ok = own_check_use(ctx, outer_copy, 13)
+
+    // Move the inner affine var
+    let m = own_transfer(ctx, inner_aff, 15)
+
+    // Exit inner scope (releases borrow, drops nothing since inner_aff is moved)
+    own_exit_scope(ctx)
+
+    // Consume the linear var
+    let lm = own_transfer(ctx, outer_lin, 20)
+
+    // Final check
+    let fok = own_check_function(ctx)
+    use_ok && m && lm && fok
+}
+
+fn own_test_74() -> i64 with IO, Mut, Div, Panic {
+    var ctx = own_context_new()
+    own_assert_true(own_test_74_inner(&! ctx), 74)
+}
+
+// Test 75: Reset and reuse context
+fn own_test_75_inner(ctx: &! OwnContext) -> bool with Mut, Div, Panic {
+    // First use
+    let id = own_declare_var(ctx, OwnTypeKind::TyAffine, 10)
+    let m = own_transfer(ctx, id, 15)
+    let c1 = own_var_count(ctx)
+
+    // Reset
+    own_reset(ctx)
+    let c2 = own_var_count(ctx)
+    let e2 = own_error_count(ctx)
+
+    // Second use
+    let id2 = own_declare_var(ctx, OwnTypeKind::TyCopy, 1)
+    let c3 = own_var_count(ctx)
+
+    m && c1 == 1 && c2 == 0 && e2 == 0 && c3 == 1 && id2 == 0
+}
+
+fn own_test_75() -> i64 with IO, Mut, Div, Panic {
+    var ctx = own_context_new()
+    own_assert_true(own_test_75_inner(&! ctx), 75)
+}
+
+// ============================================================
+//                    TEST RUNNER
+// ============================================================
+
+fn own_run_tests() -> i64 with IO, Mut, Div, Panic {
+    print("=== Ownership checker tests ===\n")
+    var fails: i64 = 0
+
+    // Category 1: Basic ownership (12 tests)
+    fails = fails + own_test_1()
+    fails = fails + own_test_2()
+    fails = fails + own_test_3()
+    fails = fails + own_test_4()
+    fails = fails + own_test_5()
+    fails = fails + own_test_6()
+    fails = fails + own_test_7()
+    fails = fails + own_test_8()
+    fails = fails + own_test_9()
+    fails = fails + own_test_10()
+    fails = fails + own_test_11()
+    fails = fails + own_test_12()
+
+    // Category 2: Use-after-move (8 tests)
+    fails = fails + own_test_13()
+    fails = fails + own_test_14()
+    fails = fails + own_test_15()
+    fails = fails + own_test_16()
+    fails = fails + own_test_17()
+    fails = fails + own_test_18()
+    fails = fails + own_test_19()
+    fails = fails + own_test_20()
+
+    // Category 3: Shared borrows (10 tests)
+    fails = fails + own_test_21()
+    fails = fails + own_test_22()
+    fails = fails + own_test_23()
+    fails = fails + own_test_24()
+    fails = fails + own_test_25()
+    fails = fails + own_test_26()
+    fails = fails + own_test_27()
+    fails = fails + own_test_28()
+    fails = fails + own_test_29()
+    fails = fails + own_test_30()
+
+    // Category 4: Exclusive borrows (10 tests)
+    fails = fails + own_test_31()
+    fails = fails + own_test_32()
+    fails = fails + own_test_33()
+    fails = fails + own_test_34()
+    fails = fails + own_test_35()
+    fails = fails + own_test_36()
+    fails = fails + own_test_37()
+    fails = fails + own_test_38()
+    fails = fails + own_test_39()
+    fails = fails + own_test_40()
+
+    // Category 5: Borrow conflicts (10 tests)
+    fails = fails + own_test_41()
+    fails = fails + own_test_42()
+    fails = fails + own_test_43()
+    fails = fails + own_test_44()
+    fails = fails + own_test_45()
+    fails = fails + own_test_46()
+    fails = fails + own_test_47()
+    fails = fails + own_test_48()
+    fails = fails + own_test_49()
+    fails = fails + own_test_50()
+
+    // Category 6: Scoping (8 tests)
+    fails = fails + own_test_51()
+    fails = fails + own_test_52()
+    fails = fails + own_test_53()
+    fails = fails + own_test_54()
+    fails = fails + own_test_55()
+    fails = fails + own_test_56()
+    fails = fails + own_test_57()
+    fails = fails + own_test_58()
+
+    // Category 7: Branch merging (7 tests)
+    fails = fails + own_test_59()
+    fails = fails + own_test_60()
+    fails = fails + own_test_61()
+    fails = fails + own_test_62()
+    fails = fails + own_test_63()
+    fails = fails + own_test_64()
+    fails = fails + own_test_65()
+
+    // Category 8: Linear types (5 tests)
+    fails = fails + own_test_66()
+    fails = fails + own_test_67()
+    fails = fails + own_test_68()
+    fails = fails + own_test_69()
+    fails = fails + own_test_70()
+
+    // Category 9: Integration (5 tests)
+    fails = fails + own_test_71()
+    fails = fails + own_test_72()
+    fails = fails + own_test_73()
+    fails = fails + own_test_74()
+    fails = fails + own_test_75()
+
+    print("Total failures: ")
+    print_int(fails)
+    print("\n")
+
+    if fails > 0 {
+        return 0 - fails
+    }
+    75
+}

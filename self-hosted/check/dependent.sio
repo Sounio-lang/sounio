@@ -1,0 +1,3511 @@
+// Dependent type elaboration for the self-hosted type checker
+//
+// Implements dependent type checking with Pi types (dependent function types),
+// Sigma types (dependent pair types), value-indexed types, term-level
+// normalization, capture-avoiding substitution, and first-order unification.
+//
+// Architecture:
+//   DepTerm         — term representation with kind tag, value, children
+//   DepConstraint   — type-level constraint (equality, ordering, etc.)
+//   DepSubstitution — pending var -> term substitution
+//   DepContext      — flat-array arena holding all dependent-type state
+//
+// Algorithm:
+//   1. Build terms via dep_term_* constructors (all return arena IDs)
+//   2. Elaborate Pi/Sigma types by allocating structured terms
+//   3. Normalize terms via beta-reduction with fuel-limited evaluation
+//   4. Unify terms structurally, recording substitutions
+//   5. Check constraints against normalized term values
+//
+// Uses flat-array arena pattern (no recursive types, no heap allocation)
+// consistent with the self-hosted checker's design.
+
+// ============================================================
+// Section 1: Constants
+// ============================================================
+
+let DEP_MAX_TERMS: i64 = 4096
+let DEP_MAX_CONSTRAINTS: i64 = 1024
+let DEP_MAX_SUBST: i64 = 512
+let DEP_MAX_VARS: i64 = 256
+let DEP_INVALID: i64 = 0 - 1
+let DEP_DEFAULT_FUEL: i64 = 1000
+
+// ============================================================
+// Section 2: Enums
+// ============================================================
+
+enum DepTermKind {
+    TermVar,
+    TermIntLit,
+    TermBoolLit,
+    TermAdd,
+    TermSub,
+    TermMul,
+    TermDiv,
+    TermMod,
+    TermNeg,
+    TermEq,
+    TermLt,
+    TermLe,
+    TermGt,
+    TermGe,
+    TermAnd,
+    TermOr,
+    TermNot,
+    TermApp,
+    TermLam,
+    TermPi,
+    TermSigma,
+    TermFst,
+    TermSnd,
+    TermIf,
+    TermLet,
+    TermType,
+    TermBottom,
+}
+
+enum DepConstraintKind {
+    ConEqual,
+    ConLessThan,
+    ConLessEq,
+    ConGreaterThan,
+    ConGreaterEq,
+    ConNonZero,
+    ConPositive,
+}
+
+enum DepNormResult {
+    NormOk,
+    NormStuck,
+    NormError,
+}
+
+enum DepUnifyResult {
+    UnifyOk,
+    UnifyFail,
+    UnifyStuck,
+}
+
+// ============================================================
+// Section 3: Structs
+// ============================================================
+
+// A single term node in the arena. Fields serve double duty depending on kind:
+//   TermVar:     var_id = variable identifier
+//   TermIntLit:  val = integer value
+//   TermBoolLit: val = 0 or 1
+//   TermAdd/Sub/Mul/Div/Mod/Eq/Lt/Le/Gt/Ge/And/Or: left, right = operand IDs
+//   TermNeg/Not: left = operand ID
+//   TermApp:     left = function term, right = argument term
+//   TermLam:     var_id = parameter, body = body term
+//   TermPi:      var_id = parameter, left = param type, right = body type
+//   TermSigma:   var_id = fst name, left = fst type, right = snd type
+//   TermFst/Snd: left = pair term
+//   TermIf:      left = condition, right = then branch, body = else branch
+//   TermLet:     var_id = bound variable, left = bound value, body = body term
+//   TermType:    (no additional fields)
+//   TermBottom:  (no additional fields)
+struct DepTerm {
+    kind: DepTermKind,
+    val: i64,
+    left: i64,
+    right: i64,
+    var_id: i64,
+    body: i64,
+}
+
+// Pi type: (param_name : param_type) -> body_type
+struct DepPiType {
+    param_name: i64,
+    param_type: i64,
+    body_type: i64,
+    is_implicit: bool,
+}
+
+// Sigma type: (fst_name : fst_type, snd_type)
+struct DepSigmaType {
+    fst_name: i64,
+    fst_type: i64,
+    snd_type: i64,
+}
+
+// A pending substitution: replace var_id with replacement term
+struct DepSubstitution {
+    var_id: i64,
+    replacement: i64,
+}
+
+// A constraint on term values
+struct DepConstraint {
+    kind: DepConstraintKind,
+    lhs: i64,
+    rhs: i64,
+    span_line: i64,
+}
+
+// The main context: flat arena of all dependent-type state
+struct DepContext {
+    terms: [DepTerm; 4096],
+    term_count: i64,
+    constraints: [DepConstraint; 1024],
+    constraint_count: i64,
+    subst: [DepSubstitution; 512],
+    subst_count: i64,
+    var_names: [i64; 256],
+    var_types: [i64; 256],
+    var_count: i64,
+    errors: [i64; 256],
+    error_count: i64,
+    norm_fuel: i64,
+    next_var: i64,
+}
+
+// ============================================================
+// Section 4: Empty / Default Constructors
+// ============================================================
+
+fn dep_empty_term() -> DepTerm {
+    DepTerm {
+        kind: DepTermKind::TermBottom,
+        val: 0,
+        left: DEP_INVALID,
+        right: DEP_INVALID,
+        var_id: DEP_INVALID,
+        body: DEP_INVALID,
+    }
+}
+
+fn dep_empty_constraint() -> DepConstraint {
+    DepConstraint {
+        kind: DepConstraintKind::ConEqual,
+        lhs: DEP_INVALID,
+        rhs: DEP_INVALID,
+        span_line: 0,
+    }
+}
+
+fn dep_empty_substitution() -> DepSubstitution {
+    DepSubstitution {
+        var_id: DEP_INVALID,
+        replacement: DEP_INVALID,
+    }
+}
+
+fn dep_empty_pi() -> DepPiType {
+    DepPiType {
+        param_name: DEP_INVALID,
+        param_type: DEP_INVALID,
+        body_type: DEP_INVALID,
+        is_implicit: false,
+    }
+}
+
+fn dep_empty_sigma() -> DepSigmaType {
+    DepSigmaType {
+        fst_name: DEP_INVALID,
+        fst_type: DEP_INVALID,
+        snd_type: DEP_INVALID,
+    }
+}
+
+// ============================================================
+// Section 5: Context Construction
+// ============================================================
+
+fn dep_context_new() -> DepContext {
+    DepContext {
+        terms: [dep_empty_term(); 4096],
+        term_count: 0,
+        constraints: [dep_empty_constraint(); 1024],
+        constraint_count: 0,
+        subst: [dep_empty_substitution(); 512],
+        subst_count: 0,
+        var_names: [0; 256],
+        var_types: [0; 256],
+        var_count: 0,
+        errors: [0; 256],
+        error_count: 0,
+        norm_fuel: DEP_DEFAULT_FUEL,
+        next_var: 10000,
+    }
+}
+
+// ============================================================
+// Section 6: Term Kind Queries (helpers, must precede callers)
+// ============================================================
+
+fn dep_term_kind_is_var(k: DepTermKind) -> bool {
+    match k {
+        DepTermKind::TermVar => true,
+        _ => false,
+    }
+}
+
+fn dep_term_kind_is_int_lit(k: DepTermKind) -> bool {
+    match k {
+        DepTermKind::TermIntLit => true,
+        _ => false,
+    }
+}
+
+fn dep_term_kind_is_bool_lit(k: DepTermKind) -> bool {
+    match k {
+        DepTermKind::TermBoolLit => true,
+        _ => false,
+    }
+}
+
+fn dep_term_kind_is_lam(k: DepTermKind) -> bool {
+    match k {
+        DepTermKind::TermLam => true,
+        _ => false,
+    }
+}
+
+fn dep_term_kind_is_app(k: DepTermKind) -> bool {
+    match k {
+        DepTermKind::TermApp => true,
+        _ => false,
+    }
+}
+
+fn dep_term_kind_is_pi(k: DepTermKind) -> bool {
+    match k {
+        DepTermKind::TermPi => true,
+        _ => false,
+    }
+}
+
+fn dep_term_kind_is_sigma(k: DepTermKind) -> bool {
+    match k {
+        DepTermKind::TermSigma => true,
+        _ => false,
+    }
+}
+
+fn dep_term_kind_is_if(k: DepTermKind) -> bool {
+    match k {
+        DepTermKind::TermIf => true,
+        _ => false,
+    }
+}
+
+fn dep_term_kind_is_let(k: DepTermKind) -> bool {
+    match k {
+        DepTermKind::TermLet => true,
+        _ => false,
+    }
+}
+
+fn dep_term_kind_is_fst(k: DepTermKind) -> bool {
+    match k {
+        DepTermKind::TermFst => true,
+        _ => false,
+    }
+}
+
+fn dep_term_kind_is_snd(k: DepTermKind) -> bool {
+    match k {
+        DepTermKind::TermSnd => true,
+        _ => false,
+    }
+}
+
+fn dep_term_kind_is_type(k: DepTermKind) -> bool {
+    match k {
+        DepTermKind::TermType => true,
+        _ => false,
+    }
+}
+
+fn dep_term_kind_is_bottom(k: DepTermKind) -> bool {
+    match k {
+        DepTermKind::TermBottom => true,
+        _ => false,
+    }
+}
+
+fn dep_term_kind_is_neg(k: DepTermKind) -> bool {
+    match k {
+        DepTermKind::TermNeg => true,
+        _ => false,
+    }
+}
+
+fn dep_term_kind_is_not(k: DepTermKind) -> bool {
+    match k {
+        DepTermKind::TermNot => true,
+        _ => false,
+    }
+}
+
+fn dep_term_kind_is_add(k: DepTermKind) -> bool {
+    match k {
+        DepTermKind::TermAdd => true,
+        _ => false,
+    }
+}
+
+fn dep_term_kind_is_sub(k: DepTermKind) -> bool {
+    match k {
+        DepTermKind::TermSub => true,
+        _ => false,
+    }
+}
+
+fn dep_term_kind_is_mul(k: DepTermKind) -> bool {
+    match k {
+        DepTermKind::TermMul => true,
+        _ => false,
+    }
+}
+
+fn dep_term_kind_is_div(k: DepTermKind) -> bool {
+    match k {
+        DepTermKind::TermDiv => true,
+        _ => false,
+    }
+}
+
+fn dep_term_kind_is_mod(k: DepTermKind) -> bool {
+    match k {
+        DepTermKind::TermMod => true,
+        _ => false,
+    }
+}
+
+fn dep_term_kind_is_eq(k: DepTermKind) -> bool {
+    match k {
+        DepTermKind::TermEq => true,
+        _ => false,
+    }
+}
+
+fn dep_term_kind_is_lt(k: DepTermKind) -> bool {
+    match k {
+        DepTermKind::TermLt => true,
+        _ => false,
+    }
+}
+
+fn dep_term_kind_is_le(k: DepTermKind) -> bool {
+    match k {
+        DepTermKind::TermLe => true,
+        _ => false,
+    }
+}
+
+fn dep_term_kind_is_gt(k: DepTermKind) -> bool {
+    match k {
+        DepTermKind::TermGt => true,
+        _ => false,
+    }
+}
+
+fn dep_term_kind_is_ge(k: DepTermKind) -> bool {
+    match k {
+        DepTermKind::TermGe => true,
+        _ => false,
+    }
+}
+
+fn dep_term_kind_is_and(k: DepTermKind) -> bool {
+    match k {
+        DepTermKind::TermAnd => true,
+        _ => false,
+    }
+}
+
+fn dep_term_kind_is_or(k: DepTermKind) -> bool {
+    match k {
+        DepTermKind::TermOr => true,
+        _ => false,
+    }
+}
+
+// Check whether a kind is a binary arithmetic/comparison operator
+fn dep_term_kind_is_binop(k: DepTermKind) -> bool {
+    match k {
+        DepTermKind::TermAdd => true,
+        DepTermKind::TermSub => true,
+        DepTermKind::TermMul => true,
+        DepTermKind::TermDiv => true,
+        DepTermKind::TermMod => true,
+        DepTermKind::TermEq  => true,
+        DepTermKind::TermLt  => true,
+        DepTermKind::TermLe  => true,
+        DepTermKind::TermGt  => true,
+        DepTermKind::TermGe  => true,
+        DepTermKind::TermAnd => true,
+        DepTermKind::TermOr  => true,
+        _ => false,
+    }
+}
+
+// Check whether a kind is a unary operator
+fn dep_term_kind_is_unop(k: DepTermKind) -> bool {
+    match k {
+        DepTermKind::TermNeg => true,
+        DepTermKind::TermNot => true,
+        _ => false,
+    }
+}
+
+// ============================================================
+// Section 7: Core Term Allocation
+// ============================================================
+
+// Allocate a term node in the arena. Returns the term ID (index).
+fn dep_alloc_term(ctx: &! DepContext, kind: DepTermKind, val: i64, left: i64, right: i64) -> i64 with Mut, Div, Panic {
+    let idx = ctx.term_count
+    if idx >= DEP_MAX_TERMS {
+        return DEP_INVALID
+    }
+    ctx.terms[idx as usize] = DepTerm {
+        kind: kind,
+        val: val,
+        left: left,
+        right: right,
+        var_id: DEP_INVALID,
+        body: DEP_INVALID,
+    }
+    ctx.term_count = idx + 1
+    idx
+}
+
+// Allocate a term with all six fields specified.
+fn dep_alloc_term_full(ctx: &! DepContext, kind: DepTermKind, val: i64, left: i64, right: i64, var_id: i64, body: i64) -> i64 with Mut, Div, Panic {
+    let idx = ctx.term_count
+    if idx >= DEP_MAX_TERMS {
+        return DEP_INVALID
+    }
+    ctx.terms[idx as usize] = DepTerm {
+        kind: kind,
+        val: val,
+        left: left,
+        right: right,
+        var_id: var_id,
+        body: body,
+    }
+    ctx.term_count = idx + 1
+    idx
+}
+
+// ============================================================
+// Section 8: Convenience Term Constructors
+// ============================================================
+
+// Integer literal term
+fn dep_term_int(ctx: &! DepContext, val: i64) -> i64 with Mut, Div, Panic {
+    dep_alloc_term(ctx, DepTermKind::TermIntLit, val, DEP_INVALID, DEP_INVALID)
+}
+
+// Boolean literal term (val: 1 = true, 0 = false)
+fn dep_term_bool(ctx: &! DepContext, val: i64) -> i64 with Mut, Div, Panic {
+    dep_alloc_term(ctx, DepTermKind::TermBoolLit, val, DEP_INVALID, DEP_INVALID)
+}
+
+// Variable reference term
+fn dep_term_var(ctx: &! DepContext, var_id: i64) -> i64 with Mut, Div, Panic {
+    let idx = ctx.term_count
+    if idx >= DEP_MAX_TERMS {
+        return DEP_INVALID
+    }
+    ctx.terms[idx as usize] = DepTerm {
+        kind: DepTermKind::TermVar,
+        val: 0,
+        left: DEP_INVALID,
+        right: DEP_INVALID,
+        var_id: var_id,
+        body: DEP_INVALID,
+    }
+    ctx.term_count = idx + 1
+    idx
+}
+
+// Addition: left + right
+fn dep_term_add(ctx: &! DepContext, l: i64, r: i64) -> i64 with Mut, Div, Panic {
+    dep_alloc_term(ctx, DepTermKind::TermAdd, 0, l, r)
+}
+
+// Subtraction: left - right
+fn dep_term_sub(ctx: &! DepContext, l: i64, r: i64) -> i64 with Mut, Div, Panic {
+    dep_alloc_term(ctx, DepTermKind::TermSub, 0, l, r)
+}
+
+// Multiplication: left * right
+fn dep_term_mul(ctx: &! DepContext, l: i64, r: i64) -> i64 with Mut, Div, Panic {
+    dep_alloc_term(ctx, DepTermKind::TermMul, 0, l, r)
+}
+
+// Division: left / right
+fn dep_term_div(ctx: &! DepContext, l: i64, r: i64) -> i64 with Mut, Div, Panic {
+    dep_alloc_term(ctx, DepTermKind::TermDiv, 0, l, r)
+}
+
+// Modulo: left % right
+fn dep_term_mod(ctx: &! DepContext, l: i64, r: i64) -> i64 with Mut, Div, Panic {
+    dep_alloc_term(ctx, DepTermKind::TermMod, 0, l, r)
+}
+
+// Negation: -operand
+fn dep_term_neg(ctx: &! DepContext, operand: i64) -> i64 with Mut, Div, Panic {
+    dep_alloc_term(ctx, DepTermKind::TermNeg, 0, operand, DEP_INVALID)
+}
+
+// Equality: left == right
+fn dep_term_eq(ctx: &! DepContext, l: i64, r: i64) -> i64 with Mut, Div, Panic {
+    dep_alloc_term(ctx, DepTermKind::TermEq, 0, l, r)
+}
+
+// Less-than: left < right
+fn dep_term_lt(ctx: &! DepContext, l: i64, r: i64) -> i64 with Mut, Div, Panic {
+    dep_alloc_term(ctx, DepTermKind::TermLt, 0, l, r)
+}
+
+// Less-or-equal: left <= right
+fn dep_term_le(ctx: &! DepContext, l: i64, r: i64) -> i64 with Mut, Div, Panic {
+    dep_alloc_term(ctx, DepTermKind::TermLe, 0, l, r)
+}
+
+// Greater-than: left > right
+fn dep_term_gt(ctx: &! DepContext, l: i64, r: i64) -> i64 with Mut, Div, Panic {
+    dep_alloc_term(ctx, DepTermKind::TermGt, 0, l, r)
+}
+
+// Greater-or-equal: left >= right
+fn dep_term_ge(ctx: &! DepContext, l: i64, r: i64) -> i64 with Mut, Div, Panic {
+    dep_alloc_term(ctx, DepTermKind::TermGe, 0, l, r)
+}
+
+// Logical AND: left && right
+fn dep_term_and(ctx: &! DepContext, l: i64, r: i64) -> i64 with Mut, Div, Panic {
+    dep_alloc_term(ctx, DepTermKind::TermAnd, 0, l, r)
+}
+
+// Logical OR: left || right
+fn dep_term_or(ctx: &! DepContext, l: i64, r: i64) -> i64 with Mut, Div, Panic {
+    dep_alloc_term(ctx, DepTermKind::TermOr, 0, l, r)
+}
+
+// Logical NOT: !operand
+fn dep_term_not(ctx: &! DepContext, operand: i64) -> i64 with Mut, Div, Panic {
+    dep_alloc_term(ctx, DepTermKind::TermNot, 0, operand, DEP_INVALID)
+}
+
+// Application: func(arg)
+fn dep_term_app(ctx: &! DepContext, func: i64, arg: i64) -> i64 with Mut, Div, Panic {
+    dep_alloc_term(ctx, DepTermKind::TermApp, 0, func, arg)
+}
+
+// Lambda: \var_id. body
+fn dep_term_lam(ctx: &! DepContext, var_id: i64, body: i64) -> i64 with Mut, Div, Panic {
+    dep_alloc_term_full(ctx, DepTermKind::TermLam, 0, DEP_INVALID, DEP_INVALID, var_id, body)
+}
+
+// Pi type: (var_id : param_type) -> body_type
+fn dep_term_pi(ctx: &! DepContext, var_id: i64, param_type: i64, body_type: i64) -> i64 with Mut, Div, Panic {
+    dep_alloc_term_full(ctx, DepTermKind::TermPi, 0, param_type, body_type, var_id, DEP_INVALID)
+}
+
+// Sigma type: (var_id : fst_type, snd_type)
+fn dep_term_sigma(ctx: &! DepContext, var_id: i64, fst_type: i64, snd_type: i64) -> i64 with Mut, Div, Panic {
+    dep_alloc_term_full(ctx, DepTermKind::TermSigma, 0, fst_type, snd_type, var_id, DEP_INVALID)
+}
+
+// First projection: fst(pair)
+fn dep_term_fst(ctx: &! DepContext, pair: i64) -> i64 with Mut, Div, Panic {
+    dep_alloc_term(ctx, DepTermKind::TermFst, 0, pair, DEP_INVALID)
+}
+
+// Second projection: snd(pair)
+fn dep_term_snd(ctx: &! DepContext, pair: i64) -> i64 with Mut, Div, Panic {
+    dep_alloc_term(ctx, DepTermKind::TermSnd, 0, pair, DEP_INVALID)
+}
+
+// Conditional: if cond then then_t else else_t
+fn dep_term_if(ctx: &! DepContext, cond: i64, then_t: i64, else_t: i64) -> i64 with Mut, Div, Panic {
+    dep_alloc_term_full(ctx, DepTermKind::TermIf, 0, cond, then_t, DEP_INVALID, else_t)
+}
+
+// Let binding: let var_id = bound_val in body
+fn dep_term_let(ctx: &! DepContext, var_id: i64, bound_val: i64, body: i64) -> i64 with Mut, Div, Panic {
+    dep_alloc_term_full(ctx, DepTermKind::TermLet, 0, bound_val, DEP_INVALID, var_id, body)
+}
+
+// Type universe: Type
+fn dep_term_type(ctx: &! DepContext) -> i64 with Mut, Div, Panic {
+    dep_alloc_term(ctx, DepTermKind::TermType, 0, DEP_INVALID, DEP_INVALID)
+}
+
+// Bottom / absurd type
+fn dep_term_bottom(ctx: &! DepContext) -> i64 with Mut, Div, Panic {
+    dep_alloc_term(ctx, DepTermKind::TermBottom, 0, DEP_INVALID, DEP_INVALID)
+}
+
+// ============================================================
+// Section 9: Term Field Accessors
+// ============================================================
+
+// Get the kind of a term by ID. Returns TermBottom for invalid IDs.
+fn dep_get_kind(ctx: &DepContext, term: i64) -> DepTermKind with Div, Panic {
+    if term < 0 { return DepTermKind::TermBottom }
+    if term >= ctx.term_count { return DepTermKind::TermBottom }
+    ctx.terms[term as usize].kind
+}
+
+// Get the val field of a term
+fn dep_get_val(ctx: &DepContext, term: i64) -> i64 with Div, Panic {
+    if term < 0 { return 0 }
+    if term >= ctx.term_count { return 0 }
+    ctx.terms[term as usize].val
+}
+
+// Get the left child of a term
+fn dep_get_left(ctx: &DepContext, term: i64) -> i64 with Div, Panic {
+    if term < 0 { return DEP_INVALID }
+    if term >= ctx.term_count { return DEP_INVALID }
+    ctx.terms[term as usize].left
+}
+
+// Get the right child of a term
+fn dep_get_right(ctx: &DepContext, term: i64) -> i64 with Div, Panic {
+    if term < 0 { return DEP_INVALID }
+    if term >= ctx.term_count { return DEP_INVALID }
+    ctx.terms[term as usize].right
+}
+
+// Get the var_id field of a term
+fn dep_get_var_id(ctx: &DepContext, term: i64) -> i64 with Div, Panic {
+    if term < 0 { return DEP_INVALID }
+    if term >= ctx.term_count { return DEP_INVALID }
+    ctx.terms[term as usize].var_id
+}
+
+// Get the body field of a term
+fn dep_get_body(ctx: &DepContext, term: i64) -> i64 with Div, Panic {
+    if term < 0 { return DEP_INVALID }
+    if term >= ctx.term_count { return DEP_INVALID }
+    ctx.terms[term as usize].body
+}
+
+// ============================================================
+// Section 10: Fresh Variable Generation
+// ============================================================
+
+// Generate a fresh variable ID, guaranteed unique within this context.
+fn dep_fresh_var(ctx: &! DepContext) -> i64 with Mut {
+    let v = ctx.next_var
+    ctx.next_var = v + 1
+    v
+}
+
+// ============================================================
+// Section 11: Variable Environment
+// ============================================================
+
+// Bind a variable name to a type in the environment.
+fn dep_bind_var(ctx: &! DepContext, name: i64, type_id: i64) -> bool with Mut, Div, Panic {
+    if ctx.var_count >= DEP_MAX_VARS {
+        return false
+    }
+    let idx = ctx.var_count
+    ctx.var_names[idx as usize] = name
+    ctx.var_types[idx as usize] = type_id
+    ctx.var_count = idx + 1
+    true
+}
+
+// Look up the type of a variable. Returns DEP_INVALID if not found.
+// Searches from the end (most recent binding) to handle shadowing.
+fn dep_lookup_var(ctx: &DepContext, name: i64) -> i64 with Mut, Div, Panic {
+    var i = ctx.var_count - 1
+    while i >= 0 {
+        if ctx.var_names[i as usize] == name {
+            return ctx.var_types[i as usize]
+        }
+        i = i - 1
+    }
+    DEP_INVALID
+}
+
+// Pop n variable bindings from the environment.
+fn dep_pop_vars(ctx: &! DepContext, n: i64) with Mut {
+    var new_count = ctx.var_count - n
+    if new_count < 0 {
+        new_count = 0
+    }
+    ctx.var_count = new_count
+}
+
+// ============================================================
+// Section 12: Error Recording
+// ============================================================
+
+// Record an error code in the context.
+fn dep_record_error(ctx: &! DepContext, code: i64) with Mut, Div, Panic {
+    if ctx.error_count >= DEP_MAX_VARS {
+        return
+    }
+    let idx = ctx.error_count
+    ctx.errors[idx as usize] = code
+    ctx.error_count = idx + 1
+}
+
+// Check if any errors have been recorded.
+fn dep_has_errors(ctx: &DepContext) -> bool {
+    ctx.error_count > 0
+}
+
+// Get the number of recorded errors.
+fn dep_error_count(ctx: &DepContext) -> i64 {
+    ctx.error_count
+}
+
+// Clear all recorded errors.
+fn dep_clear_errors(ctx: &! DepContext) with Mut {
+    ctx.error_count = 0
+}
+
+// ============================================================
+// Section 13: Term Value Queries
+// ============================================================
+
+// Check if a term is a value (fully reduced: literal, lambda, pi, sigma, type, bottom).
+fn dep_is_value(ctx: &DepContext, term: i64) -> bool with Div, Panic {
+    if term < 0 { return false }
+    if term >= ctx.term_count { return false }
+    let k = ctx.terms[term as usize].kind
+    match k {
+        DepTermKind::TermIntLit  => true,
+        DepTermKind::TermBoolLit => true,
+        DepTermKind::TermLam     => true,
+        DepTermKind::TermPi      => true,
+        DepTermKind::TermSigma   => true,
+        DepTermKind::TermType    => true,
+        DepTermKind::TermBottom  => true,
+        _ => false,
+    }
+}
+
+// Extract integer from TermIntLit. Returns DEP_INVALID for non-integer terms.
+fn dep_term_to_i64(ctx: &DepContext, term: i64) -> i64 with Div, Panic {
+    if term < 0 { return DEP_INVALID }
+    if term >= ctx.term_count { return DEP_INVALID }
+    let k = ctx.terms[term as usize].kind
+    if dep_term_kind_is_int_lit(k) {
+        return ctx.terms[term as usize].val
+    }
+    DEP_INVALID
+}
+
+// Extract boolean from TermBoolLit. Returns DEP_INVALID for non-boolean terms.
+fn dep_term_to_bool(ctx: &DepContext, term: i64) -> i64 with Div, Panic {
+    if term < 0 { return DEP_INVALID }
+    if term >= ctx.term_count { return DEP_INVALID }
+    let k = ctx.terms[term as usize].kind
+    if dep_term_kind_is_bool_lit(k) {
+        return ctx.terms[term as usize].val
+    }
+    DEP_INVALID
+}
+
+// Check if a term is valid (non-negative and within bounds).
+fn dep_term_valid(ctx: &DepContext, term: i64) -> bool {
+    if term < 0 { return false }
+    if term >= ctx.term_count { return false }
+    true
+}
+
+// ============================================================
+// Section 14: Occurs Check
+// ============================================================
+
+// Check if a variable (by var_id) occurs anywhere in a term.
+// Uses iterative worklist to avoid stack overflow on deep terms.
+fn dep_occurs_check(ctx: &! DepContext, var_id: i64, term: i64) -> bool with Mut, Div, Panic {
+    // Iterative worklist approach: we check up to 256 pending items
+    var worklist: [i64; 256] = [0; 256]
+    var wl_count: i64 = 0
+
+    // Seed with the initial term
+    if term >= 0 {
+        worklist[0 as usize] = term
+        wl_count = 1
+    }
+
+    while wl_count > 0 {
+        wl_count = wl_count - 1
+        let current = worklist[wl_count as usize]
+
+        if current < 0 { continue }
+        if current >= ctx.term_count { continue }
+
+        let k = ctx.terms[current as usize].kind
+
+        // Check if this is the variable we are looking for
+        if dep_term_kind_is_var(k) {
+            if ctx.terms[current as usize].var_id == var_id {
+                return true
+            }
+            continue
+        }
+
+        // For literals, Type, Bottom: no children to inspect
+        if dep_term_kind_is_int_lit(k) { continue }
+        if dep_term_kind_is_bool_lit(k) { continue }
+        if dep_term_kind_is_type(k) { continue }
+        if dep_term_kind_is_bottom(k) { continue }
+
+        // Push children onto worklist
+        let t_left = ctx.terms[current as usize].left
+        let t_right = ctx.terms[current as usize].right
+        let t_body = ctx.terms[current as usize].body
+        let t_var = ctx.terms[current as usize].var_id
+
+        // For lambda/pi/sigma: check if the binder shadows the variable
+        if dep_term_kind_is_lam(k) {
+            if t_var == var_id {
+                // Variable is shadowed by this lambda binder; skip body
+                continue
+            }
+        }
+        if dep_term_kind_is_pi(k) {
+            if t_var == var_id {
+                // Shadowed by Pi binder; still check param type (left)
+                if t_left >= 0 {
+                    if wl_count < 256 {
+                        worklist[wl_count as usize] = t_left
+                        wl_count = wl_count + 1
+                    }
+                }
+                continue
+            }
+        }
+        if dep_term_kind_is_sigma(k) {
+            if t_var == var_id {
+                // Shadowed by Sigma binder; still check fst type (left)
+                if t_left >= 0 {
+                    if wl_count < 256 {
+                        worklist[wl_count as usize] = t_left
+                        wl_count = wl_count + 1
+                    }
+                }
+                continue
+            }
+        }
+        if dep_term_kind_is_let(k) {
+            // Push bound value
+            if t_left >= 0 {
+                if wl_count < 256 {
+                    worklist[wl_count as usize] = t_left
+                    wl_count = wl_count + 1
+                }
+            }
+            if t_var == var_id {
+                // Shadowed in body
+                continue
+            }
+        }
+
+        // Push left child
+        if t_left >= 0 {
+            if wl_count < 256 {
+                worklist[wl_count as usize] = t_left
+                wl_count = wl_count + 1
+            }
+        }
+        // Push right child
+        if t_right >= 0 {
+            if wl_count < 256 {
+                worklist[wl_count as usize] = t_right
+                wl_count = wl_count + 1
+            }
+        }
+        // Push body
+        if t_body >= 0 {
+            if wl_count < 256 {
+                worklist[wl_count as usize] = t_body
+                wl_count = wl_count + 1
+            }
+        }
+    }
+
+    false
+}
+
+// ============================================================
+// Section 15: Capture-Avoiding Substitution
+// ============================================================
+
+// Substitute all free occurrences of var_id with replacement in term.
+// Capture-avoiding: if a binder shadows var_id, its body is not traversed.
+// If a binder would capture a free variable in replacement, we alpha-rename.
+// This creates new term nodes in the arena (does not mutate existing terms).
+fn dep_substitute(ctx: &! DepContext, term: i64, var_id: i64, replacement: i64) -> i64 with Mut, Div, Panic {
+    if term < 0 { return term }
+    if term >= ctx.term_count { return term }
+
+    let k = ctx.terms[term as usize].kind
+
+    // Variable: if it matches, return replacement; otherwise unchanged
+    if dep_term_kind_is_var(k) {
+        if ctx.terms[term as usize].var_id == var_id {
+            return replacement
+        }
+        return term
+    }
+
+    // Literals, Type, Bottom: no substitution needed
+    if dep_term_kind_is_int_lit(k) { return term }
+    if dep_term_kind_is_bool_lit(k) { return term }
+    if dep_term_kind_is_type(k) { return term }
+    if dep_term_kind_is_bottom(k) { return term }
+
+    // Unary operators
+    if dep_term_kind_is_neg(k) {
+        let new_inner = dep_substitute(ctx, ctx.terms[term as usize].left, var_id, replacement)
+        return dep_term_neg(ctx, new_inner)
+    }
+    if dep_term_kind_is_not(k) {
+        let new_inner = dep_substitute(ctx, ctx.terms[term as usize].left, var_id, replacement)
+        return dep_term_not(ctx, new_inner)
+    }
+
+    // Binary operators
+    if dep_term_kind_is_binop(k) {
+        let new_left = dep_substitute(ctx, ctx.terms[term as usize].left, var_id, replacement)
+        let new_right = dep_substitute(ctx, ctx.terms[term as usize].right, var_id, replacement)
+        match k {
+            DepTermKind::TermAdd => { return dep_term_add(ctx, new_left, new_right) },
+            DepTermKind::TermSub => { return dep_term_sub(ctx, new_left, new_right) },
+            DepTermKind::TermMul => { return dep_term_mul(ctx, new_left, new_right) },
+            DepTermKind::TermDiv => { return dep_term_div(ctx, new_left, new_right) },
+            DepTermKind::TermMod => { return dep_term_mod(ctx, new_left, new_right) },
+            DepTermKind::TermEq  => { return dep_term_eq(ctx, new_left, new_right) },
+            DepTermKind::TermLt  => { return dep_term_lt(ctx, new_left, new_right) },
+            DepTermKind::TermLe  => { return dep_term_le(ctx, new_left, new_right) },
+            DepTermKind::TermGt  => { return dep_term_gt(ctx, new_left, new_right) },
+            DepTermKind::TermGe  => { return dep_term_ge(ctx, new_left, new_right) },
+            DepTermKind::TermAnd => { return dep_term_and(ctx, new_left, new_right) },
+            DepTermKind::TermOr  => { return dep_term_or(ctx, new_left, new_right) },
+            _ => { return term },
+        }
+    }
+
+    // Application: substitute in both function and argument
+    if dep_term_kind_is_app(k) {
+        let new_func = dep_substitute(ctx, ctx.terms[term as usize].left, var_id, replacement)
+        let new_arg = dep_substitute(ctx, ctx.terms[term as usize].right, var_id, replacement)
+        return dep_term_app(ctx, new_func, new_arg)
+    }
+
+    // Lambda: \binder. body
+    if dep_term_kind_is_lam(k) {
+        let binder = ctx.terms[term as usize].var_id
+        let body = ctx.terms[term as usize].body
+        // If the binder shadows var_id, no substitution in body
+        if binder == var_id {
+            return term
+        }
+        // Capture avoidance: if binder occurs free in replacement, alpha-rename
+        if dep_occurs_check(ctx, binder, replacement) {
+            let fresh = dep_fresh_var(ctx)
+            // Rename binder -> fresh in body first
+            let renamed_body = dep_substitute(ctx, body, binder, dep_term_var(ctx, fresh))
+            // Now substitute var_id -> replacement in renamed body
+            let new_body = dep_substitute(ctx, renamed_body, var_id, replacement)
+            return dep_term_lam(ctx, fresh, new_body)
+        }
+        let new_body = dep_substitute(ctx, body, var_id, replacement)
+        return dep_term_lam(ctx, binder, new_body)
+    }
+
+    // Pi type: (binder : param_type) -> body_type
+    if dep_term_kind_is_pi(k) {
+        let binder = ctx.terms[term as usize].var_id
+        let param_type = ctx.terms[term as usize].left
+        let body_type = ctx.terms[term as usize].right
+        let new_param = dep_substitute(ctx, param_type, var_id, replacement)
+        if binder == var_id {
+            // Shadowed: only substitute in param type
+            return dep_term_pi(ctx, binder, new_param, body_type)
+        }
+        if dep_occurs_check(ctx, binder, replacement) {
+            let fresh = dep_fresh_var(ctx)
+            let renamed_body = dep_substitute(ctx, body_type, binder, dep_term_var(ctx, fresh))
+            let new_body = dep_substitute(ctx, renamed_body, var_id, replacement)
+            return dep_term_pi(ctx, fresh, new_param, new_body)
+        }
+        let new_body = dep_substitute(ctx, body_type, var_id, replacement)
+        return dep_term_pi(ctx, binder, new_param, new_body)
+    }
+
+    // Sigma type: (binder : fst_type, snd_type)
+    if dep_term_kind_is_sigma(k) {
+        let binder = ctx.terms[term as usize].var_id
+        let fst_type = ctx.terms[term as usize].left
+        let snd_type = ctx.terms[term as usize].right
+        let new_fst = dep_substitute(ctx, fst_type, var_id, replacement)
+        if binder == var_id {
+            return dep_term_sigma(ctx, binder, new_fst, snd_type)
+        }
+        if dep_occurs_check(ctx, binder, replacement) {
+            let fresh = dep_fresh_var(ctx)
+            let renamed_snd = dep_substitute(ctx, snd_type, binder, dep_term_var(ctx, fresh))
+            let new_snd = dep_substitute(ctx, renamed_snd, var_id, replacement)
+            return dep_term_sigma(ctx, fresh, new_fst, new_snd)
+        }
+        let new_snd = dep_substitute(ctx, snd_type, var_id, replacement)
+        return dep_term_sigma(ctx, binder, new_fst, new_snd)
+    }
+
+    // Projections
+    if dep_term_kind_is_fst(k) {
+        let new_pair = dep_substitute(ctx, ctx.terms[term as usize].left, var_id, replacement)
+        return dep_term_fst(ctx, new_pair)
+    }
+    if dep_term_kind_is_snd(k) {
+        let new_pair = dep_substitute(ctx, ctx.terms[term as usize].left, var_id, replacement)
+        return dep_term_snd(ctx, new_pair)
+    }
+
+    // If-then-else: cond is in left, then is in right, else is in body
+    if dep_term_kind_is_if(k) {
+        let new_cond = dep_substitute(ctx, ctx.terms[term as usize].left, var_id, replacement)
+        let new_then = dep_substitute(ctx, ctx.terms[term as usize].right, var_id, replacement)
+        let new_else = dep_substitute(ctx, ctx.terms[term as usize].body, var_id, replacement)
+        return dep_term_if(ctx, new_cond, new_then, new_else)
+    }
+
+    // Let binding: let binder = bound_val in body
+    if dep_term_kind_is_let(k) {
+        let binder = ctx.terms[term as usize].var_id
+        let bound_val = ctx.terms[term as usize].left
+        let body = ctx.terms[term as usize].body
+        let new_bound = dep_substitute(ctx, bound_val, var_id, replacement)
+        if binder == var_id {
+            return dep_term_let(ctx, binder, new_bound, body)
+        }
+        if dep_occurs_check(ctx, binder, replacement) {
+            let fresh = dep_fresh_var(ctx)
+            let renamed_body = dep_substitute(ctx, body, binder, dep_term_var(ctx, fresh))
+            let new_body = dep_substitute(ctx, renamed_body, var_id, replacement)
+            return dep_term_let(ctx, fresh, new_bound, new_body)
+        }
+        let new_body = dep_substitute(ctx, body, var_id, replacement)
+        return dep_term_let(ctx, binder, new_bound, new_body)
+    }
+
+    // Fallthrough: unknown kind, return unchanged
+    term
+}
+
+// ============================================================
+// Section 16: Single-Step Normalization
+// ============================================================
+
+// Perform a single reduction step on a term. Returns the reduced term ID,
+// or the original term if no reduction is possible.
+fn dep_normalize_step(ctx: &! DepContext, term: i64) -> i64 with Mut, Div, Panic {
+    if term < 0 { return term }
+    if term >= ctx.term_count { return term }
+
+    let k = ctx.terms[term as usize].kind
+
+    // Values are already reduced
+    if dep_term_kind_is_int_lit(k) { return term }
+    if dep_term_kind_is_bool_lit(k) { return term }
+    if dep_term_kind_is_lam(k) { return term }
+    if dep_term_kind_is_type(k) { return term }
+    if dep_term_kind_is_bottom(k) { return term }
+
+    // Variable: look up in substitutions
+    if dep_term_kind_is_var(k) {
+        let vid = ctx.terms[term as usize].var_id
+        var si: i64 = 0
+        while si < ctx.subst_count {
+            if ctx.subst[si as usize].var_id == vid {
+                return ctx.subst[si as usize].replacement
+            }
+            si = si + 1
+        }
+        return term
+    }
+
+    // Negation
+    if dep_term_kind_is_neg(k) {
+        let inner = ctx.terms[term as usize].left
+        if dep_term_kind_is_int_lit(dep_get_kind(ctx, inner)) {
+            let v = dep_get_val(ctx, inner)
+            return dep_term_int(ctx, 0 - v)
+        }
+        return term
+    }
+
+    // Logical NOT
+    if dep_term_kind_is_not(k) {
+        let inner = ctx.terms[term as usize].left
+        if dep_term_kind_is_bool_lit(dep_get_kind(ctx, inner)) {
+            let v = dep_get_val(ctx, inner)
+            if v == 0 {
+                return dep_term_bool(ctx, 1)
+            }
+            return dep_term_bool(ctx, 0)
+        }
+        return term
+    }
+
+    // Arithmetic binary operators on integer literals
+    if dep_term_kind_is_add(k) {
+        let lk = dep_get_kind(ctx, ctx.terms[term as usize].left)
+        let rk = dep_get_kind(ctx, ctx.terms[term as usize].right)
+        if dep_term_kind_is_int_lit(lk) {
+            if dep_term_kind_is_int_lit(rk) {
+                let lv = dep_get_val(ctx, ctx.terms[term as usize].left)
+                let rv = dep_get_val(ctx, ctx.terms[term as usize].right)
+                return dep_term_int(ctx, lv + rv)
+            }
+        }
+        return term
+    }
+
+    if dep_term_kind_is_sub(k) {
+        let lk = dep_get_kind(ctx, ctx.terms[term as usize].left)
+        let rk = dep_get_kind(ctx, ctx.terms[term as usize].right)
+        if dep_term_kind_is_int_lit(lk) {
+            if dep_term_kind_is_int_lit(rk) {
+                let lv = dep_get_val(ctx, ctx.terms[term as usize].left)
+                let rv = dep_get_val(ctx, ctx.terms[term as usize].right)
+                return dep_term_int(ctx, lv - rv)
+            }
+        }
+        return term
+    }
+
+    if dep_term_kind_is_mul(k) {
+        let lk = dep_get_kind(ctx, ctx.terms[term as usize].left)
+        let rk = dep_get_kind(ctx, ctx.terms[term as usize].right)
+        if dep_term_kind_is_int_lit(lk) {
+            if dep_term_kind_is_int_lit(rk) {
+                let lv = dep_get_val(ctx, ctx.terms[term as usize].left)
+                let rv = dep_get_val(ctx, ctx.terms[term as usize].right)
+                return dep_term_int(ctx, lv * rv)
+            }
+        }
+        return term
+    }
+
+    if dep_term_kind_is_div(k) {
+        let lk = dep_get_kind(ctx, ctx.terms[term as usize].left)
+        let rk = dep_get_kind(ctx, ctx.terms[term as usize].right)
+        if dep_term_kind_is_int_lit(lk) {
+            if dep_term_kind_is_int_lit(rk) {
+                let rv = dep_get_val(ctx, ctx.terms[term as usize].right)
+                if rv == 0 { return term }  // Division by zero: stuck
+                let lv = dep_get_val(ctx, ctx.terms[term as usize].left)
+                return dep_term_int(ctx, lv / rv)
+            }
+        }
+        return term
+    }
+
+    if dep_term_kind_is_mod(k) {
+        let lk = dep_get_kind(ctx, ctx.terms[term as usize].left)
+        let rk = dep_get_kind(ctx, ctx.terms[term as usize].right)
+        if dep_term_kind_is_int_lit(lk) {
+            if dep_term_kind_is_int_lit(rk) {
+                let rv = dep_get_val(ctx, ctx.terms[term as usize].right)
+                if rv == 0 { return term }
+                let lv = dep_get_val(ctx, ctx.terms[term as usize].left)
+                return dep_term_int(ctx, lv % rv)
+            }
+        }
+        return term
+    }
+
+    // Comparison operators
+    if dep_term_kind_is_eq(k) {
+        let lk = dep_get_kind(ctx, ctx.terms[term as usize].left)
+        let rk = dep_get_kind(ctx, ctx.terms[term as usize].right)
+        if dep_term_kind_is_int_lit(lk) {
+            if dep_term_kind_is_int_lit(rk) {
+                let lv = dep_get_val(ctx, ctx.terms[term as usize].left)
+                let rv = dep_get_val(ctx, ctx.terms[term as usize].right)
+                if lv == rv { return dep_term_bool(ctx, 1) }
+                return dep_term_bool(ctx, 0)
+            }
+        }
+        return term
+    }
+
+    if dep_term_kind_is_lt(k) {
+        let lk = dep_get_kind(ctx, ctx.terms[term as usize].left)
+        let rk = dep_get_kind(ctx, ctx.terms[term as usize].right)
+        if dep_term_kind_is_int_lit(lk) {
+            if dep_term_kind_is_int_lit(rk) {
+                let lv = dep_get_val(ctx, ctx.terms[term as usize].left)
+                let rv = dep_get_val(ctx, ctx.terms[term as usize].right)
+                if lv < rv { return dep_term_bool(ctx, 1) }
+                return dep_term_bool(ctx, 0)
+            }
+        }
+        return term
+    }
+
+    if dep_term_kind_is_le(k) {
+        let lk = dep_get_kind(ctx, ctx.terms[term as usize].left)
+        let rk = dep_get_kind(ctx, ctx.terms[term as usize].right)
+        if dep_term_kind_is_int_lit(lk) {
+            if dep_term_kind_is_int_lit(rk) {
+                let lv = dep_get_val(ctx, ctx.terms[term as usize].left)
+                let rv = dep_get_val(ctx, ctx.terms[term as usize].right)
+                if lv <= rv { return dep_term_bool(ctx, 1) }
+                return dep_term_bool(ctx, 0)
+            }
+        }
+        return term
+    }
+
+    if dep_term_kind_is_gt(k) {
+        let lk = dep_get_kind(ctx, ctx.terms[term as usize].left)
+        let rk = dep_get_kind(ctx, ctx.terms[term as usize].right)
+        if dep_term_kind_is_int_lit(lk) {
+            if dep_term_kind_is_int_lit(rk) {
+                let lv = dep_get_val(ctx, ctx.terms[term as usize].left)
+                let rv = dep_get_val(ctx, ctx.terms[term as usize].right)
+                if lv > rv { return dep_term_bool(ctx, 1) }
+                return dep_term_bool(ctx, 0)
+            }
+        }
+        return term
+    }
+
+    if dep_term_kind_is_ge(k) {
+        let lk = dep_get_kind(ctx, ctx.terms[term as usize].left)
+        let rk = dep_get_kind(ctx, ctx.terms[term as usize].right)
+        if dep_term_kind_is_int_lit(lk) {
+            if dep_term_kind_is_int_lit(rk) {
+                let lv = dep_get_val(ctx, ctx.terms[term as usize].left)
+                let rv = dep_get_val(ctx, ctx.terms[term as usize].right)
+                if lv >= rv { return dep_term_bool(ctx, 1) }
+                return dep_term_bool(ctx, 0)
+            }
+        }
+        return term
+    }
+
+    // Logical AND
+    if dep_term_kind_is_and(k) {
+        let lk = dep_get_kind(ctx, ctx.terms[term as usize].left)
+        let rk = dep_get_kind(ctx, ctx.terms[term as usize].right)
+        if dep_term_kind_is_bool_lit(lk) {
+            let lv = dep_get_val(ctx, ctx.terms[term as usize].left)
+            if lv == 0 { return dep_term_bool(ctx, 0) }
+            if dep_term_kind_is_bool_lit(rk) {
+                let rv = dep_get_val(ctx, ctx.terms[term as usize].right)
+                return dep_term_bool(ctx, rv)
+            }
+        }
+        return term
+    }
+
+    // Logical OR
+    if dep_term_kind_is_or(k) {
+        let lk = dep_get_kind(ctx, ctx.terms[term as usize].left)
+        let rk = dep_get_kind(ctx, ctx.terms[term as usize].right)
+        if dep_term_kind_is_bool_lit(lk) {
+            let lv = dep_get_val(ctx, ctx.terms[term as usize].left)
+            if lv == 1 { return dep_term_bool(ctx, 1) }
+            if dep_term_kind_is_bool_lit(rk) {
+                let rv = dep_get_val(ctx, ctx.terms[term as usize].right)
+                return dep_term_bool(ctx, rv)
+            }
+        }
+        return term
+    }
+
+    // Beta reduction: (\x. body)(arg) -> body[x := arg]
+    if dep_term_kind_is_app(k) {
+        let func = ctx.terms[term as usize].left
+        let arg = ctx.terms[term as usize].right
+        if func >= 0 {
+            if func < ctx.term_count {
+                let fk = ctx.terms[func as usize].kind
+                if dep_term_kind_is_lam(fk) {
+                    let param = ctx.terms[func as usize].var_id
+                    let body = ctx.terms[func as usize].body
+                    return dep_substitute(ctx, body, param, arg)
+                }
+            }
+        }
+        return term
+    }
+
+    // First projection
+    if dep_term_kind_is_fst(k) {
+        let pair = ctx.terms[term as usize].left
+        if pair >= 0 {
+            if pair < ctx.term_count {
+                let pk = ctx.terms[pair as usize].kind
+                if dep_term_kind_is_sigma(pk) {
+                    return ctx.terms[pair as usize].left
+                }
+            }
+        }
+        return term
+    }
+
+    // Second projection
+    if dep_term_kind_is_snd(k) {
+        let pair = ctx.terms[term as usize].left
+        if pair >= 0 {
+            if pair < ctx.term_count {
+                let pk = ctx.terms[pair as usize].kind
+                if dep_term_kind_is_sigma(pk) {
+                    return ctx.terms[pair as usize].right
+                }
+            }
+        }
+        return term
+    }
+
+    // If-then-else: reduce if condition is a boolean literal
+    if dep_term_kind_is_if(k) {
+        let cond = ctx.terms[term as usize].left
+        if cond >= 0 {
+            if cond < ctx.term_count {
+                let ck = ctx.terms[cond as usize].kind
+                if dep_term_kind_is_bool_lit(ck) {
+                    let cv = ctx.terms[cond as usize].val
+                    if cv == 1 {
+                        return ctx.terms[term as usize].right  // then branch
+                    }
+                    return ctx.terms[term as usize].body  // else branch
+                }
+            }
+        }
+        return term
+    }
+
+    // Let binding: let x = v in body -> body[x := v]
+    if dep_term_kind_is_let(k) {
+        let binder = ctx.terms[term as usize].var_id
+        let bound = ctx.terms[term as usize].left
+        let body = ctx.terms[term as usize].body
+        return dep_substitute(ctx, body, binder, bound)
+    }
+
+    // Pi and Sigma are values (type formers), no reduction
+    if dep_term_kind_is_pi(k) { return term }
+    if dep_term_kind_is_sigma(k) { return term }
+
+    term
+}
+
+// ============================================================
+// Section 17: Full Normalization (with fuel)
+// ============================================================
+
+// Normalize a term to its normal form. Uses fuel to bound evaluation
+// of potentially divergent terms. Returns the fully-reduced term ID.
+fn dep_normalize(ctx: &! DepContext, term: i64) -> i64 with Mut, Div, Panic {
+    var current = term
+    var fuel = ctx.norm_fuel
+
+    while fuel > 0 {
+        let next = dep_normalize_step(ctx, current)
+        if next == current {
+            // No reduction happened; we are at normal form
+            return current
+        }
+        current = next
+        fuel = fuel - 1
+    }
+
+    // Ran out of fuel; return whatever we have
+    current
+}
+
+// Normalize with explicit fuel limit (does not use context's norm_fuel).
+fn dep_normalize_with_fuel(ctx: &! DepContext, term: i64, max_fuel: i64) -> i64 with Mut, Div, Panic {
+    var current = term
+    var fuel = max_fuel
+
+    while fuel > 0 {
+        let next = dep_normalize_step(ctx, current)
+        if next == current {
+            return current
+        }
+        current = next
+        fuel = fuel - 1
+    }
+
+    current
+}
+
+// ============================================================
+// Section 18: Structural Equality
+// ============================================================
+
+// Check structural equality of two terms after normalization.
+// Both terms are first normalized, then compared structurally.
+fn dep_terms_equal(ctx: &! DepContext, a: i64, b: i64) -> bool with Mut, Div, Panic {
+    let na = dep_normalize(ctx, a)
+    let nb = dep_normalize(ctx, b)
+    return dep_terms_equal_raw(ctx, na, nb)
+}
+
+// Raw structural equality (no normalization). Compares term trees.
+fn dep_terms_equal_raw(ctx: &! DepContext, a: i64, b: i64) -> bool with Mut, Div, Panic {
+    // Same ID => same term
+    if a == b { return true }
+
+    // Bounds checks
+    if a < 0 { return b < 0 }
+    if b < 0 { return false }
+    if a >= ctx.term_count { return false }
+    if b >= ctx.term_count { return false }
+
+    let ka = ctx.terms[a as usize].kind
+    let kb = ctx.terms[b as usize].kind
+
+    // Different kinds => not equal (with enum matching)
+    // We compare kind tags by checking all combinations
+    if dep_term_kind_tag(ka) != dep_term_kind_tag(kb) {
+        return false
+    }
+
+    // Same kind: compare fields based on kind
+    if dep_term_kind_is_int_lit(ka) {
+        return ctx.terms[a as usize].val == ctx.terms[b as usize].val
+    }
+
+    if dep_term_kind_is_bool_lit(ka) {
+        return ctx.terms[a as usize].val == ctx.terms[b as usize].val
+    }
+
+    if dep_term_kind_is_var(ka) {
+        return ctx.terms[a as usize].var_id == ctx.terms[b as usize].var_id
+    }
+
+    if dep_term_kind_is_type(ka) { return true }
+    if dep_term_kind_is_bottom(ka) { return true }
+
+    // Unary: compare operand
+    if dep_term_kind_is_neg(ka) {
+        return dep_terms_equal_raw(ctx, ctx.terms[a as usize].left, ctx.terms[b as usize].left)
+    }
+    if dep_term_kind_is_not(ka) {
+        return dep_terms_equal_raw(ctx, ctx.terms[a as usize].left, ctx.terms[b as usize].left)
+    }
+
+    // Binary: compare left and right
+    if dep_term_kind_is_binop(ka) {
+        if dep_terms_equal_raw(ctx, ctx.terms[a as usize].left, ctx.terms[b as usize].left) == false {
+            return false
+        }
+        return dep_terms_equal_raw(ctx, ctx.terms[a as usize].right, ctx.terms[b as usize].right)
+    }
+
+    // Application
+    if dep_term_kind_is_app(ka) {
+        if dep_terms_equal_raw(ctx, ctx.terms[a as usize].left, ctx.terms[b as usize].left) == false {
+            return false
+        }
+        return dep_terms_equal_raw(ctx, ctx.terms[a as usize].right, ctx.terms[b as usize].right)
+    }
+
+    // Lambda: compare binder and body (alpha-equivalence would be better,
+    // but we use structural equality for simplicity)
+    if dep_term_kind_is_lam(ka) {
+        if ctx.terms[a as usize].var_id != ctx.terms[b as usize].var_id {
+            return false
+        }
+        return dep_terms_equal_raw(ctx, ctx.terms[a as usize].body, ctx.terms[b as usize].body)
+    }
+
+    // Pi type
+    if dep_term_kind_is_pi(ka) {
+        if ctx.terms[a as usize].var_id != ctx.terms[b as usize].var_id {
+            return false
+        }
+        if dep_terms_equal_raw(ctx, ctx.terms[a as usize].left, ctx.terms[b as usize].left) == false {
+            return false
+        }
+        return dep_terms_equal_raw(ctx, ctx.terms[a as usize].right, ctx.terms[b as usize].right)
+    }
+
+    // Sigma type
+    if dep_term_kind_is_sigma(ka) {
+        if ctx.terms[a as usize].var_id != ctx.terms[b as usize].var_id {
+            return false
+        }
+        if dep_terms_equal_raw(ctx, ctx.terms[a as usize].left, ctx.terms[b as usize].left) == false {
+            return false
+        }
+        return dep_terms_equal_raw(ctx, ctx.terms[a as usize].right, ctx.terms[b as usize].right)
+    }
+
+    // Projections
+    if dep_term_kind_is_fst(ka) {
+        return dep_terms_equal_raw(ctx, ctx.terms[a as usize].left, ctx.terms[b as usize].left)
+    }
+    if dep_term_kind_is_snd(ka) {
+        return dep_terms_equal_raw(ctx, ctx.terms[a as usize].left, ctx.terms[b as usize].left)
+    }
+
+    // If-then-else
+    if dep_term_kind_is_if(ka) {
+        if dep_terms_equal_raw(ctx, ctx.terms[a as usize].left, ctx.terms[b as usize].left) == false {
+            return false
+        }
+        if dep_terms_equal_raw(ctx, ctx.terms[a as usize].right, ctx.terms[b as usize].right) == false {
+            return false
+        }
+        return dep_terms_equal_raw(ctx, ctx.terms[a as usize].body, ctx.terms[b as usize].body)
+    }
+
+    // Let
+    if dep_term_kind_is_let(ka) {
+        if ctx.terms[a as usize].var_id != ctx.terms[b as usize].var_id {
+            return false
+        }
+        if dep_terms_equal_raw(ctx, ctx.terms[a as usize].left, ctx.terms[b as usize].left) == false {
+            return false
+        }
+        return dep_terms_equal_raw(ctx, ctx.terms[a as usize].body, ctx.terms[b as usize].body)
+    }
+
+    false
+}
+
+// Assign a numeric tag to each DepTermKind for comparison.
+fn dep_term_kind_tag(k: DepTermKind) -> i64 {
+    match k {
+        DepTermKind::TermVar     => 0,
+        DepTermKind::TermIntLit  => 1,
+        DepTermKind::TermBoolLit => 2,
+        DepTermKind::TermAdd     => 3,
+        DepTermKind::TermSub     => 4,
+        DepTermKind::TermMul     => 5,
+        DepTermKind::TermDiv     => 6,
+        DepTermKind::TermMod     => 7,
+        DepTermKind::TermNeg     => 8,
+        DepTermKind::TermEq      => 9,
+        DepTermKind::TermLt      => 10,
+        DepTermKind::TermLe      => 11,
+        DepTermKind::TermGt      => 12,
+        DepTermKind::TermGe      => 13,
+        DepTermKind::TermAnd     => 14,
+        DepTermKind::TermOr      => 15,
+        DepTermKind::TermNot     => 16,
+        DepTermKind::TermApp     => 17,
+        DepTermKind::TermLam     => 18,
+        DepTermKind::TermPi      => 19,
+        DepTermKind::TermSigma   => 20,
+        DepTermKind::TermFst     => 21,
+        DepTermKind::TermSnd     => 22,
+        DepTermKind::TermIf      => 23,
+        DepTermKind::TermLet     => 24,
+        DepTermKind::TermType    => 25,
+        DepTermKind::TermBottom  => 26,
+    }
+}
+
+// ============================================================
+// Section 19: Unification
+// ============================================================
+
+// Structural unification of two terms. Records substitutions for variables.
+// Returns UnifyOk on success, UnifyFail on structural mismatch,
+// UnifyStuck when terms cannot be compared (e.g. open variables).
+fn dep_unify(ctx: &! DepContext, a: i64, b: i64) -> DepUnifyResult with Mut, Div, Panic {
+    // Normalize both sides first
+    let na = dep_normalize(ctx, a)
+    let nb = dep_normalize(ctx, b)
+
+    // Same term after normalization
+    if na == nb { return DepUnifyResult::UnifyOk }
+
+    // Bounds checks
+    if na < 0 { return DepUnifyResult::UnifyFail }
+    if nb < 0 { return DepUnifyResult::UnifyFail }
+    if na >= ctx.term_count { return DepUnifyResult::UnifyFail }
+    if nb >= ctx.term_count { return DepUnifyResult::UnifyFail }
+
+    let ka = ctx.terms[na as usize].kind
+    let kb = ctx.terms[nb as usize].kind
+
+    // If either is a variable, bind it to the other
+    if dep_term_kind_is_var(ka) {
+        let vid = ctx.terms[na as usize].var_id
+        // Occurs check
+        if dep_occurs_check(ctx, vid, nb) {
+            return DepUnifyResult::UnifyFail
+        }
+        return dep_add_subst(ctx, vid, nb)
+    }
+
+    if dep_term_kind_is_var(kb) {
+        let vid = ctx.terms[nb as usize].var_id
+        if dep_occurs_check(ctx, vid, na) {
+            return DepUnifyResult::UnifyFail
+        }
+        return dep_add_subst(ctx, vid, na)
+    }
+
+    // Different kinds: fail
+    if dep_term_kind_tag(ka) != dep_term_kind_tag(kb) {
+        return DepUnifyResult::UnifyFail
+    }
+
+    // Same kind: unify sub-terms
+    if dep_term_kind_is_int_lit(ka) {
+        if ctx.terms[na as usize].val == ctx.terms[nb as usize].val {
+            return DepUnifyResult::UnifyOk
+        }
+        return DepUnifyResult::UnifyFail
+    }
+
+    if dep_term_kind_is_bool_lit(ka) {
+        if ctx.terms[na as usize].val == ctx.terms[nb as usize].val {
+            return DepUnifyResult::UnifyOk
+        }
+        return DepUnifyResult::UnifyFail
+    }
+
+    if dep_term_kind_is_type(ka) { return DepUnifyResult::UnifyOk }
+    if dep_term_kind_is_bottom(ka) { return DepUnifyResult::UnifyOk }
+
+    // Binary operators
+    if dep_term_kind_is_binop(ka) {
+        let r1 = dep_unify(ctx, ctx.terms[na as usize].left, ctx.terms[nb as usize].left)
+        match r1 {
+            DepUnifyResult::UnifyOk => {
+                return dep_unify(ctx, ctx.terms[na as usize].right, ctx.terms[nb as usize].right)
+            },
+            _ => { return r1 },
+        }
+    }
+
+    // Application
+    if dep_term_kind_is_app(ka) {
+        let r1 = dep_unify(ctx, ctx.terms[na as usize].left, ctx.terms[nb as usize].left)
+        match r1 {
+            DepUnifyResult::UnifyOk => {
+                return dep_unify(ctx, ctx.terms[na as usize].right, ctx.terms[nb as usize].right)
+            },
+            _ => { return r1 },
+        }
+    }
+
+    // Lambda
+    if dep_term_kind_is_lam(ka) {
+        // Binders must match (structural, not alpha)
+        if ctx.terms[na as usize].var_id != ctx.terms[nb as usize].var_id {
+            return DepUnifyResult::UnifyStuck
+        }
+        return dep_unify(ctx, ctx.terms[na as usize].body, ctx.terms[nb as usize].body)
+    }
+
+    // Pi type
+    if dep_term_kind_is_pi(ka) {
+        if ctx.terms[na as usize].var_id != ctx.terms[nb as usize].var_id {
+            return DepUnifyResult::UnifyStuck
+        }
+        let r1 = dep_unify(ctx, ctx.terms[na as usize].left, ctx.terms[nb as usize].left)
+        match r1 {
+            DepUnifyResult::UnifyOk => {
+                return dep_unify(ctx, ctx.terms[na as usize].right, ctx.terms[nb as usize].right)
+            },
+            _ => { return r1 },
+        }
+    }
+
+    // Sigma type
+    if dep_term_kind_is_sigma(ka) {
+        if ctx.terms[na as usize].var_id != ctx.terms[nb as usize].var_id {
+            return DepUnifyResult::UnifyStuck
+        }
+        let r1 = dep_unify(ctx, ctx.terms[na as usize].left, ctx.terms[nb as usize].left)
+        match r1 {
+            DepUnifyResult::UnifyOk => {
+                return dep_unify(ctx, ctx.terms[na as usize].right, ctx.terms[nb as usize].right)
+            },
+            _ => { return r1 },
+        }
+    }
+
+    // Projections
+    if dep_term_kind_is_fst(ka) {
+        return dep_unify(ctx, ctx.terms[na as usize].left, ctx.terms[nb as usize].left)
+    }
+    if dep_term_kind_is_snd(ka) {
+        return dep_unify(ctx, ctx.terms[na as usize].left, ctx.terms[nb as usize].left)
+    }
+
+    // If-then-else
+    if dep_term_kind_is_if(ka) {
+        let r1 = dep_unify(ctx, ctx.terms[na as usize].left, ctx.terms[nb as usize].left)
+        match r1 {
+            DepUnifyResult::UnifyOk => {
+                let r2 = dep_unify(ctx, ctx.terms[na as usize].right, ctx.terms[nb as usize].right)
+                match r2 {
+                    DepUnifyResult::UnifyOk => {
+                        return dep_unify(ctx, ctx.terms[na as usize].body, ctx.terms[nb as usize].body)
+                    },
+                    _ => { return r2 },
+                }
+            },
+            _ => { return r1 },
+        }
+    }
+
+    // Negation / Not
+    if dep_term_kind_is_neg(ka) {
+        return dep_unify(ctx, ctx.terms[na as usize].left, ctx.terms[nb as usize].left)
+    }
+    if dep_term_kind_is_not(ka) {
+        return dep_unify(ctx, ctx.terms[na as usize].left, ctx.terms[nb as usize].left)
+    }
+
+    // Let
+    if dep_term_kind_is_let(ka) {
+        if ctx.terms[na as usize].var_id != ctx.terms[nb as usize].var_id {
+            return DepUnifyResult::UnifyStuck
+        }
+        let r1 = dep_unify(ctx, ctx.terms[na as usize].left, ctx.terms[nb as usize].left)
+        match r1 {
+            DepUnifyResult::UnifyOk => {
+                return dep_unify(ctx, ctx.terms[na as usize].body, ctx.terms[nb as usize].body)
+            },
+            _ => { return r1 },
+        }
+    }
+
+    DepUnifyResult::UnifyStuck
+}
+
+// Helper: add a substitution to the context. Returns UnifyOk on success.
+fn dep_add_subst(ctx: &! DepContext, var_id: i64, replacement: i64) -> DepUnifyResult with Mut, Div, Panic {
+    if ctx.subst_count >= DEP_MAX_SUBST {
+        return DepUnifyResult::UnifyFail
+    }
+    let idx = ctx.subst_count
+    ctx.subst[idx as usize] = DepSubstitution {
+        var_id: var_id,
+        replacement: replacement,
+    }
+    ctx.subst_count = idx + 1
+    DepUnifyResult::UnifyOk
+}
+
+// ============================================================
+// Section 20: Apply All Substitutions
+// ============================================================
+
+// Apply all pending substitutions to a term, iterating until fixed point.
+fn dep_apply_subst(ctx: &! DepContext, term: i64) -> i64 with Mut, Div, Panic {
+    var current = term
+    var iterations: i64 = 0
+    let max_iterations: i64 = 100
+
+    while iterations < max_iterations {
+        var changed = false
+        var si: i64 = 0
+        while si < ctx.subst_count {
+            let vid = ctx.subst[si as usize].var_id
+            let rep = ctx.subst[si as usize].replacement
+            let new_term = dep_substitute(ctx, current, vid, rep)
+            if new_term != current {
+                current = new_term
+                changed = true
+            }
+            si = si + 1
+        }
+        if changed == false {
+            return current
+        }
+        iterations = iterations + 1
+    }
+
+    current
+}
+
+// ============================================================
+// Section 21: Constraint Management
+// ============================================================
+
+// Add a constraint to the context.
+fn dep_add_constraint(ctx: &! DepContext, kind: DepConstraintKind, lhs: i64, rhs: i64, span: i64) with Mut, Div, Panic {
+    if ctx.constraint_count >= DEP_MAX_CONSTRAINTS {
+        return
+    }
+    let idx = ctx.constraint_count
+    ctx.constraints[idx as usize] = DepConstraint {
+        kind: kind,
+        lhs: lhs,
+        rhs: rhs,
+        span_line: span,
+    }
+    ctx.constraint_count = idx + 1
+}
+
+// Check a single constraint. Normalizes both sides, then compares.
+fn dep_check_single_constraint(ctx: &! DepContext, idx: i64) -> bool with Mut, Div, Panic {
+    if idx < 0 { return false }
+    if idx >= ctx.constraint_count { return false }
+
+    let c_kind = ctx.constraints[idx as usize].kind
+    let c_lhs = ctx.constraints[idx as usize].lhs
+    let c_rhs = ctx.constraints[idx as usize].rhs
+
+    let nl = dep_normalize(ctx, c_lhs)
+    let nr = dep_normalize(ctx, c_rhs)
+
+    match c_kind {
+        DepConstraintKind::ConEqual => {
+            return dep_terms_equal_raw(ctx, nl, nr)
+        },
+        DepConstraintKind::ConLessThan => {
+            let lv = dep_term_to_i64(ctx, nl)
+            let rv = dep_term_to_i64(ctx, nr)
+            if lv == DEP_INVALID { return false }
+            if rv == DEP_INVALID { return false }
+            return lv < rv
+        },
+        DepConstraintKind::ConLessEq => {
+            let lv = dep_term_to_i64(ctx, nl)
+            let rv = dep_term_to_i64(ctx, nr)
+            if lv == DEP_INVALID { return false }
+            if rv == DEP_INVALID { return false }
+            return lv <= rv
+        },
+        DepConstraintKind::ConGreaterThan => {
+            let lv = dep_term_to_i64(ctx, nl)
+            let rv = dep_term_to_i64(ctx, nr)
+            if lv == DEP_INVALID { return false }
+            if rv == DEP_INVALID { return false }
+            return lv > rv
+        },
+        DepConstraintKind::ConGreaterEq => {
+            let lv = dep_term_to_i64(ctx, nl)
+            let rv = dep_term_to_i64(ctx, nr)
+            if lv == DEP_INVALID { return false }
+            if rv == DEP_INVALID { return false }
+            return lv >= rv
+        },
+        DepConstraintKind::ConNonZero => {
+            let lv = dep_term_to_i64(ctx, nl)
+            if lv == DEP_INVALID { return false }
+            return lv != 0
+        },
+        DepConstraintKind::ConPositive => {
+            let lv = dep_term_to_i64(ctx, nl)
+            if lv == DEP_INVALID { return false }
+            return lv > 0
+        },
+    }
+}
+
+// Check all constraints in the context. Returns true if all pass.
+fn dep_check_constraints(ctx: &! DepContext) -> bool with Mut, Div, Panic {
+    var i: i64 = 0
+    while i < ctx.constraint_count {
+        if dep_check_single_constraint(ctx, i) == false {
+            return false
+        }
+        i = i + 1
+    }
+    true
+}
+
+// Clear all constraints.
+fn dep_clear_constraints(ctx: &! DepContext) with Mut {
+    ctx.constraint_count = 0
+}
+
+// Clear all substitutions.
+fn dep_clear_subst(ctx: &! DepContext) with Mut {
+    ctx.subst_count = 0
+}
+
+// ============================================================
+// Section 22: Pi and Sigma Type Elaboration
+// ============================================================
+
+// Elaborate a Pi type: (param_name : param_type) -> body_type.
+// Allocates the Pi term in the arena and binds param_name in the environment.
+fn dep_elaborate_pi(ctx: &! DepContext, param_name: i64, param_type: i64, body_type: i64) -> i64 with Mut, Div, Panic {
+    // Create the Pi term
+    let pi_id = dep_term_pi(ctx, param_name, param_type, body_type)
+    if pi_id == DEP_INVALID {
+        dep_record_error(ctx, 100)
+        return DEP_INVALID
+    }
+
+    // Bind the parameter in the variable environment
+    let bound = dep_bind_var(ctx, param_name, param_type)
+    if bound == false {
+        dep_record_error(ctx, 101)
+    }
+
+    pi_id
+}
+
+// Elaborate a Sigma type: (fst_name : fst_type, snd_type).
+// Allocates the Sigma term and binds fst_name.
+fn dep_elaborate_sigma(ctx: &! DepContext, fst_name: i64, fst_type: i64, snd_type: i64) -> i64 with Mut, Div, Panic {
+    let sigma_id = dep_term_sigma(ctx, fst_name, fst_type, snd_type)
+    if sigma_id == DEP_INVALID {
+        dep_record_error(ctx, 200)
+        return DEP_INVALID
+    }
+
+    let bound = dep_bind_var(ctx, fst_name, fst_type)
+    if bound == false {
+        dep_record_error(ctx, 201)
+    }
+
+    sigma_id
+}
+
+// ============================================================
+// Section 23: Pi Type Application (Dependent Elimination)
+// ============================================================
+
+// Apply a Pi type to an argument: given (x : A) -> B and arg : A,
+// compute B[x := arg]. This is the key dependent elimination rule.
+fn dep_apply_pi(ctx: &! DepContext, pi_term: i64, arg: i64) -> i64 with Mut, Div, Panic {
+    if pi_term < 0 { return DEP_INVALID }
+    if pi_term >= ctx.term_count { return DEP_INVALID }
+
+    let k = ctx.terms[pi_term as usize].kind
+    if dep_term_kind_is_pi(k) == false {
+        return DEP_INVALID
+    }
+
+    let param = ctx.terms[pi_term as usize].var_id
+    let body_type = ctx.terms[pi_term as usize].right
+    dep_substitute(ctx, body_type, param, arg)
+}
+
+// ============================================================
+// Section 24: Sigma Pair Construction and Projection
+// ============================================================
+
+// Build a dependent pair: given (x : A, B(x)), construct the pair
+// holding (fst_val : A, snd_val : B[x := fst_val]).
+fn dep_make_pair(ctx: &! DepContext, sigma_term: i64, fst_val: i64, snd_val: i64) -> i64 with Mut, Div, Panic {
+    if sigma_term < 0 { return DEP_INVALID }
+    if sigma_term >= ctx.term_count { return DEP_INVALID }
+
+    // We reuse the Sigma kind but store fst_val/snd_val in left/right
+    // This is a value-level pair, distinct from the type-level Sigma
+    dep_alloc_term_full(ctx, DepTermKind::TermSigma, 0, fst_val, snd_val, DEP_INVALID, DEP_INVALID)
+}
+
+// ============================================================
+// Section 25: Type Checking Helpers
+// ============================================================
+
+// Check whether term has the expected type (by unification after normalization).
+fn dep_check_type(ctx: &! DepContext, term: i64, expected: i64) -> bool with Mut, Div, Panic {
+    let nt = dep_normalize(ctx, term)
+    let ne = dep_normalize(ctx, expected)
+    let r = dep_unify(ctx, nt, ne)
+    match r {
+        DepUnifyResult::UnifyOk => true,
+        _ => false,
+    }
+}
+
+// Infer the type of a term (simplified: only handles literals and Type).
+fn dep_infer_type(ctx: &! DepContext, term: i64) -> i64 with Mut, Div, Panic {
+    if term < 0 { return DEP_INVALID }
+    if term >= ctx.term_count { return DEP_INVALID }
+
+    let k = ctx.terms[term as usize].kind
+
+    if dep_term_kind_is_int_lit(k) {
+        return dep_term_type(ctx)
+    }
+
+    if dep_term_kind_is_bool_lit(k) {
+        return dep_term_type(ctx)
+    }
+
+    if dep_term_kind_is_type(k) {
+        return dep_term_type(ctx)
+    }
+
+    if dep_term_kind_is_var(k) {
+        let vid = ctx.terms[term as usize].var_id
+        return dep_lookup_var(ctx, vid)
+    }
+
+    if dep_term_kind_is_lam(k) {
+        // Lambda needs annotation; return invalid for now
+        return DEP_INVALID
+    }
+
+    if dep_term_kind_is_pi(k) {
+        return dep_term_type(ctx)
+    }
+
+    if dep_term_kind_is_sigma(k) {
+        return dep_term_type(ctx)
+    }
+
+    DEP_INVALID
+}
+
+// ============================================================
+// Section 26: Context Reset / Snapshot
+// ============================================================
+
+// Snapshot the current state of the context for later rollback.
+// Returns a tuple-like set of counts packed into a single i64.
+// For simplicity, we just track term_count since that is the main arena.
+fn dep_snapshot_term_count(ctx: &DepContext) -> i64 {
+    ctx.term_count
+}
+
+fn dep_snapshot_subst_count(ctx: &DepContext) -> i64 {
+    ctx.subst_count
+}
+
+fn dep_snapshot_constraint_count(ctx: &DepContext) -> i64 {
+    ctx.constraint_count
+}
+
+fn dep_snapshot_var_count(ctx: &DepContext) -> i64 {
+    ctx.var_count
+}
+
+// Rollback term arena to a snapshot
+fn dep_rollback_terms(ctx: &! DepContext, snapshot: i64) with Mut {
+    if snapshot >= 0 {
+        if snapshot <= ctx.term_count {
+            ctx.term_count = snapshot
+        }
+    }
+}
+
+// Rollback substitutions to a snapshot
+fn dep_rollback_subst(ctx: &! DepContext, snapshot: i64) with Mut {
+    if snapshot >= 0 {
+        if snapshot <= ctx.subst_count {
+            ctx.subst_count = snapshot
+        }
+    }
+}
+
+// ============================================================
+// Section 27: Utility — Term Size
+// ============================================================
+
+// Count the number of nodes in a term (iterative worklist).
+fn dep_term_size(ctx: &DepContext, term: i64) -> i64 with Mut, Div, Panic {
+    var worklist: [i64; 256] = [0; 256]
+    var wl_count: i64 = 0
+    var size: i64 = 0
+
+    if term >= 0 {
+        worklist[0 as usize] = term
+        wl_count = 1
+    }
+
+    while wl_count > 0 {
+        wl_count = wl_count - 1
+        let current = worklist[wl_count as usize]
+
+        if current < 0 { continue }
+        if current >= ctx.term_count { continue }
+
+        size = size + 1
+
+        let t_left = ctx.terms[current as usize].left
+        let t_right = ctx.terms[current as usize].right
+        let t_body = ctx.terms[current as usize].body
+
+        if t_left >= 0 {
+            if wl_count < 256 {
+                worklist[wl_count as usize] = t_left
+                wl_count = wl_count + 1
+            }
+        }
+        if t_right >= 0 {
+            if wl_count < 256 {
+                worklist[wl_count as usize] = t_right
+                wl_count = wl_count + 1
+            }
+        }
+        if t_body >= 0 {
+            if wl_count < 256 {
+                worklist[wl_count as usize] = t_body
+                wl_count = wl_count + 1
+            }
+        }
+    }
+
+    size
+}
+
+// ============================================================
+// Section 28: Utility — Term Depth
+// ============================================================
+
+// Compute the maximum depth of a term tree. Iterative with explicit stack.
+fn dep_term_depth(ctx: &DepContext, term: i64) -> i64 with Mut, Div, Panic {
+    // Stack entries: (term_id, depth)
+    var stack_terms: [i64; 256] = [0; 256]
+    var stack_depths: [i64; 256] = [0; 256]
+    var sp: i64 = 0
+    var max_depth: i64 = 0
+
+    if term >= 0 {
+        stack_terms[0 as usize] = term
+        stack_depths[0 as usize] = 1
+        sp = 1
+    }
+
+    while sp > 0 {
+        sp = sp - 1
+        let current = stack_terms[sp as usize]
+        let depth = stack_depths[sp as usize]
+
+        if current < 0 { continue }
+        if current >= ctx.term_count { continue }
+
+        if depth > max_depth {
+            max_depth = depth
+        }
+
+        let t_left = ctx.terms[current as usize].left
+        let t_right = ctx.terms[current as usize].right
+        let t_body = ctx.terms[current as usize].body
+
+        if t_left >= 0 {
+            if sp < 256 {
+                stack_terms[sp as usize] = t_left
+                stack_depths[sp as usize] = depth + 1
+                sp = sp + 1
+            }
+        }
+        if t_right >= 0 {
+            if sp < 256 {
+                stack_terms[sp as usize] = t_right
+                stack_depths[sp as usize] = depth + 1
+                sp = sp + 1
+            }
+        }
+        if t_body >= 0 {
+            if sp < 256 {
+                stack_terms[sp as usize] = t_body
+                stack_depths[sp as usize] = depth + 1
+                sp = sp + 1
+            }
+        }
+    }
+
+    max_depth
+}
+
+// ============================================================
+// Section 29: Utility — Free Variables
+// ============================================================
+
+// Count free variables in a term. Uses worklist approach.
+fn dep_count_free_vars(ctx: &! DepContext, term: i64) -> i64 with Mut, Div, Panic {
+    var worklist: [i64; 256] = [0; 256]
+    var wl_count: i64 = 0
+    var bound_vars: [i64; 256] = [0; 256]
+    var bound_count: i64 = 0
+    var free_count: i64 = 0
+
+    if term >= 0 {
+        worklist[0 as usize] = term
+        wl_count = 1
+    }
+
+    while wl_count > 0 {
+        wl_count = wl_count - 1
+        let current = worklist[wl_count as usize]
+
+        if current < 0 { continue }
+        if current >= ctx.term_count { continue }
+
+        let k = ctx.terms[current as usize].kind
+
+        if dep_term_kind_is_var(k) {
+            let vid = ctx.terms[current as usize].var_id
+            // Check if vid is in bound_vars
+            var is_bound = false
+            var bi: i64 = 0
+            while bi < bound_count {
+                if bound_vars[bi as usize] == vid {
+                    is_bound = true
+                }
+                bi = bi + 1
+            }
+            if is_bound == false {
+                free_count = free_count + 1
+            }
+            continue
+        }
+
+        // For binders, record the bound variable
+        if dep_term_kind_is_lam(k) {
+            if bound_count < 256 {
+                bound_vars[bound_count as usize] = ctx.terms[current as usize].var_id
+                bound_count = bound_count + 1
+            }
+        }
+        if dep_term_kind_is_pi(k) {
+            if bound_count < 256 {
+                bound_vars[bound_count as usize] = ctx.terms[current as usize].var_id
+                bound_count = bound_count + 1
+            }
+        }
+        if dep_term_kind_is_sigma(k) {
+            if bound_count < 256 {
+                bound_vars[bound_count as usize] = ctx.terms[current as usize].var_id
+                bound_count = bound_count + 1
+            }
+        }
+
+        // Push children
+        let t_left = ctx.terms[current as usize].left
+        let t_right = ctx.terms[current as usize].right
+        let t_body = ctx.terms[current as usize].body
+
+        if t_left >= 0 {
+            if wl_count < 256 {
+                worklist[wl_count as usize] = t_left
+                wl_count = wl_count + 1
+            }
+        }
+        if t_right >= 0 {
+            if wl_count < 256 {
+                worklist[wl_count as usize] = t_right
+                wl_count = wl_count + 1
+            }
+        }
+        if t_body >= 0 {
+            if wl_count < 256 {
+                worklist[wl_count as usize] = t_body
+                wl_count = wl_count + 1
+            }
+        }
+    }
+
+    free_count
+}
+
+// ============================================================
+// Section 30: Dependent Pattern Matching Support
+// ============================================================
+
+// Refine a Pi type by unifying its parameter type with a known value,
+// then substituting into the body. Used in dependent pattern matching
+// where matching a constructor reveals type information.
+fn dep_refine_pi(ctx: &! DepContext, pi_term: i64, known_val: i64) -> i64 with Mut, Div, Panic {
+    if pi_term < 0 { return DEP_INVALID }
+    if pi_term >= ctx.term_count { return DEP_INVALID }
+
+    let k = ctx.terms[pi_term as usize].kind
+    if dep_term_kind_is_pi(k) == false {
+        return DEP_INVALID
+    }
+
+    let param = ctx.terms[pi_term as usize].var_id
+    let param_type = ctx.terms[pi_term as usize].left
+    let body_type = ctx.terms[pi_term as usize].right
+
+    // Unify param_type with the type of known_val
+    let val_type = dep_infer_type(ctx, known_val)
+    if val_type != DEP_INVALID {
+        let r = dep_unify(ctx, param_type, val_type)
+        match r {
+            DepUnifyResult::UnifyFail => { return DEP_INVALID },
+            _ => {},
+        }
+    }
+
+    // Substitute param -> known_val in body_type
+    dep_substitute(ctx, body_type, param, known_val)
+}
+
+// ============================================================
+// Section 31: Well-Formedness Checks
+// ============================================================
+
+// Check if a Pi type is well-formed: param type and body type must be valid.
+fn dep_pi_well_formed(ctx: &! DepContext, pi_term: i64) -> bool with Mut, Div, Panic {
+    if pi_term < 0 { return false }
+    if pi_term >= ctx.term_count { return false }
+
+    let k = ctx.terms[pi_term as usize].kind
+    if dep_term_kind_is_pi(k) == false { return false }
+
+    let param_type = ctx.terms[pi_term as usize].left
+    let body_type = ctx.terms[pi_term as usize].right
+
+    if dep_term_valid(ctx, param_type) == false { return false }
+    if dep_term_valid(ctx, body_type) == false { return false }
+
+    true
+}
+
+// Check if a Sigma type is well-formed.
+fn dep_sigma_well_formed(ctx: &! DepContext, sigma_term: i64) -> bool with Mut, Div, Panic {
+    if sigma_term < 0 { return false }
+    if sigma_term >= ctx.term_count { return false }
+
+    let k = ctx.terms[sigma_term as usize].kind
+    if dep_term_kind_is_sigma(k) == false { return false }
+
+    let fst_type = ctx.terms[sigma_term as usize].left
+    let snd_type = ctx.terms[sigma_term as usize].right
+
+    if dep_term_valid(ctx, fst_type) == false { return false }
+    if dep_term_valid(ctx, snd_type) == false { return false }
+
+    true
+}
+
+// ============================================================
+// Section 32: Constraint Kind Tag (for testing)
+// ============================================================
+
+fn dep_constraint_kind_tag(k: DepConstraintKind) -> i64 {
+    match k {
+        DepConstraintKind::ConEqual       => 0,
+        DepConstraintKind::ConLessThan    => 1,
+        DepConstraintKind::ConLessEq      => 2,
+        DepConstraintKind::ConGreaterThan => 3,
+        DepConstraintKind::ConGreaterEq   => 4,
+        DepConstraintKind::ConNonZero     => 5,
+        DepConstraintKind::ConPositive    => 6,
+    }
+}
+
+// ============================================================
+// Section 33: Unify Result Tag (for testing)
+// ============================================================
+
+fn dep_unify_result_is_ok(r: DepUnifyResult) -> bool {
+    match r {
+        DepUnifyResult::UnifyOk => true,
+        _ => false,
+    }
+}
+
+fn dep_unify_result_is_fail(r: DepUnifyResult) -> bool {
+    match r {
+        DepUnifyResult::UnifyFail => true,
+        _ => false,
+    }
+}
+
+fn dep_unify_result_is_stuck(r: DepUnifyResult) -> bool {
+    match r {
+        DepUnifyResult::UnifyStuck => true,
+        _ => false,
+    }
+}
+
+// ============================================================
+// ============================================================
+//
+//                         TESTS
+//
+// ============================================================
+// ============================================================
+
+// ============================================================
+// Test Category 1: Term Construction (10 tests)
+// ============================================================
+
+fn test_dep_term_int_inner(ctx: &! DepContext) -> bool with Mut, Div, Panic {
+    let t = dep_term_int(ctx, 42)
+    if t < 0 { return false }
+    let k = dep_get_kind(ctx, t)
+    if dep_term_kind_is_int_lit(k) == false { return false }
+    dep_get_val(ctx, t) == 42
+}
+fn test_dep_term_int() -> bool with Mut, Div, Panic {
+    var ctx = dep_context_new()
+    test_dep_term_int_inner(&! ctx)
+}
+
+fn test_dep_term_int_negative_inner(ctx: &! DepContext) -> bool with Mut, Div, Panic {
+    let t = dep_term_int(ctx, 0 - 7)
+    if t < 0 { return false }
+    dep_get_val(ctx, t) == 0 - 7
+}
+fn test_dep_term_int_negative() -> bool with Mut, Div, Panic {
+    var ctx = dep_context_new()
+    test_dep_term_int_negative_inner(&! ctx)
+}
+
+fn test_dep_term_bool_inner(ctx: &! DepContext) -> bool with Mut, Div, Panic {
+    let t1 = dep_term_bool(ctx, 1)
+    let t2 = dep_term_bool(ctx, 0)
+    if dep_get_val(ctx, t1) != 1 { return false }
+    dep_get_val(ctx, t2) == 0
+}
+fn test_dep_term_bool() -> bool with Mut, Div, Panic {
+    var ctx = dep_context_new()
+    test_dep_term_bool_inner(&! ctx)
+}
+
+fn test_dep_term_var_inner(ctx: &! DepContext) -> bool with Mut, Div, Panic {
+    let t = dep_term_var(ctx, 99)
+    if t < 0 { return false }
+    let k = dep_get_kind(ctx, t)
+    if dep_term_kind_is_var(k) == false { return false }
+    dep_get_var_id(ctx, t) == 99
+}
+fn test_dep_term_var() -> bool with Mut, Div, Panic {
+    var ctx = dep_context_new()
+    test_dep_term_var_inner(&! ctx)
+}
+
+fn test_dep_term_add_inner(ctx: &! DepContext) -> bool with Mut, Div, Panic {
+    let a = dep_term_int(ctx, 3)
+    let b = dep_term_int(ctx, 5)
+    let t = dep_term_add(ctx, a, b)
+    if t < 0 { return false }
+    let k = dep_get_kind(ctx, t)
+    if dep_term_kind_is_add(k) == false { return false }
+    if dep_get_left(ctx, t) != a { return false }
+    dep_get_right(ctx, t) == b
+}
+fn test_dep_term_add() -> bool with Mut, Div, Panic {
+    var ctx = dep_context_new()
+    test_dep_term_add_inner(&! ctx)
+}
+
+fn test_dep_term_mul_inner(ctx: &! DepContext) -> bool with Mut, Div, Panic {
+    let a = dep_term_int(ctx, 4)
+    let b = dep_term_int(ctx, 6)
+    let t = dep_term_mul(ctx, a, b)
+    if t < 0 { return false }
+    let k = dep_get_kind(ctx, t)
+    if dep_term_kind_is_mul(k) == false { return false }
+    if dep_get_left(ctx, t) != a { return false }
+    dep_get_right(ctx, t) == b
+}
+fn test_dep_term_mul() -> bool with Mut, Div, Panic {
+    var ctx = dep_context_new()
+    test_dep_term_mul_inner(&! ctx)
+}
+
+fn test_dep_term_app_inner(ctx: &! DepContext) -> bool with Mut, Div, Panic {
+    let f = dep_term_var(ctx, 1)
+    let a = dep_term_int(ctx, 10)
+    let t = dep_term_app(ctx, f, a)
+    if t < 0 { return false }
+    let k = dep_get_kind(ctx, t)
+    if dep_term_kind_is_app(k) == false { return false }
+    if dep_get_left(ctx, t) != f { return false }
+    dep_get_right(ctx, t) == a
+}
+fn test_dep_term_app() -> bool with Mut, Div, Panic {
+    var ctx = dep_context_new()
+    test_dep_term_app_inner(&! ctx)
+}
+
+fn test_dep_term_lam_inner(ctx: &! DepContext) -> bool with Mut, Div, Panic {
+    let body = dep_term_int(ctx, 7)
+    let t = dep_term_lam(ctx, 42, body)
+    if t < 0 { return false }
+    let k = dep_get_kind(ctx, t)
+    if dep_term_kind_is_lam(k) == false { return false }
+    if dep_get_var_id(ctx, t) != 42 { return false }
+    dep_get_body(ctx, t) == body
+}
+fn test_dep_term_lam() -> bool with Mut, Div, Panic {
+    var ctx = dep_context_new()
+    test_dep_term_lam_inner(&! ctx)
+}
+
+fn test_dep_term_type_inner(ctx: &! DepContext) -> bool with Mut, Div, Panic {
+    let t = dep_term_type(ctx)
+    if t < 0 { return false }
+    let k = dep_get_kind(ctx, t)
+    dep_term_kind_is_type(k)
+}
+fn test_dep_term_type() -> bool with Mut, Div, Panic {
+    var ctx = dep_context_new()
+    test_dep_term_type_inner(&! ctx)
+}
+
+fn test_dep_term_if_inner(ctx: &! DepContext) -> bool with Mut, Div, Panic {
+    let cond = dep_term_bool(ctx, 1)
+    let then_t = dep_term_int(ctx, 10)
+    let else_t = dep_term_int(ctx, 20)
+    let t = dep_term_if(ctx, cond, then_t, else_t)
+    if t < 0 { return false }
+    let k = dep_get_kind(ctx, t)
+    if dep_term_kind_is_if(k) == false { return false }
+    if dep_get_left(ctx, t) != cond { return false }
+    if dep_get_right(ctx, t) != then_t { return false }
+    dep_get_body(ctx, t) == else_t
+}
+fn test_dep_term_if() -> bool with Mut, Div, Panic {
+    var ctx = dep_context_new()
+    test_dep_term_if_inner(&! ctx)
+}
+
+// ============================================================
+// Test Category 2: Substitution (10 tests)
+// ============================================================
+
+fn test_dep_subst_var_match_inner(ctx: &! DepContext) -> bool with Mut, Div, Panic {
+    // x[x := 5] == 5
+    let x = dep_term_var(ctx, 1)
+    let five = dep_term_int(ctx, 5)
+    let result = dep_substitute(ctx, x, 1, five)
+    result == five
+}
+fn test_dep_subst_var_match() -> bool with Mut, Div, Panic {
+    var ctx = dep_context_new()
+    test_dep_subst_var_match_inner(&! ctx)
+}
+
+fn test_dep_subst_var_no_match_inner(ctx: &! DepContext) -> bool with Mut, Div, Panic {
+    // y[x := 5] == y
+    let y = dep_term_var(ctx, 2)
+    let five = dep_term_int(ctx, 5)
+    let result = dep_substitute(ctx, y, 1, five)
+    result == y
+}
+fn test_dep_subst_var_no_match() -> bool with Mut, Div, Panic {
+    var ctx = dep_context_new()
+    test_dep_subst_var_no_match_inner(&! ctx)
+}
+
+fn test_dep_subst_int_noop_inner(ctx: &! DepContext) -> bool with Mut, Div, Panic {
+    // 42[x := 5] == 42
+    let fortytwo = dep_term_int(ctx, 42)
+    let five = dep_term_int(ctx, 5)
+    let result = dep_substitute(ctx, fortytwo, 1, five)
+    result == fortytwo
+}
+fn test_dep_subst_int_noop() -> bool with Mut, Div, Panic {
+    var ctx = dep_context_new()
+    test_dep_subst_int_noop_inner(&! ctx)
+}
+
+fn test_dep_subst_in_add_inner(ctx: &! DepContext) -> bool with Mut, Div, Panic {
+    // (x + 3)[x := 10] normalizes to 13
+    let x = dep_term_var(ctx, 1)
+    let three = dep_term_int(ctx, 3)
+    let sum = dep_term_add(ctx, x, three)
+    let ten = dep_term_int(ctx, 10)
+    let substituted = dep_substitute(ctx, sum, 1, ten)
+    let normed = dep_normalize(ctx, substituted)
+    dep_term_to_i64(ctx, normed) == 13
+}
+fn test_dep_subst_in_add() -> bool with Mut, Div, Panic {
+    var ctx = dep_context_new()
+    test_dep_subst_in_add_inner(&! ctx)
+}
+
+fn test_dep_subst_in_mul_inner(ctx: &! DepContext) -> bool with Mut, Div, Panic {
+    // (x * 4)[x := 3] normalizes to 12
+    let x = dep_term_var(ctx, 1)
+    let four = dep_term_int(ctx, 4)
+    let prod = dep_term_mul(ctx, x, four)
+    let three = dep_term_int(ctx, 3)
+    let substituted = dep_substitute(ctx, prod, 1, three)
+    let normed = dep_normalize(ctx, substituted)
+    dep_term_to_i64(ctx, normed) == 12
+}
+fn test_dep_subst_in_mul() -> bool with Mut, Div, Panic {
+    var ctx = dep_context_new()
+    test_dep_subst_in_mul_inner(&! ctx)
+}
+
+fn test_dep_subst_nested_inner(ctx: &! DepContext) -> bool with Mut, Div, Panic {
+    // ((x + x) * 2)[x := 5] normalizes to 20
+    let x = dep_term_var(ctx, 1)
+    let sum = dep_term_add(ctx, x, x)
+    let two = dep_term_int(ctx, 2)
+    let prod = dep_term_mul(ctx, sum, two)
+    let five = dep_term_int(ctx, 5)
+    let substituted = dep_substitute(ctx, prod, 1, five)
+    let normed = dep_normalize(ctx, substituted)
+    dep_term_to_i64(ctx, normed) == 20
+}
+fn test_dep_subst_nested() -> bool with Mut, Div, Panic {
+    var ctx = dep_context_new()
+    test_dep_subst_nested_inner(&! ctx)
+}
+
+fn test_dep_subst_lam_shadow_inner(ctx: &! DepContext) -> bool with Mut, Div, Panic {
+    // (\x. x)[x := 5] should NOT substitute (binder shadows)
+    let body_var = dep_term_var(ctx, 1)
+    let lam = dep_term_lam(ctx, 1, body_var)
+    let five = dep_term_int(ctx, 5)
+    let result = dep_substitute(ctx, lam, 1, five)
+    // The lambda should be unchanged
+    result == lam
+}
+fn test_dep_subst_lam_shadow() -> bool with Mut, Div, Panic {
+    var ctx = dep_context_new()
+    test_dep_subst_lam_shadow_inner(&! ctx)
+}
+
+fn test_dep_subst_lam_no_shadow_inner(ctx: &! DepContext) -> bool with Mut, Div, Panic {
+    // (\y. x)[x := 5] should substitute in body
+    let x = dep_term_var(ctx, 1)
+    let lam = dep_term_lam(ctx, 2, x)
+    let five = dep_term_int(ctx, 5)
+    let result = dep_substitute(ctx, lam, 1, five)
+    // Result is \y. 5 — body should be five
+    let new_body = dep_get_body(ctx, result)
+    dep_term_to_i64(ctx, new_body) == 5
+}
+fn test_dep_subst_lam_no_shadow() -> bool with Mut, Div, Panic {
+    var ctx = dep_context_new()
+    test_dep_subst_lam_no_shadow_inner(&! ctx)
+}
+
+fn test_dep_subst_pi_shadow_inner(ctx: &! DepContext) -> bool with Mut, Div, Panic {
+    // Pi(x : Int, x)[x := 5] — body should NOT be substituted
+    let int_ty = dep_term_type(ctx)
+    let body_var = dep_term_var(ctx, 1)
+    let pi = dep_term_pi(ctx, 1, int_ty, body_var)
+    let five = dep_term_int(ctx, 5)
+    let result = dep_substitute(ctx, pi, 1, five)
+    // Pi param type might be substituted, but body is shadowed
+    let new_body = dep_get_right(ctx, result)
+    // Body should still be a variable reference to 1
+    dep_get_var_id(ctx, new_body) == 1
+}
+fn test_dep_subst_pi_shadow() -> bool with Mut, Div, Panic {
+    var ctx = dep_context_new()
+    test_dep_subst_pi_shadow_inner(&! ctx)
+}
+
+fn test_dep_subst_if_inner(ctx: &! DepContext) -> bool with Mut, Div, Panic {
+    // if x then 1 else 2, [x := true] normalizes to 1
+    let x = dep_term_var(ctx, 1)
+    let one = dep_term_int(ctx, 1)
+    let two = dep_term_int(ctx, 2)
+    let ite = dep_term_if(ctx, x, one, two)
+    let t = dep_term_bool(ctx, 1)
+    let substituted = dep_substitute(ctx, ite, 1, t)
+    let normed = dep_normalize(ctx, substituted)
+    dep_term_to_i64(ctx, normed) == 1
+}
+fn test_dep_subst_if() -> bool with Mut, Div, Panic {
+    var ctx = dep_context_new()
+    test_dep_subst_if_inner(&! ctx)
+}
+
+// ============================================================
+// Test Category 3: Normalization (12 tests)
+// ============================================================
+
+fn test_dep_norm_int_inner(ctx: &! DepContext) -> bool with Mut, Div, Panic {
+    // Int literal is already normal
+    let t = dep_term_int(ctx, 99)
+    let n = dep_normalize(ctx, t)
+    n == t
+}
+fn test_dep_norm_int() -> bool with Mut, Div, Panic {
+    var ctx = dep_context_new()
+    test_dep_norm_int_inner(&! ctx)
+}
+
+fn test_dep_norm_add_inner(ctx: &! DepContext) -> bool with Mut, Div, Panic {
+    // 3 + 5 normalizes to 8
+    let a = dep_term_int(ctx, 3)
+    let b = dep_term_int(ctx, 5)
+    let sum = dep_term_add(ctx, a, b)
+    let n = dep_normalize(ctx, sum)
+    dep_term_to_i64(ctx, n) == 8
+}
+fn test_dep_norm_add() -> bool with Mut, Div, Panic {
+    var ctx = dep_context_new()
+    test_dep_norm_add_inner(&! ctx)
+}
+
+fn test_dep_norm_sub_inner(ctx: &! DepContext) -> bool with Mut, Div, Panic {
+    // 10 - 3 normalizes to 7
+    let a = dep_term_int(ctx, 10)
+    let b = dep_term_int(ctx, 3)
+    let diff = dep_term_sub(ctx, a, b)
+    let n = dep_normalize(ctx, diff)
+    dep_term_to_i64(ctx, n) == 7
+}
+fn test_dep_norm_sub() -> bool with Mut, Div, Panic {
+    var ctx = dep_context_new()
+    test_dep_norm_sub_inner(&! ctx)
+}
+
+fn test_dep_norm_mul_inner(ctx: &! DepContext) -> bool with Mut, Div, Panic {
+    // 4 * 7 normalizes to 28
+    let a = dep_term_int(ctx, 4)
+    let b = dep_term_int(ctx, 7)
+    let prod = dep_term_mul(ctx, a, b)
+    let n = dep_normalize(ctx, prod)
+    dep_term_to_i64(ctx, n) == 28
+}
+fn test_dep_norm_mul() -> bool with Mut, Div, Panic {
+    var ctx = dep_context_new()
+    test_dep_norm_mul_inner(&! ctx)
+}
+
+fn test_dep_norm_div_inner(ctx: &! DepContext) -> bool with Mut, Div, Panic {
+    // 20 / 4 normalizes to 5
+    let a = dep_term_int(ctx, 20)
+    let b = dep_term_int(ctx, 4)
+    let quot = dep_term_div(ctx, a, b)
+    let n = dep_normalize(ctx, quot)
+    dep_term_to_i64(ctx, n) == 5
+}
+fn test_dep_norm_div() -> bool with Mut, Div, Panic {
+    var ctx = dep_context_new()
+    test_dep_norm_div_inner(&! ctx)
+}
+
+fn test_dep_norm_div_by_zero_inner(ctx: &! DepContext) -> bool with Mut, Div, Panic {
+    // 10 / 0 stays stuck (no reduction)
+    let a = dep_term_int(ctx, 10)
+    let b = dep_term_int(ctx, 0)
+    let quot = dep_term_div(ctx, a, b)
+    let n = dep_normalize(ctx, quot)
+    // Should be stuck: the result is the original div term
+    let k = dep_get_kind(ctx, n)
+    dep_term_kind_is_div(k)
+}
+fn test_dep_norm_div_by_zero() -> bool with Mut, Div, Panic {
+    var ctx = dep_context_new()
+    test_dep_norm_div_by_zero_inner(&! ctx)
+}
+
+fn test_dep_norm_mod_inner(ctx: &! DepContext) -> bool with Mut, Div, Panic {
+    // 17 % 5 normalizes to 2
+    let a = dep_term_int(ctx, 17)
+    let b = dep_term_int(ctx, 5)
+    let m = dep_term_mod(ctx, a, b)
+    let n = dep_normalize(ctx, m)
+    dep_term_to_i64(ctx, n) == 2
+}
+fn test_dep_norm_mod() -> bool with Mut, Div, Panic {
+    var ctx = dep_context_new()
+    test_dep_norm_mod_inner(&! ctx)
+}
+
+fn test_dep_norm_beta_inner(ctx: &! DepContext) -> bool with Mut, Div, Panic {
+    // (\x. x + 1)(5) normalizes to 6
+    let x = dep_term_var(ctx, 1)
+    let one = dep_term_int(ctx, 1)
+    let body = dep_term_add(ctx, x, one)
+    let lam = dep_term_lam(ctx, 1, body)
+    let five = dep_term_int(ctx, 5)
+    let app = dep_term_app(ctx, lam, five)
+    let n = dep_normalize(ctx, app)
+    dep_term_to_i64(ctx, n) == 6
+}
+fn test_dep_norm_beta() -> bool with Mut, Div, Panic {
+    var ctx = dep_context_new()
+    test_dep_norm_beta_inner(&! ctx)
+}
+
+fn test_dep_norm_if_true_inner(ctx: &! DepContext) -> bool with Mut, Div, Panic {
+    // if true then 10 else 20 normalizes to 10
+    let cond = dep_term_bool(ctx, 1)
+    let then_t = dep_term_int(ctx, 10)
+    let else_t = dep_term_int(ctx, 20)
+    let ite = dep_term_if(ctx, cond, then_t, else_t)
+    let n = dep_normalize(ctx, ite)
+    dep_term_to_i64(ctx, n) == 10
+}
+fn test_dep_norm_if_true() -> bool with Mut, Div, Panic {
+    var ctx = dep_context_new()
+    test_dep_norm_if_true_inner(&! ctx)
+}
+
+fn test_dep_norm_if_false_inner(ctx: &! DepContext) -> bool with Mut, Div, Panic {
+    // if false then 10 else 20 normalizes to 20
+    let cond = dep_term_bool(ctx, 0)
+    let then_t = dep_term_int(ctx, 10)
+    let else_t = dep_term_int(ctx, 20)
+    let ite = dep_term_if(ctx, cond, then_t, else_t)
+    let n = dep_normalize(ctx, ite)
+    dep_term_to_i64(ctx, n) == 20
+}
+fn test_dep_norm_if_false() -> bool with Mut, Div, Panic {
+    var ctx = dep_context_new()
+    test_dep_norm_if_false_inner(&! ctx)
+}
+
+fn test_dep_norm_let_inner(ctx: &! DepContext) -> bool with Mut, Div, Panic {
+    // let x = 5 in x + 3 normalizes to 8
+    let five = dep_term_int(ctx, 5)
+    let x = dep_term_var(ctx, 1)
+    let three = dep_term_int(ctx, 3)
+    let body = dep_term_add(ctx, x, three)
+    let lt = dep_term_let(ctx, 1, five, body)
+    let n = dep_normalize(ctx, lt)
+    dep_term_to_i64(ctx, n) == 8
+}
+fn test_dep_norm_let() -> bool with Mut, Div, Panic {
+    var ctx = dep_context_new()
+    test_dep_norm_let_inner(&! ctx)
+}
+
+fn test_dep_norm_nested_arith_inner(ctx: &! DepContext) -> bool with Mut, Div, Panic {
+    // (2 + 3) * (4 - 1) normalizes to 15
+    let two = dep_term_int(ctx, 2)
+    let three = dep_term_int(ctx, 3)
+    let four = dep_term_int(ctx, 4)
+    let one = dep_term_int(ctx, 1)
+    let sum = dep_term_add(ctx, two, three)
+    let diff = dep_term_sub(ctx, four, one)
+    let prod = dep_term_mul(ctx, sum, diff)
+    let n = dep_normalize(ctx, prod)
+    dep_term_to_i64(ctx, n) == 15
+}
+fn test_dep_norm_nested_arith() -> bool with Mut, Div, Panic {
+    var ctx = dep_context_new()
+    test_dep_norm_nested_arith_inner(&! ctx)
+}
+
+// ============================================================
+// Test Category 4: Unification (10 tests)
+// ============================================================
+
+fn test_dep_unify_same_int_inner(ctx: &! DepContext) -> bool with Mut, Div, Panic {
+    let a = dep_term_int(ctx, 42)
+    let b = dep_term_int(ctx, 42)
+    let r = dep_unify(ctx, a, b)
+    dep_unify_result_is_ok(r)
+}
+fn test_dep_unify_same_int() -> bool with Mut, Div, Panic {
+    var ctx = dep_context_new()
+    test_dep_unify_same_int_inner(&! ctx)
+}
+
+fn test_dep_unify_diff_int_inner(ctx: &! DepContext) -> bool with Mut, Div, Panic {
+    let a = dep_term_int(ctx, 42)
+    let b = dep_term_int(ctx, 43)
+    let r = dep_unify(ctx, a, b)
+    dep_unify_result_is_fail(r)
+}
+fn test_dep_unify_diff_int() -> bool with Mut, Div, Panic {
+    var ctx = dep_context_new()
+    test_dep_unify_diff_int_inner(&! ctx)
+}
+
+fn test_dep_unify_var_binds_inner(ctx: &! DepContext) -> bool with Mut, Div, Panic {
+    // Unifying x with 5 should succeed and record substitution
+    let x = dep_term_var(ctx, 1)
+    let five = dep_term_int(ctx, 5)
+    let old_subst = ctx.subst_count
+    let r = dep_unify(ctx, x, five)
+    if dep_unify_result_is_ok(r) == false { return false }
+    // Should have added one substitution
+    ctx.subst_count == old_subst + 1
+}
+fn test_dep_unify_var_binds() -> bool with Mut, Div, Panic {
+    var ctx = dep_context_new()
+    test_dep_unify_var_binds_inner(&! ctx)
+}
+
+fn test_dep_unify_var_right_inner(ctx: &! DepContext) -> bool with Mut, Div, Panic {
+    // Unifying 5 with x should also succeed
+    let five = dep_term_int(ctx, 5)
+    let x = dep_term_var(ctx, 2)
+    let r = dep_unify(ctx, five, x)
+    dep_unify_result_is_ok(r)
+}
+fn test_dep_unify_var_right() -> bool with Mut, Div, Panic {
+    var ctx = dep_context_new()
+    test_dep_unify_var_right_inner(&! ctx)
+}
+
+fn test_dep_unify_same_bool_inner(ctx: &! DepContext) -> bool with Mut, Div, Panic {
+    let a = dep_term_bool(ctx, 1)
+    let b = dep_term_bool(ctx, 1)
+    let r = dep_unify(ctx, a, b)
+    dep_unify_result_is_ok(r)
+}
+fn test_dep_unify_same_bool() -> bool with Mut, Div, Panic {
+    var ctx = dep_context_new()
+    test_dep_unify_same_bool_inner(&! ctx)
+}
+
+fn test_dep_unify_diff_kind_inner(ctx: &! DepContext) -> bool with Mut, Div, Panic {
+    // Int vs Bool should fail
+    let a = dep_term_int(ctx, 1)
+    let b = dep_term_bool(ctx, 1)
+    let r = dep_unify(ctx, a, b)
+    dep_unify_result_is_fail(r)
+}
+fn test_dep_unify_diff_kind() -> bool with Mut, Div, Panic {
+    var ctx = dep_context_new()
+    test_dep_unify_diff_kind_inner(&! ctx)
+}
+
+fn test_dep_unify_add_terms_inner(ctx: &! DepContext) -> bool with Mut, Div, Panic {
+    // (3 + 4) unifies with (3 + 4) — both normalize to 7
+    let a1 = dep_term_int(ctx, 3)
+    let a2 = dep_term_int(ctx, 4)
+    let sum_a = dep_term_add(ctx, a1, a2)
+    let b1 = dep_term_int(ctx, 3)
+    let b2 = dep_term_int(ctx, 4)
+    let sum_b = dep_term_add(ctx, b1, b2)
+    let r = dep_unify(ctx, sum_a, sum_b)
+    dep_unify_result_is_ok(r)
+}
+fn test_dep_unify_add_terms() -> bool with Mut, Div, Panic {
+    var ctx = dep_context_new()
+    test_dep_unify_add_terms_inner(&! ctx)
+}
+
+fn test_dep_unify_occurs_fail_inner(ctx: &! DepContext) -> bool with Mut, Div, Panic {
+    // Unifying x with (x + 1) should fail (occurs check)
+    let x = dep_term_var(ctx, 1)
+    let one = dep_term_int(ctx, 1)
+    let sum = dep_term_add(ctx, x, one)
+    let r = dep_unify(ctx, x, sum)
+    dep_unify_result_is_fail(r)
+}
+fn test_dep_unify_occurs_fail() -> bool with Mut, Div, Panic {
+    var ctx = dep_context_new()
+    test_dep_unify_occurs_fail_inner(&! ctx)
+}
+
+fn test_dep_unify_type_type_inner(ctx: &! DepContext) -> bool with Mut, Div, Panic {
+    let a = dep_term_type(ctx)
+    let b = dep_term_type(ctx)
+    let r = dep_unify(ctx, a, b)
+    dep_unify_result_is_ok(r)
+}
+fn test_dep_unify_type_type() -> bool with Mut, Div, Panic {
+    var ctx = dep_context_new()
+    test_dep_unify_type_type_inner(&! ctx)
+}
+
+fn test_dep_unify_normalized_inner(ctx: &! DepContext) -> bool with Mut, Div, Panic {
+    // (2 + 3) should unify with 5 (both normalize to 5)
+    let two = dep_term_int(ctx, 2)
+    let three = dep_term_int(ctx, 3)
+    let sum = dep_term_add(ctx, two, three)
+    let five = dep_term_int(ctx, 5)
+    let r = dep_unify(ctx, sum, five)
+    dep_unify_result_is_ok(r)
+}
+fn test_dep_unify_normalized() -> bool with Mut, Div, Panic {
+    var ctx = dep_context_new()
+    test_dep_unify_normalized_inner(&! ctx)
+}
+
+// ============================================================
+// Test Category 5: Pi Types (8 tests)
+// ============================================================
+
+fn test_dep_pi_construct_inner(ctx: &! DepContext) -> bool with Mut, Div, Panic {
+    let ty = dep_term_type(ctx)
+    let body = dep_term_type(ctx)
+    let pi = dep_term_pi(ctx, 1, ty, body)
+    if pi < 0 { return false }
+    let k = dep_get_kind(ctx, pi)
+    if dep_term_kind_is_pi(k) == false { return false }
+    if dep_get_var_id(ctx, pi) != 1 { return false }
+    if dep_get_left(ctx, pi) != ty { return false }
+    dep_get_right(ctx, pi) == body
+}
+fn test_dep_pi_construct() -> bool with Mut, Div, Panic {
+    var ctx = dep_context_new()
+    test_dep_pi_construct_inner(&! ctx)
+}
+
+fn test_dep_pi_elaborate_inner(ctx: &! DepContext) -> bool with Mut, Div, Panic {
+    let ty = dep_term_type(ctx)
+    let body = dep_term_type(ctx)
+    let pi = dep_elaborate_pi(ctx, 50, ty, body)
+    if pi < 0 { return false }
+    // Should have bound var 50 in the environment
+    let found = dep_lookup_var(ctx, 50)
+    found == ty
+}
+fn test_dep_pi_elaborate() -> bool with Mut, Div, Panic {
+    var ctx = dep_context_new()
+    test_dep_pi_elaborate_inner(&! ctx)
+}
+
+fn test_dep_pi_apply_inner(ctx: &! DepContext) -> bool with Mut, Div, Panic {
+    // Pi(x : Type, x) applied to Int(5) gives Int(5)
+    let ty = dep_term_type(ctx)
+    let x = dep_term_var(ctx, 1)
+    let pi = dep_term_pi(ctx, 1, ty, x)
+    let five = dep_term_int(ctx, 5)
+    let result = dep_apply_pi(ctx, pi, five)
+    // body[x := 5] = 5
+    dep_term_to_i64(ctx, result) == 5
+}
+fn test_dep_pi_apply() -> bool with Mut, Div, Panic {
+    var ctx = dep_context_new()
+    test_dep_pi_apply_inner(&! ctx)
+}
+
+fn test_dep_pi_subst_body_inner(ctx: &! DepContext) -> bool with Mut, Div, Panic {
+    // Pi(x : Type, x + 1) applied to 10 normalizes to 11
+    let ty = dep_term_type(ctx)
+    let x = dep_term_var(ctx, 1)
+    let one = dep_term_int(ctx, 1)
+    let body = dep_term_add(ctx, x, one)
+    let pi = dep_term_pi(ctx, 1, ty, body)
+    let ten = dep_term_int(ctx, 10)
+    let result = dep_apply_pi(ctx, pi, ten)
+    let normed = dep_normalize(ctx, result)
+    dep_term_to_i64(ctx, normed) == 11
+}
+fn test_dep_pi_subst_body() -> bool with Mut, Div, Panic {
+    var ctx = dep_context_new()
+    test_dep_pi_subst_body_inner(&! ctx)
+}
+
+fn test_dep_pi_well_formed_inner(ctx: &! DepContext) -> bool with Mut, Div, Panic {
+    let ty = dep_term_type(ctx)
+    let body = dep_term_type(ctx)
+    let pi = dep_term_pi(ctx, 1, ty, body)
+    dep_pi_well_formed(ctx, pi)
+}
+fn test_dep_pi_well_formed() -> bool with Mut, Div, Panic {
+    var ctx = dep_context_new()
+    test_dep_pi_well_formed_inner(&! ctx)
+}
+
+fn test_dep_pi_not_well_formed_inner(ctx: &! DepContext) -> bool with Mut, Div, Panic {
+    // A non-Pi term should fail well-formedness
+    let t = dep_term_int(ctx, 5)
+    dep_pi_well_formed(ctx, t) == false
+}
+fn test_dep_pi_not_well_formed() -> bool with Mut, Div, Panic {
+    var ctx = dep_context_new()
+    test_dep_pi_not_well_formed_inner(&! ctx)
+}
+
+fn test_dep_pi_unify_inner(ctx: &! DepContext) -> bool with Mut, Div, Panic {
+    // Two identical Pi types should unify
+    let ty = dep_term_type(ctx)
+    let body = dep_term_type(ctx)
+    let pi1 = dep_term_pi(ctx, 1, ty, body)
+    let pi2 = dep_term_pi(ctx, 1, ty, body)
+    let r = dep_unify(ctx, pi1, pi2)
+    dep_unify_result_is_ok(r)
+}
+fn test_dep_pi_unify() -> bool with Mut, Div, Panic {
+    var ctx = dep_context_new()
+    test_dep_pi_unify_inner(&! ctx)
+}
+
+fn test_dep_pi_is_value_inner(ctx: &! DepContext) -> bool with Mut, Div, Panic {
+    let ty = dep_term_type(ctx)
+    let body = dep_term_type(ctx)
+    let pi = dep_term_pi(ctx, 1, ty, body)
+    dep_is_value(ctx, pi)
+}
+fn test_dep_pi_is_value() -> bool with Mut, Div, Panic {
+    var ctx = dep_context_new()
+    test_dep_pi_is_value_inner(&! ctx)
+}
+
+// ============================================================
+// Test Category 6: Sigma Types (6 tests)
+// ============================================================
+
+fn test_dep_sigma_construct_inner(ctx: &! DepContext) -> bool with Mut, Div, Panic {
+    let ty = dep_term_type(ctx)
+    let body = dep_term_type(ctx)
+    let sig = dep_term_sigma(ctx, 1, ty, body)
+    if sig < 0 { return false }
+    let k = dep_get_kind(ctx, sig)
+    if dep_term_kind_is_sigma(k) == false { return false }
+    if dep_get_var_id(ctx, sig) != 1 { return false }
+    if dep_get_left(ctx, sig) != ty { return false }
+    dep_get_right(ctx, sig) == body
+}
+fn test_dep_sigma_construct() -> bool with Mut, Div, Panic {
+    var ctx = dep_context_new()
+    test_dep_sigma_construct_inner(&! ctx)
+}
+
+fn test_dep_sigma_elaborate_inner(ctx: &! DepContext) -> bool with Mut, Div, Panic {
+    let ty = dep_term_type(ctx)
+    let body = dep_term_type(ctx)
+    let sig = dep_elaborate_sigma(ctx, 60, ty, body)
+    if sig < 0 { return false }
+    let found = dep_lookup_var(ctx, 60)
+    found == ty
+}
+fn test_dep_sigma_elaborate() -> bool with Mut, Div, Panic {
+    var ctx = dep_context_new()
+    test_dep_sigma_elaborate_inner(&! ctx)
+}
+
+fn test_dep_sigma_well_formed_inner(ctx: &! DepContext) -> bool with Mut, Div, Panic {
+    let ty = dep_term_type(ctx)
+    let body = dep_term_type(ctx)
+    let sig = dep_term_sigma(ctx, 1, ty, body)
+    dep_sigma_well_formed(ctx, sig)
+}
+fn test_dep_sigma_well_formed() -> bool with Mut, Div, Panic {
+    var ctx = dep_context_new()
+    test_dep_sigma_well_formed_inner(&! ctx)
+}
+
+fn test_dep_sigma_not_well_formed_inner(ctx: &! DepContext) -> bool with Mut, Div, Panic {
+    let t = dep_term_int(ctx, 5)
+    dep_sigma_well_formed(ctx, t) == false
+}
+fn test_dep_sigma_not_well_formed() -> bool with Mut, Div, Panic {
+    var ctx = dep_context_new()
+    test_dep_sigma_not_well_formed_inner(&! ctx)
+}
+
+fn test_dep_sigma_fst_inner(ctx: &! DepContext) -> bool with Mut, Div, Panic {
+    // fst of a Sigma (pair) should extract fst type
+    let fst_ty = dep_term_int(ctx, 3)
+    let snd_ty = dep_term_int(ctx, 7)
+    let pair = dep_term_sigma(ctx, 1, fst_ty, snd_ty)
+    let proj = dep_term_fst(ctx, pair)
+    let normed = dep_normalize(ctx, proj)
+    // fst of (3, 7) is 3
+    dep_term_to_i64(ctx, normed) == 3
+}
+fn test_dep_sigma_fst() -> bool with Mut, Div, Panic {
+    var ctx = dep_context_new()
+    test_dep_sigma_fst_inner(&! ctx)
+}
+
+fn test_dep_sigma_snd_inner(ctx: &! DepContext) -> bool with Mut, Div, Panic {
+    // snd of a Sigma (pair) should extract snd type
+    let fst_ty = dep_term_int(ctx, 3)
+    let snd_ty = dep_term_int(ctx, 7)
+    let pair = dep_term_sigma(ctx, 1, fst_ty, snd_ty)
+    let proj = dep_term_snd(ctx, pair)
+    let normed = dep_normalize(ctx, proj)
+    // snd of (3, 7) is 7
+    dep_term_to_i64(ctx, normed) == 7
+}
+fn test_dep_sigma_snd() -> bool with Mut, Div, Panic {
+    var ctx = dep_context_new()
+    test_dep_sigma_snd_inner(&! ctx)
+}
+
+// ============================================================
+// Test Category 7: Constraints (8 tests)
+// ============================================================
+
+fn test_dep_constraint_equal_ok_inner(ctx: &! DepContext) -> bool with Mut, Div, Panic {
+    let a = dep_term_int(ctx, 5)
+    let b = dep_term_int(ctx, 5)
+    dep_add_constraint(ctx, DepConstraintKind::ConEqual, a, b, 1)
+    dep_check_constraints(ctx)
+}
+fn test_dep_constraint_equal_ok() -> bool with Mut, Div, Panic {
+    var ctx = dep_context_new()
+    test_dep_constraint_equal_ok_inner(&! ctx)
+}
+
+fn test_dep_constraint_equal_fail_inner(ctx: &! DepContext) -> bool with Mut, Div, Panic {
+    let a = dep_term_int(ctx, 5)
+    let b = dep_term_int(ctx, 6)
+    dep_add_constraint(ctx, DepConstraintKind::ConEqual, a, b, 1)
+    dep_check_constraints(ctx) == false
+}
+fn test_dep_constraint_equal_fail() -> bool with Mut, Div, Panic {
+    var ctx = dep_context_new()
+    test_dep_constraint_equal_fail_inner(&! ctx)
+}
+
+fn test_dep_constraint_less_than_inner(ctx: &! DepContext) -> bool with Mut, Div, Panic {
+    let a = dep_term_int(ctx, 3)
+    let b = dep_term_int(ctx, 5)
+    dep_add_constraint(ctx, DepConstraintKind::ConLessThan, a, b, 1)
+    dep_check_constraints(ctx)
+}
+fn test_dep_constraint_less_than() -> bool with Mut, Div, Panic {
+    var ctx = dep_context_new()
+    test_dep_constraint_less_than_inner(&! ctx)
+}
+
+fn test_dep_constraint_less_than_fail_inner(ctx: &! DepContext) -> bool with Mut, Div, Panic {
+    let a = dep_term_int(ctx, 5)
+    let b = dep_term_int(ctx, 3)
+    dep_add_constraint(ctx, DepConstraintKind::ConLessThan, a, b, 1)
+    dep_check_constraints(ctx) == false
+}
+fn test_dep_constraint_less_than_fail() -> bool with Mut, Div, Panic {
+    var ctx = dep_context_new()
+    test_dep_constraint_less_than_fail_inner(&! ctx)
+}
+
+fn test_dep_constraint_non_zero_inner(ctx: &! DepContext) -> bool with Mut, Div, Panic {
+    let a = dep_term_int(ctx, 7)
+    dep_add_constraint(ctx, DepConstraintKind::ConNonZero, a, a, 1)
+    dep_check_constraints(ctx)
+}
+fn test_dep_constraint_non_zero() -> bool with Mut, Div, Panic {
+    var ctx = dep_context_new()
+    test_dep_constraint_non_zero_inner(&! ctx)
+}
+
+fn test_dep_constraint_non_zero_fail_inner(ctx: &! DepContext) -> bool with Mut, Div, Panic {
+    let a = dep_term_int(ctx, 0)
+    dep_add_constraint(ctx, DepConstraintKind::ConNonZero, a, a, 1)
+    dep_check_constraints(ctx) == false
+}
+fn test_dep_constraint_non_zero_fail() -> bool with Mut, Div, Panic {
+    var ctx = dep_context_new()
+    test_dep_constraint_non_zero_fail_inner(&! ctx)
+}
+
+fn test_dep_constraint_positive_inner(ctx: &! DepContext) -> bool with Mut, Div, Panic {
+    let a = dep_term_int(ctx, 10)
+    dep_add_constraint(ctx, DepConstraintKind::ConPositive, a, a, 1)
+    dep_check_constraints(ctx)
+}
+fn test_dep_constraint_positive() -> bool with Mut, Div, Panic {
+    var ctx = dep_context_new()
+    test_dep_constraint_positive_inner(&! ctx)
+}
+
+fn test_dep_constraint_greater_eq_inner(ctx: &! DepContext) -> bool with Mut, Div, Panic {
+    let a = dep_term_int(ctx, 5)
+    let b = dep_term_int(ctx, 5)
+    dep_add_constraint(ctx, DepConstraintKind::ConGreaterEq, a, b, 1)
+    if dep_check_constraints(ctx) == false { return false }
+    // Also check 6 >= 5
+    dep_clear_constraints(ctx)
+    let c = dep_term_int(ctx, 6)
+    let d = dep_term_int(ctx, 5)
+    dep_add_constraint(ctx, DepConstraintKind::ConGreaterEq, c, d, 2)
+    dep_check_constraints(ctx)
+}
+fn test_dep_constraint_greater_eq() -> bool with Mut, Div, Panic {
+    var ctx = dep_context_new()
+    test_dep_constraint_greater_eq_inner(&! ctx)
+}
+
+// ============================================================
+// Test Category 8: Integration (6 tests)
+// ============================================================
+
+fn test_dep_elaborate_normalize_inner(ctx: &! DepContext) -> bool with Mut, Div, Panic {
+    // Elaborate a Pi type, then apply it, then normalize
+    // Pi(n : Type, n + 1) applied to 10 -> 11
+    let ty = dep_term_type(ctx)
+    let n = dep_term_var(ctx, 1)
+    let one = dep_term_int(ctx, 1)
+    let body = dep_term_add(ctx, n, one)
+    let pi = dep_elaborate_pi(ctx, 1, ty, body)
+    let ten = dep_term_int(ctx, 10)
+    let applied = dep_apply_pi(ctx, pi, ten)
+    let normed = dep_normalize(ctx, applied)
+    dep_term_to_i64(ctx, normed) == 11
+}
+fn test_dep_elaborate_normalize() -> bool with Mut, Div, Panic {
+    var ctx = dep_context_new()
+    test_dep_elaborate_normalize_inner(&! ctx)
+}
+
+fn test_dep_unify_constraint_inner(ctx: &! DepContext) -> bool with Mut, Div, Panic {
+    // Unify (x) with (3 + 4), then check constraint that result == 7
+    let x = dep_term_var(ctx, 1)
+    let three = dep_term_int(ctx, 3)
+    let four = dep_term_int(ctx, 4)
+    let sum = dep_term_add(ctx, three, four)
+    let r = dep_unify(ctx, x, sum)
+    if dep_unify_result_is_ok(r) == false { return false }
+    // Now apply substitution to x
+    let resolved = dep_apply_subst(ctx, x)
+    let normed = dep_normalize(ctx, resolved)
+    // Check that the result is 7
+    let seven = dep_term_int(ctx, 7)
+    dep_add_constraint(ctx, DepConstraintKind::ConEqual, normed, seven, 1)
+    dep_check_constraints(ctx)
+}
+fn test_dep_unify_constraint() -> bool with Mut, Div, Panic {
+    var ctx = dep_context_new()
+    test_dep_unify_constraint_inner(&! ctx)
+}
+
+fn test_dep_full_pipeline_inner(ctx: &! DepContext) -> bool with Mut, Div, Panic {
+    // Build: (\f. \x. f(x))((\n. n * 2))(5) -> 10
+    // Inner function: \n. n * 2
+    let n = dep_term_var(ctx, 1)
+    let two = dep_term_int(ctx, 2)
+    let body_inner = dep_term_mul(ctx, n, two)
+    let double = dep_term_lam(ctx, 1, body_inner)
+
+    // Outer function: \f. \x. f(x)
+    let f = dep_term_var(ctx, 2)
+    let x = dep_term_var(ctx, 3)
+    let app_fx = dep_term_app(ctx, f, x)
+    let lam_x = dep_term_lam(ctx, 3, app_fx)
+    let apply_fn = dep_term_lam(ctx, 2, lam_x)
+
+    // apply_fn(double)
+    let step1 = dep_term_app(ctx, apply_fn, double)
+    // (apply_fn(double))(5)
+    let five = dep_term_int(ctx, 5)
+    let step2 = dep_term_app(ctx, step1, five)
+
+    let normed = dep_normalize(ctx, step2)
+    dep_term_to_i64(ctx, normed) == 10
+}
+fn test_dep_full_pipeline() -> bool with Mut, Div, Panic {
+    var ctx = dep_context_new()
+    test_dep_full_pipeline_inner(&! ctx)
+}
+
+fn test_dep_occurs_check_positive_inner(ctx: &! DepContext) -> bool with Mut, Div, Panic {
+    // x + 1 contains x
+    let x = dep_term_var(ctx, 1)
+    let one = dep_term_int(ctx, 1)
+    let sum = dep_term_add(ctx, x, one)
+    dep_occurs_check(ctx, 1, sum)
+}
+fn test_dep_occurs_check_positive() -> bool with Mut, Div, Panic {
+    var ctx = dep_context_new()
+    test_dep_occurs_check_positive_inner(&! ctx)
+}
+
+fn test_dep_occurs_check_negative_inner(ctx: &! DepContext) -> bool with Mut, Div, Panic {
+    // y + 1 does not contain x
+    let y = dep_term_var(ctx, 2)
+    let one = dep_term_int(ctx, 1)
+    let sum = dep_term_add(ctx, y, one)
+    dep_occurs_check(ctx, 1, sum) == false
+}
+fn test_dep_occurs_check_negative() -> bool with Mut, Div, Panic {
+    var ctx = dep_context_new()
+    test_dep_occurs_check_negative_inner(&! ctx)
+}
+
+fn test_dep_term_size_inner(ctx: &! DepContext) -> bool with Mut, Div, Panic {
+    // Term: (3 + 5) has 3 nodes
+    let a = dep_term_int(ctx, 3)
+    let b = dep_term_int(ctx, 5)
+    let sum = dep_term_add(ctx, a, b)
+    let sz = dep_term_size(ctx, sum)
+    sz == 3
+}
+fn test_dep_term_size() -> bool with Mut, Div, Panic {
+    var ctx = dep_context_new()
+    test_dep_term_size_inner(&! ctx)
+}
+
+// ============================================================
+// Test Runner — 70 tests
+// ============================================================
+
+fn dep_run_tests() -> i64 with Mut, Div, Panic {
+    var passed: i64 = 0
+    var failed: i64 = 0
+
+    // --- Term construction (10 tests) ---
+    if test_dep_term_int() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_dep_term_int_negative() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_dep_term_bool() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_dep_term_var() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_dep_term_add() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_dep_term_mul() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_dep_term_app() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_dep_term_lam() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_dep_term_type() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_dep_term_if() { passed = passed + 1 } else { failed = failed + 1 }
+
+    // --- Substitution (10 tests) ---
+    if test_dep_subst_var_match() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_dep_subst_var_no_match() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_dep_subst_int_noop() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_dep_subst_in_add() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_dep_subst_in_mul() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_dep_subst_nested() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_dep_subst_lam_shadow() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_dep_subst_lam_no_shadow() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_dep_subst_pi_shadow() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_dep_subst_if() { passed = passed + 1 } else { failed = failed + 1 }
+
+    // --- Normalization (12 tests) ---
+    if test_dep_norm_int() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_dep_norm_add() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_dep_norm_sub() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_dep_norm_mul() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_dep_norm_div() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_dep_norm_div_by_zero() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_dep_norm_mod() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_dep_norm_beta() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_dep_norm_if_true() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_dep_norm_if_false() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_dep_norm_let() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_dep_norm_nested_arith() { passed = passed + 1 } else { failed = failed + 1 }
+
+    // --- Unification (10 tests) ---
+    if test_dep_unify_same_int() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_dep_unify_diff_int() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_dep_unify_var_binds() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_dep_unify_var_right() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_dep_unify_same_bool() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_dep_unify_diff_kind() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_dep_unify_add_terms() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_dep_unify_occurs_fail() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_dep_unify_type_type() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_dep_unify_normalized() { passed = passed + 1 } else { failed = failed + 1 }
+
+    // --- Pi types (8 tests) ---
+    if test_dep_pi_construct() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_dep_pi_elaborate() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_dep_pi_apply() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_dep_pi_subst_body() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_dep_pi_well_formed() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_dep_pi_not_well_formed() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_dep_pi_unify() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_dep_pi_is_value() { passed = passed + 1 } else { failed = failed + 1 }
+
+    // --- Sigma types (6 tests) ---
+    if test_dep_sigma_construct() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_dep_sigma_elaborate() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_dep_sigma_well_formed() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_dep_sigma_not_well_formed() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_dep_sigma_fst() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_dep_sigma_snd() { passed = passed + 1 } else { failed = failed + 1 }
+
+    // --- Constraints (8 tests) ---
+    if test_dep_constraint_equal_ok() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_dep_constraint_equal_fail() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_dep_constraint_less_than() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_dep_constraint_less_than_fail() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_dep_constraint_non_zero() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_dep_constraint_non_zero_fail() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_dep_constraint_positive() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_dep_constraint_greater_eq() { passed = passed + 1 } else { failed = failed + 1 }
+
+    // --- Integration (6 tests) ---
+    if test_dep_elaborate_normalize() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_dep_unify_constraint() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_dep_full_pipeline() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_dep_occurs_check_positive() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_dep_occurs_check_negative() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_dep_term_size() { passed = passed + 1 } else { failed = failed + 1 }
+
+    if failed > 0 {
+        return 0 - failed
+    }
+    passed
+}

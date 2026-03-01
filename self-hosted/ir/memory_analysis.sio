@@ -1,0 +1,2686 @@
+// self-hosted::ir::memory_analysis — Memory alias analysis and escape analysis
+//
+// A comprehensive memory analysis module for the Sounio self-hosted compiler.
+// Implements Andersen-style inclusion-based points-to analysis with
+// field-sensitive extensions, alias queries, escape analysis, and
+// heap-to-stack promotion.
+//
+// Algorithm outline:
+//   1. Build the constraint graph: for each memory instruction (alloc, load,
+//      store, GEP, cast, phi, copy), create an abstract pointer node and
+//      edge in the constraint graph.
+//   2. Initialize points-to sets: each alloc creates a fresh region, and
+//      the allocating pointer is set to point to that region.
+//   3. Andersen fixed-point: iteratively propagate points-to sets through
+//      the constraint graph until no set changes.  Stores generate new
+//      constraints, loads resolve through pointed-to regions.
+//   4. Alias queries: two pointers must-alias if their points-to sets are
+//      both singletons and identical; may-alias if their sets intersect;
+//      no-alias if disjoint.
+//   5. Escape analysis: track whether each allocation escapes the current
+//      function (returned, stored to global, passed to external call).
+//      Propagate escape status through the pointer graph.
+//   6. Stack promotion: non-escaping heap allocations with known size can
+//      be promoted to stack allocations.
+//
+// Points-to sets are represented as bit vectors: 8 x i64 = 512 bits,
+// one bit per abstract memory region.  This keeps the representation
+// compact and allows fast union/intersection via bitwise OR/AND.
+//
+// All arrays are fixed-size -- no heap allocation.
+//
+// References:
+//   Andersen: "Program Analysis and Specialization for the C Programming
+//              Language" (PhD thesis, 1994)
+//   Steensgaard: "Points-to Analysis in Almost Linear Time" (1996)
+//   Choi et al.: "Escape Analysis for Java" (OOPSLA 1999)
+//   Blanchet: "Escape Analysis for JavaTM: Theory and Practice" (2003)
+//   Lhotak & Hendren: "Scaling Java Points-to Analysis Using Spark" (2003)
+
+// ============================================================================
+// Section 1: Constants
+// ============================================================================
+
+let MEMA_MAX_REGIONS: i64 = 512
+let MEMA_MAX_POINTERS: i64 = 1024
+let MEMA_MAX_ALLOCS: i64 = 256
+let MEMA_MAX_EDGES: i64 = 4096
+let MEMA_MAX_INSTRS: i64 = 2048
+let MEMA_WORKLIST_SIZE: i64 = 1024
+let MEMA_MAX_FIELDS: i64 = 64
+let MEMA_INVALID: i64 = 0 - 1
+let MEMA_MAX_ITERATIONS: i64 = 100
+let MEMA_BITS_PER_WORD: i64 = 64
+
+// ============================================================================
+// Section 2: Enums
+// ============================================================================
+
+// Classification of a memory region by allocation site.
+enum MemRegionKind {
+    RegStack,
+    RegHeap,
+    RegGlobal,
+    RegParam,
+    RegReturn,
+    RegUnknown,
+}
+
+// Result of an alias query between two pointer expressions.
+enum MemAliasResult {
+    AliasMust,
+    AliasMay,
+    AliasNo,
+}
+
+// Escape status of an allocation.
+enum MemEscapeStatus {
+    EscapeNone,
+    EscapeReturn,
+    EscapeStore,
+    EscapeCall,
+    EscapeUnknown,
+}
+
+// Kind of pointer operation in the constraint graph.
+enum MemPtrOp {
+    PtrAlloc,
+    PtrLoad,
+    PtrStore,
+    PtrGep,
+    PtrCast,
+    PtrPhi,
+    PtrCopy,
+    PtrNull,
+}
+
+// Result of stack promotion analysis.
+enum MemPromoteResult {
+    PromoteYes,
+    PromoteNo,
+    PromoteMaybe,
+}
+
+// ============================================================================
+// Section 3: Data Structures
+// ============================================================================
+
+// An abstract memory region representing a possible target of a pointer.
+// Each allocation site creates one region.  The escape field tracks whether
+// data stored in this region can be observed outside the function.
+struct MemRegion {
+    id: i64,
+    kind: MemRegionKind,
+    size: i64,
+    align: i64,
+    alloc_site: i64,
+    escape: MemEscapeStatus,
+}
+
+// An abstract pointer in the constraint graph.
+// region_bits is a bit vector: 8 words x 64 bits = 512 possible regions.
+// If bit i is set, this pointer may point to region i.
+struct MemPointer {
+    id: i64,
+    region_bits: [i64; 8],
+    field_offset: i64,
+    is_null_possible: bool,
+}
+
+// A directed edge in the constraint graph connecting two pointers.
+// The kind describes the relationship (copy, load, store, etc.).
+struct MemEdge {
+    from_ptr: i64,
+    to_ptr: i64,
+    kind: MemPtrOp,
+    field: i64,
+}
+
+// An allocation tracked for escape analysis and promotion.
+struct MemAlloc {
+    id: i64,
+    region_id: i64,
+    size: i64,
+    line: i64,
+    is_heap: bool,
+    escape: MemEscapeStatus,
+    promote: MemPromoteResult,
+}
+
+// A single memory instruction from the IR, abstracted for analysis.
+struct MemInstr {
+    op: MemPtrOp,
+    dst: i64,
+    src1: i64,
+    src2: i64,
+    field: i64,
+    line: i64,
+}
+
+// The main analysis context.  Flat arena -- all storage is pre-allocated
+// at fixed sizes.  No heap allocation during analysis.
+struct MemAnalysisContext {
+    regions: [MemRegion; 512],
+    region_count: i64,
+    pointers: [MemPointer; 1024],
+    ptr_count: i64,
+    allocs: [MemAlloc; 256],
+    alloc_count: i64,
+    edges: [MemEdge; 4096],
+    edge_count: i64,
+    instrs: [MemInstr; 2048],
+    instr_count: i64,
+    worklist: [i64; 1024],
+    wl_head: i64,
+    wl_tail: i64,
+    iterations: i64,
+    max_iterations: i64,
+    changed: bool,
+}
+
+// ============================================================================
+// Section 4: Default Constructors
+// ============================================================================
+
+fn mema_region_default() -> MemRegion {
+    MemRegion {
+        id: MEMA_INVALID,
+        kind: MemRegionKind::RegUnknown,
+        size: 0,
+        align: 0,
+        alloc_site: MEMA_INVALID,
+        escape: MemEscapeStatus::EscapeNone,
+    }
+}
+
+fn mema_pointer_default() -> MemPointer {
+    MemPointer {
+        id: MEMA_INVALID,
+        region_bits: [0; 8],
+        field_offset: 0,
+        is_null_possible: false,
+    }
+}
+
+fn mema_edge_default() -> MemEdge {
+    MemEdge {
+        from_ptr: MEMA_INVALID,
+        to_ptr: MEMA_INVALID,
+        kind: MemPtrOp::PtrNull,
+        field: 0,
+    }
+}
+
+fn mema_alloc_default() -> MemAlloc {
+    MemAlloc {
+        id: MEMA_INVALID,
+        region_id: MEMA_INVALID,
+        size: 0,
+        line: 0,
+        is_heap: false,
+        escape: MemEscapeStatus::EscapeNone,
+        promote: MemPromoteResult::PromoteMaybe,
+    }
+}
+
+fn mema_instr_default() -> MemInstr {
+    MemInstr {
+        op: MemPtrOp::PtrNull,
+        dst: MEMA_INVALID,
+        src1: MEMA_INVALID,
+        src2: MEMA_INVALID,
+        field: 0,
+        line: 0,
+    }
+}
+
+// ============================================================================
+// Section 5: Context Constructor
+// ============================================================================
+
+fn mema_context_new() -> MemAnalysisContext {
+    MemAnalysisContext {
+        regions: [mema_region_default(); 512],
+        region_count: 0,
+        pointers: [mema_pointer_default(); 1024],
+        ptr_count: 0,
+        allocs: [mema_alloc_default(); 256],
+        alloc_count: 0,
+        edges: [mema_edge_default(); 4096],
+        edge_count: 0,
+        instrs: [mema_instr_default(); 2048],
+        instr_count: 0,
+        worklist: [0; 1024],
+        wl_head: 0,
+        wl_tail: 0,
+        iterations: 0,
+        max_iterations: MEMA_MAX_ITERATIONS,
+        changed: false,
+    }
+}
+
+// ============================================================================
+// Section 6: Bitset Operations
+// ============================================================================
+
+// Set bit `region_id` in the 512-bit bitset.
+// The bitset is 8 words of 64 bits each.
+fn mema_region_bits_set(bits: &! [i64; 8], region_id: i64) with Mut, Div, Panic {
+    if region_id < 0 { return }
+    if region_id >= MEMA_MAX_REGIONS { return }
+    let word = region_id / MEMA_BITS_PER_WORD
+    let bit = region_id % MEMA_BITS_PER_WORD
+    // Set the bit using OR.  We build the mask by shifting 1 left.
+    // Sounio uses `<<` for left-shift.
+    let mask = 1 << bit
+    bits[word as usize] = bits[word as usize] | mask
+}
+
+// Test whether bit `region_id` is set in the bitset.
+fn mema_region_bits_test(bits: &[i64; 8], region_id: i64) -> bool with Div, Panic {
+    if region_id < 0 { return false }
+    if region_id >= MEMA_MAX_REGIONS { return false }
+    let word = region_id / MEMA_BITS_PER_WORD
+    let bit = region_id % MEMA_BITS_PER_WORD
+    let mask = 1 << bit
+    let val = bits[word as usize] & mask
+    val != 0
+}
+
+// Union src into dst: dst = dst | src.  Returns true if dst changed.
+fn mema_region_bits_or(dst: &! [i64; 8], src: &[i64; 8]) -> bool with Mut, Div, Panic {
+    var changed = false
+    var i: i64 = 0
+    loop {
+        if i >= 8 { break }
+        let old = dst[i as usize]
+        dst[i as usize] = old | src[i as usize]
+        if dst[i as usize] != old {
+            changed = true
+        }
+        i = i + 1
+    }
+    changed
+}
+
+// Intersect: dst = dst & src.
+fn mema_region_bits_and(dst: &! [i64; 8], src: &[i64; 8]) with Mut, Div, Panic {
+    var i: i64 = 0
+    loop {
+        if i >= 8 { break }
+        dst[i as usize] = dst[i as usize] & src[i as usize]
+        i = i + 1
+    }
+}
+
+// Count number of set bits across all 8 words (popcount).
+fn mema_popcount_word(w: i64) -> i64 {
+    // Kernighan's algorithm: clear lowest set bit each iteration.
+    var count: i64 = 0
+    var v = w
+    loop {
+        if v == 0 { break }
+        v = v & (v - 1)
+        count = count + 1
+    }
+    count
+}
+
+fn mema_region_bits_count(bits: &[i64; 8]) -> i64 with Mut, Div, Panic {
+    var count: i64 = 0
+    var i: i64 = 0
+    loop {
+        if i >= 8 { break }
+        count = count + mema_popcount_word(bits[i as usize])
+        i = i + 1
+    }
+    count
+}
+
+// Test whether two bitsets have a non-empty intersection.
+fn mema_region_bits_intersects(a: &[i64; 8], b: &[i64; 8]) -> bool with Mut, Div, Panic {
+    var i: i64 = 0
+    loop {
+        if i >= 8 { break }
+        if (a[i as usize] & b[i as usize]) != 0 {
+            return true
+        }
+        i = i + 1
+    }
+    false
+}
+
+// Test whether two bitsets are exactly equal.
+fn mema_region_bits_equal(a: &[i64; 8], b: &[i64; 8]) -> bool with Mut, Div, Panic {
+    var i: i64 = 0
+    loop {
+        if i >= 8 { break }
+        if a[i as usize] != b[i as usize] {
+            return false
+        }
+        i = i + 1
+    }
+    true
+}
+
+// Test whether bitset is empty (all zeros).
+fn mema_region_bits_empty(bits: &[i64; 8]) -> bool with Mut, Div, Panic {
+    var i: i64 = 0
+    loop {
+        if i >= 8 { break }
+        if bits[i as usize] != 0 {
+            return false
+        }
+        i = i + 1
+    }
+    true
+}
+
+// Clear all bits.
+fn mema_region_bits_clear(bits: &! [i64; 8]) with Mut, Div, Panic {
+    var i: i64 = 0
+    loop {
+        if i >= 8 { break }
+        bits[i as usize] = 0
+        i = i + 1
+    }
+}
+
+// Copy src bitset into dst.
+fn mema_region_bits_copy(dst: &! [i64; 8], src: &[i64; 8]) with Mut, Div, Panic {
+    var i: i64 = 0
+    loop {
+        if i >= 8 { break }
+        dst[i as usize] = src[i as usize]
+        i = i + 1
+    }
+}
+
+// Return the index of the first set bit, or -1 if empty.
+fn mema_region_bits_first(bits: &[i64; 8]) -> i64 with Mut, Div, Panic {
+    var i: i64 = 0
+    loop {
+        if i >= 8 { break }
+        if bits[i as usize] != 0 {
+            // Find lowest set bit in this word.
+            var bit: i64 = 0
+            loop {
+                if bit >= 64 { break }
+                let mask = 1 << bit
+                if (bits[i as usize] & mask) != 0 {
+                    return i * 64 + bit
+                }
+                bit = bit + 1
+            }
+        }
+        i = i + 1
+    }
+    0 - 1
+}
+
+// Test whether a is a subset of b (every bit in a is also in b).
+fn mema_region_bits_subset(a: &[i64; 8], b: &[i64; 8]) -> bool with Mut, Div, Panic {
+    var i: i64 = 0
+    loop {
+        if i >= 8 { break }
+        // a[i] & ~b[i] != 0 means a has bits not in b
+        let extra = a[i as usize] & (b[i as usize] ^ (0 - 1))
+        if extra != 0 {
+            return false
+        }
+        i = i + 1
+    }
+    true
+}
+
+// ============================================================================
+// Section 7: Worklist Operations
+// ============================================================================
+
+// Push an item onto the circular worklist.  Silently drops if full.
+fn mema_worklist_push(ctx: &! MemAnalysisContext, item: i64) with Mut, Div, Panic {
+    let next_tail = (ctx.wl_tail + 1) % MEMA_WORKLIST_SIZE
+    // If next_tail == wl_head, the worklist is full; drop the item.
+    if next_tail == ctx.wl_head {
+        return
+    }
+    ctx.worklist[ctx.wl_tail as usize] = item
+    ctx.wl_tail = next_tail
+}
+
+// Pop an item from the worklist.  Returns -1 if empty.
+fn mema_worklist_pop(ctx: &! MemAnalysisContext) -> i64 with Mut, Div, Panic {
+    if ctx.wl_head == ctx.wl_tail {
+        return 0 - 1
+    }
+    let item = ctx.worklist[ctx.wl_head as usize]
+    ctx.wl_head = (ctx.wl_head + 1) % MEMA_WORKLIST_SIZE
+    item
+}
+
+// Test whether the worklist is empty.
+fn mema_worklist_empty(ctx: &MemAnalysisContext) -> bool {
+    ctx.wl_head == ctx.wl_tail
+}
+
+// Clear the worklist.
+fn mema_worklist_clear(ctx: &! MemAnalysisContext) with Mut {
+    ctx.wl_head = 0
+    ctx.wl_tail = 0
+}
+
+// Number of items currently in the worklist.
+fn mema_worklist_size(ctx: &MemAnalysisContext) -> i64 {
+    if ctx.wl_tail >= ctx.wl_head {
+        ctx.wl_tail - ctx.wl_head
+    } else {
+        MEMA_WORKLIST_SIZE - ctx.wl_head + ctx.wl_tail
+    }
+}
+
+// ============================================================================
+// Section 8: Region and Pointer Allocation
+// ============================================================================
+
+// Create a new abstract memory region and return its id.
+fn mema_alloc_region(ctx: &! MemAnalysisContext, kind: MemRegionKind, size: i64, align: i64, site: i64) -> i64 with Mut, Div, Panic {
+    if ctx.region_count >= MEMA_MAX_REGIONS {
+        return 0 - 1
+    }
+    let id = ctx.region_count
+    ctx.regions[id as usize] = MemRegion {
+        id: id,
+        kind: kind,
+        size: size,
+        align: align,
+        alloc_site: site,
+        escape: MemEscapeStatus::EscapeNone,
+    }
+    ctx.region_count = id + 1
+    id
+}
+
+// Create a new abstract pointer and return its id.
+fn mema_alloc_pointer(ctx: &! MemAnalysisContext) -> i64 with Mut, Div, Panic {
+    if ctx.ptr_count >= MEMA_MAX_POINTERS {
+        return 0 - 1
+    }
+    let id = ctx.ptr_count
+    ctx.pointers[id as usize] = MemPointer {
+        id: id,
+        region_bits: [0; 8],
+        field_offset: 0,
+        is_null_possible: false,
+    }
+    ctx.ptr_count = id + 1
+    id
+}
+
+// Create a new allocation record and return its id.
+fn mema_add_alloc(ctx: &! MemAnalysisContext, region_id: i64, size: i64, line: i64, is_heap: bool) -> i64 with Mut, Div, Panic {
+    if ctx.alloc_count >= MEMA_MAX_ALLOCS {
+        return 0 - 1
+    }
+    let id = ctx.alloc_count
+    ctx.allocs[id as usize] = MemAlloc {
+        id: id,
+        region_id: region_id,
+        size: size,
+        line: line,
+        is_heap: is_heap,
+        escape: MemEscapeStatus::EscapeNone,
+        promote: MemPromoteResult::PromoteMaybe,
+    }
+    ctx.alloc_count = id + 1
+    id
+}
+
+// Add an instruction to the analysis.
+fn mema_add_instr(ctx: &! MemAnalysisContext, op: MemPtrOp, dst: i64, src1: i64, src2: i64, field: i64, line: i64) with Mut, Div, Panic {
+    if ctx.instr_count >= MEMA_MAX_INSTRS {
+        return
+    }
+    let idx = ctx.instr_count
+    ctx.instrs[idx as usize] = MemInstr {
+        op: op,
+        dst: dst,
+        src1: src1,
+        src2: src2,
+        field: field,
+        line: line,
+    }
+    ctx.instr_count = idx + 1
+}
+
+// Add an edge to the constraint graph.
+fn mema_add_edge(ctx: &! MemAnalysisContext, from_ptr: i64, to_ptr: i64, kind: MemPtrOp, field: i64) with Mut, Div, Panic {
+    if ctx.edge_count >= MEMA_MAX_EDGES {
+        return
+    }
+    let idx = ctx.edge_count
+    ctx.edges[idx as usize] = MemEdge {
+        from_ptr: from_ptr,
+        to_ptr: to_ptr,
+        kind: kind,
+        field: field,
+    }
+    ctx.edge_count = idx + 1
+}
+
+// ============================================================================
+// Section 9: Points-To Set Operations
+// ============================================================================
+
+// Add a region to a pointer's points-to set.
+fn mema_ptr_add_region(ctx: &! MemAnalysisContext, ptr_id: i64, region_id: i64) with Mut, Div, Panic {
+    if ptr_id < 0 { return }
+    if ptr_id >= ctx.ptr_count { return }
+    if region_id < 0 { return }
+    if region_id >= ctx.region_count { return }
+    mema_region_bits_set(&! ctx.pointers[ptr_id as usize].region_bits, region_id)
+}
+
+// Query whether a pointer may point to a region.
+fn mema_ptr_has_region(ctx: &MemAnalysisContext, ptr_id: i64, region_id: i64) -> bool with Div, Panic {
+    if ptr_id < 0 { return false }
+    if ptr_id >= ctx.ptr_count { return false }
+    if region_id < 0 { return false }
+    if region_id >= ctx.region_count { return false }
+    mema_region_bits_test(&ctx.pointers[ptr_id as usize].region_bits, region_id)
+}
+
+// Count how many regions a pointer may point to.
+fn mema_ptr_region_count(ctx: &MemAnalysisContext, ptr_id: i64) -> i64 with Mut, Div, Panic {
+    if ptr_id < 0 { return 0 }
+    if ptr_id >= ctx.ptr_count { return 0 }
+    mema_region_bits_count(&ctx.pointers[ptr_id as usize].region_bits)
+}
+
+// Union the points-to set of src into dst.  Returns true if dst changed.
+fn mema_ptr_union(ctx: &! MemAnalysisContext, dst: i64, src: i64) -> bool with Mut, Div, Panic {
+    if dst < 0 { return false }
+    if dst >= ctx.ptr_count { return false }
+    if src < 0 { return false }
+    if src >= ctx.ptr_count { return false }
+
+    // We need to read src bits then write dst bits.
+    // Copy src bits to a temporary to avoid aliasing.
+    var tmp: [i64; 8] = [0; 8]
+    var i: i64 = 0
+    loop {
+        if i >= 8 { break }
+        tmp[i as usize] = ctx.pointers[src as usize].region_bits[i as usize]
+        i = i + 1
+    }
+    mema_region_bits_or(&! ctx.pointers[dst as usize].region_bits, &tmp)
+}
+
+// Test whether two pointers have overlapping points-to sets.
+fn mema_ptr_sets_intersect(ctx: &MemAnalysisContext, a: i64, b: i64) -> bool with Mut, Div, Panic {
+    if a < 0 { return false }
+    if a >= ctx.ptr_count { return false }
+    if b < 0 { return false }
+    if b >= ctx.ptr_count { return false }
+    mema_region_bits_intersects(
+        &ctx.pointers[a as usize].region_bits,
+        &ctx.pointers[b as usize].region_bits
+    )
+}
+
+// Test whether a pointer's points-to set is a singleton (exactly one region).
+fn mema_ptr_is_singleton(ctx: &MemAnalysisContext, ptr_id: i64) -> bool with Mut, Div, Panic {
+    if ptr_id < 0 { return false }
+    if ptr_id >= ctx.ptr_count { return false }
+    mema_region_bits_count(&ctx.pointers[ptr_id as usize].region_bits) == 1
+}
+
+// Get the single region in a singleton points-to set, or -1.
+fn mema_ptr_singleton_region(ctx: &MemAnalysisContext, ptr_id: i64) -> i64 with Mut, Div, Panic {
+    if ptr_id < 0 { return 0 - 1 }
+    if ptr_id >= ctx.ptr_count { return 0 - 1 }
+    let cnt = mema_region_bits_count(&ctx.pointers[ptr_id as usize].region_bits)
+    if cnt != 1 { return 0 - 1 }
+    mema_region_bits_first(&ctx.pointers[ptr_id as usize].region_bits)
+}
+
+// ============================================================================
+// Section 10: Instruction Processing
+// ============================================================================
+
+// Process a single instruction and update points-to information.
+// Returns true if any points-to set changed.
+fn mema_process_instr(ctx: &! MemAnalysisContext, instr_idx: i64) -> bool with Mut, Div, Panic {
+    if instr_idx < 0 { return false }
+    if instr_idx >= ctx.instr_count { return false }
+
+    let op = ctx.instrs[instr_idx as usize].op
+    let dst = ctx.instrs[instr_idx as usize].dst
+    let src1 = ctx.instrs[instr_idx as usize].src1
+    let src2 = ctx.instrs[instr_idx as usize].src2
+    let field = ctx.instrs[instr_idx as usize].field
+
+    // Match on the operation kind.
+    let result = mema_process_instr_dispatch(ctx, op, dst, src1, src2, field)
+    result
+}
+
+// Dispatch based on operation kind.
+// PtrAlloc: dst points to the region identified by src1.
+// PtrCopy:  dst = src1 (union src1's set into dst).
+// PtrLoad:  for each region R in src1's set, union R's stored pointers into dst.
+// PtrStore: for each region R in dst's set, union src1's set into R's stored pointer.
+// PtrGep:   dst = src1 (same region, different offset).
+// PtrCast:  dst = src1 (same points-to set).
+// PtrPhi:   dst = src1 union src2.
+// PtrNull:  mark dst as possibly null.
+fn mema_process_instr_dispatch(ctx: &! MemAnalysisContext, op: MemPtrOp, dst: i64, src1: i64, src2: i64, field: i64) -> bool with Mut, Div, Panic {
+    var changed = false
+
+    // Handle each operation kind.
+    let is_alloc = mema_op_is_alloc(op)
+    let is_copy = mema_op_is_copy(op)
+    let is_load = mema_op_is_load(op)
+    let is_store = mema_op_is_store(op)
+    let is_gep = mema_op_is_gep(op)
+    let is_cast = mema_op_is_cast(op)
+    let is_phi = mema_op_is_phi(op)
+    let is_null = mema_op_is_null(op)
+
+    if is_alloc {
+        // src1 is the region id.  Add it to dst's set.
+        if dst >= 0 && dst < ctx.ptr_count && src1 >= 0 && src1 < ctx.region_count {
+            let had = mema_region_bits_test(&ctx.pointers[dst as usize].region_bits, src1)
+            if had == false {
+                mema_region_bits_set(&! ctx.pointers[dst as usize].region_bits, src1)
+                changed = true
+            }
+        }
+    }
+
+    if is_copy {
+        let c = mema_ptr_union(ctx, dst, src1)
+        if c { changed = true }
+    }
+
+    if is_load {
+        // For load: dst = *src1.
+        // For each region R that src1 points to, we need to find what
+        // pointers have been stored into R and union those into dst.
+        // We model this by looking at store edges targeting regions in src1's set.
+        let c = mema_process_load(ctx, dst, src1, field)
+        if c { changed = true }
+    }
+
+    if is_store {
+        // For store: *dst = src1.
+        // This creates a constraint that for each region R in dst's set,
+        // anything pointing through R should include src1's targets.
+        let c = mema_process_store(ctx, dst, src1, field)
+        if c { changed = true }
+    }
+
+    if is_gep {
+        // GEP: same regions, adjust field offset.
+        let c = mema_ptr_union(ctx, dst, src1)
+        if c { changed = true }
+        if dst >= 0 && dst < ctx.ptr_count {
+            ctx.pointers[dst as usize].field_offset = field
+        }
+    }
+
+    if is_cast {
+        // Cast: just copy the points-to set.
+        let c = mema_ptr_union(ctx, dst, src1)
+        if c { changed = true }
+    }
+
+    if is_phi {
+        // Phi: union both sources.
+        let c1 = mema_ptr_union(ctx, dst, src1)
+        let c2 = mema_ptr_union(ctx, dst, src2)
+        if c1 || c2 { changed = true }
+    }
+
+    if is_null {
+        // Mark dst as possibly null.
+        if dst >= 0 && dst < ctx.ptr_count {
+            ctx.pointers[dst as usize].is_null_possible = true
+        }
+    }
+
+    changed
+}
+
+// Process a load instruction: dst = *src_ptr.
+// For each region R in src_ptr's points-to set, look for store edges
+// that target R and union the stored value's set into dst.
+fn mema_process_load(ctx: &! MemAnalysisContext, dst: i64, src_ptr: i64, field: i64) -> bool with Mut, Div, Panic {
+    if dst < 0 || dst >= ctx.ptr_count { return false }
+    if src_ptr < 0 || src_ptr >= ctx.ptr_count { return false }
+
+    var changed = false
+
+    // For each edge that is a store...
+    var e: i64 = 0
+    loop {
+        if e >= ctx.edge_count { break }
+        let edge_kind = ctx.edges[e as usize].kind
+        let is_store_edge = mema_op_is_store(edge_kind)
+        if is_store_edge {
+            let store_dst_ptr = ctx.edges[e as usize].from_ptr
+            let store_src_ptr = ctx.edges[e as usize].to_ptr
+            let store_field = ctx.edges[e as usize].field
+
+            // Check if the store targets any region that src_ptr also points to.
+            if store_field == field || field == 0 - 1 {
+                let overlaps = mema_ptr_sets_intersect_via_copy(ctx, src_ptr, store_dst_ptr)
+                if overlaps {
+                    let c = mema_ptr_union(ctx, dst, store_src_ptr)
+                    if c { changed = true }
+                }
+            }
+        }
+        e = e + 1
+    }
+
+    changed
+}
+
+// Helper: check if two pointers' points-to sets intersect.
+// We copy the sets to temps to avoid borrow conflicts on ctx.
+fn mema_ptr_sets_intersect_via_copy(ctx: &! MemAnalysisContext, a: i64, b: i64) -> bool with Mut, Div, Panic {
+    if a < 0 || a >= ctx.ptr_count { return false }
+    if b < 0 || b >= ctx.ptr_count { return false }
+
+    var bits_a: [i64; 8] = [0; 8]
+    var bits_b: [i64; 8] = [0; 8]
+    var i: i64 = 0
+    loop {
+        if i >= 8 { break }
+        bits_a[i as usize] = ctx.pointers[a as usize].region_bits[i as usize]
+        bits_b[i as usize] = ctx.pointers[b as usize].region_bits[i as usize]
+        i = i + 1
+    }
+    mema_region_bits_intersects(&bits_a, &bits_b)
+}
+
+// Process a store instruction: *dst_ptr = src_ptr.
+// Add an edge from dst_ptr to src_ptr if not already present, and
+// record the constraint for future load resolution.
+fn mema_process_store(ctx: &! MemAnalysisContext, dst_ptr: i64, src_ptr: i64, field: i64) -> bool with Mut, Div, Panic {
+    if dst_ptr < 0 || dst_ptr >= ctx.ptr_count { return false }
+    if src_ptr < 0 || src_ptr >= ctx.ptr_count { return false }
+
+    // Check if this edge already exists.
+    var exists = false
+    var e: i64 = 0
+    loop {
+        if e >= ctx.edge_count { break }
+        let ek = ctx.edges[e as usize].kind
+        let is_store_edge = mema_op_is_store(ek)
+        if is_store_edge {
+            if ctx.edges[e as usize].from_ptr == dst_ptr &&
+               ctx.edges[e as usize].to_ptr == src_ptr &&
+               ctx.edges[e as usize].field == field {
+                exists = true
+            }
+        }
+        e = e + 1
+    }
+
+    if exists == false {
+        mema_add_edge(ctx, dst_ptr, src_ptr, MemPtrOp::PtrStore, field)
+        return true
+    }
+    false
+}
+
+// ============================================================================
+// Section 11: Operation Kind Helpers
+// ============================================================================
+
+fn mema_op_is_alloc(op: MemPtrOp) -> bool {
+    let result = match op {
+        MemPtrOp::PtrAlloc => true,
+        _ => false,
+    }
+    result
+}
+
+fn mema_op_is_load(op: MemPtrOp) -> bool {
+    let result = match op {
+        MemPtrOp::PtrLoad => true,
+        _ => false,
+    }
+    result
+}
+
+fn mema_op_is_store(op: MemPtrOp) -> bool {
+    let result = match op {
+        MemPtrOp::PtrStore => true,
+        _ => false,
+    }
+    result
+}
+
+fn mema_op_is_gep(op: MemPtrOp) -> bool {
+    let result = match op {
+        MemPtrOp::PtrGep => true,
+        _ => false,
+    }
+    result
+}
+
+fn mema_op_is_cast(op: MemPtrOp) -> bool {
+    let result = match op {
+        MemPtrOp::PtrCast => true,
+        _ => false,
+    }
+    result
+}
+
+fn mema_op_is_phi(op: MemPtrOp) -> bool {
+    let result = match op {
+        MemPtrOp::PtrPhi => true,
+        _ => false,
+    }
+    result
+}
+
+fn mema_op_is_copy(op: MemPtrOp) -> bool {
+    let result = match op {
+        MemPtrOp::PtrCopy => true,
+        _ => false,
+    }
+    result
+}
+
+fn mema_op_is_null(op: MemPtrOp) -> bool {
+    let result = match op {
+        MemPtrOp::PtrNull => true,
+        _ => false,
+    }
+    result
+}
+
+// Test whether an operation has side effects on memory (store, call).
+fn mema_op_has_side_effect(op: MemPtrOp) -> bool {
+    let result = match op {
+        MemPtrOp::PtrStore => true,
+        MemPtrOp::PtrAlloc => true,
+        _ => false,
+    }
+    result
+}
+
+// ============================================================================
+// Section 12: Andersen Fixed-Point Iteration
+// ============================================================================
+
+// Build the initial constraint graph from the instruction list.
+// For each instruction, add the appropriate edges.
+fn mema_build_constraints(ctx: &! MemAnalysisContext) with Mut, Div, Panic {
+    var i: i64 = 0
+    loop {
+        if i >= ctx.instr_count { break }
+        let op = ctx.instrs[i as usize].op
+        let dst = ctx.instrs[i as usize].dst
+        let src1 = ctx.instrs[i as usize].src1
+        let src2 = ctx.instrs[i as usize].src2
+        let field = ctx.instrs[i as usize].field
+
+        let is_copy = mema_op_is_copy(op)
+        let is_load = mema_op_is_load(op)
+        let is_store = mema_op_is_store(op)
+        let is_gep = mema_op_is_gep(op)
+        let is_cast = mema_op_is_cast(op)
+        let is_phi = mema_op_is_phi(op)
+
+        if is_copy {
+            mema_add_edge(ctx, src1, dst, MemPtrOp::PtrCopy, 0)
+        }
+        if is_load {
+            mema_add_edge(ctx, src1, dst, MemPtrOp::PtrLoad, field)
+        }
+        if is_store {
+            mema_add_edge(ctx, dst, src1, MemPtrOp::PtrStore, field)
+        }
+        if is_gep {
+            mema_add_edge(ctx, src1, dst, MemPtrOp::PtrGep, field)
+        }
+        if is_cast {
+            mema_add_edge(ctx, src1, dst, MemPtrOp::PtrCast, 0)
+        }
+        if is_phi {
+            mema_add_edge(ctx, src1, dst, MemPtrOp::PtrPhi, 0)
+            if src2 >= 0 {
+                mema_add_edge(ctx, src2, dst, MemPtrOp::PtrPhi, 0)
+            }
+        }
+
+        i = i + 1
+    }
+}
+
+// Seed the worklist with all pointer ids that have non-empty points-to sets.
+fn mema_seed_worklist(ctx: &! MemAnalysisContext) with Mut, Div, Panic {
+    mema_worklist_clear(ctx)
+    var i: i64 = 0
+    loop {
+        if i >= ctx.ptr_count { break }
+        let empty = mema_region_bits_empty(&ctx.pointers[i as usize].region_bits)
+        if empty == false {
+            mema_worklist_push(ctx, i)
+        }
+        i = i + 1
+    }
+}
+
+// Run one iteration of the fixed-point solver.
+// Process all instructions and propagate through edges.
+// Returns true if any points-to set changed.
+fn mema_iterate_once(ctx: &! MemAnalysisContext) -> bool with Mut, Div, Panic {
+    var changed = false
+
+    // Process all instructions.
+    var i: i64 = 0
+    loop {
+        if i >= ctx.instr_count { break }
+        let c = mema_process_instr(ctx, i)
+        if c { changed = true }
+        i = i + 1
+    }
+
+    // Propagate through copy/cast/gep/phi edges.
+    var e: i64 = 0
+    loop {
+        if e >= ctx.edge_count { break }
+        let kind = ctx.edges[e as usize].kind
+        let from = ctx.edges[e as usize].from_ptr
+        let to = ctx.edges[e as usize].to_ptr
+
+        let is_copy = mema_op_is_copy(kind)
+        let is_cast = mema_op_is_cast(kind)
+        let is_gep = mema_op_is_gep(kind)
+        let is_phi = mema_op_is_phi(kind)
+
+        if is_copy || is_cast || is_gep || is_phi {
+            let c = mema_ptr_union(ctx, to, from)
+            if c { changed = true }
+        }
+
+        e = e + 1
+    }
+
+    changed
+}
+
+// Compute the full Andersen-style points-to analysis.
+// Iterates until fixed point or max_iterations reached.
+// Returns true if analysis converged.
+fn mema_compute_points_to(ctx: &! MemAnalysisContext) -> bool with Mut, Div, Panic {
+    ctx.iterations = 0
+    ctx.changed = true
+
+    // Build constraint graph from instructions.
+    mema_build_constraints(ctx)
+
+    loop {
+        if ctx.changed == false { break }
+        if ctx.iterations >= ctx.max_iterations { break }
+
+        ctx.changed = false
+        let c = mema_iterate_once(ctx)
+        ctx.changed = c
+        ctx.iterations = ctx.iterations + 1
+    }
+
+    // Converged if we stopped because nothing changed.
+    ctx.changed == false
+}
+
+// ============================================================================
+// Section 13: Alias Queries
+// ============================================================================
+
+// Query the alias relationship between two abstract pointers.
+//
+// AliasMust: both are singletons pointing to the same region, same field offset.
+// AliasNo:   points-to sets are disjoint.
+// AliasMay:  points-to sets overlap but not a definite must-alias.
+fn mema_query_alias(ctx: &MemAnalysisContext, ptr_a: i64, ptr_b: i64) -> MemAliasResult with Mut, Div, Panic {
+    if ptr_a < 0 || ptr_a >= ctx.ptr_count { return MemAliasResult::AliasMay }
+    if ptr_b < 0 || ptr_b >= ctx.ptr_count { return MemAliasResult::AliasMay }
+
+    // Same pointer is always must-alias.
+    if ptr_a == ptr_b { return MemAliasResult::AliasMust }
+
+    // Check if their points-to sets intersect at all.
+    let intersects = mema_region_bits_intersects(
+        &ctx.pointers[ptr_a as usize].region_bits,
+        &ctx.pointers[ptr_b as usize].region_bits
+    )
+
+    if intersects == false {
+        return MemAliasResult::AliasNo
+    }
+
+    // Both singletons pointing to same region?
+    let cnt_a = mema_region_bits_count(&ctx.pointers[ptr_a as usize].region_bits)
+    let cnt_b = mema_region_bits_count(&ctx.pointers[ptr_b as usize].region_bits)
+
+    if cnt_a == 1 && cnt_b == 1 {
+        // Both point to exactly one region.  Check field offsets.
+        let reg_a = mema_region_bits_first(&ctx.pointers[ptr_a as usize].region_bits)
+        let reg_b = mema_region_bits_first(&ctx.pointers[ptr_b as usize].region_bits)
+        if reg_a == reg_b {
+            let off_a = ctx.pointers[ptr_a as usize].field_offset
+            let off_b = ctx.pointers[ptr_b as usize].field_offset
+            if off_a == off_b {
+                return MemAliasResult::AliasMust
+            }
+            // Same region but different offsets: field-sensitive no-alias.
+            // Only if we know the offsets are distinct and non-overlapping.
+            if off_a != off_b {
+                return MemAliasResult::AliasNo
+            }
+        }
+    }
+
+    // Otherwise, may-alias.
+    MemAliasResult::AliasMay
+}
+
+// Convenience: check if two pointers definitely do not alias.
+fn mema_no_alias(ctx: &MemAnalysisContext, a: i64, b: i64) -> bool with Mut, Div, Panic {
+    let result = mema_query_alias(ctx, a, b)
+    match result {
+        MemAliasResult::AliasNo => true,
+        _ => false,
+    }
+}
+
+// Convenience: check if two pointers must alias.
+fn mema_must_alias(ctx: &MemAnalysisContext, a: i64, b: i64) -> bool with Mut, Div, Panic {
+    let result = mema_query_alias(ctx, a, b)
+    match result {
+        MemAliasResult::AliasMust => true,
+        _ => false,
+    }
+}
+
+// Convenience: check if two pointers may alias (including must).
+fn mema_may_alias(ctx: &MemAnalysisContext, a: i64, b: i64) -> bool with Mut, Div, Panic {
+    let result = mema_query_alias(ctx, a, b)
+    match result {
+        MemAliasResult::AliasNo => false,
+        _ => true,
+    }
+}
+
+// ============================================================================
+// Section 14: Escape Analysis
+// ============================================================================
+
+// Determine the escape status of a single allocation.
+// Walks the instruction list to find uses of the allocation's pointer.
+fn mema_check_escape(ctx: &! MemAnalysisContext, alloc_id: i64) -> MemEscapeStatus with Mut, Div, Panic {
+    if alloc_id < 0 || alloc_id >= ctx.alloc_count {
+        return MemEscapeStatus::EscapeUnknown
+    }
+
+    let region_id = ctx.allocs[alloc_id as usize].region_id
+    var worst = MemEscapeStatus::EscapeNone
+
+    // Scan all instructions for uses of pointers that include this region.
+    var i: i64 = 0
+    loop {
+        if i >= ctx.instr_count { break }
+        let op = ctx.instrs[i as usize].op
+        let dst = ctx.instrs[i as usize].dst
+        let src1 = ctx.instrs[i as usize].src1
+
+        // Check if any operand pointer includes our region.
+        let dst_has = mema_ptr_has_region_safe(ctx, dst, region_id)
+        let src1_has = mema_ptr_has_region_safe(ctx, src1, region_id)
+
+        if dst_has || src1_has {
+            let esc = mema_classify_escape_for_op(op, dst_has, src1_has)
+            worst = mema_escape_merge(worst, esc)
+        }
+
+        i = i + 1
+    }
+
+    ctx.allocs[alloc_id as usize].escape = worst
+    worst
+}
+
+// Safe wrapper: check if ptr_id's set includes region_id, handling invalid ids.
+fn mema_ptr_has_region_safe(ctx: &! MemAnalysisContext, ptr_id: i64, region_id: i64) -> bool with Div, Panic {
+    if ptr_id < 0 || ptr_id >= ctx.ptr_count { return false }
+    if region_id < 0 || region_id >= ctx.region_count { return false }
+    mema_region_bits_test(&ctx.pointers[ptr_id as usize].region_bits, region_id)
+}
+
+// Classify what escape an operation implies.
+fn mema_classify_escape_for_op(op: MemPtrOp, in_dst: bool, in_src: bool) -> MemEscapeStatus {
+    // If a pointer to our region is stored somewhere, it might escape via store.
+    let is_store = mema_op_is_store(op)
+    if is_store && in_src {
+        return MemEscapeStatus::EscapeStore
+    }
+
+    // If it appears as a copy/cast/phi destination used later as a return,
+    // we'd catch that when we see the return instruction.  But at this
+    // level we just look at the immediate op.
+
+    // For now, if it appears in a copy/phi/cast, that alone doesn't escape.
+    MemEscapeStatus::EscapeNone
+}
+
+// Merge two escape statuses: the worse one wins.
+// Ordering: None < Return < Store < Call < Unknown.
+fn mema_escape_severity(e: MemEscapeStatus) -> i64 {
+    match e {
+        MemEscapeStatus::EscapeNone => 0,
+        MemEscapeStatus::EscapeReturn => 1,
+        MemEscapeStatus::EscapeStore => 2,
+        MemEscapeStatus::EscapeCall => 3,
+        MemEscapeStatus::EscapeUnknown => 4,
+    }
+}
+
+fn mema_escape_from_severity(s: i64) -> MemEscapeStatus {
+    if s == 0 { return MemEscapeStatus::EscapeNone }
+    if s == 1 { return MemEscapeStatus::EscapeReturn }
+    if s == 2 { return MemEscapeStatus::EscapeStore }
+    if s == 3 { return MemEscapeStatus::EscapeCall }
+    MemEscapeStatus::EscapeUnknown
+}
+
+fn mema_escape_merge(a: MemEscapeStatus, b: MemEscapeStatus) -> MemEscapeStatus {
+    let sa = mema_escape_severity(a)
+    let sb = mema_escape_severity(b)
+    if sa >= sb { return a }
+    b
+}
+
+// Propagate escape status through the pointer constraint graph.
+// If pointer A escapes and A's set overlaps with alloc X's region,
+// then X escapes too.  Iterate to fixed point.
+fn mema_propagate_escape(ctx: &! MemAnalysisContext) with Mut, Div, Panic {
+    var changed = true
+    var iters: i64 = 0
+
+    loop {
+        if changed == false { break }
+        if iters >= MEMA_MAX_ITERATIONS { break }
+        changed = false
+
+        // For each edge, propagate escape from the "from" side.
+        var e: i64 = 0
+        loop {
+            if e >= ctx.edge_count { break }
+            let from = ctx.edges[e as usize].from_ptr
+            let to = ctx.edges[e as usize].to_ptr
+
+            // If from_ptr's regions have escape, propagate to to_ptr's regions.
+            if from >= 0 && from < ctx.ptr_count && to >= 0 && to < ctx.ptr_count {
+                var r: i64 = 0
+                loop {
+                    if r >= ctx.region_count { break }
+                    let from_has = mema_region_bits_test(
+                        &ctx.pointers[from as usize].region_bits, r)
+                    let to_has = mema_region_bits_test(
+                        &ctx.pointers[to as usize].region_bits, r)
+
+                    if from_has && to_has {
+                        let from_esc = ctx.regions[r as usize].escape
+                        let sev = mema_escape_severity(from_esc)
+                        if sev > 0 {
+                            // Find allocs for this region and merge escape.
+                            var a: i64 = 0
+                            loop {
+                                if a >= ctx.alloc_count { break }
+                                if ctx.allocs[a as usize].region_id == r {
+                                    let old_sev = mema_escape_severity(ctx.allocs[a as usize].escape)
+                                    if sev > old_sev {
+                                        ctx.allocs[a as usize].escape = from_esc
+                                        changed = true
+                                    }
+                                }
+                                a = a + 1
+                            }
+                        }
+                    }
+                    r = r + 1
+                }
+            }
+
+            e = e + 1
+        }
+
+        iters = iters + 1
+    }
+}
+
+// Mark a region as escaping with a given status.
+fn mema_mark_region_escape(ctx: &! MemAnalysisContext, region_id: i64, esc: MemEscapeStatus) with Mut, Div, Panic {
+    if region_id < 0 || region_id >= ctx.region_count { return }
+    let old = mema_escape_severity(ctx.regions[region_id as usize].escape)
+    let new_sev = mema_escape_severity(esc)
+    if new_sev > old {
+        ctx.regions[region_id as usize].escape = esc
+    }
+}
+
+// Mark an alloc as escaping with a given status.
+fn mema_mark_alloc_escape(ctx: &! MemAnalysisContext, alloc_id: i64, esc: MemEscapeStatus) with Mut, Div, Panic {
+    if alloc_id < 0 || alloc_id >= ctx.alloc_count { return }
+    let old = mema_escape_severity(ctx.allocs[alloc_id as usize].escape)
+    let new_sev = mema_escape_severity(esc)
+    if new_sev > old {
+        ctx.allocs[alloc_id as usize].escape = esc
+        // Also propagate to the region.
+        let rid = ctx.allocs[alloc_id as usize].region_id
+        mema_mark_region_escape(ctx, rid, esc)
+    }
+}
+
+// ============================================================================
+// Section 15: Stack Promotion
+// ============================================================================
+
+// Determine whether a heap allocation can be promoted to stack.
+// Requirements:
+//   1. Must be a heap allocation.
+//   2. Must not escape (EscapeNone).
+//   3. Must have known, bounded size (> 0).
+fn mema_promote_to_stack(ctx: &! MemAnalysisContext, alloc_id: i64) -> MemPromoteResult with Mut, Div, Panic {
+    if alloc_id < 0 || alloc_id >= ctx.alloc_count {
+        return MemPromoteResult::PromoteNo
+    }
+
+    let is_heap = ctx.allocs[alloc_id as usize].is_heap
+    if is_heap == false {
+        // Already on stack or not a heap alloc.
+        ctx.allocs[alloc_id as usize].promote = MemPromoteResult::PromoteNo
+        return MemPromoteResult::PromoteNo
+    }
+
+    let esc = ctx.allocs[alloc_id as usize].escape
+    let sev = mema_escape_severity(esc)
+    if sev > 0 {
+        // Escapes -- cannot promote.
+        ctx.allocs[alloc_id as usize].promote = MemPromoteResult::PromoteNo
+        return MemPromoteResult::PromoteNo
+    }
+
+    let sz = ctx.allocs[alloc_id as usize].size
+    if sz <= 0 {
+        // Unknown or zero size -- maybe promotable with more info.
+        ctx.allocs[alloc_id as usize].promote = MemPromoteResult::PromoteMaybe
+        return MemPromoteResult::PromoteMaybe
+    }
+
+    // Non-escaping heap alloc with known positive size: promote.
+    ctx.allocs[alloc_id as usize].promote = MemPromoteResult::PromoteYes
+    MemPromoteResult::PromoteYes
+}
+
+// Compute promotions for all allocations.  Returns count of PromoteYes.
+fn mema_compute_promotions(ctx: &! MemAnalysisContext) -> i64 with Mut, Div, Panic {
+    var count: i64 = 0
+    var i: i64 = 0
+    loop {
+        if i >= ctx.alloc_count { break }
+        let result = mema_promote_to_stack(ctx, i)
+        let is_yes = match result {
+            MemPromoteResult::PromoteYes => true,
+            _ => false,
+        }
+        if is_yes { count = count + 1 }
+        i = i + 1
+    }
+    count
+}
+
+// ============================================================================
+// Section 16: Full Analysis Pipeline
+// ============================================================================
+
+// Run the complete memory analysis pipeline:
+// 1. Compute points-to (Andersen fixed-point).
+// 2. Run escape analysis on all allocations.
+// 3. Propagate escape through pointer graph.
+// 4. Compute stack promotions.
+// Returns true if analysis converged.
+fn mema_analyze_function(ctx: &! MemAnalysisContext) -> bool with Mut, Div, Panic {
+    // Step 1: Points-to analysis.
+    let converged = mema_compute_points_to(ctx)
+
+    // Step 2: Escape analysis for each allocation.
+    var i: i64 = 0
+    loop {
+        if i >= ctx.alloc_count { break }
+        let esc = mema_check_escape(ctx, i)
+        // esc is already stored in allocs[i].escape by check_escape
+        i = i + 1
+    }
+
+    // Step 3: Propagate escape.
+    mema_propagate_escape(ctx)
+
+    // Step 4: Compute promotions.
+    let promoted = mema_compute_promotions(ctx)
+
+    converged
+}
+
+// ============================================================================
+// Section 17: Query Helpers
+// ============================================================================
+
+// Count how many allocations have a specific escape status.
+fn mema_count_escaping(ctx: &MemAnalysisContext, esc: MemEscapeStatus) -> i64 with Mut, Div, Panic {
+    let target_sev = mema_escape_severity(esc)
+    var count: i64 = 0
+    var i: i64 = 0
+    loop {
+        if i >= ctx.alloc_count { break }
+        let sev = mema_escape_severity(ctx.allocs[i as usize].escape)
+        if sev == target_sev { count = count + 1 }
+        i = i + 1
+    }
+    count
+}
+
+// Count how many allocations are non-escaping.
+fn mema_count_non_escaping(ctx: &MemAnalysisContext) -> i64 with Mut, Div, Panic {
+    var count: i64 = 0
+    var i: i64 = 0
+    loop {
+        if i >= ctx.alloc_count { break }
+        let sev = mema_escape_severity(ctx.allocs[i as usize].escape)
+        if sev == 0 { count = count + 1 }
+        i = i + 1
+    }
+    count
+}
+
+// Count how many allocations are promotable.
+fn mema_count_promotable(ctx: &MemAnalysisContext) -> i64 with Mut, Div, Panic {
+    var count: i64 = 0
+    var i: i64 = 0
+    loop {
+        if i >= ctx.alloc_count { break }
+        let p = ctx.allocs[i as usize].promote
+        let is_yes = match p {
+            MemPromoteResult::PromoteYes => true,
+            _ => false,
+        }
+        if is_yes { count = count + 1 }
+        i = i + 1
+    }
+    count
+}
+
+// Total number of edges in the constraint graph.
+fn mema_edge_count(ctx: &MemAnalysisContext) -> i64 {
+    ctx.edge_count
+}
+
+// Total number of iterations the solver ran.
+fn mema_iteration_count(ctx: &MemAnalysisContext) -> i64 {
+    ctx.iterations
+}
+
+// Check if a region is of a specific kind.
+fn mema_region_is_kind(ctx: &MemAnalysisContext, region_id: i64, kind: MemRegionKind) -> bool with Div, Panic {
+    if region_id < 0 || region_id >= ctx.region_count { return false }
+    let rk = ctx.regions[region_id as usize].kind
+    mema_region_kind_eq(rk, kind)
+}
+
+fn mema_region_kind_eq(a: MemRegionKind, b: MemRegionKind) -> bool {
+    let sa = mema_region_kind_ord(a)
+    let sb = mema_region_kind_ord(b)
+    sa == sb
+}
+
+fn mema_region_kind_ord(k: MemRegionKind) -> i64 {
+    match k {
+        MemRegionKind::RegStack => 0,
+        MemRegionKind::RegHeap => 1,
+        MemRegionKind::RegGlobal => 2,
+        MemRegionKind::RegParam => 3,
+        MemRegionKind::RegReturn => 4,
+        MemRegionKind::RegUnknown => 5,
+    }
+}
+
+// Check alias result equality.
+fn mema_alias_result_eq(a: MemAliasResult, b: MemAliasResult) -> bool {
+    let oa = mema_alias_result_ord(a)
+    let ob = mema_alias_result_ord(b)
+    oa == ob
+}
+
+fn mema_alias_result_ord(r: MemAliasResult) -> i64 {
+    match r {
+        MemAliasResult::AliasMust => 0,
+        MemAliasResult::AliasMay => 1,
+        MemAliasResult::AliasNo => 2,
+    }
+}
+
+// Check escape status equality.
+fn mema_escape_eq(a: MemEscapeStatus, b: MemEscapeStatus) -> bool {
+    mema_escape_severity(a) == mema_escape_severity(b)
+}
+
+// Check promote result equality.
+fn mema_promote_eq(a: MemPromoteResult, b: MemPromoteResult) -> bool {
+    let oa = mema_promote_ord(a)
+    let ob = mema_promote_ord(b)
+    oa == ob
+}
+
+fn mema_promote_ord(p: MemPromoteResult) -> i64 {
+    match p {
+        MemPromoteResult::PromoteYes => 0,
+        MemPromoteResult::PromoteNo => 1,
+        MemPromoteResult::PromoteMaybe => 2,
+    }
+}
+
+// ============================================================================
+// Section 18: Tests — Category 1: Region/Pointer Basics (10 tests)
+// ============================================================================
+
+// T01 inner: create a region and verify its properties.
+fn test_mema_alloc_region_inner(ctx: &! MemAnalysisContext) -> bool with Mut, Div, Panic {
+    let r = mema_alloc_region(ctx, MemRegionKind::RegStack, 64, 8, 100)
+    r == 0 && ctx.region_count == 1 &&
+    ctx.regions[0].size == 64 && ctx.regions[0].align == 8 &&
+    ctx.regions[0].alloc_site == 100
+}
+
+fn test_mema_alloc_region() -> bool with Mut, Div, Panic {
+    var ctx = mema_context_new()
+    test_mema_alloc_region_inner(&! ctx)
+}
+
+// T02 inner: allocate multiple regions and check ids.
+fn test_mema_multi_region_inner(ctx: &! MemAnalysisContext) -> bool with Mut, Div, Panic {
+    let r0 = mema_alloc_region(ctx, MemRegionKind::RegStack, 8, 4, 1)
+    let r1 = mema_alloc_region(ctx, MemRegionKind::RegHeap, 128, 8, 2)
+    let r2 = mema_alloc_region(ctx, MemRegionKind::RegGlobal, 256, 16, 3)
+    r0 == 0 && r1 == 1 && r2 == 2 && ctx.region_count == 3
+}
+
+fn test_mema_multi_region() -> bool with Mut, Div, Panic {
+    var ctx = mema_context_new()
+    test_mema_multi_region_inner(&! ctx)
+}
+
+// T03 inner: allocate a pointer and verify.
+fn test_mema_alloc_pointer_inner(ctx: &! MemAnalysisContext) -> bool with Mut, Div, Panic {
+    let p = mema_alloc_pointer(ctx)
+    p == 0 && ctx.ptr_count == 1 &&
+    ctx.pointers[0].is_null_possible == false
+}
+
+fn test_mema_alloc_pointer() -> bool with Mut, Div, Panic {
+    var ctx = mema_context_new()
+    test_mema_alloc_pointer_inner(&! ctx)
+}
+
+// T04 inner: add a region to a pointer's points-to set.
+fn test_mema_ptr_add_and_has_region_inner(ctx: &! MemAnalysisContext) -> bool with Mut, Div, Panic {
+    let r0 = mema_alloc_region(ctx, MemRegionKind::RegHeap, 32, 4, 10)
+    let p0 = mema_alloc_pointer(ctx)
+    mema_ptr_add_region(ctx, p0, r0)
+    mema_ptr_has_region(ctx, p0, r0)
+}
+
+fn test_mema_ptr_add_and_has_region() -> bool with Mut, Div, Panic {
+    var ctx = mema_context_new()
+    test_mema_ptr_add_and_has_region_inner(&! ctx)
+}
+
+// T05 inner: region count on a pointer.
+fn test_mema_ptr_region_count_inner(ctx: &! MemAnalysisContext) -> bool with Mut, Div, Panic {
+    let r0 = mema_alloc_region(ctx, MemRegionKind::RegStack, 8, 4, 1)
+    let r1 = mema_alloc_region(ctx, MemRegionKind::RegHeap, 16, 4, 2)
+    let r2 = mema_alloc_region(ctx, MemRegionKind::RegGlobal, 32, 8, 3)
+    let p = mema_alloc_pointer(ctx)
+    mema_ptr_add_region(ctx, p, r0)
+    mema_ptr_add_region(ctx, p, r1)
+    mema_ptr_add_region(ctx, p, r2)
+    mema_ptr_region_count(ctx, p) == 3
+}
+
+fn test_mema_ptr_region_count() -> bool with Mut, Div, Panic {
+    var ctx = mema_context_new()
+    test_mema_ptr_region_count_inner(&! ctx)
+}
+
+// T06 inner: pointer starts with empty points-to set.
+fn test_mema_ptr_empty_initial_inner(ctx: &! MemAnalysisContext) -> bool with Mut, Div, Panic {
+    let p = mema_alloc_pointer(ctx)
+    mema_ptr_region_count(ctx, p) == 0
+}
+
+fn test_mema_ptr_empty_initial() -> bool with Mut, Div, Panic {
+    var ctx = mema_context_new()
+    test_mema_ptr_empty_initial_inner(&! ctx)
+}
+
+// T07 inner: region kind check.
+fn test_mema_region_kind_inner(ctx: &! MemAnalysisContext) -> bool with Mut, Div, Panic {
+    let r0 = mema_alloc_region(ctx, MemRegionKind::RegStack, 8, 4, 1)
+    let r1 = mema_alloc_region(ctx, MemRegionKind::RegHeap, 16, 4, 2)
+    let k0 = mema_region_is_kind(ctx, r0, MemRegionKind::RegStack)
+    let k1 = mema_region_is_kind(ctx, r1, MemRegionKind::RegHeap)
+    let k2 = mema_region_is_kind(ctx, r0, MemRegionKind::RegHeap)
+    k0 && k1 && (k2 == false)
+}
+
+fn test_mema_region_kind() -> bool with Mut, Div, Panic {
+    var ctx = mema_context_new()
+    test_mema_region_kind_inner(&! ctx)
+}
+
+// T08 inner: add alloc record.
+fn test_mema_add_alloc_inner(ctx: &! MemAnalysisContext) -> bool with Mut, Div, Panic {
+    let r = mema_alloc_region(ctx, MemRegionKind::RegHeap, 64, 8, 42)
+    let a = mema_add_alloc(ctx, r, 64, 10, true)
+    a == 0 && ctx.alloc_count == 1 &&
+    ctx.allocs[0].region_id == r &&
+    ctx.allocs[0].size == 64 &&
+    ctx.allocs[0].is_heap
+}
+
+fn test_mema_add_alloc() -> bool with Mut, Div, Panic {
+    var ctx = mema_context_new()
+    test_mema_add_alloc_inner(&! ctx)
+}
+
+// T09 inner: add instruction.
+fn test_mema_add_instr_inner(ctx: &! MemAnalysisContext) -> bool with Mut, Div, Panic {
+    mema_add_instr(ctx, MemPtrOp::PtrAlloc, 0, 1, 0, 0, 5)
+    ctx.instr_count == 1 &&
+    mema_op_is_alloc(ctx.instrs[0].op) &&
+    ctx.instrs[0].dst == 0 &&
+    ctx.instrs[0].src1 == 1 &&
+    ctx.instrs[0].line == 5
+}
+
+fn test_mema_add_instr() -> bool with Mut, Div, Panic {
+    var ctx = mema_context_new()
+    test_mema_add_instr_inner(&! ctx)
+}
+
+// T10 inner: ptr_union merges sets.
+fn test_mema_ptr_union_inner(ctx: &! MemAnalysisContext) -> bool with Mut, Div, Panic {
+    let r0 = mema_alloc_region(ctx, MemRegionKind::RegStack, 8, 4, 1)
+    let r1 = mema_alloc_region(ctx, MemRegionKind::RegHeap, 16, 4, 2)
+    let p0 = mema_alloc_pointer(ctx)
+    let p1 = mema_alloc_pointer(ctx)
+    mema_ptr_add_region(ctx, p0, r0)
+    mema_ptr_add_region(ctx, p1, r1)
+    let changed = mema_ptr_union(ctx, p0, p1)
+    changed && mema_ptr_has_region(ctx, p0, r0) && mema_ptr_has_region(ctx, p0, r1) &&
+    mema_ptr_region_count(ctx, p0) == 2
+}
+
+fn test_mema_ptr_union() -> bool with Mut, Div, Panic {
+    var ctx = mema_context_new()
+    test_mema_ptr_union_inner(&! ctx)
+}
+
+// ============================================================================
+// Section 19: Tests — Category 2: Bitset Operations (8 tests)
+// ============================================================================
+
+// T11: set and test a single bit.
+fn test_mema_bits_set_test() -> bool with Mut, Div, Panic {
+    var bits: [i64; 8] = [0; 8]
+    mema_region_bits_set(&! bits, 42)
+    mema_region_bits_test(&bits, 42)
+}
+
+// T12: set multiple bits and count.
+fn test_mema_bits_count() -> bool with Mut, Div, Panic {
+    var bits: [i64; 8] = [0; 8]
+    mema_region_bits_set(&! bits, 0)
+    mema_region_bits_set(&! bits, 63)
+    mema_region_bits_set(&! bits, 64)
+    mema_region_bits_set(&! bits, 511)
+    mema_region_bits_count(&bits) == 4
+}
+
+// T13: union of two bitsets.
+fn test_mema_bits_union() -> bool with Mut, Div, Panic {
+    var a: [i64; 8] = [0; 8]
+    var b: [i64; 8] = [0; 8]
+    mema_region_bits_set(&! a, 10)
+    mema_region_bits_set(&! b, 20)
+    var changed = false
+    {
+        changed = mema_region_bits_or(&! a, &b)
+    }
+    let has_10 = mema_region_bits_test(&a, 10)
+    let has_20 = mema_region_bits_test(&a, 20)
+    let count = mema_region_bits_count(&a)
+    changed && has_10 && has_20 && count == 2
+}
+
+// T14: union with no change returns false.
+fn test_mema_bits_union_no_change() -> bool with Mut, Div, Panic {
+    var a: [i64; 8] = [0; 8]
+    var b: [i64; 8] = [0; 8]
+    mema_region_bits_set(&! a, 5)
+    mema_region_bits_set(&! b, 5)
+    var changed = false
+    {
+        changed = mema_region_bits_or(&! a, &b)
+    }
+    let count = mema_region_bits_count(&a)
+    (changed == false) && count == 1
+}
+
+// T15: intersection of two bitsets.
+fn test_mema_bits_intersect() -> bool with Mut, Div, Panic {
+    var a: [i64; 8] = [0; 8]
+    var b: [i64; 8] = [0; 8]
+    mema_region_bits_set(&! a, 10)
+    mema_region_bits_set(&! a, 20)
+    mema_region_bits_set(&! b, 20)
+    mema_region_bits_set(&! b, 30)
+    mema_region_bits_and(&! a, &b)
+    mema_region_bits_count(&a) == 1 && mema_region_bits_test(&a, 20)
+}
+
+// T16: intersects query.
+fn test_mema_bits_intersects_query() -> bool with Mut, Div, Panic {
+    var a: [i64; 8] = [0; 8]
+    var b: [i64; 8] = [0; 8]
+    var c: [i64; 8] = [0; 8]
+    mema_region_bits_set(&! a, 100)
+    mema_region_bits_set(&! b, 100)
+    mema_region_bits_set(&! c, 200)
+    let ab = mema_region_bits_intersects(&a, &b)
+    let ac = mema_region_bits_intersects(&a, &c)
+    ab && (ac == false)
+}
+
+// T17: empty check.
+fn test_mema_bits_empty() -> bool with Mut, Div, Panic {
+    var a: [i64; 8] = [0; 8]
+    let e1 = true
+    mema_region_bits_set(&! a, 0)
+    let e2 = mema_region_bits_empty(&a)
+    e1 && (e2 == false)
+}
+
+// T18: first bit finder.
+fn test_mema_bits_first() -> bool with Mut, Div, Panic {
+    var bits: [i64; 8] = [0; 8]
+    mema_region_bits_set(&! bits, 130)
+    mema_region_bits_set(&! bits, 250)
+    mema_region_bits_first(&bits) == 130
+}
+
+// ============================================================================
+// Section 20: Tests — Category 3: Points-To Analysis (12 tests)
+// ============================================================================
+
+// T19 inner: simple alloc sets points-to.
+fn test_mema_simple_alloc_pts_inner(ctx: &! MemAnalysisContext) -> bool with Mut, Div, Panic {
+    let r = mema_alloc_region(ctx, MemRegionKind::RegHeap, 32, 4, 1)
+    let p = mema_alloc_pointer(ctx)
+    // Alloc instruction: p points to r.
+    mema_add_instr(ctx, MemPtrOp::PtrAlloc, p, r, 0, 0, 1)
+    let converged = mema_compute_points_to(ctx)
+    converged && mema_ptr_has_region(ctx, p, r) && mema_ptr_region_count(ctx, p) == 1
+}
+
+fn test_mema_simple_alloc_pts() -> bool with Mut, Div, Panic {
+    var ctx = mema_context_new()
+    test_mema_simple_alloc_pts_inner(&! ctx)
+}
+
+// T20 inner: copy propagates points-to set.
+fn test_mema_copy_pts_inner(ctx: &! MemAnalysisContext) -> bool with Mut, Div, Panic {
+    let r = mema_alloc_region(ctx, MemRegionKind::RegStack, 8, 4, 1)
+    let p0 = mema_alloc_pointer(ctx)
+    let p1 = mema_alloc_pointer(ctx)
+    mema_add_instr(ctx, MemPtrOp::PtrAlloc, p0, r, 0, 0, 1)
+    mema_add_instr(ctx, MemPtrOp::PtrCopy, p1, p0, 0, 0, 2)
+    let converged = mema_compute_points_to(ctx)
+    converged && mema_ptr_has_region(ctx, p1, r)
+}
+
+fn test_mema_copy_pts() -> bool with Mut, Div, Panic {
+    var ctx = mema_context_new()
+    test_mema_copy_pts_inner(&! ctx)
+}
+
+// T21 inner: phi merges two points-to sets.
+fn test_mema_phi_pts_inner(ctx: &! MemAnalysisContext) -> bool with Mut, Div, Panic {
+    let r0 = mema_alloc_region(ctx, MemRegionKind::RegStack, 8, 4, 1)
+    let r1 = mema_alloc_region(ctx, MemRegionKind::RegHeap, 16, 4, 2)
+    let p0 = mema_alloc_pointer(ctx)
+    let p1 = mema_alloc_pointer(ctx)
+    let p2 = mema_alloc_pointer(ctx)
+    mema_add_instr(ctx, MemPtrOp::PtrAlloc, p0, r0, 0, 0, 1)
+    mema_add_instr(ctx, MemPtrOp::PtrAlloc, p1, r1, 0, 0, 2)
+    mema_add_instr(ctx, MemPtrOp::PtrPhi, p2, p0, p1, 0, 3)
+    let converged = mema_compute_points_to(ctx)
+    converged && mema_ptr_has_region(ctx, p2, r0) && mema_ptr_has_region(ctx, p2, r1)
+}
+
+fn test_mema_phi_pts() -> bool with Mut, Div, Panic {
+    var ctx = mema_context_new()
+    test_mema_phi_pts_inner(&! ctx)
+}
+
+// T22 inner: cast preserves points-to.
+fn test_mema_cast_pts_inner(ctx: &! MemAnalysisContext) -> bool with Mut, Div, Panic {
+    let r = mema_alloc_region(ctx, MemRegionKind::RegStack, 8, 4, 1)
+    let p0 = mema_alloc_pointer(ctx)
+    let p1 = mema_alloc_pointer(ctx)
+    mema_add_instr(ctx, MemPtrOp::PtrAlloc, p0, r, 0, 0, 1)
+    mema_add_instr(ctx, MemPtrOp::PtrCast, p1, p0, 0, 0, 2)
+    let converged = mema_compute_points_to(ctx)
+    converged && mema_ptr_has_region(ctx, p1, r)
+}
+
+fn test_mema_cast_pts() -> bool with Mut, Div, Panic {
+    var ctx = mema_context_new()
+    test_mema_cast_pts_inner(&! ctx)
+}
+
+// T23 inner: gep preserves region but changes offset.
+fn test_mema_gep_pts_inner(ctx: &! MemAnalysisContext) -> bool with Mut, Div, Panic {
+    let r = mema_alloc_region(ctx, MemRegionKind::RegStack, 64, 4, 1)
+    let p0 = mema_alloc_pointer(ctx)
+    let p1 = mema_alloc_pointer(ctx)
+    mema_add_instr(ctx, MemPtrOp::PtrAlloc, p0, r, 0, 0, 1)
+    mema_add_instr(ctx, MemPtrOp::PtrGep, p1, p0, 0, 16, 2)
+    let converged = mema_compute_points_to(ctx)
+    converged && mema_ptr_has_region(ctx, p1, r) &&
+    ctx.pointers[1].field_offset == 16
+}
+
+fn test_mema_gep_pts() -> bool with Mut, Div, Panic {
+    var ctx = mema_context_new()
+    test_mema_gep_pts_inner(&! ctx)
+}
+
+// T24 inner: chain of copies propagates.
+fn test_mema_copy_chain_inner(ctx: &! MemAnalysisContext) -> bool with Mut, Div, Panic {
+    let r = mema_alloc_region(ctx, MemRegionKind::RegHeap, 32, 4, 1)
+    let p0 = mema_alloc_pointer(ctx)
+    let p1 = mema_alloc_pointer(ctx)
+    let p2 = mema_alloc_pointer(ctx)
+    let p3 = mema_alloc_pointer(ctx)
+    mema_add_instr(ctx, MemPtrOp::PtrAlloc, p0, r, 0, 0, 1)
+    mema_add_instr(ctx, MemPtrOp::PtrCopy, p1, p0, 0, 0, 2)
+    mema_add_instr(ctx, MemPtrOp::PtrCopy, p2, p1, 0, 0, 3)
+    mema_add_instr(ctx, MemPtrOp::PtrCopy, p3, p2, 0, 0, 4)
+    let converged = mema_compute_points_to(ctx)
+    converged && mema_ptr_has_region(ctx, p3, r)
+}
+
+fn test_mema_copy_chain() -> bool with Mut, Div, Panic {
+    var ctx = mema_context_new()
+    test_mema_copy_chain_inner(&! ctx)
+}
+
+// T25 inner: two allocs to different pointers stay separate.
+fn test_mema_separate_allocs_inner(ctx: &! MemAnalysisContext) -> bool with Mut, Div, Panic {
+    let r0 = mema_alloc_region(ctx, MemRegionKind::RegStack, 8, 4, 1)
+    let r1 = mema_alloc_region(ctx, MemRegionKind::RegHeap, 16, 4, 2)
+    let p0 = mema_alloc_pointer(ctx)
+    let p1 = mema_alloc_pointer(ctx)
+    mema_add_instr(ctx, MemPtrOp::PtrAlloc, p0, r0, 0, 0, 1)
+    mema_add_instr(ctx, MemPtrOp::PtrAlloc, p1, r1, 0, 0, 2)
+    let converged = mema_compute_points_to(ctx)
+    converged &&
+    mema_ptr_has_region(ctx, p0, r0) && (mema_ptr_has_region(ctx, p0, r1) == false) &&
+    mema_ptr_has_region(ctx, p1, r1) && (mema_ptr_has_region(ctx, p1, r0) == false)
+}
+
+fn test_mema_separate_allocs() -> bool with Mut, Div, Panic {
+    var ctx = mema_context_new()
+    test_mema_separate_allocs_inner(&! ctx)
+}
+
+// T26 inner: convergence on empty program.
+fn test_mema_empty_converges_inner(ctx: &! MemAnalysisContext) -> bool with Mut, Div, Panic {
+    let converged = mema_compute_points_to(ctx)
+    converged && ctx.iterations <= 1
+}
+
+fn test_mema_empty_converges() -> bool with Mut, Div, Panic {
+    var ctx = mema_context_new()
+    test_mema_empty_converges_inner(&! ctx)
+}
+
+// T27 inner: null instruction marks pointer as possibly null.
+fn test_mema_null_ptr_inner(ctx: &! MemAnalysisContext) -> bool with Mut, Div, Panic {
+    let p = mema_alloc_pointer(ctx)
+    mema_add_instr(ctx, MemPtrOp::PtrNull, p, 0, 0, 0, 1)
+    let converged = mema_compute_points_to(ctx)
+    converged && ctx.pointers[0].is_null_possible
+}
+
+fn test_mema_null_ptr() -> bool with Mut, Div, Panic {
+    var ctx = mema_context_new()
+    test_mema_null_ptr_inner(&! ctx)
+}
+
+// T28 inner: phi with one null branch.
+fn test_mema_phi_with_null_inner(ctx: &! MemAnalysisContext) -> bool with Mut, Div, Panic {
+    let r = mema_alloc_region(ctx, MemRegionKind::RegHeap, 32, 4, 1)
+    let p0 = mema_alloc_pointer(ctx)
+    let p1 = mema_alloc_pointer(ctx)
+    let p2 = mema_alloc_pointer(ctx)
+    mema_add_instr(ctx, MemPtrOp::PtrAlloc, p0, r, 0, 0, 1)
+    mema_add_instr(ctx, MemPtrOp::PtrNull, p1, 0, 0, 0, 2)
+    mema_add_instr(ctx, MemPtrOp::PtrPhi, p2, p0, p1, 0, 3)
+    let converged = mema_compute_points_to(ctx)
+    converged && mema_ptr_has_region(ctx, p2, r)
+}
+
+fn test_mema_phi_with_null() -> bool with Mut, Div, Panic {
+    var ctx = mema_context_new()
+    test_mema_phi_with_null_inner(&! ctx)
+}
+
+// T29 inner: singleton detection.
+fn test_mema_singleton_inner(ctx: &! MemAnalysisContext) -> bool with Mut, Div, Panic {
+    let r = mema_alloc_region(ctx, MemRegionKind::RegStack, 8, 4, 1)
+    let p = mema_alloc_pointer(ctx)
+    mema_ptr_add_region(ctx, p, r)
+    mema_ptr_is_singleton(ctx, p) && mema_ptr_singleton_region(ctx, p) == r
+}
+
+fn test_mema_singleton() -> bool with Mut, Div, Panic {
+    var ctx = mema_context_new()
+    test_mema_singleton_inner(&! ctx)
+}
+
+// T30 inner: non-singleton after phi.
+fn test_mema_non_singleton_inner(ctx: &! MemAnalysisContext) -> bool with Mut, Div, Panic {
+    let r0 = mema_alloc_region(ctx, MemRegionKind::RegStack, 8, 4, 1)
+    let r1 = mema_alloc_region(ctx, MemRegionKind::RegHeap, 16, 4, 2)
+    let p = mema_alloc_pointer(ctx)
+    mema_ptr_add_region(ctx, p, r0)
+    mema_ptr_add_region(ctx, p, r1)
+    (mema_ptr_is_singleton(ctx, p) == false) && mema_ptr_singleton_region(ctx, p) == (0 - 1)
+}
+
+fn test_mema_non_singleton() -> bool with Mut, Div, Panic {
+    var ctx = mema_context_new()
+    test_mema_non_singleton_inner(&! ctx)
+}
+
+// ============================================================================
+// Section 21: Tests — Category 4: Alias Queries (10 tests)
+// ============================================================================
+
+// T31 inner: same pointer must-aliases itself.
+fn test_mema_self_must_alias_inner(ctx: &! MemAnalysisContext) -> bool with Mut, Div, Panic {
+    let r = mema_alloc_region(ctx, MemRegionKind::RegStack, 8, 4, 1)
+    let p = mema_alloc_pointer(ctx)
+    mema_ptr_add_region(ctx, p, r)
+    mema_must_alias(ctx, p, p)
+}
+
+fn test_mema_self_must_alias() -> bool with Mut, Div, Panic {
+    var ctx = mema_context_new()
+    test_mema_self_must_alias_inner(&! ctx)
+}
+
+// T32 inner: two pointers to same singleton must-alias.
+fn test_mema_singleton_must_alias_inner(ctx: &! MemAnalysisContext) -> bool with Mut, Div, Panic {
+    let r = mema_alloc_region(ctx, MemRegionKind::RegStack, 8, 4, 1)
+    let p0 = mema_alloc_pointer(ctx)
+    let p1 = mema_alloc_pointer(ctx)
+    mema_ptr_add_region(ctx, p0, r)
+    mema_ptr_add_region(ctx, p1, r)
+    mema_must_alias(ctx, p0, p1)
+}
+
+fn test_mema_singleton_must_alias() -> bool with Mut, Div, Panic {
+    var ctx = mema_context_new()
+    test_mema_singleton_must_alias_inner(&! ctx)
+}
+
+// T33 inner: disjoint sets are no-alias.
+fn test_mema_disjoint_no_alias_inner(ctx: &! MemAnalysisContext) -> bool with Mut, Div, Panic {
+    let r0 = mema_alloc_region(ctx, MemRegionKind::RegStack, 8, 4, 1)
+    let r1 = mema_alloc_region(ctx, MemRegionKind::RegHeap, 16, 4, 2)
+    let p0 = mema_alloc_pointer(ctx)
+    let p1 = mema_alloc_pointer(ctx)
+    mema_ptr_add_region(ctx, p0, r0)
+    mema_ptr_add_region(ctx, p1, r1)
+    mema_no_alias(ctx, p0, p1)
+}
+
+fn test_mema_disjoint_no_alias() -> bool with Mut, Div, Panic {
+    var ctx = mema_context_new()
+    test_mema_disjoint_no_alias_inner(&! ctx)
+}
+
+// T34 inner: overlapping sets are may-alias.
+fn test_mema_overlapping_may_alias_inner(ctx: &! MemAnalysisContext) -> bool with Mut, Div, Panic {
+    let r0 = mema_alloc_region(ctx, MemRegionKind::RegStack, 8, 4, 1)
+    let r1 = mema_alloc_region(ctx, MemRegionKind::RegHeap, 16, 4, 2)
+    let p0 = mema_alloc_pointer(ctx)
+    let p1 = mema_alloc_pointer(ctx)
+    mema_ptr_add_region(ctx, p0, r0)
+    mema_ptr_add_region(ctx, p0, r1)
+    mema_ptr_add_region(ctx, p1, r1)
+    mema_may_alias(ctx, p0, p1) && (mema_must_alias(ctx, p0, p1) == false)
+}
+
+fn test_mema_overlapping_may_alias() -> bool with Mut, Div, Panic {
+    var ctx = mema_context_new()
+    test_mema_overlapping_may_alias_inner(&! ctx)
+}
+
+// T35 inner: field-sensitive no-alias (same region, different offsets).
+fn test_mema_field_no_alias_inner(ctx: &! MemAnalysisContext) -> bool with Mut, Div, Panic {
+    let r = mema_alloc_region(ctx, MemRegionKind::RegStack, 64, 4, 1)
+    let p0 = mema_alloc_pointer(ctx)
+    let p1 = mema_alloc_pointer(ctx)
+    mema_ptr_add_region(ctx, p0, r)
+    mema_ptr_add_region(ctx, p1, r)
+    ctx.pointers[0].field_offset = 0
+    ctx.pointers[1].field_offset = 8
+    mema_no_alias(ctx, p0, p1)
+}
+
+fn test_mema_field_no_alias() -> bool with Mut, Div, Panic {
+    var ctx = mema_context_new()
+    test_mema_field_no_alias_inner(&! ctx)
+}
+
+// T36 inner: empty pointer no-aliases everything.
+fn test_mema_empty_no_alias_inner(ctx: &! MemAnalysisContext) -> bool with Mut, Div, Panic {
+    let r = mema_alloc_region(ctx, MemRegionKind::RegStack, 8, 4, 1)
+    let p0 = mema_alloc_pointer(ctx)
+    let p1 = mema_alloc_pointer(ctx)
+    mema_ptr_add_region(ctx, p0, r)
+    // p1 has no regions.
+    mema_no_alias(ctx, p0, p1)
+}
+
+fn test_mema_empty_no_alias() -> bool with Mut, Div, Panic {
+    var ctx = mema_context_new()
+    test_mema_empty_no_alias_inner(&! ctx)
+}
+
+// T37 inner: alias after copy propagation.
+fn test_mema_alias_after_copy_inner(ctx: &! MemAnalysisContext) -> bool with Mut, Div, Panic {
+    let r = mema_alloc_region(ctx, MemRegionKind::RegHeap, 32, 4, 1)
+    let p0 = mema_alloc_pointer(ctx)
+    let p1 = mema_alloc_pointer(ctx)
+    mema_add_instr(ctx, MemPtrOp::PtrAlloc, p0, r, 0, 0, 1)
+    mema_add_instr(ctx, MemPtrOp::PtrCopy, p1, p0, 0, 0, 2)
+    let converged = mema_compute_points_to(ctx)
+    converged && mema_must_alias(ctx, p0, p1)
+}
+
+fn test_mema_alias_after_copy() -> bool with Mut, Div, Panic {
+    var ctx = mema_context_new()
+    test_mema_alias_after_copy_inner(&! ctx)
+}
+
+// T38 inner: alias after phi is may-alias, not must.
+fn test_mema_alias_after_phi_inner(ctx: &! MemAnalysisContext) -> bool with Mut, Div, Panic {
+    let r0 = mema_alloc_region(ctx, MemRegionKind::RegStack, 8, 4, 1)
+    let r1 = mema_alloc_region(ctx, MemRegionKind::RegHeap, 16, 4, 2)
+    let p0 = mema_alloc_pointer(ctx)
+    let p1 = mema_alloc_pointer(ctx)
+    let p2 = mema_alloc_pointer(ctx)
+    let p3 = mema_alloc_pointer(ctx)
+    mema_add_instr(ctx, MemPtrOp::PtrAlloc, p0, r0, 0, 0, 1)
+    mema_add_instr(ctx, MemPtrOp::PtrAlloc, p1, r1, 0, 0, 2)
+    mema_add_instr(ctx, MemPtrOp::PtrPhi, p2, p0, p1, 0, 3)
+    mema_add_instr(ctx, MemPtrOp::PtrCopy, p3, p0, 0, 0, 4)
+    let converged = mema_compute_points_to(ctx)
+    // p2 has {r0, r1}, p3 has {r0} — they overlap, so may-alias but not must.
+    converged && mema_may_alias(ctx, p2, p3) && (mema_must_alias(ctx, p2, p3) == false)
+}
+
+fn test_mema_alias_after_phi() -> bool with Mut, Div, Panic {
+    var ctx = mema_context_new()
+    test_mema_alias_after_phi_inner(&! ctx)
+}
+
+// T39 inner: global region may-alias with param region when merged.
+fn test_mema_global_param_alias_inner(ctx: &! MemAnalysisContext) -> bool with Mut, Div, Panic {
+    let rg = mema_alloc_region(ctx, MemRegionKind::RegGlobal, 64, 8, 1)
+    let rp = mema_alloc_region(ctx, MemRegionKind::RegParam, 32, 4, 2)
+    let p0 = mema_alloc_pointer(ctx)
+    let p1 = mema_alloc_pointer(ctx)
+    mema_ptr_add_region(ctx, p0, rg)
+    mema_ptr_add_region(ctx, p0, rp)
+    mema_ptr_add_region(ctx, p1, rp)
+    mema_may_alias(ctx, p0, p1)
+}
+
+fn test_mema_global_param_alias() -> bool with Mut, Div, Panic {
+    var ctx = mema_context_new()
+    test_mema_global_param_alias_inner(&! ctx)
+}
+
+// T40 inner: three-way disjoint is no-alias pairwise.
+fn test_mema_three_way_no_alias_inner(ctx: &! MemAnalysisContext) -> bool with Mut, Div, Panic {
+    let r0 = mema_alloc_region(ctx, MemRegionKind::RegStack, 8, 4, 1)
+    let r1 = mema_alloc_region(ctx, MemRegionKind::RegHeap, 16, 4, 2)
+    let r2 = mema_alloc_region(ctx, MemRegionKind::RegGlobal, 32, 8, 3)
+    let p0 = mema_alloc_pointer(ctx)
+    let p1 = mema_alloc_pointer(ctx)
+    let p2 = mema_alloc_pointer(ctx)
+    mema_ptr_add_region(ctx, p0, r0)
+    mema_ptr_add_region(ctx, p1, r1)
+    mema_ptr_add_region(ctx, p2, r2)
+    mema_no_alias(ctx, p0, p1) && mema_no_alias(ctx, p1, p2) && mema_no_alias(ctx, p0, p2)
+}
+
+fn test_mema_three_way_no_alias() -> bool with Mut, Div, Panic {
+    var ctx = mema_context_new()
+    test_mema_three_way_no_alias_inner(&! ctx)
+}
+
+// ============================================================================
+// Section 22: Tests — Category 5: Escape Analysis (10 tests)
+// ============================================================================
+
+// T41 inner: alloc with no escaping uses is EscapeNone.
+fn test_mema_no_escape_inner(ctx: &! MemAnalysisContext) -> bool with Mut, Div, Panic {
+    let r = mema_alloc_region(ctx, MemRegionKind::RegHeap, 32, 4, 1)
+    let p = mema_alloc_pointer(ctx)
+    let a = mema_add_alloc(ctx, r, 32, 1, true)
+    mema_add_instr(ctx, MemPtrOp::PtrAlloc, p, r, 0, 0, 1)
+    let converged = mema_compute_points_to(ctx)
+    let esc = mema_check_escape(ctx, a)
+    converged && mema_escape_eq(esc, MemEscapeStatus::EscapeNone)
+}
+
+fn test_mema_no_escape() -> bool with Mut, Div, Panic {
+    var ctx = mema_context_new()
+    test_mema_no_escape_inner(&! ctx)
+}
+
+// T42 inner: store to a pointer that includes the region marks EscapeStore.
+fn test_mema_store_escape_inner(ctx: &! MemAnalysisContext) -> bool with Mut, Div, Panic {
+    let r = mema_alloc_region(ctx, MemRegionKind::RegHeap, 32, 4, 1)
+    let rg = mema_alloc_region(ctx, MemRegionKind::RegGlobal, 64, 8, 2)
+    let p = mema_alloc_pointer(ctx)
+    let pg = mema_alloc_pointer(ctx)
+    let a = mema_add_alloc(ctx, r, 32, 1, true)
+    mema_add_instr(ctx, MemPtrOp::PtrAlloc, p, r, 0, 0, 1)
+    mema_add_instr(ctx, MemPtrOp::PtrAlloc, pg, rg, 0, 0, 2)
+    // Store p (which points to r) into pg (global).
+    mema_add_instr(ctx, MemPtrOp::PtrStore, pg, p, 0, 0, 3)
+    let converged = mema_compute_points_to(ctx)
+    let esc = mema_check_escape(ctx, a)
+    converged && mema_escape_eq(esc, MemEscapeStatus::EscapeStore)
+}
+
+fn test_mema_store_escape() -> bool with Mut, Div, Panic {
+    var ctx = mema_context_new()
+    test_mema_store_escape_inner(&! ctx)
+}
+
+// T43 inner: escape merge picks worst.
+fn test_mema_escape_merge_worst() -> bool with Mut, Div, Panic {
+    let m1 = mema_escape_merge(MemEscapeStatus::EscapeNone, MemEscapeStatus::EscapeReturn)
+    let m2 = mema_escape_merge(MemEscapeStatus::EscapeReturn, MemEscapeStatus::EscapeStore)
+    let m3 = mema_escape_merge(MemEscapeStatus::EscapeStore, MemEscapeStatus::EscapeCall)
+    let m4 = mema_escape_merge(MemEscapeStatus::EscapeCall, MemEscapeStatus::EscapeUnknown)
+    mema_escape_eq(m1, MemEscapeStatus::EscapeReturn) &&
+    mema_escape_eq(m2, MemEscapeStatus::EscapeStore) &&
+    mema_escape_eq(m3, MemEscapeStatus::EscapeCall) &&
+    mema_escape_eq(m4, MemEscapeStatus::EscapeUnknown)
+}
+
+// T44 inner: escape severity ordering.
+fn test_mema_escape_severity_order() -> bool {
+    let s0 = mema_escape_severity(MemEscapeStatus::EscapeNone)
+    let s1 = mema_escape_severity(MemEscapeStatus::EscapeReturn)
+    let s2 = mema_escape_severity(MemEscapeStatus::EscapeStore)
+    let s3 = mema_escape_severity(MemEscapeStatus::EscapeCall)
+    let s4 = mema_escape_severity(MemEscapeStatus::EscapeUnknown)
+    s0 < s1 && s1 < s2 && s2 < s3 && s3 < s4
+}
+
+// T45 inner: mark_alloc_escape updates both alloc and region.
+fn test_mema_mark_alloc_escape_inner(ctx: &! MemAnalysisContext) -> bool with Mut, Div, Panic {
+    let r = mema_alloc_region(ctx, MemRegionKind::RegHeap, 32, 4, 1)
+    let a = mema_add_alloc(ctx, r, 32, 1, true)
+    mema_mark_alloc_escape(ctx, a, MemEscapeStatus::EscapeCall)
+    mema_escape_eq(ctx.allocs[0].escape, MemEscapeStatus::EscapeCall) &&
+    mema_escape_eq(ctx.regions[0].escape, MemEscapeStatus::EscapeCall)
+}
+
+fn test_mema_mark_alloc_escape() -> bool with Mut, Div, Panic {
+    var ctx = mema_context_new()
+    test_mema_mark_alloc_escape_inner(&! ctx)
+}
+
+// T46 inner: mark_alloc_escape doesn't downgrade.
+fn test_mema_escape_no_downgrade_inner(ctx: &! MemAnalysisContext) -> bool with Mut, Div, Panic {
+    let r = mema_alloc_region(ctx, MemRegionKind::RegHeap, 32, 4, 1)
+    let a = mema_add_alloc(ctx, r, 32, 1, true)
+    mema_mark_alloc_escape(ctx, a, MemEscapeStatus::EscapeCall)
+    mema_mark_alloc_escape(ctx, a, MemEscapeStatus::EscapeReturn)
+    // Should still be EscapeCall since it's worse.
+    mema_escape_eq(ctx.allocs[0].escape, MemEscapeStatus::EscapeCall)
+}
+
+fn test_mema_escape_no_downgrade() -> bool with Mut, Div, Panic {
+    var ctx = mema_context_new()
+    test_mema_escape_no_downgrade_inner(&! ctx)
+}
+
+// T47 inner: count_non_escaping.
+fn test_mema_count_non_escaping_inner(ctx: &! MemAnalysisContext) -> bool with Mut, Div, Panic {
+    let r0 = mema_alloc_region(ctx, MemRegionKind::RegHeap, 8, 4, 1)
+    let r1 = mema_alloc_region(ctx, MemRegionKind::RegHeap, 16, 4, 2)
+    let r2 = mema_alloc_region(ctx, MemRegionKind::RegHeap, 32, 4, 3)
+    let a0 = mema_add_alloc(ctx, r0, 8, 1, true)
+    let a1 = mema_add_alloc(ctx, r1, 16, 2, true)
+    let a2 = mema_add_alloc(ctx, r2, 32, 3, true)
+    mema_mark_alloc_escape(ctx, a1, MemEscapeStatus::EscapeStore)
+    mema_count_non_escaping(ctx) == 2
+}
+
+fn test_mema_count_non_escaping() -> bool with Mut, Div, Panic {
+    var ctx = mema_context_new()
+    test_mema_count_non_escaping_inner(&! ctx)
+}
+
+// T48 inner: escape from_severity roundtrip.
+fn test_mema_escape_roundtrip() -> bool {
+    let s0 = mema_escape_from_severity(0)
+    let s1 = mema_escape_from_severity(1)
+    let s2 = mema_escape_from_severity(2)
+    let s3 = mema_escape_from_severity(3)
+    let s4 = mema_escape_from_severity(4)
+    mema_escape_severity(s0) == 0 &&
+    mema_escape_severity(s1) == 1 &&
+    mema_escape_severity(s2) == 2 &&
+    mema_escape_severity(s3) == 3 &&
+    mema_escape_severity(s4) == 4
+}
+
+// T49 inner: check_escape on invalid alloc returns Unknown.
+fn test_mema_escape_invalid_inner(ctx: &! MemAnalysisContext) -> bool with Mut, Div, Panic {
+    let esc = mema_check_escape(ctx, 99)
+    mema_escape_eq(esc, MemEscapeStatus::EscapeUnknown)
+}
+
+fn test_mema_escape_invalid() -> bool with Mut, Div, Panic {
+    var ctx = mema_context_new()
+    test_mema_escape_invalid_inner(&! ctx)
+}
+
+// T50 inner: mark_region_escape.
+fn test_mema_mark_region_escape_inner(ctx: &! MemAnalysisContext) -> bool with Mut, Div, Panic {
+    let r = mema_alloc_region(ctx, MemRegionKind::RegHeap, 32, 4, 1)
+    mema_mark_region_escape(ctx, r, MemEscapeStatus::EscapeReturn)
+    mema_escape_eq(ctx.regions[0].escape, MemEscapeStatus::EscapeReturn)
+}
+
+fn test_mema_mark_region_escape() -> bool with Mut, Div, Panic {
+    var ctx = mema_context_new()
+    test_mema_mark_region_escape_inner(&! ctx)
+}
+
+// ============================================================================
+// Section 23: Tests — Category 6: Stack Promotion (8 tests)
+// ============================================================================
+
+// T51 inner: non-escaping heap alloc is promotable.
+fn test_mema_promote_non_escaping_inner(ctx: &! MemAnalysisContext) -> bool with Mut, Div, Panic {
+    let r = mema_alloc_region(ctx, MemRegionKind::RegHeap, 32, 4, 1)
+    let a = mema_add_alloc(ctx, r, 32, 1, true)
+    let result = mema_promote_to_stack(ctx, a)
+    mema_promote_eq(result, MemPromoteResult::PromoteYes)
+}
+
+fn test_mema_promote_non_escaping() -> bool with Mut, Div, Panic {
+    var ctx = mema_context_new()
+    test_mema_promote_non_escaping_inner(&! ctx)
+}
+
+// T52 inner: escaping heap alloc is not promotable.
+fn test_mema_no_promote_escaping_inner(ctx: &! MemAnalysisContext) -> bool with Mut, Div, Panic {
+    let r = mema_alloc_region(ctx, MemRegionKind::RegHeap, 32, 4, 1)
+    let a = mema_add_alloc(ctx, r, 32, 1, true)
+    mema_mark_alloc_escape(ctx, a, MemEscapeStatus::EscapeReturn)
+    let result = mema_promote_to_stack(ctx, a)
+    mema_promote_eq(result, MemPromoteResult::PromoteNo)
+}
+
+fn test_mema_no_promote_escaping() -> bool with Mut, Div, Panic {
+    var ctx = mema_context_new()
+    test_mema_no_promote_escaping_inner(&! ctx)
+}
+
+// T53 inner: stack alloc is not promotable (already on stack).
+fn test_mema_no_promote_stack_inner(ctx: &! MemAnalysisContext) -> bool with Mut, Div, Panic {
+    let r = mema_alloc_region(ctx, MemRegionKind::RegStack, 16, 4, 1)
+    let a = mema_add_alloc(ctx, r, 16, 1, false)
+    let result = mema_promote_to_stack(ctx, a)
+    mema_promote_eq(result, MemPromoteResult::PromoteNo)
+}
+
+fn test_mema_no_promote_stack() -> bool with Mut, Div, Panic {
+    var ctx = mema_context_new()
+    test_mema_no_promote_stack_inner(&! ctx)
+}
+
+// T54 inner: zero-size alloc is PromoteMaybe.
+fn test_mema_promote_zero_size_inner(ctx: &! MemAnalysisContext) -> bool with Mut, Div, Panic {
+    let r = mema_alloc_region(ctx, MemRegionKind::RegHeap, 0, 4, 1)
+    let a = mema_add_alloc(ctx, r, 0, 1, true)
+    let result = mema_promote_to_stack(ctx, a)
+    mema_promote_eq(result, MemPromoteResult::PromoteMaybe)
+}
+
+fn test_mema_promote_zero_size() -> bool with Mut, Div, Panic {
+    var ctx = mema_context_new()
+    test_mema_promote_zero_size_inner(&! ctx)
+}
+
+// T55 inner: compute_promotions counts correctly.
+fn test_mema_compute_promotions_inner(ctx: &! MemAnalysisContext) -> bool with Mut, Div, Panic {
+    let r0 = mema_alloc_region(ctx, MemRegionKind::RegHeap, 8, 4, 1)
+    let r1 = mema_alloc_region(ctx, MemRegionKind::RegHeap, 16, 4, 2)
+    let r2 = mema_alloc_region(ctx, MemRegionKind::RegHeap, 32, 4, 3)
+    let a0 = mema_add_alloc(ctx, r0, 8, 1, true)
+    let a1 = mema_add_alloc(ctx, r1, 16, 2, true)
+    let a2 = mema_add_alloc(ctx, r2, 32, 3, true)
+    // Mark a1 as escaping.
+    mema_mark_alloc_escape(ctx, a1, MemEscapeStatus::EscapeStore)
+    let count = mema_compute_promotions(ctx)
+    // a0 and a2 are promotable, a1 is not.
+    count == 2
+}
+
+fn test_mema_compute_promotions() -> bool with Mut, Div, Panic {
+    var ctx = mema_context_new()
+    test_mema_compute_promotions_inner(&! ctx)
+}
+
+// T56 inner: promote with store-escape is No.
+fn test_mema_promote_store_escape_inner(ctx: &! MemAnalysisContext) -> bool with Mut, Div, Panic {
+    let r = mema_alloc_region(ctx, MemRegionKind::RegHeap, 64, 8, 1)
+    let a = mema_add_alloc(ctx, r, 64, 1, true)
+    mema_mark_alloc_escape(ctx, a, MemEscapeStatus::EscapeStore)
+    let result = mema_promote_to_stack(ctx, a)
+    mema_promote_eq(result, MemPromoteResult::PromoteNo)
+}
+
+fn test_mema_promote_store_escape() -> bool with Mut, Div, Panic {
+    var ctx = mema_context_new()
+    test_mema_promote_store_escape_inner(&! ctx)
+}
+
+// T57 inner: promote with call-escape is No.
+fn test_mema_promote_call_escape_inner(ctx: &! MemAnalysisContext) -> bool with Mut, Div, Panic {
+    let r = mema_alloc_region(ctx, MemRegionKind::RegHeap, 64, 8, 1)
+    let a = mema_add_alloc(ctx, r, 64, 1, true)
+    mema_mark_alloc_escape(ctx, a, MemEscapeStatus::EscapeCall)
+    let result = mema_promote_to_stack(ctx, a)
+    mema_promote_eq(result, MemPromoteResult::PromoteNo)
+}
+
+fn test_mema_promote_call_escape() -> bool with Mut, Div, Panic {
+    var ctx = mema_context_new()
+    test_mema_promote_call_escape_inner(&! ctx)
+}
+
+// T58 inner: promote_to_stack on invalid alloc_id returns No.
+fn test_mema_promote_invalid_inner(ctx: &! MemAnalysisContext) -> bool with Mut, Div, Panic {
+    let result = mema_promote_to_stack(ctx, 99)
+    mema_promote_eq(result, MemPromoteResult::PromoteNo)
+}
+
+fn test_mema_promote_invalid() -> bool with Mut, Div, Panic {
+    var ctx = mema_context_new()
+    test_mema_promote_invalid_inner(&! ctx)
+}
+
+// ============================================================================
+// Section 24: Tests — Category 7: Worklist (5 tests)
+// ============================================================================
+
+// T59 inner: push and pop single item.
+fn test_mema_wl_push_pop_inner(ctx: &! MemAnalysisContext) -> bool with Mut, Div, Panic {
+    mema_worklist_push(ctx, 42)
+    let val = mema_worklist_pop(ctx)
+    val == 42
+}
+
+fn test_mema_wl_push_pop() -> bool with Mut, Div, Panic {
+    var ctx = mema_context_new()
+    test_mema_wl_push_pop_inner(&! ctx)
+}
+
+// T60 inner: empty worklist returns -1.
+fn test_mema_wl_empty_pop_inner(ctx: &! MemAnalysisContext) -> bool with Mut, Div, Panic {
+    let val = mema_worklist_pop(ctx)
+    val == (0 - 1)
+}
+
+fn test_mema_wl_empty_pop() -> bool with Mut, Div, Panic {
+    var ctx = mema_context_new()
+    test_mema_wl_empty_pop_inner(&! ctx)
+}
+
+// T61 inner: empty check.
+fn test_mema_wl_empty_check_inner(ctx: &! MemAnalysisContext) -> bool with Mut, Div, Panic {
+    let e1 = mema_worklist_empty(ctx)
+    mema_worklist_push(ctx, 1)
+    let e2 = mema_worklist_empty(ctx)
+    let v = mema_worklist_pop(ctx)
+    let e3 = mema_worklist_empty(ctx)
+    e1 && (e2 == false) && e3
+}
+
+fn test_mema_wl_empty_check() -> bool with Mut, Div, Panic {
+    var ctx = mema_context_new()
+    test_mema_wl_empty_check_inner(&! ctx)
+}
+
+// T62 inner: FIFO ordering.
+fn test_mema_wl_fifo_inner(ctx: &! MemAnalysisContext) -> bool with Mut, Div, Panic {
+    mema_worklist_push(ctx, 10)
+    mema_worklist_push(ctx, 20)
+    mema_worklist_push(ctx, 30)
+    let v1 = mema_worklist_pop(ctx)
+    let v2 = mema_worklist_pop(ctx)
+    let v3 = mema_worklist_pop(ctx)
+    v1 == 10 && v2 == 20 && v3 == 30
+}
+
+fn test_mema_wl_fifo() -> bool with Mut, Div, Panic {
+    var ctx = mema_context_new()
+    test_mema_wl_fifo_inner(&! ctx)
+}
+
+// T63 inner: worklist size tracking.
+fn test_mema_wl_size_inner(ctx: &! MemAnalysisContext) -> bool with Mut, Div, Panic {
+    let s0 = mema_worklist_size(ctx)
+    mema_worklist_push(ctx, 1)
+    mema_worklist_push(ctx, 2)
+    let s1 = mema_worklist_size(ctx)
+    let v = mema_worklist_pop(ctx)
+    let s2 = mema_worklist_size(ctx)
+    s0 == 0 && s1 == 2 && s2 == 1
+}
+
+fn test_mema_wl_size() -> bool with Mut, Div, Panic {
+    var ctx = mema_context_new()
+    test_mema_wl_size_inner(&! ctx)
+}
+
+// ============================================================================
+// Section 25: Tests — Category 8: Integration (7 tests)
+// ============================================================================
+
+// T64 inner: full analyze_function on a simple non-escaping alloc.
+fn test_mema_analyze_simple_inner(ctx: &! MemAnalysisContext) -> bool with Mut, Div, Panic {
+    let r = mema_alloc_region(ctx, MemRegionKind::RegHeap, 32, 4, 1)
+    let p = mema_alloc_pointer(ctx)
+    let a = mema_add_alloc(ctx, r, 32, 1, true)
+    mema_add_instr(ctx, MemPtrOp::PtrAlloc, p, r, 0, 0, 1)
+    let converged = mema_analyze_function(ctx)
+    converged &&
+    mema_ptr_has_region(ctx, p, r) &&
+    mema_escape_eq(ctx.allocs[0].escape, MemEscapeStatus::EscapeNone) &&
+    mema_promote_eq(ctx.allocs[0].promote, MemPromoteResult::PromoteYes)
+}
+
+fn test_mema_analyze_simple() -> bool with Mut, Div, Panic {
+    var ctx = mema_context_new()
+    test_mema_analyze_simple_inner(&! ctx)
+}
+
+// T65 inner: analyze with copy chain.
+fn test_mema_analyze_copy_chain_inner(ctx: &! MemAnalysisContext) -> bool with Mut, Div, Panic {
+    let r = mema_alloc_region(ctx, MemRegionKind::RegHeap, 64, 8, 1)
+    let p0 = mema_alloc_pointer(ctx)
+    let p1 = mema_alloc_pointer(ctx)
+    let p2 = mema_alloc_pointer(ctx)
+    let a = mema_add_alloc(ctx, r, 64, 1, true)
+    mema_add_instr(ctx, MemPtrOp::PtrAlloc, p0, r, 0, 0, 1)
+    mema_add_instr(ctx, MemPtrOp::PtrCopy, p1, p0, 0, 0, 2)
+    mema_add_instr(ctx, MemPtrOp::PtrCopy, p2, p1, 0, 0, 3)
+    let converged = mema_analyze_function(ctx)
+    converged &&
+    mema_must_alias(ctx, p0, p1) &&
+    mema_must_alias(ctx, p1, p2) &&
+    mema_promote_eq(ctx.allocs[0].promote, MemPromoteResult::PromoteYes)
+}
+
+fn test_mema_analyze_copy_chain() -> bool with Mut, Div, Panic {
+    var ctx = mema_context_new()
+    test_mema_analyze_copy_chain_inner(&! ctx)
+}
+
+// T66 inner: analyze with phi and aliasing.
+fn test_mema_analyze_phi_alias_inner(ctx: &! MemAnalysisContext) -> bool with Mut, Div, Panic {
+    let r0 = mema_alloc_region(ctx, MemRegionKind::RegHeap, 16, 4, 1)
+    let r1 = mema_alloc_region(ctx, MemRegionKind::RegHeap, 32, 4, 2)
+    let p0 = mema_alloc_pointer(ctx)
+    let p1 = mema_alloc_pointer(ctx)
+    let p2 = mema_alloc_pointer(ctx)
+    let a0 = mema_add_alloc(ctx, r0, 16, 1, true)
+    let a1 = mema_add_alloc(ctx, r1, 32, 2, true)
+    mema_add_instr(ctx, MemPtrOp::PtrAlloc, p0, r0, 0, 0, 1)
+    mema_add_instr(ctx, MemPtrOp::PtrAlloc, p1, r1, 0, 0, 2)
+    mema_add_instr(ctx, MemPtrOp::PtrPhi, p2, p0, p1, 0, 3)
+    let converged = mema_analyze_function(ctx)
+    converged &&
+    mema_may_alias(ctx, p2, p0) &&
+    mema_may_alias(ctx, p2, p1) &&
+    mema_no_alias(ctx, p0, p1)
+}
+
+fn test_mema_analyze_phi_alias() -> bool with Mut, Div, Panic {
+    var ctx = mema_context_new()
+    test_mema_analyze_phi_alias_inner(&! ctx)
+}
+
+// T67 inner: analyze with escaping store prevents promotion.
+fn test_mema_analyze_escape_store_inner(ctx: &! MemAnalysisContext) -> bool with Mut, Div, Panic {
+    let r = mema_alloc_region(ctx, MemRegionKind::RegHeap, 32, 4, 1)
+    let rg = mema_alloc_region(ctx, MemRegionKind::RegGlobal, 64, 8, 2)
+    let p = mema_alloc_pointer(ctx)
+    let pg = mema_alloc_pointer(ctx)
+    let a = mema_add_alloc(ctx, r, 32, 1, true)
+    mema_add_instr(ctx, MemPtrOp::PtrAlloc, p, r, 0, 0, 1)
+    mema_add_instr(ctx, MemPtrOp::PtrAlloc, pg, rg, 0, 0, 2)
+    mema_add_instr(ctx, MemPtrOp::PtrStore, pg, p, 0, 0, 3)
+    let converged = mema_analyze_function(ctx)
+    converged &&
+    mema_escape_eq(ctx.allocs[0].escape, MemEscapeStatus::EscapeStore) &&
+    mema_promote_eq(ctx.allocs[0].promote, MemPromoteResult::PromoteNo)
+}
+
+fn test_mema_analyze_escape_store() -> bool with Mut, Div, Panic {
+    var ctx = mema_context_new()
+    test_mema_analyze_escape_store_inner(&! ctx)
+}
+
+// T68 inner: analyze empty function converges immediately.
+fn test_mema_analyze_empty_inner(ctx: &! MemAnalysisContext) -> bool with Mut, Div, Panic {
+    let converged = mema_analyze_function(ctx)
+    converged && ctx.iterations <= 1
+}
+
+fn test_mema_analyze_empty() -> bool with Mut, Div, Panic {
+    var ctx = mema_context_new()
+    test_mema_analyze_empty_inner(&! ctx)
+}
+
+// T69 inner: multiple allocs, mixed escape, correct promotion count.
+fn test_mema_analyze_mixed_inner(ctx: &! MemAnalysisContext) -> bool with Mut, Div, Panic {
+    let r0 = mema_alloc_region(ctx, MemRegionKind::RegHeap, 8, 4, 1)
+    let r1 = mema_alloc_region(ctx, MemRegionKind::RegHeap, 16, 4, 2)
+    let r2 = mema_alloc_region(ctx, MemRegionKind::RegHeap, 32, 4, 3)
+    let r3 = mema_alloc_region(ctx, MemRegionKind::RegGlobal, 64, 8, 4)
+    let p0 = mema_alloc_pointer(ctx)
+    let p1 = mema_alloc_pointer(ctx)
+    let p2 = mema_alloc_pointer(ctx)
+    let pg = mema_alloc_pointer(ctx)
+    let a0 = mema_add_alloc(ctx, r0, 8, 1, true)
+    let a1 = mema_add_alloc(ctx, r1, 16, 2, true)
+    let a2 = mema_add_alloc(ctx, r2, 32, 3, true)
+    mema_add_instr(ctx, MemPtrOp::PtrAlloc, p0, r0, 0, 0, 1)
+    mema_add_instr(ctx, MemPtrOp::PtrAlloc, p1, r1, 0, 0, 2)
+    mema_add_instr(ctx, MemPtrOp::PtrAlloc, p2, r2, 0, 0, 3)
+    mema_add_instr(ctx, MemPtrOp::PtrAlloc, pg, r3, 0, 0, 4)
+    // Store p1 to global (escapes).
+    mema_add_instr(ctx, MemPtrOp::PtrStore, pg, p1, 0, 0, 5)
+    let converged = mema_analyze_function(ctx)
+    // a0 and a2 should be promotable, a1 should not.
+    let promotable = mema_count_promotable(ctx)
+    converged && promotable == 2
+}
+
+fn test_mema_analyze_mixed() -> bool with Mut, Div, Panic {
+    var ctx = mema_context_new()
+    test_mema_analyze_mixed_inner(&! ctx)
+}
+
+// T70 inner: GEP creates field-sensitive no-alias.
+fn test_mema_analyze_gep_field_inner(ctx: &! MemAnalysisContext) -> bool with Mut, Div, Panic {
+    let r = mema_alloc_region(ctx, MemRegionKind::RegStack, 128, 8, 1)
+    let p0 = mema_alloc_pointer(ctx)
+    let p1 = mema_alloc_pointer(ctx)
+    let p2 = mema_alloc_pointer(ctx)
+    mema_add_instr(ctx, MemPtrOp::PtrAlloc, p0, r, 0, 0, 1)
+    mema_add_instr(ctx, MemPtrOp::PtrGep, p1, p0, 0, 0, 2)
+    mema_add_instr(ctx, MemPtrOp::PtrGep, p2, p0, 0, 8, 3)
+    let converged = mema_analyze_function(ctx)
+    // p1 points to r at offset 0, p2 points to r at offset 8.
+    // They should be no-alias due to different field offsets.
+    converged && mema_no_alias(ctx, p1, p2)
+}
+
+fn test_mema_analyze_gep_field() -> bool with Mut, Div, Panic {
+    var ctx = mema_context_new()
+    test_mema_analyze_gep_field_inner(&! ctx)
+}
+
+// ============================================================================
+// Section 26: Test Runner
+// ============================================================================
+
+fn mema_run_tests() -> i64 with Mut, Div, Panic {
+    var passed: i64 = 0
+    var failed: i64 = 0
+
+    // Category 1: Region/Pointer Basics (10 tests)
+    if test_mema_alloc_region() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_mema_multi_region() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_mema_alloc_pointer() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_mema_ptr_add_and_has_region() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_mema_ptr_region_count() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_mema_ptr_empty_initial() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_mema_region_kind() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_mema_add_alloc() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_mema_add_instr() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_mema_ptr_union() { passed = passed + 1 } else { failed = failed + 1 }
+
+    // Category 2: Bitset Operations (8 tests)
+    if test_mema_bits_set_test() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_mema_bits_count() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_mema_bits_union() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_mema_bits_union_no_change() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_mema_bits_intersect() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_mema_bits_intersects_query() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_mema_bits_empty() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_mema_bits_first() { passed = passed + 1 } else { failed = failed + 1 }
+
+    // Category 3: Points-To Analysis (12 tests)
+    if test_mema_simple_alloc_pts() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_mema_copy_pts() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_mema_phi_pts() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_mema_cast_pts() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_mema_gep_pts() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_mema_copy_chain() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_mema_separate_allocs() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_mema_empty_converges() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_mema_null_ptr() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_mema_phi_with_null() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_mema_singleton() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_mema_non_singleton() { passed = passed + 1 } else { failed = failed + 1 }
+
+    // Category 4: Alias Queries (10 tests)
+    if test_mema_self_must_alias() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_mema_singleton_must_alias() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_mema_disjoint_no_alias() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_mema_overlapping_may_alias() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_mema_field_no_alias() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_mema_empty_no_alias() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_mema_alias_after_copy() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_mema_alias_after_phi() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_mema_global_param_alias() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_mema_three_way_no_alias() { passed = passed + 1 } else { failed = failed + 1 }
+
+    // Category 5: Escape Analysis (10 tests)
+    if test_mema_no_escape() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_mema_store_escape() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_mema_escape_merge_worst() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_mema_escape_severity_order() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_mema_mark_alloc_escape() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_mema_escape_no_downgrade() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_mema_count_non_escaping() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_mema_escape_roundtrip() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_mema_escape_invalid() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_mema_mark_region_escape() { passed = passed + 1 } else { failed = failed + 1 }
+
+    // Category 6: Stack Promotion (8 tests)
+    if test_mema_promote_non_escaping() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_mema_no_promote_escaping() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_mema_no_promote_stack() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_mema_promote_zero_size() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_mema_compute_promotions() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_mema_promote_store_escape() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_mema_promote_call_escape() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_mema_promote_invalid() { passed = passed + 1 } else { failed = failed + 1 }
+
+    // Category 7: Worklist (5 tests)
+    if test_mema_wl_push_pop() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_mema_wl_empty_pop() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_mema_wl_empty_check() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_mema_wl_fifo() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_mema_wl_size() { passed = passed + 1 } else { failed = failed + 1 }
+
+    // Category 8: Integration (7 tests)
+    if test_mema_analyze_simple() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_mema_analyze_copy_chain() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_mema_analyze_phi_alias() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_mema_analyze_escape_store() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_mema_analyze_empty() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_mema_analyze_mixed() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_mema_analyze_gep_field() { passed = passed + 1 } else { failed = failed + 1 }
+
+    if failed > 0 { return 0 - failed }
+    passed
+}

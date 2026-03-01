@@ -1,0 +1,2256 @@
+// Lint rule engine — dead code detection, unused variables, naming conventions,
+// style warnings, configurable severity.
+//
+// Arena-based, flat-array design. No heap allocation. All structs use fixed-size
+// arrays with separate count fields.
+//
+// Functions use `lint_` prefix to avoid namespace collisions. Free-function API
+// operating on `&! LintContext` (exclusive ref) or `& LintContext` (shared ref).
+//
+// Severity lattice:  Allow < Warn < Deny < Forbid
+// Categories:        Unused, DeadCode, Naming, Style, Complexity, Safety, Performance
+//
+// Test runner: `lint_run_tests()` returns positive count on success, negative on failure.
+
+// ============================================================================
+// CONSTANTS
+// ============================================================================
+
+let LINT_MAX_RULES: i64 = 256
+let LINT_MAX_VARS: i64 = 1024
+let LINT_MAX_DIAGNOSTICS: i64 = 512
+let LINT_MAX_SCOPES: i64 = 64
+let LINT_MAX_DEAD_NODES: i64 = 512
+let LINT_MAX_NAME_LEN: i64 = 128
+
+// Severity tags
+let LINT_SEV_ALLOW: i64 = 0
+let LINT_SEV_WARN: i64 = 1
+let LINT_SEV_DENY: i64 = 2
+let LINT_SEV_FORBID: i64 = 3
+
+// Category tags
+let LINT_CAT_UNUSED: i64 = 0
+let LINT_CAT_DEAD_CODE: i64 = 1
+let LINT_CAT_NAMING: i64 = 2
+let LINT_CAT_STYLE: i64 = 3
+let LINT_CAT_COMPLEXITY: i64 = 4
+let LINT_CAT_SAFETY: i64 = 5
+let LINT_CAT_PERFORMANCE: i64 = 6
+
+// Rule ID tags
+let LINT_RULE_UNUSED_VAR: i64 = 0
+let LINT_RULE_UNUSED_FN: i64 = 1
+let LINT_RULE_UNUSED_IMPORT: i64 = 2
+let LINT_RULE_DEAD_CODE_AFTER_RETURN: i64 = 3
+let LINT_RULE_DEAD_CODE_AFTER_BREAK: i64 = 4
+let LINT_RULE_UNREACHABLE_BRANCH: i64 = 5
+let LINT_RULE_SHADOWING: i64 = 6
+let LINT_RULE_SNAKE_CASE: i64 = 7
+let LINT_RULE_PASCAL_CASE: i64 = 8
+let LINT_RULE_UNNECESSARY_MUT: i64 = 9
+let LINT_RULE_EMPTY_BODY: i64 = 10
+let LINT_RULE_TOO_MANY_PARAMS: i64 = 11
+let LINT_RULE_TOO_DEEP_NESTING: i64 = 12
+let LINT_RULE_UNSAFE_INDEX: i64 = 13
+let LINT_RULE_LARGE_ARRAY: i64 = 14
+let LINT_RULE_UNUSED_RESULT: i64 = 15
+let LINT_RULE_COUNT: i64 = 16
+
+// Fix kind tags
+let LINT_FIX_REMOVE: i64 = 0
+let LINT_FIX_RENAME: i64 = 1
+let LINT_FIX_REPLACE: i64 = 2
+let LINT_FIX_INSERT: i64 = 3
+let LINT_FIX_NONE: i64 = 4
+
+// Thresholds
+let LINT_MAX_PARAMS: i64 = 8
+let LINT_MAX_NESTING: i64 = 5
+let LINT_LARGE_ARRAY_THRESHOLD: i64 = 65536
+
+// ASCII constants for naming checks
+let ASCII_A_UPPER: i8 = 65 as i8
+let ASCII_Z_UPPER: i8 = 90 as i8
+let ASCII_A_LOWER: i8 = 97 as i8
+let ASCII_Z_LOWER: i8 = 122 as i8
+let ASCII_ZERO: i8 = 48 as i8
+let ASCII_NINE: i8 = 57 as i8
+let ASCII_UNDERSCORE: i8 = 95 as i8
+
+// ============================================================================
+// ENUMS
+// ============================================================================
+
+enum LintSeverity {
+    SevAllow,
+    SevWarn,
+    SevDeny,
+    SevForbid,
+}
+
+enum LintCategory {
+    CatUnused,
+    CatDeadCode,
+    CatNaming,
+    CatStyle,
+    CatComplexity,
+    CatSafety,
+    CatPerformance,
+}
+
+enum LintRuleId {
+    RuleUnusedVar,
+    RuleUnusedFn,
+    RuleUnusedImport,
+    RuleDeadCodeAfterReturn,
+    RuleDeadCodeAfterBreak,
+    RuleUnreachableBranch,
+    RuleShadowing,
+    RuleSnakeCase,
+    RulePascalCase,
+    RuleUnnecessaryMut,
+    RuleEmptyBody,
+    RuleTooManyParams,
+    RuleTooDeepNesting,
+    RuleUnsafeIndex,
+    RuleLargeArray,
+    RuleUnusedResult,
+}
+
+enum LintFixKind {
+    FixRemove,
+    FixRename,
+    FixReplace,
+    FixInsert,
+    FixNone,
+}
+
+// ============================================================================
+// STRUCTS
+// ============================================================================
+
+struct LintNameBuf {
+    buf: [i8; 128],
+    len: i64,
+}
+
+struct LintRule {
+    id: LintRuleId,
+    severity: LintSeverity,
+    category: LintCategory,
+    enabled: bool,
+}
+
+struct LintVarUsage {
+    var_id: i64,
+    name_hash: i64,
+    defined_at: i64,
+    used: bool,
+    mutated: bool,
+    is_mutable: bool,
+    scope_depth: i64,
+}
+
+struct LintDiagnostic {
+    rule_id: LintRuleId,
+    severity: LintSeverity,
+    line: i64,
+    col: i64,
+    message: [i8; 128],
+    msg_len: i64,
+    fix_kind: LintFixKind,
+}
+
+struct LintScope {
+    depth: i64,
+    var_start: i64,
+    has_return: bool,
+    has_break: bool,
+}
+
+struct LintDeadNode {
+    line: i64,
+    end_line: i64,
+    reason: i64,
+}
+
+struct LintRuleSet {
+    rules: [LintRule; 256],
+    count: i64,
+}
+
+struct LintContext {
+    rules: LintRuleSet,
+    vars: [LintVarUsage; 1024],
+    var_count: i64,
+    diagnostics: [LintDiagnostic; 512],
+    diag_count: i64,
+    scopes: [LintScope; 64],
+    scope_depth: i64,
+    dead_nodes: [LintDeadNode; 512],
+    dead_count: i64,
+    nesting_depth: i64,
+    param_count: i64,
+    current_fn_line: i64,
+}
+
+// ============================================================================
+// EMPTY / DEFAULT CONSTRUCTORS
+// ============================================================================
+
+fn lint_empty_name_buf() -> LintNameBuf {
+    LintNameBuf {
+        buf: [0 as i8; 128],
+        len: 0,
+    }
+}
+
+fn lint_empty_rule() -> LintRule {
+    LintRule {
+        id: LintRuleId::RuleUnusedVar,
+        severity: LintSeverity::SevAllow,
+        category: LintCategory::CatUnused,
+        enabled: false,
+    }
+}
+
+fn lint_empty_var_usage() -> LintVarUsage {
+    LintVarUsage {
+        var_id: 0,
+        name_hash: 0,
+        defined_at: 0,
+        used: false,
+        mutated: false,
+        is_mutable: false,
+        scope_depth: 0,
+    }
+}
+
+fn lint_empty_diagnostic() -> LintDiagnostic {
+    LintDiagnostic {
+        rule_id: LintRuleId::RuleUnusedVar,
+        severity: LintSeverity::SevAllow,
+        line: 0,
+        col: 0,
+        message: [0 as i8; 128],
+        msg_len: 0,
+        fix_kind: LintFixKind::FixNone,
+    }
+}
+
+fn lint_empty_scope() -> LintScope {
+    LintScope {
+        depth: 0,
+        var_start: 0,
+        has_return: false,
+        has_break: false,
+    }
+}
+
+fn lint_empty_dead_node() -> LintDeadNode {
+    LintDeadNode {
+        line: 0,
+        end_line: 0,
+        reason: 0,
+    }
+}
+
+// ============================================================================
+// SEVERITY / CATEGORY / RULE-ID CONVERSION HELPERS
+// ============================================================================
+
+fn lint_severity_to_i64(s: LintSeverity) -> i64 {
+    match s {
+        LintSeverity::SevAllow => LINT_SEV_ALLOW,
+        LintSeverity::SevWarn => LINT_SEV_WARN,
+        LintSeverity::SevDeny => LINT_SEV_DENY,
+        LintSeverity::SevForbid => LINT_SEV_FORBID,
+    }
+}
+
+fn lint_i64_to_severity(v: i64) -> LintSeverity {
+    if v == LINT_SEV_WARN { return LintSeverity::SevWarn }
+    if v == LINT_SEV_DENY { return LintSeverity::SevDeny }
+    if v == LINT_SEV_FORBID { return LintSeverity::SevForbid }
+    LintSeverity::SevAllow
+}
+
+fn lint_severity_ge(a: LintSeverity, b: LintSeverity) -> bool {
+    lint_severity_to_i64(a) >= lint_severity_to_i64(b)
+}
+
+fn lint_severity_eq(a: LintSeverity, b: LintSeverity) -> bool {
+    lint_severity_to_i64(a) == lint_severity_to_i64(b)
+}
+
+fn lint_category_to_i64(c: LintCategory) -> i64 {
+    match c {
+        LintCategory::CatUnused => LINT_CAT_UNUSED,
+        LintCategory::CatDeadCode => LINT_CAT_DEAD_CODE,
+        LintCategory::CatNaming => LINT_CAT_NAMING,
+        LintCategory::CatStyle => LINT_CAT_STYLE,
+        LintCategory::CatComplexity => LINT_CAT_COMPLEXITY,
+        LintCategory::CatSafety => LINT_CAT_SAFETY,
+        LintCategory::CatPerformance => LINT_CAT_PERFORMANCE,
+    }
+}
+
+fn lint_category_eq(a: LintCategory, b: LintCategory) -> bool {
+    lint_category_to_i64(a) == lint_category_to_i64(b)
+}
+
+fn lint_rule_id_to_i64(r: LintRuleId) -> i64 {
+    match r {
+        LintRuleId::RuleUnusedVar => LINT_RULE_UNUSED_VAR,
+        LintRuleId::RuleUnusedFn => LINT_RULE_UNUSED_FN,
+        LintRuleId::RuleUnusedImport => LINT_RULE_UNUSED_IMPORT,
+        LintRuleId::RuleDeadCodeAfterReturn => LINT_RULE_DEAD_CODE_AFTER_RETURN,
+        LintRuleId::RuleDeadCodeAfterBreak => LINT_RULE_DEAD_CODE_AFTER_BREAK,
+        LintRuleId::RuleUnreachableBranch => LINT_RULE_UNREACHABLE_BRANCH,
+        LintRuleId::RuleShadowing => LINT_RULE_SHADOWING,
+        LintRuleId::RuleSnakeCase => LINT_RULE_SNAKE_CASE,
+        LintRuleId::RulePascalCase => LINT_RULE_PASCAL_CASE,
+        LintRuleId::RuleUnnecessaryMut => LINT_RULE_UNNECESSARY_MUT,
+        LintRuleId::RuleEmptyBody => LINT_RULE_EMPTY_BODY,
+        LintRuleId::RuleTooManyParams => LINT_RULE_TOO_MANY_PARAMS,
+        LintRuleId::RuleTooDeepNesting => LINT_RULE_TOO_DEEP_NESTING,
+        LintRuleId::RuleUnsafeIndex => LINT_RULE_UNSAFE_INDEX,
+        LintRuleId::RuleLargeArray => LINT_RULE_LARGE_ARRAY,
+        LintRuleId::RuleUnusedResult => LINT_RULE_UNUSED_RESULT,
+    }
+}
+
+fn lint_rule_id_eq(a: LintRuleId, b: LintRuleId) -> bool {
+    lint_rule_id_to_i64(a) == lint_rule_id_to_i64(b)
+}
+
+fn lint_i64_to_rule_id(v: i64) -> LintRuleId {
+    if v == LINT_RULE_UNUSED_FN { return LintRuleId::RuleUnusedFn }
+    if v == LINT_RULE_UNUSED_IMPORT { return LintRuleId::RuleUnusedImport }
+    if v == LINT_RULE_DEAD_CODE_AFTER_RETURN { return LintRuleId::RuleDeadCodeAfterReturn }
+    if v == LINT_RULE_DEAD_CODE_AFTER_BREAK { return LintRuleId::RuleDeadCodeAfterBreak }
+    if v == LINT_RULE_UNREACHABLE_BRANCH { return LintRuleId::RuleUnreachableBranch }
+    if v == LINT_RULE_SHADOWING { return LintRuleId::RuleShadowing }
+    if v == LINT_RULE_SNAKE_CASE { return LintRuleId::RuleSnakeCase }
+    if v == LINT_RULE_PASCAL_CASE { return LintRuleId::RulePascalCase }
+    if v == LINT_RULE_UNNECESSARY_MUT { return LintRuleId::RuleUnnecessaryMut }
+    if v == LINT_RULE_EMPTY_BODY { return LintRuleId::RuleEmptyBody }
+    if v == LINT_RULE_TOO_MANY_PARAMS { return LintRuleId::RuleTooManyParams }
+    if v == LINT_RULE_TOO_DEEP_NESTING { return LintRuleId::RuleTooDeepNesting }
+    if v == LINT_RULE_UNSAFE_INDEX { return LintRuleId::RuleUnsafeIndex }
+    if v == LINT_RULE_LARGE_ARRAY { return LintRuleId::RuleLargeArray }
+    if v == LINT_RULE_UNUSED_RESULT { return LintRuleId::RuleUnusedResult }
+    LintRuleId::RuleUnusedVar
+}
+
+fn lint_fix_kind_to_i64(f: LintFixKind) -> i64 {
+    match f {
+        LintFixKind::FixRemove => LINT_FIX_REMOVE,
+        LintFixKind::FixRename => LINT_FIX_RENAME,
+        LintFixKind::FixReplace => LINT_FIX_REPLACE,
+        LintFixKind::FixInsert => LINT_FIX_INSERT,
+        LintFixKind::FixNone => LINT_FIX_NONE,
+    }
+}
+
+fn lint_fix_kind_eq(a: LintFixKind, b: LintFixKind) -> bool {
+    lint_fix_kind_to_i64(a) == lint_fix_kind_to_i64(b)
+}
+
+// ============================================================================
+// RULE CATEGORY MAPPING
+// ============================================================================
+
+fn lint_rule_category(id: LintRuleId) -> LintCategory {
+    let tag = lint_rule_id_to_i64(id)
+    // Unused: 0, 1, 2, 9, 15
+    if tag == LINT_RULE_UNUSED_VAR { return LintCategory::CatUnused }
+    if tag == LINT_RULE_UNUSED_FN { return LintCategory::CatUnused }
+    if tag == LINT_RULE_UNUSED_IMPORT { return LintCategory::CatUnused }
+    if tag == LINT_RULE_UNUSED_RESULT { return LintCategory::CatUnused }
+    // Dead code: 3, 4, 5
+    if tag == LINT_RULE_DEAD_CODE_AFTER_RETURN { return LintCategory::CatDeadCode }
+    if tag == LINT_RULE_DEAD_CODE_AFTER_BREAK { return LintCategory::CatDeadCode }
+    if tag == LINT_RULE_UNREACHABLE_BRANCH { return LintCategory::CatDeadCode }
+    // Naming: 7, 8
+    if tag == LINT_RULE_SNAKE_CASE { return LintCategory::CatNaming }
+    if tag == LINT_RULE_PASCAL_CASE { return LintCategory::CatNaming }
+    // Style: 6, 9, 10
+    if tag == LINT_RULE_SHADOWING { return LintCategory::CatStyle }
+    if tag == LINT_RULE_UNNECESSARY_MUT { return LintCategory::CatStyle }
+    if tag == LINT_RULE_EMPTY_BODY { return LintCategory::CatStyle }
+    // Complexity: 11, 12
+    if tag == LINT_RULE_TOO_MANY_PARAMS { return LintCategory::CatComplexity }
+    if tag == LINT_RULE_TOO_DEEP_NESTING { return LintCategory::CatComplexity }
+    // Safety: 13
+    if tag == LINT_RULE_UNSAFE_INDEX { return LintCategory::CatSafety }
+    // Performance: 14
+    if tag == LINT_RULE_LARGE_ARRAY { return LintCategory::CatPerformance }
+    LintCategory::CatUnused
+}
+
+// ============================================================================
+// RULE DEFAULT SEVERITY
+// ============================================================================
+
+fn lint_rule_default_severity(id: LintRuleId) -> LintSeverity {
+    let tag = lint_rule_id_to_i64(id)
+    // Most rules default to Warn
+    if tag == LINT_RULE_UNSAFE_INDEX { return LintSeverity::SevDeny }
+    if tag == LINT_RULE_LARGE_ARRAY { return LintSeverity::SevDeny }
+    LintSeverity::SevWarn
+}
+
+// ============================================================================
+// RULE SET CONSTRUCTION
+// ============================================================================
+
+fn lint_make_rule(id: LintRuleId) -> LintRule {
+    LintRule {
+        id: id,
+        severity: lint_rule_default_severity(id),
+        category: lint_rule_category(id),
+        enabled: true,
+    }
+}
+
+fn lint_rule_set_default() -> LintRuleSet with Mut, Div, Panic {
+    var rs = LintRuleSet {
+        rules: [lint_empty_rule(); 256],
+        count: 0,
+    }
+
+    // Register all 16 rules
+    rs.rules[0] = lint_make_rule(LintRuleId::RuleUnusedVar)
+    rs.rules[1] = lint_make_rule(LintRuleId::RuleUnusedFn)
+    rs.rules[2] = lint_make_rule(LintRuleId::RuleUnusedImport)
+    rs.rules[3] = lint_make_rule(LintRuleId::RuleDeadCodeAfterReturn)
+    rs.rules[4] = lint_make_rule(LintRuleId::RuleDeadCodeAfterBreak)
+    rs.rules[5] = lint_make_rule(LintRuleId::RuleUnreachableBranch)
+    rs.rules[6] = lint_make_rule(LintRuleId::RuleShadowing)
+    rs.rules[7] = lint_make_rule(LintRuleId::RuleSnakeCase)
+    rs.rules[8] = lint_make_rule(LintRuleId::RulePascalCase)
+    rs.rules[9] = lint_make_rule(LintRuleId::RuleUnnecessaryMut)
+    rs.rules[10] = lint_make_rule(LintRuleId::RuleEmptyBody)
+    rs.rules[11] = lint_make_rule(LintRuleId::RuleTooManyParams)
+    rs.rules[12] = lint_make_rule(LintRuleId::RuleTooDeepNesting)
+    rs.rules[13] = lint_make_rule(LintRuleId::RuleUnsafeIndex)
+    rs.rules[14] = lint_make_rule(LintRuleId::RuleLargeArray)
+    rs.rules[15] = lint_make_rule(LintRuleId::RuleUnusedResult)
+    rs.count = LINT_RULE_COUNT
+
+    rs
+}
+
+// ============================================================================
+// RULE SET QUERIES
+// ============================================================================
+
+fn lint_find_rule_index(rs: &LintRuleSet, rule_id: LintRuleId) -> i64 with Mut, Div, Panic {
+    var i: i64 = 0
+    while i < rs.count {
+        if lint_rule_id_eq(rs.rules[i as usize].id, rule_id) {
+            return i
+        }
+        i = i + 1
+    }
+    0 - 1
+}
+
+fn lint_rule_is_enabled(rs: &LintRuleSet, rule_id: LintRuleId) -> bool with Mut, Div, Panic {
+    let idx = lint_find_rule_index(rs, rule_id)
+    if idx < 0 { return false }
+    rs.rules[idx as usize].enabled
+}
+
+fn lint_rule_severity(rs: &LintRuleSet, rule_id: LintRuleId) -> LintSeverity with Mut, Div, Panic {
+    let idx = lint_find_rule_index(rs, rule_id)
+    if idx < 0 { return LintSeverity::SevAllow }
+    rs.rules[idx as usize].severity
+}
+
+// ============================================================================
+// CONTEXT CONSTRUCTION
+// ============================================================================
+
+fn lint_context_new() -> LintContext with Mut, Div, Panic {
+    LintContext {
+        rules: lint_rule_set_default(),
+        vars: [lint_empty_var_usage(); 1024],
+        var_count: 0,
+        diagnostics: [lint_empty_diagnostic(); 512],
+        diag_count: 0,
+        scopes: [lint_empty_scope(); 64],
+        scope_depth: 0,
+        dead_nodes: [lint_empty_dead_node(); 512],
+        dead_count: 0,
+        nesting_depth: 0,
+        param_count: 0,
+        current_fn_line: 0,
+    }
+}
+
+// ============================================================================
+// CONTEXT RESET
+// ============================================================================
+
+fn lint_context_reset(ctx: &! LintContext) with Mut {
+    ctx.var_count = 0
+    ctx.diag_count = 0
+    ctx.scope_depth = 0
+    ctx.dead_count = 0
+    ctx.nesting_depth = 0
+    ctx.param_count = 0
+    ctx.current_fn_line = 0
+}
+
+// ============================================================================
+// RULE CONFIGURATION
+// ============================================================================
+
+fn lint_set_severity(ctx: &! LintContext, rule_id: LintRuleId, severity: LintSeverity) with Mut, Div, Panic {
+    let idx = lint_find_rule_index(&ctx.rules, rule_id)
+    if idx >= 0 {
+        ctx.rules.rules[idx as usize].severity = severity
+    }
+}
+
+fn lint_enable_rule(ctx: &! LintContext, rule_id: LintRuleId) with Mut, Div, Panic {
+    let idx = lint_find_rule_index(&ctx.rules, rule_id)
+    if idx >= 0 {
+        ctx.rules.rules[idx as usize].enabled = true
+    }
+}
+
+fn lint_disable_rule(ctx: &! LintContext, rule_id: LintRuleId) with Mut, Div, Panic {
+    let idx = lint_find_rule_index(&ctx.rules, rule_id)
+    if idx >= 0 {
+        ctx.rules.rules[idx as usize].enabled = false
+    }
+}
+
+fn lint_set_category_severity(ctx: &! LintContext, cat: LintCategory, severity: LintSeverity) with Mut, Div, Panic {
+    var i: i64 = 0
+    while i < ctx.rules.count {
+        if lint_category_eq(ctx.rules.rules[i as usize].category, cat) {
+            ctx.rules.rules[i as usize].severity = severity
+        }
+        i = i + 1
+    }
+}
+
+fn lint_enable_category(ctx: &! LintContext, cat: LintCategory) with Mut, Div, Panic {
+    var i: i64 = 0
+    while i < ctx.rules.count {
+        if lint_category_eq(ctx.rules.rules[i as usize].category, cat) {
+            ctx.rules.rules[i as usize].enabled = true
+        }
+        i = i + 1
+    }
+}
+
+fn lint_disable_category(ctx: &! LintContext, cat: LintCategory) with Mut, Div, Panic {
+    var i: i64 = 0
+    while i < ctx.rules.count {
+        if lint_category_eq(ctx.rules.rules[i as usize].category, cat) {
+            ctx.rules.rules[i as usize].enabled = false
+        }
+        i = i + 1
+    }
+}
+
+// ============================================================================
+// NAME BUFFER HELPERS
+// ============================================================================
+
+fn lint_name_from_bytes(a: i8, b: i8, c: i8, d: i8, e: i8, f: i8, g: i8, h: i8, count: i64) -> LintNameBuf with Mut, Div, Panic {
+    var n = LintNameBuf { buf: [0 as i8; 128], len: count }
+    if count > 0 { n.buf[0] = a }
+    if count > 1 { n.buf[1] = b }
+    if count > 2 { n.buf[2] = c }
+    if count > 3 { n.buf[3] = d }
+    if count > 4 { n.buf[4] = e }
+    if count > 5 { n.buf[5] = f }
+    if count > 6 { n.buf[6] = g }
+    if count > 7 { n.buf[7] = h }
+    n
+}
+
+fn lint_name_from_12(a: i8, b: i8, c: i8, d: i8, e: i8, f: i8, g: i8, h: i8,
+                     i2: i8, j: i8, k: i8, l: i8, count: i64) -> LintNameBuf with Mut, Div, Panic {
+    var n = lint_name_from_bytes(a, b, c, d, e, f, g, h, count)
+    if count > 8 { n.buf[8] = i2 }
+    if count > 9 { n.buf[9] = j }
+    if count > 10 { n.buf[10] = k }
+    if count > 11 { n.buf[11] = l }
+    n
+}
+
+fn lint_name_eq(a: &LintNameBuf, b: &LintNameBuf) -> bool with Mut, Div, Panic {
+    if a.len != b.len { return false }
+    var i: i64 = 0
+    while i < a.len {
+        if a.buf[i as usize] != b.buf[i as usize] { return false }
+        i = i + 1
+    }
+    true
+}
+
+fn lint_name_hash(name: &LintNameBuf) -> i64 with Mut, Div, Panic {
+    var h: i64 = 5381
+    var i: i64 = 0
+    while i < name.len {
+        let ch = name.buf[i as usize] as i64
+        h = h * 33 + ch
+        i = i + 1
+    }
+    h
+}
+
+fn lint_name_copy(dst: &! LintNameBuf, src: &LintNameBuf) with Mut, Div, Panic {
+    dst.len = src.len
+    var i: i64 = 0
+    while i < src.len {
+        dst.buf[i as usize] = src.buf[i as usize]
+        i = i + 1
+    }
+}
+
+fn lint_name_set_byte(name: &! LintNameBuf, idx: i64, val: i8) with Mut, Div, Panic {
+    if idx >= 0 {
+        if idx < LINT_MAX_NAME_LEN {
+            name.buf[idx as usize] = val
+        }
+    }
+}
+
+fn lint_name_len(name: &LintNameBuf) -> i64 {
+    name.len
+}
+
+// ============================================================================
+// ASCII CHARACTER CLASSIFICATION
+// ============================================================================
+
+fn lint_is_upper(ch: i8) -> bool {
+    if ch >= ASCII_A_UPPER {
+        if ch <= ASCII_Z_UPPER {
+            return true
+        }
+    }
+    false
+}
+
+fn lint_is_lower(ch: i8) -> bool {
+    if ch >= ASCII_A_LOWER {
+        if ch <= ASCII_Z_LOWER {
+            return true
+        }
+    }
+    false
+}
+
+fn lint_is_digit(ch: i8) -> bool {
+    if ch >= ASCII_ZERO {
+        if ch <= ASCII_NINE {
+            return true
+        }
+    }
+    false
+}
+
+fn lint_is_underscore(ch: i8) -> bool {
+    ch == ASCII_UNDERSCORE
+}
+
+fn lint_is_alpha(ch: i8) -> bool {
+    if lint_is_upper(ch) { return true }
+    lint_is_lower(ch)
+}
+
+fn lint_is_alnum(ch: i8) -> bool {
+    if lint_is_alpha(ch) { return true }
+    lint_is_digit(ch)
+}
+
+fn lint_to_lower(ch: i8) -> i8 {
+    if lint_is_upper(ch) {
+        return (ch as i64 + 32) as i8
+    }
+    ch
+}
+
+fn lint_to_upper(ch: i8) -> i8 {
+    if lint_is_lower(ch) {
+        return (ch as i64 - 32) as i8
+    }
+    ch
+}
+
+// ============================================================================
+// NAMING CONVENTION CHECKS (pure functions)
+// ============================================================================
+
+// snake_case: all lowercase + underscores + digits, starts with lowercase or underscore
+// Examples: foo_bar, _private, x2, get_value
+fn lint_is_snake_case(name: &LintNameBuf) -> bool with Mut, Div, Panic {
+    if name.len == 0 { return false }
+
+    // First character must be lowercase letter or underscore
+    let first = name.buf[0]
+    if lint_is_lower(first) == false {
+        if lint_is_underscore(first) == false {
+            return false
+        }
+    }
+
+    var i: i64 = 0
+    while i < name.len {
+        let ch = name.buf[i as usize]
+        if lint_is_lower(ch) == false {
+            if lint_is_digit(ch) == false {
+                if lint_is_underscore(ch) == false {
+                    return false
+                }
+            }
+        }
+        i = i + 1
+    }
+
+    // No double underscores
+    var j: i64 = 1
+    while j < name.len {
+        if lint_is_underscore(name.buf[j as usize]) {
+            if lint_is_underscore(name.buf[(j - 1) as usize]) {
+                return false
+            }
+        }
+        j = j + 1
+    }
+
+    // Must not end with underscore
+    if name.len > 1 {
+        if lint_is_underscore(name.buf[(name.len - 1) as usize]) {
+            return false
+        }
+    }
+
+    true
+}
+
+// PascalCase: starts with uppercase, then mix of upper/lower/digits, no underscores
+// Examples: FooBar, HttpClient, Vec3
+fn lint_is_pascal_case(name: &LintNameBuf) -> bool with Mut, Div, Panic {
+    if name.len == 0 { return false }
+
+    // First character must be uppercase
+    let first = name.buf[0]
+    if lint_is_upper(first) == false { return false }
+
+    // Remaining: alpha or digit, no underscores
+    var i: i64 = 1
+    while i < name.len {
+        let ch = name.buf[i as usize]
+        if lint_is_alnum(ch) == false {
+            return false
+        }
+        i = i + 1
+    }
+
+    // Must have at least one lowercase letter (otherwise it's SCREAMING_CASE)
+    var has_lower = false
+    var k: i64 = 0
+    while k < name.len {
+        if lint_is_lower(name.buf[k as usize]) {
+            has_lower = true
+        }
+        k = k + 1
+    }
+
+    has_lower
+}
+
+// UPPER_SNAKE_CASE: all uppercase + underscores + digits
+// Examples: MAX_SIZE, FOO_BAR_2, HTTP_STATUS
+fn lint_is_upper_snake_case(name: &LintNameBuf) -> bool with Mut, Div, Panic {
+    if name.len == 0 { return false }
+
+    // First character must be uppercase
+    let first = name.buf[0]
+    if lint_is_upper(first) == false { return false }
+
+    // All characters: uppercase, digit, or underscore
+    var i: i64 = 0
+    while i < name.len {
+        let ch = name.buf[i as usize]
+        if lint_is_upper(ch) == false {
+            if lint_is_digit(ch) == false {
+                if lint_is_underscore(ch) == false {
+                    return false
+                }
+            }
+        }
+        i = i + 1
+    }
+
+    // No double underscores
+    var j: i64 = 1
+    while j < name.len {
+        if lint_is_underscore(name.buf[j as usize]) {
+            if lint_is_underscore(name.buf[(j - 1) as usize]) {
+                return false
+            }
+        }
+        j = j + 1
+    }
+
+    // Must not end with underscore
+    if lint_is_underscore(name.buf[(name.len - 1) as usize]) {
+        return false
+    }
+
+    true
+}
+
+// camelCase: starts with lowercase, then mixed, no underscores
+fn lint_is_camel_case(name: &LintNameBuf) -> bool with Mut, Div, Panic {
+    if name.len == 0 { return false }
+
+    let first = name.buf[0]
+    if lint_is_lower(first) == false { return false }
+
+    var i: i64 = 1
+    while i < name.len {
+        let ch = name.buf[i as usize]
+        if lint_is_alnum(ch) == false {
+            return false
+        }
+        i = i + 1
+    }
+
+    // Must have at least one uppercase letter (otherwise it might be just lowercase)
+    var has_upper = false
+    var k: i64 = 0
+    while k < name.len {
+        if lint_is_upper(name.buf[k as usize]) {
+            has_upper = true
+        }
+        k = k + 1
+    }
+
+    has_upper
+}
+
+// ============================================================================
+// DIAGNOSTIC EMISSION
+// ============================================================================
+
+fn lint_add_diagnostic(ctx: &! LintContext, rule_id: LintRuleId, line: i64, col: i64, msg: &LintNameBuf) with Mut, Div, Panic {
+    // Check if rule is enabled
+    if lint_rule_is_enabled(&ctx.rules, rule_id) == false { return }
+
+    // Check capacity
+    if ctx.diag_count >= LINT_MAX_DIAGNOSTICS { return }
+
+    let sev = lint_rule_severity(&ctx.rules, rule_id)
+
+    // Skip if severity is Allow
+    if lint_severity_eq(sev, LintSeverity::SevAllow) { return }
+
+    // Determine fix kind based on rule
+    let fix = lint_suggest_fix(rule_id)
+
+    var diag = LintDiagnostic {
+        rule_id: rule_id,
+        severity: sev,
+        line: line,
+        col: col,
+        message: [0 as i8; 128],
+        msg_len: msg.len,
+        fix_kind: fix,
+    }
+
+    // Copy message bytes
+    var i: i64 = 0
+    while i < msg.len {
+        if i < LINT_MAX_NAME_LEN {
+            diag.message[i as usize] = msg.buf[i as usize]
+        }
+        i = i + 1
+    }
+
+    ctx.diagnostics[ctx.diag_count as usize] = diag
+    ctx.diag_count = ctx.diag_count + 1
+}
+
+fn lint_add_diagnostic_simple(ctx: &! LintContext, rule_id: LintRuleId, line: i64, col: i64) with Mut, Div, Panic {
+    let msg = lint_empty_name_buf()
+    lint_add_diagnostic(ctx, rule_id, line, col, &msg)
+}
+
+fn lint_suggest_fix(rule_id: LintRuleId) -> LintFixKind {
+    let tag = lint_rule_id_to_i64(rule_id)
+    if tag == LINT_RULE_UNUSED_VAR { return LintFixKind::FixRemove }
+    if tag == LINT_RULE_UNUSED_FN { return LintFixKind::FixRemove }
+    if tag == LINT_RULE_UNUSED_IMPORT { return LintFixKind::FixRemove }
+    if tag == LINT_RULE_DEAD_CODE_AFTER_RETURN { return LintFixKind::FixRemove }
+    if tag == LINT_RULE_DEAD_CODE_AFTER_BREAK { return LintFixKind::FixRemove }
+    if tag == LINT_RULE_UNREACHABLE_BRANCH { return LintFixKind::FixRemove }
+    if tag == LINT_RULE_SHADOWING { return LintFixKind::FixRename }
+    if tag == LINT_RULE_SNAKE_CASE { return LintFixKind::FixRename }
+    if tag == LINT_RULE_PASCAL_CASE { return LintFixKind::FixRename }
+    if tag == LINT_RULE_UNNECESSARY_MUT { return LintFixKind::FixReplace }
+    if tag == LINT_RULE_EMPTY_BODY { return LintFixKind::FixInsert }
+    if tag == LINT_RULE_UNSAFE_INDEX { return LintFixKind::FixReplace }
+    LintFixKind::FixNone
+}
+
+// ============================================================================
+// DIAGNOSTIC QUERIES
+// ============================================================================
+
+fn lint_diagnostic_count(ctx: &LintContext) -> i64 {
+    ctx.diag_count
+}
+
+fn lint_has_errors(ctx: &LintContext) -> bool with Mut, Div, Panic {
+    var i: i64 = 0
+    while i < ctx.diag_count {
+        let sev = ctx.diagnostics[i as usize].severity
+        if lint_severity_ge(sev, LintSeverity::SevDeny) {
+            return true
+        }
+        i = i + 1
+    }
+    false
+}
+
+fn lint_has_warnings(ctx: &LintContext) -> bool with Mut, Div, Panic {
+    var i: i64 = 0
+    while i < ctx.diag_count {
+        let sev = ctx.diagnostics[i as usize].severity
+        if lint_severity_eq(sev, LintSeverity::SevWarn) {
+            return true
+        }
+        i = i + 1
+    }
+    false
+}
+
+fn lint_count_by_severity(ctx: &LintContext, sev: LintSeverity) -> i64 with Mut, Div, Panic {
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < ctx.diag_count {
+        if lint_severity_eq(ctx.diagnostics[i as usize].severity, sev) {
+            count = count + 1
+        }
+        i = i + 1
+    }
+    count
+}
+
+fn lint_count_by_rule(ctx: &LintContext, rule_id: LintRuleId) -> i64 with Mut, Div, Panic {
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < ctx.diag_count {
+        if lint_rule_id_eq(ctx.diagnostics[i as usize].rule_id, rule_id) {
+            count = count + 1
+        }
+        i = i + 1
+    }
+    count
+}
+
+fn lint_count_by_category(ctx: &LintContext, cat: LintCategory) -> i64 with Mut, Div, Panic {
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < ctx.diag_count {
+        let rid = ctx.diagnostics[i as usize].rule_id
+        let rule_cat = lint_rule_category(rid)
+        if lint_category_eq(rule_cat, cat) {
+            count = count + 1
+        }
+        i = i + 1
+    }
+    count
+}
+
+fn lint_get_diagnostic_line(ctx: &LintContext, idx: i64) -> i64 with Div, Panic {
+    if idx < 0 { return 0 - 1 }
+    if idx >= ctx.diag_count { return 0 - 1 }
+    ctx.diagnostics[idx as usize].line
+}
+
+fn lint_get_diagnostic_rule(ctx: &LintContext, idx: i64) -> LintRuleId with Div, Panic {
+    if idx < 0 { return LintRuleId::RuleUnusedVar }
+    if idx >= ctx.diag_count { return LintRuleId::RuleUnusedVar }
+    ctx.diagnostics[idx as usize].rule_id
+}
+
+fn lint_get_diagnostic_fix(ctx: &LintContext, idx: i64) -> LintFixKind with Div, Panic {
+    if idx < 0 { return LintFixKind::FixNone }
+    if idx >= ctx.diag_count { return LintFixKind::FixNone }
+    ctx.diagnostics[idx as usize].fix_kind
+}
+
+// ============================================================================
+// VARIABLE TRACKING
+// ============================================================================
+
+fn lint_declare_var(ctx: &! LintContext, name_hash: i64, is_mutable: bool, line: i64) -> i64 with Mut, Div, Panic {
+    if ctx.var_count >= LINT_MAX_VARS { return 0 - 1 }
+
+    let id = ctx.var_count
+    ctx.vars[id as usize] = LintVarUsage {
+        var_id: id,
+        name_hash: name_hash,
+        defined_at: line,
+        used: false,
+        mutated: false,
+        is_mutable: is_mutable,
+        scope_depth: ctx.scope_depth,
+    }
+    ctx.var_count = ctx.var_count + 1
+    id
+}
+
+fn lint_mark_used(ctx: &! LintContext, var_id: i64) with Mut, Div, Panic {
+    if var_id < 0 { return }
+    if var_id >= ctx.var_count { return }
+    ctx.vars[var_id as usize].used = true
+}
+
+fn lint_mark_mutated(ctx: &! LintContext, var_id: i64) with Mut, Div, Panic {
+    if var_id < 0 { return }
+    if var_id >= ctx.var_count { return }
+    ctx.vars[var_id as usize].mutated = true
+    ctx.vars[var_id as usize].used = true
+}
+
+fn lint_find_var_by_hash(ctx: &LintContext, name_hash: i64) -> i64 with Mut, Div, Panic {
+    // Search from most recent to oldest (innermost scope first)
+    var i = ctx.var_count - 1
+    while i >= 0 {
+        if ctx.vars[i as usize].name_hash == name_hash {
+            return i
+        }
+        i = i - 1
+    }
+    0 - 1
+}
+
+fn lint_find_var_in_scope(ctx: &LintContext, name_hash: i64, scope_start: i64) -> i64 with Mut, Div, Panic {
+    var i: i64 = scope_start
+    while i < ctx.var_count {
+        if ctx.vars[i as usize].name_hash == name_hash {
+            return i
+        }
+        i = i + 1
+    }
+    0 - 1
+}
+
+fn lint_var_is_used(ctx: &LintContext, var_id: i64) -> bool with Div, Panic {
+    if var_id < 0 { return false }
+    if var_id >= ctx.var_count { return false }
+    ctx.vars[var_id as usize].used
+}
+
+fn lint_var_is_mutated(ctx: &LintContext, var_id: i64) -> bool with Div, Panic {
+    if var_id < 0 { return false }
+    if var_id >= ctx.var_count { return false }
+    ctx.vars[var_id as usize].mutated
+}
+
+fn lint_var_is_mutable(ctx: &LintContext, var_id: i64) -> bool with Div, Panic {
+    if var_id < 0 { return false }
+    if var_id >= ctx.var_count { return false }
+    ctx.vars[var_id as usize].is_mutable
+}
+
+fn lint_var_defined_at(ctx: &LintContext, var_id: i64) -> i64 with Div, Panic {
+    if var_id < 0 { return 0 }
+    if var_id >= ctx.var_count { return 0 }
+    ctx.vars[var_id as usize].defined_at
+}
+
+// ============================================================================
+// SCOPE MANAGEMENT
+// ============================================================================
+
+fn lint_enter_scope(ctx: &! LintContext) with Mut, Div, Panic {
+    if ctx.scope_depth >= LINT_MAX_SCOPES { return }
+
+    ctx.scopes[ctx.scope_depth as usize] = LintScope {
+        depth: ctx.scope_depth,
+        var_start: ctx.var_count,
+        has_return: false,
+        has_break: false,
+    }
+    ctx.scope_depth = ctx.scope_depth + 1
+}
+
+fn lint_exit_scope(ctx: &! LintContext) with Mut, Div, Panic {
+    if ctx.scope_depth <= 0 { return }
+
+    let scope_idx = ctx.scope_depth - 1
+    let scope = ctx.scopes[scope_idx as usize]
+
+    // Check for unused variables in this scope
+    lint_check_scope_unused(ctx, scope.var_start)
+
+    // Pop scope
+    ctx.scope_depth = ctx.scope_depth - 1
+}
+
+fn lint_check_scope_unused(ctx: &! LintContext, scope_start: i64) with Mut, Div, Panic {
+    var i: i64 = scope_start
+    while i < ctx.var_count {
+        let v = ctx.vars[i as usize]
+        if v.used == false {
+            let msg = lint_empty_name_buf()
+            lint_add_diagnostic(ctx, LintRuleId::RuleUnusedVar, v.defined_at, 0, &msg)
+        }
+        i = i + 1
+    }
+}
+
+fn lint_current_scope_has_return(ctx: &LintContext) -> bool with Div, Panic {
+    if ctx.scope_depth <= 0 { return false }
+    ctx.scopes[(ctx.scope_depth - 1) as usize].has_return
+}
+
+fn lint_current_scope_has_break(ctx: &LintContext) -> bool with Div, Panic {
+    if ctx.scope_depth <= 0 { return false }
+    ctx.scopes[(ctx.scope_depth - 1) as usize].has_break
+}
+
+// ============================================================================
+// CONTROL FLOW MARKERS
+// ============================================================================
+
+fn lint_mark_return(ctx: &! LintContext, line: i64) with Mut, Div, Panic {
+    if ctx.scope_depth <= 0 { return }
+    let scope_idx = ctx.scope_depth - 1
+    ctx.scopes[scope_idx as usize].has_return = true
+}
+
+fn lint_mark_break(ctx: &! LintContext, line: i64) with Mut, Div, Panic {
+    if ctx.scope_depth <= 0 { return }
+    let scope_idx = ctx.scope_depth - 1
+    ctx.scopes[scope_idx as usize].has_break = true
+}
+
+// ============================================================================
+// DEAD CODE TRACKING
+// ============================================================================
+
+fn lint_add_dead_node(ctx: &! LintContext, line: i64, end_line: i64, reason: i64) with Mut, Div, Panic {
+    if ctx.dead_count >= LINT_MAX_DEAD_NODES { return }
+
+    ctx.dead_nodes[ctx.dead_count as usize] = LintDeadNode {
+        line: line,
+        end_line: end_line,
+        reason: reason,
+    }
+    ctx.dead_count = ctx.dead_count + 1
+}
+
+fn lint_check_dead_code_after_return(ctx: &! LintContext, stmt_line: i64) with Mut, Div, Panic {
+    if lint_current_scope_has_return(ctx) {
+        lint_add_dead_node(ctx, stmt_line, stmt_line, LINT_RULE_DEAD_CODE_AFTER_RETURN)
+        lint_add_diagnostic_simple(ctx, LintRuleId::RuleDeadCodeAfterReturn, stmt_line, 0)
+    }
+}
+
+fn lint_check_dead_code_after_break(ctx: &! LintContext, stmt_line: i64) with Mut, Div, Panic {
+    if lint_current_scope_has_break(ctx) {
+        lint_add_dead_node(ctx, stmt_line, stmt_line, LINT_RULE_DEAD_CODE_AFTER_BREAK)
+        lint_add_diagnostic_simple(ctx, LintRuleId::RuleDeadCodeAfterBreak, stmt_line, 0)
+    }
+}
+
+fn lint_check_dead_code(ctx: &! LintContext) with Mut, Div, Panic {
+    // Emit diagnostics for all accumulated dead nodes
+    var i: i64 = 0
+    while i < ctx.dead_count {
+        let node = ctx.dead_nodes[i as usize]
+        let rule_id = lint_i64_to_rule_id(node.reason)
+        lint_add_diagnostic_simple(ctx, rule_id, node.line, 0)
+        i = i + 1
+    }
+}
+
+fn lint_dead_node_count(ctx: &LintContext) -> i64 {
+    ctx.dead_count
+}
+
+// ============================================================================
+// SHADOWING DETECTION
+// ============================================================================
+
+fn lint_check_shadowing(ctx: &! LintContext, name_hash: i64, line: i64) with Mut, Div, Panic {
+    // Search for an existing variable with the same hash in an outer scope
+    var i: i64 = 0
+    while i < ctx.var_count {
+        let v = ctx.vars[i as usize]
+        if v.name_hash == name_hash {
+            // Found an earlier binding with the same name — this is a shadow
+            if v.scope_depth < ctx.scope_depth {
+                let msg = lint_empty_name_buf()
+                lint_add_diagnostic(ctx, LintRuleId::RuleShadowing, line, 0, &msg)
+                return
+            }
+        }
+        i = i + 1
+    }
+}
+
+fn lint_check_shadowing_in_same_scope(ctx: &! LintContext, name_hash: i64, line: i64) with Mut, Div, Panic {
+    // Check for a re-binding in the same scope (redefinition)
+    if ctx.scope_depth <= 0 { return }
+    let scope_idx = ctx.scope_depth - 1
+    let scope_start = ctx.scopes[scope_idx as usize].var_start
+
+    var i: i64 = scope_start
+    while i < ctx.var_count {
+        if ctx.vars[i as usize].name_hash == name_hash {
+            let msg = lint_empty_name_buf()
+            lint_add_diagnostic(ctx, LintRuleId::RuleShadowing, line, 0, &msg)
+            return
+        }
+        i = i + 1
+    }
+}
+
+// ============================================================================
+// NAMING CONVENTION CHECKS (on context)
+// ============================================================================
+
+fn lint_check_naming_snake_case(ctx: &! LintContext, name: &LintNameBuf, line: i64) -> bool with Mut, Div, Panic {
+    if lint_is_snake_case(name) { return true }
+
+    // Name violates snake_case convention
+    lint_add_diagnostic(ctx, LintRuleId::RuleSnakeCase, line, 0, name)
+    false
+}
+
+fn lint_check_naming_pascal_case(ctx: &! LintContext, name: &LintNameBuf, line: i64) -> bool with Mut, Div, Panic {
+    if lint_is_pascal_case(name) { return true }
+
+    // Name violates PascalCase convention
+    lint_add_diagnostic(ctx, LintRuleId::RulePascalCase, line, 0, name)
+    false
+}
+
+fn lint_check_naming_upper_snake_case(ctx: &! LintContext, name: &LintNameBuf, line: i64) -> bool with Mut, Div, Panic {
+    if lint_is_upper_snake_case(name) { return true }
+
+    // Name violates UPPER_SNAKE_CASE convention
+    lint_add_diagnostic(ctx, LintRuleId::RuleSnakeCase, line, 0, name)
+    false
+}
+
+// ============================================================================
+// UNNECESSARY MUT DETECTION
+// ============================================================================
+
+fn lint_check_unnecessary_mut(ctx: &! LintContext) with Mut, Div, Panic {
+    var i: i64 = 0
+    while i < ctx.var_count {
+        let v = ctx.vars[i as usize]
+        if v.is_mutable {
+            if v.mutated == false {
+                let msg = lint_empty_name_buf()
+                lint_add_diagnostic(ctx, LintRuleId::RuleUnnecessaryMut, v.defined_at, 0, &msg)
+            }
+        }
+        i = i + 1
+    }
+}
+
+fn lint_check_unnecessary_mut_in_scope(ctx: &! LintContext, scope_start: i64) with Mut, Div, Panic {
+    var i: i64 = scope_start
+    while i < ctx.var_count {
+        let v = ctx.vars[i as usize]
+        if v.is_mutable {
+            if v.mutated == false {
+                let msg = lint_empty_name_buf()
+                lint_add_diagnostic(ctx, LintRuleId::RuleUnnecessaryMut, v.defined_at, 0, &msg)
+            }
+        }
+        i = i + 1
+    }
+}
+
+// ============================================================================
+// UNUSED VARIABLE DETECTION
+// ============================================================================
+
+fn lint_check_unused_vars(ctx: &! LintContext) with Mut, Div, Panic {
+    var i: i64 = 0
+    while i < ctx.var_count {
+        let v = ctx.vars[i as usize]
+        if v.used == false {
+            let msg = lint_empty_name_buf()
+            lint_add_diagnostic(ctx, LintRuleId::RuleUnusedVar, v.defined_at, 0, &msg)
+        }
+        i = i + 1
+    }
+}
+
+fn lint_count_unused_vars(ctx: &LintContext) -> i64 with Mut, Div, Panic {
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < ctx.var_count {
+        if ctx.vars[i as usize].used == false {
+            count = count + 1
+        }
+        i = i + 1
+    }
+    count
+}
+
+fn lint_count_unused_mutable(ctx: &LintContext) -> i64 with Mut, Div, Panic {
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < ctx.var_count {
+        let v = ctx.vars[i as usize]
+        if v.is_mutable {
+            if v.mutated == false {
+                count = count + 1
+            }
+        }
+        i = i + 1
+    }
+    count
+}
+
+// ============================================================================
+// COMPLEXITY CHECKS
+// ============================================================================
+
+fn lint_check_empty_body(ctx: &! LintContext, line: i64, has_stmts: bool) with Mut, Div, Panic {
+    if has_stmts == false {
+        lint_add_diagnostic_simple(ctx, LintRuleId::RuleEmptyBody, line, 0)
+    }
+}
+
+fn lint_check_param_count(ctx: &! LintContext, count: i64, line: i64) with Mut, Div, Panic {
+    if count > LINT_MAX_PARAMS {
+        let msg = lint_empty_name_buf()
+        lint_add_diagnostic(ctx, LintRuleId::RuleTooManyParams, line, 0, &msg)
+    }
+}
+
+fn lint_check_nesting(ctx: &! LintContext, depth: i64, line: i64) with Mut, Div, Panic {
+    if depth > LINT_MAX_NESTING {
+        let msg = lint_empty_name_buf()
+        lint_add_diagnostic(ctx, LintRuleId::RuleTooDeepNesting, line, 0, &msg)
+    }
+}
+
+fn lint_enter_nesting(ctx: &! LintContext) with Mut {
+    ctx.nesting_depth = ctx.nesting_depth + 1
+}
+
+fn lint_exit_nesting(ctx: &! LintContext) with Mut {
+    if ctx.nesting_depth > 0 {
+        ctx.nesting_depth = ctx.nesting_depth - 1
+    }
+}
+
+fn lint_check_current_nesting(ctx: &! LintContext, line: i64) with Mut, Div, Panic {
+    lint_check_nesting(ctx, ctx.nesting_depth, line)
+}
+
+fn lint_set_param_count(ctx: &! LintContext, count: i64) with Mut {
+    ctx.param_count = count
+}
+
+fn lint_set_current_fn_line(ctx: &! LintContext, line: i64) with Mut {
+    ctx.current_fn_line = line
+}
+
+// ============================================================================
+// SAFETY CHECKS
+// ============================================================================
+
+fn lint_check_unsafe_index(ctx: &! LintContext, line: i64, col: i64, has_bounds_check: bool) with Mut, Div, Panic {
+    if has_bounds_check == false {
+        let msg = lint_empty_name_buf()
+        lint_add_diagnostic(ctx, LintRuleId::RuleUnsafeIndex, line, col, &msg)
+    }
+}
+
+fn lint_check_large_array(ctx: &! LintContext, size: i64, line: i64) with Mut, Div, Panic {
+    if size > LINT_LARGE_ARRAY_THRESHOLD {
+        let msg = lint_empty_name_buf()
+        lint_add_diagnostic(ctx, LintRuleId::RuleLargeArray, line, 0, &msg)
+    }
+}
+
+fn lint_check_unused_result(ctx: &! LintContext, line: i64, col: i64) with Mut, Div, Panic {
+    let msg = lint_empty_name_buf()
+    lint_add_diagnostic(ctx, LintRuleId::RuleUnusedResult, line, col, &msg)
+}
+
+// ============================================================================
+// FULL PASS HELPERS
+// ============================================================================
+
+fn lint_begin_function(ctx: &! LintContext, line: i64, param_cnt: i64) with Mut, Div, Panic {
+    lint_set_current_fn_line(ctx, line)
+    lint_set_param_count(ctx, param_cnt)
+    lint_enter_scope(ctx)
+    lint_check_param_count(ctx, param_cnt, line)
+}
+
+fn lint_end_function(ctx: &! LintContext) with Mut, Div, Panic {
+    lint_check_unnecessary_mut_in_scope(ctx, 0)
+    lint_exit_scope(ctx)
+}
+
+fn lint_enter_block(ctx: &! LintContext, line: i64) with Mut, Div, Panic {
+    lint_enter_scope(ctx)
+    lint_enter_nesting(ctx)
+    lint_check_current_nesting(ctx, line)
+}
+
+fn lint_exit_block(ctx: &! LintContext) with Mut, Div, Panic {
+    lint_exit_scope(ctx)
+    lint_exit_nesting(ctx)
+}
+
+fn lint_on_statement(ctx: &! LintContext, line: i64) with Mut, Div, Panic {
+    // Check dead code: if current scope already has return or break, any subsequent
+    // statement is dead code.
+    lint_check_dead_code_after_return(ctx, line)
+    lint_check_dead_code_after_break(ctx, line)
+}
+
+// ============================================================================
+// SUMMARY / STATS
+// ============================================================================
+
+fn lint_total_vars(ctx: &LintContext) -> i64 {
+    ctx.var_count
+}
+
+fn lint_total_scopes(ctx: &LintContext) -> i64 {
+    ctx.scope_depth
+}
+
+fn lint_total_dead_nodes(ctx: &LintContext) -> i64 {
+    ctx.dead_count
+}
+
+fn lint_clear_diagnostics(ctx: &! LintContext) with Mut {
+    ctx.diag_count = 0
+}
+
+fn lint_clear_vars(ctx: &! LintContext) with Mut {
+    ctx.var_count = 0
+}
+
+fn lint_clear_dead_nodes(ctx: &! LintContext) with Mut {
+    ctx.dead_count = 0
+}
+
+// ============================================================================
+// BULK RULE PRESETS
+// ============================================================================
+
+fn lint_preset_strict(ctx: &! LintContext) with Mut, Div, Panic {
+    // Elevate all warnings to Deny
+    var i: i64 = 0
+    while i < ctx.rules.count {
+        let sev = ctx.rules.rules[i as usize].severity
+        if lint_severity_eq(sev, LintSeverity::SevWarn) {
+            ctx.rules.rules[i as usize].severity = LintSeverity::SevDeny
+        }
+        i = i + 1
+    }
+}
+
+fn lint_preset_permissive(ctx: &! LintContext) with Mut, Div, Panic {
+    // Demote all rules to Allow (except Forbid)
+    var i: i64 = 0
+    while i < ctx.rules.count {
+        let sev = ctx.rules.rules[i as usize].severity
+        if lint_severity_eq(sev, LintSeverity::SevForbid) == false {
+            ctx.rules.rules[i as usize].severity = LintSeverity::SevAllow
+        }
+        i = i + 1
+    }
+}
+
+fn lint_preset_naming_only(ctx: &! LintContext) with Mut, Div, Panic {
+    // Disable everything except naming rules
+    var i: i64 = 0
+    while i < ctx.rules.count {
+        let cat = ctx.rules.rules[i as usize].category
+        if lint_category_eq(cat, LintCategory::CatNaming) == false {
+            ctx.rules.rules[i as usize].enabled = false
+        }
+        i = i + 1
+    }
+}
+
+fn lint_enabled_rule_count(ctx: &LintContext) -> i64 with Mut, Div, Panic {
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < ctx.rules.count {
+        if ctx.rules.rules[i as usize].enabled {
+            count = count + 1
+        }
+        i = i + 1
+    }
+    count
+}
+
+// ============================================================================
+// ============================================================================
+//
+//                          T E S T   S U I T E
+//
+// ============================================================================
+// ============================================================================
+
+// ============================================================================
+// TEST HELPERS
+// ============================================================================
+
+fn lint_assert_true(val: bool, passed: &! i64, failed: &! i64) with Mut {
+    if val {
+        passed = passed + 1
+    } else {
+        failed = failed + 1
+    }
+}
+
+fn lint_assert_false(val: bool, passed: &! i64, failed: &! i64) with Mut {
+    if val == false {
+        passed = passed + 1
+    } else {
+        failed = failed + 1
+    }
+}
+
+fn lint_assert_eq_i64(a: i64, b: i64, passed: &! i64, failed: &! i64) with Mut {
+    if a == b {
+        passed = passed + 1
+    } else {
+        failed = failed + 1
+    }
+}
+
+fn lint_assert_gt_i64(a: i64, b: i64, passed: &! i64, failed: &! i64) with Mut {
+    if a > b {
+        passed = passed + 1
+    } else {
+        failed = failed + 1
+    }
+}
+
+// ============================================================================
+// 1. RULE CONFIGURATION TESTS (8 tests)
+// ============================================================================
+
+fn lint_test_rule_config_inner(ctx: &! LintContext, passed: &! i64, failed: &! i64) with Mut, Div, Panic {
+    // Test 1: Default rules — all 16 enabled
+    let enabled = lint_enabled_rule_count(ctx)
+    lint_assert_eq_i64(enabled, LINT_RULE_COUNT, passed, failed)
+
+    // Test 2: Disable a single rule
+    lint_disable_rule(ctx, LintRuleId::RuleUnusedVar)
+    let enabled2 = lint_enabled_rule_count(ctx)
+    lint_assert_eq_i64(enabled2, LINT_RULE_COUNT - 1, passed, failed)
+
+    // Test 3: Re-enable the rule
+    lint_enable_rule(ctx, LintRuleId::RuleUnusedVar)
+    let enabled3 = lint_enabled_rule_count(ctx)
+    lint_assert_eq_i64(enabled3, LINT_RULE_COUNT, passed, failed)
+
+    // Test 4: Set severity to Deny
+    lint_set_severity(ctx, LintRuleId::RuleUnusedVar, LintSeverity::SevDeny)
+    let sev = lint_rule_severity(&ctx.rules, LintRuleId::RuleUnusedVar)
+    lint_assert_true(lint_severity_eq(sev, LintSeverity::SevDeny), passed, failed)
+
+    // Test 5: Set severity to Allow — diagnostics should not emit
+    lint_set_severity(ctx, LintRuleId::RuleUnusedVar, LintSeverity::SevAllow)
+    let before = lint_diagnostic_count(ctx)
+    let msg = lint_empty_name_buf()
+    lint_add_diagnostic(ctx, LintRuleId::RuleUnusedVar, 10, 0, &msg)
+    let after = lint_diagnostic_count(ctx)
+    lint_assert_eq_i64(before, after, passed, failed)
+
+    // Test 6: Set severity back to Warn — should emit
+    lint_set_severity(ctx, LintRuleId::RuleUnusedVar, LintSeverity::SevWarn)
+    let before2 = lint_diagnostic_count(ctx)
+    lint_add_diagnostic(ctx, LintRuleId::RuleUnusedVar, 11, 0, &msg)
+    let after2 = lint_diagnostic_count(ctx)
+    lint_assert_eq_i64(after2, before2 + 1, passed, failed)
+
+    // Test 7: Disable category — all naming rules disabled
+    lint_disable_category(ctx, LintCategory::CatNaming)
+    let snake_enabled = lint_rule_is_enabled(&ctx.rules, LintRuleId::RuleSnakeCase)
+    let pascal_enabled = lint_rule_is_enabled(&ctx.rules, LintRuleId::RulePascalCase)
+    lint_assert_false(snake_enabled, passed, failed)
+
+    // Test 8: Re-enable category
+    lint_enable_category(ctx, LintCategory::CatNaming)
+    let snake_enabled2 = lint_rule_is_enabled(&ctx.rules, LintRuleId::RuleSnakeCase)
+    lint_assert_true(snake_enabled2, passed, failed)
+}
+
+fn lint_test_rule_config(passed: &! i64, failed: &! i64) with Mut, Div, Panic {
+    var ctx = lint_context_new()
+    lint_test_rule_config_inner(&! ctx, passed, failed)
+}
+
+// ============================================================================
+// 2. UNUSED VARIABLE TESTS (10 tests)
+// ============================================================================
+
+fn lint_test_unused_vars_inner(ctx: &! LintContext, passed: &! i64, failed: &! i64) with Mut, Div, Panic {
+    lint_context_reset(ctx)
+    lint_clear_diagnostics(ctx)
+
+    // Test 9: Declare unused variable — should be detected
+    lint_enter_scope(ctx)
+    let v0 = lint_declare_var(ctx, 100, false, 1)
+    let unused_before = lint_count_unused_vars(ctx)
+    lint_assert_eq_i64(unused_before, 1, passed, failed)
+
+    // Test 10: Mark variable as used — should no longer be unused
+    lint_mark_used(ctx, v0)
+    let unused_after = lint_count_unused_vars(ctx)
+    lint_assert_eq_i64(unused_after, 0, passed, failed)
+
+    // Test 11: Multiple unused variables
+    let v1 = lint_declare_var(ctx, 101, false, 2)
+    let v2 = lint_declare_var(ctx, 102, false, 3)
+    let v3 = lint_declare_var(ctx, 103, false, 4)
+    let unused3 = lint_count_unused_vars(ctx)
+    lint_assert_eq_i64(unused3, 3, passed, failed)
+
+    // Test 12: Use one of three — two remain unused
+    lint_mark_used(ctx, v2)
+    let unused2 = lint_count_unused_vars(ctx)
+    lint_assert_eq_i64(unused2, 2, passed, failed)
+
+    // Test 13: lint_check_unused_vars emits diagnostics
+    lint_clear_diagnostics(ctx)
+    lint_check_unused_vars(ctx)
+    let diag_count = lint_diagnostic_count(ctx)
+    lint_assert_eq_i64(diag_count, 2, passed, failed)
+
+    lint_exit_scope(ctx)
+
+    // Test 14: Scope exit auto-checks unused
+    lint_clear_diagnostics(ctx)
+    lint_enter_scope(ctx)
+    let v4 = lint_declare_var(ctx, 200, false, 10)
+    lint_exit_scope(ctx)
+    let scope_diags = lint_diagnostic_count(ctx)
+    lint_assert_eq_i64(scope_diags, 1, passed, failed)
+
+    // Test 15: Used variable — scope exit should produce 0 diagnostics
+    lint_clear_diagnostics(ctx)
+    lint_enter_scope(ctx)
+    let v5 = lint_declare_var(ctx, 201, false, 11)
+    lint_mark_used(ctx, v5)
+    lint_exit_scope(ctx)
+    let scope_diags2 = lint_diagnostic_count(ctx)
+    lint_assert_eq_i64(scope_diags2, 0, passed, failed)
+
+    // Test 16: Multiple scopes — unused in inner but used in outer
+    lint_clear_diagnostics(ctx)
+    lint_enter_scope(ctx)
+    let v6 = lint_declare_var(ctx, 300, false, 20)
+    lint_mark_used(ctx, v6)
+    lint_enter_scope(ctx)
+    let v7 = lint_declare_var(ctx, 301, false, 21)
+    lint_exit_scope(ctx)
+    lint_exit_scope(ctx)
+    let multi_diags = lint_diagnostic_count(ctx)
+    // v7 unused in inner scope => 1 diagnostic, plus v6 used => 0
+    // but outer scope sees v6 + v7 after inner exit: only v7 matters in inner
+    lint_assert_eq_i64(multi_diags, 1, passed, failed)
+
+    // Test 17: Mutated variable counts as used
+    lint_clear_diagnostics(ctx)
+    lint_enter_scope(ctx)
+    let v8 = lint_declare_var(ctx, 400, true, 30)
+    lint_mark_mutated(ctx, v8)
+    lint_exit_scope(ctx)
+    let mut_diags = lint_diagnostic_count(ctx)
+    lint_assert_eq_i64(mut_diags, 0, passed, failed)
+
+    // Test 18: find_var_by_hash works
+    lint_enter_scope(ctx)
+    let v9 = lint_declare_var(ctx, 500, false, 40)
+    let found = lint_find_var_by_hash(ctx, 500)
+    lint_assert_eq_i64(found, v9, passed, failed)
+    lint_mark_used(ctx, v9)
+    lint_exit_scope(ctx)
+}
+
+fn lint_test_unused_vars(passed: &! i64, failed: &! i64) with Mut, Div, Panic {
+    var ctx = lint_context_new()
+    lint_test_unused_vars_inner(&! ctx, passed, failed)
+}
+
+// ============================================================================
+// 3. DEAD CODE TESTS (8 tests)
+// ============================================================================
+
+fn lint_test_dead_code_inner(ctx: &! LintContext, passed: &! i64, failed: &! i64) with Mut, Div, Panic {
+    lint_context_reset(ctx)
+    lint_clear_diagnostics(ctx)
+
+    // Test 19: After return mark, statement on next line is dead
+    lint_enter_scope(ctx)
+    lint_mark_return(ctx, 5)
+    lint_check_dead_code_after_return(ctx, 6)
+    let dc1 = lint_diagnostic_count(ctx)
+    lint_assert_eq_i64(dc1, 1, passed, failed)
+    lint_exit_scope(ctx)
+
+    // Test 20: Before return mark, statement is alive
+    lint_clear_diagnostics(ctx)
+    lint_enter_scope(ctx)
+    lint_check_dead_code_after_return(ctx, 4)
+    let dc2 = lint_diagnostic_count(ctx)
+    lint_assert_eq_i64(dc2, 0, passed, failed)
+    lint_mark_return(ctx, 5)
+    lint_exit_scope(ctx)
+
+    // Test 21: After break mark, statement is dead
+    lint_clear_diagnostics(ctx)
+    lint_enter_scope(ctx)
+    lint_mark_break(ctx, 10)
+    lint_check_dead_code_after_break(ctx, 11)
+    let dc3 = lint_diagnostic_count(ctx)
+    lint_assert_eq_i64(dc3, 1, passed, failed)
+    lint_exit_scope(ctx)
+
+    // Test 22: Multiple dead code statements after return
+    lint_clear_diagnostics(ctx)
+    lint_enter_scope(ctx)
+    lint_mark_return(ctx, 20)
+    lint_check_dead_code_after_return(ctx, 21)
+    lint_check_dead_code_after_return(ctx, 22)
+    lint_check_dead_code_after_return(ctx, 23)
+    let dc4 = lint_diagnostic_count(ctx)
+    lint_assert_eq_i64(dc4, 3, passed, failed)
+    lint_exit_scope(ctx)
+
+    // Test 23: Dead code in nested scope
+    lint_clear_diagnostics(ctx)
+    lint_enter_scope(ctx)
+    lint_enter_scope(ctx)
+    lint_mark_return(ctx, 30)
+    lint_check_dead_code_after_return(ctx, 31)
+    let dc5 = lint_diagnostic_count(ctx)
+    lint_assert_eq_i64(dc5, 1, passed, failed)
+    lint_exit_scope(ctx)
+    // Outer scope should not see inner scope's return
+    lint_check_dead_code_after_return(ctx, 32)
+    let dc6 = lint_diagnostic_count(ctx)
+    // Outer scope has no return, so no additional dead code
+    lint_assert_eq_i64(dc6, 1, passed, failed)
+    lint_exit_scope(ctx)
+
+    // Test 24: dead_node tracking
+    lint_clear_diagnostics(ctx)
+    lint_clear_dead_nodes(ctx)
+    lint_add_dead_node(ctx, 50, 55, LINT_RULE_DEAD_CODE_AFTER_RETURN)
+    lint_add_dead_node(ctx, 60, 65, LINT_RULE_DEAD_CODE_AFTER_BREAK)
+    let dn_count = lint_dead_node_count(ctx)
+    lint_assert_eq_i64(dn_count, 2, passed, failed)
+
+    // Test 25: lint_on_statement catches dead code
+    lint_clear_diagnostics(ctx)
+    lint_enter_scope(ctx)
+    lint_mark_return(ctx, 70)
+    lint_on_statement(ctx, 71)
+    let os_dc = lint_diagnostic_count(ctx)
+    lint_assert_eq_i64(os_dc, 1, passed, failed)
+    lint_exit_scope(ctx)
+
+    // Test 26: No false positive before return
+    lint_clear_diagnostics(ctx)
+    lint_enter_scope(ctx)
+    lint_on_statement(ctx, 80)
+    lint_on_statement(ctx, 81)
+    let no_dc = lint_diagnostic_count(ctx)
+    lint_assert_eq_i64(no_dc, 0, passed, failed)
+    lint_exit_scope(ctx)
+}
+
+fn lint_test_dead_code(passed: &! i64, failed: &! i64) with Mut, Div, Panic {
+    var ctx = lint_context_new()
+    lint_test_dead_code_inner(&! ctx, passed, failed)
+}
+
+// ============================================================================
+// 4. SHADOWING TESTS (6 tests)
+// ============================================================================
+
+fn lint_test_shadowing_inner(ctx: &! LintContext, passed: &! i64, failed: &! i64) with Mut, Div, Panic {
+    lint_context_reset(ctx)
+    lint_clear_diagnostics(ctx)
+
+    // Test 27: Shadow in nested scope detected
+    lint_enter_scope(ctx)
+    let v0 = lint_declare_var(ctx, 1000, false, 1)
+    lint_mark_used(ctx, v0)
+    lint_enter_scope(ctx)
+    lint_check_shadowing(ctx, 1000, 5)
+    let sh1 = lint_diagnostic_count(ctx)
+    lint_assert_eq_i64(sh1, 1, passed, failed)
+    lint_exit_scope(ctx)
+    lint_exit_scope(ctx)
+
+    // Test 28: No shadow if different name
+    lint_clear_diagnostics(ctx)
+    lint_enter_scope(ctx)
+    let v1 = lint_declare_var(ctx, 2000, false, 10)
+    lint_mark_used(ctx, v1)
+    lint_enter_scope(ctx)
+    lint_check_shadowing(ctx, 2001, 15)
+    let sh2 = lint_diagnostic_count(ctx)
+    lint_assert_eq_i64(sh2, 0, passed, failed)
+    lint_exit_scope(ctx)
+    lint_exit_scope(ctx)
+
+    // Test 29: Shadow with disabled rule produces no diagnostic
+    lint_clear_diagnostics(ctx)
+    lint_disable_rule(ctx, LintRuleId::RuleShadowing)
+    lint_enter_scope(ctx)
+    let v2 = lint_declare_var(ctx, 3000, false, 20)
+    lint_mark_used(ctx, v2)
+    lint_enter_scope(ctx)
+    lint_check_shadowing(ctx, 3000, 25)
+    let sh3 = lint_diagnostic_count(ctx)
+    lint_assert_eq_i64(sh3, 0, passed, failed)
+    lint_exit_scope(ctx)
+    lint_exit_scope(ctx)
+    lint_enable_rule(ctx, LintRuleId::RuleShadowing)
+
+    // Test 30: Multiple levels of shadowing
+    lint_clear_diagnostics(ctx)
+    lint_enter_scope(ctx)
+    let v3 = lint_declare_var(ctx, 4000, false, 30)
+    lint_mark_used(ctx, v3)
+    lint_enter_scope(ctx)
+    lint_check_shadowing(ctx, 4000, 35)
+    let v4 = lint_declare_var(ctx, 4000, false, 35)
+    lint_mark_used(ctx, v4)
+    lint_enter_scope(ctx)
+    lint_check_shadowing(ctx, 4000, 40)
+    lint_exit_scope(ctx)
+    lint_exit_scope(ctx)
+    lint_exit_scope(ctx)
+    let sh4 = lint_diagnostic_count(ctx)
+    lint_assert_eq_i64(sh4, 2, passed, failed)
+
+    // Test 31: Shadow in same scope (re-definition)
+    lint_clear_diagnostics(ctx)
+    lint_enter_scope(ctx)
+    let v5 = lint_declare_var(ctx, 5000, false, 50)
+    lint_mark_used(ctx, v5)
+    lint_check_shadowing_in_same_scope(ctx, 5000, 55)
+    let sh5 = lint_diagnostic_count(ctx)
+    lint_assert_eq_i64(sh5, 1, passed, failed)
+    lint_exit_scope(ctx)
+
+    // Test 32: No shadow in same scope with different hash
+    lint_clear_diagnostics(ctx)
+    lint_enter_scope(ctx)
+    let v6 = lint_declare_var(ctx, 6000, false, 60)
+    lint_mark_used(ctx, v6)
+    lint_check_shadowing_in_same_scope(ctx, 6001, 65)
+    let sh6 = lint_diagnostic_count(ctx)
+    lint_assert_eq_i64(sh6, 0, passed, failed)
+    lint_exit_scope(ctx)
+}
+
+fn lint_test_shadowing(passed: &! i64, failed: &! i64) with Mut, Div, Panic {
+    var ctx = lint_context_new()
+    lint_test_shadowing_inner(&! ctx, passed, failed)
+}
+
+// ============================================================================
+// 5. NAMING CONVENTION TESTS (10 tests)
+// ============================================================================
+
+fn lint_test_naming_inner(ctx: &! LintContext, passed: &! i64, failed: &! i64) with Mut, Div, Panic {
+    lint_context_reset(ctx)
+    lint_clear_diagnostics(ctx)
+
+    // snake_case tests
+    // Test 33: "foo_bar" is snake_case
+    // f=102, o=111, o=111, _=95, b=98, a=97, r=114
+    let name_fb = lint_name_from_bytes(102 as i8, 111 as i8, 111 as i8, 95 as i8,
+                                        98 as i8, 97 as i8, 114 as i8, 0 as i8, 7)
+    lint_assert_true(lint_is_snake_case(&name_fb), passed, failed)
+
+    // Test 34: "FooBar" is NOT snake_case
+    // F=70, o=111, o=111, B=66, a=97, r=114
+    let name_FB = lint_name_from_bytes(70 as i8, 111 as i8, 111 as i8, 66 as i8,
+                                        97 as i8, 114 as i8, 0 as i8, 0 as i8, 6)
+    lint_assert_false(lint_is_snake_case(&name_FB), passed, failed)
+
+    // Test 35: "x" is snake_case (single lowercase letter)
+    let name_x = lint_name_from_bytes(120 as i8, 0 as i8, 0 as i8, 0 as i8,
+                                       0 as i8, 0 as i8, 0 as i8, 0 as i8, 1)
+    lint_assert_true(lint_is_snake_case(&name_x), passed, failed)
+
+    // Test 36: "_private" is snake_case
+    // _=95, p=112, r=114, i=105, v=118, a=97, t=116, e=101
+    let name_priv = lint_name_from_bytes(95 as i8, 112 as i8, 114 as i8, 105 as i8,
+                                          118 as i8, 97 as i8, 116 as i8, 101 as i8, 8)
+    lint_assert_true(lint_is_snake_case(&name_priv), passed, failed)
+
+    // PascalCase tests
+    // Test 37: "FooBar" is PascalCase
+    lint_assert_true(lint_is_pascal_case(&name_FB), passed, failed)
+
+    // Test 38: "foo_bar" is NOT PascalCase
+    lint_assert_false(lint_is_pascal_case(&name_fb), passed, failed)
+
+    // Test 39: "Vec3" is PascalCase
+    // V=86, e=101, c=99, 3=51
+    let name_v3 = lint_name_from_bytes(86 as i8, 101 as i8, 99 as i8, 51 as i8,
+                                        0 as i8, 0 as i8, 0 as i8, 0 as i8, 4)
+    lint_assert_true(lint_is_pascal_case(&name_v3), passed, failed)
+
+    // UPPER_SNAKE_CASE tests
+    // Test 40: "MAX_SIZE" is UPPER_SNAKE_CASE
+    // M=77, A=65, X=88, _=95, S=83, I=73, Z=90, E=69
+    let name_ms = lint_name_from_bytes(77 as i8, 65 as i8, 88 as i8, 95 as i8,
+                                        83 as i8, 73 as i8, 90 as i8, 69 as i8, 8)
+    lint_assert_true(lint_is_upper_snake_case(&name_ms), passed, failed)
+
+    // Test 41: "max_size" is NOT UPPER_SNAKE_CASE
+    // m=109, a=97, x=120, _=95, s=115, i=105, z=122, e=101
+    let name_ms_low = lint_name_from_bytes(109 as i8, 97 as i8, 120 as i8, 95 as i8,
+                                            115 as i8, 105 as i8, 122 as i8, 101 as i8, 8)
+    lint_assert_false(lint_is_upper_snake_case(&name_ms_low), passed, failed)
+
+    // Test 42: lint_check_naming_snake_case emits diagnostic for non-snake
+    lint_clear_diagnostics(ctx)
+    let result = lint_check_naming_snake_case(ctx, &name_FB, 10)
+    lint_assert_false(result, passed, failed)
+    let naming_diags = lint_diagnostic_count(ctx)
+    lint_assert_eq_i64(naming_diags, 1, passed, failed)
+}
+
+fn lint_test_naming(passed: &! i64, failed: &! i64) with Mut, Div, Panic {
+    var ctx = lint_context_new()
+    lint_test_naming_inner(&! ctx, passed, failed)
+}
+
+// ============================================================================
+// 6. UNNECESSARY MUT TESTS (6 tests)
+// ============================================================================
+
+fn lint_test_unnecessary_mut_inner(ctx: &! LintContext, passed: &! i64, failed: &! i64) with Mut, Div, Panic {
+    lint_context_reset(ctx)
+    lint_clear_diagnostics(ctx)
+
+    // Test 43: Mutable var that is never mutated — unnecessary
+    lint_enter_scope(ctx)
+    let v0 = lint_declare_var(ctx, 7000, true, 1)
+    lint_mark_used(ctx, v0)
+    let um1 = lint_count_unused_mutable(ctx)
+    lint_assert_eq_i64(um1, 1, passed, failed)
+    lint_exit_scope(ctx)
+
+    // Test 44: Mutable var that IS mutated — not unnecessary
+    lint_clear_diagnostics(ctx)
+    lint_enter_scope(ctx)
+    let v1 = lint_declare_var(ctx, 7001, true, 2)
+    lint_mark_mutated(ctx, v1)
+    let um2 = lint_count_unused_mutable(ctx)
+    lint_assert_eq_i64(um2, 0, passed, failed)
+    lint_exit_scope(ctx)
+
+    // Test 45: Immutable var — not counted as unnecessary mut
+    lint_clear_diagnostics(ctx)
+    lint_enter_scope(ctx)
+    let v2 = lint_declare_var(ctx, 7002, false, 3)
+    lint_mark_used(ctx, v2)
+    let um3 = lint_count_unused_mutable(ctx)
+    lint_assert_eq_i64(um3, 0, passed, failed)
+    lint_exit_scope(ctx)
+
+    // Test 46: lint_check_unnecessary_mut emits diagnostic
+    lint_clear_diagnostics(ctx)
+    lint_enter_scope(ctx)
+    let v3 = lint_declare_var(ctx, 7003, true, 4)
+    lint_mark_used(ctx, v3)
+    lint_check_unnecessary_mut(ctx)
+    let um_diags = lint_diagnostic_count(ctx)
+    lint_assert_eq_i64(um_diags, 1, passed, failed)
+    lint_exit_scope(ctx)
+
+    // Test 47: Multiple mutable vars, one mutated, one not
+    lint_clear_diagnostics(ctx)
+    lint_enter_scope(ctx)
+    let v4 = lint_declare_var(ctx, 7004, true, 5)
+    let v5 = lint_declare_var(ctx, 7005, true, 6)
+    lint_mark_used(ctx, v4)
+    lint_mark_mutated(ctx, v5)
+    lint_check_unnecessary_mut(ctx)
+    let um_diags2 = lint_diagnostic_count(ctx)
+    lint_assert_eq_i64(um_diags2, 1, passed, failed)
+    lint_exit_scope(ctx)
+
+    // Test 48: Disabled rule — no diagnostic
+    lint_clear_diagnostics(ctx)
+    lint_disable_rule(ctx, LintRuleId::RuleUnnecessaryMut)
+    lint_enter_scope(ctx)
+    let v6 = lint_declare_var(ctx, 7006, true, 7)
+    lint_mark_used(ctx, v6)
+    lint_check_unnecessary_mut(ctx)
+    let um_diags3 = lint_diagnostic_count(ctx)
+    lint_assert_eq_i64(um_diags3, 0, passed, failed)
+    lint_exit_scope(ctx)
+    lint_enable_rule(ctx, LintRuleId::RuleUnnecessaryMut)
+}
+
+fn lint_test_unnecessary_mut(passed: &! i64, failed: &! i64) with Mut, Div, Panic {
+    var ctx = lint_context_new()
+    lint_test_unnecessary_mut_inner(&! ctx, passed, failed)
+}
+
+// ============================================================================
+// 7. COMPLEXITY TESTS (6 tests)
+// ============================================================================
+
+fn lint_test_complexity_inner(ctx: &! LintContext, passed: &! i64, failed: &! i64) with Mut, Div, Panic {
+    lint_context_reset(ctx)
+    lint_clear_diagnostics(ctx)
+
+    // Test 49: Param count at threshold — no warning
+    lint_check_param_count(ctx, LINT_MAX_PARAMS, 1)
+    let pc1 = lint_diagnostic_count(ctx)
+    lint_assert_eq_i64(pc1, 0, passed, failed)
+
+    // Test 50: Param count above threshold — warning
+    lint_check_param_count(ctx, LINT_MAX_PARAMS + 1, 2)
+    let pc2 = lint_diagnostic_count(ctx)
+    lint_assert_eq_i64(pc2, 1, passed, failed)
+
+    // Test 51: Nesting depth at threshold — no warning
+    lint_clear_diagnostics(ctx)
+    lint_check_nesting(ctx, LINT_MAX_NESTING, 3)
+    let nd1 = lint_diagnostic_count(ctx)
+    lint_assert_eq_i64(nd1, 0, passed, failed)
+
+    // Test 52: Nesting depth above threshold — warning
+    lint_check_nesting(ctx, LINT_MAX_NESTING + 1, 4)
+    let nd2 = lint_diagnostic_count(ctx)
+    lint_assert_eq_i64(nd2, 1, passed, failed)
+
+    // Test 53: Empty body — warning
+    lint_clear_diagnostics(ctx)
+    lint_check_empty_body(ctx, 5, false)
+    let eb1 = lint_diagnostic_count(ctx)
+    lint_assert_eq_i64(eb1, 1, passed, failed)
+
+    // Test 54: Non-empty body — no warning
+    lint_clear_diagnostics(ctx)
+    lint_check_empty_body(ctx, 6, true)
+    let eb2 = lint_diagnostic_count(ctx)
+    lint_assert_eq_i64(eb2, 0, passed, failed)
+}
+
+fn lint_test_complexity(passed: &! i64, failed: &! i64) with Mut, Div, Panic {
+    var ctx = lint_context_new()
+    lint_test_complexity_inner(&! ctx, passed, failed)
+}
+
+// ============================================================================
+// 8. INTEGRATION TESTS (6 tests)
+// ============================================================================
+
+// Simulate linting a simple function with variables, scopes, and naming.
+fn lint_test_integration_simple_fn(ctx: &! LintContext, passed: &! i64, failed: &! i64) with Mut, Div, Panic {
+    lint_context_reset(ctx)
+    lint_clear_diagnostics(ctx)
+
+    // Simulate: fn compute(x: i64, y: i64) -> i64 { let result = x + y; result }
+    lint_begin_function(ctx, 1, 2)
+
+    // Declare parameters as used
+    let p0 = lint_declare_var(ctx, 8000, false, 1)
+    let p1 = lint_declare_var(ctx, 8001, false, 1)
+    lint_mark_used(ctx, p0)
+    lint_mark_used(ctx, p1)
+
+    // Declare local result and use it
+    let v0 = lint_declare_var(ctx, 8002, false, 2)
+    lint_mark_used(ctx, v0)
+
+    lint_end_function(ctx)
+
+    // Test 55: No diagnostics for clean function
+    let diags = lint_diagnostic_count(ctx)
+    lint_assert_eq_i64(diags, 0, passed, failed)
+}
+
+fn lint_test_integration_unused_param(ctx: &! LintContext, passed: &! i64, failed: &! i64) with Mut, Div, Panic {
+    lint_context_reset(ctx)
+    lint_clear_diagnostics(ctx)
+
+    // Simulate: fn bad(x: i64, unused: i64) -> i64 { x }
+    lint_begin_function(ctx, 10, 2)
+
+    let p0 = lint_declare_var(ctx, 9000, false, 10)
+    let p1 = lint_declare_var(ctx, 9001, false, 10)
+    lint_mark_used(ctx, p0)
+    // p1 is intentionally unused
+
+    lint_end_function(ctx)
+
+    // Test 56: One unused parameter diagnostic
+    let diags = lint_diagnostic_count(ctx)
+    lint_assert_eq_i64(diags, 1, passed, failed)
+}
+
+fn lint_test_integration_deep_nesting(ctx: &! LintContext, passed: &! i64, failed: &! i64) with Mut, Div, Panic {
+    lint_context_reset(ctx)
+    lint_clear_diagnostics(ctx)
+
+    // Simulate deeply nested code: 7 levels
+    lint_begin_function(ctx, 20, 0)
+    lint_enter_block(ctx, 21)   // depth 1
+    lint_enter_block(ctx, 22)   // depth 2
+    lint_enter_block(ctx, 23)   // depth 3
+    lint_enter_block(ctx, 24)   // depth 4
+    lint_enter_block(ctx, 25)   // depth 5
+    lint_enter_block(ctx, 26)   // depth 6 — should trigger warning
+
+    lint_exit_block(ctx)
+    lint_exit_block(ctx)
+    lint_exit_block(ctx)
+    lint_exit_block(ctx)
+    lint_exit_block(ctx)
+    lint_exit_block(ctx)
+    lint_end_function(ctx)
+
+    // Test 57: Nesting warning emitted
+    let nesting_diags = lint_count_by_rule(ctx, LintRuleId::RuleTooDeepNesting)
+    lint_assert_gt_i64(nesting_diags, 0, passed, failed)
+}
+
+fn lint_test_integration_dead_after_return(ctx: &! LintContext, passed: &! i64, failed: &! i64) with Mut, Div, Panic {
+    lint_context_reset(ctx)
+    lint_clear_diagnostics(ctx)
+
+    // Simulate: fn f() { return; x = 5; y = 10; }
+    lint_begin_function(ctx, 30, 0)
+    lint_mark_return(ctx, 31)
+    lint_on_statement(ctx, 32)  // dead
+    lint_on_statement(ctx, 33)  // dead
+    lint_end_function(ctx)
+
+    // Test 58: Two dead code diagnostics
+    let dc = lint_count_by_rule(ctx, LintRuleId::RuleDeadCodeAfterReturn)
+    lint_assert_eq_i64(dc, 2, passed, failed)
+}
+
+fn lint_test_integration_mut_no_mutate(ctx: &! LintContext, passed: &! i64, failed: &! i64) with Mut, Div, Panic {
+    lint_context_reset(ctx)
+    lint_clear_diagnostics(ctx)
+
+    // Simulate: fn f() { var x = 5; use(x); }
+    lint_begin_function(ctx, 40, 0)
+    let v0 = lint_declare_var(ctx, 10000, true, 41)
+    lint_mark_used(ctx, v0)
+    lint_end_function(ctx)
+
+    // Test 59: Unnecessary mut detected
+    let um = lint_count_by_rule(ctx, LintRuleId::RuleUnnecessaryMut)
+    lint_assert_eq_i64(um, 1, passed, failed)
+}
+
+fn lint_test_integration_preset_strict(ctx: &! LintContext, passed: &! i64, failed: &! i64) with Mut, Div, Panic {
+    lint_context_reset(ctx)
+    lint_clear_diagnostics(ctx)
+
+    // Apply strict preset — all Warn become Deny
+    lint_preset_strict(ctx)
+
+    // Emit unused var diagnostic — should be Deny now
+    let msg = lint_empty_name_buf()
+    lint_add_diagnostic(ctx, LintRuleId::RuleUnusedVar, 50, 0, &msg)
+    let has_err = lint_has_errors(ctx)
+
+    // Test 60: Strict mode makes warnings into errors
+    lint_assert_true(has_err, passed, failed)
+}
+
+fn lint_test_integration(passed: &! i64, failed: &! i64) with Mut, Div, Panic {
+    var ctx = lint_context_new()
+    lint_test_integration_simple_fn(&! ctx, passed, failed)
+
+    var ctx2 = lint_context_new()
+    lint_test_integration_unused_param(&! ctx2, passed, failed)
+
+    var ctx3 = lint_context_new()
+    lint_test_integration_deep_nesting(&! ctx3, passed, failed)
+
+    var ctx4 = lint_context_new()
+    lint_test_integration_dead_after_return(&! ctx4, passed, failed)
+
+    var ctx5 = lint_context_new()
+    lint_test_integration_mut_no_mutate(&! ctx5, passed, failed)
+
+    var ctx6 = lint_context_new()
+    lint_test_integration_preset_strict(&! ctx6, passed, failed)
+}
+
+// ============================================================================
+// TEST RUNNER
+// ============================================================================
+
+fn lint_run_tests() -> i64 with Mut, Div, Panic {
+    var passed: i64 = 0
+    var failed: i64 = 0
+
+    // 1. Rule configuration (8 tests)
+    lint_test_rule_config(&! passed, &! failed)
+
+    // 2. Unused variables (10 tests)
+    lint_test_unused_vars(&! passed, &! failed)
+
+    // 3. Dead code (8 tests)
+    lint_test_dead_code(&! passed, &! failed)
+
+    // 4. Shadowing (6 tests)
+    lint_test_shadowing(&! passed, &! failed)
+
+    // 5. Naming conventions (10 tests)
+    lint_test_naming(&! passed, &! failed)
+
+    // 6. Unnecessary mut (6 tests)
+    lint_test_unnecessary_mut(&! passed, &! failed)
+
+    // 7. Complexity (6 tests)
+    lint_test_complexity(&! passed, &! failed)
+
+    // 8. Integration (6 tests)
+    lint_test_integration(&! passed, &! failed)
+
+    if failed > 0 {
+        return 0 - failed
+    }
+    passed
+}

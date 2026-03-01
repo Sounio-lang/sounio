@@ -1,0 +1,3912 @@
+// self-hosted::lsp::hover -- LSP hover information provider for Sounio
+//
+// Implements type-under-cursor, doc comment extraction, signature help, and
+// formatted hover content generation for the Sounio LSP server.  All string
+// data is stored in flat i8 buffers with explicit lengths -- no heap allocation,
+// no recursive structures, no string interning dependency.
+//
+// The provider maintains a flat arena of symbol information.  When a hover
+// request arrives at (line, col), we search for the symbol whose span contains
+// that position, then build a Markdown-formatted hover response from the
+// symbol's type, doc comments, effects, and parameter list.
+//
+// Capacity:
+//   - Symbols:     4096
+//   - Doc buffer:  512 bytes
+//   - Type buffer: 256 bytes
+//   - Hover buffer: 1024 bytes
+//   - Effects:     16 per symbol
+//   - Params:      32 per function
+//   - Line index:  65536 lines
+
+// ============================================================================
+// Section 1: CONSTANTS
+// ============================================================================
+
+let LSPH_MAX_SYMBOLS: i64  = 4096
+let LSPH_MAX_DOC_LEN: i64  = 512
+let LSPH_MAX_TYPE_LEN: i64 = 256
+let LSPH_MAX_EFFECTS: i64  = 16
+let LSPH_MAX_PARAMS: i64   = 32
+let LSPH_MAX_LINES: i64    = 65536
+let LSPH_MAX_HOVER_LEN: i64 = 1024
+let LSPH_INVALID: i64      = 0 - 1
+
+// ASCII constants
+let LSPH_BYTE_NEWLINE: i8  = 10
+let LSPH_BYTE_SPACE: i8    = 32
+let LSPH_BYTE_COLON: i8    = 58
+let LSPH_BYTE_COMMA: i8    = 44
+let LSPH_BYTE_LPAREN: i8   = 40
+let LSPH_BYTE_RPAREN: i8   = 41
+let LSPH_BYTE_LANGLE: i8   = 60
+let LSPH_BYTE_RANGLE: i8   = 62
+let LSPH_BYTE_LBRACKET: i8 = 91
+let LSPH_BYTE_RBRACKET: i8 = 93
+let LSPH_BYTE_AMPERSAND: i8 = 38
+let LSPH_BYTE_BANG: i8     = 33
+let LSPH_BYTE_DASH: i8     = 45
+let LSPH_BYTE_BACKTICK: i8 = 96
+let LSPH_BYTE_STAR: i8     = 42
+let LSPH_BYTE_ZERO: i8     = 48
+let LSPH_BYTE_SEMICOLON: i8 = 59
+let LSPH_BYTE_UNDERSCORE: i8 = 95
+
+// Effect hash constants (stable hashes for known effects)
+let LSPH_EFFECT_IO: i64    = 1
+let LSPH_EFFECT_MUT: i64   = 2
+let LSPH_EFFECT_ALLOC: i64 = 3
+let LSPH_EFFECT_PANIC: i64 = 4
+let LSPH_EFFECT_ASYNC: i64 = 5
+let LSPH_EFFECT_GPU: i64   = 6
+let LSPH_EFFECT_PROB: i64  = 7
+let LSPH_EFFECT_DIV: i64   = 8
+
+// ============================================================================
+// Section 2: ENUMS
+// ============================================================================
+
+enum LsphSymbolKind {
+    SymFunction,
+    SymVariable,
+    SymType,
+    SymField,
+    SymModule,
+    SymConstant,
+    SymParameter,
+    SymEffect,
+    SymUnknown,
+}
+
+enum LsphTypeCategory {
+    TcPrimitive,
+    TcStruct,
+    TcEnum,
+    TcFunction,
+    TcArray,
+    TcRef,
+    TcMutRef,
+    TcGeneric,
+    TcUnit,
+    TcNever,
+    TcUnknown,
+}
+
+enum LsphHoverSection {
+    SectionType,
+    SectionDoc,
+    SectionSignature,
+    SectionEffects,
+    SectionSource,
+}
+
+// ============================================================================
+// Section 3: BUFFER STRUCTS
+// ============================================================================
+
+struct LsphTypeBuf {
+    buf: [i8; 256],
+    len: i64,
+}
+
+struct LsphDocBuf {
+    buf: [i8; 512],
+    len: i64,
+}
+
+struct LsphHoverBuf {
+    buf: [i8; 1024],
+    len: i64,
+}
+
+struct LsphEffectBuf {
+    effects: [i64; 16],
+    count: i64,
+}
+
+struct LsphParamInfo {
+    name_hash: i64,
+    type_buf: LsphTypeBuf,
+}
+
+// ============================================================================
+// Section 4: SYMBOL AND CONTEXT STRUCTS
+// ============================================================================
+
+struct LsphSymbolInfo {
+    kind: LsphSymbolKind,
+    name_hash: i64,
+    type_cat: LsphTypeCategory,
+    type_buf: LsphTypeBuf,
+    doc: LsphDocBuf,
+    line: i64,
+    col: i64,
+    end_line: i64,
+    end_col: i64,
+    param_count: i64,
+    effect_count: i64,
+    is_mutable: bool,
+    def_line: i64,
+}
+
+struct LsphLineIndex {
+    line_starts: [i64; 65536],
+    line_count: i64,
+}
+
+struct LsphContext {
+    symbols: [LsphSymbolInfo; 4096],
+    sym_count: i64,
+    line_index: LsphLineIndex,
+    params_buf: [LsphParamInfo; 32],
+    effects_buf: LsphEffectBuf,
+    hover_result: LsphHoverBuf,
+    last_hover_line: i64,
+    last_hover_col: i64,
+}
+
+// ============================================================================
+// Section 5: CONSTRUCTOR FUNCTIONS (helpers must precede callers)
+// ============================================================================
+
+fn lsph_type_buf_new() -> LsphTypeBuf {
+    LsphTypeBuf {
+        buf: [0; 256],
+        len: 0,
+    }
+}
+
+fn lsph_doc_buf_new() -> LsphDocBuf {
+    LsphDocBuf {
+        buf: [0; 512],
+        len: 0,
+    }
+}
+
+fn lsph_hover_buf_new() -> LsphHoverBuf {
+    LsphHoverBuf {
+        buf: [0; 1024],
+        len: 0,
+    }
+}
+
+fn lsph_effect_buf_new() -> LsphEffectBuf {
+    LsphEffectBuf {
+        effects: [0; 16],
+        count: 0,
+    }
+}
+
+fn lsph_param_info_new() -> LsphParamInfo {
+    LsphParamInfo {
+        name_hash: 0,
+        type_buf: lsph_type_buf_new(),
+    }
+}
+
+fn lsph_symbol_info_new() -> LsphSymbolInfo {
+    LsphSymbolInfo {
+        kind: LsphSymbolKind::SymUnknown,
+        name_hash: 0,
+        type_cat: LsphTypeCategory::TcUnknown,
+        type_buf: lsph_type_buf_new(),
+        doc: lsph_doc_buf_new(),
+        line: 0,
+        col: 0,
+        end_line: 0,
+        end_col: 0,
+        param_count: 0,
+        effect_count: 0,
+        is_mutable: false,
+        def_line: 0,
+    }
+}
+
+fn lsph_line_index_new() -> LsphLineIndex {
+    LsphLineIndex {
+        line_starts: [0; 65536],
+        line_count: 0,
+    }
+}
+
+fn lsph_context_new() -> LsphContext {
+    LsphContext {
+        symbols: [lsph_symbol_info_new(); 4096],
+        sym_count: 0,
+        line_index: lsph_line_index_new(),
+        params_buf: [lsph_param_info_new(); 32],
+        effects_buf: lsph_effect_buf_new(),
+        hover_result: lsph_hover_buf_new(),
+        last_hover_line: 0,
+        last_hover_col: 0,
+    }
+}
+
+// ============================================================================
+// Section 6: TYPE BUFFER OPERATIONS
+// ============================================================================
+
+// Append a single byte to a type buffer.
+fn lsph_type_buf_append_byte(buf: &! LsphTypeBuf, b: i8) with Mut, Div, Panic {
+    if buf.len < LSPH_MAX_TYPE_LEN {
+        buf.buf[buf.len as usize] = b
+        buf.len = buf.len + 1
+    }
+}
+
+// Append contents of one type buffer to another.
+fn lsph_type_buf_append_str(dst: &! LsphTypeBuf, src: &LsphTypeBuf) with Mut, Div, Panic {
+    var i: i64 = 0
+    while i < src.len {
+        if dst.len < LSPH_MAX_TYPE_LEN {
+            dst.buf[dst.len as usize] = src.buf[i as usize]
+            dst.len = dst.len + 1
+        }
+        i = i + 1
+    }
+}
+
+// Append a decimal representation of an i64 to a type buffer.
+fn lsph_type_buf_append_i64(buf: &! LsphTypeBuf, val: i64) with Mut, Div, Panic {
+    if val == 0 {
+        lsph_type_buf_append_byte(buf, LSPH_BYTE_ZERO)
+        return
+    }
+
+    var n = val
+    if n < 0 {
+        lsph_type_buf_append_byte(buf, LSPH_BYTE_DASH)
+        n = 0 - n
+    }
+
+    // Extract digits into a temporary buffer (max 20 digits for i64)
+    var digits: [i8; 24] = [0; 24]
+    var dlen: i64 = 0
+    while n > 0 && dlen < 24 {
+        let d = n - (n / 10) * 10
+        digits[dlen as usize] = (d + 48) as i8
+        n = n / 10
+        dlen = dlen + 1
+    }
+
+    // Emit digits in reverse order (most significant first)
+    var i = dlen - 1
+    while i >= 0 {
+        lsph_type_buf_append_byte(buf, digits[i as usize])
+        i = i - 1
+    }
+}
+
+// Compare two type buffers for equality.
+fn lsph_type_buf_eq(a: &LsphTypeBuf, b: &LsphTypeBuf) -> bool with Mut, Div, Panic {
+    if a.len != b.len {
+        return false
+    }
+    var i: i64 = 0
+    while i < a.len {
+        if a.buf[i as usize] != b.buf[i as usize] {
+            return false
+        }
+        i = i + 1
+    }
+    true
+}
+
+// Return the length of a type buffer.
+fn lsph_type_buf_len(buf: &LsphTypeBuf) -> i64 {
+    buf.len
+}
+
+// Clear a type buffer.
+fn lsph_type_buf_clear(buf: &! LsphTypeBuf) with Mut {
+    buf.len = 0
+}
+
+// Check if a type buffer is empty.
+fn lsph_type_buf_is_empty(buf: &LsphTypeBuf) -> bool {
+    buf.len == 0
+}
+
+// Copy a type buffer.
+fn lsph_type_buf_copy(src: &LsphTypeBuf) -> LsphTypeBuf with Mut, Div, Panic {
+    var dst = lsph_type_buf_new()
+    var i: i64 = 0
+    while i < src.len {
+        dst.buf[i as usize] = src.buf[i as usize]
+        i = i + 1
+    }
+    dst.len = src.len
+    dst
+}
+
+// Build a type buffer from a series of known ASCII bytes representing a string.
+// This is a helper used internally to write fixed strings like "i32", "bool", etc.
+fn lsph_type_buf_from_bytes_4(b0: i8, b1: i8, b2: i8, b3: i8) -> LsphTypeBuf with Mut, Div, Panic {
+    var buf = lsph_type_buf_new()
+    lsph_type_buf_append_byte(&! buf, b0)
+    lsph_type_buf_append_byte(&! buf, b1)
+    lsph_type_buf_append_byte(&! buf, b2)
+    lsph_type_buf_append_byte(&! buf, b3)
+    buf
+}
+
+fn lsph_type_buf_from_bytes_3(b0: i8, b1: i8, b2: i8) -> LsphTypeBuf with Mut, Div, Panic {
+    var buf = lsph_type_buf_new()
+    lsph_type_buf_append_byte(&! buf, b0)
+    lsph_type_buf_append_byte(&! buf, b1)
+    lsph_type_buf_append_byte(&! buf, b2)
+    buf
+}
+
+// ============================================================================
+// Section 7: DOC BUFFER OPERATIONS
+// ============================================================================
+
+// Append a single byte to a doc buffer.
+fn lsph_doc_buf_append_byte(buf: &! LsphDocBuf, b: i8) with Mut, Div, Panic {
+    if buf.len < LSPH_MAX_DOC_LEN {
+        buf.buf[buf.len as usize] = b
+        buf.len = buf.len + 1
+    }
+}
+
+// Append contents of a type buffer to a doc buffer.
+fn lsph_doc_buf_append_type(dst: &! LsphDocBuf, src: &LsphTypeBuf) with Mut, Div, Panic {
+    var i: i64 = 0
+    while i < src.len {
+        if dst.len < LSPH_MAX_DOC_LEN {
+            dst.buf[dst.len as usize] = src.buf[i as usize]
+            dst.len = dst.len + 1
+        }
+        i = i + 1
+    }
+}
+
+// Compare two doc buffers for equality.
+fn lsph_doc_buf_eq(a: &LsphDocBuf, b: &LsphDocBuf) -> bool with Mut, Div, Panic {
+    if a.len != b.len {
+        return false
+    }
+    var i: i64 = 0
+    while i < a.len {
+        if a.buf[i as usize] != b.buf[i as usize] {
+            return false
+        }
+        i = i + 1
+    }
+    true
+}
+
+// Return the length of a doc buffer.
+fn lsph_doc_buf_len(buf: &LsphDocBuf) -> i64 {
+    buf.len
+}
+
+// Clear a doc buffer.
+fn lsph_doc_buf_clear(buf: &! LsphDocBuf) with Mut {
+    buf.len = 0
+}
+
+// Check if a doc buffer is empty.
+fn lsph_doc_buf_is_empty(buf: &LsphDocBuf) -> bool {
+    buf.len == 0
+}
+
+// Copy a doc buffer.
+fn lsph_doc_buf_copy(src: &LsphDocBuf) -> LsphDocBuf with Mut, Div, Panic {
+    var dst = lsph_doc_buf_new()
+    var i: i64 = 0
+    while i < src.len {
+        dst.buf[i as usize] = src.buf[i as usize]
+        i = i + 1
+    }
+    dst.len = src.len
+    dst
+}
+
+// ============================================================================
+// Section 8: HOVER BUFFER OPERATIONS
+// ============================================================================
+
+// Append a single byte to a hover buffer.
+fn lsph_hover_buf_append_byte(buf: &! LsphHoverBuf, b: i8) with Mut, Div, Panic {
+    if buf.len < LSPH_MAX_HOVER_LEN {
+        buf.buf[buf.len as usize] = b
+        buf.len = buf.len + 1
+    }
+}
+
+// Append contents of a type buffer to a hover buffer.
+fn lsph_hover_buf_append_type(dst: &! LsphHoverBuf, src: &LsphTypeBuf) with Mut, Div, Panic {
+    var i: i64 = 0
+    while i < src.len {
+        if dst.len < LSPH_MAX_HOVER_LEN {
+            dst.buf[dst.len as usize] = src.buf[i as usize]
+            dst.len = dst.len + 1
+        }
+        i = i + 1
+    }
+}
+
+// Append contents of a doc buffer to a hover buffer.
+fn lsph_hover_buf_append_doc(dst: &! LsphHoverBuf, src: &LsphDocBuf) with Mut, Div, Panic {
+    var i: i64 = 0
+    while i < src.len {
+        if dst.len < LSPH_MAX_HOVER_LEN {
+            dst.buf[dst.len as usize] = src.buf[i as usize]
+            dst.len = dst.len + 1
+        }
+        i = i + 1
+    }
+}
+
+// Append a newline to a hover buffer.
+fn lsph_hover_buf_append_newline(buf: &! LsphHoverBuf) with Mut, Div, Panic {
+    lsph_hover_buf_append_byte(buf, LSPH_BYTE_NEWLINE)
+}
+
+// Append a space to a hover buffer.
+fn lsph_hover_buf_append_space(buf: &! LsphHoverBuf) with Mut, Div, Panic {
+    lsph_hover_buf_append_byte(buf, LSPH_BYTE_SPACE)
+}
+
+// Append contents of one hover buffer to another.
+fn lsph_hover_buf_append_hover(dst: &! LsphHoverBuf, src: &LsphHoverBuf) with Mut, Div, Panic {
+    var i: i64 = 0
+    while i < src.len {
+        if dst.len < LSPH_MAX_HOVER_LEN {
+            dst.buf[dst.len as usize] = src.buf[i as usize]
+            dst.len = dst.len + 1
+        }
+        i = i + 1
+    }
+}
+
+// Append a decimal i64 to a hover buffer.
+fn lsph_hover_buf_append_i64(buf: &! LsphHoverBuf, val: i64) with Mut, Div, Panic {
+    if val == 0 {
+        lsph_hover_buf_append_byte(buf, LSPH_BYTE_ZERO)
+        return
+    }
+
+    var n = val
+    if n < 0 {
+        lsph_hover_buf_append_byte(buf, LSPH_BYTE_DASH)
+        n = 0 - n
+    }
+
+    var digits: [i8; 24] = [0; 24]
+    var dlen: i64 = 0
+    while n > 0 && dlen < 24 {
+        let d = n - (n / 10) * 10
+        digits[dlen as usize] = (d + 48) as i8
+        n = n / 10
+        dlen = dlen + 1
+    }
+
+    var i = dlen - 1
+    while i >= 0 {
+        lsph_hover_buf_append_byte(buf, digits[i as usize])
+        i = i - 1
+    }
+}
+
+// Return the length of a hover buffer.
+fn lsph_hover_buf_len(buf: &LsphHoverBuf) -> i64 {
+    buf.len
+}
+
+// Clear a hover buffer.
+fn lsph_hover_buf_clear(buf: &! LsphHoverBuf) with Mut {
+    buf.len = 0
+}
+
+// Check if a hover buffer is empty.
+fn lsph_hover_buf_is_empty(buf: &LsphHoverBuf) -> bool {
+    buf.len == 0
+}
+
+// Compare two hover buffers for equality.
+fn lsph_hover_buf_eq(a: &LsphHoverBuf, b: &LsphHoverBuf) -> bool with Mut, Div, Panic {
+    if a.len != b.len {
+        return false
+    }
+    var i: i64 = 0
+    while i < a.len {
+        if a.buf[i as usize] != b.buf[i as usize] {
+            return false
+        }
+        i = i + 1
+    }
+    true
+}
+
+// Append markdown code fence opener: ```sio\n
+fn lsph_hover_buf_append_code_fence_open(buf: &! LsphHoverBuf) with Mut, Div, Panic {
+    lsph_hover_buf_append_byte(buf, LSPH_BYTE_BACKTICK)
+    lsph_hover_buf_append_byte(buf, LSPH_BYTE_BACKTICK)
+    lsph_hover_buf_append_byte(buf, LSPH_BYTE_BACKTICK)
+    // 's'
+    lsph_hover_buf_append_byte(buf, 115)
+    // 'i'
+    lsph_hover_buf_append_byte(buf, 105)
+    // 'o'
+    lsph_hover_buf_append_byte(buf, 111)
+    lsph_hover_buf_append_newline(buf)
+}
+
+// Append markdown code fence closer: ```\n
+fn lsph_hover_buf_append_code_fence_close(buf: &! LsphHoverBuf) with Mut, Div, Panic {
+    lsph_hover_buf_append_byte(buf, LSPH_BYTE_BACKTICK)
+    lsph_hover_buf_append_byte(buf, LSPH_BYTE_BACKTICK)
+    lsph_hover_buf_append_byte(buf, LSPH_BYTE_BACKTICK)
+    lsph_hover_buf_append_newline(buf)
+}
+
+// Append a horizontal rule: ---\n
+fn lsph_hover_buf_append_hr(buf: &! LsphHoverBuf) with Mut, Div, Panic {
+    lsph_hover_buf_append_byte(buf, LSPH_BYTE_DASH)
+    lsph_hover_buf_append_byte(buf, LSPH_BYTE_DASH)
+    lsph_hover_buf_append_byte(buf, LSPH_BYTE_DASH)
+    lsph_hover_buf_append_newline(buf)
+}
+
+// ============================================================================
+// Section 9: EFFECT BUFFER OPERATIONS
+// ============================================================================
+
+// Add an effect to the effect buffer.
+fn lsph_effect_buf_add(buf: &! LsphEffectBuf, effect: i64) with Mut, Div, Panic {
+    if buf.count < LSPH_MAX_EFFECTS {
+        buf.effects[buf.count as usize] = effect
+        buf.count = buf.count + 1
+    }
+}
+
+// Check if an effect buffer contains a given effect.
+fn lsph_effect_buf_contains(buf: &LsphEffectBuf, effect: i64) -> bool with Mut, Div, Panic {
+    var i: i64 = 0
+    while i < buf.count {
+        if buf.effects[i as usize] == effect {
+            return true
+        }
+        i = i + 1
+    }
+    false
+}
+
+// Return the count of effects.
+fn lsph_effect_buf_count(buf: &LsphEffectBuf) -> i64 {
+    buf.count
+}
+
+// Clear the effect buffer.
+fn lsph_effect_buf_clear(buf: &! LsphEffectBuf) with Mut {
+    buf.count = 0
+}
+
+// Compare two effect buffers for equality (order-sensitive).
+fn lsph_effect_buf_eq(a: &LsphEffectBuf, b: &LsphEffectBuf) -> bool with Mut, Div, Panic {
+    if a.count != b.count {
+        return false
+    }
+    var i: i64 = 0
+    while i < a.count {
+        if a.effects[i as usize] != b.effects[i as usize] {
+            return false
+        }
+        i = i + 1
+    }
+    true
+}
+
+// Copy an effect buffer.
+fn lsph_effect_buf_copy(src: &LsphEffectBuf) -> LsphEffectBuf with Mut, Div, Panic {
+    var dst = lsph_effect_buf_new()
+    var i: i64 = 0
+    while i < src.count {
+        dst.effects[i as usize] = src.effects[i as usize]
+        i = i + 1
+    }
+    dst.count = src.count
+    dst
+}
+
+// ============================================================================
+// Section 10: SYMBOL MANAGEMENT
+// ============================================================================
+
+// Add a new symbol to the context. Returns the symbol index, or LSPH_INVALID
+// if the arena is full.
+fn lsph_add_symbol(ctx: &! LsphContext, kind: LsphSymbolKind, name_hash: i64,
+                    line: i64, col: i64, end_line: i64, end_col: i64) -> i64
+    with Mut, Div, Panic
+{
+    if ctx.sym_count >= LSPH_MAX_SYMBOLS {
+        return LSPH_INVALID
+    }
+    let idx = ctx.sym_count
+    ctx.symbols[idx as usize].kind = kind
+    ctx.symbols[idx as usize].name_hash = name_hash
+    ctx.symbols[idx as usize].type_cat = LsphTypeCategory::TcUnknown
+    ctx.symbols[idx as usize].type_buf = lsph_type_buf_new()
+    ctx.symbols[idx as usize].doc = lsph_doc_buf_new()
+    ctx.symbols[idx as usize].line = line
+    ctx.symbols[idx as usize].col = col
+    ctx.symbols[idx as usize].end_line = end_line
+    ctx.symbols[idx as usize].end_col = end_col
+    ctx.symbols[idx as usize].param_count = 0
+    ctx.symbols[idx as usize].effect_count = 0
+    ctx.symbols[idx as usize].is_mutable = false
+    ctx.symbols[idx as usize].def_line = line
+    ctx.sym_count = ctx.sym_count + 1
+    idx
+}
+
+// Set the type information for a symbol.
+fn lsph_set_symbol_type(ctx: &! LsphContext, sym_id: i64, cat: LsphTypeCategory,
+                         type_str: &LsphTypeBuf)
+    with Mut, Div, Panic
+{
+    if sym_id < 0 || sym_id >= ctx.sym_count {
+        return
+    }
+    ctx.symbols[sym_id as usize].type_cat = cat
+    // Copy type buffer contents
+    var i: i64 = 0
+    while i < type_str.len && i < LSPH_MAX_TYPE_LEN {
+        ctx.symbols[sym_id as usize].type_buf.buf[i as usize] = type_str.buf[i as usize]
+        i = i + 1
+    }
+    ctx.symbols[sym_id as usize].type_buf.len = type_str.len
+}
+
+// Set the documentation for a symbol.
+fn lsph_set_symbol_doc(ctx: &! LsphContext, sym_id: i64, doc: &LsphDocBuf)
+    with Mut, Div, Panic
+{
+    if sym_id < 0 || sym_id >= ctx.sym_count {
+        return
+    }
+    var i: i64 = 0
+    while i < doc.len && i < LSPH_MAX_DOC_LEN {
+        ctx.symbols[sym_id as usize].doc.buf[i as usize] = doc.buf[i as usize]
+        i = i + 1
+    }
+    ctx.symbols[sym_id as usize].doc.len = doc.len
+}
+
+// Set the effects for a symbol by copying from an effect buffer.
+fn lsph_set_symbol_effects(ctx: &! LsphContext, sym_id: i64, effects: &LsphEffectBuf)
+    with Mut, Div, Panic
+{
+    if sym_id < 0 || sym_id >= ctx.sym_count {
+        return
+    }
+    ctx.symbols[sym_id as usize].effect_count = effects.count
+}
+
+// Set the parameter count for a symbol.
+fn lsph_set_symbol_param_count(ctx: &! LsphContext, sym_id: i64, count: i64)
+    with Mut, Div, Panic
+{
+    if sym_id < 0 || sym_id >= ctx.sym_count {
+        return
+    }
+    ctx.symbols[sym_id as usize].param_count = count
+}
+
+// Set the mutability flag for a symbol.
+fn lsph_set_symbol_mutable(ctx: &! LsphContext, sym_id: i64, is_mutable: bool)
+    with Mut, Div, Panic
+{
+    if sym_id < 0 || sym_id >= ctx.sym_count {
+        return
+    }
+    ctx.symbols[sym_id as usize].is_mutable = is_mutable
+}
+
+// Set the definition line for a symbol.
+fn lsph_set_symbol_def_line(ctx: &! LsphContext, sym_id: i64, def_line: i64)
+    with Mut, Div, Panic
+{
+    if sym_id < 0 || sym_id >= ctx.sym_count {
+        return
+    }
+    ctx.symbols[sym_id as usize].def_line = def_line
+}
+
+// Get a reference to a symbol by index.
+fn lsph_get_symbol_kind(ctx: &LsphContext, sym_id: i64) -> LsphSymbolKind with Div, Panic {
+    if sym_id < 0 || sym_id >= ctx.sym_count {
+        return LsphSymbolKind::SymUnknown
+    }
+    ctx.symbols[sym_id as usize].kind
+}
+
+// Get the name hash of a symbol.
+fn lsph_get_symbol_name_hash(ctx: &LsphContext, sym_id: i64) -> i64 with Div, Panic {
+    if sym_id < 0 || sym_id >= ctx.sym_count {
+        return 0
+    }
+    ctx.symbols[sym_id as usize].name_hash
+}
+
+// Get the type category of a symbol.
+fn lsph_get_symbol_type_cat(ctx: &LsphContext, sym_id: i64) -> LsphTypeCategory with Div, Panic {
+    if sym_id < 0 || sym_id >= ctx.sym_count {
+        return LsphTypeCategory::TcUnknown
+    }
+    ctx.symbols[sym_id as usize].type_cat
+}
+
+// Get the line of a symbol.
+fn lsph_get_symbol_line(ctx: &LsphContext, sym_id: i64) -> i64 with Div, Panic {
+    if sym_id < 0 || sym_id >= ctx.sym_count {
+        return LSPH_INVALID
+    }
+    ctx.symbols[sym_id as usize].line
+}
+
+// Get the column of a symbol.
+fn lsph_get_symbol_col(ctx: &LsphContext, sym_id: i64) -> i64 with Div, Panic {
+    if sym_id < 0 || sym_id >= ctx.sym_count {
+        return LSPH_INVALID
+    }
+    ctx.symbols[sym_id as usize].col
+}
+
+// Check if a symbol is mutable.
+fn lsph_get_symbol_is_mutable(ctx: &LsphContext, sym_id: i64) -> bool with Div, Panic {
+    if sym_id < 0 || sym_id >= ctx.sym_count {
+        return false
+    }
+    ctx.symbols[sym_id as usize].is_mutable
+}
+
+// Get the param count of a symbol.
+fn lsph_get_symbol_param_count(ctx: &LsphContext, sym_id: i64) -> i64 with Div, Panic {
+    if sym_id < 0 || sym_id >= ctx.sym_count {
+        return 0
+    }
+    ctx.symbols[sym_id as usize].param_count
+}
+
+// Get the effect count of a symbol.
+fn lsph_get_symbol_effect_count(ctx: &LsphContext, sym_id: i64) -> i64 with Div, Panic {
+    if sym_id < 0 || sym_id >= ctx.sym_count {
+        return 0
+    }
+    ctx.symbols[sym_id as usize].effect_count
+}
+
+// ============================================================================
+// Section 11: SYMBOL SEARCH
+// ============================================================================
+
+// Check if a position (line, col) falls within a symbol's span.
+fn lsph_position_in_span(sym_line: i64, sym_col: i64,
+                          sym_end_line: i64, sym_end_col: i64,
+                          line: i64, col: i64) -> bool
+{
+    // Before start?
+    if line < sym_line {
+        return false
+    }
+    if line == sym_line && col < sym_col {
+        return false
+    }
+    // After end?
+    if line > sym_end_line {
+        return false
+    }
+    if line == sym_end_line && col > sym_end_col {
+        return false
+    }
+    true
+}
+
+// Find the symbol at a given (line, col) position.
+// Returns the symbol index, or LSPH_INVALID if none found.
+// When multiple symbols overlap, returns the innermost (smallest span).
+fn lsph_find_symbol_at(ctx: &LsphContext, line: i64, col: i64) -> i64 with Mut, Div, Panic {
+    var best_id: i64 = LSPH_INVALID
+    var best_span: i64 = 0 - 1  // will be set on first match
+
+    var i: i64 = 0
+    while i < ctx.sym_count {
+        let sym = ctx.symbols[i as usize]
+        let in_span = lsph_position_in_span(sym.line, sym.col,
+                                              sym.end_line, sym.end_col,
+                                              line, col)
+        if in_span {
+            // Compute span size: (end_line - line) * 1000 + (end_col - col)
+            let span_size = (sym.end_line - sym.line) * 1000 + (sym.end_col - sym.col)
+            if best_id == LSPH_INVALID || span_size < best_span {
+                best_id = i
+                best_span = span_size
+            }
+        }
+        i = i + 1
+    }
+    best_id
+}
+
+// Find a symbol by name hash.  Returns the first match, or LSPH_INVALID.
+fn lsph_find_symbol_by_hash(ctx: &LsphContext, name_hash: i64) -> i64 with Mut, Div, Panic {
+    var i: i64 = 0
+    while i < ctx.sym_count {
+        if ctx.symbols[i as usize].name_hash == name_hash {
+            return i
+        }
+        i = i + 1
+    }
+    LSPH_INVALID
+}
+
+// Find the symbol at a line (first symbol starting on that line).
+fn lsph_find_symbol_on_line(ctx: &LsphContext, line: i64) -> i64 with Mut, Div, Panic {
+    var i: i64 = 0
+    while i < ctx.sym_count {
+        if ctx.symbols[i as usize].line == line {
+            return i
+        }
+        i = i + 1
+    }
+    LSPH_INVALID
+}
+
+// Count symbols of a given kind.
+fn lsph_count_symbols_of_kind(ctx: &LsphContext, kind: LsphSymbolKind) -> i64 with Mut, Div, Panic {
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < ctx.sym_count {
+        let sym_kind = ctx.symbols[i as usize].kind
+        let matches = match sym_kind {
+            LsphSymbolKind::SymFunction => match kind {
+                LsphSymbolKind::SymFunction => true,
+                _ => false,
+            },
+            LsphSymbolKind::SymVariable => match kind {
+                LsphSymbolKind::SymVariable => true,
+                _ => false,
+            },
+            LsphSymbolKind::SymType => match kind {
+                LsphSymbolKind::SymType => true,
+                _ => false,
+            },
+            LsphSymbolKind::SymField => match kind {
+                LsphSymbolKind::SymField => true,
+                _ => false,
+            },
+            LsphSymbolKind::SymModule => match kind {
+                LsphSymbolKind::SymModule => true,
+                _ => false,
+            },
+            LsphSymbolKind::SymConstant => match kind {
+                LsphSymbolKind::SymConstant => true,
+                _ => false,
+            },
+            LsphSymbolKind::SymParameter => match kind {
+                LsphSymbolKind::SymParameter => true,
+                _ => false,
+            },
+            LsphSymbolKind::SymEffect => match kind {
+                LsphSymbolKind::SymEffect => true,
+                _ => false,
+            },
+            LsphSymbolKind::SymUnknown => match kind {
+                LsphSymbolKind::SymUnknown => true,
+                _ => false,
+            },
+        }
+        if matches {
+            count = count + 1
+        }
+        i = i + 1
+    }
+    count
+}
+
+// ============================================================================
+// Section 12: LINE INDEX
+// ============================================================================
+
+// Build a line index from source bytes.  Each entry in line_starts is the
+// byte offset at which a line begins.  Line 0 starts at offset 0.
+fn lsph_build_line_index(ctx: &! LsphContext, source_bytes: &[i64; 4096], source_len: i64)
+    with Mut, Div, Panic
+{
+    // Line 0 always starts at offset 0
+    ctx.line_index.line_starts[0] = 0
+    ctx.line_index.line_count = 1
+
+    var i: i64 = 0
+    while i < source_len && i < 4096 {
+        if source_bytes[i as usize] == 10 && ctx.line_index.line_count < LSPH_MAX_LINES {
+            // The next line starts at i + 1
+            let lc = ctx.line_index.line_count
+            ctx.line_index.line_starts[lc as usize] = i + 1
+            ctx.line_index.line_count = ctx.line_index.line_count + 1
+        }
+        i = i + 1
+    }
+}
+
+// Convert a (line, col) to a byte offset using the line index.
+// Returns LSPH_INVALID if the line is out of range.
+fn lsph_line_col_to_offset(ctx: &LsphContext, line: i64, col: i64) -> i64 with Div, Panic {
+    if line < 0 || line >= ctx.line_index.line_count {
+        return LSPH_INVALID
+    }
+    ctx.line_index.line_starts[line as usize] + col
+}
+
+// Convert a byte offset to a line number.  Uses linear scan.
+// Returns the line number (0-based), or LSPH_INVALID.
+fn lsph_offset_to_line(ctx: &LsphContext, offset: i64) -> i64 with Mut, Div, Panic {
+    if ctx.line_index.line_count == 0 {
+        return LSPH_INVALID
+    }
+    var i: i64 = ctx.line_index.line_count - 1
+    while i >= 0 {
+        if ctx.line_index.line_starts[i as usize] <= offset {
+            return i
+        }
+        i = i - 1
+    }
+    0
+}
+
+// Convert a byte offset to a column number within its line.
+fn lsph_offset_to_col(ctx: &LsphContext, offset: i64) -> i64 with Mut, Div, Panic {
+    let line = lsph_offset_to_line(ctx, offset)
+    if line == LSPH_INVALID {
+        return 0
+    }
+    offset - ctx.line_index.line_starts[line as usize]
+}
+
+// Get the number of lines in the index.
+fn lsph_line_count(ctx: &LsphContext) -> i64 {
+    ctx.line_index.line_count
+}
+
+// Get the start offset of a specific line.
+fn lsph_line_start(ctx: &LsphContext, line: i64) -> i64 with Div, Panic {
+    if line < 0 || line >= ctx.line_index.line_count {
+        return LSPH_INVALID
+    }
+    ctx.line_index.line_starts[line as usize]
+}
+
+// Get the length of a line (distance from this line's start to the next line's start).
+fn lsph_line_length(ctx: &LsphContext, line: i64) -> i64 with Div, Panic {
+    if line < 0 || line >= ctx.line_index.line_count {
+        return 0
+    }
+    if line + 1 < ctx.line_index.line_count {
+        return ctx.line_index.line_starts[(line + 1) as usize] - ctx.line_index.line_starts[line as usize]
+    }
+    // Last line: unknown length, return a sentinel
+    0
+}
+
+// ============================================================================
+// Section 13: DOC COMMENT EXTRACTION
+// ============================================================================
+
+// Extract doc comments from source bytes preceding a definition line.
+// Doc comments are lines starting with // immediately before def_line.
+// Returns a LsphDocBuf containing the concatenated doc text.
+fn lsph_extract_doc_comment(source: &[i64; 4096], len: i64, def_line: i64) -> LsphDocBuf
+    with Mut, Div, Panic
+{
+    var doc = lsph_doc_buf_new()
+
+    // Find where def_line starts by scanning for newlines
+    // Count lines from the beginning
+    var line_starts: [i64; 256] = [0; 256]
+    var line_count: i64 = 1
+    line_starts[0] = 0
+
+    var i: i64 = 0
+    while i < len && i < 4096 && line_count < 256 {
+        if source[i as usize] == 10 {
+            line_starts[line_count as usize] = i + 1
+            line_count = line_count + 1
+        }
+        i = i + 1
+    }
+
+    // Now scan backward from def_line looking for comment lines
+    // A comment line starts with optional whitespace followed by //
+    var scan_line = def_line - 1
+    var doc_start_line: i64 = def_line
+
+    while scan_line >= 0 && scan_line < line_count {
+        let ls = line_starts[scan_line as usize]
+        // Skip whitespace
+        var pos = ls
+        while pos < len && pos < 4096 {
+            let b = source[pos as usize]
+            if b != 32 && b != 9 {
+                // Not space or tab
+                break
+            }
+            pos = pos + 1
+        }
+        // Check for //
+        if pos + 1 < len && pos + 1 < 4096 {
+            let b0 = source[pos as usize]
+            let b1 = source[(pos + 1) as usize]
+            if b0 == 47 && b1 == 47 {
+                // It is a comment line
+                doc_start_line = scan_line
+                scan_line = scan_line - 1
+            } else {
+                // Not a comment, stop
+                break
+            }
+        } else {
+            break
+        }
+    }
+
+    // Now copy the comment text from doc_start_line to def_line - 1
+    var cl = doc_start_line
+    while cl < def_line && cl < line_count {
+        let ls = line_starts[cl as usize]
+        // Skip whitespace
+        var pos = ls
+        while pos < len && pos < 4096 {
+            let b = source[pos as usize]
+            if b != 32 && b != 9 {
+                break
+            }
+            pos = pos + 1
+        }
+        // Skip //
+        if pos + 1 < len && pos + 1 < 4096 {
+            let b0 = source[pos as usize]
+            let b1 = source[(pos + 1) as usize]
+            if b0 == 47 && b1 == 47 {
+                pos = pos + 2
+                // Skip optional space after //
+                if pos < len && pos < 4096 {
+                    if source[pos as usize] == 32 {
+                        pos = pos + 1
+                    }
+                }
+            }
+        }
+        // Copy remaining bytes of this line to doc buffer
+        while pos < len && pos < 4096 {
+            let b = source[pos as usize]
+            if b == 10 {
+                break
+            }
+            lsph_doc_buf_append_byte(&! doc, b as i8)
+            pos = pos + 1
+        }
+        // Add newline between doc lines (but not after the last)
+        if cl + 1 < def_line {
+            lsph_doc_buf_append_byte(&! doc, LSPH_BYTE_NEWLINE)
+        }
+        cl = cl + 1
+    }
+
+    doc
+}
+
+// ============================================================================
+// Section 14: TYPE CATEGORY FORMATTING
+// ============================================================================
+
+// Format a type category as a human-readable string in a type buffer.
+fn lsph_format_type_category(cat: LsphTypeCategory) -> LsphTypeBuf with Mut, Div, Panic {
+    var buf = lsph_type_buf_new()
+    match cat {
+        LsphTypeCategory::TcPrimitive => {
+            // "primitive"
+            lsph_type_buf_append_byte(&! buf, 112) // p
+            lsph_type_buf_append_byte(&! buf, 114) // r
+            lsph_type_buf_append_byte(&! buf, 105) // i
+            lsph_type_buf_append_byte(&! buf, 109) // m
+            lsph_type_buf_append_byte(&! buf, 105) // i
+            lsph_type_buf_append_byte(&! buf, 116) // t
+            lsph_type_buf_append_byte(&! buf, 105) // i
+            lsph_type_buf_append_byte(&! buf, 118) // v
+            lsph_type_buf_append_byte(&! buf, 101) // e
+        },
+        LsphTypeCategory::TcStruct => {
+            // "struct"
+            lsph_type_buf_append_byte(&! buf, 115) // s
+            lsph_type_buf_append_byte(&! buf, 116) // t
+            lsph_type_buf_append_byte(&! buf, 114) // r
+            lsph_type_buf_append_byte(&! buf, 117) // u
+            lsph_type_buf_append_byte(&! buf, 99)  // c
+            lsph_type_buf_append_byte(&! buf, 116) // t
+        },
+        LsphTypeCategory::TcEnum => {
+            // "enum"
+            lsph_type_buf_append_byte(&! buf, 101) // e
+            lsph_type_buf_append_byte(&! buf, 110) // n
+            lsph_type_buf_append_byte(&! buf, 117) // u
+            lsph_type_buf_append_byte(&! buf, 109) // m
+        },
+        LsphTypeCategory::TcFunction => {
+            // "function"
+            lsph_type_buf_append_byte(&! buf, 102) // f
+            lsph_type_buf_append_byte(&! buf, 117) // u
+            lsph_type_buf_append_byte(&! buf, 110) // n
+            lsph_type_buf_append_byte(&! buf, 99)  // c
+            lsph_type_buf_append_byte(&! buf, 116) // t
+            lsph_type_buf_append_byte(&! buf, 105) // i
+            lsph_type_buf_append_byte(&! buf, 111) // o
+            lsph_type_buf_append_byte(&! buf, 110) // n
+        },
+        LsphTypeCategory::TcArray => {
+            // "array"
+            lsph_type_buf_append_byte(&! buf, 97)  // a
+            lsph_type_buf_append_byte(&! buf, 114) // r
+            lsph_type_buf_append_byte(&! buf, 114) // r
+            lsph_type_buf_append_byte(&! buf, 97)  // a
+            lsph_type_buf_append_byte(&! buf, 121) // y
+        },
+        LsphTypeCategory::TcRef => {
+            // "&T"
+            lsph_type_buf_append_byte(&! buf, LSPH_BYTE_AMPERSAND)
+            lsph_type_buf_append_byte(&! buf, 84)  // T
+        },
+        LsphTypeCategory::TcMutRef => {
+            // "&!T"
+            lsph_type_buf_append_byte(&! buf, LSPH_BYTE_AMPERSAND)
+            lsph_type_buf_append_byte(&! buf, LSPH_BYTE_BANG)
+            lsph_type_buf_append_byte(&! buf, 84)  // T
+        },
+        LsphTypeCategory::TcGeneric => {
+            // "generic"
+            lsph_type_buf_append_byte(&! buf, 103) // g
+            lsph_type_buf_append_byte(&! buf, 101) // e
+            lsph_type_buf_append_byte(&! buf, 110) // n
+            lsph_type_buf_append_byte(&! buf, 101) // e
+            lsph_type_buf_append_byte(&! buf, 114) // r
+            lsph_type_buf_append_byte(&! buf, 105) // i
+            lsph_type_buf_append_byte(&! buf, 99)  // c
+        },
+        LsphTypeCategory::TcUnit => {
+            // "()"
+            lsph_type_buf_append_byte(&! buf, LSPH_BYTE_LPAREN)
+            lsph_type_buf_append_byte(&! buf, LSPH_BYTE_RPAREN)
+        },
+        LsphTypeCategory::TcNever => {
+            // "!"
+            lsph_type_buf_append_byte(&! buf, LSPH_BYTE_BANG)
+        },
+        LsphTypeCategory::TcUnknown => {
+            // "unknown"
+            lsph_type_buf_append_byte(&! buf, 117) // u
+            lsph_type_buf_append_byte(&! buf, 110) // n
+            lsph_type_buf_append_byte(&! buf, 107) // k
+            lsph_type_buf_append_byte(&! buf, 110) // n
+            lsph_type_buf_append_byte(&! buf, 111) // o
+            lsph_type_buf_append_byte(&! buf, 119) // w
+            lsph_type_buf_append_byte(&! buf, 110) // n
+        },
+    }
+    buf
+}
+
+// Format a symbol kind as a human-readable string.
+fn lsph_format_symbol_kind(kind: LsphSymbolKind) -> LsphTypeBuf with Mut, Div, Panic {
+    var buf = lsph_type_buf_new()
+    match kind {
+        LsphSymbolKind::SymFunction => {
+            // "fn"
+            lsph_type_buf_append_byte(&! buf, 102) // f
+            lsph_type_buf_append_byte(&! buf, 110) // n
+        },
+        LsphSymbolKind::SymVariable => {
+            // "var"
+            lsph_type_buf_append_byte(&! buf, 118) // v
+            lsph_type_buf_append_byte(&! buf, 97)  // a
+            lsph_type_buf_append_byte(&! buf, 114) // r
+        },
+        LsphSymbolKind::SymType => {
+            // "type"
+            lsph_type_buf_append_byte(&! buf, 116) // t
+            lsph_type_buf_append_byte(&! buf, 121) // y
+            lsph_type_buf_append_byte(&! buf, 112) // p
+            lsph_type_buf_append_byte(&! buf, 101) // e
+        },
+        LsphSymbolKind::SymField => {
+            // "field"
+            lsph_type_buf_append_byte(&! buf, 102) // f
+            lsph_type_buf_append_byte(&! buf, 105) // i
+            lsph_type_buf_append_byte(&! buf, 101) // e
+            lsph_type_buf_append_byte(&! buf, 108) // l
+            lsph_type_buf_append_byte(&! buf, 100) // d
+        },
+        LsphSymbolKind::SymModule => {
+            // "module"
+            lsph_type_buf_append_byte(&! buf, 109) // m
+            lsph_type_buf_append_byte(&! buf, 111) // o
+            lsph_type_buf_append_byte(&! buf, 100) // d
+            lsph_type_buf_append_byte(&! buf, 117) // u
+            lsph_type_buf_append_byte(&! buf, 108) // l
+            lsph_type_buf_append_byte(&! buf, 101) // e
+        },
+        LsphSymbolKind::SymConstant => {
+            // "const"
+            lsph_type_buf_append_byte(&! buf, 99)  // c
+            lsph_type_buf_append_byte(&! buf, 111) // o
+            lsph_type_buf_append_byte(&! buf, 110) // n
+            lsph_type_buf_append_byte(&! buf, 115) // s
+            lsph_type_buf_append_byte(&! buf, 116) // t
+        },
+        LsphSymbolKind::SymParameter => {
+            // "param"
+            lsph_type_buf_append_byte(&! buf, 112) // p
+            lsph_type_buf_append_byte(&! buf, 97)  // a
+            lsph_type_buf_append_byte(&! buf, 114) // r
+            lsph_type_buf_append_byte(&! buf, 97)  // a
+            lsph_type_buf_append_byte(&! buf, 109) // m
+        },
+        LsphSymbolKind::SymEffect => {
+            // "effect"
+            lsph_type_buf_append_byte(&! buf, 101) // e
+            lsph_type_buf_append_byte(&! buf, 102) // f
+            lsph_type_buf_append_byte(&! buf, 102) // f
+            lsph_type_buf_append_byte(&! buf, 101) // e
+            lsph_type_buf_append_byte(&! buf, 99)  // c
+            lsph_type_buf_append_byte(&! buf, 116) // t
+        },
+        LsphSymbolKind::SymUnknown => {
+            // "unknown"
+            lsph_type_buf_append_byte(&! buf, 117) // u
+            lsph_type_buf_append_byte(&! buf, 110) // n
+            lsph_type_buf_append_byte(&! buf, 107) // k
+            lsph_type_buf_append_byte(&! buf, 110) // n
+            lsph_type_buf_append_byte(&! buf, 111) // o
+            lsph_type_buf_append_byte(&! buf, 119) // w
+            lsph_type_buf_append_byte(&! buf, 110) // n
+        },
+    }
+    buf
+}
+
+// Format an effect ID as a human-readable string.
+fn lsph_format_effect(effect_id: i64) -> LsphTypeBuf with Mut, Div, Panic {
+    var buf = lsph_type_buf_new()
+    if effect_id == LSPH_EFFECT_IO {
+        // "IO"
+        lsph_type_buf_append_byte(&! buf, 73)  // I
+        lsph_type_buf_append_byte(&! buf, 79)  // O
+    } else if effect_id == LSPH_EFFECT_MUT {
+        // "Mut"
+        lsph_type_buf_append_byte(&! buf, 77)  // M
+        lsph_type_buf_append_byte(&! buf, 117) // u
+        lsph_type_buf_append_byte(&! buf, 116) // t
+    } else if effect_id == LSPH_EFFECT_ALLOC {
+        // "Alloc"
+        lsph_type_buf_append_byte(&! buf, 65)  // A
+        lsph_type_buf_append_byte(&! buf, 108) // l
+        lsph_type_buf_append_byte(&! buf, 108) // l
+        lsph_type_buf_append_byte(&! buf, 111) // o
+        lsph_type_buf_append_byte(&! buf, 99)  // c
+    } else if effect_id == LSPH_EFFECT_PANIC {
+        // "Panic"
+        lsph_type_buf_append_byte(&! buf, 80)  // P
+        lsph_type_buf_append_byte(&! buf, 97)  // a
+        lsph_type_buf_append_byte(&! buf, 110) // n
+        lsph_type_buf_append_byte(&! buf, 105) // i
+        lsph_type_buf_append_byte(&! buf, 99)  // c
+    } else if effect_id == LSPH_EFFECT_ASYNC {
+        // "Async"
+        lsph_type_buf_append_byte(&! buf, 65)  // A
+        lsph_type_buf_append_byte(&! buf, 115) // s
+        lsph_type_buf_append_byte(&! buf, 121) // y
+        lsph_type_buf_append_byte(&! buf, 110) // n
+        lsph_type_buf_append_byte(&! buf, 99)  // c
+    } else if effect_id == LSPH_EFFECT_GPU {
+        // "GPU"
+        lsph_type_buf_append_byte(&! buf, 71)  // G
+        lsph_type_buf_append_byte(&! buf, 80)  // P
+        lsph_type_buf_append_byte(&! buf, 85)  // U
+    } else if effect_id == LSPH_EFFECT_PROB {
+        // "Prob"
+        lsph_type_buf_append_byte(&! buf, 80)  // P
+        lsph_type_buf_append_byte(&! buf, 114) // r
+        lsph_type_buf_append_byte(&! buf, 111) // o
+        lsph_type_buf_append_byte(&! buf, 98)  // b
+    } else if effect_id == LSPH_EFFECT_DIV {
+        // "Div"
+        lsph_type_buf_append_byte(&! buf, 68)  // D
+        lsph_type_buf_append_byte(&! buf, 105) // i
+        lsph_type_buf_append_byte(&! buf, 118) // v
+    } else {
+        // Unknown effect: "Effect#" + id
+        lsph_type_buf_append_byte(&! buf, 69)  // E
+        lsph_type_buf_append_byte(&! buf, 102) // f
+        lsph_type_buf_append_byte(&! buf, 102) // f
+        lsph_type_buf_append_byte(&! buf, 101) // e
+        lsph_type_buf_append_byte(&! buf, 99)  // c
+        lsph_type_buf_append_byte(&! buf, 116) // t
+        lsph_type_buf_append_byte(&! buf, 35)  // #
+        lsph_type_buf_append_i64(&! buf, effect_id)
+    }
+    buf
+}
+
+// ============================================================================
+// Section 15: PARAMETER MANAGEMENT
+// ============================================================================
+
+// Set a parameter in the context parameter buffer.
+fn lsph_set_param(ctx: &! LsphContext, index: i64, name_hash: i64, type_buf: &LsphTypeBuf)
+    with Mut, Div, Panic
+{
+    if index < 0 || index >= LSPH_MAX_PARAMS {
+        return
+    }
+    ctx.params_buf[index as usize].name_hash = name_hash
+    // Copy type buf
+    var i: i64 = 0
+    while i < type_buf.len && i < LSPH_MAX_TYPE_LEN {
+        ctx.params_buf[index as usize].type_buf.buf[i as usize] = type_buf.buf[i as usize]
+        i = i + 1
+    }
+    ctx.params_buf[index as usize].type_buf.len = type_buf.len
+}
+
+// Clear the parameter buffer.
+fn lsph_clear_params(ctx: &! LsphContext) with Mut, Div, Panic {
+    var i: i64 = 0
+    while i < LSPH_MAX_PARAMS {
+        ctx.params_buf[i as usize].name_hash = 0
+        ctx.params_buf[i as usize].type_buf.len = 0
+        i = i + 1
+    }
+}
+
+// Set the effects buffer on the context.
+fn lsph_set_effects(ctx: &! LsphContext, effects: &LsphEffectBuf) with Mut, Div, Panic {
+    var i: i64 = 0
+    while i < effects.count && i < LSPH_MAX_EFFECTS {
+        ctx.effects_buf.effects[i as usize] = effects.effects[i as usize]
+        i = i + 1
+    }
+    ctx.effects_buf.count = effects.count
+}
+
+// Clear the effects buffer on the context.
+fn lsph_clear_effects(ctx: &! LsphContext) with Mut {
+    ctx.effects_buf.count = 0
+}
+
+// ============================================================================
+// Section 16: HOVER CONTENT FORMATTING -- FUNCTION SIGNATURES
+// ============================================================================
+
+// Format a function signature into a hover buffer.
+// Produces: fn name(param1: Type1, param2: Type2) -> ReturnType with Effect1, Effect2
+fn lsph_format_function_signature(ctx: &LsphContext, sym_id: i64) -> LsphHoverBuf
+    with Mut, Div, Panic
+{
+    var buf = lsph_hover_buf_new()
+
+    if sym_id < 0 || sym_id >= ctx.sym_count {
+        return buf
+    }
+
+    let sym = ctx.symbols[sym_id as usize]
+
+    // "fn "
+    lsph_hover_buf_append_byte(&! buf, 102) // f
+    lsph_hover_buf_append_byte(&! buf, 110) // n
+    lsph_hover_buf_append_space(&! buf)
+
+    // Name (as hash for now)
+    lsph_hover_buf_append_byte(&! buf, LSPH_BYTE_UNDERSCORE)
+    lsph_hover_buf_append_i64(&! buf, sym.name_hash)
+
+    // Parameters: (p1: T1, p2: T2)
+    lsph_hover_buf_append_byte(&! buf, LSPH_BYTE_LPAREN)
+    var pi: i64 = 0
+    while pi < sym.param_count && pi < LSPH_MAX_PARAMS {
+        if pi > 0 {
+            lsph_hover_buf_append_byte(&! buf, LSPH_BYTE_COMMA)
+            lsph_hover_buf_append_space(&! buf)
+        }
+        // param name hash
+        lsph_hover_buf_append_byte(&! buf, 112) // p
+        lsph_hover_buf_append_i64(&! buf, pi)
+        lsph_hover_buf_append_byte(&! buf, LSPH_BYTE_COLON)
+        lsph_hover_buf_append_space(&! buf)
+        // param type
+        let pt = ctx.params_buf[pi as usize].type_buf
+        if pt.len > 0 {
+            lsph_hover_buf_append_type(&! buf, &pt)
+        } else {
+            // "?"
+            lsph_hover_buf_append_byte(&! buf, 63)
+        }
+        pi = pi + 1
+    }
+    lsph_hover_buf_append_byte(&! buf, LSPH_BYTE_RPAREN)
+
+    // Return type: " -> Type"
+    if sym.type_buf.len > 0 {
+        lsph_hover_buf_append_space(&! buf)
+        lsph_hover_buf_append_byte(&! buf, LSPH_BYTE_DASH)
+        lsph_hover_buf_append_byte(&! buf, LSPH_BYTE_RANGLE)
+        lsph_hover_buf_append_space(&! buf)
+        lsph_hover_buf_append_type(&! buf, &sym.type_buf)
+    }
+
+    // Effects: " with E1, E2"
+    if sym.effect_count > 0 && ctx.effects_buf.count > 0 {
+        lsph_hover_buf_append_space(&! buf)
+        // "with "
+        lsph_hover_buf_append_byte(&! buf, 119) // w
+        lsph_hover_buf_append_byte(&! buf, 105) // i
+        lsph_hover_buf_append_byte(&! buf, 116) // t
+        lsph_hover_buf_append_byte(&! buf, 104) // h
+        lsph_hover_buf_append_space(&! buf)
+
+        var ei: i64 = 0
+        while ei < ctx.effects_buf.count {
+            if ei > 0 {
+                lsph_hover_buf_append_byte(&! buf, LSPH_BYTE_COMMA)
+                lsph_hover_buf_append_space(&! buf)
+            }
+            let eff = lsph_format_effect(ctx.effects_buf.effects[ei as usize])
+            lsph_hover_buf_append_type(&! buf, &eff)
+            ei = ei + 1
+        }
+    }
+
+    buf
+}
+
+// ============================================================================
+// Section 17: HOVER CONTENT FORMATTING -- VARIABLES
+// ============================================================================
+
+// Format a variable hover: shows "let name: Type" or "var name: Type"
+fn lsph_format_variable_hover(ctx: &LsphContext, sym_id: i64) -> LsphHoverBuf
+    with Mut, Div, Panic
+{
+    var buf = lsph_hover_buf_new()
+
+    if sym_id < 0 || sym_id >= ctx.sym_count {
+        return buf
+    }
+
+    let sym = ctx.symbols[sym_id as usize]
+
+    // "let " or "var "
+    if sym.is_mutable {
+        lsph_hover_buf_append_byte(&! buf, 118) // v
+        lsph_hover_buf_append_byte(&! buf, 97)  // a
+        lsph_hover_buf_append_byte(&! buf, 114) // r
+    } else {
+        lsph_hover_buf_append_byte(&! buf, 108) // l
+        lsph_hover_buf_append_byte(&! buf, 101) // e
+        lsph_hover_buf_append_byte(&! buf, 116) // t
+    }
+    lsph_hover_buf_append_space(&! buf)
+
+    // Name hash
+    lsph_hover_buf_append_byte(&! buf, LSPH_BYTE_UNDERSCORE)
+    lsph_hover_buf_append_i64(&! buf, sym.name_hash)
+
+    // Type annotation
+    if sym.type_buf.len > 0 {
+        lsph_hover_buf_append_byte(&! buf, LSPH_BYTE_COLON)
+        lsph_hover_buf_append_space(&! buf)
+        lsph_hover_buf_append_type(&! buf, &sym.type_buf)
+    }
+
+    buf
+}
+
+// ============================================================================
+// Section 18: HOVER CONTENT FORMATTING -- TYPES
+// ============================================================================
+
+// Format a type hover: shows "struct Name" / "enum Name" / etc.
+fn lsph_format_type_hover(ctx: &LsphContext, sym_id: i64) -> LsphHoverBuf
+    with Mut, Div, Panic
+{
+    var buf = lsph_hover_buf_new()
+
+    if sym_id < 0 || sym_id >= ctx.sym_count {
+        return buf
+    }
+
+    let sym = ctx.symbols[sym_id as usize]
+
+    // Type category keyword
+    let cat_buf = lsph_format_type_category(sym.type_cat)
+    lsph_hover_buf_append_type(&! buf, &cat_buf)
+    lsph_hover_buf_append_space(&! buf)
+
+    // Name hash
+    lsph_hover_buf_append_byte(&! buf, LSPH_BYTE_UNDERSCORE)
+    lsph_hover_buf_append_i64(&! buf, sym.name_hash)
+
+    buf
+}
+
+// ============================================================================
+// Section 19: HOVER CONTENT FORMATTING -- FIELDS
+// ============================================================================
+
+// Format a field hover: shows "field name: Type"
+fn lsph_format_field_hover(ctx: &LsphContext, sym_id: i64) -> LsphHoverBuf
+    with Mut, Div, Panic
+{
+    var buf = lsph_hover_buf_new()
+
+    if sym_id < 0 || sym_id >= ctx.sym_count {
+        return buf
+    }
+
+    let sym = ctx.symbols[sym_id as usize]
+
+    // "field "
+    let kind_buf = lsph_format_symbol_kind(LsphSymbolKind::SymField)
+    lsph_hover_buf_append_type(&! buf, &kind_buf)
+    lsph_hover_buf_append_space(&! buf)
+
+    // Name hash
+    lsph_hover_buf_append_byte(&! buf, LSPH_BYTE_UNDERSCORE)
+    lsph_hover_buf_append_i64(&! buf, sym.name_hash)
+
+    // Type
+    if sym.type_buf.len > 0 {
+        lsph_hover_buf_append_byte(&! buf, LSPH_BYTE_COLON)
+        lsph_hover_buf_append_space(&! buf)
+        lsph_hover_buf_append_type(&! buf, &sym.type_buf)
+    }
+
+    buf
+}
+
+// ============================================================================
+// Section 20: HOVER CONTENT FORMATTING -- CONSTANTS AND PARAMETERS
+// ============================================================================
+
+// Format a constant hover: shows "const name: Type"
+fn lsph_format_constant_hover(ctx: &LsphContext, sym_id: i64) -> LsphHoverBuf
+    with Mut, Div, Panic
+{
+    var buf = lsph_hover_buf_new()
+
+    if sym_id < 0 || sym_id >= ctx.sym_count {
+        return buf
+    }
+
+    let sym = ctx.symbols[sym_id as usize]
+
+    // "let "
+    lsph_hover_buf_append_byte(&! buf, 108) // l
+    lsph_hover_buf_append_byte(&! buf, 101) // e
+    lsph_hover_buf_append_byte(&! buf, 116) // t
+    lsph_hover_buf_append_space(&! buf)
+
+    // Name hash
+    lsph_hover_buf_append_byte(&! buf, LSPH_BYTE_UNDERSCORE)
+    lsph_hover_buf_append_i64(&! buf, sym.name_hash)
+
+    // Type
+    if sym.type_buf.len > 0 {
+        lsph_hover_buf_append_byte(&! buf, LSPH_BYTE_COLON)
+        lsph_hover_buf_append_space(&! buf)
+        lsph_hover_buf_append_type(&! buf, &sym.type_buf)
+    }
+
+    buf
+}
+
+// Format a parameter hover: shows "param name: Type"
+fn lsph_format_parameter_hover(ctx: &LsphContext, sym_id: i64) -> LsphHoverBuf
+    with Mut, Div, Panic
+{
+    var buf = lsph_hover_buf_new()
+
+    if sym_id < 0 || sym_id >= ctx.sym_count {
+        return buf
+    }
+
+    let sym = ctx.symbols[sym_id as usize]
+
+    // "param "
+    let kind_buf = lsph_format_symbol_kind(LsphSymbolKind::SymParameter)
+    lsph_hover_buf_append_type(&! buf, &kind_buf)
+    lsph_hover_buf_append_space(&! buf)
+
+    // Name hash
+    lsph_hover_buf_append_byte(&! buf, LSPH_BYTE_UNDERSCORE)
+    lsph_hover_buf_append_i64(&! buf, sym.name_hash)
+
+    // Type
+    if sym.type_buf.len > 0 {
+        lsph_hover_buf_append_byte(&! buf, LSPH_BYTE_COLON)
+        lsph_hover_buf_append_space(&! buf)
+        lsph_hover_buf_append_type(&! buf, &sym.type_buf)
+    }
+
+    buf
+}
+
+// Format a module hover: shows "module name"
+fn lsph_format_module_hover(ctx: &LsphContext, sym_id: i64) -> LsphHoverBuf
+    with Mut, Div, Panic
+{
+    var buf = lsph_hover_buf_new()
+
+    if sym_id < 0 || sym_id >= ctx.sym_count {
+        return buf
+    }
+
+    let sym = ctx.symbols[sym_id as usize]
+
+    // "module "
+    let kind_buf = lsph_format_symbol_kind(LsphSymbolKind::SymModule)
+    lsph_hover_buf_append_type(&! buf, &kind_buf)
+    lsph_hover_buf_append_space(&! buf)
+
+    // Name hash
+    lsph_hover_buf_append_byte(&! buf, LSPH_BYTE_UNDERSCORE)
+    lsph_hover_buf_append_i64(&! buf, sym.name_hash)
+
+    buf
+}
+
+// ============================================================================
+// Section 21: HOVER CONTENT BUILDER
+// ============================================================================
+
+// Format the signature line for a symbol based on its kind.
+fn lsph_format_signature_for_kind(ctx: &LsphContext, sym_id: i64) -> LsphHoverBuf
+    with Mut, Div, Panic
+{
+    if sym_id < 0 || sym_id >= ctx.sym_count {
+        return lsph_hover_buf_new()
+    }
+
+    let kind = ctx.symbols[sym_id as usize].kind
+    match kind {
+        LsphSymbolKind::SymFunction => lsph_format_function_signature(ctx, sym_id),
+        LsphSymbolKind::SymVariable => lsph_format_variable_hover(ctx, sym_id),
+        LsphSymbolKind::SymType => lsph_format_type_hover(ctx, sym_id),
+        LsphSymbolKind::SymField => lsph_format_field_hover(ctx, sym_id),
+        LsphSymbolKind::SymModule => lsph_format_module_hover(ctx, sym_id),
+        LsphSymbolKind::SymConstant => lsph_format_constant_hover(ctx, sym_id),
+        LsphSymbolKind::SymParameter => lsph_format_parameter_hover(ctx, sym_id),
+        LsphSymbolKind::SymEffect => lsph_format_field_hover(ctx, sym_id),
+        LsphSymbolKind::SymUnknown => lsph_hover_buf_new(),
+    }
+}
+
+// Build the full hover content for a symbol.  The result is stored in
+// ctx.hover_result.  Format:
+//
+//   ```sio
+//   <signature>
+//   ```
+//   ---
+//   <doc comment>
+//
+fn lsph_build_hover_content(ctx: &! LsphContext, sym_id: i64)
+    with Mut, Div, Panic
+{
+    // Clear the hover result
+    ctx.hover_result.len = 0
+
+    if sym_id < 0 || sym_id >= ctx.sym_count {
+        return
+    }
+
+    // Code fence with signature
+    lsph_hover_buf_append_code_fence_open(&! ctx.hover_result)
+
+    let sig = lsph_format_signature_for_kind(ctx, sym_id)
+    lsph_hover_buf_append_hover(&! ctx.hover_result, &sig)
+    lsph_hover_buf_append_newline(&! ctx.hover_result)
+
+    lsph_hover_buf_append_code_fence_close(&! ctx.hover_result)
+
+    // If there is a doc comment, add separator and doc
+    let doc = ctx.symbols[sym_id as usize].doc
+    if doc.len > 0 {
+        lsph_hover_buf_append_hr(&! ctx.hover_result)
+        lsph_hover_buf_append_doc(&! ctx.hover_result, &doc)
+        lsph_hover_buf_append_newline(&! ctx.hover_result)
+    }
+}
+
+// ============================================================================
+// Section 22: MAIN HOVER HANDLER
+// ============================================================================
+
+// Handle a hover request at (line, col).
+// Searches for the symbol at the position, builds hover content,
+// and stores the result in ctx.hover_result.
+// Returns true if a symbol was found, false otherwise.
+fn lsph_handle_hover(ctx: &! LsphContext, line: i64, col: i64) -> bool
+    with Mut, Div, Panic
+{
+    ctx.last_hover_line = line
+    ctx.last_hover_col = col
+    ctx.hover_result.len = 0
+
+    let sym_id = lsph_find_symbol_at(ctx, line, col)
+    if sym_id == LSPH_INVALID {
+        return false
+    }
+
+    lsph_build_hover_content(ctx, sym_id)
+    true
+}
+
+// ============================================================================
+// Section 23: UTILITY HELPERS
+// ============================================================================
+
+// Check if a symbol kind represents a callable (function).
+fn lsph_is_callable(kind: LsphSymbolKind) -> bool {
+    match kind {
+        LsphSymbolKind::SymFunction => true,
+        _ => false,
+    }
+}
+
+// Check if a symbol kind represents a type definition.
+fn lsph_is_type_def(kind: LsphSymbolKind) -> bool {
+    match kind {
+        LsphSymbolKind::SymType => true,
+        _ => false,
+    }
+}
+
+// Check if a type category is a reference type.
+fn lsph_is_ref_type(cat: LsphTypeCategory) -> bool {
+    match cat {
+        LsphTypeCategory::TcRef => true,
+        LsphTypeCategory::TcMutRef => true,
+        _ => false,
+    }
+}
+
+// Hash a simple name for testing: sum of byte values.
+fn lsph_simple_hash(b0: i64, b1: i64, b2: i64, b3: i64) -> i64 {
+    b0 * 1000000 + b1 * 10000 + b2 * 100 + b3
+}
+
+// Get the byte at a position in a hover buffer (for test assertions).
+fn lsph_hover_byte_at(buf: &LsphHoverBuf, idx: i64) -> i8 with Div, Panic {
+    if idx < 0 || idx >= buf.len {
+        return 0
+    }
+    buf.buf[idx as usize]
+}
+
+// Get the byte at a position in a type buffer (for test assertions).
+fn lsph_type_byte_at(buf: &LsphTypeBuf, idx: i64) -> i8 with Div, Panic {
+    if idx < 0 || idx >= buf.len {
+        return 0
+    }
+    buf.buf[idx as usize]
+}
+
+// Get the byte at a position in a doc buffer (for test assertions).
+fn lsph_doc_byte_at(buf: &LsphDocBuf, idx: i64) -> i8 with Div, Panic {
+    if idx < 0 || idx >= buf.len {
+        return 0
+    }
+    buf.buf[idx as usize]
+}
+
+// Create a type buffer containing "i32"
+fn lsph_make_type_i32() -> LsphTypeBuf with Mut, Div, Panic {
+    var buf = lsph_type_buf_new()
+    lsph_type_buf_append_byte(&! buf, 105) // i
+    lsph_type_buf_append_byte(&! buf, 51)  // 3
+    lsph_type_buf_append_byte(&! buf, 50)  // 2
+    buf
+}
+
+// Create a type buffer containing "f64"
+fn lsph_make_type_f64() -> LsphTypeBuf with Mut, Div, Panic {
+    var buf = lsph_type_buf_new()
+    lsph_type_buf_append_byte(&! buf, 102) // f
+    lsph_type_buf_append_byte(&! buf, 54)  // 6
+    lsph_type_buf_append_byte(&! buf, 52)  // 4
+    buf
+}
+
+// Create a type buffer containing "bool"
+fn lsph_make_type_bool() -> LsphTypeBuf with Mut, Div, Panic {
+    var buf = lsph_type_buf_new()
+    lsph_type_buf_append_byte(&! buf, 98)  // b
+    lsph_type_buf_append_byte(&! buf, 111) // o
+    lsph_type_buf_append_byte(&! buf, 111) // o
+    lsph_type_buf_append_byte(&! buf, 108) // l
+    buf
+}
+
+// Create a type buffer containing "String"
+fn lsph_make_type_string() -> LsphTypeBuf with Mut, Div, Panic {
+    var buf = lsph_type_buf_new()
+    lsph_type_buf_append_byte(&! buf, 83)  // S
+    lsph_type_buf_append_byte(&! buf, 116) // t
+    lsph_type_buf_append_byte(&! buf, 114) // r
+    lsph_type_buf_append_byte(&! buf, 105) // i
+    lsph_type_buf_append_byte(&! buf, 110) // n
+    lsph_type_buf_append_byte(&! buf, 103) // g
+    buf
+}
+
+// Create a doc buffer with a given single-line message (up to 32 bytes from i64 array).
+fn lsph_make_doc(bytes: &[i64; 32], len: i64) -> LsphDocBuf with Mut, Div, Panic {
+    var doc = lsph_doc_buf_new()
+    var i: i64 = 0
+    while i < len && i < 32 {
+        lsph_doc_buf_append_byte(&! doc, bytes[i as usize] as i8)
+        i = i + 1
+    }
+    doc
+}
+
+// ============================================================================
+// Section 24: TESTS -- BUFFER OPERATIONS (T01-T10)
+// ============================================================================
+
+// T01: Type buffer append byte
+fn test_lsph_type_buf_append_byte_inner(buf: &! LsphTypeBuf) -> bool with Mut, Div, Panic {
+    lsph_type_buf_append_byte(buf, 65) // 'A'
+    lsph_type_buf_append_byte(buf, 66) // 'B'
+    let ok_len = buf.len == 2
+    let ok_b0 = buf.buf[0] == 65
+    let ok_b1 = buf.buf[1] == 66
+    ok_len && ok_b0 && ok_b1
+}
+fn test_lsph_type_buf_append_byte() -> bool with Mut, Div, Panic {
+    var buf = lsph_type_buf_new()
+    test_lsph_type_buf_append_byte_inner(&! buf)
+}
+
+// T02: Type buffer append str
+fn test_lsph_type_buf_append_str_inner(dst: &! LsphTypeBuf) -> bool with Mut, Div, Panic {
+    lsph_type_buf_append_byte(dst, 72) // 'H'
+    var src = lsph_type_buf_new()
+    lsph_type_buf_append_byte(&! src, 105) // 'i'
+    lsph_type_buf_append_str(dst, &src)
+    let ok_len = dst.len == 2
+    let ok_b0 = dst.buf[0] == 72
+    let ok_b1 = dst.buf[1] == 105
+    ok_len && ok_b0 && ok_b1
+}
+fn test_lsph_type_buf_append_str() -> bool with Mut, Div, Panic {
+    var buf = lsph_type_buf_new()
+    test_lsph_type_buf_append_str_inner(&! buf)
+}
+
+// T03: Type buffer append i64
+fn test_lsph_type_buf_append_i64_inner(buf: &! LsphTypeBuf) -> bool with Mut, Div, Panic {
+    lsph_type_buf_append_i64(buf, 42)
+    let ok_len = buf.len == 2
+    let ok_b0 = buf.buf[0] == 52  // '4'
+    let ok_b1 = buf.buf[1] == 50  // '2'
+    ok_len && ok_b0 && ok_b1
+}
+fn test_lsph_type_buf_append_i64() -> bool with Mut, Div, Panic {
+    var buf = lsph_type_buf_new()
+    test_lsph_type_buf_append_i64_inner(&! buf)
+}
+
+// T04: Type buffer append i64 zero
+fn test_lsph_type_buf_append_i64_zero_inner(buf: &! LsphTypeBuf) -> bool with Mut, Div, Panic {
+    lsph_type_buf_append_i64(buf, 0)
+    let ok_len = buf.len == 1
+    let ok_b0 = buf.buf[0] == LSPH_BYTE_ZERO
+    ok_len && ok_b0
+}
+fn test_lsph_type_buf_append_i64_zero() -> bool with Mut, Div, Panic {
+    var buf = lsph_type_buf_new()
+    test_lsph_type_buf_append_i64_zero_inner(&! buf)
+}
+
+// T05: Type buffer equality
+fn test_lsph_type_buf_eq_inner(a: &! LsphTypeBuf) -> bool with Mut, Div, Panic {
+    lsph_type_buf_append_byte(a, 65)
+    lsph_type_buf_append_byte(a, 66)
+    var b = lsph_type_buf_new()
+    lsph_type_buf_append_byte(&! b, 65)
+    lsph_type_buf_append_byte(&! b, 66)
+    let ok_eq = lsph_type_buf_eq(a, &b)
+
+    var c = lsph_type_buf_new()
+    lsph_type_buf_append_byte(&! c, 65)
+    lsph_type_buf_append_byte(&! c, 67) // different
+    let ok_neq = lsph_type_buf_eq(a, &c) == false
+
+    ok_eq && ok_neq
+}
+fn test_lsph_type_buf_eq() -> bool with Mut, Div, Panic {
+    var a = lsph_type_buf_new()
+    test_lsph_type_buf_eq_inner(&! a)
+}
+
+// T06: Hover buffer append byte
+fn test_lsph_hover_buf_append_byte_inner(buf: &! LsphHoverBuf) -> bool with Mut, Div, Panic {
+    lsph_hover_buf_append_byte(buf, 72) // 'H'
+    lsph_hover_buf_append_byte(buf, 105) // 'i'
+    let ok_len = buf.len == 2
+    let ok_b0 = buf.buf[0] == 72
+    let ok_b1 = buf.buf[1] == 105
+    ok_len && ok_b0 && ok_b1
+}
+fn test_lsph_hover_buf_append_byte() -> bool with Mut, Div, Panic {
+    var buf = lsph_hover_buf_new()
+    test_lsph_hover_buf_append_byte_inner(&! buf)
+}
+
+// T07: Hover buffer append type
+fn test_lsph_hover_buf_append_type_inner(hb: &! LsphHoverBuf) -> bool with Mut, Div, Panic {
+    var tb = lsph_type_buf_new()
+    lsph_type_buf_append_byte(&! tb, 105) // 'i'
+    lsph_type_buf_append_byte(&! tb, 51)  // '3'
+    lsph_type_buf_append_byte(&! tb, 50)  // '2'
+    lsph_hover_buf_append_type(hb, &tb)
+    let ok_len = hb.len == 3
+    let ok_b0 = hb.buf[0] == 105
+    let ok_b1 = hb.buf[1] == 51
+    let ok_b2 = hb.buf[2] == 50
+    ok_len && ok_b0 && ok_b1 && ok_b2
+}
+fn test_lsph_hover_buf_append_type() -> bool with Mut, Div, Panic {
+    var buf = lsph_hover_buf_new()
+    test_lsph_hover_buf_append_type_inner(&! buf)
+}
+
+// T08: Hover buffer append doc
+fn test_lsph_hover_buf_append_doc_inner(hb: &! LsphHoverBuf) -> bool with Mut, Div, Panic {
+    var doc = lsph_doc_buf_new()
+    lsph_doc_buf_append_byte(&! doc, 72) // 'H'
+    lsph_doc_buf_append_byte(&! doc, 101) // 'e'
+    lsph_doc_buf_append_byte(&! doc, 108) // 'l'
+    lsph_doc_buf_append_byte(&! doc, 108) // 'l'
+    lsph_doc_buf_append_byte(&! doc, 111) // 'o'
+    lsph_hover_buf_append_doc(hb, &doc)
+    let ok_len = hb.len == 5
+    let ok_b0 = hb.buf[0] == 72
+    let ok_b4 = hb.buf[4] == 111
+    ok_len && ok_b0 && ok_b4
+}
+fn test_lsph_hover_buf_append_doc() -> bool with Mut, Div, Panic {
+    var buf = lsph_hover_buf_new()
+    test_lsph_hover_buf_append_doc_inner(&! buf)
+}
+
+// T09: Hover buffer append newline
+fn test_lsph_hover_buf_append_newline_inner(hb: &! LsphHoverBuf) -> bool with Mut, Div, Panic {
+    lsph_hover_buf_append_byte(hb, 65)
+    lsph_hover_buf_append_newline(hb)
+    let ok_len = hb.len == 2
+    let ok_nl = hb.buf[1] == LSPH_BYTE_NEWLINE
+    ok_len && ok_nl
+}
+fn test_lsph_hover_buf_append_newline() -> bool with Mut, Div, Panic {
+    var buf = lsph_hover_buf_new()
+    test_lsph_hover_buf_append_newline_inner(&! buf)
+}
+
+// T10: Hover buffer equality
+fn test_lsph_hover_buf_eq_inner(a: &! LsphHoverBuf) -> bool with Mut, Div, Panic {
+    lsph_hover_buf_append_byte(a, 65)
+    lsph_hover_buf_append_byte(a, 66)
+    var b = lsph_hover_buf_new()
+    lsph_hover_buf_append_byte(&! b, 65)
+    lsph_hover_buf_append_byte(&! b, 66)
+    let ok_eq = lsph_hover_buf_eq(a, &b)
+
+    var c = lsph_hover_buf_new()
+    lsph_hover_buf_append_byte(&! c, 65)
+    let ok_neq = lsph_hover_buf_eq(a, &c) == false
+
+    ok_eq && ok_neq
+}
+fn test_lsph_hover_buf_eq() -> bool with Mut, Div, Panic {
+    var a = lsph_hover_buf_new()
+    test_lsph_hover_buf_eq_inner(&! a)
+}
+
+// ============================================================================
+// Section 25: TESTS -- SYMBOL MANAGEMENT (T11-T20)
+// ============================================================================
+
+// T11: Add a function symbol
+fn test_lsph_add_symbol_function_inner(ctx: &! LsphContext) -> bool with Mut, Div, Panic {
+    let idx = lsph_add_symbol(ctx, LsphSymbolKind::SymFunction, 1001, 5, 0, 5, 20)
+    let ok_idx = idx == 0
+    let ok_count = ctx.sym_count == 1
+    let ok_hash = ctx.symbols[0].name_hash == 1001
+    let ok_line = ctx.symbols[0].line == 5
+    ok_idx && ok_count && ok_hash && ok_line
+}
+fn test_lsph_add_symbol_function() -> bool with Mut, Div, Panic {
+    var ctx = lsph_context_new()
+    test_lsph_add_symbol_function_inner(&! ctx)
+}
+
+// T12: Add a variable symbol
+fn test_lsph_add_symbol_variable_inner(ctx: &! LsphContext) -> bool with Mut, Div, Panic {
+    let idx = lsph_add_symbol(ctx, LsphSymbolKind::SymVariable, 2002, 10, 4, 10, 15)
+    let ok_idx = idx == 0
+    let ok_kind = match ctx.symbols[0].kind {
+        LsphSymbolKind::SymVariable => true,
+        _ => false,
+    }
+    let ok_col = ctx.symbols[0].col == 4
+    ok_idx && ok_kind && ok_col
+}
+fn test_lsph_add_symbol_variable() -> bool with Mut, Div, Panic {
+    var ctx = lsph_context_new()
+    test_lsph_add_symbol_variable_inner(&! ctx)
+}
+
+// T13: Add a type symbol
+fn test_lsph_add_symbol_type_inner(ctx: &! LsphContext) -> bool with Mut, Div, Panic {
+    let idx = lsph_add_symbol(ctx, LsphSymbolKind::SymType, 3003, 20, 0, 22, 0)
+    let ok_idx = idx == 0
+    let ok_kind = match ctx.symbols[0].kind {
+        LsphSymbolKind::SymType => true,
+        _ => false,
+    }
+    let ok_end = ctx.symbols[0].end_line == 22
+    ok_idx && ok_kind && ok_end
+}
+fn test_lsph_add_symbol_type() -> bool with Mut, Div, Panic {
+    var ctx = lsph_context_new()
+    test_lsph_add_symbol_type_inner(&! ctx)
+}
+
+// T14: Set symbol type
+fn test_lsph_set_symbol_type_inner(ctx: &! LsphContext) -> bool with Mut, Div, Panic {
+    let idx = lsph_add_symbol(ctx, LsphSymbolKind::SymVariable, 100, 1, 0, 1, 10)
+    let tb = lsph_make_type_i32()
+    lsph_set_symbol_type(ctx, idx, LsphTypeCategory::TcPrimitive, &tb)
+
+    let ok_cat = match ctx.symbols[0].type_cat {
+        LsphTypeCategory::TcPrimitive => true,
+        _ => false,
+    }
+    let ok_len = ctx.symbols[0].type_buf.len == 3
+    let ok_b0 = ctx.symbols[0].type_buf.buf[0] == 105 // 'i'
+    ok_cat && ok_len && ok_b0
+}
+fn test_lsph_set_symbol_type() -> bool with Mut, Div, Panic {
+    var ctx = lsph_context_new()
+    test_lsph_set_symbol_type_inner(&! ctx)
+}
+
+// T15: Set symbol doc
+fn test_lsph_set_symbol_doc_inner(ctx: &! LsphContext) -> bool with Mut, Div, Panic {
+    let idx = lsph_add_symbol(ctx, LsphSymbolKind::SymFunction, 200, 3, 0, 3, 30)
+    var doc = lsph_doc_buf_new()
+    lsph_doc_buf_append_byte(&! doc, 72) // 'H'
+    lsph_doc_buf_append_byte(&! doc, 105) // 'i'
+    lsph_set_symbol_doc(ctx, idx, &doc)
+
+    let ok_len = ctx.symbols[0].doc.len == 2
+    let ok_b0 = ctx.symbols[0].doc.buf[0] == 72
+    let ok_b1 = ctx.symbols[0].doc.buf[1] == 105
+    ok_len && ok_b0 && ok_b1
+}
+fn test_lsph_set_symbol_doc() -> bool with Mut, Div, Panic {
+    var ctx = lsph_context_new()
+    test_lsph_set_symbol_doc_inner(&! ctx)
+}
+
+// T16: Set symbol effects
+fn test_lsph_set_symbol_effects_inner(ctx: &! LsphContext) -> bool with Mut, Div, Panic {
+    let idx = lsph_add_symbol(ctx, LsphSymbolKind::SymFunction, 300, 5, 0, 5, 40)
+    var eff = lsph_effect_buf_new()
+    lsph_effect_buf_add(&! eff, LSPH_EFFECT_IO)
+    lsph_effect_buf_add(&! eff, LSPH_EFFECT_MUT)
+    lsph_set_symbol_effects(ctx, idx, &eff)
+
+    let ok_count = ctx.symbols[0].effect_count == 2
+    ok_count
+}
+fn test_lsph_set_symbol_effects() -> bool with Mut, Div, Panic {
+    var ctx = lsph_context_new()
+    test_lsph_set_symbol_effects_inner(&! ctx)
+}
+
+// T17: Set symbol param count
+fn test_lsph_set_symbol_param_count_inner(ctx: &! LsphContext) -> bool with Mut, Div, Panic {
+    let idx = lsph_add_symbol(ctx, LsphSymbolKind::SymFunction, 400, 7, 0, 7, 50)
+    lsph_set_symbol_param_count(ctx, idx, 3)
+    let ok = ctx.symbols[0].param_count == 3
+    ok
+}
+fn test_lsph_set_symbol_param_count() -> bool with Mut, Div, Panic {
+    var ctx = lsph_context_new()
+    test_lsph_set_symbol_param_count_inner(&! ctx)
+}
+
+// T18: Set symbol mutable
+fn test_lsph_set_symbol_mutable_inner(ctx: &! LsphContext) -> bool with Mut, Div, Panic {
+    let idx = lsph_add_symbol(ctx, LsphSymbolKind::SymVariable, 500, 9, 0, 9, 10)
+    lsph_set_symbol_mutable(ctx, idx, true)
+    let ok = ctx.symbols[0].is_mutable
+    ok
+}
+fn test_lsph_set_symbol_mutable() -> bool with Mut, Div, Panic {
+    var ctx = lsph_context_new()
+    test_lsph_set_symbol_mutable_inner(&! ctx)
+}
+
+// T19: Multiple symbols
+fn test_lsph_add_multiple_symbols_inner(ctx: &! LsphContext) -> bool with Mut, Div, Panic {
+    let idx0 = lsph_add_symbol(ctx, LsphSymbolKind::SymFunction, 100, 1, 0, 1, 20)
+    let idx1 = lsph_add_symbol(ctx, LsphSymbolKind::SymVariable, 200, 2, 0, 2, 15)
+    let idx2 = lsph_add_symbol(ctx, LsphSymbolKind::SymType, 300, 3, 0, 5, 0)
+
+    let ok_count = ctx.sym_count == 3
+    let ok_idx0 = idx0 == 0
+    let ok_idx1 = idx1 == 1
+    let ok_idx2 = idx2 == 2
+    let ok_h0 = ctx.symbols[0].name_hash == 100
+    let ok_h1 = ctx.symbols[1].name_hash == 200
+    let ok_h2 = ctx.symbols[2].name_hash == 300
+    ok_count && ok_idx0 && ok_idx1 && ok_idx2 && ok_h0 && ok_h1 && ok_h2
+}
+fn test_lsph_add_multiple_symbols() -> bool with Mut, Div, Panic {
+    var ctx = lsph_context_new()
+    test_lsph_add_multiple_symbols_inner(&! ctx)
+}
+
+// T20: Get symbol accessors
+fn test_lsph_get_symbol_accessors_inner(ctx: &! LsphContext) -> bool with Mut, Div, Panic {
+    let idx = lsph_add_symbol(ctx, LsphSymbolKind::SymFunction, 777, 10, 5, 10, 30)
+    let tb = lsph_make_type_i32()
+    lsph_set_symbol_type(ctx, idx, LsphTypeCategory::TcPrimitive, &tb)
+
+    let ok_kind = match lsph_get_symbol_kind(ctx, idx) {
+        LsphSymbolKind::SymFunction => true,
+        _ => false,
+    }
+    let ok_hash = lsph_get_symbol_name_hash(ctx, idx) == 777
+    let ok_cat = match lsph_get_symbol_type_cat(ctx, idx) {
+        LsphTypeCategory::TcPrimitive => true,
+        _ => false,
+    }
+    let ok_line = lsph_get_symbol_line(ctx, idx) == 10
+    let ok_col = lsph_get_symbol_col(ctx, idx) == 5
+    ok_kind && ok_hash && ok_cat && ok_line && ok_col
+}
+fn test_lsph_get_symbol_accessors() -> bool with Mut, Div, Panic {
+    var ctx = lsph_context_new()
+    test_lsph_get_symbol_accessors_inner(&! ctx)
+}
+
+// ============================================================================
+// Section 26: TESTS -- SYMBOL SEARCH (T21-T30)
+// ============================================================================
+
+// T21: Find symbol at position (exact hit)
+fn test_lsph_find_symbol_at_exact_inner(ctx: &! LsphContext) -> bool with Mut, Div, Panic {
+    let idx = lsph_add_symbol(ctx, LsphSymbolKind::SymVariable, 100, 5, 4, 5, 10)
+    let found = lsph_find_symbol_at(ctx, 5, 7)
+    found == idx
+}
+fn test_lsph_find_symbol_at_exact() -> bool with Mut, Div, Panic {
+    var ctx = lsph_context_new()
+    test_lsph_find_symbol_at_exact_inner(&! ctx)
+}
+
+// T22: Find symbol at position (start of span)
+fn test_lsph_find_symbol_at_start_inner(ctx: &! LsphContext) -> bool with Mut, Div, Panic {
+    let idx = lsph_add_symbol(ctx, LsphSymbolKind::SymVariable, 100, 5, 4, 5, 10)
+    let found = lsph_find_symbol_at(ctx, 5, 4)
+    found == idx
+}
+fn test_lsph_find_symbol_at_start() -> bool with Mut, Div, Panic {
+    var ctx = lsph_context_new()
+    test_lsph_find_symbol_at_start_inner(&! ctx)
+}
+
+// T23: Find symbol at position (end of span)
+fn test_lsph_find_symbol_at_end_inner(ctx: &! LsphContext) -> bool with Mut, Div, Panic {
+    let idx = lsph_add_symbol(ctx, LsphSymbolKind::SymVariable, 100, 5, 4, 5, 10)
+    let found = lsph_find_symbol_at(ctx, 5, 10)
+    found == idx
+}
+fn test_lsph_find_symbol_at_end() -> bool with Mut, Div, Panic {
+    var ctx = lsph_context_new()
+    test_lsph_find_symbol_at_end_inner(&! ctx)
+}
+
+// T24: Find symbol at position (miss)
+fn test_lsph_find_symbol_at_miss_inner(ctx: &! LsphContext) -> bool with Mut, Div, Panic {
+    let idx = lsph_add_symbol(ctx, LsphSymbolKind::SymVariable, 100, 5, 4, 5, 10)
+    let found = lsph_find_symbol_at(ctx, 5, 11)
+    found == LSPH_INVALID
+}
+fn test_lsph_find_symbol_at_miss() -> bool with Mut, Div, Panic {
+    var ctx = lsph_context_new()
+    test_lsph_find_symbol_at_miss_inner(&! ctx)
+}
+
+// T25: Find symbol with overlapping spans (innermost wins)
+fn test_lsph_find_symbol_at_overlap_inner(ctx: &! LsphContext) -> bool with Mut, Div, Panic {
+    // Outer span: line 5 col 0 to line 10 col 0
+    let outer = lsph_add_symbol(ctx, LsphSymbolKind::SymFunction, 100, 5, 0, 10, 0)
+    // Inner span: line 7 col 4 to line 7 col 12
+    let inner = lsph_add_symbol(ctx, LsphSymbolKind::SymVariable, 200, 7, 4, 7, 12)
+    let found = lsph_find_symbol_at(ctx, 7, 8)
+    found == inner
+}
+fn test_lsph_find_symbol_at_overlap() -> bool with Mut, Div, Panic {
+    var ctx = lsph_context_new()
+    test_lsph_find_symbol_at_overlap_inner(&! ctx)
+}
+
+// T26: Find symbol by hash
+fn test_lsph_find_symbol_by_hash_inner(ctx: &! LsphContext) -> bool with Mut, Div, Panic {
+    let i0 = lsph_add_symbol(ctx, LsphSymbolKind::SymFunction, 111, 1, 0, 1, 10)
+    let i1 = lsph_add_symbol(ctx, LsphSymbolKind::SymVariable, 222, 2, 0, 2, 10)
+    let i2 = lsph_add_symbol(ctx, LsphSymbolKind::SymType, 333, 3, 0, 3, 10)
+
+    let f0 = lsph_find_symbol_by_hash(ctx, 111)
+    let f1 = lsph_find_symbol_by_hash(ctx, 222)
+    let f2 = lsph_find_symbol_by_hash(ctx, 333)
+    let fm = lsph_find_symbol_by_hash(ctx, 999)
+
+    f0 == 0 && f1 == 1 && f2 == 2 && fm == LSPH_INVALID
+}
+fn test_lsph_find_symbol_by_hash() -> bool with Mut, Div, Panic {
+    var ctx = lsph_context_new()
+    test_lsph_find_symbol_by_hash_inner(&! ctx)
+}
+
+// T27: Find symbol on line
+fn test_lsph_find_symbol_on_line_inner(ctx: &! LsphContext) -> bool with Mut, Div, Panic {
+    let i0 = lsph_add_symbol(ctx, LsphSymbolKind::SymFunction, 100, 5, 0, 5, 20)
+    let i1 = lsph_add_symbol(ctx, LsphSymbolKind::SymVariable, 200, 10, 0, 10, 15)
+    let f5 = lsph_find_symbol_on_line(ctx, 5)
+    let f10 = lsph_find_symbol_on_line(ctx, 10)
+    let f7 = lsph_find_symbol_on_line(ctx, 7)
+    f5 == 0 && f10 == 1 && f7 == LSPH_INVALID
+}
+fn test_lsph_find_symbol_on_line() -> bool with Mut, Div, Panic {
+    var ctx = lsph_context_new()
+    test_lsph_find_symbol_on_line_inner(&! ctx)
+}
+
+// T28: Count symbols of kind
+fn test_lsph_count_symbols_of_kind_inner(ctx: &! LsphContext) -> bool with Mut, Div, Panic {
+    let i0 = lsph_add_symbol(ctx, LsphSymbolKind::SymFunction, 100, 1, 0, 1, 10)
+    let i1 = lsph_add_symbol(ctx, LsphSymbolKind::SymFunction, 200, 2, 0, 2, 10)
+    let i2 = lsph_add_symbol(ctx, LsphSymbolKind::SymVariable, 300, 3, 0, 3, 10)
+    let i3 = lsph_add_symbol(ctx, LsphSymbolKind::SymType, 400, 4, 0, 4, 10)
+
+    let fn_count = lsph_count_symbols_of_kind(ctx, LsphSymbolKind::SymFunction)
+    let var_count = lsph_count_symbols_of_kind(ctx, LsphSymbolKind::SymVariable)
+    let type_count = lsph_count_symbols_of_kind(ctx, LsphSymbolKind::SymType)
+    let mod_count = lsph_count_symbols_of_kind(ctx, LsphSymbolKind::SymModule)
+
+    fn_count == 2 && var_count == 1 && type_count == 1 && mod_count == 0
+}
+fn test_lsph_count_symbols_of_kind() -> bool with Mut, Div, Panic {
+    var ctx = lsph_context_new()
+    test_lsph_count_symbols_of_kind_inner(&! ctx)
+}
+
+// T29: Find symbol before span
+fn test_lsph_find_before_span_inner(ctx: &! LsphContext) -> bool with Mut, Div, Panic {
+    let idx = lsph_add_symbol(ctx, LsphSymbolKind::SymVariable, 100, 5, 4, 5, 10)
+    let found = lsph_find_symbol_at(ctx, 4, 0)
+    found == LSPH_INVALID
+}
+fn test_lsph_find_before_span() -> bool with Mut, Div, Panic {
+    var ctx = lsph_context_new()
+    test_lsph_find_before_span_inner(&! ctx)
+}
+
+// T30: Find symbol multiline span
+fn test_lsph_find_multiline_span_inner(ctx: &! LsphContext) -> bool with Mut, Div, Panic {
+    let idx = lsph_add_symbol(ctx, LsphSymbolKind::SymFunction, 100, 5, 0, 10, 0)
+    let f_mid = lsph_find_symbol_at(ctx, 7, 5)
+    let f_start = lsph_find_symbol_at(ctx, 5, 0)
+    let f_end = lsph_find_symbol_at(ctx, 10, 0)
+    let f_before = lsph_find_symbol_at(ctx, 4, 0)
+    let f_after = lsph_find_symbol_at(ctx, 10, 1)
+
+    f_mid == 0 && f_start == 0 && f_end == 0 && f_before == LSPH_INVALID && f_after == LSPH_INVALID
+}
+fn test_lsph_find_multiline_span() -> bool with Mut, Div, Panic {
+    var ctx = lsph_context_new()
+    test_lsph_find_multiline_span_inner(&! ctx)
+}
+
+// ============================================================================
+// Section 27: TESTS -- TYPE FORMATTING (T31-T38)
+// ============================================================================
+
+// T31: Format primitive type category
+fn test_lsph_format_type_primitive() -> bool with Mut, Div, Panic {
+    let buf = lsph_format_type_category(LsphTypeCategory::TcPrimitive)
+    // "primitive" = 9 bytes
+    let ok_len = buf.len == 9
+    let ok_b0 = buf.buf[0] == 112 // 'p'
+    let ok_b8 = buf.buf[8] == 101 // 'e'
+    ok_len && ok_b0 && ok_b8
+}
+
+// T32: Format struct type category
+fn test_lsph_format_type_struct() -> bool with Mut, Div, Panic {
+    let buf = lsph_format_type_category(LsphTypeCategory::TcStruct)
+    // "struct" = 6 bytes
+    let ok_len = buf.len == 6
+    let ok_b0 = buf.buf[0] == 115 // 's'
+    ok_len && ok_b0
+}
+
+// T33: Format enum type category
+fn test_lsph_format_type_enum() -> bool with Mut, Div, Panic {
+    let buf = lsph_format_type_category(LsphTypeCategory::TcEnum)
+    // "enum" = 4 bytes
+    let ok_len = buf.len == 4
+    let ok_b0 = buf.buf[0] == 101 // 'e'
+    ok_len && ok_b0
+}
+
+// T34: Format function type category
+fn test_lsph_format_type_function() -> bool with Mut, Div, Panic {
+    let buf = lsph_format_type_category(LsphTypeCategory::TcFunction)
+    // "function" = 8 bytes
+    let ok_len = buf.len == 8
+    let ok_b0 = buf.buf[0] == 102 // 'f'
+    ok_len && ok_b0
+}
+
+// T35: Format array type category
+fn test_lsph_format_type_array() -> bool with Mut, Div, Panic {
+    let buf = lsph_format_type_category(LsphTypeCategory::TcArray)
+    // "array" = 5 bytes
+    let ok_len = buf.len == 5
+    let ok_b0 = buf.buf[0] == 97 // 'a'
+    ok_len && ok_b0
+}
+
+// T36: Format ref type category
+fn test_lsph_format_type_ref() -> bool with Mut, Div, Panic {
+    let buf = lsph_format_type_category(LsphTypeCategory::TcRef)
+    // "&T" = 2 bytes
+    let ok_len = buf.len == 2
+    let ok_b0 = buf.buf[0] == LSPH_BYTE_AMPERSAND
+    let ok_b1 = buf.buf[1] == 84 // 'T'
+    ok_len && ok_b0 && ok_b1
+}
+
+// T37: Format mut ref type category
+fn test_lsph_format_type_mutref() -> bool with Mut, Div, Panic {
+    let buf = lsph_format_type_category(LsphTypeCategory::TcMutRef)
+    // "&!T" = 3 bytes
+    let ok_len = buf.len == 3
+    let ok_b0 = buf.buf[0] == LSPH_BYTE_AMPERSAND
+    let ok_b1 = buf.buf[1] == LSPH_BYTE_BANG
+    ok_len && ok_b0 && ok_b1
+}
+
+// T38: Format unit and never type categories
+fn test_lsph_format_type_unit_never() -> bool with Mut, Div, Panic {
+    let unit_buf = lsph_format_type_category(LsphTypeCategory::TcUnit)
+    let never_buf = lsph_format_type_category(LsphTypeCategory::TcNever)
+    // "()" = 2 bytes, "!" = 1 byte
+    let ok_unit_len = unit_buf.len == 2
+    let ok_never_len = never_buf.len == 1
+    let ok_unit_b0 = unit_buf.buf[0] == LSPH_BYTE_LPAREN
+    let ok_never_b0 = never_buf.buf[0] == LSPH_BYTE_BANG
+    ok_unit_len && ok_never_len && ok_unit_b0 && ok_never_b0
+}
+
+// ============================================================================
+// Section 28: TESTS -- HOVER CONTENT (T39-T48)
+// ============================================================================
+
+// T39: Hover for function (basic)
+fn test_lsph_hover_function_basic_inner(ctx: &! LsphContext) -> bool with Mut, Div, Panic {
+    let idx = lsph_add_symbol(ctx, LsphSymbolKind::SymFunction, 42, 5, 0, 5, 30)
+    let tb = lsph_make_type_i32()
+    lsph_set_symbol_type(ctx, idx, LsphTypeCategory::TcPrimitive, &tb)
+    lsph_set_symbol_param_count(ctx, idx, 0)
+
+    lsph_build_hover_content(ctx, idx)
+    let ok_has_content = ctx.hover_result.len > 0
+    // Should start with ``` (code fence)
+    let ok_fence = ctx.hover_result.buf[0] == LSPH_BYTE_BACKTICK
+    ok_has_content && ok_fence
+}
+fn test_lsph_hover_function_basic() -> bool with Mut, Div, Panic {
+    var ctx = lsph_context_new()
+    test_lsph_hover_function_basic_inner(&! ctx)
+}
+
+// T40: Hover for variable (immutable)
+fn test_lsph_hover_variable_immut_inner(ctx: &! LsphContext) -> bool with Mut, Div, Panic {
+    let idx = lsph_add_symbol(ctx, LsphSymbolKind::SymVariable, 99, 3, 4, 3, 12)
+    let tb = lsph_make_type_f64()
+    lsph_set_symbol_type(ctx, idx, LsphTypeCategory::TcPrimitive, &tb)
+
+    lsph_build_hover_content(ctx, idx)
+    let ok_len = ctx.hover_result.len > 0
+    ok_len
+}
+fn test_lsph_hover_variable_immut() -> bool with Mut, Div, Panic {
+    var ctx = lsph_context_new()
+    test_lsph_hover_variable_immut_inner(&! ctx)
+}
+
+// T41: Hover for variable (mutable)
+fn test_lsph_hover_variable_mut_inner(ctx: &! LsphContext) -> bool with Mut, Div, Panic {
+    let idx = lsph_add_symbol(ctx, LsphSymbolKind::SymVariable, 88, 4, 4, 4, 12)
+    let tb = lsph_make_type_i32()
+    lsph_set_symbol_type(ctx, idx, LsphTypeCategory::TcPrimitive, &tb)
+    lsph_set_symbol_mutable(ctx, idx, true)
+
+    lsph_build_hover_content(ctx, idx)
+
+    // After code fence open (```sio\n = 7 bytes), should have "var "
+    // Byte 7 should be 'v' (118), byte 8 'a' (97), byte 9 'r' (114)
+    let ok_len = ctx.hover_result.len > 10
+    let ok_v = ctx.hover_result.buf[7] == 118  // 'v'
+    let ok_a = ctx.hover_result.buf[8] == 97   // 'a'
+    let ok_r = ctx.hover_result.buf[9] == 114  // 'r'
+    ok_len && ok_v && ok_a && ok_r
+}
+fn test_lsph_hover_variable_mut() -> bool with Mut, Div, Panic {
+    var ctx = lsph_context_new()
+    test_lsph_hover_variable_mut_inner(&! ctx)
+}
+
+// T42: Hover for type (struct)
+fn test_lsph_hover_type_struct_inner(ctx: &! LsphContext) -> bool with Mut, Div, Panic {
+    let idx = lsph_add_symbol(ctx, LsphSymbolKind::SymType, 555, 10, 0, 15, 0)
+    let tb = lsph_type_buf_new()
+    lsph_set_symbol_type(ctx, idx, LsphTypeCategory::TcStruct, &tb)
+
+    lsph_build_hover_content(ctx, idx)
+    let ok_len = ctx.hover_result.len > 0
+    // After code fence, should have "struct"
+    let ok_s = ctx.hover_result.buf[7] == 115 // 's'
+    ok_len && ok_s
+}
+fn test_lsph_hover_type_struct() -> bool with Mut, Div, Panic {
+    var ctx = lsph_context_new()
+    test_lsph_hover_type_struct_inner(&! ctx)
+}
+
+// T43: Hover with doc comment
+fn test_lsph_hover_with_doc_inner(ctx: &! LsphContext) -> bool with Mut, Div, Panic {
+    let idx = lsph_add_symbol(ctx, LsphSymbolKind::SymFunction, 42, 5, 0, 5, 30)
+    let tb = lsph_make_type_bool()
+    lsph_set_symbol_type(ctx, idx, LsphTypeCategory::TcPrimitive, &tb)
+
+    var doc = lsph_doc_buf_new()
+    // "Doc text"
+    lsph_doc_buf_append_byte(&! doc, 68)  // D
+    lsph_doc_buf_append_byte(&! doc, 111) // o
+    lsph_doc_buf_append_byte(&! doc, 99)  // c
+    lsph_doc_buf_append_byte(&! doc, 32)  // space
+    lsph_doc_buf_append_byte(&! doc, 116) // t
+    lsph_doc_buf_append_byte(&! doc, 101) // e
+    lsph_doc_buf_append_byte(&! doc, 120) // x
+    lsph_doc_buf_append_byte(&! doc, 116) // t
+    lsph_set_symbol_doc(ctx, idx, &doc)
+
+    lsph_build_hover_content(ctx, idx)
+    // Should contain HR (---\n) and doc text
+    let ok_len = ctx.hover_result.len > 20
+    ok_len
+}
+fn test_lsph_hover_with_doc() -> bool with Mut, Div, Panic {
+    var ctx = lsph_context_new()
+    test_lsph_hover_with_doc_inner(&! ctx)
+}
+
+// T44: Hover with effects
+fn test_lsph_hover_with_effects_inner(ctx: &! LsphContext) -> bool with Mut, Div, Panic {
+    let idx = lsph_add_symbol(ctx, LsphSymbolKind::SymFunction, 42, 5, 0, 5, 30)
+    let tb = lsph_make_type_i32()
+    lsph_set_symbol_type(ctx, idx, LsphTypeCategory::TcPrimitive, &tb)
+
+    var eff = lsph_effect_buf_new()
+    lsph_effect_buf_add(&! eff, LSPH_EFFECT_MUT)
+    lsph_effect_buf_add(&! eff, LSPH_EFFECT_PANIC)
+    lsph_set_symbol_effects(ctx, idx, &eff)
+    lsph_set_effects(ctx, &eff)
+    lsph_set_symbol_param_count(ctx, idx, 0)
+
+    lsph_build_hover_content(ctx, idx)
+    let ok_len = ctx.hover_result.len > 10
+    ok_len
+}
+fn test_lsph_hover_with_effects() -> bool with Mut, Div, Panic {
+    var ctx = lsph_context_new()
+    test_lsph_hover_with_effects_inner(&! ctx)
+}
+
+// T45: Hover for constant
+fn test_lsph_hover_constant_inner(ctx: &! LsphContext) -> bool with Mut, Div, Panic {
+    let idx = lsph_add_symbol(ctx, LsphSymbolKind::SymConstant, 777, 1, 0, 1, 20)
+    let tb = lsph_make_type_i32()
+    lsph_set_symbol_type(ctx, idx, LsphTypeCategory::TcPrimitive, &tb)
+
+    lsph_build_hover_content(ctx, idx)
+    // After code fence: "let "
+    let ok_len = ctx.hover_result.len > 10
+    let ok_l = ctx.hover_result.buf[7] == 108 // 'l'
+    let ok_e = ctx.hover_result.buf[8] == 101 // 'e'
+    let ok_t = ctx.hover_result.buf[9] == 116 // 't'
+    ok_len && ok_l && ok_e && ok_t
+}
+fn test_lsph_hover_constant() -> bool with Mut, Div, Panic {
+    var ctx = lsph_context_new()
+    test_lsph_hover_constant_inner(&! ctx)
+}
+
+// T46: Hover for field
+fn test_lsph_hover_field_inner(ctx: &! LsphContext) -> bool with Mut, Div, Panic {
+    let idx = lsph_add_symbol(ctx, LsphSymbolKind::SymField, 888, 12, 4, 12, 20)
+    let tb = lsph_make_type_string()
+    lsph_set_symbol_type(ctx, idx, LsphTypeCategory::TcStruct, &tb)
+
+    lsph_build_hover_content(ctx, idx)
+    // After code fence: "field "
+    let ok_len = ctx.hover_result.len > 10
+    let ok_f = ctx.hover_result.buf[7] == 102 // 'f'
+    ok_len && ok_f
+}
+fn test_lsph_hover_field() -> bool with Mut, Div, Panic {
+    var ctx = lsph_context_new()
+    test_lsph_hover_field_inner(&! ctx)
+}
+
+// T47: Hover for parameter
+fn test_lsph_hover_parameter_inner(ctx: &! LsphContext) -> bool with Mut, Div, Panic {
+    let idx = lsph_add_symbol(ctx, LsphSymbolKind::SymParameter, 999, 7, 8, 7, 16)
+    let tb = lsph_make_type_bool()
+    lsph_set_symbol_type(ctx, idx, LsphTypeCategory::TcPrimitive, &tb)
+
+    lsph_build_hover_content(ctx, idx)
+    // After code fence: "param "
+    let ok_len = ctx.hover_result.len > 10
+    let ok_p = ctx.hover_result.buf[7] == 112 // 'p'
+    ok_len && ok_p
+}
+fn test_lsph_hover_parameter() -> bool with Mut, Div, Panic {
+    var ctx = lsph_context_new()
+    test_lsph_hover_parameter_inner(&! ctx)
+}
+
+// T48: Hover for module
+fn test_lsph_hover_module_inner(ctx: &! LsphContext) -> bool with Mut, Div, Panic {
+    let idx = lsph_add_symbol(ctx, LsphSymbolKind::SymModule, 1234, 1, 0, 1, 15)
+
+    lsph_build_hover_content(ctx, idx)
+    // After code fence: "module "
+    let ok_len = ctx.hover_result.len > 10
+    let ok_m = ctx.hover_result.buf[7] == 109 // 'm'
+    ok_len && ok_m
+}
+fn test_lsph_hover_module() -> bool with Mut, Div, Panic {
+    var ctx = lsph_context_new()
+    test_lsph_hover_module_inner(&! ctx)
+}
+
+// ============================================================================
+// Section 29: TESTS -- SIGNATURE FORMATTING (T49-T54)
+// ============================================================================
+
+// T49: Format function signature (no params, no effects)
+fn test_lsph_format_sig_no_params_inner(ctx: &! LsphContext) -> bool with Mut, Div, Panic {
+    let idx = lsph_add_symbol(ctx, LsphSymbolKind::SymFunction, 42, 1, 0, 1, 20)
+    let tb = lsph_make_type_i32()
+    lsph_set_symbol_type(ctx, idx, LsphTypeCategory::TcPrimitive, &tb)
+    lsph_set_symbol_param_count(ctx, idx, 0)
+
+    let sig = lsph_format_function_signature(ctx, idx)
+    // Should start with "fn "
+    let ok_f = sig.buf[0] == 102
+    let ok_n = sig.buf[1] == 110
+    let ok_sp = sig.buf[2] == LSPH_BYTE_SPACE
+    let ok_len = sig.len > 5
+    ok_f && ok_n && ok_sp && ok_len
+}
+fn test_lsph_format_sig_no_params() -> bool with Mut, Div, Panic {
+    var ctx = lsph_context_new()
+    test_lsph_format_sig_no_params_inner(&! ctx)
+}
+
+// T50: Format function signature (with params)
+fn test_lsph_format_sig_with_params_inner(ctx: &! LsphContext) -> bool with Mut, Div, Panic {
+    let idx = lsph_add_symbol(ctx, LsphSymbolKind::SymFunction, 42, 1, 0, 1, 30)
+    let tb = lsph_make_type_bool()
+    lsph_set_symbol_type(ctx, idx, LsphTypeCategory::TcPrimitive, &tb)
+    lsph_set_symbol_param_count(ctx, idx, 2)
+
+    let pt0 = lsph_make_type_i32()
+    lsph_set_param(ctx, 0, 100, &pt0)
+    let pt1 = lsph_make_type_f64()
+    lsph_set_param(ctx, 1, 200, &pt1)
+
+    let sig = lsph_format_function_signature(ctx, idx)
+    // Should contain parentheses with params
+    let ok_len = sig.len > 15
+    ok_len
+}
+fn test_lsph_format_sig_with_params() -> bool with Mut, Div, Panic {
+    var ctx = lsph_context_new()
+    test_lsph_format_sig_with_params_inner(&! ctx)
+}
+
+// T51: Format function signature (with effects)
+fn test_lsph_format_sig_with_effects_inner(ctx: &! LsphContext) -> bool with Mut, Div, Panic {
+    let idx = lsph_add_symbol(ctx, LsphSymbolKind::SymFunction, 42, 1, 0, 1, 30)
+    let tb = lsph_make_type_i32()
+    lsph_set_symbol_type(ctx, idx, LsphTypeCategory::TcPrimitive, &tb)
+    lsph_set_symbol_param_count(ctx, idx, 0)
+
+    var eff = lsph_effect_buf_new()
+    lsph_effect_buf_add(&! eff, LSPH_EFFECT_IO)
+    lsph_set_symbol_effects(ctx, idx, &eff)
+    lsph_set_effects(ctx, &eff)
+
+    let sig = lsph_format_function_signature(ctx, idx)
+    let ok_len = sig.len > 10
+    ok_len
+}
+fn test_lsph_format_sig_with_effects() -> bool with Mut, Div, Panic {
+    var ctx = lsph_context_new()
+    test_lsph_format_sig_with_effects_inner(&! ctx)
+}
+
+// T52: Format variable hover (let)
+fn test_lsph_format_var_hover_let_inner(ctx: &! LsphContext) -> bool with Mut, Div, Panic {
+    let idx = lsph_add_symbol(ctx, LsphSymbolKind::SymVariable, 50, 3, 0, 3, 10)
+    let tb = lsph_make_type_i32()
+    lsph_set_symbol_type(ctx, idx, LsphTypeCategory::TcPrimitive, &tb)
+
+    let hov = lsph_format_variable_hover(ctx, idx)
+    // "let _50: i32"
+    let ok_l = hov.buf[0] == 108 // 'l'
+    let ok_e = hov.buf[1] == 101 // 'e'
+    let ok_t = hov.buf[2] == 116 // 't'
+    let ok_len = hov.len > 5
+    ok_l && ok_e && ok_t && ok_len
+}
+fn test_lsph_format_var_hover_let() -> bool with Mut, Div, Panic {
+    var ctx = lsph_context_new()
+    test_lsph_format_var_hover_let_inner(&! ctx)
+}
+
+// T53: Format variable hover (var)
+fn test_lsph_format_var_hover_var_inner(ctx: &! LsphContext) -> bool with Mut, Div, Panic {
+    let idx = lsph_add_symbol(ctx, LsphSymbolKind::SymVariable, 50, 3, 0, 3, 10)
+    let tb = lsph_make_type_f64()
+    lsph_set_symbol_type(ctx, idx, LsphTypeCategory::TcPrimitive, &tb)
+    lsph_set_symbol_mutable(ctx, idx, true)
+
+    let hov = lsph_format_variable_hover(ctx, idx)
+    // "var _50: f64"
+    let ok_v = hov.buf[0] == 118 // 'v'
+    let ok_a = hov.buf[1] == 97  // 'a'
+    let ok_r = hov.buf[2] == 114 // 'r'
+    let ok_len = hov.len > 5
+    ok_v && ok_a && ok_r && ok_len
+}
+fn test_lsph_format_var_hover_var() -> bool with Mut, Div, Panic {
+    var ctx = lsph_context_new()
+    test_lsph_format_var_hover_var_inner(&! ctx)
+}
+
+// T54: Format type hover (enum)
+fn test_lsph_format_type_hover_enum_inner(ctx: &! LsphContext) -> bool with Mut, Div, Panic {
+    let idx = lsph_add_symbol(ctx, LsphSymbolKind::SymType, 700, 10, 0, 15, 0)
+    let tb = lsph_type_buf_new()
+    lsph_set_symbol_type(ctx, idx, LsphTypeCategory::TcEnum, &tb)
+
+    let hov = lsph_format_type_hover(ctx, idx)
+    // "enum _700"
+    let ok_e = hov.buf[0] == 101 // 'e'
+    let ok_n = hov.buf[1] == 110 // 'n'
+    let ok_u = hov.buf[2] == 117 // 'u'
+    let ok_m = hov.buf[3] == 109 // 'm'
+    let ok_len = hov.len > 5
+    ok_e && ok_n && ok_u && ok_m && ok_len
+}
+fn test_lsph_format_type_hover_enum() -> bool with Mut, Div, Panic {
+    var ctx = lsph_context_new()
+    test_lsph_format_type_hover_enum_inner(&! ctx)
+}
+
+// ============================================================================
+// Section 30: TESTS -- LINE INDEX (T55-T62)
+// ============================================================================
+
+// T55: Build line index (single line)
+fn test_lsph_line_index_single_inner(ctx: &! LsphContext) -> bool with Mut, Div, Panic {
+    var src: [i64; 4096] = [0; 4096]
+    // "hello" = no newlines
+    src[0] = 104
+    src[1] = 101
+    src[2] = 108
+    src[3] = 108
+    src[4] = 111
+    lsph_build_line_index(ctx, &src, 5)
+    let ok_count = ctx.line_index.line_count == 1
+    let ok_start = ctx.line_index.line_starts[0] == 0
+    ok_count && ok_start
+}
+fn test_lsph_line_index_single() -> bool with Mut, Div, Panic {
+    var ctx = lsph_context_new()
+    test_lsph_line_index_single_inner(&! ctx)
+}
+
+// T56: Build line index (two lines)
+fn test_lsph_line_index_two_inner(ctx: &! LsphContext) -> bool with Mut, Div, Panic {
+    var src: [i64; 4096] = [0; 4096]
+    // "ab\ncd" -> line 0 at 0, line 1 at 3
+    src[0] = 97   // a
+    src[1] = 98   // b
+    src[2] = 10   // \n
+    src[3] = 99   // c
+    src[4] = 100  // d
+    lsph_build_line_index(ctx, &src, 5)
+    let ok_count = ctx.line_index.line_count == 2
+    let ok_s0 = ctx.line_index.line_starts[0] == 0
+    let ok_s1 = ctx.line_index.line_starts[1] == 3
+    ok_count && ok_s0 && ok_s1
+}
+fn test_lsph_line_index_two() -> bool with Mut, Div, Panic {
+    var ctx = lsph_context_new()
+    test_lsph_line_index_two_inner(&! ctx)
+}
+
+// T57: Build line index (three lines)
+fn test_lsph_line_index_three_inner(ctx: &! LsphContext) -> bool with Mut, Div, Panic {
+    var src: [i64; 4096] = [0; 4096]
+    // "a\nb\nc"
+    src[0] = 97   // a
+    src[1] = 10   // \n
+    src[2] = 98   // b
+    src[3] = 10   // \n
+    src[4] = 99   // c
+    lsph_build_line_index(ctx, &src, 5)
+    let ok_count = ctx.line_index.line_count == 3
+    let ok_s0 = ctx.line_index.line_starts[0] == 0
+    let ok_s1 = ctx.line_index.line_starts[1] == 2
+    let ok_s2 = ctx.line_index.line_starts[2] == 4
+    ok_count && ok_s0 && ok_s1 && ok_s2
+}
+fn test_lsph_line_index_three() -> bool with Mut, Div, Panic {
+    var ctx = lsph_context_new()
+    test_lsph_line_index_three_inner(&! ctx)
+}
+
+// T58: Line/col to offset
+fn test_lsph_line_col_to_offset_inner(ctx: &! LsphContext) -> bool with Mut, Div, Panic {
+    var src: [i64; 4096] = [0; 4096]
+    // "abc\ndef\nghi"
+    src[0] = 97   // a
+    src[1] = 98   // b
+    src[2] = 99   // c
+    src[3] = 10   // \n
+    src[4] = 100  // d
+    src[5] = 101  // e
+    src[6] = 102  // f
+    src[7] = 10   // \n
+    src[8] = 103  // g
+    src[9] = 104  // h
+    src[10] = 105 // i
+    lsph_build_line_index(ctx, &src, 11)
+
+    let off_00 = lsph_line_col_to_offset(ctx, 0, 0) // should be 0
+    let off_02 = lsph_line_col_to_offset(ctx, 0, 2) // should be 2
+    let off_10 = lsph_line_col_to_offset(ctx, 1, 0) // should be 4
+    let off_12 = lsph_line_col_to_offset(ctx, 1, 2) // should be 6
+    let off_20 = lsph_line_col_to_offset(ctx, 2, 0) // should be 8
+
+    off_00 == 0 && off_02 == 2 && off_10 == 4 && off_12 == 6 && off_20 == 8
+}
+fn test_lsph_line_col_to_offset() -> bool with Mut, Div, Panic {
+    var ctx = lsph_context_new()
+    test_lsph_line_col_to_offset_inner(&! ctx)
+}
+
+// T59: Offset to line
+fn test_lsph_offset_to_line_inner(ctx: &! LsphContext) -> bool with Mut, Div, Panic {
+    var src: [i64; 4096] = [0; 4096]
+    // "ab\ncd\nef"
+    src[0] = 97
+    src[1] = 98
+    src[2] = 10
+    src[3] = 99
+    src[4] = 100
+    src[5] = 10
+    src[6] = 101
+    src[7] = 102
+    lsph_build_line_index(ctx, &src, 8)
+
+    let l0 = lsph_offset_to_line(ctx, 0)
+    let l1 = lsph_offset_to_line(ctx, 1)
+    let l2 = lsph_offset_to_line(ctx, 3)
+    let l3 = lsph_offset_to_line(ctx, 6)
+
+    l0 == 0 && l1 == 0 && l2 == 1 && l3 == 2
+}
+fn test_lsph_offset_to_line() -> bool with Mut, Div, Panic {
+    var ctx = lsph_context_new()
+    test_lsph_offset_to_line_inner(&! ctx)
+}
+
+// T60: Offset to col
+fn test_lsph_offset_to_col_inner(ctx: &! LsphContext) -> bool with Mut, Div, Panic {
+    var src: [i64; 4096] = [0; 4096]
+    // "ab\ncd\nef"
+    src[0] = 97
+    src[1] = 98
+    src[2] = 10
+    src[3] = 99
+    src[4] = 100
+    src[5] = 10
+    src[6] = 101
+    src[7] = 102
+    lsph_build_line_index(ctx, &src, 8)
+
+    let c0 = lsph_offset_to_col(ctx, 0) // col 0
+    let c1 = lsph_offset_to_col(ctx, 1) // col 1
+    let c4 = lsph_offset_to_col(ctx, 4) // col 1 (on line 1)
+    let c7 = lsph_offset_to_col(ctx, 7) // col 1 (on line 2)
+
+    c0 == 0 && c1 == 1 && c4 == 1 && c7 == 1
+}
+fn test_lsph_offset_to_col() -> bool with Mut, Div, Panic {
+    var ctx = lsph_context_new()
+    test_lsph_offset_to_col_inner(&! ctx)
+}
+
+// T61: Line count
+fn test_lsph_line_count_inner(ctx: &! LsphContext) -> bool with Mut, Div, Panic {
+    var src: [i64; 4096] = [0; 4096]
+    src[0] = 65
+    src[1] = 10
+    src[2] = 66
+    src[3] = 10
+    src[4] = 67
+    src[5] = 10
+    src[6] = 68
+    lsph_build_line_index(ctx, &src, 7)
+    lsph_line_count(ctx) == 4
+}
+fn test_lsph_line_count() -> bool with Mut, Div, Panic {
+    var ctx = lsph_context_new()
+    test_lsph_line_count_inner(&! ctx)
+}
+
+// T62: Invalid line col to offset
+fn test_lsph_line_col_invalid_inner(ctx: &! LsphContext) -> bool with Mut, Div, Panic {
+    var src: [i64; 4096] = [0; 4096]
+    src[0] = 65
+    lsph_build_line_index(ctx, &src, 1)
+
+    let r_neg = lsph_line_col_to_offset(ctx, 0 - 1, 0)
+    let r_over = lsph_line_col_to_offset(ctx, 5, 0)
+    r_neg == LSPH_INVALID && r_over == LSPH_INVALID
+}
+fn test_lsph_line_col_invalid() -> bool with Mut, Div, Panic {
+    var ctx = lsph_context_new()
+    test_lsph_line_col_invalid_inner(&! ctx)
+}
+
+// ============================================================================
+// Section 31: TESTS -- INTEGRATION (T63-T70)
+// ============================================================================
+
+// T63: Full hover pipeline -- function found
+fn test_lsph_hover_pipeline_function_inner(ctx: &! LsphContext) -> bool with Mut, Div, Panic {
+    let idx = lsph_add_symbol(ctx, LsphSymbolKind::SymFunction, 42, 5, 0, 5, 30)
+    let tb = lsph_make_type_i32()
+    lsph_set_symbol_type(ctx, idx, LsphTypeCategory::TcPrimitive, &tb)
+    lsph_set_symbol_param_count(ctx, idx, 0)
+
+    let found = lsph_handle_hover(ctx, 5, 10)
+    let ok_found = found
+    let ok_len = ctx.hover_result.len > 0
+    let ok_line = ctx.last_hover_line == 5
+    let ok_col = ctx.last_hover_col == 10
+    ok_found && ok_len && ok_line && ok_col
+}
+fn test_lsph_hover_pipeline_function() -> bool with Mut, Div, Panic {
+    var ctx = lsph_context_new()
+    test_lsph_hover_pipeline_function_inner(&! ctx)
+}
+
+// T64: Full hover pipeline -- miss
+fn test_lsph_hover_pipeline_miss_inner(ctx: &! LsphContext) -> bool with Mut, Div, Panic {
+    let idx = lsph_add_symbol(ctx, LsphSymbolKind::SymFunction, 42, 5, 0, 5, 30)
+    let found = lsph_handle_hover(ctx, 20, 0)
+    let ok_not_found = found == false
+    let ok_empty = ctx.hover_result.len == 0
+    ok_not_found && ok_empty
+}
+fn test_lsph_hover_pipeline_miss() -> bool with Mut, Div, Panic {
+    var ctx = lsph_context_new()
+    test_lsph_hover_pipeline_miss_inner(&! ctx)
+}
+
+// T65: Full hover pipeline -- variable with type
+fn test_lsph_hover_pipeline_variable_inner(ctx: &! LsphContext) -> bool with Mut, Div, Panic {
+    let idx = lsph_add_symbol(ctx, LsphSymbolKind::SymVariable, 99, 10, 4, 10, 12)
+    let tb = lsph_make_type_f64()
+    lsph_set_symbol_type(ctx, idx, LsphTypeCategory::TcPrimitive, &tb)
+
+    let found = lsph_handle_hover(ctx, 10, 8)
+    let ok_found = found
+    let ok_len = ctx.hover_result.len > 0
+    ok_found && ok_len
+}
+fn test_lsph_hover_pipeline_variable() -> bool with Mut, Div, Panic {
+    var ctx = lsph_context_new()
+    test_lsph_hover_pipeline_variable_inner(&! ctx)
+}
+
+// T66: Full hover pipeline -- multiple symbols, correct one selected
+fn test_lsph_hover_pipeline_multiple_inner(ctx: &! LsphContext) -> bool with Mut, Div, Panic {
+    let i0 = lsph_add_symbol(ctx, LsphSymbolKind::SymFunction, 100, 1, 0, 1, 20)
+    let i1 = lsph_add_symbol(ctx, LsphSymbolKind::SymVariable, 200, 5, 4, 5, 12)
+    let i2 = lsph_add_symbol(ctx, LsphSymbolKind::SymType, 300, 10, 0, 15, 0)
+
+    // Hover over the variable
+    let found = lsph_handle_hover(ctx, 5, 8)
+    let ok_found = found
+    let ok_len = ctx.hover_result.len > 0
+    ok_found && ok_len
+}
+fn test_lsph_hover_pipeline_multiple() -> bool with Mut, Div, Panic {
+    var ctx = lsph_context_new()
+    test_lsph_hover_pipeline_multiple_inner(&! ctx)
+}
+
+// T67: Hover updates last_hover coordinates
+fn test_lsph_hover_updates_coords_inner(ctx: &! LsphContext) -> bool with Mut, Div, Panic {
+    let idx = lsph_add_symbol(ctx, LsphSymbolKind::SymVariable, 42, 5, 0, 5, 20)
+
+    let r1 = lsph_handle_hover(ctx, 5, 10)
+    let ok1_line = ctx.last_hover_line == 5
+    let ok1_col = ctx.last_hover_col == 10
+
+    let r2 = lsph_handle_hover(ctx, 100, 50)
+    let ok2_line = ctx.last_hover_line == 100
+    let ok2_col = ctx.last_hover_col == 50
+
+    ok1_line && ok1_col && ok2_line && ok2_col
+}
+fn test_lsph_hover_updates_coords() -> bool with Mut, Div, Panic {
+    var ctx = lsph_context_new()
+    test_lsph_hover_updates_coords_inner(&! ctx)
+}
+
+// T68: Effect buffer operations
+fn test_lsph_effect_buf_ops_inner(eb: &! LsphEffectBuf) -> bool with Mut, Div, Panic {
+    lsph_effect_buf_add(eb, LSPH_EFFECT_IO)
+    lsph_effect_buf_add(eb, LSPH_EFFECT_MUT)
+    lsph_effect_buf_add(eb, LSPH_EFFECT_PANIC)
+
+    let ok_count = eb.count == 3
+    let ok_has_io = lsph_effect_buf_contains(eb, LSPH_EFFECT_IO)
+    let ok_has_mut = lsph_effect_buf_contains(eb, LSPH_EFFECT_MUT)
+    let ok_has_panic = lsph_effect_buf_contains(eb, LSPH_EFFECT_PANIC)
+    let ok_no_gpu = lsph_effect_buf_contains(eb, LSPH_EFFECT_GPU) == false
+
+    ok_count && ok_has_io && ok_has_mut && ok_has_panic && ok_no_gpu
+}
+fn test_lsph_effect_buf_ops() -> bool with Mut, Div, Panic {
+    var eb = lsph_effect_buf_new()
+    test_lsph_effect_buf_ops_inner(&! eb)
+}
+
+// T69: Effect formatting
+fn test_lsph_format_effect_names() -> bool with Mut, Div, Panic {
+    let io_buf = lsph_format_effect(LSPH_EFFECT_IO)
+    let mut_buf = lsph_format_effect(LSPH_EFFECT_MUT)
+    let panic_buf = lsph_format_effect(LSPH_EFFECT_PANIC)
+    let div_buf = lsph_format_effect(LSPH_EFFECT_DIV)
+    let gpu_buf = lsph_format_effect(LSPH_EFFECT_GPU)
+
+    // "IO" = 2 bytes, "Mut" = 3 bytes, "Panic" = 5 bytes, "Div" = 3 bytes, "GPU" = 3 bytes
+    let ok_io = io_buf.len == 2 && io_buf.buf[0] == 73
+    let ok_mut = mut_buf.len == 3 && mut_buf.buf[0] == 77
+    let ok_panic = panic_buf.len == 5 && panic_buf.buf[0] == 80
+    let ok_div = div_buf.len == 3 && div_buf.buf[0] == 68
+    let ok_gpu = gpu_buf.len == 3 && gpu_buf.buf[0] == 71
+
+    ok_io && ok_mut && ok_panic && ok_div && ok_gpu
+}
+
+// T70: Doc comment extraction
+fn test_lsph_extract_doc_comment_basic() -> bool with Mut, Div, Panic {
+    var src: [i64; 4096] = [0; 4096]
+    // Line 0: "// Hello\n"
+    src[0] = 47   // /
+    src[1] = 47   // /
+    src[2] = 32   // space
+    src[3] = 72   // H
+    src[4] = 101  // e
+    src[5] = 108  // l
+    src[6] = 108  // l
+    src[7] = 111  // o
+    src[8] = 10   // \n
+    // Line 1: "fn foo()\n"
+    src[9] = 102  // f
+    src[10] = 110 // n
+    src[11] = 32  // space
+    src[12] = 102 // f
+    src[13] = 111 // o
+    src[14] = 111 // o
+    src[15] = 40  // (
+    src[16] = 41  // )
+    src[17] = 10  // \n
+
+    let doc = lsph_extract_doc_comment(&src, 18, 1)
+    // Should extract "Hello"
+    let ok_len = doc.len == 5
+    let ok_h = doc.buf[0] == 72  // 'H'
+    let ok_o = doc.buf[4] == 111 // 'o'
+    ok_len && ok_h && ok_o
+}
+
+// ============================================================================
+// Section 32: ADDITIONAL HELPER FUNCTIONS
+// ============================================================================
+
+// Clear the hover result buffer on the context.
+fn lsph_clear_hover_result(ctx: &! LsphContext) with Mut {
+    ctx.hover_result.len = 0
+}
+
+// Check if the context has a hover result.
+fn lsph_has_hover_result(ctx: &LsphContext) -> bool {
+    ctx.hover_result.len > 0
+}
+
+// Get the hover result length.
+fn lsph_hover_result_len(ctx: &LsphContext) -> i64 {
+    ctx.hover_result.len
+}
+
+// Get a byte from the hover result.
+fn lsph_hover_result_byte(ctx: &LsphContext, idx: i64) -> i8 with Div, Panic {
+    if idx < 0 || idx >= ctx.hover_result.len {
+        return 0
+    }
+    ctx.hover_result.buf[idx as usize]
+}
+
+// Utility: check that a symbol is a function.
+fn lsph_symbol_is_function(ctx: &LsphContext, sym_id: i64) -> bool with Div, Panic {
+    if sym_id < 0 || sym_id >= ctx.sym_count {
+        return false
+    }
+    match ctx.symbols[sym_id as usize].kind {
+        LsphSymbolKind::SymFunction => true,
+        _ => false,
+    }
+}
+
+// Utility: check that a symbol is a variable.
+fn lsph_symbol_is_variable(ctx: &LsphContext, sym_id: i64) -> bool with Div, Panic {
+    if sym_id < 0 || sym_id >= ctx.sym_count {
+        return false
+    }
+    match ctx.symbols[sym_id as usize].kind {
+        LsphSymbolKind::SymVariable => true,
+        _ => false,
+    }
+}
+
+// Utility: check that a symbol is a type.
+fn lsph_symbol_is_type(ctx: &LsphContext, sym_id: i64) -> bool with Div, Panic {
+    if sym_id < 0 || sym_id >= ctx.sym_count {
+        return false
+    }
+    match ctx.symbols[sym_id as usize].kind {
+        LsphSymbolKind::SymType => true,
+        _ => false,
+    }
+}
+
+// Utility: reset the entire context for re-use.
+fn lsph_context_reset(ctx: &! LsphContext) with Mut {
+    ctx.sym_count = 0
+    ctx.line_index.line_count = 0
+    ctx.effects_buf.count = 0
+    ctx.hover_result.len = 0
+    ctx.last_hover_line = 0
+    ctx.last_hover_col = 0
+}
+
+// Utility: compute the symbol count.
+fn lsph_symbol_count(ctx: &LsphContext) -> i64 {
+    ctx.sym_count
+}
+
+// Format an effect list as a comma-separated string into a hover buffer.
+fn lsph_format_effects_list(effects: &LsphEffectBuf) -> LsphHoverBuf with Mut, Div, Panic {
+    var buf = lsph_hover_buf_new()
+    var i: i64 = 0
+    while i < effects.count {
+        if i > 0 {
+            lsph_hover_buf_append_byte(&! buf, LSPH_BYTE_COMMA)
+            lsph_hover_buf_append_space(&! buf)
+        }
+        let eff = lsph_format_effect(effects.effects[i as usize])
+        lsph_hover_buf_append_type(&! buf, &eff)
+        i = i + 1
+    }
+    buf
+}
+
+// ============================================================================
+// Section 33: HOVER SECTION HELPERS
+// ============================================================================
+
+// Check if a hover section is the type section.
+fn lsph_is_section_type(section: LsphHoverSection) -> bool {
+    match section {
+        LsphHoverSection::SectionType => true,
+        _ => false,
+    }
+}
+
+// Check if a hover section is the doc section.
+fn lsph_is_section_doc(section: LsphHoverSection) -> bool {
+    match section {
+        LsphHoverSection::SectionDoc => true,
+        _ => false,
+    }
+}
+
+// Check if a hover section is the signature section.
+fn lsph_is_section_signature(section: LsphHoverSection) -> bool {
+    match section {
+        LsphHoverSection::SectionSignature => true,
+        _ => false,
+    }
+}
+
+// Check if a hover section is the effects section.
+fn lsph_is_section_effects(section: LsphHoverSection) -> bool {
+    match section {
+        LsphHoverSection::SectionEffects => true,
+        _ => false,
+    }
+}
+
+// Check if a hover section is the source section.
+fn lsph_is_section_source(section: LsphHoverSection) -> bool {
+    match section {
+        LsphHoverSection::SectionSource => true,
+        _ => false,
+    }
+}
+
+// ============================================================================
+// Section 34: TYPE BUFFER STRING HELPERS
+// ============================================================================
+
+// Append a known string "fn" to a type buffer.
+fn lsph_type_buf_append_fn(buf: &! LsphTypeBuf) with Mut, Div, Panic {
+    lsph_type_buf_append_byte(buf, 102) // f
+    lsph_type_buf_append_byte(buf, 110) // n
+}
+
+// Append "let" to a type buffer.
+fn lsph_type_buf_append_let(buf: &! LsphTypeBuf) with Mut, Div, Panic {
+    lsph_type_buf_append_byte(buf, 108) // l
+    lsph_type_buf_append_byte(buf, 101) // e
+    lsph_type_buf_append_byte(buf, 116) // t
+}
+
+// Append "var" to a type buffer.
+fn lsph_type_buf_append_var(buf: &! LsphTypeBuf) with Mut, Div, Panic {
+    lsph_type_buf_append_byte(buf, 118) // v
+    lsph_type_buf_append_byte(buf, 97)  // a
+    lsph_type_buf_append_byte(buf, 114) // r
+}
+
+// Append "with " to a type buffer.
+fn lsph_type_buf_append_with(buf: &! LsphTypeBuf) with Mut, Div, Panic {
+    lsph_type_buf_append_byte(buf, 119) // w
+    lsph_type_buf_append_byte(buf, 105) // i
+    lsph_type_buf_append_byte(buf, 116) // t
+    lsph_type_buf_append_byte(buf, 104) // h
+    lsph_type_buf_append_byte(buf, 32)  // space
+}
+
+// Append " -> " to a type buffer.
+fn lsph_type_buf_append_arrow(buf: &! LsphTypeBuf) with Mut, Div, Panic {
+    lsph_type_buf_append_byte(buf, 32)  // space
+    lsph_type_buf_append_byte(buf, 45)  // -
+    lsph_type_buf_append_byte(buf, 62)  // >
+    lsph_type_buf_append_byte(buf, 32)  // space
+}
+
+// ============================================================================
+// Section 35: SYMBOL KIND COMPARISON HELPERS
+// ============================================================================
+
+// Compare two symbol kinds for equality.
+fn lsph_symbol_kind_eq(a: LsphSymbolKind, b: LsphSymbolKind) -> bool {
+    match a {
+        LsphSymbolKind::SymFunction => match b {
+            LsphSymbolKind::SymFunction => true,
+            _ => false,
+        },
+        LsphSymbolKind::SymVariable => match b {
+            LsphSymbolKind::SymVariable => true,
+            _ => false,
+        },
+        LsphSymbolKind::SymType => match b {
+            LsphSymbolKind::SymType => true,
+            _ => false,
+        },
+        LsphSymbolKind::SymField => match b {
+            LsphSymbolKind::SymField => true,
+            _ => false,
+        },
+        LsphSymbolKind::SymModule => match b {
+            LsphSymbolKind::SymModule => true,
+            _ => false,
+        },
+        LsphSymbolKind::SymConstant => match b {
+            LsphSymbolKind::SymConstant => true,
+            _ => false,
+        },
+        LsphSymbolKind::SymParameter => match b {
+            LsphSymbolKind::SymParameter => true,
+            _ => false,
+        },
+        LsphSymbolKind::SymEffect => match b {
+            LsphSymbolKind::SymEffect => true,
+            _ => false,
+        },
+        LsphSymbolKind::SymUnknown => match b {
+            LsphSymbolKind::SymUnknown => true,
+            _ => false,
+        },
+    }
+}
+
+// Compare two type categories for equality.
+fn lsph_type_cat_eq(a: LsphTypeCategory, b: LsphTypeCategory) -> bool {
+    match a {
+        LsphTypeCategory::TcPrimitive => match b {
+            LsphTypeCategory::TcPrimitive => true,
+            _ => false,
+        },
+        LsphTypeCategory::TcStruct => match b {
+            LsphTypeCategory::TcStruct => true,
+            _ => false,
+        },
+        LsphTypeCategory::TcEnum => match b {
+            LsphTypeCategory::TcEnum => true,
+            _ => false,
+        },
+        LsphTypeCategory::TcFunction => match b {
+            LsphTypeCategory::TcFunction => true,
+            _ => false,
+        },
+        LsphTypeCategory::TcArray => match b {
+            LsphTypeCategory::TcArray => true,
+            _ => false,
+        },
+        LsphTypeCategory::TcRef => match b {
+            LsphTypeCategory::TcRef => true,
+            _ => false,
+        },
+        LsphTypeCategory::TcMutRef => match b {
+            LsphTypeCategory::TcMutRef => true,
+            _ => false,
+        },
+        LsphTypeCategory::TcGeneric => match b {
+            LsphTypeCategory::TcGeneric => true,
+            _ => false,
+        },
+        LsphTypeCategory::TcUnit => match b {
+            LsphTypeCategory::TcUnit => true,
+            _ => false,
+        },
+        LsphTypeCategory::TcNever => match b {
+            LsphTypeCategory::TcNever => true,
+            _ => false,
+        },
+        LsphTypeCategory::TcUnknown => match b {
+            LsphTypeCategory::TcUnknown => true,
+            _ => false,
+        },
+    }
+}
+
+// ============================================================================
+// Section 36: DOC EXTRACTION EDGE CASES
+// ============================================================================
+
+// Extract doc comments handling multi-line comments.
+fn lsph_extract_multi_doc(source: &[i64; 4096], len: i64, def_line: i64) -> LsphDocBuf
+    with Mut, Div, Panic
+{
+    // Delegate to the main extraction function.
+    lsph_extract_doc_comment(source, len, def_line)
+}
+
+// Check if a byte is a printable ASCII character.
+fn lsph_is_printable(b: i8) -> bool {
+    let v = b as i64
+    v >= 32 && v <= 126
+}
+
+// Check if a byte is a digit.
+fn lsph_is_digit(b: i8) -> bool {
+    let v = b as i64
+    v >= 48 && v <= 57
+}
+
+// Check if a byte is an ASCII letter.
+fn lsph_is_alpha(b: i8) -> bool {
+    let v = b as i64
+    if v >= 65 && v <= 90 {
+        return true
+    }
+    if v >= 97 && v <= 122 {
+        return true
+    }
+    false
+}
+
+// Check if a byte is alphanumeric or underscore (identifier character).
+fn lsph_is_ident_char(b: i8) -> bool {
+    if lsph_is_alpha(b) {
+        return true
+    }
+    if lsph_is_digit(b) {
+        return true
+    }
+    let v = b as i64
+    v == 95 // underscore
+}
+
+// ============================================================================
+// Section 37: ADVANCED HOVER -- TYPE WITH GENERICS
+// ============================================================================
+
+// Format a generic type reference: "Name<T>"
+fn lsph_format_generic_type(name_hash: i64, type_param_hash: i64) -> LsphTypeBuf
+    with Mut, Div, Panic
+{
+    var buf = lsph_type_buf_new()
+    lsph_type_buf_append_byte(&! buf, LSPH_BYTE_UNDERSCORE)
+    lsph_type_buf_append_i64(&! buf, name_hash)
+    lsph_type_buf_append_byte(&! buf, LSPH_BYTE_LANGLE)
+    lsph_type_buf_append_byte(&! buf, LSPH_BYTE_UNDERSCORE)
+    lsph_type_buf_append_i64(&! buf, type_param_hash)
+    lsph_type_buf_append_byte(&! buf, LSPH_BYTE_RANGLE)
+    buf
+}
+
+// Format an array type: "[T; N]"
+fn lsph_format_array_type(elem_hash: i64, size: i64) -> LsphTypeBuf
+    with Mut, Div, Panic
+{
+    var buf = lsph_type_buf_new()
+    lsph_type_buf_append_byte(&! buf, LSPH_BYTE_LBRACKET)
+    lsph_type_buf_append_byte(&! buf, LSPH_BYTE_UNDERSCORE)
+    lsph_type_buf_append_i64(&! buf, elem_hash)
+    lsph_type_buf_append_byte(&! buf, LSPH_BYTE_SEMICOLON)
+    lsph_type_buf_append_byte(&! buf, LSPH_BYTE_SPACE)
+    lsph_type_buf_append_i64(&! buf, size)
+    lsph_type_buf_append_byte(&! buf, LSPH_BYTE_RBRACKET)
+    buf
+}
+
+// Format a reference type: "&T" or "&!T"
+fn lsph_format_ref_type(inner_hash: i64, is_mutable: bool) -> LsphTypeBuf
+    with Mut, Div, Panic
+{
+    var buf = lsph_type_buf_new()
+    lsph_type_buf_append_byte(&! buf, LSPH_BYTE_AMPERSAND)
+    if is_mutable {
+        lsph_type_buf_append_byte(&! buf, LSPH_BYTE_BANG)
+    }
+    lsph_type_buf_append_byte(&! buf, LSPH_BYTE_UNDERSCORE)
+    lsph_type_buf_append_i64(&! buf, inner_hash)
+    buf
+}
+
+// ============================================================================
+// Section 38: ADVANCED HOVER -- SOURCE LOCATION
+// ============================================================================
+
+// Format a source location string: "Defined at line N, col M"
+fn lsph_format_source_location(line: i64, col: i64) -> LsphHoverBuf with Mut, Div, Panic {
+    var buf = lsph_hover_buf_new()
+    // "Defined at line "
+    lsph_hover_buf_append_byte(&! buf, 68)  // D
+    lsph_hover_buf_append_byte(&! buf, 101) // e
+    lsph_hover_buf_append_byte(&! buf, 102) // f
+    lsph_hover_buf_append_byte(&! buf, 105) // i
+    lsph_hover_buf_append_byte(&! buf, 110) // n
+    lsph_hover_buf_append_byte(&! buf, 101) // e
+    lsph_hover_buf_append_byte(&! buf, 100) // d
+    lsph_hover_buf_append_space(&! buf)
+    lsph_hover_buf_append_byte(&! buf, 97)  // a
+    lsph_hover_buf_append_byte(&! buf, 116) // t
+    lsph_hover_buf_append_space(&! buf)
+    // "line "
+    lsph_hover_buf_append_byte(&! buf, 108) // l
+    lsph_hover_buf_append_byte(&! buf, 105) // i
+    lsph_hover_buf_append_byte(&! buf, 110) // n
+    lsph_hover_buf_append_byte(&! buf, 101) // e
+    lsph_hover_buf_append_space(&! buf)
+    lsph_hover_buf_append_i64(&! buf, line)
+    // ", col "
+    lsph_hover_buf_append_byte(&! buf, LSPH_BYTE_COMMA)
+    lsph_hover_buf_append_space(&! buf)
+    lsph_hover_buf_append_byte(&! buf, 99)  // c
+    lsph_hover_buf_append_byte(&! buf, 111) // o
+    lsph_hover_buf_append_byte(&! buf, 108) // l
+    lsph_hover_buf_append_space(&! buf)
+    lsph_hover_buf_append_i64(&! buf, col)
+    buf
+}
+
+// Build extended hover content with source location.
+fn lsph_build_hover_with_location(ctx: &! LsphContext, sym_id: i64) with Mut, Div, Panic {
+    // First build the standard hover content
+    lsph_build_hover_content(ctx, sym_id)
+
+    if sym_id < 0 || sym_id >= ctx.sym_count {
+        return
+    }
+
+    // Append source location
+    let sym = ctx.symbols[sym_id as usize]
+    lsph_hover_buf_append_newline(&! ctx.hover_result)
+    let loc = lsph_format_source_location(sym.def_line, sym.col)
+    lsph_hover_buf_append_hover(&! ctx.hover_result, &loc)
+    lsph_hover_buf_append_newline(&! ctx.hover_result)
+}
+
+// ============================================================================
+// Section 39: BATCH SYMBOL OPERATIONS
+// ============================================================================
+
+// Add a function symbol with full metadata in one call.
+fn lsph_add_function(ctx: &! LsphContext, name_hash: i64,
+                      line: i64, col: i64, end_line: i64, end_col: i64,
+                      type_buf: &LsphTypeBuf, param_count: i64,
+                      effects: &LsphEffectBuf) -> i64
+    with Mut, Div, Panic
+{
+    let idx = lsph_add_symbol(ctx, LsphSymbolKind::SymFunction, name_hash,
+                               line, col, end_line, end_col)
+    if idx == LSPH_INVALID {
+        return LSPH_INVALID
+    }
+    lsph_set_symbol_type(ctx, idx, LsphTypeCategory::TcFunction, type_buf)
+    lsph_set_symbol_param_count(ctx, idx, param_count)
+    lsph_set_symbol_effects(ctx, idx, effects)
+    idx
+}
+
+// Add a variable symbol with full metadata in one call.
+fn lsph_add_variable(ctx: &! LsphContext, name_hash: i64,
+                      line: i64, col: i64, end_line: i64, end_col: i64,
+                      type_buf: &LsphTypeBuf, type_cat: LsphTypeCategory,
+                      is_mutable: bool) -> i64
+    with Mut, Div, Panic
+{
+    let idx = lsph_add_symbol(ctx, LsphSymbolKind::SymVariable, name_hash,
+                               line, col, end_line, end_col)
+    if idx == LSPH_INVALID {
+        return LSPH_INVALID
+    }
+    lsph_set_symbol_type(ctx, idx, type_cat, type_buf)
+    lsph_set_symbol_mutable(ctx, idx, is_mutable)
+    idx
+}
+
+// Add a type symbol with full metadata in one call.
+fn lsph_add_type_symbol(ctx: &! LsphContext, name_hash: i64,
+                         line: i64, col: i64, end_line: i64, end_col: i64,
+                         type_cat: LsphTypeCategory) -> i64
+    with Mut, Div, Panic
+{
+    let idx = lsph_add_symbol(ctx, LsphSymbolKind::SymType, name_hash,
+                               line, col, end_line, end_col)
+    if idx == LSPH_INVALID {
+        return LSPH_INVALID
+    }
+    let empty_tb = lsph_type_buf_new()
+    lsph_set_symbol_type(ctx, idx, type_cat, &empty_tb)
+    idx
+}
+
+// ============================================================================
+// Section 40: LINE INDEX HELPERS
+// ============================================================================
+
+// Build a line index from a simple array of line-start offsets.
+// Used for testing without needing to construct source byte arrays.
+fn lsph_set_line_starts(ctx: &! LsphContext, starts: &[i64; 256], count: i64)
+    with Mut, Div, Panic
+{
+    var i: i64 = 0
+    while i < count && i < LSPH_MAX_LINES && i < 256 {
+        ctx.line_index.line_starts[i as usize] = starts[i as usize]
+        i = i + 1
+    }
+    ctx.line_index.line_count = count
+}
+
+// Get the line start for a given line (convenience wrapper).
+fn lsph_get_line_start(ctx: &LsphContext, line: i64) -> i64 with Div, Panic {
+    lsph_line_start(ctx, line)
+}
+
+// Get the line length for a given line (convenience wrapper).
+fn lsph_get_line_length(ctx: &LsphContext, line: i64) -> i64 with Div, Panic {
+    lsph_line_length(ctx, line)
+}
+
+// ============================================================================
+// Section 41: TYPE CATEGORY PREDICATE HELPERS
+// ============================================================================
+
+// Check if a type category is a primitive.
+fn lsph_is_primitive(cat: LsphTypeCategory) -> bool {
+    match cat {
+        LsphTypeCategory::TcPrimitive => true,
+        _ => false,
+    }
+}
+
+// Check if a type category is a struct.
+fn lsph_is_struct(cat: LsphTypeCategory) -> bool {
+    match cat {
+        LsphTypeCategory::TcStruct => true,
+        _ => false,
+    }
+}
+
+// Check if a type category is an enum.
+fn lsph_is_enum(cat: LsphTypeCategory) -> bool {
+    match cat {
+        LsphTypeCategory::TcEnum => true,
+        _ => false,
+    }
+}
+
+// Check if a type category is a function.
+fn lsph_is_function_type(cat: LsphTypeCategory) -> bool {
+    match cat {
+        LsphTypeCategory::TcFunction => true,
+        _ => false,
+    }
+}
+
+// Check if a type category is an array.
+fn lsph_is_array_type(cat: LsphTypeCategory) -> bool {
+    match cat {
+        LsphTypeCategory::TcArray => true,
+        _ => false,
+    }
+}
+
+// Check if a type category is generic.
+fn lsph_is_generic_type(cat: LsphTypeCategory) -> bool {
+    match cat {
+        LsphTypeCategory::TcGeneric => true,
+        _ => false,
+    }
+}
+
+// Check if a type category is unit.
+fn lsph_is_unit_type(cat: LsphTypeCategory) -> bool {
+    match cat {
+        LsphTypeCategory::TcUnit => true,
+        _ => false,
+    }
+}
+
+// Check if a type category is never.
+fn lsph_is_never_type(cat: LsphTypeCategory) -> bool {
+    match cat {
+        LsphTypeCategory::TcNever => true,
+        _ => false,
+    }
+}
+
+// ============================================================================
+// Section 42: HOVER BUFFER SEARCH HELPERS
+// ============================================================================
+
+// Find the first occurrence of a byte in a hover buffer.
+// Returns the index, or LSPH_INVALID if not found.
+fn lsph_hover_buf_find_byte(buf: &LsphHoverBuf, b: i8) -> i64 with Mut, Div, Panic {
+    var i: i64 = 0
+    while i < buf.len {
+        if buf.buf[i as usize] == b {
+            return i
+        }
+        i = i + 1
+    }
+    LSPH_INVALID
+}
+
+// Count occurrences of a byte in a hover buffer.
+fn lsph_hover_buf_count_byte(buf: &LsphHoverBuf, b: i8) -> i64 with Mut, Div, Panic {
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < buf.len {
+        if buf.buf[i as usize] == b {
+            count = count + 1
+        }
+        i = i + 1
+    }
+    count
+}
+
+// Check if a hover buffer starts with a given 3-byte sequence.
+fn lsph_hover_buf_starts_with_3(buf: &LsphHoverBuf, b0: i8, b1: i8, b2: i8) -> bool
+    with Div, Panic
+{
+    if buf.len < 3 {
+        return false
+    }
+    buf.buf[0] == b0 && buf.buf[1] == b1 && buf.buf[2] == b2
+}
+
+// ============================================================================
+// Section 43: PARAM INFO HELPERS
+// ============================================================================
+
+// Create a param info from a name hash and a type string.
+fn lsph_make_param(name_hash: i64, type_str: &LsphTypeBuf) -> LsphParamInfo with Mut, Div, Panic {
+    var pi = lsph_param_info_new()
+    pi.name_hash = name_hash
+    var i: i64 = 0
+    while i < type_str.len && i < LSPH_MAX_TYPE_LEN {
+        pi.type_buf.buf[i as usize] = type_str.buf[i as usize]
+        i = i + 1
+    }
+    pi.type_buf.len = type_str.len
+    pi
+}
+
+// Get the name hash of a param at a given index from the context.
+fn lsph_get_param_name(ctx: &LsphContext, index: i64) -> i64 with Div, Panic {
+    if index < 0 || index >= LSPH_MAX_PARAMS {
+        return 0
+    }
+    ctx.params_buf[index as usize].name_hash
+}
+
+// Get the type buffer length of a param at a given index.
+fn lsph_get_param_type_len(ctx: &LsphContext, index: i64) -> i64 with Div, Panic {
+    if index < 0 || index >= LSPH_MAX_PARAMS {
+        return 0
+    }
+    ctx.params_buf[index as usize].type_buf.len
+}
+
+// ============================================================================
+// Section 44: POSITION UTILITIES
+// ============================================================================
+
+// Check if a position is before another position.
+fn lsph_pos_before(line_a: i64, col_a: i64, line_b: i64, col_b: i64) -> bool {
+    if line_a < line_b {
+        return true
+    }
+    if line_a == line_b && col_a < col_b {
+        return true
+    }
+    false
+}
+
+// Check if a position is after another position.
+fn lsph_pos_after(line_a: i64, col_a: i64, line_b: i64, col_b: i64) -> bool {
+    if line_a > line_b {
+        return true
+    }
+    if line_a == line_b && col_a > col_b {
+        return true
+    }
+    false
+}
+
+// Check if two positions are equal.
+fn lsph_pos_eq(line_a: i64, col_a: i64, line_b: i64, col_b: i64) -> bool {
+    line_a == line_b && col_a == col_b
+}
+
+// Compute a linear position from line and col (for comparison).
+fn lsph_pos_linear(line: i64, col: i64) -> i64 {
+    line * 10000 + col
+}
+
+// ============================================================================
+// Section 45: HOVER RESULT SERIALIZATION
+// ============================================================================
+
+// Estimate the Markdown content length of the hover result.
+fn lsph_hover_markdown_len(ctx: &LsphContext) -> i64 {
+    ctx.hover_result.len
+}
+
+// Check if the hover result contains a code fence.
+fn lsph_hover_has_code_fence(ctx: &LsphContext) -> bool with Mut, Div, Panic {
+    if ctx.hover_result.len < 3 {
+        return false
+    }
+    let b0 = ctx.hover_result.buf[0]
+    let b1 = ctx.hover_result.buf[1]
+    let b2 = ctx.hover_result.buf[2]
+    b0 == LSPH_BYTE_BACKTICK && b1 == LSPH_BYTE_BACKTICK && b2 == LSPH_BYTE_BACKTICK
+}
+
+// Check if the hover result contains a horizontal rule.
+fn lsph_hover_has_hr(ctx: &LsphContext) -> bool with Mut, Div, Panic {
+    var i: i64 = 0
+    while i + 2 < ctx.hover_result.len {
+        if ctx.hover_result.buf[i as usize] == LSPH_BYTE_DASH &&
+           ctx.hover_result.buf[(i + 1) as usize] == LSPH_BYTE_DASH &&
+           ctx.hover_result.buf[(i + 2) as usize] == LSPH_BYTE_DASH {
+            return true
+        }
+        i = i + 1
+    }
+    false
+}
+
+// ============================================================================
+// Section 46: MAIN ENTRY POINT
+// ============================================================================
+
+fn lsph_run_all_tests() -> i64 with Mut, Div, Panic {
+    // Run all 70 tests
+    var passed: i64 = 0
+    var failed: i64 = 0
+
+    // Buffer operations (T01-T10)
+    if test_lsph_type_buf_append_byte()    { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lsph_type_buf_append_str()     { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lsph_type_buf_append_i64()     { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lsph_type_buf_append_i64_zero(){ passed = passed + 1 } else { failed = failed + 1 }
+    if test_lsph_type_buf_eq()             { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lsph_hover_buf_append_byte()   { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lsph_hover_buf_append_type()   { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lsph_hover_buf_append_doc()    { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lsph_hover_buf_append_newline(){ passed = passed + 1 } else { failed = failed + 1 }
+    if test_lsph_hover_buf_eq()            { passed = passed + 1 } else { failed = failed + 1 }
+
+    // Symbol management (T11-T20)
+    if test_lsph_add_symbol_function()     { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lsph_add_symbol_variable()     { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lsph_add_symbol_type()         { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lsph_set_symbol_type()         { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lsph_set_symbol_doc()          { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lsph_set_symbol_effects()      { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lsph_set_symbol_param_count()  { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lsph_set_symbol_mutable()      { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lsph_add_multiple_symbols()    { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lsph_get_symbol_accessors()    { passed = passed + 1 } else { failed = failed + 1 }
+
+    // Symbol search (T21-T30)
+    if test_lsph_find_symbol_at_exact()    { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lsph_find_symbol_at_start()    { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lsph_find_symbol_at_end()      { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lsph_find_symbol_at_miss()     { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lsph_find_symbol_at_overlap()  { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lsph_find_symbol_by_hash()     { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lsph_find_symbol_on_line()     { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lsph_count_symbols_of_kind()   { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lsph_find_before_span()        { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lsph_find_multiline_span()     { passed = passed + 1 } else { failed = failed + 1 }
+
+    // Type formatting (T31-T38)
+    if test_lsph_format_type_primitive()   { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lsph_format_type_struct()      { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lsph_format_type_enum()        { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lsph_format_type_function()    { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lsph_format_type_array()       { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lsph_format_type_ref()         { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lsph_format_type_mutref()      { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lsph_format_type_unit_never()  { passed = passed + 1 } else { failed = failed + 1 }
+
+    // Hover content (T39-T48)
+    if test_lsph_hover_function_basic()    { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lsph_hover_variable_immut()    { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lsph_hover_variable_mut()      { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lsph_hover_type_struct()       { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lsph_hover_with_doc()          { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lsph_hover_with_effects()      { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lsph_hover_constant()          { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lsph_hover_field()             { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lsph_hover_parameter()         { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lsph_hover_module()            { passed = passed + 1 } else { failed = failed + 1 }
+
+    // Signature formatting (T49-T54)
+    if test_lsph_format_sig_no_params()    { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lsph_format_sig_with_params()  { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lsph_format_sig_with_effects() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lsph_format_var_hover_let()    { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lsph_format_var_hover_var()    { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lsph_format_type_hover_enum()  { passed = passed + 1 } else { failed = failed + 1 }
+
+    // Line index (T55-T62)
+    if test_lsph_line_index_single()       { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lsph_line_index_two()          { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lsph_line_index_three()        { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lsph_line_col_to_offset()      { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lsph_offset_to_line()          { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lsph_offset_to_col()           { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lsph_line_count()              { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lsph_line_col_invalid()        { passed = passed + 1 } else { failed = failed + 1 }
+
+    // Integration (T63-T70)
+    if test_lsph_hover_pipeline_function() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lsph_hover_pipeline_miss()     { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lsph_hover_pipeline_variable() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lsph_hover_pipeline_multiple() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lsph_hover_updates_coords()    { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lsph_effect_buf_ops()          { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lsph_format_effect_names()     { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lsph_extract_doc_comment_basic() { passed = passed + 1 } else { failed = failed + 1 }
+
+    // Return 0 if all 70 tests passed, otherwise return the failure count
+    if failed == 0 {
+        return 0
+    }
+    failed
+}

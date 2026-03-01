@@ -1,0 +1,2913 @@
+// self-hosted::analysis::abstract_interp — Abstract Interpretation Engine
+//
+// Implements abstract interpretation over a simplified CFG representation.
+// Three abstract domains are combined: interval (numeric ranges), sign
+// (positive/negative/zero classification), and congruence (modular arithmetic).
+//
+// The analysis performs fixed-point iteration with widening to guarantee
+// termination on loops. The worklist algorithm processes blocks in order,
+// propagating abstract states along edges until convergence or the iteration
+// limit is reached.
+//
+// Capacity: 256 registers, 512 blocks, 4096 instructions, 2048 edges.
+// All structures use flat arrays — no heap allocation.
+
+// ============================================================================
+// CONSTANTS
+// ============================================================================
+
+let AI_MAX_REGS: i64 = 256
+let AI_MAX_BLOCKS: i64 = 512
+let AI_MAX_INSTRS: i64 = 4096
+let AI_MAX_EDGES: i64 = 2048
+let AI_MAX_ITERATIONS: i64 = 100
+let AI_INF_POS: i64 = 2147483647
+let AI_INF_NEG: i64 = 0 - 2147483647
+let AI_WIDEN_THRESHOLD: i64 = 3
+
+// ============================================================================
+// ENUMS — Sign domain
+// ============================================================================
+
+enum AiSignValue {
+    SignBot,
+    SignNeg,
+    SignZero,
+    SignPos,
+    SignNonNeg,
+    SignNonPos,
+    SignNonZero,
+    SignTop,
+}
+
+// ============================================================================
+// ENUMS — Interval state
+// ============================================================================
+
+enum AiIntervalState {
+    IntBot,
+    IntConcrete,
+    IntTop,
+}
+
+// ============================================================================
+// ENUMS — Instruction kind
+// ============================================================================
+
+enum AiInstrKind {
+    AiConst,
+    AiCopy,
+    AiAdd,
+    AiSub,
+    AiMul,
+    AiDiv,
+    AiMod,
+    AiNeg,
+    AiAnd,
+    AiOr,
+    AiXor,
+    AiShl,
+    AiShr,
+    AiCmpEq,
+    AiCmpLt,
+    AiCmpLe,
+    AiCmpGt,
+    AiCmpGe,
+    AiPhi,
+    AiBranch,
+    AiReturn,
+}
+
+// ============================================================================
+// ENUMS — Branch kind
+// ============================================================================
+
+enum AiBranchKind {
+    BrUnconditional,
+    BrIfTrue,
+    BrIfFalse,
+    BrIfEq,
+    BrIfLt,
+    BrIfLe,
+}
+
+// ============================================================================
+// STRUCTS — Core data types
+// ============================================================================
+
+struct AiInterval {
+    state: AiIntervalState,
+    lo: i64,
+    hi: i64,
+}
+
+struct AiCongruence {
+    modulus: i64,
+    remainder: i64,
+    is_bot: bool,
+}
+
+struct AiAbstractValue {
+    interval: AiInterval,
+    sign: AiSignValue,
+    congruence: AiCongruence,
+}
+
+struct AiAbstractState {
+    regs: [AiAbstractValue; 256],
+    reg_count: i64,
+}
+
+struct AiInstr {
+    kind: AiInstrKind,
+    dst: i64,
+    src1: i64,
+    src2: i64,
+    imm: i64,
+    block_id: i64,
+}
+
+struct AiEdge {
+    from_block: i64,
+    to_block: i64,
+    branch_kind: AiBranchKind,
+    cond_reg: i64,
+}
+
+struct AiBlock {
+    id: i64,
+    instr_start: i64,
+    instr_count: i64,
+    state_in: AiAbstractState,
+    state_out: AiAbstractState,
+    widen_count: i64,
+}
+
+struct AiContext {
+    blocks: [AiBlock; 512],
+    block_count: i64,
+    instrs: [AiInstr; 4096],
+    instr_count: i64,
+    edges: [AiEdge; 2048],
+    edge_count: i64,
+    worklist: [i64; 512],
+    wl_head: i64,
+    wl_tail: i64,
+    iteration_count: i64,
+    max_iterations: i64,
+    converged: bool,
+    widen_threshold: i64,
+}
+
+// ============================================================================
+// HELPER — min / max for i64
+// ============================================================================
+
+fn ai_min(a: i64, b: i64) -> i64 {
+    if a <= b { a } else { b }
+}
+
+fn ai_max(a: i64, b: i64) -> i64 {
+    if a >= b { a } else { b }
+}
+
+fn ai_abs(a: i64) -> i64 {
+    if a >= 0 { a } else { 0 - a }
+}
+
+// ============================================================================
+// GCD — used for congruence domain
+// ============================================================================
+
+fn ai_gcd(a: i64, b: i64) -> i64 with Mut, Div, Panic {
+    var x = ai_abs(a)
+    var y = ai_abs(b)
+    if x == 0 { return y }
+    if y == 0 { return x }
+    while y != 0 {
+        let t = y
+        // Integer division remainder: x - (x / t) * t
+        y = x - (x / t) * t
+        x = t
+    }
+    x
+}
+
+// ============================================================================
+// INTERVAL CONSTRUCTORS
+// ============================================================================
+
+fn ai_interval_bot() -> AiInterval {
+    AiInterval { state: AiIntervalState::IntBot, lo: 0, hi: 0 }
+}
+
+fn ai_interval_top() -> AiInterval {
+    AiInterval { state: AiIntervalState::IntTop, lo: AI_INF_NEG, hi: AI_INF_POS }
+}
+
+fn ai_interval_const(v: i64) -> AiInterval {
+    AiInterval { state: AiIntervalState::IntConcrete, lo: v, hi: v }
+}
+
+fn ai_interval_range(lo: i64, hi: i64) -> AiInterval {
+    if lo > hi {
+        return ai_interval_bot()
+    }
+    AiInterval { state: AiIntervalState::IntConcrete, lo: lo, hi: hi }
+}
+
+// ============================================================================
+// INTERVAL PREDICATES
+// ============================================================================
+
+fn ai_interval_is_bot(iv: AiInterval) -> bool {
+    match iv.state {
+        AiIntervalState::IntBot => true,
+        _ => false,
+    }
+}
+
+fn ai_interval_is_top(iv: AiInterval) -> bool {
+    match iv.state {
+        AiIntervalState::IntTop => true,
+        _ => false,
+    }
+}
+
+fn ai_interval_is_const(iv: AiInterval) -> bool {
+    match iv.state {
+        AiIntervalState::IntConcrete => iv.lo == iv.hi,
+        _ => false,
+    }
+}
+
+fn ai_interval_const_val(iv: AiInterval) -> i64 {
+    iv.lo
+}
+
+fn ai_interval_contains(iv: AiInterval, v: i64) -> bool {
+    match iv.state {
+        AiIntervalState::IntBot => false,
+        AiIntervalState::IntTop => true,
+        AiIntervalState::IntConcrete => v >= iv.lo && v <= iv.hi,
+    }
+}
+
+fn ai_interval_eq(a: AiInterval, b: AiInterval) -> bool {
+    if ai_interval_is_bot(a) && ai_interval_is_bot(b) { return true }
+    if ai_interval_is_top(a) && ai_interval_is_top(b) { return true }
+    if ai_interval_is_bot(a) || ai_interval_is_bot(b) { return false }
+    if ai_interval_is_top(a) || ai_interval_is_top(b) { return false }
+    a.lo == b.lo && a.hi == b.hi
+}
+
+fn ai_interval_width(iv: AiInterval) -> i64 {
+    match iv.state {
+        AiIntervalState::IntBot => 0,
+        AiIntervalState::IntTop => AI_INF_POS,
+        AiIntervalState::IntConcrete => iv.hi - iv.lo,
+    }
+}
+
+// ============================================================================
+// INTERVAL LATTICE OPERATIONS
+// ============================================================================
+
+fn ai_interval_join(a: AiInterval, b: AiInterval) -> AiInterval {
+    if ai_interval_is_bot(a) { return b }
+    if ai_interval_is_bot(b) { return a }
+    if ai_interval_is_top(a) { return a }
+    if ai_interval_is_top(b) { return b }
+    let lo = ai_min(a.lo, b.lo)
+    let hi = ai_max(a.hi, b.hi)
+    // Check for overflow to top
+    if lo <= AI_INF_NEG && hi >= AI_INF_POS {
+        return ai_interval_top()
+    }
+    AiInterval { state: AiIntervalState::IntConcrete, lo: lo, hi: hi }
+}
+
+fn ai_interval_meet(a: AiInterval, b: AiInterval) -> AiInterval {
+    if ai_interval_is_bot(a) { return a }
+    if ai_interval_is_bot(b) { return b }
+    if ai_interval_is_top(a) { return b }
+    if ai_interval_is_top(b) { return a }
+    let lo = ai_max(a.lo, b.lo)
+    let hi = ai_min(a.hi, b.hi)
+    if lo > hi {
+        return ai_interval_bot()
+    }
+    AiInterval { state: AiIntervalState::IntConcrete, lo: lo, hi: hi }
+}
+
+fn ai_interval_widen(old: AiInterval, new_iv: AiInterval) -> AiInterval {
+    if ai_interval_is_bot(old) { return new_iv }
+    if ai_interval_is_bot(new_iv) { return old }
+    if ai_interval_is_top(old) { return old }
+    if ai_interval_is_top(new_iv) { return ai_interval_top() }
+    // Widen: if lower bound decreased, push to -inf; if upper bound increased, push to +inf
+    let lo = if new_iv.lo < old.lo { AI_INF_NEG } else { old.lo }
+    let hi = if new_iv.hi > old.hi { AI_INF_POS } else { old.hi }
+    if lo <= AI_INF_NEG && hi >= AI_INF_POS {
+        return ai_interval_top()
+    }
+    AiInterval { state: AiIntervalState::IntConcrete, lo: lo, hi: hi }
+}
+
+// ============================================================================
+// INTERVAL ARITHMETIC
+// ============================================================================
+
+fn ai_interval_add(a: AiInterval, b: AiInterval) -> AiInterval {
+    if ai_interval_is_bot(a) || ai_interval_is_bot(b) { return ai_interval_bot() }
+    if ai_interval_is_top(a) || ai_interval_is_top(b) { return ai_interval_top() }
+    let lo = a.lo + b.lo
+    let hi = a.hi + b.hi
+    // Clamp on overflow
+    if lo < AI_INF_NEG { return ai_interval_top() }
+    if hi > AI_INF_POS { return ai_interval_top() }
+    AiInterval { state: AiIntervalState::IntConcrete, lo: lo, hi: hi }
+}
+
+fn ai_interval_sub(a: AiInterval, b: AiInterval) -> AiInterval {
+    if ai_interval_is_bot(a) || ai_interval_is_bot(b) { return ai_interval_bot() }
+    if ai_interval_is_top(a) || ai_interval_is_top(b) { return ai_interval_top() }
+    let lo = a.lo - b.hi
+    let hi = a.hi - b.lo
+    if lo < AI_INF_NEG { return ai_interval_top() }
+    if hi > AI_INF_POS { return ai_interval_top() }
+    AiInterval { state: AiIntervalState::IntConcrete, lo: lo, hi: hi }
+}
+
+fn ai_interval_neg(a: AiInterval) -> AiInterval {
+    if ai_interval_is_bot(a) { return ai_interval_bot() }
+    if ai_interval_is_top(a) { return ai_interval_top() }
+    let lo = 0 - a.hi
+    let hi = 0 - a.lo
+    AiInterval { state: AiIntervalState::IntConcrete, lo: lo, hi: hi }
+}
+
+// Helper: min of four values
+fn ai_min4(a: i64, b: i64, c: i64, d: i64) -> i64 {
+    ai_min(ai_min(a, b), ai_min(c, d))
+}
+
+// Helper: max of four values
+fn ai_max4(a: i64, b: i64, c: i64, d: i64) -> i64 {
+    ai_max(ai_max(a, b), ai_max(c, d))
+}
+
+fn ai_interval_mul(a: AiInterval, b: AiInterval) -> AiInterval {
+    if ai_interval_is_bot(a) || ai_interval_is_bot(b) { return ai_interval_bot() }
+    if ai_interval_is_top(a) || ai_interval_is_top(b) { return ai_interval_top() }
+    // Enumerate the four corner products
+    let p1 = a.lo * b.lo
+    let p2 = a.lo * b.hi
+    let p3 = a.hi * b.lo
+    let p4 = a.hi * b.hi
+    let lo = ai_min4(p1, p2, p3, p4)
+    let hi = ai_max4(p1, p2, p3, p4)
+    if lo < AI_INF_NEG || hi > AI_INF_POS { return ai_interval_top() }
+    AiInterval { state: AiIntervalState::IntConcrete, lo: lo, hi: hi }
+}
+
+fn ai_interval_div(a: AiInterval, b: AiInterval) -> AiInterval {
+    if ai_interval_is_bot(a) || ai_interval_is_bot(b) { return ai_interval_bot() }
+    if ai_interval_is_top(a) || ai_interval_is_top(b) { return ai_interval_top() }
+    // If b contains zero, go to top (could be undefined)
+    if b.lo <= 0 && b.hi >= 0 { return ai_interval_top() }
+    let p1 = a.lo / b.lo
+    let p2 = a.lo / b.hi
+    let p3 = a.hi / b.lo
+    let p4 = a.hi / b.hi
+    let lo = ai_min4(p1, p2, p3, p4)
+    let hi = ai_max4(p1, p2, p3, p4)
+    AiInterval { state: AiIntervalState::IntConcrete, lo: lo, hi: hi }
+}
+
+fn ai_interval_mod(a: AiInterval, b: AiInterval) -> AiInterval {
+    if ai_interval_is_bot(a) || ai_interval_is_bot(b) { return ai_interval_bot() }
+    if ai_interval_is_top(a) || ai_interval_is_top(b) { return ai_interval_top() }
+    if b.lo <= 0 && b.hi >= 0 { return ai_interval_top() }
+    // Conservative: result is in [-(|b_max|-1), |b_max|-1]
+    let bmax = ai_max(ai_abs(b.lo), ai_abs(b.hi))
+    let bound = bmax - 1
+    ai_interval_range(0 - bound, bound)
+}
+
+// ============================================================================
+// SIGN DOMAIN — Lattice operations
+// ============================================================================
+//
+// Lattice:       SignTop
+//              /   |   \
+//         NonNeg NonZero NonPos
+//           / \    |    / \
+//        Pos  Zero  Zero  Neg
+//           \   |   |   /
+//            \  |   |  /
+//              SignBot
+
+fn ai_sign_is_bot(s: AiSignValue) -> bool {
+    match s {
+        AiSignValue::SignBot => true,
+        _ => false,
+    }
+}
+
+fn ai_sign_is_top(s: AiSignValue) -> bool {
+    match s {
+        AiSignValue::SignTop => true,
+        _ => false,
+    }
+}
+
+fn ai_sign_join(a: AiSignValue, b: AiSignValue) -> AiSignValue {
+    if ai_sign_is_bot(a) { return b }
+    if ai_sign_is_bot(b) { return a }
+    if ai_sign_is_top(a) { return AiSignValue::SignTop }
+    if ai_sign_is_top(b) { return AiSignValue::SignTop }
+    // Same sign => same sign
+    match a {
+        AiSignValue::SignNeg => {
+            match b {
+                AiSignValue::SignNeg => AiSignValue::SignNeg,
+                AiSignValue::SignZero => AiSignValue::SignNonPos,
+                AiSignValue::SignPos => AiSignValue::SignNonZero,
+                AiSignValue::SignNonNeg => AiSignValue::SignTop,
+                AiSignValue::SignNonPos => AiSignValue::SignNonPos,
+                AiSignValue::SignNonZero => AiSignValue::SignNonZero,
+                _ => AiSignValue::SignTop,
+            }
+        },
+        AiSignValue::SignZero => {
+            match b {
+                AiSignValue::SignNeg => AiSignValue::SignNonPos,
+                AiSignValue::SignZero => AiSignValue::SignZero,
+                AiSignValue::SignPos => AiSignValue::SignNonNeg,
+                AiSignValue::SignNonNeg => AiSignValue::SignNonNeg,
+                AiSignValue::SignNonPos => AiSignValue::SignNonPos,
+                AiSignValue::SignNonZero => AiSignValue::SignTop,
+                _ => AiSignValue::SignTop,
+            }
+        },
+        AiSignValue::SignPos => {
+            match b {
+                AiSignValue::SignNeg => AiSignValue::SignNonZero,
+                AiSignValue::SignZero => AiSignValue::SignNonNeg,
+                AiSignValue::SignPos => AiSignValue::SignPos,
+                AiSignValue::SignNonNeg => AiSignValue::SignNonNeg,
+                AiSignValue::SignNonPos => AiSignValue::SignTop,
+                AiSignValue::SignNonZero => AiSignValue::SignNonZero,
+                _ => AiSignValue::SignTop,
+            }
+        },
+        AiSignValue::SignNonNeg => {
+            match b {
+                AiSignValue::SignNeg => AiSignValue::SignTop,
+                AiSignValue::SignZero => AiSignValue::SignNonNeg,
+                AiSignValue::SignPos => AiSignValue::SignNonNeg,
+                AiSignValue::SignNonNeg => AiSignValue::SignNonNeg,
+                AiSignValue::SignNonPos => AiSignValue::SignTop,
+                AiSignValue::SignNonZero => AiSignValue::SignTop,
+                _ => AiSignValue::SignTop,
+            }
+        },
+        AiSignValue::SignNonPos => {
+            match b {
+                AiSignValue::SignNeg => AiSignValue::SignNonPos,
+                AiSignValue::SignZero => AiSignValue::SignNonPos,
+                AiSignValue::SignPos => AiSignValue::SignTop,
+                AiSignValue::SignNonNeg => AiSignValue::SignTop,
+                AiSignValue::SignNonPos => AiSignValue::SignNonPos,
+                AiSignValue::SignNonZero => AiSignValue::SignTop,
+                _ => AiSignValue::SignTop,
+            }
+        },
+        AiSignValue::SignNonZero => {
+            match b {
+                AiSignValue::SignNeg => AiSignValue::SignNonZero,
+                AiSignValue::SignZero => AiSignValue::SignTop,
+                AiSignValue::SignPos => AiSignValue::SignNonZero,
+                AiSignValue::SignNonNeg => AiSignValue::SignTop,
+                AiSignValue::SignNonPos => AiSignValue::SignTop,
+                AiSignValue::SignNonZero => AiSignValue::SignNonZero,
+                _ => AiSignValue::SignTop,
+            }
+        },
+        _ => AiSignValue::SignTop,
+    }
+}
+
+fn ai_sign_meet(a: AiSignValue, b: AiSignValue) -> AiSignValue {
+    if ai_sign_is_bot(a) { return AiSignValue::SignBot }
+    if ai_sign_is_bot(b) { return AiSignValue::SignBot }
+    if ai_sign_is_top(a) { return b }
+    if ai_sign_is_top(b) { return a }
+    match a {
+        AiSignValue::SignNeg => {
+            match b {
+                AiSignValue::SignNeg => AiSignValue::SignNeg,
+                AiSignValue::SignZero => AiSignValue::SignBot,
+                AiSignValue::SignPos => AiSignValue::SignBot,
+                AiSignValue::SignNonNeg => AiSignValue::SignBot,
+                AiSignValue::SignNonPos => AiSignValue::SignNeg,
+                AiSignValue::SignNonZero => AiSignValue::SignNeg,
+                _ => AiSignValue::SignBot,
+            }
+        },
+        AiSignValue::SignZero => {
+            match b {
+                AiSignValue::SignNeg => AiSignValue::SignBot,
+                AiSignValue::SignZero => AiSignValue::SignZero,
+                AiSignValue::SignPos => AiSignValue::SignBot,
+                AiSignValue::SignNonNeg => AiSignValue::SignZero,
+                AiSignValue::SignNonPos => AiSignValue::SignZero,
+                AiSignValue::SignNonZero => AiSignValue::SignBot,
+                _ => AiSignValue::SignBot,
+            }
+        },
+        AiSignValue::SignPos => {
+            match b {
+                AiSignValue::SignNeg => AiSignValue::SignBot,
+                AiSignValue::SignZero => AiSignValue::SignBot,
+                AiSignValue::SignPos => AiSignValue::SignPos,
+                AiSignValue::SignNonNeg => AiSignValue::SignPos,
+                AiSignValue::SignNonPos => AiSignValue::SignBot,
+                AiSignValue::SignNonZero => AiSignValue::SignPos,
+                _ => AiSignValue::SignBot,
+            }
+        },
+        AiSignValue::SignNonNeg => {
+            match b {
+                AiSignValue::SignNeg => AiSignValue::SignBot,
+                AiSignValue::SignZero => AiSignValue::SignZero,
+                AiSignValue::SignPos => AiSignValue::SignPos,
+                AiSignValue::SignNonNeg => AiSignValue::SignNonNeg,
+                AiSignValue::SignNonPos => AiSignValue::SignZero,
+                AiSignValue::SignNonZero => AiSignValue::SignPos,
+                _ => AiSignValue::SignBot,
+            }
+        },
+        AiSignValue::SignNonPos => {
+            match b {
+                AiSignValue::SignNeg => AiSignValue::SignNeg,
+                AiSignValue::SignZero => AiSignValue::SignZero,
+                AiSignValue::SignPos => AiSignValue::SignBot,
+                AiSignValue::SignNonNeg => AiSignValue::SignZero,
+                AiSignValue::SignNonPos => AiSignValue::SignNonPos,
+                AiSignValue::SignNonZero => AiSignValue::SignNeg,
+                _ => AiSignValue::SignBot,
+            }
+        },
+        AiSignValue::SignNonZero => {
+            match b {
+                AiSignValue::SignNeg => AiSignValue::SignNeg,
+                AiSignValue::SignZero => AiSignValue::SignBot,
+                AiSignValue::SignPos => AiSignValue::SignPos,
+                AiSignValue::SignNonNeg => AiSignValue::SignPos,
+                AiSignValue::SignNonPos => AiSignValue::SignNeg,
+                AiSignValue::SignNonZero => AiSignValue::SignNonZero,
+                _ => AiSignValue::SignBot,
+            }
+        },
+        _ => AiSignValue::SignBot,
+    }
+}
+
+fn ai_sign_of_interval(iv: AiInterval) -> AiSignValue {
+    if ai_interval_is_bot(iv) { return AiSignValue::SignBot }
+    if ai_interval_is_top(iv) { return AiSignValue::SignTop }
+    let lo = iv.lo
+    let hi = iv.hi
+    if lo > 0 { return AiSignValue::SignPos }
+    if hi < 0 { return AiSignValue::SignNeg }
+    if lo == 0 && hi == 0 { return AiSignValue::SignZero }
+    if lo >= 0 { return AiSignValue::SignNonNeg }
+    if hi <= 0 { return AiSignValue::SignNonPos }
+    // lo < 0 && hi > 0 => NonZero not possible, it is Top
+    AiSignValue::SignTop
+}
+
+fn ai_sign_eq(a: AiSignValue, b: AiSignValue) -> bool {
+    match a {
+        AiSignValue::SignBot => ai_sign_is_bot(b),
+        AiSignValue::SignNeg => {
+            match b {
+                AiSignValue::SignNeg => true,
+                _ => false,
+            }
+        },
+        AiSignValue::SignZero => {
+            match b {
+                AiSignValue::SignZero => true,
+                _ => false,
+            }
+        },
+        AiSignValue::SignPos => {
+            match b {
+                AiSignValue::SignPos => true,
+                _ => false,
+            }
+        },
+        AiSignValue::SignNonNeg => {
+            match b {
+                AiSignValue::SignNonNeg => true,
+                _ => false,
+            }
+        },
+        AiSignValue::SignNonPos => {
+            match b {
+                AiSignValue::SignNonPos => true,
+                _ => false,
+            }
+        },
+        AiSignValue::SignNonZero => {
+            match b {
+                AiSignValue::SignNonZero => true,
+                _ => false,
+            }
+        },
+        AiSignValue::SignTop => ai_sign_is_top(b),
+    }
+}
+
+// ============================================================================
+// CONGRUENCE DOMAIN — {m*k + r | k in Z}, represented as (modulus, remainder)
+// ============================================================================
+//
+// Bot = unreachable. Top = (0, 0) with is_bot=false (any value).
+// Concrete constant c = (0, c) with is_bot=false.
+// Aligned to m = (m, 0) with is_bot=false.
+
+fn ai_cong_bot() -> AiCongruence {
+    AiCongruence { modulus: 0, remainder: 0, is_bot: true }
+}
+
+fn ai_cong_top() -> AiCongruence {
+    AiCongruence { modulus: 1, remainder: 0, is_bot: false }
+}
+
+fn ai_cong_new(m: i64, r: i64) -> AiCongruence with Mut, Panic {
+    if m == 0 {
+        // Represents the single value r
+        return AiCongruence { modulus: 0, remainder: r, is_bot: false }
+    }
+    let abs_m = ai_abs(m)
+    // Normalize remainder to [0, abs_m)
+    var rem = r - (r / abs_m) * abs_m
+    if rem < 0 {
+        rem = rem + abs_m
+    }
+    AiCongruence { modulus: abs_m, remainder: rem, is_bot: false }
+}
+
+fn ai_cong_const(v: i64) -> AiCongruence {
+    AiCongruence { modulus: 0, remainder: v, is_bot: false }
+}
+
+fn ai_cong_is_bot(c: AiCongruence) -> bool {
+    c.is_bot
+}
+
+fn ai_cong_is_top(c: AiCongruence) -> bool {
+    if c.is_bot { return false }
+    c.modulus == 1 && c.remainder == 0
+}
+
+fn ai_cong_is_const(c: AiCongruence) -> bool {
+    if c.is_bot { return false }
+    c.modulus == 0
+}
+
+fn ai_cong_eq(a: AiCongruence, b: AiCongruence) -> bool {
+    if a.is_bot && b.is_bot { return true }
+    if a.is_bot || b.is_bot { return false }
+    a.modulus == b.modulus && a.remainder == b.remainder
+}
+
+fn ai_cong_join(a: AiCongruence, b: AiCongruence) -> AiCongruence with Mut, Div, Panic {
+    if a.is_bot { return b }
+    if b.is_bot { return a }
+    // join(m1*k+r1, m2*k+r2) = gcd(m1, m2, |r1-r2|)*k + min(r1,r2) mod gcd
+    let diff = ai_abs(a.remainder - b.remainder)
+    let g1 = ai_gcd(a.modulus, b.modulus)
+    let g = ai_gcd(g1, diff)
+    if g == 0 {
+        // Both are constants
+        if a.remainder == b.remainder {
+            return a
+        }
+        // Different constants: gcd of their difference
+        return ai_cong_new(diff, a.remainder)
+    }
+    ai_cong_new(g, a.remainder)
+}
+
+fn ai_cong_meet(a: AiCongruence, b: AiCongruence) -> AiCongruence with Mut, Div, Panic {
+    if a.is_bot { return a }
+    if b.is_bot { return b }
+    if ai_cong_is_top(a) { return b }
+    if ai_cong_is_top(b) { return a }
+    // meet(m1*k+r1, m2*k+r2):
+    // If r1 mod gcd(m1,m2) != r2 mod gcd(m1,m2), result is bot.
+    // Otherwise, modulus = lcm(m1,m2) and solve for remainder via CRT.
+    if a.modulus == 0 && b.modulus == 0 {
+        // Both are constants
+        if a.remainder == b.remainder { return a }
+        return ai_cong_bot()
+    }
+    if a.modulus == 0 {
+        // a is constant: check if a.remainder satisfies b
+        if b.modulus == 0 {
+            if a.remainder == b.remainder { return a }
+            return ai_cong_bot()
+        }
+        let check = a.remainder - b.remainder
+        let mod_check = check - (check / b.modulus) * b.modulus
+        if mod_check == 0 {
+            return a
+        }
+        return ai_cong_bot()
+    }
+    if b.modulus == 0 {
+        let check = b.remainder - a.remainder
+        let mod_check = check - (check / a.modulus) * a.modulus
+        if mod_check == 0 {
+            return b
+        }
+        return ai_cong_bot()
+    }
+    // General case: gcd check for compatibility
+    let g = ai_gcd(a.modulus, b.modulus)
+    let diff = a.remainder - b.remainder
+    let diff_mod = diff - (diff / g) * g
+    if diff_mod != 0 {
+        return ai_cong_bot()
+    }
+    // LCM = a.modulus * b.modulus / gcd
+    let lcm = (a.modulus / g) * b.modulus
+    ai_cong_new(lcm, a.remainder)
+}
+
+// ============================================================================
+// CONGRUENCE ARITHMETIC
+// ============================================================================
+
+fn ai_cong_add(a: AiCongruence, b: AiCongruence) -> AiCongruence with Mut, Div, Panic {
+    if a.is_bot || b.is_bot { return ai_cong_bot() }
+    let m = ai_gcd(a.modulus, b.modulus)
+    let r = a.remainder + b.remainder
+    ai_cong_new(m, r)
+}
+
+fn ai_cong_sub(a: AiCongruence, b: AiCongruence) -> AiCongruence with Mut, Div, Panic {
+    if a.is_bot || b.is_bot { return ai_cong_bot() }
+    let m = ai_gcd(a.modulus, b.modulus)
+    let r = a.remainder - b.remainder
+    ai_cong_new(m, r)
+}
+
+fn ai_cong_mul(a: AiCongruence, b: AiCongruence) -> AiCongruence with Mut, Div, Panic {
+    if a.is_bot || b.is_bot { return ai_cong_bot() }
+    // (m1*k+r1)*(m2*j+r2) = ... modulus gcd(m1*m2, m1*r2, m2*r1), remainder r1*r2
+    let t1 = a.modulus * b.modulus
+    let t2 = a.modulus * b.remainder
+    let t3 = b.modulus * a.remainder
+    let g1 = ai_gcd(t1, t2)
+    let m = ai_gcd(g1, t3)
+    let r = a.remainder * b.remainder
+    ai_cong_new(m, r)
+}
+
+fn ai_cong_neg(a: AiCongruence) -> AiCongruence with Mut, Panic {
+    if a.is_bot { return ai_cong_bot() }
+    ai_cong_new(a.modulus, 0 - a.remainder)
+}
+
+// ============================================================================
+// ABSTRACT VALUE — Combined interval + sign + congruence
+// ============================================================================
+
+fn ai_value_bot() -> AiAbstractValue {
+    AiAbstractValue {
+        interval: ai_interval_bot(),
+        sign: AiSignValue::SignBot,
+        congruence: ai_cong_bot(),
+    }
+}
+
+fn ai_value_top() -> AiAbstractValue {
+    AiAbstractValue {
+        interval: ai_interval_top(),
+        sign: AiSignValue::SignTop,
+        congruence: ai_cong_top(),
+    }
+}
+
+fn ai_value_const(v: i64) -> AiAbstractValue {
+    AiAbstractValue {
+        interval: ai_interval_const(v),
+        sign: ai_sign_of_interval(ai_interval_const(v)),
+        congruence: ai_cong_const(v),
+    }
+}
+
+fn ai_value_from_interval(iv: AiInterval) -> AiAbstractValue {
+    AiAbstractValue {
+        interval: iv,
+        sign: ai_sign_of_interval(iv),
+        congruence: ai_cong_top(),
+    }
+}
+
+fn ai_value_join(a: AiAbstractValue, b: AiAbstractValue) -> AiAbstractValue with Mut, Div, Panic {
+    AiAbstractValue {
+        interval: ai_interval_join(a.interval, b.interval),
+        sign: ai_sign_join(a.sign, b.sign),
+        congruence: ai_cong_join(a.congruence, b.congruence),
+    }
+}
+
+fn ai_value_meet(a: AiAbstractValue, b: AiAbstractValue) -> AiAbstractValue with Mut, Div, Panic {
+    AiAbstractValue {
+        interval: ai_interval_meet(a.interval, b.interval),
+        sign: ai_sign_meet(a.sign, b.sign),
+        congruence: ai_cong_meet(a.congruence, b.congruence),
+    }
+}
+
+fn ai_value_eq(a: AiAbstractValue, b: AiAbstractValue) -> bool {
+    ai_interval_eq(a.interval, b.interval)
+        && ai_sign_eq(a.sign, b.sign)
+        && ai_cong_eq(a.congruence, b.congruence)
+}
+
+fn ai_value_widen(old: AiAbstractValue, new_v: AiAbstractValue) -> AiAbstractValue with Mut, Div, Panic {
+    // Widen interval; sign and congruence just join (they are finite lattices)
+    AiAbstractValue {
+        interval: ai_interval_widen(old.interval, new_v.interval),
+        sign: ai_sign_join(old.sign, new_v.sign),
+        congruence: ai_cong_join(old.congruence, new_v.congruence),
+    }
+}
+
+fn ai_value_is_bot(v: AiAbstractValue) -> bool {
+    ai_interval_is_bot(v.interval)
+}
+
+fn ai_value_is_top(v: AiAbstractValue) -> bool {
+    ai_interval_is_top(v.interval) && ai_sign_is_top(v.sign) && ai_cong_is_top(v.congruence)
+}
+
+fn ai_value_is_const(v: AiAbstractValue) -> bool {
+    ai_interval_is_const(v.interval)
+}
+
+fn ai_value_const_val(v: AiAbstractValue) -> i64 {
+    ai_interval_const_val(v.interval)
+}
+
+// ============================================================================
+// ABSTRACT STATE — Register file mapping
+// ============================================================================
+
+fn ai_default_value() -> AiAbstractValue {
+    ai_value_bot()
+}
+
+fn ai_state_new() -> AiAbstractState with Mut, Div, Panic {
+    var regs: [AiAbstractValue; 256] = [ai_default_value(); 256]
+    AiAbstractState { regs: regs, reg_count: 0 }
+}
+
+fn ai_state_bot() -> AiAbstractState with Mut, Div, Panic {
+    ai_state_new()
+}
+
+fn ai_state_top() -> AiAbstractState with Mut, Div, Panic {
+    var regs: [AiAbstractValue; 256] = [ai_value_top(); 256]
+    AiAbstractState { regs: regs, reg_count: AI_MAX_REGS }
+}
+
+fn ai_state_get_reg(s: &AiAbstractState, r: i64) -> AiAbstractValue with Div, Panic {
+    if r < 0 || r >= AI_MAX_REGS {
+        return ai_value_bot()
+    }
+    s.regs[r as usize]
+}
+
+fn ai_state_set_reg(s: &! AiAbstractState, r: i64, v: AiAbstractValue) with Mut, Div, Panic {
+    if r < 0 || r >= AI_MAX_REGS {
+        return
+    }
+    s.regs[r as usize] = v
+    if r >= s.reg_count {
+        s.reg_count = r + 1
+    }
+}
+
+fn ai_state_join(a: &AiAbstractState, b: &AiAbstractState) -> AiAbstractState with Mut, Div, Panic {
+    var result = ai_state_new()
+    let count = ai_max(a.reg_count, b.reg_count)
+    result.reg_count = count
+    var i: i64 = 0
+    while i < count {
+        let va = a.regs[i as usize]
+        let vb = b.regs[i as usize]
+        result.regs[i as usize] = ai_value_join(va, vb)
+        i = i + 1
+    }
+    result
+}
+
+fn ai_state_widen(old: &AiAbstractState, new_s: &AiAbstractState) -> AiAbstractState with Mut, Div, Panic {
+    var result = ai_state_new()
+    let count = ai_max(old.reg_count, new_s.reg_count)
+    result.reg_count = count
+    var i: i64 = 0
+    while i < count {
+        let vo = old.regs[i as usize]
+        let vn = new_s.regs[i as usize]
+        result.regs[i as usize] = ai_value_widen(vo, vn)
+        i = i + 1
+    }
+    result
+}
+
+fn ai_state_eq(a: &AiAbstractState, b: &AiAbstractState) -> bool with Mut, Div, Panic {
+    if a.reg_count != b.reg_count { return false }
+    var i: i64 = 0
+    while i < a.reg_count {
+        if ai_value_eq(a.regs[i as usize], b.regs[i as usize]) == false {
+            return false
+        }
+        i = i + 1
+    }
+    true
+}
+
+fn ai_state_copy(src: &AiAbstractState) -> AiAbstractState with Mut, Div, Panic {
+    var result = ai_state_new()
+    result.reg_count = src.reg_count
+    var i: i64 = 0
+    while i < src.reg_count {
+        result.regs[i as usize] = src.regs[i as usize]
+        i = i + 1
+    }
+    result
+}
+
+// ============================================================================
+// DEFAULT CONSTRUCTORS — Blocks, Instructions, Edges
+// ============================================================================
+
+fn ai_default_block() -> AiBlock with Mut, Div, Panic {
+    AiBlock {
+        id: 0,
+        instr_start: 0,
+        instr_count: 0,
+        state_in: ai_state_new(),
+        state_out: ai_state_new(),
+        widen_count: 0,
+    }
+}
+
+fn ai_default_instr() -> AiInstr {
+    AiInstr {
+        kind: AiInstrKind::AiConst,
+        dst: 0,
+        src1: 0,
+        src2: 0,
+        imm: 0,
+        block_id: 0,
+    }
+}
+
+fn ai_default_edge() -> AiEdge {
+    AiEdge {
+        from_block: 0,
+        to_block: 0,
+        branch_kind: AiBranchKind::BrUnconditional,
+        cond_reg: 0,
+    }
+}
+
+// ============================================================================
+// CONTEXT CONSTRUCTOR
+// ============================================================================
+
+fn ai_context_new() -> AiContext with Mut, Div, Panic {
+    AiContext {
+        blocks: [ai_default_block(); 512],
+        block_count: 0,
+        instrs: [ai_default_instr(); 4096],
+        instr_count: 0,
+        edges: [ai_default_edge(); 2048],
+        edge_count: 0,
+        worklist: [0; 512],
+        wl_head: 0,
+        wl_tail: 0,
+        iteration_count: 0,
+        max_iterations: AI_MAX_ITERATIONS,
+        converged: false,
+        widen_threshold: AI_WIDEN_THRESHOLD,
+    }
+}
+
+// ============================================================================
+// WORKLIST OPERATIONS
+// ============================================================================
+
+fn ai_worklist_empty(ctx: &AiContext) -> bool {
+    ctx.wl_head == ctx.wl_tail
+}
+
+fn ai_worklist_push(ctx: &! AiContext, block_id: i64) -> bool with Mut, Div, Panic {
+    // Check if already in the worklist (avoid duplicates)
+    var i = ctx.wl_head
+    while i < ctx.wl_tail {
+        let idx = i - (i / AI_MAX_BLOCKS) * AI_MAX_BLOCKS
+        if ctx.worklist[idx as usize] == block_id {
+            return false
+        }
+        i = i + 1
+    }
+    if ctx.wl_tail - ctx.wl_head >= AI_MAX_BLOCKS {
+        return false
+    }
+    let idx = ctx.wl_tail - (ctx.wl_tail / AI_MAX_BLOCKS) * AI_MAX_BLOCKS
+    ctx.worklist[idx as usize] = block_id
+    ctx.wl_tail = ctx.wl_tail + 1
+    true
+}
+
+fn ai_worklist_pop(ctx: &! AiContext) -> i64 with Mut, Div, Panic {
+    if ai_worklist_empty(ctx) {
+        return 0 - 1
+    }
+    let idx = ctx.wl_head - (ctx.wl_head / AI_MAX_BLOCKS) * AI_MAX_BLOCKS
+    let result = ctx.worklist[idx as usize]
+    ctx.wl_head = ctx.wl_head + 1
+    result
+}
+
+fn ai_worklist_clear(ctx: &! AiContext) with Mut {
+    ctx.wl_head = 0
+    ctx.wl_tail = 0
+}
+
+// ============================================================================
+// CFG CONSTRUCTION
+// ============================================================================
+
+fn ai_add_block(ctx: &! AiContext) -> i64 with Mut, Div, Panic {
+    if ctx.block_count >= AI_MAX_BLOCKS {
+        return 0 - 1
+    }
+    let id = ctx.block_count
+    ctx.blocks[id as usize].id = id
+    ctx.blocks[id as usize].instr_start = ctx.instr_count
+    ctx.blocks[id as usize].instr_count = 0
+    ctx.blocks[id as usize].widen_count = 0
+    ctx.block_count = ctx.block_count + 1
+    id
+}
+
+fn ai_add_instr(ctx: &! AiContext, kind: AiInstrKind, dst: i64, src1: i64, src2: i64, imm: i64, block_id: i64) -> i64 with Mut, Div, Panic {
+    if ctx.instr_count >= AI_MAX_INSTRS {
+        return 0 - 1
+    }
+    let idx = ctx.instr_count
+    ctx.instrs[idx as usize] = AiInstr {
+        kind: kind,
+        dst: dst,
+        src1: src1,
+        src2: src2,
+        imm: imm,
+        block_id: block_id,
+    }
+    // Update block instr count
+    if block_id >= 0 && block_id < ctx.block_count {
+        ctx.blocks[block_id as usize].instr_count = ctx.blocks[block_id as usize].instr_count + 1
+    }
+    ctx.instr_count = ctx.instr_count + 1
+    idx
+}
+
+fn ai_add_edge(ctx: &! AiContext, from: i64, to: i64, branch: AiBranchKind, cond_reg: i64) -> i64 with Mut, Div, Panic {
+    if ctx.edge_count >= AI_MAX_EDGES {
+        return 0 - 1
+    }
+    let idx = ctx.edge_count
+    ctx.edges[idx as usize] = AiEdge {
+        from_block: from,
+        to_block: to,
+        branch_kind: branch,
+        cond_reg: cond_reg,
+    }
+    ctx.edge_count = ctx.edge_count + 1
+    idx
+}
+
+// ============================================================================
+// TRANSFER FUNCTIONS — Single instruction
+// ============================================================================
+
+fn ai_transfer_const(state: &! AiAbstractState, dst: i64, imm: i64) with Mut, Div, Panic {
+    let v = ai_value_const(imm)
+    ai_state_set_reg(state, dst, v)
+}
+
+fn ai_transfer_copy(state: &! AiAbstractState, dst: i64, src: i64) with Mut, Div, Panic {
+    let v = ai_state_get_reg(state, src)
+    ai_state_set_reg(state, dst, v)
+}
+
+fn ai_transfer_add(state: &! AiAbstractState, dst: i64, src1: i64, src2: i64) with Mut, Div, Panic {
+    let a = ai_state_get_reg(state, src1)
+    let b = ai_state_get_reg(state, src2)
+    let iv = ai_interval_add(a.interval, b.interval)
+    let cg = ai_cong_add(a.congruence, b.congruence)
+    let v = AiAbstractValue {
+        interval: iv,
+        sign: ai_sign_of_interval(iv),
+        congruence: cg,
+    }
+    ai_state_set_reg(state, dst, v)
+}
+
+fn ai_transfer_sub(state: &! AiAbstractState, dst: i64, src1: i64, src2: i64) with Mut, Div, Panic {
+    let a = ai_state_get_reg(state, src1)
+    let b = ai_state_get_reg(state, src2)
+    let iv = ai_interval_sub(a.interval, b.interval)
+    let cg = ai_cong_sub(a.congruence, b.congruence)
+    let v = AiAbstractValue {
+        interval: iv,
+        sign: ai_sign_of_interval(iv),
+        congruence: cg,
+    }
+    ai_state_set_reg(state, dst, v)
+}
+
+fn ai_transfer_mul(state: &! AiAbstractState, dst: i64, src1: i64, src2: i64) with Mut, Div, Panic {
+    let a = ai_state_get_reg(state, src1)
+    let b = ai_state_get_reg(state, src2)
+    let iv = ai_interval_mul(a.interval, b.interval)
+    let cg = ai_cong_mul(a.congruence, b.congruence)
+    let v = AiAbstractValue {
+        interval: iv,
+        sign: ai_sign_of_interval(iv),
+        congruence: cg,
+    }
+    ai_state_set_reg(state, dst, v)
+}
+
+fn ai_transfer_div(state: &! AiAbstractState, dst: i64, src1: i64, src2: i64) with Mut, Div, Panic {
+    let a = ai_state_get_reg(state, src1)
+    let b = ai_state_get_reg(state, src2)
+    let iv = ai_interval_div(a.interval, b.interval)
+    // Division congruence is imprecise; go to top
+    let v = AiAbstractValue {
+        interval: iv,
+        sign: ai_sign_of_interval(iv),
+        congruence: ai_cong_top(),
+    }
+    ai_state_set_reg(state, dst, v)
+}
+
+fn ai_transfer_mod(state: &! AiAbstractState, dst: i64, src1: i64, src2: i64) with Mut, Div, Panic {
+    let a = ai_state_get_reg(state, src1)
+    let b = ai_state_get_reg(state, src2)
+    let iv = ai_interval_mod(a.interval, b.interval)
+    let v = AiAbstractValue {
+        interval: iv,
+        sign: ai_sign_of_interval(iv),
+        congruence: ai_cong_top(),
+    }
+    ai_state_set_reg(state, dst, v)
+}
+
+fn ai_transfer_neg(state: &! AiAbstractState, dst: i64, src1: i64) with Mut, Div, Panic {
+    let a = ai_state_get_reg(state, src1)
+    let iv = ai_interval_neg(a.interval)
+    let cg = ai_cong_neg(a.congruence)
+    let v = AiAbstractValue {
+        interval: iv,
+        sign: ai_sign_of_interval(iv),
+        congruence: cg,
+    }
+    ai_state_set_reg(state, dst, v)
+}
+
+fn ai_transfer_and(state: &! AiAbstractState, dst: i64, src1: i64, src2: i64) with Mut, Div, Panic {
+    // Bitwise AND: imprecise, use top with a heuristic on non-negativity
+    let a = ai_state_get_reg(state, src1)
+    let b = ai_state_get_reg(state, src2)
+    // If either operand is non-negative, result is non-negative and <= min(hi_a, hi_b)
+    let a_nn = ai_interval_is_bot(a.interval) == false && a.interval.lo >= 0
+    let b_nn = ai_interval_is_bot(b.interval) == false && b.interval.lo >= 0
+    if a_nn || b_nn {
+        let hi = if a_nn && b_nn {
+            ai_min(a.interval.hi, b.interval.hi)
+        } else if a_nn {
+            a.interval.hi
+        } else {
+            b.interval.hi
+        }
+        let iv = ai_interval_range(0, hi)
+        let v = AiAbstractValue {
+            interval: iv,
+            sign: ai_sign_of_interval(iv),
+            congruence: ai_cong_top(),
+        }
+        ai_state_set_reg(state, dst, v)
+    } else {
+        ai_state_set_reg(state, dst, ai_value_top())
+    }
+}
+
+fn ai_transfer_or(state: &! AiAbstractState, dst: i64, src1: i64, src2: i64) with Mut, Div, Panic {
+    // Bitwise OR: imprecise
+    ai_state_set_reg(state, dst, ai_value_top())
+}
+
+fn ai_transfer_xor(state: &! AiAbstractState, dst: i64, src1: i64, src2: i64) with Mut, Div, Panic {
+    // Bitwise XOR: imprecise
+    ai_state_set_reg(state, dst, ai_value_top())
+}
+
+fn ai_transfer_shl(state: &! AiAbstractState, dst: i64, src1: i64, src2: i64) with Mut, Div, Panic {
+    let a = ai_state_get_reg(state, src1)
+    let b = ai_state_get_reg(state, src2)
+    // If shift amount is a constant, we can be precise
+    if ai_value_is_const(b) {
+        let shift = ai_value_const_val(b)
+        if shift >= 0 && shift < 63 {
+            // Multiply interval by 2^shift
+            var factor: i64 = 1
+            var s: i64 = 0
+            while s < shift {
+                factor = factor * 2
+                s = s + 1
+            }
+            let fiv = ai_interval_const(factor)
+            let iv = ai_interval_mul(a.interval, fiv)
+            let v = AiAbstractValue {
+                interval: iv,
+                sign: ai_sign_of_interval(iv),
+                congruence: ai_cong_top(),
+            }
+            ai_state_set_reg(state, dst, v)
+            return
+        }
+    }
+    ai_state_set_reg(state, dst, ai_value_top())
+}
+
+fn ai_transfer_shr(state: &! AiAbstractState, dst: i64, src1: i64, src2: i64) with Mut, Div, Panic {
+    let a = ai_state_get_reg(state, src1)
+    let b = ai_state_get_reg(state, src2)
+    if ai_value_is_const(b) {
+        let shift = ai_value_const_val(b)
+        if shift >= 0 && shift < 63 {
+            var divisor: i64 = 1
+            var s: i64 = 0
+            while s < shift {
+                divisor = divisor * 2
+                s = s + 1
+            }
+            let div_iv = ai_interval_const(divisor)
+            let iv = ai_interval_div(a.interval, div_iv)
+            let v = AiAbstractValue {
+                interval: iv,
+                sign: ai_sign_of_interval(iv),
+                congruence: ai_cong_top(),
+            }
+            ai_state_set_reg(state, dst, v)
+            return
+        }
+    }
+    ai_state_set_reg(state, dst, ai_value_top())
+}
+
+// ============================================================================
+// TRANSFER FUNCTIONS — Comparisons
+// ============================================================================
+
+fn ai_transfer_cmp_eq(state: &! AiAbstractState, dst: i64, src1: i64, src2: i64) with Mut, Div, Panic {
+    let a = ai_state_get_reg(state, src1)
+    let b = ai_state_get_reg(state, src2)
+    // If both are the same constant, result is 1; if intervals don't overlap, result is 0
+    if ai_value_is_const(a) && ai_value_is_const(b) {
+        if ai_value_const_val(a) == ai_value_const_val(b) {
+            ai_state_set_reg(state, dst, ai_value_const(1))
+        } else {
+            ai_state_set_reg(state, dst, ai_value_const(0))
+        }
+        return
+    }
+    let meet = ai_interval_meet(a.interval, b.interval)
+    if ai_interval_is_bot(meet) {
+        // No overlap => definitely not equal
+        ai_state_set_reg(state, dst, ai_value_const(0))
+        return
+    }
+    // Could be either 0 or 1
+    ai_state_set_reg(state, dst, ai_value_from_interval(ai_interval_range(0, 1)))
+}
+
+fn ai_transfer_cmp_lt(state: &! AiAbstractState, dst: i64, src1: i64, src2: i64) with Mut, Div, Panic {
+    let a = ai_state_get_reg(state, src1)
+    let b = ai_state_get_reg(state, src2)
+    if ai_interval_is_bot(a.interval) || ai_interval_is_bot(b.interval) {
+        ai_state_set_reg(state, dst, ai_value_bot())
+        return
+    }
+    // a.hi < b.lo => definitely true
+    if ai_interval_is_top(a.interval) == false && ai_interval_is_top(b.interval) == false {
+        if a.interval.hi < b.interval.lo {
+            ai_state_set_reg(state, dst, ai_value_const(1))
+            return
+        }
+        // a.lo >= b.hi => definitely false
+        if a.interval.lo >= b.interval.hi {
+            ai_state_set_reg(state, dst, ai_value_const(0))
+            return
+        }
+    }
+    ai_state_set_reg(state, dst, ai_value_from_interval(ai_interval_range(0, 1)))
+}
+
+fn ai_transfer_cmp_le(state: &! AiAbstractState, dst: i64, src1: i64, src2: i64) with Mut, Div, Panic {
+    let a = ai_state_get_reg(state, src1)
+    let b = ai_state_get_reg(state, src2)
+    if ai_interval_is_bot(a.interval) || ai_interval_is_bot(b.interval) {
+        ai_state_set_reg(state, dst, ai_value_bot())
+        return
+    }
+    if ai_interval_is_top(a.interval) == false && ai_interval_is_top(b.interval) == false {
+        if a.interval.hi <= b.interval.lo {
+            ai_state_set_reg(state, dst, ai_value_const(1))
+            return
+        }
+        if a.interval.lo > b.interval.hi {
+            ai_state_set_reg(state, dst, ai_value_const(0))
+            return
+        }
+    }
+    ai_state_set_reg(state, dst, ai_value_from_interval(ai_interval_range(0, 1)))
+}
+
+fn ai_transfer_cmp_gt(state: &! AiAbstractState, dst: i64, src1: i64, src2: i64) with Mut, Div, Panic {
+    // a > b is equivalent to b < a
+    ai_transfer_cmp_lt(state, dst, src2, src1)
+}
+
+fn ai_transfer_cmp_ge(state: &! AiAbstractState, dst: i64, src1: i64, src2: i64) with Mut, Div, Panic {
+    // a >= b is equivalent to b <= a
+    ai_transfer_cmp_le(state, dst, src2, src1)
+}
+
+fn ai_transfer_phi(state: &! AiAbstractState, dst: i64, src1: i64, src2: i64) with Mut, Div, Panic {
+    let a = ai_state_get_reg(state, src1)
+    let b = ai_state_get_reg(state, src2)
+    let v = ai_value_join(a, b)
+    ai_state_set_reg(state, dst, v)
+}
+
+// ============================================================================
+// TRANSFER — Dispatch single instruction
+// ============================================================================
+
+fn ai_transfer_instr(state: &! AiAbstractState, instr: AiInstr) with Mut, Div, Panic {
+    match instr.kind {
+        AiInstrKind::AiConst => ai_transfer_const(state, instr.dst, instr.imm),
+        AiInstrKind::AiCopy => ai_transfer_copy(state, instr.dst, instr.src1),
+        AiInstrKind::AiAdd => ai_transfer_add(state, instr.dst, instr.src1, instr.src2),
+        AiInstrKind::AiSub => ai_transfer_sub(state, instr.dst, instr.src1, instr.src2),
+        AiInstrKind::AiMul => ai_transfer_mul(state, instr.dst, instr.src1, instr.src2),
+        AiInstrKind::AiDiv => ai_transfer_div(state, instr.dst, instr.src1, instr.src2),
+        AiInstrKind::AiMod => ai_transfer_mod(state, instr.dst, instr.src1, instr.src2),
+        AiInstrKind::AiNeg => ai_transfer_neg(state, instr.dst, instr.src1),
+        AiInstrKind::AiAnd => ai_transfer_and(state, instr.dst, instr.src1, instr.src2),
+        AiInstrKind::AiOr => ai_transfer_or(state, instr.dst, instr.src1, instr.src2),
+        AiInstrKind::AiXor => ai_transfer_xor(state, instr.dst, instr.src1, instr.src2),
+        AiInstrKind::AiShl => ai_transfer_shl(state, instr.dst, instr.src1, instr.src2),
+        AiInstrKind::AiShr => ai_transfer_shr(state, instr.dst, instr.src1, instr.src2),
+        AiInstrKind::AiCmpEq => ai_transfer_cmp_eq(state, instr.dst, instr.src1, instr.src2),
+        AiInstrKind::AiCmpLt => ai_transfer_cmp_lt(state, instr.dst, instr.src1, instr.src2),
+        AiInstrKind::AiCmpLe => ai_transfer_cmp_le(state, instr.dst, instr.src1, instr.src2),
+        AiInstrKind::AiCmpGt => ai_transfer_cmp_gt(state, instr.dst, instr.src1, instr.src2),
+        AiInstrKind::AiCmpGe => ai_transfer_cmp_ge(state, instr.dst, instr.src1, instr.src2),
+        AiInstrKind::AiPhi => ai_transfer_phi(state, instr.dst, instr.src1, instr.src2),
+        AiInstrKind::AiBranch => {},
+        AiInstrKind::AiReturn => {},
+    }
+}
+
+// ============================================================================
+// BRANCH REFINEMENT — Narrow abstract state based on branch conditions
+// ============================================================================
+
+fn ai_refine_eq(state: &! AiAbstractState, reg1: i64, reg2: i64) with Mut, Div, Panic {
+    let v1 = ai_state_get_reg(state, reg1)
+    let v2 = ai_state_get_reg(state, reg2)
+    let refined = ai_value_meet(v1, v2)
+    ai_state_set_reg(state, reg1, refined)
+    ai_state_set_reg(state, reg2, refined)
+}
+
+fn ai_refine_lt(state: &! AiAbstractState, reg1: i64, reg2: i64) with Mut, Div, Panic {
+    // reg1 < reg2: refine reg1.hi to min(reg1.hi, reg2.hi - 1),
+    //              refine reg2.lo to max(reg2.lo, reg1.lo + 1)
+    let v1 = ai_state_get_reg(state, reg1)
+    let v2 = ai_state_get_reg(state, reg2)
+    if ai_interval_is_bot(v1.interval) || ai_interval_is_bot(v2.interval) { return }
+    if ai_interval_is_top(v1.interval) == false && ai_interval_is_top(v2.interval) == false {
+        let new_hi1 = ai_min(v1.interval.hi, v2.interval.hi - 1)
+        let new_lo2 = ai_max(v2.interval.lo, v1.interval.lo + 1)
+        if v1.interval.lo <= new_hi1 {
+            let iv1 = ai_interval_range(v1.interval.lo, new_hi1)
+            let refined1 = AiAbstractValue {
+                interval: iv1,
+                sign: ai_sign_of_interval(iv1),
+                congruence: v1.congruence,
+            }
+            ai_state_set_reg(state, reg1, refined1)
+        }
+        if new_lo2 <= v2.interval.hi {
+            let iv2 = ai_interval_range(new_lo2, v2.interval.hi)
+            let refined2 = AiAbstractValue {
+                interval: iv2,
+                sign: ai_sign_of_interval(iv2),
+                congruence: v2.congruence,
+            }
+            ai_state_set_reg(state, reg2, refined2)
+        }
+    }
+}
+
+fn ai_refine_le(state: &! AiAbstractState, reg1: i64, reg2: i64) with Mut, Div, Panic {
+    // reg1 <= reg2: refine reg1.hi to min(reg1.hi, reg2.hi),
+    //               refine reg2.lo to max(reg2.lo, reg1.lo)
+    let v1 = ai_state_get_reg(state, reg1)
+    let v2 = ai_state_get_reg(state, reg2)
+    if ai_interval_is_bot(v1.interval) || ai_interval_is_bot(v2.interval) { return }
+    if ai_interval_is_top(v1.interval) == false && ai_interval_is_top(v2.interval) == false {
+        let new_hi1 = ai_min(v1.interval.hi, v2.interval.hi)
+        let new_lo2 = ai_max(v2.interval.lo, v1.interval.lo)
+        if v1.interval.lo <= new_hi1 {
+            let iv1 = ai_interval_range(v1.interval.lo, new_hi1)
+            let refined1 = AiAbstractValue {
+                interval: iv1,
+                sign: ai_sign_of_interval(iv1),
+                congruence: v1.congruence,
+            }
+            ai_state_set_reg(state, reg1, refined1)
+        }
+        if new_lo2 <= v2.interval.hi {
+            let iv2 = ai_interval_range(new_lo2, v2.interval.hi)
+            let refined2 = AiAbstractValue {
+                interval: iv2,
+                sign: ai_sign_of_interval(iv2),
+                congruence: v2.congruence,
+            }
+            ai_state_set_reg(state, reg2, refined2)
+        }
+    }
+}
+
+fn ai_refine_branch_true(state: &! AiAbstractState, cond_reg: i64) with Mut, Div, Panic {
+    // Condition is true (non-zero): refine the cond_reg to exclude zero
+    let v = ai_state_get_reg(state, cond_reg)
+    if ai_interval_is_bot(v.interval) { return }
+    if ai_interval_is_const(v.interval) { return }
+    // Narrow: if interval includes zero but isn't just zero, try to refine
+    // For a boolean-like comparison result, true means [1,1]
+    if ai_interval_is_top(v.interval) == false {
+        if v.interval.lo == 0 && v.interval.hi == 1 {
+            let iv = ai_interval_const(1)
+            let refined = AiAbstractValue {
+                interval: iv,
+                sign: AiSignValue::SignPos,
+                congruence: ai_cong_const(1),
+            }
+            ai_state_set_reg(state, cond_reg, refined)
+            return
+        }
+        if v.interval.lo == 0 {
+            let iv = ai_interval_range(1, v.interval.hi)
+            let refined = AiAbstractValue {
+                interval: iv,
+                sign: ai_sign_of_interval(iv),
+                congruence: v.congruence,
+            }
+            ai_state_set_reg(state, cond_reg, refined)
+        }
+    }
+}
+
+fn ai_refine_branch_false(state: &! AiAbstractState, cond_reg: i64) with Mut, Div, Panic {
+    // Condition is false (zero): refine the cond_reg to [0,0]
+    let v = ai_state_get_reg(state, cond_reg)
+    if ai_interval_is_bot(v.interval) { return }
+    if ai_interval_contains(v.interval, 0) {
+        let iv = ai_interval_const(0)
+        let refined = AiAbstractValue {
+            interval: iv,
+            sign: AiSignValue::SignZero,
+            congruence: ai_cong_const(0),
+        }
+        ai_state_set_reg(state, cond_reg, refined)
+    }
+}
+
+// ============================================================================
+// EDGE REFINEMENT — Apply branch condition to successor state
+// ============================================================================
+
+fn ai_apply_edge_refinement(state: &! AiAbstractState, edge: AiEdge) with Mut, Div, Panic {
+    match edge.branch_kind {
+        AiBranchKind::BrUnconditional => {},
+        AiBranchKind::BrIfTrue => ai_refine_branch_true(state, edge.cond_reg),
+        AiBranchKind::BrIfFalse => ai_refine_branch_false(state, edge.cond_reg),
+        AiBranchKind::BrIfEq => ai_refine_eq(state, edge.cond_reg, edge.cond_reg),
+        AiBranchKind::BrIfLt => ai_refine_lt(state, edge.cond_reg, edge.cond_reg),
+        AiBranchKind::BrIfLe => ai_refine_le(state, edge.cond_reg, edge.cond_reg),
+    }
+}
+
+// ============================================================================
+// BLOCK PROCESSING — Transfer function over a whole block
+// ============================================================================
+
+fn ai_process_block(ctx: &! AiContext, block_id: i64) with Mut, Div, Panic {
+    if block_id < 0 || block_id >= ctx.block_count { return }
+
+    // Copy the input state to a working copy
+    var work_state = ai_state_copy(&ctx.blocks[block_id as usize].state_in)
+
+    // Apply all instructions in this block
+    let start = ctx.blocks[block_id as usize].instr_start
+    let count = ctx.blocks[block_id as usize].instr_count
+    var i: i64 = 0
+    while i < count {
+        let idx = start + i
+        if idx >= 0 && idx < ctx.instr_count {
+            ai_transfer_instr(&! work_state, ctx.instrs[idx as usize])
+        }
+        i = i + 1
+    }
+
+    // Store the output state
+    ctx.blocks[block_id as usize].state_out = work_state
+}
+
+// ============================================================================
+// SUCCESSOR PROPAGATION — Push output states to successor blocks
+// ============================================================================
+
+fn ai_propagate_to_successors(ctx: &! AiContext, block_id: i64) with Mut, Div, Panic {
+    var e: i64 = 0
+    while e < ctx.edge_count {
+        if ctx.edges[e as usize].from_block == block_id {
+            let to = ctx.edges[e as usize].to_block
+            if to >= 0 && to < ctx.block_count {
+                // Compute the state to propagate: output state + edge refinement
+                var prop_state = ai_state_copy(&ctx.blocks[block_id as usize].state_out)
+                ai_apply_edge_refinement(&! prop_state, ctx.edges[e as usize])
+
+                // Join with existing input state of successor
+                let old_in = ai_state_copy(&ctx.blocks[to as usize].state_in)
+                let needs_widen = ctx.blocks[to as usize].widen_count >= ctx.widen_threshold
+
+                var new_in = ai_state_join(&old_in, &prop_state)
+                if needs_widen {
+                    new_in = ai_state_widen(&old_in, &new_in)
+                }
+
+                // Check if the state changed
+                if ai_state_eq(&old_in, &new_in) == false {
+                    ctx.blocks[to as usize].state_in = new_in
+                    ctx.blocks[to as usize].widen_count = ctx.blocks[to as usize].widen_count + 1
+                    ai_worklist_push(ctx, to)
+                }
+            }
+        }
+        e = e + 1
+    }
+}
+
+// ============================================================================
+// FIXED-POINT ANALYSIS — Main analysis driver
+// ============================================================================
+
+fn ai_analyze_function(ctx: &! AiContext) with Mut, Div, Panic {
+    // Initialize: seed block 0 into the worklist
+    if ctx.block_count == 0 { return }
+
+    ai_worklist_clear(ctx)
+    ctx.iteration_count = 0
+    ctx.converged = false
+
+    // Initialize block 0 input state to top (function entry — all params unknown)
+    ctx.blocks[0].state_in = ai_state_top()
+    ai_worklist_push(ctx, 0)
+
+    // Fixed-point loop
+    while ai_worklist_empty(ctx) == false && ctx.iteration_count < ctx.max_iterations {
+        let bid = ai_worklist_pop(ctx)
+        if bid >= 0 && bid < ctx.block_count {
+            ai_process_block(ctx, bid)
+            ai_propagate_to_successors(ctx, bid)
+        }
+        ctx.iteration_count = ctx.iteration_count + 1
+    }
+
+    ctx.converged = ai_worklist_empty(ctx)
+}
+
+// ============================================================================
+// QUERY FUNCTIONS — Extract information from analysis results
+// ============================================================================
+
+fn ai_query_reg_interval(ctx: &AiContext, block_id: i64, reg: i64) -> AiInterval with Div, Panic {
+    if block_id < 0 || block_id >= ctx.block_count { return ai_interval_bot() }
+    let v = ai_state_get_reg(&ctx.blocks[block_id as usize].state_out, reg)
+    v.interval
+}
+
+fn ai_query_reg_sign(ctx: &AiContext, block_id: i64, reg: i64) -> AiSignValue with Div, Panic {
+    if block_id < 0 || block_id >= ctx.block_count { return AiSignValue::SignBot }
+    let v = ai_state_get_reg(&ctx.blocks[block_id as usize].state_out, reg)
+    v.sign
+}
+
+fn ai_query_reg_congruence(ctx: &AiContext, block_id: i64, reg: i64) -> AiCongruence with Div, Panic {
+    if block_id < 0 || block_id >= ctx.block_count { return ai_cong_bot() }
+    let v = ai_state_get_reg(&ctx.blocks[block_id as usize].state_out, reg)
+    v.congruence
+}
+
+fn ai_query_reg_value(ctx: &AiContext, block_id: i64, reg: i64) -> AiAbstractValue with Div, Panic {
+    if block_id < 0 || block_id >= ctx.block_count { return ai_value_bot() }
+    ai_state_get_reg(&ctx.blocks[block_id as usize].state_out, reg)
+}
+
+fn ai_is_constant(ctx: &AiContext, block_id: i64, reg: i64) -> bool with Div, Panic {
+    let iv = ai_query_reg_interval(ctx, block_id, reg)
+    ai_interval_is_const(iv)
+}
+
+fn ai_is_non_negative(ctx: &AiContext, block_id: i64, reg: i64) -> bool with Div, Panic {
+    let iv = ai_query_reg_interval(ctx, block_id, reg)
+    if ai_interval_is_bot(iv) { return false }
+    if ai_interval_is_top(iv) { return false }
+    iv.lo >= 0
+}
+
+fn ai_is_non_zero(ctx: &AiContext, block_id: i64, reg: i64) -> bool with Div, Panic {
+    let iv = ai_query_reg_interval(ctx, block_id, reg)
+    if ai_interval_is_bot(iv) { return false }
+    if ai_interval_is_top(iv) { return false }
+    iv.lo > 0 || iv.hi < 0
+}
+
+fn ai_is_in_range(ctx: &AiContext, block_id: i64, reg: i64, lo: i64, hi: i64) -> bool with Div, Panic {
+    let iv = ai_query_reg_interval(ctx, block_id, reg)
+    if ai_interval_is_bot(iv) { return false }
+    if ai_interval_is_top(iv) { return false }
+    iv.lo >= lo && iv.hi <= hi
+}
+
+fn ai_get_constant_value(ctx: &AiContext, block_id: i64, reg: i64) -> i64 with Div, Panic {
+    let iv = ai_query_reg_interval(ctx, block_id, reg)
+    if ai_interval_is_const(iv) { return iv.lo }
+    0
+}
+
+fn ai_blocks_converged(ctx: &AiContext) -> bool {
+    ctx.converged
+}
+
+fn ai_iteration_count(ctx: &AiContext) -> i64 {
+    ctx.iteration_count
+}
+
+// ############################################################################
+//
+//                              T E S T S
+//
+// ############################################################################
+
+// ============================================================================
+// CATEGORY 1: Interval lattice tests (12 tests)
+// ============================================================================
+
+fn test_ai_interval_bot_inner() -> bool {
+    let b = ai_interval_bot()
+    ai_interval_is_bot(b)
+}
+fn test_ai_interval_bot() -> bool {
+    test_ai_interval_bot_inner()
+}
+
+fn test_ai_interval_top_inner() -> bool {
+    let t = ai_interval_top()
+    ai_interval_is_top(t)
+}
+fn test_ai_interval_top() -> bool {
+    test_ai_interval_top_inner()
+}
+
+fn test_ai_interval_const_inner() -> bool {
+    let c = ai_interval_const(42)
+    if ai_interval_is_const(c) == false { return false }
+    if ai_interval_const_val(c) != 42 { return false }
+    true
+}
+fn test_ai_interval_const() -> bool {
+    test_ai_interval_const_inner()
+}
+
+fn test_ai_interval_range_inner() -> bool {
+    let r = ai_interval_range(3, 7)
+    if ai_interval_is_bot(r) { return false }
+    if ai_interval_is_top(r) { return false }
+    if r.lo != 3 { return false }
+    if r.hi != 7 { return false }
+    true
+}
+fn test_ai_interval_range() -> bool {
+    test_ai_interval_range_inner()
+}
+
+fn test_ai_interval_range_inverted_inner() -> bool {
+    // hi < lo should produce bot
+    let r = ai_interval_range(10, 5)
+    ai_interval_is_bot(r)
+}
+fn test_ai_interval_range_inverted() -> bool {
+    test_ai_interval_range_inverted_inner()
+}
+
+fn test_ai_interval_join_bot_inner() -> bool {
+    let b = ai_interval_bot()
+    let c = ai_interval_const(5)
+    let j = ai_interval_join(b, c)
+    ai_interval_eq(j, c)
+}
+fn test_ai_interval_join_bot() -> bool {
+    test_ai_interval_join_bot_inner()
+}
+
+fn test_ai_interval_join_ranges_inner() -> bool {
+    let a = ai_interval_range(1, 5)
+    let b = ai_interval_range(3, 8)
+    let j = ai_interval_join(a, b)
+    if j.lo != 1 { return false }
+    if j.hi != 8 { return false }
+    true
+}
+fn test_ai_interval_join_ranges() -> bool {
+    test_ai_interval_join_ranges_inner()
+}
+
+fn test_ai_interval_meet_ranges_inner() -> bool {
+    let a = ai_interval_range(1, 8)
+    let b = ai_interval_range(3, 5)
+    let m = ai_interval_meet(a, b)
+    if m.lo != 3 { return false }
+    if m.hi != 5 { return false }
+    true
+}
+fn test_ai_interval_meet_ranges() -> bool {
+    test_ai_interval_meet_ranges_inner()
+}
+
+fn test_ai_interval_meet_disjoint_inner() -> bool {
+    let a = ai_interval_range(1, 3)
+    let b = ai_interval_range(5, 8)
+    let m = ai_interval_meet(a, b)
+    ai_interval_is_bot(m)
+}
+fn test_ai_interval_meet_disjoint() -> bool {
+    test_ai_interval_meet_disjoint_inner()
+}
+
+fn test_ai_interval_widen_inner() -> bool {
+    let old = ai_interval_range(0, 10)
+    let new_iv = ai_interval_range(0, 15)
+    let w = ai_interval_widen(old, new_iv)
+    // Lower bound same, upper bound should go to +inf
+    if w.lo != 0 { return false }
+    if w.hi != AI_INF_POS { return false }
+    true
+}
+fn test_ai_interval_widen() -> bool {
+    test_ai_interval_widen_inner()
+}
+
+fn test_ai_interval_contains_inner() -> bool {
+    let r = ai_interval_range(3, 7)
+    if ai_interval_contains(r, 5) == false { return false }
+    if ai_interval_contains(r, 2) { return false }
+    if ai_interval_contains(r, 8) { return false }
+    if ai_interval_contains(r, 3) == false { return false }
+    if ai_interval_contains(r, 7) == false { return false }
+    true
+}
+fn test_ai_interval_contains() -> bool {
+    test_ai_interval_contains_inner()
+}
+
+fn test_ai_interval_eq_inner() -> bool {
+    let a = ai_interval_range(1, 5)
+    let b = ai_interval_range(1, 5)
+    let c = ai_interval_range(1, 6)
+    if ai_interval_eq(a, b) == false { return false }
+    if ai_interval_eq(a, c) { return false }
+    if ai_interval_eq(ai_interval_bot(), ai_interval_bot()) == false { return false }
+    if ai_interval_eq(ai_interval_top(), ai_interval_top()) == false { return false }
+    true
+}
+fn test_ai_interval_eq() -> bool {
+    test_ai_interval_eq_inner()
+}
+
+// ============================================================================
+// CATEGORY 2: Sign lattice tests (8 tests)
+// ============================================================================
+
+fn test_ai_sign_bot_top_inner() -> bool {
+    if ai_sign_is_bot(AiSignValue::SignBot) == false { return false }
+    if ai_sign_is_top(AiSignValue::SignTop) == false { return false }
+    if ai_sign_is_bot(AiSignValue::SignPos) { return false }
+    if ai_sign_is_top(AiSignValue::SignNeg) { return false }
+    true
+}
+fn test_ai_sign_bot_top() -> bool {
+    test_ai_sign_bot_top_inner()
+}
+
+fn test_ai_sign_join_same_inner() -> bool {
+    let j = ai_sign_join(AiSignValue::SignPos, AiSignValue::SignPos)
+    ai_sign_eq(j, AiSignValue::SignPos)
+}
+fn test_ai_sign_join_same() -> bool {
+    test_ai_sign_join_same_inner()
+}
+
+fn test_ai_sign_join_pos_neg_inner() -> bool {
+    let j = ai_sign_join(AiSignValue::SignPos, AiSignValue::SignNeg)
+    ai_sign_eq(j, AiSignValue::SignNonZero)
+}
+fn test_ai_sign_join_pos_neg() -> bool {
+    test_ai_sign_join_pos_neg_inner()
+}
+
+fn test_ai_sign_join_pos_zero_inner() -> bool {
+    let j = ai_sign_join(AiSignValue::SignPos, AiSignValue::SignZero)
+    ai_sign_eq(j, AiSignValue::SignNonNeg)
+}
+fn test_ai_sign_join_pos_zero() -> bool {
+    test_ai_sign_join_pos_zero_inner()
+}
+
+fn test_ai_sign_join_bot_inner() -> bool {
+    let j = ai_sign_join(AiSignValue::SignBot, AiSignValue::SignNeg)
+    ai_sign_eq(j, AiSignValue::SignNeg)
+}
+fn test_ai_sign_join_bot() -> bool {
+    test_ai_sign_join_bot_inner()
+}
+
+fn test_ai_sign_meet_pos_nonneg_inner() -> bool {
+    let m = ai_sign_meet(AiSignValue::SignPos, AiSignValue::SignNonNeg)
+    ai_sign_eq(m, AiSignValue::SignPos)
+}
+fn test_ai_sign_meet_pos_nonneg() -> bool {
+    test_ai_sign_meet_pos_nonneg_inner()
+}
+
+fn test_ai_sign_meet_pos_neg_inner() -> bool {
+    let m = ai_sign_meet(AiSignValue::SignPos, AiSignValue::SignNeg)
+    ai_sign_is_bot(m)
+}
+fn test_ai_sign_meet_pos_neg() -> bool {
+    test_ai_sign_meet_pos_neg_inner()
+}
+
+fn test_ai_sign_from_interval_inner() -> bool {
+    let s1 = ai_sign_of_interval(ai_interval_range(1, 10))
+    if ai_sign_eq(s1, AiSignValue::SignPos) == false { return false }
+    let s2 = ai_sign_of_interval(ai_interval_range(0 - 5, 0 - 1))
+    if ai_sign_eq(s2, AiSignValue::SignNeg) == false { return false }
+    let s3 = ai_sign_of_interval(ai_interval_const(0))
+    if ai_sign_eq(s3, AiSignValue::SignZero) == false { return false }
+    let s4 = ai_sign_of_interval(ai_interval_range(0, 10))
+    if ai_sign_eq(s4, AiSignValue::SignNonNeg) == false { return false }
+    let s5 = ai_sign_of_interval(ai_interval_range(0 - 5, 0))
+    if ai_sign_eq(s5, AiSignValue::SignNonPos) == false { return false }
+    true
+}
+fn test_ai_sign_from_interval() -> bool {
+    test_ai_sign_from_interval_inner()
+}
+
+// ============================================================================
+// CATEGORY 3: Congruence lattice tests (8 tests)
+// ============================================================================
+
+fn test_ai_cong_bot_inner() -> bool {
+    let b = ai_cong_bot()
+    ai_cong_is_bot(b)
+}
+fn test_ai_cong_bot() -> bool {
+    test_ai_cong_bot_inner()
+}
+
+fn test_ai_cong_top_inner() -> bool {
+    let t = ai_cong_top()
+    ai_cong_is_top(t)
+}
+fn test_ai_cong_top() -> bool {
+    test_ai_cong_top_inner()
+}
+
+fn test_ai_cong_const_inner() -> bool {
+    let c = ai_cong_const(7)
+    if ai_cong_is_bot(c) { return false }
+    if ai_cong_is_top(c) { return false }
+    if ai_cong_is_const(c) == false { return false }
+    if c.remainder != 7 { return false }
+    if c.modulus != 0 { return false }
+    true
+}
+fn test_ai_cong_const() -> bool {
+    test_ai_cong_const_inner()
+}
+
+fn test_ai_cong_new_inner() -> bool with Mut, Panic {
+    let c = ai_cong_new(4, 3)
+    if c.modulus != 4 { return false }
+    if c.remainder != 3 { return false }
+    true
+}
+fn test_ai_cong_new() -> bool with Mut, Panic {
+    test_ai_cong_new_inner()
+}
+
+fn test_ai_cong_join_same_inner() -> bool with Mut, Div, Panic {
+    let a = ai_cong_new(4, 1)
+    let b = ai_cong_new(4, 1)
+    let j = ai_cong_join(a, b)
+    if j.modulus != 4 { return false }
+    if j.remainder != 1 { return false }
+    true
+}
+fn test_ai_cong_join_same() -> bool with Mut, Div, Panic {
+    test_ai_cong_join_same_inner()
+}
+
+fn test_ai_cong_join_different_inner() -> bool with Mut, Div, Panic {
+    // join(4k+1, 4k+3) = gcd(4, 4, |1-3|)k + 1 mod gcd = gcd(4,2)k + 1 = 2k+1
+    let a = ai_cong_new(4, 1)
+    let b = ai_cong_new(4, 3)
+    let j = ai_cong_join(a, b)
+    if j.modulus != 2 { return false }
+    if j.remainder != 1 { return false }
+    true
+}
+fn test_ai_cong_join_different() -> bool with Mut, Div, Panic {
+    test_ai_cong_join_different_inner()
+}
+
+fn test_ai_cong_meet_compatible_inner() -> bool with Mut, Div, Panic {
+    // meet(2k+1, 3k+1) should have modulus lcm(2,3)=6, remainder 1
+    let a = ai_cong_new(2, 1)
+    let b = ai_cong_new(3, 1)
+    let m = ai_cong_meet(a, b)
+    if ai_cong_is_bot(m) { return false }
+    if m.modulus != 6 { return false }
+    if m.remainder != 1 { return false }
+    true
+}
+fn test_ai_cong_meet_compatible() -> bool with Mut, Div, Panic {
+    test_ai_cong_meet_compatible_inner()
+}
+
+fn test_ai_cong_meet_incompatible_inner() -> bool with Mut, Div, Panic {
+    // meet(2k+0, 2k+1) => bot (even and odd never intersect)
+    let a = ai_cong_new(2, 0)
+    let b = ai_cong_new(2, 1)
+    let m = ai_cong_meet(a, b)
+    ai_cong_is_bot(m)
+}
+fn test_ai_cong_meet_incompatible() -> bool with Mut, Div, Panic {
+    test_ai_cong_meet_incompatible_inner()
+}
+
+// ============================================================================
+// CATEGORY 4: Transfer function tests (12 tests)
+// ============================================================================
+
+fn test_ai_transfer_const_inner() -> bool with Mut, Div, Panic {
+    var state = ai_state_new()
+    ai_transfer_const(&! state, 0, 42)
+    let v = ai_state_get_reg(&state, 0)
+    if ai_value_is_const(v) == false { return false }
+    if ai_value_const_val(v) != 42 { return false }
+    true
+}
+fn test_ai_transfer_const() -> bool with Mut, Div, Panic {
+    test_ai_transfer_const_inner()
+}
+
+fn test_ai_transfer_copy_inner() -> bool with Mut, Div, Panic {
+    var state = ai_state_new()
+    ai_transfer_const(&! state, 0, 99)
+    ai_transfer_copy(&! state, 1, 0)
+    let v = ai_state_get_reg(&state, 1)
+    if ai_value_is_const(v) == false { return false }
+    if ai_value_const_val(v) != 99 { return false }
+    true
+}
+fn test_ai_transfer_copy() -> bool with Mut, Div, Panic {
+    test_ai_transfer_copy_inner()
+}
+
+fn test_ai_transfer_add_const_inner() -> bool with Mut, Div, Panic {
+    var state = ai_state_new()
+    ai_transfer_const(&! state, 0, 10)
+    ai_transfer_const(&! state, 1, 32)
+    ai_transfer_add(&! state, 2, 0, 1)
+    let v = ai_state_get_reg(&state, 2)
+    if ai_value_is_const(v) == false { return false }
+    if ai_value_const_val(v) != 42 { return false }
+    true
+}
+fn test_ai_transfer_add_const() -> bool with Mut, Div, Panic {
+    test_ai_transfer_add_const_inner()
+}
+
+fn test_ai_transfer_add_range_inner() -> bool with Mut, Div, Panic {
+    var state = ai_state_new()
+    state.reg_count = 2
+    state.regs[0] = ai_value_from_interval(ai_interval_range(1, 5))
+    state.regs[1] = ai_value_from_interval(ai_interval_range(10, 20))
+    ai_transfer_add(&! state, 2, 0, 1)
+    let v = ai_state_get_reg(&state, 2)
+    if v.interval.lo != 11 { return false }
+    if v.interval.hi != 25 { return false }
+    true
+}
+fn test_ai_transfer_add_range() -> bool with Mut, Div, Panic {
+    test_ai_transfer_add_range_inner()
+}
+
+fn test_ai_transfer_sub_inner() -> bool with Mut, Div, Panic {
+    var state = ai_state_new()
+    ai_transfer_const(&! state, 0, 50)
+    ai_transfer_const(&! state, 1, 8)
+    ai_transfer_sub(&! state, 2, 0, 1)
+    let v = ai_state_get_reg(&state, 2)
+    if ai_value_is_const(v) == false { return false }
+    if ai_value_const_val(v) != 42 { return false }
+    true
+}
+fn test_ai_transfer_sub() -> bool with Mut, Div, Panic {
+    test_ai_transfer_sub_inner()
+}
+
+fn test_ai_transfer_mul_inner() -> bool with Mut, Div, Panic {
+    var state = ai_state_new()
+    ai_transfer_const(&! state, 0, 6)
+    ai_transfer_const(&! state, 1, 7)
+    ai_transfer_mul(&! state, 2, 0, 1)
+    let v = ai_state_get_reg(&state, 2)
+    if ai_value_is_const(v) == false { return false }
+    if ai_value_const_val(v) != 42 { return false }
+    true
+}
+fn test_ai_transfer_mul() -> bool with Mut, Div, Panic {
+    test_ai_transfer_mul_inner()
+}
+
+fn test_ai_transfer_div_inner() -> bool with Mut, Div, Panic {
+    var state = ai_state_new()
+    ai_transfer_const(&! state, 0, 84)
+    ai_transfer_const(&! state, 1, 2)
+    ai_transfer_div(&! state, 2, 0, 1)
+    let v = ai_state_get_reg(&state, 2)
+    if ai_value_is_const(v) == false { return false }
+    if ai_value_const_val(v) != 42 { return false }
+    true
+}
+fn test_ai_transfer_div() -> bool with Mut, Div, Panic {
+    test_ai_transfer_div_inner()
+}
+
+fn test_ai_transfer_mod_inner() -> bool with Mut, Div, Panic {
+    var state = ai_state_new()
+    ai_transfer_const(&! state, 0, 17)
+    ai_transfer_const(&! state, 1, 5)
+    ai_transfer_mod(&! state, 2, 0, 1)
+    let v = ai_state_get_reg(&state, 2)
+    // mod is imprecise for ranges; for constants 17 mod 5 should give [-4, 4]
+    if ai_interval_contains(v.interval, 2) == false { return false }
+    true
+}
+fn test_ai_transfer_mod() -> bool with Mut, Div, Panic {
+    test_ai_transfer_mod_inner()
+}
+
+fn test_ai_transfer_neg_inner() -> bool with Mut, Div, Panic {
+    var state = ai_state_new()
+    ai_transfer_const(&! state, 0, 42)
+    ai_transfer_neg(&! state, 1, 0)
+    let v = ai_state_get_reg(&state, 1)
+    if ai_value_is_const(v) == false { return false }
+    if ai_value_const_val(v) != 0 - 42 { return false }
+    true
+}
+fn test_ai_transfer_neg() -> bool with Mut, Div, Panic {
+    test_ai_transfer_neg_inner()
+}
+
+fn test_ai_transfer_cmp_eq_equal_inner() -> bool with Mut, Div, Panic {
+    var state = ai_state_new()
+    ai_transfer_const(&! state, 0, 5)
+    ai_transfer_const(&! state, 1, 5)
+    ai_transfer_cmp_eq(&! state, 2, 0, 1)
+    let v = ai_state_get_reg(&state, 2)
+    if ai_value_is_const(v) == false { return false }
+    if ai_value_const_val(v) != 1 { return false }
+    true
+}
+fn test_ai_transfer_cmp_eq_equal() -> bool with Mut, Div, Panic {
+    test_ai_transfer_cmp_eq_equal_inner()
+}
+
+fn test_ai_transfer_cmp_eq_unequal_inner() -> bool with Mut, Div, Panic {
+    var state = ai_state_new()
+    ai_transfer_const(&! state, 0, 3)
+    ai_transfer_const(&! state, 1, 7)
+    ai_transfer_cmp_eq(&! state, 2, 0, 1)
+    let v = ai_state_get_reg(&state, 2)
+    if ai_value_is_const(v) == false { return false }
+    if ai_value_const_val(v) != 0 { return false }
+    true
+}
+fn test_ai_transfer_cmp_eq_unequal() -> bool with Mut, Div, Panic {
+    test_ai_transfer_cmp_eq_unequal_inner()
+}
+
+fn test_ai_transfer_cmp_lt_inner() -> bool with Mut, Div, Panic {
+    var state = ai_state_new()
+    state.reg_count = 2
+    state.regs[0] = ai_value_from_interval(ai_interval_range(1, 3))
+    state.regs[1] = ai_value_from_interval(ai_interval_range(5, 10))
+    ai_transfer_cmp_lt(&! state, 2, 0, 1)
+    let v = ai_state_get_reg(&state, 2)
+    // [1,3] < [5,10] is always true
+    if ai_value_is_const(v) == false { return false }
+    if ai_value_const_val(v) != 1 { return false }
+    true
+}
+fn test_ai_transfer_cmp_lt() -> bool with Mut, Div, Panic {
+    test_ai_transfer_cmp_lt_inner()
+}
+
+// ============================================================================
+// CATEGORY 5: Branch refinement tests (8 tests)
+// ============================================================================
+
+fn test_ai_refine_branch_true_inner() -> bool with Mut, Div, Panic {
+    var state = ai_state_new()
+    state.reg_count = 1
+    state.regs[0] = ai_value_from_interval(ai_interval_range(0, 1))
+    ai_refine_branch_true(&! state, 0)
+    let v = ai_state_get_reg(&state, 0)
+    // Should be refined to [1,1]
+    if ai_value_is_const(v) == false { return false }
+    if ai_value_const_val(v) != 1 { return false }
+    true
+}
+fn test_ai_refine_branch_true() -> bool with Mut, Div, Panic {
+    test_ai_refine_branch_true_inner()
+}
+
+fn test_ai_refine_branch_false_inner() -> bool with Mut, Div, Panic {
+    var state = ai_state_new()
+    state.reg_count = 1
+    state.regs[0] = ai_value_from_interval(ai_interval_range(0, 1))
+    ai_refine_branch_false(&! state, 0)
+    let v = ai_state_get_reg(&state, 0)
+    // Should be refined to [0,0]
+    if ai_value_is_const(v) == false { return false }
+    if ai_value_const_val(v) != 0 { return false }
+    true
+}
+fn test_ai_refine_branch_false() -> bool with Mut, Div, Panic {
+    test_ai_refine_branch_false_inner()
+}
+
+fn test_ai_refine_eq_inner() -> bool with Mut, Div, Panic {
+    var state = ai_state_new()
+    state.reg_count = 2
+    state.regs[0] = ai_value_from_interval(ai_interval_range(1, 10))
+    state.regs[1] = ai_value_from_interval(ai_interval_range(5, 15))
+    ai_refine_eq(&! state, 0, 1)
+    let v0 = ai_state_get_reg(&state, 0)
+    let v1 = ai_state_get_reg(&state, 1)
+    // After eq refinement: both should be [5, 10] (the meet)
+    if v0.interval.lo != 5 { return false }
+    if v0.interval.hi != 10 { return false }
+    if v1.interval.lo != 5 { return false }
+    if v1.interval.hi != 10 { return false }
+    true
+}
+fn test_ai_refine_eq() -> bool with Mut, Div, Panic {
+    test_ai_refine_eq_inner()
+}
+
+fn test_ai_refine_lt_inner() -> bool with Mut, Div, Panic {
+    var state = ai_state_new()
+    state.reg_count = 2
+    state.regs[0] = ai_value_from_interval(ai_interval_range(0, 10))
+    state.regs[1] = ai_value_from_interval(ai_interval_range(0, 10))
+    ai_refine_lt(&! state, 0, 1)
+    let v0 = ai_state_get_reg(&state, 0)
+    let v1 = ai_state_get_reg(&state, 1)
+    // After reg0 < reg1: reg0.hi <= reg1.hi - 1 = 9, reg1.lo >= reg0.lo + 1 = 1
+    if v0.interval.hi != 9 { return false }
+    if v1.interval.lo != 1 { return false }
+    true
+}
+fn test_ai_refine_lt() -> bool with Mut, Div, Panic {
+    test_ai_refine_lt_inner()
+}
+
+fn test_ai_refine_le_inner() -> bool with Mut, Div, Panic {
+    var state = ai_state_new()
+    state.reg_count = 2
+    state.regs[0] = ai_value_from_interval(ai_interval_range(0, 20))
+    state.regs[1] = ai_value_from_interval(ai_interval_range(5, 15))
+    ai_refine_le(&! state, 0, 1)
+    let v0 = ai_state_get_reg(&state, 0)
+    let v1 = ai_state_get_reg(&state, 1)
+    // reg0 <= reg1: reg0.hi <= 15, reg1.lo >= 0
+    if v0.interval.hi != 15 { return false }
+    if v0.interval.lo != 0 { return false }
+    true
+}
+fn test_ai_refine_le() -> bool with Mut, Div, Panic {
+    test_ai_refine_le_inner()
+}
+
+fn test_ai_refine_branch_true_wide_inner() -> bool with Mut, Div, Panic {
+    var state = ai_state_new()
+    state.reg_count = 1
+    state.regs[0] = ai_value_from_interval(ai_interval_range(0, 100))
+    ai_refine_branch_true(&! state, 0)
+    let v = ai_state_get_reg(&state, 0)
+    // Should refine away zero: [1, 100]
+    if v.interval.lo != 1 { return false }
+    if v.interval.hi != 100 { return false }
+    true
+}
+fn test_ai_refine_branch_true_wide() -> bool with Mut, Div, Panic {
+    test_ai_refine_branch_true_wide_inner()
+}
+
+fn test_ai_refine_branch_false_wide_inner() -> bool with Mut, Div, Panic {
+    var state = ai_state_new()
+    state.reg_count = 1
+    state.regs[0] = ai_value_from_interval(ai_interval_range(0 - 5, 10))
+    ai_refine_branch_false(&! state, 0)
+    let v = ai_state_get_reg(&state, 0)
+    // False means zero
+    if ai_value_is_const(v) == false { return false }
+    if ai_value_const_val(v) != 0 { return false }
+    true
+}
+fn test_ai_refine_branch_false_wide() -> bool with Mut, Div, Panic {
+    test_ai_refine_branch_false_wide_inner()
+}
+
+fn test_ai_refine_lt_disjoint_inner() -> bool with Mut, Div, Panic {
+    var state = ai_state_new()
+    state.reg_count = 2
+    state.regs[0] = ai_value_from_interval(ai_interval_range(1, 3))
+    state.regs[1] = ai_value_from_interval(ai_interval_range(5, 10))
+    ai_refine_lt(&! state, 0, 1)
+    let v0 = ai_state_get_reg(&state, 0)
+    let v1 = ai_state_get_reg(&state, 1)
+    // Already disjoint and in correct order; should be unchanged
+    if v0.interval.lo != 1 { return false }
+    if v0.interval.hi != 3 { return false }
+    if v1.interval.lo != 5 { return false }
+    if v1.interval.hi != 10 { return false }
+    true
+}
+fn test_ai_refine_lt_disjoint() -> bool with Mut, Div, Panic {
+    test_ai_refine_lt_disjoint_inner()
+}
+
+// ============================================================================
+// CATEGORY 6: Fixed-point analysis tests (10 tests)
+// ============================================================================
+
+fn test_ai_single_block_inner(ctx: &! AiContext) -> bool with Mut, Div, Panic {
+    // Single block: r0 = 10, r1 = 32, r2 = r0 + r1
+    let b0 = ai_add_block(ctx)
+    ai_add_instr(ctx, AiInstrKind::AiConst, 0, 0, 0, 10, b0)
+    ai_add_instr(ctx, AiInstrKind::AiConst, 1, 0, 0, 32, b0)
+    ai_add_instr(ctx, AiInstrKind::AiAdd, 2, 0, 1, 0, b0)
+    ai_analyze_function(ctx)
+    if ai_blocks_converged(ctx) == false { return false }
+    let iv = ai_query_reg_interval(ctx, 0, 2)
+    if ai_interval_is_const(iv) == false { return false }
+    if iv.lo != 42 { return false }
+    true
+}
+fn test_ai_single_block() -> bool with Mut, Div, Panic {
+    var ctx = ai_context_new()
+    test_ai_single_block_inner(&! ctx)
+}
+
+fn test_ai_two_blocks_inner(ctx: &! AiContext) -> bool with Mut, Div, Panic {
+    // Block 0: r0 = 5
+    // Block 1: r1 = r0 + 3
+    // Edge: 0 -> 1 unconditional
+    let b0 = ai_add_block(ctx)
+    let b1 = ai_add_block(ctx)
+    ai_add_instr(ctx, AiInstrKind::AiConst, 0, 0, 0, 5, b0)
+    ai_add_instr(ctx, AiInstrKind::AiConst, 1, 0, 0, 3, b1)
+    ai_add_instr(ctx, AiInstrKind::AiAdd, 2, 0, 1, 0, b1)
+    ai_add_edge(ctx, b0, b1, AiBranchKind::BrUnconditional, 0)
+    ai_analyze_function(ctx)
+    if ai_blocks_converged(ctx) == false { return false }
+    let iv = ai_query_reg_interval(ctx, b1, 2)
+    if ai_interval_is_const(iv) == false { return false }
+    if iv.lo != 8 { return false }
+    true
+}
+fn test_ai_two_blocks() -> bool with Mut, Div, Panic {
+    var ctx = ai_context_new()
+    test_ai_two_blocks_inner(&! ctx)
+}
+
+fn test_ai_simple_loop_inner(ctx: &! AiContext) -> bool with Mut, Div, Panic {
+    // Block 0: r0 = 0 (loop counter init)
+    // Block 1: r0 = phi(r0_block0, r0_block1); r0 = r0 + 1; branch if r0 < 10
+    // Block 2: exit
+    // Edges: 0->1, 1->1 (back edge), 1->2
+    let b0 = ai_add_block(ctx)
+    let b1 = ai_add_block(ctx)
+    let b2 = ai_add_block(ctx)
+    ai_add_instr(ctx, AiInstrKind::AiConst, 0, 0, 0, 0, b0)
+    ai_add_instr(ctx, AiInstrKind::AiAdd, 0, 0, 0, 1, b1)  // r0 = r0 + 1 (self-loop increment approximation)
+    ai_add_instr(ctx, AiInstrKind::AiConst, 3, 0, 0, 1, b1) // const 1 for the add
+    ai_add_edge(ctx, b0, b1, AiBranchKind::BrUnconditional, 0)
+    ai_add_edge(ctx, b1, b1, AiBranchKind::BrIfTrue, 0)  // back edge
+    ai_add_edge(ctx, b1, b2, AiBranchKind::BrIfFalse, 0) // exit edge
+    ai_analyze_function(ctx)
+    // Should converge (widening guarantees termination)
+    ai_blocks_converged(ctx)
+}
+fn test_ai_simple_loop() -> bool with Mut, Div, Panic {
+    var ctx = ai_context_new()
+    test_ai_simple_loop_inner(&! ctx)
+}
+
+fn test_ai_convergence_inner(ctx: &! AiContext) -> bool with Mut, Div, Panic {
+    // Single block, no edges => should converge in 1 iteration
+    let b0 = ai_add_block(ctx)
+    ai_add_instr(ctx, AiInstrKind::AiConst, 0, 0, 0, 7, b0)
+    ai_analyze_function(ctx)
+    if ai_blocks_converged(ctx) == false { return false }
+    if ai_iteration_count(ctx) > 2 { return false }
+    true
+}
+fn test_ai_convergence() -> bool with Mut, Div, Panic {
+    var ctx = ai_context_new()
+    test_ai_convergence_inner(&! ctx)
+}
+
+fn test_ai_widening_inner(ctx: &! AiContext) -> bool with Mut, Div, Panic {
+    // Loop with incrementing variable; widening should push to +inf
+    let b0 = ai_add_block(ctx)
+    let b1 = ai_add_block(ctx)
+    ai_add_instr(ctx, AiInstrKind::AiConst, 0, 0, 0, 0, b0)
+    ai_add_instr(ctx, AiInstrKind::AiConst, 1, 0, 0, 1, b1)
+    ai_add_instr(ctx, AiInstrKind::AiAdd, 0, 0, 1, 0, b1)
+    ai_add_edge(ctx, b0, b1, AiBranchKind::BrUnconditional, 0)
+    ai_add_edge(ctx, b1, b1, AiBranchKind::BrUnconditional, 0)
+    ctx.max_iterations = 50
+    ai_analyze_function(ctx)
+    // After widening, r0 in block 1 should have hi = AI_INF_POS
+    let iv = ai_query_reg_interval(ctx, b1, 0)
+    if ai_interval_is_top(iv) == false {
+        // Should at least have been widened upward
+        if iv.hi < AI_INF_POS { return false }
+    }
+    true
+}
+fn test_ai_widening() -> bool with Mut, Div, Panic {
+    var ctx = ai_context_new()
+    test_ai_widening_inner(&! ctx)
+}
+
+fn test_ai_diamond_cfg_inner(ctx: &! AiContext) -> bool with Mut, Div, Panic {
+    // Diamond: b0 -> b1, b0 -> b2, b1 -> b3, b2 -> b3
+    // b0: r0 = 10
+    // b1: r1 = 5
+    // b2: r1 = 20
+    // b3: merge — r1 should be [5, 20]
+    let b0 = ai_add_block(ctx)
+    let b1 = ai_add_block(ctx)
+    let b2 = ai_add_block(ctx)
+    let b3 = ai_add_block(ctx)
+    ai_add_instr(ctx, AiInstrKind::AiConst, 0, 0, 0, 10, b0)
+    ai_add_instr(ctx, AiInstrKind::AiConst, 1, 0, 0, 5, b1)
+    ai_add_instr(ctx, AiInstrKind::AiConst, 1, 0, 0, 20, b2)
+    ai_add_edge(ctx, b0, b1, AiBranchKind::BrIfTrue, 0)
+    ai_add_edge(ctx, b0, b2, AiBranchKind::BrIfFalse, 0)
+    ai_add_edge(ctx, b1, b3, AiBranchKind::BrUnconditional, 0)
+    ai_add_edge(ctx, b2, b3, AiBranchKind::BrUnconditional, 0)
+    ai_analyze_function(ctx)
+    if ai_blocks_converged(ctx) == false { return false }
+    let iv = ai_query_reg_interval(ctx, b3, 1)
+    if ai_interval_is_bot(iv) { return false }
+    if ai_interval_contains(iv, 5) == false { return false }
+    if ai_interval_contains(iv, 20) == false { return false }
+    true
+}
+fn test_ai_diamond_cfg() -> bool with Mut, Div, Panic {
+    var ctx = ai_context_new()
+    test_ai_diamond_cfg_inner(&! ctx)
+}
+
+fn test_ai_chain_three_blocks_inner(ctx: &! AiContext) -> bool with Mut, Div, Panic {
+    // b0: r0 = 2
+    // b1: r1 = r0 * r0 (should be 4)
+    // b2: r2 = r1 + r0 (should be 6)
+    let b0 = ai_add_block(ctx)
+    let b1 = ai_add_block(ctx)
+    let b2 = ai_add_block(ctx)
+    ai_add_instr(ctx, AiInstrKind::AiConst, 0, 0, 0, 2, b0)
+    ai_add_instr(ctx, AiInstrKind::AiMul, 1, 0, 0, 0, b1)
+    ai_add_instr(ctx, AiInstrKind::AiAdd, 2, 1, 0, 0, b2)
+    ai_add_edge(ctx, b0, b1, AiBranchKind::BrUnconditional, 0)
+    ai_add_edge(ctx, b1, b2, AiBranchKind::BrUnconditional, 0)
+    ai_analyze_function(ctx)
+    if ai_blocks_converged(ctx) == false { return false }
+    let iv1 = ai_query_reg_interval(ctx, b1, 1)
+    if ai_interval_is_const(iv1) == false { return false }
+    if iv1.lo != 4 { return false }
+    let iv2 = ai_query_reg_interval(ctx, b2, 2)
+    if ai_interval_is_const(iv2) == false { return false }
+    if iv2.lo != 6 { return false }
+    true
+}
+fn test_ai_chain_three_blocks() -> bool with Mut, Div, Panic {
+    var ctx = ai_context_new()
+    test_ai_chain_three_blocks_inner(&! ctx)
+}
+
+fn test_ai_worklist_basic_inner(ctx: &! AiContext) -> bool with Mut, Div, Panic {
+    ai_worklist_clear(ctx)
+    if ai_worklist_empty(ctx) == false { return false }
+    ai_worklist_push(ctx, 3)
+    ai_worklist_push(ctx, 7)
+    if ai_worklist_empty(ctx) { return false }
+    let first = ai_worklist_pop(ctx)
+    if first != 3 { return false }
+    let second = ai_worklist_pop(ctx)
+    if second != 7 { return false }
+    if ai_worklist_empty(ctx) == false { return false }
+    true
+}
+fn test_ai_worklist_basic() -> bool with Mut, Div, Panic {
+    var ctx = ai_context_new()
+    test_ai_worklist_basic_inner(&! ctx)
+}
+
+fn test_ai_worklist_dedup_inner(ctx: &! AiContext) -> bool with Mut, Div, Panic {
+    ai_worklist_clear(ctx)
+    ai_worklist_push(ctx, 5)
+    let dup = ai_worklist_push(ctx, 5)
+    // Should return false because 5 is already in the worklist
+    if dup { return false }
+    let first = ai_worklist_pop(ctx)
+    if first != 5 { return false }
+    ai_worklist_empty(ctx)
+}
+fn test_ai_worklist_dedup() -> bool with Mut, Div, Panic {
+    var ctx = ai_context_new()
+    test_ai_worklist_dedup_inner(&! ctx)
+}
+
+fn test_ai_max_iterations_inner(ctx: &! AiContext) -> bool with Mut, Div, Panic {
+    // Create a self-loop that never converges (without widening effect)
+    let b0 = ai_add_block(ctx)
+    ai_add_instr(ctx, AiInstrKind::AiConst, 0, 0, 0, 1, b0)
+    ai_add_edge(ctx, b0, b0, AiBranchKind::BrUnconditional, 0)
+    ctx.max_iterations = 10
+    ai_analyze_function(ctx)
+    // Should stop at max_iterations
+    if ctx.iteration_count > 11 { return false }
+    true
+}
+fn test_ai_max_iterations() -> bool with Mut, Div, Panic {
+    var ctx = ai_context_new()
+    test_ai_max_iterations_inner(&! ctx)
+}
+
+// ============================================================================
+// CATEGORY 7: State operations tests (8 tests)
+// ============================================================================
+
+fn test_ai_state_new_inner() -> bool with Mut, Div, Panic {
+    let s = ai_state_new()
+    if s.reg_count != 0 { return false }
+    true
+}
+fn test_ai_state_new() -> bool with Mut, Div, Panic {
+    test_ai_state_new_inner()
+}
+
+fn test_ai_state_set_get_inner() -> bool with Mut, Div, Panic {
+    var s = ai_state_new()
+    let v = ai_value_const(42)
+    ai_state_set_reg(&! s, 3, v)
+    let r = ai_state_get_reg(&s, 3)
+    if ai_value_is_const(r) == false { return false }
+    if ai_value_const_val(r) != 42 { return false }
+    true
+}
+fn test_ai_state_set_get() -> bool with Mut, Div, Panic {
+    test_ai_state_set_get_inner()
+}
+
+fn test_ai_state_reg_count_inner() -> bool with Mut, Div, Panic {
+    var s = ai_state_new()
+    ai_state_set_reg(&! s, 5, ai_value_const(10))
+    if s.reg_count != 6 { return false }
+    ai_state_set_reg(&! s, 2, ai_value_const(20))
+    // reg_count should still be 6 (max seen + 1)
+    if s.reg_count != 6 { return false }
+    ai_state_set_reg(&! s, 10, ai_value_const(30))
+    if s.reg_count != 11 { return false }
+    true
+}
+fn test_ai_state_reg_count() -> bool with Mut, Div, Panic {
+    test_ai_state_reg_count_inner()
+}
+
+fn test_ai_state_out_of_bounds_inner() -> bool with Mut, Div, Panic {
+    let s = ai_state_new()
+    let v = ai_state_get_reg(&s, 0 - 1)
+    if ai_value_is_bot(v) == false { return false }
+    let v2 = ai_state_get_reg(&s, 300)
+    if ai_value_is_bot(v2) == false { return false }
+    true
+}
+fn test_ai_state_out_of_bounds() -> bool with Mut, Div, Panic {
+    test_ai_state_out_of_bounds_inner()
+}
+
+fn test_ai_state_join_inner() -> bool with Mut, Div, Panic {
+    var s1 = ai_state_new()
+    var s2 = ai_state_new()
+    ai_state_set_reg(&! s1, 0, ai_value_const(5))
+    ai_state_set_reg(&! s2, 0, ai_value_const(10))
+    let j = ai_state_join(&s1, &s2)
+    let v = ai_state_get_reg(&j, 0)
+    // Join of [5,5] and [10,10] = [5,10]
+    if v.interval.lo != 5 { return false }
+    if v.interval.hi != 10 { return false }
+    true
+}
+fn test_ai_state_join() -> bool with Mut, Div, Panic {
+    test_ai_state_join_inner()
+}
+
+fn test_ai_state_eq_inner() -> bool with Mut, Div, Panic {
+    var s1 = ai_state_new()
+    var s2 = ai_state_new()
+    ai_state_set_reg(&! s1, 0, ai_value_const(42))
+    ai_state_set_reg(&! s2, 0, ai_value_const(42))
+    if ai_state_eq(&s1, &s2) == false { return false }
+    ai_state_set_reg(&! s2, 0, ai_value_const(99))
+    if ai_state_eq(&s1, &s2) { return false }
+    true
+}
+fn test_ai_state_eq() -> bool with Mut, Div, Panic {
+    test_ai_state_eq_inner()
+}
+
+fn test_ai_state_copy_sub(orig: &! AiAbstractState) -> bool with Mut, Div, Panic {
+    ai_state_set_reg(orig, 0, ai_value_const(7))
+    ai_state_set_reg(orig, 1, ai_value_const(13))
+    let copy = ai_state_copy(orig)
+    if ai_state_eq(orig, &copy) == false { return false }
+    // Modify original; copy should be independent
+    ai_state_set_reg(orig, 0, ai_value_const(99))
+    let v = ai_state_get_reg(&copy, 0)
+    if ai_value_const_val(v) != 7 { return false }
+    true
+}
+fn test_ai_state_copy_inner() -> bool with Mut, Div, Panic {
+    var orig = ai_state_new()
+    test_ai_state_copy_sub(&! orig)
+}
+fn test_ai_state_copy() -> bool with Mut, Div, Panic {
+    test_ai_state_copy_inner()
+}
+
+fn test_ai_state_widen_inner() -> bool with Mut, Div, Panic {
+    var s1 = ai_state_new()
+    var s2 = ai_state_new()
+    ai_state_set_reg(&! s1, 0, ai_value_from_interval(ai_interval_range(0, 10)))
+    ai_state_set_reg(&! s2, 0, ai_value_from_interval(ai_interval_range(0, 20)))
+    let w = ai_state_widen(&s1, &s2)
+    let v = ai_state_get_reg(&w, 0)
+    // Widened: lo stays 0, hi goes to +inf
+    if v.interval.lo != 0 { return false }
+    if v.interval.hi != AI_INF_POS { return false }
+    true
+}
+fn test_ai_state_widen() -> bool with Mut, Div, Panic {
+    test_ai_state_widen_inner()
+}
+
+// ============================================================================
+// CATEGORY 8: Integration tests (9 tests)
+// ============================================================================
+
+fn test_ai_full_constant_prop_inner(ctx: &! AiContext) -> bool with Mut, Div, Panic {
+    // Full pipeline: r0=2, r1=3, r2=r0*r1, r3=r2+r0 => r3 should be 8
+    let b0 = ai_add_block(ctx)
+    ai_add_instr(ctx, AiInstrKind::AiConst, 0, 0, 0, 2, b0)
+    ai_add_instr(ctx, AiInstrKind::AiConst, 1, 0, 0, 3, b0)
+    ai_add_instr(ctx, AiInstrKind::AiMul, 2, 0, 1, 0, b0)
+    ai_add_instr(ctx, AiInstrKind::AiAdd, 3, 2, 0, 0, b0)
+    ai_analyze_function(ctx)
+    if ai_is_constant(ctx, b0, 3) == false { return false }
+    if ai_get_constant_value(ctx, b0, 3) != 8 { return false }
+    true
+}
+fn test_ai_full_constant_prop() -> bool with Mut, Div, Panic {
+    var ctx = ai_context_new()
+    test_ai_full_constant_prop_inner(&! ctx)
+}
+
+fn test_ai_full_sign_analysis_inner(ctx: &! AiContext) -> bool with Mut, Div, Panic {
+    // r0 = 5 (positive), r1 = -3, r2 = r0 + r1 = 2 (positive)
+    let b0 = ai_add_block(ctx)
+    ai_add_instr(ctx, AiInstrKind::AiConst, 0, 0, 0, 5, b0)
+    ai_add_instr(ctx, AiInstrKind::AiConst, 1, 0, 0, 0 - 3, b0)
+    ai_add_instr(ctx, AiInstrKind::AiAdd, 2, 0, 1, 0, b0)
+    ai_analyze_function(ctx)
+    let s = ai_query_reg_sign(ctx, b0, 2)
+    ai_sign_eq(s, AiSignValue::SignPos)
+}
+fn test_ai_full_sign_analysis() -> bool with Mut, Div, Panic {
+    var ctx = ai_context_new()
+    test_ai_full_sign_analysis_inner(&! ctx)
+}
+
+fn test_ai_full_non_negative_inner(ctx: &! AiContext) -> bool with Mut, Div, Panic {
+    // r0 = 10, r1 = 3, r2 = r0 - r1 = 7 => non-negative
+    let b0 = ai_add_block(ctx)
+    ai_add_instr(ctx, AiInstrKind::AiConst, 0, 0, 0, 10, b0)
+    ai_add_instr(ctx, AiInstrKind::AiConst, 1, 0, 0, 3, b0)
+    ai_add_instr(ctx, AiInstrKind::AiSub, 2, 0, 1, 0, b0)
+    ai_analyze_function(ctx)
+    ai_is_non_negative(ctx, b0, 2)
+}
+fn test_ai_full_non_negative() -> bool with Mut, Div, Panic {
+    var ctx = ai_context_new()
+    test_ai_full_non_negative_inner(&! ctx)
+}
+
+fn test_ai_full_non_zero_inner(ctx: &! AiContext) -> bool with Mut, Div, Panic {
+    // r0 = 7 => non-zero
+    let b0 = ai_add_block(ctx)
+    ai_add_instr(ctx, AiInstrKind::AiConst, 0, 0, 0, 7, b0)
+    ai_analyze_function(ctx)
+    ai_is_non_zero(ctx, b0, 0)
+}
+fn test_ai_full_non_zero() -> bool with Mut, Div, Panic {
+    var ctx = ai_context_new()
+    test_ai_full_non_zero_inner(&! ctx)
+}
+
+fn test_ai_full_range_check_inner(ctx: &! AiContext) -> bool with Mut, Div, Panic {
+    // r0 = 42 => should be in range [0, 100]
+    let b0 = ai_add_block(ctx)
+    ai_add_instr(ctx, AiInstrKind::AiConst, 0, 0, 0, 42, b0)
+    ai_analyze_function(ctx)
+    ai_is_in_range(ctx, b0, 0, 0, 100)
+}
+fn test_ai_full_range_check() -> bool with Mut, Div, Panic {
+    var ctx = ai_context_new()
+    test_ai_full_range_check_inner(&! ctx)
+}
+
+fn test_ai_full_diamond_merge_inner(ctx: &! AiContext) -> bool with Mut, Div, Panic {
+    // Diamond: b0 branches to b1 (r1=0) and b2 (r1=100); b3 merges.
+    // After analysis, r1 in b3 should contain both 0 and 100.
+    let b0 = ai_add_block(ctx)
+    let b1 = ai_add_block(ctx)
+    let b2 = ai_add_block(ctx)
+    let b3 = ai_add_block(ctx)
+    ai_add_instr(ctx, AiInstrKind::AiConst, 0, 0, 0, 1, b0)
+    ai_add_instr(ctx, AiInstrKind::AiConst, 1, 0, 0, 0, b1)
+    ai_add_instr(ctx, AiInstrKind::AiConst, 1, 0, 0, 100, b2)
+    ai_add_edge(ctx, b0, b1, AiBranchKind::BrIfTrue, 0)
+    ai_add_edge(ctx, b0, b2, AiBranchKind::BrIfFalse, 0)
+    ai_add_edge(ctx, b1, b3, AiBranchKind::BrUnconditional, 0)
+    ai_add_edge(ctx, b2, b3, AiBranchKind::BrUnconditional, 0)
+    ai_analyze_function(ctx)
+    if ai_blocks_converged(ctx) == false { return false }
+    let iv = ai_query_reg_interval(ctx, b3, 1)
+    if ai_interval_contains(iv, 0) == false { return false }
+    if ai_interval_contains(iv, 100) == false { return false }
+    true
+}
+fn test_ai_full_diamond_merge() -> bool with Mut, Div, Panic {
+    var ctx = ai_context_new()
+    test_ai_full_diamond_merge_inner(&! ctx)
+}
+
+fn test_ai_full_comparison_refine_inner(ctx: &! AiContext) -> bool with Mut, Div, Panic {
+    // r0 = 5, r1 = 10, r2 = cmp_lt(r0, r1) => should be 1
+    let b0 = ai_add_block(ctx)
+    ai_add_instr(ctx, AiInstrKind::AiConst, 0, 0, 0, 5, b0)
+    ai_add_instr(ctx, AiInstrKind::AiConst, 1, 0, 0, 10, b0)
+    ai_add_instr(ctx, AiInstrKind::AiCmpLt, 2, 0, 1, 0, b0)
+    ai_analyze_function(ctx)
+    if ai_is_constant(ctx, b0, 2) == false { return false }
+    if ai_get_constant_value(ctx, b0, 2) != 1 { return false }
+    true
+}
+fn test_ai_full_comparison_refine() -> bool with Mut, Div, Panic {
+    var ctx = ai_context_new()
+    test_ai_full_comparison_refine_inner(&! ctx)
+}
+
+fn test_ai_full_neg_chain_inner(ctx: &! AiContext) -> bool with Mut, Div, Panic {
+    // r0 = 42, r1 = neg(r0) = -42, r2 = neg(r1) = 42
+    let b0 = ai_add_block(ctx)
+    ai_add_instr(ctx, AiInstrKind::AiConst, 0, 0, 0, 42, b0)
+    ai_add_instr(ctx, AiInstrKind::AiNeg, 1, 0, 0, 0, b0)
+    ai_add_instr(ctx, AiInstrKind::AiNeg, 2, 1, 0, 0, b0)
+    ai_analyze_function(ctx)
+    if ai_is_constant(ctx, b0, 2) == false { return false }
+    if ai_get_constant_value(ctx, b0, 2) != 42 { return false }
+    // r1 should be -42
+    if ai_get_constant_value(ctx, b0, 1) != 0 - 42 { return false }
+    true
+}
+fn test_ai_full_neg_chain() -> bool with Mut, Div, Panic {
+    var ctx = ai_context_new()
+    test_ai_full_neg_chain_inner(&! ctx)
+}
+
+fn test_ai_full_multi_block_chain_inner(ctx: &! AiContext) -> bool with Mut, Div, Panic {
+    // b0: r0 = 1
+    // b1: r0 = r0 + r0 => 2
+    // b2: r0 = r0 + r0 => 4
+    // b3: r0 = r0 + r0 => 8
+    let b0 = ai_add_block(ctx)
+    let b1 = ai_add_block(ctx)
+    let b2 = ai_add_block(ctx)
+    let b3 = ai_add_block(ctx)
+    ai_add_instr(ctx, AiInstrKind::AiConst, 0, 0, 0, 1, b0)
+    ai_add_instr(ctx, AiInstrKind::AiAdd, 0, 0, 0, 0, b1)
+    ai_add_instr(ctx, AiInstrKind::AiAdd, 0, 0, 0, 0, b2)
+    ai_add_instr(ctx, AiInstrKind::AiAdd, 0, 0, 0, 0, b3)
+    ai_add_edge(ctx, b0, b1, AiBranchKind::BrUnconditional, 0)
+    ai_add_edge(ctx, b1, b2, AiBranchKind::BrUnconditional, 0)
+    ai_add_edge(ctx, b2, b3, AiBranchKind::BrUnconditional, 0)
+    ai_analyze_function(ctx)
+    if ai_blocks_converged(ctx) == false { return false }
+    let iv = ai_query_reg_interval(ctx, b3, 0)
+    if ai_interval_is_const(iv) == false { return false }
+    if iv.lo != 8 { return false }
+    true
+}
+fn test_ai_full_multi_block_chain() -> bool with Mut, Div, Panic {
+    var ctx = ai_context_new()
+    test_ai_full_multi_block_chain_inner(&! ctx)
+}
+
+// ============================================================================
+// MAIN — Run all 75 tests
+// ============================================================================
+
+fn ai_run_all_tests() -> i64 with Mut, Div, Panic {
+    var pass: i64 = 0
+    var fail: i64 = 0
+
+    // Category 1: Interval lattice (12)
+    if test_ai_interval_bot() { pass = pass + 1 } else { fail = fail + 1 }
+    if test_ai_interval_top() { pass = pass + 1 } else { fail = fail + 1 }
+    if test_ai_interval_const() { pass = pass + 1 } else { fail = fail + 1 }
+    if test_ai_interval_range() { pass = pass + 1 } else { fail = fail + 1 }
+    if test_ai_interval_range_inverted() { pass = pass + 1 } else { fail = fail + 1 }
+    if test_ai_interval_join_bot() { pass = pass + 1 } else { fail = fail + 1 }
+    if test_ai_interval_join_ranges() { pass = pass + 1 } else { fail = fail + 1 }
+    if test_ai_interval_meet_ranges() { pass = pass + 1 } else { fail = fail + 1 }
+    if test_ai_interval_meet_disjoint() { pass = pass + 1 } else { fail = fail + 1 }
+    if test_ai_interval_widen() { pass = pass + 1 } else { fail = fail + 1 }
+    if test_ai_interval_contains() { pass = pass + 1 } else { fail = fail + 1 }
+    if test_ai_interval_eq() { pass = pass + 1 } else { fail = fail + 1 }
+
+    // Category 2: Sign lattice (8)
+    if test_ai_sign_bot_top() { pass = pass + 1 } else { fail = fail + 1 }
+    if test_ai_sign_join_same() { pass = pass + 1 } else { fail = fail + 1 }
+    if test_ai_sign_join_pos_neg() { pass = pass + 1 } else { fail = fail + 1 }
+    if test_ai_sign_join_pos_zero() { pass = pass + 1 } else { fail = fail + 1 }
+    if test_ai_sign_join_bot() { pass = pass + 1 } else { fail = fail + 1 }
+    if test_ai_sign_meet_pos_nonneg() { pass = pass + 1 } else { fail = fail + 1 }
+    if test_ai_sign_meet_pos_neg() { pass = pass + 1 } else { fail = fail + 1 }
+    if test_ai_sign_from_interval() { pass = pass + 1 } else { fail = fail + 1 }
+
+    // Category 3: Congruence lattice (8)
+    if test_ai_cong_bot() { pass = pass + 1 } else { fail = fail + 1 }
+    if test_ai_cong_top() { pass = pass + 1 } else { fail = fail + 1 }
+    if test_ai_cong_const() { pass = pass + 1 } else { fail = fail + 1 }
+    if test_ai_cong_new() { pass = pass + 1 } else { fail = fail + 1 }
+    if test_ai_cong_join_same() { pass = pass + 1 } else { fail = fail + 1 }
+    if test_ai_cong_join_different() { pass = pass + 1 } else { fail = fail + 1 }
+    if test_ai_cong_meet_compatible() { pass = pass + 1 } else { fail = fail + 1 }
+    if test_ai_cong_meet_incompatible() { pass = pass + 1 } else { fail = fail + 1 }
+
+    // Category 4: Transfer functions (12)
+    if test_ai_transfer_const() { pass = pass + 1 } else { fail = fail + 1 }
+    if test_ai_transfer_copy() { pass = pass + 1 } else { fail = fail + 1 }
+    if test_ai_transfer_add_const() { pass = pass + 1 } else { fail = fail + 1 }
+    if test_ai_transfer_add_range() { pass = pass + 1 } else { fail = fail + 1 }
+    if test_ai_transfer_sub() { pass = pass + 1 } else { fail = fail + 1 }
+    if test_ai_transfer_mul() { pass = pass + 1 } else { fail = fail + 1 }
+    if test_ai_transfer_div() { pass = pass + 1 } else { fail = fail + 1 }
+    if test_ai_transfer_mod() { pass = pass + 1 } else { fail = fail + 1 }
+    if test_ai_transfer_neg() { pass = pass + 1 } else { fail = fail + 1 }
+    if test_ai_transfer_cmp_eq_equal() { pass = pass + 1 } else { fail = fail + 1 }
+    if test_ai_transfer_cmp_eq_unequal() { pass = pass + 1 } else { fail = fail + 1 }
+    if test_ai_transfer_cmp_lt() { pass = pass + 1 } else { fail = fail + 1 }
+
+    // Category 5: Branch refinement (8)
+    if test_ai_refine_branch_true() { pass = pass + 1 } else { fail = fail + 1 }
+    if test_ai_refine_branch_false() { pass = pass + 1 } else { fail = fail + 1 }
+    if test_ai_refine_eq() { pass = pass + 1 } else { fail = fail + 1 }
+    if test_ai_refine_lt() { pass = pass + 1 } else { fail = fail + 1 }
+    if test_ai_refine_le() { pass = pass + 1 } else { fail = fail + 1 }
+    if test_ai_refine_branch_true_wide() { pass = pass + 1 } else { fail = fail + 1 }
+    if test_ai_refine_branch_false_wide() { pass = pass + 1 } else { fail = fail + 1 }
+    if test_ai_refine_lt_disjoint() { pass = pass + 1 } else { fail = fail + 1 }
+
+    // Category 6: Fixed-point (10)
+    if test_ai_single_block() { pass = pass + 1 } else { fail = fail + 1 }
+    if test_ai_two_blocks() { pass = pass + 1 } else { fail = fail + 1 }
+    if test_ai_simple_loop() { pass = pass + 1 } else { fail = fail + 1 }
+    if test_ai_convergence() { pass = pass + 1 } else { fail = fail + 1 }
+    if test_ai_widening() { pass = pass + 1 } else { fail = fail + 1 }
+    if test_ai_diamond_cfg() { pass = pass + 1 } else { fail = fail + 1 }
+    if test_ai_chain_three_blocks() { pass = pass + 1 } else { fail = fail + 1 }
+    if test_ai_worklist_basic() { pass = pass + 1 } else { fail = fail + 1 }
+    if test_ai_worklist_dedup() { pass = pass + 1 } else { fail = fail + 1 }
+    if test_ai_max_iterations() { pass = pass + 1 } else { fail = fail + 1 }
+
+    // Category 7: State operations (8)
+    if test_ai_state_new() { pass = pass + 1 } else { fail = fail + 1 }
+    if test_ai_state_set_get() { pass = pass + 1 } else { fail = fail + 1 }
+    if test_ai_state_reg_count() { pass = pass + 1 } else { fail = fail + 1 }
+    if test_ai_state_out_of_bounds() { pass = pass + 1 } else { fail = fail + 1 }
+    if test_ai_state_join() { pass = pass + 1 } else { fail = fail + 1 }
+    if test_ai_state_eq() { pass = pass + 1 } else { fail = fail + 1 }
+    if test_ai_state_copy() { pass = pass + 1 } else { fail = fail + 1 }
+    if test_ai_state_widen() { pass = pass + 1 } else { fail = fail + 1 }
+
+    // Category 8: Integration (9)
+    if test_ai_full_constant_prop() { pass = pass + 1 } else { fail = fail + 1 }
+    if test_ai_full_sign_analysis() { pass = pass + 1 } else { fail = fail + 1 }
+    if test_ai_full_non_negative() { pass = pass + 1 } else { fail = fail + 1 }
+    if test_ai_full_non_zero() { pass = pass + 1 } else { fail = fail + 1 }
+    if test_ai_full_range_check() { pass = pass + 1 } else { fail = fail + 1 }
+    if test_ai_full_diamond_merge() { pass = pass + 1 } else { fail = fail + 1 }
+    if test_ai_full_comparison_refine() { pass = pass + 1 } else { fail = fail + 1 }
+    if test_ai_full_neg_chain() { pass = pass + 1 } else { fail = fail + 1 }
+    if test_ai_full_multi_block_chain() { pass = pass + 1 } else { fail = fail + 1 }
+
+    // Return: 0 if all pass, else number of failures
+    fail
+}
+
+// main removed — called from bootstrap main.sio via ai_run_all_tests()

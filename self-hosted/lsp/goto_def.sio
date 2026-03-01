@@ -1,0 +1,2776 @@
+// self-hosted::lsp::goto_def -- LSP go-to-definition and find-references
+//
+// Implements the core symbol table, definition tracking, and reference
+// collection needed by textDocument/definition and textDocument/references
+// LSP requests.  All string data is represented as i64 name hashes
+// (intern IDs); the actual text lives in the StringInterner and is
+// resolved at the transport boundary.
+//
+// The module maintains a flat-arena context (LspgContext) with:
+//   - Definition table   (4096 entries)
+//   - Reference table    (8192 entries)
+//   - Symbol table       (4096 entries)
+//   - Result list        (512 entries)
+//
+// No heap allocation, no recursive structures.  Every lookup is a
+// linear scan over the arena -- perfectly adequate for files under
+// a few thousand definitions.
+//
+// Naming convention: all public names use the `lspg_` prefix to avoid
+// global namespace collisions.
+
+// ============================================================================
+// Section 1: CONSTANTS
+// ============================================================================
+
+let LSPG_MAX_DEFS: i64    = 4096
+let LSPG_MAX_REFS: i64    = 8192
+let LSPG_MAX_FILES: i64   = 256
+let LSPG_MAX_RESULTS: i64 = 512
+let LSPG_MAX_SYMBOLS: i64 = 4096
+let LSPG_INVALID: i64     = 0 - 1
+
+// ============================================================================
+// Section 2: ENUMS
+// ============================================================================
+
+enum LspgSymKind {
+    GSymFunction,
+    GSymVariable,
+    GSymType,
+    GSymField,
+    GSymModule,
+    GSymConstant,
+    GSymParam,
+    GSymImport,
+}
+
+enum LspgRefKind {
+    RefUsage,
+    RefDefinition,
+    RefWrite,
+    RefRead,
+    RefImport,
+}
+
+// ============================================================================
+// Section 3: CORE STRUCTS
+// ============================================================================
+
+struct LspgLocation {
+    file_id: i64,
+    line: i64,
+    col: i64,
+    end_line: i64,
+    end_col: i64,
+}
+
+struct LspgDefinition {
+    id: i64,
+    sym_kind: LspgSymKind,
+    name_hash: i64,
+    loc: LspgLocation,
+    scope_depth: i64,
+}
+
+struct LspgReference {
+    def_id: i64,
+    kind: LspgRefKind,
+    loc: LspgLocation,
+}
+
+struct LspgSymbol {
+    name_hash: i64,
+    def_id: i64,
+    sym_kind: LspgSymKind,
+    ref_start: i64,
+    ref_count: i64,
+    loc: LspgLocation,
+}
+
+struct LspgResultList {
+    results: [LspgLocation; 512],
+    count: i64,
+}
+
+struct LspgContext {
+    defs: [LspgDefinition; 4096],
+    def_count: i64,
+    refs: [LspgReference; 8192],
+    ref_count: i64,
+    symbols: [LspgSymbol; 4096],
+    sym_count: i64,
+    results: LspgResultList,
+    current_file_id: i64,
+}
+
+// ============================================================================
+// Section 4: DEFAULT VALUE CONSTRUCTORS
+// ============================================================================
+
+fn lspg_location_zero() -> LspgLocation {
+    LspgLocation {
+        file_id: 0,
+        line: 0,
+        col: 0,
+        end_line: 0,
+        end_col: 0,
+    }
+}
+
+fn lspg_definition_zero() -> LspgDefinition {
+    LspgDefinition {
+        id: 0 - 1,
+        sym_kind: LspgSymKind::GSymVariable,
+        name_hash: 0,
+        loc: lspg_location_zero(),
+        scope_depth: 0,
+    }
+}
+
+fn lspg_reference_zero() -> LspgReference {
+    LspgReference {
+        def_id: 0 - 1,
+        kind: LspgRefKind::RefUsage,
+        loc: lspg_location_zero(),
+    }
+}
+
+fn lspg_symbol_zero() -> LspgSymbol {
+    LspgSymbol {
+        name_hash: 0,
+        def_id: 0 - 1,
+        sym_kind: LspgSymKind::GSymVariable,
+        ref_start: 0,
+        ref_count: 0,
+        loc: lspg_location_zero(),
+    }
+}
+
+fn lspg_result_list_zero() -> LspgResultList {
+    LspgResultList {
+        results: [lspg_location_zero(); 512],
+        count: 0,
+    }
+}
+
+// ============================================================================
+// Section 5: CONTEXT CONSTRUCTOR
+// ============================================================================
+
+fn lspg_context_new() -> LspgContext {
+    LspgContext {
+        defs: [lspg_definition_zero(); 4096],
+        def_count: 0,
+        refs: [lspg_reference_zero(); 8192],
+        ref_count: 0,
+        symbols: [lspg_symbol_zero(); 4096],
+        sym_count: 0,
+        results: lspg_result_list_zero(),
+        current_file_id: 0,
+    }
+}
+
+// ============================================================================
+// Section 6: LOCATION FUNCTIONS
+// ============================================================================
+
+fn lspg_location_new(file_id: i64, line: i64, col: i64, end_line: i64, end_col: i64) -> LspgLocation {
+    LspgLocation {
+        file_id: file_id,
+        line: line,
+        col: col,
+        end_line: end_line,
+        end_col: end_col,
+    }
+}
+
+fn lspg_location_eq(a: &LspgLocation, b: &LspgLocation) -> bool {
+    a.file_id == b.file_id
+        && a.line == b.line
+        && a.col == b.col
+        && a.end_line == b.end_line
+        && a.end_col == b.end_col
+}
+
+// Returns true if the cursor position (line, col) falls within the span
+// described by loc.  The span is inclusive on both endpoints.
+fn lspg_location_contains(loc: &LspgLocation, line: i64, col: i64) -> bool {
+    if line < loc.line { return false }
+    if line > loc.end_line { return false }
+    // Single-line span
+    if loc.line == loc.end_line {
+        return col >= loc.col && col <= loc.end_col
+    }
+    // Multi-line span: first line, last line, or middle line
+    if line == loc.line {
+        return col >= loc.col
+    }
+    if line == loc.end_line {
+        return col <= loc.end_col
+    }
+    // Strictly between start and end lines -- always contained
+    true
+}
+
+// Returns true if two locations overlap at all
+fn lspg_location_overlaps(a: &LspgLocation, b: &LspgLocation) -> bool {
+    if a.file_id == b.file_id {
+        // Check that neither span is entirely before the other
+        let a_before_b = a.end_line < b.line || (a.end_line == b.line && a.end_col < b.col)
+        let b_before_a = b.end_line < a.line || (b.end_line == a.line && b.end_col < a.col)
+        if a_before_b { return false }
+        if b_before_a { return false }
+        return true
+    }
+    false
+}
+
+// Returns the length of a location span in columns (single-line only)
+fn lspg_location_span(loc: &LspgLocation) -> i64 {
+    if loc.line == loc.end_line {
+        return loc.end_col - loc.col + 1
+    }
+    // For multi-line spans, return -1 to indicate multi-line
+    0 - 1
+}
+
+// Returns true if a location is the zero/invalid location
+fn lspg_location_is_zero(loc: &LspgLocation) -> bool {
+    loc.file_id == 0 && loc.line == 0 && loc.col == 0
+        && loc.end_line == 0 && loc.end_col == 0
+}
+
+// ============================================================================
+// Section 7: DEFINITION MANAGEMENT
+// ============================================================================
+
+fn lspg_add_definition(ctx: &! LspgContext, kind: LspgSymKind, name_hash: i64, loc: LspgLocation, scope: i64) -> i64 with Mut, Div, Panic {
+    if ctx.def_count >= LSPG_MAX_DEFS {
+        return LSPG_INVALID
+    }
+    let idx = ctx.def_count
+    ctx.defs[idx as usize] = LspgDefinition {
+        id: idx,
+        sym_kind: kind,
+        name_hash: name_hash,
+        loc: loc,
+        scope_depth: scope,
+    }
+    ctx.def_count = idx + 1
+    idx
+}
+
+fn lspg_def_count(ctx: &LspgContext) -> i64 {
+    ctx.def_count
+}
+
+fn lspg_def_location(ctx: &LspgContext, def_id: i64) -> LspgLocation with Div, Panic {
+    if def_id < 0 || def_id >= ctx.def_count {
+        return lspg_location_zero()
+    }
+    ctx.defs[def_id as usize].loc
+}
+
+fn lspg_def_name_hash(ctx: &LspgContext, def_id: i64) -> i64 with Div, Panic {
+    if def_id < 0 || def_id >= ctx.def_count {
+        return 0
+    }
+    ctx.defs[def_id as usize].name_hash
+}
+
+fn lspg_def_kind(ctx: &LspgContext, def_id: i64) -> LspgSymKind with Div, Panic {
+    if def_id < 0 || def_id >= ctx.def_count {
+        return LspgSymKind::GSymVariable
+    }
+    ctx.defs[def_id as usize].sym_kind
+}
+
+fn lspg_def_scope(ctx: &LspgContext, def_id: i64) -> i64 with Div, Panic {
+    if def_id < 0 || def_id >= ctx.def_count {
+        return 0 - 1
+    }
+    ctx.defs[def_id as usize].scope_depth
+}
+
+// Find the definition whose span contains (line, col) in the current file.
+// Returns the definition id, or LSPG_INVALID if none found.
+fn lspg_find_def_at(ctx: &LspgContext, line: i64, col: i64) -> i64 with Mut, Div, Panic {
+    var i: i64 = 0
+    var best: i64 = LSPG_INVALID
+    var best_span: i64 = 999999
+    while i < ctx.def_count {
+        let d = &ctx.defs[i as usize]
+        if d.loc.file_id == ctx.current_file_id {
+            if lspg_location_contains(&d.loc, line, col) {
+                // Prefer the tightest enclosing span
+                let span = lspg_location_span(&d.loc)
+                if span >= 0 && span < best_span {
+                    best = i
+                    best_span = span
+                }
+                // If multi-line span and no better found yet, take it
+                if span < 0 && best == LSPG_INVALID {
+                    best = i
+                }
+            }
+        }
+        i = i + 1
+    }
+    best
+}
+
+// Find a definition by exact name hash.  Returns the first match, or LSPG_INVALID.
+fn lspg_find_def_by_hash(ctx: &LspgContext, name_hash: i64) -> i64 with Mut, Div, Panic {
+    var i: i64 = 0
+    while i < ctx.def_count {
+        if ctx.defs[i as usize].name_hash == name_hash {
+            return i
+        }
+        i = i + 1
+    }
+    LSPG_INVALID
+}
+
+// Find a definition by name hash and kind.  Returns first match or LSPG_INVALID.
+fn lspg_find_def_by_hash_and_kind(ctx: &LspgContext, name_hash: i64, kind: LspgSymKind) -> i64 with Mut, Div, Panic {
+    var i: i64 = 0
+    while i < ctx.def_count {
+        let d = &ctx.defs[i as usize]
+        if d.name_hash == name_hash {
+            let kind_match = match d.sym_kind {
+                LspgSymKind::GSymFunction => match kind {
+                    LspgSymKind::GSymFunction => true,
+                    _ => false,
+                },
+                LspgSymKind::GSymVariable => match kind {
+                    LspgSymKind::GSymVariable => true,
+                    _ => false,
+                },
+                LspgSymKind::GSymType => match kind {
+                    LspgSymKind::GSymType => true,
+                    _ => false,
+                },
+                LspgSymKind::GSymField => match kind {
+                    LspgSymKind::GSymField => true,
+                    _ => false,
+                },
+                LspgSymKind::GSymModule => match kind {
+                    LspgSymKind::GSymModule => true,
+                    _ => false,
+                },
+                LspgSymKind::GSymConstant => match kind {
+                    LspgSymKind::GSymConstant => true,
+                    _ => false,
+                },
+                LspgSymKind::GSymParam => match kind {
+                    LspgSymKind::GSymParam => true,
+                    _ => false,
+                },
+                LspgSymKind::GSymImport => match kind {
+                    LspgSymKind::GSymImport => true,
+                    _ => false,
+                },
+            }
+            if kind_match {
+                return i
+            }
+        }
+        i = i + 1
+    }
+    LSPG_INVALID
+}
+
+// Count definitions with a given name hash
+fn lspg_count_defs_by_hash(ctx: &LspgContext, name_hash: i64) -> i64 with Mut, Div, Panic {
+    var i: i64 = 0
+    var count: i64 = 0
+    while i < ctx.def_count {
+        if ctx.defs[i as usize].name_hash == name_hash {
+            count = count + 1
+        }
+        i = i + 1
+    }
+    count
+}
+
+// Find the deepest-scope definition with a given name hash
+fn lspg_find_innermost_def(ctx: &LspgContext, name_hash: i64) -> i64 with Mut, Div, Panic {
+    var i: i64 = 0
+    var best: i64 = LSPG_INVALID
+    var best_depth: i64 = 0 - 1
+    while i < ctx.def_count {
+        let d = &ctx.defs[i as usize]
+        if d.name_hash == name_hash && d.scope_depth > best_depth {
+            best = i
+            best_depth = d.scope_depth
+        }
+        i = i + 1
+    }
+    best
+}
+
+// ============================================================================
+// Section 8: REFERENCE MANAGEMENT
+// ============================================================================
+
+fn lspg_add_reference(ctx: &! LspgContext, def_id: i64, kind: LspgRefKind, loc: LspgLocation) -> i64 with Mut, Div, Panic {
+    if ctx.ref_count >= LSPG_MAX_REFS {
+        return LSPG_INVALID
+    }
+    let idx = ctx.ref_count
+    ctx.refs[idx as usize] = LspgReference {
+        def_id: def_id,
+        kind: kind,
+        loc: loc,
+    }
+    ctx.ref_count = idx + 1
+    idx
+}
+
+fn lspg_ref_count(ctx: &LspgContext) -> i64 {
+    ctx.ref_count
+}
+
+// Find a reference whose span contains (line, col) in the current file.
+// Returns the reference index, or LSPG_INVALID.
+fn lspg_find_ref_at(ctx: &LspgContext, line: i64, col: i64) -> i64 with Mut, Div, Panic {
+    var i: i64 = 0
+    var best: i64 = LSPG_INVALID
+    var best_span: i64 = 999999
+    while i < ctx.ref_count {
+        let r = &ctx.refs[i as usize]
+        if r.loc.file_id == ctx.current_file_id {
+            if lspg_location_contains(&r.loc, line, col) {
+                let span = lspg_location_span(&r.loc)
+                if span >= 0 && span < best_span {
+                    best = i
+                    best_span = span
+                }
+                if span < 0 && best == LSPG_INVALID {
+                    best = i
+                }
+            }
+        }
+        i = i + 1
+    }
+    best
+}
+
+// Count how many references point to a given definition
+fn lspg_refs_for_def(ctx: &LspgContext, def_id: i64) -> i64 with Mut, Div, Panic {
+    var i: i64 = 0
+    var count: i64 = 0
+    while i < ctx.ref_count {
+        if ctx.refs[i as usize].def_id == def_id {
+            count = count + 1
+        }
+        i = i + 1
+    }
+    count
+}
+
+// Count references of a specific kind for a given definition
+fn lspg_refs_for_def_kind(ctx: &LspgContext, def_id: i64, kind: LspgRefKind) -> i64 with Mut, Div, Panic {
+    var i: i64 = 0
+    var count: i64 = 0
+    while i < ctx.ref_count {
+        let r = &ctx.refs[i as usize]
+        if r.def_id == def_id {
+            let kind_match = match r.kind {
+                LspgRefKind::RefUsage => match kind {
+                    LspgRefKind::RefUsage => true,
+                    _ => false,
+                },
+                LspgRefKind::RefDefinition => match kind {
+                    LspgRefKind::RefDefinition => true,
+                    _ => false,
+                },
+                LspgRefKind::RefWrite => match kind {
+                    LspgRefKind::RefWrite => true,
+                    _ => false,
+                },
+                LspgRefKind::RefRead => match kind {
+                    LspgRefKind::RefRead => true,
+                    _ => false,
+                },
+                LspgRefKind::RefImport => match kind {
+                    LspgRefKind::RefImport => true,
+                    _ => false,
+                },
+            }
+            if kind_match {
+                count = count + 1
+            }
+        }
+        i = i + 1
+    }
+    count
+}
+
+// Get the def_id that a reference at index `ref_idx` points to
+fn lspg_ref_def_id(ctx: &LspgContext, ref_idx: i64) -> i64 with Div, Panic {
+    if ref_idx < 0 || ref_idx >= ctx.ref_count {
+        return LSPG_INVALID
+    }
+    ctx.refs[ref_idx as usize].def_id
+}
+
+// Get the location of a reference at index `ref_idx`
+fn lspg_ref_location(ctx: &LspgContext, ref_idx: i64) -> LspgLocation with Div, Panic {
+    if ref_idx < 0 || ref_idx >= ctx.ref_count {
+        return lspg_location_zero()
+    }
+    ctx.refs[ref_idx as usize].loc
+}
+
+// ============================================================================
+// Section 9: SYMBOL TABLE MANAGEMENT
+// ============================================================================
+
+fn lspg_add_symbol(ctx: &! LspgContext, name_hash: i64, def_id: i64, kind: LspgSymKind, loc: LspgLocation) -> i64 with Mut, Div, Panic {
+    if ctx.sym_count >= LSPG_MAX_SYMBOLS {
+        return LSPG_INVALID
+    }
+    let idx = ctx.sym_count
+    ctx.symbols[idx as usize] = LspgSymbol {
+        name_hash: name_hash,
+        def_id: def_id,
+        sym_kind: kind,
+        ref_start: 0,
+        ref_count: 0,
+        loc: loc,
+    }
+    ctx.sym_count = idx + 1
+    idx
+}
+
+fn lspg_sym_count(ctx: &LspgContext) -> i64 {
+    ctx.sym_count
+}
+
+// Find a symbol by name hash.  Returns the symbol index, or LSPG_INVALID.
+fn lspg_find_symbol_by_hash(ctx: &LspgContext, name_hash: i64) -> i64 with Mut, Div, Panic {
+    var i: i64 = 0
+    while i < ctx.sym_count {
+        if ctx.symbols[i as usize].name_hash == name_hash {
+            return i
+        }
+        i = i + 1
+    }
+    LSPG_INVALID
+}
+
+// Find a symbol by def_id.  Returns the symbol index, or LSPG_INVALID.
+fn lspg_find_symbol_by_def(ctx: &LspgContext, def_id: i64) -> i64 with Mut, Div, Panic {
+    var i: i64 = 0
+    while i < ctx.sym_count {
+        if ctx.symbols[i as usize].def_id == def_id {
+            return i
+        }
+        i = i + 1
+    }
+    LSPG_INVALID
+}
+
+// Count symbols of a given kind
+fn lspg_count_symbols_by_kind(ctx: &LspgContext, kind: LspgSymKind) -> i64 with Mut, Div, Panic {
+    var i: i64 = 0
+    var count: i64 = 0
+    while i < ctx.sym_count {
+        let s = &ctx.symbols[i as usize]
+        let kind_match = match s.sym_kind {
+            LspgSymKind::GSymFunction => match kind {
+                LspgSymKind::GSymFunction => true,
+                _ => false,
+            },
+            LspgSymKind::GSymVariable => match kind {
+                LspgSymKind::GSymVariable => true,
+                _ => false,
+            },
+            LspgSymKind::GSymType => match kind {
+                LspgSymKind::GSymType => true,
+                _ => false,
+            },
+            LspgSymKind::GSymField => match kind {
+                LspgSymKind::GSymField => true,
+                _ => false,
+            },
+            LspgSymKind::GSymModule => match kind {
+                LspgSymKind::GSymModule => true,
+                _ => false,
+            },
+            LspgSymKind::GSymConstant => match kind {
+                LspgSymKind::GSymConstant => true,
+                _ => false,
+            },
+            LspgSymKind::GSymParam => match kind {
+                LspgSymKind::GSymParam => true,
+                _ => false,
+            },
+            LspgSymKind::GSymImport => match kind {
+                LspgSymKind::GSymImport => true,
+                _ => false,
+            },
+        }
+        if kind_match {
+            count = count + 1
+        }
+        i = i + 1
+    }
+    count
+}
+
+// Get the symbol's def_id at index sym_idx
+fn lspg_symbol_def_id(ctx: &LspgContext, sym_idx: i64) -> i64 with Div, Panic {
+    if sym_idx < 0 || sym_idx >= ctx.sym_count {
+        return LSPG_INVALID
+    }
+    ctx.symbols[sym_idx as usize].def_id
+}
+
+// Get the symbol's name hash at index sym_idx
+fn lspg_symbol_name_hash(ctx: &LspgContext, sym_idx: i64) -> i64 with Div, Panic {
+    if sym_idx < 0 || sym_idx >= ctx.sym_count {
+        return 0
+    }
+    ctx.symbols[sym_idx as usize].name_hash
+}
+
+// Update a symbol's ref_start and ref_count fields
+fn lspg_symbol_set_refs(ctx: &! LspgContext, sym_idx: i64, ref_start: i64, ref_count: i64) with Mut, Div, Panic {
+    if sym_idx >= 0 && sym_idx < ctx.sym_count {
+        ctx.symbols[sym_idx as usize].ref_start = ref_start
+        ctx.symbols[sym_idx as usize].ref_count = ref_count
+    }
+}
+
+// ============================================================================
+// Section 10: RESULT LIST MANAGEMENT
+// ============================================================================
+
+fn lspg_clear_results(ctx: &! LspgContext) with Mut {
+    ctx.results.count = 0
+}
+
+fn lspg_result_count(ctx: &LspgContext) -> i64 {
+    ctx.results.count
+}
+
+fn lspg_result_at(ctx: &LspgContext, idx: i64) -> LspgLocation with Div, Panic {
+    if idx < 0 || idx >= ctx.results.count {
+        return lspg_location_zero()
+    }
+    ctx.results.results[idx as usize]
+}
+
+fn lspg_add_result(ctx: &! LspgContext, loc: LspgLocation) -> bool with Mut, Div, Panic {
+    if ctx.results.count >= LSPG_MAX_RESULTS {
+        return false
+    }
+    ctx.results.results[ctx.results.count as usize] = loc
+    ctx.results.count = ctx.results.count + 1
+    true
+}
+
+// Check if a location is already in the result list (deduplication)
+fn lspg_result_contains(ctx: &LspgContext, loc: &LspgLocation) -> bool with Mut, Div, Panic {
+    var i: i64 = 0
+    while i < ctx.results.count {
+        if lspg_location_eq(&ctx.results.results[i as usize], loc) {
+            return true
+        }
+        i = i + 1
+    }
+    false
+}
+
+// Add a location to the result list only if not already present
+fn lspg_add_result_unique(ctx: &! LspgContext, loc: LspgLocation) -> bool with Mut, Div, Panic {
+    if lspg_result_contains(ctx, &loc) {
+        return false
+    }
+    lspg_add_result(ctx, loc)
+}
+
+// ============================================================================
+// Section 11: FILE MANAGEMENT
+// ============================================================================
+
+fn lspg_set_current_file(ctx: &! LspgContext, file_id: i64) with Mut {
+    ctx.current_file_id = file_id
+}
+
+fn lspg_current_file(ctx: &LspgContext) -> i64 {
+    ctx.current_file_id
+}
+
+// ============================================================================
+// Section 12: CURSOR RESOLUTION
+// ============================================================================
+
+// Resolve the def_id at a cursor position.  First checks if the cursor is
+// on a definition site; if not, checks references and follows the link
+// back to the definition.  Returns LSPG_INVALID if nothing found.
+fn lspg_resolve_at_cursor(ctx: &LspgContext, line: i64, col: i64) -> i64 with Mut, Div, Panic {
+    // First: is the cursor directly on a definition?
+    let def_at = lspg_find_def_at(ctx, line, col)
+    if def_at >= 0 {
+        return def_at
+    }
+    // Second: is the cursor on a reference?  Follow to its definition.
+    let ref_at = lspg_find_ref_at(ctx, line, col)
+    if ref_at >= 0 {
+        return lspg_ref_def_id(ctx, ref_at)
+    }
+    LSPG_INVALID
+}
+
+// Resolve the def_id at a cursor position, but only return it if it matches
+// a specific file_id.  Useful for cross-file navigation.
+fn lspg_resolve_at_cursor_in_file(ctx: &LspgContext, file_id: i64, line: i64, col: i64) -> i64 with Mut, Div, Panic {
+    let def_id = lspg_resolve_at_cursor(ctx, line, col)
+    if def_id == LSPG_INVALID {
+        return LSPG_INVALID
+    }
+    let loc = lspg_def_location(ctx, def_id)
+    if loc.file_id == file_id {
+        return def_id
+    }
+    // Even if def is in a different file, still return it -- goto-def
+    // is supposed to jump across files
+    def_id
+}
+
+// ============================================================================
+// Section 13: COLLECT REFERENCES
+// ============================================================================
+
+// Collect all reference locations for a given def_id into the result list.
+fn lspg_collect_references(ctx: &! LspgContext, def_id: i64) with Mut, Div, Panic {
+    lspg_clear_results(ctx)
+    var i: i64 = 0
+    while i < ctx.ref_count {
+        if ctx.refs[i as usize].def_id == def_id {
+            let added = lspg_add_result(ctx, ctx.refs[i as usize].loc)
+            if added == false {
+                return
+            }
+        }
+        i = i + 1
+    }
+}
+
+// Collect references of a specific kind for a given def_id
+fn lspg_collect_references_by_kind(ctx: &! LspgContext, def_id: i64, kind: LspgRefKind) with Mut, Div, Panic {
+    lspg_clear_results(ctx)
+    var i: i64 = 0
+    while i < ctx.ref_count {
+        let r = &ctx.refs[i as usize]
+        if r.def_id == def_id {
+            let kind_match = match r.kind {
+                LspgRefKind::RefUsage => match kind {
+                    LspgRefKind::RefUsage => true,
+                    _ => false,
+                },
+                LspgRefKind::RefDefinition => match kind {
+                    LspgRefKind::RefDefinition => true,
+                    _ => false,
+                },
+                LspgRefKind::RefWrite => match kind {
+                    LspgRefKind::RefWrite => true,
+                    _ => false,
+                },
+                LspgRefKind::RefRead => match kind {
+                    LspgRefKind::RefRead => true,
+                    _ => false,
+                },
+                LspgRefKind::RefImport => match kind {
+                    LspgRefKind::RefImport => true,
+                    _ => false,
+                },
+            }
+            if kind_match {
+                let added = lspg_add_result(ctx, r.loc)
+                if added == false {
+                    return
+                }
+            }
+        }
+        i = i + 1
+    }
+}
+
+// Collect all definitions that share a given name hash into the result list.
+fn lspg_collect_definitions_by_name(ctx: &! LspgContext, name_hash: i64) with Mut, Div, Panic {
+    lspg_clear_results(ctx)
+    var i: i64 = 0
+    while i < ctx.def_count {
+        if ctx.defs[i as usize].name_hash == name_hash {
+            let added = lspg_add_result(ctx, ctx.defs[i as usize].loc)
+            if added == false {
+                return
+            }
+        }
+        i = i + 1
+    }
+}
+
+// Collect all references AND the definition location for a def_id.
+// This is useful for "highlight all occurrences" behavior.
+fn lspg_collect_all_occurrences(ctx: &! LspgContext, def_id: i64) with Mut, Div, Panic {
+    lspg_clear_results(ctx)
+    // Add the definition location first
+    if def_id >= 0 && def_id < ctx.def_count {
+        let added = lspg_add_result(ctx, ctx.defs[def_id as usize].loc)
+        if added == false {
+            return
+        }
+    }
+    // Then add all reference locations
+    var i: i64 = 0
+    while i < ctx.ref_count {
+        if ctx.refs[i as usize].def_id == def_id {
+            let added = lspg_add_result(ctx, ctx.refs[i as usize].loc)
+            if added == false {
+                return
+            }
+        }
+        i = i + 1
+    }
+}
+
+// Collect definitions in a specific file
+fn lspg_collect_defs_in_file(ctx: &! LspgContext, file_id: i64) with Mut, Div, Panic {
+    lspg_clear_results(ctx)
+    var i: i64 = 0
+    while i < ctx.def_count {
+        if ctx.defs[i as usize].loc.file_id == file_id {
+            let added = lspg_add_result(ctx, ctx.defs[i as usize].loc)
+            if added == false {
+                return
+            }
+        }
+        i = i + 1
+    }
+}
+
+// Collect references in a specific file
+fn lspg_collect_refs_in_file(ctx: &! LspgContext, file_id: i64) with Mut, Div, Panic {
+    lspg_clear_results(ctx)
+    var i: i64 = 0
+    while i < ctx.ref_count {
+        if ctx.refs[i as usize].loc.file_id == file_id {
+            let added = lspg_add_result(ctx, ctx.refs[i as usize].loc)
+            if added == false {
+                return
+            }
+        }
+        i = i + 1
+    }
+}
+
+// ============================================================================
+// Section 14: BUILD SYMBOL <-> DEFINITION MAPPING
+// ============================================================================
+
+// Walk all definitions and ensure each has a corresponding symbol entry.
+// If a symbol with matching name_hash already exists, skip it (first wins).
+fn lspg_build_def_map(ctx: &! LspgContext) with Mut, Div, Panic {
+    var i: i64 = 0
+    while i < ctx.def_count {
+        let d = &ctx.defs[i as usize]
+        let existing = lspg_find_symbol_by_hash(ctx, d.name_hash)
+        if existing == LSPG_INVALID {
+            let added = lspg_add_symbol(ctx, d.name_hash, d.id, d.sym_kind, d.loc)
+            // Ignore overflow (added == LSPG_INVALID)
+            let _ = added
+        }
+        i = i + 1
+    }
+}
+
+// Build a reverse index: for each symbol, count how many references
+// point to the symbol's def_id and record the starting offset.
+// This is a two-pass algorithm: first count, then assign start offsets.
+fn lspg_build_ref_index(ctx: &! LspgContext) with Mut, Div, Panic {
+    // Pass 1: count references per symbol
+    var s: i64 = 0
+    while s < ctx.sym_count {
+        let def_id = ctx.symbols[s as usize].def_id
+        var count: i64 = 0
+        var r: i64 = 0
+        while r < ctx.ref_count {
+            if ctx.refs[r as usize].def_id == def_id {
+                count = count + 1
+            }
+            r = r + 1
+        }
+        ctx.symbols[s as usize].ref_count = count
+        s = s + 1
+    }
+
+    // Pass 2: assign start offsets (cumulative sum)
+    var offset: i64 = 0
+    var s2: i64 = 0
+    while s2 < ctx.sym_count {
+        ctx.symbols[s2 as usize].ref_start = offset
+        offset = offset + ctx.symbols[s2 as usize].ref_count
+        s2 = s2 + 1
+    }
+}
+
+// ============================================================================
+// Section 15: GOTO DEFINITION HANDLER
+// ============================================================================
+
+// Handle a textDocument/definition request.  Resolves the cursor position
+// to a definition and places the definition location in the result list.
+// Returns true if a definition was found, false otherwise.
+fn lspg_handle_definition(ctx: &! LspgContext, line: i64, col: i64) -> bool with Mut, Div, Panic {
+    lspg_clear_results(ctx)
+    let def_id = lspg_resolve_at_cursor(ctx, line, col)
+    if def_id == LSPG_INVALID {
+        return false
+    }
+    let loc = lspg_def_location(ctx, def_id)
+    if lspg_location_is_zero(&loc) {
+        return false
+    }
+    let added = lspg_add_result(ctx, loc)
+    added
+}
+
+// Handle goto-definition where the cursor may be on a reference that
+// points to a definition in a different file.  The result includes the
+// definition location regardless of file_id.
+fn lspg_handle_definition_cross_file(ctx: &! LspgContext, file_id: i64, line: i64, col: i64) -> bool with Mut, Div, Panic {
+    let saved_file = ctx.current_file_id
+    lspg_set_current_file(ctx, file_id)
+    let result = lspg_handle_definition(ctx, line, col)
+    // Restore the previous file context
+    lspg_set_current_file(ctx, saved_file)
+    result
+}
+
+// ============================================================================
+// Section 16: FIND REFERENCES HANDLER
+// ============================================================================
+
+// Handle a textDocument/references request.  Resolves the cursor position
+// to a definition and collects all references to that definition into the
+// result list.  Returns true if any references were found.
+fn lspg_handle_references(ctx: &! LspgContext, line: i64, col: i64) -> bool with Mut, Div, Panic {
+    lspg_clear_results(ctx)
+    let def_id = lspg_resolve_at_cursor(ctx, line, col)
+    if def_id == LSPG_INVALID {
+        return false
+    }
+    lspg_collect_references(ctx, def_id)
+    ctx.results.count > 0
+}
+
+// Handle find-references including the definition site in results
+fn lspg_handle_references_with_def(ctx: &! LspgContext, line: i64, col: i64) -> bool with Mut, Div, Panic {
+    lspg_clear_results(ctx)
+    let def_id = lspg_resolve_at_cursor(ctx, line, col)
+    if def_id == LSPG_INVALID {
+        return false
+    }
+    lspg_collect_all_occurrences(ctx, def_id)
+    ctx.results.count > 0
+}
+
+// Handle find-references for a specific reference kind only
+fn lspg_handle_references_by_kind(ctx: &! LspgContext, line: i64, col: i64, kind: LspgRefKind) -> bool with Mut, Div, Panic {
+    lspg_clear_results(ctx)
+    let def_id = lspg_resolve_at_cursor(ctx, line, col)
+    if def_id == LSPG_INVALID {
+        return false
+    }
+    lspg_collect_references_by_kind(ctx, def_id, kind)
+    ctx.results.count > 0
+}
+
+// ============================================================================
+// Section 17: SCOPE-AWARE RESOLUTION HELPERS
+// ============================================================================
+
+// Check whether a definition at `def_id` is visible at scope `depth`.
+// A definition is visible if its scope_depth <= depth.
+fn lspg_def_visible_at(ctx: &LspgContext, def_id: i64, depth: i64) -> bool with Div, Panic {
+    if def_id < 0 || def_id >= ctx.def_count {
+        return false
+    }
+    ctx.defs[def_id as usize].scope_depth <= depth
+}
+
+// Resolve a name hash at a given scope depth.  Returns the innermost
+// visible definition with that name, or LSPG_INVALID.
+fn lspg_resolve_name_at_scope(ctx: &LspgContext, name_hash: i64, depth: i64) -> i64 with Mut, Div, Panic {
+    var i: i64 = 0
+    var best: i64 = LSPG_INVALID
+    var best_depth: i64 = 0 - 1
+    while i < ctx.def_count {
+        let d = &ctx.defs[i as usize]
+        if d.name_hash == name_hash && d.scope_depth <= depth && d.scope_depth > best_depth {
+            best = i
+            best_depth = d.scope_depth
+        }
+        i = i + 1
+    }
+    best
+}
+
+// Check if a definition shadows another definition with the same name
+fn lspg_is_shadowing(ctx: &LspgContext, def_id: i64) -> bool with Mut, Div, Panic {
+    if def_id < 0 || def_id >= ctx.def_count {
+        return false
+    }
+    let name = ctx.defs[def_id as usize].name_hash
+    let depth = ctx.defs[def_id as usize].scope_depth
+    var i: i64 = 0
+    while i < ctx.def_count {
+        if i == def_id {
+            i = i + 1
+            continue
+        }
+        let d = &ctx.defs[i as usize]
+        if d.name_hash == name && d.scope_depth < depth {
+            return true
+        }
+        i = i + 1
+    }
+    false
+}
+
+// ============================================================================
+// Section 18: DIAGNOSTIC HELPERS
+// ============================================================================
+
+// Check if a definition has zero references (unused symbol)
+fn lspg_def_is_unused(ctx: &LspgContext, def_id: i64) -> bool with Mut, Div, Panic {
+    lspg_refs_for_def(ctx, def_id) == 0
+}
+
+// Count definitions in the entire context that are unused
+fn lspg_count_unused_defs(ctx: &LspgContext) -> i64 with Mut, Div, Panic {
+    var i: i64 = 0
+    var count: i64 = 0
+    while i < ctx.def_count {
+        if lspg_refs_for_def(ctx, i) == 0 {
+            count = count + 1
+        }
+        i = i + 1
+    }
+    count
+}
+
+// Count how many distinct definitions are referenced from a given file
+fn lspg_count_defs_referenced_from(ctx: &LspgContext, file_id: i64) -> i64 with Mut, Div, Panic {
+    // Use a simple bitmap approach: track seen def_ids
+    // Since LSPG_MAX_DEFS is 4096, use a simple loop with dedup
+    var seen: [i64; 512] = [0 - 1; 512]
+    var seen_count: i64 = 0
+    var i: i64 = 0
+    while i < ctx.ref_count {
+        let r = &ctx.refs[i as usize]
+        if r.loc.file_id == file_id {
+            // Check if already seen
+            var already: bool = false
+            var j: i64 = 0
+            while j < seen_count {
+                if seen[j as usize] == r.def_id {
+                    already = true
+                }
+                j = j + 1
+            }
+            if already == false && seen_count < 512 {
+                seen[seen_count as usize] = r.def_id
+                seen_count = seen_count + 1
+            }
+        }
+        i = i + 1
+    }
+    seen_count
+}
+
+// ============================================================================
+// Section 19: SYMBOL KIND UTILITIES
+// ============================================================================
+
+// Convert LspgSymKind to an LSP SymbolKind integer (subset)
+fn lspg_sym_kind_to_lsp(kind: LspgSymKind) -> i64 {
+    match kind {
+        LspgSymKind::GSymFunction => 12,   // Function
+        LspgSymKind::GSymVariable => 13,   // Variable
+        LspgSymKind::GSymType     => 5,    // Class (used for types)
+        LspgSymKind::GSymField    => 8,    // Field
+        LspgSymKind::GSymModule   => 2,    // Module
+        LspgSymKind::GSymConstant => 14,   // Constant
+        LspgSymKind::GSymParam    => 13,   // Variable (params are variables)
+        LspgSymKind::GSymImport   => 2,    // Module (imports are module-like)
+    }
+}
+
+// Convert LspgRefKind to a human-readable integer code
+fn lspg_ref_kind_code(kind: LspgRefKind) -> i64 {
+    match kind {
+        LspgRefKind::RefUsage      => 1,
+        LspgRefKind::RefDefinition => 2,
+        LspgRefKind::RefWrite      => 3,
+        LspgRefKind::RefRead       => 4,
+        LspgRefKind::RefImport     => 5,
+    }
+}
+
+// Check if a kind represents a callable (function or method)
+fn lspg_kind_is_callable(kind: LspgSymKind) -> bool {
+    match kind {
+        LspgSymKind::GSymFunction => true,
+        _ => false,
+    }
+}
+
+// Check if a kind represents a type-like entity
+fn lspg_kind_is_type_like(kind: LspgSymKind) -> bool {
+    match kind {
+        LspgSymKind::GSymType   => true,
+        LspgSymKind::GSymModule => true,
+        _ => false,
+    }
+}
+
+// Check if a kind represents a value-like entity
+fn lspg_kind_is_value_like(kind: LspgSymKind) -> bool {
+    match kind {
+        LspgSymKind::GSymVariable => true,
+        LspgSymKind::GSymConstant => true,
+        LspgSymKind::GSymParam    => true,
+        LspgSymKind::GSymField    => true,
+        _ => false,
+    }
+}
+
+// ============================================================================
+// Section 20: BATCH OPERATIONS
+// ============================================================================
+
+// Register a definition and immediately create a self-reference (RefDefinition).
+// Returns the definition id.
+fn lspg_register_def_with_self_ref(ctx: &! LspgContext, kind: LspgSymKind, name_hash: i64, loc: LspgLocation, scope: i64) -> i64 with Mut, Div, Panic {
+    let def_id = lspg_add_definition(ctx, kind, name_hash, loc, scope)
+    if def_id == LSPG_INVALID {
+        return LSPG_INVALID
+    }
+    let ref_id = lspg_add_reference(ctx, def_id, LspgRefKind::RefDefinition, loc)
+    let _ = ref_id
+    def_id
+}
+
+// Register a definition, create a self-reference, and add a symbol entry.
+// Returns the definition id.
+fn lspg_register_full(ctx: &! LspgContext, kind: LspgSymKind, name_hash: i64, loc: LspgLocation, scope: i64) -> i64 with Mut, Div, Panic {
+    let def_id = lspg_register_def_with_self_ref(ctx, kind, name_hash, loc, scope)
+    if def_id == LSPG_INVALID {
+        return LSPG_INVALID
+    }
+    let sym_id = lspg_add_symbol(ctx, name_hash, def_id, kind, loc)
+    let _ = sym_id
+    def_id
+}
+
+// Add a usage reference to an existing definition by name hash lookup.
+// Returns the reference index, or LSPG_INVALID if the definition is not found.
+fn lspg_add_usage_by_name(ctx: &! LspgContext, name_hash: i64, loc: LspgLocation) -> i64 with Mut, Div, Panic {
+    let def_id = lspg_find_def_by_hash(ctx, name_hash)
+    if def_id == LSPG_INVALID {
+        return LSPG_INVALID
+    }
+    lspg_add_reference(ctx, def_id, LspgRefKind::RefUsage, loc)
+}
+
+// Add a write reference to an existing definition by name hash lookup.
+fn lspg_add_write_by_name(ctx: &! LspgContext, name_hash: i64, loc: LspgLocation) -> i64 with Mut, Div, Panic {
+    let def_id = lspg_find_def_by_hash(ctx, name_hash)
+    if def_id == LSPG_INVALID {
+        return LSPG_INVALID
+    }
+    lspg_add_reference(ctx, def_id, LspgRefKind::RefWrite, loc)
+}
+
+// Add a read reference to an existing definition by name hash lookup.
+fn lspg_add_read_by_name(ctx: &! LspgContext, name_hash: i64, loc: LspgLocation) -> i64 with Mut, Div, Panic {
+    let def_id = lspg_find_def_by_hash(ctx, name_hash)
+    if def_id == LSPG_INVALID {
+        return LSPG_INVALID
+    }
+    lspg_add_reference(ctx, def_id, LspgRefKind::RefRead, loc)
+}
+
+// Add an import reference to an existing definition by name hash lookup.
+fn lspg_add_import_ref(ctx: &! LspgContext, name_hash: i64, loc: LspgLocation) -> i64 with Mut, Div, Panic {
+    let def_id = lspg_find_def_by_hash(ctx, name_hash)
+    if def_id == LSPG_INVALID {
+        return LSPG_INVALID
+    }
+    lspg_add_reference(ctx, def_id, LspgRefKind::RefImport, loc)
+}
+
+// ============================================================================
+// Section 21: CROSS-FILE NAVIGATION HELPERS
+// ============================================================================
+
+// Given a def_id, collect all references across all files
+fn lspg_collect_cross_file_refs(ctx: &! LspgContext, def_id: i64) with Mut, Div, Panic {
+    lspg_clear_results(ctx)
+    var i: i64 = 0
+    while i < ctx.ref_count {
+        if ctx.refs[i as usize].def_id == def_id {
+            let added = lspg_add_result(ctx, ctx.refs[i as usize].loc)
+            if added == false {
+                return
+            }
+        }
+        i = i + 1
+    }
+}
+
+// Count how many files reference a given def_id
+fn lspg_count_files_referencing(ctx: &LspgContext, def_id: i64) -> i64 with Mut, Div, Panic {
+    var file_ids: [i64; 256] = [0 - 1; 256]
+    var file_count: i64 = 0
+    var i: i64 = 0
+    while i < ctx.ref_count {
+        if ctx.refs[i as usize].def_id == def_id {
+            let fid = ctx.refs[i as usize].loc.file_id
+            var already: bool = false
+            var j: i64 = 0
+            while j < file_count {
+                if file_ids[j as usize] == fid {
+                    already = true
+                }
+                j = j + 1
+            }
+            if already == false && file_count < 256 {
+                file_ids[file_count as usize] = fid
+                file_count = file_count + 1
+            }
+        }
+        i = i + 1
+    }
+    file_count
+}
+
+// ============================================================================
+// Section 22: CONTEXT STATISTICS
+// ============================================================================
+
+// Return overall statistics about the context
+fn lspg_total_entries(ctx: &LspgContext) -> i64 {
+    ctx.def_count + ctx.ref_count + ctx.sym_count
+}
+
+// Ratio of refs to defs (as integer percentage) -- a rough complexity metric
+fn lspg_ref_to_def_ratio(ctx: &LspgContext) -> i64 with Div, Panic {
+    if ctx.def_count == 0 {
+        return 0
+    }
+    (ctx.ref_count * 100) / ctx.def_count
+}
+
+// Check if the context has any data at all
+fn lspg_context_is_empty(ctx: &LspgContext) -> bool {
+    ctx.def_count == 0 && ctx.ref_count == 0 && ctx.sym_count == 0
+}
+
+// Check if the context is at capacity for definitions
+fn lspg_defs_at_capacity(ctx: &LspgContext) -> bool {
+    ctx.def_count >= LSPG_MAX_DEFS
+}
+
+// Check if the context is at capacity for references
+fn lspg_refs_at_capacity(ctx: &LspgContext) -> bool {
+    ctx.ref_count >= LSPG_MAX_REFS
+}
+
+// ============================================================================
+// Section 23: CLEANUP AND RESET
+// ============================================================================
+
+// Reset the entire context to empty state
+fn lspg_reset(ctx: &! LspgContext) with Mut {
+    ctx.def_count = 0
+    ctx.ref_count = 0
+    ctx.sym_count = 0
+    ctx.results.count = 0
+    ctx.current_file_id = 0
+}
+
+// Reset only the symbol table (useful when rebuilding)
+fn lspg_reset_symbols(ctx: &! LspgContext) with Mut {
+    ctx.sym_count = 0
+}
+
+// Reset only the result list
+fn lspg_reset_results(ctx: &! LspgContext) with Mut {
+    ctx.results.count = 0
+}
+
+// ============================================================================
+// Section 24: RANGE QUERY HELPERS
+// ============================================================================
+
+// Find all definitions on a given line.  Returns count of matches
+// placed in the result list.
+fn lspg_find_defs_on_line(ctx: &! LspgContext, file_id: i64, line: i64) -> i64 with Mut, Div, Panic {
+    lspg_clear_results(ctx)
+    var i: i64 = 0
+    while i < ctx.def_count {
+        let d = &ctx.defs[i as usize]
+        if d.loc.file_id == file_id && d.loc.line <= line && d.loc.end_line >= line {
+            let added = lspg_add_result(ctx, d.loc)
+            if added == false {
+                return ctx.results.count
+            }
+        }
+        i = i + 1
+    }
+    ctx.results.count
+}
+
+// Find all references on a given line.  Returns count of matches.
+fn lspg_find_refs_on_line(ctx: &! LspgContext, file_id: i64, line: i64) -> i64 with Mut, Div, Panic {
+    lspg_clear_results(ctx)
+    var i: i64 = 0
+    while i < ctx.ref_count {
+        let r = &ctx.refs[i as usize]
+        if r.loc.file_id == file_id && r.loc.line <= line && r.loc.end_line >= line {
+            let added = lspg_add_result(ctx, r.loc)
+            if added == false {
+                return ctx.results.count
+            }
+        }
+        i = i + 1
+    }
+    ctx.results.count
+}
+
+// Find definitions within a range [start_line, end_line].  Returns count.
+fn lspg_find_defs_in_range(ctx: &! LspgContext, file_id: i64, start_line: i64, end_line: i64) -> i64 with Mut, Div, Panic {
+    lspg_clear_results(ctx)
+    var i: i64 = 0
+    while i < ctx.def_count {
+        let d = &ctx.defs[i as usize]
+        if d.loc.file_id == file_id && d.loc.line >= start_line && d.loc.line <= end_line {
+            let added = lspg_add_result(ctx, d.loc)
+            if added == false {
+                return ctx.results.count
+            }
+        }
+        i = i + 1
+    }
+    ctx.results.count
+}
+
+// ============================================================================
+// Section 25: DEFINITION ORDERING AND SORTING
+// ============================================================================
+
+// Check if definitions are in source order (by line number within a file)
+fn lspg_defs_in_source_order(ctx: &LspgContext, file_id: i64) -> bool with Mut, Div, Panic {
+    var prev_line: i64 = 0 - 1
+    var i: i64 = 0
+    while i < ctx.def_count {
+        let d = &ctx.defs[i as usize]
+        if d.loc.file_id == file_id {
+            if d.loc.line < prev_line {
+                return false
+            }
+            prev_line = d.loc.line
+        }
+        i = i + 1
+    }
+    true
+}
+
+// Find the Nth definition in a file (0-indexed).  Returns def_id or LSPG_INVALID.
+fn lspg_nth_def_in_file(ctx: &LspgContext, file_id: i64, n: i64) -> i64 with Mut, Div, Panic {
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < ctx.def_count {
+        if ctx.defs[i as usize].loc.file_id == file_id {
+            if count == n {
+                return i
+            }
+            count = count + 1
+        }
+        i = i + 1
+    }
+    LSPG_INVALID
+}
+
+// Count definitions in a specific file
+fn lspg_count_defs_in_file(ctx: &LspgContext, file_id: i64) -> i64 with Mut, Div, Panic {
+    var i: i64 = 0
+    var count: i64 = 0
+    while i < ctx.def_count {
+        if ctx.defs[i as usize].loc.file_id == file_id {
+            count = count + 1
+        }
+        i = i + 1
+    }
+    count
+}
+
+// Count references in a specific file
+fn lspg_count_refs_in_file(ctx: &LspgContext, file_id: i64) -> i64 with Mut, Div, Panic {
+    var i: i64 = 0
+    var count: i64 = 0
+    while i < ctx.ref_count {
+        if ctx.refs[i as usize].loc.file_id == file_id {
+            count = count + 1
+        }
+        i = i + 1
+    }
+    count
+}
+
+
+// ############################################################################
+//
+//  T E S T S
+//
+// ############################################################################
+//
+// 70 tests organized in 8 categories:
+//   1. Location      (T01-T08)   -- create, eq, contains, overlap, span
+//   2. Definitions   (T09-T18)   -- add, query, find at cursor, scope
+//   3. References    (T19-T28)   -- add, query, find at cursor, counts
+//   4. Symbol table  (T29-T36)   -- add, lookup, build def map, ref index
+//   5. Goto-def      (T37-T46)   -- resolve at cursor, handle request
+//   6. Find-refs     (T47-T56)   -- collect refs, handle request, multi-ref
+//   7. Result list   (T57-T62)   -- add, count, clear, dedup, at index
+//   8. Integration   (T63-T70)   -- full pipeline, batch, cross-file, stats
+//
+
+// -------------------------------------------------------
+// Location tests (T01-T08)
+// -------------------------------------------------------
+
+// T01: create a location and verify fields
+fn test_lspg_location_new() -> bool {
+    let loc = lspg_location_new(1, 10, 5, 10, 15)
+    loc.file_id == 1 && loc.line == 10 && loc.col == 5
+        && loc.end_line == 10 && loc.end_col == 15
+}
+
+// T02: location equality -- same values
+fn test_lspg_location_eq_same() -> bool {
+    let a = lspg_location_new(1, 10, 5, 10, 15)
+    let b = lspg_location_new(1, 10, 5, 10, 15)
+    lspg_location_eq(&a, &b)
+}
+
+// T03: location equality -- different values
+fn test_lspg_location_eq_diff() -> bool {
+    let a = lspg_location_new(1, 10, 5, 10, 15)
+    let b = lspg_location_new(2, 10, 5, 10, 15)
+    lspg_location_eq(&a, &b) == false
+}
+
+// T04: location contains -- cursor inside single-line span
+fn test_lspg_location_contains_inside() -> bool {
+    let loc = lspg_location_new(1, 5, 3, 5, 12)
+    lspg_location_contains(&loc, 5, 7)
+}
+
+// T05: location contains -- cursor outside span
+fn test_lspg_location_contains_outside() -> bool {
+    let loc = lspg_location_new(1, 5, 3, 5, 12)
+    lspg_location_contains(&loc, 6, 1) == false
+}
+
+// T06: location contains -- cursor at start boundary
+fn test_lspg_location_contains_start() -> bool {
+    let loc = lspg_location_new(1, 5, 3, 5, 12)
+    lspg_location_contains(&loc, 5, 3)
+}
+
+// T07: location contains -- multi-line span
+fn test_lspg_location_contains_multiline() -> bool {
+    let loc = lspg_location_new(1, 5, 3, 8, 10)
+    // Middle line should be contained
+    let mid = lspg_location_contains(&loc, 6, 0)
+    // Start line, at col
+    let start = lspg_location_contains(&loc, 5, 5)
+    // End line, within col
+    let end = lspg_location_contains(&loc, 8, 5)
+    mid && start && end
+}
+
+// T08: location span -- single line returns width
+fn test_lspg_location_span() -> bool {
+    let loc = lspg_location_new(1, 5, 3, 5, 12)
+    let span = lspg_location_span(&loc)
+    span == 10  // 12 - 3 + 1
+}
+
+// -------------------------------------------------------
+// Definition tests (T09-T18)
+// -------------------------------------------------------
+
+// T09: add a definition and verify count
+fn test_lspg_add_def_inner(ctx: &! LspgContext) -> bool with Mut, Div, Panic {
+    let loc = lspg_location_new(1, 1, 0, 1, 5)
+    let id = lspg_add_definition(ctx, LspgSymKind::GSymFunction, 100, loc, 0)
+    id == 0 && lspg_def_count(ctx) == 1
+}
+fn test_lspg_add_def() -> bool with Mut, Div, Panic {
+    var ctx = lspg_context_new()
+    test_lspg_add_def_inner(&! ctx)
+}
+
+// T10: add multiple definitions
+fn test_lspg_add_multi_def_inner(ctx: &! LspgContext) -> bool with Mut, Div, Panic {
+    let loc1 = lspg_location_new(1, 1, 0, 1, 5)
+    let loc2 = lspg_location_new(1, 3, 0, 3, 8)
+    let loc3 = lspg_location_new(1, 5, 0, 5, 3)
+    let id1 = lspg_add_definition(ctx, LspgSymKind::GSymFunction, 100, loc1, 0)
+    let id2 = lspg_add_definition(ctx, LspgSymKind::GSymVariable, 101, loc2, 0)
+    let id3 = lspg_add_definition(ctx, LspgSymKind::GSymType, 102, loc3, 0)
+    id1 == 0 && id2 == 1 && id3 == 2 && lspg_def_count(ctx) == 3
+}
+fn test_lspg_add_multi_def() -> bool with Mut, Div, Panic {
+    var ctx = lspg_context_new()
+    test_lspg_add_multi_def_inner(&! ctx)
+}
+
+// T11: query definition location
+fn test_lspg_def_location_inner(ctx: &! LspgContext) -> bool with Mut, Div, Panic {
+    let loc = lspg_location_new(2, 10, 3, 10, 15)
+    let id = lspg_add_definition(ctx, LspgSymKind::GSymVariable, 200, loc, 0)
+    let got = lspg_def_location(ctx, id)
+    lspg_location_eq(&got, &loc)
+}
+fn test_lspg_def_location() -> bool with Mut, Div, Panic {
+    var ctx = lspg_context_new()
+    test_lspg_def_location_inner(&! ctx)
+}
+
+// T12: query definition name hash
+fn test_lspg_def_name_hash_inner(ctx: &! LspgContext) -> bool with Mut, Div, Panic {
+    let loc = lspg_location_new(1, 1, 0, 1, 5)
+    let id = lspg_add_definition(ctx, LspgSymKind::GSymConstant, 42, loc, 0)
+    lspg_def_name_hash(ctx, id) == 42
+}
+fn test_lspg_def_name_hash() -> bool with Mut, Div, Panic {
+    var ctx = lspg_context_new()
+    test_lspg_def_name_hash_inner(&! ctx)
+}
+
+// T13: query definition kind
+fn test_lspg_def_kind_inner(ctx: &! LspgContext) -> bool with Mut, Div, Panic {
+    let loc = lspg_location_new(1, 1, 0, 1, 5)
+    let id = lspg_add_definition(ctx, LspgSymKind::GSymModule, 300, loc, 0)
+    let k = lspg_def_kind(ctx, id)
+    match k {
+        LspgSymKind::GSymModule => true,
+        _ => false,
+    }
+}
+fn test_lspg_def_kind() -> bool with Mut, Div, Panic {
+    var ctx = lspg_context_new()
+    test_lspg_def_kind_inner(&! ctx)
+}
+
+// T14: find definition at cursor position
+fn test_lspg_find_def_at_inner(ctx: &! LspgContext) -> bool with Mut, Div, Panic {
+    lspg_set_current_file(ctx, 1)
+    let loc = lspg_location_new(1, 5, 3, 5, 12)
+    let id = lspg_add_definition(ctx, LspgSymKind::GSymFunction, 400, loc, 0)
+    let found = lspg_find_def_at(ctx, 5, 7)
+    found == id
+}
+fn test_lspg_find_def_at() -> bool with Mut, Div, Panic {
+    var ctx = lspg_context_new()
+    test_lspg_find_def_at_inner(&! ctx)
+}
+
+// T15: find definition at cursor -- no match
+fn test_lspg_find_def_at_miss_inner(ctx: &! LspgContext) -> bool with Mut, Div, Panic {
+    lspg_set_current_file(ctx, 1)
+    let loc = lspg_location_new(1, 5, 3, 5, 12)
+    let id = lspg_add_definition(ctx, LspgSymKind::GSymFunction, 400, loc, 0)
+    let _ = id
+    let found = lspg_find_def_at(ctx, 10, 1)
+    found == LSPG_INVALID
+}
+fn test_lspg_find_def_at_miss() -> bool with Mut, Div, Panic {
+    var ctx = lspg_context_new()
+    test_lspg_find_def_at_miss_inner(&! ctx)
+}
+
+// T16: find definition by hash
+fn test_lspg_find_def_by_hash_inner(ctx: &! LspgContext) -> bool with Mut, Div, Panic {
+    let loc = lspg_location_new(1, 1, 0, 1, 5)
+    let id = lspg_add_definition(ctx, LspgSymKind::GSymFunction, 555, loc, 0)
+    let found = lspg_find_def_by_hash(ctx, 555)
+    found == id
+}
+fn test_lspg_find_def_by_hash() -> bool with Mut, Div, Panic {
+    var ctx = lspg_context_new()
+    test_lspg_find_def_by_hash_inner(&! ctx)
+}
+
+// T17: find definition by hash -- not found
+fn test_lspg_find_def_by_hash_miss_inner(ctx: &! LspgContext) -> bool with Mut, Div, Panic {
+    let loc = lspg_location_new(1, 1, 0, 1, 5)
+    let id = lspg_add_definition(ctx, LspgSymKind::GSymFunction, 555, loc, 0)
+    let _ = id
+    let found = lspg_find_def_by_hash(ctx, 999)
+    found == LSPG_INVALID
+}
+fn test_lspg_find_def_by_hash_miss() -> bool with Mut, Div, Panic {
+    var ctx = lspg_context_new()
+    test_lspg_find_def_by_hash_miss_inner(&! ctx)
+}
+
+// T18: find innermost definition (deepest scope)
+fn test_lspg_find_innermost_inner(ctx: &! LspgContext) -> bool with Mut, Div, Panic {
+    let loc1 = lspg_location_new(1, 1, 0, 1, 5)
+    let loc2 = lspg_location_new(1, 3, 0, 3, 5)
+    let id1 = lspg_add_definition(ctx, LspgSymKind::GSymVariable, 700, loc1, 0)
+    let id2 = lspg_add_definition(ctx, LspgSymKind::GSymVariable, 700, loc2, 2)
+    let _ = id1
+    let found = lspg_find_innermost_def(ctx, 700)
+    found == id2
+}
+fn test_lspg_find_innermost() -> bool with Mut, Div, Panic {
+    var ctx = lspg_context_new()
+    test_lspg_find_innermost_inner(&! ctx)
+}
+
+// -------------------------------------------------------
+// Reference tests (T19-T28)
+// -------------------------------------------------------
+
+// T19: add a reference and verify count
+fn test_lspg_add_ref_inner(ctx: &! LspgContext) -> bool with Mut, Div, Panic {
+    let loc_d = lspg_location_new(1, 1, 0, 1, 5)
+    let def_id = lspg_add_definition(ctx, LspgSymKind::GSymFunction, 100, loc_d, 0)
+    let loc_r = lspg_location_new(1, 10, 0, 10, 5)
+    let ref_id = lspg_add_reference(ctx, def_id, LspgRefKind::RefUsage, loc_r)
+    ref_id == 0 && lspg_ref_count(ctx) == 1
+}
+fn test_lspg_add_ref() -> bool with Mut, Div, Panic {
+    var ctx = lspg_context_new()
+    test_lspg_add_ref_inner(&! ctx)
+}
+
+// T20: add multiple references
+fn test_lspg_add_multi_ref_inner(ctx: &! LspgContext) -> bool with Mut, Div, Panic {
+    let loc_d = lspg_location_new(1, 1, 0, 1, 5)
+    let def_id = lspg_add_definition(ctx, LspgSymKind::GSymVariable, 100, loc_d, 0)
+    let loc1 = lspg_location_new(1, 5, 0, 5, 5)
+    let loc2 = lspg_location_new(1, 8, 0, 8, 5)
+    let loc3 = lspg_location_new(1, 12, 0, 12, 5)
+    let r1 = lspg_add_reference(ctx, def_id, LspgRefKind::RefUsage, loc1)
+    let r2 = lspg_add_reference(ctx, def_id, LspgRefKind::RefRead, loc2)
+    let r3 = lspg_add_reference(ctx, def_id, LspgRefKind::RefWrite, loc3)
+    r1 == 0 && r2 == 1 && r3 == 2 && lspg_ref_count(ctx) == 3
+}
+fn test_lspg_add_multi_ref() -> bool with Mut, Div, Panic {
+    var ctx = lspg_context_new()
+    test_lspg_add_multi_ref_inner(&! ctx)
+}
+
+// T21: find reference at cursor position
+fn test_lspg_find_ref_at_inner(ctx: &! LspgContext) -> bool with Mut, Div, Panic {
+    lspg_set_current_file(ctx, 1)
+    let loc_d = lspg_location_new(1, 1, 0, 1, 5)
+    let def_id = lspg_add_definition(ctx, LspgSymKind::GSymFunction, 100, loc_d, 0)
+    let loc_r = lspg_location_new(1, 10, 3, 10, 8)
+    let ref_id = lspg_add_reference(ctx, def_id, LspgRefKind::RefUsage, loc_r)
+    let found = lspg_find_ref_at(ctx, 10, 5)
+    found == ref_id
+}
+fn test_lspg_find_ref_at() -> bool with Mut, Div, Panic {
+    var ctx = lspg_context_new()
+    test_lspg_find_ref_at_inner(&! ctx)
+}
+
+// T22: find reference at cursor -- no match
+fn test_lspg_find_ref_at_miss_inner(ctx: &! LspgContext) -> bool with Mut, Div, Panic {
+    lspg_set_current_file(ctx, 1)
+    let loc_d = lspg_location_new(1, 1, 0, 1, 5)
+    let def_id = lspg_add_definition(ctx, LspgSymKind::GSymFunction, 100, loc_d, 0)
+    let loc_r = lspg_location_new(1, 10, 3, 10, 8)
+    let ref_id = lspg_add_reference(ctx, def_id, LspgRefKind::RefUsage, loc_r)
+    let _ = ref_id
+    let found = lspg_find_ref_at(ctx, 20, 0)
+    found == LSPG_INVALID
+}
+fn test_lspg_find_ref_at_miss() -> bool with Mut, Div, Panic {
+    var ctx = lspg_context_new()
+    test_lspg_find_ref_at_miss_inner(&! ctx)
+}
+
+// T23: count references for a definition
+fn test_lspg_refs_for_def_inner(ctx: &! LspgContext) -> bool with Mut, Div, Panic {
+    let loc_d = lspg_location_new(1, 1, 0, 1, 5)
+    let def_id = lspg_add_definition(ctx, LspgSymKind::GSymFunction, 100, loc_d, 0)
+    let loc1 = lspg_location_new(1, 5, 0, 5, 5)
+    let loc2 = lspg_location_new(1, 8, 0, 8, 5)
+    let r1 = lspg_add_reference(ctx, def_id, LspgRefKind::RefUsage, loc1)
+    let r2 = lspg_add_reference(ctx, def_id, LspgRefKind::RefRead, loc2)
+    let _ = r1
+    let _ = r2
+    lspg_refs_for_def(ctx, def_id) == 2
+}
+fn test_lspg_refs_for_def() -> bool with Mut, Div, Panic {
+    var ctx = lspg_context_new()
+    test_lspg_refs_for_def_inner(&! ctx)
+}
+
+// T24: count references for a non-existent definition
+fn test_lspg_refs_for_def_zero_inner(ctx: &! LspgContext) -> bool with Mut, Div, Panic {
+    let loc_d = lspg_location_new(1, 1, 0, 1, 5)
+    let def_id = lspg_add_definition(ctx, LspgSymKind::GSymFunction, 100, loc_d, 0)
+    let _ = def_id
+    lspg_refs_for_def(ctx, 999) == 0
+}
+fn test_lspg_refs_for_def_zero() -> bool with Mut, Div, Panic {
+    var ctx = lspg_context_new()
+    test_lspg_refs_for_def_zero_inner(&! ctx)
+}
+
+// T25: get ref def_id
+fn test_lspg_ref_def_id_inner(ctx: &! LspgContext) -> bool with Mut, Div, Panic {
+    let loc_d = lspg_location_new(1, 1, 0, 1, 5)
+    let def_id = lspg_add_definition(ctx, LspgSymKind::GSymVariable, 100, loc_d, 0)
+    let loc_r = lspg_location_new(1, 10, 0, 10, 5)
+    let ref_id = lspg_add_reference(ctx, def_id, LspgRefKind::RefUsage, loc_r)
+    lspg_ref_def_id(ctx, ref_id) == def_id
+}
+fn test_lspg_ref_def_id() -> bool with Mut, Div, Panic {
+    var ctx = lspg_context_new()
+    test_lspg_ref_def_id_inner(&! ctx)
+}
+
+// T26: get ref location
+fn test_lspg_ref_location_inner(ctx: &! LspgContext) -> bool with Mut, Div, Panic {
+    let loc_d = lspg_location_new(1, 1, 0, 1, 5)
+    let def_id = lspg_add_definition(ctx, LspgSymKind::GSymVariable, 100, loc_d, 0)
+    let loc_r = lspg_location_new(1, 10, 3, 10, 8)
+    let ref_id = lspg_add_reference(ctx, def_id, LspgRefKind::RefUsage, loc_r)
+    let got = lspg_ref_location(ctx, ref_id)
+    lspg_location_eq(&got, &loc_r)
+}
+fn test_lspg_ref_location() -> bool with Mut, Div, Panic {
+    var ctx = lspg_context_new()
+    test_lspg_ref_location_inner(&! ctx)
+}
+
+// T27: count references by kind
+fn test_lspg_refs_by_kind_inner(ctx: &! LspgContext) -> bool with Mut, Div, Panic {
+    let loc_d = lspg_location_new(1, 1, 0, 1, 5)
+    let def_id = lspg_add_definition(ctx, LspgSymKind::GSymVariable, 100, loc_d, 0)
+    let loc1 = lspg_location_new(1, 5, 0, 5, 5)
+    let loc2 = lspg_location_new(1, 8, 0, 8, 5)
+    let loc3 = lspg_location_new(1, 12, 0, 12, 5)
+    let r1 = lspg_add_reference(ctx, def_id, LspgRefKind::RefRead, loc1)
+    let r2 = lspg_add_reference(ctx, def_id, LspgRefKind::RefRead, loc2)
+    let r3 = lspg_add_reference(ctx, def_id, LspgRefKind::RefWrite, loc3)
+    let _ = r1
+    let _ = r2
+    let _ = r3
+    let reads = lspg_refs_for_def_kind(ctx, def_id, LspgRefKind::RefRead)
+    let writes = lspg_refs_for_def_kind(ctx, def_id, LspgRefKind::RefWrite)
+    reads == 2 && writes == 1
+}
+fn test_lspg_refs_by_kind() -> bool with Mut, Div, Panic {
+    var ctx = lspg_context_new()
+    test_lspg_refs_by_kind_inner(&! ctx)
+}
+
+// T28: ref to different defs
+fn test_lspg_refs_multi_def_inner(ctx: &! LspgContext) -> bool with Mut, Div, Panic {
+    let loc_d1 = lspg_location_new(1, 1, 0, 1, 5)
+    let loc_d2 = lspg_location_new(1, 3, 0, 3, 5)
+    let def1 = lspg_add_definition(ctx, LspgSymKind::GSymFunction, 100, loc_d1, 0)
+    let def2 = lspg_add_definition(ctx, LspgSymKind::GSymVariable, 101, loc_d2, 0)
+    let loc_r1 = lspg_location_new(1, 10, 0, 10, 5)
+    let loc_r2 = lspg_location_new(1, 15, 0, 15, 5)
+    let loc_r3 = lspg_location_new(1, 20, 0, 20, 5)
+    let r1 = lspg_add_reference(ctx, def1, LspgRefKind::RefUsage, loc_r1)
+    let r2 = lspg_add_reference(ctx, def2, LspgRefKind::RefUsage, loc_r2)
+    let r3 = lspg_add_reference(ctx, def1, LspgRefKind::RefUsage, loc_r3)
+    let _ = r1
+    let _ = r2
+    let _ = r3
+    let c1 = lspg_refs_for_def(ctx, def1)
+    let c2 = lspg_refs_for_def(ctx, def2)
+    c1 == 2 && c2 == 1
+}
+fn test_lspg_refs_multi_def() -> bool with Mut, Div, Panic {
+    var ctx = lspg_context_new()
+    test_lspg_refs_multi_def_inner(&! ctx)
+}
+
+// -------------------------------------------------------
+// Symbol table tests (T29-T36)
+// -------------------------------------------------------
+
+// T29: add a symbol and verify count
+fn test_lspg_add_symbol_inner(ctx: &! LspgContext) -> bool with Mut, Div, Panic {
+    let loc = lspg_location_new(1, 1, 0, 1, 5)
+    let id = lspg_add_symbol(ctx, 100, 0, LspgSymKind::GSymFunction, loc)
+    id == 0 && lspg_sym_count(ctx) == 1
+}
+fn test_lspg_add_symbol() -> bool with Mut, Div, Panic {
+    var ctx = lspg_context_new()
+    test_lspg_add_symbol_inner(&! ctx)
+}
+
+// T30: find symbol by hash
+fn test_lspg_find_symbol_inner(ctx: &! LspgContext) -> bool with Mut, Div, Panic {
+    let loc = lspg_location_new(1, 1, 0, 1, 5)
+    let id = lspg_add_symbol(ctx, 200, 0, LspgSymKind::GSymVariable, loc)
+    let found = lspg_find_symbol_by_hash(ctx, 200)
+    found == id
+}
+fn test_lspg_find_symbol() -> bool with Mut, Div, Panic {
+    var ctx = lspg_context_new()
+    test_lspg_find_symbol_inner(&! ctx)
+}
+
+// T31: find symbol by hash -- not found
+fn test_lspg_find_symbol_miss_inner(ctx: &! LspgContext) -> bool with Mut, Div, Panic {
+    let loc = lspg_location_new(1, 1, 0, 1, 5)
+    let id = lspg_add_symbol(ctx, 200, 0, LspgSymKind::GSymVariable, loc)
+    let _ = id
+    let found = lspg_find_symbol_by_hash(ctx, 999)
+    found == LSPG_INVALID
+}
+fn test_lspg_find_symbol_miss() -> bool with Mut, Div, Panic {
+    var ctx = lspg_context_new()
+    test_lspg_find_symbol_miss_inner(&! ctx)
+}
+
+// T32: find symbol by def_id
+fn test_lspg_find_symbol_by_def_inner(ctx: &! LspgContext) -> bool with Mut, Div, Panic {
+    let loc = lspg_location_new(1, 1, 0, 1, 5)
+    let id = lspg_add_symbol(ctx, 300, 5, LspgSymKind::GSymType, loc)
+    let found = lspg_find_symbol_by_def(ctx, 5)
+    found == id
+}
+fn test_lspg_find_symbol_by_def() -> bool with Mut, Div, Panic {
+    var ctx = lspg_context_new()
+    test_lspg_find_symbol_by_def_inner(&! ctx)
+}
+
+// T33: count symbols by kind
+fn test_lspg_count_symbols_kind_inner(ctx: &! LspgContext) -> bool with Mut, Div, Panic {
+    let loc = lspg_location_new(1, 1, 0, 1, 5)
+    let s1 = lspg_add_symbol(ctx, 100, 0, LspgSymKind::GSymFunction, loc)
+    let s2 = lspg_add_symbol(ctx, 101, 1, LspgSymKind::GSymFunction, loc)
+    let s3 = lspg_add_symbol(ctx, 102, 2, LspgSymKind::GSymVariable, loc)
+    let _ = s1
+    let _ = s2
+    let _ = s3
+    let funcs = lspg_count_symbols_by_kind(ctx, LspgSymKind::GSymFunction)
+    let vars = lspg_count_symbols_by_kind(ctx, LspgSymKind::GSymVariable)
+    funcs == 2 && vars == 1
+}
+fn test_lspg_count_symbols_kind() -> bool with Mut, Div, Panic {
+    var ctx = lspg_context_new()
+    test_lspg_count_symbols_kind_inner(&! ctx)
+}
+
+// T34: build def map creates symbols from definitions
+fn test_lspg_build_def_map_inner(ctx: &! LspgContext) -> bool with Mut, Div, Panic {
+    let loc1 = lspg_location_new(1, 1, 0, 1, 5)
+    let loc2 = lspg_location_new(1, 3, 0, 3, 5)
+    let d1 = lspg_add_definition(ctx, LspgSymKind::GSymFunction, 100, loc1, 0)
+    let d2 = lspg_add_definition(ctx, LspgSymKind::GSymVariable, 200, loc2, 0)
+    let _ = d1
+    let _ = d2
+    lspg_build_def_map(ctx)
+    lspg_sym_count(ctx) == 2
+}
+fn test_lspg_build_def_map() -> bool with Mut, Div, Panic {
+    var ctx = lspg_context_new()
+    test_lspg_build_def_map_inner(&! ctx)
+}
+
+// T35: build def map does not duplicate
+fn test_lspg_build_def_map_nodup_inner(ctx: &! LspgContext) -> bool with Mut, Div, Panic {
+    let loc1 = lspg_location_new(1, 1, 0, 1, 5)
+    let loc2 = lspg_location_new(1, 3, 0, 3, 5)
+    // Two defs with the same name hash -- should produce only one symbol
+    let d1 = lspg_add_definition(ctx, LspgSymKind::GSymVariable, 100, loc1, 0)
+    let d2 = lspg_add_definition(ctx, LspgSymKind::GSymVariable, 100, loc2, 1)
+    let _ = d1
+    let _ = d2
+    lspg_build_def_map(ctx)
+    lspg_sym_count(ctx) == 1
+}
+fn test_lspg_build_def_map_nodup() -> bool with Mut, Div, Panic {
+    var ctx = lspg_context_new()
+    test_lspg_build_def_map_nodup_inner(&! ctx)
+}
+
+// T36: build ref index populates ref_count
+fn test_lspg_build_ref_index_inner(ctx: &! LspgContext) -> bool with Mut, Div, Panic {
+    let loc_d = lspg_location_new(1, 1, 0, 1, 5)
+    let def_id = lspg_add_definition(ctx, LspgSymKind::GSymFunction, 100, loc_d, 0)
+    let loc_r1 = lspg_location_new(1, 5, 0, 5, 5)
+    let loc_r2 = lspg_location_new(1, 8, 0, 8, 5)
+    let r1 = lspg_add_reference(ctx, def_id, LspgRefKind::RefUsage, loc_r1)
+    let r2 = lspg_add_reference(ctx, def_id, LspgRefKind::RefRead, loc_r2)
+    let _ = r1
+    let _ = r2
+    lspg_build_def_map(ctx)
+    lspg_build_ref_index(ctx)
+    let sym_idx = lspg_find_symbol_by_hash(ctx, 100)
+    ctx.symbols[sym_idx as usize].ref_count == 2
+}
+fn test_lspg_build_ref_index() -> bool with Mut, Div, Panic {
+    var ctx = lspg_context_new()
+    test_lspg_build_ref_index_inner(&! ctx)
+}
+
+// -------------------------------------------------------
+// Goto-definition tests (T37-T46)
+// -------------------------------------------------------
+
+// T37: resolve at cursor -- cursor on definition
+fn test_lspg_resolve_on_def_inner(ctx: &! LspgContext) -> bool with Mut, Div, Panic {
+    lspg_set_current_file(ctx, 1)
+    let loc = lspg_location_new(1, 5, 3, 5, 12)
+    let def_id = lspg_add_definition(ctx, LspgSymKind::GSymFunction, 100, loc, 0)
+    let resolved = lspg_resolve_at_cursor(ctx, 5, 7)
+    resolved == def_id
+}
+fn test_lspg_resolve_on_def() -> bool with Mut, Div, Panic {
+    var ctx = lspg_context_new()
+    test_lspg_resolve_on_def_inner(&! ctx)
+}
+
+// T38: resolve at cursor -- cursor on reference
+fn test_lspg_resolve_on_ref_inner(ctx: &! LspgContext) -> bool with Mut, Div, Panic {
+    lspg_set_current_file(ctx, 1)
+    let loc_d = lspg_location_new(1, 1, 0, 1, 5)
+    let def_id = lspg_add_definition(ctx, LspgSymKind::GSymFunction, 100, loc_d, 0)
+    let loc_r = lspg_location_new(1, 10, 3, 10, 8)
+    let ref_id = lspg_add_reference(ctx, def_id, LspgRefKind::RefUsage, loc_r)
+    let _ = ref_id
+    let resolved = lspg_resolve_at_cursor(ctx, 10, 5)
+    resolved == def_id
+}
+fn test_lspg_resolve_on_ref() -> bool with Mut, Div, Panic {
+    var ctx = lspg_context_new()
+    test_lspg_resolve_on_ref_inner(&! ctx)
+}
+
+// T39: resolve at cursor -- no match
+fn test_lspg_resolve_miss_inner(ctx: &! LspgContext) -> bool with Mut, Div, Panic {
+    lspg_set_current_file(ctx, 1)
+    let loc = lspg_location_new(1, 1, 0, 1, 5)
+    let def_id = lspg_add_definition(ctx, LspgSymKind::GSymFunction, 100, loc, 0)
+    let _ = def_id
+    let resolved = lspg_resolve_at_cursor(ctx, 50, 0)
+    resolved == LSPG_INVALID
+}
+fn test_lspg_resolve_miss() -> bool with Mut, Div, Panic {
+    var ctx = lspg_context_new()
+    test_lspg_resolve_miss_inner(&! ctx)
+}
+
+// T40: handle definition -- success
+fn test_lspg_handle_def_ok_inner(ctx: &! LspgContext) -> bool with Mut, Div, Panic {
+    lspg_set_current_file(ctx, 1)
+    let loc_d = lspg_location_new(1, 1, 0, 1, 10)
+    let def_id = lspg_add_definition(ctx, LspgSymKind::GSymFunction, 100, loc_d, 0)
+    let loc_r = lspg_location_new(1, 5, 3, 5, 8)
+    let ref_id = lspg_add_reference(ctx, def_id, LspgRefKind::RefUsage, loc_r)
+    let _ = ref_id
+    let ok = lspg_handle_definition(ctx, 5, 5)
+    let count = lspg_result_count(ctx)
+    let result = lspg_result_at(ctx, 0)
+    ok && count == 1 && lspg_location_eq(&result, &loc_d)
+}
+fn test_lspg_handle_def_ok() -> bool with Mut, Div, Panic {
+    var ctx = lspg_context_new()
+    test_lspg_handle_def_ok_inner(&! ctx)
+}
+
+// T41: handle definition -- no match returns false
+fn test_lspg_handle_def_miss_inner(ctx: &! LspgContext) -> bool with Mut, Div, Panic {
+    lspg_set_current_file(ctx, 1)
+    let ok = lspg_handle_definition(ctx, 10, 10)
+    ok == false && lspg_result_count(ctx) == 0
+}
+fn test_lspg_handle_def_miss() -> bool with Mut, Div, Panic {
+    var ctx = lspg_context_new()
+    test_lspg_handle_def_miss_inner(&! ctx)
+}
+
+// T42: handle definition -- cursor directly on def site
+fn test_lspg_handle_def_on_def_inner(ctx: &! LspgContext) -> bool with Mut, Div, Panic {
+    lspg_set_current_file(ctx, 1)
+    let loc = lspg_location_new(1, 3, 5, 3, 20)
+    let def_id = lspg_add_definition(ctx, LspgSymKind::GSymType, 200, loc, 0)
+    let _ = def_id
+    let ok = lspg_handle_definition(ctx, 3, 10)
+    let count = lspg_result_count(ctx)
+    let result = lspg_result_at(ctx, 0)
+    ok && count == 1 && lspg_location_eq(&result, &loc)
+}
+fn test_lspg_handle_def_on_def() -> bool with Mut, Div, Panic {
+    var ctx = lspg_context_new()
+    test_lspg_handle_def_on_def_inner(&! ctx)
+}
+
+// T43: handle definition cross-file
+fn test_lspg_handle_def_xfile_inner(ctx: &! LspgContext) -> bool with Mut, Div, Panic {
+    // Def in file 2
+    let loc_d = lspg_location_new(2, 1, 0, 1, 10)
+    let def_id = lspg_add_definition(ctx, LspgSymKind::GSymFunction, 100, loc_d, 0)
+    // Ref in file 1
+    let loc_r = lspg_location_new(1, 5, 3, 5, 8)
+    let ref_id = lspg_add_reference(ctx, def_id, LspgRefKind::RefUsage, loc_r)
+    let _ = ref_id
+    let ok = lspg_handle_definition_cross_file(ctx, 1, 5, 5)
+    let count = lspg_result_count(ctx)
+    ok && count == 1
+}
+fn test_lspg_handle_def_xfile() -> bool with Mut, Div, Panic {
+    var ctx = lspg_context_new()
+    test_lspg_handle_def_xfile_inner(&! ctx)
+}
+
+// T44: handle definition -- prefers tighter span
+fn test_lspg_handle_def_tighter_inner(ctx: &! LspgContext) -> bool with Mut, Div, Panic {
+    lspg_set_current_file(ctx, 1)
+    // Outer span: line 3, col 0..20
+    let loc_outer = lspg_location_new(1, 3, 0, 3, 20)
+    let id_outer = lspg_add_definition(ctx, LspgSymKind::GSymFunction, 100, loc_outer, 0)
+    // Inner span: line 3, col 5..10
+    let loc_inner = lspg_location_new(1, 3, 5, 3, 10)
+    let id_inner = lspg_add_definition(ctx, LspgSymKind::GSymVariable, 101, loc_inner, 1)
+    let _ = id_outer
+    // Cursor at line 3, col 7 -- should resolve to inner
+    let resolved = lspg_resolve_at_cursor(ctx, 3, 7)
+    resolved == id_inner
+}
+fn test_lspg_handle_def_tighter() -> bool with Mut, Div, Panic {
+    var ctx = lspg_context_new()
+    test_lspg_handle_def_tighter_inner(&! ctx)
+}
+
+// T45: resolve at cursor picks def over ref when both overlap
+fn test_lspg_resolve_def_over_ref_inner(ctx: &! LspgContext) -> bool with Mut, Div, Panic {
+    lspg_set_current_file(ctx, 1)
+    let loc = lspg_location_new(1, 5, 3, 5, 12)
+    let def_id = lspg_add_definition(ctx, LspgSymKind::GSymVariable, 100, loc, 0)
+    // Add a ref at the exact same location
+    let ref_id = lspg_add_reference(ctx, 999, LspgRefKind::RefUsage, loc)
+    let _ = ref_id
+    // Should resolve to the def (def checked first)
+    let resolved = lspg_resolve_at_cursor(ctx, 5, 7)
+    resolved == def_id
+}
+fn test_lspg_resolve_def_over_ref() -> bool with Mut, Div, Panic {
+    var ctx = lspg_context_new()
+    test_lspg_resolve_def_over_ref_inner(&! ctx)
+}
+
+// T46: resolve at cursor in different file context
+fn test_lspg_resolve_file_ctx_inner(ctx: &! LspgContext) -> bool with Mut, Div, Panic {
+    // Def in file 1
+    lspg_set_current_file(ctx, 1)
+    let loc = lspg_location_new(1, 5, 3, 5, 12)
+    let def_id = lspg_add_definition(ctx, LspgSymKind::GSymFunction, 100, loc, 0)
+    let _ = def_id
+    // Switch to file 2 -- should not find def
+    lspg_set_current_file(ctx, 2)
+    let resolved = lspg_find_def_at(ctx, 5, 7)
+    resolved == LSPG_INVALID
+}
+fn test_lspg_resolve_file_ctx() -> bool with Mut, Div, Panic {
+    var ctx = lspg_context_new()
+    test_lspg_resolve_file_ctx_inner(&! ctx)
+}
+
+// -------------------------------------------------------
+// Find-references tests (T47-T56)
+// -------------------------------------------------------
+
+// T47: handle references -- basic
+fn test_lspg_handle_refs_ok_inner(ctx: &! LspgContext) -> bool with Mut, Div, Panic {
+    lspg_set_current_file(ctx, 1)
+    let loc_d = lspg_location_new(1, 1, 0, 1, 5)
+    let def_id = lspg_add_definition(ctx, LspgSymKind::GSymVariable, 100, loc_d, 0)
+    let loc_r1 = lspg_location_new(1, 5, 0, 5, 5)
+    let loc_r2 = lspg_location_new(1, 10, 0, 10, 5)
+    let r1 = lspg_add_reference(ctx, def_id, LspgRefKind::RefUsage, loc_r1)
+    let r2 = lspg_add_reference(ctx, def_id, LspgRefKind::RefUsage, loc_r2)
+    let _ = r1
+    let _ = r2
+    let ok = lspg_handle_references(ctx, 1, 2)
+    let count = lspg_result_count(ctx)
+    ok && count == 2
+}
+fn test_lspg_handle_refs_ok() -> bool with Mut, Div, Panic {
+    var ctx = lspg_context_new()
+    test_lspg_handle_refs_ok_inner(&! ctx)
+}
+
+// T48: handle references -- no match
+fn test_lspg_handle_refs_miss_inner(ctx: &! LspgContext) -> bool with Mut, Div, Panic {
+    lspg_set_current_file(ctx, 1)
+    let ok = lspg_handle_references(ctx, 10, 10)
+    ok == false && lspg_result_count(ctx) == 0
+}
+fn test_lspg_handle_refs_miss() -> bool with Mut, Div, Panic {
+    var ctx = lspg_context_new()
+    test_lspg_handle_refs_miss_inner(&! ctx)
+}
+
+// T49: handle references -- cursor on ref follows to def
+fn test_lspg_handle_refs_via_ref_inner(ctx: &! LspgContext) -> bool with Mut, Div, Panic {
+    lspg_set_current_file(ctx, 1)
+    let loc_d = lspg_location_new(1, 1, 0, 1, 5)
+    let def_id = lspg_add_definition(ctx, LspgSymKind::GSymFunction, 100, loc_d, 0)
+    let loc_r1 = lspg_location_new(1, 5, 3, 5, 8)
+    let loc_r2 = lspg_location_new(1, 10, 0, 10, 5)
+    let r1 = lspg_add_reference(ctx, def_id, LspgRefKind::RefUsage, loc_r1)
+    let r2 = lspg_add_reference(ctx, def_id, LspgRefKind::RefUsage, loc_r2)
+    let _ = r1
+    let _ = r2
+    // Click on the first ref (line 5, col 5)
+    let ok = lspg_handle_references(ctx, 5, 5)
+    let count = lspg_result_count(ctx)
+    ok && count == 2
+}
+fn test_lspg_handle_refs_via_ref() -> bool with Mut, Div, Panic {
+    var ctx = lspg_context_new()
+    test_lspg_handle_refs_via_ref_inner(&! ctx)
+}
+
+// T50: handle references with def included
+fn test_lspg_handle_refs_with_def_inner(ctx: &! LspgContext) -> bool with Mut, Div, Panic {
+    lspg_set_current_file(ctx, 1)
+    let loc_d = lspg_location_new(1, 1, 0, 1, 5)
+    let def_id = lspg_add_definition(ctx, LspgSymKind::GSymVariable, 100, loc_d, 0)
+    let loc_r = lspg_location_new(1, 5, 0, 5, 5)
+    let r1 = lspg_add_reference(ctx, def_id, LspgRefKind::RefUsage, loc_r)
+    let _ = r1
+    let ok = lspg_handle_references_with_def(ctx, 1, 2)
+    let count = lspg_result_count(ctx)
+    // Should include def + 1 ref = 2 results
+    ok && count == 2
+}
+fn test_lspg_handle_refs_with_def() -> bool with Mut, Div, Panic {
+    var ctx = lspg_context_new()
+    test_lspg_handle_refs_with_def_inner(&! ctx)
+}
+
+// T51: collect references by kind -- writes only
+fn test_lspg_collect_refs_kind_inner(ctx: &! LspgContext) -> bool with Mut, Div, Panic {
+    let loc_d = lspg_location_new(1, 1, 0, 1, 5)
+    let def_id = lspg_add_definition(ctx, LspgSymKind::GSymVariable, 100, loc_d, 0)
+    let loc_r1 = lspg_location_new(1, 5, 0, 5, 5)
+    let loc_r2 = lspg_location_new(1, 8, 0, 8, 5)
+    let loc_r3 = lspg_location_new(1, 12, 0, 12, 5)
+    let r1 = lspg_add_reference(ctx, def_id, LspgRefKind::RefWrite, loc_r1)
+    let r2 = lspg_add_reference(ctx, def_id, LspgRefKind::RefRead, loc_r2)
+    let r3 = lspg_add_reference(ctx, def_id, LspgRefKind::RefWrite, loc_r3)
+    let _ = r1
+    let _ = r2
+    let _ = r3
+    lspg_collect_references_by_kind(ctx, def_id, LspgRefKind::RefWrite)
+    lspg_result_count(ctx) == 2
+}
+fn test_lspg_collect_refs_kind() -> bool with Mut, Div, Panic {
+    var ctx = lspg_context_new()
+    test_lspg_collect_refs_kind_inner(&! ctx)
+}
+
+// T52: collect definitions by name
+fn test_lspg_collect_defs_name_inner(ctx: &! LspgContext) -> bool with Mut, Div, Panic {
+    let loc1 = lspg_location_new(1, 1, 0, 1, 5)
+    let loc2 = lspg_location_new(1, 10, 0, 10, 5)
+    let loc3 = lspg_location_new(2, 1, 0, 1, 5)
+    let d1 = lspg_add_definition(ctx, LspgSymKind::GSymFunction, 42, loc1, 0)
+    let d2 = lspg_add_definition(ctx, LspgSymKind::GSymVariable, 99, loc2, 0)
+    let d3 = lspg_add_definition(ctx, LspgSymKind::GSymFunction, 42, loc3, 0)
+    let _ = d1
+    let _ = d2
+    let _ = d3
+    lspg_collect_definitions_by_name(ctx, 42)
+    lspg_result_count(ctx) == 2
+}
+fn test_lspg_collect_defs_name() -> bool with Mut, Div, Panic {
+    var ctx = lspg_context_new()
+    test_lspg_collect_defs_name_inner(&! ctx)
+}
+
+// T53: collect all occurrences (def + refs)
+fn test_lspg_collect_all_inner(ctx: &! LspgContext) -> bool with Mut, Div, Panic {
+    let loc_d = lspg_location_new(1, 1, 0, 1, 5)
+    let def_id = lspg_add_definition(ctx, LspgSymKind::GSymVariable, 100, loc_d, 0)
+    let loc_r1 = lspg_location_new(1, 5, 0, 5, 5)
+    let loc_r2 = lspg_location_new(1, 10, 0, 10, 5)
+    let r1 = lspg_add_reference(ctx, def_id, LspgRefKind::RefUsage, loc_r1)
+    let r2 = lspg_add_reference(ctx, def_id, LspgRefKind::RefUsage, loc_r2)
+    let _ = r1
+    let _ = r2
+    lspg_collect_all_occurrences(ctx, def_id)
+    // 1 def + 2 refs = 3
+    lspg_result_count(ctx) == 3
+}
+fn test_lspg_collect_all() -> bool with Mut, Div, Panic {
+    var ctx = lspg_context_new()
+    test_lspg_collect_all_inner(&! ctx)
+}
+
+// T54: handle references by kind
+fn test_lspg_handle_refs_by_kind_inner(ctx: &! LspgContext) -> bool with Mut, Div, Panic {
+    lspg_set_current_file(ctx, 1)
+    let loc_d = lspg_location_new(1, 1, 0, 1, 5)
+    let def_id = lspg_add_definition(ctx, LspgSymKind::GSymVariable, 100, loc_d, 0)
+    let loc_r1 = lspg_location_new(1, 5, 0, 5, 5)
+    let loc_r2 = lspg_location_new(1, 10, 0, 10, 5)
+    let loc_r3 = lspg_location_new(1, 15, 0, 15, 5)
+    let r1 = lspg_add_reference(ctx, def_id, LspgRefKind::RefRead, loc_r1)
+    let r2 = lspg_add_reference(ctx, def_id, LspgRefKind::RefWrite, loc_r2)
+    let r3 = lspg_add_reference(ctx, def_id, LspgRefKind::RefRead, loc_r3)
+    let _ = r1
+    let _ = r2
+    let _ = r3
+    let ok = lspg_handle_references_by_kind(ctx, 1, 2, LspgRefKind::RefRead)
+    let count = lspg_result_count(ctx)
+    ok && count == 2
+}
+fn test_lspg_handle_refs_by_kind() -> bool with Mut, Div, Panic {
+    var ctx = lspg_context_new()
+    test_lspg_handle_refs_by_kind_inner(&! ctx)
+}
+
+// T55: find refs in file
+fn test_lspg_refs_in_file_inner(ctx: &! LspgContext) -> bool with Mut, Div, Panic {
+    let loc_d = lspg_location_new(1, 1, 0, 1, 5)
+    let def_id = lspg_add_definition(ctx, LspgSymKind::GSymFunction, 100, loc_d, 0)
+    let loc_r1 = lspg_location_new(1, 5, 0, 5, 5)
+    let loc_r2 = lspg_location_new(2, 3, 0, 3, 5)
+    let loc_r3 = lspg_location_new(1, 10, 0, 10, 5)
+    let r1 = lspg_add_reference(ctx, def_id, LspgRefKind::RefUsage, loc_r1)
+    let r2 = lspg_add_reference(ctx, def_id, LspgRefKind::RefUsage, loc_r2)
+    let r3 = lspg_add_reference(ctx, def_id, LspgRefKind::RefUsage, loc_r3)
+    let _ = r1
+    let _ = r2
+    let _ = r3
+    lspg_collect_refs_in_file(ctx, 1)
+    lspg_result_count(ctx) == 2
+}
+fn test_lspg_refs_in_file() -> bool with Mut, Div, Panic {
+    var ctx = lspg_context_new()
+    test_lspg_refs_in_file_inner(&! ctx)
+}
+
+// T56: find defs in file
+fn test_lspg_defs_in_file_inner(ctx: &! LspgContext) -> bool with Mut, Div, Panic {
+    let loc1 = lspg_location_new(1, 1, 0, 1, 5)
+    let loc2 = lspg_location_new(2, 3, 0, 3, 5)
+    let loc3 = lspg_location_new(1, 10, 0, 10, 5)
+    let d1 = lspg_add_definition(ctx, LspgSymKind::GSymFunction, 100, loc1, 0)
+    let d2 = lspg_add_definition(ctx, LspgSymKind::GSymVariable, 200, loc2, 0)
+    let d3 = lspg_add_definition(ctx, LspgSymKind::GSymType, 300, loc3, 0)
+    let _ = d1
+    let _ = d2
+    let _ = d3
+    lspg_collect_defs_in_file(ctx, 1)
+    lspg_result_count(ctx) == 2
+}
+fn test_lspg_defs_in_file() -> bool with Mut, Div, Panic {
+    var ctx = lspg_context_new()
+    test_lspg_defs_in_file_inner(&! ctx)
+}
+
+// -------------------------------------------------------
+// Result list tests (T57-T62)
+// -------------------------------------------------------
+
+// T57: add result and check count
+fn test_lspg_result_add_inner(ctx: &! LspgContext) -> bool with Mut, Div, Panic {
+    lspg_clear_results(ctx)
+    let loc = lspg_location_new(1, 5, 3, 5, 12)
+    let ok = lspg_add_result(ctx, loc)
+    ok && lspg_result_count(ctx) == 1
+}
+fn test_lspg_result_add() -> bool with Mut, Div, Panic {
+    var ctx = lspg_context_new()
+    test_lspg_result_add_inner(&! ctx)
+}
+
+// T58: result at index
+fn test_lspg_result_at_inner(ctx: &! LspgContext) -> bool with Mut, Div, Panic {
+    lspg_clear_results(ctx)
+    let loc = lspg_location_new(1, 5, 3, 5, 12)
+    let ok = lspg_add_result(ctx, loc)
+    let _ = ok
+    let got = lspg_result_at(ctx, 0)
+    lspg_location_eq(&got, &loc)
+}
+fn test_lspg_result_at() -> bool with Mut, Div, Panic {
+    var ctx = lspg_context_new()
+    test_lspg_result_at_inner(&! ctx)
+}
+
+// T59: clear results
+fn test_lspg_result_clear_inner(ctx: &! LspgContext) -> bool with Mut, Div, Panic {
+    let loc = lspg_location_new(1, 1, 0, 1, 5)
+    let ok = lspg_add_result(ctx, loc)
+    let _ = ok
+    lspg_clear_results(ctx)
+    lspg_result_count(ctx) == 0
+}
+fn test_lspg_result_clear() -> bool with Mut, Div, Panic {
+    var ctx = lspg_context_new()
+    test_lspg_result_clear_inner(&! ctx)
+}
+
+// T60: result at out of bounds returns zero loc
+fn test_lspg_result_at_oob_inner(ctx: &! LspgContext) -> bool with Mut, Div, Panic {
+    lspg_clear_results(ctx)
+    let got = lspg_result_at(ctx, 0)
+    lspg_location_is_zero(&got)
+}
+fn test_lspg_result_at_oob() -> bool with Mut, Div, Panic {
+    var ctx = lspg_context_new()
+    test_lspg_result_at_oob_inner(&! ctx)
+}
+
+// T61: result deduplication
+fn test_lspg_result_dedup_inner(ctx: &! LspgContext) -> bool with Mut, Div, Panic {
+    lspg_clear_results(ctx)
+    let loc = lspg_location_new(1, 5, 3, 5, 12)
+    let ok1 = lspg_add_result_unique(ctx, loc)
+    let ok2 = lspg_add_result_unique(ctx, loc)
+    // First add should succeed, second should be skipped
+    ok1 && ok2 == false && lspg_result_count(ctx) == 1
+}
+fn test_lspg_result_dedup() -> bool with Mut, Div, Panic {
+    var ctx = lspg_context_new()
+    test_lspg_result_dedup_inner(&! ctx)
+}
+
+// T62: multiple results in order
+fn test_lspg_result_multi_inner(ctx: &! LspgContext) -> bool with Mut, Div, Panic {
+    lspg_clear_results(ctx)
+    let loc1 = lspg_location_new(1, 1, 0, 1, 5)
+    let loc2 = lspg_location_new(1, 3, 0, 3, 5)
+    let loc3 = lspg_location_new(1, 7, 0, 7, 5)
+    let ok1 = lspg_add_result(ctx, loc1)
+    let ok2 = lspg_add_result(ctx, loc2)
+    let ok3 = lspg_add_result(ctx, loc3)
+    let _ = ok1
+    let _ = ok2
+    let _ = ok3
+    let count = lspg_result_count(ctx)
+    let r0 = lspg_result_at(ctx, 0)
+    let r1 = lspg_result_at(ctx, 1)
+    let r2 = lspg_result_at(ctx, 2)
+    count == 3
+        && lspg_location_eq(&r0, &loc1)
+        && lspg_location_eq(&r1, &loc2)
+        && lspg_location_eq(&r2, &loc3)
+}
+fn test_lspg_result_multi() -> bool with Mut, Div, Panic {
+    var ctx = lspg_context_new()
+    test_lspg_result_multi_inner(&! ctx)
+}
+
+// -------------------------------------------------------
+// Integration tests (T63-T70)
+// -------------------------------------------------------
+
+// T63: full goto-def pipeline -- register, reference, resolve
+fn test_lspg_pipeline_goto_def_inner(ctx: &! LspgContext) -> bool with Mut, Div, Panic {
+    lspg_set_current_file(ctx, 1)
+    // Register a function definition at line 1
+    let loc_d = lspg_location_new(1, 1, 4, 1, 12)
+    let def_id = lspg_register_full(ctx, LspgSymKind::GSymFunction, 1001, loc_d, 0)
+    // Add a usage reference at line 10
+    let loc_r = lspg_location_new(1, 10, 2, 10, 10)
+    let ref_id = lspg_add_reference(ctx, def_id, LspgRefKind::RefUsage, loc_r)
+    let _ = ref_id
+    // Goto-def from the reference site
+    let ok = lspg_handle_definition(ctx, 10, 5)
+    let count = lspg_result_count(ctx)
+    let result = lspg_result_at(ctx, 0)
+    ok && count == 1 && lspg_location_eq(&result, &loc_d)
+}
+fn test_lspg_pipeline_goto_def() -> bool with Mut, Div, Panic {
+    var ctx = lspg_context_new()
+    test_lspg_pipeline_goto_def_inner(&! ctx)
+}
+
+// T64: full find-references pipeline
+fn test_lspg_pipeline_find_refs_inner(ctx: &! LspgContext) -> bool with Mut, Div, Panic {
+    lspg_set_current_file(ctx, 1)
+    let loc_d = lspg_location_new(1, 1, 4, 1, 12)
+    let def_id = lspg_register_full(ctx, LspgSymKind::GSymVariable, 2001, loc_d, 0)
+    // Three usage refs
+    let loc_r1 = lspg_location_new(1, 5, 0, 5, 5)
+    let loc_r2 = lspg_location_new(1, 8, 0, 8, 5)
+    let loc_r3 = lspg_location_new(1, 12, 0, 12, 5)
+    let r1 = lspg_add_reference(ctx, def_id, LspgRefKind::RefUsage, loc_r1)
+    let r2 = lspg_add_reference(ctx, def_id, LspgRefKind::RefRead, loc_r2)
+    let r3 = lspg_add_reference(ctx, def_id, LspgRefKind::RefWrite, loc_r3)
+    let _ = r1
+    let _ = r2
+    let _ = r3
+    // Find refs from the def site -- note: register_full also adds a RefDefinition ref
+    let ok = lspg_handle_references(ctx, 1, 6)
+    let count = lspg_result_count(ctx)
+    // 1 def-ref (from register_full) + 3 usage refs = 4
+    ok && count == 4
+}
+fn test_lspg_pipeline_find_refs() -> bool with Mut, Div, Panic {
+    var ctx = lspg_context_new()
+    test_lspg_pipeline_find_refs_inner(&! ctx)
+}
+
+// T65: batch registration with add_usage_by_name
+fn test_lspg_batch_usage_inner(ctx: &! LspgContext) -> bool with Mut, Div, Panic {
+    let loc_d = lspg_location_new(1, 1, 0, 1, 5)
+    let def_id = lspg_add_definition(ctx, LspgSymKind::GSymFunction, 500, loc_d, 0)
+    let _ = def_id
+    let loc_u1 = lspg_location_new(1, 5, 0, 5, 5)
+    let loc_u2 = lspg_location_new(1, 10, 0, 10, 5)
+    let u1 = lspg_add_usage_by_name(ctx, 500, loc_u1)
+    let u2 = lspg_add_usage_by_name(ctx, 500, loc_u2)
+    u1 >= 0 && u2 >= 0 && lspg_ref_count(ctx) == 2
+}
+fn test_lspg_batch_usage() -> bool with Mut, Div, Panic {
+    var ctx = lspg_context_new()
+    test_lspg_batch_usage_inner(&! ctx)
+}
+
+// T66: batch registration with add_write_by_name
+fn test_lspg_batch_write_inner(ctx: &! LspgContext) -> bool with Mut, Div, Panic {
+    let loc_d = lspg_location_new(1, 1, 0, 1, 5)
+    let def_id = lspg_add_definition(ctx, LspgSymKind::GSymVariable, 600, loc_d, 0)
+    let _ = def_id
+    let loc_w = lspg_location_new(1, 5, 0, 5, 5)
+    let w = lspg_add_write_by_name(ctx, 600, loc_w)
+    w >= 0 && lspg_refs_for_def_kind(ctx, 0, LspgRefKind::RefWrite) == 1
+}
+fn test_lspg_batch_write() -> bool with Mut, Div, Panic {
+    var ctx = lspg_context_new()
+    test_lspg_batch_write_inner(&! ctx)
+}
+
+// T67: cross-file ref count
+fn test_lspg_cross_file_count_inner(ctx: &! LspgContext) -> bool with Mut, Div, Panic {
+    let loc_d = lspg_location_new(1, 1, 0, 1, 5)
+    let def_id = lspg_add_definition(ctx, LspgSymKind::GSymFunction, 100, loc_d, 0)
+    let loc_r1 = lspg_location_new(1, 5, 0, 5, 5)
+    let loc_r2 = lspg_location_new(2, 3, 0, 3, 5)
+    let loc_r3 = lspg_location_new(3, 7, 0, 7, 5)
+    let r1 = lspg_add_reference(ctx, def_id, LspgRefKind::RefUsage, loc_r1)
+    let r2 = lspg_add_reference(ctx, def_id, LspgRefKind::RefUsage, loc_r2)
+    let r3 = lspg_add_reference(ctx, def_id, LspgRefKind::RefUsage, loc_r3)
+    let _ = r1
+    let _ = r2
+    let _ = r3
+    let file_count = lspg_count_files_referencing(ctx, def_id)
+    file_count == 3
+}
+fn test_lspg_cross_file_count() -> bool with Mut, Div, Panic {
+    var ctx = lspg_context_new()
+    test_lspg_cross_file_count_inner(&! ctx)
+}
+
+// T68: context statistics
+fn test_lspg_stats_inner(ctx: &! LspgContext) -> bool with Mut, Div, Panic {
+    let loc_d = lspg_location_new(1, 1, 0, 1, 5)
+    let def_id = lspg_add_definition(ctx, LspgSymKind::GSymFunction, 100, loc_d, 0)
+    let loc_r = lspg_location_new(1, 5, 0, 5, 5)
+    let ref_id = lspg_add_reference(ctx, def_id, LspgRefKind::RefUsage, loc_r)
+    let _ = ref_id
+    let sym_id = lspg_add_symbol(ctx, 100, def_id, LspgSymKind::GSymFunction, loc_d)
+    let _ = sym_id
+    let total = lspg_total_entries(ctx)
+    let empty = lspg_context_is_empty(ctx)
+    total == 3 && empty == false
+}
+fn test_lspg_stats() -> bool with Mut, Div, Panic {
+    var ctx = lspg_context_new()
+    test_lspg_stats_inner(&! ctx)
+}
+
+// T69: reset clears everything
+fn test_lspg_reset_inner(ctx: &! LspgContext) -> bool with Mut, Div, Panic {
+    let loc_d = lspg_location_new(1, 1, 0, 1, 5)
+    let def_id = lspg_add_definition(ctx, LspgSymKind::GSymFunction, 100, loc_d, 0)
+    let loc_r = lspg_location_new(1, 5, 0, 5, 5)
+    let ref_id = lspg_add_reference(ctx, def_id, LspgRefKind::RefUsage, loc_r)
+    let _ = ref_id
+    lspg_reset(ctx)
+    lspg_context_is_empty(ctx) && lspg_def_count(ctx) == 0
+        && lspg_ref_count(ctx) == 0 && lspg_sym_count(ctx) == 0
+}
+fn test_lspg_reset() -> bool with Mut, Div, Panic {
+    var ctx = lspg_context_new()
+    test_lspg_reset_inner(&! ctx)
+}
+
+// T70: shadowing detection
+fn test_lspg_shadowing_inner(ctx: &! LspgContext) -> bool with Mut, Div, Panic {
+    let loc1 = lspg_location_new(1, 1, 0, 1, 5)
+    let loc2 = lspg_location_new(1, 5, 0, 5, 5)
+    let d1 = lspg_add_definition(ctx, LspgSymKind::GSymVariable, 900, loc1, 0)
+    let d2 = lspg_add_definition(ctx, LspgSymKind::GSymVariable, 900, loc2, 1)
+    let is_shadow_d1 = lspg_is_shadowing(ctx, d1)
+    let is_shadow_d2 = lspg_is_shadowing(ctx, d2)
+    // d1 is at depth 0, d2 at depth 1 with same name -- d2 shadows d1
+    is_shadow_d1 == false && is_shadow_d2
+}
+fn test_lspg_shadowing() -> bool with Mut, Div, Panic {
+    var ctx = lspg_context_new()
+    test_lspg_shadowing_inner(&! ctx)
+}
+
+// ============================================================================
+// Section 26: TEST RUNNER
+// ============================================================================
+
+fn lspg_run_all_tests() -> i64 with Mut, Div, Panic {
+    var passed: i64 = 0
+    var total: i64 = 0
+
+    // ---- Location tests (T01-T08) ----
+    total = total + 1
+    if test_lspg_location_new() { passed = passed + 1 }
+
+    total = total + 1
+    if test_lspg_location_eq_same() { passed = passed + 1 }
+
+    total = total + 1
+    if test_lspg_location_eq_diff() { passed = passed + 1 }
+
+    total = total + 1
+    if test_lspg_location_contains_inside() { passed = passed + 1 }
+
+    total = total + 1
+    if test_lspg_location_contains_outside() { passed = passed + 1 }
+
+    total = total + 1
+    if test_lspg_location_contains_start() { passed = passed + 1 }
+
+    total = total + 1
+    if test_lspg_location_contains_multiline() { passed = passed + 1 }
+
+    total = total + 1
+    if test_lspg_location_span() { passed = passed + 1 }
+
+    // ---- Definition tests (T09-T18) ----
+    total = total + 1
+    if test_lspg_add_def() { passed = passed + 1 }
+
+    total = total + 1
+    if test_lspg_add_multi_def() { passed = passed + 1 }
+
+    total = total + 1
+    if test_lspg_def_location() { passed = passed + 1 }
+
+    total = total + 1
+    if test_lspg_def_name_hash() { passed = passed + 1 }
+
+    total = total + 1
+    if test_lspg_def_kind() { passed = passed + 1 }
+
+    total = total + 1
+    if test_lspg_find_def_at() { passed = passed + 1 }
+
+    total = total + 1
+    if test_lspg_find_def_at_miss() { passed = passed + 1 }
+
+    total = total + 1
+    if test_lspg_find_def_by_hash() { passed = passed + 1 }
+
+    total = total + 1
+    if test_lspg_find_def_by_hash_miss() { passed = passed + 1 }
+
+    total = total + 1
+    if test_lspg_find_innermost() { passed = passed + 1 }
+
+    // ---- Reference tests (T19-T28) ----
+    total = total + 1
+    if test_lspg_add_ref() { passed = passed + 1 }
+
+    total = total + 1
+    if test_lspg_add_multi_ref() { passed = passed + 1 }
+
+    total = total + 1
+    if test_lspg_find_ref_at() { passed = passed + 1 }
+
+    total = total + 1
+    if test_lspg_find_ref_at_miss() { passed = passed + 1 }
+
+    total = total + 1
+    if test_lspg_refs_for_def() { passed = passed + 1 }
+
+    total = total + 1
+    if test_lspg_refs_for_def_zero() { passed = passed + 1 }
+
+    total = total + 1
+    if test_lspg_ref_def_id() { passed = passed + 1 }
+
+    total = total + 1
+    if test_lspg_ref_location() { passed = passed + 1 }
+
+    total = total + 1
+    if test_lspg_refs_by_kind() { passed = passed + 1 }
+
+    total = total + 1
+    if test_lspg_refs_multi_def() { passed = passed + 1 }
+
+    // ---- Symbol table tests (T29-T36) ----
+    total = total + 1
+    if test_lspg_add_symbol() { passed = passed + 1 }
+
+    total = total + 1
+    if test_lspg_find_symbol() { passed = passed + 1 }
+
+    total = total + 1
+    if test_lspg_find_symbol_miss() { passed = passed + 1 }
+
+    total = total + 1
+    if test_lspg_find_symbol_by_def() { passed = passed + 1 }
+
+    total = total + 1
+    if test_lspg_count_symbols_kind() { passed = passed + 1 }
+
+    total = total + 1
+    if test_lspg_build_def_map() { passed = passed + 1 }
+
+    total = total + 1
+    if test_lspg_build_def_map_nodup() { passed = passed + 1 }
+
+    total = total + 1
+    if test_lspg_build_ref_index() { passed = passed + 1 }
+
+    // ---- Goto-definition tests (T37-T46) ----
+    total = total + 1
+    if test_lspg_resolve_on_def() { passed = passed + 1 }
+
+    total = total + 1
+    if test_lspg_resolve_on_ref() { passed = passed + 1 }
+
+    total = total + 1
+    if test_lspg_resolve_miss() { passed = passed + 1 }
+
+    total = total + 1
+    if test_lspg_handle_def_ok() { passed = passed + 1 }
+
+    total = total + 1
+    if test_lspg_handle_def_miss() { passed = passed + 1 }
+
+    total = total + 1
+    if test_lspg_handle_def_on_def() { passed = passed + 1 }
+
+    total = total + 1
+    if test_lspg_handle_def_xfile() { passed = passed + 1 }
+
+    total = total + 1
+    if test_lspg_handle_def_tighter() { passed = passed + 1 }
+
+    total = total + 1
+    if test_lspg_resolve_def_over_ref() { passed = passed + 1 }
+
+    total = total + 1
+    if test_lspg_resolve_file_ctx() { passed = passed + 1 }
+
+    // ---- Find-references tests (T47-T56) ----
+    total = total + 1
+    if test_lspg_handle_refs_ok() { passed = passed + 1 }
+
+    total = total + 1
+    if test_lspg_handle_refs_miss() { passed = passed + 1 }
+
+    total = total + 1
+    if test_lspg_handle_refs_via_ref() { passed = passed + 1 }
+
+    total = total + 1
+    if test_lspg_handle_refs_with_def() { passed = passed + 1 }
+
+    total = total + 1
+    if test_lspg_collect_refs_kind() { passed = passed + 1 }
+
+    total = total + 1
+    if test_lspg_collect_defs_name() { passed = passed + 1 }
+
+    total = total + 1
+    if test_lspg_collect_all() { passed = passed + 1 }
+
+    total = total + 1
+    if test_lspg_handle_refs_by_kind() { passed = passed + 1 }
+
+    total = total + 1
+    if test_lspg_refs_in_file() { passed = passed + 1 }
+
+    total = total + 1
+    if test_lspg_defs_in_file() { passed = passed + 1 }
+
+    // ---- Result list tests (T57-T62) ----
+    total = total + 1
+    if test_lspg_result_add() { passed = passed + 1 }
+
+    total = total + 1
+    if test_lspg_result_at() { passed = passed + 1 }
+
+    total = total + 1
+    if test_lspg_result_clear() { passed = passed + 1 }
+
+    total = total + 1
+    if test_lspg_result_at_oob() { passed = passed + 1 }
+
+    total = total + 1
+    if test_lspg_result_dedup() { passed = passed + 1 }
+
+    total = total + 1
+    if test_lspg_result_multi() { passed = passed + 1 }
+
+    // ---- Integration tests (T63-T70) ----
+    total = total + 1
+    if test_lspg_pipeline_goto_def() { passed = passed + 1 }
+
+    total = total + 1
+    if test_lspg_pipeline_find_refs() { passed = passed + 1 }
+
+    total = total + 1
+    if test_lspg_batch_usage() { passed = passed + 1 }
+
+    total = total + 1
+    if test_lspg_batch_write() { passed = passed + 1 }
+
+    total = total + 1
+    if test_lspg_cross_file_count() { passed = passed + 1 }
+
+    total = total + 1
+    if test_lspg_stats() { passed = passed + 1 }
+
+    total = total + 1
+    if test_lspg_reset() { passed = passed + 1 }
+
+    total = total + 1
+    if test_lspg_shadowing() { passed = passed + 1 }
+
+    passed
+}

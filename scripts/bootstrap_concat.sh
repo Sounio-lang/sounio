@@ -86,14 +86,22 @@ FILES=(
   self-hosted/check/pat_decision.sio
   self-hosted/check/type_erasure.sio
   self-hosted/check/gadts.sio
+  self-hosted/check/dependent.sio
+  self-hosted/check/ownership.sio
+  self-hosted/check/lint.sio
+  self-hosted/check/layout.sio
 
   # ── 6. Effects layer ────────────────────────────────────────────
   self-hosted/effects/types.sio
   self-hosted/effects/mod.sio
   self-hosted/effects/checker.sio
+  self-hosted/effects/handlers.sio
 
   # ── 6b. Diagnostics engine ────────────────────────────────────
   self-hosted/diagnostics/mod.sio
+
+  # ── 6c. Analysis layer ──────────────────────────────────────────
+  self-hosted/analysis/abstract_interp.sio
 
   # ── 7. IR layer ─────────────────────────────────────────────────
   self-hosted/ir/ir.sio
@@ -116,6 +124,9 @@ FILES=(
   self-hosted/ir/egraph.sio
   self-hosted/ir/loop_opt.sio
   self-hosted/ir/auto_vectorize.sio
+  self-hosted/ir/memory_analysis.sio
+  self-hosted/ir/incremental.sio
+  self-hosted/ir/locality.sio
   self-hosted/ir/mod.sio
 
   # ── 8. HLIR (High-Level IR) ─────────────────────────────────────
@@ -147,6 +158,7 @@ FILES=(
   self-hosted/native/avx512.sio
   self-hosted/native/pe_coff.sio
   self-hosted/native/signal_handler.sio
+  self-hosted/native/profiling.sio
   self-hosted/native/hyper_lower.sio
   self-hosted/native/suite.sio
 
@@ -254,6 +266,8 @@ FILES=(
   # ── 22b. LSP protocol + completions ────────────────────────────
   self-hosted/lsp/protocol.sio
   self-hosted/lsp/completions.sio
+  self-hosted/lsp/hover.sio
+  self-hosted/lsp/goto_def.sio
 
   # ── 23. I/O helpers + module loader ─────────────────────────────
   self-hosted/io/file_write.sio
@@ -385,12 +399,20 @@ if [ "$BOOTSTRAP_PROFILE" != "full" ]; then
     self-hosted/check/pat_decision.sio
     self-hosted/check/type_erasure.sio
     self-hosted/check/gadts.sio
+    self-hosted/check/dependent.sio
+    self-hosted/check/ownership.sio
+    self-hosted/check/lint.sio
+    self-hosted/check/layout.sio
 
     # 5b. Diagnostics engine
     self-hosted/diagnostics/mod.sio
 
-    # 5c. Effects checker
+    # 5c. Analysis layer
+    self-hosted/analysis/abstract_interp.sio
+
+    # 5d. Effects checker
     self-hosted/effects/checker.sio
+    self-hosted/effects/handlers.sio
 
     # 6. IR layer
     self-hosted/ir/ir.sio
@@ -413,6 +435,9 @@ if [ "$BOOTSTRAP_PROFILE" != "full" ]; then
     self-hosted/ir/egraph.sio
     self-hosted/ir/loop_opt.sio
     self-hosted/ir/auto_vectorize.sio
+    self-hosted/ir/memory_analysis.sio
+    self-hosted/ir/incremental.sio
+    self-hosted/ir/locality.sio
     self-hosted/ir/mod.sio
 
     # 7. Native codegen layer
@@ -438,6 +463,7 @@ if [ "$BOOTSTRAP_PROFILE" != "full" ]; then
     self-hosted/native/avx512.sio
     self-hosted/native/pe_coff.sio
     self-hosted/native/signal_handler.sio
+    self-hosted/native/profiling.sio
     self-hosted/native/hyper_lower.sio
 
     # 8. WebAssembly backend
@@ -453,6 +479,8 @@ if [ "$BOOTSTRAP_PROFILE" != "full" ]; then
     # 8c. LSP protocol + completions
     self-hosted/lsp/protocol.sio
     self-hosted/lsp/completions.sio
+    self-hosted/lsp/hover.sio
+    self-hosted/lsp/goto_def.sio
 
     # 8d. VM layer
     self-hosted/vm/vm.sio

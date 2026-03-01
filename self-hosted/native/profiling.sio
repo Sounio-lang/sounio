@@ -1,0 +1,2471 @@
+// self-hosted::native::profiling — Compiler pass profiling
+//
+// Provides timing, memory tracking, hot function identification, sampling,
+// and pass-level statistics for the Sounio compiler pipeline.  All state
+// lives in flat fixed-size arrays (arena pattern) suitable for the bootstrap
+// self-hosted compiler.
+//
+// Every struct and function uses the `prof_` prefix to avoid global
+// namespace collisions with other self-hosted modules.
+//
+// Key capabilities:
+//   - Timer allocation, start/stop, multi-invocation tracking
+//   - Pass registration with kind/name, per-pass timing & memory
+//   - Function heat tracking (hash-based), hot-function marking
+//   - Sample collection per timer/pass kind, average computation
+//   - Report generation with percentage and sorting
+//   - Full reset for profiler reuse across compilation units
+
+// ============================================================================
+// Constants
+// ============================================================================
+
+let PROF_MAX_PASSES: i64 = 128
+let PROF_MAX_FUNCTIONS: i64 = 2048
+let PROF_MAX_TIMERS: i64 = 256
+let PROF_MAX_SAMPLES: i64 = 1024
+let PROF_MAX_NAME_LEN: i64 = 64
+let PROF_TOP_N: i64 = 20
+let PROF_NO_TIMER: i64 = 0 - 1
+let PROF_NO_PASS: i64 = 0 - 1
+
+// ============================================================================
+// Enums — encoded as i64 tags
+// ============================================================================
+
+// ProfPassKind tags
+fn prof_pass_lexer() -> i64 { 0 }
+fn prof_pass_parser() -> i64 { 1 }
+fn prof_pass_resolve() -> i64 { 2 }
+fn prof_pass_check() -> i64 { 3 }
+fn prof_pass_effects() -> i64 { 4 }
+fn prof_pass_ir() -> i64 { 5 }
+fn prof_pass_optimize() -> i64 { 6 }
+fn prof_pass_codegen() -> i64 { 7 }
+fn prof_pass_link() -> i64 { 8 }
+fn prof_pass_lsp() -> i64 { 9 }
+fn prof_pass_custom() -> i64 { 10 }
+
+// ProfTimerState tags
+fn prof_timer_idle() -> i64 { 0 }
+fn prof_timer_running() -> i64 { 1 }
+fn prof_timer_stopped() -> i64 { 2 }
+
+// ProfSortBy tags
+fn prof_sort_by_time() -> i64 { 0 }
+fn prof_sort_by_count() -> i64 { 1 }
+fn prof_sort_by_memory() -> i64 { 2 }
+fn prof_sort_by_name() -> i64 { 3 }
+
+// ============================================================================
+// Data structures
+// ============================================================================
+
+// A fixed-length name buffer for pass/function names.
+struct ProfNameBuf {
+    buf: [i8; 64],
+    len: i64,
+}
+
+// A single timer — tracks start tick, accumulated elapsed, invocations.
+struct ProfTimer {
+    id: i64,
+    state: i64,
+    start_tick: i64,
+    elapsed_ticks: i64,
+    invocations: i64,
+}
+
+// Per-pass statistics: kind, name, timing, memory, function count.
+struct ProfPassStats {
+    pass_kind: i64,
+    name: ProfNameBuf,
+    timer_id: i64,
+    total_ticks: i64,
+    invocations: i64,
+    mem_before: i64,
+    mem_after: i64,
+    mem_delta: i64,
+    functions_processed: i64,
+}
+
+// Per-function heat tracking: hash-keyed, accumulated timing, hot flag.
+struct ProfFunctionHeat {
+    fn_name_hash: i64,
+    total_ticks: i64,
+    pass_count: i64,
+    max_single_pass: i64,
+    is_hot: bool,
+}
+
+// A single timing sample associated with a timer and pass kind.
+struct ProfSample {
+    timer_id: i64,
+    ticks: i64,
+    pass_kind: i64,
+}
+
+// A single line of the profiling report.
+struct ProfReportLine {
+    name: ProfNameBuf,
+    ticks: i64,
+    pct_of_total: i64,
+    invocations: i64,
+    mem_delta: i64,
+}
+
+// The full profiling context — flat arena with all arrays.
+struct ProfContext {
+    passes: [ProfPassStats; 128],
+    pass_count: i64,
+    functions: [ProfFunctionHeat; 2048],
+    fn_count: i64,
+    timers: [ProfTimer; 256],
+    timer_count: i64,
+    samples: [ProfSample; 1024],
+    sample_count: i64,
+    report: [ProfReportLine; 128],
+    report_count: i64,
+    total_ticks: i64,
+    total_mem_delta: i64,
+    current_pass: i64,
+    current_timer: i64,
+}
+
+// ============================================================================
+// Constructors — element defaults
+// ============================================================================
+
+fn prof_name_buf_empty() -> ProfNameBuf {
+    ProfNameBuf {
+        buf: [0; 64],
+        len: 0,
+    }
+}
+
+fn prof_timer_empty() -> ProfTimer {
+    ProfTimer {
+        id: 0,
+        state: prof_timer_idle(),
+        start_tick: 0,
+        elapsed_ticks: 0,
+        invocations: 0,
+    }
+}
+
+fn prof_pass_stats_empty() -> ProfPassStats {
+    ProfPassStats {
+        pass_kind: prof_pass_custom(),
+        name: prof_name_buf_empty(),
+        timer_id: PROF_NO_TIMER,
+        total_ticks: 0,
+        invocations: 0,
+        mem_before: 0,
+        mem_after: 0,
+        mem_delta: 0,
+        functions_processed: 0,
+    }
+}
+
+fn prof_function_heat_empty() -> ProfFunctionHeat {
+    ProfFunctionHeat {
+        fn_name_hash: 0,
+        total_ticks: 0,
+        pass_count: 0,
+        max_single_pass: 0,
+        is_hot: false,
+    }
+}
+
+fn prof_sample_empty() -> ProfSample {
+    ProfSample {
+        timer_id: 0,
+        ticks: 0,
+        pass_kind: 0,
+    }
+}
+
+fn prof_report_line_empty() -> ProfReportLine {
+    ProfReportLine {
+        name: prof_name_buf_empty(),
+        ticks: 0,
+        pct_of_total: 0,
+        invocations: 0,
+        mem_delta: 0,
+    }
+}
+
+// ============================================================================
+// Context constructor
+// ============================================================================
+
+fn prof_context_new() -> ProfContext {
+    ProfContext {
+        passes: [prof_pass_stats_empty(); 128],
+        pass_count: 0,
+        functions: [prof_function_heat_empty(); 2048],
+        fn_count: 0,
+        timers: [prof_timer_empty(); 256],
+        timer_count: 0,
+        samples: [prof_sample_empty(); 1024],
+        sample_count: 0,
+        report: [prof_report_line_empty(); 128],
+        report_count: 0,
+        total_ticks: 0,
+        total_mem_delta: 0,
+        current_pass: PROF_NO_PASS,
+        current_timer: PROF_NO_TIMER,
+    }
+}
+
+// ============================================================================
+// ProfNameBuf helpers (must precede callers)
+// ============================================================================
+
+// Create a name buffer from up to 8 individual bytes plus a count.
+// count must be in [0, 8]; bytes beyond count are ignored.
+fn prof_name_from_bytes(
+    a: i8, b: i8, c: i8, d: i8,
+    e: i8, f: i8, g: i8, h: i8,
+    count: i64
+) -> ProfNameBuf with Mut, Div, Panic {
+    var name = prof_name_buf_empty()
+    if count > PROF_MAX_NAME_LEN { return name }
+    if count >= 1 { name.buf[0 as usize] = a }
+    if count >= 2 { name.buf[1 as usize] = b }
+    if count >= 3 { name.buf[2 as usize] = c }
+    if count >= 4 { name.buf[3 as usize] = d }
+    if count >= 5 { name.buf[4 as usize] = e }
+    if count >= 6 { name.buf[5 as usize] = f }
+    if count >= 7 { name.buf[6 as usize] = g }
+    if count >= 8 { name.buf[7 as usize] = h }
+    name.len = count
+    name
+}
+
+// Compare two name buffers byte-by-byte.
+fn prof_name_eq(a: &ProfNameBuf, b: &ProfNameBuf) -> bool with Mut, Div, Panic {
+    if a.len != b.len { return false }
+    var i: i64 = 0
+    while i < a.len {
+        if a.buf[i as usize] != b.buf[i as usize] { return false }
+        i = i + 1
+    }
+    true
+}
+
+// Copy a name buffer (value semantics).
+fn prof_name_copy(src: &ProfNameBuf) -> ProfNameBuf with Mut, Div, Panic {
+    var dst = prof_name_buf_empty()
+    var i: i64 = 0
+    while i < src.len {
+        dst.buf[i as usize] = src.buf[i as usize]
+        i = i + 1
+    }
+    dst.len = src.len
+    dst
+}
+
+// Return the first byte of a name, or 0 if empty.
+fn prof_name_first_byte(name: &ProfNameBuf) -> i8 with Div, Panic {
+    if name.len > 0 { name.buf[0 as usize] } else { 0 as i8 }
+}
+
+// Lexicographic comparison: returns negative if a < b, 0 if equal, positive if a > b.
+fn prof_name_cmp(a: &ProfNameBuf, b: &ProfNameBuf) -> i64 with Mut, Div, Panic {
+    var i: i64 = 0
+    var min_len = a.len
+    if b.len < min_len { min_len = b.len }
+    while i < min_len {
+        let diff = (a.buf[i as usize] as i64) - (b.buf[i as usize] as i64)
+        if diff != 0 { return diff }
+        i = i + 1
+    }
+    a.len - b.len
+}
+
+// ============================================================================
+// Absolute value helper (must precede callers)
+// ============================================================================
+
+fn prof_abs(x: i64) -> i64 {
+    if x < 0 { 0 - x } else { x }
+}
+
+// Min/Max helpers
+fn prof_min(a: i64, b: i64) -> i64 {
+    if a < b { a } else { b }
+}
+
+fn prof_max(a: i64, b: i64) -> i64 {
+    if a > b { a } else { b }
+}
+
+// ============================================================================
+// Timer operations
+// ============================================================================
+
+// Allocate a new timer, returning its ID. Returns -1 if full.
+fn prof_alloc_timer(ctx: &! ProfContext) -> i64 with Mut, Div, Panic {
+    if ctx.timer_count >= PROF_MAX_TIMERS { return 0 - 1 }
+    let id = ctx.timer_count
+    ctx.timers[id as usize] = ProfTimer {
+        id: id,
+        state: prof_timer_idle(),
+        start_tick: 0,
+        elapsed_ticks: 0,
+        invocations: 0,
+    }
+    ctx.timer_count = ctx.timer_count + 1
+    id
+}
+
+// Start the timer at the given tick. If already running, does nothing.
+fn prof_start_timer(ctx: &! ProfContext, timer_id: i64, tick: i64) -> bool with Mut, Div, Panic {
+    if timer_id < 0 { return false }
+    if timer_id >= ctx.timer_count { return false }
+    if ctx.timers[timer_id as usize].state == prof_timer_running() { return false }
+    ctx.timers[timer_id as usize].state = prof_timer_running()
+    ctx.timers[timer_id as usize].start_tick = tick
+    true
+}
+
+// Stop the timer at the given tick. Accumulates elapsed ticks.
+fn prof_stop_timer(ctx: &! ProfContext, timer_id: i64, tick: i64) -> bool with Mut, Div, Panic {
+    if timer_id < 0 { return false }
+    if timer_id >= ctx.timer_count { return false }
+    if ctx.timers[timer_id as usize].state != prof_timer_running() { return false }
+    let elapsed = tick - ctx.timers[timer_id as usize].start_tick
+    ctx.timers[timer_id as usize].elapsed_ticks = ctx.timers[timer_id as usize].elapsed_ticks + elapsed
+    ctx.timers[timer_id as usize].invocations = ctx.timers[timer_id as usize].invocations + 1
+    ctx.timers[timer_id as usize].state = prof_timer_stopped()
+    true
+}
+
+// Query the total elapsed ticks for a timer.
+fn prof_timer_elapsed(ctx: &ProfContext, timer_id: i64) -> i64 with Div, Panic {
+    if timer_id < 0 { return 0 }
+    if timer_id >= ctx.timer_count { return 0 }
+    ctx.timers[timer_id as usize].elapsed_ticks
+}
+
+// Query invocation count for a timer.
+fn prof_timer_invocations(ctx: &ProfContext, timer_id: i64) -> i64 with Div, Panic {
+    if timer_id < 0 { return 0 }
+    if timer_id >= ctx.timer_count { return 0 }
+    ctx.timers[timer_id as usize].invocations
+}
+
+// Query the state of a timer.
+fn prof_timer_state(ctx: &ProfContext, timer_id: i64) -> i64 with Div, Panic {
+    if timer_id < 0 { return prof_timer_idle() }
+    if timer_id >= ctx.timer_count { return prof_timer_idle() }
+    ctx.timers[timer_id as usize].state
+}
+
+// Reset a single timer to idle.
+fn prof_reset_timer(ctx: &! ProfContext, timer_id: i64) with Mut, Div, Panic {
+    if timer_id < 0 { return }
+    if timer_id >= ctx.timer_count { return }
+    ctx.timers[timer_id as usize].state = prof_timer_idle()
+    ctx.timers[timer_id as usize].start_tick = 0
+    ctx.timers[timer_id as usize].elapsed_ticks = 0
+    ctx.timers[timer_id as usize].invocations = 0
+}
+
+// Restart a stopped timer (allows multiple invocations without re-allocating).
+fn prof_restart_timer(ctx: &! ProfContext, timer_id: i64, tick: i64) -> bool with Mut, Div, Panic {
+    if timer_id < 0 { return false }
+    if timer_id >= ctx.timer_count { return false }
+    // Only restart if stopped or idle
+    let state = ctx.timers[timer_id as usize].state
+    if state == prof_timer_running() { return false }
+    ctx.timers[timer_id as usize].state = prof_timer_running()
+    ctx.timers[timer_id as usize].start_tick = tick
+    true
+}
+
+// ============================================================================
+// Pass registration and tracking
+// ============================================================================
+
+// Register a new compiler pass. Returns the pass ID, or -1 if full.
+fn prof_register_pass(ctx: &! ProfContext, kind: i64, name: ProfNameBuf) -> i64 with Mut, Div, Panic {
+    if ctx.pass_count >= PROF_MAX_PASSES { return 0 - 1 }
+    let id = ctx.pass_count
+    let timer_id = prof_alloc_timer(ctx)
+    ctx.passes[id as usize] = ProfPassStats {
+        pass_kind: kind,
+        name: name,
+        timer_id: timer_id,
+        total_ticks: 0,
+        invocations: 0,
+        mem_before: 0,
+        mem_after: 0,
+        mem_delta: 0,
+        functions_processed: 0,
+    }
+    ctx.pass_count = ctx.pass_count + 1
+    id
+}
+
+// Begin a pass invocation: record start tick, memory before, start timer.
+fn prof_start_pass(ctx: &! ProfContext, pass_id: i64, tick: i64, mem: i64) with Mut, Div, Panic {
+    if pass_id < 0 { return }
+    if pass_id >= ctx.pass_count { return }
+    ctx.passes[pass_id as usize].mem_before = mem
+    ctx.current_pass = pass_id
+    let tid = ctx.passes[pass_id as usize].timer_id
+    // Restart (not just start) so timer accumulates across invocations.
+    let _ok = prof_restart_timer(ctx, tid, tick)
+}
+
+// End a pass invocation: record end tick, memory after, stop timer, compute delta.
+fn prof_end_pass(ctx: &! ProfContext, pass_id: i64, tick: i64, mem: i64) with Mut, Div, Panic {
+    if pass_id < 0 { return }
+    if pass_id >= ctx.pass_count { return }
+    let tid = ctx.passes[pass_id as usize].timer_id
+    let _ok = prof_stop_timer(ctx, tid, tick)
+    let elapsed = prof_timer_elapsed(ctx, tid)
+    ctx.passes[pass_id as usize].total_ticks = elapsed
+    ctx.passes[pass_id as usize].mem_after = mem
+    let delta = mem - ctx.passes[pass_id as usize].mem_before
+    ctx.passes[pass_id as usize].mem_delta = ctx.passes[pass_id as usize].mem_delta + delta
+    ctx.passes[pass_id as usize].invocations = ctx.passes[pass_id as usize].invocations + 1
+    // Accumulate into total ticks and memory delta.
+    ctx.total_ticks = ctx.total_ticks + (tick - ctx.timers[tid as usize].start_tick)
+    ctx.total_mem_delta = ctx.total_mem_delta + delta
+    ctx.current_pass = PROF_NO_PASS
+}
+
+// Record that a pass processed one more function.
+fn prof_pass_add_function(ctx: &! ProfContext, pass_id: i64) with Mut, Div, Panic {
+    if pass_id < 0 { return }
+    if pass_id >= ctx.pass_count { return }
+    ctx.passes[pass_id as usize].functions_processed = ctx.passes[pass_id as usize].functions_processed + 1
+}
+
+// Query total ticks for a pass.
+fn prof_pass_time(ctx: &ProfContext, pass_id: i64) -> i64 with Div, Panic {
+    if pass_id < 0 { return 0 }
+    if pass_id >= ctx.pass_count { return 0 }
+    ctx.passes[pass_id as usize].total_ticks
+}
+
+// Query invocation count for a pass.
+fn prof_pass_count(ctx: &ProfContext, pass_id: i64) -> i64 with Div, Panic {
+    if pass_id < 0 { return 0 }
+    if pass_id >= ctx.pass_count { return 0 }
+    ctx.passes[pass_id as usize].invocations
+}
+
+// Query memory delta for a pass.
+fn prof_pass_mem_delta(ctx: &ProfContext, pass_id: i64) -> i64 with Div, Panic {
+    if pass_id < 0 { return 0 }
+    if pass_id >= ctx.pass_count { return 0 }
+    ctx.passes[pass_id as usize].mem_delta
+}
+
+// Query the pass kind.
+fn prof_pass_kind(ctx: &ProfContext, pass_id: i64) -> i64 with Div, Panic {
+    if pass_id < 0 { return prof_pass_custom() }
+    if pass_id >= ctx.pass_count { return prof_pass_custom() }
+    ctx.passes[pass_id as usize].pass_kind
+}
+
+// Query functions processed by a pass.
+fn prof_pass_functions_processed(ctx: &ProfContext, pass_id: i64) -> i64 with Div, Panic {
+    if pass_id < 0 { return 0 }
+    if pass_id >= ctx.pass_count { return 0 }
+    ctx.passes[pass_id as usize].functions_processed
+}
+
+// ============================================================================
+// Function heat tracking
+// ============================================================================
+
+// Find a function by hash. Returns the index, or -1 if not found.
+fn prof_find_function(ctx: &ProfContext, fn_hash: i64) -> i64 with Mut, Div, Panic {
+    var i: i64 = 0
+    while i < ctx.fn_count {
+        if ctx.functions[i as usize].fn_name_hash == fn_hash {
+            return i
+        }
+        i = i + 1
+    }
+    0 - 1
+}
+
+// Record a function timing event. Creates a new entry if the hash is unseen.
+fn prof_record_function(ctx: &! ProfContext, fn_hash: i64, ticks: i64, pass_kind: i64) with Mut, Div, Panic {
+    // Try to find existing entry.
+    var idx: i64 = 0 - 1
+    var i: i64 = 0
+    while i < ctx.fn_count {
+        if ctx.functions[i as usize].fn_name_hash == fn_hash {
+            idx = i
+            // break: set i to fn_count to exit loop
+            i = ctx.fn_count
+        } else {
+            i = i + 1
+        }
+    }
+    if idx < 0 {
+        // Allocate new slot.
+        if ctx.fn_count >= PROF_MAX_FUNCTIONS { return }
+        idx = ctx.fn_count
+        ctx.functions[idx as usize] = ProfFunctionHeat {
+            fn_name_hash: fn_hash,
+            total_ticks: 0,
+            pass_count: 0,
+            max_single_pass: 0,
+            is_hot: false,
+        }
+        ctx.fn_count = ctx.fn_count + 1
+    }
+    ctx.functions[idx as usize].total_ticks = ctx.functions[idx as usize].total_ticks + ticks
+    ctx.functions[idx as usize].pass_count = ctx.functions[idx as usize].pass_count + 1
+    if ticks > ctx.functions[idx as usize].max_single_pass {
+        ctx.functions[idx as usize].max_single_pass = ticks
+    }
+}
+
+// Query function heat by index.
+fn prof_function_ticks(ctx: &ProfContext, idx: i64) -> i64 with Div, Panic {
+    if idx < 0 { return 0 }
+    if idx >= ctx.fn_count { return 0 }
+    ctx.functions[idx as usize].total_ticks
+}
+
+// Query function pass count by index.
+fn prof_function_pass_count(ctx: &ProfContext, idx: i64) -> i64 with Div, Panic {
+    if idx < 0 { return 0 }
+    if idx >= ctx.fn_count { return 0 }
+    ctx.functions[idx as usize].pass_count
+}
+
+// Query if a function is hot.
+fn prof_function_is_hot(ctx: &ProfContext, idx: i64) -> bool with Div, Panic {
+    if idx < 0 { return false }
+    if idx >= ctx.fn_count { return false }
+    ctx.functions[idx as usize].is_hot
+}
+
+// Query the max single pass for a function.
+fn prof_function_max_pass(ctx: &ProfContext, idx: i64) -> i64 with Div, Panic {
+    if idx < 0 { return 0 }
+    if idx >= ctx.fn_count { return 0 }
+    ctx.functions[idx as usize].max_single_pass
+}
+
+// Compute the sum of all function ticks (for threshold calculations).
+fn prof_total_function_ticks(ctx: &ProfContext) -> i64 with Mut, Div, Panic {
+    var total: i64 = 0
+    var i: i64 = 0
+    while i < ctx.fn_count {
+        total = total + ctx.functions[i as usize].total_ticks
+        i = i + 1
+    }
+    total
+}
+
+// Mark functions whose cumulative ticks exceed threshold_pct of total as hot.
+// threshold_pct is an integer percentage (e.g. 80 means top 80%).
+fn prof_mark_hot_functions(ctx: &! ProfContext, threshold_pct: i64) with Mut, Div, Panic {
+    let total = prof_total_function_ticks(ctx)
+    if total == 0 { return }
+    // First, clear all hot flags.
+    var i: i64 = 0
+    while i < ctx.fn_count {
+        ctx.functions[i as usize].is_hot = false
+        i = i + 1
+    }
+    // Sort indices by total_ticks descending via simple selection.
+    // We use a temporary ordering array approach with in-place marking.
+    // Since we cannot return arrays, we do a multi-pass scan:
+    //   on each pass, find the largest unmarked entry, mark it hot,
+    //   and accumulate until we hit threshold_pct of total.
+    let threshold = total * threshold_pct / 100
+    var accumulated: i64 = 0
+    var marked: i64 = 0
+    while accumulated < threshold {
+        if marked >= ctx.fn_count { return }
+        // Find the entry with the largest total_ticks that is not yet hot.
+        var best_idx: i64 = 0 - 1
+        var best_ticks: i64 = 0 - 1
+        var j: i64 = 0
+        while j < ctx.fn_count {
+            if ctx.functions[j as usize].is_hot == false {
+                if ctx.functions[j as usize].total_ticks > best_ticks {
+                    best_ticks = ctx.functions[j as usize].total_ticks
+                    best_idx = j
+                }
+            }
+            j = j + 1
+        }
+        if best_idx < 0 { return }
+        ctx.functions[best_idx as usize].is_hot = true
+        accumulated = accumulated + best_ticks
+        marked = marked + 1
+    }
+}
+
+// Sort functions by total_ticks descending (insertion sort) and return
+// the count of hot functions (up to n).
+fn prof_top_hot_functions(ctx: &! ProfContext, n: i64) -> i64 with Mut, Div, Panic {
+    // Insertion sort functions by total_ticks descending.
+    var i: i64 = 1
+    while i < ctx.fn_count {
+        let key = ctx.functions[i as usize]
+        var j = i - 1
+        while j >= 0 {
+            if ctx.functions[j as usize].total_ticks < key.total_ticks {
+                ctx.functions[(j + 1) as usize] = ctx.functions[j as usize]
+                j = j - 1
+            } else {
+                // break
+                j = 0 - 1
+            }
+        }
+        ctx.functions[(j + 1) as usize] = key
+        i = i + 1
+    }
+    // Return min(n, fn_count).
+    if n < ctx.fn_count { n } else { ctx.fn_count }
+}
+
+// Count how many functions are currently marked hot.
+fn prof_count_hot_functions(ctx: &ProfContext) -> i64 with Mut, Div, Panic {
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < ctx.fn_count {
+        if ctx.functions[i as usize].is_hot { count = count + 1 }
+        i = i + 1
+    }
+    count
+}
+
+// ============================================================================
+// Aggregate queries
+// ============================================================================
+
+// Total accumulated ticks across all passes.
+fn prof_total_time(ctx: &ProfContext) -> i64 {
+    ctx.total_ticks
+}
+
+// Total accumulated memory delta across all passes.
+fn prof_total_memory_delta(ctx: &ProfContext) -> i64 {
+    ctx.total_mem_delta
+}
+
+// Compute total ticks by summing all pass total_ticks (alternative to incremental).
+fn prof_compute_total_time(ctx: &ProfContext) -> i64 with Mut, Div, Panic {
+    var total: i64 = 0
+    var i: i64 = 0
+    while i < ctx.pass_count {
+        total = total + ctx.passes[i as usize].total_ticks
+        i = i + 1
+    }
+    total
+}
+
+// Compute total memory delta by summing all pass mem_deltas.
+fn prof_compute_total_mem_delta(ctx: &ProfContext) -> i64 with Mut, Div, Panic {
+    var total: i64 = 0
+    var i: i64 = 0
+    while i < ctx.pass_count {
+        total = total + ctx.passes[i as usize].mem_delta
+        i = i + 1
+    }
+    total
+}
+
+// Find the pass with the highest total_ticks. Returns pass_id or -1.
+fn prof_slowest_pass(ctx: &ProfContext) -> i64 with Mut, Div, Panic {
+    if ctx.pass_count == 0 { return 0 - 1 }
+    var best_id: i64 = 0
+    var best_ticks: i64 = ctx.passes[0 as usize].total_ticks
+    var i: i64 = 1
+    while i < ctx.pass_count {
+        if ctx.passes[i as usize].total_ticks > best_ticks {
+            best_ticks = ctx.passes[i as usize].total_ticks
+            best_id = i
+        }
+        i = i + 1
+    }
+    best_id
+}
+
+// Find the pass with the largest memory delta. Returns pass_id or -1.
+fn prof_largest_mem_pass(ctx: &ProfContext) -> i64 with Mut, Div, Panic {
+    if ctx.pass_count == 0 { return 0 - 1 }
+    var best_id: i64 = 0
+    var best_delta: i64 = prof_abs(ctx.passes[0 as usize].mem_delta)
+    var i: i64 = 1
+    while i < ctx.pass_count {
+        let d = prof_abs(ctx.passes[i as usize].mem_delta)
+        if d > best_delta {
+            best_delta = d
+            best_id = i
+        }
+        i = i + 1
+    }
+    best_id
+}
+
+// ============================================================================
+// Sampling
+// ============================================================================
+
+// Add a timing sample.
+fn prof_add_sample(ctx: &! ProfContext, timer_id: i64, ticks: i64, kind: i64) with Mut, Div, Panic {
+    if ctx.sample_count >= PROF_MAX_SAMPLES { return }
+    ctx.samples[ctx.sample_count as usize] = ProfSample {
+        timer_id: timer_id,
+        ticks: ticks,
+        pass_kind: kind,
+    }
+    ctx.sample_count = ctx.sample_count + 1
+}
+
+// Compute the average sample ticks for a given pass kind.
+// Returns 0 if no samples match.
+fn prof_average_sample(ctx: &ProfContext, pass_kind: i64) -> i64 with Mut, Div, Panic {
+    var sum: i64 = 0
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < ctx.sample_count {
+        if ctx.samples[i as usize].pass_kind == pass_kind {
+            sum = sum + ctx.samples[i as usize].ticks
+            count = count + 1
+        }
+        i = i + 1
+    }
+    if count == 0 { return 0 }
+    sum / count
+}
+
+// Compute the max sample ticks for a given pass kind.
+fn prof_max_sample(ctx: &ProfContext, pass_kind: i64) -> i64 with Mut, Div, Panic {
+    var mx: i64 = 0
+    var i: i64 = 0
+    while i < ctx.sample_count {
+        if ctx.samples[i as usize].pass_kind == pass_kind {
+            if ctx.samples[i as usize].ticks > mx {
+                mx = ctx.samples[i as usize].ticks
+            }
+        }
+        i = i + 1
+    }
+    mx
+}
+
+// Compute the min sample ticks for a given pass kind (returns 0 if none).
+fn prof_min_sample(ctx: &ProfContext, pass_kind: i64) -> i64 with Mut, Div, Panic {
+    var mn: i64 = 0
+    var found: bool = false
+    var i: i64 = 0
+    while i < ctx.sample_count {
+        if ctx.samples[i as usize].pass_kind == pass_kind {
+            if found == false {
+                mn = ctx.samples[i as usize].ticks
+                found = true
+            } else {
+                if ctx.samples[i as usize].ticks < mn {
+                    mn = ctx.samples[i as usize].ticks
+                }
+            }
+        }
+        i = i + 1
+    }
+    mn
+}
+
+// Count samples for a given pass kind.
+fn prof_count_samples(ctx: &ProfContext, pass_kind: i64) -> i64 with Mut, Div, Panic {
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < ctx.sample_count {
+        if ctx.samples[i as usize].pass_kind == pass_kind {
+            count = count + 1
+        }
+        i = i + 1
+    }
+    count
+}
+
+// Count total samples.
+fn prof_total_sample_count(ctx: &ProfContext) -> i64 {
+    ctx.sample_count
+}
+
+// ============================================================================
+// Reporting
+// ============================================================================
+
+// Build report lines from the current pass stats.
+fn prof_format_report(ctx: &! ProfContext) with Mut, Div, Panic {
+    ctx.report_count = 0
+    // Compute total ticks for percentage.
+    var total: i64 = 0
+    var i: i64 = 0
+    while i < ctx.pass_count {
+        total = total + ctx.passes[i as usize].total_ticks
+        i = i + 1
+    }
+    // Build one report line per pass.
+    i = 0
+    while i < ctx.pass_count {
+        if ctx.report_count >= PROF_MAX_PASSES { return }
+        var pct: i64 = 0
+        if total > 0 {
+            pct = ctx.passes[i as usize].total_ticks * 100 / total
+        }
+        ctx.report[ctx.report_count as usize] = ProfReportLine {
+            name: ctx.passes[i as usize].name,
+            ticks: ctx.passes[i as usize].total_ticks,
+            pct_of_total: pct,
+            invocations: ctx.passes[i as usize].invocations,
+            mem_delta: ctx.passes[i as usize].mem_delta,
+        }
+        ctx.report_count = ctx.report_count + 1
+        i = i + 1
+    }
+}
+
+// Query the number of report lines.
+fn prof_report_line_count(ctx: &ProfContext) -> i64 {
+    ctx.report_count
+}
+
+// Query a specific report line's ticks.
+fn prof_report_line_ticks(ctx: &ProfContext, idx: i64) -> i64 with Div, Panic {
+    if idx < 0 { return 0 }
+    if idx >= ctx.report_count { return 0 }
+    ctx.report[idx as usize].ticks
+}
+
+// Query a specific report line's percentage.
+fn prof_report_line_pct(ctx: &ProfContext, idx: i64) -> i64 with Div, Panic {
+    if idx < 0 { return 0 }
+    if idx >= ctx.report_count { return 0 }
+    ctx.report[idx as usize].pct_of_total
+}
+
+// Query a specific report line's invocation count.
+fn prof_report_line_invocations(ctx: &ProfContext, idx: i64) -> i64 with Div, Panic {
+    if idx < 0 { return 0 }
+    if idx >= ctx.report_count { return 0 }
+    ctx.report[idx as usize].invocations
+}
+
+// Query a specific report line's memory delta.
+fn prof_report_line_mem_delta(ctx: &ProfContext, idx: i64) -> i64 with Div, Panic {
+    if idx < 0 { return 0 }
+    if idx >= ctx.report_count { return 0 }
+    ctx.report[idx as usize].mem_delta
+}
+
+// ============================================================================
+// Report sorting
+// ============================================================================
+
+// Swap two report lines by index.
+fn prof_swap_report_lines(ctx: &! ProfContext, a: i64, b: i64) with Mut, Div, Panic {
+    if a < 0 { return }
+    if b < 0 { return }
+    if a >= ctx.report_count { return }
+    if b >= ctx.report_count { return }
+    let tmp = ctx.report[a as usize]
+    ctx.report[a as usize] = ctx.report[b as usize]
+    ctx.report[b as usize] = tmp
+}
+
+// Compare two report lines for the given sort criterion.
+// Returns true if the line at index a should come before line at index b.
+fn prof_report_less(ctx: &ProfContext, a: i64, b: i64, sort_by: i64) -> bool with Mut, Div, Panic {
+    if sort_by == prof_sort_by_time() {
+        // Sort descending by ticks.
+        return ctx.report[a as usize].ticks > ctx.report[b as usize].ticks
+    }
+    if sort_by == prof_sort_by_count() {
+        // Sort descending by invocations.
+        return ctx.report[a as usize].invocations > ctx.report[b as usize].invocations
+    }
+    if sort_by == prof_sort_by_memory() {
+        // Sort descending by absolute memory delta.
+        return prof_abs(ctx.report[a as usize].mem_delta) > prof_abs(ctx.report[b as usize].mem_delta)
+    }
+    if sort_by == prof_sort_by_name() {
+        // Sort ascending by name (lexicographic).
+        let cmp = prof_name_cmp(&ctx.report[a as usize].name, &ctx.report[b as usize].name)
+        return cmp < 0
+    }
+    false
+}
+
+// Sort report lines by the given criterion (insertion sort).
+fn prof_sort_passes_by(ctx: &! ProfContext, sort_by: i64) with Mut, Div, Panic {
+    var i: i64 = 1
+    while i < ctx.report_count {
+        let key = ctx.report[i as usize]
+        var j = i - 1
+        while j >= 0 {
+            if prof_report_less(ctx, i, j, sort_by) == false {
+                // key should not precede j, break
+                j = 0 - 1
+            } else {
+                j = j - 1
+            }
+        }
+        // Actually sort: use insertion sort with value threading.
+        // Re-do with standard insertion sort pattern.
+        j = i - 1
+        var inserted: bool = false
+        while j >= 0 {
+            if inserted == false {
+                // Compare key against element at j.
+                var should_shift: bool = false
+                if sort_by == prof_sort_by_time() {
+                    should_shift = ctx.report[j as usize].ticks < key.ticks
+                } else if sort_by == prof_sort_by_count() {
+                    should_shift = ctx.report[j as usize].invocations < key.invocations
+                } else if sort_by == prof_sort_by_memory() {
+                    should_shift = prof_abs(ctx.report[j as usize].mem_delta) < prof_abs(key.mem_delta)
+                } else if sort_by == prof_sort_by_name() {
+                    let cmp = prof_name_cmp(&ctx.report[j as usize].name, &key.name)
+                    should_shift = cmp > 0
+                }
+                if should_shift {
+                    ctx.report[(j + 1) as usize] = ctx.report[j as usize]
+                    j = j - 1
+                } else {
+                    ctx.report[(j + 1) as usize] = key
+                    inserted = true
+                    j = 0 - 1
+                }
+            } else {
+                j = 0 - 1
+            }
+        }
+        if inserted == false {
+            ctx.report[0 as usize] = key
+        }
+        i = i + 1
+    }
+}
+
+// ============================================================================
+// Reset
+// ============================================================================
+
+// Reset the entire profiling context for reuse.
+fn prof_reset(ctx: &! ProfContext) with Mut, Div, Panic {
+    // Clear passes.
+    var i: i64 = 0
+    while i < ctx.pass_count {
+        ctx.passes[i as usize] = prof_pass_stats_empty()
+        i = i + 1
+    }
+    ctx.pass_count = 0
+    // Clear functions.
+    i = 0
+    while i < ctx.fn_count {
+        ctx.functions[i as usize] = prof_function_heat_empty()
+        i = i + 1
+    }
+    ctx.fn_count = 0
+    // Clear timers.
+    i = 0
+    while i < ctx.timer_count {
+        ctx.timers[i as usize] = prof_timer_empty()
+        i = i + 1
+    }
+    ctx.timer_count = 0
+    // Clear samples.
+    i = 0
+    while i < ctx.sample_count {
+        ctx.samples[i as usize] = prof_sample_empty()
+        i = i + 1
+    }
+    ctx.sample_count = 0
+    // Clear report.
+    i = 0
+    while i < ctx.report_count {
+        ctx.report[i as usize] = prof_report_line_empty()
+        i = i + 1
+    }
+    ctx.report_count = 0
+    // Reset totals.
+    ctx.total_ticks = 0
+    ctx.total_mem_delta = 0
+    ctx.current_pass = PROF_NO_PASS
+    ctx.current_timer = PROF_NO_TIMER
+}
+
+// ============================================================================
+// Convenience: name literals for standard pass kinds
+// ============================================================================
+
+fn prof_name_lexer() -> ProfNameBuf with Mut, Div, Panic {
+    // "lexer" = 108, 101, 120, 101, 114
+    prof_name_from_bytes(108 as i8, 101 as i8, 120 as i8, 101 as i8, 114 as i8, 0 as i8, 0 as i8, 0 as i8, 5)
+}
+
+fn prof_name_parser() -> ProfNameBuf with Mut, Div, Panic {
+    // "parser" = 112, 97, 114, 115, 101, 114
+    prof_name_from_bytes(112 as i8, 97 as i8, 114 as i8, 115 as i8, 101 as i8, 114 as i8, 0 as i8, 0 as i8, 6)
+}
+
+fn prof_name_resolve() -> ProfNameBuf with Mut, Div, Panic {
+    // "resolve" = 114, 101, 115, 111, 108, 118, 101
+    prof_name_from_bytes(114 as i8, 101 as i8, 115 as i8, 111 as i8, 108 as i8, 118 as i8, 101 as i8, 0 as i8, 7)
+}
+
+fn prof_name_check() -> ProfNameBuf with Mut, Div, Panic {
+    // "check" = 99, 104, 101, 99, 107
+    prof_name_from_bytes(99 as i8, 104 as i8, 101 as i8, 99 as i8, 107 as i8, 0 as i8, 0 as i8, 0 as i8, 5)
+}
+
+fn prof_name_effects() -> ProfNameBuf with Mut, Div, Panic {
+    // "effects" = 101, 102, 102, 101, 99, 116, 115
+    prof_name_from_bytes(101 as i8, 102 as i8, 102 as i8, 101 as i8, 99 as i8, 116 as i8, 115 as i8, 0 as i8, 7)
+}
+
+fn prof_name_ir() -> ProfNameBuf with Mut, Div, Panic {
+    // "ir" = 105, 114
+    prof_name_from_bytes(105 as i8, 114 as i8, 0 as i8, 0 as i8, 0 as i8, 0 as i8, 0 as i8, 0 as i8, 2)
+}
+
+fn prof_name_optimize() -> ProfNameBuf with Mut, Div, Panic {
+    // "optimize" = 111, 112, 116, 105, 109, 105, 122, 101
+    prof_name_from_bytes(111 as i8, 112 as i8, 116 as i8, 105 as i8, 109 as i8, 105 as i8, 122 as i8, 101 as i8, 8)
+}
+
+fn prof_name_codegen() -> ProfNameBuf with Mut, Div, Panic {
+    // "codegen" = 99, 111, 100, 101, 103, 101, 110
+    prof_name_from_bytes(99 as i8, 111 as i8, 100 as i8, 101 as i8, 103 as i8, 101 as i8, 110 as i8, 0 as i8, 7)
+}
+
+fn prof_name_link() -> ProfNameBuf with Mut, Div, Panic {
+    // "link" = 108, 105, 110, 107
+    prof_name_from_bytes(108 as i8, 105 as i8, 110 as i8, 107 as i8, 0 as i8, 0 as i8, 0 as i8, 0 as i8, 4)
+}
+
+fn prof_name_custom_a() -> ProfNameBuf with Mut, Div, Panic {
+    // "custA" = 99, 117, 115, 116, 65
+    prof_name_from_bytes(99 as i8, 117 as i8, 115 as i8, 116 as i8, 65 as i8, 0 as i8, 0 as i8, 0 as i8, 5)
+}
+
+fn prof_name_custom_b() -> ProfNameBuf with Mut, Div, Panic {
+    // "custB" = 99, 117, 115, 116, 66
+    prof_name_from_bytes(99 as i8, 117 as i8, 115 as i8, 116 as i8, 66 as i8, 0 as i8, 0 as i8, 0 as i8, 5)
+}
+
+// ============================================================================
+// Tests — 1. Timer operations (8 tests)
+// ============================================================================
+
+fn test_prof_timer_alloc_inner(ctx: &! ProfContext) -> bool with Mut, Div, Panic {
+    let id = prof_alloc_timer(ctx)
+    if id != 0 { return false }
+    if ctx.timer_count != 1 { return false }
+    let state = prof_timer_state(ctx, id)
+    if state != prof_timer_idle() { return false }
+    true
+}
+
+fn test_prof_timer_alloc() -> bool with Mut, Div, Panic {
+    var ctx = prof_context_new()
+    test_prof_timer_alloc_inner(&! ctx)
+}
+
+fn test_prof_timer_start_inner(ctx: &! ProfContext) -> bool with Mut, Div, Panic {
+    let id = prof_alloc_timer(ctx)
+    let ok = prof_start_timer(ctx, id, 1000)
+    if ok == false { return false }
+    let state = prof_timer_state(ctx, id)
+    if state != prof_timer_running() { return false }
+    true
+}
+
+fn test_prof_timer_start() -> bool with Mut, Div, Panic {
+    var ctx = prof_context_new()
+    test_prof_timer_start_inner(&! ctx)
+}
+
+fn test_prof_timer_stop_inner(ctx: &! ProfContext) -> bool with Mut, Div, Panic {
+    let id = prof_alloc_timer(ctx)
+    let _s = prof_start_timer(ctx, id, 1000)
+    let ok = prof_stop_timer(ctx, id, 1500)
+    if ok == false { return false }
+    let state = prof_timer_state(ctx, id)
+    if state != prof_timer_stopped() { return false }
+    let elapsed = prof_timer_elapsed(ctx, id)
+    if elapsed != 500 { return false }
+    true
+}
+
+fn test_prof_timer_stop() -> bool with Mut, Div, Panic {
+    var ctx = prof_context_new()
+    test_prof_timer_stop_inner(&! ctx)
+}
+
+fn test_prof_timer_elapsed_inner(ctx: &! ProfContext) -> bool with Mut, Div, Panic {
+    let id = prof_alloc_timer(ctx)
+    let _s = prof_start_timer(ctx, id, 100)
+    let _t = prof_stop_timer(ctx, id, 350)
+    let elapsed = prof_timer_elapsed(ctx, id)
+    elapsed == 250
+}
+
+fn test_prof_timer_elapsed() -> bool with Mut, Div, Panic {
+    var ctx = prof_context_new()
+    test_prof_timer_elapsed_inner(&! ctx)
+}
+
+fn test_prof_timer_multiple_invocations_inner(ctx: &! ProfContext) -> bool with Mut, Div, Panic {
+    let id = prof_alloc_timer(ctx)
+    // First invocation: 100 ticks
+    let _s1 = prof_start_timer(ctx, id, 0)
+    let _t1 = prof_stop_timer(ctx, id, 100)
+    // Second invocation: 200 ticks
+    let _r1 = prof_restart_timer(ctx, id, 200)
+    let _t2 = prof_stop_timer(ctx, id, 400)
+    let elapsed = prof_timer_elapsed(ctx, id)
+    if elapsed != 300 { return false }
+    let inv = prof_timer_invocations(ctx, id)
+    if inv != 2 { return false }
+    true
+}
+
+fn test_prof_timer_multiple_invocations() -> bool with Mut, Div, Panic {
+    var ctx = prof_context_new()
+    test_prof_timer_multiple_invocations_inner(&! ctx)
+}
+
+fn test_prof_timer_alloc_multiple_inner(ctx: &! ProfContext) -> bool with Mut, Div, Panic {
+    let id0 = prof_alloc_timer(ctx)
+    let id1 = prof_alloc_timer(ctx)
+    let id2 = prof_alloc_timer(ctx)
+    if id0 != 0 { return false }
+    if id1 != 1 { return false }
+    if id2 != 2 { return false }
+    if ctx.timer_count != 3 { return false }
+    true
+}
+
+fn test_prof_timer_alloc_multiple() -> bool with Mut, Div, Panic {
+    var ctx = prof_context_new()
+    test_prof_timer_alloc_multiple_inner(&! ctx)
+}
+
+fn test_prof_timer_double_start_inner(ctx: &! ProfContext) -> bool with Mut, Div, Panic {
+    let id = prof_alloc_timer(ctx)
+    let ok1 = prof_start_timer(ctx, id, 100)
+    if ok1 == false { return false }
+    // Starting again while running should return false.
+    let ok2 = prof_start_timer(ctx, id, 200)
+    if ok2 == true { return false }
+    true
+}
+
+fn test_prof_timer_double_start() -> bool with Mut, Div, Panic {
+    var ctx = prof_context_new()
+    test_prof_timer_double_start_inner(&! ctx)
+}
+
+fn test_prof_timer_reset_inner(ctx: &! ProfContext) -> bool with Mut, Div, Panic {
+    let id = prof_alloc_timer(ctx)
+    let _s = prof_start_timer(ctx, id, 0)
+    let _t = prof_stop_timer(ctx, id, 500)
+    prof_reset_timer(ctx, id)
+    let elapsed = prof_timer_elapsed(ctx, id)
+    if elapsed != 0 { return false }
+    let inv = prof_timer_invocations(ctx, id)
+    if inv != 0 { return false }
+    let state = prof_timer_state(ctx, id)
+    if state != prof_timer_idle() { return false }
+    true
+}
+
+fn test_prof_timer_reset() -> bool with Mut, Div, Panic {
+    var ctx = prof_context_new()
+    test_prof_timer_reset_inner(&! ctx)
+}
+
+// ============================================================================
+// Tests — 2. Pass registration (8 tests)
+// ============================================================================
+
+fn test_prof_register_pass_inner(ctx: &! ProfContext) -> bool with Mut, Div, Panic {
+    let name = prof_name_lexer()
+    let id = prof_register_pass(ctx, prof_pass_lexer(), name)
+    if id != 0 { return false }
+    if ctx.pass_count != 1 { return false }
+    let kind = prof_pass_kind(ctx, id)
+    if kind != prof_pass_lexer() { return false }
+    true
+}
+
+fn test_prof_register_pass() -> bool with Mut, Div, Panic {
+    var ctx = prof_context_new()
+    test_prof_register_pass_inner(&! ctx)
+}
+
+fn test_prof_register_multiple_passes_inner(ctx: &! ProfContext) -> bool with Mut, Div, Panic {
+    let id0 = prof_register_pass(ctx, prof_pass_lexer(), prof_name_lexer())
+    let id1 = prof_register_pass(ctx, prof_pass_parser(), prof_name_parser())
+    let id2 = prof_register_pass(ctx, prof_pass_check(), prof_name_check())
+    if id0 != 0 { return false }
+    if id1 != 1 { return false }
+    if id2 != 2 { return false }
+    if ctx.pass_count != 3 { return false }
+    true
+}
+
+fn test_prof_register_multiple_passes() -> bool with Mut, Div, Panic {
+    var ctx = prof_context_new()
+    test_prof_register_multiple_passes_inner(&! ctx)
+}
+
+fn test_prof_pass_start_end_inner(ctx: &! ProfContext) -> bool with Mut, Div, Panic {
+    let pid = prof_register_pass(ctx, prof_pass_lexer(), prof_name_lexer())
+    prof_start_pass(ctx, pid, 1000, 4096)
+    prof_end_pass(ctx, pid, 1500, 8192)
+    let time = prof_pass_time(ctx, pid)
+    if time != 500 { return false }
+    let inv = prof_pass_count(ctx, pid)
+    if inv != 1 { return false }
+    true
+}
+
+fn test_prof_pass_start_end() -> bool with Mut, Div, Panic {
+    var ctx = prof_context_new()
+    test_prof_pass_start_end_inner(&! ctx)
+}
+
+fn test_prof_pass_mem_delta_inner(ctx: &! ProfContext) -> bool with Mut, Div, Panic {
+    let pid = prof_register_pass(ctx, prof_pass_parser(), prof_name_parser())
+    prof_start_pass(ctx, pid, 0, 1000)
+    prof_end_pass(ctx, pid, 100, 3000)
+    let delta = prof_pass_mem_delta(ctx, pid)
+    if delta != 2000 { return false }
+    true
+}
+
+fn test_prof_pass_mem_delta() -> bool with Mut, Div, Panic {
+    var ctx = prof_context_new()
+    test_prof_pass_mem_delta_inner(&! ctx)
+}
+
+fn test_prof_pass_kind_query_inner(ctx: &! ProfContext) -> bool with Mut, Div, Panic {
+    let pid = prof_register_pass(ctx, prof_pass_codegen(), prof_name_codegen())
+    let kind = prof_pass_kind(ctx, pid)
+    kind == prof_pass_codegen()
+}
+
+fn test_prof_pass_kind_query() -> bool with Mut, Div, Panic {
+    var ctx = prof_context_new()
+    test_prof_pass_kind_query_inner(&! ctx)
+}
+
+fn test_prof_pass_functions_processed_inner(ctx: &! ProfContext) -> bool with Mut, Div, Panic {
+    let pid = prof_register_pass(ctx, prof_pass_check(), prof_name_check())
+    prof_pass_add_function(ctx, pid)
+    prof_pass_add_function(ctx, pid)
+    prof_pass_add_function(ctx, pid)
+    let count = prof_pass_functions_processed(ctx, pid)
+    count == 3
+}
+
+fn test_prof_pass_functions_processed() -> bool with Mut, Div, Panic {
+    var ctx = prof_context_new()
+    test_prof_pass_functions_processed_inner(&! ctx)
+}
+
+fn test_prof_pass_multiple_invocations_inner(ctx: &! ProfContext) -> bool with Mut, Div, Panic {
+    let pid = prof_register_pass(ctx, prof_pass_optimize(), prof_name_optimize())
+    // First invocation.
+    prof_start_pass(ctx, pid, 0, 1000)
+    prof_end_pass(ctx, pid, 200, 1500)
+    // Second invocation.
+    prof_start_pass(ctx, pid, 300, 1500)
+    prof_end_pass(ctx, pid, 600, 2000)
+    let inv = prof_pass_count(ctx, pid)
+    if inv != 2 { return false }
+    let delta = prof_pass_mem_delta(ctx, pid)
+    // (1500-1000) + (2000-1500) = 500 + 500 = 1000
+    if delta != 1000 { return false }
+    true
+}
+
+fn test_prof_pass_multiple_invocations() -> bool with Mut, Div, Panic {
+    var ctx = prof_context_new()
+    test_prof_pass_multiple_invocations_inner(&! ctx)
+}
+
+fn test_prof_pass_timer_auto_alloc_inner(ctx: &! ProfContext) -> bool with Mut, Div, Panic {
+    // Registering a pass should auto-allocate a timer.
+    let pid = prof_register_pass(ctx, prof_pass_ir(), prof_name_ir())
+    // Timer count should be 1 (auto-allocated).
+    if ctx.timer_count != 1 { return false }
+    // The pass's timer_id should be 0.
+    let tid = ctx.passes[pid as usize].timer_id
+    if tid != 0 { return false }
+    true
+}
+
+fn test_prof_pass_timer_auto_alloc() -> bool with Mut, Div, Panic {
+    var ctx = prof_context_new()
+    test_prof_pass_timer_auto_alloc_inner(&! ctx)
+}
+
+// ============================================================================
+// Tests — 3. Function heat (8 tests)
+// ============================================================================
+
+fn test_prof_record_function_inner(ctx: &! ProfContext) -> bool with Mut, Div, Panic {
+    prof_record_function(ctx, 42, 100, prof_pass_check())
+    if ctx.fn_count != 1 { return false }
+    let ticks = prof_function_ticks(ctx, 0)
+    if ticks != 100 { return false }
+    true
+}
+
+fn test_prof_record_function() -> bool with Mut, Div, Panic {
+    var ctx = prof_context_new()
+    test_prof_record_function_inner(&! ctx)
+}
+
+fn test_prof_record_function_accumulate_inner(ctx: &! ProfContext) -> bool with Mut, Div, Panic {
+    prof_record_function(ctx, 42, 100, prof_pass_check())
+    prof_record_function(ctx, 42, 200, prof_pass_optimize())
+    if ctx.fn_count != 1 { return false }
+    let ticks = prof_function_ticks(ctx, 0)
+    if ticks != 300 { return false }
+    let pc = prof_function_pass_count(ctx, 0)
+    if pc != 2 { return false }
+    true
+}
+
+fn test_prof_record_function_accumulate() -> bool with Mut, Div, Panic {
+    var ctx = prof_context_new()
+    test_prof_record_function_accumulate_inner(&! ctx)
+}
+
+fn test_prof_find_function_inner(ctx: &! ProfContext) -> bool with Mut, Div, Panic {
+    prof_record_function(ctx, 100, 50, prof_pass_lexer())
+    prof_record_function(ctx, 200, 75, prof_pass_parser())
+    prof_record_function(ctx, 300, 25, prof_pass_check())
+    let idx = prof_find_function(ctx, 200)
+    if idx != 1 { return false }
+    let missing = prof_find_function(ctx, 999)
+    if missing != (0 - 1) { return false }
+    true
+}
+
+fn test_prof_find_function() -> bool with Mut, Div, Panic {
+    var ctx = prof_context_new()
+    test_prof_find_function_inner(&! ctx)
+}
+
+fn test_prof_function_max_pass_inner(ctx: &! ProfContext) -> bool with Mut, Div, Panic {
+    prof_record_function(ctx, 42, 100, prof_pass_check())
+    prof_record_function(ctx, 42, 300, prof_pass_optimize())
+    prof_record_function(ctx, 42, 150, prof_pass_codegen())
+    let mx = prof_function_max_pass(ctx, 0)
+    mx == 300
+}
+
+fn test_prof_function_max_pass() -> bool with Mut, Div, Panic {
+    var ctx = prof_context_new()
+    test_prof_function_max_pass_inner(&! ctx)
+}
+
+fn test_prof_mark_hot_functions_inner(ctx: &! ProfContext) -> bool with Mut, Div, Panic {
+    // Create functions with distinct tick counts.
+    // Total = 100 + 50 + 30 + 20 = 200
+    // Top 80% threshold = 160 ticks. Need to mark top functions until >= 160.
+    // Sorted desc: 100, 50, 30, 20
+    // Cumulative: 100 (50%), 150 (75%), 180 (90%)  -> 3 functions marked at 80%.
+    prof_record_function(ctx, 1, 100, prof_pass_check())
+    prof_record_function(ctx, 2, 50, prof_pass_check())
+    prof_record_function(ctx, 3, 30, prof_pass_check())
+    prof_record_function(ctx, 4, 20, prof_pass_check())
+    prof_mark_hot_functions(ctx, 80)
+    let hot_count = prof_count_hot_functions(ctx)
+    // Should be 3 (100+50+30=180 >= 160)
+    if hot_count != 3 { return false }
+    // The function with 20 ticks should NOT be hot.
+    let idx_4 = prof_find_function(ctx, 4)
+    let is_hot_4 = prof_function_is_hot(ctx, idx_4)
+    if is_hot_4 == true { return false }
+    true
+}
+
+fn test_prof_mark_hot_functions() -> bool with Mut, Div, Panic {
+    var ctx = prof_context_new()
+    test_prof_mark_hot_functions_inner(&! ctx)
+}
+
+fn test_prof_top_hot_functions_inner(ctx: &! ProfContext) -> bool with Mut, Div, Panic {
+    prof_record_function(ctx, 10, 50, prof_pass_lexer())
+    prof_record_function(ctx, 20, 300, prof_pass_parser())
+    prof_record_function(ctx, 30, 100, prof_pass_check())
+    let top = prof_top_hot_functions(ctx, 2)
+    if top != 2 { return false }
+    // After sorting, index 0 should have the highest ticks (300).
+    let t0 = prof_function_ticks(ctx, 0)
+    if t0 != 300 { return false }
+    // Index 1 should have 100.
+    let t1 = prof_function_ticks(ctx, 1)
+    if t1 != 100 { return false }
+    true
+}
+
+fn test_prof_top_hot_functions() -> bool with Mut, Div, Panic {
+    var ctx = prof_context_new()
+    test_prof_top_hot_functions_inner(&! ctx)
+}
+
+fn test_prof_function_not_hot_by_default_inner(ctx: &! ProfContext) -> bool with Mut, Div, Panic {
+    prof_record_function(ctx, 42, 100, prof_pass_check())
+    let is_hot = prof_function_is_hot(ctx, 0)
+    is_hot == false
+}
+
+fn test_prof_function_not_hot_by_default() -> bool with Mut, Div, Panic {
+    var ctx = prof_context_new()
+    test_prof_function_not_hot_by_default_inner(&! ctx)
+}
+
+fn test_prof_total_function_ticks_inner(ctx: &! ProfContext) -> bool with Mut, Div, Panic {
+    prof_record_function(ctx, 1, 100, prof_pass_lexer())
+    prof_record_function(ctx, 2, 200, prof_pass_parser())
+    prof_record_function(ctx, 3, 300, prof_pass_check())
+    let total = prof_total_function_ticks(ctx)
+    total == 600
+}
+
+fn test_prof_total_function_ticks() -> bool with Mut, Div, Panic {
+    var ctx = prof_context_new()
+    test_prof_total_function_ticks_inner(&! ctx)
+}
+
+// ============================================================================
+// Tests — 4. Sampling (6 tests)
+// ============================================================================
+
+fn test_prof_add_sample_inner(ctx: &! ProfContext) -> bool with Mut, Div, Panic {
+    prof_add_sample(ctx, 0, 100, prof_pass_lexer())
+    if ctx.sample_count != 1 { return false }
+    true
+}
+
+fn test_prof_add_sample() -> bool with Mut, Div, Panic {
+    var ctx = prof_context_new()
+    test_prof_add_sample_inner(&! ctx)
+}
+
+fn test_prof_add_multiple_samples_inner(ctx: &! ProfContext) -> bool with Mut, Div, Panic {
+    prof_add_sample(ctx, 0, 100, prof_pass_lexer())
+    prof_add_sample(ctx, 1, 200, prof_pass_parser())
+    prof_add_sample(ctx, 0, 150, prof_pass_lexer())
+    if ctx.sample_count != 3 { return false }
+    true
+}
+
+fn test_prof_add_multiple_samples() -> bool with Mut, Div, Panic {
+    var ctx = prof_context_new()
+    test_prof_add_multiple_samples_inner(&! ctx)
+}
+
+fn test_prof_average_sample_inner(ctx: &! ProfContext) -> bool with Mut, Div, Panic {
+    prof_add_sample(ctx, 0, 100, prof_pass_lexer())
+    prof_add_sample(ctx, 0, 200, prof_pass_lexer())
+    prof_add_sample(ctx, 0, 300, prof_pass_lexer())
+    let avg = prof_average_sample(ctx, prof_pass_lexer())
+    // (100 + 200 + 300) / 3 = 200
+    avg == 200
+}
+
+fn test_prof_average_sample() -> bool with Mut, Div, Panic {
+    var ctx = prof_context_new()
+    test_prof_average_sample_inner(&! ctx)
+}
+
+fn test_prof_average_sample_by_kind_inner(ctx: &! ProfContext) -> bool with Mut, Div, Panic {
+    prof_add_sample(ctx, 0, 100, prof_pass_lexer())
+    prof_add_sample(ctx, 1, 500, prof_pass_parser())
+    prof_add_sample(ctx, 0, 300, prof_pass_lexer())
+    let avg_lexer = prof_average_sample(ctx, prof_pass_lexer())
+    let avg_parser = prof_average_sample(ctx, prof_pass_parser())
+    if avg_lexer != 200 { return false }
+    if avg_parser != 500 { return false }
+    true
+}
+
+fn test_prof_average_sample_by_kind() -> bool with Mut, Div, Panic {
+    var ctx = prof_context_new()
+    test_prof_average_sample_by_kind_inner(&! ctx)
+}
+
+fn test_prof_max_sample_inner(ctx: &! ProfContext) -> bool with Mut, Div, Panic {
+    prof_add_sample(ctx, 0, 100, prof_pass_check())
+    prof_add_sample(ctx, 0, 400, prof_pass_check())
+    prof_add_sample(ctx, 0, 200, prof_pass_check())
+    let mx = prof_max_sample(ctx, prof_pass_check())
+    mx == 400
+}
+
+fn test_prof_max_sample() -> bool with Mut, Div, Panic {
+    var ctx = prof_context_new()
+    test_prof_max_sample_inner(&! ctx)
+}
+
+fn test_prof_count_samples_inner(ctx: &! ProfContext) -> bool with Mut, Div, Panic {
+    prof_add_sample(ctx, 0, 100, prof_pass_lexer())
+    prof_add_sample(ctx, 1, 200, prof_pass_parser())
+    prof_add_sample(ctx, 0, 150, prof_pass_lexer())
+    prof_add_sample(ctx, 2, 300, prof_pass_parser())
+    let c_lex = prof_count_samples(ctx, prof_pass_lexer())
+    let c_par = prof_count_samples(ctx, prof_pass_parser())
+    if c_lex != 2 { return false }
+    if c_par != 2 { return false }
+    true
+}
+
+fn test_prof_count_samples() -> bool with Mut, Div, Panic {
+    var ctx = prof_context_new()
+    test_prof_count_samples_inner(&! ctx)
+}
+
+// ============================================================================
+// Tests — 5. Reporting (8 tests)
+// ============================================================================
+
+fn test_prof_format_report_inner(ctx: &! ProfContext) -> bool with Mut, Div, Panic {
+    let pid0 = prof_register_pass(ctx, prof_pass_lexer(), prof_name_lexer())
+    let pid1 = prof_register_pass(ctx, prof_pass_parser(), prof_name_parser())
+    prof_start_pass(ctx, pid0, 0, 0)
+    prof_end_pass(ctx, pid0, 300, 100)
+    prof_start_pass(ctx, pid1, 300, 100)
+    prof_end_pass(ctx, pid1, 1000, 200)
+    prof_format_report(ctx)
+    let count = prof_report_line_count(ctx)
+    count == 2
+}
+
+fn test_prof_format_report() -> bool with Mut, Div, Panic {
+    var ctx = prof_context_new()
+    test_prof_format_report_inner(&! ctx)
+}
+
+fn test_prof_report_percentages_inner(ctx: &! ProfContext) -> bool with Mut, Div, Panic {
+    let pid0 = prof_register_pass(ctx, prof_pass_lexer(), prof_name_lexer())
+    let pid1 = prof_register_pass(ctx, prof_pass_parser(), prof_name_parser())
+    prof_start_pass(ctx, pid0, 0, 0)
+    prof_end_pass(ctx, pid0, 250, 0)
+    prof_start_pass(ctx, pid1, 250, 0)
+    prof_end_pass(ctx, pid1, 1000, 0)
+    prof_format_report(ctx)
+    // Pass 0: 250 ticks, pass 1: 750 ticks. Total = 1000.
+    // pct0 = 250*100/1000 = 25, pct1 = 750*100/1000 = 75.
+    let pct0 = prof_report_line_pct(ctx, 0)
+    let pct1 = prof_report_line_pct(ctx, 1)
+    if pct0 != 25 { return false }
+    if pct1 != 75 { return false }
+    true
+}
+
+fn test_prof_report_percentages() -> bool with Mut, Div, Panic {
+    var ctx = prof_context_new()
+    test_prof_report_percentages_inner(&! ctx)
+}
+
+fn test_prof_report_ticks_inner(ctx: &! ProfContext) -> bool with Mut, Div, Panic {
+    let pid = prof_register_pass(ctx, prof_pass_check(), prof_name_check())
+    prof_start_pass(ctx, pid, 0, 0)
+    prof_end_pass(ctx, pid, 500, 0)
+    prof_format_report(ctx)
+    let ticks = prof_report_line_ticks(ctx, 0)
+    ticks == 500
+}
+
+fn test_prof_report_ticks() -> bool with Mut, Div, Panic {
+    var ctx = prof_context_new()
+    test_prof_report_ticks_inner(&! ctx)
+}
+
+fn test_prof_report_invocations_inner(ctx: &! ProfContext) -> bool with Mut, Div, Panic {
+    let pid = prof_register_pass(ctx, prof_pass_optimize(), prof_name_optimize())
+    prof_start_pass(ctx, pid, 0, 0)
+    prof_end_pass(ctx, pid, 100, 0)
+    prof_start_pass(ctx, pid, 100, 0)
+    prof_end_pass(ctx, pid, 200, 0)
+    prof_start_pass(ctx, pid, 200, 0)
+    prof_end_pass(ctx, pid, 300, 0)
+    prof_format_report(ctx)
+    let inv = prof_report_line_invocations(ctx, 0)
+    inv == 3
+}
+
+fn test_prof_report_invocations() -> bool with Mut, Div, Panic {
+    var ctx = prof_context_new()
+    test_prof_report_invocations_inner(&! ctx)
+}
+
+fn test_prof_report_mem_delta_inner(ctx: &! ProfContext) -> bool with Mut, Div, Panic {
+    let pid = prof_register_pass(ctx, prof_pass_codegen(), prof_name_codegen())
+    prof_start_pass(ctx, pid, 0, 1000)
+    prof_end_pass(ctx, pid, 100, 5000)
+    prof_format_report(ctx)
+    let md = prof_report_line_mem_delta(ctx, 0)
+    md == 4000
+}
+
+fn test_prof_report_mem_delta() -> bool with Mut, Div, Panic {
+    var ctx = prof_context_new()
+    test_prof_report_mem_delta_inner(&! ctx)
+}
+
+fn test_prof_sort_by_time_inner(ctx: &! ProfContext) -> bool with Mut, Div, Panic {
+    let pid0 = prof_register_pass(ctx, prof_pass_lexer(), prof_name_lexer())
+    let pid1 = prof_register_pass(ctx, prof_pass_parser(), prof_name_parser())
+    let pid2 = prof_register_pass(ctx, prof_pass_check(), prof_name_check())
+    prof_start_pass(ctx, pid0, 0, 0)
+    prof_end_pass(ctx, pid0, 100, 0)
+    prof_start_pass(ctx, pid1, 100, 0)
+    prof_end_pass(ctx, pid1, 400, 0)
+    prof_start_pass(ctx, pid2, 400, 0)
+    prof_end_pass(ctx, pid2, 600, 0)
+    prof_format_report(ctx)
+    prof_sort_passes_by(ctx, prof_sort_by_time())
+    // After sorting by time desc: parser(300), check(200), lexer(100).
+    let t0 = prof_report_line_ticks(ctx, 0)
+    let t1 = prof_report_line_ticks(ctx, 1)
+    let t2 = prof_report_line_ticks(ctx, 2)
+    if t0 != 300 { return false }
+    if t1 != 200 { return false }
+    if t2 != 100 { return false }
+    true
+}
+
+fn test_prof_sort_by_time() -> bool with Mut, Div, Panic {
+    var ctx = prof_context_new()
+    test_prof_sort_by_time_inner(&! ctx)
+}
+
+fn test_prof_sort_by_count_inner(ctx: &! ProfContext) -> bool with Mut, Div, Panic {
+    let pid0 = prof_register_pass(ctx, prof_pass_lexer(), prof_name_lexer())
+    let pid1 = prof_register_pass(ctx, prof_pass_parser(), prof_name_parser())
+    // lexer: 1 invocation, parser: 3 invocations.
+    prof_start_pass(ctx, pid0, 0, 0)
+    prof_end_pass(ctx, pid0, 100, 0)
+    prof_start_pass(ctx, pid1, 100, 0)
+    prof_end_pass(ctx, pid1, 200, 0)
+    prof_start_pass(ctx, pid1, 200, 0)
+    prof_end_pass(ctx, pid1, 300, 0)
+    prof_start_pass(ctx, pid1, 300, 0)
+    prof_end_pass(ctx, pid1, 400, 0)
+    prof_format_report(ctx)
+    prof_sort_passes_by(ctx, prof_sort_by_count())
+    // Parser (3) should come before lexer (1).
+    let inv0 = prof_report_line_invocations(ctx, 0)
+    let inv1 = prof_report_line_invocations(ctx, 1)
+    if inv0 != 3 { return false }
+    if inv1 != 1 { return false }
+    true
+}
+
+fn test_prof_sort_by_count() -> bool with Mut, Div, Panic {
+    var ctx = prof_context_new()
+    test_prof_sort_by_count_inner(&! ctx)
+}
+
+fn test_prof_sort_by_memory_inner(ctx: &! ProfContext) -> bool with Mut, Div, Panic {
+    let pid0 = prof_register_pass(ctx, prof_pass_lexer(), prof_name_lexer())
+    let pid1 = prof_register_pass(ctx, prof_pass_parser(), prof_name_parser())
+    prof_start_pass(ctx, pid0, 0, 1000)
+    prof_end_pass(ctx, pid0, 100, 2000)
+    prof_start_pass(ctx, pid1, 100, 2000)
+    prof_end_pass(ctx, pid1, 200, 10000)
+    prof_format_report(ctx)
+    prof_sort_passes_by(ctx, prof_sort_by_memory())
+    // Parser (delta=8000) should come before lexer (delta=1000).
+    let md0 = prof_report_line_mem_delta(ctx, 0)
+    let md1 = prof_report_line_mem_delta(ctx, 1)
+    if md0 != 8000 { return false }
+    if md1 != 1000 { return false }
+    true
+}
+
+fn test_prof_sort_by_memory() -> bool with Mut, Div, Panic {
+    var ctx = prof_context_new()
+    test_prof_sort_by_memory_inner(&! ctx)
+}
+
+// ============================================================================
+// Tests — 6. Memory tracking (6 tests)
+// ============================================================================
+
+fn test_prof_mem_delta_positive_inner(ctx: &! ProfContext) -> bool with Mut, Div, Panic {
+    let pid = prof_register_pass(ctx, prof_pass_lexer(), prof_name_lexer())
+    prof_start_pass(ctx, pid, 0, 1000)
+    prof_end_pass(ctx, pid, 100, 5000)
+    let delta = prof_pass_mem_delta(ctx, pid)
+    delta == 4000
+}
+
+fn test_prof_mem_delta_positive() -> bool with Mut, Div, Panic {
+    var ctx = prof_context_new()
+    test_prof_mem_delta_positive_inner(&! ctx)
+}
+
+fn test_prof_mem_delta_negative_inner(ctx: &! ProfContext) -> bool with Mut, Div, Panic {
+    let pid = prof_register_pass(ctx, prof_pass_optimize(), prof_name_optimize())
+    // Optimization frees memory: after < before.
+    prof_start_pass(ctx, pid, 0, 8000)
+    prof_end_pass(ctx, pid, 100, 5000)
+    let delta = prof_pass_mem_delta(ctx, pid)
+    // 5000 - 8000 = -3000
+    delta == (0 - 3000)
+}
+
+fn test_prof_mem_delta_negative() -> bool with Mut, Div, Panic {
+    var ctx = prof_context_new()
+    test_prof_mem_delta_negative_inner(&! ctx)
+}
+
+fn test_prof_mem_delta_zero_inner(ctx: &! ProfContext) -> bool with Mut, Div, Panic {
+    let pid = prof_register_pass(ctx, prof_pass_check(), prof_name_check())
+    prof_start_pass(ctx, pid, 0, 1000)
+    prof_end_pass(ctx, pid, 100, 1000)
+    let delta = prof_pass_mem_delta(ctx, pid)
+    delta == 0
+}
+
+fn test_prof_mem_delta_zero() -> bool with Mut, Div, Panic {
+    var ctx = prof_context_new()
+    test_prof_mem_delta_zero_inner(&! ctx)
+}
+
+fn test_prof_total_mem_delta_inner(ctx: &! ProfContext) -> bool with Mut, Div, Panic {
+    let pid0 = prof_register_pass(ctx, prof_pass_lexer(), prof_name_lexer())
+    let pid1 = prof_register_pass(ctx, prof_pass_parser(), prof_name_parser())
+    prof_start_pass(ctx, pid0, 0, 0)
+    prof_end_pass(ctx, pid0, 100, 1000)
+    prof_start_pass(ctx, pid1, 100, 1000)
+    prof_end_pass(ctx, pid1, 200, 3000)
+    let total = prof_total_memory_delta(ctx)
+    // 1000 + 2000 = 3000
+    total == 3000
+}
+
+fn test_prof_total_mem_delta() -> bool with Mut, Div, Panic {
+    var ctx = prof_context_new()
+    test_prof_total_mem_delta_inner(&! ctx)
+}
+
+fn test_prof_per_pass_mem_independent_inner(ctx: &! ProfContext) -> bool with Mut, Div, Panic {
+    let pid0 = prof_register_pass(ctx, prof_pass_lexer(), prof_name_lexer())
+    let pid1 = prof_register_pass(ctx, prof_pass_parser(), prof_name_parser())
+    prof_start_pass(ctx, pid0, 0, 1000)
+    prof_end_pass(ctx, pid0, 50, 2000)
+    prof_start_pass(ctx, pid1, 50, 2000)
+    prof_end_pass(ctx, pid1, 100, 7000)
+    let d0 = prof_pass_mem_delta(ctx, pid0)
+    let d1 = prof_pass_mem_delta(ctx, pid1)
+    if d0 != 1000 { return false }
+    if d1 != 5000 { return false }
+    true
+}
+
+fn test_prof_per_pass_mem_independent() -> bool with Mut, Div, Panic {
+    var ctx = prof_context_new()
+    test_prof_per_pass_mem_independent_inner(&! ctx)
+}
+
+fn test_prof_largest_mem_pass_inner(ctx: &! ProfContext) -> bool with Mut, Div, Panic {
+    let pid0 = prof_register_pass(ctx, prof_pass_lexer(), prof_name_lexer())
+    let pid1 = prof_register_pass(ctx, prof_pass_parser(), prof_name_parser())
+    let pid2 = prof_register_pass(ctx, prof_pass_codegen(), prof_name_codegen())
+    prof_start_pass(ctx, pid0, 0, 0)
+    prof_end_pass(ctx, pid0, 100, 500)
+    prof_start_pass(ctx, pid1, 100, 500)
+    prof_end_pass(ctx, pid1, 200, 10000)
+    prof_start_pass(ctx, pid2, 200, 10000)
+    prof_end_pass(ctx, pid2, 300, 11000)
+    let best = prof_largest_mem_pass(ctx)
+    // parser: delta=9500, codegen: delta=1000, lexer: delta=500
+    best == 1
+}
+
+fn test_prof_largest_mem_pass() -> bool with Mut, Div, Panic {
+    var ctx = prof_context_new()
+    test_prof_largest_mem_pass_inner(&! ctx)
+}
+
+// ============================================================================
+// Tests — 7. Reset/reuse (5 tests)
+// ============================================================================
+
+fn test_prof_reset_clears_passes_inner(ctx: &! ProfContext) -> bool with Mut, Div, Panic {
+    prof_register_pass(ctx, prof_pass_lexer(), prof_name_lexer())
+    prof_register_pass(ctx, prof_pass_parser(), prof_name_parser())
+    if ctx.pass_count != 2 { return false }
+    prof_reset(ctx)
+    if ctx.pass_count != 0 { return false }
+    true
+}
+
+fn test_prof_reset_clears_passes() -> bool with Mut, Div, Panic {
+    var ctx = prof_context_new()
+    test_prof_reset_clears_passes_inner(&! ctx)
+}
+
+fn test_prof_reset_clears_timers_inner(ctx: &! ProfContext) -> bool with Mut, Div, Panic {
+    prof_alloc_timer(ctx)
+    prof_alloc_timer(ctx)
+    if ctx.timer_count != 2 { return false }
+    prof_reset(ctx)
+    if ctx.timer_count != 0 { return false }
+    true
+}
+
+fn test_prof_reset_clears_timers() -> bool with Mut, Div, Panic {
+    var ctx = prof_context_new()
+    test_prof_reset_clears_timers_inner(&! ctx)
+}
+
+fn test_prof_reset_clears_functions_inner(ctx: &! ProfContext) -> bool with Mut, Div, Panic {
+    prof_record_function(ctx, 1, 100, prof_pass_check())
+    prof_record_function(ctx, 2, 200, prof_pass_check())
+    if ctx.fn_count != 2 { return false }
+    prof_reset(ctx)
+    if ctx.fn_count != 0 { return false }
+    true
+}
+
+fn test_prof_reset_clears_functions() -> bool with Mut, Div, Panic {
+    var ctx = prof_context_new()
+    test_prof_reset_clears_functions_inner(&! ctx)
+}
+
+fn test_prof_reset_clears_samples_inner(ctx: &! ProfContext) -> bool with Mut, Div, Panic {
+    prof_add_sample(ctx, 0, 100, prof_pass_lexer())
+    prof_add_sample(ctx, 1, 200, prof_pass_parser())
+    if ctx.sample_count != 2 { return false }
+    prof_reset(ctx)
+    if ctx.sample_count != 0 { return false }
+    true
+}
+
+fn test_prof_reset_clears_samples() -> bool with Mut, Div, Panic {
+    var ctx = prof_context_new()
+    test_prof_reset_clears_samples_inner(&! ctx)
+}
+
+fn test_prof_reset_and_reuse_inner(ctx: &! ProfContext) -> bool with Mut, Div, Panic {
+    // First use.
+    let pid = prof_register_pass(ctx, prof_pass_lexer(), prof_name_lexer())
+    prof_start_pass(ctx, pid, 0, 0)
+    prof_end_pass(ctx, pid, 500, 1000)
+    prof_record_function(ctx, 42, 250, prof_pass_lexer())
+    // Reset.
+    prof_reset(ctx)
+    // Second use: everything should work fresh.
+    let pid2 = prof_register_pass(ctx, prof_pass_parser(), prof_name_parser())
+    if pid2 != 0 { return false }
+    prof_start_pass(ctx, pid2, 0, 0)
+    prof_end_pass(ctx, pid2, 100, 500)
+    let time = prof_pass_time(ctx, pid2)
+    if time != 100 { return false }
+    if ctx.pass_count != 1 { return false }
+    if ctx.fn_count != 0 { return false }
+    true
+}
+
+fn test_prof_reset_and_reuse() -> bool with Mut, Div, Panic {
+    var ctx = prof_context_new()
+    test_prof_reset_and_reuse_inner(&! ctx)
+}
+
+// ============================================================================
+// Tests — 8. Integration (6 tests)
+// ============================================================================
+
+fn test_prof_full_pipeline_inner(ctx: &! ProfContext) -> bool with Mut, Div, Panic {
+    // Simulate a full compilation profiling session.
+    let pid_lex = prof_register_pass(ctx, prof_pass_lexer(), prof_name_lexer())
+    let pid_parse = prof_register_pass(ctx, prof_pass_parser(), prof_name_parser())
+    let pid_check = prof_register_pass(ctx, prof_pass_check(), prof_name_check())
+    let pid_cg = prof_register_pass(ctx, prof_pass_codegen(), prof_name_codegen())
+
+    // Lexer pass.
+    prof_start_pass(ctx, pid_lex, 0, 0)
+    prof_record_function(ctx, 1, 30, prof_pass_lexer())
+    prof_record_function(ctx, 2, 20, prof_pass_lexer())
+    prof_pass_add_function(ctx, pid_lex)
+    prof_pass_add_function(ctx, pid_lex)
+    prof_end_pass(ctx, pid_lex, 100, 500)
+
+    // Parser pass.
+    prof_start_pass(ctx, pid_parse, 100, 500)
+    prof_record_function(ctx, 1, 50, prof_pass_parser())
+    prof_record_function(ctx, 3, 80, prof_pass_parser())
+    prof_pass_add_function(ctx, pid_parse)
+    prof_pass_add_function(ctx, pid_parse)
+    prof_end_pass(ctx, pid_parse, 400, 2000)
+
+    // Check pass.
+    prof_start_pass(ctx, pid_check, 400, 2000)
+    prof_record_function(ctx, 1, 100, prof_pass_check())
+    prof_record_function(ctx, 2, 60, prof_pass_check())
+    prof_record_function(ctx, 3, 40, prof_pass_check())
+    prof_pass_add_function(ctx, pid_check)
+    prof_pass_add_function(ctx, pid_check)
+    prof_pass_add_function(ctx, pid_check)
+    prof_end_pass(ctx, pid_check, 700, 4000)
+
+    // Codegen pass.
+    prof_start_pass(ctx, pid_cg, 700, 4000)
+    prof_record_function(ctx, 1, 80, prof_pass_codegen())
+    prof_record_function(ctx, 2, 50, prof_pass_codegen())
+    prof_pass_add_function(ctx, pid_cg)
+    prof_pass_add_function(ctx, pid_cg)
+    prof_end_pass(ctx, pid_cg, 1000, 5000)
+
+    // Verify pass stats.
+    if ctx.pass_count != 4 { return false }
+    if prof_pass_functions_processed(ctx, pid_lex) != 2 { return false }
+    if prof_pass_functions_processed(ctx, pid_parse) != 2 { return false }
+    if prof_pass_functions_processed(ctx, pid_check) != 3 { return false }
+    if prof_pass_functions_processed(ctx, pid_cg) != 2 { return false }
+
+    // Verify function heat: function 1 appeared in all 4 passes.
+    let idx1 = prof_find_function(ctx, 1)
+    if idx1 < 0 { return false }
+    let pc1 = prof_function_pass_count(ctx, idx1)
+    if pc1 != 4 { return false }
+
+    // Verify total ticks accumulated.
+    let tt = prof_total_time(ctx)
+    if tt == 0 { return false }
+
+    true
+}
+
+fn test_prof_full_pipeline() -> bool with Mut, Div, Panic {
+    var ctx = prof_context_new()
+    test_prof_full_pipeline_inner(&! ctx)
+}
+
+fn test_prof_pipeline_with_sampling_inner(ctx: &! ProfContext) -> bool with Mut, Div, Panic {
+    let pid = prof_register_pass(ctx, prof_pass_lexer(), prof_name_lexer())
+    prof_start_pass(ctx, pid, 0, 0)
+    prof_add_sample(ctx, 0, 50, prof_pass_lexer())
+    prof_add_sample(ctx, 0, 80, prof_pass_lexer())
+    prof_add_sample(ctx, 0, 70, prof_pass_lexer())
+    prof_end_pass(ctx, pid, 200, 1000)
+    let avg = prof_average_sample(ctx, prof_pass_lexer())
+    // (50 + 80 + 70) / 3 = 66
+    if avg != 66 { return false }
+    let mx = prof_max_sample(ctx, prof_pass_lexer())
+    if mx != 80 { return false }
+    true
+}
+
+fn test_prof_pipeline_with_sampling() -> bool with Mut, Div, Panic {
+    var ctx = prof_context_new()
+    test_prof_pipeline_with_sampling_inner(&! ctx)
+}
+
+fn test_prof_pipeline_report_inner(ctx: &! ProfContext) -> bool with Mut, Div, Panic {
+    let pid0 = prof_register_pass(ctx, prof_pass_lexer(), prof_name_lexer())
+    let pid1 = prof_register_pass(ctx, prof_pass_parser(), prof_name_parser())
+    let pid2 = prof_register_pass(ctx, prof_pass_codegen(), prof_name_codegen())
+    prof_start_pass(ctx, pid0, 0, 0)
+    prof_end_pass(ctx, pid0, 200, 500)
+    prof_start_pass(ctx, pid1, 200, 500)
+    prof_end_pass(ctx, pid1, 500, 1500)
+    prof_start_pass(ctx, pid2, 500, 1500)
+    prof_end_pass(ctx, pid2, 1000, 3000)
+    prof_format_report(ctx)
+    if prof_report_line_count(ctx) != 3 { return false }
+    prof_sort_passes_by(ctx, prof_sort_by_time())
+    // Codegen(500), parser(300), lexer(200).
+    let t0 = prof_report_line_ticks(ctx, 0)
+    if t0 != 500 { return false }
+    true
+}
+
+fn test_prof_pipeline_report() -> bool with Mut, Div, Panic {
+    var ctx = prof_context_new()
+    test_prof_pipeline_report_inner(&! ctx)
+}
+
+fn test_prof_pipeline_hot_functions_inner(ctx: &! ProfContext) -> bool with Mut, Div, Panic {
+    // Create 5 functions with varying heat.
+    prof_record_function(ctx, 10, 500, prof_pass_check())
+    prof_record_function(ctx, 20, 200, prof_pass_check())
+    prof_record_function(ctx, 30, 100, prof_pass_check())
+    prof_record_function(ctx, 40, 50, prof_pass_check())
+    prof_record_function(ctx, 50, 10, prof_pass_check())
+    // Total = 860. Top 80% = 688.
+    // Cumulative: 500, 700, 800 -> 3 functions needed.
+    prof_mark_hot_functions(ctx, 80)
+    let hot = prof_count_hot_functions(ctx)
+    if hot != 3 { return false }
+    // Top-N sort.
+    let top = prof_top_hot_functions(ctx, 3)
+    if top != 3 { return false }
+    // After sort, index 0 should have hash 10 (500 ticks).
+    if ctx.functions[0 as usize].fn_name_hash != 10 { return false }
+    true
+}
+
+fn test_prof_pipeline_hot_functions() -> bool with Mut, Div, Panic {
+    var ctx = prof_context_new()
+    test_prof_pipeline_hot_functions_inner(&! ctx)
+}
+
+fn test_prof_pipeline_reset_cycle_inner(ctx: &! ProfContext) -> bool with Mut, Div, Panic {
+    // First compilation unit.
+    let pid = prof_register_pass(ctx, prof_pass_lexer(), prof_name_lexer())
+    prof_start_pass(ctx, pid, 0, 0)
+    prof_end_pass(ctx, pid, 100, 1000)
+    prof_record_function(ctx, 1, 80, prof_pass_lexer())
+    prof_add_sample(ctx, 0, 90, prof_pass_lexer())
+    // Reset for second unit.
+    prof_reset(ctx)
+    if ctx.pass_count != 0 { return false }
+    if ctx.fn_count != 0 { return false }
+    if ctx.sample_count != 0 { return false }
+    if ctx.timer_count != 0 { return false }
+    // Second compilation unit should work.
+    let pid2 = prof_register_pass(ctx, prof_pass_parser(), prof_name_parser())
+    prof_start_pass(ctx, pid2, 0, 0)
+    prof_end_pass(ctx, pid2, 200, 500)
+    let time = prof_pass_time(ctx, pid2)
+    time == 200
+}
+
+fn test_prof_pipeline_reset_cycle() -> bool with Mut, Div, Panic {
+    var ctx = prof_context_new()
+    test_prof_pipeline_reset_cycle_inner(&! ctx)
+}
+
+fn test_prof_slowest_pass_inner(ctx: &! ProfContext) -> bool with Mut, Div, Panic {
+    let pid0 = prof_register_pass(ctx, prof_pass_lexer(), prof_name_lexer())
+    let pid1 = prof_register_pass(ctx, prof_pass_parser(), prof_name_parser())
+    let pid2 = prof_register_pass(ctx, prof_pass_check(), prof_name_check())
+    prof_start_pass(ctx, pid0, 0, 0)
+    prof_end_pass(ctx, pid0, 100, 0)
+    prof_start_pass(ctx, pid1, 100, 0)
+    prof_end_pass(ctx, pid1, 500, 0)
+    prof_start_pass(ctx, pid2, 500, 0)
+    prof_end_pass(ctx, pid2, 700, 0)
+    let slowest = prof_slowest_pass(ctx)
+    // Parser: 400, check: 200, lexer: 100
+    slowest == 1
+}
+
+fn test_prof_slowest_pass() -> bool with Mut, Div, Panic {
+    var ctx = prof_context_new()
+    test_prof_slowest_pass_inner(&! ctx)
+}
+
+// ============================================================================
+// Name buffer tests (supplementary)
+// ============================================================================
+
+fn test_prof_name_from_bytes_inner(ctx: &! ProfContext) -> bool with Mut, Div, Panic {
+    let name = prof_name_from_bytes(65 as i8, 66 as i8, 67 as i8, 0 as i8, 0 as i8, 0 as i8, 0 as i8, 0 as i8, 3)
+    if name.len != 3 { return false }
+    if name.buf[0 as usize] != (65 as i8) { return false }
+    if name.buf[1 as usize] != (66 as i8) { return false }
+    if name.buf[2 as usize] != (67 as i8) { return false }
+    true
+}
+
+fn test_prof_name_from_bytes() -> bool with Mut, Div, Panic {
+    var ctx = prof_context_new()
+    test_prof_name_from_bytes_inner(&! ctx)
+}
+
+fn test_prof_name_eq_inner(ctx: &! ProfContext) -> bool with Mut, Div, Panic {
+    let a = prof_name_from_bytes(65 as i8, 66 as i8, 67 as i8, 0 as i8, 0 as i8, 0 as i8, 0 as i8, 0 as i8, 3)
+    let b = prof_name_from_bytes(65 as i8, 66 as i8, 67 as i8, 0 as i8, 0 as i8, 0 as i8, 0 as i8, 0 as i8, 3)
+    let c = prof_name_from_bytes(88 as i8, 89 as i8, 90 as i8, 0 as i8, 0 as i8, 0 as i8, 0 as i8, 0 as i8, 3)
+    if prof_name_eq(&a, &b) == false { return false }
+    if prof_name_eq(&a, &c) == true { return false }
+    true
+}
+
+fn test_prof_name_eq() -> bool with Mut, Div, Panic {
+    var ctx = prof_context_new()
+    test_prof_name_eq_inner(&! ctx)
+}
+
+fn test_prof_name_eq_different_len_inner(ctx: &! ProfContext) -> bool with Mut, Div, Panic {
+    let a = prof_name_from_bytes(65 as i8, 66 as i8, 0 as i8, 0 as i8, 0 as i8, 0 as i8, 0 as i8, 0 as i8, 2)
+    let b = prof_name_from_bytes(65 as i8, 66 as i8, 67 as i8, 0 as i8, 0 as i8, 0 as i8, 0 as i8, 0 as i8, 3)
+    prof_name_eq(&a, &b) == false
+}
+
+fn test_prof_name_eq_different_len() -> bool with Mut, Div, Panic {
+    var ctx = prof_context_new()
+    test_prof_name_eq_different_len_inner(&! ctx)
+}
+
+fn test_prof_name_cmp_inner(ctx: &! ProfContext) -> bool with Mut, Div, Panic {
+    let a = prof_name_from_bytes(65 as i8, 66 as i8, 67 as i8, 0 as i8, 0 as i8, 0 as i8, 0 as i8, 0 as i8, 3)
+    let b = prof_name_from_bytes(65 as i8, 66 as i8, 68 as i8, 0 as i8, 0 as i8, 0 as i8, 0 as i8, 0 as i8, 3)
+    let cmp = prof_name_cmp(&a, &b)
+    // 'C' (67) < 'D' (68), so cmp should be negative.
+    if cmp >= 0 { return false }
+    let cmp2 = prof_name_cmp(&a, &a)
+    if cmp2 != 0 { return false }
+    true
+}
+
+fn test_prof_name_cmp() -> bool with Mut, Div, Panic {
+    var ctx = prof_context_new()
+    test_prof_name_cmp_inner(&! ctx)
+}
+
+fn test_prof_name_empty_inner(ctx: &! ProfContext) -> bool with Mut, Div, Panic {
+    let name = prof_name_buf_empty()
+    if name.len != 0 { return false }
+    let fb = prof_name_first_byte(&name)
+    if fb != (0 as i8) { return false }
+    true
+}
+
+fn test_prof_name_empty() -> bool with Mut, Div, Panic {
+    var ctx = prof_context_new()
+    test_prof_name_empty_inner(&! ctx)
+}
+
+// ============================================================================
+// Edge case and boundary tests (supplementary)
+// ============================================================================
+
+fn test_prof_timer_invalid_id_inner(ctx: &! ProfContext) -> bool with Mut, Div, Panic {
+    // Negative ID should be handled gracefully.
+    let ok = prof_start_timer(ctx, 0 - 1, 100)
+    if ok == true { return false }
+    let elapsed = prof_timer_elapsed(ctx, 0 - 1)
+    if elapsed != 0 { return false }
+    // Out-of-range ID.
+    let ok2 = prof_start_timer(ctx, 999, 100)
+    if ok2 == true { return false }
+    true
+}
+
+fn test_prof_timer_invalid_id() -> bool with Mut, Div, Panic {
+    var ctx = prof_context_new()
+    test_prof_timer_invalid_id_inner(&! ctx)
+}
+
+fn test_prof_stop_idle_timer_inner(ctx: &! ProfContext) -> bool with Mut, Div, Panic {
+    let id = prof_alloc_timer(ctx)
+    // Stopping an idle timer should return false.
+    let ok = prof_stop_timer(ctx, id, 100)
+    ok == false
+}
+
+fn test_prof_stop_idle_timer() -> bool with Mut, Div, Panic {
+    var ctx = prof_context_new()
+    test_prof_stop_idle_timer_inner(&! ctx)
+}
+
+fn test_prof_pass_invalid_id_inner(ctx: &! ProfContext) -> bool with Mut, Div, Panic {
+    let time = prof_pass_time(ctx, 0 - 1)
+    if time != 0 { return false }
+    let count = prof_pass_count(ctx, 999)
+    if count != 0 { return false }
+    true
+}
+
+fn test_prof_pass_invalid_id() -> bool with Mut, Div, Panic {
+    var ctx = prof_context_new()
+    test_prof_pass_invalid_id_inner(&! ctx)
+}
+
+fn test_prof_find_function_empty_inner(ctx: &! ProfContext) -> bool with Mut, Div, Panic {
+    let idx = prof_find_function(ctx, 42)
+    idx == (0 - 1)
+}
+
+fn test_prof_find_function_empty() -> bool with Mut, Div, Panic {
+    var ctx = prof_context_new()
+    test_prof_find_function_empty_inner(&! ctx)
+}
+
+fn test_prof_average_sample_empty_inner(ctx: &! ProfContext) -> bool with Mut, Div, Panic {
+    let avg = prof_average_sample(ctx, prof_pass_lexer())
+    avg == 0
+}
+
+fn test_prof_average_sample_empty() -> bool with Mut, Div, Panic {
+    var ctx = prof_context_new()
+    test_prof_average_sample_empty_inner(&! ctx)
+}
+
+fn test_prof_report_empty_inner(ctx: &! ProfContext) -> bool with Mut, Div, Panic {
+    prof_format_report(ctx)
+    prof_report_line_count(ctx) == 0
+}
+
+fn test_prof_report_empty() -> bool with Mut, Div, Panic {
+    var ctx = prof_context_new()
+    test_prof_report_empty_inner(&! ctx)
+}
+
+fn test_prof_context_new_zeroed_inner(ctx: &! ProfContext) -> bool with Mut, Div, Panic {
+    if ctx.pass_count != 0 { return false }
+    if ctx.fn_count != 0 { return false }
+    if ctx.timer_count != 0 { return false }
+    if ctx.sample_count != 0 { return false }
+    if ctx.report_count != 0 { return false }
+    if ctx.total_ticks != 0 { return false }
+    if ctx.total_mem_delta != 0 { return false }
+    if ctx.current_pass != PROF_NO_PASS { return false }
+    if ctx.current_timer != PROF_NO_TIMER { return false }
+    true
+}
+
+fn test_prof_context_new_zeroed() -> bool with Mut, Div, Panic {
+    var ctx = prof_context_new()
+    test_prof_context_new_zeroed_inner(&! ctx)
+}
+
+fn test_prof_min_sample_inner(ctx: &! ProfContext) -> bool with Mut, Div, Panic {
+    prof_add_sample(ctx, 0, 300, prof_pass_check())
+    prof_add_sample(ctx, 0, 100, prof_pass_check())
+    prof_add_sample(ctx, 0, 500, prof_pass_check())
+    let mn = prof_min_sample(ctx, prof_pass_check())
+    mn == 100
+}
+
+fn test_prof_min_sample() -> bool with Mut, Div, Panic {
+    var ctx = prof_context_new()
+    test_prof_min_sample_inner(&! ctx)
+}
+
+fn test_prof_compute_total_time_inner(ctx: &! ProfContext) -> bool with Mut, Div, Panic {
+    let pid0 = prof_register_pass(ctx, prof_pass_lexer(), prof_name_lexer())
+    let pid1 = prof_register_pass(ctx, prof_pass_parser(), prof_name_parser())
+    prof_start_pass(ctx, pid0, 0, 0)
+    prof_end_pass(ctx, pid0, 200, 0)
+    prof_start_pass(ctx, pid1, 200, 0)
+    prof_end_pass(ctx, pid1, 500, 0)
+    let total = prof_compute_total_time(ctx)
+    // lexer: 200, parser: 300. Total = 500.
+    total == 500
+}
+
+fn test_prof_compute_total_time() -> bool with Mut, Div, Panic {
+    var ctx = prof_context_new()
+    test_prof_compute_total_time_inner(&! ctx)
+}
+
+fn test_prof_compute_total_mem_delta_inner(ctx: &! ProfContext) -> bool with Mut, Div, Panic {
+    let pid0 = prof_register_pass(ctx, prof_pass_lexer(), prof_name_lexer())
+    let pid1 = prof_register_pass(ctx, prof_pass_parser(), prof_name_parser())
+    prof_start_pass(ctx, pid0, 0, 0)
+    prof_end_pass(ctx, pid0, 100, 1000)
+    prof_start_pass(ctx, pid1, 100, 1000)
+    prof_end_pass(ctx, pid1, 200, 4000)
+    let total = prof_compute_total_mem_delta(ctx)
+    // lexer: 1000, parser: 3000. Total = 4000.
+    total == 4000
+}
+
+fn test_prof_compute_total_mem_delta() -> bool with Mut, Div, Panic {
+    var ctx = prof_context_new()
+    test_prof_compute_total_mem_delta_inner(&! ctx)
+}
+
+fn test_prof_sort_by_name_inner(ctx: &! ProfContext) -> bool with Mut, Div, Panic {
+    // Register in reverse alphabetical order.
+    let pid0 = prof_register_pass(ctx, prof_pass_parser(), prof_name_parser())
+    let pid1 = prof_register_pass(ctx, prof_pass_lexer(), prof_name_lexer())
+    let pid2 = prof_register_pass(ctx, prof_pass_check(), prof_name_check())
+    prof_start_pass(ctx, pid0, 0, 0)
+    prof_end_pass(ctx, pid0, 100, 0)
+    prof_start_pass(ctx, pid1, 100, 0)
+    prof_end_pass(ctx, pid1, 200, 0)
+    prof_start_pass(ctx, pid2, 200, 0)
+    prof_end_pass(ctx, pid2, 300, 0)
+    prof_format_report(ctx)
+    prof_sort_passes_by(ctx, prof_sort_by_name())
+    // Alphabetical: check, lexer, parser.
+    // 'c' < 'l' < 'p'.
+    let name0_byte = prof_name_first_byte(&ctx.report[0 as usize].name)
+    let name1_byte = prof_name_first_byte(&ctx.report[1 as usize].name)
+    let name2_byte = prof_name_first_byte(&ctx.report[2 as usize].name)
+    // 'c' = 99, 'l' = 108, 'p' = 112
+    if (name0_byte as i64) != 99 { return false }
+    if (name1_byte as i64) != 108 { return false }
+    if (name2_byte as i64) != 112 { return false }
+    true
+}
+
+fn test_prof_sort_by_name() -> bool with Mut, Div, Panic {
+    var ctx = prof_context_new()
+    test_prof_sort_by_name_inner(&! ctx)
+}
+
+fn test_prof_name_copy_inner(ctx: &! ProfContext) -> bool with Mut, Div, Panic {
+    let original = prof_name_from_bytes(72 as i8, 69 as i8, 76 as i8, 76 as i8, 79 as i8, 0 as i8, 0 as i8, 0 as i8, 5)
+    let copy = prof_name_copy(&original)
+    if copy.len != 5 { return false }
+    prof_name_eq(&original, &copy)
+}
+
+fn test_prof_name_copy() -> bool with Mut, Div, Panic {
+    var ctx = prof_context_new()
+    test_prof_name_copy_inner(&! ctx)
+}
+
+fn test_prof_mark_hot_all_equal_inner(ctx: &! ProfContext) -> bool with Mut, Div, Panic {
+    // When all functions have the same ticks, marking at 50% threshold
+    // should mark about half.
+    prof_record_function(ctx, 1, 100, prof_pass_check())
+    prof_record_function(ctx, 2, 100, prof_pass_check())
+    prof_record_function(ctx, 3, 100, prof_pass_check())
+    prof_record_function(ctx, 4, 100, prof_pass_check())
+    // Total = 400. 50% = 200. Each is 100, so need 2 to reach 200.
+    prof_mark_hot_functions(ctx, 50)
+    let hot = prof_count_hot_functions(ctx)
+    hot == 2
+}
+
+fn test_prof_mark_hot_all_equal() -> bool with Mut, Div, Panic {
+    var ctx = prof_context_new()
+    test_prof_mark_hot_all_equal_inner(&! ctx)
+}
+
+fn test_prof_total_sample_count_inner(ctx: &! ProfContext) -> bool with Mut, Div, Panic {
+    prof_add_sample(ctx, 0, 100, prof_pass_lexer())
+    prof_add_sample(ctx, 0, 200, prof_pass_parser())
+    prof_add_sample(ctx, 0, 300, prof_pass_check())
+    let count = prof_total_sample_count(ctx)
+    count == 3
+}
+
+fn test_prof_total_sample_count() -> bool with Mut, Div, Panic {
+    var ctx = prof_context_new()
+    test_prof_total_sample_count_inner(&! ctx)
+}
+
+// ============================================================================
+// Main — run all tests
+// ============================================================================
+
+fn prof_run_all_tests() -> i64 with Mut, Div, Panic {
+    var failures: i64 = 0
+
+    // Timer operations (8 tests)
+    if test_prof_timer_alloc() == false { failures = failures + 1 }
+    if test_prof_timer_start() == false { failures = failures + 1 }
+    if test_prof_timer_stop() == false { failures = failures + 1 }
+    if test_prof_timer_elapsed() == false { failures = failures + 1 }
+    if test_prof_timer_multiple_invocations() == false { failures = failures + 1 }
+    if test_prof_timer_alloc_multiple() == false { failures = failures + 1 }
+    if test_prof_timer_double_start() == false { failures = failures + 1 }
+    if test_prof_timer_reset() == false { failures = failures + 1 }
+
+    // Pass registration (8 tests)
+    if test_prof_register_pass() == false { failures = failures + 1 }
+    if test_prof_register_multiple_passes() == false { failures = failures + 1 }
+    if test_prof_pass_start_end() == false { failures = failures + 1 }
+    if test_prof_pass_mem_delta() == false { failures = failures + 1 }
+    if test_prof_pass_kind_query() == false { failures = failures + 1 }
+    if test_prof_pass_functions_processed() == false { failures = failures + 1 }
+    if test_prof_pass_multiple_invocations() == false { failures = failures + 1 }
+    if test_prof_pass_timer_auto_alloc() == false { failures = failures + 1 }
+
+    // Function heat (8 tests)
+    if test_prof_record_function() == false { failures = failures + 1 }
+    if test_prof_record_function_accumulate() == false { failures = failures + 1 }
+    if test_prof_find_function() == false { failures = failures + 1 }
+    if test_prof_function_max_pass() == false { failures = failures + 1 }
+    if test_prof_mark_hot_functions() == false { failures = failures + 1 }
+    if test_prof_top_hot_functions() == false { failures = failures + 1 }
+    if test_prof_function_not_hot_by_default() == false { failures = failures + 1 }
+    if test_prof_total_function_ticks() == false { failures = failures + 1 }
+
+    // Sampling (6 tests)
+    if test_prof_add_sample() == false { failures = failures + 1 }
+    if test_prof_add_multiple_samples() == false { failures = failures + 1 }
+    if test_prof_average_sample() == false { failures = failures + 1 }
+    if test_prof_average_sample_by_kind() == false { failures = failures + 1 }
+    if test_prof_max_sample() == false { failures = failures + 1 }
+    if test_prof_count_samples() == false { failures = failures + 1 }
+
+    // Reporting (8 tests)
+    if test_prof_format_report() == false { failures = failures + 1 }
+    if test_prof_report_percentages() == false { failures = failures + 1 }
+    if test_prof_report_ticks() == false { failures = failures + 1 }
+    if test_prof_report_invocations() == false { failures = failures + 1 }
+    if test_prof_report_mem_delta() == false { failures = failures + 1 }
+    if test_prof_sort_by_time() == false { failures = failures + 1 }
+    if test_prof_sort_by_count() == false { failures = failures + 1 }
+    if test_prof_sort_by_memory() == false { failures = failures + 1 }
+
+    // Memory tracking (6 tests)
+    if test_prof_mem_delta_positive() == false { failures = failures + 1 }
+    if test_prof_mem_delta_negative() == false { failures = failures + 1 }
+    if test_prof_mem_delta_zero() == false { failures = failures + 1 }
+    if test_prof_total_mem_delta() == false { failures = failures + 1 }
+    if test_prof_per_pass_mem_independent() == false { failures = failures + 1 }
+    if test_prof_largest_mem_pass() == false { failures = failures + 1 }
+
+    // Reset/reuse (5 tests)
+    if test_prof_reset_clears_passes() == false { failures = failures + 1 }
+    if test_prof_reset_clears_timers() == false { failures = failures + 1 }
+    if test_prof_reset_clears_functions() == false { failures = failures + 1 }
+    if test_prof_reset_clears_samples() == false { failures = failures + 1 }
+    if test_prof_reset_and_reuse() == false { failures = failures + 1 }
+
+    // Integration (6 tests)
+    if test_prof_full_pipeline() == false { failures = failures + 1 }
+    if test_prof_pipeline_with_sampling() == false { failures = failures + 1 }
+    if test_prof_pipeline_report() == false { failures = failures + 1 }
+    if test_prof_pipeline_hot_functions() == false { failures = failures + 1 }
+    if test_prof_pipeline_reset_cycle() == false { failures = failures + 1 }
+    if test_prof_slowest_pass() == false { failures = failures + 1 }
+
+    // Supplementary name buffer tests (5 tests)
+    if test_prof_name_from_bytes() == false { failures = failures + 1 }
+    if test_prof_name_eq() == false { failures = failures + 1 }
+    if test_prof_name_eq_different_len() == false { failures = failures + 1 }
+    if test_prof_name_cmp() == false { failures = failures + 1 }
+    if test_prof_name_empty() == false { failures = failures + 1 }
+
+    // Supplementary edge case tests (10 tests)
+    if test_prof_timer_invalid_id() == false { failures = failures + 1 }
+    if test_prof_stop_idle_timer() == false { failures = failures + 1 }
+    if test_prof_pass_invalid_id() == false { failures = failures + 1 }
+    if test_prof_find_function_empty() == false { failures = failures + 1 }
+    if test_prof_average_sample_empty() == false { failures = failures + 1 }
+    if test_prof_report_empty() == false { failures = failures + 1 }
+    if test_prof_context_new_zeroed() == false { failures = failures + 1 }
+    if test_prof_min_sample() == false { failures = failures + 1 }
+    if test_prof_compute_total_time() == false { failures = failures + 1 }
+    if test_prof_compute_total_mem_delta() == false { failures = failures + 1 }
+    if test_prof_sort_by_name() == false { failures = failures + 1 }
+    if test_prof_name_copy() == false { failures = failures + 1 }
+    if test_prof_mark_hot_all_equal() == false { failures = failures + 1 }
+    if test_prof_total_sample_count() == false { failures = failures + 1 }
+
+    failures
+}
+
+// main removed — called from bootstrap main.sio via prof_run_all_tests()

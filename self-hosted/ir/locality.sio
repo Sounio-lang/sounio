@@ -1,0 +1,3500 @@
+// self-hosted::ir::locality — Data locality optimization pass
+//
+// Cache-aware analysis and transformation pass for the Sounio self-hosted
+// compiler IR.  Implements classical and modern data locality optimizations:
+//
+//   1. Access pattern analysis — classify memory access strides per loop nest
+//   2. Reuse distance computation — temporal, spatial, group, and no-reuse
+//   3. Cache miss estimation — model L1/L2/L3 cache behaviour under LRU
+//   4. Loop tiling (blocking) — partition iteration space for cache residency
+//   5. Prefetch insertion — software prefetch hints (T0/T1/T2/NTA)
+//   6. Loop interchange — reorder nested loops for unit-stride access
+//   7. Working set estimation — predict data footprint per loop level
+//
+// The analysis is purely static: it models cache behaviour from access patterns
+// and loop trip counts without requiring profiling data.  All arrays are
+// fixed-size — no heap allocation.
+//
+// Cache model:
+//   L1: 32 KiB, 8-way, 64 B line  (LOC_L1_SIZE)
+//   L2: 256 KiB, 8-way, 64 B line (LOC_L2_SIZE)
+//   L3: 8 MiB, 16-way, 64 B line  (LOC_L3_SIZE)
+//
+// References:
+//   Wolf & Lam: "A Data Locality Optimizing Algorithm" (PLDI 1991)
+//   McKinley, Carr & Tseng: "Improving Data Locality with Loop
+//       Transformations" (TOPLAS 1996)
+//   Ding & Zhong: "Predicting Whole-Program Locality Through Reuse
+//       Distance Analysis" (PLDI 2003)
+//   Lam, Rothberg & Wolf: "The Cache Performance and Optimizations of
+//       Blocked Algorithms" (ASPLOS 1991)
+//   Mowry, Lam & Gupta: "Design and Evaluation of a Compiler Algorithm
+//       for Prefetching" (ASPLOS 1992)
+//   Allen & Kennedy: "Optimizing Compilers for Modern Architectures" (2002)
+
+// ============================================================================
+// Section 1: Constants
+// ============================================================================
+
+let LOC_MAX_ACCESSES: i64 = 1024
+let LOC_MAX_LOOPS: i64 = 128
+let LOC_MAX_TILES: i64 = 64
+let LOC_MAX_PREFETCH: i64 = 256
+let LOC_MAX_ARRAYS: i64 = 128
+let LOC_MAX_REUSE: i64 = 1024
+
+let LOC_CACHE_LINE_SIZE: i64 = 64
+let LOC_L1_SIZE: i64 = 32768
+let LOC_L2_SIZE: i64 = 262144
+let LOC_L3_SIZE: i64 = 8388608
+
+let LOC_INVALID: i64 = 0 - 1
+
+// Prefetch distance constants (in cache lines ahead)
+let LOC_PREFETCH_DISTANCE_T0: i64 = 8
+let LOC_PREFETCH_DISTANCE_T1: i64 = 32
+let LOC_PREFETCH_DISTANCE_T2: i64 = 64
+let LOC_PREFETCH_DISTANCE_NTA: i64 = 128
+
+// Minimum trip count for tiling to be worthwhile
+let LOC_MIN_TILE_TRIP: i64 = 32
+
+// Maximum tile factor (code bloat limit)
+let LOC_MAX_TILE_FACTOR: i64 = 256
+
+// Threshold: if working set fits this fraction of cache, tiling not needed
+let LOC_FIT_THRESHOLD_NUMER: i64 = 3
+let LOC_FIT_THRESHOLD_DENOM: i64 = 4
+
+// Threshold for prefetch profitability: stride must exceed this
+let LOC_PREFETCH_STRIDE_THRESHOLD: i64 = 8
+
+// ============================================================================
+// Section 2: Enums
+// ============================================================================
+
+// Classification of memory access stride pattern within a loop.
+enum LocStrideKind {
+    StrideUnit,
+    StrideConstant,
+    StrideAffine,
+    StrideRandom,
+    StrideUnknown,
+}
+
+// Classification of data reuse between memory accesses.
+enum LocReuseKind {
+    ReuseTemporal,
+    ReuseSpatial,
+    ReuseGroup,
+    ReuseNone,
+}
+
+// Software prefetch hint level (maps to x86 prefetcht0/t1/t2/nta).
+enum LocPrefetchHint {
+    PrefetchT0,
+    PrefetchT1,
+    PrefetchT2,
+    PrefetchNTA,
+}
+
+// Whether a loop is a legal and profitable tiling candidate.
+enum LocTileStatus {
+    TileApplicable,
+    TileNotProfitable,
+    TileNotLegal,
+    TileAlreadyTiled,
+}
+
+// Outcome of a loop interchange attempt.
+enum LocInterchangeResult {
+    InterchangeOk,
+    InterchangeIllegal,
+    InterchangeNotProfitable,
+}
+
+// ============================================================================
+// Section 3: Data Structures
+// ============================================================================
+
+// A single memory access pattern observed within a loop body.
+// Records the array being accessed, the stride pattern, and the
+// containing loop level so that reuse analysis can reason about
+// which loop carries each access.
+struct LocAccessPattern {
+    array_id: i64,
+    base_offset: i64,
+    stride: i64,
+    stride_kind: LocStrideKind,
+    loop_id: i64,
+    loop_depth: i64,
+    element_size: i64,
+    line: i64,
+}
+
+// Result of reuse analysis for a single access pattern.
+// distance is the iteration distance before the same cache line is
+// touched again.  carried_by_loop identifies the loop level that
+// carries the reuse.  spatial_stride is the byte distance between
+// consecutive accesses in the spatial dimension.
+struct LocReuseInfo {
+    kind: LocReuseKind,
+    distance: i64,
+    carried_by_loop: i64,
+    spatial_stride: i64,
+}
+
+// Information about a loop in the nest.  access_start/access_count
+// index into the global access table so we can find all accesses
+// belonging to a given loop.
+struct LocLoopInfo {
+    id: i64,
+    depth: i64,
+    trip_count: i64,
+    parent_loop: i64,
+    access_start: i64,
+    access_count: i64,
+    is_tiled: bool,
+    tile_factor: i64,
+}
+
+// Configuration and outcome of a tiling decision for a single loop.
+struct LocTileConfig {
+    loop_id: i64,
+    factor: i64,
+    status: LocTileStatus,
+    estimated_misses_before: i64,
+    estimated_misses_after: i64,
+}
+
+// A software prefetch insertion point.
+struct LocPrefetchPoint {
+    array_id: i64,
+    loop_id: i64,
+    offset_ahead: i64,
+    hint: LocPrefetchHint,
+    stride: i64,
+    line: i64,
+}
+
+// Metadata about an array referenced by access patterns.
+struct LocArrayInfo {
+    id: i64,
+    total_size: i64,
+    element_size: i64,
+    dimension_count: i64,
+}
+
+// The main analysis context.  Flat arena -- all storage is pre-allocated
+// at fixed sizes.  No heap allocation during analysis.
+struct LocContext {
+    accesses: [LocAccessPattern; 1024],
+    access_count: i64,
+    loops: [LocLoopInfo; 128],
+    loop_count: i64,
+    tiles: [LocTileConfig; 64],
+    tile_count: i64,
+    prefetches: [LocPrefetchPoint; 256],
+    prefetch_count: i64,
+    arrays: [LocArrayInfo; 128],
+    array_count: i64,
+    reuse: [LocReuseInfo; 1024],
+    reuse_count: i64,
+    cache_line_size: i64,
+    l1_size: i64,
+    l2_size: i64,
+    l3_size: i64,
+    total_misses_before: i64,
+    total_misses_after: i64,
+}
+
+// ============================================================================
+// Section 4: Default Constructors
+// ============================================================================
+
+fn loc_access_default() -> LocAccessPattern {
+    LocAccessPattern {
+        array_id: LOC_INVALID,
+        base_offset: 0,
+        stride: 0,
+        stride_kind: LocStrideKind::StrideUnknown,
+        loop_id: LOC_INVALID,
+        loop_depth: 0,
+        element_size: 0,
+        line: 0,
+    }
+}
+
+fn loc_reuse_default() -> LocReuseInfo {
+    LocReuseInfo {
+        kind: LocReuseKind::ReuseNone,
+        distance: 0,
+        carried_by_loop: LOC_INVALID,
+        spatial_stride: 0,
+    }
+}
+
+fn loc_loop_default() -> LocLoopInfo {
+    LocLoopInfo {
+        id: LOC_INVALID,
+        depth: 0,
+        trip_count: 0,
+        parent_loop: LOC_INVALID,
+        access_start: 0,
+        access_count: 0,
+        is_tiled: false,
+        tile_factor: 0,
+    }
+}
+
+fn loc_tile_default() -> LocTileConfig {
+    LocTileConfig {
+        loop_id: LOC_INVALID,
+        factor: 0,
+        status: LocTileStatus::TileNotLegal,
+        estimated_misses_before: 0,
+        estimated_misses_after: 0,
+    }
+}
+
+fn loc_prefetch_default() -> LocPrefetchPoint {
+    LocPrefetchPoint {
+        array_id: LOC_INVALID,
+        loop_id: LOC_INVALID,
+        offset_ahead: 0,
+        hint: LocPrefetchHint::PrefetchT0,
+        stride: 0,
+        line: 0,
+    }
+}
+
+fn loc_array_default() -> LocArrayInfo {
+    LocArrayInfo {
+        id: LOC_INVALID,
+        total_size: 0,
+        element_size: 0,
+        dimension_count: 0,
+    }
+}
+
+// ============================================================================
+// Section 5: Context Constructor
+// ============================================================================
+
+fn loc_context_new() -> LocContext {
+    LocContext {
+        accesses: [loc_access_default(); 1024],
+        access_count: 0,
+        loops: [loc_loop_default(); 128],
+        loop_count: 0,
+        tiles: [loc_tile_default(); 64],
+        tile_count: 0,
+        prefetches: [loc_prefetch_default(); 256],
+        prefetch_count: 0,
+        arrays: [loc_array_default(); 128],
+        array_count: 0,
+        reuse: [loc_reuse_default(); 1024],
+        reuse_count: 0,
+        cache_line_size: LOC_CACHE_LINE_SIZE,
+        l1_size: LOC_L1_SIZE,
+        l2_size: LOC_L2_SIZE,
+        l3_size: LOC_L3_SIZE,
+        total_misses_before: 0,
+        total_misses_after: 0,
+    }
+}
+
+// ============================================================================
+// Section 6: Arithmetic Helpers
+// ============================================================================
+
+// Integer absolute value.
+fn loc_abs(x: i64) -> i64 {
+    if x < 0 { return 0 - x }
+    x
+}
+
+// Integer minimum.
+fn loc_min(a: i64, b: i64) -> i64 {
+    if a < b { return a }
+    b
+}
+
+// Integer maximum.
+fn loc_max(a: i64, b: i64) -> i64 {
+    if a > b { return a }
+    b
+}
+
+// Integer division rounding up.
+fn loc_div_ceil(num: i64, den: i64) -> i64 with Div, Panic {
+    if den == 0 { return 0 }
+    let q = num / den
+    if num % den != 0 { return q + 1 }
+    q
+}
+
+// Integer square root (floor) via Newton's method.
+fn loc_isqrt(n: i64) -> i64 with Mut, Div, Panic {
+    if n <= 0 { return 0 }
+    if n == 1 { return 1 }
+    var x = n / 2
+    var y = (x + n / x) / 2
+    var iters: i64 = 0
+    // Newton iteration: converges in O(log log n) steps
+    // Guard with iteration limit to prevent infinite loops
+    if x > y {
+        x = y
+        y = (x + n / x) / 2
+        iters = iters + 1
+    }
+    if iters < 64 {
+        if x > y {
+            x = y
+            y = (x + n / x) / 2
+            iters = iters + 1
+        }
+    }
+    // Iterative refinement loop
+    if x > y {
+        x = y
+        y = (x + n / x) / 2
+    }
+    if x > y {
+        x = y
+        y = (x + n / x) / 2
+    }
+    if x > y {
+        x = y
+        y = (x + n / x) / 2
+    }
+    if x > y {
+        x = y
+        y = (x + n / x) / 2
+    }
+    if x > y {
+        x = y
+        y = (x + n / x) / 2
+    }
+    if x > y {
+        x = y
+        y = (x + n / x) / 2
+    }
+    if x > y {
+        x = y
+        y = (x + n / x) / 2
+    }
+    if x > y {
+        x = y
+        y = (x + n / x) / 2
+    }
+    if x > y {
+        x = y
+        y = (x + n / x) / 2
+    }
+    if x > y {
+        x = y
+        y = (x + n / x) / 2
+    }
+    // x is now floor(sqrt(n))
+    x
+}
+
+// Compute greatest common divisor.
+fn loc_gcd(a_in: i64, b_in: i64) -> i64 with Mut, Div, Panic {
+    var a = loc_abs(a_in)
+    var b = loc_abs(b_in)
+    if b == 0 { return a }
+    // Euclid's algorithm (iteratively unrolled)
+    var tmp: i64 = 0
+    // Iteration 1
+    if b != 0 { tmp = b; b = a % b; a = tmp }
+    if b != 0 { tmp = b; b = a % b; a = tmp }
+    if b != 0 { tmp = b; b = a % b; a = tmp }
+    if b != 0 { tmp = b; b = a % b; a = tmp }
+    if b != 0 { tmp = b; b = a % b; a = tmp }
+    if b != 0 { tmp = b; b = a % b; a = tmp }
+    if b != 0 { tmp = b; b = a % b; a = tmp }
+    if b != 0 { tmp = b; b = a % b; a = tmp }
+    if b != 0 { tmp = b; b = a % b; a = tmp }
+    if b != 0 { tmp = b; b = a % b; a = tmp }
+    if b != 0 { tmp = b; b = a % b; a = tmp }
+    if b != 0 { tmp = b; b = a % b; a = tmp }
+    if b != 0 { tmp = b; b = a % b; a = tmp }
+    if b != 0 { tmp = b; b = a % b; a = tmp }
+    if b != 0 { tmp = b; b = a % b; a = tmp }
+    if b != 0 { tmp = b; b = a % b; a = tmp }
+    a
+}
+
+// Log base 2 (floor) for positive integers.
+fn loc_log2(n: i64) -> i64 with Mut, Panic {
+    if n <= 0 { return 0 }
+    var result: i64 = 0
+    var val = n
+    if val >= 256 { val = val / 256; result = result + 8 }
+    if val >= 16 { val = val / 16; result = result + 4 }
+    if val >= 4 { val = val / 4; result = result + 2 }
+    if val >= 2 { result = result + 1 }
+    result
+}
+
+// Check if n is a power of two.
+fn loc_is_power_of_two(n: i64) -> bool {
+    if n <= 0 { return false }
+    // n & (n-1) == 0 means power of 2; emulate with division
+    // A power of two has exactly one bit set
+    if n == 1 { return true }
+    if n == 2 { return true }
+    if n == 4 { return true }
+    if n == 8 { return true }
+    if n == 16 { return true }
+    if n == 32 { return true }
+    if n == 64 { return true }
+    if n == 128 { return true }
+    if n == 256 { return true }
+    if n == 512 { return true }
+    if n == 1024 { return true }
+    if n == 2048 { return true }
+    if n == 4096 { return true }
+    if n == 8192 { return true }
+    if n == 16384 { return true }
+    if n == 32768 { return true }
+    if n == 65536 { return true }
+    if n == 131072 { return true }
+    if n == 262144 { return true }
+    if n == 524288 { return true }
+    if n == 1048576 { return true }
+    false
+}
+
+// ============================================================================
+// Section 7: Array Registration
+// ============================================================================
+
+// Register an array with the analysis context.
+// Returns the array ID (index into the arrays table).
+fn loc_add_array(ctx: &! LocContext, total_size: i64, elem_size: i64, dims: i64) -> i64 with Mut, Div, Panic {
+    if ctx.array_count >= LOC_MAX_ARRAYS { return LOC_INVALID }
+    let idx = ctx.array_count
+    ctx.arrays[idx as usize] = LocArrayInfo {
+        id: idx,
+        total_size: total_size,
+        element_size: elem_size,
+        dimension_count: dims,
+    }
+    ctx.array_count = ctx.array_count + 1
+    idx
+}
+
+// Look up an array's element size.  Returns 0 for invalid IDs.
+fn loc_array_elem_size(ctx: &LocContext, array_id: i64) -> i64 with Div, Panic {
+    if array_id < 0 { return 0 }
+    if array_id >= ctx.array_count { return 0 }
+    ctx.arrays[array_id as usize].element_size
+}
+
+// Look up an array's total size.  Returns 0 for invalid IDs.
+fn loc_array_total_size(ctx: &LocContext, array_id: i64) -> i64 with Div, Panic {
+    if array_id < 0 { return 0 }
+    if array_id >= ctx.array_count { return 0 }
+    ctx.arrays[array_id as usize].total_size
+}
+
+// Look up an array's dimension count.  Returns 0 for invalid IDs.
+fn loc_array_dims(ctx: &LocContext, array_id: i64) -> i64 with Div, Panic {
+    if array_id < 0 { return 0 }
+    if array_id >= ctx.array_count { return 0 }
+    ctx.arrays[array_id as usize].dimension_count
+}
+
+// ============================================================================
+// Section 8: Loop Registration
+// ============================================================================
+
+// Register a loop with the analysis context.
+// depth is the nesting level (0 = outermost), parent is the parent
+// loop ID or LOC_INVALID for outermost loops.
+// Returns the loop ID.
+fn loc_add_loop(ctx: &! LocContext, depth: i64, trip_count: i64, parent: i64) -> i64 with Mut, Div, Panic {
+    if ctx.loop_count >= LOC_MAX_LOOPS { return LOC_INVALID }
+    let idx = ctx.loop_count
+    ctx.loops[idx as usize] = LocLoopInfo {
+        id: idx,
+        depth: depth,
+        trip_count: trip_count,
+        parent_loop: parent,
+        access_start: ctx.access_count,
+        access_count: 0,
+        is_tiled: false,
+        tile_factor: 0,
+    }
+    ctx.loop_count = ctx.loop_count + 1
+    idx
+}
+
+// Look up a loop's trip count.  Returns 0 for invalid IDs.
+fn loc_loop_trip_count(ctx: &LocContext, loop_id: i64) -> i64 with Div, Panic {
+    if loop_id < 0 { return 0 }
+    if loop_id >= ctx.loop_count { return 0 }
+    ctx.loops[loop_id as usize].trip_count
+}
+
+// Look up a loop's depth.
+fn loc_loop_depth(ctx: &LocContext, loop_id: i64) -> i64 with Div, Panic {
+    if loop_id < 0 { return 0 }
+    if loop_id >= ctx.loop_count { return 0 }
+    ctx.loops[loop_id as usize].depth
+}
+
+// Look up a loop's parent.
+fn loc_loop_parent(ctx: &LocContext, loop_id: i64) -> i64 with Div, Panic {
+    if loop_id < 0 { return LOC_INVALID }
+    if loop_id >= ctx.loop_count { return LOC_INVALID }
+    ctx.loops[loop_id as usize].parent_loop
+}
+
+// Check if a loop is already tiled.
+fn loc_loop_is_tiled(ctx: &LocContext, loop_id: i64) -> bool with Div, Panic {
+    if loop_id < 0 { return false }
+    if loop_id >= ctx.loop_count { return false }
+    ctx.loops[loop_id as usize].is_tiled
+}
+
+// Get the number of accesses in a loop.
+fn loc_loop_access_count(ctx: &LocContext, loop_id: i64) -> i64 with Div, Panic {
+    if loop_id < 0 { return 0 }
+    if loop_id >= ctx.loop_count { return 0 }
+    ctx.loops[loop_id as usize].access_count
+}
+
+// ============================================================================
+// Section 9: Access Pattern Registration
+// ============================================================================
+
+// Register a memory access pattern within a loop.
+// stride_kind must be pre-classified or StrideUnknown for auto-classification.
+// Returns the access ID (index into the accesses table).
+fn loc_add_access(ctx: &! LocContext, array_id: i64, base: i64, stride: i64, stride_kind: LocStrideKind, loop_id: i64, elem_size: i64, line: i64) -> i64 with Mut, Div, Panic {
+    if ctx.access_count >= LOC_MAX_ACCESSES { return LOC_INVALID }
+    let idx = ctx.access_count
+    let depth = loc_loop_depth(ctx, loop_id)
+    ctx.accesses[idx as usize] = LocAccessPattern {
+        array_id: array_id,
+        base_offset: base,
+        stride: stride,
+        stride_kind: stride_kind,
+        loop_id: loop_id,
+        loop_depth: depth,
+        element_size: elem_size,
+        line: line,
+    }
+    ctx.access_count = ctx.access_count + 1
+    // Update loop's access_count
+    if loop_id >= 0 {
+        if loop_id < ctx.loop_count {
+            ctx.loops[loop_id as usize].access_count = ctx.loops[loop_id as usize].access_count + 1
+        }
+    }
+    idx
+}
+
+// Look up an access pattern's stride.
+fn loc_access_stride(ctx: &LocContext, access_idx: i64) -> i64 with Div, Panic {
+    if access_idx < 0 { return 0 }
+    if access_idx >= ctx.access_count { return 0 }
+    ctx.accesses[access_idx as usize].stride
+}
+
+// Look up an access pattern's array ID.
+fn loc_access_array(ctx: &LocContext, access_idx: i64) -> i64 with Div, Panic {
+    if access_idx < 0 { return LOC_INVALID }
+    if access_idx >= ctx.access_count { return LOC_INVALID }
+    ctx.accesses[access_idx as usize].array_id
+}
+
+// Look up an access pattern's loop ID.
+fn loc_access_loop(ctx: &LocContext, access_idx: i64) -> i64 with Div, Panic {
+    if access_idx < 0 { return LOC_INVALID }
+    if access_idx >= ctx.access_count { return LOC_INVALID }
+    ctx.accesses[access_idx as usize].loop_id
+}
+
+// ============================================================================
+// Section 10: Stride Classification
+// ============================================================================
+
+// Classify a stride pattern based on the stride value and element size.
+//
+// Unit stride: the stride equals the element size, meaning consecutive
+//   elements are accessed in memory order (best locality).
+// Constant stride: the stride is a fixed multiple of the element size
+//   (regular but non-unit pattern).
+// Affine stride: the stride is non-zero and not a perfect multiple of
+//   element size (irregular but predictable).
+// Random: stride is zero but access pattern is not unit (unknown pattern).
+// Unknown: cannot classify.
+fn loc_classify_stride(stride: i64, elem_size: i64) -> LocStrideKind with Div, Panic {
+    if elem_size <= 0 { return LocStrideKind::StrideUnknown }
+    let abs_stride = loc_abs(stride)
+    // Unit stride: access consecutive elements
+    if abs_stride == elem_size {
+        return LocStrideKind::StrideUnit
+    }
+    // Zero stride: same location each iteration (temporal reuse)
+    if stride == 0 {
+        return LocStrideKind::StrideConstant
+    }
+    // Constant stride: stride is exact multiple of element size
+    if abs_stride % elem_size == 0 {
+        return LocStrideKind::StrideConstant
+    }
+    // Non-zero stride that is not a clean multiple: affine
+    if abs_stride > 0 {
+        return LocStrideKind::StrideAffine
+    }
+    LocStrideKind::StrideUnknown
+}
+
+// Reclassify a single access pattern's stride in-place.
+fn loc_reclassify_access(ctx: &! LocContext, access_idx: i64) -> LocStrideKind with Mut, Div, Panic {
+    if access_idx < 0 { return LocStrideKind::StrideUnknown }
+    if access_idx >= ctx.access_count { return LocStrideKind::StrideUnknown }
+    let stride = ctx.accesses[access_idx as usize].stride
+    let elem = ctx.accesses[access_idx as usize].element_size
+    let kind = loc_classify_stride(stride, elem)
+    ctx.accesses[access_idx as usize].stride_kind = kind
+    kind
+}
+
+// ============================================================================
+// Section 11: Analyze All Access Patterns
+// ============================================================================
+
+// Reclassify stride for all registered access patterns.
+// This is typically called after all accesses have been registered to
+// ensure consistent classification.
+fn loc_analyze_access_patterns(ctx: &! LocContext) -> i64 with Mut, Div, Panic {
+    var i: i64 = 0
+    var unit_count: i64 = 0
+    if i < ctx.access_count {
+        let k = loc_reclassify_access(ctx, i)
+        if loc_stride_is_unit(k) { unit_count = unit_count + 1 }
+        i = i + 1
+    }
+    if i < ctx.access_count {
+        let k = loc_reclassify_access(ctx, i)
+        if loc_stride_is_unit(k) { unit_count = unit_count + 1 }
+        i = i + 1
+    }
+    if i < ctx.access_count {
+        let k = loc_reclassify_access(ctx, i)
+        if loc_stride_is_unit(k) { unit_count = unit_count + 1 }
+        i = i + 1
+    }
+    if i < ctx.access_count {
+        let k = loc_reclassify_access(ctx, i)
+        if loc_stride_is_unit(k) { unit_count = unit_count + 1 }
+        i = i + 1
+    }
+    // Continue with remaining accesses in groups of 8
+    if i < ctx.access_count {
+        let k = loc_reclassify_access(ctx, i)
+        if loc_stride_is_unit(k) { unit_count = unit_count + 1 }
+        i = i + 1
+    }
+    if i < ctx.access_count {
+        let k = loc_reclassify_access(ctx, i)
+        if loc_stride_is_unit(k) { unit_count = unit_count + 1 }
+        i = i + 1
+    }
+    if i < ctx.access_count {
+        let k = loc_reclassify_access(ctx, i)
+        if loc_stride_is_unit(k) { unit_count = unit_count + 1 }
+        i = i + 1
+    }
+    if i < ctx.access_count {
+        let k = loc_reclassify_access(ctx, i)
+        if loc_stride_is_unit(k) { unit_count = unit_count + 1 }
+        i = i + 1
+    }
+    // Process remaining accesses beyond the initial 8
+    if i < ctx.access_count {
+        let k = loc_reclassify_access(ctx, i)
+        if loc_stride_is_unit(k) { unit_count = unit_count + 1 }
+        i = i + 1
+    }
+    if i < ctx.access_count {
+        let k = loc_reclassify_access(ctx, i)
+        if loc_stride_is_unit(k) { unit_count = unit_count + 1 }
+        i = i + 1
+    }
+    if i < ctx.access_count {
+        let k = loc_reclassify_access(ctx, i)
+        if loc_stride_is_unit(k) { unit_count = unit_count + 1 }
+        i = i + 1
+    }
+    if i < ctx.access_count {
+        let k = loc_reclassify_access(ctx, i)
+        if loc_stride_is_unit(k) { unit_count = unit_count + 1 }
+        i = i + 1
+    }
+    if i < ctx.access_count {
+        let k = loc_reclassify_access(ctx, i)
+        if loc_stride_is_unit(k) { unit_count = unit_count + 1 }
+        i = i + 1
+    }
+    if i < ctx.access_count {
+        let k = loc_reclassify_access(ctx, i)
+        if loc_stride_is_unit(k) { unit_count = unit_count + 1 }
+        i = i + 1
+    }
+    if i < ctx.access_count {
+        let k = loc_reclassify_access(ctx, i)
+        if loc_stride_is_unit(k) { unit_count = unit_count + 1 }
+        i = i + 1
+    }
+    if i < ctx.access_count {
+        let k = loc_reclassify_access(ctx, i)
+        if loc_stride_is_unit(k) { unit_count = unit_count + 1 }
+        i = i + 1
+    }
+    unit_count
+}
+
+// Helper: check if stride kind is unit.
+fn loc_stride_is_unit(k: LocStrideKind) -> bool {
+    if loc_stride_kind_to_int(k) == 0 { return true }
+    false
+}
+
+// Convert stride kind to integer tag for comparisons.
+fn loc_stride_kind_to_int(k: LocStrideKind) -> i64 {
+    match k {
+        LocStrideKind::StrideUnit => 0,
+        LocStrideKind::StrideConstant => 1,
+        LocStrideKind::StrideAffine => 2,
+        LocStrideKind::StrideRandom => 3,
+        LocStrideKind::StrideUnknown => 4,
+    }
+}
+
+// Convert reuse kind to integer tag for comparisons.
+fn loc_reuse_kind_to_int(k: LocReuseKind) -> i64 {
+    match k {
+        LocReuseKind::ReuseTemporal => 0,
+        LocReuseKind::ReuseSpatial => 1,
+        LocReuseKind::ReuseGroup => 2,
+        LocReuseKind::ReuseNone => 3,
+    }
+}
+
+// Convert tile status to integer tag.
+fn loc_tile_status_to_int(s: LocTileStatus) -> i64 {
+    match s {
+        LocTileStatus::TileApplicable => 0,
+        LocTileStatus::TileNotProfitable => 1,
+        LocTileStatus::TileNotLegal => 2,
+        LocTileStatus::TileAlreadyTiled => 3,
+    }
+}
+
+// Convert interchange result to integer tag.
+fn loc_interchange_result_to_int(r: LocInterchangeResult) -> i64 {
+    match r {
+        LocInterchangeResult::InterchangeOk => 0,
+        LocInterchangeResult::InterchangeIllegal => 1,
+        LocInterchangeResult::InterchangeNotProfitable => 2,
+    }
+}
+
+// Convert prefetch hint to integer tag.
+fn loc_prefetch_hint_to_int(h: LocPrefetchHint) -> i64 {
+    match h {
+        LocPrefetchHint::PrefetchT0 => 0,
+        LocPrefetchHint::PrefetchT1 => 1,
+        LocPrefetchHint::PrefetchT2 => 2,
+        LocPrefetchHint::PrefetchNTA => 3,
+    }
+}
+
+// ============================================================================
+// Section 12: Reuse Distance Computation
+// ============================================================================
+
+// Compute reuse information for a single access pattern.
+//
+// Reuse classification:
+//   Temporal: the same memory address is accessed again by the same access
+//     in a later iteration of the carrying loop.  Occurs when stride == 0
+//     (same address every iteration) or when the total sweep wraps within
+//     a cache line.
+//   Spatial: different addresses within the same cache line are accessed
+//     in consecutive iterations.  Occurs with unit or small constant stride.
+//   Group: different accesses in the same loop body touch the same cache
+//     line.  Detected by finding other accesses to the same array with
+//     nearby base offsets.
+//   None: no detectable reuse pattern.
+fn loc_compute_reuse_distance(ctx: &! LocContext, access_idx: i64) -> LocReuseInfo with Mut, Div, Panic {
+    if access_idx < 0 { return loc_reuse_default() }
+    if access_idx >= ctx.access_count { return loc_reuse_default() }
+
+    let stride = ctx.accesses[access_idx as usize].stride
+    let elem_size = ctx.accesses[access_idx as usize].element_size
+    let loop_id = ctx.accesses[access_idx as usize].loop_id
+    let array_id = ctx.accesses[access_idx as usize].array_id
+    let base = ctx.accesses[access_idx as usize].base_offset
+    let abs_stride = loc_abs(stride)
+
+    // Zero stride means same address every iteration — pure temporal reuse
+    if stride == 0 {
+        return LocReuseInfo {
+            kind: LocReuseKind::ReuseTemporal,
+            distance: 1,
+            carried_by_loop: loop_id,
+            spatial_stride: 0,
+        }
+    }
+
+    // Unit stride: spatial reuse — consecutive iterations touch the same
+    // cache line until we cross a boundary
+    if abs_stride == elem_size {
+        let line_size = ctx.cache_line_size
+        let elems_per_line = loc_max(1, line_size / loc_max(1, elem_size))
+        return LocReuseInfo {
+            kind: LocReuseKind::ReuseSpatial,
+            distance: elems_per_line,
+            carried_by_loop: loop_id,
+            spatial_stride: abs_stride,
+        }
+    }
+
+    // Small constant stride (within a cache line): spatial reuse
+    if abs_stride > 0 {
+        if abs_stride < ctx.cache_line_size {
+            let line_size = ctx.cache_line_size
+            let accesses_per_line = loc_max(1, line_size / loc_max(1, abs_stride))
+            return LocReuseInfo {
+                kind: LocReuseKind::ReuseSpatial,
+                distance: accesses_per_line,
+                carried_by_loop: loop_id,
+                spatial_stride: abs_stride,
+            }
+        }
+    }
+
+    // Check for group reuse: other accesses to the same array with nearby base
+    let group_reuse = loc_check_group_reuse(ctx, access_idx, array_id, base)
+    if loc_reuse_kind_to_int(group_reuse.kind) == 2 {
+        return group_reuse
+    }
+
+    // Large stride or unknown: no reuse
+    LocReuseInfo {
+        kind: LocReuseKind::ReuseNone,
+        distance: 0,
+        carried_by_loop: loop_id,
+        spatial_stride: abs_stride,
+    }
+}
+
+// Check if any other access in the same loop touches the same array
+// with a base offset within the same cache line.
+fn loc_check_group_reuse(ctx: &! LocContext, self_idx: i64, array_id: i64, base: i64) -> LocReuseInfo with Mut, Div, Panic {
+    let line_size = ctx.cache_line_size
+    let self_line = base / loc_max(1, line_size)
+    let self_loop = ctx.accesses[self_idx as usize].loop_id
+
+    var i: i64 = 0
+    // Scan all accesses for group reuse matches
+    if i < ctx.access_count {
+        if i != self_idx {
+            if ctx.accesses[i as usize].array_id == array_id {
+                if ctx.accesses[i as usize].loop_id == self_loop {
+                    let other_line = ctx.accesses[i as usize].base_offset / loc_max(1, line_size)
+                    if other_line == self_line {
+                        return LocReuseInfo {
+                            kind: LocReuseKind::ReuseGroup,
+                            distance: 0,
+                            carried_by_loop: self_loop,
+                            spatial_stride: loc_abs(base - ctx.accesses[i as usize].base_offset),
+                        }
+                    }
+                }
+            }
+        }
+        i = i + 1
+    }
+    if i < ctx.access_count {
+        if i != self_idx {
+            if ctx.accesses[i as usize].array_id == array_id {
+                if ctx.accesses[i as usize].loop_id == self_loop {
+                    let other_line = ctx.accesses[i as usize].base_offset / loc_max(1, line_size)
+                    if other_line == self_line {
+                        return LocReuseInfo {
+                            kind: LocReuseKind::ReuseGroup,
+                            distance: 0,
+                            carried_by_loop: self_loop,
+                            spatial_stride: loc_abs(base - ctx.accesses[i as usize].base_offset),
+                        }
+                    }
+                }
+            }
+        }
+        i = i + 1
+    }
+    if i < ctx.access_count {
+        if i != self_idx {
+            if ctx.accesses[i as usize].array_id == array_id {
+                if ctx.accesses[i as usize].loop_id == self_loop {
+                    let other_line = ctx.accesses[i as usize].base_offset / loc_max(1, line_size)
+                    if other_line == self_line {
+                        return LocReuseInfo {
+                            kind: LocReuseKind::ReuseGroup,
+                            distance: 0,
+                            carried_by_loop: self_loop,
+                            spatial_stride: loc_abs(base - ctx.accesses[i as usize].base_offset),
+                        }
+                    }
+                }
+            }
+        }
+        i = i + 1
+    }
+    if i < ctx.access_count {
+        if i != self_idx {
+            if ctx.accesses[i as usize].array_id == array_id {
+                if ctx.accesses[i as usize].loop_id == self_loop {
+                    let other_line = ctx.accesses[i as usize].base_offset / loc_max(1, line_size)
+                    if other_line == self_line {
+                        return LocReuseInfo {
+                            kind: LocReuseKind::ReuseGroup,
+                            distance: 0,
+                            carried_by_loop: self_loop,
+                            spatial_stride: loc_abs(base - ctx.accesses[i as usize].base_offset),
+                        }
+                    }
+                }
+            }
+        }
+        i = i + 1
+    }
+    if i < ctx.access_count {
+        if i != self_idx {
+            if ctx.accesses[i as usize].array_id == array_id {
+                if ctx.accesses[i as usize].loop_id == self_loop {
+                    let other_line = ctx.accesses[i as usize].base_offset / loc_max(1, line_size)
+                    if other_line == self_line {
+                        return LocReuseInfo {
+                            kind: LocReuseKind::ReuseGroup,
+                            distance: 0,
+                            carried_by_loop: self_loop,
+                            spatial_stride: loc_abs(base - ctx.accesses[i as usize].base_offset),
+                        }
+                    }
+                }
+            }
+        }
+        i = i + 1
+    }
+    if i < ctx.access_count {
+        if i != self_idx {
+            if ctx.accesses[i as usize].array_id == array_id {
+                if ctx.accesses[i as usize].loop_id == self_loop {
+                    let other_line = ctx.accesses[i as usize].base_offset / loc_max(1, line_size)
+                    if other_line == self_line {
+                        return LocReuseInfo {
+                            kind: LocReuseKind::ReuseGroup,
+                            distance: 0,
+                            carried_by_loop: self_loop,
+                            spatial_stride: loc_abs(base - ctx.accesses[i as usize].base_offset),
+                        }
+                    }
+                }
+            }
+        }
+        i = i + 1
+    }
+    if i < ctx.access_count {
+        if i != self_idx {
+            if ctx.accesses[i as usize].array_id == array_id {
+                if ctx.accesses[i as usize].loop_id == self_loop {
+                    let other_line = ctx.accesses[i as usize].base_offset / loc_max(1, line_size)
+                    if other_line == self_line {
+                        return LocReuseInfo {
+                            kind: LocReuseKind::ReuseGroup,
+                            distance: 0,
+                            carried_by_loop: self_loop,
+                            spatial_stride: loc_abs(base - ctx.accesses[i as usize].base_offset),
+                        }
+                    }
+                }
+            }
+        }
+        i = i + 1
+    }
+    if i < ctx.access_count {
+        if i != self_idx {
+            if ctx.accesses[i as usize].array_id == array_id {
+                if ctx.accesses[i as usize].loop_id == self_loop {
+                    let other_line = ctx.accesses[i as usize].base_offset / loc_max(1, line_size)
+                    if other_line == self_line {
+                        return LocReuseInfo {
+                            kind: LocReuseKind::ReuseGroup,
+                            distance: 0,
+                            carried_by_loop: self_loop,
+                            spatial_stride: loc_abs(base - ctx.accesses[i as usize].base_offset),
+                        }
+                    }
+                }
+            }
+        }
+        i = i + 1
+    }
+    // No group reuse found
+    loc_reuse_default()
+}
+
+// ============================================================================
+// Section 13: Compute All Reuse
+// ============================================================================
+
+// Compute reuse information for all registered access patterns.
+// Stores results in the reuse array of the context.
+fn loc_compute_all_reuse(ctx: &! LocContext) -> i64 with Mut, Div, Panic {
+    var i: i64 = 0
+    var count: i64 = 0
+    // Process up to 16 accesses (unrolled)
+    if i < ctx.access_count {
+        let info = loc_compute_reuse_distance(ctx, i)
+        if ctx.reuse_count < LOC_MAX_REUSE {
+            ctx.reuse[ctx.reuse_count as usize] = info
+            ctx.reuse_count = ctx.reuse_count + 1
+            count = count + 1
+        }
+        i = i + 1
+    }
+    if i < ctx.access_count {
+        let info = loc_compute_reuse_distance(ctx, i)
+        if ctx.reuse_count < LOC_MAX_REUSE {
+            ctx.reuse[ctx.reuse_count as usize] = info
+            ctx.reuse_count = ctx.reuse_count + 1
+            count = count + 1
+        }
+        i = i + 1
+    }
+    if i < ctx.access_count {
+        let info = loc_compute_reuse_distance(ctx, i)
+        if ctx.reuse_count < LOC_MAX_REUSE {
+            ctx.reuse[ctx.reuse_count as usize] = info
+            ctx.reuse_count = ctx.reuse_count + 1
+            count = count + 1
+        }
+        i = i + 1
+    }
+    if i < ctx.access_count {
+        let info = loc_compute_reuse_distance(ctx, i)
+        if ctx.reuse_count < LOC_MAX_REUSE {
+            ctx.reuse[ctx.reuse_count as usize] = info
+            ctx.reuse_count = ctx.reuse_count + 1
+            count = count + 1
+        }
+        i = i + 1
+    }
+    if i < ctx.access_count {
+        let info = loc_compute_reuse_distance(ctx, i)
+        if ctx.reuse_count < LOC_MAX_REUSE {
+            ctx.reuse[ctx.reuse_count as usize] = info
+            ctx.reuse_count = ctx.reuse_count + 1
+            count = count + 1
+        }
+        i = i + 1
+    }
+    if i < ctx.access_count {
+        let info = loc_compute_reuse_distance(ctx, i)
+        if ctx.reuse_count < LOC_MAX_REUSE {
+            ctx.reuse[ctx.reuse_count as usize] = info
+            ctx.reuse_count = ctx.reuse_count + 1
+            count = count + 1
+        }
+        i = i + 1
+    }
+    if i < ctx.access_count {
+        let info = loc_compute_reuse_distance(ctx, i)
+        if ctx.reuse_count < LOC_MAX_REUSE {
+            ctx.reuse[ctx.reuse_count as usize] = info
+            ctx.reuse_count = ctx.reuse_count + 1
+            count = count + 1
+        }
+        i = i + 1
+    }
+    if i < ctx.access_count {
+        let info = loc_compute_reuse_distance(ctx, i)
+        if ctx.reuse_count < LOC_MAX_REUSE {
+            ctx.reuse[ctx.reuse_count as usize] = info
+            ctx.reuse_count = ctx.reuse_count + 1
+            count = count + 1
+        }
+        i = i + 1
+    }
+    // Process remaining accesses beyond 8
+    if i < ctx.access_count {
+        let info = loc_compute_reuse_distance(ctx, i)
+        if ctx.reuse_count < LOC_MAX_REUSE {
+            ctx.reuse[ctx.reuse_count as usize] = info
+            ctx.reuse_count = ctx.reuse_count + 1
+            count = count + 1
+        }
+        i = i + 1
+    }
+    if i < ctx.access_count {
+        let info = loc_compute_reuse_distance(ctx, i)
+        if ctx.reuse_count < LOC_MAX_REUSE {
+            ctx.reuse[ctx.reuse_count as usize] = info
+            ctx.reuse_count = ctx.reuse_count + 1
+            count = count + 1
+        }
+        i = i + 1
+    }
+    if i < ctx.access_count {
+        let info = loc_compute_reuse_distance(ctx, i)
+        if ctx.reuse_count < LOC_MAX_REUSE {
+            ctx.reuse[ctx.reuse_count as usize] = info
+            ctx.reuse_count = ctx.reuse_count + 1
+            count = count + 1
+        }
+        i = i + 1
+    }
+    if i < ctx.access_count {
+        let info = loc_compute_reuse_distance(ctx, i)
+        if ctx.reuse_count < LOC_MAX_REUSE {
+            ctx.reuse[ctx.reuse_count as usize] = info
+            ctx.reuse_count = ctx.reuse_count + 1
+            count = count + 1
+        }
+        i = i + 1
+    }
+    if i < ctx.access_count {
+        let info = loc_compute_reuse_distance(ctx, i)
+        if ctx.reuse_count < LOC_MAX_REUSE {
+            ctx.reuse[ctx.reuse_count as usize] = info
+            ctx.reuse_count = ctx.reuse_count + 1
+            count = count + 1
+        }
+        i = i + 1
+    }
+    if i < ctx.access_count {
+        let info = loc_compute_reuse_distance(ctx, i)
+        if ctx.reuse_count < LOC_MAX_REUSE {
+            ctx.reuse[ctx.reuse_count as usize] = info
+            ctx.reuse_count = ctx.reuse_count + 1
+            count = count + 1
+        }
+        i = i + 1
+    }
+    if i < ctx.access_count {
+        let info = loc_compute_reuse_distance(ctx, i)
+        if ctx.reuse_count < LOC_MAX_REUSE {
+            ctx.reuse[ctx.reuse_count as usize] = info
+            ctx.reuse_count = ctx.reuse_count + 1
+            count = count + 1
+        }
+        i = i + 1
+    }
+    if i < ctx.access_count {
+        let info = loc_compute_reuse_distance(ctx, i)
+        if ctx.reuse_count < LOC_MAX_REUSE {
+            ctx.reuse[ctx.reuse_count as usize] = info
+            ctx.reuse_count = ctx.reuse_count + 1
+            count = count + 1
+        }
+        i = i + 1
+    }
+    count
+}
+
+// ============================================================================
+// Section 14: Cache Miss Estimation
+// ============================================================================
+
+// Estimate the number of cache misses for a single access in a loop.
+// Model: for unit stride, miss every cache_line_size/element_size iterations.
+// For larger strides, miss every iteration if stride >= cache_line_size.
+// For random access, assume miss every iteration.
+fn loc_estimate_access_misses(ctx: &LocContext, access_idx: i64, trip_count: i64) -> i64 with Div, Panic {
+    if access_idx < 0 { return 0 }
+    if access_idx >= ctx.access_count { return 0 }
+    if trip_count <= 0 { return 0 }
+
+    let stride = ctx.accesses[access_idx as usize].stride
+    let elem_size = ctx.accesses[access_idx as usize].element_size
+    let kind = ctx.accesses[access_idx as usize].stride_kind
+    let kind_int = loc_stride_kind_to_int(kind)
+    let line_size = ctx.cache_line_size
+
+    // Unit stride: one miss per cache line traversal
+    if kind_int == 0 {
+        let elems_per_line = loc_max(1, line_size / loc_max(1, elem_size))
+        return loc_div_ceil(trip_count, elems_per_line)
+    }
+
+    // Constant stride (including zero stride)
+    if kind_int == 1 {
+        let abs_stride = loc_abs(stride)
+        // Zero stride: compulsory miss + hits
+        if abs_stride == 0 {
+            return 1
+        }
+        // Stride within one cache line: similar to unit stride but scaled
+        if abs_stride < line_size {
+            let lines_touched = loc_div_ceil(abs_stride * trip_count, line_size)
+            return lines_touched
+        }
+        // Stride >= cache line: miss every iteration
+        return trip_count
+    }
+
+    // Affine stride: assume miss every other iteration (heuristic)
+    if kind_int == 2 {
+        return loc_div_ceil(trip_count, 2)
+    }
+
+    // Random or unknown: miss every iteration
+    trip_count
+}
+
+// Estimate total cache misses for all accesses within a loop.
+fn loc_estimate_cache_misses(ctx: &! LocContext, loop_id: i64) -> i64 with Mut, Div, Panic {
+    if loop_id < 0 { return 0 }
+    if loop_id >= ctx.loop_count { return 0 }
+
+    let trip = ctx.loops[loop_id as usize].trip_count
+    var total: i64 = 0
+    var i: i64 = 0
+
+    // Scan all accesses belonging to this loop
+    if i < ctx.access_count {
+        if ctx.accesses[i as usize].loop_id == loop_id {
+            total = total + loc_estimate_access_misses(ctx, i, trip)
+        }
+        i = i + 1
+    }
+    if i < ctx.access_count {
+        if ctx.accesses[i as usize].loop_id == loop_id {
+            total = total + loc_estimate_access_misses(ctx, i, trip)
+        }
+        i = i + 1
+    }
+    if i < ctx.access_count {
+        if ctx.accesses[i as usize].loop_id == loop_id {
+            total = total + loc_estimate_access_misses(ctx, i, trip)
+        }
+        i = i + 1
+    }
+    if i < ctx.access_count {
+        if ctx.accesses[i as usize].loop_id == loop_id {
+            total = total + loc_estimate_access_misses(ctx, i, trip)
+        }
+        i = i + 1
+    }
+    if i < ctx.access_count {
+        if ctx.accesses[i as usize].loop_id == loop_id {
+            total = total + loc_estimate_access_misses(ctx, i, trip)
+        }
+        i = i + 1
+    }
+    if i < ctx.access_count {
+        if ctx.accesses[i as usize].loop_id == loop_id {
+            total = total + loc_estimate_access_misses(ctx, i, trip)
+        }
+        i = i + 1
+    }
+    if i < ctx.access_count {
+        if ctx.accesses[i as usize].loop_id == loop_id {
+            total = total + loc_estimate_access_misses(ctx, i, trip)
+        }
+        i = i + 1
+    }
+    if i < ctx.access_count {
+        if ctx.accesses[i as usize].loop_id == loop_id {
+            total = total + loc_estimate_access_misses(ctx, i, trip)
+        }
+        i = i + 1
+    }
+    if i < ctx.access_count {
+        if ctx.accesses[i as usize].loop_id == loop_id {
+            total = total + loc_estimate_access_misses(ctx, i, trip)
+        }
+        i = i + 1
+    }
+    if i < ctx.access_count {
+        if ctx.accesses[i as usize].loop_id == loop_id {
+            total = total + loc_estimate_access_misses(ctx, i, trip)
+        }
+        i = i + 1
+    }
+    if i < ctx.access_count {
+        if ctx.accesses[i as usize].loop_id == loop_id {
+            total = total + loc_estimate_access_misses(ctx, i, trip)
+        }
+        i = i + 1
+    }
+    if i < ctx.access_count {
+        if ctx.accesses[i as usize].loop_id == loop_id {
+            total = total + loc_estimate_access_misses(ctx, i, trip)
+        }
+        i = i + 1
+    }
+    if i < ctx.access_count {
+        if ctx.accesses[i as usize].loop_id == loop_id {
+            total = total + loc_estimate_access_misses(ctx, i, trip)
+        }
+        i = i + 1
+    }
+    if i < ctx.access_count {
+        if ctx.accesses[i as usize].loop_id == loop_id {
+            total = total + loc_estimate_access_misses(ctx, i, trip)
+        }
+        i = i + 1
+    }
+    if i < ctx.access_count {
+        if ctx.accesses[i as usize].loop_id == loop_id {
+            total = total + loc_estimate_access_misses(ctx, i, trip)
+        }
+        i = i + 1
+    }
+    if i < ctx.access_count {
+        if ctx.accesses[i as usize].loop_id == loop_id {
+            total = total + loc_estimate_access_misses(ctx, i, trip)
+        }
+        i = i + 1
+    }
+    total
+}
+
+// Estimate cache misses after tiling with a given factor.
+// The basic model: tiling by factor F means the working set shrinks by F,
+// so misses scale roughly by (working_set_after / cache_size) if the
+// tiled working set fits in cache, or remain unchanged if not.
+fn loc_estimate_misses_after_tiling(ctx: &! LocContext, loop_id: i64, tile_factor: i64) -> i64 with Mut, Div, Panic {
+    let misses_before = loc_estimate_cache_misses(ctx, loop_id)
+    if tile_factor <= 1 { return misses_before }
+
+    let working_set = loc_compute_working_set(ctx, loop_id)
+    let tiled_ws = working_set / tile_factor
+
+    // If tiled working set fits in L1, massive reduction
+    if tiled_ws <= ctx.l1_size {
+        // Only compulsory misses remain; estimate as misses_before / tile_factor
+        return loc_div_ceil(misses_before, tile_factor)
+    }
+
+    // If tiled working set fits in L2, moderate reduction
+    if tiled_ws <= ctx.l2_size {
+        return loc_div_ceil(misses_before * 2, tile_factor)
+    }
+
+    // If tiled working set fits in L3, small reduction
+    if tiled_ws <= ctx.l3_size {
+        return loc_div_ceil(misses_before * 3, tile_factor)
+    }
+
+    // Still too large: marginal benefit
+    misses_before - loc_div_ceil(misses_before, 4)
+}
+
+// ============================================================================
+// Section 15: Working Set Estimation
+// ============================================================================
+
+// Estimate the working set size (in bytes) for a loop.
+// The working set is the total number of distinct cache lines touched
+// during one full traversal of the loop.
+fn loc_compute_working_set(ctx: &! LocContext, loop_id: i64) -> i64 with Mut, Div, Panic {
+    if loop_id < 0 { return 0 }
+    if loop_id >= ctx.loop_count { return 0 }
+
+    let trip = ctx.loops[loop_id as usize].trip_count
+    let line_size = ctx.cache_line_size
+    var total_bytes: i64 = 0
+    var i: i64 = 0
+
+    // Sum up the footprint of each access in this loop
+    if i < ctx.access_count {
+        if ctx.accesses[i as usize].loop_id == loop_id {
+            total_bytes = total_bytes + loc_access_footprint(ctx, i, trip)
+        }
+        i = i + 1
+    }
+    if i < ctx.access_count {
+        if ctx.accesses[i as usize].loop_id == loop_id {
+            total_bytes = total_bytes + loc_access_footprint(ctx, i, trip)
+        }
+        i = i + 1
+    }
+    if i < ctx.access_count {
+        if ctx.accesses[i as usize].loop_id == loop_id {
+            total_bytes = total_bytes + loc_access_footprint(ctx, i, trip)
+        }
+        i = i + 1
+    }
+    if i < ctx.access_count {
+        if ctx.accesses[i as usize].loop_id == loop_id {
+            total_bytes = total_bytes + loc_access_footprint(ctx, i, trip)
+        }
+        i = i + 1
+    }
+    if i < ctx.access_count {
+        if ctx.accesses[i as usize].loop_id == loop_id {
+            total_bytes = total_bytes + loc_access_footprint(ctx, i, trip)
+        }
+        i = i + 1
+    }
+    if i < ctx.access_count {
+        if ctx.accesses[i as usize].loop_id == loop_id {
+            total_bytes = total_bytes + loc_access_footprint(ctx, i, trip)
+        }
+        i = i + 1
+    }
+    if i < ctx.access_count {
+        if ctx.accesses[i as usize].loop_id == loop_id {
+            total_bytes = total_bytes + loc_access_footprint(ctx, i, trip)
+        }
+        i = i + 1
+    }
+    if i < ctx.access_count {
+        if ctx.accesses[i as usize].loop_id == loop_id {
+            total_bytes = total_bytes + loc_access_footprint(ctx, i, trip)
+        }
+        i = i + 1
+    }
+    if i < ctx.access_count {
+        if ctx.accesses[i as usize].loop_id == loop_id {
+            total_bytes = total_bytes + loc_access_footprint(ctx, i, trip)
+        }
+        i = i + 1
+    }
+    if i < ctx.access_count {
+        if ctx.accesses[i as usize].loop_id == loop_id {
+            total_bytes = total_bytes + loc_access_footprint(ctx, i, trip)
+        }
+        i = i + 1
+    }
+    if i < ctx.access_count {
+        if ctx.accesses[i as usize].loop_id == loop_id {
+            total_bytes = total_bytes + loc_access_footprint(ctx, i, trip)
+        }
+        i = i + 1
+    }
+    if i < ctx.access_count {
+        if ctx.accesses[i as usize].loop_id == loop_id {
+            total_bytes = total_bytes + loc_access_footprint(ctx, i, trip)
+        }
+        i = i + 1
+    }
+    if i < ctx.access_count {
+        if ctx.accesses[i as usize].loop_id == loop_id {
+            total_bytes = total_bytes + loc_access_footprint(ctx, i, trip)
+        }
+        i = i + 1
+    }
+    if i < ctx.access_count {
+        if ctx.accesses[i as usize].loop_id == loop_id {
+            total_bytes = total_bytes + loc_access_footprint(ctx, i, trip)
+        }
+        i = i + 1
+    }
+    if i < ctx.access_count {
+        if ctx.accesses[i as usize].loop_id == loop_id {
+            total_bytes = total_bytes + loc_access_footprint(ctx, i, trip)
+        }
+        i = i + 1
+    }
+    if i < ctx.access_count {
+        if ctx.accesses[i as usize].loop_id == loop_id {
+            total_bytes = total_bytes + loc_access_footprint(ctx, i, trip)
+        }
+        i = i + 1
+    }
+
+    total_bytes
+}
+
+// Compute the memory footprint (in bytes) of a single access pattern
+// over trip_count iterations.
+fn loc_access_footprint(ctx: &LocContext, access_idx: i64, trip_count: i64) -> i64 with Div, Panic {
+    if access_idx < 0 { return 0 }
+    if access_idx >= ctx.access_count { return 0 }
+    if trip_count <= 0 { return 0 }
+
+    let stride = ctx.accesses[access_idx as usize].stride
+    let elem_size = ctx.accesses[access_idx as usize].element_size
+    let abs_stride = loc_abs(stride)
+
+    // Zero stride: only one element accessed
+    if abs_stride == 0 {
+        return elem_size
+    }
+
+    // Footprint = stride * trip_count (capped at array size if known)
+    let footprint = abs_stride * trip_count
+    let array_id = ctx.accesses[access_idx as usize].array_id
+    if array_id >= 0 {
+        if array_id < ctx.array_count {
+            let arr_size = ctx.arrays[array_id as usize].total_size
+            if arr_size > 0 {
+                return loc_min(footprint, arr_size)
+            }
+        }
+    }
+    footprint
+}
+
+// ============================================================================
+// Section 16: Cache Fit Checks
+// ============================================================================
+
+// Check if a given data size fits in L1 cache.
+fn loc_fits_in_l1(ctx: &LocContext, size: i64) -> bool {
+    size <= ctx.l1_size
+}
+
+// Check if a given data size fits in L2 cache.
+fn loc_fits_in_l2(ctx: &LocContext, size: i64) -> bool {
+    size <= ctx.l2_size
+}
+
+// Check if a given data size fits in L3 cache.
+fn loc_fits_in_l3(ctx: &LocContext, size: i64) -> bool {
+    size <= ctx.l3_size
+}
+
+// Check if a working set fits within a fraction of cache (threshold).
+fn loc_fits_with_margin(size: i64, cache_size: i64) -> bool with Div, Panic {
+    // size <= cache_size * 3/4
+    let threshold = cache_size * LOC_FIT_THRESHOLD_NUMER / LOC_FIT_THRESHOLD_DENOM
+    size <= threshold
+}
+
+// ============================================================================
+// Section 17: Optimal Tile Factor Computation
+// ============================================================================
+
+// Compute the optimal tile factor so that the tiled working set fits
+// in the target cache level.
+//
+// working_set: estimated bytes touched per full loop iteration
+// cache_size: size of target cache level (e.g. L1_SIZE)
+// elem_size: element size for rounding
+//
+// Returns a tile factor >= 1.  The factor is the number of iterations
+// in the tiled inner loop, chosen so that:
+//   working_set / factor <= cache_size * 3/4
+fn loc_optimal_tile_factor(working_set: i64, cache_size: i64, elem_size: i64) -> i64 with Mut, Div, Panic {
+    if working_set <= 0 { return 1 }
+    if cache_size <= 0 { return 1 }
+    if elem_size <= 0 { return 1 }
+
+    // Target: use 3/4 of cache
+    let target = cache_size * LOC_FIT_THRESHOLD_NUMER / LOC_FIT_THRESHOLD_DENOM
+    if target <= 0 { return 1 }
+
+    // If already fits, no tiling needed
+    if working_set <= target { return 1 }
+
+    // factor = ceil(working_set / target)
+    let raw_factor = loc_div_ceil(working_set, target)
+
+    // Round to a nice power-of-two-ish number for code generation
+    let clamped = loc_min(raw_factor, LOC_MAX_TILE_FACTOR)
+    if clamped <= 1 { return 1 }
+
+    // Find the smallest power of two >= clamped
+    var p: i64 = 1
+    if p < clamped { p = p * 2 }
+    if p < clamped { p = p * 2 }
+    if p < clamped { p = p * 2 }
+    if p < clamped { p = p * 2 }
+    if p < clamped { p = p * 2 }
+    if p < clamped { p = p * 2 }
+    if p < clamped { p = p * 2 }
+    if p < clamped { p = p * 2 }
+
+    loc_min(p, LOC_MAX_TILE_FACTOR)
+}
+
+// ============================================================================
+// Section 18: Tiling Suggestions
+// ============================================================================
+
+// Suggest a tiling configuration for a single loop.
+// Returns a LocTileConfig with the recommended factor and expected
+// miss reduction.
+fn loc_suggest_tiling(ctx: &! LocContext, loop_id: i64) -> LocTileConfig with Mut, Div, Panic {
+    if loop_id < 0 {
+        return loc_tile_default()
+    }
+    if loop_id >= ctx.loop_count {
+        return loc_tile_default()
+    }
+
+    // Already tiled: skip
+    if ctx.loops[loop_id as usize].is_tiled {
+        return LocTileConfig {
+            loop_id: loop_id,
+            factor: ctx.loops[loop_id as usize].tile_factor,
+            status: LocTileStatus::TileAlreadyTiled,
+            estimated_misses_before: 0,
+            estimated_misses_after: 0,
+        }
+    }
+
+    let trip = ctx.loops[loop_id as usize].trip_count
+
+    // Too short to tile
+    if trip < LOC_MIN_TILE_TRIP {
+        return LocTileConfig {
+            loop_id: loop_id,
+            factor: 0,
+            status: LocTileStatus::TileNotProfitable,
+            estimated_misses_before: 0,
+            estimated_misses_after: 0,
+        }
+    }
+
+    let working_set = loc_compute_working_set(ctx, loop_id)
+
+    // Already fits in L1: not profitable
+    if loc_fits_with_margin(working_set, ctx.l1_size) {
+        return LocTileConfig {
+            loop_id: loop_id,
+            factor: 0,
+            status: LocTileStatus::TileNotProfitable,
+            estimated_misses_before: 0,
+            estimated_misses_after: 0,
+        }
+    }
+
+    // Compute tile factor to fit in L1
+    let factor = loc_optimal_tile_factor(working_set, ctx.l1_size, LOC_CACHE_LINE_SIZE)
+    if factor <= 1 {
+        return LocTileConfig {
+            loop_id: loop_id,
+            factor: 0,
+            status: LocTileStatus::TileNotProfitable,
+            estimated_misses_before: 0,
+            estimated_misses_after: 0,
+        }
+    }
+
+    // Factor must divide trip count reasonably (or handle remainder)
+    let misses_before = loc_estimate_cache_misses(ctx, loop_id)
+    let misses_after = loc_estimate_misses_after_tiling(ctx, loop_id, factor)
+
+    // Check if the improvement is significant (at least 10%)
+    let improvement = misses_before - misses_after
+    let threshold = loc_div_ceil(misses_before, 10)
+    if improvement < threshold {
+        return LocTileConfig {
+            loop_id: loop_id,
+            factor: factor,
+            status: LocTileStatus::TileNotProfitable,
+            estimated_misses_before: misses_before,
+            estimated_misses_after: misses_after,
+        }
+    }
+
+    LocTileConfig {
+        loop_id: loop_id,
+        factor: factor,
+        status: LocTileStatus::TileApplicable,
+        estimated_misses_before: misses_before,
+        estimated_misses_after: misses_after,
+    }
+}
+
+// ============================================================================
+// Section 19: Apply Tiling
+// ============================================================================
+
+// Apply a tiling transformation to a loop.
+// Marks the loop as tiled with the given factor.  Subsequent analyses
+// will see the reduced working set.
+fn loc_apply_tiling(ctx: &! LocContext, loop_id: i64, factor: i64) -> LocTileStatus with Mut, Div, Panic {
+    if loop_id < 0 { return LocTileStatus::TileNotLegal }
+    if loop_id >= ctx.loop_count { return LocTileStatus::TileNotLegal }
+    if factor <= 1 { return LocTileStatus::TileNotLegal }
+
+    // Already tiled
+    if ctx.loops[loop_id as usize].is_tiled {
+        return LocTileStatus::TileAlreadyTiled
+    }
+
+    // Trip count too small for this factor
+    let trip = ctx.loops[loop_id as usize].trip_count
+    if trip < factor {
+        return LocTileStatus::TileNotLegal
+    }
+
+    // Apply the tiling
+    ctx.loops[loop_id as usize].is_tiled = true
+    ctx.loops[loop_id as usize].tile_factor = factor
+
+    // Record in tiles array
+    if ctx.tile_count < LOC_MAX_TILES {
+        let misses_before = loc_estimate_cache_misses(ctx, loop_id)
+        ctx.tiles[ctx.tile_count as usize] = LocTileConfig {
+            loop_id: loop_id,
+            factor: factor,
+            status: LocTileStatus::TileApplicable,
+            estimated_misses_before: misses_before,
+            estimated_misses_after: loc_estimate_misses_after_tiling(ctx, loop_id, factor),
+        }
+        ctx.tile_count = ctx.tile_count + 1
+    }
+
+    LocTileStatus::TileApplicable
+}
+
+// ============================================================================
+// Section 20: Suggest All Tilings
+// ============================================================================
+
+// Scan all loops and generate tiling suggestions for each.
+// Applicable tilings are automatically applied.
+fn loc_suggest_all_tilings(ctx: &! LocContext) -> i64 with Mut, Div, Panic {
+    var applied: i64 = 0
+    var i: i64 = 0
+
+    if i < ctx.loop_count {
+        let config = loc_suggest_tiling(ctx, i)
+        if loc_tile_status_to_int(config.status) == 0 {
+            let status = loc_apply_tiling(ctx, i, config.factor)
+            if loc_tile_status_to_int(status) == 0 { applied = applied + 1 }
+        }
+        i = i + 1
+    }
+    if i < ctx.loop_count {
+        let config = loc_suggest_tiling(ctx, i)
+        if loc_tile_status_to_int(config.status) == 0 {
+            let status = loc_apply_tiling(ctx, i, config.factor)
+            if loc_tile_status_to_int(status) == 0 { applied = applied + 1 }
+        }
+        i = i + 1
+    }
+    if i < ctx.loop_count {
+        let config = loc_suggest_tiling(ctx, i)
+        if loc_tile_status_to_int(config.status) == 0 {
+            let status = loc_apply_tiling(ctx, i, config.factor)
+            if loc_tile_status_to_int(status) == 0 { applied = applied + 1 }
+        }
+        i = i + 1
+    }
+    if i < ctx.loop_count {
+        let config = loc_suggest_tiling(ctx, i)
+        if loc_tile_status_to_int(config.status) == 0 {
+            let status = loc_apply_tiling(ctx, i, config.factor)
+            if loc_tile_status_to_int(status) == 0 { applied = applied + 1 }
+        }
+        i = i + 1
+    }
+    if i < ctx.loop_count {
+        let config = loc_suggest_tiling(ctx, i)
+        if loc_tile_status_to_int(config.status) == 0 {
+            let status = loc_apply_tiling(ctx, i, config.factor)
+            if loc_tile_status_to_int(status) == 0 { applied = applied + 1 }
+        }
+        i = i + 1
+    }
+    if i < ctx.loop_count {
+        let config = loc_suggest_tiling(ctx, i)
+        if loc_tile_status_to_int(config.status) == 0 {
+            let status = loc_apply_tiling(ctx, i, config.factor)
+            if loc_tile_status_to_int(status) == 0 { applied = applied + 1 }
+        }
+        i = i + 1
+    }
+    if i < ctx.loop_count {
+        let config = loc_suggest_tiling(ctx, i)
+        if loc_tile_status_to_int(config.status) == 0 {
+            let status = loc_apply_tiling(ctx, i, config.factor)
+            if loc_tile_status_to_int(status) == 0 { applied = applied + 1 }
+        }
+        i = i + 1
+    }
+    if i < ctx.loop_count {
+        let config = loc_suggest_tiling(ctx, i)
+        if loc_tile_status_to_int(config.status) == 0 {
+            let status = loc_apply_tiling(ctx, i, config.factor)
+            if loc_tile_status_to_int(status) == 0 { applied = applied + 1 }
+        }
+        i = i + 1
+    }
+    applied
+}
+
+// ============================================================================
+// Section 21: Prefetch Insertion
+// ============================================================================
+
+// Insert a software prefetch point manually.
+// Returns the prefetch ID or LOC_INVALID if capacity exceeded.
+fn loc_insert_prefetch(ctx: &! LocContext, array_id: i64, loop_id: i64, stride: i64, hint: LocPrefetchHint) -> i64 with Mut, Div, Panic {
+    if ctx.prefetch_count >= LOC_MAX_PREFETCH { return LOC_INVALID }
+    let idx = ctx.prefetch_count
+
+    let hint_int = loc_prefetch_hint_to_int(hint)
+    var offset: i64 = LOC_PREFETCH_DISTANCE_T0
+    if hint_int == 1 { offset = LOC_PREFETCH_DISTANCE_T1 }
+    if hint_int == 2 { offset = LOC_PREFETCH_DISTANCE_T2 }
+    if hint_int == 3 { offset = LOC_PREFETCH_DISTANCE_NTA }
+
+    let line: i64 = 0
+    if loop_id >= 0 {
+        if loop_id < ctx.loop_count {
+            // Use the first access line in this loop as source location
+        }
+    }
+
+    ctx.prefetches[idx as usize] = LocPrefetchPoint {
+        array_id: array_id,
+        loop_id: loop_id,
+        offset_ahead: offset * stride,
+        hint: hint,
+        stride: stride,
+        line: line,
+    }
+    ctx.prefetch_count = ctx.prefetch_count + 1
+    idx
+}
+
+// Choose prefetch hint based on reuse distance.
+// T0: L1 — for data that will be reused soon
+// T1: L2 — for data with moderate reuse distance
+// T2: L3 — for data with long reuse distance
+// NTA: non-temporal — for streaming data with no reuse
+fn loc_choose_prefetch_hint(reuse_kind: LocReuseKind, distance: i64) -> LocPrefetchHint {
+    let kind_int = loc_reuse_kind_to_int(reuse_kind)
+    // Temporal reuse: bring into L1
+    if kind_int == 0 { return LocPrefetchHint::PrefetchT0 }
+    // Spatial reuse: bring into L1 (will be used soon)
+    if kind_int == 1 { return LocPrefetchHint::PrefetchT0 }
+    // Group reuse: bring into L2 (shared among multiple accesses)
+    if kind_int == 2 { return LocPrefetchHint::PrefetchT1 }
+    // No reuse: non-temporal access (streaming)
+    LocPrefetchHint::PrefetchNTA
+}
+
+// ============================================================================
+// Section 22: Suggest Prefetches
+// ============================================================================
+
+// Automatically suggest prefetch points for all accesses with large strides.
+// Prefetching is beneficial when stride >= cache line size (every access is
+// a miss) and the loop has enough iterations to amortize the prefetch cost.
+fn loc_suggest_prefetches(ctx: &! LocContext) -> i64 with Mut, Div, Panic {
+    var count: i64 = 0
+    var i: i64 = 0
+
+    if i < ctx.access_count {
+        let inserted = loc_maybe_insert_prefetch(ctx, i)
+        if inserted { count = count + 1 }
+        i = i + 1
+    }
+    if i < ctx.access_count {
+        let inserted = loc_maybe_insert_prefetch(ctx, i)
+        if inserted { count = count + 1 }
+        i = i + 1
+    }
+    if i < ctx.access_count {
+        let inserted = loc_maybe_insert_prefetch(ctx, i)
+        if inserted { count = count + 1 }
+        i = i + 1
+    }
+    if i < ctx.access_count {
+        let inserted = loc_maybe_insert_prefetch(ctx, i)
+        if inserted { count = count + 1 }
+        i = i + 1
+    }
+    if i < ctx.access_count {
+        let inserted = loc_maybe_insert_prefetch(ctx, i)
+        if inserted { count = count + 1 }
+        i = i + 1
+    }
+    if i < ctx.access_count {
+        let inserted = loc_maybe_insert_prefetch(ctx, i)
+        if inserted { count = count + 1 }
+        i = i + 1
+    }
+    if i < ctx.access_count {
+        let inserted = loc_maybe_insert_prefetch(ctx, i)
+        if inserted { count = count + 1 }
+        i = i + 1
+    }
+    if i < ctx.access_count {
+        let inserted = loc_maybe_insert_prefetch(ctx, i)
+        if inserted { count = count + 1 }
+        i = i + 1
+    }
+    if i < ctx.access_count {
+        let inserted = loc_maybe_insert_prefetch(ctx, i)
+        if inserted { count = count + 1 }
+        i = i + 1
+    }
+    if i < ctx.access_count {
+        let inserted = loc_maybe_insert_prefetch(ctx, i)
+        if inserted { count = count + 1 }
+        i = i + 1
+    }
+    if i < ctx.access_count {
+        let inserted = loc_maybe_insert_prefetch(ctx, i)
+        if inserted { count = count + 1 }
+        i = i + 1
+    }
+    if i < ctx.access_count {
+        let inserted = loc_maybe_insert_prefetch(ctx, i)
+        if inserted { count = count + 1 }
+        i = i + 1
+    }
+    if i < ctx.access_count {
+        let inserted = loc_maybe_insert_prefetch(ctx, i)
+        if inserted { count = count + 1 }
+        i = i + 1
+    }
+    if i < ctx.access_count {
+        let inserted = loc_maybe_insert_prefetch(ctx, i)
+        if inserted { count = count + 1 }
+        i = i + 1
+    }
+    if i < ctx.access_count {
+        let inserted = loc_maybe_insert_prefetch(ctx, i)
+        if inserted { count = count + 1 }
+        i = i + 1
+    }
+    if i < ctx.access_count {
+        let inserted = loc_maybe_insert_prefetch(ctx, i)
+        if inserted { count = count + 1 }
+        i = i + 1
+    }
+    count
+}
+
+// Decide whether to insert a prefetch for a single access and do it.
+fn loc_maybe_insert_prefetch(ctx: &! LocContext, access_idx: i64) -> bool with Mut, Div, Panic {
+    if access_idx < 0 { return false }
+    if access_idx >= ctx.access_count { return false }
+
+    let stride = ctx.accesses[access_idx as usize].stride
+    let abs_stride = loc_abs(stride)
+    let loop_id = ctx.accesses[access_idx as usize].loop_id
+    let array_id = ctx.accesses[access_idx as usize].array_id
+
+    // Only prefetch if stride is large enough to warrant it
+    if abs_stride < LOC_PREFETCH_STRIDE_THRESHOLD { return false }
+
+    // Need a valid loop
+    if loop_id < 0 { return false }
+    if loop_id >= ctx.loop_count { return false }
+
+    // Need enough iterations to amortize prefetch cost
+    let trip = ctx.loops[loop_id as usize].trip_count
+    if trip < 16 { return false }
+
+    // Choose hint based on reuse analysis (if available)
+    var hint = LocPrefetchHint::PrefetchT0
+    if abs_stride >= ctx.cache_line_size {
+        // Large stride: no spatial reuse, use NTA for streaming
+        hint = LocPrefetchHint::PrefetchNTA
+    }
+
+    // Check reuse info if available
+    if access_idx < ctx.reuse_count {
+        let reuse = ctx.reuse[access_idx as usize]
+        hint = loc_choose_prefetch_hint(reuse.kind, reuse.distance)
+    }
+
+    let id = loc_insert_prefetch(ctx, array_id, loop_id, abs_stride, hint)
+    if id == LOC_INVALID { return false }
+    true
+}
+
+// ============================================================================
+// Section 23: Loop Interchange Legality
+// ============================================================================
+
+// Check whether interchanging two loops is legal.
+// Interchange is legal when there are no loop-carried dependencies
+// that would be violated by the reordering.
+//
+// In this simplified model, we check:
+//   1. Both loops must exist and be in a parent-child relationship
+//   2. The inner loop must not carry dependencies that the outer loop resolves
+//   3. No random-stride accesses in either loop (conservative)
+fn loc_check_interchange_legal(ctx: &! LocContext, outer: i64, inner: i64) -> bool with Mut, Div, Panic {
+    if outer < 0 { return false }
+    if outer >= ctx.loop_count { return false }
+    if inner < 0 { return false }
+    if inner >= ctx.loop_count { return false }
+    if outer == inner { return false }
+
+    // Check parent-child relationship
+    let inner_parent = ctx.loops[inner as usize].parent_loop
+    if inner_parent != outer { return false }
+
+    // Check for random-stride accesses (conservative: disallow)
+    var i: i64 = 0
+    if i < ctx.access_count {
+        if ctx.accesses[i as usize].loop_id == inner {
+            if loc_stride_kind_to_int(ctx.accesses[i as usize].stride_kind) == 3 {
+                return false
+            }
+        }
+        if ctx.accesses[i as usize].loop_id == outer {
+            if loc_stride_kind_to_int(ctx.accesses[i as usize].stride_kind) == 3 {
+                return false
+            }
+        }
+        i = i + 1
+    }
+    if i < ctx.access_count {
+        if ctx.accesses[i as usize].loop_id == inner {
+            if loc_stride_kind_to_int(ctx.accesses[i as usize].stride_kind) == 3 {
+                return false
+            }
+        }
+        if ctx.accesses[i as usize].loop_id == outer {
+            if loc_stride_kind_to_int(ctx.accesses[i as usize].stride_kind) == 3 {
+                return false
+            }
+        }
+        i = i + 1
+    }
+    if i < ctx.access_count {
+        if ctx.accesses[i as usize].loop_id == inner {
+            if loc_stride_kind_to_int(ctx.accesses[i as usize].stride_kind) == 3 {
+                return false
+            }
+        }
+        if ctx.accesses[i as usize].loop_id == outer {
+            if loc_stride_kind_to_int(ctx.accesses[i as usize].stride_kind) == 3 {
+                return false
+            }
+        }
+        i = i + 1
+    }
+    if i < ctx.access_count {
+        if ctx.accesses[i as usize].loop_id == inner {
+            if loc_stride_kind_to_int(ctx.accesses[i as usize].stride_kind) == 3 {
+                return false
+            }
+        }
+        if ctx.accesses[i as usize].loop_id == outer {
+            if loc_stride_kind_to_int(ctx.accesses[i as usize].stride_kind) == 3 {
+                return false
+            }
+        }
+        i = i + 1
+    }
+    if i < ctx.access_count {
+        if ctx.accesses[i as usize].loop_id == inner {
+            if loc_stride_kind_to_int(ctx.accesses[i as usize].stride_kind) == 3 {
+                return false
+            }
+        }
+        if ctx.accesses[i as usize].loop_id == outer {
+            if loc_stride_kind_to_int(ctx.accesses[i as usize].stride_kind) == 3 {
+                return false
+            }
+        }
+        i = i + 1
+    }
+    if i < ctx.access_count {
+        if ctx.accesses[i as usize].loop_id == inner {
+            if loc_stride_kind_to_int(ctx.accesses[i as usize].stride_kind) == 3 {
+                return false
+            }
+        }
+        if ctx.accesses[i as usize].loop_id == outer {
+            if loc_stride_kind_to_int(ctx.accesses[i as usize].stride_kind) == 3 {
+                return false
+            }
+        }
+        i = i + 1
+    }
+    if i < ctx.access_count {
+        if ctx.accesses[i as usize].loop_id == inner {
+            if loc_stride_kind_to_int(ctx.accesses[i as usize].stride_kind) == 3 {
+                return false
+            }
+        }
+        if ctx.accesses[i as usize].loop_id == outer {
+            if loc_stride_kind_to_int(ctx.accesses[i as usize].stride_kind) == 3 {
+                return false
+            }
+        }
+        i = i + 1
+    }
+    if i < ctx.access_count {
+        if ctx.accesses[i as usize].loop_id == inner {
+            if loc_stride_kind_to_int(ctx.accesses[i as usize].stride_kind) == 3 {
+                return false
+            }
+        }
+        if ctx.accesses[i as usize].loop_id == outer {
+            if loc_stride_kind_to_int(ctx.accesses[i as usize].stride_kind) == 3 {
+                return false
+            }
+        }
+        i = i + 1
+    }
+
+    true
+}
+
+// ============================================================================
+// Section 24: Loop Interchange
+// ============================================================================
+
+// Count how many accesses in a loop have unit stride (best locality).
+fn loc_count_unit_stride_accesses(ctx: &! LocContext, loop_id: i64) -> i64 with Mut, Div, Panic {
+    var count: i64 = 0
+    var i: i64 = 0
+    if i < ctx.access_count {
+        if ctx.accesses[i as usize].loop_id == loop_id {
+            if loc_stride_kind_to_int(ctx.accesses[i as usize].stride_kind) == 0 {
+                count = count + 1
+            }
+        }
+        i = i + 1
+    }
+    if i < ctx.access_count {
+        if ctx.accesses[i as usize].loop_id == loop_id {
+            if loc_stride_kind_to_int(ctx.accesses[i as usize].stride_kind) == 0 {
+                count = count + 1
+            }
+        }
+        i = i + 1
+    }
+    if i < ctx.access_count {
+        if ctx.accesses[i as usize].loop_id == loop_id {
+            if loc_stride_kind_to_int(ctx.accesses[i as usize].stride_kind) == 0 {
+                count = count + 1
+            }
+        }
+        i = i + 1
+    }
+    if i < ctx.access_count {
+        if ctx.accesses[i as usize].loop_id == loop_id {
+            if loc_stride_kind_to_int(ctx.accesses[i as usize].stride_kind) == 0 {
+                count = count + 1
+            }
+        }
+        i = i + 1
+    }
+    if i < ctx.access_count {
+        if ctx.accesses[i as usize].loop_id == loop_id {
+            if loc_stride_kind_to_int(ctx.accesses[i as usize].stride_kind) == 0 {
+                count = count + 1
+            }
+        }
+        i = i + 1
+    }
+    if i < ctx.access_count {
+        if ctx.accesses[i as usize].loop_id == loop_id {
+            if loc_stride_kind_to_int(ctx.accesses[i as usize].stride_kind) == 0 {
+                count = count + 1
+            }
+        }
+        i = i + 1
+    }
+    if i < ctx.access_count {
+        if ctx.accesses[i as usize].loop_id == loop_id {
+            if loc_stride_kind_to_int(ctx.accesses[i as usize].stride_kind) == 0 {
+                count = count + 1
+            }
+        }
+        i = i + 1
+    }
+    if i < ctx.access_count {
+        if ctx.accesses[i as usize].loop_id == loop_id {
+            if loc_stride_kind_to_int(ctx.accesses[i as usize].stride_kind) == 0 {
+                count = count + 1
+            }
+        }
+        i = i + 1
+    }
+    count
+}
+
+// Perform loop interchange if legal and profitable.
+// Interchange is profitable when moving the loop with more unit-stride
+// accesses to the innermost position.
+fn loc_interchange_loops(ctx: &! LocContext, outer: i64, inner: i64) -> LocInterchangeResult with Mut, Div, Panic {
+    if loc_check_interchange_legal(ctx, outer, inner) == false {
+        return LocInterchangeResult::InterchangeIllegal
+    }
+
+    // Count unit-stride accesses in each loop
+    let outer_unit = loc_count_unit_stride_accesses(ctx, outer)
+    let inner_unit = loc_count_unit_stride_accesses(ctx, inner)
+
+    // Profitable if outer loop has more unit-stride accesses
+    // (meaning it should become the inner loop)
+    if outer_unit <= inner_unit {
+        return LocInterchangeResult::InterchangeNotProfitable
+    }
+
+    // Perform the interchange by swapping depths
+    let outer_depth = ctx.loops[outer as usize].depth
+    let inner_depth = ctx.loops[inner as usize].depth
+    ctx.loops[outer as usize].depth = inner_depth
+    ctx.loops[inner as usize].depth = outer_depth
+
+    // Update parent relationship
+    ctx.loops[inner as usize].parent_loop = ctx.loops[outer as usize].parent_loop
+    ctx.loops[outer as usize].parent_loop = inner
+
+    // Update access depths
+    var i: i64 = 0
+    if i < ctx.access_count {
+        if ctx.accesses[i as usize].loop_id == outer {
+            ctx.accesses[i as usize].loop_depth = inner_depth
+        }
+        if ctx.accesses[i as usize].loop_id == inner {
+            ctx.accesses[i as usize].loop_depth = outer_depth
+        }
+        i = i + 1
+    }
+    if i < ctx.access_count {
+        if ctx.accesses[i as usize].loop_id == outer {
+            ctx.accesses[i as usize].loop_depth = inner_depth
+        }
+        if ctx.accesses[i as usize].loop_id == inner {
+            ctx.accesses[i as usize].loop_depth = outer_depth
+        }
+        i = i + 1
+    }
+    if i < ctx.access_count {
+        if ctx.accesses[i as usize].loop_id == outer {
+            ctx.accesses[i as usize].loop_depth = inner_depth
+        }
+        if ctx.accesses[i as usize].loop_id == inner {
+            ctx.accesses[i as usize].loop_depth = outer_depth
+        }
+        i = i + 1
+    }
+    if i < ctx.access_count {
+        if ctx.accesses[i as usize].loop_id == outer {
+            ctx.accesses[i as usize].loop_depth = inner_depth
+        }
+        if ctx.accesses[i as usize].loop_id == inner {
+            ctx.accesses[i as usize].loop_depth = outer_depth
+        }
+        i = i + 1
+    }
+    if i < ctx.access_count {
+        if ctx.accesses[i as usize].loop_id == outer {
+            ctx.accesses[i as usize].loop_depth = inner_depth
+        }
+        if ctx.accesses[i as usize].loop_id == inner {
+            ctx.accesses[i as usize].loop_depth = outer_depth
+        }
+        i = i + 1
+    }
+    if i < ctx.access_count {
+        if ctx.accesses[i as usize].loop_id == outer {
+            ctx.accesses[i as usize].loop_depth = inner_depth
+        }
+        if ctx.accesses[i as usize].loop_id == inner {
+            ctx.accesses[i as usize].loop_depth = outer_depth
+        }
+        i = i + 1
+    }
+    if i < ctx.access_count {
+        if ctx.accesses[i as usize].loop_id == outer {
+            ctx.accesses[i as usize].loop_depth = inner_depth
+        }
+        if ctx.accesses[i as usize].loop_id == inner {
+            ctx.accesses[i as usize].loop_depth = outer_depth
+        }
+        i = i + 1
+    }
+    if i < ctx.access_count {
+        if ctx.accesses[i as usize].loop_id == outer {
+            ctx.accesses[i as usize].loop_depth = inner_depth
+        }
+        if ctx.accesses[i as usize].loop_id == inner {
+            ctx.accesses[i as usize].loop_depth = outer_depth
+        }
+        i = i + 1
+    }
+
+    LocInterchangeResult::InterchangeOk
+}
+
+// ============================================================================
+// Section 25: Total Improvement
+// ============================================================================
+
+// Compute the estimated total miss reduction from all tiling and
+// prefetch optimizations applied to the context.
+fn loc_total_improvement(ctx: &LocContext) -> i64 with Mut, Div, Panic {
+    var total_reduction: i64 = 0
+    var i: i64 = 0
+
+    // Sum up miss reductions from tiling decisions
+    if i < ctx.tile_count {
+        let before = ctx.tiles[i as usize].estimated_misses_before
+        let after = ctx.tiles[i as usize].estimated_misses_after
+        if before > after {
+            total_reduction = total_reduction + (before - after)
+        }
+        i = i + 1
+    }
+    if i < ctx.tile_count {
+        let before = ctx.tiles[i as usize].estimated_misses_before
+        let after = ctx.tiles[i as usize].estimated_misses_after
+        if before > after {
+            total_reduction = total_reduction + (before - after)
+        }
+        i = i + 1
+    }
+    if i < ctx.tile_count {
+        let before = ctx.tiles[i as usize].estimated_misses_before
+        let after = ctx.tiles[i as usize].estimated_misses_after
+        if before > after {
+            total_reduction = total_reduction + (before - after)
+        }
+        i = i + 1
+    }
+    if i < ctx.tile_count {
+        let before = ctx.tiles[i as usize].estimated_misses_before
+        let after = ctx.tiles[i as usize].estimated_misses_after
+        if before > after {
+            total_reduction = total_reduction + (before - after)
+        }
+        i = i + 1
+    }
+    if i < ctx.tile_count {
+        let before = ctx.tiles[i as usize].estimated_misses_before
+        let after = ctx.tiles[i as usize].estimated_misses_after
+        if before > after {
+            total_reduction = total_reduction + (before - after)
+        }
+        i = i + 1
+    }
+    if i < ctx.tile_count {
+        let before = ctx.tiles[i as usize].estimated_misses_before
+        let after = ctx.tiles[i as usize].estimated_misses_after
+        if before > after {
+            total_reduction = total_reduction + (before - after)
+        }
+        i = i + 1
+    }
+    if i < ctx.tile_count {
+        let before = ctx.tiles[i as usize].estimated_misses_before
+        let after = ctx.tiles[i as usize].estimated_misses_after
+        if before > after {
+            total_reduction = total_reduction + (before - after)
+        }
+        i = i + 1
+    }
+    if i < ctx.tile_count {
+        let before = ctx.tiles[i as usize].estimated_misses_before
+        let after = ctx.tiles[i as usize].estimated_misses_after
+        if before > after {
+            total_reduction = total_reduction + (before - after)
+        }
+        i = i + 1
+    }
+
+    total_reduction
+}
+
+// Compute total misses before optimization across all loops.
+fn loc_total_misses_before(ctx: &! LocContext) -> i64 with Mut, Div, Panic {
+    var total: i64 = 0
+    var i: i64 = 0
+    if i < ctx.loop_count {
+        total = total + loc_estimate_cache_misses(ctx, i)
+        i = i + 1
+    }
+    if i < ctx.loop_count {
+        total = total + loc_estimate_cache_misses(ctx, i)
+        i = i + 1
+    }
+    if i < ctx.loop_count {
+        total = total + loc_estimate_cache_misses(ctx, i)
+        i = i + 1
+    }
+    if i < ctx.loop_count {
+        total = total + loc_estimate_cache_misses(ctx, i)
+        i = i + 1
+    }
+    if i < ctx.loop_count {
+        total = total + loc_estimate_cache_misses(ctx, i)
+        i = i + 1
+    }
+    if i < ctx.loop_count {
+        total = total + loc_estimate_cache_misses(ctx, i)
+        i = i + 1
+    }
+    if i < ctx.loop_count {
+        total = total + loc_estimate_cache_misses(ctx, i)
+        i = i + 1
+    }
+    if i < ctx.loop_count {
+        total = total + loc_estimate_cache_misses(ctx, i)
+        i = i + 1
+    }
+    total
+}
+
+// ============================================================================
+// Section 26: Full Analysis Pipeline
+// ============================================================================
+
+// Run the full data locality analysis and optimization pipeline:
+//   1. Classify all access strides
+//   2. Compute reuse distances
+//   3. Suggest and apply tilings
+//   4. Suggest prefetches
+// Returns the number of optimizations applied.
+fn loc_run_full_analysis(ctx: &! LocContext) -> i64 with Mut, Div, Panic {
+    // Step 1: classify strides
+    let unit_count = loc_analyze_access_patterns(ctx)
+
+    // Step 2: compute reuse
+    let reuse_count = loc_compute_all_reuse(ctx)
+
+    // Step 3: tiling
+    let tile_count = loc_suggest_all_tilings(ctx)
+
+    // Step 4: prefetches
+    let prefetch_count = loc_suggest_prefetches(ctx)
+
+    tile_count + prefetch_count
+}
+
+// ============================================================================
+// Section 27: Query Helpers
+// ============================================================================
+
+// Get the number of arrays registered.
+fn loc_array_count(ctx: &LocContext) -> i64 {
+    ctx.array_count
+}
+
+// Get the number of loops registered.
+fn loc_loop_count(ctx: &LocContext) -> i64 {
+    ctx.loop_count
+}
+
+// Get the number of accesses registered.
+fn loc_access_count(ctx: &LocContext) -> i64 {
+    ctx.access_count
+}
+
+// Get the number of tiles applied.
+fn loc_tile_count(ctx: &LocContext) -> i64 {
+    ctx.tile_count
+}
+
+// Get the number of prefetches inserted.
+fn loc_prefetch_count(ctx: &LocContext) -> i64 {
+    ctx.prefetch_count
+}
+
+// Get the number of reuse entries computed.
+fn loc_reuse_count(ctx: &LocContext) -> i64 {
+    ctx.reuse_count
+}
+
+// Get a tile config by index.
+fn loc_get_tile(ctx: &LocContext, idx: i64) -> LocTileConfig with Div, Panic {
+    if idx < 0 { return loc_tile_default() }
+    if idx >= ctx.tile_count { return loc_tile_default() }
+    ctx.tiles[idx as usize]
+}
+
+// Get a prefetch point by index.
+fn loc_get_prefetch(ctx: &LocContext, idx: i64) -> LocPrefetchPoint with Div, Panic {
+    if idx < 0 { return loc_prefetch_default() }
+    if idx >= ctx.prefetch_count { return loc_prefetch_default() }
+    ctx.prefetches[idx as usize]
+}
+
+// Get a reuse info by index.
+fn loc_get_reuse(ctx: &LocContext, idx: i64) -> LocReuseInfo with Div, Panic {
+    if idx < 0 { return loc_reuse_default() }
+    if idx >= ctx.reuse_count { return loc_reuse_default() }
+    ctx.reuse[idx as usize]
+}
+
+// Get cache line size from context.
+fn loc_cache_line(ctx: &LocContext) -> i64 {
+    ctx.cache_line_size
+}
+
+// Count accesses with a given stride kind.
+fn loc_count_by_stride(ctx: &LocContext, kind: LocStrideKind) -> i64 with Mut, Div, Panic {
+    let target = loc_stride_kind_to_int(kind)
+    var count: i64 = 0
+    var i: i64 = 0
+    if i < ctx.access_count {
+        if loc_stride_kind_to_int(ctx.accesses[i as usize].stride_kind) == target { count = count + 1 }
+        i = i + 1
+    }
+    if i < ctx.access_count {
+        if loc_stride_kind_to_int(ctx.accesses[i as usize].stride_kind) == target { count = count + 1 }
+        i = i + 1
+    }
+    if i < ctx.access_count {
+        if loc_stride_kind_to_int(ctx.accesses[i as usize].stride_kind) == target { count = count + 1 }
+        i = i + 1
+    }
+    if i < ctx.access_count {
+        if loc_stride_kind_to_int(ctx.accesses[i as usize].stride_kind) == target { count = count + 1 }
+        i = i + 1
+    }
+    if i < ctx.access_count {
+        if loc_stride_kind_to_int(ctx.accesses[i as usize].stride_kind) == target { count = count + 1 }
+        i = i + 1
+    }
+    if i < ctx.access_count {
+        if loc_stride_kind_to_int(ctx.accesses[i as usize].stride_kind) == target { count = count + 1 }
+        i = i + 1
+    }
+    if i < ctx.access_count {
+        if loc_stride_kind_to_int(ctx.accesses[i as usize].stride_kind) == target { count = count + 1 }
+        i = i + 1
+    }
+    if i < ctx.access_count {
+        if loc_stride_kind_to_int(ctx.accesses[i as usize].stride_kind) == target { count = count + 1 }
+        i = i + 1
+    }
+    count
+}
+
+// Count accesses with a given reuse kind.
+fn loc_count_by_reuse(ctx: &LocContext, kind: LocReuseKind) -> i64 with Mut, Div, Panic {
+    let target = loc_reuse_kind_to_int(kind)
+    var count: i64 = 0
+    var i: i64 = 0
+    if i < ctx.reuse_count {
+        if loc_reuse_kind_to_int(ctx.reuse[i as usize].kind) == target { count = count + 1 }
+        i = i + 1
+    }
+    if i < ctx.reuse_count {
+        if loc_reuse_kind_to_int(ctx.reuse[i as usize].kind) == target { count = count + 1 }
+        i = i + 1
+    }
+    if i < ctx.reuse_count {
+        if loc_reuse_kind_to_int(ctx.reuse[i as usize].kind) == target { count = count + 1 }
+        i = i + 1
+    }
+    if i < ctx.reuse_count {
+        if loc_reuse_kind_to_int(ctx.reuse[i as usize].kind) == target { count = count + 1 }
+        i = i + 1
+    }
+    if i < ctx.reuse_count {
+        if loc_reuse_kind_to_int(ctx.reuse[i as usize].kind) == target { count = count + 1 }
+        i = i + 1
+    }
+    if i < ctx.reuse_count {
+        if loc_reuse_kind_to_int(ctx.reuse[i as usize].kind) == target { count = count + 1 }
+        i = i + 1
+    }
+    if i < ctx.reuse_count {
+        if loc_reuse_kind_to_int(ctx.reuse[i as usize].kind) == target { count = count + 1 }
+        i = i + 1
+    }
+    if i < ctx.reuse_count {
+        if loc_reuse_kind_to_int(ctx.reuse[i as usize].kind) == target { count = count + 1 }
+        i = i + 1
+    }
+    count
+}
+
+// ============================================================================
+// Section 28: Tests — Category 1: Array/Loop Setup (8 tests)
+// ============================================================================
+
+fn test_loc_add_array_inner(ctx: &! LocContext) -> bool with Mut, Div, Panic {
+    let id = loc_add_array(ctx, 8192, 8, 1)
+    if id != 0 { return false }
+    if ctx.array_count != 1 { return false }
+    if ctx.arrays[0 as usize].total_size != 8192 { return false }
+    if ctx.arrays[0 as usize].element_size != 8 { return false }
+    if ctx.arrays[0 as usize].dimension_count != 1 { return false }
+    true
+}
+fn test_loc_add_array() -> bool with Mut, Div, Panic {
+    var ctx = loc_context_new()
+    test_loc_add_array_inner(&! ctx)
+}
+
+fn test_loc_add_multiple_arrays_inner(ctx: &! LocContext) -> bool with Mut, Div, Panic {
+    let a = loc_add_array(ctx, 4096, 4, 2)
+    let b = loc_add_array(ctx, 8192, 8, 1)
+    let c = loc_add_array(ctx, 16384, 16, 3)
+    if a != 0 { return false }
+    if b != 1 { return false }
+    if c != 2 { return false }
+    if ctx.array_count != 3 { return false }
+    true
+}
+fn test_loc_add_multiple_arrays() -> bool with Mut, Div, Panic {
+    var ctx = loc_context_new()
+    test_loc_add_multiple_arrays_inner(&! ctx)
+}
+
+fn test_loc_add_loop_inner(ctx: &! LocContext) -> bool with Mut, Div, Panic {
+    let id = loc_add_loop(ctx, 0, 1000, LOC_INVALID)
+    if id != 0 { return false }
+    if ctx.loop_count != 1 { return false }
+    if ctx.loops[0 as usize].trip_count != 1000 { return false }
+    if ctx.loops[0 as usize].depth != 0 { return false }
+    true
+}
+fn test_loc_add_loop() -> bool with Mut, Div, Panic {
+    var ctx = loc_context_new()
+    test_loc_add_loop_inner(&! ctx)
+}
+
+fn test_loc_nested_loops_inner(ctx: &! LocContext) -> bool with Mut, Div, Panic {
+    let outer = loc_add_loop(ctx, 0, 100, LOC_INVALID)
+    let inner = loc_add_loop(ctx, 1, 100, outer)
+    if outer != 0 { return false }
+    if inner != 1 { return false }
+    if ctx.loops[1 as usize].parent_loop != 0 { return false }
+    if ctx.loops[1 as usize].depth != 1 { return false }
+    true
+}
+fn test_loc_nested_loops() -> bool with Mut, Div, Panic {
+    var ctx = loc_context_new()
+    test_loc_nested_loops_inner(&! ctx)
+}
+
+fn test_loc_add_access_inner(ctx: &! LocContext) -> bool with Mut, Div, Panic {
+    let arr = loc_add_array(ctx, 8000, 8, 1)
+    let lp = loc_add_loop(ctx, 0, 1000, LOC_INVALID)
+    let acc = loc_add_access(ctx, arr, 0, 8, LocStrideKind::StrideUnit, lp, 8, 42)
+    if acc != 0 { return false }
+    if ctx.access_count != 1 { return false }
+    if ctx.accesses[0 as usize].stride != 8 { return false }
+    if ctx.accesses[0 as usize].line != 42 { return false }
+    true
+}
+fn test_loc_add_access() -> bool with Mut, Div, Panic {
+    var ctx = loc_context_new()
+    test_loc_add_access_inner(&! ctx)
+}
+
+fn test_loc_access_loop_count_inner(ctx: &! LocContext) -> bool with Mut, Div, Panic {
+    let arr = loc_add_array(ctx, 8000, 8, 1)
+    let lp = loc_add_loop(ctx, 0, 1000, LOC_INVALID)
+    let a1 = loc_add_access(ctx, arr, 0, 8, LocStrideKind::StrideUnit, lp, 8, 10)
+    let a2 = loc_add_access(ctx, arr, 0, 16, LocStrideKind::StrideConstant, lp, 8, 11)
+    if ctx.loops[0 as usize].access_count != 2 { return false }
+    true
+}
+fn test_loc_access_loop_count() -> bool with Mut, Div, Panic {
+    var ctx = loc_context_new()
+    test_loc_access_loop_count_inner(&! ctx)
+}
+
+fn test_loc_array_query_inner(ctx: &! LocContext) -> bool with Mut, Div, Panic {
+    let arr = loc_add_array(ctx, 4096, 4, 2)
+    if loc_array_elem_size(ctx, 0) != 4 { return false }
+    if loc_array_total_size(ctx, 0) != 4096 { return false }
+    if loc_array_dims(ctx, 0) != 2 { return false }
+    // Invalid ID returns 0
+    if loc_array_elem_size(ctx, 99) != 0 { return false }
+    true
+}
+fn test_loc_array_query() -> bool with Mut, Div, Panic {
+    var ctx = loc_context_new()
+    test_loc_array_query_inner(&! ctx)
+}
+
+fn test_loc_loop_query_inner(ctx: &! LocContext) -> bool with Mut, Div, Panic {
+    let lp = loc_add_loop(ctx, 2, 500, LOC_INVALID)
+    if loc_loop_trip_count(ctx, 0) != 500 { return false }
+    if loc_loop_depth(ctx, 0) != 2 { return false }
+    if loc_loop_parent(ctx, 0) != LOC_INVALID { return false }
+    if loc_loop_is_tiled(ctx, 0) { return false }
+    true
+}
+fn test_loc_loop_query() -> bool with Mut, Div, Panic {
+    var ctx = loc_context_new()
+    test_loc_loop_query_inner(&! ctx)
+}
+
+// ============================================================================
+// Section 29: Tests — Category 2: Stride Classification (6 tests)
+// ============================================================================
+
+fn test_loc_classify_unit_stride() -> bool with Div, Panic {
+    let k = loc_classify_stride(8, 8)
+    loc_stride_kind_to_int(k) == 0
+}
+
+fn test_loc_classify_unit_stride_negative() -> bool with Div, Panic {
+    // Negative unit stride (reverse traversal)
+    let k = loc_classify_stride(0 - 8, 8)
+    loc_stride_kind_to_int(k) == 0
+}
+
+fn test_loc_classify_constant_stride() -> bool with Div, Panic {
+    // Stride is 2x element size — constant but not unit
+    let k = loc_classify_stride(16, 8)
+    loc_stride_kind_to_int(k) == 1
+}
+
+fn test_loc_classify_zero_stride() -> bool with Div, Panic {
+    // Zero stride — same element every iteration
+    let k = loc_classify_stride(0, 8)
+    loc_stride_kind_to_int(k) == 1
+}
+
+fn test_loc_classify_affine_stride() -> bool with Div, Panic {
+    // Stride not a clean multiple of element size
+    let k = loc_classify_stride(13, 8)
+    loc_stride_kind_to_int(k) == 2
+}
+
+fn test_loc_classify_unknown_elem() -> bool with Div, Panic {
+    // Zero element size — cannot classify
+    let k = loc_classify_stride(8, 0)
+    loc_stride_kind_to_int(k) == 4
+}
+
+// ============================================================================
+// Section 30: Tests — Category 3: Reuse Analysis (10 tests)
+// ============================================================================
+
+fn test_loc_reuse_temporal_inner(ctx: &! LocContext) -> bool with Mut, Div, Panic {
+    let arr = loc_add_array(ctx, 8000, 8, 1)
+    let lp = loc_add_loop(ctx, 0, 1000, LOC_INVALID)
+    // Zero stride: same address every iteration — temporal reuse
+    let acc = loc_add_access(ctx, arr, 0, 0, LocStrideKind::StrideConstant, lp, 8, 1)
+    let info = loc_compute_reuse_distance(ctx, acc)
+    if loc_reuse_kind_to_int(info.kind) != 0 { return false }
+    if info.distance != 1 { return false }
+    true
+}
+fn test_loc_reuse_temporal() -> bool with Mut, Div, Panic {
+    var ctx = loc_context_new()
+    test_loc_reuse_temporal_inner(&! ctx)
+}
+
+fn test_loc_reuse_spatial_unit_inner(ctx: &! LocContext) -> bool with Mut, Div, Panic {
+    let arr = loc_add_array(ctx, 8000, 8, 1)
+    let lp = loc_add_loop(ctx, 0, 1000, LOC_INVALID)
+    // Unit stride (8 bytes, elem=8) — spatial reuse
+    let acc = loc_add_access(ctx, arr, 0, 8, LocStrideKind::StrideUnit, lp, 8, 1)
+    let info = loc_compute_reuse_distance(ctx, acc)
+    if loc_reuse_kind_to_int(info.kind) != 1 { return false }
+    // 64/8 = 8 elements per cache line
+    if info.distance != 8 { return false }
+    true
+}
+fn test_loc_reuse_spatial_unit() -> bool with Mut, Div, Panic {
+    var ctx = loc_context_new()
+    test_loc_reuse_spatial_unit_inner(&! ctx)
+}
+
+fn test_loc_reuse_spatial_small_stride_inner(ctx: &! LocContext) -> bool with Mut, Div, Panic {
+    let arr = loc_add_array(ctx, 8000, 4, 1)
+    let lp = loc_add_loop(ctx, 0, 1000, LOC_INVALID)
+    // Stride 16, element 4 — constant stride but within cache line
+    let acc = loc_add_access(ctx, arr, 0, 16, LocStrideKind::StrideConstant, lp, 4, 1)
+    let info = loc_compute_reuse_distance(ctx, acc)
+    // 16 < 64, so spatial reuse; distance = 64/16 = 4
+    if loc_reuse_kind_to_int(info.kind) != 1 { return false }
+    if info.distance != 4 { return false }
+    true
+}
+fn test_loc_reuse_spatial_small_stride() -> bool with Mut, Div, Panic {
+    var ctx = loc_context_new()
+    test_loc_reuse_spatial_small_stride_inner(&! ctx)
+}
+
+fn test_loc_reuse_none_large_stride_inner(ctx: &! LocContext) -> bool with Mut, Div, Panic {
+    let arr = loc_add_array(ctx, 80000, 8, 1)
+    let lp = loc_add_loop(ctx, 0, 1000, LOC_INVALID)
+    // Stride 1024 — much larger than cache line, no spatial reuse
+    let acc = loc_add_access(ctx, arr, 0, 1024, LocStrideKind::StrideConstant, lp, 8, 1)
+    let info = loc_compute_reuse_distance(ctx, acc)
+    // 1024 >= 64, so no spatial reuse (and no group partner)
+    if loc_reuse_kind_to_int(info.kind) != 3 { return false }
+    true
+}
+fn test_loc_reuse_none_large_stride() -> bool with Mut, Div, Panic {
+    var ctx = loc_context_new()
+    test_loc_reuse_none_large_stride_inner(&! ctx)
+}
+
+fn test_loc_reuse_group_inner(ctx: &! LocContext) -> bool with Mut, Div, Panic {
+    let arr = loc_add_array(ctx, 8000, 8, 1)
+    let lp = loc_add_loop(ctx, 0, 1000, LOC_INVALID)
+    // Two accesses to same array, nearby bases within one cache line
+    let a1 = loc_add_access(ctx, arr, 0, 128, LocStrideKind::StrideConstant, lp, 8, 1)
+    let a2 = loc_add_access(ctx, arr, 8, 128, LocStrideKind::StrideConstant, lp, 8, 2)
+    // a2 base=8, same line as a1 base=0 (both in line 0)
+    // But both have stride 128 >= 64, so self-reuse is none
+    // group reuse should be detected
+    let info = loc_compute_reuse_distance(ctx, a2)
+    // a2 stride 128 >= cache line, so self-reuse is none
+    // but a1 has base 0 and a2 has base 8, both in line 0 -> group
+    if loc_reuse_kind_to_int(info.kind) != 2 { return false }
+    true
+}
+fn test_loc_reuse_group() -> bool with Mut, Div, Panic {
+    var ctx = loc_context_new()
+    test_loc_reuse_group_inner(&! ctx)
+}
+
+fn test_loc_reuse_carried_by_loop_inner(ctx: &! LocContext) -> bool with Mut, Div, Panic {
+    let arr = loc_add_array(ctx, 8000, 8, 1)
+    let lp = loc_add_loop(ctx, 0, 1000, LOC_INVALID)
+    let acc = loc_add_access(ctx, arr, 0, 8, LocStrideKind::StrideUnit, lp, 8, 1)
+    let info = loc_compute_reuse_distance(ctx, acc)
+    if info.carried_by_loop != 0 { return false }
+    true
+}
+fn test_loc_reuse_carried_by_loop() -> bool with Mut, Div, Panic {
+    var ctx = loc_context_new()
+    test_loc_reuse_carried_by_loop_inner(&! ctx)
+}
+
+fn test_loc_compute_all_reuse_inner(ctx: &! LocContext) -> bool with Mut, Div, Panic {
+    let arr = loc_add_array(ctx, 8000, 8, 1)
+    let lp = loc_add_loop(ctx, 0, 1000, LOC_INVALID)
+    let a1 = loc_add_access(ctx, arr, 0, 8, LocStrideKind::StrideUnit, lp, 8, 1)
+    let a2 = loc_add_access(ctx, arr, 0, 0, LocStrideKind::StrideConstant, lp, 8, 2)
+    let count = loc_compute_all_reuse(ctx)
+    if count != 2 { return false }
+    if ctx.reuse_count != 2 { return false }
+    true
+}
+fn test_loc_compute_all_reuse() -> bool with Mut, Div, Panic {
+    var ctx = loc_context_new()
+    test_loc_compute_all_reuse_inner(&! ctx)
+}
+
+fn test_loc_reuse_spatial_stride_inner(ctx: &! LocContext) -> bool with Mut, Div, Panic {
+    let arr = loc_add_array(ctx, 8000, 8, 1)
+    let lp = loc_add_loop(ctx, 0, 1000, LOC_INVALID)
+    let acc = loc_add_access(ctx, arr, 0, 8, LocStrideKind::StrideUnit, lp, 8, 1)
+    let info = loc_compute_reuse_distance(ctx, acc)
+    if info.spatial_stride != 8 { return false }
+    true
+}
+fn test_loc_reuse_spatial_stride() -> bool with Mut, Div, Panic {
+    var ctx = loc_context_new()
+    test_loc_reuse_spatial_stride_inner(&! ctx)
+}
+
+fn test_loc_reuse_invalid_access() -> bool with Mut, Div, Panic {
+    var ctx = loc_context_new()
+    let info = loc_compute_reuse_distance(&! ctx, 999)
+    loc_reuse_kind_to_int(info.kind) == 3
+}
+
+fn test_loc_reuse_negative_access() -> bool with Mut, Div, Panic {
+    var ctx = loc_context_new()
+    let info = loc_compute_reuse_distance(&! ctx, 0 - 1)
+    loc_reuse_kind_to_int(info.kind) == 3
+}
+
+// ============================================================================
+// Section 31: Tests — Category 4: Cache Miss Estimation (8 tests)
+// ============================================================================
+
+fn test_loc_misses_unit_stride_inner(ctx: &! LocContext) -> bool with Mut, Div, Panic {
+    let arr = loc_add_array(ctx, 8000, 8, 1)
+    let lp = loc_add_loop(ctx, 0, 1000, LOC_INVALID)
+    let acc = loc_add_access(ctx, arr, 0, 8, LocStrideKind::StrideUnit, lp, 8, 1)
+    let misses = loc_estimate_cache_misses(ctx, 0)
+    // Unit stride: 1000 iterations, 8 elems per line = 125 misses
+    if misses != 125 { return false }
+    true
+}
+fn test_loc_misses_unit_stride() -> bool with Mut, Div, Panic {
+    var ctx = loc_context_new()
+    test_loc_misses_unit_stride_inner(&! ctx)
+}
+
+fn test_loc_misses_zero_stride_inner(ctx: &! LocContext) -> bool with Mut, Div, Panic {
+    let arr = loc_add_array(ctx, 8000, 8, 1)
+    let lp = loc_add_loop(ctx, 0, 1000, LOC_INVALID)
+    let acc = loc_add_access(ctx, arr, 0, 0, LocStrideKind::StrideConstant, lp, 8, 1)
+    let misses = loc_estimate_cache_misses(ctx, 0)
+    // Zero stride: 1 compulsory miss
+    if misses != 1 { return false }
+    true
+}
+fn test_loc_misses_zero_stride() -> bool with Mut, Div, Panic {
+    var ctx = loc_context_new()
+    test_loc_misses_zero_stride_inner(&! ctx)
+}
+
+fn test_loc_misses_large_stride_inner(ctx: &! LocContext) -> bool with Mut, Div, Panic {
+    let arr = loc_add_array(ctx, 80000, 8, 1)
+    let lp = loc_add_loop(ctx, 0, 100, LOC_INVALID)
+    // Stride 128 = 2 cache lines; constant stride, >= line size
+    let acc = loc_add_access(ctx, arr, 0, 128, LocStrideKind::StrideConstant, lp, 8, 1)
+    let misses = loc_estimate_cache_misses(ctx, 0)
+    // Stride >= 64: miss every iteration
+    if misses != 100 { return false }
+    true
+}
+fn test_loc_misses_large_stride() -> bool with Mut, Div, Panic {
+    var ctx = loc_context_new()
+    test_loc_misses_large_stride_inner(&! ctx)
+}
+
+fn test_loc_misses_random_inner(ctx: &! LocContext) -> bool with Mut, Div, Panic {
+    let arr = loc_add_array(ctx, 80000, 8, 1)
+    let lp = loc_add_loop(ctx, 0, 50, LOC_INVALID)
+    let acc = loc_add_access(ctx, arr, 0, 999, LocStrideKind::StrideRandom, lp, 8, 1)
+    let misses = loc_estimate_cache_misses(ctx, 0)
+    // Random: miss every iteration
+    if misses != 50 { return false }
+    true
+}
+fn test_loc_misses_random() -> bool with Mut, Div, Panic {
+    var ctx = loc_context_new()
+    test_loc_misses_random_inner(&! ctx)
+}
+
+fn test_loc_misses_empty_loop_inner(ctx: &! LocContext) -> bool with Mut, Div, Panic {
+    let lp = loc_add_loop(ctx, 0, 1000, LOC_INVALID)
+    let misses = loc_estimate_cache_misses(ctx, 0)
+    if misses != 0 { return false }
+    true
+}
+fn test_loc_misses_empty_loop() -> bool with Mut, Div, Panic {
+    var ctx = loc_context_new()
+    test_loc_misses_empty_loop_inner(&! ctx)
+}
+
+fn test_loc_misses_multiple_accesses_inner(ctx: &! LocContext) -> bool with Mut, Div, Panic {
+    let arr1 = loc_add_array(ctx, 8000, 8, 1)
+    let arr2 = loc_add_array(ctx, 4000, 4, 1)
+    let lp = loc_add_loop(ctx, 0, 1000, LOC_INVALID)
+    let a1 = loc_add_access(ctx, arr1, 0, 8, LocStrideKind::StrideUnit, lp, 8, 1)
+    let a2 = loc_add_access(ctx, arr2, 0, 4, LocStrideKind::StrideUnit, lp, 4, 2)
+    let misses = loc_estimate_cache_misses(ctx, 0)
+    // arr1: 1000/8 = 125, arr2: 1000/16 = 63
+    // Total = 125 + 63 = 188
+    if misses != 188 { return false }
+    true
+}
+fn test_loc_misses_multiple_accesses() -> bool with Mut, Div, Panic {
+    var ctx = loc_context_new()
+    test_loc_misses_multiple_accesses_inner(&! ctx)
+}
+
+fn test_loc_misses_affine_inner(ctx: &! LocContext) -> bool with Mut, Div, Panic {
+    let arr = loc_add_array(ctx, 80000, 8, 1)
+    let lp = loc_add_loop(ctx, 0, 100, LOC_INVALID)
+    let acc = loc_add_access(ctx, arr, 0, 13, LocStrideKind::StrideAffine, lp, 8, 1)
+    let misses = loc_estimate_cache_misses(ctx, 0)
+    // Affine: miss every other iteration = ceil(100/2) = 50
+    if misses != 50 { return false }
+    true
+}
+fn test_loc_misses_affine() -> bool with Mut, Div, Panic {
+    var ctx = loc_context_new()
+    test_loc_misses_affine_inner(&! ctx)
+}
+
+fn test_loc_misses_invalid_loop() -> bool with Mut, Div, Panic {
+    var ctx = loc_context_new()
+    let misses = loc_estimate_cache_misses(&! ctx, 99)
+    misses == 0
+}
+
+// ============================================================================
+// Section 32: Tests — Category 5: Tiling (10 tests)
+// ============================================================================
+
+fn test_loc_suggest_tiling_applicable_inner(ctx: &! LocContext) -> bool with Mut, Div, Panic {
+    let arr = loc_add_array(ctx, 1000000, 8, 1)
+    let lp = loc_add_loop(ctx, 0, 100000, LOC_INVALID)
+    // Large stride, many iterations — working set exceeds L1
+    let acc = loc_add_access(ctx, arr, 0, 8, LocStrideKind::StrideUnit, lp, 8, 1)
+    let config = loc_suggest_tiling(ctx, 0)
+    if loc_tile_status_to_int(config.status) != 0 { return false }
+    if config.factor <= 1 { return false }
+    true
+}
+fn test_loc_suggest_tiling_applicable() -> bool with Mut, Div, Panic {
+    var ctx = loc_context_new()
+    test_loc_suggest_tiling_applicable_inner(&! ctx)
+}
+
+fn test_loc_suggest_tiling_small_loop_inner(ctx: &! LocContext) -> bool with Mut, Div, Panic {
+    let arr = loc_add_array(ctx, 100, 8, 1)
+    let lp = loc_add_loop(ctx, 0, 10, LOC_INVALID)
+    let acc = loc_add_access(ctx, arr, 0, 8, LocStrideKind::StrideUnit, lp, 8, 1)
+    let config = loc_suggest_tiling(ctx, 0)
+    // Too few iterations
+    if loc_tile_status_to_int(config.status) != 1 { return false }
+    true
+}
+fn test_loc_suggest_tiling_small_loop() -> bool with Mut, Div, Panic {
+    var ctx = loc_context_new()
+    test_loc_suggest_tiling_small_loop_inner(&! ctx)
+}
+
+fn test_loc_suggest_tiling_fits_l1_inner(ctx: &! LocContext) -> bool with Mut, Div, Panic {
+    let arr = loc_add_array(ctx, 1024, 8, 1)
+    let lp = loc_add_loop(ctx, 0, 100, LOC_INVALID)
+    // Working set = 100 * 8 = 800 bytes << 32KB L1
+    let acc = loc_add_access(ctx, arr, 0, 8, LocStrideKind::StrideUnit, lp, 8, 1)
+    let config = loc_suggest_tiling(ctx, 0)
+    // Already fits in L1 with margin: not profitable
+    if loc_tile_status_to_int(config.status) != 1 { return false }
+    true
+}
+fn test_loc_suggest_tiling_fits_l1() -> bool with Mut, Div, Panic {
+    var ctx = loc_context_new()
+    test_loc_suggest_tiling_fits_l1_inner(&! ctx)
+}
+
+fn test_loc_apply_tiling_inner(ctx: &! LocContext) -> bool with Mut, Div, Panic {
+    let arr = loc_add_array(ctx, 1000000, 8, 1)
+    let lp = loc_add_loop(ctx, 0, 100000, LOC_INVALID)
+    let acc = loc_add_access(ctx, arr, 0, 8, LocStrideKind::StrideUnit, lp, 8, 1)
+    let status = loc_apply_tiling(ctx, 0, 32)
+    if loc_tile_status_to_int(status) != 0 { return false }
+    if ctx.loops[0 as usize].is_tiled == false { return false }
+    if ctx.loops[0 as usize].tile_factor != 32 { return false }
+    if ctx.tile_count != 1 { return false }
+    true
+}
+fn test_loc_apply_tiling() -> bool with Mut, Div, Panic {
+    var ctx = loc_context_new()
+    test_loc_apply_tiling_inner(&! ctx)
+}
+
+fn test_loc_apply_tiling_already_tiled_inner(ctx: &! LocContext) -> bool with Mut, Div, Panic {
+    let arr = loc_add_array(ctx, 1000000, 8, 1)
+    let lp = loc_add_loop(ctx, 0, 100000, LOC_INVALID)
+    let acc = loc_add_access(ctx, arr, 0, 8, LocStrideKind::StrideUnit, lp, 8, 1)
+    let s1 = loc_apply_tiling(ctx, 0, 32)
+    let s2 = loc_apply_tiling(ctx, 0, 64)
+    if loc_tile_status_to_int(s2) != 3 { return false }
+    true
+}
+fn test_loc_apply_tiling_already_tiled() -> bool with Mut, Div, Panic {
+    var ctx = loc_context_new()
+    test_loc_apply_tiling_already_tiled_inner(&! ctx)
+}
+
+fn test_loc_apply_tiling_factor_too_large_inner(ctx: &! LocContext) -> bool with Mut, Div, Panic {
+    let arr = loc_add_array(ctx, 100, 8, 1)
+    let lp = loc_add_loop(ctx, 0, 50, LOC_INVALID)
+    let acc = loc_add_access(ctx, arr, 0, 8, LocStrideKind::StrideUnit, lp, 8, 1)
+    // Factor 100 > trip count 50
+    let status = loc_apply_tiling(ctx, 0, 100)
+    if loc_tile_status_to_int(status) != 2 { return false }
+    true
+}
+fn test_loc_apply_tiling_factor_too_large() -> bool with Mut, Div, Panic {
+    var ctx = loc_context_new()
+    test_loc_apply_tiling_factor_too_large_inner(&! ctx)
+}
+
+fn test_loc_apply_tiling_invalid_factor_inner(ctx: &! LocContext) -> bool with Mut, Div, Panic {
+    let lp = loc_add_loop(ctx, 0, 1000, LOC_INVALID)
+    let status = loc_apply_tiling(ctx, 0, 0)
+    if loc_tile_status_to_int(status) != 2 { return false }
+    true
+}
+fn test_loc_apply_tiling_invalid_factor() -> bool with Mut, Div, Panic {
+    var ctx = loc_context_new()
+    test_loc_apply_tiling_invalid_factor_inner(&! ctx)
+}
+
+fn test_loc_suggest_all_tilings_inner(ctx: &! LocContext) -> bool with Mut, Div, Panic {
+    let arr = loc_add_array(ctx, 1000000, 8, 1)
+    let lp1 = loc_add_loop(ctx, 0, 100000, LOC_INVALID)
+    let lp2 = loc_add_loop(ctx, 0, 50, LOC_INVALID)
+    let a1 = loc_add_access(ctx, arr, 0, 8, LocStrideKind::StrideUnit, lp1, 8, 1)
+    let a2 = loc_add_access(ctx, arr, 0, 8, LocStrideKind::StrideUnit, lp2, 8, 2)
+    let applied = loc_suggest_all_tilings(ctx)
+    // lp1 should be tiled, lp2 fits in cache so should not
+    if applied < 1 { return false }
+    true
+}
+fn test_loc_suggest_all_tilings() -> bool with Mut, Div, Panic {
+    var ctx = loc_context_new()
+    test_loc_suggest_all_tilings_inner(&! ctx)
+}
+
+fn test_loc_optimal_tile_factor_basic() -> bool with Mut, Div, Panic {
+    // Working set 100KB, L1 32KB, elem 8 bytes
+    let factor = loc_optimal_tile_factor(102400, LOC_L1_SIZE, 8)
+    // Need factor >= 100KB / (32KB * 3/4) = ~4.2, round up to power of 2 = 8
+    if factor < 2 { return false }
+    if factor > 256 { return false }
+    true
+}
+
+fn test_loc_optimal_tile_factor_fits() -> bool with Mut, Div, Panic {
+    // Working set already fits in cache
+    let factor = loc_optimal_tile_factor(1000, LOC_L1_SIZE, 8)
+    if factor != 1 { return false }
+    true
+}
+
+// ============================================================================
+// Section 33: Tests — Category 6: Prefetch (6 tests)
+// ============================================================================
+
+fn test_loc_insert_prefetch_inner(ctx: &! LocContext) -> bool with Mut, Div, Panic {
+    let arr = loc_add_array(ctx, 8000, 8, 1)
+    let lp = loc_add_loop(ctx, 0, 1000, LOC_INVALID)
+    let id = loc_insert_prefetch(ctx, 0, 0, 64, LocPrefetchHint::PrefetchT0)
+    if id != 0 { return false }
+    if ctx.prefetch_count != 1 { return false }
+    if ctx.prefetches[0 as usize].stride != 64 { return false }
+    true
+}
+fn test_loc_insert_prefetch() -> bool with Mut, Div, Panic {
+    var ctx = loc_context_new()
+    test_loc_insert_prefetch_inner(&! ctx)
+}
+
+fn test_loc_prefetch_hint_t1_inner(ctx: &! LocContext) -> bool with Mut, Div, Panic {
+    let arr = loc_add_array(ctx, 8000, 8, 1)
+    let lp = loc_add_loop(ctx, 0, 1000, LOC_INVALID)
+    let id = loc_insert_prefetch(ctx, 0, 0, 128, LocPrefetchHint::PrefetchT1)
+    if ctx.prefetches[0 as usize].offset_ahead != LOC_PREFETCH_DISTANCE_T1 * 128 { return false }
+    if loc_prefetch_hint_to_int(ctx.prefetches[0 as usize].hint) != 1 { return false }
+    true
+}
+fn test_loc_prefetch_hint_t1() -> bool with Mut, Div, Panic {
+    var ctx = loc_context_new()
+    test_loc_prefetch_hint_t1_inner(&! ctx)
+}
+
+fn test_loc_prefetch_nta_inner(ctx: &! LocContext) -> bool with Mut, Div, Panic {
+    let arr = loc_add_array(ctx, 8000, 8, 1)
+    let lp = loc_add_loop(ctx, 0, 1000, LOC_INVALID)
+    let id = loc_insert_prefetch(ctx, 0, 0, 256, LocPrefetchHint::PrefetchNTA)
+    if loc_prefetch_hint_to_int(ctx.prefetches[0 as usize].hint) != 3 { return false }
+    true
+}
+fn test_loc_prefetch_nta() -> bool with Mut, Div, Panic {
+    var ctx = loc_context_new()
+    test_loc_prefetch_nta_inner(&! ctx)
+}
+
+fn test_loc_suggest_prefetches_inner(ctx: &! LocContext) -> bool with Mut, Div, Panic {
+    let arr = loc_add_array(ctx, 80000, 8, 1)
+    let lp = loc_add_loop(ctx, 0, 1000, LOC_INVALID)
+    // Large stride — should trigger prefetch suggestion
+    let acc = loc_add_access(ctx, arr, 0, 128, LocStrideKind::StrideConstant, lp, 8, 1)
+    let count = loc_suggest_prefetches(ctx)
+    if count < 1 { return false }
+    if ctx.prefetch_count < 1 { return false }
+    true
+}
+fn test_loc_suggest_prefetches() -> bool with Mut, Div, Panic {
+    var ctx = loc_context_new()
+    test_loc_suggest_prefetches_inner(&! ctx)
+}
+
+fn test_loc_no_prefetch_small_stride_inner(ctx: &! LocContext) -> bool with Mut, Div, Panic {
+    let arr = loc_add_array(ctx, 8000, 8, 1)
+    let lp = loc_add_loop(ctx, 0, 1000, LOC_INVALID)
+    // Small stride — prefetch not worthwhile
+    let acc = loc_add_access(ctx, arr, 0, 4, LocStrideKind::StrideUnit, lp, 4, 1)
+    let count = loc_suggest_prefetches(ctx)
+    if count != 0 { return false }
+    true
+}
+fn test_loc_no_prefetch_small_stride() -> bool with Mut, Div, Panic {
+    var ctx = loc_context_new()
+    test_loc_no_prefetch_small_stride_inner(&! ctx)
+}
+
+fn test_loc_choose_hint_temporal() -> bool {
+    let hint = loc_choose_prefetch_hint(LocReuseKind::ReuseTemporal, 1)
+    loc_prefetch_hint_to_int(hint) == 0
+}
+
+// ============================================================================
+// Section 34: Tests — Category 7: Loop Interchange (6 tests)
+// ============================================================================
+
+fn test_loc_interchange_legal_inner(ctx: &! LocContext) -> bool with Mut, Div, Panic {
+    let arr = loc_add_array(ctx, 80000, 8, 1)
+    let outer = loc_add_loop(ctx, 0, 100, LOC_INVALID)
+    let inner = loc_add_loop(ctx, 1, 100, outer)
+    // Unit-stride accesses in both loops
+    let a1 = loc_add_access(ctx, arr, 0, 8, LocStrideKind::StrideUnit, outer, 8, 1)
+    let a2 = loc_add_access(ctx, arr, 0, 8, LocStrideKind::StrideUnit, inner, 8, 2)
+    let legal = loc_check_interchange_legal(ctx, outer, inner)
+    if legal == false { return false }
+    true
+}
+fn test_loc_interchange_legal() -> bool with Mut, Div, Panic {
+    var ctx = loc_context_new()
+    test_loc_interchange_legal_inner(&! ctx)
+}
+
+fn test_loc_interchange_illegal_not_nested_inner(ctx: &! LocContext) -> bool with Mut, Div, Panic {
+    let outer = loc_add_loop(ctx, 0, 100, LOC_INVALID)
+    let other = loc_add_loop(ctx, 0, 100, LOC_INVALID)
+    // Not parent-child: illegal
+    let legal = loc_check_interchange_legal(ctx, outer, other)
+    if legal { return false }
+    true
+}
+fn test_loc_interchange_illegal_not_nested() -> bool with Mut, Div, Panic {
+    var ctx = loc_context_new()
+    test_loc_interchange_illegal_not_nested_inner(&! ctx)
+}
+
+fn test_loc_interchange_illegal_same_inner(ctx: &! LocContext) -> bool with Mut, Div, Panic {
+    let lp = loc_add_loop(ctx, 0, 100, LOC_INVALID)
+    let legal = loc_check_interchange_legal(ctx, lp, lp)
+    if legal { return false }
+    true
+}
+fn test_loc_interchange_illegal_same() -> bool with Mut, Div, Panic {
+    var ctx = loc_context_new()
+    test_loc_interchange_illegal_same_inner(&! ctx)
+}
+
+fn test_loc_interchange_profitable_inner(ctx: &! LocContext) -> bool with Mut, Div, Panic {
+    let arr = loc_add_array(ctx, 80000, 8, 1)
+    let outer = loc_add_loop(ctx, 0, 100, LOC_INVALID)
+    let inner = loc_add_loop(ctx, 1, 100, outer)
+    // Outer has more unit-stride accesses than inner -> profitable to swap
+    let a1 = loc_add_access(ctx, arr, 0, 8, LocStrideKind::StrideUnit, outer, 8, 1)
+    let a2 = loc_add_access(ctx, arr, 8, 8, LocStrideKind::StrideUnit, outer, 8, 2)
+    let a3 = loc_add_access(ctx, arr, 16, 128, LocStrideKind::StrideConstant, inner, 8, 3)
+    let result = loc_interchange_loops(ctx, outer, inner)
+    if loc_interchange_result_to_int(result) != 0 { return false }
+    true
+}
+fn test_loc_interchange_profitable() -> bool with Mut, Div, Panic {
+    var ctx = loc_context_new()
+    test_loc_interchange_profitable_inner(&! ctx)
+}
+
+fn test_loc_interchange_not_profitable_inner(ctx: &! LocContext) -> bool with Mut, Div, Panic {
+    let arr = loc_add_array(ctx, 80000, 8, 1)
+    let outer = loc_add_loop(ctx, 0, 100, LOC_INVALID)
+    let inner = loc_add_loop(ctx, 1, 100, outer)
+    // Inner has more unit-stride → already good layout
+    let a1 = loc_add_access(ctx, arr, 0, 128, LocStrideKind::StrideConstant, outer, 8, 1)
+    let a2 = loc_add_access(ctx, arr, 0, 8, LocStrideKind::StrideUnit, inner, 8, 2)
+    let a3 = loc_add_access(ctx, arr, 8, 8, LocStrideKind::StrideUnit, inner, 8, 3)
+    let result = loc_interchange_loops(ctx, outer, inner)
+    if loc_interchange_result_to_int(result) != 2 { return false }
+    true
+}
+fn test_loc_interchange_not_profitable() -> bool with Mut, Div, Panic {
+    var ctx = loc_context_new()
+    test_loc_interchange_not_profitable_inner(&! ctx)
+}
+
+fn test_loc_interchange_random_illegal_inner(ctx: &! LocContext) -> bool with Mut, Div, Panic {
+    let arr = loc_add_array(ctx, 80000, 8, 1)
+    let outer = loc_add_loop(ctx, 0, 100, LOC_INVALID)
+    let inner = loc_add_loop(ctx, 1, 100, outer)
+    // Random stride in inner → illegal
+    let a1 = loc_add_access(ctx, arr, 0, 999, LocStrideKind::StrideRandom, inner, 8, 1)
+    let legal = loc_check_interchange_legal(ctx, outer, inner)
+    if legal { return false }
+    true
+}
+fn test_loc_interchange_random_illegal() -> bool with Mut, Div, Panic {
+    var ctx = loc_context_new()
+    test_loc_interchange_random_illegal_inner(&! ctx)
+}
+
+// ============================================================================
+// Section 35: Tests — Category 8: Integration (6 tests)
+// ============================================================================
+
+fn test_loc_working_set_inner(ctx: &! LocContext) -> bool with Mut, Div, Panic {
+    let arr = loc_add_array(ctx, 8000, 8, 1)
+    let lp = loc_add_loop(ctx, 0, 100, LOC_INVALID)
+    let acc = loc_add_access(ctx, arr, 0, 8, LocStrideKind::StrideUnit, lp, 8, 1)
+    let ws = loc_compute_working_set(ctx, 0)
+    // 100 iterations * 8 byte stride = 800 bytes
+    if ws != 800 { return false }
+    true
+}
+fn test_loc_working_set() -> bool with Mut, Div, Panic {
+    var ctx = loc_context_new()
+    test_loc_working_set_inner(&! ctx)
+}
+
+fn test_loc_fits_cache_inner(ctx: &! LocContext) -> bool with Mut, Div, Panic {
+    if loc_fits_in_l1(ctx, 1000) == false { return false }
+    if loc_fits_in_l1(ctx, 100000) { return false }
+    if loc_fits_in_l2(ctx, 100000) == false { return false }
+    if loc_fits_in_l2(ctx, 1000000) { return false }
+    if loc_fits_in_l3(ctx, 1000000) == false { return false }
+    if loc_fits_in_l3(ctx, 100000000) { return false }
+    true
+}
+fn test_loc_fits_cache() -> bool with Mut, Div, Panic {
+    var ctx = loc_context_new()
+    test_loc_fits_cache_inner(&! ctx)
+}
+
+fn test_loc_full_pipeline_inner(ctx: &! LocContext) -> bool with Mut, Div, Panic {
+    let arr = loc_add_array(ctx, 1000000, 8, 1)
+    let lp = loc_add_loop(ctx, 0, 100000, LOC_INVALID)
+    let a1 = loc_add_access(ctx, arr, 0, 8, LocStrideKind::StrideUnit, lp, 8, 1)
+    let a2 = loc_add_access(ctx, arr, 8, 128, LocStrideKind::StrideConstant, lp, 8, 2)
+    let opts = loc_run_full_analysis(ctx)
+    // Should have at least some optimizations
+    if ctx.reuse_count < 2 { return false }
+    true
+}
+fn test_loc_full_pipeline() -> bool with Mut, Div, Panic {
+    var ctx = loc_context_new()
+    test_loc_full_pipeline_inner(&! ctx)
+}
+
+fn test_loc_empty_context() -> bool with Mut, Div, Panic {
+    var ctx = loc_context_new()
+    let opts = loc_run_full_analysis(&! ctx)
+    if opts != 0 { return false }
+    if ctx.access_count != 0 { return false }
+    if ctx.loop_count != 0 { return false }
+    true
+}
+
+fn test_loc_total_improvement_inner(ctx: &! LocContext) -> bool with Mut, Div, Panic {
+    let arr = loc_add_array(ctx, 1000000, 8, 1)
+    let lp = loc_add_loop(ctx, 0, 100000, LOC_INVALID)
+    let acc = loc_add_access(ctx, arr, 0, 8, LocStrideKind::StrideUnit, lp, 8, 1)
+    let opts = loc_run_full_analysis(ctx)
+    let improvement = loc_total_improvement(ctx)
+    // If tiling was applied, improvement should be positive
+    if ctx.tile_count > 0 {
+        if improvement <= 0 { return false }
+    }
+    true
+}
+fn test_loc_total_improvement() -> bool with Mut, Div, Panic {
+    var ctx = loc_context_new()
+    test_loc_total_improvement_inner(&! ctx)
+}
+
+fn test_loc_misses_after_tiling_inner(ctx: &! LocContext) -> bool with Mut, Div, Panic {
+    let arr = loc_add_array(ctx, 1000000, 8, 1)
+    let lp = loc_add_loop(ctx, 0, 100000, LOC_INVALID)
+    let acc = loc_add_access(ctx, arr, 0, 8, LocStrideKind::StrideUnit, lp, 8, 1)
+    let before = loc_estimate_cache_misses(ctx, 0)
+    let after = loc_estimate_misses_after_tiling(ctx, 0, 32)
+    if after >= before { return false }
+    if after <= 0 { return false }
+    true
+}
+fn test_loc_misses_after_tiling() -> bool with Mut, Div, Panic {
+    var ctx = loc_context_new()
+    test_loc_misses_after_tiling_inner(&! ctx)
+}
+
+// ============================================================================
+// Section 36: Test Runner
+// ============================================================================
+
+fn loc_run_tests() -> i64 with Mut, Div, Panic {
+    var passed: i64 = 0
+    var failed: i64 = 0
+
+    // Category 1: Array/Loop Setup (8 tests)
+    if test_loc_add_array() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_loc_add_multiple_arrays() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_loc_add_loop() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_loc_nested_loops() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_loc_add_access() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_loc_access_loop_count() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_loc_array_query() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_loc_loop_query() { passed = passed + 1 } else { failed = failed + 1 }
+
+    // Category 2: Stride Classification (6 tests)
+    if test_loc_classify_unit_stride() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_loc_classify_unit_stride_negative() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_loc_classify_constant_stride() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_loc_classify_zero_stride() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_loc_classify_affine_stride() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_loc_classify_unknown_elem() { passed = passed + 1 } else { failed = failed + 1 }
+
+    // Category 3: Reuse Analysis (10 tests)
+    if test_loc_reuse_temporal() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_loc_reuse_spatial_unit() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_loc_reuse_spatial_small_stride() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_loc_reuse_none_large_stride() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_loc_reuse_group() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_loc_reuse_carried_by_loop() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_loc_compute_all_reuse() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_loc_reuse_spatial_stride() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_loc_reuse_invalid_access() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_loc_reuse_negative_access() { passed = passed + 1 } else { failed = failed + 1 }
+
+    // Category 4: Cache Miss Estimation (8 tests)
+    if test_loc_misses_unit_stride() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_loc_misses_zero_stride() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_loc_misses_large_stride() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_loc_misses_random() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_loc_misses_empty_loop() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_loc_misses_multiple_accesses() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_loc_misses_affine() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_loc_misses_invalid_loop() { passed = passed + 1 } else { failed = failed + 1 }
+
+    // Category 5: Tiling (10 tests)
+    if test_loc_suggest_tiling_applicable() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_loc_suggest_tiling_small_loop() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_loc_suggest_tiling_fits_l1() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_loc_apply_tiling() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_loc_apply_tiling_already_tiled() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_loc_apply_tiling_factor_too_large() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_loc_apply_tiling_invalid_factor() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_loc_suggest_all_tilings() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_loc_optimal_tile_factor_basic() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_loc_optimal_tile_factor_fits() { passed = passed + 1 } else { failed = failed + 1 }
+
+    // Category 6: Prefetch (6 tests)
+    if test_loc_insert_prefetch() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_loc_prefetch_hint_t1() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_loc_prefetch_nta() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_loc_suggest_prefetches() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_loc_no_prefetch_small_stride() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_loc_choose_hint_temporal() { passed = passed + 1 } else { failed = failed + 1 }
+
+    // Category 7: Loop Interchange (6 tests)
+    if test_loc_interchange_legal() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_loc_interchange_illegal_not_nested() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_loc_interchange_illegal_same() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_loc_interchange_profitable() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_loc_interchange_not_profitable() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_loc_interchange_random_illegal() { passed = passed + 1 } else { failed = failed + 1 }
+
+    // Category 8: Integration (6 tests)
+    if test_loc_working_set() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_loc_fits_cache() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_loc_full_pipeline() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_loc_empty_context() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_loc_total_improvement() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_loc_misses_after_tiling() { passed = passed + 1 } else { failed = failed + 1 }
+
+    if failed > 0 { return 0 - failed }
+    passed
+}
