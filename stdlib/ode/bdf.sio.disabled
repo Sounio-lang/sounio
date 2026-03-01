@@ -1,0 +1,807 @@
+// bdf.sio - Backward Differentiation Formula (BDF) Implicit Stiff ODE Solver
+//
+// BDF methods for stiff systems of ODEs, orders 1-4.
+// Implicit equations solved via simplified Newton iteration with
+// finite-difference Jacobian approximation and Gaussian elimination.
+//
+// BDF-k uses k previous solution values to compute next step implicitly:
+//   BDF-1 (Backward Euler): y_{n+1} = y_n + h*f(t_{n+1}, y_{n+1})
+//   BDF-2: y_{n+1} = (4/3)*y_n - (1/3)*y_{n-1} + (2/3)*h*f(t_{n+1}, y_{n+1})
+//   BDF-3: y_{n+1} = (18/11)*y_n - (9/11)*y_{n-1} + (2/11)*y_{n-2} + (6/11)*h*f(...)
+//   BDF-4: y_{n+1} = (48/25)*y_n - (36/25)*y_{n-1} + (16/25)*y_{n-2}
+//          - (3/25)*y_{n-3} + (12/25)*h*f(...)
+//
+// Supports systems up to 8 equations.
+//
+// Error estimation uses the BDF error constant (Gear's formula) applied to
+// the predictor-corrector difference. Step size control follows standard
+// LSODE/CVODE conventions.
+//
+// References:
+//   Hairer, Wanner (1996) "Solving Ordinary Differential Equations II: Stiff
+//     and Differential-Algebraic Problems"
+//   Shampine, Reichelt (1997) "The MATLAB ODE Suite"
+//   Gear (1971) "Numerical Initial Value Problems in ODEs"
+//   Brenan, Campbell, Petzold (1996) "Numerical Solution of Initial-Value
+//     Problems in Differential-Algebraic Equations"
+
+extern "C" {
+    fn sqrt(x: f64) -> f64;
+    fn exp(x: f64) -> f64;
+    fn log(x: f64) -> f64;
+}
+
+// ============================================================================
+// HELPER FUNCTIONS (must precede all callers)
+// ============================================================================
+
+fn bdf_abs_f64(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+fn bdf_max_f64(a: f64, b: f64) -> f64 {
+    if a > b { return a }
+    return b
+}
+
+fn bdf_min_f64(a: f64, b: f64) -> f64 {
+    if a < b { return a }
+    return b
+}
+
+fn bdf_sqrt_f64(x: f64) -> f64 {
+    if x <= 0.0 { return 0.0 }
+    return sqrt(x)
+}
+
+// ============================================================================
+// DATA STRUCTURES
+// ============================================================================
+
+struct BDFState {
+    // Current solution
+    y: [f64; 8],
+    t: f64,
+    dt: f64,
+    dt_max: f64,
+    n_eqs: i32,
+
+    // History for multi-step (previous solutions)
+    y_prev1: [f64; 8],
+    y_prev2: [f64; 8],
+    y_prev3: [f64; 8],
+    n_history: i32,
+
+    // Step control
+    order: i32,
+    max_order: i32,
+    n_steps: i32,
+    n_function_evals: i32,
+    n_jac_evals: i32,
+
+    // Tolerances
+    atol: f64,
+    rtol: f64,
+    newton_tol: f64,
+    max_newton_iter: i32
+}
+
+struct BDFResult {
+    t_final: f64,
+    y_final: [f64; 8],
+    n_steps: i32,
+    n_accepted: i32,
+    n_rejected: i32,
+    n_function_evals: i32,
+    n_jac_evals: i32,
+    success: bool
+}
+
+struct BDFTrajectory {
+    times: [f64; 256],
+    states: [f64; 2048],
+    n_points: i32,
+    n_eqs: i32
+}
+
+struct NewtonResult {
+    y: [f64; 8],
+    converged: bool,
+    iters: i32,
+    fevals: i32,
+    jevals: i32
+}
+
+struct BDFStepResult {
+    new_state: BDFState,
+    accepted: bool
+}
+
+// ============================================================================
+// RHS FUNCTIONS (test problems for stiff ODEs)
+// ============================================================================
+
+// Problem 0: Exponential decay  dy/dt = -1000*y  (single stiff equation)
+fn rhs_exponential_decay(t: f64, y: [f64; 8], n: i32, dydt: [f64; 8]) -> [f64; 8] with Mut, Panic, Div {
+    var out: [f64; 8] = dydt
+    out[0] = 0.0 - 1000.0 * y[0]
+    var k: i32 = 1
+    while k < 8 {
+        out[k] = 0.0
+        k = k + 1
+    }
+    return out
+}
+
+// Problem 1: Robertson chemical kinetics (classic stiff benchmark)
+//   dy1/dt = -0.04*y1 + 1e4*y2*y3
+//   dy2/dt = 0.04*y1 - 1e4*y2*y3 - 3e7*y2^2
+//   dy3/dt = 3e7*y2^2
+fn rhs_robertson(t: f64, y: [f64; 8], n: i32, dydt: [f64; 8]) -> [f64; 8] with Mut, Panic, Div {
+    var out: [f64; 8] = dydt
+    out[0] = 0.0 - 0.04 * y[0] + 10000.0 * y[1] * y[2]
+    out[1] = 0.04 * y[0] - 10000.0 * y[1] * y[2] - 30000000.0 * y[1] * y[1]
+    out[2] = 30000000.0 * y[1] * y[1]
+    var k: i32 = 3
+    while k < 8 {
+        out[k] = 0.0
+        k = k + 1
+    }
+    return out
+}
+
+// Problem 2: Van der Pol oscillator (stiff for large mu)
+//   dy1/dt = y2
+//   dy2/dt = mu*(1 - y1^2)*y2 - y1,  mu = 1000
+fn rhs_van_der_pol(t: f64, y: [f64; 8], n: i32, dydt: [f64; 8]) -> [f64; 8] with Mut, Panic, Div {
+    var out: [f64; 8] = dydt
+    let mu = 1000.0
+    out[0] = y[1]
+    out[1] = mu * (1.0 - y[0] * y[0]) * y[1] - y[0]
+    var k: i32 = 2
+    while k < 8 {
+        out[k] = 0.0
+        k = k + 1
+    }
+    return out
+}
+
+// Problem 3: Linear stiff 2x2 system
+//   dy/dt = [-1000, 0; 0, -1] * y
+//   Exact: y1 = exp(-1000t), y2 = exp(-t)
+fn rhs_linear_stiff(t: f64, y: [f64; 8], n: i32, dydt: [f64; 8]) -> [f64; 8] with Mut, Panic, Div {
+    var out: [f64; 8] = dydt
+    out[0] = 0.0 - 1000.0 * y[0]
+    out[1] = 0.0 - 1.0 * y[1]
+    var k: i32 = 2
+    while k < 8 {
+        out[k] = 0.0
+        k = k + 1
+    }
+    return out
+}
+
+// ============================================================================
+// RHS DISPATCHER
+// ============================================================================
+
+fn eval_rhs(fn_id: i32, t: f64, y: [f64; 8], n: i32) -> [f64; 8] with Mut, Panic, Div {
+    var dydt: [f64; 8] = [0.0; 8]
+    if fn_id == 0 {
+        return rhs_exponential_decay(t, y, n, dydt)
+    }
+    if fn_id == 1 {
+        return rhs_robertson(t, y, n, dydt)
+    }
+    if fn_id == 2 {
+        return rhs_van_der_pol(t, y, n, dydt)
+    }
+    if fn_id == 3 {
+        return rhs_linear_stiff(t, y, n, dydt)
+    }
+    return dydt
+}
+
+// ============================================================================
+// GAUSSIAN ELIMINATION (partial pivoting, up to 8x8)
+// ============================================================================
+
+fn gauss_solve_8(a: [f64; 64], b: [f64; 8], n: i32) -> [f64; 8] with Mut, Panic, Div {
+    var aa: [f64; 64] = a
+    var bb: [f64; 8] = b
+    var x: [f64; 8] = [0.0; 8]
+
+    // Forward elimination with partial pivoting
+    var col: i32 = 0
+    while col < n {
+        var max_val: f64 = bdf_abs_f64(aa[col * 8 + col])
+        var max_row: i32 = col
+        var row: i32 = col + 1
+        while row < n {
+            let val = bdf_abs_f64(aa[row * 8 + col])
+            if val > max_val {
+                max_val = val
+                max_row = row
+            }
+            row = row + 1
+        }
+
+        if max_row != col {
+            var k: i32 = 0
+            while k < n {
+                let tmp_a = aa[col * 8 + k]
+                aa[col * 8 + k] = aa[max_row * 8 + k]
+                aa[max_row * 8 + k] = tmp_a
+                k = k + 1
+            }
+            let tmp_b = bb[col]
+            bb[col] = bb[max_row]
+            bb[max_row] = tmp_b
+        }
+
+        let pivot = aa[col * 8 + col]
+        if bdf_abs_f64(pivot) < 1.0e-30 {
+            return x
+        }
+
+        row = col + 1
+        while row < n {
+            let factor = aa[row * 8 + col] / pivot
+            var k: i32 = col + 1
+            while k < n {
+                aa[row * 8 + k] = aa[row * 8 + k] - factor * aa[col * 8 + k]
+                k = k + 1
+            }
+            aa[row * 8 + col] = 0.0
+            bb[row] = bb[row] - factor * bb[col]
+            row = row + 1
+        }
+        col = col + 1
+    }
+
+    // Back substitution
+    var i: i32 = n - 1
+    while i >= 0 {
+        var sum: f64 = bb[i]
+        var j: i32 = i + 1
+        while j < n {
+            sum = sum - aa[i * 8 + j] * x[j]
+            j = j + 1
+        }
+        let diag = aa[i * 8 + i]
+        if bdf_abs_f64(diag) < 1.0e-30 {
+            x[i] = 0.0
+        } else {
+            x[i] = sum / diag
+        }
+        i = i - 1
+    }
+
+    return x
+}
+
+// ============================================================================
+// BDF PREDICTORS
+// ============================================================================
+
+fn bdf1_predict(state: BDFState) -> [f64; 8] with Mut, Panic, Div {
+    var y_pred: [f64; 8] = [0.0; 8]
+    var i: i32 = 0
+    while i < state.n_eqs {
+        y_pred[i] = state.y[i]
+        i = i + 1
+    }
+    return y_pred
+}
+
+fn bdf2_predict(state: BDFState) -> [f64; 8] with Mut, Panic, Div {
+    var y_pred: [f64; 8] = [0.0; 8]
+    var i: i32 = 0
+    while i < state.n_eqs {
+        y_pred[i] = 2.0 * state.y[i] - state.y_prev1[i]
+        i = i + 1
+    }
+    return y_pred
+}
+
+fn bdf3_predict(state: BDFState) -> [f64; 8] with Mut, Panic, Div {
+    var y_pred: [f64; 8] = [0.0; 8]
+    var i: i32 = 0
+    while i < state.n_eqs {
+        y_pred[i] = 3.0 * state.y[i] - 3.0 * state.y_prev1[i] + state.y_prev2[i]
+        i = i + 1
+    }
+    return y_pred
+}
+
+fn bdf4_predict(state: BDFState) -> [f64; 8] with Mut, Panic, Div {
+    var y_pred: [f64; 8] = [0.0; 8]
+    var i: i32 = 0
+    while i < state.n_eqs {
+        y_pred[i] = 4.0 * state.y[i] - 6.0 * state.y_prev1[i]
+                     + 4.0 * state.y_prev2[i] - state.y_prev3[i]
+        i = i + 1
+    }
+    return y_pred
+}
+
+// ============================================================================
+// BDF COEFFICIENT ACCESS
+// ============================================================================
+
+fn bdf_beta(order: i32) -> f64 with Panic {
+    if order == 1 { return 1.0 }
+    if order == 2 { return 2.0 / 3.0 }
+    if order == 3 { return 6.0 / 11.0 }
+    if order == 4 { return 12.0 / 25.0 }
+    return 1.0
+}
+
+// Error constant for BDF-k (Gear's formula)
+fn bdf_error_constant(order: i32) -> f64 with Panic {
+    if order == 1 { return 0.5 }
+    if order == 2 { return 2.0 / 9.0 }
+    if order == 3 { return 3.0 / 22.0 }
+    if order == 4 { return 12.0 / 125.0 }
+    return 0.5
+}
+
+fn bdf_history_sum(state: BDFState, order: i32) -> [f64; 8] with Mut, Panic, Div {
+    var s: [f64; 8] = [0.0; 8]
+    var i: i32 = 0
+
+    if order == 1 {
+        while i < state.n_eqs {
+            s[i] = state.y[i]
+            i = i + 1
+        }
+    } else if order == 2 {
+        while i < state.n_eqs {
+            s[i] = (4.0 / 3.0) * state.y[i] - (1.0 / 3.0) * state.y_prev1[i]
+            i = i + 1
+        }
+    } else if order == 3 {
+        while i < state.n_eqs {
+            s[i] = (18.0 / 11.0) * state.y[i]
+                 - (9.0 / 11.0) * state.y_prev1[i]
+                 + (2.0 / 11.0) * state.y_prev2[i]
+            i = i + 1
+        }
+    } else {
+        while i < state.n_eqs {
+            s[i] = (48.0 / 25.0) * state.y[i]
+                 - (36.0 / 25.0) * state.y_prev1[i]
+                 + (16.0 / 25.0) * state.y_prev2[i]
+                 - (3.0 / 25.0) * state.y_prev3[i]
+            i = i + 1
+        }
+    }
+    return s
+}
+
+// ============================================================================
+// FINITE-DIFFERENCE JACOBIAN APPROXIMATION
+// ============================================================================
+
+fn compute_jacobian(fn_id: i32, t: f64, y: [f64; 8], n: i32, f0: [f64; 8]) -> [f64; 64] with Mut, Panic, Div {
+    var jac: [f64; 64] = [0.0; 64]
+    let eps = 1.0e-8
+
+    var j: i32 = 0
+    while j < n {
+        var y_pert: [f64; 8] = y
+        let delta = eps * bdf_max_f64(bdf_abs_f64(y[j]), 1.0)
+        y_pert[j] = y[j] + delta
+
+        let f_pert = eval_rhs(fn_id, t, y_pert, n)
+
+        var i: i32 = 0
+        while i < n {
+            jac[i * 8 + j] = (f_pert[i] - f0[i]) / delta
+            i = i + 1
+        }
+        j = j + 1
+    }
+    return jac
+}
+
+// ============================================================================
+// NEWTON SOLVE FOR BDF CORRECTOR
+// ============================================================================
+
+fn bdf_newton_solve(
+    fn_id: i32,
+    t_new: f64,
+    y_pred: [f64; 8],
+    hist_sum: [f64; 8],
+    beta_h: f64,
+    n_eqs: i32,
+    newton_tol: f64,
+    max_iter: i32
+) -> NewtonResult with Mut, Panic, Div {
+    var y_k: [f64; 8] = y_pred
+    var converged: bool = false
+    var iters: i32 = 0
+    var fevals: i32 = 0
+    var jevals: i32 = 0
+
+    let f_pred = eval_rhs(fn_id, t_new, y_pred, n_eqs)
+    fevals = fevals + 1
+
+    let jac = compute_jacobian(fn_id, t_new, y_pred, n_eqs, f_pred)
+    fevals = fevals + n_eqs
+    jevals = jevals + 1
+
+    // Build iteration matrix M = I - beta*h*J
+    var M: [f64; 64] = [0.0; 64]
+    var i: i32 = 0
+    while i < n_eqs {
+        var j: i32 = 0
+        while j < n_eqs {
+            let jac_val = jac[i * 8 + j]
+            if i == j {
+                M[i * 8 + j] = 1.0 - beta_h * jac_val
+            } else {
+                M[i * 8 + j] = 0.0 - beta_h * jac_val
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    var iter: i32 = 0
+    while iter < max_iter {
+        let f_k = eval_rhs(fn_id, t_new, y_k, n_eqs)
+        fevals = fevals + 1
+
+        var neg_G: [f64; 8] = [0.0; 8]
+        i = 0
+        while i < n_eqs {
+            neg_G[i] = 0.0 - (y_k[i] - hist_sum[i] - beta_h * f_k[i])
+            i = i + 1
+        }
+
+        var g_norm: f64 = 0.0
+        i = 0
+        while i < n_eqs {
+            g_norm = g_norm + neg_G[i] * neg_G[i]
+            i = i + 1
+        }
+        g_norm = bdf_sqrt_f64(g_norm)
+
+        if g_norm < newton_tol {
+            converged = true
+            iters = iter + 1
+            return NewtonResult {
+                y: y_k,
+                converged: converged,
+                iters: iters,
+                fevals: fevals,
+                jevals: jevals
+            }
+        }
+
+        let delta = gauss_solve_8(M, neg_G, n_eqs)
+
+        i = 0
+        while i < n_eqs {
+            y_k[i] = y_k[i] + delta[i]
+            i = i + 1
+        }
+
+        iter = iter + 1
+    }
+
+    // Check if final residual is small enough
+    let f_final = eval_rhs(fn_id, t_new, y_k, n_eqs)
+    fevals = fevals + 1
+    var final_norm: f64 = 0.0
+    i = 0
+    while i < n_eqs {
+        let g_i = y_k[i] - hist_sum[i] - beta_h * f_final[i]
+        final_norm = final_norm + g_i * g_i
+        i = i + 1
+    }
+    final_norm = bdf_sqrt_f64(final_norm)
+    if final_norm < newton_tol * 100.0 {
+        converged = true
+    }
+
+    iters = max_iter
+    return NewtonResult {
+        y: y_k,
+        converged: converged,
+        iters: iters,
+        fevals: fevals,
+        jevals: jevals
+    }
+}
+
+// ============================================================================
+// ERROR ESTIMATION
+// ============================================================================
+
+fn error_norm_weighted(err: [f64; 8], y_old: [f64; 8], y_new: [f64; 8],
+                       n: i32, atol: f64, rtol: f64) -> f64 with Mut, Panic, Div {
+    var sum: f64 = 0.0
+    var i: i32 = 0
+    while i < n {
+        var scale = atol + rtol * bdf_max_f64(bdf_abs_f64(y_old[i]), bdf_abs_f64(y_new[i]))
+        if scale < 1.0e-30 { scale = 1.0e-30 }
+        let e = err[i] / scale
+        sum = sum + e * e
+        i = i + 1
+    }
+    if n > 0 {
+        return bdf_sqrt_f64(sum / (n as f64))
+    }
+    return 0.0
+}
+
+// ============================================================================
+// BDF STEP
+// ============================================================================
+
+fn bdf_step(state: BDFState, rhs_fn_id: i32) -> BDFStepResult with Mut, Panic, Div {
+    var s = state
+    let n = s.n_eqs
+    let h = s.dt
+    let t_new = s.t + h
+
+    // Determine effective order
+    // Stay at BDF-1 during rapid step growth (variable step BDF-k>1
+    // requires constant step size for accurate predictors)
+    var eff_order: i32 = 1
+    if s.order > 1 && s.n_history >= s.order - 1 {
+        eff_order = s.order
+    }
+    if eff_order > s.n_history + 1 {
+        eff_order = s.n_history + 1
+    }
+    if eff_order < 1 {
+        eff_order = 1
+    }
+    if eff_order > s.max_order {
+        eff_order = s.max_order
+    }
+
+    var y_pred: [f64; 8] = [0.0; 8]
+    if eff_order == 1 {
+        y_pred = bdf1_predict(s)
+    } else if eff_order == 2 {
+        y_pred = bdf2_predict(s)
+    } else if eff_order == 3 {
+        y_pred = bdf3_predict(s)
+    } else {
+        y_pred = bdf4_predict(s)
+    }
+
+    let beta = bdf_beta(eff_order)
+    let beta_h = beta * h
+    let hist_sum = bdf_history_sum(s, eff_order)
+
+    let newton = bdf_newton_solve(
+        rhs_fn_id, t_new, y_pred, hist_sum,
+        beta_h, n, s.newton_tol, s.max_newton_iter
+    )
+
+    s.n_function_evals = s.n_function_evals + newton.fevals
+    s.n_jac_evals = s.n_jac_evals + newton.jevals
+
+    if !newton.converged {
+        s.dt = s.dt * 0.25
+        s.dt = bdf_max_f64(1.0e-14, s.dt)
+        // Also reduce order on Newton failure
+        if s.order > 1 {
+            s.order = s.order - 1
+        }
+        return BDFStepResult { new_state: s, accepted: false }
+    }
+
+    // Error estimation using predictor-corrector difference with error constant
+    // This is the standard LSODE/CVODE approach for all orders
+    let err_const = bdf_error_constant(eff_order)
+
+    var lte: [f64; 8] = [0.0; 8]
+    var i: i32 = 0
+    while i < n {
+        lte[i] = err_const * (newton.y[i] - y_pred[i])
+        i = i + 1
+    }
+
+    let err_n = error_norm_weighted(lte, s.y, newton.y, n, s.atol, s.rtol)
+
+    let accepted = err_n <= 1.0
+
+    if accepted {
+        s.y_prev3 = s.y_prev2
+        s.y_prev2 = s.y_prev1
+        s.y_prev1 = s.y
+        s.y = newton.y
+        s.t = t_new
+        s.n_steps = s.n_steps + 1
+
+        if s.n_history < 3 {
+            s.n_history = s.n_history + 1
+        }
+
+        // Conservative order control: only promote if error is comfortably small
+        if s.n_history >= s.order && s.order < s.max_order && err_n < 0.1 {
+            s.order = s.order + 1
+        }
+
+        if err_n > 1.0e-10 {
+            let order_p1 = (eff_order + 1) as f64
+            let factor = 0.9 * exp(log(1.0 / err_n) / order_p1)
+            let factor_lim = bdf_min_f64(1.5, bdf_max_f64(0.8, factor))
+            s.dt = s.dt * factor_lim
+        } else {
+            s.dt = s.dt * 1.5
+        }
+    } else {
+        // Rejected: shrink step and reduce order
+        if s.order > 1 {
+            s.order = s.order - 1
+        }
+        if err_n > 1.0e-10 {
+            let order_p1 = (eff_order + 1) as f64
+            let factor = 0.9 * exp(log(1.0 / err_n) / order_p1)
+            let factor_lim = bdf_max_f64(0.1, bdf_min_f64(0.5, factor))
+            s.dt = s.dt * factor_lim
+        } else {
+            s.dt = s.dt * 0.5
+        }
+    }
+
+    s.dt = bdf_max_f64(1.0e-14, s.dt)
+    s.dt = bdf_min_f64(s.dt, s.dt_max)
+
+    return BDFStepResult { new_state: s, accepted: accepted }
+}
+
+// ============================================================================
+// INITIALIZATION
+// ============================================================================
+
+fn bdf_init(n_eqs: i32, y0: [f64; 8], t0: f64, dt: f64,
+            dt_max: f64, atol: f64, rtol: f64) -> BDFState {
+    return BDFState {
+        y: y0,
+        t: t0,
+        dt: dt,
+        dt_max: dt_max,
+        n_eqs: n_eqs,
+        y_prev1: [0.0; 8],
+        y_prev2: [0.0; 8],
+        y_prev3: [0.0; 8],
+        n_history: 0,
+        order: 1,
+        max_order: 4,
+        n_steps: 0,
+        n_function_evals: 0,
+        n_jac_evals: 0,
+        atol: atol,
+        rtol: rtol,
+        newton_tol: 1.0e-10,
+        max_newton_iter: 20
+    }
+}
+
+fn bdf_init_order(n_eqs: i32, y0: [f64; 8], t0: f64, dt: f64,
+                  dt_max: f64, atol: f64, rtol: f64, max_order: i32) -> BDFState {
+    return BDFState {
+        y: y0,
+        t: t0,
+        dt: dt,
+        dt_max: dt_max,
+        n_eqs: n_eqs,
+        y_prev1: [0.0; 8],
+        y_prev2: [0.0; 8],
+        y_prev3: [0.0; 8],
+        n_history: 0,
+        order: 1,
+        max_order: max_order,
+        n_steps: 0,
+        n_function_evals: 0,
+        n_jac_evals: 0,
+        atol: atol,
+        rtol: rtol,
+        newton_tol: 1.0e-10,
+        max_newton_iter: 20
+    }
+}
+
+// ============================================================================
+// INTEGRATION DRIVERS
+// ============================================================================
+
+fn bdf_integrate(state: BDFState, t_end: f64, rhs_fn_id: i32) -> BDFResult with Mut, Panic, Div {
+    var s = state
+    var n_accepted: i32 = 0
+    var n_rejected: i32 = 0
+    let max_total_steps: i32 = 50000
+
+    var total_attempts: i32 = 0
+    while s.t < t_end && total_attempts < max_total_steps {
+        if s.t + s.dt > t_end {
+            s.dt = t_end - s.t
+        }
+        if s.dt < 1.0e-15 {
+            s.dt = 1.0e-15
+        }
+
+        let step_result = bdf_step(s, rhs_fn_id)
+        s = step_result.new_state
+
+        if step_result.accepted {
+            n_accepted = n_accepted + 1
+        } else {
+            n_rejected = n_rejected + 1
+        }
+
+        total_attempts = total_attempts + 1
+    }
+
+    let success = s.t >= t_end - 1.0e-12
+
+    return BDFResult {
+        t_final: s.t,
+        y_final: s.y,
+        n_steps: s.n_steps,
+        n_accepted: n_accepted,
+        n_rejected: n_rejected,
+        n_function_evals: s.n_function_evals,
+        n_jac_evals: s.n_jac_evals,
+        success: success
+    }
+}
+
+fn bdf_integrate_trajectory(state: BDFState, t_end: f64, rhs_fn_id: i32) -> BDFTrajectory with Mut, Panic, Div {
+    var traj = BDFTrajectory {
+        times: [0.0; 256],
+        states: [0.0; 2048],
+        n_points: 0,
+        n_eqs: state.n_eqs
+    }
+
+    var s = state
+
+    traj.times[0] = s.t
+    var k: i32 = 0
+    while k < s.n_eqs {
+        traj.states[0 * 8 + k] = s.y[k]
+        k = k + 1
+    }
+    traj.n_points = 1
+
+    let max_total_steps: i32 = 50000
+    var total_attempts: i32 = 0
+
+    while s.t < t_end && total_attempts < max_total_steps && traj.n_points < 256 {
+        if s.t + s.dt > t_end {
+            s.dt = t_end - s.t
+        }
+        if s.dt < 1.0e-15 {
+            s.dt = 1.0e-15
+        }
+
+        let step_result = bdf_step(s, rhs_fn_id)
+        s = step_result.new_state
+
+        if step_result.accepted {
+            let idx = traj.n_points
+            traj.times[idx] = s.t
+            k = 0
+            while k < s.n_eqs {
+                traj.states[idx * 8 + k] = s.y[k]
+                k = k + 1
+            }
+            traj.n_points = traj.n_points + 1
+        }
+
+        total_attempts = total_attempts + 1
+    }
+
+    return traj
+}

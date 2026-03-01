@@ -1,0 +1,95 @@
+// Sounio MedLang: Generalised N-Compartment PK Framework
+//
+// A configurable multi-compartment PK model supporting:
+//   - Arbitrary number of peripheral compartments (up to 4)
+//   - Optional oral absorption (Gut depot compartment)
+//   - Optional zero-order infusion
+//   - Michaelis-Menten (nonlinear) elimination as alternative to linear CL
+//
+// This framework subsumes 1-, 2-, and 3-compartment models while enabling
+// exploration of higher-order disposition kinetics.
+//
+// Reference:
+//   Mould & Upton (2013), "Basic Concepts in Population Modeling", CPT:PSP
+//   Duffull et al. (2000), "A class of N-compartment pharmacokinetic models"
+
+// Multi-compartment IV model with linear elimination
+//
+// The user specifies n_periph ∈ {0, 1, 2, 3, 4} to control the number
+// of peripheral compartments. Each peripheral has its own Vp and Qp.
+//
+// n_periph = 0  →  one-compartment model
+// n_periph = 1  →  two-compartment model
+// n_periph = 2  →  three-compartment model
+// etc.
+model MultiCompartmentIV {
+    // Central compartment parameters
+    param CL: Knowledge<L/h> ~ LogNormal(mean: 5.0 L/h, omega: 0.30)
+    param V1: Knowledge<L> ~ LogNormal(mean: 10.0 L, omega: 0.25)
+
+    // Peripheral compartments (up to 4)
+    param V2: Knowledge<L> ~ LogNormal(mean: 20.0 L, omega: 0.35)
+    param Q2: Knowledge<L/h> ~ LogNormal(mean: 10.0 L/h, omega: 0.30)
+
+    param V3: Knowledge<L> ~ LogNormal(mean: 200.0 L, omega: 0.40)
+    param Q3: Knowledge<L/h> ~ LogNormal(mean: 2.0 L/h, omega: 0.50)
+
+    param V4: Knowledge<L> ~ LogNormal(mean: 500.0 L, omega: 0.45)
+    param Q4: Knowledge<L/h> ~ LogNormal(mean: 0.5 L/h, omega: 0.60)
+
+    param V5: Knowledge<L> ~ LogNormal(mean: 1000.0 L, omega: 0.50)
+    param Q5: Knowledge<L/h> ~ LogNormal(mean: 0.1 L/h, omega: 0.70)
+
+    // Configuration
+    config n_periph: i32 = 2   // number of peripheral compartments (0–4)
+
+    // Compartments — compiler emits only those needed by n_periph
+    compartment Central { volume: V1 }
+    compartment Peripheral1 { volume: V2, enabled: n_periph >= 1 }
+    compartment Peripheral2 { volume: V3, enabled: n_periph >= 2 }
+    compartment Peripheral3 { volume: V4, enabled: n_periph >= 3 }
+    compartment Peripheral4 { volume: V5, enabled: n_periph >= 4 }
+
+    // Flows
+    flow Central -> Elimination { rate: CL }
+    flow Central <-> Peripheral1 { rate: Q2, enabled: n_periph >= 1 }
+    flow Central <-> Peripheral2 { rate: Q3, enabled: n_periph >= 2 }
+    flow Central <-> Peripheral3 { rate: Q4, enabled: n_periph >= 3 }
+    flow Central <-> Peripheral4 { rate: Q5, enabled: n_periph >= 4 }
+
+    dose IV { into: Central }
+    observe Cp: Concentration = Central.concentration
+}
+
+// Multi-compartment model with Michaelis-Menten elimination
+//
+// Replaces linear CL with nonlinear (saturable) elimination:
+//   dA_central/dt = ... - Vmax * C / (Km + C)
+//
+// Common for phenytoin, ethanol, and other capacity-limited drugs.
+model MultiCompartmentMM {
+    // Nonlinear elimination parameters
+    param Vmax: Knowledge<mg/h> ~ LogNormal(mean: 500.0 mg/h, omega: 0.35)
+    param Km: Knowledge<mg/L> ~ LogNormal(mean: 10.0 mg/L, omega: 0.30)
+    param V1: Knowledge<L> ~ LogNormal(mean: 10.0 L, omega: 0.25)
+
+    // Optional peripheral compartment
+    param V2: Knowledge<L> ~ LogNormal(mean: 40.0 L, omega: 0.35)
+    param Q2: Knowledge<L/h> ~ LogNormal(mean: 8.0 L/h, omega: 0.30)
+
+    config n_periph: i32 = 1
+
+    compartment Central { volume: V1 }
+    compartment Peripheral1 { volume: V2, enabled: n_periph >= 1 }
+
+    // Michaelis-Menten elimination
+    flow Central -> Elimination {
+        rate: Vmax / (Km + Central.concentration)
+        kinetics: michaelis_menten
+    }
+
+    flow Central <-> Peripheral1 { rate: Q2, enabled: n_periph >= 1 }
+
+    dose IV { into: Central }
+    observe Cp: Concentration = Central.concentration
+}

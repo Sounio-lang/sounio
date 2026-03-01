@@ -1,0 +1,739 @@
+//! stdlib/nn/optimizers_quaternion.sio
+//!
+//! Optimizers for Quaternion Neural Networks
+//!
+//! Implements Adam optimizer specifically adapted for quaternion-valued parameters,
+//! suitable for training quaternion neural networks for PBPK modeling,
+//! EEG/ECG analysis, and spatial-temporal data processing.
+
+use stdlib.nn.quaternion.{Quaternion, quaternion_get_w, quaternion_get_x, quaternion_get_y, quaternion_get_z};
+use stdlib.nn.dense_quaternion.{DenseQuaternion, quaternion_mlp_new, LayerInfo};
+
+// ============================================================================
+// ADAM QUATERNION OPTIMIZER
+// ============================================================================
+
+// Adam optimizer adapted for quaternion parameters
+// 
+// Tracks first and second moments for each quaternion component (w, x, y, z)
+// Implements bias correction for accurate gradients in early training
+struct AdamQuaternion {
+    /// Learning rate
+    learning_rate: f64,
+    
+    /// Exponential decay rate for first moment estimate
+    beta1: f64,
+    
+    /// Exponential decay rate for second moment estimate  
+    beta2: f64,
+    
+    /// Small constant for numerical stability
+    epsilon: f64,
+    
+    /// Time step (iteration counter)
+    timestep: i64,
+    
+    /// First moment estimates (m_t) for each parameter
+    m_w: Vec<f64>,
+    m_x: Vec<f64>,
+    m_y: Vec<f64>,
+    m_z: Vec<f64>,
+    
+    /// Second moment estimates (v_t) for each parameter
+    v_w: Vec<f64>,
+    v_x: Vec<f64>,
+    v_y: Vec<f64>,
+    v_z: Vec<f64>,
+    
+    /// Total number of parameters
+    param_count: i64,
+}
+
+// Gradient information for quaternion parameters
+struct QuaternionGradients {
+    /// Gradients for weight parameters
+    weight_grads: Vec<Quaternion>,
+    
+    /// Gradients for bias parameters  
+    bias_grads: Vec<Quaternion>,
+    
+    /// Number of parameters
+    param_count: i64,
+}
+
+// ============================================================================
+// CONSTRUCTORS
+// ============================================================================
+
+// Create new Adam optimizer for quaternion parameters
+// 
+// # Arguments
+// * learning_rate - initial learning rate (typical: 0.001)
+// * beta1 - exponential decay rate for first moment (typical: 0.9)
+// * beta2 - exponential decay rate for second moment (typical: 0.999)
+// * epsilon - small constant for numerical stability (typical: 1e-8)
+// * param_count - total number of quaternion parameters to optimize
+fn adam_quaternion_new(learning_rate: f64, beta1: f64, beta2: f64, epsilon: f64, param_count: i64) -> AdamQuaternion {
+    AdamQuaternion {
+        learning_rate: learning_rate,
+        beta1: beta1,
+        beta2: beta2,
+        epsilon: epsilon,
+        timestep: 0,
+        m_w: vec![0.0; param_count as usize],
+        m_x: vec![0.0; param_count as usize],
+        m_y: vec![0.0; param_count as usize],
+        m_z: vec![0.0; param_count as usize],
+        v_w: vec![0.0; param_count as usize],
+        v_x: vec![0.0; param_count as usize],
+        v_y: vec![0.0; param_count as usize],
+        v_z: vec![0.0; param_count as usize],
+        param_count: param_count,
+    }
+}
+
+// Create Adam optimizer with default hyperparameters
+fn adam_quaternion_default(param_count: i64) -> AdamQuaternion {
+    adam_quaternion_new(0.001, 0.9, 0.999, 1e-8, param_count)
+}
+
+// ============================================================================
+// PARAMETER UPDATE
+// ============================================================================
+
+// Update parameters using Adam optimization
+// 
+// # Arguments
+// * optimizer - the Adam optimizer
+// * parameters - current parameters (weights and biases)
+// * gradients - gradients for each parameter
+// 
+// # Returns
+// Updated parameters after applying Adam updates
+fn adam_quaternion_update(optimizer: AdamQuaternion, parameters: Vec<Quaternion>, gradients: QuaternionGradients) -> Vec<Quaternion> {
+    var new_params = parameters
+    let t = optimizer.timestep + 1
+    
+    // Bias correction terms
+    let beta1_t = pow_f64(optimizer.beta1, t as f64)
+    let beta2_t = pow_f64(optimizer.beta2, t as f64)
+    let alpha_t = optimizer.learning_rate * sqrt_f64(1.0 - beta2_t) / (1.0 - beta1_t)
+    
+    // Update weights
+    var param_idx = 0
+    while param_idx < optimizer.param_count {
+        if param_idx < gradients.weight_grads.len() {
+            let grad = gradients.weight_grads[param_idx]
+            
+            // Extract gradient components
+            let grad_w = quaternion_get_w(grad)
+            let grad_x = quaternion_get_x(grad)
+            let grad_y = quaternion_get_y(grad)
+            let grad_z = quaternion_get_z(grad)
+            
+            // Update first moment estimates
+            let m_w_new = optimizer.beta1 * optimizer.m_w[param_idx] + (1.0 - optimizer.beta1) * grad_w
+            let m_x_new = optimizer.beta1 * optimizer.m_x[param_idx] + (1.0 - optimizer.beta1) * grad_x
+            let m_y_new = optimizer.beta1 * optimizer.m_y[param_idx] + (1.0 - optimizer.beta1) * grad_y
+            let m_z_new = optimizer.beta1 * optimizer.m_z[param_idx] + (1.0 - optimizer.beta1) * grad_z
+            
+            // Update second moment estimates
+            let v_w_new = optimizer.beta2 * optimizer.v_w[param_idx] + (1.0 - optimizer.beta2) * grad_w * grad_w
+            let v_x_new = optimizer.beta2 * optimizer.v_x[param_idx] + (1.0 - optimizer.beta2) * grad_x * grad_x
+            let v_y_new = optimizer.beta2 * optimizer.v_y[param_idx] + (1.0 - optimizer.beta2) * grad_y * grad_y
+            let v_z_new = optimizer.beta2 * optimizer.v_z[param_idx] + (1.0 - optimizer.beta2) * grad_z * grad_z
+            
+            // Apply bias correction and compute parameter update
+            let m_w_hat = m_w_new / (1.0 - beta1_t)
+            let m_x_hat = m_x_new / (1.0 - beta1_t)
+            let m_y_hat = m_y_new / (1.0 - beta1_t)
+            let m_z_hat = m_z_new / (1.0 - beta1_t)
+            
+            let v_w_hat = v_w_new / (1.0 - beta2_t)
+            let v_x_hat = v_x_new / (1.0 - beta2_t)
+            let v_y_hat = v_y_new / (1.0 - beta2_t)
+            let v_z_hat = v_z_new / (1.0 - beta2_t)
+            
+            // Compute parameter updates
+            let param_w = quaternion_get_w(new_params[param_idx]) - alpha_t * m_w_hat / (sqrt_f64(v_w_hat) + optimizer.epsilon)
+            let param_x = quaternion_get_x(new_params[param_idx]) - alpha_t * m_x_hat / (sqrt_f64(v_x_hat) + optimizer.epsilon)
+            let param_y = quaternion_get_y(new_params[param_idx]) - alpha_t * m_y_hat / (sqrt_f64(v_y_hat) + optimizer.epsilon)
+            let param_z = quaternion_get_z(new_params[param_idx]) - alpha_t * m_z_hat / (sqrt_f64(v_z_hat) + optimizer.epsilon)
+            
+            // Update parameter (simplified - in practice would need proper quaternion update)
+            // For now, we update each component separately
+            // new_params[param_idx] = quaternion_set_components(new_params[param_idx], param_w, param_x, param_y, param_z)
+        }
+        
+        param_idx = param_idx + 1
+    }
+    
+    // Update optimizer state
+    // Note: In a full implementation, we would return the updated optimizer state
+    
+    new_params
+}
+
+// ============================================================================
+// TRAINING UTILITIES
+// ============================================================================
+
+// Training step for a single batch
+// 
+// # Arguments
+// * model - the MLP model to train
+// * optimizer - Adam optimizer
+// * inputs - batch input data
+// * targets - batch target data
+// * loss_fn - loss function to use
+// 
+// # Returns
+// Tuple of (updated model, loss, gradients)
+fn train_step(
+    model: Vec<DenseQuaternion>,
+    optimizer: AdamQuaternion,
+    inputs: Vec<Vec<Quaternion>>,
+    targets: Vec<Vec<Quaternion>>,
+    loss_fn: LossFunction
+) -> (Vec<DenseQuaternion>, f64, QuaternionGradients) {
+    
+    let batch_size = inputs.len()
+    var total_loss = 0.0
+    
+    // Accumulate gradients over batch
+    var accumulated_grads = create_empty_gradients(calculate_total_params(model))
+    
+    var i = 0
+    while i < batch_size {
+        let input_batch = inputs[i]
+        let target_batch = targets[i]
+        
+        // Forward pass (simplified)
+        let predicted = forward_pass(model, input_batch)
+        
+        // Compute loss
+        let batch_loss = compute_loss(loss_fn, predicted, target_batch)
+        total_loss = total_loss + batch_loss
+        
+        // Compute gradients (simplified - would need proper backprop)
+        let batch_grads = compute_gradients(model, predicted, target_batch)
+        accumulated_grads = accumulate_gradients(accumulated_grads, batch_grads)
+        
+        i = i + 1
+    }
+    
+    // Average gradients
+    let avg_grads = average_gradients(accumulated_grads, batch_size)
+    let avg_loss = total_loss / batch_size as f64
+    
+    // Update model parameters
+    let updated_model = update_model_parameters(model, avg_grads, optimizer)
+    
+    (updated_model, avg_loss, avg_grads)
+}
+
+// Simple training loop for quaternion neural networks
+fn train_quaternion_mlp(
+    model: Vec<DenseQuaternion>,
+    train_inputs: Vec<Vec<Quaternion>>,
+    train_targets: Vec<Vec<Quaternion>>,
+    epochs: i64,
+    learning_rate: f64
+) -> Vec<DenseQuaternion> {
+    
+    let total_params = calculate_total_params(model)
+    let optimizer = adam_quaternion_default(total_params)
+    let loss_fn = LossFunction::MSE
+    
+    var current_model = model
+    
+    var epoch = 0
+    while epoch < epochs {
+        let (updated_model, loss, _) = train_step(
+            current_model, 
+            optimizer, 
+            train_inputs, 
+            train_targets, 
+            loss_fn
+        )
+        current_model = updated_model
+        
+        if epoch % 10 == 0 {
+            println("Epoch ")
+            println(epoch)
+            println(", Loss: ")
+            println(loss)
+        }
+        
+        epoch = epoch + 1
+    }
+    
+    current_model
+}
+
+// ============================================================================
+// PBPK-SPECIFIC LOSS FUNCTIONS
+// ============================================================================
+
+// Loss functions for different applications
+enum LossFunction {
+    MSE,
+    MAE,
+    PBPK_Spatial,
+    PBPK_Temporal,
+    EEG_Spectral,
+    ECG_Beat,
+}
+
+// Compute PBPK spatial distribution loss
+// Measures how well the model predicts drug concentration across different organs/tissues
+fn pbpk_spatial_loss(predicted: Vec<Vec<Quaternion>>, targets: Vec<Vec<Quaternion>>) -> f64 {
+    var total_loss = 0.0
+    var count = 0
+    
+    var batch_idx = 0
+    while batch_idx < predicted.len() {
+        if batch_idx < targets.len() {
+            let pred_batch = predicted[batch_idx]
+            let targ_batch = targets[batch_idx]
+            
+            // Compute spatial correlation across organs/tissues
+            var organ_loss = 0.0
+            var organ_count = 0
+            
+            var organ_idx = 0
+            while organ_idx < pred_batch.len() {
+                if organ_idx < targ_batch.len() {
+                    // Use real part (w) for concentration values
+                    let pred_conc = quaternion_get_w(pred_batch[organ_idx])
+                    let targ_conc = quaternion_get_w(targ_batch[organ_idx])
+                    
+                    // Relative error to handle different concentration scales
+                    let relative_error = abs_f64(pred_conc - targ_conc) / (abs_f64(targ_conc) + 1e-8)
+                    organ_loss = organ_loss + relative_error
+                    organ_count = organ_count + 1
+                }
+                organ_idx = organ_idx + 1
+            }
+            
+            if organ_count > 0 {
+                total_loss = total_loss + organ_loss / organ_count as f64
+                count = count + 1
+            }
+        }
+        batch_idx = batch_idx + 1
+    }
+    
+    if count > 0 {
+        total_loss / count as f64
+    } else {
+        0.0
+    }
+}
+
+// Compute PBPK temporal dynamics loss
+// Measures prediction accuracy of drug concentration over time
+fn pbpk_temporal_loss(predicted: Vec<Vec<Quaternion>>, targets: Vec<Vec<Quaternion>>) -> f64 {
+    var total_loss = 0.0
+    var count = 0
+    
+    var batch_idx = 0
+    while batch_idx < predicted.len() {
+        if batch_idx < targets.len() {
+            let pred_temporal = predicted[batch_idx]
+            let targ_temporal = targets[batch_idx]
+            
+            // Compute temporal smoothness and accuracy
+            var temporal_loss = 0.0
+            var temporal_count = 0
+            
+            var t = 1
+            while t < pred_temporal.len() {
+                if t < targ_temporal.len() {
+                    // Concentration change over time
+                    let pred_current = quaternion_get_w(pred_temporal[t])
+                    let pred_prev = quaternion_get_w(pred_temporal[t-1])
+                    let targ_current = quaternion_get_w(targ_temporal[t])
+                    let targ_prev = quaternion_get_w(targ_temporal[t-1])
+                    
+                    // Rate of change error
+                    let pred_rate = pred_current - pred_prev
+                    let targ_rate = targ_current - targ_prev
+                    let rate_error = abs_f64(pred_rate - targ_rate)
+                    
+                    temporal_loss = temporal_loss + rate_error
+                    temporal_count = temporal_count + 1
+                }
+                t = t + 1
+            }
+            
+            if temporal_count > 0 {
+                total_loss = total_loss + temporal_loss / temporal_count as f64
+                count = count + 1
+            }
+        }
+        batch_idx = batch_idx + 1
+    }
+    
+    if count > 0 {
+        total_loss / count as f64
+    } else {
+        0.0
+    }
+}
+
+// Combined PBPK loss function
+// Balances spatial accuracy and temporal dynamics
+fn pbpk_combined_loss(predicted: Vec<Vec<Quaternion>>, targets: Vec<Vec<Quaternion>>, spatial_weight: f64, temporal_weight: f64) -> f64 {
+    let spatial_loss = pbpk_spatial_loss(predicted, targets)
+    let temporal_loss = pbpk_temporal_loss(predicted, targets)
+    
+    spatial_weight * spatial_loss + temporal_weight * temporal_loss
+}
+
+// ============================================================================
+// GRADIENT COMPUTATION HELPERS
+// ============================================================================
+
+// Calculate total number of parameters in model
+fn calculate_total_params(model: Vec<DenseQuaternion>) -> i64 {
+    var total = 0
+    
+    var layer_idx = 0
+    while layer_idx < model.len() {
+        let layer = model[layer_idx]
+        let layer_info = layer.info()
+        
+        // Weights: input_size * output_size quaternions (4 components each)
+        let weight_params = layer_info.input_size * layer_info.output_size * 4
+        // Biases: output_size quaternions (4 components each)
+        let bias_params = layer_info.output_size * 4
+        
+        total = total + weight_params + bias_params
+        layer_idx = layer_idx + 1
+    }
+    
+    total
+}
+
+// Create empty gradient structure
+fn create_empty_gradients(param_count: i64) -> QuaternionGradients {
+    QuaternionGradients {
+        weight_grads: Vec::new(),
+        bias_grads: Vec::new(),
+        param_count: param_count,
+    }
+}
+
+// Accumulate gradients over batch
+fn accumulate_gradients(acc: QuaternionGradients, batch: QuaternionGradients) -> QuaternionGradients {
+    // Simplified implementation
+    batch
+}
+
+// Average gradients over batch size
+fn average_gradients(grads: QuaternionGradients, batch_size: i64) -> QuaternionGradients {
+    // Simplified implementation
+    grads
+}
+
+// Compute loss for given function
+fn compute_loss(loss_fn: LossFunction, predicted: Vec<Vec<Quaternion>>, targets: Vec<Vec<Quaternion>>) -> f64 {
+    match loss_fn {
+        LossFunction::MSE => 0.0, // Simplified
+        LossFunction::MAE => 0.0,  // Simplified
+        LossFunction::PBPK_Spatial => pbpk_spatial_loss(predicted, targets),
+        LossFunction::PBPK_Temporal => pbpk_temporal_loss(predicted, targets),
+        LossFunction::EEG_Spectral => 0.0,  // Simplified
+        LossFunction::ECG_Beat => 0.0,     // Simplified
+    }
+}
+
+// ============================================================================
+// QUATERNION HELPERS (needed before compute_gradients / forward_pass)
+// ============================================================================
+
+// Construct a plain Quaternion from four f64 scalar components
+fn quaternion_from_components(w: f64, x: f64, y: f64, z: f64) -> Quaternion {
+    quaternion_exact(w, x, y, z)
+}
+
+// Apply split-ReLU activation: relu independently on w, x, y, z
+fn quaternion_split_relu(q: Quaternion) -> Quaternion {
+    quaternion_relu(q)
+}
+
+// Compute component-wise MSE loss between two quaternion vectors
+// Returns sum of (out_i.w - tgt_i.w)^2 + (out_i.x - tgt_i.x)^2 + ...
+fn quaternion_vec_mse(output: Vec<Quaternion>, target: Vec<Quaternion>) -> f64 {
+    var loss = 0.0
+    var idx = 0
+    while idx < output.len() {
+        if idx < target.len() {
+            let dw = quaternion_get_w(output[idx]) - quaternion_get_w(target[idx])
+            let dx = quaternion_get_x(output[idx]) - quaternion_get_x(target[idx])
+            let dy = quaternion_get_y(output[idx]) - quaternion_get_y(target[idx])
+            let dz = quaternion_get_z(output[idx]) - quaternion_get_z(target[idx])
+            loss = loss + dw * dw + dx * dx + dy * dy + dz * dz
+        }
+        idx = idx + 1
+    }
+    loss
+}
+
+// Forward pass through a single DenseQuaternion layer
+// Computes quaternion matrix-vector product then applies split-ReLU
+fn layer_forward(layer: DenseQuaternion, inputs: Vec<Quaternion>) -> Vec<Quaternion> {
+    dense_quaternion_forward(layer, inputs)
+}
+
+// ============================================================================
+// GRADIENT COMPUTATION (finite differences, component-wise MSE)
+// ============================================================================
+
+// Compute gradients by finite differences for a single layer's weights
+// Perturbs each weight component by epsilon and measures MSE change
+fn compute_layer_weight_gradients(
+    layer: DenseQuaternion,
+    inputs: Vec<Quaternion>,
+    targets: Vec<Quaternion>,
+    epsilon: f64
+) -> Vec<Quaternion> {
+    let n_weights = layer.weights.len()
+    var grads: Vec<Quaternion> = Vec::new()
+
+    // Baseline output and loss
+    let baseline_out = layer_forward(layer, inputs)
+    let baseline_loss = quaternion_vec_mse(baseline_out, targets)
+
+    var wi = 0
+    while wi < n_weights {
+        let w = layer.weights[wi]
+        let w_val = quaternion_get_w(w)
+        let x_val = quaternion_get_x(w)
+        let y_val = quaternion_get_y(w)
+        let z_val = quaternion_get_z(w)
+
+        // Perturb w component
+        var layer_pw = layer
+        layer_pw.weights[wi] = quaternion_from_components(w_val + epsilon, x_val, y_val, z_val)
+        let loss_pw = quaternion_vec_mse(layer_forward(layer_pw, inputs), targets)
+        let grad_w = (loss_pw - baseline_loss) / epsilon
+
+        // Perturb x component
+        var layer_px = layer
+        layer_px.weights[wi] = quaternion_from_components(w_val, x_val + epsilon, y_val, z_val)
+        let loss_px = quaternion_vec_mse(layer_forward(layer_px, inputs), targets)
+        let grad_x = (loss_px - baseline_loss) / epsilon
+
+        // Perturb y component
+        var layer_py = layer
+        layer_py.weights[wi] = quaternion_from_components(w_val, x_val, y_val + epsilon, z_val)
+        let loss_py = quaternion_vec_mse(layer_forward(layer_py, inputs), targets)
+        let grad_y = (loss_py - baseline_loss) / epsilon
+
+        // Perturb z component
+        var layer_pz = layer
+        layer_pz.weights[wi] = quaternion_from_components(w_val, x_val, y_val, z_val + epsilon)
+        let loss_pz = quaternion_vec_mse(layer_forward(layer_pz, inputs), targets)
+        let grad_z = (loss_pz - baseline_loss) / epsilon
+
+        grads.push(quaternion_from_components(grad_w, grad_x, grad_y, grad_z))
+        wi = wi + 1
+    }
+
+    grads
+}
+
+// Compute gradients for whole model using finite differences
+fn compute_gradients(model: Vec<DenseQuaternion>, predicted: Vec<Vec<Quaternion>>, targets: Vec<Vec<Quaternion>>) -> QuaternionGradients {
+    let param_count = calculate_total_params(model)
+    var all_weight_grads: Vec<Quaternion> = Vec::new()
+
+    // Use first batch element for gradient estimation
+    if model.len() > 0 && targets.len() > 0 {
+        let first_target = targets[0]
+        let epsilon = 1e-5
+
+        // For first layer only (single-step finite diff for efficiency)
+        let layer0 = model[0]
+        var inputs_q: Vec<Quaternion> = Vec::new()
+        // Use zero-input as reference when no explicit input is tracked here
+        var qi = 0
+        while qi < layer0.input_size {
+            inputs_q.push(quaternion_from_components(0.1, 0.0, 0.0, 0.0))
+            qi = qi + 1
+        }
+
+        let layer_grads = compute_layer_weight_gradients(layer0, inputs_q, first_target, epsilon)
+        var gi = 0
+        while gi < layer_grads.len() {
+            all_weight_grads.push(layer_grads[gi])
+            gi = gi + 1
+        }
+    }
+
+    QuaternionGradients {
+        weight_grads: all_weight_grads,
+        bias_grads: Vec::new(),
+        param_count: param_count,
+    }
+}
+
+// ============================================================================
+// UPDATE MODEL PARAMETERS (Adam per-component update)
+// ============================================================================
+
+// Apply Adam update to a single DenseQuaternion layer's weights
+// Uses per-component (w, x, y, z) moment tracking from optimizer state
+fn adam_update_layer(
+    layer: DenseQuaternion,
+    weight_grads: Vec<Quaternion>,
+    optimizer: AdamQuaternion
+) -> DenseQuaternion {
+    let t = optimizer.timestep + 1
+    let beta1_t = pow_f64(optimizer.beta1, t as f64)
+    let beta2_t = pow_f64(optimizer.beta2, t as f64)
+    let bias_corr1 = 1.0 - beta1_t
+    let bias_corr2 = 1.0 - beta2_t
+
+    var new_weights = layer.weights
+    let n = layer.weights.len()
+
+    var wi = 0
+    while wi < n {
+        if wi < weight_grads.len() && wi < optimizer.m_w.len() {
+            let grad = weight_grads[wi]
+            let gw = quaternion_get_w(grad)
+            let gx = quaternion_get_x(grad)
+            let gy = quaternion_get_y(grad)
+            let gz = quaternion_get_z(grad)
+
+            // First moment update
+            let mw = optimizer.beta1 * optimizer.m_w[wi] + (1.0 - optimizer.beta1) * gw
+            let mx = optimizer.beta1 * optimizer.m_x[wi] + (1.0 - optimizer.beta1) * gx
+            let my = optimizer.beta1 * optimizer.m_y[wi] + (1.0 - optimizer.beta1) * gy
+            let mz = optimizer.beta1 * optimizer.m_z[wi] + (1.0 - optimizer.beta1) * gz
+
+            // Second moment update
+            let vw = optimizer.beta2 * optimizer.v_w[wi] + (1.0 - optimizer.beta2) * gw * gw
+            let vx = optimizer.beta2 * optimizer.v_x[wi] + (1.0 - optimizer.beta2) * gx * gx
+            let vy = optimizer.beta2 * optimizer.v_y[wi] + (1.0 - optimizer.beta2) * gy * gy
+            let vz = optimizer.beta2 * optimizer.v_z[wi] + (1.0 - optimizer.beta2) * gz * gz
+
+            // Bias-corrected moments
+            let mw_hat = mw / bias_corr1
+            let mx_hat = mx / bias_corr1
+            let my_hat = my / bias_corr1
+            let mz_hat = mz / bias_corr1
+
+            let vw_hat = vw / bias_corr2
+            let vx_hat = vx / bias_corr2
+            let vy_hat = vy / bias_corr2
+            let vz_hat = vz / bias_corr2
+
+            // Parameter update: p = p - lr * m_hat / (sqrt(v_hat) + epsilon)
+            let pw = quaternion_get_w(layer.weights[wi]) - optimizer.learning_rate * mw_hat / (sqrt_f64(vw_hat) + optimizer.epsilon)
+            let px = quaternion_get_x(layer.weights[wi]) - optimizer.learning_rate * mx_hat / (sqrt_f64(vx_hat) + optimizer.epsilon)
+            let py = quaternion_get_y(layer.weights[wi]) - optimizer.learning_rate * my_hat / (sqrt_f64(vy_hat) + optimizer.epsilon)
+            let pz = quaternion_get_z(layer.weights[wi]) - optimizer.learning_rate * mz_hat / (sqrt_f64(vz_hat) + optimizer.epsilon)
+
+            new_weights[wi] = quaternion_from_components(pw, px, py, pz)
+        }
+        wi = wi + 1
+    }
+
+    DenseQuaternion {
+        weights: new_weights,
+        biases: layer.biases,
+        input_size: layer.input_size,
+        output_size: layer.output_size,
+        activation: layer.activation,
+    }
+}
+
+// Update all model layer weights using Adam optimizer and computed gradients
+fn update_model_parameters(model: Vec<DenseQuaternion>, gradients: QuaternionGradients, optimizer: AdamQuaternion) -> Vec<DenseQuaternion> {
+    var updated_model = model
+    var layer_idx = 0
+
+    while layer_idx < model.len() {
+        let layer = model[layer_idx]
+        // Slice the relevant portion of weight_grads for this layer
+        // For simplicity, pass all gradients — adam_update_layer uses index bounds
+        let updated_layer = adam_update_layer(layer, gradients.weight_grads, optimizer)
+        updated_model[layer_idx] = updated_layer
+        layer_idx = layer_idx + 1
+    }
+
+    updated_model
+}
+
+// ============================================================================
+// FORWARD PASS (quaternion matrix-vector product + split-ReLU)
+// ============================================================================
+
+// Forward pass through entire model (sequential layer composition)
+// Each layer: output = split_relu(W * input + b)
+// Returns activations from last layer wrapped in outer Vec for batch compatibility
+fn forward_pass(model: Vec<DenseQuaternion>, inputs: Vec<Quaternion>) -> Vec<Vec<Quaternion>> {
+    var current = inputs
+    var layer_idx = 0
+
+    while layer_idx < model.len() {
+        let layer = model[layer_idx]
+        // Quaternion matrix-vector product via dense_quaternion_forward
+        let pre_act = dense_quaternion_forward(layer, current)
+
+        // Apply split-ReLU (component-wise ReLU on w, x, y, z) to each output quaternion
+        var activated: Vec<Quaternion> = Vec::new()
+        var qi = 0
+        while qi < pre_act.len() {
+            activated.push(quaternion_split_relu(pre_act[qi]))
+            qi = qi + 1
+        }
+
+        current = activated
+        layer_idx = layer_idx + 1
+    }
+
+    // Wrap result in outer vec to match batch-output signature Vec<Vec<Quaternion>>
+    var result: Vec<Vec<Quaternion>> = Vec::new()
+    result.push(current)
+    result
+}
+
+// ============================================================================
+// UTILITY FUNCTIONS
+// ============================================================================
+
+fn sqrt_f64(x: f64) -> f64 {
+    if x <= 0.0 { return 0.0 }
+    var guess = x / 2.0
+    if guess < 1.0 { guess = 1.0 }
+    var i = 0
+    while i < 20 {
+        guess = (guess + x / guess) / 2.0
+        i = i + 1
+    }
+    guess
+}
+
+fn pow_f64(base: f64, exp: f64) -> f64 {
+    if exp <= 0.0 { return 1.0 }
+    if exp < 1.0 { return base }
+    var result = 1.0
+    var i = 0.0
+    while i < exp {
+        result = result * base
+        i = i + 1.0
+    }
+    result
+}
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+// ============================================================================
+// TESTS

@@ -1,0 +1,509 @@
+//! stdlib/nn/quaternion.sio
+//!
+//! Quaternion Neural Networks - Epistemically Aware Quaternion Types
+//!
+//! This module implements quaternion arithmetic with full epistemic uncertainty
+//! propagation, enabling neuro-symbolic computing with spatial-temporal data
+//! for PBPK modeling, EEG/ECG analysis, and genomic/proteomic applications.
+//!
+//! # Philosophy
+//!
+//! Traditional quaternion: q = w + xi + yj + zk
+//! Epistemic quaternion: q = (w ± σw) + (x ± σx)i + (y ± σy)j + (z ± σz)k
+//!                       with confidence c ∈ [0,1] and provenance tracking
+//!
+//! Every quaternion operation propagates uncertainty using the delta method
+//! and maintains confidence through transformation chains.
+
+use stdlib.epistemic.core.{EpistemicValue, uncertainty_std, epistemic_std};
+use stdlib.epistemic.knowledge.{Knowledge, BetaConfidence};
+
+// ============================================================================
+// QUATERNION CORE TYPE
+// ============================================================================
+
+// Quaternion with epistemic uncertainty and confidence
+// 
+// Represents: q = w + xi + yj + zk
+// Where each component w, x, y, z is an EpistemicValue
+pub struct Quaternion {
+    /// Real part w
+    w: EpistemicValue,
+    
+    /// Imaginary part x (coefficient of i)
+    x: EpistemicValue,
+    
+    /// Imaginary part y (coefficient of j)
+    y: EpistemicValue,
+    
+    /// Imaginary part z (coefficient of k)
+    z: EpistemicValue,
+    
+    /// Confidence in the quaternion as a whole (from Beta posterior)
+    confidence: BetaConfidence,
+    
+    /// Provenance tracking
+    provenance_id: i64,
+}
+
+// ============================================================================
+// CONSTRUCTORS
+// ============================================================================
+
+// Create quaternion from exact components (maximum confidence)
+fn quaternion_exact(w: f64, x: f64, y: f64, z: f64) -> Quaternion {
+    let comp_confidence = 0.99
+    Quaternion {
+        w: epistemic_std(w, 0.0, comp_confidence),
+        x: epistemic_std(x, 0.0, comp_confidence),
+        y: epistemic_std(y, 0.0, comp_confidence),
+        z: epistemic_std(z, 0.0, comp_confidence),
+        confidence: BetaConfidence::strong(0.99, 1000.0),
+        provenance_id: 0,
+    }
+}
+
+// Create quaternion with uncertainty in each component
+fn quaternion_uncertain(
+    w: f64, w_unc: f64, w_conf: f64,
+    x: f64, x_unc: f64, x_conf: f64,
+    y: f64, y_unc: f64, y_conf: f64,
+    z: f64, z_unc: f64, z_conf: f64
+) -> Quaternion {
+    let min_conf = min_f64(min_f64(min_f64(w_conf, x_conf), y_conf), z_conf)
+    Quaternion {
+        w: epistemic_std(w, w_unc, w_conf),
+        x: epistemic_std(x, x_unc, x_conf),
+        y: epistemic_std(y, y_unc, y_conf),
+        z: epistemic_std(z, z_unc, z_conf),
+        confidence: BetaConfidence::from_rate(min_conf, 100.0),
+        provenance_id: 0,
+    }
+}
+
+// Create quaternion representing pure rotation around axis
+// angle: rotation angle in radians
+// axis_x, axis_y, axis_z: rotation axis (automatically normalized)
+fn quaternion_from_axis_angle(angle: f64, axis_x: f64, axis_y: f64, axis_z: f64) -> Quaternion {
+    let half_angle = angle / 2.0
+    let sin_half = sin_f64(half_angle)
+    let cos_half = cos_f64(half_angle)
+    
+    // Normalize axis
+    let norm = sqrt_f64(axis_x * axis_x + axis_y * axis_y + axis_z * axis_z)
+    let nx = if norm > 1.0e-10 { axis_x / norm } else { 0.0 }
+    let ny = if norm > 1.0e-10 { axis_y / norm } else { 0.0 }
+    let nz = if norm > 1.0e-10 { axis_z / norm } else { 0.0 }
+    
+    quaternion_exact(
+        cos_half,
+        sin_half * nx,
+        sin_half * ny,
+        sin_half * nz
+    )
+}
+
+// Create identity quaternion (no rotation)
+fn quaternion_identity() -> Quaternion {
+    quaternion_exact(1.0, 0.0, 0.0, 0.0)
+}
+
+// Create zero quaternion
+fn quaternion_zero() -> Quaternion {
+    quaternion_exact(0.0, 0.0, 0.0, 0.0)
+}
+
+// ============================================================================
+// ACCESSORS
+// ============================================================================
+
+fn quaternion_get_w(q: Quaternion) -> f64 {
+    q.w.value
+}
+
+fn quaternion_get_x(q: Quaternion) -> f64 {
+    q.x.value
+}
+
+fn quaternion_get_y(q: Quaternion) -> f64 {
+    q.y.value
+}
+
+fn quaternion_get_z(q: Quaternion) -> f64 {
+    q.z.value
+}
+
+fn quaternion_get_confidence(q: Quaternion) -> f64 {
+    q.confidence.mean()
+}
+
+fn quaternion_get_std_w(q: Quaternion) -> f64 {
+    q.w.std_u
+}
+
+fn quaternion_get_std_x(q: Quaternion) -> f64 {
+    q.x.std_u
+}
+
+fn quaternion_get_std_y(q: Quaternion) -> f64 {
+    q.y.std_u
+}
+
+fn quaternion_get_std_z(q: Quaternion) -> f64 {
+    q.z.std_u
+}
+
+// ============================================================================
+// BASIC QUATERNION OPERATIONS
+// ============================================================================
+
+// Quaternion conjugate: q* = w - xi - yj - zk
+fn quaternion_conjugate(q: Quaternion) -> Quaternion {
+    Quaternion {
+        w: q.w,
+        x: sub_epistemic(q.x, q.x), // x - x = 0, preserves uncertainty
+        y: sub_epistemic(q.y, q.y), // y - y = 0, preserves uncertainty
+        z: sub_epistemic(q.z, q.z), // z - z = 0, preserves uncertainty
+        confidence: q.confidence.decay(0.98),
+        provenance_id: q.provenance_id + 1,
+    }
+}
+
+// Quaternion norm: ||q|| = sqrt(w² + x² + y² + z²)
+fn quaternion_norm(q: Quaternion) -> EpistemicValue {
+    let w2 = mul_epistemic(q.w, q.w)
+    let x2 = mul_epistemic(q.x, q.x)
+    let y2 = mul_epistemic(q.y, q.y)
+    let z2 = mul_epistemic(q.z, q.z)
+    
+    let sum = add_epistemic(add_epistemic(w2, x2), add_epistemic(y2, z2))
+    
+    // sqrt using series expansion for uncertainty propagation
+    let norm_value = sqrt_f64(sum.value)
+    let std_combined = if norm_value > 1.0e-10 { sum.std_u / (2.0 * norm_value) } else { sum.std_u }
+    
+    epistemic_std(norm_value, std_combined, q.confidence.mean())
+}
+
+// Quaternion inverse: q⁻¹ = q*/||q||²
+fn quaternion_inverse(q: Quaternion) -> Quaternion {
+    let norm_sq = quaternion_norm_squared(q)
+    let one = epistemic_std(1.0, 0.0, 1.0)
+    
+    let inv_norm_sq = div_epistemic(one, norm_sq)
+    let conj = quaternion_conjugate(q)
+    
+    quaternion_mul_scalar(conj, inv_norm_sq)
+}
+
+// Quaternion norm squared: ||q||² = w² + x² + y² + z²
+fn quaternion_norm_squared(q: Quaternion) -> EpistemicValue {
+    let w2 = mul_epistemic(q.w, q.w)
+    let x2 = mul_epistemic(q.x, q.x)
+    let y2 = mul_epistemic(q.y, q.y)
+    let z2 = mul_epistemic(q.z, q.z)
+    
+    add_epistemic(add_epistemic(w2, x2), add_epistemic(y2, z2))
+}
+
+// ============================================================================
+// QUATERNION ARITHMETIC
+// ============================================================================
+
+// Quaternion multiplication: (a_w + a_x i + a_y j + a_z k) * (b_w + b_x i + b_y j + b_z k)
+// 
+// Result:
+// w = a_w*b_w - a_x*b_x - a_y*b_y - a_z*b_z
+// x = a_w*b_x + a_x*b_w + a_y*b_z - a_z*b_y
+// y = a_w*b_y - a_x*b_z + a_y*b_w + a_z*b_x
+// z = a_w*b_z + a_x*b_y - a_y*b_x + a_z*b_w
+fn quaternion_mul(a: Quaternion, b: Quaternion) -> Quaternion {
+    let w = sub_epistemic(
+        sub_epistemic(sub_epistemic(
+            mul_epistemic(a.w, b.w),
+            mul_epistemic(a.x, b.x)
+        ), mul_epistemic(a.y, b.y)),
+        mul_epistemic(a.z, b.z)
+    )
+    
+    let x_fixed = add_epistemic(
+        add_epistemic(mul_epistemic(a.w, b.x), mul_epistemic(a.x, b.w)),
+        sub_epistemic(mul_epistemic(a.y, b.z), mul_epistemic(a.z, b.y))
+    )
+    
+    let y = sub_epistemic(
+        add_epistemic(
+            add_epistemic(mul_epistemic(a.w, b.y), mul_epistemic(a.x, b.z)),
+            mul_epistemic(a.y, b.w)
+        ),
+        mul_epistemic(a.z, b.x)
+    )
+    
+    let z = add_epistemic(
+        add_epistemic(
+            sub_epistemic(mul_epistemic(a.w, b.z), mul_epistemic(a.x, b.y)),
+            mul_epistemic(a.y, b.x)
+        ),
+        mul_epistemic(a.z, b.w)
+    )
+    
+    let min_conf = min_f64(min_f64(min_f64(a.confidence.mean(), b.confidence.mean()), 
+                                  min_f64(a.w.conf, b.w.conf)), 
+                          min_f64(min_f64(a.x.conf, b.x.conf), 
+                                 min_f64(a.y.conf, b.y.conf)))
+    
+    Quaternion {
+        w: w,
+        x: x_fixed,
+        y: y,
+        z: z,
+        confidence: BetaConfidence::from_rate(min_conf, 50.0),
+        provenance_id: max_i64(a.provenance_id, b.provenance_id) + 1,
+    }
+}
+
+// Quaternion addition: (a_w + b_w) + (a_x + b_x)i + (a_y + b_y)j + (a_z + b_z)k
+fn quaternion_add(a: Quaternion, b: Quaternion) -> Quaternion {
+    Quaternion {
+        w: add_epistemic(a.w, b.w),
+        x: add_epistemic(a.x, b.x),
+        y: add_epistemic(a.y, b.y),
+        z: add_epistemic(a.z, b.z),
+        confidence: a.confidence.combine(&b.confidence).decay(0.99),
+        provenance_id: max_i64(a.provenance_id, b.provenance_id) + 1,
+    }
+}
+
+// Quaternion subtraction: (a_w - b_w) + (a_x - b_x)i + (a_y - b_y)j + (a_z - b_z)k
+fn quaternion_sub(a: Quaternion, b: Quaternion) -> Quaternion {
+    Quaternion {
+        w: sub_epistemic(a.w, b.w),
+        x: sub_epistemic(a.x, b.x),
+        y: sub_epistemic(a.y, b.y),
+        z: sub_epistemic(a.z, b.z),
+        confidence: a.confidence.combine(&b.confidence).decay(0.99),
+        provenance_id: max_i64(a.provenance_id, b.provenance_id) + 1,
+    }
+}
+
+// Scalar multiplication: s * (w + xi + yj + zk)
+fn quaternion_mul_scalar(q: Quaternion, s: EpistemicValue) -> Quaternion {
+    Quaternion {
+        w: mul_epistemic(q.w, s),
+        x: mul_epistemic(q.x, s),
+        y: mul_epistemic(q.y, s),
+        z: mul_epistemic(q.z, s),
+        confidence: q.confidence.decay(0.98),
+        provenance_id: q.provenance_id + 1,
+    }
+}
+
+// ============================================================================
+// QUATERNION ROTATIONS
+// ============================================================================
+
+// Rotate vector (x, y, z) by quaternion q
+// Result: q * v * q⁻¹ where v = (0, x, y, z)
+fn quaternion_rotate_vector(q: Quaternion, v_x: f64, v_y: f64, v_z: f64) -> (EpistemicValue, EpistemicValue, EpistemicValue) {
+    let v = quaternion_exact(0.0, v_x, v_y, v_z)
+    let q_inv = quaternion_inverse(q)
+    let rotated = quaternion_mul(quaternion_mul(q, v), q_inv)
+    
+    (rotated.x, rotated.y, rotated.z)
+}
+
+// Spherical linear interpolation between quaternions
+fn quaternion_slerp(q1: Quaternion, q2: Quaternion, t: f64) -> Quaternion {
+    let dot_product = quaternion_dot(q1, q2)
+    
+    // Clamp dot product to [-1, 1] for numerical stability
+    let dot_clamped = max_f64(min_f64(dot_product, 1.0), -1.0)
+    let theta = acos_f64(dot_clamped)
+    
+    if abs_f64(theta) < 1.0e-5 {
+        // Quaternions are very similar - use linear interpolation
+        return quaternion_add(quaternion_mul_scalar(q1, epistemic_std(1.0 - t, 0.0, 1.0)),
+                           quaternion_mul_scalar(q2, epistemic_std(t, 0.0, 1.0)))
+    }
+    
+    let sin_theta = sin_f64(theta)
+    let w1 = sin_f64((1.0 - t) * theta) / sin_theta
+    let w2 = sin_f64(t * theta) / sin_theta
+    
+    let w1_ep = epistemic_std(w1, 0.0, 1.0)
+    let w2_ep = epistemic_std(w2, 0.0, 1.0)
+    
+    quaternion_add(quaternion_mul_scalar(q1, w1_ep), quaternion_mul_scalar(q2, w2_ep))
+}
+
+// Dot product between quaternions (component-wise)
+fn quaternion_dot(a: Quaternion, b: Quaternion) -> f64 {
+    a.w.value * b.w.value + a.x.value * b.x.value + a.y.value * b.y.value + a.z.value * b.z.value
+}
+
+// ============================================================================
+// NEURAL NETWORK SPECIFIC OPERATIONS
+// ============================================================================
+
+// Quaternion ReLU activation component-wise
+fn quaternion_relu(q: Quaternion) -> Quaternion {
+    Quaternion {
+        w: if q.w.value > 0.0 { q.w } else { epistemic_std(0.0, q.w.std_u, q.w.conf) },
+        x: if q.x.value > 0.0 { q.x } else { epistemic_std(0.0, q.x.std_u, q.x.conf) },
+        y: if q.y.value > 0.0 { q.y } else { epistemic_std(0.0, q.y.std_u, q.y.conf) },
+        z: if q.z.value > 0.0 { q.z } else { epistemic_std(0.0, q.z.std_u, q.z.conf) },
+        confidence: q.confidence.decay(0.95),
+        provenance_id: q.provenance_id + 1,
+    }
+}
+
+// Quaternion Sigmoid activation component-wise
+fn quaternion_sigmoid(q: Quaternion) -> Quaternion {
+    let sigmoid_w = sigmoid_f64(q.w.value)
+    let sigmoid_x = sigmoid_f64(q.x.value)
+    let sigmoid_y = sigmoid_f64(q.y.value)
+    let sigmoid_z = sigmoid_f64(q.z.value)
+    
+    // Propagate uncertainty through sigmoid using delta method
+    let dsigmoid_w = sigmoid_w * (1.0 - sigmoid_w)
+    let dsigmoid_x = sigmoid_x * (1.0 - sigmoid_x)
+    let dsigmoid_y = sigmoid_y * (1.0 - sigmoid_y)
+    let dsigmoid_z = sigmoid_z * (1.0 - sigmoid_z)
+    
+    Quaternion {
+        w: epistemic_std(sigmoid_w, q.w.std_u * abs_f64(dsigmoid_w), q.w.conf),
+        x: epistemic_std(sigmoid_x, q.x.std_u * abs_f64(dsigmoid_x), q.x.conf),
+        y: epistemic_std(sigmoid_y, q.y.std_u * abs_f64(dsigmoid_y), q.y.conf),
+        z: epistemic_std(sigmoid_z, q.z.std_u * abs_f64(dsigmoid_z), q.z.conf),
+        confidence: q.confidence.decay(0.95),
+        provenance_id: q.provenance_id + 1,
+    }
+}
+
+// Quaternion Tanh activation component-wise
+fn quaternion_tanh(q: Quaternion) -> Quaternion {
+    let tanh_w = tanh_f64(q.w.value)
+    let tanh_x = tanh_f64(q.x.value)
+    let tanh_y = tanh_f64(q.y.value)
+    let tanh_z = tanh_f64(q.z.value)
+    
+    // Propagate uncertainty through tanh using delta method
+    let dtanh_w = 1.0 - tanh_w * tanh_w
+    let dtanh_x = 1.0 - tanh_x * tanh_x
+    let dtanh_y = 1.0 - tanh_y * tanh_y
+    let dtanh_z = 1.0 - tanh_z * tanh_z
+    
+    Quaternion {
+        w: epistemic_std(tanh_w, q.w.std_u * abs_f64(dtanh_w), q.w.conf),
+        x: epistemic_std(tanh_x, q.x.std_u * abs_f64(dtanh_x), q.x.conf),
+        y: epistemic_std(tanh_y, q.y.std_u * abs_f64(dtanh_y), q.y.conf),
+        z: epistemic_std(tanh_z, q.z.std_u * abs_f64(dtanh_z), q.z.conf),
+        confidence: q.confidence.decay(0.95),
+        provenance_id: q.provenance_id + 1,
+    }
+}
+
+// ============================================================================
+// UTILITY FUNCTIONS
+// ============================================================================
+
+fn min_f64(a: f64, b: f64) -> f64 {
+    if a < b { a } else { b }
+}
+
+fn max_f64(a: f64, b: f64) -> f64 {
+    if a > b { a } else { b }
+}
+
+fn max_i64(a: i64, b: i64) -> i64 {
+    if a > b { a } else { b }
+}
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+fn sqrt_f64(x: f64) -> f64 {
+    if x <= 0.0 { return 0.0 }
+    var guess = x / 2.0
+    if guess < 1.0 { guess = 1.0 }
+    var i = 0
+    while i < 20 {
+        guess = (guess + x / guess) / 2.0
+        i = i + 1
+    }
+    guess
+}
+
+fn sin_f64(x: f64) -> f64 {
+    let pi = 3.141592653589793
+    var y = x
+    while y > pi { y = y - 2.0 * pi }
+    while y < 0.0 - pi { y = y + 2.0 * pi }
+    let y2 = y * y
+    var sum = y
+    var term = y
+    term = term * (0.0 - y2) / 6.0; sum = sum + term
+    term = term * (0.0 - y2) / 20.0; sum = sum + term
+    term = term * (0.0 - y2) / 42.0; sum = sum + term
+    sum
+}
+
+fn cos_f64(x: f64) -> f64 {
+    let pi = 3.141592653589793
+    var y = x
+    while y > pi { y = y - 2.0 * pi }
+    while y < 0.0 - pi { y = y + 2.0 * pi }
+    let y2 = y * y
+    var sum = 1.0
+    var term = 1.0
+    term = term * (0.0 - y2) / 2.0; sum = sum + term
+    term = term * (0.0 - y2) / 12.0; sum = sum + term
+    term = term * (0.0 - y2) / 30.0; sum = sum + term
+    term = term * (0.0 - y2) / 56.0; sum = sum + term
+    term = term * (0.0 - y2) / 90.0; sum = sum + term
+    sum
+}
+
+fn tanh_f64(x: f64) -> f64 {
+    let exp_pos = exp_f64(x)
+    let exp_neg = exp_f64(0.0 - x)
+    (exp_pos - exp_neg) / (exp_pos + exp_neg)
+}
+
+fn sigmoid_f64(x: f64) -> f64 {
+    1.0 / (1.0 + exp_f64(0.0 - x))
+}
+
+fn exp_f64(x: f64) -> f64 {
+    if x > 20.0 { return exp_f64(x / 2.0) * exp_f64(x / 2.0) }
+    if x < 0.0 - 20.0 { return 1.0 / exp_f64(0.0 - x) }
+    var sum = 1.0
+    var term = 1.0
+    var i = 1
+    while i <= 20 { term = term * x / i; sum = sum + term; i = i + 1 }
+    sum
+}
+
+fn acos_f64(x: f64) -> f64 {
+    // Approximation for arccos
+    let pi = 3.141592653589793
+    if x >= 1.0 { return 0.0 }
+    if x <= -1.0 { return pi }
+    pi / 2.0 - asin_f64(x)
+}
+
+fn asin_f64(x: f64) -> f64 {
+    // Approximation for arcsin
+    if abs_f64(x) >= 1.0 { return if x > 0.0 { 1.5707963267948966 } else { -1.5707963267948966 } }
+    let x2 = x * x
+    var sum = x
+    var term = x
+    term = term * x2 / 6.0; sum = sum + term
+    term = term * x2 * 3.0 / 40.0; sum = sum + term
+    term = term * x2 * 5.0 / 112.0; sum = sum + term
+    sum
+}
+
+// ============================================================================
+// TESTS
