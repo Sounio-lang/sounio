@@ -1,0 +1,115 @@
+//@ run-pass
+//@ expect-stdout: SCIENCE_PBPK_OK
+// Executable darwin_pbpk reference-case lane (stable tsit5 integration window).
+
+use darwin_pbpk::tsit5_pbpk14::*
+
+fn bool_to_f64(v: bool) -> f64 {
+    if v { 1.0 } else { 0.0 }
+}
+
+fn emit_metric(name: string, value: f64) with IO {
+    print("SCIENCE_METRIC darwin_pbpk ")
+    print(name)
+    print(" ")
+    print(value)
+    print("\n")
+}
+
+fn finite_like(x: f64) -> bool {
+    if x != x {
+        return false
+    }
+    abs_f64(x) < 1e12
+}
+
+fn state_non_negative(st: PBPKState14) -> bool {
+    st.blood >= -1e-9 && st.liver >= -1e-9 && st.kidney >= -1e-9 && st.brain >= -1e-9 &&
+    st.heart >= -1e-9 && st.lung >= -1e-9 && st.muscle >= -1e-9 && st.adipose >= -1e-9 &&
+    st.gut >= -1e-9 && st.skin >= -1e-9 && st.bone >= -1e-9 && st.spleen >= -1e-9 &&
+    st.pancreas >= -1e-9 && st.other >= -1e-9
+}
+
+fn state_finite(st: PBPKState14) -> bool {
+    finite_like(st.blood) && finite_like(st.liver) && finite_like(st.kidney) && finite_like(st.brain) &&
+    finite_like(st.heart) && finite_like(st.lung) && finite_like(st.muscle) && finite_like(st.adipose) &&
+    finite_like(st.gut) && finite_like(st.skin) && finite_like(st.bone) && finite_like(st.spleen) &&
+    finite_like(st.pancreas) && finite_like(st.other)
+}
+
+fn total_volume(prm: PBPKParams14) -> f64 {
+    prm.v_blood + prm.v_liver + prm.v_kidney + prm.v_brain + prm.v_heart + prm.v_lung +
+    prm.v_muscle + prm.v_adipose + prm.v_gut + prm.v_skin + prm.v_bone + prm.v_spleen +
+    prm.v_pancreas + prm.v_other
+}
+
+fn run_reference_case_and_emit() -> i32 with IO, Mut, Div, Panic {
+    let prm = default_pbpk_params()
+
+    // Stable reference case: short horizon with small fixed steps.
+    let dose = 1.0
+    let dt = 0.0001
+    let n_steps: i32 = 200
+
+    var st = pbpk_state_zero()
+    st.blood = dose
+
+    var t = 0.0
+    var step_i: i32 = 0
+    var cmax = st.blood
+    var auc = 0.0
+    var c_prev = st.blood
+
+    while step_i < n_steps {
+        let step = tsit5_step_pbpk(st, t, dt, prm)
+        let st_next = step.state_new
+        let c_now = st_next.blood
+
+        if c_now > cmax {
+            cmax = c_now
+        }
+
+        auc = auc + ((c_prev + c_now) / 2.0) * dt
+        c_prev = c_now
+        st = st_next
+        t = t + dt
+        step_i = step_i + 1
+    }
+
+    if auc <= 1e-12 {
+        return 2
+    }
+
+    let clearance = dose / auc
+    let vdss = total_volume(prm)
+    let half_life = if clearance > 1e-12 { 0.693 * vdss / clearance } else { 0.0 }
+
+    let non_negative = state_non_negative(st)
+    let finite_outputs =
+        finite_like(cmax) && finite_like(auc) && finite_like(half_life) &&
+        finite_like(clearance) && finite_like(vdss) && state_finite(st)
+    let route_constraints_ok = cmax >= st.blood && st.blood >= -1e-9
+    let invariants_ok = non_negative && finite_outputs && route_constraints_ok
+
+    emit_metric("cmax", cmax)
+    emit_metric("auc", auc)
+    emit_metric("half_life", half_life)
+    emit_metric("clearance", clearance)
+    emit_metric("vdss", vdss)
+    emit_metric("invariants_ok", bool_to_f64(invariants_ok))
+
+    if !invariants_ok {
+        return 3
+    }
+
+    0
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    let rc = run_reference_case_and_emit()
+    if rc != 0 {
+        return rc
+    }
+    print("SCIENCE_PBPK_OK\n")
+    0
+}

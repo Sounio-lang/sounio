@@ -245,6 +245,25 @@ print("ATE: ", effect.value, " ± ", effect.uncertainty)
 | `bayes/` | 1,371 | Bayesian inference, MCMC, VI |
 | `random/` | 1,068 | Random number generation |
 
+### Fail-Closed Science Gates (fMRI + Darwin PBPK)
+
+The main gate path now requires two executable scientific lanes:
+- `tests/stdlib/fmri/test_pipeline_real_e2e.sio`
+- `tests/stdlib/darwin_pbpk/test_pipeline_real_e2e.sio`
+
+Run from repository root:
+
+```bash
+bash scripts/stdlib_science_pipeline_gate.sh
+bash scripts/stdlib_reliability_gate.sh
+```
+
+Current machine-checkable artifacts:
+- `artifacts/stdlib/stdlib_science_pipeline_status.v1.json`
+- `artifacts/stdlib/stdlib_reliability_status.v1.json`
+- `tests/fixtures/fmri/fixture_manifest.v1.json`
+- `tests/fixtures/fmri/pipeline_golden.v1.json`
+
 ---
 
 ## Installation

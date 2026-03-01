@@ -1,0 +1,142 @@
+// darwin_pbpk::simulation_real — executable PBPK reference-case pipeline.
+//
+// This module provides a deterministic real-execution wrapper on the active
+// tsit5 PBPK surface for fail-closed science gating.
+
+use tsit5_pbpk14::*;
+
+struct SimulationResult {
+    cmax: f64,
+    auc: f64,
+    half_life: f64,
+    clearance: f64,
+    vdss: f64,
+    final_state: PBPKState14,
+    success: bool,
+}
+
+fn simulation_result_empty() -> SimulationResult {
+    SimulationResult {
+        cmax: 0.0,
+        auc: 0.0,
+        half_life: 0.0,
+        clearance: 0.0,
+        vdss: 0.0,
+        final_state: pbpk_state_zero(),
+        success: false,
+    }
+}
+
+struct PbpkInvariantReport {
+    non_negative_state: bool,
+    finite_outputs: bool,
+    route_constraints_ok: bool,
+    success: bool,
+}
+
+fn pbpk_invariant_report_empty() -> PbpkInvariantReport {
+    PbpkInvariantReport {
+        non_negative_state: false,
+        finite_outputs: false,
+        route_constraints_ok: false,
+        success: false,
+    }
+}
+
+fn pbpk_total_volume(prm: PBPKParams14) -> f64 {
+    prm.v_blood + prm.v_liver + prm.v_kidney + prm.v_brain + prm.v_heart + prm.v_lung +
+    prm.v_muscle + prm.v_adipose + prm.v_gut + prm.v_skin + prm.v_bone + prm.v_spleen +
+    prm.v_pancreas + prm.v_other
+}
+
+fn finite_like(x: f64) -> bool {
+    // NaN check: NaN is the only value not equal to itself.
+    if x != x {
+        return false
+    }
+    let ax = abs_f64(x)
+    ax < 1e12
+}
+
+fn state_non_negative(st: PBPKState14) -> bool {
+    st.blood >= 0.0 && st.liver >= 0.0 && st.kidney >= 0.0 && st.brain >= 0.0 &&
+    st.heart >= 0.0 && st.lung >= 0.0 && st.muscle >= 0.0 && st.adipose >= 0.0 &&
+    st.gut >= 0.0 && st.skin >= 0.0 && st.bone >= 0.0 && st.spleen >= 0.0 &&
+    st.pancreas >= 0.0 && st.other >= 0.0
+}
+
+fn state_finite(st: PBPKState14) -> bool {
+    finite_like(st.blood) && finite_like(st.liver) && finite_like(st.kidney) && finite_like(st.brain) &&
+    finite_like(st.heart) && finite_like(st.lung) && finite_like(st.muscle) && finite_like(st.adipose) &&
+    finite_like(st.gut) && finite_like(st.skin) && finite_like(st.bone) && finite_like(st.spleen) &&
+    finite_like(st.pancreas) && finite_like(st.other)
+}
+
+fn run_pbpk_reference_case(case_id: i32) -> SimulationResult with Mut, Div, Panic {
+    if case_id != 1 {
+        return simulation_result_empty()
+    }
+
+    let prm = default_pbpk_params()
+    let t_end = 24.0
+    let dose = 500.0
+    let dt = 0.05
+
+    var st = pbpk_state_zero()
+    st.blood = dose / prm.v_blood
+
+    var t = 0.0
+    var cmax = st.blood
+    var auc = 0.0
+    var c_prev = st.blood
+
+    while t < t_end {
+        let dt_use = if t + dt > t_end { t_end - t } else { dt }
+        let step = tsit5_step_pbpk(st, t, dt_use, prm)
+        let st_next = step.state_new
+        let c_now = st_next.blood
+
+        if c_now > cmax {
+            cmax = c_now
+        }
+
+        auc = auc + ((c_prev + c_now) / 2.0) * dt_use
+        c_prev = c_now
+
+        st = st_next
+        t = t + dt_use
+    }
+
+    let clearance = if auc > 1e-12 { dose / auc } else { 0.0 }
+    let vdss = pbpk_total_volume(prm)
+    let half_life = if clearance > 1e-12 {
+        0.693 * vdss / clearance
+    } else {
+        0.0
+    }
+
+    SimulationResult {
+        cmax: cmax,
+        auc: auc,
+        half_life: half_life,
+        clearance: clearance,
+        vdss: vdss,
+        final_state: st,
+        success: cmax > 0.0 && auc > 0.0 && clearance > 0.0,
+    }
+}
+
+fn pbpk_invariant_report(result: SimulationResult) -> PbpkInvariantReport {
+    var out = pbpk_invariant_report_empty()
+
+    out.non_negative_state = state_non_negative(result.final_state)
+    out.finite_outputs =
+        finite_like(result.cmax) && finite_like(result.auc) && finite_like(result.half_life) &&
+        finite_like(result.clearance) && finite_like(result.vdss) && state_finite(result.final_state)
+
+    // Reference case 1 is IV bolus: concentration should not increase above Cmax at end.
+    out.route_constraints_ok = result.cmax >= result.final_state.blood && result.final_state.blood >= 0.0
+
+    out.success = result.success && out.non_negative_state && out.finite_outputs && out.route_constraints_ok
+    out
+}

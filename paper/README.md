@@ -27,6 +27,22 @@ make clean  # Remove build artifacts
 - `Makefile` — TeX build script
 - `reproduce.sh` — end-to-end reproducibility script
 
+## Executable Science Evidence Notes
+
+For manuscript claims that reference runnable fMRI/PBPK pipelines, use the
+repository gates and artifacts as the source of truth:
+
+```bash
+bash scripts/stdlib_science_pipeline_gate.sh
+bash scripts/stdlib_reliability_gate.sh
+```
+
+Primary evidence artifacts:
+- `artifacts/stdlib/stdlib_science_pipeline_status.v1.json`
+- `artifacts/stdlib/stdlib_reliability_status.v1.json`
+- `tests/fixtures/fmri/fixture_manifest.v1.json`
+- `tests/fixtures/fmri/pipeline_golden.v1.json`
+
 ## Target Venues
 
 ### Legacy Preprint

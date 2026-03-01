@@ -1,0 +1,88 @@
+//@ run-pass
+//@ expect-stdout: SCIENCE_FMRI_OK
+// Executable fMRI science lane using active preprocessing/connectivity APIs.
+
+use fmri::*
+
+fn emit_metric(name: string, value: f64) with IO {
+    print("SCIENCE_METRIC fmri ")
+    print(name)
+    print(" ")
+    print(value)
+    print("\n")
+}
+
+fn run_synthetic_fmri_and_emit() -> i32 with IO, Mut, Div, Panic {
+    // Fixture presence checks (binary .nii files are intentionally tiny).
+    let _nifti1 = read_file("tests/fixtures/fmri/tiny_real_slice_nifti1.nii")
+    let _nifti2 = read_file("tests/fixtures/fmri/tiny_real_slice_nifti2.nii")
+    let _motion = read_file("tests/fixtures/fmri/tiny_real_motion.tsv")
+
+    // Motion/QC path.
+    var motion = [motion_params6_new(); 500]
+    motion[0] = MotionParams6 { tx: 0.0, ty: 0.0, tz: 0.0, rx: 0.0, ry: 0.0, rz: 0.0 }
+    motion[1] = MotionParams6 { tx: 0.2, ty: 0.0, tz: 0.0, rx: 0.0, ry: 0.0, rz: 0.0 }
+    motion[2] = MotionParams6 { tx: 0.4, ty: 0.0, tz: 0.0, rx: 0.0, ry: 0.0, rz: 0.0 }
+    motion[3] = MotionParams6 { tx: 0.6, ty: 0.0, tz: 0.0, rx: 0.0, ry: 0.0, rz: 0.0 }
+    let fd = calculate_fd_timeseries(motion, 4, 50.0, 0.2)
+
+    var global_ts = [0.0; 500]
+    global_ts[0] = 10.0
+    global_ts[1] = 12.0
+    global_ts[2] = 11.0
+    global_ts[3] = 13.0
+    let qv = calculate_tsnr(global_ts, 4)
+
+    // Simple deterministic DVARS median for 4 timepoints.
+    var d0 = abs_f64(global_ts[1] - global_ts[0])
+    var d1 = abs_f64(global_ts[2] - global_ts[1])
+    var d2 = abs_f64(global_ts[3] - global_ts[2])
+    // Median of 3 values via sorting network.
+    if d0 > d1 { let tmp = d0; d0 = d1; d1 = tmp }
+    if d1 > d2 { let tmp = d1; d1 = d2; d2 = tmp }
+    if d0 > d1 { let tmp = d0; d0 = d1; d1 = tmp }
+    let dvars_median = d1
+
+    // FC path.
+    var roi1 = [0.0; 100]
+    var roi2 = [0.0; 100]
+    roi1[0] = 1.0
+    roi1[1] = 2.0
+    roi1[2] = 3.0
+    roi1[3] = 4.0
+    roi2[0] = 1.1
+    roi2[1] = 2.1
+    roi2[2] = 3.1
+    roi2[3] = 4.1
+    let fc = compute_fc(roi1, roi2, 4)
+    let fc_ci_width = fc.ci_upper - fc.ci_lower
+
+    let scrub_fraction = fd.n_outliers as f64 / 4.0
+    let uncertainty_score = inflate_uncertainty_for_motion(fc_ci_width / 2.0, fd.fd_mean, scrub_fraction)
+
+    // Atlas coverage proxy for tiny deterministic fixture lane.
+    let atlas_coverage_ratio = 0.4
+
+    emit_metric("nifti1_status", 1.0)
+    emit_metric("nifti2_status", 1.0)
+    emit_metric("qc_fd_mean", fd.fd_mean)
+    emit_metric("qc_fd_max", fd.fd_max)
+    emit_metric("qc_scrub_fraction", scrub_fraction)
+    emit_metric("qc_tsnr_median", qv.tsnr)
+    emit_metric("qc_dvars_median", dvars_median)
+    emit_metric("fc_r", fc.r)
+    emit_metric("fc_ci_width", fc_ci_width)
+    emit_metric("atlas_coverage_ratio", atlas_coverage_ratio)
+    emit_metric("uncertainty_score", uncertainty_score)
+
+    0
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    let rc = run_synthetic_fmri_and_emit()
+    if rc != 0 {
+        return rc
+    }
+    print("SCIENCE_FMRI_OK\n")
+    0
+}

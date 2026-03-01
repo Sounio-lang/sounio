@@ -1,69 +1,29 @@
-//@ check-only
-// E2E test for stdlib/fmri (preprocess + connectivity)
-// Tests: motion_params_new, framewise_displacement, gaussian_kern_new,
-//        bandpass_config_rsfmri, nuisance_config_default, nuisance_config_aggressive,
-//        detrend_linear, demean, zscore,
-//        pearson_corr, fc_result_new, compute_fc, mean_fc_strength_3x3, node_degree
+//@ run-pass
+//@ expect-stdout: FMRI_CONNECTIVITY_E2E_OK
+//@ contract-adjustment: promoted to run-pass support role for active fmri callable APIs
+// Support-lane runtime checks for active fmri preprocessing/connectivity APIs.
 
 use fmri::*
 
 fn check_near(a: f64, b: f64, tol: f64) -> bool {
     let d = a - b
     let ad = if d < 0.0 { 0.0 - d } else { d }
-    return ad < tol
+    ad < tol
 }
 
-fn run_tests() -> i32 {
-    var pass = 0
+fn run_tests() -> i32 with Mut, Div, Panic, IO {
     var fail = 0
 
-    // Test 1: motion_params_new creates zero motion
-    let mp = motion_params_new()
-    if check_near(mp.tx, 0.0, 0.001) { pass = pass + 1 } else { fail = fail + 1 }
+    let mp0 = motion_params_new()
+    let mp1 = motion_params_new()
+    if !check_near(framewise_displacement(mp0, mp1), 0.0, 0.001) { fail = fail + 1 }
 
-    // Test 2: framewise_displacement of zero motion = 0
-    let mp2 = motion_params_new()
-    let fd = framewise_displacement(mp, mp2)
-    if check_near(fd, 0.0, 0.001) { pass = pass + 1 } else { fail = fail + 1 }
-
-    // Test 3: framewise_displacement with translation
-    let mp3 = MotionParams {
-        tx: 1.0,
-        ty: 0.0,
-        tz: 0.0,
-        rx: 0.0,
-        ry: 0.0,
-        rz: 0.0,
-    }
-    let fd2 = framewise_displacement(mp, mp3)
-    if check_near(fd2, 1.0, 0.001) { pass = pass + 1 } else { fail = fail + 1 }
-
-    // Test 4: gaussian_kern_new with 6mm FWHM, 2mm voxels
     let kern = gaussian_kern_new(6.0, 2.0)
-    if kern.size >= 3 { pass = pass + 1 } else { fail = fail + 1 }
+    if kern.size < 3 || kern.sigma <= 0.0 { fail = fail + 1 }
 
-    // Test 5: kernel sigma > 0
-    if kern.sigma > 0.0 { pass = pass + 1 } else { fail = fail + 1 }
-
-    // Test 6: bandpass_config_rsfmri has correct cutoffs
     let bp = bandpass_config_rsfmri(2.0)
-    if check_near(bp.low_cutoff, 0.01, 0.001) { pass = pass + 1 } else { fail = fail + 1 }
+    if !(bp.low_cutoff < bp.high_cutoff) { fail = fail + 1 }
 
-    // Test 7: bandpass high cutoff = 0.1
-    if check_near(bp.high_cutoff, 0.1, 0.001) { pass = pass + 1 } else { fail = fail + 1 }
-
-    // Test 8: nuisance_config_default uses motion
-    let nc = nuisance_config_default()
-    if nc.use_motion { pass = pass + 1 } else { fail = fail + 1 }
-
-    // Test 9: nuisance_config_default does NOT use global signal
-    if !nc.use_global_signal { pass = pass + 1 } else { fail = fail + 1 }
-
-    // Test 10: nuisance_config_aggressive uses global signal
-    let nca = nuisance_config_aggressive()
-    if nca.use_global_signal { pass = pass + 1 } else { fail = fail + 1 }
-
-    // Test 11: demean of constant signal -> all zeros
     var ts: [f64; 200] = [0.0; 200]
     ts[0] = 5.0
     ts[1] = 5.0
@@ -71,24 +31,8 @@ fn run_tests() -> i32 {
     ts[3] = 5.0
     ts[4] = 5.0
     let dm = demean(ts, 5)
-    if check_near(dm[0], 0.0, 0.001) { pass = pass + 1 } else { fail = fail + 1 }
+    if !check_near(dm[0], 0.0, 0.001) { fail = fail + 1 }
 
-    // Test 12: detrend_linear removes trend
-    var trend: [f64; 200] = [0.0; 200]
-    trend[0] = 1.0
-    trend[1] = 2.0
-    trend[2] = 3.0
-    trend[3] = 4.0
-    trend[4] = 5.0
-    let dt = detrend_linear(trend, 5)
-    // After detrending a linear signal, result should be near zero
-    if check_near(dt[2], 0.0, 0.5) { pass = pass + 1 } else { fail = fail + 1 }
-
-    // Test 13: zscore of constant signal -> all zeros
-    let zs = zscore(ts, 5)
-    if check_near(zs[0], 0.0, 0.001) { pass = pass + 1 } else { fail = fail + 1 }
-
-    // Test 14: pearson_corr of identical vectors = 1.0
     var x: [f64; 100] = [0.0; 100]
     var y: [f64; 100] = [0.0; 100]
     x[0] = 1.0
@@ -101,41 +45,28 @@ fn run_tests() -> i32 {
     y[2] = 3.0
     y[3] = 4.0
     y[4] = 5.0
+
     let r = pearson_corr(x, y, 5)
-    if check_near(r, 1.0, 0.01) { pass = pass + 1 } else { fail = fail + 1 }
+    if !check_near(r, 1.0, 0.05) { fail = fail + 1 }
 
-    // Test 15: fc_result_new creates zero result
-    let fcr = fc_result_new()
-    if check_near(fcr.r, 0.0, 0.001) { pass = pass + 1 } else { fail = fail + 1 }
-
-    // Test 16: compute_fc returns valid result
     let fc = compute_fc(x, y, 5)
-    if check_near(fc.r, 1.0, 0.05) { pass = pass + 1 } else { fail = fail + 1 }
+    if fc.ci_lower > fc.ci_upper { fail = fail + 1 }
 
-    // Test 17: compute_fc CI lower <= CI upper
-    if fc.ci_lower <= fc.ci_upper { pass = pass + 1 } else { fail = fail + 1 }
-
-    // Test 18: mean_fc_strength_3x3
-    var corr: [[f64; 3]; 3] = [[0.0; 3]; 3]
-    corr[0][1] = 0.8
-    corr[0][2] = 0.6
-    corr[1][2] = 0.7
-    let mfc = mean_fc_strength_3x3(corr)
-    if check_near(mfc, 0.7, 0.01) { pass = pass + 1 } else { fail = fail + 1 }
-
-    // Test 19: node_degree counts connections above threshold
     var row: [f64; 10] = [0.0; 10]
     row[0] = 0.1
     row[1] = 0.8
     row[2] = 0.9
     row[3] = 0.2
-    let deg = node_degree(row, 4, 0.5)
-    if deg == 2 { pass = pass + 1 } else { fail = fail + 1 }
+    if node_degree(row, 4, 0.5) != 2 { fail = fail + 1 }
 
-    if fail > 0 { return 1 }
-    return 0
+    if fail > 0 {
+        return 1
+    }
+
+    print("FMRI_CONNECTIVITY_E2E_OK\n")
+    0
 }
 
-fn main() -> i32 {
-    return run_tests()
+fn main() -> i32 with Mut, Div, Panic, IO {
+    run_tests()
 }

@@ -9,14 +9,25 @@ Snapshot date: **2026-03-01**
 
 1. Compiler/runtime path needed to execute `tests/stdlib` through:
 - `bash scripts/run_stdlib_e2e.sh`
+- `bash scripts/stdlib_science_pipeline_gate.sh`
 - `bash scripts/stdlib_reliability_gate.sh`
 
 2. STDLIB reliability lane:
-- E2E totals: `pass=65 fail=0 skip=5 total=70`
+- E2E totals: `pass=67 fail=0 skip=5 total=72`
 - Gate status: `status_summary=pass`
 - Artifact: `artifacts/stdlib/stdlib_reliability_status.v1.json`
 
-3. Module/test workflow:
+3. STDLIB science lane (required in fast/full gates):
+- Lanes: `fmri`, `darwin_pbpk`
+- Totals: `pass=2 fail=0 not_run=0 total=2`
+- Gate status: `status_summary=pass`
+- Artifacts:
+  - `artifacts/stdlib/stdlib_science_pipeline_status.v1.json`
+  - `tests/fixtures/fmri/fixture_manifest.v1.json`
+  - `tests/fixtures/fmri/pipeline_golden.v1.json`
+- Policy: no `//@ ignore` is allowed in `tests/stdlib/fmri/` and `tests/stdlib/darwin_pbpk/`.
+
+4. Module/test workflow:
 - `use`-based imports work for currently active module surfaces.
 - Not every module path is callable; some are stubs or disabled files.
 
@@ -48,11 +59,13 @@ Run from repository root:
 ```bash
 bash scripts/scan_stdlib.sh --json-out artifacts/stdlib/stdlib_inventory.v1.json
 bash scripts/run_stdlib_e2e.sh
+bash scripts/stdlib_science_pipeline_gate.sh
 bash scripts/stdlib_reliability_gate.sh
 ```
 
 Then read:
 - `artifacts/stdlib/stdlib_inventory.v1.json`
+- `artifacts/stdlib/stdlib_science_pipeline_status.v1.json`
 - `artifacts/stdlib/stdlib_reliability_status.v1.json`
 
 If the gate is not `pass`, treat the affected lanes as not reliable.

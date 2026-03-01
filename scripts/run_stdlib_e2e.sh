@@ -5,9 +5,9 @@
 # Each test imports from the real stdlib to validate E2E correctness.
 #
 # Annotations:
-#   //@ run-pass                expect souc check to pass (exit 0)
+#   //@ run-pass                expect souc check; runtime execution occurs when expect-stdout is declared
 #   //@ check-only              only run souc check, not souc run
-#   //@ expect-stdout: X        stdout must contain X (run-pass only)
+#   //@ expect-stdout: X        stdout must contain X (run-pass only, optional)
 #   //@ ignore [reason]         skip this test
 #   //@ ignore-owner: TEAM      optional owner metadata for ignored tests
 #   //@ ignore-unblock: TEXT    optional unblock condition for ignored tests
@@ -32,6 +32,8 @@ export SOUNIO_STDLIB_PATH="${SOUNIO_STDLIB_PATH:-$ROOT_DIR/stdlib}"
 FILTER=""
 VERBOSE=0
 JSON_OUT="${STDLIB_E2E_JSON_OUT:-}"
+RUN_TIMEOUT_SEC="${STDLIB_E2E_RUN_TIMEOUT_SEC:-30}"
+RUN_ALL_RUN_PASS="${STDLIB_E2E_RUN_ALL_RUN_PASS:-0}"
 
 usage() {
   cat <<'USAGE'
@@ -195,34 +197,50 @@ run_test() {
     return
   fi
 
-  if [[ ${#expect_stdout[@]} -gt 0 ]]; then
-    exit_code=0
+  if [[ ${#expect_stdout[@]} -eq 0 && "$RUN_ALL_RUN_PASS" != "1" ]]; then
+    PASS=$((PASS + 1))
+    record_result "pass" "$relpath" "run-pass-check-only" "no-expect-stdout" "" "" "0" ""
+    if [[ $VERBOSE -eq 1 ]]; then
+      echo "  PASS  $relpath (run-pass check-only fallback)"
+    fi
+    return
+  fi
+
+  exit_code=0
+  if command -v timeout >/dev/null 2>&1; then
+    output=$(timeout "${RUN_TIMEOUT_SEC}s" "$SOUC_BIN" run "$file" 2>&1) || exit_code=$?
+  else
     output=$("$SOUC_BIN" run "$file" 2>&1) || exit_code=$?
-    if [[ $exit_code -ne 0 ]]; then
-      local excerpt
-      excerpt="$(echo "$output" | head -6)"
+  fi
+  if [[ $exit_code -ne 0 ]]; then
+    local excerpt
+    excerpt="$(echo "$output" | head -6)"
+    FAIL=$((FAIL + 1))
+    local reason="run-failed"
+    if [[ $exit_code -eq 124 ]]; then
+      reason="run-timeout"
+      excerpt="timeout after ${RUN_TIMEOUT_SEC}s"
+    fi
+    ERRORS="${ERRORS}\n  FAIL  $relpath (run exited $exit_code)"
+    record_result "fail" "$relpath" "run" "$reason" "" "" "$exit_code" "$excerpt"
+    if [[ $VERBOSE -eq 1 ]]; then
+      echo "  FAIL  $relpath (run exited $exit_code)"
+    fi
+    return
+  fi
+
+  local pattern
+  for pattern in "${expect_stdout[@]}"; do
+    if ! echo "$output" | grep -qF "$pattern"; then
       FAIL=$((FAIL + 1))
-      ERRORS="${ERRORS}\n  FAIL  $relpath (run exited $exit_code)"
-      record_result "fail" "$relpath" "run" "run-failed" "" "" "$exit_code" "$excerpt"
+      ERRORS="${ERRORS}\n  FAIL  $relpath (missing stdout: $pattern)"
+      record_result "fail" "$relpath" "stdout" "missing-stdout" "" "" "0" "missing: $pattern"
       if [[ $VERBOSE -eq 1 ]]; then
-        echo "  FAIL  $relpath (run exited $exit_code)"
+        echo "  FAIL  $relpath (missing stdout: $pattern)"
       fi
       return
     fi
-
-    local pattern
-    for pattern in "${expect_stdout[@]}"; do
-      if ! echo "$output" | grep -qF "$pattern"; then
-        FAIL=$((FAIL + 1))
-        ERRORS="${ERRORS}\n  FAIL  $relpath (missing stdout: $pattern)"
-        record_result "fail" "$relpath" "stdout" "missing-stdout" "" "" "0" "missing: $pattern"
-        if [[ $VERBOSE -eq 1 ]]; then
-          echo "  FAIL  $relpath (missing stdout: $pattern)"
-        fi
-        return
-      fi
-    done
-  fi
+  done
 
   PASS=$((PASS + 1))
   record_result "pass" "$relpath" "run-pass" "" "" "" "0" ""

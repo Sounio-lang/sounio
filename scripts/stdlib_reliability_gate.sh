@@ -7,6 +7,7 @@ cd "$ROOT_DIR"
 OUT_JSON="${STDLIB_RELIABILITY_STATUS_OUT:-$ROOT_DIR/artifacts/stdlib/stdlib_reliability_status.v1.json}"
 E2E_JSON="${STDLIB_RELIABILITY_E2E_JSON:-$ROOT_DIR/artifacts/stdlib/stdlib_e2e_result.v1.json}"
 INVENTORY_JSON="${STDLIB_RELIABILITY_INVENTORY_JSON:-$ROOT_DIR/artifacts/stdlib/stdlib_inventory.v1.json}"
+SCIENCE_STATUS_JSON="${STDLIB_RELIABILITY_SCIENCE_STATUS_JSON:-$ROOT_DIR/artifacts/stdlib/stdlib_science_pipeline_status.v1.json}"
 BASELINE_PASS="${STDLIB_RELIABILITY_BASELINE_PASS:-52}"
 BASELINE_FAIL="${STDLIB_RELIABILITY_BASELINE_FAIL:-13}"
 BASELINE_SKIP="${STDLIB_RELIABILITY_BASELINE_SKIP:-5}"
@@ -14,7 +15,7 @@ BASELINE_TOTAL="${STDLIB_RELIABILITY_BASELINE_TOTAL:-70}"
 
 usage() {
   cat <<'USAGE'
-Usage: bash scripts/stdlib_reliability_gate.sh [--out-json PATH] [--e2e-json PATH] [--inventory-json PATH]
+Usage: bash scripts/stdlib_reliability_gate.sh [--out-json PATH] [--e2e-json PATH] [--inventory-json PATH] [--science-json PATH]
 
 Runs fail-closed STDLIB reliability gate:
   1) Collect stdlib inventory snapshot.
@@ -48,6 +49,14 @@ while [[ $# -gt 0 ]]; do
         exit 2
       fi
       INVENTORY_JSON="$2"
+      shift 2
+      ;;
+    --science-json)
+      if [[ $# -lt 2 ]]; then
+        echo "error: --science-json requires a path" >&2
+        exit 2
+      fi
+      SCIENCE_STATUS_JSON="$2"
       shift 2
       ;;
     -h|--help)
@@ -84,6 +93,7 @@ obj = {
     "ignored": [],
     "contract_adjustments": [],
     "inventory": {"sio_files": 0, "disabled_files": 0, "stub_mod_files": 0, "active_module_entrypoints": 0},
+    "science_pipeline": {"status": "not_run", "status_artifact": ""},
     "notes": [reason],
 }
 out_path.write_text(json.dumps(obj, indent=2) + "\n", encoding="utf-8")
@@ -111,6 +121,7 @@ required = [
     "ignored",
     "contract_adjustments",
     "inventory",
+    "science_pipeline",
     "notes",
 ]
 for key in required:
@@ -130,6 +141,31 @@ for key in ("pass", "fail", "skip", "total"):
 for key in ("sio_files", "disabled_files", "stub_mod_files"):
     if key not in obj["inventory"]:
         raise SystemExit(f"inventory missing key: {key}")
+
+if "status" not in obj["science_pipeline"]:
+    raise SystemExit("science_pipeline missing status")
+if obj["science_pipeline"]["status"] not in {"pass", "fail", "not_run"}:
+    raise SystemExit("science_pipeline.status must be pass|fail|not_run")
+PY
+}
+
+load_science_status() {
+  if [[ ! -s "$SCIENCE_STATUS_JSON" ]]; then
+    return 1
+  fi
+  python3 - "$SCIENCE_STATUS_JSON" <<'PY'
+import json
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+obj = json.loads(path.read_text(encoding="utf-8"))
+if obj.get("schema") != "sounio.stdlib.science_pipeline_status.v1":
+    raise SystemExit("unexpected science schema")
+status = obj.get("status_summary")
+if status not in {"pass", "fail", "not_run"}:
+    raise SystemExit("invalid science status_summary")
+print(status)
 PY
 }
 
@@ -142,6 +178,18 @@ if [[ $scan_rc -ne 0 || ! -s "$INVENTORY_JSON" ]]; then
   emit_not_run "inventory_scan_failed"
   validate_status_json || true
   echo "error: inventory scan failed (rc=$scan_rc)" >&2
+  exit 1
+fi
+
+echo "[stdlib-reliability-gate] reading science gate status"
+set +e
+SCIENCE_STATUS="$(load_science_status)"
+science_rc=$?
+set -e
+if [[ $science_rc -ne 0 ]]; then
+  emit_not_run "science_status_missing_or_invalid"
+  validate_status_json || true
+  echo "error: science status missing/invalid: $SCIENCE_STATUS_JSON" >&2
   exit 1
 fi
 
@@ -159,7 +207,8 @@ fi
 
 set +e
 python3 - "$ROOT_DIR" "$E2E_JSON" "$INVENTORY_JSON" "$OUT_JSON" "$e2e_rc" \
-  "$BASELINE_PASS" "$BASELINE_FAIL" "$BASELINE_SKIP" "$BASELINE_TOTAL" <<'PY'
+  "$BASELINE_PASS" "$BASELINE_FAIL" "$BASELINE_SKIP" "$BASELINE_TOTAL" \
+  "$SCIENCE_STATUS" "$SCIENCE_STATUS_JSON" <<'PY'
 import datetime
 import json
 import re
@@ -175,6 +224,8 @@ baseline_pass = int(sys.argv[6])
 baseline_fail = int(sys.argv[7])
 baseline_skip = int(sys.argv[8])
 baseline_total = int(sys.argv[9])
+science_status = sys.argv[10]
+science_status_json = Path(sys.argv[11]).resolve()
 
 try:
     e2e = json.loads(e2e_path.read_text(encoding="utf-8"))
@@ -304,6 +355,8 @@ if e2e_rc > 1:
     status_summary = "not_run"
 elif fail_count > 0:
     status_summary = "fail"
+elif science_status != "pass":
+    status_summary = "fail"
 else:
     status_summary = "pass"
 
@@ -324,6 +377,14 @@ if e2e_rc == 1 and fail_count == 0:
     notes.append("warning: e2e exit code indicates failure but fail count is zero")
 if e2e_rc == 0 and fail_count > 0:
     notes.append("warning: e2e exit code indicates success but fail count is non-zero")
+if science_status != "pass":
+    notes.append(f"science_gate_required_pass_observed={science_status}")
+
+def rel_or_abs(path: Path) -> str:
+    try:
+        return path.relative_to(root).as_posix()
+    except Exception:
+        return str(path)
 
 obj = {
     "schema": "sounio.stdlib.reliability_status.v1",
@@ -344,6 +405,10 @@ obj = {
         "disabled_files": disabled_files,
         "stub_mod_files": stub_mod_files,
         "active_module_entrypoints": active_entrypoints,
+    },
+    "science_pipeline": {
+        "status": science_status,
+        "status_artifact": rel_or_abs(science_status_json),
     },
     "notes": notes,
 }
@@ -380,6 +445,8 @@ PY
 echo "[stdlib-reliability-gate] status_json=${OUT_JSON#$ROOT_DIR/}"
 echo "[stdlib-reliability-gate] inventory_json=${INVENTORY_JSON#$ROOT_DIR/}"
 echo "[stdlib-reliability-gate] e2e_json=${E2E_JSON#$ROOT_DIR/}"
+echo "[stdlib-reliability-gate] science_json=${SCIENCE_STATUS_JSON#$ROOT_DIR/}"
+echo "[stdlib-reliability-gate] science_status=${SCIENCE_STATUS}"
 echo "[stdlib-reliability-gate] status_summary=$status_summary"
 
 if [[ "$status_summary" == "pass" ]]; then
