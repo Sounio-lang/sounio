@@ -6,12 +6,12 @@ Welcome to the Sounio programming language documentation.
 
 ### Getting Started
 - [Getting Started](getting-started.md)
-- [Minimum Viable Sounio](MINIMUM_VIABLE_SOUNIO.md)
+- [Minimum Viable Sounio](guide/MINIMUM_VIABLE_SOUNIO.md)
 - [LLM Programming Guide](LLM_PROGRAMMING_GUIDE.md)
 
 ### Reference
 - [Standard Library Reference](reference/STDLIB_REFERENCE.md)
-- [Standard Library Organization](reference/STDLIB_MODULE_ORGANIZATION.md)
+- [Standard Library Organization](STDLIB_MODULE_ORGANIZATION.md)
 
 ## For Developers
 
