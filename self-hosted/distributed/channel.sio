@@ -1,0 +1,1100 @@
+// self-hosted::distributed::channel — Typed async ring-buffer channel
+//
+// A bounded FIFO channel backed by a fixed-size ring buffer.
+// All operations are O(1). Capacity is capped at 256 slots.
+// Prefix: ch_
+
+// ============================================================================
+// CONSTANTS (as functions to avoid forward-ref issues)
+// ============================================================================
+
+fn CH_OK() -> i64 { 0 }
+fn CH_EMPTY() -> i64 { 1 }
+fn CH_FULL() -> i64 { 2 }
+fn CH_CLOSED() -> i64 { 3 }
+
+// ============================================================================
+// STRUCTS
+// ============================================================================
+
+struct ChBuf {
+    data: [i64; 256],
+    head: i64,
+    tail: i64,
+    cap: i64,
+    count: i64,
+    closed: bool,
+}
+
+struct ChSelectEntry {
+    buf_id: i64,
+    ready: bool,
+    value: i64,
+}
+
+struct ChSelect {
+    entries: [ChSelectEntry; 16],
+    count: i64,
+    ready_idx: i64,
+}
+
+// ============================================================================
+// CHANNEL CONSTRUCTOR
+// ============================================================================
+
+fn ch_new(cap: i64) -> ChBuf with Mut {
+    var actual_cap: i64 = cap
+    if actual_cap > 256 {
+        actual_cap = 256
+    }
+    if actual_cap < 1 {
+        actual_cap = 1
+    }
+    ChBuf {
+        data: [0; 256],
+        head: 0,
+        tail: 0,
+        cap: actual_cap,
+        count: 0,
+        closed: false,
+    }
+}
+
+// ============================================================================
+// CORE SEND / RECV
+// ============================================================================
+
+fn ch_send(ch: &! ChBuf, val: i64) -> i64 with Mut, Panic, Div {
+    if ch.closed {
+        return CH_CLOSED()
+    }
+    if ch.count >= ch.cap {
+        return CH_FULL()
+    }
+    ch.data[ch.tail] = val
+    ch.tail = (ch.tail + 1) % ch.cap
+    ch.count = ch.count + 1
+    CH_OK()
+}
+
+fn ch_recv(ch: &! ChBuf) -> i64 with Mut, Panic, Div {
+    if ch.count == 0 {
+        return 0 - 1
+    }
+    let val = ch.data[ch.head]
+    ch.head = (ch.head + 1) % ch.cap
+    ch.count = ch.count - 1
+    val
+}
+
+fn ch_recv_status(ch: &! ChBuf) -> i64 with Mut, Panic, Div {
+    if ch.closed && ch.count == 0 {
+        return CH_CLOSED()
+    }
+    if ch.count == 0 {
+        return CH_EMPTY()
+    }
+    CH_OK()
+}
+
+// ============================================================================
+// NON-BLOCKING OPS
+// ============================================================================
+
+fn ch_try_send(ch: &! ChBuf, val: i64) -> bool with Mut, Panic, Div {
+    let status = ch_send(ch, val)
+    status == CH_OK()
+}
+
+fn ch_try_recv(ch: &! ChBuf) -> i64 with Mut, Panic, Div {
+    if ch.count == 0 {
+        return 0 - 1
+    }
+    ch_recv(ch)
+}
+
+// ============================================================================
+// CLOSE
+// ============================================================================
+
+fn ch_close(ch: &! ChBuf) -> () with Mut {
+    ch.closed = true
+}
+
+fn ch_is_closed(ch: &ChBuf) -> bool {
+    ch.closed
+}
+
+// ============================================================================
+// QUERIES
+// ============================================================================
+
+fn ch_len(ch: &ChBuf) -> i64 {
+    ch.count
+}
+
+fn ch_cap(ch: &ChBuf) -> i64 {
+    ch.cap
+}
+
+fn ch_is_empty(ch: &ChBuf) -> bool {
+    ch.count == 0
+}
+
+fn ch_is_full(ch: &ChBuf) -> bool {
+    ch.count >= ch.cap
+}
+
+// ============================================================================
+// DRAIN
+// ============================================================================
+
+fn ch_drain(ch: &! ChBuf, out: &! [i64; 256]) -> i64 with Mut, Panic, Div {
+    var n: i64 = 0
+    while ch.count > 0 {
+        let val = ch_recv(ch)
+        out[n] = val
+        n = n + 1
+    }
+    n
+}
+
+// ============================================================================
+// SELECT
+// ============================================================================
+
+fn ch_select_entry_new(buf_id: i64) -> ChSelectEntry {
+    ChSelectEntry {
+        buf_id: buf_id,
+        ready: false,
+        value: 0,
+    }
+}
+
+fn ch_select_new() -> ChSelect with Mut {
+    ChSelect {
+        entries: [ChSelectEntry { buf_id: 0, ready: false, value: 0 }; 16],
+        count: 0,
+        ready_idx: 0 - 1,
+    }
+}
+
+fn ch_select_add(sel: &! ChSelect, buf_id: i64) -> () with Mut, Panic {
+    if sel.count >= 16 {
+        return ()
+    }
+    sel.entries[sel.count] = ChSelectEntry { buf_id: buf_id, ready: false, value: 0 }
+    sel.count = sel.count + 1
+}
+
+fn ch_select_mark_ready(sel: &! ChSelect, idx: i64, value: i64) -> () with Mut, Panic {
+    sel.entries[idx] = ChSelectEntry {
+        buf_id: sel.entries[idx].buf_id,
+        ready: true,
+        value: value,
+    }
+    sel.ready_idx = idx
+}
+
+fn ch_select_ready(sel: &ChSelect) -> i64 {
+    sel.ready_idx
+}
+
+fn ch_select_count(sel: &ChSelect) -> i64 {
+    sel.count
+}
+
+// ============================================================================
+// TESTS — channel send / recv basics
+// ============================================================================
+
+fn do_test_001(ch: &! ChBuf) -> bool with Mut, Panic, Div {
+    let s = ch_send(ch, 42)
+    let v = ch_recv(ch)
+    s == CH_OK() && v == 42
+}
+
+fn test_001_send_recv_basic() -> bool with Mut, Panic, Div {
+    var ch = ch_new(8)
+    do_test_001(&! ch)
+}
+
+fn do_test_002(ch: &! ChBuf) -> bool with Mut, Panic, Div {
+    ch_send(ch, 10)
+    ch_send(ch, 20)
+    ch_send(ch, 30)
+    let v1 = ch_recv(ch)
+    let v2 = ch_recv(ch)
+    let v3 = ch_recv(ch)
+    v1 == 10 && v2 == 20 && v3 == 30
+}
+
+fn test_002_fifo_ordering() -> bool with Mut, Panic, Div {
+    var ch = ch_new(8)
+    do_test_002(&! ch)
+}
+
+fn do_test_003(ch: &! ChBuf) -> bool with Mut, Panic, Div {
+    let s1 = ch_send(ch, 1)
+    let s2 = ch_send(ch, 2)
+    let s3 = ch_send(ch, 3)
+    let s4 = ch_send(ch, 4)
+    // 5th send into capacity-4 channel must fail
+    let s5 = ch_send(ch, 5)
+    s1 == CH_OK() && s2 == CH_OK() && s3 == CH_OK() && s4 == CH_OK() && s5 == CH_FULL()
+}
+
+fn test_003_send_full() -> bool with Mut, Panic, Div {
+    var ch = ch_new(4)
+    do_test_003(&! ch)
+}
+
+fn test_004_recv_empty_returns_neg1() -> bool with Mut, Panic, Div {
+    var ch = ch_new(4)
+    let v = ch_recv(&! ch)
+    v == 0 - 1
+}
+
+fn do_test_005(ch: &! ChBuf) -> bool with Mut, Panic, Div {
+    ch_send(ch, 100)
+    ch_recv(ch)
+    ch_send(ch, 200)
+    ch_recv(ch)
+    ch_len(ch) == 0
+}
+
+fn test_005_len_tracks_count() -> bool with Mut, Panic, Div {
+    var ch = ch_new(8)
+    do_test_005(&! ch)
+}
+
+fn test_006_cap_reported_correctly() -> bool with Mut, Panic, Div {
+    var ch = ch_new(16)
+    ch_cap(&ch) == 16
+}
+
+fn test_007_is_empty_on_new_channel() -> bool with Mut, Panic, Div {
+    var ch = ch_new(4)
+    ch_is_empty(&ch)
+}
+
+fn do_test_008(ch: &! ChBuf) -> bool with Mut, Panic, Div {
+    ch_send(ch, 1)
+    ch_send(ch, 2)
+    ch_send(ch, 3)
+    ch_send(ch, 4)
+    ch_is_full(ch)
+}
+
+fn test_008_is_full_when_at_capacity() -> bool with Mut, Panic, Div {
+    var ch = ch_new(4)
+    do_test_008(&! ch)
+}
+
+fn do_test_009(ch: &! ChBuf) -> bool with Mut, Panic, Div {
+    ch_send(ch, 1)
+    ch_send(ch, 2)
+    ch_send(ch, 3)
+    ch_send(ch, 4)
+    ch_recv(ch)
+    !ch_is_full(ch)
+}
+
+fn test_009_not_full_after_recv() -> bool with Mut, Panic, Div {
+    var ch = ch_new(4)
+    do_test_009(&! ch)
+}
+
+// ============================================================================
+// TESTS — ring buffer wraparound
+// ============================================================================
+
+fn do_test_010(ch: &! ChBuf) -> bool with Mut, Panic, Div {
+    // fill
+    ch_send(ch, 10)
+    ch_send(ch, 20)
+    ch_send(ch, 30)
+    ch_send(ch, 40)
+    // drain two
+    ch_recv(ch)
+    ch_recv(ch)
+    // add two more (wraps tail)
+    ch_send(ch, 50)
+    ch_send(ch, 60)
+    let v1 = ch_recv(ch)
+    let v2 = ch_recv(ch)
+    let v3 = ch_recv(ch)
+    let v4 = ch_recv(ch)
+    v1 == 30 && v2 == 40 && v3 == 50 && v4 == 60
+}
+
+fn test_010_wraparound_basic() -> bool with Mut, Panic, Div {
+    var ch = ch_new(4)
+    do_test_010(&! ch)
+}
+
+fn do_test_011(ch: &! ChBuf) -> bool with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < 8 {
+        ch_send(ch, i)
+        ch_recv(ch)
+        i = i + 1
+    }
+    ch_len(ch) == 0
+}
+
+fn test_011_wraparound_many_cycles() -> bool with Mut, Panic, Div {
+    var ch = ch_new(4)
+    do_test_011(&! ch)
+}
+
+fn do_test_012(ch: &! ChBuf) -> bool with Mut, Panic, Div {
+    ch_send(ch, 1)
+    ch_recv(ch)
+    ch_send(ch, 2)
+    ch_recv(ch)
+    ch_send(ch, 3)
+    ch_recv(ch)
+    ch_send(ch, 4)
+    let v = ch_recv(ch)
+    v == 4
+}
+
+fn test_012_single_slot_fifo() -> bool with Mut, Panic, Div {
+    var ch = ch_new(1)
+    do_test_012(&! ch)
+}
+
+fn do_test_013(ch: &! ChBuf) -> bool with Mut, Panic, Div {
+    ch_send(ch, 77)
+    ch_send(ch, 88)
+    ch_recv(ch)
+    ch_recv(ch)
+    let v = ch_recv(ch)
+    v == 0 - 1
+}
+
+fn test_013_recv_after_drain_returns_neg1() -> bool with Mut, Panic, Div {
+    var ch = ch_new(4)
+    do_test_013(&! ch)
+}
+
+// ============================================================================
+// TESTS — close behaviour
+// ============================================================================
+
+fn do_test_014(ch: &! ChBuf) -> bool with Mut, Panic, Div {
+    ch_close(ch)
+    ch_is_closed(ch)
+}
+
+fn test_014_close_marks_closed() -> bool with Mut, Panic, Div {
+    var ch = ch_new(4)
+    do_test_014(&! ch)
+}
+
+fn do_test_015(ch: &! ChBuf) -> bool with Mut, Panic, Div {
+    ch_send(ch, 1)
+    ch_close(ch)
+    let s = ch_send(ch, 2)
+    s == CH_CLOSED()
+}
+
+fn test_015_send_to_closed_returns_closed() -> bool with Mut, Panic, Div {
+    var ch = ch_new(4)
+    do_test_015(&! ch)
+}
+
+fn do_test_016(ch: &! ChBuf) -> bool with Mut, Panic, Div {
+    ch_send(ch, 42)
+    ch_close(ch)
+    // can still drain buffered data after close
+    let v = ch_recv(ch)
+    v == 42
+}
+
+fn test_016_recv_buffered_after_close() -> bool with Mut, Panic, Div {
+    var ch = ch_new(4)
+    do_test_016(&! ch)
+}
+
+fn do_test_017(ch: &! ChBuf) -> bool with Mut, Panic, Div {
+    ch_close(ch)
+    let s = ch_recv_status(ch)
+    s == CH_CLOSED()
+}
+
+fn test_017_recv_status_closed_empty() -> bool with Mut, Panic, Div {
+    var ch = ch_new(4)
+    do_test_017(&! ch)
+}
+
+fn do_test_018(ch: &! ChBuf) -> bool with Mut, Panic, Div {
+    let s = ch_recv_status(ch)
+    s == CH_EMPTY()
+}
+
+fn test_018_recv_status_empty_open() -> bool with Mut, Panic, Div {
+    var ch = ch_new(4)
+    do_test_018(&! ch)
+}
+
+fn do_test_019(ch: &! ChBuf) -> bool with Mut, Panic, Div {
+    ch_send(ch, 7)
+    let s = ch_recv_status(ch)
+    s == CH_OK()
+}
+
+fn test_019_recv_status_ok_when_data() -> bool with Mut, Panic, Div {
+    var ch = ch_new(4)
+    do_test_019(&! ch)
+}
+
+fn do_test_020(ch: &! ChBuf) -> bool with Mut, Panic, Div {
+    ch_send(ch, 1)
+    ch_send(ch, 2)
+    ch_close(ch)
+    let s = ch_recv_status(ch)
+    s == CH_OK()
+}
+
+fn test_020_recv_status_ok_closed_with_data() -> bool with Mut, Panic, Div {
+    var ch = ch_new(4)
+    do_test_020(&! ch)
+}
+
+// ============================================================================
+// TESTS — non-blocking try_send / try_recv
+// ============================================================================
+
+fn do_test_021(ch: &! ChBuf) -> bool with Mut, Panic, Div {
+    let ok = ch_try_send(ch, 99)
+    let v = ch_try_recv(ch)
+    ok && v == 99
+}
+
+fn test_021_try_send_recv_success() -> bool with Mut, Panic, Div {
+    var ch = ch_new(4)
+    do_test_021(&! ch)
+}
+
+fn test_022_try_recv_empty_returns_neg1() -> bool with Mut, Panic, Div {
+    var ch = ch_new(4)
+    let v = ch_try_recv(&! ch)
+    v == 0 - 1
+}
+
+fn do_test_023(ch: &! ChBuf) -> bool with Mut, Panic, Div {
+    ch_send(ch, 1)
+    ch_send(ch, 2)
+    ch_send(ch, 3)
+    ch_send(ch, 4)
+    let ok = ch_try_send(ch, 5)
+    !ok
+}
+
+fn test_023_try_send_full_returns_false() -> bool with Mut, Panic, Div {
+    var ch = ch_new(4)
+    do_test_023(&! ch)
+}
+
+fn do_test_024(ch: &! ChBuf) -> bool with Mut, Panic, Div {
+    ch_close(ch)
+    let ok = ch_try_send(ch, 1)
+    !ok
+}
+
+fn test_024_try_send_closed_returns_false() -> bool with Mut, Panic, Div {
+    var ch = ch_new(4)
+    do_test_024(&! ch)
+}
+
+fn do_test_025(ch: &! ChBuf) -> bool with Mut, Panic, Div {
+    ch_send(ch, 55)
+    ch_send(ch, 66)
+    let v1 = ch_try_recv(ch)
+    let v2 = ch_try_recv(ch)
+    let v3 = ch_try_recv(ch)
+    v1 == 55 && v2 == 66 && v3 == 0 - 1
+}
+
+fn test_025_try_recv_drains_in_order() -> bool with Mut, Panic, Div {
+    var ch = ch_new(8)
+    do_test_025(&! ch)
+}
+
+// ============================================================================
+// TESTS — capacity boundary
+// ============================================================================
+
+fn test_026_cap_capped_at_256() -> bool with Mut, Panic, Div {
+    var ch = ch_new(999)
+    ch_cap(&ch) == 256
+}
+
+fn test_027_cap_min_1() -> bool with Mut, Panic, Div {
+    var ch = ch_new(0)
+    ch_cap(&ch) == 1
+}
+
+fn do_test_028(ch: &! ChBuf) -> bool with Mut, Panic, Div {
+    var ok: bool = true
+    var i: i64 = 0
+    while i < 256 {
+        let s = ch_send(ch, i)
+        if s != CH_OK() {
+            ok = false
+        }
+        i = i + 1
+    }
+    let s_extra = ch_send(ch, 999)
+    ok && s_extra == CH_FULL()
+}
+
+fn test_028_full_256_cap() -> bool with Mut, Panic, Div {
+    var ch = ch_new(256)
+    do_test_028(&! ch)
+}
+
+fn do_test_029(ch: &! ChBuf) -> bool with Mut, Panic, Div {
+    ch_send(ch, 1)
+    ch_recv(ch)
+    ch_len(ch) == 0
+}
+
+fn test_029_len_zero_after_single_cycle() -> bool with Mut, Panic, Div {
+    var ch = ch_new(1)
+    do_test_029(&! ch)
+}
+
+fn do_test_030(ch: &! ChBuf) -> bool with Mut, Panic, Div {
+    ch_send(ch, 1)
+    let full1 = ch_is_full(ch)
+    ch_recv(ch)
+    let empty1 = ch_is_empty(ch)
+    full1 && empty1
+}
+
+fn test_030_single_slot_full_empty() -> bool with Mut, Panic, Div {
+    var ch = ch_new(1)
+    do_test_030(&! ch)
+}
+
+// ============================================================================
+// TESTS — drain
+// ============================================================================
+
+fn do_test_031(ch: &! ChBuf, out: &! [i64; 256]) -> bool with Mut, Panic, Div {
+    ch_send(ch, 10)
+    ch_send(ch, 20)
+    ch_send(ch, 30)
+    let n = ch_drain(ch, out)
+    let ok1 = n == 3
+    let ok2 = out[0] == 10
+    let ok3 = out[1] == 20
+    let ok4 = out[2] == 30
+    let ok5 = ch_is_empty(ch)
+    ok1 && ok2 && ok3 && ok4 && ok5
+}
+
+fn test_031_drain_basic() -> bool with Mut, Panic, Div {
+    var ch = ch_new(8)
+    var out: [i64; 256] = [0; 256]
+    do_test_031(&! ch, &! out)
+}
+
+fn do_test_032(ch: &! ChBuf, out: &! [i64; 256]) -> bool with Mut, Panic, Div {
+    let n = ch_drain(ch, out)
+    n == 0 && ch_is_empty(ch)
+}
+
+fn test_032_drain_empty_channel() -> bool with Mut, Panic, Div {
+    var ch = ch_new(8)
+    var out: [i64; 256] = [0; 256]
+    do_test_032(&! ch, &! out)
+}
+
+fn do_test_033(ch: &! ChBuf, out: &! [i64; 256]) -> bool with Mut, Panic, Div {
+    ch_send(ch, 1)
+    ch_send(ch, 2)
+    ch_send(ch, 3)
+    ch_send(ch, 4)
+    ch_send(ch, 5)
+    let n = ch_drain(ch, out)
+    n == 5
+}
+
+fn test_033_drain_multiple() -> bool with Mut, Panic, Div {
+    var ch = ch_new(8)
+    var out: [i64; 256] = [0; 256]
+    do_test_033(&! ch, &! out)
+}
+
+fn do_test_034(ch: &! ChBuf, out: &! [i64; 256]) -> bool with Mut, Panic, Div {
+    ch_send(ch, 99)
+    ch_close(ch)
+    let n = ch_drain(ch, out)
+    n == 1 && out[0] == 99
+}
+
+fn test_034_drain_from_closed_channel() -> bool with Mut, Panic, Div {
+    var ch = ch_new(8)
+    var out: [i64; 256] = [0; 256]
+    do_test_034(&! ch, &! out)
+}
+
+// ============================================================================
+// TESTS — select
+// ============================================================================
+
+fn do_test_035(sel: &! ChSelect) -> bool with Mut, Panic {
+    ch_select_add(sel, 10)
+    ch_select_add(sel, 20)
+    ch_select_count(sel) == 2
+}
+
+fn test_035_select_add_entries() -> bool with Mut, Panic {
+    var sel = ch_select_new()
+    do_test_035(&! sel)
+}
+
+fn test_036_select_ready_minus1_initially() -> bool with Mut {
+    let sel = ch_select_new()
+    ch_select_ready(&sel) == 0 - 1
+}
+
+fn do_test_037(sel: &! ChSelect) -> bool with Mut, Panic {
+    ch_select_add(sel, 5)
+    ch_select_add(sel, 6)
+    ch_select_mark_ready(sel, 0, 42)
+    ch_select_ready(sel) == 0
+}
+
+fn test_037_select_mark_ready() -> bool with Mut, Panic {
+    var sel = ch_select_new()
+    do_test_037(&! sel)
+}
+
+fn do_test_038(sel: &! ChSelect) -> bool with Mut, Panic {
+    ch_select_add(sel, 100)
+    ch_select_mark_ready(sel, 0, 77)
+    let idx = ch_select_ready(sel)
+    let entry = sel.entries[0]
+    idx == 0 && entry.ready && entry.value == 77
+}
+
+fn test_038_select_entry_value() -> bool with Mut, Panic {
+    var sel = ch_select_new()
+    do_test_038(&! sel)
+}
+
+fn do_test_039(sel: &! ChSelect) -> bool with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < 16 {
+        ch_select_add(sel, i)
+        i = i + 1
+    }
+    // 17th add should be ignored
+    ch_select_add(sel, 999)
+    ch_select_count(sel) == 16
+}
+
+fn test_039_select_max_16_entries() -> bool with Mut, Panic, Div {
+    var sel = ch_select_new()
+    do_test_039(&! sel)
+}
+
+fn do_test_040(sel: &! ChSelect) -> bool with Mut, Panic {
+    ch_select_add(sel, 1)
+    ch_select_add(sel, 2)
+    ch_select_add(sel, 3)
+    ch_select_mark_ready(sel, 2, 55)
+    ch_select_ready(sel) == 2
+}
+
+fn test_040_select_mark_last_ready() -> bool with Mut, Panic {
+    var sel = ch_select_new()
+    do_test_040(&! sel)
+}
+
+// ============================================================================
+// TESTS — status codes
+// ============================================================================
+
+fn test_041_ch_ok_is_0() -> bool {
+    CH_OK() == 0
+}
+
+fn test_042_ch_empty_is_1() -> bool {
+    CH_EMPTY() == 1
+}
+
+fn test_043_ch_full_is_2() -> bool {
+    CH_FULL() == 2
+}
+
+fn test_044_ch_closed_is_3() -> bool {
+    CH_CLOSED() == 3
+}
+
+// ============================================================================
+// TESTS — send returns correct status
+// ============================================================================
+
+fn do_test_045(ch: &! ChBuf) -> bool with Mut, Panic, Div {
+    let s = ch_send(ch, 1)
+    s == CH_OK()
+}
+
+fn test_045_send_returns_ok() -> bool with Mut, Panic, Div {
+    var ch = ch_new(4)
+    do_test_045(&! ch)
+}
+
+fn do_test_046(ch: &! ChBuf) -> bool with Mut, Panic, Div {
+    ch_send(ch, 1)
+    ch_send(ch, 2)
+    ch_send(ch, 3)
+    ch_send(ch, 4)
+    let s = ch_send(ch, 5)
+    s == CH_FULL()
+}
+
+fn test_046_send_returns_full() -> bool with Mut, Panic, Div {
+    var ch = ch_new(4)
+    do_test_046(&! ch)
+}
+
+fn do_test_047(ch: &! ChBuf) -> bool with Mut, Panic, Div {
+    ch_close(ch)
+    let s = ch_send(ch, 1)
+    s == CH_CLOSED()
+}
+
+fn test_047_send_returns_closed() -> bool with Mut, Panic, Div {
+    var ch = ch_new(4)
+    do_test_047(&! ch)
+}
+
+// ============================================================================
+// TESTS — multiple values, various caps
+// ============================================================================
+
+fn do_test_048(ch: &! ChBuf) -> bool with Mut, Panic, Div {
+    ch_send(ch, 100)
+    ch_send(ch, 200)
+    ch_send(ch, 300)
+    let v1 = ch_recv(ch)
+    ch_send(ch, 400)
+    let v2 = ch_recv(ch)
+    let v3 = ch_recv(ch)
+    let v4 = ch_recv(ch)
+    v1 == 100 && v2 == 200 && v3 == 300 && v4 == 400
+}
+
+fn test_048_interleaved_send_recv() -> bool with Mut, Panic, Div {
+    var ch = ch_new(4)
+    do_test_048(&! ch)
+}
+
+fn do_test_049(ch: &! ChBuf) -> bool with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < 10 {
+        ch_send(ch, i * 10)
+        i = i + 1
+    }
+    var j: i64 = 0
+    var ok: bool = true
+    while j < 10 {
+        let v = ch_recv(ch)
+        if v != j * 10 {
+            ok = false
+        }
+        j = j + 1
+    }
+    ok
+}
+
+fn test_049_batch_send_recv() -> bool with Mut, Panic, Div {
+    var ch = ch_new(16)
+    do_test_049(&! ch)
+}
+
+fn do_test_050(ch: &! ChBuf) -> bool with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < 8 {
+        ch_send(ch, i)
+        i = i + 1
+    }
+    ch_len(ch) == 8
+}
+
+fn test_050_len_after_batch_send() -> bool with Mut, Panic, Div {
+    var ch = ch_new(8)
+    do_test_050(&! ch)
+}
+
+fn do_test_051(ch: &! ChBuf) -> bool with Mut, Panic, Div {
+    ch_send(ch, 0 - 1)
+    let v = ch_recv(ch)
+    v == 0 - 1
+}
+
+fn test_051_send_negative_value() -> bool with Mut, Panic, Div {
+    var ch = ch_new(4)
+    do_test_051(&! ch)
+}
+
+fn do_test_052(ch: &! ChBuf) -> bool with Mut, Panic, Div {
+    ch_send(ch, 0)
+    let v = ch_recv(ch)
+    v == 0
+}
+
+fn test_052_send_zero_value() -> bool with Mut, Panic, Div {
+    var ch = ch_new(4)
+    do_test_052(&! ch)
+}
+
+fn do_test_053(ch: &! ChBuf) -> bool with Mut, Panic, Div {
+    ch_send(ch, 9999999)
+    let v = ch_recv(ch)
+    v == 9999999
+}
+
+fn test_053_send_large_value() -> bool with Mut, Panic, Div {
+    var ch = ch_new(4)
+    do_test_053(&! ch)
+}
+
+// ============================================================================
+// TESTS — is_open / not_closed
+// ============================================================================
+
+fn test_054_not_closed_on_creation() -> bool with Mut, Panic, Div {
+    var ch = ch_new(4)
+    !ch_is_closed(&ch)
+}
+
+fn do_test_055(ch: &! ChBuf) -> bool with Mut, Panic, Div {
+    ch_close(ch)
+    ch_close(ch)
+    ch_is_closed(ch)
+}
+
+fn test_055_double_close_idempotent() -> bool with Mut, Panic, Div {
+    var ch = ch_new(4)
+    do_test_055(&! ch)
+}
+
+// ============================================================================
+// TESTS — cap variants
+// ============================================================================
+
+fn test_056_cap_2_channel() -> bool with Mut, Panic, Div {
+    var ch = ch_new(2)
+    ch_cap(&ch) == 2
+}
+
+fn test_057_cap_32_channel() -> bool with Mut, Panic, Div {
+    var ch = ch_new(32)
+    ch_cap(&ch) == 32
+}
+
+fn test_058_cap_128_channel() -> bool with Mut, Panic, Div {
+    var ch = ch_new(128)
+    ch_cap(&ch) == 128
+}
+
+// ============================================================================
+// TESTS — wraparound edge cases
+// ============================================================================
+
+fn do_test_059(ch: &! ChBuf) -> bool with Mut, Panic, Div {
+    // fill cap-1 times, drain cap-1 times, then fill again
+    ch_send(ch, 1)
+    ch_send(ch, 2)
+    ch_recv(ch)
+    ch_recv(ch)
+    ch_send(ch, 3)
+    ch_send(ch, 4)
+    let v1 = ch_recv(ch)
+    let v2 = ch_recv(ch)
+    v1 == 3 && v2 == 4
+}
+
+fn test_059_wraparound_at_cap_2() -> bool with Mut, Panic, Div {
+    var ch = ch_new(2)
+    do_test_059(&! ch)
+}
+
+fn do_test_060(ch: &! ChBuf) -> bool with Mut, Panic, Div {
+    // alternating single send/recv 256 times to cycle entire ring
+    var i: i64 = 0
+    var ok: bool = true
+    while i < 16 {
+        ch_send(ch, i * 3)
+        let v = ch_recv(ch)
+        if v != i * 3 {
+            ok = false
+        }
+        i = i + 1
+    }
+    ok
+}
+
+fn test_060_alternating_single_wrap() -> bool with Mut, Panic, Div {
+    var ch = ch_new(4)
+    do_test_060(&! ch)
+}
+
+// ============================================================================
+// TESTS — len tracking
+// ============================================================================
+
+fn do_test_061(ch: &! ChBuf) -> bool with Mut, Panic, Div {
+    let l0 = ch_len(ch)
+    ch_send(ch, 1)
+    let l1 = ch_len(ch)
+    ch_send(ch, 2)
+    let l2 = ch_len(ch)
+    ch_recv(ch)
+    let l3 = ch_len(ch)
+    l0 == 0 && l1 == 1 && l2 == 2 && l3 == 1
+}
+
+fn test_061_len_increments_decrements() -> bool with Mut, Panic, Div {
+    var ch = ch_new(8)
+    do_test_061(&! ch)
+}
+
+fn do_test_062(ch: &! ChBuf) -> bool with Mut, Panic, Div {
+    ch_send(ch, 1)
+    ch_send(ch, 2)
+    ch_send(ch, 3)
+    let n = ch_len(ch)
+    n == 3
+}
+
+fn test_062_len_equals_3_after_3_sends() -> bool with Mut, Panic, Div {
+    var ch = ch_new(8)
+    do_test_062(&! ch)
+}
+
+// ============================================================================
+// TESTS — select entry buf_id tracking
+// ============================================================================
+
+fn do_test_063(sel: &! ChSelect) -> bool with Mut, Panic {
+    ch_select_add(sel, 42)
+    sel.entries[0].buf_id == 42
+}
+
+fn test_063_select_entry_buf_id() -> bool with Mut, Panic {
+    var sel = ch_select_new()
+    do_test_063(&! sel)
+}
+
+fn do_test_064(sel: &! ChSelect) -> bool with Mut, Panic {
+    ch_select_add(sel, 1)
+    ch_select_add(sel, 2)
+    ch_select_add(sel, 3)
+    sel.entries[0].buf_id == 1 && sel.entries[1].buf_id == 2 && sel.entries[2].buf_id == 3
+}
+
+fn test_064_select_multiple_buf_ids() -> bool with Mut, Panic {
+    var sel = ch_select_new()
+    do_test_064(&! sel)
+}
+
+fn test_065_select_count_zero_on_new() -> bool with Mut {
+    let sel = ch_select_new()
+    ch_select_count(&sel) == 0
+}
+
+// ============================================================================
+// TESTS — send to full then drain
+// ============================================================================
+
+fn do_test_066(ch: &! ChBuf, out: &! [i64; 256]) -> bool with Mut, Panic, Div {
+    // fill channel completely
+    var i: i64 = 0
+    while i < 8 {
+        ch_send(ch, i + 1)
+        i = i + 1
+    }
+    let n = ch_drain(ch, out)
+    let ok1 = n == 8
+    let ok2 = out[0] == 1
+    let ok3 = out[7] == 8
+    ok1 && ok2 && ok3
+}
+
+fn test_066_drain_full_channel() -> bool with Mut, Panic, Div {
+    var ch = ch_new(8)
+    var out: [i64; 256] = [0; 256]
+    do_test_066(&! ch, &! out)
+}
+
+fn do_test_067(ch: &! ChBuf) -> bool with Mut, Panic, Div {
+    ch_send(ch, 1)
+    ch_send(ch, 2)
+    let s = ch_send(ch, 3)
+    s == CH_FULL()
+}
+
+fn test_067_send_returns_full_at_cap2() -> bool with Mut, Panic, Div {
+    var ch = ch_new(2)
+    do_test_067(&! ch)
+}
+
+// ============================================================================
+// TESTS — is_empty after drain
+// ============================================================================
+
+fn do_test_068(ch: &! ChBuf, out: &! [i64; 256]) -> bool with Mut, Panic, Div {
+    ch_send(ch, 10)
+    ch_send(ch, 20)
+    ch_drain(ch, out)
+    ch_is_empty(ch)
+}
+
+fn test_068_is_empty_after_drain() -> bool with Mut, Panic, Div {
+    var ch = ch_new(8)
+    var out: [i64; 256] = [0; 256]
+    do_test_068(&! ch, &! out)
+}
+
+// ============================================================================
+// TESTS — recv on closed+empty returns -1
+// ============================================================================
+
+fn do_test_069(ch: &! ChBuf) -> bool with Mut, Panic, Div {
+    ch_close(ch)
+    let v = ch_recv(ch)
+    v == 0 - 1
+}
+
+fn test_069_recv_closed_empty_returns_neg1() -> bool with Mut, Panic, Div {
+    var ch = ch_new(4)
+    do_test_069(&! ch)
+}
+
+// ============================================================================
+// TESTS — mixed states
+// ============================================================================
+
+fn do_test_070(ch: &! ChBuf) -> bool with Mut, Panic, Div {
+    ch_send(ch, 5)
+    ch_send(ch, 10)
+    ch_send(ch, 15)
+    let l = ch_len(ch)
+    let c = ch_cap(ch)
+    let full = ch_is_full(ch)
+    l == 3 && c == 3 && full
+}
+
+fn test_070_len_cap_full_at_boundary() -> bool with Mut, Panic, Div {
+    var ch = ch_new(3)
+    do_test_070(&! ch)
+}

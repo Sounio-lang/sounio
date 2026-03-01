@@ -1,0 +1,1062 @@
+// self-hosted::tools::package — Package dependency resolution and lock file
+//
+// Semantic versioning with major/minor/patch, BFS dependency resolution,
+// conflict detection, lock file management, and hash verification.
+//
+// All names are stored in fixed-size [i8; 128] arrays. Strings are compared
+// and copied using str_char_at / str_len primitives.
+
+// ============================================================================
+// STRUCTS
+// ============================================================================
+
+struct PkgVersion {
+    major: i64,
+    minor: i64,
+    patch: i64,
+}
+
+struct PkgDep {
+    name:              [i8; 128],
+    name_len:          i64,
+    version_req_major: i64,
+    version_req_minor: i64,
+    optional:          bool,
+}
+
+struct PkgMeta {
+    name:      [i8; 128],
+    name_len:  i64,
+    version:   PkgVersion,
+    deps:      [PkgDep; 32],
+    dep_count: i64,
+}
+
+struct PkgLockEntry {
+    name:     [i8; 128],
+    name_len: i64,
+    version:  PkgVersion,
+    hash:     i64,
+    resolved: bool,
+}
+
+struct PkgLock {
+    entries: [PkgLockEntry; 256],
+    count:   i64,
+    valid:   bool,
+}
+
+struct PkgRegistry {
+    packages: [PkgMeta; 128],
+    count:    i64,
+}
+
+struct PkgResolveResult {
+    resolved:       [i64; 256],   // indices into registry
+    resolved_count: i64,
+    conflicts:      [i64; 64],
+    conflict_count: i64,
+    ok:             bool,
+}
+
+// ============================================================================
+// HELPERS: empty structs
+// ============================================================================
+
+fn pkg_empty_version() -> PkgVersion {
+    PkgVersion { major: 0, minor: 0, patch: 0 }
+}
+
+fn pkg_empty_dep() -> PkgDep {
+    PkgDep {
+        name:              [0; 128],
+        name_len:          0,
+        version_req_major: 0,
+        version_req_minor: 0,
+        optional:          false,
+    }
+}
+
+fn pkg_empty_meta() -> PkgMeta {
+    PkgMeta {
+        name:      [0; 128],
+        name_len:  0,
+        version:   pkg_empty_version(),
+        deps:      [pkg_empty_dep(); 32],
+        dep_count: 0,
+    }
+}
+
+fn pkg_empty_lock_entry() -> PkgLockEntry {
+    PkgLockEntry {
+        name:     [0; 128],
+        name_len: 0,
+        version:  pkg_empty_version(),
+        hash:     0,
+        resolved: false,
+    }
+}
+
+fn pkg_empty_resolve_result() -> PkgResolveResult {
+    PkgResolveResult {
+        resolved:       [0; 256],
+        resolved_count: 0,
+        conflicts:      [0; 64],
+        conflict_count: 0,
+        ok:             true,
+    }
+}
+
+// ============================================================================
+// STRING COPY INTO [i8; 128]
+// ============================================================================
+
+fn pkg_copy_name(dst: &![i8; 128], s: string) -> i64 with Mut, Panic, Div {
+    let n = str_len(s)
+    var lim: i64 = n
+    if lim > 128 { lim = 128 }
+    var i: i64 = 0
+    while i < lim {
+        dst[i as usize] = str_char_at(s, i) as i8
+        i = i + 1
+    }
+    lim
+}
+
+// Compare a string to a [i8; 128] name field (length n).
+fn pkg_name_eq(name: [i8; 128], name_len: i64, s: string) -> bool with Mut, Panic, Div {
+    let sn = str_len(s)
+    if sn != name_len { return false }
+    var i: i64 = 0
+    while i < name_len {
+        if name[i as usize] != str_char_at(s, i) as i8 {
+            return false
+        }
+        i = i + 1
+    }
+    true
+}
+
+// ============================================================================
+// VERSION OPERATIONS
+// ============================================================================
+
+fn pkg_version_new(major: i64, minor: i64, patch: i64) -> PkgVersion {
+    PkgVersion { major: major, minor: minor, patch: patch }
+}
+
+// Compare versions: returns -1 (a<b), 0 (a==b), 1 (a>b)
+fn pkg_version_compare(a: &PkgVersion, b: &PkgVersion) -> i64 {
+    if a.major < b.major { return 0 - 1 }
+    if a.major > b.major { return 1 }
+    if a.minor < b.minor { return 0 - 1 }
+    if a.minor > b.minor { return 1 }
+    if a.patch < b.patch { return 0 - 1 }
+    if a.patch > b.patch { return 1 }
+    0
+}
+
+// Returns true if v satisfies >= (req_major, req_minor, 0)
+fn pkg_version_satisfies(v: &PkgVersion, req_major: i64, req_minor: i64) -> bool {
+    if v.major > req_major { return true }
+    if v.major < req_major { return false }
+    // same major
+    v.minor >= req_minor
+}
+
+// Build "major.minor.patch" into a small buffer.
+fn pkg_int_to_i8_buf(buf: &![i8; 32], n: i64, pos: i64) -> i64 with Mut, Panic, Div {
+    if n == 0 {
+        buf[pos as usize] = 48 as i8
+        return pos + 1
+    }
+    var val: i64 = n
+    var digits: [i8; 20] = [0; 20]
+    var dcount: i64 = 0
+    while val > 0 && dcount < 20 {
+        let d = val % 10
+        digits[dcount as usize] = (48 + d) as i8
+        val = val / 10
+        dcount = dcount + 1
+    }
+    var p: i64 = pos
+    var j: i64 = dcount - 1
+    while j >= 0 {
+        if p < 32 {
+            buf[p as usize] = digits[j as usize]
+            p = p + 1
+        }
+        j = j - 1
+    }
+    p
+}
+
+fn pkg_version_to_string(v: &PkgVersion) -> string with Mut, Panic, Div {
+    var buf: [i8; 32] = [0; 32]
+    let buf_ref = &! buf
+    var pos: i64 = pkg_int_to_i8_buf(buf_ref, v.major, 0)
+    // '.' = 46
+    buf[pos as usize] = 46 as i8
+    pos = pos + 1
+    pos = pkg_int_to_i8_buf(buf_ref, v.minor, pos)
+    buf[pos as usize] = 46 as i8
+    pos = pos + 1
+    pos = pkg_int_to_i8_buf(buf_ref, v.patch, pos)
+    str_from_bytes(buf, pos)
+}
+
+// ============================================================================
+// PACKAGE META CONSTRUCTION
+// ============================================================================
+
+fn pkg_meta_new(name: string, major: i64, minor: i64, patch: i64) -> PkgMeta with Mut, Panic, Div {
+    var m = pkg_empty_meta()
+    let n = str_len(name)
+    var lim: i64 = n
+    if lim > 128 { lim = 128 }
+    var i: i64 = 0
+    while i < lim {
+        m.name[i as usize] = str_char_at(name, i) as i8
+        i = i + 1
+    }
+    m.name_len = lim
+    m.version = PkgVersion { major: major, minor: minor, patch: patch }
+    m
+}
+
+fn pkg_add_dep(m: &! PkgMeta, name: string, req_major: i64, req_minor: i64, optional: bool) -> () with Mut, Panic, Div {
+    if m.dep_count >= 32 {
+        return ()
+    }
+    let idx = m.dep_count
+    m.deps[idx as usize] = pkg_empty_dep()
+    let n = str_len(name)
+    var lim: i64 = n
+    if lim > 128 { lim = 128 }
+    var i: i64 = 0
+    while i < lim {
+        m.deps[idx as usize].name[i as usize] = str_char_at(name, i) as i8
+        i = i + 1
+    }
+    m.deps[idx as usize].name_len = lim
+    m.deps[idx as usize].version_req_major = req_major
+    m.deps[idx as usize].version_req_minor = req_minor
+    m.deps[idx as usize].optional = optional
+    m.dep_count = m.dep_count + 1
+}
+
+fn pkg_dep_count(m: &PkgMeta) -> i64 {
+    m.dep_count
+}
+
+// ============================================================================
+// REGISTRY
+// ============================================================================
+
+fn pkg_registry_new() -> PkgRegistry with Mut {
+    PkgRegistry {
+        packages: [pkg_empty_meta(); 128],
+        count:    0,
+    }
+}
+
+// Add a package to the registry. Returns its index, or -1 if full.
+fn pkg_registry_add(r: &! PkgRegistry, m: PkgMeta) -> i64 with Mut, Panic, Div {
+    if r.count >= 128 {
+        return 0 - 1
+    }
+    let idx = r.count
+    r.packages[idx as usize] = m
+    r.count = r.count + 1
+    idx
+}
+
+fn pkg_registry_count(r: &PkgRegistry) -> i64 {
+    r.count
+}
+
+// Find a package by name. Returns index, or -1 if not found.
+fn pkg_registry_find(r: &PkgRegistry, name: string) -> i64 with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < r.count {
+        if pkg_name_eq(r.packages[i as usize].name, r.packages[i as usize].name_len, name) {
+            return i
+        }
+        i = i + 1
+    }
+    0 - 1
+}
+
+// ============================================================================
+// RESOLUTION — BFS
+// ============================================================================
+//
+// resolve_result tracks which registry indices are already resolved to avoid
+// duplicates. A simple visited[] array (by registry index) is used.
+
+fn pkg_resolve_is_visited(visited: [i64; 256], visited_count: i64, idx: i64) -> bool with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < visited_count {
+        if visited[i as usize] == idx {
+            return true
+        }
+        i = i + 1
+    }
+    false
+}
+
+// BFS queue: up to 256 indices. Returns the resolve result.
+fn pkg_resolve(r: &PkgRegistry, root: &PkgMeta) -> PkgResolveResult with Mut, Panic, Div {
+    var result = pkg_empty_resolve_result()
+    // BFS queue of registry indices to visit
+    var queue: [i64; 256] = [0; 256]
+    var q_head: i64 = 0
+    var q_tail: i64 = 0
+    // Visited set (registry indices)
+    var visited: [i64; 256] = [0; 256]
+    var visited_count: i64 = 0
+
+    // Enqueue all deps of root (root itself is not in registry necessarily)
+    var di: i64 = 0
+    while di < root.dep_count {
+        let dep_name = str_from_bytes(root.deps[di as usize].name, root.deps[di as usize].name_len)
+        let dep_idx = pkg_registry_find(r, dep_name)
+        if dep_idx < 0 {
+            if !root.deps[di as usize].optional {
+                // Missing non-optional dep — conflict
+                if result.conflict_count < 64 {
+                    result.conflicts[result.conflict_count as usize] = di
+                    result.conflict_count = result.conflict_count + 1
+                }
+                result.ok = false
+            }
+        } else {
+            // Check version satisfies requirement
+            let dep_pkg = r.packages[dep_idx as usize]
+            let ok = pkg_version_satisfies(&dep_pkg.version, root.deps[di as usize].version_req_major, root.deps[di as usize].version_req_minor)
+            if !ok {
+                if result.conflict_count < 64 {
+                    result.conflicts[result.conflict_count as usize] = dep_idx
+                    result.conflict_count = result.conflict_count + 1
+                }
+                result.ok = false
+            } else {
+                if !pkg_resolve_is_visited(visited, visited_count, dep_idx) {
+                    queue[q_tail as usize] = dep_idx
+                    q_tail = q_tail + 1
+                    visited[visited_count as usize] = dep_idx
+                    visited_count = visited_count + 1
+                    if result.resolved_count < 256 {
+                        result.resolved[result.resolved_count as usize] = dep_idx
+                        result.resolved_count = result.resolved_count + 1
+                    }
+                }
+            }
+        }
+        di = di + 1
+    }
+
+    // BFS
+    while q_head < q_tail {
+        let curr_idx = queue[q_head as usize]
+        q_head = q_head + 1
+        let curr = r.packages[curr_idx as usize]
+        var ci: i64 = 0
+        while ci < curr.dep_count {
+            let cn = str_from_bytes(curr.deps[ci as usize].name, curr.deps[ci as usize].name_len)
+            let cidx = pkg_registry_find(r, cn)
+            if cidx < 0 {
+                if !curr.deps[ci as usize].optional {
+                    if result.conflict_count < 64 {
+                        result.conflicts[result.conflict_count as usize] = ci
+                        result.conflict_count = result.conflict_count + 1
+                    }
+                    result.ok = false
+                }
+            } else {
+                let cdep = r.packages[cidx as usize]
+                let cok = pkg_version_satisfies(&cdep.version, curr.deps[ci as usize].version_req_major, curr.deps[ci as usize].version_req_minor)
+                if !cok {
+                    if result.conflict_count < 64 {
+                        result.conflicts[result.conflict_count as usize] = cidx
+                        result.conflict_count = result.conflict_count + 1
+                    }
+                    result.ok = false
+                } else {
+                    if !pkg_resolve_is_visited(visited, visited_count, cidx) {
+                        if q_tail < 256 {
+                            queue[q_tail as usize] = cidx
+                            q_tail = q_tail + 1
+                        }
+                        visited[visited_count as usize] = cidx
+                        visited_count = visited_count + 1
+                        if result.resolved_count < 256 {
+                            result.resolved[result.resolved_count as usize] = cidx
+                            result.resolved_count = result.resolved_count + 1
+                        }
+                    }
+                }
+            }
+            ci = ci + 1
+        }
+    }
+
+    result
+}
+
+fn pkg_resolve_ok(res: &PkgResolveResult) -> bool {
+    res.ok
+}
+
+fn pkg_resolve_count(res: &PkgResolveResult) -> i64 {
+    res.resolved_count
+}
+
+fn pkg_resolve_conflict_count(res: &PkgResolveResult) -> i64 {
+    res.conflict_count
+}
+
+// ============================================================================
+// LOCK FILE
+// ============================================================================
+
+fn pkg_lock_new() -> PkgLock with Mut {
+    PkgLock {
+        entries: [pkg_empty_lock_entry(); 256],
+        count:   0,
+        valid:   true,
+    }
+}
+
+fn pkg_lock_add(l: &! PkgLock, name: string, v: PkgVersion, hash: i64) -> () with Mut, Panic, Div {
+    if l.count >= 256 {
+        return ()
+    }
+    let idx = l.count
+    l.entries[idx as usize] = pkg_empty_lock_entry()
+    let n = str_len(name)
+    var lim: i64 = n
+    if lim > 128 { lim = 128 }
+    var i: i64 = 0
+    while i < lim {
+        l.entries[idx as usize].name[i as usize] = str_char_at(name, i) as i8
+        i = i + 1
+    }
+    l.entries[idx as usize].name_len = lim
+    l.entries[idx as usize].version = v
+    l.entries[idx as usize].hash = hash
+    l.entries[idx as usize].resolved = true
+    l.count = l.count + 1
+}
+
+fn pkg_lock_count(l: &PkgLock) -> i64 {
+    l.count
+}
+
+fn pkg_lock_valid(l: &PkgLock) -> bool {
+    l.valid
+}
+
+fn pkg_lock_find(l: &PkgLock, name: string) -> i64 with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < l.count {
+        if pkg_name_eq(l.entries[i as usize].name, l.entries[i as usize].name_len, name) {
+            return i
+        }
+        i = i + 1
+    }
+    0 - 1
+}
+
+fn pkg_lock_verify_hash(l: &PkgLock, idx: i64, expected_hash: i64) -> bool with Panic {
+    if idx < 0 || idx >= l.count {
+        return false
+    }
+    l.entries[idx as usize].hash == expected_hash
+}
+
+// Reconstruct a resolve result from what the lock file says is installed,
+// cross-checking against the registry.
+fn pkg_lock_to_resolve_result(l: &PkgLock, r: &PkgRegistry) -> PkgResolveResult with Mut, Panic, Div {
+    var result = pkg_empty_resolve_result()
+    var i: i64 = 0
+    while i < l.count {
+        let entry = l.entries[i as usize]
+        if entry.resolved {
+            let name = str_from_bytes(entry.name, entry.name_len)
+            let ridx = pkg_registry_find(r, name)
+            if ridx >= 0 {
+                if result.resolved_count < 256 {
+                    result.resolved[result.resolved_count as usize] = ridx
+                    result.resolved_count = result.resolved_count + 1
+                }
+            } else {
+                // Package in lock but not in registry — conflict
+                if result.conflict_count < 64 {
+                    result.conflicts[result.conflict_count as usize] = i
+                    result.conflict_count = result.conflict_count + 1
+                }
+                result.ok = false
+            }
+        }
+        i = i + 1
+    }
+    result
+}
+
+// ============================================================================
+// TESTS
+// ============================================================================
+
+fn test_001_version_new() -> bool {
+    let v = pkg_version_new(1, 2, 3)
+    v.major == 1 && v.minor == 2 && v.patch == 3
+}
+
+fn test_002_version_compare_equal() -> bool {
+    let a = pkg_version_new(1, 0, 0)
+    let b = pkg_version_new(1, 0, 0)
+    pkg_version_compare(&a, &b) == 0
+}
+
+fn test_003_version_compare_major_less() -> bool {
+    let a = pkg_version_new(1, 0, 0)
+    let b = pkg_version_new(2, 0, 0)
+    pkg_version_compare(&a, &b) == (0 - 1)
+}
+
+fn test_004_version_compare_major_greater() -> bool {
+    let a = pkg_version_new(3, 0, 0)
+    let b = pkg_version_new(1, 0, 0)
+    pkg_version_compare(&a, &b) == 1
+}
+
+fn test_005_version_compare_minor_less() -> bool {
+    let a = pkg_version_new(1, 2, 0)
+    let b = pkg_version_new(1, 5, 0)
+    pkg_version_compare(&a, &b) == (0 - 1)
+}
+
+fn test_006_version_compare_patch() -> bool {
+    let a = pkg_version_new(1, 0, 5)
+    let b = pkg_version_new(1, 0, 3)
+    pkg_version_compare(&a, &b) == 1
+}
+
+fn test_007_version_satisfies_exact() -> bool {
+    let v = pkg_version_new(2, 3, 0)
+    pkg_version_satisfies(&v, 2, 3)
+}
+
+fn test_008_version_satisfies_higher_minor() -> bool {
+    let v = pkg_version_new(2, 5, 0)
+    pkg_version_satisfies(&v, 2, 3)
+}
+
+fn test_009_version_satisfies_lower_minor_fail() -> bool {
+    let v = pkg_version_new(2, 1, 0)
+    !pkg_version_satisfies(&v, 2, 3)
+}
+
+fn test_010_version_satisfies_higher_major() -> bool {
+    let v = pkg_version_new(3, 0, 0)
+    pkg_version_satisfies(&v, 2, 0)
+}
+
+fn test_011_version_satisfies_lower_major_fail() -> bool {
+    let v = pkg_version_new(1, 9, 0)
+    !pkg_version_satisfies(&v, 2, 0)
+}
+
+fn test_012_version_to_string_100() -> bool with Mut, Panic, Div {
+    let v = pkg_version_new(1, 0, 0)
+    let s = pkg_version_to_string(&v)
+    let n = str_len(s)
+    n > 0
+}
+
+fn test_013_version_to_string_1_2_3() -> bool with Mut, Panic, Div {
+    let v = pkg_version_new(1, 2, 3)
+    let s = pkg_version_to_string(&v)
+    // "1.2.3" has length 5
+    str_len(s) == 5
+}
+
+fn do_meta_new(name: string, major: i64, minor: i64, patch: i64) -> PkgMeta with Mut, Panic, Div {
+    pkg_meta_new(name, major, minor, patch)
+}
+
+fn test_014_meta_new_name() -> bool with Mut, Panic, Div {
+    let m = do_meta_new("mylib", 1, 0, 0)
+    m.name_len == 5
+}
+
+fn test_015_meta_new_version() -> bool with Mut, Panic, Div {
+    let m = do_meta_new("mylib", 2, 3, 4)
+    m.version.major == 2 && m.version.minor == 3 && m.version.patch == 4
+}
+
+fn test_016_meta_dep_count_zero() -> bool with Mut, Panic, Div {
+    let m = do_meta_new("a", 1, 0, 0)
+    pkg_dep_count(&m) == 0
+}
+
+fn do_add_dep(m: &! PkgMeta, name: string, rmaj: i64, rmin: i64, opt: bool) -> () with Mut, Panic, Div {
+    pkg_add_dep(m, name, rmaj, rmin, opt)
+}
+
+fn test_017_add_dep_count() -> bool with Mut, Panic, Div {
+    var m = do_meta_new("root", 1, 0, 0)
+    do_add_dep(&! m, "depA", 1, 0, false)
+    pkg_dep_count(&m) == 1
+}
+
+fn test_018_add_multiple_deps() -> bool with Mut, Panic, Div {
+    var m = do_meta_new("root", 1, 0, 0)
+    do_add_dep(&! m, "depA", 1, 0, false)
+    do_add_dep(&! m, "depB", 2, 0, false)
+    do_add_dep(&! m, "depC", 1, 1, true)
+    pkg_dep_count(&m) == 3
+}
+
+fn test_019_dep_optional_flag() -> bool with Mut, Panic, Div {
+    var m = do_meta_new("root", 1, 0, 0)
+    do_add_dep(&! m, "opt", 1, 0, true)
+    m.deps[0].optional
+}
+
+fn test_020_dep_not_optional() -> bool with Mut, Panic, Div {
+    var m = do_meta_new("root", 1, 0, 0)
+    do_add_dep(&! m, "req", 1, 0, false)
+    !m.deps[0].optional
+}
+
+fn do_reg_new() -> PkgRegistry with Mut {
+    pkg_registry_new()
+}
+
+fn test_021_registry_new_empty() -> bool with Mut {
+    var r = do_reg_new()
+    pkg_registry_count(&r) == 0
+}
+
+fn do_reg_add(r: &! PkgRegistry, m: PkgMeta) -> i64 with Mut, Panic, Div {
+    pkg_registry_add(r, m)
+}
+
+fn test_022_registry_add_one() -> bool with Mut, Panic, Div {
+    var r = do_reg_new()
+    let m = do_meta_new("libA", 1, 0, 0)
+    do_reg_add(&! r, m)
+    pkg_registry_count(&r) == 1
+}
+
+fn test_023_registry_add_returns_index() -> bool with Mut, Panic, Div {
+    var r = do_reg_new()
+    let m = do_meta_new("libA", 1, 0, 0)
+    let idx = do_reg_add(&! r, m)
+    idx == 0
+}
+
+fn test_024_registry_add_second() -> bool with Mut, Panic, Div {
+    var r = do_reg_new()
+    let m0 = do_meta_new("libA", 1, 0, 0)
+    let m1 = do_meta_new("libB", 2, 0, 0)
+    do_reg_add(&! r, m0)
+    let idx = do_reg_add(&! r, m1)
+    idx == 1
+}
+
+fn do_reg_find(r: &PkgRegistry, name: string) -> i64 with Mut, Panic, Div {
+    pkg_registry_find(r, name)
+}
+
+fn test_025_registry_find_existing() -> bool with Mut, Panic, Div {
+    var r = do_reg_new()
+    let m = do_meta_new("libA", 1, 0, 0)
+    do_reg_add(&! r, m)
+    let idx = do_reg_find(&r, "libA")
+    idx == 0
+}
+
+fn test_026_registry_find_missing() -> bool with Mut, Panic, Div {
+    var r = do_reg_new()
+    let idx = do_reg_find(&r, "libX")
+    idx == (0 - 1)
+}
+
+fn test_027_registry_find_second() -> bool with Mut, Panic, Div {
+    var r = do_reg_new()
+    let m0 = do_meta_new("A", 1, 0, 0)
+    let m1 = do_meta_new("B", 1, 0, 0)
+    do_reg_add(&! r, m0)
+    do_reg_add(&! r, m1)
+    let idx = do_reg_find(&r, "B")
+    idx == 1
+}
+
+fn test_028_resolve_no_deps() -> bool with Mut, Panic, Div {
+    var r = do_reg_new()
+    let m = do_meta_new("root", 1, 0, 0)
+    let res = pkg_resolve(&r, &m)
+    pkg_resolve_ok(&res) && pkg_resolve_count(&res) == 0
+}
+
+fn test_029_resolve_one_dep() -> bool with Mut, Panic, Div {
+    var r = do_reg_new()
+    let dep = do_meta_new("depA", 1, 2, 0)
+    do_reg_add(&! r, dep)
+    var root = do_meta_new("root", 2, 0, 0)
+    do_add_dep(&! root, "depA", 1, 0, false)
+    let res = pkg_resolve(&r, &root)
+    pkg_resolve_ok(&res) && pkg_resolve_count(&res) == 1
+}
+
+fn test_030_resolve_missing_dep_not_ok() -> bool with Mut, Panic, Div {
+    var r = do_reg_new()
+    var root = do_meta_new("root", 1, 0, 0)
+    do_add_dep(&! root, "missing", 1, 0, false)
+    let res = pkg_resolve(&r, &root)
+    !pkg_resolve_ok(&res)
+}
+
+fn test_031_resolve_missing_optional_ok() -> bool with Mut, Panic, Div {
+    var r = do_reg_new()
+    var root = do_meta_new("root", 1, 0, 0)
+    do_add_dep(&! root, "missing_opt", 1, 0, true)
+    let res = pkg_resolve(&r, &root)
+    pkg_resolve_ok(&res)
+}
+
+fn test_032_resolve_conflict_wrong_version() -> bool with Mut, Panic, Div {
+    var r = do_reg_new()
+    // depA is at 1.0 but root requires 2.0
+    let dep = do_meta_new("depA", 1, 0, 0)
+    do_reg_add(&! r, dep)
+    var root = do_meta_new("root", 2, 0, 0)
+    do_add_dep(&! root, "depA", 2, 0, false)
+    let res = pkg_resolve(&r, &root)
+    !pkg_resolve_ok(&res) && pkg_resolve_conflict_count(&res) > 0
+}
+
+fn test_033_resolve_diamond() -> bool with Mut, Panic, Div {
+    // root -> A, B; A -> C; B -> C (diamond — C resolved once)
+    var r = do_reg_new()
+    let c = do_meta_new("C", 1, 0, 0)
+    do_reg_add(&! r, c)
+    var a = do_meta_new("A", 1, 0, 0)
+    do_add_dep(&! a, "C", 1, 0, false)
+    do_reg_add(&! r, a)
+    var b = do_meta_new("B", 1, 0, 0)
+    do_add_dep(&! b, "C", 1, 0, false)
+    do_reg_add(&! r, b)
+    var root = do_meta_new("root", 1, 0, 0)
+    do_add_dep(&! root, "A", 1, 0, false)
+    do_add_dep(&! root, "B", 1, 0, false)
+    let res = pkg_resolve(&r, &root)
+    // Should resolve A, B, C (C only once)
+    pkg_resolve_ok(&res)
+}
+
+fn test_034_resolve_diamond_count() -> bool with Mut, Panic, Div {
+    var r = do_reg_new()
+    let c = do_meta_new("C", 1, 0, 0)
+    do_reg_add(&! r, c)
+    var a = do_meta_new("A", 1, 0, 0)
+    do_add_dep(&! a, "C", 1, 0, false)
+    do_reg_add(&! r, a)
+    var b = do_meta_new("B", 1, 0, 0)
+    do_add_dep(&! b, "C", 1, 0, false)
+    do_reg_add(&! r, b)
+    var root = do_meta_new("root", 1, 0, 0)
+    do_add_dep(&! root, "A", 1, 0, false)
+    do_add_dep(&! root, "B", 1, 0, false)
+    let res = pkg_resolve(&r, &root)
+    // A, B, C = 3 (C not duplicated)
+    pkg_resolve_count(&res) == 3
+}
+
+fn test_035_resolve_chain() -> bool with Mut, Panic, Div {
+    // root -> A -> B -> C (linear chain)
+    var r = do_reg_new()
+    let c = do_meta_new("C", 1, 0, 0)
+    do_reg_add(&! r, c)
+    var b = do_meta_new("B", 1, 0, 0)
+    do_add_dep(&! b, "C", 1, 0, false)
+    do_reg_add(&! r, b)
+    var a = do_meta_new("A", 1, 0, 0)
+    do_add_dep(&! a, "B", 1, 0, false)
+    do_reg_add(&! r, a)
+    var root = do_meta_new("root", 1, 0, 0)
+    do_add_dep(&! root, "A", 1, 0, false)
+    let res = pkg_resolve(&r, &root)
+    pkg_resolve_ok(&res) && pkg_resolve_count(&res) == 3
+}
+
+fn do_lock_new() -> PkgLock with Mut {
+    pkg_lock_new()
+}
+
+fn test_036_lock_new_empty() -> bool with Mut {
+    var l = do_lock_new()
+    pkg_lock_count(&l) == 0
+}
+
+fn test_037_lock_new_valid() -> bool with Mut {
+    var l = do_lock_new()
+    pkg_lock_valid(&l)
+}
+
+fn do_lock_add(l: &! PkgLock, name: string, v: PkgVersion, hash: i64) -> () with Mut, Panic, Div {
+    pkg_lock_add(l, name, v, hash)
+}
+
+fn test_038_lock_add_one() -> bool with Mut, Panic, Div {
+    var l = do_lock_new()
+    let v = pkg_version_new(1, 0, 0)
+    do_lock_add(&! l, "mylib", v, 12345)
+    pkg_lock_count(&l) == 1
+}
+
+fn test_039_lock_add_two() -> bool with Mut, Panic, Div {
+    var l = do_lock_new()
+    let v1 = pkg_version_new(1, 0, 0)
+    let v2 = pkg_version_new(2, 1, 0)
+    do_lock_add(&! l, "a", v1, 100)
+    do_lock_add(&! l, "b", v2, 200)
+    pkg_lock_count(&l) == 2
+}
+
+fn do_lock_find(l: &PkgLock, name: string) -> i64 with Mut, Panic, Div {
+    pkg_lock_find(l, name)
+}
+
+fn test_040_lock_find_existing() -> bool with Mut, Panic, Div {
+    var l = do_lock_new()
+    let v = pkg_version_new(1, 0, 0)
+    do_lock_add(&! l, "mylib", v, 999)
+    let idx = do_lock_find(&l, "mylib")
+    idx == 0
+}
+
+fn test_041_lock_find_missing() -> bool with Mut, Panic, Div {
+    var l = do_lock_new()
+    let idx = do_lock_find(&l, "unknown")
+    idx == (0 - 1)
+}
+
+fn test_042_lock_verify_hash_correct() -> bool with Mut, Panic, Div {
+    var l = do_lock_new()
+    let v = pkg_version_new(1, 0, 0)
+    do_lock_add(&! l, "lib", v, 42)
+    pkg_lock_verify_hash(&l, 0, 42)
+}
+
+fn test_043_lock_verify_hash_wrong() -> bool with Mut, Panic, Div {
+    var l = do_lock_new()
+    let v = pkg_version_new(1, 0, 0)
+    do_lock_add(&! l, "lib", v, 42)
+    !pkg_lock_verify_hash(&l, 0, 99)
+}
+
+fn test_044_lock_verify_hash_out_of_bounds() -> bool with Mut, Panic, Div {
+    var l = do_lock_new()
+    !pkg_lock_verify_hash(&l, 5, 0)
+}
+
+fn test_045_lock_to_resolve_empty() -> bool with Mut, Panic, Div {
+    var l = do_lock_new()
+    var r = do_reg_new()
+    let res = pkg_lock_to_resolve_result(&l, &r)
+    pkg_resolve_ok(&res) && pkg_resolve_count(&res) == 0
+}
+
+fn test_046_lock_to_resolve_found() -> bool with Mut, Panic, Div {
+    var l = do_lock_new()
+    var r = do_reg_new()
+    let m = do_meta_new("mylib", 1, 0, 0)
+    do_reg_add(&! r, m)
+    let v = pkg_version_new(1, 0, 0)
+    do_lock_add(&! l, "mylib", v, 0)
+    let res = pkg_lock_to_resolve_result(&l, &r)
+    pkg_resolve_ok(&res) && pkg_resolve_count(&res) == 1
+}
+
+fn test_047_lock_to_resolve_not_in_registry() -> bool with Mut, Panic, Div {
+    var l = do_lock_new()
+    var r = do_reg_new()
+    let v = pkg_version_new(1, 0, 0)
+    do_lock_add(&! l, "ghost", v, 0)
+    let res = pkg_lock_to_resolve_result(&l, &r)
+    !pkg_resolve_ok(&res)
+}
+
+fn test_048_version_compare_sym() -> bool {
+    let a = pkg_version_new(2, 0, 0)
+    let b = pkg_version_new(1, 0, 0)
+    let ab = pkg_version_compare(&a, &b)
+    let ba = pkg_version_compare(&b, &a)
+    ab == 1 && ba == (0 - 1)
+}
+
+fn test_049_dep_req_version_stored() -> bool with Mut, Panic, Div {
+    var m = do_meta_new("root", 1, 0, 0)
+    do_add_dep(&! m, "dep", 3, 5, false)
+    m.deps[0].version_req_major == 3 && m.deps[0].version_req_minor == 5
+}
+
+fn test_050_dep_max_32() -> bool with Mut, Panic, Div {
+    var m = do_meta_new("root", 1, 0, 0)
+    var i: i64 = 0
+    while i < 35 {
+        do_add_dep(&! m, "d", 1, 0, false)
+        i = i + 1
+    }
+    pkg_dep_count(&m) == 32
+}
+
+fn test_051_lock_count_max_256() -> bool with Mut, Panic, Div {
+    var l = do_lock_new()
+    var i: i64 = 0
+    while i < 260 {
+        let v = pkg_version_new(1, 0, 0)
+        pkg_lock_add(&! l, "x", v, i)
+        i = i + 1
+    }
+    pkg_lock_count(&l) == 256
+}
+
+fn test_052_registry_count_max_128() -> bool with Mut, Panic, Div {
+    var r = do_reg_new()
+    var i: i64 = 0
+    while i < 130 {
+        let m = do_meta_new("x", 1, 0, 0)
+        pkg_registry_add(&! r, m)
+        i = i + 1
+    }
+    pkg_registry_count(&r) == 128
+}
+
+fn test_053_resolve_no_conflict_count() -> bool with Mut, Panic, Div {
+    var r = do_reg_new()
+    let m = do_meta_new("root", 1, 0, 0)
+    let res = pkg_resolve(&r, &m)
+    pkg_resolve_conflict_count(&res) == 0
+}
+
+fn test_054_lock_entry_resolved_flag() -> bool with Mut, Panic, Div {
+    var l = do_lock_new()
+    let v = pkg_version_new(1, 0, 0)
+    do_lock_add(&! l, "pkg", v, 0)
+    l.entries[0].resolved
+}
+
+fn test_055_version_satisfies_zero_req() -> bool {
+    let v = pkg_version_new(0, 0, 0)
+    pkg_version_satisfies(&v, 0, 0)
+}
+
+fn test_056_version_compare_both_zero() -> bool {
+    let a = pkg_version_new(0, 0, 0)
+    let b = pkg_version_new(0, 0, 0)
+    pkg_version_compare(&a, &b) == 0
+}
+
+fn test_057_registry_add_full_returns_neg1() -> bool with Mut, Panic, Div {
+    var r = do_reg_new()
+    var i: i64 = 0
+    while i < 128 {
+        let m = do_meta_new("x", 1, 0, 0)
+        pkg_registry_add(&! r, m)
+        i = i + 1
+    }
+    let m2 = do_meta_new("overflow", 1, 0, 0)
+    let idx = pkg_registry_add(&! r, m2)
+    idx == (0 - 1)
+}
+
+fn test_058_lock_verify_hash_neg_idx() -> bool with Mut, Panic, Div {
+    var l = do_lock_new()
+    !pkg_lock_verify_hash(&l, 0 - 1, 0)
+}
+
+fn test_059_resolve_two_deps_both_ok() -> bool with Mut, Panic, Div {
+    var r = do_reg_new()
+    let a = do_meta_new("A", 1, 2, 0)
+    let b = do_meta_new("B", 3, 0, 0)
+    do_reg_add(&! r, a)
+    do_reg_add(&! r, b)
+    var root = do_meta_new("root", 1, 0, 0)
+    do_add_dep(&! root, "A", 1, 0, false)
+    do_add_dep(&! root, "B", 3, 0, false)
+    let res = pkg_resolve(&r, &root)
+    pkg_resolve_ok(&res) && pkg_resolve_count(&res) == 2
+}
+
+fn test_060_lock_add_and_find_second() -> bool with Mut, Panic, Div {
+    var l = do_lock_new()
+    let v1 = pkg_version_new(1, 0, 0)
+    let v2 = pkg_version_new(2, 0, 0)
+    do_lock_add(&! l, "first", v1, 111)
+    do_lock_add(&! l, "second", v2, 222)
+    let idx = do_lock_find(&l, "second")
+    idx == 1
+}
+
+fn test_061_resolve_result_ok_accessor() -> bool {
+    let res = pkg_empty_resolve_result()
+    pkg_resolve_ok(&res)
+}
+
+fn test_062_resolve_result_count_zero() -> bool {
+    let res = pkg_empty_resolve_result()
+    pkg_resolve_count(&res) == 0
+}
+
+fn test_063_resolve_result_conflict_zero() -> bool {
+    let res = pkg_empty_resolve_result()
+    pkg_resolve_conflict_count(&res) == 0
+}
+
+fn test_064_meta_zero_deps_initially() -> bool with Mut, Panic, Div {
+    let m = do_meta_new("a", 1, 0, 0)
+    m.dep_count == 0
+}
+
+fn test_065_version_satisfies_exact_minor() -> bool {
+    let v = pkg_version_new(1, 3, 0)
+    pkg_version_satisfies(&v, 1, 3)
+}
+
+fn test_066_lock_hash_stored() -> bool with Mut, Panic, Div {
+    var l = do_lock_new()
+    let v = pkg_version_new(1, 0, 0)
+    do_lock_add(&! l, "x", v, 9999)
+    l.entries[0].hash == 9999
+}
+
+fn test_067_registry_find_after_multiple() -> bool with Mut, Panic, Div {
+    var r = do_reg_new()
+    let m0 = do_meta_new("alpha", 1, 0, 0)
+    let m1 = do_meta_new("beta", 1, 0, 0)
+    let m2 = do_meta_new("gamma", 1, 0, 0)
+    do_reg_add(&! r, m0)
+    do_reg_add(&! r, m1)
+    do_reg_add(&! r, m2)
+    let idx = do_reg_find(&r, "gamma")
+    idx == 2
+}
+
+fn test_068_empty_version() -> bool {
+    let v = pkg_empty_version()
+    v.major == 0 && v.minor == 0 && v.patch == 0
+}
+
+fn test_069_resolve_missing_dep_conflict_count() -> bool with Mut, Panic, Div {
+    var r = do_reg_new()
+    var root = do_meta_new("root", 1, 0, 0)
+    do_add_dep(&! root, "missing1", 1, 0, false)
+    do_add_dep(&! root, "missing2", 1, 0, false)
+    let res = pkg_resolve(&r, &root)
+    pkg_resolve_conflict_count(&res) == 2
+}

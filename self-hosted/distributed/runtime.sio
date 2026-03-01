@@ -1,0 +1,1353 @@
+// self-hosted::distributed::runtime — Actor registry + work-stealing scheduler
+//
+// Fixed-capacity actor runtime. Actors have a name, mailbox ring-buffer,
+// priority, and status. Workers hold a queue of actor IDs and steal work
+// from each other when idle.
+// Prefix: drt_
+
+// ============================================================================
+// CONSTANTS
+// ============================================================================
+
+fn DRT_IDLE() -> i64 { 0 }
+fn DRT_RUNNING() -> i64 { 1 }
+fn DRT_BLOCKED() -> i64 { 2 }
+fn DRT_DEAD() -> i64 { 3 }
+
+// ============================================================================
+// STRUCTS
+// ============================================================================
+
+struct DrtActor {
+    id: i64,
+    name: [i64; 64],
+    name_len: i64,
+    status: i64,
+    mailbox: [i64; 128],
+    mailbox_head: i64,
+    mailbox_tail: i64,
+    mailbox_count: i64,
+    priority: i64,
+}
+
+struct DrtWorker {
+    id: i64,
+    queue: [i64; 64],
+    queue_head: i64,
+    queue_tail: i64,
+    queue_count: i64,
+    busy: bool,
+}
+
+struct DrtRuntime {
+    actors: [DrtActor; 256],
+    actor_count: i64,
+    workers: [DrtWorker; 16],
+    worker_count: i64,
+    next_id: i64,
+}
+
+// ============================================================================
+// HELPERS — blank structs
+// ============================================================================
+
+fn drt_blank_actor(id: i64) -> DrtActor {
+    DrtActor {
+        id: id,
+        name: [0; 64],
+        name_len: 0,
+        status: DRT_IDLE(),
+        mailbox: [0; 128],
+        mailbox_head: 0,
+        mailbox_tail: 0,
+        mailbox_count: 0,
+        priority: 0,
+    }
+}
+
+fn drt_blank_worker(id: i64) -> DrtWorker {
+    DrtWorker {
+        id: id,
+        queue: [0; 64],
+        queue_head: 0,
+        queue_tail: 0,
+        queue_count: 0,
+        busy: false,
+    }
+}
+
+// ============================================================================
+// HELPERS — name encoding
+// ============================================================================
+
+fn drt_encode_name(name: string, actor: &! DrtActor) -> () with Mut, Panic, Div {
+    let len = str_len(name)
+    var cap: i64 = len
+    if cap > 64 {
+        cap = 64
+    }
+    var i: i64 = 0
+    while i < cap {
+        actor.name[i] = str_char_at(name, i) as i64
+        i = i + 1
+    }
+    actor.name_len = cap
+}
+
+fn drt_name_eq(actor: &DrtActor, name: string) -> bool with Mut, Panic, Div {
+    let len = str_len(name)
+    if actor.name_len != len {
+        return false
+    }
+    var i: i64 = 0
+    while i < len {
+        if actor.name[i] != str_char_at(name, i) as i64 {
+            return false
+        }
+        i = i + 1
+    }
+    true
+}
+
+// ============================================================================
+// CONSTRUCTOR
+// ============================================================================
+
+fn drt_new(worker_count: i64) -> DrtRuntime with Mut, Panic, Div {
+    var actual: i64 = worker_count
+    if actual > 16 {
+        actual = 16
+    }
+    if actual < 1 {
+        actual = 1
+    }
+    var rt = DrtRuntime {
+        actors: [DrtActor {
+            id: 0,
+            name: [0; 64],
+            name_len: 0,
+            status: 0,
+            mailbox: [0; 128],
+            mailbox_head: 0,
+            mailbox_tail: 0,
+            mailbox_count: 0,
+            priority: 0,
+        }; 256],
+        actor_count: 0,
+        workers: [DrtWorker {
+            id: 0,
+            queue: [0; 64],
+            queue_head: 0,
+            queue_tail: 0,
+            queue_count: 0,
+            busy: false,
+        }; 16],
+        worker_count: actual,
+        next_id: 0,
+    }
+    // Initialise worker IDs
+    var i: i64 = 0
+    while i < actual {
+        rt.workers[i] = drt_blank_worker(i)
+        i = i + 1
+    }
+    rt
+}
+
+// ============================================================================
+// SPAWN
+// ============================================================================
+
+fn drt_spawn(rt: &! DrtRuntime, name: string, priority: i64) -> i64 with Mut, Panic, Div {
+    if rt.actor_count >= 256 {
+        return 0 - 1
+    }
+    let id = rt.next_id
+    var actor = drt_blank_actor(id)
+    actor.priority = priority
+    actor.status = DRT_IDLE()
+    drt_encode_name(name, &! actor)
+    rt.actors[id] = actor
+    rt.actor_count = rt.actor_count + 1
+    rt.next_id = rt.next_id + 1
+    id
+}
+
+// ============================================================================
+// QUERIES
+// ============================================================================
+
+fn drt_actor_count(rt: &DrtRuntime) -> i64 {
+    rt.actor_count
+}
+
+fn drt_find_actor(rt: &DrtRuntime, name: string) -> i64 with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < rt.actor_count {
+        if drt_name_eq(&rt.actors[i], name) {
+            return i
+        }
+        i = i + 1
+    }
+    0 - 1
+}
+
+fn drt_actor_status(rt: &DrtRuntime, actor_id: i64) -> i64 with Panic {
+    if actor_id < 0 || actor_id >= rt.actor_count {
+        return 0 - 1
+    }
+    rt.actors[actor_id].status
+}
+
+fn drt_mailbox_len(rt: &DrtRuntime, actor_id: i64) -> i64 with Panic {
+    if actor_id < 0 || actor_id >= rt.actor_count {
+        return 0
+    }
+    rt.actors[actor_id].mailbox_count
+}
+
+// ============================================================================
+// SEND / RECV
+// ============================================================================
+
+fn drt_send(rt: &! DrtRuntime, actor_id: i64, msg: i64) -> bool with Mut, Panic, Div {
+    if actor_id < 0 || actor_id >= rt.actor_count {
+        return false
+    }
+    if rt.actors[actor_id].status == DRT_DEAD() {
+        return false
+    }
+    if rt.actors[actor_id].mailbox_count >= 128 {
+        return false
+    }
+    let tail = rt.actors[actor_id].mailbox_tail
+    rt.actors[actor_id].mailbox[tail] = msg
+    rt.actors[actor_id].mailbox_tail = (tail + 1) % 128
+    rt.actors[actor_id].mailbox_count = rt.actors[actor_id].mailbox_count + 1
+    true
+}
+
+fn drt_recv(rt: &! DrtRuntime, actor_id: i64) -> i64 with Mut, Panic, Div {
+    if actor_id < 0 || actor_id >= rt.actor_count {
+        return 0 - 1
+    }
+    if rt.actors[actor_id].mailbox_count == 0 {
+        return 0 - 1
+    }
+    let head = rt.actors[actor_id].mailbox_head
+    let msg = rt.actors[actor_id].mailbox[head]
+    rt.actors[actor_id].mailbox_head = (head + 1) % 128
+    rt.actors[actor_id].mailbox_count = rt.actors[actor_id].mailbox_count - 1
+    msg
+}
+
+// ============================================================================
+// KILL
+// ============================================================================
+
+fn drt_kill(rt: &! DrtRuntime, actor_id: i64) -> () with Mut, Panic {
+    if actor_id < 0 || actor_id >= rt.actor_count {
+        return ()
+    }
+    rt.actors[actor_id].status = DRT_DEAD()
+}
+
+// ============================================================================
+// WORKER QUEUE HELPERS
+// ============================================================================
+
+fn drt_worker_enqueue(rt: &! DrtRuntime, worker_id: i64, actor_id: i64) -> bool with Mut, Panic, Div {
+    if worker_id < 0 || worker_id >= rt.worker_count {
+        return false
+    }
+    if rt.workers[worker_id].queue_count >= 64 {
+        return false
+    }
+    let tail = rt.workers[worker_id].queue_tail
+    rt.workers[worker_id].queue[tail] = actor_id
+    rt.workers[worker_id].queue_tail = (tail + 1) % 64
+    rt.workers[worker_id].queue_count = rt.workers[worker_id].queue_count + 1
+    true
+}
+
+fn drt_worker_dequeue(rt: &! DrtRuntime, worker_id: i64) -> i64 with Mut, Panic, Div {
+    if worker_id < 0 || worker_id >= rt.worker_count {
+        return 0 - 1
+    }
+    if rt.workers[worker_id].queue_count == 0 {
+        return 0 - 1
+    }
+    let head = rt.workers[worker_id].queue_head
+    let actor_id = rt.workers[worker_id].queue[head]
+    rt.workers[worker_id].queue_head = (head + 1) % 64
+    rt.workers[worker_id].queue_count = rt.workers[worker_id].queue_count - 1
+    actor_id
+}
+
+fn drt_worker_queue_len(rt: &DrtRuntime, worker_id: i64) -> i64 with Panic {
+    if worker_id < 0 || worker_id >= rt.worker_count {
+        return 0
+    }
+    rt.workers[worker_id].queue_count
+}
+
+// ============================================================================
+// ASSIGN TO WORKER
+// ============================================================================
+
+fn drt_assign_to_worker(rt: &! DrtRuntime, actor_id: i64) -> i64 with Mut, Panic, Div {
+    if actor_id < 0 || actor_id >= rt.actor_count {
+        return 0 - 1
+    }
+    // Round-robin: pick worker with smallest queue
+    var best_worker: i64 = 0
+    var best_count: i64 = rt.workers[0].queue_count
+    var i: i64 = 1
+    while i < rt.worker_count {
+        if rt.workers[i].queue_count < best_count {
+            best_count = rt.workers[i].queue_count
+            best_worker = i
+        }
+        i = i + 1
+    }
+    drt_worker_enqueue(rt, best_worker, actor_id)
+    best_worker
+}
+
+// ============================================================================
+// SCHEDULE
+// ============================================================================
+
+// Returns the highest-priority runnable actor_id, or -1 if none.
+fn drt_schedule(rt: &! DrtRuntime) -> i64 with Mut, Panic, Div {
+    var best_id: i64 = 0 - 1
+    var best_priority: i64 = 0 - 1
+    var i: i64 = 0
+    while i < rt.actor_count {
+        let s = rt.actors[i].status
+        if s == DRT_IDLE() || s == DRT_RUNNING() {
+            if rt.actors[i].mailbox_count > 0 {
+                if rt.actors[i].priority > best_priority {
+                    best_priority = rt.actors[i].priority
+                    best_id = i
+                }
+            }
+        }
+        i = i + 1
+    }
+    best_id
+}
+
+// ============================================================================
+// WORK STEALING
+// ============================================================================
+
+// drt_steal_work — worker steals one actor_id from the busiest other worker.
+// Returns the stolen actor_id or -1 if nothing to steal.
+fn drt_steal_work(rt: &! DrtRuntime, worker_id: i64) -> i64 with Mut, Panic, Div {
+    if worker_id < 0 || worker_id >= rt.worker_count {
+        return 0 - 1
+    }
+    // Find the worker with the most work (excluding self)
+    var victim: i64 = 0 - 1
+    var max_count: i64 = 0
+    var i: i64 = 0
+    while i < rt.worker_count {
+        if i != worker_id {
+            if rt.workers[i].queue_count > max_count {
+                max_count = rt.workers[i].queue_count
+                victim = i
+            }
+        }
+        i = i + 1
+    }
+    if victim == 0 - 1 {
+        return 0 - 1
+    }
+    if max_count == 0 {
+        return 0 - 1
+    }
+    // Steal one actor from victim
+    drt_worker_dequeue(rt, victim)
+}
+
+// ============================================================================
+// COUNTS
+// ============================================================================
+
+fn drt_running_count(rt: &DrtRuntime) -> i64 with Mut, Panic, Div {
+    var n: i64 = 0
+    var i: i64 = 0
+    while i < rt.actor_count {
+        if rt.actors[i].status == DRT_RUNNING() {
+            n = n + 1
+        }
+        i = i + 1
+    }
+    n
+}
+
+fn drt_idle_count(rt: &DrtRuntime) -> i64 with Mut, Panic, Div {
+    var n: i64 = 0
+    var i: i64 = 0
+    while i < rt.actor_count {
+        if rt.actors[i].status == DRT_IDLE() {
+            n = n + 1
+        }
+        i = i + 1
+    }
+    n
+}
+
+// ============================================================================
+// TESTS — constants
+// ============================================================================
+
+fn test_001_drt_idle_is_0() -> bool {
+    DRT_IDLE() == 0
+}
+
+fn test_002_drt_running_is_1() -> bool {
+    DRT_RUNNING() == 1
+}
+
+fn test_003_drt_blocked_is_2() -> bool {
+    DRT_BLOCKED() == 2
+}
+
+fn test_004_drt_dead_is_3() -> bool {
+    DRT_DEAD() == 3
+}
+
+// ============================================================================
+// TESTS — constructor
+// ============================================================================
+
+fn test_005_new_runtime_actor_count_zero() -> bool with Mut, Panic, Div {
+    let rt = drt_new(4)
+    drt_actor_count(&rt) == 0
+}
+
+fn test_006_new_runtime_worker_count() -> bool with Mut, Panic, Div {
+    let rt = drt_new(4)
+    rt.worker_count == 4
+}
+
+fn test_007_new_runtime_worker_count_capped() -> bool with Mut, Panic, Div {
+    let rt = drt_new(100)
+    rt.worker_count == 16
+}
+
+fn test_008_new_runtime_worker_count_min_1() -> bool with Mut, Panic, Div {
+    let rt = drt_new(0)
+    rt.worker_count == 1
+}
+
+// ============================================================================
+// TESTS — spawn actors
+// ============================================================================
+
+fn do_test_009(rt: &! DrtRuntime) -> bool with Mut, Panic, Div {
+    let id = drt_spawn(rt, "worker1", 1)
+    id == 0 && drt_actor_count(rt) == 1
+}
+
+fn test_009_spawn_first_actor() -> bool with Mut, Panic, Div {
+    var rt = drt_new(4)
+    do_test_009(&! rt)
+}
+
+fn do_test_010(rt: &! DrtRuntime) -> bool with Mut, Panic, Div {
+    let id0 = drt_spawn(rt, "a", 1)
+    let id1 = drt_spawn(rt, "b", 2)
+    let id2 = drt_spawn(rt, "c", 3)
+    id0 == 0 && id1 == 1 && id2 == 2 && drt_actor_count(rt) == 3
+}
+
+fn test_010_spawn_three_actors() -> bool with Mut, Panic, Div {
+    var rt = drt_new(4)
+    do_test_010(&! rt)
+}
+
+fn do_test_011(rt: &! DrtRuntime) -> bool with Mut, Panic, Div {
+    let id = drt_spawn(rt, "w", 5)
+    drt_actor_status(rt, id) == DRT_IDLE()
+}
+
+fn test_011_spawned_actor_is_idle() -> bool with Mut, Panic, Div {
+    var rt = drt_new(4)
+    do_test_011(&! rt)
+}
+
+fn do_test_012(rt: &! DrtRuntime) -> bool with Mut, Panic, Div {
+    let id = drt_spawn(rt, "w", 7)
+    drt_mailbox_len(rt, id) == 0
+}
+
+fn test_012_spawned_actor_empty_mailbox() -> bool with Mut, Panic, Div {
+    var rt = drt_new(4)
+    do_test_012(&! rt)
+}
+
+// ============================================================================
+// TESTS — find_actor
+// ============================================================================
+
+fn do_test_013(rt: &! DrtRuntime) -> bool with Mut, Panic, Div {
+    drt_spawn(rt, "alice", 1)
+    drt_spawn(rt, "bob", 2)
+    let id = drt_find_actor(rt, "alice")
+    id == 0
+}
+
+fn test_013_find_actor_by_name() -> bool with Mut, Panic, Div {
+    var rt = drt_new(4)
+    do_test_013(&! rt)
+}
+
+fn do_test_014(rt: &! DrtRuntime) -> bool with Mut, Panic, Div {
+    drt_spawn(rt, "alice", 1)
+    let id = drt_find_actor(rt, "bob")
+    id == 0 - 1
+}
+
+fn test_014_find_actor_not_found() -> bool with Mut, Panic, Div {
+    var rt = drt_new(4)
+    do_test_014(&! rt)
+}
+
+fn do_test_015(rt: &! DrtRuntime) -> bool with Mut, Panic, Div {
+    let id0 = drt_spawn(rt, "x", 1)
+    let id1 = drt_spawn(rt, "y", 2)
+    let id2 = drt_spawn(rt, "z", 3)
+    let fx = drt_find_actor(rt, "x")
+    let fy = drt_find_actor(rt, "y")
+    let fz = drt_find_actor(rt, "z")
+    fx == id0 && fy == id1 && fz == id2
+}
+
+fn test_015_find_multiple_actors() -> bool with Mut, Panic, Div {
+    var rt = drt_new(4)
+    do_test_015(&! rt)
+}
+
+// ============================================================================
+// TESTS — send / recv messages
+// ============================================================================
+
+fn do_test_016(rt: &! DrtRuntime) -> bool with Mut, Panic, Div {
+    let id = drt_spawn(rt, "w", 1)
+    let ok = drt_send(rt, id, 42)
+    let msg = drt_recv(rt, id)
+    ok && msg == 42
+}
+
+fn test_016_send_recv_basic() -> bool with Mut, Panic, Div {
+    var rt = drt_new(4)
+    do_test_016(&! rt)
+}
+
+fn do_test_017(rt: &! DrtRuntime) -> bool with Mut, Panic, Div {
+    let id = drt_spawn(rt, "w", 1)
+    drt_send(rt, id, 10)
+    drt_send(rt, id, 20)
+    drt_send(rt, id, 30)
+    let m1 = drt_recv(rt, id)
+    let m2 = drt_recv(rt, id)
+    let m3 = drt_recv(rt, id)
+    m1 == 10 && m2 == 20 && m3 == 30
+}
+
+fn test_017_mailbox_fifo_order() -> bool with Mut, Panic, Div {
+    var rt = drt_new(4)
+    do_test_017(&! rt)
+}
+
+fn do_test_018(rt: &! DrtRuntime) -> bool with Mut, Panic, Div {
+    let id = drt_spawn(rt, "w", 1)
+    let msg = drt_recv(rt, id)
+    msg == 0 - 1
+}
+
+fn test_018_recv_empty_returns_neg1() -> bool with Mut, Panic, Div {
+    var rt = drt_new(4)
+    do_test_018(&! rt)
+}
+
+fn do_test_019(rt: &! DrtRuntime) -> bool with Mut, Panic, Div {
+    let id = drt_spawn(rt, "w", 1)
+    drt_send(rt, id, 100)
+    drt_mailbox_len(rt, id) == 1
+}
+
+fn test_019_mailbox_len_after_send() -> bool with Mut, Panic, Div {
+    var rt = drt_new(4)
+    do_test_019(&! rt)
+}
+
+fn do_test_020(rt: &! DrtRuntime) -> bool with Mut, Panic, Div {
+    let id = drt_spawn(rt, "w", 1)
+    drt_send(rt, id, 1)
+    drt_send(rt, id, 2)
+    drt_recv(rt, id)
+    drt_mailbox_len(rt, id) == 1
+}
+
+fn test_020_mailbox_len_decrements_after_recv() -> bool with Mut, Panic, Div {
+    var rt = drt_new(4)
+    do_test_020(&! rt)
+}
+
+// ============================================================================
+// TESTS — kill
+// ============================================================================
+
+fn do_test_021(rt: &! DrtRuntime) -> bool with Mut, Panic, Div {
+    let id = drt_spawn(rt, "w", 1)
+    drt_kill(rt, id)
+    drt_actor_status(rt, id) == DRT_DEAD()
+}
+
+fn test_021_kill_sets_dead() -> bool with Mut, Panic, Div {
+    var rt = drt_new(4)
+    do_test_021(&! rt)
+}
+
+fn do_test_022(rt: &! DrtRuntime) -> bool with Mut, Panic, Div {
+    let id = drt_spawn(rt, "w", 1)
+    drt_kill(rt, id)
+    let ok = drt_send(rt, id, 42)
+    !ok
+}
+
+fn test_022_send_to_dead_actor_fails() -> bool with Mut, Panic, Div {
+    var rt = drt_new(4)
+    do_test_022(&! rt)
+}
+
+fn test_023_kill_invalid_id_noop() -> bool with Mut, Panic, Div {
+    var rt = drt_new(4)
+    drt_kill(&! rt, 99)
+    drt_actor_count(&rt) == 0
+}
+
+// ============================================================================
+// TESTS — worker queue / assign
+// ============================================================================
+
+fn do_test_024(rt: &! DrtRuntime) -> bool with Mut, Panic, Div {
+    let id = drt_spawn(rt, "w", 1)
+    let worker = drt_assign_to_worker(rt, id)
+    worker >= 0 && worker < rt.worker_count
+}
+
+fn test_024_assign_to_worker_valid_index() -> bool with Mut, Panic, Div {
+    var rt = drt_new(4)
+    do_test_024(&! rt)
+}
+
+fn do_test_025(rt: &! DrtRuntime) -> bool with Mut, Panic, Div {
+    let id = drt_spawn(rt, "w", 1)
+    drt_assign_to_worker(rt, id)
+    // check that some worker has queue_count == 1
+    var found: bool = false
+    var i: i64 = 0
+    while i < rt.worker_count {
+        if rt.workers[i].queue_count == 1 {
+            found = true
+        }
+        i = i + 1
+    }
+    found
+}
+
+fn test_025_assign_enqueues_actor() -> bool with Mut, Panic, Div {
+    var rt = drt_new(4)
+    do_test_025(&! rt)
+}
+
+fn do_test_026(rt: &! DrtRuntime) -> bool with Mut, Panic, Div {
+    let qlen = drt_worker_queue_len(rt, 0)
+    qlen == 0
+}
+
+fn test_026_worker_queue_empty_initially() -> bool with Mut, Panic, Div {
+    var rt = drt_new(4)
+    do_test_026(&! rt)
+}
+
+fn do_test_027(rt: &! DrtRuntime) -> bool with Mut, Panic, Div {
+    let id0 = drt_spawn(rt, "a", 1)
+    let id1 = drt_spawn(rt, "b", 1)
+    let id2 = drt_spawn(rt, "c", 1)
+    let id3 = drt_spawn(rt, "d", 1)
+    drt_assign_to_worker(rt, id0)
+    drt_assign_to_worker(rt, id1)
+    drt_assign_to_worker(rt, id2)
+    drt_assign_to_worker(rt, id3)
+    // with 4 workers and 4 actors, each worker should have 1
+    let q0 = drt_worker_queue_len(rt, 0)
+    let q1 = drt_worker_queue_len(rt, 1)
+    let q2 = drt_worker_queue_len(rt, 2)
+    let q3 = drt_worker_queue_len(rt, 3)
+    q0 + q1 + q2 + q3 == 4
+}
+
+fn test_027_round_robin_4_workers_4_actors() -> bool with Mut, Panic, Div {
+    var rt = drt_new(4)
+    do_test_027(&! rt)
+}
+
+// ============================================================================
+// TESTS — work stealing
+// ============================================================================
+
+fn do_test_028(rt: &! DrtRuntime) -> bool with Mut, Panic, Div {
+    let id0 = drt_spawn(rt, "a", 1)
+    let id1 = drt_spawn(rt, "b", 1)
+    let id2 = drt_spawn(rt, "c", 1)
+    // Put all 3 into worker 0
+    drt_worker_enqueue(rt, 0, id0)
+    drt_worker_enqueue(rt, 0, id1)
+    drt_worker_enqueue(rt, 0, id2)
+    // Worker 1 steals
+    let stolen = drt_steal_work(rt, 1)
+    stolen >= 0
+}
+
+fn test_028_steal_from_busy_worker() -> bool with Mut, Panic, Div {
+    var rt = drt_new(4)
+    do_test_028(&! rt)
+}
+
+fn do_test_029(rt: &! DrtRuntime) -> bool with Mut, Panic, Div {
+    let id = drt_spawn(rt, "a", 1)
+    drt_worker_enqueue(rt, 0, id)
+    // worker 0 steals from itself — should find no victim or victim == self
+    let stolen = drt_steal_work(rt, 0)
+    // Nothing to steal (no other worker has work)
+    stolen == 0 - 1
+}
+
+fn test_029_steal_when_no_victims() -> bool with Mut, Panic, Div {
+    var rt = drt_new(2)
+    do_test_029(&! rt)
+}
+
+fn do_test_030(rt: &! DrtRuntime) -> bool with Mut, Panic, Div {
+    let id0 = drt_spawn(rt, "a", 1)
+    let id1 = drt_spawn(rt, "b", 1)
+    let id2 = drt_spawn(rt, "c", 1)
+    drt_worker_enqueue(rt, 0, id0)
+    drt_worker_enqueue(rt, 0, id1)
+    drt_worker_enqueue(rt, 0, id2)
+    let q_before = drt_worker_queue_len(rt, 0)
+    drt_steal_work(rt, 1)
+    let q_after = drt_worker_queue_len(rt, 0)
+    q_before == 3 && q_after == 2
+}
+
+fn test_030_steal_reduces_victim_queue() -> bool with Mut, Panic, Div {
+    var rt = drt_new(4)
+    do_test_030(&! rt)
+}
+
+fn do_test_031(rt: &! DrtRuntime) -> bool with Mut, Panic, Div {
+    // all workers empty — stealing returns -1
+    let stolen = drt_steal_work(rt, 0)
+    stolen == 0 - 1
+}
+
+fn test_031_steal_from_empty_runtime() -> bool with Mut, Panic, Div {
+    var rt = drt_new(4)
+    do_test_031(&! rt)
+}
+
+// ============================================================================
+// TESTS — schedule (priority ordering)
+// ============================================================================
+
+fn do_test_032(rt: &! DrtRuntime) -> bool with Mut, Panic, Div {
+    let id_lo = drt_spawn(rt, "lo", 1)
+    let id_hi = drt_spawn(rt, "hi", 10)
+    drt_send(rt, id_lo, 1)
+    drt_send(rt, id_hi, 2)
+    let next = drt_schedule(rt)
+    next == id_hi
+}
+
+fn test_032_schedule_prefers_higher_priority() -> bool with Mut, Panic, Div {
+    var rt = drt_new(4)
+    do_test_032(&! rt)
+}
+
+fn do_test_033(rt: &! DrtRuntime) -> bool with Mut, Panic, Div {
+    let id = drt_spawn(rt, "w", 5)
+    // no messages — schedule finds nothing
+    let next = drt_schedule(rt)
+    next == 0 - 1
+}
+
+fn test_033_schedule_returns_neg1_when_no_messages() -> bool with Mut, Panic, Div {
+    var rt = drt_new(4)
+    do_test_033(&! rt)
+}
+
+fn do_test_034(rt: &! DrtRuntime) -> bool with Mut, Panic, Div {
+    let id = drt_spawn(rt, "w", 5)
+    drt_send(rt, id, 99)
+    let next = drt_schedule(rt)
+    next == id
+}
+
+fn test_034_schedule_returns_actor_with_message() -> bool with Mut, Panic, Div {
+    var rt = drt_new(4)
+    do_test_034(&! rt)
+}
+
+fn do_test_035(rt: &! DrtRuntime) -> bool with Mut, Panic, Div {
+    let id0 = drt_spawn(rt, "a", 3)
+    let id1 = drt_spawn(rt, "b", 7)
+    let id2 = drt_spawn(rt, "c", 5)
+    drt_send(rt, id0, 1)
+    drt_send(rt, id1, 2)
+    drt_send(rt, id2, 3)
+    let next = drt_schedule(rt)
+    next == id1
+}
+
+fn test_035_schedule_picks_highest_among_three() -> bool with Mut, Panic, Div {
+    var rt = drt_new(4)
+    do_test_035(&! rt)
+}
+
+// ============================================================================
+// TESTS — running / idle counts
+// ============================================================================
+
+fn do_test_036(rt: &! DrtRuntime) -> bool with Mut, Panic, Div {
+    drt_spawn(rt, "a", 1)
+    drt_spawn(rt, "b", 1)
+    drt_idle_count(rt) == 2
+}
+
+fn test_036_idle_count_equals_actor_count_initially() -> bool with Mut, Panic, Div {
+    var rt = drt_new(4)
+    do_test_036(&! rt)
+}
+
+fn do_test_037(rt: &! DrtRuntime) -> bool with Mut, Panic, Div {
+    let id = drt_spawn(rt, "w", 1)
+    rt.actors[id].status = DRT_RUNNING()
+    drt_running_count(rt) == 1
+}
+
+fn test_037_running_count_after_status_change() -> bool with Mut, Panic, Div {
+    var rt = drt_new(4)
+    do_test_037(&! rt)
+}
+
+fn test_038_running_count_zero_initially() -> bool with Mut, Panic, Div {
+    var rt = drt_new(4)
+    drt_running_count(&rt) == 0
+}
+
+// ============================================================================
+// TESTS — priority ordering with equal priorities
+// ============================================================================
+
+fn do_test_039(rt: &! DrtRuntime) -> bool with Mut, Panic, Div {
+    let id0 = drt_spawn(rt, "a", 5)
+    let id1 = drt_spawn(rt, "b", 5)
+    drt_send(rt, id0, 1)
+    drt_send(rt, id1, 2)
+    let next = drt_schedule(rt)
+    // equal priority: first match wins (id0)
+    next == id0
+}
+
+fn test_039_schedule_equal_priority_first_wins() -> bool with Mut, Panic, Div {
+    var rt = drt_new(4)
+    do_test_039(&! rt)
+}
+
+// ============================================================================
+// TESTS — mailbox overflow
+// ============================================================================
+
+fn do_test_040(rt: &! DrtRuntime) -> bool with Mut, Panic, Div {
+    let id = drt_spawn(rt, "w", 1)
+    var i: i64 = 0
+    while i < 128 {
+        drt_send(rt, id, i)
+        i = i + 1
+    }
+    // 129th send should fail (mailbox cap = 128)
+    let ok = drt_send(rt, id, 999)
+    !ok && drt_mailbox_len(rt, id) == 128
+}
+
+fn test_040_mailbox_overflow_rejected() -> bool with Mut, Panic, Div {
+    var rt = drt_new(4)
+    do_test_040(&! rt)
+}
+
+// ============================================================================
+// TESTS — send to invalid actor
+// ============================================================================
+
+fn test_041_send_to_invalid_id_returns_false() -> bool with Mut, Panic, Div {
+    var rt = drt_new(4)
+    let ok = drt_send(&! rt, 99, 42)
+    !ok
+}
+
+// ============================================================================
+// TESTS — find_actor with many actors
+// ============================================================================
+
+fn do_test_042(rt: &! DrtRuntime) -> bool with Mut, Panic, Div {
+    drt_spawn(rt, "first", 1)
+    drt_spawn(rt, "second", 2)
+    drt_spawn(rt, "third", 3)
+    let id = drt_find_actor(rt, "second")
+    id == 1
+}
+
+fn test_042_find_middle_actor() -> bool with Mut, Panic, Div {
+    var rt = drt_new(4)
+    do_test_042(&! rt)
+}
+
+// ============================================================================
+// TESTS — mailbox wraparound
+// ============================================================================
+
+fn do_test_043(rt: &! DrtRuntime) -> bool with Mut, Panic, Div {
+    let id = drt_spawn(rt, "w", 1)
+    // Send 64 messages and recv 64 to force wraparound
+    var i: i64 = 0
+    while i < 64 {
+        drt_send(rt, id, i)
+        i = i + 1
+    }
+    var j: i64 = 0
+    while j < 64 {
+        drt_recv(rt, id)
+        j = j + 1
+    }
+    // Now send 4 more — they should wrap around in the ring
+    drt_send(rt, id, 100)
+    drt_send(rt, id, 200)
+    let m1 = drt_recv(rt, id)
+    let m2 = drt_recv(rt, id)
+    m1 == 100 && m2 == 200
+}
+
+fn test_043_mailbox_wraparound() -> bool with Mut, Panic, Div {
+    var rt = drt_new(4)
+    do_test_043(&! rt)
+}
+
+// ============================================================================
+// TESTS — multiple workers interleave
+// ============================================================================
+
+fn do_test_044(rt: &! DrtRuntime) -> bool with Mut, Panic, Div {
+    let id0 = drt_spawn(rt, "a", 1)
+    let id1 = drt_spawn(rt, "b", 1)
+    drt_worker_enqueue(rt, 0, id0)
+    drt_worker_enqueue(rt, 1, id1)
+    let q0 = drt_worker_queue_len(rt, 0)
+    let q1 = drt_worker_queue_len(rt, 1)
+    q0 == 1 && q1 == 1
+}
+
+fn test_044_two_workers_each_one_actor() -> bool with Mut, Panic, Div {
+    var rt = drt_new(4)
+    do_test_044(&! rt)
+}
+
+fn do_test_045(rt: &! DrtRuntime) -> bool with Mut, Panic, Div {
+    let id0 = drt_spawn(rt, "a", 1)
+    let id1 = drt_spawn(rt, "b", 1)
+    let id2 = drt_spawn(rt, "c", 1)
+    drt_worker_enqueue(rt, 0, id0)
+    drt_worker_enqueue(rt, 0, id1)
+    drt_worker_enqueue(rt, 0, id2)
+    let stolen = drt_steal_work(rt, 1)
+    let q0_after = drt_worker_queue_len(rt, 0)
+    stolen == id0 && q0_after == 2
+}
+
+fn test_045_steal_returns_first_in_victim_queue() -> bool with Mut, Panic, Div {
+    var rt = drt_new(4)
+    do_test_045(&! rt)
+}
+
+// ============================================================================
+// TESTS — dead actor status
+// ============================================================================
+
+fn do_test_046(rt: &! DrtRuntime) -> bool with Mut, Panic, Div {
+    let id = drt_spawn(rt, "w", 1)
+    drt_kill(rt, id)
+    let s = drt_actor_status(rt, id)
+    s == DRT_DEAD()
+}
+
+fn test_046_dead_actor_status() -> bool with Mut, Panic, Div {
+    var rt = drt_new(4)
+    do_test_046(&! rt)
+}
+
+// ============================================================================
+// TESTS — recv from invalid actor
+// ============================================================================
+
+fn test_047_recv_from_invalid_id() -> bool with Mut, Panic, Div {
+    var rt = drt_new(4)
+    let v = drt_recv(&! rt, 99)
+    v == 0 - 1
+}
+
+// ============================================================================
+// TESTS — actor_count after multiple spawns
+// ============================================================================
+
+fn do_test_048(rt: &! DrtRuntime) -> bool with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < 10 {
+        drt_spawn(rt, "w", 1)
+        i = i + 1
+    }
+    drt_actor_count(rt) == 10
+}
+
+fn test_048_actor_count_after_10_spawns() -> bool with Mut, Panic, Div {
+    var rt = drt_new(4)
+    do_test_048(&! rt)
+}
+
+// ============================================================================
+// TESTS — schedule with dead actor skipped
+// ============================================================================
+
+fn do_test_049(rt: &! DrtRuntime) -> bool with Mut, Panic, Div {
+    let id_dead = drt_spawn(rt, "dead", 100)
+    let id_live = drt_spawn(rt, "live", 1)
+    drt_send(rt, id_dead, 1)
+    drt_send(rt, id_live, 2)
+    drt_kill(rt, id_dead)
+    let next = drt_schedule(rt)
+    next == id_live
+}
+
+fn test_049_schedule_skips_dead_actor() -> bool with Mut, Panic, Div {
+    var rt = drt_new(4)
+    do_test_049(&! rt)
+}
+
+// ============================================================================
+// TESTS — assign to worker invalid
+// ============================================================================
+
+fn test_050_assign_invalid_actor_id() -> bool with Mut, Panic, Div {
+    var rt = drt_new(4)
+    let w = drt_assign_to_worker(&! rt, 99)
+    w == 0 - 1
+}
+
+// ============================================================================
+// TESTS — worker queue len invalid worker
+// ============================================================================
+
+fn test_051_worker_queue_len_invalid_worker() -> bool with Mut, Panic, Div {
+    var rt = drt_new(4)
+    drt_worker_queue_len(&rt, 99) == 0
+}
+
+// ============================================================================
+// TESTS — running count with kills
+// ============================================================================
+
+fn do_test_052(rt: &! DrtRuntime) -> bool with Mut, Panic, Div {
+    let id = drt_spawn(rt, "w", 1)
+    rt.actors[id].status = DRT_RUNNING()
+    drt_kill(rt, id)
+    drt_running_count(rt) == 0
+}
+
+fn test_052_running_count_decrements_after_kill() -> bool with Mut, Panic, Div {
+    var rt = drt_new(4)
+    do_test_052(&! rt)
+}
+
+// ============================================================================
+// TESTS — idle count
+// ============================================================================
+
+fn test_053_idle_count_zero_on_empty_runtime() -> bool with Mut, Panic, Div {
+    var rt = drt_new(4)
+    drt_idle_count(&rt) == 0
+}
+
+fn do_test_054(rt: &! DrtRuntime) -> bool with Mut, Panic, Div {
+    drt_spawn(rt, "a", 1)
+    drt_spawn(rt, "b", 1)
+    drt_spawn(rt, "c", 1)
+    drt_idle_count(rt) == 3
+}
+
+fn test_054_idle_count_3_spawned() -> bool with Mut, Panic, Div {
+    var rt = drt_new(4)
+    do_test_054(&! rt)
+}
+
+// ============================================================================
+// TESTS — priority 0 actors
+// ============================================================================
+
+fn do_test_055(rt: &! DrtRuntime) -> bool with Mut, Panic, Div {
+    let id = drt_spawn(rt, "w", 0)
+    drt_send(rt, id, 1)
+    let next = drt_schedule(rt)
+    next == id
+}
+
+fn test_055_schedule_zero_priority_actor() -> bool with Mut, Panic, Div {
+    var rt = drt_new(4)
+    do_test_055(&! rt)
+}
+
+// ============================================================================
+// TESTS — multi-message send then kill
+// ============================================================================
+
+fn do_test_056(rt: &! DrtRuntime) -> bool with Mut, Panic, Div {
+    let id = drt_spawn(rt, "w", 1)
+    drt_send(rt, id, 1)
+    drt_send(rt, id, 2)
+    drt_send(rt, id, 3)
+    drt_kill(rt, id)
+    // after kill, send should fail
+    let ok = drt_send(rt, id, 4)
+    !ok
+}
+
+fn test_056_send_after_kill_fails() -> bool with Mut, Panic, Div {
+    var rt = drt_new(4)
+    do_test_056(&! rt)
+}
+
+// ============================================================================
+// TESTS — steal invalid worker
+// ============================================================================
+
+fn test_057_steal_invalid_worker_returns_neg1() -> bool with Mut, Panic, Div {
+    var rt = drt_new(4)
+    let stolen = drt_steal_work(&! rt, 99)
+    stolen == 0 - 1
+}
+
+// ============================================================================
+// TESTS — actor_status invalid
+// ============================================================================
+
+fn test_058_actor_status_invalid_id() -> bool with Mut, Panic, Div {
+    var rt = drt_new(4)
+    drt_actor_status(&rt, 99) == 0 - 1
+}
+
+// ============================================================================
+// TESTS — send negative message
+// ============================================================================
+
+fn do_test_059(rt: &! DrtRuntime) -> bool with Mut, Panic, Div {
+    let id = drt_spawn(rt, "w", 1)
+    drt_send(rt, id, 0 - 42)
+    let msg = drt_recv(rt, id)
+    msg == 0 - 42
+}
+
+fn test_059_send_negative_message() -> bool with Mut, Panic, Div {
+    var rt = drt_new(4)
+    do_test_059(&! rt)
+}
+
+// ============================================================================
+// TESTS — large worker count
+// ============================================================================
+
+fn do_test_060(rt: &! DrtRuntime) -> bool with Mut, Panic, Div {
+    let id_lo = drt_spawn(rt, "lo", 1)
+    let id_hi = drt_spawn(rt, "hi", 999)
+    drt_send(rt, id_lo, 1)
+    drt_send(rt, id_hi, 2)
+    let next = drt_schedule(rt)
+    next == id_hi
+}
+
+fn test_060_large_priority_schedule() -> bool with Mut, Panic, Div {
+    var rt = drt_new(8)
+    do_test_060(&! rt)
+}
+
+// ============================================================================
+// TESTS — enqueue / dequeue symmetry
+// ============================================================================
+
+fn do_test_061(rt: &! DrtRuntime) -> bool with Mut, Panic, Div {
+    let id = drt_spawn(rt, "w", 1)
+    drt_worker_enqueue(rt, 0, id)
+    let got = drt_worker_dequeue(rt, 0)
+    got == id && drt_worker_queue_len(rt, 0) == 0
+}
+
+fn test_061_enqueue_dequeue_symmetry() -> bool with Mut, Panic, Div {
+    var rt = drt_new(4)
+    do_test_061(&! rt)
+}
+
+fn do_test_062(rt: &! DrtRuntime) -> bool with Mut, Panic, Div {
+    let got = drt_worker_dequeue(rt, 0)
+    got == 0 - 1
+}
+
+fn test_062_dequeue_empty_worker_returns_neg1() -> bool with Mut, Panic, Div {
+    var rt = drt_new(4)
+    do_test_062(&! rt)
+}
+
+// ============================================================================
+// TESTS — two runtimes are independent
+// ============================================================================
+
+fn do_test_063(rt1: &! DrtRuntime, rt2: &! DrtRuntime) -> bool with Mut, Panic, Div {
+    let id1 = drt_spawn(rt1, "a", 1)
+    let id2 = drt_spawn(rt2, "b", 2)
+    drt_actor_count(rt1) == 1 && drt_actor_count(rt2) == 1
+}
+
+fn test_063_two_runtimes_independent() -> bool with Mut, Panic, Div {
+    var rt1 = drt_new(2)
+    var rt2 = drt_new(2)
+    do_test_063(&! rt1, &! rt2)
+}
+
+// ============================================================================
+// TESTS — worker enqueue at cap
+// ============================================================================
+
+fn do_test_064(rt: &! DrtRuntime) -> bool with Mut, Panic, Div {
+    // Worker queue cap = 64
+    var i: i64 = 0
+    while i < 64 {
+        drt_worker_enqueue(rt, 0, i)
+        i = i + 1
+    }
+    // 65th should fail
+    let ok = drt_worker_enqueue(rt, 0, 999)
+    !ok && drt_worker_queue_len(rt, 0) == 64
+}
+
+fn test_064_worker_queue_capped_at_64() -> bool with Mut, Panic, Div {
+    var rt = drt_new(4)
+    do_test_064(&! rt)
+}
+
+// ============================================================================
+// TESTS — find actor not found in empty runtime
+// ============================================================================
+
+fn test_065_find_actor_empty_runtime() -> bool with Mut, Panic, Div {
+    var rt = drt_new(4)
+    drt_find_actor(&rt, "nobody") == 0 - 1
+}
+
+// ============================================================================
+// TESTS — mailbox len of invalid actor
+// ============================================================================
+
+fn test_066_mailbox_len_invalid_actor() -> bool with Mut, Panic, Div {
+    var rt = drt_new(4)
+    drt_mailbox_len(&rt, 99) == 0
+}
+
+// ============================================================================
+// TESTS — next_id increments correctly
+// ============================================================================
+
+fn do_test_067(rt: &! DrtRuntime) -> bool with Mut, Panic, Div {
+    let id0 = drt_spawn(rt, "a", 1)
+    let id1 = drt_spawn(rt, "b", 1)
+    let id2 = drt_spawn(rt, "c", 1)
+    // next_id should now be 3
+    rt.next_id == 3
+}
+
+fn test_067_next_id_increments() -> bool with Mut, Panic, Div {
+    var rt = drt_new(4)
+    do_test_067(&! rt)
+}
+
+// ============================================================================
+// TESTS — schedule with blocked actor skipped
+// ============================================================================
+
+fn do_test_068(rt: &! DrtRuntime) -> bool with Mut, Panic, Div {
+    let id_blocked = drt_spawn(rt, "blocked", 100)
+    let id_idle = drt_spawn(rt, "idle", 1)
+    rt.actors[id_blocked].status = DRT_BLOCKED()
+    drt_send(rt, id_blocked, 1)
+    drt_send(rt, id_idle, 2)
+    let next = drt_schedule(rt)
+    // blocked actors are skipped (only IDLE and RUNNING checked)
+    next == id_idle
+}
+
+fn test_068_schedule_skips_blocked_actor() -> bool with Mut, Panic, Div {
+    var rt = drt_new(4)
+    do_test_068(&! rt)
+}
+
+// ============================================================================
+// TESTS — steal from multi-worker setup
+// ============================================================================
+
+fn do_test_069(rt: &! DrtRuntime) -> bool with Mut, Panic, Div {
+    // load worker 0 with 5, worker 1 with 2, worker 2 with 1
+    var i: i64 = 0
+    while i < 5 {
+        drt_worker_enqueue(rt, 0, i)
+        i = i + 1
+    }
+    drt_worker_enqueue(rt, 1, 10)
+    drt_worker_enqueue(rt, 1, 11)
+    drt_worker_enqueue(rt, 2, 20)
+    // worker 3 steals — should pick from worker 0 (busiest)
+    drt_steal_work(rt, 3)
+    let q0 = drt_worker_queue_len(rt, 0)
+    q0 == 4
+}
+
+fn test_069_steal_picks_busiest_worker() -> bool with Mut, Panic, Div {
+    var rt = drt_new(4)
+    do_test_069(&! rt)
+}
+
+// ============================================================================
+// TESTS — idle count after kills
+// ============================================================================
+
+fn do_test_070(rt: &! DrtRuntime) -> bool with Mut, Panic, Div {
+    let id0 = drt_spawn(rt, "a", 1)
+    let id1 = drt_spawn(rt, "b", 1)
+    drt_kill(rt, id0)
+    drt_idle_count(rt) == 1
+}
+
+fn test_070_idle_count_after_kill() -> bool with Mut, Panic, Div {
+    var rt = drt_new(4)
+    do_test_070(&! rt)
+}

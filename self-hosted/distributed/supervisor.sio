@@ -1,0 +1,1107 @@
+// self-hosted::distributed::supervisor — OTP-style supervision tree
+//
+// Fixed-capacity supervision tree with one-for-one, one-for-all, and
+// rest-for-one restart strategies. No heap allocation; all state is
+// embedded in flat arrays.
+// Prefix: sup_
+
+// ============================================================================
+// CONSTANTS
+// ============================================================================
+
+fn SUP_RUNNING() -> i64 { 0 }
+fn SUP_STOPPED() -> i64 { 1 }
+fn SUP_FAILED() -> i64 { 2 }
+
+fn SUP_ONE_FOR_ONE() -> i64 { 0 }
+fn SUP_ONE_FOR_ALL() -> i64 { 1 }
+fn SUP_REST_FOR_ONE() -> i64 { 2 }
+
+// Action codes returned by sup_fail_child / sup_handle_failure
+fn SUP_ACTION_RESTART() -> i64 { 0 }
+fn SUP_ACTION_STOP() -> i64 { 1 }
+fn SUP_ACTION_ESCALATE() -> i64 { 2 }
+
+// ============================================================================
+// STRUCTS
+// ============================================================================
+
+struct SupChild {
+    id: i64,
+    name: [i64; 64],
+    name_len: i64,
+    status: i64,
+    restart_count: i64,
+    max_restarts: i64,
+}
+
+struct SupSpec {
+    strategy: i64,
+    max_restarts: i64,
+    restart_window: i64,
+}
+
+struct SupTree {
+    spec: SupSpec,
+    children: [SupChild; 64],
+    child_count: i64,
+    restart_history: [i64; 128],
+    restart_history_count: i64,
+}
+
+// ============================================================================
+// HELPERS — name encoding
+// ============================================================================
+
+fn sup_encode_name(name: string, child: &! SupChild) -> () with Mut, Panic, Div {
+    let len = str_len(name)
+    var cap: i64 = len
+    if cap > 64 {
+        cap = 64
+    }
+    var i: i64 = 0
+    while i < cap {
+        child.name[i] = str_char_at(name, i) as i64
+        i = i + 1
+    }
+    child.name_len = cap
+}
+
+fn sup_name_eq(child: &SupChild, name: string) -> bool with Mut, Panic, Div {
+    let len = str_len(name)
+    if child.name_len != len {
+        return false
+    }
+    var i: i64 = 0
+    while i < len {
+        if child.name[i] != str_char_at(name, i) as i64 {
+            return false
+        }
+        i = i + 1
+    }
+    true
+}
+
+// ============================================================================
+// HELPERS — blank child
+// ============================================================================
+
+fn sup_blank_child() -> SupChild {
+    SupChild {
+        id: 0,
+        name: [0; 64],
+        name_len: 0,
+        status: 0,
+        restart_count: 0,
+        max_restarts: 0,
+    }
+}
+
+// ============================================================================
+// CONSTRUCTOR
+// ============================================================================
+
+fn sup_new(strategy: i64, max_restarts: i64) -> SupTree with Mut {
+    SupTree {
+        spec: SupSpec {
+            strategy: strategy,
+            max_restarts: max_restarts,
+            restart_window: 60,
+        },
+        children: [SupChild {
+            id: 0,
+            name: [0; 64],
+            name_len: 0,
+            status: 0,
+            restart_count: 0,
+            max_restarts: 0,
+        }; 64],
+        child_count: 0,
+        restart_history: [0; 128],
+        restart_history_count: 0,
+    }
+}
+
+// ============================================================================
+// CHILD MANAGEMENT
+// ============================================================================
+
+fn sup_add_child(t: &! SupTree, name: string, max_restarts: i64) -> i64 with Mut, Panic, Div {
+    if t.child_count >= 64 {
+        return 0 - 1
+    }
+    let id = t.child_count
+    var child = sup_blank_child()
+    child.id = id
+    child.status = SUP_STOPPED()
+    child.max_restarts = max_restarts
+    sup_encode_name(name, &! child)
+    t.children[id] = child
+    t.child_count = t.child_count + 1
+    id
+}
+
+fn sup_child_count(t: &SupTree) -> i64 {
+    t.child_count
+}
+
+fn sup_child_status(t: &SupTree, id: i64) -> i64 with Panic {
+    if id < 0 || id >= t.child_count {
+        return 0 - 1
+    }
+    t.children[id].status
+}
+
+fn sup_child_restart_count(t: &SupTree, id: i64) -> i64 with Panic {
+    if id < 0 || id >= t.child_count {
+        return 0
+    }
+    t.children[id].restart_count
+}
+
+// Return name as string using str_concat — simplest approach: return empty string
+// if id invalid, else reconstruct from char codes.
+// Since souc string is a builtin, we can only construct via literals/concat.
+// We return a sentinel approach: name is stored; callers compare via sup_child_name_eq.
+fn sup_child_name(t: &SupTree, id: i64) -> string with Panic {
+    if id < 0 || id >= t.child_count {
+        return ""
+    }
+    // We cannot reconstruct an arbitrary string from i64 chars in souc without
+    // an i64->char builtin, so we return the length as a decimal string for
+    // testing purposes. Callers that need names use sup_child_name_eq.
+    ""
+}
+
+fn sup_child_name_eq(t: &SupTree, id: i64, name: string) -> bool with Mut, Panic, Div {
+    if id < 0 || id >= t.child_count {
+        return false
+    }
+    sup_name_eq(&t.children[id], name)
+}
+
+// ============================================================================
+// START / STOP
+// ============================================================================
+
+fn sup_start_child(t: &! SupTree, id: i64) -> bool with Mut, Panic {
+    if id < 0 || id >= t.child_count {
+        return false
+    }
+    if t.children[id].status == SUP_RUNNING() {
+        return true
+    }
+    t.children[id].status = SUP_RUNNING()
+    true
+}
+
+fn sup_stop_child(t: &! SupTree, id: i64) -> () with Mut, Panic {
+    if id < 0 || id >= t.child_count {
+        return ()
+    }
+    t.children[id].status = SUP_STOPPED()
+}
+
+fn sup_reset_child(t: &! SupTree, id: i64) -> () with Mut, Panic {
+    if id < 0 || id >= t.child_count {
+        return ()
+    }
+    t.children[id].restart_count = 0
+    t.children[id].status = SUP_STOPPED()
+}
+
+// ============================================================================
+// FAILURE HANDLING
+// ============================================================================
+
+fn sup_should_restart(t: &SupTree, id: i64) -> bool with Panic {
+    if id < 0 || id >= t.child_count {
+        return false
+    }
+    let child = t.children[id]
+    child.restart_count < child.max_restarts
+}
+
+fn sup_record_restart(t: &! SupTree, id: i64) -> () with Mut, Panic {
+    if t.restart_history_count < 128 {
+        t.restart_history[t.restart_history_count] = id
+        t.restart_history_count = t.restart_history_count + 1
+    }
+}
+
+// sup_fail_child — mark child as failed, increment restart counter.
+// Returns SUP_ACTION_RESTART if restarts remain, SUP_ACTION_ESCALATE otherwise.
+fn sup_fail_child(t: &! SupTree, id: i64) -> i64 with Mut, Panic, Div {
+    if id < 0 || id >= t.child_count {
+        return SUP_ACTION_STOP()
+    }
+    t.children[id].status = SUP_FAILED()
+    t.children[id].restart_count = t.children[id].restart_count + 1
+    sup_record_restart(t, id)
+    if sup_should_restart(t, id) {
+        return SUP_ACTION_RESTART()
+    }
+    SUP_ACTION_ESCALATE()
+}
+
+// sup_handle_failure — applies the supervisor strategy after a child fails.
+// ONE_FOR_ONE: restart only the failed child.
+// ONE_FOR_ALL: stop all running children, restart all stopped children.
+// REST_FOR_ONE: stop all children after the failed one, restart them all.
+// Returns the action for the directly failed child.
+fn sup_handle_failure(t: &! SupTree, id: i64) -> i64 with Mut, Panic, Div {
+    let action = sup_fail_child(t, id)
+    let strategy = t.spec.strategy
+
+    if strategy == SUP_ONE_FOR_ONE() {
+        if action == SUP_ACTION_RESTART() {
+            t.children[id].status = SUP_RUNNING()
+        }
+        return action
+    }
+
+    if strategy == SUP_ONE_FOR_ALL() {
+        // Stop all running children (except the failed one already marked)
+        var i: i64 = 0
+        while i < t.child_count {
+            if i != id && t.children[i].status == SUP_RUNNING() {
+                t.children[i].status = SUP_STOPPED()
+            }
+            i = i + 1
+        }
+        // Restart the failed child if within limits
+        if action == SUP_ACTION_RESTART() {
+            t.children[id].status = SUP_RUNNING()
+        }
+        // Restart all stopped children
+        var j: i64 = 0
+        while j < t.child_count {
+            if j != id && t.children[j].status == SUP_STOPPED() {
+                t.children[j].status = SUP_RUNNING()
+            }
+            j = j + 1
+        }
+        return action
+    }
+
+    if strategy == SUP_REST_FOR_ONE() {
+        // Stop children after 'id' in registration order
+        var i: i64 = id + 1
+        while i < t.child_count {
+            if t.children[i].status == SUP_RUNNING() {
+                t.children[i].status = SUP_STOPPED()
+            }
+            i = i + 1
+        }
+        // Restart the failed child if within limits
+        if action == SUP_ACTION_RESTART() {
+            t.children[id].status = SUP_RUNNING()
+        }
+        // Restart the stopped-due-to-failure children
+        var j: i64 = id + 1
+        while j < t.child_count {
+            if t.children[j].status == SUP_STOPPED() {
+                t.children[j].status = SUP_RUNNING()
+            }
+            j = j + 1
+        }
+        return action
+    }
+
+    action
+}
+
+// ============================================================================
+// COUNTS
+// ============================================================================
+
+fn sup_running_count(t: &SupTree) -> i64 with Mut, Panic, Div {
+    var n: i64 = 0
+    var i: i64 = 0
+    while i < t.child_count {
+        if t.children[i].status == SUP_RUNNING() {
+            n = n + 1
+        }
+        i = i + 1
+    }
+    n
+}
+
+fn sup_failed_count(t: &SupTree) -> i64 with Mut, Panic, Div {
+    var n: i64 = 0
+    var i: i64 = 0
+    while i < t.child_count {
+        if t.children[i].status == SUP_FAILED() {
+            n = n + 1
+        }
+        i = i + 1
+    }
+    n
+}
+
+// ============================================================================
+// RESTART WINDOW CHECK
+// ============================================================================
+
+fn sup_restart_window_exceeded(t: &SupTree) -> bool with Panic, Div {
+    t.restart_history_count >= t.spec.max_restarts
+}
+
+// ============================================================================
+// STRATEGY QUERY
+// ============================================================================
+
+fn sup_strategy(t: &SupTree) -> i64 {
+    t.spec.strategy
+}
+
+// ============================================================================
+// TESTS — constants
+// ============================================================================
+
+fn test_001_sup_running_is_0() -> bool {
+    SUP_RUNNING() == 0
+}
+
+fn test_002_sup_stopped_is_1() -> bool {
+    SUP_STOPPED() == 1
+}
+
+fn test_003_sup_failed_is_2() -> bool {
+    SUP_FAILED() == 2
+}
+
+fn test_004_sup_one_for_one_is_0() -> bool {
+    SUP_ONE_FOR_ONE() == 0
+}
+
+fn test_005_sup_one_for_all_is_1() -> bool {
+    SUP_ONE_FOR_ALL() == 1
+}
+
+fn test_006_sup_rest_for_one_is_2() -> bool {
+    SUP_REST_FOR_ONE() == 2
+}
+
+// ============================================================================
+// TESTS — constructor
+// ============================================================================
+
+fn test_007_new_tree_empty() -> bool with Mut {
+    let t = sup_new(SUP_ONE_FOR_ONE(), 5)
+    sup_child_count(&t) == 0
+}
+
+fn test_008_new_tree_strategy() -> bool with Mut {
+    let t = sup_new(SUP_ONE_FOR_ALL(), 3)
+    sup_strategy(&t) == SUP_ONE_FOR_ALL()
+}
+
+// ============================================================================
+// TESTS — add children
+// ============================================================================
+
+fn do_test_009(t: &! SupTree) -> bool with Mut, Panic, Div {
+    let id = sup_add_child(t, "worker", 3)
+    id == 0 && sup_child_count(t) == 1
+}
+
+fn test_009_add_first_child() -> bool with Mut, Panic, Div {
+    var t = sup_new(SUP_ONE_FOR_ONE(), 5)
+    do_test_009(&! t)
+}
+
+fn do_test_010(t: &! SupTree) -> bool with Mut, Panic, Div {
+    let id0 = sup_add_child(t, "a", 3)
+    let id1 = sup_add_child(t, "b", 3)
+    let id2 = sup_add_child(t, "c", 3)
+    id0 == 0 && id1 == 1 && id2 == 2 && sup_child_count(t) == 3
+}
+
+fn test_010_add_three_children() -> bool with Mut, Panic, Div {
+    var t = sup_new(SUP_ONE_FOR_ONE(), 5)
+    do_test_010(&! t)
+}
+
+fn do_test_011(t: &! SupTree) -> bool with Mut, Panic, Div {
+    let id = sup_add_child(t, "w", 5)
+    // freshly added child is stopped
+    sup_child_status(t, id) == SUP_STOPPED()
+}
+
+fn test_011_new_child_starts_stopped() -> bool with Mut, Panic, Div {
+    var t = sup_new(SUP_ONE_FOR_ONE(), 5)
+    do_test_011(&! t)
+}
+
+fn do_test_012(t: &! SupTree) -> bool with Mut, Panic, Div {
+    let id = sup_add_child(t, "worker", 7)
+    sup_child_restart_count(t, id) == 0
+}
+
+fn test_012_new_child_restart_count_zero() -> bool with Mut, Panic, Div {
+    var t = sup_new(SUP_ONE_FOR_ONE(), 5)
+    do_test_012(&! t)
+}
+
+fn do_test_013(t: &! SupTree) -> bool with Mut, Panic, Div {
+    let id = sup_add_child(t, "myworker", 3)
+    sup_child_name_eq(t, id, "myworker")
+}
+
+fn test_013_child_name_stored_correctly() -> bool with Mut, Panic, Div {
+    var t = sup_new(SUP_ONE_FOR_ONE(), 5)
+    do_test_013(&! t)
+}
+
+// ============================================================================
+// TESTS — start / stop
+// ============================================================================
+
+fn do_test_014(t: &! SupTree) -> bool with Mut, Panic, Div {
+    let id = sup_add_child(t, "w", 3)
+    let ok = sup_start_child(t, id)
+    ok && sup_child_status(t, id) == SUP_RUNNING()
+}
+
+fn test_014_start_child_sets_running() -> bool with Mut, Panic, Div {
+    var t = sup_new(SUP_ONE_FOR_ONE(), 5)
+    do_test_014(&! t)
+}
+
+fn do_test_015(t: &! SupTree) -> bool with Mut, Panic, Div {
+    let id = sup_add_child(t, "w", 3)
+    sup_start_child(t, id)
+    sup_stop_child(t, id)
+    sup_child_status(t, id) == SUP_STOPPED()
+}
+
+fn test_015_stop_child_sets_stopped() -> bool with Mut, Panic, Div {
+    var t = sup_new(SUP_ONE_FOR_ONE(), 5)
+    do_test_015(&! t)
+}
+
+fn do_test_016(t: &! SupTree) -> bool with Mut, Panic, Div {
+    let id = sup_add_child(t, "w", 3)
+    // start twice — idempotent
+    let ok1 = sup_start_child(t, id)
+    let ok2 = sup_start_child(t, id)
+    ok1 && ok2 && sup_child_status(t, id) == SUP_RUNNING()
+}
+
+fn test_016_double_start_idempotent() -> bool with Mut, Panic, Div {
+    var t = sup_new(SUP_ONE_FOR_ONE(), 5)
+    do_test_016(&! t)
+}
+
+fn test_017_start_invalid_id_returns_false() -> bool with Mut, Panic {
+    var t = sup_new(SUP_ONE_FOR_ONE(), 5)
+    let ok = sup_start_child(&! t, 99)
+    !ok
+}
+
+// ============================================================================
+// TESTS — fail + restart (one-for-one)
+// ============================================================================
+
+fn do_test_018(t: &! SupTree) -> bool with Mut, Panic, Div {
+    let id = sup_add_child(t, "w", 3)
+    sup_start_child(t, id)
+    let action = sup_handle_failure(t, id)
+    action == SUP_ACTION_RESTART() && sup_child_status(t, id) == SUP_RUNNING()
+}
+
+fn test_018_one_for_one_restarts_failed() -> bool with Mut, Panic, Div {
+    var t = sup_new(SUP_ONE_FOR_ONE(), 5)
+    do_test_018(&! t)
+}
+
+fn do_test_019(t: &! SupTree) -> bool with Mut, Panic, Div {
+    let id = sup_add_child(t, "w", 2)
+    sup_start_child(t, id)
+    // fail twice — both within max_restarts (which is 2, so 2 restarts allowed)
+    sup_handle_failure(t, id)
+    let action2 = sup_handle_failure(t, id)
+    // 2nd restart: restart_count becomes 2, max_restarts=2, so 2 < 2 is false => ESCALATE
+    action2 == SUP_ACTION_ESCALATE()
+}
+
+fn test_019_escalate_when_max_restarts_exceeded() -> bool with Mut, Panic, Div {
+    var t = sup_new(SUP_ONE_FOR_ONE(), 10)
+    do_test_019(&! t)
+}
+
+fn do_test_020(t: &! SupTree) -> bool with Mut, Panic, Div {
+    let id = sup_add_child(t, "w", 5)
+    sup_start_child(t, id)
+    sup_handle_failure(t, id)
+    sup_handle_failure(t, id)
+    let cnt = sup_child_restart_count(t, id)
+    cnt == 2
+}
+
+fn test_020_restart_count_increments() -> bool with Mut, Panic, Div {
+    var t = sup_new(SUP_ONE_FOR_ONE(), 10)
+    do_test_020(&! t)
+}
+
+// ============================================================================
+// TESTS — fail + restart (one-for-all)
+// ============================================================================
+
+fn do_test_021(t: &! SupTree) -> bool with Mut, Panic, Div {
+    let id0 = sup_add_child(t, "a", 5)
+    let id1 = sup_add_child(t, "b", 5)
+    let id2 = sup_add_child(t, "c", 5)
+    sup_start_child(t, id0)
+    sup_start_child(t, id1)
+    sup_start_child(t, id2)
+    // fail child 1 — one-for-all should restart all
+    let action = sup_handle_failure(t, id1)
+    let s0 = sup_child_status(t, id0)
+    let s1 = sup_child_status(t, id1)
+    let s2 = sup_child_status(t, id2)
+    action == SUP_ACTION_RESTART() && s0 == SUP_RUNNING() && s1 == SUP_RUNNING() && s2 == SUP_RUNNING()
+}
+
+fn test_021_one_for_all_restarts_all() -> bool with Mut, Panic, Div {
+    var t = sup_new(SUP_ONE_FOR_ALL(), 10)
+    do_test_021(&! t)
+}
+
+fn do_test_022(t: &! SupTree) -> bool with Mut, Panic, Div {
+    let id0 = sup_add_child(t, "a", 5)
+    let id1 = sup_add_child(t, "b", 5)
+    sup_start_child(t, id0)
+    // id1 is stopped — one-for-all stops running ones then restarts stopped
+    let action = sup_handle_failure(t, id0)
+    let s1 = sup_child_status(t, id1)
+    action == SUP_ACTION_RESTART() && s1 == SUP_RUNNING()
+}
+
+fn test_022_one_for_all_starts_stopped_siblings() -> bool with Mut, Panic, Div {
+    var t = sup_new(SUP_ONE_FOR_ALL(), 10)
+    do_test_022(&! t)
+}
+
+// ============================================================================
+// TESTS — fail + restart (rest-for-one)
+// ============================================================================
+
+fn do_test_023(t: &! SupTree) -> bool with Mut, Panic, Div {
+    let id0 = sup_add_child(t, "a", 5)
+    let id1 = sup_add_child(t, "b", 5)
+    let id2 = sup_add_child(t, "c", 5)
+    sup_start_child(t, id0)
+    sup_start_child(t, id1)
+    sup_start_child(t, id2)
+    // fail id0 — rest-for-one restarts id0 and id1, id2 after id0
+    let action = sup_handle_failure(t, id0)
+    let s0 = sup_child_status(t, id0)
+    let s1 = sup_child_status(t, id1)
+    let s2 = sup_child_status(t, id2)
+    action == SUP_ACTION_RESTART() && s0 == SUP_RUNNING() && s1 == SUP_RUNNING() && s2 == SUP_RUNNING()
+}
+
+fn test_023_rest_for_one_restarts_tail() -> bool with Mut, Panic, Div {
+    var t = sup_new(SUP_REST_FOR_ONE(), 10)
+    do_test_023(&! t)
+}
+
+fn do_test_024(t: &! SupTree) -> bool with Mut, Panic, Div {
+    let id0 = sup_add_child(t, "a", 5)
+    let id1 = sup_add_child(t, "b", 5)
+    let id2 = sup_add_child(t, "c", 5)
+    sup_start_child(t, id0)
+    sup_start_child(t, id1)
+    sup_start_child(t, id2)
+    // fail id2 — rest-for-one: no children after id2, so only id2 restarts
+    let action = sup_handle_failure(t, id2)
+    let s0 = sup_child_status(t, id0)
+    let s1 = sup_child_status(t, id1)
+    let s2 = sup_child_status(t, id2)
+    action == SUP_ACTION_RESTART() && s0 == SUP_RUNNING() && s1 == SUP_RUNNING() && s2 == SUP_RUNNING()
+}
+
+fn test_024_rest_for_one_last_child() -> bool with Mut, Panic, Div {
+    var t = sup_new(SUP_REST_FOR_ONE(), 10)
+    do_test_024(&! t)
+}
+
+// ============================================================================
+// TESTS — running / failed counts
+// ============================================================================
+
+fn do_test_025(t: &! SupTree) -> bool with Mut, Panic, Div {
+    let id0 = sup_add_child(t, "a", 5)
+    let id1 = sup_add_child(t, "b", 5)
+    let id2 = sup_add_child(t, "c", 5)
+    sup_start_child(t, id0)
+    sup_start_child(t, id1)
+    sup_start_child(t, id2)
+    sup_running_count(t) == 3
+}
+
+fn test_025_running_count_three() -> bool with Mut, Panic, Div {
+    var t = sup_new(SUP_ONE_FOR_ONE(), 5)
+    do_test_025(&! t)
+}
+
+fn do_test_026(t: &! SupTree) -> bool with Mut, Panic, Div {
+    let id0 = sup_add_child(t, "a", 5)
+    let id1 = sup_add_child(t, "b", 5)
+    sup_start_child(t, id0)
+    sup_start_child(t, id1)
+    sup_fail_child(t, id0)
+    // id0 now FAILED, so running_count should be 1 (id1 still running)
+    // but fail_child also increments restart_count and sets status=FAILED
+    // one-for-one doesn't auto-restart in fail_child alone
+    let rc = sup_running_count(t)
+    let fc = sup_failed_count(t)
+    rc == 1 && fc == 1
+}
+
+fn test_026_running_and_failed_count() -> bool with Mut, Panic, Div {
+    var t = sup_new(SUP_ONE_FOR_ONE(), 5)
+    do_test_026(&! t)
+}
+
+fn test_027_running_count_zero_on_new_tree() -> bool with Mut, Panic, Div {
+    var t = sup_new(SUP_ONE_FOR_ONE(), 5)
+    sup_running_count(&t) == 0
+}
+
+fn test_028_failed_count_zero_on_new_tree() -> bool with Mut, Panic, Div {
+    var t = sup_new(SUP_ONE_FOR_ONE(), 5)
+    sup_failed_count(&t) == 0
+}
+
+// ============================================================================
+// TESTS — reset child
+// ============================================================================
+
+fn do_test_029(t: &! SupTree) -> bool with Mut, Panic, Div {
+    let id = sup_add_child(t, "w", 5)
+    sup_start_child(t, id)
+    sup_fail_child(t, id)
+    sup_reset_child(t, id)
+    let s = sup_child_status(t, id)
+    let rc = sup_child_restart_count(t, id)
+    s == SUP_STOPPED() && rc == 0
+}
+
+fn test_029_reset_clears_count_and_stops() -> bool with Mut, Panic, Div {
+    var t = sup_new(SUP_ONE_FOR_ONE(), 5)
+    do_test_029(&! t)
+}
+
+// ============================================================================
+// TESTS — should_restart
+// ============================================================================
+
+fn do_test_030(t: &! SupTree) -> bool with Mut, Panic, Div {
+    let id = sup_add_child(t, "w", 3)
+    // restart_count=0 < max_restarts=3 => should restart
+    sup_should_restart(t, id)
+}
+
+fn test_030_should_restart_when_below_max() -> bool with Mut, Panic, Div {
+    var t = sup_new(SUP_ONE_FOR_ONE(), 5)
+    do_test_030(&! t)
+}
+
+fn do_test_031(t: &! SupTree) -> bool with Mut, Panic, Div {
+    let id = sup_add_child(t, "w", 2)
+    // Simulate hitting max_restarts by calling fail_child twice
+    sup_fail_child(t, id)
+    sup_fail_child(t, id)
+    // restart_count=2, max_restarts=2 => 2 < 2 is false
+    !sup_should_restart(t, id)
+}
+
+fn test_031_should_not_restart_at_max() -> bool with Mut, Panic, Div {
+    var t = sup_new(SUP_ONE_FOR_ONE(), 5)
+    do_test_031(&! t)
+}
+
+// ============================================================================
+// TESTS — restart window exceeded
+// ============================================================================
+
+fn do_test_032(t: &! SupTree) -> bool with Mut, Panic, Div {
+    let id = sup_add_child(t, "w", 100)
+    // fail 5 times to fill restart_history (max_restarts in spec = 3, history = 5)
+    sup_fail_child(t, id)
+    sup_fail_child(t, id)
+    sup_fail_child(t, id)
+    // t.spec.max_restarts = 3, restart_history_count = 3 => 3 >= 3 => exceeded
+    sup_restart_window_exceeded(t)
+}
+
+fn test_032_restart_window_exceeded() -> bool with Mut, Panic, Div {
+    var t = sup_new(SUP_ONE_FOR_ONE(), 3)
+    do_test_032(&! t)
+}
+
+fn test_033_restart_window_not_exceeded_initially() -> bool with Mut, Panic, Div {
+    var t = sup_new(SUP_ONE_FOR_ONE(), 5)
+    !sup_restart_window_exceeded(&t)
+}
+
+// ============================================================================
+// TESTS — strategy query
+// ============================================================================
+
+fn test_034_strategy_one_for_one() -> bool with Mut {
+    let t = sup_new(SUP_ONE_FOR_ONE(), 5)
+    sup_strategy(&t) == SUP_ONE_FOR_ONE()
+}
+
+fn test_035_strategy_one_for_all() -> bool with Mut {
+    let t = sup_new(SUP_ONE_FOR_ALL(), 5)
+    sup_strategy(&t) == SUP_ONE_FOR_ALL()
+}
+
+fn test_036_strategy_rest_for_one() -> bool with Mut {
+    let t = sup_new(SUP_REST_FOR_ONE(), 5)
+    sup_strategy(&t) == SUP_REST_FOR_ONE()
+}
+
+// ============================================================================
+// TESTS — child_count after multiple adds
+// ============================================================================
+
+fn do_test_037(t: &! SupTree) -> bool with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < 10 {
+        sup_add_child(t, "child", 3)
+        i = i + 1
+    }
+    sup_child_count(t) == 10
+}
+
+fn test_037_add_10_children() -> bool with Mut, Panic, Div {
+    var t = sup_new(SUP_ONE_FOR_ONE(), 5)
+    do_test_037(&! t)
+}
+
+// ============================================================================
+// TESTS — invalid id edge cases
+// ============================================================================
+
+fn test_038_status_of_invalid_id() -> bool with Mut, Panic {
+    var t = sup_new(SUP_ONE_FOR_ONE(), 5)
+    sup_child_status(&t, 99) == 0 - 1
+}
+
+fn test_039_restart_count_of_invalid_id() -> bool with Mut, Panic {
+    var t = sup_new(SUP_ONE_FOR_ONE(), 5)
+    sup_child_restart_count(&t, 99) == 0
+}
+
+fn test_040_name_eq_of_invalid_id() -> bool with Mut, Panic, Div {
+    var t = sup_new(SUP_ONE_FOR_ONE(), 5)
+    !sup_child_name_eq(&t, 99, "anything")
+}
+
+// ============================================================================
+// TESTS — stop running count
+// ============================================================================
+
+fn do_test_041(t: &! SupTree) -> bool with Mut, Panic, Div {
+    let id0 = sup_add_child(t, "a", 5)
+    let id1 = sup_add_child(t, "b", 5)
+    sup_start_child(t, id0)
+    sup_start_child(t, id1)
+    sup_stop_child(t, id0)
+    sup_running_count(t) == 1
+}
+
+fn test_041_running_count_after_stop() -> bool with Mut, Panic, Div {
+    var t = sup_new(SUP_ONE_FOR_ONE(), 5)
+    do_test_041(&! t)
+}
+
+// ============================================================================
+// TESTS — multiple child names
+// ============================================================================
+
+fn do_test_042(t: &! SupTree) -> bool with Mut, Panic, Div {
+    let id0 = sup_add_child(t, "alpha", 3)
+    let id1 = sup_add_child(t, "beta", 3)
+    let id2 = sup_add_child(t, "gamma", 3)
+    let ok0 = sup_child_name_eq(t, id0, "alpha")
+    let ok1 = sup_child_name_eq(t, id1, "beta")
+    let ok2 = sup_child_name_eq(t, id2, "gamma")
+    ok0 && ok1 && ok2
+}
+
+fn test_042_multiple_distinct_names() -> bool with Mut, Panic, Div {
+    var t = sup_new(SUP_ONE_FOR_ONE(), 5)
+    do_test_042(&! t)
+}
+
+fn do_test_043(t: &! SupTree) -> bool with Mut, Panic, Div {
+    let id0 = sup_add_child(t, "alpha", 3)
+    let id1 = sup_add_child(t, "beta", 3)
+    // alpha name should not equal beta
+    !sup_child_name_eq(t, id0, "beta") && !sup_child_name_eq(t, id1, "alpha")
+}
+
+fn test_043_name_mismatch_returns_false() -> bool with Mut, Panic, Div {
+    var t = sup_new(SUP_ONE_FOR_ONE(), 5)
+    do_test_043(&! t)
+}
+
+// ============================================================================
+// TESTS — restart history recording
+// ============================================================================
+
+fn do_test_044(t: &! SupTree) -> bool with Mut, Panic, Div {
+    let id = sup_add_child(t, "w", 10)
+    sup_fail_child(t, id)
+    sup_fail_child(t, id)
+    sup_fail_child(t, id)
+    t.restart_history_count == 3
+}
+
+fn test_044_restart_history_count() -> bool with Mut, Panic, Div {
+    var t = sup_new(SUP_ONE_FOR_ONE(), 100)
+    do_test_044(&! t)
+}
+
+fn do_test_045(t: &! SupTree) -> bool with Mut, Panic, Div {
+    let id = sup_add_child(t, "w", 10)
+    sup_fail_child(t, id)
+    t.restart_history[0] == id
+}
+
+fn test_045_restart_history_stores_id() -> bool with Mut, Panic, Div {
+    var t = sup_new(SUP_ONE_FOR_ONE(), 100)
+    do_test_045(&! t)
+}
+
+// ============================================================================
+// TESTS — one-for-all with many children
+// ============================================================================
+
+fn do_test_046(t: &! SupTree) -> bool with Mut, Panic, Div {
+    let id0 = sup_add_child(t, "a", 5)
+    let id1 = sup_add_child(t, "b", 5)
+    let id2 = sup_add_child(t, "c", 5)
+    let id3 = sup_add_child(t, "d", 5)
+    sup_start_child(t, id0)
+    sup_start_child(t, id1)
+    sup_start_child(t, id2)
+    sup_start_child(t, id3)
+    sup_handle_failure(t, id2)
+    let s0 = sup_child_status(t, id0)
+    let s1 = sup_child_status(t, id1)
+    let s2 = sup_child_status(t, id2)
+    let s3 = sup_child_status(t, id3)
+    s0 == SUP_RUNNING() && s1 == SUP_RUNNING() && s2 == SUP_RUNNING() && s3 == SUP_RUNNING()
+}
+
+fn test_046_one_for_all_restarts_all_four() -> bool with Mut, Panic, Div {
+    var t = sup_new(SUP_ONE_FOR_ALL(), 10)
+    do_test_046(&! t)
+}
+
+// ============================================================================
+// TESTS — max restarts with one-for-one
+// ============================================================================
+
+fn do_test_047(t: &! SupTree) -> bool with Mut, Panic, Div {
+    let id = sup_add_child(t, "w", 1)
+    sup_start_child(t, id)
+    // 1 restart allowed: first fail => RESTART
+    let a1 = sup_handle_failure(t, id)
+    // 2nd fail => ESCALATE (restart_count = 1, max = 1, 1 < 1 is false)
+    let a2 = sup_handle_failure(t, id)
+    a1 == SUP_ACTION_RESTART() && a2 == SUP_ACTION_ESCALATE()
+}
+
+fn test_047_max_restarts_1_escalates_on_second() -> bool with Mut, Panic, Div {
+    var t = sup_new(SUP_ONE_FOR_ONE(), 10)
+    do_test_047(&! t)
+}
+
+fn do_test_048(t: &! SupTree) -> bool with Mut, Panic, Div {
+    let id = sup_add_child(t, "w", 0)
+    sup_start_child(t, id)
+    // max_restarts=0 means restart_count (0) < 0 is false => immediate escalate
+    let action = sup_handle_failure(t, id)
+    action == SUP_ACTION_ESCALATE()
+}
+
+fn test_048_max_restarts_0_always_escalates() -> bool with Mut, Panic, Div {
+    var t = sup_new(SUP_ONE_FOR_ONE(), 10)
+    do_test_048(&! t)
+}
+
+// ============================================================================
+// TESTS — stop and then fail
+// ============================================================================
+
+fn do_test_049(t: &! SupTree) -> bool with Mut, Panic, Div {
+    let id = sup_add_child(t, "w", 5)
+    // child is stopped, not running — fail_child marks it FAILED and increments
+    sup_fail_child(t, id)
+    sup_child_status(t, id) == SUP_FAILED()
+}
+
+fn test_049_fail_stopped_child_marks_failed() -> bool with Mut, Panic, Div {
+    var t = sup_new(SUP_ONE_FOR_ONE(), 5)
+    do_test_049(&! t)
+}
+
+// ============================================================================
+// TESTS — rest-for-one middle child
+// ============================================================================
+
+fn do_test_050(t: &! SupTree) -> bool with Mut, Panic, Div {
+    let id0 = sup_add_child(t, "a", 5)
+    let id1 = sup_add_child(t, "b", 5)
+    let id2 = sup_add_child(t, "c", 5)
+    let id3 = sup_add_child(t, "d", 5)
+    sup_start_child(t, id0)
+    sup_start_child(t, id1)
+    sup_start_child(t, id2)
+    sup_start_child(t, id3)
+    // fail id1: rest-for-one should stop id2,id3 then restart id1,id2,id3
+    sup_handle_failure(t, id1)
+    let s0 = sup_child_status(t, id0)
+    let s1 = sup_child_status(t, id1)
+    let s2 = sup_child_status(t, id2)
+    let s3 = sup_child_status(t, id3)
+    // id0 should stay running (before id1), id1/id2/id3 should be running
+    s0 == SUP_RUNNING() && s1 == SUP_RUNNING() && s2 == SUP_RUNNING() && s3 == SUP_RUNNING()
+}
+
+fn test_050_rest_for_one_middle_child() -> bool with Mut, Panic, Div {
+    var t = sup_new(SUP_REST_FOR_ONE(), 10)
+    do_test_050(&! t)
+}
+
+// ============================================================================
+// TESTS — action codes
+// ============================================================================
+
+fn test_051_action_restart_is_0() -> bool {
+    SUP_ACTION_RESTART() == 0
+}
+
+fn test_052_action_stop_is_1() -> bool {
+    SUP_ACTION_STOP() == 1
+}
+
+fn test_053_action_escalate_is_2() -> bool {
+    SUP_ACTION_ESCALATE() == 2
+}
+
+// ============================================================================
+// TESTS — child_count with cap
+// ============================================================================
+
+fn do_test_054(t: &! SupTree) -> bool with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < 64 {
+        sup_add_child(t, "w", 3)
+        i = i + 1
+    }
+    // 65th should return -1 (cap)
+    let id_extra = sup_add_child(t, "overflow", 3)
+    sup_child_count(t) == 64 && id_extra == 0 - 1
+}
+
+fn test_054_max_64_children() -> bool with Mut, Panic, Div {
+    var t = sup_new(SUP_ONE_FOR_ONE(), 5)
+    do_test_054(&! t)
+}
+
+// ============================================================================
+// TESTS — restart count after reset
+// ============================================================================
+
+fn do_test_055(t: &! SupTree) -> bool with Mut, Panic, Div {
+    let id = sup_add_child(t, "w", 10)
+    sup_start_child(t, id)
+    sup_fail_child(t, id)
+    sup_fail_child(t, id)
+    sup_fail_child(t, id)
+    sup_reset_child(t, id)
+    sup_child_restart_count(t, id) == 0
+}
+
+fn test_055_reset_zeroes_restart_count() -> bool with Mut, Panic, Div {
+    var t = sup_new(SUP_ONE_FOR_ONE(), 5)
+    do_test_055(&! t)
+}
+
+// ============================================================================
+// TESTS — should_restart edge cases
+// ============================================================================
+
+fn test_056_should_restart_invalid_id() -> bool with Mut, Panic {
+    var t = sup_new(SUP_ONE_FOR_ONE(), 5)
+    !sup_should_restart(&t, 99)
+}
+
+fn test_057_should_restart_neg_id() -> bool with Mut, Panic {
+    var t = sup_new(SUP_ONE_FOR_ONE(), 5)
+    !sup_should_restart(&t, 0 - 1)
+}
+
+// ============================================================================
+// TESTS — multiple trees independent
+// ============================================================================
+
+fn do_test_058(t1: &! SupTree, t2: &! SupTree) -> bool with Mut, Panic, Div {
+    let id1 = sup_add_child(t1, "a", 3)
+    let id2 = sup_add_child(t2, "b", 5)
+    sup_start_child(t1, id1)
+    sup_start_child(t2, id2)
+    let s1 = sup_running_count(t1)
+    let s2 = sup_running_count(t2)
+    s1 == 1 && s2 == 1
+}
+
+fn test_058_two_trees_independent() -> bool with Mut, Panic, Div {
+    var t1 = sup_new(SUP_ONE_FOR_ONE(), 5)
+    var t2 = sup_new(SUP_ONE_FOR_ALL(), 5)
+    do_test_058(&! t1, &! t2)
+}
+
+// ============================================================================
+// TESTS — failed count after one-for-all
+// ============================================================================
+
+fn do_test_059(t: &! SupTree) -> bool with Mut, Panic, Div {
+    let id0 = sup_add_child(t, "a", 5)
+    let id1 = sup_add_child(t, "b", 5)
+    sup_start_child(t, id0)
+    sup_start_child(t, id1)
+    // one-for-all: when child fails and restarts, status goes back to RUNNING
+    sup_handle_failure(t, id0)
+    // After handle_failure with one-for-all, the failed child is restarted
+    sup_failed_count(t) == 0
+}
+
+fn test_059_no_failed_children_after_afa_restart() -> bool with Mut, Panic, Div {
+    var t = sup_new(SUP_ONE_FOR_ALL(), 10)
+    do_test_059(&! t)
+}
+
+// ============================================================================
+// TESTS — name_eq with long name
+// ============================================================================
+
+fn do_test_060(t: &! SupTree) -> bool with Mut, Panic, Div {
+    let id = sup_add_child(t, "averylongworkername", 3)
+    sup_child_name_eq(t, id, "averylongworkername")
+}
+
+fn test_060_long_name_stored_correctly() -> bool with Mut, Panic, Div {
+    var t = sup_new(SUP_ONE_FOR_ONE(), 5)
+    do_test_060(&! t)
+}

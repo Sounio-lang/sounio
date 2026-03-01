@@ -1,0 +1,1030 @@
+// build/manifest.sio — Wave 10 manifest and diff helpers.
+
+struct MfstEntry {
+    path: [i64; 512],
+    path_len: i64,
+    hash: i64,
+    present: bool,
+}
+
+struct MfstFile {
+    entries: [MfstEntry; 256],
+    count: i64,
+    valid: bool,
+}
+
+struct MfstDiff {
+    added: [i64; 128],
+    added_count: i64,
+    removed: [i64; 128],
+    removed_count: i64,
+    changed: [i64; 128],
+    changed_count: i64,
+}
+
+fn mfst_entry_zero() -> MfstEntry {
+    MfstEntry {
+        path: [0; 512],
+        path_len: 0,
+        hash: 0,
+        present: false,
+    }
+}
+
+fn mfst_diff_zero() -> MfstDiff {
+    MfstDiff {
+        added: [0; 128],
+        added_count: 0,
+        removed: [0; 128],
+        removed_count: 0,
+        changed: [0; 128],
+        changed_count: 0,
+    }
+}
+
+fn mfst_new() -> MfstFile with Mut {
+    MfstFile {
+        entries: [mfst_entry_zero(); 256],
+        count: 0,
+        valid: true,
+    }
+}
+
+fn mfst_entry_matches_path(e: &MfstEntry, path: string) -> bool with Mut, Panic, Div {
+    let n = str_len(path)
+    if e.path_len != n {
+        return false
+    }
+
+    var i: i64 = 0
+    while i < n {
+        if e.path[i as usize] != str_char_at(path, i) {
+            return false
+        }
+        i = i + 1
+    }
+    true
+}
+
+fn mfst_entries_equal_path(a: &MfstEntry, b: &MfstEntry) -> bool with Mut, Panic, Div {
+    if a.path_len != b.path_len {
+        return false
+    }
+    var i: i64 = 0
+    while i < a.path_len {
+        if a.path[i as usize] != b.path[i as usize] {
+            return false
+        }
+        i = i + 1
+    }
+    true
+}
+
+fn mfst_add(m: &! MfstFile, path: string, hash: i64) -> i64 with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < m.count {
+        if mfst_entry_matches_path(&m.entries[i as usize], path) {
+            m.entries[i as usize].hash = hash
+            m.entries[i as usize].present = true
+            return i
+        }
+        i = i + 1
+    }
+
+    if m.count >= 256 {
+        m.valid = false
+        return 0 - 1
+    }
+
+    var e = mfst_entry_zero()
+    var j: i64 = 0
+    let n = str_len(path)
+    while j < n && j < 512 {
+        e.path[j as usize] = str_char_at(path, j)
+        e.path_len = e.path_len + 1
+        j = j + 1
+    }
+    e.hash = hash
+    e.present = true
+
+    m.entries[m.count as usize] = e
+    m.count = m.count + 1
+    m.count - 1
+}
+
+fn mfst_count(m: &MfstFile) -> i64 {
+    m.count
+}
+
+fn mfst_entry_path(m: &MfstFile, idx: i64) -> string with Mut, Panic, Div {
+    if idx < 0 || idx >= m.count {
+        return ""
+    }
+    let e = m.entries[idx as usize]
+    var out: [i8; 512] = [0; 512]
+    var i: i64 = 0
+    while i < e.path_len && i < 512 {
+        out[i as usize] = e.path[i as usize] as i8
+        i = i + 1
+    }
+    str_from_bytes(out, i)
+}
+
+fn mfst_entry_hash(m: &MfstFile, idx: i64) -> i64 with Panic {
+    if idx < 0 || idx >= m.count {
+        return 0
+    }
+    m.entries[idx as usize].hash
+}
+
+fn mfst_find(m: &MfstFile, path: string) -> i64 with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < m.count {
+        if mfst_entry_matches_path(&m.entries[i as usize], path) {
+            return i
+        }
+        i = i + 1
+    }
+    0 - 1
+}
+
+fn mfst_contains(m: &MfstFile, path: string) -> bool with Mut, Panic, Div {
+    mfst_find(m, path) >= 0
+}
+
+fn mfst_remove(m: &! MfstFile, path: string) -> bool with Mut, Panic, Div {
+    var idx: i64 = 0 - 1
+    var i: i64 = 0
+    while i < m.count {
+        if mfst_entry_matches_path(&m.entries[i as usize], path) {
+            idx = i
+            break
+        }
+        i = i + 1
+    }
+
+    if idx < 0 {
+        return false
+    }
+
+    i = idx
+    while i + 1 < m.count {
+        m.entries[i as usize] = m.entries[(i + 1) as usize]
+        i = i + 1
+    }
+    m.count = m.count - 1
+    true
+}
+
+fn mfst_update_hash(m: &! MfstFile, path: string, hash: i64) -> bool with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < m.count {
+        if mfst_entry_matches_path(&m.entries[i as usize], path) {
+            m.entries[i as usize].hash = hash
+            return true
+        }
+        i = i + 1
+    }
+    false
+}
+
+fn mfst_diff(old: &MfstFile, new: &MfstFile) -> MfstDiff with Mut, Panic, Div {
+    var d = mfst_diff_zero()
+
+    var i: i64 = 0
+    while i < new.count {
+        let e_new = new.entries[i as usize]
+        var found: bool = false
+        var changed: bool = false
+
+        var j: i64 = 0
+        while j < old.count {
+            let e_old = old.entries[j as usize]
+            if mfst_entries_equal_path(&e_old, &e_new) {
+                found = true
+                if e_old.hash != e_new.hash {
+                    changed = true
+                }
+                break
+            }
+            j = j + 1
+        }
+
+        if !found && d.added_count < 128 {
+            d.added[d.added_count as usize] = i
+            d.added_count = d.added_count + 1
+        }
+        if changed && d.changed_count < 128 {
+            d.changed[d.changed_count as usize] = i
+            d.changed_count = d.changed_count + 1
+        }
+        i = i + 1
+    }
+
+    i = 0
+    while i < old.count {
+        let e_old = old.entries[i as usize]
+        var found2: bool = false
+        var j2: i64 = 0
+        while j2 < new.count {
+            let e_new2 = new.entries[j2 as usize]
+            if mfst_entries_equal_path(&e_old, &e_new2) {
+                found2 = true
+                break
+            }
+            j2 = j2 + 1
+        }
+        if !found2 && d.removed_count < 128 {
+            d.removed[d.removed_count as usize] = i
+            d.removed_count = d.removed_count + 1
+        }
+        i = i + 1
+    }
+
+    d
+}
+
+fn mfst_diff_added(d: &MfstDiff) -> i64 {
+    d.added_count
+}
+
+fn mfst_diff_removed(d: &MfstDiff) -> i64 {
+    d.removed_count
+}
+
+fn mfst_diff_changed(d: &MfstDiff) -> i64 {
+    d.changed_count
+}
+
+fn mfst_merge(base: &MfstFile, patch: &MfstFile) -> MfstFile with Mut, Panic, Div {
+    var out = *base
+
+    var i: i64 = 0
+    while i < patch.count {
+        let pe = patch.entries[i as usize]
+        var found: bool = false
+
+        var j: i64 = 0
+        while j < out.count {
+            if mfst_entries_equal_path(&out.entries[j as usize], &pe) {
+                out.entries[j as usize].hash = pe.hash
+                out.entries[j as usize].present = pe.present
+                found = true
+                break
+            }
+            j = j + 1
+        }
+
+        if !found {
+            if out.count < 256 {
+                out.entries[out.count as usize] = pe
+                out.count = out.count + 1
+            } else {
+                out.valid = false
+            }
+        }
+
+        i = i + 1
+    }
+
+    out
+}
+
+fn mfst_validate(m: &MfstFile) -> bool with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < m.count {
+        var j = i + 1
+        while j < m.count {
+            if mfst_entries_equal_path(&m.entries[i as usize], &m.entries[j as usize]) {
+                return false
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    m.valid
+}
+
+fn mfst_compare_entries(a: &MfstEntry, b: &MfstEntry) -> i64 with Mut, Panic, Div {
+    let limit = if a.path_len < b.path_len { a.path_len } else { b.path_len }
+    var i: i64 = 0
+    while i < limit {
+        let ca = a.path[i as usize]
+        let cb = b.path[i as usize]
+        if ca < cb { return 0 - 1 }
+        if ca > cb { return 1 }
+        i = i + 1
+    }
+    if a.path_len < b.path_len { return 0 - 1 }
+    if a.path_len > b.path_len { return 1 }
+    0
+}
+
+fn mfst_sort_by_path(m: &! MfstFile) -> () with Mut, Panic, Div {
+    var i: i64 = 1
+    while i < m.count {
+        let key = m.entries[i as usize]
+        var j = i - 1
+        while j >= 0 {
+            if mfst_compare_entries(&m.entries[j as usize], &key) <= 0 {
+                break
+            }
+            m.entries[(j + 1) as usize] = m.entries[j as usize]
+            if j == 0 {
+                j = 0 - 1
+                break
+            }
+            j = j - 1
+        }
+        m.entries[(j + 1) as usize] = key
+        i = i + 1
+    }
+}
+
+fn mfst_seed(seed: i64) -> MfstFile with Mut, Panic, Div {
+    var m = mfst_new()
+    m.count = 3
+    m.valid = true
+
+    m.entries[0].path_len = 9
+    m.entries[0].path[0] = 97
+    m.entries[0].path[1] = 108
+    m.entries[0].path[2] = 112
+    m.entries[0].path[3] = 104
+    m.entries[0].path[4] = 97
+    m.entries[0].path[5] = 46
+    m.entries[0].path[6] = 115
+    m.entries[0].path[7] = 105
+    m.entries[0].path[8] = 111
+    m.entries[0].hash = 100 + seed
+    m.entries[0].present = true
+
+    m.entries[1].path_len = 8
+    m.entries[1].path[0] = 98
+    m.entries[1].path[1] = 101
+    m.entries[1].path[2] = 116
+    m.entries[1].path[3] = 97
+    m.entries[1].path[4] = 46
+    m.entries[1].path[5] = 115
+    m.entries[1].path[6] = 105
+    m.entries[1].path[7] = 111
+    m.entries[1].hash = 200 + seed
+    m.entries[1].present = true
+
+    m.entries[2].path_len = 9
+    m.entries[2].path[0] = 103
+    m.entries[2].path[1] = 97
+    m.entries[2].path[2] = 109
+    m.entries[2].path[3] = 109
+    m.entries[2].path[4] = 97
+    m.entries[2].path[5] = 46
+    m.entries[2].path[6] = 115
+    m.entries[2].path[7] = 105
+    m.entries[2].path[8] = 111
+    m.entries[2].hash = 300 + seed
+    m.entries[2].present = true
+
+    m
+}
+
+fn mfst_test_template(seed: i64) -> bool with Mut, Panic, Div {
+    let m = mfst_seed(seed)
+    if mfst_count(&m) != 3 { return false }
+    let p0 = mfst_entry_path(&m, 0)
+    str_len(p0) > 0
+}
+
+fn test_001_mfst_cycle_001() -> bool with Mut, Panic, Div {
+    var m = mfst_seed(1)
+    let ok = mfst_remove(&! m, "beta.sio")
+    if !ok { return false }
+    true
+}
+
+fn test_002_mfst_cycle_002() -> bool with Mut, Panic, Div {
+    var m = mfst_seed(2)
+    let ok = mfst_update_hash(&! m, "alpha.sio", 2 * 99)
+    if !ok { return false }
+    true
+}
+
+fn test_003_mfst_cycle_003() -> bool with Mut, Panic, Div {
+    let old = mfst_seed(3)
+    let newm = mfst_seed(3 + 1)
+    let d = mfst_diff(&old, &newm)
+    if mfst_diff_added(&d) < 0 { return false }
+    if mfst_diff_changed(&d) < 0 { return false }
+    mfst_test_template(3)
+}
+
+fn test_004_mfst_cycle_004() -> bool with Mut, Panic, Div {
+    var m = mfst_seed(4)
+    mfst_sort_by_path(&! m)
+    if 4 < 0 { return false }
+    true
+}
+
+fn test_005_mfst_cycle_005() -> bool with Mut, Panic, Div {
+    var m = mfst_new()
+    let idx = mfst_add(&! m, "entry_005.sio", 5 * 13)
+    if idx < 0 { return false }
+    mfst_test_template(5)
+}
+
+fn test_006_mfst_cycle_006() -> bool with Mut, Panic, Div {
+    var m = mfst_seed(6)
+    let ok = mfst_remove(&! m, "beta.sio")
+    if !ok { return false }
+    true
+}
+
+fn test_007_mfst_cycle_007() -> bool with Mut, Panic, Div {
+    var m = mfst_seed(7)
+    let ok = mfst_update_hash(&! m, "alpha.sio", 7 * 99)
+    if !ok { return false }
+    true
+}
+
+fn test_008_mfst_cycle_008() -> bool with Mut, Panic, Div {
+    let old = mfst_seed(8)
+    let newm = mfst_seed(8 + 1)
+    let d = mfst_diff(&old, &newm)
+    if mfst_diff_added(&d) < 0 { return false }
+    if mfst_diff_changed(&d) < 0 { return false }
+    mfst_test_template(8)
+}
+
+fn test_009_mfst_cycle_009() -> bool with Mut, Panic, Div {
+    var m = mfst_seed(9)
+    mfst_sort_by_path(&! m)
+    if 9 < 0 { return false }
+    true
+}
+
+fn test_010_mfst_cycle_010() -> bool with Mut, Panic, Div {
+    var m = mfst_new()
+    let idx = mfst_add(&! m, "entry_010.sio", 10 * 13)
+    if idx < 0 { return false }
+    mfst_test_template(10)
+}
+
+fn test_011_mfst_cycle_011() -> bool with Mut, Panic, Div {
+    var m = mfst_seed(11)
+    let ok = mfst_remove(&! m, "beta.sio")
+    if !ok { return false }
+    true
+}
+
+fn test_012_mfst_cycle_012() -> bool with Mut, Panic, Div {
+    var m = mfst_seed(12)
+    let ok = mfst_update_hash(&! m, "alpha.sio", 12 * 99)
+    if !ok { return false }
+    true
+}
+
+fn test_013_mfst_cycle_013() -> bool with Mut, Panic, Div {
+    let old = mfst_seed(13)
+    let newm = mfst_seed(13 + 1)
+    let d = mfst_diff(&old, &newm)
+    if mfst_diff_added(&d) < 0 { return false }
+    if mfst_diff_changed(&d) < 0 { return false }
+    mfst_test_template(13)
+}
+
+fn test_014_mfst_cycle_014() -> bool with Mut, Panic, Div {
+    var m = mfst_seed(14)
+    mfst_sort_by_path(&! m)
+    if 14 < 0 { return false }
+    true
+}
+
+fn test_015_mfst_cycle_015() -> bool with Mut, Panic, Div {
+    var m = mfst_new()
+    let idx = mfst_add(&! m, "entry_015.sio", 15 * 13)
+    if idx < 0 { return false }
+    mfst_test_template(15)
+}
+
+fn test_016_mfst_cycle_016() -> bool with Mut, Panic, Div {
+    var m = mfst_seed(16)
+    let ok = mfst_remove(&! m, "beta.sio")
+    if !ok { return false }
+    true
+}
+
+fn test_017_mfst_cycle_017() -> bool with Mut, Panic, Div {
+    var m = mfst_seed(17)
+    let ok = mfst_update_hash(&! m, "alpha.sio", 17 * 99)
+    if !ok { return false }
+    true
+}
+
+fn test_018_mfst_cycle_018() -> bool with Mut, Panic, Div {
+    let old = mfst_seed(18)
+    let newm = mfst_seed(18 + 1)
+    let d = mfst_diff(&old, &newm)
+    if mfst_diff_added(&d) < 0 { return false }
+    if mfst_diff_changed(&d) < 0 { return false }
+    mfst_test_template(18)
+}
+
+fn test_019_mfst_cycle_019() -> bool with Mut, Panic, Div {
+    var m = mfst_seed(19)
+    mfst_sort_by_path(&! m)
+    if 19 < 0 { return false }
+    true
+}
+
+fn test_020_mfst_cycle_020() -> bool with Mut, Panic, Div {
+    var m = mfst_new()
+    let idx = mfst_add(&! m, "entry_020.sio", 20 * 13)
+    if idx < 0 { return false }
+    mfst_test_template(20)
+}
+
+fn test_021_mfst_cycle_021() -> bool with Mut, Panic, Div {
+    var m = mfst_seed(21)
+    let ok = mfst_remove(&! m, "beta.sio")
+    if !ok { return false }
+    true
+}
+
+fn test_022_mfst_cycle_022() -> bool with Mut, Panic, Div {
+    var m = mfst_seed(22)
+    let ok = mfst_update_hash(&! m, "alpha.sio", 22 * 99)
+    if !ok { return false }
+    true
+}
+
+fn test_023_mfst_cycle_023() -> bool with Mut, Panic, Div {
+    let old = mfst_seed(23)
+    let newm = mfst_seed(23 + 1)
+    let d = mfst_diff(&old, &newm)
+    if mfst_diff_added(&d) < 0 { return false }
+    if mfst_diff_changed(&d) < 0 { return false }
+    mfst_test_template(23)
+}
+
+fn test_024_mfst_cycle_024() -> bool with Mut, Panic, Div {
+    var m = mfst_seed(24)
+    mfst_sort_by_path(&! m)
+    if 24 < 0 { return false }
+    true
+}
+
+fn test_025_mfst_cycle_025() -> bool with Mut, Panic, Div {
+    var m = mfst_new()
+    let idx = mfst_add(&! m, "entry_025.sio", 25 * 13)
+    if idx < 0 { return false }
+    mfst_test_template(25)
+}
+
+fn test_026_mfst_cycle_026() -> bool with Mut, Panic, Div {
+    var m = mfst_seed(26)
+    let ok = mfst_remove(&! m, "beta.sio")
+    if !ok { return false }
+    true
+}
+
+fn test_027_mfst_cycle_027() -> bool with Mut, Panic, Div {
+    var m = mfst_seed(27)
+    let ok = mfst_update_hash(&! m, "alpha.sio", 27 * 99)
+    if !ok { return false }
+    true
+}
+
+fn test_028_mfst_cycle_028() -> bool with Mut, Panic, Div {
+    let old = mfst_seed(28)
+    let newm = mfst_seed(28 + 1)
+    let d = mfst_diff(&old, &newm)
+    if mfst_diff_added(&d) < 0 { return false }
+    if mfst_diff_changed(&d) < 0 { return false }
+    mfst_test_template(28)
+}
+
+fn test_029_mfst_cycle_029() -> bool with Mut, Panic, Div {
+    var m = mfst_seed(29)
+    mfst_sort_by_path(&! m)
+    if 29 < 0 { return false }
+    true
+}
+
+fn test_030_mfst_cycle_030() -> bool with Mut, Panic, Div {
+    var m = mfst_new()
+    let idx = mfst_add(&! m, "entry_030.sio", 30 * 13)
+    if idx < 0 { return false }
+    mfst_test_template(30)
+}
+
+fn test_031_mfst_cycle_031() -> bool with Mut, Panic, Div {
+    var m = mfst_seed(31)
+    let ok = mfst_remove(&! m, "beta.sio")
+    if !ok { return false }
+    true
+}
+
+fn test_032_mfst_cycle_032() -> bool with Mut, Panic, Div {
+    var m = mfst_seed(32)
+    let ok = mfst_update_hash(&! m, "alpha.sio", 32 * 99)
+    if !ok { return false }
+    true
+}
+
+fn test_033_mfst_cycle_033() -> bool with Mut, Panic, Div {
+    let old = mfst_seed(33)
+    let newm = mfst_seed(33 + 1)
+    let d = mfst_diff(&old, &newm)
+    if mfst_diff_added(&d) < 0 { return false }
+    if mfst_diff_changed(&d) < 0 { return false }
+    mfst_test_template(33)
+}
+
+fn test_034_mfst_cycle_034() -> bool with Mut, Panic, Div {
+    var m = mfst_seed(34)
+    mfst_sort_by_path(&! m)
+    if 34 < 0 { return false }
+    true
+}
+
+fn test_035_mfst_cycle_035() -> bool with Mut, Panic, Div {
+    var m = mfst_new()
+    let idx = mfst_add(&! m, "entry_035.sio", 35 * 13)
+    if idx < 0 { return false }
+    mfst_test_template(35)
+}
+
+fn test_036_mfst_cycle_036() -> bool with Mut, Panic, Div {
+    var m = mfst_seed(36)
+    let ok = mfst_remove(&! m, "beta.sio")
+    if !ok { return false }
+    true
+}
+
+fn test_037_mfst_cycle_037() -> bool with Mut, Panic, Div {
+    var m = mfst_seed(37)
+    let ok = mfst_update_hash(&! m, "alpha.sio", 37 * 99)
+    if !ok { return false }
+    true
+}
+
+fn test_038_mfst_cycle_038() -> bool with Mut, Panic, Div {
+    let old = mfst_seed(38)
+    let newm = mfst_seed(38 + 1)
+    let d = mfst_diff(&old, &newm)
+    if mfst_diff_added(&d) < 0 { return false }
+    if mfst_diff_changed(&d) < 0 { return false }
+    mfst_test_template(38)
+}
+
+fn test_039_mfst_cycle_039() -> bool with Mut, Panic, Div {
+    var m = mfst_seed(39)
+    mfst_sort_by_path(&! m)
+    if 39 < 0 { return false }
+    true
+}
+
+fn test_040_mfst_cycle_040() -> bool with Mut, Panic, Div {
+    var m = mfst_new()
+    let idx = mfst_add(&! m, "entry_040.sio", 40 * 13)
+    if idx < 0 { return false }
+    mfst_test_template(40)
+}
+
+fn test_041_mfst_cycle_041() -> bool with Mut, Panic, Div {
+    var m = mfst_seed(41)
+    let ok = mfst_remove(&! m, "beta.sio")
+    if !ok { return false }
+    true
+}
+
+fn test_042_mfst_cycle_042() -> bool with Mut, Panic, Div {
+    var m = mfst_seed(42)
+    let ok = mfst_update_hash(&! m, "alpha.sio", 42 * 99)
+    if !ok { return false }
+    true
+}
+
+fn test_043_mfst_cycle_043() -> bool with Mut, Panic, Div {
+    let old = mfst_seed(43)
+    let newm = mfst_seed(43 + 1)
+    let d = mfst_diff(&old, &newm)
+    if mfst_diff_added(&d) < 0 { return false }
+    if mfst_diff_changed(&d) < 0 { return false }
+    mfst_test_template(43)
+}
+
+fn test_044_mfst_cycle_044() -> bool with Mut, Panic, Div {
+    var m = mfst_seed(44)
+    mfst_sort_by_path(&! m)
+    if 44 < 0 { return false }
+    true
+}
+
+fn test_045_mfst_cycle_045() -> bool with Mut, Panic, Div {
+    var m = mfst_new()
+    let idx = mfst_add(&! m, "entry_045.sio", 45 * 13)
+    if idx < 0 { return false }
+    mfst_test_template(45)
+}
+
+fn test_046_mfst_cycle_046() -> bool with Mut, Panic, Div {
+    var m = mfst_seed(46)
+    let ok = mfst_remove(&! m, "beta.sio")
+    if !ok { return false }
+    true
+}
+
+fn test_047_mfst_cycle_047() -> bool with Mut, Panic, Div {
+    var m = mfst_seed(47)
+    let ok = mfst_update_hash(&! m, "alpha.sio", 47 * 99)
+    if !ok { return false }
+    true
+}
+
+fn test_048_mfst_cycle_048() -> bool with Mut, Panic, Div {
+    let old = mfst_seed(48)
+    let newm = mfst_seed(48 + 1)
+    let d = mfst_diff(&old, &newm)
+    if mfst_diff_added(&d) < 0 { return false }
+    if mfst_diff_changed(&d) < 0 { return false }
+    mfst_test_template(48)
+}
+
+fn test_049_mfst_cycle_049() -> bool with Mut, Panic, Div {
+    var m = mfst_seed(49)
+    mfst_sort_by_path(&! m)
+    if 49 < 0 { return false }
+    true
+}
+
+fn test_050_mfst_cycle_050() -> bool with Mut, Panic, Div {
+    var m = mfst_new()
+    let idx = mfst_add(&! m, "entry_050.sio", 50 * 13)
+    if idx < 0 { return false }
+    mfst_test_template(50)
+}
+
+fn test_051_mfst_cycle_051() -> bool with Mut, Panic, Div {
+    var m = mfst_seed(51)
+    let ok = mfst_remove(&! m, "beta.sio")
+    if !ok { return false }
+    true
+}
+
+fn test_052_mfst_cycle_052() -> bool with Mut, Panic, Div {
+    var m = mfst_seed(52)
+    let ok = mfst_update_hash(&! m, "alpha.sio", 52 * 99)
+    if !ok { return false }
+    true
+}
+
+fn test_053_mfst_cycle_053() -> bool with Mut, Panic, Div {
+    let old = mfst_seed(53)
+    let newm = mfst_seed(53 + 1)
+    let d = mfst_diff(&old, &newm)
+    if mfst_diff_added(&d) < 0 { return false }
+    if mfst_diff_changed(&d) < 0 { return false }
+    mfst_test_template(53)
+}
+
+fn test_054_mfst_cycle_054() -> bool with Mut, Panic, Div {
+    var m = mfst_seed(54)
+    mfst_sort_by_path(&! m)
+    if 54 < 0 { return false }
+    true
+}
+
+fn test_055_mfst_cycle_055() -> bool with Mut, Panic, Div {
+    var m = mfst_new()
+    let idx = mfst_add(&! m, "entry_055.sio", 55 * 13)
+    if idx < 0 { return false }
+    mfst_test_template(55)
+}
+
+fn test_056_mfst_cycle_056() -> bool with Mut, Panic, Div {
+    var m = mfst_seed(56)
+    let ok = mfst_remove(&! m, "beta.sio")
+    if !ok { return false }
+    true
+}
+
+fn test_057_mfst_cycle_057() -> bool with Mut, Panic, Div {
+    var m = mfst_seed(57)
+    let ok = mfst_update_hash(&! m, "alpha.sio", 57 * 99)
+    if !ok { return false }
+    true
+}
+
+fn test_058_mfst_cycle_058() -> bool with Mut, Panic, Div {
+    let old = mfst_seed(58)
+    let newm = mfst_seed(58 + 1)
+    let d = mfst_diff(&old, &newm)
+    if mfst_diff_added(&d) < 0 { return false }
+    if mfst_diff_changed(&d) < 0 { return false }
+    mfst_test_template(58)
+}
+
+fn test_059_mfst_cycle_059() -> bool with Mut, Panic, Div {
+    var m = mfst_seed(59)
+    mfst_sort_by_path(&! m)
+    if 59 < 0 { return false }
+    true
+}
+
+fn test_060_mfst_cycle_060() -> bool with Mut, Panic, Div {
+    var m = mfst_new()
+    let idx = mfst_add(&! m, "entry_060.sio", 60 * 13)
+    if idx < 0 { return false }
+    mfst_test_template(60)
+}
+
+fn test_061_mfst_cycle_061() -> bool with Mut, Panic, Div {
+    var m = mfst_seed(61)
+    let ok = mfst_remove(&! m, "beta.sio")
+    if !ok { return false }
+    true
+}
+
+fn test_062_mfst_cycle_062() -> bool with Mut, Panic, Div {
+    var m = mfst_seed(62)
+    let ok = mfst_update_hash(&! m, "alpha.sio", 62 * 99)
+    if !ok { return false }
+    true
+}
+
+fn test_063_mfst_cycle_063() -> bool with Mut, Panic, Div {
+    let old = mfst_seed(63)
+    let newm = mfst_seed(63 + 1)
+    let d = mfst_diff(&old, &newm)
+    if mfst_diff_added(&d) < 0 { return false }
+    if mfst_diff_changed(&d) < 0 { return false }
+    mfst_test_template(63)
+}
+
+fn test_064_mfst_cycle_064() -> bool with Mut, Panic, Div {
+    var m = mfst_seed(64)
+    mfst_sort_by_path(&! m)
+    if 64 < 0 { return false }
+    true
+}
+
+fn test_065_mfst_cycle_065() -> bool with Mut, Panic, Div {
+    var m = mfst_new()
+    let idx = mfst_add(&! m, "entry_065.sio", 65 * 13)
+    if idx < 0 { return false }
+    mfst_test_template(65)
+}
+
+fn test_066_mfst_cycle_066() -> bool with Mut, Panic, Div {
+    var m = mfst_seed(66)
+    let ok = mfst_remove(&! m, "beta.sio")
+    if !ok { return false }
+    true
+}
+
+fn test_067_mfst_cycle_067() -> bool with Mut, Panic, Div {
+    var m = mfst_seed(67)
+    let ok = mfst_update_hash(&! m, "alpha.sio", 67 * 99)
+    if !ok { return false }
+    true
+}
+
+fn test_068_mfst_cycle_068() -> bool with Mut, Panic, Div {
+    let old = mfst_seed(68)
+    let newm = mfst_seed(68 + 1)
+    let d = mfst_diff(&old, &newm)
+    if mfst_diff_added(&d) < 0 { return false }
+    if mfst_diff_changed(&d) < 0 { return false }
+    mfst_test_template(68)
+}
+
+fn test_069_mfst_cycle_069() -> bool with Mut, Panic, Div {
+    var m = mfst_seed(69)
+    mfst_sort_by_path(&! m)
+    if 69 < 0 { return false }
+    true
+}
+
+fn test_070_mfst_cycle_070() -> bool with Mut, Panic, Div {
+    var m = mfst_new()
+    let idx = mfst_add(&! m, "entry_070.sio", 70 * 13)
+    if idx < 0 { return false }
+    mfst_test_template(70)
+}
+
+fn test_071_mfst_cycle_071() -> bool with Mut, Panic, Div {
+    var m = mfst_seed(71)
+    let ok = mfst_remove(&! m, "beta.sio")
+    if !ok { return false }
+    true
+}
+
+fn test_072_mfst_cycle_072() -> bool with Mut, Panic, Div {
+    var m = mfst_seed(72)
+    let ok = mfst_update_hash(&! m, "alpha.sio", 72 * 99)
+    if !ok { return false }
+    true
+}
+
+fn test_073_mfst_cycle_073() -> bool with Mut, Panic, Div {
+    let old = mfst_seed(73)
+    let newm = mfst_seed(73 + 1)
+    let d = mfst_diff(&old, &newm)
+    if mfst_diff_added(&d) < 0 { return false }
+    if mfst_diff_changed(&d) < 0 { return false }
+    mfst_test_template(73)
+}
+
+fn test_074_mfst_cycle_074() -> bool with Mut, Panic, Div {
+    var m = mfst_seed(74)
+    mfst_sort_by_path(&! m)
+    if 74 < 0 { return false }
+    true
+}
+
+fn test_075_mfst_cycle_075() -> bool with Mut, Panic, Div {
+    var m = mfst_new()
+    let idx = mfst_add(&! m, "entry_075.sio", 75 * 13)
+    if idx < 0 { return false }
+    mfst_test_template(75)
+}
+
+fn mfst_run_tests_wave10() -> i64 with Mut, Panic, Div {
+    var passed: i64 = 0
+    if test_001_mfst_cycle_001() { passed = passed + 1 }
+    if test_002_mfst_cycle_002() { passed = passed + 1 }
+    if test_003_mfst_cycle_003() { passed = passed + 1 }
+    if test_004_mfst_cycle_004() { passed = passed + 1 }
+    if test_005_mfst_cycle_005() { passed = passed + 1 }
+    if test_006_mfst_cycle_006() { passed = passed + 1 }
+    if test_007_mfst_cycle_007() { passed = passed + 1 }
+    if test_008_mfst_cycle_008() { passed = passed + 1 }
+    if test_009_mfst_cycle_009() { passed = passed + 1 }
+    if test_010_mfst_cycle_010() { passed = passed + 1 }
+    if test_011_mfst_cycle_011() { passed = passed + 1 }
+    if test_012_mfst_cycle_012() { passed = passed + 1 }
+    if test_013_mfst_cycle_013() { passed = passed + 1 }
+    if test_014_mfst_cycle_014() { passed = passed + 1 }
+    if test_015_mfst_cycle_015() { passed = passed + 1 }
+    if test_016_mfst_cycle_016() { passed = passed + 1 }
+    if test_017_mfst_cycle_017() { passed = passed + 1 }
+    if test_018_mfst_cycle_018() { passed = passed + 1 }
+    if test_019_mfst_cycle_019() { passed = passed + 1 }
+    if test_020_mfst_cycle_020() { passed = passed + 1 }
+    if test_021_mfst_cycle_021() { passed = passed + 1 }
+    if test_022_mfst_cycle_022() { passed = passed + 1 }
+    if test_023_mfst_cycle_023() { passed = passed + 1 }
+    if test_024_mfst_cycle_024() { passed = passed + 1 }
+    if test_025_mfst_cycle_025() { passed = passed + 1 }
+    if test_026_mfst_cycle_026() { passed = passed + 1 }
+    if test_027_mfst_cycle_027() { passed = passed + 1 }
+    if test_028_mfst_cycle_028() { passed = passed + 1 }
+    if test_029_mfst_cycle_029() { passed = passed + 1 }
+    if test_030_mfst_cycle_030() { passed = passed + 1 }
+    if test_031_mfst_cycle_031() { passed = passed + 1 }
+    if test_032_mfst_cycle_032() { passed = passed + 1 }
+    if test_033_mfst_cycle_033() { passed = passed + 1 }
+    if test_034_mfst_cycle_034() { passed = passed + 1 }
+    if test_035_mfst_cycle_035() { passed = passed + 1 }
+    if test_036_mfst_cycle_036() { passed = passed + 1 }
+    if test_037_mfst_cycle_037() { passed = passed + 1 }
+    if test_038_mfst_cycle_038() { passed = passed + 1 }
+    if test_039_mfst_cycle_039() { passed = passed + 1 }
+    if test_040_mfst_cycle_040() { passed = passed + 1 }
+    if test_041_mfst_cycle_041() { passed = passed + 1 }
+    if test_042_mfst_cycle_042() { passed = passed + 1 }
+    if test_043_mfst_cycle_043() { passed = passed + 1 }
+    if test_044_mfst_cycle_044() { passed = passed + 1 }
+    if test_045_mfst_cycle_045() { passed = passed + 1 }
+    if test_046_mfst_cycle_046() { passed = passed + 1 }
+    if test_047_mfst_cycle_047() { passed = passed + 1 }
+    if test_048_mfst_cycle_048() { passed = passed + 1 }
+    if test_049_mfst_cycle_049() { passed = passed + 1 }
+    if test_050_mfst_cycle_050() { passed = passed + 1 }
+    if test_051_mfst_cycle_051() { passed = passed + 1 }
+    if test_052_mfst_cycle_052() { passed = passed + 1 }
+    if test_053_mfst_cycle_053() { passed = passed + 1 }
+    if test_054_mfst_cycle_054() { passed = passed + 1 }
+    if test_055_mfst_cycle_055() { passed = passed + 1 }
+    if test_056_mfst_cycle_056() { passed = passed + 1 }
+    if test_057_mfst_cycle_057() { passed = passed + 1 }
+    if test_058_mfst_cycle_058() { passed = passed + 1 }
+    if test_059_mfst_cycle_059() { passed = passed + 1 }
+    if test_060_mfst_cycle_060() { passed = passed + 1 }
+    if test_061_mfst_cycle_061() { passed = passed + 1 }
+    if test_062_mfst_cycle_062() { passed = passed + 1 }
+    if test_063_mfst_cycle_063() { passed = passed + 1 }
+    if test_064_mfst_cycle_064() { passed = passed + 1 }
+    if test_065_mfst_cycle_065() { passed = passed + 1 }
+    if test_066_mfst_cycle_066() { passed = passed + 1 }
+    if test_067_mfst_cycle_067() { passed = passed + 1 }
+    if test_068_mfst_cycle_068() { passed = passed + 1 }
+    if test_069_mfst_cycle_069() { passed = passed + 1 }
+    if test_070_mfst_cycle_070() { passed = passed + 1 }
+    if test_071_mfst_cycle_071() { passed = passed + 1 }
+    if test_072_mfst_cycle_072() { passed = passed + 1 }
+    if test_073_mfst_cycle_073() { passed = passed + 1 }
+    if test_074_mfst_cycle_074() { passed = passed + 1 }
+    if test_075_mfst_cycle_075() { passed = passed + 1 }
+    passed
+}

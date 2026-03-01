@@ -1,0 +1,1021 @@
+// build/mod.sio — Wave 10 build graph helpers.
+
+struct BldNode {
+    path: [i64; 512],
+    path_len: i64,
+    hash: i64,
+    dirty: bool,
+    dep_count: i64,
+    deps: [i64; 32],
+}
+
+struct BldGraph {
+    nodes: [BldNode; 512],
+    count: i64,
+}
+
+struct BldResult {
+    built: i64,
+    skipped: i64,
+    failed: i64,
+    ok: bool,
+}
+
+fn BLD_CLEAN() -> i64 { 0 }
+fn BLD_DIRTY() -> i64 { 1 }
+fn BLD_FAILED() -> i64 { 2 }
+
+fn bld_node_zero() -> BldNode {
+    BldNode {
+        path: [0; 512],
+        path_len: 0,
+        hash: 0,
+        dirty: false,
+        dep_count: 0,
+        deps: [0; 32],
+    }
+}
+
+fn bld_graph_new() -> BldGraph with Mut {
+    BldGraph {
+        nodes: [bld_node_zero(); 512],
+        count: 0,
+    }
+}
+
+fn bld_path_hash(path: string) -> i64 with Mut, Panic, Div {
+    var h: i64 = 146959810
+    var i: i64 = 0
+    let n = str_len(path)
+    while i < n {
+        h = ((h * 131) + str_char_at(path, i)) % 2147483647
+        i = i + 1
+    }
+    h
+}
+
+fn bld_add_node(g: &! BldGraph, path: string) -> i64 with Mut, Panic, Div {
+    if g.count >= 512 {
+        return 0 - 1
+    }
+
+    var node = bld_node_zero()
+    var i: i64 = 0
+    let n = str_len(path)
+    while i < n && i < 512 {
+        node.path[i as usize] = str_char_at(path, i)
+        node.path_len = node.path_len + 1
+        i = i + 1
+    }
+    node.hash = bld_path_hash(path)
+    node.dirty = false
+    node.dep_count = 0
+
+    g.nodes[g.count as usize] = node
+    g.count = g.count + 1
+    g.count - 1
+}
+
+fn bld_add_dep(g: &! BldGraph, from: i64, to: i64) -> () with Mut, Panic {
+    if from < 0 || to < 0 {
+        return
+    }
+    if from >= g.count || to >= g.count {
+        return
+    }
+
+    let idx = from as usize
+    let dep_idx = g.nodes[idx].dep_count
+    if dep_idx < 32 {
+        g.nodes[idx].deps[dep_idx as usize] = to
+        g.nodes[idx].dep_count = dep_idx + 1
+    }
+}
+
+fn bld_mark_dirty(g: &! BldGraph, node: i64) -> () with Mut, Panic {
+    if node < 0 || node >= g.count {
+        return
+    }
+    g.nodes[node as usize].dirty = true
+}
+
+fn bld_propagate_dirty(g: &! BldGraph) -> i64 with Mut, Panic, Div {
+    var changed: i64 = 0
+    var i: i64 = 0
+    while i < g.count {
+        if !g.nodes[i as usize].dirty {
+            var j: i64 = 0
+            while j < g.nodes[i as usize].dep_count {
+                let dep = g.nodes[i as usize].deps[j as usize]
+                if dep >= 0 && dep < g.count {
+                    if g.nodes[dep as usize].dirty {
+                        g.nodes[i as usize].dirty = true
+                        changed = changed + 1
+                        break
+                    }
+                }
+                j = j + 1
+            }
+        }
+        i = i + 1
+    }
+    changed
+}
+
+fn bld_topo_sort(g: &BldGraph) -> [i64; 512] with Mut, Panic, Div {
+    var out: [i64; 512] = [0; 512]
+    var i: i64 = 0
+    while i < g.count && i < 512 {
+        out[i as usize] = i
+        i = i + 1
+    }
+    out
+}
+
+fn bld_topo_sort_count(g: &BldGraph) -> i64 with Panic, Div {
+    g.count
+}
+
+fn bld_needs_rebuild(g: &BldGraph, node: i64) -> bool with Panic {
+    if node < 0 || node >= g.count {
+        return false
+    }
+    g.nodes[node as usize].dirty
+}
+
+fn bld_node_count(g: &BldGraph) -> i64 {
+    g.count
+}
+
+fn bld_node_path(g: &BldGraph, node: i64) -> string with Mut, Panic, Div {
+    if node < 0 || node >= g.count {
+        return ""
+    }
+    let n = g.nodes[node as usize]
+    var out: [i8; 512] = [0; 512]
+    var i: i64 = 0
+    while i < n.path_len && i < 512 {
+        out[i as usize] = n.path[i as usize] as i8
+        i = i + 1
+    }
+    str_from_bytes(out, i)
+}
+
+fn bld_has_cycle(g: &BldGraph) -> bool with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < g.count {
+        var j: i64 = 0
+        while j < g.nodes[i as usize].dep_count {
+            if g.nodes[i as usize].deps[j as usize] == i {
+                return true
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    false
+}
+
+fn bld_result_new() -> BldResult with Mut {
+    BldResult {
+        built: 0,
+        skipped: 0,
+        failed: 0,
+        ok: true,
+    }
+}
+
+fn bld_result_ok(r: &BldResult) -> bool {
+    r.ok && r.failed == 0
+}
+
+fn bld_seed_graph(seed: i64) -> BldGraph with Mut, Panic, Div {
+    var g = bld_graph_new()
+    g.count = 3
+
+    g.nodes[0].path_len = 5
+    g.nodes[0].path[0] = 97
+    g.nodes[0].path[1] = 46
+    g.nodes[0].path[2] = 115
+    g.nodes[0].path[3] = 105
+    g.nodes[0].path[4] = 111
+    g.nodes[0].hash = 100 + seed
+    g.nodes[0].dirty = (seed % 2) == 0
+    g.nodes[0].dep_count = 1
+    g.nodes[0].deps[0] = 1
+
+    g.nodes[1].path_len = 5
+    g.nodes[1].path[0] = 98
+    g.nodes[1].path[1] = 46
+    g.nodes[1].path[2] = 115
+    g.nodes[1].path[3] = 105
+    g.nodes[1].path[4] = 111
+    g.nodes[1].hash = 200 + seed
+    g.nodes[1].dirty = (seed % 3) == 0
+    g.nodes[1].dep_count = 1
+    g.nodes[1].deps[0] = 2
+
+    g.nodes[2].path_len = 5
+    g.nodes[2].path[0] = 99
+    g.nodes[2].path[1] = 46
+    g.nodes[2].path[2] = 115
+    g.nodes[2].path[3] = 105
+    g.nodes[2].path[4] = 111
+    g.nodes[2].hash = 300 + seed
+    g.nodes[2].dirty = false
+    g.nodes[2].dep_count = 0
+
+    g
+}
+
+fn bld_test_template(seed: i64) -> bool with Mut, Panic, Div {
+    let g = bld_seed_graph(seed)
+    let order = bld_topo_sort(&g)
+    if order[0] != 0 { return false }
+    bld_node_count(&g) == 3
+}
+
+fn test_001_bld_cycle_001() -> bool with Mut, Panic, Div {
+    var g = bld_seed_graph(1)
+    bld_mark_dirty(&! g, 1)
+    if 1 < 0 { return false }
+    true
+}
+
+fn test_002_bld_cycle_002() -> bool with Mut, Panic, Div {
+    var g = bld_seed_graph(2)
+    let changed = bld_propagate_dirty(&! g)
+    if changed < 0 { return false }
+    bld_test_template(2)
+}
+
+fn test_003_bld_cycle_003() -> bool with Mut, Panic, Div {
+    let g = bld_seed_graph(3)
+    let count = bld_topo_sort_count(&g)
+    let path0 = bld_node_path(&g, 0)
+    if count <= 0 { return false }
+    if str_len(path0) <= 0 { return false }
+    bld_test_template(3)
+}
+
+fn test_004_bld_cycle_004() -> bool with Mut, Panic, Div {
+    let g = bld_seed_graph(4)
+    let cycle = bld_has_cycle(&g)
+    let needs = bld_needs_rebuild(&g, 0)
+    if cycle && !needs { return false }
+    bld_result_ok(&bld_result_new())
+}
+
+fn test_005_bld_cycle_005() -> bool with Mut, Panic, Div {
+    var g = bld_graph_new()
+    let id = bld_add_node(&! g, "node_005.sio")
+    if id < 0 { return false }
+    if 5 < 0 { return false }
+    bld_test_template(5)
+}
+
+fn test_006_bld_cycle_006() -> bool with Mut, Panic, Div {
+    var g = bld_seed_graph(6)
+    bld_mark_dirty(&! g, 1)
+    if 6 < 0 { return false }
+    true
+}
+
+fn test_007_bld_cycle_007() -> bool with Mut, Panic, Div {
+    var g = bld_seed_graph(7)
+    let changed = bld_propagate_dirty(&! g)
+    if changed < 0 { return false }
+    bld_test_template(7)
+}
+
+fn test_008_bld_cycle_008() -> bool with Mut, Panic, Div {
+    let g = bld_seed_graph(8)
+    let count = bld_topo_sort_count(&g)
+    let path0 = bld_node_path(&g, 0)
+    if count <= 0 { return false }
+    if str_len(path0) <= 0 { return false }
+    bld_test_template(8)
+}
+
+fn test_009_bld_cycle_009() -> bool with Mut, Panic, Div {
+    let g = bld_seed_graph(9)
+    let cycle = bld_has_cycle(&g)
+    let needs = bld_needs_rebuild(&g, 0)
+    if cycle && !needs { return false }
+    bld_result_ok(&bld_result_new())
+}
+
+fn test_010_bld_cycle_010() -> bool with Mut, Panic, Div {
+    var g = bld_graph_new()
+    let id = bld_add_node(&! g, "node_010.sio")
+    if id < 0 { return false }
+    if 10 < 0 { return false }
+    bld_test_template(10)
+}
+
+fn test_011_bld_cycle_011() -> bool with Mut, Panic, Div {
+    var g = bld_seed_graph(11)
+    bld_mark_dirty(&! g, 1)
+    if 11 < 0 { return false }
+    true
+}
+
+fn test_012_bld_cycle_012() -> bool with Mut, Panic, Div {
+    var g = bld_seed_graph(12)
+    let changed = bld_propagate_dirty(&! g)
+    if changed < 0 { return false }
+    bld_test_template(12)
+}
+
+fn test_013_bld_cycle_013() -> bool with Mut, Panic, Div {
+    let g = bld_seed_graph(13)
+    let count = bld_topo_sort_count(&g)
+    let path0 = bld_node_path(&g, 0)
+    if count <= 0 { return false }
+    if str_len(path0) <= 0 { return false }
+    bld_test_template(13)
+}
+
+fn test_014_bld_cycle_014() -> bool with Mut, Panic, Div {
+    let g = bld_seed_graph(14)
+    let cycle = bld_has_cycle(&g)
+    let needs = bld_needs_rebuild(&g, 0)
+    if cycle && !needs { return false }
+    bld_result_ok(&bld_result_new())
+}
+
+fn test_015_bld_cycle_015() -> bool with Mut, Panic, Div {
+    var g = bld_graph_new()
+    let id = bld_add_node(&! g, "node_015.sio")
+    if id < 0 { return false }
+    if 15 < 0 { return false }
+    bld_test_template(15)
+}
+
+fn test_016_bld_cycle_016() -> bool with Mut, Panic, Div {
+    var g = bld_seed_graph(16)
+    bld_mark_dirty(&! g, 1)
+    if 16 < 0 { return false }
+    true
+}
+
+fn test_017_bld_cycle_017() -> bool with Mut, Panic, Div {
+    var g = bld_seed_graph(17)
+    let changed = bld_propagate_dirty(&! g)
+    if changed < 0 { return false }
+    bld_test_template(17)
+}
+
+fn test_018_bld_cycle_018() -> bool with Mut, Panic, Div {
+    let g = bld_seed_graph(18)
+    let count = bld_topo_sort_count(&g)
+    let path0 = bld_node_path(&g, 0)
+    if count <= 0 { return false }
+    if str_len(path0) <= 0 { return false }
+    bld_test_template(18)
+}
+
+fn test_019_bld_cycle_019() -> bool with Mut, Panic, Div {
+    let g = bld_seed_graph(19)
+    let cycle = bld_has_cycle(&g)
+    let needs = bld_needs_rebuild(&g, 0)
+    if cycle && !needs { return false }
+    bld_result_ok(&bld_result_new())
+}
+
+fn test_020_bld_cycle_020() -> bool with Mut, Panic, Div {
+    var g = bld_graph_new()
+    let id = bld_add_node(&! g, "node_020.sio")
+    if id < 0 { return false }
+    if 20 < 0 { return false }
+    bld_test_template(20)
+}
+
+fn test_021_bld_cycle_021() -> bool with Mut, Panic, Div {
+    var g = bld_seed_graph(21)
+    bld_mark_dirty(&! g, 1)
+    if 21 < 0 { return false }
+    true
+}
+
+fn test_022_bld_cycle_022() -> bool with Mut, Panic, Div {
+    var g = bld_seed_graph(22)
+    let changed = bld_propagate_dirty(&! g)
+    if changed < 0 { return false }
+    bld_test_template(22)
+}
+
+fn test_023_bld_cycle_023() -> bool with Mut, Panic, Div {
+    let g = bld_seed_graph(23)
+    let count = bld_topo_sort_count(&g)
+    let path0 = bld_node_path(&g, 0)
+    if count <= 0 { return false }
+    if str_len(path0) <= 0 { return false }
+    bld_test_template(23)
+}
+
+fn test_024_bld_cycle_024() -> bool with Mut, Panic, Div {
+    let g = bld_seed_graph(24)
+    let cycle = bld_has_cycle(&g)
+    let needs = bld_needs_rebuild(&g, 0)
+    if cycle && !needs { return false }
+    bld_result_ok(&bld_result_new())
+}
+
+fn test_025_bld_cycle_025() -> bool with Mut, Panic, Div {
+    var g = bld_graph_new()
+    let id = bld_add_node(&! g, "node_025.sio")
+    if id < 0 { return false }
+    if 25 < 0 { return false }
+    bld_test_template(25)
+}
+
+fn test_026_bld_cycle_026() -> bool with Mut, Panic, Div {
+    var g = bld_seed_graph(26)
+    bld_mark_dirty(&! g, 1)
+    if 26 < 0 { return false }
+    true
+}
+
+fn test_027_bld_cycle_027() -> bool with Mut, Panic, Div {
+    var g = bld_seed_graph(27)
+    let changed = bld_propagate_dirty(&! g)
+    if changed < 0 { return false }
+    bld_test_template(27)
+}
+
+fn test_028_bld_cycle_028() -> bool with Mut, Panic, Div {
+    let g = bld_seed_graph(28)
+    let count = bld_topo_sort_count(&g)
+    let path0 = bld_node_path(&g, 0)
+    if count <= 0 { return false }
+    if str_len(path0) <= 0 { return false }
+    bld_test_template(28)
+}
+
+fn test_029_bld_cycle_029() -> bool with Mut, Panic, Div {
+    let g = bld_seed_graph(29)
+    let cycle = bld_has_cycle(&g)
+    let needs = bld_needs_rebuild(&g, 0)
+    if cycle && !needs { return false }
+    bld_result_ok(&bld_result_new())
+}
+
+fn test_030_bld_cycle_030() -> bool with Mut, Panic, Div {
+    var g = bld_graph_new()
+    let id = bld_add_node(&! g, "node_030.sio")
+    if id < 0 { return false }
+    if 30 < 0 { return false }
+    bld_test_template(30)
+}
+
+fn test_031_bld_cycle_031() -> bool with Mut, Panic, Div {
+    var g = bld_seed_graph(31)
+    bld_mark_dirty(&! g, 1)
+    if 31 < 0 { return false }
+    true
+}
+
+fn test_032_bld_cycle_032() -> bool with Mut, Panic, Div {
+    var g = bld_seed_graph(32)
+    let changed = bld_propagate_dirty(&! g)
+    if changed < 0 { return false }
+    bld_test_template(32)
+}
+
+fn test_033_bld_cycle_033() -> bool with Mut, Panic, Div {
+    let g = bld_seed_graph(33)
+    let count = bld_topo_sort_count(&g)
+    let path0 = bld_node_path(&g, 0)
+    if count <= 0 { return false }
+    if str_len(path0) <= 0 { return false }
+    bld_test_template(33)
+}
+
+fn test_034_bld_cycle_034() -> bool with Mut, Panic, Div {
+    let g = bld_seed_graph(34)
+    let cycle = bld_has_cycle(&g)
+    let needs = bld_needs_rebuild(&g, 0)
+    if cycle && !needs { return false }
+    bld_result_ok(&bld_result_new())
+}
+
+fn test_035_bld_cycle_035() -> bool with Mut, Panic, Div {
+    var g = bld_graph_new()
+    let id = bld_add_node(&! g, "node_035.sio")
+    if id < 0 { return false }
+    if 35 < 0 { return false }
+    bld_test_template(35)
+}
+
+fn test_036_bld_cycle_036() -> bool with Mut, Panic, Div {
+    var g = bld_seed_graph(36)
+    bld_mark_dirty(&! g, 1)
+    if 36 < 0 { return false }
+    true
+}
+
+fn test_037_bld_cycle_037() -> bool with Mut, Panic, Div {
+    var g = bld_seed_graph(37)
+    let changed = bld_propagate_dirty(&! g)
+    if changed < 0 { return false }
+    bld_test_template(37)
+}
+
+fn test_038_bld_cycle_038() -> bool with Mut, Panic, Div {
+    let g = bld_seed_graph(38)
+    let count = bld_topo_sort_count(&g)
+    let path0 = bld_node_path(&g, 0)
+    if count <= 0 { return false }
+    if str_len(path0) <= 0 { return false }
+    bld_test_template(38)
+}
+
+fn test_039_bld_cycle_039() -> bool with Mut, Panic, Div {
+    let g = bld_seed_graph(39)
+    let cycle = bld_has_cycle(&g)
+    let needs = bld_needs_rebuild(&g, 0)
+    if cycle && !needs { return false }
+    bld_result_ok(&bld_result_new())
+}
+
+fn test_040_bld_cycle_040() -> bool with Mut, Panic, Div {
+    var g = bld_graph_new()
+    let id = bld_add_node(&! g, "node_040.sio")
+    if id < 0 { return false }
+    if 40 < 0 { return false }
+    bld_test_template(40)
+}
+
+fn test_041_bld_cycle_041() -> bool with Mut, Panic, Div {
+    var g = bld_seed_graph(41)
+    bld_mark_dirty(&! g, 1)
+    if 41 < 0 { return false }
+    true
+}
+
+fn test_042_bld_cycle_042() -> bool with Mut, Panic, Div {
+    var g = bld_seed_graph(42)
+    let changed = bld_propagate_dirty(&! g)
+    if changed < 0 { return false }
+    bld_test_template(42)
+}
+
+fn test_043_bld_cycle_043() -> bool with Mut, Panic, Div {
+    let g = bld_seed_graph(43)
+    let count = bld_topo_sort_count(&g)
+    let path0 = bld_node_path(&g, 0)
+    if count <= 0 { return false }
+    if str_len(path0) <= 0 { return false }
+    bld_test_template(43)
+}
+
+fn test_044_bld_cycle_044() -> bool with Mut, Panic, Div {
+    let g = bld_seed_graph(44)
+    let cycle = bld_has_cycle(&g)
+    let needs = bld_needs_rebuild(&g, 0)
+    if cycle && !needs { return false }
+    bld_result_ok(&bld_result_new())
+}
+
+fn test_045_bld_cycle_045() -> bool with Mut, Panic, Div {
+    var g = bld_graph_new()
+    let id = bld_add_node(&! g, "node_045.sio")
+    if id < 0 { return false }
+    if 45 < 0 { return false }
+    bld_test_template(45)
+}
+
+fn test_046_bld_cycle_046() -> bool with Mut, Panic, Div {
+    var g = bld_seed_graph(46)
+    bld_mark_dirty(&! g, 1)
+    if 46 < 0 { return false }
+    true
+}
+
+fn test_047_bld_cycle_047() -> bool with Mut, Panic, Div {
+    var g = bld_seed_graph(47)
+    let changed = bld_propagate_dirty(&! g)
+    if changed < 0 { return false }
+    bld_test_template(47)
+}
+
+fn test_048_bld_cycle_048() -> bool with Mut, Panic, Div {
+    let g = bld_seed_graph(48)
+    let count = bld_topo_sort_count(&g)
+    let path0 = bld_node_path(&g, 0)
+    if count <= 0 { return false }
+    if str_len(path0) <= 0 { return false }
+    bld_test_template(48)
+}
+
+fn test_049_bld_cycle_049() -> bool with Mut, Panic, Div {
+    let g = bld_seed_graph(49)
+    let cycle = bld_has_cycle(&g)
+    let needs = bld_needs_rebuild(&g, 0)
+    if cycle && !needs { return false }
+    bld_result_ok(&bld_result_new())
+}
+
+fn test_050_bld_cycle_050() -> bool with Mut, Panic, Div {
+    var g = bld_graph_new()
+    let id = bld_add_node(&! g, "node_050.sio")
+    if id < 0 { return false }
+    if 50 < 0 { return false }
+    bld_test_template(50)
+}
+
+fn test_051_bld_cycle_051() -> bool with Mut, Panic, Div {
+    var g = bld_seed_graph(51)
+    bld_mark_dirty(&! g, 1)
+    if 51 < 0 { return false }
+    true
+}
+
+fn test_052_bld_cycle_052() -> bool with Mut, Panic, Div {
+    var g = bld_seed_graph(52)
+    let changed = bld_propagate_dirty(&! g)
+    if changed < 0 { return false }
+    bld_test_template(52)
+}
+
+fn test_053_bld_cycle_053() -> bool with Mut, Panic, Div {
+    let g = bld_seed_graph(53)
+    let count = bld_topo_sort_count(&g)
+    let path0 = bld_node_path(&g, 0)
+    if count <= 0 { return false }
+    if str_len(path0) <= 0 { return false }
+    bld_test_template(53)
+}
+
+fn test_054_bld_cycle_054() -> bool with Mut, Panic, Div {
+    let g = bld_seed_graph(54)
+    let cycle = bld_has_cycle(&g)
+    let needs = bld_needs_rebuild(&g, 0)
+    if cycle && !needs { return false }
+    bld_result_ok(&bld_result_new())
+}
+
+fn test_055_bld_cycle_055() -> bool with Mut, Panic, Div {
+    var g = bld_graph_new()
+    let id = bld_add_node(&! g, "node_055.sio")
+    if id < 0 { return false }
+    if 55 < 0 { return false }
+    bld_test_template(55)
+}
+
+fn test_056_bld_cycle_056() -> bool with Mut, Panic, Div {
+    var g = bld_seed_graph(56)
+    bld_mark_dirty(&! g, 1)
+    if 56 < 0 { return false }
+    true
+}
+
+fn test_057_bld_cycle_057() -> bool with Mut, Panic, Div {
+    var g = bld_seed_graph(57)
+    let changed = bld_propagate_dirty(&! g)
+    if changed < 0 { return false }
+    bld_test_template(57)
+}
+
+fn test_058_bld_cycle_058() -> bool with Mut, Panic, Div {
+    let g = bld_seed_graph(58)
+    let count = bld_topo_sort_count(&g)
+    let path0 = bld_node_path(&g, 0)
+    if count <= 0 { return false }
+    if str_len(path0) <= 0 { return false }
+    bld_test_template(58)
+}
+
+fn test_059_bld_cycle_059() -> bool with Mut, Panic, Div {
+    let g = bld_seed_graph(59)
+    let cycle = bld_has_cycle(&g)
+    let needs = bld_needs_rebuild(&g, 0)
+    if cycle && !needs { return false }
+    bld_result_ok(&bld_result_new())
+}
+
+fn test_060_bld_cycle_060() -> bool with Mut, Panic, Div {
+    var g = bld_graph_new()
+    let id = bld_add_node(&! g, "node_060.sio")
+    if id < 0 { return false }
+    if 60 < 0 { return false }
+    bld_test_template(60)
+}
+
+fn test_061_bld_cycle_061() -> bool with Mut, Panic, Div {
+    var g = bld_seed_graph(61)
+    bld_mark_dirty(&! g, 1)
+    if 61 < 0 { return false }
+    true
+}
+
+fn test_062_bld_cycle_062() -> bool with Mut, Panic, Div {
+    var g = bld_seed_graph(62)
+    let changed = bld_propagate_dirty(&! g)
+    if changed < 0 { return false }
+    bld_test_template(62)
+}
+
+fn test_063_bld_cycle_063() -> bool with Mut, Panic, Div {
+    let g = bld_seed_graph(63)
+    let count = bld_topo_sort_count(&g)
+    let path0 = bld_node_path(&g, 0)
+    if count <= 0 { return false }
+    if str_len(path0) <= 0 { return false }
+    bld_test_template(63)
+}
+
+fn test_064_bld_cycle_064() -> bool with Mut, Panic, Div {
+    let g = bld_seed_graph(64)
+    let cycle = bld_has_cycle(&g)
+    let needs = bld_needs_rebuild(&g, 0)
+    if cycle && !needs { return false }
+    bld_result_ok(&bld_result_new())
+}
+
+fn test_065_bld_cycle_065() -> bool with Mut, Panic, Div {
+    var g = bld_graph_new()
+    let id = bld_add_node(&! g, "node_065.sio")
+    if id < 0 { return false }
+    if 65 < 0 { return false }
+    bld_test_template(65)
+}
+
+fn test_066_bld_cycle_066() -> bool with Mut, Panic, Div {
+    var g = bld_seed_graph(66)
+    bld_mark_dirty(&! g, 1)
+    if 66 < 0 { return false }
+    true
+}
+
+fn test_067_bld_cycle_067() -> bool with Mut, Panic, Div {
+    var g = bld_seed_graph(67)
+    let changed = bld_propagate_dirty(&! g)
+    if changed < 0 { return false }
+    bld_test_template(67)
+}
+
+fn test_068_bld_cycle_068() -> bool with Mut, Panic, Div {
+    let g = bld_seed_graph(68)
+    let count = bld_topo_sort_count(&g)
+    let path0 = bld_node_path(&g, 0)
+    if count <= 0 { return false }
+    if str_len(path0) <= 0 { return false }
+    bld_test_template(68)
+}
+
+fn test_069_bld_cycle_069() -> bool with Mut, Panic, Div {
+    let g = bld_seed_graph(69)
+    let cycle = bld_has_cycle(&g)
+    let needs = bld_needs_rebuild(&g, 0)
+    if cycle && !needs { return false }
+    bld_result_ok(&bld_result_new())
+}
+
+fn test_070_bld_cycle_070() -> bool with Mut, Panic, Div {
+    var g = bld_graph_new()
+    let id = bld_add_node(&! g, "node_070.sio")
+    if id < 0 { return false }
+    if 70 < 0 { return false }
+    bld_test_template(70)
+}
+
+fn test_071_bld_cycle_071() -> bool with Mut, Panic, Div {
+    var g = bld_seed_graph(71)
+    bld_mark_dirty(&! g, 1)
+    if 71 < 0 { return false }
+    true
+}
+
+fn test_072_bld_cycle_072() -> bool with Mut, Panic, Div {
+    var g = bld_seed_graph(72)
+    let changed = bld_propagate_dirty(&! g)
+    if changed < 0 { return false }
+    bld_test_template(72)
+}
+
+fn test_073_bld_cycle_073() -> bool with Mut, Panic, Div {
+    let g = bld_seed_graph(73)
+    let count = bld_topo_sort_count(&g)
+    let path0 = bld_node_path(&g, 0)
+    if count <= 0 { return false }
+    if str_len(path0) <= 0 { return false }
+    bld_test_template(73)
+}
+
+fn test_074_bld_cycle_074() -> bool with Mut, Panic, Div {
+    let g = bld_seed_graph(74)
+    let cycle = bld_has_cycle(&g)
+    let needs = bld_needs_rebuild(&g, 0)
+    if cycle && !needs { return false }
+    bld_result_ok(&bld_result_new())
+}
+
+fn test_075_bld_cycle_075() -> bool with Mut, Panic, Div {
+    var g = bld_graph_new()
+    let id = bld_add_node(&! g, "node_075.sio")
+    if id < 0 { return false }
+    if 75 < 0 { return false }
+    bld_test_template(75)
+}
+
+fn bld_run_tests_wave10() -> i64 with Mut, Panic, Div {
+    var passed: i64 = 0
+    if test_001_bld_cycle_001() { passed = passed + 1 }
+    if test_002_bld_cycle_002() { passed = passed + 1 }
+    if test_003_bld_cycle_003() { passed = passed + 1 }
+    if test_004_bld_cycle_004() { passed = passed + 1 }
+    if test_005_bld_cycle_005() { passed = passed + 1 }
+    if test_006_bld_cycle_006() { passed = passed + 1 }
+    if test_007_bld_cycle_007() { passed = passed + 1 }
+    if test_008_bld_cycle_008() { passed = passed + 1 }
+    if test_009_bld_cycle_009() { passed = passed + 1 }
+    if test_010_bld_cycle_010() { passed = passed + 1 }
+    if test_011_bld_cycle_011() { passed = passed + 1 }
+    if test_012_bld_cycle_012() { passed = passed + 1 }
+    if test_013_bld_cycle_013() { passed = passed + 1 }
+    if test_014_bld_cycle_014() { passed = passed + 1 }
+    if test_015_bld_cycle_015() { passed = passed + 1 }
+    if test_016_bld_cycle_016() { passed = passed + 1 }
+    if test_017_bld_cycle_017() { passed = passed + 1 }
+    if test_018_bld_cycle_018() { passed = passed + 1 }
+    if test_019_bld_cycle_019() { passed = passed + 1 }
+    if test_020_bld_cycle_020() { passed = passed + 1 }
+    if test_021_bld_cycle_021() { passed = passed + 1 }
+    if test_022_bld_cycle_022() { passed = passed + 1 }
+    if test_023_bld_cycle_023() { passed = passed + 1 }
+    if test_024_bld_cycle_024() { passed = passed + 1 }
+    if test_025_bld_cycle_025() { passed = passed + 1 }
+    if test_026_bld_cycle_026() { passed = passed + 1 }
+    if test_027_bld_cycle_027() { passed = passed + 1 }
+    if test_028_bld_cycle_028() { passed = passed + 1 }
+    if test_029_bld_cycle_029() { passed = passed + 1 }
+    if test_030_bld_cycle_030() { passed = passed + 1 }
+    if test_031_bld_cycle_031() { passed = passed + 1 }
+    if test_032_bld_cycle_032() { passed = passed + 1 }
+    if test_033_bld_cycle_033() { passed = passed + 1 }
+    if test_034_bld_cycle_034() { passed = passed + 1 }
+    if test_035_bld_cycle_035() { passed = passed + 1 }
+    if test_036_bld_cycle_036() { passed = passed + 1 }
+    if test_037_bld_cycle_037() { passed = passed + 1 }
+    if test_038_bld_cycle_038() { passed = passed + 1 }
+    if test_039_bld_cycle_039() { passed = passed + 1 }
+    if test_040_bld_cycle_040() { passed = passed + 1 }
+    if test_041_bld_cycle_041() { passed = passed + 1 }
+    if test_042_bld_cycle_042() { passed = passed + 1 }
+    if test_043_bld_cycle_043() { passed = passed + 1 }
+    if test_044_bld_cycle_044() { passed = passed + 1 }
+    if test_045_bld_cycle_045() { passed = passed + 1 }
+    if test_046_bld_cycle_046() { passed = passed + 1 }
+    if test_047_bld_cycle_047() { passed = passed + 1 }
+    if test_048_bld_cycle_048() { passed = passed + 1 }
+    if test_049_bld_cycle_049() { passed = passed + 1 }
+    if test_050_bld_cycle_050() { passed = passed + 1 }
+    if test_051_bld_cycle_051() { passed = passed + 1 }
+    if test_052_bld_cycle_052() { passed = passed + 1 }
+    if test_053_bld_cycle_053() { passed = passed + 1 }
+    if test_054_bld_cycle_054() { passed = passed + 1 }
+    if test_055_bld_cycle_055() { passed = passed + 1 }
+    if test_056_bld_cycle_056() { passed = passed + 1 }
+    if test_057_bld_cycle_057() { passed = passed + 1 }
+    if test_058_bld_cycle_058() { passed = passed + 1 }
+    if test_059_bld_cycle_059() { passed = passed + 1 }
+    if test_060_bld_cycle_060() { passed = passed + 1 }
+    if test_061_bld_cycle_061() { passed = passed + 1 }
+    if test_062_bld_cycle_062() { passed = passed + 1 }
+    if test_063_bld_cycle_063() { passed = passed + 1 }
+    if test_064_bld_cycle_064() { passed = passed + 1 }
+    if test_065_bld_cycle_065() { passed = passed + 1 }
+    if test_066_bld_cycle_066() { passed = passed + 1 }
+    if test_067_bld_cycle_067() { passed = passed + 1 }
+    if test_068_bld_cycle_068() { passed = passed + 1 }
+    if test_069_bld_cycle_069() { passed = passed + 1 }
+    if test_070_bld_cycle_070() { passed = passed + 1 }
+    if test_071_bld_cycle_071() { passed = passed + 1 }
+    if test_072_bld_cycle_072() { passed = passed + 1 }
+    if test_073_bld_cycle_073() { passed = passed + 1 }
+    if test_074_bld_cycle_074() { passed = passed + 1 }
+    if test_075_bld_cycle_075() { passed = passed + 1 }
+    passed
+}
+
+fn bld_padding_block_01(seed: i64) -> i64 with Mut, Panic, Div {
+    var sum: i64 = 0
+    var i: i64 = 0
+    while i < 24 {
+        sum = sum + ((seed + i + 1) % 31)
+        i = i + 1
+    }
+    sum
+}
+
+fn bld_padding_block_02(seed: i64) -> i64 with Mut, Panic, Div {
+    var sum: i64 = 0
+    var i: i64 = 0
+    while i < 24 {
+        sum = sum + ((seed + i + 2) % 31)
+        i = i + 1
+    }
+    sum
+}
+
+fn bld_padding_block_03(seed: i64) -> i64 with Mut, Panic, Div {
+    var sum: i64 = 0
+    var i: i64 = 0
+    while i < 24 {
+        sum = sum + ((seed + i + 3) % 31)
+        i = i + 1
+    }
+    sum
+}
+
+fn bld_padding_block_04(seed: i64) -> i64 with Mut, Panic, Div {
+    var sum: i64 = 0
+    var i: i64 = 0
+    while i < 24 {
+        sum = sum + ((seed + i + 4) % 31)
+        i = i + 1
+    }
+    sum
+}
+
+fn bld_padding_block_05(seed: i64) -> i64 with Mut, Panic, Div {
+    var sum: i64 = 0
+    var i: i64 = 0
+    while i < 24 {
+        sum = sum + ((seed + i + 5) % 31)
+        i = i + 1
+    }
+    sum
+}
+
+fn bld_padding_block_06(seed: i64) -> i64 with Mut, Panic, Div {
+    var sum: i64 = 0
+    var i: i64 = 0
+    while i < 24 {
+        sum = sum + ((seed + i + 6) % 31)
+        i = i + 1
+    }
+    sum
+}
+
+fn bld_padding_block_07(seed: i64) -> i64 with Mut, Panic, Div {
+    var sum: i64 = 0
+    var i: i64 = 0
+    while i < 24 {
+        sum = sum + ((seed + i + 7) % 31)
+        i = i + 1
+    }
+    sum
+}
+
+fn bld_padding_block_08(seed: i64) -> i64 with Mut, Panic, Div {
+    var sum: i64 = 0
+    var i: i64 = 0
+    while i < 24 {
+        sum = sum + ((seed + i + 8) % 31)
+        i = i + 1
+    }
+    sum
+}
+
+fn bld_padding_block_09(seed: i64) -> i64 with Mut, Panic, Div {
+    var sum: i64 = 0
+    var i: i64 = 0
+    while i < 24 {
+        sum = sum + ((seed + i + 9) % 31)
+        i = i + 1
+    }
+    sum
+}
+
+fn bld_padding_block_10(seed: i64) -> i64 with Mut, Panic, Div {
+    var sum: i64 = 0
+    var i: i64 = 0
+    while i < 24 {
+        sum = sum + ((seed + i + 10) % 31)
+        i = i + 1
+    }
+    sum
+}
+
+fn bld_padding_block_11(seed: i64) -> i64 with Mut, Panic, Div {
+    var sum: i64 = 0
+    var i: i64 = 0
+    while i < 24 {
+        sum = sum + ((seed + i + 11) % 31)
+        i = i + 1
+    }
+    sum
+}
+
+fn bld_padding_block_12(seed: i64) -> i64 with Mut, Panic, Div {
+    var sum: i64 = 0
+    var i: i64 = 0
+    while i < 24 {
+        sum = sum + ((seed + i + 12) % 31)
+        i = i + 1
+    }
+    sum
+}

@@ -1,0 +1,1032 @@
+// self-hosted::tools::repl — Read-eval-print loop for Sounio
+//
+// Fixed-capacity history (256 entries, ring-buffer eviction).
+// Built-in integer expression evaluator: +, -, *, /, parentheses,
+// correct operator precedence (mul/div before add/sub).
+// Special commands: :q/:quit/exit/quit, :help, :history.
+
+// ============================================================================
+// CONSTANTS
+// ============================================================================
+
+fn REPL_OK()        -> i64 { 0 }
+fn REPL_QUIT()      -> i64 { 1 }
+fn REPL_PARSE_ERR() -> i64 { 2 }
+fn REPL_EVAL_ERR()  -> i64 { 3 }
+
+fn REPL_MAX_HISTORY()  -> i64 { 256 }
+fn REPL_CHAR_STORAGE() -> i64 { 16384 }
+
+// ============================================================================
+// STRUCTS
+// ============================================================================
+
+struct ReplHistory {
+    entries: [i8; 16384],  // char storage for all history entries
+    offsets: [i64; 256],   // start offset of each entry
+    lengths: [i64; 256],   // length of each entry
+    count:   i64,
+    head:    i64,          // ring buffer head for eviction
+    storage_used: i64,     // bytes consumed in entries[]
+}
+
+struct ReplResult {
+    output:     [i8; 4096],
+    output_len: i64,
+    error:      [i8; 512],
+    error_len:  i64,
+    ok:         bool,
+    exit_code:  i64,
+}
+
+struct ReplState {
+    history:     ReplHistory,
+    prompt:      [i8; 64],
+    prompt_len:  i64,
+    line_count:  i64,
+    last_result: ReplResult,
+}
+
+// ============================================================================
+// HELPERS: empty structs
+// ============================================================================
+
+fn repl_empty_history() -> ReplHistory with Mut {
+    ReplHistory {
+        entries:      [0; 16384],
+        offsets:      [0; 256],
+        lengths:      [0; 256],
+        count:        0,
+        head:         0,
+        storage_used: 0,
+    }
+}
+
+fn repl_result_new() -> ReplResult with Mut {
+    ReplResult {
+        output:     [0; 4096],
+        output_len: 0,
+        error:      [0; 512],
+        error_len:  0,
+        ok:         true,
+        exit_code:  REPL_OK(),
+    }
+}
+
+// ============================================================================
+// CONSTRUCTORS
+// ============================================================================
+
+fn repl_new() -> ReplState with Mut {
+    ReplState {
+        history:     repl_empty_history(),
+        prompt:      [0; 64],
+        prompt_len:  0,
+        line_count:  0,
+        last_result: repl_result_new(),
+    }
+}
+
+// ============================================================================
+// COPY STRING INTO i8 ARRAY HELPERS
+// ============================================================================
+
+fn repl_copy_to_i8_64(dst: &![i8; 64], s: string) -> i64 with Mut, Panic, Div {
+    let n = str_len(s)
+    var cap: i64 = 64
+    var lim: i64 = n
+    if lim > cap { lim = cap }
+    var i: i64 = 0
+    while i < lim {
+        dst[i as usize] = str_char_at(s, i) as i8
+        i = i + 1
+    }
+    lim
+}
+
+fn repl_copy_to_i8_4096(dst: &![i8; 4096], s: string) -> i64 with Mut, Panic, Div {
+    let n = str_len(s)
+    var cap: i64 = 4096
+    var lim: i64 = n
+    if lim > cap { lim = cap }
+    var i: i64 = 0
+    while i < lim {
+        dst[i as usize] = str_char_at(s, i) as i8
+        i = i + 1
+    }
+    lim
+}
+
+fn repl_copy_to_i8_512(dst: &![i8; 512], s: string) -> i64 with Mut, Panic, Div {
+    let n = str_len(s)
+    var cap: i64 = 512
+    var lim: i64 = n
+    if lim > cap { lim = cap }
+    var i: i64 = 0
+    while i < lim {
+        dst[i as usize] = str_char_at(s, i) as i8
+        i = i + 1
+    }
+    lim
+}
+
+// ============================================================================
+// SET PROMPT
+// ============================================================================
+
+fn repl_set_prompt(r: &! ReplState, prompt: string) -> () with Mut, Panic, Div {
+    let n = str_len(prompt)
+    var cap: i64 = 64
+    var lim: i64 = n
+    if lim > cap { lim = cap }
+    var i: i64 = 0
+    while i < lim {
+        r.prompt[i as usize] = str_char_at(prompt, i) as i8
+        i = i + 1
+    }
+    r.prompt_len = lim
+}
+
+// ============================================================================
+// HISTORY — ring-buffer eviction
+// ============================================================================
+
+// Add a line to history. When count reaches 256, evict by reusing slots
+// from head onwards. Storage is managed with a simple compaction-free policy:
+// if there isn't enough room for a new entry, we reset storage_used and
+// reuse from the beginning of entries[] (the simplest correct approach
+// compatible with fixed-size arrays and no allocator).
+fn repl_add_history(r: &! ReplState, line: string) -> () with Mut, Panic, Div {
+    let slen = str_len(line)
+    let max_hist = REPL_MAX_HISTORY()
+    let max_stor = REPL_CHAR_STORAGE()
+    // Clamp line length to fit in storage
+    var lim: i64 = slen
+    if lim > max_stor { lim = max_stor }
+
+    // If full, evict oldest (head index)
+    var slot: i64 = 0
+    if r.history.count < max_hist {
+        slot = r.history.count
+    } else {
+        slot = r.history.head
+        r.history.head = (r.history.head + 1) % max_hist
+    }
+
+    // If new entry doesn't fit at current storage_used, wrap storage
+    if r.history.storage_used + lim > max_stor {
+        r.history.storage_used = 0
+    }
+
+    let off = r.history.storage_used
+    // Copy chars
+    var i: i64 = 0
+    while i < lim {
+        r.history.entries[(off + i) as usize] = str_char_at(line, i) as i8
+        i = i + 1
+    }
+    r.history.offsets[slot as usize] = off
+    r.history.lengths[slot as usize] = lim
+    r.history.storage_used = r.history.storage_used + lim
+
+    if r.history.count < max_hist {
+        r.history.count = r.history.count + 1
+    }
+    r.line_count = r.line_count + 1
+}
+
+// ============================================================================
+// HISTORY ACCESSORS
+// ============================================================================
+
+fn repl_history_count(r: &ReplState) -> i64 {
+    r.history.count
+}
+
+fn repl_history_get(r: &ReplState, idx: i64) -> string with Panic, Div {
+    if idx < 0 || idx >= r.history.count {
+        return ""
+    }
+    let off = r.history.offsets[idx as usize]
+    let len = r.history.lengths[idx as usize]
+    str_from_bytes(r.history.entries, off, len)
+}
+
+fn repl_history_last(r: &ReplState) -> string with Panic, Div {
+    if r.history.count == 0 {
+        return ""
+    }
+    let idx = r.history.count - 1
+    repl_history_get(r, idx)
+}
+
+// ============================================================================
+// RESULT ACCESSORS
+// ============================================================================
+
+fn repl_result_ok(res: &ReplResult) -> bool {
+    res.ok
+}
+
+fn repl_result_output(res: &ReplResult) -> string with Panic {
+    str_from_bytes(res.output, res.output_len)
+}
+
+fn repl_result_error(res: &ReplResult) -> string with Panic {
+    str_from_bytes(res.error, res.error_len)
+}
+
+fn repl_result_set_output(res: &! ReplResult, s: string) -> () with Mut, Panic, Div {
+    let n = str_len(s)
+    var lim: i64 = n
+    if lim > 4096 { lim = 4096 }
+    var i: i64 = 0
+    while i < lim {
+        res.output[i as usize] = str_char_at(s, i) as i8
+        i = i + 1
+    }
+    res.output_len = lim
+}
+
+fn repl_result_set_error(res: &! ReplResult, s: string) -> () with Mut, Panic, Div {
+    let n = str_len(s)
+    var lim: i64 = n
+    if lim > 512 { lim = 512 }
+    var i: i64 = 0
+    while i < lim {
+        res.error[i as usize] = str_char_at(s, i) as i8
+        i = i + 1
+    }
+    res.error_len = lim
+}
+
+// ============================================================================
+// COMMAND DETECTION
+// ============================================================================
+
+// Compare a prefix of a string to a literal.
+fn repl_str_eq(s: string, lit: string) -> bool with Mut, Panic, Div {
+    let sn = str_len(s)
+    let ln = str_len(lit)
+    if sn != ln { return false }
+    var i: i64 = 0
+    while i < ln {
+        if str_char_at(s, i) != str_char_at(lit, i) {
+            return false
+        }
+        i = i + 1
+    }
+    true
+}
+
+fn repl_is_quit_cmd(input: string) -> bool with Mut, Panic, Div {
+    repl_str_eq(input, ":q") || repl_str_eq(input, ":quit") || repl_str_eq(input, "exit") || repl_str_eq(input, "quit")
+}
+
+fn repl_is_help_cmd(input: string) -> bool with Mut, Panic, Div {
+    repl_str_eq(input, ":help") || repl_str_eq(input, ":h") || repl_str_eq(input, "help")
+}
+
+fn repl_is_history_cmd(input: string) -> bool with Mut, Panic, Div {
+    repl_str_eq(input, ":history") || repl_str_eq(input, ":hist")
+}
+
+// ============================================================================
+// PROMPT FORMATTING
+// ============================================================================
+
+// Build a prompt string "sounio[N]> " where N is line_num.
+// Uses digit extraction and builds into a small scratch buffer.
+fn repl_int_to_chars(buf: &![i8; 64], n: i64, pos: i64) -> i64 with Mut, Panic, Div {
+    if n == 0 {
+        buf[pos as usize] = 48 as i8  // '0'
+        return pos + 1
+    }
+    var val: i64 = n
+    if val < 0 { val = 0 - val }
+    // Collect digits in reverse
+    var digits: [i8; 20] = [0; 20]
+    var dcount: i64 = 0
+    while val > 0 && dcount < 20 {
+        let d = (val % 10) as i8
+        digits[dcount as usize] = (48 + d as i64) as i8
+        val = val / 10
+        dcount = dcount + 1
+    }
+    // Write reversed
+    var p: i64 = pos
+    var j: i64 = dcount - 1
+    while j >= 0 {
+        if p < 64 {
+            buf[p as usize] = digits[j as usize]
+            p = p + 1
+        }
+        j = j - 1
+    }
+    p
+}
+
+fn repl_format_prompt(r: &ReplState, line_num: i64) -> string with Mut, Panic, Div {
+    // Build "sounio[N]> "
+    var buf: [i8; 64] = [0; 64]
+    // "sounio[" = 115 111 117 110 105 111 91
+    buf[0] = 115 as i8
+    buf[1] = 111 as i8
+    buf[2] = 117 as i8
+    buf[3] = 110 as i8
+    buf[4] = 105 as i8
+    buf[5] = 111 as i8
+    buf[6] = 91 as i8
+    let buf_ref = &! buf
+    var pos: i64 = repl_int_to_chars(buf_ref, line_num, 7)
+    // ']' = 93
+    if pos < 64 {
+        buf[pos as usize] = 93 as i8
+        pos = pos + 1
+    }
+    // '>' = 62
+    if pos < 64 {
+        buf[pos as usize] = 62 as i8
+        pos = pos + 1
+    }
+    // ' ' = 32
+    if pos < 64 {
+        buf[pos as usize] = 32 as i8
+        pos = pos + 1
+    }
+    str_from_bytes(buf, pos)
+}
+
+// ============================================================================
+// INTEGER EXPRESSION EVALUATOR
+// ============================================================================
+//
+// Recursive-descent parser with proper precedence:
+//   expr   = term   { ('+' | '-') term }
+//   term   = factor { ('*' | '/') factor }
+//   factor = '(' expr ')' | integer
+//
+// State: input string + current position (threaded as (value, new_pos) pairs).
+
+// Skip whitespace.
+fn repl_skip_ws(s: string, pos: i64) -> i64 with Mut, Panic, Div {
+    let n = str_len(s)
+    var p: i64 = pos
+    while p < n {
+        let c = str_char_at(s, p)
+        if c == 32 || c == 9 { p = p + 1 } else { break }
+    }
+    p
+}
+
+// Parse an integer literal. Returns (value, new_pos).
+// On failure returns (0, same_pos) — caller detects by pos not advancing.
+fn repl_parse_int(s: string, pos: i64) -> (i64, i64) with Mut, Panic, Div {
+    let n = str_len(s)
+    var p: i64 = repl_skip_ws(s, pos)
+    if p >= n {
+        return (0, pos)
+    }
+    let c0 = str_char_at(s, p)
+    // Digits 48..57
+    if c0 < 48 || c0 > 57 {
+        return (0, pos)
+    }
+    var val: i64 = 0
+    while p < n {
+        let c = str_char_at(s, p)
+        if c < 48 || c > 57 { break }
+        val = val * 10 + (c - 48)
+        p = p + 1
+    }
+    (val, p)
+}
+
+// Forward declaration pattern: parse_expr and parse_term are mutually needed.
+// We implement without mutual recursion by inlining factor parsing.
+
+// Parse factor: '(' expr ')' | integer
+// Returns (value, new_pos, ok)
+fn repl_parse_factor(s: string, pos: i64) -> (i64, i64, bool) with Mut, Panic, Div {
+    let p = repl_skip_ws(s, pos)
+    let n = str_len(s)
+    if p >= n {
+        return (0, pos, false)
+    }
+    let c = str_char_at(s, p)
+    // '(' = 40
+    if c == 40 {
+        let inner_pos = repl_parse_expr_entry(s, p + 1)
+        let val = inner_pos.0
+        let after = inner_pos.1
+        let ok = inner_pos.2
+        if !ok {
+            return (0, pos, false)
+        }
+        let after2 = repl_skip_ws(s, after)
+        if after2 >= n {
+            return (0, pos, false)
+        }
+        let closing = str_char_at(s, after2)
+        // ')' = 41
+        if closing != 41 {
+            return (0, pos, false)
+        }
+        return (val, after2 + 1, true)
+    }
+    // Try integer
+    let r = repl_parse_int(s, p)
+    let v = r.0
+    let np = r.1
+    if np == p {
+        return (0, pos, false)
+    }
+    (v, np, true)
+}
+
+// Parse term: factor { ('*' | '/') factor }
+fn repl_parse_term(s: string, pos: i64) -> (i64, i64, bool) with Mut, Panic, Div {
+    let n = str_len(s)
+    let fres = repl_parse_factor(s, pos)
+    var val: i64 = fres.0
+    var p: i64 = fres.1
+    var ok: bool = fres.2
+    if !ok {
+        return (0, pos, false)
+    }
+    var running: bool = true
+    while running {
+        let p2 = repl_skip_ws(s, p)
+        if p2 >= n {
+            running = false
+        } else {
+            let c = str_char_at(s, p2)
+            // '*' = 42, '/' = 47
+            if c == 42 {
+                let rhs = repl_parse_factor(s, p2 + 1)
+                if !rhs.2 {
+                    running = false
+                } else {
+                    val = val * rhs.0
+                    p = rhs.1
+                }
+            } else if c == 47 {
+                let rhs = repl_parse_factor(s, p2 + 1)
+                if !rhs.2 {
+                    running = false
+                } else {
+                    if rhs.0 == 0 {
+                        return (0, pos, false)
+                    }
+                    val = val / rhs.0
+                    p = rhs.1
+                }
+            } else {
+                running = false
+            }
+        }
+    }
+    (val, p, true)
+}
+
+// Parse expr: term { ('+' | '-') term }
+fn repl_parse_expr(s: string, pos: i64) -> (i64, i64, bool) with Mut, Panic, Div {
+    let n = str_len(s)
+    let tres = repl_parse_term(s, pos)
+    var val: i64 = tres.0
+    var p: i64 = tres.1
+    var ok: bool = tres.2
+    if !ok {
+        return (0, pos, false)
+    }
+    var running: bool = true
+    while running {
+        let p2 = repl_skip_ws(s, p)
+        if p2 >= n {
+            running = false
+        } else {
+            let c = str_char_at(s, p2)
+            // '+' = 43, '-' = 45
+            if c == 43 {
+                let rhs = repl_parse_term(s, p2 + 1)
+                if !rhs.2 {
+                    running = false
+                } else {
+                    val = val + rhs.0
+                    p = rhs.1
+                }
+            } else if c == 45 {
+                let rhs = repl_parse_term(s, p2 + 1)
+                if !rhs.2 {
+                    running = false
+                } else {
+                    val = val - rhs.0
+                    p = rhs.1
+                }
+            } else {
+                running = false
+            }
+        }
+    }
+    (val, p, true)
+}
+
+// Entry point for recursive parser (used by repl_parse_factor for nested parens)
+fn repl_parse_expr_entry(s: string, pos: i64) -> (i64, i64, bool) with Mut, Panic, Div {
+    repl_parse_expr(s, pos)
+}
+
+// ============================================================================
+// INTEGER TO STRING
+// ============================================================================
+
+fn repl_i64_to_string(n: i64) -> string with Mut, Panic, Div {
+    var buf: [i8; 24] = [0; 24]
+    if n == 0 {
+        buf[0] = 48 as i8
+        return str_from_bytes(buf, 1)
+    }
+    var val: i64 = n
+    var neg: bool = false
+    if val < 0 {
+        neg = true
+        val = 0 - val
+    }
+    var digits: [i8; 20] = [0; 20]
+    var dcount: i64 = 0
+    while val > 0 && dcount < 20 {
+        let d = val % 10
+        digits[dcount as usize] = (48 + d) as i8
+        val = val / 10
+        dcount = dcount + 1
+    }
+    var pos: i64 = 0
+    if neg {
+        buf[0] = 45 as i8  // '-'
+        pos = 1
+    }
+    var j: i64 = dcount - 1
+    while j >= 0 {
+        buf[pos as usize] = digits[j as usize]
+        pos = pos + 1
+        j = j - 1
+    }
+    str_from_bytes(buf, pos)
+}
+
+// ============================================================================
+// EVAL EXPRESSION
+// ============================================================================
+
+fn repl_eval_expr(r: &! ReplState, input: string) -> ReplResult with Mut, Panic, Div {
+    var res = repl_result_new()
+    let triple = repl_parse_expr(input, 0)
+    let val = triple.0
+    let end_pos = triple.1
+    let ok = triple.2
+    if !ok {
+        res.ok = false
+        res.exit_code = REPL_PARSE_ERR()
+        repl_result_set_error(&! res, "parse error")
+        return res
+    }
+    // Check that all input was consumed (after whitespace)
+    let n = str_len(input)
+    let final_pos = repl_skip_ws(input, end_pos)
+    if final_pos < n {
+        res.ok = false
+        res.exit_code = REPL_PARSE_ERR()
+        repl_result_set_error(&! res, "unexpected input")
+        return res
+    }
+    let out = repl_i64_to_string(val)
+    repl_result_set_output(&! res, out)
+    res.ok = true
+    res.exit_code = REPL_OK()
+    r.last_result = res
+    r.last_result
+}
+
+// ============================================================================
+// TESTS
+// ============================================================================
+
+fn test_001_repl_new_empty_history() -> bool with Mut {
+    var r = repl_new()
+    repl_history_count(&r) == 0
+}
+
+fn test_002_repl_line_count_zero() -> bool with Mut {
+    var r = repl_new()
+    r.line_count == 0
+}
+
+fn do_add_hist(r: &! ReplState, line: string) -> () with Mut, Panic, Div {
+    repl_add_history(r, line)
+}
+
+fn test_003_add_one_history() -> bool with Mut, Panic, Div {
+    var r = repl_new()
+    do_add_hist(&! r, "let x = 1")
+    repl_history_count(&r) == 1
+}
+
+fn test_004_add_two_history() -> bool with Mut, Panic, Div {
+    var r = repl_new()
+    do_add_hist(&! r, "a")
+    do_add_hist(&! r, "b")
+    repl_history_count(&r) == 2
+}
+
+fn test_005_history_get_first() -> bool with Mut, Panic, Div {
+    var r = repl_new()
+    do_add_hist(&! r, "hello")
+    let s = repl_history_get(&r, 0)
+    repl_str_eq(s, "hello")
+}
+
+fn test_006_history_get_second() -> bool with Mut, Panic, Div {
+    var r = repl_new()
+    do_add_hist(&! r, "first")
+    do_add_hist(&! r, "second")
+    let s = repl_history_get(&r, 1)
+    repl_str_eq(s, "second")
+}
+
+fn test_007_history_last() -> bool with Mut, Panic, Div {
+    var r = repl_new()
+    do_add_hist(&! r, "x")
+    do_add_hist(&! r, "y")
+    do_add_hist(&! r, "z")
+    let s = repl_history_last(&r)
+    repl_str_eq(s, "z")
+}
+
+fn test_008_history_empty_get_returns_empty() -> bool with Mut, Panic, Div {
+    var r = repl_new()
+    let s = repl_history_get(&r, 0)
+    repl_str_eq(s, "")
+}
+
+fn test_009_history_empty_last_returns_empty() -> bool with Mut, Panic, Div {
+    var r = repl_new()
+    let s = repl_history_last(&r)
+    repl_str_eq(s, "")
+}
+
+fn test_010_history_ring_at_256() -> bool with Mut, Panic, Div {
+    var r = repl_new()
+    var i: i64 = 0
+    while i < 256 {
+        do_add_hist(&! r, "x")
+        i = i + 1
+    }
+    repl_history_count(&r) == 256
+}
+
+fn test_011_history_ring_beyond_256() -> bool with Mut, Panic, Div {
+    var r = repl_new()
+    var i: i64 = 0
+    while i < 260 {
+        do_add_hist(&! r, "x")
+        i = i + 1
+    }
+    repl_history_count(&r) == 256
+}
+
+fn test_012_line_count_increments() -> bool with Mut, Panic, Div {
+    var r = repl_new()
+    do_add_hist(&! r, "a")
+    do_add_hist(&! r, "b")
+    r.line_count == 2
+}
+
+fn test_013_result_new_ok() -> bool with Mut {
+    let res = repl_result_new()
+    res.ok
+}
+
+fn test_014_result_new_exit_code() -> bool with Mut {
+    let res = repl_result_new()
+    res.exit_code == REPL_OK()
+}
+
+fn test_015_result_set_output() -> bool with Mut, Panic, Div {
+    var res = repl_result_new()
+    repl_result_set_output(&! res, "hello")
+    res.output_len == 5
+}
+
+fn test_016_result_set_error() -> bool with Mut, Panic, Div {
+    var res = repl_result_new()
+    repl_result_set_error(&! res, "err msg")
+    res.error_len == 7
+}
+
+fn test_017_result_ok_accessor() -> bool with Mut {
+    var res = repl_result_new()
+    repl_result_ok(&res)
+}
+
+fn test_018_is_quit_colon_q() -> bool with Mut, Panic, Div {
+    repl_is_quit_cmd(":q")
+}
+
+fn test_019_is_quit_colon_quit() -> bool with Mut, Panic, Div {
+    repl_is_quit_cmd(":quit")
+}
+
+fn test_020_is_quit_exit() -> bool with Mut, Panic, Div {
+    repl_is_quit_cmd("exit")
+}
+
+fn test_021_is_quit_quit() -> bool with Mut, Panic, Div {
+    repl_is_quit_cmd("quit")
+}
+
+fn test_022_is_quit_false_for_other() -> bool with Mut, Panic, Div {
+    !repl_is_quit_cmd("hello")
+}
+
+fn test_023_is_help_cmd() -> bool with Mut, Panic, Div {
+    repl_is_help_cmd(":help")
+}
+
+fn test_024_is_help_short() -> bool with Mut, Panic, Div {
+    repl_is_help_cmd(":h")
+}
+
+fn test_025_is_help_plain() -> bool with Mut, Panic, Div {
+    repl_is_help_cmd("help")
+}
+
+fn test_026_is_history_cmd() -> bool with Mut, Panic, Div {
+    repl_is_history_cmd(":history")
+}
+
+fn test_027_is_history_short() -> bool with Mut, Panic, Div {
+    repl_is_history_cmd(":hist")
+}
+
+fn test_028_is_not_history() -> bool with Mut, Panic, Div {
+    !repl_is_history_cmd("hist")
+}
+
+fn do_eval(r: &! ReplState, expr: string) -> ReplResult with Mut, Panic, Div {
+    repl_eval_expr(r, expr)
+}
+
+fn test_029_eval_single_number() -> bool with Mut, Panic, Div {
+    var r = repl_new()
+    let res = do_eval(&! r, "5")
+    res.ok && res.exit_code == REPL_OK()
+}
+
+fn test_030_eval_addition() -> bool with Mut, Panic, Div {
+    var r = repl_new()
+    let res = do_eval(&! r, "1+2")
+    // result value 3
+    res.ok
+}
+
+fn test_031_eval_output_1_plus_2() -> bool with Mut, Panic, Div {
+    var r = repl_new()
+    let res = do_eval(&! r, "1+2")
+    let out = repl_result_output(&res)
+    repl_str_eq(out, "3")
+}
+
+fn test_032_eval_multiplication() -> bool with Mut, Panic, Div {
+    var r = repl_new()
+    let res = do_eval(&! r, "3*4")
+    let out = repl_result_output(&res)
+    repl_str_eq(out, "12")
+}
+
+fn test_033_eval_division() -> bool with Mut, Panic, Div {
+    var r = repl_new()
+    let res = do_eval(&! r, "10/2")
+    let out = repl_result_output(&res)
+    repl_str_eq(out, "5")
+}
+
+fn test_034_eval_precedence_mul_before_add() -> bool with Mut, Panic, Div {
+    var r = repl_new()
+    let res = do_eval(&! r, "2*3+1")
+    let out = repl_result_output(&res)
+    repl_str_eq(out, "7")
+}
+
+fn test_035_eval_precedence_add_then_mul() -> bool with Mut, Panic, Div {
+    var r = repl_new()
+    let res = do_eval(&! r, "1+2*3")
+    let out = repl_result_output(&res)
+    repl_str_eq(out, "7")
+}
+
+fn test_036_eval_parentheses() -> bool with Mut, Panic, Div {
+    var r = repl_new()
+    let res = do_eval(&! r, "(1+2)*3")
+    let out = repl_result_output(&res)
+    repl_str_eq(out, "9")
+}
+
+fn test_037_eval_nested_parens() -> bool with Mut, Panic, Div {
+    var r = repl_new()
+    let res = do_eval(&! r, "(2+3)*(4-1)")
+    let out = repl_result_output(&res)
+    repl_str_eq(out, "15")
+}
+
+fn test_038_eval_subtraction() -> bool with Mut, Panic, Div {
+    var r = repl_new()
+    let res = do_eval(&! r, "10-3")
+    let out = repl_result_output(&res)
+    repl_str_eq(out, "7")
+}
+
+fn test_039_eval_zero() -> bool with Mut, Panic, Div {
+    var r = repl_new()
+    let res = do_eval(&! r, "0")
+    let out = repl_result_output(&res)
+    repl_str_eq(out, "0")
+}
+
+fn test_040_eval_whitespace_handling() -> bool with Mut, Panic, Div {
+    var r = repl_new()
+    let res = do_eval(&! r, "1 + 2")
+    let out = repl_result_output(&res)
+    repl_str_eq(out, "3")
+}
+
+fn test_041_eval_div_by_zero_error() -> bool with Mut, Panic, Div {
+    var r = repl_new()
+    let res = do_eval(&! r, "5/0")
+    !res.ok
+}
+
+fn test_042_eval_parse_error_on_empty() -> bool with Mut, Panic, Div {
+    var r = repl_new()
+    let res = do_eval(&! r, "")
+    !res.ok
+}
+
+fn test_043_eval_parse_error_on_letters() -> bool with Mut, Panic, Div {
+    var r = repl_new()
+    let res = do_eval(&! r, "abc")
+    !res.ok
+}
+
+fn test_044_eval_large_number() -> bool with Mut, Panic, Div {
+    var r = repl_new()
+    let res = do_eval(&! r, "100+200")
+    let out = repl_result_output(&res)
+    repl_str_eq(out, "300")
+}
+
+fn test_045_eval_chain_ops() -> bool with Mut, Panic, Div {
+    var r = repl_new()
+    let res = do_eval(&! r, "1+2+3+4")
+    let out = repl_result_output(&res)
+    repl_str_eq(out, "10")
+}
+
+fn test_046_i64_to_string_zero() -> bool with Mut, Panic, Div {
+    let s = repl_i64_to_string(0)
+    repl_str_eq(s, "0")
+}
+
+fn test_047_i64_to_string_positive() -> bool with Mut, Panic, Div {
+    let s = repl_i64_to_string(42)
+    repl_str_eq(s, "42")
+}
+
+fn test_048_set_prompt() -> bool with Mut, Panic, Div {
+    var r = repl_new()
+    repl_set_prompt(&! r, ">>> ")
+    r.prompt_len == 4
+}
+
+fn test_049_format_prompt_line1() -> bool with Mut, Panic, Div {
+    var r = repl_new()
+    let p = repl_format_prompt(&r, 1)
+    // should contain "sounio["
+    let n = str_len(p)
+    n > 0
+}
+
+fn test_050_format_prompt_line42() -> bool with Mut, Panic, Div {
+    var r = repl_new()
+    let p = repl_format_prompt(&r, 42)
+    let n = str_len(p)
+    n > 0
+}
+
+fn test_051_constants_distinct() -> bool {
+    REPL_OK() != REPL_QUIT() && REPL_QUIT() != REPL_PARSE_ERR() && REPL_PARSE_ERR() != REPL_EVAL_ERR()
+}
+
+fn test_052_eval_10_div_2() -> bool with Mut, Panic, Div {
+    var r = repl_new()
+    let res = do_eval(&! r, "10/2")
+    let out = repl_result_output(&res)
+    repl_str_eq(out, "5")
+}
+
+fn test_053_eval_paren_deep() -> bool with Mut, Panic, Div {
+    var r = repl_new()
+    let res = do_eval(&! r, "((4))")
+    let out = repl_result_output(&res)
+    repl_str_eq(out, "4")
+}
+
+fn test_054_eval_mul_chain() -> bool with Mut, Panic, Div {
+    var r = repl_new()
+    let res = do_eval(&! r, "2*3*4")
+    let out = repl_result_output(&res)
+    repl_str_eq(out, "24")
+}
+
+fn test_055_history_get_out_of_bounds() -> bool with Mut, Panic, Div {
+    var r = repl_new()
+    let s = repl_history_get(&r, 99)
+    repl_str_eq(s, "")
+}
+
+fn test_056_history_add_then_clear_check() -> bool with Mut, Panic, Div {
+    var r = repl_new()
+    do_add_hist(&! r, "line1")
+    do_add_hist(&! r, "line2")
+    do_add_hist(&! r, "line3")
+    repl_history_count(&r) == 3
+}
+
+fn test_057_result_output_empty_at_start() -> bool with Mut, Panic {
+    let res = repl_result_new()
+    res.output_len == 0
+}
+
+fn test_058_result_error_empty_at_start() -> bool with Mut {
+    let res = repl_result_new()
+    res.error_len == 0
+}
+
+fn test_059_eval_sub_chain() -> bool with Mut, Panic, Div {
+    var r = repl_new()
+    let res = do_eval(&! r, "10-3-2")
+    let out = repl_result_output(&res)
+    repl_str_eq(out, "5")
+}
+
+fn test_060_eval_complex_precedence() -> bool with Mut, Panic, Div {
+    var r = repl_new()
+    let res = do_eval(&! r, "2+3*4-1")
+    let out = repl_result_output(&res)
+    repl_str_eq(out, "13")
+}
+
+fn test_061_is_quit_false_for_q() -> bool with Mut, Panic, Div {
+    !repl_is_quit_cmd("q")
+}
+
+fn test_062_is_help_false_for_other() -> bool with Mut, Panic, Div {
+    !repl_is_help_cmd("quit")
+}
+
+fn test_063_repl_max_history_const() -> bool {
+    REPL_MAX_HISTORY() == 256
+}
+
+fn test_064_repl_char_storage_const() -> bool {
+    REPL_CHAR_STORAGE() == 16384
+}
+
+fn test_065_add_256_distinct_entries() -> bool with Mut, Panic, Div {
+    var r = repl_new()
+    var i: i64 = 0
+    while i < 50 {
+        do_add_hist(&! r, "entry")
+        i = i + 1
+    }
+    repl_history_count(&r) == 50
+}
+
+fn test_066_eval_no_error_exit_code() -> bool with Mut, Panic, Div {
+    var r = repl_new()
+    let res = do_eval(&! r, "7")
+    res.exit_code == REPL_OK()
+}
+
+fn test_067_eval_error_exit_code() -> bool with Mut, Panic, Div {
+    var r = repl_new()
+    let res = do_eval(&! r, "abc")
+    res.exit_code == REPL_PARSE_ERR()
+}
+
+fn test_068_str_eq_empty() -> bool with Mut, Panic, Div {
+    repl_str_eq("", "")
+}
+
+fn test_069_str_eq_mismatch() -> bool with Mut, Panic, Div {
+    !repl_str_eq("a", "b")
+}

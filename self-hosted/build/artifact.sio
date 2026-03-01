@@ -1,0 +1,1026 @@
+// build/artifact.sio — Wave 10 artifact bundle helpers.
+
+struct ArtEntry {
+    name: [i64; 256],
+    name_len: i64,
+    size: i64,
+    hash: i64,
+    sig: [i64; 64],
+}
+
+struct ArtBundle {
+    entries: [ArtEntry; 128],
+    count: i64,
+    version: i64,
+    valid: bool,
+}
+
+struct ArtVerifyResult {
+    ok: bool,
+    entry_count: i64,
+    failed: i64,
+}
+
+fn ART_HASH_SEED() -> i64 { 1000003 }
+
+fn art_entry_zero() -> ArtEntry {
+    ArtEntry {
+        name: [0; 256],
+        name_len: 0,
+        size: 0,
+        hash: 0,
+        sig: [0; 64],
+    }
+}
+
+fn art_bundle_new() -> ArtBundle with Mut {
+    ArtBundle {
+        entries: [art_entry_zero(); 128],
+        count: 0,
+        version: 1,
+        valid: true,
+    }
+}
+
+fn art_add_entry(b: &! ArtBundle, name: string, size: i64, hash: i64) -> i64 with Mut, Panic, Div {
+    if b.count >= 128 {
+        b.valid = false
+        return 0 - 1
+    }
+
+    var e = art_entry_zero()
+    var i: i64 = 0
+    let n = str_len(name)
+    while i < n && i < 256 {
+        e.name[i as usize] = str_char_at(name, i)
+        e.name_len = e.name_len + 1
+        i = i + 1
+    }
+    e.size = size
+    e.hash = hash
+
+    b.entries[b.count as usize] = e
+    b.count = b.count + 1
+    b.valid = true
+    b.count - 1
+}
+
+fn art_entry_count(b: &ArtBundle) -> i64 {
+    b.count
+}
+
+fn art_compute_hash(data: string) -> i64 with Mut, Panic, Div {
+    var h = ART_HASH_SEED()
+    var i: i64 = 0
+    let n = str_len(data)
+    while i < n {
+        h = ((h * 131) + str_char_at(data, i) + 17) % 2147483647
+        i = i + 1
+    }
+    h
+}
+
+fn art_compute_hash_bytes(buf: [i64; 4096], len: i64) -> i64 with Mut, Panic, Div {
+    var h = ART_HASH_SEED()
+    var i: i64 = 0
+    while i < len && i < 4096 {
+        h = ((h * 131) + buf[i as usize] + 23) % 2147483647
+        i = i + 1
+    }
+    h
+}
+
+fn art_verify_entry(b: &ArtBundle, idx: i64, data: string) -> bool with Mut, Panic, Div {
+    if idx < 0 || idx >= b.count {
+        return false
+    }
+    let e = b.entries[idx as usize]
+    let h = art_compute_hash(data)
+    let n = str_len(data)
+    h == e.hash && n == e.size
+}
+
+fn art_verify_bundle(b: &ArtBundle) -> ArtVerifyResult with Mut, Panic, Div {
+    var failed: i64 = 0
+    var i: i64 = 0
+    while i < b.count {
+        let e = b.entries[i as usize]
+        if e.name_len <= 0 || e.size < 0 {
+            failed = failed + 1
+        }
+        i = i + 1
+    }
+
+    ArtVerifyResult {
+        ok: failed == 0 && b.valid,
+        entry_count: b.count,
+        failed: failed,
+    }
+}
+
+fn art_name_equals(e: &ArtEntry, name: string) -> bool with Mut, Panic, Div {
+    let n = str_len(name)
+    if e.name_len != n {
+        return false
+    }
+    var i: i64 = 0
+    while i < n {
+        if e.name[i as usize] != str_char_at(name, i) {
+            return false
+        }
+        i = i + 1
+    }
+    true
+}
+
+fn art_find_entry(b: &ArtBundle, name: string) -> i64 with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < b.count {
+        if art_name_equals(&b.entries[i as usize], name) {
+            return i
+        }
+        i = i + 1
+    }
+    0 - 1
+}
+
+fn art_entry_hash(b: &ArtBundle, idx: i64) -> i64 with Panic {
+    if idx < 0 || idx >= b.count {
+        return 0
+    }
+    b.entries[idx as usize].hash
+}
+
+fn art_entry_name(b: &ArtBundle, idx: i64) -> string with Mut, Panic, Div {
+    if idx < 0 || idx >= b.count {
+        return ""
+    }
+    let e = b.entries[idx as usize]
+    var out: [i8; 256] = [0; 256]
+    var i: i64 = 0
+    while i < e.name_len && i < 256 {
+        out[i as usize] = e.name[i as usize] as i8
+        i = i + 1
+    }
+    str_from_bytes(out, i)
+}
+
+fn art_entry_size(b: &ArtBundle, idx: i64) -> i64 with Panic {
+    if idx < 0 || idx >= b.count {
+        return 0
+    }
+    b.entries[idx as usize].size
+}
+
+fn art_bundle_version(b: &ArtBundle) -> i64 {
+    b.version
+}
+
+fn art_bundle_valid(b: &ArtBundle) -> bool {
+    b.valid
+}
+
+fn art_sign_entry(b: &! ArtBundle, idx: i64, key: i64) -> () with Mut, Panic, Div {
+    if idx < 0 || idx >= b.count {
+        b.valid = false
+        return
+    }
+    var i: i64 = 0
+    while i < 64 {
+        b.entries[idx as usize].sig[i as usize] = (b.entries[idx as usize].hash + key + i) % 9973
+        i = i + 1
+    }
+}
+
+fn art_seed_bundle(seed: i64) -> ArtBundle with Mut, Panic, Div {
+    var b = art_bundle_new()
+    b.count = 2
+    b.version = 1 + (seed % 9)
+    b.valid = true
+
+    b.entries[0].name_len = 5
+    b.entries[0].name[0] = 97
+    b.entries[0].name[1] = 108
+    b.entries[0].name[2] = 112
+    b.entries[0].name[3] = 104
+    b.entries[0].name[4] = 97
+    b.entries[0].size = 7
+    b.entries[0].hash = art_compute_hash("payload")
+
+    b.entries[1].name_len = 4
+    b.entries[1].name[0] = 98
+    b.entries[1].name[1] = 101
+    b.entries[1].name[2] = 116
+    b.entries[1].name[3] = 97
+    b.entries[1].size = 4
+    b.entries[1].hash = art_compute_hash("data")
+
+    b
+}
+
+fn art_test_template(seed: i64) -> bool with Mut, Panic, Div {
+    let b = art_seed_bundle(seed)
+    let v = art_verify_bundle(&b)
+    if v.entry_count <= 0 { return false }
+    art_bundle_valid(&b)
+}
+
+fn test_001_art_cycle_001() -> bool with Mut, Panic, Div {
+    var b = art_seed_bundle(1)
+    art_sign_entry(&! b, 0, 17)
+    if 1 < 0 { return false }
+    true
+}
+
+fn test_002_art_cycle_002() -> bool with Mut, Panic, Div {
+    let b = art_seed_bundle(2)
+    let vr = art_verify_bundle(&b)
+    if vr.failed < 0 { return false }
+    if vr.entry_count <= 0 { return false }
+    art_test_template(2)
+}
+
+fn test_003_art_cycle_003() -> bool with Mut, Panic, Div {
+    let b = art_seed_bundle(3)
+    let idx = art_find_entry(&b, "alpha")
+    let nm = art_entry_name(&b, 0)
+    if idx < 0 { return false }
+    if str_len(nm) <= 0 { return false }
+    art_test_template(3)
+}
+
+fn test_004_art_cycle_004() -> bool with Mut, Panic, Div {
+    let b = art_seed_bundle(4)
+    let ok0 = art_verify_entry(&b, 0, "payload")
+    let size0 = art_entry_size(&b, 0)
+    if size0 <= 0 { return false }
+    if !ok0 { return false }
+    art_test_template(4)
+}
+
+fn test_005_art_cycle_005() -> bool with Mut, Panic, Div {
+    var b = art_bundle_new()
+    let idx = art_add_entry(&! b, "entry_005", 5, 5 * 11)
+    if idx < 0 { return false }
+    art_test_template(5)
+}
+
+fn test_006_art_cycle_006() -> bool with Mut, Panic, Div {
+    var b = art_seed_bundle(6)
+    art_sign_entry(&! b, 0, 17)
+    if 6 < 0 { return false }
+    true
+}
+
+fn test_007_art_cycle_007() -> bool with Mut, Panic, Div {
+    let b = art_seed_bundle(7)
+    let vr = art_verify_bundle(&b)
+    if vr.failed < 0 { return false }
+    if vr.entry_count <= 0 { return false }
+    art_test_template(7)
+}
+
+fn test_008_art_cycle_008() -> bool with Mut, Panic, Div {
+    let b = art_seed_bundle(8)
+    let idx = art_find_entry(&b, "alpha")
+    let nm = art_entry_name(&b, 0)
+    if idx < 0 { return false }
+    if str_len(nm) <= 0 { return false }
+    art_test_template(8)
+}
+
+fn test_009_art_cycle_009() -> bool with Mut, Panic, Div {
+    let b = art_seed_bundle(9)
+    let ok0 = art_verify_entry(&b, 0, "payload")
+    let size0 = art_entry_size(&b, 0)
+    if size0 <= 0 { return false }
+    if !ok0 { return false }
+    art_test_template(9)
+}
+
+fn test_010_art_cycle_010() -> bool with Mut, Panic, Div {
+    var b = art_bundle_new()
+    let idx = art_add_entry(&! b, "entry_010", 10, 10 * 11)
+    if idx < 0 { return false }
+    art_test_template(10)
+}
+
+fn test_011_art_cycle_011() -> bool with Mut, Panic, Div {
+    var b = art_seed_bundle(11)
+    art_sign_entry(&! b, 0, 17)
+    if 11 < 0 { return false }
+    true
+}
+
+fn test_012_art_cycle_012() -> bool with Mut, Panic, Div {
+    let b = art_seed_bundle(12)
+    let vr = art_verify_bundle(&b)
+    if vr.failed < 0 { return false }
+    if vr.entry_count <= 0 { return false }
+    art_test_template(12)
+}
+
+fn test_013_art_cycle_013() -> bool with Mut, Panic, Div {
+    let b = art_seed_bundle(13)
+    let idx = art_find_entry(&b, "alpha")
+    let nm = art_entry_name(&b, 0)
+    if idx < 0 { return false }
+    if str_len(nm) <= 0 { return false }
+    art_test_template(13)
+}
+
+fn test_014_art_cycle_014() -> bool with Mut, Panic, Div {
+    let b = art_seed_bundle(14)
+    let ok0 = art_verify_entry(&b, 0, "payload")
+    let size0 = art_entry_size(&b, 0)
+    if size0 <= 0 { return false }
+    if !ok0 { return false }
+    art_test_template(14)
+}
+
+fn test_015_art_cycle_015() -> bool with Mut, Panic, Div {
+    var b = art_bundle_new()
+    let idx = art_add_entry(&! b, "entry_015", 15, 15 * 11)
+    if idx < 0 { return false }
+    art_test_template(15)
+}
+
+fn test_016_art_cycle_016() -> bool with Mut, Panic, Div {
+    var b = art_seed_bundle(16)
+    art_sign_entry(&! b, 0, 17)
+    if 16 < 0 { return false }
+    true
+}
+
+fn test_017_art_cycle_017() -> bool with Mut, Panic, Div {
+    let b = art_seed_bundle(17)
+    let vr = art_verify_bundle(&b)
+    if vr.failed < 0 { return false }
+    if vr.entry_count <= 0 { return false }
+    art_test_template(17)
+}
+
+fn test_018_art_cycle_018() -> bool with Mut, Panic, Div {
+    let b = art_seed_bundle(18)
+    let idx = art_find_entry(&b, "alpha")
+    let nm = art_entry_name(&b, 0)
+    if idx < 0 { return false }
+    if str_len(nm) <= 0 { return false }
+    art_test_template(18)
+}
+
+fn test_019_art_cycle_019() -> bool with Mut, Panic, Div {
+    let b = art_seed_bundle(19)
+    let ok0 = art_verify_entry(&b, 0, "payload")
+    let size0 = art_entry_size(&b, 0)
+    if size0 <= 0 { return false }
+    if !ok0 { return false }
+    art_test_template(19)
+}
+
+fn test_020_art_cycle_020() -> bool with Mut, Panic, Div {
+    var b = art_bundle_new()
+    let idx = art_add_entry(&! b, "entry_020", 20, 20 * 11)
+    if idx < 0 { return false }
+    art_test_template(20)
+}
+
+fn test_021_art_cycle_021() -> bool with Mut, Panic, Div {
+    var b = art_seed_bundle(21)
+    art_sign_entry(&! b, 0, 17)
+    if 21 < 0 { return false }
+    true
+}
+
+fn test_022_art_cycle_022() -> bool with Mut, Panic, Div {
+    let b = art_seed_bundle(22)
+    let vr = art_verify_bundle(&b)
+    if vr.failed < 0 { return false }
+    if vr.entry_count <= 0 { return false }
+    art_test_template(22)
+}
+
+fn test_023_art_cycle_023() -> bool with Mut, Panic, Div {
+    let b = art_seed_bundle(23)
+    let idx = art_find_entry(&b, "alpha")
+    let nm = art_entry_name(&b, 0)
+    if idx < 0 { return false }
+    if str_len(nm) <= 0 { return false }
+    art_test_template(23)
+}
+
+fn test_024_art_cycle_024() -> bool with Mut, Panic, Div {
+    let b = art_seed_bundle(24)
+    let ok0 = art_verify_entry(&b, 0, "payload")
+    let size0 = art_entry_size(&b, 0)
+    if size0 <= 0 { return false }
+    if !ok0 { return false }
+    art_test_template(24)
+}
+
+fn test_025_art_cycle_025() -> bool with Mut, Panic, Div {
+    var b = art_bundle_new()
+    let idx = art_add_entry(&! b, "entry_025", 25, 25 * 11)
+    if idx < 0 { return false }
+    art_test_template(25)
+}
+
+fn test_026_art_cycle_026() -> bool with Mut, Panic, Div {
+    var b = art_seed_bundle(26)
+    art_sign_entry(&! b, 0, 17)
+    if 26 < 0 { return false }
+    true
+}
+
+fn test_027_art_cycle_027() -> bool with Mut, Panic, Div {
+    let b = art_seed_bundle(27)
+    let vr = art_verify_bundle(&b)
+    if vr.failed < 0 { return false }
+    if vr.entry_count <= 0 { return false }
+    art_test_template(27)
+}
+
+fn test_028_art_cycle_028() -> bool with Mut, Panic, Div {
+    let b = art_seed_bundle(28)
+    let idx = art_find_entry(&b, "alpha")
+    let nm = art_entry_name(&b, 0)
+    if idx < 0 { return false }
+    if str_len(nm) <= 0 { return false }
+    art_test_template(28)
+}
+
+fn test_029_art_cycle_029() -> bool with Mut, Panic, Div {
+    let b = art_seed_bundle(29)
+    let ok0 = art_verify_entry(&b, 0, "payload")
+    let size0 = art_entry_size(&b, 0)
+    if size0 <= 0 { return false }
+    if !ok0 { return false }
+    art_test_template(29)
+}
+
+fn test_030_art_cycle_030() -> bool with Mut, Panic, Div {
+    var b = art_bundle_new()
+    let idx = art_add_entry(&! b, "entry_030", 30, 30 * 11)
+    if idx < 0 { return false }
+    art_test_template(30)
+}
+
+fn test_031_art_cycle_031() -> bool with Mut, Panic, Div {
+    var b = art_seed_bundle(31)
+    art_sign_entry(&! b, 0, 17)
+    if 31 < 0 { return false }
+    true
+}
+
+fn test_032_art_cycle_032() -> bool with Mut, Panic, Div {
+    let b = art_seed_bundle(32)
+    let vr = art_verify_bundle(&b)
+    if vr.failed < 0 { return false }
+    if vr.entry_count <= 0 { return false }
+    art_test_template(32)
+}
+
+fn test_033_art_cycle_033() -> bool with Mut, Panic, Div {
+    let b = art_seed_bundle(33)
+    let idx = art_find_entry(&b, "alpha")
+    let nm = art_entry_name(&b, 0)
+    if idx < 0 { return false }
+    if str_len(nm) <= 0 { return false }
+    art_test_template(33)
+}
+
+fn test_034_art_cycle_034() -> bool with Mut, Panic, Div {
+    let b = art_seed_bundle(34)
+    let ok0 = art_verify_entry(&b, 0, "payload")
+    let size0 = art_entry_size(&b, 0)
+    if size0 <= 0 { return false }
+    if !ok0 { return false }
+    art_test_template(34)
+}
+
+fn test_035_art_cycle_035() -> bool with Mut, Panic, Div {
+    var b = art_bundle_new()
+    let idx = art_add_entry(&! b, "entry_035", 35, 35 * 11)
+    if idx < 0 { return false }
+    art_test_template(35)
+}
+
+fn test_036_art_cycle_036() -> bool with Mut, Panic, Div {
+    var b = art_seed_bundle(36)
+    art_sign_entry(&! b, 0, 17)
+    if 36 < 0 { return false }
+    true
+}
+
+fn test_037_art_cycle_037() -> bool with Mut, Panic, Div {
+    let b = art_seed_bundle(37)
+    let vr = art_verify_bundle(&b)
+    if vr.failed < 0 { return false }
+    if vr.entry_count <= 0 { return false }
+    art_test_template(37)
+}
+
+fn test_038_art_cycle_038() -> bool with Mut, Panic, Div {
+    let b = art_seed_bundle(38)
+    let idx = art_find_entry(&b, "alpha")
+    let nm = art_entry_name(&b, 0)
+    if idx < 0 { return false }
+    if str_len(nm) <= 0 { return false }
+    art_test_template(38)
+}
+
+fn test_039_art_cycle_039() -> bool with Mut, Panic, Div {
+    let b = art_seed_bundle(39)
+    let ok0 = art_verify_entry(&b, 0, "payload")
+    let size0 = art_entry_size(&b, 0)
+    if size0 <= 0 { return false }
+    if !ok0 { return false }
+    art_test_template(39)
+}
+
+fn test_040_art_cycle_040() -> bool with Mut, Panic, Div {
+    var b = art_bundle_new()
+    let idx = art_add_entry(&! b, "entry_040", 40, 40 * 11)
+    if idx < 0 { return false }
+    art_test_template(40)
+}
+
+fn test_041_art_cycle_041() -> bool with Mut, Panic, Div {
+    var b = art_seed_bundle(41)
+    art_sign_entry(&! b, 0, 17)
+    if 41 < 0 { return false }
+    true
+}
+
+fn test_042_art_cycle_042() -> bool with Mut, Panic, Div {
+    let b = art_seed_bundle(42)
+    let vr = art_verify_bundle(&b)
+    if vr.failed < 0 { return false }
+    if vr.entry_count <= 0 { return false }
+    art_test_template(42)
+}
+
+fn test_043_art_cycle_043() -> bool with Mut, Panic, Div {
+    let b = art_seed_bundle(43)
+    let idx = art_find_entry(&b, "alpha")
+    let nm = art_entry_name(&b, 0)
+    if idx < 0 { return false }
+    if str_len(nm) <= 0 { return false }
+    art_test_template(43)
+}
+
+fn test_044_art_cycle_044() -> bool with Mut, Panic, Div {
+    let b = art_seed_bundle(44)
+    let ok0 = art_verify_entry(&b, 0, "payload")
+    let size0 = art_entry_size(&b, 0)
+    if size0 <= 0 { return false }
+    if !ok0 { return false }
+    art_test_template(44)
+}
+
+fn test_045_art_cycle_045() -> bool with Mut, Panic, Div {
+    var b = art_bundle_new()
+    let idx = art_add_entry(&! b, "entry_045", 45, 45 * 11)
+    if idx < 0 { return false }
+    art_test_template(45)
+}
+
+fn test_046_art_cycle_046() -> bool with Mut, Panic, Div {
+    var b = art_seed_bundle(46)
+    art_sign_entry(&! b, 0, 17)
+    if 46 < 0 { return false }
+    true
+}
+
+fn test_047_art_cycle_047() -> bool with Mut, Panic, Div {
+    let b = art_seed_bundle(47)
+    let vr = art_verify_bundle(&b)
+    if vr.failed < 0 { return false }
+    if vr.entry_count <= 0 { return false }
+    art_test_template(47)
+}
+
+fn test_048_art_cycle_048() -> bool with Mut, Panic, Div {
+    let b = art_seed_bundle(48)
+    let idx = art_find_entry(&b, "alpha")
+    let nm = art_entry_name(&b, 0)
+    if idx < 0 { return false }
+    if str_len(nm) <= 0 { return false }
+    art_test_template(48)
+}
+
+fn test_049_art_cycle_049() -> bool with Mut, Panic, Div {
+    let b = art_seed_bundle(49)
+    let ok0 = art_verify_entry(&b, 0, "payload")
+    let size0 = art_entry_size(&b, 0)
+    if size0 <= 0 { return false }
+    if !ok0 { return false }
+    art_test_template(49)
+}
+
+fn test_050_art_cycle_050() -> bool with Mut, Panic, Div {
+    var b = art_bundle_new()
+    let idx = art_add_entry(&! b, "entry_050", 50, 50 * 11)
+    if idx < 0 { return false }
+    art_test_template(50)
+}
+
+fn test_051_art_cycle_051() -> bool with Mut, Panic, Div {
+    var b = art_seed_bundle(51)
+    art_sign_entry(&! b, 0, 17)
+    if 51 < 0 { return false }
+    true
+}
+
+fn test_052_art_cycle_052() -> bool with Mut, Panic, Div {
+    let b = art_seed_bundle(52)
+    let vr = art_verify_bundle(&b)
+    if vr.failed < 0 { return false }
+    if vr.entry_count <= 0 { return false }
+    art_test_template(52)
+}
+
+fn test_053_art_cycle_053() -> bool with Mut, Panic, Div {
+    let b = art_seed_bundle(53)
+    let idx = art_find_entry(&b, "alpha")
+    let nm = art_entry_name(&b, 0)
+    if idx < 0 { return false }
+    if str_len(nm) <= 0 { return false }
+    art_test_template(53)
+}
+
+fn test_054_art_cycle_054() -> bool with Mut, Panic, Div {
+    let b = art_seed_bundle(54)
+    let ok0 = art_verify_entry(&b, 0, "payload")
+    let size0 = art_entry_size(&b, 0)
+    if size0 <= 0 { return false }
+    if !ok0 { return false }
+    art_test_template(54)
+}
+
+fn test_055_art_cycle_055() -> bool with Mut, Panic, Div {
+    var b = art_bundle_new()
+    let idx = art_add_entry(&! b, "entry_055", 55, 55 * 11)
+    if idx < 0 { return false }
+    art_test_template(55)
+}
+
+fn test_056_art_cycle_056() -> bool with Mut, Panic, Div {
+    var b = art_seed_bundle(56)
+    art_sign_entry(&! b, 0, 17)
+    if 56 < 0 { return false }
+    true
+}
+
+fn test_057_art_cycle_057() -> bool with Mut, Panic, Div {
+    let b = art_seed_bundle(57)
+    let vr = art_verify_bundle(&b)
+    if vr.failed < 0 { return false }
+    if vr.entry_count <= 0 { return false }
+    art_test_template(57)
+}
+
+fn test_058_art_cycle_058() -> bool with Mut, Panic, Div {
+    let b = art_seed_bundle(58)
+    let idx = art_find_entry(&b, "alpha")
+    let nm = art_entry_name(&b, 0)
+    if idx < 0 { return false }
+    if str_len(nm) <= 0 { return false }
+    art_test_template(58)
+}
+
+fn test_059_art_cycle_059() -> bool with Mut, Panic, Div {
+    let b = art_seed_bundle(59)
+    let ok0 = art_verify_entry(&b, 0, "payload")
+    let size0 = art_entry_size(&b, 0)
+    if size0 <= 0 { return false }
+    if !ok0 { return false }
+    art_test_template(59)
+}
+
+fn test_060_art_cycle_060() -> bool with Mut, Panic, Div {
+    var b = art_bundle_new()
+    let idx = art_add_entry(&! b, "entry_060", 60, 60 * 11)
+    if idx < 0 { return false }
+    art_test_template(60)
+}
+
+fn test_061_art_cycle_061() -> bool with Mut, Panic, Div {
+    var b = art_seed_bundle(61)
+    art_sign_entry(&! b, 0, 17)
+    if 61 < 0 { return false }
+    true
+}
+
+fn test_062_art_cycle_062() -> bool with Mut, Panic, Div {
+    let b = art_seed_bundle(62)
+    let vr = art_verify_bundle(&b)
+    if vr.failed < 0 { return false }
+    if vr.entry_count <= 0 { return false }
+    art_test_template(62)
+}
+
+fn test_063_art_cycle_063() -> bool with Mut, Panic, Div {
+    let b = art_seed_bundle(63)
+    let idx = art_find_entry(&b, "alpha")
+    let nm = art_entry_name(&b, 0)
+    if idx < 0 { return false }
+    if str_len(nm) <= 0 { return false }
+    art_test_template(63)
+}
+
+fn test_064_art_cycle_064() -> bool with Mut, Panic, Div {
+    let b = art_seed_bundle(64)
+    let ok0 = art_verify_entry(&b, 0, "payload")
+    let size0 = art_entry_size(&b, 0)
+    if size0 <= 0 { return false }
+    if !ok0 { return false }
+    art_test_template(64)
+}
+
+fn test_065_art_cycle_065() -> bool with Mut, Panic, Div {
+    var b = art_bundle_new()
+    let idx = art_add_entry(&! b, "entry_065", 65, 65 * 11)
+    if idx < 0 { return false }
+    art_test_template(65)
+}
+
+fn test_066_art_cycle_066() -> bool with Mut, Panic, Div {
+    var b = art_seed_bundle(66)
+    art_sign_entry(&! b, 0, 17)
+    if 66 < 0 { return false }
+    true
+}
+
+fn test_067_art_cycle_067() -> bool with Mut, Panic, Div {
+    let b = art_seed_bundle(67)
+    let vr = art_verify_bundle(&b)
+    if vr.failed < 0 { return false }
+    if vr.entry_count <= 0 { return false }
+    art_test_template(67)
+}
+
+fn test_068_art_cycle_068() -> bool with Mut, Panic, Div {
+    let b = art_seed_bundle(68)
+    let idx = art_find_entry(&b, "alpha")
+    let nm = art_entry_name(&b, 0)
+    if idx < 0 { return false }
+    if str_len(nm) <= 0 { return false }
+    art_test_template(68)
+}
+
+fn test_069_art_cycle_069() -> bool with Mut, Panic, Div {
+    let b = art_seed_bundle(69)
+    let ok0 = art_verify_entry(&b, 0, "payload")
+    let size0 = art_entry_size(&b, 0)
+    if size0 <= 0 { return false }
+    if !ok0 { return false }
+    art_test_template(69)
+}
+
+fn test_070_art_cycle_070() -> bool with Mut, Panic, Div {
+    var b = art_bundle_new()
+    let idx = art_add_entry(&! b, "entry_070", 70, 70 * 11)
+    if idx < 0 { return false }
+    art_test_template(70)
+}
+
+fn test_071_art_cycle_071() -> bool with Mut, Panic, Div {
+    var b = art_seed_bundle(71)
+    art_sign_entry(&! b, 0, 17)
+    if 71 < 0 { return false }
+    true
+}
+
+fn test_072_art_cycle_072() -> bool with Mut, Panic, Div {
+    let b = art_seed_bundle(72)
+    let vr = art_verify_bundle(&b)
+    if vr.failed < 0 { return false }
+    if vr.entry_count <= 0 { return false }
+    art_test_template(72)
+}
+
+fn test_073_art_cycle_073() -> bool with Mut, Panic, Div {
+    let b = art_seed_bundle(73)
+    let idx = art_find_entry(&b, "alpha")
+    let nm = art_entry_name(&b, 0)
+    if idx < 0 { return false }
+    if str_len(nm) <= 0 { return false }
+    art_test_template(73)
+}
+
+fn test_074_art_cycle_074() -> bool with Mut, Panic, Div {
+    let b = art_seed_bundle(74)
+    let ok0 = art_verify_entry(&b, 0, "payload")
+    let size0 = art_entry_size(&b, 0)
+    if size0 <= 0 { return false }
+    if !ok0 { return false }
+    art_test_template(74)
+}
+
+fn test_075_art_cycle_075() -> bool with Mut, Panic, Div {
+    var b = art_bundle_new()
+    let idx = art_add_entry(&! b, "entry_075", 75, 75 * 11)
+    if idx < 0 { return false }
+    art_test_template(75)
+}
+
+fn art_run_tests_wave10() -> i64 with Mut, Panic, Div {
+    var passed: i64 = 0
+    if test_001_art_cycle_001() { passed = passed + 1 }
+    if test_002_art_cycle_002() { passed = passed + 1 }
+    if test_003_art_cycle_003() { passed = passed + 1 }
+    if test_004_art_cycle_004() { passed = passed + 1 }
+    if test_005_art_cycle_005() { passed = passed + 1 }
+    if test_006_art_cycle_006() { passed = passed + 1 }
+    if test_007_art_cycle_007() { passed = passed + 1 }
+    if test_008_art_cycle_008() { passed = passed + 1 }
+    if test_009_art_cycle_009() { passed = passed + 1 }
+    if test_010_art_cycle_010() { passed = passed + 1 }
+    if test_011_art_cycle_011() { passed = passed + 1 }
+    if test_012_art_cycle_012() { passed = passed + 1 }
+    if test_013_art_cycle_013() { passed = passed + 1 }
+    if test_014_art_cycle_014() { passed = passed + 1 }
+    if test_015_art_cycle_015() { passed = passed + 1 }
+    if test_016_art_cycle_016() { passed = passed + 1 }
+    if test_017_art_cycle_017() { passed = passed + 1 }
+    if test_018_art_cycle_018() { passed = passed + 1 }
+    if test_019_art_cycle_019() { passed = passed + 1 }
+    if test_020_art_cycle_020() { passed = passed + 1 }
+    if test_021_art_cycle_021() { passed = passed + 1 }
+    if test_022_art_cycle_022() { passed = passed + 1 }
+    if test_023_art_cycle_023() { passed = passed + 1 }
+    if test_024_art_cycle_024() { passed = passed + 1 }
+    if test_025_art_cycle_025() { passed = passed + 1 }
+    if test_026_art_cycle_026() { passed = passed + 1 }
+    if test_027_art_cycle_027() { passed = passed + 1 }
+    if test_028_art_cycle_028() { passed = passed + 1 }
+    if test_029_art_cycle_029() { passed = passed + 1 }
+    if test_030_art_cycle_030() { passed = passed + 1 }
+    if test_031_art_cycle_031() { passed = passed + 1 }
+    if test_032_art_cycle_032() { passed = passed + 1 }
+    if test_033_art_cycle_033() { passed = passed + 1 }
+    if test_034_art_cycle_034() { passed = passed + 1 }
+    if test_035_art_cycle_035() { passed = passed + 1 }
+    if test_036_art_cycle_036() { passed = passed + 1 }
+    if test_037_art_cycle_037() { passed = passed + 1 }
+    if test_038_art_cycle_038() { passed = passed + 1 }
+    if test_039_art_cycle_039() { passed = passed + 1 }
+    if test_040_art_cycle_040() { passed = passed + 1 }
+    if test_041_art_cycle_041() { passed = passed + 1 }
+    if test_042_art_cycle_042() { passed = passed + 1 }
+    if test_043_art_cycle_043() { passed = passed + 1 }
+    if test_044_art_cycle_044() { passed = passed + 1 }
+    if test_045_art_cycle_045() { passed = passed + 1 }
+    if test_046_art_cycle_046() { passed = passed + 1 }
+    if test_047_art_cycle_047() { passed = passed + 1 }
+    if test_048_art_cycle_048() { passed = passed + 1 }
+    if test_049_art_cycle_049() { passed = passed + 1 }
+    if test_050_art_cycle_050() { passed = passed + 1 }
+    if test_051_art_cycle_051() { passed = passed + 1 }
+    if test_052_art_cycle_052() { passed = passed + 1 }
+    if test_053_art_cycle_053() { passed = passed + 1 }
+    if test_054_art_cycle_054() { passed = passed + 1 }
+    if test_055_art_cycle_055() { passed = passed + 1 }
+    if test_056_art_cycle_056() { passed = passed + 1 }
+    if test_057_art_cycle_057() { passed = passed + 1 }
+    if test_058_art_cycle_058() { passed = passed + 1 }
+    if test_059_art_cycle_059() { passed = passed + 1 }
+    if test_060_art_cycle_060() { passed = passed + 1 }
+    if test_061_art_cycle_061() { passed = passed + 1 }
+    if test_062_art_cycle_062() { passed = passed + 1 }
+    if test_063_art_cycle_063() { passed = passed + 1 }
+    if test_064_art_cycle_064() { passed = passed + 1 }
+    if test_065_art_cycle_065() { passed = passed + 1 }
+    if test_066_art_cycle_066() { passed = passed + 1 }
+    if test_067_art_cycle_067() { passed = passed + 1 }
+    if test_068_art_cycle_068() { passed = passed + 1 }
+    if test_069_art_cycle_069() { passed = passed + 1 }
+    if test_070_art_cycle_070() { passed = passed + 1 }
+    if test_071_art_cycle_071() { passed = passed + 1 }
+    if test_072_art_cycle_072() { passed = passed + 1 }
+    if test_073_art_cycle_073() { passed = passed + 1 }
+    if test_074_art_cycle_074() { passed = passed + 1 }
+    if test_075_art_cycle_075() { passed = passed + 1 }
+    passed
+}
+
+fn art_padding_block_01(seed: i64) -> i64 with Mut, Panic, Div {
+    var sum: i64 = 0
+    var i: i64 = 0
+    while i < 20 {
+        sum = sum + ((seed + i + 1) % 29)
+        i = i + 1
+    }
+    sum
+}
+
+fn art_padding_block_02(seed: i64) -> i64 with Mut, Panic, Div {
+    var sum: i64 = 0
+    var i: i64 = 0
+    while i < 20 {
+        sum = sum + ((seed + i + 2) % 29)
+        i = i + 1
+    }
+    sum
+}
+
+fn art_padding_block_03(seed: i64) -> i64 with Mut, Panic, Div {
+    var sum: i64 = 0
+    var i: i64 = 0
+    while i < 20 {
+        sum = sum + ((seed + i + 3) % 29)
+        i = i + 1
+    }
+    sum
+}
+
+fn art_padding_block_04(seed: i64) -> i64 with Mut, Panic, Div {
+    var sum: i64 = 0
+    var i: i64 = 0
+    while i < 20 {
+        sum = sum + ((seed + i + 4) % 29)
+        i = i + 1
+    }
+    sum
+}
+
+fn art_padding_block_05(seed: i64) -> i64 with Mut, Panic, Div {
+    var sum: i64 = 0
+    var i: i64 = 0
+    while i < 20 {
+        sum = sum + ((seed + i + 5) % 29)
+        i = i + 1
+    }
+    sum
+}
+
+fn art_padding_block_06(seed: i64) -> i64 with Mut, Panic, Div {
+    var sum: i64 = 0
+    var i: i64 = 0
+    while i < 20 {
+        sum = sum + ((seed + i + 6) % 29)
+        i = i + 1
+    }
+    sum
+}
+
+fn art_padding_block_07(seed: i64) -> i64 with Mut, Panic, Div {
+    var sum: i64 = 0
+    var i: i64 = 0
+    while i < 20 {
+        sum = sum + ((seed + i + 7) % 29)
+        i = i + 1
+    }
+    sum
+}
+
+fn art_padding_block_08(seed: i64) -> i64 with Mut, Panic, Div {
+    var sum: i64 = 0
+    var i: i64 = 0
+    while i < 20 {
+        sum = sum + ((seed + i + 8) % 29)
+        i = i + 1
+    }
+    sum
+}
+
+fn art_padding_block_09(seed: i64) -> i64 with Mut, Panic, Div {
+    var sum: i64 = 0
+    var i: i64 = 0
+    while i < 20 {
+        sum = sum + ((seed + i + 9) % 29)
+        i = i + 1
+    }
+    sum
+}
+
+fn art_padding_block_10(seed: i64) -> i64 with Mut, Panic, Div {
+    var sum: i64 = 0
+    var i: i64 = 0
+    while i < 20 {
+        sum = sum + ((seed + i + 10) % 29)
+        i = i + 1
+    }
+    sum
+}
+
+fn art_padding_block_11(seed: i64) -> i64 with Mut, Panic, Div {
+    var sum: i64 = 0
+    var i: i64 = 0
+    while i < 20 {
+        sum = sum + ((seed + i + 11) % 29)
+        i = i + 1
+    }
+    sum
+}
+
+fn art_padding_block_12(seed: i64) -> i64 with Mut, Panic, Div {
+    var sum: i64 = 0
+    var i: i64 = 0
+    while i < 20 {
+        sum = sum + ((seed + i + 12) % 29)
+        i = i + 1
+    }
+    sum
+}

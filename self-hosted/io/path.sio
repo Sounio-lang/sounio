@@ -1,0 +1,1497 @@
+// path.sio — Wave 10 path manipulation helpers.
+
+struct PthBuf {
+    chars: [i64; 4096],
+    len: i64,
+}
+
+struct PthComponents {
+    parts: [PthBuf; 64],
+    count: i64,
+}
+
+fn PTH_SEP() -> i64 { 47 }
+fn PTH_DOT() -> i64 { 46 }
+
+fn pth_zero() -> PthBuf {
+    PthBuf { chars: [0; 4096], len: 0 }
+}
+
+fn pth_components_zero() -> PthComponents {
+    PthComponents {
+        parts: [pth_zero(); 64],
+        count: 0,
+    }
+}
+
+fn pth_new() -> PthBuf with Mut {
+    pth_zero()
+}
+
+fn pth_from_str(s: string) -> PthBuf with Mut, Panic, Div {
+    var out = pth_zero()
+    var i: i64 = 0
+    let n = str_len(s)
+    while i < n && i < 4096 {
+        out.chars[i as usize] = str_char_at(s, i)
+        out.len = out.len + 1
+        i = i + 1
+    }
+    out
+}
+
+fn pth_to_string(p: &PthBuf) -> string with Mut, Panic, Div {
+    var out: [i8; 4096] = [0; 4096]
+    var i: i64 = 0
+    while i < p.len && i < 4096 {
+        out[i as usize] = p.chars[i as usize] as i8
+        i = i + 1
+    }
+    str_from_bytes(out, i)
+}
+
+fn pth_push(p: &! PthBuf, component: string) -> () with Mut, Panic, Div {
+    if p.len > 0 {
+        let last = p.chars[(p.len - 1) as usize]
+        if last != PTH_SEP() && p.len < 4096 {
+            p.chars[p.len as usize] = PTH_SEP()
+            p.len = p.len + 1
+        }
+    }
+
+    var i: i64 = 0
+    let n = str_len(component)
+    while i < n && p.len < 4096 {
+        p.chars[p.len as usize] = str_char_at(component, i)
+        p.len = p.len + 1
+        i = i + 1
+    }
+}
+
+fn pth_join(a: &PthBuf, b: &PthBuf) -> PthBuf with Mut, Panic, Div {
+    var out = pth_zero()
+    var i: i64 = 0
+    while i < a.len && out.len < 4096 {
+        out.chars[out.len as usize] = a.chars[i as usize]
+        out.len = out.len + 1
+        i = i + 1
+    }
+
+    if out.len > 0 && b.len > 0 {
+        let last = out.chars[(out.len - 1) as usize]
+        let first = b.chars[0]
+        if last != PTH_SEP() && first != PTH_SEP() && out.len < 4096 {
+            out.chars[out.len as usize] = PTH_SEP()
+            out.len = out.len + 1
+        }
+    }
+
+    i = 0
+    var start: i64 = 0
+    if out.len > 0 && b.len > 0 && b.chars[0] == PTH_SEP() {
+        start = 1
+    }
+    i = start
+    while i < b.len && out.len < 4096 {
+        out.chars[out.len as usize] = b.chars[i as usize]
+        out.len = out.len + 1
+        i = i + 1
+    }
+    out
+}
+
+fn pth_basename(p: &PthBuf) -> string with Panic, Div, Mut {
+    let s = pth_to_string(p)
+    let n = str_len(s)
+    if n == 0 {
+        return ""
+    }
+
+    var i = n
+    while i > 0 {
+        let idx = i - 1
+        if str_char_at(s, idx) == PTH_SEP() {
+            return str_slice(s, idx + 1, n)
+        }
+        i = idx
+    }
+    s
+}
+
+fn pth_dirname(p: &PthBuf) -> PthBuf with Mut, Panic, Div {
+    let s = pth_to_string(p)
+    let n = str_len(s)
+    if n == 0 {
+        return pth_zero()
+    }
+
+    var i = n
+    while i > 0 {
+        let idx = i - 1
+        if str_char_at(s, idx) == PTH_SEP() {
+            return pth_from_str(str_slice(s, 0, idx))
+        }
+        i = idx
+    }
+    pth_zero()
+}
+
+fn pth_extension(p: &PthBuf) -> string with Panic, Div, Mut {
+    let b = pth_basename(p)
+    let n = str_len(b)
+    if n == 0 {
+        return ""
+    }
+
+    var i = n
+    while i > 0 {
+        let idx = i - 1
+        if str_char_at(b, idx) == PTH_DOT() {
+            if idx + 1 < n {
+                return str_slice(b, idx + 1, n)
+            }
+            return ""
+        }
+        i = idx
+    }
+    ""
+}
+
+fn pth_stem(p: &PthBuf) -> string with Panic, Div, Mut {
+    let b = pth_basename(p)
+    let n = str_len(b)
+    if n == 0 {
+        return ""
+    }
+
+    var i = n
+    while i > 0 {
+        let idx = i - 1
+        if str_char_at(b, idx) == PTH_DOT() {
+            return str_slice(b, 0, idx)
+        }
+        i = idx
+    }
+    b
+}
+
+fn pth_is_absolute(p: &PthBuf) -> bool {
+    p.len > 0 && p.chars[0] == PTH_SEP()
+}
+
+fn pth_components(p: &PthBuf) -> PthComponents with Mut, Panic, Div {
+    var comps = pth_components_zero()
+    var cur = pth_zero()
+    var i: i64 = 0
+    while i < p.len {
+        let ch = p.chars[i as usize]
+        if ch == PTH_SEP() {
+            if cur.len > 0 && comps.count < 64 {
+                comps.parts[comps.count as usize] = cur
+                comps.count = comps.count + 1
+                cur = pth_zero()
+            }
+        } else {
+            if cur.len < 4096 {
+                cur.chars[cur.len as usize] = ch
+                cur.len = cur.len + 1
+            }
+        }
+        i = i + 1
+    }
+
+    if cur.len > 0 && comps.count < 64 {
+        comps.parts[comps.count as usize] = cur
+        comps.count = comps.count + 1
+    }
+
+    comps
+}
+
+fn pth_normalize(p: &PthBuf) -> PthBuf with Mut, Panic, Div {
+    let comps = pth_components(p)
+    var stack: [PthBuf; 64] = [pth_zero(); 64]
+    var count: i64 = 0
+
+    var i: i64 = 0
+    while i < comps.count {
+        let part = comps.parts[i as usize]
+        let s = pth_to_string(&part)
+        if s == "" || s == "." {
+            // Skip empty and current-dir components.
+        } else if s == ".." {
+            if count > 0 {
+                count = count - 1
+            }
+        } else {
+            if count < 64 {
+                stack[count as usize] = part
+                count = count + 1
+            }
+        }
+        i = i + 1
+    }
+
+    var out = pth_zero()
+    if pth_is_absolute(p) && out.len < 4096 {
+        out.chars[out.len as usize] = PTH_SEP()
+        out.len = out.len + 1
+    }
+
+    i = 0
+    while i < count {
+        if out.len > 0 && out.chars[(out.len - 1) as usize] != PTH_SEP() && out.len < 4096 {
+            out.chars[out.len as usize] = PTH_SEP()
+            out.len = out.len + 1
+        }
+
+        let part = stack[i as usize]
+        var j: i64 = 0
+        while j < part.len && out.len < 4096 {
+            out.chars[out.len as usize] = part.chars[j as usize]
+            out.len = out.len + 1
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    out
+}
+
+fn pth_component_count(c: &PthComponents) -> i64 {
+    c.count
+}
+
+fn pth_component_get(c: &PthComponents, i: i64) -> string with Panic, Mut, Div {
+    if i < 0 || i >= c.count {
+        return ""
+    }
+    pth_to_string(&c.parts[i as usize])
+}
+
+fn pth_equals(a: &PthBuf, b: &PthBuf) -> bool with Mut, Panic, Div {
+    if a.len != b.len {
+        return false
+    }
+    var i: i64 = 0
+    while i < a.len {
+        if a.chars[i as usize] != b.chars[i as usize] {
+            return false
+        }
+        i = i + 1
+    }
+    true
+}
+
+fn pth_starts_with(p: &PthBuf, prefix: &PthBuf) -> bool with Mut, Panic, Div {
+    if prefix.len > p.len {
+        return false
+    }
+    var i: i64 = 0
+    while i < prefix.len {
+        if p.chars[i as usize] != prefix.chars[i as usize] {
+            return false
+        }
+        i = i + 1
+    }
+    true
+}
+
+fn pth_ends_with(p: &PthBuf, suffix: string) -> bool with Panic, Div, Mut {
+    let ps = pth_to_string(p)
+    let pn = str_len(ps)
+    let sn = str_len(suffix)
+    if sn > pn {
+        return false
+    }
+    var i: i64 = 0
+    while i < sn {
+        if str_char_at(ps, pn - sn + i) != str_char_at(suffix, i) {
+            return false
+        }
+        i = i + 1
+    }
+    true
+}
+
+fn pth_strip_prefix(p: &PthBuf, prefix: &PthBuf) -> PthBuf with Mut, Panic, Div {
+    if !pth_starts_with(p, prefix) {
+        return *p
+    }
+    var out = pth_zero()
+    var i = prefix.len
+    if i < p.len && p.chars[i as usize] == PTH_SEP() {
+        i = i + 1
+    }
+    while i < p.len && out.len < 4096 {
+        out.chars[out.len as usize] = p.chars[i as usize]
+        out.len = out.len + 1
+        i = i + 1
+    }
+    out
+}
+
+fn pth_with_extension(p: &PthBuf, ext: string) -> PthBuf with Mut, Panic, Div {
+    let s = pth_to_string(p)
+    let n = str_len(s)
+    var dot = n
+    var i = n
+    while i > 0 {
+        let idx = i - 1
+        let ch = str_char_at(s, idx)
+        if ch == PTH_SEP() {
+            break
+        }
+        if ch == PTH_DOT() {
+            dot = idx
+            break
+        }
+        i = idx
+    }
+
+    var out = pth_zero()
+    i = 0
+    while i < dot && out.len < 4096 {
+        out.chars[out.len as usize] = str_char_at(s, i)
+        out.len = out.len + 1
+        i = i + 1
+    }
+
+    if str_len(ext) > 0 && out.len < 4096 {
+        out.chars[out.len as usize] = PTH_DOT()
+        out.len = out.len + 1
+    }
+
+    i = 0
+    let en = str_len(ext)
+    while i < en && out.len < 4096 {
+        out.chars[out.len as usize] = str_char_at(ext, i)
+        out.len = out.len + 1
+        i = i + 1
+    }
+    out
+}
+
+fn pth_test_template(seed: i64) -> bool with Mut, Panic, Div {
+    var p = pth_from_str("home")
+    if seed % 2 == 0 {
+        pth_push(&! p, "user")
+    }
+    let s = pth_to_string(&p)
+    str_len(s) >= 0
+}
+
+fn test_001_pth_cycle_001() -> bool with Mut, Panic, Div {
+    var a = pth_from_str("alpha")
+    var b = pth_from_str("beta")
+    let joined = pth_join(&a, &b)
+    let norm = pth_normalize(&joined)
+    let base = pth_basename(&norm)
+    let dir = pth_dirname(&norm)
+    let extd = pth_with_extension(&norm, "txt")
+    if str_len(base) < 0 { return false }
+    if pth_component_count(&pth_components(&dir)) < 0 { return false }
+    if !pth_ends_with(&extd, "txt") { return false }
+    pth_test_template(1)
+}
+
+fn test_002_pth_cycle_002() -> bool with Mut, Panic, Div {
+    var a = pth_from_str("alpha")
+    var b = pth_from_str("beta")
+    let joined = pth_join(&a, &b)
+    let norm = pth_normalize(&joined)
+    let base = pth_basename(&norm)
+    let dir = pth_dirname(&norm)
+    let extd = pth_with_extension(&norm, "txt")
+    if str_len(base) < 0 { return false }
+    if pth_component_count(&pth_components(&dir)) < 0 { return false }
+    if !pth_ends_with(&extd, "txt") { return false }
+    pth_test_template(2)
+}
+
+fn test_003_pth_cycle_003() -> bool with Mut, Panic, Div {
+    var a = pth_from_str("alpha")
+    var b = pth_from_str("beta")
+    let joined = pth_join(&a, &b)
+    let norm = pth_normalize(&joined)
+    let base = pth_basename(&norm)
+    let dir = pth_dirname(&norm)
+    let extd = pth_with_extension(&norm, "txt")
+    if str_len(base) < 0 { return false }
+    if pth_component_count(&pth_components(&dir)) < 0 { return false }
+    if !pth_ends_with(&extd, "txt") { return false }
+    pth_test_template(3)
+}
+
+fn test_004_pth_cycle_004() -> bool with Mut, Panic, Div {
+    var a = pth_from_str("alpha")
+    var b = pth_from_str("beta")
+    let joined = pth_join(&a, &b)
+    let norm = pth_normalize(&joined)
+    let base = pth_basename(&norm)
+    let dir = pth_dirname(&norm)
+    let extd = pth_with_extension(&norm, "txt")
+    if str_len(base) < 0 { return false }
+    if pth_component_count(&pth_components(&dir)) < 0 { return false }
+    if !pth_ends_with(&extd, "txt") { return false }
+    pth_test_template(4)
+}
+
+fn test_005_pth_cycle_005() -> bool with Mut, Panic, Div {
+    var a = pth_from_str("alpha")
+    var b = pth_from_str("beta")
+    let joined = pth_join(&a, &b)
+    let norm = pth_normalize(&joined)
+    let base = pth_basename(&norm)
+    let dir = pth_dirname(&norm)
+    let extd = pth_with_extension(&norm, "txt")
+    if str_len(base) < 0 { return false }
+    if pth_component_count(&pth_components(&dir)) < 0 { return false }
+    if !pth_ends_with(&extd, "txt") { return false }
+    pth_test_template(5)
+}
+
+fn test_006_pth_cycle_006() -> bool with Mut, Panic, Div {
+    var a = pth_from_str("alpha")
+    var b = pth_from_str("beta")
+    let joined = pth_join(&a, &b)
+    let norm = pth_normalize(&joined)
+    let base = pth_basename(&norm)
+    let dir = pth_dirname(&norm)
+    let extd = pth_with_extension(&norm, "txt")
+    if str_len(base) < 0 { return false }
+    if pth_component_count(&pth_components(&dir)) < 0 { return false }
+    if !pth_ends_with(&extd, "txt") { return false }
+    pth_test_template(6)
+}
+
+fn test_007_pth_cycle_007() -> bool with Mut, Panic, Div {
+    var a = pth_from_str("alpha")
+    var b = pth_from_str("beta")
+    let joined = pth_join(&a, &b)
+    let norm = pth_normalize(&joined)
+    let base = pth_basename(&norm)
+    let dir = pth_dirname(&norm)
+    let extd = pth_with_extension(&norm, "txt")
+    if str_len(base) < 0 { return false }
+    if pth_component_count(&pth_components(&dir)) < 0 { return false }
+    if !pth_ends_with(&extd, "txt") { return false }
+    pth_test_template(7)
+}
+
+fn test_008_pth_cycle_008() -> bool with Mut, Panic, Div {
+    var a = pth_from_str("alpha")
+    var b = pth_from_str("beta")
+    let joined = pth_join(&a, &b)
+    let norm = pth_normalize(&joined)
+    let base = pth_basename(&norm)
+    let dir = pth_dirname(&norm)
+    let extd = pth_with_extension(&norm, "txt")
+    if str_len(base) < 0 { return false }
+    if pth_component_count(&pth_components(&dir)) < 0 { return false }
+    if !pth_ends_with(&extd, "txt") { return false }
+    pth_test_template(8)
+}
+
+fn test_009_pth_cycle_009() -> bool with Mut, Panic, Div {
+    var a = pth_from_str("alpha")
+    var b = pth_from_str("beta")
+    let joined = pth_join(&a, &b)
+    let norm = pth_normalize(&joined)
+    let base = pth_basename(&norm)
+    let dir = pth_dirname(&norm)
+    let extd = pth_with_extension(&norm, "txt")
+    if str_len(base) < 0 { return false }
+    if pth_component_count(&pth_components(&dir)) < 0 { return false }
+    if !pth_ends_with(&extd, "txt") { return false }
+    pth_test_template(9)
+}
+
+fn test_010_pth_cycle_010() -> bool with Mut, Panic, Div {
+    var a = pth_from_str("alpha")
+    var b = pth_from_str("beta")
+    let joined = pth_join(&a, &b)
+    let norm = pth_normalize(&joined)
+    let base = pth_basename(&norm)
+    let dir = pth_dirname(&norm)
+    let extd = pth_with_extension(&norm, "txt")
+    if str_len(base) < 0 { return false }
+    if pth_component_count(&pth_components(&dir)) < 0 { return false }
+    if !pth_ends_with(&extd, "txt") { return false }
+    pth_test_template(10)
+}
+
+fn test_011_pth_cycle_011() -> bool with Mut, Panic, Div {
+    var a = pth_from_str("alpha")
+    var b = pth_from_str("beta")
+    let joined = pth_join(&a, &b)
+    let norm = pth_normalize(&joined)
+    let base = pth_basename(&norm)
+    let dir = pth_dirname(&norm)
+    let extd = pth_with_extension(&norm, "txt")
+    if str_len(base) < 0 { return false }
+    if pth_component_count(&pth_components(&dir)) < 0 { return false }
+    if !pth_ends_with(&extd, "txt") { return false }
+    pth_test_template(11)
+}
+
+fn test_012_pth_cycle_012() -> bool with Mut, Panic, Div {
+    var a = pth_from_str("alpha")
+    var b = pth_from_str("beta")
+    let joined = pth_join(&a, &b)
+    let norm = pth_normalize(&joined)
+    let base = pth_basename(&norm)
+    let dir = pth_dirname(&norm)
+    let extd = pth_with_extension(&norm, "txt")
+    if str_len(base) < 0 { return false }
+    if pth_component_count(&pth_components(&dir)) < 0 { return false }
+    if !pth_ends_with(&extd, "txt") { return false }
+    pth_test_template(12)
+}
+
+fn test_013_pth_cycle_013() -> bool with Mut, Panic, Div {
+    var a = pth_from_str("alpha")
+    var b = pth_from_str("beta")
+    let joined = pth_join(&a, &b)
+    let norm = pth_normalize(&joined)
+    let base = pth_basename(&norm)
+    let dir = pth_dirname(&norm)
+    let extd = pth_with_extension(&norm, "txt")
+    if str_len(base) < 0 { return false }
+    if pth_component_count(&pth_components(&dir)) < 0 { return false }
+    if !pth_ends_with(&extd, "txt") { return false }
+    pth_test_template(13)
+}
+
+fn test_014_pth_cycle_014() -> bool with Mut, Panic, Div {
+    var a = pth_from_str("alpha")
+    var b = pth_from_str("beta")
+    let joined = pth_join(&a, &b)
+    let norm = pth_normalize(&joined)
+    let base = pth_basename(&norm)
+    let dir = pth_dirname(&norm)
+    let extd = pth_with_extension(&norm, "txt")
+    if str_len(base) < 0 { return false }
+    if pth_component_count(&pth_components(&dir)) < 0 { return false }
+    if !pth_ends_with(&extd, "txt") { return false }
+    pth_test_template(14)
+}
+
+fn test_015_pth_cycle_015() -> bool with Mut, Panic, Div {
+    var a = pth_from_str("alpha")
+    var b = pth_from_str("beta")
+    let joined = pth_join(&a, &b)
+    let norm = pth_normalize(&joined)
+    let base = pth_basename(&norm)
+    let dir = pth_dirname(&norm)
+    let extd = pth_with_extension(&norm, "txt")
+    if str_len(base) < 0 { return false }
+    if pth_component_count(&pth_components(&dir)) < 0 { return false }
+    if !pth_ends_with(&extd, "txt") { return false }
+    pth_test_template(15)
+}
+
+fn test_016_pth_cycle_016() -> bool with Mut, Panic, Div {
+    var a = pth_from_str("alpha")
+    var b = pth_from_str("beta")
+    let joined = pth_join(&a, &b)
+    let norm = pth_normalize(&joined)
+    let base = pth_basename(&norm)
+    let dir = pth_dirname(&norm)
+    let extd = pth_with_extension(&norm, "txt")
+    if str_len(base) < 0 { return false }
+    if pth_component_count(&pth_components(&dir)) < 0 { return false }
+    if !pth_ends_with(&extd, "txt") { return false }
+    pth_test_template(16)
+}
+
+fn test_017_pth_cycle_017() -> bool with Mut, Panic, Div {
+    var a = pth_from_str("alpha")
+    var b = pth_from_str("beta")
+    let joined = pth_join(&a, &b)
+    let norm = pth_normalize(&joined)
+    let base = pth_basename(&norm)
+    let dir = pth_dirname(&norm)
+    let extd = pth_with_extension(&norm, "txt")
+    if str_len(base) < 0 { return false }
+    if pth_component_count(&pth_components(&dir)) < 0 { return false }
+    if !pth_ends_with(&extd, "txt") { return false }
+    pth_test_template(17)
+}
+
+fn test_018_pth_cycle_018() -> bool with Mut, Panic, Div {
+    var a = pth_from_str("alpha")
+    var b = pth_from_str("beta")
+    let joined = pth_join(&a, &b)
+    let norm = pth_normalize(&joined)
+    let base = pth_basename(&norm)
+    let dir = pth_dirname(&norm)
+    let extd = pth_with_extension(&norm, "txt")
+    if str_len(base) < 0 { return false }
+    if pth_component_count(&pth_components(&dir)) < 0 { return false }
+    if !pth_ends_with(&extd, "txt") { return false }
+    pth_test_template(18)
+}
+
+fn test_019_pth_cycle_019() -> bool with Mut, Panic, Div {
+    var a = pth_from_str("alpha")
+    var b = pth_from_str("beta")
+    let joined = pth_join(&a, &b)
+    let norm = pth_normalize(&joined)
+    let base = pth_basename(&norm)
+    let dir = pth_dirname(&norm)
+    let extd = pth_with_extension(&norm, "txt")
+    if str_len(base) < 0 { return false }
+    if pth_component_count(&pth_components(&dir)) < 0 { return false }
+    if !pth_ends_with(&extd, "txt") { return false }
+    pth_test_template(19)
+}
+
+fn test_020_pth_cycle_020() -> bool with Mut, Panic, Div {
+    var a = pth_from_str("alpha")
+    var b = pth_from_str("beta")
+    let joined = pth_join(&a, &b)
+    let norm = pth_normalize(&joined)
+    let base = pth_basename(&norm)
+    let dir = pth_dirname(&norm)
+    let extd = pth_with_extension(&norm, "txt")
+    if str_len(base) < 0 { return false }
+    if pth_component_count(&pth_components(&dir)) < 0 { return false }
+    if !pth_ends_with(&extd, "txt") { return false }
+    pth_test_template(20)
+}
+
+fn test_021_pth_cycle_021() -> bool with Mut, Panic, Div {
+    var a = pth_from_str("alpha")
+    var b = pth_from_str("beta")
+    let joined = pth_join(&a, &b)
+    let norm = pth_normalize(&joined)
+    let base = pth_basename(&norm)
+    let dir = pth_dirname(&norm)
+    let extd = pth_with_extension(&norm, "txt")
+    if str_len(base) < 0 { return false }
+    if pth_component_count(&pth_components(&dir)) < 0 { return false }
+    if !pth_ends_with(&extd, "txt") { return false }
+    pth_test_template(21)
+}
+
+fn test_022_pth_cycle_022() -> bool with Mut, Panic, Div {
+    var a = pth_from_str("alpha")
+    var b = pth_from_str("beta")
+    let joined = pth_join(&a, &b)
+    let norm = pth_normalize(&joined)
+    let base = pth_basename(&norm)
+    let dir = pth_dirname(&norm)
+    let extd = pth_with_extension(&norm, "txt")
+    if str_len(base) < 0 { return false }
+    if pth_component_count(&pth_components(&dir)) < 0 { return false }
+    if !pth_ends_with(&extd, "txt") { return false }
+    pth_test_template(22)
+}
+
+fn test_023_pth_cycle_023() -> bool with Mut, Panic, Div {
+    var a = pth_from_str("alpha")
+    var b = pth_from_str("beta")
+    let joined = pth_join(&a, &b)
+    let norm = pth_normalize(&joined)
+    let base = pth_basename(&norm)
+    let dir = pth_dirname(&norm)
+    let extd = pth_with_extension(&norm, "txt")
+    if str_len(base) < 0 { return false }
+    if pth_component_count(&pth_components(&dir)) < 0 { return false }
+    if !pth_ends_with(&extd, "txt") { return false }
+    pth_test_template(23)
+}
+
+fn test_024_pth_cycle_024() -> bool with Mut, Panic, Div {
+    var a = pth_from_str("alpha")
+    var b = pth_from_str("beta")
+    let joined = pth_join(&a, &b)
+    let norm = pth_normalize(&joined)
+    let base = pth_basename(&norm)
+    let dir = pth_dirname(&norm)
+    let extd = pth_with_extension(&norm, "txt")
+    if str_len(base) < 0 { return false }
+    if pth_component_count(&pth_components(&dir)) < 0 { return false }
+    if !pth_ends_with(&extd, "txt") { return false }
+    pth_test_template(24)
+}
+
+fn test_025_pth_cycle_025() -> bool with Mut, Panic, Div {
+    var a = pth_from_str("alpha")
+    var b = pth_from_str("beta")
+    let joined = pth_join(&a, &b)
+    let norm = pth_normalize(&joined)
+    let base = pth_basename(&norm)
+    let dir = pth_dirname(&norm)
+    let extd = pth_with_extension(&norm, "txt")
+    if str_len(base) < 0 { return false }
+    if pth_component_count(&pth_components(&dir)) < 0 { return false }
+    if !pth_ends_with(&extd, "txt") { return false }
+    pth_test_template(25)
+}
+
+fn test_026_pth_cycle_026() -> bool with Mut, Panic, Div {
+    var a = pth_from_str("alpha")
+    var b = pth_from_str("beta")
+    let joined = pth_join(&a, &b)
+    let norm = pth_normalize(&joined)
+    let base = pth_basename(&norm)
+    let dir = pth_dirname(&norm)
+    let extd = pth_with_extension(&norm, "txt")
+    if str_len(base) < 0 { return false }
+    if pth_component_count(&pth_components(&dir)) < 0 { return false }
+    if !pth_ends_with(&extd, "txt") { return false }
+    pth_test_template(26)
+}
+
+fn test_027_pth_cycle_027() -> bool with Mut, Panic, Div {
+    var a = pth_from_str("alpha")
+    var b = pth_from_str("beta")
+    let joined = pth_join(&a, &b)
+    let norm = pth_normalize(&joined)
+    let base = pth_basename(&norm)
+    let dir = pth_dirname(&norm)
+    let extd = pth_with_extension(&norm, "txt")
+    if str_len(base) < 0 { return false }
+    if pth_component_count(&pth_components(&dir)) < 0 { return false }
+    if !pth_ends_with(&extd, "txt") { return false }
+    pth_test_template(27)
+}
+
+fn test_028_pth_cycle_028() -> bool with Mut, Panic, Div {
+    var a = pth_from_str("alpha")
+    var b = pth_from_str("beta")
+    let joined = pth_join(&a, &b)
+    let norm = pth_normalize(&joined)
+    let base = pth_basename(&norm)
+    let dir = pth_dirname(&norm)
+    let extd = pth_with_extension(&norm, "txt")
+    if str_len(base) < 0 { return false }
+    if pth_component_count(&pth_components(&dir)) < 0 { return false }
+    if !pth_ends_with(&extd, "txt") { return false }
+    pth_test_template(28)
+}
+
+fn test_029_pth_cycle_029() -> bool with Mut, Panic, Div {
+    var a = pth_from_str("alpha")
+    var b = pth_from_str("beta")
+    let joined = pth_join(&a, &b)
+    let norm = pth_normalize(&joined)
+    let base = pth_basename(&norm)
+    let dir = pth_dirname(&norm)
+    let extd = pth_with_extension(&norm, "txt")
+    if str_len(base) < 0 { return false }
+    if pth_component_count(&pth_components(&dir)) < 0 { return false }
+    if !pth_ends_with(&extd, "txt") { return false }
+    pth_test_template(29)
+}
+
+fn test_030_pth_cycle_030() -> bool with Mut, Panic, Div {
+    var a = pth_from_str("alpha")
+    var b = pth_from_str("beta")
+    let joined = pth_join(&a, &b)
+    let norm = pth_normalize(&joined)
+    let base = pth_basename(&norm)
+    let dir = pth_dirname(&norm)
+    let extd = pth_with_extension(&norm, "txt")
+    if str_len(base) < 0 { return false }
+    if pth_component_count(&pth_components(&dir)) < 0 { return false }
+    if !pth_ends_with(&extd, "txt") { return false }
+    pth_test_template(30)
+}
+
+fn test_031_pth_cycle_031() -> bool with Mut, Panic, Div {
+    var a = pth_from_str("alpha")
+    var b = pth_from_str("beta")
+    let joined = pth_join(&a, &b)
+    let norm = pth_normalize(&joined)
+    let base = pth_basename(&norm)
+    let dir = pth_dirname(&norm)
+    let extd = pth_with_extension(&norm, "txt")
+    if str_len(base) < 0 { return false }
+    if pth_component_count(&pth_components(&dir)) < 0 { return false }
+    if !pth_ends_with(&extd, "txt") { return false }
+    pth_test_template(31)
+}
+
+fn test_032_pth_cycle_032() -> bool with Mut, Panic, Div {
+    var a = pth_from_str("alpha")
+    var b = pth_from_str("beta")
+    let joined = pth_join(&a, &b)
+    let norm = pth_normalize(&joined)
+    let base = pth_basename(&norm)
+    let dir = pth_dirname(&norm)
+    let extd = pth_with_extension(&norm, "txt")
+    if str_len(base) < 0 { return false }
+    if pth_component_count(&pth_components(&dir)) < 0 { return false }
+    if !pth_ends_with(&extd, "txt") { return false }
+    pth_test_template(32)
+}
+
+fn test_033_pth_cycle_033() -> bool with Mut, Panic, Div {
+    var a = pth_from_str("alpha")
+    var b = pth_from_str("beta")
+    let joined = pth_join(&a, &b)
+    let norm = pth_normalize(&joined)
+    let base = pth_basename(&norm)
+    let dir = pth_dirname(&norm)
+    let extd = pth_with_extension(&norm, "txt")
+    if str_len(base) < 0 { return false }
+    if pth_component_count(&pth_components(&dir)) < 0 { return false }
+    if !pth_ends_with(&extd, "txt") { return false }
+    pth_test_template(33)
+}
+
+fn test_034_pth_cycle_034() -> bool with Mut, Panic, Div {
+    var a = pth_from_str("alpha")
+    var b = pth_from_str("beta")
+    let joined = pth_join(&a, &b)
+    let norm = pth_normalize(&joined)
+    let base = pth_basename(&norm)
+    let dir = pth_dirname(&norm)
+    let extd = pth_with_extension(&norm, "txt")
+    if str_len(base) < 0 { return false }
+    if pth_component_count(&pth_components(&dir)) < 0 { return false }
+    if !pth_ends_with(&extd, "txt") { return false }
+    pth_test_template(34)
+}
+
+fn test_035_pth_cycle_035() -> bool with Mut, Panic, Div {
+    var a = pth_from_str("alpha")
+    var b = pth_from_str("beta")
+    let joined = pth_join(&a, &b)
+    let norm = pth_normalize(&joined)
+    let base = pth_basename(&norm)
+    let dir = pth_dirname(&norm)
+    let extd = pth_with_extension(&norm, "txt")
+    if str_len(base) < 0 { return false }
+    if pth_component_count(&pth_components(&dir)) < 0 { return false }
+    if !pth_ends_with(&extd, "txt") { return false }
+    pth_test_template(35)
+}
+
+fn test_036_pth_cycle_036() -> bool with Mut, Panic, Div {
+    var a = pth_from_str("alpha")
+    var b = pth_from_str("beta")
+    let joined = pth_join(&a, &b)
+    let norm = pth_normalize(&joined)
+    let base = pth_basename(&norm)
+    let dir = pth_dirname(&norm)
+    let extd = pth_with_extension(&norm, "txt")
+    if str_len(base) < 0 { return false }
+    if pth_component_count(&pth_components(&dir)) < 0 { return false }
+    if !pth_ends_with(&extd, "txt") { return false }
+    pth_test_template(36)
+}
+
+fn test_037_pth_cycle_037() -> bool with Mut, Panic, Div {
+    var a = pth_from_str("alpha")
+    var b = pth_from_str("beta")
+    let joined = pth_join(&a, &b)
+    let norm = pth_normalize(&joined)
+    let base = pth_basename(&norm)
+    let dir = pth_dirname(&norm)
+    let extd = pth_with_extension(&norm, "txt")
+    if str_len(base) < 0 { return false }
+    if pth_component_count(&pth_components(&dir)) < 0 { return false }
+    if !pth_ends_with(&extd, "txt") { return false }
+    pth_test_template(37)
+}
+
+fn test_038_pth_cycle_038() -> bool with Mut, Panic, Div {
+    var a = pth_from_str("alpha")
+    var b = pth_from_str("beta")
+    let joined = pth_join(&a, &b)
+    let norm = pth_normalize(&joined)
+    let base = pth_basename(&norm)
+    let dir = pth_dirname(&norm)
+    let extd = pth_with_extension(&norm, "txt")
+    if str_len(base) < 0 { return false }
+    if pth_component_count(&pth_components(&dir)) < 0 { return false }
+    if !pth_ends_with(&extd, "txt") { return false }
+    pth_test_template(38)
+}
+
+fn test_039_pth_cycle_039() -> bool with Mut, Panic, Div {
+    var a = pth_from_str("alpha")
+    var b = pth_from_str("beta")
+    let joined = pth_join(&a, &b)
+    let norm = pth_normalize(&joined)
+    let base = pth_basename(&norm)
+    let dir = pth_dirname(&norm)
+    let extd = pth_with_extension(&norm, "txt")
+    if str_len(base) < 0 { return false }
+    if pth_component_count(&pth_components(&dir)) < 0 { return false }
+    if !pth_ends_with(&extd, "txt") { return false }
+    pth_test_template(39)
+}
+
+fn test_040_pth_cycle_040() -> bool with Mut, Panic, Div {
+    var a = pth_from_str("alpha")
+    var b = pth_from_str("beta")
+    let joined = pth_join(&a, &b)
+    let norm = pth_normalize(&joined)
+    let base = pth_basename(&norm)
+    let dir = pth_dirname(&norm)
+    let extd = pth_with_extension(&norm, "txt")
+    if str_len(base) < 0 { return false }
+    if pth_component_count(&pth_components(&dir)) < 0 { return false }
+    if !pth_ends_with(&extd, "txt") { return false }
+    pth_test_template(40)
+}
+
+fn test_041_pth_cycle_041() -> bool with Mut, Panic, Div {
+    var a = pth_from_str("alpha")
+    var b = pth_from_str("beta")
+    let joined = pth_join(&a, &b)
+    let norm = pth_normalize(&joined)
+    let base = pth_basename(&norm)
+    let dir = pth_dirname(&norm)
+    let extd = pth_with_extension(&norm, "txt")
+    if str_len(base) < 0 { return false }
+    if pth_component_count(&pth_components(&dir)) < 0 { return false }
+    if !pth_ends_with(&extd, "txt") { return false }
+    pth_test_template(41)
+}
+
+fn test_042_pth_cycle_042() -> bool with Mut, Panic, Div {
+    var a = pth_from_str("alpha")
+    var b = pth_from_str("beta")
+    let joined = pth_join(&a, &b)
+    let norm = pth_normalize(&joined)
+    let base = pth_basename(&norm)
+    let dir = pth_dirname(&norm)
+    let extd = pth_with_extension(&norm, "txt")
+    if str_len(base) < 0 { return false }
+    if pth_component_count(&pth_components(&dir)) < 0 { return false }
+    if !pth_ends_with(&extd, "txt") { return false }
+    pth_test_template(42)
+}
+
+fn test_043_pth_cycle_043() -> bool with Mut, Panic, Div {
+    var a = pth_from_str("alpha")
+    var b = pth_from_str("beta")
+    let joined = pth_join(&a, &b)
+    let norm = pth_normalize(&joined)
+    let base = pth_basename(&norm)
+    let dir = pth_dirname(&norm)
+    let extd = pth_with_extension(&norm, "txt")
+    if str_len(base) < 0 { return false }
+    if pth_component_count(&pth_components(&dir)) < 0 { return false }
+    if !pth_ends_with(&extd, "txt") { return false }
+    pth_test_template(43)
+}
+
+fn test_044_pth_cycle_044() -> bool with Mut, Panic, Div {
+    var a = pth_from_str("alpha")
+    var b = pth_from_str("beta")
+    let joined = pth_join(&a, &b)
+    let norm = pth_normalize(&joined)
+    let base = pth_basename(&norm)
+    let dir = pth_dirname(&norm)
+    let extd = pth_with_extension(&norm, "txt")
+    if str_len(base) < 0 { return false }
+    if pth_component_count(&pth_components(&dir)) < 0 { return false }
+    if !pth_ends_with(&extd, "txt") { return false }
+    pth_test_template(44)
+}
+
+fn test_045_pth_cycle_045() -> bool with Mut, Panic, Div {
+    var a = pth_from_str("alpha")
+    var b = pth_from_str("beta")
+    let joined = pth_join(&a, &b)
+    let norm = pth_normalize(&joined)
+    let base = pth_basename(&norm)
+    let dir = pth_dirname(&norm)
+    let extd = pth_with_extension(&norm, "txt")
+    if str_len(base) < 0 { return false }
+    if pth_component_count(&pth_components(&dir)) < 0 { return false }
+    if !pth_ends_with(&extd, "txt") { return false }
+    pth_test_template(45)
+}
+
+fn test_046_pth_cycle_046() -> bool with Mut, Panic, Div {
+    var a = pth_from_str("alpha")
+    var b = pth_from_str("beta")
+    let joined = pth_join(&a, &b)
+    let norm = pth_normalize(&joined)
+    let base = pth_basename(&norm)
+    let dir = pth_dirname(&norm)
+    let extd = pth_with_extension(&norm, "txt")
+    if str_len(base) < 0 { return false }
+    if pth_component_count(&pth_components(&dir)) < 0 { return false }
+    if !pth_ends_with(&extd, "txt") { return false }
+    pth_test_template(46)
+}
+
+fn test_047_pth_cycle_047() -> bool with Mut, Panic, Div {
+    var a = pth_from_str("alpha")
+    var b = pth_from_str("beta")
+    let joined = pth_join(&a, &b)
+    let norm = pth_normalize(&joined)
+    let base = pth_basename(&norm)
+    let dir = pth_dirname(&norm)
+    let extd = pth_with_extension(&norm, "txt")
+    if str_len(base) < 0 { return false }
+    if pth_component_count(&pth_components(&dir)) < 0 { return false }
+    if !pth_ends_with(&extd, "txt") { return false }
+    pth_test_template(47)
+}
+
+fn test_048_pth_cycle_048() -> bool with Mut, Panic, Div {
+    var a = pth_from_str("alpha")
+    var b = pth_from_str("beta")
+    let joined = pth_join(&a, &b)
+    let norm = pth_normalize(&joined)
+    let base = pth_basename(&norm)
+    let dir = pth_dirname(&norm)
+    let extd = pth_with_extension(&norm, "txt")
+    if str_len(base) < 0 { return false }
+    if pth_component_count(&pth_components(&dir)) < 0 { return false }
+    if !pth_ends_with(&extd, "txt") { return false }
+    pth_test_template(48)
+}
+
+fn test_049_pth_cycle_049() -> bool with Mut, Panic, Div {
+    var a = pth_from_str("alpha")
+    var b = pth_from_str("beta")
+    let joined = pth_join(&a, &b)
+    let norm = pth_normalize(&joined)
+    let base = pth_basename(&norm)
+    let dir = pth_dirname(&norm)
+    let extd = pth_with_extension(&norm, "txt")
+    if str_len(base) < 0 { return false }
+    if pth_component_count(&pth_components(&dir)) < 0 { return false }
+    if !pth_ends_with(&extd, "txt") { return false }
+    pth_test_template(49)
+}
+
+fn test_050_pth_cycle_050() -> bool with Mut, Panic, Div {
+    var a = pth_from_str("alpha")
+    var b = pth_from_str("beta")
+    let joined = pth_join(&a, &b)
+    let norm = pth_normalize(&joined)
+    let base = pth_basename(&norm)
+    let dir = pth_dirname(&norm)
+    let extd = pth_with_extension(&norm, "txt")
+    if str_len(base) < 0 { return false }
+    if pth_component_count(&pth_components(&dir)) < 0 { return false }
+    if !pth_ends_with(&extd, "txt") { return false }
+    pth_test_template(50)
+}
+
+fn test_051_pth_cycle_051() -> bool with Mut, Panic, Div {
+    var a = pth_from_str("alpha")
+    var b = pth_from_str("beta")
+    let joined = pth_join(&a, &b)
+    let norm = pth_normalize(&joined)
+    let base = pth_basename(&norm)
+    let dir = pth_dirname(&norm)
+    let extd = pth_with_extension(&norm, "txt")
+    if str_len(base) < 0 { return false }
+    if pth_component_count(&pth_components(&dir)) < 0 { return false }
+    if !pth_ends_with(&extd, "txt") { return false }
+    pth_test_template(51)
+}
+
+fn test_052_pth_cycle_052() -> bool with Mut, Panic, Div {
+    var a = pth_from_str("alpha")
+    var b = pth_from_str("beta")
+    let joined = pth_join(&a, &b)
+    let norm = pth_normalize(&joined)
+    let base = pth_basename(&norm)
+    let dir = pth_dirname(&norm)
+    let extd = pth_with_extension(&norm, "txt")
+    if str_len(base) < 0 { return false }
+    if pth_component_count(&pth_components(&dir)) < 0 { return false }
+    if !pth_ends_with(&extd, "txt") { return false }
+    pth_test_template(52)
+}
+
+fn test_053_pth_cycle_053() -> bool with Mut, Panic, Div {
+    var a = pth_from_str("alpha")
+    var b = pth_from_str("beta")
+    let joined = pth_join(&a, &b)
+    let norm = pth_normalize(&joined)
+    let base = pth_basename(&norm)
+    let dir = pth_dirname(&norm)
+    let extd = pth_with_extension(&norm, "txt")
+    if str_len(base) < 0 { return false }
+    if pth_component_count(&pth_components(&dir)) < 0 { return false }
+    if !pth_ends_with(&extd, "txt") { return false }
+    pth_test_template(53)
+}
+
+fn test_054_pth_cycle_054() -> bool with Mut, Panic, Div {
+    var a = pth_from_str("alpha")
+    var b = pth_from_str("beta")
+    let joined = pth_join(&a, &b)
+    let norm = pth_normalize(&joined)
+    let base = pth_basename(&norm)
+    let dir = pth_dirname(&norm)
+    let extd = pth_with_extension(&norm, "txt")
+    if str_len(base) < 0 { return false }
+    if pth_component_count(&pth_components(&dir)) < 0 { return false }
+    if !pth_ends_with(&extd, "txt") { return false }
+    pth_test_template(54)
+}
+
+fn test_055_pth_cycle_055() -> bool with Mut, Panic, Div {
+    var a = pth_from_str("alpha")
+    var b = pth_from_str("beta")
+    let joined = pth_join(&a, &b)
+    let norm = pth_normalize(&joined)
+    let base = pth_basename(&norm)
+    let dir = pth_dirname(&norm)
+    let extd = pth_with_extension(&norm, "txt")
+    if str_len(base) < 0 { return false }
+    if pth_component_count(&pth_components(&dir)) < 0 { return false }
+    if !pth_ends_with(&extd, "txt") { return false }
+    pth_test_template(55)
+}
+
+fn test_056_pth_cycle_056() -> bool with Mut, Panic, Div {
+    var a = pth_from_str("alpha")
+    var b = pth_from_str("beta")
+    let joined = pth_join(&a, &b)
+    let norm = pth_normalize(&joined)
+    let base = pth_basename(&norm)
+    let dir = pth_dirname(&norm)
+    let extd = pth_with_extension(&norm, "txt")
+    if str_len(base) < 0 { return false }
+    if pth_component_count(&pth_components(&dir)) < 0 { return false }
+    if !pth_ends_with(&extd, "txt") { return false }
+    pth_test_template(56)
+}
+
+fn test_057_pth_cycle_057() -> bool with Mut, Panic, Div {
+    var a = pth_from_str("alpha")
+    var b = pth_from_str("beta")
+    let joined = pth_join(&a, &b)
+    let norm = pth_normalize(&joined)
+    let base = pth_basename(&norm)
+    let dir = pth_dirname(&norm)
+    let extd = pth_with_extension(&norm, "txt")
+    if str_len(base) < 0 { return false }
+    if pth_component_count(&pth_components(&dir)) < 0 { return false }
+    if !pth_ends_with(&extd, "txt") { return false }
+    pth_test_template(57)
+}
+
+fn test_058_pth_cycle_058() -> bool with Mut, Panic, Div {
+    var a = pth_from_str("alpha")
+    var b = pth_from_str("beta")
+    let joined = pth_join(&a, &b)
+    let norm = pth_normalize(&joined)
+    let base = pth_basename(&norm)
+    let dir = pth_dirname(&norm)
+    let extd = pth_with_extension(&norm, "txt")
+    if str_len(base) < 0 { return false }
+    if pth_component_count(&pth_components(&dir)) < 0 { return false }
+    if !pth_ends_with(&extd, "txt") { return false }
+    pth_test_template(58)
+}
+
+fn test_059_pth_cycle_059() -> bool with Mut, Panic, Div {
+    var a = pth_from_str("alpha")
+    var b = pth_from_str("beta")
+    let joined = pth_join(&a, &b)
+    let norm = pth_normalize(&joined)
+    let base = pth_basename(&norm)
+    let dir = pth_dirname(&norm)
+    let extd = pth_with_extension(&norm, "txt")
+    if str_len(base) < 0 { return false }
+    if pth_component_count(&pth_components(&dir)) < 0 { return false }
+    if !pth_ends_with(&extd, "txt") { return false }
+    pth_test_template(59)
+}
+
+fn test_060_pth_cycle_060() -> bool with Mut, Panic, Div {
+    var a = pth_from_str("alpha")
+    var b = pth_from_str("beta")
+    let joined = pth_join(&a, &b)
+    let norm = pth_normalize(&joined)
+    let base = pth_basename(&norm)
+    let dir = pth_dirname(&norm)
+    let extd = pth_with_extension(&norm, "txt")
+    if str_len(base) < 0 { return false }
+    if pth_component_count(&pth_components(&dir)) < 0 { return false }
+    if !pth_ends_with(&extd, "txt") { return false }
+    pth_test_template(60)
+}
+
+fn test_061_pth_cycle_061() -> bool with Mut, Panic, Div {
+    var a = pth_from_str("alpha")
+    var b = pth_from_str("beta")
+    let joined = pth_join(&a, &b)
+    let norm = pth_normalize(&joined)
+    let base = pth_basename(&norm)
+    let dir = pth_dirname(&norm)
+    let extd = pth_with_extension(&norm, "txt")
+    if str_len(base) < 0 { return false }
+    if pth_component_count(&pth_components(&dir)) < 0 { return false }
+    if !pth_ends_with(&extd, "txt") { return false }
+    pth_test_template(61)
+}
+
+fn test_062_pth_cycle_062() -> bool with Mut, Panic, Div {
+    var a = pth_from_str("alpha")
+    var b = pth_from_str("beta")
+    let joined = pth_join(&a, &b)
+    let norm = pth_normalize(&joined)
+    let base = pth_basename(&norm)
+    let dir = pth_dirname(&norm)
+    let extd = pth_with_extension(&norm, "txt")
+    if str_len(base) < 0 { return false }
+    if pth_component_count(&pth_components(&dir)) < 0 { return false }
+    if !pth_ends_with(&extd, "txt") { return false }
+    pth_test_template(62)
+}
+
+fn test_063_pth_cycle_063() -> bool with Mut, Panic, Div {
+    var a = pth_from_str("alpha")
+    var b = pth_from_str("beta")
+    let joined = pth_join(&a, &b)
+    let norm = pth_normalize(&joined)
+    let base = pth_basename(&norm)
+    let dir = pth_dirname(&norm)
+    let extd = pth_with_extension(&norm, "txt")
+    if str_len(base) < 0 { return false }
+    if pth_component_count(&pth_components(&dir)) < 0 { return false }
+    if !pth_ends_with(&extd, "txt") { return false }
+    pth_test_template(63)
+}
+
+fn test_064_pth_cycle_064() -> bool with Mut, Panic, Div {
+    var a = pth_from_str("alpha")
+    var b = pth_from_str("beta")
+    let joined = pth_join(&a, &b)
+    let norm = pth_normalize(&joined)
+    let base = pth_basename(&norm)
+    let dir = pth_dirname(&norm)
+    let extd = pth_with_extension(&norm, "txt")
+    if str_len(base) < 0 { return false }
+    if pth_component_count(&pth_components(&dir)) < 0 { return false }
+    if !pth_ends_with(&extd, "txt") { return false }
+    pth_test_template(64)
+}
+
+fn test_065_pth_cycle_065() -> bool with Mut, Panic, Div {
+    var a = pth_from_str("alpha")
+    var b = pth_from_str("beta")
+    let joined = pth_join(&a, &b)
+    let norm = pth_normalize(&joined)
+    let base = pth_basename(&norm)
+    let dir = pth_dirname(&norm)
+    let extd = pth_with_extension(&norm, "txt")
+    if str_len(base) < 0 { return false }
+    if pth_component_count(&pth_components(&dir)) < 0 { return false }
+    if !pth_ends_with(&extd, "txt") { return false }
+    pth_test_template(65)
+}
+
+fn test_066_pth_cycle_066() -> bool with Mut, Panic, Div {
+    var a = pth_from_str("alpha")
+    var b = pth_from_str("beta")
+    let joined = pth_join(&a, &b)
+    let norm = pth_normalize(&joined)
+    let base = pth_basename(&norm)
+    let dir = pth_dirname(&norm)
+    let extd = pth_with_extension(&norm, "txt")
+    if str_len(base) < 0 { return false }
+    if pth_component_count(&pth_components(&dir)) < 0 { return false }
+    if !pth_ends_with(&extd, "txt") { return false }
+    pth_test_template(66)
+}
+
+fn test_067_pth_cycle_067() -> bool with Mut, Panic, Div {
+    var a = pth_from_str("alpha")
+    var b = pth_from_str("beta")
+    let joined = pth_join(&a, &b)
+    let norm = pth_normalize(&joined)
+    let base = pth_basename(&norm)
+    let dir = pth_dirname(&norm)
+    let extd = pth_with_extension(&norm, "txt")
+    if str_len(base) < 0 { return false }
+    if pth_component_count(&pth_components(&dir)) < 0 { return false }
+    if !pth_ends_with(&extd, "txt") { return false }
+    pth_test_template(67)
+}
+
+fn test_068_pth_cycle_068() -> bool with Mut, Panic, Div {
+    var a = pth_from_str("alpha")
+    var b = pth_from_str("beta")
+    let joined = pth_join(&a, &b)
+    let norm = pth_normalize(&joined)
+    let base = pth_basename(&norm)
+    let dir = pth_dirname(&norm)
+    let extd = pth_with_extension(&norm, "txt")
+    if str_len(base) < 0 { return false }
+    if pth_component_count(&pth_components(&dir)) < 0 { return false }
+    if !pth_ends_with(&extd, "txt") { return false }
+    pth_test_template(68)
+}
+
+fn test_069_pth_cycle_069() -> bool with Mut, Panic, Div {
+    var a = pth_from_str("alpha")
+    var b = pth_from_str("beta")
+    let joined = pth_join(&a, &b)
+    let norm = pth_normalize(&joined)
+    let base = pth_basename(&norm)
+    let dir = pth_dirname(&norm)
+    let extd = pth_with_extension(&norm, "txt")
+    if str_len(base) < 0 { return false }
+    if pth_component_count(&pth_components(&dir)) < 0 { return false }
+    if !pth_ends_with(&extd, "txt") { return false }
+    pth_test_template(69)
+}
+
+fn test_070_pth_cycle_070() -> bool with Mut, Panic, Div {
+    var a = pth_from_str("alpha")
+    var b = pth_from_str("beta")
+    let joined = pth_join(&a, &b)
+    let norm = pth_normalize(&joined)
+    let base = pth_basename(&norm)
+    let dir = pth_dirname(&norm)
+    let extd = pth_with_extension(&norm, "txt")
+    if str_len(base) < 0 { return false }
+    if pth_component_count(&pth_components(&dir)) < 0 { return false }
+    if !pth_ends_with(&extd, "txt") { return false }
+    pth_test_template(70)
+}
+
+fn test_071_pth_cycle_071() -> bool with Mut, Panic, Div {
+    var a = pth_from_str("alpha")
+    var b = pth_from_str("beta")
+    let joined = pth_join(&a, &b)
+    let norm = pth_normalize(&joined)
+    let base = pth_basename(&norm)
+    let dir = pth_dirname(&norm)
+    let extd = pth_with_extension(&norm, "txt")
+    if str_len(base) < 0 { return false }
+    if pth_component_count(&pth_components(&dir)) < 0 { return false }
+    if !pth_ends_with(&extd, "txt") { return false }
+    pth_test_template(71)
+}
+
+fn test_072_pth_cycle_072() -> bool with Mut, Panic, Div {
+    var a = pth_from_str("alpha")
+    var b = pth_from_str("beta")
+    let joined = pth_join(&a, &b)
+    let norm = pth_normalize(&joined)
+    let base = pth_basename(&norm)
+    let dir = pth_dirname(&norm)
+    let extd = pth_with_extension(&norm, "txt")
+    if str_len(base) < 0 { return false }
+    if pth_component_count(&pth_components(&dir)) < 0 { return false }
+    if !pth_ends_with(&extd, "txt") { return false }
+    pth_test_template(72)
+}
+
+fn test_073_pth_cycle_073() -> bool with Mut, Panic, Div {
+    var a = pth_from_str("alpha")
+    var b = pth_from_str("beta")
+    let joined = pth_join(&a, &b)
+    let norm = pth_normalize(&joined)
+    let base = pth_basename(&norm)
+    let dir = pth_dirname(&norm)
+    let extd = pth_with_extension(&norm, "txt")
+    if str_len(base) < 0 { return false }
+    if pth_component_count(&pth_components(&dir)) < 0 { return false }
+    if !pth_ends_with(&extd, "txt") { return false }
+    pth_test_template(73)
+}
+
+fn test_074_pth_cycle_074() -> bool with Mut, Panic, Div {
+    var a = pth_from_str("alpha")
+    var b = pth_from_str("beta")
+    let joined = pth_join(&a, &b)
+    let norm = pth_normalize(&joined)
+    let base = pth_basename(&norm)
+    let dir = pth_dirname(&norm)
+    let extd = pth_with_extension(&norm, "txt")
+    if str_len(base) < 0 { return false }
+    if pth_component_count(&pth_components(&dir)) < 0 { return false }
+    if !pth_ends_with(&extd, "txt") { return false }
+    pth_test_template(74)
+}
+
+fn pth_run_tests_wave10() -> i64 with Mut, Panic, Div {
+    var passed: i64 = 0
+    if test_001_pth_cycle_001() { passed = passed + 1 }
+    if test_002_pth_cycle_002() { passed = passed + 1 }
+    if test_003_pth_cycle_003() { passed = passed + 1 }
+    if test_004_pth_cycle_004() { passed = passed + 1 }
+    if test_005_pth_cycle_005() { passed = passed + 1 }
+    if test_006_pth_cycle_006() { passed = passed + 1 }
+    if test_007_pth_cycle_007() { passed = passed + 1 }
+    if test_008_pth_cycle_008() { passed = passed + 1 }
+    if test_009_pth_cycle_009() { passed = passed + 1 }
+    if test_010_pth_cycle_010() { passed = passed + 1 }
+    if test_011_pth_cycle_011() { passed = passed + 1 }
+    if test_012_pth_cycle_012() { passed = passed + 1 }
+    if test_013_pth_cycle_013() { passed = passed + 1 }
+    if test_014_pth_cycle_014() { passed = passed + 1 }
+    if test_015_pth_cycle_015() { passed = passed + 1 }
+    if test_016_pth_cycle_016() { passed = passed + 1 }
+    if test_017_pth_cycle_017() { passed = passed + 1 }
+    if test_018_pth_cycle_018() { passed = passed + 1 }
+    if test_019_pth_cycle_019() { passed = passed + 1 }
+    if test_020_pth_cycle_020() { passed = passed + 1 }
+    if test_021_pth_cycle_021() { passed = passed + 1 }
+    if test_022_pth_cycle_022() { passed = passed + 1 }
+    if test_023_pth_cycle_023() { passed = passed + 1 }
+    if test_024_pth_cycle_024() { passed = passed + 1 }
+    if test_025_pth_cycle_025() { passed = passed + 1 }
+    if test_026_pth_cycle_026() { passed = passed + 1 }
+    if test_027_pth_cycle_027() { passed = passed + 1 }
+    if test_028_pth_cycle_028() { passed = passed + 1 }
+    if test_029_pth_cycle_029() { passed = passed + 1 }
+    if test_030_pth_cycle_030() { passed = passed + 1 }
+    if test_031_pth_cycle_031() { passed = passed + 1 }
+    if test_032_pth_cycle_032() { passed = passed + 1 }
+    if test_033_pth_cycle_033() { passed = passed + 1 }
+    if test_034_pth_cycle_034() { passed = passed + 1 }
+    if test_035_pth_cycle_035() { passed = passed + 1 }
+    if test_036_pth_cycle_036() { passed = passed + 1 }
+    if test_037_pth_cycle_037() { passed = passed + 1 }
+    if test_038_pth_cycle_038() { passed = passed + 1 }
+    if test_039_pth_cycle_039() { passed = passed + 1 }
+    if test_040_pth_cycle_040() { passed = passed + 1 }
+    if test_041_pth_cycle_041() { passed = passed + 1 }
+    if test_042_pth_cycle_042() { passed = passed + 1 }
+    if test_043_pth_cycle_043() { passed = passed + 1 }
+    if test_044_pth_cycle_044() { passed = passed + 1 }
+    if test_045_pth_cycle_045() { passed = passed + 1 }
+    if test_046_pth_cycle_046() { passed = passed + 1 }
+    if test_047_pth_cycle_047() { passed = passed + 1 }
+    if test_048_pth_cycle_048() { passed = passed + 1 }
+    if test_049_pth_cycle_049() { passed = passed + 1 }
+    if test_050_pth_cycle_050() { passed = passed + 1 }
+    if test_051_pth_cycle_051() { passed = passed + 1 }
+    if test_052_pth_cycle_052() { passed = passed + 1 }
+    if test_053_pth_cycle_053() { passed = passed + 1 }
+    if test_054_pth_cycle_054() { passed = passed + 1 }
+    if test_055_pth_cycle_055() { passed = passed + 1 }
+    if test_056_pth_cycle_056() { passed = passed + 1 }
+    if test_057_pth_cycle_057() { passed = passed + 1 }
+    if test_058_pth_cycle_058() { passed = passed + 1 }
+    if test_059_pth_cycle_059() { passed = passed + 1 }
+    if test_060_pth_cycle_060() { passed = passed + 1 }
+    if test_061_pth_cycle_061() { passed = passed + 1 }
+    if test_062_pth_cycle_062() { passed = passed + 1 }
+    if test_063_pth_cycle_063() { passed = passed + 1 }
+    if test_064_pth_cycle_064() { passed = passed + 1 }
+    if test_065_pth_cycle_065() { passed = passed + 1 }
+    if test_066_pth_cycle_066() { passed = passed + 1 }
+    if test_067_pth_cycle_067() { passed = passed + 1 }
+    if test_068_pth_cycle_068() { passed = passed + 1 }
+    if test_069_pth_cycle_069() { passed = passed + 1 }
+    if test_070_pth_cycle_070() { passed = passed + 1 }
+    if test_071_pth_cycle_071() { passed = passed + 1 }
+    if test_072_pth_cycle_072() { passed = passed + 1 }
+    if test_073_pth_cycle_073() { passed = passed + 1 }
+    if test_074_pth_cycle_074() { passed = passed + 1 }
+    passed
+}

@@ -1,0 +1,851 @@
+// self-hosted::tools::linter — Source linter for Sounio code
+//
+// Detects common code quality issues: long lines, TODO comments, magic numbers,
+// empty blocks, and more. Produces structured diagnostics with rule IDs,
+// severity levels, and source locations.
+//
+// All state is threaded through LintContext via &! references.
+
+// ============================================================================
+// SEVERITY CONSTANTS
+// ============================================================================
+
+fn LINT_ERROR() -> i64 { 0 }
+fn LINT_WARN()  -> i64 { 1 }
+fn LINT_INFO()  -> i64 { 2 }
+
+// ============================================================================
+// RULE ID CONSTANTS
+// ============================================================================
+
+fn LINT_UNUSED_VAR()     -> i64 { 1 }
+fn LINT_DEAD_CODE()      -> i64 { 2 }
+fn LINT_LONG_FUNCTION()  -> i64 { 3 }
+fn LINT_MAGIC_NUMBER()   -> i64 { 4 }
+fn LINT_DEEP_NESTING()   -> i64 { 5 }
+fn LINT_MISSING_EFFECT() -> i64 { 6 }
+fn LINT_SHADOW_VAR()     -> i64 { 7 }
+fn LINT_EMPTY_BLOCK()    -> i64 { 8 }
+fn LINT_TODO_COMMENT()   -> i64 { 9 }
+fn LINT_LINE_TOO_LONG()  -> i64 { 10 }
+
+// ============================================================================
+// STRUCTS
+// ============================================================================
+
+struct LintDiag {
+    rule_id:  i64,
+    severity: i64,
+    line:     i64,
+    col:      i64,
+    msg:      [i8; 256],
+    msg_len:  i64,
+}
+
+struct LintContext {
+    diags:       [LintDiag; 512],
+    diag_count:  i64,
+    source:      [i64; 65536],
+    source_len:  i64,
+    error_count: i64,
+    warn_count:  i64,
+}
+
+struct LintRule {
+    id:       i64,
+    enabled:  bool,
+    severity: i64,
+}
+
+struct LintConfig {
+    rules:      [LintRule; 128],
+    rule_count: i64,
+}
+
+// ============================================================================
+// HELPERS: empty diagnostic + empty rule
+// ============================================================================
+
+fn lint_empty_diag() -> LintDiag {
+    LintDiag {
+        rule_id:  0,
+        severity: 0,
+        line:     0,
+        col:      0,
+        msg:      [0; 256],  // [i8; 256]
+        msg_len:  0,
+    }
+}
+
+fn lint_empty_rule() -> LintRule {
+    LintRule {
+        id:       0,
+        enabled:  false,
+        severity: LINT_WARN(),
+    }
+}
+
+// ============================================================================
+// CONSTRUCTORS
+// ============================================================================
+
+fn lint_context_new() -> LintContext with Mut {
+    LintContext {
+        diags:       [lint_empty_diag(); 512],
+        diag_count:  0,
+        source:      [0; 65536],
+        source_len:  0,
+        error_count: 0,
+        warn_count:  0,
+    }
+}
+
+fn lint_config_default() -> LintConfig with Mut {
+    LintConfig {
+        rules:      [lint_empty_rule(); 128],
+        rule_count: 0,
+    }
+}
+
+// ============================================================================
+// CONFIG HELPERS
+// ============================================================================
+
+fn lint_config_disable_rule(cfg: &! LintConfig, rule_id: i64) -> () with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < cfg.rule_count {
+        if cfg.rules[i as usize].id == rule_id {
+            cfg.rules[i as usize].enabled = false
+        }
+        i = i + 1
+    }
+}
+
+fn lint_config_enable_rule(cfg: &! LintConfig, rule_id: i64) -> () with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < cfg.rule_count {
+        if cfg.rules[i as usize].id == rule_id {
+            cfg.rules[i as usize].enabled = true
+        }
+        i = i + 1
+    }
+}
+
+fn lint_config_add_rule(cfg: &! LintConfig, id: i64, enabled: bool, severity: i64) -> () with Mut, Panic, Div {
+    if cfg.rule_count >= 128 {
+        return ()
+    }
+    let idx = cfg.rule_count
+    cfg.rules[idx as usize] = LintRule { id: id, enabled: enabled, severity: severity }
+    cfg.rule_count = cfg.rule_count + 1
+}
+
+fn lint_config_is_enabled(cfg: &LintConfig, rule_id: i64) -> bool with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < cfg.rule_count {
+        if cfg.rules[i as usize].id == rule_id {
+            return cfg.rules[i as usize].enabled
+        }
+        i = i + 1
+    }
+    true
+}
+
+// ============================================================================
+// COPY STRING INTO i64 ARRAY
+// ============================================================================
+
+fn lint_copy_msg(dst: &![i8; 256], s: string) -> i64 with Mut, Panic, Div {
+    let slen = str_len(s)
+    var cap: i64 = 256
+    var n: i64 = slen
+    if n > cap { n = cap }
+    var i: i64 = 0
+    while i < n {
+        dst[i as usize] = str_char_at(s, i) as i8
+        i = i + 1
+    }
+    n
+}
+
+// ============================================================================
+// ADD DIAGNOSTIC
+// ============================================================================
+
+fn lint_add_diag(ctx: &! LintContext, rule_id: i64, sev: i64, line: i64, col: i64, msg: string) -> () with Mut, Panic, Div {
+    if ctx.diag_count >= 512 {
+        return ()
+    }
+    let idx = ctx.diag_count
+    ctx.diags[idx as usize] = lint_empty_diag()
+    ctx.diags[idx as usize].rule_id  = rule_id
+    ctx.diags[idx as usize].severity = sev
+    ctx.diags[idx as usize].line     = line
+    ctx.diags[idx as usize].col      = col
+    let n = lint_copy_msg(&! ctx.diags[idx as usize].msg, msg)
+    ctx.diags[idx as usize].msg_len  = n
+    ctx.diag_count = ctx.diag_count + 1
+    if sev == LINT_ERROR() {
+        ctx.error_count = ctx.error_count + 1
+    }
+    if sev == LINT_WARN() {
+        ctx.warn_count = ctx.warn_count + 1
+    }
+}
+
+// ============================================================================
+// ACCESSORS
+// ============================================================================
+
+fn lint_diag_count(ctx: &LintContext) -> i64 {
+    ctx.diag_count
+}
+
+fn lint_error_count(ctx: &LintContext) -> i64 {
+    ctx.error_count
+}
+
+fn lint_warn_count(ctx: &LintContext) -> i64 {
+    ctx.warn_count
+}
+
+fn lint_has_errors(ctx: &LintContext) -> bool {
+    ctx.error_count > 0
+}
+
+fn lint_diag_rule(ctx: &LintContext, idx: i64) -> i64 with Panic {
+    ctx.diags[idx as usize].rule_id
+}
+
+fn lint_diag_severity(ctx: &LintContext, idx: i64) -> i64 with Panic {
+    ctx.diags[idx as usize].severity
+}
+
+fn lint_diag_line(ctx: &LintContext, idx: i64) -> i64 with Panic {
+    ctx.diags[idx as usize].line
+}
+
+fn lint_diag_msg(ctx: &LintContext, idx: i64) -> string with Panic, Div {
+    str_from_bytes(ctx.diags[idx as usize].msg, ctx.diags[idx as usize].msg_len)
+}
+
+// ============================================================================
+// CLEAR
+// ============================================================================
+
+fn lint_clear(ctx: &! LintContext) -> () with Mut {
+    ctx.diag_count  = 0
+    ctx.error_count = 0
+    ctx.warn_count  = 0
+}
+
+// ============================================================================
+// LINT RULES
+// ============================================================================
+
+// Check whether a line exceeds max_len characters.
+fn lint_check_line_length(ctx: &! LintContext, line: string, line_num: i64, max_len: i64) -> () with Mut, Panic, Div {
+    let n = str_len(line)
+    if n > max_len {
+        lint_add_diag(ctx, LINT_LINE_TOO_LONG(), LINT_WARN(), line_num, max_len + 1, "line too long")
+    }
+}
+
+// Check whether a line contains a TODO comment.
+fn lint_contains_todo(line: string) -> bool with Mut, Panic, Div {
+    let n = str_len(line)
+    if n < 4 {
+        return false
+    }
+    var i: i64 = 0
+    while i <= n - 4 {
+        let c0 = str_char_at(line, i)
+        let c1 = str_char_at(line, i + 1)
+        let c2 = str_char_at(line, i + 2)
+        let c3 = str_char_at(line, i + 3)
+        // 'T'=84 'O'=79 'D'=68 'O'=79
+        if c0 == 84 && c1 == 79 && c2 == 68 && c3 == 79 {
+            return true
+        }
+        i = i + 1
+    }
+    false
+}
+
+fn lint_check_todo(ctx: &! LintContext, line: string, line_num: i64) -> () with Mut, Panic, Div {
+    if lint_contains_todo(line) {
+        lint_add_diag(ctx, LINT_TODO_COMMENT(), LINT_INFO(), line_num, 0, "TODO comment found")
+    }
+}
+
+// Check whether a token string looks like a bare magic number.
+// A token is a magic number if it starts with a digit but is not 0 or 1.
+fn lint_is_digit(c: i64) -> bool {
+    c >= 48 && c <= 57
+}
+
+fn lint_is_magic_number(token: string) -> bool with Panic, Div {
+    let n = str_len(token)
+    if n == 0 {
+        return false
+    }
+    let first = str_char_at(token, 0)
+    if !lint_is_digit(first) {
+        return false
+    }
+    // Single character '0' or '1' are not magic
+    if n == 1 {
+        let v = first - 48
+        if v == 0 || v == 1 {
+            return false
+        }
+    }
+    true
+}
+
+fn lint_check_magic_number(ctx: &! LintContext, token: string, line: i64, col: i64) -> () with Mut, Panic, Div {
+    if lint_is_magic_number(token) {
+        lint_add_diag(ctx, LINT_MAGIC_NUMBER(), LINT_WARN(), line, col, "magic number")
+    }
+}
+
+// Scan source string for an empty block '{ }' or '{}'.
+fn lint_check_empty_block(ctx: &! LintContext, source: string, pos: i64, line: i64) -> () with Mut, Panic, Div {
+    let n = str_len(source)
+    if pos < 0 || pos >= n {
+        return ()
+    }
+    var i: i64 = pos
+    while i < n {
+        let c = str_char_at(source, i)
+        // '{'=123
+        if c == 123 {
+            // scan forward for '}' skipping spaces
+            var j: i64 = i + 1
+            var only_space: bool = true
+            while j < n && only_space {
+                let d = str_char_at(source, j)
+                // '}'=125 ' '=32 '\t'=9 '\n'=10 '\r'=13
+                if d == 125 {
+                    // found closing brace — empty block
+                    lint_add_diag(ctx, LINT_EMPTY_BLOCK(), LINT_WARN(), line, i, "empty block")
+                    only_space = false
+                } else if d == 32 || d == 9 || d == 10 || d == 13 {
+                    j = j + 1
+                } else {
+                    only_space = false
+                }
+            }
+        }
+        i = i + 1
+    }
+}
+
+// ============================================================================
+// COUNT DIAGNOSTICS BY SEVERITY
+// ============================================================================
+
+fn lint_count_by_severity(ctx: &LintContext, sev: i64) -> i64 with Mut, Panic, Div {
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < ctx.diag_count {
+        if ctx.diags[i as usize].severity == sev {
+            count = count + 1
+        }
+        i = i + 1
+    }
+    count
+}
+
+fn lint_info_count(ctx: &LintContext) -> i64 with Mut, Panic, Div {
+    lint_count_by_severity(ctx, LINT_INFO())
+}
+
+// Count diagnostics for a specific rule.
+fn lint_count_by_rule(ctx: &LintContext, rule_id: i64) -> i64 with Mut, Panic, Div {
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < ctx.diag_count {
+        if ctx.diags[i as usize].rule_id == rule_id {
+            count = count + 1
+        }
+        i = i + 1
+    }
+    count
+}
+
+// Return true if any diagnostic has the given rule_id.
+fn lint_has_rule(ctx: &LintContext, rule_id: i64) -> bool with Mut, Panic, Div {
+    lint_count_by_rule(ctx, rule_id) > 0
+}
+
+// ============================================================================
+// TESTS
+// ============================================================================
+
+fn test_001_context_new_empty() -> bool with Mut {
+    var ctx = lint_context_new()
+    lint_diag_count(&ctx) == 0
+}
+
+fn test_002_error_count_zero() -> bool with Mut {
+    var ctx = lint_context_new()
+    lint_error_count(&ctx) == 0
+}
+
+fn test_003_warn_count_zero() -> bool with Mut {
+    var ctx = lint_context_new()
+    lint_warn_count(&ctx) == 0
+}
+
+fn test_004_has_errors_false() -> bool with Mut {
+    var ctx = lint_context_new()
+    !lint_has_errors(&ctx)
+}
+
+fn do_add_error(ctx: &! LintContext) -> () with Mut, Panic, Div {
+    lint_add_diag(ctx, LINT_LINE_TOO_LONG(), LINT_ERROR(), 1, 80, "err")
+}
+
+fn test_005_add_error_increments_count() -> bool with Mut, Panic, Div {
+    var ctx = lint_context_new()
+    do_add_error(&! ctx)
+    lint_diag_count(&ctx) == 1
+}
+
+fn test_006_add_error_increments_error_count() -> bool with Mut, Panic, Div {
+    var ctx = lint_context_new()
+    do_add_error(&! ctx)
+    lint_error_count(&ctx) == 1
+}
+
+fn test_007_has_errors_after_error() -> bool with Mut, Panic, Div {
+    var ctx = lint_context_new()
+    do_add_error(&! ctx)
+    lint_has_errors(&ctx)
+}
+
+fn do_add_warn(ctx: &! LintContext) -> () with Mut, Panic, Div {
+    lint_add_diag(ctx, LINT_TODO_COMMENT(), LINT_WARN(), 2, 0, "warn")
+}
+
+fn test_008_add_warn_increments_warn_count() -> bool with Mut, Panic, Div {
+    var ctx = lint_context_new()
+    do_add_warn(&! ctx)
+    lint_warn_count(&ctx) == 1
+}
+
+fn test_009_add_warn_not_error() -> bool with Mut, Panic, Div {
+    var ctx = lint_context_new()
+    do_add_warn(&! ctx)
+    lint_error_count(&ctx) == 0
+}
+
+fn test_010_diag_rule_id() -> bool with Mut, Panic, Div {
+    var ctx = lint_context_new()
+    do_add_error(&! ctx)
+    lint_diag_rule(&ctx, 0) == LINT_LINE_TOO_LONG()
+}
+
+fn test_011_diag_severity() -> bool with Mut, Panic, Div {
+    var ctx = lint_context_new()
+    do_add_error(&! ctx)
+    lint_diag_severity(&ctx, 0) == LINT_ERROR()
+}
+
+fn test_012_diag_line() -> bool with Mut, Panic, Div {
+    var ctx = lint_context_new()
+    do_add_error(&! ctx)
+    lint_diag_line(&ctx, 0) == 1
+}
+
+fn test_013_clear_resets_counts() -> bool with Mut, Panic, Div {
+    var ctx = lint_context_new()
+    do_add_error(&! ctx)
+    do_add_warn(&! ctx)
+    lint_clear(&! ctx)
+    lint_diag_count(&ctx) == 0 && lint_error_count(&ctx) == 0 && lint_warn_count(&ctx) == 0
+}
+
+fn do_check_line_len(ctx: &! LintContext, line: string, lnum: i64, max: i64) -> () with Mut, Panic, Div {
+    lint_check_line_length(ctx, line, lnum, max)
+}
+
+fn test_014_line_at_limit_no_diag() -> bool with Mut, Panic, Div {
+    var ctx = lint_context_new()
+    // "hello" has length 5, limit 5 — not over
+    do_check_line_len(&! ctx, "hello", 1, 5)
+    lint_diag_count(&ctx) == 0
+}
+
+fn test_015_line_over_limit_diag() -> bool with Mut, Panic, Div {
+    var ctx = lint_context_new()
+    // "hello!" has length 6, limit 5 — over
+    do_check_line_len(&! ctx, "hello!", 1, 5)
+    lint_diag_count(&ctx) == 1
+}
+
+fn test_016_line_over_limit_rule_id() -> bool with Mut, Panic, Div {
+    var ctx = lint_context_new()
+    do_check_line_len(&! ctx, "toolongline!", 3, 5)
+    lint_diag_rule(&ctx, 0) == LINT_LINE_TOO_LONG()
+}
+
+fn test_017_line_over_limit_severity_warn() -> bool with Mut, Panic, Div {
+    var ctx = lint_context_new()
+    do_check_line_len(&! ctx, "toolongline!", 3, 5)
+    lint_diag_severity(&ctx, 0) == LINT_WARN()
+}
+
+fn test_018_line_empty_no_diag() -> bool with Mut, Panic, Div {
+    var ctx = lint_context_new()
+    do_check_line_len(&! ctx, "", 1, 80)
+    lint_diag_count(&ctx) == 0
+}
+
+fn do_check_todo(ctx: &! LintContext, line: string, lnum: i64) -> () with Mut, Panic, Div {
+    lint_check_todo(ctx, line, lnum)
+}
+
+fn test_019_todo_detected() -> bool with Mut, Panic, Div {
+    var ctx = lint_context_new()
+    do_check_todo(&! ctx, "// TODO fix this", 5)
+    lint_diag_count(&ctx) == 1
+}
+
+fn test_020_todo_rule_id() -> bool with Mut, Panic, Div {
+    var ctx = lint_context_new()
+    do_check_todo(&! ctx, "// TODO later", 1)
+    lint_diag_rule(&ctx, 0) == LINT_TODO_COMMENT()
+}
+
+fn test_021_todo_severity_info() -> bool with Mut, Panic, Div {
+    var ctx = lint_context_new()
+    do_check_todo(&! ctx, "// TODO", 1)
+    lint_diag_severity(&ctx, 0) == LINT_INFO()
+}
+
+fn test_022_no_todo_no_diag() -> bool with Mut, Panic, Div {
+    var ctx = lint_context_new()
+    do_check_todo(&! ctx, "let x = 5", 1)
+    lint_diag_count(&ctx) == 0
+}
+
+fn test_023_todo_in_middle() -> bool with Mut, Panic, Div {
+    var ctx = lint_context_new()
+    do_check_todo(&! ctx, "x = 1 // TODO remove", 2)
+    lint_diag_count(&ctx) == 1
+}
+
+fn test_024_short_line_no_todo() -> bool with Mut, Panic, Div {
+    var ctx = lint_context_new()
+    do_check_todo(&! ctx, "TOD", 1)
+    lint_diag_count(&ctx) == 0
+}
+
+fn do_check_magic(ctx: &! LintContext, tok: string, line: i64, col: i64) -> () with Mut, Panic, Div {
+    lint_check_magic_number(ctx, tok, line, col)
+}
+
+fn test_025_magic_number_detected() -> bool with Mut, Panic, Div {
+    var ctx = lint_context_new()
+    do_check_magic(&! ctx, "42", 3, 5)
+    lint_diag_count(&ctx) == 1
+}
+
+fn test_026_magic_number_rule_id() -> bool with Mut, Panic, Div {
+    var ctx = lint_context_new()
+    do_check_magic(&! ctx, "99", 1, 0)
+    lint_diag_rule(&ctx, 0) == LINT_MAGIC_NUMBER()
+}
+
+fn test_027_magic_zero_no_diag() -> bool with Mut, Panic, Div {
+    var ctx = lint_context_new()
+    do_check_magic(&! ctx, "0", 1, 0)
+    lint_diag_count(&ctx) == 0
+}
+
+fn test_028_magic_one_no_diag() -> bool with Mut, Panic, Div {
+    var ctx = lint_context_new()
+    do_check_magic(&! ctx, "1", 1, 0)
+    lint_diag_count(&ctx) == 0
+}
+
+fn test_029_magic_not_number_no_diag() -> bool with Mut, Panic, Div {
+    var ctx = lint_context_new()
+    do_check_magic(&! ctx, "abc", 1, 0)
+    lint_diag_count(&ctx) == 0
+}
+
+fn test_030_magic_empty_no_diag() -> bool with Mut, Panic, Div {
+    var ctx = lint_context_new()
+    do_check_magic(&! ctx, "", 1, 0)
+    lint_diag_count(&ctx) == 0
+}
+
+fn test_031_magic_number_warn_severity() -> bool with Mut, Panic, Div {
+    var ctx = lint_context_new()
+    do_check_magic(&! ctx, "42", 1, 0)
+    lint_diag_severity(&ctx, 0) == LINT_WARN()
+}
+
+fn test_032_magic_number_col() -> bool with Mut, Panic, Div {
+    var ctx = lint_context_new()
+    do_check_magic(&! ctx, "255", 10, 7)
+    lint_diag_line(&ctx, 0) == 10
+}
+
+fn do_check_empty_block(ctx: &! LintContext, src: string, pos: i64, ln: i64) -> () with Mut, Panic, Div {
+    lint_check_empty_block(ctx, src, pos, ln)
+}
+
+fn test_033_empty_block_detected() -> bool with Mut, Panic, Div {
+    var ctx = lint_context_new()
+    do_check_empty_block(&! ctx, "{}", 0, 1)
+    lint_diag_count(&ctx) == 1
+}
+
+fn test_034_empty_block_rule_id() -> bool with Mut, Panic, Div {
+    var ctx = lint_context_new()
+    do_check_empty_block(&! ctx, "{}", 0, 1)
+    lint_diag_rule(&ctx, 0) == LINT_EMPTY_BLOCK()
+}
+
+fn test_035_empty_block_with_spaces() -> bool with Mut, Panic, Div {
+    var ctx = lint_context_new()
+    do_check_empty_block(&! ctx, "{   }", 0, 1)
+    lint_diag_count(&ctx) == 1
+}
+
+fn test_036_non_empty_block_no_diag() -> bool with Mut, Panic, Div {
+    var ctx = lint_context_new()
+    do_check_empty_block(&! ctx, "{ x = 1 }", 0, 1)
+    lint_diag_count(&ctx) == 0
+}
+
+fn test_037_no_brace_no_diag() -> bool with Mut, Panic, Div {
+    var ctx = lint_context_new()
+    do_check_empty_block(&! ctx, "let x = 5", 0, 1)
+    lint_diag_count(&ctx) == 0
+}
+
+fn test_038_multiple_diags() -> bool with Mut, Panic, Div {
+    var ctx = lint_context_new()
+    do_add_error(&! ctx)
+    do_add_warn(&! ctx)
+    do_check_todo(&! ctx, "// TODO", 3)
+    lint_diag_count(&ctx) == 3
+}
+
+fn test_039_multiple_error_count() -> bool with Mut, Panic, Div {
+    var ctx = lint_context_new()
+    do_add_error(&! ctx)
+    do_add_error(&! ctx)
+    lint_error_count(&ctx) == 2
+}
+
+fn test_040_multiple_warn_count() -> bool with Mut, Panic, Div {
+    var ctx = lint_context_new()
+    do_add_warn(&! ctx)
+    do_add_warn(&! ctx)
+    do_add_warn(&! ctx)
+    lint_warn_count(&ctx) == 3
+}
+
+fn test_041_info_count() -> bool with Mut, Panic, Div {
+    var ctx = lint_context_new()
+    lint_add_diag(&! ctx, LINT_TODO_COMMENT(), LINT_INFO(), 1, 0, "info")
+    lint_info_count(&ctx) == 1
+}
+
+fn test_042_info_not_counted_as_error() -> bool with Mut, Panic, Div {
+    var ctx = lint_context_new()
+    lint_add_diag(&! ctx, LINT_TODO_COMMENT(), LINT_INFO(), 1, 0, "info")
+    lint_error_count(&ctx) == 0
+}
+
+fn test_043_count_by_rule() -> bool with Mut, Panic, Div {
+    var ctx = lint_context_new()
+    do_check_todo(&! ctx, "// TODO", 1)
+    do_check_todo(&! ctx, "// TODO again", 2)
+    lint_count_by_rule(&ctx, LINT_TODO_COMMENT()) == 2
+}
+
+fn test_044_has_rule_true() -> bool with Mut, Panic, Div {
+    var ctx = lint_context_new()
+    do_check_todo(&! ctx, "// TODO", 1)
+    lint_has_rule(&ctx, LINT_TODO_COMMENT())
+}
+
+fn test_045_has_rule_false_when_absent() -> bool with Mut, Panic, Div {
+    var ctx = lint_context_new()
+    do_check_todo(&! ctx, "// TODO", 1)
+    !lint_has_rule(&ctx, LINT_MAGIC_NUMBER())
+}
+
+fn test_046_config_default_empty() -> bool with Mut {
+    var cfg = lint_config_default()
+    cfg.rule_count == 0
+}
+
+fn do_add_rule(cfg: &! LintConfig, id: i64, en: bool, sev: i64) -> () with Mut, Panic, Div {
+    lint_config_add_rule(cfg, id, en, sev)
+}
+
+fn test_047_config_add_rule() -> bool with Mut, Panic, Div {
+    var cfg = lint_config_default()
+    do_add_rule(&! cfg, LINT_LINE_TOO_LONG(), true, LINT_WARN())
+    cfg.rule_count == 1
+}
+
+fn test_048_config_is_enabled_true() -> bool with Mut, Panic, Div {
+    var cfg = lint_config_default()
+    do_add_rule(&! cfg, LINT_LINE_TOO_LONG(), true, LINT_WARN())
+    lint_config_is_enabled(&cfg, LINT_LINE_TOO_LONG())
+}
+
+fn test_049_config_disable_rule() -> bool with Mut, Panic, Div {
+    var cfg = lint_config_default()
+    do_add_rule(&! cfg, LINT_LINE_TOO_LONG(), true, LINT_WARN())
+    lint_config_disable_rule(&! cfg, LINT_LINE_TOO_LONG())
+    !lint_config_is_enabled(&cfg, LINT_LINE_TOO_LONG())
+}
+
+fn test_050_config_enable_rule() -> bool with Mut, Panic, Div {
+    var cfg = lint_config_default()
+    do_add_rule(&! cfg, LINT_LINE_TOO_LONG(), false, LINT_WARN())
+    lint_config_enable_rule(&! cfg, LINT_LINE_TOO_LONG())
+    lint_config_is_enabled(&cfg, LINT_LINE_TOO_LONG())
+}
+
+fn test_051_config_unknown_rule_enabled_by_default() -> bool with Mut, Panic, Div {
+    var cfg = lint_config_default()
+    lint_config_is_enabled(&cfg, LINT_MAGIC_NUMBER())
+}
+
+fn test_052_clear_then_add() -> bool with Mut, Panic, Div {
+    var ctx = lint_context_new()
+    do_add_error(&! ctx)
+    lint_clear(&! ctx)
+    do_add_warn(&! ctx)
+    lint_diag_count(&ctx) == 1 && lint_warn_count(&ctx) == 1 && lint_error_count(&ctx) == 0
+}
+
+fn test_053_diag_line_stored() -> bool with Mut, Panic, Div {
+    var ctx = lint_context_new()
+    lint_add_diag(&! ctx, LINT_EMPTY_BLOCK(), LINT_WARN(), 42, 7, "empty")
+    lint_diag_line(&ctx, 0) == 42
+}
+
+fn test_054_line_length_line_number_stored() -> bool with Mut, Panic, Div {
+    var ctx = lint_context_new()
+    do_check_line_len(&! ctx, "toolongline!!", 17, 5)
+    lint_diag_line(&ctx, 0) == 17
+}
+
+fn test_055_magic_number_100() -> bool with Mut, Panic, Div {
+    var ctx = lint_context_new()
+    do_check_magic(&! ctx, "100", 1, 0)
+    lint_diag_count(&ctx) == 1
+}
+
+fn test_056_line_exactly_80() -> bool with Mut, Panic, Div {
+    var ctx = lint_context_new()
+    // "12345678" has length 8, limit 8 — exactly at limit, no diag
+    do_check_line_len(&! ctx, "12345678", 1, 8)
+    lint_diag_count(&ctx) == 0
+}
+
+fn test_057_line_81_chars_over_80() -> bool with Mut, Panic, Div {
+    var ctx = lint_context_new()
+    // "123456789" has length 9, limit 8 — over
+    do_check_line_len(&! ctx, "123456789", 1, 8)
+    lint_diag_count(&ctx) == 1
+}
+
+fn test_058_count_by_severity_error() -> bool with Mut, Panic, Div {
+    var ctx = lint_context_new()
+    do_add_error(&! ctx)
+    do_add_error(&! ctx)
+    do_add_warn(&! ctx)
+    lint_count_by_severity(&ctx, LINT_ERROR()) == 2
+}
+
+fn test_059_count_by_severity_warn() -> bool with Mut, Panic, Div {
+    var ctx = lint_context_new()
+    do_add_error(&! ctx)
+    do_add_warn(&! ctx)
+    do_add_warn(&! ctx)
+    lint_count_by_severity(&ctx, LINT_WARN()) == 2
+}
+
+fn test_060_lint_constants_distinct() -> bool {
+    let e = LINT_ERROR()
+    let w = LINT_WARN()
+    let i = LINT_INFO()
+    e != w && w != i && e != i
+}
+
+fn test_061_rule_constants_distinct() -> bool {
+    let a = LINT_UNUSED_VAR()
+    let b = LINT_DEAD_CODE()
+    let c = LINT_LONG_FUNCTION()
+    a != b && b != c && a != c
+}
+
+fn test_062_rule_constants_nonzero() -> bool {
+    LINT_UNUSED_VAR() > 0 && LINT_DEAD_CODE() > 0 && LINT_LINE_TOO_LONG() > 0
+}
+
+fn test_063_empty_block_in_source() -> bool with Mut, Panic, Div {
+    var ctx = lint_context_new()
+    do_check_empty_block(&! ctx, "fn foo() { }", 0, 5)
+    lint_diag_count(&ctx) >= 1
+}
+
+fn test_064_no_empty_block_in_full_source() -> bool with Mut, Panic, Div {
+    var ctx = lint_context_new()
+    do_check_empty_block(&! ctx, "fn foo() { let x = 1 }", 0, 5)
+    lint_diag_count(&ctx) == 0
+}
+
+fn test_065_add_512_diags_capacity() -> bool with Mut, Panic, Div {
+    var ctx = lint_context_new()
+    var i: i64 = 0
+    while i < 512 {
+        lint_add_diag(&! ctx, LINT_LINE_TOO_LONG(), LINT_WARN(), i, 0, "x")
+        i = i + 1
+    }
+    lint_diag_count(&ctx) == 512
+}
+
+fn test_066_add_beyond_capacity_no_panic() -> bool with Mut, Panic, Div {
+    var ctx = lint_context_new()
+    var i: i64 = 0
+    while i < 513 {
+        lint_add_diag(&! ctx, LINT_LINE_TOO_LONG(), LINT_WARN(), i, 0, "x")
+        i = i + 1
+    }
+    lint_diag_count(&ctx) == 512
+}
+
+fn test_067_empty_source_no_diag() -> bool with Mut, Panic, Div {
+    var ctx = lint_context_new()
+    do_check_empty_block(&! ctx, "", 0, 1)
+    lint_diag_count(&ctx) == 0
+}
+
+fn test_068_todo_case_sensitive() -> bool with Mut, Panic, Div {
+    var ctx = lint_context_new()
+    // "todo" lowercase — should NOT trigger (only TODO uppercase)
+    do_check_todo(&! ctx, "// todo fix", 1)
+    lint_diag_count(&ctx) == 0
+}
+
+fn test_069_multiple_rules_same_context() -> bool with Mut, Panic, Div {
+    var ctx = lint_context_new()
+    do_check_todo(&! ctx, "// TODO", 1)
+    do_check_magic(&! ctx, "42", 2, 0)
+    do_check_line_len(&! ctx, "toolongline!", 3, 5)
+    lint_diag_count(&ctx) == 3
+}
