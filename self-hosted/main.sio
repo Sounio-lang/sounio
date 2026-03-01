@@ -398,6 +398,62 @@ fn write_elf_to_file(path: string, elf: Elf64Binary) -> bool with IO, Mut {
     write_bytes_to_file(path, elf.bytes, elf.len)
 }
 
+// Read a single environment variable from /proc/self/environ.
+// Returns empty string when not found or unavailable.
+fn main_read_env(key: string) -> string with IO, Mut, Div, Panic {
+    let env_path = "/proc/self/environ"
+    let size = file_size(env_path)
+    if size <= 0 {
+        return ""
+    }
+    let data = read_file(env_path)
+    let key_len = str_len(key)
+    if key_len <= 0 {
+        return ""
+    }
+
+    var i: i64 = 0
+    while i < size {
+        var j: i64 = 0
+        var matches: bool = true
+        while j < key_len {
+            if i + j >= size {
+                matches = false
+                break
+            }
+            if data[(i + j) as usize] != (str_char_at(key, j) as i8) {
+                matches = false
+                break
+            }
+            j = j + 1
+        }
+
+        if matches && i + key_len < size && data[(i + key_len) as usize] == (61 as i8) {
+            let value_start = i + key_len + 1
+            var value_end = value_start
+            while value_end < size && data[value_end as usize] != 0 {
+                value_end = value_end + 1
+            }
+
+            var out: [i8; 512] = [0; 512]
+            var out_len: i64 = 0
+            var k = value_start
+            while k < value_end && out_len < 512 {
+                out[out_len as usize] = data[k as usize]
+                out_len = out_len + 1
+                k = k + 1
+            }
+            return str_from_bytes(out, out_len)
+        }
+
+        while i < size && data[i as usize] != 0 {
+            i = i + 1
+        }
+        i = i + 1
+    }
+    ""
+}
+
 // ============================================================================
 // COMPILE PIPELINE (--compile mode)
 // ============================================================================
@@ -521,7 +577,46 @@ fn run_compile_pipeline_with_output(path: string, output_path: string, fast_skip
 // COMPILE PIPELINE (NATIVE) — Phase 6: Native ELF Backend
 // ============================================================================
 
-fn run_compile_pipeline_native(path: string, output_path: string, fast_skip_blocks: bool, show_item_count: bool) -> i32 with IO, Mut, Div, Panic, Alloc {
+fn native_trace_output_path() -> string {
+    let override_path = main_read_env("SOUNIO_NATIVE_DECISION_TRACE_PATH")
+    if str_len(override_path) > 0 {
+        override_path
+    } else {
+        "artifacts/omega/native_decision_trace.v1.json"
+    }
+}
+
+fn native_write_decision_trace(spec: NativeTargetSpec, backend: string, ok: bool, error_code: i64) -> bool with IO, Mut, Panic, Div {
+    io_write_native_decision_trace(
+        native_trace_output_path(),
+        spec.requested_target,
+        spec.resolved_target,
+        native_matrix_mode_string(spec.matrix_mode),
+        native_target_source_string(spec.source_id),
+        spec.fallback_reason,
+        backend,
+        ok,
+        error_code
+    )
+}
+
+fn native_print_dispatch(spec: NativeTargetSpec) with IO {
+    print("Native dispatch: requested=")
+    print(spec.requested_target)
+    print(" resolved=")
+    print(spec.resolved_target)
+    print(" matrix=")
+    print(native_matrix_mode_string(spec.matrix_mode))
+    print(" source=")
+    print(native_target_source_string(spec.source_id))
+    if str_len(spec.fallback_reason) > 0 {
+        print(" fallback=")
+        print(spec.fallback_reason)
+    }
+    print("\n")
+}
+
+fn run_compile_pipeline_native(path: string, output_path: string, fast_skip_blocks: bool, show_item_count: bool, target_spec: NativeTargetSpec) -> i32 with IO, Mut, Div, Panic, Alloc {
     let state = read_source_file(path)
     if fast_skip_blocks {
         parser_set_fast_skip_blocks(true)
@@ -533,6 +628,13 @@ fn run_compile_pipeline_native(path: string, output_path: string, fast_skip_bloc
     maybe_print_fast_skip_blocks_warning(fast_skip_blocks)
     maybe_print_item_count(prog, show_item_count)
     if fail_if_parse_errors() {
+        let trace_ok = native_write_decision_trace(target_spec, "native", false, ERR_OK())
+        if !trace_ok {
+            print("Error: Failed to write native decision trace to ")
+            print(native_trace_output_path())
+            print("\n")
+            return 1
+        }
         return 1
     }
 
@@ -542,6 +644,13 @@ fn run_compile_pipeline_native(path: string, output_path: string, fast_skip_bloc
         print("Resolve errors: ")
         print_int(resolve_result.error_count)
         print("\n")
+        let trace_ok = native_write_decision_trace(target_spec, "native", false, ERR_OK())
+        if !trace_ok {
+            print("Error: Failed to write native decision trace to ")
+            print(native_trace_output_path())
+            print("\n")
+            return 1
+        }
         return 1
     }
 
@@ -551,6 +660,13 @@ fn run_compile_pipeline_native(path: string, output_path: string, fast_skip_bloc
         print("Check errors: ")
         print_int(check_result.error_count)
         print("\n")
+        let trace_ok = native_write_decision_trace(target_spec, "native", false, ERR_OK())
+        if !trace_ok {
+            print("Error: Failed to write native decision trace to ")
+            print(native_trace_output_path())
+            print("\n")
+            return 1
+        }
         return 1
     }
 
@@ -560,23 +676,55 @@ fn run_compile_pipeline_native(path: string, output_path: string, fast_skip_bloc
         print("Lower errors: ")
         print_int(lower_result.error_count)
         print("\n")
+        let trace_ok = native_write_decision_trace(target_spec, "native", false, ERR_OK())
+        if !trace_ok {
+            print("Error: Failed to write native decision trace to ")
+            print(native_trace_output_path())
+            print("\n")
+            return 1
+        }
         return 1
     }
 
-    // PHASE 6: Compile to native ELF64 binary
-    print("Compiling to native x86-64 ELF...\n")
-    let base_addr: i64 = 4194304  // 0x400000 - standard Linux load address
-    let elf = compile_to_elf(lower_result.module, base_addr)
+    // Native compile dispatch
+    let native_result = compile_native(lower_result.module, target_spec)
+    if !native_result.ok {
+        let trace_ok = native_write_decision_trace(target_spec, "native", false, native_result.error_code)
+        if !trace_ok {
+            print("Error: Failed to write native decision trace to ")
+            print(native_trace_output_path())
+            print("\n")
+            return 1
+        }
+        print("Native compilation failed: ")
+        print(native_result.error_msg)
+        print("\n")
+        return 1
+    }
 
-    print("ELF size: ")
-    print_int(elf.len)
+    print("Native binary size: ")
+    print_int(native_result.len)
     print(" bytes\n")
 
-    // Write ELF bytes to disk
-    let write_ok = write_elf_to_file(output_path, elf)
+    let write_ok = io_write_native_binary(output_path, native_result.bytes, native_result.len)
     if !write_ok {
-        print("Error: Failed to write ELF to ")
+        let trace_ok = native_write_decision_trace(target_spec, "native", false, ERR_OK())
+        if !trace_ok {
+            print("Error: Failed to write native decision trace to ")
+            print(native_trace_output_path())
+            print("\n")
+            return 1
+        }
+        print("Error: Failed to write native binary to ")
         print(output_path)
+        print("\n")
+        return 1
+    }
+
+    let trace_ok = native_write_decision_trace(target_spec, "native", true, ERR_OK())
+    if !trace_ok {
+        print("Error: Failed to write native decision trace to ")
+        print(native_trace_output_path())
         print("\n")
         return 1
     }
@@ -1126,7 +1274,8 @@ fn print_cli_help() with IO {
     print("    lex <file>             Tokenize source file\n")
     print("    parse <file>           Parse source file to AST\n")
     print("    resolve <file>         Resolve names and scopes\n")
-    print("    compile <file>         Compile to SOIR bytecode\n")
+    print("    compile [--backend=native] [--target=<...>] [--matrix=<...>] <file>\n")
+    print("                           Compile to SOIR bytecode or native backend via dispatcher\n")
     print("    compile-multi <file>   Compile with imports resolved\n\n")
     print("EXAMPLES:\n")
     print("    sounio check examples/hello.sio\n")
@@ -1260,7 +1409,7 @@ fn main() -> i32 with IO, Mut, Div, Panic, Alloc {
 
     if str_eq(cmd, "compile") {
         if argc < 2 {
-            print("Usage: sounio compile [--backend=native] [--fast-skip-blocks] [--no-item-count] [-o output] <path.sio>\n")
+            print("Usage: sounio compile [--backend=native] [--target=<native-auto|x86_64-linux|aarch64-macos|riscv64-linux>] [--matrix=<auto|off|apple-amx|intel-amx|ime|vme|ame>] [--fast-skip-blocks] [--no-item-count] [-o output] <path.sio>\n")
             return 1
         }
 
@@ -1269,6 +1418,10 @@ fn main() -> i32 with IO, Mut, Div, Panic, Alloc {
         var use_multimodule: bool = false
         var fast_skip_blocks: bool = false
         var show_item_count: bool = true
+        var requested_target: string = "native-auto"
+        var requested_matrix: string = "auto"
+        var explicit_target: bool = false
+        var explicit_matrix: bool = false
         var output_path: string = "a.out"
         var output_explicit: bool = false
         var source_path: string = ""
@@ -1279,6 +1432,30 @@ fn main() -> i32 with IO, Mut, Div, Panic, Alloc {
 
             if str_eq(arg, "--backend=native") {
                 use_native = true
+                arg_idx = arg_idx + 1
+            } else if str_eq(arg, "--target") {
+                if arg_idx + 1 >= argc {
+                    print("Error: --target requires an argument\n")
+                    return 1
+                }
+                requested_target = get_arg(arg_idx + 1)
+                explicit_target = true
+                arg_idx = arg_idx + 2
+            } else if starts_with(arg, "--target=") {
+                requested_target = str_slice(arg, 9, str_len(arg))
+                explicit_target = true
+                arg_idx = arg_idx + 1
+            } else if str_eq(arg, "--matrix") {
+                if arg_idx + 1 >= argc {
+                    print("Error: --matrix requires an argument\n")
+                    return 1
+                }
+                requested_matrix = get_arg(arg_idx + 1)
+                explicit_matrix = true
+                arg_idx = arg_idx + 2
+            } else if starts_with(arg, "--matrix=") {
+                requested_matrix = str_slice(arg, 9, str_len(arg))
+                explicit_matrix = true
                 arg_idx = arg_idx + 1
             } else if str_eq(arg, "--fast-skip-blocks") {
                 fast_skip_blocks = true
@@ -1310,9 +1487,14 @@ fn main() -> i32 with IO, Mut, Div, Panic, Alloc {
             return 1
         }
 
+        if (explicit_target || explicit_matrix) && !use_native {
+            print("Error: target_flags_require_native_backend\n")
+            return 1
+        }
+
         // Route to appropriate pipeline
         if use_multimodule && use_native {
-            return compile_multimodule_native(source_path, output_path)
+            return compile_multimodule_native(source_path, output_path, requested_target, requested_matrix, explicit_target)
         }
         if use_multimodule {
             let result = compile_multimodule_program(source_path)
@@ -1329,7 +1511,9 @@ fn main() -> i32 with IO, Mut, Div, Panic, Alloc {
             }
         }
         if use_native {
-            return run_compile_pipeline_native(source_path, output_path, fast_skip_blocks, show_item_count)
+            let target_spec = native_resolve_target(requested_target, requested_matrix, explicit_target)
+            native_print_dispatch(target_spec)
+            return run_compile_pipeline_native(source_path, output_path, fast_skip_blocks, show_item_count, target_spec)
         } else {
             if output_explicit {
                 return run_compile_pipeline_with_output(source_path, output_path, fast_skip_blocks, show_item_count)

@@ -18,6 +18,313 @@ fn empty_label_patch() -> LabelPatch {
 }
 
 // ============================================================================
+// Native dispatcher contracts (Sprint 1)
+// ============================================================================
+
+fn ARCH_UNKNOWN() -> i64 { 0 }
+fn ARCH_X86_64() -> i64 { 1 }
+fn ARCH_AARCH64() -> i64 { 2 }
+fn ARCH_RISCV64() -> i64 { 3 }
+
+fn OS_UNKNOWN() -> i64 { 0 }
+fn OS_LINUX() -> i64 { 1 }
+fn OS_MACOS() -> i64 { 2 }
+
+fn MATRIX_AUTO() -> i64 { 0 }
+fn MATRIX_OFF() -> i64 { 1 }
+fn MATRIX_APPLE_AMX() -> i64 { 2 }
+fn MATRIX_INTEL_AMX() -> i64 { 3 }
+fn MATRIX_IME() -> i64 { 4 }
+fn MATRIX_VME() -> i64 { 5 }
+fn MATRIX_AME() -> i64 { 6 }
+
+fn FORMAT_NONE() -> i64 { 0 }
+fn FORMAT_ELF64() -> i64 { 1 }
+fn FORMAT_MACHO64() -> i64 { 2 }
+
+fn ERR_OK() -> i64 { 0 }
+fn ERR_BACKEND_NOT_IMPLEMENTED() -> i64 { 1 }
+fn ERR_INVALID_TARGET() -> i64 { 2 }
+fn ERR_INVALID_MATRIX() -> i64 { 3 }
+fn ERR_TRACE_WRITE_FAILED() -> i64 { 4 }
+fn ERR_TARGET_FLAGS_REQUIRE_NATIVE() -> i64 { 5 }
+
+fn TARGET_SOURCE_UNKNOWN() -> i64 { 0 }
+fn TARGET_SOURCE_EXPLICIT() -> i64 { 1 }
+fn TARGET_SOURCE_HOST_PROBE() -> i64 { 2 }
+fn TARGET_SOURCE_ENV_OVERRIDE() -> i64 { 3 }
+fn TARGET_SOURCE_FALLBACK() -> i64 { 4 }
+
+// Read one environment variable from /proc/self/environ.
+// Returns empty string when missing or unavailable.
+fn read_env(key: string) -> string with IO, Mut, Div, Panic {
+    let env_path = "/proc/self/environ"
+    let size = file_size(env_path)
+    if size <= 0 {
+        return ""
+    }
+    let data = read_file(env_path)
+    let key_len = str_len(key)
+    if key_len <= 0 {
+        return ""
+    }
+
+    var i: i64 = 0
+    while i < size {
+        var j: i64 = 0
+        var matches: bool = true
+        while j < key_len {
+            if i + j >= size {
+                matches = false
+                break
+            }
+            if data[(i + j) as usize] != (str_char_at(key, j) as i8) {
+                matches = false
+                break
+            }
+            j = j + 1
+        }
+
+        if matches && i + key_len < size && data[(i + key_len) as usize] == (61 as i8) {
+            let value_start = i + key_len + 1
+            var value_end = value_start
+            while value_end < size && data[value_end as usize] != 0 {
+                value_end = value_end + 1
+            }
+
+            var out: [i8; 512] = [0; 512]
+            var out_len: i64 = 0
+            var k = value_start
+            while k < value_end && out_len < 512 {
+                out[out_len as usize] = data[k as usize]
+                out_len = out_len + 1
+                k = k + 1
+            }
+            return str_from_bytes(out, out_len)
+        }
+
+        while i < size && data[i as usize] != 0 {
+            i = i + 1
+        }
+        i = i + 1
+    }
+    ""
+}
+
+struct NativeTargetSpec {
+    arch_id: i64,
+    os_id: i64,
+    matrix_mode: i64,
+    source_id: i64,
+    requested_target: string,
+    resolved_target: string,
+    fallback_reason: string,
+}
+
+struct NativeCompileResult {
+    ok: bool,
+    bytes: [i8; 4194304],
+    len: i64,
+    format_id: i64,
+    error_code: i64,
+    error_msg: string,
+}
+
+struct NativeTargetParse {
+    ok: bool,
+    arch_id: i64,
+    os_id: i64,
+    canonical: string,
+}
+
+fn native_target_parse_invalid() -> NativeTargetParse {
+    NativeTargetParse {
+        ok: false,
+        arch_id: ARCH_UNKNOWN(),
+        os_id: OS_UNKNOWN(),
+        canonical: "",
+    }
+}
+
+fn native_target_parse(raw: string) -> NativeTargetParse {
+    if str_eq(raw, "x86_64-linux") {
+        return NativeTargetParse { ok: true, arch_id: ARCH_X86_64(), os_id: OS_LINUX(), canonical: "x86_64-linux" }
+    }
+    if str_eq(raw, "aarch64-macos") {
+        return NativeTargetParse { ok: true, arch_id: ARCH_AARCH64(), os_id: OS_MACOS(), canonical: "aarch64-macos" }
+    }
+    if str_eq(raw, "riscv64-linux") {
+        return NativeTargetParse { ok: true, arch_id: ARCH_RISCV64(), os_id: OS_LINUX(), canonical: "riscv64-linux" }
+    }
+    native_target_parse_invalid()
+}
+
+fn native_target_spec_default(requested_target: string) -> NativeTargetSpec {
+    NativeTargetSpec {
+        arch_id: ARCH_UNKNOWN(),
+        os_id: OS_UNKNOWN(),
+        matrix_mode: MATRIX_AUTO(),
+        source_id: TARGET_SOURCE_UNKNOWN(),
+        requested_target: requested_target,
+        resolved_target: "",
+        fallback_reason: "",
+    }
+}
+
+fn native_matrix_mode_parse(raw: string) -> i64 {
+    if str_eq(raw, "auto") { return MATRIX_AUTO() }
+    if str_eq(raw, "off") { return MATRIX_OFF() }
+    if str_eq(raw, "apple-amx") { return MATRIX_APPLE_AMX() }
+    if str_eq(raw, "intel-amx") { return MATRIX_INTEL_AMX() }
+    if str_eq(raw, "ime") { return MATRIX_IME() }
+    if str_eq(raw, "vme") { return MATRIX_VME() }
+    if str_eq(raw, "ame") { return MATRIX_AME() }
+    -1
+}
+
+fn native_matrix_mode_string(mode: i64) -> string {
+    if mode == MATRIX_AUTO() { return "auto" }
+    if mode == MATRIX_OFF() { return "off" }
+    if mode == MATRIX_APPLE_AMX() { return "apple-amx" }
+    if mode == MATRIX_INTEL_AMX() { return "intel-amx" }
+    if mode == MATRIX_IME() { return "ime" }
+    if mode == MATRIX_VME() { return "vme" }
+    if mode == MATRIX_AME() { return "ame" }
+    "invalid"
+}
+
+fn native_target_source_string(source_id: i64) -> string {
+    if source_id == TARGET_SOURCE_EXPLICIT() { return "explicit_cli" }
+    if source_id == TARGET_SOURCE_HOST_PROBE() { return "host_probe" }
+    if source_id == TARGET_SOURCE_ENV_OVERRIDE() { return "env_override" }
+    if source_id == TARGET_SOURCE_FALLBACK() { return "fallback" }
+    "unknown"
+}
+
+fn native_host_probe_target() -> string with IO, Mut, Panic, Div {
+    let host_type = read_env("HOSTTYPE")
+    let os_type = read_env("OSTYPE")
+
+    let is_linux = starts_with(os_type, "linux")
+    let is_macos = starts_with(os_type, "darwin") || starts_with(os_type, "mac")
+
+    if (starts_with(host_type, "x86_64") || starts_with(host_type, "amd64")) && is_linux {
+        return "x86_64-linux"
+    }
+    if (starts_with(host_type, "arm64") || starts_with(host_type, "aarch64")) && is_macos {
+        return "aarch64-macos"
+    }
+    if starts_with(host_type, "riscv64") && is_linux {
+        return "riscv64-linux"
+    }
+    ""
+}
+
+fn native_resolve_target(requested_target: string, requested_matrix: string, explicit_target: bool) -> NativeTargetSpec with IO, Mut, Panic, Div {
+    var req_target = requested_target
+    if str_len(req_target) == 0 {
+        req_target = "native-auto"
+    }
+
+    var spec = native_target_spec_default(req_target)
+
+    let req_matrix_mode = native_matrix_mode_parse(requested_matrix)
+    if req_matrix_mode < 0 {
+        spec.matrix_mode = -1
+        spec.fallback_reason = "invalid_matrix_mode"
+        return spec
+    }
+    spec.matrix_mode = req_matrix_mode
+
+    if explicit_target && !str_eq(req_target, "native-auto") {
+        let parsed = native_target_parse(req_target)
+        if parsed.ok {
+            spec.arch_id = parsed.arch_id
+            spec.os_id = parsed.os_id
+            spec.resolved_target = parsed.canonical
+            spec.source_id = TARGET_SOURCE_EXPLICIT()
+        } else {
+            spec.arch_id = ARCH_UNKNOWN()
+            spec.os_id = OS_UNKNOWN()
+            spec.resolved_target = req_target
+            spec.source_id = TARGET_SOURCE_EXPLICIT()
+            spec.fallback_reason = "invalid_target"
+        }
+        return spec
+    }
+
+    var resolved = native_host_probe_target()
+    if str_len(resolved) > 0 {
+        spec.source_id = TARGET_SOURCE_HOST_PROBE()
+    } else {
+        spec.source_id = TARGET_SOURCE_FALLBACK()
+    }
+
+    let target_override = read_env("SOUNIO_TARGET_OVERRIDE")
+    if str_len(target_override) > 0 {
+        let parsed_override = native_target_parse(target_override)
+        if parsed_override.ok {
+            resolved = parsed_override.canonical
+            spec.source_id = TARGET_SOURCE_ENV_OVERRIDE()
+        }
+    }
+
+    if spec.matrix_mode == MATRIX_AUTO() {
+        let matrix_override = read_env("SOUNIO_MATRIX_OVERRIDE")
+        if str_len(matrix_override) > 0 {
+            let matrix_override_mode = native_matrix_mode_parse(matrix_override)
+            if matrix_override_mode >= 0 {
+                spec.matrix_mode = matrix_override_mode
+            }
+        }
+    }
+
+    if str_len(resolved) == 0 {
+        resolved = "x86_64-linux"
+        spec.source_id = TARGET_SOURCE_FALLBACK()
+        spec.fallback_reason = "unresolved_default_x86_64_linux"
+    }
+
+    let parsed = native_target_parse(resolved)
+    if parsed.ok {
+        spec.arch_id = parsed.arch_id
+        spec.os_id = parsed.os_id
+        spec.resolved_target = parsed.canonical
+    } else {
+        spec.arch_id = ARCH_UNKNOWN()
+        spec.os_id = OS_UNKNOWN()
+        spec.resolved_target = resolved
+        if str_len(spec.fallback_reason) == 0 {
+            spec.fallback_reason = "invalid_target"
+        }
+    }
+
+    spec
+}
+
+fn native_compile_result_error(code: i64, msg: string) -> NativeCompileResult {
+    NativeCompileResult {
+        ok: false,
+        bytes: [0; 4194304],
+        len: 0,
+        format_id: FORMAT_NONE(),
+        error_code: code,
+        error_msg: msg,
+    }
+}
+
+fn native_compile_result_ok(bytes: [i8; 4194304], len: i64, format_id: i64) -> NativeCompileResult {
+    NativeCompileResult {
+        ok: true,
+        bytes: bytes,
+        len: len,
+        format_id: format_id,
+        error_code: ERR_OK(),
+        error_msg: "",
+    }
+}
+
+// ============================================================================
 // Compiler state
 // ============================================================================
 
@@ -907,6 +1214,40 @@ fn trampoline_offset(nc: NativeCompiler) -> i64 {
 // ============================================================================
 // Full pipeline: IrModule -> ELF64 binary
 // ============================================================================
+
+fn compile_to_macho_arm64_placeholder(module: IrModule, target_spec: NativeTargetSpec) -> NativeCompileResult {
+    let _module = module
+    let _target = target_spec
+    native_compile_result_error(ERR_BACKEND_NOT_IMPLEMENTED(), "backend_not_implemented:aarch64-macos")
+}
+
+fn compile_to_elf_riscv_placeholder(module: IrModule, target_spec: NativeTargetSpec) -> NativeCompileResult {
+    let _module = module
+    let _target = target_spec
+    native_compile_result_error(ERR_BACKEND_NOT_IMPLEMENTED(), "backend_not_implemented:riscv64-linux")
+}
+
+fn compile_native(module: IrModule, target_spec: NativeTargetSpec) -> NativeCompileResult with Mut, Panic, Div, Alloc {
+    if target_spec.matrix_mode < 0 {
+        return native_compile_result_error(ERR_INVALID_MATRIX(), "invalid_matrix")
+    }
+
+    if target_spec.arch_id == ARCH_X86_64() && target_spec.os_id == OS_LINUX() {
+        let base_addr: i64 = 4194304  // 0x400000
+        let elf = compile_to_elf(module, base_addr)
+        return native_compile_result_ok(elf.bytes, elf.len, FORMAT_ELF64())
+    }
+
+    if target_spec.arch_id == ARCH_AARCH64() && target_spec.os_id == OS_MACOS() {
+        return compile_to_macho_arm64_placeholder(module, target_spec)
+    }
+
+    if target_spec.arch_id == ARCH_RISCV64() && target_spec.os_id == OS_LINUX() {
+        return compile_to_elf_riscv_placeholder(module, target_spec)
+    }
+
+    native_compile_result_error(ERR_INVALID_TARGET(), "invalid_target")
+}
 
 fn compile_to_elf(module: IrModule, base_addr: i64) -> Elf64Binary with Mut, Panic, Div, Alloc {
     var nc = compiler_new()

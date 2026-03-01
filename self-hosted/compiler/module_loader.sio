@@ -410,28 +410,124 @@ fn compile_multimodule_program(main_path: string) -> CompileResult with IO, Mut,
 // Multi-module native compilation pipeline (ELF output)
 // ============================================================
 
-fn compile_multimodule_native(main_path: string, output_path: string) -> i32 with IO, Mut, Div, Panic, Alloc {
+fn multimodule_native_trace_output_path() -> string {
+    let override_path = read_env("SOUNIO_NATIVE_DECISION_TRACE_PATH")
+    if str_len(override_path) > 0 {
+        override_path
+    } else {
+        "artifacts/omega/native_decision_trace.v1.json"
+    }
+}
+
+fn compile_multimodule_native(main_path: string, output_path: string, requested_target: string, requested_matrix: string, explicit_target: bool) -> i32 with IO, Mut, Div, Panic, Alloc {
+    let target_spec = native_resolve_target(requested_target, requested_matrix, explicit_target)
+    print("Native dispatch: requested=")
+    print(target_spec.requested_target)
+    print(" resolved=")
+    print(target_spec.resolved_target)
+    print(" matrix=")
+    print(native_matrix_mode_string(target_spec.matrix_mode))
+    print(" source=")
+    print(native_target_source_string(target_spec.source_id))
+    if str_len(target_spec.fallback_reason) > 0 {
+        print(" fallback=")
+        print(target_spec.fallback_reason)
+    }
+    print("\n")
+
     let ir_result = load_multimodule_ir(main_path)
     if !ir_result.ok {
         print("Multi-module IR failed: ")
         print(ir_result.error_msg)
         print("\n")
+        let trace_ok = io_write_native_decision_trace(
+            multimodule_native_trace_output_path(),
+            target_spec.requested_target,
+            target_spec.resolved_target,
+            native_matrix_mode_string(target_spec.matrix_mode),
+            native_target_source_string(target_spec.source_id),
+            target_spec.fallback_reason,
+            "native",
+            false,
+            ERR_OK()
+        )
+        if !trace_ok {
+            print("Error: Failed to write native decision trace to ")
+            print(multimodule_native_trace_output_path())
+            print("\n")
+            return 1
+        }
         return 1
     }
 
-    // Compile merged IR to native ELF64 binary
-    print("Compiling to native x86-64 ELF...\n")
-    let base_addr: i64 = 4194304  // 0x400000
-    let elf = compile_to_elf(ir_result.module, base_addr)
+    let native_result = compile_native(ir_result.module, target_spec)
+    if !native_result.ok {
+        let trace_ok = io_write_native_decision_trace(
+            multimodule_native_trace_output_path(),
+            target_spec.requested_target,
+            target_spec.resolved_target,
+            native_matrix_mode_string(target_spec.matrix_mode),
+            native_target_source_string(target_spec.source_id),
+            target_spec.fallback_reason,
+            "native",
+            false,
+            native_result.error_code
+        )
+        if !trace_ok {
+            print("Error: Failed to write native decision trace to ")
+            print(multimodule_native_trace_output_path())
+            print("\n")
+            return 1
+        }
+        print("Native compilation failed: ")
+        print(native_result.error_msg)
+        print("\n")
+        return 1
+    }
 
-    print("ELF size: ")
-    print_int(elf.len)
+    print("Native binary size: ")
+    print_int(native_result.len)
     print(" bytes\n")
 
-    let write_ok = io_write_elf_to_file(output_path, elf)
+    let write_ok = io_write_native_binary(output_path, native_result.bytes, native_result.len)
     if !write_ok {
-        print("Error: Failed to write ELF to ")
+        let trace_ok = io_write_native_decision_trace(
+            multimodule_native_trace_output_path(),
+            target_spec.requested_target,
+            target_spec.resolved_target,
+            native_matrix_mode_string(target_spec.matrix_mode),
+            native_target_source_string(target_spec.source_id),
+            target_spec.fallback_reason,
+            "native",
+            false,
+            ERR_OK()
+        )
+        if !trace_ok {
+            print("Error: Failed to write native decision trace to ")
+            print(multimodule_native_trace_output_path())
+            print("\n")
+            return 1
+        }
+        print("Error: Failed to write native binary to ")
         print(output_path)
+        print("\n")
+        return 1
+    }
+
+    let trace_ok = io_write_native_decision_trace(
+        multimodule_native_trace_output_path(),
+        target_spec.requested_target,
+        target_spec.resolved_target,
+        native_matrix_mode_string(target_spec.matrix_mode),
+        native_target_source_string(target_spec.source_id),
+        target_spec.fallback_reason,
+        "native",
+        true,
+        ERR_OK()
+    )
+    if !trace_ok {
+        print("Error: Failed to write native decision trace to ")
+        print(multimodule_native_trace_output_path())
         print("\n")
         return 1
     }
