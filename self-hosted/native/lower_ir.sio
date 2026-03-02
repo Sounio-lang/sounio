@@ -99,6 +99,8 @@ fn lower_instr(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut, P
         lower_g2_apply_gen_o(nc, instr)
     } else if instr.op == IrOpcode::IrG2DenseO {
         lower_g2_dense_o(nc, instr)
+    } else if instr.op == IrOpcode::IrG2EquivDenseKernelO {
+        lower_g2_equiv_dense_kernel_o(nc, instr)
     } else {
         // Unsupported opcode — skip silently for bootstrap
         nc
@@ -1355,6 +1357,65 @@ fn lower_g2_dense_o(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with M
     c.code = emit_evex_pd_rr_full(c.code, 2, 0x16, t_bcast, bcast_base + 6, dst, vl, 0, 0)
     c.code = emit_evex_pd_rr_full(c.code, 2, 0xB8, accum, t_bcast, col_base + 6, vl, 0, 0)
     // Final store: VMOVAPD dst{mask_k}{z}, accum
+    c.code = emit_evex_pd_rr_full(c.code, 1, 0x28, dst, 0, accum, vl, mask_k, zb)
+    c
+}
+
+// IrG2EquivDenseKernelO — G₂-equivariant dense kernel with IEEE-754-2019 robustness (H3.8)
+//
+// Full pipeline:
+//   1. Project to Im(𝕆): VANDPD dst, src, imag_mask                   (6 bytes)
+//   2. Zero accumulator:  VXORPD accum, accum, accum                   (6 bytes)
+//   3. G₂ matrix-vector:  7×(VPERMPD broadcast + VFMADD231PD FMA)    (84 bytes)
+//   4. IEEE NaN/±0 clamp: VMINMAXPD{k}{z} accum, accum, accum, 0x00  (7 bytes)
+//   5. Masked store:      VMOVAPD{k}{z} dst, accum                     (6 bytes)
+//
+// Total: 18 instructions / 109 bytes
+//
+// Encoding:
+//   label_id = (mask_k & 7) | (col_base << 4)   — consistent with IrG2DenseO
+//   imm_flags bit 0 = z-bit (zeroing-mask)
+//   src1 = input ZMM index, src2 = imag_mask ZMM index (lane 0 = 0x0, lanes 1-7 = 0xFF…)
+//   bcast_base = col_base - 7  (7 broadcast-ctrl ZMMs immediately before column ZMMs)
+//
+// VMINMAXPD (MAP5 opcode 0x52) imm8=0x00: minimum, propagate NaN → cleans up fp edge cases.
+fn lower_g2_equiv_dense_kernel_o(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut, Panic, Div {
+    var c = nc
+    let vl       = 2   // ZMM
+    let mask_k   = instr.label_id & 7
+    let zb       = instr.imm_flags & 1
+    let col_base = (instr.label_id >> 4) & 0xF
+    let imag_zmm = instr.src2
+    let src      = instr.src1
+    let dst      = instr.dst
+    let t_bcast  = instr.dst + 2
+    let accum    = instr.dst + 4
+    let bcast_base = col_base - 7
+    // Step 1: project to Im(𝕆) — VANDPD dst, src, imag_mask  (map=1, opcode=0x54)
+    c.code = emit_evex_pd_rr_full(c.code, 1, 0x54, dst, src, imag_zmm, vl, 0, 0)
+    // Step 2: zero accumulator — VXORPD accum, accum, accum  (map=1, opcode=0x57)
+    c.code = emit_evex_pd_rr_full(c.code, 1, 0x57, accum, accum, accum, vl, 0, 0)
+    // Step 3: G₂ generator matrix-vector on projected input (7 columns, broadcast-and-FMA)
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0x16, t_bcast, bcast_base + 0, dst, vl, 0, 0)
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0xB8, accum, t_bcast, col_base + 0, vl, 0, 0)
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0x16, t_bcast, bcast_base + 1, dst, vl, 0, 0)
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0xB8, accum, t_bcast, col_base + 1, vl, 0, 0)
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0x16, t_bcast, bcast_base + 2, dst, vl, 0, 0)
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0xB8, accum, t_bcast, col_base + 2, vl, 0, 0)
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0x16, t_bcast, bcast_base + 3, dst, vl, 0, 0)
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0xB8, accum, t_bcast, col_base + 3, vl, 0, 0)
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0x16, t_bcast, bcast_base + 4, dst, vl, 0, 0)
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0xB8, accum, t_bcast, col_base + 4, vl, 0, 0)
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0x16, t_bcast, bcast_base + 5, dst, vl, 0, 0)
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0xB8, accum, t_bcast, col_base + 5, vl, 0, 0)
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0x16, t_bcast, bcast_base + 6, dst, vl, 0, 0)
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0xB8, accum, t_bcast, col_base + 6, vl, 0, 0)
+    // Step 4: IEEE-754-2019 NaN/±0 clamp via VMINMAXPD{k}{z}  (MAP5 opcode 0x52, imm8=0x00)
+    //   minimum with NaN propagation — eliminates fp edge cases before masked store
+    var b = emit_evex_pd_rr_full(c.code, 5, 0x52, accum, accum, accum, vl, mask_k, zb)
+    b = emit_byte(b, 0x00)
+    c.code = b
+    // Step 5: masked store — VMOVAPD{k}{z} dst, accum  (map=1, opcode=0x28, src1=0→vvvv=1111)
     c.code = emit_evex_pd_rr_full(c.code, 1, 0x28, dst, 0, accum, vl, mask_k, zb)
     c
 }

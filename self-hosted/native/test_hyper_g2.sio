@@ -111,6 +111,50 @@ fn tg2_emit_apply_gen_o(buf: CodeBuffer) -> CodeBuffer with Mut, Panic, Div {
     b
 }
 
+// ---- IrG2EquivDenseKernelO emitter (18 instructions, 109 bytes) ----
+// layout: project(6) + zero(6) + 7×(VPERMPD+VFMADD)(84) + VMINMAXPD{k}{z}+imm8(7) + VMOVAPD{k}{z}(6)
+// label_id = 1|(16<<4) → mask_k=1, col_base=16, bcast_base=9
+// imm_flags = 1 → z-bit set
+// imag_zmm=24, src=0, dst=2, t_bcast=4, accum=6
+fn tg2_emit_equiv_dense_kernel_o(buf: CodeBuffer) -> CodeBuffer with Mut, Panic, Div {
+    var b = buf
+    let src        = 0
+    let dst        = 2
+    let t_bcast    = 4
+    let accum      = 6
+    let col_base   = 16
+    let bcast_base = 9
+    let imag_zmm   = 24
+    let vl         = 2
+    let mask_k     = 1
+    let zb         = 1
+    // Step 1: VANDPD dst, src, imag_zmm  (project, unmasked)
+    b = tg2_emit_evex_pd_rr_full(b, 1, 0x54, dst, src, imag_zmm, vl, 0, 0)
+    // Step 2: VXORPD accum, accum, accum  (zero, unmasked)
+    b = tg2_emit_evex_pd_rr_full(b, 1, 0x57, accum, accum, accum, vl, 0, 0)
+    // Step 3: G₂ matrix-vector (7 columns, broadcast-and-FMA)
+    b = tg2_emit_evex_pd_rr_full(b, 2, 0x16, t_bcast, bcast_base + 0, dst, vl, 0, 0)
+    b = tg2_emit_evex_pd_rr_full(b, 2, 0xB8, accum, t_bcast, col_base + 0, vl, 0, 0)
+    b = tg2_emit_evex_pd_rr_full(b, 2, 0x16, t_bcast, bcast_base + 1, dst, vl, 0, 0)
+    b = tg2_emit_evex_pd_rr_full(b, 2, 0xB8, accum, t_bcast, col_base + 1, vl, 0, 0)
+    b = tg2_emit_evex_pd_rr_full(b, 2, 0x16, t_bcast, bcast_base + 2, dst, vl, 0, 0)
+    b = tg2_emit_evex_pd_rr_full(b, 2, 0xB8, accum, t_bcast, col_base + 2, vl, 0, 0)
+    b = tg2_emit_evex_pd_rr_full(b, 2, 0x16, t_bcast, bcast_base + 3, dst, vl, 0, 0)
+    b = tg2_emit_evex_pd_rr_full(b, 2, 0xB8, accum, t_bcast, col_base + 3, vl, 0, 0)
+    b = tg2_emit_evex_pd_rr_full(b, 2, 0x16, t_bcast, bcast_base + 4, dst, vl, 0, 0)
+    b = tg2_emit_evex_pd_rr_full(b, 2, 0xB8, accum, t_bcast, col_base + 4, vl, 0, 0)
+    b = tg2_emit_evex_pd_rr_full(b, 2, 0x16, t_bcast, bcast_base + 5, dst, vl, 0, 0)
+    b = tg2_emit_evex_pd_rr_full(b, 2, 0xB8, accum, t_bcast, col_base + 5, vl, 0, 0)
+    b = tg2_emit_evex_pd_rr_full(b, 2, 0x16, t_bcast, bcast_base + 6, dst, vl, 0, 0)
+    b = tg2_emit_evex_pd_rr_full(b, 2, 0xB8, accum, t_bcast, col_base + 6, vl, 0, 0)
+    // Step 4: VMINMAXPD{k1}{z} accum, accum, accum, imm8=0x00  (MAP5 0x52, 7 bytes)
+    b = tg2_emit_evex_pd_rr_full(b, 5, 0x52, accum, accum, accum, vl, mask_k, zb)
+    b = emit_byte(b, 0x00)
+    // Step 5: VMOVAPD{k1}{z} dst, accum  (unmasked NDS form, map=1, 0x28, src1=0)
+    b = tg2_emit_evex_pd_rr_full(b, 1, 0x28, dst, 0, accum, vl, mask_k, zb)
+    b
+}
+
 // ---- IrG2DenseO emitter (17 instructions, 102 bytes) ----
 // Same registers as ApplyGenO + imag_zmm=24 for projection
 fn tg2_emit_dense_o(buf: CodeBuffer) -> CodeBuffer with Mut, Panic, Div {
@@ -200,6 +244,41 @@ fn t07_g2_dense_o_len() -> bool with Mut, Panic, Div {
     buf.len == 102
 }
 
+// ---- IrG2EquivDenseKernelO tests (H3.8) ----
+
+// T08: IrG2EquivDenseKernelO — total encoding length == 109 bytes (18 instructions)
+//   layout: VANDPD(6) + VXORPD(6) + 7*(VPERMPD+VFMADD)(84) + VMINMAXPD+imm8(7) + VMOVAPD(6)
+fn t08_g2_equiv_dense_kernel_len() -> bool with Mut, Panic, Div {
+    var buf = code_buffer_new()
+    buf = tg2_emit_equiv_dense_kernel_o(buf)
+    buf.len == 109
+}
+
+// T09: IrG2EquivDenseKernelO — VMINMAXPD opcode at byte 100 == 0x52 (MAP5)
+//   VANDPD[0..5] + VXORPD[6..11] + 7*(VPERMPD+VFMADD)[12..95] → VMINMAXPD starts at byte 96
+//   EVEX: 0x62[96] P1[97] P2[98] P3[99] opcode[100] ModRM[101] imm8[102]
+fn t09_g2_equiv_dense_kernel_vminmaxpd_opcode() -> bool with Mut, Panic, Div {
+    var buf = code_buffer_new()
+    buf = tg2_emit_equiv_dense_kernel_o(buf)
+    tg2_read_byte(buf, 100) == 0x52
+}
+
+// T10: IrG2EquivDenseKernelO — VMINMAXPD imm8 at byte 102 == 0x00 (minimum, propagate NaN)
+fn t10_g2_equiv_dense_kernel_vminmaxpd_imm8() -> bool with Mut, Panic, Div {
+    var buf = code_buffer_new()
+    buf = tg2_emit_equiv_dense_kernel_o(buf)
+    tg2_read_byte(buf, 102) == 0x00
+}
+
+// T11: IrG2EquivDenseKernelO — VMOVAPD opcode at byte 107 == 0x28 (store)
+//   VMINMAXPD[96..102](7 bytes) → VMOVAPD starts at byte 103
+//   EVEX: 0x62[103] P1[104] P2[105] P3[106] opcode[107] ModRM[108]
+fn t11_g2_equiv_dense_kernel_vmovapd_opcode() -> bool with Mut, Panic, Div {
+    var buf = code_buffer_new()
+    buf = tg2_emit_equiv_dense_kernel_o(buf)
+    tg2_read_byte(buf, 107) == 0x28
+}
+
 fn main() -> i32 with IO, Mut, Panic, Div {
     var pass = 0
     var fail = 0
@@ -211,6 +290,10 @@ fn main() -> i32 with IO, Mut, Panic, Div {
     if t05_g2_apply_gen_o_first_vpermpd() { pass = pass + 1 } else { fail = fail + 1 }
     if t06_g2_apply_gen_o_first_vfmadd() { pass = pass + 1 } else { fail = fail + 1 }
     if t07_g2_dense_o_len()              { pass = pass + 1 } else { fail = fail + 1 }
+    if t08_g2_equiv_dense_kernel_len()               { pass = pass + 1 } else { fail = fail + 1 }
+    if t09_g2_equiv_dense_kernel_vminmaxpd_opcode()  { pass = pass + 1 } else { fail = fail + 1 }
+    if t10_g2_equiv_dense_kernel_vminmaxpd_imm8()    { pass = pass + 1 } else { fail = fail + 1 }
+    if t11_g2_equiv_dense_kernel_vmovapd_opcode()    { pass = pass + 1 } else { fail = fail + 1 }
 
     if fail == 0 { 0 } else { 1 }
 }
