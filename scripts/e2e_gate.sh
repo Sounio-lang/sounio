@@ -49,6 +49,12 @@ if [[ "${SOUNIO_SKIP_GPU:-}" != "1" ]]; then
     echo "[e2e] gpu skipped (binary not built with gpu feature)"
   fi
 
+  echo "[e2e] gpu codegen parity gate"
+  bash "$ROOT_DIR/scripts/omega/omega_gpu_codegen_parity_gate.sh"
+
+  echo "[e2e] gpu binary attestation gate"
+  bash "$ROOT_DIR/scripts/omega/omega_gpu_binary_attest_gate.sh"
+
   echo "[e2e] gpu runtime attestation gate"
   bash "$ROOT_DIR/scripts/omega/omega_gpu_runtime_attest_gate.sh"
 else

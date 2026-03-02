@@ -41,14 +41,19 @@ Snapshot date: **2026-03-02**
 - Policy: no `//@ ignore` in required hyper tests.
 
 5. GPU runtime attestation lane (required in CI full gate):
+- Codegen parity gate: `bash scripts/omega/omega_gpu_codegen_parity_gate.sh`
+- Binary attestation gate: `bash scripts/omega/omega_gpu_binary_attest_gate.sh`
 - Gate script: `bash scripts/omega/omega_gpu_runtime_attest_gate.sh`
+- Artifacts:
+  - `artifacts/omega/gpu_codegen_parity.v1.json`
+  - `artifacts/omega/gpu_binary_attestation.v1.json`
 - Artifact: `artifacts/omega/gpu_runtime_attest_gate.v1.json`
 - Modes:
   - local default: `OMEGA_GPU_RUNTIME_GATE_MODE=auto`
   - required CI: `OMEGA_GPU_RUNTIME_GATE_MODE=required`
 - In required mode, any non-pass (`fail` or `not_run`) is fail-closed.
 - Canonical pinned `souc` version is sourced from `scripts/omega/omega_resolve_souc_bin.sh` (with optional `SOUNIO_SOUC_VERSION` override).
-- Blockers are normalized as: `ssh_unreachable`, `remote_env_missing`, `attestation_invalid`, `pinned_version_mismatch`, `gpu_backend_unavailable`, `runtime_test_fail`.
+- Blockers are normalized as: `target_unavailable`, `isa_encode_unsupported`, `binary_pack_fail`, `driver_reject`, `parity_fail`, `perf_regression`, `attestation_invalid`, `ssh_unreachable`, `remote_env_missing`, `pinned_version_mismatch`, `gpu_backend_unavailable`, `runtime_test_fail`.
 
 4. Module/test workflow:
 - `use`-based imports work for currently active module surfaces.
@@ -81,10 +86,14 @@ Run from repository root:
 
 ```bash
 bash scripts/scan_stdlib.sh --json-out artifacts/stdlib/stdlib_inventory.v1.json
+OMEGA_GPU_CODEGEN_PARITY_MODE=required bash scripts/omega/omega_gpu_codegen_parity_gate.sh
+OMEGA_GPU_BINARY_ATTEST_MODE=required bash scripts/omega/omega_gpu_binary_attest_gate.sh
 OMEGA_GPU_RUNTIME_GATE_MODE=required bash scripts/omega/omega_gpu_runtime_attest_gate.sh
 bash scripts/stdlib_hyper_execution_gate.sh
 STDLIB_RUNTIME_REGRESSION_STRICT=1 bash scripts/stdlib_science_pipeline_gate.sh
 STDLIB_RUNTIME_REGRESSION_STRICT=1 bash scripts/stdlib_reliability_gate.sh
+bash scripts/omega/omega_gpu_codegen_parity_gate.sh
+bash scripts/omega/omega_gpu_binary_attest_gate.sh
 bash scripts/omega/omega_gpu_runtime_attest_gate.sh
 bash scripts/stdlib_hyper_execution_gate.sh
 bash scripts/run_stdlib_e2e.sh
@@ -97,6 +106,8 @@ Then read:
 - `artifacts/stdlib/stdlib_science_pipeline_status.v1.json`
 - `artifacts/stdlib/stdlib_hyper_execution_status.v1.json`
 - `artifacts/stdlib/stdlib_reliability_status.v1.json`
+- `artifacts/omega/gpu_codegen_parity.v1.json`
+- `artifacts/omega/gpu_binary_attestation.v1.json`
 - `artifacts/omega/gpu_runtime_attest_gate.v1.json`
 
 If the gate is not `pass`, treat the affected lanes as not reliable.

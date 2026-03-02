@@ -11,6 +11,7 @@ This document describes the GPU runtime infrastructure for Sounio, including the
 - [Kernel Management](#kernel-management)
 - [C-Callable API](#c-callable-api)
 - [Usage Examples](#usage-examples)
+- [Multi-Target Contracts](#multi-target-contracts)
 - [Backend Support](#backend-support)
 
 ---
@@ -24,6 +25,8 @@ Sounio's GPU runtime provides:
 - **Buffer registry**: Map buffer IDs to device memory allocations
 - **C-callable dispatch functions**: Integration with effect handler system
 - **Multiple backends**: CUDA, Vulkan/SPIR-V, and simulated (testing)
+- **End-to-end binary ownership telemetry**: parity + hash-chain artifacts for
+  CUDA/ROCm lanes via Omega gate scripts
 - **Release contract integration**: `benchmarks/independence/contract.v2.json`
   (fallback `contract.v1.json`) is validated by
   `scripts/independence_benchmark_gate.sh` before promotion
@@ -351,6 +354,44 @@ fn gpu_matmul() -> Result<(), GpuBridgeError> {
     Ok(())
 }
 ```
+
+---
+
+## Multi-Target Contracts
+
+The GPU release lane now carries three machine-readable artifacts:
+
+- `artifacts/omega/gpu_codegen_parity.v1.json`
+- `artifacts/omega/gpu_binary_attestation.v1.json`
+- `artifacts/omega/gpu_runtime_attest_gate.v1.json`
+
+These map directly to scripts:
+
+- `scripts/omega/omega_gpu_codegen_parity_gate.sh`
+- `scripts/omega/omega_gpu_binary_attest_gate.sh`
+- `scripts/omega/omega_gpu_runtime_attest_gate.sh`
+
+Run modes are consistent across gates: `auto|required|off`.
+
+- `auto`: non-pass states are surfaced as `not_run` with typed blockers.
+- `required`: non-pass states fail closed.
+- `off`: deterministic `not_run` for local bypass/testing loops.
+
+Canonical blocker classes:
+
+- `target_unavailable`
+- `isa_encode_unsupported`
+- `binary_pack_fail`
+- `driver_reject`
+- `parity_fail`
+- `perf_regression`
+- `attestation_invalid`
+
+The runtime attest artifact now embeds:
+
+- per-target codegen profiles (`target_profiles`)
+- binary provenance entries (`binary_provenance`)
+- hash-chain state (`hash_chain`)
 
 ---
 

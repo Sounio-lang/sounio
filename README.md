@@ -274,19 +274,26 @@ Runtime policy (science runtime regressions):
 
 GPU runtime policy:
 - backend compile smoke remains in `scripts/e2e_gate.sh`
+- multi-target codegen parity gate is integrated via `scripts/omega/omega_gpu_codegen_parity_gate.sh`
+- binary hash-chain attestation gate is integrated via `scripts/omega/omega_gpu_binary_attest_gate.sh`
 - remote-attested GPU runtime gate is integrated via `scripts/omega/omega_gpu_runtime_attest_gate.sh`
+- GPU build CLI now accepts `--gpu-target`, `--gpu-binary-format`, and `--gpu-strict-parity`
 - canonical pinned `souc` version is sourced from `scripts/omega/omega_resolve_souc_bin.sh` (or `SOUNIO_SOUC_VERSION` override)
 - local default mode is `OMEGA_GPU_RUNTIME_GATE_MODE=auto` (non-fatal `not_run` when remote runner is unavailable)
 - required CI mode is `OMEGA_GPU_RUNTIME_GATE_MODE=required` (any non-pass is fail-closed)
-- blocker taxonomy includes `ssh_unreachable`, `remote_env_missing`, `attestation_invalid`, `pinned_version_mismatch`, `gpu_backend_unavailable`, `runtime_test_fail`
+- blocker taxonomy includes `target_unavailable`, `isa_encode_unsupported`, `binary_pack_fail`, `driver_reject`, `parity_fail`, `perf_regression`, `attestation_invalid`, `ssh_unreachable`, `remote_env_missing`, `pinned_version_mismatch`, `gpu_backend_unavailable`, `runtime_test_fail`
 
 Run from repository root:
 
 ```bash
+OMEGA_GPU_CODEGEN_PARITY_MODE=required bash scripts/omega/omega_gpu_codegen_parity_gate.sh
+OMEGA_GPU_BINARY_ATTEST_MODE=required bash scripts/omega/omega_gpu_binary_attest_gate.sh
 OMEGA_GPU_RUNTIME_GATE_MODE=required bash scripts/omega/omega_gpu_runtime_attest_gate.sh
 bash scripts/stdlib_hyper_execution_gate.sh
 STDLIB_RUNTIME_REGRESSION_STRICT=1 bash scripts/stdlib_science_pipeline_gate.sh
 STDLIB_RUNTIME_REGRESSION_STRICT=1 bash scripts/stdlib_reliability_gate.sh
+bash scripts/omega/omega_gpu_codegen_parity_gate.sh
+bash scripts/omega/omega_gpu_binary_attest_gate.sh
 bash scripts/omega/omega_gpu_runtime_attest_gate.sh
 bash scripts/stdlib_hyper_execution_gate.sh
 bash scripts/stdlib_science_pipeline_gate.sh
@@ -294,6 +301,8 @@ bash scripts/stdlib_reliability_gate.sh
 ```
 
 Current machine-checkable artifacts:
+- `artifacts/omega/gpu_codegen_parity.v1.json`
+- `artifacts/omega/gpu_binary_attestation.v1.json`
 - `artifacts/omega/gpu_runtime_attest_gate.v1.json`
 - `artifacts/stdlib/stdlib_hyper_execution_status.v1.json`
 - `artifacts/stdlib/stdlib_science_pipeline_status.v1.json`

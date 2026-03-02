@@ -7,6 +7,8 @@ cd "$ROOT_DIR"
 MODE="${OMEGA_GPU_RUNTIME_GATE_MODE:-auto}"
 OUT_JSON="${OMEGA_GPU_RUNTIME_GATE_OUT:-$ROOT_DIR/artifacts/omega/gpu_runtime_attest_gate.v1.json}"
 LOG_PATH="${OMEGA_GPU_RUNTIME_GATE_LOG:-$ROOT_DIR/artifacts/omega/gpu_runtime_attest_gate.log}"
+PARITY_ARTIFACT="${OMEGA_GPU_CODEGEN_PARITY_JSON:-$ROOT_DIR/artifacts/omega/gpu_codegen_parity.v1.json}"
+BINARY_ATTEST_ARTIFACT="${OMEGA_GPU_BINARY_ATTEST_JSON:-$ROOT_DIR/artifacts/omega/gpu_binary_attestation.v1.json}"
 GPU_HOST="${GPU_HOST:-10.100.100.215}"
 GPU_USER="${GPU_USER:-demetrios}"
 REMOTE_DIR="${REMOTE_DIR:-~/work/sounio}"
@@ -141,7 +143,9 @@ emit_status_json() {
   local tests_json="$8"
   local gpu_info="$9"
   local nonce="${10}"
-  python3 - "$OUT_JSON" "$status" "$reason" "$MODE" "$GPU_HOST" "$GPU_USER" "$REMOTE_DIR" "$signature_valid" "$souc_path" "$souc_version" "$EXPECTED_VERSION" "$remote_json" "$blockers_json" "$tests_json" "$gpu_info" "$nonce" "$LOG_PATH" "$EXPECTED_VERSION_SOURCE" "$EXPECTED_VERSION_SOURCE_PATH" "$LOCAL_PINNED_SOUC_PATH" "$REMOTE_BOOTSTRAPPED_SOUC_REL" <<'PY'
+  local parity_artifact_path="$PARITY_ARTIFACT"
+  local binary_attest_artifact_path="$BINARY_ATTEST_ARTIFACT"
+  python3 - "$OUT_JSON" "$status" "$reason" "$MODE" "$GPU_HOST" "$GPU_USER" "$REMOTE_DIR" "$signature_valid" "$souc_path" "$souc_version" "$EXPECTED_VERSION" "$remote_json" "$blockers_json" "$tests_json" "$gpu_info" "$nonce" "$LOG_PATH" "$EXPECTED_VERSION_SOURCE" "$EXPECTED_VERSION_SOURCE_PATH" "$LOCAL_PINNED_SOUC_PATH" "$REMOTE_BOOTSTRAPPED_SOUC_REL" "$parity_artifact_path" "$binary_attest_artifact_path" <<'PY'
 import datetime
 import json
 from pathlib import Path
@@ -168,6 +172,8 @@ expected_version_source = sys.argv[18]
 expected_version_source_path = sys.argv[19]
 local_pinned_souc_path = sys.argv[20]
 remote_bootstrapped_souc_rel = sys.argv[21]
+parity_artifact_path = Path(sys.argv[22]) if sys.argv[22] else None
+binary_attest_artifact_path = Path(sys.argv[23]) if sys.argv[23] else None
 
 try:
     remote_obj = json.loads(remote_json) if remote_json else {}
@@ -181,6 +187,37 @@ try:
     tests = json.loads(tests_json) if tests_json else []
 except Exception:
     tests = []
+
+parity_obj = {}
+if parity_artifact_path is not None and parity_artifact_path.exists():
+    try:
+        parity_obj = json.loads(parity_artifact_path.read_text(encoding="utf-8"))
+    except Exception:
+        parity_obj = {}
+
+binary_attest_obj = {}
+if binary_attest_artifact_path is not None and binary_attest_artifact_path.exists():
+    try:
+        binary_attest_obj = json.loads(binary_attest_artifact_path.read_text(encoding="utf-8"))
+    except Exception:
+        binary_attest_obj = {}
+
+target_profiles = []
+for row in parity_obj.get("targets", []) if isinstance(parity_obj.get("targets"), list) else []:
+    if not isinstance(row, dict):
+        continue
+    target_profiles.append({
+        "lane": row.get("lane", ""),
+        "target": row.get("target", ""),
+        "binary_format": row.get("binary_format", ""),
+        "status": row.get("status", ""),
+        "reason": row.get("reason", ""),
+        "output_path": row.get("output_path", ""),
+        "output_sha256": row.get("output_sha256", ""),
+    })
+
+hash_chain = binary_attest_obj.get("hash_chain", {}) if isinstance(binary_attest_obj.get("hash_chain"), dict) else {}
+binary_provenance_entries = binary_attest_obj.get("target_provenance", []) if isinstance(binary_attest_obj.get("target_provenance"), list) else []
 
 obj = {
     "schema": "sounio.omega.gpu_runtime_attest_gate.v1",
@@ -206,6 +243,13 @@ obj = {
     },
     "signature_valid": signature_valid,
     "gpu_info": gpu_info,
+    "target_profiles": target_profiles,
+    "binary_provenance": {
+        "parity_artifact": str(parity_artifact_path) if parity_artifact_path is not None else "",
+        "binary_attest_artifact": str(binary_attest_artifact_path) if binary_attest_artifact_path is not None else "",
+        "entries": binary_provenance_entries,
+    },
+    "hash_chain": hash_chain,
     "tests": tests,
     "blockers": blockers,
     "notes": [
@@ -217,6 +261,8 @@ obj = {
         f"resolved_expected_version={expected_version}",
         f"local_pinned_souc_path={local_pinned_souc_path}",
         f"remote_bootstrapped_souc_rel={remote_bootstrapped_souc_rel}",
+        f"parity_artifact={str(parity_artifact_path) if parity_artifact_path is not None else ''}",
+        f"binary_attest_artifact={str(binary_attest_artifact_path) if binary_attest_artifact_path is not None else ''}",
     ],
 }
 out_path.write_text(json.dumps(obj, indent=2) + "\n", encoding="utf-8")
