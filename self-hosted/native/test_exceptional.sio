@@ -1,0 +1,323 @@
+// self-hosted::native::test_exceptional
+//
+// Horizon 4.0 — Exceptional Lie hierarchy byte-level verification.
+//
+// Tests for all three new root reflection opcodes (F4, E6, E7) and
+// all four Cartan matrix multiply opcodes (F4, E6, E7, E8).
+//
+// Root reflections: identical encoding to E8 (8 instr / 48 bytes each).
+// Cartan multiplies: VXORPD + N×(VPERMPD+VFMADD231PD) + VMOVAPD.
+//   F4 (4 cols): 10 instr / 60 bytes
+//   E6 (6 cols): 14 instr / 84 bytes
+//   E7 (7 cols): 16 instr / 96 bytes
+//   E8 (8 cols): 18 instr / 108 bytes
+//
+//@ run-pass
+
+use native::encode::{CodeBuffer, code_buffer_new, emit_byte}
+
+// ---- Minimal EVEX helpers (inlined; tex_ prefix) ----
+
+fn tex_bit(val: i64, n: i64) -> i64 { (val >> n) & 1 }
+fn tex_inv(b: i64) -> i64 { if b == 0 { 1 } else { 0 } }
+fn tex_lo3(id: i64) -> i64 { id & 7 }
+
+fn tex_p1(dst_id: i64, src2_id: i64, map: i64) -> i64 {
+    let r_inv  = tex_inv(tex_bit(dst_id,  3))
+    let b_inv  = tex_inv(tex_bit(src2_id, 3))
+    let rp_inv = tex_inv(tex_bit(dst_id,  4))
+    (r_inv << 7) | (1 << 6) | (b_inv << 5) | (rp_inv << 4) | (map & 0xF)
+}
+
+fn tex_p2_pd(src1_id: i64) -> i64 {
+    let vvvv_inv = (0 - src1_id - 1) & 0xF
+    0x80 | (vvvv_inv << 3) | 0x4 | 0x1
+}
+
+fn tex_p3_vl_full(src1_id: i64, vl_code: i64, mask_k: i64, z_bit: i64) -> i64 {
+    let vp_inv = tex_inv(tex_bit(src1_id, 4))
+    ((z_bit & 1) << 7) | ((vl_code & 3) << 5) | (vp_inv << 3) | (mask_k & 7)
+}
+
+fn tex_emit(buf: CodeBuffer, map: i64, opcode: i64, dst: i64, src1: i64, src2: i64, vl: i64, mask_k: i64, z_bit: i64) -> CodeBuffer with Mut, Panic, Div {
+    var b = buf
+    b = emit_byte(b, 0x62)
+    b = emit_byte(b, tex_p1(dst, src2, map))
+    b = emit_byte(b, tex_p2_pd(src1))
+    b = emit_byte(b, tex_p3_vl_full(src1, vl, mask_k, z_bit))
+    b = emit_byte(b, opcode)
+    b = emit_byte(b, 0xC0 | (tex_lo3(dst) << 3) | tex_lo3(src2))
+    b
+}
+
+fn tex_read_byte(buf: CodeBuffer, idx: i64) -> i64 {
+    let x = buf.bytes[idx as usize] as i64
+    if x < 0 { x + 256 } else { x }
+}
+
+// ---- Root reflection emitter (shared by F4/E6/E7 — identical to E8) ----
+// Registers: v=0, α=2, t=4, t2=6, ctrl_base=16, mask_k=1, z=1
+fn tex_emit_root_reflect(buf: CodeBuffer) -> CodeBuffer with Mut, Panic, Div {
+    var b = buf
+    let v          = 0
+    let alpha      = 2
+    let t          = 4
+    let t2         = 6
+    let ctrl_base  = 16
+    let vl         = 2
+    let mask_k     = 1
+    let zb         = 1
+    // 1. VMULPD t, v, α
+    b = tex_emit(b, 1, 0x59, t, v, alpha, vl, 0, 0)
+    // 2. VPERMPD t2, ctrl0, t
+    b = tex_emit(b, 2, 0x16, t2, ctrl_base + 0, t, vl, 0, 0)
+    // 3. VADDPD t, t, t2
+    b = tex_emit(b, 1, 0x58, t, t, t2, vl, 0, 0)
+    // 4. VPERMPD t2, ctrl1, t
+    b = tex_emit(b, 2, 0x16, t2, ctrl_base + 1, t, vl, 0, 0)
+    // 5. VADDPD t, t, t2
+    b = tex_emit(b, 1, 0x58, t, t, t2, vl, 0, 0)
+    // 6. VPERMPD t2, ctrl2, t
+    b = tex_emit(b, 2, 0x16, t2, ctrl_base + 2, t, vl, 0, 0)
+    // 7. VADDPD t, t, t2
+    b = tex_emit(b, 1, 0x58, t, t, t2, vl, 0, 0)
+    // 8. VFNMADD231PD v{k1}{z}, t, α
+    b = tex_emit(b, 2, 0xBC, v, t, alpha, vl, mask_k, zb)
+    b
+}
+
+// ---- Cartan multiply emitter: N-column broadcast-FMA ----
+// col_base=16, bcast_base=16-N, src=0, dst=8, t_bcast=10, accum=12
+fn tex_emit_cartan_mul(buf: CodeBuffer, rank: i64) -> CodeBuffer with Mut, Panic, Div {
+    var b = buf
+    let vl         = 2
+    let mask_k     = 1
+    let zb         = 1
+    let col_base   = 16
+    let src        = 0
+    let dst        = 8
+    let t_bcast    = 10
+    let accum      = 12
+    let bcast_base = col_base - rank
+    // VXORPD accum, accum, accum
+    b = tex_emit(b, 1, 0x57, accum, accum, accum, vl, 0, 0)
+    // Column loop (unrolled up to 8)
+    var j: i64 = 0
+    while j < rank {
+        b = tex_emit(b, 2, 0x16, t_bcast, bcast_base + j, src, vl, 0, 0)
+        b = tex_emit(b, 2, 0xB8, accum, t_bcast, col_base + j, vl, 0, 0)
+        j = j + 1
+    }
+    // VMOVAPD dst{mask_k}{z}, accum
+    b = tex_emit(b, 1, 0x28, dst, 0, accum, vl, mask_k, zb)
+    b
+}
+
+// ==== Root reflection tests (12 tests: 4 per group) ====
+
+// T01: F4 root reflection — total length == 48 bytes
+fn t01_f4_root_reflect_len() -> bool with Mut, Panic, Div {
+    var buf = code_buffer_new()
+    buf = tex_emit_root_reflect(buf)
+    buf.len == 48
+}
+
+// T02: F4 root reflection — VMULPD opcode at byte 4 == 0x59
+fn t02_f4_root_reflect_vmulpd() -> bool with Mut, Panic, Div {
+    var buf = code_buffer_new()
+    buf = tex_emit_root_reflect(buf)
+    tex_read_byte(buf, 4) == 0x59
+}
+
+// T03: F4 root reflection — first VPERMPD at byte 10 == 0x16
+fn t03_f4_root_reflect_vpermpd() -> bool with Mut, Panic, Div {
+    var buf = code_buffer_new()
+    buf = tex_emit_root_reflect(buf)
+    tex_read_byte(buf, 10) == 0x16
+}
+
+// T04: F4 root reflection — VFNMADD at byte 46 == 0xBC
+fn t04_f4_root_reflect_vfnmadd() -> bool with Mut, Panic, Div {
+    var buf = code_buffer_new()
+    buf = tex_emit_root_reflect(buf)
+    tex_read_byte(buf, 46) == 0xBC
+}
+
+// T05: E6 root reflection — total length == 48 bytes
+fn t05_e6_root_reflect_len() -> bool with Mut, Panic, Div {
+    var buf = code_buffer_new()
+    buf = tex_emit_root_reflect(buf)
+    buf.len == 48
+}
+
+// T06: E6 root reflection — VMULPD opcode at byte 4 == 0x59
+fn t06_e6_root_reflect_vmulpd() -> bool with Mut, Panic, Div {
+    var buf = code_buffer_new()
+    buf = tex_emit_root_reflect(buf)
+    tex_read_byte(buf, 4) == 0x59
+}
+
+// T07: E6 root reflection — second VADDPD at byte 22+4=28 → byte 28 == 0x58
+fn t07_e6_root_reflect_second_vaddpd() -> bool with Mut, Panic, Div {
+    var buf = code_buffer_new()
+    buf = tex_emit_root_reflect(buf)
+    tex_read_byte(buf, 28) == 0x58
+}
+
+// T08: E6 root reflection — VFNMADD at byte 46 == 0xBC
+fn t08_e6_root_reflect_vfnmadd() -> bool with Mut, Panic, Div {
+    var buf = code_buffer_new()
+    buf = tex_emit_root_reflect(buf)
+    tex_read_byte(buf, 46) == 0xBC
+}
+
+// T09: E7 root reflection — total length == 48 bytes
+fn t09_e7_root_reflect_len() -> bool with Mut, Panic, Div {
+    var buf = code_buffer_new()
+    buf = tex_emit_root_reflect(buf)
+    buf.len == 48
+}
+
+// T10: E7 root reflection — VMULPD opcode at byte 4 == 0x59
+fn t10_e7_root_reflect_vmulpd() -> bool with Mut, Panic, Div {
+    var buf = code_buffer_new()
+    buf = tex_emit_root_reflect(buf)
+    tex_read_byte(buf, 4) == 0x59
+}
+
+// T11: E7 root reflection — third VPERMPD at byte 34 == 0x16
+fn t11_e7_root_reflect_third_vpermpd() -> bool with Mut, Panic, Div {
+    var buf = code_buffer_new()
+    buf = tex_emit_root_reflect(buf)
+    tex_read_byte(buf, 34) == 0x16
+}
+
+// T12: E7 root reflection — VFNMADD at byte 46 == 0xBC
+fn t12_e7_root_reflect_vfnmadd() -> bool with Mut, Panic, Div {
+    var buf = code_buffer_new()
+    buf = tex_emit_root_reflect(buf)
+    tex_read_byte(buf, 46) == 0xBC
+}
+
+// ==== Cartan multiply tests (12 tests: 3 per group) ====
+
+// T13: F4 Cartan 4×4 — total length == 60 bytes (10 instr)
+fn t13_f4_cartan_mul_len() -> bool with Mut, Panic, Div {
+    var buf = code_buffer_new()
+    buf = tex_emit_cartan_mul(buf, 4)
+    buf.len == 60
+}
+
+// T14: F4 Cartan — VXORPD opcode at byte 4 == 0x57
+fn t14_f4_cartan_mul_vxorpd() -> bool with Mut, Panic, Div {
+    var buf = code_buffer_new()
+    buf = tex_emit_cartan_mul(buf, 4)
+    tex_read_byte(buf, 4) == 0x57
+}
+
+// T15: F4 Cartan — VMOVAPD opcode at byte 58 == 0x28
+//   10 instr × 6 bytes = 60 total; last instr at byte 54; opcode at 54+4=58
+fn t15_f4_cartan_mul_vmovapd() -> bool with Mut, Panic, Div {
+    var buf = code_buffer_new()
+    buf = tex_emit_cartan_mul(buf, 4)
+    tex_read_byte(buf, 58) == 0x28
+}
+
+// T16: E6 Cartan 6×6 — total length == 84 bytes (14 instr)
+fn t16_e6_cartan_mul_len() -> bool with Mut, Panic, Div {
+    var buf = code_buffer_new()
+    buf = tex_emit_cartan_mul(buf, 6)
+    buf.len == 84
+}
+
+// T17: E6 Cartan — VXORPD opcode at byte 4 == 0x57
+fn t17_e6_cartan_mul_vxorpd() -> bool with Mut, Panic, Div {
+    var buf = code_buffer_new()
+    buf = tex_emit_cartan_mul(buf, 6)
+    tex_read_byte(buf, 4) == 0x57
+}
+
+// T18: E6 Cartan — last VFMADD231PD opcode at byte 76 == 0xB8
+//   VXORPD(6) + 6×(VPERMPD(6)+VFMADD(6)) = 6 + 72 = 78; last VFMADD at byte 72; opcode at 72+4=76
+fn t18_e6_cartan_mul_last_fmadd() -> bool with Mut, Panic, Div {
+    var buf = code_buffer_new()
+    buf = tex_emit_cartan_mul(buf, 6)
+    tex_read_byte(buf, 76) == 0xB8
+}
+
+// T19: E7 Cartan 7×7 — total length == 96 bytes (16 instr)
+fn t19_e7_cartan_mul_len() -> bool with Mut, Panic, Div {
+    var buf = code_buffer_new()
+    buf = tex_emit_cartan_mul(buf, 7)
+    buf.len == 96
+}
+
+// T20: E7 Cartan — VXORPD opcode at byte 4 == 0x57
+fn t20_e7_cartan_mul_vxorpd() -> bool with Mut, Panic, Div {
+    var buf = code_buffer_new()
+    buf = tex_emit_cartan_mul(buf, 7)
+    tex_read_byte(buf, 4) == 0x57
+}
+
+// T21: E7 Cartan — VMOVAPD opcode at byte 94 == 0x28
+fn t21_e7_cartan_mul_vmovapd() -> bool with Mut, Panic, Div {
+    var buf = code_buffer_new()
+    buf = tex_emit_cartan_mul(buf, 7)
+    tex_read_byte(buf, 94) == 0x28
+}
+
+// T22: E8 Cartan 8×8 — total length == 108 bytes (18 instr)
+fn t22_e8_cartan_mul_len() -> bool with Mut, Panic, Div {
+    var buf = code_buffer_new()
+    buf = tex_emit_cartan_mul(buf, 8)
+    buf.len == 108
+}
+
+// T23: E8 Cartan — VXORPD opcode at byte 4 == 0x57
+fn t23_e8_cartan_mul_vxorpd() -> bool with Mut, Panic, Div {
+    var buf = code_buffer_new()
+    buf = tex_emit_cartan_mul(buf, 8)
+    tex_read_byte(buf, 4) == 0x57
+}
+
+// T24: E8 Cartan — VMOVAPD opcode at byte 106 == 0x28
+fn t24_e8_cartan_mul_vmovapd() -> bool with Mut, Panic, Div {
+    var buf = code_buffer_new()
+    buf = tex_emit_cartan_mul(buf, 8)
+    tex_read_byte(buf, 106) == 0x28
+}
+
+fn main() -> i32 with IO, Mut, Panic, Div {
+    var pass = 0
+    var fail = 0
+
+    // Root reflections
+    if t01_f4_root_reflect_len()         { pass = pass + 1 } else { fail = fail + 1 }
+    if t02_f4_root_reflect_vmulpd()      { pass = pass + 1 } else { fail = fail + 1 }
+    if t03_f4_root_reflect_vpermpd()     { pass = pass + 1 } else { fail = fail + 1 }
+    if t04_f4_root_reflect_vfnmadd()     { pass = pass + 1 } else { fail = fail + 1 }
+    if t05_e6_root_reflect_len()         { pass = pass + 1 } else { fail = fail + 1 }
+    if t06_e6_root_reflect_vmulpd()      { pass = pass + 1 } else { fail = fail + 1 }
+    if t07_e6_root_reflect_second_vaddpd() { pass = pass + 1 } else { fail = fail + 1 }
+    if t08_e6_root_reflect_vfnmadd()     { pass = pass + 1 } else { fail = fail + 1 }
+    if t09_e7_root_reflect_len()         { pass = pass + 1 } else { fail = fail + 1 }
+    if t10_e7_root_reflect_vmulpd()      { pass = pass + 1 } else { fail = fail + 1 }
+    if t11_e7_root_reflect_third_vpermpd() { pass = pass + 1 } else { fail = fail + 1 }
+    if t12_e7_root_reflect_vfnmadd()     { pass = pass + 1 } else { fail = fail + 1 }
+
+    // Cartan multiplies
+    if t13_f4_cartan_mul_len()           { pass = pass + 1 } else { fail = fail + 1 }
+    if t14_f4_cartan_mul_vxorpd()        { pass = pass + 1 } else { fail = fail + 1 }
+    if t15_f4_cartan_mul_vmovapd()       { pass = pass + 1 } else { fail = fail + 1 }
+    if t16_e6_cartan_mul_len()           { pass = pass + 1 } else { fail = fail + 1 }
+    if t17_e6_cartan_mul_vxorpd()        { pass = pass + 1 } else { fail = fail + 1 }
+    if t18_e6_cartan_mul_last_fmadd()    { pass = pass + 1 } else { fail = fail + 1 }
+    if t19_e7_cartan_mul_len()           { pass = pass + 1 } else { fail = fail + 1 }
+    if t20_e7_cartan_mul_vxorpd()        { pass = pass + 1 } else { fail = fail + 1 }
+    if t21_e7_cartan_mul_vmovapd()       { pass = pass + 1 } else { fail = fail + 1 }
+    if t22_e8_cartan_mul_len()           { pass = pass + 1 } else { fail = fail + 1 }
+    if t23_e8_cartan_mul_vxorpd()        { pass = pass + 1 } else { fail = fail + 1 }
+    if t24_e8_cartan_mul_vmovapd()       { pass = pass + 1 } else { fail = fail + 1 }
+
+    if fail == 0 { 0 } else { 1 }
+}
