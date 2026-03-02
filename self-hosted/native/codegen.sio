@@ -4,18 +4,14 @@
 // Takes an IrModule, compiles each function with proper stack frames,
 // emits an entry trampoline, applies relocations, and produces an ELF64 binary.
 
-// ============================================================================
-// Label patching for intra-function control flow
-// ============================================================================
-
-struct LabelPatch {
-    code_offset: i64,       // Position of the rel32 operand to patch
-    label_id: i64,          // Target label
-}
-
-fn empty_label_patch() -> LabelPatch {
-    LabelPatch { code_offset: 0, label_id: -1 }
-}
+use parser::ast::{Name}
+use ir::ir::{IrModule, IrFunction, IrInstr, IrOpcode, IR_MAX_FUNCS, IR_MAX_STRINGS}
+use native::encode::*
+use native::elf::*
+use native::reloc::*
+use native::frame::*
+use native::lower_ir::{lower_instr}
+use native::regs::{param_reg}
 
 // ============================================================================
 // Native dispatcher contracts (Sprint 1)
@@ -322,79 +318,6 @@ fn native_compile_result_ok(bytes: [i8; 4194304], len: i64, format_id: i64) -> N
         error_code: ERR_OK(),
         error_msg: "",
     }
-}
-
-// ============================================================================
-// Compiler state
-// ============================================================================
-
-struct NativeCompiler {
-    code: CodeBuffer,
-    relocs: RelocationTable,
-    rodata: StringTable,            // String literals for .rodata
-
-    // Module-level: function layout
-    fn_offsets: [i64; 1024],         // function index -> code buffer offset
-    fn_count: i64,
-
-    // Per-function: return jump patching
-    return_jumps: [i64; 64],        // positions of jmp rel32 operands
-    return_jump_count: i64,
-
-    // Per-function: label tracking for branches
-    label_offsets: [i64; 256],      // label_id -> code offset (-1 = undefined)
-    label_patches: [LabelPatch; 256],
-    label_patch_count: i64,
-
-    // Per-function: frame info
-    current_frame_size: i64,
-
-    // Entry trampoline offset (recorded during emit_entry_trampoline)
-    entry_offset: i64,
-}
-
-fn compiler_new() -> NativeCompiler {
-    NativeCompiler {
-        code: code_buffer_new(),
-        relocs: reloc_table_new(),
-        rodata: string_table_new(),
-        fn_offsets: [-1; 1024],
-        fn_count: 0,
-        return_jumps: [0; 64],
-        return_jump_count: 0,
-        label_offsets: [-1; 256],
-        label_patches: [empty_label_patch(); 256],
-        label_patch_count: 0,
-        current_frame_size: 0,
-        entry_offset: 0,
-    }
-}
-
-fn codegen_new() -> NativeCompiler {
-    compiler_new()
-}
-
-// Reset per-function state before compiling a new function
-fn reset_function_state(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
-    var c = nc
-    c.return_jump_count = 0
-    var i = 0
-    while i < 256 {
-        c.label_offsets[i as usize] = -1
-        i = i + 1
-    }
-    c.label_patch_count = 0
-    c.current_frame_size = 0
-    c
-}
-
-// ============================================================================
-// Stack slot mapping: IR virtual register -> rbp-relative offset
-// ============================================================================
-
-// IR virtual register N lives at rbp - (N+1)*8
-fn ir_slot_offset(vreg: i64) -> i64 {
-    -(vreg + 1) * 8
 }
 
 // ============================================================================
@@ -1072,77 +995,6 @@ fn spill_ir_params(nc: NativeCompiler, func: IrFunction) -> NativeCompiler with 
             let preg = param_reg(i)
             let offset = ir_slot_offset(vreg)
             c.code = emit_store_reg_rbp_disp32(c.code, offset, preg)
-        }
-        i = i + 1
-    }
-    c
-}
-
-// ============================================================================
-// Return jump patching
-// ============================================================================
-
-fn record_return_jump(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
-    var c = nc
-    // Emit jmp rel32 placeholder
-    let jmp_pos = c.code.len
-    c.code = emit_jmp_rel32(c.code)
-    // Record the position of the rel32 operand (jmp_pos + 1)
-    if c.return_jump_count < 64 {
-        c.return_jumps[c.return_jump_count as usize] = jmp_pos + 1
-        c.return_jump_count = c.return_jump_count + 1
-    }
-    c
-}
-
-fn patch_return_jumps(nc: NativeCompiler, epilogue_offset: i64) -> NativeCompiler with Mut, Panic, Div {
-    var c = nc
-    var i = 0
-    while i < c.return_jump_count {
-        let imm_offset = c.return_jumps[i as usize]
-        let next_ip = imm_offset + 4
-        let rel = epilogue_offset - next_ip
-        c.code = patch_u32_le(c.code, imm_offset, rel)
-        i = i + 1
-    }
-    c
-}
-
-// ============================================================================
-// Label tracking for intra-function control flow
-// ============================================================================
-
-fn record_label(nc: NativeCompiler, label_id: i64) -> NativeCompiler with Mut, Panic {
-    var c = nc
-    if label_id >= 0 && label_id < 256 {
-        c.label_offsets[label_id as usize] = c.code.len
-    }
-    c
-}
-
-// Record a forward reference to a label (the rel32 operand position)
-fn record_label_patch(nc: NativeCompiler, label_id: i64, rel32_offset: i64) -> NativeCompiler with Mut, Panic {
-    var c = nc
-    if c.label_patch_count < 256 {
-        c.label_patches[c.label_patch_count as usize] = LabelPatch {
-            code_offset: rel32_offset,
-            label_id: label_id,
-        }
-        c.label_patch_count = c.label_patch_count + 1
-    }
-    c
-}
-
-fn patch_label_forwards(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
-    var c = nc
-    var i = 0
-    while i < c.label_patch_count {
-        let patch = c.label_patches[i as usize]
-        let target = c.label_offsets[patch.label_id as usize]
-        if target >= 0 {
-            let next_ip = patch.code_offset + 4
-            let rel = target - next_ip
-            c.code = patch_u32_le(c.code, patch.code_offset, rel)
         }
         i = i + 1
     }
