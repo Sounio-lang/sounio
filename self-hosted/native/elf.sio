@@ -4,6 +4,9 @@
 
 use native::encode::*
 
+// PT_GNU_STACK type constant (marks stack non-executable)
+fn elf_pt_gnu_stack() -> i64 { 0x6474e551 }
+
 // ELF64 constants
 fn elf_magic_0() -> i64 { 0x7f }
 fn elf_magic_1() -> i64 { 0x45 }  // 'E'
@@ -96,7 +99,7 @@ fn elf_emit_u64(bin: Elf64Binary, val: i64) -> Elf64Binary with Mut, Panic, Div 
     b
 }
 
-// Build minimal ELF64 executable with .text + .rodata
+// Build minimal ELF64 executable with .text + .rodata + PT_GNU_STACK
 fn finalize_elf64(
     code: CodeBuffer,
     rodata: StringTable,
@@ -109,12 +112,19 @@ fn finalize_elf64(
     let text_offset = 4096
     let rodata_offset = align_page(text_offset + code.len)
 
-    // ELF header (64 bytes)
-    bin = emit_elf_header(bin, entry_offset, base_addr, rodata.len)
+    // phnum: text + gnu_stack (always), + rodata if non-empty
+    let phnum = if rodata.len > 0 { 3 } else { 2 }
 
-    // Program headers: 2 PT_LOAD segments (56 bytes each = 112 total)
+    // ELF header (64 bytes)
+    bin = emit_elf_header(bin, entry_offset, base_addr, phnum)
+
+    // Program headers
     bin = emit_program_header_text(bin, code.len, text_offset, base_addr)
-    bin = emit_program_header_rodata(bin, rodata.len, rodata_offset, base_addr)
+    if rodata.len > 0 {
+        bin = emit_program_header_rodata(bin, rodata.len, rodata_offset, base_addr)
+    }
+    // PT_GNU_STACK: marks stack non-executable (NX), required by many distros
+    bin = emit_program_header_gnu_stack(bin)
 
     // Pad to .text start (4096 bytes)
     while bin.len < text_offset {
@@ -153,8 +163,8 @@ fn align_page(offset: i64) -> i64 with Mut, Panic {
     aligned
 }
 
-// Emit ELF64 header (updated for 2 program headers)
-fn emit_elf_header(bin: Elf64Binary, entry_offset: i64, base_addr: i64, rodata_len: i64) -> Elf64Binary with Mut, Panic, Div {
+// Emit ELF64 header
+fn emit_elf_header(bin: Elf64Binary, entry_offset: i64, base_addr: i64, phnum: i64) -> Elf64Binary with Mut, Panic, Div {
     var b = bin
 
     // e_ident[16]
@@ -193,8 +203,7 @@ fn emit_elf_header(bin: Elf64Binary, entry_offset: i64, base_addr: i64, rodata_l
     b = elf_emit_u16(b, 56)       // program header entry size
 
     // e_phnum, e_shentsize, e_shnum, e_shstrndx
-    let phnum = if rodata_len > 0 { 2 } else { 1 }
-    b = elf_emit_u16(b, phnum)    // 2 program headers (.text + .rodata)
+    b = elf_emit_u16(b, phnum)
     b = elf_emit_u16(b, 0)        // section header entry size (none)
     b = elf_emit_u16(b, 0)        // section header count (none)
     b = elf_emit_u16(b, 0)        // section name string table index
@@ -227,6 +236,24 @@ fn emit_program_header_text(bin: Elf64Binary, code_len: i64, text_offset: i64, b
     // p_align (4096 bytes)
     b = elf_emit_u64(b, 4096)
 
+    b
+}
+
+// Emit PT_GNU_STACK program header (marks stack non-executable; all sizes zero)
+fn emit_program_header_gnu_stack(bin: Elf64Binary) -> Elf64Binary with Mut, Panic, Div {
+    var b = bin
+    // p_type = PT_GNU_STACK
+    b = elf_emit_u32(b, elf_pt_gnu_stack())
+    // p_flags = PF_R|PF_W (6)
+    b = elf_emit_u32(b, elf_pf_r() + 2)
+    // p_offset, p_vaddr, p_paddr, p_filesz, p_memsz = 0
+    b = elf_emit_u64(b, 0)
+    b = elf_emit_u64(b, 0)
+    b = elf_emit_u64(b, 0)
+    b = elf_emit_u64(b, 0)
+    b = elf_emit_u64(b, 0)
+    // p_align = 16
+    b = elf_emit_u64(b, 16)
     b
 }
 
