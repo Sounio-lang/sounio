@@ -17,6 +17,7 @@ Emits a machine-checkable snapshot of stdlib inventory:
   - total .sio.disabled files
   - stub-like mod.sio files (module-only surface)
   - active module entrypoints (lib.sio + non-stub mod.sio)
+  - hypercomplex inventory (active/disabled/stub in nn/onn/qnn/snn/math lanes)
 USAGE
 }
 
@@ -98,6 +99,22 @@ for p in entrypoint_files:
     elif str(p) not in stub_mod_set:
         active_entrypoints.append(p)
 
+HYPER_ROOTS = {"nn", "onn", "qnn", "snn", "math"}
+HYPER_TOKENS = ("quaternion", "octonion", "sedenion", "hypercomplex", "g2", "clifford")
+
+def is_hyper_path(path: Path) -> bool:
+    rel = path.relative_to(stdlib_path)
+    if not rel.parts:
+        return False
+    if rel.parts[0] not in HYPER_ROOTS:
+        return False
+    joined = "/".join(rel.parts).lower()
+    return any(token in joined for token in HYPER_TOKENS)
+
+hyper_sio_files = [p for p in sio_files if is_hyper_path(p)]
+hyper_disabled_files = [p for p in disabled_files if is_hyper_path(p)]
+hyper_stub_mod_files = [p for p in stub_mod if is_hyper_path(p)]
+
 obj = {
     "schema": "sounio.stdlib.inventory.v1",
     "generated_at_utc": datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z"),
@@ -111,9 +128,15 @@ obj = {
         "lib_files": len(lib_files),
         "module_entrypoints": len(entrypoint_files),
         "active_module_entrypoints": len(active_entrypoints),
+        "hyper_active_files": len(hyper_sio_files),
+        "hyper_disabled_files": len(hyper_disabled_files),
+        "hyper_stub_mod_files": len(hyper_stub_mod_files),
     },
     "stub_mod_paths": [str(p.relative_to(stdlib_path)) for p in stub_mod],
     "active_entrypoint_paths": [str(p.relative_to(stdlib_path)) for p in active_entrypoints],
+    "hyper_active_paths": [str(p.relative_to(stdlib_path)) for p in hyper_sio_files],
+    "hyper_disabled_paths": [str(p.relative_to(stdlib_path)) for p in hyper_disabled_files],
+    "hyper_stub_mod_paths": [str(p.relative_to(stdlib_path)) for p in hyper_stub_mod_files],
 }
 out_path.write_text(json.dumps(obj, indent=2) + "\n", encoding="utf-8")
 PY
@@ -136,6 +159,9 @@ print(f"mod_files: {counts['mod_files']}")
 print(f"lib_files: {counts['lib_files']}")
 print(f"module_entrypoints: {counts['module_entrypoints']}")
 print(f"active_module_entrypoints: {counts['active_module_entrypoints']}")
+print(f"hyper_active_files: {counts['hyper_active_files']}")
+print(f"hyper_disabled_files: {counts['hyper_disabled_files']}")
+print(f"hyper_stub_mod_files: {counts['hyper_stub_mod_files']}")
 PY
 fi
 

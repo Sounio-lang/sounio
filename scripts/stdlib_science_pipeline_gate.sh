@@ -9,7 +9,14 @@ MANIFEST_JSON="${STDLIB_SCIENCE_FIXTURE_MANIFEST:-$ROOT_DIR/tests/fixtures/fmri/
 GOLDEN_JSON="${STDLIB_SCIENCE_GOLDEN:-$ROOT_DIR/tests/fixtures/fmri/pipeline_golden.v1.json}"
 FMRI_TEST="${STDLIB_SCIENCE_FMRI_TEST:-$ROOT_DIR/tests/stdlib/fmri/test_pipeline_real_e2e.sio}"
 PBPK_TEST="${STDLIB_SCIENCE_PBPK_TEST:-$ROOT_DIR/tests/stdlib/darwin_pbpk/test_pipeline_real_e2e.sio}"
+RUNTIME_LITERAL_SRC="${STDLIB_RUNTIME_PROBE_LITERAL:-$ROOT_DIR/tests/stdlib/runtime_regression/runtime_literal_as_bytes.sio}"
+RUNTIME_TEXT_SRC="${STDLIB_RUNTIME_PROBE_TEXT:-$ROOT_DIR/tests/stdlib/runtime_regression/runtime_text_as_bytes.sio}"
+RUNTIME_BINARY_SRC="${STDLIB_RUNTIME_PROBE_BINARY:-$ROOT_DIR/tests/stdlib/runtime_regression/runtime_binary_as_bytes.sio}"
+RUNTIME_SLICE_SRC="${STDLIB_RUNTIME_PROBE_SLICE:-$ROOT_DIR/tests/stdlib/runtime_regression/runtime_dynamic_slice.sio}"
 RUNTIME_REGRESSION_STRICT="${STDLIB_RUNTIME_REGRESSION_STRICT:-0}"
+RUNTIME_SOUC_BIN=""
+RUNTIME_SOUC_VERSION=""
+RUNTIME_PINNED_VERSION_EXPECTED="${SOUNIO_SOUC_VERSION:-}"
 RUNTIME_REGRESSION_ENFORCEMENT="soft"
 if [[ "$RUNTIME_REGRESSION_STRICT" == "1" ]]; then
   RUNTIME_REGRESSION_ENFORCEMENT="strict"
@@ -70,7 +77,7 @@ mkdir -p "$(dirname "$OUT_JSON")"
 
 emit_not_run() {
   local reason="$1"
-  python3 - "$OUT_JSON" "$reason" "$RUNTIME_REGRESSION_ENFORCEMENT" <<'PY'
+  python3 - "$OUT_JSON" "$reason" "$RUNTIME_REGRESSION_ENFORCEMENT" "$RUNTIME_SOUC_BIN" "$RUNTIME_SOUC_VERSION" "$RUNTIME_PINNED_VERSION_EXPECTED" <<'PY'
 import datetime
 import json
 from pathlib import Path
@@ -79,6 +86,9 @@ import sys
 out_path = Path(sys.argv[1])
 reason = sys.argv[2]
 runtime_enforcement = sys.argv[3]
+souc_bin = sys.argv[4]
+souc_version = sys.argv[5]
+pinned_version = sys.argv[6]
 obj = {
     "schema": "sounio.stdlib.science_pipeline_status.v1",
     "generated_at_utc": datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z"),
@@ -98,9 +108,15 @@ obj = {
         "literal_as_bytes": {"status": "not_run", "check_exit_code": 125, "run_exit_code": 125, "start_marker_found": False, "after_marker_found": False, "output_excerpt": ""},
         "text_as_bytes": {"status": "not_run", "check_exit_code": 125, "run_exit_code": 125, "start_marker_found": False, "after_marker_found": False, "output_excerpt": ""},
         "binary_as_bytes": {"status": "not_run", "check_exit_code": 125, "run_exit_code": 125, "start_marker_found": False, "after_marker_found": False, "output_excerpt": ""},
+        "dynamic_slice": {"status": "not_run", "check_exit_code": 125, "run_exit_code": 125, "start_marker_found": False, "after_marker_found": False, "output_excerpt": ""},
     },
     "runtime_regression_enforcement": runtime_enforcement,
-    "runtime_regression_summary": {"status": "not_run", "pass": 0, "fail": 0, "not_run": 3, "total": 3},
+    "runtime_regression_summary": {"status": "not_run", "pass": 0, "fail": 0, "not_run": 4, "total": 4},
+    "runtime_provenance": {
+        "souc_bin": souc_bin,
+        "souc_version": souc_version,
+        "pinned_version_expected": pinned_version,
+    },
     "failures": [{"lane": "gate", "kind": "not_run", "message": reason}],
     "notes": [reason],
 }
@@ -134,6 +150,7 @@ required = [
     "runtime_regressions",
     "runtime_regression_enforcement",
     "runtime_regression_summary",
+    "runtime_provenance",
     "failures",
     "notes",
 ]
@@ -153,7 +170,7 @@ if obj["runtime_regression_enforcement"] not in {"soft", "strict"}:
 rr = obj.get("runtime_regressions")
 if not isinstance(rr, dict):
     raise SystemExit("runtime_regressions must be an object")
-for key in ("literal_as_bytes", "text_as_bytes", "binary_as_bytes"):
+for key in ("literal_as_bytes", "text_as_bytes", "binary_as_bytes", "dynamic_slice"):
     if key not in rr:
         raise SystemExit(f"runtime_regressions missing key: {key}")
 
@@ -162,6 +179,13 @@ if not isinstance(rr_summary, dict):
     raise SystemExit("runtime_regression_summary must be an object")
 if rr_summary.get("status") not in {"pass", "fail", "not_run"}:
     raise SystemExit("runtime_regression_summary.status must be pass|fail|not_run")
+
+runtime_provenance = obj.get("runtime_provenance")
+if not isinstance(runtime_provenance, dict):
+    raise SystemExit("runtime_provenance must be an object")
+for key in ("souc_bin", "souc_version", "pinned_version_expected"):
+    if key not in runtime_provenance:
+        raise SystemExit(f"runtime_provenance missing key: {key}")
 PY
 }
 
@@ -187,6 +211,28 @@ if [[ $souc_rc -ne 0 ]]; then
 fi
 
 export SOUNIO_STDLIB_PATH="${SOUNIO_STDLIB_PATH:-$ROOT_DIR/stdlib}"
+RUNTIME_SOUC_BIN="$SOUC_BIN"
+RUNTIME_SOUC_VERSION="$("$SOUC_BIN" --version 2>/dev/null | awk 'NR==1 {print $2}')"
+if [[ -z "$RUNTIME_SOUC_VERSION" ]]; then
+  RUNTIME_SOUC_VERSION="unknown"
+fi
+if [[ -z "$RUNTIME_PINNED_VERSION_EXPECTED" ]]; then
+  RUNTIME_PINNED_VERSION_EXPECTED="$(python3 - "$ROOT_DIR/scripts/omega/omega_resolve_souc_bin.sh" <<'PY'
+import re
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+src = path.read_text(encoding="utf-8", errors="replace")
+match = re.search(r'SOUC_VERSION="\$\{SOUNIO_SOUC_VERSION:-([^}]+)\}"', src)
+if match:
+    print(match.group(1))
+PY
+)"
+fi
+if [[ -z "$RUNTIME_PINNED_VERSION_EXPECTED" ]]; then
+  RUNTIME_PINNED_VERSION_EXPECTED="unknown"
+fi
 
 if [[ ! -f "$FMRI_TEST" || ! -f "$PBPK_TEST" ]]; then
   emit_not_run "science_tests_missing"
@@ -194,6 +240,14 @@ if [[ ! -f "$FMRI_TEST" || ! -f "$PBPK_TEST" ]]; then
   echo "error: required science tests are missing" >&2
   exit 1
 fi
+for probe_src in "$RUNTIME_LITERAL_SRC" "$RUNTIME_TEXT_SRC" "$RUNTIME_BINARY_SRC" "$RUNTIME_SLICE_SRC"; do
+  if [[ ! -f "$probe_src" ]]; then
+    emit_not_run "runtime_probe_source_missing"
+    validate_status_json || true
+    echo "error: missing runtime probe source: $probe_src" >&2
+    exit 1
+  fi
+done
 
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
@@ -201,12 +255,10 @@ FMRI_OUT="$TMP_DIR/fmri.out"
 PBPK_OUT="$TMP_DIR/pbpk.out"
 IGNORE_HITS_FILE="$TMP_DIR/ignore_hits.txt"
 MANIFEST_VERIFY_LOG="$TMP_DIR/manifest_verify.log"
-RUNTIME_LITERAL_SRC="$TMP_DIR/runtime_literal_as_bytes.sio"
-RUNTIME_TEXT_SRC="$TMP_DIR/runtime_text_as_bytes.sio"
-RUNTIME_BINARY_SRC="$TMP_DIR/runtime_binary_as_bytes.sio"
 RUNTIME_LITERAL_OUT="$TMP_DIR/runtime_literal_as_bytes.out"
 RUNTIME_TEXT_OUT="$TMP_DIR/runtime_text_as_bytes.out"
 RUNTIME_BINARY_OUT="$TMP_DIR/runtime_binary_as_bytes.out"
+RUNTIME_SLICE_OUT="$TMP_DIR/runtime_dynamic_slice.out"
 
 run_runtime_probe() {
   local src="$1"
@@ -227,57 +279,19 @@ run_runtime_probe() {
   printf -v "$run_var" '%s' "$run_rc"
 }
 
-cat >"$RUNTIME_LITERAL_SRC" <<'SIO'
-fn main() -> i32 with IO {
-    print("RUNTIME_PROBE_LITERAL_START\n")
-    let bytes = "literal_probe".as_bytes()
-    let n = bytes.len() as i64
-    print("RUNTIME_PROBE_LITERAL_LEN ")
-    print(n)
-    print("\n")
-    print("RUNTIME_PROBE_LITERAL_AFTER\n")
-    0
-}
-SIO
-
-cat >"$RUNTIME_TEXT_SRC" <<'SIO'
-fn main() -> i32 with IO {
-    print("RUNTIME_PROBE_TEXT_START\n")
-    let raw = read_file("tests/fixtures/fmri/tiny_real_motion.tsv")
-    let bytes = raw.as_bytes()
-    let n = bytes.len() as i64
-    print("RUNTIME_PROBE_TEXT_LEN ")
-    print(n)
-    print("\n")
-    print("RUNTIME_PROBE_TEXT_AFTER\n")
-    0
-}
-SIO
-
-cat >"$RUNTIME_BINARY_SRC" <<'SIO'
-fn main() -> i32 with IO {
-    print("RUNTIME_PROBE_BINARY_START\n")
-    let raw = read_file("tests/fixtures/fmri/tiny_real_slice_nifti1.nii")
-    let bytes = raw.as_bytes()
-    let n = bytes.len() as i64
-    print("RUNTIME_PROBE_BINARY_LEN ")
-    print(n)
-    print("\n")
-    print("RUNTIME_PROBE_BINARY_AFTER\n")
-    0
-}
-SIO
-
 literal_check_rc=125
 literal_run_rc=125
 text_check_rc=125
 text_run_rc=125
 binary_check_rc=125
 binary_run_rc=125
+slice_check_rc=125
+slice_run_rc=125
 
 run_runtime_probe "$RUNTIME_LITERAL_SRC" "$RUNTIME_LITERAL_OUT" literal_check_rc literal_run_rc
 run_runtime_probe "$RUNTIME_TEXT_SRC" "$RUNTIME_TEXT_OUT" text_check_rc text_run_rc
 run_runtime_probe "$RUNTIME_BINARY_SRC" "$RUNTIME_BINARY_OUT" binary_check_rc binary_run_rc
+run_runtime_probe "$RUNTIME_SLICE_SRC" "$RUNTIME_SLICE_OUT" slice_check_rc slice_run_rc
 
 # Hard policy: no ignore annotations in these lanes.
 rg -n '^[[:space:]]*//@[[:space:]]*ignore([[:space:]].*)?$' tests/stdlib/fmri tests/stdlib/darwin_pbpk >"$IGNORE_HITS_FILE" || true
@@ -346,7 +360,7 @@ if [[ $manifest_ok -eq 1 && $ignore_violation -eq 0 ]]; then
   set -e
 fi
 
-python3 - "$ROOT_DIR" "$OUT_JSON" "$MANIFEST_JSON" "$GOLDEN_JSON" "$FMRI_TEST" "$PBPK_TEST" "$FMRI_OUT" "$PBPK_OUT" "$fmri_rc" "$pbpk_rc" "$manifest_ok" "$ignore_violation" "$IGNORE_HITS_FILE" "$MANIFEST_VERIFY_LOG" "$RUNTIME_REGRESSION_ENFORCEMENT" "$literal_check_rc" "$literal_run_rc" "$RUNTIME_LITERAL_OUT" "$text_check_rc" "$text_run_rc" "$RUNTIME_TEXT_OUT" "$binary_check_rc" "$binary_run_rc" "$RUNTIME_BINARY_OUT" <<'PY'
+python3 - "$ROOT_DIR" "$OUT_JSON" "$MANIFEST_JSON" "$GOLDEN_JSON" "$FMRI_TEST" "$PBPK_TEST" "$FMRI_OUT" "$PBPK_OUT" "$fmri_rc" "$pbpk_rc" "$manifest_ok" "$ignore_violation" "$IGNORE_HITS_FILE" "$MANIFEST_VERIFY_LOG" "$RUNTIME_REGRESSION_ENFORCEMENT" "$literal_check_rc" "$literal_run_rc" "$RUNTIME_LITERAL_OUT" "$text_check_rc" "$text_run_rc" "$RUNTIME_TEXT_OUT" "$binary_check_rc" "$binary_run_rc" "$RUNTIME_BINARY_OUT" "$slice_check_rc" "$slice_run_rc" "$RUNTIME_SLICE_OUT" "$RUNTIME_SOUC_BIN" "$RUNTIME_SOUC_VERSION" "$RUNTIME_PINNED_VERSION_EXPECTED" <<'PY'
 import datetime
 import hashlib
 import json
@@ -379,6 +393,12 @@ text_out_path = Path(sys.argv[21]).resolve()
 binary_check_rc = int(sys.argv[22])
 binary_run_rc = int(sys.argv[23])
 binary_out_path = Path(sys.argv[24]).resolve()
+slice_check_rc = int(sys.argv[25])
+slice_run_rc = int(sys.argv[26])
+slice_out_path = Path(sys.argv[27]).resolve()
+runtime_souc_bin = sys.argv[28]
+runtime_souc_version = sys.argv[29]
+runtime_pinned_version_expected = sys.argv[30]
 
 now = datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
 
@@ -514,6 +534,13 @@ runtime_regressions = {
         "RUNTIME_PROBE_BINARY_START",
         "RUNTIME_PROBE_BINARY_AFTER",
     ),
+    "dynamic_slice": runtime_probe_status(
+        slice_check_rc,
+        slice_run_rc,
+        slice_out_path,
+        "RUNTIME_PROBE_SLICE_START",
+        "RUNTIME_PROBE_SLICE_AFTER",
+    ),
 }
 
 runtime_pass = 0
@@ -539,7 +566,7 @@ runtime_regression_summary = {
     "pass": runtime_pass,
     "fail": runtime_fail,
     "not_run": runtime_not_run,
-    "total": 3,
+    "total": len(runtime_regressions),
 }
 
 fmri_out = fmri_out_path.read_text(encoding="utf-8", errors="replace") if fmri_out_path.exists() else ""
@@ -626,7 +653,7 @@ if runtime_regression_enforcement == "strict" and runtime_fail > 0:
     failures.append({
         "lane": "runtime",
         "kind": "runtime_regression",
-        "message": "as_bytes runtime regression probes failed under strict enforcement",
+        "message": "runtime regression probes failed under strict enforcement",
     })
 
 pass_count = 0
@@ -653,6 +680,9 @@ notes.append(f"fmri_exit_code={fmri_rc}")
 notes.append(f"darwin_pbpk_exit_code={pbpk_rc}")
 notes.append(f"runtime_regression_enforcement={runtime_regression_enforcement}")
 notes.append(f"runtime_regression_summary={runtime_status}:{runtime_fail}fail/{runtime_pass}pass/{runtime_not_run}not_run")
+notes.append(f"runtime_souc_bin={runtime_souc_bin}")
+notes.append(f"runtime_souc_version={runtime_souc_version}")
+notes.append(f"runtime_pinned_version_expected={runtime_pinned_version_expected}")
 
 obj = {
     "schema": "sounio.stdlib.science_pipeline_status.v1",
@@ -686,6 +716,11 @@ obj = {
     "runtime_regressions": runtime_regressions,
     "runtime_regression_enforcement": runtime_regression_enforcement,
     "runtime_regression_summary": runtime_regression_summary,
+    "runtime_provenance": {
+        "souc_bin": runtime_souc_bin,
+        "souc_version": runtime_souc_version,
+        "pinned_version_expected": runtime_pinned_version_expected,
+    },
     "failures": failures,
     "notes": notes,
 }

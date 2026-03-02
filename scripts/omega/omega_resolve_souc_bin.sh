@@ -3,7 +3,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
-SOUC_VERSION="${SOUNIO_SOUC_VERSION:-0.100.3}"
+SOUC_VERSION="${SOUNIO_SOUC_VERSION:-1.0.0-beta.4}"
 SOUC_PLATFORM="${SOUNIO_SOUC_PLATFORM:-linux-x86_64}"
 SOUC_RELEASE_BASE_URL="${SOUNIO_SOUC_RELEASE_BASE_URL:-https://github.com/sounio-lang/sounio/releases/download}"
 SOUC_ASSET_NAME="${SOUNIO_SOUC_ASSET_NAME:-souc-${SOUC_PLATFORM}}"

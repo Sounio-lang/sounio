@@ -8,6 +8,7 @@ OUT_JSON="${STDLIB_RELIABILITY_STATUS_OUT:-$ROOT_DIR/artifacts/stdlib/stdlib_rel
 E2E_JSON="${STDLIB_RELIABILITY_E2E_JSON:-$ROOT_DIR/artifacts/stdlib/stdlib_e2e_result.v1.json}"
 INVENTORY_JSON="${STDLIB_RELIABILITY_INVENTORY_JSON:-$ROOT_DIR/artifacts/stdlib/stdlib_inventory.v1.json}"
 SCIENCE_STATUS_JSON="${STDLIB_RELIABILITY_SCIENCE_STATUS_JSON:-$ROOT_DIR/artifacts/stdlib/stdlib_science_pipeline_status.v1.json}"
+HYPER_STATUS_JSON="${STDLIB_RELIABILITY_HYPER_STATUS_JSON:-$ROOT_DIR/artifacts/stdlib/stdlib_hyper_execution_status.v1.json}"
 BASELINE_PASS="${STDLIB_RELIABILITY_BASELINE_PASS:-52}"
 BASELINE_FAIL="${STDLIB_RELIABILITY_BASELINE_FAIL:-13}"
 BASELINE_SKIP="${STDLIB_RELIABILITY_BASELINE_SKIP:-5}"
@@ -16,7 +17,7 @@ RUNTIME_REGRESSION_STRICT="${STDLIB_RUNTIME_REGRESSION_STRICT:-0}"
 
 usage() {
   cat <<'USAGE'
-Usage: bash scripts/stdlib_reliability_gate.sh [--out-json PATH] [--e2e-json PATH] [--inventory-json PATH] [--science-json PATH]
+Usage: bash scripts/stdlib_reliability_gate.sh [--out-json PATH] [--e2e-json PATH] [--inventory-json PATH] [--science-json PATH] [--hyper-json PATH]
 
 Runs fail-closed STDLIB reliability gate:
   1) Collect stdlib inventory snapshot.
@@ -60,6 +61,14 @@ while [[ $# -gt 0 ]]; do
       SCIENCE_STATUS_JSON="$2"
       shift 2
       ;;
+    --hyper-json)
+      if [[ $# -lt 2 ]]; then
+        echo "error: --hyper-json requires a path" >&2
+        exit 2
+      fi
+      HYPER_STATUS_JSON="$2"
+      shift 2
+      ;;
     -h|--help)
       usage
       exit 0
@@ -99,6 +108,14 @@ obj = {
         "status_artifact": "",
         "runtime_regression_enforcement": "soft",
         "runtime_regression_summary_status": "not_run",
+        "runtime_souc_bin": "",
+        "runtime_souc_version": "",
+        "runtime_pinned_version_expected": "",
+    },
+    "hyper_pipeline": {
+        "status": "not_run",
+        "status_artifact": "",
+        "totals": {"pass": 0, "fail": 0, "skip": 0, "total": 0},
     },
     "notes": [reason],
 }
@@ -128,6 +145,7 @@ required = [
     "contract_adjustments",
     "inventory",
     "science_pipeline",
+    "hyper_pipeline",
     "notes",
 ]
 for key in required:
@@ -155,12 +173,25 @@ if obj["science_pipeline"]["status"] not in {"pass", "fail", "not_run"}:
 for key in ("runtime_regression_enforcement", "runtime_regression_summary_status"):
     if key not in obj["science_pipeline"]:
         raise SystemExit(f"science_pipeline missing {key}")
+for key in ("runtime_souc_bin", "runtime_souc_version", "runtime_pinned_version_expected"):
+    if key not in obj["science_pipeline"]:
+        raise SystemExit(f"science_pipeline missing {key}")
 if obj["science_pipeline"]["runtime_regression_enforcement"] not in {"soft", "strict"}:
     raise SystemExit("science_pipeline.runtime_regression_enforcement must be soft|strict")
 if obj["science_pipeline"]["runtime_regression_summary_status"] not in {"pass", "fail", "not_run"}:
     raise SystemExit("science_pipeline.runtime_regression_summary_status must be pass|fail|not_run")
 if "runtime_regression_fail_count" in obj["science_pipeline"] and not isinstance(obj["science_pipeline"]["runtime_regression_fail_count"], int):
     raise SystemExit("science_pipeline.runtime_regression_fail_count must be int")
+
+if "status" not in obj["hyper_pipeline"]:
+    raise SystemExit("hyper_pipeline missing status")
+if obj["hyper_pipeline"]["status"] not in {"pass", "fail", "not_run"}:
+    raise SystemExit("hyper_pipeline.status must be pass|fail|not_run")
+if "totals" not in obj["hyper_pipeline"]:
+    raise SystemExit("hyper_pipeline missing totals")
+for key in ("pass", "fail", "skip", "total"):
+    if key not in obj["hyper_pipeline"]["totals"]:
+        raise SystemExit(f"hyper_pipeline.totals missing key: {key}")
 PY
 }
 
@@ -192,13 +223,47 @@ if runtime_status not in {"pass", "fail", "not_run"}:
 runtime_fail = runtime_summary.get("fail")
 if not isinstance(runtime_fail, int):
     raise SystemExit("invalid science runtime_regression_summary.fail")
-print(f"{status}\t{runtime_enforcement}\t{runtime_status}\t{runtime_fail}")
+runtime_provenance = obj.get("runtime_provenance")
+if not isinstance(runtime_provenance, dict):
+    raise SystemExit("invalid science runtime_provenance")
+runtime_souc_bin = runtime_provenance.get("souc_bin")
+runtime_souc_version = runtime_provenance.get("souc_version")
+runtime_pinned_expected = runtime_provenance.get("pinned_version_expected")
+if not all(isinstance(v, str) for v in (runtime_souc_bin, runtime_souc_version, runtime_pinned_expected)):
+    raise SystemExit("invalid science runtime_provenance fields")
+print(f"{status}\t{runtime_enforcement}\t{runtime_status}\t{runtime_fail}\t{runtime_souc_bin}\t{runtime_souc_version}\t{runtime_pinned_expected}")
+PY
+}
+
+load_hyper_status() {
+  if [[ ! -s "$HYPER_STATUS_JSON" ]]; then
+    return 1
+  fi
+  python3 - "$HYPER_STATUS_JSON" <<'PY'
+import json
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+obj = json.loads(path.read_text(encoding="utf-8"))
+if obj.get("schema") != "sounio.stdlib.hyper_execution_status.v1":
+    raise SystemExit("unexpected hyper schema")
+status = obj.get("status_summary")
+if status not in {"pass", "fail", "not_run"}:
+    raise SystemExit("invalid hyper status_summary")
+totals = obj.get("totals")
+if not isinstance(totals, dict):
+    raise SystemExit("invalid hyper totals")
+for key in ("pass", "fail", "skip", "total"):
+    if key not in totals or not isinstance(totals[key], int):
+        raise SystemExit(f"invalid hyper totals.{key}")
+print(f"{status}\t{totals['pass']}\t{totals['fail']}\t{totals['skip']}\t{totals['total']}")
 PY
 }
 
 echo "[stdlib-reliability-gate] collecting inventory snapshot"
 set +e
-bash "$ROOT_DIR/scripts/scan_stdlib.sh" --json-out "$INVENTORY_JSON" --quiet
+bash "$ROOT_DIR/scripts/stdlib/scan_stdlib.sh" --json-out "$INVENTORY_JSON" --quiet
 scan_rc=$?
 set -e
 if [[ $scan_rc -ne 0 || ! -s "$INVENTORY_JSON" ]]; then
@@ -207,6 +272,31 @@ if [[ $scan_rc -ne 0 || ! -s "$INVENTORY_JSON" ]]; then
   echo "error: inventory scan failed (rc=$scan_rc)" >&2
   exit 1
 fi
+
+echo "[stdlib-reliability-gate] running hyper execution gate"
+set +e
+bash "$ROOT_DIR/scripts/stdlib/stdlib_hyper_execution_gate.sh" --out-json "$HYPER_STATUS_JSON"
+hyper_gate_rc=$?
+set -e
+if [[ $hyper_gate_rc -ne 0 || ! -s "$HYPER_STATUS_JSON" ]]; then
+  emit_not_run "hyper_gate_failed_or_missing"
+  validate_status_json || true
+  echo "error: hyper gate failed or status missing: $HYPER_STATUS_JSON (rc=$hyper_gate_rc)" >&2
+  exit 1
+fi
+
+echo "[stdlib-reliability-gate] reading hyper gate status"
+set +e
+HYPER_STATUS_ROW="$(load_hyper_status)"
+hyper_status_rc=$?
+set -e
+if [[ $hyper_status_rc -ne 0 ]]; then
+  emit_not_run "hyper_status_missing_or_invalid"
+  validate_status_json || true
+  echo "error: hyper status missing/invalid: $HYPER_STATUS_JSON" >&2
+  exit 1
+fi
+IFS=$'\t' read -r HYPER_STATUS HYPER_PASS HYPER_FAIL HYPER_SKIP HYPER_TOTAL <<<"$HYPER_STATUS_ROW"
 
 echo "[stdlib-reliability-gate] reading science gate status"
 set +e
@@ -219,11 +309,11 @@ if [[ $science_rc -ne 0 ]]; then
   echo "error: science status missing/invalid: $SCIENCE_STATUS_JSON" >&2
   exit 1
 fi
-IFS=$'\t' read -r SCIENCE_STATUS SCIENCE_RUNTIME_ENFORCEMENT SCIENCE_RUNTIME_STATUS SCIENCE_RUNTIME_FAIL <<<"$SCIENCE_STATUS_ROW"
+IFS=$'\t' read -r SCIENCE_STATUS SCIENCE_RUNTIME_ENFORCEMENT SCIENCE_RUNTIME_STATUS SCIENCE_RUNTIME_FAIL SCIENCE_RUNTIME_SOUC_BIN SCIENCE_RUNTIME_SOUC_VERSION SCIENCE_RUNTIME_PINNED_EXPECTED <<<"$SCIENCE_STATUS_ROW"
 
 echo "[stdlib-reliability-gate] running stdlib e2e suite"
 set +e
-bash "$ROOT_DIR/scripts/run_stdlib_e2e.sh" --json-out "$E2E_JSON"
+bash "$ROOT_DIR/scripts/stdlib/run_stdlib_e2e.sh" --json-out "$E2E_JSON"
 e2e_rc=$?
 set -e
 if [[ ! -s "$E2E_JSON" ]]; then
@@ -236,7 +326,9 @@ fi
 set +e
 python3 - "$ROOT_DIR" "$E2E_JSON" "$INVENTORY_JSON" "$OUT_JSON" "$e2e_rc" \
   "$BASELINE_PASS" "$BASELINE_FAIL" "$BASELINE_SKIP" "$BASELINE_TOTAL" \
-  "$SCIENCE_STATUS" "$SCIENCE_STATUS_JSON" "$SCIENCE_RUNTIME_ENFORCEMENT" "$SCIENCE_RUNTIME_STATUS" "$SCIENCE_RUNTIME_FAIL" "$RUNTIME_REGRESSION_STRICT" <<'PY'
+  "$HYPER_STATUS" "$HYPER_STATUS_JSON" "$HYPER_PASS" "$HYPER_FAIL" "$HYPER_SKIP" "$HYPER_TOTAL" \
+  "$SCIENCE_STATUS" "$SCIENCE_STATUS_JSON" "$SCIENCE_RUNTIME_ENFORCEMENT" "$SCIENCE_RUNTIME_STATUS" "$SCIENCE_RUNTIME_FAIL" "$RUNTIME_REGRESSION_STRICT" \
+  "$SCIENCE_RUNTIME_SOUC_BIN" "$SCIENCE_RUNTIME_SOUC_VERSION" "$SCIENCE_RUNTIME_PINNED_EXPECTED" <<'PY'
 import datetime
 import json
 import re
@@ -252,12 +344,21 @@ baseline_pass = int(sys.argv[6])
 baseline_fail = int(sys.argv[7])
 baseline_skip = int(sys.argv[8])
 baseline_total = int(sys.argv[9])
-science_status = sys.argv[10]
-science_status_json = Path(sys.argv[11]).resolve()
-science_runtime_enforcement = sys.argv[12]
-science_runtime_status = sys.argv[13]
-science_runtime_fail = int(sys.argv[14])
-runtime_regression_strict = sys.argv[15] == "1"
+hyper_status = sys.argv[10]
+hyper_status_json = Path(sys.argv[11]).resolve()
+hyper_pass = int(sys.argv[12])
+hyper_fail = int(sys.argv[13])
+hyper_skip = int(sys.argv[14])
+hyper_total = int(sys.argv[15])
+science_status = sys.argv[16]
+science_status_json = Path(sys.argv[17]).resolve()
+science_runtime_enforcement = sys.argv[18]
+science_runtime_status = sys.argv[19]
+science_runtime_fail = int(sys.argv[20])
+runtime_regression_strict = sys.argv[21] == "1"
+science_runtime_souc_bin = sys.argv[22]
+science_runtime_souc_version = sys.argv[23]
+science_runtime_pinned_expected = sys.argv[24]
 
 try:
     e2e = json.loads(e2e_path.read_text(encoding="utf-8"))
@@ -387,7 +488,11 @@ if e2e_rc > 1:
     status_summary = "not_run"
 elif fail_count > 0:
     status_summary = "fail"
+elif hyper_status != "pass":
+    status_summary = "fail"
 elif science_status != "pass":
+    status_summary = "fail"
+elif runtime_regression_strict and science_runtime_enforcement != "strict":
     status_summary = "fail"
 elif runtime_regression_strict and science_runtime_status != "pass":
     status_summary = "fail"
@@ -411,12 +516,19 @@ if e2e_rc == 1 and fail_count == 0:
     notes.append("warning: e2e exit code indicates failure but fail count is zero")
 if e2e_rc == 0 and fail_count > 0:
     notes.append("warning: e2e exit code indicates success but fail count is non-zero")
+notes.append(f"hyper_gate_required_pass_observed={hyper_status}")
+notes.append(f"hyper_totals=pass:{hyper_pass},fail:{hyper_fail},skip:{hyper_skip},total:{hyper_total}")
 if science_status != "pass":
     notes.append(f"science_gate_required_pass_observed={science_status}")
 notes.append(f"science_runtime_regression_enforcement={science_runtime_enforcement}")
 notes.append(f"science_runtime_regression_summary_status={science_runtime_status}")
 notes.append(f"science_runtime_regression_fail_count={science_runtime_fail}")
+notes.append(f"science_runtime_souc_bin={science_runtime_souc_bin}")
+notes.append(f"science_runtime_souc_version={science_runtime_souc_version}")
+notes.append(f"science_runtime_pinned_expected={science_runtime_pinned_expected}")
 notes.append(f"runtime_regression_strict_requested={runtime_regression_strict}")
+if runtime_regression_strict and science_runtime_enforcement != "strict":
+    notes.append("runtime_regression_strict_mode_not_propagated")
 if runtime_regression_strict and science_runtime_status != "pass":
     notes.append("runtime_regression_strict_mode_failed")
 
@@ -452,6 +564,19 @@ obj = {
         "runtime_regression_enforcement": science_runtime_enforcement,
         "runtime_regression_summary_status": science_runtime_status,
         "runtime_regression_fail_count": science_runtime_fail,
+        "runtime_souc_bin": science_runtime_souc_bin,
+        "runtime_souc_version": science_runtime_souc_version,
+        "runtime_pinned_version_expected": science_runtime_pinned_expected,
+    },
+    "hyper_pipeline": {
+        "status": hyper_status,
+        "status_artifact": rel_or_abs(hyper_status_json),
+        "totals": {
+            "pass": hyper_pass,
+            "fail": hyper_fail,
+            "skip": hyper_skip,
+            "total": hyper_total,
+        },
     },
     "notes": notes,
 }
@@ -488,6 +613,8 @@ PY
 echo "[stdlib-reliability-gate] status_json=${OUT_JSON#$ROOT_DIR/}"
 echo "[stdlib-reliability-gate] inventory_json=${INVENTORY_JSON#$ROOT_DIR/}"
 echo "[stdlib-reliability-gate] e2e_json=${E2E_JSON#$ROOT_DIR/}"
+echo "[stdlib-reliability-gate] hyper_json=${HYPER_STATUS_JSON#$ROOT_DIR/}"
+echo "[stdlib-reliability-gate] hyper_status=${HYPER_STATUS}"
 echo "[stdlib-reliability-gate] science_json=${SCIENCE_STATUS_JSON#$ROOT_DIR/}"
 echo "[stdlib-reliability-gate] science_status=${SCIENCE_STATUS}"
 echo "[stdlib-reliability-gate] science_runtime_enforcement=${SCIENCE_RUNTIME_ENFORCEMENT}"

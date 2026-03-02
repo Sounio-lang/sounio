@@ -41,13 +41,16 @@ else
 fi
 
 if [[ "${SOUNIO_SKIP_GPU:-}" != "1" ]]; then
-  echo "[e2e] gpu compile-only"
+  echo "[e2e] gpu backend compile smoke"
   if "$SOUC_BIN" build "$GPU_FIXTURE" --backend gpu -o "$OUT_DIR/gpu_minimal.ptx" 2>/dev/null; then
     test -s "$OUT_DIR/gpu_minimal.ptx"
     grep -q "\\.entry" "$OUT_DIR/gpu_minimal.ptx"
   else
     echo "[e2e] gpu skipped (binary not built with gpu feature)"
   fi
+
+  echo "[e2e] gpu runtime attestation gate"
+  bash "$ROOT_DIR/scripts/omega/omega_gpu_runtime_attest_gate.sh"
 else
   echo "[e2e] gpu skipped (SOUNIO_SKIP_GPU=1)"
 fi
