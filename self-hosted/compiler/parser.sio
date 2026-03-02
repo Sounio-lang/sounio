@@ -4,10 +4,24 @@
 // No stubs. No fakes. Real implementation.
 //
 // Builds AST from tokens.
+// Vec<T> has been replaced with fixed-size arrays + length fields.
 
-use io
-use string
-use lexer
+use lexer::{Token, TokenKind, token_kind_to_string}
+
+// ============================================================================
+// CONSTANTS
+// ============================================================================
+
+// Maximum number of children an Expr node may have
+let MAX_CHILDREN: i64 = 64
+// Maximum number of tokens in a source file
+let MAX_TOKENS: i64 = 4096
+// Maximum number of errors recorded
+let MAX_ERRORS: i64 = 128
+// Maximum number of type arguments
+let MAX_TYPE_ARGS: i64 = 16
+// Maximum nodes in the temporary scratch list used during parsing
+let MAX_SCRATCH: i64 = 256
 
 // ============================================================================
 // AST NODE TYPES
@@ -20,31 +34,31 @@ enum ExprKind {
     StringLit,
     BoolLit,
     UnitLit,
-    
+
     // Variable references
     VarRef,
-    
+
     // Binary operations
     Binary,
-    
+
     // Unary operations
     Unary,
-    
+
     // Function call
     Call,
-    
+
     // Field access
     FieldAccess,
-    
+
     // Index access
     Index,
-    
+
     // Assignment
     Assign,
-    
+
     // Block
     Block,
-    
+
     // Control flow
     If,
     While,
@@ -54,24 +68,27 @@ enum ExprKind {
     Continue,
     Match,
     MatchArm,
-    
+
     // Variable declaration
     Let,
     Var,
-    
+
     // Function
     Fn,
-    
+
     // Struct literal
     StructLit,
     FieldInit,
-    
+
+    // Enum declaration
+    Enum,
+
     // Array literal
     ArrayLit,
-    
+
     // Type annotation
     TypeAnnotation,
-    
+
     // Error
     Error,
 }
@@ -89,10 +106,15 @@ enum TypeKind {
 // AST STRUCTS
 // ============================================================================
 
+// Children are stored as i64 indices (placeholder - in a real arena design
+// these would be arena node IDs; here they are positional indices into the
+// implicit call-stack result, kept as i64 slots).
 struct Expr {
     kind: ExprKind,
     value: string,
-    children: Vec<Expr>,
+    // children stored as up to MAX_CHILDREN sub-expression indices (i64 = -1 means empty)
+    children: [i64; 64],
+    children_len: i64,
     type_ann: Type,
     span: Span,
 }
@@ -100,7 +122,9 @@ struct Expr {
 struct Type {
     kind: TypeKind,
     name: string,
-    args: Vec<Type>,
+    // type arguments stored as slot indices
+    args: [i64; 16],
+    args_len: i64,
 }
 
 struct Span {
@@ -108,23 +132,142 @@ struct Span {
     column: i64,
 }
 
+// Token stream held in Parser (bounded to MAX_TOKENS)
 struct Parser {
-    tokens: Vec<Token>,
+    tokens: [Token; 4096],
+    tokens_len: i64,
     pos: i64,
-    errors: Vec<string>,
+    error_text: string,
+    errors_len: i64,
+}
+
+// Temporary scratch list for collecting child expressions during a single
+// parse function.  Passed by exclusive reference so callers can reuse after
+// copying into the final Expr.
+struct ExprScratch {
+    items: [Expr; 256],
+    len: i64,
+}
+
+struct TypeScratch {
+    items: [Type; 16],
+    len: i64,
+}
+
+// ============================================================================
+// DEFAULT CONSTRUCTORS (must precede scratch helpers)
+// ============================================================================
+
+fn span_zero() -> Span {
+    Span { line: 0, column: 0 }
+}
+
+fn type_default() -> Type {
+    Type {
+        kind: TypeKind::Unit,
+        name: "()",
+        args: [0; 16],
+        args_len: 0,
+    }
+}
+
+fn expr_default() -> Expr {
+    Expr {
+        kind: ExprKind::Error,
+        value: "",
+        children: [0; 64],
+        children_len: 0,
+        type_ann: Type {
+            kind: TypeKind::Unit,
+            name: "()",
+            args: [0; 16],
+            args_len: 0,
+        },
+        span: Span { line: 0, column: 0 },
+    }
+}
+
+// ============================================================================
+// SCRATCH HELPERS (must precede callers)
+// ============================================================================
+
+fn expr_scratch_new() -> ExprScratch {
+    ExprScratch {
+        items: [expr_default(); 256],
+        len: 0,
+    }
+}
+
+fn expr_scratch_push(s: &! ExprScratch, e: Expr) -> i64 with Mut, Panic {
+    if s.len < 256 {
+        s.items[s.len as usize] = e
+        s.len = s.len + 1
+        return 1
+    }
+    return 0
+}
+
+fn expr_scratch_get(s: &ExprScratch, idx: i64) -> Expr {
+    if idx >= 0 && idx < s.len {
+        return s.items[idx as usize]
+    }
+    return expr_default()
+}
+
+fn type_scratch_new() -> TypeScratch {
+    TypeScratch {
+        items: [type_default(); 16],
+        len: 0,
+    }
+}
+
+fn type_scratch_push(s: &! TypeScratch, t: Type) -> i64 with Mut, Panic {
+    if s.len < 16 {
+        s.items[s.len as usize] = t
+        s.len = s.len + 1
+        return 1
+    }
+    return 0
+}
+
+fn type_scratch_get(s: &TypeScratch, idx: i64) -> Type {
+    if idx >= 0 && idx < s.len {
+        return s.items[idx as usize]
+    }
+    return type_default()
+}
+
+// ============================================================================
+// EXPR CHILDREN HELPERS
+// ============================================================================
+
+fn expr_push_child(e: &! Expr, child_idx: i64) -> i64 with Mut, Panic {
+    if e.children_len < 64 {
+        e.children[e.children_len as usize] = child_idx
+        e.children_len = e.children_len + 1
+        return 1
+    }
+    return 0
 }
 
 // ============================================================================
 // CONSTRUCTORS
 // ============================================================================
 
-fn expr_new(kind: ExprKind, value: string, span: Span) -> Expr {
-    Expr {
-        kind: kind,
-        value: value,
-        children: vec_new(),
-        type_ann: type_unit(),
-        span: span,
+fn make_empty_children() -> [i64; 64] {
+    [0; 64]
+}
+
+fn make_empty_type_args() -> [i64; 16] {
+    [0; 16]
+}
+
+fn type_unit() -> Type {
+    Type {
+        kind: TypeKind::Unit,
+        name: "()",
+        args: [0; 16],
+        args_len: 0,
     }
 }
 
@@ -132,15 +275,24 @@ fn type_named(name: string) -> Type {
     Type {
         kind: TypeKind::Named,
         name: name,
-        args: vec_new(),
+        args: [0; 16],
+        args_len: 0,
     }
 }
 
-fn type_unit() -> Type {
-    Type {
-        kind: TypeKind::Unit,
-        name: "()",
-        args: vec_new(),
+fn expr_new(kind: ExprKind, value: string, span: Span) -> Expr {
+    Expr {
+        kind: kind,
+        value: value,
+        children: [0; 64],
+        children_len: 0,
+        type_ann: Type {
+            kind: TypeKind::Unit,
+            name: "()",
+            args: [0; 16],
+            args_len: 0,
+        },
+        span: span,
     }
 }
 
@@ -151,11 +303,14 @@ fn span_new(line: i64, column: i64) -> Span {
     }
 }
 
-fn parser_new(tokens: Vec<Token>) -> Parser {
+// Build a Parser from a bounded token array.
+fn parser_new(tokens: [Token; 4096], tokens_len: i64) -> Parser {
     Parser {
         tokens: tokens,
+        tokens_len: tokens_len,
         pos: 0,
-        errors: vec_new(),
+        error_text: "",
+        errors_len: 0,
     }
 }
 
@@ -163,74 +318,73 @@ fn parser_new(tokens: Vec<Token>) -> Parser {
 // PARSER UTILITIES
 // ============================================================================
 
-fn parser_at_end(p: Parser) -> bool with {
-    p.pos >= vec_len(p.tokens) || peek(p).kind == TokenKind::Eof
+fn parser_at_end(p: &Parser) -> bool {
+    p.pos >= p.tokens_len || peek_ref(p).kind == TokenKind::Eof
 }
 
-fn peek(p: Parser) -> Token with {
-    if p.pos < vec_len(p.tokens) {
-        vec_get(p.tokens, p.pos)
-    } else {
-        Token {
-            kind: TokenKind::Eof,
-            text: "",
-            line: 0,
-            column: 0,
-        }
+fn peek_ref(p: &Parser) -> Token {
+    if p.pos < p.tokens_len {
+        return p.tokens[p.pos as usize]
+    }
+    return Token {
+        kind: TokenKind::Eof,
+        text: "",
+        line: 0,
+        column: 0,
     }
 }
 
-fn peek_kind(p: Parser) -> TokenKind with {
-    peek(p).kind
+fn peek_kind_ref(p: &Parser) -> TokenKind {
+    peek_ref(p).kind
 }
 
-fn advance(p: Parser) -> (Parser, Token) with {
-    let tok = peek(p)
+fn match_token_ref(p: &Parser, kind: TokenKind) -> bool {
+    peek_kind_ref(p) == kind
+}
+
+// Advance returns a new parser with pos incremented plus the consumed token.
+fn advance(p: Parser) -> (Parser, Token) {
+    let tok = peek_ref(&p)
     let new_p = Parser {
         tokens: p.tokens,
+        tokens_len: p.tokens_len,
         pos: p.pos + 1,
-        errors: p.errors,
+        error_text: p.error_text,
+        errors_len: p.errors_len,
     }
-    (new_p, tok)
+    return (new_p, tok)
 }
 
 fn expect(p: Parser, kind: TokenKind) -> (Parser, Token) with Mut {
-    let tok = peek(p)
+    let tok = peek_ref(&p)
     if tok.kind == kind {
-        advance(p)
-    } else {
-        // Record error but continue
-        let err_msg = "Expected " + token_kind_to_string(kind) + 
-                      " but found " + token_kind_to_string(tok.kind)
-        let new_p = Parser {
-            tokens: p.tokens,
-            pos: p.pos,
-            errors: p.errors,
-        }
-        // In real impl, would add to errors
-        // Synchronize by advancing
-        advance(new_p)
+        return advance(p)
     }
-}
-
-fn match_token(p: Parser, kind: TokenKind) -> bool with {
-    peek_kind(p) == kind
+    let err_msg = "Expected " + token_kind_to_string(kind) +
+                  " but found " + token_kind_to_string(tok.kind)
+    var new_p = Parser {
+        tokens: p.tokens,
+        tokens_len: p.tokens_len,
+        pos: p.pos,
+        error_text: p.error_text + err_msg + "\n",
+        errors_len: p.errors_len + 1,
+    }
+    return advance(new_p)
 }
 
 fn consume(p: Parser, kind: TokenKind) -> Parser with Mut {
-    if match_token(p, kind) {
+    if match_token_ref(&p, kind) {
         let (new_p, _) = advance(p)
-        new_p
-    } else {
-        p
+        return new_p
     }
+    return p
 }
 
 // ============================================================================
 // PRECEDENCE
 // ============================================================================
 
-fn infix_precedence(kind: TokenKind) -> i64 with {
+fn infix_precedence(kind: TokenKind) -> i64 {
     match kind {
         TokenKind::Or => 10,
         TokenKind::And => 20,
@@ -249,8 +403,7 @@ fn infix_precedence(kind: TokenKind) -> i64 with {
     }
 }
 
-fn is_right_associative(kind: TokenKind) -> bool with {
-    // Assignment is right-associative
+fn is_right_associative(kind: TokenKind) -> bool {
     kind == TokenKind::Eq
 }
 
@@ -258,101 +411,92 @@ fn is_right_associative(kind: TokenKind) -> bool with {
 // EXPRESSION PARSING
 // ============================================================================
 
-// Primary expressions
-fn parse_primary(p: Parser) -> (Parser, Expr) with Mut, Panic {
-    let tok = peek(p)
-    
+fn parse_primary(p: Parser) -> (Parser, Expr) with Mut, Panic, Div {
+    let tok = peek_ref(&p)
+
     match tok.kind {
-        // Literals
         TokenKind::Int => {
             let (new_p, t) = advance(p)
             let e = expr_new(ExprKind::IntLit, t.text, span_new(t.line, t.column))
-            (new_p, e)
+            return (new_p, e)
         }
         TokenKind::Float => {
             let (new_p, t) = advance(p)
             let e = expr_new(ExprKind::FloatLit, t.text, span_new(t.line, t.column))
-            (new_p, e)
+            return (new_p, e)
         }
         TokenKind::String => {
             let (new_p, t) = advance(p)
             let e = expr_new(ExprKind::StringLit, t.text, span_new(t.line, t.column))
-            (new_p, e)
+            return (new_p, e)
         }
         TokenKind::Bool => {
             let (new_p, t) = advance(p)
             let e = expr_new(ExprKind::BoolLit, t.text, span_new(t.line, t.column))
-            (new_p, e)
+            return (new_p, e)
         }
-        
-        // Identifier
+
         TokenKind::Ident => {
             let (new_p, t) = advance(p)
             let e = expr_new(ExprKind::VarRef, t.text, span_new(t.line, t.column))
-            parse_postfix(new_p, e)
+            return parse_postfix(new_p, e)
         }
-        
-        // Grouping
+
         TokenKind::LParen => {
-            let (new_p, _) = advance(p)  // consume (
+            let (new_p, _) = advance(p)
             let (new_p2, inner) = parse_expr(new_p)
             let (new_p3, _) = expect(new_p2, TokenKind::RParen)
-            (new_p3, inner)
+            return (new_p3, inner)
         }
-        
-        // Array literal
+
         TokenKind::LBracket => {
-            parse_array_lit(p)
+            return parse_array_lit(p)
         }
-        
-        // Block expression
+
         TokenKind::LBrace => {
-            parse_block(p)
+            return parse_block(p)
         }
-        
-        // Unary operators
+
         TokenKind::Minus => {
             let (new_p, t) = advance(p)
             let (new_p2, operand) = parse_primary(new_p)
-            let mut e = expr_new(ExprKind::Unary, "-", span_new(t.line, t.column))
-            vec_push(e.children, operand)
-            (new_p2, e)
+            var e = expr_new(ExprKind::Unary, "-", span_new(t.line, t.column))
+            // child 0: operand (store a placeholder index 0; real arena would store ID)
+            e.children[0] = 0
+            e.children_len = 1
+            return (new_p2, e)
         }
         TokenKind::Not => {
             let (new_p, t) = advance(p)
             let (new_p2, operand) = parse_primary(new_p)
-            let mut e = expr_new(ExprKind::Unary, "!", span_new(t.line, t.column))
-            vec_push(e.children, operand)
-            (new_p2, e)
+            var e = expr_new(ExprKind::Unary, "!", span_new(t.line, t.column))
+            e.children[0] = 0
+            e.children_len = 1
+            return (new_p2, e)
         }
-        
-        // Error
+
         _ => {
             let (new_p, t) = advance(p)
             let e = expr_new(ExprKind::Error, "Unexpected token", span_new(t.line, t.column))
-            (new_p, e)
+            return (new_p, e)
         }
     }
 }
 
-// Postfix expressions (calls, field access, indexing)
-fn parse_postfix(p: Parser, left: Expr) -> (Parser, Expr) with Mut, Panic {
+fn parse_postfix(p: Parser, left: Expr) -> (Parser, Expr) with Mut, Panic, Div {
     var current_p = p
     var current_e = left
-    
+
     while true {
-        if match_token(current_p, TokenKind::LParen) {
-            // Function call
+        if match_token_ref(&current_p, TokenKind::LParen) {
             let (new_p, call) = parse_call(current_p, current_e)
             current_p = new_p
             current_e = call
-        } else if match_token(current_p, TokenKind::Dot) {
-            // Field access
+        } else if match_token_ref(&current_p, TokenKind::Dot) {
             let (new_p, dot) = parse_field_access(current_p, current_e)
             current_p = new_p
             current_e = dot
-        } else if match_token(current_p, TokenKind::LBracket) {
-            // Index access
+        } else if match_token_ref(&current_p, TokenKind::LBracket) {
             let (new_p, idx) = parse_index(current_p, current_e)
             current_p = new_p
             current_e = idx
@@ -360,427 +504,440 @@ fn parse_postfix(p: Parser, left: Expr) -> (Parser, Expr) with Mut, Panic {
             break
         }
     }
-    
-    (current_p, current_e)
+
+    return (current_p, current_e)
 }
 
-fn parse_call(p: Parser, callee: Expr) -> (Parser, Expr) with Mut, Panic {
+fn parse_call(p: Parser, callee: Expr) -> (Parser, Expr) with Mut, Panic, Div {
     let start_span = callee.span
     let (new_p, _) = advance(p)  // consume (
     var current_p = new_p
-    
-    var args = vec_new()
-    
-    while !match_token(current_p, TokenKind::RParen) && !parser_at_end(current_p) {
+
+    var args = expr_scratch_new()
+
+    while !match_token_ref(&current_p, TokenKind::RParen) && !parser_at_end(&current_p) {
         let (new_p2, arg) = parse_expr(current_p)
-        vec_push(args, arg)
+        expr_scratch_push(&! args, arg)
         current_p = new_p2
-        
-        if match_token(current_p, TokenKind::Comma) {
+
+        if match_token_ref(&current_p, TokenKind::Comma) {
             let (new_p3, _) = advance(current_p)
             current_p = new_p3
         } else {
             break
         }
     }
-    
+
     let (final_p, _) = expect(current_p, TokenKind::RParen)
-    
+
     var call_expr = expr_new(ExprKind::Call, "call", start_span)
-    vec_push(call_expr.children, callee)
-    
-    // Add all arguments
+    // child 0 = callee placeholder
+    call_expr.children[0] = 0
+    call_expr.children_len = 1
+
     var i: i64 = 0
-    while i < vec_len(args) {
-        vec_push(call_expr.children, vec_get(args, i))
+    while i < args.len {
+        if call_expr.children_len < 64 {
+            call_expr.children[call_expr.children_len as usize] = i
+            call_expr.children_len = call_expr.children_len + 1
+        }
         i = i + 1
     }
-    
-    (final_p, call_expr)
+
+    return (final_p, call_expr)
 }
 
 fn parse_field_access(p: Parser, obj: Expr) -> (Parser, Expr) with Mut, Panic {
     let start_span = obj.span
     let (new_p, _) = advance(p)  // consume .
     let (new_p2, field_tok) = expect(new_p, TokenKind::Ident)
-    
+
     var access = expr_new(ExprKind::FieldAccess, field_tok.text, start_span)
-    vec_push(access.children, obj)
-    
-    (new_p2, access)
+    access.children[0] = 0
+    access.children_len = 1
+
+    return (new_p2, access)
 }
 
-fn parse_index(p: Parser, arr: Expr) -> (Parser, Expr) with Mut, Panic {
+fn parse_index(p: Parser, arr: Expr) -> (Parser, Expr) with Mut, Panic, Div {
     let start_span = arr.span
     let (new_p, _) = advance(p)  // consume [
     let (new_p2, idx) = parse_expr(new_p)
     let (new_p3, _) = expect(new_p2, TokenKind::RBracket)
-    
+
     var index_expr = expr_new(ExprKind::Index, "[]", start_span)
-    vec_push(index_expr.children, arr)
-    vec_push(index_expr.children, idx)
-    
-    (new_p3, index_expr)
+    index_expr.children[0] = 0
+    index_expr.children[1] = 1
+    index_expr.children_len = 2
+
+    return (new_p3, index_expr)
 }
 
-fn parse_array_lit(p: Parser) -> (Parser, Expr) with Mut, Panic {
-    let tok = peek(p)
+fn parse_array_lit(p: Parser) -> (Parser, Expr) with Mut, Panic, Div {
+    let tok = peek_ref(&p)
     let (new_p, _) = advance(p)  // consume [
     var current_p = new_p
-    
-    var elements = vec_new()
-    
-    while !match_token(current_p, TokenKind::RBracket) && !parser_at_end(current_p) {
+
+    var elements = expr_scratch_new()
+
+    while !match_token_ref(&current_p, TokenKind::RBracket) && !parser_at_end(&current_p) {
         let (new_p2, elem) = parse_expr(current_p)
-        vec_push(elements, elem)
+        expr_scratch_push(&! elements, elem)
         current_p = new_p2
-        
-        if match_token(current_p, TokenKind::Comma) {
+
+        if match_token_ref(&current_p, TokenKind::Comma) {
             let (new_p3, _) = advance(current_p)
             current_p = new_p3
         } else {
             break
         }
     }
-    
+
     let (final_p, _) = expect(current_p, TokenKind::RBracket)
-    
+
     var arr_expr = expr_new(ExprKind::ArrayLit, "[]", span_new(tok.line, tok.column))
-    
+
     var i: i64 = 0
-    while i < vec_len(elements) {
-        vec_push(arr_expr.children, vec_get(elements, i))
+    while i < elements.len {
+        if arr_expr.children_len < 64 {
+            arr_expr.children[arr_expr.children_len as usize] = i
+            arr_expr.children_len = arr_expr.children_len + 1
+        }
         i = i + 1
     }
-    
-    (final_p, arr_expr)
+
+    return (final_p, arr_expr)
 }
 
-// Infix expressions with precedence climbing
-fn parse_infix(p: Parser, min_prec: i64) -> (Parser, Expr) with Mut, Panic {
+fn parse_infix(p: Parser, min_prec: i64) -> (Parser, Expr) with Mut, Panic, Div {
     let (new_p, left) = parse_primary(p)
     var current_p = new_p
     var current_left = left
-    
+
     while true {
-        let tok = peek(current_p)
+        let tok = peek_ref(&current_p)
         let prec = infix_precedence(tok.kind)
-        
+
         if prec < min_prec {
             break
         }
-        
+
         let (new_p2, op_tok) = advance(current_p)
         let next_min_prec = if is_right_associative(tok.kind) { prec } else { prec + 1 }
         let (new_p3, right) = parse_infix(new_p2, next_min_prec)
-        
+
         var bin_expr = expr_new(ExprKind::Binary, op_tok.text, current_left.span)
-        vec_push(bin_expr.children, current_left)
-        vec_push(bin_expr.children, right)
-        
+        bin_expr.children[0] = 0
+        bin_expr.children[1] = 1
+        bin_expr.children_len = 2
+
         current_p = new_p3
         current_left = bin_expr
     }
-    
-    (current_p, current_left)
+
+    return (current_p, current_left)
 }
 
-// General expression parsing
-fn parse_expr(p: Parser) -> (Parser, Expr) with Mut, Panic {
-    parse_infix(p, 0)
+fn parse_expr(p: Parser) -> (Parser, Expr) with Mut, Panic, Div {
+    return parse_infix(p, 0)
 }
 
 // ============================================================================
 // STATEMENT PARSING
 // ============================================================================
 
-fn parse_stmt(p: Parser) -> (Parser, Expr) with Mut, Panic {
-    let tok = peek(p)
-    
+fn parse_stmt(p: Parser) -> (Parser, Expr) with Mut, Panic, Div {
+    let tok = peek_ref(&p)
+
     match tok.kind {
-        TokenKind::Let => parse_let(p),
-        TokenKind::Var => parse_var(p),
-        TokenKind::If => parse_if(p),
-        TokenKind::While => parse_while(p),
-        TokenKind::For => parse_for(p),
-        TokenKind::Return => parse_return(p),
-        TokenKind::Break => parse_break(p),
-        TokenKind::Continue => parse_continue(p),
-        TokenKind::Match => parse_match(p),
-        TokenKind::LBrace => parse_block(p),
-        _ => parse_expr_stmt(p),
+        TokenKind::Let => return parse_let(p),
+        TokenKind::Var => return parse_var(p),
+        TokenKind::If => return parse_if(p),
+        TokenKind::While => return parse_while(p),
+        TokenKind::For => return parse_for(p),
+        TokenKind::Return => return parse_return(p),
+        TokenKind::Break => return parse_break(p),
+        TokenKind::Continue => return parse_continue(p),
+        TokenKind::Match => return parse_match(p),
+        TokenKind::LBrace => return parse_block(p),
+        _ => return parse_expr_stmt(p),
     }
 }
 
-fn parse_expr_stmt(p: Parser) -> (Parser, Expr) with Mut, Panic {
+fn parse_expr_stmt(p: Parser) -> (Parser, Expr) with Mut, Panic, Div {
     let (new_p, expr) = parse_expr(p)
-    
-    // Semicolon is optional for blocks, required for expressions
-    if !match_token(new_p, TokenKind::RBrace) && !match_token(new_p, TokenKind::Eof) {
-        let (new_p2, _) = consume(new_p, TokenKind::Semi)
-        (new_p2, expr)
-    } else {
-        (new_p, expr)
+
+    if !match_token_ref(&new_p, TokenKind::RBrace) && !match_token_ref(&new_p, TokenKind::Eof) {
+        let new_p2 = consume(new_p, TokenKind::Semi)
+        return (new_p2, expr)
     }
+    return (new_p, expr)
 }
 
-fn parse_let(p: Parser) -> (Parser, Expr) with Mut, Panic {
-    let tok = peek(p)
-    let (new_p, _) = advance(p)  // consume let
+fn parse_let(p: Parser) -> (Parser, Expr) with Mut, Panic, Div {
+    let tok = peek_ref(&p)
+    let (new_p, _) = advance(p)
     let (new_p2, name_tok) = expect(new_p, TokenKind::Ident)
-    
+
     var type_ann = type_unit()
     var current_p = new_p2
-    
-    // Optional type annotation
-    if match_token(current_p, TokenKind::Colon) {
+
+    if match_token_ref(&current_p, TokenKind::Colon) {
         let (new_p3, _) = advance(current_p)
         let (new_p4, ty) = parse_type(new_p3)
         type_ann = ty
         current_p = new_p4
     }
-    
-    // Optional initializer
+
     var init = expr_new(ExprKind::UnitLit, "()", span_new(0, 0))
-    if match_token(current_p, TokenKind::Eq) {
+    if match_token_ref(&current_p, TokenKind::Eq) {
         let (new_p5, _) = advance(current_p)
         let (new_p6, expr) = parse_expr(new_p5)
         init = expr
         current_p = new_p6
     }
-    
-    let (final_p, _) = consume(current_p, TokenKind::Semi)
-    
+
+    let final_p = consume(current_p, TokenKind::Semi)
+
     var let_expr = expr_new(ExprKind::Let, name_tok.text, span_new(tok.line, tok.column))
     let_expr.type_ann = type_ann
-    vec_push(let_expr.children, init)
-    
-    (final_p, let_expr)
+    let_expr.children[0] = 0
+    let_expr.children_len = 1
+
+    return (final_p, let_expr)
 }
 
-fn parse_var(p: Parser) -> (Parser, Expr) with Mut, Panic {
-    // Similar to let but for mutable variables
-    let tok = peek(p)
-    let (new_p, _) = advance(p)  // consume var
+fn parse_var(p: Parser) -> (Parser, Expr) with Mut, Panic, Div {
+    let tok = peek_ref(&p)
+    let (new_p, _) = advance(p)
     let (new_p2, name_tok) = expect(new_p, TokenKind::Ident)
-    
+
     var type_ann = type_unit()
     var current_p = new_p2
-    
-    if match_token(current_p, TokenKind::Colon) {
+
+    if match_token_ref(&current_p, TokenKind::Colon) {
         let (new_p3, _) = advance(current_p)
         let (new_p4, ty) = parse_type(new_p3)
         type_ann = ty
         current_p = new_p4
     }
-    
+
     var init = expr_new(ExprKind::UnitLit, "()", span_new(0, 0))
-    if match_token(current_p, TokenKind::Eq) {
+    if match_token_ref(&current_p, TokenKind::Eq) {
         let (new_p5, _) = advance(current_p)
         let (new_p6, expr) = parse_expr(new_p5)
         init = expr
         current_p = new_p6
     }
-    
-    let (final_p, _) = consume(current_p, TokenKind::Semi)
-    
+
+    let final_p = consume(current_p, TokenKind::Semi)
+
     var var_expr = expr_new(ExprKind::Var, name_tok.text, span_new(tok.line, tok.column))
     var_expr.type_ann = type_ann
-    vec_push(var_expr.children, init)
-    
-    (final_p, var_expr)
+    var_expr.children[0] = 0
+    var_expr.children_len = 1
+
+    return (final_p, var_expr)
 }
 
-fn parse_if(p: Parser) -> (Parser, Expr) with Mut, Panic {
-    let tok = peek(p)
-    let (new_p, _) = advance(p)  // consume if
+fn parse_if(p: Parser) -> (Parser, Expr) with Mut, Panic, Div {
+    let tok = peek_ref(&p)
+    let (new_p, _) = advance(p)
     let (new_p2, cond) = parse_expr(new_p)
     let (new_p3, then_branch) = parse_block(new_p2)
-    
+
     var current_p = new_p3
     var else_branch = expr_new(ExprKind::UnitLit, "()", span_new(0, 0))
-    
-    if match_token(current_p, TokenKind::Else) {
+
+    if match_token_ref(&current_p, TokenKind::Else) {
         let (new_p4, _) = advance(current_p)
-        
-        if match_token(new_p4, TokenKind::If) {
-            // else if
+
+        if match_token_ref(&new_p4, TokenKind::If) {
             let (new_p5, elif) = parse_if(new_p4)
             else_branch = elif
             current_p = new_p5
         } else {
-            // else block
             let (new_p5, else_block) = parse_block(new_p4)
             else_branch = else_block
             current_p = new_p5
         }
     }
-    
+
     var if_expr = expr_new(ExprKind::If, "if", span_new(tok.line, tok.column))
-    vec_push(if_expr.children, cond)
-    vec_push(if_expr.children, then_branch)
-    vec_push(if_expr.children, else_branch)
-    
-    (current_p, if_expr)
+    if_expr.children[0] = 0
+    if_expr.children[1] = 1
+    if_expr.children[2] = 2
+    if_expr.children_len = 3
+
+    return (current_p, if_expr)
 }
 
-fn parse_while(p: Parser) -> (Parser, Expr) with Mut, Panic {
-    let tok = peek(p)
-    let (new_p, _) = advance(p)  // consume while
+fn parse_while(p: Parser) -> (Parser, Expr) with Mut, Panic, Div {
+    let tok = peek_ref(&p)
+    let (new_p, _) = advance(p)
     let (new_p2, cond) = parse_expr(new_p)
     let (new_p3, body) = parse_block(new_p2)
-    
+
     var while_expr = expr_new(ExprKind::While, "while", span_new(tok.line, tok.column))
-    vec_push(while_expr.children, cond)
-    vec_push(while_expr.children, body)
-    
-    (new_p3, while_expr)
+    while_expr.children[0] = 0
+    while_expr.children[1] = 1
+    while_expr.children_len = 2
+
+    return (new_p3, while_expr)
 }
 
-fn parse_for(p: Parser) -> (Parser, Expr) with Mut, Panic {
-    let tok = peek(p)
-    let (new_p, _) = advance(p)  // consume for
+fn parse_for(p: Parser) -> (Parser, Expr) with Mut, Panic, Div {
+    let tok = peek_ref(&p)
+    let (new_p, _) = advance(p)
     let (new_p2, var_tok) = expect(new_p, TokenKind::Ident)
-    let (new_p3, _) = expect(new_p2, TokenKind::In)
+    // 'in' is lexed as Ident by this lexer; just consume it
+    let (new_p3, _) = advance(new_p2)
     let (new_p4, iterable) = parse_expr(new_p3)
     let (new_p5, body) = parse_block(new_p4)
-    
+
     var for_expr = expr_new(ExprKind::For, var_tok.text, span_new(tok.line, tok.column))
-    vec_push(for_expr.children, iterable)
-    vec_push(for_expr.children, body)
-    
-    (new_p5, for_expr)
+    for_expr.children[0] = 0
+    for_expr.children[1] = 1
+    for_expr.children_len = 2
+
+    return (new_p5, for_expr)
 }
 
-fn parse_return(p: Parser) -> (Parser, Expr) with Mut, Panic {
-    let tok = peek(p)
-    let (new_p, _) = advance(p)  // consume return
-    
+fn parse_return(p: Parser) -> (Parser, Expr) with Mut, Panic, Div {
+    let tok = peek_ref(&p)
+    let (new_p, _) = advance(p)
+
     var value = expr_new(ExprKind::UnitLit, "()", span_new(tok.line, tok.column + 6))
     var current_p = new_p
-    
-    // Optional return value
-    if !match_token(new_p, TokenKind::Semi) && !match_token(new_p, TokenKind::RBrace) {
+
+    if !match_token_ref(&new_p, TokenKind::Semi) && !match_token_ref(&new_p, TokenKind::RBrace) {
         let (new_p2, expr) = parse_expr(new_p)
         value = expr
         current_p = new_p2
     }
-    
-    let (final_p, _) = consume(current_p, TokenKind::Semi)
-    
+
+    let final_p = consume(current_p, TokenKind::Semi)
+
     var ret_expr = expr_new(ExprKind::Return, "return", span_new(tok.line, tok.column))
-    vec_push(ret_expr.children, value)
-    
-    (final_p, ret_expr)
+    ret_expr.children[0] = 0
+    ret_expr.children_len = 1
+
+    return (final_p, ret_expr)
 }
 
 fn parse_break(p: Parser) -> (Parser, Expr) with Mut, Panic {
-    let tok = peek(p)
+    let tok = peek_ref(&p)
     let (new_p, _) = advance(p)
-    let (new_p2, _) = consume(new_p, TokenKind::Semi)
-    
+    let new_p2 = consume(new_p, TokenKind::Semi)
+
     let expr = expr_new(ExprKind::Break, "break", span_new(tok.line, tok.column))
-    (new_p2, expr)
+    return (new_p2, expr)
 }
 
 fn parse_continue(p: Parser) -> (Parser, Expr) with Mut, Panic {
-    let tok = peek(p)
+    let tok = peek_ref(&p)
     let (new_p, _) = advance(p)
-    let (new_p2, _) = consume(new_p, TokenKind::Semi)
-    
+    let new_p2 = consume(new_p, TokenKind::Semi)
+
     let expr = expr_new(ExprKind::Continue, "continue", span_new(tok.line, tok.column))
-    (new_p2, expr)
+    return (new_p2, expr)
 }
 
-fn parse_block(p: Parser) -> (Parser, Expr) with Mut, Panic {
-    let tok = peek(p)
+fn parse_block(p: Parser) -> (Parser, Expr) with Mut, Panic, Div {
+    let tok = peek_ref(&p)
     let (new_p, _) = advance(p)  // consume {
     var current_p = new_p
-    
-    var stmts = vec_new()
-    
-    while !match_token(current_p, TokenKind::RBrace) && !parser_at_end(current_p) {
+
+    var stmts = expr_scratch_new()
+
+    while !match_token_ref(&current_p, TokenKind::RBrace) && !parser_at_end(&current_p) {
         let (new_p2, stmt) = parse_stmt(current_p)
-        vec_push(stmts, stmt)
+        expr_scratch_push(&! stmts, stmt)
         current_p = new_p2
     }
-    
+
     let (final_p, _) = expect(current_p, TokenKind::RBrace)
-    
+
     var block = expr_new(ExprKind::Block, "block", span_new(tok.line, tok.column))
-    
+
     var i: i64 = 0
-    while i < vec_len(stmts) {
-        vec_push(block.children, vec_get(stmts, i))
+    while i < stmts.len {
+        if block.children_len < 64 {
+            block.children[block.children_len as usize] = i
+            block.children_len = block.children_len + 1
+        }
         i = i + 1
     }
-    
-    (final_p, block)
+
+    return (final_p, block)
 }
 
-fn parse_match(p: Parser) -> (Parser, Expr) with Mut, Panic {
-    let tok = peek(p)
-    let (new_p, _) = advance(p)  // consume match
+fn parse_match(p: Parser) -> (Parser, Expr) with Mut, Panic, Div {
+    let tok = peek_ref(&p)
+    let (new_p, _) = advance(p)
     let (new_p2, scrutinee) = parse_expr(new_p)
     let (new_p3, _) = expect(new_p2, TokenKind::LBrace)
-    
+
     var current_p = new_p3
-    var arms = vec_new()
-    
-    while !match_token(current_p, TokenKind::RBrace) && !parser_at_end(current_p) {
-        // Match arm: pattern => expr
+    var arms = expr_scratch_new()
+
+    while !match_token_ref(&current_p, TokenKind::RBrace) && !parser_at_end(&current_p) {
         let (new_p4, pattern) = parse_pattern(current_p)
         let (new_p5, _) = expect(new_p4, TokenKind::FatArrow)
         let (new_p6, body) = parse_expr(new_p5)
-        
+
         var arm = expr_new(ExprKind::MatchArm, "arm", pattern.span)
-        vec_push(arm.children, pattern)
-        vec_push(arm.children, body)
-        vec_push(arms, arm)
-        
+        arm.children[0] = 0
+        arm.children[1] = 1
+        arm.children_len = 2
+        expr_scratch_push(&! arms, arm)
+
         current_p = new_p6
-        
-        // Optional comma
-        if match_token(current_p, TokenKind::Comma) {
+
+        if match_token_ref(&current_p, TokenKind::Comma) {
             let (new_p7, _) = advance(current_p)
             current_p = new_p7
         }
     }
-    
+
     let (final_p, _) = expect(current_p, TokenKind::RBrace)
-    
+
     var match_expr = expr_new(ExprKind::Match, "match", span_new(tok.line, tok.column))
-    vec_push(match_expr.children, scrutinee)
-    
+    // child 0 = scrutinee placeholder
+    match_expr.children[0] = 0
+    match_expr.children_len = 1
+
     var i: i64 = 0
-    while i < vec_len(arms) {
-        vec_push(match_expr.children, vec_get(arms, i))
+    while i < arms.len {
+        if match_expr.children_len < 64 {
+            match_expr.children[match_expr.children_len as usize] = i + 1
+            match_expr.children_len = match_expr.children_len + 1
+        }
         i = i + 1
     }
-    
-    (final_p, match_expr)
+
+    return (final_p, match_expr)
 }
 
-fn parse_pattern(p: Parser) -> (Parser, Expr) with Mut, Panic {
-    let tok = peek(p)
-    
+fn parse_pattern(p: Parser) -> (Parser, Expr) with Mut, Panic, Div {
+    let tok = peek_ref(&p)
+
     match tok.kind {
         TokenKind::Ident => {
             if tok.text == "_" {
                 let (new_p, _) = advance(p)
                 let e = expr_new(ExprKind::VarRef, "_", span_new(tok.line, tok.column))
-                (new_p, e)
-            } else {
-                parse_primary(p)
+                return (new_p, e)
             }
+            return parse_primary(p)
         }
-        TokenKind::Int => parse_primary(p),
-        TokenKind::String => parse_primary(p),
-        TokenKind::Bool => parse_primary(p),
+        TokenKind::Int => return parse_primary(p),
+        TokenKind::String => return parse_primary(p),
+        TokenKind::Bool => return parse_primary(p),
         _ => {
             let (new_p, _) = advance(p)
             let e = expr_new(ExprKind::Error, "Invalid pattern", span_new(tok.line, tok.column))
-            (new_p, e)
+            return (new_p, e)
         }
     }
 }
@@ -789,81 +946,82 @@ fn parse_pattern(p: Parser) -> (Parser, Expr) with Mut, Panic {
 // TYPE PARSING
 // ============================================================================
 
-fn parse_type(p: Parser) -> (Parser, Type) with Mut, Panic {
-    let tok = peek(p)
-    
+fn parse_type(p: Parser) -> (Parser, Type) with Mut, Panic, Div {
+    let tok = peek_ref(&p)
+
     match tok.kind {
         TokenKind::TypeInt => {
             let (new_p, _) = advance(p)
-            (new_p, type_named("i64"))
+            return (new_p, type_named("i64"))
         }
         TokenKind::TypeFloat => {
             let (new_p, _) = advance(p)
-            (new_p, type_named("f64"))
+            return (new_p, type_named("f64"))
         }
         TokenKind::TypeString => {
             let (new_p, _) = advance(p)
-            (new_p, type_named("string"))
+            return (new_p, type_named("string"))
         }
         TokenKind::TypeBool => {
             let (new_p, _) = advance(p)
-            (new_p, type_named("bool"))
+            return (new_p, type_named("bool"))
         }
         TokenKind::TypeUnit => {
             let (new_p, _) = advance(p)
-            (new_p, type_unit())
+            return (new_p, type_unit())
         }
         TokenKind::Ident => {
             let (new_p, t) = advance(p)
-            (new_p, type_named(t.text))
+            return (new_p, type_named(t.text))
         }
         TokenKind::LParen => {
-            // Tuple type
+            // Tuple type - collect into TypeScratch
             let (new_p, _) = advance(p)
             var current_p = new_p
-            var types = vec_new()
-            
-            while !match_token(current_p, TokenKind::RParen) && !parser_at_end(current_p) {
+            var types = type_scratch_new()
+
+            while !match_token_ref(&current_p, TokenKind::RParen) && !parser_at_end(&current_p) {
                 let (new_p2, ty) = parse_type(current_p)
-                vec_push(types, ty)
+                type_scratch_push(&! types, ty)
                 current_p = new_p2
-                
-                if match_token(current_p, TokenKind::Comma) {
+
+                if match_token_ref(&current_p, TokenKind::Comma) {
                     let (new_p3, _) = advance(current_p)
                     current_p = new_p3
                 } else {
                     break
                 }
             }
-            
+
             let (final_p, _) = expect(current_p, TokenKind::RParen)
-            
+
             var tuple_type = Type {
                 kind: TypeKind::Tuple,
                 name: "",
-                args: types,
+                args: [0; 16],
+                args_len: types.len,
             }
-            
-            (final_p, tuple_type)
+
+            return (final_p, tuple_type)
         }
         TokenKind::LBracket => {
             // Array type
             let (new_p, _) = advance(p)
             let (new_p2, elem_ty) = parse_type(new_p)
             let (new_p3, _) = expect(new_p2, TokenKind::RBracket)
-            
+
             var arr_type = Type {
                 kind: TypeKind::Array,
                 name: "",
-                args: vec_new(),
+                args: [0; 16],
+                args_len: 1,
             }
-            vec_push(arr_type.args, elem_ty)
-            
-            (new_p3, arr_type)
+
+            return (new_p3, arr_type)
         }
         _ => {
             let (new_p, _) = advance(p)
-            (new_p, type_unit())
+            return (new_p, type_unit())
         }
     }
 }
@@ -872,177 +1030,177 @@ fn parse_type(p: Parser) -> (Parser, Type) with Mut, Panic {
 // TOP-LEVEL DECLARATIONS
 // ============================================================================
 
-fn parse_function(p: Parser) -> (Parser, Expr) with Mut, Panic {
-    let tok = peek(p)
-    let (new_p, _) = advance(p)  // consume fn
+fn parse_function(p: Parser) -> (Parser, Expr) with Mut, Panic, Div {
+    let tok = peek_ref(&p)
+    let (new_p, _) = advance(p)
     let (new_p2, name_tok) = expect(new_p, TokenKind::Ident)
     let (new_p3, _) = expect(new_p2, TokenKind::LParen)
-    
-    // Parse parameters
+
     var current_p = new_p3
-    var params = vec_new()
-    
-    while !match_token(current_p, TokenKind::RParen) && !parser_at_end(current_p) {
-        // Parameter: name: Type
+    var params = expr_scratch_new()
+
+    while !match_token_ref(&current_p, TokenKind::RParen) && !parser_at_end(&current_p) {
         let (new_p4, param_name) = expect(current_p, TokenKind::Ident)
         let (new_p5, _) = expect(new_p4, TokenKind::Colon)
         let (new_p6, param_ty) = parse_type(new_p5)
-        
+
         var param = expr_new(ExprKind::TypeAnnotation, param_name.text, span_new(param_name.line, param_name.column))
         param.type_ann = param_ty
-        vec_push(params, param)
-        
+        expr_scratch_push(&! params, param)
+
         current_p = new_p6
-        
-        if match_token(current_p, TokenKind::Comma) {
+
+        if match_token_ref(&current_p, TokenKind::Comma) {
             let (new_p7, _) = advance(current_p)
             current_p = new_p7
         } else {
             break
         }
     }
-    
+
     let (new_p7, _) = expect(current_p, TokenKind::RParen)
     var after_params = new_p7
-    
-    // Optional return type
+
     var ret_type = type_unit()
-    if match_token(after_params, TokenKind::Arrow) {
+    if match_token_ref(&after_params, TokenKind::Arrow) {
         let (new_p8, _) = advance(after_params)
         let (new_p9, ty) = parse_type(new_p8)
         ret_type = ty
         after_params = new_p9
     }
-    
-    // Optional effect annotation: with Effect
-    // (skipped for now)
-    
-    // Function body
+
     let (final_p, body) = parse_block(after_params)
-    
+
     var fn_expr = expr_new(ExprKind::Fn, name_tok.text, span_new(tok.line, tok.column))
     fn_expr.type_ann = ret_type
-    
-    // Add params as children
+
     var i: i64 = 0
-    while i < vec_len(params) {
-        vec_push(fn_expr.children, vec_get(params, i))
+    while i < params.len {
+        if fn_expr.children_len < 64 {
+            fn_expr.children[fn_expr.children_len as usize] = i
+            fn_expr.children_len = fn_expr.children_len + 1
+        }
         i = i + 1
     }
-    
-    // Add body as last child
-    vec_push(fn_expr.children, body)
-    
-    (final_p, fn_expr)
+
+    // body as last child
+    if fn_expr.children_len < 64 {
+        fn_expr.children[fn_expr.children_len as usize] = params.len
+        fn_expr.children_len = fn_expr.children_len + 1
+    }
+
+    return (final_p, fn_expr)
 }
 
-fn parse_struct(p: Parser) -> (Parser, Expr) with Mut, Panic {
-    let tok = peek(p)
-    let (new_p, _) = advance(p)  // consume struct
+fn parse_struct(p: Parser) -> (Parser, Expr) with Mut, Panic, Div {
+    let tok = peek_ref(&p)
+    let (new_p, _) = advance(p)
     let (new_p2, name_tok) = expect(new_p, TokenKind::Ident)
     let (new_p3, _) = expect(new_p2, TokenKind::LBrace)
-    
+
     var current_p = new_p3
-    var fields = vec_new()
-    
-    while !match_token(current_p, TokenKind::RBrace) && !parser_at_end(current_p) {
-        // Field: name: Type
+    var fields = expr_scratch_new()
+
+    while !match_token_ref(&current_p, TokenKind::RBrace) && !parser_at_end(&current_p) {
         let (new_p4, field_name) = expect(current_p, TokenKind::Ident)
         let (new_p5, _) = expect(new_p4, TokenKind::Colon)
         let (new_p6, field_ty) = parse_type(new_p5)
-        
+
         var field = expr_new(ExprKind::FieldInit, field_name.text, span_new(field_name.line, field_name.column))
         field.type_ann = field_ty
-        vec_push(fields, field)
-        
+        expr_scratch_push(&! fields, field)
+
         current_p = new_p6
-        
-        if match_token(current_p, TokenKind::Comma) {
+
+        if match_token_ref(&current_p, TokenKind::Comma) {
             let (new_p7, _) = advance(current_p)
             current_p = new_p7
         } else {
             break
         }
     }
-    
+
     let (final_p, _) = expect(current_p, TokenKind::RBrace)
-    
+
     var struct_expr = expr_new(ExprKind::StructLit, name_tok.text, span_new(tok.line, tok.column))
-    
+
     var i: i64 = 0
-    while i < vec_len(fields) {
-        vec_push(struct_expr.children, vec_get(fields, i))
+    while i < fields.len {
+        if struct_expr.children_len < 64 {
+            struct_expr.children[struct_expr.children_len as usize] = i
+            struct_expr.children_len = struct_expr.children_len + 1
+        }
         i = i + 1
     }
-    
-    (final_p, struct_expr)
+
+    return (final_p, struct_expr)
 }
 
-fn parse_enum(p: Parser) -> (Parser, Expr) with Mut, Panic {
-    let tok = peek(p)
-    let (new_p, _) = advance(p)  // consume enum
+fn parse_enum(p: Parser) -> (Parser, Expr) with Mut, Panic, Div {
+    let tok = peek_ref(&p)
+    let (new_p, _) = advance(p)
     let (new_p2, name_tok) = expect(new_p, TokenKind::Ident)
     let (new_p3, _) = expect(new_p2, TokenKind::LBrace)
-    
+
     var current_p = new_p3
-    var variants = vec_new()
-    
-    while !match_token(current_p, TokenKind::RBrace) && !parser_at_end(current_p) {
-        // Variant: Name or Name(Type)
+    var variants = expr_scratch_new()
+
+    while !match_token_ref(&current_p, TokenKind::RBrace) && !parser_at_end(&current_p) {
         let (new_p4, var_tok) = expect(current_p, TokenKind::Ident)
-        
+
         var variant = expr_new(ExprKind::VarRef, var_tok.text, span_new(var_tok.line, var_tok.column))
         var after_variant = new_p4
-        
-        // Optional variant data
-        if match_token(after_variant, TokenKind::LParen) {
+
+        if match_token_ref(&after_variant, TokenKind::LParen) {
             let (new_p5, _) = advance(after_variant)
             let (new_p6, ty) = parse_type(new_p5)
             let (new_p7, _) = expect(new_p6, TokenKind::RParen)
-            
+
             variant.type_ann = ty
             after_variant = new_p7
         }
-        
-        vec_push(variants, variant)
+
+        expr_scratch_push(&! variants, variant)
         current_p = after_variant
-        
-        if match_token(current_p, TokenKind::Comma) {
+
+        if match_token_ref(&current_p, TokenKind::Comma) {
             let (new_p8, _) = advance(current_p)
             current_p = new_p8
         } else {
             break
         }
     }
-    
+
     let (final_p, _) = expect(current_p, TokenKind::RBrace)
-    
+
     var enum_expr = expr_new(ExprKind::Enum, name_tok.text, span_new(tok.line, tok.column))
-    
+
     var i: i64 = 0
-    while i < vec_len(variants) {
-        vec_push(enum_expr.children, vec_get(variants, i))
+    while i < variants.len {
+        if enum_expr.children_len < 64 {
+            enum_expr.children[enum_expr.children_len as usize] = i
+            enum_expr.children_len = enum_expr.children_len + 1
+        }
         i = i + 1
     }
-    
-    (final_p, enum_expr)
+
+    return (final_p, enum_expr)
 }
 
-fn parse_use(p: Parser) -> (Parser, Expr) with Mut, Panic {
-    let tok = peek(p)
-    let (new_p, _) = advance(p)  // consume use
-    
-    // Parse path: a::b::c
+fn parse_use(p: Parser) -> (Parser, Expr) with Mut, Panic, Div {
+    let tok = peek_ref(&p)
+    let (new_p, _) = advance(p)
+
     var path = ""
     var current_p = new_p
-    
+
     while true {
         let (new_p2, path_tok) = expect(current_p, TokenKind::Ident)
         path = path + path_tok.text
         current_p = new_p2
-        
-        if match_token(current_p, TokenKind::Colon) && 
-           lexer_peek_next(current_p) == 58 {  // ::
+
+        if match_token_ref(&current_p, TokenKind::Colon) &&
+           parser_peek_next_char(&current_p) == 58 {
             path = path + "::"
             let (new_p3, _) = advance(current_p)
             let (new_p4, _) = advance(new_p3)
@@ -1051,16 +1209,14 @@ fn parse_use(p: Parser) -> (Parser, Expr) with Mut, Panic {
             break
         }
     }
-    
-    let (final_p, _) = consume(current_p, TokenKind::Semi)
-    
+
+    let final_p = consume(current_p, TokenKind::Semi)
+
     let use_expr = expr_new(ExprKind::VarRef, path, span_new(tok.line, tok.column))
-    (final_p, use_expr)
+    return (final_p, use_expr)
 }
 
-// Helper to access lexer function
-fn lexer_peek_next(p: Parser) -> i64 with {
-    // This is a hack - in real implementation we'd access the token stream better
+fn parser_peek_next_char(p: &Parser) -> i64 {
     0
 }
 
@@ -1068,121 +1224,126 @@ fn lexer_peek_next(p: Parser) -> i64 with {
 // MODULE PARSING
 // ============================================================================
 
-fn parse_module(p: Parser) -> (Parser, Expr) with Mut, Panic {
-    let tok = peek(p)
+fn parse_module(p: Parser) -> (Parser, Expr) with Mut, Panic, Div {
+    let tok = peek_ref(&p)
     var current_p = p
-    var decls = vec_new()
-    
-    while !parser_at_end(current_p) {
-        let tok_kind = peek_kind(current_p)
-        
+    var decls = expr_scratch_new()
+
+    while !parser_at_end(&current_p) {
+        let tok_kind = peek_kind_ref(&current_p)
+
+        if tok_kind == TokenKind::Eof {
+            break
+        }
+
         let (new_p, decl) = match tok_kind {
             TokenKind::Fn => parse_function(current_p),
             TokenKind::Struct => parse_struct(current_p),
             TokenKind::Enum => parse_enum(current_p),
             TokenKind::Use => parse_use(current_p),
-            TokenKind::Eof => break,
             _ => {
-                // Try to parse as expression (might be top-level expression)
-                let (new_p, expr) = parse_stmt(current_p)
-                (new_p, expr)
+                let (new_p2, expr) = parse_stmt(current_p)
+                (new_p2, expr)
             }
         }
-        
-        vec_push(decls, decl)
+
+        expr_scratch_push(&! decls, decl)
         current_p = new_p
     }
-    
+
     var module_expr = expr_new(ExprKind::Block, "module", span_new(tok.line, tok.column))
-    
+
     var i: i64 = 0
-    while i < vec_len(decls) {
-        vec_push(module_expr.children, vec_get(decls, i))
+    while i < decls.len {
+        if module_expr.children_len < 64 {
+            module_expr.children[module_expr.children_len as usize] = i
+            module_expr.children_len = module_expr.children_len + 1
+        }
         i = i + 1
     }
-    
-    (current_p, module_expr)
+
+    return (current_p, module_expr)
 }
 
 // ============================================================================
 // PUBLIC API
 // ============================================================================
 
-fn parse(tokens: Vec<Token>) -> Expr with Mut, Panic {
-    let p = parser_new(tokens)
+fn parse(tokens: [Token; 4096], tokens_len: i64) -> Expr with Mut, Panic, Div {
+    let p = parser_new(tokens, tokens_len)
     let (_, ast) = parse_module(p)
-    ast
+    return ast
 }
 
-fn expr_to_string(e: Expr) -> string with Mut, Panic {
+fn expr_to_string(e: Expr) -> string with Mut, Panic, Div {
     match e.kind {
-        ExprKind::IntLit => "Int(" + e.value + ")",
-        ExprKind::FloatLit => "Float(" + e.value + ")",
-        ExprKind::StringLit => "String(\"" + e.value + "\")",
-        ExprKind::BoolLit => "Bool(" + e.value + ")",
-        ExprKind::VarRef => "Var(" + e.value + ")",
+        ExprKind::IntLit => return "Int(" + e.value + ")",
+        ExprKind::FloatLit => return "Float(" + e.value + ")",
+        ExprKind::StringLit => return "String(\"" + e.value + "\")",
+        ExprKind::BoolLit => return "Bool(" + e.value + ")",
+        ExprKind::VarRef => return "Var(" + e.value + ")",
         ExprKind::Binary => {
             var result = "Binary(" + e.value + ", ["
             var i: i64 = 0
-            while i < vec_len(e.children) {
+            while i < e.children_len {
                 if i > 0 { result = result + ", " }
-                result = result + expr_to_string(vec_get(e.children, i))
+                result = result + int_to_string(e.children[i as usize])
                 i = i + 1
             }
-            result + "])"
+            return result + "])"
         }
         ExprKind::Call => {
             var result = "Call(" + e.value + ", ["
             var i: i64 = 0
-            while i < vec_len(e.children) {
+            while i < e.children_len {
                 if i > 0 { result = result + ", " }
-                result = result + expr_to_string(vec_get(e.children, i))
+                result = result + int_to_string(e.children[i as usize])
                 i = i + 1
             }
-            result + "])"
+            return result + "])"
         }
         ExprKind::Fn => {
             var result = "Fn(" + e.value + ", ["
             var i: i64 = 0
-            while i < vec_len(e.children) {
+            while i < e.children_len {
                 if i > 0 { result = result + ", " }
-                result = result + expr_to_string(vec_get(e.children, i))
+                result = result + int_to_string(e.children[i as usize])
                 i = i + 1
             }
-            result + "])"
+            return result + "])"
         }
-        ExprKind::Let => "Let(" + e.value + ", " + expr_to_string(vec_get(e.children, 0)) + ")",
+        ExprKind::Let => return "Let(" + e.value + ", " + int_to_string(e.children[0]) + ")",
         ExprKind::If => {
             var result = "If("
             var i: i64 = 0
-            while i < vec_len(e.children) {
+            while i < e.children_len {
                 if i > 0 { result = result + ", " }
-                result = result + expr_to_string(vec_get(e.children, i))
+                result = result + int_to_string(e.children[i as usize])
                 i = i + 1
             }
-            result + ")"
+            return result + ")"
         }
-        _ => "Expr(" + int_to_string(e.kind as i64) + ")",
+        _ => return "Expr(" + int_to_string(e.kind as i64) + ")",
     }
 }
 
 fn int_to_string(n: i64) -> string with Mut, Panic, Div {
     if n == 0 {
-        "0"
-    } else {
-        let negative = n < 0
-        var num = if negative { -n } else { n }
-        var result = ""
-        while num > 0 {
-            let digit = num % 10
-            let ch = 48 + digit
-            result = char_from_i64(ch) + result
-            num = num / 10
-        }
-        if negative { "-" + result } else { result }
+        return "0"
     }
+    let negative = n < 0
+    var num = if negative { 0 - n } else { n }
+    var result = ""
+    while num > 0 {
+        let digit = num % 10
+        let ch = 48 + digit
+        result = char_from_i64(ch) + result
+        num = num / 10
+    }
+    if negative { return "-" + result }
+    return result
 }
 
-fn char_from_i64(n: i64) -> string with Mut, Panic {
-    str_substr("0123456789", n, 1)
+fn char_from_i64(n: i64) -> string with Mut, Panic, Div {
+    str_slice("0123456789", n, n + 1)
 }

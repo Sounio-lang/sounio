@@ -1,493 +1,1060 @@
 // self-hosted::compiler::types
 //
-// TYPE SYSTEM FOR SOUNIO COMPILER
-// No stubs. No fakes. Real implementation.
+// TYPE SYSTEM FOR SOUNIO COMPILER — Arena-based
 //
-// Defines the type representation and type operations.
-
-use io
-use string
+// All types stored in a flat TypeArena. No Vec, no recursion.
+// Integer IDs reference type nodes; child lists use (start, len)
+// indices into a shared children array.
+//
+// Pattern: stdlib/theorem/kernel.sio (PropArena / ProofStore)
 
 // ============================================================================
-// TYPE REPRESENTATION
+// TYPE KIND TAGS (integer-encoded for arena compatibility)
 // ============================================================================
 
-enum TypeKind {
-    // Primitives
-    TInt,
-    TFloat,
-    TString,
-    TBool,
-    TUnit,
-    
-    // Composite
-    TTuple,
-    TArray,
-    TStruct,
-    TEnum,
-    TFunction,
-    
-    // Type variables for polymorphism
-    TVar,
-    
-    // Reference types
-    TRef,
-    
-    // Generic
-    TGeneric,
-    
-    // Error
-    TError,
-}
+let TK_INT: i32 = 0
+let TK_FLOAT: i32 = 1
+let TK_STRING: i32 = 2
+let TK_BOOL: i32 = 3
+let TK_UNIT: i32 = 4
+let TK_TUPLE: i32 = 5
+let TK_ARRAY: i32 = 6
+let TK_STRUCT: i32 = 7
+let TK_ENUM: i32 = 8
+let TK_FUNCTION: i32 = 9
+let TK_VAR: i32 = 10
+let TK_REF: i32 = 11
+let TK_GENERIC: i32 = 12
+let TK_ERROR: i32 = 13
 
-struct Type {
-    kind: TypeKind,
-    name: string,           // For named types
-    args: Vec<Type>,        // Type arguments
-    fields: Vec<Field>,     // For structs
-    variants: Vec<Variant>, // For enums
-    ret: Type,              // For functions
-    effects: Vec<string>,   // Effect types
-}
+// ============================================================================
+// ARENA CAPACITIES
+// ============================================================================
 
-struct Field {
+let TYPE_ARENA_CAP: i64 = 4096
+let CHILDREN_CAP: i64 = 16384
+let FIELD_ARENA_CAP: i64 = 4096
+let VARIANT_ARENA_CAP: i64 = 2048
+let MAX_EFFECTS: i64 = 8
+
+// ============================================================================
+// TYPE NODE — flat, no recursion
+// ============================================================================
+//
+// Each TypeNode lives in the TypeArena at an integer index (TypeId).
+//   - args_start / args_len: range in children[] holding type-argument IDs
+//   - fields_start / fields_len: range in field arena
+//   - variants_start / variants_len: range in variant arena
+//   - ret_id: ID of return type (for functions), or -1
+//   - effects: bounded inline array of effect names
+//   - effects_len: how many effects are active
+
+struct TypeNode {
+    tag: i32,
     name: string,
-    ty: Type,
+    args_start: i64,
+    args_len: i64,
+    fields_start: i64,
+    fields_len: i64,
+    variants_start: i64,
+    variants_len: i64,
+    ret_id: i64,
+    effects: [string; 8],
+    effects_len: i64,
 }
 
-struct Variant {
-    name: string,
-    data: Type,  // Unit for simple variants
-}
-
-struct TypeVar {
-    id: i64,
-    name: string,
+fn type_node_default() -> TypeNode {
+    return TypeNode {
+        tag: TK_ERROR,
+        name: "",
+        args_start: 0,
+        args_len: 0,
+        fields_start: 0,
+        fields_len: 0,
+        variants_start: 0,
+        variants_len: 0,
+        ret_id: 0 - 1,
+        effects: [""; 8],
+        effects_len: 0,
+    }
 }
 
 // ============================================================================
-// PRIMITIVE TYPES
+// FIELD NODE — stored in FieldArena
 // ============================================================================
 
-fn type_int() -> Type {
-    Type {
-        kind: TypeKind::TInt,
+struct FieldNode {
+    name: string,
+    type_id: i64,
+}
+
+fn field_node_default() -> FieldNode {
+    return FieldNode { name: "", type_id: 0 - 1 }
+}
+
+// ============================================================================
+// VARIANT NODE — stored in VariantArena
+// ============================================================================
+
+struct VariantNode {
+    name: string,
+    data_id: i64,
+}
+
+fn variant_node_default() -> VariantNode {
+    return VariantNode { name: "", data_id: 0 - 1 }
+}
+
+// ============================================================================
+// TYPE ARENA — owns all type data
+// ============================================================================
+
+struct TypeArena {
+    // Type nodes (SoA layout for cache friendliness)
+    tags: [i32; 4096],
+    names: [string; 4096],
+    args_starts: [i64; 4096],
+    args_lens: [i64; 4096],
+    fields_starts: [i64; 4096],
+    fields_lens: [i64; 4096],
+    variants_starts: [i64; 4096],
+    variants_lens: [i64; 4096],
+    ret_ids: [i64; 4096],
+    eff0: [string; 4096],
+    eff1: [string; 4096],
+    eff2: [string; 4096],
+    eff3: [string; 4096],
+    eff4: [string; 4096],
+    eff5: [string; 4096],
+    eff6: [string; 4096],
+    eff7: [string; 4096],
+    effects_lens: [i64; 4096],
+    type_count: i64,
+
+    // Children array (type-argument IDs, shared across all nodes)
+    children: [i64; 16384],
+    children_len: i64,
+
+    // Field arena
+    field_names: [string; 4096],
+    field_type_ids: [i64; 4096],
+    field_count: i64,
+
+    // Variant arena
+    variant_names: [string; 2048],
+    variant_data_ids: [i64; 2048],
+    variant_count: i64,
+}
+
+fn arena_new() -> TypeArena {
+    return TypeArena {
+        tags: [0; 4096],
+        names: [""; 4096],
+        args_starts: [0; 4096],
+        args_lens: [0; 4096],
+        fields_starts: [0; 4096],
+        fields_lens: [0; 4096],
+        variants_starts: [0; 4096],
+        variants_lens: [0; 4096],
+        ret_ids: [0; 4096],
+        eff0: [""; 4096],
+        eff1: [""; 4096],
+        eff2: [""; 4096],
+        eff3: [""; 4096],
+        eff4: [""; 4096],
+        eff5: [""; 4096],
+        eff6: [""; 4096],
+        eff7: [""; 4096],
+        effects_lens: [0; 4096],
+        type_count: 0,
+        children: [0; 16384],
+        children_len: 0,
+        field_names: [""; 4096],
+        field_type_ids: [0; 4096],
+        field_count: 0,
+        variant_names: [""; 2048],
+        variant_data_ids: [0; 2048],
+        variant_count: 0,
+    }
+}
+
+// ============================================================================
+// ARENA: LOW-LEVEL ALLOCATION
+// ============================================================================
+
+// Allocate a raw type node, return its ID
+fn arena_alloc(a: &! TypeArena, node: TypeNode) -> i64 {
+    let idx = a.type_count
+    if idx >= TYPE_ARENA_CAP {
+        return 0 - 1
+    }
+    a.tags[idx] = node.tag
+    a.names[idx] = node.name
+    a.args_starts[idx] = node.args_start
+    a.args_lens[idx] = node.args_len
+    a.fields_starts[idx] = node.fields_start
+    a.fields_lens[idx] = node.fields_len
+    a.variants_starts[idx] = node.variants_start
+    a.variants_lens[idx] = node.variants_len
+    a.ret_ids[idx] = node.ret_id
+    a.eff0[idx] = node.effects[0]
+    a.eff1[idx] = node.effects[1]
+    a.eff2[idx] = node.effects[2]
+    a.eff3[idx] = node.effects[3]
+    a.eff4[idx] = node.effects[4]
+    a.eff5[idx] = node.effects[5]
+    a.eff6[idx] = node.effects[6]
+    a.eff7[idx] = node.effects[7]
+    a.effects_lens[idx] = node.effects_len
+    a.type_count = idx + 1
+    return idx
+}
+
+// Read a type node back from the arena
+fn arena_get(a: &TypeArena, idx: i64) -> TypeNode {
+    if idx < 0 {
+        return type_node_default()
+    }
+    if idx >= a.type_count {
+        return type_node_default()
+    }
+    var effs: [string; 8] = [""; 8]
+    effs[0] = a.eff0[idx]
+    effs[1] = a.eff1[idx]
+    effs[2] = a.eff2[idx]
+    effs[3] = a.eff3[idx]
+    effs[4] = a.eff4[idx]
+    effs[5] = a.eff5[idx]
+    effs[6] = a.eff6[idx]
+    effs[7] = a.eff7[idx]
+    return TypeNode {
+        tag: a.tags[idx],
+        name: a.names[idx],
+        args_start: a.args_starts[idx],
+        args_len: a.args_lens[idx],
+        fields_start: a.fields_starts[idx],
+        fields_len: a.fields_lens[idx],
+        variants_start: a.variants_starts[idx],
+        variants_len: a.variants_lens[idx],
+        ret_id: a.ret_ids[idx],
+        effects: effs,
+        effects_len: a.effects_lens[idx],
+    }
+}
+
+// Get the tag of a type node without constructing the full node
+fn arena_tag(a: &TypeArena, idx: i64) -> i32 {
+    if idx < 0 { return TK_ERROR }
+    if idx >= a.type_count { return TK_ERROR }
+    return a.tags[idx]
+}
+
+// Get the name of a type node
+fn arena_name(a: &TypeArena, idx: i64) -> string {
+    if idx < 0 { return "" }
+    if idx >= a.type_count { return "" }
+    return a.names[idx]
+}
+
+// ============================================================================
+// CHILDREN ARRAY OPERATIONS
+// ============================================================================
+
+// Push a child type-ID into the children array, return its index
+fn children_push(a: &! TypeArena, child_id: i64) -> i64 {
+    let idx = a.children_len
+    if idx >= CHILDREN_CAP {
+        return 0 - 1
+    }
+    a.children[idx] = child_id
+    a.children_len = idx + 1
+    return idx
+}
+
+// Get a child type-ID from the children array
+fn children_get(a: &TypeArena, idx: i64) -> i64 {
+    if idx < 0 { return 0 - 1 }
+    if idx >= a.children_len { return 0 - 1 }
+    return a.children[idx]
+}
+
+// Reserve a contiguous block of children slots, return the start index
+fn children_reserve(a: &! TypeArena, count: i64) -> i64 {
+    let start = a.children_len
+    if start + count > CHILDREN_CAP {
+        return 0 - 1
+    }
+    a.children_len = start + count
+    return start
+}
+
+// ============================================================================
+// FIELD ARENA OPERATIONS
+// ============================================================================
+
+fn field_alloc(a: &! TypeArena, name: string, type_id: i64) -> i64 {
+    let idx = a.field_count
+    if idx >= FIELD_ARENA_CAP {
+        return 0 - 1
+    }
+    a.field_names[idx] = name
+    a.field_type_ids[idx] = type_id
+    a.field_count = idx + 1
+    return idx
+}
+
+fn field_get_name(a: &TypeArena, idx: i64) -> string {
+    if idx < 0 { return "" }
+    if idx >= a.field_count { return "" }
+    return a.field_names[idx]
+}
+
+fn field_get_type_id(a: &TypeArena, idx: i64) -> i64 {
+    if idx < 0 { return 0 - 1 }
+    if idx >= a.field_count { return 0 - 1 }
+    return a.field_type_ids[idx]
+}
+
+// ============================================================================
+// VARIANT ARENA OPERATIONS
+// ============================================================================
+
+fn variant_alloc(a: &! TypeArena, name: string, data_id: i64) -> i64 {
+    let idx = a.variant_count
+    if idx >= VARIANT_ARENA_CAP {
+        return 0 - 1
+    }
+    a.variant_names[idx] = name
+    a.variant_data_ids[idx] = data_id
+    a.variant_count = idx + 1
+    return idx
+}
+
+fn variant_get_name(a: &TypeArena, idx: i64) -> string {
+    if idx < 0 { return "" }
+    if idx >= a.variant_count { return "" }
+    return a.variant_names[idx]
+}
+
+fn variant_get_data_id(a: &TypeArena, idx: i64) -> i64 {
+    if idx < 0 { return 0 - 1 }
+    if idx >= a.variant_count { return 0 - 1 }
+    return a.variant_data_ids[idx]
+}
+
+// ============================================================================
+// EFFECT HELPERS (inline bounded array)
+// ============================================================================
+
+fn get_effect(a: &TypeArena, type_id: i64, eff_idx: i64) -> string {
+    if type_id < 0 { return "" }
+    if type_id >= a.type_count { return "" }
+    if eff_idx == 0 { return a.eff0[type_id] }
+    if eff_idx == 1 { return a.eff1[type_id] }
+    if eff_idx == 2 { return a.eff2[type_id] }
+    if eff_idx == 3 { return a.eff3[type_id] }
+    if eff_idx == 4 { return a.eff4[type_id] }
+    if eff_idx == 5 { return a.eff5[type_id] }
+    if eff_idx == 6 { return a.eff6[type_id] }
+    if eff_idx == 7 { return a.eff7[type_id] }
+    return ""
+}
+
+fn effects_count(a: &TypeArena, type_id: i64) -> i64 {
+    if type_id < 0 { return 0 }
+    if type_id >= a.type_count { return 0 }
+    return a.effects_lens[type_id]
+}
+
+// ============================================================================
+// PRIMITIVE TYPE CONSTRUCTORS
+// ============================================================================
+
+fn type_int(a: &! TypeArena) -> i64 {
+    let node = TypeNode {
+        tag: TK_INT,
         name: "i64",
-        args: vec_new(),
-        fields: vec_new(),
-        variants: vec_new(),
-        ret: type_error(),
-        effects: vec_new(),
+        args_start: 0, args_len: 0,
+        fields_start: 0, fields_len: 0,
+        variants_start: 0, variants_len: 0,
+        ret_id: 0 - 1,
+        effects: [""; 8],
+        effects_len: 0,
     }
+    return arena_alloc(a, node)
 }
 
-fn type_float() -> Type {
-    Type {
-        kind: TypeKind::TFloat,
+fn type_float(a: &! TypeArena) -> i64 {
+    let node = TypeNode {
+        tag: TK_FLOAT,
         name: "f64",
-        args: vec_new(),
-        fields: vec_new(),
-        variants: vec_new(),
-        ret: type_error(),
-        effects: vec_new(),
+        args_start: 0, args_len: 0,
+        fields_start: 0, fields_len: 0,
+        variants_start: 0, variants_len: 0,
+        ret_id: 0 - 1,
+        effects: [""; 8],
+        effects_len: 0,
     }
+    return arena_alloc(a, node)
 }
 
-fn type_string() -> Type {
-    Type {
-        kind: TypeKind::TString,
+fn type_string(a: &! TypeArena) -> i64 {
+    let node = TypeNode {
+        tag: TK_STRING,
         name: "string",
-        args: vec_new(),
-        fields: vec_new(),
-        variants: vec_new(),
-        ret: type_error(),
-        effects: vec_new(),
+        args_start: 0, args_len: 0,
+        fields_start: 0, fields_len: 0,
+        variants_start: 0, variants_len: 0,
+        ret_id: 0 - 1,
+        effects: [""; 8],
+        effects_len: 0,
     }
+    return arena_alloc(a, node)
 }
 
-fn type_bool() -> Type {
-    Type {
-        kind: TypeKind::TBool,
+fn type_bool(a: &! TypeArena) -> i64 {
+    let node = TypeNode {
+        tag: TK_BOOL,
         name: "bool",
-        args: vec_new(),
-        fields: vec_new(),
-        variants: vec_new(),
-        ret: type_error(),
-        effects: vec_new(),
+        args_start: 0, args_len: 0,
+        fields_start: 0, fields_len: 0,
+        variants_start: 0, variants_len: 0,
+        ret_id: 0 - 1,
+        effects: [""; 8],
+        effects_len: 0,
     }
+    return arena_alloc(a, node)
 }
 
-fn type_unit() -> Type {
-    Type {
-        kind: TypeKind::TUnit,
+fn type_unit(a: &! TypeArena) -> i64 {
+    let node = TypeNode {
+        tag: TK_UNIT,
         name: "()",
-        args: vec_new(),
-        fields: vec_new(),
-        variants: vec_new(),
-        ret: type_error(),
-        effects: vec_new(),
+        args_start: 0, args_len: 0,
+        fields_start: 0, fields_len: 0,
+        variants_start: 0, variants_len: 0,
+        ret_id: 0 - 1,
+        effects: [""; 8],
+        effects_len: 0,
     }
+    return arena_alloc(a, node)
 }
 
-fn type_error() -> Type {
-    Type {
-        kind: TypeKind::TError,
+fn type_error(a: &! TypeArena) -> i64 {
+    let node = TypeNode {
+        tag: TK_ERROR,
         name: "<error>",
-        args: vec_new(),
-        fields: vec_new(),
-        variants: vec_new(),
-        ret: type_error(),
-        effects: vec_new(),
+        args_start: 0, args_len: 0,
+        fields_start: 0, fields_len: 0,
+        variants_start: 0, variants_len: 0,
+        ret_id: 0 - 1,
+        effects: [""; 8],
+        effects_len: 0,
     }
+    return arena_alloc(a, node)
 }
 
 // ============================================================================
 // COMPOSITE TYPE CONSTRUCTORS
 // ============================================================================
 
-fn type_array(elem: Type) -> Type {
-    Type {
-        kind: TypeKind::TArray,
+// Array type: one element type as the sole child
+fn type_array(a: &! TypeArena, elem_id: i64) -> i64 {
+    let start = a.children_len
+    children_push(a, elem_id)
+    let node = TypeNode {
+        tag: TK_ARRAY,
         name: "",
-        args: vec_new(),
-        fields: vec_new(),
-        variants: vec_new(),
-        ret: type_error(),
-        effects: vec_new(),
+        args_start: start, args_len: 1,
+        fields_start: 0, fields_len: 0,
+        variants_start: 0, variants_len: 0,
+        ret_id: 0 - 1,
+        effects: [""; 8],
+        effects_len: 0,
     }
+    return arena_alloc(a, node)
 }
 
-fn type_tuple(elements: Vec<Type>) -> Type {
-    Type {
-        kind: TypeKind::TTuple,
+// Tuple type: N element types as children
+// Caller must push children first, then pass start + len
+fn type_tuple(a: &! TypeArena, args_start: i64, args_len: i64) -> i64 {
+    let node = TypeNode {
+        tag: TK_TUPLE,
         name: "",
-        args: elements,
-        fields: vec_new(),
-        variants: vec_new(),
-        ret: type_error(),
-        effects: vec_new(),
+        args_start: args_start, args_len: args_len,
+        fields_start: 0, fields_len: 0,
+        variants_start: 0, variants_len: 0,
+        ret_id: 0 - 1,
+        effects: [""; 8],
+        effects_len: 0,
     }
+    return arena_alloc(a, node)
 }
 
-fn type_function(params: Vec<Type>, ret: Type, effects: Vec<string>) -> Type {
-    Type {
-        kind: TypeKind::TFunction,
+// Function type: params as children, ret_id, effects inline
+fn type_function(a: &! TypeArena, params_start: i64, params_len: i64, ret_id: i64, effs: [string; 8], effs_len: i64) -> i64 {
+    let node = TypeNode {
+        tag: TK_FUNCTION,
         name: "",
-        args: params,
-        fields: vec_new(),
-        variants: vec_new(),
-        ret: ret,
-        effects: effects,
+        args_start: params_start, args_len: params_len,
+        fields_start: 0, fields_len: 0,
+        variants_start: 0, variants_len: 0,
+        ret_id: ret_id,
+        effects: effs,
+        effects_len: effs_len,
     }
+    return arena_alloc(a, node)
 }
 
-fn type_var(id: i64, name: string) -> Type {
-    Type {
-        kind: TypeKind::TVar,
+// Type variable (polymorphism)
+fn type_var(a: &! TypeArena, id: i64, name: string) -> i64 {
+    let node = TypeNode {
+        tag: TK_VAR,
         name: name,
-        args: vec_new(),
-        fields: vec_new(),
-        variants: vec_new(),
-        ret: type_error(),
-        effects: vec_new(),
+        args_start: 0, args_len: 0,
+        fields_start: 0, fields_len: 0,
+        variants_start: 0, variants_len: 0,
+        ret_id: id,
+        effects: [""; 8],
+        effects_len: 0,
     }
+    return arena_alloc(a, node)
+}
+
+// Struct type: name + fields range
+fn type_struct(a: &! TypeArena, name: string, fields_start: i64, fields_len: i64) -> i64 {
+    let node = TypeNode {
+        tag: TK_STRUCT,
+        name: name,
+        args_start: 0, args_len: 0,
+        fields_start: fields_start, fields_len: fields_len,
+        variants_start: 0, variants_len: 0,
+        ret_id: 0 - 1,
+        effects: [""; 8],
+        effects_len: 0,
+    }
+    return arena_alloc(a, node)
+}
+
+// Enum type: name + variants range
+fn type_enum(a: &! TypeArena, name: string, variants_start: i64, variants_len: i64) -> i64 {
+    let node = TypeNode {
+        tag: TK_ENUM,
+        name: name,
+        args_start: 0, args_len: 0,
+        fields_start: 0, fields_len: 0,
+        variants_start: variants_start, variants_len: variants_len,
+        ret_id: 0 - 1,
+        effects: [""; 8],
+        effects_len: 0,
+    }
+    return arena_alloc(a, node)
+}
+
+// Generic type: name + type-arg children
+fn type_generic(a: &! TypeArena, name: string, args_start: i64, args_len: i64) -> i64 {
+    let node = TypeNode {
+        tag: TK_GENERIC,
+        name: name,
+        args_start: args_start, args_len: args_len,
+        fields_start: 0, fields_len: 0,
+        variants_start: 0, variants_len: 0,
+        ret_id: 0 - 1,
+        effects: [""; 8],
+        effects_len: 0,
+    }
+    return arena_alloc(a, node)
+}
+
+// Reference type: inner type as sole child
+fn type_ref(a: &! TypeArena, inner_id: i64) -> i64 {
+    let start = a.children_len
+    children_push(a, inner_id)
+    let node = TypeNode {
+        tag: TK_REF,
+        name: "",
+        args_start: start, args_len: 1,
+        fields_start: 0, fields_len: 0,
+        variants_start: 0, variants_len: 0,
+        ret_id: 0 - 1,
+        effects: [""; 8],
+        effects_len: 0,
+    }
+    return arena_alloc(a, node)
 }
 
 // ============================================================================
-// TYPE OPERATIONS
+// TYPE QUERIES
 // ============================================================================
 
-fn types_equal(t1: Type, t2: Type) -> bool with {
-    if t1.kind != t2.kind {
-        false
-    } else {
-        match t1.kind {
-            TypeKind::TInt => true,
-            TypeKind::TFloat => true,
-            TypeKind::TString => true,
-            TypeKind::TBool => true,
-            TypeKind::TUnit => true,
-            TypeKind::TError => true,
-            TypeKind::TVar => t1.name == t2.name,
-            TypeKind::TArray => {
-                if vec_len(t1.args) == 1 && vec_len(t2.args) == 1 {
-                    types_equal(vec_get(t1.args, 0), vec_get(t2.args, 0))
-                } else {
-                    false
-                }
-            }
-            TypeKind::TTuple => {
-                if vec_len(t1.args) == vec_len(t2.args) {
-                    var equal = true
-                    var i: i64 = 0
-                    while i < vec_len(t1.args) {
-                        if !types_equal(vec_get(t1.args, i), vec_get(t2.args, i)) {
-                            equal = false
-                            break
-                        }
-                        i = i + 1
-                    }
-                    equal
-                } else {
-                    false
-                }
-            }
-            TypeKind::TFunction => {
-                // Check params
-                if vec_len(t1.args) != vec_len(t2.args) {
-                    false
-                } else {
-                    var params_equal = true
-                    var i: i64 = 0
-                    while i < vec_len(t1.args) {
-                        if !types_equal(vec_get(t1.args, i), vec_get(t2.args, i)) {
-                            params_equal = false
-                            break
-                        }
-                        i = i + 1
-                    }
-                    
-                    // Check return type
-                    let ret_equal = types_equal(t1.ret, t2.ret)
-                    
-                    params_equal && ret_equal
-                }
-            }
-            _ => t1.name == t2.name,
+fn is_primitive(a: &TypeArena, id: i64) -> bool {
+    let tag = arena_tag(a, id)
+    if tag == TK_INT { return true }
+    if tag == TK_FLOAT { return true }
+    if tag == TK_STRING { return true }
+    if tag == TK_BOOL { return true }
+    if tag == TK_UNIT { return true }
+    return false
+}
+
+fn is_numeric(a: &TypeArena, id: i64) -> bool {
+    let tag = arena_tag(a, id)
+    if tag == TK_INT { return true }
+    if tag == TK_FLOAT { return true }
+    return false
+}
+
+fn is_integer(a: &TypeArena, id: i64) -> bool {
+    let tag = arena_tag(a, id)
+    return tag == TK_INT
+}
+
+fn is_comparable(a: &TypeArena, id: i64) -> bool {
+    return is_primitive(a, id)
+}
+
+// ============================================================================
+// TYPE EQUALITY
+// ============================================================================
+
+fn types_equal(a: &TypeArena, id1: i64, id2: i64) -> bool {
+    let tag1 = arena_tag(a, id1)
+    let tag2 = arena_tag(a, id2)
+    if tag1 != tag2 { return false }
+
+    // Primitives: tag match is sufficient
+    if tag1 == TK_INT { return true }
+    if tag1 == TK_FLOAT { return true }
+    if tag1 == TK_STRING { return true }
+    if tag1 == TK_BOOL { return true }
+    if tag1 == TK_UNIT { return true }
+    if tag1 == TK_ERROR { return true }
+
+    // Type variables: compare by name
+    if tag1 == TK_VAR {
+        return arena_name(a, id1) == arena_name(a, id2)
+    }
+
+    // Array: compare element type
+    if tag1 == TK_ARRAY {
+        let n1 = arena_get(a, id1)
+        let n2 = arena_get(a, id2)
+        if n1.args_len != 1 { return false }
+        if n2.args_len != 1 { return false }
+        let e1 = children_get(a, n1.args_start)
+        let e2 = children_get(a, n2.args_start)
+        return types_equal(a, e1, e2)
+    }
+
+    // Tuple: compare all element types
+    if tag1 == TK_TUPLE {
+        let n1 = arena_get(a, id1)
+        let n2 = arena_get(a, id2)
+        if n1.args_len != n2.args_len { return false }
+        var i: i64 = 0
+        while i < n1.args_len {
+            let c1 = children_get(a, n1.args_start + i)
+            let c2 = children_get(a, n2.args_start + i)
+            if !types_equal(a, c1, c2) { return false }
+            i = i + 1
         }
+        return true
     }
-}
 
-fn is_primitive(t: Type) -> bool with {
-    t.kind == TypeKind::TInt ||
-    t.kind == TypeKind::TFloat ||
-    t.kind == TypeKind::TString ||
-    t.kind == TypeKind::TBool ||
-    t.kind == TypeKind::TUnit
-}
+    // Function: compare params + return type
+    if tag1 == TK_FUNCTION {
+        let n1 = arena_get(a, id1)
+        let n2 = arena_get(a, id2)
+        if n1.args_len != n2.args_len { return false }
+        var i: i64 = 0
+        while i < n1.args_len {
+            let c1 = children_get(a, n1.args_start + i)
+            let c2 = children_get(a, n2.args_start + i)
+            if !types_equal(a, c1, c2) { return false }
+            i = i + 1
+        }
+        return types_equal(a, n1.ret_id, n2.ret_id)
+    }
 
-fn is_numeric(t: Type) -> bool with {
-    t.kind == TypeKind::TInt || t.kind == TypeKind::TFloat
-}
-
-fn is_integer(t: Type) -> bool with {
-    t.kind == TypeKind::TInt
-}
-
-fn is_comparable(t: Type) -> bool with {
-    is_primitive(t)
+    // Struct/Enum/Generic: compare by name
+    return arena_name(a, id1) == arena_name(a, id2)
 }
 
 // ============================================================================
 // TYPE STRING REPRESENTATION
 // ============================================================================
 
-fn type_to_string(t: Type) -> string with Mut, Panic {
-    match t.kind {
-        TypeKind::TInt => "i64",
-        TypeKind::TFloat => "f64",
-        TypeKind::TString => "string",
-        TypeKind::TBool => "bool",
-        TypeKind::TUnit => "()",
-        TypeKind::TError => "<error>",
-        TypeKind::TVar => "'" + t.name,
-        TypeKind::TArray => {
-            let elem = vec_get(t.args, 0)
-            "[" + type_to_string(elem) + "]"
-        }
-        TypeKind::TTuple => {
-            var result = "("
-            var i: i64 = 0
-            while i < vec_len(t.args) {
-                if i > 0 { result = result + ", " }
-                result = result + type_to_string(vec_get(t.args, i))
-                i = i + 1
-            }
-            result + ")"
-        }
-        TypeKind::TFunction => {
-            var result = "fn("
-            var i: i64 = 0
-            while i < vec_len(t.args) {
-                if i > 0 { result = result + ", " }
-                result = result + type_to_string(vec_get(t.args, i))
-                i = i + 1
-            }
-            result = result + ")"
-            
-            if t.ret.kind != TypeKind::TUnit {
-                result = result + " -> " + type_to_string(t.ret)
-            }
-            
-            if vec_len(t.effects) > 0 {
-                result = result + " with "
-                var j: i64 = 0
-                while j < vec_len(t.effects) {
-                    if j > 0 { result = result + ", " }
-                    result = result + vec_get(t.effects, j)
-                    j = j + 1
-                }
-            }
-            
-            result
-        }
-        TypeKind::TStruct => t.name,
-        TypeKind::TEnum => t.name,
-        TypeKind::TGeneric => {
-            var result = t.name + "["
-            var i: i64 = 0
-            while i < vec_len(t.args) {
-                if i > 0 { result = result + ", " }
-                result = result + type_to_string(vec_get(t.args, i))
-                i = i + 1
-            }
-            result + "]"
-        }
-        _ => t.name,
+fn type_to_string(a: &TypeArena, id: i64) -> string {
+    let tag = arena_tag(a, id)
+
+    if tag == TK_INT { return "i64" }
+    if tag == TK_FLOAT { return "f64" }
+    if tag == TK_STRING { return "string" }
+    if tag == TK_BOOL { return "bool" }
+    if tag == TK_UNIT { return "()" }
+    if tag == TK_ERROR { return "<error>" }
+
+    if tag == TK_VAR {
+        return "'" + arena_name(a, id)
     }
+
+    if tag == TK_ARRAY {
+        let node = arena_get(a, id)
+        if node.args_len >= 1 {
+            let elem = children_get(a, node.args_start)
+            return "[" + type_to_string(a, elem) + "]"
+        }
+        return "[?]"
+    }
+
+    if tag == TK_TUPLE {
+        let node = arena_get(a, id)
+        var result = "("
+        var i: i64 = 0
+        while i < node.args_len {
+            if i > 0 { result = result + ", " }
+            let cid = children_get(a, node.args_start + i)
+            result = result + type_to_string(a, cid)
+            i = i + 1
+        }
+        return result + ")"
+    }
+
+    if tag == TK_FUNCTION {
+        let node = arena_get(a, id)
+        var result = "fn("
+        var i: i64 = 0
+        while i < node.args_len {
+            if i > 0 { result = result + ", " }
+            let cid = children_get(a, node.args_start + i)
+            result = result + type_to_string(a, cid)
+            i = i + 1
+        }
+        result = result + ")"
+        let ret_tag = arena_tag(a, node.ret_id)
+        if ret_tag != TK_UNIT {
+            result = result + " -> " + type_to_string(a, node.ret_id)
+        }
+        if node.effects_len > 0 {
+            result = result + " with "
+            var j: i64 = 0
+            while j < node.effects_len {
+                if j > 0 { result = result + ", " }
+                result = result + node.effects[j]
+                j = j + 1
+            }
+        }
+        return result
+    }
+
+    if tag == TK_STRUCT { return arena_name(a, id) }
+    if tag == TK_ENUM { return arena_name(a, id) }
+
+    if tag == TK_GENERIC {
+        let node = arena_get(a, id)
+        var result = arena_name(a, id) + "["
+        var i: i64 = 0
+        while i < node.args_len {
+            if i > 0 { result = result + ", " }
+            let cid = children_get(a, node.args_start + i)
+            result = result + type_to_string(a, cid)
+            i = i + 1
+        }
+        return result + "]"
+    }
+
+    if tag == TK_REF {
+        let node = arena_get(a, id)
+        if node.args_len >= 1 {
+            let inner = children_get(a, node.args_start)
+            return "&" + type_to_string(a, inner)
+        }
+        return "&?"
+    }
+
+    return arena_name(a, id)
 }
 
 // ============================================================================
-// BUILTIN TYPES
+// BUILTIN TYPE REGISTRATION
 // ============================================================================
 
-struct TypeEnv {
-    types: Map<string, Type>,
-    parent: Option<TypeEnv>,
-}
+fn make_builtin_types(a: &! TypeArena) -> i64 {
+    // Register the 5 primitive types at well-known IDs
+    // Returns the count of builtins registered
+    let id_int = type_int(a)
+    let id_float = type_float(a)
+    let id_string = type_string(a)
+    let id_bool = type_bool(a)
+    let id_unit = type_unit(a)
 
-fn make_builtin_types() -> Map<string, Type> with {
-    var types = map_new()
-    
-    // Primitive types
-    map_insert(types, "i64", type_int())
-    map_insert(types, "f64", type_float())
-    map_insert(types, "string", type_string())
-    map_insert(types, "bool", type_bool())
-    map_insert(types, "()", type_unit())
-    
-    // Generic types
-    map_insert(types, "Vec", type_generic_vec())
-    map_insert(types, "Option", type_generic_option())
-    map_insert(types, "Result", type_generic_result())
-    
-    types
-}
+    // Generic Vec
+    let id_vec = type_generic(a, "Vec", 0, 0)
 
-fn type_generic_vec() -> Type {
-    Type {
-        kind: TypeKind::TGeneric,
-        name: "Vec",
-        args: vec_new(),
-        fields: vec_new(),
-        variants: vec_new(),
-        ret: type_error(),
-        effects: vec_new(),
-    }
-}
+    // Generic Option (with Some/None variants)
+    let tv0 = type_var(a, 0, "T")
+    let unit_id = type_unit(a)
+    let vs = a.variant_count
+    variant_alloc(a, "Some", tv0)
+    variant_alloc(a, "None", unit_id)
+    let id_option = type_enum(a, "Option", vs, 2)
 
-fn type_generic_option() -> Type {
-    var some = Variant {
-        name: "Some",
-        data: type_var(0, "T"),
-    }
-    var none = Variant {
-        name: "None",
-        data: type_unit(),
-    }
-    
-    var variants = vec_new()
-    vec_push(variants, some)
-    vec_push(variants, none)
-    
-    Type {
-        kind: TypeKind::TGeneric,
-        name: "Option",
-        args: vec_new(),
-        fields: vec_new(),
-        variants: variants,
-        ret: type_error(),
-        effects: vec_new(),
-    }
-}
+    // Generic Result (with Ok/Err variants)
+    let tv1 = type_var(a, 0, "T")
+    let tv2 = type_var(a, 1, "E")
+    let vs2 = a.variant_count
+    variant_alloc(a, "Ok", tv1)
+    variant_alloc(a, "Err", tv2)
+    let id_result = type_enum(a, "Result", vs2, 2)
 
-fn type_generic_result() -> Type {
-    var ok = Variant {
-        name: "Ok",
-        data: type_var(0, "T"),
-    }
-    var err = Variant {
-        name: "Err",
-        data: type_var(1, "E"),
-    }
-    
-    var variants = vec_new()
-    vec_push(variants, ok)
-    vec_push(variants, err)
-    
-    Type {
-        kind: TypeKind::TGeneric,
-        name: "Result",
-        args: vec_new(),
-        fields: vec_new(),
-        variants: variants,
-        ret: type_error(),
-        effects: vec_new(),
-    }
+    return a.type_count
 }
 
 // ============================================================================
-// EFFECT TYPES
+// EFFECT OPERATIONS
 // ============================================================================
 
-fn effect_io() -> string with { "IO" }
-fn effect_mut() -> string with { "Mut" }
-fn effect_panic() -> string with { "Panic" }
-fn effect_div() -> string with { "Div" }
-fn effect_alloc() -> string with { "Alloc" }
+fn effect_io() -> string { return "IO" }
+fn effect_mut() -> string { return "Mut" }
+fn effect_panic() -> string { return "Panic" }
+fn effect_div() -> string { return "Div" }
+fn effect_alloc() -> string { return "Alloc" }
 
-fn has_effect(t: Type, effect: string) -> bool with {
+fn has_effect(a: &TypeArena, type_id: i64, effect: string) -> bool {
+    let n = effects_count(a, type_id)
     var i: i64 = 0
-    while i < vec_len(t.effects) {
-        if vec_get(t.effects, i) == effect {
+    while i < n {
+        if get_effect(a, type_id, i) == effect {
             return true
         }
         i = i + 1
     }
-    false
+    return false
 }
 
-fn combine_effects(e1: Vec<string>, e2: Vec<string>) -> Vec<string> with {
-    var result = vec_new()
-    
-    // Add all from e1
+// Combine two effect lists into a new bounded array
+// Returns the combined effects array and sets out_len
+fn combine_effects_arr(e1: [string; 8], e1_len: i64, e2: [string; 8], e2_len: i64) -> [string; 8] {
+    var result: [string; 8] = [""; 8]
+    var rlen: i64 = 0
+
+    // Copy all from e1
     var i: i64 = 0
-    while i < vec_len(e1) {
-        vec_push(result, vec_get(e1, i))
+    while i < e1_len {
+        if rlen < MAX_EFFECTS {
+            result[rlen] = e1[i]
+            rlen = rlen + 1
+        }
         i = i + 1
     }
-    
+
     // Add unique from e2
     var j: i64 = 0
-    while j < vec_len(e2) {
-        let e = vec_get(e2, j)
-        if !vec_contains(result, e) {
-            vec_push(result, e)
+    while j < e2_len {
+        let eff = e2[j]
+        var found = false
+        var k: i64 = 0
+        while k < rlen {
+            if result[k] == eff {
+                found = true
+            }
+            k = k + 1
+        }
+        if !found {
+            if rlen < MAX_EFFECTS {
+                result[rlen] = eff
+                rlen = rlen + 1
+            }
         }
         j = j + 1
     }
-    
-    result
+
+    return result
 }
 
-// Helper
-fn vec_contains(v: Vec<string>, item: string) -> bool with {
-    var i: i64 = 0
-    while i < vec_len(v) {
-        if vec_get(v, i) == item {
-            return true
+// Return the count after combining effects (companion to combine_effects_arr)
+fn combine_effects_len(e1: [string; 8], e1_len: i64, e2: [string; 8], e2_len: i64) -> i64 {
+    var rlen: i64 = e1_len
+    if rlen > MAX_EFFECTS { rlen = MAX_EFFECTS }
+
+    var j: i64 = 0
+    while j < e2_len {
+        let eff = e2[j]
+        var found = false
+        var k: i64 = 0
+        while k < e1_len {
+            if e1[k] == eff {
+                found = true
+            }
+            k = k + 1
         }
-        i = i + 1
+        if !found {
+            if rlen < MAX_EFFECTS {
+                rlen = rlen + 1
+            }
+        }
+        j = j + 1
     }
-    false
+
+    return rlen
+}
+
+// ============================================================================
+// CONVENIENCE: EMPTY EFFECTS
+// ============================================================================
+
+fn empty_effects() -> [string; 8] {
+    return [""; 8]
+}
+
+// ============================================================================
+// TYPE-ARG CHILD HELPERS
+// ============================================================================
+
+// Get the i-th type argument of a type node
+fn type_arg(a: &TypeArena, type_id: i64, idx: i64) -> i64 {
+    let node = arena_get(a, type_id)
+    if idx < 0 { return 0 - 1 }
+    if idx >= node.args_len { return 0 - 1 }
+    return children_get(a, node.args_start + idx)
+}
+
+// Get the count of type arguments
+fn type_args_len(a: &TypeArena, type_id: i64) -> i64 {
+    if type_id < 0 { return 0 }
+    if type_id >= a.type_count { return 0 }
+    return a.args_lens[type_id]
+}
+
+// ============================================================================
+// FIELD / VARIANT ACCESS HELPERS
+// ============================================================================
+
+// Get i-th field name of a struct type
+fn type_field_name(a: &TypeArena, type_id: i64, idx: i64) -> string {
+    let node = arena_get(a, type_id)
+    if idx < 0 { return "" }
+    if idx >= node.fields_len { return "" }
+    return field_get_name(a, node.fields_start + idx)
+}
+
+// Get i-th field type-ID of a struct type
+fn type_field_type(a: &TypeArena, type_id: i64, idx: i64) -> i64 {
+    let node = arena_get(a, type_id)
+    if idx < 0 { return 0 - 1 }
+    if idx >= node.fields_len { return 0 - 1 }
+    return field_get_type_id(a, node.fields_start + idx)
+}
+
+// Get count of fields
+fn type_fields_len(a: &TypeArena, type_id: i64) -> i64 {
+    if type_id < 0 { return 0 }
+    if type_id >= a.type_count { return 0 }
+    return a.fields_lens[type_id]
+}
+
+// Get i-th variant name of an enum type
+fn type_variant_name(a: &TypeArena, type_id: i64, idx: i64) -> string {
+    let node = arena_get(a, type_id)
+    if idx < 0 { return "" }
+    if idx >= node.variants_len { return "" }
+    return variant_get_name(a, node.variants_start + idx)
+}
+
+// Get i-th variant data type-ID of an enum type
+fn type_variant_data(a: &TypeArena, type_id: i64, idx: i64) -> i64 {
+    let node = arena_get(a, type_id)
+    if idx < 0 { return 0 - 1 }
+    if idx >= node.variants_len { return 0 - 1 }
+    return variant_get_data_id(a, node.variants_start + idx)
+}
+
+// Get count of variants
+fn type_variants_len(a: &TypeArena, type_id: i64) -> i64 {
+    if type_id < 0 { return 0 }
+    if type_id >= a.type_count { return 0 }
+    return a.variants_lens[type_id]
+}
+
+// ============================================================================
+// SELF-TEST
+// ============================================================================
+
+fn run_tests(a: &! TypeArena) -> i32 {
+    // Build some types
+    let tid_int = type_int(a)
+    let tid_float = type_float(a)
+    let tid_bool = type_bool(a)
+    let tid_str = type_string(a)
+    let tid_unit = type_unit(a)
+    let tid_err = type_error(a)
+
+    // Check tags
+    if arena_tag(a, tid_int) != TK_INT { return 1 }
+    if arena_tag(a, tid_float) != TK_FLOAT { return 2 }
+    if arena_tag(a, tid_bool) != TK_BOOL { return 3 }
+
+    // Check equality
+    let tid_int2 = type_int(a)
+    if !types_equal(a, tid_int, tid_int2) { return 4 }
+    if types_equal(a, tid_int, tid_float) { return 5 }
+
+    // Check array type
+    let tid_arr = type_array(a, tid_int)
+    if arena_tag(a, tid_arr) != TK_ARRAY { return 6 }
+    let s = type_to_string(a, tid_arr)
+    if s != "[i64]" { return 7 }
+
+    // Check is_numeric
+    if !is_numeric(a, tid_int) { return 8 }
+    if !is_numeric(a, tid_float) { return 9 }
+    if is_numeric(a, tid_bool) { return 10 }
+
+    // Check type_to_string for primitives
+    if type_to_string(a, tid_int) != "i64" { return 11 }
+    if type_to_string(a, tid_str) != "string" { return 12 }
+
+    // Check function type
+    let ps = a.children_len
+    children_push(a, tid_int)
+    children_push(a, tid_float)
+    let fn_id = type_function(a, ps, 2, tid_bool, empty_effects(), 0)
+    let fn_str = type_to_string(a, fn_id)
+    if fn_str != "fn(i64, f64) -> bool" { return 13 }
+
+    // Build struct with fields
+    let fs = a.field_count
+    field_alloc(a, "x", tid_int)
+    field_alloc(a, "y", tid_float)
+    let struct_id = type_struct(a, "Point", fs, 2)
+    if type_to_string(a, struct_id) != "Point" { return 14 }
+    if type_field_name(a, struct_id, 0) != "x" { return 15 }
+    if type_field_name(a, struct_id, 1) != "y" { return 16 }
+
+    // Build enum with variants
+    let vs = a.variant_count
+    variant_alloc(a, "Red", tid_unit)
+    variant_alloc(a, "Green", tid_unit)
+    variant_alloc(a, "Blue", tid_unit)
+    let enum_id = type_enum(a, "Color", vs, 3)
+    if type_variant_name(a, enum_id, 0) != "Red" { return 17 }
+    if type_variant_name(a, enum_id, 2) != "Blue" { return 18 }
+
+    // Check effects
+    var effs: [string; 8] = ["IO", "Mut", "", "", "", "", "", ""]
+    let ps2 = a.children_len
+    let fn2 = type_function(a, ps2, 0, tid_unit, effs, 2)
+    if !has_effect(a, fn2, "IO") { return 19 }
+    if !has_effect(a, fn2, "Mut") { return 20 }
+    if has_effect(a, fn2, "Panic") { return 21 }
+
+    // Register builtins
+    make_builtin_types(a)
+
+    return 0
+}
+
+fn main() -> i32 {
+    var arena = arena_new()
+    return run_tests(&! arena)
 }
