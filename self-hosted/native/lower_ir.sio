@@ -57,6 +57,12 @@ fn lower_instr(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut, P
         lower_branch_false(nc, instr)
     } else if instr.op == IrOpcode::IrNop {
         nc
+    } else if instr.op == IrOpcode::IrVecAddF64 {
+        lower_vec_add(nc, instr)
+    } else if instr.op == IrOpcode::IrVecMulF64 {
+        lower_vec_mul(nc, instr)
+    } else if instr.op == IrOpcode::IrVecFmaF64 {
+        lower_vec_fma(nc, instr)
     } else {
         // Unsupported opcode — skip silently for bootstrap
         nc
@@ -529,4 +535,91 @@ fn lower_ir_instr(buf: CodeBuffer, instr: IrInstr) -> CodeBuffer with Mut, Panic
     c.code = buf
     c = lower_instr(c, instr)
     c.code
+}
+
+// ============================================================================
+// EVEX encoding helpers — packed-f64 ZMM register-register form.
+//
+// Inlined from the avx512 module encoding to keep lower_ir.sio self-contained
+// and avoid pushing the transitive module count over the 64-module BFS limit.
+// Reference: Intel SDM Vol.2 §2.6, EVEX prefix layout.
+//
+// Byte layout:
+//   P0 = 0x62
+//   P1 = R X B R' 0 0 m m   (R/X/B/R' are inverted extension bits; mm = map)
+//   P2 = W vvvv4..1 1 pp1pp0 (W=1=f64; vvvv = inverted src1; pp=01=66-prefix)
+//   P3 = z L'L b V' aaa      (L'L=10=512-bit; V' = inv(src1[4]); rest=0)
+//   opcode byte
+//   ModRM = 11 dst_lo3 src2_lo3
+// ============================================================================
+
+fn evex_bit(val: i64, n: i64) -> i64 { (val >> n) & 1 }
+fn evex_inv(b: i64) -> i64 { if b == 0 { 1 } else { 0 } }
+fn evex_lo3(id: i64) -> i64 { id & 7 }
+
+// P1: R=~dst[3], X=1 (no index), B=~src2[3], R'=~dst[4], map
+fn evex_p1(dst_id: i64, src2_id: i64, map: i64) -> i64 {
+    let r_inv  = evex_inv(evex_bit(dst_id,  3))
+    let b_inv  = evex_inv(evex_bit(src2_id, 3))
+    let rp_inv = evex_inv(evex_bit(dst_id,  4))
+    (r_inv << 7) | (1 << 6) | (b_inv << 5) | (rp_inv << 4) | (map & 0xF)
+}
+
+// P2: W=1 (f64), vvvv=bitwise-NOT of src1 low-4, prefix=01 (66h)
+fn evex_p2_pd(src1_id: i64) -> i64 {
+    let vvvv_inv = (0 - src1_id - 1) & 0xF
+    0x80 | (vvvv_inv << 3) | 0x4 | 0x1
+}
+
+// P3: L'L=10 (512-bit), V'=~src1[4], zeroing/mask/broadcast all zero
+fn evex_p3_zmm(src1_id: i64) -> i64 {
+    let vp_inv = evex_inv(evex_bit(src1_id, 4))
+    (0b10 << 5) | (vp_inv << 3)
+}
+
+// Emit a complete EVEX packed-f64 ZMM reg-reg instruction into a CodeBuffer.
+//   map:    1 = 0F  (vaddpd=0x58, vmulpd=0x59)
+//           2 = 0F38 (vfmadd231pd=0xB8)
+//   opcode: instruction opcode byte
+//   dst/src1/src2: ZMM register indices 0-31
+fn emit_evex_pd_zmm_rr(buf: CodeBuffer, map: i64, opcode: i64, dst: i64, src1: i64, src2: i64) -> CodeBuffer with Mut, Panic, Div {
+    var b = buf
+    b = emit_byte(b, 0x62)
+    b = emit_byte(b, evex_p1(dst, src2, map))
+    b = emit_byte(b, evex_p2_pd(src1))
+    b = emit_byte(b, evex_p3_zmm(src1))
+    b = emit_byte(b, opcode)
+    b = emit_byte(b, 0xC0 | (evex_lo3(dst) << 3) | evex_lo3(src2))
+    b
+}
+
+// ============================================================================
+// Vector IR lowering — ZMM packed-f64
+//
+// IrInstr encoding for vector ops:
+//   dst  = ZMM destination register index (0-31)
+//   src1 = ZMM source-1 register index
+//   src2 = ZMM source-2 register index
+// ============================================================================
+
+// IrVecAddF64 → EVEX VADDPD zmm_dst, zmm_src1, zmm_src2
+fn lower_vec_add(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut, Panic, Div {
+    var c = nc
+    c.code = emit_evex_pd_zmm_rr(c.code, 1, 0x58, instr.dst, instr.src1, instr.src2)
+    c
+}
+
+// IrVecMulF64 → EVEX VMULPD zmm_dst, zmm_src1, zmm_src2
+fn lower_vec_mul(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut, Panic, Div {
+    var c = nc
+    c.code = emit_evex_pd_zmm_rr(c.code, 1, 0x59, instr.dst, instr.src1, instr.src2)
+    c
+}
+
+// IrVecFmaF64 → EVEX VFMADD231PD zmm_dst, zmm_src1, zmm_src2
+//   Semantics: zmm_dst = zmm_src1 * zmm_src2 + zmm_dst  (form 231)
+fn lower_vec_fma(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut, Panic, Div {
+    var c = nc
+    c.code = emit_evex_pd_zmm_rr(c.code, 2, 0xB8, instr.dst, instr.src1, instr.src2)
+    c
 }

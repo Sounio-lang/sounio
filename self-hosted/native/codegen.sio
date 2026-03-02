@@ -1041,6 +1041,19 @@ fn emit_entry_trampoline(nc: NativeCompiler, main_fn_index: i64) -> NativeCompil
     c.code = emit_mov_mem_r12_disp8_rax(c.code, 8) // [r12 + 8] = argv
     c.code = emit_add_r13_imm8(c.code, 16)        // r13 += 16 (bump past argc/argv)
 
+    // AVX-512 capability guard: abort (exit 200) if CPU lacks AVX-512F.
+    // emit_cpuid_avx512_check probes CPUID leaf 7 EBX[16] and returns rax=1 if
+    // AVX-512F is available, rax=0 otherwise.
+    c.code = emit_cpuid_avx512_check(c.code)
+    c.code = emit_test_rax_rax(c.code)
+    let avx_jnz = c.code.len
+    c.code = emit_jnz_rel32(c.code)           // JNZ past the no-AVX512 abort block
+    c.code = emit_mov_rdi_imm(c.code, 200)    // exit code 200 = no AVX-512F
+    c.code = emit_mov_rax_imm(c.code, 60)     // sys_exit
+    c.code = emit_syscall(c.code)
+    let avx_ok = c.code.len
+    c.code = patch_u32_le(c.code, avx_jnz + 2, avx_ok - (avx_jnz + 6))
+
     // call main (placeholder, will be relocated)
     let call_pos = c.code.len
     c.code = emit_call_rel32_placeholder(c.code)
