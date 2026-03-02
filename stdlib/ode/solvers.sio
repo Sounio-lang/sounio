@@ -1,0 +1,1108 @@
+// ode::solvers — Adaptive ODE Solvers for Sounio
+//
+// Implements fixed-step and adaptive Runge-Kutta methods for scalar ODEs:
+//   dy/dt = f(t, y),  y(t0) = y0
+//
+// Methods:
+// - Euler: First-order, O(h) local truncation error
+// - Midpoint: Second-order, O(h^2) local truncation error
+// - RK4: Classic fourth-order Runge-Kutta (fixed step)
+// - RK45: Dormand-Prince 5(4) embedded pair with adaptive step control
+//
+// References:
+// - Dormand & Prince (1980): "A family of embedded Runge-Kutta formulae"
+// - Hairer, Norsett & Wanner: "Solving Ordinary Differential Equations I"
+// - Shampine & Gordner (1975): Computer solution of ODEs
+//
+// NOTE: Because Sounio does not support function pointers as parameters
+// at this stage, the solver accepts the ODE function index (ode_id) and
+// dispatches internally. Functions with signature fn(f64, f64) -> f64
+// are registered as inline variants. For extensibility, add new ODE ids.
+
+// ============================================================================
+// MATH HELPERS
+// ============================================================================
+
+fn ode_f64_abs(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+fn ode_f64_max(a: f64, b: f64) -> f64 {
+    if a > b { return a }
+    return b
+}
+
+fn ode_f64_min(a: f64, b: f64) -> f64 {
+    if a < b { return a }
+    return b
+}
+
+// Newton's method square root (10 iterations — accurate to float precision)
+fn ode_sqrt(x: f64) -> f64 {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    return y
+}
+
+// Fifth root for step-size control: x^(1/5) via Newton on t^5 - x = 0
+fn ode_pow15(x: f64) -> f64 {
+    if x <= 0.0 { return 0.0 }
+    var y = 1.0
+    y = y - (y * y * y * y * y - x) / (5.0 * y * y * y * y)
+    y = y - (y * y * y * y * y - x) / (5.0 * y * y * y * y)
+    y = y - (y * y * y * y * y - x) / (5.0 * y * y * y * y)
+    y = y - (y * y * y * y * y - x) / (5.0 * y * y * y * y)
+    y = y - (y * y * y * y * y - x) / (5.0 * y * y * y * y)
+    y = y - (y * y * y * y * y - x) / (5.0 * y * y * y * y)
+    y = y - (y * y * y * y * y - x) / (5.0 * y * y * y * y)
+    y = y - (y * y * y * y * y - x) / (5.0 * y * y * y * y)
+    return y
+}
+
+// Taylor series approximation of exp(x) — accurate for |x| <= 20
+fn ode_exp_approx(x: f64) -> f64 {
+    if x > 20.0 { return ode_exp_approx(x / 2.0) * ode_exp_approx(x / 2.0) }
+    if x < 0.0 - 20.0 { return 1.0 / ode_exp_approx(0.0 - x) }
+    var s = 1.0
+    var t = 1.0
+    t = t * x / 1.0   ; s = s + t
+    t = t * x / 2.0   ; s = s + t
+    t = t * x / 3.0   ; s = s + t
+    t = t * x / 4.0   ; s = s + t
+    t = t * x / 5.0   ; s = s + t
+    t = t * x / 6.0   ; s = s + t
+    t = t * x / 7.0   ; s = s + t
+    t = t * x / 8.0   ; s = s + t
+    t = t * x / 9.0   ; s = s + t
+    t = t * x / 10.0  ; s = s + t
+    t = t * x / 11.0  ; s = s + t
+    t = t * x / 12.0  ; s = s + t
+    t = t * x / 13.0  ; s = s + t
+    t = t * x / 14.0  ; s = s + t
+    t = t * x / 15.0  ; s = s + t
+    return s
+}
+
+// ============================================================================
+// ODE FUNCTION DISPATCH
+//
+// ODE IDs:
+//   0 — decay:   f(t, y) = -y          (exact: y = y0 * exp(-t))
+//   1 — growth:  f(t, y) = y           (exact: y = y0 * exp(t))
+//   2 — logistic: f(t, y) = y*(1-y)    (exact: y = 1/(1 + ((1-y0)/y0)*exp(-t)))
+//   3 — harmonic: dy/dt = v (position), dv/dt = -y (velocity, scalar only y-part)
+//   4 — constant: f(t, y) = 1.0        (exact: y = y0 + t)
+//   5 — linear:  f(t, y) = t           (exact: y = y0 + t^2/2)
+//   6 — quadratic: f(t, y) = t*t       (exact: y = y0 + t^3/3)
+//   7 — sinusoidal: f(t, y) = -2*y + sin(t*3.14159/2)
+// ============================================================================
+
+// Sine approximation (Taylor: sin(x) ≈ x - x^3/6 + x^5/120 - x^7/5040 + ...)
+fn ode_sin_approx(x: f64) -> f64 {
+    // Reduce x to [-pi, pi]
+    let pi = 3.14159265358979323846
+    let twopi = 6.28318530717958647692
+    var xr = x
+    if xr > pi { xr = xr - twopi }
+    if xr < 0.0 - pi { xr = xr + twopi }
+    let x2 = xr * xr
+    // Horner: sin(x) ≈ x * (1 - x^2/6*(1 - x^2/20*(1 - x^2/42*(1 - x^2/72))))
+    return xr * (1.0 - x2 / 6.0 * (1.0 - x2 / 20.0 * (1.0 - x2 / 42.0 * (1.0 - x2 / 72.0))))
+}
+
+fn ode_dispatch(ode_id: i64, t: f64, y: f64) -> f64 {
+    if ode_id == 0 {
+        // decay: dy/dt = -y
+        return 0.0 - y
+    }
+    if ode_id == 1 {
+        // growth: dy/dt = y
+        return y
+    }
+    if ode_id == 2 {
+        // logistic: dy/dt = y*(1-y)
+        return y * (1.0 - y)
+    }
+    if ode_id == 3 {
+        // harmonic position half: dy/dt = omega*y (placeholder)
+        return 0.0 - y
+    }
+    if ode_id == 4 {
+        // constant: dy/dt = 1
+        return 1.0
+    }
+    if ode_id == 5 {
+        // linear: dy/dt = t
+        return t
+    }
+    if ode_id == 6 {
+        // quadratic: dy/dt = t^2
+        return t * t
+    }
+    if ode_id == 7 {
+        // sinusoidal forcing: dy/dt = -2*y + sin(pi*t/2)
+        return 0.0 - 2.0 * y + ode_sin_approx(3.14159265358979323846 * t / 2.0)
+    }
+    // Default: zero derivative
+    return 0.0
+}
+
+// Exact solution dispatch (for validation)
+fn ode_exact(ode_id: i64, t: f64, y0: f64) -> f64 {
+    if ode_id == 0 {
+        // decay: y(t) = y0 * exp(-t)
+        return y0 * ode_exp_approx(0.0 - t)
+    }
+    if ode_id == 1 {
+        // growth: y(t) = y0 * exp(t)
+        return y0 * ode_exp_approx(t)
+    }
+    if ode_id == 4 {
+        // constant: y(t) = y0 + t
+        return y0 + t
+    }
+    if ode_id == 5 {
+        // linear: y(t) = y0 + t^2/2
+        return y0 + t * t / 2.0
+    }
+    if ode_id == 6 {
+        // quadratic: y(t) = y0 + t^3/3
+        return y0 + t * t * t / 3.0
+    }
+    // Default: undefined, return 0
+    return 0.0
+}
+
+// ============================================================================
+// EULER METHOD
+// ============================================================================
+
+// Single explicit Euler step: y_{n+1} = y_n + h * f(t_n, y_n)
+fn ode_euler_step(ode_id: i64, t: f64, y: f64, h: f64) -> f64 {
+    return y + h * ode_dispatch(ode_id, t, y)
+}
+
+// Fixed-step Euler integration from t0 to t_end in n steps
+// Returns final value y(t_end)
+fn ode_euler(ode_id: i64, t0: f64, y0: f64, t_end: f64, n: i64) -> f64 {
+    let h = (t_end - t0) / (n as f64)
+    var y = y0
+    var t = t0
+    var i: i64 = 0
+    while i < n {
+        y = ode_euler_step(ode_id, t, y, h)
+        t = t + h
+        i = i + 1
+    }
+    return y
+}
+
+// ============================================================================
+// MIDPOINT METHOD (RK2)
+// ============================================================================
+
+// Single midpoint step: y_{n+1} = y_n + h * f(t_n + h/2, y_n + h/2 * f(t_n, y_n))
+fn ode_midpoint_step(ode_id: i64, t: f64, y: f64, h: f64) -> f64 {
+    let k1 = ode_dispatch(ode_id, t, y)
+    let y_mid = y + 0.5 * h * k1
+    let k2 = ode_dispatch(ode_id, t + 0.5 * h, y_mid)
+    return y + h * k2
+}
+
+// Fixed-step midpoint (RK2) integration from t0 to t_end in n steps
+fn ode_midpoint(ode_id: i64, t0: f64, y0: f64, t_end: f64, n: i64) -> f64 {
+    let h = (t_end - t0) / (n as f64)
+    var y = y0
+    var t = t0
+    var i: i64 = 0
+    while i < n {
+        y = ode_midpoint_step(ode_id, t, y, h)
+        t = t + h
+        i = i + 1
+    }
+    return y
+}
+
+// ============================================================================
+// CLASSIC RUNGE-KUTTA 4 (RK4)
+// ============================================================================
+
+// Single RK4 step:
+//   k1 = f(t, y)
+//   k2 = f(t + h/2, y + h/2 * k1)
+//   k3 = f(t + h/2, y + h/2 * k2)
+//   k4 = f(t + h, y + h * k3)
+//   y_{n+1} = y_n + h/6 * (k1 + 2*k2 + 2*k3 + k4)
+fn ode_rk4_step(ode_id: i64, t: f64, y: f64, h: f64) -> f64 {
+    let k1 = ode_dispatch(ode_id, t, y)
+    let k2 = ode_dispatch(ode_id, t + 0.5 * h, y + 0.5 * h * k1)
+    let k3 = ode_dispatch(ode_id, t + 0.5 * h, y + 0.5 * h * k2)
+    let k4 = ode_dispatch(ode_id, t + h, y + h * k3)
+    return y + (h / 6.0) * (k1 + 2.0 * k2 + 2.0 * k3 + k4)
+}
+
+// Fixed-step RK4 integration from t0 to t_end in n steps
+// Returns final value y(t_end)
+fn ode_rk4(ode_id: i64, t0: f64, y0: f64, t_end: f64, n: i64) -> f64 {
+    let h = (t_end - t0) / (n as f64)
+    var y = y0
+    var t = t0
+    var i: i64 = 0
+    while i < n {
+        y = ode_rk4_step(ode_id, t, y, h)
+        t = t + h
+        i = i + 1
+    }
+    return y
+}
+
+// ============================================================================
+// DORMAND-PRINCE RK45 EMBEDDED PAIR
+//
+// Butcher tableau (Dormand & Prince, 1980):
+//
+//   c2 = 1/5    a21 = 1/5
+//   c3 = 3/10   a31 = 3/40      a32 = 9/40
+//   c4 = 4/5    a41 = 44/45     a42 = -56/15     a43 = 32/9
+//   c5 = 8/9    a51 = 19372/6561 a52=-25360/2187 a53=64448/6561 a54=-212/729
+//   c6 = 1      a61 = 9017/3168  a62=-355/33     a63=46732/5247 a64=49/176
+//                                                                a65=-5103/18656
+//   c7 = 1      a71 = 35/384                     a73=500/1113   a74=125/192
+//                                                                a75=-2187/6784
+//                                                                a76=11/84
+//
+// 5th-order weights b (same as a7i — FSAL property):
+//   b1=35/384  b3=500/1113  b4=125/192  b5=-2187/6784  b6=11/84
+//
+// Error estimate coefficients (e = b - bhat):
+//   e1=71/57600  e3=-71/16695  e4=71/1920  e5=-17253/339200  e6=22/525
+//   e7=-1/40
+// ============================================================================
+
+// RK45 step result: new y value and error estimate
+struct Rk45Result {
+    y_new: f64,
+    err_est: f64,
+}
+
+// Single Dormand-Prince RK45 step
+// Returns (y_new [5th order], err_est [absolute error estimate])
+fn ode_rk45_step(ode_id: i64, t: f64, y: f64, h: f64) -> Rk45Result {
+    // Stage 1
+    let k1 = ode_dispatch(ode_id, t, y)
+
+    // Stage 2  (c2 = 1/5)
+    let y2 = y + h * (1.0 / 5.0 * k1)
+    let k2 = ode_dispatch(ode_id, t + h / 5.0, y2)
+
+    // Stage 3  (c3 = 3/10)
+    let y3 = y + h * (3.0 / 40.0 * k1 + 9.0 / 40.0 * k2)
+    let k3 = ode_dispatch(ode_id, t + 3.0 * h / 10.0, y3)
+
+    // Stage 4  (c4 = 4/5)
+    let y4 = y + h * (44.0 / 45.0 * k1 + (0.0 - 56.0 / 15.0) * k2 + 32.0 / 9.0 * k3)
+    let k4 = ode_dispatch(ode_id, t + 4.0 * h / 5.0, y4)
+
+    // Stage 5  (c5 = 8/9)
+    let y5 = y + h * (19372.0 / 6561.0 * k1 + (0.0 - 25360.0 / 2187.0) * k2 + 64448.0 / 6561.0 * k3 + (0.0 - 212.0 / 729.0) * k4)
+    let k5 = ode_dispatch(ode_id, t + 8.0 * h / 9.0, y5)
+
+    // Stage 6  (c6 = 1)
+    let y6 = y + h * (9017.0 / 3168.0 * k1 + (0.0 - 355.0 / 33.0) * k2 + 46732.0 / 5247.0 * k3 + 49.0 / 176.0 * k4 + (0.0 - 5103.0 / 18656.0) * k5)
+    let k6 = ode_dispatch(ode_id, t + h, y6)
+
+    // 5th-order solution (same weights as stage 7 in FSAL)
+    let y_new = y + h * (35.0 / 384.0 * k1 + 500.0 / 1113.0 * k3 + 125.0 / 192.0 * k4 + (0.0 - 2187.0 / 6784.0) * k5 + 11.0 / 84.0 * k6)
+
+    // Stage 7 for FSAL error estimate
+    let k7 = ode_dispatch(ode_id, t + h, y_new)
+
+    // Error estimate: e = b - bhat (coefficients for embedded 4th-order)
+    let err_raw = h * (71.0 / 57600.0 * k1 + (0.0 - 71.0 / 16695.0) * k3 + 71.0 / 1920.0 * k4 + (0.0 - 17253.0 / 339200.0) * k5 + 22.0 / 525.0 * k6 + (0.0 - 1.0 / 40.0) * k7)
+
+    return Rk45Result {
+        y_new: y_new,
+        err_est: ode_f64_abs(err_raw),
+    }
+}
+
+// ============================================================================
+// ADAPTIVE RK45 INTEGRATOR
+//
+// Step size control: h_new = h * safety * (tol / err)^(1/5)
+// Safety factor: 0.9 (avoid overly optimistic step growth)
+// Min/max growth factors: 0.2 / 10.0
+// ============================================================================
+
+// Adaptive RK45 with error control
+// tol: desired absolute tolerance per step
+// h_init: initial step size (if <= 0, auto-selected)
+// Returns: final value y(t_end)
+fn ode_rk45_adaptive(ode_id: i64, t0: f64, y0: f64, t_end: f64, tol: f64, h_init: f64) -> f64 {
+    var y = y0
+    var t = t0
+    let tol_use = if tol <= 0.0 { 1.0e-6 } else { tol }
+
+    // Auto-select initial step size if not provided
+    var h = if h_init > 0.0 {
+        h_init
+    } else {
+        let f0 = ode_f64_abs(ode_dispatch(ode_id, t0, y0))
+        let scale = tol_use + tol_use * ode_f64_abs(y0)
+        let dt_est = if f0 > 1.0e-10 { scale / f0 } else { 0.01 * (t_end - t0) }
+        ode_f64_min(0.1 * (t_end - t0), dt_est)
+    }
+
+    let h_min = 1.0e-12
+    let h_max = t_end - t0
+    let safety = 0.9
+    let max_grow = 10.0
+    let max_shrink = 0.2
+    let max_steps = 100000
+
+    var steps: i64 = 0
+    while t < t_end && steps < max_steps {
+        // Don't overshoot
+        let h_use = if t + h > t_end { t_end - t } else { h }
+
+        let result = ode_rk45_step(ode_id, t, y, h_use)
+
+        // Error norm (absolute)
+        let scale = tol_use + tol_use * ode_f64_max(ode_f64_abs(y), ode_f64_abs(result.y_new))
+        let err_norm = if scale > 0.0 { result.err_est / scale } else { 0.0 }
+
+        if err_norm <= 1.0 {
+            // Accept step
+            t = t + h_use
+            y = result.y_new
+            steps = steps + 1
+
+            // Compute new step size
+            let factor = if err_norm > 1.0e-10 {
+                safety * ode_pow15(1.0 / err_norm)
+            } else {
+                max_grow
+            }
+            let factor_clipped = ode_f64_min(max_grow, ode_f64_max(max_shrink, factor))
+            h = h_use * factor_clipped
+        } else {
+            // Reject step: shrink h
+            let factor = safety * ode_pow15(1.0 / err_norm)
+            let factor_clipped = ode_f64_max(max_shrink, factor)
+            h = h_use * factor_clipped
+        }
+
+        // Enforce h bounds
+        h = ode_f64_max(h_min, ode_f64_min(h_max, h))
+    }
+    return y
+}
+
+// ============================================================================
+// TRAJECTORY RECORDING
+//
+// Records time and state values at each fixed-step output point.
+// Uses [f64; 4096] for up to 2048 output points (t and y interleaved).
+// ============================================================================
+
+struct OdeTraj {
+    ts: [f64; 2048],   // time values
+    ys: [f64; 2048],   // y values
+    len: i64,           // number of recorded points
+}
+
+fn ode_traj_new() -> OdeTraj {
+    OdeTraj {
+        ts: [0.0; 2048],
+        ys: [0.0; 2048],
+        len: 0,
+    }
+}
+
+// Record trajectory using fixed-step RK4
+// n_out: number of output time points (evenly spaced in [t0, t_end])
+// Returns trajectory struct
+fn ode_rk4_trajectory(ode_id: i64, t0: f64, y0: f64, t_end: f64, n_out: i64) -> OdeTraj {
+    var traj = ode_traj_new()
+    let n_use = if n_out > 2048 { 2048 } else { n_out }
+    let h = (t_end - t0) / (n_use as f64)
+    var y = y0
+    var t = t0
+
+    traj.ts[0] = t
+    traj.ys[0] = y
+    traj.len = 1
+
+    var i: i64 = 1
+    while i < n_use {
+        y = ode_rk4_step(ode_id, t, y, h)
+        t = t + h
+        if i < 2048 {
+            traj.ts[i as usize] = t
+            traj.ys[i as usize] = y
+            traj.len = i + 1
+        }
+        i = i + 1
+    }
+    return traj
+}
+
+// ============================================================================
+// CONVERGENCE TESTING UTILITIES
+// ============================================================================
+
+// Compute global error at t_end for RK4 with n steps on an ODE with known
+// exact solution
+fn ode_rk4_global_error(ode_id: i64, t0: f64, y0: f64, t_end: f64, n: i64) -> f64 {
+    let y_num = ode_rk4(ode_id, t0, y0, t_end, n)
+    let y_ex = ode_exact(ode_id, t_end, y0)
+    return ode_f64_abs(y_num - y_ex)
+}
+
+fn ode_euler_global_error(ode_id: i64, t0: f64, y0: f64, t_end: f64, n: i64) -> f64 {
+    let y_num = ode_euler(ode_id, t0, y0, t_end, n)
+    let y_ex = ode_exact(ode_id, t_end, y0)
+    return ode_f64_abs(y_num - y_ex)
+}
+
+fn ode_midpoint_global_error(ode_id: i64, t0: f64, y0: f64, t_end: f64, n: i64) -> f64 {
+    let y_num = ode_midpoint(ode_id, t0, y0, t_end, n)
+    let y_ex = ode_exact(ode_id, t_end, y0)
+    return ode_f64_abs(y_num - y_ex)
+}
+
+// ============================================================================
+// TESTS
+// ============================================================================
+
+fn ode_approx_eq(a: f64, b: f64, tol: f64) -> bool {
+    ode_f64_abs(a - b) < tol
+}
+
+// --- Helpers ---
+
+fn test_ode_exp_approx_accuracy() -> bool {
+    // exp(0) = 1
+    let e0 = ode_exp_approx(0.0)
+    if ode_f64_abs(e0 - 1.0) > 1.0e-12 { return false }
+    // exp(1) ≈ 2.71828...
+    let e1 = ode_exp_approx(1.0)
+    if ode_f64_abs(e1 - 2.71828182845904524) > 1.0e-8 { return false }
+    // exp(-1) ≈ 0.36787...
+    let em1 = ode_exp_approx(0.0 - 1.0)
+    if ode_f64_abs(em1 - 0.36787944117144233) > 1.0e-8 { return false }
+    return true
+}
+
+fn test_ode_sqrt_accuracy() -> bool {
+    let s4 = ode_sqrt(4.0)
+    if ode_f64_abs(s4 - 2.0) > 1.0e-10 { return false }
+    let s2 = ode_sqrt(2.0)
+    if ode_f64_abs(s2 - 1.41421356237) > 1.0e-8 { return false }
+    let s0 = ode_sqrt(0.0)
+    if ode_f64_abs(s0) > 1.0e-15 { return false }
+    return true
+}
+
+fn test_ode_abs_max_min() -> bool {
+    if ode_f64_abs(0.0 - 3.5) != 3.5 { return false }
+    if ode_f64_abs(2.0) != 2.0 { return false }
+    if ode_f64_max(1.0, 2.0) != 2.0 { return false }
+    if ode_f64_max(3.0, 2.0) != 3.0 { return false }
+    if ode_f64_min(1.0, 2.0) != 1.0 { return false }
+    if ode_f64_min(3.0, 2.0) != 2.0 { return false }
+    return true
+}
+
+// --- Euler method tests ---
+
+fn test_euler_decay_coarse() -> bool {
+    // y' = -y, y(0)=1 → exact: exp(-1) ≈ 0.36788
+    // Euler with 1000 steps: O(h)=O(0.001) error
+    let y_num = ode_euler(0, 0.0, 1.0, 1.0, 1000)
+    let y_ex = ode_exp_approx(0.0 - 1.0)
+    return ode_f64_abs(y_num - y_ex) < 0.005
+}
+
+fn test_euler_decay_fine() -> bool {
+    let y_num = ode_euler(0, 0.0, 1.0, 1.0, 10000)
+    let y_ex = ode_exp_approx(0.0 - 1.0)
+    return ode_f64_abs(y_num - y_ex) < 0.0005
+}
+
+fn test_euler_growth() -> bool {
+    let y_num = ode_euler(1, 0.0, 1.0, 0.5, 1000)
+    let y_ex = ode_exp_approx(0.5)
+    return ode_f64_abs(y_num - y_ex) < 0.001
+}
+
+fn test_euler_constant_exact() -> bool {
+    // y' = 1, y(0)=0 → exact y=t, no truncation error for piecewise constant
+    let y_num = ode_euler(4, 0.0, 0.0, 3.7, 100)
+    return ode_f64_abs(y_num - 3.7) < 1.0e-10
+}
+
+fn test_euler_linear_converges() -> bool {
+    // y' = t, y(0)=0 → exact y=t^2/2=2.0 at t=2
+    let y_num = ode_euler(5, 0.0, 0.0, 2.0, 1000)
+    return ode_f64_abs(y_num - 2.0) < 0.005
+}
+
+fn test_euler_order1_convergence() -> bool {
+    // Error ratio should be ~2 when we double n (first-order method)
+    let e1 = ode_euler_global_error(0, 0.0, 1.0, 1.0, 100)
+    let e2 = ode_euler_global_error(0, 0.0, 1.0, 1.0, 200)
+    // ratio ≈ 2 for first-order method
+    let ratio = e1 / e2
+    return ratio > 1.5 && ratio < 2.5
+}
+
+fn test_euler_initial_value_preserved() -> bool {
+    // n=1 step over zero interval should give back y0
+    let y_num = ode_euler(0, 0.0, 5.0, 0.0, 1)
+    return ode_f64_abs(y_num - 5.0) < 1.0e-12
+}
+
+fn test_euler_nonzero_y0() -> bool {
+    // y' = -y, y(0)=2 → exact: 2*exp(-0.5) ≈ 1.2130
+    let y_num = ode_euler(0, 0.0, 2.0, 0.5, 500)
+    let y_ex = 2.0 * ode_exp_approx(0.0 - 0.5)
+    return ode_f64_abs(y_num - y_ex) < 0.01
+}
+
+fn test_euler_growth_larger_t() -> bool {
+    // y' = y, y(0)=1 → y(2) = e^2 ≈ 7.389
+    let y_num = ode_euler(1, 0.0, 1.0, 2.0, 2000)
+    let y_ex = ode_exp_approx(2.0)
+    return ode_f64_abs(y_num - y_ex) < 0.05
+}
+
+fn test_euler_quadratic() -> bool {
+    // y' = t^2, y(0)=0 → y(3) = 27/3 = 9
+    let y_num = ode_euler(6, 0.0, 0.0, 3.0, 3000)
+    return ode_f64_abs(y_num - 9.0) < 0.01
+}
+
+// --- Midpoint (RK2) method tests ---
+
+fn test_midpoint_decay() -> bool {
+    let y_num = ode_midpoint(0, 0.0, 1.0, 1.0, 100)
+    let y_ex = ode_exp_approx(0.0 - 1.0)
+    return ode_f64_abs(y_num - y_ex) < 0.001
+}
+
+fn test_midpoint_growth() -> bool {
+    let y_num = ode_midpoint(1, 0.0, 1.0, 0.5, 50)
+    let y_ex = ode_exp_approx(0.5)
+    return ode_f64_abs(y_num - y_ex) < 0.001
+}
+
+fn test_midpoint_better_than_euler() -> bool {
+    // Same number of steps: midpoint should have smaller error
+    let e_euler = ode_euler_global_error(0, 0.0, 1.0, 1.0, 100)
+    let e_mid = ode_midpoint_global_error(0, 0.0, 1.0, 1.0, 100)
+    return e_mid < e_euler
+}
+
+fn test_midpoint_order2_convergence() -> bool {
+    let e1 = ode_midpoint_global_error(0, 0.0, 1.0, 1.0, 100)
+    let e2 = ode_midpoint_global_error(0, 0.0, 1.0, 1.0, 200)
+    let ratio = e1 / e2
+    // Second-order: error halves when we double n → ratio ≈ 4
+    return ratio > 3.0 && ratio < 5.0
+}
+
+fn test_midpoint_linear_exact() -> bool {
+    // y' = t is linear, midpoint integrates exactly (Simpson-like)
+    let y_num = ode_midpoint(5, 0.0, 0.0, 2.0, 10)
+    return ode_f64_abs(y_num - 2.0) < 1.0e-10
+}
+
+fn test_midpoint_constant_exact() -> bool {
+    let y_num = ode_midpoint(4, 0.0, 1.0, 5.0, 50)
+    return ode_f64_abs(y_num - 6.0) < 1.0e-10
+}
+
+// --- RK4 single step tests ---
+
+fn test_rk4_step_decay_small_h() -> bool {
+    // For small h, y_new ≈ y - h*y (Euler is also good approximation)
+    let h = 0.001
+    let y_new = ode_rk4_step(0, 0.0, 1.0, h)
+    let y_ex = ode_exp_approx(0.0 - h)
+    return ode_f64_abs(y_new - y_ex) < 1.0e-13
+}
+
+fn test_rk4_step_growth_small_h() -> bool {
+    let h = 0.001
+    let y_new = ode_rk4_step(1, 0.0, 1.0, h)
+    let y_ex = ode_exp_approx(h)
+    return ode_f64_abs(y_new - y_ex) < 1.0e-13
+}
+
+fn test_rk4_step_nonzero_t() -> bool {
+    // y'=t, y(1)=0, one step of h=0.1: y(1.1) = integral of t from 1 to 1.1 = 0.105
+    // Exact: y(1.1) - y(1) = 1.1^2/2 - 1^2/2 = 0.605 - 0.5 = 0.105
+    let y_new = ode_rk4_step(5, 1.0, 0.0, 0.1)
+    return ode_f64_abs(y_new - 0.105) < 1.0e-10
+}
+
+// --- RK4 integration tests ---
+
+fn test_rk4_decay_medium_n() -> bool {
+    let y_num = ode_rk4(0, 0.0, 1.0, 1.0, 10)
+    let y_ex = ode_exp_approx(0.0 - 1.0)
+    return ode_f64_abs(y_num - y_ex) < 1.0e-6
+}
+
+fn test_rk4_growth_at_t05() -> bool {
+    // y'=y, y(0)=1 → y(0.5) = exp(0.5) ≈ 1.64872
+    let y_num = ode_rk4(1, 0.0, 1.0, 0.5, 10)
+    let y_ex = ode_exp_approx(0.5)
+    return ode_f64_abs(y_num - y_ex) < 1.0e-7
+}
+
+fn test_rk4_decay_y0_eq_2() -> bool {
+    // y'=-y, y(0)=2 → y(1) = 2*exp(-1)
+    let y_num = ode_rk4(0, 0.0, 2.0, 1.0, 20)
+    let y_ex = 2.0 * ode_exp_approx(0.0 - 1.0)
+    return ode_f64_abs(y_num - y_ex) < 1.0e-7
+}
+
+fn test_rk4_constant_rhs() -> bool {
+    // y'=1, exact, no error for any n
+    let y_num = ode_rk4(4, 0.0, 0.0, 7.0, 5)
+    return ode_f64_abs(y_num - 7.0) < 1.0e-12
+}
+
+fn test_rk4_linear_rhs_exact() -> bool {
+    // y'=t, y(0)=0 → y=t^2/2. RK4 integrates cubics exactly so quadratic rhs is exact.
+    let y_num = ode_rk4(5, 0.0, 0.0, 4.0, 4)
+    return ode_f64_abs(y_num - 8.0) < 1.0e-10
+}
+
+fn test_rk4_quadratic_rhs_exact() -> bool {
+    // y'=t^2, y(0)=0 → y=t^3/3. RK4 is 4th-order so cubic RHS is exact.
+    let y_num = ode_rk4(6, 0.0, 0.0, 3.0, 6)
+    return ode_f64_abs(y_num - 9.0) < 1.0e-9
+}
+
+fn test_rk4_order4_convergence() -> bool {
+    let e1 = ode_rk4_global_error(0, 0.0, 1.0, 1.0, 10)
+    let e2 = ode_rk4_global_error(0, 0.0, 1.0, 1.0, 20)
+    let ratio = e1 / e2
+    // 4th order: error reduces by ~16x when n doubles
+    return ratio > 12.0 && ratio < 20.0
+}
+
+fn test_rk4_better_than_midpoint() -> bool {
+    let e_mp = ode_midpoint_global_error(0, 0.0, 1.0, 1.0, 10)
+    let e_rk4 = ode_rk4_global_error(0, 0.0, 1.0, 1.0, 10)
+    return e_rk4 < e_mp
+}
+
+fn test_rk4_long_integration() -> bool {
+    // y'=-y over t=0..5, y(0)=1 → y=exp(-5) ≈ 0.006738
+    let y_num = ode_rk4(0, 0.0, 1.0, 5.0, 50)
+    let y_ex = ode_exp_approx(0.0 - 5.0)
+    return ode_f64_abs(y_num - y_ex) < 1.0e-7
+}
+
+fn test_rk4_growth_long() -> bool {
+    // y'=y over t=0..3, y(0)=1 → y=exp(3) ≈ 20.0855
+    let y_num = ode_rk4(1, 0.0, 1.0, 3.0, 30)
+    let y_ex = ode_exp_approx(3.0)
+    return ode_f64_abs(y_num - y_ex) < 1.0e-5
+}
+
+fn test_rk4_midpoint_y0_nonone() -> bool {
+    // y'=-y, y(0)=3.5 → y(2) = 3.5*exp(-2)
+    let y_num = ode_rk4(0, 0.0, 3.5, 2.0, 20)
+    let y_ex = 3.5 * ode_exp_approx(0.0 - 2.0)
+    return ode_f64_abs(y_num - y_ex) < 1.0e-7
+}
+
+fn test_rk4_start_nonzero_t() -> bool {
+    // y'=-y starting from t=1: y(1)=y0, y(2) = y0*exp(-1)
+    let y0 = 0.36787944117144233  // exp(-1)
+    let y_num = ode_rk4(0, 1.0, y0, 2.0, 20)
+    let y_ex = y0 * ode_exp_approx(0.0 - 1.0)  // = exp(-2)
+    return ode_f64_abs(y_num - y_ex) < 1.0e-8
+}
+
+// --- RK45 step tests ---
+
+fn test_rk45_step_decay() -> bool {
+    // Single step with h=0.1, decay ODE
+    let r = ode_rk45_step(0, 0.0, 1.0, 0.1)
+    let y_ex = ode_exp_approx(0.0 - 0.1)
+    return ode_f64_abs(r.y_new - y_ex) < 1.0e-9
+}
+
+fn test_rk45_step_growth() -> bool {
+    let r = ode_rk45_step(1, 0.0, 1.0, 0.1)
+    let y_ex = ode_exp_approx(0.1)
+    return ode_f64_abs(r.y_new - y_ex) < 1.0e-9
+}
+
+fn test_rk45_step_err_small_for_smooth() -> bool {
+    // For smooth ODE and moderate h, error estimate should be small
+    let r = ode_rk45_step(0, 0.0, 1.0, 0.01)
+    return r.err_est < 1.0e-10
+}
+
+fn test_rk45_step_err_grows_with_h() -> bool {
+    // Larger h → larger error estimate
+    let r_small = ode_rk45_step(0, 0.0, 1.0, 0.01)
+    let r_large = ode_rk45_step(0, 0.0, 1.0, 0.5)
+    return r_large.err_est > r_small.err_est
+}
+
+fn test_rk45_step_5th_order() -> bool {
+    // RK45 step should be 5th-order accurate
+    let h = 0.1
+    let r = ode_rk45_step(0, 0.0, 1.0, h)
+    let y_ex = ode_exp_approx(0.0 - h)
+    // 5th order: error O(h^6) ≈ 1e-7 for h=0.1
+    return ode_f64_abs(r.y_new - y_ex) < 1.0e-8
+}
+
+fn test_rk45_step_constant_rhs() -> bool {
+    // y'=1 is constant — all methods exact
+    let r = ode_rk45_step(4, 0.0, 0.0, 1.0)
+    return ode_f64_abs(r.y_new - 1.0) < 1.0e-12
+}
+
+// --- RK45 adaptive tests ---
+
+fn test_rk45_adaptive_decay() -> bool {
+    // y'=-y, y(0)=1 → y(1)=exp(-1)
+    let y_num = ode_rk45_adaptive(0, 0.0, 1.0, 1.0, 1.0e-8, 0.1)
+    let y_ex = ode_exp_approx(0.0 - 1.0)
+    return ode_f64_abs(y_num - y_ex) < 1.0e-6
+}
+
+fn test_rk45_adaptive_growth() -> bool {
+    let y_num = ode_rk45_adaptive(1, 0.0, 1.0, 0.5, 1.0e-8, 0.1)
+    let y_ex = ode_exp_approx(0.5)
+    return ode_f64_abs(y_num - y_ex) < 1.0e-6
+}
+
+fn test_rk45_adaptive_more_accurate_than_rk4_coarse() -> bool {
+    // RK45 with tight tol should beat coarse RK4 with n=5
+    let y_rk45 = ode_rk45_adaptive(0, 0.0, 1.0, 1.0, 1.0e-9, 0.1)
+    let y_rk4 = ode_rk4(0, 0.0, 1.0, 1.0, 5)
+    let y_ex = ode_exp_approx(0.0 - 1.0)
+    let err_rk45 = ode_f64_abs(y_rk45 - y_ex)
+    let err_rk4 = ode_f64_abs(y_rk4 - y_ex)
+    return err_rk45 < err_rk4
+}
+
+fn test_rk45_adaptive_auto_h() -> bool {
+    // h_init <= 0 → auto-selected
+    let y_num = ode_rk45_adaptive(0, 0.0, 1.0, 1.0, 1.0e-6, 0.0 - 1.0)
+    let y_ex = ode_exp_approx(0.0 - 1.0)
+    return ode_f64_abs(y_num - y_ex) < 1.0e-4
+}
+
+fn test_rk45_adaptive_long_integration() -> bool {
+    let y_num = ode_rk45_adaptive(0, 0.0, 1.0, 5.0, 1.0e-8, 0.1)
+    let y_ex = ode_exp_approx(0.0 - 5.0)
+    return ode_f64_abs(y_num - y_ex) < 1.0e-6
+}
+
+fn test_rk45_adaptive_constant_rhs() -> bool {
+    let y_num = ode_rk45_adaptive(4, 0.0, 0.0, 10.0, 1.0e-8, 0.1)
+    return ode_f64_abs(y_num - 10.0) < 1.0e-8
+}
+
+fn test_rk45_adaptive_linear_rhs() -> bool {
+    // y'=t, y(0)=0 → y(4)=8
+    let y_num = ode_rk45_adaptive(5, 0.0, 0.0, 4.0, 1.0e-8, 0.1)
+    return ode_f64_abs(y_num - 8.0) < 1.0e-6
+}
+
+fn test_rk45_adaptive_different_y0() -> bool {
+    // y'=-y, y(0)=5 → y(1) = 5*exp(-1)
+    let y_num = ode_rk45_adaptive(0, 0.0, 5.0, 1.0, 1.0e-8, 0.1)
+    let y_ex = 5.0 * ode_exp_approx(0.0 - 1.0)
+    return ode_f64_abs(y_num - y_ex) < 1.0e-5
+}
+
+// --- Trajectory tests ---
+
+fn test_traj_len_correct() -> bool {
+    let traj = ode_rk4_trajectory(0, 0.0, 1.0, 1.0, 10)
+    return traj.len == 10
+}
+
+fn test_traj_t0_correct() -> bool {
+    let traj = ode_rk4_trajectory(0, 0.0, 1.0, 1.0, 10)
+    return ode_f64_abs(traj.ts[0]) < 1.0e-15
+}
+
+fn test_traj_y0_correct() -> bool {
+    let traj = ode_rk4_trajectory(0, 0.0, 1.0, 1.0, 10)
+    return ode_f64_abs(traj.ys[0] - 1.0) < 1.0e-15
+}
+
+fn test_traj_tend_correct() -> bool {
+    let traj = ode_rk4_trajectory(0, 0.0, 1.0, 1.0, 10)
+    return ode_f64_abs(traj.ts[9] - 1.0) < 1.0e-12
+}
+
+fn test_traj_ytend_correct() -> bool {
+    let traj = ode_rk4_trajectory(0, 0.0, 1.0, 1.0, 10)
+    let y_ex = ode_exp_approx(0.0 - 1.0)
+    return ode_f64_abs(traj.ys[9] - y_ex) < 1.0e-6
+}
+
+fn test_traj_monotone_t() -> bool {
+    let traj = ode_rk4_trajectory(0, 0.0, 1.0, 1.0, 10)
+    var ok = true
+    var i: i64 = 1
+    while i < 10 {
+        if traj.ts[i as usize] <= traj.ts[(i - 1) as usize] { ok = false }
+        i = i + 1
+    }
+    return ok
+}
+
+fn test_traj_decay_decreasing() -> bool {
+    let traj = ode_rk4_trajectory(0, 0.0, 1.0, 2.0, 20)
+    var ok = true
+    var i: i64 = 1
+    while i < 20 {
+        if traj.ys[i as usize] >= traj.ys[(i - 1) as usize] { ok = false }
+        i = i + 1
+    }
+    return ok
+}
+
+fn test_traj_growth_increasing() -> bool {
+    let traj = ode_rk4_trajectory(1, 0.0, 1.0, 2.0, 20)
+    var ok = true
+    var i: i64 = 1
+    while i < 20 {
+        if traj.ys[i as usize] <= traj.ys[(i - 1) as usize] { ok = false }
+        i = i + 1
+    }
+    return ok
+}
+
+fn test_traj_large_n() -> bool {
+    let traj = ode_rk4_trajectory(0, 0.0, 1.0, 1.0, 100)
+    return traj.len == 100
+}
+
+// --- Cross-method comparison tests ---
+
+fn test_rk4_euler_same_decay_n1000() -> bool {
+    // Both should converge to exp(-1); RK4 much more accurate
+    let y_euler = ode_euler(0, 0.0, 1.0, 1.0, 1000)
+    let y_rk4 = ode_rk4(0, 0.0, 1.0, 1.0, 1000)
+    let y_ex = ode_exp_approx(0.0 - 1.0)
+    let e_euler = ode_f64_abs(y_euler - y_ex)
+    let e_rk4 = ode_f64_abs(y_rk4 - y_ex)
+    return e_rk4 < e_euler
+}
+
+fn test_methods_agree_on_decay() -> bool {
+    let y_euler = ode_euler(0, 0.0, 1.0, 0.1, 1000)
+    let y_mid = ode_midpoint(0, 0.0, 1.0, 0.1, 100)
+    let y_rk4 = ode_rk4(0, 0.0, 1.0, 0.1, 10)
+    let y_ex = ode_exp_approx(0.0 - 0.1)
+    return ode_f64_abs(y_euler - y_ex) < 0.001
+        && ode_f64_abs(y_mid - y_ex) < 0.0001
+        && ode_f64_abs(y_rk4 - y_ex) < 1.0e-9
+}
+
+fn test_rk45_matches_rk4_on_decay() -> bool {
+    let y_rk4 = ode_rk4(0, 0.0, 1.0, 1.0, 100)
+    let y_rk45 = ode_rk45_adaptive(0, 0.0, 1.0, 1.0, 1.0e-8, 0.01)
+    return ode_f64_abs(y_rk4 - y_rk45) < 1.0e-5
+}
+
+fn test_convergence_hierarchy() -> bool {
+    // More accurate methods should have smaller errors for same work
+    let n = 20
+    let e_euler = ode_euler_global_error(0, 0.0, 1.0, 1.0, n)
+    let e_mid = ode_midpoint_global_error(0, 0.0, 1.0, 1.0, n)
+    let e_rk4 = ode_rk4_global_error(0, 0.0, 1.0, 1.0, n)
+    return e_euler > e_mid && e_mid > e_rk4
+}
+
+// --- Edge case tests ---
+
+fn test_zero_length_interval() -> bool {
+    // t0 == t_end: should return y0
+    let y = ode_rk4(0, 1.0, 2.5, 1.0, 1)
+    // With n=1 step and zero h, y should be unchanged
+    // h = 0, so k1=k2=k3=k4=f(1.0,2.5)=-2.5, y_new = 2.5 + 0 = 2.5
+    return ode_f64_abs(y - 2.5) < 1.0e-10
+}
+
+fn test_single_step_rk4_equals_step_fn() -> bool {
+    let y0 = 1.5
+    let t0 = 0.5
+    let h = 0.2
+    let y1_direct = ode_rk4_step(0, t0, y0, h)
+    let y1_loop = ode_rk4(0, t0, y0, t0 + h, 1)
+    return ode_f64_abs(y1_direct - y1_loop) < 1.0e-15
+}
+
+fn test_single_step_euler_matches() -> bool {
+    let y0 = 2.0
+    let t0 = 0.0
+    let h = 0.3
+    let y1_direct = ode_euler_step(0, t0, y0, h)
+    let y1_loop = ode_euler(0, t0, y0, t0 + h, 1)
+    return ode_f64_abs(y1_direct - y1_loop) < 1.0e-15
+}
+
+fn test_single_step_midpoint_matches() -> bool {
+    let y0 = 1.0
+    let t0 = 0.0
+    let h = 0.25
+    let y1_direct = ode_midpoint_step(0, t0, y0, h)
+    let y1_loop = ode_midpoint(0, t0, y0, t0 + h, 1)
+    return ode_f64_abs(y1_direct - y1_loop) < 1.0e-15
+}
+
+fn test_decay_at_various_endpoints() -> bool {
+    var ok = true
+    // Check y' = -y at several t values
+    let ts: [f64; 5] = [0.1, 0.5, 1.0, 2.0, 3.0]
+    var i: i64 = 0
+    while i < 5 {
+        let t_end = ts[i as usize]
+        let n = (t_end * 100.0) as i64
+        let n_use = if n < 10 { 10 } else { n }
+        let y_num = ode_rk4(0, 0.0, 1.0, t_end, n_use)
+        let y_ex = ode_exp_approx(0.0 - t_end)
+        if ode_f64_abs(y_num - y_ex) > 1.0e-7 { ok = false }
+        i = i + 1
+    }
+    return ok
+}
+
+fn test_rk45_adaptive_high_tol() -> bool {
+    // With very tight tolerance, should still finish and be accurate
+    let y_num = ode_rk45_adaptive(0, 0.0, 1.0, 1.0, 1.0e-10, 0.1)
+    let y_ex = ode_exp_approx(0.0 - 1.0)
+    return ode_f64_abs(y_num - y_ex) < 1.0e-7
+}
+
+fn test_rk45_adaptive_loose_tol() -> bool {
+    // With loose tolerance (1e-3), should still be in the right ballpark
+    let y_num = ode_rk45_adaptive(0, 0.0, 1.0, 1.0, 1.0e-3, 0.1)
+    let y_ex = ode_exp_approx(0.0 - 1.0)
+    return ode_f64_abs(y_num - y_ex) < 0.01
+}
+
+fn test_rk4_nonunit_y0_growth() -> bool {
+    // y'=y, y(0)=0.5 → y(1)=0.5*e
+    let y_num = ode_rk4(1, 0.0, 0.5, 1.0, 20)
+    let y_ex = 0.5 * ode_exp_approx(1.0)
+    return ode_f64_abs(y_num - y_ex) < 1.0e-7
+}
+
+fn test_midpoint_nonunit_y0() -> bool {
+    let y_num = ode_midpoint(0, 0.0, 0.5, 1.0, 200)
+    let y_ex = 0.5 * ode_exp_approx(0.0 - 1.0)
+    return ode_f64_abs(y_num - y_ex) < 0.001
+}
+
+fn test_euler_many_steps() -> bool {
+    // Large n: should converge well
+    let y_num = ode_euler(0, 0.0, 1.0, 1.0, 100000)
+    let y_ex = ode_exp_approx(0.0 - 1.0)
+    return ode_f64_abs(y_num - y_ex) < 5.0e-6
+}
+
+fn test_rk4_step_zero_h() -> bool {
+    // h=0 → no change
+    let y_new = ode_rk4_step(0, 0.5, 2.0, 0.0)
+    return ode_f64_abs(y_new - 2.0) < 1.0e-15
+}
+
+fn test_rk45_result_struct_fields() -> bool {
+    let r = ode_rk45_step(0, 0.0, 1.0, 0.1)
+    // y_new and err_est must both be finite positive
+    let yn = r.y_new
+    let er = r.err_est
+    return yn > 0.0 && er >= 0.0
+}
+
+fn test_rk4_and_rk45_agree_on_growth() -> bool {
+    let y_rk4 = ode_rk4(1, 0.0, 1.0, 0.5, 100)
+    let y_rk45 = ode_rk45_adaptive(1, 0.0, 1.0, 0.5, 1.0e-8, 0.05)
+    return ode_f64_abs(y_rk4 - y_rk45) < 1.0e-6
+}
+
+fn test_error_decreases_with_tighter_tol() -> bool {
+    let y_ex = ode_exp_approx(0.0 - 1.0)
+    let y_loose = ode_rk45_adaptive(0, 0.0, 1.0, 1.0, 1.0e-4, 0.1)
+    let y_tight = ode_rk45_adaptive(0, 0.0, 1.0, 1.0, 1.0e-9, 0.1)
+    let e_loose = ode_f64_abs(y_loose - y_ex)
+    let e_tight = ode_f64_abs(y_tight - y_ex)
+    return e_tight < e_loose
+}
+
+fn test_dispatch_ids() -> bool {
+    // All ODE IDs should return sensible derivatives at (t=0, y=1)
+    let f0 = ode_dispatch(0, 0.0, 1.0)  // -1
+    let f1 = ode_dispatch(1, 0.0, 1.0)  // 1
+    let f4 = ode_dispatch(4, 0.0, 1.0)  // 1
+    let f5 = ode_dispatch(5, 0.0, 1.0)  // 0
+    return ode_f64_abs(f0 - (0.0 - 1.0)) < 1.0e-12
+        && ode_f64_abs(f1 - 1.0) < 1.0e-12
+        && ode_f64_abs(f4 - 1.0) < 1.0e-12
+        && ode_f64_abs(f5) < 1.0e-12
+}
+
+fn test_exact_solutions_dispatch() -> bool {
+    // Exact solution at t=1 for decay and growth
+    let e_decay = ode_exact(0, 1.0, 1.0)
+    let e_growth = ode_exact(1, 1.0, 1.0)
+    return ode_f64_abs(e_decay - ode_exp_approx(0.0 - 1.0)) < 1.0e-10
+        && ode_f64_abs(e_growth - ode_exp_approx(1.0)) < 1.0e-10
+}
+
+fn test_euler_vs_midpoint_n100_decay() -> bool {
+    let y_euler = ode_euler(0, 0.0, 1.0, 1.0, 100)
+    let y_mid = ode_midpoint(0, 0.0, 1.0, 1.0, 100)
+    let y_ex = ode_exp_approx(0.0 - 1.0)
+    let e_euler = ode_f64_abs(y_euler - y_ex)
+    let e_mid = ode_f64_abs(y_mid - y_ex)
+    return e_mid < e_euler
+}
+
+fn test_rk4_very_fine_step() -> bool {
+    // RK4 with n=1000 should be extremely accurate for smooth ODE
+    let y_num = ode_rk4(0, 0.0, 1.0, 1.0, 1000)
+    let y_ex = ode_exp_approx(0.0 - 1.0)
+    return ode_f64_abs(y_num - y_ex) < 1.0e-13
+}
+
+fn test_adaptive_different_odes() -> bool {
+    // Check that adaptive works on multiple ODE IDs
+    let y0_decay = ode_rk45_adaptive(0, 0.0, 1.0, 0.5, 1.0e-8, 0.05)
+    let y0_growth = ode_rk45_adaptive(1, 0.0, 1.0, 0.5, 1.0e-8, 0.05)
+    let y0_const = ode_rk45_adaptive(4, 0.0, 0.0, 0.5, 1.0e-8, 0.05)
+    let e1 = ode_f64_abs(y0_decay - ode_exp_approx(0.0 - 0.5))
+    let e2 = ode_f64_abs(y0_growth - ode_exp_approx(0.5))
+    let e3 = ode_f64_abs(y0_const - 0.5)
+    return e1 < 1.0e-6 && e2 < 1.0e-6 && e3 < 1.0e-8
+}

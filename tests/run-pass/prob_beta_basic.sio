@@ -1,0 +1,191 @@
+//@ run-pass
+//@ expect-stdout: 1
+// Probabilistic Primitives Basic Tests
+//
+// Tests for Beta distribution and KL divergence from prob::primitives.
+// All functions inlined — tests cannot import stdlib.
+//
+// Verified properties:
+//  1. Beta(2,5) mean = 2/7 ≈ 0.2857, within 0.001
+//  2. Beta(1,1) pdf at x=0.5 = 1.0, within 0.001
+//  3. KL divergence of any distribution with itself = 0, within 0.0001
+
+// ============================================================================
+// MATH HELPERS
+// ============================================================================
+
+fn pbb_abs(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+// Natural log via argument reduction + Pade series
+fn pbb_log(x: f64) -> f64 with Div, Mut, Panic {
+    if x <= 0.0 { panic("pbb_log: x must be positive") }
+    var m = x
+    var e = 0
+    while m >= 1.0 { m = m / 2.0; e = e + 1 }
+    while m < 0.5  { m = m * 2.0; e = e - 1 }
+    let t = (m - 1.0) / (m + 1.0)
+    let t2 = t * t
+    var s = t
+    var term = t
+    term = term * t2; s = s + term / 3.0
+    term = term * t2; s = s + term / 5.0
+    term = term * t2; s = s + term / 7.0
+    term = term * t2; s = s + term / 9.0
+    term = term * t2; s = s + term / 11.0
+    term = term * t2; s = s + term / 13.0
+    term = term * t2; s = s + term / 15.0
+    term = term * t2; s = s + term / 17.0
+    term = term * t2; s = s + term / 19.0
+    term = term * t2; s = s + term / 21.0
+    let ln2 = 0.6931471805599453
+    return 2.0 * s + (e as f64) * ln2
+}
+
+// exp via Taylor series
+fn pbb_exp(x: f64) -> f64 with Div, Mut, Panic {
+    if x > 20.0 { let h = pbb_exp(x / 2.0); return h * h }
+    if x < 0.0 - 20.0 { return 1.0 / pbb_exp(0.0 - x) }
+    var sum = 1.0
+    var term = 1.0
+    term = term * x / 1.0;   sum = sum + term
+    term = term * x / 2.0;   sum = sum + term
+    term = term * x / 3.0;   sum = sum + term
+    term = term * x / 4.0;   sum = sum + term
+    term = term * x / 5.0;   sum = sum + term
+    term = term * x / 6.0;   sum = sum + term
+    term = term * x / 7.0;   sum = sum + term
+    term = term * x / 8.0;   sum = sum + term
+    term = term * x / 9.0;   sum = sum + term
+    term = term * x / 10.0;  sum = sum + term
+    term = term * x / 11.0;  sum = sum + term
+    term = term * x / 12.0;  sum = sum + term
+    term = term * x / 13.0;  sum = sum + term
+    term = term * x / 14.0;  sum = sum + term
+    term = term * x / 15.0;  sum = sum + term
+    term = term * x / 16.0;  sum = sum + term
+    term = term * x / 17.0;  sum = sum + term
+    term = term * x / 18.0;  sum = sum + term
+    term = term * x / 19.0;  sum = sum + term
+    term = term * x / 20.0;  sum = sum + term
+    return sum
+}
+
+// Lanczos log-gamma approximation (g=7, 9-term)
+fn pbb_log_gamma(x: f64) -> f64 with Div, Mut, Panic {
+    let p0 = 0.99999999999980993
+    let p1 = 676.5203681218851
+    let p2 = 0.0 - 1259.1392167224028
+    let p3 = 771.32342877765313
+    let p4 = 0.0 - 176.61502916214059
+    let p5 = 12.507343278686905
+    let p6 = 0.0 - 0.13857109526572012
+    let p7 = 9.9843695780195716e-6
+    let p8 = 1.5056327351493116e-7
+    let pi_val = 3.141592653589793
+    if x < 0.5 {
+        let px = pi_val * x
+        var sin_px = px
+        let px2 = px * px
+        var t = px
+        t = t * (0.0 - px2) / (2.0 * 3.0);  sin_px = sin_px + t
+        t = t * (0.0 - px2) / (4.0 * 5.0);  sin_px = sin_px + t
+        t = t * (0.0 - px2) / (6.0 * 7.0);  sin_px = sin_px + t
+        t = t * (0.0 - px2) / (8.0 * 9.0);  sin_px = sin_px + t
+        if sin_px < 0.0 { sin_px = 0.0 - sin_px }
+        if sin_px < 1.0e-300 { sin_px = 1.0e-300 }
+        let log_pi = pbb_log(pi_val)
+        let log_sin = pbb_log(sin_px)
+        let lg1mx = pbb_log_gamma(1.0 - x)
+        return log_pi - log_sin - lg1mx
+    }
+    let z = x - 1.0
+    var acc = p0
+    acc = acc + p1 / (z + 1.0)
+    acc = acc + p2 / (z + 2.0)
+    acc = acc + p3 / (z + 3.0)
+    acc = acc + p4 / (z + 4.0)
+    acc = acc + p5 / (z + 5.0)
+    acc = acc + p6 / (z + 6.0)
+    acc = acc + p7 / (z + 7.0)
+    acc = acc + p8 / (z + 8.0)
+    let g = 7.0
+    let t2 = z + g + 0.5
+    let log_sqrt2pi = 0.9189385332046727
+    return log_sqrt2pi + (z + 0.5) * pbb_log(t2) - t2 + pbb_log(acc)
+}
+
+fn pbb_log_beta(a: f64, b: f64) -> f64 with Div, Mut, Panic {
+    return pbb_log_gamma(a) + pbb_log_gamma(b) - pbb_log_gamma(a + b)
+}
+
+// ============================================================================
+// BETA DISTRIBUTION
+// ============================================================================
+
+fn pbb_beta_mean(alpha: f64, beta: f64) -> f64 with Div, Mut, Panic {
+    return alpha / (alpha + beta)
+}
+
+fn pbb_beta_pdf(x: f64, alpha: f64, beta: f64) -> f64 with Div, Mut, Panic {
+    if x <= 0.0 || x >= 1.0 { return 0.0 }
+    let log_pdf = (alpha - 1.0) * pbb_log(x)
+                + (beta  - 1.0) * pbb_log(1.0 - x)
+                - pbb_log_beta(alpha, beta)
+    return pbb_exp(log_pdf)
+}
+
+// ============================================================================
+// KL DIVERGENCE
+// ============================================================================
+
+fn pbb_kl_divergence(p: [f64; 64], q: [f64; 64], n: i64) -> f64 with Div, Mut, Panic {
+    var kl = 0.0
+    var i = 0 as i64
+    while i < n {
+        let pi = p[i as usize]
+        let qi = q[i as usize]
+        if pi > 0.0 {
+            kl = kl + pi * (pbb_log(pi) - pbb_log(qi))
+        }
+        i = i + 1
+    }
+    return kl
+}
+
+// ============================================================================
+// MAIN
+// ============================================================================
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    // Test 1: Beta(2,5) mean = 2/7 ≈ 0.2857, within 0.001
+    let mu_25 = pbb_beta_mean(2.0, 5.0)
+    let expected_mu = 2.0 / 7.0
+    let test1 = pbb_abs(mu_25 - expected_mu) < 0.001
+
+    // Test 2: Beta(1,1) pdf at x=0.5 = 1.0, within 0.001
+    let pdf_11_half = pbb_beta_pdf(0.5, 1.0, 1.0)
+    let test2 = pbb_abs(pdf_11_half - 1.0) < 0.001
+
+    // Test 3: KL(P||P) = 0, within 0.0001
+    var p: [f64; 64] = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                         0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                         0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                         0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                         0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                         0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                         0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                         0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    p[0] = 0.3; p[1] = 0.3; p[2] = 0.2; p[3] = 0.2
+    let kl_self = pbb_kl_divergence(p, p, 4)
+    let test3 = kl_self < 0.0001
+
+    if test1 && test2 && test3 {
+        println(1)
+        return 0
+    }
+    println(0)
+    return 1
+}
