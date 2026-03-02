@@ -93,6 +93,12 @@ fn lower_instr(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut, P
         lower_hyper_mul_o_fano(nc, instr)
     } else if instr.op == IrOpcode::IrHyperNormSqO {
         lower_hyper_norm_sq_o(nc, instr)
+    } else if instr.op == IrOpcode::IrG2ProjectImO {
+        lower_g2_project_im_o(nc, instr)
+    } else if instr.op == IrOpcode::IrG2ApplyGenO {
+        lower_g2_apply_gen_o(nc, instr)
+    } else if instr.op == IrOpcode::IrG2DenseO {
+        lower_g2_dense_o(nc, instr)
     } else {
         // Unsupported opcode — skip silently for bootstrap
         nc
@@ -1226,5 +1232,129 @@ fn lower_hyper_norm_sq_o(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler w
     c.code = emit_evex_pd_rr_imm8(c.code, 3, 0x01, lo_sq, 15, sum, vl, 0x4E)
     // Step 7: VADDPD{mask_k}{z} dst, sum, lo_sq  — masked output
     c.code = emit_evex_pd_rr_full(c.code, 1, 0x58, dst, sum, lo_sq, vl, mask_k, zb)
+    c
+}
+
+// ============================================================================
+// G₂-equivariant ops — Horizon 3.7
+// ============================================================================
+//
+// G₂ = Aut(𝕆), the 14-dimensional exceptional Lie group preserving the Fano-plane
+// multiplication table.  Its Lie algebra 𝔤₂ acts on Im(𝕆) ≅ ℝ⁷ (ZMM lanes 1-7).
+// These ops build on the single-ZMM convention from Horizon 3.6.1.
+// ============================================================================
+
+// IrG2ProjectImO — zero real lane (lane 0) to project 𝕆 → Im(𝕆)
+// VANDPD (map=1, opcode=0x54): dst = src AND imag_mask
+//   imag_mask ZMM: lane 0 = 0x0000000000000000, lanes 1-7 = 0xFFFFFFFFFFFFFFFF
+// 1 instruction / 6 bytes
+fn lower_g2_project_im_o(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut, Panic, Div {
+    var c = nc
+    let vl       = 2   // ZMM
+    let mask_k   = instr.label_id & 7
+    let zb       = instr.imm_flags & 1
+    let imag_zmm = (instr.label_id >> 4) & 0xF
+    let src      = instr.src1
+    let dst      = instr.dst
+    // VANDPD dst, src, imag_mask  (map=1, opcode=0x54)
+    c.code = emit_evex_pd_rr_full(c.code, 1, 0x54, dst, src, imag_zmm, vl, mask_k, zb)
+    c
+}
+
+// IrG2ApplyGenO — apply a 7×7 matrix (𝔤₂ generator) to Im(𝕆) via column-major multiply
+//
+// The generator matrix is stored as 7 column vectors in ZMM registers
+// (col_base+0 .. col_base+6).  Each column has lane 0 = 0 (no real contribution).
+//
+// Algorithm (column-major, same broadcast-and-FMA as Fano cols 1-7):
+//   1. VXORPD accum, accum, accum           — zero accumulator
+//   2. For j = 1..7:
+//        VPERMPD t_bcast, bcast_ctrl_j, src — broadcast input[j] to all lanes
+//        VFMADD231PD accum, t_bcast, col_j  — accum += bcast(input[j]) × column_j
+//   3. VMOVAPD dst{k}{z}, accum             — masked store
+//
+// Broadcast ctrls: [j,j,j,j,j,j,j,j] — reuse Fano bcast vectors.
+// Convention: bcast ctrls at col_base-7 .. col_base-1 (7 ZMMs before the columns).
+//
+// 16 instructions / 96 bytes: 1 + 7×2 + 1
+fn lower_g2_apply_gen_o(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut, Panic, Div {
+    var c = nc
+    let vl       = 2   // ZMM
+    let mask_k   = instr.label_id & 7
+    let zb       = instr.imm_flags & 1
+    let col_base = (instr.label_id >> 4) & 0xF
+    let src      = instr.src1
+    let dst      = instr.dst
+    let t_bcast  = instr.dst + 2    // scratch for broadcast
+    let accum    = instr.dst + 4    // scratch accumulator
+    // Broadcast ctrl base: 7 ZMMs before col_base  (convention: bcast_base = col_base - 7)
+    let bcast_base = col_base - 7
+    // Step 1: zero accumulator
+    // VXORPD accum, accum, accum  (map=1, opcode=0x57)
+    c.code = emit_evex_pd_rr_full(c.code, 1, 0x57, accum, accum, accum, vl, 0, 0)
+    // Column 1: broadcast input[1], FMA with col_base+0
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0x16, t_bcast, bcast_base + 0, src, vl, 0, 0)
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0xB8, accum, t_bcast, col_base + 0, vl, 0, 0)
+    // Column 2: broadcast input[2], FMA with col_base+1
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0x16, t_bcast, bcast_base + 1, src, vl, 0, 0)
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0xB8, accum, t_bcast, col_base + 1, vl, 0, 0)
+    // Column 3: broadcast input[3], FMA with col_base+2
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0x16, t_bcast, bcast_base + 2, src, vl, 0, 0)
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0xB8, accum, t_bcast, col_base + 2, vl, 0, 0)
+    // Column 4: broadcast input[4], FMA with col_base+3
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0x16, t_bcast, bcast_base + 3, src, vl, 0, 0)
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0xB8, accum, t_bcast, col_base + 3, vl, 0, 0)
+    // Column 5: broadcast input[5], FMA with col_base+4
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0x16, t_bcast, bcast_base + 4, src, vl, 0, 0)
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0xB8, accum, t_bcast, col_base + 4, vl, 0, 0)
+    // Column 6: broadcast input[6], FMA with col_base+5
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0x16, t_bcast, bcast_base + 5, src, vl, 0, 0)
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0xB8, accum, t_bcast, col_base + 5, vl, 0, 0)
+    // Column 7: broadcast input[7], FMA with col_base+6
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0x16, t_bcast, bcast_base + 6, src, vl, 0, 0)
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0xB8, accum, t_bcast, col_base + 6, vl, 0, 0)
+    // Final store: VMOVAPD dst{mask_k}{z}, accum  (map=1, opcode=0x28, src1=0 → vvvv=1111)
+    c.code = emit_evex_pd_rr_full(c.code, 1, 0x28, dst, 0, accum, vl, mask_k, zb)
+    c
+}
+
+// IrG2DenseO — G₂-equivariant dense layer: project + apply + store
+// Composes IrG2ProjectImO (1 instr) + IrG2ApplyGenO (16 instr) = 17 instr / 102 bytes
+// The weight matrix (Σ αₖ Dₖ, 14 learnable scalars → one 7×7 matrix) is precomputed
+// by the frontend and loaded into col_base+0..6 ZMMs before this instruction.
+fn lower_g2_dense_o(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut, Panic, Div {
+    var c = nc
+    let vl       = 2   // ZMM
+    let mask_k   = instr.label_id & 7
+    let zb       = instr.imm_flags & 1
+    let col_base = (instr.label_id >> 4) & 0xF
+    let imag_zmm = instr.src2    // src2 repurposed: ZMM index of imag_mask
+    let src      = instr.src1
+    let dst      = instr.dst
+    let t_bcast  = instr.dst + 2
+    let accum    = instr.dst + 4
+    let bcast_base = col_base - 7
+    // Step 1: project to Im(𝕆) — VANDPD dst, src, imag_mask  (map=1, opcode=0x54)
+    c.code = emit_evex_pd_rr_full(c.code, 1, 0x54, dst, src, imag_zmm, vl, 0, 0)
+    // Step 2: matrix-vector on the projected input (use dst as source)
+    // VXORPD accum, accum, accum
+    c.code = emit_evex_pd_rr_full(c.code, 1, 0x57, accum, accum, accum, vl, 0, 0)
+    // Columns 1-7: broadcast from dst (projected), FMA with col_base+0..6
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0x16, t_bcast, bcast_base + 0, dst, vl, 0, 0)
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0xB8, accum, t_bcast, col_base + 0, vl, 0, 0)
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0x16, t_bcast, bcast_base + 1, dst, vl, 0, 0)
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0xB8, accum, t_bcast, col_base + 1, vl, 0, 0)
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0x16, t_bcast, bcast_base + 2, dst, vl, 0, 0)
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0xB8, accum, t_bcast, col_base + 2, vl, 0, 0)
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0x16, t_bcast, bcast_base + 3, dst, vl, 0, 0)
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0xB8, accum, t_bcast, col_base + 3, vl, 0, 0)
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0x16, t_bcast, bcast_base + 4, dst, vl, 0, 0)
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0xB8, accum, t_bcast, col_base + 4, vl, 0, 0)
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0x16, t_bcast, bcast_base + 5, dst, vl, 0, 0)
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0xB8, accum, t_bcast, col_base + 5, vl, 0, 0)
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0x16, t_bcast, bcast_base + 6, dst, vl, 0, 0)
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0xB8, accum, t_bcast, col_base + 6, vl, 0, 0)
+    // Final store: VMOVAPD dst{mask_k}{z}, accum
+    c.code = emit_evex_pd_rr_full(c.code, 1, 0x28, dst, 0, accum, vl, mask_k, zb)
     c
 }

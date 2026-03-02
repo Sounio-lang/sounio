@@ -1,0 +1,216 @@
+// self-hosted::native::test_hyper_g2
+//
+// Horizon 3.7 — G2-equivariant ops byte-level verification.
+//
+// EVEX layouts tested:
+//
+//   IrG2ProjectImO: 1 x VANDPD = 6 bytes
+//     VANDPD: EVEX.NDS.66.0F.W1 54 /r  — map=1, opcode=0x54
+//     Zeroes lane 0 (real part) of ZMM octonion, projecting to Im(O).
+//
+//   IrG2ApplyGenO: 16 instructions = 96 bytes
+//     1 x VXORPD (zero accum) + 7 x (VPERMPD + VFMADD231PD) + 1 x VMOVAPD
+//     Column-major 7x7 matrix-vector multiply on Im(O) lanes 1-7.
+//
+//   IrG2DenseO: 17 instructions = 102 bytes
+//     1 x VANDPD (project) + 1 x VXORPD + 7 x (VPERMPD + VFMADD231PD) + 1 x VMOVAPD
+//
+//@ run-pass
+
+use native::encode::{CodeBuffer, code_buffer_new, emit_byte}
+
+// ---- Minimal EVEX helpers (inlined; tg2_ prefix) ----
+
+fn tg2_bit(val: i64, n: i64) -> i64 { (val >> n) & 1 }
+fn tg2_inv(b: i64) -> i64 { if b == 0 { 1 } else { 0 } }
+fn tg2_lo3(id: i64) -> i64 { id & 7 }
+
+fn tg2_p1(dst_id: i64, src2_id: i64, map: i64) -> i64 {
+    let r_inv  = tg2_inv(tg2_bit(dst_id,  3))
+    let b_inv  = tg2_inv(tg2_bit(src2_id, 3))
+    let rp_inv = tg2_inv(tg2_bit(dst_id,  4))
+    (r_inv << 7) | (1 << 6) | (b_inv << 5) | (rp_inv << 4) | (map & 0xF)
+}
+
+fn tg2_p2_pd(src1_id: i64) -> i64 {
+    let vvvv_inv = (0 - src1_id - 1) & 0xF
+    0x80 | (vvvv_inv << 3) | 0x4 | 0x1
+}
+
+fn tg2_p3_vl_full(src1_id: i64, vl_code: i64, mask_k: i64, z_bit: i64) -> i64 {
+    let vp_inv = tg2_inv(tg2_bit(src1_id, 4))
+    ((z_bit & 1) << 7) | ((vl_code & 3) << 5) | (vp_inv << 3) | (mask_k & 7)
+}
+
+fn tg2_emit_evex_pd_rr_full(buf: CodeBuffer, map: i64, opcode: i64, dst: i64, src1: i64, src2: i64, vl_code: i64, mask_k: i64, z_bit: i64) -> CodeBuffer with Mut, Panic, Div {
+    var b = buf
+    b = emit_byte(b, 0x62)
+    b = emit_byte(b, tg2_p1(dst, src2, map))
+    b = emit_byte(b, tg2_p2_pd(src1))
+    b = emit_byte(b, tg2_p3_vl_full(src1, vl_code, mask_k, z_bit))
+    b = emit_byte(b, opcode)
+    b = emit_byte(b, 0xC0 | (tg2_lo3(dst) << 3) | tg2_lo3(src2))
+    b
+}
+
+fn tg2_read_byte(buf: CodeBuffer, idx: i64) -> i64 {
+    let x = buf.bytes[idx as usize] as i64
+    if x < 0 { x + 256 } else { x }
+}
+
+// ---- IrG2ProjectImO emitter (1 VANDPD, 6 bytes) ----
+// src=0, dst=2, imag_mask=24, vl=2 (ZMM), unmasked
+fn tg2_emit_project_im_o(buf: CodeBuffer) -> CodeBuffer with Mut, Panic, Div {
+    var b = buf
+    let src       = 0
+    let dst       = 2
+    let imag_zmm  = 24
+    let vl        = 2
+    // VANDPD dst, src, imag_zmm  (map=1, opcode=0x54)
+    b = tg2_emit_evex_pd_rr_full(b, 1, 0x54, dst, src, imag_zmm, vl, 0, 0)
+    b
+}
+
+// ---- IrG2ApplyGenO emitter (16 instructions, 96 bytes) ----
+// src=0, dst=2, t_bcast=4, accum=6, col_base=16, bcast_base=9 (=16-7)
+// vl=2 (ZMM), unmasked
+fn tg2_emit_apply_gen_o(buf: CodeBuffer) -> CodeBuffer with Mut, Panic, Div {
+    var b = buf
+    let src        = 0
+    let dst        = 2
+    let t_bcast    = 4
+    let accum      = 6
+    let col_base   = 16
+    let bcast_base = 9    // col_base - 7
+    let vl         = 2
+    // Step 1: VXORPD accum, accum, accum  (zero)
+    b = tg2_emit_evex_pd_rr_full(b, 1, 0x57, accum, accum, accum, vl, 0, 0)
+    // Column 1
+    b = tg2_emit_evex_pd_rr_full(b, 2, 0x16, t_bcast, bcast_base + 0, src, vl, 0, 0)
+    b = tg2_emit_evex_pd_rr_full(b, 2, 0xB8, accum, t_bcast, col_base + 0, vl, 0, 0)
+    // Column 2
+    b = tg2_emit_evex_pd_rr_full(b, 2, 0x16, t_bcast, bcast_base + 1, src, vl, 0, 0)
+    b = tg2_emit_evex_pd_rr_full(b, 2, 0xB8, accum, t_bcast, col_base + 1, vl, 0, 0)
+    // Column 3
+    b = tg2_emit_evex_pd_rr_full(b, 2, 0x16, t_bcast, bcast_base + 2, src, vl, 0, 0)
+    b = tg2_emit_evex_pd_rr_full(b, 2, 0xB8, accum, t_bcast, col_base + 2, vl, 0, 0)
+    // Column 4
+    b = tg2_emit_evex_pd_rr_full(b, 2, 0x16, t_bcast, bcast_base + 3, src, vl, 0, 0)
+    b = tg2_emit_evex_pd_rr_full(b, 2, 0xB8, accum, t_bcast, col_base + 3, vl, 0, 0)
+    // Column 5
+    b = tg2_emit_evex_pd_rr_full(b, 2, 0x16, t_bcast, bcast_base + 4, src, vl, 0, 0)
+    b = tg2_emit_evex_pd_rr_full(b, 2, 0xB8, accum, t_bcast, col_base + 4, vl, 0, 0)
+    // Column 6
+    b = tg2_emit_evex_pd_rr_full(b, 2, 0x16, t_bcast, bcast_base + 5, src, vl, 0, 0)
+    b = tg2_emit_evex_pd_rr_full(b, 2, 0xB8, accum, t_bcast, col_base + 5, vl, 0, 0)
+    // Column 7
+    b = tg2_emit_evex_pd_rr_full(b, 2, 0x16, t_bcast, bcast_base + 6, src, vl, 0, 0)
+    b = tg2_emit_evex_pd_rr_full(b, 2, 0xB8, accum, t_bcast, col_base + 6, vl, 0, 0)
+    // Final store: VMOVAPD dst, accum  (unmasked)
+    b = tg2_emit_evex_pd_rr_full(b, 1, 0x28, dst, 0, accum, vl, 0, 0)
+    b
+}
+
+// ---- IrG2DenseO emitter (17 instructions, 102 bytes) ----
+// Same registers as ApplyGenO + imag_zmm=24 for projection
+fn tg2_emit_dense_o(buf: CodeBuffer) -> CodeBuffer with Mut, Panic, Div {
+    var b = buf
+    let src        = 0
+    let dst        = 2
+    let t_bcast    = 4
+    let accum      = 6
+    let col_base   = 16
+    let bcast_base = 9
+    let imag_zmm   = 24
+    let vl         = 2
+    // Step 1: VANDPD dst, src, imag_zmm  (project to Im(O))
+    b = tg2_emit_evex_pd_rr_full(b, 1, 0x54, dst, src, imag_zmm, vl, 0, 0)
+    // Step 2: VXORPD accum, accum, accum  (zero)
+    b = tg2_emit_evex_pd_rr_full(b, 1, 0x57, accum, accum, accum, vl, 0, 0)
+    // Columns 1-7: broadcast from dst (projected), FMA with col_base+0..6
+    b = tg2_emit_evex_pd_rr_full(b, 2, 0x16, t_bcast, bcast_base + 0, dst, vl, 0, 0)
+    b = tg2_emit_evex_pd_rr_full(b, 2, 0xB8, accum, t_bcast, col_base + 0, vl, 0, 0)
+    b = tg2_emit_evex_pd_rr_full(b, 2, 0x16, t_bcast, bcast_base + 1, dst, vl, 0, 0)
+    b = tg2_emit_evex_pd_rr_full(b, 2, 0xB8, accum, t_bcast, col_base + 1, vl, 0, 0)
+    b = tg2_emit_evex_pd_rr_full(b, 2, 0x16, t_bcast, bcast_base + 2, dst, vl, 0, 0)
+    b = tg2_emit_evex_pd_rr_full(b, 2, 0xB8, accum, t_bcast, col_base + 2, vl, 0, 0)
+    b = tg2_emit_evex_pd_rr_full(b, 2, 0x16, t_bcast, bcast_base + 3, dst, vl, 0, 0)
+    b = tg2_emit_evex_pd_rr_full(b, 2, 0xB8, accum, t_bcast, col_base + 3, vl, 0, 0)
+    b = tg2_emit_evex_pd_rr_full(b, 2, 0x16, t_bcast, bcast_base + 4, dst, vl, 0, 0)
+    b = tg2_emit_evex_pd_rr_full(b, 2, 0xB8, accum, t_bcast, col_base + 4, vl, 0, 0)
+    b = tg2_emit_evex_pd_rr_full(b, 2, 0x16, t_bcast, bcast_base + 5, dst, vl, 0, 0)
+    b = tg2_emit_evex_pd_rr_full(b, 2, 0xB8, accum, t_bcast, col_base + 5, vl, 0, 0)
+    b = tg2_emit_evex_pd_rr_full(b, 2, 0x16, t_bcast, bcast_base + 6, dst, vl, 0, 0)
+    b = tg2_emit_evex_pd_rr_full(b, 2, 0xB8, accum, t_bcast, col_base + 6, vl, 0, 0)
+    // Final store: VMOVAPD dst, accum  (unmasked)
+    b = tg2_emit_evex_pd_rr_full(b, 1, 0x28, dst, 0, accum, vl, 0, 0)
+    b
+}
+
+// ---- Tests ----
+
+// T01: IrG2ProjectImO — VANDPD encoding length == 6 bytes
+fn t01_g2_project_im_o_len() -> bool with Mut, Panic, Div {
+    var buf = code_buffer_new()
+    buf = tg2_emit_project_im_o(buf)
+    buf.len == 6
+}
+
+// T02: IrG2ProjectImO — opcode byte[4] == 0x54 (VANDPD)
+fn t02_g2_project_im_o_opcode() -> bool with Mut, Panic, Div {
+    var buf = code_buffer_new()
+    buf = tg2_emit_project_im_o(buf)
+    tg2_read_byte(buf, 4) == 0x54
+}
+
+// T03: IrG2ApplyGenO — encoding length == 96 bytes (16 instructions)
+fn t03_g2_apply_gen_o_len() -> bool with Mut, Panic, Div {
+    var buf = code_buffer_new()
+    buf = tg2_emit_apply_gen_o(buf)
+    buf.len == 96
+}
+
+// T04: IrG2ApplyGenO — first instruction VXORPD: opcode at byte[4] == 0x57
+fn t04_g2_apply_gen_o_vxorpd() -> bool with Mut, Panic, Div {
+    var buf = code_buffer_new()
+    buf = tg2_emit_apply_gen_o(buf)
+    tg2_read_byte(buf, 4) == 0x57
+}
+
+// T05: IrG2ApplyGenO — first VPERMPD (col 1 broadcast) at byte[10] == 0x16
+//   byte[0..5] = VXORPD (6 bytes), byte[6..11] = first VPERMPD
+fn t05_g2_apply_gen_o_first_vpermpd() -> bool with Mut, Panic, Div {
+    var buf = code_buffer_new()
+    buf = tg2_emit_apply_gen_o(buf)
+    tg2_read_byte(buf, 10) == 0x16
+}
+
+// T06: IrG2ApplyGenO — first VFMADD231PD at byte[16] == 0xB8
+//   byte[12..17] = first VFMADD231PD
+fn t06_g2_apply_gen_o_first_vfmadd() -> bool with Mut, Panic, Div {
+    var buf = code_buffer_new()
+    buf = tg2_emit_apply_gen_o(buf)
+    tg2_read_byte(buf, 16) == 0xB8
+}
+
+// T07: IrG2DenseO — encoding length == 102 bytes (17 instructions)
+fn t07_g2_dense_o_len() -> bool with Mut, Panic, Div {
+    var buf = code_buffer_new()
+    buf = tg2_emit_dense_o(buf)
+    buf.len == 102
+}
+
+fn main() -> i32 with IO, Mut, Panic, Div {
+    var pass = 0
+    var fail = 0
+
+    if t01_g2_project_im_o_len()        { pass = pass + 1 } else { fail = fail + 1 }
+    if t02_g2_project_im_o_opcode()      { pass = pass + 1 } else { fail = fail + 1 }
+    if t03_g2_apply_gen_o_len()          { pass = pass + 1 } else { fail = fail + 1 }
+    if t04_g2_apply_gen_o_vxorpd()       { pass = pass + 1 } else { fail = fail + 1 }
+    if t05_g2_apply_gen_o_first_vpermpd() { pass = pass + 1 } else { fail = fail + 1 }
+    if t06_g2_apply_gen_o_first_vfmadd() { pass = pass + 1 } else { fail = fail + 1 }
+    if t07_g2_dense_o_len()              { pass = pass + 1 } else { fail = fail + 1 }
+
+    if fail == 0 { 0 } else { 1 }
+}
