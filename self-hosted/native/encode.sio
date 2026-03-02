@@ -1348,3 +1348,81 @@ fn emit_lea_rax_rbp_disp32(buf: CodeBuffer, disp: i64) -> CodeBuffer with Mut, P
     b = emit_u32_le(b, disp)
     b
 }
+
+// AVX10.2 dual-probe capability detection — 77 bytes.
+//
+// Probe 1 (CPUID leaf 7, subleaf 1, EDX[19]):  checks AVX10 base.
+// Probe 2 (CPUID leaf 0x24, subleaf 0):         extracts VL mask + version.
+//   EBX[7:0]  = version (1=AVX10.1, 2=AVX10.2)
+//   EBX[18]   = AVX10_512  EBX[17] = AVX10_256  EBX[16] = AVX10_128
+// Fallback:   leaf 7.0 EBX[16] for legacy AVX-512F CPUs.
+//
+// Postconditions:
+//   r15  = VL capability mask: bit0=128, bit1=256, bit2=512 (preserved across main)
+//   rax  = 1 if any vector support, 0 otherwise
+//
+// Fixed control-flow layout (byte offsets from function start):
+//   0x00  probe1 (18 bytes: MOV eax,7 / MOV ecx,1 / CPUID / TEST edx,0x80000)
+//   0x12  JZ rel8=20  → .no_avx10 at 0x28
+//   0x14  probe2 (18 bytes: MOV eax,0x24 / XOR ecx,ecx / CPUID / SHR / AND / MOV r15d,ebx)
+//   0x26  JMP rel8=27 → .done at 0x43
+//   0x28  .no_avx10 (27 bytes: leaf 7.0 / SETE / SHL / MOV r15d,eax)
+//   0x43  .done (10 bytes: TEST r15d,r15d / SETNE al / MOVZX rax,al)
+fn emit_avx10_detect(buf: CodeBuffer) -> CodeBuffer with Mut, Panic, Div {
+    var b = buf
+
+    // --- Probe 1: CPUID(7, 1) — EDX[19] = AVX10 base ---
+    // MOV eax, 7
+    b = emit_byte(b, 0xB8); b = emit_byte(b, 7); b = emit_byte(b, 0); b = emit_byte(b, 0); b = emit_byte(b, 0)
+    // MOV ecx, 1  (subleaf 1)
+    b = emit_byte(b, 0xB9); b = emit_byte(b, 1); b = emit_byte(b, 0); b = emit_byte(b, 0); b = emit_byte(b, 0)
+    // CPUID
+    b = emit_byte(b, 0x0F); b = emit_byte(b, 0xA2)
+    // TEST edx, 0x80000  (bit 19 = 0x00080000 LE: 00 00 08 00)
+    b = emit_byte(b, 0xF7); b = emit_byte(b, 0xC2); b = emit_byte(b, 0); b = emit_byte(b, 0); b = emit_byte(b, 0x08); b = emit_byte(b, 0)
+    // JZ .no_avx10  (rel8 = 20: skip 18-byte probe2 + 2-byte JMP)
+    b = emit_byte(b, 0x74); b = emit_byte(b, 20)
+
+    // --- Probe 2 (AVX10 confirmed): CPUID(0x24, 0) — VL mask into r15 ---
+    // MOV eax, 0x24
+    b = emit_byte(b, 0xB8); b = emit_byte(b, 0x24); b = emit_byte(b, 0); b = emit_byte(b, 0); b = emit_byte(b, 0)
+    // XOR ecx, ecx
+    b = emit_byte(b, 0x31); b = emit_byte(b, 0xC9)
+    // CPUID
+    b = emit_byte(b, 0x0F); b = emit_byte(b, 0xA2)
+    // SHR ebx, 16  (C1 EB 10): shift VL bits [18:16] down to [2:0]
+    b = emit_byte(b, 0xC1); b = emit_byte(b, 0xEB); b = emit_byte(b, 16)
+    // AND ebx, 7  (83 E3 07): mask to VL bits only
+    b = emit_byte(b, 0x83); b = emit_byte(b, 0xE3); b = emit_byte(b, 7)
+    // MOV r15d, ebx  (41 89 DF): store VL mask; zero-extends r15
+    b = emit_byte(b, 0x41); b = emit_byte(b, 0x89); b = emit_byte(b, 0xDF)
+    // JMP .done  (EB 1B, rel8 = 27: skip 27-byte .no_avx10 block)
+    b = emit_byte(b, 0xEB); b = emit_byte(b, 27)
+
+    // --- .no_avx10: legacy AVX-512F fallback (CPUID leaf 7.0 EBX[16]) ---
+    // MOV eax, 7
+    b = emit_byte(b, 0xB8); b = emit_byte(b, 7); b = emit_byte(b, 0); b = emit_byte(b, 0); b = emit_byte(b, 0)
+    // XOR ecx, ecx  (subleaf 0)
+    b = emit_byte(b, 0x31); b = emit_byte(b, 0xC9)
+    // CPUID
+    b = emit_byte(b, 0x0F); b = emit_byte(b, 0xA2)
+    // TEST ebx, 0x10000  (F7 C3 00 00 01 00)
+    b = emit_byte(b, 0xF7); b = emit_byte(b, 0xC3); b = emit_byte(b, 0); b = emit_byte(b, 0); b = emit_byte(b, 1); b = emit_byte(b, 0)
+    // SETE al  (0F 94 C0): al = 1 if AVX-512F present
+    b = emit_byte(b, 0x0F); b = emit_byte(b, 0x94); b = emit_byte(b, 0xC0)
+    // MOVZX eax, al  (0F B6 C0): zero-extend, eax = 0 or 1
+    b = emit_byte(b, 0x0F); b = emit_byte(b, 0xB6); b = emit_byte(b, 0xC0)
+    // SHL eax, 2  (C1 E0 02): 1 → 4 (bit2 = 512-bit in VL mask convention)
+    b = emit_byte(b, 0xC1); b = emit_byte(b, 0xE0); b = emit_byte(b, 2)
+    // MOV r15d, eax  (41 89 C7): store VL mask in r15
+    b = emit_byte(b, 0x41); b = emit_byte(b, 0x89); b = emit_byte(b, 0xC7)
+
+    // --- .done: rax = 1 if any vector support (r15 != 0) ---
+    // TEST r15d, r15d  (45 85 FF)
+    b = emit_byte(b, 0x45); b = emit_byte(b, 0x85); b = emit_byte(b, 0xFF)
+    // SETNE al  (0F 95 C0)
+    b = emit_byte(b, 0x0F); b = emit_byte(b, 0x95); b = emit_byte(b, 0xC0)
+    // MOVZX rax, al  (48 0F B6 C0)
+    b = emit_byte(b, 0x48); b = emit_byte(b, 0x0F); b = emit_byte(b, 0xB6); b = emit_byte(b, 0xC0)
+    b
+}
