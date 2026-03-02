@@ -48,19 +48,18 @@ else:
       ],
     },
     sounio: {
-      code: `let c: Knowledge<mg_per_l> = measure(
-  value: 9.8,
-  uncertainty: 0.3,
-  confidence: 0.97,
-  source: "lab_run_042"
+      code: `let c: Knowledge[f64] = Knowledge(
+  9.8, 
+  ε=0.97, 
+  prov="lab_run_042"
 )
 
-let derived = c * 2.5  // uncertainty auto-propagates
+let derived: Knowledge[f64] = c * 2.5  // uncertainty auto-propagates
 
-if derived.confidence > 0.95 {
+if derived.ε > 0.95 {
   approve(derived)  // provenance travels with it
 }`,
-      lines: 11,
+      lines: 10,
       advantages: [
         'Uncertainty is part of the type — impossible to forget',
         'Propagation is automatic through all operations',
@@ -69,87 +68,137 @@ if derived.confidence > 0.95 {
     },
   },
   {
-    id: 'units',
-    label: 'Unit Safety',
-    dimension: 'Physical units must be correct. When does the language catch mistakes?',
+    id: 'causal',
+    label: 'Causal Integration',
+    dimension: 'Statistical correlation is not causation. Can the language express interventions?',
     traditional: {
-      lang: 'C++ (raw doubles)',
-      code: `double distance_km = 400.0;
-double time_hr = 2.5;
-double speed = distance_km / time_hr;
+      lang: 'Python (NetworkX)',
+      code: `import networkx as nx
 
-// Later, someone passes meters...
-double dist_m = 400000.0;
-double bad_speed = dist_m / time_hr;
-// Compiles fine. Units are wrong.
-// Result: 160,000 "km/h" — silent bug
+# Purely library level, opaque to the compiler
+model = nx.DiGraph()
+model.add_edges_from([
+    ("Genetics", "Smoking"),
+    ("Genetics", "Cancer"),
+    ("Smoking", "Tar"),
+    ("Tar", "Cancer")
+])
 
-// Mars Climate Orbiter (1999):
-// $327M lost to this exact class of error`,
-      lines: 10,
+# Compiler doesn't understand the DAG
+# Typos in string names cause silent failures`,
+      lines: 12,
       issues: [
-        'Units exist only in comments — compiler ignores them',
-        'Mixing km and m compiles without any warning',
-        'Bugs surface at runtime (or in orbit)',
+        'DAG exists only as string pairs at runtime',
+        'Compiler cannot validate node connections',
+        'Refactoring node names breaks graphs silently',
       ],
     },
     sounio: {
-      code: `let distance: km = 400.0
-let time: hr = 2.5
-let speed: km_per_hr = distance / time
+      code: `causal model SmokingCancer {
+    nodes: [Smoking, Tar, Cancer, Genetics]
+    Genetics -> Smoking
+    Genetics -> Cancer
+    Smoking -> Tar
+    Tar -> Cancer
+}
 
-// This would be a compile-time error:
-// let bad: km_per_hr = meters(400000) / time
-//   ^ ERROR: dimension mismatch (m/hr ≠ km/hr)`,
-      lines: 6,
+// The DAG is parsed as a native language construct
+// Fully validated and typed at compile time`,
+      lines: 10,
       advantages: [
-        'Units are first-class types checked at compile time',
-        'Dimension mismatches are caught before code ships',
-        'No runtime overhead — erased after verification',
+        'Causal graphs are first-class language keywords',
+        'Nodes and edges are validated by the compiler',
+        'Impossible to connect non-existent nodes',
       ],
     },
   },
   {
-    id: 'effects',
-    label: 'Effect Transparency',
-    dimension: 'Side effects hide bugs. How visible are they in function signatures?',
+    id: 'resources',
+    label: 'Resource Safety',
+    dimension: 'Forgetting to close a file or release a lock causes leaks. How are resources managed?',
     traditional: {
-      lang: 'Python',
-      code: `def analyze(data):
-    # Does this read files? Hit the network?
-    # Allocate GPU memory? Mutate state?
-    # The signature tells you nothing.
+      lang: 'C (Manual)',
+      code: `void process(int fd) {
+    FILE* f = fdopen(fd, "r");
     
-    result = expensive_model(data)  # GPU?
-    db.save(result)                 # I/O?
-    cache[data.id] = result         # mutation?
-    return result
-
-# Caller has no idea what just happened
-x = analyze(my_data)`,
+    if (error_condition) {
+        // Forgot to fclose(f) before return!
+        // Resource leak in error path.
+        return; 
+    }
+    
+    fclose(f);
+}`,
       lines: 10,
       issues: [
-        'Function signature hides all side effects',
-        'Caller cannot know if GPU, I/O, or mutation occurs',
-        'Debugging requires reading every implementation',
+        'Resource cleanup is purely convention',
+        'Early returns easily bypass cleanup logic',
+        'Double-free and use-after-free bugs common',
       ],
     },
     sounio: {
-      code: `fn analyze(data: Dataset)
-  -> Result<Analysis> ! Gpu, Io, Mut {
-  
-  let result = expensive_model(data)  // ! Gpu
-  db.save(result)                     // ! Io
-  cache.set(data.id, result)          // ! Mut
-  result
+      code: `linear struct FileHandle { fd: i32 }
+
+fn process(h: FileHandle) {
+    if error_condition {
+        // Compiler ERROR: \`h\` must be consumed!
+        // Cannot return without closing or moving \`h\`
+        return
+    }
+    
+    close(h) // Consumes the linear value
+}`,
+      lines: 10,
+      advantages: [
+        'Linear structs must be consumed exactly once',
+        'Compiler prevents leaks on all code paths',
+        'Cannot accidentally use a resource after closing',
+      ],
+    },
+  },
+  {
+    id: 'ontology',
+    label: 'Ontology Integration',
+    dimension: 'Scientific data requires standardized terminologies. How are domain concepts validated?',
+    traditional: {
+      lang: 'Python / JSON',
+      code: `# Stringly-typed concepts, no domain validation
+patient_data = {
+    "diagnosis": "SNOMED:22298006", # Myocardial infarction
+    "lab_test": "LOINC:718-7"      # Hemoglobin
 }
 
-// Caller sees EXACTLY what effects are involved`,
-      lines: 9,
+def analyze_cardiac_event(dx_code):
+    # Just a string check. Is this code a specific type 
+    # of heart disease? The compiler doesn't know.
+    if dx_code == "SNOMED:22298006":
+        run_protocol()`,
+      lines: 11,
+      issues: [
+        'Ontology IDs are opaque strings prone to typos',
+        'No compile-time validation of SNOMED/LOINC codes',
+        'Subsumption (Is-A) hierarchy is lost in the language',
+      ],
+    },
+    sounio: {
+      code: `import medical::snomed::{Disease, MyocardialInfarction}
+
+// Compiler natively resolves the 15M+ term hierarchy
+fn analyze_cardiac_event(dx: Disease) {
+    match dx {
+        // MyocardialInfarction is type-checked as a valid Disease
+        MyocardialInfarction => run_protocol(),
+        _ => default_care()
+    }
+}
+
+let dx = MyocardialInfarction
+analyze_cardiac_event(dx)`,
+      lines: 12,
       advantages: [
-        'Effects declared in the function signature',
-        'Caller knows precisely what resources are touched',
-        'Compiler enforces effect boundaries at every call site',
+        '15M+ scientific entities bound directly as language types',
+        'Compile-time validation guarantees valid ontology terms',
+        'Type system understands subsumption (child/parent relations)',
       ],
     },
   },
