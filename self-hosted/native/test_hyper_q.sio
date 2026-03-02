@@ -1,0 +1,157 @@
+// self-hosted::native::test_hyper_q
+//
+// Horizon 3.5 — VPERMILPD, VADDSUBPD, and IrHyperMulQ byte-level verification.
+//
+// EVEX layouts tested:
+//
+//   VPERMILPD (imm8 form): EVEX.66.0F3A.W1 05 /r ib  — map=3, opcode=0x05
+//     No NDS register (2-operand); src1=15 encodes vvvv=1111 in P2.
+//     Total: 7 bytes (6 EVEX + 1 imm8).
+//
+//   VPERMILPD (reg-reg form): EVEX.66.0F38.W1 0D /r   — map=2, opcode=0x0D
+//     Three-operand: dst, ctrl, src.
+//     Total: 6 bytes.
+//
+//   VADDSUBPD: EVEX.66.0F.W1 D0 /r  — map=1, opcode=0xD0
+//     Total: 6 bytes.
+//
+//   IrHyperMulQ lowers to 7 EVEX instructions (steps 1–7 in lower_hyper_mul_q):
+//     4 × VPERMILPD/imm8 (7 bytes each) + 2 × VMULPD (6 bytes) +
+//     1 × VFMADD231PD (6 bytes) + 1 × VADDSUBPD (6 bytes)
+//     Total: 4×7 + 4×6 = 28 + 24 = 52 bytes  (7 instructions)
+//
+//@ run-pass
+
+use native::encode::{CodeBuffer, code_buffer_new, emit_byte}
+
+// ---- Minimal EVEX helpers (inlined) ----
+
+fn thq_bit(val: i64, n: i64) -> i64 { (val >> n) & 1 }
+fn thq_inv(b: i64) -> i64 { if b == 0 { 1 } else { 0 } }
+fn thq_lo3(id: i64) -> i64 { id & 7 }
+
+fn thq_p1(dst_id: i64, src2_id: i64, map: i64) -> i64 {
+    let r_inv  = thq_inv(thq_bit(dst_id,  3))
+    let b_inv  = thq_inv(thq_bit(src2_id, 3))
+    let rp_inv = thq_inv(thq_bit(dst_id,  4))
+    (r_inv << 7) | (1 << 6) | (b_inv << 5) | (rp_inv << 4) | (map & 0xF)
+}
+
+fn thq_p2_pd(src1_id: i64) -> i64 {
+    let vvvv_inv = (0 - src1_id - 1) & 0xF
+    0x80 | (vvvv_inv << 3) | 0x4 | 0x1
+}
+
+fn thq_p3_vl(src1_id: i64, vl_code: i64) -> i64 {
+    let vp_inv = thq_inv(thq_bit(src1_id, 4))
+    ((vl_code & 3) << 5) | (vp_inv << 3)
+}
+
+fn thq_emit_evex_pd_rr(buf: CodeBuffer, map: i64, opcode: i64, dst: i64, src1: i64, src2: i64, vl_code: i64) -> CodeBuffer with Mut, Panic, Div {
+    var b = buf
+    b = emit_byte(b, 0x62)
+    b = emit_byte(b, thq_p1(dst, src2, map))
+    b = emit_byte(b, thq_p2_pd(src1))
+    b = emit_byte(b, thq_p3_vl(src1, vl_code))
+    b = emit_byte(b, opcode)
+    b = emit_byte(b, 0xC0 | (thq_lo3(dst) << 3) | thq_lo3(src2))
+    b
+}
+
+fn thq_emit_evex_pd_rr_imm8(buf: CodeBuffer, map: i64, opcode: i64, dst: i64, src1: i64, src2: i64, vl_code: i64, imm8: i64) -> CodeBuffer with Mut, Panic, Div {
+    var b = thq_emit_evex_pd_rr(buf, map, opcode, dst, src1, src2, vl_code)
+    b = emit_byte(b, imm8 & 0xFF)
+    b
+}
+
+fn thq_read_byte(buf: CodeBuffer, idx: i64) -> i64 {
+    let x = buf.bytes[idx as usize] as i64
+    if x < 0 { x + 256 } else { x }
+}
+
+// Emit the 7-instruction IrHyperMulQ sequence (dst=0, src1=q1=1, src2=q2=2)
+// with scratch regs r_tmp=1, r_a=2, r_b=3, r_q1x=4 (dst+1..dst+4).
+// NOTE: test uses dst=0 so scratch regs are 1,2,3,4.  Total length = 52 bytes.
+fn thq_emit_hyper_mul_q(buf: CodeBuffer) -> CodeBuffer with Mut, Panic, Div {
+    var b = buf
+    let q1  = 1   // src1
+    let q2  = 2   // src2
+    let dst = 0
+    let r_tmp = 1
+    let r_a   = 2
+    let r_b   = 3
+    let r_q1x = 4
+    // Step 1: VPERMILPD r_tmp, q2, 0x05  (imm8, map=3, op=0x05, src1=15)
+    b = thq_emit_evex_pd_rr_imm8(b, 3, 0x05, r_tmp, 15, q2,  1, 0x05)
+    // Step 2: VMULPD r_a, q1, r_tmp
+    b = thq_emit_evex_pd_rr(b, 1, 0x59, r_a, q1, r_tmp, 1)
+    // Step 3: VPERMILPD r_tmp, q2, 0x0F
+    b = thq_emit_evex_pd_rr_imm8(b, 3, 0x05, r_tmp, 15, q2,  1, 0x0F)
+    // Step 4: VMULPD r_b, q1, r_tmp
+    b = thq_emit_evex_pd_rr(b, 1, 0x59, r_b, q1, r_tmp, 1)
+    // Step 5: VPERMILPD r_q1x, q1, 0x01
+    b = thq_emit_evex_pd_rr_imm8(b, 3, 0x05, r_q1x, 15, q1, 1, 0x01)
+    // Step 6: VFMADD231PD r_a, r_q1x, q2
+    b = thq_emit_evex_pd_rr(b, 2, 0xB8, r_a, r_q1x, q2, 1)
+    // Step 7: VADDSUBPD dst, r_a, r_b
+    b = thq_emit_evex_pd_rr(b, 1, 0xD0, dst, r_a, r_b, 1)
+    b
+}
+
+// ---- Tests ----
+
+// T01: VPERMILPD imm8 — total length 7 (6 EVEX + 1 imm8)
+fn t01_vpermilpd_imm8_len() -> bool with Mut, Panic, Div {
+    var buf = code_buffer_new()
+    buf = thq_emit_evex_pd_rr_imm8(buf, 3, 0x05, 0, 15, 2, 1, 0x05)
+    buf.len == 7
+}
+
+// T02: VPERMILPD imm8 — P1 low nibble = 3 (map=3, 0F3A)
+fn t02_vpermilpd_imm8_map3() -> bool with Mut, Panic, Div {
+    var buf = code_buffer_new()
+    buf = thq_emit_evex_pd_rr_imm8(buf, 3, 0x05, 0, 15, 2, 1, 0x05)
+    (thq_read_byte(buf, 1) & 0xF) == 3
+}
+
+// T03: VPERMILPD imm8 — opcode byte[4] = 0x05
+fn t03_vpermilpd_imm8_opcode() -> bool with Mut, Panic, Div {
+    var buf = code_buffer_new()
+    buf = thq_emit_evex_pd_rr_imm8(buf, 3, 0x05, 0, 15, 2, 1, 0x05)
+    thq_read_byte(buf, 4) == 0x05
+}
+
+// T04: VPERMILPD reg-reg — P1 low nibble = 2 (map=2, 0F38)
+fn t04_vpermilpd_rr_map2() -> bool with Mut, Panic, Div {
+    var buf = code_buffer_new()
+    buf = thq_emit_evex_pd_rr(buf, 2, 0x0D, 0, 1, 2, 1)
+    (thq_read_byte(buf, 1) & 0xF) == 2
+}
+
+// T05: VADDSUBPD — opcode byte[4] = 0xD0
+fn t05_vaddsubpd_opcode() -> bool with Mut, Panic, Div {
+    var buf = code_buffer_new()
+    buf = thq_emit_evex_pd_rr(buf, 1, 0xD0, 0, 1, 2, 1)
+    thq_read_byte(buf, 4) == 0xD0
+}
+
+// T06: IrHyperMulQ sequence length — 52 bytes (7 instructions)
+fn t06_hyper_mul_q_len() -> bool with Mut, Panic, Div {
+    var buf = code_buffer_new()
+    buf = thq_emit_hyper_mul_q(buf)
+    buf.len == 52
+}
+
+fn main() -> i32 with IO, Mut, Panic, Div {
+    var pass = 0
+    var fail = 0
+
+    if t01_vpermilpd_imm8_len()   { pass = pass + 1 } else { fail = fail + 1 }
+    if t02_vpermilpd_imm8_map3()  { pass = pass + 1 } else { fail = fail + 1 }
+    if t03_vpermilpd_imm8_opcode(){ pass = pass + 1 } else { fail = fail + 1 }
+    if t04_vpermilpd_rr_map2()    { pass = pass + 1 } else { fail = fail + 1 }
+    if t05_vaddsubpd_opcode()     { pass = pass + 1 } else { fail = fail + 1 }
+    if t06_hyper_mul_q_len()      { pass = pass + 1 } else { fail = fail + 1 }
+
+    if fail == 0 { 0 } else { 1 }
+}

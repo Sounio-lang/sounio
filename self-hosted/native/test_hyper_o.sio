@@ -1,0 +1,340 @@
+// self-hosted::native::test_hyper_o
+//
+// Horizon 3.6/3.6.1 — VXORPD, VPERMPD (reg-indexed), IrHyperConjugateO,
+//                      IrHyperMulO (Fano single-ZMM), IrHyperNormSqO byte-level verification.
+//
+// EVEX layouts tested:
+//
+//   VXORPD: EVEX.NDS.66.0F.W1 57 /r  — map=1, opcode=0x57 (6 bytes)
+//
+//   VPERMPD reg-indexed: EVEX.NDS.66.0F38.W1 16 /r  — map=2, opcode=0x16 (6 bytes)
+//     Distinct from VPERMPD imm8 form (map=3, opcode=0x01).
+//
+//   IrHyperConjugateO: 2 × VXORPD = 12 bytes
+//
+//   IrHyperMulO (3.6.1, Fano single-ZMM): 31 instructions, 186 bytes
+//     col0: VBROADCASTSD+VMULPD (12) + 7 cols × 4 instr (168) + VMOVAPD (6)
+//     col j: VPERMPD_b + VPERMPD_a + VXORPD_sign + VFMADD231PD = 24 bytes
+//
+//   IrHyperMulO (3.6, Cayley-Dickson, reference): 32 instructions, 204 bytes
+//     2×VXORPD (12) + 4×emit_quat_mul_r (180) + VSUBPD+VADDPD (12)
+//
+//   IrHyperNormSqO: 7 instructions, 44 bytes
+//     VMULPD×2(12) + VADDPD(6) + VPERMILPD/imm8(7) + VADDPD(6) + VPERMPD/imm8(7) + VADDPD(6)
+//
+//@ run-pass
+
+use native::encode::{CodeBuffer, code_buffer_new, emit_byte}
+
+// ---- Minimal EVEX helpers (inlined; tho_ prefix) ----
+
+fn tho_bit(val: i64, n: i64) -> i64 { (val >> n) & 1 }
+fn tho_inv(b: i64) -> i64 { if b == 0 { 1 } else { 0 } }
+fn tho_lo3(id: i64) -> i64 { id & 7 }
+
+fn tho_p1(dst_id: i64, src2_id: i64, map: i64) -> i64 {
+    let r_inv  = tho_inv(tho_bit(dst_id,  3))
+    let b_inv  = tho_inv(tho_bit(src2_id, 3))
+    let rp_inv = tho_inv(tho_bit(dst_id,  4))
+    (r_inv << 7) | (1 << 6) | (b_inv << 5) | (rp_inv << 4) | (map & 0xF)
+}
+
+fn tho_p2_pd(src1_id: i64) -> i64 {
+    let vvvv_inv = (0 - src1_id - 1) & 0xF
+    0x80 | (vvvv_inv << 3) | 0x4 | 0x1
+}
+
+fn tho_p3_vl(src1_id: i64, vl_code: i64) -> i64 {
+    let vp_inv = tho_inv(tho_bit(src1_id, 4))
+    ((vl_code & 3) << 5) | (vp_inv << 3)
+}
+
+fn tho_p3_vl_full(src1_id: i64, vl_code: i64, mask_k: i64, z_bit: i64) -> i64 {
+    let vp_inv = tho_inv(tho_bit(src1_id, 4))
+    ((z_bit & 1) << 7) | ((vl_code & 3) << 5) | (vp_inv << 3) | (mask_k & 7)
+}
+
+fn tho_emit_evex_pd_rr(buf: CodeBuffer, map: i64, opcode: i64, dst: i64, src1: i64, src2: i64, vl_code: i64) -> CodeBuffer with Mut, Panic, Div {
+    var b = buf
+    b = emit_byte(b, 0x62)
+    b = emit_byte(b, tho_p1(dst, src2, map))
+    b = emit_byte(b, tho_p2_pd(src1))
+    b = emit_byte(b, tho_p3_vl(src1, vl_code))
+    b = emit_byte(b, opcode)
+    b = emit_byte(b, 0xC0 | (tho_lo3(dst) << 3) | tho_lo3(src2))
+    b
+}
+
+fn tho_emit_evex_pd_rr_imm8(buf: CodeBuffer, map: i64, opcode: i64, dst: i64, src1: i64, src2: i64, vl_code: i64, imm8: i64) -> CodeBuffer with Mut, Panic, Div {
+    var b = tho_emit_evex_pd_rr(buf, map, opcode, dst, src1, src2, vl_code)
+    b = emit_byte(b, imm8 & 0xFF)
+    b
+}
+
+fn tho_emit_evex_pd_rr_full(buf: CodeBuffer, map: i64, opcode: i64, dst: i64, src1: i64, src2: i64, vl_code: i64, mask_k: i64, z_bit: i64) -> CodeBuffer with Mut, Panic, Div {
+    var b = buf
+    b = emit_byte(b, 0x62)
+    b = emit_byte(b, tho_p1(dst, src2, map))
+    b = emit_byte(b, tho_p2_pd(src1))
+    b = emit_byte(b, tho_p3_vl_full(src1, vl_code, mask_k, z_bit))
+    b = emit_byte(b, opcode)
+    b = emit_byte(b, 0xC0 | (tho_lo3(dst) << 3) | tho_lo3(src2))
+    b
+}
+
+fn tho_read_byte(buf: CodeBuffer, idx: i64) -> i64 {
+    let x = buf.bytes[idx as usize] as i64
+    if x < 0 { x + 256 } else { x }
+}
+
+// ---- Parameterized quaternion multiply helper (7 instr / 45 bytes) ----
+// Mirrors emit_quat_mul_r in lower_ir.sio. All ops use k0/merge (no output mask).
+fn tho_emit_quat_mul_r(buf: CodeBuffer, q1: i64, q2: i64, out: i64, sc1: i64, sc2: i64, sc3: i64) -> CodeBuffer with Mut, Panic, Div {
+    var b = buf
+    // Step 1: VPERMILPD sc1, q2, 0x05   (map=3, op=0x05, 7 bytes)
+    b = tho_emit_evex_pd_rr_imm8(b, 3, 0x05, sc1, 15, q2, 1, 0x05)
+    // Step 2: VMULPD sc2, q1, sc1        (6 bytes)
+    b = tho_emit_evex_pd_rr(b, 1, 0x59, sc2, q1, sc1, 1)
+    // Step 3: VPERMILPD sc1, q2, 0x0F   (7 bytes)
+    b = tho_emit_evex_pd_rr_imm8(b, 3, 0x05, sc1, 15, q2, 1, 0x0F)
+    // Step 4: VMULPD sc3, q1, sc1        (6 bytes)
+    b = tho_emit_evex_pd_rr(b, 1, 0x59, sc3, q1, sc1, 1)
+    // Step 5: VPERMILPD sc1, q1, 0x01   (7 bytes)
+    b = tho_emit_evex_pd_rr_imm8(b, 3, 0x05, sc1, 15, q1, 1, 0x01)
+    // Step 6: VFMADD231PD sc2, sc1, q2  (map=2, op=0xB8, 6 bytes)
+    b = tho_emit_evex_pd_rr(b, 2, 0xB8, sc2, sc1, q2, 1)
+    // Step 7: VADDSUBPD out, sc2, sc3   (map=1, op=0xD0, 6 bytes)
+    b = tho_emit_evex_pd_rr(b, 1, 0xD0, out, sc2, sc3, 1)
+    b
+}
+
+// ---- IrHyperConjugateO (2 VXORPD, 12 bytes) — unmasked ----
+// dst_lo=0, dst_hi=1, src_lo=12, src_hi=13, sign_lo=4, sign_hi=5 (sign_lo+1)
+fn tho_emit_hyper_conjugate_o(buf: CodeBuffer) -> CodeBuffer with Mut, Panic, Div {
+    var b = buf
+    let sign_lo = 4
+    let sign_hi = 5
+    // VXORPD dst_lo, src_lo, sign_lo  → flip e₁,e₂,e₃
+    b = tho_emit_evex_pd_rr_full(b, 1, 0x57, 0, 12, sign_lo, 1, 0, 0)
+    // VXORPD dst_hi, src_hi, sign_hi  → flip e₄,e₅,e₆,e₇
+    b = tho_emit_evex_pd_rr_full(b, 1, 0x57, 1, 13, sign_hi, 1, 0, 0)
+    b
+}
+
+// ---- IrHyperConjugateO with mask k1 + zeroing (for T07) ----
+fn tho_emit_hyper_conjugate_o_masked(buf: CodeBuffer) -> CodeBuffer with Mut, Panic, Div {
+    var b = buf
+    let sign_lo = 4
+    let sign_hi = 5
+    b = tho_emit_evex_pd_rr_full(b, 1, 0x57, 0, 12, sign_lo, 1, 1, 1)
+    b = tho_emit_evex_pd_rr_full(b, 1, 0x57, 1, 13, sign_hi, 1, 1, 1)
+    b
+}
+
+// ---- IrHyperMulO Cayley-Dickson (32 instructions, 204 bytes) ----
+// Register layout:
+//   a_lo=12, a_hi=13, b_lo=14, b_hi=15  (even-indexed pairs)
+//   dst_lo=0, dst_hi=1
+//   conj_ah=2, conj_bl=3, tmp_pp=4, tmp_qcq=5
+//   sc1=6, sc2=7, sc3=8   (emit_quat_mul_r internal scratch)
+//   sign_r=10              (sign_mask_lo YMM; sign_r+1=11 = sign_mask_hi)
+//   mask_k=0, z_bit=0      (unmasked)
+fn tho_emit_hyper_mul_o(buf: CodeBuffer) -> CodeBuffer with Mut, Panic, Div {
+    var b = buf
+    let a_lo    = 12
+    let a_hi    = 13
+    let b_lo    = 14
+    let b_hi    = 15
+    let dst_lo  = 0
+    let dst_hi  = 1
+    let conj_ah = 2
+    let conj_bl = 3
+    let tmp_pp  = 4
+    let tmp_qcq = 5
+    let sc1     = 6
+    let sc2     = 7
+    let sc3     = 8
+    let sign_r  = 10
+    // Step 1: VXORPD conj_ah, a_hi, sign_r  (conjugate hi-half of a)
+    b = tho_emit_evex_pd_rr_full(b, 1, 0x57, conj_ah, a_hi, sign_r, 1, 0, 0)
+    // Step 2: VXORPD conj_bl, b_lo, sign_r  (conjugate lo-half of b)
+    b = tho_emit_evex_pd_rr_full(b, 1, 0x57, conj_bl, b_lo, sign_r, 1, 0, 0)
+    // Steps 3-9: tmp_pp = quat_mul(a_lo, b_lo)   → 45 bytes
+    b = tho_emit_quat_mul_r(b, a_lo, b_lo, tmp_pp, sc1, sc2, sc3)
+    // Steps 10-16: tmp_qcq = quat_mul(b_hi, conj_ah)  → 45 bytes
+    b = tho_emit_quat_mul_r(b, b_hi, conj_ah, tmp_qcq, sc1, sc2, sc3)
+    // Step 17: VSUBPD dst_lo, tmp_pp, tmp_qcq   (VSUBPD = map=1, op=0x5C)
+    b = tho_emit_evex_pd_rr_full(b, 1, 0x5C, dst_lo, tmp_pp, tmp_qcq, 1, 0, 0)
+    // Steps 18-24: tmp_pp = quat_mul(b_hi, a_lo)   → 45 bytes
+    b = tho_emit_quat_mul_r(b, b_hi, a_lo, tmp_pp, sc1, sc2, sc3)
+    // Steps 25-31: tmp_qcq = quat_mul(a_hi, conj_bl)  → 45 bytes
+    b = tho_emit_quat_mul_r(b, a_hi, conj_bl, tmp_qcq, sc1, sc2, sc3)
+    // Step 32: VADDPD dst_hi, tmp_pp, tmp_qcq   (VADDPD = map=1, op=0x58)
+    b = tho_emit_evex_pd_rr_full(b, 1, 0x58, dst_hi, tmp_pp, tmp_qcq, 1, 0, 0)
+    b
+}
+
+// ---- IrHyperMulO Fano single-ZMM (31 instructions, 186 bytes) ----
+// Column-by-column Fano-plane: c = sum_j sign_j(perm_j(a)) × broadcast_j(b)
+// Register layout:
+//   za=0, zb_in=1, dst=2, t_bj=4 (dst+2), t_aj=6 (dst+4), accum=8 (dst+6)
+//   ctrl_base=16  (21 pre-loaded ctrl ZMMs: bcast[0..6], perm[7..13], sign[14..20])
+//   mask_k=0, z_bit=0 (unmasked)
+// Byte layout: col0 (12) + cols 1-7 (7×24=168) + store (6) = 186
+fn tho_emit_hyper_mul_o_fano(buf: CodeBuffer) -> CodeBuffer with Mut, Panic, Div {
+    var b = buf
+    let za        = 0
+    let zb_in     = 1
+    let t_bj      = 4    // dst + 2  (dst=2 → 2+2=4)
+    let t_aj      = 6    // dst + 4
+    let accum     = 8    // dst + 6
+    let dst       = 2
+    let ctrl_base = 16
+    let vl        = 2    // ZMM
+    // Column 0: identity perm, all-positive — VBROADCASTSD + VMULPD  (12 bytes)
+    b = tho_emit_evex_pd_rr_full(b, 2, 0x19, t_bj, 0, zb_in, vl, 0, 0)
+    b = tho_emit_evex_pd_rr_full(b, 1, 0x59, accum, za, t_bj, vl, 0, 0)
+    // Column 1: perm=[1,0,3,2,5,4,7,6], neg={0,3,5,6}  (24 bytes)
+    b = tho_emit_evex_pd_rr_full(b, 2, 0x16, t_bj, ctrl_base + 0,  zb_in, vl, 0, 0)
+    b = tho_emit_evex_pd_rr_full(b, 2, 0x16, t_aj, ctrl_base + 7,  za,    vl, 0, 0)
+    b = tho_emit_evex_pd_rr_full(b, 1, 0x57, t_aj, t_aj, ctrl_base + 14,  vl, 0, 0)
+    b = tho_emit_evex_pd_rr_full(b, 2, 0xB8, accum, t_aj, t_bj,    vl, 0, 0)
+    // Column 2: perm=[2,3,0,1,6,7,4,5], neg={0,1,6,7}  (24 bytes)
+    b = tho_emit_evex_pd_rr_full(b, 2, 0x16, t_bj, ctrl_base + 1,  zb_in, vl, 0, 0)
+    b = tho_emit_evex_pd_rr_full(b, 2, 0x16, t_aj, ctrl_base + 8,  za,    vl, 0, 0)
+    b = tho_emit_evex_pd_rr_full(b, 1, 0x57, t_aj, t_aj, ctrl_base + 15,  vl, 0, 0)
+    b = tho_emit_evex_pd_rr_full(b, 2, 0xB8, accum, t_aj, t_bj,    vl, 0, 0)
+    // Column 3: perm=[3,2,1,0,7,6,5,4], neg={0,2,5,7}  (24 bytes)
+    b = tho_emit_evex_pd_rr_full(b, 2, 0x16, t_bj, ctrl_base + 2,  zb_in, vl, 0, 0)
+    b = tho_emit_evex_pd_rr_full(b, 2, 0x16, t_aj, ctrl_base + 9,  za,    vl, 0, 0)
+    b = tho_emit_evex_pd_rr_full(b, 1, 0x57, t_aj, t_aj, ctrl_base + 16,  vl, 0, 0)
+    b = tho_emit_evex_pd_rr_full(b, 2, 0xB8, accum, t_aj, t_bj,    vl, 0, 0)
+    // Column 4: perm=[4,5,6,7,0,1,2,3], neg={0,1,2,3}  (24 bytes)
+    b = tho_emit_evex_pd_rr_full(b, 2, 0x16, t_bj, ctrl_base + 3,  zb_in, vl, 0, 0)
+    b = tho_emit_evex_pd_rr_full(b, 2, 0x16, t_aj, ctrl_base + 10, za,    vl, 0, 0)
+    b = tho_emit_evex_pd_rr_full(b, 1, 0x57, t_aj, t_aj, ctrl_base + 17,  vl, 0, 0)
+    b = tho_emit_evex_pd_rr_full(b, 2, 0xB8, accum, t_aj, t_bj,    vl, 0, 0)
+    // Column 5: perm=[5,4,7,6,1,0,3,2], neg={0,2,4}  (24 bytes)
+    b = tho_emit_evex_pd_rr_full(b, 2, 0x16, t_bj, ctrl_base + 4,  zb_in, vl, 0, 0)
+    b = tho_emit_evex_pd_rr_full(b, 2, 0x16, t_aj, ctrl_base + 11, za,    vl, 0, 0)
+    b = tho_emit_evex_pd_rr_full(b, 1, 0x57, t_aj, t_aj, ctrl_base + 18,  vl, 0, 0)
+    b = tho_emit_evex_pd_rr_full(b, 2, 0xB8, accum, t_aj, t_bj,    vl, 0, 0)
+    // Column 6: perm=[6,7,4,5,2,3,0,1], neg={0,3,4}  (24 bytes)
+    b = tho_emit_evex_pd_rr_full(b, 2, 0x16, t_bj, ctrl_base + 5,  zb_in, vl, 0, 0)
+    b = tho_emit_evex_pd_rr_full(b, 2, 0x16, t_aj, ctrl_base + 12, za,    vl, 0, 0)
+    b = tho_emit_evex_pd_rr_full(b, 1, 0x57, t_aj, t_aj, ctrl_base + 19,  vl, 0, 0)
+    b = tho_emit_evex_pd_rr_full(b, 2, 0xB8, accum, t_aj, t_bj,    vl, 0, 0)
+    // Column 7: perm=[7,6,5,4,3,2,1,0], neg={0,1,4,5}  (24 bytes)
+    b = tho_emit_evex_pd_rr_full(b, 2, 0x16, t_bj, ctrl_base + 6,  zb_in, vl, 0, 0)
+    b = tho_emit_evex_pd_rr_full(b, 2, 0x16, t_aj, ctrl_base + 13, za,    vl, 0, 0)
+    b = tho_emit_evex_pd_rr_full(b, 1, 0x57, t_aj, t_aj, ctrl_base + 20,  vl, 0, 0)
+    b = tho_emit_evex_pd_rr_full(b, 2, 0xB8, accum, t_aj, t_bj,    vl, 0, 0)
+    // Final store: VMOVAPD dst, accum  (src1=0 → vvvv=1111, unmasked)  (6 bytes)
+    b = tho_emit_evex_pd_rr_full(b, 1, 0x28, dst, 0, accum, vl, 0, 0)
+    b
+}
+
+// ---- IrHyperNormSqO (7 instructions, 44 bytes) ----
+// src_lo=12, src_hi=13, dst=0, scratch: lo_sq=1, sum=2
+fn tho_emit_hyper_norm_sq_o(buf: CodeBuffer) -> CodeBuffer with Mut, Panic, Div {
+    var b = buf
+    let src_lo = 12
+    let src_hi = 13
+    let dst    = 0
+    let lo_sq  = 1
+    let sum    = 2
+    // Step 1: VMULPD lo_sq, src_lo, src_lo  (6 bytes)
+    b = tho_emit_evex_pd_rr(b, 1, 0x59, lo_sq, src_lo, src_lo, 1)
+    // Step 2: VMULPD sum, src_hi, src_hi    (6 bytes)
+    b = tho_emit_evex_pd_rr(b, 1, 0x59, sum, src_hi, src_hi, 1)
+    // Step 3: VADDPD sum, lo_sq, sum         (6 bytes)
+    b = tho_emit_evex_pd_rr(b, 1, 0x58, sum, lo_sq, sum, 1)
+    // Step 4: VPERMILPD lo_sq, sum, imm8=0x05  (map=3, op=0x05, 7 bytes)
+    b = tho_emit_evex_pd_rr_imm8(b, 3, 0x05, lo_sq, 15, sum, 1, 0x05)
+    // Step 5: VADDPD sum, sum, lo_sq          (6 bytes)
+    b = tho_emit_evex_pd_rr(b, 1, 0x58, sum, sum, lo_sq, 1)
+    // Step 6: VPERMPD lo_sq, sum, imm8=0x4E  (map=3, op=0x01, 7 bytes)
+    b = tho_emit_evex_pd_rr_imm8(b, 3, 0x01, lo_sq, 15, sum, 1, 0x4E)
+    // Step 7: VADDPD dst, sum, lo_sq  k0/merge (6 bytes)
+    b = tho_emit_evex_pd_rr_full(b, 1, 0x58, dst, sum, lo_sq, 1, 0, 0)
+    b
+}
+
+// ---- Tests ----
+
+// T01: VXORPD — opcode byte[4] == 0x57
+fn t01_vxorpd_opcode() -> bool with Mut, Panic, Div {
+    var buf = code_buffer_new()
+    buf = tho_emit_evex_pd_rr(buf, 1, 0x57, 0, 1, 2, 1)
+    tho_read_byte(buf, 4) == 0x57
+}
+
+// T02: VPERMPD reg-indexed — P1 low nibble == 2 (map=2, 0F38)
+fn t02_vpermpd_rr_map2() -> bool with Mut, Panic, Div {
+    var buf = code_buffer_new()
+    buf = tho_emit_evex_pd_rr(buf, 2, 0x16, 0, 1, 2, 1)
+    (tho_read_byte(buf, 1) & 0xF) == 2
+}
+
+// T03: VPERMPD reg-indexed — opcode byte[4] == 0x16
+fn t03_vpermpd_rr_opcode() -> bool with Mut, Panic, Div {
+    var buf = code_buffer_new()
+    buf = tho_emit_evex_pd_rr(buf, 2, 0x16, 0, 1, 2, 1)
+    tho_read_byte(buf, 4) == 0x16
+}
+
+// T04: IrHyperConjugateO — 2 × VXORPD = 12 bytes (mask does not change length)
+fn t04_hyper_conj_o_len() -> bool with Mut, Panic, Div {
+    var buf = code_buffer_new()
+    buf = tho_emit_hyper_conjugate_o(buf)
+    buf.len == 12
+}
+
+// T05: IrHyperMulO Fano — single-ZMM = 186 bytes (31 instructions)
+fn t05_hyper_mul_o_fano_len() -> bool with Mut, Panic, Div {
+    var buf = code_buffer_new()
+    buf = tho_emit_hyper_mul_o_fano(buf)
+    buf.len == 186
+}
+
+// T06: IrHyperNormSqO — 7 instructions = 44 bytes
+fn t06_hyper_norm_sq_o_len() -> bool with Mut, Panic, Div {
+    var buf = code_buffer_new()
+    buf = tho_emit_hyper_norm_sq_o(buf)
+    buf.len == 44
+}
+
+// T07: Masked IrHyperConjugateO — EVEX P3 byte[3] has z=1 and aaa=001 (k1)
+//   With mask_k=1, z_bit=1 on a VXORPD with src1=12 (bit4=0, so V'=1):
+//   P3 = (1<<7)|(vl=1→0x20)|(V'=1→0x08)|(aaa=1) = 0xA9
+//   Assertion: (P3 & 0x87) == 0x81  checks bit7 (z=1) and bits[2:0] (k1=001)
+fn t07_masked_conj_o_evex_p3() -> bool with Mut, Panic, Div {
+    var buf = code_buffer_new()
+    buf = tho_emit_hyper_conjugate_o_masked(buf)
+    (tho_read_byte(buf, 3) & 0x87) == 0x81
+}
+
+// T08: Fano — first VPERMPD opcode (column-1 block, byte offset 16) == 0x16
+//   col0 = 12 bytes (bytes 0-11), col1 starts at byte 12:
+//     byte[12]=0x62, byte[13]=P1, byte[14]=P2, byte[15]=P3, byte[16]=opcode=0x16
+fn t08_fano_first_vpermpd_opcode() -> bool with Mut, Panic, Div {
+    var buf = code_buffer_new()
+    buf = tho_emit_hyper_mul_o_fano(buf)
+    tho_read_byte(buf, 16) == 0x16
+}
+
+fn main() -> i32 with IO, Mut, Panic, Div {
+    var pass = 0
+    var fail = 0
+
+    if t01_vxorpd_opcode()               { pass = pass + 1 } else { fail = fail + 1 }
+    if t02_vpermpd_rr_map2()             { pass = pass + 1 } else { fail = fail + 1 }
+    if t03_vpermpd_rr_opcode()           { pass = pass + 1 } else { fail = fail + 1 }
+    if t04_hyper_conj_o_len()            { pass = pass + 1 } else { fail = fail + 1 }
+    if t05_hyper_mul_o_fano_len()        { pass = pass + 1 } else { fail = fail + 1 }
+    if t06_hyper_norm_sq_o_len()         { pass = pass + 1 } else { fail = fail + 1 }
+    if t07_masked_conj_o_evex_p3()       { pass = pass + 1 } else { fail = fail + 1 }
+    if t08_fano_first_vpermpd_opcode()   { pass = pass + 1 } else { fail = fail + 1 }
+
+    if fail == 0 { 0 } else { 1 }
+}

@@ -1,0 +1,111 @@
+// self-hosted::native::test_k_logical
+//
+// Horizon 3.5 — VEX-3 k-register logical op byte-level verification.
+//
+// K-register ops use a 5-byte VEX-3 prefix (0xC4), NOT EVEX.
+//
+// VEX-3 binary k-op layout (KANDW / KORW):
+//   [0] 0xC4   VEX-3 fixed
+//   [1] 0xE1   R=1 X=1 B=1 map=0F (k-regs 0-7 never need extension bits)
+//   [2] W=0 vvvv=~src1 L=1 pp=01 → ((~src1 & 0xF) << 3) | 5
+//   [3] opcode  0x41=KANDW  0x45=KORW
+//   [4] ModRM   11 dst_lo3 src2_lo3
+//
+// VEX-3 unary k-op layout (KNOTW / KMOVW):
+//   [0] 0xC4
+//   [1] 0xE1
+//   [2] 0x79   W=0 vvvv=1111 L=0 pp=01
+//   [3] opcode  0x44=KNOTW  0x90=KMOVW
+//   [4] ModRM   11 dst_lo3 src_lo3
+//
+// All k-logical ops are 5 bytes.
+//
+//@ run-pass
+
+use native::encode::{CodeBuffer, code_buffer_new, emit_byte}
+
+// ---- Minimal VEX-3 k-op helpers (inlined) ----
+
+fn tkl_read_byte(buf: CodeBuffer, idx: i64) -> i64 {
+    let x = buf.bytes[idx as usize] as i64
+    if x < 0 { x + 256 } else { x }
+}
+
+fn tkl_emit_k_binary(buf: CodeBuffer, opcode: i64, dst: i64, src1: i64, src2: i64) -> CodeBuffer with Mut, Panic, Div {
+    var b = buf
+    let vvvv_inv = (0 - src1 - 1) & 0xF
+    b = emit_byte(b, 0xC4)
+    b = emit_byte(b, 0xE1)
+    b = emit_byte(b, (vvvv_inv << 3) | 0x5)
+    b = emit_byte(b, opcode)
+    b = emit_byte(b, 0xC0 | ((dst & 7) << 3) | (src2 & 7))
+    b
+}
+
+fn tkl_emit_k_unary(buf: CodeBuffer, opcode: i64, dst: i64, src: i64) -> CodeBuffer with Mut, Panic, Div {
+    var b = buf
+    b = emit_byte(b, 0xC4)
+    b = emit_byte(b, 0xE1)
+    b = emit_byte(b, 0x79)
+    b = emit_byte(b, opcode)
+    b = emit_byte(b, 0xC0 | ((dst & 7) << 3) | (src & 7))
+    b
+}
+
+// ---- Tests ----
+
+// T01: KANDW k0, k1, k2 — byte[0]=0xC4 (VEX-3 prefix)
+fn t01_kandw_vex3_prefix() -> bool with Mut, Panic, Div {
+    var buf = code_buffer_new()
+    buf = tkl_emit_k_binary(buf, 0x41, 0, 1, 2)
+    tkl_read_byte(buf, 0) == 0xC4
+}
+
+// T02: KANDW k0, k1, k2 — byte[1]=0xE1 (constant for k0–k7)
+fn t02_kandw_vex3_b1() -> bool with Mut, Panic, Div {
+    var buf = code_buffer_new()
+    buf = tkl_emit_k_binary(buf, 0x41, 0, 1, 2)
+    tkl_read_byte(buf, 1) == 0xE1
+}
+
+// T03: KANDW k0, k1, k2 — opcode byte[3]=0x41
+fn t03_kandw_opcode() -> bool with Mut, Panic, Div {
+    var buf = code_buffer_new()
+    buf = tkl_emit_k_binary(buf, 0x41, 0, 1, 2)
+    tkl_read_byte(buf, 3) == 0x41
+}
+
+// T04: KORW k0, k1, k2 — opcode byte[3]=0x45
+fn t04_korw_opcode() -> bool with Mut, Panic, Div {
+    var buf = code_buffer_new()
+    buf = tkl_emit_k_binary(buf, 0x45, 0, 1, 2)
+    tkl_read_byte(buf, 3) == 0x45
+}
+
+// T05: KNOTW k0, k1 — byte[2]=0x79 (L=0 vvvv=1111 pp=01, constant for unary)
+fn t05_knotw_unary_b2() -> bool with Mut, Panic, Div {
+    var buf = code_buffer_new()
+    buf = tkl_emit_k_unary(buf, 0x44, 0, 1)
+    tkl_read_byte(buf, 2) == 0x79
+}
+
+// T06: KMOVW k2, k3 — opcode=0x90, ModRM = 0xC0 | (2 << 3) | 3 = 0xD3
+fn t06_kmovw_modrm() -> bool with Mut, Panic, Div {
+    var buf = code_buffer_new()
+    buf = tkl_emit_k_unary(buf, 0x90, 2, 3)
+    tkl_read_byte(buf, 3) == 0x90 && tkl_read_byte(buf, 4) == 0xD3
+}
+
+fn main() -> i32 with IO, Mut, Panic, Div {
+    var pass = 0
+    var fail = 0
+
+    if t01_kandw_vex3_prefix()  { pass = pass + 1 } else { fail = fail + 1 }
+    if t02_kandw_vex3_b1()      { pass = pass + 1 } else { fail = fail + 1 }
+    if t03_kandw_opcode()       { pass = pass + 1 } else { fail = fail + 1 }
+    if t04_korw_opcode()        { pass = pass + 1 } else { fail = fail + 1 }
+    if t05_knotw_unary_b2()     { pass = pass + 1 } else { fail = fail + 1 }
+    if t06_kmovw_modrm()        { pass = pass + 1 } else { fail = fail + 1 }
+
+    if fail == 0 { 0 } else { 1 }
+}
