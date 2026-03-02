@@ -36,9 +36,14 @@ Run the fail-closed scientific pipeline gate from repository root:
 
 ```bash
 bash scripts/stdlib_science_pipeline_gate.sh
+STDLIB_RUNTIME_REGRESSION_STRICT=1 bash scripts/stdlib_science_pipeline_gate.sh
 ```
 
 Artifacts:
 - `artifacts/stdlib/stdlib_science_pipeline_status.v1.json`
 - `tests/fixtures/fmri/fixture_manifest.v1.json`
 - `tests/fixtures/fmri/pipeline_golden.v1.json`
+
+Runtime policy:
+- default mode records `runtime_regressions` telemetry but stays soft-fail for that lane
+- strict mode (`STDLIB_RUNTIME_REGRESSION_STRICT=1`) hard-fails on any runtime regression probe

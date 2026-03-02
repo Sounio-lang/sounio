@@ -12,7 +12,7 @@ Values below are sourced from machine-generated artifacts, not aspirational spec
 
 | Metric | Value |
 |---|---:|
-| `sio_files` | 595 |
+| `sio_files` | 599 |
 | `disabled_files` | 120 |
 | `stub_mod_files` | 43 |
 | `active_module_entrypoints` | 91 |
@@ -29,8 +29,12 @@ Values below are sourced from machine-generated artifacts, not aspirational spec
 | Science lanes `pass` | 2 |
 | Science lanes `fail` | 0 |
 | Science lanes `not_run` | 0 |
+| fMRI lane mode | real NIfTI fixture parse/load execution (`test_pipeline_real_e2e.sio`) |
 | Science lane policy | no `//@ ignore` allowed in `tests/stdlib/fmri` or `tests/stdlib/darwin_pbpk` |
 | Science gate `status_summary` | `pass` |
+| Runtime regression telemetry | `runtime_regressions` in science status artifact |
+| Runtime regression enforcement (default) | `soft` |
+| Runtime regression enforcement (strict) | `STDLIB_RUNTIME_REGRESSION_STRICT=1` |
 
 ## Contract Levels
 
@@ -73,7 +77,9 @@ From repository root:
 ```bash
 bash scripts/scan_stdlib.sh --json-out artifacts/stdlib/stdlib_inventory.v1.json
 bash scripts/stdlib_science_pipeline_gate.sh
+STDLIB_RUNTIME_REGRESSION_STRICT=1 bash scripts/stdlib_science_pipeline_gate.sh
 bash scripts/stdlib_reliability_gate.sh
+STDLIB_RUNTIME_REGRESSION_STRICT=1 bash scripts/stdlib_reliability_gate.sh
 ```
 
 The gate is fail-closed:

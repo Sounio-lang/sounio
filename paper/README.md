@@ -35,6 +35,8 @@ repository gates and artifacts as the source of truth:
 ```bash
 bash scripts/stdlib_science_pipeline_gate.sh
 bash scripts/stdlib_reliability_gate.sh
+STDLIB_RUNTIME_REGRESSION_STRICT=1 bash scripts/stdlib_science_pipeline_gate.sh
+STDLIB_RUNTIME_REGRESSION_STRICT=1 bash scripts/stdlib_reliability_gate.sh
 ```
 
 Primary evidence artifacts:
@@ -42,6 +44,10 @@ Primary evidence artifacts:
 - `artifacts/stdlib/stdlib_reliability_status.v1.json`
 - `tests/fixtures/fmri/fixture_manifest.v1.json`
 - `tests/fixtures/fmri/pipeline_golden.v1.json`
+
+Runtime policy note:
+- science status JSON now includes `runtime_regressions`, `runtime_regression_enforcement`, and `runtime_regression_summary`
+- default gate mode is soft telemetry for runtime regressions; strict mode is opt-in with `STDLIB_RUNTIME_REGRESSION_STRICT=1`
 
 ## Target Venues
 

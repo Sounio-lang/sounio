@@ -19,6 +19,7 @@ Snapshot date: **2026-03-01**
 
 3. STDLIB science lane (required in fast/full gates):
 - Lanes: `fmri`, `darwin_pbpk`
+- fMRI lane is real executable NIfTI-driven (`tests/stdlib/fmri/test_pipeline_real_e2e.sio`)
 - Totals: `pass=2 fail=0 not_run=0 total=2`
 - Gate status: `status_summary=pass`
 - Artifacts:
@@ -26,6 +27,8 @@ Snapshot date: **2026-03-01**
   - `tests/fixtures/fmri/fixture_manifest.v1.json`
   - `tests/fixtures/fmri/pipeline_golden.v1.json`
 - Policy: no `//@ ignore` is allowed in `tests/stdlib/fmri/` and `tests/stdlib/darwin_pbpk/`.
+- Runtime regression telemetry is always recorded in `runtime_regressions`.
+- Default enforcement is soft; strict mode is available via `STDLIB_RUNTIME_REGRESSION_STRICT=1`.
 
 4. Module/test workflow:
 - `use`-based imports work for currently active module surfaces.
@@ -60,7 +63,9 @@ Run from repository root:
 bash scripts/scan_stdlib.sh --json-out artifacts/stdlib/stdlib_inventory.v1.json
 bash scripts/run_stdlib_e2e.sh
 bash scripts/stdlib_science_pipeline_gate.sh
+STDLIB_RUNTIME_REGRESSION_STRICT=1 bash scripts/stdlib_science_pipeline_gate.sh
 bash scripts/stdlib_reliability_gate.sh
+STDLIB_RUNTIME_REGRESSION_STRICT=1 bash scripts/stdlib_reliability_gate.sh
 ```
 
 Then read:

@@ -251,11 +251,18 @@ The main gate path now requires two executable scientific lanes:
 - `tests/stdlib/fmri/test_pipeline_real_e2e.sio`
 - `tests/stdlib/darwin_pbpk/test_pipeline_real_e2e.sio`
 
+fMRI lane details:
+- real fixture-driven NIfTI-1/NIfTI-2 parse/load execution (not synthetic-only checks)
+- QC + FC + atlas coverage + uncertainty metrics are emitted and compared against pinned golden values
+- runtime `as_bytes` regressions are tracked in gate JSON under `runtime_regressions`
+
 Run from repository root:
 
 ```bash
 bash scripts/stdlib_science_pipeline_gate.sh
 bash scripts/stdlib_reliability_gate.sh
+STDLIB_RUNTIME_REGRESSION_STRICT=1 bash scripts/stdlib_science_pipeline_gate.sh
+STDLIB_RUNTIME_REGRESSION_STRICT=1 bash scripts/stdlib_reliability_gate.sh
 ```
 
 Current machine-checkable artifacts:

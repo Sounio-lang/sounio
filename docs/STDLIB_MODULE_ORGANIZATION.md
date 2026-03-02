@@ -15,7 +15,7 @@ STDLIB uses a mixed entrypoint structure:
 
 Current inventory (`artifacts/stdlib/stdlib_inventory.v1.json`):
 
-- `sio_files`: 595
+- `sio_files`: 599
 - `disabled_files`: 120
 - `mod_files`: 70
 - `lib_files`: 64
@@ -44,6 +44,7 @@ Each module lane should be interpreted with one of three levels:
 - `disabled_file` -> avoid callable assertions; realign tests to active API and
   record `//@ contract-adjustment: ...` when intent changes
 - `science lanes` (`tests/stdlib/fmri`, `tests/stdlib/darwin_pbpk`) -> run-pass only; `//@ ignore` is forbidden by gate policy
+- runtime regression probes (`as_bytes` literal/text/binary) are always recorded in science status JSON; strict mode is opt-in via `STDLIB_RUNTIME_REGRESSION_STRICT=1`
 
 ## Reliability Workflow
 
@@ -52,7 +53,9 @@ From repository root:
 ```bash
 bash scripts/scan_stdlib.sh --json-out artifacts/stdlib/stdlib_inventory.v1.json
 bash scripts/stdlib_science_pipeline_gate.sh
+STDLIB_RUNTIME_REGRESSION_STRICT=1 bash scripts/stdlib_science_pipeline_gate.sh
 bash scripts/stdlib_reliability_gate.sh
+STDLIB_RUNTIME_REGRESSION_STRICT=1 bash scripts/stdlib_reliability_gate.sh
 ```
 
 Primary status artifact:
