@@ -1,1 +1,80 @@
-//! g2_activation (disabled)
+//! stdlib/onn/g2_activation.sio
+//!
+//! Active ONN G2-style activation helpers.
+
+struct OnnOctonion {
+    w: f32,
+    x: f32,
+    y: f32,
+    z: f32,
+    t: f32,
+    u: f32,
+    v: f32,
+    s: f32,
+}
+
+fn onn_oct_new(w: f32, x: f32, y: f32, z: f32, t: f32, u: f32, v: f32, s: f32) -> OnnOctonion {
+    OnnOctonion { w: w, x: x, y: y, z: z, t: t, u: u, v: v, s: s }
+}
+
+fn onn_oct_zero() -> OnnOctonion {
+    onn_oct_new(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+}
+
+fn oct_energy(o: OnnOctonion) -> f32 {
+    o.w * o.w + o.x * o.x + o.y * o.y + o.z * o.z +
+    o.t * o.t + o.u * o.u + o.v * o.v + o.s * o.s
+}
+
+fn oct_scale(o: OnnOctonion, k: f32) -> OnnOctonion {
+    onn_oct_new(o.w * k, o.x * k, o.y * k, o.z * k, o.t * k, o.u * k, o.v * k, o.s * k)
+}
+
+fn oct_gelu_g2_activate(o: OnnOctonion) -> OnnOctonion {
+    // Runtime-safe smooth shrink surrogate for this lane.
+    let scale = 1.0 / (1.0 + 0.5 * oct_energy(o))
+    oct_scale(o, scale)
+}
+
+fn oct_leaky_relu_g2_activate(o: OnnOctonion, alpha: f32) -> OnnOctonion {
+    if oct_energy(o) < 0.001 { oct_scale(o, alpha) } else { o }
+}
+
+fn oct_relu_g2_activate(o: OnnOctonion) -> OnnOctonion {
+    if oct_energy(o) > 0.0 { o } else { onn_oct_zero() }
+}
+
+fn abs_f32_local(x: f32) -> f32 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+fn oct_sigmoid_gate_g2(o: OnnOctonion) -> OnnOctonion {
+    // Bounded monotone gate that avoids exp/tanh runtime path.
+    let gate = 0.5 + 0.5 * (o.w / (1.0 + abs_f32_local(o.w)))
+    oct_scale(o, gate)
+}
+
+fn oct_soft_normalize(o: OnnOctonion, epsilon: f32) -> OnnOctonion {
+    let scale = 1.0 / (1.0 + oct_energy(o) + epsilon)
+    oct_scale(o, scale)
+}
+
+fn oct_gelu_g2_batch(input: [OnnOctonion; 16], n: i64) -> [OnnOctonion; 16] {
+    var out = [onn_oct_zero(); 16]
+    var i: i64 = 0
+    while i < n && i < 16 {
+        out[i as usize] = oct_gelu_g2_activate(input[i as usize])
+        i = i + 1
+    }
+    out
+}
+
+fn oct_leaky_relu_g2_batch(input: [OnnOctonion; 16], n: i64, alpha: f32) -> [OnnOctonion; 16] {
+    var out = [onn_oct_zero(); 16]
+    var i: i64 = 0
+    while i < n && i < 16 {
+        out[i as usize] = oct_leaky_relu_g2_activate(input[i as usize], alpha)
+        i = i + 1
+    }
+    out
+}
