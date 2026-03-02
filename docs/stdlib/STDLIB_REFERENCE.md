@@ -6,7 +6,9 @@ Values below are sourced from machine-generated artifacts, not aspirational spec
 - Inventory source: `artifacts/stdlib/stdlib_inventory.v1.json`
 - Reliability gate source: `artifacts/stdlib/stdlib_reliability_status.v1.json`
 - Science gate source: `artifacts/stdlib/stdlib_science_pipeline_status.v1.json`
-- Snapshot date: **2026-03-01**
+- Hyper gate source: `artifacts/stdlib/stdlib_hyper_execution_status.v1.json`
+- GPU attest gate source: `artifacts/omega/gpu_runtime_attest_gate.v1.json`
+- Snapshot date: **2026-03-02**
 
 ## Reliability Snapshot
 
@@ -16,10 +18,13 @@ Values below are sourced from machine-generated artifacts, not aspirational spec
 | `disabled_files` | 120 |
 | `stub_mod_files` | 43 |
 | `active_module_entrypoints` | 91 |
-| E2E `pass` | 67 |
+| `hyper_active_files` | 17 |
+| `hyper_disabled_files` | 6 |
+| `hyper_stub_mod_files` | 0 |
+| E2E `pass` | 71 |
 | E2E `fail` | 0 |
-| E2E `skip` | 5 |
-| E2E `total` | 72 |
+| E2E `skip` | 9 |
+| E2E `total` | 80 |
 | Gate `status_summary` | `pass` |
 
 ## Science Pipeline Snapshot (fMRI + Darwin PBPK)
@@ -32,9 +37,34 @@ Values below are sourced from machine-generated artifacts, not aspirational spec
 | fMRI lane mode | real NIfTI fixture parse/load execution (`test_pipeline_real_e2e.sio`) |
 | Science lane policy | no `//@ ignore` allowed in `tests/stdlib/fmri` or `tests/stdlib/darwin_pbpk` |
 | Science gate `status_summary` | `pass` |
-| Runtime regression telemetry | `runtime_regressions` in science status artifact |
-| Runtime regression enforcement (default) | `soft` |
-| Runtime regression enforcement (strict) | `STDLIB_RUNTIME_REGRESSION_STRICT=1` |
+| Runtime regression telemetry | `runtime_regressions` (`literal_as_bytes`, `text_as_bytes`, `binary_as_bytes`, `dynamic_slice`) |
+| Runtime regression provenance | `runtime_provenance` (`souc_bin`, `souc_version`, `pinned_version_expected`) |
+| Runtime regression enforcement (local default) | `soft` |
+| Runtime regression enforcement (required CI) | `STDLIB_RUNTIME_REGRESSION_STRICT=1` in full-gate workflow |
+
+Current telemetry truth:
+- `runtime_regression_summary.status` is currently `fail` on pinned runtime binaries, so strict mode is fail-closed by design until upstream runtime fixes land.
+
+## Hyper Execution Snapshot
+
+| Metric | Value |
+|---|---:|
+| Hyper tests `pass` | 5 |
+| Hyper tests `fail` | 0 |
+| Hyper tests `skip` | 0 |
+| Hyper tests `total` | 5 |
+| Hyper gate `status_summary` | `pass` |
+| Hyper no-ignore policy | enforced on required hyper tests |
+
+## GPU Runtime Attestation Snapshot
+
+| Metric | Value |
+|---|---:|
+| Gate mode (local default) | `auto` |
+| Gate mode (required CI) | `required` (`OMEGA_GPU_RUNTIME_GATE_MODE=required`) |
+| Status contract | `pass|fail|not_run` with blocker codes |
+| Required blocker semantics | any non-pass fails CI in required mode |
+| Current local artifact | reflects remote-runner availability (`remote_env_missing` in this snapshot) |
 
 ## Contract Levels
 
@@ -76,14 +106,19 @@ From repository root:
 
 ```bash
 bash scripts/scan_stdlib.sh --json-out artifacts/stdlib/stdlib_inventory.v1.json
-bash scripts/stdlib_science_pipeline_gate.sh
+OMEGA_GPU_RUNTIME_GATE_MODE=required bash scripts/omega/omega_gpu_runtime_attest_gate.sh
+bash scripts/stdlib_hyper_execution_gate.sh
 STDLIB_RUNTIME_REGRESSION_STRICT=1 bash scripts/stdlib_science_pipeline_gate.sh
-bash scripts/stdlib_reliability_gate.sh
 STDLIB_RUNTIME_REGRESSION_STRICT=1 bash scripts/stdlib_reliability_gate.sh
+bash scripts/omega/omega_gpu_runtime_attest_gate.sh
+bash scripts/stdlib_hyper_execution_gate.sh
+bash scripts/stdlib_science_pipeline_gate.sh
+bash scripts/stdlib_reliability_gate.sh
 ```
 
 The gate is fail-closed:
 - non-zero exit on any non-ignored E2E fail,
+- non-zero exit when hyper gate artifact is missing/malformed/non-pass,
 - non-zero exit on missing/malformed status JSON,
 - non-zero exit on `not_run`,
 - non-zero exit when science gate is missing, malformed, or not `pass`.

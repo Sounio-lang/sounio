@@ -3,7 +3,7 @@
 This guide is intentionally conservative: it describes what is currently
 validated by repository gates, not long-term roadmap intent.
 
-Snapshot date: **2026-03-01**
+Snapshot date: **2026-03-02**
 
 ## What Is Reliable Right Now
 
@@ -13,7 +13,7 @@ Snapshot date: **2026-03-01**
 - `bash scripts/stdlib_reliability_gate.sh`
 
 2. STDLIB reliability lane:
-- E2E totals: `pass=67 fail=0 skip=5 total=72`
+- E2E totals: `pass=71 fail=0 skip=9 total=80`
 - Gate status: `status_summary=pass`
 - Artifact: `artifacts/stdlib/stdlib_reliability_status.v1.json`
 
@@ -27,8 +27,26 @@ Snapshot date: **2026-03-01**
   - `tests/fixtures/fmri/fixture_manifest.v1.json`
   - `tests/fixtures/fmri/pipeline_golden.v1.json`
 - Policy: no `//@ ignore` is allowed in `tests/stdlib/fmri/` and `tests/stdlib/darwin_pbpk/`.
-- Runtime regression telemetry is always recorded in `runtime_regressions`.
-- Default enforcement is soft; strict mode is available via `STDLIB_RUNTIME_REGRESSION_STRICT=1`.
+- Runtime regression telemetry is always recorded in `runtime_regressions` from committed probes under `tests/stdlib/runtime_regression/`.
+- Runtime provenance is always recorded in `runtime_provenance` (`souc_bin`, `souc_version`, `pinned_version_expected`).
+- Local default enforcement is soft; required CI full gate runs strict mode via `STDLIB_RUNTIME_REGRESSION_STRICT=1`.
+- Current pinned runtime still fails these probes in telemetry mode, so strict mode currently fails closed by design.
+
+4. STDLIB hyper execution lane (required by reliability gate):
+- Gate script: `bash scripts/stdlib_hyper_execution_gate.sh`
+- Lanes: `nn`, `onn`, `qnn`, `snn`, `math` (required run-pass tests)
+- Totals: `pass=5 fail=0 skip=0 total=5`
+- Gate status: `status_summary=pass`
+- Artifact: `artifacts/stdlib/stdlib_hyper_execution_status.v1.json`
+- Policy: no `//@ ignore` in required hyper tests.
+
+5. GPU runtime attestation lane (required in CI full gate):
+- Gate script: `bash scripts/omega/omega_gpu_runtime_attest_gate.sh`
+- Artifact: `artifacts/omega/gpu_runtime_attest_gate.v1.json`
+- Modes:
+  - local default: `OMEGA_GPU_RUNTIME_GATE_MODE=auto`
+  - required CI: `OMEGA_GPU_RUNTIME_GATE_MODE=required`
+- In required mode, any non-pass (`fail` or `not_run`) is fail-closed.
 
 4. Module/test workflow:
 - `use`-based imports work for currently active module surfaces.
@@ -61,16 +79,22 @@ Run from repository root:
 
 ```bash
 bash scripts/scan_stdlib.sh --json-out artifacts/stdlib/stdlib_inventory.v1.json
+OMEGA_GPU_RUNTIME_GATE_MODE=required bash scripts/omega/omega_gpu_runtime_attest_gate.sh
+bash scripts/stdlib_hyper_execution_gate.sh
+STDLIB_RUNTIME_REGRESSION_STRICT=1 bash scripts/stdlib_science_pipeline_gate.sh
+STDLIB_RUNTIME_REGRESSION_STRICT=1 bash scripts/stdlib_reliability_gate.sh
+bash scripts/omega/omega_gpu_runtime_attest_gate.sh
+bash scripts/stdlib_hyper_execution_gate.sh
 bash scripts/run_stdlib_e2e.sh
 bash scripts/stdlib_science_pipeline_gate.sh
-STDLIB_RUNTIME_REGRESSION_STRICT=1 bash scripts/stdlib_science_pipeline_gate.sh
 bash scripts/stdlib_reliability_gate.sh
-STDLIB_RUNTIME_REGRESSION_STRICT=1 bash scripts/stdlib_reliability_gate.sh
 ```
 
 Then read:
 - `artifacts/stdlib/stdlib_inventory.v1.json`
 - `artifacts/stdlib/stdlib_science_pipeline_status.v1.json`
+- `artifacts/stdlib/stdlib_hyper_execution_status.v1.json`
 - `artifacts/stdlib/stdlib_reliability_status.v1.json`
+- `artifacts/omega/gpu_runtime_attest_gate.v1.json`
 
 If the gate is not `pass`, treat the affected lanes as not reliable.

@@ -12,7 +12,7 @@ Welcome to the Sounio programming language documentation.
 ### Reference
 - [Standard Library Reference](reference/STDLIB_REFERENCE.md)
 - [Standard Library Organization](STDLIB_MODULE_ORGANIZATION.md)
-- [Minimum Viable Sounio](guide/MINIMUM_VIABLE_SOUNIO.md) (includes fail-closed science + reliability gate commands and strict runtime-regression toggle)
+- [Minimum Viable Sounio](guide/MINIMUM_VIABLE_SOUNIO.md) (includes fail-closed science + reliability gate commands, runtime probe sources, and required CI strict runtime-regression mode)
 
 ## For Developers
 

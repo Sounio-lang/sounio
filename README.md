@@ -245,27 +245,55 @@ print("ATE: ", effect.value, " ± ", effect.uncertainty)
 | `bayes/` | 1,371 | Bayesian inference, MCMC, VI |
 | `random/` | 1,068 | Random number generation |
 
-### Fail-Closed Science Gates (fMRI + Darwin PBPK)
+### Fail-Closed Science + Hyper + GPU Gates
 
-The main gate path now requires two executable scientific lanes:
+The main gate path now requires executable scientific and hypercomplex lanes:
 - `tests/stdlib/fmri/test_pipeline_real_e2e.sio`
 - `tests/stdlib/darwin_pbpk/test_pipeline_real_e2e.sio`
+- `tests/stdlib/nn/test_hyper_quaternion_e2e.sio`
+- `tests/stdlib/onn/test_hyper_onn_e2e.sio`
+- `tests/stdlib/qnn/test_hyper_qnn_e2e.sio`
+- `tests/stdlib/snn/test_snn_e2e.sio`
+- `tests/stdlib/math/test_hyper_math_e2e.sio`
 
-fMRI lane details:
+fMRI + PBPK lane details:
 - real fixture-driven NIfTI-1/NIfTI-2 parse/load execution (not synthetic-only checks)
 - QC + FC + atlas coverage + uncertainty metrics are emitted and compared against pinned golden values
-- runtime `as_bytes` regressions are tracked in gate JSON under `runtime_regressions`
+- runtime regressions are tracked in gate JSON under `runtime_regressions` using committed probes in `tests/stdlib/runtime_regression/`
+- runtime provenance is recorded under `runtime_provenance` (`souc_bin`, `souc_version`, `pinned_version_expected`)
+
+Hyper lane details:
+- strict run-pass execution with pinned `tests/fixtures/hyper/pipeline_golden.v1.json`
+- no `//@ ignore` allowed in required hyper tests
+- hyper inventory is emitted from `scripts/scan_stdlib.sh` as `hyper_active_files`, `hyper_disabled_files`, `hyper_stub_mod_files`
+
+Runtime policy (science runtime regressions):
+- local default remains telemetry mode (`soft`)
+- required CI full gate enforces strict runtime regression mode (`STDLIB_RUNTIME_REGRESSION_STRICT=1`)
+- current pinned runtime still reports runtime-regression failures in telemetry, so strict mode is intentionally fail-closed until the upstream runtime fix is published
+
+GPU runtime policy:
+- backend compile smoke remains in `scripts/e2e_gate.sh`
+- remote-attested GPU runtime gate is integrated via `scripts/omega/omega_gpu_runtime_attest_gate.sh`
+- local default mode is `OMEGA_GPU_RUNTIME_GATE_MODE=auto` (non-fatal `not_run` when remote runner is unavailable)
+- required CI mode is `OMEGA_GPU_RUNTIME_GATE_MODE=required` (any non-pass is fail-closed)
 
 Run from repository root:
 
 ```bash
-bash scripts/stdlib_science_pipeline_gate.sh
-bash scripts/stdlib_reliability_gate.sh
+OMEGA_GPU_RUNTIME_GATE_MODE=required bash scripts/omega/omega_gpu_runtime_attest_gate.sh
+bash scripts/stdlib_hyper_execution_gate.sh
 STDLIB_RUNTIME_REGRESSION_STRICT=1 bash scripts/stdlib_science_pipeline_gate.sh
 STDLIB_RUNTIME_REGRESSION_STRICT=1 bash scripts/stdlib_reliability_gate.sh
+bash scripts/omega/omega_gpu_runtime_attest_gate.sh
+bash scripts/stdlib_hyper_execution_gate.sh
+bash scripts/stdlib_science_pipeline_gate.sh
+bash scripts/stdlib_reliability_gate.sh
 ```
 
 Current machine-checkable artifacts:
+- `artifacts/omega/gpu_runtime_attest_gate.v1.json`
+- `artifacts/stdlib/stdlib_hyper_execution_status.v1.json`
 - `artifacts/stdlib/stdlib_science_pipeline_status.v1.json`
 - `artifacts/stdlib/stdlib_reliability_status.v1.json`
 - `tests/fixtures/fmri/fixture_manifest.v1.json`

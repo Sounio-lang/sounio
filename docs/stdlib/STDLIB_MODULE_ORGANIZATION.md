@@ -3,7 +3,7 @@
 This page describes how STDLIB modules are organized for current reliability
 work, using repository-generated inventory artifacts as ground truth.
 
-Snapshot date: **2026-03-01**
+Snapshot date: **2026-03-02**
 
 ## File Surface Model
 
@@ -22,6 +22,9 @@ Current inventory (`artifacts/stdlib/stdlib_inventory.v1.json`):
 - `module_entrypoints`: 134
 - `stub_mod_files`: 43
 - `active_module_entrypoints`: 91
+- `hyper_active_files`: 17
+- `hyper_disabled_files`: 6
+- `hyper_stub_mod_files`: 0
 
 ## Contract Levels
 
@@ -44,7 +47,12 @@ Each module lane should be interpreted with one of three levels:
 - `disabled_file` -> avoid callable assertions; realign tests to active API and
   record `//@ contract-adjustment: ...` when intent changes
 - `science lanes` (`tests/stdlib/fmri`, `tests/stdlib/darwin_pbpk`) -> run-pass only; `//@ ignore` is forbidden by gate policy
-- runtime regression probes (`as_bytes` literal/text/binary) are always recorded in science status JSON; strict mode is opt-in via `STDLIB_RUNTIME_REGRESSION_STRICT=1`
+- `hyper lanes` (`tests/stdlib/{nn,onn,qnn,snn,math}` required set) -> run-pass only; `//@ ignore` is forbidden by hyper gate policy
+- runtime regression probes (`as_bytes` literal/text/binary + dynamic slice) are always recorded in science status JSON from committed files in `tests/stdlib/runtime_regression/`
+- runtime provenance (`souc_bin`, `souc_version`, `pinned_version_expected`) is always emitted in science status JSON
+- strict runtime regression mode is required in CI full gate (`STDLIB_RUNTIME_REGRESSION_STRICT=1`); local default remains soft telemetry
+- current pinned runtime still reports runtime-probe failures, so CI strict mode is an intentional fail-closed blocker until upstream runtime fixes are available
+- GPU runtime attestation gate is required in CI with `OMEGA_GPU_RUNTIME_GATE_MODE=required`; local default `auto` records remote-unavailable cases as `not_run`
 
 ## Reliability Workflow
 
@@ -52,15 +60,21 @@ From repository root:
 
 ```bash
 bash scripts/scan_stdlib.sh --json-out artifacts/stdlib/stdlib_inventory.v1.json
-bash scripts/stdlib_science_pipeline_gate.sh
+OMEGA_GPU_RUNTIME_GATE_MODE=required bash scripts/omega/omega_gpu_runtime_attest_gate.sh
+bash scripts/stdlib_hyper_execution_gate.sh
 STDLIB_RUNTIME_REGRESSION_STRICT=1 bash scripts/stdlib_science_pipeline_gate.sh
-bash scripts/stdlib_reliability_gate.sh
 STDLIB_RUNTIME_REGRESSION_STRICT=1 bash scripts/stdlib_reliability_gate.sh
+bash scripts/omega/omega_gpu_runtime_attest_gate.sh
+bash scripts/stdlib_hyper_execution_gate.sh
+bash scripts/stdlib_science_pipeline_gate.sh
+bash scripts/stdlib_reliability_gate.sh
 ```
 
 Primary status artifact:
 - `artifacts/stdlib/stdlib_reliability_status.v1.json`
 - `artifacts/stdlib/stdlib_science_pipeline_status.v1.json`
+- `artifacts/stdlib/stdlib_hyper_execution_status.v1.json`
+- `artifacts/omega/gpu_runtime_attest_gate.v1.json`
 
 Primary reference page:
 - `docs/STDLIB_REFERENCE.md`
