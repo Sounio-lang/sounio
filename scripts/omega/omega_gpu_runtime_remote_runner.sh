@@ -7,6 +7,7 @@ cd "$ROOT_DIR"
 NONCE="${OMEGA_GPU_ATTEST_NONCE:-${1:-}}"
 MANIFEST_B64="${OMEGA_GPU_ATTEST_MANIFEST_B64:-${2:-}}"
 EXPECTED_VERSION="${SOUNIO_SOUC_VERSION:-unknown}"
+BOOTSTRAPPED_SOUC="${OMEGA_GPU_ATTEST_BOOTSTRAPPED_SOUC:-}"
 
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
@@ -231,7 +232,19 @@ SOUC_VERSION="unknown"
 RESOLVER_STATUS="fail"
 RESOLVER_LOG="$TMP_DIR/resolver.log"
 
-if [[ -x "$ROOT_DIR/scripts/omega/omega_resolve_souc_bin.sh" ]]; then
+if [[ -n "$BOOTSTRAPPED_SOUC" ]]; then
+  if [[ "$BOOTSTRAPPED_SOUC" = /* ]]; then
+    candidate_souc="$BOOTSTRAPPED_SOUC"
+  else
+    candidate_souc="$ROOT_DIR/$BOOTSTRAPPED_SOUC"
+  fi
+  if [[ -x "$candidate_souc" ]]; then
+    SOUC_BIN="$candidate_souc"
+    RESOLVER_STATUS="bootstrapped"
+  fi
+fi
+
+if [[ -z "$SOUC_BIN" && -x "$ROOT_DIR/scripts/omega/omega_resolve_souc_bin.sh" ]]; then
   set +e
   SOUC_BIN="$(SOUNIO_SOUC_VERSION="$EXPECTED_VERSION" OMEGA_SOUC_REQUIRE_PINNED=1 OMEGA_SOUC_ALLOW_LOCAL_FALLBACK=1 "$ROOT_DIR/scripts/omega/omega_resolve_souc_bin.sh" --print-path 2>"$RESOLVER_LOG")"
   resolver_rc=$?
@@ -350,7 +363,12 @@ if not souc_bin:
 if resolver_status == "fail":
     blockers.append("remote_env_missing")
 if probe_hash_mismatches:
-    blockers.append("probe_hash_mismatch")
+    blockers.append("attestation_invalid")
+for row in rows:
+    if row.get("name") == "gpu_backend_compile_smoke" and row.get("status") == "fail":
+        excerpt = str(row.get("error_excerpt", "")).lower()
+        if "gpu backend not enabled" in excerpt:
+            blockers.append("gpu_backend_unavailable")
 if any(r.get("status") == "fail" for r in rows):
     blockers.append("runtime_test_fail")
 

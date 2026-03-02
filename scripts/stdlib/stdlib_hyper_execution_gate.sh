@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT_DIR"
 
 OUT_JSON="${STDLIB_HYPER_STATUS_OUT:-$ROOT_DIR/artifacts/stdlib/stdlib_hyper_execution_status.v1.json}"
@@ -165,7 +165,7 @@ run_one "tests/stdlib/snn/test_snn_e2e.sio" "snn" "HYPER_SNN_OK"
 run_one "tests/stdlib/math/test_hyper_math_e2e.sio" "math" "HYPER_MATH_OK"
 
 set +e
-bash "$ROOT_DIR/scripts/scan_stdlib.sh" --json-out "$INVENTORY_JSON" --quiet
+bash "$ROOT_DIR/scripts/stdlib/scan_stdlib.sh" --json-out "$INVENTORY_JSON" --quiet
 scan_rc=$?
 set -e
 if [[ $scan_rc -ne 0 || ! -s "$INVENTORY_JSON" ]]; then

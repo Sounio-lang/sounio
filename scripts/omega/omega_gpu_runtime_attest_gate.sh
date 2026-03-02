@@ -11,8 +11,49 @@ GPU_HOST="${GPU_HOST:-10.100.100.215}"
 GPU_USER="${GPU_USER:-demetrios}"
 REMOTE_DIR="${REMOTE_DIR:-~/work/sounio}"
 REMOTE_BOOTSTRAP="${OMEGA_GPU_RUNTIME_BOOTSTRAP:-1}"
+REMOTE_BOOTSTRAPPED_SOUC_REL="${OMEGA_GPU_REMOTE_BOOTSTRAPPED_SOUC_REL:-artifacts/omega/souc-bin/souc-linux-x86_64}"
 FRESHNESS_MAX_SEC="${OMEGA_GPU_ATTEST_FRESHNESS_MAX_SEC:-900}"
-EXPECTED_VERSION="${SOUNIO_SOUC_VERSION:-1.0.0-beta.4}"
+EXPECTED_VERSION_SOURCE_PATH="$ROOT_DIR/scripts/omega/omega_resolve_souc_bin.sh"
+EXPECTED_VERSION_SOURCE="env:SOUNIO_SOUC_VERSION"
+if [[ -n "${SOUNIO_SOUC_VERSION:-}" ]]; then
+  EXPECTED_VERSION="${SOUNIO_SOUC_VERSION}"
+else
+  EXPECTED_VERSION="$(python3 - "$EXPECTED_VERSION_SOURCE_PATH" <<'PY'
+import re
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+if not path.exists():
+    print("")
+    raise SystemExit(0)
+src = path.read_text(encoding="utf-8", errors="replace")
+match = re.search(r'SOUC_VERSION="\$\{SOUNIO_SOUC_VERSION:-([^}]+)\}"', src)
+print(match.group(1) if match else "")
+PY
+)"
+  if [[ -n "$EXPECTED_VERSION" ]]; then
+    EXPECTED_VERSION_SOURCE="resolver_default"
+  else
+    EXPECTED_VERSION="1.0.0-beta.4"
+    EXPECTED_VERSION_SOURCE="fallback_default"
+  fi
+fi
+LOCAL_PINNED_SOUC_PATH=""
+if [[ -x "$EXPECTED_VERSION_SOURCE_PATH" ]]; then
+  set +e
+  LOCAL_PINNED_SOUC_PATH="$(
+    SOUNIO_SOUC_VERSION="$EXPECTED_VERSION" \
+    OMEGA_SOUC_REQUIRE_PINNED=1 \
+    OMEGA_SOUC_ALLOW_LOCAL_FALLBACK=1 \
+      "$EXPECTED_VERSION_SOURCE_PATH" --print-path 2>>"$LOG_PATH"
+  )"
+  local_souc_rc=$?
+  set -e
+  if [[ $local_souc_rc -ne 0 || ! -x "$LOCAL_PINNED_SOUC_PATH" ]]; then
+    LOCAL_PINNED_SOUC_PATH=""
+  fi
+fi
 
 PROBE_FILES=(
   "tests/selfhost/gpu_runtime/test_gpu_runtime_literal.sio"
@@ -77,6 +118,15 @@ remote_bootstrap_sync() {
     return 15
   fi
 
+  if [[ -n "${LOCAL_PINNED_SOUC_PATH:-}" && -x "${LOCAL_PINNED_SOUC_PATH}" ]]; then
+    if ! ssh "${ssh_opts[@]}" "$host" "mkdir -p ${dir}/artifacts/omega/souc-bin" >/dev/null 2>&1; then
+      return 16
+    fi
+    if ! cat "${LOCAL_PINNED_SOUC_PATH}" | ssh "${ssh_opts[@]}" "$host" "cat > ${dir}/${REMOTE_BOOTSTRAPPED_SOUC_REL} && chmod +x ${dir}/${REMOTE_BOOTSTRAPPED_SOUC_REL}" >>"$LOG_PATH" 2>&1; then
+      return 17
+    fi
+  fi
+
   return 0
 }
 
@@ -91,7 +141,7 @@ emit_status_json() {
   local tests_json="$8"
   local gpu_info="$9"
   local nonce="${10}"
-  python3 - "$OUT_JSON" "$status" "$reason" "$MODE" "$GPU_HOST" "$GPU_USER" "$REMOTE_DIR" "$signature_valid" "$souc_path" "$souc_version" "$EXPECTED_VERSION" "$remote_json" "$blockers_json" "$tests_json" "$gpu_info" "$nonce" "$LOG_PATH" <<'PY'
+  python3 - "$OUT_JSON" "$status" "$reason" "$MODE" "$GPU_HOST" "$GPU_USER" "$REMOTE_DIR" "$signature_valid" "$souc_path" "$souc_version" "$EXPECTED_VERSION" "$remote_json" "$blockers_json" "$tests_json" "$gpu_info" "$nonce" "$LOG_PATH" "$EXPECTED_VERSION_SOURCE" "$EXPECTED_VERSION_SOURCE_PATH" "$LOCAL_PINNED_SOUC_PATH" "$REMOTE_BOOTSTRAPPED_SOUC_REL" <<'PY'
 import datetime
 import json
 from pathlib import Path
@@ -114,6 +164,10 @@ tests_json = sys.argv[14]
 gpu_info = sys.argv[15]
 nonce = sys.argv[16]
 log_path = Path(sys.argv[17])
+expected_version_source = sys.argv[18]
+expected_version_source_path = sys.argv[19]
+local_pinned_souc_path = sys.argv[20]
+remote_bootstrapped_souc_rel = sys.argv[21]
 
 try:
     remote_obj = json.loads(remote_json) if remote_json else {}
@@ -143,6 +197,13 @@ obj = {
     "souc_path": souc_path,
     "souc_version": souc_version,
     "souc_version_expected": expected_version,
+    "version_provenance": {
+        "expected_source": expected_version_source,
+        "expected_source_path": expected_version_source_path,
+        "resolved_expected_version": expected_version,
+        "local_pinned_souc_path": local_pinned_souc_path,
+        "remote_bootstrapped_souc_rel": remote_bootstrapped_souc_rel,
+    },
     "signature_valid": signature_valid,
     "gpu_info": gpu_info,
     "tests": tests,
@@ -151,6 +212,11 @@ obj = {
         f"reason={reason}",
         f"log_path={str(log_path)}",
         "required_test_set=gpu_runtime_literal,gpu_runtime_file_text,gpu_runtime_file_binary,gpu_runtime_dynamic_slice,gpu_backend_compile_smoke,gpu_kernel_basic_runtime_smoke",
+        f"expected_version_source={expected_version_source}",
+        f"expected_version_source_path={expected_version_source_path}",
+        f"resolved_expected_version={expected_version}",
+        f"local_pinned_souc_path={local_pinned_souc_path}",
+        f"remote_bootstrapped_souc_rel={remote_bootstrapped_souc_rel}",
     ],
 }
 out_path.write_text(json.dumps(obj, indent=2) + "\n", encoding="utf-8")
@@ -240,7 +306,7 @@ trap 'rm -f "$REMOTE_OUT"' EXIT
 
 set +e
 ssh "${SSH_OPTS[@]}" "${GPU_USER}@${GPU_HOST}" \
-  "cd ${REMOTE_DIR} && OMEGA_GPU_ATTEST_NONCE='${NONCE}' OMEGA_GPU_ATTEST_MANIFEST_B64='${MANIFEST_B64}' SOUNIO_SOUC_VERSION='${EXPECTED_VERSION}' bash scripts/omega/omega_gpu_runtime_remote_runner.sh" \
+  "cd ${REMOTE_DIR} && OMEGA_GPU_ATTEST_NONCE='${NONCE}' OMEGA_GPU_ATTEST_MANIFEST_B64='${MANIFEST_B64}' OMEGA_GPU_ATTEST_BOOTSTRAPPED_SOUC='${REMOTE_BOOTSTRAPPED_SOUC_REL}' SOUNIO_SOUC_VERSION='${EXPECTED_VERSION}' bash scripts/omega/omega_gpu_runtime_remote_runner.sh" \
   >"$REMOTE_OUT" 2>"$LOG_PATH"
 remote_rc=$?
 set -e
