@@ -101,6 +101,8 @@ fn lower_instr(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut, P
         lower_g2_dense_o(nc, instr)
     } else if instr.op == IrOpcode::IrG2EquivDenseKernelO {
         lower_g2_equiv_dense_kernel_o(nc, instr)
+    } else if instr.op == IrOpcode::IrE8RootReflectO {
+        lower_e8_root_reflect_o(nc, instr)
     } else {
         // Unsupported opcode — skip silently for bootstrap
         nc
@@ -1417,5 +1419,63 @@ fn lower_g2_equiv_dense_kernel_o(nc: NativeCompiler, instr: IrInstr) -> NativeCo
     c.code = b
     // Step 5: masked store — VMOVAPD{k}{z} dst, accum  (map=1, opcode=0x28, src1=0→vvvv=1111)
     c.code = emit_evex_pd_rr_full(c.code, 1, 0x28, dst, 0, accum, vl, mask_k, zb)
+    c
+}
+
+// IrE8RootReflectO — E₈ Weyl group root reflection (H3.9)
+//
+// Computes s_α(v) = v − ⟨v,α⟩·α for a unit root α in ℝ⁸ (all E₈ roots have ⟨α,α⟩=2,
+// but the algorithm uses ⟨v,α⟩ directly since the normalisation cancels).
+//
+// 8-wide f64 ZMM layout: lanes 0-7 carry the 8 Cartan coordinates.
+//
+// Algorithm (8 instructions / 48 bytes):
+//   1. VMULPD   t, v, α                       — t = v * α  (elementwise)
+//   2. VPERMPD  t2, ctrl0, t  (swap halves)   — t2 = t[4..7, 0..3]
+//   3. VADDPD   t, t, t2                      — t[i] = t[i] + t[i^4]  (8→4 partial)
+//   4. VPERMPD  t2, ctrl1, t  (swap pairs)    — t2 = t[2,3,0,1,6,7,4,5]
+//   5. VADDPD   t, t, t2                      — t[i] += t[i^2]        (4→2 partial)
+//   6. VPERMPD  t2, ctrl2, t  (swap adjacent) — t2 = t[1,0,3,2,5,4,7,6]
+//   7. VADDPD   t, t, t2                      — t[i] += t[i^1] = ⟨v,α⟩ (broadcast)
+//   8. VFNMADD231PD v, t, α                   — v = v − t·α
+//
+// Encoding:
+//   dst      = v ZMM (input/output)
+//   src1     = α ZMM (root, read-only)
+//   src2     = t ZMM (dot-product scratch)
+//   t2       = src2 + 2 (caller must leave ZMM free)
+//   ctrl_base = (label_id >> 4) & 0xF
+//     ctrl_base+0: ZMM with permutation [4,5,6,7,0,1,2,3]
+//     ctrl_base+1: ZMM with permutation [2,3,0,1,6,7,4,5]
+//     ctrl_base+2: ZMM with permutation [1,0,3,2,5,4,7,6]
+//   mask_k   = label_id & 7
+//   z-bit    = imm_flags & 1  (applied only to final VFNMADD)
+fn lower_e8_root_reflect_o(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut, Panic, Div {
+    var c = nc
+    let vl        = 2   // ZMM
+    let mask_k    = instr.label_id & 7
+    let zb        = instr.imm_flags & 1
+    let ctrl_base = (instr.label_id >> 4) & 0xF
+    let v         = instr.dst
+    let alpha     = instr.src1
+    let t         = instr.src2
+    let t2        = instr.src2 + 2
+    // 1. VMULPD t, v, α  (elementwise product)
+    c.code = emit_evex_pd_rr_full(c.code, 1, 0x59, t, v, alpha, vl, 0, 0)
+    // 2. VPERMPD t2, ctrl0, t  (swap 4-element halves → begin 8→4 partial sum)
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0x16, t2, ctrl_base + 0, t, vl, 0, 0)
+    // 3. VADDPD t, t, t2
+    c.code = emit_evex_pd_rr_full(c.code, 1, 0x58, t, t, t2, vl, 0, 0)
+    // 4. VPERMPD t2, ctrl1, t  (swap 2-element pairs → 4→2 partial)
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0x16, t2, ctrl_base + 1, t, vl, 0, 0)
+    // 5. VADDPD t, t, t2
+    c.code = emit_evex_pd_rr_full(c.code, 1, 0x58, t, t, t2, vl, 0, 0)
+    // 6. VPERMPD t2, ctrl2, t  (swap adjacent → 2→1 broadcast)
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0x16, t2, ctrl_base + 2, t, vl, 0, 0)
+    // 7. VADDPD t, t, t2  → t = ⟨v,α⟩ broadcast to all 8 lanes
+    c.code = emit_evex_pd_rr_full(c.code, 1, 0x58, t, t, t2, vl, 0, 0)
+    // 8. VFNMADD231PD v{mask_k}{z}, t, α  → v = v − t·α = s_α(v)
+    //   VFNMADD231PD: map=2, opcode=0xBC   semantics: dst = dst − src1*src2
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0xBC, v, t, alpha, vl, mask_k, zb)
     c
 }

@@ -1,0 +1,150 @@
+// self-hosted::native::test_e8
+//
+// Horizon 3.9 — E₈ root reflection byte-level verification.
+//
+// IrE8RootReflectO: 8 instructions / 48 bytes
+//   s_α(v) = v − ⟨v,α⟩·α on a ZMM carrying 8 f64 Cartan coordinates.
+//
+// Instruction sequence:
+//   VMULPD     (t = v·α)                           — map=1 opcode=0x59 (6B)
+//   VPERMPD    (swap halves,  ctrl0)                — map=2 opcode=0x16 (6B)
+//   VADDPD     (partial sum)                        — map=1 opcode=0x58 (6B)
+//   VPERMPD    (swap pairs,   ctrl1)                — map=2 opcode=0x16 (6B)
+//   VADDPD     (partial sum)                        — map=1 opcode=0x58 (6B)
+//   VPERMPD    (swap adjacent,ctrl2)                — map=2 opcode=0x16 (6B)
+//   VADDPD     (dot product broadcast)              — map=1 opcode=0x58 (6B)
+//   VFNMADD231PD (v = v − ⟨v,α⟩·α)                — map=2 opcode=0xBC (6B)
+//
+//@ run-pass
+
+use native::encode::{CodeBuffer, code_buffer_new, emit_byte}
+
+// ---- Minimal EVEX helpers (inlined; te8_ prefix) ----
+
+fn te8_bit(val: i64, n: i64) -> i64 { (val >> n) & 1 }
+fn te8_inv(b: i64) -> i64 { if b == 0 { 1 } else { 0 } }
+fn te8_lo3(id: i64) -> i64 { id & 7 }
+
+fn te8_p1(dst_id: i64, src2_id: i64, map: i64) -> i64 {
+    let r_inv  = te8_inv(te8_bit(dst_id,  3))
+    let b_inv  = te8_inv(te8_bit(src2_id, 3))
+    let rp_inv = te8_inv(te8_bit(dst_id,  4))
+    (r_inv << 7) | (1 << 6) | (b_inv << 5) | (rp_inv << 4) | (map & 0xF)
+}
+
+fn te8_p2_pd(src1_id: i64) -> i64 {
+    let vvvv_inv = (0 - src1_id - 1) & 0xF
+    0x80 | (vvvv_inv << 3) | 0x4 | 0x1
+}
+
+fn te8_p3_vl_full(src1_id: i64, vl_code: i64, mask_k: i64, z_bit: i64) -> i64 {
+    let vp_inv = te8_inv(te8_bit(src1_id, 4))
+    ((z_bit & 1) << 7) | ((vl_code & 3) << 5) | (vp_inv << 3) | (mask_k & 7)
+}
+
+fn te8_emit(buf: CodeBuffer, map: i64, opcode: i64, dst: i64, src1: i64, src2: i64, vl: i64, mask_k: i64, z_bit: i64) -> CodeBuffer with Mut, Panic, Div {
+    var b = buf
+    b = emit_byte(b, 0x62)
+    b = emit_byte(b, te8_p1(dst, src2, map))
+    b = emit_byte(b, te8_p2_pd(src1))
+    b = emit_byte(b, te8_p3_vl_full(src1, vl, mask_k, z_bit))
+    b = emit_byte(b, opcode)
+    b = emit_byte(b, 0xC0 | (te8_lo3(dst) << 3) | te8_lo3(src2))
+    b
+}
+
+fn te8_read_byte(buf: CodeBuffer, idx: i64) -> i64 {
+    let x = buf.bytes[idx as usize] as i64
+    if x < 0 { x + 256 } else { x }
+}
+
+// ---- IrE8RootReflectO emitter (8 instructions, 48 bytes) ----
+// Registers: v=0, α=2, t=4, t2=6, ctrl_base=16, mask_k=1, z=1
+fn te8_emit_root_reflect_o(buf: CodeBuffer) -> CodeBuffer with Mut, Panic, Div {
+    var b = buf
+    let v          = 0     // input/output ZMM
+    let alpha      = 2     // root α ZMM (read-only)
+    let t          = 4     // dot-product scratch
+    let t2         = 6     // second scratch
+    let ctrl_base  = 16    // 3 permutation control ZMMs at 16, 17, 18
+    let vl         = 2     // ZMM
+    let mask_k     = 1
+    let zb         = 1
+    // 1. VMULPD t, v, α  (map=1, opcode=0x59)
+    b = te8_emit(b, 1, 0x59, t, v, alpha, vl, 0, 0)
+    // 2. VPERMPD t2, ctrl0, t  (swap halves, map=2, opcode=0x16)
+    b = te8_emit(b, 2, 0x16, t2, ctrl_base + 0, t, vl, 0, 0)
+    // 3. VADDPD t, t, t2  (map=1, opcode=0x58)
+    b = te8_emit(b, 1, 0x58, t, t, t2, vl, 0, 0)
+    // 4. VPERMPD t2, ctrl1, t  (swap pairs, map=2, opcode=0x16)
+    b = te8_emit(b, 2, 0x16, t2, ctrl_base + 1, t, vl, 0, 0)
+    // 5. VADDPD t, t, t2  (map=1, opcode=0x58)
+    b = te8_emit(b, 1, 0x58, t, t, t2, vl, 0, 0)
+    // 6. VPERMPD t2, ctrl2, t  (swap adjacent, map=2, opcode=0x16)
+    b = te8_emit(b, 2, 0x16, t2, ctrl_base + 2, t, vl, 0, 0)
+    // 7. VADDPD t, t, t2  → ⟨v,α⟩ broadcast  (map=1, opcode=0x58)
+    b = te8_emit(b, 1, 0x58, t, t, t2, vl, 0, 0)
+    // 8. VFNMADD231PD v{k1}{z}, t, α  → v = v − t·α  (map=2, opcode=0xBC)
+    b = te8_emit(b, 2, 0xBC, v, t, alpha, vl, mask_k, zb)
+    b
+}
+
+// ---- Tests ----
+
+// T01: IrE8RootReflectO — total encoding length == 48 bytes (8 instructions)
+fn t01_e8_root_reflect_len() -> bool with Mut, Panic, Div {
+    var buf = code_buffer_new()
+    buf = te8_emit_root_reflect_o(buf)
+    buf.len == 48
+}
+
+// T02: IrE8RootReflectO — first instruction VMULPD: opcode at byte 4 == 0x59
+fn t02_e8_root_reflect_vmulpd_opcode() -> bool with Mut, Panic, Div {
+    var buf = code_buffer_new()
+    buf = te8_emit_root_reflect_o(buf)
+    te8_read_byte(buf, 4) == 0x59
+}
+
+// T03: IrE8RootReflectO — first VPERMPD (swap halves): opcode at byte 10 == 0x16
+fn t03_e8_root_reflect_first_vpermpd() -> bool with Mut, Panic, Div {
+    var buf = code_buffer_new()
+    buf = te8_emit_root_reflect_o(buf)
+    te8_read_byte(buf, 10) == 0x16
+}
+
+// T04: IrE8RootReflectO — first VADDPD (partial sum): opcode at byte 16 == 0x58
+fn t04_e8_root_reflect_first_vaddpd() -> bool with Mut, Panic, Div {
+    var buf = code_buffer_new()
+    buf = te8_emit_root_reflect_o(buf)
+    te8_read_byte(buf, 16) == 0x58
+}
+
+// T05: IrE8RootReflectO — final VFNMADD231PD: opcode at byte 46 == 0xBC
+//   bytes 0-41: 7 × 6-byte instructions; VFNMADD231PD at byte 42
+//   EVEX: 0x62[42] P1[43] P2[44] P3[45] opcode[46] ModRM[47]
+fn t05_e8_root_reflect_vfnmadd_opcode() -> bool with Mut, Panic, Div {
+    var buf = code_buffer_new()
+    buf = te8_emit_root_reflect_o(buf)
+    te8_read_byte(buf, 46) == 0xBC
+}
+
+// T06: IrE8RootReflectO — second VPERMPD (swap pairs) at byte 22 == 0x16
+fn t06_e8_root_reflect_second_vpermpd() -> bool with Mut, Panic, Div {
+    var buf = code_buffer_new()
+    buf = te8_emit_root_reflect_o(buf)
+    te8_read_byte(buf, 22) == 0x16
+}
+
+fn main() -> i32 with IO, Mut, Panic, Div {
+    var pass = 0
+    var fail = 0
+
+    if t01_e8_root_reflect_len()              { pass = pass + 1 } else { fail = fail + 1 }
+    if t02_e8_root_reflect_vmulpd_opcode()    { pass = pass + 1 } else { fail = fail + 1 }
+    if t03_e8_root_reflect_first_vpermpd()    { pass = pass + 1 } else { fail = fail + 1 }
+    if t04_e8_root_reflect_first_vaddpd()     { pass = pass + 1 } else { fail = fail + 1 }
+    if t05_e8_root_reflect_vfnmadd_opcode()   { pass = pass + 1 } else { fail = fail + 1 }
+    if t06_e8_root_reflect_second_vpermpd()   { pass = pass + 1 } else { fail = fail + 1 }
+
+    if fail == 0 { 0 } else { 1 }
+}

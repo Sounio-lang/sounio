@@ -1,0 +1,183 @@
+// self-hosted::native::bench_g2_vs_naive
+//
+// Instruction-density benchmark: G₂-equivariant kernel vs naive 7×7 dense
+// vs E₈ root reflection.
+//
+// All three kernels operate on ZMM registers (8 f64 lanes, 512-bit):
+//
+//   Naive 7×7 dense (no equivariance):
+//     16 instructions / 96 bytes
+//     Parameters: 49 (full 7×7 weight matrix)
+//
+//   G₂-equivariant dense kernel (H3.8):
+//     18 instructions / 109 bytes
+//     Parameters: 14 (one scalar per 𝔤₂ generator)
+//     Overhead vs naive: +2 instr (+projection, +IEEE clamp)
+//     Parameter reduction: 3.5× (49 → 14)
+//
+//   E₈ root reflection (H3.9):
+//     8 instructions / 48 bytes
+//     Parameters: 0 (fully determined by the root lattice)
+//     Acts on: rank-8 Cartan subalgebra ℝ⁸ ≅ 8 f64 lanes
+//
+//@ run-pass
+
+use native::encode::{CodeBuffer, code_buffer_new, emit_byte}
+
+// ---- EVEX emit helper (bm_ prefix) ----
+
+fn bm_bit(val: i64, n: i64) -> i64 { (val >> n) & 1 }
+fn bm_inv(b: i64) -> i64 { if b == 0 { 1 } else { 0 } }
+fn bm_lo3(id: i64) -> i64 { id & 7 }
+
+fn bm_p1(dst_id: i64, src2_id: i64, map: i64) -> i64 {
+    let r_inv  = bm_inv(bm_bit(dst_id,  3))
+    let b_inv  = bm_inv(bm_bit(src2_id, 3))
+    let rp_inv = bm_inv(bm_bit(dst_id,  4))
+    (r_inv << 7) | (1 << 6) | (b_inv << 5) | (rp_inv << 4) | (map & 0xF)
+}
+
+fn bm_p2_pd(src1_id: i64) -> i64 {
+    let vvvv_inv = (0 - src1_id - 1) & 0xF
+    0x80 | (vvvv_inv << 3) | 0x4 | 0x1
+}
+
+fn bm_p3_vl(src1_id: i64, vl_code: i64, mask_k: i64, z_bit: i64) -> i64 {
+    let vp_inv = bm_inv(bm_bit(src1_id, 4))
+    ((z_bit & 1) << 7) | ((vl_code & 3) << 5) | (vp_inv << 3) | (mask_k & 7)
+}
+
+fn bm_emit(buf: CodeBuffer, map: i64, opcode: i64, dst: i64, src1: i64, src2: i64, vl: i64, mk: i64, zb: i64) -> CodeBuffer with Mut, Panic, Div {
+    var b = buf
+    b = emit_byte(b, 0x62)
+    b = emit_byte(b, bm_p1(dst, src2, map))
+    b = emit_byte(b, bm_p2_pd(src1))
+    b = emit_byte(b, bm_p3_vl(src1, vl, mk, zb))
+    b = emit_byte(b, opcode)
+    b = emit_byte(b, 0xC0 | (bm_lo3(dst) << 3) | bm_lo3(src2))
+    b
+}
+
+// ---- Naive 7×7 dense (IrG2ApplyGenO-equivalent, unmasked) ----
+// VXORPD + 7×(VPERMPD + VFMADD231PD) + VMOVAPD = 16 instr / 96 bytes
+fn bm_naive_dense(buf: CodeBuffer) -> CodeBuffer with Mut, Panic, Div {
+    var b = buf
+    let src = 0; let dst = 2; let t = 4; let acc = 6
+    let cb = 16; let bb = 9; let vl = 2
+    b = bm_emit(b, 1, 0x57, acc, acc, acc, vl, 0, 0)
+    b = bm_emit(b, 2, 0x16, t, bb+0, src, vl, 0, 0)
+    b = bm_emit(b, 2, 0xB8, acc, t, cb+0, vl, 0, 0)
+    b = bm_emit(b, 2, 0x16, t, bb+1, src, vl, 0, 0)
+    b = bm_emit(b, 2, 0xB8, acc, t, cb+1, vl, 0, 0)
+    b = bm_emit(b, 2, 0x16, t, bb+2, src, vl, 0, 0)
+    b = bm_emit(b, 2, 0xB8, acc, t, cb+2, vl, 0, 0)
+    b = bm_emit(b, 2, 0x16, t, bb+3, src, vl, 0, 0)
+    b = bm_emit(b, 2, 0xB8, acc, t, cb+3, vl, 0, 0)
+    b = bm_emit(b, 2, 0x16, t, bb+4, src, vl, 0, 0)
+    b = bm_emit(b, 2, 0xB8, acc, t, cb+4, vl, 0, 0)
+    b = bm_emit(b, 2, 0x16, t, bb+5, src, vl, 0, 0)
+    b = bm_emit(b, 2, 0xB8, acc, t, cb+5, vl, 0, 0)
+    b = bm_emit(b, 2, 0x16, t, bb+6, src, vl, 0, 0)
+    b = bm_emit(b, 2, 0xB8, acc, t, cb+6, vl, 0, 0)
+    b = bm_emit(b, 1, 0x28, dst, 0, acc, vl, 0, 0)
+    b
+}
+
+// ---- G₂ equivariant dense kernel (H3.8) ----
+// VANDPD + VXORPD + 7×(VPERMPD+VFMADD) + VMINMAXPD{k}{z}+imm8 + VMOVAPD{k}{z}
+// 18 instr / 109 bytes  (parameter-efficient: 14 vs 49)
+fn bm_g2_equiv_dense(buf: CodeBuffer) -> CodeBuffer with Mut, Panic, Div {
+    var b = buf
+    let src = 0; let dst = 2; let t = 4; let acc = 6
+    let cb = 16; let bb = 9; let imag = 24; let vl = 2; let mk = 1; let zb = 1
+    b = bm_emit(b, 1, 0x54, dst, src, imag, vl, 0, 0)
+    b = bm_emit(b, 1, 0x57, acc, acc, acc, vl, 0, 0)
+    b = bm_emit(b, 2, 0x16, t, bb+0, dst, vl, 0, 0)
+    b = bm_emit(b, 2, 0xB8, acc, t, cb+0, vl, 0, 0)
+    b = bm_emit(b, 2, 0x16, t, bb+1, dst, vl, 0, 0)
+    b = bm_emit(b, 2, 0xB8, acc, t, cb+1, vl, 0, 0)
+    b = bm_emit(b, 2, 0x16, t, bb+2, dst, vl, 0, 0)
+    b = bm_emit(b, 2, 0xB8, acc, t, cb+2, vl, 0, 0)
+    b = bm_emit(b, 2, 0x16, t, bb+3, dst, vl, 0, 0)
+    b = bm_emit(b, 2, 0xB8, acc, t, cb+3, vl, 0, 0)
+    b = bm_emit(b, 2, 0x16, t, bb+4, dst, vl, 0, 0)
+    b = bm_emit(b, 2, 0xB8, acc, t, cb+4, vl, 0, 0)
+    b = bm_emit(b, 2, 0x16, t, bb+5, dst, vl, 0, 0)
+    b = bm_emit(b, 2, 0xB8, acc, t, cb+5, vl, 0, 0)
+    b = bm_emit(b, 2, 0x16, t, bb+6, dst, vl, 0, 0)
+    b = bm_emit(b, 2, 0xB8, acc, t, cb+6, vl, 0, 0)
+    var bv = bm_emit(b, 5, 0x52, acc, acc, acc, vl, mk, zb)
+    bv = emit_byte(bv, 0x00)
+    bv = bm_emit(bv, 1, 0x28, dst, 0, acc, vl, mk, zb)
+    bv
+}
+
+// ---- E₈ root reflection (H3.9) ----
+// VMULPD + 3×(VPERMPD+VADDPD) + VFNMADD231PD = 8 instr / 48 bytes
+fn bm_e8_reflect(buf: CodeBuffer) -> CodeBuffer with Mut, Panic, Div {
+    var b = buf
+    let v = 0; let al = 2; let t = 4; let t2 = 6; let cb = 16; let vl = 2
+    b = bm_emit(b, 1, 0x59, t, v, al, vl, 0, 0)
+    b = bm_emit(b, 2, 0x16, t2, cb+0, t, vl, 0, 0)
+    b = bm_emit(b, 1, 0x58, t, t, t2, vl, 0, 0)
+    b = bm_emit(b, 2, 0x16, t2, cb+1, t, vl, 0, 0)
+    b = bm_emit(b, 1, 0x58, t, t, t2, vl, 0, 0)
+    b = bm_emit(b, 2, 0x16, t2, cb+2, t, vl, 0, 0)
+    b = bm_emit(b, 1, 0x58, t, t, t2, vl, 0, 0)
+    b = bm_emit(b, 2, 0xBC, v, t, al, vl, 1, 1)
+    b
+}
+
+// ---- Benchmark assertions ----
+
+// BM01: Naive 7×7 dense = 96 bytes (16 instructions)
+fn bm01_naive_96() -> bool with Mut, Panic, Div {
+    var buf = code_buffer_new()
+    buf = bm_naive_dense(buf)
+    buf.len == 96
+}
+
+// BM02: G₂ equivariant = 109 bytes (18 instructions, 14 parameters)
+fn bm02_g2_109() -> bool with Mut, Panic, Div {
+    var buf = code_buffer_new()
+    buf = bm_g2_equiv_dense(buf)
+    buf.len == 109
+}
+
+// BM03: E₈ reflection = 48 bytes (8 instructions)
+fn bm03_e8_48() -> bool with Mut, Panic, Div {
+    var buf = code_buffer_new()
+    buf = bm_e8_reflect(buf)
+    buf.len == 48
+}
+
+// BM04: G₂ kernel is larger than naive (equivariance + IEEE clamp overhead: +13 bytes)
+fn bm04_g2_overhead_vs_naive() -> bool with Mut, Panic, Div {
+    var naive = code_buffer_new()
+    naive = bm_naive_dense(naive)
+    var g2 = code_buffer_new()
+    g2 = bm_g2_equiv_dense(g2)
+    g2.len > naive.len
+}
+
+// BM05: E₈ reflection is smallest — algebraic action in fewest bytes
+fn bm05_e8_smallest() -> bool with Mut, Panic, Div {
+    var e8 = code_buffer_new()
+    e8 = bm_e8_reflect(e8)
+    var naive = code_buffer_new()
+    naive = bm_naive_dense(naive)
+    e8.len < naive.len
+}
+
+fn main() -> i32 with IO, Mut, Panic, Div {
+    var pass = 0
+    var fail = 0
+
+    if bm01_naive_96()              { pass = pass + 1 } else { fail = fail + 1 }
+    if bm02_g2_109()                { pass = pass + 1 } else { fail = fail + 1 }
+    if bm03_e8_48()                 { pass = pass + 1 } else { fail = fail + 1 }
+    if bm04_g2_overhead_vs_naive()  { pass = pass + 1 } else { fail = fail + 1 }
+    if bm05_e8_smallest()           { pass = pass + 1 } else { fail = fail + 1 }
+
+    if fail == 0 { 0 } else { 1 }
+}
