@@ -1,0 +1,132 @@
+// self-hosted::native::vec_ieee754
+//
+// IEEE 754-2019 clause 9.6 — named predicate constants for VMINMAXPD (MAP5 0x52)
+// and scalar reference implementations for numerical correctness testing.
+//
+// VMINMAXPD imm8 bit layout:
+//   Bits [1:0]: operation base — 00=minimum  01=maximum  10=minimumMagnitude  11=maximumMagnitude
+//   Bit  [4]:  NaN mode        — 0=propagating (any NaN → NaN)  1=Number (NaN+num → num)
+//   Bits [3:2]: sign control   — 00=from src1  01=from winner  10=force+  11=force-
+//
+// The 8 recommended operations (IEEE 754-2019 §9.6):
+//   minimum                — propagating; -0.0 < +0.0
+//   maximum                — propagating; -0.0 < +0.0
+//   minimumMagnitude       — compare |x|,|y| then return that element
+//   maximumMagnitude       — compare |x|,|y| then return that element
+//   minimumNumber          — non-propagating (NaN→return the number)
+//   maximumNumber          — non-propagating
+//   minimumMagnitudeNumber — non-propagating magnitude
+//   maximumMagnitudeNumber — non-propagating magnitude
+
+// ============================================================================
+// Named imm8 predicate constants
+// ============================================================================
+
+let VEC_MINIMUM:               i64 = 0x00  // minimum            (NaN propagates)
+let VEC_MAXIMUM:               i64 = 0x01  // maximum            (NaN propagates)
+let VEC_MINIMUM_MAGNITUDE:     i64 = 0x02  // minimumMagnitude   (NaN propagates)
+let VEC_MAXIMUM_MAGNITUDE:     i64 = 0x03  // maximumMagnitude   (NaN propagates)
+let VEC_MINIMUM_NUMBER:        i64 = 0x10  // minimumNumber      (NaN → return number)
+let VEC_MAXIMUM_NUMBER:        i64 = 0x11  // maximumNumber      (NaN → return number)
+let VEC_MINIMUM_MAGNITUDE_NUM: i64 = 0x12  // minimumMagnitudeNumber
+let VEC_MAXIMUM_MAGNITUDE_NUM: i64 = 0x13  // maximumMagnitudeNumber
+
+// ============================================================================
+// Scalar reference implementations — used by tests to compare against hardware
+// ============================================================================
+
+// NaN detection: x != x iff x is NaN (IEEE 754 property)
+fn ref_is_nan(x: f64) -> bool { x != x }
+
+// Signed-zero detection: -0.0 and +0.0 compare equal via ==, but differ in sign bit.
+// We detect -0.0 as: x == 0.0 AND (1.0 / x) < 0.0.
+fn ref_is_neg_zero(x: f64) -> bool with Div, Panic {
+    if x == 0.0 {
+        let recip = 1.0 / x
+        recip < 0.0
+    } else {
+        false
+    }
+}
+
+// IEEE 754-2019 minimum: NaN propagates; -0.0 < +0.0
+fn ref_minimum(x: f64, y: f64) -> f64 with Div, Panic {
+    if ref_is_nan(x) { x }
+    else if ref_is_nan(y) { y }
+    else if x < y { x }
+    else if y < x { y }
+    // tie: both zero — return the one with negative sign
+    else if ref_is_neg_zero(x) { x }
+    else { y }
+}
+
+// IEEE 754-2019 maximum: NaN propagates; -0.0 < +0.0
+fn ref_maximum(x: f64, y: f64) -> f64 with Div, Panic {
+    if ref_is_nan(x) { x }
+    else if ref_is_nan(y) { y }
+    else if x > y { x }
+    else if y > x { y }
+    // tie: both zero — return the one with positive sign
+    else if ref_is_neg_zero(y) { x }
+    else { y }
+}
+
+// IEEE 754-2019 minimumNumber: NaN is treated as missing data
+fn ref_minimum_number(x: f64, y: f64) -> f64 with Div, Panic {
+    if ref_is_nan(x) && ref_is_nan(y) { x }   // both NaN → quiet NaN
+    else if ref_is_nan(x) { y }                // x is NaN → return y
+    else if ref_is_nan(y) { x }                // y is NaN → return x
+    else ref_minimum(x, y)                     // neither NaN → normal minimum
+}
+
+// IEEE 754-2019 maximumNumber: NaN is treated as missing data
+fn ref_maximum_number(x: f64, y: f64) -> f64 with Div, Panic {
+    if ref_is_nan(x) && ref_is_nan(y) { x }
+    else if ref_is_nan(x) { y }
+    else if ref_is_nan(y) { x }
+    else ref_maximum(x, y)
+}
+
+// Absolute value helper (no stdlib dependency)
+fn ref_abs(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+
+// IEEE 754-2019 minimumMagnitude: compare |x| and |y|; use minimum for ties
+fn ref_minimum_magnitude(x: f64, y: f64) -> f64 with Div, Panic {
+    if ref_is_nan(x) { x }
+    else if ref_is_nan(y) { y }
+    else {
+        let ax = ref_abs(x)
+        let ay = ref_abs(y)
+        if ax < ay { x }
+        else if ay < ax { y }
+        else ref_minimum(x, y)  // equal magnitude → signed-zero rule
+    }
+}
+
+// IEEE 754-2019 maximumMagnitude
+fn ref_maximum_magnitude(x: f64, y: f64) -> f64 with Div, Panic {
+    if ref_is_nan(x) { x }
+    else if ref_is_nan(y) { y }
+    else {
+        let ax = ref_abs(x)
+        let ay = ref_abs(y)
+        if ax > ay { x }
+        else if ay > ax { y }
+        else ref_maximum(x, y)
+    }
+}
+
+// Non-propagating magnitude variants
+fn ref_minimum_magnitude_number(x: f64, y: f64) -> f64 with Div, Panic {
+    if ref_is_nan(x) && ref_is_nan(y) { x }
+    else if ref_is_nan(x) { y }
+    else if ref_is_nan(y) { x }
+    else ref_minimum_magnitude(x, y)
+}
+
+fn ref_maximum_magnitude_number(x: f64, y: f64) -> f64 with Div, Panic {
+    if ref_is_nan(x) && ref_is_nan(y) { x }
+    else if ref_is_nan(x) { y }
+    else if ref_is_nan(y) { x }
+    else ref_maximum_magnitude(x, y)
+}

@@ -1,0 +1,160 @@
+// self-hosted::native::test_vec_minmax
+//
+// Horizon 3.4 — VMINMAXPD (MAP5 0x52) byte-level verification + masked-op P3 aaa bits.
+//
+// VMINMAXPD encoding (7 bytes):
+//   [0] 0x62   P0 fixed
+//   [1] P1     R X B R' 0 0 m m   (low nibble = map = 5 for MAP5)
+//   [2] P2     W vvvv4..1 1 pp
+//   [3] P3     z L'L b V' aaa
+//   [4] 0x52   opcode
+//   [5] ModRM  11 dst_lo3 src2_lo3
+//   [6] imm8   predicate byte (0=min ordered-quiet, 1=max ordered-quiet, …)
+//
+// Canonical probe: VMINMAXPD zmm0, zmm1, zmm2 imm8=0x00
+//   P1 = 0xF5  (R=1 X=1 B=1 R'=1 map=5)
+//   P2 = 0xF5  (W=1 vvvv=~1&F=E pp=01)
+//   P3 = 0x48  (L'L=10 V'=1 aaa=0)
+//   opcode  = 0x52
+//   ModRM   = 0xC2  (11 000 010)
+//   imm8    = 0x00
+//
+//@ run-pass
+
+use native::encode::{CodeBuffer, code_buffer_new, emit_byte}
+
+// ---- Minimal EVEX helpers (inlined; no lower_ir import needed) ----
+
+fn tvm_bit(val: i64, n: i64) -> i64 { (val >> n) & 1 }
+fn tvm_inv(b: i64) -> i64 { if b == 0 { 1 } else { 0 } }
+fn tvm_lo3(id: i64) -> i64 { id & 7 }
+
+fn tvm_p1(dst_id: i64, src2_id: i64, map: i64) -> i64 {
+    let r_inv  = tvm_inv(tvm_bit(dst_id,  3))
+    let b_inv  = tvm_inv(tvm_bit(src2_id, 3))
+    let rp_inv = tvm_inv(tvm_bit(dst_id,  4))
+    (r_inv << 7) | (1 << 6) | (b_inv << 5) | (rp_inv << 4) | (map & 0xF)
+}
+
+fn tvm_p2_pd(src1_id: i64) -> i64 {
+    let vvvv_inv = (0 - src1_id - 1) & 0xF
+    0x80 | (vvvv_inv << 3) | 0x4 | 0x1
+}
+
+fn tvm_p3_vl(src1_id: i64, vl_code: i64) -> i64 {
+    let vp_inv = tvm_inv(tvm_bit(src1_id, 4))
+    ((vl_code & 3) << 5) | (vp_inv << 3)
+}
+
+fn tvm_p3_vl_masked(src1_id: i64, vl_code: i64, mask_k: i64) -> i64 {
+    let vp_inv = tvm_inv(tvm_bit(src1_id, 4))
+    ((vl_code & 3) << 5) | (vp_inv << 3) | (mask_k & 7)
+}
+
+// vl_code: 0=XMM, 1=YMM, 2=ZMM
+fn tvm_emit_evex_pd_rr(buf: CodeBuffer, map: i64, opcode: i64, dst: i64, src1: i64, src2: i64, vl_code: i64) -> CodeBuffer with Mut, Panic, Div {
+    var b = buf
+    b = emit_byte(b, 0x62)
+    b = emit_byte(b, tvm_p1(dst, src2, map))
+    b = emit_byte(b, tvm_p2_pd(src1))
+    b = emit_byte(b, tvm_p3_vl(src1, vl_code))
+    b = emit_byte(b, opcode)
+    b = emit_byte(b, 0xC0 | (tvm_lo3(dst) << 3) | tvm_lo3(src2))
+    b
+}
+
+fn tvm_emit_evex_pd_rr_imm8(buf: CodeBuffer, map: i64, opcode: i64, dst: i64, src1: i64, src2: i64, vl_code: i64, imm8: i64) -> CodeBuffer with Mut, Panic, Div {
+    var b = tvm_emit_evex_pd_rr(buf, map, opcode, dst, src1, src2, vl_code)
+    b = emit_byte(b, imm8 & 0xFF)
+    b
+}
+
+fn tvm_emit_evex_pd_rr_masked(buf: CodeBuffer, map: i64, opcode: i64, dst: i64, src1: i64, src2: i64, vl_code: i64, mask_k: i64) -> CodeBuffer with Mut, Panic, Div {
+    var b = buf
+    b = emit_byte(b, 0x62)
+    b = emit_byte(b, tvm_p1(dst, src2, map))
+    b = emit_byte(b, tvm_p2_pd(src1))
+    b = emit_byte(b, tvm_p3_vl_masked(src1, vl_code, mask_k))
+    b = emit_byte(b, opcode)
+    b = emit_byte(b, 0xC0 | (tvm_lo3(dst) << 3) | tvm_lo3(src2))
+    b
+}
+
+fn tvm_read_byte(buf: CodeBuffer, idx: i64) -> i64 {
+    let x = buf.bytes[idx as usize] as i64
+    if x < 0 { x + 256 } else { x }
+}
+
+// ---- Tests ----
+
+// T01: VMINMAXPD ZMM encoding — total length is 7 bytes (6 EVEX + 1 imm8)
+fn t01_vminmaxpd_zmm_len() -> bool with Mut, Panic, Div {
+    var buf = code_buffer_new()
+    buf = tvm_emit_evex_pd_rr_imm8(buf, 5, 0x52, 0, 1, 2, 2, 0x00)
+    buf.len == 7
+}
+
+// T02: P1 low nibble = 5 (MAP5)
+fn t02_vminmaxpd_map5_p1() -> bool with Mut, Panic, Div {
+    var buf = code_buffer_new()
+    buf = tvm_emit_evex_pd_rr_imm8(buf, 5, 0x52, 0, 1, 2, 2, 0x00)
+    (tvm_read_byte(buf, 1) & 0xF) == 5
+}
+
+// T03: opcode byte at [4] = 0x52
+fn t03_vminmaxpd_opcode() -> bool with Mut, Panic, Div {
+    var buf = code_buffer_new()
+    buf = tvm_emit_evex_pd_rr_imm8(buf, 5, 0x52, 0, 1, 2, 2, 0x00)
+    tvm_read_byte(buf, 4) == 0x52
+}
+
+// T04: imm8=0x00 at byte[6]
+fn t04_vminmaxpd_imm8_zero() -> bool with Mut, Panic, Div {
+    var buf = code_buffer_new()
+    buf = tvm_emit_evex_pd_rr_imm8(buf, 5, 0x52, 0, 1, 2, 2, 0x00)
+    tvm_read_byte(buf, 6) == 0x00
+}
+
+// T05: VMINMAXPD YMM (vl_code=1) — P3 L'L bits [6:5] = 01 → (byte & 0x60) == 0x20
+fn t05_vminmaxpd_ymm_p3_ll() -> bool with Mut, Panic, Div {
+    var buf = code_buffer_new()
+    buf = tvm_emit_evex_pd_rr_imm8(buf, 5, 0x52, 0, 1, 2, 1, 0x00)
+    (tvm_read_byte(buf, 3) & 0x60) == 0x20
+}
+
+// T06: imm8=0x01 (max predicate) propagates to byte[6]
+fn t06_vminmaxpd_imm8_max() -> bool with Mut, Panic, Div {
+    var buf = code_buffer_new()
+    buf = tvm_emit_evex_pd_rr_imm8(buf, 5, 0x52, 0, 1, 2, 2, 0x01)
+    tvm_read_byte(buf, 6) == 0x01
+}
+
+// T07: Masked VADDPD with k1 — P3 aaa bits [2:0] = 1
+fn t07_vaddpd_masked_k1_p3_aaa() -> bool with Mut, Panic, Div {
+    var buf = code_buffer_new()
+    buf = tvm_emit_evex_pd_rr_masked(buf, 1, 0x58, 0, 1, 2, 2, 1)
+    (tvm_read_byte(buf, 3) & 7) == 1
+}
+
+// T08: Unmasked VADDPD — P3 aaa bits [2:0] = 0
+fn t08_vaddpd_unmasked_p3_aaa() -> bool with Mut, Panic, Div {
+    var buf = code_buffer_new()
+    buf = tvm_emit_evex_pd_rr(buf, 1, 0x58, 0, 1, 2, 2)
+    (tvm_read_byte(buf, 3) & 7) == 0
+}
+
+fn main() -> i32 with IO, Mut, Panic, Div {
+    var pass = 0
+    var fail = 0
+
+    if t01_vminmaxpd_zmm_len()        { pass = pass + 1 } else { fail = fail + 1 }
+    if t02_vminmaxpd_map5_p1()        { pass = pass + 1 } else { fail = fail + 1 }
+    if t03_vminmaxpd_opcode()         { pass = pass + 1 } else { fail = fail + 1 }
+    if t04_vminmaxpd_imm8_zero()      { pass = pass + 1 } else { fail = fail + 1 }
+    if t05_vminmaxpd_ymm_p3_ll()      { pass = pass + 1 } else { fail = fail + 1 }
+    if t06_vminmaxpd_imm8_max()       { pass = pass + 1 } else { fail = fail + 1 }
+    if t07_vaddpd_masked_k1_p3_aaa()  { pass = pass + 1 } else { fail = fail + 1 }
+    if t08_vaddpd_unmasked_p3_aaa()   { pass = pass + 1 } else { fail = fail + 1 }
+
+    if fail == 0 { 0 } else { 1 }
+}

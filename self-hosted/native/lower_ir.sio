@@ -65,6 +65,8 @@ fn lower_instr(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut, P
         lower_vec_fma(nc, instr)
     } else if instr.op == IrOpcode::IrVecSubF64 {
         lower_vec_sub(nc, instr)
+    } else if instr.op == IrOpcode::IrVecMinMaxPD {
+        lower_vec_minmax(nc, instr)
     } else {
         // Unsupported opcode — skip silently for bootstrap
         nc
@@ -583,6 +585,12 @@ fn evex_p3_vl(src1_id: i64, vl_code: i64) -> i64 {
 // Convenience alias for 512-bit (ZMM) — preserves existing call sites.
 fn evex_p3_zmm(src1_id: i64) -> i64 { evex_p3_vl(src1_id, 2) }
 
+// P3 with opmask: bits [2:0] = mask_k (k0=no mask, k1–k7=active mask).
+fn evex_p3_vl_masked(src1_id: i64, vl_code: i64, mask_k: i64) -> i64 {
+    let vp_inv = evex_inv(evex_bit(src1_id, 4))
+    ((vl_code & 3) << 5) | (vp_inv << 3) | (mask_k & 7)
+}
+
 // Width-parameterised EVEX packed-f64 reg-reg emitter.
 //   vl_code: 0=XMM, 1=YMM, 2=ZMM
 //   map:     1 = 0F  (vaddpd=0x58, vmulpd=0x59, vsubpd=0x5C)
@@ -603,6 +611,26 @@ fn emit_evex_pd_zmm_rr(buf: CodeBuffer, map: i64, opcode: i64, dst: i64, src1: i
     emit_evex_pd_rr(buf, map, opcode, dst, src1, src2, 2)
 }
 
+// EVEX packed-f64 reg-reg + trailing immediate byte (7 bytes total).
+//   map 5 = AVX10.2 MAP5 (e.g. VMINMAXPD opcode 0x52)
+fn emit_evex_pd_rr_imm8(buf: CodeBuffer, map: i64, opcode: i64, dst: i64, src1: i64, src2: i64, vl_code: i64, imm8: i64) -> CodeBuffer with Mut, Panic, Div {
+    var b = emit_evex_pd_rr(buf, map, opcode, dst, src1, src2, vl_code)
+    b = emit_byte(b, imm8 & 0xFF)
+    b
+}
+
+// EVEX reg-reg with opmask register in P3 aaa bits.  mask_k=0 → same as emit_evex_pd_rr.
+fn emit_evex_pd_rr_masked(buf: CodeBuffer, map: i64, opcode: i64, dst: i64, src1: i64, src2: i64, vl_code: i64, mask_k: i64) -> CodeBuffer with Mut, Panic, Div {
+    var b = buf
+    b = emit_byte(b, 0x62)
+    b = emit_byte(b, evex_p1(dst, src2, map))
+    b = emit_byte(b, evex_p2_pd(src1))
+    b = emit_byte(b, evex_p3_vl_masked(src1, vl_code, mask_k))
+    b = emit_byte(b, opcode)
+    b = emit_byte(b, 0xC0 | (evex_lo3(dst) << 3) | evex_lo3(src2))
+    b
+}
+
 // ============================================================================
 // Vector IR lowering — AVX10.2 unified-width packed-f64
 //
@@ -616,10 +644,16 @@ fn emit_evex_pd_zmm_rr(buf: CodeBuffer, map: i64, opcode: i64, dst: i64, src1: i
 // ============================================================================
 
 // IrVecAddF64 → EVEX VADDPD {xmm|ymm|zmm}_dst, src1, src2
+//   label_id > 0 activates opmask k{label_id}
 fn lower_vec_add(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut, Panic, Div {
     var c = nc
     let vl = if instr.imm_i64 > 0 { instr.imm_i64 } else { 2 }
-    c.code = emit_evex_pd_rr(c.code, 1, 0x58, instr.dst, instr.src1, instr.src2, vl)
+    let mk = instr.label_id & 7
+    if mk > 0 {
+        c.code = emit_evex_pd_rr_masked(c.code, 1, 0x58, instr.dst, instr.src1, instr.src2, vl, mk)
+    } else {
+        c.code = emit_evex_pd_rr(c.code, 1, 0x58, instr.dst, instr.src1, instr.src2, vl)
+    }
     c
 }
 
@@ -627,7 +661,12 @@ fn lower_vec_add(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut,
 fn lower_vec_mul(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut, Panic, Div {
     var c = nc
     let vl = if instr.imm_i64 > 0 { instr.imm_i64 } else { 2 }
-    c.code = emit_evex_pd_rr(c.code, 1, 0x59, instr.dst, instr.src1, instr.src2, vl)
+    let mk = instr.label_id & 7
+    if mk > 0 {
+        c.code = emit_evex_pd_rr_masked(c.code, 1, 0x59, instr.dst, instr.src1, instr.src2, vl, mk)
+    } else {
+        c.code = emit_evex_pd_rr(c.code, 1, 0x59, instr.dst, instr.src1, instr.src2, vl)
+    }
     c
 }
 
@@ -636,7 +675,12 @@ fn lower_vec_mul(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut,
 fn lower_vec_fma(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut, Panic, Div {
     var c = nc
     let vl = if instr.imm_i64 > 0 { instr.imm_i64 } else { 2 }
-    c.code = emit_evex_pd_rr(c.code, 2, 0xB8, instr.dst, instr.src1, instr.src2, vl)
+    let mk = instr.label_id & 7
+    if mk > 0 {
+        c.code = emit_evex_pd_rr_masked(c.code, 2, 0xB8, instr.dst, instr.src1, instr.src2, vl, mk)
+    } else {
+        c.code = emit_evex_pd_rr(c.code, 2, 0xB8, instr.dst, instr.src1, instr.src2, vl)
+    }
     c
 }
 
@@ -644,6 +688,21 @@ fn lower_vec_fma(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut,
 fn lower_vec_sub(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut, Panic, Div {
     var c = nc
     let vl = if instr.imm_i64 > 0 { instr.imm_i64 } else { 2 }
-    c.code = emit_evex_pd_rr(c.code, 1, 0x5C, instr.dst, instr.src1, instr.src2, vl)
+    let mk = instr.label_id & 7
+    if mk > 0 {
+        c.code = emit_evex_pd_rr_masked(c.code, 1, 0x5C, instr.dst, instr.src1, instr.src2, vl, mk)
+    } else {
+        c.code = emit_evex_pd_rr(c.code, 1, 0x5C, instr.dst, instr.src1, instr.src2, vl)
+    }
+    c
+}
+
+// IrVecMinMaxPD → EVEX VMINMAXPD {xmm|ymm|zmm}_dst, src1, src2, imm8
+//   MAP5 opcode 0x52; field_idx carries the imm8 predicate (0=min, 1=max, …)
+fn lower_vec_minmax(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut, Panic, Div {
+    var c = nc
+    let vl   = if instr.imm_i64 > 0 { instr.imm_i64 } else { 2 }
+    let pred = instr.field_idx & 0xFF
+    c.code = emit_evex_pd_rr_imm8(c.code, 5, 0x52, instr.dst, instr.src1, instr.src2, vl, pred)
     c
 }
