@@ -43,7 +43,7 @@ Values below are sourced from machine-generated artifacts, not aspirational spec
 | Runtime regression enforcement (required CI) | `STDLIB_RUNTIME_REGRESSION_STRICT=1` in full-gate workflow |
 
 Current telemetry truth:
-- `runtime_regression_summary.status` is currently `fail` on pinned runtime binaries, so strict mode is fail-closed by design until upstream runtime fixes land.
+- strict mode is fail-closed by design; `runtime_regression_summary.status` must be `pass` for strict CI success.
 
 ## Hyper Execution Snapshot
 
@@ -64,7 +64,8 @@ Current telemetry truth:
 | Gate mode (required CI) | `required` (`OMEGA_GPU_RUNTIME_GATE_MODE=required`) |
 | Status contract | `pass|fail|not_run` with blocker codes |
 | Required blocker semantics | any non-pass fails CI in required mode |
-| Current local artifact | reflects remote-runner availability (`remote_env_missing` in this snapshot) |
+| Canonical version source | `scripts/omega/omega_resolve_souc_bin.sh` (`SOUNIO_SOUC_VERSION` override supported) |
+| Current local artifact | reflects remote attestation state; non-pass in `auto` records `not_run` with blockers |
 
 ## Contract Levels
 

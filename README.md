@@ -270,13 +270,15 @@ Hyper lane details:
 Runtime policy (science runtime regressions):
 - local default remains telemetry mode (`soft`)
 - required CI full gate enforces strict runtime regression mode (`STDLIB_RUNTIME_REGRESSION_STRICT=1`)
-- current pinned runtime still reports runtime-regression failures in telemetry, so strict mode is intentionally fail-closed until the upstream runtime fix is published
+- strict mode is fail-closed; runtime probes must pass to keep CI green
 
 GPU runtime policy:
 - backend compile smoke remains in `scripts/e2e_gate.sh`
 - remote-attested GPU runtime gate is integrated via `scripts/omega/omega_gpu_runtime_attest_gate.sh`
+- canonical pinned `souc` version is sourced from `scripts/omega/omega_resolve_souc_bin.sh` (or `SOUNIO_SOUC_VERSION` override)
 - local default mode is `OMEGA_GPU_RUNTIME_GATE_MODE=auto` (non-fatal `not_run` when remote runner is unavailable)
 - required CI mode is `OMEGA_GPU_RUNTIME_GATE_MODE=required` (any non-pass is fail-closed)
+- blocker taxonomy includes `ssh_unreachable`, `remote_env_missing`, `attestation_invalid`, `pinned_version_mismatch`, `gpu_backend_unavailable`, `runtime_test_fail`
 
 Run from repository root:
 

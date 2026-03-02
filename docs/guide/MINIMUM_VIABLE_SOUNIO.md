@@ -30,7 +30,7 @@ Snapshot date: **2026-03-02**
 - Runtime regression telemetry is always recorded in `runtime_regressions` from committed probes under `tests/stdlib/runtime_regression/`.
 - Runtime provenance is always recorded in `runtime_provenance` (`souc_bin`, `souc_version`, `pinned_version_expected`).
 - Local default enforcement is soft; required CI full gate runs strict mode via `STDLIB_RUNTIME_REGRESSION_STRICT=1`.
-- Current pinned runtime still fails these probes in telemetry mode, so strict mode currently fails closed by design.
+- Strict mode is fail-closed by design and requires probe pass for CI success.
 
 4. STDLIB hyper execution lane (required by reliability gate):
 - Gate script: `bash scripts/stdlib_hyper_execution_gate.sh`
@@ -47,6 +47,8 @@ Snapshot date: **2026-03-02**
   - local default: `OMEGA_GPU_RUNTIME_GATE_MODE=auto`
   - required CI: `OMEGA_GPU_RUNTIME_GATE_MODE=required`
 - In required mode, any non-pass (`fail` or `not_run`) is fail-closed.
+- Canonical pinned `souc` version is sourced from `scripts/omega/omega_resolve_souc_bin.sh` (with optional `SOUNIO_SOUC_VERSION` override).
+- Blockers are normalized as: `ssh_unreachable`, `remote_env_missing`, `attestation_invalid`, `pinned_version_mismatch`, `gpu_backend_unavailable`, `runtime_test_fail`.
 
 4. Module/test workflow:
 - `use`-based imports work for currently active module surfaces.

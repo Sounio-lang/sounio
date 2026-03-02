@@ -51,8 +51,10 @@ Each module lane should be interpreted with one of three levels:
 - runtime regression probes (`as_bytes` literal/text/binary + dynamic slice) are always recorded in science status JSON from committed files in `tests/stdlib/runtime_regression/`
 - runtime provenance (`souc_bin`, `souc_version`, `pinned_version_expected`) is always emitted in science status JSON
 - strict runtime regression mode is required in CI full gate (`STDLIB_RUNTIME_REGRESSION_STRICT=1`); local default remains soft telemetry
-- current pinned runtime still reports runtime-probe failures, so CI strict mode is an intentional fail-closed blocker until upstream runtime fixes are available
+- CI strict mode is intentionally fail-closed; runtime probes must pass for strict green status
 - GPU runtime attestation gate is required in CI with `OMEGA_GPU_RUNTIME_GATE_MODE=required`; local default `auto` records remote-unavailable cases as `not_run`
+- canonical pinned `souc` version is sourced from `scripts/omega/omega_resolve_souc_bin.sh` (or explicit `SOUNIO_SOUC_VERSION` override)
+- blocker taxonomy is normalized as `ssh_unreachable`, `remote_env_missing`, `attestation_invalid`, `pinned_version_mismatch`, `gpu_backend_unavailable`, `runtime_test_fail`
 
 ## Reliability Workflow
 
@@ -77,4 +79,4 @@ Primary status artifact:
 - `artifacts/omega/gpu_runtime_attest_gate.v1.json`
 
 Primary reference page:
-- `docs/STDLIB_REFERENCE.md`
+- `docs/stdlib/STDLIB_REFERENCE.md`

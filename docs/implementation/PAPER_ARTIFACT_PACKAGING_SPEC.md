@@ -82,7 +82,7 @@ Required acceptance criteria:
 | Claim ID | Paper-facing claim | Evidence source(s) | Marker(s) / artifact(s) |
 |---|---|---|---|
 | `C1` | Sounio build/test path is reproducible on public runners | `.github/workflows/ci.yml` `fast-gate`; `scripts/fast_gate.sh` | `[fast-gate] ok` |
-| `C2` | Multi-backend pipeline is exercised (native, LLVM when available, GPU compile-only) | `scripts/e2e_gate.sh`, CI `fast-gate` | `[e2e] native build + run`, `[e2e] llvm ...` or skip marker, `[e2e] gpu compile-only`, `[e2e] ok` |
+| `C2` | Multi-backend pipeline is exercised (native, LLVM when available, GPU compile smoke + runtime attestation gate) | `scripts/e2e_gate.sh`, CI `fast-gate` | `[e2e] native build + run`, `[e2e] llvm ...` or skip marker, `[e2e] gpu backend compile smoke`, `[e2e] gpu runtime attestation gate`, `[e2e] ok` |
 | `C3` | Self-host path passes strict no-fallback corpus gate | `scripts/selfhost_zero_fallback_gate.sh`, CI `selfhost-zero-fallback` | `PASS [full-selfhost] ...`, `PASS [parse-all-report] ...`, `PASS [parse-all-shards] ...`, `SELFHOST_ZERO_GATE_SUMMARY ... fail=0` |
 | `C3b` | Self-host driver can emit decodable bytecode artifacts (bootstrap subset) | `scripts/selfhost_driver_output_gate.sh` | `PASS [ret_42] ...`, `PASS [print_boot] ...`, `SELFHOST_DRIVER_OUTPUT_GATE_SUMMARY ... fail=0` |
 | `C4` | Ontology mismatch diagnostics are enforced in end-to-end checks | `scripts/e2e_gate.sh` ontology cross-check | presence of `semantic distance` diagnostic in failure path check |
@@ -154,7 +154,7 @@ rg -n "Summary: PASS=.* FAIL=0" "$ARTIFACT_ROOT/poseidon_public.log" "$ARTIFACT_
 ## Threats to Validity
 
 - Hardware/runtime variance can change runtime magnitude; this spec treats gate pass/fail markers as primary evidence.
-- GPU validation in `e2e_gate` is compile-only in this lane; runtime GPU throughput claims require separate hardware-specific benchmarking.
+- GPU validation in `e2e_gate` includes compile smoke plus a remote-attested runtime gate; throughput claims still require separate hardware-specific benchmarking.
 - Enterprise lane hides implementation details by design; reproducibility is at the interface/marker level, not full workload publication.
 - Baseline commit selection in `poseidon_gate.sh` (`BASELINE_COMMIT`) may require periodic updates to avoid stale comparisons.
 

@@ -56,9 +56,10 @@ Runtime policy note:
 - science status JSON includes `runtime_regressions`, `runtime_regression_enforcement`, `runtime_regression_summary`, and `runtime_provenance`
 - runtime probe sources are committed in `tests/stdlib/runtime_regression/` for reproducible paper evidence
 - local gate mode is soft telemetry for runtime regressions; required CI full gate uses `STDLIB_RUNTIME_REGRESSION_STRICT=1`
-- current pinned runtime reports runtime-probe failures, so strict mode is expected to fail closed until upstream runtime fixes are released
+- strict mode is fail-closed; runtime probes must pass for strict CI success
 - hyper execution lane is fail-closed with no-ignore policy in required hyper tests
 - GPU runtime attestation uses `OMEGA_GPU_RUNTIME_GATE_MODE=required` in CI and records pass|fail|not_run with blocker metadata in the artifact
+- canonical pinned `souc` version is sourced from `scripts/omega/omega_resolve_souc_bin.sh` unless explicitly overridden via `SOUNIO_SOUC_VERSION`
 
 ## Target Venues
 
