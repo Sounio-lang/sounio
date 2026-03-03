@@ -4,18 +4,18 @@
 // Takes an IrModule, compiles each function with proper stack frames,
 // emits an entry trampoline, applies relocations, and produces an ELF64 binary.
 
-// ============================================================================
-// Label patching for intra-function control flow
-// ============================================================================
+module native::codegen
 
-struct LabelPatch {
-    code_offset: i64,       // Position of the rel32 operand to patch
-    label_id: i64,          // Target label
-}
-
-fn empty_label_patch() -> LabelPatch {
-    LabelPatch { code_offset: 0, label_id: -1 }
-}
+use parser::ast::{Name}
+use ir::ir::{IrModule, IrFunction, IrInstr, IrOpcode, IR_MAX_FUNCS, IR_MAX_STRINGS}
+use native::encode::*
+use native::elf::*
+use native::reloc::*
+use native::frame::*
+use native::lower_ir::{lower_instr}
+use native::regs::{param_reg}
+// Note: native::avx512 EVEX emitters are available in native/avx512.sio.
+// They will be wired into the lowering pass in Horizon 3.2 (vector IR ops).
 
 // ============================================================================
 // Native dispatcher contracts (Sprint 1)
@@ -172,6 +172,7 @@ fn native_target_spec_default(requested_target: string) -> NativeTargetSpec {
 }
 
 fn native_matrix_mode_parse(raw: string) -> i64 {
+    if str_len(raw) == 0 { return MATRIX_AUTO() }
     if str_eq(raw, "auto") { return MATRIX_AUTO() }
     if str_eq(raw, "off") { return MATRIX_OFF() }
     if str_eq(raw, "apple-amx") { return MATRIX_APPLE_AMX() }
@@ -322,79 +323,6 @@ fn native_compile_result_ok(bytes: [i8; 4194304], len: i64, format_id: i64) -> N
         error_code: ERR_OK(),
         error_msg: "",
     }
-}
-
-// ============================================================================
-// Compiler state
-// ============================================================================
-
-struct NativeCompiler {
-    code: CodeBuffer,
-    relocs: RelocationTable,
-    rodata: StringTable,            // String literals for .rodata
-
-    // Module-level: function layout
-    fn_offsets: [i64; 1024],         // function index -> code buffer offset
-    fn_count: i64,
-
-    // Per-function: return jump patching
-    return_jumps: [i64; 64],        // positions of jmp rel32 operands
-    return_jump_count: i64,
-
-    // Per-function: label tracking for branches
-    label_offsets: [i64; 256],      // label_id -> code offset (-1 = undefined)
-    label_patches: [LabelPatch; 256],
-    label_patch_count: i64,
-
-    // Per-function: frame info
-    current_frame_size: i64,
-
-    // Entry trampoline offset (recorded during emit_entry_trampoline)
-    entry_offset: i64,
-}
-
-fn compiler_new() -> NativeCompiler {
-    NativeCompiler {
-        code: code_buffer_new(),
-        relocs: reloc_table_new(),
-        rodata: string_table_new(),
-        fn_offsets: [-1; 1024],
-        fn_count: 0,
-        return_jumps: [0; 64],
-        return_jump_count: 0,
-        label_offsets: [-1; 256],
-        label_patches: [empty_label_patch(); 256],
-        label_patch_count: 0,
-        current_frame_size: 0,
-        entry_offset: 0,
-    }
-}
-
-fn codegen_new() -> NativeCompiler {
-    compiler_new()
-}
-
-// Reset per-function state before compiling a new function
-fn reset_function_state(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
-    var c = nc
-    c.return_jump_count = 0
-    var i = 0
-    while i < 256 {
-        c.label_offsets[i as usize] = -1
-        i = i + 1
-    }
-    c.label_patch_count = 0
-    c.current_frame_size = 0
-    c
-}
-
-// ============================================================================
-// Stack slot mapping: IR virtual register -> rbp-relative offset
-// ============================================================================
-
-// IR virtual register N lives at rbp - (N+1)*8
-fn ir_slot_offset(vreg: i64) -> i64 {
-    -(vreg + 1) * 8
 }
 
 // ============================================================================
@@ -1012,8 +940,9 @@ fn find_main_index(module: IrModule) -> i64 with Mut, Panic, Div {
 fn compile_ir_function(nc: NativeCompiler, func: IrFunction, fn_index: i64) -> NativeCompiler with Mut, Panic, Div, Alloc {
     var c = reset_function_state(nc)
 
-    // Record this function's code offset
+    // Record this function's code offset and name (for .symtab)
     c.fn_offsets[fn_index as usize] = c.code.len
+    c.symbols = symbol_data_add_name(c.symbols, fn_index, func.name.buf, func.name.len)
 
     // Builtin dispatch — emit hand-coded assembly, skip normal IR lowering
     // M3: print builtins
@@ -1079,77 +1008,6 @@ fn spill_ir_params(nc: NativeCompiler, func: IrFunction) -> NativeCompiler with 
 }
 
 // ============================================================================
-// Return jump patching
-// ============================================================================
-
-fn record_return_jump(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
-    var c = nc
-    // Emit jmp rel32 placeholder
-    let jmp_pos = c.code.len
-    c.code = emit_jmp_rel32(c.code)
-    // Record the position of the rel32 operand (jmp_pos + 1)
-    if c.return_jump_count < 64 {
-        c.return_jumps[c.return_jump_count as usize] = jmp_pos + 1
-        c.return_jump_count = c.return_jump_count + 1
-    }
-    c
-}
-
-fn patch_return_jumps(nc: NativeCompiler, epilogue_offset: i64) -> NativeCompiler with Mut, Panic, Div {
-    var c = nc
-    var i = 0
-    while i < c.return_jump_count {
-        let imm_offset = c.return_jumps[i as usize]
-        let next_ip = imm_offset + 4
-        let rel = epilogue_offset - next_ip
-        c.code = patch_u32_le(c.code, imm_offset, rel)
-        i = i + 1
-    }
-    c
-}
-
-// ============================================================================
-// Label tracking for intra-function control flow
-// ============================================================================
-
-fn record_label(nc: NativeCompiler, label_id: i64) -> NativeCompiler with Mut, Panic {
-    var c = nc
-    if label_id >= 0 && label_id < 256 {
-        c.label_offsets[label_id as usize] = c.code.len
-    }
-    c
-}
-
-// Record a forward reference to a label (the rel32 operand position)
-fn record_label_patch(nc: NativeCompiler, label_id: i64, rel32_offset: i64) -> NativeCompiler with Mut, Panic {
-    var c = nc
-    if c.label_patch_count < 256 {
-        c.label_patches[c.label_patch_count as usize] = LabelPatch {
-            code_offset: rel32_offset,
-            label_id: label_id,
-        }
-        c.label_patch_count = c.label_patch_count + 1
-    }
-    c
-}
-
-fn patch_label_forwards(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
-    var c = nc
-    var i = 0
-    while i < c.label_patch_count {
-        let patch = c.label_patches[i as usize]
-        let target = c.label_offsets[patch.label_id as usize]
-        if target >= 0 {
-            let next_ip = patch.code_offset + 4
-            let rel = target - next_ip
-            c.code = patch_u32_le(c.code, patch.code_offset, rel)
-        }
-        i = i + 1
-    }
-    c
-}
-
-// ============================================================================
 // Entry trampoline: _start calls main, then sys_exit(rax)
 // ============================================================================
 
@@ -1185,6 +1043,21 @@ fn emit_entry_trampoline(nc: NativeCompiler, main_fn_index: i64) -> NativeCompil
     c.code = emit_lea_rax_r14_disp8(c.code, 8)    // rax = r14 + 8 = argv pointer
     c.code = emit_mov_mem_r12_disp8_rax(c.code, 8) // [r12 + 8] = argv
     c.code = emit_add_r13_imm8(c.code, 16)        // r13 += 16 (bump past argc/argv)
+
+    // AVX10.2-aware capability guard: abort (exit 200) if CPU lacks any vector support.
+    // emit_avx10_detect probes leaf 7.1 EDX[19] for AVX10, falls back to leaf 7.0
+    // EBX[16] for legacy AVX-512F CPUs.  Sets r15 = VL capability mask:
+    //   bit0=128-bit, bit1=256-bit, bit2=512-bit (persistent across call to main).
+    // Returns rax = 1 if any vector support detected, 0 otherwise.
+    c.code = emit_avx10_detect(c.code)
+    c.code = emit_test_rax_rax(c.code)
+    let avx_jnz = c.code.len
+    c.code = emit_jnz_rel32(c.code)           // JNZ past the no-vector abort block
+    c.code = emit_mov_rdi_imm(c.code, 200)    // exit code 200 = no vector support
+    c.code = emit_mov_rax_imm(c.code, 60)     // sys_exit
+    c.code = emit_syscall(c.code)
+    let avx_ok = c.code.len
+    c.code = patch_u32_le(c.code, avx_jnz + 2, avx_ok - (avx_jnz + 6))
 
     // call main (placeholder, will be relocated)
     let call_pos = c.code.len
@@ -1254,5 +1127,5 @@ fn compile_to_elf(module: IrModule, base_addr: i64) -> Elf64Binary with Mut, Pan
     nc = compile_module(nc, module)
 
     let entry = trampoline_offset(nc)
-    finalize_elf64(nc.code, nc.rodata, entry, base_addr)
+    finalize_elf64(nc.code, nc.rodata, entry, base_addr, nc.symbols, nc.fn_offsets, nc.fn_count)
 }

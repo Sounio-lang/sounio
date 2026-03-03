@@ -1,0 +1,229 @@
+// file_write.sio — Shared file I/O helpers for self-hosted compile flows.
+
+use parser::*
+use lexer::*
+use native::*
+use native::{Elf64Binary}
+
+fn io_write_bytes_to_file(path: string, data: [i8; 4194304], len: i64) -> bool with IO {
+    let result = write_file(path, data, len)
+    result == 0
+}
+
+fn io_write_elf_to_file(path: string, elf: Elf64Binary) -> bool with IO, Mut {
+    io_write_bytes_to_file(path, elf.bytes, elf.len)
+}
+
+fn io_write_native_binary(path: string, bytes: [i8; 4194304], len: i64) -> bool with IO {
+    io_write_bytes_to_file(path, bytes, len)
+}
+
+fn io_trace_append_byte(buf: [i8; 4194304], pos: i64, b: i64) -> ([i8; 4194304], i64) with Mut, Panic, Div {
+    var out = buf
+    var p = pos
+    var n = b % 256
+    if n < 0 { n = n + 256 }
+    if p >= 0 && p < 4194304 {
+        out[p as usize] = n as i8
+        p = p + 1
+    }
+    (out, p)
+}
+
+fn io_trace_append_string(buf: [i8; 4194304], pos: i64, s: string) -> ([i8; 4194304], i64) with Mut, Panic, Div {
+    var out = buf
+    var p = pos
+    var i: i64 = 0
+    let n = str_len(s)
+    while i < n && p < 4194304 {
+        out[p as usize] = str_char_at(s, i) as i8
+        p = p + 1
+        i = i + 1
+    }
+    (out, p)
+}
+
+fn io_trace_append_json_string(buf: [i8; 4194304], pos: i64, s: string) -> ([i8; 4194304], i64) with Mut, Panic, Div {
+    var out = buf
+    var p = pos
+    var i: i64 = 0
+    let n = str_len(s)
+    while i < n && p < 4194304 {
+        let ch = str_char_at(s, i)
+        if ch == 34 {
+            let pair1 = io_trace_append_byte(out, p, 92)   // '\'
+            out = pair1.0
+            p = pair1.1
+            let pair2 = io_trace_append_byte(out, p, 34)   // '"'
+            out = pair2.0
+            p = pair2.1
+        } else if ch == 92 {
+            let pair1 = io_trace_append_byte(out, p, 92)   // '\'
+            out = pair1.0
+            p = pair1.1
+            let pair2 = io_trace_append_byte(out, p, 92)   // '\'
+            out = pair2.0
+            p = pair2.1
+        } else if ch == 10 {
+            let pair1 = io_trace_append_byte(out, p, 92)   // '\'
+            out = pair1.0
+            p = pair1.1
+            let pair2 = io_trace_append_byte(out, p, 110)  // 'n'
+            out = pair2.0
+            p = pair2.1
+        } else if ch == 13 {
+            let pair1 = io_trace_append_byte(out, p, 92)   // '\'
+            out = pair1.0
+            p = pair1.1
+            let pair2 = io_trace_append_byte(out, p, 114)  // 'r'
+            out = pair2.0
+            p = pair2.1
+        } else if ch == 9 {
+            let pair1 = io_trace_append_byte(out, p, 92)   // '\'
+            out = pair1.0
+            p = pair1.1
+            let pair2 = io_trace_append_byte(out, p, 116)  // 't'
+            out = pair2.0
+            p = pair2.1
+        } else {
+            let pair = io_trace_append_byte(out, p, ch)
+            out = pair.0
+            p = pair.1
+        }
+        i = i + 1
+    }
+    (out, p)
+}
+
+fn io_trace_bool_string(v: bool) -> string {
+    if v { "true" } else { "false" }
+}
+
+fn io_trace_i64_string(v: i64) -> string with Mut, Panic, Div {
+    if v == 0 { return "0" }
+
+    var n = v
+    var neg: bool = false
+    if n < 0 {
+        neg = true
+        n = 0 - n
+    }
+
+    var rev: [i8; 32] = [0; 32]
+    var rev_len: i64 = 0
+    while n > 0 && rev_len < 31 {
+        let digit = n % 10
+        rev[rev_len as usize] = (48 + digit) as i8
+        rev_len = rev_len + 1
+        n = n / 10
+    }
+
+    var out: [i8; 64] = [0; 64]
+    var out_len: i64 = 0
+    if neg {
+        out[out_len as usize] = 45 as i8
+        out_len = out_len + 1
+    }
+
+    var i = rev_len - 1
+    while i >= 0 {
+        out[out_len as usize] = rev[i as usize]
+        out_len = out_len + 1
+        if i == 0 { break }
+        i = i - 1
+    }
+    str_from_bytes(out, out_len)
+}
+
+fn io_write_native_decision_trace(
+    path: string,
+    requested_target: string,
+    resolved_target: string,
+    matrix_mode: string,
+    source: string,
+    fallback_reason: string,
+    backend: string,
+    ok: bool,
+    error_code: i64
+) -> bool with IO, Mut, Panic, Div {
+    var buf: [i8; 4194304] = [0; 4194304]
+    var p: i64 = 0
+
+    let p0 = io_trace_append_byte(buf, p, 123) // {
+    buf = p0.0; p = p0.1
+
+    let p1 = io_trace_append_string(buf, p, "\"requested_target\":\"")
+    buf = p1.0; p = p1.1
+    let p2 = io_trace_append_json_string(buf, p, requested_target)
+    buf = p2.0; p = p2.1
+    let p3 = io_trace_append_string(buf, p, "\",")
+    buf = p3.0; p = p3.1
+
+    let p4 = io_trace_append_string(buf, p, "\"resolved_target\":\"")
+    buf = p4.0; p = p4.1
+    let p5 = io_trace_append_json_string(buf, p, resolved_target)
+    buf = p5.0; p = p5.1
+    let p6 = io_trace_append_string(buf, p, "\",")
+    buf = p6.0; p = p6.1
+
+    let p7 = io_trace_append_string(buf, p, "\"matrix_mode\":\"")
+    buf = p7.0; p = p7.1
+    let p8 = io_trace_append_json_string(buf, p, matrix_mode)
+    buf = p8.0; p = p8.1
+    let p9 = io_trace_append_string(buf, p, "\",")
+    buf = p9.0; p = p9.1
+
+    let p10 = io_trace_append_string(buf, p, "\"source\":\"")
+    buf = p10.0; p = p10.1
+    let p11 = io_trace_append_json_string(buf, p, source)
+    buf = p11.0; p = p11.1
+    let p12 = io_trace_append_string(buf, p, "\",")
+    buf = p12.0; p = p12.1
+
+    let p13 = io_trace_append_string(buf, p, "\"fallback_reason\":\"")
+    buf = p13.0; p = p13.1
+    let p14 = io_trace_append_json_string(buf, p, fallback_reason)
+    buf = p14.0; p = p14.1
+    let p15 = io_trace_append_string(buf, p, "\",")
+    buf = p15.0; p = p15.1
+
+    let p16 = io_trace_append_string(buf, p, "\"backend\":\"")
+    buf = p16.0; p = p16.1
+    let p17 = io_trace_append_json_string(buf, p, backend)
+    buf = p17.0; p = p17.1
+    let p18 = io_trace_append_string(buf, p, "\",")
+    buf = p18.0; p = p18.1
+
+    let p19 = io_trace_append_string(buf, p, "\"ok\":")
+    buf = p19.0; p = p19.1
+    let p20 = io_trace_append_string(buf, p, io_trace_bool_string(ok))
+    buf = p20.0; p = p20.1
+    let p21 = io_trace_append_string(buf, p, ",")
+    buf = p21.0; p = p21.1
+
+    let p22 = io_trace_append_string(buf, p, "\"error_code\":")
+    buf = p22.0; p = p22.1
+    let p23 = io_trace_append_string(buf, p, io_trace_i64_string(error_code))
+    buf = p23.0; p = p23.1
+
+    let p24 = io_trace_append_byte(buf, p, 125) // }
+    buf = p24.0; p = p24.1
+    let p25 = io_trace_append_byte(buf, p, 10)  // newline
+    buf = p25.0; p = p25.1
+
+    io_write_bytes_to_file(path, buf, p)
+}
+
+fn io_read_source_file(path: string) -> LexerState with IO, Mut, Div, Panic {
+    let data = read_file(path)
+    let size = file_size(path)
+    var buf: [i8; 1048576] = [0; 1048576]
+    // Use reference-backed writes to avoid copying sparse array storage.
+    let buf_ref = &!buf
+    var i: i64 = 0
+    while i < size && i < 1048576 {
+        buf_ref[i as usize] = data[i as usize]
+        i = i + 1
+    }
+    lex(buf, size, 0)
+}

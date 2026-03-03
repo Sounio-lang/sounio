@@ -1,24 +1,22 @@
 # UI Type De-ignore Audit
 
-- generated_at_utc: 2026-03-01T14:46:19Z
-- souc_bin: /home/demetrios/work/sounio/souc
-- ignored_files: 40
+- generated_at_utc: 2026-03-02T08:25:22Z
+- souc_bin: /home/demetrios/work/sounio/artifacts/omega/souc-bin/souc-linux-x86_64
+- ignored_files: 38
 - safe_deignore_candidates: 0
 - ready_count: 0
-- needs_fix_count: 2
+- needs_fix_count: 0
 - still_blocked_count: 38
 
 ## Bucket Summary
 
 - ready: 0
-- needs-fix: 2
+- needs-fix: 0
 - still-blocked: 38
 
 ## Ready
 
 ## Needs Fix
-- tests/ui/type/epistemic_call_boundary_invalid_provided_epsilon.sio (exit=1, pattern_hit=false, first_line=Error: P0003)
-- tests/ui/type/epistemic_call_boundary_unknown_provided_epsilon.sio (exit=1, pattern_hit=false, first_line=Error: P0003)
 
 ## Still Blocked
 - tests/ui/type/array_elem_mismatch.sio (BLOCKED: pinned binary does not enforce array element types; self-hosted checker has E020)
@@ -76,10 +74,10 @@
 - tests/ui/type/division_by_zero_const_expr.sio (exit=0, pattern_hit=true, first_line=All checks passed: tests/ui/type/division_by_zero_const_expr.sio)
 - tests/ui/type/division_by_zero_const_ident.sio (exit=0, pattern_hit=true, first_line=All checks passed: tests/ui/type/division_by_zero_const_ident.sio)
 - tests/ui/type/division_by_zero.sio (exit=0, pattern_hit=true, first_line=All checks passed: tests/ui/type/division_by_zero.sio)
-- tests/ui/type/epistemic_call_boundary_invalid_provided_epsilon.sio (exit=1, pattern_hit=false, first_line=Error: P0003)
-- tests/ui/type/epistemic_call_boundary_unknown_provided_epsilon.sio (exit=1, pattern_hit=false, first_line=Error: P0003)
 - tests/ui/type/extra_args.sio (exit=0, pattern_hit=false, first_line=All checks passed: tests/ui/type/extra_args.sio)
 - tests/ui/type/field_not_found.sio (exit=0, pattern_hit=true, first_line=All checks passed: tests/ui/type/field_not_found.sio)
 - tests/ui/type/if_branch_mismatch.sio (exit=0, pattern_hit=true, first_line=All checks passed: tests/ui/type/if_branch_mismatch.sio)
 - tests/ui/type/invalid_binary_op.sio (exit=0, pattern_hit=true, first_line=All checks passed: tests/ui/type/invalid_binary_op.sio)
 - tests/ui/type/invalid_unary_op.sio (exit=0, pattern_hit=true, first_line=All checks passed: tests/ui/type/invalid_unary_op.sio)
+- tests/ui/type/logical_not_bool.sio (exit=0, pattern_hit=true, first_line=All checks passed: tests/ui/type/logical_not_bool.sio)
+- tests/ui/type/match_arm_mismatch.sio (exit=0, pattern_hit=true, first_line=All checks passed: tests/ui/type/match_arm_mismatch.sio)

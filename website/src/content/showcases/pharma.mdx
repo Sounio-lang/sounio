@@ -1,155 +1,43 @@
 ---
 title: "Pharmacometrics"
-description: "PK/PD modeling with uncertainty quantification for drug development and clinical trial design"
+description: "PK/PD modeling with GUM uncertainty propagation for clinical dosing"
 domain: "pharma"
 icon: "💊"
 ---
 
 # Pharmacometrics with Sounio
 
-Sounio provides a powerful platform for pharmacometric modeling, enabling drug dosage optimization and clinical trial design with rigorous uncertainty handling.
+Sounio provides a powerful platform for pharmacometric modeling, enabling drug dosage optimization with rigorous uncertainty handling.
 
-## Why Sounio for Pharmacometrics?
+## GUM-Compliant Vancomycin Dosing
 
-Traditional pharmacometric tools often treat model parameters as fixed values. In reality:
-- Drug absorption rates vary between patients
-- Measurement equipment has finite precision
-- Population studies have sampling uncertainty
-
-Sounio's epistemic types naturally capture this uncertainty.
-
-## Example: PK/PD Modeling
+Sounio's `Knowledge` construct carries confidence values (`ε`) which propagate through computations.
 
 ```sio
-use std::units::{mg, L, h, mg_per_L}
-use std::epistemic::{Knowledge, measure}
+// 15 mg/kg/day: Level 1A evidence (RCT meta-analysis, 18 centres, n=2204)
+// ε=0.92 reflects high evidence quality with known inter-patient variability.
+let base_dose: Knowledge[f64] = Knowledge(15.0, ε=0.92, prov="ASHP_2020_Level1A_RCT")
 
-struct PKParameters {
-    clearance: Knowledge<L/h>,
-    volume: Knowledge<L>,
-    ka: Knowledge<1/h>,  // Absorption rate
-}
+// Hospital floor scale: ±0.5 kg on 78.5 kg patient → ε=0.98 (calibrated device).
+let weight: Knowledge[f64] = Knowledge(78.5, ε=0.98, prov="hospital_scale_calibrated")
+let ref_wt: Knowledge[f64] = Knowledge(70.0, ε=1.0)
 
-fn predict_concentration(
-    dose: Knowledge<mg>,
-    params: &PKParameters,
-    time: h
-) -> Knowledge<mg_per_L> {
-    let cl = params.clearance
-    let v = params.volume
-    let ka = params.ka
-
-    // One-compartment model with first-order absorption
-    let ke = cl / v
-    let concentration = (dose * ka) / (v * (ka - ke)) *
-        (exp(-ke * time) - exp(-ka * time))
-
-    concentration  // Uncertainty propagates automatically
-}
+// GUM propagation is automatic: ε(a/b) = ε(a)×ε(b) under independent errors.
+let weight_factor: Knowledge[f64] = weight / ref_wt
+let dose1: Knowledge[f64] = base_dose * weight_factor
+// ε(dose1) ≈ 0.92 × 0.98 × 1.0 = 0.9016
 ```
 
-## Confidence-Gated Dosing
+## Safety Gates
+
+You can enforce safety thresholds at compile-time or runtime using the propagated confidence.
 
 ```sio
-fn recommend_dose(
-    patient: &Patient,
-    target: Knowledge<mg_per_L>
-) -> DoseRecommendation with IO {
-    let predicted = simulate_dosing(patient, proposed_dose)
+let conf_dose = dose3.ε
 
-    if predicted.confidence > 0.90 {
-        if within_therapeutic_window(predicted, target) {
-            DoseRecommendation::Approve(proposed_dose)
-        } else {
-            DoseRecommendation::Adjust(calculate_adjustment(predicted, target))
-        }
-    } else {
-        // Uncertainty too high - request more data
-        perform IO::warn("Insufficient confidence for dosing recommendation")
-        DoseRecommendation::RequestData(needed_measurements(patient))
-    }
+if conf_dose >= 0.82 {
+    println("  PRESCRIBE: dose pipeline confidence sufficient")
+} else {
+    println("  BLOCKED:   refine CrCl estimate (Cockcroft-Gault CV too high)")
 }
 ```
-
-## Population Modeling
-
-```sio
-fn population_pk_analysis(
-    patients: Vec<PatientData>
-) -> PopulationParameters with IO, Prob {
-    // Hierarchical Bayesian model
-    let population_cl = perform Prob::sample(LogNormal(log(10.0), 0.3))
-    let population_v = perform Prob::sample(LogNormal(log(50.0), 0.2))
-
-    for patient in patients {
-        // Individual parameters with random effects
-        let individual_cl = perform Prob::sample(
-            LogNormal(log(population_cl), omega_cl)
-        )
-
-        // Condition on observed concentrations
-        for obs in patient.observations {
-            let predicted = predict_concentration(
-                patient.dose, individual_cl, patient.v, obs.time
-            )
-            perform Prob::observe(
-                Normal(predicted.value, obs.uncertainty),
-                obs.concentration
-            )
-        }
-    }
-
-    PopulationParameters {
-        clearance: population_cl,
-        volume: population_v,
-    }
-}
-```
-
-## Features for Pharma
-
-- **GUM-compliant uncertainty**: Follows ISO/GUM standards
-- **Unit safety**: Prevents mg/kg vs mg/L errors
-- **Provenance tracking**: Full audit trail for FDA compliance
-- **Effect isolation**: Separates pure computation from I/O
-
-## Regulatory Compliance
-
-Sounio's provenance tracking supports:
-- FDA 21 CFR Part 11
-- GxP validation requirements
-- ICH E9 statistical principles
-- Full audit trails
-
-## Get Started
-
-```bash
-sounio new pharma-project --template pharmacometrics
-cd pharma-project
-sounio run examples/pk_model.sio
-```
-
-## Resources
-
-- [Pharmacometrics Showcase](/science/pharma)
-- [PK/PD Examples](/learn/examples)
-- [Scientific Computing Showcase](/science/scientific-computing)
-
-## Featured Safety Gate: Vancomycin Confidence Refusal
-
-Sounio includes a clinical-safety compile-fail fixture that blocks low-confidence
-prescriptions before runtime:
-
-```bash
-souc check tests/compile-fail/vancomycin_low_conf.sio
-```
-
-Use alongside the propagation demo:
-
-```bash
-souc check tests/run-pass/vancomycin_propagation.sio
-```
-
-Outcome:
-- propagation example shows confidence changes through dosing steps
-- refusal fixture enforces an epistemic threshold (`epsilon`) at compile time

@@ -186,6 +186,90 @@ enum GpuError {
     GpuOpBufferOverflow,
 }
 
+// Phase 7: Multi-target profile and legalization contracts.
+enum GpuTargetVendor {
+    GpuVendorCuda,
+    GpuVendorRocm,
+    GpuVendorSpirv,
+    GpuVendorMetal,
+    GpuVendorUnknown,
+}
+
+enum GpuTargetMemoryModel {
+    GpuMemoryCuda,
+    GpuMemoryHsa,
+    GpuMemorySpirv,
+    GpuMemoryUnknown,
+}
+
+enum GpuBinaryFormat {
+    GpuBinaryFatbin,
+    GpuBinaryCubin,
+    GpuBinaryHsaco,
+    GpuBinaryMulti,
+}
+
+enum GpuWorkloadTag {
+    GpuWorkloadGeneral,
+    GpuWorkloadMl,
+    GpuWorkloadOnn,
+    GpuWorkloadQnn,
+    GpuWorkloadSnn,
+    GpuWorkloadSpnn,
+    GpuWorkloadQuantnn,
+    GpuWorkloadHyperMath,
+    GpuWorkloadExceptional,
+}
+
+enum GpuLegalizationCode {
+    GpuLegalizationPass,
+    GpuLegalizationTensorCoreUnavailable,
+    GpuLegalizationAsyncCopyUnavailable,
+    GpuLegalizationTf32Unavailable,
+    GpuLegalizationFp16Unavailable,
+}
+
+struct GpuTargetProfile {
+    vendor: GpuTargetVendor,
+    arch: Name,
+    warp_width: i64,
+    wave_width: i64,
+    supports_tensor_core: bool,
+    supports_async_copy: bool,
+    supports_tf32: bool,
+    supports_fp16: bool,
+    memory_model: GpuTargetMemoryModel,
+}
+
+struct GpuOpCapabilityRequirement {
+    opcode: GpuOpcode,
+    requires_tensor_core: bool,
+    requires_async_copy: bool,
+    requires_tf32: bool,
+    requires_fp16: bool,
+}
+
+struct GpuLegalizationDiagnostic {
+    op_index: i64,
+    opcode: GpuOpcode,
+    code: GpuLegalizationCode,
+    is_error: bool,
+}
+
+struct GpuKernelSsaV2 {
+    version_major: i64,
+    version_minor: i64,
+    pipeline_id: Name,
+    provenance_tag: Name,
+    workload_tag: GpuWorkloadTag,
+    target_profile: GpuTargetProfile,
+    kernel: GpuKernelIr,
+    capability_reqs: [GpuOpCapabilityRequirement; 1024],
+    capability_req_count: i64,
+    diagnostics: [GpuLegalizationDiagnostic; 1024],
+    diagnostic_count: i64,
+}
+
 // Return value used by checked op append APIs.
 struct GpuAppendResult {
     kernel: GpuKernelIr,
@@ -230,6 +314,7 @@ struct GpuParam {
 // GPU kernel IR (represents a single kernel)
 struct GpuKernelIr {
     kernel_name: Name,
+    workload_tag: GpuWorkloadTag,
     params: [GpuParam; 8],
     param_count: i64,
     // Stage-5 hardening target: allow up to 1024 IR ops per kernel
@@ -279,6 +364,7 @@ fn hlir_gpu_lowered_module_new() -> HlirGpuLoweredModule {
 fn gpu_kernel_new() -> GpuKernelIr {
     GpuKernelIr {
         kernel_name: ir_empty_name(),
+        workload_tag: GpuWorkloadTag::GpuWorkloadGeneral,
         params: [gpu_param_new(); 8],
         param_count: 0,
         ops: [gpu_op_new(); 1024],
@@ -364,6 +450,249 @@ fn gpu_op_new() -> GpuOp {
         scope: 0,
         cg_size: 0,
     }
+}
+
+fn gpu_target_vendor_to_string(vendor: GpuTargetVendor) -> string {
+    match vendor {
+        GpuTargetVendor::GpuVendorCuda => "cuda"
+        GpuTargetVendor::GpuVendorRocm => "rocm"
+        GpuTargetVendor::GpuVendorSpirv => "spirv"
+        GpuTargetVendor::GpuVendorMetal => "metal"
+        GpuTargetVendor::GpuVendorUnknown => "unknown"
+    }
+}
+
+fn gpu_binary_format_to_string(fmt: GpuBinaryFormat) -> string {
+    match fmt {
+        GpuBinaryFormat::GpuBinaryFatbin => "fatbin"
+        GpuBinaryFormat::GpuBinaryCubin => "cubin"
+        GpuBinaryFormat::GpuBinaryHsaco => "hsaco"
+        GpuBinaryFormat::GpuBinaryMulti => "multi"
+    }
+}
+
+fn gpu_workload_tag_to_string(tag: GpuWorkloadTag) -> string {
+    match tag {
+        GpuWorkloadTag::GpuWorkloadGeneral => "general"
+        GpuWorkloadTag::GpuWorkloadMl => "ml"
+        GpuWorkloadTag::GpuWorkloadOnn => "onn"
+        GpuWorkloadTag::GpuWorkloadQnn => "qnn"
+        GpuWorkloadTag::GpuWorkloadSnn => "snn"
+        GpuWorkloadTag::GpuWorkloadSpnn => "spnn"
+        GpuWorkloadTag::GpuWorkloadQuantnn => "quantnn"
+        GpuWorkloadTag::GpuWorkloadHyperMath => "hyper_math"
+        GpuWorkloadTag::GpuWorkloadExceptional => "exceptional"
+    }
+}
+
+fn gpu_kernel_set_workload_tag(kernel: GpuKernelIr, tag: GpuWorkloadTag) -> GpuKernelIr {
+    var out = kernel
+    out.workload_tag = tag
+    out
+}
+
+fn gpu_target_profile_unknown() -> GpuTargetProfile {
+    GpuTargetProfile {
+        vendor: GpuTargetVendor::GpuVendorUnknown,
+        arch: ir_empty_name(),
+        warp_width: 0,
+        wave_width: 0,
+        supports_tensor_core: false,
+        supports_async_copy: false,
+        supports_tf32: false,
+        supports_fp16: false,
+        memory_model: GpuTargetMemoryModel::GpuMemoryUnknown,
+    }
+}
+
+fn gpu_target_profile_cuda_sm80() -> GpuTargetProfile with Mut, Panic, Div {
+    var arch = ir_name_from_bytes(99, 117, 100, 97, 9)  // "cuda-sm80"
+    arch.buf[4] = 45   // '-'
+    arch.buf[5] = 115  // 's'
+    arch.buf[6] = 109  // 'm'
+    arch.buf[7] = 56   // '8'
+    arch.buf[8] = 48   // '0'
+    GpuTargetProfile {
+        vendor: GpuTargetVendor::GpuVendorCuda,
+        arch: arch,
+        warp_width: 32,
+        wave_width: 32,
+        supports_tensor_core: true,
+        supports_async_copy: true,
+        supports_tf32: true,
+        supports_fp16: true,
+        memory_model: GpuTargetMemoryModel::GpuMemoryCuda,
+    }
+}
+
+fn gpu_target_profile_rocm_gfx942() -> GpuTargetProfile with Mut, Panic, Div {
+    var arch = ir_name_from_bytes(114, 111, 99, 109, 11)  // "rocm-gfx942"
+    arch.buf[4] = 45   // '-'
+    arch.buf[5] = 103  // 'g'
+    arch.buf[6] = 102  // 'f'
+    arch.buf[7] = 120  // 'x'
+    arch.buf[8] = 57   // '9'
+    arch.buf[9] = 52   // '4'
+    arch.buf[10] = 50  // '2'
+    GpuTargetProfile {
+        vendor: GpuTargetVendor::GpuVendorRocm,
+        arch: arch,
+        warp_width: 32,
+        wave_width: 64,
+        supports_tensor_core: true,
+        supports_async_copy: false,
+        supports_tf32: false,
+        supports_fp16: true,
+        memory_model: GpuTargetMemoryModel::GpuMemoryHsa,
+    }
+}
+
+fn gpu_target_profile_arch_string(profile: GpuTargetProfile) -> string with Mut, Panic, Div {
+    str_from_bytes(profile.arch.buf, profile.arch.len)
+}
+
+fn gpu_op_capability_requirement_new() -> GpuOpCapabilityRequirement {
+    GpuOpCapabilityRequirement {
+        opcode: GpuOpcode::GpuRet,
+        requires_tensor_core: false,
+        requires_async_copy: false,
+        requires_tf32: false,
+        requires_fp16: false,
+    }
+}
+
+fn gpu_capability_requirement_from_op(op: GpuOp) -> GpuOpCapabilityRequirement {
+    var req = gpu_op_capability_requirement_new()
+    req.opcode = op.opcode
+
+    if op.opcode == GpuOpcode::GpuWmma || op.opcode == GpuOpcode::GpuMma || op.opcode == GpuOpcode::GpuMmaTf32 || op.opcode == GpuOpcode::GpuMmaF16 {
+        req.requires_tensor_core = true
+    }
+    if op.opcode == GpuOpcode::GpuCpAsync || op.opcode == GpuOpcode::GpuCpAsyncWait || op.opcode == GpuOpcode::GpuCpAsyncWaitAll {
+        req.requires_async_copy = true
+    }
+    if op.opcode == GpuOpcode::GpuMmaTf32 || op.opcode == GpuOpcode::GpuCvtF32Tf32 || op.ty == GpuType::GpuTf32 || op.dst_ty == GpuType::GpuTf32 || op.src_ty == GpuType::GpuTf32 {
+        req.requires_tf32 = true
+    }
+    if op.opcode == GpuOpcode::GpuMmaF16 || op.ty == GpuType::GpuF16 || op.dst_ty == GpuType::GpuF16 || op.src_ty == GpuType::GpuF16 {
+        req.requires_fp16 = true
+    }
+
+    req
+}
+
+fn gpu_target_supports_requirement(profile: GpuTargetProfile, req: GpuOpCapabilityRequirement) -> bool {
+    if req.requires_tensor_core && !profile.supports_tensor_core {
+        return false
+    }
+    if req.requires_async_copy && !profile.supports_async_copy {
+        return false
+    }
+    if req.requires_tf32 && !profile.supports_tf32 {
+        return false
+    }
+    if req.requires_fp16 && !profile.supports_fp16 {
+        return false
+    }
+    true
+}
+
+fn gpu_first_unmet_legalization_code(profile: GpuTargetProfile, req: GpuOpCapabilityRequirement) -> GpuLegalizationCode {
+    if req.requires_tensor_core && !profile.supports_tensor_core {
+        return GpuLegalizationCode::GpuLegalizationTensorCoreUnavailable
+    }
+    if req.requires_async_copy && !profile.supports_async_copy {
+        return GpuLegalizationCode::GpuLegalizationAsyncCopyUnavailable
+    }
+    if req.requires_tf32 && !profile.supports_tf32 {
+        return GpuLegalizationCode::GpuLegalizationTf32Unavailable
+    }
+    if req.requires_fp16 && !profile.supports_fp16 {
+        return GpuLegalizationCode::GpuLegalizationFp16Unavailable
+    }
+    GpuLegalizationCode::GpuLegalizationPass
+}
+
+fn gpu_legalization_diag_default() -> GpuLegalizationDiagnostic {
+    GpuLegalizationDiagnostic {
+        op_index: -1,
+        opcode: GpuOpcode::GpuRet,
+        code: GpuLegalizationCode::GpuLegalizationPass,
+        is_error: false,
+    }
+}
+
+fn gpu_legalization_diagnostic_new(op_index: i64, opcode: GpuOpcode, code: GpuLegalizationCode) -> GpuLegalizationDiagnostic {
+    GpuLegalizationDiagnostic {
+        op_index: op_index,
+        opcode: opcode,
+        code: code,
+        is_error: code != GpuLegalizationCode::GpuLegalizationPass,
+    }
+}
+
+fn gpu_ssa_v2_pipeline_id() -> Name with Mut, Panic, Div {
+    var n = ir_name_from_bytes(103, 112, 117, 95, 10)  // "gpu_ssa_v2"
+    n.buf[4] = 115  // 's'
+    n.buf[5] = 115  // 's'
+    n.buf[6] = 97   // 'a'
+    n.buf[7] = 95   // '_'
+    n.buf[8] = 118  // 'v'
+    n.buf[9] = 50   // '2'
+    n
+}
+
+fn gpu_ssa_v2_provenance_tag() -> Name with Mut, Panic, Div {
+    var n = ir_name_from_bytes(110, 97, 116, 105, 13)  // "native_shadow"
+    n.buf[4] = 118   // 'v'
+    n.buf[5] = 101   // 'e'
+    n.buf[6] = 95    // '_'
+    n.buf[7] = 115   // 's'
+    n.buf[8] = 104   // 'h'
+    n.buf[9] = 97    // 'a'
+    n.buf[10] = 100  // 'd'
+    n.buf[11] = 111  // 'o'
+    n.buf[12] = 119  // 'w'
+    n
+}
+
+fn gpu_kernel_ssa_v2_new(kernel: GpuKernelIr, target: GpuTargetProfile) -> GpuKernelSsaV2 with Mut, Panic, Div {
+    GpuKernelSsaV2 {
+        version_major: 2,
+        version_minor: 0,
+        pipeline_id: gpu_ssa_v2_pipeline_id(),
+        provenance_tag: gpu_ssa_v2_provenance_tag(),
+        workload_tag: kernel.workload_tag,
+        target_profile: target,
+        kernel: kernel,
+        capability_reqs: [gpu_op_capability_requirement_new(); 1024],
+        capability_req_count: 0,
+        diagnostics: [gpu_legalization_diag_default(); 1024],
+        diagnostic_count: 0,
+    }
+}
+
+fn gpu_legalize_kernel_to_ssa_v2(kernel: GpuKernelIr, target: GpuTargetProfile) -> GpuKernelSsaV2 with Mut, Panic, Div {
+    var out = gpu_kernel_ssa_v2_new(kernel, target)
+    var i: i64 = 0
+    while i < kernel.op_count {
+        let op = kernel.ops[i as usize]
+        let req = gpu_capability_requirement_from_op(op)
+        out.capability_reqs[out.capability_req_count as usize] = req
+        out.capability_req_count = out.capability_req_count + 1
+
+        let code = gpu_first_unmet_legalization_code(target, req)
+        if code != GpuLegalizationCode::GpuLegalizationPass {
+            out.diagnostics[out.diagnostic_count as usize] = gpu_legalization_diagnostic_new(i, op.opcode, code)
+            out.diagnostic_count = out.diagnostic_count + 1
+        }
+        i = i + 1
+    }
+    out
+}
+
+fn gpu_ssa_v2_is_legal(ssa: GpuKernelSsaV2) -> bool {
+    ssa.diagnostic_count == 0
 }
 
 fn gpu_type_to_string(ty: GpuType) -> string {

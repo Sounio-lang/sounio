@@ -1,5 +1,9 @@
 // IR definitions for self-hosted post-checker phases
 
+module ir::ir
+
+use parser::ast::{Name, StringList, AstPath, BinaryOp, UnaryOp}
+
 // These caps gate what the self-hosted pipeline can lower and execute.
 // They used to be tiny for bring-up, but hypercomplex + ML demos need more room.
 let IR_MAX_FUNCS: i64 = 1024
@@ -31,6 +35,142 @@ enum IrOpcode {
     IrLabel,
     IrNop,
     IrPhi,
+    // Vector IR — AVX10.2 unified-width packed-f64
+    //   imm_i64  = L'L code: 0→ZMM (default), 1=YMM, 2=ZMM
+    //   label_id = opmask register k0–k7 (0 = no masking)
+    //   field_idx = imm8 predicate byte (IrVecMinMaxPD only)
+    IrVecAddF64,   // EVEX VADDPD    {xmm|ymm|zmm}_dst, src1, src2
+    IrVecMulF64,   // EVEX VMULPD    {xmm|ymm|zmm}_dst, src1, src2
+    IrVecFmaF64,   // EVEX VFMADD231PD: dst = src1*src2 + dst
+    IrVecSubF64,   // EVEX VSUBPD    {xmm|ymm|zmm}_dst, src1, src2
+    IrVecMinMaxPD, // EVEX VMINMAXPD {xmm|ymm|zmm}_dst, src1, src2, imm8  (MAP5 0x52)
+    // K-register logical ops — VEX.L0/L1.66.0F.W0
+    //   dst  = destination k-register (0–7)
+    //   src1 = first source k-register (binary ops)
+    //   src2 = second source k-register
+    IrMaskAnd,     // VEX KANDW  k_dst, k_src1, k_src2  (opcode 0x41, L=1)
+    IrMaskOr,      // VEX KORW   k_dst, k_src1, k_src2  (opcode 0x45, L=1)
+    IrMaskNot,     // VEX KNOTW  k_dst, k_src           (opcode 0x44, L=0)
+    IrMaskMov,     // VEX KMOVW  k_dst, k_src           (opcode 0x90, L=0)
+    // Vector utility ops — prerequisites for hypercomplex
+    //   IrVecPermilPD:    imm_i64=vl_code, src1=ctrl_reg, src2=data_reg  (reg-reg form)
+    //   IrVecPermilPDImm: imm_i64=vl_code, field_idx=imm8_ctrl, src2=data_reg  (imm8 form)
+    //   IrVecAddSubPD:    standard imm_i64=vl, label_id=mask_k
+    IrVecPermilPD,    // EVEX VPERMILPD reg-reg: dst=permute(src2,src1_ctrl)  map=2 0x0D
+    IrVecPermilPDImm, // EVEX VPERMILPD imm8:   dst=permute(src2,imm8_ctrl)  map=3 0x05
+    IrVecAddSubPD,    // EVEX VADDSUBPD:        dst[i]=src1[i] +-+- src2[i]  map=1 0xD0
+    // Hypercomplex multiply
+    //   dst  = result register (YMM for quaternion, vl=1)
+    //   src1 = left operand register
+    //   src2 = right operand register
+    IrHyperMulQ,      // Quaternion Hamilton product via 8-instr EVEX sequence
+    // Octonion vector primitives (prerequisites for hypercomplex-O ops)
+    //   IrVecXorPD:   map=1 op=0x57   EVEX.66.0F.W1 57 /r  — f64 bitwise XOR (sign flip)
+    //   IrVecPermpd:  map=2 op=0x16   EVEX.66.0F38.W1 16 /r — arbitrary YMM permute (reg-indexed)
+    //   Both: dst/src1/src2 = YMM reg indices, imm_i64 = vl_code (1=YMM)
+    //         label_id & 7 = mask k-register, imm_flags & 1 = z-bit
+    IrVecXorPD,       // VXORPD: bitwise XOR packed f64                        map=1 op=0x57
+    IrVecPermpd,      // VPERMPD reg-indexed: arbitrary YMM/ZMM f64 permute     map=2 op=0x16
+    // Octonion hypercomplex ops (post-3.6.1)
+    //   IrHyperConjugateO: paired-YMM unchanged from 3.6
+    //   IrHyperMulO (3.6.1+): single-ZMM Fano-plane convention
+    //     lane 0 = real e0, lanes 1-7 = e1..e7, vl_code = 2 (ZMM)
+    //     INVARIANT: dst/src1/src2 are valid ZMM indices; no paired-register requirement.
+    //   label_id = (mask_k & 7) | (ctrl_base << 4)
+    //              low 3 bits = output k-register (0 = k0 = no mask)
+    //              bits 7:4   = base ZMM index for 21 pre-loaded Fano constants
+    //                           [+0..+6]  broadcast ctrl for b[1..7] (ZMM = [j,j,j,j,j,j,j,j])
+    //                           [+7..+13] permutation ctrl for a columns 1..7
+    //                           [+14..+20] sign masks for columns 1..7 (0x8000… = negative)
+    //   imm_flags bit 0 = z-bit (0 = merge-masking, 1 = zero-masking)
+    //   IrHyperConjugateO label_id still encodes (mask_k & 7) | (sign_ymm << 4)
+    IrHyperConjugateO, // Octonion conjugate: 2×VXORPD, flip e₁–e₇ in both YMM halves (12 bytes)
+    IrHyperMulO,       // Octonion Hamilton product, Fano single-ZMM, 31 instr / 186 bytes
+    IrHyperNormSqO,    // Octonion norm-squared Σeᵢ², 7 instr / 44 bytes, broadcast to all lanes
+    // G₂-equivariant ops (Horizon 3.7)
+    //   G₂ = Aut(𝕆), the 14-dimensional exceptional Lie group preserving the Fano-plane
+    //   multiplication table. Its Lie algebra 𝔤₂ consists of derivations acting on Im(𝕆) ≅ ℝ⁷
+    //   (lanes 1-7 of a single ZMM; lane 0 = real part = 0 for imaginary projections).
+    //
+    //   IrG2ProjectImO: zero lane 0 → project from 𝕆 to Im(𝕆)
+    //     VANDPD dst, src, imag_mask (lane 0 = 0x0, lanes 1-7 = 0xFFFF…)
+    //     label_id = (mask_k & 7) | (imag_mask_zmm << 4)
+    //     imm_flags bit 0 = z-bit
+    //
+    //   IrG2ApplyGenO: apply 7×7 matrix to Im(𝕆) via column-major multiply
+    //     Same broadcast-and-FMA pattern as Fano columns: for each j=1..7,
+    //     broadcast input[j], VFMADD with column_j of the generator matrix.
+    //     label_id = (mask_k & 7) | (col_base << 4)
+    //       col_base+0..6 = 7 column ZMMs (preloaded generator matrix rows)
+    //     field_idx = generator ID (0..13) for documentation; lowering uses col_base
+    //     Broadcast ctrls reused from Fano constants ([j,j,j,j,j,j,j,j])
+    //     16 instr / 96 bytes: 1 VXORPD + 7×(VPERMPD + VFMADD231PD) + 1 VMOVAPD
+    //
+    //   IrG2DenseO: G₂-equivariant dense layer = project + apply + store
+    //     Composes IrG2ProjectImO + IrG2ApplyGenO internally
+    //     17 instr / 102 bytes
+    IrG2ProjectImO,    // Project to Im(𝕆): zero lane 0 via VANDPD, 1 instr / 6 bytes
+    IrG2ApplyGenO,     // Apply 𝔤₂ generator: 7×7 matrix-vector on Im(𝕆), 16 instr / 96 bytes
+    IrG2DenseO,        // G₂-equivariant dense: project + apply, 17 instr / 102 bytes
+    // G₂-equivariant dense kernel with IEEE-754-2019 robustness (Horizon 3.8)
+    //   Full pipeline: project → G₂ matrix-vector → VMINMAXPD NaN/±0 clamp → masked store
+    //   18 instructions / 109 bytes:
+    //     1 VANDPD (project, 6) + 1 VXORPD (zero, 6) + 7×(VPERMPD+VFMADD231PD) (84)
+    //     + VMINMAXPD{k}{z}+imm8 (IEEE clamp, 7) + VMOVAPD{k}{z} (store, 6)
+    //   label_id = (mask_k & 7) | (col_base << 4)   — same encoding as IrG2DenseO
+    //   imm_flags bit 0 = z-bit (zeroing-mask)
+    //   src1 = input ZMM, src2 = imag_mask ZMM (lane 0 = 0x0, lanes 1-7 = 0xFF…)
+    IrG2EquivDenseKernelO, // G₂-equivariant dense kernel + IEEE robustness, 18 instr / 109 bytes
+    // E₈ root reflection — Weyl group action on the rank-8 Cartan subalgebra (Horizon 3.9)
+    //   E₈ = largest exceptional Lie algebra (dim 248, rank 8, 240 roots).
+    //   All E₈ roots have ⟨α,α⟩ = 2, so: s_α(v) = v − ⟨v,α⟩·α  (no /2 needed).
+    //
+    //   ZMM carries 8 f64 lanes ≅ one vector in the Cartan subalgebra ℝ⁸.
+    //   Algorithm (8 instr / 48 bytes):
+    //     1. VMULPD t, v, α                     — elementwise product (6B)
+    //     2. VPERMPD t2, ctrl0, t [swap halves]  — reduce 8→4 (6B)
+    //     3. VADDPD t, t, t2                     — partial sums      (6B)
+    //     4. VPERMPD t2, ctrl1, t [swap pairs]   — reduce 4→2 (6B)
+    //     5. VADDPD t, t, t2                     — partial sums      (6B)
+    //     6. VPERMPD t2, ctrl2, t [swap adj]     — reduce 2→1 (broadcast) (6B)
+    //     7. VADDPD t, t, t2                     — dot broadcast to all 8 lanes (6B)
+    //     8. VFNMADD231PD v, t, α                — v = v − t·α        (6B)
+    //
+    //   Encoding:
+    //     dst  = v ZMM index (input → output, updated in-place)
+    //     src1 = α ZMM index (root vector, read-only)
+    //     src2 = t ZMM index (scratch dot-product accumulator)
+    //     t2   = src2 + 2   (second scratch; caller must leave free)
+    //     label_id = (mask_k & 7) | (ctrl_base << 4)
+    //       ctrl_base+0: control ZMM for swap-halves    [4,5,6,7,0,1,2,3]
+    //       ctrl_base+1: control ZMM for swap-pairs     [2,3,0,1,6,7,4,5]
+    //       ctrl_base+2: control ZMM for swap-adjacent  [1,0,3,2,5,4,7,6]
+    //     imm_flags bit 0 = z-bit (zeroing-mask on final VFNMADD)
+    IrE8RootReflectO,      // E₈ Weyl reflection s_α(v) = v − ⟨v,α⟩·α, 8 instr / 48 bytes
+    // F₄ root reflection — rank 4, dim 52, 48 roots (Horizon 4.0)
+    //   NOT simply-laced: short/long root ratio √2.  Pre-normalize roots to ⟨α,α⟩=2
+    //   so the E₈ tree-reduction pattern applies unchanged.
+    //   Algorithm: same 8-lane VMULPD + 3×(VPERMPD+VADDPD) + VFNMADD231PD
+    //   Unused lanes 4-7 zeroed → contribute 0 to dot product.
+    //   8 instr / 48 bytes.  Encoding identical to IrE8RootReflectO.
+    IrF4RootReflectO,
+    // E₆ root reflection — rank 6, dim 78, 72 roots, simply-laced (Horizon 4.0)
+    //   Same algorithm as E₈; lanes 6-7 zeroed.  8 instr / 48 bytes.
+    IrE6RootReflectO,
+    // E₇ root reflection — rank 7, dim 133, 126 roots, simply-laced (Horizon 4.0)
+    //   Same algorithm as E₈; lane 7 zeroed.  8 instr / 48 bytes.
+    IrE7RootReflectO,
+    // Cartan matrix multiply — column-major broadcast-and-FMA (Horizon 4.0)
+    //   Applies the Cartan matrix A_{ij} = 2⟨αᵢ,αⱼ⟩/⟨αⱼ,αⱼ⟩ to a weight vector.
+    //   Column vectors preloaded into ZMM registers at col_base+0..N-1.
+    //   Broadcast ctrls at bcast_base = col_base − rank.
+    //   Pattern: VXORPD + N×(VPERMPD+VFMADD231PD) + VMOVAPD
+    //   label_id = (mask_k & 7) | (col_base << 4), imm_flags bit 0 = z-bit
+    //   Registers: dst=output, src1=input, t_bcast=dst+2, accum=dst+4
+    IrF4CartanMulO,        // F₄ 4×4 Cartan, 10 instr / 60 bytes
+    IrE6CartanMulO,        // E₆ 6×6 Cartan, 14 instr / 84 bytes
+    IrE7CartanMulO,        // E₇ 7×7 Cartan, 16 instr / 96 bytes
+    IrE8CartanMulO,        // E₈ 8×8 Cartan, 18 instr / 108 bytes
 }
 
 struct IrRegList {
@@ -48,6 +188,7 @@ struct IrInstr {
     label_id: i64,
     fn_id: i64,
     field_idx: i64,
+    imm_flags: i64,    // Bit 0: z (zeroing-mask, sets EVEX P3[7]). Future: SAE, broadcast.
     bin_op: BinaryOp,
     un_op: UnaryOp,
     name: Name,
@@ -341,6 +482,7 @@ fn ir_instr_new(op: IrOpcode) -> IrInstr {
         label_id: IR_INVALID_LABEL,
         fn_id: IR_INVALID_FN,
         field_idx: -1,
+        imm_flags: 0,
         bin_op: BinaryOp::OpAdd,
         un_op: UnaryOp::OpNeg,
         name: ir_empty_name(),
@@ -369,6 +511,7 @@ fn ir_label(label_id: i64) -> IrInstr {
         label_id: label_id,
         fn_id: base.fn_id,
         field_idx: base.field_idx,
+        imm_flags: base.imm_flags,
         bin_op: base.bin_op,
         un_op: base.un_op,
         name: base.name,
@@ -389,6 +532,7 @@ fn ir_jump(label_id: i64) -> IrInstr {
         label_id: label_id,
         fn_id: base.fn_id,
         field_idx: base.field_idx,
+        imm_flags: base.imm_flags,
         bin_op: base.bin_op,
         un_op: base.un_op,
         name: base.name,
@@ -409,6 +553,7 @@ fn ir_branch_true(cond: i64, label_id: i64) -> IrInstr {
         label_id: label_id,
         fn_id: base.fn_id,
         field_idx: base.field_idx,
+        imm_flags: base.imm_flags,
         bin_op: base.bin_op,
         un_op: base.un_op,
         name: base.name,
@@ -429,6 +574,7 @@ fn ir_branch_false(cond: i64, label_id: i64) -> IrInstr {
         label_id: label_id,
         fn_id: base.fn_id,
         field_idx: base.field_idx,
+        imm_flags: base.imm_flags,
         bin_op: base.bin_op,
         un_op: base.un_op,
         name: base.name,
@@ -449,6 +595,7 @@ fn ir_load_imm(dst: i64, value: i64) -> IrInstr {
         label_id: base.label_id,
         fn_id: base.fn_id,
         field_idx: base.field_idx,
+        imm_flags: base.imm_flags,
         bin_op: base.bin_op,
         un_op: base.un_op,
         name: base.name,
@@ -469,6 +616,7 @@ fn ir_load_float(dst: i64, value: f64) -> IrInstr {
         label_id: base.label_id,
         fn_id: base.fn_id,
         field_idx: base.field_idx,
+        imm_flags: base.imm_flags,
         bin_op: base.bin_op,
         un_op: base.un_op,
         name: base.name,
@@ -489,6 +637,7 @@ fn ir_load_bool(dst: i64, value: bool) -> IrInstr {
         label_id: base.label_id,
         fn_id: base.fn_id,
         field_idx: base.field_idx,
+        imm_flags: base.imm_flags,
         bin_op: base.bin_op,
         un_op: base.un_op,
         name: base.name,
@@ -509,6 +658,7 @@ fn ir_load_string(dst: i64, string_idx: i64, n: Name) -> IrInstr {
         label_id: base.label_id,
         fn_id: base.fn_id,
         field_idx: base.field_idx,
+        imm_flags: base.imm_flags,
         bin_op: base.bin_op,
         un_op: base.un_op,
         name: n,
@@ -529,6 +679,7 @@ fn ir_copy(dst: i64, src: i64) -> IrInstr {
         label_id: base.label_id,
         fn_id: base.fn_id,
         field_idx: base.field_idx,
+        imm_flags: base.imm_flags,
         bin_op: base.bin_op,
         un_op: base.un_op,
         name: base.name,
@@ -569,6 +720,7 @@ fn ir_unaryop(dst: i64, op: UnaryOp, src: i64) -> IrInstr {
         label_id: base.label_id,
         fn_id: base.fn_id,
         field_idx: base.field_idx,
+        imm_flags: base.imm_flags,
         bin_op: base.bin_op,
         un_op: op,
         name: base.name,
@@ -592,6 +744,7 @@ fn ir_call(dst: i64, fn_id: i64, fn_name: Name, args: Option<Box<IrRegList>>, ar
         label_id: base.label_id,
         fn_id: fn_id,
         field_idx: base.field_idx,
+        imm_flags: base.imm_flags,
         bin_op: base.bin_op,
         un_op: base.un_op,
         name: fn_name,
@@ -626,6 +779,7 @@ fn ir_return(src: i64) -> IrInstr {
         label_id: base.label_id,
         fn_id: base.fn_id,
         field_idx: base.field_idx,
+        imm_flags: base.imm_flags,
         bin_op: base.bin_op,
         un_op: base.un_op,
         name: base.name,
@@ -646,6 +800,7 @@ fn ir_field_get(dst: i64, base_reg: i64, field_idx: i64, field_name: Name) -> Ir
         label_id: base.label_id,
         fn_id: base.fn_id,
         field_idx: field_idx,
+        imm_flags: base.imm_flags,
         bin_op: base.bin_op,
         un_op: base.un_op,
         name: field_name,
@@ -666,6 +821,7 @@ fn ir_field_set(base_reg: i64, field_idx: i64, src: i64, field_name: Name) -> Ir
         label_id: base.label_id,
         fn_id: base.fn_id,
         field_idx: field_idx,
+        imm_flags: base.imm_flags,
         bin_op: base.bin_op,
         un_op: base.un_op,
         name: field_name,
@@ -686,6 +842,7 @@ fn ir_index_get(dst: i64, base_reg: i64, idx_reg: i64) -> IrInstr {
         label_id: base.label_id,
         fn_id: base.fn_id,
         field_idx: base.field_idx,
+        imm_flags: base.imm_flags,
         bin_op: base.bin_op,
         un_op: base.un_op,
         name: base.name,
@@ -706,6 +863,7 @@ fn ir_index_set(base_reg: i64, idx_reg: i64, src_reg: i64) -> IrInstr {
         label_id: base.label_id,
         fn_id: base.fn_id,
         field_idx: base.field_idx,
+        imm_flags: base.imm_flags,
         bin_op: base.bin_op,
         un_op: base.un_op,
         name: base.name,
@@ -726,6 +884,7 @@ fn ir_alloc(dst: i64, type_id: i64) -> IrInstr {
         label_id: base.label_id,
         fn_id: base.fn_id,
         field_idx: base.field_idx,
+        imm_flags: base.imm_flags,
         bin_op: base.bin_op,
         un_op: base.un_op,
         name: base.name,
@@ -746,6 +905,7 @@ fn ir_phi(dst: i64) -> IrInstr {
         label_id: base.label_id,
         fn_id: base.fn_id,
         field_idx: base.field_idx,
+        imm_flags: base.imm_flags,
         bin_op: base.bin_op,
         un_op: base.un_op,
         name: base.name,

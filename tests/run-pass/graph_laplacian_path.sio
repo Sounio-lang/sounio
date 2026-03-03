@@ -1,0 +1,202 @@
+//@ run-pass
+//@ expect-stdout: 1
+// Graph Spectral — Laplacian and Connectivity Tests
+//
+// Self-contained tests for spectral graph primitives.
+// All functions inlined — tests cannot import stdlib.
+//
+// Graph conventions:
+//   adj stored row-major in [f64; 16] for n <= 4
+//   adj[i*n + j] = weight of edge (i,j)
+//
+// Verified properties:
+//   1. P4 (path on 4 nodes, 3 edges): trace(L) = 6
+//   2. K3 (complete graph on 3 nodes, 3 edges): trace(L) = 6
+//   3. Star S3 (1 center + 3 leaves, n=4): gsp_is_connected = true
+//   4. Empty graph on 4 nodes (no edges): gsp_is_connected = false
+
+// ============================================================================
+// MATH HELPERS
+// ============================================================================
+
+fn glp_abs(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+// ============================================================================
+// ADJACENCY HELPERS (n <= 4, stored in [f64; 16])
+// ============================================================================
+
+// Build a zero adjacency matrix for n <= 4
+fn glp_zero_adj() -> [f64; 16] {
+    let z: [f64; 16] = [0.0, 0.0, 0.0, 0.0,
+                         0.0, 0.0, 0.0, 0.0,
+                         0.0, 0.0, 0.0, 0.0,
+                         0.0, 0.0, 0.0, 0.0]
+    return z
+}
+
+// Add undirected edge (u,v) to adjacency matrix (n is the row stride)
+fn glp_add_edge(adj: &! [f64; 16], n: i64, u: i64, v: i64) with Mut, Panic {
+    adj[(u * n + v) as usize] = 1.0
+    adj[(v * n + u) as usize] = 1.0
+}
+
+// ============================================================================
+// LAPLACIAN AND TRACE (n <= 4, stored in [f64; 16])
+// ============================================================================
+
+// Compute graph Laplacian L = D - A.
+// Writes into out[0..n*n-1].
+fn glp_laplacian(adj: [f64; 16], n: i64, out: &! [f64; 16]) with Div, Mut, Panic {
+    if n <= 0 || n > 4 { panic("glp_laplacian: n must be in [1,4]") }
+    var i = 0 as i64
+    while i < n {
+        var deg = 0.0
+        var k = 0 as i64
+        while k < n {
+            deg = deg + adj[(i * n + k) as usize]
+            k = k + 1
+        }
+        var j = 0 as i64
+        while j < n {
+            if i == j {
+                out[(i * n + j) as usize] = deg
+            } else {
+                out[(i * n + j) as usize] = 0.0 - adj[(i * n + j) as usize]
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+}
+
+// Compute trace of n x n matrix stored in [f64; 16]
+fn glp_trace(lap: [f64; 16], n: i64) -> f64 with Div, Mut, Panic {
+    if n <= 0 || n > 4 { panic("glp_trace: n must be in [1,4]") }
+    var tr = 0.0
+    var i = 0 as i64
+    while i < n {
+        tr = tr + lap[(i * n + i) as usize]
+        i = i + 1
+    }
+    return tr
+}
+
+// ============================================================================
+// CONNECTIVITY CHECK (BFS, n <= 4)
+// ============================================================================
+
+fn glp_is_connected(adj: [f64; 16], n: i64) -> bool with Div, Mut, Panic {
+    if n <= 0 || n > 4 { panic("glp_is_connected: n must be in [1,4]") }
+    if n == 1 { return true }
+
+    // visited array (4 slots max)
+    var visited: [i64; 4] = [0, 0, 0, 0]
+    // BFS queue: fixed capacity 4
+    var queue: [i64; 4] = [0, 0, 0, 0]
+    var q_head = 0 as i64
+    var q_tail = 0 as i64
+
+    // Enqueue vertex 0
+    visited[0] = 1
+    queue[q_tail as usize] = 0
+    q_tail = q_tail + 1
+
+    while q_head < q_tail {
+        let cur = queue[q_head as usize]
+        q_head = q_head + 1
+        var nb = 0 as i64
+        while nb < n {
+            if adj[(cur * n + nb) as usize] > 0.0 {
+                if visited[nb as usize] == 0 {
+                    visited[nb as usize] = 1
+                    queue[q_tail as usize] = nb
+                    q_tail = q_tail + 1
+                }
+            }
+            nb = nb + 1
+        }
+    }
+
+    // Check all vertices were visited
+    var v = 0 as i64
+    while v < n {
+        if visited[v as usize] == 0 { return false }
+        v = v + 1
+    }
+    return true
+}
+
+// ============================================================================
+// TEST FUNCTIONS
+// ============================================================================
+
+// Test 1: P4 path graph (0-1-2-3, 3 edges)
+// trace(L) = sum of degrees = 1+2+2+1 = 6
+fn test_p4_trace() -> bool with Div, Mut, Panic {
+    var adj = glp_zero_adj()
+    glp_add_edge(&! adj, 4, 0, 1)
+    glp_add_edge(&! adj, 4, 1, 2)
+    glp_add_edge(&! adj, 4, 2, 3)
+    var lap = glp_zero_adj()
+    glp_laplacian(adj, 4, &! lap)
+    let tr = glp_trace(lap, 4)
+    return glp_abs(tr - 6.0) < 0.0001
+}
+
+// Test 2: K3 complete graph (0-1, 1-2, 0-2, 3 edges)
+// Each vertex has degree 2, so trace(L) = 2+2+2 = 6
+fn test_k3_trace() -> bool with Div, Mut, Panic {
+    // K3 is on 3 vertices; use n=3 stored in [f64; 16]
+    var adj: [f64; 16] = [0.0, 0.0, 0.0, 0.0,
+                           0.0, 0.0, 0.0, 0.0,
+                           0.0, 0.0, 0.0, 0.0,
+                           0.0, 0.0, 0.0, 0.0]
+    // Row stride = 3 for K3 (n=3 used in glp_laplacian/glp_trace)
+    // But glp_add_edge uses stride n=3
+    glp_add_edge(&! adj, 3, 0, 1)
+    glp_add_edge(&! adj, 3, 1, 2)
+    glp_add_edge(&! adj, 3, 0, 2)
+    var lap: [f64; 16] = [0.0, 0.0, 0.0, 0.0,
+                           0.0, 0.0, 0.0, 0.0,
+                           0.0, 0.0, 0.0, 0.0,
+                           0.0, 0.0, 0.0, 0.0]
+    glp_laplacian(adj, 3, &! lap)
+    let tr = glp_trace(lap, 3)
+    return glp_abs(tr - 6.0) < 0.0001
+}
+
+// Test 3: Star S3 (center=0, leaves=1,2,3, 3 edges) — must be connected
+fn test_star_s3_connected() -> bool with Div, Mut, Panic {
+    var adj = glp_zero_adj()
+    glp_add_edge(&! adj, 4, 0, 1)
+    glp_add_edge(&! adj, 4, 0, 2)
+    glp_add_edge(&! adj, 4, 0, 3)
+    return glp_is_connected(adj, 4)
+}
+
+// Test 4: Empty graph on 4 nodes (no edges) — must NOT be connected
+fn test_empty_disconnected() -> bool with Div, Mut, Panic {
+    let adj = glp_zero_adj()
+    return glp_is_connected(adj, 4) == false
+}
+
+// ============================================================================
+// MAIN
+// ============================================================================
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    let test1 = test_p4_trace()
+    let test2 = test_k3_trace()
+    let test3 = test_star_s3_connected()
+    let test4 = test_empty_disconnected()
+
+    if test1 && test2 && test3 && test4 {
+        println(1)
+        return 0
+    }
+    println(0)
+    return 1
+}

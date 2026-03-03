@@ -24,101 +24,100 @@ if bmi < 25:
     print("Normal weight")
 # What if the scale was off by 2kg?`,
     sounio: `// Sounio: epistemic computing
-let mass: Knowledge<kg> = measure(
-    value: 75.3,
-    uncertainty: 0.5,
-    source: "clinical_scale_001"
+// ε is the confidence level (0.0 to 1.0)
+let mass: Knowledge[f64] = Knowledge(
+    75.3, 
+    ε=0.98, 
+    prov="clinical_scale_001"
 )
 
-let height: Knowledge<m> = measure(
-    value: 1.82,
-    uncertainty: 0.01,
-    source: "stadiometer_001"
+let height: Knowledge[f64] = Knowledge(
+    1.82, 
+    ε=0.99, 
+    prov="stadiometer_001"
 )
 
-// Uncertainty propagates automatically
-let bmi = mass / (height * height)
-// bmi = 22.74 \u00b1 0.31 (confidence: 97.1%)
+// GUM Uncertainty propagates automatically:
+// ε(a/b) = ε(a) × ε(b)
+let bmi: Knowledge[f64] = mass / (height * height)
+// bmi.value = 22.74, bmi.ε = 0.96
 
-if bmi.confidence > 0.95 {
-    report_bmi(bmi)
+if bmi.ε >= 0.95 {
+    println("Confidence sufficient for diagnosis")
 } else {
-    request_remeasurement()
+    println("Request remeasurement")
 }`,
   },
   {
-    id: 'effects',
-    label: 'Effects',
-    python: `# Python: hidden side effects
-def read_sensor():
-    raw = open("/dev/sensor0").read()
-    value = float(raw)
-    return value
-    # What can go wrong? Everything.
-    # File IO? Network? Parse errors?
-    # The signature doesn't tell you.
+    id: 'causality',
+    label: 'Causal Models',
+    python: `# Python: implicit causality
+# A model where Genetics confound Smoking and Cancer
+def predict_cancer(genetics, smoking):
+    tar = 0.8 * smoking
+    cancer = 0.6 * tar + 0.3 * genetics
+    return cancer
 
-def main():
-    try:
-        v = read_sensor()
-    except Exception as e:
-        print(f"Error: {e}")
-        v = 0.0
-    # Catching 'Exception' \u2014 hoping for the best`,
-    sounio: `// Sounio: effects are tracked in types
-fn read_sensor() -> f64 with IO, Fail {
-    let raw = perform IO::read("/dev/sensor0")?
-    let value = parse_float(raw)?
-    value
-}
+# The structure is hidden in code execution.
+# Hard to analyze counterfactuals or interventions.
+# No standard way to express "Smoking causes Tar".
+`,
+    sounio: `// Sounio: native causal directed acyclic graphs
+causal model SmokingCancer {
+    // Declare causal variables
+    nodes: [Smoking, Tar, Cancer, Genetics]
 
-// Effect handlers provide the implementation
-fn main() with IO {
-    handle read_sensor() {
-        IO::read(path) => resume(fs::read(path)),
-        Fail::error(msg) => {
-            log_error(msg)
-            resume(0.0)
-        }
+    // Define causal relationships (edges)
+    Genetics -> Smoking
+    Genetics -> Cancer
+    Smoking -> Tar
+    Tar -> Cancer
+
+    // Structural causal equations
+    equations: {
+        Smoking = 0.5 * Genetics,
+        Tar = 0.8 * Smoking,
+        Cancer = 0.6 * Tar + 0.3 * Genetics
     }
 }
-// The type system guarantees: no hidden effects`,
+// The compiler understands the causal graph natively.`,
   },
   {
-    id: 'gpu',
-    label: 'GPU',
-    python: `# Python: string-based GPU code
-import cupy as cp
+    id: 'resources',
+    label: 'Resource Safety',
+    python: `# Python: garbage collection
+class FileHandle:
+    def __init__(self, fd):
+        self.fd = fd
 
-kernel = cp.RawKernel(r'''
-extern "C" __global__
-void matmul(const float* a, const float* b,
-            float* c, int M, int K, int N) {
-    int row = blockIdx.y * blockDim.y + threadIdx.y;
-    int col = blockIdx.x * blockDim.x + threadIdx.x;
-    float sum = 0.0f;
-    for (int k = 0; k < K; k++)
-        sum += a[row*K+k] * b[k*N+col];
-    c[row*N+col] = sum;
-}
-''', 'matmul')  # No type checking inside string`,
-    sounio: `// Sounio: native GPU kernel syntax
-@kernel
-fn matrix_multiply(
-    a: &Tensor<f32, [M, K]>,
-    b: &Tensor<f32, [K, N]>,
-    c: &!Tensor<f32, [M, N]>
-) with GPU {
-    let row = gpu::thread_idx_y()
-    let col = gpu::thread_idx_x()
+def close_file(h):
+    # Closes the file descriptors
+    pass
 
-    var sum: f32 = 0.0
-    for k in 0..K {
-        sum += a[row, k] * b[k, col]
-    }
-    c[row, col] = sum
+h = FileHandle(42)
+close_file(h)
+close_file(h) # Oops, double free!
+# The type system doesn't stop you from using 
+# a closed resource or forgetting to close it.`,
+    sounio: `// Sounio: linear types for strict ownership
+linear struct FileHandle {
+    fd: i32
 }
-// Type-safe. Dimension-checked. No strings.`,
+
+fn close_file(h: FileHandle) -> i32 {
+    h.fd // consumed exactly once
+}
+
+fn main() {
+    let handle = FileHandle { fd: 42 }
+    
+    // Consumes the linear resource
+    let result = close_file(handle)
+    
+    // let err = close_file(handle) 
+    // ^ COMPILE ERROR: use of consumed linear value!
+}
+// Enforces no-cloning and no-dropping at compile time.`,
   },
 ];
 
@@ -195,18 +194,6 @@ export default function CodeExamples() {
           </div>
         </div>
 
-        {/* CTA */}
-        <div className="mt-12 text-center">
-          <a
-            href="/playground"
-            className="inline-flex items-center gap-2 text-[var(--color-accent-gold)] font-medium hover:gap-3 transition-all"
-          >
-            Try in Playground
-            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M14 5l7 7m0 0l-7 7m7-7H3" />
-            </svg>
-          </a>
-        </div>
       </div>
     </section>
   );

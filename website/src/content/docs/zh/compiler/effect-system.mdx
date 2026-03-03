@@ -1,0 +1,139 @@
+---
+title: "Effect System"
+description: "Algebraic effects with handlers: checking, inference, and runtime dispatch."
+weight: 63
+category: "compiler"
+---
+
+> **Note**: This page has not yet been translated to ZH and is presented in English.
+
+
+# Effect System
+
+Sounio tracks side effects explicitly at the type level using an **algebraic effect system with handlers**.
+
+At a high level:
+
+1. Functions declare effects with `with ...` (e.g., `with IO, Async`).
+2. The compiler checks that effectful operations are only used when the corresponding effect is declared.
+3. At runtime, a handler stack (and continuation machinery) dispatches effect operations.
+
+## Where It Lives
+
+- `crates/souc/src/effects/` — effect inference, continuations, and handler implementations
+- `crates/souc/src/types/effects.rs` — effect set representation used by the checker
+
+Key submodules under `crates/souc/src/effects/` include:
+
+- `inference.rs` — effect inference/checking pass
+- `handlers/` — concrete handler implementations (IO, Async, GPU, ...)
+- `continuation.rs` — CPS/continuation machinery for suspend/resume
+- `linearity.rs` — linearity checks around effects (when enabled/used)
+- `resilience.rs` — resilient patterns (retry, circuit breaker)
+
+## Built-In Effects (Examples)
+
+The compiler/runtime has handler implementations for effects like:
+
+| Effect | Purpose | Typical Ops |
+|---|---|---|
+| `IO` | console/filesystem I/O | `print`, `read_file`, `write_file` |
+| `Panic` | recoverable failures | `panic`, `assert`, `unwrap` |
+| `Async` | task scheduling | `spawn`, `await`, `join`, `select` |
+| `GPU` | GPU execution | `launch`, `sync`, `alloc_device` |
+
+> Spec vs implementation: some effect operations may exist as stubs depending on enabled features and available external tooling (CUDA, LLVM, etc.). See `docs/compiler/KNOWN_LIMITATIONS.md`.
+
+## Effect Checking & Inference
+
+Effect inference tracks where effects come from so diagnostics can be precise (direct ops, method calls, higher-order functions, pattern-match panics, ...).
+
+Common error classes:
+
+- **Undeclared effect**: using an effectful operation inside a function that didn’t declare the effect.
+- **Unhandled effect**: effect is declared but no handler is available for execution in that mode.
+- **Effect in pure context**: calling an effectful closure where a pure one is required.
+
+### Checker Shape (Selected Fields)
+
+```rust
+pub struct EffectChecker<'a> {
+    symbols: &'a SymbolTable,
+    type_info: Option<&'a TypeInfo>,
+    fn_effects: HashMap<DefId, EffectSet>,
+    method_effects: HashMap<(String, String), EffectSet>,
+    declared: EffectSet,
+    inferred: EffectSet,
+    errors: Vec<EffectError>,
+    effect_sources: HashMap<String, Span>,
+}
+```
+
+### Error Classification (Examples)
+
+```rust
+pub enum EffectErrorKind {
+    UndeclaredEffect { effect: String, source: EffectSource },
+    UnhandledEffect { effect: String },
+    EffectInPureContext { effect: String },
+    EffectfulClosureArg { effect: String, hof_name: String },
+    RefutablePatternPanic { pattern_desc: String },
+}
+```
+
+## Handlers and Continuations
+
+Handlers implement a capability interface (effect name + supported operations + `handle(...)`), and execution can suspend/resume via a continuation representation.
+
+This design enables:
+
+- swapping handler implementations (e.g., testing IO)
+- resilient handlers (retry/circuit breaker style patterns)
+- integration points for async scheduling and GPU dispatch
+
+### Handler Capability Trait (Shape)
+
+```rust
+pub trait HandlerCapability {
+    fn effect_name(&self) -> &str;
+    fn operations(&self) -> &[OperationSpec];
+
+    fn handle(
+        &self,
+        operation: &str,
+        args: &[Value],
+        cont: Continuation,
+        state: &mut HandlerState,
+    ) -> HandlerResult;
+}
+```
+
+### Continuation Resume Points (Shape)
+
+```rust
+pub enum ResumePoint {
+    InterpreterClosure { resume_fn: OneShotResumeFn },
+    InterpreterMultiShot { resume_fn: MultiShotResumeFn },
+    Jit { return_address: usize, saved_registers: Vec<u64> },
+    Stub,
+}
+```
+
+## Example (Language-Level)
+
+```sio
+fn read_config(path: string) -> string with IO {
+    return perform IO.read_file(path)
+}
+
+fn pure_add(a: i32, b: i32) -> i32 {
+    // Error (effect not declared): calling IO inside a pure function
+    // print(a + b)
+    return a + b
+}
+```
+
+## Next
+
+- [Code Generation](../codegen)
+- [Scientific Features](../scientific-features)

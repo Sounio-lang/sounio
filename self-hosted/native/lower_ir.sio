@@ -1,4 +1,14 @@
 // self-hosted::native::lower_ir — IR-to-x86-64 lowering (stack-slot model)
+
+module native::lower_ir
+
+use parser::ast::{BinaryOp, UnaryOp}
+use ir::ir::{IrInstr, IrOpcode, IrRegList, IR_MAX_FUNCS}
+use native::encode::*
+use native::reloc::{RelocationTable, add_call_reloc, add_rip_reloc, patch_u32_le}
+use native::elf::{StringTable, string_table_add, data_section_add_f64}
+use native::regs::{param_reg}
+use native::frame::*
 //
 // Phase 1: Full instruction lowering.
 //
@@ -49,6 +59,66 @@ fn lower_instr(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut, P
         lower_branch_false(nc, instr)
     } else if instr.op == IrOpcode::IrNop {
         nc
+    } else if instr.op == IrOpcode::IrVecAddF64 {
+        lower_vec_add(nc, instr)
+    } else if instr.op == IrOpcode::IrVecMulF64 {
+        lower_vec_mul(nc, instr)
+    } else if instr.op == IrOpcode::IrVecFmaF64 {
+        lower_vec_fma(nc, instr)
+    } else if instr.op == IrOpcode::IrVecSubF64 {
+        lower_vec_sub(nc, instr)
+    } else if instr.op == IrOpcode::IrVecMinMaxPD {
+        lower_vec_minmax(nc, instr)
+    } else if instr.op == IrOpcode::IrMaskAnd {
+        lower_mask_and(nc, instr)
+    } else if instr.op == IrOpcode::IrMaskOr {
+        lower_mask_or(nc, instr)
+    } else if instr.op == IrOpcode::IrMaskNot {
+        lower_mask_not(nc, instr)
+    } else if instr.op == IrOpcode::IrMaskMov {
+        lower_mask_mov(nc, instr)
+    } else if instr.op == IrOpcode::IrVecPermilPD {
+        lower_vec_permil(nc, instr)
+    } else if instr.op == IrOpcode::IrVecPermilPDImm {
+        lower_vec_permil_imm(nc, instr)
+    } else if instr.op == IrOpcode::IrVecAddSubPD {
+        lower_vec_addsub(nc, instr)
+    } else if instr.op == IrOpcode::IrHyperMulQ {
+        lower_hyper_mul_q(nc, instr)
+    } else if instr.op == IrOpcode::IrVecXorPD {
+        lower_vec_xor(nc, instr)
+    } else if instr.op == IrOpcode::IrVecPermpd {
+        lower_vec_permpd(nc, instr)
+    } else if instr.op == IrOpcode::IrHyperConjugateO {
+        lower_hyper_conjugate_o(nc, instr)
+    } else if instr.op == IrOpcode::IrHyperMulO {
+        lower_hyper_mul_o_fano(nc, instr)
+    } else if instr.op == IrOpcode::IrHyperNormSqO {
+        lower_hyper_norm_sq_o(nc, instr)
+    } else if instr.op == IrOpcode::IrG2ProjectImO {
+        lower_g2_project_im_o(nc, instr)
+    } else if instr.op == IrOpcode::IrG2ApplyGenO {
+        lower_g2_apply_gen_o(nc, instr)
+    } else if instr.op == IrOpcode::IrG2DenseO {
+        lower_g2_dense_o(nc, instr)
+    } else if instr.op == IrOpcode::IrG2EquivDenseKernelO {
+        lower_g2_equiv_dense_kernel_o(nc, instr)
+    } else if instr.op == IrOpcode::IrE8RootReflectO {
+        lower_e8_root_reflect_o(nc, instr)
+    } else if instr.op == IrOpcode::IrF4RootReflectO {
+        lower_f4_root_reflect_o(nc, instr)
+    } else if instr.op == IrOpcode::IrE6RootReflectO {
+        lower_e6_root_reflect_o(nc, instr)
+    } else if instr.op == IrOpcode::IrE7RootReflectO {
+        lower_e7_root_reflect_o(nc, instr)
+    } else if instr.op == IrOpcode::IrF4CartanMulO {
+        lower_f4_cartan_mul_o(nc, instr)
+    } else if instr.op == IrOpcode::IrE6CartanMulO {
+        lower_e6_cartan_mul_o(nc, instr)
+    } else if instr.op == IrOpcode::IrE7CartanMulO {
+        lower_e7_cartan_mul_o(nc, instr)
+    } else if instr.op == IrOpcode::IrE8CartanMulO {
+        lower_e8_cartan_mul_o(nc, instr)
     } else {
         // Unsupported opcode — skip silently for bootstrap
         nc
@@ -175,11 +245,23 @@ fn lower_load_bool(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mu
 
 fn lower_load_float(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut, Panic, Div {
     var c = nc
-    // Reinterpret f64 bit pattern as i64 (IEEE 754 preserving).
     let bits = f64_to_bits(instr.imm_f64)
-    c.code = emit_mov_rax_imm(c.code, bits)
+
+    // Place f64 constant in .rodata (8-byte aligned)
+    c.rodata = data_section_add_f64(c.rodata, bits)
+    let data_offset = c.rodata.last_offset
+
+    // MOVSD xmm0, [rip + disp32] — 8 bytes: F2 0F 10 05 <disp32>
+    let movsd_pos = c.code.len
+    c.code = emit_movsd_xmm0_rip_disp32(c.code, 0)
+    c.relocs = add_rip_reloc(c.relocs, movsd_pos + 4, data_offset)
+
+    // MOVQ rax, xmm0 — transfer to GPR for stack storage
+    c.code = emit_movq_rax_xmm0(c.code)
+
     if instr.dst >= 0 {
         c.code = emit_store_rax_rbp_disp32(c.code, ir_slot_offset(instr.dst))
+        c.is_float_reg[instr.dst as usize] = 1
     }
     c
 }
@@ -192,8 +274,8 @@ fn lower_load_string(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with 
     var c = nc
 
     // Add string to .rodata, get offset
-    let (new_rodata, str_offset) = string_table_add(c.rodata, instr.name.buf, instr.name.len)
-    c.rodata = new_rodata
+    c.rodata = string_table_add(c.rodata, instr.name.buf, instr.name.len)
+    let str_offset = c.rodata.last_offset
 
     // Emit LEA rax, [rip + disp32] with placeholder
     // The LEA is 7 bytes: 48 8d 05 <disp32>
@@ -224,6 +306,10 @@ fn lower_copy(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut, Pa
     c.code = emit_load_rbp_disp32_rax(c.code, ir_slot_offset(instr.src1))
     if instr.dst >= 0 {
         c.code = emit_store_rax_rbp_disp32(c.code, ir_slot_offset(instr.dst))
+        // Propagate float type tracking
+        if instr.src1 >= 0 && instr.src1 < 512 {
+            c.is_float_reg[instr.dst as usize] = c.is_float_reg[instr.src1 as usize]
+        }
     }
     c
 }
@@ -232,24 +318,114 @@ fn lower_copy(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut, Pa
 // Binary operations
 // ============================================================================
 
+// Returns 1 if op is a comparison (produces integer 0/1), 0 if arithmetic (produces f64)
+fn is_comparison_op(op: BinaryOp) -> i64 {
+    if op == BinaryOp::OpEq { 1 }
+    else if op == BinaryOp::OpNe { 1 }
+    else if op == BinaryOp::OpLt { 1 }
+    else if op == BinaryOp::OpLe { 1 }
+    else if op == BinaryOp::OpGt { 1 }
+    else if op == BinaryOp::OpGe { 1 }
+    else { 0 }
+}
+
+// Float binary operation: xmm0 = LHS, xmm1 = RHS, result in rax
+fn emit_float_binop_code(nc: NativeCompiler, op: BinaryOp) -> NativeCompiler with Mut, Panic, Div {
+    var c = nc
+
+    if op == BinaryOp::OpAdd {
+        c.code = emit_addsd_xmm0_xmm1(c.code)
+        c.code = emit_movq_rax_xmm0(c.code)
+    } else if op == BinaryOp::OpSub {
+        c.code = emit_subsd_xmm0_xmm1(c.code)
+        c.code = emit_movq_rax_xmm0(c.code)
+    } else if op == BinaryOp::OpMul {
+        c.code = emit_mulsd_xmm0_xmm1(c.code)
+        c.code = emit_movq_rax_xmm0(c.code)
+    } else if op == BinaryOp::OpDiv {
+        c.code = emit_divsd_xmm0_xmm1(c.code)
+        c.code = emit_movq_rax_xmm0(c.code)
+    } else if op == BinaryOp::OpEq {
+        c.code = emit_ucomisd_xmm0_xmm1(c.code)
+        c.code = emit_sete_al(c.code)
+        c.code = emit_movzx_rax_al(c.code)
+    } else if op == BinaryOp::OpNe {
+        c.code = emit_ucomisd_xmm0_xmm1(c.code)
+        c.code = emit_setne_al(c.code)
+        c.code = emit_movzx_rax_al(c.code)
+    } else if op == BinaryOp::OpLt {
+        c.code = emit_ucomisd_xmm0_xmm1(c.code)
+        c.code = emit_setb_al(c.code)
+        c.code = emit_movzx_rax_al(c.code)
+    } else if op == BinaryOp::OpLe {
+        c.code = emit_ucomisd_xmm0_xmm1(c.code)
+        c.code = emit_setbe_al(c.code)
+        c.code = emit_movzx_rax_al(c.code)
+    } else if op == BinaryOp::OpGt {
+        c.code = emit_ucomisd_xmm0_xmm1(c.code)
+        c.code = emit_seta_al(c.code)
+        c.code = emit_movzx_rax_al(c.code)
+    } else if op == BinaryOp::OpGe {
+        c.code = emit_ucomisd_xmm0_xmm1(c.code)
+        c.code = emit_setae_al(c.code)
+        c.code = emit_movzx_rax_al(c.code)
+    }
+
+    c
+}
+
 fn lower_ir_binop(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut, Panic, Div {
     var c = nc
 
-    // Load LHS to rax, push; load RHS to rax; pop LHS to rbx
-    // After: rbx = LHS, rax = RHS
-    c.code = emit_load_rbp_disp32_rax(c.code, ir_slot_offset(instr.src1))
-    c.code = emit_push_rax(c.code)
-    c.code = emit_sub_rsp_8(c.code)      // maintain 16-byte alignment
-    c.code = emit_load_rbp_disp32_rax(c.code, ir_slot_offset(instr.src2))
-    c.code = emit_add_rsp_8(c.code)
-    c.code = emit_pop_rbx(c.code)
+    // Check if either operand is float
+    var is_float = 0
+    if instr.src1 >= 0 && instr.src1 < 512 {
+        if c.is_float_reg[instr.src1 as usize] == 1 {
+            is_float = 1
+        }
+    }
+    if instr.src2 >= 0 && instr.src2 < 512 {
+        if c.is_float_reg[instr.src2 as usize] == 1 {
+            is_float = 1
+        }
+    }
 
-    // Now rbx = LHS, rax = RHS
-    c = emit_binop_code(c, instr.bin_op)
+    if is_float == 1 {
+        // Float path: load src1 → rax → xmm0, src2 → rax → xmm1
+        c.code = emit_load_rbp_disp32_rax(c.code, ir_slot_offset(instr.src1))
+        c.code = emit_movq_xmm0_rax(c.code)
+        c.code = emit_load_rbp_disp32_rax(c.code, ir_slot_offset(instr.src2))
+        c.code = emit_movq_xmm1_rax(c.code)
 
-    // Store result (in rax) to dst slot
-    if instr.dst >= 0 {
-        c.code = emit_store_rax_rbp_disp32(c.code, ir_slot_offset(instr.dst))
+        c = emit_float_binop_code(c, instr.bin_op)
+        let is_cmp = is_comparison_op(instr.bin_op)
+
+        // Store result (in rax) to dst slot
+        if instr.dst >= 0 {
+            c.code = emit_store_rax_rbp_disp32(c.code, ir_slot_offset(instr.dst))
+            // Comparisons produce integer 0/1; arithmetic keeps float
+            if is_cmp == 1 {
+                c.is_float_reg[instr.dst as usize] = 0
+            } else {
+                c.is_float_reg[instr.dst as usize] = 1
+            }
+        }
+    } else {
+        // Integer path (original)
+        c.code = emit_load_rbp_disp32_rax(c.code, ir_slot_offset(instr.src1))
+        c.code = emit_push_rax(c.code)
+        c.code = emit_sub_rsp_8(c.code)      // maintain 16-byte alignment
+        c.code = emit_load_rbp_disp32_rax(c.code, ir_slot_offset(instr.src2))
+        c.code = emit_add_rsp_8(c.code)
+        c.code = emit_pop_rbx(c.code)
+
+        // Now rbx = LHS, rax = RHS
+        c = emit_binop_code(c, instr.bin_op)
+
+        // Store result (in rax) to dst slot
+        if instr.dst >= 0 {
+            c.code = emit_store_rax_rbp_disp32(c.code, ir_slot_offset(instr.dst))
+        }
     }
     c
 }
@@ -521,4 +697,1183 @@ fn lower_ir_instr(buf: CodeBuffer, instr: IrInstr) -> CodeBuffer with Mut, Panic
     c.code = buf
     c = lower_instr(c, instr)
     c.code
+}
+
+// ============================================================================
+// EVEX encoding helpers — packed-f64 ZMM register-register form.
+//
+// Inlined from the avx512 module encoding to keep lower_ir.sio self-contained
+// and avoid pushing the transitive module count over the 64-module BFS limit.
+// Reference: Intel SDM Vol.2 §2.6, EVEX prefix layout.
+//
+// Byte layout:
+//   P0 = 0x62
+//   P1 = R X B R' 0 0 m m   (R/X/B/R' are inverted extension bits; mm = map)
+//   P2 = W vvvv4..1 1 pp1pp0 (W=1=f64; vvvv = inverted src1; pp=01=66-prefix)
+//   P3 = z L'L b V' aaa      (L'L=10=512-bit; V' = inv(src1[4]); rest=0)
+//   opcode byte
+//   ModRM = 11 dst_lo3 src2_lo3
+// ============================================================================
+
+fn evex_bit(val: i64, n: i64) -> i64 { (val >> n) & 1 }
+fn evex_inv(b: i64) -> i64 { if b == 0 { 1 } else { 0 } }
+fn evex_lo3(id: i64) -> i64 { id & 7 }
+
+// P1: R=~dst[3], X=1 (no index), B=~src2[3], R'=~dst[4], map
+fn evex_p1(dst_id: i64, src2_id: i64, map: i64) -> i64 {
+    let r_inv  = evex_inv(evex_bit(dst_id,  3))
+    let b_inv  = evex_inv(evex_bit(src2_id, 3))
+    let rp_inv = evex_inv(evex_bit(dst_id,  4))
+    (r_inv << 7) | (1 << 6) | (b_inv << 5) | (rp_inv << 4) | (map & 0xF)
+}
+
+// P2: W=1 (f64), vvvv=bitwise-NOT of src1 low-4, prefix=01 (66h)
+fn evex_p2_pd(src1_id: i64) -> i64 {
+    let vvvv_inv = (0 - src1_id - 1) & 0xF
+    0x80 | (vvvv_inv << 3) | 0x4 | 0x1
+}
+
+// P3 — width-parameterised: L'L encodes vector length, V'=~src1[4]
+//   vl_code: 0=XMM (L'L=00), 1=YMM (L'L=01), 2=ZMM (L'L=10)
+fn evex_p3_vl(src1_id: i64, vl_code: i64) -> i64 {
+    let vp_inv = evex_inv(evex_bit(src1_id, 4))
+    ((vl_code & 3) << 5) | (vp_inv << 3)
+}
+
+// Convenience alias for 512-bit (ZMM) — preserves existing call sites.
+fn evex_p3_zmm(src1_id: i64) -> i64 { evex_p3_vl(src1_id, 2) }
+
+// P3 with opmask: bits [2:0] = mask_k (k0=no mask, k1–k7=active mask).
+fn evex_p3_vl_masked(src1_id: i64, vl_code: i64, mask_k: i64) -> i64 {
+    let vp_inv = evex_inv(evex_bit(src1_id, 4))
+    ((vl_code & 3) << 5) | (vp_inv << 3) | (mask_k & 7)
+}
+
+// Width-parameterised EVEX packed-f64 reg-reg emitter.
+//   vl_code: 0=XMM, 1=YMM, 2=ZMM
+//   map:     1 = 0F  (vaddpd=0x58, vmulpd=0x59, vsubpd=0x5C)
+//            2 = 0F38 (vfmadd231pd=0xB8)
+fn emit_evex_pd_rr(buf: CodeBuffer, map: i64, opcode: i64, dst: i64, src1: i64, src2: i64, vl_code: i64) -> CodeBuffer with Mut, Panic, Div {
+    var b = buf
+    b = emit_byte(b, 0x62)
+    b = emit_byte(b, evex_p1(dst, src2, map))
+    b = emit_byte(b, evex_p2_pd(src1))
+    b = emit_byte(b, evex_p3_vl(src1, vl_code))
+    b = emit_byte(b, opcode)
+    b = emit_byte(b, 0xC0 | (evex_lo3(dst) << 3) | evex_lo3(src2))
+    b
+}
+
+// ZMM-fixed wrapper — keeps existing callers working.
+fn emit_evex_pd_zmm_rr(buf: CodeBuffer, map: i64, opcode: i64, dst: i64, src1: i64, src2: i64) -> CodeBuffer with Mut, Panic, Div {
+    emit_evex_pd_rr(buf, map, opcode, dst, src1, src2, 2)
+}
+
+// EVEX packed-f64 reg-reg + trailing immediate byte (7 bytes total).
+//   map 5 = AVX10.2 MAP5 (e.g. VMINMAXPD opcode 0x52)
+fn emit_evex_pd_rr_imm8(buf: CodeBuffer, map: i64, opcode: i64, dst: i64, src1: i64, src2: i64, vl_code: i64, imm8: i64) -> CodeBuffer with Mut, Panic, Div {
+    var b = emit_evex_pd_rr(buf, map, opcode, dst, src1, src2, vl_code)
+    b = emit_byte(b, imm8 & 0xFF)
+    b
+}
+
+// EVEX reg-reg with opmask register in P3 aaa bits.  mask_k=0 → same as emit_evex_pd_rr.
+fn emit_evex_pd_rr_masked(buf: CodeBuffer, map: i64, opcode: i64, dst: i64, src1: i64, src2: i64, vl_code: i64, mask_k: i64) -> CodeBuffer with Mut, Panic, Div {
+    var b = buf
+    b = emit_byte(b, 0x62)
+    b = emit_byte(b, evex_p1(dst, src2, map))
+    b = emit_byte(b, evex_p2_pd(src1))
+    b = emit_byte(b, evex_p3_vl_masked(src1, vl_code, mask_k))
+    b = emit_byte(b, opcode)
+    b = emit_byte(b, 0xC0 | (evex_lo3(dst) << 3) | evex_lo3(src2))
+    b
+}
+
+// P3 — full control: z-bit (zeroing-mask), L'L (width), V', aaa (opmask).
+//   z_bit=1 sets EVEX P3[7]; z_bit=0 is merging-mask (default).
+//   Requires mask_k > 0 when z_bit=1.
+fn evex_p3_vl_full(src1_id: i64, vl_code: i64, mask_k: i64, z_bit: i64) -> i64 {
+    let vp_inv = evex_inv(evex_bit(src1_id, 4))
+    ((z_bit & 1) << 7) | ((vl_code & 3) << 5) | (vp_inv << 3) | (mask_k & 7)
+}
+
+// EVEX reg-reg covering all modes: unmasked, masked (merging), masked+zeroing.
+fn emit_evex_pd_rr_full(buf: CodeBuffer, map: i64, opcode: i64, dst: i64, src1: i64, src2: i64, vl_code: i64, mask_k: i64, z_bit: i64) -> CodeBuffer with Mut, Panic, Div {
+    var b = buf
+    b = emit_byte(b, 0x62)
+    b = emit_byte(b, evex_p1(dst, src2, map))
+    b = emit_byte(b, evex_p2_pd(src1))
+    b = emit_byte(b, evex_p3_vl_full(src1, vl_code, mask_k, z_bit))
+    b = emit_byte(b, opcode)
+    b = emit_byte(b, 0xC0 | (evex_lo3(dst) << 3) | evex_lo3(src2))
+    b
+}
+
+// VBROADCASTSD ZMM,XMM — EVEX.512.66.0F38.W1 19 /r
+// Broadcasts the low f64 of src (ZMM lane 0) to all lanes of dst.
+// vvvv = 1111 (unused): src1=0 in evex_p2_pd gives vvvv_inv=0xF → vvvv=1111.
+fn emit_vbroadcastsd(buf: CodeBuffer, dst: i64, src: i64, vl_code: i64, mask_k: i64, z_bit: i64) -> CodeBuffer with Mut, Panic, Div {
+    emit_evex_pd_rr_full(buf, 2, 0x19, dst, 0, src, vl_code, mask_k, z_bit)
+}
+
+// Vector IR lowering — AVX10.2 unified-width packed-f64
+//
+// IrInstr encoding for vector ops:
+//   dst      = vector register index (0-31)
+//   src1     = vector source-1 register index
+//   src2     = vector source-2 register index
+//   imm_i64  = EVEX L'L code: 0=XMM (default→ZMM), 1=YMM, 2=ZMM
+//              When imm_i64 == 0 (default-initialised), ZMM is used for
+//              backward compatibility with pre-3.3 code.
+// ============================================================================
+
+// IrVecAddF64 → EVEX VADDPD {xmm|ymm|zmm}_dst, src1, src2
+//   label_id > 0 activates opmask k{label_id}
+fn lower_vec_add(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut, Panic, Div {
+    var c = nc
+    let vl = if instr.imm_i64 > 0 { instr.imm_i64 } else { 2 }
+    let mk = instr.label_id & 7
+    let zb = instr.imm_flags & 1
+    if mk > 0 {
+        c.code = emit_evex_pd_rr_full(c.code, 1, 0x58, instr.dst, instr.src1, instr.src2, vl, mk, zb)
+    } else {
+        c.code = emit_evex_pd_rr(c.code, 1, 0x58, instr.dst, instr.src1, instr.src2, vl)
+    }
+    c
+}
+
+// IrVecMulF64 → EVEX VMULPD {xmm|ymm|zmm}_dst, src1, src2
+fn lower_vec_mul(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut, Panic, Div {
+    var c = nc
+    let vl = if instr.imm_i64 > 0 { instr.imm_i64 } else { 2 }
+    let mk = instr.label_id & 7
+    let zb = instr.imm_flags & 1
+    if mk > 0 {
+        c.code = emit_evex_pd_rr_full(c.code, 1, 0x59, instr.dst, instr.src1, instr.src2, vl, mk, zb)
+    } else {
+        c.code = emit_evex_pd_rr(c.code, 1, 0x59, instr.dst, instr.src1, instr.src2, vl)
+    }
+    c
+}
+
+// IrVecFmaF64 → EVEX VFMADD231PD {xmm|ymm|zmm}_dst, src1, src2
+//   Semantics: dst = src1 * src2 + dst  (form 231)
+fn lower_vec_fma(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut, Panic, Div {
+    var c = nc
+    let vl = if instr.imm_i64 > 0 { instr.imm_i64 } else { 2 }
+    let mk = instr.label_id & 7
+    let zb = instr.imm_flags & 1
+    if mk > 0 {
+        c.code = emit_evex_pd_rr_full(c.code, 2, 0xB8, instr.dst, instr.src1, instr.src2, vl, mk, zb)
+    } else {
+        c.code = emit_evex_pd_rr(c.code, 2, 0xB8, instr.dst, instr.src1, instr.src2, vl)
+    }
+    c
+}
+
+// IrVecSubF64 → EVEX VSUBPD {xmm|ymm|zmm}_dst, src1, src2
+fn lower_vec_sub(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut, Panic, Div {
+    var c = nc
+    let vl = if instr.imm_i64 > 0 { instr.imm_i64 } else { 2 }
+    let mk = instr.label_id & 7
+    let zb = instr.imm_flags & 1
+    if mk > 0 {
+        c.code = emit_evex_pd_rr_full(c.code, 1, 0x5C, instr.dst, instr.src1, instr.src2, vl, mk, zb)
+    } else {
+        c.code = emit_evex_pd_rr(c.code, 1, 0x5C, instr.dst, instr.src1, instr.src2, vl)
+    }
+    c
+}
+
+// IrVecMinMaxPD → EVEX VMINMAXPD {xmm|ymm|zmm}_dst, src1, src2, imm8
+//   MAP5 opcode 0x52; field_idx carries the imm8 predicate (0=min, 1=max, …)
+fn lower_vec_minmax(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut, Panic, Div {
+    var c = nc
+    let vl   = if instr.imm_i64 > 0 { instr.imm_i64 } else { 2 }
+    let pred = instr.field_idx & 0xFF
+    let mk   = instr.label_id & 7
+    let zb   = instr.imm_flags & 1
+    // VMINMAXPD (MAP5 0x52) has a trailing imm8; masked form uses full P3 then imm8.
+    if mk > 0 {
+        var b = emit_evex_pd_rr_full(c.code, 5, 0x52, instr.dst, instr.src1, instr.src2, vl, mk, zb)
+        b = emit_byte(b, pred)
+        c.code = b
+    } else {
+        c.code = emit_evex_pd_rr_imm8(c.code, 5, 0x52, instr.dst, instr.src1, instr.src2, vl, pred)
+    }
+    c
+}
+
+// ============================================================================
+// K-register logical ops — VEX-3 prefix (0xC4)
+// ============================================================================
+//
+// K-register IDs are always 0–7 (bits 3 and 4 are zero), so VEX-3 simplifies:
+//   Byte 0: 0xC4
+//   Byte 1: 0xE1  (R=1 X=1 B=1 map=0F — all k-regs have id < 8)
+//   Byte 2 (binary): W=0 vvvv=~src1 L=1 pp=01 → ((~src1 & 0xF) << 3) | 5
+//   Byte 2 (unary):  W=0 vvvv=1111 L=0 pp=01 → 0x79
+//   Byte 3: opcode
+//   Byte 4: ModRM = 0xC0 | (dst << 3) | src2
+
+// VEX-3 binary k-op: KANDW (0x41) or KORW (0x45).  L=1 (wide form required by Intel).
+fn emit_vex3_k_binary(buf: CodeBuffer, opcode: i64, dst: i64, src1: i64, src2: i64) -> CodeBuffer with Mut, Panic, Div {
+    var b = buf
+    let vvvv_inv = (0 - src1 - 1) & 0xF
+    b = emit_byte(b, 0xC4)
+    b = emit_byte(b, 0xE1)
+    b = emit_byte(b, (vvvv_inv << 3) | 0x5)
+    b = emit_byte(b, opcode)
+    b = emit_byte(b, 0xC0 | ((dst & 7) << 3) | (src2 & 7))
+    b
+}
+
+// VEX-3 unary k-op: KNOTW (0x44) or KMOVW (0x90).  L=0, vvvv=1111.
+fn emit_vex3_k_unary(buf: CodeBuffer, opcode: i64, dst: i64, src: i64) -> CodeBuffer with Mut, Panic, Div {
+    var b = buf
+    b = emit_byte(b, 0xC4)
+    b = emit_byte(b, 0xE1)
+    b = emit_byte(b, 0x79)
+    b = emit_byte(b, opcode)
+    b = emit_byte(b, 0xC0 | ((dst & 7) << 3) | (src & 7))
+    b
+}
+
+// IrMaskAnd → KANDW k_dst, k_src1, k_src2
+fn lower_mask_and(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut, Panic, Div {
+    var c = nc
+    c.code = emit_vex3_k_binary(c.code, 0x41, instr.dst, instr.src1, instr.src2)
+    c
+}
+
+// IrMaskOr → KORW k_dst, k_src1, k_src2
+fn lower_mask_or(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut, Panic, Div {
+    var c = nc
+    c.code = emit_vex3_k_binary(c.code, 0x45, instr.dst, instr.src1, instr.src2)
+    c
+}
+
+// IrMaskNot → KNOTW k_dst, k_src  (src1 used as source)
+fn lower_mask_not(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut, Panic, Div {
+    var c = nc
+    c.code = emit_vex3_k_unary(c.code, 0x44, instr.dst, instr.src1)
+    c
+}
+
+// IrMaskMov → KMOVW k_dst, k_src  (src1 used as source)
+fn lower_mask_mov(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut, Panic, Div {
+    var c = nc
+    c.code = emit_vex3_k_unary(c.code, 0x90, instr.dst, instr.src1)
+    c
+}
+
+// ============================================================================
+// Vector utility ops — VPERMILPD, VADDSUBPD
+// ============================================================================
+
+// IrVecPermilPD → EVEX VPERMILPD (reg-reg)
+//   EVEX.66.0F38.W1 0D /r  (map=2, opcode=0x0D)
+//   src1 = control register, src2 = data register
+fn lower_vec_permil(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut, Panic, Div {
+    var c = nc
+    let vl = if instr.imm_i64 > 0 { instr.imm_i64 } else { 2 }
+    c.code = emit_evex_pd_rr(c.code, 2, 0x0D, instr.dst, instr.src1, instr.src2, vl)
+    c
+}
+
+// IrVecPermilPDImm → EVEX VPERMILPD (imm8)
+//   EVEX.66.0F3A.W1 05 /r ib  (map=3, opcode=0x05)
+//   src2 = data register; field_idx = imm8 permutation control
+//   src1 = 15 encodes vvvv=1111 (no NDS register — 2-operand form)
+fn lower_vec_permil_imm(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut, Panic, Div {
+    var c = nc
+    let vl   = if instr.imm_i64 > 0 { instr.imm_i64 } else { 2 }
+    let ctrl = instr.field_idx & 0xFF
+    c.code = emit_evex_pd_rr_imm8(c.code, 3, 0x05, instr.dst, 15, instr.src2, vl, ctrl)
+    c
+}
+
+// IrVecAddSubPD → EVEX VADDSUBPD
+//   EVEX.66.0F.W1 D0 /r  (map=1, opcode=0xD0)
+//   dst[i] = src1[i] + src2[i] for even lanes, src1[i] - src2[i] for odd lanes
+fn lower_vec_addsub(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut, Panic, Div {
+    var c = nc
+    let vl = if instr.imm_i64 > 0 { instr.imm_i64 } else { 2 }
+    let mk = instr.label_id & 7
+    let zb = instr.imm_flags & 1
+    if mk > 0 {
+        c.code = emit_evex_pd_rr_full(c.code, 1, 0xD0, instr.dst, instr.src1, instr.src2, vl, mk, zb)
+    } else {
+        c.code = emit_evex_pd_rr(c.code, 1, 0xD0, instr.dst, instr.src1, instr.src2, vl)
+    }
+    c
+}
+
+// ============================================================================
+// Quaternion Hamilton product — IrHyperMulQ
+// ============================================================================
+//
+// Lowers a quaternion multiply (q1 ⊗ q2) to an 8-instruction EVEX sequence
+// using YMM registers (vl=1, 4 × f64).
+//
+// Register allocation uses scratch registers assigned sequentially after dst/src:
+//   r_tmp  = instr.dst + 1    (permuted q2 and intermediate)
+//   r_a    = instr.dst + 2    (partial product accumulator A)
+//   r_b    = instr.dst + 3    (partial product accumulator B)
+//   r_q1x  = instr.dst + 4   (permuted q1)
+//
+// The compiler must ensure 5 consecutive YMM registers are available from dst.
+// This lower function emits bytes unconditionally; register allocation is the
+// front-end's responsibility.
+//
+// Hamilton product: given q1=[w1,x1,y1,z1], q2=[w2,x2,y2,z2]:
+//   w = w1*w2 - x1*x2 - y1*y2 - z1*z2
+//   x = w1*x2 + x1*w2 + y1*z2 - z1*y2
+//   y = w1*y2 - x1*z2 + y1*w2 + z1*x2
+//   z = w1*z2 + x1*y2 - y1*x2 + z1*w2
+//
+// The 8-step lowering permutes and multiplies components, then uses VADDSUBPD
+// to apply the sign pattern automatically:
+//   VPERMILPD imm8=0x05: [w,x,y,z] → [x,w,z,y]
+//   VMULPD    r_a, q1, r_tmp
+//   VPERMILPD imm8=0x0F: [w,x,y,z] → [y,z,w,x]  (imm8=0x0F = 0b00001111)
+//   VMULPD    r_b, q1, r_tmp
+//   VPERMILPD imm8=0x01: [w,x,y,z] → [x,w,z,y] for q1  (swap within pairs)
+//   VFMADD231PD r_a, r_q1x, q2
+//   VADDSUBPD   dst, r_a, r_b
+//   VPERMILPD imm8=0x00: identity (keep component order)
+fn lower_hyper_mul_q(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut, Panic, Div {
+    var c = nc
+    let q1    = instr.src1
+    let q2    = instr.src2
+    let dst   = instr.dst
+    let r_tmp = dst + 1
+    let r_a   = dst + 2
+    let r_b   = dst + 3
+    let r_q1x = dst + 4
+    // Step 1: VPERMILPD r_tmp, q2, imm8=0x05  → q2 swapped within pairs: [x2,w2,z2,y2]
+    c.code = emit_evex_pd_rr_imm8(c.code, 3, 0x05, r_tmp, 15, q2, 1, 0x05)
+    // Step 2: VMULPD r_a, q1, r_tmp
+    c.code = emit_evex_pd_rr(c.code, 1, 0x59, r_a, q1, r_tmp, 1)
+    // Step 3: VPERMILPD r_tmp, q2, imm8=0x0F  → [y2,z2,w2,x2]
+    c.code = emit_evex_pd_rr_imm8(c.code, 3, 0x05, r_tmp, 15, q2, 1, 0x0F)
+    // Step 4: VMULPD r_b, q1, r_tmp
+    c.code = emit_evex_pd_rr(c.code, 1, 0x59, r_b, q1, r_tmp, 1)
+    // Step 5: VPERMILPD r_q1x, q1, imm8=0x01  → q1 lanes rotated: [x1,w1,z1,y1]
+    c.code = emit_evex_pd_rr_imm8(c.code, 3, 0x05, r_q1x, 15, q1, 1, 0x01)
+    // Step 6: VFMADD231PD r_a, r_q1x, q2  → r_a += r_q1x * q2
+    c.code = emit_evex_pd_rr(c.code, 2, 0xB8, r_a, r_q1x, q2, 1)
+    // Step 7: VADDSUBPD dst, r_a, r_b  → alternating +/- gives correct Hamilton signs
+    c.code = emit_evex_pd_rr(c.code, 1, 0xD0, dst, r_a, r_b, 1)
+    // Step 8: identity permute (component order already correct after VADDSUBPD)
+    //         omitted — VADDSUBPD already produces [w,x,y,z] layout
+    c
+}
+
+// ============================================================================
+// Octonion arithmetic — IrVecXorPD, IrVecPermpd, IrHyperConjugateO,
+//                       IrHyperMulO, IrHyperNormSqO
+// ============================================================================
+
+// IrVecXorPD → EVEX VXORPD
+//   EVEX.NDS.66.0F.W1 57 /r  (map=1, opcode=0x57)
+//   Same EVEX structure as VADDPD (map=1, 0x58). Mask + z-bit threaded from instr.
+fn lower_vec_xor(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut, Panic, Div {
+    var c = nc
+    let vl   = if instr.imm_i64 > 0 { instr.imm_i64 } else { 2 }
+    let mask = instr.label_id & 7
+    let zb   = instr.imm_flags & 1
+    c.code = emit_evex_pd_rr_full(c.code, 1, 0x57, instr.dst, instr.src1, instr.src2, vl, mask, zb)
+    c
+}
+
+// IrVecPermpd → EVEX VPERMPD (register-indexed form)
+//   EVEX.NDS.66.0F38.W1 16 /r  (map=2, opcode=0x16)
+//   3-operand: dst=permuted data, src1=control/index vector, src2=source data
+//   Supports arbitrary 4-lane (YMM) or 8-lane (ZMM) f64 permutations.
+//   NOTE: distinct from VPERMPD imm8 form (map=3, opcode=0x01) in avx512.sio.
+fn lower_vec_permpd(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut, Panic, Div {
+    var c = nc
+    let vl   = if instr.imm_i64 > 0 { instr.imm_i64 } else { 2 }
+    let mask = instr.label_id & 7
+    let zb   = instr.imm_flags & 1
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0x16, instr.dst, instr.src1, instr.src2, vl, mask, zb)
+    c
+}
+
+// IrHyperConjugateO → octonion conjugate: negate e₁–e₇, keep e₀
+//   Emits 2 × VXORPD (12 bytes) with the sign-mask YMM loaded from instr.label_id.
+//   sign_mask_ymm_idx = (instr.label_id >> 4) & 0xF  (YMM index of sign constant)
+//   mask_k            = instr.label_id & 7            (output k-register, 0=no mask)
+//   conj(o).lo = VXORPD dst_lo, src_lo, sign_mask_lo  (flip e₁,e₂,e₃)
+//   conj(o).hi = VXORPD dst_hi, src_hi, sign_mask_hi  (flip e₄,e₅,e₆,e₇ — all 4)
+//   sign_mask_lo = (0x0000…, 0x8000…, 0x8000…, 0x8000…)
+//   sign_mask_hi = (0x8000…, 0x8000…, 0x8000…, 0x8000…)
+//   Both stored consecutively in r15-relative constant table (boot pattern).
+fn lower_hyper_conjugate_o(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut, Panic, Div {
+    var c = nc
+    let vl      = if instr.imm_i64 > 0 { instr.imm_i64 } else { 1 }
+    let sign_r  = (instr.label_id >> 4) & 0xF   // YMM index of sign_mask_lo
+    let mask_k  = instr.label_id & 7
+    let zb      = instr.imm_flags & 1
+    let dst_lo  = instr.dst
+    let dst_hi  = instr.dst + 1
+    let src_lo  = instr.src1
+    let src_hi  = instr.src1 + 1
+    // VXORPD dst_lo, src_lo, sign_mask_lo  → flip e₁,e₂,e₃
+    c.code = emit_evex_pd_rr_full(c.code, 1, 0x57, dst_lo, src_lo, sign_r, vl, mask_k, zb)
+    // VXORPD dst_hi, src_hi, sign_mask_hi  → sign_mask_hi is sign_r+1
+    c.code = emit_evex_pd_rr_full(c.code, 1, 0x57, dst_hi, src_hi, sign_r + 1, vl, mask_k, zb)
+    c
+}
+
+// ============================================================================
+// emit_quat_mul_r — parameterized quaternion multiply helper
+// ============================================================================
+//
+// Emits the 7-instruction / 45-byte quaternion Hamilton product using fully
+// parameterized register indices. All operations use k0/merge (no output mask)
+// since these are intermediate scratch computations within lower_hyper_mul_o.
+//
+// Parameters:
+//   buf             = code buffer
+//   q1, q2          = YMM register indices of left/right quaternion operands
+//   out             = destination YMM register
+//   sc1, sc2, sc3   = three scratch YMM registers (clobbered)
+//
+// Algorithm (same as lower_hyper_mul_q but parameterized):
+//   Step 1: VPERMILPD sc1, q2, 0x05  — q2 permuted: [x,w,z,y]
+//   Step 2: VMULPD    sc2, q1, sc1
+//   Step 3: VPERMILPD sc1, q2, 0x0F  — q2 permuted: [y,z,w,x]
+//   Step 4: VMULPD    sc3, q1, sc1
+//   Step 5: VPERMILPD sc1, q1, 0x01  — q1 permuted: swap within pairs
+//   Step 6: VFMADD231PD sc2, sc1, q2 — sc2 += sc1 * q2
+//   Step 7: VADDSUBPD out, sc2, sc3  — alternating +/- gives Hamilton signs
+//
+// Byte count: 3×7 (imm8) + 4×6 (rr) = 21 + 24 = 45 bytes
+fn emit_quat_mul_r(buf: CodeBuffer, q1: i64, q2: i64, out: i64, sc1: i64, sc2: i64, sc3: i64) -> CodeBuffer with Mut, Panic, Div {
+    var b = buf
+    // Step 1: VPERMILPD sc1, q2, imm8=0x05
+    b = emit_evex_pd_rr_imm8(b, 3, 0x05, sc1, 15, q2, 1, 0x05)
+    // Step 2: VMULPD sc2, q1, sc1
+    b = emit_evex_pd_rr(b, 1, 0x59, sc2, q1, sc1, 1)
+    // Step 3: VPERMILPD sc1, q2, imm8=0x0F
+    b = emit_evex_pd_rr_imm8(b, 3, 0x05, sc1, 15, q2, 1, 0x0F)
+    // Step 4: VMULPD sc3, q1, sc1
+    b = emit_evex_pd_rr(b, 1, 0x59, sc3, q1, sc1, 1)
+    // Step 5: VPERMILPD sc1, q1, imm8=0x01
+    b = emit_evex_pd_rr_imm8(b, 3, 0x05, sc1, 15, q1, 1, 0x01)
+    // Step 6: VFMADD231PD sc2, sc1, q2
+    b = emit_evex_pd_rr(b, 2, 0xB8, sc2, sc1, q2, 1)
+    // Step 7: VADDSUBPD out, sc2, sc3
+    b = emit_evex_pd_rr(b, 1, 0xD0, out, sc2, sc3, 1)
+    b
+}
+
+// IrHyperMulO → octonion Hamilton product via Cayley-Dickson decomposition
+//
+// Storage: two consecutive YMM registers per octonion (must be even-indexed):
+//   a_lo = src1,   a_hi = src1+1   (e₀–e₃, e₄–e₇)
+//   b_lo = src2,   b_hi = src2+1
+//   dst_lo = dst,  dst_hi = dst+1
+//
+// Cayley-Dickson: (a_lo,a_hi)(b_lo,b_hi) = ( a_lo*b_lo - b_hi*conj(a_hi),
+//                                              b_hi*a_lo + a_hi*conj(b_lo) )
+// where conj(q) = (q.e₀, -q.e₁, -q.e₂, -q.e₃)
+//
+// Register layout (scratch: 8 YMMs from dst+2 onwards):
+//   conj_a_hi = dst+2,  conj_b_lo = dst+3
+//   tmp_pp    = dst+4,  tmp_qcq   = dst+5
+//   sc1=dst+6, sc2=dst+7, sc3=dst+8  (internal scratch for emit_quat_mul_r)
+//
+// Masking: output VSUBPD/VADDPD carry {mask_k}{z} from instr.
+//          All intermediate ops use k0/merge.
+//
+// Instruction count: 2 + 4×7 + 2 = 32   Byte count: 12 + 180 + 12 = 204
+//
+// IrHyperMulO → single-ZMM Fano-plane octonion multiply (3.6.1)
+//
+// Algorithm: column-by-column product  c = M(a) × b
+//   Derived from stdlib/math/octonion.sio:174-190 (our oct_mul convention: e1*e2=e3).
+//   For each column j (j=0..7): accum += sign_j(perm_j(a)) × broadcast_j(b)
+//
+// Column permutation ctrl vectors (VPERMPD: ctrl[out_lane] = src_lane):
+//   col 0: identity [0,1,2,3,4,5,6,7]  — handled specially (VBROADCASTSD + VMULPD, no sign)
+//   col 1: [1,0,3,2,5,4,7,6]           neg lanes {0,3,5,6}
+//   col 2: [2,3,0,1,6,7,4,5]           neg lanes {0,1,6,7}
+//   col 3: [3,2,1,0,7,6,5,4]           neg lanes {0,2,5,7}
+//   col 4: [4,5,6,7,0,1,2,3]           neg lanes {0,1,2,3}
+//   col 5: [5,4,7,6,1,0,3,2]           neg lanes {0,2,4,6}
+//   col 6: [6,7,4,5,2,3,0,1]           neg lanes {0,3,4,7}
+//   col 7: [7,6,5,4,3,2,1,0]           neg lanes {0,1,4,5}
+//
+// Register layout:
+//   src1 = ZMM octonion a (lanes 0-7 = e0-e7)
+//   src2 = ZMM octonion b
+//   dst  = ZMM result
+//   dst+2 = t_bj  (broadcast b[j])
+//   dst+4 = t_aj  (permuted+signed a column j)
+//   dst+6 = accum
+//   ctrl_base = (label_id >> 4) & 0xF = base ZMM for 21 pre-loaded constants:
+//     ctrl_base+0..6:   broadcast ctrl for b[1..7]  (ZMM = [j,j,j,j,j,j,j,j])
+//     ctrl_base+7..13:  permutation ctrl for a cols 1..7
+//     ctrl_base+14..20: sign masks for cols 1..7 (0x8000000000000000 = negative)
+//
+// Instruction count: 2 (col 0) + 4×7 (cols 1-7) + 1 (store) = 31
+// Byte count:        2×6       + 28×6              + 6        = 186
+fn lower_hyper_mul_o_fano(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut, Panic, Div {
+    var c = nc
+    let vl        = 2   // ZMM (8 f64 lanes)
+    let mask_k    = instr.label_id & 7
+    let zb        = instr.imm_flags & 1
+    let ctrl_base = (instr.label_id >> 4) & 0xF
+    let za        = instr.src1
+    let zb_in     = instr.src2
+    let dst       = instr.dst
+    let t_bj      = instr.dst + 2
+    let t_aj      = instr.dst + 4
+    let accum     = instr.dst + 6
+    // Column 0: identity perm, all-positive — init accum
+    //   VBROADCASTSD t_bj, zb_in[0]   (broadcast lane 0 of b to all 8 lanes)
+    c.code = emit_vbroadcastsd(c.code, t_bj, zb_in, vl, 0, 0)
+    //   VMULPD accum, za, t_bj         (accum = a × b[0])
+    c.code = emit_evex_pd_rr_full(c.code, 1, 0x59, accum, za, t_bj, vl, 0, 0)
+    // Column 1: perm=[1,0,3,2,5,4,7,6], neg={0,3,5,6}
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0x16, t_bj, ctrl_base + 0,  zb_in, vl, 0, 0)
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0x16, t_aj, ctrl_base + 7,  za,    vl, 0, 0)
+    c.code = emit_evex_pd_rr_full(c.code, 1, 0x57, t_aj, t_aj, ctrl_base + 14,  vl, 0, 0)
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0xB8, accum, t_aj, t_bj,    vl, 0, 0)
+    // Column 2: perm=[2,3,0,1,6,7,4,5], neg={0,1,6,7}
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0x16, t_bj, ctrl_base + 1,  zb_in, vl, 0, 0)
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0x16, t_aj, ctrl_base + 8,  za,    vl, 0, 0)
+    c.code = emit_evex_pd_rr_full(c.code, 1, 0x57, t_aj, t_aj, ctrl_base + 15,  vl, 0, 0)
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0xB8, accum, t_aj, t_bj,    vl, 0, 0)
+    // Column 3: perm=[3,2,1,0,7,6,5,4], neg={0,2,5,7}
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0x16, t_bj, ctrl_base + 2,  zb_in, vl, 0, 0)
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0x16, t_aj, ctrl_base + 9,  za,    vl, 0, 0)
+    c.code = emit_evex_pd_rr_full(c.code, 1, 0x57, t_aj, t_aj, ctrl_base + 16,  vl, 0, 0)
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0xB8, accum, t_aj, t_bj,    vl, 0, 0)
+    // Column 4: perm=[4,5,6,7,0,1,2,3], neg={0,1,2,3}
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0x16, t_bj, ctrl_base + 3,  zb_in, vl, 0, 0)
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0x16, t_aj, ctrl_base + 10, za,    vl, 0, 0)
+    c.code = emit_evex_pd_rr_full(c.code, 1, 0x57, t_aj, t_aj, ctrl_base + 17,  vl, 0, 0)
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0xB8, accum, t_aj, t_bj,    vl, 0, 0)
+    // Column 5: perm=[5,4,7,6,1,0,3,2], neg={0,2,4,6}
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0x16, t_bj, ctrl_base + 4,  zb_in, vl, 0, 0)
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0x16, t_aj, ctrl_base + 11, za,    vl, 0, 0)
+    c.code = emit_evex_pd_rr_full(c.code, 1, 0x57, t_aj, t_aj, ctrl_base + 18,  vl, 0, 0)
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0xB8, accum, t_aj, t_bj,    vl, 0, 0)
+    // Column 6: perm=[6,7,4,5,2,3,0,1], neg={0,3,4,7}
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0x16, t_bj, ctrl_base + 5,  zb_in, vl, 0, 0)
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0x16, t_aj, ctrl_base + 12, za,    vl, 0, 0)
+    c.code = emit_evex_pd_rr_full(c.code, 1, 0x57, t_aj, t_aj, ctrl_base + 19,  vl, 0, 0)
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0xB8, accum, t_aj, t_bj,    vl, 0, 0)
+    // Column 7: perm=[7,6,5,4,3,2,1,0], neg={0,1,4,5}
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0x16, t_bj, ctrl_base + 6,  zb_in, vl, 0, 0)
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0x16, t_aj, ctrl_base + 13, za,    vl, 0, 0)
+    c.code = emit_evex_pd_rr_full(c.code, 1, 0x57, t_aj, t_aj, ctrl_base + 20,  vl, 0, 0)
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0xB8, accum, t_aj, t_bj,    vl, 0, 0)
+    // Final store with masking: VMOVAPD dst{mask_k}{z}, accum  (opcode 0x28, src1=0→vvvv=1111)
+    c.code = emit_evex_pd_rr_full(c.code, 1, 0x28, dst, 0, accum, vl, mask_k, zb)
+    c
+}
+
+// IrHyperMulO (Cayley-Dickson, kept for reference — no longer on dispatch path post-3.6.1)
+fn lower_hyper_mul_o(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut, Panic, Div {
+    var c = nc
+    let vl      = 1   // YMM for all operations
+    let sign_r  = (instr.label_id >> 4) & 0xF   // YMM index of sign-flip constant
+    let mask_k  = instr.label_id & 7
+    let zb      = instr.imm_flags & 1
+    // Operand registers
+    let a_lo    = instr.src1
+    let a_hi    = instr.src1 + 1
+    let b_lo    = instr.src2
+    let b_hi    = instr.src2 + 1
+    let dst_lo  = instr.dst
+    let dst_hi  = instr.dst + 1
+    // Scratch registers
+    let conj_ah = instr.dst + 2
+    let conj_bl = instr.dst + 3
+    let tmp_pp  = instr.dst + 4
+    let tmp_qcq = instr.dst + 5
+    let sc1     = instr.dst + 6
+    let sc2     = instr.dst + 7
+    let sc3     = instr.dst + 8
+    // Step 1: conj_a_hi = VXORPD(a_hi, sign_mask_lo)   — conjugate hi-half of a
+    c.code = emit_evex_pd_rr_full(c.code, 1, 0x57, conj_ah, a_hi, sign_r, vl, 0, 0)
+    // Step 2: conj_b_lo = VXORPD(b_lo, sign_mask_lo)   — conjugate lo-half of b
+    c.code = emit_evex_pd_rr_full(c.code, 1, 0x57, conj_bl, b_lo, sign_r, vl, 0, 0)
+    // Step 3–9: tmp_pp = quat_mul(a_lo, b_lo)           — 45 bytes
+    c.code = emit_quat_mul_r(c.code, a_lo, b_lo, tmp_pp, sc1, sc2, sc3)
+    // Step 10–16: tmp_qcq = quat_mul(b_hi, conj_a_hi)  — 45 bytes
+    c.code = emit_quat_mul_r(c.code, b_hi, conj_ah, tmp_qcq, sc1, sc2, sc3)
+    // Step 17: dst_lo = VSUBPD{mask_k}{z}(tmp_pp, tmp_qcq)  — masked output
+    c.code = emit_evex_pd_rr_full(c.code, 1, 0x5C, dst_lo, tmp_pp, tmp_qcq, vl, mask_k, zb)
+    // Step 18–24: tmp_pp = quat_mul(b_hi, a_lo)         — 45 bytes
+    c.code = emit_quat_mul_r(c.code, b_hi, a_lo, tmp_pp, sc1, sc2, sc3)
+    // Step 25–31: tmp_qcq = quat_mul(a_hi, conj_b_lo)  — 45 bytes
+    c.code = emit_quat_mul_r(c.code, a_hi, conj_bl, tmp_qcq, sc1, sc2, sc3)
+    // Step 32: dst_hi = VADDPD{mask_k}{z}(tmp_pp, tmp_qcq)  — masked output
+    c.code = emit_evex_pd_rr_full(c.code, 1, 0x58, dst_hi, tmp_pp, tmp_qcq, vl, mask_k, zb)
+    c
+}
+
+// IrHyperNormSqO → octonion norm-squared: Σeᵢ² for i=0..7
+//
+// Input: YMM pair (src1=lo: e₀–e₃, src1+1=hi: e₄–e₇)
+// Output: dst YMM with norm² broadcast to all 4 lanes
+//
+// Reduction algorithm (7 instructions, 44 bytes):
+//   1. VMULPD lo_sq, src_lo, src_lo     — square e₀–e₃  (6 bytes)
+//   2. VMULPD hi_sq, src_hi, src_hi     — square e₄–e₇  (6 bytes)
+//   3. VADDPD sum, lo_sq, hi_sq         — pairwise sum   (6 bytes)
+//   4. VPERMILPD sc, sum, imm8=0x05     — swap pairs within 128-bit lanes  (7 bytes)
+//   5. VADDPD sum, sum, sc              — [01+45, 01+45, 23+67, 23+67]  (6 bytes)
+//   6. VPERMPD sc, sum, imm8=0x4E      — swap 128-bit halves (indices [2,3,0,1])  (7 bytes)
+//   7. VADDPD{mask_k}{z} dst, sum, sc  — all 4 lanes = total norm²  (6 bytes)
+// Byte count: 3×6 + 2×7 + 2×6 = 18 + 14 + 12 = 44
+fn lower_hyper_norm_sq_o(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut, Panic, Div {
+    var c = nc
+    let vl      = 1   // YMM
+    let mask_k  = instr.label_id & 7
+    let zb      = instr.imm_flags & 1
+    let src_lo  = instr.src1
+    let src_hi  = instr.src1 + 1
+    let dst     = instr.dst
+    // Use scratch regs: dst+1 = hi_sq/sc, dst+2 = sum
+    let lo_sq   = dst + 1   // repurposed as scratch (lo_sq then sc for step 4/6)
+    let sum     = dst + 2
+    // Step 1: VMULPD lo_sq, src_lo, src_lo
+    c.code = emit_evex_pd_rr(c.code, 1, 0x59, lo_sq, src_lo, src_lo, vl)
+    // Step 2: VMULPD sum, src_hi, src_hi  (use sum as hi_sq temporarily)
+    c.code = emit_evex_pd_rr(c.code, 1, 0x59, sum, src_hi, src_hi, vl)
+    // Step 3: VADDPD sum, lo_sq, sum  — pairwise sum of squares
+    c.code = emit_evex_pd_rr(c.code, 1, 0x58, sum, lo_sq, sum, vl)
+    // Step 4: VPERMILPD lo_sq, sum, imm8=0x05  — swap within pairs (lo_sq reused as sc)
+    c.code = emit_evex_pd_rr_imm8(c.code, 3, 0x05, lo_sq, 15, sum, vl, 0x05)
+    // Step 5: VADDPD sum, sum, lo_sq
+    c.code = emit_evex_pd_rr(c.code, 1, 0x58, sum, sum, lo_sq, vl)
+    // Step 6: VPERMPD lo_sq, sum, imm8=0x4E  — swap 128-bit halves: [2,3,0,1]
+    c.code = emit_evex_pd_rr_imm8(c.code, 3, 0x01, lo_sq, 15, sum, vl, 0x4E)
+    // Step 7: VADDPD{mask_k}{z} dst, sum, lo_sq  — masked output
+    c.code = emit_evex_pd_rr_full(c.code, 1, 0x58, dst, sum, lo_sq, vl, mask_k, zb)
+    c
+}
+
+// ============================================================================
+// G₂-equivariant ops — Horizon 3.7
+// ============================================================================
+//
+// G₂ = Aut(𝕆), the 14-dimensional exceptional Lie group preserving the Fano-plane
+// multiplication table.  Its Lie algebra 𝔤₂ acts on Im(𝕆) ≅ ℝ⁷ (ZMM lanes 1-7).
+// These ops build on the single-ZMM convention from Horizon 3.6.1.
+// ============================================================================
+
+// IrG2ProjectImO — zero real lane (lane 0) to project 𝕆 → Im(𝕆)
+// VANDPD (map=1, opcode=0x54): dst = src AND imag_mask
+//   imag_mask ZMM: lane 0 = 0x0000000000000000, lanes 1-7 = 0xFFFFFFFFFFFFFFFF
+// 1 instruction / 6 bytes
+fn lower_g2_project_im_o(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut, Panic, Div {
+    var c = nc
+    let vl       = 2   // ZMM
+    let mask_k   = instr.label_id & 7
+    let zb       = instr.imm_flags & 1
+    let imag_zmm = (instr.label_id >> 4) & 0xF
+    let src      = instr.src1
+    let dst      = instr.dst
+    // VANDPD dst, src, imag_mask  (map=1, opcode=0x54)
+    c.code = emit_evex_pd_rr_full(c.code, 1, 0x54, dst, src, imag_zmm, vl, mask_k, zb)
+    c
+}
+
+// IrG2ApplyGenO — apply a 7×7 matrix (𝔤₂ generator) to Im(𝕆) via column-major multiply
+//
+// The generator matrix is stored as 7 column vectors in ZMM registers
+// (col_base+0 .. col_base+6).  Each column has lane 0 = 0 (no real contribution).
+//
+// Algorithm (column-major, same broadcast-and-FMA as Fano cols 1-7):
+//   1. VXORPD accum, accum, accum           — zero accumulator
+//   2. For j = 1..7:
+//        VPERMPD t_bcast, bcast_ctrl_j, src — broadcast input[j] to all lanes
+//        VFMADD231PD accum, t_bcast, col_j  — accum += bcast(input[j]) × column_j
+//   3. VMOVAPD dst{k}{z}, accum             — masked store
+//
+// Broadcast ctrls: [j,j,j,j,j,j,j,j] — reuse Fano bcast vectors.
+// Convention: bcast ctrls at col_base-7 .. col_base-1 (7 ZMMs before the columns).
+//
+// 16 instructions / 96 bytes: 1 + 7×2 + 1
+fn lower_g2_apply_gen_o(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut, Panic, Div {
+    var c = nc
+    let vl       = 2   // ZMM
+    let mask_k   = instr.label_id & 7
+    let zb       = instr.imm_flags & 1
+    let col_base = (instr.label_id >> 4) & 0xF
+    let src      = instr.src1
+    let dst      = instr.dst
+    let t_bcast  = instr.dst + 2    // scratch for broadcast
+    let accum    = instr.dst + 4    // scratch accumulator
+    // Broadcast ctrl base: 7 ZMMs before col_base  (convention: bcast_base = col_base - 7)
+    let bcast_base = col_base - 7
+    // Step 1: zero accumulator
+    // VXORPD accum, accum, accum  (map=1, opcode=0x57)
+    c.code = emit_evex_pd_rr_full(c.code, 1, 0x57, accum, accum, accum, vl, 0, 0)
+    // Column 1: broadcast input[1], FMA with col_base+0
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0x16, t_bcast, bcast_base + 0, src, vl, 0, 0)
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0xB8, accum, t_bcast, col_base + 0, vl, 0, 0)
+    // Column 2: broadcast input[2], FMA with col_base+1
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0x16, t_bcast, bcast_base + 1, src, vl, 0, 0)
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0xB8, accum, t_bcast, col_base + 1, vl, 0, 0)
+    // Column 3: broadcast input[3], FMA with col_base+2
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0x16, t_bcast, bcast_base + 2, src, vl, 0, 0)
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0xB8, accum, t_bcast, col_base + 2, vl, 0, 0)
+    // Column 4: broadcast input[4], FMA with col_base+3
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0x16, t_bcast, bcast_base + 3, src, vl, 0, 0)
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0xB8, accum, t_bcast, col_base + 3, vl, 0, 0)
+    // Column 5: broadcast input[5], FMA with col_base+4
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0x16, t_bcast, bcast_base + 4, src, vl, 0, 0)
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0xB8, accum, t_bcast, col_base + 4, vl, 0, 0)
+    // Column 6: broadcast input[6], FMA with col_base+5
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0x16, t_bcast, bcast_base + 5, src, vl, 0, 0)
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0xB8, accum, t_bcast, col_base + 5, vl, 0, 0)
+    // Column 7: broadcast input[7], FMA with col_base+6
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0x16, t_bcast, bcast_base + 6, src, vl, 0, 0)
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0xB8, accum, t_bcast, col_base + 6, vl, 0, 0)
+    // Final store: VMOVAPD dst{mask_k}{z}, accum  (map=1, opcode=0x28, src1=0 → vvvv=1111)
+    c.code = emit_evex_pd_rr_full(c.code, 1, 0x28, dst, 0, accum, vl, mask_k, zb)
+    c
+}
+
+// IrG2DenseO — G₂-equivariant dense layer: project + apply + store
+// Composes IrG2ProjectImO (1 instr) + IrG2ApplyGenO (16 instr) = 17 instr / 102 bytes
+// The weight matrix (Σ αₖ Dₖ, 14 learnable scalars → one 7×7 matrix) is precomputed
+// by the frontend and loaded into col_base+0..6 ZMMs before this instruction.
+fn lower_g2_dense_o(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut, Panic, Div {
+    var c = nc
+    let vl       = 2   // ZMM
+    let mask_k   = instr.label_id & 7
+    let zb       = instr.imm_flags & 1
+    let col_base = (instr.label_id >> 4) & 0xF
+    let imag_zmm = instr.src2    // src2 repurposed: ZMM index of imag_mask
+    let src      = instr.src1
+    let dst      = instr.dst
+    let t_bcast  = instr.dst + 2
+    let accum    = instr.dst + 4
+    let bcast_base = col_base - 7
+    // Step 1: project to Im(𝕆) — VANDPD dst, src, imag_mask  (map=1, opcode=0x54)
+    c.code = emit_evex_pd_rr_full(c.code, 1, 0x54, dst, src, imag_zmm, vl, 0, 0)
+    // Step 2: matrix-vector on the projected input (use dst as source)
+    // VXORPD accum, accum, accum
+    c.code = emit_evex_pd_rr_full(c.code, 1, 0x57, accum, accum, accum, vl, 0, 0)
+    // Columns 1-7: broadcast from dst (projected), FMA with col_base+0..6
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0x16, t_bcast, bcast_base + 0, dst, vl, 0, 0)
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0xB8, accum, t_bcast, col_base + 0, vl, 0, 0)
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0x16, t_bcast, bcast_base + 1, dst, vl, 0, 0)
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0xB8, accum, t_bcast, col_base + 1, vl, 0, 0)
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0x16, t_bcast, bcast_base + 2, dst, vl, 0, 0)
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0xB8, accum, t_bcast, col_base + 2, vl, 0, 0)
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0x16, t_bcast, bcast_base + 3, dst, vl, 0, 0)
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0xB8, accum, t_bcast, col_base + 3, vl, 0, 0)
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0x16, t_bcast, bcast_base + 4, dst, vl, 0, 0)
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0xB8, accum, t_bcast, col_base + 4, vl, 0, 0)
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0x16, t_bcast, bcast_base + 5, dst, vl, 0, 0)
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0xB8, accum, t_bcast, col_base + 5, vl, 0, 0)
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0x16, t_bcast, bcast_base + 6, dst, vl, 0, 0)
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0xB8, accum, t_bcast, col_base + 6, vl, 0, 0)
+    // Final store: VMOVAPD dst{mask_k}{z}, accum
+    c.code = emit_evex_pd_rr_full(c.code, 1, 0x28, dst, 0, accum, vl, mask_k, zb)
+    c
+}
+
+// IrG2EquivDenseKernelO — G₂-equivariant dense kernel with IEEE-754-2019 robustness (H3.8)
+//
+// Full pipeline:
+//   1. Project to Im(𝕆): VANDPD dst, src, imag_mask                   (6 bytes)
+//   2. Zero accumulator:  VXORPD accum, accum, accum                   (6 bytes)
+//   3. G₂ matrix-vector:  7×(VPERMPD broadcast + VFMADD231PD FMA)    (84 bytes)
+//   4. IEEE NaN/±0 clamp: VMINMAXPD{k}{z} accum, accum, accum, 0x00  (7 bytes)
+//   5. Masked store:      VMOVAPD{k}{z} dst, accum                     (6 bytes)
+//
+// Total: 18 instructions / 109 bytes
+//
+// Encoding:
+//   label_id = (mask_k & 7) | (col_base << 4)   — consistent with IrG2DenseO
+//   imm_flags bit 0 = z-bit (zeroing-mask)
+//   src1 = input ZMM index, src2 = imag_mask ZMM index (lane 0 = 0x0, lanes 1-7 = 0xFF…)
+//   bcast_base = col_base - 7  (7 broadcast-ctrl ZMMs immediately before column ZMMs)
+//
+// VMINMAXPD (MAP5 opcode 0x52) imm8=0x00: minimum, propagate NaN → cleans up fp edge cases.
+fn lower_g2_equiv_dense_kernel_o(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut, Panic, Div {
+    var c = nc
+    let vl       = 2   // ZMM
+    let mask_k   = instr.label_id & 7
+    let zb       = instr.imm_flags & 1
+    let col_base = (instr.label_id >> 4) & 0xF
+    let imag_zmm = instr.src2
+    let src      = instr.src1
+    let dst      = instr.dst
+    let t_bcast  = instr.dst + 2
+    let accum    = instr.dst + 4
+    let bcast_base = col_base - 7
+    // Step 1: project to Im(𝕆) — VANDPD dst, src, imag_mask  (map=1, opcode=0x54)
+    c.code = emit_evex_pd_rr_full(c.code, 1, 0x54, dst, src, imag_zmm, vl, 0, 0)
+    // Step 2: zero accumulator — VXORPD accum, accum, accum  (map=1, opcode=0x57)
+    c.code = emit_evex_pd_rr_full(c.code, 1, 0x57, accum, accum, accum, vl, 0, 0)
+    // Step 3: G₂ generator matrix-vector on projected input (7 columns, broadcast-and-FMA)
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0x16, t_bcast, bcast_base + 0, dst, vl, 0, 0)
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0xB8, accum, t_bcast, col_base + 0, vl, 0, 0)
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0x16, t_bcast, bcast_base + 1, dst, vl, 0, 0)
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0xB8, accum, t_bcast, col_base + 1, vl, 0, 0)
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0x16, t_bcast, bcast_base + 2, dst, vl, 0, 0)
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0xB8, accum, t_bcast, col_base + 2, vl, 0, 0)
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0x16, t_bcast, bcast_base + 3, dst, vl, 0, 0)
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0xB8, accum, t_bcast, col_base + 3, vl, 0, 0)
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0x16, t_bcast, bcast_base + 4, dst, vl, 0, 0)
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0xB8, accum, t_bcast, col_base + 4, vl, 0, 0)
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0x16, t_bcast, bcast_base + 5, dst, vl, 0, 0)
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0xB8, accum, t_bcast, col_base + 5, vl, 0, 0)
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0x16, t_bcast, bcast_base + 6, dst, vl, 0, 0)
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0xB8, accum, t_bcast, col_base + 6, vl, 0, 0)
+    // Step 4: IEEE-754-2019 NaN/±0 clamp via VMINMAXPD{k}{z}  (MAP5 opcode 0x52, imm8=0x00)
+    //   minimum with NaN propagation — eliminates fp edge cases before masked store
+    var b = emit_evex_pd_rr_full(c.code, 5, 0x52, accum, accum, accum, vl, mask_k, zb)
+    b = emit_byte(b, 0x00)
+    c.code = b
+    // Step 5: masked store — VMOVAPD{k}{z} dst, accum  (map=1, opcode=0x28, src1=0→vvvv=1111)
+    c.code = emit_evex_pd_rr_full(c.code, 1, 0x28, dst, 0, accum, vl, mask_k, zb)
+    c
+}
+
+// IrE8RootReflectO — E₈ Weyl group root reflection (H3.9)
+//
+// Computes s_α(v) = v − ⟨v,α⟩·α for a unit root α in ℝ⁸ (all E₈ roots have ⟨α,α⟩=2,
+// but the algorithm uses ⟨v,α⟩ directly since the normalisation cancels).
+//
+// 8-wide f64 ZMM layout: lanes 0-7 carry the 8 Cartan coordinates.
+//
+// Algorithm (8 instructions / 48 bytes):
+//   1. VMULPD   t, v, α                       — t = v * α  (elementwise)
+//   2. VPERMPD  t2, ctrl0, t  (swap halves)   — t2 = t[4..7, 0..3]
+//   3. VADDPD   t, t, t2                      — t[i] = t[i] + t[i^4]  (8→4 partial)
+//   4. VPERMPD  t2, ctrl1, t  (swap pairs)    — t2 = t[2,3,0,1,6,7,4,5]
+//   5. VADDPD   t, t, t2                      — t[i] += t[i^2]        (4→2 partial)
+//   6. VPERMPD  t2, ctrl2, t  (swap adjacent) — t2 = t[1,0,3,2,5,4,7,6]
+//   7. VADDPD   t, t, t2                      — t[i] += t[i^1] = ⟨v,α⟩ (broadcast)
+//   8. VFNMADD231PD v, t, α                   — v = v − t·α
+//
+// Encoding:
+//   dst      = v ZMM (input/output)
+//   src1     = α ZMM (root, read-only)
+//   src2     = t ZMM (dot-product scratch)
+//   t2       = src2 + 2 (caller must leave ZMM free)
+//   ctrl_base = (label_id >> 4) & 0xF
+//     ctrl_base+0: ZMM with permutation [4,5,6,7,0,1,2,3]
+//     ctrl_base+1: ZMM with permutation [2,3,0,1,6,7,4,5]
+//     ctrl_base+2: ZMM with permutation [1,0,3,2,5,4,7,6]
+//   mask_k   = label_id & 7
+//   z-bit    = imm_flags & 1  (applied only to final VFNMADD)
+fn lower_e8_root_reflect_o(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut, Panic, Div {
+    var c = nc
+    let vl        = 2   // ZMM
+    let mask_k    = instr.label_id & 7
+    let zb        = instr.imm_flags & 1
+    let ctrl_base = (instr.label_id >> 4) & 0xF
+    let v         = instr.dst
+    let alpha     = instr.src1
+    let t         = instr.src2
+    let t2        = instr.src2 + 2
+    // 1. VMULPD t, v, α  (elementwise product)
+    c.code = emit_evex_pd_rr_full(c.code, 1, 0x59, t, v, alpha, vl, 0, 0)
+    // 2. VPERMPD t2, ctrl0, t  (swap 4-element halves → begin 8→4 partial sum)
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0x16, t2, ctrl_base + 0, t, vl, 0, 0)
+    // 3. VADDPD t, t, t2
+    c.code = emit_evex_pd_rr_full(c.code, 1, 0x58, t, t, t2, vl, 0, 0)
+    // 4. VPERMPD t2, ctrl1, t  (swap 2-element pairs → 4→2 partial)
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0x16, t2, ctrl_base + 1, t, vl, 0, 0)
+    // 5. VADDPD t, t, t2
+    c.code = emit_evex_pd_rr_full(c.code, 1, 0x58, t, t, t2, vl, 0, 0)
+    // 6. VPERMPD t2, ctrl2, t  (swap adjacent → 2→1 broadcast)
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0x16, t2, ctrl_base + 2, t, vl, 0, 0)
+    // 7. VADDPD t, t, t2  → t = ⟨v,α⟩ broadcast to all 8 lanes
+    c.code = emit_evex_pd_rr_full(c.code, 1, 0x58, t, t, t2, vl, 0, 0)
+    // 8. VFNMADD231PD v{mask_k}{z}, t, α  → v = v − t·α = s_α(v)
+    //   VFNMADD231PD: map=2, opcode=0xBC   semantics: dst = dst − src1*src2
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0xBC, v, t, alpha, vl, mask_k, zb)
+    c
+}
+
+// IrF4RootReflectO — F₄ Weyl group root reflection (H4.0)
+//
+// F₄ is the 52-dimensional exceptional Lie algebra with rank 4, 48 roots.
+// Unlike E₈, F₄ is NOT simply-laced (has short/long roots with ratio √2).
+// We pre-normalize roots to ⟨α,α⟩=2 so the same reflection formula applies:
+//   s_α(v) = v − ⟨v,α⟩·α
+//
+// ZMM layout: lanes 0-3 carry the 4 Cartan coordinates, lanes 4-7 = 0.
+// The 8-lane tree reduction works unchanged — zeroed lanes add zero.
+// Same encoding as IrE8RootReflectO.  8 instructions / 48 bytes.
+fn lower_f4_root_reflect_o(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut, Panic, Div {
+    var c = nc
+    let vl        = 2
+    let mask_k    = instr.label_id & 7
+    let zb        = instr.imm_flags & 1
+    let ctrl_base = (instr.label_id >> 4) & 0xF
+    let v         = instr.dst
+    let alpha     = instr.src1
+    let t         = instr.src2
+    let t2        = instr.src2 + 2
+    // 1. VMULPD t, v, α  (elementwise; lanes 4-7 = 0·0 = 0)
+    c.code = emit_evex_pd_rr_full(c.code, 1, 0x59, t, v, alpha, vl, 0, 0)
+    // 2. VPERMPD t2, ctrl0, t  (swap halves)
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0x16, t2, ctrl_base + 0, t, vl, 0, 0)
+    // 3. VADDPD t, t, t2
+    c.code = emit_evex_pd_rr_full(c.code, 1, 0x58, t, t, t2, vl, 0, 0)
+    // 4. VPERMPD t2, ctrl1, t  (swap pairs)
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0x16, t2, ctrl_base + 1, t, vl, 0, 0)
+    // 5. VADDPD t, t, t2
+    c.code = emit_evex_pd_rr_full(c.code, 1, 0x58, t, t, t2, vl, 0, 0)
+    // 6. VPERMPD t2, ctrl2, t  (swap adjacent)
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0x16, t2, ctrl_base + 2, t, vl, 0, 0)
+    // 7. VADDPD t, t, t2  → dot broadcast
+    c.code = emit_evex_pd_rr_full(c.code, 1, 0x58, t, t, t2, vl, 0, 0)
+    // 8. VFNMADD231PD v{mask_k}{z}, t, α  → v = v − t·α
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0xBC, v, t, alpha, vl, mask_k, zb)
+    c
+}
+
+// IrE6RootReflectO — E₆ Weyl group root reflection (H4.0)
+//
+// E₆: 78-dimensional exceptional Lie algebra, rank 6, 72 roots, simply-laced.
+// ZMM layout: lanes 0-5 carry 6 Cartan coordinates, lanes 6-7 = 0.
+// Same algorithm as E₈.  8 instructions / 48 bytes.
+fn lower_e6_root_reflect_o(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut, Panic, Div {
+    var c = nc
+    let vl        = 2
+    let mask_k    = instr.label_id & 7
+    let zb        = instr.imm_flags & 1
+    let ctrl_base = (instr.label_id >> 4) & 0xF
+    let v         = instr.dst
+    let alpha     = instr.src1
+    let t         = instr.src2
+    let t2        = instr.src2 + 2
+    c.code = emit_evex_pd_rr_full(c.code, 1, 0x59, t, v, alpha, vl, 0, 0)
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0x16, t2, ctrl_base + 0, t, vl, 0, 0)
+    c.code = emit_evex_pd_rr_full(c.code, 1, 0x58, t, t, t2, vl, 0, 0)
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0x16, t2, ctrl_base + 1, t, vl, 0, 0)
+    c.code = emit_evex_pd_rr_full(c.code, 1, 0x58, t, t, t2, vl, 0, 0)
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0x16, t2, ctrl_base + 2, t, vl, 0, 0)
+    c.code = emit_evex_pd_rr_full(c.code, 1, 0x58, t, t, t2, vl, 0, 0)
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0xBC, v, t, alpha, vl, mask_k, zb)
+    c
+}
+
+// IrE7RootReflectO — E₇ Weyl group root reflection (H4.0)
+//
+// E₇: 133-dimensional exceptional Lie algebra, rank 7, 126 roots, simply-laced.
+// ZMM layout: lanes 0-6 carry 7 Cartan coordinates, lane 7 = 0.
+// Same algorithm as E₈.  8 instructions / 48 bytes.
+fn lower_e7_root_reflect_o(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut, Panic, Div {
+    var c = nc
+    let vl        = 2
+    let mask_k    = instr.label_id & 7
+    let zb        = instr.imm_flags & 1
+    let ctrl_base = (instr.label_id >> 4) & 0xF
+    let v         = instr.dst
+    let alpha     = instr.src1
+    let t         = instr.src2
+    let t2        = instr.src2 + 2
+    c.code = emit_evex_pd_rr_full(c.code, 1, 0x59, t, v, alpha, vl, 0, 0)
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0x16, t2, ctrl_base + 0, t, vl, 0, 0)
+    c.code = emit_evex_pd_rr_full(c.code, 1, 0x58, t, t, t2, vl, 0, 0)
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0x16, t2, ctrl_base + 1, t, vl, 0, 0)
+    c.code = emit_evex_pd_rr_full(c.code, 1, 0x58, t, t, t2, vl, 0, 0)
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0x16, t2, ctrl_base + 2, t, vl, 0, 0)
+    c.code = emit_evex_pd_rr_full(c.code, 1, 0x58, t, t, t2, vl, 0, 0)
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0xBC, v, t, alpha, vl, mask_k, zb)
+    c
+}
+
+// IrF4CartanMulO — F₄ Cartan matrix multiply, 4×4 (H4.0)
+//
+// Applies the 4×4 Cartan matrix of F₄ to a weight vector via column-major FMA.
+// F₄ Cartan matrix:
+//   [ 2 -1  0  0 ]
+//   [-1  2 -2  0 ]
+//   [ 0 -1  2 -1 ]
+//   [ 0  0 -1  2 ]
+// (note the -2 entry: F₄ is not simply-laced)
+//
+// 4 column ZMMs at col_base+0..3, broadcast ctrls at col_base-4..col_base-1.
+// 10 instructions / 60 bytes: 1 VXORPD + 4×(VPERMPD+VFMADD231PD) + 1 VMOVAPD
+fn lower_f4_cartan_mul_o(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut, Panic, Div {
+    var c = nc
+    let vl         = 2
+    let mask_k     = instr.label_id & 7
+    let zb         = instr.imm_flags & 1
+    let col_base   = (instr.label_id >> 4) & 0xF
+    let src        = instr.src1
+    let dst        = instr.dst
+    let t_bcast    = instr.dst + 2
+    let accum      = instr.dst + 4
+    let bcast_base = col_base - 4
+    // VXORPD accum, accum, accum
+    c.code = emit_evex_pd_rr_full(c.code, 1, 0x57, accum, accum, accum, vl, 0, 0)
+    // Column 0
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0x16, t_bcast, bcast_base + 0, src, vl, 0, 0)
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0xB8, accum, t_bcast, col_base + 0, vl, 0, 0)
+    // Column 1
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0x16, t_bcast, bcast_base + 1, src, vl, 0, 0)
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0xB8, accum, t_bcast, col_base + 1, vl, 0, 0)
+    // Column 2
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0x16, t_bcast, bcast_base + 2, src, vl, 0, 0)
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0xB8, accum, t_bcast, col_base + 2, vl, 0, 0)
+    // Column 3
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0x16, t_bcast, bcast_base + 3, src, vl, 0, 0)
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0xB8, accum, t_bcast, col_base + 3, vl, 0, 0)
+    // VMOVAPD dst{mask_k}{z}, accum
+    c.code = emit_evex_pd_rr_full(c.code, 1, 0x28, dst, 0, accum, vl, mask_k, zb)
+    c
+}
+
+// IrE6CartanMulO — E₆ Cartan matrix multiply, 6×6 (H4.0)
+//
+// E₆ Cartan matrix (simply-laced, all diagonal entries = 2, off-diagonal = -1 or 0):
+//   [ 2 -1  0  0  0  0 ]
+//   [-1  2 -1  0  0  0 ]
+//   [ 0 -1  2 -1  0 -1 ]
+//   [ 0  0 -1  2 -1  0 ]
+//   [ 0  0  0 -1  2  0 ]
+//   [ 0  0 -1  0  0  2 ]
+//
+// 6 column ZMMs at col_base+0..5, broadcast ctrls at col_base-6..col_base-1.
+// 14 instructions / 84 bytes: 1 VXORPD + 6×(VPERMPD+VFMADD231PD) + 1 VMOVAPD
+fn lower_e6_cartan_mul_o(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut, Panic, Div {
+    var c = nc
+    let vl         = 2
+    let mask_k     = instr.label_id & 7
+    let zb         = instr.imm_flags & 1
+    let col_base   = (instr.label_id >> 4) & 0xF
+    let src        = instr.src1
+    let dst        = instr.dst
+    let t_bcast    = instr.dst + 2
+    let accum      = instr.dst + 4
+    let bcast_base = col_base - 6
+    // VXORPD accum, accum, accum
+    c.code = emit_evex_pd_rr_full(c.code, 1, 0x57, accum, accum, accum, vl, 0, 0)
+    // Column 0
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0x16, t_bcast, bcast_base + 0, src, vl, 0, 0)
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0xB8, accum, t_bcast, col_base + 0, vl, 0, 0)
+    // Column 1
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0x16, t_bcast, bcast_base + 1, src, vl, 0, 0)
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0xB8, accum, t_bcast, col_base + 1, vl, 0, 0)
+    // Column 2
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0x16, t_bcast, bcast_base + 2, src, vl, 0, 0)
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0xB8, accum, t_bcast, col_base + 2, vl, 0, 0)
+    // Column 3
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0x16, t_bcast, bcast_base + 3, src, vl, 0, 0)
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0xB8, accum, t_bcast, col_base + 3, vl, 0, 0)
+    // Column 4
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0x16, t_bcast, bcast_base + 4, src, vl, 0, 0)
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0xB8, accum, t_bcast, col_base + 4, vl, 0, 0)
+    // Column 5
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0x16, t_bcast, bcast_base + 5, src, vl, 0, 0)
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0xB8, accum, t_bcast, col_base + 5, vl, 0, 0)
+    // VMOVAPD dst{mask_k}{z}, accum
+    c.code = emit_evex_pd_rr_full(c.code, 1, 0x28, dst, 0, accum, vl, mask_k, zb)
+    c
+}
+
+// IrE7CartanMulO — E₇ Cartan matrix multiply, 7×7 (H4.0)
+//
+// E₇ Cartan matrix (simply-laced, 7×7):
+//   [ 2 -1  0  0  0  0  0 ]
+//   [-1  2 -1  0  0  0  0 ]
+//   [ 0 -1  2 -1  0  0 -1 ]
+//   [ 0  0 -1  2 -1  0  0 ]
+//   [ 0  0  0 -1  2 -1  0 ]
+//   [ 0  0  0  0 -1  2  0 ]
+//   [ 0  0 -1  0  0  0  2 ]
+//
+// 7 column ZMMs at col_base+0..6, broadcast ctrls at col_base-7..col_base-1.
+// 16 instructions / 96 bytes: 1 VXORPD + 7×(VPERMPD+VFMADD231PD) + 1 VMOVAPD
+fn lower_e7_cartan_mul_o(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut, Panic, Div {
+    var c = nc
+    let vl         = 2
+    let mask_k     = instr.label_id & 7
+    let zb         = instr.imm_flags & 1
+    let col_base   = (instr.label_id >> 4) & 0xF
+    let src        = instr.src1
+    let dst        = instr.dst
+    let t_bcast    = instr.dst + 2
+    let accum      = instr.dst + 4
+    let bcast_base = col_base - 7
+    // VXORPD accum, accum, accum
+    c.code = emit_evex_pd_rr_full(c.code, 1, 0x57, accum, accum, accum, vl, 0, 0)
+    // Columns 0-6
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0x16, t_bcast, bcast_base + 0, src, vl, 0, 0)
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0xB8, accum, t_bcast, col_base + 0, vl, 0, 0)
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0x16, t_bcast, bcast_base + 1, src, vl, 0, 0)
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0xB8, accum, t_bcast, col_base + 1, vl, 0, 0)
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0x16, t_bcast, bcast_base + 2, src, vl, 0, 0)
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0xB8, accum, t_bcast, col_base + 2, vl, 0, 0)
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0x16, t_bcast, bcast_base + 3, src, vl, 0, 0)
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0xB8, accum, t_bcast, col_base + 3, vl, 0, 0)
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0x16, t_bcast, bcast_base + 4, src, vl, 0, 0)
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0xB8, accum, t_bcast, col_base + 4, vl, 0, 0)
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0x16, t_bcast, bcast_base + 5, src, vl, 0, 0)
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0xB8, accum, t_bcast, col_base + 5, vl, 0, 0)
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0x16, t_bcast, bcast_base + 6, src, vl, 0, 0)
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0xB8, accum, t_bcast, col_base + 6, vl, 0, 0)
+    // VMOVAPD dst{mask_k}{z}, accum
+    c.code = emit_evex_pd_rr_full(c.code, 1, 0x28, dst, 0, accum, vl, mask_k, zb)
+    c
+}
+
+// IrE8CartanMulO — E₈ Cartan matrix multiply, 8×8 (H4.0)
+//
+// E₈ Cartan matrix (simply-laced, 8×8, Bourbaki: 1—2—3—4—5—6—7, branch 3—8):
+//   [ 2 -1  0  0  0  0  0  0 ]
+//   [-1  2 -1  0  0  0  0  0 ]
+//   [ 0 -1  2 -1  0  0  0 -1 ]
+//   [ 0  0 -1  2 -1  0  0  0 ]
+//   [ 0  0  0 -1  2 -1  0  0 ]
+//   [ 0  0  0  0 -1  2 -1  0 ]
+//   [ 0  0  0  0  0 -1  2  0 ]
+//   [ 0  0 -1  0  0  0  0  2 ]
+//
+// 8 column ZMMs at col_base+0..7, broadcast ctrls at col_base-8..col_base-1.
+// 18 instructions / 108 bytes: 1 VXORPD + 8×(VPERMPD+VFMADD231PD) + 1 VMOVAPD
+fn lower_e8_cartan_mul_o(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut, Panic, Div {
+    var c = nc
+    let vl         = 2
+    let mask_k     = instr.label_id & 7
+    let zb         = instr.imm_flags & 1
+    let col_base   = (instr.label_id >> 4) & 0xF
+    let src        = instr.src1
+    let dst        = instr.dst
+    let t_bcast    = instr.dst + 2
+    let accum      = instr.dst + 4
+    let bcast_base = col_base - 8
+    // VXORPD accum, accum, accum
+    c.code = emit_evex_pd_rr_full(c.code, 1, 0x57, accum, accum, accum, vl, 0, 0)
+    // Columns 0-7
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0x16, t_bcast, bcast_base + 0, src, vl, 0, 0)
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0xB8, accum, t_bcast, col_base + 0, vl, 0, 0)
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0x16, t_bcast, bcast_base + 1, src, vl, 0, 0)
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0xB8, accum, t_bcast, col_base + 1, vl, 0, 0)
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0x16, t_bcast, bcast_base + 2, src, vl, 0, 0)
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0xB8, accum, t_bcast, col_base + 2, vl, 0, 0)
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0x16, t_bcast, bcast_base + 3, src, vl, 0, 0)
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0xB8, accum, t_bcast, col_base + 3, vl, 0, 0)
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0x16, t_bcast, bcast_base + 4, src, vl, 0, 0)
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0xB8, accum, t_bcast, col_base + 4, vl, 0, 0)
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0x16, t_bcast, bcast_base + 5, src, vl, 0, 0)
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0xB8, accum, t_bcast, col_base + 5, vl, 0, 0)
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0x16, t_bcast, bcast_base + 6, src, vl, 0, 0)
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0xB8, accum, t_bcast, col_base + 6, vl, 0, 0)
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0x16, t_bcast, bcast_base + 7, src, vl, 0, 0)
+    c.code = emit_evex_pd_rr_full(c.code, 2, 0xB8, accum, t_bcast, col_base + 7, vl, 0, 0)
+    // VMOVAPD dst{mask_k}{z}, accum
+    c.code = emit_evex_pd_rr_full(c.code, 1, 0x28, dst, 0, accum, vl, mask_k, zb)
+    c
 }

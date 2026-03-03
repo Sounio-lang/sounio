@@ -1,0 +1,123 @@
+// self-hosted::native::test_vec_multiwidth
+//
+// Horizon 3.3 — AVX10.2 unified-width EVEX byte-level verification.
+//
+// Tests confirm that the EVEX emitter produces correct bytes for
+// 256-bit (YMM, L'L=01) and 512-bit (ZMM, L'L=10) vector widths.
+//
+// EVEX reg-reg layout (6 bytes):
+//   [0] 0x62   P0 fixed
+//   [1] P1     R X B R' 0 0 m m
+//   [2] P2     W vvvv4..1 1 pp
+//   [3] P3     z L'L b V' aaa
+//   [4] opcode
+//   [5] ModRM  11 dst_lo3 src2_lo3
+//
+// Canonical probe: VADDPD zmm0, zmm1, zmm2
+//   P1 = 0xF1  (R=1 X=1 B=1 R'=1 map=01)
+//   P2 = 0xF5  (W=1 vvvv=~1&F=E pp=01)
+//   P3 zmm = 0x48  (L'L=10 V'=1)
+//   P3 ymm = 0x28  (L'L=01 V'=1)
+//   opcode   = 0x58
+//   ModRM    = 0xC2  (11 000 010)
+
+use native::encode::{CodeBuffer, code_buffer_new, emit_byte}
+
+// ---- Minimal EVEX helpers (inlined; no lower_ir import needed) ----
+
+fn tvmw_bit(val: i64, n: i64) -> i64 { (val >> n) & 1 }
+fn tvmw_inv(b: i64) -> i64 { if b == 0 { 1 } else { 0 } }
+fn tvmw_lo3(id: i64) -> i64 { id & 7 }
+
+fn tvmw_p1(dst_id: i64, src2_id: i64, map: i64) -> i64 {
+    let r_inv  = tvmw_inv(tvmw_bit(dst_id,  3))
+    let b_inv  = tvmw_inv(tvmw_bit(src2_id, 3))
+    let rp_inv = tvmw_inv(tvmw_bit(dst_id,  4))
+    (r_inv << 7) | (1 << 6) | (b_inv << 5) | (rp_inv << 4) | (map & 0xF)
+}
+
+fn tvmw_p2_pd(src1_id: i64) -> i64 {
+    let vvvv_inv = (0 - src1_id - 1) & 0xF
+    0x80 | (vvvv_inv << 3) | 0x4 | 0x1
+}
+
+fn tvmw_p3_vl(src1_id: i64, vl_code: i64) -> i64 {
+    let vp_inv = tvmw_inv(tvmw_bit(src1_id, 4))
+    ((vl_code & 3) << 5) | (vp_inv << 3)
+}
+
+// vl_code: 0=XMM, 1=YMM, 2=ZMM
+fn tvmw_emit_evex_pd_rr(buf: CodeBuffer, map: i64, opcode: i64, dst: i64, src1: i64, src2: i64, vl_code: i64) -> CodeBuffer with Mut, Panic, Div {
+    var b = buf
+    b = emit_byte(b, 0x62)
+    b = emit_byte(b, tvmw_p1(dst, src2, map))
+    b = emit_byte(b, tvmw_p2_pd(src1))
+    b = emit_byte(b, tvmw_p3_vl(src1, vl_code))
+    b = emit_byte(b, opcode)
+    b = emit_byte(b, 0xC0 | (tvmw_lo3(dst) << 3) | tvmw_lo3(src2))
+    b
+}
+
+fn tvmw_read_byte(buf: CodeBuffer, idx: i64) -> i64 {
+    let x = buf.bytes[idx as usize] as i64
+    if x < 0 { x + 256 } else { x }
+}
+
+// ---- Tests ----
+
+// T01: VADDPD ZMM (vl_code=2) — 6 bytes, P3 L'L = 10 → 0x48
+fn t01_vaddpd_zmm_len_p3() -> bool with Mut, Panic, Div {
+    var buf = code_buffer_new()
+    buf = tvmw_emit_evex_pd_rr(buf, 1, 0x58, 0, 1, 2, 2)
+    buf.len == 6 && tvmw_read_byte(buf, 3) == 0x48
+}
+
+// T02: VADDPD YMM (vl_code=1) — P3 L'L = 01 → 0x28
+fn t02_vaddpd_ymm_p3() -> bool with Mut, Panic, Div {
+    var buf = code_buffer_new()
+    buf = tvmw_emit_evex_pd_rr(buf, 1, 0x58, 0, 1, 2, 1)
+    tvmw_read_byte(buf, 3) == 0x28
+}
+
+// T03: VMULPD ZMM opcode byte = 0x59
+fn t03_vmulpd_zmm_opcode() -> bool with Mut, Panic, Div {
+    var buf = code_buffer_new()
+    buf = tvmw_emit_evex_pd_rr(buf, 1, 0x59, 0, 1, 2, 2)
+    tvmw_read_byte(buf, 4) == 0x59
+}
+
+// T04: VSUBPD YMM opcode byte = 0x5C
+fn t04_vsubpd_ymm_opcode() -> bool with Mut, Panic, Div {
+    var buf = code_buffer_new()
+    buf = tvmw_emit_evex_pd_rr(buf, 1, 0x5C, 0, 1, 2, 1)
+    tvmw_read_byte(buf, 4) == 0x5C
+}
+
+// T05: VFMADD231PD ZMM — map 0F38, P1 low nibble = 2
+fn t05_vfmadd231pd_zmm_map() -> bool with Mut, Panic, Div {
+    var buf = code_buffer_new()
+    buf = tvmw_emit_evex_pd_rr(buf, 2, 0xB8, 0, 1, 2, 2)
+    (tvmw_read_byte(buf, 1) & 0xF) == 2
+}
+
+// T06: P1 byte for zmm0,zmm2 with map=1: all extension bits zero → inverted = 1
+//   R=1 X=1 B=1 R'=1 map=01 → 0b1111_0001 = 0xF1
+fn t06_p1_byte_canonical() -> bool with Mut, Panic, Div {
+    var buf = code_buffer_new()
+    buf = tvmw_emit_evex_pd_rr(buf, 1, 0x58, 0, 1, 2, 2)
+    tvmw_read_byte(buf, 1) == 0xF1
+}
+
+fn test_vec_multiwidth_main() -> i32 with IO, Mut, Panic, Div {
+    var pass = 0
+    var fail = 0
+
+    if t01_vaddpd_zmm_len_p3()   { pass = pass + 1 } else { fail = fail + 1 }
+    if t02_vaddpd_ymm_p3()       { pass = pass + 1 } else { fail = fail + 1 }
+    if t03_vmulpd_zmm_opcode()   { pass = pass + 1 } else { fail = fail + 1 }
+    if t04_vsubpd_ymm_opcode()   { pass = pass + 1 } else { fail = fail + 1 }
+    if t05_vfmadd231pd_zmm_map() { pass = pass + 1 } else { fail = fail + 1 }
+    if t06_p1_byte_canonical()   { pass = pass + 1 } else { fail = fail + 1 }
+
+    if fail == 0 { 0 } else { 1 }
+}

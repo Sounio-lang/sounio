@@ -33,15 +33,33 @@ For manuscript claims that reference runnable fMRI/PBPK pipelines, use the
 repository gates and artifacts as the source of truth:
 
 ```bash
+OMEGA_GPU_RUNTIME_GATE_MODE=required bash scripts/omega/omega_gpu_runtime_attest_gate.sh
+bash scripts/stdlib_hyper_execution_gate.sh
+STDLIB_RUNTIME_REGRESSION_STRICT=1 bash scripts/stdlib_science_pipeline_gate.sh
+STDLIB_RUNTIME_REGRESSION_STRICT=1 bash scripts/stdlib_reliability_gate.sh
+bash scripts/omega/omega_gpu_runtime_attest_gate.sh
+bash scripts/stdlib_hyper_execution_gate.sh
 bash scripts/stdlib_science_pipeline_gate.sh
 bash scripts/stdlib_reliability_gate.sh
 ```
 
 Primary evidence artifacts:
+- `artifacts/omega/gpu_runtime_attest_gate.v1.json`
+- `artifacts/stdlib/stdlib_hyper_execution_status.v1.json`
 - `artifacts/stdlib/stdlib_science_pipeline_status.v1.json`
 - `artifacts/stdlib/stdlib_reliability_status.v1.json`
 - `tests/fixtures/fmri/fixture_manifest.v1.json`
 - `tests/fixtures/fmri/pipeline_golden.v1.json`
+- `tests/fixtures/hyper/pipeline_golden.v1.json`
+
+Runtime policy note:
+- science status JSON includes `runtime_regressions`, `runtime_regression_enforcement`, `runtime_regression_summary`, and `runtime_provenance`
+- runtime probe sources are committed in `tests/stdlib/runtime_regression/` for reproducible paper evidence
+- local gate mode is soft telemetry for runtime regressions; required CI full gate uses `STDLIB_RUNTIME_REGRESSION_STRICT=1`
+- strict mode is fail-closed; runtime probes must pass for strict CI success
+- hyper execution lane is fail-closed with no-ignore policy in required hyper tests
+- GPU runtime attestation uses `OMEGA_GPU_RUNTIME_GATE_MODE=required` in CI and records pass|fail|not_run with blocker metadata in the artifact
+- canonical pinned `souc` version is sourced from `scripts/omega/omega_resolve_souc_bin.sh` unless explicitly overridden via `SOUNIO_SOUC_VERSION`
 
 ## Target Venues
 

@@ -2,6 +2,13 @@
 //
 // Generates a minimal ELF64 executable with .text segment.
 
+module native::elf
+
+use native::encode::*
+
+// PT_GNU_STACK type constant (marks stack non-executable)
+fn elf_pt_gnu_stack() -> i64 { 0x6474e551 }
+
 // ELF64 constants
 fn elf_magic_0() -> i64 { 0x7f }
 fn elf_magic_1() -> i64 { 0x45 }  // 'E'
@@ -30,16 +37,17 @@ struct Elf64Binary {
 struct StringTable {
     bytes: [i8; 131072],
     len: i64,
+    last_offset: i64,
 }
 
 fn string_table_new() -> StringTable {
-    StringTable { bytes: [0; 131072], len: 0 }
+    StringTable { bytes: [0; 131072], len: 0, last_offset: 0 }
 }
 
-// Add a string to the table, return its offset
-fn string_table_add(st: StringTable, s_bytes: [i8; 128], s_len: i64) -> (StringTable, i64) with Mut, Panic, Div {
+// Add a string to the table; offset stored in .last_offset
+fn string_table_add(st: StringTable, s_bytes: [i8; 128], s_len: i64) -> StringTable with Mut, Panic, Div {
     var t = st
-    let offset = t.len
+    t.last_offset = t.len
     var i = 0
     while i < s_len && t.len < 131072 {
         t.bytes[t.len as usize] = s_bytes[i as usize]
@@ -51,11 +59,89 @@ fn string_table_add(st: StringTable, s_bytes: [i8; 128], s_len: i64) -> (StringT
         t.bytes[t.len as usize] = 0
         t.len = t.len + 1
     }
-    (t, offset)
+    t
+}
+
+// Align data section to given boundary (pad with zero bytes)
+fn data_section_align(st: StringTable, alignment: i64) -> StringTable with Mut, Panic, Div {
+    var t = st
+    while (t.len % alignment) != 0 && t.len < 131072 {
+        t.bytes[t.len as usize] = 0
+        t.len = t.len + 1
+    }
+    t
+}
+
+// Add an f64 constant (as i64 bit pattern) to .rodata with 8-byte alignment.
+// Byte offset stored in .last_offset.
+fn data_section_add_f64(st: StringTable, bits: i64) -> StringTable with Mut, Panic, Div {
+    var t = data_section_align(st, 8)
+    t.last_offset = t.len
+    var i: i64 = 0
+    while i < 8 && (t.len + i) < 131072 {
+        t.bytes[(t.len + i) as usize] = ((bits >> (i * 8)) & 0xFF) as i8
+        i = i + 1
+    }
+    t.len = t.len + 8
+    t
 }
 
 fn elf_binary_new() -> Elf64Binary {
     Elf64Binary { bytes: [0; 4194304], len: 0 }
+}
+
+// Symbol table data for .symtab/.strtab sections
+struct SymbolData {
+    strtab: [i8; 32768],         // null-terminated function name strings
+    strtab_len: i64,              // current length (index 0 is always \0)
+    name_offsets: [i64; 1024],   // strtab byte offset for each function's name
+}
+
+fn symbol_data_new() -> SymbolData {
+    SymbolData {
+        strtab: [0; 32768],
+        strtab_len: 1,             // slot 0 = \0 (null entry's st_name = 0)
+        name_offsets: [0; 1024],
+    }
+}
+
+// Record a function's name in the symbol table's strtab
+fn symbol_data_add_name(sym: SymbolData, fn_idx: i64, name_buf: [i8; 128], name_len: i64) -> SymbolData with Mut, Panic, Div {
+    var s = sym
+    if fn_idx >= 0 && fn_idx < 1024 {
+        s.name_offsets[fn_idx as usize] = s.strtab_len
+        var ni = 0
+        while ni < name_len && s.strtab_len < 32767 {
+            s.strtab[s.strtab_len as usize] = name_buf[ni as usize]
+            s.strtab_len = s.strtab_len + 1
+            ni = ni + 1
+        }
+        if s.strtab_len < 32768 {
+            s.strtab[s.strtab_len as usize] = 0
+            s.strtab_len = s.strtab_len + 1
+        }
+    }
+    s
+}
+
+// Emit one Elf64_Sym entry (24 bytes, little-endian)
+fn emit_symtab_entry(
+    bin: Elf64Binary,
+    st_name: i64,      // 4 bytes: name offset in .strtab
+    st_type: i64,      // nibble: STT_NOTYPE=0, STT_FUNC=2
+    st_bind: i64,      // nibble: STB_LOCAL=0, STB_GLOBAL=1
+    st_shndx: i64,     // 2 bytes: section index
+    st_value: i64,     // 8 bytes: virtual address
+    st_size: i64       // 8 bytes: size (0 = unknown)
+) -> Elf64Binary with Mut, Panic, Div {
+    var b = bin
+    b = elf_emit_u32(b, st_name)
+    b = elf_emit_byte(b, st_bind * 16 + st_type)  // st_info = (bind<<4) | type
+    b = elf_emit_byte(b, 0)                        // st_other = STV_DEFAULT
+    b = elf_emit_u16(b, st_shndx)
+    b = elf_emit_u64(b, st_value)
+    b = elf_emit_u64(b, st_size)
+    b
 }
 
 // Emit a byte to the binary
@@ -94,12 +180,31 @@ fn elf_emit_u64(bin: Elf64Binary, val: i64) -> Elf64Binary with Mut, Panic, Div 
     b
 }
 
-// Build minimal ELF64 executable with .text + .rodata
+// Build ELF64 executable: .text + .rodata + PT_GNU_STACK + section headers
+// Includes .symtab and .strtab sections for debugger/objdump visibility.
+// Includes .note.gnu.property marking AVX-512F capability.
+//
+// .shstrtab layout (fixed offsets):
+//   offset  0: \0                    — NULL section name
+//   offset  1: .text\0               — 6 bytes   (sh_name=1)
+//   offset  7: .rodata\0             — 8 bytes   (sh_name=7)
+//   offset 15: .symtab\0             — 8 bytes   (sh_name=15)
+//   offset 23: .strtab\0             — 8 bytes   (sh_name=23)
+//   offset 31: .shstrtab\0           — 10 bytes  (sh_name=31)
+//   offset 41: .note.gnu.property\0  — 20 bytes  (sh_name=41)
+//
+// Section table order (with rodata):
+//   0=NULL, 1=.text, 2=.rodata, 3=.symtab, 4=.strtab, 5=.note.gnu.property, 6=.shstrtab
+// Section table order (without rodata):
+//   0=NULL, 1=.text, 2=.symtab, 3=.strtab, 4=.note.gnu.property, 5=.shstrtab
 fn finalize_elf64(
     code: CodeBuffer,
     rodata: StringTable,
     entry_offset: i64,
-    base_addr: i64
+    base_addr: i64,
+    symbols: SymbolData,
+    fn_offsets: [i64; 1024],
+    fn_count: i64
 ) -> Elf64Binary with Mut, Panic, Div {
     var bin = elf_binary_new()
 
@@ -107,12 +212,19 @@ fn finalize_elf64(
     let text_offset = 4096
     let rodata_offset = align_page(text_offset + code.len)
 
-    // ELF header (64 bytes)
-    bin = emit_elf_header(bin, entry_offset, base_addr, rodata.len)
+    // phnum: text + gnu_stack (always), + rodata if non-empty
+    let phnum = if rodata.len > 0 { 3 } else { 2 }
 
-    // Program headers: 2 PT_LOAD segments (56 bytes each = 112 total)
+    // ELF header (64 bytes) — e_shoff/e_shnum/e_shentsize patched later
+    bin = emit_elf_header(bin, entry_offset, base_addr, phnum)
+
+    // Program headers
     bin = emit_program_header_text(bin, code.len, text_offset, base_addr)
-    bin = emit_program_header_rodata(bin, rodata.len, rodata_offset, base_addr)
+    if rodata.len > 0 {
+        bin = emit_program_header_rodata(bin, rodata.len, rodata_offset, base_addr)
+    }
+    // PT_GNU_STACK: marks stack non-executable (NX), required by many distros
+    bin = emit_program_header_gnu_stack(bin)
 
     // Pad to .text start (4096 bytes)
     while bin.len < text_offset {
@@ -138,6 +250,183 @@ fn finalize_elf64(
         j = j + 1
     }
 
+    // ----------------------------------------------------------------
+    // .strtab: function name strings (not mapped into memory)
+    // ----------------------------------------------------------------
+    let strtab_offset = bin.len
+    var si = 0
+    let strtab_emit_len = if symbols.strtab_len > 0 { symbols.strtab_len } else { 1 }
+    while si < strtab_emit_len {
+        bin = elf_emit_byte(bin, symbols.strtab[si as usize] as i64)
+        si = si + 1
+    }
+    let strtab_size = bin.len - strtab_offset
+
+    // ----------------------------------------------------------------
+    // .symtab: Elf64_Sym entries (24 bytes each)
+    // ----------------------------------------------------------------
+
+    // Align to 8-byte boundary for .symtab
+    while bin.len % 8 != 0 {
+        bin = elf_emit_byte(bin, 0)
+    }
+    let symtab_offset = bin.len
+
+    // Null symbol entry (all zeros): index 0, all fields = 0
+    bin = emit_symtab_entry(bin, 0, 0, 0, 0, 0, 0)
+
+    // One STT_FUNC entry per compiled function
+    let text_va_base = base_addr + text_offset
+    var fi = 0
+    while fi < fn_count {
+        let fn_name_off = symbols.name_offsets[fi as usize]
+        let fn_va = text_va_base + fn_offsets[fi as usize]
+        // STT_FUNC=2, STB_GLOBAL=1, shndx=1 (.text section)
+        bin = emit_symtab_entry(bin, fn_name_off, 2, 1, 1, fn_va, 0)
+        fi = fi + 1
+    }
+    let symtab_size = bin.len - symtab_offset
+
+    // ----------------------------------------------------------------
+    // .note.gnu.property: AVX-512 capability marking
+    //   Tells the kernel / dynamic linker this binary requires AVX-512F.
+    //   Format: ELF note header (12 B) + name "GNU\0" (4 B) + property (16 B) = 32 B
+    //   Note: no PT_NOTE program header yet — section visible to readelf/objdump.
+    // ----------------------------------------------------------------
+    while bin.len % 8 != 0 {
+        bin = elf_emit_byte(bin, 0)
+    }
+    let noteprop_offset = bin.len
+    // Note header
+    bin = elf_emit_u32(bin, 4)           // namesz = 4 ("GNU\0")
+    bin = elf_emit_u32(bin, 16)          // descsz = 16 (one property entry)
+    bin = elf_emit_u32(bin, 5)           // type   = NT_GNU_PROPERTY_TYPE_0
+    // Name: "GNU\0"
+    bin = elf_emit_byte(bin, 71)         // G
+    bin = elf_emit_byte(bin, 78)         // N
+    bin = elf_emit_byte(bin, 85)         // U
+    bin = elf_emit_byte(bin, 0)          // \0
+    // Property entry: GNU_PROPERTY_X86_ISA_1_AVX512F
+    bin = elf_emit_u32(bin, 0xc0010002)  // pr_type   (GNU_PROPERTY_X86_ISA_1_AVX512F)
+    bin = elf_emit_u32(bin, 4)           // pr_datasz = 4
+    bin = elf_emit_u32(bin, 0x10)        // AVX512F capability bit (bit 4)
+    bin = elf_emit_u32(bin, 0)           // padding to 8-byte alignment
+    let noteprop_size = bin.len - noteprop_offset
+
+    // ----------------------------------------------------------------
+    // .shstrtab: section name strings
+    // ----------------------------------------------------------------
+
+    // Align to 8-byte boundary before .shstrtab
+    while bin.len % 8 != 0 {
+        bin = elf_emit_byte(bin, 0)
+    }
+    let shstrtab_offset = bin.len
+
+    bin = elf_emit_byte(bin, 0)                                     // offset  0: \0
+    bin = elf_emit_byte(bin, 46)  bin = elf_emit_byte(bin, 116)     // offset  1: .t
+    bin = elf_emit_byte(bin, 101) bin = elf_emit_byte(bin, 120)     //            ex
+    bin = elf_emit_byte(bin, 116) bin = elf_emit_byte(bin, 0)       //            t\0
+    bin = elf_emit_byte(bin, 46)  bin = elf_emit_byte(bin, 114)     // offset  7: .r
+    bin = elf_emit_byte(bin, 111) bin = elf_emit_byte(bin, 100)     //            od
+    bin = elf_emit_byte(bin, 97)  bin = elf_emit_byte(bin, 116)     //            at
+    bin = elf_emit_byte(bin, 97)  bin = elf_emit_byte(bin, 0)       //            a\0
+    bin = elf_emit_byte(bin, 46)  bin = elf_emit_byte(bin, 115)     // offset 15: .s
+    bin = elf_emit_byte(bin, 121) bin = elf_emit_byte(bin, 109)     //            ym
+    bin = elf_emit_byte(bin, 116) bin = elf_emit_byte(bin, 97)      //            ta
+    bin = elf_emit_byte(bin, 98)  bin = elf_emit_byte(bin, 0)       //            b\0
+    bin = elf_emit_byte(bin, 46)  bin = elf_emit_byte(bin, 115)     // offset 23: .s
+    bin = elf_emit_byte(bin, 116) bin = elf_emit_byte(bin, 114)     //            tr
+    bin = elf_emit_byte(bin, 116) bin = elf_emit_byte(bin, 97)      //            ta
+    bin = elf_emit_byte(bin, 98)  bin = elf_emit_byte(bin, 0)       //            b\0
+    bin = elf_emit_byte(bin, 46)  bin = elf_emit_byte(bin, 115)     // offset 31: .s
+    bin = elf_emit_byte(bin, 104) bin = elf_emit_byte(bin, 115)     //            hs
+    bin = elf_emit_byte(bin, 116) bin = elf_emit_byte(bin, 114)     //            tr
+    bin = elf_emit_byte(bin, 116) bin = elf_emit_byte(bin, 97)      //            ta
+    bin = elf_emit_byte(bin, 98)  bin = elf_emit_byte(bin, 0)       //            b\0
+    // offset 41: .note.gnu.property\0
+    bin = elf_emit_byte(bin, 46)  bin = elf_emit_byte(bin, 110)     //            .n
+    bin = elf_emit_byte(bin, 111) bin = elf_emit_byte(bin, 116)     //            ot
+    bin = elf_emit_byte(bin, 101) bin = elf_emit_byte(bin, 46)      //            e.
+    bin = elf_emit_byte(bin, 103) bin = elf_emit_byte(bin, 110)     //            gn
+    bin = elf_emit_byte(bin, 117) bin = elf_emit_byte(bin, 46)      //            u.
+    bin = elf_emit_byte(bin, 112) bin = elf_emit_byte(bin, 114)     //            pr
+    bin = elf_emit_byte(bin, 111) bin = elf_emit_byte(bin, 112)     //            op
+    bin = elf_emit_byte(bin, 101) bin = elf_emit_byte(bin, 114)     //            er
+    bin = elf_emit_byte(bin, 116) bin = elf_emit_byte(bin, 121)     //            ty
+    bin = elf_emit_byte(bin, 0)                                      //            \0
+    let shstrtab_size = bin.len - shstrtab_offset
+
+    // ----------------------------------------------------------------
+    // Section header table
+    // ----------------------------------------------------------------
+
+    // Align to 8-byte boundary before section header table
+    while bin.len % 8 != 0 {
+        bin = elf_emit_byte(bin, 0)
+    }
+    let shoff = bin.len
+
+    // Section counts and indices
+    // With rodata:    NULL(0) .text(1) .rodata(2) .symtab(3) .strtab(4) .note(5) .shstrtab(6) → shnum=7
+    // Without rodata: NULL(0) .text(1) .symtab(2) .strtab(3) .note(4) .shstrtab(5)            → shnum=6
+    let shnum = if rodata.len > 0 { 7 } else { 6 }
+    let shstrndx = shnum - 1      // .shstrtab is always last
+    let strtab_shndx = shnum - 3  // .strtab is 3rd-to-last (note + shstrtab after it)
+
+    // SHT_* constants
+    let sht_progbits = 1
+    let sht_symtab = 2
+    let sht_strtab = 3
+    // SHF_* flag constants
+    let shf_alloc = 2
+    let shf_execinstr = 4
+
+    // Section 0: NULL (all zeros)
+    bin = emit_section_header(bin, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+
+    // Section 1: .text  (SHT_PROGBITS, SHF_ALLOC|SHF_EXECINSTR)
+    let text_va = base_addr + text_offset
+    bin = emit_section_header(bin,
+        1, sht_progbits, shf_alloc + shf_execinstr,
+        text_va, text_offset, code.len, 0, 0, 16, 0)
+
+    // Section 2: .rodata (SHT_PROGBITS, SHF_ALLOC) — only if non-empty
+    if rodata.len > 0 {
+        let rodata_va = base_addr + rodata_offset
+        bin = emit_section_header(bin,
+            7, sht_progbits, shf_alloc,
+            rodata_va, rodata_offset, rodata.len, 0, 0, 8, 0)
+    }
+
+    // .symtab: sh_link=strtab_shndx, sh_info=1 (first global symbol at index 1),
+    //          sh_entsize=24 (size of each Elf64_Sym)
+    bin = emit_section_header(bin,
+        15, sht_symtab, 0,
+        0, symtab_offset, symtab_size, strtab_shndx, 1, 8, 24)
+
+    // .strtab: function name string table
+    bin = emit_section_header(bin,
+        23, sht_strtab, 0,
+        0, strtab_offset, strtab_size, 0, 0, 1, 0)
+
+    // .note.gnu.property: AVX-512 capability note (SHT_NOTE=7, SHF_ALLOC=2)
+    let sht_note = 7
+    bin = emit_section_header(bin,
+        41, sht_note, shf_alloc,
+        0, noteprop_offset, noteprop_size, 0, 0, 8, 0)
+
+    // .shstrtab: section name string table
+    bin = emit_section_header(bin,
+        31, sht_strtab, 0,
+        0, shstrtab_offset, shstrtab_size, 0, 0, 1, 0)
+
+    // Patch ELF header: e_shoff (offset 40), e_shentsize (58), e_shnum (60), e_shstrndx (62)
+    bin = elf_patch_u64(bin, 40, shoff)
+    bin = elf_patch_u16(bin, 58, 64)
+    bin = elf_patch_u16(bin, 60, shnum)
+    bin = elf_patch_u16(bin, 62, shstrndx)
+
     bin
 }
 
@@ -151,8 +440,8 @@ fn align_page(offset: i64) -> i64 with Mut, Panic {
     aligned
 }
 
-// Emit ELF64 header (updated for 2 program headers)
-fn emit_elf_header(bin: Elf64Binary, entry_offset: i64, base_addr: i64, rodata_len: i64) -> Elf64Binary with Mut, Panic, Div {
+// Emit ELF64 header
+fn emit_elf_header(bin: Elf64Binary, entry_offset: i64, base_addr: i64, phnum: i64) -> Elf64Binary with Mut, Panic, Div {
     var b = bin
 
     // e_ident[16]
@@ -191,8 +480,7 @@ fn emit_elf_header(bin: Elf64Binary, entry_offset: i64, base_addr: i64, rodata_l
     b = elf_emit_u16(b, 56)       // program header entry size
 
     // e_phnum, e_shentsize, e_shnum, e_shstrndx
-    let phnum = if rodata_len > 0 { 2 } else { 1 }
-    b = elf_emit_u16(b, phnum)    // 2 program headers (.text + .rodata)
+    b = elf_emit_u16(b, phnum)
     b = elf_emit_u16(b, 0)        // section header entry size (none)
     b = elf_emit_u16(b, 0)        // section header count (none)
     b = elf_emit_u16(b, 0)        // section name string table index
@@ -228,6 +516,24 @@ fn emit_program_header_text(bin: Elf64Binary, code_len: i64, text_offset: i64, b
     b
 }
 
+// Emit PT_GNU_STACK program header (marks stack non-executable; all sizes zero)
+fn emit_program_header_gnu_stack(bin: Elf64Binary) -> Elf64Binary with Mut, Panic, Div {
+    var b = bin
+    // p_type = PT_GNU_STACK
+    b = elf_emit_u32(b, elf_pt_gnu_stack())
+    // p_flags = PF_R|PF_W (6)
+    b = elf_emit_u32(b, elf_pf_r() + 2)
+    // p_offset, p_vaddr, p_paddr, p_filesz, p_memsz = 0
+    b = elf_emit_u64(b, 0)
+    b = elf_emit_u64(b, 0)
+    b = elf_emit_u64(b, 0)
+    b = elf_emit_u64(b, 0)
+    b = elf_emit_u64(b, 0)
+    // p_align = 16
+    b = elf_emit_u64(b, 16)
+    b
+}
+
 // Emit program header for .rodata segment (R)
 fn emit_program_header_rodata(bin: Elf64Binary, rodata_len: i64, rodata_offset: i64, base_addr: i64) -> Elf64Binary with Mut, Panic, Div {
     var b = bin
@@ -253,5 +559,63 @@ fn emit_program_header_rodata(bin: Elf64Binary, rodata_len: i64, rodata_offset: 
     // p_align (4096 bytes)
     b = elf_emit_u64(b, 4096)
 
+    b
+}
+
+// ============================================================================
+// Section header support (ELF64 Shdr, 64 bytes each)
+// ============================================================================
+
+// Patch a u16 at the given file offset in an Elf64Binary
+fn elf_patch_u16(bin: Elf64Binary, offset: i64, val: i64) -> Elf64Binary with Mut, Panic, Div {
+    var b = bin
+    if offset >= 0 && offset + 2 <= b.len {
+        b.bytes[offset as usize] = low8(val) as i8
+        b.bytes[(offset + 1) as usize] = low8(val >> 8) as i8
+    }
+    b
+}
+
+// Patch a u64 at the given file offset in an Elf64Binary
+fn elf_patch_u64(bin: Elf64Binary, offset: i64, val: i64) -> Elf64Binary with Mut, Panic, Div {
+    var b = bin
+    if offset >= 0 && offset + 8 <= b.len {
+        b.bytes[(offset + 0) as usize] = low8(val) as i8
+        b.bytes[(offset + 1) as usize] = low8(val >> 8) as i8
+        b.bytes[(offset + 2) as usize] = low8(val >> 16) as i8
+        b.bytes[(offset + 3) as usize] = low8(val >> 24) as i8
+        b.bytes[(offset + 4) as usize] = low8(val >> 32) as i8
+        b.bytes[(offset + 5) as usize] = low8(val >> 40) as i8
+        b.bytes[(offset + 6) as usize] = low8(val >> 48) as i8
+        b.bytes[(offset + 7) as usize] = low8(val >> 56) as i8
+    }
+    b
+}
+
+// Emit a 64-byte ELF64 section header (Elf64_Shdr)
+fn emit_section_header(
+    bin: Elf64Binary,
+    sh_name: i64,
+    sh_type: i64,
+    sh_flags: i64,
+    sh_addr: i64,
+    sh_offset: i64,
+    sh_size: i64,
+    sh_link: i64,
+    sh_info: i64,
+    sh_addralign: i64,
+    sh_entsize: i64
+) -> Elf64Binary with Mut, Panic, Div {
+    var b = bin
+    b = elf_emit_u32(b, sh_name)
+    b = elf_emit_u32(b, sh_type)
+    b = elf_emit_u64(b, sh_flags)
+    b = elf_emit_u64(b, sh_addr)
+    b = elf_emit_u64(b, sh_offset)
+    b = elf_emit_u64(b, sh_size)
+    b = elf_emit_u32(b, sh_link)
+    b = elf_emit_u32(b, sh_info)
+    b = elf_emit_u64(b, sh_addralign)
+    b = elf_emit_u64(b, sh_entsize)
     b
 }

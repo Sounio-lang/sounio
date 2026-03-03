@@ -1,0 +1,1316 @@
+// signal::wavelets — Discrete Wavelet Transform
+//
+// Implements single-level and multi-level discrete wavelet transforms (DWT)
+// for signal analysis and denoising.
+//
+// Wavelets supported:
+//   - Haar: Oldest and simplest wavelet. Perfect reconstruction.
+//   - Daubechies-4 (db4): 4-tap orthogonal wavelet with 2 vanishing moments.
+//
+// Operations:
+//   - Forward DWT: Signal → (approximation, detail) coefficients
+//   - Inverse DWT: (approximation, detail) → signal (perfect reconstruction)
+//   - Hard thresholding: Zero out |coeff| < threshold (sparse denoising)
+//   - Soft thresholding: Shrink by threshold (smooth denoising)
+//   - Signal energy: Parseval's theorem: energy preserved under orthogonal DWT
+//   - SNR: Signal-to-noise ratio in dB
+//
+// References:
+//   - Daubechies (1992): "Ten Lectures on Wavelets", SIAM
+//   - Mallat (1989): "A Theory for Multiresolution Signal Decomposition"
+//   - Donoho & Johnstone (1994): "Ideal Spatial Adaptation by Wavelet Shrinkage"
+
+// ============================================================================
+// MATH HELPERS
+// ============================================================================
+
+fn wav_f64_abs(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+fn wav_f64_max(a: f64, b: f64) -> f64 {
+    if a > b { return a }
+    return b
+}
+
+fn wav_f64_min(a: f64, b: f64) -> f64 {
+    if a < b { return a }
+    return b
+}
+
+fn wav_sqrt(x: f64) -> f64 {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    return y
+}
+
+// log base 10 approximation (for SNR in dB)
+fn wav_log10(x: f64) -> f64 {
+    if x <= 0.0 { return 0.0 - 1000.0 }
+    // log10(x) = log(x) / log(10), log via Taylor around 1
+    // Use: ln(x) = 2 * arctanh((x-1)/(x+1)) — valid for all x > 0
+    // First normalize: factor out powers of 2
+    var v = x
+    var exponent: i64 = 0
+    while v > 2.0 { v = v / 2.0 ; exponent = exponent + 1 }
+    while v < 0.5 { v = v * 2.0 ; exponent = exponent - 1 }
+    // Now v in [0.5, 2]; compute ln(v) via arctanh series
+    let u = (v - 1.0) / (v + 1.0)
+    let u2 = u * u
+    let ln_v = 2.0 * u * (1.0 + u2 / 3.0 + u2 * u2 / 5.0 + u2 * u2 * u2 / 7.0 + u2 * u2 * u2 * u2 / 9.0 + u2 * u2 * u2 * u2 * u2 / 11.0)
+    let ln2 = 0.6931471805599453
+    let log10e = 0.4342944819032518  // 1/ln(10)
+    return log10e * (ln_v + (exponent as f64) * ln2)
+}
+
+// ============================================================================
+// HAAR WAVELET
+//
+// The Haar wavelet is the simplest orthogonal wavelet:
+//   Scaling function φ: indicator of [0, 1)
+//   Wavelet function ψ: +1 on [0, 0.5), -1 on [0.5, 1)
+//
+// Forward transform (analysis):
+//   approx[i] = (signal[2i] + signal[2i+1]) / sqrt(2)
+//   detail[i]  = (signal[2i] - signal[2i+1]) / sqrt(2)
+//
+// Inverse transform (synthesis):
+//   signal[2i]   = (approx[i] + detail[i]) / sqrt(2)
+//   signal[2i+1] = (approx[i] - detail[i]) / sqrt(2)
+//
+// The sqrt(2) factors ensure orthogonality and energy preservation.
+// ============================================================================
+
+// Haar forward DWT: signal[0..n-1] → (approx[0..n/2-1], detail[0..n/2-1])
+// n must be even and <= 512
+// Returns n/2 (number of coefficients in each output band)
+fn wav_haar_forward(signal: [f64; 512], n: i64, out_approx: &! [f64; 256], out_detail: &! [f64; 256]) -> i64 {
+    let half_n = n / 2
+    let sqrt2 = 1.41421356237309504880  // sqrt(2)
+    let inv_sqrt2 = 0.70710678118654752440  // 1/sqrt(2)
+    var i: i64 = 0
+    while i < half_n {
+        let a = signal[(2 * i) as usize]
+        let b = signal[(2 * i + 1) as usize]
+        out_approx[i as usize] = (a + b) * inv_sqrt2
+        out_detail[i as usize] = (a - b) * inv_sqrt2
+        i = i + 1
+    }
+    return half_n
+}
+
+// Haar inverse DWT: (approx, detail) → signal
+// n: number of coefficients in each band (output has 2*n samples)
+// Returns 2*n (length of reconstructed signal)
+fn wav_haar_inverse(approx: [f64; 256], detail: [f64; 256], n: i64, out: &! [f64; 512]) -> i64 {
+    let inv_sqrt2 = 0.70710678118654752440
+    var i: i64 = 0
+    while i < n {
+        let a = approx[i as usize]
+        let d = detail[i as usize]
+        out[(2 * i) as usize] = (a + d) * inv_sqrt2
+        out[(2 * i + 1) as usize] = (a - d) * inv_sqrt2
+        i = i + 1
+    }
+    return 2 * n
+}
+
+// ============================================================================
+// SIGNAL ENERGY (Parseval's theorem)
+//
+// E = sum_{i=0}^{n-1} signal[i]^2
+// Under an orthonormal DWT: E_signal = E_approx + E_detail
+// ============================================================================
+
+fn wav_energy(signal: [f64; 512], n: i64) -> f64 {
+    var e = 0.0
+    var i: i64 = 0
+    while i < n {
+        let x = signal[i as usize]
+        e = e + x * x
+        i = i + 1
+    }
+    return e
+}
+
+fn wav_energy_256(signal: [f64; 256], n: i64) -> f64 {
+    var e = 0.0
+    var i: i64 = 0
+    while i < n {
+        let x = signal[i as usize]
+        e = e + x * x
+        i = i + 1
+    }
+    return e
+}
+
+// ============================================================================
+// THRESHOLDING
+//
+// Hard thresholding (Donoho, 1994):
+//   T_hard(x, λ) = 0 if |x| < λ, x otherwise
+//   Creates sparse representation; discontinuous at ±λ.
+//
+// Soft thresholding (shrinkage):
+//   T_soft(x, λ) = sign(x) * max(0, |x| - λ)
+//   Continuous, biased estimator; preferred for denoising.
+// ============================================================================
+
+// Hard thresholding: in-place zeroing of small detail coefficients
+// Returns number of surviving (non-zero) coefficients
+fn wav_threshold_hard(detail: &! [f64; 256], n: i64, thresh: f64) -> i64 {
+    var surviving: i64 = 0
+    var i: i64 = 0
+    while i < n {
+        let v = detail[i as usize]
+        if wav_f64_abs(v) < thresh {
+            detail[i as usize] = 0.0
+        } else {
+            surviving = surviving + 1
+        }
+        i = i + 1
+    }
+    return surviving
+}
+
+// Soft thresholding: in-place shrinkage of detail coefficients
+// Returns number of surviving (non-zero) coefficients
+fn wav_threshold_soft(detail: &! [f64; 256], n: i64, thresh: f64) -> i64 {
+    var surviving: i64 = 0
+    var i: i64 = 0
+    while i < n {
+        let v = detail[i as usize]
+        let av = wav_f64_abs(v)
+        if av <= thresh {
+            detail[i as usize] = 0.0
+        } else {
+            if v > 0.0 {
+                detail[i as usize] = av - thresh
+            } else {
+                detail[i as usize] = 0.0 - (av - thresh)
+            }
+            surviving = surviving + 1
+        }
+        i = i + 1
+    }
+    return surviving
+}
+
+// ============================================================================
+// SIGNAL-TO-NOISE RATIO
+//
+// SNR = 10 * log10(E_signal / E_noise)
+// where E_noise = sum (original[i] - reconstructed[i])^2
+// A perfect reconstruction gives infinite SNR; denoising gives finite SNR.
+// ============================================================================
+
+fn wav_snr(original: [f64; 512], reconstructed: [f64; 512], n: i64) -> f64 {
+    var e_signal = 0.0
+    var e_noise = 0.0
+    var i: i64 = 0
+    while i < n {
+        let o = original[i as usize]
+        let r = reconstructed[i as usize]
+        e_signal = e_signal + o * o
+        let diff = o - r
+        e_noise = e_noise + diff * diff
+        i = i + 1
+    }
+    if e_noise < 1.0e-300 {
+        return 1000.0  // Very large SNR — nearly perfect reconstruction
+    }
+    if e_signal < 1.0e-300 {
+        return 0.0
+    }
+    return 10.0 * wav_log10(e_signal / e_noise)
+}
+
+// ============================================================================
+// DAUBECHIES-4 (db4) WAVELET
+//
+// The Daubechies-4 wavelet has 4 filter coefficients and 2 vanishing moments.
+// It can represent polynomials of degree <= 1 exactly.
+//
+// Analysis low-pass filter (h0): scaling coefficients
+// Analysis high-pass filter (h1): wavelet coefficients
+//
+// Coefficients (from Daubechies 1988, orthonormal form):
+//   h0 = [(1+sqrt3)/(4*sqrt2), (3+sqrt3)/(4*sqrt2), (3-sqrt3)/(4*sqrt2), (1-sqrt3)/(4*sqrt2)]
+//   h1[k] = (-1)^k * h0[3-k]   (quadrature mirror)
+//
+// Numerical values (sqrt3 ≈ 1.7320508075688773):
+//   h0[0] = (1+√3)/(4√2) ≈  0.4829629131445341
+//   h0[1] = (3+√3)/(4√2) ≈  0.8365163037378077
+//   h0[2] = (3-√3)/(4√2) ≈  0.2241438680420134
+//   h0[3] = (1-√3)/(4√2) ≈ -0.1294095225512603
+//
+//   h1[0] = -h0[3] ≈  0.1294095225512603
+//   h1[1] =  h0[2] ≈  0.2241438680420134
+//   h1[2] = -h0[1] ≈ -0.8365163037378077
+//   h1[3] =  h0[0] ≈  0.4829629131445341
+//
+// Reconstruction (synthesis) filters:
+//   g0[k] = h0[3-k]   (time-reverse of h0)
+//   g1[k] = h1[3-k]   (time-reverse of h1)
+// ============================================================================
+
+fn db4_h0_0() -> f64 {  0.4829629131445341 }
+fn db4_h0_1() -> f64 {  0.8365163037378077 }
+fn db4_h0_2() -> f64 {  0.2241438680420134 }
+fn db4_h0_3() -> f64 { 0.0 - 0.1294095225512603 }
+
+fn db4_h1_0() -> f64 {  0.1294095225512603 }
+fn db4_h1_1() -> f64 {  0.2241438680420134 }
+fn db4_h1_2() -> f64 { 0.0 - 0.8365163037378077 }
+fn db4_h1_3() -> f64 {  0.4829629131445341 }
+
+// Synthesis (inverse) low-pass: g0[k] = h0[3-k]
+fn db4_g0_0() -> f64 { 0.0 - 0.1294095225512603 }  // h0[3]
+fn db4_g0_1() -> f64 {  0.2241438680420134 }         // h0[2]
+fn db4_g0_2() -> f64 {  0.8365163037378077 }         // h0[1]
+fn db4_g0_3() -> f64 {  0.4829629131445341 }         // h0[0]
+
+// Synthesis (inverse) high-pass: g1[k] = h1[3-k]
+fn db4_g1_0() -> f64 {  0.4829629131445341 }         // h1[3]
+fn db4_g1_1() -> f64 { 0.0 - 0.8365163037378077 }   // h1[2]
+fn db4_g1_2() -> f64 {  0.2241438680420134 }         // h1[1]
+fn db4_g1_3() -> f64 {  0.1294095225512603 }         // h1[0]
+
+// DB4 forward DWT (single level, periodic boundary conditions)
+// signal[0..n-1] → out_approx[0..n/2-1], out_detail[0..n/2-1]
+// n must be even and <= 512
+// Returns n/2
+fn wav_db4_forward(signal: [f64; 512], n: i64, out_approx: &! [f64; 256], out_detail: &! [f64; 256]) -> i64 {
+    let half_n = n / 2
+    var i: i64 = 0
+    while i < half_n {
+        let k = 2 * i
+        // Periodic boundary indices
+        let k0 = k % n
+        let k1 = (k + 1) % n
+        let k2 = (k + 2) % n
+        let k3 = (k + 3) % n
+        let s0 = signal[k0 as usize]
+        let s1 = signal[k1 as usize]
+        let s2 = signal[k2 as usize]
+        let s3 = signal[k3 as usize]
+        out_approx[i as usize] = db4_h0_0() * s0 + db4_h0_1() * s1 + db4_h0_2() * s2 + db4_h0_3() * s3
+        out_detail[i as usize] = db4_h1_0() * s0 + db4_h1_1() * s1 + db4_h1_2() * s2 + db4_h1_3() * s3
+        i = i + 1
+    }
+    return half_n
+}
+
+// DB4 inverse DWT (single level, periodic boundary conditions)
+// approx[0..n-1], detail[0..n-1] → out[0..2*n-1]
+// Returns 2*n
+fn wav_db4_inverse(approx: [f64; 256], detail: [f64; 256], n: i64, out: &! [f64; 512]) -> i64 {
+    let len_out = 2 * n
+    // Initialize output to zero
+    var j: i64 = 0
+    while j < len_out {
+        out[j as usize] = 0.0
+        j = j + 1
+    }
+    // Accumulate contributions from each approximation and detail coefficient
+    var i: i64 = 0
+    while i < n {
+        let k = 2 * i
+        // Upsampling + synthesis filtering with periodic boundary
+        let k0 = k % len_out
+        let k1 = (k + 1) % len_out
+        let k2 = (k + 2) % len_out
+        let k3 = (k + 3) % len_out
+        let a = approx[i as usize]
+        let d = detail[i as usize]
+        out[k0 as usize] = out[k0 as usize] + db4_g0_0() * a + db4_g1_0() * d
+        out[k1 as usize] = out[k1 as usize] + db4_g0_1() * a + db4_g1_1() * d
+        out[k2 as usize] = out[k2 as usize] + db4_g0_2() * a + db4_g1_2() * d
+        out[k3 as usize] = out[k3 as usize] + db4_g0_3() * a + db4_g1_3() * d
+        i = i + 1
+    }
+    return len_out
+}
+
+// ============================================================================
+// MULTI-LEVEL DWT (Haar, cascaded on approximation sub-bands)
+//
+// Level 1: n-point signal → (A1: n/2, D1: n/2)
+// Level 2: A1 → (A2: n/4, D2: n/4)
+// Level 3: A2 → (A3: n/8, D3: n/8)
+//
+// The wavelet packet coefficients are stored in separate arrays.
+// ============================================================================
+
+struct Wav2LevelHaar {
+    approx2: [f64; 128],   // 2nd-level approximation (n/4 coefficients)
+    detail2: [f64; 128],   // 2nd-level detail (n/4 coefficients)
+    detail1: [f64; 256],   // 1st-level detail (n/2 coefficients)
+    n2: i64,               // n/4
+    n1: i64,               // n/2
+}
+
+fn wav_haar_forward_2level(signal: [f64; 512], n: i64) -> Wav2LevelHaar {
+    // Level 1
+    var approx1: [f64; 256] = [0.0; 256]
+    var detail1: [f64; 256] = [0.0; 256]
+    let n1 = wav_haar_forward(signal, n, &! approx1, &! detail1)
+
+    // Level 2: transform approx1
+    var approx2: [f64; 128] = [0.0; 128]
+    var detail2: [f64; 128] = [0.0; 128]
+
+    // Copy approx1 into a 512-padded array for the forward function
+    var approx1_pad: [f64; 512] = [0.0; 512]
+    var k: i64 = 0
+    while k < n1 {
+        approx1_pad[k as usize] = approx1[k as usize]
+        k = k + 1
+    }
+
+    // Haar level 2
+    let inv_sqrt2 = 0.70710678118654752440
+    let n2 = n1 / 2
+    var i: i64 = 0
+    while i < n2 {
+        let a = approx1[( 2 * i) as usize]
+        let b = approx1[(2 * i + 1) as usize]
+        approx2[i as usize] = (a + b) * inv_sqrt2
+        detail2[i as usize] = (a - b) * inv_sqrt2
+        i = i + 1
+    }
+
+    // Build result struct
+    var result = Wav2LevelHaar {
+        approx2: [0.0; 128],
+        detail2: [0.0; 128],
+        detail1: [0.0; 256],
+        n2: n2,
+        n1: n1,
+    }
+    i = 0
+    while i < n2 {
+        result.approx2[i as usize] = approx2[i as usize]
+        result.detail2[i as usize] = detail2[i as usize]
+        i = i + 1
+    }
+    i = 0
+    while i < n1 {
+        result.detail1[i as usize] = detail1[i as usize]
+        i = i + 1
+    }
+    return result
+}
+
+// 2-level Haar inverse
+fn wav_haar_inverse_2level(decomp: Wav2LevelHaar, out: &! [f64; 512]) -> i64 {
+    // Reconstruct approx1 from (approx2, detail2)
+    let inv_sqrt2 = 0.70710678118654752440
+    let n2 = decomp.n2
+    let n1 = decomp.n1
+
+    var approx1: [f64; 256] = [0.0; 256]
+    var i: i64 = 0
+    while i < n2 {
+        let a = decomp.approx2[i as usize]
+        let d = decomp.detail2[i as usize]
+        approx1[(2 * i) as usize] = (a + d) * inv_sqrt2
+        approx1[(2 * i + 1) as usize] = (a - d) * inv_sqrt2
+        i = i + 1
+    }
+
+    // Reconstruct full signal from (approx1, detail1)
+    i = 0
+    while i < n1 {
+        let a = approx1[i as usize]
+        let d = decomp.detail1[i as usize]
+        out[(2 * i) as usize] = (a + d) * inv_sqrt2
+        out[(2 * i + 1) as usize] = (a - d) * inv_sqrt2
+        i = i + 1
+    }
+    return 2 * n1
+}
+
+// ============================================================================
+// WAVELET DENOISING PIPELINE
+//
+// Standard pipeline (Donoho & Johnstone, 1994):
+//   1. Forward DWT
+//   2. Threshold detail coefficients (keep approximation unchanged)
+//   3. Inverse DWT
+// ============================================================================
+
+// Denoise signal using Haar DWT + hard threshold on detail coefficients
+// thresh: threshold value (e.g., sigma * sqrt(2 * log(n)))
+// Returns reconstructed (denoised) signal via out
+fn wav_denoise_haar_hard(signal: [f64; 512], n: i64, thresh: f64, out: &! [f64; 512]) -> i64 {
+    var approx: [f64; 256] = [0.0; 256]
+    var detail: [f64; 256] = [0.0; 256]
+    let half_n = wav_haar_forward(signal, n, &! approx, &! detail)
+    // Threshold detail inline (avoids double &! borrow)
+    var i: i64 = 0
+    while i < half_n {
+        let v = detail[i as usize]
+        if wav_f64_abs(v) < thresh { detail[i as usize] = 0.0 }
+        i = i + 1
+    }
+    // Reconstruct
+    return wav_haar_inverse(approx, detail, half_n, out)
+}
+
+// Denoise signal using Haar DWT + soft threshold on detail coefficients
+fn wav_denoise_haar_soft(signal: [f64; 512], n: i64, thresh: f64, out: &! [f64; 512]) -> i64 {
+    var approx: [f64; 256] = [0.0; 256]
+    var detail: [f64; 256] = [0.0; 256]
+    let half_n = wav_haar_forward(signal, n, &! approx, &! detail)
+    // Soft threshold inline (avoids double &! borrow)
+    var i: i64 = 0
+    while i < half_n {
+        let v = detail[i as usize]
+        let av = wav_f64_abs(v)
+        if av <= thresh {
+            detail[i as usize] = 0.0
+        } else {
+            if v > 0.0 {
+                detail[i as usize] = av - thresh
+            } else {
+                detail[i as usize] = 0.0 - (av - thresh)
+            }
+        }
+        i = i + 1
+    }
+    return wav_haar_inverse(approx, detail, half_n, out)
+}
+
+// ============================================================================
+// UTILITY: MAXIMUM ABSOLUTE COEFFICIENT
+// ============================================================================
+
+fn wav_max_coeff(signal: [f64; 256], n: i64) -> f64 {
+    var mx = 0.0
+    var i: i64 = 0
+    while i < n {
+        let v = wav_f64_abs(signal[i as usize])
+        if v > mx { mx = v }
+        i = i + 1
+    }
+    return mx
+}
+
+fn wav_max_coeff_512(signal: [f64; 512], n: i64) -> f64 {
+    var mx = 0.0
+    var i: i64 = 0
+    while i < n {
+        let v = wav_f64_abs(signal[i as usize])
+        if v > mx { mx = v }
+        i = i + 1
+    }
+    return mx
+}
+
+// ============================================================================
+// TESTS
+// ============================================================================
+
+fn wav_approx_eq(a: f64, b: f64, tol: f64) -> bool {
+    wav_f64_abs(a - b) < tol
+}
+
+// --- Math helper tests ---
+
+fn test_wav_abs() -> bool {
+    if wav_f64_abs(3.5) != 3.5 { return false }
+    if wav_f64_abs(0.0 - 2.7) != 2.7 { return false }
+    if wav_f64_abs(0.0) != 0.0 { return false }
+    return true
+}
+
+fn test_wav_sqrt() -> bool {
+    if wav_f64_abs(wav_sqrt(4.0) - 2.0) > 1.0e-10 { return false }
+    if wav_f64_abs(wav_sqrt(2.0) - 1.41421356237) > 1.0e-8 { return false }
+    if wav_sqrt(0.0) != 0.0 { return false }
+    if wav_f64_abs(wav_sqrt(9.0) - 3.0) > 1.0e-10 { return false }
+    return true
+}
+
+fn test_wav_log10() -> bool {
+    // log10(1) = 0
+    if wav_f64_abs(wav_log10(1.0)) > 1.0e-6 { return false }
+    // log10(10) = 1
+    if wav_f64_abs(wav_log10(10.0) - 1.0) > 1.0e-6 { return false }
+    // log10(100) = 2
+    if wav_f64_abs(wav_log10(100.0) - 2.0) > 1.0e-6 { return false }
+    // log10(0.1) = -1
+    if wav_f64_abs(wav_log10(0.1) - (0.0 - 1.0)) > 1.0e-5 { return false }
+    return true
+}
+
+fn test_wav_max_min() -> bool {
+    if wav_f64_max(1.0, 3.0) != 3.0 { return false }
+    if wav_f64_max(5.0, 2.0) != 5.0 { return false }
+    if wav_f64_min(1.0, 3.0) != 1.0 { return false }
+    if wav_f64_min(5.0, 2.0) != 2.0 { return false }
+    return true
+}
+
+// --- Haar filter constants tests ---
+
+fn test_haar_sqrt2_identity() -> bool {
+    // inv_sqrt2 * sqrt(2) should be 1
+    let inv_sqrt2 = 0.70710678118654752440
+    let sqrt2 = 1.41421356237309504880
+    return wav_f64_abs(inv_sqrt2 * sqrt2 - 1.0) < 1.0e-10
+}
+
+fn test_haar_orthogonality() -> bool {
+    // Haar scaling filter h0 = [1/sqrt2, 1/sqrt2]
+    // Wavelet filter h1 = [1/sqrt2, -1/sqrt2]
+    // h0 · h1 should be 0 (orthogonality)
+    let inv_sqrt2 = 0.70710678118654752440
+    let dot = inv_sqrt2 * inv_sqrt2 + inv_sqrt2 * (0.0 - inv_sqrt2)
+    return wav_f64_abs(dot) < 1.0e-15
+}
+
+fn test_haar_norm() -> bool {
+    // ||h0||^2 = 1 (unit norm for orthonormal filter)
+    let inv_sqrt2 = 0.70710678118654752440
+    let norm_sq = inv_sqrt2 * inv_sqrt2 + inv_sqrt2 * inv_sqrt2
+    return wav_f64_abs(norm_sq - 1.0) < 1.0e-15
+}
+
+// --- Haar forward transform tests ---
+
+fn test_haar_fwd_constant_signal() -> bool {
+    // Constant signal [c, c, c, ...]: approx = c*sqrt(2), detail = 0
+    var sig: [f64; 512] = [0.0; 512]
+    let c = 3.0
+    var i: i64 = 0
+    while i < 8 {
+        sig[i as usize] = c
+        i = i + 1
+    }
+    var approx: [f64; 256] = [0.0; 256]
+    var detail: [f64; 256] = [0.0; 256]
+    let half = wav_haar_forward(sig, 8, &! approx, &! detail)
+    // approx[i] = (c + c) / sqrt(2) = c * sqrt(2)
+    let sqrt2_c = c * 1.41421356237309504880
+    if half != 4 { return false }
+    i = 0
+    while i < 4 {
+        if wav_f64_abs(approx[i as usize] - sqrt2_c) > 1.0e-10 { return false }
+        if wav_f64_abs(detail[i as usize]) > 1.0e-15 { return false }
+        i = i + 1
+    }
+    return true
+}
+
+fn test_haar_fwd_alternating_signal() -> bool {
+    // Alternating signal [a, -a, a, -a, ...]: approx = 0, detail = a*sqrt(2)
+    var sig: [f64; 512] = [0.0; 512]
+    let a = 2.0
+    var i: i64 = 0
+    while i < 8 {
+        if i % 2 == 0 { sig[i as usize] = a } else { sig[i as usize] = 0.0 - a }
+        i = i + 1
+    }
+    var approx: [f64; 256] = [0.0; 256]
+    var detail: [f64; 256] = [0.0; 256]
+    let half = wav_haar_forward(sig, 8, &! approx, &! detail)
+    let sqrt2_a = a * 1.41421356237309504880
+    i = 0
+    while i < 4 {
+        if wav_f64_abs(approx[i as usize]) > 1.0e-15 { return false }
+        if wav_f64_abs(detail[i as usize] - sqrt2_a) > 1.0e-10 { return false }
+        i = i + 1
+    }
+    return true
+}
+
+fn test_haar_fwd_output_len() -> bool {
+    var sig: [f64; 512] = [0.0; 512]
+    var approx: [f64; 256] = [0.0; 256]
+    var detail: [f64; 256] = [0.0; 256]
+    let half = wav_haar_forward(sig, 16, &! approx, &! detail)
+    return half == 8
+}
+
+fn test_haar_fwd_single_pair() -> bool {
+    // n=2: one forward step on [3, 5]
+    // approx = (3+5)/sqrt2 = 8/sqrt2 ≈ 5.6569
+    // detail = (3-5)/sqrt2 = -2/sqrt2 ≈ -1.4142
+    var sig: [f64; 512] = [0.0; 512]
+    sig[0] = 3.0
+    sig[1] = 5.0
+    var approx: [f64; 256] = [0.0; 256]
+    var detail: [f64; 256] = [0.0; 256]
+    let half = wav_haar_forward(sig, 2, &! approx, &! detail)
+    let inv_sqrt2 = 0.70710678118654752440
+    let expected_a = 8.0 * inv_sqrt2
+    let expected_d = (0.0 - 2.0) * inv_sqrt2
+    return half == 1
+        && wav_f64_abs(approx[0] - expected_a) < 1.0e-12
+        && wav_f64_abs(detail[0] - expected_d) < 1.0e-12
+}
+
+// --- Haar inverse transform tests ---
+
+fn test_haar_inv_constant_approx() -> bool {
+    // All approx = c*sqrt2, all detail = 0 → reconstructed = [c, c, ...]
+    let c = 3.0
+    let sqrt2_c = c * 1.41421356237309504880
+    var approx: [f64; 256] = [0.0; 256]
+    var detail: [f64; 256] = [0.0; 256]
+    var i: i64 = 0
+    while i < 4 {
+        approx[i as usize] = sqrt2_c
+        detail[i as usize] = 0.0
+        i = i + 1
+    }
+    var recon: [f64; 512] = [0.0; 512]
+    let len = wav_haar_inverse(approx, detail, 4, &! recon)
+    if len != 8 { return false }
+    i = 0
+    while i < 8 {
+        if wav_f64_abs(recon[i as usize] - c) > 1.0e-10 { return false }
+        i = i + 1
+    }
+    return true
+}
+
+fn test_haar_inv_output_len() -> bool {
+    var approx: [f64; 256] = [0.0; 256]
+    var detail: [f64; 256] = [0.0; 256]
+    var out: [f64; 512] = [0.0; 512]
+    let len = wav_haar_inverse(approx, detail, 8, &! out)
+    return len == 16
+}
+
+fn test_haar_inv_single_pair() -> bool {
+    // Inverse of single pair: approx=A, detail=D → [A+D, A-D] / sqrt2
+    let a = 5.0
+    let d = 2.0
+    var approx: [f64; 256] = [0.0; 256]
+    var detail: [f64; 256] = [0.0; 256]
+    approx[0] = a
+    detail[0] = d
+    var out: [f64; 512] = [0.0; 512]
+    let len = wav_haar_inverse(approx, detail, 1, &! out)
+    let inv_sqrt2 = 0.70710678118654752440
+    return len == 2
+        && wav_f64_abs(out[0] - (a + d) * inv_sqrt2) < 1.0e-12
+        && wav_f64_abs(out[1] - (a - d) * inv_sqrt2) < 1.0e-12
+}
+
+// --- Roundtrip (perfect reconstruction) tests ---
+
+fn test_haar_roundtrip_constant() -> bool {
+    // Constant signal: fwd → inv should give back original
+    var sig: [f64; 512] = [0.0; 512]
+    var i: i64 = 0
+    while i < 32 {
+        sig[i as usize] = 7.0
+        i = i + 1
+    }
+    var approx: [f64; 256] = [0.0; 256]
+    var detail: [f64; 256] = [0.0; 256]
+    let half = wav_haar_forward(sig, 32, &! approx, &! detail)
+    var recon: [f64; 512] = [0.0; 512]
+    let _len = wav_haar_inverse(approx, detail, half, &! recon)
+    i = 0
+    while i < 32 {
+        if wav_f64_abs(recon[i as usize] - 7.0) > 1.0e-12 { return false }
+        i = i + 1
+    }
+    return true
+}
+
+fn test_haar_roundtrip_linear() -> bool {
+    // Linear signal: [0, 1, 2, ..., 15]
+    var sig: [f64; 512] = [0.0; 512]
+    var i: i64 = 0
+    while i < 16 {
+        sig[i as usize] = i as f64
+        i = i + 1
+    }
+    var approx: [f64; 256] = [0.0; 256]
+    var detail: [f64; 256] = [0.0; 256]
+    let half = wav_haar_forward(sig, 16, &! approx, &! detail)
+    var recon: [f64; 512] = [0.0; 512]
+    let _len = wav_haar_inverse(approx, detail, half, &! recon)
+    i = 0
+    while i < 16 {
+        if wav_f64_abs(recon[i as usize] - (i as f64)) > 1.0e-12 { return false }
+        i = i + 1
+    }
+    return true
+}
+
+fn test_haar_roundtrip_random_like() -> bool {
+    // Pseudo-random signal via simple recurrence
+    var sig: [f64; 512] = [0.0; 512]
+    sig[0] = 1.7
+    var i: i64 = 1
+    while i < 64 {
+        sig[i as usize] = sig[(i-1) as usize] * 1.3 + 0.7
+        if sig[i as usize] > 10.0 { sig[i as usize] = sig[i as usize] - 10.0 }
+        i = i + 1
+    }
+    var approx: [f64; 256] = [0.0; 256]
+    var detail: [f64; 256] = [0.0; 256]
+    let half = wav_haar_forward(sig, 64, &! approx, &! detail)
+    var recon: [f64; 512] = [0.0; 512]
+    let _len = wav_haar_inverse(approx, detail, half, &! recon)
+    i = 0
+    var max_err = 0.0
+    while i < 64 {
+        let e = wav_f64_abs(recon[i as usize] - sig[i as usize])
+        if e > max_err { max_err = e }
+        i = i + 1
+    }
+    return max_err < 1.0e-10
+}
+
+fn test_haar_roundtrip_n128() -> bool {
+    var sig: [f64; 512] = [0.0; 512]
+    var i: i64 = 0
+    while i < 128 {
+        sig[i as usize] = (i as f64) * 0.1 + 1.0
+        i = i + 1
+    }
+    var approx: [f64; 256] = [0.0; 256]
+    var detail: [f64; 256] = [0.0; 256]
+    let half = wav_haar_forward(sig, 128, &! approx, &! detail)
+    var recon: [f64; 512] = [0.0; 512]
+    let _len = wav_haar_inverse(approx, detail, half, &! recon)
+    i = 0
+    while i < 128 {
+        if wav_f64_abs(recon[i as usize] - sig[i as usize]) > 1.0e-10 { return false }
+        i = i + 1
+    }
+    return true
+}
+
+fn test_haar_roundtrip_n512() -> bool {
+    var sig: [f64; 512] = [0.0; 512]
+    var i: i64 = 0
+    while i < 512 {
+        sig[i as usize] = (i as f64) * 0.01
+        i = i + 1
+    }
+    var approx: [f64; 256] = [0.0; 256]
+    var detail: [f64; 256] = [0.0; 256]
+    let half = wav_haar_forward(sig, 512, &! approx, &! detail)
+    var recon: [f64; 512] = [0.0; 512]
+    let _len = wav_haar_inverse(approx, detail, half, &! recon)
+    i = 0
+    while i < 512 {
+        if wav_f64_abs(recon[i as usize] - sig[i as usize]) > 1.0e-10 { return false }
+        i = i + 1
+    }
+    return true
+}
+
+// --- Energy preservation tests (Parseval's theorem) ---
+
+fn test_haar_energy_preserved_constant() -> bool {
+    var sig: [f64; 512] = [0.0; 512]
+    var i: i64 = 0
+    while i < 16 {
+        sig[i as usize] = 2.0
+        i = i + 1
+    }
+    let e_before = wav_energy(sig, 16)
+    var approx: [f64; 256] = [0.0; 256]
+    var detail: [f64; 256] = [0.0; 256]
+    let half = wav_haar_forward(sig, 16, &! approx, &! detail)
+    let e_approx = wav_energy_256(approx, half)
+    let e_detail = wav_energy_256(detail, half)
+    let e_after = e_approx + e_detail
+    return wav_f64_abs(e_before - e_after) / e_before < 1.0e-12
+}
+
+fn test_haar_energy_preserved_mixed() -> bool {
+    var sig: [f64; 512] = [0.0; 512]
+    var i: i64 = 0
+    while i < 32 {
+        // Mix of 1s and 2s
+        if i % 3 == 0 { sig[i as usize] = 1.0 } else { sig[i as usize] = 2.0 }
+        i = i + 1
+    }
+    let e_before = wav_energy(sig, 32)
+    var approx: [f64; 256] = [0.0; 256]
+    var detail: [f64; 256] = [0.0; 256]
+    let half = wav_haar_forward(sig, 32, &! approx, &! detail)
+    let e_after = wav_energy_256(approx, half) + wav_energy_256(detail, half)
+    return wav_f64_abs(e_before - e_after) / e_before < 1.0e-12
+}
+
+fn test_haar_energy_preserved_n64() -> bool {
+    var sig: [f64; 512] = [0.0; 512]
+    var i: i64 = 0
+    while i < 64 {
+        sig[i as usize] = (i as f64) * 0.5 + 0.1
+        i = i + 1
+    }
+    let e_before = wav_energy(sig, 64)
+    var approx: [f64; 256] = [0.0; 256]
+    var detail: [f64; 256] = [0.0; 256]
+    let half = wav_haar_forward(sig, 64, &! approx, &! detail)
+    let e_after = wav_energy_256(approx, half) + wav_energy_256(detail, half)
+    return wav_f64_abs(e_before - e_after) / e_before < 1.0e-12
+}
+
+// --- Thresholding tests ---
+
+fn test_hard_threshold_all_zero() -> bool {
+    // thresh > all values → all zeroed
+    var detail: [f64; 256] = [0.0; 256]
+    var i: i64 = 0
+    while i < 8 {
+        detail[i as usize] = 0.1 * (i as f64)
+        i = i + 1
+    }
+    let surviving = wav_threshold_hard(&! detail, 8, 1.0)
+    // 0.7 < 1.0, 0.8 < 1.0, 0.9 < 1.0 — all < 1.0 so all zeroed
+    return surviving == 0
+}
+
+fn test_hard_threshold_none_zero() -> bool {
+    // thresh = 0 → none zeroed
+    var detail: [f64; 256] = [0.0; 256]
+    var i: i64 = 0
+    while i < 8 {
+        detail[i as usize] = (i as f64) + 1.0  // 1..8
+        i = i + 1
+    }
+    let surviving = wav_threshold_hard(&! detail, 8, 0.0)
+    return surviving == 8
+}
+
+fn test_hard_threshold_partial() -> bool {
+    var detail: [f64; 256] = [0.0; 256]
+    detail[0] = 0.5
+    detail[1] = 1.5
+    detail[2] = 2.5
+    detail[3] = 0.3
+    let surviving = wav_threshold_hard(&! detail, 4, 1.0)
+    // |0.5| < 1 → 0, |1.5| >= 1 → keep, |2.5| >= 1 → keep, |0.3| < 1 → 0
+    return surviving == 2
+        && wav_f64_abs(detail[0]) < 1.0e-15
+        && wav_f64_abs(detail[1] - 1.5) < 1.0e-15
+        && wav_f64_abs(detail[2] - 2.5) < 1.0e-15
+        && wav_f64_abs(detail[3]) < 1.0e-15
+}
+
+fn test_hard_threshold_values_unchanged() -> bool {
+    // Values above threshold should not change
+    var detail: [f64; 256] = [0.0; 256]
+    detail[0] = 5.5
+    detail[1] = 0.0 - 3.2
+    let _s = wav_threshold_hard(&! detail, 2, 1.0)
+    return wav_f64_abs(detail[0] - 5.5) < 1.0e-15
+        && wav_f64_abs(detail[1] - (0.0 - 3.2)) < 1.0e-15
+}
+
+fn test_soft_threshold_shrinkage() -> bool {
+    // Soft threshold with thresh=1.0 on [0.5, 1.5, 2.5, -2.0]
+    var detail: [f64; 256] = [0.0; 256]
+    detail[0] = 0.5
+    detail[1] = 1.5
+    detail[2] = 2.5
+    detail[3] = 0.0 - 2.0
+    let _s = wav_threshold_soft(&! detail, 4, 1.0)
+    // |0.5| <= 1 → 0; 1.5-1=0.5; 2.5-1=1.5; |-2.0|-1=1.0 → -1.0
+    return wav_f64_abs(detail[0]) < 1.0e-15
+        && wav_f64_abs(detail[1] - 0.5) < 1.0e-15
+        && wav_f64_abs(detail[2] - 1.5) < 1.0e-15
+        && wav_f64_abs(detail[3] - (0.0 - 1.0)) < 1.0e-15
+}
+
+fn test_soft_threshold_zero_thresh() -> bool {
+    // thresh=0 → no change except small values
+    var detail: [f64; 256] = [0.0; 256]
+    detail[0] = 3.0
+    detail[1] = 0.0 - 2.0
+    let surviving = wav_threshold_soft(&! detail, 2, 0.0)
+    // |3.0| > 0 → 3.0 - 0 = 3.0; |-2.0| > 0 → -2.0+0 = -2.0
+    return surviving == 2
+        && wav_f64_abs(detail[0] - 3.0) < 1.0e-15
+        && wav_f64_abs(detail[1] - (0.0 - 2.0)) < 1.0e-15
+}
+
+fn test_soft_threshold_all_zero_result() -> bool {
+    var detail: [f64; 256] = [0.0; 256]
+    detail[0] = 0.5
+    detail[1] = 0.0 - 0.3
+    let surviving = wav_threshold_soft(&! detail, 2, 1.0)
+    return surviving == 0
+        && wav_f64_abs(detail[0]) < 1.0e-15
+        && wav_f64_abs(detail[1]) < 1.0e-15
+}
+
+fn test_soft_vs_hard_threshold() -> bool {
+    // Soft should always have smaller or equal magnitude than hard
+    var det_soft: [f64; 256] = [0.0; 256]
+    var det_hard: [f64; 256] = [0.0; 256]
+    var i: i64 = 0
+    while i < 8 {
+        let v = (i as f64) * 0.5 + 0.2
+        det_soft[i as usize] = v
+        det_hard[i as usize] = v
+        i = i + 1
+    }
+    let thresh = 1.0
+    let _ss = wav_threshold_soft(&! det_soft, 8, thresh)
+    let _sh = wav_threshold_hard(&! det_hard, 8, thresh)
+    i = 0
+    while i < 8 {
+        if wav_f64_abs(det_soft[i as usize]) > wav_f64_abs(det_hard[i as usize]) + 1.0e-12 { return false }
+        i = i + 1
+    }
+    return true
+}
+
+// --- Energy function tests ---
+
+fn test_energy_zero_signal() -> bool {
+    var sig: [f64; 512] = [0.0; 512]
+    let e = wav_energy(sig, 64)
+    return wav_f64_abs(e) < 1.0e-15
+}
+
+fn test_energy_unit_signal() -> bool {
+    var sig: [f64; 512] = [0.0; 512]
+    var i: i64 = 0
+    while i < 16 {
+        sig[i as usize] = 1.0
+        i = i + 1
+    }
+    let e = wav_energy(sig, 16)
+    return wav_f64_abs(e - 16.0) < 1.0e-12
+}
+
+fn test_energy_known_value() -> bool {
+    // Signal [3, 4]: energy = 9 + 16 = 25
+    var sig: [f64; 512] = [0.0; 512]
+    sig[0] = 3.0
+    sig[1] = 4.0
+    let e = wav_energy(sig, 2)
+    return wav_f64_abs(e - 25.0) < 1.0e-12
+}
+
+fn test_energy_sqrt_is_norm() -> bool {
+    // ||signal|| = sqrt(energy)
+    var sig: [f64; 512] = [0.0; 512]
+    sig[0] = 3.0
+    sig[1] = 4.0
+    let norm = wav_sqrt(wav_energy(sig, 2))
+    return wav_f64_abs(norm - 5.0) < 1.0e-10
+}
+
+// --- SNR tests ---
+
+fn test_snr_perfect_reconstruction() -> bool {
+    var orig: [f64; 512] = [0.0; 512]
+    var recon: [f64; 512] = [0.0; 512]
+    var i: i64 = 0
+    while i < 16 {
+        orig[i as usize] = (i as f64) + 1.0
+        recon[i as usize] = (i as f64) + 1.0
+        i = i + 1
+    }
+    let snr = wav_snr(orig, recon, 16)
+    return snr > 900.0  // Should be effectively infinite (we cap at 1000 dB)
+}
+
+fn test_snr_finite_error() -> bool {
+    var orig: [f64; 512] = [0.0; 512]
+    var recon: [f64; 512] = [0.0; 512]
+    var i: i64 = 0
+    while i < 16 {
+        orig[i as usize] = 1.0
+        recon[i as usize] = 1.0 + 0.01  // Small error
+        i = i + 1
+    }
+    let snr = wav_snr(orig, recon, 16)
+    // SNR = 10*log10(energy/noise) = 10*log10(16/(16*0.0001)) = 10*log10(10000) = 40 dB
+    return snr > 35.0 && snr < 45.0
+}
+
+fn test_snr_positive() -> bool {
+    var orig: [f64; 512] = [0.0; 512]
+    var recon: [f64; 512] = [0.0; 512]
+    var i: i64 = 0
+    while i < 8 {
+        orig[i as usize] = 5.0
+        recon[i as usize] = 4.5
+        i = i + 1
+    }
+    let snr = wav_snr(orig, recon, 8)
+    return snr > 0.0
+}
+
+fn test_snr_decreases_with_more_noise() -> bool {
+    var orig: [f64; 512] = [0.0; 512]
+    var i: i64 = 0
+    while i < 16 {
+        orig[i as usize] = 1.0
+        i = i + 1
+    }
+    // Small noise
+    var recon_small: [f64; 512] = [0.0; 512]
+    i = 0
+    while i < 16 {
+        recon_small[i as usize] = 1.0 + 0.001
+        i = i + 1
+    }
+    // Large noise
+    var recon_large: [f64; 512] = [0.0; 512]
+    i = 0
+    while i < 16 {
+        recon_large[i as usize] = 1.0 + 0.1
+        i = i + 1
+    }
+    let snr_small = wav_snr(orig, recon_small, 16)
+    let snr_large = wav_snr(orig, recon_large, 16)
+    return snr_small > snr_large
+}
+
+// --- DB4 filter coefficient tests ---
+
+fn test_db4_filter_norm() -> bool {
+    // ||h0||^2 = 1 for orthonormal filter
+    let h0 = db4_h0_0() * db4_h0_0() + db4_h0_1() * db4_h0_1() + db4_h0_2() * db4_h0_2() + db4_h0_3() * db4_h0_3()
+    return wav_f64_abs(h0 - 1.0) < 1.0e-12
+}
+
+fn test_db4_filter_h1_norm() -> bool {
+    let h1 = db4_h1_0() * db4_h1_0() + db4_h1_1() * db4_h1_1() + db4_h1_2() * db4_h1_2() + db4_h1_3() * db4_h1_3()
+    return wav_f64_abs(h1 - 1.0) < 1.0e-12
+}
+
+fn test_db4_filter_orthogonality() -> bool {
+    // h0 · h1 = 0 (orthogonality of filters)
+    let dot = db4_h0_0() * db4_h1_0() + db4_h0_1() * db4_h1_1() + db4_h0_2() * db4_h1_2() + db4_h0_3() * db4_h1_3()
+    return wav_f64_abs(dot) < 1.0e-12
+}
+
+fn test_db4_synthesis_norm() -> bool {
+    let g0 = db4_g0_0() * db4_g0_0() + db4_g0_1() * db4_g0_1() + db4_g0_2() * db4_g0_2() + db4_g0_3() * db4_g0_3()
+    return wav_f64_abs(g0 - 1.0) < 1.0e-12
+}
+
+fn test_db4_vanishing_moments() -> bool {
+    // h0 · [1, 1, 1, 1] = sqrt(2) (sum of scaling filter)
+    let sum_h0 = db4_h0_0() + db4_h0_1() + db4_h0_2() + db4_h0_3()
+    let sqrt2 = 1.41421356237309504880
+    return wav_f64_abs(sum_h0 - sqrt2) < 1.0e-12
+}
+
+fn test_db4_wavelet_sum_zero() -> bool {
+    // h1 · [1, 1, 1, 1] = 0 (first vanishing moment)
+    let sum_h1 = db4_h1_0() + db4_h1_1() + db4_h1_2() + db4_h1_3()
+    return wav_f64_abs(sum_h1) < 1.0e-12
+}
+
+// --- DB4 forward/inverse tests ---
+
+fn test_db4_fwd_output_len() -> bool {
+    var sig: [f64; 512] = [0.0; 512]
+    var approx: [f64; 256] = [0.0; 256]
+    var detail: [f64; 256] = [0.0; 256]
+    let half = wav_db4_forward(sig, 16, &! approx, &! detail)
+    return half == 8
+}
+
+fn test_db4_inv_output_len() -> bool {
+    var approx: [f64; 256] = [0.0; 256]
+    var detail: [f64; 256] = [0.0; 256]
+    var out: [f64; 512] = [0.0; 512]
+    let len = wav_db4_inverse(approx, detail, 8, &! out)
+    return len == 16
+}
+
+fn test_db4_roundtrip_constant() -> bool {
+    // Constant signal: DB4 fwd → inv should reconstruct well
+    var sig: [f64; 512] = [0.0; 512]
+    var i: i64 = 0
+    while i < 16 {
+        sig[i as usize] = 3.0
+        i = i + 1
+    }
+    var approx: [f64; 256] = [0.0; 256]
+    var detail: [f64; 256] = [0.0; 256]
+    let half = wav_db4_forward(sig, 16, &! approx, &! detail)
+    var recon: [f64; 512] = [0.0; 512]
+    let _len = wav_db4_inverse(approx, detail, half, &! recon)
+    i = 0
+    var max_err = 0.0
+    while i < 16 {
+        let e = wav_f64_abs(recon[i as usize] - 3.0)
+        if e > max_err { max_err = e }
+        i = i + 1
+    }
+    return max_err < 1.0e-10
+}
+
+fn test_db4_roundtrip_n32() -> bool {
+    var sig: [f64; 512] = [0.0; 512]
+    var i: i64 = 0
+    while i < 32 {
+        sig[i as usize] = (i as f64) * 0.3 + 1.0
+        i = i + 1
+    }
+    var approx: [f64; 256] = [0.0; 256]
+    var detail: [f64; 256] = [0.0; 256]
+    let half = wav_db4_forward(sig, 32, &! approx, &! detail)
+    var recon: [f64; 512] = [0.0; 512]
+    let _len = wav_db4_inverse(approx, detail, half, &! recon)
+    i = 0
+    var max_err = 0.0
+    while i < 32 {
+        let e = wav_f64_abs(recon[i as usize] - sig[i as usize])
+        if e > max_err { max_err = e }
+        i = i + 1
+    }
+    return max_err < 1.0e-10
+}
+
+// --- Multi-level tests ---
+
+fn test_2level_roundtrip() -> bool {
+    var sig: [f64; 512] = [0.0; 512]
+    var i: i64 = 0
+    while i < 64 {
+        sig[i as usize] = (i as f64) * 0.1 + 2.0
+        i = i + 1
+    }
+    let decomp = wav_haar_forward_2level(sig, 64)
+    var recon: [f64; 512] = [0.0; 512]
+    let _len = wav_haar_inverse_2level(decomp, &! recon)
+    i = 0
+    var max_err = 0.0
+    while i < 64 {
+        let e = wav_f64_abs(recon[i as usize] - sig[i as usize])
+        if e > max_err { max_err = e }
+        i = i + 1
+    }
+    return max_err < 1.0e-10
+}
+
+fn test_2level_approx_n() -> bool {
+    var sig: [f64; 512] = [0.0; 512]
+    let decomp = wav_haar_forward_2level(sig, 32)
+    return decomp.n2 == 8 && decomp.n1 == 16
+}
+
+// --- Denoising pipeline tests ---
+
+fn test_denoise_hard_constant_signal_survives() -> bool {
+    // Constant signal: all detail = 0, threshold doesn't affect approx
+    var sig: [f64; 512] = [0.0; 512]
+    var i: i64 = 0
+    while i < 16 {
+        sig[i as usize] = 5.0
+        i = i + 1
+    }
+    var out: [f64; 512] = [0.0; 512]
+    let _len = wav_denoise_haar_hard(sig, 16, 0.1, &! out)
+    // Constant signal has zero detail → thresholding doesn't affect reconstruction
+    i = 0
+    while i < 16 {
+        if wav_f64_abs(out[i as usize] - 5.0) > 1.0e-10 { return false }
+        i = i + 1
+    }
+    return true
+}
+
+fn test_denoise_soft_constant_signal_survives() -> bool {
+    var sig: [f64; 512] = [0.0; 512]
+    var i: i64 = 0
+    while i < 16 {
+        sig[i as usize] = 5.0
+        i = i + 1
+    }
+    var out: [f64; 512] = [0.0; 512]
+    let _len = wav_denoise_haar_soft(sig, 16, 0.1, &! out)
+    i = 0
+    while i < 16 {
+        if wav_f64_abs(out[i as usize] - 5.0) > 1.0e-10 { return false }
+        i = i + 1
+    }
+    return true
+}
+
+fn test_denoise_zero_thresh_is_identity() -> bool {
+    // Threshold of 0 → no coefficients removed → perfect reconstruction
+    var sig: [f64; 512] = [0.0; 512]
+    var i: i64 = 0
+    while i < 32 {
+        sig[i as usize] = (i as f64) * 0.5 + 1.0
+        i = i + 1
+    }
+    var out: [f64; 512] = [0.0; 512]
+    let _len = wav_denoise_haar_hard(sig, 32, 0.0, &! out)
+    i = 0
+    while i < 32 {
+        if wav_f64_abs(out[i as usize] - sig[i as usize]) > 1.0e-10 { return false }
+        i = i + 1
+    }
+    return true
+}
+
+fn test_denoise_reduces_energy_for_noisy_signal() -> bool {
+    // Noisy signal: after hard threshold, energy should not exceed original
+    var sig: [f64; 512] = [0.0; 512]
+    var i: i64 = 0
+    while i < 64 {
+        // Alternating high-frequency noise
+        if i % 2 == 0 {
+            sig[i as usize] = 1.0
+        } else {
+            sig[i as usize] = 0.0 - 1.0
+        }
+        i = i + 1
+    }
+    let e_before = wav_energy(sig, 64)
+    var out: [f64; 512] = [0.0; 512]
+    let _len = wav_denoise_haar_hard(sig, 64, 1.5, &! out)
+    let e_after = wav_energy(out, 64)
+    // Hard thresholding removes high-freq components → energy reduced
+    return e_after < e_before || wav_f64_abs(e_after - e_before) < 1.0e-10
+}
+
+// --- Max coefficient tests ---
+
+fn test_max_coeff_all_zero() -> bool {
+    var c: [f64; 256] = [0.0; 256]
+    return wav_f64_abs(wav_max_coeff(c, 8)) < 1.0e-15
+}
+
+fn test_max_coeff_positive() -> bool {
+    var c: [f64; 256] = [0.0; 256]
+    c[0] = 1.0
+    c[1] = 5.0
+    c[2] = 3.0
+    return wav_f64_abs(wav_max_coeff(c, 3) - 5.0) < 1.0e-12
+}
+
+fn test_max_coeff_negative() -> bool {
+    // Max absolute value, not max value
+    var c: [f64; 256] = [0.0; 256]
+    c[0] = 0.0 - 7.0
+    c[1] = 2.0
+    return wav_f64_abs(wav_max_coeff(c, 2) - 7.0) < 1.0e-12
+}

@@ -4,6 +4,26 @@
 // Pipeline: parse main → extract imports → load deps → resolve_modules
 //           → check all → lower all → merge IR → serialize
 
+// Horizon 2: wire parser/ast types via use import.
+// Cross-directory resolution works via the parent-dir fallback in the souc resolver.
+// Symbols from modules that still have unresolved deps are left as forward refs
+// (accepted by the self-hosted runtime's flat-bundle approach).
+use parser::ast::*
+use lexer::mod::*
+use ir::ir::*
+use check::types::*
+use check::mod::{check_program, CheckResult}
+use resolve::mod::{resolve_modules, ResolveBatchResult}
+use parser::mod::{parse_program_preloaded, count_items}
+use io::file_write::*
+use ir::lower::{lower_program_to_ir}
+use ir::serialize::{serialize_ir_module}
+use native::encode::*
+use native::elf::*
+use native::reloc::*
+use native::frame::*
+use native::codegen::*
+
 // ============================================================
 // Path conversion: AstPath segments → string
 // ============================================================
@@ -55,14 +75,62 @@ fn use_path_to_string(path: AstPath) -> string with Mut, Panic, Div, Alloc {
     buf_to_string(result_buf, result_len)
 }
 
+// Check if a StringList head segment is exactly "super" (115,117,112,101,114)
+fn seg_is_super(sl: StringList) -> bool {
+    if sl.head_len != 5 { return false }
+    sl.head_buf[0] == (115 as i8) &&
+    sl.head_buf[1] == (117 as i8) &&
+    sl.head_buf[2] == (112 as i8) &&
+    sl.head_buf[3] == (101 as i8) &&
+    sl.head_buf[4] == (114 as i8)
+}
+
+// Strip the last directory component from a path buffer.
+// "/a/b/c" -> "/a/b" (returns index of last '/')
+fn buf_strip_last_dir(buf: [i8; 512], len: i64) -> ([i8; 512], i64) with Mut, Panic, Div {
+    var i = len - 1
+    while i > 0 {
+        if buf[i as usize] == (47 as i8) {
+            return (buf, i)
+        }
+        i = i - 1
+    }
+    (buf, len)
+}
+
+// Process path segments into buf, handling "super" as parent-dir navigation.
+// Each non-super segment is appended as "/seg"; "super" strips the last dir component.
+fn use_path_segs_to_buf(sl: StringList, out: [i8; 512], pos: i64) -> ([i8; 512], i64) with Mut, Panic, Div, Alloc {
+    if seg_is_super(sl) {
+        let (stripped, new_pos) = buf_strip_last_dir(out, pos)
+        match sl.tail {
+            None => (stripped, new_pos)
+            Some(next) => use_path_segs_to_buf(*next, stripped, new_pos)
+        }
+    } else {
+        var buf2 = out
+        var p2 = pos
+        if p2 < 500 {
+            buf2[p2] = 47 as i8  // '/'
+            p2 = p2 + 1
+        }
+        let (buf3, p3) = string_list_seg_to_buf(sl, buf2, p2)
+        match sl.tail {
+            None => (buf3, p3)
+            Some(next) => use_path_segs_to_buf(*next, buf3, p3)
+        }
+    }
+}
+
 fn use_path_to_file_path(path: AstPath, prefix: string) -> string with Mut, Panic, Div, Alloc {
-    // Convert AstPath to "prefix/seg1/seg2/seg3.sio" file path
+    // Convert AstPath to "prefix/seg1/seg2/seg3.sio" file path.
+    // "super" segments navigate up one directory level.
     if path.seg_count == 0 {
         return ""
     }
     var buf: [i8; 512] = [0; 512]
     var pos: i64 = 0
-    // Write prefix bytes
+    // Write prefix bytes (no trailing slash — segments add their own leading slash)
     let prefix_len = str_len(prefix)
     var pi: i64 = 0
     while pi < prefix_len && pos < 490 {
@@ -70,13 +138,8 @@ fn use_path_to_file_path(path: AstPath, prefix: string) -> string with Mut, Pani
         pos = pos + 1
         pi = pi + 1
     }
-    // Add separator
-    if pos < 490 {
-        buf[pos] = 47 as i8  // '/'
-        pos = pos + 1
-    }
-    // Use / as separator (47 = '/', 0 = no second sep byte)
-    let (result_buf, result_len) = string_list_to_path_buf(path.segments, 47 as i8, 0 as i8, buf, pos)
+    // Process all segments (super-aware)
+    let (result_buf, result_len) = use_path_segs_to_buf(path.segments, buf, pos)
     // Append ".sio"
     var final_buf = result_buf
     var fp = result_len
@@ -293,12 +356,14 @@ fn load_multimodule_ir(main_path: string) -> MultiModuleIrResult with IO, Mut, D
     print_int(main_items)
     print(" items\n")
 
-    // Derive search base from main file's directory
-    let main_dir = path_directory(main_path)
-
     // Step 3: Load imported modules transitively (BFS with visited-set)
+    // file_paths[] is parallel to programs[] — stores each module's resolved path
+    // so transitive imports resolve relative to the importing module's directory,
+    // not the root file's directory.
     var programs: [Program; 64] = [empty_program(); 64]
+    var file_paths: [string; 64] = [""; 64]
     programs[0] = main_prog
+    file_paths[0] = main_path
     var loaded: i64 = 1
 
     // Visited set: tracks file paths already loaded to prevent re-loading and cycles
@@ -312,12 +377,14 @@ fn load_multimodule_ir(main_path: string) -> MultiModuleIrResult with IO, Mut, D
     var i: i64 = 0
 
     while work_front < loaded && loaded < 64 {
+        // Derive base directory from the module being processed (not the root file)
+        let cur_dir = path_directory(file_paths[work_front])
         let work_imports = extract_imports_from_ast(programs[work_front])
         work_front = work_front + 1
 
         i = 0
         while i < work_imports.count && loaded < 64 {
-            let file_path_local = use_path_to_file_path(work_imports.paths[i], main_dir)
+            let file_path_local = use_path_to_file_path(work_imports.paths[i], cur_dir)
             let file_path_stdlib = use_path_to_file_path(work_imports.paths[i], "stdlib")
             var file_path = file_path_local
             if !file_exists(file_path_local) {
@@ -331,6 +398,7 @@ fn load_multimodule_ir(main_path: string) -> MultiModuleIrResult with IO, Mut, D
                     print(file_path)
                     print("\n")
                     programs[loaded] = load_module_file(file_path)
+                    file_paths[loaded] = file_path
                     loaded = loaded + 1
                 } else {
                     print("Warning: module not found: ")
@@ -396,14 +464,14 @@ fn load_multimodule_ir(main_path: string) -> MultiModuleIrResult with IO, Mut, D
 // Multi-module compilation pipeline (bytecode output)
 // ============================================================
 
-fn compile_multimodule_program(main_path: string) -> CompileResult with IO, Mut, Div, Panic, Alloc {
+fn compile_multimodule_program(main_path: string) -> BytecodeResult with IO, Mut, Div, Panic, Alloc {
     let ir_result = load_multimodule_ir(main_path)
     if !ir_result.ok {
-        return compile_result_error(ir_result.error_msg)
+        return bytecode_result_error(ir_result.error_msg)
     }
 
     let serialized = serialize_ir_module(ir_result.module)
-    compile_result_ok(serialized.0, serialized.1)
+    bytecode_result_ok(serialized.0, serialized.1)
 }
 
 // ============================================================
@@ -419,7 +487,16 @@ fn multimodule_native_trace_output_path() -> string {
     }
 }
 
-fn compile_multimodule_native(main_path: string, output_path: string, requested_target: string, requested_matrix: string, explicit_target: bool) -> i32 with IO, Mut, Div, Panic, Alloc {
+fn compile_multimodule_native(
+    main_path: string,
+    output_path: string,
+    requested_target: string,
+    requested_matrix: string,
+    explicit_target: bool,
+    gpu_target: string,
+    gpu_binary_format: string,
+    gpu_strict_parity: bool
+) -> i32 with IO, Mut, Div, Panic, Alloc {
     let target_spec = native_resolve_target(requested_target, requested_matrix, explicit_target)
     print("Native dispatch: requested=")
     print(target_spec.requested_target)
@@ -432,6 +509,20 @@ fn compile_multimodule_native(main_path: string, output_path: string, requested_
     if str_len(target_spec.fallback_reason) > 0 {
         print(" fallback=")
         print(target_spec.fallback_reason)
+    }
+    if str_len(gpu_target) > 0 {
+        print(" gpu_target=")
+        print(gpu_target)
+    }
+    if str_len(gpu_binary_format) > 0 {
+        print(" gpu_binary_format=")
+        print(gpu_binary_format)
+    }
+    print(" gpu_strict_parity=")
+    if gpu_strict_parity {
+        print("true")
+    } else {
+        print("false")
     }
     print("\n")
 
@@ -542,15 +633,15 @@ fn compile_multimodule_native(main_path: string, output_path: string, requested_
 // Result types
 // ============================================================
 
-struct CompileResult {
+struct BytecodeResult {
     ok: bool,
     bytecode: [i8; 131072],
     bytecode_len: i64,
     error_msg: string,
 }
 
-fn compile_result_ok(bytecode: [i8; 131072], len: i64) -> CompileResult {
-    CompileResult {
+fn bytecode_result_ok(bytecode: [i8; 131072], len: i64) -> BytecodeResult {
+    BytecodeResult {
         ok: true,
         bytecode: bytecode,
         bytecode_len: len,
@@ -558,8 +649,8 @@ fn compile_result_ok(bytecode: [i8; 131072], len: i64) -> CompileResult {
     }
 }
 
-fn compile_result_error(msg: string) -> CompileResult {
-    CompileResult {
+fn bytecode_result_error(msg: string) -> BytecodeResult {
+    BytecodeResult {
         ok: false,
         bytecode: [0; 131072],
         bytecode_len: 0,

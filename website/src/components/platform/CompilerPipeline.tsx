@@ -5,31 +5,31 @@ const STAGES = [
     id: 1,
     title: 'Source Code (.sio)',
     code: `// Patient dosing administration
-let dose: Knowledge<mg> = input_dose;
-let volume: Knowledge<L> = patient_volume;
+let dose: Knowledge[f64] = input_dose
+let volume: Knowledge[f64] = patient_volume
 
-let conc: Knowledge<mg/L> = dose / volume;`
+let conc: Knowledge[f64] = dose / volume`
   },
   {
     id: 2,
     title: 'Epistemic Type & Effect Checking',
     code: `[Type Check Passed]
-- 'dose' inferred as Knowledge<mg> with bounds [0.0, 500.0]
-- 'volume' inferred as Knowledge<L> with bounds [0.5, 10.0]
-- 'conc' resolved as Knowledge<mg/L>
+- 'dose' inferred as Knowledge[f64] with valid provenance
+- 'volume' inferred as Knowledge[f64]
+- 'conc' resolved as Knowledge[f64]
 
 [Effect Analysis]
 - Requires 'Read<PatientData>' effect
-- Epistemic uncertainty propagated: { conc.variance = dose.var + vol.var }`
+- Epistemic uncertainty propagated: { conc.ε = f(dose.ε, vol.ε) }`
   },
   {
     id: 3,
     title: 'HIR / CPS Transform',
-    code: `fn compute_conc_cps(dose: K<mg>, volume: K<L>, k: Cont) -> ! {
-    let _t1 = fdiv(dose.mean, volume.mean);
-    let _t2 = propagate_variance(dose, volume);
+    code: `fn compute_conc_cps(dose: K[f64], volume: K[f64], k: Cont) -> ! {
+    let _t1 = fdiv(dose.value, volume.value);
+    let _t2 = propagate_epsilon(dose.ε, volume.ε);
     
-    let conc = Knowledge::new(_t1, _t2);
+    let conc = Knowledge(_t1, ε=_t2, prov="derived");
     k(conc)
 }`
   },

@@ -1,0 +1,275 @@
+//@ run-pass
+//@ expect-stdout: ALL TESTS PASSED
+//@ expect-stdout: Failed: 0
+// ODE Solver Correctness Tests
+//
+// Validates RK4 and Euler on canonical scalar ODEs with known exact solutions.
+// All functions are self-contained (no imports).
+//
+// Tests:
+//   1. RK4 on y'=-y (decay), y(0)=1: |y(1) - exp(-1)| < 0.01
+//   2. Euler on y'=-y (decay), y(0)=1: |y(1) - exp(-1)| < 0.1 (coarser)
+//   3. RK4 on y'=y (growth), y(0)=1: |y(0.5) - exp(0.5)| < 0.001
+//   4. RK4 on y'=-y, nonzero y0: |y(1) - 2*exp(-1)| < 0.001
+//   5. Midpoint on y'=-y: more accurate than Euler at same step count
+//   6. RK4 convergence: error ratio ~16 when n doubles (4th order)
+//
+// References:
+//   Hairer, Norsett & Wanner (1993), "Solving ODEs I", Springer
+
+// ============================================================================
+// MATH HELPERS (inlined, no imports)
+// ============================================================================
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+// Taylor series exp(x), 15 terms — accurate for |x| <= 10
+fn exp_approx(x: f64) -> f64 {
+    if x > 15.0 { return exp_approx(x / 2.0) * exp_approx(x / 2.0) }
+    if x < 0.0 - 15.0 { return 1.0 / exp_approx(0.0 - x) }
+    var s = 1.0
+    var t = 1.0
+    t = t * x / 1.0  ; s = s + t
+    t = t * x / 2.0  ; s = s + t
+    t = t * x / 3.0  ; s = s + t
+    t = t * x / 4.0  ; s = s + t
+    t = t * x / 5.0  ; s = s + t
+    t = t * x / 6.0  ; s = s + t
+    t = t * x / 7.0  ; s = s + t
+    t = t * x / 8.0  ; s = s + t
+    t = t * x / 9.0  ; s = s + t
+    t = t * x / 10.0 ; s = s + t
+    t = t * x / 11.0 ; s = s + t
+    t = t * x / 12.0 ; s = s + t
+    t = t * x / 13.0 ; s = s + t
+    t = t * x / 14.0 ; s = s + t
+    t = t * x / 15.0 ; s = s + t
+    return s
+}
+
+// ============================================================================
+// ODE FUNCTION DISPATCH
+//
+// ode_id = 0: decay  f(t,y) = -y    exact: y0 * exp(-t)
+// ode_id = 1: growth f(t,y) =  y    exact: y0 * exp(t)
+// ============================================================================
+
+fn ode_f(ode_id: i64, t: f64, y: f64) -> f64 {
+    if ode_id == 0 { return 0.0 - y }
+    if ode_id == 1 { return y }
+    return 0.0
+}
+
+// ============================================================================
+// EULER METHOD
+// ============================================================================
+
+fn euler_step(ode_id: i64, t: f64, y: f64, h: f64) -> f64 {
+    return y + h * ode_f(ode_id, t, y)
+}
+
+fn euler_integrate(ode_id: i64, t0: f64, y0: f64, t_end: f64, n: i64) -> f64 {
+    let h = (t_end - t0) / (n as f64)
+    var y = y0
+    var t = t0
+    var i: i64 = 0
+    while i < n {
+        y = euler_step(ode_id, t, y, h)
+        t = t + h
+        i = i + 1
+    }
+    return y
+}
+
+// ============================================================================
+// MIDPOINT (RK2) METHOD
+// ============================================================================
+
+fn midpoint_step(ode_id: i64, t: f64, y: f64, h: f64) -> f64 {
+    let k1 = ode_f(ode_id, t, y)
+    let k2 = ode_f(ode_id, t + 0.5 * h, y + 0.5 * h * k1)
+    return y + h * k2
+}
+
+fn midpoint_integrate(ode_id: i64, t0: f64, y0: f64, t_end: f64, n: i64) -> f64 {
+    let h = (t_end - t0) / (n as f64)
+    var y = y0
+    var t = t0
+    var i: i64 = 0
+    while i < n {
+        y = midpoint_step(ode_id, t, y, h)
+        t = t + h
+        i = i + 1
+    }
+    return y
+}
+
+// ============================================================================
+// CLASSIC RK4 METHOD
+// ============================================================================
+
+fn rk4_step(ode_id: i64, t: f64, y: f64, h: f64) -> f64 {
+    let k1 = ode_f(ode_id, t, y)
+    let k2 = ode_f(ode_id, t + 0.5 * h, y + 0.5 * h * k1)
+    let k3 = ode_f(ode_id, t + 0.5 * h, y + 0.5 * h * k2)
+    let k4 = ode_f(ode_id, t + h, y + h * k3)
+    return y + (h / 6.0) * (k1 + 2.0 * k2 + 2.0 * k3 + k4)
+}
+
+fn rk4_integrate(ode_id: i64, t0: f64, y0: f64, t_end: f64, n: i64) -> f64 {
+    let h = (t_end - t0) / (n as f64)
+    var y = y0
+    var t = t0
+    var i: i64 = 0
+    while i < n {
+        y = rk4_step(ode_id, t, y, h)
+        t = t + h
+        i = i + 1
+    }
+    return y
+}
+
+// ============================================================================
+// TEST FUNCTIONS
+// ============================================================================
+
+// Test 1: RK4 on y'=-y with y(0)=1, check |y(1) - exp(-1)| < 0.01
+fn test_rk4_decay_to_exp_neg1() -> bool with IO, Mut, Panic, Div {
+    // n=100 gives RK4 error ~ (1/100)^4 ~ 1e-8, well within 0.01
+    let y_num = rk4_integrate(0, 0.0, 1.0, 1.0, 100)
+    let y_exact = exp_approx(0.0 - 1.0)  // ≈ 0.36787944...
+    return abs_f64(y_num - y_exact) < 0.01
+}
+
+// Test 2: Euler on y'=-y with y(0)=1, check |y(1) - exp(-1)| < 0.1 (coarser)
+fn test_euler_decay_coarse() -> bool with IO, Mut, Panic, Div {
+    // Euler with n=1000: first-order error ~0.001, well within 0.1
+    let y_num = euler_integrate(0, 0.0, 1.0, 1.0, 1000)
+    let y_exact = exp_approx(0.0 - 1.0)
+    return abs_f64(y_num - y_exact) < 0.1
+}
+
+// Test 3: RK4 on y'=y with y(0)=1, check |y(0.5) - exp(0.5)| < 0.001
+fn test_rk4_growth_at_half() -> bool with IO, Mut, Panic, Div {
+    // n=50 gives excellent accuracy
+    let y_num = rk4_integrate(1, 0.0, 1.0, 0.5, 50)
+    let y_exact = exp_approx(0.5)  // ≈ 1.64872127...
+    return abs_f64(y_num - y_exact) < 0.001
+}
+
+// Test 4: RK4 on y'=-y with y(0)=2, check |y(1) - 2*exp(-1)| < 0.001
+fn test_rk4_decay_nonunit_y0() -> bool with IO, Mut, Panic, Div {
+    let y_num = rk4_integrate(0, 0.0, 2.0, 1.0, 100)
+    let y_exact = 2.0 * exp_approx(0.0 - 1.0)
+    return abs_f64(y_num - y_exact) < 0.001
+}
+
+// Test 5: Midpoint more accurate than Euler at same step count for decay
+fn test_midpoint_beats_euler() -> bool with IO, Mut, Panic, Div {
+    let n = 50
+    let y_euler = euler_integrate(0, 0.0, 1.0, 1.0, n)
+    let y_mid = midpoint_integrate(0, 0.0, 1.0, 1.0, n)
+    let y_exact = exp_approx(0.0 - 1.0)
+    let e_euler = abs_f64(y_euler - y_exact)
+    let e_mid = abs_f64(y_mid - y_exact)
+    return e_mid < e_euler
+}
+
+// Test 6: RK4 fourth-order convergence — doubling n should reduce error ~16x
+fn test_rk4_order4_convergence_ratio() -> bool with IO, Mut, Panic, Div {
+    let y_exact = exp_approx(0.0 - 1.0)
+    let y_n10 = rk4_integrate(0, 0.0, 1.0, 1.0, 10)
+    let y_n20 = rk4_integrate(0, 0.0, 1.0, 1.0, 20)
+    let e10 = abs_f64(y_n10 - y_exact)
+    let e20 = abs_f64(y_n20 - y_exact)
+    // Ratio should be around 2^4 = 16 for 4th-order method
+    // Accept range [12, 20] to allow for floating-point effects
+    if e20 < 1.0e-15 { return true }  // Already at machine precision
+    let ratio = e10 / e20
+    return ratio > 12.0 && ratio < 20.0
+}
+
+// ============================================================================
+// MAIN
+// ============================================================================
+
+fn run_tests(ctx: i64) -> i32 with IO, Mut, Panic, Div {
+    var passed = 0
+    var failed = 0
+
+    print("Test 1: RK4 decay |y(1) - exp(-1)| < 0.01 ........ ")
+    if test_rk4_decay_to_exp_neg1() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    print("Test 2: Euler decay coarse |y(1) - exp(-1)| < 0.1 . ")
+    if test_euler_decay_coarse() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    print("Test 3: RK4 growth |y(0.5) - exp(0.5)| < 0.001 ... ")
+    if test_rk4_growth_at_half() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    print("Test 4: RK4 decay y0=2 non-unit initial value ...... ")
+    if test_rk4_decay_nonunit_y0() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    print("Test 5: Midpoint more accurate than Euler n=50 ..... ")
+    if test_midpoint_beats_euler() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    print("Test 6: RK4 convergence ratio ~16 (4th order) ...... ")
+    if test_rk4_order4_convergence_ratio() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    println("")
+    print("Passed: ")
+    println(passed)
+    print("Failed: ")
+    println(failed)
+
+    if failed > 0 {
+        println("SOME TESTS FAILED")
+        return 1
+    }
+    println("ALL TESTS PASSED")
+    return 0
+}
+
+fn main() -> i32 with IO, Mut, Panic, Div {
+    println("=== ODE Solver Tests: RK4 / Euler / Midpoint ===")
+    println("")
+    return run_tests(0)
+}

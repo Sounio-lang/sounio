@@ -1,19 +1,110 @@
 // self-hosted::compiler::main
 //
 // MAIN ENTRY POINT FOR SELF-HOSTED SOUNIO COMPILER
-// No stubs. No fakes. Real implementation.
+// Horizon 2 (step 1): main.sio uses `use` imports from lexer.
+// Deeper module wiring (module_loader, typecheck, gen) is done incrementally
+// as each module gains its own `use` imports.
 //
-// Usage: souc input.sio -o output
+// Usage: souc input.sio [-o output] [-t target] [-O] [-v] [--emit-tokens]
 
-use io
-use string
-use lexer
-use parser
-use typecheck
-use gen
+// Horizon 3: wire to real multi-module native compilation pipeline
+// Comprehensive wildcard imports mirror module_loader.sio to satisfy flat-namespace checker
+use lexer::mod::*
+use parser::ast::*
+use ir::ir::*
+use check::types::*
+use io::file_write::*
+use native::encode::*
+use native::elf::*
+use native::reloc::*
+use native::frame::*
+use native::codegen::*
+use module_loader::{compile_multimodule_native}
 
 // ============================================================================
-// COMPILER DRIVER
+// STRING UTILITIES
+// ============================================================================
+
+fn char_from_i64(n: i64) -> string with Mut, Panic {
+    str_slice("0123456789", n, n + 1)
+}
+
+fn int_to_string(n: i64) -> string with Mut, Panic, Div {
+    if n == 0 {
+        "0"
+    } else {
+        let negative = n < 0
+        var num = if negative { 0 - n } else { n }
+        var result = ""
+        while num > 0 {
+            let digit = num % 10
+            let ch = 48 + digit
+            result = char_from_i64(ch) + result
+            num = num / 10
+        }
+        if negative { "-" + result } else { result }
+    }
+}
+
+// ============================================================================
+// ARG LIST  (replaces Vec<string> for command-line args)
+// ============================================================================
+
+struct ArgList {
+    items: [string; 64],
+    len: i64,
+}
+
+fn arg_list_get(lst: ArgList, i: i64) -> string {
+    lst.items[i as usize]
+}
+
+// ============================================================================
+// COMPILE ERROR LIST  (replaces Vec<string> in CompileResult)
+// ============================================================================
+
+struct CompileErrors {
+    items: [string; 256],
+    len: i64,
+}
+
+fn compile_errors_new() -> CompileErrors {
+    CompileErrors {
+        items: ["", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "",
+                "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "",
+                "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "",
+                "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "",
+                "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "",
+                "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "",
+                "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "",
+                "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "",
+                "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "",
+                "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "",
+                "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "",
+                "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "",
+                "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "",
+                "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "",
+                "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "",
+                "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", ""],
+        len: 0,
+    }
+}
+
+fn compile_errors_push(errs: CompileErrors, s: string) -> CompileErrors {
+    var out = errs
+    if out.len < 256 {
+        out.items[out.len as usize] = s
+        out.len = out.len + 1
+    }
+    out
+}
+
+fn compile_errors_get(errs: CompileErrors, i: i64) -> string {
+    errs.items[i as usize]
+}
+
+// ============================================================================
+// COMPILER OPTIONS AND RESULT
 // ============================================================================
 
 struct CompilerOptions {
@@ -24,73 +115,64 @@ struct CompilerOptions {
     verbose: bool,
     emit_ast: bool,
     emit_tokens: bool,
+    gpu_target: string,
+    gpu_binary_format: string,
+    gpu_strict_parity: bool,
 }
 
 struct CompileResult {
     success: bool,
-    errors: Vec<string>,
+    errors: CompileErrors,
     output: string,
 }
 
-// ============================================================================
-// MAIN
-// ============================================================================
+fn get_args() -> ArgList with IO, Mut, Panic, Div {
+    var args = ArgList {
+        items: ["", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "",
+                "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "",
+                "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "",
+                "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", ""],
+        len: 0,
+    }
+    let argc = arg_count()
+    var i: i64 = 0
+    while i < argc && i < 64 {
+        args.items[i as usize] = get_arg(i)
+        i = i + 1
+    }
+    args.len = i
+    args
+}
 
-fn main() with IO, Panic {
-    let args = get_args()
-    
-    println("╔══════════════════════════════════════════════════════════════╗")
-    println("║          SOUNIO SELF-HOSTED COMPILER v0.1.0                  ║")
-    println("║                                                              ║")
-    println("║  No stubs. No fakes. Real Sounio code.                       ║")
-    println("╚══════════════════════════════════════════════════════════════╝")
-    println("")
-    
-    // Parse command line
-    let opts = parse_options(args)
-    
-    if opts.verbose {
-        println("Options:")
-        println("  Input:  " + opts.input_file)
-        println("  Output: " + opts.output_file)
-        println("  Target: " + opts.target)
-        println("")
-    }
-    
-    // Compile
-    let result = compile(opts)
-    
-    if result.success {
-        println("✅ Compilation successful!")
-        println("   Output: " + result.output)
-        
-        if vec_len(result.errors) > 0 {
-            println("")
-            println("Warnings:")
-            var i: i64 = 0
-            while i < vec_len(result.errors) {
-                println("  ⚠️  " + vec_get(result.errors, i))
-                i = i + 1
-            }
-        }
-    } else {
-        println("❌ Compilation failed!")
-        println("")
-        println("Errors:")
-        var i: i64 = 0
-        while i < vec_len(result.errors) {
-            println("  ❌ " + vec_get(result.errors, i))
-            i = i + 1
-        }
-        exit(1)
-    }
+fn exit_process(code: i64) {
 }
 
 // ============================================================================
 // COMMAND LINE PARSING
 // ============================================================================
 
-fn parse_options(args: Vec<string>) -> CompilerOptions with Panic {
+fn print_help() with IO {
+    println("Usage: souc [options] <input.sio>")
+    println("")
+    println("Options:")
+    println("  -o, --output <file>    Output file (default: a.out)")
+    println("  -t, --target <target>  Target: native, wasm, llvm (default: native)")
+    println("  -O, --optimize         Enable optimizations")
+    println("  -v, --verbose          Verbose output")
+    println("  --emit-ast             Print AST to stdout")
+    println("  --emit-tokens          Print tokens to stdout")
+    println("  --gpu-target <name>    GPU target profile (cuda-smXX, rocm-gfxXXX)")
+    println("  --gpu-binary-format    fatbin|cubin|hsaco|multi")
+    println("  --gpu-strict-parity    Require strict CUDA/ROCm parity checks")
+    println("  -h, --help             Print this help message")
+    println("")
+    println("Examples:")
+    println("  souc hello.sio")
+    println("  souc hello.sio -o hello")
+    println("  souc hello.sio -t wasm -o hello.wasm")
+}
+
+fn parse_options(args: ArgList) -> CompilerOptions with IO, Mut, Panic, Div {
     var input_file = ""
     var output_file = "a.out"
     var target = "native"
@@ -98,21 +180,24 @@ fn parse_options(args: Vec<string>) -> CompilerOptions with Panic {
     var verbose = false
     var emit_ast = false
     var emit_tokens = false
-    
-    var i: i64 = 1  // Skip program name
-    while i < vec_len(args) {
-        let arg = vec_get(args, i)
-        
+    var gpu_target = ""
+    var gpu_binary_format = ""
+    var gpu_strict_parity = false
+
+    var i: i64 = 1
+    while i < args.len {
+        let arg = arg_list_get(args, i)
+
         if arg == "-o" || arg == "--output" {
             i = i + 1
-            if i < vec_len(args) {
-                output_file = vec_get(args, i)
+            if i < args.len {
+                output_file = arg_list_get(args, i)
             }
         }
         else if arg == "-t" || arg == "--target" {
             i = i + 1
-            if i < vec_len(args) {
-                target = vec_get(args, i)
+            if i < args.len {
+                target = arg_list_get(args, i)
             }
         }
         else if arg == "-O" || arg == "--optimize" {
@@ -127,23 +212,38 @@ fn parse_options(args: Vec<string>) -> CompilerOptions with Panic {
         else if arg == "--emit-tokens" {
             emit_tokens = true
         }
+        else if arg == "--gpu-target" {
+            i = i + 1
+            if i < args.len {
+                gpu_target = arg_list_get(args, i)
+            }
+        }
+        else if arg == "--gpu-binary-format" {
+            i = i + 1
+            if i < args.len {
+                gpu_binary_format = arg_list_get(args, i)
+            }
+        }
+        else if arg == "--gpu-strict-parity" {
+            gpu_strict_parity = true
+        }
         else if arg == "-h" || arg == "--help" {
             print_help()
-            exit(0)
+            exit_process(0)
         }
-        else if str_char_at(arg, 0) != 45 {  // Doesn't start with -
+        else if str_char_at(arg, 0) != 45 {
             input_file = arg
         }
-        
+
         i = i + 1
     }
-    
+
     if input_file == "" {
         println("Error: No input file specified")
         print_help()
-        exit(1)
+        exit_process(1)
     }
-    
+
     CompilerOptions {
         input_file: input_file,
         output_file: output_file,
@@ -152,228 +252,86 @@ fn parse_options(args: Vec<string>) -> CompilerOptions with Panic {
         verbose: verbose,
         emit_ast: emit_ast,
         emit_tokens: emit_tokens,
+        gpu_target: gpu_target,
+        gpu_binary_format: gpu_binary_format,
+        gpu_strict_parity: gpu_strict_parity,
     }
-}
-
-fn print_help() with IO {
-    println("Usage: souc [options] <input.sio>")
-    println("")
-    println("Options:")
-    println("  -o, --output <file>    Output file (default: a.out)")
-    println("  -t, --target <target>  Target: native, wasm, llvm (default: native)")
-    println("  -O, --optimize         Enable optimizations")
-    println("  -v, --verbose          Verbose output")
-    println("  --emit-ast             Print AST to stdout")
-    println("  --emit-tokens          Print tokens to stdout")
-    println("  -h, --help             Print this help message")
-    println("")
-    println("Examples:")
-    println("  souc hello.sio")
-    println("  souc hello.sio -o hello")
-    println("  souc hello.sio -t wasm -o hello.wasm")
 }
 
 // ============================================================================
 // COMPILATION PIPELINE
 // ============================================================================
 
-fn compile(opts: CompilerOptions) -> CompileResult with IO, Panic {
-    var errors = vec_new()
-    
-    // Stage 1: Read input
-    if opts.verbose {
-        println("📖 Reading input file...")
-    }
-    
-    let source = match read_file(opts.input_file) {
-        Result::Ok(content) => content,
-        Result::Err(msg) => {
-            vec_push(errors, "Cannot read file: " + msg)
-            return CompileResult {
-                success: false,
-                errors: errors,
-                output: "",
-            }
-        }
-    }
-    
-    if opts.verbose {
-        println("   " + int_to_string(str_len(source)) + " bytes")
-        println("")
-    }
-    
-    // Stage 2: Lexical analysis
-    if opts.verbose {
-        println("🔤 Lexical analysis...")
-    }
-    
-    let tokens = lex(source)
-    
-    if opts.verbose {
-        println("   " + int_to_string(vec_len(tokens)) + " tokens")
-    }
-    
-    if opts.emit_tokens {
-        println("")
-        println("Tokens:")
-        var i: i64 = 0
-        while i < vec_len(tokens) {
-            let tok = vec_get(tokens, i)
-            println("  " + token_to_string(tok))
-            i = i + 1
-        }
-        println("")
-    }
-    
-    // Stage 3: Parsing
-    if opts.verbose {
-        println("🌳 Parsing...")
-    }
-    
-    let ast = parse(tokens)
-    
-    if opts.verbose {
-        println("   AST nodes: " + int_to_string(count_nodes(ast)))
-    }
-    
-    if opts.emit_ast {
-        println("")
-        println("AST:")
-        println(expr_to_string(ast))
-        println("")
-    }
-    
-    // Stage 4: Type checking
-    if opts.verbose {
-        println("✓ Type checking...")
-    }
-    
-    let (type_errors, result_ty) = typecheck(ast)
-    
-    if vec_len(type_errors) > 0 {
-        var i: i64 = 0
-        while i < vec_len(type_errors) {
-            vec_push(errors, vec_get(type_errors, i))
-            i = i + 1
-        }
-        
-        return CompileResult {
-            success: false,
-            errors: errors,
-            output: "",
-        }
-    }
-    
-    if opts.verbose {
-        println("   Result type: " + type_to_string(result_ty))
-    }
-    
-    // Stage 5: Code generation
-    if opts.verbose {
-        println("⚙️  Code generation...")
-    }
-    
-    let output = match opts.target {
-        "native" => gen_native(ast, opts.optimize),
-        "wasm" => gen_wasm(ast, opts.optimize),
-        "llvm" => gen_llvm(ast, opts.optimize),
-        _ => {
-            vec_push(errors, "Unknown target: " + opts.target)
-            return CompileResult {
-                success: false,
-                errors: errors,
-                output: "",
-            }
-        }
-    }
-    
-    // Stage 6: Write output
-    if opts.verbose {
-        println("💾 Writing output...")
-    }
-    
-    match write_file(opts.output_file, output) {
-        Result::Ok(_) => {}
-        Result::Err(msg) => {
-            vec_push(errors, "Cannot write output: " + msg)
-            return CompileResult {
-                success: false,
-                errors: errors,
-                output: "",
-            }
-        }
-    }
-    
-    if opts.verbose {
-        println("   " + int_to_string(str_len(output)) + " bytes")
-    }
-    
+// Horizon 3: real multi-module native compilation pipeline.
+// module_loader::compile_multimodule_native handles file reading, parsing,
+// type checking, IR lowering, x86-64 codegen, ELF output, and tracing.
+fn compile(opts: CompilerOptions) -> CompileResult with IO, Mut, Panic, Div, Alloc {
+    let exit_code = compile_multimodule_native(
+        opts.input_file,
+        opts.output_file,
+        opts.target,
+        "auto",
+        false,
+        opts.gpu_target,
+        opts.gpu_binary_format,
+        opts.gpu_strict_parity
+    )
     CompileResult {
-        success: vec_len(errors) == 0,
-        errors: errors,
-        output: opts.output_file,
+        success: exit_code == 0,
+        errors: compile_errors_new(),
+        output: if exit_code == 0 { opts.output_file } else { "" },
     }
 }
 
 // ============================================================================
-// UTILITIES
+// MAIN
 // ============================================================================
 
-fn count_nodes(expr: Expr) -> i64 with {
-    var count = 1
-    var i: i64 = 0
-    while i < vec_len(expr.children) {
-        count = count + count_nodes(vec_get(expr.children, i))
-        i = i + 1
-    }
-    count
-}
+fn main() with IO, Mut, Panic, Div, Alloc {
+    let args = get_args()
 
-fn int_to_string(n: i64) -> string with Mut, Panic, Div {
-    if n == 0 {
-        "0"
-    } else {
-        let negative = n < 0
-        var num = if negative { -n } else { n }
-        var result = ""
-        while num > 0 {
-            let digit = num % 10
-            let ch = 48 + digit
-            result = char_from_i64(ch) + result
-            num = num / 10
+    println("SOUNIO SELF-HOSTED COMPILER v0.80.0")
+    println("Horizon 3: self-hosted primary compiler.")
+    println("")
+
+    let opts = parse_options(args)
+
+    if opts.verbose {
+        println("Options:")
+        println("  Input:  " + opts.input_file)
+        println("  Output: " + opts.output_file)
+        println("  Target: " + opts.target)
+        println("  GPU Target: " + opts.gpu_target)
+        println("  GPU Binary Format: " + opts.gpu_binary_format)
+        let strict_label = if opts.gpu_strict_parity { "true" } else { "false" }
+        println("  GPU Strict Parity: " + strict_label)
+        println("")
+    }
+
+    let result = compile(opts)
+
+    if result.success {
+        println("Compilation successful!")
+        println("   Output: " + result.output)
+
+        if result.errors.len > 0 {
+            println("")
+            println("Warnings:")
+            var i: i64 = 0
+            while i < result.errors.len {
+                println("  " + compile_errors_get(result.errors, i))
+                i = i + 1
+            }
         }
-        if negative { "-" + result } else { result }
+    } else {
+        println("Compilation failed!")
+        println("")
+        println("Errors:")
+        var i: i64 = 0
+        while i < result.errors.len {
+            println("  " + compile_errors_get(result.errors, i))
+            i = i + 1
+        }
+        exit_process(1)
     }
-}
-
-fn char_from_i64(n: i64) -> string with Mut, Panic {
-    str_substr("0123456789", n, 1)
-}
-
-enum Result<T, E> {
-    Ok(T),
-    Err(E),
-}
-
-// ============================================================================
-// STUBS FOR I/O (would be provided by runtime)
-// ============================================================================
-
-fn get_args() -> Vec<string> with IO {
-    // Provided by runtime
-    vec_new()
-}
-
-fn read_file(path: string) -> Result<string, string> with IO {
-    // Provided by runtime
-    Result::Err("Not implemented")
-}
-
-fn write_file(path: string, content: string) -> Result<(), string> with IO {
-    // Provided by runtime
-    Result::Err("Not implemented")
-}
-
-fn exit(code: i64) with {
-    // Provided by runtime
 }

@@ -245,20 +245,66 @@ print("ATE: ", effect.value, " ± ", effect.uncertainty)
 | `bayes/` | 1,371 | Bayesian inference, MCMC, VI |
 | `random/` | 1,068 | Random number generation |
 
-### Fail-Closed Science Gates (fMRI + Darwin PBPK)
+### Fail-Closed Science + Hyper + GPU Gates
 
-The main gate path now requires two executable scientific lanes:
+The main gate path now requires executable scientific and hypercomplex lanes:
 - `tests/stdlib/fmri/test_pipeline_real_e2e.sio`
 - `tests/stdlib/darwin_pbpk/test_pipeline_real_e2e.sio`
+- `tests/stdlib/nn/test_hyper_quaternion_e2e.sio`
+- `tests/stdlib/onn/test_hyper_onn_e2e.sio`
+- `tests/stdlib/qnn/test_hyper_qnn_e2e.sio`
+- `tests/stdlib/snn/test_snn_e2e.sio`
+- `tests/stdlib/math/test_hyper_math_e2e.sio`
+
+fMRI + PBPK lane details:
+- real fixture-driven NIfTI-1/NIfTI-2 parse/load execution (not synthetic-only checks)
+- QC + FC + atlas coverage + uncertainty metrics are emitted and compared against pinned golden values
+- runtime regressions are tracked in gate JSON under `runtime_regressions` using committed probes in `tests/stdlib/runtime_regression/`
+- runtime provenance is recorded under `runtime_provenance` (`souc_bin`, `souc_version`, `pinned_version_expected`)
+
+Hyper lane details:
+- strict run-pass execution with pinned `tests/fixtures/hyper/pipeline_golden.v1.json`
+- no `//@ ignore` allowed in required hyper tests
+- hyper inventory is emitted from `scripts/scan_stdlib.sh` as `hyper_active_files`, `hyper_disabled_files`, `hyper_stub_mod_files`
+
+Runtime policy (science runtime regressions):
+- local default remains telemetry mode (`soft`)
+- required CI full gate enforces strict runtime regression mode (`STDLIB_RUNTIME_REGRESSION_STRICT=1`)
+- strict mode is fail-closed; runtime probes must pass to keep CI green
+
+GPU runtime policy:
+- backend compile smoke remains in `scripts/e2e_gate.sh`
+- multi-target codegen parity gate is integrated via `scripts/omega/omega_gpu_codegen_parity_gate.sh`
+- binary hash-chain attestation gate is integrated via `scripts/omega/omega_gpu_binary_attest_gate.sh`
+- remote-attested GPU runtime gate is integrated via `scripts/omega/omega_gpu_runtime_attest_gate.sh`
+- GPU build CLI now accepts `--gpu-target`, `--gpu-binary-format`, and `--gpu-strict-parity`
+- canonical pinned `souc` version is sourced from `scripts/omega/omega_resolve_souc_bin.sh` (or `SOUNIO_SOUC_VERSION` override)
+- local default mode is `OMEGA_GPU_RUNTIME_GATE_MODE=auto` (non-fatal `not_run` when remote runner is unavailable)
+- required CI mode is `OMEGA_GPU_RUNTIME_GATE_MODE=required` (any non-pass is fail-closed)
+- blocker taxonomy includes `target_unavailable`, `isa_encode_unsupported`, `binary_pack_fail`, `driver_reject`, `parity_fail`, `perf_regression`, `attestation_invalid`, `ssh_unreachable`, `remote_env_missing`, `pinned_version_mismatch`, `gpu_backend_unavailable`, `runtime_test_fail`
 
 Run from repository root:
 
 ```bash
+OMEGA_GPU_CODEGEN_PARITY_MODE=required bash scripts/omega/omega_gpu_codegen_parity_gate.sh
+OMEGA_GPU_BINARY_ATTEST_MODE=required bash scripts/omega/omega_gpu_binary_attest_gate.sh
+OMEGA_GPU_RUNTIME_GATE_MODE=required bash scripts/omega/omega_gpu_runtime_attest_gate.sh
+bash scripts/stdlib_hyper_execution_gate.sh
+STDLIB_RUNTIME_REGRESSION_STRICT=1 bash scripts/stdlib_science_pipeline_gate.sh
+STDLIB_RUNTIME_REGRESSION_STRICT=1 bash scripts/stdlib_reliability_gate.sh
+bash scripts/omega/omega_gpu_codegen_parity_gate.sh
+bash scripts/omega/omega_gpu_binary_attest_gate.sh
+bash scripts/omega/omega_gpu_runtime_attest_gate.sh
+bash scripts/stdlib_hyper_execution_gate.sh
 bash scripts/stdlib_science_pipeline_gate.sh
 bash scripts/stdlib_reliability_gate.sh
 ```
 
 Current machine-checkable artifacts:
+- `artifacts/omega/gpu_codegen_parity.v1.json`
+- `artifacts/omega/gpu_binary_attestation.v1.json`
+- `artifacts/omega/gpu_runtime_attest_gate.v1.json`
+- `artifacts/stdlib/stdlib_hyper_execution_status.v1.json`
 - `artifacts/stdlib/stdlib_science_pipeline_status.v1.json`
 - `artifacts/stdlib/stdlib_reliability_status.v1.json`
 - `tests/fixtures/fmri/fixture_manifest.v1.json`

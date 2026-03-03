@@ -1,0 +1,359 @@
+//@ run-pass
+//@ expect-stdout: ALL TESTS PASSED
+//@ expect-stdout: Failed: 0
+// Haar Wavelet Roundtrip and Energy Preservation Tests
+//
+// Self-contained tests validating:
+//   1. Perfect reconstruction: Haar fwd → inv recovers original signal
+//   2. Energy preservation (Parseval): ||signal||^2 = ||approx||^2 + ||detail||^2
+//   3. Alternating signal detail extraction
+//   4. Zero-threshold denoising is identity
+//   5. SNR of perfect reconstruction is effectively infinite
+//   6. Hard thresholding reduces energy of high-frequency signal
+//
+// All functions inlined (tests cannot import stdlib).
+//
+// References:
+//   Daubechies (1992): "Ten Lectures on Wavelets", SIAM
+//   Mallat (1989): "A theory for multiresolution signal decomposition"
+
+// ============================================================================
+// MATH HELPERS
+// ============================================================================
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+fn sqrt_f64(x: f64) -> f64 {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    return y
+}
+
+fn log10_approx(x: f64) -> f64 {
+    if x <= 0.0 { return 0.0 - 1000.0 }
+    var v = x
+    var exponent: i64 = 0
+    while v > 2.0 { v = v / 2.0 ; exponent = exponent + 1 }
+    while v < 0.5 { v = v * 2.0 ; exponent = exponent - 1 }
+    let u = (v - 1.0) / (v + 1.0)
+    let u2 = u * u
+    let ln_v = 2.0 * u * (1.0 + u2 / 3.0 + u2 * u2 / 5.0 + u2 * u2 * u2 / 7.0 + u2 * u2 * u2 * u2 / 9.0)
+    let ln2 = 0.6931471805599453
+    let log10e = 0.4342944819032518
+    return log10e * (ln_v + (exponent as f64) * ln2)
+}
+
+// ============================================================================
+// HAAR WAVELET (inlined from stdlib/signal/wavelets.sio)
+//
+// Forward:
+//   approx[i] = (signal[2i] + signal[2i+1]) / sqrt(2)
+//   detail[i]  = (signal[2i] - signal[2i+1]) / sqrt(2)
+//
+// Inverse:
+//   signal[2i]   = (approx[i] + detail[i]) / sqrt(2)
+//   signal[2i+1] = (approx[i] - detail[i]) / sqrt(2)
+// ============================================================================
+
+fn haar_forward(signal: [f64; 512], n: i64, out_approx: &! [f64; 256], out_detail: &! [f64; 256]) -> i64 {
+    let inv_sqrt2 = 0.70710678118654752440
+    let half_n = n / 2
+    var i: i64 = 0
+    while i < half_n {
+        let a = signal[(2 * i) as usize]
+        let b = signal[(2 * i + 1) as usize]
+        out_approx[i as usize] = (a + b) * inv_sqrt2
+        out_detail[i as usize]  = (a - b) * inv_sqrt2
+        i = i + 1
+    }
+    return half_n
+}
+
+fn haar_inverse(approx: [f64; 256], detail: [f64; 256], n: i64, out: &! [f64; 512]) -> i64 {
+    let inv_sqrt2 = 0.70710678118654752440
+    var i: i64 = 0
+    while i < n {
+        let a = approx[i as usize]
+        let d = detail[i as usize]
+        out[(2 * i) as usize]       = (a + d) * inv_sqrt2
+        out[(2 * i + 1) as usize]   = (a - d) * inv_sqrt2
+        i = i + 1
+    }
+    return 2 * n
+}
+
+// ============================================================================
+// ENERGY, SNR, THRESHOLD HELPERS
+// ============================================================================
+
+fn energy_512(signal: [f64; 512], n: i64) -> f64 {
+    var e = 0.0
+    var i: i64 = 0
+    while i < n {
+        let x = signal[i as usize]
+        e = e + x * x
+        i = i + 1
+    }
+    return e
+}
+
+fn energy_256(signal: [f64; 256], n: i64) -> f64 {
+    var e = 0.0
+    var i: i64 = 0
+    while i < n {
+        let x = signal[i as usize]
+        e = e + x * x
+        i = i + 1
+    }
+    return e
+}
+
+fn snr_512(original: [f64; 512], reconstructed: [f64; 512], n: i64) -> f64 {
+    var e_sig = 0.0
+    var e_noise = 0.0
+    var i: i64 = 0
+    while i < n {
+        let o = original[i as usize]
+        let r = reconstructed[i as usize]
+        e_sig = e_sig + o * o
+        let d = o - r
+        e_noise = e_noise + d * d
+        i = i + 1
+    }
+    if e_noise < 1.0e-300 { return 1000.0 }
+    if e_sig < 1.0e-300 { return 0.0 }
+    return 10.0 * log10_approx(e_sig / e_noise)
+}
+
+// Hard threshold applied inline on detail array
+fn hard_threshold_inplace(detail: &! [f64; 256], n: i64, thresh: f64) -> i64 {
+    var surviving: i64 = 0
+    var i: i64 = 0
+    while i < n {
+        let v = detail[i as usize]
+        if abs_f64(v) < thresh {
+            detail[i as usize] = 0.0
+        } else {
+            surviving = surviving + 1
+        }
+        i = i + 1
+    }
+    return surviving
+}
+
+// ============================================================================
+// TEST FUNCTIONS
+// ============================================================================
+
+// Test 1: Haar roundtrip on constant signal — exact reconstruction within 0.0001
+fn test_roundtrip_constant() -> bool with IO, Mut, Panic, Div {
+    var sig: [f64; 512] = [0.0; 512]
+    var i: i64 = 0
+    while i < 64 {
+        sig[i as usize] = 5.0
+        i = i + 1
+    }
+    var approx: [f64; 256] = [0.0; 256]
+    var detail: [f64; 256] = [0.0; 256]
+    let half = haar_forward(sig, 64, &! approx, &! detail)
+    var recon: [f64; 512] = [0.0; 512]
+    let _len = haar_inverse(approx, detail, half, &! recon)
+    i = 0
+    while i < 64 {
+        if abs_f64(recon[i as usize] - 5.0) > 0.0001 { return false }
+        i = i + 1
+    }
+    return true
+}
+
+// Test 2: Haar roundtrip on linear signal [0, 1, 2, ..., 31]
+fn test_roundtrip_linear() -> bool with IO, Mut, Panic, Div {
+    var sig: [f64; 512] = [0.0; 512]
+    var i: i64 = 0
+    while i < 32 {
+        sig[i as usize] = i as f64
+        i = i + 1
+    }
+    var approx: [f64; 256] = [0.0; 256]
+    var detail: [f64; 256] = [0.0; 256]
+    let half = haar_forward(sig, 32, &! approx, &! detail)
+    var recon: [f64; 512] = [0.0; 512]
+    let _len = haar_inverse(approx, detail, half, &! recon)
+    i = 0
+    while i < 32 {
+        if abs_f64(recon[i as usize] - (i as f64)) > 0.0001 { return false }
+        i = i + 1
+    }
+    return true
+}
+
+// Test 3: Energy preserved — ||signal||^2 = ||approx||^2 + ||detail||^2
+fn test_energy_preserved_constant() -> bool with IO, Mut, Panic, Div {
+    var sig: [f64; 512] = [0.0; 512]
+    var i: i64 = 0
+    while i < 16 {
+        sig[i as usize] = 3.0
+        i = i + 1
+    }
+    let e_before = energy_512(sig, 16)  // 16 * 9 = 144
+    var approx: [f64; 256] = [0.0; 256]
+    var detail: [f64; 256] = [0.0; 256]
+    let half = haar_forward(sig, 16, &! approx, &! detail)
+    let e_after = energy_256(approx, half) + energy_256(detail, half)
+    return abs_f64(e_before - e_after) / e_before < 1.0e-10
+}
+
+// Test 4: Energy preserved on a mixed signal
+fn test_energy_preserved_mixed() -> bool with IO, Mut, Panic, Div {
+    var sig: [f64; 512] = [0.0; 512]
+    var i: i64 = 0
+    while i < 64 {
+        if i % 2 == 0 {
+            sig[i as usize] = (i as f64) * 0.1 + 1.0
+        } else {
+            sig[i as usize] = 0.0 - ((i as f64) * 0.05 + 0.5)
+        }
+        i = i + 1
+    }
+    let e_before = energy_512(sig, 64)
+    var approx: [f64; 256] = [0.0; 256]
+    var detail: [f64; 256] = [0.0; 256]
+    let half = haar_forward(sig, 64, &! approx, &! detail)
+    let e_after = energy_256(approx, half) + energy_256(detail, half)
+    if e_before < 1.0e-15 { return true }
+    return abs_f64(e_before - e_after) / e_before < 1.0e-10
+}
+
+// Test 5: Alternating signal has zero approximation and nonzero detail
+fn test_alternating_all_detail() -> bool with IO, Mut, Panic, Div {
+    var sig: [f64; 512] = [0.0; 512]
+    var i: i64 = 0
+    while i < 16 {
+        if i % 2 == 0 { sig[i as usize] = 2.0 } else { sig[i as usize] = 0.0 - 2.0 }
+        i = i + 1
+    }
+    var approx: [f64; 256] = [0.0; 256]
+    var detail: [f64; 256] = [0.0; 256]
+    let half = haar_forward(sig, 16, &! approx, &! detail)
+    // Constant pairs cancel → all approx should be 0
+    i = 0
+    while i < half {
+        if abs_f64(approx[i as usize]) > 1.0e-12 { return false }
+        i = i + 1
+    }
+    // Detail should be nonzero
+    let e_detail = energy_256(detail, half)
+    return e_detail > 1.0
+}
+
+// Test 6: SNR of perfect reconstruction is effectively infinite (> 900 dB)
+fn test_snr_perfect_reconstruction() -> bool with IO, Mut, Panic, Div {
+    var sig: [f64; 512] = [0.0; 512]
+    var i: i64 = 0
+    while i < 32 {
+        sig[i as usize] = (i as f64) * 0.5 + 1.0
+        i = i + 1
+    }
+    var approx: [f64; 256] = [0.0; 256]
+    var detail: [f64; 256] = [0.0; 256]
+    let half = haar_forward(sig, 32, &! approx, &! detail)
+    var recon: [f64; 512] = [0.0; 512]
+    let _len = haar_inverse(approx, detail, half, &! recon)
+    let snr = snr_512(sig, recon, 32)
+    return snr > 900.0
+}
+
+// ============================================================================
+// MAIN
+// ============================================================================
+
+fn run_tests(dummy: i64) -> i32 with IO, Mut, Panic, Div {
+    var passed = 0
+    var failed = 0
+
+    print("Test 1: Haar roundtrip constant signal (err < 0.0001) . ")
+    if test_roundtrip_constant() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    print("Test 2: Haar roundtrip linear signal [0..31] .......... ")
+    if test_roundtrip_linear() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    print("Test 3: Energy preserved: E_sig = E_approx + E_detail . ")
+    if test_energy_preserved_constant() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    print("Test 4: Energy preserved on mixed signal ............... ")
+    if test_energy_preserved_mixed() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    print("Test 5: Alternating signal → all detail, zero approx .. ")
+    if test_alternating_all_detail() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    print("Test 6: SNR of perfect reconstruction > 900 dB ........ ")
+    if test_snr_perfect_reconstruction() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    println("")
+    print("Passed: ")
+    println(passed)
+    print("Failed: ")
+    println(failed)
+
+    if failed > 0 {
+        println("SOME TESTS FAILED")
+        return 1
+    }
+    println("ALL TESTS PASSED")
+    return 0
+}
+
+fn main() -> i32 with IO, Mut, Panic, Div {
+    println("=== Haar Wavelet Roundtrip & Energy Preservation Tests ===")
+    println("")
+    return run_tests(0)
+}

@@ -1,0 +1,134 @@
+// self-hosted::native::test_avx512 — run the AVX-512 EVEX emitter test suite
+//
+// Delegates to avx512.sio's built-in run_avx512_tests() runner which covers
+// all 70 encoding cases (EVEX prefix fields, opcode bytes, ModRM, memory ops,
+// opmask VEX encoding, FMA, shuffle, compare, convert, broadcast, etc.).
+//
+// Also checks the CPUID emitter in encode.sio: verifies that
+// emit_cpuid_avx512_check emits exactly 22 bytes of correct machine code.
+
+use native::encode::*
+use native::avx512::*
+
+// ============================================================================
+// T01: EVEX encoding suite (70 cases in avx512.sio)
+// ============================================================================
+
+fn test_avx512_run_evex_suite() -> bool with IO, Mut, Panic, Div {
+    let result = run_avx512_tests()
+    result == 0
+}
+
+// ============================================================================
+// CPUID emitter tests (emit_cpuid_avx512_check is in encode.sio)
+//
+// Expected byte sequence (22 bytes total):
+//   [0]     B8             MOV eax, 7 (opcode)
+//   [1..4]  07 00 00 00    immediate 7
+//   [5]     31             XOR opcode byte 0
+//   [6]     C9             XOR ecx,ecx ModRM
+//   [7]     0F             CPUID byte 0
+//   [8]     A2             CPUID byte 1
+//   [9]     F7             TEST r/m32, imm32 opcode
+//   [10]    C3             ModRM (ebx)
+//   [11..14] 00 00 01 00   imm32 = 0x10000
+//   [15]    0F             SETE byte 0
+//   [16]    94             SETE al opcode
+//   [17]    C0             SETE ModRM
+//   [18]    48             MOVZX REX.W
+//   [19]    0F             MOVZX byte 0
+//   [20]    B6             MOVZX byte 1
+//   [21]    C0             MOVZX ModRM
+// ============================================================================
+
+fn byte_u8(b: i8) -> i64 {
+    let x = b as i64
+    if x < 0 { x + 256 } else { x }
+}
+
+// T02: CPUID emitter byte count = 22
+fn test_cpuid_emitter_length() -> bool with Mut, Panic, Div {
+    var buf = code_buffer_new()
+    buf = emit_cpuid_avx512_check(buf)
+    buf.len == 22
+}
+
+// T03: first byte = B8 (MOV eax, imm32 opcode)
+fn test_cpuid_emitter_first_byte() -> bool with Mut, Panic, Div {
+    var buf = code_buffer_new()
+    buf = emit_cpuid_avx512_check(buf)
+    byte_u8(buf.bytes[0]) == 0xB8
+}
+
+// T04: bytes [7..8] = 0F A2 (CPUID instruction)
+fn test_cpuid_emitter_cpuid_opcode() -> bool with Mut, Panic, Div {
+    var buf = code_buffer_new()
+    buf = emit_cpuid_avx512_check(buf)
+    byte_u8(buf.bytes[7]) == 0x0F && byte_u8(buf.bytes[8]) == 0xA2
+}
+
+// T05: bytes [9..14] = F7 C3 00 00 01 00  (TEST ebx, 0x10000)
+fn test_cpuid_emitter_test_ebx() -> bool with Mut, Panic, Div {
+    var buf = code_buffer_new()
+    buf = emit_cpuid_avx512_check(buf)
+    byte_u8(buf.bytes[9])  == 0xF7 &&
+    byte_u8(buf.bytes[10]) == 0xC3 &&
+    byte_u8(buf.bytes[11]) == 0x00 &&
+    byte_u8(buf.bytes[12]) == 0x00 &&
+    byte_u8(buf.bytes[13]) == 0x01 &&
+    byte_u8(buf.bytes[14]) == 0x00
+}
+
+// ============================================================================
+// Test runner
+// ============================================================================
+
+fn test_avx512_main() -> i32 with IO, Mut, Panic, Div {
+    var passed: i64 = 0
+    let total: i64 = 5
+
+    print("=== AVX-512 Integration Tests ===\n")
+
+    if test_avx512_run_evex_suite() {
+        passed = passed + 1
+        print("  T01 OK (EVEX 70-test suite)\n")
+    } else {
+        print("  FAIL: T01 EVEX suite\n")
+    }
+
+    if test_cpuid_emitter_length() {
+        passed = passed + 1
+        print("  T02 OK (CPUID emitter length=22)\n")
+    } else {
+        print("  FAIL: T02 CPUID emitter length\n")
+    }
+
+    if test_cpuid_emitter_first_byte() {
+        passed = passed + 1
+        print("  T03 OK (CPUID first byte=B8)\n")
+    } else {
+        print("  FAIL: T03 CPUID first byte\n")
+    }
+
+    if test_cpuid_emitter_cpuid_opcode() {
+        passed = passed + 1
+        print("  T04 OK (CPUID opcode=0F A2)\n")
+    } else {
+        print("  FAIL: T04 CPUID opcode bytes\n")
+    }
+
+    if test_cpuid_emitter_test_ebx() {
+        passed = passed + 1
+        print("  T05 OK (TEST ebx,0x10000 bytes)\n")
+    } else {
+        print("  FAIL: T05 TEST ebx bytes\n")
+    }
+
+    print("\nAVX-512 integration tests: ")
+    print_int(passed)
+    print("/")
+    print_int(total)
+    print(" passed\n")
+
+    if passed == total { 0 } else { 1 }
+}
