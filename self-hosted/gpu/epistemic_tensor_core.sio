@@ -27,6 +27,12 @@ let WMMA_N: i64 = 16
 let WMMA_K: i64 = 16
 let WMMA_TILE_SIZE: i64 = 256  // 16x16
 
+// Opaque WMMA fragment type aliases (Sounio lacks const generics, so we
+// use named wrappers around the hardware 16×16×16 f32 tile fragments.)
+struct WmmaFragA  { x: [f32; 256] }
+struct WmmaFragB  { x: [f32; 256] }
+struct WmmaFragC  { x: [f32; 256] }
+
 // Epistemic tensor with full provenance tracking per element
 struct EpistemicTensor {
     // Data buffer in shared memory layout
@@ -143,9 +149,9 @@ fn wmma_load_epistemic_a(
     tensor: EpistemicTensor,
     tile_row: i64,
     tile_col: i64
-) -> wmma::fragment<wmma::matrix_a, 16, 16, 16, f32, wmma::col_major> with GPU, Mut {
+) -> WmmaFragA with GPU, Mut {
     
-    let frag: wmma::fragment<wmma::matrix_a, 16, 16, 16, f32, wmma::col_major>
+    let frag: WmmaFragA
     
     // Compute base index for this tile
     let base_idx: i64 = tile_row * WMMA_M * tensor.cols + tile_col * WMMA_K
@@ -168,9 +174,9 @@ fn wmma_load_epistemic_b(
     tensor: EpistemicTensor,
     tile_row: i64,
     tile_col: i64
-) -> wmma::fragment<wmma::matrix_b, 16, 16, 16, f32, wmma::col_major> with GPU, Mut {
+) -> WmmaFragB with GPU, Mut {
     
-    let frag: wmma::fragment<wmma::matrix_b, 16, 16, 16, f32, wmma::col_major>
+    let frag: WmmaFragB
     
     let base_idx: i64 = tile_row * WMMA_K * tensor.cols + tile_col * WMMA_N
     let lane_offset: i64 = (tensor.lane_id % 4) * 4
@@ -189,9 +195,9 @@ fn wmma_load_epistemic_c(
     tensor: EpistemicTensor,
     tile_row: i64,
     tile_col: i64
-) -> wmma::fragment<wmma::accumulator, 16, 16, 16, f32> with GPU, Mut {
+) -> WmmaFragC with GPU, Mut {
     
-    let frag: wmma::fragment<wmma::accumulator, 16, 16, 16, f32>
+    let frag: WmmaFragC
     
     let base_idx: i64 = tile_row * WMMA_M * tensor.cols + tile_col * WMMA_N
     let lane_offset: i64 = (tensor.lane_id % 4) * 4
@@ -208,7 +214,7 @@ fn wmma_load_epistemic_c(
 
 // Store WMMA accumulator back to epistemic tensor
 fn wmma_store_epistemic_c(
-    frag: wmma::fragment<wmma::accumulator, 16, 16, 16, f32>,
+    frag: WmmaFragC,
     tensor: EpistemicTensor,
     tile_row: i64,
     tile_col: i64
@@ -253,7 +259,7 @@ fn epistemic_gemm_fused(
     var tile_n: i64 = 0
     var tile_k: i64 = 0
     
-    var c_accum: wmma::fragment<wmma::accumulator, 16, 16, 16, f32>
+    var c_accum: WmmaFragC
     
     // Initialize accumulator
     wmma::fill_fragment(c_accum, 0.0f32)
@@ -363,7 +369,7 @@ fn tensor_from_atom_arena(
 // Convert epistemic tensor back to molecule network
 fn tensor_to_glycolysis_network(
     tensor: EpistemicTensor,
-    mut net: GlycolysisAtomNetwork
+    net: GlycolysisAtomNetwork
 ) -> GlycolysisAtomNetwork with GPU, Mut {
     
     var i: i64 = 0
@@ -391,7 +397,7 @@ fn tensor_to_glycolysis_network(
 
 // Full 10-step glycolysis on GPU tensor core
 fn run_epistemic_glycolysis_on_gpu(
-    mut net: GlycolysisAtomNetwork
+    net: GlycolysisAtomNetwork
 ) -> GlycolysisAtomNetwork with GPU, Mut, Panic, Div {
     
     // Step 1: Convert to tensor format
@@ -463,7 +469,7 @@ fn run_epistemic_glycolysis_on_gpu(
 // POWER ESTIMATION
 // ============================================================================
 
-fn estimate_power_mw(gum_counter: i64, cycles: i64) -> i64 with {
+fn estimate_power_mw(gum_counter: i64, cycles: i64) -> i64 with Div {
     // Rough power model: base power + active power
     // GUM counter gives activity factor
     let base_power: i64 = 45  // mW baseline
