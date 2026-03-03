@@ -386,10 +386,16 @@ Canonical blocker classes:
 - `parity_fail`
 - `perf_regression`
 - `attestation_invalid`
+- `native_lane_missing`
+- `native_lane_compile_fail`
+- `native_lane_runtime_fail`
+- `native_lane_parity_fail`
+- `native_lane_perf_regression`
 
 The runtime attest artifact now embeds:
 
 - per-target codegen profiles (`target_profiles`)
+- native lane statuses (`native_lanes`) for `onn|qnn|snn|spnn|quantnn|hyper_math|exceptional`
 - binary provenance entries (`binary_provenance`)
 - hash-chain state (`hash_chain`)
 

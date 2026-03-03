@@ -10,12 +10,14 @@ Artifacts covered:
 - `artifacts/omega/gpu_codegen_parity.v1.json`
 - `artifacts/omega/gpu_binary_attestation.v1.json`
 - `artifacts/omega/gpu_runtime_attest_gate.v1.json`
+- `artifacts/omega/gpu_comprehensive_run.v1.json`
 
 Primary scripts:
 
 - `scripts/omega/omega_gpu_codegen_parity_gate.sh`
 - `scripts/omega/omega_gpu_binary_attest_gate.sh`
 - `scripts/omega/omega_gpu_runtime_attest_gate.sh`
+- `scripts/omega/omega_gpu_comprehensive_run.sh`
 
 ## Shared Status Semantics
 
@@ -41,6 +43,11 @@ Canonical blocker classes:
 - `pinned_version_mismatch`
 - `gpu_backend_unavailable`
 - `runtime_test_fail`
+- `native_lane_missing`
+- `native_lane_compile_fail`
+- `native_lane_runtime_fail`
+- `native_lane_parity_fail`
+- `native_lane_perf_regression`
 
 ## `gpu_codegen_parity.v1.json`
 
@@ -55,8 +62,18 @@ Required top-level fields:
 - `status_summary`
 - `strict_parity` (bool)
 - `targets[]` with per-lane status + output hash
+- `targets[].compile_mode|provenance|packer_schema` for fallback provenance
+- `native_lane_matrix_artifact` path to stdlib/native lane matrix source
+- `native_lanes[]` with status for `onn|qnn|snn|spnn|quantnn|hyper_math|exceptional`
 - `parity` summary object
 - `blockers[]`
+
+Bootstrap note:
+
+- `packed_from_ptx` is an allowed transitional status when native binary
+  emission is unavailable for a lane.
+- CUDA fallback schema: `sounio.omega.cuda-packer.v1`
+- ROCm fallback schema: `sounio.omega.rocm-packer.v1`
 
 ## `gpu_binary_attestation.v1.json`
 
@@ -72,6 +89,7 @@ Required top-level fields:
 - `binaries[]` (`path`, `size_bytes`, `sha256`, target metadata)
 - `hash_chain` (`algorithm`, `entries[]`, `head`)
 - `target_provenance[]`
+- `native_lanes[]` mirrored from parity artifact for provenance continuity
 - `blockers[]`
 
 ## `gpu_runtime_attest_gate.v1.json` Extensions
@@ -79,8 +97,27 @@ Required top-level fields:
 The runtime attestation contract now includes:
 
 - `target_profiles[]` copied from codegen parity outputs
+- `native_lanes[]` copied from codegen parity outputs
 - `binary_provenance.entries[]` copied from binary attestation outputs
 - `hash_chain` copied from binary attestation outputs
 
 This keeps runtime proof tied to concrete codegen and binary materialization
 artifacts.
+
+## `gpu_comprehensive_run.v1.json`
+
+Purpose: aggregate native-lane execution status, GPU codegen/attestation/runtime
+gates, and real-L4 benchmark outcomes into one optimization-ready run artifact.
+
+Required top-level fields:
+
+- `schema = "sounio.omega.gpu_comprehensive_run.v1"`
+- `generated_at_utc`
+- `mode`
+- `status_summary`
+- `reason`
+- `environment` (`gpu_host`, `gpu_user`, `remote_dir`)
+- `artifacts` map to source gate artifacts
+- `steps[]` with per-step `status`, `reason`, `rc`, and typed `blockers[]`
+- `hotspots[]` with optimization targets inferred from lane and benchmark signals
+- `blockers[]`
