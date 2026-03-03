@@ -37,16 +37,17 @@ struct Elf64Binary {
 struct StringTable {
     bytes: [i8; 131072],
     len: i64,
+    last_offset: i64,
 }
 
 fn string_table_new() -> StringTable {
-    StringTable { bytes: [0; 131072], len: 0 }
+    StringTable { bytes: [0; 131072], len: 0, last_offset: 0 }
 }
 
-// Add a string to the table, return its offset
-fn string_table_add(st: StringTable, s_bytes: [i8; 128], s_len: i64) -> (StringTable, i64) with Mut, Panic, Div {
+// Add a string to the table; offset stored in .last_offset
+fn string_table_add(st: StringTable, s_bytes: [i8; 128], s_len: i64) -> StringTable with Mut, Panic, Div {
     var t = st
-    let offset = t.len
+    t.last_offset = t.len
     var i = 0
     while i < s_len && t.len < 131072 {
         t.bytes[t.len as usize] = s_bytes[i as usize]
@@ -58,7 +59,31 @@ fn string_table_add(st: StringTable, s_bytes: [i8; 128], s_len: i64) -> (StringT
         t.bytes[t.len as usize] = 0
         t.len = t.len + 1
     }
-    (t, offset)
+    t
+}
+
+// Align data section to given boundary (pad with zero bytes)
+fn data_section_align(st: StringTable, alignment: i64) -> StringTable with Mut, Panic, Div {
+    var t = st
+    while (t.len % alignment) != 0 && t.len < 131072 {
+        t.bytes[t.len as usize] = 0
+        t.len = t.len + 1
+    }
+    t
+}
+
+// Add an f64 constant (as i64 bit pattern) to .rodata with 8-byte alignment.
+// Byte offset stored in .last_offset.
+fn data_section_add_f64(st: StringTable, bits: i64) -> StringTable with Mut, Panic, Div {
+    var t = data_section_align(st, 8)
+    t.last_offset = t.len
+    var i: i64 = 0
+    while i < 8 && (t.len + i) < 131072 {
+        t.bytes[(t.len + i) as usize] = ((bits >> (i * 8)) & 0xFF) as i8
+        i = i + 1
+    }
+    t.len = t.len + 8
+    t
 }
 
 fn elf_binary_new() -> Elf64Binary {
@@ -371,7 +396,7 @@ fn finalize_elf64(
         let rodata_va = base_addr + rodata_offset
         bin = emit_section_header(bin,
             7, sht_progbits, shf_alloc,
-            rodata_va, rodata_offset, rodata.len, 0, 0, 1, 0)
+            rodata_va, rodata_offset, rodata.len, 0, 0, 8, 0)
     }
 
     // .symtab: sh_link=strtab_shndx, sh_info=1 (first global symbol at index 1),

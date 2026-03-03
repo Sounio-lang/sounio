@@ -6,7 +6,7 @@ use parser::ast::{BinaryOp, UnaryOp}
 use ir::ir::{IrInstr, IrOpcode, IrRegList, IR_MAX_FUNCS}
 use native::encode::*
 use native::reloc::{RelocationTable, add_call_reloc, add_rip_reloc, patch_u32_le}
-use native::elf::{StringTable, string_table_add}
+use native::elf::{StringTable, string_table_add, data_section_add_f64}
 use native::regs::{param_reg}
 use native::frame::*
 //
@@ -245,11 +245,23 @@ fn lower_load_bool(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mu
 
 fn lower_load_float(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut, Panic, Div {
     var c = nc
-    // Reinterpret f64 bit pattern as i64 (IEEE 754 preserving).
     let bits = f64_to_bits(instr.imm_f64)
-    c.code = emit_mov_rax_imm(c.code, bits)
+
+    // Place f64 constant in .rodata (8-byte aligned)
+    c.rodata = data_section_add_f64(c.rodata, bits)
+    let data_offset = c.rodata.last_offset
+
+    // MOVSD xmm0, [rip + disp32] — 8 bytes: F2 0F 10 05 <disp32>
+    let movsd_pos = c.code.len
+    c.code = emit_movsd_xmm0_rip_disp32(c.code, 0)
+    c.relocs = add_rip_reloc(c.relocs, movsd_pos + 4, data_offset)
+
+    // MOVQ rax, xmm0 — transfer to GPR for stack storage
+    c.code = emit_movq_rax_xmm0(c.code)
+
     if instr.dst >= 0 {
         c.code = emit_store_rax_rbp_disp32(c.code, ir_slot_offset(instr.dst))
+        c.is_float_reg[instr.dst as usize] = 1
     }
     c
 }
@@ -262,8 +274,8 @@ fn lower_load_string(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with 
     var c = nc
 
     // Add string to .rodata, get offset
-    let (new_rodata, str_offset) = string_table_add(c.rodata, instr.name.buf, instr.name.len)
-    c.rodata = new_rodata
+    c.rodata = string_table_add(c.rodata, instr.name.buf, instr.name.len)
+    let str_offset = c.rodata.last_offset
 
     // Emit LEA rax, [rip + disp32] with placeholder
     // The LEA is 7 bytes: 48 8d 05 <disp32>
@@ -294,6 +306,10 @@ fn lower_copy(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut, Pa
     c.code = emit_load_rbp_disp32_rax(c.code, ir_slot_offset(instr.src1))
     if instr.dst >= 0 {
         c.code = emit_store_rax_rbp_disp32(c.code, ir_slot_offset(instr.dst))
+        // Propagate float type tracking
+        if instr.src1 >= 0 && instr.src1 < 512 {
+            c.is_float_reg[instr.dst as usize] = c.is_float_reg[instr.src1 as usize]
+        }
     }
     c
 }
@@ -302,24 +318,114 @@ fn lower_copy(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut, Pa
 // Binary operations
 // ============================================================================
 
+// Returns 1 if op is a comparison (produces integer 0/1), 0 if arithmetic (produces f64)
+fn is_comparison_op(op: BinaryOp) -> i64 {
+    if op == BinaryOp::OpEq { 1 }
+    else if op == BinaryOp::OpNe { 1 }
+    else if op == BinaryOp::OpLt { 1 }
+    else if op == BinaryOp::OpLe { 1 }
+    else if op == BinaryOp::OpGt { 1 }
+    else if op == BinaryOp::OpGe { 1 }
+    else { 0 }
+}
+
+// Float binary operation: xmm0 = LHS, xmm1 = RHS, result in rax
+fn emit_float_binop_code(nc: NativeCompiler, op: BinaryOp) -> NativeCompiler with Mut, Panic, Div {
+    var c = nc
+
+    if op == BinaryOp::OpAdd {
+        c.code = emit_addsd_xmm0_xmm1(c.code)
+        c.code = emit_movq_rax_xmm0(c.code)
+    } else if op == BinaryOp::OpSub {
+        c.code = emit_subsd_xmm0_xmm1(c.code)
+        c.code = emit_movq_rax_xmm0(c.code)
+    } else if op == BinaryOp::OpMul {
+        c.code = emit_mulsd_xmm0_xmm1(c.code)
+        c.code = emit_movq_rax_xmm0(c.code)
+    } else if op == BinaryOp::OpDiv {
+        c.code = emit_divsd_xmm0_xmm1(c.code)
+        c.code = emit_movq_rax_xmm0(c.code)
+    } else if op == BinaryOp::OpEq {
+        c.code = emit_ucomisd_xmm0_xmm1(c.code)
+        c.code = emit_sete_al(c.code)
+        c.code = emit_movzx_rax_al(c.code)
+    } else if op == BinaryOp::OpNe {
+        c.code = emit_ucomisd_xmm0_xmm1(c.code)
+        c.code = emit_setne_al(c.code)
+        c.code = emit_movzx_rax_al(c.code)
+    } else if op == BinaryOp::OpLt {
+        c.code = emit_ucomisd_xmm0_xmm1(c.code)
+        c.code = emit_setb_al(c.code)
+        c.code = emit_movzx_rax_al(c.code)
+    } else if op == BinaryOp::OpLe {
+        c.code = emit_ucomisd_xmm0_xmm1(c.code)
+        c.code = emit_setbe_al(c.code)
+        c.code = emit_movzx_rax_al(c.code)
+    } else if op == BinaryOp::OpGt {
+        c.code = emit_ucomisd_xmm0_xmm1(c.code)
+        c.code = emit_seta_al(c.code)
+        c.code = emit_movzx_rax_al(c.code)
+    } else if op == BinaryOp::OpGe {
+        c.code = emit_ucomisd_xmm0_xmm1(c.code)
+        c.code = emit_setae_al(c.code)
+        c.code = emit_movzx_rax_al(c.code)
+    }
+
+    c
+}
+
 fn lower_ir_binop(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut, Panic, Div {
     var c = nc
 
-    // Load LHS to rax, push; load RHS to rax; pop LHS to rbx
-    // After: rbx = LHS, rax = RHS
-    c.code = emit_load_rbp_disp32_rax(c.code, ir_slot_offset(instr.src1))
-    c.code = emit_push_rax(c.code)
-    c.code = emit_sub_rsp_8(c.code)      // maintain 16-byte alignment
-    c.code = emit_load_rbp_disp32_rax(c.code, ir_slot_offset(instr.src2))
-    c.code = emit_add_rsp_8(c.code)
-    c.code = emit_pop_rbx(c.code)
+    // Check if either operand is float
+    var is_float = 0
+    if instr.src1 >= 0 && instr.src1 < 512 {
+        if c.is_float_reg[instr.src1 as usize] == 1 {
+            is_float = 1
+        }
+    }
+    if instr.src2 >= 0 && instr.src2 < 512 {
+        if c.is_float_reg[instr.src2 as usize] == 1 {
+            is_float = 1
+        }
+    }
 
-    // Now rbx = LHS, rax = RHS
-    c = emit_binop_code(c, instr.bin_op)
+    if is_float == 1 {
+        // Float path: load src1 → rax → xmm0, src2 → rax → xmm1
+        c.code = emit_load_rbp_disp32_rax(c.code, ir_slot_offset(instr.src1))
+        c.code = emit_movq_xmm0_rax(c.code)
+        c.code = emit_load_rbp_disp32_rax(c.code, ir_slot_offset(instr.src2))
+        c.code = emit_movq_xmm1_rax(c.code)
 
-    // Store result (in rax) to dst slot
-    if instr.dst >= 0 {
-        c.code = emit_store_rax_rbp_disp32(c.code, ir_slot_offset(instr.dst))
+        c = emit_float_binop_code(c, instr.bin_op)
+        let is_cmp = is_comparison_op(instr.bin_op)
+
+        // Store result (in rax) to dst slot
+        if instr.dst >= 0 {
+            c.code = emit_store_rax_rbp_disp32(c.code, ir_slot_offset(instr.dst))
+            // Comparisons produce integer 0/1; arithmetic keeps float
+            if is_cmp == 1 {
+                c.is_float_reg[instr.dst as usize] = 0
+            } else {
+                c.is_float_reg[instr.dst as usize] = 1
+            }
+        }
+    } else {
+        // Integer path (original)
+        c.code = emit_load_rbp_disp32_rax(c.code, ir_slot_offset(instr.src1))
+        c.code = emit_push_rax(c.code)
+        c.code = emit_sub_rsp_8(c.code)      // maintain 16-byte alignment
+        c.code = emit_load_rbp_disp32_rax(c.code, ir_slot_offset(instr.src2))
+        c.code = emit_add_rsp_8(c.code)
+        c.code = emit_pop_rbx(c.code)
+
+        // Now rbx = LHS, rax = RHS
+        c = emit_binop_code(c, instr.bin_op)
+
+        // Store result (in rax) to dst slot
+        if instr.dst >= 0 {
+            c.code = emit_store_rax_rbp_disp32(c.code, ir_slot_offset(instr.dst))
+        }
     }
     c
 }
