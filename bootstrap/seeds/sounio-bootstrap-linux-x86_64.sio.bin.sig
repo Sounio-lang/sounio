@@ -1,1 +1,1 @@
-SOUNIO-SEED-SIG-V1 key=sounio-dev sha256=dd180021f8cfbc6341f13b62f52daa3aee0b02fe1d7cdea4f18d9ae4039feab0
+SOUNIO-SEED-SIG-V1 key=bootstrap-dev sha256=2f285342c842eb5e938081565e860e3f8bd189c8177e80f78c25dddbc22879bd
