@@ -17,7 +17,7 @@
 
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 GPU_HOST="${GPU_HOST:-10.100.100.215}"
 GPU_USER="${GPU_USER:-demetrios}"
 REMOTE_DIR="${REMOTE_DIR:-~/work/sounio}"
@@ -39,7 +39,7 @@ echo ""
 
 # Step 1: Generate augmented PTX on the L4
 echo "[1/4] Generating shadow-augmented PTX on L4..."
-ssh "${GPU_USER}@${GPU_HOST}" "cd ${REMOTE_DIR} && python3 scripts/ptx_shadow_augment.py ${PTX_BASELINE} ${PTX_AUGMENTED}"
+ssh "${GPU_USER}@${GPU_HOST}" "cd ${REMOTE_DIR} && python3 scripts/gpu/ptx_shadow_augment.py ${PTX_BASELINE} ${PTX_AUGMENTED}"
 
 # Step 2: Run baseline (no shadows)
 echo ""
@@ -47,7 +47,7 @@ echo "[2/4] Running baseline (no shadows)..."
 BASELINE_RESULTS=""
 for dim in ${DIMS}; do
     echo "  --- Baseline ${dim}x${dim} ---"
-    result=$(ssh "${GPU_USER}@${GPU_HOST}" "cd ${REMOTE_DIR} && GEMM_M=${dim} GEMM_N=${dim} GEMM_K=${dim} GEMM_ITERS=${ITERS} GEMM_PTX_FILE=${PTX_BASELINE} python3 scripts/cuda_gemm_dispatch.py 2>&1" | grep -oP 'GFLOPS:\s+\K[0-9.]+' || echo "0")
+    result=$(ssh "${GPU_USER}@${GPU_HOST}" "cd ${REMOTE_DIR} && GEMM_M=${dim} GEMM_N=${dim} GEMM_K=${dim} GEMM_ITERS=${ITERS} GEMM_PTX_FILE=${PTX_BASELINE} python3 scripts/gpu/cuda_gemm_dispatch.py 2>&1" | grep -oP 'GFLOPS:\s+\K[0-9.]+' || echo "0")
     echo "    GFLOPS: ${result}"
     BASELINE_RESULTS="${BASELINE_RESULTS}${dim}:${result} "
 done
@@ -58,7 +58,7 @@ echo "[3/4] Running augmented (with shadows)..."
 AUGMENTED_RESULTS=""
 for dim in ${DIMS}; do
     echo "  --- Augmented ${dim}x${dim} ---"
-    result=$(ssh "${GPU_USER}@${GPU_HOST}" "cd ${REMOTE_DIR} && GEMM_M=${dim} GEMM_N=${dim} GEMM_K=${dim} GEMM_ITERS=${ITERS} GEMM_PTX_FILE=${PTX_AUGMENTED} python3 scripts/cuda_gemm_dispatch.py 2>&1" | grep -oP 'GFLOPS:\s+\K[0-9.]+' || echo "0")
+    result=$(ssh "${GPU_USER}@${GPU_HOST}" "cd ${REMOTE_DIR} && GEMM_M=${dim} GEMM_N=${dim} GEMM_K=${dim} GEMM_ITERS=${ITERS} GEMM_PTX_FILE=${PTX_AUGMENTED} python3 scripts/gpu/cuda_gemm_dispatch.py 2>&1" | grep -oP 'GFLOPS:\s+\K[0-9.]+' || echo "0")
     echo "    GFLOPS: ${result}"
     AUGMENTED_RESULTS="${AUGMENTED_RESULTS}${dim}:${result} "
 done

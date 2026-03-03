@@ -4,7 +4,7 @@
 
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 REPORT_DIR="${REPORT_DIR:-$ROOT_DIR/artifacts/omega/l4_runs}"
 TIMESTAMP_UTC="$(date -u +%Y-%m-%dT%H-%M-%SZ)"
 REPORT_PATH="${REPORT_PATH:-$REPORT_DIR/l4_ncu_metrics.${TIMESTAMP_UTC}.v1.json}"
@@ -60,7 +60,7 @@ run_variant_ncu() {
   fi
 
   local cmd
-  cmd="cd ${REMOTE_DIR} && GEMM_M=${NCU_DIM} GEMM_N=${NCU_DIM} GEMM_K=${NCU_DIM} GEMM_ITERS=${NCU_ITERS} GEMM_PTX_FILE=${ptx_file} ncu --target-processes all --metrics ${NCU_METRICS} --csv python3 scripts/cuda_gemm_dispatch.py"
+  cmd="cd ${REMOTE_DIR} && GEMM_M=${NCU_DIM} GEMM_N=${NCU_DIM} GEMM_K=${NCU_DIM} GEMM_ITERS=${NCU_ITERS} GEMM_PTX_FILE=${ptx_file} ncu --target-processes all --metrics ${NCU_METRICS} --csv python3 scripts/gpu/cuda_gemm_dispatch.py"
 
   if run_remote "$cmd" >"$log_path" 2>&1; then
     printf '%s\tPASS\t%s\t%s\n' "$variant" "$ptx_file" "$log_path" >> "$ROWS_TSV"

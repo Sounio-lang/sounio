@@ -5,7 +5,7 @@
 
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 REPORT_DIR="${REPORT_DIR:-$ROOT_DIR/artifacts/omega/l4_runs}"
 TIMESTAMP_UTC="$(date -u +%Y-%m-%dT%H-%M-%SZ)"
 REPORT_PATH="${REPORT_PATH:-$REPORT_DIR/l4_optimized_no_rust_report.${TIMESTAMP_UTC}.v2.json}"
@@ -76,6 +76,15 @@ SHADOW_STRICT_VALIDITY_PACK_MODE="${SHADOW_STRICT_VALIDITY_PACK_MODE:-full}"
 SHADOW_FAST_VALIDITY_PACK_MODE="${SHADOW_FAST_VALIDITY_PACK_MODE:-packed}"
 VALUE_ONLY_VALIDITY_PACK_MODE="${VALUE_ONLY_VALIDITY_PACK_MODE:-none}"
 
+# Native shadow generator tuning controls (forwarded to generate_l4_shadow_variants.py).
+SHADOW_STRICT_SQRT_INTERVAL="${SHADOW_STRICT_SQRT_INTERVAL:-2}"
+SHADOW_STRICT_PROV_INTERVAL="${SHADOW_STRICT_PROV_INTERVAL:-1}"
+SHADOW_STRICT_FEEDBACK_INTERVAL="${SHADOW_STRICT_FEEDBACK_INTERVAL:-32}"
+SHADOW_FAST_PROV_INTERVAL="${SHADOW_FAST_PROV_INTERVAL:-64}"
+SHADOW_FAST_FEEDBACK_INTERVAL="${SHADOW_FAST_FEEDBACK_INTERVAL:-0}"
+SHADOW_STRICT_SLOT_CAP="${SHADOW_STRICT_SLOT_CAP:-16}"
+SHADOW_FAST_SLOT_CAP="${SHADOW_FAST_SLOT_CAP:-8}"
+
 ENABLE_NCU="${ENABLE_NCU:-1}"
 NCU_DIM="${NCU_DIM:-$TARGET_DIM}"
 NCU_ITERS="${NCU_ITERS:-5}"
@@ -105,6 +114,12 @@ copy_script_remote() {
   local src="$1"
   local dst="$2"
   scp "${SSH_OPTS[@]}" "$src" "${GPU_USER}@${GPU_HOST}:${dst}" >/dev/null
+}
+
+sync_remote_gpu_scripts() {
+  run_remote "mkdir -p ${REMOTE_DIR}/scripts/gpu" >/dev/null
+  copy_script_remote "$ROOT_DIR/scripts/gpu/cuda_gemm_dispatch.py" "${REMOTE_DIR}/scripts/gpu/cuda_gemm_dispatch.py"
+  copy_script_remote "$ROOT_DIR/scripts/gpu/cuda_cublas_baseline.py" "${REMOTE_DIR}/scripts/gpu/cuda_cublas_baseline.py"
 }
 
 SHADOW_STRICT_VARIANT_SOURCE="prebuilt"
@@ -165,23 +180,24 @@ ensure_shadow_variants() {
     return
   fi
 
+  run_remote "mkdir -p ${REMOTE_DIR}/scripts/gpu" >/dev/null
   # Keep helpers in sync with local repo so remote runs don't depend on stale copies.
-  copy_script_remote "$ROOT_DIR/scripts/generate_l4_shadow_variants.py" "${REMOTE_DIR}/scripts/generate_l4_shadow_variants.py"
-  copy_script_remote "$ROOT_DIR/scripts/ptx_shadow_augment.py" "${REMOTE_DIR}/scripts/ptx_shadow_augment.py"
+  copy_script_remote "$ROOT_DIR/scripts/gpu/generate_l4_shadow_variants.py" "${REMOTE_DIR}/scripts/gpu/generate_l4_shadow_variants.py"
+  copy_script_remote "$ROOT_DIR/scripts/gpu/ptx_shadow_augment.py" "${REMOTE_DIR}/scripts/gpu/ptx_shadow_augment.py"
 
   if [ "$need_strict" -eq 1 ]; then
-    if run_remote "cd ${REMOTE_DIR} && python3 scripts/generate_l4_shadow_variants.py --mode strict ${VALUE_ONLY_PTX_FILE} ${SHADOW_STRICT_PTX_FILE}" >/dev/null 2>&1; then
+    if run_remote "cd ${REMOTE_DIR} && python3 scripts/gpu/generate_l4_shadow_variants.py --mode strict --strict-sqrt-interval ${SHADOW_STRICT_SQRT_INTERVAL} --strict-prov-interval ${SHADOW_STRICT_PROV_INTERVAL} --strict-feedback-interval ${SHADOW_STRICT_FEEDBACK_INTERVAL} --fast-prov-interval ${SHADOW_FAST_PROV_INTERVAL} --fast-feedback-interval ${SHADOW_FAST_FEEDBACK_INTERVAL} --strict-slot-cap ${SHADOW_STRICT_SLOT_CAP} --fast-slot-cap ${SHADOW_FAST_SLOT_CAP} ${VALUE_ONLY_PTX_FILE} ${SHADOW_STRICT_PTX_FILE}" >/dev/null 2>&1; then
       SHADOW_STRICT_VARIANT_SOURCE="native_shadow_emitter"
-    elif [ "$ALLOW_LEGACY_SHADOW_AUGMENT_FALLBACK" = "1" ] && run_remote "cd ${REMOTE_DIR} && python3 scripts/ptx_shadow_augment.py --mode strict ${VALUE_ONLY_PTX_FILE} ${SHADOW_STRICT_PTX_FILE}" >/dev/null 2>&1; then
+    elif [ "$ALLOW_LEGACY_SHADOW_AUGMENT_FALLBACK" = "1" ] && run_remote "cd ${REMOTE_DIR} && python3 scripts/gpu/ptx_shadow_augment.py --mode strict ${VALUE_ONLY_PTX_FILE} ${SHADOW_STRICT_PTX_FILE}" >/dev/null 2>&1; then
       SHADOW_STRICT_VARIANT_SOURCE="legacy_shadow_augment"
     else
       SHADOW_STRICT_VARIANT_SOURCE="missing"
     fi
   fi
   if [ "$need_fast" -eq 1 ]; then
-    if run_remote "cd ${REMOTE_DIR} && python3 scripts/generate_l4_shadow_variants.py --mode fast ${VALUE_ONLY_PTX_FILE} ${SHADOW_FAST_PTX_FILE}" >/dev/null 2>&1; then
+    if run_remote "cd ${REMOTE_DIR} && python3 scripts/gpu/generate_l4_shadow_variants.py --mode fast --strict-sqrt-interval ${SHADOW_STRICT_SQRT_INTERVAL} --strict-prov-interval ${SHADOW_STRICT_PROV_INTERVAL} --strict-feedback-interval ${SHADOW_STRICT_FEEDBACK_INTERVAL} --fast-prov-interval ${SHADOW_FAST_PROV_INTERVAL} --fast-feedback-interval ${SHADOW_FAST_FEEDBACK_INTERVAL} --strict-slot-cap ${SHADOW_STRICT_SLOT_CAP} --fast-slot-cap ${SHADOW_FAST_SLOT_CAP} ${VALUE_ONLY_PTX_FILE} ${SHADOW_FAST_PTX_FILE}" >/dev/null 2>&1; then
       SHADOW_FAST_VARIANT_SOURCE="native_shadow_emitter"
-    elif [ "$ALLOW_LEGACY_SHADOW_AUGMENT_FALLBACK" = "1" ] && run_remote "cd ${REMOTE_DIR} && python3 scripts/ptx_shadow_augment.py --mode fast ${VALUE_ONLY_PTX_FILE} ${SHADOW_FAST_PTX_FILE}" >/dev/null 2>&1; then
+    elif [ "$ALLOW_LEGACY_SHADOW_AUGMENT_FALLBACK" = "1" ] && run_remote "cd ${REMOTE_DIR} && python3 scripts/gpu/ptx_shadow_augment.py --mode fast ${VALUE_ONLY_PTX_FILE} ${SHADOW_FAST_PTX_FILE}" >/dev/null 2>&1; then
       SHADOW_FAST_VARIANT_SOURCE="legacy_shadow_augment"
     else
       SHADOW_FAST_VARIANT_SOURCE="missing"
@@ -212,7 +228,7 @@ PY
 run_cublas_once() {
   local dim="$1"
   local log_path="$2"
-  if run_remote "cd ${REMOTE_DIR} && GEMM_DIMS=${dim} GEMM_ITERS=${GEMM_ITERS} python3 scripts/cuda_cublas_baseline.py" >"$log_path" 2>&1; then
+  if run_remote "cd ${REMOTE_DIR} && GEMM_DIMS=${dim} GEMM_ITERS=${GEMM_ITERS} python3 scripts/gpu/cuda_cublas_baseline.py" >"$log_path" 2>&1; then
     local gflops
     gflops="$(extract_first_gflops "$log_path")"
     local r0
@@ -229,7 +245,7 @@ run_variant_once() {
   local dim="$1"
   local ptx_file="$2"
   local log_path="$3"
-  if run_remote "cd ${REMOTE_DIR} && GEMM_M=${dim} GEMM_N=${dim} GEMM_K=${dim} GEMM_ITERS=${GEMM_ITERS} GEMM_PTX_FILE=${ptx_file} python3 scripts/cuda_gemm_dispatch.py" >"$log_path" 2>&1; then
+  if run_remote "cd ${REMOTE_DIR} && GEMM_M=${dim} GEMM_N=${dim} GEMM_K=${dim} GEMM_ITERS=${GEMM_ITERS} GEMM_PTX_FILE=${ptx_file} python3 scripts/gpu/cuda_gemm_dispatch.py" >"$log_path" 2>&1; then
     local gflops
     gflops="$(extract_first_gflops "$log_path")"
     local r0
@@ -339,6 +355,7 @@ VARIANT_VALIDITY[shadow_strict]="$SHADOW_STRICT_VALIDITY_PACK_MODE"
 VARIANT_VALIDITY[shadow_fast]="$SHADOW_FAST_VALIDITY_PACK_MODE"
 
 ensure_shadow_variants
+sync_remote_gpu_scripts
 
 for dim in "${DIMS[@]}"; do
   echo ""
@@ -346,7 +363,7 @@ for dim in "${DIMS[@]}"; do
 
   warm=1
   while [ "$warm" -le "$WARMUP_RUNS" ]; do
-    run_remote "cd ${REMOTE_DIR} && GEMM_DIMS=${dim} GEMM_ITERS=${GEMM_ITERS} python3 scripts/cuda_cublas_baseline.py" >/dev/null 2>&1 || true
+    run_remote "cd ${REMOTE_DIR} && GEMM_DIMS=${dim} GEMM_ITERS=${GEMM_ITERS} python3 scripts/gpu/cuda_cublas_baseline.py" >/dev/null 2>&1 || true
     warm=$((warm + 1))
   done
 
@@ -375,7 +392,7 @@ for dim in "${DIMS[@]}"; do
 
     warm=1
     while [ "$warm" -le "$WARMUP_RUNS" ]; do
-      run_remote "cd ${REMOTE_DIR} && GEMM_M=${dim} GEMM_N=${dim} GEMM_K=${dim} GEMM_ITERS=${GEMM_ITERS} GEMM_PTX_FILE=${ptx_file} python3 scripts/cuda_gemm_dispatch.py" >/dev/null 2>&1 || true
+      run_remote "cd ${REMOTE_DIR} && GEMM_M=${dim} GEMM_N=${dim} GEMM_K=${dim} GEMM_ITERS=${GEMM_ITERS} GEMM_PTX_FILE=${ptx_file} python3 scripts/gpu/cuda_gemm_dispatch.py" >/dev/null 2>&1 || true
       warm=$((warm + 1))
     done
 
@@ -404,7 +421,7 @@ if [ "$ENABLE_NCU" = "1" ]; then
   SHADOW_STRICT_PTX_FILE="$SHADOW_STRICT_PTX_FILE" \
   SHADOW_FAST_PTX_FILE="$SHADOW_FAST_PTX_FILE" \
   REPORT_PATH="$NCU_REPORT_PATH" \
-  bash "$ROOT_DIR/scripts/gpu_ncu_l4_collect.sh"
+  bash "$ROOT_DIR/scripts/gpu/gpu_ncu_l4_collect.sh"
   rc_ncu=$?
   set -e
   if [ "$rc_ncu" -eq 0 ] && [ -f "$NCU_REPORT_PATH" ]; then
@@ -428,6 +445,9 @@ export VALUE_ONLY_SMEM_BYTES SHADOW_STRICT_SMEM_BYTES SHADOW_FAST_SMEM_BYTES
 export SHADOW_STRICT_VARIANT_SOURCE SHADOW_FAST_VARIANT_SOURCE
 export VALUE_ONLY_PROVENANCE_FOLD_INTERVAL SHADOW_STRICT_PROVENANCE_FOLD_INTERVAL SHADOW_FAST_PROVENANCE_FOLD_INTERVAL
 export VALUE_ONLY_VALIDITY_PACK_MODE SHADOW_STRICT_VALIDITY_PACK_MODE SHADOW_FAST_VALIDITY_PACK_MODE
+export SHADOW_STRICT_SQRT_INTERVAL SHADOW_STRICT_PROV_INTERVAL SHADOW_STRICT_FEEDBACK_INTERVAL
+export SHADOW_FAST_PROV_INTERVAL SHADOW_FAST_FEEDBACK_INTERVAL
+export SHADOW_STRICT_SLOT_CAP SHADOW_FAST_SLOT_CAP
 export NCU_REPORT_PATH
 export NCU_COLLECTION_STATUS="$ncu_status"
 export REQUIRE_NATIVE_SHADOW_VARIANTS
@@ -483,6 +503,12 @@ variant_meta = {
         "smem_bytes": int(os.environ["SHADOW_STRICT_SMEM_BYTES"]),
         "provenance_fold_interval": int(os.environ["SHADOW_STRICT_PROVENANCE_FOLD_INTERVAL"]),
         "validity_pack_mode": os.environ["SHADOW_STRICT_VALIDITY_PACK_MODE"],
+        "shadow_tuning": {
+            "sqrt_interval": int(os.environ["SHADOW_STRICT_SQRT_INTERVAL"]),
+            "prov_interval": int(os.environ["SHADOW_STRICT_PROV_INTERVAL"]),
+            "feedback_interval": int(os.environ["SHADOW_STRICT_FEEDBACK_INTERVAL"]),
+            "slot_cap": int(os.environ["SHADOW_STRICT_SLOT_CAP"]),
+        },
     },
     "shadow_fast": {
         "kernel_variant": "shadow_fast",
@@ -497,6 +523,11 @@ variant_meta = {
         "smem_bytes": int(os.environ["SHADOW_FAST_SMEM_BYTES"]),
         "provenance_fold_interval": int(os.environ["SHADOW_FAST_PROVENANCE_FOLD_INTERVAL"]),
         "validity_pack_mode": os.environ["SHADOW_FAST_VALIDITY_PACK_MODE"],
+        "shadow_tuning": {
+            "prov_interval": int(os.environ["SHADOW_FAST_PROV_INTERVAL"]),
+            "feedback_interval": int(os.environ["SHADOW_FAST_FEEDBACK_INTERVAL"]),
+            "slot_cap": int(os.environ["SHADOW_FAST_SLOT_CAP"]),
+        },
     },
 }
 

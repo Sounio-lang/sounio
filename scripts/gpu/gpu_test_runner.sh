@@ -205,14 +205,14 @@ if [ "\$profile_ok" -ne 1 ] && [ "${GPU_DIRECT_DISPATCH_FALLBACK}" = "1" ]; then
       GEMM_K=${GEMM_K} \
       GEMM_ITERS=${GPU_DIRECT_ITERS} \
       GEMM_PTX_FILE="${GPU_DIRECT_PTX_FILE}" \
-      python3 scripts/cuda_gemm_dispatch.py >"\$direct_log" 2>&1
+      python3 scripts/gpu/cuda_gemm_dispatch.py >"\$direct_log" 2>&1
   else
     run_with_timeout "${GPU_PROFILE_TIMEOUT_SECS}" env \
       GEMM_M=${GEMM_M} \
       GEMM_N=${GEMM_N} \
       GEMM_K=${GEMM_K} \
       GEMM_ITERS=${GPU_DIRECT_ITERS} \
-      python3 scripts/cuda_gemm_dispatch.py >"\$direct_log" 2>&1
+      python3 scripts/gpu/cuda_gemm_dispatch.py >"\$direct_log" 2>&1
   fi
   direct_rc=\$?
   set -e
@@ -247,11 +247,11 @@ BASELINE="${BASELINE:-0}"
 if [ "$BASELINE" = "1" ]; then
   echo ""
   echo "=== cuBLAS SGEMM baseline ==="
-  ssh ${SSH_OPTS[@]} "${GPU_USER}@${GPU_HOST_IP}" <<BASELINE_SCRIPT
+  $SSH_CMD "${GPU_USER}@${GPU_HOST_IP}" <<BASELINE_SCRIPT
 export PATH="${REMOTE_CARGO_BIN}:\$PATH"
 cd ${REMOTE_DIR}
 GEMM_DIMS="${GEMM_M}" GEMM_ITERS="${GPU_DIRECT_ITERS}" \
-  python3 scripts/cuda_cublas_baseline.py 2>&1
+  python3 scripts/gpu/cuda_cublas_baseline.py 2>&1
 BASELINE_SCRIPT
   echo "GPU_BASELINE_STATUS=done"
 fi

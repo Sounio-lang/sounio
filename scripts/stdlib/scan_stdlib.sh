@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT_DIR"
 
 STDLIB_PATH="${ROOT_DIR}/stdlib"
@@ -99,21 +99,53 @@ for p in entrypoint_files:
     elif str(p) not in stub_mod_set:
         active_entrypoints.append(p)
 
-HYPER_ROOTS = {"nn", "onn", "qnn", "snn", "math"}
-HYPER_TOKENS = ("quaternion", "octonion", "sedenion", "hypercomplex", "g2", "clifford")
+HYPER_ROOTS = {"nn", "onn", "qnn", "snn", "spnn", "quantnn", "math"}
+HYPER_TOKENS = ("quaternion", "octonion", "sedenion", "hypercomplex", "g2", "clifford", "spiking", "quantum")
+HYPER_LANES = ("nn", "onn", "qnn", "snn", "spnn", "quantnn", "math")
 
 def is_hyper_path(path: Path) -> bool:
     rel = path.relative_to(stdlib_path)
     if not rel.parts:
         return False
-    if rel.parts[0] not in HYPER_ROOTS:
+    root = rel.parts[0]
+    if root not in HYPER_ROOTS:
         return False
+    if root in {"onn", "qnn", "snn", "spnn", "quantnn"}:
+        return True
     joined = "/".join(rel.parts).lower()
     return any(token in joined for token in HYPER_TOKENS)
 
 hyper_sio_files = [p for p in sio_files if is_hyper_path(p)]
 hyper_disabled_files = [p for p in disabled_files if is_hyper_path(p)]
 hyper_stub_mod_files = [p for p in stub_mod if is_hyper_path(p)]
+
+def lane_for_path(path: Path) -> str:
+    rel = path.relative_to(stdlib_path)
+    if not rel.parts:
+        return ""
+    lane = rel.parts[0]
+    if lane in HYPER_ROOTS:
+        return lane
+    return ""
+
+lane_active = {lane: [] for lane in HYPER_LANES}
+lane_disabled = {lane: [] for lane in HYPER_LANES}
+lane_stub_mod = {lane: [] for lane in HYPER_LANES}
+
+for p in hyper_sio_files:
+    lane = lane_for_path(p)
+    if lane in lane_active:
+        lane_active[lane].append(str(p.relative_to(stdlib_path)))
+
+for p in hyper_disabled_files:
+    lane = lane_for_path(p)
+    if lane in lane_disabled:
+        lane_disabled[lane].append(str(p.relative_to(stdlib_path)))
+
+for p in hyper_stub_mod_files:
+    lane = lane_for_path(p)
+    if lane in lane_stub_mod:
+        lane_stub_mod[lane].append(str(p.relative_to(stdlib_path)))
 
 obj = {
     "schema": "sounio.stdlib.inventory.v1",
@@ -137,6 +169,22 @@ obj = {
     "hyper_active_paths": [str(p.relative_to(stdlib_path)) for p in hyper_sio_files],
     "hyper_disabled_paths": [str(p.relative_to(stdlib_path)) for p in hyper_disabled_files],
     "hyper_stub_mod_paths": [str(p.relative_to(stdlib_path)) for p in hyper_stub_mod_files],
+    "hyper_lane_counts": {
+        lane: {
+            "active_files": len(lane_active[lane]),
+            "disabled_files": len(lane_disabled[lane]),
+            "stub_mod_files": len(lane_stub_mod[lane]),
+        }
+        for lane in HYPER_LANES
+    },
+    "hyper_lane_paths": {
+        lane: {
+            "active": lane_active[lane],
+            "disabled": lane_disabled[lane],
+            "stub_mod": lane_stub_mod[lane],
+        }
+        for lane in HYPER_LANES
+    },
 }
 out_path.write_text(json.dumps(obj, indent=2) + "\n", encoding="utf-8")
 PY

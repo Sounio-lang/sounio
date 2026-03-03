@@ -20,6 +20,15 @@ REMOTE_DIR="${REMOTE_DIR:-~/work/sounio}"
 
 ENABLE_NCU="${OMEGA_L4_ENABLE_NCU:-0}"
 FORCE_REGENERATE_SHADOW_VARIANTS="${OMEGA_L4_FORCE_REGENERATE_SHADOW_VARIANTS:-1}"
+BENCH_SCRIPT="${OMEGA_L4_BENCH_SCRIPT:-}"
+
+if [[ -z "$BENCH_SCRIPT" ]]; then
+  if [[ -x "$ROOT_DIR/scripts/benchmarks/l4_optimized_no_rust_bench.sh" ]]; then
+    BENCH_SCRIPT="$ROOT_DIR/scripts/benchmarks/l4_optimized_no_rust_bench.sh"
+  else
+    BENCH_SCRIPT="$ROOT_DIR/scripts/l4_optimized_no_rust_bench.sh"
+  fi
+fi
 
 TARGET_DIM="${TARGET_DIM:-4096}"
 TARGET_STRICT_OVERHEAD_MAX="${TARGET_STRICT_OVERHEAD_MAX:-3.0}"
@@ -129,6 +138,17 @@ if [[ "$MODE" == "off" ]]; then
   exit 0
 fi
 
+if [[ ! -x "$BENCH_SCRIPT" ]]; then
+  if [[ "$MODE" == "required" ]]; then
+    emit_status_json "fail" "benchmark_script_missing" "NOT RUN" "" "" "" "" "" 1 "[\"target_unavailable\"]"
+    echo "omega_l4_native_shadow_gate: status=fail reason=benchmark_script_missing script=$BENCH_SCRIPT report=$OUT_JSON" >&2
+    exit 2
+  fi
+  emit_status_json "not_run" "benchmark_script_missing" "NOT RUN" "" "" "" "" "" 0 "[\"target_unavailable\"]"
+  echo "omega_l4_native_shadow_gate: status=not_run reason=benchmark_script_missing script=$BENCH_SCRIPT report=$OUT_JSON"
+  exit 0
+fi
+
 SSH_OPTS=(
   -o BatchMode=yes
   -o ConnectTimeout=8
@@ -149,6 +169,7 @@ fi
 timestamp_utc="$(date -u +%Y-%m-%dT%H-%M-%SZ)"
 report_path="$REPORT_DIR/l4_optimized_no_rust_report.${timestamp_utc}.v2.json"
 latest_path="$REPORT_DIR/l4_optimized_no_rust_report.latest.v2.json"
+run_started_epoch="$(date +%s)"
 
 set +e
 SHADOW_VARIANT_GENERATOR_PREFERENCE="native" \
@@ -166,13 +187,18 @@ TARGET_DIM="$TARGET_DIM" \
 TARGET_STRICT_OVERHEAD_MAX="$TARGET_STRICT_OVERHEAD_MAX" \
 TARGET_FAST_SPEEDUP_MIN="$TARGET_FAST_SPEEDUP_MIN" \
 TARGET_FAST_DRIFT_MAX="$TARGET_FAST_DRIFT_MAX" \
-bash "$ROOT_DIR/scripts/l4_optimized_no_rust_bench.sh" >"$LOG_PATH" 2>&1
+bash "$BENCH_SCRIPT" >"$LOG_PATH" 2>&1
 bench_rc=$?
 set -e
 
-report_read_path="$report_path"
-if [[ ! -f "$report_read_path" && -f "$latest_path" ]]; then
-  report_read_path="$latest_path"
+report_read_path=""
+if [[ -f "$report_path" ]]; then
+  report_read_path="$report_path"
+elif [[ -f "$latest_path" ]]; then
+  latest_mtime="$(stat -c %Y "$latest_path" 2>/dev/null || echo 0)"
+  if [[ "$latest_mtime" -ge "$run_started_epoch" ]]; then
+    report_read_path="$latest_path"
+  fi
 fi
 
 benchmark_status="NOT RUN"
@@ -180,12 +206,15 @@ strict_overhead=""
 fast_speedup=""
 fast_drift=""
 blocked_reasons="[]"
-if [[ -f "$report_read_path" ]]; then
+if [[ -n "$report_read_path" && -f "$report_read_path" ]]; then
   benchmark_status="$(jq -r '.overall_status // "NOT RUN"' "$report_read_path")"
   strict_overhead="$(jq -r --arg dim "$TARGET_DIM" '.results.by_dimension[$dim].ratios.overhead_x_shadow_strict_vs_cublas // empty' "$report_read_path")"
   fast_speedup="$(jq -r --arg dim "$TARGET_DIM" '.results.by_dimension[$dim].ratios.speedup_x_shadow_fast_vs_shadow_strict // empty' "$report_read_path")"
   fast_drift="$(jq -r --arg dim "$TARGET_DIM" '.results.by_dimension[$dim].drift.numerical_drift_vs_strict_median // empty' "$report_read_path")"
   blocked_reasons="$(jq -c '.blocked_reasons // []' "$report_read_path")"
+elif [[ "$bench_rc" -ne 0 ]]; then
+  benchmark_status="FAIL"
+  blocked_reasons='["target_unavailable"]'
 fi
 
 if [[ "$bench_rc" -eq 0 && "$benchmark_status" == "PASS" ]]; then

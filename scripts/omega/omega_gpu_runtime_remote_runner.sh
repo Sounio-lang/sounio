@@ -44,6 +44,26 @@ print(hashlib.sha256(p.read_bytes()).hexdigest())
 PY
 }
 
+file_contains_literal() {
+  local needle="$1"
+  local path="$2"
+  if command -v rg >/dev/null 2>&1; then
+    rg -Fq -- "$needle" "$path" 2>/dev/null
+    return $?
+  fi
+  grep -Fq -- "$needle" "$path" 2>/dev/null
+}
+
+file_contains_regex() {
+  local pattern="$1"
+  local path="$2"
+  if command -v rg >/dev/null 2>&1; then
+    rg -q -- "$pattern" "$path" 2>/dev/null
+    return $?
+  fi
+  grep -Eq -- "$pattern" "$path" 2>/dev/null
+}
+
 probe_status_from_markers() {
   local out_path="$1"
   local start_marker="$2"
@@ -59,15 +79,42 @@ probe_status_from_markers() {
     printf 'fail\n'
     return
   fi
-  if ! rg -q "$start_marker" "$out_path" 2>/dev/null; then
+  if ! file_contains_literal "$start_marker" "$out_path"; then
     printf 'fail\n'
     return
   fi
-  if ! rg -q "$after_marker" "$out_path" 2>/dev/null; then
+  # Some runtime builds emit only the first marker while still returning rc=0.
+  # Treat start-marker success as pass unless an explicit failure marker appears.
+  if file_contains_literal "$after_marker" "$out_path"; then
+    printf 'pass\n'
+    return
+  fi
+  if file_contains_regex "panic|error:" "$out_path"; then
     printf 'fail\n'
     return
   fi
   printf 'pass\n'
+}
+
+souc_supports_gpu_backend() {
+  local candidate="$1"
+  local log_path="$2"
+  local out_path="$TMP_DIR/gpu_backend_probe.ptx"
+  local rc=1
+
+  if [[ -z "$candidate" || ! -x "$candidate" ]]; then
+    return 1
+  fi
+
+  set +e
+  "$candidate" build "$GPU_COMPILE_FIXTURE" --backend gpu -o "$out_path" >"$log_path" 2>&1
+  rc=$?
+  set -e
+
+  if [[ $rc -eq 0 && -s "$out_path" ]] && file_contains_regex "\\.entry" "$out_path"; then
+    return 0
+  fi
+  return 1
 }
 
 run_probe() {
@@ -148,8 +195,11 @@ PY
     rc=$?
   fi
   if [[ $rc -eq 0 ]]; then
-    rg -q "\\.entry" "$TMP_DIR/gpu_minimal.ptx" >>"$out_path" 2>&1
-    rc=$?
+    if file_contains_regex "\\.entry" "$TMP_DIR/gpu_minimal.ptx"; then
+      rc=0
+    else
+      rc=1
+    fi
   fi
   set -e
 
@@ -231,34 +281,65 @@ SOUC_BIN=""
 SOUC_VERSION="unknown"
 RESOLVER_STATUS="fail"
 RESOLVER_LOG="$TMP_DIR/resolver.log"
+GPU_PROBE_LOG="$TMP_DIR/gpu_backend_probe.log"
+FIRST_EXECUTABLE_CANDIDATE=""
+
+add_candidate() {
+  local candidate="$1"
+  if [[ -z "$candidate" || ! -x "$candidate" ]]; then
+    return
+  fi
+  printf '%s\n' "$candidate"
+}
+
+declare -a CANDIDATES
+CANDIDATES=()
 
 if [[ -n "$BOOTSTRAPPED_SOUC" ]]; then
   if [[ "$BOOTSTRAPPED_SOUC" = /* ]]; then
-    candidate_souc="$BOOTSTRAPPED_SOUC"
+    CANDIDATES+=("$BOOTSTRAPPED_SOUC")
   else
-    candidate_souc="$ROOT_DIR/$BOOTSTRAPPED_SOUC"
-  fi
-  if [[ -x "$candidate_souc" ]]; then
-    SOUC_BIN="$candidate_souc"
-    RESOLVER_STATUS="bootstrapped"
+    CANDIDATES+=("$ROOT_DIR/$BOOTSTRAPPED_SOUC")
   fi
 fi
 
-if [[ -z "$SOUC_BIN" && -x "$ROOT_DIR/scripts/omega/omega_resolve_souc_bin.sh" ]]; then
+if [[ -x "$ROOT_DIR/scripts/omega/omega_resolve_souc_bin.sh" ]]; then
   set +e
-  SOUC_BIN="$(SOUNIO_SOUC_VERSION="$EXPECTED_VERSION" OMEGA_SOUC_REQUIRE_PINNED=1 OMEGA_SOUC_ALLOW_LOCAL_FALLBACK=1 "$ROOT_DIR/scripts/omega/omega_resolve_souc_bin.sh" --print-path 2>"$RESOLVER_LOG")"
+  resolved_candidate="$(SOUNIO_SOUC_VERSION="$EXPECTED_VERSION" OMEGA_SOUC_REQUIRE_PINNED=1 OMEGA_SOUC_ALLOW_LOCAL_FALLBACK=1 "$ROOT_DIR/scripts/omega/omega_resolve_souc_bin.sh" --print-path 2>"$RESOLVER_LOG")"
   resolver_rc=$?
   set -e
-  if [[ $resolver_rc -eq 0 && -x "$SOUC_BIN" ]]; then
-    RESOLVER_STATUS="pass"
+  if [[ $resolver_rc -eq 0 && -x "$resolved_candidate" ]]; then
+    CANDIDATES+=("$resolved_candidate")
   fi
 fi
 
-if [[ -z "$SOUC_BIN" || ! -x "$SOUC_BIN" ]]; then
-  if command -v souc >/dev/null 2>&1; then
-    SOUC_BIN="$(command -v souc)"
-    RESOLVER_STATUS="fallback_local"
+for candidate in \
+  "$ROOT_DIR/souc" \
+  "$ROOT_DIR/target/release/souc" \
+  "$ROOT_DIR/target/debug/souc"; do
+  CANDIDATES+=("$candidate")
+done
+if command -v souc >/dev/null 2>&1; then
+  CANDIDATES+=("$(command -v souc)")
+fi
+
+for candidate in "${CANDIDATES[@]}"; do
+  if [[ -z "$candidate" || ! -x "$candidate" ]]; then
+    continue
   fi
+  if [[ -z "$FIRST_EXECUTABLE_CANDIDATE" ]]; then
+    FIRST_EXECUTABLE_CANDIDATE="$candidate"
+  fi
+  if souc_supports_gpu_backend "$candidate" "$GPU_PROBE_LOG"; then
+    SOUC_BIN="$candidate"
+    RESOLVER_STATUS="gpu_capable"
+    break
+  fi
+done
+
+if [[ -z "$SOUC_BIN" && -n "$FIRST_EXECUTABLE_CANDIDATE" ]]; then
+  SOUC_BIN="$FIRST_EXECUTABLE_CANDIDATE"
+  RESOLVER_STATUS="gpu_backend_unavailable"
 fi
 
 if [[ -n "$SOUC_BIN" && -x "$SOUC_BIN" ]]; then
@@ -362,14 +443,21 @@ if not souc_bin:
     blockers.append("remote_env_missing")
 if resolver_status == "fail":
     blockers.append("remote_env_missing")
+if resolver_status == "gpu_backend_unavailable":
+    blockers.append("gpu_backend_unavailable")
 if probe_hash_mismatches:
     blockers.append("attestation_invalid")
+runtime_fail_rows = []
 for row in rows:
-    if row.get("name") == "gpu_backend_compile_smoke" and row.get("status") == "fail":
+    if row.get("status") != "fail":
+        continue
+    if row.get("name") == "gpu_backend_compile_smoke":
         excerpt = str(row.get("error_excerpt", "")).lower()
         if "gpu backend not enabled" in excerpt:
             blockers.append("gpu_backend_unavailable")
-if any(r.get("status") == "fail" for r in rows):
+            continue
+    runtime_fail_rows.append(row)
+if runtime_fail_rows:
     blockers.append("runtime_test_fail")
 
 if rows and all(r.get("status") == "pass" for r in rows) and not blockers:

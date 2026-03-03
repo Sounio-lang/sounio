@@ -26,6 +26,15 @@ REG_RE = re.compile(r"^\s*\.reg\s+")
 RET_RE = re.compile(r"^\s*ret;")
 
 
+DEFAULT_STRICT_SQRT_INTERVAL = 1
+DEFAULT_STRICT_PROV_INTERVAL = 1
+DEFAULT_STRICT_FEEDBACK_INTERVAL = 32
+DEFAULT_FAST_PROV_INTERVAL = 16
+DEFAULT_FAST_FEEDBACK_INTERVAL = 0
+DEFAULT_STRICT_SLOT_CAP = 16
+DEFAULT_FAST_SLOT_CAP = 16
+
+
 @dataclass(frozen=True)
 class FmaInfo:
     line_idx: int
@@ -96,21 +105,31 @@ def gen_shadow_decl_and_init(mode: str, slots: int) -> list[str]:
     return [line + "\n" for line in out]
 
 
-def gen_shadow_step(mode: str, fma_index: int, slot: int, dst: str) -> list[str]:
+def gen_shadow_step(mode: str, fma_index: int, slot: int, dst: str, tuning: dict[str, int]) -> list[str]:
     out: list[str] = []
     out.append(f"    // native shadow step fma={fma_index} slot={slot} mode={mode}")
     if mode == "strict":
         out.append(f"    add.f32 %r_nsh_eps{slot}, %r_nsh_eps{slot}, 0f2EDBE6FF;")
-        out.append(f"    add.f32 %r_nsh_eps{slot}, %r_nsh_eps{slot}, 0f2EDBE6FF;")
-        out.append(f"    sqrt.approx.f32 %r_nsh_eps{slot}, %r_nsh_eps{slot};")
+        if fma_index % 2 == 0:
+            out.append(f"    add.f32 %r_nsh_eps{slot}, %r_nsh_eps{slot}, 0f2EDBE6FF;")
+        sqrt_interval = max(1, int(tuning["strict_sqrt_interval"]))
+        if fma_index % sqrt_interval == 0:
+            out.append(f"    sqrt.approx.f32 %r_nsh_eps{slot}, %r_nsh_eps{slot};")
         out.append(f"    add.f32 %r_nsh_eps{slot}, %r_nsh_eps{slot}, 0f2EDBE6FF;")
         out.append(f"    and.pred %p_nsh_valid{slot}, %p_nsh_valid{slot}, %p_nsh_valid{slot};")
-        out.append(f"    xor.b32 %r_nsh_prov{slot}, %r_nsh_prov{slot}, %r0;")
-        if fma_index % 32 == 0:
+        prov_interval = max(1, int(tuning["strict_prov_interval"]))
+        if fma_index % prov_interval == 0:
+            out.append(f"    xor.b32 %r_nsh_prov{slot}, %r_nsh_prov{slot}, %r0;")
+        feedback_interval = int(tuning["strict_feedback_interval"])
+        if feedback_interval > 0 and fma_index % feedback_interval == 0:
             out.append(f"    fma.rn.f32 {dst}, %r_nsh_eps{slot}, 0f2EDBE6FF, {dst};")
     else:
-        if fma_index % 16 == 0:
+        prov_interval = max(1, int(tuning["fast_prov_interval"]))
+        if fma_index % prov_interval == 0:
             out.append(f"    xor.b32 %r_nsh_prov{slot}, %r_nsh_prov{slot}, %r0;")
+        feedback_interval = int(tuning["fast_feedback_interval"])
+        if feedback_interval > 0 and fma_index % feedback_interval == 0:
+            out.append(f"    fma.rn.f32 {dst}, %r_nsh_eps{slot}, 0f2EDBE6FF, {dst};")
     return [line + "\n" for line in out]
 
 
@@ -144,7 +163,7 @@ def gen_fold_block(mode: str, slots: int, dst_anchor: str) -> list[str]:
     return [line + "\n" for line in out]
 
 
-def augment_native(ptx_text: str, mode: str) -> tuple[str, dict[str, int]]:
+def augment_native(ptx_text: str, mode: str, tuning: dict[str, int]) -> tuple[str, dict[str, int]]:
     lines = ptx_text.splitlines()
     fmas = parse_fmas(lines)
     if not fmas:
@@ -154,7 +173,9 @@ def augment_native(ptx_text: str, mode: str) -> tuple[str, dict[str, int]]:
     if reg_end < 0:
         raise RuntimeError("No .reg declaration block found in PTX")
 
-    slots_map = detect_inner_slots(fmas, max_slots=16)
+    slot_cap = int(tuning["strict_slot_cap"] if mode == "strict" else tuning["fast_slot_cap"])
+    slot_cap = max(1, slot_cap)
+    slots_map = detect_inner_slots(fmas, max_slots=slot_cap)
     if not slots_map:
         raise RuntimeError("Unable to map inner FMA slots")
     slots = max(slots_map.values()) + 1
@@ -176,7 +197,7 @@ def augment_native(ptx_text: str, mode: str) -> tuple[str, dict[str, int]]:
             continue
         slot = slots_map[global_fma_idx]
         dst = fmas[global_fma_idx].dst
-        step = gen_shadow_step(mode, global_fma_idx, slot, dst)
+        step = gen_shadow_step(mode, global_fma_idx, slot, dst, tuning)
         if len(step) <= 1:
             continue
         for j, step_line in enumerate(step):
@@ -202,14 +223,31 @@ def augment_native(ptx_text: str, mode: str) -> tuple[str, dict[str, int]]:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--mode", choices=("strict", "fast"), required=True)
+    parser.add_argument("--strict-sqrt-interval", type=int, default=DEFAULT_STRICT_SQRT_INTERVAL)
+    parser.add_argument("--strict-prov-interval", type=int, default=DEFAULT_STRICT_PROV_INTERVAL)
+    parser.add_argument("--strict-feedback-interval", type=int, default=DEFAULT_STRICT_FEEDBACK_INTERVAL)
+    parser.add_argument("--fast-prov-interval", type=int, default=DEFAULT_FAST_PROV_INTERVAL)
+    parser.add_argument("--fast-feedback-interval", type=int, default=DEFAULT_FAST_FEEDBACK_INTERVAL)
+    parser.add_argument("--strict-slot-cap", type=int, default=DEFAULT_STRICT_SLOT_CAP)
+    parser.add_argument("--fast-slot-cap", type=int, default=DEFAULT_FAST_SLOT_CAP)
     parser.add_argument("input_ptx")
     parser.add_argument("output_ptx")
     args = parser.parse_args()
 
+    tuning = {
+        "strict_sqrt_interval": max(1, int(args.strict_sqrt_interval)),
+        "strict_prov_interval": max(1, int(args.strict_prov_interval)),
+        "strict_feedback_interval": int(args.strict_feedback_interval),
+        "fast_prov_interval": max(1, int(args.fast_prov_interval)),
+        "fast_feedback_interval": int(args.fast_feedback_interval),
+        "strict_slot_cap": max(1, int(args.strict_slot_cap)),
+        "fast_slot_cap": max(1, int(args.fast_slot_cap)),
+    }
+
     with open(args.input_ptx, "r", encoding="utf-8") as f:
         ptx = f.read()
 
-    out, stats = augment_native(ptx, args.mode)
+    out, stats = augment_native(ptx, args.mode, tuning)
     with open(args.output_ptx, "w", encoding="utf-8") as f:
         f.write(f"// native_shadow_variant mode={args.mode}\n")
         f.write(out)
@@ -217,7 +255,14 @@ def main() -> int:
     print(
         "[native-shadow] "
         f"mode={args.mode} fmas={stats['fma_total']} slots={stats['shadow_slots']} "
-        f"steps={stats['shadow_steps']} chars={stats['chars_in']}->{stats['chars_out']}"
+        f"steps={stats['shadow_steps']} chars={stats['chars_in']}->{stats['chars_out']} "
+        f"strict_sqrt_interval={tuning['strict_sqrt_interval']} "
+        f"strict_prov_interval={tuning['strict_prov_interval']} "
+        f"strict_feedback_interval={tuning['strict_feedback_interval']} "
+        f"fast_prov_interval={tuning['fast_prov_interval']} "
+        f"fast_feedback_interval={tuning['fast_feedback_interval']} "
+        f"strict_slot_cap={tuning['strict_slot_cap']} "
+        f"fast_slot_cap={tuning['fast_slot_cap']}"
     )
     print(f"[native-shadow] output={args.output_ptx}")
     return 0

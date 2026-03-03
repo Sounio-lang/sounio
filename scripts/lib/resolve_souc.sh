@@ -98,6 +98,114 @@ sounio_cargo() {
   cargo "$@"
 }
 
+_SOUNIO_GPU_PROBE_REASON=""
+
+# Probe whether a given souc binary can actually build the GPU fixture.
+sounio_probe_gpu_backend() {
+  local candidate="$1"
+  local fixture="${2:-$_SOUNIO_ROOT_DIR/scripts/fixtures/gpu_minimal.sio}"
+  _SOUNIO_GPU_PROBE_REASON=""
+
+  if [[ -z "$candidate" || ! -x "$candidate" ]]; then
+    _SOUNIO_GPU_PROBE_REASON="souc_unavailable"
+    return 1
+  fi
+  if [[ ! -f "$fixture" ]]; then
+    _SOUNIO_GPU_PROBE_REASON="gpu_fixture_missing"
+    return 1
+  fi
+
+  local tmp_dir out_path log_path rc
+  tmp_dir="$(mktemp -d)"
+  out_path="$tmp_dir/gpu_probe.ptx"
+  log_path="$tmp_dir/gpu_probe.log"
+  set +e
+  "$candidate" build "$fixture" --backend gpu -o "$out_path" >"$log_path" 2>&1
+  rc=$?
+  set -e
+
+  if [[ $rc -eq 0 && -s "$out_path" ]] && rg -q '\.entry' "$out_path" >/dev/null 2>&1; then
+    rm -rf "$tmp_dir"
+    return 0
+  fi
+
+  if rg -qi "gpu backend not enabled|not built with gpu support|not built with gpu feature" "$log_path" >/dev/null 2>&1; then
+    _SOUNIO_GPU_PROBE_REASON="gpu_backend_unavailable"
+  elif rg -qi "unknown gpu target|unsupported gpu target|rocm unavailable|hip unavailable|amdgpu unavailable|target unavailable" "$log_path" >/dev/null 2>&1; then
+    _SOUNIO_GPU_PROBE_REASON="target_unavailable"
+  else
+    _SOUNIO_GPU_PROBE_REASON="gpu_probe_failed_rc_${rc}"
+  fi
+
+  rm -rf "$tmp_dir"
+  return 1
+}
+
+sounio_gpu_probe_reason() {
+  printf '%s' "${_SOUNIO_GPU_PROBE_REASON:-}"
+}
+
+# Resolve the first souc candidate that passes GPU backend probing.
+sounio_resolve_gpu_souc() {
+  local fixture="${1:-$_SOUNIO_ROOT_DIR/scripts/fixtures/gpu_minimal.sio}"
+  local preferred="${2:-}"
+  local -a candidates=()
+  local -a extras=()
+
+  _sounio_add_candidate() {
+    local c="$1"
+    local existing
+    if [[ -z "$c" ]]; then
+      return 0
+    fi
+    for existing in "${candidates[@]}"; do
+      if [[ "$existing" == "$c" ]]; then
+        return 0
+      fi
+    done
+    candidates+=("$c")
+  }
+
+  _sounio_add_candidate "$preferred"
+  _sounio_add_candidate "${SOUNIO_GPU_SOUC_BIN:-}"
+  _sounio_add_candidate "${SOUC_BIN:-}"
+  _sounio_add_candidate "$_SOUNIO_ROOT_DIR/artifacts/omega/souc-bin/souc-linux-x86_64-gpu"
+  _sounio_add_candidate "$_SOUNIO_ROOT_DIR/artifacts/omega/souc-bin/souc-linux-x86_64"
+  _sounio_add_candidate "$_SOUNIO_ROOT_DIR/souc"
+  _sounio_add_candidate "$_SOUNIO_ROOT_DIR/target/release/souc"
+  _sounio_add_candidate "$_SOUNIO_ROOT_DIR/target/debug/souc"
+
+  if _resolved_fallback="$(_sounio_resolve_bin 2>/dev/null || true)"; then
+    _sounio_add_candidate "$_resolved_fallback"
+  fi
+  unset _resolved_fallback
+
+  if [[ -n "${SOUNIO_GPU_SOUC_CANDIDATES:-}" ]]; then
+    IFS=':' read -r -a extras <<<"${SOUNIO_GPU_SOUC_CANDIDATES}"
+    for c in "${extras[@]}"; do
+      _sounio_add_candidate "$c"
+    done
+  fi
+
+  local c last_reason
+  last_reason="gpu_backend_unavailable"
+  for c in "${candidates[@]}"; do
+    if [[ ! -x "$c" ]]; then
+      continue
+    fi
+    if sounio_probe_gpu_backend "$c" "$fixture"; then
+      printf '%s\n' "$c"
+      return 0
+    fi
+    if [[ -n "$(sounio_gpu_probe_reason)" ]]; then
+      last_reason="$(sounio_gpu_probe_reason)"
+    fi
+  done
+
+  _SOUNIO_GPU_PROBE_REASON="$last_reason"
+  return 1
+}
+
 # If SOUC_BIN is not set or not executable, try to resolve it.
 if [[ -z "${SOUC_BIN:-}" ]] || [[ ! -x "${SOUC_BIN:-}" ]]; then
   _resolved="$(_sounio_resolve_bin 2>/dev/null || true)"

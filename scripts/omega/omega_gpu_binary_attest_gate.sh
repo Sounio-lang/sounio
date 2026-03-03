@@ -42,6 +42,7 @@ emit_status_json() {
   local binaries_json="$4"
   local hash_chain_json="$5"
   local provenance_json="$6"
+  local native_lanes_json="$7"
 
   jq -cn \
     --arg generated_at_utc "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
@@ -54,6 +55,7 @@ emit_status_json() {
     --argjson binaries "$binaries_json" \
     --argjson hash_chain "$hash_chain_json" \
     --argjson provenance "$provenance_json" \
+    --argjson native_lanes "$native_lanes_json" \
     '{
       schema: "sounio.omega.gpu_binary_attestation.v1",
       generated_at_utc: $generated_at_utc,
@@ -64,13 +66,14 @@ emit_status_json() {
       binaries: $binaries,
       hash_chain: $hash_chain,
       target_provenance: $provenance,
+      native_lanes: $native_lanes,
       blockers: $blockers,
       log_path: $log_path
     }' >"$OUT_JSON"
 }
 
 if [[ "$MODE" == "off" ]]; then
-  emit_status_json "not_run" "gate_disabled" "[]" "[]" '{"algorithm":"sha256-chain-v1","entries":[],"head":""}' '[]'
+  emit_status_json "not_run" "gate_disabled" "[]" "[]" '{"algorithm":"sha256-chain-v1","entries":[],"head":""}' '[]' '[]'
   echo "omega_gpu_binary_attest_gate: status=not_run reason=gate_disabled report=$OUT_JSON"
   exit 0
 fi
@@ -114,11 +117,32 @@ for row in target_rows:
     if lane:
         rows_by_lane[lane] = row
 
+def blocker_from_target_reason(reason: str) -> str:
+    text = (reason or "").strip().lower()
+    if text in {"isa_encode_unsupported", "binary_pack_fail", "driver_reject", "parity_fail", "attestation_invalid"}:
+        return text
+    if text in {"gpu_backend_unavailable", "target_unavailable", "souc_unavailable"}:
+        return "target_unavailable"
+    if "isa" in text or "encode" in text:
+        return "isa_encode_unsupported"
+    if "pack" in text or "binary" in text:
+        return "binary_pack_fail"
+    if "driver" in text or "runtime" in text or "launch" in text:
+        return "driver_reject"
+    if "parity" in text:
+        return "parity_fail"
+    return "target_unavailable"
+
 for lane in required_targets:
     row = rows_by_lane.get(lane)
-    if row is None or row.get("status") != "pass":
+    if row is None:
         if "target_unavailable" not in blockers:
             blockers.append("target_unavailable")
+        continue
+    if row.get("status") != "pass":
+        blocker = blocker_from_target_reason(str(row.get("reason", "")))
+        if blocker not in blockers:
+            blockers.append(blocker)
 
 pass_rows = [row for row in target_rows if isinstance(row, dict) and row.get("status") == "pass"]
 for row in pass_rows:
@@ -179,6 +203,34 @@ for idx, item in enumerate(binaries):
 if not binaries and "target_unavailable" not in blockers:
     blockers.append("target_unavailable")
 
+native_lanes = obj.get("native_lanes") if isinstance(obj.get("native_lanes"), list) else []
+
+def native_blocker(status: str, reason: str, fallback: str) -> str:
+    text = (reason or "").lower()
+    if status == "not_run" or "missing" in text or "not_run" in text:
+        return "native_lane_missing"
+    if "compile" in text or "check_failed" in text:
+        return "native_lane_compile_fail"
+    if "parity" in text or "golden" in text:
+        return "native_lane_parity_fail"
+    if "perf" in text or "throughput" in text:
+        return "native_lane_perf_regression"
+    if fallback:
+        return fallback
+    return "native_lane_runtime_fail"
+
+for lane_row in native_lanes:
+    if not isinstance(lane_row, dict):
+        continue
+    if not lane_row.get("required", False):
+        continue
+    lane_status = str(lane_row.get("status", "not_run"))
+    if lane_status == "pass":
+        continue
+    blocker = native_blocker(lane_status, str(lane_row.get("reason", "")), str(lane_row.get("blocker", "")))
+    if blocker not in blockers:
+        blockers.append(blocker)
+
 reason = "attestation_pass"
 if blockers:
     reason = blockers[0]
@@ -187,6 +239,7 @@ print(json.dumps({
     "blockers": blockers,
     "binaries": binaries,
     "provenance": provenance,
+    "native_lanes": native_lanes,
     "hash_chain": {
         "algorithm": "sha256-chain-v1",
         "entries": hash_entries,
@@ -229,6 +282,14 @@ print(json.dumps(obj.get("provenance", []), separators=(",", ":")))
 PY
 )"
 
+native_lanes_json="$(python3 - "$analysis_json" <<'PY'
+import json
+import sys
+obj = json.loads(sys.argv[1])
+print(json.dumps(obj.get("native_lanes", []), separators=(",", ":")))
+PY
+)"
+
 candidate_reason="$(python3 - "$analysis_json" <<'PY'
 import json
 import sys
@@ -249,7 +310,7 @@ if [[ "$blockers_json" != "[]" ]]; then
   fi
 fi
 
-emit_status_json "$status" "$reason" "$blockers_json" "$binaries_json" "$hash_chain_json" "$provenance_json"
+emit_status_json "$status" "$reason" "$blockers_json" "$binaries_json" "$hash_chain_json" "$provenance_json" "$native_lanes_json"
 
 if [[ "$status" == "pass" ]]; then
   echo "omega_gpu_binary_attest_gate: status=pass report=$OUT_JSON"

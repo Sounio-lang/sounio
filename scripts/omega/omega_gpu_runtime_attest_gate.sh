@@ -3,12 +3,14 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT_DIR"
+source "$ROOT_DIR/scripts/lib/resolve_souc.sh"
 
 MODE="${OMEGA_GPU_RUNTIME_GATE_MODE:-auto}"
 OUT_JSON="${OMEGA_GPU_RUNTIME_GATE_OUT:-$ROOT_DIR/artifacts/omega/gpu_runtime_attest_gate.v1.json}"
 LOG_PATH="${OMEGA_GPU_RUNTIME_GATE_LOG:-$ROOT_DIR/artifacts/omega/gpu_runtime_attest_gate.log}"
 PARITY_ARTIFACT="${OMEGA_GPU_CODEGEN_PARITY_JSON:-$ROOT_DIR/artifacts/omega/gpu_codegen_parity.v1.json}"
 BINARY_ATTEST_ARTIFACT="${OMEGA_GPU_BINARY_ATTEST_JSON:-$ROOT_DIR/artifacts/omega/gpu_binary_attestation.v1.json}"
+REQUIRED_NATIVE_LANES="${OMEGA_REQUIRED_NATIVE_LANES:-onn,qnn,snn,spnn,quantnn,hyper_math,exceptional}"
 GPU_HOST="${GPU_HOST:-10.100.100.215}"
 GPU_USER="${GPU_USER:-demetrios}"
 REMOTE_DIR="${REMOTE_DIR:-~/work/sounio}"
@@ -55,6 +57,14 @@ if [[ -x "$EXPECTED_VERSION_SOURCE_PATH" ]]; then
   if [[ $local_souc_rc -ne 0 || ! -x "$LOCAL_PINNED_SOUC_PATH" ]]; then
     LOCAL_PINNED_SOUC_PATH=""
   fi
+fi
+
+GPU_RUNTIME_LOCAL_SOUC_BIN="${OMEGA_GPU_RUNTIME_LOCAL_SOUC_BIN:-}"
+if [[ -z "$GPU_RUNTIME_LOCAL_SOUC_BIN" ]]; then
+  GPU_RUNTIME_LOCAL_SOUC_BIN="$LOCAL_PINNED_SOUC_PATH"
+fi
+if resolved_gpu_souc="$(sounio_resolve_gpu_souc "$ROOT_DIR/scripts/fixtures/gpu_minimal.sio" "$GPU_RUNTIME_LOCAL_SOUC_BIN" 2>/dev/null)"; then
+  LOCAL_PINNED_SOUC_PATH="$resolved_gpu_souc"
 fi
 
 PROBE_FILES=(
@@ -216,6 +226,8 @@ for row in parity_obj.get("targets", []) if isinstance(parity_obj.get("targets")
         "output_sha256": row.get("output_sha256", ""),
     })
 
+native_lanes = parity_obj.get("native_lanes", []) if isinstance(parity_obj.get("native_lanes"), list) else []
+
 hash_chain = binary_attest_obj.get("hash_chain", {}) if isinstance(binary_attest_obj.get("hash_chain"), dict) else {}
 binary_provenance_entries = binary_attest_obj.get("target_provenance", []) if isinstance(binary_attest_obj.get("target_provenance"), list) else []
 
@@ -244,6 +256,7 @@ obj = {
     "signature_valid": signature_valid,
     "gpu_info": gpu_info,
     "target_profiles": target_profiles,
+    "native_lanes": native_lanes,
     "binary_provenance": {
         "parity_artifact": str(parity_artifact_path) if parity_artifact_path is not None else "",
         "binary_attest_artifact": str(binary_attest_artifact_path) if binary_attest_artifact_path is not None else "",
@@ -371,7 +384,7 @@ fi
 VERDICT_FILE="$(mktemp)"
 trap 'rm -f "$REMOTE_OUT" "$VERDICT_FILE"' EXIT
 
-python3 - "$REMOTE_OUT" "$NONCE" "$EXPECTED_VERSION" "$FRESHNESS_MAX_SEC" "${REQUIRED_TESTS[@]}" >"$VERDICT_FILE" <<'PY'
+python3 - "$REMOTE_OUT" "$NONCE" "$EXPECTED_VERSION" "$FRESHNESS_MAX_SEC" "$PARITY_ARTIFACT" "$REQUIRED_NATIVE_LANES" "${REQUIRED_TESTS[@]}" >"$VERDICT_FILE" <<'PY'
 import datetime
 import hashlib
 import json
@@ -382,7 +395,9 @@ wrapper_path = Path(sys.argv[1]).resolve()
 nonce = sys.argv[2]
 expected_version = sys.argv[3]
 max_age_sec = int(sys.argv[4])
-required_tests = sys.argv[5:]
+parity_artifact = Path(sys.argv[5]).resolve()
+required_native_lanes = [lane.strip() for lane in sys.argv[6].split(",") if lane.strip()]
+required_tests = sys.argv[7:]
 
 raw = wrapper_path.read_text(encoding="utf-8", errors="replace").strip()
 wrapper = json.loads(raw)
@@ -427,6 +442,52 @@ for test_name in required_tests:
 if status != "pass":
     blockers.add("runtime_test_fail")
 
+native_lanes = []
+if parity_artifact.exists():
+    try:
+        parity_obj = json.loads(parity_artifact.read_text(encoding="utf-8", errors="replace"))
+        native_lanes = parity_obj.get("native_lanes") if isinstance(parity_obj.get("native_lanes"), list) else []
+    except Exception:
+        native_lanes = []
+else:
+    blockers.add("native_lane_missing")
+
+native_by_lane = {}
+for lane_row in native_lanes:
+    if isinstance(lane_row, dict):
+        lane = str(lane_row.get("lane", ""))
+        if lane:
+            native_by_lane[lane] = lane_row
+
+def lane_blocker(status_text: str, reason_text: str, fallback_text: str) -> str:
+    text = (reason_text or "").lower()
+    if status_text == "not_run" or "missing" in text or "not_run" in text:
+        return "native_lane_missing"
+    if "compile" in text or "check_failed" in text:
+        return "native_lane_compile_fail"
+    if "parity" in text or "golden" in text:
+        return "native_lane_parity_fail"
+    if "perf" in text or "throughput" in text:
+        return "native_lane_perf_regression"
+    if fallback_text:
+        return fallback_text
+    return "native_lane_runtime_fail"
+
+alias = {"hyper_math": "math"}
+for lane in required_native_lanes:
+    row = native_by_lane.get(lane)
+    if row is None:
+        mapped = alias.get(lane, lane)
+        row = native_by_lane.get(mapped)
+    if row is None:
+        blockers.add("native_lane_missing")
+        continue
+    lane_status = str(row.get("status", "not_run"))
+    if lane_status == "pass":
+        continue
+    blocker = lane_blocker(lane_status, str(row.get("reason", "")), str(row.get("blocker", "")))
+    blockers.add(blocker)
+
 final_status = "pass" if not blockers else "fail"
 
 out = {
@@ -435,6 +496,7 @@ out = {
     "payload": payload,
     "blockers": sorted(blockers),
     "tests": rows,
+    "native_lanes": native_lanes,
     "gpu_info": payload.get("gpu_info", ""),
     "souc_path": payload.get("souc_path", ""),
     "souc_version": payload.get("souc_version", ""),
