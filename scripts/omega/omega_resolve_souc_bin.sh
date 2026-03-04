@@ -12,6 +12,8 @@ SOUC_EXPECTED_SHA256="${SOUNIO_SOUC_SHA256:-}"
 SOUC_REQUIRE_PINNED="${OMEGA_SOUC_REQUIRE_PINNED:-1}"
 ALLOW_LOCAL_FALLBACK="${OMEGA_SOUC_ALLOW_LOCAL_FALLBACK:-0}"
 CANONICAL_PUBKEY="${OMEGA_CANONICAL_PUBKEY:-$ROOT_DIR/keys/bootstrap_ed25519.pub}"
+CANONICAL_PUBKEY_HEX="${OMEGA_CANONICAL_PUBKEY_HEX:-}"
+DEFAULT_CANONICAL_PUBKEY_HEX="7fff7a53baa75b84dacf68e2ed8c981827d6d90a4feb6fc476f6ec9b8be45b9f"
 PRINT_PATH=0
 
 if [ "$SOUC_VARIANT" = "jit" ]; then
@@ -73,6 +75,26 @@ resolve_local() {
 }
 
 mkdir -p "$SOUC_CACHE_DIR"
+
+if [ -z "$CANONICAL_PUBKEY_HEX" ] && [ ! -s "$CANONICAL_PUBKEY" ]; then
+  CANONICAL_PUBKEY_HEX="$DEFAULT_CANONICAL_PUBKEY_HEX"
+fi
+if [ -n "$CANONICAL_PUBKEY_HEX" ]; then
+  CANONICAL_PUBKEY_HEX="$(printf '%s' "$CANONICAL_PUBKEY_HEX" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')"
+  case "$CANONICAL_PUBKEY_HEX" in
+    ''|*[!0-9a-f]*)
+      echo "error: invalid OMEGA_CANONICAL_PUBKEY_HEX (must be lowercase hex)" >&2
+      exit 2
+      ;;
+  esac
+  if [ "${#CANONICAL_PUBKEY_HEX}" -ne 64 ]; then
+    echo "error: invalid OMEGA_CANONICAL_PUBKEY_HEX length ${#CANONICAL_PUBKEY_HEX} (expected 64)" >&2
+    exit 2
+  fi
+  CANONICAL_PUBKEY_PATH="$SOUC_CACHE_DIR/canonical_pubkey_${SOUC_VARIANT}.hex"
+  printf '%s\n' "$CANONICAL_PUBKEY_HEX" > "$CANONICAL_PUBKEY_PATH"
+  CANONICAL_PUBKEY="$CANONICAL_PUBKEY_PATH"
+fi
 
 if [ "$SOUC_VERSION" = "latest" ]; then
   ASSET_URL="${SOUNIO_SOUC_ASSET_URL:-}"
