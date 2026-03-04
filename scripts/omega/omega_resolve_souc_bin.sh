@@ -5,15 +5,28 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
 SOUC_VERSION="${SOUNIO_SOUC_VERSION:-1.0.0-beta.5}"
 SOUC_PLATFORM="${SOUNIO_SOUC_PLATFORM:-linux-x86_64}"
+SOUC_VARIANT="${SOUNIO_SOUC_VARIANT:-std}"
 SOUC_RELEASE_BASE_URL="${SOUNIO_SOUC_RELEASE_BASE_URL:-https://github.com/sounio-lang/sounio/releases/download}"
-SOUC_ASSET_NAME="${SOUNIO_SOUC_ASSET_NAME:-souc-${SOUC_PLATFORM}}"
 SOUC_CACHE_DIR="${SOUNIO_SOUC_CACHE_DIR:-$ROOT_DIR/artifacts/omega/souc-bin}"
 SOUC_EXPECTED_SHA256="${SOUNIO_SOUC_SHA256:-}"
 SOUC_REQUIRE_PINNED="${OMEGA_SOUC_REQUIRE_PINNED:-1}"
 ALLOW_LOCAL_FALLBACK="${OMEGA_SOUC_ALLOW_LOCAL_FALLBACK:-0}"
 CANONICAL_PUBKEY="${OMEGA_CANONICAL_PUBKEY:-$ROOT_DIR/keys/bootstrap_ed25519.pub}"
-PROVENANCE_OUT="${OMEGA_SOUC_PROVENANCE_OUT:-$ROOT_DIR/artifacts/omega/souc_release_provenance.v1.json}"
 PRINT_PATH=0
+
+if [ "$SOUC_VARIANT" = "jit" ]; then
+  SOUC_DEFAULT_ASSET_NAME="souc-${SOUC_PLATFORM}-jit"
+  SOUC_DEFAULT_PROVENANCE_OUT="$ROOT_DIR/artifacts/omega/souc_release_provenance.jit.v1.json"
+elif [ "$SOUC_VARIANT" = "std" ]; then
+  SOUC_DEFAULT_ASSET_NAME="souc-${SOUC_PLATFORM}"
+  SOUC_DEFAULT_PROVENANCE_OUT="$ROOT_DIR/artifacts/omega/souc_release_provenance.v1.json"
+else
+  echo "error: unsupported SOUNIO_SOUC_VARIANT '$SOUC_VARIANT' (expected std|jit)" >&2
+  exit 2
+fi
+
+SOUC_ASSET_NAME="${SOUNIO_SOUC_ASSET_NAME:-$SOUC_DEFAULT_ASSET_NAME}"
+PROVENANCE_OUT="${OMEGA_SOUC_PROVENANCE_OUT:-$SOUC_DEFAULT_PROVENANCE_OUT}"
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -74,23 +87,37 @@ SIG_PATH="$SOUC_CACHE_DIR/$SOUC_ASSET_NAME.sig"
 resolved=""
 if [ "$SOUC_REQUIRE_PINNED" = "1" ] && [ -n "$ASSET_URL" ]; then
   if command -v curl >/dev/null 2>&1; then
-    curl -fsSL "$ASSET_URL" -o "$BIN_PATH"
-    chmod +x "$BIN_PATH"
+    BIN_TMP_PATH="$BIN_PATH.download.$$"
+    SHA_TMP_PATH="$SHA_PATH.download.$$"
+    SIG_TMP_PATH="$SIG_PATH.download.$$"
+
+    rm -f "$BIN_TMP_PATH" "$SHA_TMP_PATH" "$SIG_TMP_PATH"
+    curl -fsSL "$ASSET_URL" -o "$BIN_TMP_PATH"
+    chmod +x "$BIN_TMP_PATH"
+    mv -f "$BIN_TMP_PATH" "$BIN_PATH"
 
     if [ -z "$SOUC_EXPECTED_SHA256" ]; then
       set +e
-      curl -fsSL "${ASSET_URL}.sha256" -o "$SHA_PATH"
+      curl -fsSL "${ASSET_URL}.sha256" -o "$SHA_TMP_PATH"
       sha_rc=$?
       set -e
-      if [ "$sha_rc" -eq 0 ] && [ -s "$SHA_PATH" ]; then
+      if [ "$sha_rc" -eq 0 ] && [ -s "$SHA_TMP_PATH" ]; then
+        mv -f "$SHA_TMP_PATH" "$SHA_PATH"
         SOUC_EXPECTED_SHA256="$(awk '{print $1}' "$SHA_PATH" | tr -d '[:space:]')"
+      else
+        rm -f "$SHA_TMP_PATH"
       fi
     fi
 
     set +e
-    curl -fsSL "${ASSET_URL}.sig" -o "$SIG_PATH"
+    curl -fsSL "${ASSET_URL}.sig" -o "$SIG_TMP_PATH"
     sig_rc=$?
     set -e
+    if [ "$sig_rc" -eq 0 ] && [ -s "$SIG_TMP_PATH" ]; then
+      mv -f "$SIG_TMP_PATH" "$SIG_PATH"
+    else
+      rm -f "$SIG_TMP_PATH"
+    fi
 
     VERIFY_ARGS=(
       --binary "$BIN_PATH"
