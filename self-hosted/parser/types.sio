@@ -65,6 +65,10 @@ impl Parser {
             self.parse_fn_type()
         } else if k == TokenKind::Knowledge {
             self.parse_knowledge_type()
+        } else if k == TokenKind::Intervention {
+            self.parse_epistemic_wrapper_type(TypeExprKind::TypeIntervention)
+        } else if k == TokenKind::Counterfactual {
+            self.parse_epistemic_wrapper_type(TypeExprKind::TypeCounterfactual)
         } else {
             // Named type (possibly with :: path and <> generic args)
             self.parse_named_type()
@@ -540,6 +544,77 @@ impl Parser {
         }
         (p, TypeExpr {
             kind: TypeExprKind::TypeKnowledge,
+            span: span,
+            path: empty_path(),
+            type_args: None,
+            inner: None,
+            array_size: None,
+            effects: None,
+            knowledge_info: Some(Box::new(info)),
+            refinement_info: None,
+        })
+    }
+
+    fn parse_epistemic_wrapper_type(self, wrapper_kind: TypeExprKind) -> (Parser, TypeExpr) with Mut, IO, Panic, Div, Alloc {
+        let start = self.current_span()
+        var p = self.advance()
+
+        let delim = p.peek()
+        var use_bracket = false
+        if delim == TokenKind::LBracket {
+            use_bracket = true
+            p = p.advance()
+        } else {
+            p = p.expect(TokenKind::Lt)
+        }
+
+        let pair = p.parse_type()
+        p = pair.0
+        let inner_ty = pair.1
+
+        var epsilon_opt: Option<Box<EpsilonBound>> = None
+        var validity_opt: Option<Box<ValidityCondition>> = None
+        var provenance_opt: Option<Box<AstProvenanceKind>> = None
+
+        if use_bracket {
+            while p.peek() == TokenKind::Comma {
+                p = p.advance()
+                let component_tok = p.peek()
+
+                if component_tok == TokenKind::Valid {
+                    p = p.advance()
+                    p = p.expect(TokenKind::LParen)
+                    let expr_pair = p.parse_expr()
+                    p = expr_pair.0
+                    p = p.expect(TokenKind::RParen)
+                    validity_opt = Some(Box::new(ValidityCondition { kind: ValidityKind::ValidAlways, expr: Some(Box::new(expr_pair.1)) }))
+                } else if component_tok == TokenKind::Derived {
+                    p = p.advance()
+                    provenance_opt = Some(Box::new(AstProvenanceKind::AstProvDerived))
+                } else if component_tok == TokenKind::Computed {
+                    p = p.advance()
+                    provenance_opt = Some(Box::new(AstProvenanceKind::AstProvComputed))
+                } else if component_tok == TokenKind::Measured {
+                    p = p.advance()
+                    provenance_opt = Some(Box::new(AstProvenanceKind::AstProvMeasured))
+                } else {
+                    p = p.advance()
+                }
+            }
+            p = p.expect(TokenKind::RBracket)
+        } else {
+            p = p.expect(TokenKind::Gt)
+        }
+
+        let span = p.span_from(start)
+        let info = KnowledgeTypeInfo {
+            inner_type: Box::new(inner_ty),
+            epsilon: epsilon_opt,
+            validity: validity_opt,
+            provenance: provenance_opt,
+        }
+        (p, TypeExpr {
+            kind: wrapper_kind,
             span: span,
             path: empty_path(),
             type_args: None,
