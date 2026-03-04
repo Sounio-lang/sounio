@@ -180,6 +180,14 @@ fn print_type_name(ty: TypeEntry) with IO, Mut, Panic, Div, Alloc {
             }
             print(">")
         }
+        TyValidated => {
+            print("Validated<")
+            match ty.inner {
+                Some(inner) => print_type_name(*inner)
+                None => print("?")
+            }
+            print(">")
+        }
         TyHyper => {
             print("Hyper<")
             if ty.algebra_kind == 0 { print("Real") }
@@ -970,6 +978,7 @@ impl Checker {
             TypeKnowledge => c.lower_knowledge_type(te.knowledge_info)
             TypeIntervention => c.lower_intervention_type(te.knowledge_info)
             TypeCounterfactual => c.lower_counterfactual_type(te.knowledge_info)
+            TypeValidated => c.lower_validated_type(te.knowledge_info)
             TypeRefinement => c.lower_refinement_type(te.refinement_info)
         }
         (result.0.exit_type_depth(), result.1)
@@ -1106,6 +1115,13 @@ impl Checker {
     fn lower_counterfactual_type(self, opt: Option<Box<KnowledgeTypeInfo>>) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
         match opt {
             Some(info) => check_counterfactual_type(self, *info)
+            None => (self, ty_error())
+        }
+    }
+
+    fn lower_validated_type(self, opt: Option<Box<KnowledgeTypeInfo>>) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+        match opt {
+            Some(info) => check_validated_type(self, *info)
             None => (self, ty_error())
         }
     }
@@ -2248,6 +2264,15 @@ impl Checker {
                 c = c.report_error_at(e.span, 12, 0, 0, 0)
                 (c, ty_error())
             }
+        } else if base_ty.kind == TypeKind::TyValidated {
+            if name_matches_str5(e.name, 118, 97, 108, 117, 101) {
+                (c, knowledge_inner(base_ty))
+            } else if name_matches_str7(e.name, 101, 112, 115, 105, 108, 111, 110) {
+                (c, ty_f64())
+            } else {
+                c = c.report_error_at(e.span, 12, 0, 0, 0)
+                (c, ty_error())
+            }
         } else if base_ty.kind == TypeKind::TyHyper {
             // Hyper field access: delegates to hyper.sio predicates
             // Complex: .real, .imag -> inner type
@@ -2617,12 +2642,15 @@ impl Checker {
 
     fn check_call_arg_knowledge_boundary(self, arg_ty: TypeEntry, param_ty: TypeEntry, call_span: Span) -> Checker with Mut, Panic, Div, Alloc, IO {
         let expected_ty = call_ref_inner_or_self(param_ty)
-        if expected_ty.kind != TypeKind::TyKnowledge {
+        if !is_epistemic_type(expected_ty) {
             return self
         }
         let provided_ty = call_ref_inner_or_self(arg_ty)
-        if provided_ty.kind != TypeKind::TyKnowledge || is_error_or_unknown(provided_ty) {
+        if !is_epistemic_type(provided_ty) || is_error_or_unknown(provided_ty) {
             return self
+        }
+        if provided_ty.kind != expected_ty.kind {
+            return self.report_error_at(call_span, 36, 0, 0, 0)
         }
         if knowledge_call_boundary_compatible(provided_ty, expected_ty) {
             self

@@ -123,6 +123,30 @@ fn check_counterfactual_type(checker: Checker, info: KnowledgeTypeInfo) -> (Chec
     (c, ty)
 }
 
+fn check_validated_type(checker: Checker, info: KnowledgeTypeInfo) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+    let pair = checker.lower_type_expr(*info.inner_type)
+    var c = pair.0
+    let inner_ty = pair.1
+
+    var eps_val: f64 = -1.0
+    match info.epsilon {
+        Some(eb) => {
+            let bound = *eb
+            if bound.value < 0.0 {
+                c = c.report_error_at(Span::dummy(), 22, 0, 0, 0)
+            } else if bound.value > 1.0 {
+                c = c.report_error_at(Span::dummy(), 22, 0, 0, 0)
+            } else {
+                eps_val = bound.value
+            }
+        }
+        None => {}
+    }
+
+    let ty = ty_validated(inner_ty, eps_val)
+    (c, ty)
+}
+
 fn knowledge_validity_expr_non_negative(opt: Option<Box<Expr>>) -> bool {
     match opt {
         Some(e) => {
@@ -218,8 +242,12 @@ fn is_counterfactual_type(ty: TypeEntry) -> bool {
     ty.kind == TypeKind::TyCounterfactual
 }
 
+fn is_validated_type(ty: TypeEntry) -> bool {
+    ty.kind == TypeKind::TyValidated
+}
+
 fn is_epistemic_type(ty: TypeEntry) -> bool {
-    ty.kind == TypeKind::TyKnowledge || ty.kind == TypeKind::TyIntervention || ty.kind == TypeKind::TyCounterfactual
+    ty.kind == TypeKind::TyKnowledge || ty.kind == TypeKind::TyIntervention || ty.kind == TypeKind::TyCounterfactual || ty.kind == TypeKind::TyValidated
 }
 
 fn knowledge_inner(ty: TypeEntry) -> TypeEntry with Mut, Panic, Div, Alloc {
@@ -474,6 +502,13 @@ fn knowledge_meta_from_ty(ty: TypeEntry) -> KnowledgeMeta with Mut, Panic, Div, 
             }
         }
         TypeKind::TyCounterfactual => {
+            KnowledgeMeta {
+                epsilon: ty.knowledge_epsilon,
+                validity: validity_always(),
+                provenance: provenance_new(ProvenanceKind::ProvDerived)
+            }
+        }
+        TypeKind::TyValidated => {
             KnowledgeMeta {
                 epsilon: ty.knowledge_epsilon,
                 validity: validity_always(),
@@ -836,7 +871,7 @@ fn knowledge_op_supported(op: BinaryOp) -> bool {
 // Check knowledge compatibility at function call boundaries
 // Considers epsilon, validity, and provenance
 fn knowledge_call_boundary_compatible(provided: TypeEntry, required: TypeEntry) -> bool with Mut, Panic, Div, Alloc {
-    if !is_knowledge_type(provided) || !is_knowledge_type(required) {
+    if !is_epistemic_type(provided) || !is_epistemic_type(required) {
         return false
     }
     if !types_equal(knowledge_inner(provided), knowledge_inner(required)) {
