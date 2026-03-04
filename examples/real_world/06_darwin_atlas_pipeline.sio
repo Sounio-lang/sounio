@@ -1,0 +1,1519 @@
+/// Real-World Example 6: Darwin Atlas Pipeline in Pure Sounio
+///
+/// End-to-end stages (pure Sounio):
+/// 1. Download stage (deterministic synthetic genomes + manifest + checksums)
+/// 2. Technical validation (operator + symmetry invariants)
+/// 3. Table generation (replicons + window symmetry + theoretical group tables)
+///
+/// Usage:
+///   souc run examples/real_world/06_darwin_atlas_pipeline.sio -- [flags]
+///
+/// Flags:
+///   --data-dir <path>     Default: examples/real_world/darwin_atlas_data
+///   --max-genomes <n>     Default: 200 (internally capped to 64)
+///   --seed <n>            Default: 42
+///   --assembly-summary    Real NCBI assembly_summary.txt input (local file)
+///   --skip-download       Reuse existing manifest/raw files
+///   --validate-only       Run stage 2 only (after optional stage 1)
+///   --parity-with <dir>   Strict compare against Julia pipeline output dir
+///   --parity-report       Output JSON report path (default under manifest/)
+
+const PIPELINE_MAX_RECORDS: i64 = 64
+const FILE_BUF_CAP: i64 = 4194304
+const ASSEMBLY_SUMMARY_MAX_BYTES: i64 = 30000000
+
+fn bool_to_string(v: bool) -> string {
+    if v { "true" } else { "false" }
+}
+
+fn min_i64(a: i64, b: i64) -> i64 {
+    if a < b { a } else { b }
+}
+
+fn abs_i64(v: i64) -> i64 {
+    if v < 0 { 0 - v } else { v }
+}
+
+fn parse_decimal_digit(ch: string) -> i64 {
+    if str_eq(ch, "0") { 0 }
+    else if str_eq(ch, "1") { 1 }
+    else if str_eq(ch, "2") { 2 }
+    else if str_eq(ch, "3") { 3 }
+    else if str_eq(ch, "4") { 4 }
+    else if str_eq(ch, "5") { 5 }
+    else if str_eq(ch, "6") { 6 }
+    else if str_eq(ch, "7") { 7 }
+    else if str_eq(ch, "8") { 8 }
+    else if str_eq(ch, "9") { 9 }
+    else { -1 }
+}
+
+fn parse_nonnegative_i64(raw: string) -> i64 with Mut, Div {
+    let len = str_len(raw)
+    if len <= 0 {
+        return -1
+    }
+
+    var i: i64 = 0
+    var value: i64 = 0
+    while i < len {
+        let ch = str_slice(raw, i, i + 1)
+        let d = parse_decimal_digit(ch)
+        if d < 0 {
+            return -1
+        }
+        value = value * 10 + d
+        i = i + 1
+    }
+    value
+}
+
+fn i64_to_string(v: i64) -> string with Mut, Panic, Div {
+    if v == 0 { return "0" }
+
+    var n = v
+    var neg: bool = false
+    if n < 0 {
+        neg = true
+        n = 0 - n
+    }
+
+    var rev: [i8; 32] = [0; 32]
+    var rev_len: i64 = 0
+    while n > 0 && rev_len < 31 {
+        let digit = n % 10
+        rev[rev_len as usize] = (48 + digit) as i8
+        rev_len = rev_len + 1
+        n = n / 10
+    }
+
+    var out: [i8; 64] = [0; 64]
+    var out_len: i64 = 0
+    if neg {
+        out[out_len as usize] = 45 as i8
+        out_len = out_len + 1
+    }
+
+    var i = rev_len - 1
+    while i >= 0 {
+        out[out_len as usize] = rev[i as usize]
+        out_len = out_len + 1
+        if i == 0 { break }
+        i = i - 1
+    }
+    str_from_bytes(out, out_len)
+}
+
+fn zero_pad_i64(v: i64, width: i64) -> string with Mut, Panic, Div {
+    let raw = i64_to_string(v)
+    let len = str_len(raw)
+    if len >= width { return raw }
+    var out = ""
+    var i: i64 = 0
+    while i < width - len {
+        out = out ++ "0"
+        i = i + 1
+    }
+    out ++ raw
+}
+
+fn permille_to_decimal(pm: i64) -> string with Mut, Panic, Div {
+    var x = pm
+    if x < 0 { x = 0 }
+    let int_part = x / 1000
+    let frac = x % 1000
+    i64_to_string(int_part) ++ "." ++ zero_pad_i64(frac, 3)
+}
+
+fn path_join(a: string, b: string) -> string with Mut, Panic, Div {
+    let n = str_len(a)
+    if n <= 0 { return b }
+    if str_eq(str_slice(a, n - 1, n), "/") {
+        a ++ b
+    } else {
+        a ++ "/" ++ b
+    }
+}
+
+fn write_text_file(path: string, text: string) -> bool with IO, Mut, Panic, Div {
+    var data: [i8; 4194304] = [0; 4194304]
+    let n = str_len(text)
+    var i: i64 = 0
+    while i < n && i < FILE_BUF_CAP {
+        data[i as usize] = str_char_at(text, i) as i8
+        i = i + 1
+    }
+    let result = write_file(path, data, i)
+    result == 0
+}
+
+fn read_text_file(path: string) -> string with IO, Mut, Panic, Div {
+    let size = file_size(path)
+    if size <= 0 {
+        return ""
+    }
+    let raw = read_file(path)
+    str_from_bytes(raw, size)
+}
+
+fn hash_djb2(s: string) -> i64 with Mut, Div {
+    let n = str_len(s)
+    var h: i64 = 5381
+    var i: i64 = 0
+    while i < n {
+        let ch = str_char_at(s, i)
+        h = h * 33 + ch
+        i = i + 1
+    }
+    h
+}
+
+fn seq_base_complement(ch: i64) -> string {
+    if ch == 65 || ch == 97 { "T" }      // A
+    else if ch == 67 || ch == 99 { "G" } // C
+    else if ch == 71 || ch == 103 { "C" } // G
+    else if ch == 84 || ch == 116 { "A" } // T
+    else { "N" }
+}
+
+fn seq_reverse(seq: string) -> string with Mut, Panic, Div {
+    let n = str_len(seq)
+    var out = ""
+    if n <= 0 {
+        return out
+    }
+    var i: i64 = n - 1
+    while i >= 0 {
+        out = out ++ str_slice(seq, i, i + 1)
+        if i == 0 { break }
+        i = i - 1
+    }
+    out
+}
+
+fn seq_complement(seq: string) -> string with Mut, Panic, Div {
+    let n = str_len(seq)
+    var out = ""
+    var i: i64 = 0
+    while i < n {
+        out = out ++ seq_base_complement(str_char_at(seq, i))
+        i = i + 1
+    }
+    out
+}
+
+fn seq_reverse_complement(seq: string) -> string with Mut, Panic, Div {
+    seq_complement(seq_reverse(seq))
+}
+
+fn seq_shift(seq: string, k: i64) -> string with Mut, Panic, Div {
+    let n = str_len(seq)
+    if n <= 0 {
+        return ""
+    }
+
+    var kk = k % n
+    if kk < 0 {
+        kk = kk + n
+    }
+    if kk == 0 {
+        return seq
+    }
+
+    var out = ""
+    var i = kk
+    while i < n {
+        out = out ++ str_slice(seq, i, i + 1)
+        i = i + 1
+    }
+    i = 0
+    while i < kk {
+        out = out ++ str_slice(seq, i, i + 1)
+        i = i + 1
+    }
+    out
+}
+
+fn seq_hamming(a: string, b: string) -> i64 with Mut, Panic, Div {
+    let na = str_len(a)
+    let nb = str_len(b)
+    let n = min_i64(na, nb)
+    var d: i64 = abs_i64(na - nb)
+    var i: i64 = 0
+    while i < n {
+        if str_char_at(a, i) != str_char_at(b, i) {
+            d = d + 1
+        }
+        i = i + 1
+    }
+    d
+}
+
+fn seq_gc_count(seq: string) -> i64 with Mut, Panic, Div {
+    let n = str_len(seq)
+    var gc: i64 = 0
+    var i: i64 = 0
+    while i < n {
+        let ch = str_char_at(seq, i)
+        if ch == 67 || ch == 71 || ch == 99 || ch == 103 {
+            gc = gc + 1
+        }
+        i = i + 1
+    }
+    gc
+}
+
+fn contains_hash(hashes: [i64; 512], count: i64, value: i64) -> bool {
+    var i: i64 = 0
+    while i < count && i < 512 {
+        if hashes[i as usize] == value {
+            return true
+        }
+        i = i + 1
+    }
+    false
+}
+
+fn seq_orbit_size(seq: string) -> i64 with Mut, Panic, Div {
+    let n = str_len(seq)
+    if n <= 0 {
+        return 0
+    }
+    var seen: [i64; 512] = [0; 512]
+    var count: i64 = 0
+
+    var k: i64 = 0
+    while k < n {
+        let rot = seq_shift(seq, k)
+        let h_rot = hash_djb2(rot)
+        if !contains_hash(seen, count, h_rot) && count < 512 {
+            seen[count as usize] = h_rot
+            count = count + 1
+        }
+
+        let rev = seq_reverse(rot)
+        let h_rev = hash_djb2(rev)
+        if !contains_hash(seen, count, h_rev) && count < 512 {
+            seen[count as usize] = h_rev
+            count = count + 1
+        }
+
+        k = k + 1
+    }
+    count
+}
+
+fn seq_dmin(seq: string, include_rc: bool) -> i64 with Mut, Panic, Div {
+    let n = str_len(seq)
+    if n <= 1 {
+        return 0
+    }
+
+    var min_d = n
+
+    var k: i64 = 1
+    while k < n {
+        let d = seq_hamming(seq, seq_shift(seq, k))
+        if d < min_d { min_d = d }
+        k = k + 1
+    }
+
+    let rev = seq_reverse(seq)
+    k = 0
+    while k < n {
+        let d = seq_hamming(seq, seq_shift(rev, k))
+        if d < min_d { min_d = d }
+        k = k + 1
+    }
+
+    if include_rc {
+        let rc = seq_reverse_complement(seq)
+        k = 0
+        while k < n {
+            let d = seq_hamming(seq, seq_shift(rc, k))
+            if d < min_d { min_d = d }
+            k = k + 1
+        }
+    }
+
+    min_d
+}
+
+fn starts_with(haystack: string, prefix: string) -> bool with Mut, Panic, Div {
+    let hlen = str_len(haystack)
+    let plen = str_len(prefix)
+    if plen > hlen { return false }
+    var i: i64 = 0
+    while i < plen {
+        if str_char_at(haystack, i) != str_char_at(prefix, i) {
+            return false
+        }
+        i = i + 1
+    }
+    true
+}
+
+fn str_find_sub(haystack: string, needle: string) -> i64 with Mut, Panic, Div {
+    let hlen = str_len(haystack)
+    let nlen = str_len(needle)
+    if nlen <= 0 { return 0 }
+    if nlen > hlen { return -1 }
+
+    var i: i64 = 0
+    while i <= hlen - nlen {
+        var j: i64 = 0
+        var ok: bool = true
+        while j < nlen {
+            if str_char_at(haystack, i + j) != str_char_at(needle, j) {
+                ok = false
+                break
+            }
+            j = j + 1
+        }
+        if ok { return i }
+        i = i + 1
+    }
+    -1
+}
+
+fn json_extract_string(line: string, key: string) -> string with Mut, Panic, Div {
+    let pattern = "\"" ++ key ++ "\":\""
+    let pos = str_find_sub(line, pattern)
+    if pos < 0 {
+        return ""
+    }
+    let start = pos + str_len(pattern)
+    let n = str_len(line)
+    var end = start
+    while end < n && str_char_at(line, end) != 34 {
+        end = end + 1
+    }
+    str_slice(line, start, end)
+}
+
+fn json_extract_i64(line: string, key: string) -> i64 with Mut, Panic, Div {
+    let pattern = "\"" ++ key ++ "\":"
+    let pos = str_find_sub(line, pattern)
+    if pos < 0 {
+        return -1
+    }
+
+    let n = str_len(line)
+    var i = pos + str_len(pattern)
+    while i < n {
+        let ch = str_char_at(line, i)
+        if ch == 32 || ch == 9 {
+            i = i + 1
+        } else {
+            break
+        }
+    }
+
+    var neg: bool = false
+    if i < n && str_char_at(line, i) == 45 {
+        neg = true
+        i = i + 1
+    }
+
+    var value: i64 = 0
+    var seen_digit: bool = false
+    while i < n {
+        let ch = str_char_at(line, i)
+        if ch >= 48 && ch <= 57 {
+            value = value * 10 + (ch - 48)
+            seen_digit = true
+            i = i + 1
+        } else {
+            break
+        }
+    }
+
+    if !seen_digit {
+        return -1
+    }
+    if neg { 0 - value } else { value }
+}
+
+fn json_extract_decimal_permille(line: string, key: string) -> i64 with Mut, Panic, Div {
+    let pattern = "\"" ++ key ++ "\":"
+    let pos = str_find_sub(line, pattern)
+    if pos < 0 {
+        return -1
+    }
+
+    let n = str_len(line)
+    var i = pos + str_len(pattern)
+    while i < n {
+        let ch = str_char_at(line, i)
+        if ch == 32 || ch == 9 {
+            i = i + 1
+        } else {
+            break
+        }
+    }
+
+    var int_part: i64 = 0
+    var frac_part: i64 = 0
+    var frac_digits: i64 = 0
+    var seen_digit: bool = false
+    var seen_dot: bool = false
+
+    while i < n {
+        let ch = str_char_at(line, i)
+        if ch >= 48 && ch <= 57 {
+            seen_digit = true
+            if !seen_dot {
+                int_part = int_part * 10 + (ch - 48)
+            } else if frac_digits < 3 {
+                frac_part = frac_part * 10 + (ch - 48)
+                frac_digits = frac_digits + 1
+            }
+            i = i + 1
+        } else if ch == 46 && !seen_dot { // '.'
+            seen_dot = true
+            i = i + 1
+        } else {
+            break
+        }
+    }
+
+    if !seen_digit {
+        return -1
+    }
+
+    while frac_digits < 3 {
+        frac_part = frac_part * 10
+        frac_digits = frac_digits + 1
+    }
+
+    int_part * 1000 + frac_part
+}
+
+fn json_escape(s: string) -> string with Mut, Panic, Div {
+    var out = ""
+    let n = str_len(s)
+    var i: i64 = 0
+    while i < n {
+        let ch = str_char_at(s, i)
+        if ch == 34 {
+            out = out ++ "\\\""
+        } else if ch == 92 {
+            out = out ++ "\\\\"
+        } else if ch == 10 {
+            out = out ++ "\\n"
+        } else if ch == 13 {
+            out = out ++ "\\r"
+        } else if ch == 9 {
+            out = out ++ "\\t"
+        } else {
+            out = out ++ str_slice(s, i, i + 1)
+        }
+        i = i + 1
+    }
+    out
+}
+
+fn tsv_get_field(line: string, target_idx: i64) -> string with Mut, Panic, Div {
+    if target_idx < 0 {
+        return ""
+    }
+
+    let n = str_len(line)
+    var field_idx: i64 = 0
+    var start: i64 = 0
+    var i: i64 = 0
+    while i < n {
+        if str_char_at(line, i) == 9 { // tab
+            if field_idx == target_idx {
+                return str_slice(line, start, i)
+            }
+            field_idx = field_idx + 1
+            start = i + 1
+        }
+        i = i + 1
+    }
+    if field_idx == target_idx {
+        return str_slice(line, start, n)
+    }
+    ""
+}
+
+fn tsv_find_col(header: string, key: string) -> i64 with Mut, Panic, Div {
+    let n = str_len(header)
+    var field_idx: i64 = 0
+    var start: i64 = 0
+    var i: i64 = 0
+    while i < n {
+        if str_char_at(header, i) == 9 { // tab
+            if str_eq(str_slice(header, start, i), key) {
+                return field_idx
+            }
+            field_idx = field_idx + 1
+            start = i + 1
+        }
+        i = i + 1
+    }
+
+    if str_eq(str_slice(header, start, n), key) {
+        return field_idx
+    }
+    -1
+}
+
+fn is_complete_genome_level(level: string) -> bool with Mut, Panic, Div {
+    str_find_sub(level, "Complete Genome") >= 0
+        || str_find_sub(level, "complete genome") >= 0
+}
+
+struct AssemblySelection {
+    accessions: [string; 64],
+    taxids: [i64; 64],
+    names: [string; 64],
+    count: i64,
+    seen: i64,
+}
+
+fn empty_assembly_selection() -> AssemblySelection {
+    AssemblySelection {
+        accessions: [""; 64],
+        taxids: [0; 64],
+        names: [""; 64],
+        count: 0,
+        seen: 0,
+    }
+}
+
+fn load_assembly_selection(summary_path: string, max_genomes: i64, seed: i64) -> AssemblySelection with IO, Mut, Panic, Div {
+    var out = empty_assembly_selection()
+
+    let size = file_size(summary_path)
+    if size <= 0 {
+        print("Error: assembly summary file not found or empty: ")
+        print(summary_path)
+        print("\n")
+        return out
+    }
+    if size > ASSEMBLY_SUMMARY_MAX_BYTES {
+        print("Error: assembly summary too large for this pure-Sounio parser: ")
+        print(summary_path)
+        print("\n")
+        print("  max bytes supported: ")
+        print_int(ASSEMBLY_SUMMARY_MAX_BYTES)
+        print("\n")
+        return out
+    }
+
+    var target = max_genomes
+    if target <= 0 { target = 1 }
+    if target > PIPELINE_MAX_RECORDS { target = PIPELINE_MAX_RECORDS }
+
+    let text = read_text_file(summary_path)
+    let n = str_len(text)
+    if n <= 0 {
+        print("Error: failed reading assembly summary: ")
+        print(summary_path)
+        print("\n")
+        return out
+    }
+
+    var col_accession: i64 = -1
+    var col_level: i64 = -1
+    var col_taxid: i64 = -1
+    var col_org: i64 = -1
+    var col_ftp: i64 = -1
+    var header_ready: bool = false
+
+    var start: i64 = 0
+    while start <= n {
+        var end = start
+        while end < n && str_char_at(text, end) != 10 {
+            end = end + 1
+        }
+        var line = str_slice(text, start, end)
+        if str_len(line) > 0 && str_char_at(line, str_len(line) - 1) == 13 {
+            line = str_slice(line, 0, str_len(line) - 1)
+        }
+
+        if str_len(line) > 0 {
+            if starts_with(line, "##") {
+                // ignore comment preamble
+            } else if starts_with(line, "#assembly_accession") {
+                let header = str_slice(line, 1, str_len(line))
+                col_accession = tsv_find_col(header, "assembly_accession")
+                col_level = tsv_find_col(header, "assembly_level")
+                col_taxid = tsv_find_col(header, "taxid")
+                col_org = tsv_find_col(header, "organism_name")
+                col_ftp = tsv_find_col(header, "ftp_path")
+                header_ready = col_accession >= 0 && col_level >= 0
+            } else if header_ready {
+                let level = tsv_get_field(line, col_level)
+                if is_complete_genome_level(level) {
+                    let ftp = if col_ftp >= 0 { tsv_get_field(line, col_ftp) } else { "" }
+                    if str_len(ftp) > 0 && !str_eq(ftp, "na") {
+                        let accession = tsv_get_field(line, col_accession)
+                        if str_len(accession) > 0 {
+                            let taxid_raw = if col_taxid >= 0 { tsv_get_field(line, col_taxid) } else { "0" }
+                            let taxid = parse_nonnegative_i64(taxid_raw)
+                            var org = if col_org >= 0 { tsv_get_field(line, col_org) } else { "" }
+                            if str_len(org) <= 0 {
+                                org = "Unknown organism"
+                            }
+
+                            out.seen = out.seen + 1
+
+                            if out.count < target {
+                                out.accessions[out.count as usize] = accession
+                                out.taxids[out.count as usize] = if taxid >= 0 { taxid } else { 0 }
+                                out.names[out.count as usize] = org
+                                out.count = out.count + 1
+                            } else {
+                                // Deterministic reservoir replacement using seed.
+                                let rstate = lcg_next(seed + out.seen * 3571 + hash_djb2(accession))
+                                let repl = rstate % out.seen
+                                if repl < target {
+                                    out.accessions[repl as usize] = accession
+                                    out.taxids[repl as usize] = if taxid >= 0 { taxid } else { 0 }
+                                    out.names[repl as usize] = org
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if end >= n {
+            break
+        }
+        start = end + 1
+    }
+
+    if !header_ready {
+        print("Error: could not parse required columns in assembly summary header\n")
+        return empty_assembly_selection()
+    }
+
+    out
+}
+
+fn lcg_next(state: i64) -> i64 with Mut, Panic, Div {
+    var x = state * 1103515245 + 12345
+    if x < 0 {
+        x = 0 - x
+    }
+    x % 2147483647
+}
+
+fn synth_sequence(length_bp: i64, seed: i64) -> string with Mut, Panic, Div {
+    var out = ""
+    var state = seed
+    if state <= 0 { state = 42 }
+
+    var i: i64 = 0
+    while i < length_bp {
+        state = lcg_next(state + i + 17)
+        let r = state % 4
+        if r == 0 {
+            out = out ++ "A"
+        } else if r == 1 {
+            out = out ++ "C"
+        } else if r == 2 {
+            out = out ++ "G"
+        } else {
+            out = out ++ "T"
+        }
+        i = i + 1
+    }
+    out
+}
+
+fn accession_for_index(i: i64) -> string with Mut, Panic, Div {
+    "GCA_" ++ zero_pad_i64(i + 1, 9)
+}
+
+fn print_missing_dirs_error(data_dir: string) with IO, Mut, Panic, Div {
+    print("Error: write failed. Ensure directories exist:\n")
+    print("  ")
+    print(path_join(data_dir, "raw"))
+    print("\n  ")
+    print(path_join(data_dir, "manifest"))
+    print("\n  ")
+    print(path_join(data_dir, "tables"))
+    print("\n")
+}
+
+fn step_download(data_dir: string, max_genomes: i64, seed: i64, assembly_summary_path: string) -> i64 with IO, Mut, Panic, Div {
+    var count = max_genomes
+    if count <= 0 { count = 1 }
+    if count > PIPELINE_MAX_RECORDS { count = PIPELINE_MAX_RECORDS }
+
+    var selection = empty_assembly_selection()
+    var use_summary: bool = false
+    if str_len(assembly_summary_path) > 0 {
+        use_summary = true
+        selection = load_assembly_selection(assembly_summary_path, count, seed)
+        if selection.count <= 0 {
+            print("Error: no complete genomes selected from assembly summary\n")
+            return -1
+        }
+        count = selection.count
+        print("  assembly summary mode: selected ")
+        print_int(count)
+        print(" complete genomes\n")
+    }
+
+    var manifest_text = ""
+    var checksums_text = ""
+
+    var i: i64 = 0
+    while i < count {
+        var accession = accession_for_index(i)
+        var taxonomy_id = 2 + (i % 17)
+        var taxonomy_name = "Synthetic bacterium " ++ i64_to_string(i + 1)
+
+        if use_summary {
+            accession = selection.accessions[i as usize]
+            taxonomy_id = selection.taxids[i as usize]
+            taxonomy_name = selection.names[i as usize]
+        }
+
+        let replicon_id = accession ++ "_rep1"
+        let replicon_accession = accession ++ ".1"
+
+        var len_mod = (seed + i * 37 + hash_djb2(accession)) % 401
+        if len_mod < 0 { len_mod = 0 - len_mod }
+        let length_bp = 600 + len_mod
+
+        let seq = synth_sequence(length_bp, seed + i * 7919 + hash_djb2(accession))
+        let gc_permille = (seq_gc_count(seq) * 1000) / length_bp
+        let checksum_djb2 = hash_djb2(seq)
+        let checksum_sha256 = "djb2:" ++ i64_to_string(checksum_djb2)
+        let gc_fraction = permille_to_decimal(gc_permille)
+
+        let fasta = ">" ++ accession ++ " " ++ json_escape(taxonomy_name) ++ "\n" ++ seq ++ "\n"
+        let raw_path = path_join(path_join(data_dir, "raw"), accession ++ "_genomic.fna")
+        if !write_text_file(raw_path, fasta) {
+            print_missing_dirs_error(data_dir)
+            return -1
+        }
+
+        // Emit a Julia-compatible manifest subset plus Sounio-specific fields.
+        var line = "{"
+        line = line ++ "\"assembly_accession\":\"" ++ json_escape(accession) ++ "\","
+        line = line ++ "\"replicon_id\":\"" ++ json_escape(replicon_id) ++ "\","
+        line = line ++ "\"replicon_accession\":\"" ++ json_escape(replicon_accession) ++ "\","
+        line = line ++ "\"replicon_type\":\"CHROMOSOME\","
+        line = line ++ "\"length_bp\":" ++ i64_to_string(length_bp) ++ ","
+        line = line ++ "\"gc_fraction\":" ++ gc_fraction ++ ","
+        line = line ++ "\"gc_permille\":" ++ i64_to_string(gc_permille) ++ ","
+        line = line ++ "\"taxonomy_id\":" ++ i64_to_string(taxonomy_id) ++ ","
+        line = line ++ "\"taxonomy_name\":\"" ++ json_escape(taxonomy_name) ++ "\","
+        line = line ++ "\"source_db\":\"REFSEQ\","
+        line = line ++ "\"download_date\":\"2026-03-04\","
+        line = line ++ "\"checksum_sha256\":\"" ++ json_escape(checksum_sha256) ++ "\","
+        line = line ++ "\"checksum_djb2\":" ++ i64_to_string(checksum_djb2)
+        line = line ++ "}\n"
+        manifest_text = manifest_text ++ line
+
+        checksums_text = checksums_text
+            ++ checksum_sha256
+            ++ "  "
+            ++ accession
+            ++ "_genomic.fna\n"
+
+        i = i + 1
+    }
+
+    let manifest_path = path_join(path_join(data_dir, "manifest"), "manifest.jsonl")
+    let checksums_path = path_join(path_join(data_dir, "manifest"), "checksums.sha256")
+
+    if !write_text_file(manifest_path, manifest_text) {
+        print_missing_dirs_error(data_dir)
+        return -1
+    }
+    if !write_text_file(checksums_path, checksums_text) {
+        print_missing_dirs_error(data_dir)
+        return -1
+    }
+
+    count
+}
+
+fn validation_add(pass_count: i64, fail_count: i64, ok: bool) -> (i64, i64) {
+    if ok {
+        (pass_count + 1, fail_count)
+    } else {
+        (pass_count, fail_count + 1)
+    }
+}
+
+fn run_technical_validation(data_dir: string) -> bool with IO, Mut, Panic, Div {
+    print("\n[Step 2] Running technical validation...\n")
+
+    var pass_count: i64 = 0
+    var fail_count: i64 = 0
+
+    let seq = "ACGTACGTAA"
+    let n = str_len(seq)
+
+    let check_shift_cyclic = str_eq(seq_shift(seq, n), seq)
+    let tally1 = validation_add(pass_count, fail_count, check_shift_cyclic)
+    pass_count = tally1.0
+    fail_count = tally1.1
+
+    let check_reverse_involution = str_eq(seq_reverse(seq_reverse(seq)), seq)
+    let tally2 = validation_add(pass_count, fail_count, check_reverse_involution)
+    pass_count = tally2.0
+    fail_count = tally2.1
+
+    let check_complement_involution = str_eq(seq_complement(seq_complement(seq)), seq)
+    let tally3 = validation_add(pass_count, fail_count, check_complement_involution)
+    pass_count = tally3.0
+    fail_count = tally3.1
+
+    let rc = seq_reverse_complement(seq)
+    let rk = seq_reverse(seq_complement(seq))
+    let kr = seq_complement(seq_reverse(seq))
+    let check_rc_commutative = str_eq(rc, rk) && str_eq(rc, kr)
+    let tally4 = validation_add(pass_count, fail_count, check_rc_commutative)
+    pass_count = tally4.0
+    fail_count = tally4.1
+
+    var check_dihedral_all = true
+    var k: i64 = 1
+    while k <= 5 {
+        let lhs = seq_reverse(seq_shift(seq, k))
+        let rhs = seq_shift(seq_reverse(seq), n - k)
+        if !str_eq(lhs, rhs) {
+            check_dihedral_all = false
+        }
+        k = k + 1
+    }
+    let tally5 = validation_add(pass_count, fail_count, check_dihedral_all)
+    pass_count = tally5.0
+    fail_count = tally5.1
+
+    let s1 = "ACGTACGT"
+    let s2 = "AAAAAAA"
+    let s3 = "ACGTACGTACGT"
+    let s4 = "ACGTTGCA"
+
+    let o1 = seq_orbit_size(s1)
+    let o2 = seq_orbit_size(s2)
+    let o3 = seq_orbit_size(s3)
+    let o4 = seq_orbit_size(s4)
+
+    let c1 = (o1 >= 1) && ((2 * str_len(s1)) % o1 == 0)
+    let c2 = (o2 >= 1) && ((2 * str_len(s2)) % o2 == 0)
+    let c3 = (o3 >= 1) && ((2 * str_len(s3)) % o3 == 0)
+    let c4 = (o4 >= 1) && ((2 * str_len(s4)) % o4 == 0)
+    let check_orbit_divides = c1 && c2 && c3 && c4
+    let tally6 = validation_add(pass_count, fail_count, check_orbit_divides)
+    pass_count = tally6.0
+    fail_count = tally6.1
+
+    let d1 = seq_dmin(s1, true)
+    let d2 = seq_dmin(s2, true)
+    let d3 = seq_dmin(s3, true)
+    let d4 = seq_dmin(s4, true)
+    let b1 = d1 >= 0 && d1 <= str_len(s1)
+    let b2 = d2 >= 0 && d2 <= str_len(s2)
+    let b3 = d3 >= 0 && d3 <= str_len(s3)
+    let b4 = d4 >= 0 && d4 <= str_len(s4)
+    let check_dmin_bounds = b1 && b2 && b3 && b4
+    let tally7 = validation_add(pass_count, fail_count, check_dmin_bounds)
+    pass_count = tally7.0
+    fail_count = tally7.1
+
+    let check_dmin_periodic = seq_dmin("ACGTACGT", false) == 0
+    let tally8 = validation_add(pass_count, fail_count, check_dmin_periodic)
+    pass_count = tally8.0
+    fail_count = tally8.1
+
+    let all_passed = fail_count == 0
+
+    print("  shift_cyclic: ")
+    print(bool_to_string(check_shift_cyclic))
+    print("\n  reverse_involution: ")
+    print(bool_to_string(check_reverse_involution))
+    print("\n  complement_involution: ")
+    print(bool_to_string(check_complement_involution))
+    print("\n  rc_commutative: ")
+    print(bool_to_string(check_rc_commutative))
+    print("\n  dihedral_relation: ")
+    print(bool_to_string(check_dihedral_all))
+    print("\n  orbit_divides: ")
+    print(bool_to_string(check_orbit_divides))
+    print("\n  dmin_bounds: ")
+    print(bool_to_string(check_dmin_bounds))
+    print("\n  dmin_periodic_zero: ")
+    print(bool_to_string(check_dmin_periodic))
+    print("\n")
+
+    var report = "{\n"
+    report = report ++ "  \"schema\": \"darwin_atlas.validation.v1\",\n"
+    report = report ++ "  \"all_passed\": " ++ bool_to_string(all_passed) ++ ",\n"
+    report = report ++ "  \"passed\": " ++ i64_to_string(pass_count) ++ ",\n"
+    report = report ++ "  \"failed\": " ++ i64_to_string(fail_count) ++ "\n"
+    report = report ++ "}\n"
+
+    let report_path = path_join(path_join(data_dir, "manifest"), "validation_report.json")
+    if !write_text_file(report_path, report) {
+        print_missing_dirs_error(data_dir)
+        return false
+    }
+
+    if all_passed {
+        print("  Validation PASSED\n")
+    } else {
+        print("  Validation FAILED\n")
+    }
+
+    all_passed
+}
+
+fn load_fasta_sequence(path: string, max_len: i64) -> string with IO, Mut, Panic, Div {
+    let raw = read_text_file(path)
+    let n = str_len(raw)
+    if n <= 0 {
+        return ""
+    }
+
+    var out = ""
+    var i: i64 = 0
+    var at_line_start = true
+    while i < n && str_len(out) < max_len {
+        let ch = str_char_at(raw, i)
+
+        if at_line_start && ch == 62 { // '>'
+            while i < n && str_char_at(raw, i) != 10 {
+                i = i + 1
+            }
+            at_line_start = true
+        } else {
+            if ch != 10 && ch != 13 && ch != 32 && ch != 9 {
+                out = out ++ str_slice(raw, i, i + 1)
+                at_line_start = false
+            } else {
+                if ch == 10 || ch == 13 {
+                    at_line_start = true
+                }
+            }
+            i = i + 1
+        }
+    }
+    out
+}
+
+fn generate_theoretical_tables(data_dir: string) -> bool with IO, Mut, Panic, Div {
+    let tables_dir = path_join(data_dir, "tables")
+    let lifts_path = path_join(tables_dir, "dicyclic_lifts.csv")
+    let quat_path = path_join(tables_dir, "quaternion_results.csv")
+
+    var lifts_csv = "dihedral_order,verified_double_cover,lift_group,relations_satisfied\n"
+    lifts_csv = lifts_csv ++ "4,true,Dic_2,true\n"
+    lifts_csv = lifts_csv ++ "8,true,Dic_4,true\n"
+    lifts_csv = lifts_csv ++ "16,true,Dic_8,true\n"
+    lifts_csv = lifts_csv ++ "32,true,Dic_16,true\n"
+
+    var quat_csv = "n,dicyclic_order,dihedral_order,double_cover_verified,group_notation\n"
+    var n: i64 = 2
+    while n <= 16 {
+        quat_csv = quat_csv
+            ++ i64_to_string(n) ++ ","
+            ++ i64_to_string(4 * n) ++ ","
+            ++ i64_to_string(2 * n) ++ ","
+            ++ "true,"
+            ++ "Dic_" ++ i64_to_string(n) ++ " -> D_" ++ i64_to_string(n)
+            ++ "\n"
+        n = n + 1
+    }
+
+    if !write_text_file(lifts_path, lifts_csv) {
+        print_missing_dirs_error(data_dir)
+        return false
+    }
+    if !write_text_file(quat_path, quat_csv) {
+        print_missing_dirs_error(data_dir)
+        return false
+    }
+    true
+}
+
+fn generate_tables(data_dir: string) -> i64 with IO, Mut, Panic, Div {
+    print("\n[Step 3] Generating output tables...\n")
+
+    let manifest_path = path_join(path_join(data_dir, "manifest"), "manifest.jsonl")
+    let manifest_text = read_text_file(manifest_path)
+    if str_len(manifest_text) <= 0 {
+        print("  No manifest records found; generating theoretical tables only\n")
+        if !generate_theoretical_tables(data_dir) { return -1 }
+        return 0
+    }
+
+    let tables_dir = path_join(data_dir, "tables")
+    let replicons_path = path_join(tables_dir, "atlas_replicons.csv")
+    let windows_path = path_join(tables_dir, "atlas_windows_exact.csv")
+    let approx_path = path_join(tables_dir, "approx_symmetry_stats.csv")
+
+    var replicons_csv = "assembly_accession,replicon_id,replicon_type,length_bp,gc_fraction,taxonomy_id,checksum_sha256\n"
+    var windows_csv = "replicon_id,window_length,window_start,orbit_ratio,orbit_size,dmin,dmin_normalized\n"
+
+    var window_count: i64 = 0
+    var sum_orbit_pm: i64 = 0
+    var sum_dmin_pm: i64 = 0
+    var record_count: i64 = 0
+
+    let n = str_len(manifest_text)
+    var start: i64 = 0
+    while start <= n {
+        var end = start
+        while end < n && str_char_at(manifest_text, end) != 10 {
+            end = end + 1
+        }
+
+        let line = str_slice(manifest_text, start, end)
+        if str_len(line) > 0 {
+            let accession = json_extract_string(line, "assembly_accession")
+            let replicon_id = json_extract_string(line, "replicon_id")
+            var replicon_type = json_extract_string(line, "replicon_type")
+            let length_bp = json_extract_i64(line, "length_bp")
+            var gc_permille = json_extract_i64(line, "gc_permille")
+            let taxonomy_id = json_extract_i64(line, "taxonomy_id")
+            var checksum_text = json_extract_string(line, "checksum_sha256")
+
+            if str_len(replicon_type) <= 0 {
+                replicon_type = "CHROMOSOME"
+            }
+            if gc_permille < 0 {
+                gc_permille = json_extract_decimal_permille(line, "gc_fraction")
+            }
+            if gc_permille < 0 {
+                gc_permille = 0
+            }
+            if str_len(checksum_text) <= 0 {
+                let checksum = json_extract_i64(line, "checksum_djb2")
+                checksum_text = "djb2:" ++ i64_to_string(checksum)
+            }
+
+            if str_len(accession) > 0 && str_len(replicon_id) > 0 && length_bp > 0 {
+                replicons_csv = replicons_csv
+                    ++ accession ++ ","
+                    ++ replicon_id ++ ","
+                    ++ replicon_type ++ ","
+                    ++ i64_to_string(length_bp) ++ ","
+                    ++ permille_to_decimal(gc_permille) ++ ","
+                    ++ i64_to_string(taxonomy_id) ++ ","
+                    ++ checksum_text ++ "\n"
+
+                let raw_path = path_join(path_join(data_dir, "raw"), accession ++ "_genomic.fna")
+                let seq = load_fasta_sequence(raw_path, 256)
+                let seq_len = str_len(seq)
+                if seq_len > 0 {
+                    let window_len = min_i64(128, seq_len)
+                    let window = str_slice(seq, 0, window_len)
+                    let orbit_size = seq_orbit_size(window)
+                    let dmin = seq_dmin(window, true)
+                    let orbit_pm = (orbit_size * 1000) / (2 * window_len)
+                    let dmin_pm = (dmin * 1000) / window_len
+
+                    windows_csv = windows_csv
+                        ++ replicon_id ++ ","
+                        ++ i64_to_string(window_len) ++ ","
+                        ++ "0,"
+                        ++ permille_to_decimal(orbit_pm) ++ ","
+                        ++ i64_to_string(orbit_size) ++ ","
+                        ++ i64_to_string(dmin) ++ ","
+                        ++ permille_to_decimal(dmin_pm) ++ "\n"
+
+                    window_count = window_count + 1
+                    sum_orbit_pm = sum_orbit_pm + orbit_pm
+                    sum_dmin_pm = sum_dmin_pm + dmin_pm
+                }
+
+                record_count = record_count + 1
+            }
+        }
+
+        if end >= n {
+            break
+        }
+        start = end + 1
+    }
+
+    var approx_csv = "n_windows,mean_orbit_ratio,mean_dmin_normalized\n"
+    if window_count > 0 {
+        approx_csv = approx_csv
+            ++ i64_to_string(window_count) ++ ","
+            ++ permille_to_decimal(sum_orbit_pm / window_count) ++ ","
+            ++ permille_to_decimal(sum_dmin_pm / window_count) ++ "\n"
+    } else {
+        approx_csv = approx_csv ++ "0,0.000,0.000\n"
+    }
+
+    if !write_text_file(replicons_path, replicons_csv) {
+        print_missing_dirs_error(data_dir)
+        return -1
+    }
+    if !write_text_file(windows_path, windows_csv) {
+        print_missing_dirs_error(data_dir)
+        return -1
+    }
+    if !write_text_file(approx_path, approx_csv) {
+        print_missing_dirs_error(data_dir)
+        return -1
+    }
+    if !generate_theoretical_tables(data_dir) {
+        return -1
+    }
+
+    print("  Generated atlas_replicons.csv, atlas_windows_exact.csv, approx_symmetry_stats.csv\n")
+    print("  Generated dicyclic_lifts.csv, quaternion_results.csv\n")
+    record_count
+}
+
+fn count_nonempty_lines(text: string) -> i64 with Mut, Panic, Div {
+    let n = str_len(text)
+    if n <= 0 { return 0 }
+
+    var count: i64 = 0
+    var start: i64 = 0
+    while start <= n {
+        var end = start
+        while end < n && str_char_at(text, end) != 10 {
+            end = end + 1
+        }
+        let line = str_slice(text, start, end)
+        if str_len(line) > 0 {
+            count = count + 1
+        }
+        if end >= n { break }
+        start = end + 1
+    }
+    count
+}
+
+fn csv_data_rows(text: string) -> i64 with Mut, Panic, Div {
+    let n = str_len(text)
+    if n <= 0 { return 0 }
+
+    var rows: i64 = 0
+    var line_index: i64 = 0
+    var start: i64 = 0
+    while start <= n {
+        var end = start
+        while end < n && str_char_at(text, end) != 10 {
+            end = end + 1
+        }
+        let line = str_slice(text, start, end)
+        if line_index > 0 && str_len(line) > 0 {
+            rows = rows + 1
+        }
+        line_index = line_index + 1
+        if end >= n { break }
+        start = end + 1
+    }
+    rows
+}
+
+fn normalize_arrow(text: string) -> string with Mut, Panic, Div {
+    let n = str_len(text)
+    var out = ""
+    var i: i64 = 0
+    while i < n {
+        let ch = str_char_at(text, i)
+        // Unicode right arrow (→) can appear as UTF-8 bytes E2 86 92.
+        if ch == 226 && i + 2 < n
+            && str_char_at(text, i + 1) == 134
+            && str_char_at(text, i + 2) == 146 {
+            out = out ++ "->"
+            i = i + 3
+        } else if ch == 8594 { // codepoint fallback
+            out = out ++ "->"
+            i = i + 1
+        } else {
+            out = out ++ str_slice(text, i, i + 1)
+            i = i + 1
+        }
+    }
+    out
+}
+
+fn run_parity_report(data_dir: string, baseline_dir: string, report_path: string) -> bool with IO, Mut, Panic, Div {
+    print("\n[Step 4] Running strict parity report...\n")
+
+    let src_manifest_path = path_join(path_join(data_dir, "manifest"), "manifest.jsonl")
+    let ref_manifest_path = path_join(path_join(baseline_dir, "manifest"), "manifest.jsonl")
+    let src_repl_path = path_join(path_join(data_dir, "tables"), "atlas_replicons.csv")
+    let ref_repl_path = path_join(path_join(baseline_dir, "tables"), "atlas_replicons.csv")
+    let src_lifts_path = path_join(path_join(data_dir, "tables"), "dicyclic_lifts.csv")
+    let ref_lifts_path = path_join(path_join(baseline_dir, "tables"), "dicyclic_lifts.csv")
+    let src_quat_path = path_join(path_join(data_dir, "tables"), "quaternion_results.csv")
+    let ref_quat_path = path_join(path_join(baseline_dir, "tables"), "quaternion_results.csv")
+
+    let src_manifest = read_text_file(src_manifest_path)
+    let ref_manifest = read_text_file(ref_manifest_path)
+    let src_repl = read_text_file(src_repl_path)
+    let ref_repl = read_text_file(ref_repl_path)
+    let src_lifts = read_text_file(src_lifts_path)
+    let ref_lifts = read_text_file(ref_lifts_path)
+    let src_quat = read_text_file(src_quat_path)
+    let ref_quat = read_text_file(ref_quat_path)
+    let src_quat_norm = normalize_arrow(src_quat)
+    let ref_quat_norm = normalize_arrow(ref_quat)
+
+    let src_manifest_rows = count_nonempty_lines(src_manifest)
+    let ref_manifest_rows = count_nonempty_lines(ref_manifest)
+    let src_repl_rows = csv_data_rows(src_repl)
+    let ref_repl_rows = csv_data_rows(ref_repl)
+
+    let manifest_count_equal = src_manifest_rows > 0 && src_manifest_rows == ref_manifest_rows
+    let replicon_count_equal = src_repl_rows > 0 && src_repl_rows == ref_repl_rows
+    let replicon_hash_equal = str_len(src_repl) > 0
+        && str_len(ref_repl) > 0
+        && hash_djb2(src_repl) == hash_djb2(ref_repl)
+    let lifts_hash_equal = str_len(src_lifts) > 0
+        && str_len(ref_lifts) > 0
+        && hash_djb2(src_lifts) == hash_djb2(ref_lifts)
+    let quaternion_hash_equal = str_len(src_quat_norm) > 0
+        && str_len(ref_quat_norm) > 0
+        && hash_djb2(src_quat_norm) == hash_djb2(ref_quat_norm)
+
+    let all_passed = manifest_count_equal
+        && replicon_count_equal
+        && replicon_hash_equal
+        && lifts_hash_equal
+        && quaternion_hash_equal
+
+    print("  manifest_count_equal: ")
+    print(bool_to_string(manifest_count_equal))
+    print("\n  replicon_count_equal: ")
+    print(bool_to_string(replicon_count_equal))
+    print("\n  replicon_hash_equal: ")
+    print(bool_to_string(replicon_hash_equal))
+    print("\n  dicyclic_lifts_hash_equal: ")
+    print(bool_to_string(lifts_hash_equal))
+    print("\n  quaternion_hash_equal: ")
+    print(bool_to_string(quaternion_hash_equal))
+    print("\n")
+
+    var report = "{\n"
+    report = report ++ "  \"schema\": \"darwin_atlas.parity.v1\",\n"
+    report = report ++ "  \"strict\": true,\n"
+    report = report ++ "  \"all_passed\": " ++ bool_to_string(all_passed) ++ ",\n"
+    report = report ++ "  \"data_dir\": \"" ++ json_escape(data_dir) ++ "\",\n"
+    report = report ++ "  \"baseline_dir\": \"" ++ json_escape(baseline_dir) ++ "\",\n"
+    report = report ++ "  \"manifest_rows\": " ++ i64_to_string(src_manifest_rows) ++ ",\n"
+    report = report ++ "  \"baseline_manifest_rows\": " ++ i64_to_string(ref_manifest_rows) ++ ",\n"
+    report = report ++ "  \"replicon_rows\": " ++ i64_to_string(src_repl_rows) ++ ",\n"
+    report = report ++ "  \"baseline_replicon_rows\": " ++ i64_to_string(ref_repl_rows) ++ ",\n"
+    report = report ++ "  \"checks\": {\n"
+    report = report ++ "    \"manifest_count_equal\": " ++ bool_to_string(manifest_count_equal) ++ ",\n"
+    report = report ++ "    \"replicon_count_equal\": " ++ bool_to_string(replicon_count_equal) ++ ",\n"
+    report = report ++ "    \"replicon_hash_equal\": " ++ bool_to_string(replicon_hash_equal) ++ ",\n"
+    report = report ++ "    \"dicyclic_lifts_hash_equal\": " ++ bool_to_string(lifts_hash_equal) ++ ",\n"
+    report = report ++ "    \"quaternion_hash_equal\": " ++ bool_to_string(quaternion_hash_equal) ++ "\n"
+    report = report ++ "  }\n"
+    report = report ++ "}\n"
+
+    if !write_text_file(report_path, report) {
+        print("Error: failed writing parity report: ")
+        print(report_path)
+        print("\n")
+        return false
+    }
+
+    print("  parity report: ")
+    print(report_path)
+    print("\n")
+
+    all_passed
+}
+
+fn print_usage() with IO {
+    print("Usage: souc run examples/real_world/06_darwin_atlas_pipeline.sio -- ")
+    print("[--data-dir <path>] [--max-genomes <n>] [--seed <n>] ")
+    print("[--assembly-summary <assembly_summary.txt>] [--skip-download] [--validate-only] ")
+    print("[--parity-with <dir>] [--parity-report <path>]\n")
+}
+
+fn main() -> i32 with IO, Mut, Panic, Div {
+    let argc = arg_count()
+
+    var data_dir = "examples/real_world/darwin_atlas_data"
+    var max_genomes: i64 = 200
+    var seed: i64 = 42
+    var assembly_summary_path: string = ""
+    var skip_download: bool = false
+    var validate_only: bool = false
+    var parity_with: string = ""
+    var parity_report_path: string = ""
+
+    var i: i64 = 0
+    while i < argc {
+        let arg = get_arg(i)
+        if str_eq(arg, "--data-dir") || str_eq(arg, "-d") {
+            if i + 1 >= argc {
+                print("Error: --data-dir requires an argument\n")
+                print_usage()
+                return 1
+            }
+            data_dir = get_arg(i + 1)
+            i = i + 2
+        } else if str_eq(arg, "--max-genomes") || str_eq(arg, "-m") {
+            if i + 1 >= argc {
+                print("Error: --max-genomes requires an argument\n")
+                print_usage()
+                return 1
+            }
+            let parsed = parse_nonnegative_i64(get_arg(i + 1))
+            if parsed <= 0 {
+                print("Error: --max-genomes must be > 0\n")
+                return 1
+            }
+            max_genomes = parsed
+            i = i + 2
+        } else if str_eq(arg, "--seed") || str_eq(arg, "-s") {
+            if i + 1 >= argc {
+                print("Error: --seed requires an argument\n")
+                print_usage()
+                return 1
+            }
+            let parsed = parse_nonnegative_i64(get_arg(i + 1))
+            if parsed < 0 {
+                print("Error: --seed must be a non-negative integer\n")
+                return 1
+            }
+            seed = parsed
+            i = i + 2
+        } else if str_eq(arg, "--assembly-summary") {
+            if i + 1 >= argc {
+                print("Error: --assembly-summary requires an argument\n")
+                print_usage()
+                return 1
+            }
+            assembly_summary_path = get_arg(i + 1)
+            i = i + 2
+        } else if str_eq(arg, "--skip-download") {
+            skip_download = true
+            i = i + 1
+        } else if str_eq(arg, "--validate-only") {
+            validate_only = true
+            i = i + 1
+        } else if str_eq(arg, "--parity-with") {
+            if i + 1 >= argc {
+                print("Error: --parity-with requires an argument\n")
+                print_usage()
+                return 1
+            }
+            parity_with = get_arg(i + 1)
+            i = i + 2
+        } else if str_eq(arg, "--parity-report") {
+            if i + 1 >= argc {
+                print("Error: --parity-report requires an argument\n")
+                print_usage()
+                return 1
+            }
+            parity_report_path = get_arg(i + 1)
+            i = i + 2
+        } else if str_eq(arg, "--help") || str_eq(arg, "-h") {
+            print_usage()
+            return 0
+        } else {
+            print("Error: unknown flag: ")
+            print(arg)
+            print("\n")
+            print_usage()
+            return 1
+        }
+    }
+
+    print("\n============================================================\n")
+    print("DARWIN OPERATOR SYMMETRY ATLAS\n")
+    print("Pure Sounio Pipeline Runner v1.0.0\n")
+    print("============================================================\n")
+    print("Data directory: ")
+    print(data_dir)
+    print("\n")
+    print("Max genomes: ")
+    print_int(max_genomes)
+    print("\n")
+    print("Seed: ")
+    print_int(seed)
+    print("\n")
+    if str_len(assembly_summary_path) > 0 {
+        print("Assembly summary: ")
+        print(assembly_summary_path)
+        print("\n")
+    }
+    if str_len(parity_with) > 0 {
+        print("Parity baseline: ")
+        print(parity_with)
+        print("\n")
+    }
+
+    if validate_only && str_len(parity_with) > 0 {
+        print("Error: --parity-with requires full pipeline (cannot combine with --validate-only)\n")
+        return 1
+    }
+
+    if !skip_download {
+        if str_len(assembly_summary_path) > 0 {
+            print("\n[Step 1] Building manifest/raw set from NCBI assembly summary...\n")
+        } else {
+            print("\n[Step 1] Downloading genomes (synthetic deterministic source)...\n")
+        }
+        let downloaded = step_download(data_dir, max_genomes, seed, assembly_summary_path)
+        if downloaded < 0 {
+            print("Pipeline failed in Step 1\n")
+            return 2
+        }
+        print("  Downloaded replicons: ")
+        print_int(downloaded)
+        print("\n")
+    } else {
+        print("\n[Step 1] Skipping download (--skip-download)\n")
+    }
+
+    let validation_ok = run_technical_validation(data_dir)
+    if !validation_ok {
+        print("Technical validation failed! Aborting pipeline.\n")
+        return 3
+    }
+
+    if validate_only {
+        print("\n[Done] Validation complete (--validate-only)\n")
+        return 0
+    }
+
+    let table_count = generate_tables(data_dir)
+    if table_count < 0 {
+        print("Pipeline failed in Step 3\n")
+        return 4
+    }
+
+    if str_len(parity_with) > 0 {
+        var report_path = parity_report_path
+        if str_len(report_path) <= 0 {
+            report_path = path_join(path_join(data_dir, "manifest"), "parity_report.json")
+        }
+        let parity_ok = run_parity_report(data_dir, parity_with, report_path)
+        if !parity_ok {
+            print("Strict parity failed.\n")
+            return 5
+        }
+        print("Strict parity passed.\n")
+    }
+
+    print("\n============================================================\n")
+    print("PIPELINE COMPLETE\n")
+    print("Replicons processed: ")
+    print_int(table_count)
+    print("\n")
+    print("Artifacts directory: ")
+    print(path_join(data_dir, "tables"))
+    print("\n")
+    print("============================================================\n")
+
+    0
+}

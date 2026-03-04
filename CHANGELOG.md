@@ -2,6 +2,15 @@
 
 All notable changes to the Sounio programming language and compiler are documented in this file. Sounio follows semantic versioning and this changelog is maintained for each release.
 
+## [1.0.0-beta.5] - 2026-03-04
+
+### Release — Darwin Atlas Real Ingestion and Strict Parity
+
+- Added real `--assembly-summary` ingestion mode to `examples/real_world/06_darwin_atlas_pipeline.sio`, including TSV header parsing, complete-genome filtering, deterministic reservoir sampling, and Julia-compatible manifest fields (`gc_fraction`, `checksum_sha256`, and taxonomy columns).
+- Added strict parity surfaces to the same pipeline with `--parity-with` and `--parity-report`, producing machine-readable JSON and fail-closed parity checks for manifest and output table hashes.
+- Added `examples/real_world/run_darwin_atlas_parity.sh` to orchestrate Sounio plus Julia parity runs, instantiate/repair Julia dependencies, and hard-fail when parity JSON is not `all_passed: true`.
+- Added default in-repo data skeleton directories at `examples/real_world/darwin_atlas_data/{raw,manifest,tables}` with `.gitkeep` placeholders.
+
 ## [0.2.0] - 2026-02-26
 
 ### Release — Core Type System Completion

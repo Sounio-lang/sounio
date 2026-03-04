@@ -39,7 +39,7 @@ PY
   if [[ -n "$EXPECTED_VERSION" ]]; then
     EXPECTED_VERSION_SOURCE="resolver_default"
   else
-    EXPECTED_VERSION="1.0.0-beta.4"
+    EXPECTED_VERSION="1.0.0-beta.5"
     EXPECTED_VERSION_SOURCE="fallback_default"
   fi
 fi
