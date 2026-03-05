@@ -1,0 +1,400 @@
+// darwin_pbpk/epistemic_sim.sio — Epistemic PBPK Simulation
+//
+// Wraps a PBPKParams14-based PBPK simulation with GUM uncertainty propagation.
+//
+// Method: First-order linearization (GUM / delta method)
+//   Var(y) = Σ_i (∂y/∂θ_i)^2 * Var(θ_i)
+//
+// Jacobian computed by forward finite differences:
+//   ∂y/∂θ_i ≈ [y(θ_i + h_i) - y(θ_ref)] / h_i
+//
+// Step size (robust against numerical cancellation):
+//   h = max(1e-6 * |μ|, 1e-2 * σ)
+//
+// Epistemic confidence propagation:
+//   NOT Beta distribution for unbounded parameters (CL, Ka).
+//   Uses evidence-weighted combination: conf(output) = Σ_i s_i * conf_i
+//   where s_i = fractional contribution of parameter i to total variance.
+//
+// Validity regime of GUM linearization:
+//   - No threshold/saturation nonlinearities (linear PK holds)
+//   - Parameter perturbations stay in physiologically valid region
+//   - Simulation window not too short relative to t1/2 (CL must affect AUC)
+//
+// AUC naming: auc_0_48 (NOT auc_0_inf — 48h truncated integral, honest)
+//   For rapamycin t1/2 ~ 21h (distribution-capped model), 48h captures ~90%
+//   of the fast-phase AUC, which is adequate for inter-individual variability study.
+
+use tsit5_pbpk14::*;
+
+// ============================================================================
+// EPISTEMIC PARAMETER TYPE
+// ============================================================================
+// Represents a parameter with mean, variance, and evidence quality score.
+// NOT a Beta distribution for parameters outside [0,1].
+// Confidence is an evidence-quality score [0,1] (see rapamycin.sio header).
+
+struct EpParam {
+    mean: f64,
+    variance: f64,   // SD^2, GUM-compatible
+    confidence: f64, // Evidence quality [0,1]
+}
+
+fn ep_param_new(mean: f64, variance: f64, confidence: f64) -> EpParam {
+    EpParam { mean: mean, variance: variance, confidence: confidence }
+}
+
+// ============================================================================
+// EPISTEMIC PBPK PARAMETER SET
+// ============================================================================
+// Wraps PBPKParams14 (base/mean values) with uncertain parameters as EpParam.
+//
+// Split rationale:
+//   - Physiological parameters (volumes, flows): well-characterized, stay f64
+//   - Drug-specific parameters: uncertain, represented as EpParam
+
+struct EpistemicPBPKParams {
+    base: PBPKParams14,         // Mean values for ALL parameters
+    ep_cl_hepatic: EpParam,     // CYP3A4 clearance uncertainty
+    ep_kp_brain: EpParam,       // BBB partition coefficient uncertainty
+    ep_fu_plasma: EpParam,      // Protein binding fraction uncertainty
+}
+
+fn epistemic_from_base(base: PBPKParams14) -> EpistemicPBPKParams {
+    // Wrap base params with non-informative epistemic priors (zero variance)
+    EpistemicPBPKParams {
+        base: base,
+        ep_cl_hepatic: ep_param_new(base.cl_hepatic, 0.0, 1.0),
+        ep_kp_brain: ep_param_new(base.kp_brain, 0.0, 1.0),
+        ep_fu_plasma: ep_param_new(base.fu_plasma, 0.0, 1.0),
+    }
+}
+
+// ============================================================================
+// PK METRICS RESULT (deterministic, from single ODE run)
+// ============================================================================
+
+struct PKMetrics {
+    cmax: f64,        // Max blood concentration (mg/L)
+    auc_0_48: f64,    // Trapezoidal AUC 0-t_end (NOT extrapolated to infinity)
+    brain_final: f64, // Brain concentration at t_end (mg/L)
+    blood_final: f64, // Blood concentration at t_end (mg/L)
+    success: bool,
+}
+
+fn pk_metrics_empty() -> PKMetrics {
+    PKMetrics {
+        cmax: 0.0,
+        auc_0_48: 0.0,
+        brain_final: 0.0,
+        blood_final: 0.0,
+        success: false,
+    }
+}
+
+// ============================================================================
+// MATH HELPERS
+// ============================================================================
+
+fn ep_abs(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+fn ep_sqrt(x: f64) -> f64 {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i = 0
+    while i < 10 {
+        y = (y + x / y) * 0.5
+        i = i + 1
+    }
+    return y
+}
+
+fn ep_max(a: f64, b: f64) -> f64 {
+    if a > b { return a }
+    return b
+}
+
+fn ep_finite(x: f64) -> bool {
+    if x != x { return false }
+    return ep_abs(x) < 1.0e12
+}
+
+// ============================================================================
+// FINITE DIFFERENCE STEP SIZE (GUM-robust)
+// h = max(1e-6 * |mean|, 1e-2 * SD)
+//
+// Rationale:
+//   - h_rel = 1e-6 * |mean|: avoids underflow (relative to parameter scale)
+//   - h_abs = 1e-2 * SD: samples 1% of the uncertainty range
+//   - max: ensures we never take a catastrophically small step
+//   - 1e-2 * SD << SD: finite diff stays in linear regime of Jacobian
+// ============================================================================
+
+fn ep_fdiff_h(mean: f64, variance: f64) -> f64 {
+    let h_rel = 1.0e-6 * ep_abs(mean)
+    let h_abs = 0.01 * ep_sqrt(variance)
+    return ep_max(h_rel, h_abs)
+}
+
+// ============================================================================
+// RUN PBPK (deterministic metrics from a single parameter set)
+// ============================================================================
+// IV bolus simulation tracking Cmax, AUC(0-t_end), final brain and blood.
+//
+// Uses Tsit5 adaptive integrator from tsit5_pbpk14.
+// Fixed-step wrapper for simplicity (dt=0.1h for 48h = 480 steps).
+
+fn run_pbpk_metrics(prm: PBPKParams14, dose_mg: f64, t_end: f64) -> PKMetrics with Mut, Div, Panic {
+    let c0_blood = dose_mg / prm.v_blood
+
+    // IV bolus: all drug in blood at t=0
+    var st = PBPKState14 {
+        blood: c0_blood,
+        liver: 0.0, kidney: 0.0, brain: 0.0, heart: 0.0,
+        lung: 0.0, muscle: 0.0, adipose: 0.0, gut: 0.0, skin: 0.0,
+        bone: 0.0, spleen: 0.0, pancreas: 0.0, other: 0.0
+    }
+
+    var t = 0.0
+    let dt = 0.1        // 0.1h step (appropriate for t1/2 ~ 21h)
+    var cmax = c0_blood
+    var auc = 0.0
+    var c_prev = c0_blood
+
+    while t < t_end {
+        let dt_use = if t + dt > t_end { t_end - t } else { dt }
+        let step = tsit5_step_pbpk(st, t, dt_use, prm)
+        st = step.state_new
+
+        if st.blood > cmax { cmax = st.blood }
+        auc = auc + (c_prev + st.blood) * 0.5 * dt_use
+        c_prev = st.blood
+        t = t + dt_use
+    }
+
+    let ok = ep_finite(cmax) && ep_finite(auc) && cmax >= 0.0 && auc >= 0.0
+
+    PKMetrics {
+        cmax: cmax,
+        auc_0_48: auc,
+        brain_final: st.brain,
+        blood_final: st.blood,
+        success: ok,
+    }
+}
+
+// ============================================================================
+// PERTURB PARAMETER HELPERS
+// (Each returns a modified PBPKParams14 with one parameter changed)
+// Must precede simulate_epistemic_pbpk (no forward refs).
+// ============================================================================
+
+fn perturb_cl(prm: PBPKParams14, delta: f64) -> PBPKParams14 {
+    var p = prm
+    p.cl_hepatic = prm.cl_hepatic + delta
+    return p
+}
+
+fn perturb_kp_brain(prm: PBPKParams14, delta: f64) -> PBPKParams14 {
+    var p = prm
+    p.kp_brain = prm.kp_brain + delta
+    return p
+}
+
+fn perturb_fu(prm: PBPKParams14, delta: f64) -> PBPKParams14 {
+    var p = prm
+    p.fu_plasma = prm.fu_plasma + delta
+    // fu also scales effective clearance (cl_eff = cl_hepatic * fu)
+    // The ODE uses cl_hepatic and fu_plasma separately, so this is correct
+    return p
+}
+
+// ============================================================================
+// EPISTEMIC SIMULATION RESULT
+// ============================================================================
+
+struct EpistemicPKResult {
+    // AUC (0-48h window, truncated)
+    auc_mean: f64,
+    auc_var: f64,
+    auc_conf: f64,
+
+    // Brain/plasma concentration ratio at t_end
+    // Directly quantifies CNS exposure relative to systemic
+    brain_plasma_ratio_mean: f64,
+    brain_plasma_ratio_var: f64,
+    brain_plasma_ratio_conf: f64,
+
+    // Sensitivity fractions for AUC (sum to ~1.0)
+    s_cl_auc: f64,       // CL contribution to AUC variance
+    s_kp_auc: f64,       // kp_brain contribution to AUC variance
+    s_fu_auc: f64,       // fu_plasma contribution to AUC variance
+
+    // Sensitivity fractions for brain/plasma ratio
+    s_cl_bpr: f64,
+    s_kp_bpr: f64,
+    s_fu_bpr: f64,
+
+    success: bool,
+}
+
+fn epistemic_pk_result_empty() -> EpistemicPKResult {
+    EpistemicPKResult {
+        auc_mean: 0.0, auc_var: 0.0, auc_conf: 0.0,
+        brain_plasma_ratio_mean: 0.0, brain_plasma_ratio_var: 0.0, brain_plasma_ratio_conf: 0.0,
+        s_cl_auc: 0.0, s_kp_auc: 0.0, s_fu_auc: 0.0,
+        s_cl_bpr: 0.0, s_kp_bpr: 0.0, s_fu_bpr: 0.0,
+        success: false,
+    }
+}
+
+// ============================================================================
+// MAIN EPISTEMIC SIMULATION FUNCTION
+// ============================================================================
+// Algorithm:
+//   1. Run reference simulation with mean parameters
+//   2. For each uncertain param (CL, kp_brain, fu):
+//      a. Compute h = max(1e-6*|mean|, 1e-2*SD)
+//      b. Perturb param by +h, run simulation
+//      c. Compute Jacobian component: ∂y/∂θ ≈ (y_perturb - y_ref) / h
+//   3. GUM propagation:
+//      Var(y) = (∂y/∂CL)^2 * Var(CL)
+//             + (∂y/∂kp_brain)^2 * Var(kp_brain)
+//             + (∂y/∂fu)^2 * Var(fu)
+//   4. Evidence-weighted confidence:
+//      conf(y) = Σ_i (s_i * conf_i)  where s_i = fractional variance contribution
+
+fn simulate_epistemic_pbpk(
+    ep: EpistemicPBPKParams,
+    dose_mg: f64,
+    t_end: f64,
+) -> EpistemicPKResult with Mut, Div, Panic {
+    // --- Step 1: Reference simulation ---
+    let ref_m = run_pbpk_metrics(ep.base, dose_mg, t_end)
+    if ref_m.success == false {
+        return epistemic_pk_result_empty()
+    }
+
+    let auc_ref = ref_m.auc_0_48
+    let bpr_ref = if ref_m.blood_final > 1.0e-12 {
+        ref_m.brain_final / ref_m.blood_final
+    } else {
+        0.0
+    }
+
+    // --- Step 2: Perturbations ---
+
+    // Perturbation: CL_hepatic
+    let h_cl = ep_fdiff_h(ep.ep_cl_hepatic.mean, ep.ep_cl_hepatic.variance)
+    let prm_cl = perturb_cl(ep.base, h_cl)
+    let m_cl = run_pbpk_metrics(prm_cl, dose_mg, t_end)
+    let dauc_dcl = (m_cl.auc_0_48 - auc_ref) / h_cl
+    let bpr_cl_p = if m_cl.blood_final > 1.0e-12 {
+        m_cl.brain_final / m_cl.blood_final
+    } else {
+        0.0
+    }
+    let dbpr_dcl = (bpr_cl_p - bpr_ref) / h_cl
+
+    // Perturbation: kp_brain
+    let h_kp = ep_fdiff_h(ep.ep_kp_brain.mean, ep.ep_kp_brain.variance)
+    let prm_kp = perturb_kp_brain(ep.base, h_kp)
+    let m_kp = run_pbpk_metrics(prm_kp, dose_mg, t_end)
+    let dauc_dkp = (m_kp.auc_0_48 - auc_ref) / h_kp
+    let bpr_kp_p = if m_kp.blood_final > 1.0e-12 {
+        m_kp.brain_final / m_kp.blood_final
+    } else {
+        0.0
+    }
+    let dbpr_dkp = (bpr_kp_p - bpr_ref) / h_kp
+
+    // Perturbation: fu_plasma
+    let h_fu = ep_fdiff_h(ep.ep_fu_plasma.mean, ep.ep_fu_plasma.variance)
+    let prm_fu = perturb_fu(ep.base, h_fu)
+    let m_fu = run_pbpk_metrics(prm_fu, dose_mg, t_end)
+    let dauc_dfu = (m_fu.auc_0_48 - auc_ref) / h_fu
+    let bpr_fu_p = if m_fu.blood_final > 1.0e-12 {
+        m_fu.brain_final / m_fu.blood_final
+    } else {
+        0.0
+    }
+    let dbpr_dfu = (bpr_fu_p - bpr_ref) / h_fu
+
+    // --- Step 3: GUM Variance propagation ---
+    let var_cl = ep.ep_cl_hepatic.variance
+    let var_kp = ep.ep_kp_brain.variance
+    let var_fu = ep.ep_fu_plasma.variance
+
+    let var_auc = dauc_dcl * dauc_dcl * var_cl
+                + dauc_dkp * dauc_dkp * var_kp
+                + dauc_dfu * dauc_dfu * var_fu
+
+    let var_bpr = dbpr_dcl * dbpr_dcl * var_cl
+                + dbpr_dkp * dbpr_dkp * var_kp
+                + dbpr_dfu * dbpr_dfu * var_fu
+
+    // --- Step 4: Sensitivity fractions (fractional variance contributions) ---
+    let cl_contrib_auc = if var_auc > 1.0e-30 {
+        dauc_dcl * dauc_dcl * var_cl / var_auc
+    } else {
+        0.0
+    }
+    let kp_contrib_auc = if var_auc > 1.0e-30 {
+        dauc_dkp * dauc_dkp * var_kp / var_auc
+    } else {
+        0.0
+    }
+    let fu_contrib_auc = if var_auc > 1.0e-30 {
+        dauc_dfu * dauc_dfu * var_fu / var_auc
+    } else {
+        0.0
+    }
+
+    let cl_contrib_bpr = if var_bpr > 1.0e-30 {
+        dbpr_dcl * dbpr_dcl * var_cl / var_bpr
+    } else {
+        0.0
+    }
+    let kp_contrib_bpr = if var_bpr > 1.0e-30 {
+        dbpr_dkp * dbpr_dkp * var_kp / var_bpr
+    } else {
+        0.0
+    }
+    let fu_contrib_bpr = if var_bpr > 1.0e-30 {
+        dbpr_dfu * dbpr_dfu * var_fu / var_bpr
+    } else {
+        0.0
+    }
+
+    // Evidence-weighted confidence
+    let conf_cl = ep.ep_cl_hepatic.confidence
+    let conf_kp = ep.ep_kp_brain.confidence
+    let conf_fu = ep.ep_fu_plasma.confidence
+
+    let conf_auc = conf_cl * cl_contrib_auc
+                 + conf_kp * kp_contrib_auc
+                 + conf_fu * fu_contrib_auc
+
+    let conf_bpr = conf_cl * cl_contrib_bpr
+                 + conf_kp * kp_contrib_bpr
+                 + conf_fu * fu_contrib_bpr
+
+    EpistemicPKResult {
+        auc_mean: auc_ref,
+        auc_var: var_auc,
+        auc_conf: conf_auc,
+        brain_plasma_ratio_mean: bpr_ref,
+        brain_plasma_ratio_var: var_bpr,
+        brain_plasma_ratio_conf: conf_bpr,
+        s_cl_auc: cl_contrib_auc,
+        s_kp_auc: kp_contrib_auc,
+        s_fu_auc: fu_contrib_auc,
+        s_cl_bpr: cl_contrib_bpr,
+        s_kp_bpr: kp_contrib_bpr,
+        s_fu_bpr: fu_contrib_bpr,
+        success: true,
+    }
+}
