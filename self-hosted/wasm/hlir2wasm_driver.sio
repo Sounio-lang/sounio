@@ -25,6 +25,8 @@ let WT_I64: i64 = 126
 let WT_VOID: i64 = 64
 let OP_BLOCK: i64 = 2
 let OP_LOOP: i64 = 3
+let OP_IF: i64 = 4
+let OP_ELSE: i64 = 5
 let OP_END: i64 = 11
 let OP_BR: i64 = 12
 let OP_BR_IF: i64 = 13
@@ -44,6 +46,7 @@ let OP_I64_ADD: i64 = 124
 let OP_I64_SUB: i64 = 125
 let OP_I64_MUL: i64 = 126
 let OP_EXT_I32: i64 = 172    // i64.extend_i32_s (0xac)
+let OP_WRAP_I64: i64 = 167   // i32.wrap_i64 (0xa7)
 
 // ── SOIR op codes ─────────────────────────────────────────────────────────
 let HI_ALLOCA: i64 = 1
@@ -52,6 +55,7 @@ let HI_LOAD: i64 = 3
 let HI_STORE: i64 = 4
 let HI_BINARY: i64 = 5
 let HI_CALL: i64 = 6
+let HI_PHI: i64 = 7
 
 let HB_ADD: i64 = 1
 let HB_SUB: i64 = 2
@@ -334,6 +338,21 @@ fn parse_soir(buf: [i8; 131072], size: i64) -> Mod with Mut, Panic, Div {
                 else if name_is(onr.n, onr.len, "eq", 2) == 1 { ins.bo = HB_EQ }
                 else if name_is(onr.n, onr.len, "ne", 2) == 1 { ins.bo = HB_NE }
                 else { ins.bo = HB_ADD }
+            } else if c1 == 112 {  // 'p' phi: Ip <rv> <n> <bid1> <vid1> [<bid2> <vid2>]
+                let r = read_int(buf, p + 2, size)
+                let nr2 = read_int(buf, r.p, size)
+                ins.op = HI_PHI; ins.rv = r.v
+                // n=nr2.v pairs; store first pair in a,b; second pair in bo,args[0]
+                if nr2.v >= 1 {
+                    let b1r = read_int(buf, nr2.p, size)
+                    let v1r = read_int(buf, b1r.p, size)
+                    ins.a = b1r.v; ins.b = v1r.v
+                    if nr2.v >= 2 {
+                        let b2r = read_int(buf, v1r.p, size)
+                        let v2r = read_int(buf, b2r.p, size)
+                        ins.bo = b2r.v; ins.args[0 as usize] = v2r.v
+                    }
+                }
             } else if c1 == 107 {  // 'k' call
                 let r = read_int(buf, p + 2, size)
                 let cnr = read_name(buf, r.p, size)
@@ -450,6 +469,10 @@ fn emit_ins(body: Buf, cg: Cg, ins: Ins, m: Mod) -> CR with Mut, Panic, Div {
         if ins.bo >= HB_LT { nb = buf_push(nb, OP_EXT_I32) }
         nb = buf_push(nb, OP_LOCAL_SET)
         nb = buf_push_uleb(nb, nc.vl[ins.rv as usize])
+    } else if ins.op == HI_PHI {
+        // Phi is handled structurally in codegen_func (if/else pattern);
+        // skip here as a fallback
+        nc = nc
     } else if ins.op == HI_CALL {
         var ai: i64 = 0
         while ai < ins.b { nb = elg(nb, nc, ins.args[ai as usize]); ai = ai + 1 }
@@ -471,6 +494,21 @@ fn emit_blk_ins(body: Buf, cg: Cg, blk: Blk, m: Mod) -> CR with Mut, Panic, Div 
         nb = r.body; nc = r.cg; i = i + 1
     }
     CR { body: nb, cg: nc }
+}
+
+fn is_ifelse(f: Fun) -> i64 {
+    if f.nb == 4 {
+        let b0 = f.blks[0 as usize]; let b1 = f.blks[1 as usize]
+        let b2 = f.blks[2 as usize]; let b3 = f.blks[3 as usize]
+        // b0: cond-branch to b1(then) and b2(else)
+        // b1: branch to b3, b2: branch to b3, b3: has phi
+        let phi_in_b3: i64 = if b3.ni > 0 && b3.ins[0 as usize].op == HI_PHI { 1 } else { 0 }
+        if b0.term == HT_COND && b0.ct == 1 && b0.ce == 2
+        && b1.term == HT_BR && b1.br == 3
+        && b2.term == HT_BR && b2.br == 3
+        && phi_in_b3 == 1
+        { 1 } else { 0 }
+    } else { 0 }
 }
 
 fn is_while(f: Fun) -> i64 {
@@ -522,7 +560,39 @@ fn codegen_func(f: Fun, m: Mod) -> Buf with Mut, Panic, Div {
         body = buf_push_uleb(body, 1); body = buf_push_uleb(body, extra); body = buf_push(body, WT_I64)
     } else { body = buf_push_uleb(body, 0) }
 
-    if is_while(f) == 1 {
+    if is_ifelse(f) == 1 {
+        let b0 = f.blks[0 as usize]; let b1 = f.blks[1 as usize]
+        let b2 = f.blks[2 as usize]; let b3 = f.blks[3 as usize]
+        let phi = b3.ins[0 as usize]
+        // Determine which phi incoming corresponds to then vs else
+        // phi.a=bid_first, phi.b=vid_first, phi.bo=bid_second, phi.args[0]=vid_second
+        let then_vid: i64 = if phi.a == b0.ct { phi.b } else { phi.args[0 as usize] }
+        let else_vid: i64 = if phi.a == b0.ct { phi.args[0 as usize] } else { phi.b }
+        // Emit B0 instructions + condition + if (result i64)
+        // Condition local is i64 (comparison result extended); wrap to i32 for WASM if
+        let r0 = emit_blk_ins(body, nc, b0, m); body = r0.body; nc = r0.cg
+        body = elg(body, nc, b0.cv)
+        body = buf_push(body, OP_WRAP_I64)
+        body = buf_push(body, OP_IF); body = buf_push(body, WT_I64)
+        // Then branch: B1 instructions + then-value
+        let r1 = emit_blk_ins(body, nc, b1, m); body = r1.body; nc = r1.cg
+        body = elg(body, nc, then_vid)
+        body = buf_push(body, OP_ELSE)
+        // Else branch: B2 instructions + else-value
+        let r2 = emit_blk_ins(body, nc, b2, m); body = r2.body; nc = r2.cg
+        body = elg(body, nc, else_vid)
+        body = buf_push(body, OP_END)
+        // Store phi result
+        body = buf_push(body, OP_LOCAL_SET)
+        body = buf_push_uleb(body, nc.vl[phi.rv as usize])
+        // Emit remaining B3 instructions (skip phi at index 0)
+        var bi3: i64 = 1
+        while bi3 < b3.ni {
+            let rr = emit_ins(body, nc, b3.ins[bi3 as usize], m); body = rr.body; nc = rr.cg
+            bi3 = bi3 + 1
+        }
+        if b3.rv >= 0 { body = elg(body, nc, b3.rv) }
+    } else if is_while(f) == 1 {
         let b0 = f.blks[0 as usize]; let b1 = f.blks[1 as usize]
         let b2 = f.blks[2 as usize]; let b3 = f.blks[3 as usize]
         let r0 = emit_blk_ins(body, nc, b0, m); body = r0.body; nc = r0.cg
@@ -616,7 +686,12 @@ fn main() -> i64 with IO, Mut, Panic, Div {
         var si: i64 = 0
         while si < wasm.len { stage[si as usize] = wasm.data[si as usize]; si = si + 1 }
         let rc = write_file(out_path, stage, wasm.len)
-        if rc == 0 { println("wasm: wrote "); println(out_path) }
+        if rc == 0 {
+            print("wasm: wrote ")
+            print_int(wasm.len)
+            print(" bytes to ")
+            println(out_path)
+        }
         else { println("wasm: write_file failed") }
         rc
     }

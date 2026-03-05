@@ -89,6 +89,17 @@ def parse_instr(itext):
         args_str = ' '.join(arg_vids)
         return f'Ik {result_vid} {callee} {argc} {args_str}'.strip()
 
+    elif re.search(r'\bop:\s*Phi\s*\{', itext):
+        # Ip <rvid> <n> <bid1> <vid1> [<bid2> <vid2> ...]
+        m_phi = re.search(r'op:\s*Phi\s*\{(.*?)\}', itext, re.DOTALL)
+        phi_text = m_phi.group(1) if m_phi else itext
+        # Find all (BlockId(n), ValueId(m)) pairs — multiline format
+        pairs = re.findall(r'BlockId\(\s*(\d+)\s*,?\s*\)[\s,)]*ValueId\(\s*(\d+)\s*,?\s*\)',
+                           phi_text, re.DOTALL)
+        n = len(pairs)
+        flat = ' '.join(f'{bid} {vid}' for bid, vid in pairs)
+        return f'Ip {result_vid} {n} {flat}'.strip()
+
     return None  # unknown op, skip
 
 def hlir_to_soir(text):
