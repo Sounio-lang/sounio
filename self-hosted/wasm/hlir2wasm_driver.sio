@@ -1,0 +1,623 @@
+// ============================================================================
+// hlir2wasm_driver.sio — SOIR line format → WASM binary compiler
+//
+// Pipeline:
+//   souc compile --emit hlir input.sio | python3 scripts/hlir2soir.py > /tmp/prog.soir
+//   souc run self-hosted/wasm/hlir2wasm_driver.sio /tmp/prog.soir output.wasm
+//
+// SOIR line types:
+//   F <name> <nparam> [vid...]    function header
+//   B <id> <label>                block
+//   Ia <rvid>                     alloca
+//   Ic <rvid> <val>               i64.const
+//   Il <rvid> <ptr_vid>           load
+//   Is <ptr_vid> <val_vid>        store
+//   Ib <rvid> <op> <l> <r>        binary (add/sub/mul/lt/gt/le/ge/eq/ne)
+//   Ik <rvid> <callee> <argc> [vid...]  call
+//   Tr <vid>                      return (-1 = void)
+//   Tb <bid>                      branch
+//   Tq <cvid> <then> <else>       cond-branch
+// ============================================================================
+module hlir2wasm_driver
+
+// ── WASM types & opcodes ─────────────────────────────────────────────────
+let WT_I64: i64 = 126
+let WT_VOID: i64 = 64
+let OP_BLOCK: i64 = 2
+let OP_LOOP: i64 = 3
+let OP_END: i64 = 11
+let OP_BR: i64 = 12
+let OP_BR_IF: i64 = 13
+let OP_RETURN: i64 = 15
+let OP_CALL: i64 = 16
+let OP_LOCAL_GET: i64 = 32
+let OP_LOCAL_SET: i64 = 33
+let OP_I64_CONST: i64 = 66
+let OP_I64_EQZ: i64 = 80
+let OP_I64_EQ: i64 = 81
+let OP_I64_NE: i64 = 82
+let OP_I64_LT_S: i64 = 83
+let OP_I64_GT_S: i64 = 85
+let OP_I64_LE_S: i64 = 87
+let OP_I64_GE_S: i64 = 89
+let OP_I64_ADD: i64 = 124
+let OP_I64_SUB: i64 = 125
+let OP_I64_MUL: i64 = 126
+let OP_EXT_I32: i64 = 172    // i64.extend_i32_s (0xac)
+
+// ── SOIR op codes ─────────────────────────────────────────────────────────
+let HI_ALLOCA: i64 = 1
+let HI_CONST: i64 = 2
+let HI_LOAD: i64 = 3
+let HI_STORE: i64 = 4
+let HI_BINARY: i64 = 5
+let HI_CALL: i64 = 6
+
+let HB_ADD: i64 = 1
+let HB_SUB: i64 = 2
+let HB_MUL: i64 = 3
+let HB_LT: i64 = 4
+let HB_GT: i64 = 5
+let HB_LE: i64 = 6
+let HB_GE: i64 = 7
+let HB_EQ: i64 = 8
+let HB_NE: i64 = 9
+
+let HT_RET: i64 = 1
+let HT_BR: i64 = 2
+let HT_COND: i64 = 3
+
+// ============================================================================
+// WASM BYTE BUFFER
+// ============================================================================
+
+struct Buf { data: [i8; 65536], len: i64 }
+
+fn buf_new() -> Buf with Mut, Panic, Div {
+    Buf { data: [0; 65536], len: 0 }
+}
+
+fn buf_push(b: Buf, v: i64) -> Buf with Mut, Panic, Div {
+    var nb = b
+    nb.data[nb.len as usize] = v as i8
+    nb.len = nb.len + 1
+    nb
+}
+
+fn buf_push_uleb(b: Buf, v: i64) -> Buf with Mut, Panic, Div {
+    var nb = b
+    var x = v
+    while x > 127 {
+        nb = buf_push(nb, (x & 127) | 128)
+        x = x / 128
+    }
+    buf_push(nb, x & 127)
+}
+
+fn buf_push_sleb(b: Buf, v: i64) -> Buf with Mut, Panic, Div {
+    var nb = b
+    var x = v
+    var more: i64 = 1
+    while more == 1 {
+        let byte = x & 127
+        x = x / 128
+        let sign = byte & 64
+        if (x == 0 && sign == 0) || (x == 0 - 1 && sign != 0) {
+            more = 0
+            nb = buf_push(nb, byte)
+        } else {
+            nb = buf_push(nb, byte | 128)
+        }
+    }
+    nb
+}
+
+fn buf_push_bytes(b: Buf, src: Buf) -> Buf with Mut, Panic, Div {
+    var nb = b
+    var i: i64 = 0
+    while i < src.len {
+        nb = buf_push(nb, src.data[i as usize] as i64)
+        i = i + 1
+    }
+    nb
+}
+
+fn buf_emit_section(b: Buf, id: i64, payload: Buf) -> Buf with Mut, Panic, Div {
+    var nb = buf_push(b, id)
+    nb = buf_push_uleb(nb, payload.len)
+    buf_push_bytes(nb, payload)
+}
+
+fn emit_magic(b: Buf) -> Buf with Mut, Panic, Div {
+    var nb = buf_push(b, 0)
+    nb = buf_push(nb, 97)
+    nb = buf_push(nb, 115)
+    nb = buf_push(nb, 109)
+    nb = buf_push(nb, 1)
+    nb = buf_push(nb, 0)
+    nb = buf_push(nb, 0)
+    buf_push(nb, 0)
+}
+
+// ============================================================================
+// SOIR TEXT READER
+// ============================================================================
+
+// Skip leading spaces/tabs, read integer, return (value, pos_after)
+struct IR { v: i64, p: i64 }
+
+fn read_int(buf: [i8; 131072], pos: i64, size: i64) -> IR with Mut, Panic, Div {
+    var p = pos
+    var skip: i64 = 1
+    while p < size && skip == 1 {
+        let c = buf[p as usize] as i64
+        if c == 32 || c == 9 { p = p + 1 } else { skip = 0 }
+    }
+    var neg: i64 = 0
+    if p < size && (buf[p as usize] as i64) == 45 { neg = 1; p = p + 1 }
+    var v: i64 = 0
+    var going: i64 = 1
+    while p < size && going == 1 {
+        let c = buf[p as usize] as i64
+        if c >= 48 && c <= 57 { v = v * 10 + (c - 48); p = p + 1 }
+        else { going = 0 }
+    }
+    IR { v: if neg == 1 { 0 - v } else { v }, p: p }
+}
+
+// Read alphanumeric+dot+underscore token, return (name[32], len, pos_after)
+struct NR { n: [i8; 32], len: i64, p: i64 }
+
+fn read_name(buf: [i8; 131072], pos: i64, size: i64) -> NR with Mut, Panic, Div {
+    var p = pos
+    var skip: i64 = 1
+    while p < size && skip == 1 {
+        let c = buf[p as usize] as i64
+        if c == 32 || c == 9 { p = p + 1 } else { skip = 0 }
+    }
+    var out: [i8; 32] = [0; 32]
+    var n: i64 = 0
+    var going: i64 = 1
+    while p < size && n < 31 && going == 1 {
+        let c = buf[p as usize] as i64
+        if (c >= 97 && c <= 122) || (c >= 65 && c <= 90) ||
+           (c >= 48 && c <= 57) || c == 95 || c == 46 {
+            out[n as usize] = c as i8; n = n + 1; p = p + 1
+        } else { going = 0 }
+    }
+    NR { n: out, len: n, p: p }
+}
+
+fn name_is(nr: [i8; 32], nlen: i64, lit: string, llen: i64) -> i64 with Mut, Panic, Div {
+    if nlen != llen { 0 }
+    else {
+        var i: i64 = 0
+        var ok: i64 = 1
+        while i < llen && ok == 1 {
+            if nr[i as usize] as i64 != str_char_at(lit, i) { ok = 0 }
+            i = i + 1
+        }
+        ok
+    }
+}
+
+fn skip_to_nl(buf: [i8; 131072], pos: i64, size: i64) -> i64 with Mut, Panic, Div {
+    var p = pos
+    while p < size && (buf[p as usize] as i64) != 10 { p = p + 1 }
+    if p < size { p + 1 } else { p }
+}
+
+// ============================================================================
+// SOIR DATA STRUCTURES
+// ============================================================================
+
+struct Ins {
+    op: i64,
+    rv: i64,
+    a: i64,     // alloca:-, const:val, load:ptr, store:ptr, binary:left, call:fidx
+    b: i64,     // store:val, binary:right, call:argc
+    bo: i64,    // binary op
+    args: [i64; 4],
+}
+
+fn ins0() -> Ins with Mut, Panic { Ins { op:0, rv:0-1, a:0, b:0, bo:0, args:[0;4] } }
+
+struct Blk {
+    id: i64,
+    wc: i64,    // 1 if label == "while.cond"
+    ins: [Ins; 16],
+    ni: i64,
+    term: i64,
+    br: i64,
+    cv: i64, ct: i64, ce: i64,   // cond
+    rv: i64,                      // ret vid (-1 = void)
+}
+
+fn blk0() -> Blk with Mut, Panic {
+    Blk { id:0, wc:0, ins:[ins0();16], ni:0, term:0, br:0-1, cv:0-1, ct:0-1, ce:0-1, rv:0-1 }
+}
+
+struct Fun {
+    name: [i8; 32],
+    nl: i64,
+    pvids: [i64; 4],
+    np: i64,
+    blks: [Blk; 8],
+    nb: i64,
+}
+
+fn fun0() -> Fun with Mut, Panic {
+    Fun { name:[0;32], nl:0, pvids:[0;4], np:0, blks:[blk0();8], nb:0 }
+}
+
+struct Mod { fns: [Fun; 8], nf: i64 }
+
+fn mod0() -> Mod with Mut, Panic { Mod { fns:[fun0();8], nf:0 } }
+
+// ============================================================================
+// SOIR PARSER
+// ============================================================================
+
+fn parse_soir(buf: [i8; 131072], size: i64) -> Mod with Mut, Panic, Div {
+    var m = mod0()
+    var p: i64 = 0
+    var cf: i64 = 0 - 1   // current func idx
+    var cb: i64 = 0 - 1   // current block idx
+
+    while p < size {
+        let c0 = buf[p as usize] as i64
+        if c0 == 10 { p = p + 1 }
+        else if c0 == 70 {  // 'F'
+            let fi = m.nf
+            let nr = read_name(buf, p + 1, size)
+            var ni: i64 = 0
+            while ni < nr.len && ni < 31 {
+                m.fns[fi as usize].name[ni as usize] = nr.n[ni as usize]
+                ni = ni + 1
+            }
+            m.fns[fi as usize].nl = nr.len
+            let pcr = read_int(buf, nr.p, size)
+            m.fns[fi as usize].np = pcr.v
+            var pp = pcr.p
+            var pi: i64 = 0
+            while pi < pcr.v && pi < 4 {
+                let vr = read_int(buf, pp, size)
+                m.fns[fi as usize].pvids[pi as usize] = vr.v
+                pp = vr.p; pi = pi + 1
+            }
+            m.nf = fi + 1; cf = fi; cb = 0 - 1
+            p = skip_to_nl(buf, p, size)
+        } else if c0 == 66 && cf >= 0 {  // 'B'
+            let fi = cf
+            let bi = m.fns[fi as usize].nb
+            let idr = read_int(buf, p + 1, size)
+            let lnr = read_name(buf, idr.p, size)
+            m.fns[fi as usize].blks[bi as usize].id = idr.v
+            if name_is(lnr.n, lnr.len, "while.cond", 10) == 1 {
+                m.fns[fi as usize].blks[bi as usize].wc = 1
+            }
+            m.fns[fi as usize].nb = bi + 1; cb = bi
+            p = skip_to_nl(buf, p, size)
+        } else if c0 == 73 && cf >= 0 && cb >= 0 {  // 'I'
+            let c1 = buf[(p + 1) as usize] as i64
+            let fi = cf; let bi = cb
+            let ii = m.fns[fi as usize].blks[bi as usize].ni
+            var ins = ins0()
+            if c1 == 97 {  // 'a' alloca
+                let r = read_int(buf, p + 2, size)
+                ins.op = HI_ALLOCA; ins.rv = r.v
+            } else if c1 == 99 {  // 'c' const
+                let r = read_int(buf, p + 2, size)
+                let vr = read_int(buf, r.p, size)
+                ins.op = HI_CONST; ins.rv = r.v; ins.a = vr.v
+            } else if c1 == 108 {  // 'l' load
+                let r = read_int(buf, p + 2, size)
+                let pr = read_int(buf, r.p, size)
+                ins.op = HI_LOAD; ins.rv = r.v; ins.a = pr.v
+            } else if c1 == 115 {  // 's' store
+                let pr = read_int(buf, p + 2, size)
+                let vr = read_int(buf, pr.p, size)
+                ins.op = HI_STORE; ins.a = pr.v; ins.b = vr.v
+            } else if c1 == 98 {  // 'b' binary
+                let r = read_int(buf, p + 2, size)
+                let onr = read_name(buf, r.p, size)
+                let lr = read_int(buf, onr.p, size)
+                let rr = read_int(buf, lr.p, size)
+                ins.op = HI_BINARY; ins.rv = r.v; ins.a = lr.v; ins.b = rr.v
+                if name_is(onr.n, onr.len, "add", 3) == 1 { ins.bo = HB_ADD }
+                else if name_is(onr.n, onr.len, "sub", 3) == 1 { ins.bo = HB_SUB }
+                else if name_is(onr.n, onr.len, "mul", 3) == 1 { ins.bo = HB_MUL }
+                else if name_is(onr.n, onr.len, "lt", 2) == 1 { ins.bo = HB_LT }
+                else if name_is(onr.n, onr.len, "gt", 2) == 1 { ins.bo = HB_GT }
+                else if name_is(onr.n, onr.len, "le", 2) == 1 { ins.bo = HB_LE }
+                else if name_is(onr.n, onr.len, "ge", 2) == 1 { ins.bo = HB_GE }
+                else if name_is(onr.n, onr.len, "eq", 2) == 1 { ins.bo = HB_EQ }
+                else if name_is(onr.n, onr.len, "ne", 2) == 1 { ins.bo = HB_NE }
+                else { ins.bo = HB_ADD }
+            } else if c1 == 107 {  // 'k' call
+                let r = read_int(buf, p + 2, size)
+                let cnr = read_name(buf, r.p, size)
+                let ar = read_int(buf, cnr.p, size)
+                ins.op = HI_CALL; ins.rv = r.v; ins.b = ar.v
+                // resolve callee
+                var fi2: i64 = 0; var fnd: i64 = 0 - 1
+                while fi2 < m.nf && fnd < 0 {
+                    let fn2 = m.fns[fi2 as usize]
+                    if fn2.nl == cnr.len {
+                        var ni: i64 = 0; var ok: i64 = 1
+                        while ni < cnr.len && ok == 1 {
+                            if fn2.name[ni as usize] != cnr.n[ni as usize] { ok = 0 }
+                            ni = ni + 1
+                        }
+                        if ok == 1 { fnd = fi2 }
+                    }
+                    fi2 = fi2 + 1
+                }
+                ins.a = fnd
+                var ai: i64 = 0; var ap = ar.p
+                while ai < ar.v && ai < 4 {
+                    let av = read_int(buf, ap, size)
+                    ins.args[ai as usize] = av.v; ap = av.p; ai = ai + 1
+                }
+            }
+            m.fns[fi as usize].blks[bi as usize].ins[ii as usize] = ins
+            m.fns[fi as usize].blks[bi as usize].ni = ii + 1
+            p = skip_to_nl(buf, p, size)
+        } else if c0 == 84 && cf >= 0 && cb >= 0 {  // 'T'
+            let c1 = buf[(p + 1) as usize] as i64
+            let fi = cf; let bi = cb
+            if c1 == 114 {  // 'r' return
+                let r = read_int(buf, p + 2, size)
+                m.fns[fi as usize].blks[bi as usize].term = HT_RET
+                m.fns[fi as usize].blks[bi as usize].rv = r.v
+            } else if c1 == 98 {  // 'b' branch
+                let r = read_int(buf, p + 2, size)
+                m.fns[fi as usize].blks[bi as usize].term = HT_BR
+                m.fns[fi as usize].blks[bi as usize].br = r.v
+            } else if c1 == 113 {  // 'q' cond
+                let cr = read_int(buf, p + 2, size)
+                let tr2 = read_int(buf, cr.p, size)
+                let er = read_int(buf, tr2.p, size)
+                m.fns[fi as usize].blks[bi as usize].term = HT_COND
+                m.fns[fi as usize].blks[bi as usize].cv = cr.v
+                m.fns[fi as usize].blks[bi as usize].ct = tr2.v
+                m.fns[fi as usize].blks[bi as usize].ce = er.v
+            }
+            p = skip_to_nl(buf, p, size)
+        } else {
+            p = skip_to_nl(buf, p, size)
+        }
+    }
+    m
+}
+
+// ============================================================================
+// WASM CODEGEN
+// ============================================================================
+
+struct Cg {
+    vl: [i64; 512],    // SSA vid → WASM local index
+    al: [i64; 512],    // alloca vid → WASM local index
+    nl: i64,           // next local index
+}
+
+fn cg_new(np: i64) -> Cg with Mut, Panic, Div {
+    var c = Cg { vl: [0-1; 512], al: [0-1; 512], nl: np }
+    var i: i64 = 0
+    while i < np { c.vl[i as usize] = i; i = i + 1 }
+    c
+}
+
+struct CR { body: Buf, cg: Cg }
+
+fn elg(b: Buf, c: Cg, vid: i64) -> Buf with Mut, Panic, Div {
+    var nb = buf_push(b, OP_LOCAL_GET)
+    buf_push_uleb(nb, c.vl[vid as usize])
+}
+
+fn emit_ins(body: Buf, cg: Cg, ins: Ins, m: Mod) -> CR with Mut, Panic, Div {
+    var nb = body; var nc = cg
+    if ins.op == HI_ALLOCA {
+        // Alloca: locals pre-allocated by pre_alloc; nothing to emit at use site
+        nc = nc
+    } else if ins.op == HI_CONST {
+        nb = buf_push(nb, OP_I64_CONST)
+        nb = buf_push_sleb(nb, ins.a)
+        nb = buf_push(nb, OP_LOCAL_SET)
+        nb = buf_push_uleb(nb, nc.vl[ins.rv as usize])
+    } else if ins.op == HI_LOAD {
+        nb = buf_push(nb, OP_LOCAL_GET)
+        nb = buf_push_uleb(nb, nc.al[ins.a as usize])
+        nb = buf_push(nb, OP_LOCAL_SET)
+        nb = buf_push_uleb(nb, nc.vl[ins.rv as usize])
+    } else if ins.op == HI_STORE {
+        nb = elg(nb, nc, ins.b)
+        nb = buf_push(nb, OP_LOCAL_SET)
+        nb = buf_push_uleb(nb, nc.al[ins.a as usize])
+    } else if ins.op == HI_BINARY {
+        nb = elg(nb, nc, ins.a)
+        nb = elg(nb, nc, ins.b)
+        if ins.bo == HB_ADD { nb = buf_push(nb, OP_I64_ADD) }
+        else if ins.bo == HB_SUB { nb = buf_push(nb, OP_I64_SUB) }
+        else if ins.bo == HB_MUL { nb = buf_push(nb, OP_I64_MUL) }
+        else if ins.bo == HB_LT { nb = buf_push(nb, OP_I64_LT_S) }
+        else if ins.bo == HB_GT { nb = buf_push(nb, OP_I64_GT_S) }
+        else if ins.bo == HB_LE { nb = buf_push(nb, OP_I64_LE_S) }
+        else if ins.bo == HB_GE { nb = buf_push(nb, OP_I64_GE_S) }
+        else if ins.bo == HB_EQ { nb = buf_push(nb, OP_I64_EQ) }
+        else if ins.bo == HB_NE { nb = buf_push(nb, OP_I64_NE) }
+        else { nb = buf_push(nb, OP_I64_ADD) }
+        if ins.bo >= HB_LT { nb = buf_push(nb, OP_EXT_I32) }
+        nb = buf_push(nb, OP_LOCAL_SET)
+        nb = buf_push_uleb(nb, nc.vl[ins.rv as usize])
+    } else if ins.op == HI_CALL {
+        var ai: i64 = 0
+        while ai < ins.b { nb = elg(nb, nc, ins.args[ai as usize]); ai = ai + 1 }
+        nb = buf_push(nb, OP_CALL)
+        nb = buf_push_uleb(nb, if ins.a < 0 { 0 } else { ins.a })
+        if ins.rv >= 0 {
+            nb = buf_push(nb, OP_LOCAL_SET)
+            nb = buf_push_uleb(nb, nc.vl[ins.rv as usize])
+        }
+    }
+    CR { body: nb, cg: nc }
+}
+
+fn emit_blk_ins(body: Buf, cg: Cg, blk: Blk, m: Mod) -> CR with Mut, Panic, Div {
+    var nb = body; var nc = cg
+    var i: i64 = 0
+    while i < blk.ni {
+        let r = emit_ins(nb, nc, blk.ins[i as usize], m)
+        nb = r.body; nc = r.cg; i = i + 1
+    }
+    CR { body: nb, cg: nc }
+}
+
+fn is_while(f: Fun) -> i64 {
+    if f.nb == 4 {
+        let b0 = f.blks[0 as usize]; let b1 = f.blks[1 as usize]; let b2 = f.blks[2 as usize]
+        if b0.term == HT_BR && b0.br == 1
+        && b1.term == HT_COND && b1.ct == 2 && b1.ce == 3 && b1.wc == 1
+        && b2.term == HT_BR && b2.br == 1
+        { 1 } else { 0 }
+    } else { 0 }
+}
+
+fn pre_alloc(cg: Cg, f: Fun) -> Cg with Mut, Panic, Div {
+    var nc = cg
+    var bi: i64 = 0
+    while bi < f.nb {
+        var ii: i64 = 0
+        while ii < f.blks[bi as usize].ni {
+            let ins = f.blks[bi as usize].ins[ii as usize]
+            if ins.op == HI_ALLOCA && ins.rv >= 0 {
+                nc.al[ins.rv as usize] = nc.nl; nc.nl = nc.nl + 1
+            }
+            ii = ii + 1
+        }
+        bi = bi + 1
+    }
+    bi = 0
+    while bi < f.nb {
+        var ii: i64 = 0
+        while ii < f.blks[bi as usize].ni {
+            let ins = f.blks[bi as usize].ins[ii as usize]
+            if ins.op != HI_ALLOCA && ins.op != HI_STORE
+            && ins.rv >= 0 && nc.vl[ins.rv as usize] < 0 {
+                nc.vl[ins.rv as usize] = nc.nl; nc.nl = nc.nl + 1
+            }
+            ii = ii + 1
+        }
+        bi = bi + 1
+    }
+    nc
+}
+
+fn codegen_func(f: Fun, m: Mod) -> Buf with Mut, Panic, Div {
+    var body = buf_new()
+    var nc = cg_new(f.np)
+    nc = pre_alloc(nc, f)
+    let extra = nc.nl - f.np
+    if extra > 0 {
+        body = buf_push_uleb(body, 1); body = buf_push_uleb(body, extra); body = buf_push(body, WT_I64)
+    } else { body = buf_push_uleb(body, 0) }
+
+    if is_while(f) == 1 {
+        let b0 = f.blks[0 as usize]; let b1 = f.blks[1 as usize]
+        let b2 = f.blks[2 as usize]; let b3 = f.blks[3 as usize]
+        let r0 = emit_blk_ins(body, nc, b0, m); body = r0.body; nc = r0.cg
+        body = buf_push(body, OP_BLOCK); body = buf_push(body, WT_VOID)
+        body = buf_push(body, OP_LOOP);  body = buf_push(body, WT_VOID)
+        let r1 = emit_blk_ins(body, nc, b1, m); body = r1.body; nc = r1.cg
+        body = elg(body, nc, b1.cv)
+        body = buf_push(body, OP_I64_EQZ)
+        body = buf_push(body, OP_BR_IF); body = buf_push_uleb(body, 1)
+        let r2 = emit_blk_ins(body, nc, b2, m); body = r2.body; nc = r2.cg
+        body = buf_push(body, OP_BR); body = buf_push_uleb(body, 0)
+        body = buf_push(body, OP_END); body = buf_push(body, OP_END)
+        let r3 = emit_blk_ins(body, nc, b3, m); body = r3.body; nc = r3.cg
+        if b3.rv >= 0 { body = elg(body, nc, b3.rv) }
+    } else {
+        var bi: i64 = 0
+        while bi < f.nb {
+            let blk = f.blks[bi as usize]
+            let rr = emit_blk_ins(body, nc, blk, m); body = rr.body; nc = rr.cg
+            if blk.term == HT_RET {
+                if blk.rv >= 0 { body = elg(body, nc, blk.rv) }
+                if bi < f.nb - 1 { body = buf_push(body, OP_RETURN) }
+            }
+            bi = bi + 1
+        }
+    }
+    buf_push(body, OP_END)
+}
+
+fn assemble(m: Mod) -> Buf with Mut, Panic, Div {
+    var out = emit_magic(buf_new())
+    // Type section
+    var tp = buf_push_uleb(buf_new(), m.nf)
+    var fi: i64 = 0
+    while fi < m.nf {
+        let f = m.fns[fi as usize]
+        tp = buf_push(tp, 96)
+        tp = buf_push_uleb(tp, f.np)
+        var pi: i64 = 0
+        while pi < f.np { tp = buf_push(tp, WT_I64); pi = pi + 1 }
+        tp = buf_push_uleb(tp, 1); tp = buf_push(tp, WT_I64)
+        fi = fi + 1
+    }
+    out = buf_emit_section(out, 1, tp)
+    // Function section
+    var fp = buf_push_uleb(buf_new(), m.nf)
+    var fi2: i64 = 0
+    while fi2 < m.nf { fp = buf_push_uleb(fp, fi2); fi2 = fi2 + 1 }
+    out = buf_emit_section(out, 3, fp)
+    // Export section
+    var ep = buf_push_uleb(buf_new(), m.nf)
+    var fi3: i64 = 0
+    while fi3 < m.nf {
+        let f = m.fns[fi3 as usize]
+        ep = buf_push_uleb(ep, f.nl)
+        var ni: i64 = 0
+        while ni < f.nl { ep = buf_push(ep, f.name[ni as usize] as i64); ni = ni + 1 }
+        ep = buf_push(ep, 0); ep = buf_push_uleb(ep, fi3); fi3 = fi3 + 1
+    }
+    out = buf_emit_section(out, 7, ep)
+    // Code section
+    var cp = buf_push_uleb(buf_new(), m.nf)
+    var fi4: i64 = 0
+    while fi4 < m.nf {
+        let body = codegen_func(m.fns[fi4 as usize], m)
+        cp = buf_push_uleb(cp, body.len); cp = buf_push_bytes(cp, body); fi4 = fi4 + 1
+    }
+    buf_emit_section(out, 10, cp)
+}
+
+// ============================================================================
+// MAIN
+// ============================================================================
+
+fn main() -> i64 with IO, Mut, Panic, Div {
+    let argc = arg_count()
+    if argc < 2 {
+        println("Usage: souc run hlir2wasm_driver.sio <input.soir> <output.wasm>")
+        1
+    } else {
+        let soir_path = get_arg(0)
+        let out_path = get_arg(1)
+        let fsize = file_size(soir_path)
+        let fdata = read_file(soir_path)
+        var buf: [i8; 131072] = [0; 131072]
+        var ci: i64 = 0
+        while ci < fsize && ci < 131072 { buf[ci as usize] = fdata[ci as usize]; ci = ci + 1 }
+        let m = parse_soir(buf, fsize)
+        let wasm = assemble(m)
+        var stage: [i8; 65536] = [0; 65536]
+        var si: i64 = 0
+        while si < wasm.len { stage[si as usize] = wasm.data[si as usize]; si = si + 1 }
+        let rc = write_file(out_path, stage, wasm.len)
+        if rc == 0 { println("wasm: wrote "); println(out_path) }
+        else { println("wasm: write_file failed") }
+        rc
+    }
+}

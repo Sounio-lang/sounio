@@ -1,32 +1,40 @@
 #!/usr/bin/env bash
-# souc-wasm — Compile a Sounio source file to WASM using the self-hosted driver
+# souc-wasm — Compile a Sounio source file to WASM
 #
-# Usage: souc-wasm [input.sio] <output.wasm>
-#   With input:   souc-wasm hello.sio hello.wasm  (future: full pipeline)
-#   Standalone:   souc-wasm out.wasm              (emit built-in demo program)
+# Usage:
+#   souc-wasm <input.sio> <output.wasm>   compile source to WASM
+#   souc-wasm <output.wasm>               emit built-in demo (add, fib, main)
 #
-# Currently emits the built-in demo (add, fib, main) to <output.wasm>.
-# Full source→WASM pipeline requires importing wasm/lower.sio (coming soon).
+# Pipeline (full source→WASM):
+#   souc compile --emit hlir input.sio | python3 scripts/hlir2soir.py > /tmp/prog.soir
+#   souc run self-hosted/wasm/hlir2wasm_driver.sio /tmp/prog.soir output.wasm
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SOUC="${SCRIPT_DIR}/target/debug/souc"
-DRIVER="${SCRIPT_DIR}/self-hosted/wasm/driver.sio"
+DEMO_DRIVER="${SCRIPT_DIR}/self-hosted/wasm/driver.sio"
+HLIR_DRIVER="${SCRIPT_DIR}/self-hosted/wasm/hlir2wasm_driver.sio"
+HLIR2SOIR="${SCRIPT_DIR}/scripts/hlir2soir.py"
 
 if [[ $# -lt 1 ]]; then
-    echo "Usage: souc-wasm <output.wasm>" >&2
-    echo "       souc-wasm <input.sio> <output.wasm>  (pipeline mode, coming soon)" >&2
+    echo "Usage: souc-wasm <input.sio> <output.wasm>" >&2
+    echo "       souc-wasm <output.wasm>   (demo mode)" >&2
     exit 1
 fi
 
-OUTPUT="${@: -1}"  # last arg is always output
-
 if [[ $# -eq 1 ]]; then
-    # Standalone demo mode
-    exec "${SOUC}" run "${DRIVER}" "${OUTPUT}"
+    # Standalone demo mode: emit built-in add+fib+main program
+    exec "${SOUC}" run "${DEMO_DRIVER}" "$1"
 else
-    # Pipeline mode (reserved for when import timeout is resolved)
-    echo "souc-wasm: pipeline mode not yet available (import timeout)" >&2
-    echo "souc-wasm: use standalone mode: souc-wasm <output.wasm>" >&2
-    exit 1
+    # Full pipeline: input.sio → HLIR → SOIR → WASM
+    INPUT="$1"
+    OUTPUT="$2"
+    TMPDIR_SOIR="$(mktemp -d)"
+    SOIR="${TMPDIR_SOIR}/prog.soir"
+    trap "rm -rf ${TMPDIR_SOIR}" EXIT
+
+    "${SOUC}" compile --emit hlir "${INPUT}" 2>&1 \
+        | python3 "${HLIR2SOIR}" > "${SOIR}"
+
+    exec "${SOUC}" run "${HLIR_DRIVER}" "${SOIR}" "${OUTPUT}"
 fi
