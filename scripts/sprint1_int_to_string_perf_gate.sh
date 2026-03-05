@@ -156,6 +156,48 @@ fn main() with IO, Mut, Panic, Div {
 EOF
 }
 
+write_arith_probe_fixture() {
+  local out_path="$1"
+  cat > "$out_path" <<'EOF'
+fn main() -> i32 with IO {
+    var i: i64 = 0
+    var acc: i64 = 0
+    while i < 1000 {
+        acc = acc + i
+        i = i + 1
+    }
+    if acc == 499500 {
+        println("jit_probe_arith_ok")
+        0
+    } else {
+        println("jit_probe_arith_bad")
+        1
+    }
+}
+EOF
+}
+
+write_string_probe_fixture() {
+  local out_path="$1"
+  cat > "$out_path" <<'EOF'
+fn main() -> i32 with IO, Mut, Panic {
+    let n = str_len("abc")
+    let s = str_slice("0123456789", 2, 5)
+    var bytes: [i8; 4] = [0; 4]
+    bytes[0] = 52 as i8
+    bytes[1] = 50 as i8
+    let t = str_from_bytes(bytes, 2)
+    if n == 3 && s == "234" && t == "42" {
+        println("jit_probe_string_ok")
+        0
+    } else {
+        println("jit_probe_string_bad")
+        1
+    }
+}
+EOF
+}
+
 if [[ ! -x /usr/bin/time ]]; then
   emit_json "not_run" "time_binary_unavailable" "none" "" "" "" "" "[\"/usr/bin/time_missing\"]"
   exit 0
@@ -186,14 +228,19 @@ fi
 
 BASE_FIXTURE="$TMP_DIR/bench_int_to_string_base.sio"
 FULL_FIXTURE="$TMP_DIR/bench_int_to_string_full.sio"
+ARITH_PROBE_FIXTURE="$TMP_DIR/jit_probe_arith.sio"
+STRING_PROBE_FIXTURE="$TMP_DIR/jit_probe_string.sio"
 write_bench_fixture 0 "$BASE_FIXTURE"
 write_bench_fixture 1000000 "$FULL_FIXTURE"
+write_arith_probe_fixture "$ARITH_PROBE_FIXTURE"
+write_string_probe_fixture "$STRING_PROBE_FIXTURE"
 
 run_probe_mode() {
   local mode="$1"
   local bin="$2"
+  local fixture="$3"
   set +e
-  timeout 15 "$bin" "$mode" "$BASE_FIXTURE" > "$TMP_DIR/probe.out" 2>&1
+  timeout 15 "$bin" "$mode" "$fixture" > "$TMP_DIR/probe.out" 2>&1
   local rc=$?
   set -e
   echo "$rc" > "$TMP_DIR/probe.rc"
@@ -257,11 +304,22 @@ for c in "${candidates[@]}"; do
   if [[ ! -x "$c" ]]; then
     continue
   fi
-  run_probe_mode "jit" "$c"
+  run_probe_mode "jit" "$c" "$ARITH_PROBE_FIXTURE"
   probe_rc="$(cat "$TMP_DIR/probe.rc")"
-  if [[ "$probe_rc" == "0" ]] && rg -F -q "bench_int_to_string iterations=0" "$TMP_DIR/probe.out"; then
-    jit_runner="$c"
-    break
+  if [[ "$probe_rc" == "0" ]] && rg -F -q "jit_probe_arith_ok" "$TMP_DIR/probe.out"; then
+    has_jit_capable_candidate=1
+    run_probe_mode "jit" "$c" "$STRING_PROBE_FIXTURE"
+    str_probe_rc="$(cat "$TMP_DIR/probe.rc")"
+    if [[ "$str_probe_rc" == "0" ]] && rg -F -q "jit_probe_string_ok" "$TMP_DIR/probe.out"; then
+      jit_runner="$c"
+      break
+    fi
+    if [[ "$str_probe_rc" == "124" ]]; then
+      blockers+=("jit_string_probe_timeout:$c")
+    else
+      blockers+=("jit_string_runtime_unavailable:$c")
+    fi
+    continue
   fi
   if rg -F -q "JIT backend not enabled" "$TMP_DIR/probe.out"; then
     blockers+=("jit_backend_not_enabled:$c")
@@ -288,6 +346,10 @@ print(json.dumps(vals))
 PY
 )"
   if [[ "$REQUIRE_JIT_RUNNER" == "1" ]]; then
+    if printf '%s\n' "${blockers[@]:-}" | rg -F -q "jit_string_runtime_unavailable:"; then
+      emit_json "fail" "jit_string_runtime_unavailable" "none" "" "" "" "" "$blockers_json"
+      exit 0
+    fi
     if [[ "$has_jit_capable_candidate" == "1" ]]; then
       emit_json "fail" "jit_runner_unusable" "none" "" "" "" "" "$blockers_json"
     else
@@ -301,7 +363,7 @@ PY
     if [[ ! -x "$c" ]]; then
       continue
     fi
-    run_probe_mode "run" "$c"
+    run_probe_mode "run" "$c" "$BASE_FIXTURE"
     probe_rc="$(cat "$TMP_DIR/probe.rc")"
     if [[ "$probe_rc" == "0" ]] && rg -F -q "bench_int_to_string iterations=0" "$TMP_DIR/probe.out"; then
       run_runner="$c"
