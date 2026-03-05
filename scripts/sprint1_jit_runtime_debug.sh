@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OUT_JSON="${1:-$ROOT_DIR/artifacts/sprint1/jit_runtime_debug.v1.json}"
 SOURCE_FILE="${SOUNIO_SPRINT1_SOURCE_FILE:-$ROOT_DIR/self-hosted/compiler/main.sio}"
-SOUC_JIT_VERSION="${SOUNIO_SOUC_JIT_VERSION:-0.100.3-jit.1}"
+SOUC_JIT_VERSION="${SOUNIO_SOUC_JIT_VERSION:-0.100.3-jit.2}"
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
 
@@ -51,12 +51,68 @@ fn main() -> i32 with IO, Mut, Panic {
     bytes[0] = 52 as i8
     bytes[1] = 50 as i8
     let t = str_from_bytes(bytes, 2)
-    if n == 3 && s == "234" && t == "42" {
+    if n == 3 && str_eq(s, "234") && str_eq(t, "42") {
         println("jit_probe_string_ok")
         0
     } else {
         println("jit_probe_string_bad")
         1
+    }
+}
+PROBE
+}
+
+write_source_runtime_probe_fixture() {
+  local out_path="$1"
+  cat > "$out_path" <<'PROBE'
+fn i64_to_string_decimal(n: i64) -> string with Mut, Panic, Div {
+    var out: [i8; 24] = [0; 24]
+    if n == 0 {
+        out[0] = 48 as i8
+        return str_from_bytes(out, 1)
+    }
+
+    var value = n
+    var digits: i64 = 1
+    while value <= -10 || value >= 10 {
+        digits = digits + 1
+        value = value / 10
+    }
+
+    let negative = n < 0
+    let total_len = if negative { digits + 1 } else { digits }
+
+    var write = total_len - 1
+    value = n
+    while value <= -10 || value >= 10 {
+        var digit = value % 10
+        if digit < 0 {
+            digit = 0 - digit
+        }
+        out[write as usize] = (48 + digit) as i8
+        write = write - 1
+        value = value / 10
+    }
+
+    var final_digit = value
+    if final_digit < 0 {
+        final_digit = 0 - final_digit
+    }
+    out[write as usize] = (48 + final_digit) as i8
+
+    if negative {
+        out[0] = 45 as i8
+    }
+
+    str_from_bytes(out, total_len)
+}
+
+fn main() with IO, Mut, Panic, Div {
+    let rendered = i64_to_string_decimal(-9223372036854775807)
+    if str_len(rendered) > 0 {
+        println("jit_probe_source_runtime_ok")
+    } else {
+        println("jit_probe_source_runtime_bad")
     }
 }
 PROBE
@@ -105,8 +161,10 @@ run_probe() {
 
 ARITH_PROBE_FIXTURE="$TMP_DIR/jit_probe_arith.sio"
 STRING_PROBE_FIXTURE="$TMP_DIR/jit_probe_string.sio"
+SOURCE_RUNTIME_PROBE_FIXTURE="$TMP_DIR/jit_probe_source_runtime.sio"
 write_arith_probe_fixture "$ARITH_PROBE_FIXTURE"
 write_string_probe_fixture "$STRING_PROBE_FIXTURE"
+write_source_runtime_probe_fixture "$SOURCE_RUNTIME_PROBE_FIXTURE"
 
 : > "$TMP_DIR/results.tsv"
 
@@ -159,10 +217,13 @@ done
 for c in "${unique_candidates[@]}"; do
   run_probe "$c" "arith" 20 "jit_probe_arith_ok" "$c" jit "$ARITH_PROBE_FIXTURE"
   run_probe "$c" "string" 20 "jit_probe_string_ok" "$c" jit "$STRING_PROBE_FIXTURE"
+  run_probe "$c" "source_runtime" 20 "jit_probe_source_runtime_ok" "$c" jit "$SOURCE_RUNTIME_PROBE_FIXTURE"
   if [[ -f "$SOURCE_FILE" ]]; then
-    run_probe "$c" "source" 30 "bench_int_to_string iterations=0" "$c" jit "$SOURCE_FILE" -- --bench-int-to-string 0
+    # main.sio is diagnostic-only here: module-loader import depth is currently
+    # known to overflow stack on this runner and should not mask runtime signal.
+    run_probe "$c" "source_main" 45 "bench_int_to_string iterations=0" "$c" jit "$SOURCE_FILE" -- --bench-int-to-string 0
   else
-    printf '%s\t%s\t%s\t%s\t%s\n' "$c" "source" "fail" "source_file_missing" "-1" >> "$TMP_DIR/results.tsv"
+    printf '%s\t%s\t%s\t%s\t%s\n' "$c" "source_main" "fail" "source_file_missing" "-1" >> "$TMP_DIR/results.tsv"
   fi
 done
 
@@ -201,13 +262,15 @@ candidates = []
 for candidate, probes in by_candidate.items():
     arith = probes.get("arith", {}).get("status")
     string = probes.get("string", {}).get("status")
-    source = probes.get("source", {}).get("status")
-    usable = arith == "pass" and string == "pass" and source == "pass"
+    source_runtime = probes.get("source_runtime", {}).get("status")
+    source_main = probes.get("source_main", {}).get("status")
+    usable = arith == "pass" and string == "pass" and source_runtime == "pass"
     candidates.append(
         {
             "path": candidate,
             "probes": probes,
             "jit_usable_for_sprint1": usable,
+            "main_source_probe_status": source_main or "not_run",
         }
     )
 

@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OUT_JSON="${1:-$ROOT_DIR/artifacts/sprint1/int_to_string_perf_gate.v1.json}"
 REQUIRE_JIT_RUNNER="${SOUNIO_SPRINT1_REQUIRE_JIT_RUNNER:-1}"
-SOUC_JIT_VERSION="${SOUNIO_SOUC_JIT_VERSION:-0.100.3-jit.1}"
+SOUC_JIT_VERSION="${SOUNIO_SOUC_JIT_VERSION:-0.100.3-jit.2}"
 SOURCE_FILE="${SOUNIO_SPRINT1_SOURCE_FILE:-$ROOT_DIR/self-hosted/compiler/main.sio}"
 RUN_LANE_JSON="${SOUNIO_SPRINT1_RUN_LANE_JSON:-$ROOT_DIR/artifacts/sprint1/int_to_string_perf_run_lane.v1.json}"
 TMP_DIR="$(mktemp -d)"
@@ -149,6 +149,28 @@ write_bench_fixture() {
   local iterations="$1"
   local out_path="$2"
   cat > "$out_path" <<EOF
+fn i64_digit_count_from_negative(v: i64) -> i64 {
+    if v <= -1000000000000000000 { 19 }
+    else if v <= -100000000000000000 { 18 }
+    else if v <= -10000000000000000 { 17 }
+    else if v <= -1000000000000000 { 16 }
+    else if v <= -100000000000000 { 15 }
+    else if v <= -10000000000000 { 14 }
+    else if v <= -1000000000000 { 13 }
+    else if v <= -100000000000 { 12 }
+    else if v <= -10000000000 { 11 }
+    else if v <= -1000000000 { 10 }
+    else if v <= -100000000 { 9 }
+    else if v <= -10000000 { 8 }
+    else if v <= -1000000 { 7 }
+    else if v <= -100000 { 6 }
+    else if v <= -10000 { 5 }
+    else if v <= -1000 { 4 }
+    else if v <= -100 { 3 }
+    else if v <= -10 { 2 }
+    else { 1 }
+}
+
 fn i64_to_string_decimal(n: i64) -> string with Mut, Panic, Div {
     var out: [i8; 24] = [0; 24]
     if n == 0 {
@@ -156,33 +178,38 @@ fn i64_to_string_decimal(n: i64) -> string with Mut, Panic, Div {
         return str_from_bytes(out, 1)
     }
 
-    var value = n
-    var digits: i64 = 1
-    while value <= -10 || value >= 10 {
-        digits = digits + 1
-        value = value / 10
-    }
-
     let negative = n < 0
+    let neg_value = if negative { n } else { 0 - n }
+    let digits = i64_digit_count_from_negative(neg_value)
     let total_len = if negative { digits + 1 } else { digits }
 
+    var value = n
     var write = total_len - 1
-    value = n
-    while value <= -10 || value >= 10 {
-        var digit = value % 10
-        if digit < 0 {
-            digit = 0 - digit
+    while value <= -100 || value >= 100 {
+        var pair = value % 100
+        if pair < 0 {
+            pair = 0 - pair
         }
-        out[write as usize] = (48 + digit) as i8
-        write = write - 1
-        value = value / 10
+        let ones = pair % 10
+        let tens = pair / 10
+        let write_prev = write - 1
+        out[write as usize] = (48 + ones) as i8
+        out[write_prev as usize] = (48 + tens) as i8
+        write = write - 2
+        value = value / 100
     }
 
-    var final_digit = value
-    if final_digit < 0 {
-        final_digit = 0 - final_digit
+    var rem = value
+    if rem < 0 {
+        rem = 0 - rem
     }
-    out[write as usize] = (48 + final_digit) as i8
+    if rem >= 10 {
+        let write_prev = write - 1
+        out[write as usize] = (48 + (rem % 10)) as i8
+        out[write_prev as usize] = (48 + (rem / 10)) as i8
+    } else {
+        out[write as usize] = (48 + rem) as i8
+    }
 
     if negative {
         out[0] = 45 as i8
@@ -196,18 +223,19 @@ fn int_to_string(n: i64) -> string with Mut, Panic, Div {
 }
 
 fn run_int_to_string_bench(iterations: i64) -> i64 with Mut, Panic, Div {
-    let i64_max = 9223372036854775807
-    let i64_min = (0 - i64_max) - 1
     var checksum: i64 = 0
     var i: i64 = 0
     while i < iterations {
-        var sample = (i * 1000003) - 500001
-        if (i % 11) == 0 {
-            sample = 0 - sample
-        }
-        if (i % 7919) == 0 {
-            sample = i64_min
-        }
+        let selector = i & 7
+        let sample =
+            if selector == 0 { 9223372036854775807 }
+            else if selector == 1 { -9223372036854775807 }
+            else if selector == 2 { 1234567890123456789 }
+            else if selector == 3 { -987654321098765432 }
+            else if selector == 4 { 777777777777777777 }
+            else if selector == 5 { -333333333333333333 }
+            else if selector == 6 { 100000000000000001 }
+            else { -100000000000000001 }
         let rendered = int_to_string(sample)
         checksum = checksum + str_len(rendered)
         i = i + 1
@@ -255,7 +283,7 @@ fn main() -> i32 with IO, Mut, Panic {
     bytes[0] = 52 as i8
     bytes[1] = 50 as i8
     let t = str_from_bytes(bytes, 2)
-    if n == 3 && s == "234" && t == "42" {
+    if n == 3 && str_eq(s, "234") && str_eq(t, "42") {
         println("jit_probe_string_ok")
         0
     } else {

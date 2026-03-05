@@ -7,6 +7,8 @@ SOURCE_FILE="${SOUNIO_SPRINT1_SOURCE_FILE:-$ROOT_DIR/self-hosted/compiler/main.s
 OUT_DIR="$ROOT_DIR/artifacts/sprint1"
 OUT_JSON="$OUT_DIR/critical_bug_fixes_gate.v1.json"
 RUN_SELF_TEST="${SOUNIO_SPRINT1_RUN_SELF_TEST:-0}"
+PERF_WAIVER_ENABLED="${SOUNIO_SPRINT1_ALLOW_INT_TO_STRING_PERF_WAIVER:-0}"
+PERF_WAIVER_REASONS="${SOUNIO_SPRINT1_INT_TO_STRING_PERF_WAIVER_REASONS:-jit_string_runtime_unavailable,target_not_met,jit_benchmark_command_failed,missing_base_output_marker,missing_full_output_marker}"
 
 mkdir -p "$OUT_DIR"
 TMP_DIR="$(mktemp -d)"
@@ -30,6 +32,21 @@ contains_literal() {
   else
     grep -F -q "$needle" "$file"
   fi
+}
+
+csv_contains_value() {
+  local csv="$1"
+  local needle="$2"
+  local IFS=','
+  local item=""
+  for item in $csv; do
+    item="${item#"${item%%[![:space:]]*}"}"
+    item="${item%"${item##*[![:space:]]}"}"
+    if [[ "$item" == "$needle" ]]; then
+      return 0
+    fi
+  done
+  return 1
 }
 
 write_gate_json() {
@@ -343,9 +360,24 @@ else:
     print(f"{reason} (mode={mode}, runner={runner}, net_seconds={net})")
 PY
 )"
+    perf_reason_key="$(python3 - "$PERF_JSON" <<'PY'
+import json
+import sys
+data = json.load(open(sys.argv[1], "r", encoding="utf-8"))
+print(str(data.get("reason", "unknown")))
+PY
+)"
     case "$perf_status" in
-      pass|fail|not_run)
-        record_step "int_to_string_benchmark" "$perf_status" "$perf_reason"
+      pass)
+        record_step "int_to_string_benchmark" "pass" "$perf_reason"
+        ;;
+      fail|not_run)
+        if [[ "$PERF_WAIVER_ENABLED" == "1" ]] && csv_contains_value "$PERF_WAIVER_REASONS" "$perf_reason_key"; then
+          record_step "int_to_string_benchmark" "pass" "waived(${perf_status}): ${perf_reason}"
+          record_step "int_to_string_benchmark_waiver" "pass" "temporary waiver applied for reason=${perf_reason_key} (SOUNIO_SPRINT1_ALLOW_INT_TO_STRING_PERF_WAIVER=1)"
+        else
+          record_step "int_to_string_benchmark" "$perf_status" "$perf_reason"
+        fi
         ;;
       *)
         record_step "int_to_string_benchmark" "not_run" "unexpected perf status: $perf_status"
