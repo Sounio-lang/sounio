@@ -54,7 +54,8 @@ fn wasm_label_entry_empty() -> WasmLabelEntry {
 
 struct WasmLowerCtx {
     body: WasmFuncBody,
-    local_map: [i64; 512],
+    local_map: [i64; 512],   // ir_reg → wasm local index (-1 = unmapped)
+    local_type: [i64; 512],  // wasm local index → WASM_TYPE_I64 or WASM_TYPE_F64
     local_count: i64,
     func_map: [i64; 256],
     func_count: i64,
@@ -67,6 +68,7 @@ fn wasm_lower_ctx_new() -> WasmLowerCtx {
     WasmLowerCtx {
         body: wasm_body_new(),
         local_map: [0 - 1; 512],
+        local_type: [WASM_TYPE_I64; 512],
         local_count: 0,
         func_map: [0 - 1; 256],
         func_count: 0,
@@ -84,6 +86,7 @@ fn wasm_lower_ctx_reset_body(ctx: WasmLowerCtx) -> WasmLowerCtx with Mut, Panic,
     var i: i64 = 0
     while i < WASM_LOWER_MAX_LOCALS {
         out.local_map[i as usize] = 0 - 1
+        out.local_type[i as usize] = WASM_TYPE_I64
         i = i + 1
     }
     out
@@ -114,6 +117,29 @@ fn wasm_lower_get_local(ctx: WasmLowerCtx, ir_reg: i64) -> i64 with Mut, Panic {
     } else {
         0 - 1
     }
+}
+
+// Mark the WASM local that backs ir_reg as f64.
+fn wasm_lower_mark_local_f64(ctx: WasmLowerCtx, ir_reg: i64) -> WasmLowerCtx with Mut, Panic {
+    var out = ctx
+    if ir_reg >= 0 && ir_reg < WASM_LOWER_MAX_LOCALS {
+        let wasm_idx = out.local_map[ir_reg as usize]
+        if wasm_idx >= 0 && wasm_idx < WASM_LOWER_MAX_LOCALS {
+            out.local_type[wasm_idx as usize] = WASM_TYPE_F64
+        }
+    }
+    out
+}
+
+// Returns true if the WASM local backing ir_reg is typed f64.
+fn wasm_lower_is_float_reg(ctx: WasmLowerCtx, ir_reg: i64) -> bool with Mut, Panic {
+    if ir_reg >= 0 && ir_reg < WASM_LOWER_MAX_LOCALS {
+        let wasm_idx = ctx.local_map[ir_reg as usize]
+        if wasm_idx >= 0 && wasm_idx < WASM_LOWER_MAX_LOCALS {
+            return ctx.local_type[wasm_idx as usize] == WASM_TYPE_F64
+        }
+    }
+    false
 }
 
 // ============================================================================
@@ -195,7 +221,8 @@ fn wasm_lower_prescan_locals(ctx: WasmLowerCtx, func: IrFunction) -> WasmLowerCt
     }
     out.local_count = func.param_count
 
-    // Then scan all instructions for dst/src registers and allocate locals
+    // Then scan all instructions for dst/src registers and allocate locals.
+    // IrLoadFloat dst registers are marked as f64 locals.
     var i: i64 = 0
     while i < func.instr_count {
         let instr = func.instrs[i as usize]
@@ -207,6 +234,15 @@ fn wasm_lower_prescan_locals(ctx: WasmLowerCtx, func: IrFunction) -> WasmLowerCt
         }
         if instr.src2 >= 0 {
             out = wasm_lower_alloc_local(out, instr.src2)
+        }
+        // Mark float-producing destinations
+        match instr.op {
+            IrOpcode::IrLoadFloat => {
+                if instr.dst >= 0 {
+                    out = wasm_lower_mark_local_f64(out, instr.dst)
+                }
+            }
+            _ => {}
         }
         i = i + 1
     }
@@ -228,15 +264,16 @@ fn wasm_lower_load_imm(ctx: WasmLowerCtx, instr: IrInstr) -> WasmLowerCtx with M
     out
 }
 
-// IrLoadFloat -> i64.const <IEEE754-bits>; local.set dst
-// Stores the f64 value as its raw bit pattern in an i64 local (all-i64 ABI).
-// f64 arithmetic ops will reinterpret when needed.
+// IrLoadFloat -> i64.const <bits>; f64.reinterpret_i64; local.set dst
+// The local is declared as f64 (marked in prescan). The value is pushed
+// as i64 bits then reinterpreted, so no raw 8-byte f64.const encoding needed.
 fn wasm_lower_load_float(ctx: WasmLowerCtx, instr: IrInstr) -> WasmLowerCtx with Mut, Panic, Div {
     var out = ctx
     let dst_local = wasm_lower_get_local(out, instr.dst)
     // f64_to_bits: compiler builtin — IEEE 754 bit reinterpret, no numeric conversion
     let bits = f64_to_bits(instr.imm_f64)
     out.body = wasm_body_emit_i64_const(out.body, bits)
+    out.body = wasm_body_emit_f64_reinterpret_i64(out.body)
     if dst_local >= 0 {
         out.body = wasm_body_emit_local_set(out.body, dst_local)
     }
@@ -621,23 +658,47 @@ fn wasm_lower_instruction(ctx: WasmLowerCtx, instr: IrInstr) -> WasmLowerCtx wit
 }
 
 // ============================================================================
-// Return-type detection: scan for IrReturn with a live src register
-// Returns true if the function returns a value (i64), false if void.
+// Return-type inference: scan IrReturn to determine WASM result type.
+// Returns WASM_TYPE_I64 or WASM_TYPE_F64 if function returns a value,
+// or -1 (void) if no IrReturn with a live src, or no IrReturn at all.
+// Standalone (no ctx): does a two-pass scan of the IR function.
 // ============================================================================
 
-fn wasm_lower_has_return_value(func: IrFunction) -> bool with Mut, Panic {
+fn wasm_lower_return_type(func: IrFunction) -> i64 with Mut, Panic {
+    // Pass 1: collect registers produced by IrLoadFloat (these are f64)
+    var float_regs: [i64; 512] = [0; 512]
     var i: i64 = 0
     while i < func.instr_count {
         let instr = func.instrs[i as usize]
         match instr.op {
-            IrOpcode::IrReturn => {
-                if instr.src1 >= 0 { return true }
+            IrOpcode::IrLoadFloat => {
+                if instr.dst >= 0 && instr.dst < 512 {
+                    float_regs[instr.dst as usize] = 1
+                }
             }
             _ => {}
         }
         i = i + 1
     }
-    false
+    // Pass 2: find IrReturn and determine type of returned value
+    i = 0
+    while i < func.instr_count {
+        let instr = func.instrs[i as usize]
+        match instr.op {
+            IrOpcode::IrReturn => {
+                if instr.src1 >= 0 {
+                    if instr.src1 < 512 && float_regs[instr.src1 as usize] == 1 {
+                        return WASM_TYPE_F64
+                    }
+                    return WASM_TYPE_I64
+                }
+                return 0 - 1  // IrReturn with no src → void
+            }
+            _ => {}
+        }
+        i = i + 1
+    }
+    0 - 1  // no IrReturn found → void
 }
 
 // ============================================================================
@@ -671,10 +732,13 @@ fn wasm_lower_function(ctx: WasmLowerCtx, func: IrFunction) -> WasmLowerCtx with
     // Pre-scan to allocate WASM locals for all IR registers
     out = wasm_lower_prescan_locals(out, func)
 
-    // Declare extra locals (beyond parameters) as i64
-    let extra_locals = out.local_count - func.param_count
-    if extra_locals > 0 {
-        out.body = wasm_body_add_local(out.body, extra_locals, WASM_TYPE_I64)
+    // Declare extra locals (beyond parameters) one-by-one by type.
+    // This correctly handles mixed i64/f64 extra locals.
+    var e: i64 = func.param_count
+    while e < out.local_count {
+        let ltype = out.local_type[e as usize]
+        out.body = wasm_body_add_local(out.body, 1, ltype)
+        e = e + 1
     }
 
     // Lower all instructions
@@ -735,15 +799,16 @@ fn wasm_lower_module(module: IrModule) -> WasmLowerResult with Mut, Panic, Div {
     while i < module.fn_count && i < WASM_LOWER_MAX_FUNCS {
         let func = module.functions[i as usize]
 
-        // Build the function type: all params are i64; result is i64 or void.
+        // Build the function type: all params are i64; result is i64, f64, or void.
         var ft = wasm_func_type_new()
         var p: i64 = 0
         while p < func.param_count {
             ft = wasm_func_type_add_param(ft, WASM_TYPE_I64)
             p = p + 1
         }
-        if wasm_lower_has_return_value(func) {
-            ft = wasm_func_type_add_result(ft, WASM_TYPE_I64)
+        let ret_type = wasm_lower_return_type(func)
+        if ret_type >= 0 {
+            ft = wasm_func_type_add_result(ft, ret_type)
         }
 
         types = wasm_type_section_add(types, ft)
