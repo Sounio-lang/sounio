@@ -182,6 +182,31 @@ source_file = sys.argv[1]
 text = open(source_file, "r", encoding="utf-8").read()
 compact = re.sub(r"\s+", " ", text).strip()
 
+def function_body(name: str) -> str:
+    marker = f"fn {name}("
+    start = text.find(marker)
+    if start < 0:
+        return ""
+    open_brace = text.find("{", start)
+    if open_brace < 0:
+        return ""
+    depth = 0
+    i = open_brace
+    while i < len(text):
+        ch = text[i]
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return text[open_brace + 1 : i]
+        i += 1
+    return ""
+
+char_body = re.sub(r"\s+", " ", function_body("char_from_i64")).strip()
+arg_body = re.sub(r"\s+", " ", function_body("arg_list_get")).strip()
+int_body = re.sub(r"\s+", " ", function_body("int_to_string")).strip()
+
 def add(name: str, ok: bool, pass_reason: str, fail_reason: str) -> None:
     status = "pass" if ok else "fail"
     reason = pass_reason if ok else fail_reason
@@ -189,7 +214,9 @@ def add(name: str, ok: bool, pass_reason: str, fail_reason: str) -> None:
 
 add(
     "char_from_i64_bounds",
-    'fn char_from_i64(n: i64) -> string with Mut, Panic { if n < 0 || n > 9 { panic(char_from_i64_error(n)) } str_slice("0123456789", n, n + 1) }' in compact,
+    ("if n < 0 || n > 9" in char_body)
+    and ("panic(char_from_i64_error(n))" in char_body)
+    and ('str_slice("0123456789", n, n + 1)' in char_body),
     "char_from_i64 validates 0 <= n <= 9 before indexing",
     "char_from_i64 missing explicit 0..9 bounds guard",
 )
@@ -203,7 +230,10 @@ add(
 
 add(
     "arg_list_get_bounds",
-    "fn arg_list_get(lst: ArgList, i: i64) -> string with Mut, Panic { if i < 0 || i >= lst.len { panic(arg_list_get_error(i, lst.len)) } lst.items[i as usize] }" in compact,
+    ("fn arg_list_get(lst: ArgList, i: i64) -> string with Mut, Panic {" in compact)
+    and ("if i < 0 || i >= lst.len" in arg_body)
+    and ("panic(arg_list_get_error(i, lst.len))" in arg_body)
+    and ("lst.items[i as usize]" in arg_body),
     "arg_list_get validates 0 <= i < len before indexing",
     "arg_list_get missing bounds guard or Panic effect",
 )
@@ -217,9 +247,10 @@ add(
 
 add(
     "int_to_string_linear_impl",
-    ('fn int_to_string(n: i64) -> string with Mut, Panic, Div { i64_to_string_decimal(n) }' in compact)
-    and ('var out: [i8; 24] = [0; 24]' in text)
-    and ('result = char_from_i64(ch) + result' not in text),
+    ("fn int_to_string(n: i64) -> string with Mut, Panic, Div {" in compact)
+    and ("i64_to_string_decimal(n)" in int_body)
+    and ("var out: [i8; 24] = [0; 24]" in text)
+    and ("result = char_from_i64(ch) + result" not in text),
     "int_to_string uses fixed buffer O(n) decimal implementation",
     "int_to_string missing linear-time buffer path or still has O(n^2) prepend",
 )

@@ -234,6 +234,20 @@ if [[ -x "$resolver" ]]; then
   fi
 fi
 
+declare -A seen_candidates=()
+declare -a unique_candidates=()
+for c in "${candidates[@]}"; do
+  if [[ -z "$c" ]]; then
+    continue
+  fi
+  if [[ -n "${seen_candidates[$c]:-}" ]]; then
+    continue
+  fi
+  seen_candidates["$c"]=1
+  unique_candidates+=("$c")
+done
+candidates=("${unique_candidates[@]}")
+
 jit_runner=""
 bench_mode="jit"
 blockers=()
