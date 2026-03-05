@@ -109,10 +109,53 @@ run_case() {
   fi
 }
 
+run_stdout_case() {
+  local name="$1"
+  local sio="$2"
+  local expected_stdout="$3"
+  local log_path="$LOG_DIR/${name}.log"
+  local soir="$OUT_DIR/${name}.soir"
+  local wasm="$OUT_DIR/${name}.wasm"
+
+  if [ ! -x "$SOUC_BIN" ] || [ ! -f "$sio" ]; then
+    append_case "$name" "not_run" "prerequisites_missing" "" ""
+    return
+  fi
+
+  set +e
+  "$SOUC_BIN" compile --emit hlir "$sio" 2>"$log_path" | python3 "$HLIR2SOIR" > "$soir" 2>>"$log_path"
+  local soir_rc=${PIPESTATUS[0]}
+  timeout "$TIMEOUT_SECS" "$SOUC_BIN" run "$DRIVER" "$soir" "$wasm" >>"$log_path" 2>&1
+  local wasm_rc=$?
+  set -e
+
+  if [ "$soir_rc" -ne 0 ] || [ ! -s "$wasm" ]; then
+    append_case "$name" "fail" "gen_failed" "" ""
+    return
+  fi
+
+  if [ ! -x "$WASMTIME" ]; then
+    append_case "$name" "not_run" "wasmtime_missing" "" ""
+    return
+  fi
+
+  set +e
+  local actual_stdout
+  actual_stdout="$("$WASMTIME" "$wasm" 2>>"$log_path")"
+  set -e
+
+  if [ "$actual_stdout" = "$expected_stdout" ]; then
+    append_case "$name" "pass" "ok" "$expected_stdout" "$actual_stdout"
+  else
+    append_case "$name" "fail" "wrong_stdout" "$expected_stdout" "$actual_stdout"
+  fi
+}
+
 run_case "add"      "$ROOT_DIR/tests/wasm/add.sio"      7
 run_case "fib"      "$ROOT_DIR/tests/wasm/fib.sio"      55
 run_case "mul"      "$ROOT_DIR/tests/wasm/mul.sio"      42
 run_case "nested"   "$ROOT_DIR/tests/wasm/nested.sio"   12
+run_stdout_case "print_fib"  "$ROOT_DIR/tests/wasm/print_fib.sio"  "55"
 
 python3 - "$OUT_JSON" "$CASES_TSV" "$TIMEOUT_SECS" "$SOUC_BIN" "$WASMTIME" <<'PY'
 import datetime as dt
