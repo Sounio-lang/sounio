@@ -6,7 +6,7 @@ use parser::ast::*
 use ir::ir::*
 
 struct Lowerer {
-    module: IrModule,
+    module: Box<IrModule>,
     current_fn: i64,
     env: Option<Box<IrEnvList>>,
     scope_depth: i64,
@@ -16,14 +16,14 @@ struct Lowerer {
     error_count: i64,
     had_error: bool,
     // Phase 3.1: Enum variant discriminants
-    enum_variants: EnumVariantTable,
+    enum_variants: Box<EnumVariantTable>,
     // Phase 3.2: Struct field layouts
-    struct_layouts: StructLayoutTable,
+    struct_layouts: Box<StructLayoutTable>,
 }
 
-fn lowerer_new() -> Lowerer {
+fn lowerer_new() -> Lowerer with Alloc {
     Lowerer {
-        module: ir_empty_module(),
+        module: Box::new(ir_empty_module()),
         current_fn: IR_INVALID_FN,
         env: None,
         scope_depth: 0,
@@ -32,8 +32,8 @@ fn lowerer_new() -> Lowerer {
         loop_depth: 0,
         error_count: 0,
         had_error: false,
-        enum_variants: empty_enum_variant_table(),
-        struct_layouts: empty_struct_layout_table(),
+        enum_variants: Box::new(empty_enum_variant_table()),
+        struct_layouts: Box::new(empty_struct_layout_table()),
     }
 }
 
@@ -76,39 +76,42 @@ impl Lowerer {
     }
 
     fn fresh_reg(self) -> (Lowerer, i64) with Mut, Panic, Div {
-        if self.current_fn < 0 || self.current_fn >= self.module.fn_count {
-            let loe = self.report_error()
+        var lo = self
+        if lo.current_fn < 0 || lo.current_fn >= lo.module.fn_count {
+            let loe = lo.report_error()
             return (loe, 0)
         }
-        let fn_id = self.current_fn
-        let reg = self.module.functions[fn_id].reg_count
-        self.module.functions[fn_id].reg_count = reg + 1
-        (self, reg)
+        let fn_id = lo.current_fn
+        let reg = lo.module.functions[fn_id].reg_count
+        lo.module.functions[fn_id].reg_count = reg + 1
+        (lo, reg)
     }
 
     fn fresh_label(self) -> (Lowerer, i64) with Mut, Panic, Div {
-        if self.current_fn < 0 || self.current_fn >= self.module.fn_count {
-            let loe = self.report_error()
+        var lo = self
+        if lo.current_fn < 0 || lo.current_fn >= lo.module.fn_count {
+            let loe = lo.report_error()
             return (loe, 0)
         }
-        let fn_id = self.current_fn
-        let label = self.module.functions[fn_id].label_count
-        self.module.functions[fn_id].label_count = label + 1
-        (self, label)
+        let fn_id = lo.current_fn
+        let label = lo.module.functions[fn_id].label_count
+        lo.module.functions[fn_id].label_count = label + 1
+        (lo, label)
     }
 
     fn emit(self, instr: IrInstr) -> Lowerer with Mut, Panic, Div {
-        if self.current_fn < 0 || self.current_fn >= self.module.fn_count {
-            return self.report_error()
+        var lo = self
+        if lo.current_fn < 0 || lo.current_fn >= lo.module.fn_count {
+            return lo.report_error()
         }
-        let fn_id = self.current_fn
-        let instr_count = self.module.functions[fn_id].instr_count
+        let fn_id = lo.current_fn
+        let instr_count = lo.module.functions[fn_id].instr_count
         if instr_count < IR_MAX_INSTRS {
-            self.module.functions[fn_id].instrs[instr_count] = instr
-            self.module.functions[fn_id].instr_count = instr_count + 1
-            self
+            lo.module.functions[fn_id].instrs[instr_count] = instr
+            lo.module.functions[fn_id].instr_count = instr_count + 1
+            lo
         } else {
-            self.report_error()
+            lo.report_error()
         }
     }
 
@@ -128,13 +131,16 @@ impl Lowerer {
             }
             i = i + 1
         }
-        if self.module.string_count < IR_MAX_STRINGS {
-            let idx = self.module.string_count
-            self.module.string_table[idx] = n
-            self.module.string_count = self.module.string_count + 1
-            (self, idx)
+        var lo = self
+        if lo.module.string_count < IR_MAX_STRINGS {
+            let idx = lo.module.string_count
+            var m = lo.module
+            m.string_table[idx] = n
+            m.string_count = m.string_count + 1
+            lo.module = m
+            (lo, idx)
         } else {
-            let loe = self.report_error()
+            let loe = lo.report_error()
             (loe, -1)
         }
     }
@@ -148,18 +154,23 @@ impl Lowerer {
             i = i + 1
         }
 
-        if self.module.fn_count < IR_MAX_FUNCS {
-            let idx = self.module.fn_count
-            self.module.functions[idx].name = name
-            self.module.functions[idx].instr_count = 0
-            self.module.functions[idx].reg_count = 0
-            self.module.functions[idx].label_count = 0
-            self.module.functions[idx].param_count = 0
-            self.module.functions[idx].param_regs = [IR_INVALID_REG; 64]
-            self.module.fn_count = self.module.fn_count + 1
-            (self, idx)
+        var lo = self
+        if lo.module.fn_count < IR_MAX_FUNCS {
+            let idx = lo.module.fn_count
+            var m = lo.module
+            var f = m.functions[idx]
+            f.name = name
+            f.instr_count = 0
+            f.reg_count = 0
+            f.label_count = 0
+            f.param_count = 0
+            f.param_regs = [IR_INVALID_REG; 64]
+            m.functions[idx] = f
+            m.fn_count = m.fn_count + 1
+            lo.module = m
+            (lo, idx)
         } else {
-            let loe = self.report_error()
+            let loe = lo.report_error()
             (loe, -1)
         }
     }
@@ -441,7 +452,7 @@ impl Lowerer {
                 let fd_params: Option<Box<ParamList>> = (*fd).params
                 let fd_body: Block = (*fd).body
 
-                lo = lo.enter_scope()
+                lo.scope_depth = lo.scope_depth + 1
                 lo = lo.lower_fn_params(fd_params)
                 print("IR lower fn params done\n")
                 let bpair = lo.lower_block(fd_body)
@@ -451,24 +462,7 @@ impl Lowerer {
 
                 if !lo.fn_ends_with_return() {
                     print("IR lower fn emit return start\n")
-                    print("IR lower fn emit return state current_fn=")
-                    print_int(lo.current_fn)
-                    print(" fn_count=")
-                    print_int(lo.module.fn_count)
-                    print("\n")
-                    if lo.current_fn < 0 || lo.current_fn >= lo.module.fn_count {
-                        lo.error_count = lo.error_count + 1
-                        lo.had_error = true
-                    } else {
-                        let emit_fn_id = lo.current_fn
-                        let emit_instr_count = lo.module.functions[emit_fn_id].instr_count
-                        if emit_instr_count < IR_MAX_INSTRS {
-                            lo.module.functions[emit_fn_id].instrs[emit_instr_count] = ir_return(result_reg)
-                            lo.module.functions[emit_fn_id].instr_count = emit_instr_count + 1
-                        } else {
-                            lo = lo.report_error()
-                        }
-                    }
+                    lo = lo.emit(ir_return(result_reg))
                     print("IR lower fn emit return done\n")
                 }
 
@@ -492,8 +486,8 @@ impl Lowerer {
         var lo = self
         lo.scope_depth = lo.scope_depth + 1
         let pair = lo.lower_stmt_list(blk.stmts)
-        print("IR lower block after stmt_list\n")
         lo = pair.0
+        print("IR lower block after stmt_list\n")
         let reg = pair.1
         if lo.scope_depth > 0 {
             lo.scope_depth = lo.scope_depth - 1
@@ -1369,7 +1363,7 @@ fn lower_program_to_ir(prog: Program) -> IrLowerResult with Mut, Panic, Div, All
     let lo2 = lo.lower_program_items(prog.items)
     print("IR lower items done\n")
     IrLowerResult {
-        module: lo2.module,
+        module: *lo2.module,
         error_count: lo2.error_count,
         had_error: lo2.had_error,
     }
