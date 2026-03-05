@@ -47,6 +47,10 @@ let OP_I64_SUB: i64 = 125
 let OP_I64_MUL: i64 = 126
 let OP_EXT_I32: i64 = 172    // i64.extend_i32_s (0xac)
 let OP_WRAP_I64: i64 = 167   // i32.wrap_i64 (0xa7)
+let OP_I32_STORE: i64 = 54   // 0x36
+let OP_I32_STORE8: i64 = 58  // 0x3a
+let OP_I64_DIV_U: i64 = 128  // 0x80
+let OP_I64_REM_U: i64 = 130  // 0x82
 
 // ── SOIR op codes ─────────────────────────────────────────────────────────
 let HI_ALLOCA: i64 = 1
@@ -372,6 +376,17 @@ fn parse_soir(buf: [i8; 131072], size: i64) -> Mod with Mut, Panic, Div {
                     }
                     fi2 = fi2 + 1
                 }
+                // Check for __print_i64 builtin (11 chars)
+                if fnd < 0 && cnr.len == 11 {
+                    if cnr.n[0 as usize] as i64 == 95 && cnr.n[1 as usize] as i64 == 95 &&
+                       cnr.n[2 as usize] as i64 == 112 && cnr.n[3 as usize] as i64 == 114 &&
+                       cnr.n[4 as usize] as i64 == 105 && cnr.n[5 as usize] as i64 == 110 &&
+                       cnr.n[6 as usize] as i64 == 116 && cnr.n[7 as usize] as i64 == 95 &&
+                       cnr.n[8 as usize] as i64 == 105 && cnr.n[9 as usize] as i64 == 54 &&
+                       cnr.n[10 as usize] as i64 == 52 {
+                        fnd = 0 - 2
+                    }
+                }
                 ins.a = fnd
                 var ai: i64 = 0; var ap = ar.p
                 while ai < ar.v && ai < 4 {
@@ -477,7 +492,13 @@ fn emit_ins(body: Buf, cg: Cg, ins: Ins, m: Mod) -> CR with Mut, Panic, Div {
         var ai: i64 = 0
         while ai < ins.b { nb = elg(nb, nc, ins.args[ai as usize]); ai = ai + 1 }
         nb = buf_push(nb, OP_CALL)
-        nb = buf_push_uleb(nb, (if ins.a < 0 { 0 } else { ins.a }) + 1)  // +1: proc_exit import at idx 0
+        // ins.a == -2 means __print_i64 builtin (at wasm idx m.nf+2)
+        // ins.a >= 0 means user func (at wasm idx ins.a+2)
+        // ins.a == -1 (unresolved) falls back to idx 2
+        let call_idx: i64 = if ins.a == 0 - 2 { m.nf + 2 }
+                            else if ins.a >= 0 { ins.a + 2 }
+                            else { 2 }
+        nb = buf_push_uleb(nb, call_idx)
         if ins.rv >= 0 {
             nb = buf_push(nb, OP_LOCAL_SET)
             nb = buf_push_uleb(nb, nc.vl[ins.rv as usize])
@@ -622,15 +643,107 @@ fn codegen_func(f: Fun, m: Mod) -> Buf with Mut, Panic, Div {
     buf_push(body, OP_END)
 }
 
+fn emit_print_i64_body(b: Buf) -> Buf with Mut, Panic, Div {
+    var nb = b
+    // locals: 1 i64 (x, local 1), 1 i32 (pos, local 2)
+    nb = buf_push(nb, 2); nb = buf_push(nb, 1); nb = buf_push(nb, 126)
+    nb = buf_push(nb, 1); nb = buf_push(nb, 127)
+    // pos = 24
+    nb = buf_push(nb, 65); nb = buf_push(nb, 24)
+    nb = buf_push(nb, 33); nb = buf_push(nb, 2)
+    // mem[24] = '\n'
+    nb = buf_push(nb, 65); nb = buf_push(nb, 24)
+    nb = buf_push(nb, 65); nb = buf_push(nb, 10)
+    nb = buf_push(nb, 58); nb = buf_push(nb, 0); nb = buf_push(nb, 0)
+    // if n == 0
+    nb = buf_push(nb, 32); nb = buf_push(nb, 0)
+    nb = buf_push(nb, 80)
+    nb = buf_push(nb, 4); nb = buf_push(nb, 64)
+      // zero case: mem[23]='0', iovec={23,2}, fd_write, return
+      nb = buf_push(nb, 65); nb = buf_push(nb, 23)
+      nb = buf_push(nb, 65); nb = buf_push(nb, 48)
+      nb = buf_push(nb, 58); nb = buf_push(nb, 0); nb = buf_push(nb, 0)
+      nb = buf_push(nb, 65); nb = buf_push(nb, 32)
+      nb = buf_push(nb, 65); nb = buf_push(nb, 23)
+      nb = buf_push(nb, 54); nb = buf_push(nb, 2); nb = buf_push(nb, 0)
+      nb = buf_push(nb, 65); nb = buf_push(nb, 36)
+      nb = buf_push(nb, 65); nb = buf_push(nb, 2)
+      nb = buf_push(nb, 54); nb = buf_push(nb, 2); nb = buf_push(nb, 0)
+      nb = buf_push(nb, 65); nb = buf_push(nb, 1)
+      nb = buf_push(nb, 65); nb = buf_push(nb, 32)
+      nb = buf_push(nb, 65); nb = buf_push(nb, 1)
+      nb = buf_push(nb, 65); nb = buf_push(nb, 40)
+      nb = buf_push(nb, 16); nb = buf_push(nb, 1)
+      nb = buf_push(nb, 26)
+      nb = buf_push(nb, 15)
+    nb = buf_push(nb, 11)
+    // x = n
+    nb = buf_push(nb, 32); nb = buf_push(nb, 0)
+    nb = buf_push(nb, 33); nb = buf_push(nb, 1)
+    // block/loop
+    nb = buf_push(nb, 2); nb = buf_push(nb, 64)
+    nb = buf_push(nb, 3); nb = buf_push(nb, 64)
+      nb = buf_push(nb, 32); nb = buf_push(nb, 1)
+      nb = buf_push(nb, 80)
+      nb = buf_push(nb, 13); nb = buf_push(nb, 1)
+      nb = buf_push(nb, 32); nb = buf_push(nb, 2)
+      nb = buf_push(nb, 65); nb = buf_push(nb, 1)
+      nb = buf_push(nb, 107)
+      nb = buf_push(nb, 32); nb = buf_push(nb, 1)
+      nb = buf_push(nb, 66); nb = buf_push(nb, 10)
+      nb = buf_push(nb, 130)
+      nb = buf_push(nb, 167)
+      nb = buf_push(nb, 65); nb = buf_push(nb, 48)
+      nb = buf_push(nb, 106)
+      nb = buf_push(nb, 58); nb = buf_push(nb, 0); nb = buf_push(nb, 0)
+      nb = buf_push(nb, 32); nb = buf_push(nb, 1)
+      nb = buf_push(nb, 66); nb = buf_push(nb, 10)
+      nb = buf_push(nb, 128)
+      nb = buf_push(nb, 33); nb = buf_push(nb, 1)
+      nb = buf_push(nb, 32); nb = buf_push(nb, 2)
+      nb = buf_push(nb, 65); nb = buf_push(nb, 1)
+      nb = buf_push(nb, 107)
+      nb = buf_push(nb, 33); nb = buf_push(nb, 2)
+      nb = buf_push(nb, 12); nb = buf_push(nb, 0)
+    nb = buf_push(nb, 11); nb = buf_push(nb, 11)
+    // iovec.ptr = pos
+    nb = buf_push(nb, 65); nb = buf_push(nb, 32)
+    nb = buf_push(nb, 32); nb = buf_push(nb, 2)
+    nb = buf_push(nb, 54); nb = buf_push(nb, 2); nb = buf_push(nb, 0)
+    // iovec.len = 25 - pos
+    nb = buf_push(nb, 65); nb = buf_push(nb, 36)
+    nb = buf_push(nb, 65); nb = buf_push(nb, 25)
+    nb = buf_push(nb, 32); nb = buf_push(nb, 2)
+    nb = buf_push(nb, 107)
+    nb = buf_push(nb, 54); nb = buf_push(nb, 2); nb = buf_push(nb, 0)
+    // fd_write(1, 32, 1, 40)
+    nb = buf_push(nb, 65); nb = buf_push(nb, 1)
+    nb = buf_push(nb, 65); nb = buf_push(nb, 32)
+    nb = buf_push(nb, 65); nb = buf_push(nb, 1)
+    nb = buf_push(nb, 65); nb = buf_push(nb, 40)
+    nb = buf_push(nb, 16); nb = buf_push(nb, 1)
+    nb = buf_push(nb, 26)
+    nb = buf_push(nb, 11)
+    nb
+}
+
 fn assemble(m: Mod) -> Buf with Mut, Panic, Div {
     var out = emit_magic(buf_new())
 
-    // ── Type section ─────────────────────────────────────────────────────
-    // Type 0: proc_exit (i32) -> void
-    // Types 1..nf: user func types
-    // Type nf+1: _start () -> void
-    var tp = buf_push_uleb(buf_new(), m.nf + 2)
+    // ── Type section (nf+4 types) ─────────────────────────────────────────
+    // type 0: proc_exit (i32) -> void
+    // type 1: fd_write (i32 i32 i32 i32) -> i32
+    // types 2..nf+1: user func types
+    // type nf+2: __print_i64 (i64) -> void
+    // type nf+3: _start () -> void
+    var tp = buf_push_uleb(buf_new(), m.nf + 4)
+    // type 0: proc_exit (i32) -> void
     tp = buf_push(tp, 96); tp = buf_push(tp, 1); tp = buf_push(tp, 127); tp = buf_push(tp, 0)
+    // type 1: fd_write (i32 i32 i32 i32) -> i32
+    tp = buf_push(tp, 96); tp = buf_push(tp, 4)
+    tp = buf_push(tp, 127); tp = buf_push(tp, 127); tp = buf_push(tp, 127); tp = buf_push(tp, 127)
+    tp = buf_push(tp, 1); tp = buf_push(tp, 127)
+    // types 2..nf+1: user func types
     var fi: i64 = 0
     while fi < m.nf {
         let f = m.fns[fi as usize]
@@ -641,12 +754,15 @@ fn assemble(m: Mod) -> Buf with Mut, Panic, Div {
         tp = buf_push_uleb(tp, 1); tp = buf_push(tp, WT_I64)
         fi = fi + 1
     }
+    // type nf+2: __print_i64 (i64) -> void
+    tp = buf_push(tp, 96); tp = buf_push(tp, 1); tp = buf_push(tp, 126); tp = buf_push(tp, 0)
+    // type nf+3: _start () -> void
     tp = buf_push(tp, 96); tp = buf_push(tp, 0); tp = buf_push(tp, 0)
     out = buf_emit_section(out, 1, tp)
 
-    // ── Import section ───────────────────────────────────────────────────
-    // wasi_snapshot_preview1::proc_exit (type 0) as func 0
-    var ip = buf_push_uleb(buf_new(), 1)
+    // ── Import section (2 imports) ────────────────────────────────────────
+    var ip = buf_push_uleb(buf_new(), 2)
+    // import 0: proc_exit (type 0)
     ip = buf_push_uleb(ip, 22)
     ip = buf_push(ip, 119); ip = buf_push(ip, 97);  ip = buf_push(ip, 115); ip = buf_push(ip, 105)
     ip = buf_push(ip, 95);  ip = buf_push(ip, 115); ip = buf_push(ip, 110); ip = buf_push(ip, 97)
@@ -659,14 +775,30 @@ fn assemble(m: Mod) -> Buf with Mut, Panic, Div {
     ip = buf_push(ip, 95);  ip = buf_push(ip, 101); ip = buf_push(ip, 120); ip = buf_push(ip, 105)
     ip = buf_push(ip, 116)
     ip = buf_push(ip, 0); ip = buf_push(ip, 0)
+    // import 1: fd_write (type 1)
+    ip = buf_push_uleb(ip, 22)
+    ip = buf_push(ip, 119); ip = buf_push(ip, 97);  ip = buf_push(ip, 115); ip = buf_push(ip, 105)
+    ip = buf_push(ip, 95);  ip = buf_push(ip, 115); ip = buf_push(ip, 110); ip = buf_push(ip, 97)
+    ip = buf_push(ip, 112); ip = buf_push(ip, 115); ip = buf_push(ip, 104); ip = buf_push(ip, 111)
+    ip = buf_push(ip, 116); ip = buf_push(ip, 95);  ip = buf_push(ip, 112); ip = buf_push(ip, 114)
+    ip = buf_push(ip, 101); ip = buf_push(ip, 118); ip = buf_push(ip, 105); ip = buf_push(ip, 101)
+    ip = buf_push(ip, 119); ip = buf_push(ip, 49)
+    ip = buf_push_uleb(ip, 8)
+    // "fd_write" = f=102 d=100 _=95 w=119 r=114 i=105 t=116 e=101
+    ip = buf_push(ip, 102); ip = buf_push(ip, 100); ip = buf_push(ip, 95);  ip = buf_push(ip, 119)
+    ip = buf_push(ip, 114); ip = buf_push(ip, 105); ip = buf_push(ip, 116); ip = buf_push(ip, 101)
+    ip = buf_push(ip, 0); ip = buf_push(ip, 1)
     out = buf_emit_section(out, 2, ip)
 
-    // ── Function section ─────────────────────────────────────────────────
-    // nf user funcs (types 1..nf) + _start (type nf+1)
-    var fp = buf_push_uleb(buf_new(), m.nf + 1)
+    // ── Function section (nf+2 funcs) ────────────────────────────────────
+    // user funcs → types 2..nf+1
+    // __print_i64 → type nf+2
+    // _start → type nf+3
+    var fp = buf_push_uleb(buf_new(), m.nf + 2)
     var fi2: i64 = 0
-    while fi2 < m.nf { fp = buf_push_uleb(fp, fi2 + 1); fi2 = fi2 + 1 }
-    fp = buf_push_uleb(fp, m.nf + 1)
+    while fi2 < m.nf { fp = buf_push_uleb(fp, fi2 + 2); fi2 = fi2 + 1 }
+    fp = buf_push_uleb(fp, m.nf + 2)
+    fp = buf_push_uleb(fp, m.nf + 3)
     out = buf_emit_section(out, 3, fp)
 
     // ── Memory section ───────────────────────────────────────────────────
@@ -674,8 +806,8 @@ fn assemble(m: Mod) -> Buf with Mut, Panic, Div {
     mp = buf_push(mp, 0); mp = buf_push_uleb(mp, 1)
     out = buf_emit_section(out, 5, mp)
 
-    // ── Export section ───────────────────────────────────────────────────
-    // user funcs (wasm idx 1..nf) + _start (nf+1) + memory (kind=2)
+    // ── Export section (nf+2 exports) ────────────────────────────────────
+    // user funcs at wasm idx 2..nf+1 + _start at nf+3 + memory
     var ep = buf_push_uleb(buf_new(), m.nf + 2)
     var fi3: i64 = 0
     while fi3 < m.nf {
@@ -683,27 +815,32 @@ fn assemble(m: Mod) -> Buf with Mut, Panic, Div {
         ep = buf_push_uleb(ep, f.nl)
         var ni: i64 = 0
         while ni < f.nl { ep = buf_push(ep, f.name[ni as usize] as i64); ni = ni + 1 }
-        ep = buf_push(ep, 0); ep = buf_push_uleb(ep, fi3 + 1)
+        ep = buf_push(ep, 0); ep = buf_push_uleb(ep, fi3 + 2)
         fi3 = fi3 + 1
     }
+    // _start export
     ep = buf_push_uleb(ep, 6)
     ep = buf_push(ep, 95);  ep = buf_push(ep, 115); ep = buf_push(ep, 116)
     ep = buf_push(ep, 97);  ep = buf_push(ep, 114); ep = buf_push(ep, 116)
-    ep = buf_push(ep, 0); ep = buf_push_uleb(ep, m.nf + 1)
+    ep = buf_push(ep, 0); ep = buf_push_uleb(ep, m.nf + 3)
+    // memory export
     ep = buf_push_uleb(ep, 6)
     ep = buf_push(ep, 109); ep = buf_push(ep, 101); ep = buf_push(ep, 109)
     ep = buf_push(ep, 111); ep = buf_push(ep, 114); ep = buf_push(ep, 121)
     ep = buf_push(ep, 2); ep = buf_push(ep, 0)
     out = buf_emit_section(out, 7, ep)
 
-    // ── Code section ─────────────────────────────────────────────────────
-    var cp = buf_push_uleb(buf_new(), m.nf + 1)
+    // ── Code section (nf+2 bodies) ────────────────────────────────────────
+    var cp = buf_push_uleb(buf_new(), m.nf + 2)
     var fi4: i64 = 0
     while fi4 < m.nf {
         let body = codegen_func(m.fns[fi4 as usize], m)
         cp = buf_push_uleb(cp, body.len); cp = buf_push_bytes(cp, body); fi4 = fi4 + 1
     }
-    // _start: call main (wasm idx main_idx+1), i32.wrap_i64, call proc_exit(0), unreachable
+    // __print_i64 body
+    let pb = emit_print_i64_body(buf_new())
+    cp = buf_push_uleb(cp, pb.len); cp = buf_push_bytes(cp, pb)
+    // _start body: call main (+2 for 2 imports), i32.wrap_i64, call proc_exit(0)
     var main_idx: i64 = m.nf - 1
     var mi: i64 = 0
     var found: i64 = 0
@@ -718,7 +855,7 @@ fn assemble(m: Mod) -> Buf with Mut, Panic, Div {
     }
     var sb = buf_new()
     sb = buf_push_uleb(sb, 0)
-    sb = buf_push(sb, 16); sb = buf_push_uleb(sb, main_idx + 1)
+    sb = buf_push(sb, 16); sb = buf_push_uleb(sb, main_idx + 2)
     sb = buf_push(sb, 167)
     sb = buf_push(sb, 16); sb = buf_push(sb, 0)
     sb = buf_push(sb, 0)

@@ -31,7 +31,8 @@ def find_bid(text):
     m = re.search(BID, text, re.DOTALL)
     return m.group(1) if m else '-1'
 
-def parse_instr(itext):
+def parse_instr(itext, state=None):
+    if state is None: state = {}
     """Return a SOIR line for one HlirInstr text block."""
     # Result
     m_res = re.search(r'result:\s*Some\(\s*' + VID, itext, re.DOTALL)
@@ -79,6 +80,13 @@ def parse_instr(itext):
         call_text = m_call.group(1) if m_call else itext
         m_name = re.search(r'name:\s*"([^"]+)"', call_text)
         callee = m_name.group(1) if m_name else 'unknown'
+        # print_int / println_int → map to __print_i64 builtin
+        if callee in ('print_int', 'println_int'):
+            m_args = re.search(r'args:\s*\[(.*?)\]', call_text, re.DOTALL)
+            arg_vids = find_vids(m_args.group(1)) if m_args else []
+            argc = len(arg_vids)
+            args_str = ' '.join(arg_vids)
+            return f'Ik -1 __print_i64 {argc} {args_str}'.strip()
         # args: [ValueId(...), ...] — find the args list
         m_args = re.search(r'args:\s*\[(.*?)\]', call_text, re.DOTALL)
         if m_args:
@@ -99,6 +107,26 @@ def parse_instr(itext):
         n = len(pairs)
         flat = ' '.join(f'{bid} {vid}' for bid, vid in pairs)
         return f'Ip {result_vid} {n} {flat}'.strip()
+
+    elif re.search(r'\bop:\s*Const\(\s*GlobalRef\(', itext):
+        m_name = re.search(r'GlobalRef\(\s*"([^"]+)"', itext)
+        if m_name:
+            state[result_vid] = m_name.group(1)
+        return None  # function pointer loads have no SOIR equivalent
+
+    elif re.search(r'\bop:\s*Call\s*\{', itext):
+        m_func = re.search(r'func:\s*ValueId\(\s*(\d+)', itext, re.DOTALL)
+        func_vid = m_func.group(1) if m_func else None
+        callee_name = state.get(func_vid) if func_vid else None
+        m_args_block = re.search(r'args:\s*\[(.*?)\]', itext, re.DOTALL)
+        arg_vids = re.findall(r'ValueId\(\s*(\d+)', m_args_block.group(1)) if m_args_block else []
+        argc = len(arg_vids)
+        args_str = ' '.join(arg_vids)
+        if callee_name in ('print_int', 'println_int'):
+            return f'Ik -1 __print_i64 {argc} {args_str}'.strip()
+        elif callee_name:
+            return f'Ik {result_vid} {callee_name} {argc} {args_str}'.strip()
+        return None
 
     return None  # unknown op, skip
 
@@ -151,11 +179,12 @@ def hlir_to_soir(text):
             term_text = block_text[term_start + len('terminator:'):].strip()
 
             # Instructions: split by HlirInstr {
+            global_refs = {}  # vid → global name (for indirect call resolution)
             instr_starts = [m.start() for m in re.finditer(r'HlirInstr \{', instrs_text)]
             for ii, ist in enumerate(instr_starts):
                 next_ist = instr_starts[ii + 1] if ii + 1 < len(instr_starts) else len(instrs_text)
                 itext = instrs_text[ist:next_ist]
-                line = parse_instr(itext)
+                line = parse_instr(itext, state=global_refs)
                 if line:
                     lines.append(line)
 
