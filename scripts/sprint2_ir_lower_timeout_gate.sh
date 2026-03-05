@@ -88,7 +88,7 @@ run_ir_lower_probe_case() {
 
   set +e
   timeout "$TIMEOUT_SECS" \
-    "$SOUC_BIN" run self-hosted/compiler/main.sio -- souc "$SOURCE_FILE" -o "$NATIVE_OUT" -t native -v \
+    "$SOUC_BIN" build --backend=selfhosted-native "$SOURCE_FILE" -o "$NATIVE_OUT" \
     >"$log_path" 2>&1
   local rc=$?
   set -e
@@ -100,11 +100,11 @@ run_ir_lower_probe_case() {
   local ir_start
   ir_start="$(marker_bool "IR lowering module" "$log_path")"
   local ir_done
-  ir_done="$(marker_bool "IR lowering complete" "$log_path")"
+  ir_done="$(marker_bool "Native compilation successful" "$log_path")"
   local merged_seen
   merged_seen="$(marker_bool "Merged IR:" "$log_path")"
   local native_dispatch_seen
-  native_dispatch_seen="$(marker_bool "Native dispatch:" "$log_path")"
+  native_dispatch_seen="$(marker_bool "ELF size:" "$log_path")"
   local native_bin_seen
   native_bin_seen="$(marker_bool "Native binary size:" "$log_path")"
   local written_seen
