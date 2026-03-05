@@ -320,6 +320,17 @@ fn wasm_lower_prescan_locals(ctx: WasmLowerCtx, func: IrFunction) -> WasmLowerCt
                     out = wasm_lower_mark_local_f64(out, instr.dst)
                 }
             }
+            IrOpcode::IrUnaryOp => {
+                // OpNeg on a f64 operand produces a f64 result.
+                match instr.un_op {
+                    UnaryOp::OpNeg => {
+                        if instr.dst >= 0 && wasm_lower_is_float_reg(out, instr.src1) {
+                            out = wasm_lower_mark_local_f64(out, instr.dst)
+                        }
+                    }
+                    _ => {}
+                }
+            }
             _ => {}
         }
         i = i + 1
@@ -482,26 +493,35 @@ fn wasm_lower_unaryop(ctx: WasmLowerCtx, instr: IrInstr) -> WasmLowerCtx with Mu
         out.body = wasm_body_emit_local_get(out.body, src_local)
     }
 
-    match instr.un_op {
-        UnaryOp::OpNeg => {
-            // Negate: 0 - value.  Push 0 first, then swap with i64.sub.
-            // Stack has [val] already from local.get.
-            // We need: i64.const 0; <reorder>; i64.sub
-            // Simpler: emit const 0, local.get, sub
-            // Redo: pop the value we already pushed, emit the correct sequence
-            // Actually: we have val on stack. Do: i64.const(-1), i64.mul
-            out.body = wasm_body_emit_i64_const(out.body, 0 - 1)
-            out.body = wasm_body_emit_i64_mul(out.body)
+    if wasm_lower_is_float_reg(out, instr.src1) {
+        // ── f64 unary path ────────────────────────────────────────────────────
+        match instr.un_op {
+            UnaryOp::OpNeg => {
+                // f64.neg (0x9A): flip the sign bit — correct IEEE 754 negation.
+                // The i64.const(-1)*i64.mul trick is wrong for f64 locals.
+                out.body = wasm_body_emit_f64_neg(out.body)
+            }
+            _ => {
+                // OpNot on f64 is undefined; OpRef/Deref don't apply.
+            }
         }
-        UnaryOp::OpNot => {
-            // Logical NOT: i64.eqz
-            out.body = wasm_body_emit_i64_eqz(out.body)
-            // Extend the i32 result back to i64
-            out.body = wasm_body_emit_i64_extend_i32_u(out.body)
-        }
-        _ => {
-            // OpRef, OpRefMut, OpDeref: not representable in flat WASM lowering
-            // Pass through as nop (value is already on stack)
+    } else {
+        // ── i64 unary path ────────────────────────────────────────────────────
+        match instr.un_op {
+            UnaryOp::OpNeg => {
+                // Negate: val is on stack.  Multiply by -1.
+                out.body = wasm_body_emit_i64_const(out.body, 0 - 1)
+                out.body = wasm_body_emit_i64_mul(out.body)
+            }
+            UnaryOp::OpNot => {
+                // Logical NOT: i64.eqz → i32; extend back to i64.
+                out.body = wasm_body_emit_i64_eqz(out.body)
+                out.body = wasm_body_emit_i64_extend_i32_u(out.body)
+            }
+            _ => {
+                // OpRef, OpRefMut, OpDeref: not representable in flat WASM lowering.
+                // Pass through — value is already on the stack.
+            }
         }
     }
 
