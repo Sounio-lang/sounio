@@ -19,31 +19,126 @@ use native::elf::*
 use native::reloc::*
 use native::frame::*
 use native::codegen::*
-use module_loader::{compile_multimodule_native}
+use module_loader::{compile_multimodule_native, load_multimodule_ir}
+use parser::parser::{parser_last_error_count}
 
 // ============================================================================
 // STRING UTILITIES
 // ============================================================================
 
+fn pow10_idx(idx: i64) -> i64 {
+    if idx == 0 { 1000000000000000000 }
+    else if idx == 1 { 100000000000000000 }
+    else if idx == 2 { 10000000000000000 }
+    else if idx == 3 { 1000000000000000 }
+    else if idx == 4 { 100000000000000 }
+    else if idx == 5 { 10000000000000 }
+    else if idx == 6 { 1000000000000 }
+    else if idx == 7 { 100000000000 }
+    else if idx == 8 { 10000000000 }
+    else if idx == 9 { 1000000000 }
+    else if idx == 10 { 100000000 }
+    else if idx == 11 { 10000000 }
+    else if idx == 12 { 1000000 }
+    else if idx == 13 { 100000 }
+    else if idx == 14 { 10000 }
+    else if idx == 15 { 1000 }
+    else if idx == 16 { 100 }
+    else if idx == 17 { 10 }
+    else { 1 }
+}
+
+fn digit_for_power(rem: i64, power: i64) -> i64 {
+    if rem <= (0 - (9 * power)) { 9 }
+    else if rem <= (0 - (8 * power)) { 8 }
+    else if rem <= (0 - (7 * power)) { 7 }
+    else if rem <= (0 - (6 * power)) { 6 }
+    else if rem <= (0 - (5 * power)) { 5 }
+    else if rem <= (0 - (4 * power)) { 4 }
+    else if rem <= (0 - (3 * power)) { 3 }
+    else if rem <= (0 - (2 * power)) { 2 }
+    else if rem <= (0 - power) { 1 }
+    else { 0 }
+}
+
+fn i64_to_digits_no_div(rem: i64, idx: i64, started: bool) -> string with Mut, Panic {
+    if idx >= 19 {
+        return ""
+    }
+
+    let power = pow10_idx(idx)
+    let digit = digit_for_power(rem, power)
+    let rem_next = rem + (digit * power)
+    let emit = started || digit > 0 || idx == 18
+    let head = if emit { char_from_i64(digit) } else { "" }
+    head + i64_to_digits_no_div(rem_next, idx + 1, emit)
+}
+
+fn i64_to_string_no_div(n: i64) -> string with Mut, Panic {
+    if n == 0 {
+        return "0"
+    }
+    let negative = n < 0
+    let rem = if negative { n } else { 0 - n }
+    let digits = i64_to_digits_no_div(rem, 0, false)
+    if negative { "-" + digits } else { digits }
+}
+
+fn char_from_i64_error(n: i64) -> string with Mut, Panic {
+    "char_from_i64: digit must be 0-9, got " + i64_to_string_no_div(n)
+}
+
 fn char_from_i64(n: i64) -> string with Mut, Panic {
+    if n < 0 || n > 9 {
+        panic(char_from_i64_error(n))
+    }
     str_slice("0123456789", n, n + 1)
 }
 
-fn int_to_string(n: i64) -> string with Mut, Panic, Div {
+fn i64_to_string_decimal(n: i64) -> string with Mut, Panic, Div {
+    var out: [i8; 24] = [0; 24]
     if n == 0 {
-        "0"
-    } else {
-        let negative = n < 0
-        var num = if negative { 0 - n } else { n }
-        var result = ""
-        while num > 0 {
-            let digit = num % 10
-            let ch = 48 + digit
-            result = char_from_i64(ch) + result
-            num = num / 10
-        }
-        if negative { "-" + result } else { result }
+        out[0] = 48 as i8
+        return str_from_bytes(out, 1)
     }
+
+    var value = n
+    var digits: i64 = 1
+    while value <= -10 || value >= 10 {
+        digits = digits + 1
+        value = value / 10
+    }
+
+    let negative = n < 0
+    let total_len = if negative { digits + 1 } else { digits }
+
+    var write = total_len - 1
+    value = n
+    while value <= -10 || value >= 10 {
+        var digit = value % 10
+        if digit < 0 {
+            digit = 0 - digit
+        }
+        out[write as usize] = (48 + digit) as i8
+        write = write - 1
+        value = value / 10
+    }
+
+    var final_digit = value
+    if final_digit < 0 {
+        final_digit = 0 - final_digit
+    }
+    out[write as usize] = (48 + final_digit) as i8
+
+    if negative {
+        out[0] = 45 as i8
+    }
+
+    str_from_bytes(out, total_len)
+}
+
+fn int_to_string(n: i64) -> string with Mut, Panic, Div {
+    i64_to_string_decimal(n)
 }
 
 // ============================================================================
@@ -55,8 +150,16 @@ struct ArgList {
     len: i64,
 }
 
-fn arg_list_get(lst: ArgList, i: i64) -> string {
+fn arg_list_get(lst: ArgList, i: i64) -> string with Mut, Panic {
+    if i < 0 || i >= lst.len {
+        panic(arg_list_get_error(i, lst.len))
+    }
     lst.items[i as usize]
+}
+
+fn arg_list_get_error(index: i64, len: i64) -> string with Mut, Panic {
+    "arg_list_get: index " + i64_to_string_no_div(index) +
+    " out of bounds (length " + i64_to_string_no_div(len) + ")"
 }
 
 // ============================================================================
@@ -101,6 +204,49 @@ fn compile_errors_push(errs: CompileErrors, s: string) -> CompileErrors {
 
 fn compile_errors_get(errs: CompileErrors, i: i64) -> string {
     errs.items[i as usize]
+}
+
+fn compile_trim_line(line: string) -> string with Mut, Panic, Div {
+    let line_len = str_len(line)
+    if line_len > 0 && str_char_at(line, line_len - 1) == 13 {
+        str_slice(line, 0, line_len - 1)
+    } else {
+        line
+    }
+}
+
+fn compile_errors_push_lines(errs: CompileErrors, prefix: string, text: string) -> CompileErrors with Mut, Panic, Div {
+    var out = errs
+    let n = str_len(text)
+    if n <= 0 {
+        return out
+    }
+
+    var start: i64 = 0
+    var i: i64 = 0
+    while i < n {
+        if str_char_at(text, i) == 10 {
+            if i > start {
+                let raw_line = str_slice(text, start, i)
+                let line = compile_trim_line(raw_line)
+                if str_len(line) > 0 {
+                    out = compile_errors_push(out, prefix + line)
+                }
+            }
+            start = i + 1
+        }
+        i = i + 1
+    }
+
+    if start < n {
+        let raw_line = str_slice(text, start, n)
+        let line = compile_trim_line(raw_line)
+        if str_len(line) > 0 {
+            out = compile_errors_push(out, prefix + line)
+        }
+    }
+
+    out
 }
 
 // ============================================================================
@@ -276,10 +422,41 @@ fn compile(opts: CompilerOptions) -> CompileResult with IO, Mut, Panic, Div, All
         opts.gpu_binary_format,
         opts.gpu_strict_parity
     )
+
+    if exit_code == 0 {
+        return CompileResult {
+            success: true,
+            errors: compile_errors_new(),
+            output: opts.output_file,
+        }
+    }
+
+    // Diagnostic replay path: preserve compile_multimodule_native behavior while
+    // collecting structured messages for callers.
+    var errors = compile_errors_new()
+    let ir_result = load_multimodule_ir(opts.input_file)
+    if !ir_result.ok {
+        errors = compile_errors_push_lines(errors, "error: ", ir_result.error_msg)
+    } else {
+        let target_spec = native_resolve_target(opts.target, "auto", false)
+        let native_result = compile_native(ir_result.module, target_spec)
+        if !native_result.ok {
+            errors = compile_errors_push_lines(errors, "error: ", native_result.error_msg)
+        }
+    }
+
+    let parse_errors = parser_last_error_count()
+    if parse_errors > 0 {
+        errors = compile_errors_push(errors, "error: parser reported " + int_to_string(parse_errors) + " syntax errors")
+    }
+    if errors.len == 0 {
+        errors = compile_errors_push(errors, "error: compilation failed (no structured diagnostics captured)")
+    }
+
     CompileResult {
-        success: exit_code == 0,
-        errors: compile_errors_new(),
-        output: if exit_code == 0 { opts.output_file } else { "" },
+        success: false,
+        errors: errors,
+        output: "",
     }
 }
 
