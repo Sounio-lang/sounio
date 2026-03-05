@@ -477,7 +477,7 @@ fn emit_ins(body: Buf, cg: Cg, ins: Ins, m: Mod) -> CR with Mut, Panic, Div {
         var ai: i64 = 0
         while ai < ins.b { nb = elg(nb, nc, ins.args[ai as usize]); ai = ai + 1 }
         nb = buf_push(nb, OP_CALL)
-        nb = buf_push_uleb(nb, if ins.a < 0 { 0 } else { ins.a })
+        nb = buf_push_uleb(nb, (if ins.a < 0 { 0 } else { ins.a }) + 1)  // +1: proc_exit import at idx 0
         if ins.rv >= 0 {
             nb = buf_push(nb, OP_LOCAL_SET)
             nb = buf_push_uleb(nb, nc.vl[ins.rv as usize])
@@ -624,8 +624,13 @@ fn codegen_func(f: Fun, m: Mod) -> Buf with Mut, Panic, Div {
 
 fn assemble(m: Mod) -> Buf with Mut, Panic, Div {
     var out = emit_magic(buf_new())
-    // Type section
-    var tp = buf_push_uleb(buf_new(), m.nf)
+
+    // ── Type section ─────────────────────────────────────────────────────
+    // Type 0: proc_exit (i32) -> void
+    // Types 1..nf: user func types
+    // Type nf+1: _start () -> void
+    var tp = buf_push_uleb(buf_new(), m.nf + 2)
+    tp = buf_push(tp, 96); tp = buf_push(tp, 1); tp = buf_push(tp, 127); tp = buf_push(tp, 0)
     var fi: i64 = 0
     while fi < m.nf {
         let f = m.fns[fi as usize]
@@ -636,30 +641,89 @@ fn assemble(m: Mod) -> Buf with Mut, Panic, Div {
         tp = buf_push_uleb(tp, 1); tp = buf_push(tp, WT_I64)
         fi = fi + 1
     }
+    tp = buf_push(tp, 96); tp = buf_push(tp, 0); tp = buf_push(tp, 0)
     out = buf_emit_section(out, 1, tp)
-    // Function section
-    var fp = buf_push_uleb(buf_new(), m.nf)
+
+    // ── Import section ───────────────────────────────────────────────────
+    // wasi_snapshot_preview1::proc_exit (type 0) as func 0
+    var ip = buf_push_uleb(buf_new(), 1)
+    ip = buf_push_uleb(ip, 22)
+    ip = buf_push(ip, 119); ip = buf_push(ip, 97);  ip = buf_push(ip, 115); ip = buf_push(ip, 105)
+    ip = buf_push(ip, 95);  ip = buf_push(ip, 115); ip = buf_push(ip, 110); ip = buf_push(ip, 97)
+    ip = buf_push(ip, 112); ip = buf_push(ip, 115); ip = buf_push(ip, 104); ip = buf_push(ip, 111)
+    ip = buf_push(ip, 116); ip = buf_push(ip, 95);  ip = buf_push(ip, 112); ip = buf_push(ip, 114)
+    ip = buf_push(ip, 101); ip = buf_push(ip, 118); ip = buf_push(ip, 105); ip = buf_push(ip, 101)
+    ip = buf_push(ip, 119); ip = buf_push(ip, 49)
+    ip = buf_push_uleb(ip, 9)
+    ip = buf_push(ip, 112); ip = buf_push(ip, 114); ip = buf_push(ip, 111); ip = buf_push(ip, 99)
+    ip = buf_push(ip, 95);  ip = buf_push(ip, 101); ip = buf_push(ip, 120); ip = buf_push(ip, 105)
+    ip = buf_push(ip, 116)
+    ip = buf_push(ip, 0); ip = buf_push(ip, 0)
+    out = buf_emit_section(out, 2, ip)
+
+    // ── Function section ─────────────────────────────────────────────────
+    // nf user funcs (types 1..nf) + _start (type nf+1)
+    var fp = buf_push_uleb(buf_new(), m.nf + 1)
     var fi2: i64 = 0
-    while fi2 < m.nf { fp = buf_push_uleb(fp, fi2); fi2 = fi2 + 1 }
+    while fi2 < m.nf { fp = buf_push_uleb(fp, fi2 + 1); fi2 = fi2 + 1 }
+    fp = buf_push_uleb(fp, m.nf + 1)
     out = buf_emit_section(out, 3, fp)
-    // Export section
-    var ep = buf_push_uleb(buf_new(), m.nf)
+
+    // ── Memory section ───────────────────────────────────────────────────
+    var mp = buf_push_uleb(buf_new(), 1)
+    mp = buf_push(mp, 0); mp = buf_push_uleb(mp, 1)
+    out = buf_emit_section(out, 5, mp)
+
+    // ── Export section ───────────────────────────────────────────────────
+    // user funcs (wasm idx 1..nf) + _start (nf+1) + memory (kind=2)
+    var ep = buf_push_uleb(buf_new(), m.nf + 2)
     var fi3: i64 = 0
     while fi3 < m.nf {
         let f = m.fns[fi3 as usize]
         ep = buf_push_uleb(ep, f.nl)
         var ni: i64 = 0
         while ni < f.nl { ep = buf_push(ep, f.name[ni as usize] as i64); ni = ni + 1 }
-        ep = buf_push(ep, 0); ep = buf_push_uleb(ep, fi3); fi3 = fi3 + 1
+        ep = buf_push(ep, 0); ep = buf_push_uleb(ep, fi3 + 1)
+        fi3 = fi3 + 1
     }
+    ep = buf_push_uleb(ep, 6)
+    ep = buf_push(ep, 95);  ep = buf_push(ep, 115); ep = buf_push(ep, 116)
+    ep = buf_push(ep, 97);  ep = buf_push(ep, 114); ep = buf_push(ep, 116)
+    ep = buf_push(ep, 0); ep = buf_push_uleb(ep, m.nf + 1)
+    ep = buf_push_uleb(ep, 6)
+    ep = buf_push(ep, 109); ep = buf_push(ep, 101); ep = buf_push(ep, 109)
+    ep = buf_push(ep, 111); ep = buf_push(ep, 114); ep = buf_push(ep, 121)
+    ep = buf_push(ep, 2); ep = buf_push(ep, 0)
     out = buf_emit_section(out, 7, ep)
-    // Code section
-    var cp = buf_push_uleb(buf_new(), m.nf)
+
+    // ── Code section ─────────────────────────────────────────────────────
+    var cp = buf_push_uleb(buf_new(), m.nf + 1)
     var fi4: i64 = 0
     while fi4 < m.nf {
         let body = codegen_func(m.fns[fi4 as usize], m)
         cp = buf_push_uleb(cp, body.len); cp = buf_push_bytes(cp, body); fi4 = fi4 + 1
     }
+    // _start: call main (wasm idx main_idx+1), i32.wrap_i64, call proc_exit(0), unreachable
+    var main_idx: i64 = m.nf - 1
+    var mi: i64 = 0
+    var found: i64 = 0
+    while mi < m.nf && found == 0 {
+        let mf = m.fns[mi as usize]
+        if mf.nl == 4 &&
+           mf.name[0 as usize] as i64 == 109 && mf.name[1 as usize] as i64 == 97 &&
+           mf.name[2 as usize] as i64 == 105 && mf.name[3 as usize] as i64 == 110 {
+            main_idx = mi; found = 1
+        }
+        mi = mi + 1
+    }
+    var sb = buf_new()
+    sb = buf_push_uleb(sb, 0)
+    sb = buf_push(sb, 16); sb = buf_push_uleb(sb, main_idx + 1)
+    sb = buf_push(sb, 167)
+    sb = buf_push(sb, 16); sb = buf_push(sb, 0)
+    sb = buf_push(sb, 0)
+    sb = buf_push(sb, 11)
+    cp = buf_push_uleb(cp, sb.len); cp = buf_push_bytes(cp, sb)
     buf_emit_section(out, 10, cp)
 }
 
