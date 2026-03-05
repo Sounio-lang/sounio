@@ -92,7 +92,7 @@ export function CinematicHero({ localePath }: Props) {
           className="mb-8"
         >
           <span className="px-4 py-1.5 rounded-full border border-white/10 bg-white/5 backdrop-blur-md text-xs font-mono tracking-[0.2em] text-[var(--color-accent-gold-soft)] uppercase">
-            Sounio Architecture V2
+            v1.0.0-beta.5 · Self-Hosted Native ELF
           </span>
         </motion.div>
 
@@ -135,7 +135,7 @@ export function CinematicHero({ localePath }: Props) {
           animate={{ opacity: isLoaded ? 1 : 0 }}
           transition={{ delay: 2.2, duration: 1.5 }}
         >
-          Compute at the boundary where certainty meets consequence. Integrate 15M+ scientific entities and mathematical provers directly into your native runtime.
+          Epistemic types — Knowledge&lt;T&gt;, Validated&lt;T&gt;, Intervention&lt;T&gt;, Counterfactual&lt;T&gt; — compile to self-hosted native ELF. Scientific trust is a type-system concern, not a convention.
         </motion.p>
 
         {/* Actions */}

@@ -307,8 +307,10 @@ else
 fi
 
 PERF_JSON="$OUT_DIR/int_to_string_perf_gate.v1.json"
+RUN_LANE_JSON="$OUT_DIR/int_to_string_perf_run_lane.v1.json"
 if [[ ! -x "$SOUC_BIN" ]]; then
   record_step "int_to_string_benchmark" "not_run" "perf gate skipped because souc binary is unavailable"
+  record_step "int_to_string_benchmark_run_lane" "pass" "informational run-lane skipped because souc binary is unavailable"
 else
   set +e
   bash "$ROOT_DIR/scripts/sprint1_int_to_string_perf_gate.sh" "$PERF_JSON" > "$TMP_DIR/int_to_string_perf_gate.out" 2>&1
@@ -349,6 +351,27 @@ PY
         record_step "int_to_string_benchmark" "not_run" "unexpected perf status: $perf_status"
         ;;
     esac
+  fi
+
+  if [[ -f "$RUN_LANE_JSON" ]]; then
+    run_lane_reason="$(python3 - "$RUN_LANE_JSON" <<'PY'
+import json
+import sys
+data = json.load(open(sys.argv[1], "r", encoding="utf-8"))
+status = str(data.get("status", "not_run"))
+reason = str(data.get("reason", "unknown"))
+runner = str(data.get("runner", ""))
+metrics = data.get("metrics", {})
+net = metrics.get("net_seconds")
+if net is None:
+    print(f"informational run lane: status={status} reason={reason} runner={runner}")
+else:
+    print(f"informational run lane: status={status} reason={reason} runner={runner} net_seconds={net}")
+PY
+)"
+    record_step "int_to_string_benchmark_run_lane" "pass" "$run_lane_reason"
+  else
+    record_step "int_to_string_benchmark_run_lane" "pass" "informational run lane artifact missing"
   fi
 fi
 

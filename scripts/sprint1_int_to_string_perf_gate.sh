@@ -3,13 +3,15 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OUT_JSON="${1:-$ROOT_DIR/artifacts/sprint1/int_to_string_perf_gate.v1.json}"
-REQUIRE_JIT_RUNNER="${SOUNIO_SPRINT1_REQUIRE_JIT_RUNNER:-0}"
+REQUIRE_JIT_RUNNER="${SOUNIO_SPRINT1_REQUIRE_JIT_RUNNER:-1}"
 SOUC_JIT_VERSION="${SOUNIO_SOUC_JIT_VERSION:-0.100.3-jit.1}"
 SOURCE_FILE="${SOUNIO_SPRINT1_SOURCE_FILE:-$ROOT_DIR/self-hosted/compiler/main.sio}"
+RUN_LANE_JSON="${SOUNIO_SPRINT1_RUN_LANE_JSON:-$ROOT_DIR/artifacts/sprint1/int_to_string_perf_run_lane.v1.json}"
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
 
 mkdir -p "$(dirname "$OUT_JSON")"
+mkdir -p "$(dirname "$RUN_LANE_JSON")"
 
 emit_json() {
   local status="$1"
@@ -46,6 +48,62 @@ except Exception:
 payload = {
     "schema": "sounio.sprint1.int_to_string_perf_gate.v1",
     "generated_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+    "status": status,
+    "reason": reason,
+    "mode": mode,
+    "runner": runner,
+    "target_seconds": 1.0,
+    "metrics": {
+        "base_seconds": parse_float(base_s),
+        "full_seconds": parse_float(full_s),
+        "net_seconds": parse_float(net_s),
+    },
+    "blockers": blockers,
+}
+with open(out_path, "w", encoding="utf-8") as f:
+    json.dump(payload, f, indent=2)
+    f.write("\n")
+print(f"wrote: {out_path}")
+print(f"status={status} reason={reason}")
+PY
+}
+
+emit_run_lane_json() {
+  local status="$1"
+  local reason="$2"
+  local mode="$3"
+  local runner="$4"
+  local base_s="$5"
+  local full_s="$6"
+  local net_s="$7"
+  local blockers_json="$8"
+  python3 - "$RUN_LANE_JSON" "$status" "$reason" "$mode" "$runner" "$base_s" "$full_s" "$net_s" "$blockers_json" <<'PY'
+import datetime as dt
+import json
+import sys
+
+out_path, status, reason, mode, runner, base_s, full_s, net_s, blockers_json = sys.argv[1:10]
+
+def parse_float(raw: str):
+    raw = (raw or "").strip()
+    if not raw:
+        return None
+    try:
+        return float(raw)
+    except ValueError:
+        return None
+
+try:
+    blockers = json.loads(blockers_json)
+    if not isinstance(blockers, list):
+        blockers = [str(blockers)]
+except Exception:
+    blockers = [str(blockers_json)]
+
+payload = {
+    "schema": "sounio.sprint1.int_to_string_perf_run_lane.v1",
+    "generated_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+    "non_gating": True,
     "status": status,
     "reason": reason,
     "mode": mode,
@@ -256,6 +314,11 @@ run_probe_mode() {
   echo "$rc" > "$TMP_DIR/probe.rc"
 }
 
+RUN_LANE_LAST_STATUS="not_run"
+RUN_LANE_LAST_REASON="runner_unavailable"
+RUN_LANE_LAST_RUNNER=""
+RUN_LANE_LAST_NET=""
+
 declare -a candidates=()
 if [[ -n "${SOUNIO_SOUC_JIT_BIN:-}" ]]; then
   candidates+=("${SOUNIO_SOUC_JIT_BIN}")
@@ -267,6 +330,7 @@ candidates+=(
   "$ROOT_DIR/souc"
   "$ROOT_DIR/target/debug/souc"
   "$ROOT_DIR/target/release/souc"
+  "$ROOT_DIR/artifacts/omega/souc-bin/souc-linux-x86_64-jit"
   "$ROOT_DIR/artifacts/omega/souc-bin/souc-linux-x86_64"
   "$ROOT_DIR/artifacts/omega/souc-bin/souc-linux-x86_64-gpu"
 )
@@ -305,10 +369,135 @@ for c in "${candidates[@]}"; do
 done
 candidates=("${unique_candidates[@]}")
 
+run_run_lane() {
+  local run_runner=""
+  local -a run_blockers=()
+  local blockers_json="[]"
+
+  for c in "${candidates[@]}"; do
+    if [[ ! -x "$c" ]]; then
+      continue
+    fi
+    run_probe_mode "run" "$c" "$BASE_FIXTURE"
+    probe_rc="$(cat "$TMP_DIR/probe.rc")"
+    if [[ "$probe_rc" == "0" ]] && contains_literal "bench_int_to_string iterations=0" "$TMP_DIR/probe.out"; then
+      run_runner="$c"
+      break
+    fi
+    if [[ "$probe_rc" == "124" ]]; then
+      run_blockers+=("run_probe_timeout:$c")
+    else
+      run_blockers+=("run_probe_failed:$c")
+    fi
+  done
+
+  if [[ -z "$run_runner" ]]; then
+    blockers_json="$(python3 - <<'PY' "${run_blockers[@]:-}"
+import json
+import sys
+vals = [v for v in sys.argv[1:] if v]
+if not vals:
+    vals = ["runner_unavailable"]
+print(json.dumps(vals))
+PY
+)"
+    RUN_LANE_LAST_STATUS="not_run"
+    RUN_LANE_LAST_REASON="runner_unavailable"
+    RUN_LANE_LAST_RUNNER=""
+    RUN_LANE_LAST_NET=""
+    emit_run_lane_json "not_run" "runner_unavailable" "run" "" "" "" "" "$blockers_json"
+    return
+  fi
+
+  set +e
+  /usr/bin/time -f '%e' -o "$TMP_DIR/run_lane_base.time" \
+    timeout 240 "$run_runner" run "$BASE_FIXTURE" \
+    > "$TMP_DIR/run_lane_base.out" 2>&1
+  base_rc=$?
+  /usr/bin/time -f '%e' -o "$TMP_DIR/run_lane_full.time" \
+    timeout 240 "$run_runner" run "$FULL_FIXTURE" \
+    > "$TMP_DIR/run_lane_full.out" 2>&1
+  full_rc=$?
+  set -e
+
+  if [[ "$base_rc" != "0" || "$full_rc" != "0" ]]; then
+    blockers_json="$(python3 - <<'PY' "$base_rc" "$full_rc"
+import json
+import sys
+b, f = sys.argv[1:3]
+vals = []
+if b != "0":
+    vals.append(f"bench_base_rc={b}")
+if f != "0":
+    vals.append(f"bench_full_rc={f}")
+print(json.dumps(vals))
+PY
+)"
+    RUN_LANE_LAST_STATUS="not_run"
+    RUN_LANE_LAST_REASON="run_benchmark_command_failed"
+    RUN_LANE_LAST_RUNNER="$run_runner"
+    RUN_LANE_LAST_NET=""
+    emit_run_lane_json "not_run" "run_benchmark_command_failed" "run" "$run_runner" "" "" "" "$blockers_json"
+    return
+  fi
+
+  if ! contains_literal "bench_int_to_string iterations=0" "$TMP_DIR/run_lane_base.out"; then
+    RUN_LANE_LAST_STATUS="not_run"
+    RUN_LANE_LAST_REASON="missing_base_output_marker"
+    RUN_LANE_LAST_RUNNER="$run_runner"
+    RUN_LANE_LAST_NET=""
+    emit_run_lane_json "not_run" "missing_base_output_marker" "run" "$run_runner" "" "" "" "[\"marker_missing:iterations=0\"]"
+    return
+  fi
+  if ! contains_literal "bench_int_to_string iterations=1000000" "$TMP_DIR/run_lane_full.out"; then
+    RUN_LANE_LAST_STATUS="not_run"
+    RUN_LANE_LAST_REASON="missing_full_output_marker"
+    RUN_LANE_LAST_RUNNER="$run_runner"
+    RUN_LANE_LAST_NET=""
+    emit_run_lane_json "not_run" "missing_full_output_marker" "run" "$run_runner" "" "" "" "[\"marker_missing:iterations=1000000\"]"
+    return
+  fi
+
+  run_base_s="$(cat "$TMP_DIR/run_lane_base.time")"
+  run_full_s="$(cat "$TMP_DIR/run_lane_full.time")"
+  run_net_s="$(python3 - "$run_base_s" "$run_full_s" <<'PY'
+import sys
+base = float(sys.argv[1])
+full = float(sys.argv[2])
+net = full - base
+if net < 0:
+    net = 0.0
+print(f"{net:.6f}")
+PY
+)"
+
+  if python3 - "$run_net_s" <<'PY'
+import sys
+net = float(sys.argv[1])
+raise SystemExit(0 if net < 1.0 else 1)
+PY
+  then
+    RUN_LANE_LAST_STATUS="pass"
+    RUN_LANE_LAST_REASON="target_met"
+    RUN_LANE_LAST_RUNNER="$run_runner"
+    RUN_LANE_LAST_NET="$run_net_s"
+    emit_run_lane_json "pass" "target_met" "run" "$run_runner" "$run_base_s" "$run_full_s" "$run_net_s" "[]"
+  else
+    RUN_LANE_LAST_STATUS="fail"
+    RUN_LANE_LAST_REASON="target_not_met"
+    RUN_LANE_LAST_RUNNER="$run_runner"
+    RUN_LANE_LAST_NET="$run_net_s"
+    emit_run_lane_json "fail" "target_not_met" "run" "$run_runner" "$run_base_s" "$run_full_s" "$run_net_s" "[]"
+  fi
+}
+
+run_run_lane
+
 jit_runner=""
 bench_mode="jit"
 blockers=()
 has_jit_capable_candidate=0
+final_blockers_json="[]"
 
 for c in "${candidates[@]}"; do
   if [[ ! -x "$c" ]]; then
@@ -355,6 +544,7 @@ if not vals:
 print(json.dumps(vals))
 PY
 )"
+  final_blockers_json="$blockers_json"
   if [[ "$REQUIRE_JIT_RUNNER" == "1" ]]; then
     if printf '%s\n' "${blockers[@]:-}" | grep -F -q "jit_string_runtime_unavailable:"; then
       emit_json "fail" "jit_string_runtime_unavailable" "none" "" "" "" "" "$blockers_json"
@@ -435,6 +625,25 @@ if f != "0":
 print(json.dumps(vals))
 PY
 )"
+  if [[ "$final_blockers_json" != "[]" ]]; then
+    blockers_json="$(python3 - <<'PY' "$final_blockers_json" "$base_rc" "$full_rc"
+import json
+import sys
+prior_raw, b, f = sys.argv[1:4]
+try:
+    vals = json.loads(prior_raw)
+    if not isinstance(vals, list):
+        vals = [str(vals)]
+except Exception:
+    vals = [str(prior_raw)]
+if b != "0":
+    vals.append(f"bench_base_rc={b}")
+if f != "0":
+    vals.append(f"bench_full_rc={f}")
+print(json.dumps(vals))
+PY
+)"
+  fi
   emit_json "not_run" "${bench_mode}_benchmark_command_failed" "$bench_mode" "$jit_runner" "" "" "" "$blockers_json"
   exit 0
 fi
@@ -467,7 +676,7 @@ net = float(sys.argv[1])
 raise SystemExit(0 if net < 1.0 else 1)
 PY
 then
-  emit_json "pass" "target_met" "$bench_mode" "$jit_runner" "$base_s" "$full_s" "$net_s" "[]"
+  emit_json "pass" "target_met" "$bench_mode" "$jit_runner" "$base_s" "$full_s" "$net_s" "$final_blockers_json"
 else
-  emit_json "fail" "target_not_met" "$bench_mode" "$jit_runner" "$base_s" "$full_s" "$net_s" "[]"
+  emit_json "fail" "target_not_met" "$bench_mode" "$jit_runner" "$base_s" "$full_s" "$net_s" "$final_blockers_json"
 fi

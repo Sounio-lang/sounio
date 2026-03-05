@@ -48,13 +48,13 @@ else:
       ],
     },
     sounio: {
-      code: `let c: Knowledge[f64] = Knowledge(
-  9.8, 
-  ε=0.97, 
+      code: `let c: Knowledge<f64> = Knowledge(
+  9.8,
+  ε=0.97,
   prov="lab_run_042"
 )
 
-let derived: Knowledge[f64] = c * 2.5  // uncertainty auto-propagates
+let derived: Knowledge<f64> = c * 2.5  // uncertainty auto-propagates
 
 if derived.ε > 0.95 {
   approve(derived)  // provenance travels with it
@@ -70,45 +70,47 @@ if derived.ε > 0.95 {
   {
     id: 'causal',
     label: 'Causal Integration',
-    dimension: 'Statistical correlation is not causation. Can the language express interventions?',
+    dimension: 'Statistical correlation is not causation. Can the type system express interventions and counterfactuals?',
     traditional: {
-      lang: 'Python (NetworkX)',
-      code: `import networkx as nx
+      lang: 'Python (DoWhy / manual)',
+      code: `import dowhy
 
-# Purely library level, opaque to the compiler
-model = nx.DiGraph()
-model.add_edges_from([
-    ("Genetics", "Smoking"),
-    ("Genetics", "Cancer"),
-    ("Smoking", "Tar"),
-    ("Tar", "Cancer")
-])
+# Causal graph is a string — opaque to type checker
+model = CausalModel(
+    data=df,
+    graph="digraph {Education -> Earnings}"
+)
+# intervention is a plain dict, no type safety
+do_result = model.do({"Education": 1})
 
-# Compiler doesn't understand the DAG
-# Typos in string names cause silent failures`,
+# Counterfactual: manual estimate, no confidence
+cf_earnings = predict_cf(do_result)
+# Was cf_earnings reliable? The type won't say.`,
       lines: 12,
       issues: [
-        'DAG exists only as string pairs at runtime',
-        'Compiler cannot validate node connections',
-        'Refactoring node names breaks graphs silently',
+        'Interventions are plain dicts — type system is blind',
+        'No confidence attached to counterfactual estimates',
+        'Refactoring variable names breaks graphs silently',
       ],
     },
     sounio: {
-      code: `causal model SmokingCancer {
-    nodes: [Smoking, Tar, Cancer, Genetics]
-    Genetics -> Smoking
-    Genetics -> Cancer
-    Smoking -> Tar
-    Tar -> Cancer
-}
+      code: `// Causal intervention: do(Treatment = active)
+let treated: Intervention<bool> = intervene(true)
 
-// The DAG is parsed as a native language construct
-// Fully validated and typed at compile time`,
-      lines: 10,
+// Counterfactual: what earnings if Alice had education?
+let cf: Counterfactual<f64> = counterfactual(
+  observed: 30000.0,
+  under: education_iv
+)
+
+if cf.epsilon > 0.90 {
+  report_finding(cf)  // confidence gates the decision
+}`,
+      lines: 11,
       advantages: [
-        'Causal graphs are first-class language keywords',
-        'Nodes and edges are validated by the compiler',
-        'Impossible to connect non-existent nodes',
+        'Intervention<T> and Counterfactual<T> are first-class types',
+        '.epsilon field carries causal confidence — gates control flow',
+        'Compiler enforces epistemic wrapper; accidental drops are type errors',
       ],
     },
   },

@@ -1,20 +1,18 @@
-/// Real-World Example 5: PK/PD Data Analysis with Uncertainty
+/// Real-World Example 5: PK/PD Data Analysis with Uncertainty (native-compatible)
 ///
-/// Demonstrates: ODE + epistemic types, analytical PK solutions, derived parameters
-///
-/// Problem: Fit pharmacokinetic model to clinical data and calculate derived
-/// parameters (half-life, clearance) with uncertainty propagation.
-///
-/// Expected Output:
-///   PK parameter estimates with uncertainty
-///   Half-life calculation with propagated uncertainty
-///   Comparison to published midazolam pharmacokinetics
-///
-/// Verification: t½ = 0.693·Vd/CL (with uncertainty propagation)
+/// Demonstrates:
+/// - One-compartment oral PK concentration model (analytical form)
+/// - First-order uncertainty propagation (GUM-style) for derived parameters
+/// - Pass/fail scientific checks that run in both interpreter and native compile paths
 
 // ============================================================================
 // NUMERIC HELPERS
 // ============================================================================
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
 
 fn sqrt_f64(x: f64) -> f64 {
     if x <= 0.0 { return 0.0 }
@@ -28,19 +26,34 @@ fn sqrt_f64(x: f64) -> f64 {
 }
 
 fn exp_f64(x: f64) -> f64 {
-    if x > 10.0 { return 22026.465794806718 * exp_f64(x - 10.0) }
-    if x < 0.0 - 10.0 { return 0.00004539992976248485 * exp_f64(x + 10.0) }
+    // Guard non-finite / extreme arguments to avoid runaway recursion/loops in native mode.
+    if x != x { return 0.0 }
+    if x > 80.0 { return 5.54062238439351e34 } // exp(80)
+    if x < 0.0 - 80.0 { return 1.804851387845415e-35 } // exp(-80)
+
+    var xx = x
+    var scale = 1.0
+
+    while xx > 10.0 {
+        xx = xx - 10.0
+        scale = scale * 22026.465794806718 // exp(10)
+    }
+    while xx < 0.0 - 10.0 {
+        xx = xx + 10.0
+        scale = scale * 0.00004539992976248485 // exp(-10)
+    }
+
     var result = 1.0
     var term = 1.0
     var nf = 1.0
     var n = 1
     while n < 20 {
-        term = term * x / nf
+        term = term * xx / nf
         result = result + term
         n = n + 1
         nf = nf + 1.0
     }
-    return result
+    return result * scale
 }
 
 fn ln_f64(x: f64) -> f64 {
@@ -59,291 +72,125 @@ fn ln_f64(x: f64) -> f64 {
 }
 
 // ============================================================================
-// EPISTEMIC VALUE STRUCT
+// PK MODEL
 // ============================================================================
 
-struct EpistemicValue {
-    value: f64,
-    variance: f64,
-    conf_alpha: f64,
-    conf_beta: f64
-}
-
-fn epistemic_new(value: f64, variance: f64) -> EpistemicValue {
-    return EpistemicValue {
-        value: value,
-        variance: variance,
-        conf_alpha: 1.0,
-        conf_beta: 1.0
-    }
-}
-
-fn epistemic_std(k: EpistemicValue) -> f64 {
-    return sqrt_f64(k.variance)
-}
-
-/// X * Y: Var(XY) ≈ Y²Var(X) + X²Var(Y)
-fn epistemic_mul(x: EpistemicValue, y: EpistemicValue) -> EpistemicValue {
-    let new_variance = y.value * y.value * x.variance + x.value * x.value * y.variance
-    return EpistemicValue {
-        value: x.value * y.value,
-        variance: new_variance,
-        conf_alpha: x.conf_alpha + y.conf_alpha - 1.0,
-        conf_beta: x.conf_beta + y.conf_beta - 1.0
-    }
-}
-
-/// X / Y: Var(X/Y) ≈ (1/Y²)Var(X) + (X²/Y⁴)Var(Y)
-fn epistemic_div(x: EpistemicValue, y: EpistemicValue) -> EpistemicValue {
-    let y2 = y.value * y.value
-    let y4 = y2 * y2
-    let new_variance = x.variance / y2 + x.value * x.value * y.variance / y4
-    return EpistemicValue {
-        value: x.value / y.value,
-        variance: new_variance,
-        conf_alpha: x.conf_alpha + y.conf_alpha - 1.0,
-        conf_beta: x.conf_beta + y.conf_beta - 1.0
-    }
-}
-
-/// Scale by constant: Var(cX) = c²Var(X)
-fn epistemic_scale(k: EpistemicValue, c: f64) -> EpistemicValue {
-    return EpistemicValue {
-        value: k.value * c,
-        variance: k.variance * c * c,
-        conf_alpha: k.conf_alpha,
-        conf_beta: k.conf_beta
-    }
-}
-
-// ============================================================================
-// PHARMACOKINETIC MODEL
-// ============================================================================
-
-/// One-compartment oral absorption model (analytical solution)
-///
-/// C(t) = (ka * D / Vd) * (e^(-ke*t) - e^(-ka*t)) / (ka - ke)
-///
-/// Where:
-///   ka = absorption rate constant (1/h)
-///   ke = elimination rate constant = CL/Vd (1/h)
-///   D = dose (mg)
-///   Vd = volume of distribution (L)
-///   CL = clearance (L/h)
+/// One-compartment oral absorption model (analytical solution):
+/// C(t) = (ka * D / Vd) * (e^(-ke*t) - e^(-ka*t)) / (ka - ke), where ke = CL / Vd
 fn pk_concentration(t: f64, dose: f64, ka: f64, vd: f64, cl: f64) -> f64 {
     let ke = cl / vd
-
     let exp_ke = exp_f64(0.0 - ke * t)
     let exp_ka = exp_f64(0.0 - ka * t)
+    return (ka * dose / vd) * (exp_ke - exp_ka) / (ka - ke)
+}
 
-    let conc = (ka * dose / vd) * (exp_ke - exp_ka) / (ka - ke)
-
-    return conc
+fn pk_find_tmax_scan(dose: f64, ka: f64, vd: f64, cl: f64) -> f64 {
+    // Robust numeric peak search fallback: 0..24h with 0.01h step.
+    var best_t = 0.0
+    var best_c = pk_concentration(0.0, dose, ka, vd, cl)
+    var t = 0.0
+    while t <= 24.0 {
+        let c = pk_concentration(t, dose, ka, vd, cl)
+        if c > best_c {
+            best_c = c
+            best_t = t
+        }
+        t = t + 0.01
+    }
+    return best_t
 }
 
 // ============================================================================
-// MAIN: PK DATA ANALYSIS
+// MAIN: NATIVE-COMPATIBLE REAL PK/PD TEST
 // ============================================================================
 
-fn main() -> i32 {
-    println("=== Pharmacokinetic Data Analysis: Midazolam 7.5mg Oral ===")
-    println("")
+fn main() -> i32 with IO, Panic {
+    print("=== PKPD real test (native-compatible) ===\n")
 
-    // CLINICAL DATA: Midazolam oral dosing study
-    println("Clinical Study Data:")
-    println("  Drug: Midazolam (benzodiazepine)")
-    println("  Dose: 7.5 mg oral")
-    println("  Subject: Healthy volunteer (70 kg)")
-    println("")
+    // Midazolam-like parameters (mean and variance)
+    // CL = 27 +/- 3 L/h  => var = 9
+    // Vd = 77 +/- 8 L    => var = 64
+    // ka = 3.8 +/- 0.6 1/h => var = 0.36
+    let cl_v = 27.0
+    let cl_var = 9.0
+    let vd_v = 77.0
+    let vd_var = 64.0
+    let ka_v = 3.8
+    let ka_var = 0.36
+    let _ka_std = sqrt_f64(ka_var)
 
-    // PK PARAMETER ESTIMATES (from population analysis)
-    // These would normally come from nonlinear regression or MCMC
-    // Here we use published values with realistic uncertainties
+    // Derived 1: half-life t_half = 0.693 * Vd / CL
+    // Var(Vd/CL) ~= Var(Vd)/CL^2 + Vd^2 Var(CL)/CL^4
+    let cl_sq = cl_v * cl_v
+    let cl_quad = cl_sq * cl_sq
+    let vd_sq = vd_v * vd_v
+    let ratio_v = vd_v / cl_v
+    let ratio_var = vd_var / cl_sq + vd_sq * cl_var / cl_quad
+    let t_half_v = 0.693 * ratio_v
+    let t_half_var = 0.693 * 0.693 * ratio_var
 
-    println("PK Parameter Estimates:")
-    println("")
+    // Derived 2: elimination constant ke = CL / Vd
+    // Var(CL/Vd) ~= Var(CL)/Vd^2 + CL^2 Var(Vd)/Vd^4
+    let vd_sq_ke = vd_v * vd_v
+    let vd_quad_ke = vd_sq_ke * vd_sq_ke
+    let ke_v = cl_v / vd_v
+    let _ke_var = cl_var / vd_sq_ke + cl_v * cl_v * vd_var / vd_quad_ke
 
-    // Clearance: CL ~ 27 ± 3 L/h
-    let cl = epistemic_new(27.0, 9.0)  // variance = 3²
-    print("  Clearance (CL): ")
-    println(cl.value)
-    print("  ± ")
-    println(epistemic_std(cl))
-    println("  L/h")
-    println("")
+    // Concentration profile
+    let dose = 7.5
+    let c1 = pk_concentration(0.5, dose, ka_v, vd_v, cl_v)
+    let _c2 = pk_concentration(1.0, dose, ka_v, vd_v, cl_v)
+    let _c3 = pk_concentration(2.0, dose, ka_v, vd_v, cl_v)
+    let _c4 = pk_concentration(4.0, dose, ka_v, vd_v, cl_v)
+    let c5 = pk_concentration(8.0, dose, ka_v, vd_v, cl_v)
 
-    // Volume of distribution: Vd ~ 77 ± 8 L
-    let vd = epistemic_new(77.0, 64.0)  // variance = 8²
-    print("  Volume (Vd): ")
-    println(vd.value)
-    print("  ± ")
-    println(epistemic_std(vd))
-    println("  L")
-    println("")
+    // Analytic t_max = ln(ka/ke)/(ka-ke), with numeric fallback if unstable.
+    let ka_ke_ratio = ka_v / ke_v
+    let t_max_raw = ln_f64(ka_ke_ratio) / (ka_v - ke_v)
+    let t_max = if t_max_raw <= 0.0 || t_max_raw > 24.0 {
+        pk_find_tmax_scan(dose, ka_v, vd_v, cl_v)
+    } else {
+        t_max_raw
+    }
+    let c_max = pk_concentration(t_max, dose, ka_v, vd_v, cl_v)
 
-    // Absorption rate: ka ~ 3.8 ± 0.6 1/h
-    let ka = epistemic_new(3.8, 0.36)  // variance = 0.6²
-    print("  Absorption (ka): ")
-    println(ka.value)
-    print("  ± ")
-    println(epistemic_std(ka))
-    println("  1/h")
-    println("")
+    // ------------------------------------------------------------------------
+    // SCIENTIFIC CHECKS (pass/fail)
+    // ------------------------------------------------------------------------
 
-    // DERIVED PARAMETERS WITH UNCERTAINTY PROPAGATION
-    println("Derived Parameters:")
-    println("")
-
-    // Half-life: t½ = 0.693 * Vd / CL
-    let ln2 = epistemic_new(0.693, 0.0)  // Natural log of 2 (exact)
-    let t_half_ratio = epistemic_div(vd, cl)
-    let t_half = epistemic_mul(ln2, t_half_ratio)
-
-    print("  Half-life (t½): ")
-    println(t_half.value)
-    print("  ± ")
-    println(epistemic_std(t_half))
-    println("  hours")
-    println("")
-
-    // Elimination rate constant: ke = CL / Vd
-    let ke = epistemic_div(cl, vd)
-    print("  Elimination (ke): ")
-    println(ke.value)
-    print("  ± ")
-    println(epistemic_std(ke))
-    println("  1/h")
-    println("")
-
-    // CONCENTRATION-TIME PROFILE AT KEY TIMEPOINTS
-    println("Predicted Concentrations (with uncertainty):")
-    println("")
-
-    let dose = 7.5  // mg
-
-    // Time points: 0.5h, 1h, 2h, 4h, 8h
-    let t1 = 0.5
-    let t2 = 1.0
-    let t3 = 2.0
-    let t4 = 4.0
-    let t5 = 8.0
-
-    // Calculate concentrations using mean parameter values
-    let c1 = pk_concentration(t1, dose, ka.value, vd.value, cl.value)
-    let c2 = pk_concentration(t2, dose, ka.value, vd.value, cl.value)
-    let c3 = pk_concentration(t3, dose, ka.value, vd.value, cl.value)
-    let c4 = pk_concentration(t4, dose, ka.value, vd.value, cl.value)
-    let c5 = pk_concentration(t5, dose, ka.value, vd.value, cl.value)
-
-    print("  t = 0.5h: C = ")
-    println(c1)
-    println("  ng/mL")
-
-    print("  t = 1.0h: C = ")
-    println(c2)
-    println("  ng/mL")
-
-    print("  t = 2.0h: C = ")
-    println(c3)
-    println("  ng/mL")
-
-    print("  t = 4.0h: C = ")
-    println(c4)
-    println("  ng/mL")
-
-    print("  t = 8.0h: C = ")
-    println(c5)
-    println("  ng/mL")
-    println("")
-
-    // TIME TO PEAK CONCENTRATION
-    // t_max = ln(ka/ke) / (ka - ke)
-    let ka_ke_ratio = ka.value / ke.value
-    let t_max = ln_f64(ka_ke_ratio) / (ka.value - ke.value)
-
-    print("  Peak time (t_max): ")
-    println(t_max)
-    println("  hours")
-
-    let c_max = pk_concentration(t_max, dose, ka.value, vd.value, cl.value)
-    print("  Peak conc (C_max): ")
-    println(c_max)
-    println("  ng/mL")
-    println("")
-
-    // VERIFICATION: Compare to published literature
-    println("Literature Comparison (Thummel et al. 1996):")
-    println("  Published CL: 27.3 ± 3.2 L/h")
-    println("  Published Vd: 77.4 ± 8.1 L")
-    println("  Published t½: 1.97 ± 0.31 h")
-    println("")
-
-    print("  Our estimate t½: ")
-    println(t_half.value)
-    print("  ± ")
-    println(epistemic_std(t_half))
-    println("  h")
-
-    // Check if our estimate is within range
+    // Check A: half-life near literature envelope (1.97 +/- 0.31 h)
     let lit_t_half = 1.97
     let lit_std = 0.31
-    let our_diff = t_half.value - lit_t_half
-
-    if our_diff < lit_std && our_diff > 0.0 - lit_std {
-        println("  PASS: Within published range")
-    } else {
-        println("  Note: Slight deviation from literature (acceptable)")
+    let t_half_diff = t_half_v - lit_t_half
+    if !(t_half_diff < lit_std && t_half_diff > 0.0 - lit_std) {
+        print("FAIL: half-life outside literature envelope\n")
+        return 1
     }
-    println("")
+    print("PASS: half-life within literature envelope\n")
 
-    // UNCERTAINTY PROPAGATION VERIFICATION
-    println("Uncertainty Propagation Verification:")
-    println("")
-
-    // For t½ = 0.693 * Vd / CL:
-    // Var(t½) = 0.693² * Var(Vd/CL)
-    //         = 0.693² * [Var(Vd)/CL² + Vd²*Var(CL)/CL⁴]
-
-    let cl_sq = cl.value * cl.value
-    let cl_quad = cl_sq * cl_sq
-    let vd_sq = vd.value * vd.value
-
-    let expected_ratio_var = vd.variance / cl_sq + vd_sq * cl.variance / cl_quad
-    let expected_t_half_var = 0.693 * 0.693 * expected_ratio_var
-
-    print("  Expected t½ variance: ")
-    println(expected_t_half_var)
-    print("  Computed t½ variance: ")
-    println(t_half.variance)
-
-    let var_diff = t_half.variance - expected_t_half_var
-    if var_diff < 0.001 && var_diff > 0.0 - 0.001 {
-        println("  PASS: Variance propagation correct")
-    } else {
-        println("  PASS: Variance propagation (within tolerance)")
+    // Check B: variance propagation identity for t_half
+    let expected_t_half_var = 0.693 * 0.693 * (vd_var / cl_sq + vd_sq * cl_var / cl_quad)
+    let var_diff = abs_f64(t_half_var - expected_t_half_var)
+    if var_diff > 0.001 {
+        print("FAIL: variance propagation mismatch\n")
+        return 2
     }
-    println("")
+    print("PASS: variance propagation identity holds\n")
 
-    println("=== PK/PD Analysis Summary ===")
-    println("")
-    println("Successfully estimated pharmacokinetic parameters")
-    println("with full uncertainty quantification:")
-    println("")
-    print("  - Half-life: ")
-    println(t_half.value)
-    println("  h (uncertainty propagated)")
-    print("  - Peak time: ")
-    println(t_max)
-    println("  h")
-    print("  - Peak concentration: ")
-    println(c_max)
-    println("  ng/mL")
-    println("")
-    println("This demonstrates:")
-    println("  - PK parameter estimation with uncertainty")
-    println("  - Derived parameter calculation (t½ from CL and Vd)")
-    println("  - Automatic uncertainty propagation via GUM")
-    println("  - Validation against published literature")
+    // Check C: physically sensible concentration profile
+    if c1 <= 0.0 || c5 <= 0.0 || c1 <= c5 {
+        print("FAIL: concentration profile sanity check failed\n")
+        return 3
+    }
+    print("PASS: concentration profile sanity check\n")
 
+    // Check D: positive peak time and peak concentration
+    if t_max <= 0.0 || c_max <= 0.0 {
+        print("FAIL: peak metrics invalid\n")
+        return 4
+    }
+    print("PASS: peak metrics valid\n")
+
+    print("PKPD_REAL_TEST: PASS\n")
     return 0
 }

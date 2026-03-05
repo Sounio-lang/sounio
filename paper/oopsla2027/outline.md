@@ -1,106 +1,218 @@
-# Sounio: A Self-Hosted Systems Language for Verifiable Scientific Computing
+# Sounio OOPSLA 2027 Systems Paper Outline (R5 Draft)
 
-**Target:** OOPSLA 2027 (two review rounds: ~April and ~October)
-**Authors:** Demetrios Chiuratto Agourakis, Marli Gerenutti
-**Format:** PACMPL, ACM small format
+## Positioning
 
----
+- Venue: OOPSLA 2027 (PACMPL systems-heavy framing)
+- Paper role: engineering and systems design paper, not primary type-theory paper
+- Central narrative: Sounio operationalizes scientific semantics in a self-hosted systems compiler/runtime with explicit reproducibility artifacts
 
-## The Pitch
+## One-Paragraph Pitch
 
-This is the SYSTEMS paper. Not type theory — engineering.
+Sounio is a self-hosted systems language and compiler stack for verifiable scientific computing. The key systems contribution is a Scientific IR (SIR) and gate-driven engineering workflow that keep uncertainty semantics, causal operations, and reproducibility constraints visible across parsing, typing, optimization, and backend lowering. The paper should argue that Sounio is not only expressive at the language level, but also operationally disciplined: bootstrap closure, artifactized gate status, and script-first evidence linking claims to machine-readable outputs.
 
-"We built a 410,000-line self-hosted systems language for scientific
-computing, with a three-stage verified bootstrap, native ELF/Mach-O code
-generation, and a Scientific IR that treats epistemic operations as
-first-class instructions. Here's how it works and how it performs."
+## Draft Abstract (Systems-Facing)
 
-OOPSLA reviewers want: ambitious system, real implementation, honest evaluation.
+Scientific software frequently combines numerically delicate models, uncertain measurements, and production constraints, yet mainstream systems toolchains lack first-class support for these concerns. We present Sounio, a self-hosted systems language and compiler pipeline designed for verifiable scientific workloads. Sounio centers a Scientific IR (SIR) with explicit scientific operators and preserves uncertainty/causal semantics through typed lowering and backend code generation. The implementation includes a three-stage self-host workflow, fail-closed policy gates, and artifact-first status reporting for reproducibility. We describe compiler architecture, bootstrap constraints, and backend strategy (native plus accelerator lanes), then evaluate on scientific benchmark lanes including pharmacokinetic and uncertainty workloads. The result is a systems approach where language semantics and operational evidence co-evolve: claims are tied to scripts and generated artifacts rather than prose-only assertions.
 
----
-
-## Section Plan
+## Section Blueprint
 
 ### 1. Introduction
-- The gap: systems languages lack scientific semantics, scientific languages
-  lack systems performance
-- Sounio bridges this: 138K self-hosted compiler + 272K stdlib
-- Three-stage bootstrap with SHA-256 parity verification
-- Contributions:
-  1. Scientific IR (SIR) with epistemic/ODE/tensor instructions
-  2. Self-hosted compiler with verified bootstrap
-  3. Multi-backend codegen (native ELF/Mach-O, LLVM, Cranelift, GPU)
-  4. Evaluation on pharmacokinetic modeling and uncertainty benchmarks
 
-### 2. Language Design (from user's perspective)
-- Epistemic types: Knowledge<T> with automatic GUM propagation
-- Linear types: resource safety for GPU buffers, file handles
-- Algebraic effects: IO, Mut, Div, Async, GPU, Epistemic
-- Units of measure: compile-time dimensional analysis
-- Code examples in Sounio syntax (NOT Rust)
+Objective:
+- Frame the engineering gap: systems languages optimize control/performance but usually externalize scientific semantics and reproducibility contracts.
+
+Claims to make:
+- Sounio treats scientific correctness constraints as compiler/runtime concerns, not optional library policy.
+- Evidence for the system exists as versioned scripts plus JSON artifacts.
+
+Evidence pointers:
+- `docs/compiler/ARCHITECTURE.md`
+- `docs/compiler/SCIENTIFIC_FEATURES_ARCHITECTURE.md`
+- `artifacts/omega/paper_repro_gate_status.v1.json`
+
+Deliverables in section:
+- Problem statement, contributions list, and evaluation preview.
+
+### 2. Language Surface for Scientific Systems
+
+Objective:
+- Show the user-facing scientific primitives that motivate backend/compiler choices.
+
+Subtopics:
+- Epistemic values and uncertainty-aware arithmetic.
+- Causal operations and intervention-centric APIs.
+- Effects and units as systems guardrails.
+
+Code anchor suggestions:
+- `examples/real_world/05_pkpd_data_analysis.sio`
+- `stdlib/causal/core.sio`
+
+Figure/table candidates:
+- Table: language constructs -> compiler/runtime handling path.
 
 ### 3. Compiler Architecture
-- Pipeline: Source → Lexer → Parser → AST → Check → HIR → SIR → HLIR → Backend
-- Bidirectional type inference with epistemic extensions
-- The type checker: 138K lines, handles generics, turbofish, bounds
 
-### 4. Scientific IR (SIR) — The Novel Contribution
-- Why a domain-specific IR for science (vs lowering to LLVM directly)
-- SIR instruction set: epistemic ops, ODE integration, tensor ops, autodiff
-- Optimization passes:
-  - Variance fusion (consecutive epistemic additions → single RSS)
-  - Exact elision (ε=0 skips variance computation)
-  - SIMD vectorization (value + variance in parallel)
-- Example: SIR dump for a PBPK function
+Objective:
+- Describe end-to-end pipeline and where scientific semantics are preserved.
 
-### 5. Self-Hosted Bootstrap
-- Stage 1: Rust-hosted compiler compiles Sounio compiler to SOBC
-- Stage 2: Stage-1 compiler compiles itself to SOBC
-- Stage 3: SHA-256 parity check (Stage 1 output = Stage 2 output)
-- The journey: from 0 to 138K lines self-hosting
-- SOIR v1 IR format specification
+Subtopics:
+- Front-end stages: source, parser, AST/HIR checks.
+- Middle-end: SIR/HLIR semantics-aware transforms.
+- Backend boundary: native and accelerator emission strategy.
 
-### 6. Code Generation
-- Native backend: ELF64 (Linux), Mach-O (macOS)
-- LLVM backend (partial)
-- GPU: PTX (NVIDIA), Metal (Apple)
-- The ODE bridge: Sounio RHS functions called from Rust RK4 solver
+Evidence pointers:
+- `docs/compiler/ARCHITECTURE.md`
+- `docs/compiler/TYPE_SYSTEM_ARCHITECTURE.md`
+- `docs/compiler/CODE_GENERATION_ARCHITECTURE.md`
+
+Figure/table candidates:
+- Figure: pipeline map with data structures and invariants.
+
+### 4. Scientific IR (SIR) as Systems Core
+
+Objective:
+- Make SIR the unique systems contribution: explain why direct lowering is insufficient for scientific invariants.
+
+Subtopics:
+- SIR design goals and instruction families.
+- Optimization strategy for uncertainty-heavy compute paths.
+- Semantics preservation boundaries from typed source to executable lanes.
+
+Evidence pointers:
+- `docs/compiler/SIR_PASSES.md`
+- `docs/compiler/SCIENTIFIC_FEATURES_ARCHITECTURE.md`
+
+Figure/table candidates:
+- Figure: representative SIR snippet with annotations.
+- Table: pass goals, preconditions, and expected effect.
+
+### 5. Self-Hosted Bootstrap and Policy Closure
+
+Objective:
+- Show operational rigor: self-host/closure is tested with fail-closed contracts, not ad hoc scripts.
+
+Subtopics:
+- Bootstrap workflow and closure expectations.
+- No-Rust policy boundaries and explicit failure classes.
+- Artifactized gate outcomes as engineering telemetry.
+
+Evidence pointers:
+- `docs/implementation/RUSTLESS_CUTOVER.md`
+- `docs/implementation/RUSTLESS_COMPLETE.md`
+- `artifacts/omega/strict_no_rust_closure_gate.v1.json`
+
+Figure/table candidates:
+- Table: bootstrap stages and expected pass/fail/not_run surfaces.
+
+### 6. Backend Strategy and Runtime Integration
+
+Objective:
+- Explain production tradeoffs across native and accelerator backends.
+
+Subtopics:
+- Native targets and code emission contracts.
+- GPU/runtime attest lanes and capability gating.
+- Runtime bridge patterns for scientific kernels/ODE-like workloads.
+
+Evidence pointers:
+- `docs/compiler/CODE_GENERATION_ARCHITECTURE.md`
+- `artifacts/omega/gpu_runtime_attest_gate.v1.json`
+- `artifacts/omega/gpu_codegen_parity.v1.json`
+
+Figure/table candidates:
+- Figure: backend matrix and dispatch policy.
 
 ### 7. Evaluation
-- 7.1 Micro-benchmarks: uncertainty propagation vs Python/Julia (Table)
-- 7.2 ODE validation: caffeine PK, exponential decay (analytical comparison)
-- 7.3 Compile-time overhead: epistemic checking adds 12%
-- 7.4 Bootstrap verification: Stage 1 = Stage 2 (deterministic)
-- 7.5 Standard library coverage: 272K lines across 20+ domains
+
+Objective:
+- Report systems outcomes with explicit scope and reproducibility path.
+
+Subsections:
+- 7.1 Scientific/uncertainty microbenchmarks.
+- 7.2 Domain lane examples (PK/PBPK and related workloads).
+- 7.3 Build/runtime overhead and policy-gate status.
+- 7.4 Reproducibility pipeline results.
+
+Evidence pointers:
+- `benchmarks/README.md`
+- `benchmarks/results/NVIDIA_L4_BENCHMARKS.md`
+- `benchmarks/results/l4_raw_data.json`
+- `paper/reproduce.sh`
+- `artifacts/omega/paper_repro_gate_status.v1.json`
+
+Output discipline:
+- Report pass/fail/not_run where applicable.
+- Preserve blocked status as first-class result instead of collapsing into narrative success.
 
 ### 8. Related Work
-- Scientific languages: Julia, Fortran, Chapel, X10
-- Self-hosted compilers: Go, Rust, Zig
-- Domain-specific IRs: Halide, TVM, MLIR
-- Uncertainty libraries: Python uncertainties, Julia Measurements.jl
+
+Objective:
+- Situate Sounio among systems languages, scientific stacks, and compiler infrastructures.
+
+Comparison axes:
+- Systems implementation depth.
+- Scientific semantic integration depth.
+- Reproducibility contract strength.
+
+Potential clusters:
+- Systems languages and self-hosting compilers.
+- Scientific computing toolchains.
+- IR-centric systems (general-purpose and domain-specific).
 
 ### 9. Conclusion
 
----
+Objective:
+- Re-state systems thesis: scientific semantics and operational reproducibility can be compiler/runtime responsibilities.
 
-## Source Material
+Close with:
+- What the current system demonstrates.
+- What remains open as engineering debt and research direction.
 
-Most content can be extracted from:
-- POPL draft sections 5-7 (Implementation, Evaluation)
-- TechRxiv preprint (sounio_arxiv_draft.md)
-- docs/compiler/ARCHITECTURE.md
-- docs/RUSTLESS_CUTOVER.md, RUSTLESS_COMPLETE.md
-- benchmark data in benchmarks/ and artifacts/omega/
+## Claim -> Artifact Matrix (Fail-Closed Writing Contract)
 
-## What's New vs. POPL
+Use this matrix during drafting/revision. A claim without an artifact link should be labeled as design intent, not empirical result.
 
-| Aspect | ICFP (Theory) | OOPSLA (Systems) |
-|--------|---------------|------------------|
-| Core contribution | Type theory + Lean proofs | Compiler engineering + SIR |
-| Formal content | Typing rules, metatheory | Architecture, pipeline |
-| Lean proofs | Central | Supporting evidence |
-| Benchmarks | None | Central |
-| LOC counts | None | Central |
-| Bootstrap | Not mentioned | Full section |
-| GPU codegen | Not mentioned | Section |
-| Related work | PL theory papers | Systems papers |
+| Claim class | Required evidence | Location |
+| --- | --- | --- |
+| Reproducibility workflow exists and runs | Script + status artifact | `paper/reproduce.sh`, `artifacts/omega/paper_repro_gate_status.v1.json` |
+| Bootstrap/policy closure behavior | Gate artifact with explicit blockers | `artifacts/omega/strict_no_rust_closure_gate.v1.json` |
+| GPU/runtime readiness statement | Runtime attest/parity artifacts | `artifacts/omega/gpu_runtime_attest_gate.v1.json`, `artifacts/omega/gpu_codegen_parity.v1.json` |
+| Benchmark claim | Raw data or benchmark summary file | `benchmarks/results/l4_raw_data.json`, `benchmarks/results/NVIDIA_L4_BENCHMARKS.md` |
+| Architecture claim | Source docs + code path | `docs/compiler/*.md`, `self-hosted/` compiler modules |
+
+## Figures and Tables Backlog
+
+Figures:
+- F1: end-to-end compiler pipeline with scientific invariants.
+- F2: SIR-centered optimization and lowering flow.
+- F3: policy gate surface (pass/fail/not_run + blockers).
+
+Tables:
+- T1: contributions and where they land in implementation.
+- T2: evaluation matrix with script/artifact provenance.
+- T3: failure taxonomy used by gate artifacts.
+
+## Writing Guardrails
+
+- Keep empirical scope narrow and artifact-backed.
+- Avoid absolute language unless backed by measurable evidence in repo artifacts.
+- Separate present-tense implementation facts from future roadmap.
+- Preserve uncertainty language where benchmark coverage is partial.
+
+## Build and Review Loop
+
+Recommended drafting loop for this paper lane:
+
+1. Draft prose section with explicit claim labels.
+2. Attach artifact/file pointer for each claim.
+3. Run reproducibility scripts for paper lane:
+   - `paper/reproduce.sh`
+   - `scripts/paper_repro_gate.sh`
+4. Update any claim whose supporting artifact changed.
+5. Export final claim-artifact checklist into submission package notes.
+
+## Immediate Next Tasks
+
+1. Create `paper/oopsla2027/main.tex` using this blueprint and existing PACMPL style from `paper/popl2027/main.tex`.
+2. Populate Sections 1-4 first (story + architecture + SIR), then lock figures.
+3. Fill Evaluation only after rerunning the paper repro gate so numbers and statuses are current.
