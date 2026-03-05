@@ -88,7 +88,8 @@ run_ir_lower_probe_case() {
 
   set +e
   timeout "$TIMEOUT_SECS" \
-    "$SOUC_BIN" build --backend=selfhosted-native "$SOURCE_FILE" -o "$NATIVE_OUT" \
+    "$SOUC_BIN" run self-hosted/compiler/main.sio -- \
+      souc "$SOURCE_FILE" -o "$NATIVE_OUT" -t native -v \
     >"$log_path" 2>&1
   local rc=$?
   set -e
@@ -100,22 +101,28 @@ run_ir_lower_probe_case() {
   local ir_start
   ir_start="$(marker_bool "IR lowering module" "$log_path")"
   local ir_done
-  ir_done="$(marker_bool "Native compilation successful" "$log_path")"
+  ir_done="$(marker_bool "IR lowering complete for module 0" "$log_path")"
   local merged_seen
   merged_seen="$(marker_bool "Merged IR:" "$log_path")"
   local native_dispatch_seen
-  native_dispatch_seen="$(marker_bool "ELF size:" "$log_path")"
+  native_dispatch_seen="$(marker_bool "Native dispatch:" "$log_path")"
   local native_bin_seen
-  native_bin_seen="$(marker_bool "Native binary size:" "$log_path")"
+  native_bin_seen="$(marker_bool "Native compilation successful:" "$log_path")"
   local written_seen
-  written_seen="$(marker_bool "Written to " "$log_path")"
+  written_seen="$(marker_bool "Compiled: " "$log_path")"
+  local selfhost_banner_seen
+  selfhost_banner_seen="$(marker_bool "SOUNIO SELF-HOSTED COMPILER v" "$log_path")"
+  local selfhost_horizon_seen
+  selfhost_horizon_seen="$(marker_bool "Horizon 3: self-hosted primary compiler." "$log_path")"
 
   local markers
-  markers="{\"type_start\":$type_start,\"type_done\":$type_done,\"ir_start\":$ir_start,\"ir_done\":$ir_done,\"merged_seen\":$merged_seen,\"native_dispatch_seen\":$native_dispatch_seen,\"native_bin_seen\":$native_bin_seen,\"written_seen\":$written_seen}"
+  markers="{\"selfhost_banner_seen\":$selfhost_banner_seen,\"selfhost_horizon_seen\":$selfhost_horizon_seen,\"type_start\":$type_start,\"type_done\":$type_done,\"ir_start\":$ir_start,\"ir_done\":$ir_done,\"merged_seen\":$merged_seen,\"native_dispatch_seen\":$native_dispatch_seen,\"native_bin_seen\":$native_bin_seen,\"written_seen\":$written_seen}"
 
   if [ "$rc" -eq 124 ]; then
     local timeout_reason="timeout"
-    if [ "$ir_start" -eq 0 ]; then
+    if [ "$selfhost_banner_seen" -eq 0 ] || [ "$selfhost_horizon_seen" -eq 0 ]; then
+      timeout_reason="timeout_non_selfhost_lane"
+    elif [ "$ir_start" -eq 0 ]; then
       timeout_reason="timeout_pre_ir_lower"
     elif [ "$ir_done" -eq 0 ]; then
       timeout_reason="timeout_in_ir_lower"
@@ -130,6 +137,16 @@ run_ir_lower_probe_case() {
 
   if [ "$rc" -ne 0 ]; then
     append_case "$name" "fail" "command_failed" "$rc" "$log_path" "$markers"
+    return
+  fi
+
+  if [ "$selfhost_banner_seen" -eq 0 ] || [ "$selfhost_horizon_seen" -eq 0 ]; then
+    append_case "$name" "fail" "selfhost_lane_not_executed" "$rc" "$log_path" "$markers"
+    return
+  fi
+
+  if [ "$ir_start" -eq 0 ] || [ "$type_start" -eq 0 ]; then
+    append_case "$name" "fail" "missing_selfhost_stage_markers" "$rc" "$log_path" "$markers"
     return
   fi
 
