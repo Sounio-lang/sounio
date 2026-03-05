@@ -13,16 +13,8 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      - name: Resolve pinned souc binary
-        run: |
-          chmod +x scripts/omega/omega_resolve_souc_bin.sh
-          SOUC_BIN="$(
-            SOUNIO_SOUC_VERSION=0.100.3 \
-            OMEGA_SOUC_REQUIRE_PINNED=1 \
-            OMEGA_SOUC_ALLOW_LOCAL_FALLBACK=0 \
-              scripts/omega/omega_resolve_souc_bin.sh --print-path
-          )"
-          echo "SOUC_BIN=$SOUC_BIN" >> "$GITHUB_ENV"
+      - name: Resolve souc binary (with local fallback)
+        run: bash scripts/fix_ci_binary.sh
       - name: Run selfhost driver output regression gate
         env:
           SOUNIO_REPO_HARD_NO_RUST: "1"
@@ -33,3 +25,315 @@ jobs:
           SOUNIO_REPO_HARD_NO_RUST: "1"
         run: |
           bash scripts/refinement_gate.sh
+
+  sprint1-frontend-tests:
+    name: Sprint1 Frontend Tests (json artifact)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Resolve souc binary (with local fallback)
+        run: bash scripts/fix_ci_binary.sh
+      - name: Run sprint1 frontend test lane
+        env:
+          SOUNIO_SPRINT1_REQUIRE_PARSER_DEEP: "1"
+        run: |
+          bash scripts/run_sprint1_tests.sh
+      - name: Verify sprint1 frontend status JSON
+        run: |
+          STATUS_JSON="artifacts/sprint1/reports/frontend_test_status.v1.json"
+          PARSER_DEEP_JSON="artifacts/sprint1/reports/parser_golden_deep_probe.v1.json"
+          test -s "$STATUS_JSON"
+          test -s "$PARSER_DEEP_JSON"
+          jq -e '
+            .schema == "sounio.sprint1.frontend_tests.status.v1" and
+            (.status == "pass" or .status == "fail" or .status == "skip") and
+            (.parser_deep_probe.status == "pass") and
+            (.metrics.total | type == "number") and
+            (.metrics.passed | type == "number") and
+            (.metrics.failed | type == "number") and
+            (.metrics.timeout | type == "number") and
+            (.metrics.pass_rate_percent | type == "number")
+          ' "$STATUS_JSON"
+          jq -e '
+            .schema == "sounio.sprint1.parser_deep_probe.v1" and
+            (.status == "pass") and
+            (.metrics.total | type == "number") and
+            (.metrics.passed | type == "number") and
+            (.metrics.failed | type == "number") and
+            (.metrics.timeout | type == "number") and
+            (.metrics.not_run | type == "number")
+          ' "$PARSER_DEEP_JSON"
+      - name: Upload sprint1 frontend artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sprint1-frontend-tests
+          path: |
+            artifacts/sprint1/reports/summary.txt
+            artifacts/sprint1/reports/failures.txt
+            artifacts/sprint1/reports/frontend_test_status.v1.json
+            artifacts/sprint1/reports/parser_golden_deep_probe.v1.json
+            artifacts/sprint1/logs/
+            artifacts/sprint1_test_summary.txt
+          retention-days: 7
+
+  sprint1-critical-bug-fixes:
+    name: Sprint1 Critical Bug Fixes Gate (strict)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Resolve souc binary (with local fallback)
+        env:
+          SOUNIO_CI_SOUC_VERSION: "0.100.3"
+        run: bash scripts/fix_ci_binary.sh
+      - name: Resolve pinned JIT souc binary
+        run: |
+          chmod +x scripts/omega/omega_resolve_souc_bin.sh
+          SOUC_JIT_BIN="$(
+            SOUNIO_SOUC_VERSION=0.100.3-jit.2 \
+            SOUNIO_SOUC_VARIANT=jit \
+            OMEGA_SOUC_REQUIRE_PINNED=1 \
+            OMEGA_SOUC_ALLOW_LOCAL_FALLBACK=0 \
+              scripts/omega/omega_resolve_souc_bin.sh --print-path
+          )"
+          echo "SOUC_JIT_BIN=$SOUC_JIT_BIN" >> "$GITHUB_ENV"
+      - name: Run sprint1 JIT runtime debug
+        env:
+          SOUNIO_SOUC_JIT_BIN: "${{ env.SOUC_JIT_BIN }}"
+          SOUNIO_SOUC_JIT_VERSION: "0.100.3-jit.2"
+        run: |
+          bash scripts/sprint1_jit_runtime_debug.sh
+      - name: Run sprint1 critical bug fixes gate (required pass)
+        env:
+          SOUNIO_SOUC_BIN: "${{ env.SOUC_BIN }}"
+          SOUNIO_SOUC_JIT_BIN: "${{ env.SOUC_JIT_BIN }}"
+          SOUNIO_SOUC_JIT_VERSION: "0.100.3-jit.2"
+          SOUNIO_SPRINT1_REQUIRE_JIT_RUNNER: "1"
+          SOUNIO_SPRINT1_GATE_REQUIRE_PASS: "1"
+        run: |
+          bash scripts/sprint1_critical_bug_fixes_gate.sh
+      - name: Run sprint1 JIT import stress debug (non-gating)
+        if: always()
+        continue-on-error: true
+        env:
+          SOUNIO_SOUC_JIT_BIN: "${{ env.SOUC_JIT_BIN }}"
+          SOUNIO_SOUC_JIT_VERSION: "0.100.3-jit.2"
+        run: |
+          bash scripts/sprint1_jit_import_stress_debug.sh
+      - name: Run sprint1 JIT wasm stack depth debug (non-gating)
+        if: always()
+        continue-on-error: true
+        env:
+          SOUNIO_SOUC_JIT_BIN: "${{ env.SOUC_JIT_BIN }}"
+          SOUNIO_SOUC_JIT_VERSION: "0.100.3-jit.2"
+        run: |
+          bash scripts/sprint1_jit_wasm_stack_depth_debug.sh
+      - name: Run sprint1 JIT ir timeout repro (non-gating)
+        if: always()
+        continue-on-error: true
+        env:
+          SOUNIO_SOUC_JIT_BIN: "${{ env.SOUC_JIT_BIN }}"
+          SOUNIO_SOUC_JIT_VERSION: "0.100.3-jit.2"
+        run: |
+          bash scripts/sprint1_jit_ir_timeout_repro.sh
+      - name: Run sprint1 JIT root-cause bigpush (non-gating)
+        if: always()
+        continue-on-error: true
+        env:
+          SOUNIO_SOUC_JIT_BIN: "${{ env.SOUC_JIT_BIN }}"
+          SOUNIO_SOUC_JIT_VERSION: "0.100.3-jit.2"
+        run: |
+          bash scripts/sprint1_jit_root_cause_bigpush.sh
+      - name: Build sprint1 blocker report
+        if: always()
+        run: |
+          bash scripts/sprint1_blocker_report.sh
+      - name: Upload sprint1 bug-fix artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sprint1-critical-bug-fixes
+          path: |
+            artifacts/sprint1/critical_bug_fixes_gate.v1.json
+            artifacts/sprint1/int_to_string_perf_gate.v1.json
+            artifacts/sprint1/int_to_string_perf_run_lane.v1.json
+            artifacts/sprint1/jit_runtime_debug.v1.json
+            artifacts/sprint1/jit_import_stress_debug.v1.json
+            artifacts/sprint1/jit_wasm_stack_depth_debug.v1.json
+            artifacts/sprint1/jit_ir_timeout_repro.v1.json
+            artifacts/sprint1/jit_root_cause_bigpush.v1.json
+            artifacts/sprint1/sprint1_blocker_report.v1.json
+            artifacts/sprint1/sprint1_blocker_report.md
+          retention-days: 7
+
+  sprint2-parser-stability:
+    name: Sprint2 Parser Stability Gate (json artifact)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Resolve souc binary (with local fallback)
+        run: bash scripts/fix_ci_binary.sh
+      - name: Run sprint2 parser stability gate
+        run: |
+          bash scripts/sprint2_parser_stability_gate.sh
+      - name: Verify sprint2 parser stability JSON
+        run: |
+          STATUS_JSON="artifacts/sprint2/parser_stability_gate.v1.json"
+          test -s "$STATUS_JSON"
+          jq -e '
+            .schema == "sounio.sprint2.parser_stability_gate.v1" and
+            (.status == "pass" or .status == "fail" or .status == "timeout" or .status == "not_run") and
+            (.metrics | type == "object") and
+            (.metrics.total | type == "number") and
+            (.metrics.passed | type == "number") and
+            (.metrics.failed | type == "number") and
+            (.metrics.timeout | type == "number") and
+            (.metrics.not_run | type == "number")
+          ' "$STATUS_JSON"
+      - name: Upload sprint2 parser stability artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sprint2-parser-stability
+          path: |
+            artifacts/sprint2/parser_stability_gate.v1.json
+            artifacts/sprint2/logs/
+          retention-days: 7
+
+  sprint2-lexer-features:
+    name: Sprint2 Lexer Feature Gate (json artifact)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Resolve souc binary (with local fallback)
+        run: bash scripts/fix_ci_binary.sh
+      - name: Run sprint2 lexer feature gate
+        run: |
+          bash scripts/sprint2_lexer_feature_gate.sh
+      - name: Verify sprint2 lexer feature JSON
+        run: |
+          STATUS_JSON="artifacts/sprint2/lexer_feature_gate.v1.json"
+          test -s "$STATUS_JSON"
+          jq -e '
+            .schema == "sounio.sprint2.lexer_feature_gate.v1" and
+            (.status == "pass" or .status == "fail" or .status == "timeout" or .status == "not_run") and
+            (.metrics.total | type == "number") and
+            (.metrics.passed | type == "number") and
+            (.metrics.failed | type == "number") and
+            (.metrics.timeout | type == "number") and
+            (.metrics.not_run | type == "number")
+          ' "$STATUS_JSON"
+      - name: Upload sprint2 lexer feature artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sprint2-lexer-features
+          path: |
+            artifacts/sprint2/lexer_feature_gate.v1.json
+            artifacts/sprint2/logs/lexer_feature/
+          retention-days: 7
+
+  sprint2-wasm-dispatch:
+    name: Sprint2 WASM Dispatch Gate (json artifact)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Resolve souc binary (with local fallback)
+        run: bash scripts/fix_ci_binary.sh
+      - name: Run sprint2 wasm dispatch gate
+        run: |
+          bash scripts/sprint2_wasm_dispatch_gate.sh
+      - name: Verify sprint2 wasm dispatch JSON
+        run: |
+          STATUS_JSON="artifacts/sprint2/wasm_dispatch_gate.v1.json"
+          test -s "$STATUS_JSON"
+          jq -e '
+            .schema == "sounio.sprint2.wasm_dispatch_gate.v1" and
+            (.status == "pass" or .status == "fail" or .status == "timeout" or .status == "not_run") and
+            (.metrics.total | type == "number") and
+            (.metrics.passed | type == "number") and
+            (.metrics.failed | type == "number") and
+            (.metrics.timeout | type == "number") and
+            (.metrics.not_run | type == "number")
+          ' "$STATUS_JSON"
+      - name: Upload sprint2 wasm dispatch artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sprint2-wasm-dispatch
+          path: |
+            artifacts/sprint2/wasm_dispatch_gate.v1.json
+            artifacts/sprint2/wasm_dispatch/
+            artifacts/sprint2/logs/wasm_dispatch/
+          retention-days: 7
+
+  sprint2-ir-lower-timeout:
+    name: Sprint2 IR Lower Timeout Gate (json artifact)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Resolve souc binary (with local fallback)
+        run: bash scripts/fix_ci_binary.sh
+      - name: Run sprint2 IR lower timeout gate
+        run: |
+          bash scripts/sprint2_ir_lower_timeout_gate.sh
+      - name: Verify sprint2 IR lower timeout JSON
+        run: |
+          STATUS_JSON="artifacts/sprint2/ir_lower_timeout_gate.v1.json"
+          test -s "$STATUS_JSON"
+          jq -e '
+            .schema == "sounio.sprint2.ir_lower_timeout_gate.v1" and
+            (.status == "pass" or .status == "fail" or .status == "timeout" or .status == "not_run") and
+            (.metrics.total | type == "number") and
+            (.metrics.passed | type == "number") and
+            (.metrics.failed | type == "number") and
+            (.metrics.timeout | type == "number") and
+            (.metrics.not_run | type == "number")
+          ' "$STATUS_JSON"
+      - name: Upload sprint2 IR lower timeout artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sprint2-ir-lower-timeout
+          path: |
+            artifacts/sprint2/ir_lower_timeout_gate.v1.json
+            artifacts/sprint2/ir_lower_timeout/
+            artifacts/sprint2/logs/ir_lower_timeout/
+          retention-days: 7
+
+  sprint3-wasm-gate:
+    name: Sprint3 WASM Gate (HLIR→SOIR→WASM end-to-end)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Resolve souc binary (with local fallback)
+        run: bash scripts/fix_ci_binary.sh
+      - name: Install wasmtime
+        run: |
+          curl -sSfL https://wasmtime.dev/install.sh | bash
+          echo "$HOME/.wasmtime/bin" >> "$GITHUB_PATH"
+      - name: Run sprint3 WASM gate
+        run: |
+          bash scripts/sprint3_wasm_gate.sh
+      - name: Verify sprint3 WASM gate JSON
+        run: |
+          STATUS_JSON="artifacts/sprint3/wasm_gate.v1.json"
+          test -s "$STATUS_JSON"
+          jq -e '
+            .schema == "sounio.sprint3.wasm_gate.v1" and
+            (.status == "pass" or .status == "fail" or .status == "timeout" or .status == "not_run") and
+            (.metrics.total | type == "number") and
+            (.metrics.passed | type == "number") and
+            (.metrics.failed | type == "number") and
+            (.metrics.timeout | type == "number") and
+            (.metrics.not_run | type == "number")
+          ' "$STATUS_JSON"
+      - name: Upload sprint3 WASM gate artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sprint3-wasm-gate
+          path: |
+            artifacts/sprint3/wasm_gate.v1.json
+            artifacts/sprint3/logs/wasm_gate/
+          retention-days: 7

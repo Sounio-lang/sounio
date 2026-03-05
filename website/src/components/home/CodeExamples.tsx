@@ -25,13 +25,13 @@ if bmi < 25:
 # What if the scale was off by 2kg?`,
     sounio: `// Sounio: epistemic computing
 // ε is the confidence level (0.0 to 1.0)
-let mass: Knowledge[f64] = Knowledge(
+let mass: Knowledge<f64> = Knowledge(
     75.3, 
     ε=0.98, 
     prov="clinical_scale_001"
 )
 
-let height: Knowledge[f64] = Knowledge(
+let height: Knowledge<f64> = Knowledge(
     1.82, 
     ε=0.99, 
     prov="stadiometer_001"
@@ -39,7 +39,7 @@ let height: Knowledge[f64] = Knowledge(
 
 // GUM Uncertainty propagates automatically:
 // ε(a/b) = ε(a) × ε(b)
-let bmi: Knowledge[f64] = mass / (height * height)
+let bmi: Knowledge<f64> = mass / (height * height)
 // bmi.value = 22.74, bmi.ε = 0.96
 
 if bmi.ε >= 0.95 {
@@ -50,37 +50,35 @@ if bmi.ε >= 0.95 {
   },
   {
     id: 'causality',
-    label: 'Causal Models',
-    python: `# Python: implicit causality
-# A model where Genetics confound Smoking and Cancer
-def predict_cancer(genetics, smoking):
-    tar = 0.8 * smoking
-    cancer = 0.6 * tar + 0.3 * genetics
-    return cancer
+    label: 'Causal Types',
+    python: `# Python: implicit causality, no type safety
+import dowhy
 
-# The structure is hidden in code execution.
-# Hard to analyze counterfactuals or interventions.
-# No standard way to express "Smoking causes Tar".
-`,
-    sounio: `// Sounio: native causal directed acyclic graphs
-causal model SmokingCancer {
-    // Declare causal variables
-    nodes: [Smoking, Tar, Cancer, Genetics]
+# Intervention is a plain dict — no type check
+model = CausalModel(data=df,
+    graph="digraph {Education -> Earnings}")
+do_result = model.do({"Education": 1})
 
-    // Define causal relationships (edges)
-    Genetics -> Smoking
-    Genetics -> Cancer
-    Smoking -> Tar
-    Tar -> Cancer
+# Counterfactual: manual estimate, no confidence
+cf_earnings = predict_cf(do_result)
+# Was cf_earnings reliable? The type won't say.
+# No way to gate on causal confidence.`,
+    sounio: `// Sounio: Intervention<T> and Counterfactual<T>
+// are first-class epistemic types
 
-    // Structural causal equations
-    equations: {
-        Smoking = 0.5 * Genetics,
-        Tar = 0.8 * Smoking,
-        Cancer = 0.6 * Tar + 0.3 * Genetics
-    }
-}
-// The compiler understands the causal graph natively.`,
+// Causal intervention: do(Treatment = active)
+let treated: Intervention<bool> = intervene(true)
+
+// Counterfactual: what if Alice had education?
+let cf: Counterfactual<f64> = counterfactual(
+    observed: 30000.0,
+    under: education_iv
+)
+
+// .epsilon gates on causal confidence
+if cf.epsilon > 0.90 {
+    report_finding(cf)  // type-safe causal claim
+}`,
   },
   {
     id: 'resources',

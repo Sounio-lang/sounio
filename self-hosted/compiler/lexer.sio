@@ -15,7 +15,15 @@ enum TokenKind {
     Int,
     Float,
     String,
+    Char,
     Bool,
+    IntLit,
+    FloatLit,
+    HexLit,
+    BinLit,
+    OctLit,
+    CharLit,
+    StringLit,
     
     // Identifiers
     Ident,
@@ -38,6 +46,9 @@ enum TokenKind {
     Match,
     Break,
     Continue,
+    Uncertain,
+    Belief,
+    Posterior,
     
     // Types
     TypeInt,
@@ -64,6 +75,17 @@ enum TokenKind {
     Not,            // !
     Arrow,          // ->
     FatArrow,       // =>
+    PlusMinus,      // +-
+    DotDot,         // ..
+    DotDotEq,       // ..=
+    DotDotDot,      // ...
+    PipeEq,         // |=
+    ShlEq,          // <<=
+    ShrEq,          // >>=
+    Amp,            // &
+    AmpBang,        // &!
+    Tilde,          // ~
+    ColonColon,     // ::
     
     // Delimiters
     LParen,         // (
@@ -81,6 +103,8 @@ enum TokenKind {
     
     // Special
     Comment,
+    DocOuter,
+    DocInner,
     Whitespace,
     Newline,
     Eof,
@@ -101,6 +125,14 @@ struct Token {
 struct TokenList {
     items: [Token; 4096],
     len: i64,
+}
+
+// Compatibility shape used by older lexer callers that pass byte buffers.
+// This keeps the parser-facing TokenList API intact while exposing a legacy path.
+struct LexerState {
+    tokens: [Token; 4096],
+    token_count: i64,
+    error_count: i64,
 }
 
 fn token_list_new() -> TokenList {
@@ -128,6 +160,7 @@ fn is_keyword(s: string) -> bool {
     s == "struct" || s == "enum" || s == "use" || s == "mut" ||
     s == "with" || s == "as" || s == "match" || s == "break" ||
     s == "continue" || s == "true" || s == "false" ||
+    s == "uncertain" || s == "belief" || s == "posterior" ||
     s == "i64" || s == "f64" || s == "string" || s == "bool" || s == "()"
 }
 
@@ -149,6 +182,9 @@ fn keyword_to_kind(s: string) -> TokenKind {
     else if s == "match" { TokenKind::Match }
     else if s == "break" { TokenKind::Break }
     else if s == "continue" { TokenKind::Continue }
+    else if s == "uncertain" { TokenKind::Uncertain }
+    else if s == "belief" { TokenKind::Belief }
+    else if s == "posterior" { TokenKind::Posterior }
     else if s == "true" || s == "false" { TokenKind::Bool }
     else if s == "i64" { TokenKind::TypeInt }
     else if s == "f64" { TokenKind::TypeFloat }
@@ -218,35 +254,72 @@ fn lexer_skip_whitespace(lex: Lexer) -> Lexer {
     l
 }
 
-fn lexer_read_string(lex: Lexer) -> (Lexer, string) with Mut, Panic, Div {
+fn lexer_peek_n(lex: Lexer, n: i64) -> i64 {
+    let p = lex.pos + n
+    if p >= str_len(lex.input) {
+        0
+    } else {
+        str_char_at(lex.input, p)
+    }
+}
+
+fn is_dec_digit(ch: i64) -> bool {
+    ch >= 48 && ch <= 57
+}
+
+fn is_hex_digit(ch: i64) -> bool {
+    is_dec_digit(ch) ||
+    (ch >= 65 && ch <= 70) ||
+    (ch >= 97 && ch <= 102)
+}
+
+fn is_oct_digit(ch: i64) -> bool {
+    ch >= 48 && ch <= 55
+}
+
+fn is_bin_digit(ch: i64) -> bool {
+    ch == 48 || ch == 49
+}
+
+fn is_ident_continue(ch: i64) -> bool {
+    (ch >= 65 && ch <= 90) ||
+    (ch >= 97 && ch <= 122) ||
+    (ch >= 48 && ch <= 57) ||
+    ch == 95
+}
+
+fn lexer_read_string(lex: Lexer) -> (Lexer, string, bool) with Mut, Panic, Div {
     var l = lex
     var result = ""
-    
+    var terminated = false
+
     // Skip opening quote
     let (new_l, _) = lexer_advance(l)
     l = new_l
-    
+
     while !lexer_at_end(l) {
         let ch = lexer_peek(l)
-        
-        if ch == 34 {  // closing quote
+
+        if ch == 34 {  // "
             let (new_l2, _) = lexer_advance(l)
             l = new_l2
+            terminated = true
             break
         }
-        
-        if ch == 92 {  // backslash - escape sequence
+
+        if ch == 92 {  // \
             let (new_l3, _) = lexer_advance(l)
             l = new_l3
+            if lexer_at_end(l) {
+                break
+            }
             let esc = lexer_peek(l)
-            
             if esc == 110 { result = result + "\n" }      // \n
             else if esc == 116 { result = result + "\t" } // \t
             else if esc == 114 { result = result + "\r" } // \r
             else if esc == 92 { result = result + "\\" }  // \\
             else if esc == 34 { result = result + "\"" }  // \"
             else { result = result + char_from_i64(esc) }
-            
             let (new_l4, _) = lexer_advance(l)
             l = new_l4
         } else {
@@ -255,38 +328,172 @@ fn lexer_read_string(lex: Lexer) -> (Lexer, string) with Mut, Panic, Div {
             l = new_l5
         }
     }
-    
-    (l, result)
+
+    (l, result, terminated)
+}
+
+fn lexer_read_char_literal(lex: Lexer) -> (Lexer, string, bool) with Mut, Panic, Div {
+    var l = lex
+    var result = ""
+    var terminated = false
+
+    // Skip opening '
+    let (new_l, _) = lexer_advance(l)
+    l = new_l
+
+    if lexer_at_end(l) {
+        return (l, result, false)
+    }
+
+    let ch = lexer_peek(l)
+    if ch == 92 {  // escape
+        let (new_l2, _) = lexer_advance(l)
+        l = new_l2
+        if lexer_at_end(l) {
+            return (l, result, false)
+        }
+        let esc = lexer_peek(l)
+        if esc == 110 { result = "\n" }
+        else if esc == 116 { result = "\t" }
+        else if esc == 114 { result = "\r" }
+        else if esc == 92 { result = "\\" }
+        else if esc == 39 { result = "'" }
+        else { result = char_from_i64(esc) }
+        let (new_l3, _) = lexer_advance(l)
+        l = new_l3
+    } else {
+        result = char_from_i64(ch)
+        let (new_l4, _) = lexer_advance(l)
+        l = new_l4
+    }
+
+    if !lexer_at_end(l) && lexer_peek(l) == 39 {
+        let (new_l5, _) = lexer_advance(l)
+        l = new_l5
+        terminated = true
+    }
+
+    (l, result, terminated)
 }
 
 fn lexer_read_number(lex: Lexer) -> (Lexer, string, bool) with Mut, Panic, Div {
     var l = lex
     var result = ""
     var is_float = false
-    
+
+    // Base-prefixed integers: 0x.. 0b.. 0o..
+    if lexer_peek(l) == 48 {
+        let next = lexer_peek_next(l)
+        if next == 120 || next == 88 || next == 98 || next == 66 || next == 111 || next == 79 {
+            let (l0, ch0) = lexer_advance(l)
+            l = l0
+            result = result + char_from_i64(ch0)
+            let (l1, ch1) = lexer_advance(l)
+            l = l1
+            result = result + char_from_i64(ch1)
+
+            while !lexer_at_end(l) {
+                let ch = lexer_peek(l)
+                let accept = if next == 120 || next == 88 {
+                    is_hex_digit(ch)
+                } else if next == 98 || next == 66 {
+                    is_bin_digit(ch)
+                } else {
+                    is_oct_digit(ch)
+                }
+                if accept || ch == 95 {
+                    result = result + char_from_i64(ch)
+                    let (new_l, _) = lexer_advance(l)
+                    l = new_l
+                } else {
+                    break
+                }
+            }
+
+            while !lexer_at_end(l) {
+                let ch = lexer_peek(l)
+                if is_ident_continue(ch) {
+                    result = result + char_from_i64(ch)
+                    let (new_l, _) = lexer_advance(l)
+                    l = new_l
+                } else {
+                    break
+                }
+            }
+
+            return (l, result, false)
+        }
+    }
+
+    // Decimal / float / scientific
     while !lexer_at_end(l) {
         let ch = lexer_peek(l)
-        
-        if ch >= 48 && ch <= 57 {  // 0-9
+        if is_dec_digit(ch) || ch == 95 {
             result = result + char_from_i64(ch)
             let (new_l, _) = lexer_advance(l)
             l = new_l
-        } else if ch == 46 {  // decimal point
-            // Check if next is also digit (avoid .. operator confusion)
-            let next = lexer_peek_next(l)
-            if next >= 48 && next <= 57 {
-                is_float = true
-                result = result + "."
-                let (new_l, _) = lexer_advance(l)
-                l = new_l
-            } else {
-                break
-            }
         } else {
             break
         }
     }
-    
+
+    if !lexer_at_end(l) && lexer_peek(l) == 46 && is_dec_digit(lexer_peek_next(l)) {
+        is_float = true
+        result = result + "."
+        let (new_l2, _) = lexer_advance(l)
+        l = new_l2
+        while !lexer_at_end(l) {
+            let ch = lexer_peek(l)
+            if is_dec_digit(ch) || ch == 95 {
+                result = result + char_from_i64(ch)
+                let (new_l3, _) = lexer_advance(l)
+                l = new_l3
+            } else {
+                break
+            }
+        }
+    }
+
+    if !lexer_at_end(l) && (lexer_peek(l) == 101 || lexer_peek(l) == 69) {
+        let e = lexer_peek(l)
+        let sign_or_digit = lexer_peek_n(l, 1)
+        let after_sign = lexer_peek_n(l, 2)
+        if is_dec_digit(sign_or_digit) ||
+           ((sign_or_digit == 43 || sign_or_digit == 45) && is_dec_digit(after_sign)) {
+            is_float = true
+            result = result + char_from_i64(e)
+            let (new_l4, _) = lexer_advance(l)
+            l = new_l4
+            if !lexer_at_end(l) && (lexer_peek(l) == 43 || lexer_peek(l) == 45) {
+                let sign = lexer_peek(l)
+                result = result + char_from_i64(sign)
+                let (new_l5, _) = lexer_advance(l)
+                l = new_l5
+            }
+            while !lexer_at_end(l) {
+                let ch = lexer_peek(l)
+                if is_dec_digit(ch) || ch == 95 {
+                    result = result + char_from_i64(ch)
+                    let (new_l6, _) = lexer_advance(l)
+                    l = new_l6
+                } else {
+                    break
+                }
+            }
+        }
+    }
+
+    while !lexer_at_end(l) {
+        let ch = lexer_peek(l)
+        if is_ident_continue(ch) {
+            result = result + char_from_i64(ch)
+            let (new_l7, _) = lexer_advance(l)
+            l = new_l7
+        } else {
+            break
+        }
+    }
+
     (l, result, is_float)
 }
 
@@ -336,6 +543,44 @@ fn lexer_read_comment(lex: Lexer) -> (Lexer, string) with Mut, Panic, Div {
     (l, result)
 }
 
+fn lexer_read_block_comment(lex: Lexer) -> (Lexer, string, bool) with Mut, Panic, Div {
+    var l = lex
+    var result = ""
+    var depth: i64 = 0
+
+    if lexer_peek(l) == 47 && lexer_peek_next(l) == 42 {
+        let (l0, _) = lexer_advance(l)
+        l = l0
+        let (l1, _) = lexer_advance(l)
+        l = l1
+        depth = 1
+    }
+
+    while depth > 0 && !lexer_at_end(l) {
+        let ch = lexer_peek(l)
+        let next = lexer_peek_next(l)
+        if ch == 47 && next == 42 {
+            depth = depth + 1
+            let (l2, _) = lexer_advance(l)
+            l = l2
+            let (l3, _) = lexer_advance(l)
+            l = l3
+        } else if ch == 42 && next == 47 {
+            depth = depth - 1
+            let (l4, _) = lexer_advance(l)
+            l = l4
+            let (l5, _) = lexer_advance(l)
+            l = l5
+        } else {
+            result = result + char_from_i64(ch)
+            let (l6, _) = lexer_advance(l)
+            l = l6
+        }
+    }
+
+    (l, result, depth == 0)
+}
+
 fn lexer_next_token(lex: Lexer) -> (Lexer, Token) with Mut, Panic, Div {
     var l = lexer_skip_whitespace(lex)
     
@@ -354,9 +599,20 @@ fn lexer_next_token(lex: Lexer) -> (Lexer, Token) with Mut, Panic, Div {
         
         // String literal
         if ch == 34 {  // "
-            let (new_l, text) = lexer_read_string(l)
+            let (new_l, text, terminated) = lexer_read_string(l)
             let tok = Token {
-                kind: TokenKind::String,
+                kind: if terminated { TokenKind::String } else { TokenKind::Invalid },
+                text: text,
+                line: start_line,
+                column: start_col,
+            }
+            (new_l, tok)
+        }
+        // Character literal
+        else if ch == 39 {  // '
+            let (new_l, text, terminated) = lexer_read_char_literal(l)
+            let tok = Token {
+                kind: if terminated { TokenKind::Char } else { TokenKind::Invalid },
                 text: text,
                 line: start_line,
                 column: start_col,
@@ -386,6 +642,27 @@ fn lexer_next_token(lex: Lexer) -> (Lexer, Token) with Mut, Panic, Div {
             }
             (new_l, tok)
         }
+        // Doc comments
+        else if ch == 47 && lexer_peek_next(l) == 47 && lexer_peek_n(l, 2) == 47 {  // ///
+            let (new_l, text) = lexer_read_comment(l)
+            let tok = Token {
+                kind: TokenKind::DocOuter,
+                text: text,
+                line: start_line,
+                column: start_col,
+            }
+            (new_l, tok)
+        }
+        else if ch == 47 && lexer_peek_next(l) == 47 && lexer_peek_n(l, 2) == 33 {  // //!
+            let (new_l, text) = lexer_read_comment(l)
+            let tok = Token {
+                kind: TokenKind::DocInner,
+                text: text,
+                line: start_line,
+                column: start_col,
+            }
+            (new_l, tok)
+        }
         // Comment
         else if ch == 47 && lexer_peek_next(l) == 47 {  // //
             let (new_l, text) = lexer_read_comment(l)
@@ -397,7 +674,122 @@ fn lexer_next_token(lex: Lexer) -> (Lexer, Token) with Mut, Panic, Div {
             }
             (new_l, tok)
         }
+        // Block comment (nested)
+        else if ch == 47 && lexer_peek_next(l) == 42 {  // /*
+            let (new_l, text, terminated) = lexer_read_block_comment(l)
+            let tok = Token {
+                kind: if terminated { TokenKind::Comment } else { TokenKind::Invalid },
+                text: text,
+                line: start_line,
+                column: start_col,
+            }
+            (new_l, tok)
+        }
+        // Three-character operators
+        else if ch == 60 && lexer_peek_next(l) == 60 && lexer_peek_n(l, 2) == 61 {  // <<=
+            let (new_l, _) = lexer_advance(l)
+            let (new_l2, _) = lexer_advance(new_l)
+            let (new_l3, _) = lexer_advance(new_l2)
+            let tok = Token {
+                kind: TokenKind::ShlEq,
+                text: "<<=",
+                line: start_line,
+                column: start_col,
+            }
+            (new_l3, tok)
+        }
+        else if ch == 62 && lexer_peek_next(l) == 62 && lexer_peek_n(l, 2) == 61 {  // >>=
+            let (new_l, _) = lexer_advance(l)
+            let (new_l2, _) = lexer_advance(new_l)
+            let (new_l3, _) = lexer_advance(new_l2)
+            let tok = Token {
+                kind: TokenKind::ShrEq,
+                text: ">>=",
+                line: start_line,
+                column: start_col,
+            }
+            (new_l3, tok)
+        }
+        else if ch == 46 && lexer_peek_next(l) == 46 && lexer_peek_n(l, 2) == 46 {  // ...
+            let (new_l, _) = lexer_advance(l)
+            let (new_l2, _) = lexer_advance(new_l)
+            let (new_l3, _) = lexer_advance(new_l2)
+            let tok = Token {
+                kind: TokenKind::DotDotDot,
+                text: "...",
+                line: start_line,
+                column: start_col,
+            }
+            (new_l3, tok)
+        }
+        else if ch == 46 && lexer_peek_next(l) == 46 && lexer_peek_n(l, 2) == 61 {  // ..=
+            let (new_l, _) = lexer_advance(l)
+            let (new_l2, _) = lexer_advance(new_l)
+            let (new_l3, _) = lexer_advance(new_l2)
+            let tok = Token {
+                kind: TokenKind::DotDotEq,
+                text: "..=",
+                line: start_line,
+                column: start_col,
+            }
+            (new_l3, tok)
+        }
         // Two-character operators
+        else if ch == 46 && lexer_peek_next(l) == 46 {  // ..
+            let (new_l, _) = lexer_advance(l)
+            let (new_l2, _) = lexer_advance(new_l)
+            let tok = Token {
+                kind: TokenKind::DotDot,
+                text: "..",
+                line: start_line,
+                column: start_col,
+            }
+            (new_l2, tok)
+        }
+        else if ch == 58 && lexer_peek_next(l) == 58 {  // ::
+            let (new_l, _) = lexer_advance(l)
+            let (new_l2, _) = lexer_advance(new_l)
+            let tok = Token {
+                kind: TokenKind::ColonColon,
+                text: "::",
+                line: start_line,
+                column: start_col,
+            }
+            (new_l2, tok)
+        }
+        else if ch == 124 && lexer_peek_next(l) == 61 {  // |=
+            let (new_l, _) = lexer_advance(l)
+            let (new_l2, _) = lexer_advance(new_l)
+            let tok = Token {
+                kind: TokenKind::PipeEq,
+                text: "|=",
+                line: start_line,
+                column: start_col,
+            }
+            (new_l2, tok)
+        }
+        else if ch == 43 && lexer_peek_next(l) == 45 {  // +-
+            let (new_l, _) = lexer_advance(l)
+            let (new_l2, _) = lexer_advance(new_l)
+            let tok = Token {
+                kind: TokenKind::PlusMinus,
+                text: "+-",
+                line: start_line,
+                column: start_col,
+            }
+            (new_l2, tok)
+        }
+        else if ch == 38 && lexer_peek_next(l) == 33 {  // &!
+            let (new_l, _) = lexer_advance(l)
+            let (new_l2, _) = lexer_advance(new_l)
+            let tok = Token {
+                kind: TokenKind::AmpBang,
+                text: "&!",
+                line: start_line,
+                column: start_col,
+            }
+            (new_l2, tok)
+        }
         else if ch == 61 && lexer_peek_next(l) == 61 {  // ==
             let (new_l, _) = lexer_advance(l)
             let (new_l2, _) = lexer_advance(new_l)
@@ -522,6 +914,8 @@ fn char_to_token(ch: i64) -> (TokenKind, string) {
     else if ch == 58 { (TokenKind::Colon, ":") }
     else if ch == 59 { (TokenKind::Semi, ";") }
     else if ch == 124 { (TokenKind::Pipe, "|") }
+    else if ch == 38 { (TokenKind::Amp, "&") }
+    else if ch == 126 { (TokenKind::Tilde, "~") }
     else if ch == 95 { (TokenKind::Underscore, "_") }
     else if ch == 10 { (TokenKind::Newline, "\n") }
     else { (TokenKind::Invalid, char_from_i64(ch)) }
@@ -541,6 +935,8 @@ fn lex(input: string) -> TokenList with Mut, Panic, Div {
 
         // Skip comments and whitespace for parser
         if tok.kind != TokenKind::Comment &&
+           tok.kind != TokenKind::DocOuter &&
+           tok.kind != TokenKind::DocInner &&
            tok.kind != TokenKind::Whitespace &&
            tok.kind != TokenKind::Newline {
             tokens.items[tokens.len as usize] = tok
@@ -560,6 +956,154 @@ fn lex(input: string) -> TokenList with Mut, Panic, Div {
     tokens
 }
 
+fn token_list_to_lexer_state(tokens: TokenList) -> LexerState with Mut, Panic, Div {
+    var state = LexerState {
+        tokens: [Token { kind: TokenKind::Invalid, text: "", line: 0, column: 0 }; 4096],
+        token_count: tokens.len,
+        error_count: 0,
+    }
+
+    var i: i64 = 0
+    while i < tokens.len {
+        state.tokens[i as usize] = tokens.items[i as usize]
+        i = i + 1
+    }
+
+    state
+}
+
+fn slice_buffer_to_string(buffer: [i8; 1048576], length: i64, offset: i64) -> string with Mut, Panic, Div {
+    if length < 0 || length > 1048576 {
+        panic("lex_buffer: length out of bounds")
+    }
+    if offset < 0 || offset > length {
+        panic("lex_buffer: offset out of bounds")
+    }
+
+    let used = length - offset
+    var result = ""
+    var i: i64 = 0
+    while i < used {
+        var ch = buffer[(offset + i) as usize] as i64
+        if ch < 0 {
+            ch = ch + 256
+        }
+        result = result + char_from_i64(ch)
+        i = i + 1
+    }
+    result
+}
+
+fn text_starts_with(s: string, prefix: string) -> bool {
+    let s_len = str_len(s)
+    let p_len = str_len(prefix)
+    if p_len > s_len {
+        return false
+    }
+    var i: i64 = 0
+    while i < p_len {
+        if str_char_at(s, i) != str_char_at(prefix, i) {
+            return false
+        }
+        i = i + 1
+    }
+    true
+}
+
+fn text_contains(s: string, ch: i64) -> bool {
+    var i: i64 = 0
+    while i < str_len(s) {
+        if str_char_at(s, i) == ch {
+            return true
+        }
+        i = i + 1
+    }
+    false
+}
+
+fn classify_legacy_number(text: string, kind: TokenKind) -> TokenKind {
+    if kind == TokenKind::Float {
+        return TokenKind::FloatLit
+    }
+    if text_starts_with(text, "0x") || text_starts_with(text, "0X") {
+        return TokenKind::HexLit
+    }
+    if text_starts_with(text, "0b") || text_starts_with(text, "0B") {
+        return TokenKind::BinLit
+    }
+    if text_starts_with(text, "0o") || text_starts_with(text, "0O") {
+        return TokenKind::OctLit
+    }
+    if text_contains(text, 46) || text_contains(text, 101) || text_contains(text, 69) {
+        return TokenKind::FloatLit
+    }
+    TokenKind::IntLit
+}
+
+fn map_to_legacy_kind(tok: Token) -> TokenKind {
+    if tok.kind == TokenKind::Int || tok.kind == TokenKind::Float {
+        classify_legacy_number(tok.text, tok.kind)
+    } else if tok.kind == TokenKind::String {
+        TokenKind::StringLit
+    } else if tok.kind == TokenKind::Char {
+        TokenKind::CharLit
+    } else {
+        tok.kind
+    }
+}
+
+fn lex_legacy_input(input: string) -> LexerState with Mut, Panic, Div {
+    var l = lexer_new(input)
+    var state = LexerState {
+        tokens: [Token { kind: TokenKind::Invalid, text: "", line: 0, column: 0 }; 4096],
+        token_count: 0,
+        error_count: 0,
+    }
+
+    while true {
+        let (new_l, tok) = lexer_next_token(l)
+        l = new_l
+
+        if tok.kind == TokenKind::Invalid {
+            state.error_count = state.error_count + 1
+        }
+
+        if tok.kind == TokenKind::Comment ||
+           tok.kind == TokenKind::DocInner ||
+           tok.kind == TokenKind::Whitespace ||
+           tok.kind == TokenKind::Newline {
+            if tok.kind == TokenKind::Eof {
+                break
+            }
+            continue
+        }
+
+        let mapped_kind = map_to_legacy_kind(tok)
+        state.tokens[state.token_count as usize] = Token {
+            kind: mapped_kind,
+            text: tok.text,
+            line: tok.line,
+            column: tok.column,
+        }
+        state.token_count = state.token_count + 1
+
+        if mapped_kind == TokenKind::Eof {
+            break
+        }
+    }
+
+    state
+}
+
+fn lex_buffer(buffer: [i8; 1048576], length: i64, offset: i64) -> LexerState with Mut, Panic, Div {
+    let input = slice_buffer_to_string(buffer, length, offset)
+    lex_legacy_input(input)
+}
+
+fn lex_legacy(buffer: [i8; 1048576], length: i64, offset: i64) -> LexerState with Mut, Panic, Div {
+    lex_buffer(buffer, length, offset)
+}
+
 fn token_to_string(tok: Token) -> string with Mut, Panic, Div {
     "Token(" + token_kind_to_string(tok.kind) + ", \"" + tok.text + "\", " +
     int_to_string(tok.line) + ":" + int_to_string(tok.column) + ")"
@@ -570,7 +1114,15 @@ fn token_kind_to_string(kind: TokenKind) -> string {
         TokenKind::Int => "Int",
         TokenKind::Float => "Float",
         TokenKind::String => "String",
+        TokenKind::Char => "Char",
         TokenKind::Bool => "Bool",
+        TokenKind::IntLit => "IntLit",
+        TokenKind::FloatLit => "FloatLit",
+        TokenKind::HexLit => "HexLit",
+        TokenKind::BinLit => "BinLit",
+        TokenKind::OctLit => "OctLit",
+        TokenKind::CharLit => "CharLit",
+        TokenKind::StringLit => "StringLit",
         TokenKind::Ident => "Ident",
         TokenKind::Fn => "Fn",
         TokenKind::Let => "Let",
@@ -589,6 +1141,9 @@ fn token_kind_to_string(kind: TokenKind) -> string {
         TokenKind::Match => "Match",
         TokenKind::Break => "Break",
         TokenKind::Continue => "Continue",
+        TokenKind::Uncertain => "Uncertain",
+        TokenKind::Belief => "Belief",
+        TokenKind::Posterior => "Posterior",
         TokenKind::TypeInt => "TypeInt",
         TokenKind::TypeFloat => "TypeFloat",
         TokenKind::TypeString => "TypeString",
@@ -611,6 +1166,17 @@ fn token_kind_to_string(kind: TokenKind) -> string {
         TokenKind::Not => "Not",
         TokenKind::Arrow => "Arrow",
         TokenKind::FatArrow => "FatArrow",
+        TokenKind::PlusMinus => "PlusMinus",
+        TokenKind::DotDot => "DotDot",
+        TokenKind::DotDotEq => "DotDotEq",
+        TokenKind::DotDotDot => "DotDotDot",
+        TokenKind::PipeEq => "PipeEq",
+        TokenKind::ShlEq => "ShlEq",
+        TokenKind::ShrEq => "ShrEq",
+        TokenKind::Amp => "Amp",
+        TokenKind::AmpBang => "AmpBang",
+        TokenKind::Tilde => "Tilde",
+        TokenKind::ColonColon => "ColonColon",
         TokenKind::LParen => "LParen",
         TokenKind::RParen => "RParen",
         TokenKind::LBrace => "LBrace",
@@ -623,6 +1189,11 @@ fn token_kind_to_string(kind: TokenKind) -> string {
         TokenKind::Semi => "Semi",
         TokenKind::Pipe => "Pipe",
         TokenKind::Underscore => "Underscore",
+        TokenKind::Comment => "Comment",
+        TokenKind::DocOuter => "DocOuter",
+        TokenKind::DocInner => "DocInner",
+        TokenKind::Whitespace => "Whitespace",
+        TokenKind::Newline => "Newline",
         TokenKind::Eof => "Eof",
         TokenKind::Invalid => "Invalid",
         _ => "Unknown",
@@ -650,6 +1221,11 @@ fn int_to_string(n: i64) -> string with Mut, Panic, Div {
     }
 }
 
-fn char_from_i64(n: i64) -> string with Mut, Panic, Div {
-    str_slice("0123456789", n, n + 1)
+fn char_from_i64(n: i64) -> string with Mut, Panic {
+    if n < 0 || n > 255 {
+        panic("char_from_i64: byte out of range")
+    }
+    var buf: [i8; 1] = [0]
+    buf[0] = n as i8
+    str_from_bytes(buf, 1)
 }

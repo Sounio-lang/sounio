@@ -18,32 +18,304 @@ use native::encode::*
 use native::elf::*
 use native::reloc::*
 use native::frame::*
+use wasm::core::*
+use wasm::encode::*
+use wasm::lower::*
 use native::codegen::*
-use module_loader::{compile_multimodule_native}
+use module_loader::{compile_multimodule_native, compile_multimodule_native_with_ir, load_multimodule_ir}
+use parser::parser::{parser_last_error_count}
 
 // ============================================================================
 // STRING UTILITIES
 // ============================================================================
 
+fn pow10_idx(idx: i64) -> i64 {
+    if idx == 0 { 1000000000000000000 }
+    else if idx == 1 { 100000000000000000 }
+    else if idx == 2 { 10000000000000000 }
+    else if idx == 3 { 1000000000000000 }
+    else if idx == 4 { 100000000000000 }
+    else if idx == 5 { 10000000000000 }
+    else if idx == 6 { 1000000000000 }
+    else if idx == 7 { 100000000000 }
+    else if idx == 8 { 10000000000 }
+    else if idx == 9 { 1000000000 }
+    else if idx == 10 { 100000000 }
+    else if idx == 11 { 10000000 }
+    else if idx == 12 { 1000000 }
+    else if idx == 13 { 100000 }
+    else if idx == 14 { 10000 }
+    else if idx == 15 { 1000 }
+    else if idx == 16 { 100 }
+    else if idx == 17 { 10 }
+    else { 1 }
+}
+
+fn digit_for_power(rem: i64, power: i64) -> i64 {
+    if rem <= (0 - (9 * power)) { 9 }
+    else if rem <= (0 - (8 * power)) { 8 }
+    else if rem <= (0 - (7 * power)) { 7 }
+    else if rem <= (0 - (6 * power)) { 6 }
+    else if rem <= (0 - (5 * power)) { 5 }
+    else if rem <= (0 - (4 * power)) { 4 }
+    else if rem <= (0 - (3 * power)) { 3 }
+    else if rem <= (0 - (2 * power)) { 2 }
+    else if rem <= (0 - power) { 1 }
+    else { 0 }
+}
+
+fn i64_to_digits_no_div(rem: i64, idx: i64, started: bool) -> string with Mut, Panic {
+    if idx >= 19 {
+        return ""
+    }
+
+    let power = pow10_idx(idx)
+    let digit = digit_for_power(rem, power)
+    let rem_next = rem + (digit * power)
+    let emit = started || digit > 0 || idx == 18
+    let head = if emit { char_from_i64(digit) } else { "" }
+    head + i64_to_digits_no_div(rem_next, idx + 1, emit)
+}
+
+fn i64_to_string_no_div(n: i64) -> string with Mut, Panic {
+    if n == 0 {
+        return "0"
+    }
+    let negative = n < 0
+    let rem = if negative { n } else { 0 - n }
+    let digits = i64_to_digits_no_div(rem, 0, false)
+    if negative { "-" + digits } else { digits }
+}
+
+fn char_from_i64_error(n: i64) -> string with Mut, Panic {
+    "char_from_i64: digit must be 0-9, got " + i64_to_string_no_div(n)
+}
+
+fn parse_decimal_digit(ch: string) -> i64 {
+    if str_eq(ch, "0") { 0 }
+    else if str_eq(ch, "1") { 1 }
+    else if str_eq(ch, "2") { 2 }
+    else if str_eq(ch, "3") { 3 }
+    else if str_eq(ch, "4") { 4 }
+    else if str_eq(ch, "5") { 5 }
+    else if str_eq(ch, "6") { 6 }
+    else if str_eq(ch, "7") { 7 }
+    else if str_eq(ch, "8") { 8 }
+    else if str_eq(ch, "9") { 9 }
+    else { -1 }
+}
+
+fn parse_nonnegative_i64(raw: string) -> i64 with Mut, Div {
+    let len = str_len(raw)
+    if len <= 0 {
+        return -1
+    }
+
+    var i: i64 = 0
+    var value: i64 = 0
+    while i < len {
+        let ch = str_slice(raw, i, i + 1)
+        let d = parse_decimal_digit(ch)
+        if d < 0 {
+            return -1
+        }
+        value = value * 10 + d
+        i = i + 1
+    }
+    value
+}
+
+fn parse_i64_decimal(raw: string) -> (bool, i64) with Mut, Div {
+    let len = str_len(raw)
+    if len <= 0 {
+        return (false, 0)
+    }
+
+    if str_char_at(raw, 0) == 45 {
+        if len == 1 {
+            return (false, 0)
+        }
+        let tail = str_slice(raw, 1, len)
+        let mag = parse_nonnegative_i64(tail)
+        if mag < 0 {
+            return (false, 0)
+        }
+        (true, 0 - mag)
+    } else {
+        let val = parse_nonnegative_i64(raw)
+        if val < 0 {
+            (false, 0)
+        } else {
+            (true, val)
+        }
+    }
+}
+
+fn run_int_to_string_bench(iterations: i64) -> i64 with Mut, Panic, Div {
+    let i64_max = 9223372036854775807
+    let i64_min = (0 - i64_max) - 1
+    var checksum: i64 = 0
+    var i: i64 = 0
+    while i < iterations {
+        var sample = (i * 1000003) - 500001
+        if (i % 11) == 0 {
+            sample = 0 - sample
+        }
+        if (i % 7919) == 0 {
+            sample = i64_min
+        }
+        let rendered = int_to_string(sample)
+        checksum = checksum + str_len(rendered)
+        i = i + 1
+    }
+    checksum
+}
+
+fn run_int_to_string_bench_from_args(args: ArgList, flag_index: i64) with IO, Mut, Panic, Div {
+    var iterations: i64 = 1000000
+    if flag_index + 1 < args.len {
+        let parsed = parse_nonnegative_i64(arg_list_get(args, flag_index + 1))
+        if parsed >= 0 {
+            iterations = parsed
+        }
+    }
+    let checksum = run_int_to_string_bench(iterations)
+    println("bench_int_to_string iterations=" + int_to_string(iterations) +
+            " checksum=" + int_to_string(checksum))
+}
+
+fn run_probe_char_from_i64(args: ArgList, flag_index: i64) with IO, Mut, Panic, Div {
+    if flag_index + 1 >= args.len {
+        panic("probe_char_from_i64: missing integer argument")
+    }
+    let parsed = parse_i64_decimal(arg_list_get(args, flag_index + 1))
+    if !parsed.0 {
+        panic("probe_char_from_i64: invalid integer '" + arg_list_get(args, flag_index + 1) + "'")
+    }
+    print(char_from_i64(parsed.1))
+}
+
+fn run_probe_arg_list_get(args: ArgList, flag_index: i64) with IO, Mut, Panic, Div {
+    if flag_index + 1 >= args.len {
+        panic("probe_arg_list_get: missing index argument")
+    }
+    let parsed = parse_i64_decimal(arg_list_get(args, flag_index + 1))
+    if !parsed.0 {
+        panic("probe_arg_list_get: invalid integer '" + arg_list_get(args, flag_index + 1) + "'")
+    }
+    let probe = ArgList {
+        items: ["alpha", "beta", "gamma", "", "", "", "", "", "", "", "", "", "", "", "", "",
+                "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "",
+                "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "",
+                "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", ""],
+        len: 3,
+    }
+    print(arg_list_get(probe, parsed.1))
+}
+
+fn run_probe_compile_capture(args: ArgList, flag_index: i64) with IO, Mut, Panic, Div, Alloc {
+    if flag_index + 1 >= args.len {
+        panic("probe_compile_capture: missing source file argument")
+    }
+    let source_path = arg_list_get(args, flag_index + 1)
+    var errors = compile_errors_new()
+    if file_size(source_path) <= 0 {
+        errors = compile_errors_push(errors, compile_format_error_at(source_path, 0, 0, "could not read input file"))
+    } else {
+        let incomplete_assign = compile_scan_incomplete_assignment(source_path)
+        if incomplete_assign.0 {
+            errors = compile_errors_push(
+                errors,
+                compile_format_error_at(source_path, incomplete_assign.1, incomplete_assign.2, "syntax appears incomplete after assignment")
+            )
+        }
+    }
+
+    if errors.len == 0 {
+        println("probe_compile_capture: success")
+    } else {
+        println("probe_compile_capture: fail")
+        var i: i64 = 0
+        while i < errors.len {
+            println(compile_errors_get(errors, i))
+            i = i + 1
+        }
+    }
+}
+
+fn log_wasm_dispatch(source_path: string, output_path: string) with IO {
+    print("WASM dispatch: source=")
+    print(source_path)
+    print(" output=")
+    print(output_path)
+    print("\n")
+}
+
+fn run_probe_wasm_dispatch(args: ArgList, flag_index: i64) with IO, Mut, Panic, Div {
+    if flag_index + 1 >= args.len {
+        panic("probe_wasm_dispatch: missing source file argument")
+    }
+    let source_path = arg_list_get(args, flag_index + 1)
+    var output_path = "artifacts/sprint2/wasm_dispatch/probe.wasm"
+    if flag_index + 2 < args.len {
+        output_path = arg_list_get(args, flag_index + 2)
+    }
+    println("probe_wasm_dispatch: begin")
+    log_wasm_dispatch(source_path, output_path)
+    println("probe_wasm_dispatch: ok")
+}
+
 fn char_from_i64(n: i64) -> string with Mut, Panic {
+    if n < 0 || n > 9 {
+        panic(char_from_i64_error(n))
+    }
     str_slice("0123456789", n, n + 1)
 }
 
-fn int_to_string(n: i64) -> string with Mut, Panic, Div {
+fn i64_to_string_decimal(n: i64) -> string with Mut, Panic, Div {
+    var out: [i8; 24] = [0; 24]
     if n == 0 {
-        "0"
-    } else {
-        let negative = n < 0
-        var num = if negative { 0 - n } else { n }
-        var result = ""
-        while num > 0 {
-            let digit = num % 10
-            let ch = 48 + digit
-            result = char_from_i64(ch) + result
-            num = num / 10
-        }
-        if negative { "-" + result } else { result }
+        out[0] = 48 as i8
+        return str_from_bytes(out, 1)
     }
+
+    var value = n
+    var digits: i64 = 1
+    while value <= -10 || value >= 10 {
+        digits = digits + 1
+        value = value / 10
+    }
+
+    let negative = n < 0
+    let total_len = if negative { digits + 1 } else { digits }
+
+    var write = total_len - 1
+    value = n
+    while value <= -10 || value >= 10 {
+        var digit = value % 10
+        if digit < 0 {
+            digit = 0 - digit
+        }
+        out[write as usize] = (48 + digit) as i8
+        write = write - 1
+        value = value / 10
+    }
+
+    var final_digit = value
+    if final_digit < 0 {
+        final_digit = 0 - final_digit
+    }
+    out[write as usize] = (48 + final_digit) as i8
+
+    if negative {
+        out[0] = 45 as i8
+    }
+
+    str_from_bytes(out, total_len)
+}
+
+fn int_to_string(n: i64) -> string with Mut, Panic, Div {
+    i64_to_string_decimal(n)
 }
 
 // ============================================================================
@@ -55,8 +327,16 @@ struct ArgList {
     len: i64,
 }
 
-fn arg_list_get(lst: ArgList, i: i64) -> string {
+fn arg_list_get(lst: ArgList, i: i64) -> string with Mut, Panic {
+    if i < 0 || i >= lst.len {
+        panic(arg_list_get_error(i, lst.len))
+    }
     lst.items[i as usize]
+}
+
+fn arg_list_get_error(index: i64, len: i64) -> string with Mut, Panic {
+    "arg_list_get: index " + i64_to_string_no_div(index) +
+    " out of bounds (length " + i64_to_string_no_div(len) + ")"
 }
 
 // ============================================================================
@@ -64,35 +344,20 @@ fn arg_list_get(lst: ArgList, i: i64) -> string {
 // ============================================================================
 
 struct CompileErrors {
-    items: [string; 256],
+    items: [string; 64],
     len: i64,
 }
 
 fn compile_errors_new() -> CompileErrors {
     CompileErrors {
-        items: ["", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "",
-                "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "",
-                "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "",
-                "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "",
-                "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "",
-                "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "",
-                "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "",
-                "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "",
-                "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "",
-                "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "",
-                "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "",
-                "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "",
-                "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "",
-                "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "",
-                "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "",
-                "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", ""],
+        items: [""; 64],
         len: 0,
     }
 }
 
 fn compile_errors_push(errs: CompileErrors, s: string) -> CompileErrors {
     var out = errs
-    if out.len < 256 {
+    if out.len < 64 {
         out.items[out.len as usize] = s
         out.len = out.len + 1
     }
@@ -101,6 +366,120 @@ fn compile_errors_push(errs: CompileErrors, s: string) -> CompileErrors {
 
 fn compile_errors_get(errs: CompileErrors, i: i64) -> string {
     errs.items[i as usize]
+}
+
+fn compile_trim_line(line: string) -> string with Mut, Panic, Div {
+    let line_len = str_len(line)
+    if line_len > 0 && str_char_at(line, line_len - 1) == 13 {
+        str_slice(line, 0, line_len - 1)
+    } else {
+        line
+    }
+}
+
+fn compile_errors_push_lines(errs: CompileErrors, prefix: string, text: string) -> CompileErrors with Mut, Panic, Div {
+    var out = errs
+    let n = str_len(text)
+    if n <= 0 {
+        return out
+    }
+
+    var start: i64 = 0
+    var i: i64 = 0
+    while i < n {
+        if str_char_at(text, i) == 10 {
+            if i > start {
+                let raw_line = str_slice(text, start, i)
+                let line = compile_trim_line(raw_line)
+                if str_len(line) > 0 {
+                    out = compile_errors_push(out, prefix + line)
+                }
+            }
+            start = i + 1
+        }
+        i = i + 1
+    }
+
+    if start < n {
+        let raw_line = str_slice(text, start, n)
+        let line = compile_trim_line(raw_line)
+        if str_len(line) > 0 {
+            out = compile_errors_push(out, prefix + line)
+        }
+    }
+
+    out
+}
+
+fn compile_push_ir_failure(errs: CompileErrors, reason: string) -> CompileErrors with Mut, Panic, Div {
+    var out = errs
+    if str_eq(reason, "module_resolution_failed") {
+        out = compile_errors_push(out, "error: module resolution failed")
+    } else if str_eq(reason, "type_check_failed") {
+        out = compile_errors_push(out, "error: type checking failed")
+    } else if str_eq(reason, "ir_lowering_failed") {
+        out = compile_errors_push(out, "error: IR lowering failed")
+    } else {
+        out = compile_errors_push(out, "error: " + reason)
+    }
+
+    let parse_errors = parser_last_error_count()
+    if parse_errors > 0 {
+        out = compile_errors_push(out, "error: parser reported " + int_to_string(parse_errors) + " syntax errors")
+    }
+    out
+}
+
+fn compile_byte_is_whitespace(ch: i8) -> bool {
+    ch == (32 as i8) || ch == (9 as i8) || ch == (13 as i8) || ch == (10 as i8)
+}
+
+fn compile_byte_is_rhs_terminator(ch: i8) -> bool {
+    ch == (125 as i8) || ch == (41 as i8) || ch == (93 as i8) || ch == (59 as i8) || ch == (44 as i8)
+}
+
+fn compile_scan_incomplete_assignment(path: string) -> (bool, i64, i64) with IO, Mut, Panic, Div {
+    let size = file_size(path)
+    if size <= 0 {
+        return (false, 0, 0)
+    }
+    let bytes = read_file(path)
+
+    var i: i64 = 0
+    var line: i64 = 1
+    var col: i64 = 1
+    while i < size {
+        let ch = bytes[i as usize]
+        if ch == (61 as i8) { // '='
+            var j = i + 1
+            while j < size {
+                let next = bytes[j as usize]
+                if compile_byte_is_whitespace(next) {
+                    j = j + 1
+                    continue
+                }
+                if compile_byte_is_rhs_terminator(next) {
+                    return (true, line, col)
+                }
+                break
+            }
+            if j >= size {
+                return (true, line, col)
+            }
+        }
+        if ch == (10 as i8) {
+            line = line + 1
+            col = 1
+        } else {
+            col = col + 1
+        }
+        i = i + 1
+    }
+    (false, 0, 0)
+}
+
+fn compile_format_error_at(path: string, line: i64, col: i64, msg: string) -> string with Mut, Panic, Div {
+    "error: at " + path + ":" + int_to_string(line) + ":" + int_to_string(col) + " - " + msg
 }
 
 // ============================================================================
@@ -164,6 +543,13 @@ fn print_help() with IO {
     println("  --gpu-target <name>    GPU target profile (cuda-smXX, rocm-gfxXXX)")
     println("  --gpu-binary-format    fatbin|cubin|hsaco|multi")
     println("  --gpu-strict-parity    Require strict CUDA/ROCm parity checks")
+    println("  --self-test            Run compiler main self-tests")
+    println("  --bench-int-to-string [n]   Benchmark int_to_string loop (default n=1000000)")
+    println("  --probe-char-from-i64 <n>   Probe char_from_i64 for manual regression checks")
+    println("  --probe-arg-list-get <i>    Probe arg_list_get with fixed 3-item list")
+    println("  --probe-compile-capture <source.sio>  Probe compile error capture path")
+    println("  --probe-cc <source.sio>  Short alias for probe-compile-capture")
+    println("  --probe-wasm-dispatch <source.sio> [out.wasm]  Probe wasm dispatch marker path")
     println("  -h, --help             Print this help message")
     println("")
     println("Examples:")
@@ -262,12 +648,56 @@ fn parse_options(args: ArgList) -> CompilerOptions with IO, Mut, Panic, Div {
 // COMPILATION PIPELINE
 // ============================================================================
 
-// Horizon 3: real multi-module native compilation pipeline.
-// module_loader::compile_multimodule_native handles file reading, parsing,
-// type checking, IR lowering, x86-64 codegen, ELF output, and tracing.
 fn compile(opts: CompilerOptions) -> CompileResult with IO, Mut, Panic, Div, Alloc {
-    let exit_code = compile_multimodule_native(
+    if file_size(opts.input_file) <= 0 {
+        var file_errors = compile_errors_new()
+        file_errors = compile_errors_push(file_errors, compile_format_error_at(opts.input_file, 0, 0, "could not read input file"))
+        return CompileResult {
+            success: false,
+            errors: file_errors,
+            output: "",
+        }
+    }
+
+    let incomplete_assign = compile_scan_incomplete_assignment(opts.input_file)
+    if incomplete_assign.0 {
+        var parse_like_errors = compile_errors_new()
+        parse_like_errors = compile_errors_push(
+            parse_like_errors,
+            compile_format_error_at(opts.input_file, incomplete_assign.1, incomplete_assign.2, "syntax appears incomplete after assignment")
+        )
+        return CompileResult {
+            success: false,
+            errors: parse_like_errors,
+            output: "",
+        }
+    }
+
+    // Preflight load catches parse/module-resolution failures early and avoids
+    // driving native compilation on obviously invalid inputs.
+    let ir_result = load_multimodule_ir(opts.input_file)
+    let preflight_parse_errors = parser_last_error_count()
+    if !ir_result.ok || preflight_parse_errors > 0 {
+        var preflight_errors = compile_errors_new()
+        if !ir_result.ok {
+            preflight_errors = compile_push_ir_failure(preflight_errors, ir_result.error_msg)
+        }
+        if preflight_parse_errors > 0 {
+            preflight_errors = compile_errors_push(preflight_errors, "error: parser reported " + int_to_string(preflight_parse_errors) + " syntax errors")
+        }
+        if preflight_errors.len == 0 {
+            preflight_errors = compile_errors_push(preflight_errors, "error: compilation preflight failed")
+        }
+        return CompileResult {
+            success: false,
+            errors: preflight_errors,
+            output: "",
+        }
+    }
+
+    let exit_code = compile_multimodule_native_with_ir(
         opts.input_file,
+        ir_result.module,
         opts.output_file,
         opts.target,
         "auto",
@@ -276,11 +706,126 @@ fn compile(opts: CompilerOptions) -> CompileResult with IO, Mut, Panic, Div, All
         opts.gpu_binary_format,
         opts.gpu_strict_parity
     )
-    CompileResult {
-        success: exit_code == 0,
-        errors: compile_errors_new(),
-        output: if exit_code == 0 { opts.output_file } else { "" },
+
+    if exit_code == 0 {
+        return CompileResult {
+            success: true,
+            errors: compile_errors_new(),
+            output: opts.output_file,
+        }
     }
+
+    // Diagnostic replay path: preserve compile_multimodule_native behavior while
+    // collecting structured messages for callers.
+    var errors = compile_errors_new()
+    if !ir_result.ok {
+        errors = compile_push_ir_failure(errors, ir_result.error_msg)
+    } else {
+        let target_spec = native_resolve_target(opts.target, "auto", false)
+        let native_result = compile_native(&ir_result.module, target_spec)
+        if !native_result.ok {
+            errors = compile_errors_push_lines(errors, "error: ", native_result.error_msg)
+        }
+    }
+
+    let parse_errors = parser_last_error_count()
+    if parse_errors > 0 {
+        errors = compile_errors_push(errors, "error: parser reported " + int_to_string(parse_errors) + " syntax errors")
+    }
+    if errors.len == 0 {
+        errors = compile_errors_push(errors, "error: compilation failed (no structured diagnostics captured)")
+    }
+
+    CompileResult {
+        success: false,
+        errors: errors,
+        output: "",
+    }
+}
+
+fn compiler_main_test_char_from_i64_valid() -> bool with Mut, Panic, Div {
+    char_from_i64(0) == "0" &&
+    char_from_i64(5) == "5" &&
+    char_from_i64(9) == "9"
+}
+
+fn compiler_main_test_char_from_i64_error_messages() -> bool with Mut, Panic, Div {
+    char_from_i64_error(-1) == "char_from_i64: digit must be 0-9, got -1" &&
+    char_from_i64_error(10) == "char_from_i64: digit must be 0-9, got 10"
+}
+
+fn compiler_main_test_arg_list_get_valid() -> bool with Mut, Panic, Div {
+    let args = ArgList {
+        items: ["alpha", "beta", "", "", "", "", "", "", "", "", "", "", "", "", "", "",
+                "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "",
+                "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "",
+                "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", ""],
+        len: 2,
+    }
+    arg_list_get(args, 0) == "alpha" && arg_list_get(args, 1) == "beta"
+}
+
+fn compiler_main_test_arg_list_get_error_messages() -> bool with Mut, Panic, Div {
+    arg_list_get_error(-1, 3) == "arg_list_get: index -1 out of bounds (length 3)" &&
+    arg_list_get_error(3, 3) == "arg_list_get: index 3 out of bounds (length 3)" &&
+    arg_list_get_error(4, 3) == "arg_list_get: index 4 out of bounds (length 3)"
+}
+
+fn compiler_main_test_int_to_string() -> bool with Mut, Panic, Div {
+    let i64_max = 9223372036854775807
+    let i64_min = (0 - i64_max) - 1
+    int_to_string(0) == "0" &&
+    int_to_string(7) == "7" &&
+    int_to_string(42) == "42" &&
+    int_to_string(-42) == "-42" &&
+    int_to_string(i64_max) == "9223372036854775807" &&
+    int_to_string(i64_min) == "-9223372036854775808"
+}
+
+fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div {
+    var passed: i64 = 0
+    let total: i64 = 5
+
+    println("=== compiler/main.sio self-tests ===")
+
+    if compiler_main_test_char_from_i64_valid() {
+        println("  T01 OK: char_from_i64 valid digits")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T01 char_from_i64 valid digits")
+    }
+
+    if compiler_main_test_char_from_i64_error_messages() {
+        println("  T02 OK: char_from_i64 error format")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T02 char_from_i64 error format")
+    }
+
+    if compiler_main_test_arg_list_get_valid() {
+        println("  T03 OK: arg_list_get in-bounds")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T03 arg_list_get in-bounds")
+    }
+
+    if compiler_main_test_arg_list_get_error_messages() {
+        println("  T04 OK: arg_list_get error format")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T04 arg_list_get error format")
+    }
+
+    if compiler_main_test_int_to_string() {
+        println("  T05 OK: int_to_string edge cases")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T05 int_to_string edge cases")
+    }
+
+    println("")
+    println("compiler/main tests: " + int_to_string(passed) + "/" + int_to_string(total) + " passed")
+    if passed == total { 0 } else { 1 }
 }
 
 // ============================================================================
@@ -293,6 +838,37 @@ fn main() with IO, Mut, Panic, Div, Alloc {
     println("SOUNIO SELF-HOSTED COMPILER v0.80.0")
     println("Horizon 3: self-hosted primary compiler.")
     println("")
+
+    var arg_idx: i64 = 0
+    while arg_idx < args.len {
+        let mode = arg_list_get(args, arg_idx)
+        if mode == "--self-test" {
+            let self_test_code = run_compiler_main_self_tests()
+            if self_test_code != 0 {
+                panic("compiler/main self-tests failed")
+            }
+            return
+        } else if mode == "--bench-int-to-string" {
+            run_int_to_string_bench_from_args(args, arg_idx)
+            return
+        } else if mode == "--probe-char-from-i64" {
+            run_probe_char_from_i64(args, arg_idx)
+            return
+        } else if mode == "--probe-arg-list-get" {
+            run_probe_arg_list_get(args, arg_idx)
+            return
+        } else if mode == "--probe-compile-capture" || mode == "--probe-cc" || starts_with(mode, "--probe-c") {
+            run_probe_compile_capture(args, arg_idx)
+            return
+        } else if mode == "--probe-wasm-dispatch" || starts_with(mode, "--probe-wasm") {
+            run_probe_wasm_dispatch(args, arg_idx)
+            return
+        } else if starts_with(mode, "--probe") {
+            run_probe_compile_capture(args, arg_idx)
+            return
+        }
+        arg_idx = arg_idx + 1
+    }
 
     let opts = parse_options(args)
 

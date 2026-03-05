@@ -1,0 +1,630 @@
+// ============================================================================
+// wasm_driver.sio — standalone Sounio→WASM compilation driver
+//
+// Self-contained: no imports. Inlines the minimal WASM emitter + IR lowering
+// needed to compile two real functions end-to-end:
+//
+//   fn add(a: i64, b: i64) -> i64 { a + b }
+//   fn fib(n: i64) -> i64           (iterative, loop)
+//   fn main() -> i64 { fib(10) }
+//
+// Emits raw WASM bytes via print_char. Usage:
+//   target/debug/souc run wasm_driver.sio | head -c -2 > out.wasm
+//   node wasm_validate.mjs out.wasm
+// ============================================================================
+module wasm_driver
+
+// ── Constants ─────────────────────────────────────────────────────────────
+// WASM types
+let WASM_I64: i64 = 126   // 0x7e
+let WASM_F64: i64 = 125   // 0x7d
+let WASM_VOID: i64 = 64   // 0x40 blocktype empty
+
+// WASM opcodes
+let OP_UNREACHABLE: i64 = 0
+let OP_NOP: i64 = 1
+let OP_BLOCK: i64 = 2      // 0x02
+let OP_LOOP: i64 = 3       // 0x03
+let OP_END: i64 = 11       // 0x0b
+let OP_BR: i64 = 12        // 0x0c
+let OP_BR_IF: i64 = 13     // 0x0d
+let OP_RETURN: i64 = 15    // 0x0f
+let OP_CALL: i64 = 16      // 0x10
+let OP_LOCAL_GET: i64 = 32 // 0x20
+let OP_LOCAL_SET: i64 = 33 // 0x21
+let OP_I64_CONST: i64 = 66 // 0x42
+let OP_I64_EQZ: i64 = 80   // 0x50
+let OP_I64_EQ: i64 = 81    // 0x51
+let OP_I64_NE: i64 = 82    // 0x52
+let OP_I64_LT_S: i64 = 83  // 0x53
+let OP_I64_GT_S: i64 = 85  // 0x55
+let OP_I64_LE_S: i64 = 87  // 0x57
+let OP_I64_GE_S: i64 = 89  // 0x59
+let OP_I64_ADD: i64 = 124  // 0x7c
+let OP_I64_SUB: i64 = 125  // 0x7d — also WASM_F64, context-dependent
+let OP_I64_MUL: i64 = 126  // 0x7e — also WASM_I64, context-dependent
+
+// ── Byte buffer ────────────────────────────────────────────────────────────
+struct Buf {
+    data: [i8; 65536],
+    len: i64,
+}
+
+fn buf_new() -> Buf {
+    Buf { data: [0; 65536], len: 0 }
+}
+
+fn buf_push(b: Buf, byte: i64) -> Buf with Mut, Panic, Div {
+    var out = b
+    if out.len < 65536 {
+        out.data[out.len as usize] = byte as i8
+        out.len = out.len + 1
+    }
+    out
+}
+
+// Unsigned LEB128 (for small values ≤ 127, one byte)
+fn buf_push_uleb(b: Buf, val: i64) -> Buf with Mut, Panic, Div {
+    var out = b
+    var v = val
+    while v > 127 {
+        out = buf_push(out, (v & 127) | 128)
+        v = v / 128
+    }
+    out = buf_push(out, v & 127)
+    out
+}
+
+// Signed LEB128 for i64 constants
+fn buf_push_sleb(b: Buf, val: i64) -> Buf with Mut, Panic, Div {
+    var out = b
+    var v = val
+    var more: bool = true
+    while more {
+        let byte = v & 127
+        v = v / 128
+        // Arithmetic: if remaining is 0 and sign bit of byte is 0,
+        // OR remaining is -1 and sign bit of byte is set → done.
+        let sign_bit = (byte >> 6) & 1
+        if (v == 0 && sign_bit == 0) || (v == 0 - 1 && sign_bit == 1) {
+            more = false
+            out = buf_push(out, byte)
+        } else {
+            out = buf_push(out, byte | 128)
+        }
+    }
+    out
+}
+
+// Append a string literal (ASCII bytes only)
+fn buf_push_name(b: Buf, name: [i8; 32], name_len: i64) -> Buf with Mut, Panic, Div {
+    var out = b
+    out = buf_push_uleb(out, name_len)
+    var i: i64 = 0
+    while i < name_len {
+        out = buf_push(out, name[i as usize] as i64)
+        i = i + 1
+    }
+    out
+}
+
+// Emit a WASM section: section_id + payload length (LEB128) + payload bytes
+fn buf_emit_section(outer: Buf, section_id: i64, payload: Buf) -> Buf with Mut, Panic, Div {
+    var out = outer
+    out = buf_push_uleb(out, section_id)
+    out = buf_push_uleb(out, payload.len)
+    var i: i64 = 0
+    while i < payload.len {
+        out = buf_push(out, payload.data[i as usize] as i64)
+        i = i + 1
+    }
+    out
+}
+
+// ── Function type table ────────────────────────────────────────────────────
+// Holds up to 8 function type signatures.
+struct FuncType {
+    param_types: [i64; 8],
+    param_count: i64,
+    result_type: i64,   // WASM_I64, WASM_F64, or -1 for void
+}
+
+struct TypeTable {
+    types: [FuncType; 8],
+    count: i64,
+}
+
+fn type_table_new() -> TypeTable {
+    TypeTable {
+        types: [FuncType { param_types: [0; 8], param_count: 0, result_type: 0 - 1 }; 8],
+        count: 0,
+    }
+}
+
+fn type_table_add(tt: TypeTable, ft: FuncType) -> TypeTable with Mut, Panic {
+    var out = tt
+    if out.count < 8 {
+        out.types[out.count as usize] = ft
+        out.count = out.count + 1
+    }
+    out
+}
+
+fn make_func_type_2i64_i64() -> FuncType {
+    var ft = FuncType { param_types: [0; 8], param_count: 2, result_type: 126 }
+    ft.param_types[0 as usize] = 126
+    ft.param_types[1 as usize] = 126
+    ft
+}
+
+fn make_func_type_1i64_i64() -> FuncType {
+    var ft = FuncType { param_types: [0; 8], param_count: 1, result_type: 126 }
+    ft.param_types[0 as usize] = 126
+    ft
+}
+
+fn make_func_type_void_i64() -> FuncType {
+    FuncType { param_types: [0; 8], param_count: 0, result_type: 126 }
+}
+
+// ── Emit type section ──────────────────────────────────────────────────────
+fn emit_type_section(tt: TypeTable) -> Buf with Mut, Panic, Div {
+    var payload = buf_new()
+    payload = buf_push_uleb(payload, tt.count)
+    var i: i64 = 0
+    while i < tt.count {
+        let ft = tt.types[i as usize]
+        payload = buf_push(payload, 96)  // 0x60 functype
+        payload = buf_push_uleb(payload, ft.param_count)
+        var p: i64 = 0
+        while p < ft.param_count {
+            payload = buf_push(payload, ft.param_types[p as usize])
+            p = p + 1
+        }
+        if ft.result_type >= 0 {
+            payload = buf_push(payload, 1)
+            payload = buf_push(payload, ft.result_type)
+        } else {
+            payload = buf_push(payload, 0)
+        }
+        i = i + 1
+    }
+    payload
+}
+
+// ── Emit function section ──────────────────────────────────────────────────
+fn emit_func_section(type_indices: [i64; 8], fn_count: i64) -> Buf with Mut, Panic, Div {
+    var payload = buf_new()
+    payload = buf_push_uleb(payload, fn_count)
+    var i: i64 = 0
+    while i < fn_count {
+        payload = buf_push_uleb(payload, type_indices[i as usize])
+        i = i + 1
+    }
+    payload
+}
+
+// ── Emit export section ────────────────────────────────────────────────────
+struct Export {
+    name: [i8; 32],
+    name_len: i64,
+    func_idx: i64,
+}
+
+struct ExportTable {
+    exports: [Export; 8],
+    count: i64,
+}
+
+fn export_table_new() -> ExportTable {
+    ExportTable {
+        exports: [Export { name: [0; 32], name_len: 0, func_idx: 0 }; 8],
+        count: 0,
+    }
+}
+
+fn export_table_add(et: ExportTable, name: [i8; 32], name_len: i64, func_idx: i64) -> ExportTable with Mut, Panic {
+    var out = et
+    if out.count < 8 {
+        out.exports[out.count as usize] = Export { name: name, name_len: name_len, func_idx: func_idx }
+        out.count = out.count + 1
+    }
+    out
+}
+
+fn emit_export_section(et: ExportTable) -> Buf with Mut, Panic, Div {
+    var payload = buf_new()
+    payload = buf_push_uleb(payload, et.count)
+    var i: i64 = 0
+    while i < et.count {
+        let exp = et.exports[i as usize]
+        payload = buf_push_name(payload, exp.name, exp.name_len)
+        payload = buf_push(payload, 0)  // kind: func
+        payload = buf_push_uleb(payload, exp.func_idx)
+        i = i + 1
+    }
+    payload
+}
+
+// ── Code body builder ──────────────────────────────────────────────────────
+// Builds a function body: local declarations + instructions.
+struct Body {
+    code: [i8; 4096],
+    code_len: i64,
+    // Additional locals beyond params (grouped by type for compactness)
+    n_extra_i64: i64,
+}
+
+fn body_new() -> Body {
+    Body { code: [0; 4096], code_len: 0, n_extra_i64: 0 }
+}
+
+fn body_emit(bd: Body, byte: i64) -> Body with Mut, Panic, Div {
+    var out = bd
+    if out.code_len < 4096 {
+        out.code[out.code_len as usize] = byte as i8
+        out.code_len = out.code_len + 1
+    }
+    out
+}
+
+fn body_emit_uleb(bd: Body, val: i64) -> Body with Mut, Panic, Div {
+    var out = bd
+    var v = val
+    while v > 127 {
+        out = body_emit(out, (v & 127) | 128)
+        v = v / 128
+    }
+    out = body_emit(out, v & 127)
+    out
+}
+
+fn body_emit_sleb(bd: Body, val: i64) -> Body with Mut, Panic, Div {
+    var out = bd
+    var v = val
+    var more: bool = true
+    while more {
+        let byte = v & 127
+        v = v / 128
+        let sign_bit = (byte >> 6) & 1
+        if (v == 0 && sign_bit == 0) || (v == 0 - 1 && sign_bit == 1) {
+            more = false
+            out = body_emit(out, byte)
+        } else {
+            out = body_emit(out, byte | 128)
+        }
+    }
+    out
+}
+
+fn body_local_get(bd: Body, idx: i64) -> Body with Mut, Panic, Div {
+    var out = body_emit(bd, OP_LOCAL_GET)
+    out = body_emit_uleb(out, idx)
+    out
+}
+
+fn body_local_set(bd: Body, idx: i64) -> Body with Mut, Panic, Div {
+    var out = body_emit(bd, OP_LOCAL_SET)
+    out = body_emit_uleb(out, idx)
+    out
+}
+
+fn body_i64_const(bd: Body, val: i64) -> Body with Mut, Panic, Div {
+    var out = body_emit(bd, OP_I64_CONST)
+    out = body_emit_sleb(out, val)
+    out
+}
+
+fn body_call(bd: Body, func_idx: i64) -> Body with Mut, Panic, Div {
+    var out = body_emit(bd, OP_CALL)
+    out = body_emit_uleb(out, func_idx)
+    out
+}
+
+fn body_br(bd: Body, depth: i64) -> Body with Mut, Panic, Div {
+    var out = body_emit(bd, OP_BR)
+    out = body_emit_uleb(out, depth)
+    out
+}
+
+fn body_br_if(bd: Body, depth: i64) -> Body with Mut, Panic, Div {
+    var out = body_emit(bd, OP_BR_IF)
+    out = body_emit_uleb(out, depth)
+    out
+}
+
+// Serialize body to a Buf (with size prefix for code section entry)
+fn body_to_buf(bd: Body) -> Buf with Mut, Panic, Div {
+    // Local declarations: if n_extra_i64 > 0, emit 1 group
+    var locals = buf_new()
+    if bd.n_extra_i64 > 0 {
+        locals = buf_push_uleb(locals, 1)          // 1 group
+        locals = buf_push_uleb(locals, bd.n_extra_i64)  // count
+        locals = buf_push(locals, 126)             // i64
+    } else {
+        locals = buf_push_uleb(locals, 0)          // 0 groups
+    }
+    // Body size = locals + code + end byte
+    let body_size = locals.len + bd.code_len + 1
+    var out = buf_new()
+    out = buf_push_uleb(out, body_size)
+    var i: i64 = 0
+    while i < locals.len {
+        out = buf_push(out, locals.data[i as usize] as i64)
+        i = i + 1
+    }
+    i = 0
+    while i < bd.code_len {
+        out = buf_push(out, bd.code[i as usize] as i64)
+        i = i + 1
+    }
+    out = buf_push(out, OP_END)  // function end
+    out
+}
+
+// ── Emit code section ──────────────────────────────────────────────────────
+fn emit_code_section(bodies: [Buf; 8], body_count: i64) -> Buf with Mut, Panic, Div {
+    var payload = buf_new()
+    payload = buf_push_uleb(payload, body_count)
+    var i: i64 = 0
+    while i < body_count {
+        let body_buf = bodies[i as usize]
+        var j: i64 = 0
+        while j < body_buf.len {
+            payload = buf_push(payload, body_buf.data[j as usize] as i64)
+            j = j + 1
+        }
+        i = i + 1
+    }
+    payload
+}
+
+// ── Emit memory section ────────────────────────────────────────────────────
+fn emit_memory_section(min_pages: i64) -> Buf with Mut, Panic, Div {
+    var payload = buf_new()
+    payload = buf_push_uleb(payload, 1)          // 1 memory
+    payload = buf_push_uleb(payload, 0)          // no max
+    payload = buf_push_uleb(payload, min_pages)
+    payload
+}
+
+// ── Name helpers ──────────────────────────────────────────────────────────
+fn name_add() -> [i8; 32] {
+    var n: [i8; 32] = [0; 32]
+    n[0 as usize] = 97 as i8   // a
+    n[1 as usize] = 100 as i8  // d
+    n[2 as usize] = 100 as i8  // d
+    n
+}
+
+fn name_fib() -> [i8; 32] {
+    var n: [i8; 32] = [0; 32]
+    n[0 as usize] = 102 as i8  // f
+    n[1 as usize] = 105 as i8  // i
+    n[2 as usize] = 98 as i8   // b
+    n
+}
+
+fn name_main() -> [i8; 32] {
+    var n: [i8; 32] = [0; 32]
+    n[0 as usize] = 109 as i8  // m
+    n[1 as usize] = 97 as i8   // a
+    n[2 as usize] = 105 as i8  // i
+    n[3 as usize] = 110 as i8  // n
+    n
+}
+
+fn name_memory() -> [i8; 32] {
+    var n: [i8; 32] = [0; 32]
+    n[0 as usize] = 109 as i8  // m
+    n[1 as usize] = 101 as i8  // e
+    n[2 as usize] = 109 as i8  // m
+    n[3 as usize] = 111 as i8  // o
+    n[4 as usize] = 114 as i8  // r
+    n[5 as usize] = 121 as i8  // y
+    n
+}
+
+// ── Build: fn add(a: i64, b: i64) -> i64 { a + b } ───────────────────────
+// Locals: param0=local0 (a), param1=local1 (b). No extra locals.
+fn build_add_body() -> Buf with Mut, Panic, Div {
+    var bd = body_new()
+    bd = body_local_get(bd, 0)     // push a
+    bd = body_local_get(bd, 1)     // push b
+    bd = body_emit(bd, OP_I64_ADD) // i64.add
+    body_to_buf(bd)
+}
+
+// ── Build: fn fib(n: i64) -> i64 (iterative) ─────────────────────────────
+// locals: param n=local0, a=local1, b=local2, i=local3, t=local4
+// Algorithm:
+//   a = 0; b = 1; i = 0
+//   loop: if i >= n → break; t = a + b; a = b; b = t; i++
+//   return a
+// WASM structured control flow:
+//   block {         // outer: break target (depth 0 from inside loop)
+//     loop {        // inner: continue target (depth 0 from inside loop = depth 1 from block)
+//       local.get i; local.get n; i64.ge_s → br_if 1 (exit outer block)
+//       local.get a; local.get b; i64.add → local.set t
+//       local.get b → local.set a
+//       local.get t → local.set b
+//       local.get i; i64.const 1; i64.add → local.set i
+//       br 0        (continue loop)
+//     }             // end loop
+//   }               // end block
+//   local.get a
+fn build_fib_body() -> Buf with Mut, Panic, Div {
+    var bd = body_new()
+    bd.n_extra_i64 = 4   // a(local1), b(local2), i(local3), t(local4)
+
+    // a = 0
+    bd = body_i64_const(bd, 0)
+    bd = body_local_set(bd, 1)
+    // b = 1
+    bd = body_i64_const(bd, 1)
+    bd = body_local_set(bd, 2)
+    // i = 0
+    bd = body_i64_const(bd, 0)
+    bd = body_local_set(bd, 3)
+
+    // block (void) → break target at label depth 1 inside loop
+    bd = body_emit(bd, OP_BLOCK)
+    bd = body_emit(bd, 64)   // 0x40 = void blocktype
+
+    // loop (void) → continue target at label depth 0 inside loop
+    bd = body_emit(bd, OP_LOOP)
+    bd = body_emit(bd, 64)   // 0x40 = void blocktype
+
+    // if i >= n → exit (br 1 exits the outer block)
+    bd = body_local_get(bd, 3)   // i
+    bd = body_local_get(bd, 0)   // n
+    bd = body_emit(bd, OP_I64_GE_S)
+    bd = body_br_if(bd, 1)       // br_if 1 → exit block
+
+    // t = a + b
+    bd = body_local_get(bd, 1)   // a
+    bd = body_local_get(bd, 2)   // b
+    bd = body_emit(bd, OP_I64_ADD)
+    bd = body_local_set(bd, 4)   // t
+
+    // a = b
+    bd = body_local_get(bd, 2)
+    bd = body_local_set(bd, 1)
+
+    // b = t
+    bd = body_local_get(bd, 4)
+    bd = body_local_set(bd, 2)
+
+    // i = i + 1
+    bd = body_local_get(bd, 3)
+    bd = body_i64_const(bd, 1)
+    bd = body_emit(bd, OP_I64_ADD)
+    bd = body_local_set(bd, 3)
+
+    // br 0 → continue loop
+    bd = body_br(bd, 0)
+
+    bd = body_emit(bd, OP_END)   // end loop
+    bd = body_emit(bd, OP_END)   // end block
+
+    // return a
+    bd = body_local_get(bd, 1)
+
+    body_to_buf(bd)
+}
+
+// ── Build: fn main() -> i64 { fib(10) } ──────────────────────────────────
+// locals: result=local0  (no params)
+// fib is function index 1
+fn build_main_body() -> Buf with Mut, Panic, Div {
+    var bd = body_new()
+    bd.n_extra_i64 = 1   // result=local0
+
+    bd = body_i64_const(bd, 10)
+    bd = body_call(bd, 1)        // call fib (func index 1)
+    bd = body_local_set(bd, 0)
+    bd = body_local_get(bd, 0)
+
+    body_to_buf(bd)
+}
+
+// ── Assemble the full WASM module ─────────────────────────────────────────
+fn build_module() -> Buf with Mut, Panic, Div {
+    var out = buf_new()
+
+    // Magic + version
+    out = buf_push(out, 0)    // \0
+    out = buf_push(out, 97)   // a
+    out = buf_push(out, 115)  // s
+    out = buf_push(out, 109)  // m
+    out = buf_push(out, 1)    // version 1
+    out = buf_push(out, 0)
+    out = buf_push(out, 0)
+    out = buf_push(out, 0)
+
+    // Type section: 3 types
+    //   type 0: (i64 i64) → i64   for add
+    //   type 1: (i64)     → i64   for fib
+    //   type 2: ()        → i64   for main
+    var tt = type_table_new()
+    tt = type_table_add(tt, make_func_type_2i64_i64())
+    tt = type_table_add(tt, make_func_type_1i64_i64())
+    tt = type_table_add(tt, make_func_type_void_i64())
+    out = buf_emit_section(out, 1, emit_type_section(tt))
+
+    // Function section: func 0 → type 0 (add), func 1 → type 1 (fib), func 2 → type 2 (main)
+    var type_indices: [i64; 8] = [0; 8]
+    type_indices[0 as usize] = 0
+    type_indices[1 as usize] = 1
+    type_indices[2 as usize] = 2
+    out = buf_emit_section(out, 3, emit_func_section(type_indices, 3))
+
+    // Memory section: 1 page (64KB)
+    out = buf_emit_section(out, 5, emit_memory_section(1))
+
+    // Export section: "add"→0, "fib"→1, "main"→2, "memory"→memory 0
+    var et = export_table_new()
+    et = export_table_add(et, name_add(),    3, 0)
+    et = export_table_add(et, name_fib(),    3, 1)
+    et = export_table_add(et, name_main(),   4, 2)
+    // memory export uses kind=2
+    var mem_et_payload = buf_new()
+    mem_et_payload = buf_push_uleb(mem_et_payload, et.count + 1)  // +1 for memory
+    // emit the func exports manually
+    var ei: i64 = 0
+    while ei < et.count {
+        let exp = et.exports[ei as usize]
+        mem_et_payload = buf_push_name(mem_et_payload, exp.name, exp.name_len)
+        mem_et_payload = buf_push(mem_et_payload, 0)   // kind: func
+        mem_et_payload = buf_push_uleb(mem_et_payload, exp.func_idx)
+        ei = ei + 1
+    }
+    // memory export
+    mem_et_payload = buf_push_name(mem_et_payload, name_memory(), 6)
+    mem_et_payload = buf_push(mem_et_payload, 2)   // kind: memory
+    mem_et_payload = buf_push_uleb(mem_et_payload, 0)  // memory index 0
+    out = buf_emit_section(out, 7, mem_et_payload)
+
+    // Code section: 3 bodies
+    var bodies: [Buf; 8] = [buf_new(); 8]
+    bodies[0 as usize] = build_add_body()
+    bodies[1 as usize] = build_fib_body()
+    bodies[2 as usize] = build_main_body()
+    out = buf_emit_section(out, 10, emit_code_section(bodies, 3))
+
+    out
+}
+
+// ── main: emit the WASM binary ────────────────────────────────────────────
+// Usage (file mode):  souc run driver.sio <output.wasm>
+// Usage (pipe mode):  souc run driver.sio | head -c -2 > out.wasm
+fn main() -> i64 with IO, Mut, Panic, Div {
+    let wasm = build_module()
+    let argc = arg_count()
+    if argc > 0 {
+        // File mode: write directly to the path given as arg 0
+        let out_path = get_arg(0)
+        var stage: [i8; 4194304] = [0; 4194304]
+        var ci: i64 = 0
+        while ci < wasm.len {
+            stage[ci as usize] = wasm.data[ci as usize] as i8
+            ci = ci + 1
+        }
+        let rc = write_file(out_path, stage, wasm.len)
+        if rc == 0 {
+            println("wasm: wrote ")
+            println(out_path)
+        } else {
+            println("wasm: write_file failed")
+        }
+        rc
+    } else {
+        // Pipe mode: emit raw bytes via print_char (strip trailing \n via head -c -2)
+        var i: i64 = 0
+        while i < wasm.len {
+            print_char(wasm.data[i as usize] as i64)
+            i = i + 1
+        }
+        0
+    }
+}

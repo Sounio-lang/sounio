@@ -81,19 +81,21 @@ export function ScrollStorySection() {
               className="text-xs md:text-sm font-mono text-emerald-400/90 leading-relaxed"
               style={{ clipPath: codeClipPath }}
             >
-{`import Mathlib.Data.Real.Basic
+{`// Effect-annotated epistemic pipeline
+fn analyze(dose: Knowledge<mg>) -> Validated<mg>
+    with IO, Mut {
+  let v: Validated<mg> = validate(
+    dose, threshold: 0.95
+  )
+  v
+}
 
-theorem uncertainty_bounds (x : ℝ) :
-  let confidence := compute_interval x
-  confidence.lower > 0.95 := by
-  -- Z3 Prover Output Extraction
-  exact rigorous_bound.apply rfl
-  
-// Machine Codegen Phase
-0x1000: mov rax, 0x1
-0x1008: mov rcx, [rsp+0x8]
-0x1010: mul rcx, 0x3F800000
-0x1018: ret`}
+// → self-hosted native ELF (x86-64 SSE2)
+0x1000: push   rbp
+0x1001: mov    rbp, rsp
+0x1004: movsd  xmm0, [rip+0x200]
+0x100b: pop    rbp
+0x100c: ret`}
             </motion.pre>
           </div>
         </motion.div>

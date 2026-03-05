@@ -5,18 +5,18 @@ const STAGES = [
     id: 1,
     title: 'Source Code (.sio)',
     code: `// Patient dosing administration
-let dose: Knowledge[f64] = input_dose
-let volume: Knowledge[f64] = patient_volume
+let dose: Knowledge<f64> = input_dose
+let volume: Knowledge<f64> = patient_volume
 
-let conc: Knowledge[f64] = dose / volume`
+let conc: Knowledge<f64> = dose / volume`
   },
   {
     id: 2,
     title: 'Epistemic Type & Effect Checking',
     code: `[Type Check Passed]
-- 'dose' inferred as Knowledge[f64] with valid provenance
-- 'volume' inferred as Knowledge[f64]
-- 'conc' resolved as Knowledge[f64]
+- 'dose' inferred as Knowledge<f64> with valid provenance
+- 'volume' inferred as Knowledge<f64>
+- 'conc' resolved as Knowledge<f64>
 
 [Effect Analysis]
 - Requires 'Read<PatientData>' effect

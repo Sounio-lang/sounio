@@ -242,7 +242,7 @@ export default function PlaygroundEditor({ initialCode, theme = 'dark' }: Playgr
       </div>
 
       <div className="flex items-center justify-between px-4 py-2 bg-[var(--color-navy-900)] text-white/60 text-xs font-mono border-t border-white/10">
-        <span>Sounio v0.100.0</span>
+        <span>Sounio v1.0.0-beta.5</span>
         <span>{wasmApi?.version ? wasmApi.version() : 'WASM'}</span>
       </div>
     </div>

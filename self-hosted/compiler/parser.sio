@@ -100,6 +100,8 @@ enum TypeKind {
     Function,
     Generic,
     Unit,
+    Ref,
+    RefMut,
 }
 
 // ============================================================================
@@ -279,6 +281,23 @@ fn type_named(name: string) -> Type {
         args_len: 0,
     }
 }
+fn type_ref_shared(inner_name: string) -> Type {
+    Type {
+        kind: TypeKind::Ref,
+        name: inner_name,
+        args: [0; 16],
+        args_len: 0,
+    }
+}
+
+fn type_ref_excl(inner_name: string) -> Type {
+    Type {
+        kind: TypeKind::RefMut,
+        name: inner_name,
+        args: [0; 16],
+        args_len: 0,
+    }
+}
 
 fn expr_new(kind: ExprKind, value: string, span: Span) -> Expr {
     Expr {
@@ -399,7 +418,7 @@ fn infix_precedence(kind: TokenKind) -> i64 {
         TokenKind::Star => 60,
         TokenKind::Slash => 60,
         TokenKind::Percent => 60,
-        _ => 0,
+        _ => -1,
     }
 }
 
@@ -438,8 +457,21 @@ fn parse_primary(p: Parser) -> (Parser, Expr) with Mut, Panic, Div {
 
         TokenKind::Ident => {
             let (new_p, t) = advance(p)
-            let e = expr_new(ExprKind::VarRef, t.text, span_new(t.line, t.column))
-            return parse_postfix(new_p, e)
+            var path = t.text
+            var current_p = new_p
+            // Consume :: path segments: Foo::Bar::Baz
+            while match_token_ref(&current_p, TokenKind::ColonColon) {
+                let (after_cc, _) = advance(current_p)
+                if match_token_ref(&after_cc, TokenKind::Ident) {
+                    let (after_seg, seg) = advance(after_cc)
+                    path = path + "::" + seg.text
+                    current_p = after_seg
+                } else {
+                    break
+                }
+            }
+            let e = expr_new(ExprKind::VarRef, path, span_new(t.line, t.column))
+            return parse_postfix(current_p, e)
         }
 
         TokenKind::LParen => {
@@ -1019,6 +1051,18 @@ fn parse_type(p: Parser) -> (Parser, Type) with Mut, Panic, Div {
 
             return (new_p3, arr_type)
         }
+        TokenKind::Amp => {
+            // Shared reference: &T
+            let (new_p, _) = advance(p)
+            let (new_p2, inner) = parse_type(new_p)
+            return (new_p2, type_ref_shared(inner.name))
+        }
+        TokenKind::AmpBang => {
+            // Exclusive reference: &!T
+            let (new_p, _) = advance(p)
+            let (new_p2, inner) = parse_type(new_p)
+            return (new_p2, type_ref_excl(inner.name))
+        }
         _ => {
             let (new_p, _) = advance(p)
             return (new_p, type_unit())
@@ -1199,12 +1243,13 @@ fn parse_use(p: Parser) -> (Parser, Expr) with Mut, Panic, Div {
         path = path + path_tok.text
         current_p = new_p2
 
-        if match_token_ref(&current_p, TokenKind::Colon) &&
-           parser_peek_next_char(&current_p) == 58 {
+        if match_token_ref(&current_p, TokenKind::ColonColon) {
             path = path + "::"
             let (new_p3, _) = advance(current_p)
-            let (new_p4, _) = advance(new_p3)
-            current_p = new_p4
+            current_p = new_p3
+        } else if match_token_ref(&current_p, TokenKind::LBrace) {
+            // use mod::{a, b} — stop here, let caller parse braces
+            break
         } else {
             break
         }

@@ -14,7 +14,7 @@ export function LogicConflictTracePanel() {
     {
       line: 118,
       file: 'stdlib/medical/measurement.sio',
-      code: `fn measure_drug_response() -> Knowledge[f64] { ... }`,
+      code: `fn measure_drug_response() -> Knowledge<f64> { ... }`,
       note: 'Returns: confidence = 0.92 (due to historical variance)',
       isSource: false
     }
