@@ -1067,13 +1067,117 @@ fn wasm_lower_export_from_name(name: Name, func_idx: i64) -> WasmExport with Mut
 }
 
 // ============================================================================
+// Builtin function detection
+//
+// Builtin functions are those with instr_count == 0 whose name matches one of
+// the known host-provided functions (print, print_int, str_len, etc.).
+// They are emitted as WASM imports (module="env") rather than local functions.
+// ============================================================================
+
+// Check if a Name is the builtin "print" (5 bytes: p-r-i-n-t)
+fn wasm_lower_name_is_print(name: Name) -> bool with Mut, Panic {
+    name.len == 5
+        && (name.buf[0 as usize] as i64) == 112  // p
+        && (name.buf[1 as usize] as i64) == 114  // r
+        && (name.buf[2 as usize] as i64) == 105  // i
+        && (name.buf[3 as usize] as i64) == 110  // n
+        && (name.buf[4 as usize] as i64) == 116  // t
+}
+
+// Check if a Name begins with "print_" (the prefix shared by print_int, print_char)
+fn wasm_lower_name_starts_print_under(name: Name) -> bool with Mut, Panic {
+    name.len >= 6
+        && (name.buf[0 as usize] as i64) == 112  // p
+        && (name.buf[1 as usize] as i64) == 114  // r
+        && (name.buf[2 as usize] as i64) == 105  // i
+        && (name.buf[3 as usize] as i64) == 110  // n
+        && (name.buf[4 as usize] as i64) == 116  // t
+        && (name.buf[5 as usize] as i64) == 95   // _
+}
+
+// Check if a Name begins with "str_" (str_len, str_eq, str_char_at, etc.)
+fn wasm_lower_name_starts_str_under(name: Name) -> bool with Mut, Panic {
+    name.len >= 4
+        && (name.buf[0 as usize] as i64) == 115  // s
+        && (name.buf[1 as usize] as i64) == 116  // t
+        && (name.buf[2 as usize] as i64) == 114  // r
+        && (name.buf[3 as usize] as i64) == 95   // _
+}
+
+// Check if a Name begins with "get_arg" (get_arg, get_arg_count)
+fn wasm_lower_name_starts_get_arg(name: Name) -> bool with Mut, Panic {
+    name.len >= 7
+        && (name.buf[0 as usize] as i64) == 103  // g
+        && (name.buf[1 as usize] as i64) == 101  // e
+        && (name.buf[2 as usize] as i64) == 116  // t
+        && (name.buf[3 as usize] as i64) == 95   // _
+        && (name.buf[4 as usize] as i64) == 97   // a
+        && (name.buf[5 as usize] as i64) == 114  // r
+        && (name.buf[6 as usize] as i64) == 103  // g
+}
+
+// Returns true if the function name is a known host builtin.
+fn wasm_lower_is_builtin_name(name: Name) -> bool with Mut, Panic {
+    if wasm_lower_name_is_print(name) { return true }
+    if wasm_lower_name_starts_print_under(name) { return true }
+    if wasm_lower_name_starts_str_under(name) { return true }
+    if wasm_lower_name_starts_get_arg(name) { return true }
+    false
+}
+
+// Returns true if this IR function is a host builtin (no body, known builtin name).
+fn wasm_lower_is_builtin(func: IrFunction) -> bool with Mut, Panic {
+    func.instr_count == 0 && wasm_lower_is_builtin_name(func.name)
+}
+
+// Returns the WASM param count for a known builtin.
+// print / print_int / print_char → 1 param (the string/value as i64)
+// str_len → 1 param (string pointer)
+// All others → 2 params (two i64 args)
+fn wasm_lower_builtin_param_count(name: Name) -> i64 {
+    if wasm_lower_name_is_print(name) { return 1 }        // print
+    if wasm_lower_name_starts_print_under(name) { return 1 }  // print_int, print_char
+    if name.len == 7 { return 1 }                          // str_len (len=7: s-t-r-_-l-e-n)
+    2  // str_eq, str_char_at, str_concat, str_slice, get_arg, etc.
+}
+
+// Returns true if the builtin returns i64 (false → void return).
+// print / print_int / print_char return void; str_* and get_* return i64.
+fn wasm_lower_builtin_returns_i64(name: Name) -> bool {
+    if wasm_lower_name_is_print(name) { return false }
+    if wasm_lower_name_starts_print_under(name) { return false }
+    true
+}
+
+// Build a WasmImport for a builtin function.
+// module = "env" (101 110 118), name = func.name bytes.
+fn wasm_lower_make_builtin_import(func_name: Name, type_idx: i64) -> WasmImport with Mut, Panic {
+    var imp = wasm_import_new()
+    // module = "env"
+    imp.module_buf[0 as usize] = 101 as i8  // e
+    imp.module_buf[1 as usize] = 110 as i8  // n
+    imp.module_buf[2 as usize] = 118 as i8  // v
+    imp.module_len = 3
+    // function name
+    var i: i64 = 0
+    while i < func_name.len && i < 32 {
+        imp.name_buf[i as usize] = func_name.buf[i as usize]
+        i = i + 1
+    }
+    imp.name_len = func_name.len
+    imp.type_index = type_idx
+    imp
+}
+
+// ============================================================================
 // Module lowering
 //
 // Translates an entire IrModule into WASM sections:
-//   - Type section:     one type per function (all i64 params -> i64 result)
-//   - Function section: maps each function to its type
-//   - Code section:     lowered function bodies
-//   - Export section:   exports all functions by name + "memory"
+//   - Type section:     types for all functions (imports + locals)
+//   - Import section:   host builtins (print, print_int, str_*, ...)
+//   - Function section: local functions only (indices offset by import count)
+//   - Code section:     lowered bodies for local functions only
+//   - Export section:   local functions by IR name + "memory"
 //   - Memory section:   1 page minimum for heap
 // ============================================================================
 
@@ -1094,53 +1198,113 @@ fn wasm_lower_result_new() -> WasmLowerResult {
 fn wasm_lower_module(module: IrModule) -> WasmLowerResult with Mut, Panic, Div {
     var ctx = wasm_lower_ctx_new()
     var types = wasm_type_section_new()
+    var imports = wasm_import_section_new()
     var funcs = wasm_func_section_new()
     var code = wasm_code_section_new()
     var exports = wasm_export_section_new()
 
-    // Register all functions first so calls can resolve
+    // ── Pass 0: count imports so we can compute WASM function index offsets ──
+    var n_imports: i64 = 0
+    var si: i64 = 0
+    while si < module.fn_count && si < WASM_LOWER_MAX_FUNCS {
+        if wasm_lower_is_builtin(module.functions[si as usize]) {
+            n_imports = n_imports + 1
+        }
+        si = si + 1
+    }
+
+    // ── Pass 1: register all IR function IDs → WASM function indices ─────────
+    // Builtins get indices 0..n_imports-1 (they are imported).
+    // Local functions get indices n_imports..n_imports+n_local-1.
+    var import_idx: i64 = 0
+    var local_idx: i64 = n_imports
     var fi: i64 = 0
     while fi < module.fn_count && fi < WASM_LOWER_MAX_FUNCS {
-        ctx = wasm_lower_register_func(ctx, fi, fi)
+        let func = module.functions[fi as usize]
+        if wasm_lower_is_builtin(func) {
+            ctx = wasm_lower_register_func(ctx, fi, import_idx)
+            import_idx = import_idx + 1
+        } else {
+            ctx = wasm_lower_register_func(ctx, fi, local_idx)
+            local_idx = local_idx + 1
+        }
         fi = fi + 1
     }
 
-    // Lower each function
-    var i: i64 = 0
-    while i < module.fn_count && i < WASM_LOWER_MAX_FUNCS {
-        let func = module.functions[i as usize]
+    // ── Pass 2: build type section + import/function sections ─────────────────
+    // All functions (builtins and locals) get a type entry.
+    // The type_index for each function is its position in the type section.
+    // Builtins' type entries come first (in IR order), then locals.
+    // We track type indices in a temporary array.
+    var type_indices: [i64; 256] = [0; 256]
+    var type_idx: i64 = 0
 
-        // Build the function type: all params are i64; result is i64, f64, or void.
+    fi = 0
+    while fi < module.fn_count && fi < WASM_LOWER_MAX_FUNCS {
+        let func = module.functions[fi as usize]
         var ft = wasm_func_type_new()
-        var p: i64 = 0
-        while p < func.param_count {
-            ft = wasm_func_type_add_param(ft, WASM_TYPE_I64)
-            p = p + 1
-        }
-        let ret_type = wasm_lower_return_type(func)
-        if ret_type >= 0 {
-            ft = wasm_func_type_add_result(ft, ret_type)
+
+        if wasm_lower_is_builtin(func) {
+            // Builtin: use hardcoded param count and return type.
+            let n_params = wasm_lower_builtin_param_count(func.name)
+            var p: i64 = 0
+            while p < n_params {
+                ft = wasm_func_type_add_param(ft, WASM_TYPE_I64)
+                p = p + 1
+            }
+            if wasm_lower_builtin_returns_i64(func.name) {
+                ft = wasm_func_type_add_result(ft, WASM_TYPE_I64)
+            }
+        } else {
+            // Local function: use param_count from IR; infer return type.
+            var p: i64 = 0
+            while p < func.param_count {
+                ft = wasm_func_type_add_param(ft, WASM_TYPE_I64)
+                p = p + 1
+            }
+            let ret_type = wasm_lower_return_type(func)
+            if ret_type >= 0 {
+                ft = wasm_func_type_add_result(ft, ret_type)
+            }
         }
 
+        if fi < 256 { type_indices[fi as usize] = type_idx }
         types = wasm_type_section_add(types, ft)
-        funcs = wasm_func_section_add(funcs, i)
+        type_idx = type_idx + 1
+        fi = fi + 1
+    }
 
-        // Export each function by its IR name
-        let exp = wasm_lower_export_from_name(func.name, i)
-        exports = wasm_export_section_add(exports, exp)
+    // ── Pass 3: populate import section, function section, code section ───────
+    fi = 0
+    while fi < module.fn_count && fi < WASM_LOWER_MAX_FUNCS {
+        let func = module.functions[fi as usize]
+        let tidx = if fi < 256 { type_indices[fi as usize] } else { 0 }
+        let wasm_idx = wasm_lower_get_func(ctx, fi)
 
-        // Lower the function body
-        ctx = wasm_lower_function(ctx, func)
-        code = wasm_code_section_add(code, ctx.body)
+        if wasm_lower_is_builtin(func) {
+            // Emit WASM import entry for this builtin.
+            let imp = wasm_lower_make_builtin_import(func.name, tidx)
+            imports = wasm_import_section_add(imports, imp)
+        } else {
+            // Emit function section entry (type index for this local function).
+            funcs = wasm_func_section_add(funcs, tidx)
 
-        i = i + 1
+            // Export local function by its IR name.
+            let exp = wasm_lower_export_from_name(func.name, wasm_idx)
+            exports = wasm_export_section_add(exports, exp)
+
+            // Lower the function body.
+            ctx = wasm_lower_function(ctx, func)
+            code = wasm_code_section_add(code, ctx.body)
+        }
+        fi = fi + 1
     }
 
     // Also export the linear memory (conventional for WASM modules)
     exports = wasm_export_section_add(exports, wasm_export_memory("memory", 0))
 
     // Emit the full WASM module
-    let buf = wasm_emit_full_module(types, funcs, 1, 0, exports, code)
+    let buf = wasm_emit_full_module(types, imports, funcs, 1, 0, exports, code)
 
     WasmLowerResult {
         buf: buf,

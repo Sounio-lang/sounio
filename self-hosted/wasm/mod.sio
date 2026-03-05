@@ -352,6 +352,113 @@ fn wasm_export_section_add(es: WasmExportSection, exp: WasmExport) -> WasmExport
     out
 }
 
+// ============================================================================
+// Import section (ID = 2)
+//
+// Format:
+//   section_id(2) | payload_len(LEB128)
+//   count(LEB128)
+//   for each import:
+//     module_name_len(LEB128) | module_name_bytes...
+//     func_name_len(LEB128)   | func_name_bytes...
+//     kind(1 byte: 0x00=func)
+//     type_index(LEB128)
+// ============================================================================
+
+let WASM_IMPORT_KIND_FUNC: i64 = 0
+let WASM_IMPORT_MAX: i64 = 64
+
+struct WasmImport {
+    module_buf: [i8; 32],
+    module_len: i64,
+    name_buf:   [i8; 32],
+    name_len:   i64,
+    type_index: i64,
+}
+
+struct WasmImportSection {
+    imports: [WasmImport; 64],
+    count:   i64,
+}
+
+fn wasm_import_new() -> WasmImport {
+    WasmImport {
+        module_buf: [0; 32],
+        module_len: 0,
+        name_buf:   [0; 32],
+        name_len:   0,
+        type_index: 0,
+    }
+}
+
+fn wasm_import_section_new() -> WasmImportSection {
+    WasmImportSection {
+        imports: [WasmImport { module_buf: [0; 32], module_len: 0, name_buf: [0; 32], name_len: 0, type_index: 0 }; 64],
+        count: 0,
+    }
+}
+
+fn wasm_import_section_add(sec: WasmImportSection, imp: WasmImport) -> WasmImportSection with Mut, Panic {
+    var out = sec
+    if out.count < WASM_IMPORT_MAX {
+        out.imports[out.count as usize] = imp
+        out.count = out.count + 1
+    }
+    out
+}
+
+fn wasm_import_byte_size(imp: WasmImport) -> i64 with Mut, Panic, Div {
+    // module_len(LEB128) + module_bytes + name_len(LEB128) + name_bytes + kind(1) + type_idx(LEB128)
+    wasm_u32_leb128_len(imp.module_len) + imp.module_len
+        + wasm_u32_leb128_len(imp.name_len) + imp.name_len
+        + 1
+        + wasm_u32_leb128_len(imp.type_index)
+}
+
+fn wasm_import_section_payload_size(sec: WasmImportSection) -> i64 with Mut, Panic, Div {
+    var size = wasm_u32_leb128_len(sec.count)
+    var i: i64 = 0
+    while i < sec.count {
+        size = size + wasm_import_byte_size(sec.imports[i as usize])
+        i = i + 1
+    }
+    size
+}
+
+fn wasm_emit_import_section(buf: WasmBuf, sec: WasmImportSection) -> WasmBuf with Mut, Panic, Div {
+    var out = buf
+    if sec.count == 0 { return out }
+
+    let payload_size = wasm_import_section_payload_size(sec)
+    out = wasm_emit_section_header(out, WASM_SECTION_IMPORT, payload_size)
+    out = wasm_push_u32_leb128(out, sec.count)
+
+    var i: i64 = 0
+    while i < sec.count {
+        let imp = sec.imports[i as usize]
+        // module name length + bytes
+        out = wasm_push_u32_leb128(out, imp.module_len)
+        var m: i64 = 0
+        while m < imp.module_len {
+            out = wasm_push_byte(out, imp.module_buf[m as usize] as i64)
+            m = m + 1
+        }
+        // function name length + bytes
+        out = wasm_push_u32_leb128(out, imp.name_len)
+        var n: i64 = 0
+        while n < imp.name_len {
+            out = wasm_push_byte(out, imp.name_buf[n as usize] as i64)
+            n = n + 1
+        }
+        // kind = 0x00 (function)
+        out = wasm_push_byte(out, WASM_IMPORT_KIND_FUNC)
+        // type index
+        out = wasm_push_u32_leb128(out, imp.type_index)
+        i = i + 1
+    }
+    out
+}
+
 // Local variable declaration within a function body
 struct WasmLocal {
     count: i64,
@@ -731,6 +838,7 @@ fn wasm_emit_code_section(buf: WasmBuf, bodies: WasmCodeSection) -> WasmBuf with
 
 fn wasm_emit_full_module(
     types: WasmTypeSection,
+    imports: WasmImportSection,
     funcs: WasmFuncSection,
     min_pages: i64,
     max_pages: i64,
@@ -742,21 +850,24 @@ fn wasm_emit_full_module(
     // 1. Magic + version
     buf = wasm_emit_magic(buf)
 
-    // 2. Type section
+    // 2. Type section (types for both imports and local functions)
     buf = wasm_emit_type_section(buf, types)
 
-    // 3. Function section
+    // 3. Import section (before function section — WASM spec ordering)
+    buf = wasm_emit_import_section(buf, imports)
+
+    // 4. Function section (local functions only; indices offset by import count)
     buf = wasm_emit_function_section(buf, funcs)
 
-    // 4. Memory section (skip if min_pages == 0 and max_pages == 0)
+    // 5. Memory section (skip if min_pages == 0 and max_pages == 0)
     if min_pages > 0 || max_pages > 0 {
         buf = wasm_emit_memory_section(buf, min_pages, max_pages)
     }
 
-    // 5. Export section
+    // 6. Export section
     buf = wasm_emit_export_section(buf, exports)
 
-    // 6. Code section
+    // 7. Code section (local functions only)
     buf = wasm_emit_code_section(buf, code)
 
     buf
@@ -997,7 +1108,7 @@ fn test_wasm_full_module_header() -> bool with Mut, Panic, Div {
     var cs = wasm_code_section_new()
     cs = wasm_code_section_add(cs, body)
 
-    let module = wasm_emit_full_module(ts, fs, 1, 0, es, cs)
+    let module = wasm_emit_full_module(ts, wasm_import_section_new(), fs, 1, 0, es, cs)
 
     // Verify magic + version at start
     module.len > 8
