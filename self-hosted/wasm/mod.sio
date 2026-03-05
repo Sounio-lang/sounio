@@ -207,6 +207,27 @@ fn wasm_i32_leb128_len(val: i64) -> i64 with Mut, Panic, Div {
     count
 }
 
+fn wasm_i64_leb128_len(val: i64) -> i64 with Mut, Panic, Div {
+    // Signed LEB128 byte length for i64 (mirrors wasm_push_i64_leb128 counting logic)
+    var v = val
+    var count: i64 = 0
+    var done = false
+    while !done {
+        let low7 = v % 128
+        var byte_val = low7
+        if byte_val < 0 { byte_val = byte_val + 128 }
+        if v < 0 { v = (v - 127) / 128 } else { v = v / 128 }
+        let sign_bit = byte_val % 128
+        count = count + 1
+        if v == 0 && sign_bit < 64 {
+            done = true
+        } else if v == (0 - 1) && sign_bit >= 64 {
+            done = true
+        }
+    }
+    count
+}
+
 // ============================================================================
 // Section-level data structures
 // ============================================================================
@@ -833,6 +854,192 @@ fn wasm_emit_code_section(buf: WasmBuf, bodies: WasmCodeSection) -> WasmBuf with
 }
 
 // ============================================================================
+// Global section (ID = 6)
+//
+// Holds mutable i64 globals.  We use one global (index 0) as the heap bump
+// pointer, initialized to the address just past the data section.
+//
+// Format:
+//   section_id(6) | payload_len(LEB128)
+//   count(LEB128)
+//   for each global:
+//     val_type(1 byte: 0x7E=i64)
+//     mutability(1 byte: 0=const, 1=mutable)
+//     init_expr: i64.const(0x42) val(LEB128) end(0x0B)
+// ============================================================================
+
+let WASM_GLOBAL_MUTABLE: i64 = 1
+
+// A single i64 mutable global with a known initial value.
+struct WasmGlobal {
+    init_val: i64,
+}
+
+struct WasmGlobalSection {
+    globals: [WasmGlobal; 8],
+    count:   i64,
+}
+
+fn wasm_global_section_new() -> WasmGlobalSection {
+    WasmGlobalSection {
+        globals: [WasmGlobal { init_val: 0 }; 8],
+        count: 0,
+    }
+}
+
+fn wasm_global_section_add(sec: WasmGlobalSection, init_val: i64) -> WasmGlobalSection with Mut, Panic {
+    var out = sec
+    if out.count < 8 {
+        out.globals[out.count as usize] = WasmGlobal { init_val: init_val }
+        out.count = out.count + 1
+    }
+    out
+}
+
+fn wasm_global_entry_byte_size(g: WasmGlobal) -> i64 with Mut, Panic, Div {
+    // val_type(1) + mutability(1) + i64.const(1) + val(LEB128) + end(1)
+    4 + wasm_i64_leb128_len(g.init_val)
+}
+
+fn wasm_global_section_payload_size(sec: WasmGlobalSection) -> i64 with Mut, Panic, Div {
+    var size = wasm_u32_leb128_len(sec.count)
+    var i: i64 = 0
+    while i < sec.count {
+        size = size + wasm_global_entry_byte_size(sec.globals[i as usize])
+        i = i + 1
+    }
+    size
+}
+
+fn wasm_emit_global_section(buf: WasmBuf, sec: WasmGlobalSection) -> WasmBuf with Mut, Panic, Div {
+    var out = buf
+    if sec.count == 0 { return out }
+
+    let payload_size = wasm_global_section_payload_size(sec)
+    out = wasm_emit_section_header(out, WASM_SECTION_GLOBAL, payload_size)
+    out = wasm_push_u32_leb128(out, sec.count)
+
+    var i: i64 = 0
+    while i < sec.count {
+        let g = sec.globals[i as usize]
+        out = wasm_push_byte(out, WASM_TYPE_I64)        // val_type = i64
+        out = wasm_push_byte(out, WASM_GLOBAL_MUTABLE)  // mutable = 1
+        out = wasm_push_byte(out, 0x42)                 // i64.const opcode
+        out = wasm_push_i64_leb128(out, g.init_val)    // initial value
+        out = wasm_push_byte(out, 0x0B)                 // end
+        i = i + 1
+    }
+    out
+}
+
+// ============================================================================
+// Data section (ID = 11)
+//
+// Holds constant byte strings placed in linear memory at load time.
+// Each segment specifies: memory_index(0) | offset_expr | byte_count | bytes...
+//
+// Format (MVP active data segment):
+//   section_id(11) | payload_len(LEB128)
+//   count(LEB128)
+//   for each segment:
+//     kind(LEB128, 0 = active, memory 0, i32.const offset)
+//     offset_expr: i32.const(0x41) offset(LEB128) end(0x0B)
+//     byte_count(LEB128)
+//     bytes...
+// ============================================================================
+
+let WASM_DATA_MAX_BYTES: i64 = 65536
+
+struct WasmDataSection {
+    data:       [i8; 65536],
+    data_len:   i64,
+    seg_count:  i64,          // number of segments (each string = one segment)
+    seg_offset: [i64; 512],   // seg_offset[i] = byte offset of segment i in data[]
+    seg_len:    [i64; 512],   // seg_len[i]    = byte count of segment i
+}
+
+fn wasm_data_section_new() -> WasmDataSection {
+    WasmDataSection {
+        data:       [0; 65536],
+        data_len:   0,
+        seg_count:  0,
+        seg_offset: [0; 512],
+        seg_len:    [0; 512],
+    }
+}
+
+// Add a Name's bytes as a new data segment at the current offset.
+// Returns updated section.  The segment is null-terminated.
+fn wasm_data_section_add_name(sec: WasmDataSection, name: Name) -> WasmDataSection with Mut, Panic {
+    var out = sec
+    if out.seg_count >= 512 { return out }
+    let seg_idx = out.seg_count
+    out.seg_offset[seg_idx as usize] = out.data_len
+    var i: i64 = 0
+    while i < name.len && out.data_len < WASM_DATA_MAX_BYTES {
+        out.data[out.data_len as usize] = name.buf[i as usize]
+        out.data_len = out.data_len + 1
+        i = i + 1
+    }
+    // null terminator
+    if out.data_len < WASM_DATA_MAX_BYTES {
+        out.data[out.data_len as usize] = 0
+        out.data_len = out.data_len + 1
+    }
+    out.seg_len[seg_idx as usize] = name.len + 1  // include null terminator
+    out.seg_count = out.seg_count + 1
+    out
+}
+
+fn wasm_data_segment_header_size(seg_offset: i64, seg_len: i64) -> i64 with Mut, Panic, Div {
+    // kind(1) + i32.const(1) + offset(LEB128) + end(1) + byte_count(LEB128)
+    1 + 1 + wasm_u32_leb128_len(seg_offset) + 1 + wasm_u32_leb128_len(seg_len)
+}
+
+fn wasm_data_section_payload_size(sec: WasmDataSection) -> i64 with Mut, Panic, Div {
+    var size = wasm_u32_leb128_len(sec.seg_count)
+    var i: i64 = 0
+    while i < sec.seg_count {
+        let soff = sec.seg_offset[i as usize]
+        let slen = sec.seg_len[i as usize]
+        size = size + wasm_data_segment_header_size(soff, slen) + slen
+        i = i + 1
+    }
+    size
+}
+
+fn wasm_emit_data_section(buf: WasmBuf, sec: WasmDataSection) -> WasmBuf with Mut, Panic, Div {
+    var out = buf
+    if sec.seg_count == 0 { return out }
+
+    let payload_size = wasm_data_section_payload_size(sec)
+    out = wasm_emit_section_header(out, WASM_SECTION_DATA, payload_size)
+    out = wasm_push_u32_leb128(out, sec.seg_count)
+
+    var i: i64 = 0
+    while i < sec.seg_count {
+        let soff = sec.seg_offset[i as usize]
+        let slen = sec.seg_len[i as usize]
+        // kind = 0 (active, memory 0, i32.const offset)
+        out = wasm_push_u32_leb128(out, 0)
+        // offset expression: i32.const <soff> end
+        out = wasm_push_byte(out, 0x41)             // i32.const
+        out = wasm_push_u32_leb128(out, soff)       // offset value
+        out = wasm_push_byte(out, 0x0B)             // end
+        // byte count
+        out = wasm_push_u32_leb128(out, slen)
+        // bytes
+        var b: i64 = soff
+        while b < soff + slen {
+            out = wasm_push_byte(out, sec.data[b as usize] as i64)
+            b = b + 1
+        }
+        i = i + 1
+    }
+    out
+}
+
+// ============================================================================
 // Full module assembly
 // ============================================================================
 
@@ -840,10 +1047,12 @@ fn wasm_emit_full_module(
     types: WasmTypeSection,
     imports: WasmImportSection,
     funcs: WasmFuncSection,
+    globals: WasmGlobalSection,
     min_pages: i64,
     max_pages: i64,
     exports: WasmExportSection,
-    code: WasmCodeSection
+    code: WasmCodeSection,
+    data: WasmDataSection
 ) -> WasmBuf with Mut, Panic, Div {
     var buf = wasm_buf_new()
 
@@ -864,11 +1073,17 @@ fn wasm_emit_full_module(
         buf = wasm_emit_memory_section(buf, min_pages, max_pages)
     }
 
-    // 6. Export section
+    // 6. Global section (heap bump pointer + any other globals)
+    buf = wasm_emit_global_section(buf, globals)
+
+    // 7. Export section
     buf = wasm_emit_export_section(buf, exports)
 
-    // 7. Code section (local functions only)
+    // 8. Code section (local functions only)
     buf = wasm_emit_code_section(buf, code)
+
+    // 9. Data section (string literals in linear memory)
+    buf = wasm_emit_data_section(buf, data)
 
     buf
 }
@@ -1108,7 +1323,7 @@ fn test_wasm_full_module_header() -> bool with Mut, Panic, Div {
     var cs = wasm_code_section_new()
     cs = wasm_code_section_add(cs, body)
 
-    let module = wasm_emit_full_module(ts, wasm_import_section_new(), fs, 1, 0, es, cs)
+    let module = wasm_emit_full_module(ts, wasm_import_section_new(), fs, wasm_global_section_new(), 1, 0, es, cs, wasm_data_section_new())
 
     // Verify magic + version at start
     module.len > 8
