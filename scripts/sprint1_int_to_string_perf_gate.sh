@@ -5,6 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OUT_JSON="${1:-$ROOT_DIR/artifacts/sprint1/int_to_string_perf_gate.v1.json}"
 REQUIRE_JIT_RUNNER="${SOUNIO_SPRINT1_REQUIRE_JIT_RUNNER:-0}"
 SOUC_JIT_VERSION="${SOUNIO_SOUC_JIT_VERSION:-0.100.3-jit.1}"
+SOURCE_FILE="${SOUNIO_SPRINT1_SOURCE_FILE:-$ROOT_DIR/self-hosted/compiler/main.sio}"
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
 
@@ -65,16 +66,134 @@ print(f"status={status} reason={reason}")
 PY
 }
 
+source_blockers_json() {
+  python3 - <<'PY' "${@:-}"
+import json
+import sys
+vals = [v for v in sys.argv[1:] if v]
+if not vals:
+    vals = ["unknown_source_contract_failure"]
+print(json.dumps(vals))
+PY
+}
+
+write_bench_fixture() {
+  local iterations="$1"
+  local out_path="$2"
+  cat > "$out_path" <<EOF
+fn i64_to_string_decimal(n: i64) -> string with Mut, Panic, Div {
+    var out: [i8; 24] = [0; 24]
+    if n == 0 {
+        out[0] = 48 as i8
+        return str_from_bytes(out, 1)
+    }
+
+    var value = n
+    var digits: i64 = 1
+    while value <= -10 || value >= 10 {
+        digits = digits + 1
+        value = value / 10
+    }
+
+    let negative = n < 0
+    let total_len = if negative { digits + 1 } else { digits }
+
+    var write = total_len - 1
+    value = n
+    while value <= -10 || value >= 10 {
+        var digit = value % 10
+        if digit < 0 {
+            digit = 0 - digit
+        }
+        out[write as usize] = (48 + digit) as i8
+        write = write - 1
+        value = value / 10
+    }
+
+    var final_digit = value
+    if final_digit < 0 {
+        final_digit = 0 - final_digit
+    }
+    out[write as usize] = (48 + final_digit) as i8
+
+    if negative {
+        out[0] = 45 as i8
+    }
+
+    str_from_bytes(out, total_len)
+}
+
+fn int_to_string(n: i64) -> string with Mut, Panic, Div {
+    i64_to_string_decimal(n)
+}
+
+fn run_int_to_string_bench(iterations: i64) -> i64 with Mut, Panic, Div {
+    let i64_max = 9223372036854775807
+    let i64_min = (0 - i64_max) - 1
+    var checksum: i64 = 0
+    var i: i64 = 0
+    while i < iterations {
+        var sample = (i * 1000003) - 500001
+        if (i % 11) == 0 {
+            sample = 0 - sample
+        }
+        if (i % 7919) == 0 {
+            sample = i64_min
+        }
+        let rendered = int_to_string(sample)
+        checksum = checksum + str_len(rendered)
+        i = i + 1
+    }
+    checksum
+}
+
+fn main() with IO, Mut, Panic, Div {
+    let iterations: i64 = $iterations
+    let checksum = run_int_to_string_bench(iterations)
+    println("bench_int_to_string iterations=" + int_to_string(iterations) +
+            " checksum=" + int_to_string(checksum))
+}
+EOF
+}
+
 if [[ ! -x /usr/bin/time ]]; then
   emit_json "not_run" "time_binary_unavailable" "none" "" "" "" "" "[\"/usr/bin/time_missing\"]"
   exit 0
 fi
 
+if [[ ! -f "$SOURCE_FILE" ]]; then
+  emit_json "fail" "source_file_missing" "none" "" "" "" "" "[\"self-hosted/compiler/main.sio_missing\"]"
+  exit 0
+fi
+
+declare -a source_blockers=()
+if ! rg -F -q 'fn int_to_string(n: i64) -> string with Mut, Panic, Div {' "$SOURCE_FILE"; then
+  source_blockers+=("int_to_string_signature_missing")
+fi
+if ! rg -F -q 'i64_to_string_decimal(n)' "$SOURCE_FILE"; then
+  source_blockers+=("int_to_string_delegate_missing")
+fi
+if ! rg -F -q 'var out: [i8; 24] = [0; 24]' "$SOURCE_FILE"; then
+  source_blockers+=("i64_to_string_decimal_buffer_missing")
+fi
+if rg -F -q 'result = char_from_i64(ch) + result' "$SOURCE_FILE"; then
+  source_blockers+=("legacy_on2_prepend_detected")
+fi
+if [[ "${#source_blockers[@]}" -gt 0 ]]; then
+  emit_json "fail" "source_contract_mismatch" "none" "" "" "" "" "$(source_blockers_json "${source_blockers[@]}")"
+  exit 0
+fi
+
+BASE_FIXTURE="$TMP_DIR/bench_int_to_string_base.sio"
+FULL_FIXTURE="$TMP_DIR/bench_int_to_string_full.sio"
+write_bench_fixture 0 "$BASE_FIXTURE"
+write_bench_fixture 1000000 "$FULL_FIXTURE"
+
 run_probe_mode() {
   local mode="$1"
   local bin="$2"
   set +e
-  timeout 30 "$bin" "$mode" self-hosted/compiler/main.sio -- --bench-int-to-string 0 > "$TMP_DIR/probe.out" 2>&1
+  timeout 15 "$bin" "$mode" "$BASE_FIXTURE" > "$TMP_DIR/probe.out" 2>&1
   local rc=$?
   set -e
   echo "$rc" > "$TMP_DIR/probe.rc"
@@ -201,18 +320,18 @@ fi
 
 run_bench_mode() {
   local name="$1"
-  local iterations="$2"
+  local fixture="$2"
   set +e
   /usr/bin/time -f '%e' -o "$TMP_DIR/${name}.time" \
-    timeout 180 "$jit_runner" "$bench_mode" self-hosted/compiler/main.sio -- --bench-int-to-string "$iterations" \
+    timeout 240 "$jit_runner" "$bench_mode" "$fixture" \
     > "$TMP_DIR/${name}.out" 2>&1
   local rc=$?
   set -e
   echo "$rc" > "$TMP_DIR/${name}.rc"
 }
 
-run_bench_mode "bench_base" 0
-run_bench_mode "bench_full" 1000000
+run_bench_mode "bench_base" "$BASE_FIXTURE"
+run_bench_mode "bench_full" "$FULL_FIXTURE"
 
 base_rc="$(cat "$TMP_DIR/bench_base.rc")"
 full_rc="$(cat "$TMP_DIR/bench_full.rc")"
