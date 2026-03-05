@@ -235,10 +235,29 @@ fn wasm_lower_prescan_locals(ctx: WasmLowerCtx, func: IrFunction) -> WasmLowerCt
         if instr.src2 >= 0 {
             out = wasm_lower_alloc_local(out, instr.src2)
         }
-        // Mark float-producing destinations
+        // Mark float-producing destinations (forward propagation in def-order)
         match instr.op {
             IrOpcode::IrLoadFloat => {
                 if instr.dst >= 0 {
+                    out = wasm_lower_mark_local_f64(out, instr.dst)
+                }
+            }
+            IrOpcode::IrBinOp => {
+                // Arithmetic on f64 operands → f64 result.
+                // Comparison ops (Eq/Ne/Lt/Le/Gt/Ge) → i64 boolean; no mark.
+                if wasm_lower_is_float_reg(out, instr.src1) && wasm_lower_is_float_reg(out, instr.src2) {
+                    match instr.bin_op {
+                        BinaryOp::OpAdd => { out = wasm_lower_mark_local_f64(out, instr.dst) }
+                        BinaryOp::OpSub => { out = wasm_lower_mark_local_f64(out, instr.dst) }
+                        BinaryOp::OpMul => { out = wasm_lower_mark_local_f64(out, instr.dst) }
+                        BinaryOp::OpDiv => { out = wasm_lower_mark_local_f64(out, instr.dst) }
+                        _ => {}
+                    }
+                }
+            }
+            IrOpcode::IrCopy => {
+                // Propagate f64 type through copies.
+                if instr.dst >= 0 && wasm_lower_is_float_reg(out, instr.src1) {
                     out = wasm_lower_mark_local_f64(out, instr.dst)
                 }
             }
@@ -321,35 +340,69 @@ fn wasm_lower_binop(ctx: WasmLowerCtx, instr: IrInstr) -> WasmLowerCtx with Mut,
         out.body = wasm_body_emit_local_get(out.body, rhs_local)
     }
 
-    // Emit the operation (all i64 in this lowering)
-    match instr.bin_op {
-        BinaryOp::OpAdd => { out.body = wasm_body_emit_i64_add(out.body) }
-        BinaryOp::OpSub => { out.body = wasm_body_emit_i64_sub(out.body) }
-        BinaryOp::OpMul => { out.body = wasm_body_emit_i64_mul(out.body) }
-        BinaryOp::OpDiv => { out.body = wasm_body_emit_i64_div_s(out.body) }
-        BinaryOp::OpRem => { out.body = wasm_body_emit_i64_rem_s(out.body) }
-        BinaryOp::OpEq => { out.body = wasm_body_emit_i64_eq(out.body) }
-        BinaryOp::OpNe => { out.body = wasm_body_emit_i64_ne(out.body) }
-        BinaryOp::OpLt => { out.body = wasm_body_emit_i64_lt_s(out.body) }
-        BinaryOp::OpLe => { out.body = wasm_body_emit_i64_le_s(out.body) }
-        BinaryOp::OpGt => { out.body = wasm_body_emit_i64_gt_s(out.body) }
-        BinaryOp::OpGe => { out.body = wasm_body_emit_i64_ge_s(out.body) }
-        BinaryOp::OpBitAnd => { out.body = wasm_body_emit_i64_and(out.body) }
-        BinaryOp::OpBitOr => { out.body = wasm_body_emit_i64_or(out.body) }
-        BinaryOp::OpBitXor => { out.body = wasm_body_emit_i64_xor(out.body) }
-        BinaryOp::OpShl => { out.body = wasm_body_emit_i64_shl(out.body) }
-        BinaryOp::OpShr => { out.body = wasm_body_emit_i64_shr_s(out.body) }
-        BinaryOp::OpAnd => {
-            // Logical AND: a & b (both i64 booleans, 0/1)
-            out.body = wasm_body_emit_i64_and(out.body)
+    // Dispatch to f64 or i64 operations based on operand type.
+    if wasm_lower_is_float_reg(out, instr.src1) {
+        // ── f64 path ──────────────────────────────────────────────────────────
+        // Arithmetic ops produce f64; comparison ops return i32 (extended to i64).
+        match instr.bin_op {
+            BinaryOp::OpAdd => { out.body = wasm_body_emit_f64_add(out.body) }
+            BinaryOp::OpSub => { out.body = wasm_body_emit_f64_sub(out.body) }
+            BinaryOp::OpMul => { out.body = wasm_body_emit_f64_mul(out.body) }
+            BinaryOp::OpDiv => { out.body = wasm_body_emit_f64_div(out.body) }
+            BinaryOp::OpEq => {
+                out.body = wasm_body_emit_f64_eq(out.body)
+                out.body = wasm_body_emit_i64_extend_i32_u(out.body)
+            }
+            BinaryOp::OpNe => {
+                out.body = wasm_body_emit_f64_ne(out.body)
+                out.body = wasm_body_emit_i64_extend_i32_u(out.body)
+            }
+            BinaryOp::OpLt => {
+                out.body = wasm_body_emit_f64_lt(out.body)
+                out.body = wasm_body_emit_i64_extend_i32_u(out.body)
+            }
+            BinaryOp::OpLe => {
+                out.body = wasm_body_emit_f64_le(out.body)
+                out.body = wasm_body_emit_i64_extend_i32_u(out.body)
+            }
+            BinaryOp::OpGt => {
+                out.body = wasm_body_emit_f64_gt(out.body)
+                out.body = wasm_body_emit_i64_extend_i32_u(out.body)
+            }
+            BinaryOp::OpGe => {
+                out.body = wasm_body_emit_f64_ge(out.body)
+                out.body = wasm_body_emit_i64_extend_i32_u(out.body)
+            }
+            _ => {
+                // Bitwise / shift ops on f64 are undefined; trap.
+                out.body = wasm_body_emit_unreachable(out.body)
+            }
         }
-        BinaryOp::OpOr => {
-            // Logical OR: a | b (both i64 booleans, 0/1)
-            out.body = wasm_body_emit_i64_or(out.body)
-        }
-        _ => {
-            // OpConcat, OpRange, OpRangeInclusive: not lowered to WASM
-            out.body = wasm_body_emit_unreachable(out.body)
+    } else {
+        // ── i64 path ──────────────────────────────────────────────────────────
+        match instr.bin_op {
+            BinaryOp::OpAdd => { out.body = wasm_body_emit_i64_add(out.body) }
+            BinaryOp::OpSub => { out.body = wasm_body_emit_i64_sub(out.body) }
+            BinaryOp::OpMul => { out.body = wasm_body_emit_i64_mul(out.body) }
+            BinaryOp::OpDiv => { out.body = wasm_body_emit_i64_div_s(out.body) }
+            BinaryOp::OpRem => { out.body = wasm_body_emit_i64_rem_s(out.body) }
+            BinaryOp::OpEq => { out.body = wasm_body_emit_i64_eq(out.body) }
+            BinaryOp::OpNe => { out.body = wasm_body_emit_i64_ne(out.body) }
+            BinaryOp::OpLt => { out.body = wasm_body_emit_i64_lt_s(out.body) }
+            BinaryOp::OpLe => { out.body = wasm_body_emit_i64_le_s(out.body) }
+            BinaryOp::OpGt => { out.body = wasm_body_emit_i64_gt_s(out.body) }
+            BinaryOp::OpGe => { out.body = wasm_body_emit_i64_ge_s(out.body) }
+            BinaryOp::OpBitAnd => { out.body = wasm_body_emit_i64_and(out.body) }
+            BinaryOp::OpBitOr => { out.body = wasm_body_emit_i64_or(out.body) }
+            BinaryOp::OpBitXor => { out.body = wasm_body_emit_i64_xor(out.body) }
+            BinaryOp::OpShl => { out.body = wasm_body_emit_i64_shl(out.body) }
+            BinaryOp::OpShr => { out.body = wasm_body_emit_i64_shr_s(out.body) }
+            BinaryOp::OpAnd => { out.body = wasm_body_emit_i64_and(out.body) }
+            BinaryOp::OpOr  => { out.body = wasm_body_emit_i64_or(out.body) }
+            _ => {
+                // OpConcat, OpRange, OpRangeInclusive: not lowered to WASM
+                out.body = wasm_body_emit_unreachable(out.body)
+            }
         }
     }
 
