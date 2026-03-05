@@ -54,8 +54,9 @@ fn wasm_label_entry_empty() -> WasmLabelEntry {
 
 struct WasmLowerCtx {
     body: WasmFuncBody,
-    local_map: [i64; 512],   // ir_reg → wasm local index (-1 = unmapped)
-    local_type: [i64; 512],  // wasm local index → WASM_TYPE_I64 or WASM_TYPE_F64
+    local_map: [i64; 512],    // ir_reg → wasm local index (-1 = unmapped)
+    local_type: [i64; 512],   // wasm local index → WASM_TYPE_I64 or WASM_TYPE_F64
+    loop_labels: [i64; 512],  // loop_labels[label_id] = 1 if backward-jump target
     local_count: i64,
     func_map: [i64; 256],
     func_count: i64,
@@ -69,6 +70,7 @@ fn wasm_lower_ctx_new() -> WasmLowerCtx {
         body: wasm_body_new(),
         local_map: [0 - 1; 512],
         local_type: [WASM_TYPE_I64; 512],
+        loop_labels: [0; 512],
         local_count: 0,
         func_map: [0 - 1; 256],
         func_count: 0,
@@ -87,6 +89,7 @@ fn wasm_lower_ctx_reset_body(ctx: WasmLowerCtx) -> WasmLowerCtx with Mut, Panic,
     while i < WASM_LOWER_MAX_LOCALS {
         out.local_map[i as usize] = 0 - 1
         out.local_type[i as usize] = WASM_TYPE_I64
+        out.loop_labels[i as usize] = 0
         i = i + 1
     }
     out
@@ -202,6 +205,62 @@ fn wasm_lower_find_label_depth(ctx: WasmLowerCtx, ir_label: i64) -> i64 with Mut
         idx = idx - 1
     }
     0 - 1
+}
+
+// ============================================================================
+// Loop detection pre-pass
+//
+// WASM requires `loop` for back-edge targets and `block` for forward labels.
+// We scan IrJump/IrBranchTrue/IrBranchFalse instructions; if the target label
+// was defined at an earlier instruction index, it is a backward-jump target
+// and needs a `loop` opener instead of `block`.
+// ============================================================================
+
+fn wasm_lower_detect_loops(ctx: WasmLowerCtx, func: IrFunction) -> WasmLowerCtx with Mut, Panic, Div {
+    var out = ctx
+    // Reset flags
+    var j: i64 = 0
+    while j < WASM_LOWER_MAX_LOCALS {
+        out.loop_labels[j as usize] = 0
+        j = j + 1
+    }
+
+    // Pass 1: record the instruction index at which each label is defined.
+    var label_pos: [i64; 512] = [0 - 1; 512]
+    var i: i64 = 0
+    while i < func.instr_count {
+        let instr = func.instrs[i as usize]
+        match instr.op {
+            IrOpcode::IrLabel => {
+                if instr.label_id >= 0 && instr.label_id < 512 {
+                    label_pos[instr.label_id as usize] = i
+                }
+            }
+            _ => {}
+        }
+        i = i + 1
+    }
+
+    // Pass 2: any jump whose target label is defined before the jump is a back-edge.
+    i = 0
+    while i < func.instr_count {
+        let instr = func.instrs[i as usize]
+        let tgt = instr.label_id
+        let is_branch = match instr.op {
+            IrOpcode::IrJump       => true,
+            IrOpcode::IrBranchTrue => true,
+            IrOpcode::IrBranchFalse => true,
+            _ => false
+        }
+        if is_branch && tgt >= 0 && tgt < 512 {
+            let lpos = label_pos[tgt as usize]
+            if lpos >= 0 && lpos < i {
+                out.loop_labels[tgt as usize] = 1
+            }
+        }
+        i = i + 1
+    }
+    out
 }
 
 // ============================================================================
@@ -554,13 +613,21 @@ fn wasm_lower_branch_false(ctx: WasmLowerCtx, instr: IrInstr) -> WasmLowerCtx wi
     out
 }
 
-// IrLabel -> open a new block or loop depending on context
-// Convention: if label is referenced by a backward jump -> loop, else -> block.
-// For simplicity in this lowering pass, IrLabel emits a block.
+// IrLabel -> open a `loop` if the label is a backward-jump target (detected by
+// wasm_lower_detect_loops), otherwise open a `block`.  The distinction is
+// required for valid WASM: back-edges (while loops) must be wrapped in `loop`,
+// forward-only labels (if/else exit points) use `block`.
 fn wasm_lower_label(ctx: WasmLowerCtx, instr: IrInstr) -> WasmLowerCtx with Mut, Panic, Div {
     var out = ctx
-    out.body = wasm_body_emit_block(out.body, WASM_BLOCK_VOID)
-    out = wasm_lower_push_label(out, instr.label_id, WASM_LABEL_BLOCK)
+    let is_loop = instr.label_id >= 0 && instr.label_id < 512
+        && out.loop_labels[instr.label_id as usize] == 1
+    if is_loop {
+        out.body = wasm_body_emit_loop(out.body, WASM_BLOCK_VOID)
+        out = wasm_lower_push_label(out, instr.label_id, WASM_LABEL_LOOP)
+    } else {
+        out.body = wasm_body_emit_block(out.body, WASM_BLOCK_VOID)
+        out = wasm_lower_push_label(out, instr.label_id, WASM_LABEL_BLOCK)
+    }
     out
 }
 
@@ -782,6 +849,9 @@ fn wasm_lower_basic_block(ctx: WasmLowerCtx, func: IrFunction, start: i64, end_i
 fn wasm_lower_function(ctx: WasmLowerCtx, func: IrFunction) -> WasmLowerCtx with Mut, Panic, Div {
     var out = wasm_lower_ctx_reset_body(ctx)
 
+    // Detect loop targets (back-edge labels) before main lowering.
+    out = wasm_lower_detect_loops(out, func)
+
     // Pre-scan to allocate WASM locals for all IR registers
     out = wasm_lower_prescan_locals(out, func)
 
@@ -809,13 +879,34 @@ fn wasm_lower_function(ctx: WasmLowerCtx, func: IrFunction) -> WasmLowerCtx with
 }
 
 // ============================================================================
+// Export helper
+//
+// Build a WasmExport from an IrFunction Name struct without going through a
+// Sounio `string` (which requires a runtime allocation).  Copies the raw bytes
+// from Name.buf directly into WasmExport.name_buf.
+// ============================================================================
+
+fn wasm_lower_export_from_name(name: Name, func_idx: i64) -> WasmExport with Mut, Panic {
+    var exp = wasm_export_new()
+    var i: i64 = 0
+    while i < name.len && i < 128 {
+        exp.name_buf[i as usize] = name.buf[i as usize]
+        i = i + 1
+    }
+    exp.name_len = name.len
+    exp.kind = WASM_EXPORT_FUNC
+    exp.index = func_idx
+    exp
+}
+
+// ============================================================================
 // Module lowering
 //
 // Translates an entire IrModule into WASM sections:
 //   - Type section:     one type per function (all i64 params -> i64 result)
 //   - Function section: maps each function to its type
 //   - Code section:     lowered function bodies
-//   - Export section:    exports all functions by name
+//   - Export section:   exports all functions by name + "memory"
 //   - Memory section:   1 page minimum for heap
 // ============================================================================
 
@@ -867,12 +958,19 @@ fn wasm_lower_module(module: IrModule) -> WasmLowerResult with Mut, Panic, Div {
         types = wasm_type_section_add(types, ft)
         funcs = wasm_func_section_add(funcs, i)
 
+        // Export each function by its IR name
+        let exp = wasm_lower_export_from_name(func.name, i)
+        exports = wasm_export_section_add(exports, exp)
+
         // Lower the function body
         ctx = wasm_lower_function(ctx, func)
         code = wasm_code_section_add(code, ctx.body)
 
         i = i + 1
     }
+
+    // Also export the linear memory (conventional for WASM modules)
+    exports = wasm_export_section_add(exports, wasm_export_memory("memory", 0))
 
     // Emit the full WASM module
     let buf = wasm_emit_full_module(types, funcs, 1, 0, exports, code)
