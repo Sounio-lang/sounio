@@ -85,6 +85,9 @@ extern "C" fn runtime_print_cstr(ptr: *const u8) {
 use std::sync::Mutex;
 #[cfg(feature = "jit")]
 static STRING_STORAGE: Mutex<Vec<std::ffi::CString>> = Mutex::new(Vec::new());
+#[cfg(feature = "jit")]
+static STRING_INTERN: std::sync::OnceLock<Mutex<std::collections::HashMap<Vec<u8>, usize>>> =
+    std::sync::OnceLock::new();
 
 /// Print a boolean value
 #[cfg(feature = "jit")]
@@ -97,6 +100,127 @@ extern "C" fn runtime_print_bool(val: i8) {
 #[cfg(feature = "jit")]
 extern "C" fn runtime_debug_test() -> i64 {
     99
+}
+
+#[cfg(feature = "jit")]
+fn intern_jit_string(value: &str) -> *const u8 {
+    let bytes = value.as_bytes();
+    let normalized = if let Some(pos) = bytes.iter().position(|b| *b == 0) {
+        &bytes[..pos]
+    } else {
+        bytes
+    };
+    let intern = STRING_INTERN.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
+    if let Ok(mut map) = intern.lock() {
+        if let Some(&ptr) = map.get(normalized) {
+            return ptr as *const u8;
+        }
+        if let Ok(mut storage) = STRING_STORAGE.lock() {
+            let cstring = std::ffi::CString::new(normalized).unwrap_or_default();
+            let key = cstring.as_bytes().to_vec();
+            let ptr = cstring.as_ptr() as usize;
+            storage.push(cstring);
+            map.insert(key, ptr);
+            ptr as *const u8
+        } else {
+            std::ptr::null()
+        }
+    } else {
+        std::ptr::null()
+    }
+}
+
+#[cfg(feature = "jit")]
+fn intern_jit_bytes(bytes: &[u8]) -> *const u8 {
+    let text = String::from_utf8_lossy(bytes);
+    intern_jit_string(text.as_ref())
+}
+
+/// Builtin: str_len(string) -> i64
+#[cfg(feature = "jit")]
+extern "C" fn runtime_str_len(ptr: *const u8) -> i64 {
+    if ptr.is_null() {
+        return 0;
+    }
+    unsafe { std::ffi::CStr::from_ptr(ptr as *const std::ffi::c_char) }
+        .to_bytes()
+        .len() as i64
+}
+
+/// Builtin: str_eq(a, b) -> bool (i8)
+#[cfg(feature = "jit")]
+extern "C" fn runtime_str_eq(a_ptr: *const u8, b_ptr: *const u8) -> i8 {
+    let a = if a_ptr.is_null() {
+        &[][..]
+    } else {
+        unsafe { std::ffi::CStr::from_ptr(a_ptr as *const std::ffi::c_char) }.to_bytes()
+    };
+    let b = if b_ptr.is_null() {
+        &[][..]
+    } else {
+        unsafe { std::ffi::CStr::from_ptr(b_ptr as *const std::ffi::c_char) }.to_bytes()
+    };
+    if a == b {
+        1
+    } else {
+        0
+    }
+}
+
+/// Builtin: str_concat(a, b) -> string
+#[cfg(feature = "jit")]
+extern "C" fn runtime_str_concat(a_ptr: *const u8, b_ptr: *const u8) -> *const u8 {
+    let a = if a_ptr.is_null() {
+        String::new()
+    } else {
+        unsafe { std::ffi::CStr::from_ptr(a_ptr as *const std::ffi::c_char) }
+            .to_string_lossy()
+            .into_owned()
+    };
+    let b = if b_ptr.is_null() {
+        String::new()
+    } else {
+        unsafe { std::ffi::CStr::from_ptr(b_ptr as *const std::ffi::c_char) }
+            .to_string_lossy()
+            .into_owned()
+    };
+    let mut out = String::with_capacity(a.len() + b.len());
+    out.push_str(&a);
+    out.push_str(&b);
+    intern_jit_string(&out)
+}
+
+/// Builtin: str_slice(s, start, end) -> string (byte-indexed, clamped)
+#[cfg(feature = "jit")]
+extern "C" fn runtime_str_slice(ptr: *const u8, start: i64, end: i64) -> *const u8 {
+    if ptr.is_null() {
+        return intern_jit_string("");
+    }
+    let bytes = unsafe { std::ffi::CStr::from_ptr(ptr as *const std::ffi::c_char) }.to_bytes();
+    let len = bytes.len() as i64;
+    let s = start.clamp(0, len) as usize;
+    let e = end.clamp(0, len).max(s as i64) as usize;
+    intern_jit_bytes(&bytes[s..e])
+}
+
+/// Builtin: str_from_bytes([i8], len) -> string
+///
+/// JIT array layout:
+/// - [0..8): i64 length
+/// - [8..): element bytes (for [i8], one byte per element)
+#[cfg(feature = "jit")]
+extern "C" fn runtime_str_from_bytes(array_ptr: *const u8, requested_len: i64) -> *const u8 {
+    if array_ptr.is_null() {
+        return intern_jit_string("");
+    }
+    let stored_len = unsafe { std::ptr::read_unaligned(array_ptr as *const i64) }.max(0);
+    let take = requested_len.clamp(0, stored_len) as usize;
+    if take == 0 {
+        return intern_jit_string("");
+    }
+    let data_ptr = unsafe { array_ptr.add(8) };
+    let bytes = unsafe { std::slice::from_raw_parts(data_ptr, take) };
+    intern_jit_bytes(bytes)
 }
 
 // ==================== Effect Runtime Functions ====================
@@ -2650,6 +2774,11 @@ impl JitCompiler {
         jit_builder.symbol("runtime_print_cstr", runtime_print_cstr as *const u8);
         jit_builder.symbol("runtime_print_bool", runtime_print_bool as *const u8);
         jit_builder.symbol("runtime_debug_test", runtime_debug_test as *const u8);
+        jit_builder.symbol("str_len", runtime_str_len as *const u8);
+        jit_builder.symbol("str_eq", runtime_str_eq as *const u8);
+        jit_builder.symbol("str_concat", runtime_str_concat as *const u8);
+        jit_builder.symbol("str_slice", runtime_str_slice as *const u8);
+        jit_builder.symbol("str_from_bytes", runtime_str_from_bytes as *const u8);
 
         // Register effect runtime functions
         jit_builder.symbol("runtime_prob_sample", runtime_prob_sample as *const u8);
@@ -3049,6 +3178,70 @@ impl JitCompiler {
         self.func_ids.insert("runtime_print_bool".to_string(), id);
         self.func_sigs
             .insert("runtime_print_bool".to_string(), sig_print_bool);
+
+        // ==================== Core string builtins ====================
+
+        // str_len(ptr) -> i64
+        let mut sig_str_len = Signature::new(call_conv);
+        sig_str_len.params.push(AbiParam::new(types::I64)); // ptr
+        sig_str_len.returns.push(AbiParam::new(types::I64));
+        let id = self
+            .jit_module
+            .declare_function("str_len", Linkage::Import, &sig_str_len)
+            .map_err(|e| format!("Failed to declare str_len: {}", e))?;
+        self.func_ids.insert("str_len".to_string(), id);
+        self.func_sigs.insert("str_len".to_string(), sig_str_len);
+
+        // str_eq(a_ptr, b_ptr) -> i8
+        let mut sig_str_eq = Signature::new(call_conv);
+        sig_str_eq.params.push(AbiParam::new(types::I64)); // a_ptr
+        sig_str_eq.params.push(AbiParam::new(types::I64)); // b_ptr
+        sig_str_eq.returns.push(AbiParam::new(types::I8));
+        let id = self
+            .jit_module
+            .declare_function("str_eq", Linkage::Import, &sig_str_eq)
+            .map_err(|e| format!("Failed to declare str_eq: {}", e))?;
+        self.func_ids.insert("str_eq".to_string(), id);
+        self.func_sigs.insert("str_eq".to_string(), sig_str_eq);
+
+        // str_concat(a_ptr, b_ptr) -> i64
+        let mut sig_str_concat = Signature::new(call_conv);
+        sig_str_concat.params.push(AbiParam::new(types::I64)); // a_ptr
+        sig_str_concat.params.push(AbiParam::new(types::I64)); // b_ptr
+        sig_str_concat.returns.push(AbiParam::new(types::I64));
+        let id = self
+            .jit_module
+            .declare_function("str_concat", Linkage::Import, &sig_str_concat)
+            .map_err(|e| format!("Failed to declare str_concat: {}", e))?;
+        self.func_ids.insert("str_concat".to_string(), id);
+        self.func_sigs
+            .insert("str_concat".to_string(), sig_str_concat);
+
+        // str_slice(ptr, start, end) -> i64
+        let mut sig_str_slice = Signature::new(call_conv);
+        sig_str_slice.params.push(AbiParam::new(types::I64)); // ptr
+        sig_str_slice.params.push(AbiParam::new(types::I64)); // start
+        sig_str_slice.params.push(AbiParam::new(types::I64)); // end
+        sig_str_slice.returns.push(AbiParam::new(types::I64));
+        let id = self
+            .jit_module
+            .declare_function("str_slice", Linkage::Import, &sig_str_slice)
+            .map_err(|e| format!("Failed to declare str_slice: {}", e))?;
+        self.func_ids.insert("str_slice".to_string(), id);
+        self.func_sigs.insert("str_slice".to_string(), sig_str_slice);
+
+        // str_from_bytes(array_ptr, requested_len) -> i64
+        let mut sig_str_from_bytes = Signature::new(call_conv);
+        sig_str_from_bytes.params.push(AbiParam::new(types::I64)); // array_ptr
+        sig_str_from_bytes.params.push(AbiParam::new(types::I64)); // requested_len
+        sig_str_from_bytes.returns.push(AbiParam::new(types::I64));
+        let id = self
+            .jit_module
+            .declare_function("str_from_bytes", Linkage::Import, &sig_str_from_bytes)
+            .map_err(|e| format!("Failed to declare str_from_bytes: {}", e))?;
+        self.func_ids.insert("str_from_bytes".to_string(), id);
+        self.func_sigs
+            .insert("str_from_bytes".to_string(), sig_str_from_bytes);
 
         // ==================== Effect Runtime Functions ====================
 
@@ -4196,14 +4389,14 @@ fn translate_instruction(
 ) -> Result<Option<cranelift_codegen::ir::Value>, String> {
     let ty = hlir_to_cranelift_type(&instr.ty);
 
+    if let Some(result_id) = instr.result {
+        if matches!(&instr.ty, HlirType::Ptr(inner) if matches!(inner.as_ref(), HlirType::U8)) {
+            string_values.insert(result_id);
+        }
+    }
+
     match &instr.op {
         Op::Const(constant) => {
-            // Track string constants for proper print handling
-            if let HlirConstant::String(_) = constant {
-                if let Some(result_id) = instr.result {
-                    string_values.insert(result_id);
-                }
-            }
             let val = translate_constant(builder, constant, &instr.ty, func_refs, string_globals)?;
             Ok(Some(val))
         }
@@ -4216,7 +4409,7 @@ fn translate_instruction(
         Op::Binary { op, left, right } => {
             let lhs = get_value(values, *left)?;
             let rhs = get_value(values, *right)?;
-            let result = translate_binary_op(builder, *op, lhs, rhs, &instr.ty)?;
+            let result = translate_binary_op(builder, *op, lhs, rhs, &instr.ty, func_refs)?;
             Ok(Some(result))
         }
 
@@ -6866,17 +7059,8 @@ fn translate_constant(
                     return Ok(builder.ins().global_value(types::I64, gv));
                 }
             }
-            // JIT mode: store string in heap (valid during JIT execution)
-            let cstring = std::ffi::CString::new(s.as_str())
-                .unwrap_or_else(|_| std::ffi::CString::new("").unwrap());
-            if let Ok(mut storage) = STRING_STORAGE.lock() {
-                storage.push(cstring);
-                let stored_ptr =
-                    storage.last().expect("storage must have elements").as_ptr() as i64;
-                Ok(builder.ins().iconst(types::I64, stored_ptr))
-            } else {
-                Ok(builder.ins().iconst(types::I64, 0))
-            }
+            // JIT mode: intern constants so pointer-based equality remains stable.
+            Ok(builder.ins().iconst(types::I64, intern_jit_string(s.as_str()) as i64))
         }
         HlirConstant::Null(_) => Ok(builder.ins().iconst(types::I64, 0)),
         HlirConstant::Undef(_) => Ok(builder.ins().iconst(cl_ty, 0)),
@@ -6884,10 +7068,20 @@ fn translate_constant(
             if let Some(&func_ref) = func_refs.get(name) {
                 Ok(builder.ins().func_addr(types::I64, func_ref))
             } else {
+                #[cfg(debug_assertions)]
+                eprintln!("warning: unresolved JIT function ref '{}'", name);
                 Ok(builder.ins().iconst(types::I64, 0))
             }
         }
-        HlirConstant::GlobalRef(_) => Ok(builder.ins().iconst(types::I64, 0)),
+        HlirConstant::GlobalRef(name) => {
+            if let Some(&func_ref) = func_refs.get(name) {
+                Ok(builder.ins().func_addr(types::I64, func_ref))
+            } else {
+                #[cfg(debug_assertions)]
+                eprintln!("warning: unresolved JIT global ref '{}'", name);
+                Ok(builder.ins().iconst(types::I64, 0))
+            }
+        }
         HlirConstant::Array(_) | HlirConstant::Struct(_) => {
             // Complex constants - return null for now
             Ok(builder.ins().iconst(types::I64, 0))
@@ -6902,6 +7096,7 @@ fn translate_binary_op(
     lhs: cranelift_codegen::ir::Value,
     rhs: cranelift_codegen::ir::Value,
     result_ty: &HlirType,
+    func_refs: &HashMap<String, cranelift_codegen::ir::FuncRef>,
 ) -> Result<cranelift_codegen::ir::Value, String> {
     use cranelift_codegen::ir::condcodes::{FloatCC, IntCC};
 
@@ -6982,6 +7177,18 @@ fn translate_binary_op(
 
     }
 
+    let is_cstr_ptr = matches!(result_ty, HlirType::Ptr(inner) if matches!(inner.as_ref(), HlirType::U8));
+    if is_cstr_ptr && matches!(op, BinaryOp::Add | BinaryOp::Concat) {
+        if let Some(&concat_ref) = func_refs.get("str_concat") {
+            let call = builder.ins().call(concat_ref, &[lhs, rhs]);
+            let results = builder.inst_results(call);
+            if !results.is_empty() {
+                return Ok(results[0]);
+            }
+        }
+        return Ok(builder.ins().iconst(types::I64, 0));
+    }
+
     let result = match op {
         // Integer arithmetic
         BinaryOp::Add => builder.ins().iadd(lhs, rhs),
@@ -7036,10 +7243,7 @@ fn translate_binary_op(
         BinaryOp::FOLe => builder.ins().fcmp(FloatCC::LessThanOrEqual, lhs, rhs),
         BinaryOp::FOGt => builder.ins().fcmp(FloatCC::GreaterThan, lhs, rhs),
         BinaryOp::FOGe => builder.ins().fcmp(FloatCC::GreaterThanOrEqual, lhs, rhs),
-        BinaryOp::Concat => {
-            // String concatenation - not supported in JIT, would need runtime call
-            return Err("String concatenation not supported in JIT".to_string());
-        }
+        BinaryOp::Concat => builder.ins().iadd(lhs, rhs),
     };
 
     // Comparisons return i8, may need to extend for result type
