@@ -362,25 +362,33 @@ fn wasm_lower_unaryop(ctx: WasmLowerCtx, instr: IrInstr) -> WasmLowerCtx with Mu
     out
 }
 
-// IrCall -> push args via local.get; call func_idx; local.set dst
+// Push all call arguments from IrRegList onto the WASM stack.
+// Box dereference (*list) does not require Alloc effect — only reads existing heap.
+fn wasm_lower_push_args(ctx: WasmLowerCtx, args: Option<Box<IrRegList>>) -> WasmLowerCtx with Mut, Panic, Div {
+    match args {
+        Some(list) => {
+            let reg = (*list).head
+            var out = ctx
+            if reg >= 0 {
+                let local_idx = wasm_lower_get_local(out, reg)
+                if local_idx >= 0 {
+                    out.body = wasm_body_emit_local_get(out.body, local_idx)
+                }
+            }
+            wasm_lower_push_args(out, (*list).tail)
+        }
+        _ => ctx
+    }
+}
+
+// IrCall -> push all args from call_args list; call func_idx; local.set dst
 fn wasm_lower_call(ctx: WasmLowerCtx, instr: IrInstr) -> WasmLowerCtx with Mut, Panic, Div {
     var out = ctx
     let dst_local = wasm_lower_get_local(out, instr.dst)
     let wasm_func_idx = wasm_lower_get_func(out, instr.fn_id)
 
-    // Push first two args from src1/src2 (cached in IrInstr)
-    if instr.src1 >= 0 {
-        let a0_local = wasm_lower_get_local(out, instr.src1)
-        if a0_local >= 0 {
-            out.body = wasm_body_emit_local_get(out.body, a0_local)
-        }
-    }
-    if instr.arg_count > 1 && instr.src2 >= 0 {
-        let a1_local = wasm_lower_get_local(out, instr.src2)
-        if a1_local >= 0 {
-            out.body = wasm_body_emit_local_get(out.body, a1_local)
-        }
-    }
+    // Push all args via the full call_args list (supports >2 args)
+    out = wasm_lower_push_args(out, instr.call_args)
 
     // Emit call
     if wasm_func_idx >= 0 {
