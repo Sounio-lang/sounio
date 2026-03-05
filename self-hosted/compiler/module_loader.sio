@@ -14,7 +14,7 @@ use ir::ir::*
 use check::types::*
 use check::mod::{check_program, CheckResult}
 use resolve::mod::{resolve_modules, ResolveBatchResult}
-use parser::mod::{parse_program_preloaded, count_items}
+use parser::mod::{parse_program, count_items}
 use io::file_write::*
 use ir::lower::{lower_program_to_ir}
 use ir::serialize::{serialize_ir_module}
@@ -22,7 +22,7 @@ use native::encode::*
 use native::elf::*
 use native::reloc::*
 use native::frame::*
-use wasm::mod::*
+use wasm::core::*
 use wasm::encode::*
 use wasm::lower::*
 use native::codegen::*
@@ -215,7 +215,7 @@ fn empty_program() -> Program {
 
 fn load_module_file(path: string) -> Program with IO, Mut, Div, Panic, Alloc {
     let state = io_read_source_file(path)
-    var prog = parse_program_preloaded(state.token_count)
+    var prog = parse_program(state.tokens, state.token_count)
     prog.module_path = file_path_to_module_path(path)
     prog
 }
@@ -418,18 +418,28 @@ fn load_multimodule_ir(main_path: string) -> MultiModuleIrResult with IO, Mut, D
     print_int(loaded)
     print(" modules\n")
 
-    // Step 4: Resolve all modules together
-    let resolve_result = resolve_modules(programs, loaded)
-    if resolve_result.had_error {
-        print("Module resolution failed: ")
-        print_int(resolve_result.error_count)
-        print(" errors\n")
-        return multimodule_ir_error("module_resolution_failed")
+    // Step 4: Resolve all modules together.
+    // Fast path: single module with no imports does not need cross-module resolution.
+    let main_imports = extract_imports_from_ast(programs[0])
+    let needs_resolution = loaded > 1 || main_imports.count > 0
+    if needs_resolution {
+        let resolve_result = resolve_modules(programs, loaded)
+        if resolve_result.had_error {
+            print("Module resolution failed: ")
+            print_int(resolve_result.error_count)
+            print(" errors\n")
+            return multimodule_ir_error("module_resolution_failed")
+        }
+    } else {
+        print("Resolve skip: single module with no imports\n")
     }
 
     // Step 5: Type check all modules
     i = 0
     while i < loaded {
+        print("Type checking module ")
+        print_int(i)
+        print("\n")
         let check_result = check_program(programs[i])
         if check_result.had_error {
             print("Type check failed for module ")
@@ -437,14 +447,32 @@ fn load_multimodule_ir(main_path: string) -> MultiModuleIrResult with IO, Mut, D
             print("\n")
             return multimodule_ir_error("type_check_failed")
         }
+        print("Type check complete for module ")
+        print_int(i)
+        print("\n")
         i = i + 1
     }
 
-    // Step 6: Lower ALL modules to IR and merge
-    var merged_module = ir_empty_module()
+    // Step 6: Lower ALL modules to IR and merge.
+    // Seed the merge with module 0 to avoid expensive empty-module initialization.
+    if loaded <= 0 {
+        return multimodule_ir_error("no_modules_loaded")
+    }
 
-    i = 0
+    print("IR lowering module 0\n")
+    let seed_lower_result = lower_program_to_ir(programs[0])
+    if seed_lower_result.had_error {
+        print("IR lowering failed for module 0\n")
+        return multimodule_ir_error("ir_lowering_failed")
+    }
+    var merged_module = seed_lower_result.module
+    print("IR lowering complete for module 0\n")
+
+    i = 1
     while i < loaded {
+        print("IR lowering module ")
+        print_int(i)
+        print("\n")
         let lower_result = lower_program_to_ir(programs[i])
         if lower_result.had_error {
             print("IR lowering failed for module ")
@@ -453,6 +481,9 @@ fn load_multimodule_ir(main_path: string) -> MultiModuleIrResult with IO, Mut, D
             return multimodule_ir_error("ir_lowering_failed")
         }
         merged_module = ir_merge_modules(merged_module, lower_result.module)
+        print("IR lowering complete for module ")
+        print_int(i)
+        print("\n")
         i = i + 1
     }
 
@@ -490,8 +521,9 @@ fn multimodule_native_trace_output_path() -> string {
     }
 }
 
-fn compile_multimodule_native(
+fn compile_multimodule_native_with_ir(
     main_path: string,
+    preloaded_ir: IrModule,
     output_path: string,
     requested_target: string,
     requested_matrix: string,
@@ -507,14 +539,7 @@ fn compile_multimodule_native(
         print(" output=")
         print(output_path)
         print("\n")
-        let wir = load_multimodule_ir(main_path)
-        if !wir.ok {
-            print("Multi-module IR failed: ")
-            print(wir.error_msg)
-            print("\n")
-            return 1
-        }
-        let wasm_result = wasm_lower_module(wir.module)
+        let wasm_result = wasm_lower_module(preloaded_ir)
         if wasm_result.error_count > 0 {
             print("WASM lowering failed: ")
             print_int(wasm_result.error_count)
@@ -542,6 +567,145 @@ fn compile_multimodule_native(
         print(output_path)
         print("\n")
         return 0
+    }
+
+    let target_spec = native_resolve_target(requested_target, requested_matrix, explicit_target)
+    print("Native dispatch: requested=")
+    print(target_spec.requested_target)
+    print(" resolved=")
+    print(target_spec.resolved_target)
+    print(" matrix=")
+    print(native_matrix_mode_string(target_spec.matrix_mode))
+    print(" source=")
+    print(native_target_source_string(target_spec.source_id))
+    if str_len(target_spec.fallback_reason) > 0 {
+        print(" fallback=")
+        print(target_spec.fallback_reason)
+    }
+    if str_len(gpu_target) > 0 {
+        print(" gpu_target=")
+        print(gpu_target)
+    }
+    if str_len(gpu_binary_format) > 0 {
+        print(" gpu_binary_format=")
+        print(gpu_binary_format)
+    }
+    print(" gpu_strict_parity=")
+    if gpu_strict_parity {
+        print("true")
+    } else {
+        print("false")
+    }
+    print("\n")
+
+    let native_result = compile_native(preloaded_ir, target_spec)
+    if !native_result.ok {
+        let trace_ok = io_write_native_decision_trace(
+            multimodule_native_trace_output_path(),
+            target_spec.requested_target,
+            target_spec.resolved_target,
+            native_matrix_mode_string(target_spec.matrix_mode),
+            native_target_source_string(target_spec.source_id),
+            target_spec.fallback_reason,
+            "native",
+            false,
+            native_result.error_code
+        )
+        if !trace_ok {
+            print("Error: Failed to write native decision trace to ")
+            print(multimodule_native_trace_output_path())
+            print("\n")
+            return 1
+        }
+        print("Native compilation failed: ")
+        print(native_result.error_msg)
+        print("\n")
+        return 1
+    }
+
+    print("Native binary size: ")
+    print_int(native_result.len)
+    print(" bytes\n")
+
+    let write_ok = io_write_native_binary(output_path, native_result.bytes, native_result.len)
+    if !write_ok {
+        let trace_ok = io_write_native_decision_trace(
+            multimodule_native_trace_output_path(),
+            target_spec.requested_target,
+            target_spec.resolved_target,
+            native_matrix_mode_string(target_spec.matrix_mode),
+            native_target_source_string(target_spec.source_id),
+            target_spec.fallback_reason,
+            "native",
+            false,
+            ERR_OK()
+        )
+        if !trace_ok {
+            print("Error: Failed to write native decision trace to ")
+            print(multimodule_native_trace_output_path())
+            print("\n")
+            return 1
+        }
+        print("Error: Failed to write native binary to ")
+        print(output_path)
+        print("\n")
+        return 1
+    }
+
+    let trace_ok = io_write_native_decision_trace(
+        multimodule_native_trace_output_path(),
+        target_spec.requested_target,
+        target_spec.resolved_target,
+        native_matrix_mode_string(target_spec.matrix_mode),
+        native_target_source_string(target_spec.source_id),
+        target_spec.fallback_reason,
+        "native",
+        true,
+        ERR_OK()
+    )
+    if !trace_ok {
+        print("Error: Failed to write native decision trace to ")
+        print(multimodule_native_trace_output_path())
+        print("\n")
+        return 1
+    }
+
+    print("Written to ")
+    print(output_path)
+    print("\n")
+    return 0
+}
+
+fn compile_multimodule_native(
+    main_path: string,
+    output_path: string,
+    requested_target: string,
+    requested_matrix: string,
+    explicit_target: bool,
+    gpu_target: string,
+    gpu_binary_format: string,
+    gpu_strict_parity: bool
+) -> i32 with IO, Mut, Div, Panic, Alloc {
+    // WASM backend short-circuit — bypass native ELF path entirely
+    if str_eq(requested_target, "wasm") {
+        let wir = load_multimodule_ir(main_path)
+        if !wir.ok {
+            print("Multi-module IR failed: ")
+            print(wir.error_msg)
+            print("\n")
+            return 1
+        }
+        return compile_multimodule_native_with_ir(
+            main_path,
+            wir.module,
+            output_path,
+            requested_target,
+            requested_matrix,
+            explicit_target,
+            gpu_target,
+            gpu_binary_format,
+            gpu_strict_parity
+        )
     }
 
     let target_spec = native_resolve_target(requested_target, requested_matrix, explicit_target)
