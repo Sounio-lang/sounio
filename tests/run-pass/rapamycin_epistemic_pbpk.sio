@@ -1,0 +1,653 @@
+//@ run-pass
+// Rapamycin (Sirolimus) Epistemic PBPK Test Suite
+//
+// Validates GUM-based uncertainty propagation through a 3-compartment
+// rapamycin model: Blood, Brain (BBB-limited), Peripheral (fast-eq. tissues).
+//
+// Model choice: Distribution-capped 3-compartment (NOT full 14-compartment).
+//   - Brain compartment: kp_brain=0.08 (P-gp efflux at BBB) — PRESERVED accurately
+//   - Peripheral: v_periph=50L, kp_periph=0.5 → t1/2 ~ 21h (tractable for 48h)
+//   - Adipose deep sequestration (kp_adipose~15) excluded by design
+//     (would require multi-week simulation for CL to be observable in AUC)
+//
+// Epistemic parameters:
+//   - cl_hepatic: 12.4 L/h, Var=54.76 (CV=60%, CYP3A4 polymorphism, Ferron 1997)
+//   - kp_brain: 0.08, Var=0.000625 (SD=0.025, P-gp efflux, Lampen 1998)
+//   - fu_plasma: 0.08, Var=0.0004 (SD=0.02, 92% bound, Schreiber 1991)
+//
+// GUM step sizes: h = max(1e-6 * |mean|, 1e-2 * SD)  [GPT review correction]
+//
+// Confidence: evidence-quality score [0,1], NOT Beta distribution
+//   (Beta appropriate only for [0,1]-bounded quantities; CL is unbounded)
+//
+// 6 tests:
+//   1. Simulation completes successfully
+//   2. Brain/plasma ratio < 0.15 (P-gp efflux verified)
+//   3. CV(AUC_0_48) > 30% (CYP3A4 inter-individual variability)
+//   4. All epistemic variances > 0
+//   5. AUC(CL/2) > AUC(CL_ref) — causal monotonicity check
+//   6. CL dominates AUC uncertainty: s_cl > 0.5
+
+// ============================================================================
+// MATH HELPERS
+// ============================================================================
+
+fn rp_abs(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+fn rp_sqrt(x: f64) -> f64 {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i = 0
+    while i < 12 {
+        y = (y + x / y) * 0.5
+        i = i + 1
+    }
+    return y
+}
+
+fn rp_max(a: f64, b: f64) -> f64 {
+    if a > b { return a }
+    return b
+}
+
+fn rp_finite(x: f64) -> bool {
+    if x != x { return false }
+    return rp_abs(x) < 1.0e12
+}
+
+// ============================================================================
+// 3-COMPARTMENT STATE AND PARAMETERS
+// ============================================================================
+// Compartments: blood (central), brain (BBB-limited), peripheral (fast tissues)
+
+struct Rp3State {
+    blood: f64,
+    brain: f64,
+    periph: f64,
+}
+
+struct Rp3Params {
+    v_blood: f64,     // L
+    v_brain: f64,     // L
+    v_periph: f64,    // L  (50L: fast-equilibrating muscle+skin+bone)
+    q_brain: f64,     // L/h
+    q_periph: f64,    // L/h
+    kp_brain: f64,    // (P-gp efflux at BBB)
+    kp_periph: f64,   // (capped peripheral distribution)
+    cl_hepatic: f64,  // L/h (CYP3A4-dominated)
+    fu_plasma: f64,   // (protein binding fraction)
+}
+
+fn rp3_zero() -> Rp3State {
+    Rp3State { blood: 0.0, brain: 0.0, periph: 0.0 }
+}
+
+fn rp3_add(a: Rp3State, b: Rp3State) -> Rp3State {
+    Rp3State {
+        blood: a.blood + b.blood,
+        brain: a.brain + b.brain,
+        periph: a.periph + b.periph,
+    }
+}
+
+fn rp3_scale(s: Rp3State, f: f64) -> Rp3State {
+    Rp3State {
+        blood: s.blood * f,
+        brain: s.brain * f,
+        periph: s.periph * f,
+    }
+}
+
+// ============================================================================
+// RAPAMYCIN ODE SYSTEM
+// ============================================================================
+// Blood: dC_b/dt = -[(q_br + q_pr)/v_b] * C_b
+//                 + [q_br/v_b] * C_br/kp_br
+//                 + [q_pr/v_b] * C_pr/kp_pr
+//                 - [cl_eff/v_b] * C_b
+//
+// Brain: dC_br/dt = [q_br/v_br] * (C_b - C_br/kp_br)
+//
+// Periph: dC_pr/dt = [q_pr/v_pr] * (C_b - C_pr/kp_pr)
+//
+// where cl_eff = cl_hepatic * fu_plasma (unbound drug cleared)
+//
+// At pseudo-equilibrium (fast for brain: τ_brain = v_brain/q_brain = 1.4/50 = 0.028h):
+//   C_brain ≈ kp_brain * C_blood
+//   → brain/plasma ratio → kp_brain = 0.08 at quasi-steady state
+
+fn rp3_ode(st: Rp3State, prm: Rp3Params) -> Rp3State {
+    let cl_eff = prm.cl_hepatic * prm.fu_plasma
+
+    let d_blood = (0.0 - (prm.q_brain + prm.q_periph) / prm.v_blood * st.blood)
+                + (prm.q_brain / prm.v_blood * st.brain / prm.kp_brain)
+                + (prm.q_periph / prm.v_blood * st.periph / prm.kp_periph)
+                + (0.0 - cl_eff / prm.v_blood * st.blood)
+
+    let d_brain = (prm.q_brain / prm.v_brain) * (st.blood - st.brain / prm.kp_brain)
+
+    let d_periph = (prm.q_periph / prm.v_periph) * (st.blood - st.periph / prm.kp_periph)
+
+    Rp3State { blood: d_blood, brain: d_brain, periph: d_periph }
+}
+
+// ============================================================================
+// RK4 INTEGRATOR (4th-order, fixed step)
+// ============================================================================
+
+fn rp3_rk4(st: Rp3State, prm: Rp3Params, dt: f64) -> Rp3State {
+    let k1 = rp3_ode(st, prm)
+    let s2 = rp3_add(st, rp3_scale(k1, dt * 0.5))
+    let k2 = rp3_ode(s2, prm)
+    let s3 = rp3_add(st, rp3_scale(k2, dt * 0.5))
+    let k3 = rp3_ode(s3, prm)
+    let s4 = rp3_add(st, rp3_scale(k3, dt))
+    let k4 = rp3_ode(s4, prm)
+
+    let weighted = rp3_add(k1,
+        rp3_add(rp3_scale(k2, 2.0),
+        rp3_add(rp3_scale(k3, 2.0), k4)))
+    rp3_add(st, rp3_scale(weighted, dt / 6.0))
+}
+
+// ============================================================================
+// PK METRICS STRUCT AND SIMULATION
+// ============================================================================
+
+struct Rp3Metrics {
+    cmax: f64,        // max blood conc (mg/L) — for IV = initial, CL-independent
+    auc_0_48: f64,    // AUC(0-48h) trapezoidal (mg·h/L) — CL-sensitive for t1/2~21h
+    brain_final: f64, // brain conc at t_end (mg/L)
+    blood_final: f64, // blood conc at t_end (mg/L)
+    success: bool,
+}
+
+fn rp3_metrics_empty() -> Rp3Metrics {
+    Rp3Metrics {
+        cmax: 0.0, auc_0_48: 0.0, brain_final: 0.0, blood_final: 0.0, success: false
+    }
+}
+
+fn run_rp3(prm: Rp3Params, dose_mg: f64, t_end: f64) -> Rp3Metrics with Mut, Div, Panic {
+    let c0 = dose_mg / prm.v_blood
+    var st = Rp3State { blood: c0, brain: 0.0, periph: 0.0 }
+    var t = 0.0
+    let dt = 0.1    // 0.1h step — appropriate for t1/2 ~ 21h
+    var cmax = c0
+    var auc = 0.0
+    var c_prev = c0
+
+    while t < t_end {
+        let dt_use = if t + dt > t_end { t_end - t } else { dt }
+        st = rp3_rk4(st, prm, dt_use)
+
+        if st.blood > cmax { cmax = st.blood }
+        auc = auc + (c_prev + st.blood) * 0.5 * dt_use
+        c_prev = st.blood
+        t = t + dt_use
+    }
+
+    Rp3Metrics {
+        cmax: cmax,
+        auc_0_48: auc,
+        brain_final: st.brain,
+        blood_final: st.blood,
+        success: rp_finite(cmax) && rp_finite(auc) && auc > 0.0,
+    }
+}
+
+// ============================================================================
+// REFERENCE PARAMETERS (mean values, distribution-capped model)
+// ============================================================================
+// Note on t1/2 with these parameters:
+//   cl_eff = 12.4 * 0.08 = 0.992 L/h
+//   Vd_ss = v_blood + v_periph * kp_periph + v_brain * kp_brain
+//          = 5 + 50 * 0.5 + 1.4 * 0.08
+//          = 5 + 25 + 0.112 = 30.1 L
+//   ke = cl_eff / Vd_ss = 0.992 / 30.1 = 0.033 /h
+//   t1/2 = 0.693 / 0.033 = 21h
+//
+// In 48h: exp(-0.033 * 48) = 0.206 → ~79% eliminated → AUC well-defined
+
+fn rp3_mean_params() -> Rp3Params {
+    // q_brain: MEMBRANE-LIMITED (not perfusion-limited) BBB transport.
+    //   Rapamycin is a P-gp substrate: P-gp efflux is the rate-limiting step,
+    //   not cerebral blood flow. Effective permeability-surface product (PS_brain)
+    //   for P-gp substrates is ~0.01-0.1 L/h (vs. total perfusion ~50 L/h).
+    //
+    //   Using q_brain=0.05 L/h:
+    //   - λ_brain = q_brain/v_brain * (1+1/kp_brain) = 0.05/1.4 * 13.5 = 0.48 /h
+    //   - λ_periph = q_periph/v_periph / kp_periph = 87/50/0.5 = 3.48 /h
+    //   - λ_max ≈ 21 /h (blood-periph fast mode)
+    //   - RK4 stability: dt < 2.83/21 = 0.13h → dt=0.1h is stable ✓
+    //
+    //   Contrast: q_brain=50 gives λ_brain=456/h → RK4 unstable with dt=0.1h
+    //             (requires dt < 0.006h for stability)
+    Rp3Params {
+        v_blood: 5.0,
+        v_brain: 1.4,
+        v_periph: 50.0,
+        q_brain: 0.05,     // L/h PS_brain for P-gp substrate (membrane-limited BBB)
+        q_periph: 87.0,
+        kp_brain: 0.08,    // P-gp efflux equilibrium Kp at BBB (Lampen 1998)
+        kp_periph: 0.5,    // Distribution cap for 48h model
+        cl_hepatic: 12.4,  // L/h (CYP3A4, Ferron 1997)
+        fu_plasma: 0.08,   // Protein binding (Schreiber 1991)
+    }
+}
+
+// ============================================================================
+// EPISTEMIC PRIORS
+// ============================================================================
+// Confidence is evidence-quality score [0,1], NOT Beta posterior.
+// CL and Ka are unbounded (0,∞) — Beta is inappropriate here.
+// fu (0,1) could use Beta, but for API consistency we use the same score.
+//
+// Score heuristic:
+//   0.55: limited in vitro data, indirect measurement
+//   0.65: in vivo, single population study, n=15-30
+//   0.72: well-characterized in vitro, replicated
+
+struct Rp3Priors {
+    cl_mean: f64,       cl_var: f64,       cl_conf: f64,
+    kp_brain_mean: f64, kp_brain_var: f64, kp_brain_conf: f64,
+    fu_mean: f64,       fu_var: f64,       fu_conf: f64,
+}
+
+fn rp3_priors() -> Rp3Priors {
+    Rp3Priors {
+        cl_mean: 12.4,    cl_var: 54.76,     cl_conf: 0.65,
+        kp_brain_mean: 0.08, kp_brain_var: 0.000625, kp_brain_conf: 0.55,
+        fu_mean: 0.08,    fu_var: 0.0004,    fu_conf: 0.72,
+    }
+}
+
+// ============================================================================
+// FINITE DIFFERENCE STEP SIZE (GUM-robust, from GPT review)
+// h = max(1e-6 * |mean|, 1e-2 * SD)
+// ============================================================================
+
+fn rp3_fdiff_h(mean: f64, var: f64) -> f64 {
+    let h_rel = 1.0e-6 * rp_abs(mean)
+    let h_abs = 0.01 * rp_sqrt(var)
+    return rp_max(h_rel, h_abs)
+}
+
+// ============================================================================
+// EPISTEMIC RESULT STRUCT
+// ============================================================================
+
+struct EpistemicRp3 {
+    auc_mean: f64,
+    auc_var: f64,
+    auc_conf: f64,
+
+    bpr_mean: f64,    // brain/plasma ratio at t_end
+    bpr_var: f64,
+    bpr_conf: f64,
+
+    // AUC sensitivity fractions (fractional variance contributions, sum ~ 1)
+    s_cl: f64,    // CL contribution to AUC variance
+    s_kp: f64,    // kp_brain contribution to AUC variance
+    s_fu: f64,    // fu_plasma contribution to AUC variance
+
+    success: bool,
+}
+
+fn ep_rp3_empty() -> EpistemicRp3 {
+    EpistemicRp3 {
+        auc_mean: 0.0, auc_var: 0.0, auc_conf: 0.0,
+        bpr_mean: 0.0, bpr_var: 0.0, bpr_conf: 0.0,
+        s_cl: 0.0, s_kp: 0.0, s_fu: 0.0,
+        success: false,
+    }
+}
+
+// ============================================================================
+// SIMULATE EPISTEMIC PBPK
+// ============================================================================
+// Must come AFTER all helpers (no forward refs in Sounio)
+
+fn simulate_epistemic_rp3(
+    priors: Rp3Priors,
+    dose_mg: f64,
+    t_end: f64,
+) -> EpistemicRp3 with Mut, Div, Panic {
+    let prm_ref = rp3_mean_params()
+
+    // Reference simulation
+    let ref_m = run_rp3(prm_ref, dose_mg, t_end)
+    if ref_m.success == false {
+        return ep_rp3_empty()
+    }
+
+    let auc_ref = ref_m.auc_0_48
+    let bpr_ref = if ref_m.blood_final > 1.0e-12 {
+        ref_m.brain_final / ref_m.blood_final
+    } else {
+        0.0
+    }
+
+    // --- Perturbation 1: CL ---
+    let h_cl = rp3_fdiff_h(priors.cl_mean, priors.cl_var)
+    var prm_cl = prm_ref
+    prm_cl.cl_hepatic = prm_ref.cl_hepatic + h_cl
+    let m_cl = run_rp3(prm_cl, dose_mg, t_end)
+    let dauc_dcl = (m_cl.auc_0_48 - auc_ref) / h_cl
+    let bpr_cl_p = if m_cl.blood_final > 1.0e-12 {
+        m_cl.brain_final / m_cl.blood_final
+    } else {
+        0.0
+    }
+    let dbpr_dcl = (bpr_cl_p - bpr_ref) / h_cl
+
+    // --- Perturbation 2: kp_brain ---
+    let h_kp = rp3_fdiff_h(priors.kp_brain_mean, priors.kp_brain_var)
+    var prm_kp = prm_ref
+    prm_kp.kp_brain = prm_ref.kp_brain + h_kp
+    let m_kp = run_rp3(prm_kp, dose_mg, t_end)
+    let dauc_dkp = (m_kp.auc_0_48 - auc_ref) / h_kp
+    let bpr_kp_p = if m_kp.blood_final > 1.0e-12 {
+        m_kp.brain_final / m_kp.blood_final
+    } else {
+        0.0
+    }
+    let dbpr_dkp = (bpr_kp_p - bpr_ref) / h_kp
+
+    // --- Perturbation 3: fu_plasma ---
+    let h_fu = rp3_fdiff_h(priors.fu_mean, priors.fu_var)
+    var prm_fu = prm_ref
+    prm_fu.fu_plasma = prm_ref.fu_plasma + h_fu
+    let m_fu = run_rp3(prm_fu, dose_mg, t_end)
+    let dauc_dfu = (m_fu.auc_0_48 - auc_ref) / h_fu
+    let bpr_fu_p = if m_fu.blood_final > 1.0e-12 {
+        m_fu.brain_final / m_fu.blood_final
+    } else {
+        0.0
+    }
+    let dbpr_dfu = (bpr_fu_p - bpr_ref) / h_fu
+
+    // --- GUM propagation ---
+    let var_cl = priors.cl_var
+    let var_kp = priors.kp_brain_var
+    let var_fu = priors.fu_var
+
+    let var_auc = dauc_dcl * dauc_dcl * var_cl
+                + dauc_dkp * dauc_dkp * var_kp
+                + dauc_dfu * dauc_dfu * var_fu
+
+    let var_bpr = dbpr_dcl * dbpr_dcl * var_cl
+                + dbpr_dkp * dbpr_dkp * var_kp
+                + dbpr_dfu * dbpr_dfu * var_fu
+
+    // --- Sensitivity fractions for AUC ---
+    let s_cl_auc = if var_auc > 1.0e-30 {
+        dauc_dcl * dauc_dcl * var_cl / var_auc
+    } else {
+        0.0
+    }
+    let s_kp_auc = if var_auc > 1.0e-30 {
+        dauc_dkp * dauc_dkp * var_kp / var_auc
+    } else {
+        0.0
+    }
+    let s_fu_auc = if var_auc > 1.0e-30 {
+        dauc_dfu * dauc_dfu * var_fu / var_auc
+    } else {
+        0.0
+    }
+
+    // --- Evidence-weighted confidence (fractional, NOT Beta combination) ---
+    let conf_auc = priors.cl_conf * s_cl_auc
+                 + priors.kp_brain_conf * s_kp_auc
+                 + priors.fu_conf * s_fu_auc
+
+    // For BPR: kp_brain dominates directly (C_brain ≈ kp_brain * C_blood)
+    let s_kp_bpr = if var_bpr > 1.0e-30 {
+        dbpr_dkp * dbpr_dkp * var_kp / var_bpr
+    } else {
+        0.0
+    }
+    let conf_bpr = priors.kp_brain_conf * s_kp_bpr
+                 + priors.cl_conf * (if var_bpr > 1.0e-30 { dbpr_dcl * dbpr_dcl * var_cl / var_bpr } else { 0.0 })
+                 + priors.fu_conf * (if var_bpr > 1.0e-30 { dbpr_dfu * dbpr_dfu * var_fu / var_bpr } else { 0.0 })
+
+    EpistemicRp3 {
+        auc_mean: auc_ref,
+        auc_var: var_auc,
+        auc_conf: conf_auc,
+        bpr_mean: bpr_ref,
+        bpr_var: var_bpr,
+        bpr_conf: conf_bpr,
+        s_cl: s_cl_auc,
+        s_kp: s_kp_auc,
+        s_fu: s_fu_auc,
+        success: true,
+    }
+}
+
+// ============================================================================
+// MAIN TEST SUITE
+// ============================================================================
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    println("======================================================================")
+    println("  Rapamycin (Sirolimus) Epistemic PBPK Test Suite")
+    println("  3-Compartment: Blood / Brain (BBB, P-gp) / Peripheral (fast)")
+    println("  GUM Linearization: h = max(1e-6|mu|, 1e-2*sigma)")
+    println("  Confidence: evidence-quality score [0,1], NOT Beta posterior")
+    println("======================================================================")
+    println("")
+
+    let priors = rp3_priors()
+    let dose_mg = 5.0     // 5 mg IV bolus
+    let t_end = 48.0      // 48h simulation window
+
+    let ep = simulate_epistemic_rp3(priors, dose_mg, t_end)
+
+    var passed = 0
+    var failed = 0
+
+    // ----------------------------------------------------------------
+    // TEST 1: Simulation completes successfully
+    // ----------------------------------------------------------------
+    println("TEST 1: Simulation completes successfully")
+    if ep.success {
+        println("  [PASS] Reference + 3 perturbed simulations all succeeded")
+        passed = passed + 1
+    } else {
+        println("  FAIL: Simulation failed — check parameter validity")
+        failed = failed + 1
+    }
+    println("")
+
+    // ----------------------------------------------------------------
+    // TEST 2: Brain/plasma ratio < 0.15 (P-gp efflux at BBB)
+    //
+    // Pharmacological basis: rapamycin is a P-glycoprotein substrate.
+    // P-gp efflux at the blood-brain barrier actively removes rapamycin
+    // from brain endothelial cells → CNS penetration severely limited.
+    //
+    // Expected from model: at pseudo-equilibrium (t_brain~1.7 min),
+    //   C_brain ≈ kp_brain * C_blood = 0.08 * C_blood
+    //   → brain/plasma ratio ≈ 0.08 (well below 0.15 threshold)
+    //
+    // Literature: Lampen 1998 measured brain/plasma = 0.07-0.12 in rodents.
+    // This test validates that the model correctly reproduces this property.
+    // ----------------------------------------------------------------
+    println("TEST 2: Brain/plasma ratio < 0.15 (P-gp efflux at BBB)")
+    println("  brain/plasma ratio at t=48h:")
+    println(ep.bpr_mean)
+    if ep.bpr_mean > 0.0 && ep.bpr_mean < 0.15 {
+        println("  [PASS] BBB P-gp efflux correctly limits CNS exposure")
+        passed = passed + 1
+    } else {
+        println("  FAIL: brain/plasma ratio should be 0 < x < 0.15")
+        println("  expected range: [0.06, 0.12] (kp_brain = 0.08)")
+        failed = failed + 1
+    }
+    println("")
+
+    // ----------------------------------------------------------------
+    // TEST 3: CV(AUC_0_48) > 30% — CYP3A4 inter-individual variability
+    //
+    // Pharmacological basis:
+    //   CYP3A4 exhibits enormous inter-individual variability (CV~60%,
+    //   range 10-fold between lowest and highest expressors).
+    //   Rapamycin is almost exclusively metabolized by CYP3A4 → CL CV~60%.
+    //
+    // With t1/2~21h in this model (ke=0.033/h):
+    //   At t=48h: exp(-ke*t_end) = exp(-1.58) ≈ 0.21
+    //   → 79% of dose eliminated → CL strongly influences AUC(0-48)
+    //
+    // GUM estimate: CV(AUC) ≈ CV(CL) * |∂ln(AUC)/∂ln(CL)|
+    //   For t1/2 << t_end: AUC ≈ dose/CL → CV(AUC) ≈ CV(CL) = 60%
+    //   For finite window: slightly attenuated but still > 30%
+    //
+    // Note: For IV bolus, Cmax = dose/v_blood (CL-independent at t=0).
+    //   Using AUC (not Cmax) as the CL-sensitive metric is correct here.
+    //   [GPT review: correct to use AUC for IV bolus epistemic testing]
+    // ----------------------------------------------------------------
+    println("TEST 3: CV(AUC_0_48) > 30% (CYP3A4 variability)")
+    let auc_sd = rp_sqrt(ep.auc_var)
+    let cv_auc = if ep.auc_mean > 1.0e-12 { auc_sd / ep.auc_mean } else { 0.0 }
+    println("  AUC(0-48) mean (mg·h/L):")
+    println(ep.auc_mean)
+    println("  AUC SD:")
+    println(auc_sd)
+    println("  AUC CV:")
+    println(cv_auc)
+    if cv_auc > 0.30 {
+        println("  [PASS] CV(AUC) > 30% — CYP3A4 variability correctly propagated")
+        passed = passed + 1
+    } else {
+        println("  FAIL: CV(AUC) should exceed 30% for rapamycin (CYP3A4 CV=60%)")
+        println("  Possible causes: t_end too short relative to t1/2, or wrong step h")
+        failed = failed + 1
+    }
+    println("")
+
+    // ----------------------------------------------------------------
+    // TEST 4: All epistemic variances > 0
+    //
+    // Validates that GUM propagation actually transferred parameter
+    // uncertainty to output uncertainty. Zero variance would indicate
+    // a degenerate Jacobian (e.g., parameter has no effect on output
+    // in this model/window) or a numerical error.
+    //
+    // Expected:
+    //   - var_auc > 0: CL and fu both affect AUC (confirmed by TEST 3)
+    //   - var_bpr > 0: kp_brain directly sets brain/blood ratio
+    // ----------------------------------------------------------------
+    println("TEST 4: All epistemic variances > 0")
+    println("  auc_var:")
+    println(ep.auc_var)
+    println("  bpr_var:")
+    println(ep.bpr_var)
+    if ep.auc_var > 0.0 && ep.bpr_var > 0.0 {
+        println("  [PASS] GUM propagation transferred uncertainty to all outputs")
+        passed = passed + 1
+    } else {
+        println("  FAIL: Some variance is zero — Jacobian degenerate or too-small h")
+        failed = failed + 1
+    }
+    println("")
+
+    // ----------------------------------------------------------------
+    // TEST 5: AUC(CL/2) > AUC(CL_ref) — causal monotonicity check
+    //
+    // Causal check (not mass conservation): halving CL should increase AUC.
+    // This validates the model's pharmacokinetic causality, independent of
+    // the specific AUC value.
+    //
+    // Pharmacological basis: AUC = dose/CL (linear PK, 1-compartment approx)
+    //   → AUC scales inversely with CL
+    //   → CL/2 → AUC * 2 (approximately)
+    //
+    // [GPT review: testing causal monotonicity is more robust than equality]
+    // ----------------------------------------------------------------
+    println("TEST 5: AUC(CL/2) > AUC(CL_ref) (causal monotonicity)")
+    var prm_low_cl = rp3_mean_params()
+    prm_low_cl.cl_hepatic = priors.cl_mean * 0.5
+    let m_low_cl = run_rp3(prm_low_cl, dose_mg, t_end)
+    println("  AUC(0-48) at CL_ref = 12.4 L/h:")
+    println(ep.auc_mean)
+    println("  AUC(0-48) at CL/2  = 6.2 L/h:")
+    println(m_low_cl.auc_0_48)
+    if m_low_cl.auc_0_48 > ep.auc_mean {
+        println("  [PASS] Halving CL correctly increases AUC (causal PK relationship)")
+        passed = passed + 1
+    } else {
+        println("  FAIL: AUC should increase when CL decreases")
+        failed = failed + 1
+    }
+    println("")
+
+    // ----------------------------------------------------------------
+    // TEST 6: CL dominates AUC uncertainty: s_cl > 0.5
+    //
+    // Sensitivity analysis: CL_hepatic should be the dominant contributor
+    // to AUC variance. This is pharmacologically expected because:
+    //   - CL has the largest variance (SD=7.4, CV=60%)
+    //   - AUC scales with 1/CL (first-order approximation)
+    //   - kp_brain only weakly affects total systemic AUC
+    //   - fu_plasma also contributes (since cl_eff = CL * fu) but less
+    //
+    // Rough analytical estimate:
+    //   s_cl ≈ (1/CL)^2 * Var_CL / Σ[(1/θ_i)^2 * Var_i]
+    //        ≈ (1/12.4)^2 * 54.76 / [(1/12.4)^2 * 54.76 + (1/0.08)^2 * 0.0004]
+    //        = 0.356 / (0.356 + 0.0625)
+    //        ≈ 0.85  (estimate, actual value from nonlinear model may differ)
+    //
+    // Test uses conservative threshold: s_cl > 0.5
+    // ----------------------------------------------------------------
+    println("TEST 6: CL dominates AUC uncertainty (s_cl > 0.5)")
+    println("  Sensitivity fractions for AUC variance:")
+    println("    s_cl  (CL_hepatic):")
+    println(ep.s_cl)
+    println("    s_kp  (kp_brain):")
+    println(ep.s_kp)
+    println("    s_fu  (fu_plasma):")
+    println(ep.s_fu)
+    println("    sum:")
+    println(ep.s_cl + ep.s_kp + ep.s_fu)
+    if ep.s_cl > 0.5 {
+        println("  [PASS] CL correctly identified as dominant AUC uncertainty source")
+        passed = passed + 1
+    } else {
+        println("  FAIL: CL should dominate AUC variance (expected s_cl > 0.5)")
+        println("  CYP3A4 CV=60% should far outweigh other parameter uncertainties")
+        failed = failed + 1
+    }
+    println("")
+
+    // ----------------------------------------------------------------
+    // SUMMARY
+    // ----------------------------------------------------------------
+    println("======================================================================")
+    println("  RAPAMYCIN EPISTEMIC PBPK — TEST SUMMARY")
+    println("======================================================================")
+    println("  Passed:")
+    println(passed)
+    println("  Failed:")
+    println(failed)
+    println("")
+    if failed == 0 {
+        println("  ALL 6 TESTS PASSED")
+        println("")
+        println("  Epistemic PBPK validated for rapamycin CNS distribution.")
+        println("  Key findings confirmed by GUM propagation:")
+        println("    - Brain/plasma ratio < 0.15: P-gp efflux at BBB verified")
+        println("    - CV(AUC) > 30%: CYP3A4 inter-individual variability propagated")
+        println("    - CL dominates AUC uncertainty: TDM clinically justified")
+        println("    - Causal monotonicity: AUC inversely proportional to CL")
+    } else {
+        println("  SOME TESTS FAILED — see diagnostics above")
+    }
+    println("======================================================================")
+
+    return failed
+}
