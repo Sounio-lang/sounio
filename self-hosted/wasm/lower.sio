@@ -803,6 +803,8 @@ fn wasm_lower_field_get(ctx: WasmLowerCtx, instr: IrInstr) -> WasmLowerCtx with 
     if base_local >= 0 {
         out.body = wasm_body_emit_local_get(out.body, base_local)
     }
+    // WASM memory ops take i32 addresses: truncate the i64 pointer.
+    out.body = wasm_body_emit_i32_wrap_i64(out.body)
     // i64.load with alignment 3 (2^3 = 8 byte aligned), offset = field_idx * 8
     out.body = wasm_body_emit_i64_load(out.body, 3, offset)
 
@@ -822,6 +824,8 @@ fn wasm_lower_field_set(ctx: WasmLowerCtx, instr: IrInstr) -> WasmLowerCtx with 
     if base_local >= 0 {
         out.body = wasm_body_emit_local_get(out.body, base_local)
     }
+    // WASM store expects i32 address below the value on the stack.
+    out.body = wasm_body_emit_i32_wrap_i64(out.body)
     if val_local >= 0 {
         out.body = wasm_body_emit_local_get(out.body, val_local)
     }
@@ -991,6 +995,95 @@ fn wasm_lower_return_type(func: IrFunction) -> i64 with Mut, Panic {
         i = i + 1
     }
     0 - 1  // no IrReturn found → void
+}
+
+// ============================================================================
+// f64 param type inference
+// ============================================================================
+// Infers which of a function's param registers are f64 by:
+//   Step 1: seed float_regs from all IrLoadFloat destinations.
+//   Step 2: propagate forward (if any BinOp input is f64, output is f64)
+//           and backward (if BinOp output is f64, both inputs are f64) — 3 passes.
+//   Step 3: check each param_reg against float_regs; emit WASM_TYPE_F64 or I64.
+// Returns a [i64; 32] of WASM type codes, one per param.
+fn wasm_lower_infer_param_types(func: IrFunction) -> [i64; 32] with Mut, Panic {
+    var result: [i64; 32] = [126; 32]  // 0x7e = WASM_TYPE_I64 = 126 (default all i64)
+
+    // Step 1: seed — mark regs written by IrLoadFloat as f64
+    var float_regs: [i64; 512] = [0; 512]
+    var i: i64 = 0
+    while i < func.instr_count && i < 4096 {
+        let instr = func.instrs[i as usize]
+        match instr.op {
+            IrOpcode::IrLoadFloat => {
+                if instr.dst >= 0 && instr.dst < 512 {
+                    float_regs[instr.dst as usize] = 1
+                }
+            }
+            _ => {}
+        }
+        i = i + 1
+    }
+
+    // Step 2: propagate — 3 passes over the instruction stream handles most
+    // programs without needing full fixed-point iteration.
+    var pass: i64 = 0
+    while pass < 3 {
+        i = 0
+        while i < func.instr_count && i < 4096 {
+            let instr = func.instrs[i as usize]
+            match instr.op {
+                IrOpcode::IrBinOp => {
+                    let s1f = instr.src1 >= 0 && instr.src1 < 512
+                              && float_regs[instr.src1 as usize] == 1
+                    let s2f = instr.src2 >= 0 && instr.src2 < 512
+                              && float_regs[instr.src2 as usize] == 1
+                    let df  = instr.dst  >= 0 && instr.dst  < 512
+                              && float_regs[instr.dst  as usize] == 1
+                    // Forward: float input → float output
+                    if (s1f || s2f) && instr.dst >= 0 && instr.dst < 512 {
+                        float_regs[instr.dst as usize] = 1
+                    }
+                    // Backward: float output → float inputs
+                    if df {
+                        if instr.src1 >= 0 && instr.src1 < 512 {
+                            float_regs[instr.src1 as usize] = 1
+                        }
+                        if instr.src2 >= 0 && instr.src2 < 512 {
+                            float_regs[instr.src2 as usize] = 1
+                        }
+                    }
+                }
+                IrOpcode::IrCopy => {
+                    let s1f = instr.src1 >= 0 && instr.src1 < 512
+                              && float_regs[instr.src1 as usize] == 1
+                    let df  = instr.dst  >= 0 && instr.dst  < 512
+                              && float_regs[instr.dst  as usize] == 1
+                    if s1f && instr.dst >= 0 && instr.dst < 512 {
+                        float_regs[instr.dst as usize] = 1
+                    }
+                    if df && instr.src1 >= 0 && instr.src1 < 512 {
+                        float_regs[instr.src1 as usize] = 1
+                    }
+                }
+                _ => {}
+            }
+            i = i + 1
+        }
+        pass = pass + 1
+    }
+
+    // Step 3: assign param types
+    var p: i64 = 0
+    while p < func.param_count && p < 32 {
+        let preg = func.param_regs[p as usize]
+        if preg >= 0 && preg < 512 && float_regs[preg as usize] == 1 {
+            result[p as usize] = 125  // 0x7d = WASM_TYPE_F64
+        }
+        p = p + 1
+    }
+
+    result
 }
 
 // ============================================================================
@@ -1322,10 +1415,11 @@ fn wasm_lower_module(module: IrModule) -> WasmLowerResult with Mut, Panic, Div {
                 ft = wasm_func_type_add_result(ft, WASM_TYPE_I64)
             }
         } else {
-            // Local function: use param_count from IR; infer return type.
+            // Local function: infer param types (i64 vs f64) + return type.
+            let param_types = wasm_lower_infer_param_types(func)
             var p: i64 = 0
             while p < func.param_count {
-                ft = wasm_func_type_add_param(ft, WASM_TYPE_I64)
+                ft = wasm_func_type_add_param(ft, param_types[p as usize])
                 p = p + 1
             }
             let ret_type = wasm_lower_return_type(func)
