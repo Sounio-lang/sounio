@@ -66,6 +66,16 @@ print(f"status={status} reason={reason}")
 PY
 }
 
+contains_literal() {
+  local needle="$1"
+  local file="$2"
+  if command -v rg >/dev/null 2>&1; then
+    rg -F -q "$needle" "$file"
+  else
+    grep -F -q "$needle" "$file"
+  fi
+}
+
 source_blockers_json() {
   python3 - <<'PY' "${@:-}"
 import json
@@ -209,16 +219,16 @@ if [[ ! -f "$SOURCE_FILE" ]]; then
 fi
 
 declare -a source_blockers=()
-if ! rg -F -q 'fn int_to_string(n: i64) -> string with Mut, Panic, Div {' "$SOURCE_FILE"; then
+if ! contains_literal 'fn int_to_string(n: i64) -> string with Mut, Panic, Div {' "$SOURCE_FILE"; then
   source_blockers+=("int_to_string_signature_missing")
 fi
-if ! rg -F -q 'i64_to_string_decimal(n)' "$SOURCE_FILE"; then
+if ! contains_literal 'i64_to_string_decimal(n)' "$SOURCE_FILE"; then
   source_blockers+=("int_to_string_delegate_missing")
 fi
-if ! rg -F -q 'var out: [i8; 24] = [0; 24]' "$SOURCE_FILE"; then
+if ! contains_literal 'var out: [i8; 24] = [0; 24]' "$SOURCE_FILE"; then
   source_blockers+=("i64_to_string_decimal_buffer_missing")
 fi
-if rg -F -q 'result = char_from_i64(ch) + result' "$SOURCE_FILE"; then
+if contains_literal 'result = char_from_i64(ch) + result' "$SOURCE_FILE"; then
   source_blockers+=("legacy_on2_prepend_detected")
 fi
 if [[ "${#source_blockers[@]}" -gt 0 ]]; then
@@ -306,11 +316,11 @@ for c in "${candidates[@]}"; do
   fi
   run_probe_mode "jit" "$c" "$ARITH_PROBE_FIXTURE"
   probe_rc="$(cat "$TMP_DIR/probe.rc")"
-  if [[ "$probe_rc" == "0" ]] && rg -F -q "jit_probe_arith_ok" "$TMP_DIR/probe.out"; then
+  if [[ "$probe_rc" == "0" ]] && contains_literal "jit_probe_arith_ok" "$TMP_DIR/probe.out"; then
     has_jit_capable_candidate=1
     run_probe_mode "jit" "$c" "$STRING_PROBE_FIXTURE"
     str_probe_rc="$(cat "$TMP_DIR/probe.rc")"
-    if [[ "$str_probe_rc" == "0" ]] && rg -F -q "jit_probe_string_ok" "$TMP_DIR/probe.out"; then
+    if [[ "$str_probe_rc" == "0" ]] && contains_literal "jit_probe_string_ok" "$TMP_DIR/probe.out"; then
       jit_runner="$c"
       break
     fi
@@ -321,7 +331,7 @@ for c in "${candidates[@]}"; do
     fi
     continue
   fi
-  if rg -F -q "JIT backend not enabled" "$TMP_DIR/probe.out"; then
+  if contains_literal "JIT backend not enabled" "$TMP_DIR/probe.out"; then
     blockers+=("jit_backend_not_enabled:$c")
   elif [[ "$probe_rc" == "124" ]]; then
     has_jit_capable_candidate=1
@@ -346,7 +356,7 @@ print(json.dumps(vals))
 PY
 )"
   if [[ "$REQUIRE_JIT_RUNNER" == "1" ]]; then
-    if printf '%s\n' "${blockers[@]:-}" | rg -F -q "jit_string_runtime_unavailable:"; then
+    if printf '%s\n' "${blockers[@]:-}" | grep -F -q "jit_string_runtime_unavailable:"; then
       emit_json "fail" "jit_string_runtime_unavailable" "none" "" "" "" "" "$blockers_json"
       exit 0
     fi
@@ -365,7 +375,7 @@ PY
     fi
     run_probe_mode "run" "$c" "$BASE_FIXTURE"
     probe_rc="$(cat "$TMP_DIR/probe.rc")"
-    if [[ "$probe_rc" == "0" ]] && rg -F -q "bench_int_to_string iterations=0" "$TMP_DIR/probe.out"; then
+    if [[ "$probe_rc" == "0" ]] && contains_literal "bench_int_to_string iterations=0" "$TMP_DIR/probe.out"; then
       run_runner="$c"
       break
     fi
@@ -429,11 +439,11 @@ PY
   exit 0
 fi
 
-if ! rg -F -q "bench_int_to_string iterations=0" "$TMP_DIR/bench_base.out"; then
+if ! contains_literal "bench_int_to_string iterations=0" "$TMP_DIR/bench_base.out"; then
   emit_json "not_run" "missing_base_output_marker" "$bench_mode" "$jit_runner" "" "" "" "[\"marker_missing:iterations=0\"]"
   exit 0
 fi
-if ! rg -F -q "bench_int_to_string iterations=1000000" "$TMP_DIR/bench_full.out"; then
+if ! contains_literal "bench_int_to_string iterations=1000000" "$TMP_DIR/bench_full.out"; then
   emit_json "not_run" "missing_full_output_marker" "$bench_mode" "$jit_runner" "" "" "" "[\"marker_missing:iterations=1000000\"]"
   exit 0
 fi

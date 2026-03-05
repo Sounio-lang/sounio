@@ -22,6 +22,16 @@ record_step() {
   printf '%s\t%s\t%s\n' "$name" "$status" "$reason" >> "$STEPS_TSV"
 }
 
+contains_literal() {
+  local needle="$1"
+  local file="$2"
+  if command -v rg >/dev/null 2>&1; then
+    rg -F -q "$needle" "$file"
+  else
+    grep -F -q "$needle" "$file"
+  fi
+}
+
 write_gate_json() {
   python3 - "$STEPS_TSV" "$OUT_JSON" <<'PY'
 import datetime as dt
@@ -164,7 +174,7 @@ EOF
   timeout 30 "$SOUC_BIN" run "$fixture" > "$TMP_DIR/light_self_test.out" 2>&1
   local rc=$?
   set -e
-  if [[ "$rc" == "0" ]] && rg -F -q "sprint1_light_self_test: pass" "$TMP_DIR/light_self_test.out"; then
+  if [[ "$rc" == "0" ]] && contains_literal "sprint1_light_self_test: pass" "$TMP_DIR/light_self_test.out"; then
     record_step "self_test" "pass" "lightweight Sprint1 self-test fixture passed"
   elif [[ "$rc" == "124" ]]; then
     record_step "self_test" "fail" "lightweight Sprint1 self-test fixture timed out"
