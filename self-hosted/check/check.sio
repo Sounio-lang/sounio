@@ -164,6 +164,30 @@ fn print_type_name(ty: TypeEntry) with IO, Mut, Panic, Div, Alloc {
             }
             print(">")
         }
+        TyPolicy => {
+            print("Policy<")
+            match ty.inner {
+                Some(inner) => print_type_name(*inner)
+                None => print("?")
+            }
+            print(">")
+        }
+        TyContest => {
+            print("Contest<")
+            match ty.inner {
+                Some(inner) => print_type_name(*inner)
+                None => print("?")
+            }
+            print(">")
+        }
+        TyRobust => {
+            print("Robust<")
+            match ty.inner {
+                Some(inner) => print_type_name(*inner)
+                None => print("?")
+            }
+            print(">")
+        }
         TyIntervention => {
             print("Intervention<")
             match ty.inner {
@@ -286,7 +310,11 @@ impl Checker {
             print_int(span.end)
         }
         print(": ")
-        print_error_message(code)
+        if got.kind == TypeKind::TyContest && expected.kind != TypeKind::TyContest {
+            print("cannot implicitly coerce contested evidence into this type")
+        } else {
+            print_error_message(code)
+        }
         print("\n   |\n   = expected ")
         print_type_name(expected)
         print("\n   = found ")
@@ -517,6 +545,9 @@ fn print_error_message(code: i64) with IO, Mut, Panic, Div {
     else if code == 55 { print("range endpoints must be integer types") }
     else if code == 56 { print("division by zero detected at compile time") }
     else if code == 57 { print("modulo by zero detected at compile time") }
+    else if code == 58 { print("prove_robust(...) requires Contest<T> and Policy<T> with the same inner type") }
+    else if code == 59 { print("contest expressions require an explicit Contest<T> annotation") }
+    else if code == 63 { print("epistemic wrapper metadata arguments are not implemented in this MVP") }
     else { print("unknown error") }
 }
 
@@ -682,6 +713,15 @@ fn print_error_help(code: i64) with IO, Mut, Panic, Div {
     }
     else if code == 57 {
         print("   |\n   = help: modulo by zero is undefined; check the divisor\n")
+    }
+    else if code == 58 {
+        print("   |\n   = help: call prove_robust(contest_expr, policy_expr) with Contest<T> and Policy<T> over the same T\n")
+    }
+    else if code == 59 {
+        print("   |\n   = help: bind the expression with an explicit type such as `let c: Contest<T> = contest [...] on data`\n")
+    }
+    else if code == 63 {
+        print("   |\n   = help: the current MVP only supports a single wrapped type argument for Policy, Contest, and Robust\n")
     }
     else {
         // No help available for unknown errors
@@ -851,6 +891,15 @@ fn print_error_note(code: i64) with IO, Mut, Panic, Div {
     else if code == 57 {
         print("   = note: integer modulo by zero causes undefined behavior\n")
     }
+    else if code == 58 {
+        print("   = note: unresolved model disagreement remains obstructive until fenced by an explicit robustness proof\n")
+    }
+    else if code == 59 {
+        print("   = note: Contest expressions do not infer a plain result type because that would erase unresolved disagreement\n")
+    }
+    else if code == 63 {
+        print("   = note: extended Contest/Robust metadata arguments are deferred; only the wrapped result type is live in this patch\n")
+    }
     else {
         // No note available for unknown errors
     }
@@ -859,6 +908,44 @@ fn print_error_note(code: i64) with IO, Mut, Panic, Div {
 // ============================================================
 // Borrow checking helpers
 // ============================================================
+
+fn call_expr_is_builtin_prove_robust(opt: Option<Box<Expr>>) -> bool with Mut, Panic, Div, Alloc, IO {
+    match opt {
+        Some(expr) => {
+            if (*expr).kind != ExprKind::ExprIdent {
+                return false
+            }
+            name_matches_str12((*expr).name, 112, 114, 111, 118, 101, 95, 114, 111, 98, 117, 115, 116)
+        }
+        None => false
+    }
+}
+
+fn expr_list_head(opt: Option<Box<ExprList>>) -> Option<Box<Expr>> with Alloc {
+    match opt {
+        Some(list) => Some(Box::new((*list).head))
+        None => None
+    }
+}
+
+fn expr_list_second(opt: Option<Box<ExprList>>) -> Option<Box<Expr>> with Alloc {
+    match opt {
+        Some(list) => {
+            match (*list).tail {
+                Some(rest) => Some(Box::new((*rest).head))
+                None => None
+            }
+        }
+        None => None
+    }
+}
+
+fn contest_model_list_present(opt: Option<Box<ExprList>>) -> bool {
+    match opt {
+        Some(_) => true
+        None => false
+    }
+}
 
 // Extract variable name from unary operand (if it's a simple ident)
 fn unary_operand_name(opt: Option<Box<Expr>>) -> Name {
@@ -976,6 +1063,9 @@ impl Checker {
             TypeTuple => c.lower_tuple_type(te.type_args)
             TypeFn => (c, ty_unknown())
             TypeKnowledge => c.lower_knowledge_type(te.knowledge_info)
+            TypePolicy => c.lower_policy_type(te.type_args, te.span)
+            TypeContest => c.lower_contest_type(te.type_args, te.span)
+            TypeRobust => c.lower_robust_type(te.type_args, te.span)
             TypeIntervention => c.lower_intervention_type(te.knowledge_info)
             TypeCounterfactual => c.lower_counterfactual_type(te.knowledge_info)
             TypeValidated => c.lower_validated_type(te.knowledge_info)
@@ -1102,6 +1192,46 @@ impl Checker {
         match opt {
             Some(info) => check_knowledge_type(self, *info)
             None => (self, ty_error())
+        }
+    }
+
+    fn lower_single_wrapper_arg(self, opt: Option<Box<TypeExprList>>, span: Span) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+        match opt {
+            Some(args) => {
+                let first = (*args).head
+                match (*args).tail {
+                    Some(_) => (self.report_error_at(span, 63, 0, 0, 0), ty_error())
+                    None => self.lower_type_expr(first)
+                }
+            }
+            None => (self.report_error_at(span, 63, 0, 0, 0), ty_error())
+        }
+    }
+
+    fn lower_policy_type(self, opt: Option<Box<TypeExprList>>, span: Span) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+        let pair = self.lower_single_wrapper_arg(opt, span)
+        if pair.1.kind == TypeKind::TyError {
+            pair
+        } else {
+            (pair.0, ty_policy(pair.1, -1))
+        }
+    }
+
+    fn lower_contest_type(self, opt: Option<Box<TypeExprList>>, span: Span) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+        let pair = self.lower_single_wrapper_arg(opt, span)
+        if pair.1.kind == TypeKind::TyError {
+            pair
+        } else {
+            (pair.0, ty_contest(pair.1, -1))
+        }
+    }
+
+    fn lower_robust_type(self, opt: Option<Box<TypeExprList>>, span: Span) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+        let pair = self.lower_single_wrapper_arg(opt, span)
+        if pair.1.kind == TypeKind::TyError {
+            pair
+        } else {
+            (pair.0, ty_robust(pair.1, -1, -1))
         }
     }
 
@@ -1714,7 +1844,7 @@ impl Checker {
         let ann_pair = c.lower_opt_type(s.ty)
         c = ann_pair.0
         let ann_ty = ann_pair.1
-        let init_pair = c.check_opt_expr(s.expr)
+        let init_pair = c.check_binding_init_expr(s.expr, ann_ty)
         c = init_pair.0
         let init_ty = init_pair.1
         // Determine binding type: annotation if present, else init type
@@ -1747,7 +1877,7 @@ impl Checker {
         let ann_pair = c.lower_opt_type(s.ty)
         c = ann_pair.0
         let ann_ty = ann_pair.1
-        let init_pair = c.check_opt_expr(s.expr)
+        let init_pair = c.check_binding_init_expr(s.expr, ann_ty)
         c = init_pair.0
         let init_ty = init_pair.1
         var bind_ty = init_ty
@@ -1870,6 +2000,23 @@ impl Checker {
             None => (self, ty_unit())
         }
     }
+
+    fn check_binding_init_expr(self, opt: Option<Box<Expr>>, ann_ty: TypeEntry) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+        match opt {
+            Some(e) => {
+                if (*e).kind == ExprKind::ExprContest {
+                    if ann_ty.kind == TypeKind::TyContest {
+                        self.check_contest_expr_expected(*e, knowledge_inner(ann_ty))
+                    } else {
+                        self.check_contest_expr_no_annotation(*e)
+                    }
+                } else {
+                    self.check_expr(*e)
+                }
+            }
+            None => (self, ty_unit())
+        }
+    }
 }
 
 // ============================================================
@@ -1939,6 +2086,7 @@ impl Checker {
             ExprCast => c.check_cast_expr(e)
             ExprHandle => c.check_handle_expr(e)
             ExprClosure => c.check_closure_expr(e)
+            ExprContest => c.check_contest_expr_no_annotation(e)
             ExprError => (c, ty_error())
         }
         (result.0.exit_expr_depth(), result.1)
@@ -2464,6 +2612,9 @@ impl Checker {
     // --------------------------------------------------------
 
     fn check_call_expr(self, e: Expr) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+        if call_expr_is_builtin_prove_robust(e.left) {
+            return self.check_prove_robust_expr(e)
+        }
         let callee_pair = self.check_opt_expr(e.left)
         var c = callee_pair.0
         let callee_ty = callee_pair.1
@@ -2489,6 +2640,64 @@ impl Checker {
             c = c.release_call_arg_borrows(e.args, None, call_start_borrows)
             (c, ty_error())
         }
+    }
+
+    fn check_contest_expr_no_annotation(self, e: Expr) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+        let pair = self.check_contest_expr_expected(e, ty_error())
+        (pair.0.report_error_at(e.span, 59, 0, 0, 0), ty_error())
+    }
+
+    fn check_contest_expr_expected(self, e: Expr, expected_inner: TypeEntry) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+        var c = self
+        let subject_pair = c.check_opt_expr(e.left)
+        c = subject_pair.0
+        if !contest_model_list_present(e.args) {
+            c = c.report_error_at(e.span, 58, 0, 0, 0)
+        }
+        if expected_inner.kind == TypeKind::TyError {
+            (c, ty_error())
+        } else {
+            (c, ty_contest(expected_inner, -1))
+        }
+    }
+
+    fn check_prove_robust_expr(self, e: Expr) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+        let first_arg = expr_list_head(e.args)
+        let second_arg = expr_list_second(e.args)
+
+        let policy_pair = self.check_opt_expr(second_arg)
+        var c = policy_pair.0
+        let policy_ty = policy_pair.1
+        if policy_ty.kind != TypeKind::TyPolicy {
+            c = c.report_error_at(e.span, 58, 0, 0, 0)
+            return (c, ty_error())
+        }
+
+        let contest_inner = knowledge_inner(policy_ty)
+        let contest_pair = match first_arg {
+            Some(arg) => {
+                if (*arg).kind == ExprKind::ExprContest {
+                    c.check_contest_expr_expected(*arg, contest_inner)
+                } else {
+                    c.check_expr(*arg)
+                }
+            }
+            None => (c.report_error_at(e.span, 58, 0, 0, 0), ty_error())
+        }
+        c = contest_pair.0
+        let contest_ty = contest_pair.1
+
+        if contest_ty.kind != TypeKind::TyContest {
+            c = c.report_error_at(e.span, 58, 0, 0, 0)
+            return (c, ty_error())
+        }
+
+        if !types_compatible(knowledge_inner(contest_ty), contest_inner) {
+            c = c.report_error_at(e.span, 58, 0, 0, 0)
+            return (c, ty_error())
+        }
+
+        (c, ty_robust(contest_inner, -1, -1))
     }
 
     fn borrow_state_and_shared_count(self, name: Name) -> (i64, i64) with Mut, Panic, Div, Alloc, IO {

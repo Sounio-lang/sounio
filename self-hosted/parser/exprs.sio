@@ -237,6 +237,8 @@ impl Parser {
             self.parse_closure_expr()
         } else if k == TokenKind::PipePipe {
             self.parse_closure_no_params()
+        } else if k == TokenKind::ContestLower {
+            self.parse_contest_expr()
         }
         // Identifier (variable, function name, enum path, struct literal)
         else if k == TokenKind::Ident {
@@ -320,6 +322,46 @@ impl Parser {
         var e = mk_expr(ExprKind::ExprCharLit, span)
         e.int_val = tok.int_value
         (p, e)
+    }
+
+    fn parse_contest_expr(self) -> (Parser, Expr) with Mut, IO, Panic, Div, Alloc {
+        let start = self.current_span()
+        var p = self.advance()  // skip contest
+        p = p.expect(TokenKind::LBracket)
+
+        var rev_models_opt: Option<Box<ExprList>> = None
+        if p.peek() != TokenKind::RBracket {
+            let first_pair = p.parse_contest_model_expr()
+            p = first_pair.0
+            rev_models_opt = Some(Box::new(ExprList { head: first_pair.1, tail: None }))
+
+            while p.peek() == TokenKind::Comma {
+                p = p.advance()
+                let next_pair = p.parse_contest_model_expr()
+                p = next_pair.0
+                rev_models_opt = Some(Box::new(ExprList { head: next_pair.1, tail: rev_models_opt }))
+            }
+        }
+
+        p = p.expect(TokenKind::RBracket)
+        p = p.expect(TokenKind::On)
+        let subject_pair = p.parse_expr()
+        p = subject_pair.0
+
+        let span = p.span_from(start)
+        var e = mk_expr(ExprKind::ExprContest, span)
+        e.args = reverse_expr_list_opt(rev_models_opt)
+        e.left = Some(Box::new(subject_pair.1))
+        (p, e)
+    }
+
+    fn parse_contest_model_expr(self) -> (Parser, Expr) with Mut, IO, Panic, Div {
+        let start = self.current_span()
+        let pair = self.parse_type_path()
+        let span = pair.0.span_from(start)
+        var e = mk_expr(ExprKind::ExprPath, span)
+        e.path = pair.1
+        (pair.0, e)
     }
 
     // ============================================================
@@ -1132,13 +1174,22 @@ fn path_first_is_kaxi(path: AstPath) -> bool {
     seg.head_buf[3] == 73 as i8     // I
 }
 
+fn exprs_copy_string_list_to_name(seg: StringList) -> Name with Mut, Panic, Div {
+    var n = Name { buf: [0; 128], len: seg.head_len }
+    var i: i64 = 0
+    while i < seg.head_len && i < 128 {
+        n.buf[i] = seg.head_buf[i]
+        i = i + 1
+    }
+    n
+}
+
 fn path_last_name(path: AstPath) -> Name with Mut, Panic, Div, Alloc {
     if path.seg_count <= 0 {
         return empty_name()
     }
     if path.seg_count == 1 {
-        let seg = path.segments
-        return Name { buf: seg.head_buf, len: seg.head_len }
+        return exprs_copy_string_list_to_name(path.segments)
     }
     string_list_last_name(path.segments)
 }
@@ -1146,7 +1197,7 @@ fn path_last_name(path: AstPath) -> Name with Mut, Panic, Div, Alloc {
 fn string_list_last_name(list: StringList) -> Name with Mut, Panic, Div, Alloc {
     match list.tail {
         Some(rest) => string_list_last_name(*rest),
-        _ => Name { buf: list.head_buf, len: list.head_len },
+        _ => exprs_copy_string_list_to_name(list),
     }
 }
 
