@@ -5,7 +5,13 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
-SOUC="${SOUNIO_SOUC:-$ROOT_DIR/target/debug/souc}"
+if [ -n "${SOUNIO_SOUC:-}" ]; then
+  SOUC="$SOUNIO_SOUC"
+else
+  # shellcheck source=/dev/null
+  source "$ROOT_DIR/scripts/lib/resolve_souc.sh"
+  SOUC="$SOUC_BIN"
+fi
 OUT_JSON="${SOUNIO_SPRINT7_GATE_OUT:-$ROOT_DIR/artifacts/sprint7/prove_robust_gate.v1.json}"
 TIMEOUT_SECS="${SOUNIO_SPRINT7_TIMEOUT_SECS:-60}"
 
@@ -21,7 +27,7 @@ record() {
   printf '%s\t%s\t%s\n' "$name" "$status" "$reason" >> "$CASES_TSV"
 }
 
-# Case 1: souc check self-hosted/compiler/main.sio passes
+# Case 1: souc check self-hosted/compiler/main.sio passes (no regressions)
 set +e
 timeout "$TIMEOUT_SECS" "$SOUC" check self-hosted/compiler/main.sio > /tmp/sprint7_check_main.log 2>&1
 rc=$?
@@ -79,6 +85,7 @@ if [ -f "tests/frontend/prove_robust_basic.sio" ] \
 else
   record "fixture_prove_robust_basic" "fail" "file_missing_or_syntax_absent"
 fi
+
 
 python3 - "$OUT_JSON" "$CASES_TSV" "$SOUC" "$TIMEOUT_SECS" << 'PY'
 import json, datetime as dt, sys
