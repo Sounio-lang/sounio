@@ -1149,6 +1149,18 @@ fn call_expr_is_builtin_validate_manifest(opt: Option<Box<Expr>>) -> bool with M
     }
 }
 
+fn call_expr_is_builtin_measure(opt: Option<Box<Expr>>) -> bool with Mut, Panic, Div, Alloc, IO {
+    match opt {
+        Some(expr) => {
+            if (*expr).kind != ExprKind::ExprIdent {
+                return false
+            }
+            name_matches_str7((*expr).name, 109, 101, 97, 115, 117, 114, 101)
+        }
+        None => false
+    }
+}
+
 fn call_expr_is_builtin_lift_knowledge(opt: Option<Box<Expr>>) -> bool with Mut, Panic, Div, Alloc, IO {
     match opt {
         Some(expr) => {
@@ -1386,7 +1398,7 @@ impl Checker {
             TypeRobust => c.lower_robust_type(te.type_args, te.span)
             TypeIntervention => c.lower_intervention_type(te.knowledge_info)
             TypeCounterfactual => c.lower_counterfactual_type(te.knowledge_info)
-            TypeValidated => c.lower_validated_type(te.knowledge_info)
+            TypeValidated => c.lower_validated_type(te.type_args, te.knowledge_info, te.span)
             TypeRefinement => c.lower_refinement_type(te.refinement_info)
         }
         (result.0.exit_type_depth(), result.1)
@@ -1567,10 +1579,22 @@ impl Checker {
         }
     }
 
-    fn lower_validated_type(self, opt: Option<Box<KnowledgeTypeInfo>>) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+    fn lower_validated_type(
+        self,
+        type_args: Option<Box<TypeExprList>>,
+        opt: Option<Box<KnowledgeTypeInfo>>,
+        span: Span
+    ) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
         match opt {
             Some(info) => check_validated_type(self, *info)
-            None => (self, ty_error())
+            None => {
+                let pair = self.lower_single_wrapper_arg(type_args, span)
+                if pair.1.kind == TypeKind::TyError {
+                    pair
+                } else {
+                    (pair.0, ty_validated(pair.1, -1.0))
+                }
+            }
         }
     }
 
@@ -2222,22 +2246,17 @@ impl Checker {
 
     fn check_let_stmt(self, s: Stmt) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
         var c = self
-        println("debug: check_let_stmt start")
         c.last_literal_kind = 0  // reset before checking init expr
         let ann_pair = c.lower_opt_type(s.ty)
         c = ann_pair.0
         let ann_ty = ann_pair.1
-        println("debug: check_let_stmt lowered annotation")
         let init_pair = c.check_binding_init_expr(s.expr, ann_ty)
         c = init_pair.0
         let init_ty = init_pair.1
-        println("debug: check_let_stmt checked init")
         // Determine binding type: annotation if present, else init type
         var bind_ty = init_ty
         if ann_ty.kind != TypeKind::TyUnknown {
-            println("debug: check_let_stmt comparing types")
             if !types_compatible(init_ty, ann_ty) {
-                println("debug: check_let_stmt reporting mismatch")
                 c = c.report_mismatch(s.span, 1, ann_ty, init_ty)
             }
             if ann_ty.kind == TypeKind::TyContest && init_ty.kind == TypeKind::TyContest && ann_ty.epistemic_meta_id < 0 {
@@ -2246,7 +2265,6 @@ impl Checker {
                 bind_ty = ann_ty
             }
         }
-        println("debug: check_let_stmt post-bind-type")
         // Validate refinement predicate on literal initializers
         c = c.check_refinement_literal(s.span, bind_ty)
         let const_pair = eval_const_int_opt_expr(c, s.expr)
@@ -2260,7 +2278,6 @@ impl Checker {
         // Track variable for borrow checking (linear if struct is declared linear)
         let lin = c.is_linear_type(bind_ty)
         c.borrows = c.borrows.track(s.name, lin)
-        println("debug: check_let_stmt done")
         (c, ty_unit())
     }
 
@@ -3010,7 +3027,6 @@ impl Checker {
 
     fn check_call_expr(self, e: Expr) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
         if call_expr_is_builtin_prove_robust(e.left) {
-            println("debug: check_call_expr builtin prove_robust")
             return self.check_prove_robust_expr(e)
         }
         if call_expr_is_builtin_validate_manifest(e.left) {
@@ -3018,6 +3034,9 @@ impl Checker {
         }
         if call_expr_is_builtin_lift_knowledge(e.left) {
             return self.check_lift_knowledge_expr(e)
+        }
+        if call_expr_is_builtin_measure(e.left) {
+            return self.check_measure_expr(e)
         }
         let callee_pair = self.check_opt_expr(e.left)
         var c = callee_pair.0
@@ -3069,14 +3088,12 @@ impl Checker {
     }
 
     fn check_prove_robust_expr(self, e: Expr) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
-        println("debug: check_prove_robust_expr start")
         let first_arg = expr_list_head(e.args)
         let second_arg = expr_list_second(e.args)
 
         let policy_pair = self.check_opt_expr(second_arg)
         var c = policy_pair.0
         let policy_ty = policy_pair.1
-        println("debug: check_prove_robust_expr checked policy")
         if policy_ty.kind != TypeKind::TyPolicy {
             c = c.report_error_at(e.span, 58, 0, 0, 0)
             return (c, ty_error())
@@ -3091,7 +3108,6 @@ impl Checker {
         let contest_inner = knowledge_inner(policy_ty)
         let contest_pair = match first_arg {
             Some(arg) => {
-                println("debug: check_prove_robust_expr checking contest arg")
                 if (*arg).kind == ExprKind::ExprContest {
                     c.check_contest_expr_expected(*arg, contest_inner)
                 } else {
@@ -3102,7 +3118,6 @@ impl Checker {
         }
         c = contest_pair.0
         let contest_ty = contest_pair.1
-        println("debug: check_prove_robust_expr checked contest arg")
 
         if contest_ty.kind != TypeKind::TyContest {
             c = c.report_error_at(e.span, 58, 0, 0, 0)
@@ -3114,6 +3129,10 @@ impl Checker {
             return (c, ty_error())
         }
 
+        if policy_info.requirement_count == 0 {
+            return (c, ty_robust(contest_inner, -1, -1))
+        }
+
         let req_pair = check_policy_requirements_against_contest(
             c,
             e.span,
@@ -3122,12 +3141,10 @@ impl Checker {
             contest_ty.epistemic_meta_id
         )
         c = req_pair.0
-        println("debug: check_prove_robust_expr checked requirements")
         if !req_pair.1 {
             return (c, ty_error())
         }
 
-        println("debug: check_prove_robust_expr done")
         (c, ty_robust(contest_inner, -1, -1))
     }
 
@@ -3161,6 +3178,16 @@ impl Checker {
         }
         let inner_ty = knowledge_inner(k_ty)
         (c, ty_contest(inner_ty, k_ty.epistemic_meta_id))
+    }
+
+    fn check_measure_expr(self, e: Expr) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+        // measure(v: T, uncertainty: f64) -> Knowledge<T>
+        // Type-check first arg; T = type of value; result = Knowledge<T> with epsilon=-1 (unspecified)
+        let first_arg = expr_list_head(e.args)
+        let v_pair = self.check_opt_expr(first_arg)
+        let c = v_pair.0
+        let v_ty = v_pair.1
+        (c, ty_knowledge(v_ty, 0.0 - 1.0))
     }
 
     fn borrow_state_and_shared_count(self, name: Name) -> (i64, i64) with Mut, Panic, Div, Alloc, IO {
