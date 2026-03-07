@@ -53,6 +53,16 @@ has_literal() {
   fi
 }
 
+matches_regex() {
+  local pattern="$1"
+  local log_path="$2"
+  if command -v rg >/dev/null 2>&1; then
+    rg -q "$pattern" "$log_path"
+  else
+    grep -E -q -- "$pattern" "$log_path"
+  fi
+}
+
 run_cmd_case() {
   local name="$1"
   local log_path="$2"
@@ -212,9 +222,9 @@ run_source_fixture_contract_case() {
   local has_main_sig
   has_main_sig="$(marker_bool "fn main() -> i64 {" "$SOURCE_FILE")"
   local has_zero_expr
-  has_zero_expr="$(rg -n '^[[:space:]]*0[[:space:]]*$' "$SOURCE_FILE" >/dev/null 2>&1 && printf '1' || printf '0')"
+  has_zero_expr="$(matches_regex '^[[:space:]]*0[[:space:]]*$' "$SOURCE_FILE" >/dev/null 2>&1 && printf '1' || printf '0')"
   local has_forbidden_top
-  has_forbidden_top="$(rg -n '^[[:space:]]*(use|module|import)[[:space:]]+' "$SOURCE_FILE" >/dev/null 2>&1 && printf '1' || printf '0')"
+  has_forbidden_top="$(matches_regex '^[[:space:]]*(use|module|import)[[:space:]]+' "$SOURCE_FILE" >/dev/null 2>&1 && printf '1' || printf '0')"
 
   local markers
   markers="{\"bytes\":$bytes,\"lines\":$lines,\"has_main_sig\":$has_main_sig,\"has_zero_expr\":$has_zero_expr,\"has_forbidden_top\":$has_forbidden_top}"
