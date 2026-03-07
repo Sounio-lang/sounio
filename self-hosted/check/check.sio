@@ -17,6 +17,16 @@ const MAX_BORROW_ENTRIES: i64 = 2048
 const MAX_SCOPE_DEPTH: i64 = 256
 const MAX_REFINEMENT_ENTRIES: i64 = 128
 const MAX_CONST_INT_BINDINGS: i64 = 4096
+const ROBUST_LEVEL_FRAGILE: i64 = 0
+const ROBUST_LEVEL_CONDITIONAL: i64 = 1
+const ROBUST_LEVEL_STABLE: i64 = 2
+const ROBUST_LEVEL_STRONG: i64 = 3
+const ROBUST_LEVEL_INVARIANT: i64 = 4
+const ROBUST_SCOPE_IN_DISTRIBUTION: i64 = 0
+const ROBUST_SCOPE_EXTRAPOLATIVE: i64 = 1
+const ROBUST_SCOPE_SUBGROUP_SPECIFIC: i64 = 2
+const ROBUST_SCOPE_IDENTIFIED_FAMILY: i64 = 3
+const ROBUST_SCOPE_TRANSPORTED_DOMAIN: i64 = 4
 
 // ============================================================
 // Checker state
@@ -30,8 +40,15 @@ struct Checker {
     structs: StructTable,
     enums: EnumTable,
     fn_sigs: FnSigTable,
+    models: ModelTable,
+    model_families: ModelFamilyTable,
     policies: PolicyTable,
+    validations: ValidationPolicyTable,
     contests: ContestTable,
+    mechanistic_reports: MechanisticReportTable,
+    counterexamples: CounterexampleTable,
+    robust_proofs: RobustProofTable,
+    validated_manifests: ValidatedManifestTable,
     error_count: i64,
     had_error: bool,
     current_return_type: TypeEntry,
@@ -63,8 +80,15 @@ fn checker_new() -> Checker with Mut, Panic, Div {
         structs: struct_table_new(),
         enums: enum_table_new(),
         fn_sigs: fn_sig_table_new(),
+        models: model_table_new(),
+        model_families: model_family_table_new(),
         policies: policy_table_new(),
+        validations: validation_policy_table_new(),
         contests: contest_table_new(),
+        mechanistic_reports: mechanistic_report_table_new(),
+        counterexamples: counterexample_table_new(),
+        robust_proofs: robust_proof_table_new(),
+        validated_manifests: validated_manifest_table_new(),
         error_count: 0,
         had_error: false,
         current_return_type: ty_unit(),
@@ -168,6 +192,20 @@ fn print_type_name(ty: TypeEntry) with IO, Mut, Panic, Div, Alloc {
             }
             print(">")
         }
+        TyModel => {
+            print("Model<")
+            print_type_name(type_entry_list_get(ty.tuple_elems, 0))
+            print(", ")
+            print_type_name(type_entry_list_get(ty.tuple_elems, 1))
+            print(">")
+        }
+        TyModelFamily => {
+            print("ModelFamily<")
+            print_type_name(type_entry_list_get(ty.tuple_elems, 0))
+            print(", ")
+            print_type_name(type_entry_list_get(ty.tuple_elems, 1))
+            print(">")
+        }
         TyPolicy => {
             print("Policy<")
             match ty.inner {
@@ -190,6 +228,12 @@ fn print_type_name(ty: TypeEntry) with IO, Mut, Panic, Div, Alloc {
                 Some(inner) => print_type_name(*inner)
                 None => print("?")
             }
+            if ty.robustness_level_id >= 0 || ty.robustness_scope_id >= 0 {
+                print(", level=")
+                print_int(ty.robustness_level_id)
+                print(", scope=")
+                print_int(ty.robustness_scope_id)
+            }
             print(">")
         }
         TyIntervention => {
@@ -210,6 +254,14 @@ fn print_type_name(ty: TypeEntry) with IO, Mut, Panic, Div, Alloc {
         }
         TyValidated => {
             print("Validated<")
+            match ty.inner {
+                Some(inner) => print_type_name(*inner)
+                None => print("?")
+            }
+            print(">")
+        }
+        TyValidation => {
+            print("Validation<")
             match ty.inner {
                 Some(inner) => print_type_name(*inner)
                 None => print("?")
@@ -437,7 +489,7 @@ impl Checker {
         var c = self
         c.error_count = c.error_count + 1
         c.had_error = true
-        print("error[E067]")
+        print("error[E072]")
         if span.start > 0 || span.end > 0 {
             print(" at ")
             print_int(span.start)
@@ -471,7 +523,7 @@ impl Checker {
         var c = self
         c.error_count = c.error_count + 1
         c.had_error = true
-        print("error[E068]")
+        print("error[E073]")
         if span.start > 0 || span.end > 0 {
             print(" at ")
             print_int(span.start)
@@ -501,6 +553,204 @@ impl Checker {
             }
         }
         print("   = help: narrow the admissible model family with explicit justification, or strengthen the policy diagnostics before promotion\n")
+        c
+    }
+
+    fn report_missing_model_family_metadata(self, span: Span) -> Checker with Mut, IO, Panic, Div {
+        var c = self
+        c.error_count = c.error_count + 1
+        c.had_error = true
+        print("error[E069]")
+        if span.start > 0 || span.end > 0 {
+            print(" at ")
+            print_int(span.start)
+            print("..")
+            print_int(span.end)
+        }
+        print(": Contest<T, Family, Policy> requires a declared models family\n")
+        print("   |\n   = help: declare `models Name = [M1, M2, ...]` and reference that family in Contest<...>\n")
+        print("   = note: shorthand Contest<T> remains parser-compatible, but it cannot discharge robustness obligations\n")
+        c
+    }
+
+    fn report_model_family_mismatch(self, span: Span, family: ModelFamilyInfo, contest_info: ContestInfo) -> Checker with Mut, IO, Panic, Div {
+        var c = self
+        c.error_count = c.error_count + 1
+        c.had_error = true
+        print("error[E070]")
+        if span.start > 0 || span.end > 0 {
+            print(" at ")
+            print_int(span.start)
+            print("..")
+            print_int(span.end)
+        }
+        print(": contest model list does not match the declared family\n")
+        print("   |\n   = declared family ")
+        print_name_value(family.name)
+        print(" = [")
+        var i: i64 = 0
+        while i < family.model_count && i < 16 {
+            if i > 0 { print(", ") }
+            print_name_value(family.model_names[i as usize])
+            i = i + 1
+        }
+        print("]\n   = found contest [")
+        i = 0
+        while i < contest_info.model_count && i < 16 {
+            if i > 0 { print(", ") }
+            print_name_value(contest_info.model_names[i as usize])
+            i = i + 1
+        }
+        print("]\n")
+        print("   = help: keep the inline contest list identical to the named family in both membership and order\n")
+        c
+    }
+
+    fn report_model_type_incompatibility(self, span: Span, model_name: Name, got: TypeEntry) -> Checker with Mut, IO, Panic, Div, Alloc {
+        var c = self
+        c.error_count = c.error_count + 1
+        c.had_error = true
+        print("error[E071]")
+        if span.start > 0 || span.end > 0 {
+            print(" at ")
+            print_int(span.start)
+            print("..")
+            print_int(span.end)
+        }
+        print(": model family members must be declared as Model<I, O>\n")
+        print("   |\n   = member ")
+        print_name_value(model_name)
+        print(" has type ")
+        print_type_name(got)
+        print("\n   = help: declare the model alias as `type ")
+        print_name_value(model_name)
+        print(" = Model<Input, Output>` before using it in a models family\n")
+        c
+    }
+
+    fn report_model_family_member_mismatch(
+        self,
+        span: Span,
+        model_name: Name,
+        expected_input: TypeEntry,
+        expected_output: TypeEntry,
+        got_input: TypeEntry,
+        got_output: TypeEntry
+    ) -> Checker with Mut, IO, Panic, Div, Alloc {
+        var c = self
+        c.error_count = c.error_count + 1
+        c.had_error = true
+        print("error[E071]")
+        if span.start > 0 || span.end > 0 {
+            print(" at ")
+            print_int(span.start)
+            print("..")
+            print_int(span.end)
+        }
+        print(": model family members must share the same Model<I, O> signature\n")
+        print("   |\n   = member ")
+        print_name_value(model_name)
+        print(" has Model<")
+        print_type_name(got_input)
+        print(", ")
+        print_type_name(got_output)
+        print(">\n   = expected Model<")
+        print_type_name(expected_input)
+        print(", ")
+        print_type_name(expected_output)
+        print(">\n")
+        c
+    }
+
+    fn report_missing_validation_policy(self, span: Span) -> Checker with Mut, IO, Panic, Div {
+        var c = self
+        c.error_count = c.error_count + 1
+        c.had_error = true
+        print("error[E074]")
+        if span.start > 0 || span.end > 0 {
+            print(" at ")
+            print_int(span.start)
+            print("..")
+            print_int(span.end)
+        }
+        print(": validate_manifest(...) requires an explicit validation item\n")
+        print("   |\n   = help: declare `validation Name for T {}` and call validate_manifest(robust_value, Name)\n")
+        print("   = note: Robust<T> does not silently become Validated<T>\n")
+        c
+    }
+
+    fn report_validation_target_mismatch(self, span: Span, expected: TypeEntry, got: TypeEntry) -> Checker with Mut, IO, Panic, Div, Alloc {
+        var c = self
+        c.error_count = c.error_count + 1
+        c.had_error = true
+        print("error[E075]")
+        if span.start > 0 || span.end > 0 {
+            print(" at ")
+            print_int(span.start)
+            print("..")
+            print_int(span.end)
+        }
+        print(": validation policy target does not match the robust subject type\n")
+        print("\n   = validation target ")
+        print_type_name(expected)
+        print("\n   = robust subject ")
+        print_type_name(got)
+        print("\n   = help: use a validation item declared for the same T as Robust<T>\n")
+        c
+    }
+
+    fn report_missing_robust_proof(self, span: Span) -> Checker with Mut, IO, Panic, Div {
+        var c = self
+        c.error_count = c.error_count + 1
+        c.had_error = true
+        print("error[E078]")
+        if span.start > 0 || span.end > 0 {
+            print(" at ")
+            print_int(span.start)
+            print("..")
+            print_int(span.end)
+        }
+        print(": validate_manifest(...) requires a proof-carrying Robust<T> value\n")
+        print("   |\n   = help: use the result of prove_robust(contest_value, PolicyName) directly, instead of a bare Robust<T, Level, Scope> annotation\n")
+        print("   = note: this compiler slice now records auditable robustness proofs and refuses validation when the proof record is missing\n")
+        c
+    }
+
+    fn report_policy_missing_robustness_metadata(self, span: Span, policy_name: Name) -> Checker with Mut, IO, Panic, Div {
+        var c = self
+        c.error_count = c.error_count + 1
+        c.had_error = true
+        print("error[E076]")
+        if span.start > 0 || span.end > 0 {
+            print(" at ")
+            print_int(span.start)
+            print("..")
+            print_int(span.end)
+        }
+        print(": policy item is missing explicit robustness level/scope metadata\n")
+        print("   |\n   = policy ")
+        print_name_value(policy_name)
+        print(" must declare `level ... scope ...` before it can witness Robust<T, Level, Scope>\n")
+        c
+    }
+
+    fn report_contest_policy_mismatch(self, span: Span, expected_policy_id: i64, got_policy_id: i64) -> Checker with Mut, IO, Panic, Div {
+        var c = self
+        c.error_count = c.error_count + 1
+        c.had_error = true
+        print("error[E077]")
+        if span.start > 0 || span.end > 0 {
+            print(" at ")
+            print_int(span.start)
+            print("..")
+            print_int(span.end)
+        }
+        print(": prove_robust(...) policy does not match the policy attached to Contest<T, Family, Policy>\n")
+        print("   |\n   = expected policy#")
+        print_int(expected_policy_id)
+        print(", found policy#")
+        print_int(got_policy_id)
+        print("\n")
         c
     }
 
@@ -759,7 +1009,7 @@ fn print_error_message(code: i64) with IO, Mut, Panic, Div {
     else if code == 57 { print("modulo by zero detected at compile time") }
     else if code == 58 { print("prove_robust(...) requires Contest<T> and Policy<T> with the same inner type") }
     else if code == 59 { print("contest expressions require an explicit Contest<T> annotation") }
-    else if code == 63 { print("epistemic wrapper metadata arguments are not implemented in this MVP") }
+    else if code == 63 { print("epistemic wrapper metadata is malformed or unsupported in this compiler slice") }
     else { print("unknown error") }
 }
 
@@ -933,7 +1183,7 @@ fn print_error_help(code: i64) with IO, Mut, Panic, Div {
         print("   |\n   = help: bind the expression with an explicit type such as `let c: Contest<T> = contest [...] on data`\n")
     }
     else if code == 63 {
-        print("   |\n   = help: the current MVP only supports a single wrapped type argument for Policy, Contest, and Robust\n")
+        print("   |\n   = help: use Model<I, O>, Contest<T, Family, Policy>, Robust<T, Level, Scope>, or the legacy single-argument migration forms with the correct arity\n")
     }
     else {
         // No help available for unknown errors
@@ -1110,7 +1360,7 @@ fn print_error_note(code: i64) with IO, Mut, Panic, Div {
         print("   = note: Contest expressions do not infer a plain result type because that would erase unresolved disagreement\n")
     }
     else if code == 63 {
-        print("   = note: extended Contest/Robust metadata arguments are deferred; only the wrapped result type is live in this patch\n")
+        print("   = note: the self-hosted compiler now tracks selected Contest/Robust metadata, but malformed wrapper arity and unknown level/scope tags still fail closed\n")
     }
     else {
         // No note available for unknown errors
@@ -1245,6 +1495,152 @@ fn contest_info_from_expr_models_loop(opt: Option<Box<ExprList>>, info: ContestI
         }
         None => info
     }
+}
+
+fn model_input_ty(ty: TypeEntry) -> TypeEntry with Mut, Panic, Div, Alloc {
+    type_entry_list_get(ty.tuple_elems, 0)
+}
+
+fn model_output_ty(ty: TypeEntry) -> TypeEntry with Mut, Panic, Div, Alloc {
+    type_entry_list_get(ty.tuple_elems, 1)
+}
+
+fn contest_model_lists_match(opt: Option<Box<ExprList>>, family: ModelFamilyInfo, idx: i64) -> bool with Mut, Panic, Div, Alloc {
+    match opt {
+        Some(list) => {
+            if idx >= family.model_count || idx >= 16 {
+                return false
+            }
+            if !name_eq(contest_model_name((*list).head), family.model_names[idx as usize]) {
+                return false
+            }
+            contest_model_lists_match((*list).tail, family, idx + 1)
+        }
+        None => idx == family.model_count
+    }
+}
+
+fn contest_info_from_family_signature(family: ModelFamilyInfo, policy_id: i64) -> ContestInfo with Mut, Panic, Div {
+    var info = empty_contest_info()
+    info.family_id = -1
+    info.policy_id = policy_id
+    info.model_count = family.model_count
+    var i: i64 = 0
+    while i < family.model_count && i < 16 {
+        info.model_names[i as usize] = family.model_names[i as usize]
+        i = i + 1
+    }
+    info
+}
+
+fn contest_info_attach_span(info: ContestInfo, span: Span) -> ContestInfo {
+    var next = info
+    next.span_start = span.start
+    next.span_end = span.end
+    next
+}
+
+fn contest_info_attach_family_id(info: ContestInfo, family_id: i64) -> ContestInfo {
+    var next = info
+    next.family_id = family_id
+    next
+}
+
+fn robust_proof_info_from_contest(contest_id: i64, contest_info: ContestInfo, policy_info: PolicyInfo, span: Span) -> RobustProofInfo with Mut, Panic, Div {
+    var rp = empty_robust_proof_info()
+    rp.span_start = span.start
+    rp.span_end = span.end
+    rp.contest_id = contest_id
+    rp.policy_id = contest_info.policy_id
+    rp.level_id = policy_info.level_id
+    rp.scope_id = policy_info.scope_id
+    var i: i64 = 0
+    while i < 8 {
+        rp.metric_known[i as usize] = contest_info.metric_known[i as usize]
+        rp.metric_values[i as usize] = contest_info.metric_values[i as usize]
+        i = i + 1
+    }
+    rp
+}
+
+fn robustness_level_id_from_name(name: Name) -> i64 with Panic, Div {
+    if name.len == 7
+        && name.buf[0] == 70 as i8 && name.buf[1] == 114 as i8 && name.buf[2] == 97 as i8
+        && name.buf[3] == 103 as i8 && name.buf[4] == 105 as i8 && name.buf[5] == 108 as i8
+        && name.buf[6] == 101 as i8 {
+        return ROBUST_LEVEL_FRAGILE
+    }
+    if name.len == 11
+        && name.buf[0] == 67 as i8 && name.buf[1] == 111 as i8 && name.buf[2] == 110 as i8
+        && name.buf[3] == 100 as i8 && name.buf[4] == 105 as i8 && name.buf[5] == 116 as i8
+        && name.buf[6] == 105 as i8 && name.buf[7] == 111 as i8 && name.buf[8] == 110 as i8
+        && name.buf[9] == 97 as i8 && name.buf[10] == 108 as i8 {
+        return ROBUST_LEVEL_CONDITIONAL
+    }
+    if name.len == 6
+        && name.buf[0] == 83 as i8 && name.buf[1] == 116 as i8 && name.buf[2] == 97 as i8
+        && name.buf[3] == 98 as i8 && name.buf[4] == 108 as i8 && name.buf[5] == 101 as i8 {
+        return ROBUST_LEVEL_STABLE
+    }
+    if name.len == 6
+        && name.buf[0] == 83 as i8 && name.buf[1] == 116 as i8 && name.buf[2] == 114 as i8
+        && name.buf[3] == 111 as i8 && name.buf[4] == 110 as i8 && name.buf[5] == 103 as i8 {
+        return ROBUST_LEVEL_STRONG
+    }
+    if name.len == 9
+        && name.buf[0] == 73 as i8 && name.buf[1] == 110 as i8 && name.buf[2] == 118 as i8
+        && name.buf[3] == 97 as i8 && name.buf[4] == 114 as i8 && name.buf[5] == 105 as i8
+        && name.buf[6] == 97 as i8 && name.buf[7] == 110 as i8 && name.buf[8] == 116 as i8 {
+        return ROBUST_LEVEL_INVARIANT
+    }
+    -1
+}
+
+fn robustness_scope_id_from_name(name: Name) -> i64 with Panic, Div {
+    if name.len == 14
+        && name.buf[0] == 73 as i8 && name.buf[1] == 110 as i8 && name.buf[2] == 68 as i8
+        && name.buf[3] == 105 as i8 && name.buf[4] == 115 as i8 && name.buf[5] == 116 as i8
+        && name.buf[6] == 114 as i8 && name.buf[7] == 105 as i8 && name.buf[8] == 98 as i8
+        && name.buf[9] == 117 as i8 && name.buf[10] == 116 as i8 && name.buf[11] == 105 as i8
+        && name.buf[12] == 111 as i8 && name.buf[13] == 110 as i8 {
+        return ROBUST_SCOPE_IN_DISTRIBUTION
+    }
+    if name.len == 13
+        && name.buf[0] == 69 as i8 && name.buf[1] == 120 as i8 && name.buf[2] == 116 as i8
+        && name.buf[3] == 114 as i8 && name.buf[4] == 97 as i8 && name.buf[5] == 112 as i8
+        && name.buf[6] == 111 as i8 && name.buf[7] == 108 as i8 && name.buf[8] == 97 as i8
+        && name.buf[9] == 116 as i8 && name.buf[10] == 105 as i8 && name.buf[11] == 118 as i8
+        && name.buf[12] == 101 as i8 {
+        return ROBUST_SCOPE_EXTRAPOLATIVE
+    }
+    if name.len == 16
+        && name.buf[0] == 83 as i8 && name.buf[1] == 117 as i8 && name.buf[2] == 98 as i8
+        && name.buf[3] == 103 as i8 && name.buf[4] == 114 as i8 && name.buf[5] == 111 as i8
+        && name.buf[6] == 117 as i8 && name.buf[7] == 112 as i8 && name.buf[8] == 83 as i8
+        && name.buf[9] == 112 as i8 && name.buf[10] == 101 as i8 && name.buf[11] == 99 as i8
+        && name.buf[12] == 105 as i8 && name.buf[13] == 102 as i8 && name.buf[14] == 105 as i8
+        && name.buf[15] == 99 as i8 {
+        return ROBUST_SCOPE_SUBGROUP_SPECIFIC
+    }
+    if name.len == 16
+        && name.buf[0] == 73 as i8 && name.buf[1] == 100 as i8 && name.buf[2] == 101 as i8
+        && name.buf[3] == 110 as i8 && name.buf[4] == 116 as i8 && name.buf[5] == 105 as i8
+        && name.buf[6] == 102 as i8 && name.buf[7] == 105 as i8 && name.buf[8] == 101 as i8
+        && name.buf[9] == 100 as i8 && name.buf[10] == 70 as i8 && name.buf[11] == 97 as i8
+        && name.buf[12] == 109 as i8 && name.buf[13] == 105 as i8 && name.buf[14] == 108 as i8
+        && name.buf[15] == 121 as i8 {
+        return ROBUST_SCOPE_IDENTIFIED_FAMILY
+    }
+    if name.len == 17
+        && name.buf[0] == 84 as i8 && name.buf[1] == 114 as i8 && name.buf[2] == 97 as i8
+        && name.buf[3] == 110 as i8 && name.buf[4] == 115 as i8 && name.buf[5] == 112 as i8
+        && name.buf[6] == 111 as i8 && name.buf[7] == 114 as i8 && name.buf[8] == 116 as i8
+        && name.buf[9] == 101 as i8 && name.buf[10] == 100 as i8 && name.buf[11] == 68 as i8
+        && name.buf[12] == 111 as i8 && name.buf[13] == 109 as i8 && name.buf[14] == 97 as i8
+        && name.buf[15] == 105 as i8 && name.buf[16] == 110 as i8 {
+        return ROBUST_SCOPE_TRANSPORTED_DOMAIN
+    }
+    -1
 }
 
 fn check_policy_requirements_against_contest(
@@ -1393,6 +1789,7 @@ impl Checker {
             TypeTuple => c.lower_tuple_type(te.type_args)
             TypeFn => (c, ty_unknown())
             TypeKnowledge => c.lower_knowledge_type(te.knowledge_info)
+            TypeModel => c.lower_model_type(te.type_args, te.span)
             TypePolicy => c.lower_policy_type(te.type_args, te.span)
             TypeContest => c.lower_contest_type(te.type_args, te.span)
             TypeRobust => c.lower_robust_type(te.type_args, te.span)
@@ -1442,7 +1839,15 @@ impl Checker {
                     let rt = self.refinements.entries[ref_idx as usize]
                     (self, ty_with_refinement(rt.base_type, ref_idx))
                 } else {
-                    (self, ty_named(name))
+                    let bound_ty = self.env.lookup(name)
+                    if bound_ty.kind == TypeKind::TyModel
+                        || bound_ty.kind == TypeKind::TyModelFamily
+                        || bound_ty.kind == TypeKind::TyPolicy
+                        || bound_ty.kind == TypeKind::TyValidation {
+                        (self, bound_ty)
+                    } else {
+                        (self, ty_named(name))
+                    }
                 }
             }
         }
@@ -1518,6 +1923,18 @@ impl Checker {
         }
     }
 
+    fn robust_type_tag_from_type_expr(self, te: TypeExpr, is_level: bool) -> i64 with Mut, Panic, Div, Alloc, IO {
+        if te.kind != TypeExprKind::TypeNamed {
+            return -1
+        }
+        let name = checker_copy_string_list_to_name(te.path.segments)
+        if is_level {
+            robustness_level_id_from_name(name)
+        } else {
+            robustness_scope_id_from_name(name)
+        }
+    }
+
     fn lower_knowledge_type(self, opt: Option<Box<KnowledgeTypeInfo>>) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
         match opt {
             Some(info) => check_knowledge_type(self, *info)
@@ -1538,6 +1955,27 @@ impl Checker {
         }
     }
 
+    fn lower_model_type(self, opt: Option<Box<TypeExprList>>, span: Span) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+        match opt {
+            Some(args) => {
+                match (*args).tail {
+                    Some(rest) => {
+                        match (*rest).tail {
+                            Some(_) => (self.report_error_at(span, 63, 0, 0, 0), ty_error())
+                            None => {
+                                let in_pair = self.lower_type_expr((*args).head)
+                                let out_pair = in_pair.0.lower_type_expr((*rest).head)
+                                (out_pair.0, ty_model(in_pair.1, out_pair.1))
+                            }
+                        }
+                    }
+                    None => (self.report_error_at(span, 63, 0, 0, 0), ty_error())
+                }
+            }
+            None => (self.report_error_at(span, 63, 0, 0, 0), ty_error())
+        }
+    }
+
     fn lower_policy_type(self, opt: Option<Box<TypeExprList>>, span: Span) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
         let pair = self.lower_single_wrapper_arg(opt, span)
         if pair.1.kind == TypeKind::TyError {
@@ -1548,20 +1986,97 @@ impl Checker {
     }
 
     fn lower_contest_type(self, opt: Option<Box<TypeExprList>>, span: Span) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
-        let pair = self.lower_single_wrapper_arg(opt, span)
-        if pair.1.kind == TypeKind::TyError {
-            pair
-        } else {
-            (pair.0, ty_contest(pair.1, -1))
+        match opt {
+            Some(args) => {
+                match (*args).tail {
+                    None => {
+                        let pair = self.lower_type_expr((*args).head)
+                        if pair.1.kind == TypeKind::TyError {
+                            pair
+                        } else {
+                            (pair.0, ty_contest(pair.1, -1))
+                        }
+                    }
+                    Some(rest) => {
+                        match (*rest).tail {
+                            Some(last) => {
+                                match (*last).tail {
+                                    Some(_) => (self.report_error_at(span, 63, 0, 0, 0), ty_error())
+                                    None => {
+                                        let inner_pair = self.lower_type_expr((*args).head)
+                                        var c = inner_pair.0
+                                        let inner_ty = inner_pair.1
+                                        let family_pair = c.lower_type_expr((*rest).head)
+                                        c = family_pair.0
+                                        let family_ty = family_pair.1
+                                        let policy_pair = c.lower_type_expr((*last).head)
+                                        c = policy_pair.0
+                                        let policy_ty = policy_pair.1
+                                        if family_ty.kind != TypeKind::TyModelFamily {
+                                            return (c.report_missing_model_family_metadata(span), ty_error())
+                                        }
+                                        if policy_ty.kind != TypeKind::TyPolicy {
+                                            return (c.report_policy_requires_named_definition(span), ty_error())
+                                        }
+                                        if !types_compatible(model_output_ty(family_ty), inner_ty) || !types_compatible(knowledge_inner(policy_ty), inner_ty) {
+                                            return (c.report_error_at(span, 58, 0, 0, 0), ty_error())
+                                        }
+                                        let family_info = c.model_families.get(family_ty.epistemic_meta_id)
+                                        var info = contest_info_from_family_signature(family_info, policy_ty.epistemic_meta_id)
+                                        info = contest_info_attach_span(info, span)
+                                        info = contest_info_attach_family_id(info, family_ty.epistemic_meta_id)
+                                        let add_result = c.contests.add(info)
+                                        c.contests = add_result.0
+                                        (c, ty_contest(inner_ty, add_result.1))
+                                    }
+                                }
+                            }
+                            None => (self.report_error_at(span, 63, 0, 0, 0), ty_error())
+                        }
+                    }
+                }
+            }
+            None => (self.report_error_at(span, 63, 0, 0, 0), ty_error())
         }
     }
 
     fn lower_robust_type(self, opt: Option<Box<TypeExprList>>, span: Span) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
-        let pair = self.lower_single_wrapper_arg(opt, span)
-        if pair.1.kind == TypeKind::TyError {
-            pair
-        } else {
-            (pair.0, ty_robust(pair.1, -1, -1))
+        match opt {
+            Some(args) => {
+                match (*args).tail {
+                    None => {
+                        let pair = self.lower_type_expr((*args).head)
+                        if pair.1.kind == TypeKind::TyError {
+                            pair
+                        } else {
+                            (pair.0, ty_robust(pair.1, -1, -1, -1))
+                        }
+                    }
+                    Some(rest) => {
+                        match (*rest).tail {
+                            Some(last) => {
+                                match (*last).tail {
+                                    Some(_) => (self.report_error_at(span, 63, 0, 0, 0), ty_error())
+                                    None => {
+                                        let inner_pair = self.lower_type_expr((*args).head)
+                                        var c = inner_pair.0
+                                        let inner_ty = inner_pair.1
+                                        let level_id = c.robust_type_tag_from_type_expr((*rest).head, true)
+                                        let scope_id = c.robust_type_tag_from_type_expr((*last).head, false)
+                                        if level_id < 0 || scope_id < 0 {
+                                            c = c.report_error_at(span, 63, 0, 0, 0)
+                                            return (c, ty_error())
+                                        }
+                                        (c, ty_robust(inner_ty, -1, level_id, scope_id))
+                                    }
+                                }
+                            }
+                            None => (self.report_error_at(span, 63, 0, 0, 0), ty_error())
+                        }
+                    }
+                }
+            }
+            None => (self.report_error_at(span, 63, 0, 0, 0), ty_error())
         }
     }
 
@@ -1645,7 +2160,9 @@ impl Checker {
             ItemEnum => self.collect_enum_def(item.name, item.enum_def)
             ItemImpl => self.collect_impl_def(item.impl_def)
             ItemTypeAlias => self.collect_type_alias(item.name, item.type_alias_ty)
+            ItemModels => self.collect_models_def(item.name, item.models_def)
             ItemPolicy => self.collect_policy_def(item.name, item.policy_def)
+            ItemValidation => self.collect_validation_def(item.name, item.validation_def)
             ItemUse => self
             ItemUnit => self.collect_unit_decl(item.name)
         }
@@ -1684,8 +2201,21 @@ impl Checker {
                         None => self
                     }
                 } else {
-                    // Plain type alias — no refinement, pass through
-                    self
+                    let pair = self.lower_type_expr(te)
+                    var c = pair.0
+                    let alias_ty = pair.1
+                    c.env = c.env.bind(name, alias_ty, false)
+                    c = c.const_int_bind_unknown(name)
+                    if alias_ty.kind == TypeKind::TyModel {
+                        let info = ModelInfo {
+                            name: name,
+                            input_ty: model_input_ty(alias_ty),
+                            output_ty: model_output_ty(alias_ty),
+                        }
+                        let add_result = c.models.add(info)
+                        c.models = add_result.0
+                    }
+                    c
                 }
             }
             None => self
@@ -1713,12 +2243,80 @@ impl Checker {
                 let info = PolicyInfo {
                     name: name,
                     target_ty: target_ty,
+                    level_name: (*pd).level_name,
+                    scope_name: (*pd).scope_name,
+                    level_id: robustness_level_id_from_name((*pd).level_name),
+                    scope_id: robustness_scope_id_from_name((*pd).scope_name),
                     requirements: requirements,
                     requirement_count: requirement_count,
                 }
                 let add_result = c.policies.add(info)
                 c.policies = add_result.0
                 c.env = c.env.bind(name, ty_policy(target_ty, add_result.1), false)
+                c = c.const_int_bind_unknown(name)
+                c
+            }
+            None => self
+        }
+    }
+
+    fn collect_models_def(self, name: Name, opt: Option<Box<ModelsDef>>) -> Checker with Mut, Panic, Div, Alloc, IO {
+        match opt {
+            Some(md) => {
+                let pair = self.collect_model_family_members((*md).models, empty_model_family_info(), (*md).span)
+                var c = pair.0
+                var info = pair.1
+                info.name = name
+                let add_result = c.model_families.add(info)
+                c.model_families = add_result.0
+                let family_info = c.model_families.get(add_result.1)
+                c.env = c.env.bind(name, ty_model_family(family_info.input_ty, family_info.output_ty, add_result.1), false)
+                c = c.const_int_bind_unknown(name)
+                c
+            }
+            None => self
+        }
+    }
+
+    fn collect_model_family_members(self, opt: Option<Box<AstPathList>>, seed: ModelFamilyInfo, span: Span) -> (Checker, ModelFamilyInfo) with Mut, Panic, Div, Alloc, IO {
+        match opt {
+            Some(list) => {
+                let model_name = checker_copy_string_list_tail_to_name((*list).head.segments)
+                var c = self
+                let model_ty = c.env.lookup(model_name)
+                var info = seed
+                if model_ty.kind != TypeKind::TyModel {
+                    c = c.report_model_type_incompatibility(span, model_name, model_ty)
+                } else {
+                    let input_ty = model_input_ty(model_ty)
+                    let output_ty = model_output_ty(model_ty)
+                    if info.model_count == 0 {
+                        info.input_ty = input_ty
+                        info.output_ty = output_ty
+                    } else if !types_compatible(info.input_ty, input_ty) || !types_compatible(info.output_ty, output_ty) {
+                        c = c.report_model_family_member_mismatch(span, model_name, info.input_ty, info.output_ty, input_ty, output_ty)
+                    }
+                    if info.model_count < 16 {
+                        info.model_names[info.model_count as usize] = model_name
+                    }
+                    info.model_count = info.model_count + 1
+                }
+                c.collect_model_family_members((*list).tail, info, span)
+            }
+            None => (self, seed)
+        }
+    }
+
+    fn collect_validation_def(self, name: Name, opt: Option<Box<ValidationDef>>) -> Checker with Mut, Panic, Div, Alloc, IO {
+        match opt {
+            Some(vd) => {
+                let target_pair = self.lower_type_expr((*vd).target_type)
+                var c = target_pair.0
+                let target_ty = target_pair.1
+                let info = ValidationPolicyInfo { name: name, target_ty: target_ty }
+                let add_result = c.validations.add(info)
+                c.validations = add_result.0
+                c.env = c.env.bind(name, ty_validation(target_ty, add_result.1), false)
                 c = c.const_int_bind_unknown(name)
                 c
             }
@@ -2038,7 +2636,9 @@ impl Checker {
             ItemEnum => self
             ItemImpl => self.check_impl_item(item.impl_def)
             ItemTypeAlias => self
+            ItemModels => self
             ItemPolicy => self
+            ItemValidation => self
             ItemUse => self
             ItemUnit => self  // Already handled in collect pass
         }
@@ -2259,8 +2859,11 @@ impl Checker {
             if !types_compatible(init_ty, ann_ty) {
                 c = c.report_mismatch(s.span, 1, ann_ty, init_ty)
             }
-            if ann_ty.kind == TypeKind::TyContest && init_ty.kind == TypeKind::TyContest && ann_ty.epistemic_meta_id < 0 {
-                bind_ty = ty_contest(knowledge_inner(ann_ty), init_ty.epistemic_meta_id)
+            if ann_ty.kind == init_ty.kind
+                && (ann_ty.kind == TypeKind::TyContest
+                    || ann_ty.kind == TypeKind::TyRobust
+                    || ann_ty.kind == TypeKind::TyValidated) {
+                bind_ty = init_ty
             } else {
                 bind_ty = ann_ty
             }
@@ -2295,8 +2898,11 @@ impl Checker {
             if !types_compatible(init_ty, ann_ty) {
                 c = c.report_mismatch(s.span, 1, ann_ty, init_ty)
             }
-            if ann_ty.kind == TypeKind::TyContest && init_ty.kind == TypeKind::TyContest && ann_ty.epistemic_meta_id < 0 {
-                bind_ty = ty_contest(knowledge_inner(ann_ty), init_ty.epistemic_meta_id)
+            if ann_ty.kind == init_ty.kind
+                && (ann_ty.kind == TypeKind::TyContest
+                    || ann_ty.kind == TypeKind::TyRobust
+                    || ann_ty.kind == TypeKind::TyValidated) {
+                bind_ty = init_ty
             } else {
                 bind_ty = ann_ty
             }
@@ -2420,9 +3026,15 @@ impl Checker {
             Some(e) => {
                 if (*e).kind == ExprKind::ExprContest {
                     if ann_ty.kind == TypeKind::TyContest {
-                        self.check_contest_expr_expected(*e, knowledge_inner(ann_ty))
+                        self.check_contest_expr_expected(*e, ann_ty)
                     } else {
                         self.check_contest_expr_no_annotation(*e)
+                    }
+                } else if (*e).kind == ExprKind::ExprCall && call_expr_is_builtin_lift_knowledge((*e).left) {
+                    if ann_ty.kind == TypeKind::TyContest {
+                        self.check_lift_knowledge_expr_expected(*e, ann_ty)
+                    } else {
+                        self.check_expr(*e)
                     }
                 } else {
                     self.check_expr(*e)
@@ -3070,20 +3682,44 @@ impl Checker {
         (pair.0.report_error_at(e.span, 59, 0, 0, 0), ty_error())
     }
 
-    fn check_contest_expr_expected(self, e: Expr, expected_inner: TypeEntry) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+    fn check_contest_expr_expected(self, e: Expr, expected_contest_ty: TypeEntry) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
         var c = self
         let subject_pair = c.check_opt_expr(e.left)
         c = subject_pair.0
+        let subject_ty = subject_pair.1
         if !contest_model_list_present(e.args) {
             c = c.report_error_at(e.span, 58, 0, 0, 0)
         }
-        if expected_inner.kind == TypeKind::TyError {
+        if expected_contest_ty.kind == TypeKind::TyError || expected_contest_ty.kind != TypeKind::TyContest {
             (c, ty_error())
         } else {
-            let info = contest_info_from_expr_models(e.args)
+            var info = contest_info_from_expr_models(e.args)
+            info = contest_info_attach_span(info, e.span)
+            if expected_contest_ty.epistemic_meta_id >= 0 && expected_contest_ty.epistemic_meta_id < c.contests.count {
+                let expected_info = c.contests.get(expected_contest_ty.epistemic_meta_id)
+                info.family_id = expected_info.family_id
+                info.policy_id = expected_info.policy_id
+                info.mechanistic_report_id = expected_info.mechanistic_report_id
+                info.posterior_weights_id = expected_info.posterior_weights_id
+                info.counterexample_id = expected_info.counterexample_id
+                info.provenance_bundle_id = expected_info.provenance_bundle_id
+                if expected_info.family_id >= 0 {
+                    if expected_info.family_id >= c.model_families.count {
+                        c = c.report_missing_model_family_metadata(e.span)
+                    } else {
+                        let family_info = c.model_families.get(expected_info.family_id)
+                        if !contest_model_lists_match(e.args, family_info, 0) {
+                            c = c.report_model_family_mismatch(e.span, family_info, info)
+                        }
+                        if !types_compatible(subject_ty, family_info.input_ty) {
+                            c = c.report_mismatch(e.span, 1, family_info.input_ty, subject_ty)
+                        }
+                    }
+                }
+            }
             let add_result = c.contests.add(info)
             c.contests = add_result.0
-            (c, ty_contest(expected_inner, add_result.1))
+            (c, ty_contest(knowledge_inner(expected_contest_ty), add_result.1))
         }
     }
 
@@ -3105,15 +3741,14 @@ impl Checker {
         }
 
         let policy_info = c.policies.get(policy_ty.epistemic_meta_id)
+        if policy_info.level_id < 0 || policy_info.scope_id < 0 {
+            c = c.report_policy_missing_robustness_metadata(e.span, policy_info.name)
+            return (c, ty_error())
+        }
+
         let contest_inner = knowledge_inner(policy_ty)
         let contest_pair = match first_arg {
-            Some(arg) => {
-                if (*arg).kind == ExprKind::ExprContest {
-                    c.check_contest_expr_expected(*arg, contest_inner)
-                } else {
-                    c.check_expr(*arg)
-                }
-            }
+            Some(arg) => c.check_expr(*arg)
             None => (c.report_error_at(e.span, 58, 0, 0, 0), ty_error())
         }
         c = contest_pair.0
@@ -3129,23 +3764,39 @@ impl Checker {
             return (c, ty_error())
         }
 
-        if policy_info.requirement_count == 0 {
-            return (c, ty_robust(contest_inner, -1, -1))
-        }
-
-        let req_pair = check_policy_requirements_against_contest(
-            c,
-            e.span,
-            policy_info.name,
-            policy_info.requirements,
-            contest_ty.epistemic_meta_id
-        )
-        c = req_pair.0
-        if !req_pair.1 {
+        if contest_ty.epistemic_meta_id < 0 || contest_ty.epistemic_meta_id >= c.contests.count {
+            c = c.report_missing_model_family_metadata(e.span)
             return (c, ty_error())
         }
 
-        (c, ty_robust(contest_inner, -1, -1))
+        let contest_info = c.contests.get(contest_ty.epistemic_meta_id)
+        if contest_info.family_id < 0 {
+            c = c.report_missing_model_family_metadata(e.span)
+            return (c, ty_error())
+        }
+        if contest_info.policy_id >= 0 && contest_info.policy_id != policy_ty.epistemic_meta_id {
+            c = c.report_contest_policy_mismatch(e.span, contest_info.policy_id, policy_ty.epistemic_meta_id)
+            return (c, ty_error())
+        }
+
+        if policy_info.requirement_count > 0 {
+            let req_pair = check_policy_requirements_against_contest(
+                c,
+                e.span,
+                policy_info.name,
+                policy_info.requirements,
+                contest_ty.epistemic_meta_id
+            )
+            c = req_pair.0
+            if !req_pair.1 {
+                return (c, ty_error())
+            }
+        }
+
+        let proof_info = robust_proof_info_from_contest(contest_ty.epistemic_meta_id, contest_info, policy_info, e.span)
+        let add_result = c.robust_proofs.add(proof_info)
+        c.robust_proofs = add_result.0
+        (c, ty_robust(contest_inner, add_result.1, policy_info.level_id, policy_info.scope_id))
     }
 
     // validate_manifest(robust: Robust<T>) -> Validated<T>
@@ -3154,6 +3805,7 @@ impl Checker {
     // serves as the explicit compile-time gate that produces the Validated<T> token.
     fn check_validate_manifest_expr(self, e: Expr) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
         let first_arg = expr_list_head(e.args)
+        let second_arg = expr_list_second(e.args)
         let robust_pair = self.check_opt_expr(first_arg)
         var c = robust_pair.0
         let robust_ty = robust_pair.1
@@ -3161,8 +3813,32 @@ impl Checker {
             c = c.report_error_at(e.span, 63, 0, 0, 0)
             return (c, ty_error())
         }
+        let validation_pair = c.check_opt_expr(second_arg)
+        c = validation_pair.0
+        let validation_ty = validation_pair.1
+        if validation_ty.kind != TypeKind::TyValidation {
+            c = c.report_missing_validation_policy(e.span)
+            return (c, ty_error())
+        }
         let inner_ty = knowledge_inner(robust_ty)
-        (c, ty_validated(inner_ty, 0.0 - 1.0))
+        if !types_compatible(inner_ty, knowledge_inner(validation_ty)) {
+            c = c.report_validation_target_mismatch(e.span, knowledge_inner(validation_ty), inner_ty)
+            return (c, ty_error())
+        }
+        if robust_ty.epistemic_meta_id < 0 || robust_ty.epistemic_meta_id >= c.robust_proofs.count {
+            c = c.report_missing_robust_proof(e.span)
+            return (c, ty_error())
+        }
+        let manifest_info = ValidatedManifestInfo {
+            span_start: e.span.start,
+            span_end: e.span.end,
+            robust_proof_id: robust_ty.epistemic_meta_id,
+            validation_id: validation_ty.epistemic_meta_id,
+            inner_ty: inner_ty,
+        }
+        let add_result = c.validated_manifests.add(manifest_info)
+        c.validated_manifests = add_result.0
+        (c, ty_validated_with_policy(inner_ty, 0.0 - 1.0, add_result.1))
     }
 
     fn check_lift_knowledge_expr(self, e: Expr) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
@@ -3178,6 +3854,31 @@ impl Checker {
         }
         let inner_ty = knowledge_inner(k_ty)
         (c, ty_contest(inner_ty, k_ty.epistemic_meta_id))
+    }
+
+    fn check_lift_knowledge_expr_expected(self, e: Expr, expected_contest_ty: TypeEntry) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+        let first_arg = expr_list_head(e.args)
+        let k_pair = self.check_opt_expr(first_arg)
+        var c = k_pair.0
+        let k_ty = k_pair.1
+        if k_ty.kind != TypeKind::TyKnowledge {
+            c = c.report_error_at(e.span, 63, 0, 0, 0)
+            return (c, ty_error())
+        }
+        let inner_ty = knowledge_inner(k_ty)
+        let expected_inner = knowledge_inner(expected_contest_ty)
+        if !types_compatible(inner_ty, expected_inner) {
+            c = c.report_mismatch(e.span, 1, expected_inner, inner_ty)
+            return (c, ty_error())
+        }
+        if expected_contest_ty.epistemic_meta_id >= 0 && expected_contest_ty.epistemic_meta_id < c.contests.count {
+            var info = c.contests.get(expected_contest_ty.epistemic_meta_id)
+            info = contest_info_attach_span(info, e.span)
+            let add_result = c.contests.add(info)
+            c.contests = add_result.0
+            return (c, ty_contest(expected_inner, add_result.1))
+        }
+        (c, expected_contest_ty)
     }
 
     fn check_measure_expr(self, e: Expr) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
@@ -3709,9 +4410,7 @@ impl Checker {
     fn check_struct_field_inits(self, opt: Option<Box<StructFieldList>>, si: StructInfo, lit_span: Span) -> Checker with Mut, Panic, Div, Alloc, IO {
         let init_count = struct_field_list_count(opt)
         if init_count != si.field_count {
-            var c = self.report_error_at(lit_span, 46, 0, 0, 0)
-            // Still check field types to report additional errors
-            return c.check_struct_field_inits_with_type(opt, si)
+            return self.report_error_at(lit_span, 46, 0, 0, 0)
         }
         self.check_struct_field_inits_with_type(opt, si)
     }
