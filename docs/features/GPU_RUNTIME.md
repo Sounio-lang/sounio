@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: website.docs.gpu
+authority: dual
+audience: users
+last_validated: 2026-03-07
+validated_by: A6
+source_of_truth: docs/governance/topic-registry.v1.json#website.docs.gpu
+-->
+
 # Sounio GPU Runtime
 
 This document describes the GPU runtime infrastructure for Sounio, including the runtime bridge, kernel launch, memory management, and backend support.
@@ -495,10 +504,10 @@ cargo test --features "gpu,cuda" gpu_
 
 ## Related Documentation
 
-- [Feature Flags](FEATURE_FLAGS.md) - GPU build configuration
-- [LLVM Codegen](LLVM_CODEGEN.md) - Native code generation
-- [Async Runtime](ASYNC_RUNTIME.md) - Async GPU operations
-- [GPU Numerical README](../compiler/src/codegen/gpu/numerical_README.md) - GPU codegen details
+- [Feature Flags](../FEATURE_FLAGS.md) - GPU build configuration
+- [LLVM Codegen](../architecture/LLVM_CODEGEN.md) - Native code generation
+- [Async Runtime](../architecture/ASYNC_RUNTIME.md) - Async GPU operations
+- [GPU Code Generation Architecture](../compiler/CODE_GENERATION_ARCHITECTURE.md) - GPU codegen details
 
 ---
 

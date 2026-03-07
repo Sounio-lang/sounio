@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: website.docs.epistemic
+authority: dual
+audience: users
+last_validated: 2026-03-07
+validated_by: A3
+source_of_truth: docs/governance/topic-registry.v1.json#website.docs.epistemic
+-->
+
 # Knowledge<T> Reference
 
 This document is the JOSS-facing API reference for Sounio's epistemic value model.

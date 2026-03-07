@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.features.hot-reload
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A6
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.features.hot-reload
+-->
+
 # 🔥 Hot Code Reload for Sounio
 
 **Erlang-inspired hot reloading with state preservation.**

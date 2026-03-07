@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.qnn.performance-handbook
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.qnn.performance-handbook
+-->
+
 # QNN Performance Tuning Handbook
 
 > *"The purpose of computing is insight, not numbers."* — Richard Hamming

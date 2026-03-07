@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: website.docs.getting-started
+authority: dual
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#website.docs.getting-started
+-->
+
 # Getting Started with Sounio
 
 Welcome to **Sounio**, a systems programming language for epistemic computing — where every value can carry its uncertainty.
@@ -22,10 +31,10 @@ sudo mv souc /usr/local/bin/
 
 ```bash
 git clone https://github.com/sounio-lang/sounio.git
-cd sounio/compiler
+cd sounio
 
 # Basic build (Cranelift JIT)
-cargo build --release
+cargo build -p souc --release
 
 # With LLVM backend (recommended for production)
 # Requires: LLVM 17, libzstd-dev
@@ -35,7 +44,7 @@ cargo build --release --features llvm17
 sudo cp target/release/souc /usr/local/bin/
 ```
 
-For detailed dependency installation, see [INSTALLATION.md](INSTALLATION.md).
+For detailed dependency installation, see the [installation guide](installation.md).
 
 ### Verify Installation
 
@@ -244,10 +253,10 @@ souc run uncertainty.sio
 
 ## Next Steps
 
-- [Language Reference](./LLM_PROGRAMMING_GUIDE.md) — Complete syntax guide
-- [Standard Library](../stdlib/) — Browse the stdlib
-- [Examples](../examples/) — Working code examples
-- [CHANGELOG](../CHANGELOG.md) — Version history
+- [Programming Guide](programming.md) — Complete syntax and capability guide
+- [Standard Library](../stdlib/STDLIB_REFERENCE.md) — Browse the stdlib
+- [Examples](../../examples/README.md) — Working code examples
+- [CHANGELOG](../../CHANGELOG.md) — Version history
 
 ## Getting Help
 

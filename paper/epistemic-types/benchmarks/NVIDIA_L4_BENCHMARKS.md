@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.paper.epistemic-types.benchmarks.nvidia-l4-benchmarks
+authority: repo_only
+audience: researchers
+last_validated: 2026-03-07
+validated_by: A6
+source_of_truth: docs/governance/topic-registry.v1.json#repo.paper.epistemic-types.benchmarks.nvidia-l4-benchmarks
+-->
+
 # NVIDIA L4 Epistemic GEMM Benchmark Results
 
 **Headline:** Median 5.3 TFLOPS compiler-generated tiled GEMM at 4096x4096 (17.3% of L4 peak). cuBLAS SGEMM baseline at 14.1 TFLOPS. **Overhead: 2.19x geometric mean** (compiler maturity baseline — kernel generated with `epistemic_enabled=false`; shadow register overhead not yet isolated).

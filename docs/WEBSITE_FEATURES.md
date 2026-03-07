@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.website-features
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.website-features
+-->
+
 # Sounio Language: Website Features Overview
 
 **Sounio** is a systems programming language for epistemic computing—computation that tracks uncertainty, confidence, and provenance as first-class language features. This document highlights the cutting-edge capabilities that make Sounio unique for scientific computing, medical modeling, and high-performance applications.

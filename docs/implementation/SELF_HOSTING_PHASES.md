@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.implementation.self-hosting-phases
+authority: repo_only
+audience: maintainers
+last_validated: 2026-03-07
+validated_by: A7
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.implementation.self-hosting-phases
+-->
+
 # Sounio Self-Hosting Bootstrap Phases
 
 ## Cutover Status (No-Rust Build+Run)

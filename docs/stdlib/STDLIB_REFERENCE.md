@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: website.docs.stdlib
+authority: dual
+audience: users
+last_validated: 2026-03-07
+validated_by: A3
+source_of_truth: docs/governance/topic-registry.v1.json#website.docs.stdlib
+-->
+
 # Sounio STDLIB Reference (Executable Snapshot)
 
 This document tracks the **current executable STDLIB contract** for reliability work.

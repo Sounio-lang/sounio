@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.compiler.sir-passes
+authority: repo_only
+audience: contributors
+last_validated: 2026-03-07
+validated_by: A4
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.compiler.sir-passes
+-->
+
 # SIR Transformation Passes
 
 This document describes the modular SIR transformation pass infrastructure.

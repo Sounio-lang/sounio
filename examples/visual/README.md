@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.examples.visual.readme
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A5
+source_of_truth: docs/governance/topic-registry.v1.json#repo.examples.visual.readme
+-->
+
 # Sounio Visual Examples
 
 **Beautiful scientific visualization using ASCII art + ANSI colors**

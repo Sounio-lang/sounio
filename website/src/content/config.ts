@@ -12,6 +12,12 @@ const docsCollection = defineCollection({
     weight: z.number().default(0),
     draft: z.boolean().default(false),
     category: z.string().optional(),
+    topic_id: z.string(),
+    authority: z.string(),
+    audience: z.string(),
+    last_validated: z.string(),
+    validated_by: z.string(),
+    source_of_truth: z.string(),
   }),
 });
 
@@ -25,6 +31,12 @@ const showcasesCollection = defineCollection({
     icon: z.string().optional(),
     color: z.string().optional(),
     draft: z.boolean().default(false),
+    topic_id: z.string(),
+    authority: z.string(),
+    audience: z.string(),
+    last_validated: z.string(),
+    validated_by: z.string(),
+    source_of_truth: z.string(),
   }),
 });
 
@@ -39,6 +51,12 @@ const tutorialsCollection = defineCollection({
     estimatedMinutes: z.number().optional(),
     prerequisites: z.array(z.string()).optional(),
     draft: z.boolean().default(false),
+    topic_id: z.string(),
+    authority: z.string(),
+    audience: z.string(),
+    last_validated: z.string(),
+    validated_by: z.string(),
+    source_of_truth: z.string(),
   }),
 });
 
@@ -55,6 +73,12 @@ const blogCollection = defineCollection({
     featured: z.boolean().default(false),
     draft: z.boolean().default(false),
     image: z.string().optional(),
+    topic_id: z.string(),
+    authority: z.string(),
+    audience: z.string(),
+    last_validated: z.string(),
+    validated_by: z.string(),
+    source_of_truth: z.string(),
   }),
 });
 

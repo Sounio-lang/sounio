@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.research.epistemic-algebra-review
+authority: repo_only
+audience: researchers
+last_validated: 2026-03-07
+validated_by: A6
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.research.epistemic-algebra-review
+-->
+
 # Epistemic Algebra Verification Report
 
 ## Executive Summary

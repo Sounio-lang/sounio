@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.features.platform-support
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A6
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.features.platform-support
+-->
+
 # Platform Support
 
 This document describes the platforms supported by the Sounio compiler and runtime, along with known limitations and platform-specific considerations.
@@ -322,6 +331,6 @@ Planned platform additions:
 
 ## See Also
 
-- [docs/ARCHITECTURE.md](ARCHITECTURE.md) - Compiler architecture
-- [docs/BACKENDS.md](BACKENDS.md) - Backend implementation details
-- [bootstrap/poseidon/README.md](../bootstrap/poseidon/README.md) - Poseidon VM documentation
+- [docs/compiler/ARCHITECTURE.md](../compiler/ARCHITECTURE.md) - Compiler architecture
+- [docs/compiler/CODE_GENERATION_ARCHITECTURE.md](../compiler/CODE_GENERATION_ARCHITECTURE.md) - Backend implementation details
+- [bootstrap/poseidon/README.md](../../bootstrap/poseidon/README.md) - Poseidon VM documentation

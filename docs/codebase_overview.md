@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.contributor.codebase-overview
+authority: repo_only
+audience: contributors
+last_validated: 2026-03-07
+validated_by: A5
+source_of_truth: docs/governance/topic-registry.v1.json#repo.contributor.codebase-overview
+-->
+
 # Sounio Codebase Overview
 
 This document maps the active parts of the Sounio monorepo so contributors can quickly find ownership boundaries and release-critical paths.
@@ -9,7 +18,7 @@ This document maps the active parts of the Sounio monorepo so contributors can q
 - `tests/`: Language and integration fixtures (`run-pass`, `ui`, `compile-fail`, `error_audit`, `stdlib`, and regression suites).
 - `website/`: Astro site for docs, tutorials, releases, and multilingual pages used for publish readiness.
 - `docs/`: Contributor and architecture documentation.
-- `scripts/`: CI/release gate scripts (fast gate, docs consistency, workflow script reference checks, and isolated diagnostic wrappers).
+- `scripts/`: CI/release gate scripts (fast gate, docs consistency, docs registry verification, workflow script reference checks, and isolated diagnostic wrappers).
 - `.github/workflows/`: CI workflows that enforce compiler, docs, and website quality contracts.
 
 ## 2. Compiler Runtime and Bootstrap Flow
@@ -25,6 +34,8 @@ This document maps the active parts of the Sounio monorepo so contributors can q
 - `scripts/fast_gate.sh`: Preflight that runs syntax drift scan, workflow/docs checks, compiler tests, and e2e gate.
 - `scripts/check_workflow_script_refs.sh`: Prevents workflow drift by failing on missing `scripts/*` references.
 - `scripts/check_docs_consistency.sh`: Prevents stale path/version statements in key docs.
+- `scripts/check_docs_registry.sh`: Verifies the machine-readable docs registry, hidden metadata blocks/frontmatter, front-door/current-canon repo-doc links, and historical status labeling.
+- `docs/governance/`: Generated authority and acceptance surfaces (`DOCS_AUTHORITY_MATRIX.md`, `DOCS_ACCEPTANCE_REPORT.md`, and `topic-registry.v1.json`) for docs ownership, parity, and merge readiness.
 - `website` quality gate (`npm --prefix website run check:quality`): Enforces build, redirects, i18n keys, nav integrity, and search indexing.
 
 ## 4. Website Routing Model
@@ -48,6 +59,6 @@ This document maps the active parts of the Sounio monorepo so contributors can q
 3. `cargo test -p souc --lib` completes without aborts.
 4. `bash scripts/fast_gate.sh` passes.
 5. `npm --prefix website run check:quality` passes.
-6. Workflow/doc integrity checks pass in CI and locally.
+6. Workflow/doc integrity checks, including `bash scripts/check_docs_registry.sh`, pass in CI and locally.
 
 Use this overview as the source-of-truth map for release readiness and regression triage.

@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.compiler.debugging-guide
+authority: repo_only
+audience: contributors
+last_validated: 2026-03-07
+validated_by: A4
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.compiler.debugging-guide
+-->
+
 # Debugging Guide for Sounio Programs
 
 ## 1. Introduction

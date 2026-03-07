@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.architecture.async-runtime
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.architecture.async-runtime
+-->
+
 # Sounio Async Runtime
 
 This document describes the async/await runtime infrastructure for Sounio programs, including task scheduling, combinators, and channels.

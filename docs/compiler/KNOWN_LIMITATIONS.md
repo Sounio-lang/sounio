@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.compiler.known-limitations
+authority: repo_only
+audience: contributors
+last_validated: 2026-03-07
+validated_by: A4
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.compiler.known-limitations
+-->
+
 # Known Language Limitations
 
 This document tracks limitations in the Sounio language implementation.

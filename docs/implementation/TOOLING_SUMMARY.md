@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.implementation.tooling-summary
+authority: repo_only
+audience: maintainers
+last_validated: 2026-03-07
+validated_by: A7
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.implementation.tooling-summary
+-->
+
 # Rustless Cutover Tooling Summary
 
 **Created**: 2026-02-13

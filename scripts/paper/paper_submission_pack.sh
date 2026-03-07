@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 PAPER_ARTIFACTS_DIR="$ROOT_DIR/paper/artifacts"
 OUT_BASE="${PAPER_SUBMISSION_PACK_DIR:-$ROOT_DIR/artifacts/omega/paper_submission_pack}"
 

@@ -27,6 +27,7 @@ npm run check:quality
 
 `check:quality` is release-blocking and includes:
 
+- docs topic registry parity
 - i18n key parity
 - Astro build + Pagefind indexing
 - route/redirect contracts

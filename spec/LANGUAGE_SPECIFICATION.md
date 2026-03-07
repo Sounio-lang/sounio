@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: website.docs.spec.language-spec
+authority: dual
+audience: users
+last_validated: 2026-03-07
+validated_by: A3
+source_of_truth: docs/governance/topic-registry.v1.json#website.docs.spec.language-spec
+-->
+
 # The Sounio Programming Language
 
 ## Language Specification v1.0.0

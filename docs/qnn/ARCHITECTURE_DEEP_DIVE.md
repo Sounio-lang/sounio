@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.qnn.architecture-deep-dive
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.qnn.architecture-deep-dive
+-->
+
 # QNN Architecture Deep-Dive
 
 > *"Any sufficiently advanced abstraction is indistinguishable from magic."*

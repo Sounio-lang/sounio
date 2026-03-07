@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 PAPER_DIR="$ROOT_DIR/paper"
 OUT_JSON="${PAPER_REPRO_GATE_STATUS_JSON:-$ROOT_DIR/artifacts/omega/paper_repro_gate_status.v1.json}"
 

@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.guide.programming
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A5
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.guide.programming
+-->
+
 # Sounio Programming Guide for LLMs
 
 This comprehensive guide enables LLMs to correctly generate Sounio code. Sounio is a novel L0 systems + scientific programming language - it is NOT a dialect of Rust, Julia, Python, or any other language.
@@ -31,7 +40,7 @@ This comprehensive guide enables LLMs to correctly generate Sounio code. Sounio 
 ### Canonical References
 
 For what the compiler accepts today:
-- `docs/MINIMUM_VIABLE_SOUNIO.md` — What actually works
+- `docs/guide/MINIMUM_VIABLE_SOUNIO.md` — What actually works
 - `compiler/docs/KNOWN_LIMITATIONS.md` — What is not implemented
 - `tests/run-pass/` — Compilable syntax patterns
 
@@ -1828,7 +1837,7 @@ fn rotation_network(input_poses: [Octonion]) -> [Octonion] {
 }
 ```
 
-For comprehensive benchmarks and performance analysis, see [docs/ONN_BENCHMARK_ANALYSIS.md](ONN_BENCHMARK_ANALYSIS.md).
+For comprehensive benchmarks and performance analysis, see [docs/research/ONN_BENCHMARK_ANALYSIS.md](../research/ONN_BENCHMARK_ANALYSIS.md).
 
 ---
 

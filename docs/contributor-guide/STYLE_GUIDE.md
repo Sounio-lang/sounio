@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.contributor-guide.style-guide
+authority: repo_only
+audience: contributors
+last_validated: 2026-03-07
+validated_by: A5
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.contributor-guide.style-guide
+-->
+
 # Sounio Style Guide
 
 Official style conventions for writing idiomatic Sounio code.

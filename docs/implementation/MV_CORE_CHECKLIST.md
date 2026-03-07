@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.implementation.mv-core-checklist
+authority: repo_only
+audience: maintainers
+last_validated: 2026-03-07
+validated_by: A7
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.implementation.mv-core-checklist
+-->
+
 # Minimum Viable Sounio Core (MVSC) — Checklist
 
 This checklist defines the smallest coherent subset of Sounio that feels “real” end-to-end: parse → typecheck → diagnose → (optionally) run, while preserving Sounio’s epistemic invariants.

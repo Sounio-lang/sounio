@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.features.visual-showcase-integration
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A6
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.features.visual-showcase-integration
+-->
+
 # Visual Examples Showcase - Website Integration
 
 **Status:** ✅ Complete

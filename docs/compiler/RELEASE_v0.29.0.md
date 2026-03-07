@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.compiler.release-v0.29.0
+authority: repo_only
+audience: contributors
+last_validated: 2026-03-07
+validated_by: A4
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.compiler.release-v0.29.0
+-->
+
 # Sounio v0.29.0 Release Notes
 
 **Release Date:** December 3, 2025

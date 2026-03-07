@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.stdlib.stdlib-language-limitations
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A3
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.stdlib.stdlib-language-limitations
+-->
+
 # Stdlib Module Language Limitations
 
 ## Summary
@@ -215,7 +224,7 @@ These can serve as reference implementations once the compiler limitations are a
 
 ## See Also
 
-- [MINIMUM_VIABLE_SOUNIO.md](MINIMUM_VIABLE_SOUNIO.md) - Current language capabilities
-- [CLAUDE.md](../CLAUDE.md) - Development guidelines
+- [MINIMUM_VIABLE_SOUNIO.md](../guide/MINIMUM_VIABLE_SOUNIO.md) - Current language capabilities
+- [DEVELOPER_WORKFLOW.md](../contributor-guide/DEVELOPER_WORKFLOW.md) - Development guidelines
 - GitHub Issue #18 - Stdlib Module Design RFC
 - GitHub Issue #21 - Multi-module linking issues

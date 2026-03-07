@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.guide.installation
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A5
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.guide.installation
+-->
+
 # Sounio Installation Guide
 
 This guide covers all installation scenarios for the Sounio compiler, from basic setup to full-featured builds with all optional dependencies.
@@ -24,7 +33,7 @@ For most users, the basic build requires only Rust:
 ```bash
 # Clone the repository
 git clone https://github.com/sounio-lang/sounio.git
-cd sounio/compiler
+cd sounio
 
 # Build with default features (Cranelift JIT)
 cargo build --release
@@ -73,7 +82,7 @@ rustup update stable
 
 ```bash
 git clone https://github.com/sounio-lang/sounio.git
-cd sounio/compiler
+cd sounio
 
 # Basic build (uses Cranelift JIT)
 cargo build --release
@@ -420,8 +429,8 @@ test result: ok. 3851 passed; 0 failed; 0 ignored
 ## Next Steps
 
 - [Getting Started](getting-started.md) — Write your first Sounio program
-- [Language Guide](LLM_PROGRAMMING_GUIDE.md) — Complete syntax reference
-- [Feature Flags](FEATURE_FLAGS.md) — Detailed feature documentation
+- [Programming Guide](programming.md) — Complete syntax reference
+- [Feature Flags](../FEATURE_FLAGS.md) — Detailed feature documentation
 - [Minimum Viable Sounio](MINIMUM_VIABLE_SOUNIO.md) — What works today
 
 ---

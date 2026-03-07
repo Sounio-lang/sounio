@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.architecture.kaxi-adapters
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.architecture.kaxi-adapters
+-->
+
 # K-AXI Adapter Flags
 
 `flags` is a 32-bit packed field with this layout:

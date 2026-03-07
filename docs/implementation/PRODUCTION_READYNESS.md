@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.implementation.production-readyness
+authority: repo_only
+audience: maintainers
+last_validated: 2026-03-07
+validated_by: A7
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.implementation.production-readyness
+-->
+
 # Sounio Production Readiness (Linux x86-64)
 
 This document defines the production-readiness boundaries for the first operational rollout.

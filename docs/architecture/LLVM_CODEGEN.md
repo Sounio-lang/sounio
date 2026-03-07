@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.architecture.llvm-codegen
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.architecture.llvm-codegen
+-->
+
 # Sounio LLVM Code Generation
 
 This document describes the LLVM code generation backend for Sounio, including type mapping, supported operations, and build configuration.

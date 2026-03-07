@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.guide.tutorial
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A5
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.guide.tutorial
+-->
+
 # Sounio Tutorial
 
 A step-by-step guide to learning Sounio, the language for epistemic computing.
@@ -515,14 +524,14 @@ fn dot_product<T: Numeric>(a: [T], b: [T]) -> T {
 ## Next Steps
 
 ### Continue Learning
-- **[Language Guide](../LLM_PROGRAMMING_GUIDE.md)** - Complete reference
+- **[Programming Guide](programming.md)** - Complete reference
 - **[Standard Library](../reference/STDLIB_REFERENCE.md)** - API documentation
 - **[Examples](../../examples/)** - Real-world code
 
 ### Start Building
-- Try the [medical examples](../../examples/medical/) for PK/PD modeling
+- Try the [medical examples](../../examples/medlang/) for PK/PD modeling
 - Explore [GPU examples](../../examples/gpu/) for high-performance computing
-- Check [fMRI examples](../../examples/neuroimaging/) for neuroimaging
+- Check [fMRI examples](../../examples/fmri/) for neuroimaging
 
 ### Get Help
 - **[FAQ](../FAQ.md)** - Common questions

@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.examples.real-world.readme
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A5
+source_of_truth: docs/governance/topic-registry.v1.json#repo.examples.real-world.readme
+-->
+
 # Real-World Sounio Examples
 
 Production-quality examples showcasing Sounio's unique capabilities in epistemic computing, scientific programming, and type-safe uncertainty quantification.

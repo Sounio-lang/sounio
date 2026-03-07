@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.frontdoor.readme
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.frontdoor.readme
+-->
+
 <div align="center">
 
 # SOUNIO
@@ -440,7 +449,7 @@ This displays all search locations and which ones exist, helping you verify corr
 ### For Contributors
 - **[Architecture Overview](docs/compiler/ARCHITECTURE.md)** - Compiler design
 - **[Contributing Guide](CONTRIBUTING.md)** - How to contribute
-- **[Style Guide](docs/STYLE_GUIDE.md)** - Code style conventions
+- **[Style Guide](docs/contributor-guide/STYLE_GUIDE.md)** - Code style conventions
 
 ---
 
@@ -524,10 +533,10 @@ cargo run -p soir -- inspect hello.soir
 ```
 
 **Documentation**:
-- [Rustless Cutover Guide](docs/RUSTLESS_CUTOVER.md) - Complete workflow
-- [SOIR Format Specification](docs/SOIR_REFERENCE.md) - Binary format reference
-- [Migration Guide](docs/MIGRATION_GUIDE.md) - User and developer migration
-- [Complete Implementation](docs/RUSTLESS_COMPLETE.md) - Full technical details
+- [Rustless Cutover Guide](docs/implementation/RUSTLESS_CUTOVER.md) - Complete workflow
+- [SOIR Format Specification](docs/architecture/SOIR_REFERENCE.md) - Binary format reference
+- [Migration Guide](docs/implementation/MIGRATION_GUIDE.md) - User and developer migration
+- [Complete Implementation](docs/implementation/RUSTLESS_COMPLETE.md) - Full technical details
 
 **Benefits**:
 - ✅ **Reproducible builds** (Stage 1 ≡ Stage 2 verified)

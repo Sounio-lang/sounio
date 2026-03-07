@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: website.docs.compiler.codegen
+authority: dual
+audience: contributors
+last_validated: 2026-03-07
+validated_by: A4
+source_of_truth: docs/governance/topic-registry.v1.json#website.docs.compiler.codegen
+-->
+
 # Geração de Código - Arquitetura do Compilador Sounio
 
 ## Visão Geral

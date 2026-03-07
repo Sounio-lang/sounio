@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.qnn.api.comparison-guide
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.qnn.api.comparison-guide
+-->
+
 # PyTorch vs Sounio QNN Comparison
 
 This guide provides side-by-side comparisons of equivalent PyTorch and Sounio code, helping you understand the translation patterns.

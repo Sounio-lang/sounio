@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.examples.showcase.readme
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A5
+source_of_truth: docs/governance/topic-registry.v1.json#repo.examples.showcase.readme
+-->
+
 # Sounio Showcase Examples
 
 Ten self-contained programs demonstrating Sounio's unique capabilities for both scientific computing and systems programming. Every example type-checks and runs end-to-end.

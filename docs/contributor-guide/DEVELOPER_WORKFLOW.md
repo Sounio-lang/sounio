@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.contributor-guide.developer-workflow
+authority: repo_only
+audience: contributors
+last_validated: 2026-03-07
+validated_by: A5
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.contributor-guide.developer-workflow
+-->
+
 # Sounio Developer Workflow Guide
 
 **Target Audience**: Contributors working on the self-hosted compiler
@@ -146,7 +155,7 @@ vim self-hosted/ir/test_serialize.sio
 # Add roundtrip test for new opcode
 
 # 6. Update documentation
-vim docs/SOIR_REFERENCE.md
+vim docs/architecture/SOIR_REFERENCE.md
 # Add new opcode to reference table
 
 # 7. Verify everything works
@@ -570,7 +579,7 @@ If this passes, your changes are safe.
 
 ## Further Reading
 
-- [RUSTLESS_CUTOVER.md](RUSTLESS_CUTOVER.md) - Complete rustless cutover documentation
-- [SOIR_REFERENCE.md](SOIR_REFERENCE.md) - SOIR format specification
-- [SELF_HOSTING_PHASES.md](SELF_HOSTING_PHASES.md) - Bootstrap roadmap
+- [RUSTLESS_CUTOVER.md](../implementation/RUSTLESS_CUTOVER.md) - Complete rustless cutover documentation
+- [SOIR_REFERENCE.md](../architecture/SOIR_REFERENCE.md) - SOIR format specification
+- [SELF_HOSTING_PHASES.md](../implementation/SELF_HOSTING_PHASES.md) - Bootstrap roadmap
 - `.claude/decisions/2026-02-13-rustless-cutover.md` - Design decisions

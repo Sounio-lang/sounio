@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.getting-started
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.getting-started
+-->
+
 # Getting Started with Sounio
 
 Sounio is an L0 systems and scientific programming language for epistemic computing. It features algebraic effects, linear types, units of measure, epistemic uncertainty propagation, and 16-dimensional hypercomplex (sedenion) algebra.

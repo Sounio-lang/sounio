@@ -47,6 +47,7 @@ run_step() {
 run_step "cargo-check-rerun" cargo check -p souc
 run_step "workflow-refs-rerun" bash "$ROOT_DIR/scripts/check_workflow_script_refs.sh"
 run_step "docs-consistency-rerun" bash "$ROOT_DIR/scripts/check_docs_consistency.sh"
+run_step "docs-registry-rerun" bash "$ROOT_DIR/scripts/check_docs_registry.sh"
 run_step "website-quality-rerun" npm --prefix "$ROOT_DIR/website" run check:quality
 
 if [[ "$MODE" == "full" ]]; then

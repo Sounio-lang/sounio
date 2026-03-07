@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.glm-4.7-integration
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.glm-4.7-integration
+-->
+
 # GLM-4.7 Integration for ML-Guided Optimization
 
 ## Overview

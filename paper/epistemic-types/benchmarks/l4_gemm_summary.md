@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.paper.epistemic-types.benchmarks.l4-gemm-summary
+authority: repo_only
+audience: researchers
+last_validated: 2026-03-07
+validated_by: A6
+source_of_truth: docs/governance/topic-registry.v1.json#repo.paper.epistemic-types.benchmarks.l4-gemm-summary
+-->
+
 # L4 GPU Epistemic GEMM Benchmark Results
 
 **Generated from:** `artifacts/omega/l4_*.{txt,log}` (27 raw log files)

@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.features.genomics-features
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A6
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.features.genomics-features
+-->
+
 # Sounio Genomics Module — Complete Feature Documentation
 
 **Status**: Production-ready | **Version**: 0.100.0+ | **Lines of Code**: 3,600+
@@ -415,10 +424,10 @@ let msa = build_msa(seqs)
 ## API Reference
 
 See full documentation:
-- [Expression Analysis](docs/genomics/expression.md)
-- [Pathway Enrichment](docs/genomics/ontology.md)
-- [Sequence Alignment](docs/genomics/alignment.md)
-- [Variant Calling](docs/genomics/variant.md)
+- [Expression Analysis](../../stdlib/genomics/expression.sio)
+- [Pathway Enrichment](../../stdlib/genomics/ontology.sio)
+- [Sequence Alignment](../../stdlib/genomics/alignment.sio)
+- [Variant Calling](../../stdlib/genomics/variant.sio)
 
 ---
 

@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.qnn.migration-guide
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.qnn.migration-guide
+-->
+
 # Migration Guide: Float to Quaternion Networks
 
 > *Converting real-valued neural networks to quaternion-based architectures—when it helps, when it doesn't, and how to do it right.*

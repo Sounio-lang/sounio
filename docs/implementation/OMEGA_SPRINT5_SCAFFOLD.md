@@ -1,3 +1,18 @@
+<!-- docs:meta
+topic_id: repo.docs.implementation.omega-sprint5-scaffold
+authority: historical
+audience: maintainers
+last_validated: 2026-03-07
+validated_by: A7
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.implementation.omega-sprint5-scaffold
+-->
+
+
+<!-- docs:status-note:start -->
+> Docs status: `historical`
+> This page is preserved for lineage. Start at [Docs Authority Matrix](../governance/DOCS_AUTHORITY_MATRIX.md) and [docs index](../README.md) for the current canonical surface for this topic.
+<!-- docs:status-note:end -->
+
 # Omega Sprint 5 Scaffold
 
 This scaffold starts Sprint 5 from the locked Sprint 4 Genesis baseline.

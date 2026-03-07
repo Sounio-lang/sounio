@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.architects-guide
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.architects-guide
+-->
+
 # The Sounio Architect's Guide
 
 ## How to Build Complex Systems Without Writing Code

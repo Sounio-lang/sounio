@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: website.docs.vancomycin-uncertainty
+authority: dual
+audience: researchers
+last_validated: 2026-03-07
+validated_by: A6
+source_of_truth: docs/governance/topic-registry.v1.json#website.docs.vancomycin-uncertainty
+-->
+
 # Vancomycin Uncertainty Propagation: Compile-Time Clinical Safety
 
 ## Before vs After
@@ -119,9 +128,9 @@ Note: the compile-time refusal path is fully active via `souc check`; the curren
 
 ## Screenshots
 
-![Run-pass check succeeds](website/public/docs/assets/vancomycin-ship/check_pass.png)
-![Run output with propagated provenance](website/public/docs/assets/vancomycin-ship/run_output.png)
-![Compile-time refusal diagnostics](website/public/docs/assets/vancomycin-ship/compile_fails.png)
+![Run-pass check succeeds](../../website/public/docs/assets/vancomycin-ship/check_pass.png)
+![Run output with propagated provenance](../../website/public/docs/assets/vancomycin-ship/run_output.png)
+![Compile-time refusal diagnostics](../../website/public/docs/assets/vancomycin-ship/compile_fails.png)
 
 ## Why This Saves Kidneys
 
