@@ -52,6 +52,7 @@ enum TypeKind {
     TyAleatoric,        // Aleatoric<T> — irreducible uncertainty (sensor noise, quantum) — H6.3
     TyEpistemic,        // Epistemic<T>  — reducible uncertainty (model params, estimation) — H6.3
     TyCausalEffect,     // CausalEffect<Cause, Effect, do(Z=z)> — typed causal query — H6.4
+    TyGradedEffect,     // GradedEffect<ε, label> — effect row graded by uncertainty bound — H6.5
 }
 
 // ============================================================
@@ -1070,5 +1071,79 @@ fn causal_effect_is_identifiable(ty: TypeEntry) -> bool {
     match ty.kind {
         TypeKind::TyCausalEffect => ty.epistemic_meta_id == 0
         _ => false
+    }
+}
+
+// ============================================================
+// GradedEffect constructor and predicates (H6.5 — Sprint 18)
+// ============================================================
+
+// TyGradedEffect: effect row graded by uncertainty bound ε.
+// Represents `Prob<ε>` — a graded modality fusing row-poly effects + epistemic uncertainty.
+//   name         = effect label (e.g. "Prob")
+//   knowledge_epsilon = grade ε ∈ [0,1]
+//   inner        = tail type (the residual effect row)
+//   epistemic_meta_id = 0: epistemic grade (quadrature composition); 1: aleatoric grade (additive)
+fn ty_graded_effect(label: Name, epsilon: f64, tail: TypeEntry, aleatoric: i64) -> TypeEntry with Alloc {
+    TypeEntry {
+        kind: TypeKind::TyGradedEffect,
+        name: label,
+        inner: Some(Box::new(tail)),
+        array_size: -1,
+        fn_sig_id: -1,
+        tuple_elems: None,
+        knowledge_epsilon: epsilon,
+        algebra_kind: -1,
+        clifford_p: -1,
+        clifford_q: -1,
+        unit_id: -1,
+        refinement_id: -1,
+        epistemic_meta_id: aleatoric,
+        robustness_level_id: -1,
+        robustness_scope_id: -1,
+    }
+}
+
+fn is_graded_effect_type(ty: TypeEntry) -> bool {
+    match ty.kind {
+        TypeKind::TyGradedEffect => true
+        _ => false
+    }
+}
+
+// Grade subsumption: Prob<ε_provided> satisfies Prob<ε_required> iff ε_provided <= ε_required.
+// A tighter bound (smaller ε) is always acceptable where a looser bound is required.
+fn graded_effect_subsumes(provided: TypeEntry, required: TypeEntry) -> bool {
+    match provided.kind {
+        TypeKind::TyGradedEffect => {
+            match required.kind {
+                TypeKind::TyGradedEffect => {
+                    // provided.ε ≤ required.ε (provided is at least as precise)
+                    provided.knowledge_epsilon <= required.knowledge_epsilon
+                }
+                _ => false
+            }
+        }
+        _ => false
+    }
+}
+
+// Grade composition: Prob<ε1> ∘ Prob<ε2>
+// Epistemic (aleatoric=0): quadrature — ε_out = sqrt(ε1² + ε2²)
+// Aleatoric  (aleatoric=1): additive  — ε_out = ε1 + ε2
+fn graded_effect_compose(a: TypeEntry, b: TypeEntry) -> f64 with Div {
+    if a.epistemic_meta_id == 1 {
+        // Aleatoric: additive
+        a.knowledge_epsilon + b.knowledge_epsilon
+    } else {
+        // Epistemic: quadrature sqrt(a² + b²)
+        let sum_sq = a.knowledge_epsilon * a.knowledge_epsilon + b.knowledge_epsilon * b.knowledge_epsilon
+        var est: f64 = sum_sq
+        var i: i64 = 0
+        while i < 10 {
+            est = (est + sum_sq / est) / 2.0
+            i = i + 1
+        }
+        est
     }
 }

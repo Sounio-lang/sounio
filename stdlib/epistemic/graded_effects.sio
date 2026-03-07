@@ -1,0 +1,121 @@
+// stdlib/epistemic/graded_effects.sio — Graded Epistemic Effects
+//
+// Fuses row-polymorphic algebraic effects (Track A) with the
+// epistemic/aleatoric uncertainty split (Track B) into a unified
+// graded modality system.
+//
+// Theory (PLDI 2027, Track C):
+//   - Grade an effect row with an uncertainty bound: Prob<ε>
+//   - Epistemic grade composition: Prob<ε1> ∘ Prob<ε2> = Prob<√(ε1² + ε2²)]
+//   - Aleatoric grade composition: Prob<ε1> ∘ Prob<ε2> = Prob<ε1 + ε2>
+//   - Subsumption: Prob<ε_tight> satisfies Prob<ε_loose> iff ε_tight ≤ ε_loose
+//
+// GUM compliance: grade composition is GUM-sound (ISO/IEC Guide 98-3).
+//
+// References:
+//   - Granule: graded modal types (Orchard/McBride)
+//   - GMDT: graded modal dependent types (Abel/Orchard POPL 2023)
+//   - DEUP: decomposed epistemic/aleatoric uncertainty (Bengio 2021)
+
+module epistemic::graded_effects
+
+// GradedProb: runtime representation of a Prob<ε>-graded computation result.
+// Carries the value, the achieved grade ε, and whether the grade is epistemic or aleatoric.
+struct GradedProb {
+    value: f64,
+    epsilon: f64,       // achieved uncertainty grade ε ∈ [0,1]
+    is_aleatoric: bool, // false = epistemic (reducible), true = aleatoric (irreducible)
+}
+
+// Construct an epistemic-graded value: reducible by more data
+fn graded_epistemic(value: f64, epsilon: f64) -> GradedProb {
+    GradedProb {
+        value: value,
+        epsilon: epsilon,
+        is_aleatoric: false,
+    }
+}
+
+// Construct an aleatoric-graded value: irreducible physical uncertainty
+fn graded_aleatoric(value: f64, epsilon: f64) -> GradedProb {
+    GradedProb {
+        value: value,
+        epsilon: epsilon,
+        is_aleatoric: true,
+    }
+}
+
+// Integer square root approximation (10 Newton iterations)
+fn graded_sqrt(x: f64) -> f64 with Div {
+    if x <= 0.0 {
+        0.0
+    } else {
+        var est: f64 = x
+        var i: i64 = 0
+        while i < 10 {
+            est = (est + x / est) / 2.0
+            i = i + 1
+        }
+        est
+    }
+}
+
+// Grade composition: a ∘ b
+// Composes two graded computations following the GUM propagation rule.
+// Mixed (epistemic + aleatoric) → aleatoric (worst case, irreducibility dominates).
+fn graded_compose(a: GradedProb, b: GradedProb) -> GradedProb with Div {
+    if a.is_aleatoric || b.is_aleatoric {
+        // Aleatoric dominates: additive composition
+        GradedProb {
+            value: a.value,
+            epsilon: a.epsilon + b.epsilon,
+            is_aleatoric: true,
+        }
+    } else {
+        // Epistemic: quadrature — sqrt(ε1² + ε2²)
+        let sum_sq = a.epsilon * a.epsilon + b.epsilon * b.epsilon
+        GradedProb {
+            value: a.value,
+            epsilon: graded_sqrt(sum_sq),
+            is_aleatoric: false,
+        }
+    }
+}
+
+// Subsumption check: does `provided` satisfy `required` grade?
+// Returns true iff provided.ε ≤ required.ε
+fn graded_subsumes(provided: GradedProb, required_epsilon: f64) -> bool {
+    provided.epsilon <= required_epsilon
+}
+
+// Bayesian update: reduce epistemic grade by n new samples
+// New ε ~= ε_prior / sqrt(1 + n)  (Bernstein-von Mises convergence rate)
+fn graded_epistemic_update(prior: GradedProb, n_samples: i64) -> GradedProb with Div {
+    if prior.is_aleatoric || n_samples <= 0 {
+        prior
+    } else {
+        let n_f = n_samples as f64
+        let new_eps = prior.epsilon / graded_sqrt(1.0 + n_f)
+        GradedProb {
+            value: prior.value,
+            epsilon: new_eps,
+            is_aleatoric: false,
+        }
+    }
+}
+
+// Extract the grade (uncertainty bound)
+fn graded_epsilon(g: GradedProb) -> f64 {
+    g.epsilon
+}
+
+// Extract the value
+fn graded_value(g: GradedProb) -> f64 {
+    g.value
+}
+
+// Check if this grade is at the threshold for a safety-critical decision
+// Returns true if epsilon <= threshold (safe to act on)
+fn graded_is_safe(g: GradedProb, threshold: f64) -> bool {
+    g.epsilon <= threshold
+}
