@@ -142,6 +142,10 @@ fn print_type_expr(te: TypeExpr) with IO, Mut, Panic, Div, Alloc {
         TypeKnowledge => {
             print("Knowledge<...>")
         }
+        TypeModel => {
+            print("Model")
+            print_type_args_opt(te.type_args)
+        }
         TypePolicy => {
             print("Policy")
             print_type_args_opt(te.type_args)
@@ -422,6 +426,11 @@ fn print_expr(e: Expr) with IO, Mut, Panic, Div, Alloc {
             print("] on ")
             print_expr_opt(e.left)
         }
+        ExprAuditAttach => {
+            print_expr_opt(e.left)
+            print(" audit ")
+            print_name(e.name)
+        }
         ExprIf => {
             print("if ")
             print_expr_opt(e.left)
@@ -580,6 +589,10 @@ fn print_expr_list_comma(opt: Option<Box<ExprList>>) with IO, Mut, Panic, Div, A
 fn print_expr_list_comma_inner(list: ExprList, first: bool) with IO, Mut, Panic, Div, Alloc {
     if !first {
         print(", ")
+    }
+    if !name_is_empty(list.label) {
+        print_name(list.label)
+        print(": ")
     }
     print_expr(list.head)
     match list.tail {
@@ -741,6 +754,162 @@ fn print_item_list_top_inner(list: ItemList) with IO, Mut, Panic, Div, Alloc {
     }
 }
 
+fn print_policy_compare_op(op: CompareOp) with IO {
+    match op {
+        CmpLt => print("<")
+        CmpLe => print("<=")
+        CmpEq => print("==")
+        CmpGe => print(">=")
+        CmpGt => print(">")
+    }
+}
+
+fn print_policy_threshold(value: f64) with IO {
+    let milli = (value * 1000.0) as i64
+    print_int(milli)
+    print("/1000")
+}
+
+fn print_policy_requirements(opt: Option<Box<PolicyRequirementList>>, indent: i64) with IO, Mut, Panic, Div, Alloc {
+    match opt {
+        Some(list) => {
+            print_indent(indent)
+            print("require ")
+            print_name((*list).head.metric_name)
+            print(" ")
+            print_policy_compare_op((*list).head.op)
+            print(" ")
+            print_policy_threshold((*list).head.threshold)
+            print("\n")
+            print_policy_requirements((*list).tail, indent)
+        }
+        None => {}
+    }
+}
+
+fn print_policy_item(opt: Option<Box<PolicyDef>>, indent: i64) with IO, Mut, Panic, Div, Alloc {
+    match opt {
+        Some(pd) => {
+            print_indent(indent)
+            print("policy ")
+            print_name((*pd).name)
+            print(" for ")
+            print_type_expr((*pd).target_type)
+            if !name_is_empty((*pd).level_name) {
+                print(" level ")
+                print_name((*pd).level_name)
+            }
+            if !name_is_empty((*pd).scope_name) {
+                print(" scope ")
+                print_name((*pd).scope_name)
+            }
+            print(" {\n")
+            print_policy_requirements((*pd).requirements, indent + 1)
+            print_indent(indent)
+            print("}")
+        }
+        None => {}
+    }
+}
+
+fn print_ast_path_list(opt: Option<Box<AstPathList>>) with IO, Mut, Panic, Div, Alloc {
+    match opt {
+        Some(list) => print_ast_path_list_inner(*list, true)
+        None => {}
+    }
+}
+
+fn print_ast_path_list_inner(list: AstPathList, first: bool) with IO, Mut, Panic, Div, Alloc {
+    if !first {
+        print(", ")
+    }
+    print_path(list.head)
+    match list.tail {
+        Some(rest) => print_ast_path_list_inner(*rest, false)
+        None => {}
+    }
+}
+
+fn print_models_item(opt: Option<Box<ModelsDef>>, indent: i64) with IO, Mut, Panic, Div, Alloc {
+    match opt {
+        Some(md) => {
+            print_indent(indent)
+            print("models ")
+            print_name((*md).name)
+            print(" = [")
+            print_ast_path_list((*md).models)
+            print("]")
+        }
+        None => {}
+    }
+}
+
+fn print_validation_item(opt: Option<Box<ValidationDef>>, indent: i64) with IO, Mut, Panic, Div, Alloc {
+    match opt {
+        Some(vd) => {
+            print_indent(indent)
+            print("validation ")
+            print_name((*vd).name)
+            print(" for ")
+            print_type_expr((*vd).target_type)
+            print(" {}")
+        }
+        None => {}
+    }
+}
+
+fn print_audit_field_entry(entry: AuditFieldEntry, first: bool) with IO, Mut, Panic, Div {
+    if !first { print(", ") }
+    print_name(entry.name)
+    print(": ")
+    if entry.value_kind == AuditValueKind::AuditValueFloat {
+        print_float(entry.value_f64)
+    } else {
+        print_name(entry.value_name)
+    }
+}
+
+fn print_audit_field_entries(opt: Option<Box<AuditFieldEntryList>>, first: bool) with IO, Mut, Panic, Div, Alloc {
+    match opt {
+        Some(list) => {
+            print_audit_field_entry((*list).head, first)
+            print_audit_field_entries((*list).tail, false)
+        }
+        None => {}
+    }
+}
+
+fn print_audit_sections(opt: Option<Box<AuditSectionList>>, indent: i64) with IO, Mut, Panic, Div, Alloc {
+    match opt {
+        Some(list) => {
+            print_indent(indent)
+            print_name((*list).head.name)
+            print(" { ")
+            print_audit_field_entries((*list).head.fields, true)
+            print(" }\n")
+            print_audit_sections((*list).tail, indent)
+        }
+        None => {}
+    }
+}
+
+fn print_audit_item(opt: Option<Box<AuditDef>>, indent: i64) with IO, Mut, Panic, Div, Alloc {
+    match opt {
+        Some(ad) => {
+            print_indent(indent)
+            print("audit ")
+            print_name((*ad).name)
+            print(" for ")
+            print_type_expr((*ad).target_type)
+            print(" {\n")
+            print_audit_sections((*ad).sections, indent + 1)
+            print_indent(indent)
+            print("}")
+        }
+        None => {}
+    }
+}
+
 fn print_item(item: Item, indent: i64) with IO, Mut, Panic, Div, Alloc {
     match item.kind {
         ItemFn => print_fn_item(item.fn_def, indent)
@@ -754,6 +923,10 @@ fn print_item(item: Item, indent: i64) with IO, Mut, Panic, Div, Alloc {
             print(" = ")
             print_type_inner(item.type_alias_ty)
         }
+        ItemModels => print_models_item(item.models_def, indent)
+        ItemPolicy => print_policy_item(item.policy_def, indent)
+        ItemValidation => print_validation_item(item.validation_def, indent)
+        ItemAudit => print_audit_item(item.audit_def, indent)
         ItemUse => {
             print_indent(indent)
             print("use ")
@@ -768,6 +941,47 @@ fn print_item(item: Item, indent: i64) with IO, Mut, Panic, Div, Alloc {
             print_name(item.name)
             print(";")
         }
+        ItemEffect => {
+            print_indent(indent)
+            print("effect ")
+            print_name(item.name)
+            print(" {")
+            match item.effect_def {
+                Some(edef) => print_effect_op_def_list_opt((*edef).ops, indent + 1)
+                None => {}
+            }
+            print("\n")
+            print_indent(indent)
+            print("}")
+        }
+    }
+}
+
+fn print_effect_op_def_list_opt(opt: Option<Box<EffectOpDefList>>, indent: i64) with IO, Mut, Panic, Div, Alloc {
+    match opt {
+        None => {}
+        Some(node) => print_effect_op_def_list_inner(*node, indent)
+    }
+}
+
+fn print_effect_op_def_list_inner(list: EffectOpDefList, indent: i64) with IO, Mut, Panic, Div, Alloc {
+    print("\n")
+    print_indent(indent)
+    print("fn ")
+    print_name(list.head.name)
+    print("(")
+    print_param_list(list.head.params)
+    print(")")
+    match list.head.ret_ty {
+        Some(ty) => {
+            print(" -> ")
+            print_type_expr(*ty)
+        }
+        None => {}
+    }
+    match list.tail {
+        Some(rest) => print_effect_op_def_list_inner(*rest, indent)
+        None => {}
     }
 }
 

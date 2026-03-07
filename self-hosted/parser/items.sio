@@ -44,6 +44,14 @@ impl Parser {
             p.parse_impl_item(is_pub)
         } else if item_kind == TokenKind::Type {
             p.parse_type_alias_item(is_pub)
+        } else if item_kind == TokenKind::ModelsLower {
+            p.parse_models_item(is_pub)
+        } else if item_kind == TokenKind::PolicyLower {
+            p.parse_policy_item(is_pub)
+        } else if item_kind == TokenKind::ValidationLower {
+            p.parse_validation_item(is_pub)
+        } else if item_kind == TokenKind::AuditLower {
+            p.parse_audit_item(is_pub)
         } else if item_kind == TokenKind::Use {
             p.parse_use_item(is_pub)
         } else if item_kind == TokenKind::Import {
@@ -54,6 +62,8 @@ impl Parser {
             p.parse_global_var_item(is_pub)
         } else if item_kind == TokenKind::Unit {
             p.parse_unit_item(is_pub)
+        } else if item_kind == TokenKind::Effect {
+            p.parse_effect_item(is_pub)
         } else {
             // Error recovery: skip token
             let span = p.current_span()
@@ -70,9 +80,14 @@ impl Parser {
                 enum_def: None,
                 impl_def: None,
                 type_alias_ty: None,
+                policy_def: None,
+                models_def: None,
+                validation_def: None,
+                audit_def: None,
                 use_path: empty_path(),
                 use_glob: false,
                 use_items: None,
+                effect_def: None,
             })
         }
     }
@@ -108,9 +123,14 @@ impl Parser {
             enum_def: None,
             impl_def: None,
             type_alias_ty: None,
+            policy_def: None,
+            models_def: None,
+            validation_def: None,
+            audit_def: None,
             use_path: empty_path(),
             use_glob: false,
             use_items: None,
+            effect_def: None,
         })
     }
 
@@ -141,9 +161,14 @@ impl Parser {
             enum_def: None,
             impl_def: None,
             type_alias_ty: None,
+            policy_def: None,
+            models_def: None,
+            validation_def: None,
+            audit_def: None,
             use_path: empty_path(),
             use_glob: false,
             use_items: None,
+            effect_def: None,
         })
     }
 
@@ -169,9 +194,14 @@ impl Parser {
                 enum_def: None,
                 impl_def: None,
                 type_alias_ty: None,
+                policy_def: None,
+                models_def: None,
+                validation_def: None,
+                audit_def: None,
                 use_path: empty_path(),
                 use_glob: false,
                 use_items: None,
+                effect_def: None,
             })
         }
 
@@ -226,9 +256,14 @@ impl Parser {
             enum_def: None,
             impl_def: None,
             type_alias_ty: None,
+            policy_def: None,
+            models_def: None,
+            validation_def: None,
+            audit_def: None,
             use_path: empty_path(),
             use_glob: false,
             use_items: None,
+            effect_def: None,
         })
     }
 
@@ -343,9 +378,14 @@ impl Parser {
             enum_def: None,
             impl_def: None,
             type_alias_ty: None,
+            policy_def: None,
+            models_def: None,
+            validation_def: None,
+            audit_def: None,
             use_path: empty_path(),
             use_glob: false,
             use_items: None,
+            effect_def: None,
         })
     }
 
@@ -393,9 +433,14 @@ impl Parser {
             enum_def: Some(Box::new(edef)),
             impl_def: None,
             type_alias_ty: None,
+            policy_def: None,
+            models_def: None,
+            validation_def: None,
+            audit_def: None,
             use_path: empty_path(),
             use_glob: false,
             use_items: None,
+            effect_def: None,
         })
     }
 
@@ -455,9 +500,14 @@ impl Parser {
             enum_def: None,
             impl_def: Some(Box::new(idef)),
             type_alias_ty: None,
+            policy_def: None,
+            models_def: None,
+            validation_def: None,
+            audit_def: None,
             use_path: empty_path(),
             use_glob: false,
             use_items: None,
+            effect_def: None,
         })
     }
 
@@ -489,9 +539,14 @@ impl Parser {
                 enum_def: None,
                 impl_def: None,
                 type_alias_ty: Some(Box::new(ref_ty)),
+                policy_def: None,
+                models_def: None,
+                validation_def: None,
+                audit_def: None,
                 use_path: empty_path(),
                 use_glob: false,
                 use_items: None,
+                effect_def: None,
             })
         }
 
@@ -510,10 +565,409 @@ impl Parser {
             enum_def: None,
             impl_def: None,
             type_alias_ty: Some(Box::new(ty)),
+            policy_def: None,
+            models_def: None,
+            validation_def: None,
+            audit_def: None,
             use_path: empty_path(),
             use_glob: false,
             use_items: None,
+            effect_def: None,
         })
+    }
+
+    // ============================================================
+    // Policy: policy Name for Type { require metric >= value }
+    // ============================================================
+
+    fn parse_policy_item(self, is_pub: bool) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
+        let start = self.current_span()
+        var p = self.advance()  // skip 'policy'
+
+        let name = p.current_name()
+        p = p.expect_ident()
+        p = p.expect(TokenKind::For)
+
+        let target_pair = p.parse_type()
+        p = target_pair.0
+        let target_ty = target_pair.1
+
+        var level_name = empty_name()
+        var scope_name = empty_name()
+        if p.peek() == TokenKind::Level {
+            p = p.advance()
+            level_name = p.current_name()
+            p = p.expect_ident()
+        }
+        if p.peek() == TokenKind::Scope {
+            p = p.advance()
+            scope_name = p.current_name()
+            p = p.expect_ident()
+        }
+
+        p = p.expect(TokenKind::LBrace)
+        var rev_requirements_opt: Option<Box<PolicyRequirementList>> = None
+
+        while p.peek() != TokenKind::RBrace && p.peek() != TokenKind::Eof {
+            while p.peek() == TokenKind::Semi || p.peek() == TokenKind::Newline {
+                p = p.advance()
+            }
+            if p.peek() == TokenKind::RBrace || p.peek() == TokenKind::Eof {
+                break
+            }
+
+            let req_pair = p.parse_policy_requirement()
+            p = req_pair.0
+            rev_requirements_opt = Some(Box::new(PolicyRequirementList {
+                head: req_pair.1,
+                tail: rev_requirements_opt,
+            }))
+
+            while p.peek() == TokenKind::Semi {
+                p = p.advance()
+            }
+        }
+
+        p = p.expect(TokenKind::RBrace)
+
+        let span = p.span_from(start)
+        let pdef = PolicyDef {
+            name: name,
+            target_type: target_ty,
+            level_name: level_name,
+            scope_name: scope_name,
+            requirements: reverse_policy_requirement_list_opt(rev_requirements_opt),
+            span: span,
+        }
+
+        (p, Item {
+            kind: ItemKind::ItemPolicy,
+            span: span,
+            is_pub: is_pub,
+            name: name,
+            fn_def: None,
+            struct_def: None,
+            enum_def: None,
+            impl_def: None,
+            type_alias_ty: None,
+            policy_def: Some(Box::new(pdef)),
+            models_def: None,
+            validation_def: None,
+            audit_def: None,
+            use_path: empty_path(),
+            use_glob: false,
+            use_items: None,
+            effect_def: None,
+        })
+    }
+
+    fn parse_models_item(self, is_pub: bool) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
+        let start = self.current_span()
+        var p = self.advance()  // skip 'models'
+
+        let name = p.current_name()
+        p = p.expect_ident()
+        p = p.expect(TokenKind::Eq)
+        p = p.expect(TokenKind::LBracket)
+
+        var rev_models_opt: Option<Box<AstPathList>> = None
+        var model_count: i64 = 0
+
+        if p.peek() != TokenKind::RBracket {
+            let pair = p.parse_type_path()
+            p = pair.0
+            rev_models_opt = Some(Box::new(AstPathList { head: pair.1, tail: None }))
+            model_count = 1
+
+            while p.peek() == TokenKind::Comma {
+                p = p.advance()
+                if p.peek() == TokenKind::RBracket { break }
+                let pair2 = p.parse_type_path()
+                p = pair2.0
+                rev_models_opt = Some(Box::new(AstPathList { head: pair2.1, tail: rev_models_opt }))
+                model_count = model_count + 1
+            }
+        }
+
+        p = p.expect(TokenKind::RBracket)
+        let span = p.span_from(start)
+        let mdef = ModelsDef {
+            name: name,
+            models: reverse_ast_path_list_opt(rev_models_opt),
+            model_count: model_count,
+            span: span,
+        }
+
+        (p, Item {
+            kind: ItemKind::ItemModels,
+            span: span,
+            is_pub: is_pub,
+            name: name,
+            fn_def: None,
+            struct_def: None,
+            enum_def: None,
+            impl_def: None,
+            type_alias_ty: None,
+            policy_def: None,
+            models_def: Some(Box::new(mdef)),
+            validation_def: None,
+            audit_def: None,
+            use_path: empty_path(),
+            use_glob: false,
+            use_items: None,
+            effect_def: None,
+        })
+    }
+
+    fn parse_validation_item(self, is_pub: bool) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
+        let start = self.current_span()
+        var p = self.advance()  // skip 'validation'
+
+        let name = p.current_name()
+        p = p.expect_ident()
+        p = p.expect(TokenKind::For)
+
+        let target_pair = p.parse_type()
+        p = target_pair.0
+        let target_ty = target_pair.1
+
+        p = p.expect(TokenKind::LBrace)
+        while p.peek() != TokenKind::RBrace && p.peek() != TokenKind::Eof {
+            p = p.advance()
+        }
+        p = p.expect(TokenKind::RBrace)
+
+        let span = p.span_from(start)
+        let vdef = ValidationDef {
+            name: name,
+            target_type: target_ty,
+            span: span,
+        }
+
+        (p, Item {
+            kind: ItemKind::ItemValidation,
+            span: span,
+            is_pub: is_pub,
+            name: name,
+            fn_def: None,
+            struct_def: None,
+            enum_def: None,
+            impl_def: None,
+            type_alias_ty: None,
+            policy_def: None,
+            models_def: None,
+            validation_def: Some(Box::new(vdef)),
+            audit_def: None,
+            use_path: empty_path(),
+            use_glob: false,
+            use_items: None,
+            effect_def: None,
+        })
+    }
+
+    fn parse_audit_item(self, is_pub: bool) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
+        let start = self.current_span()
+        var p = self.advance()  // skip 'audit'
+
+        let name = p.current_name()
+        p = p.expect_ident()
+        p = p.expect(TokenKind::For)
+
+        let target_pair = p.parse_type()
+        p = target_pair.0
+        let target_ty = target_pair.1
+
+        p = p.expect(TokenKind::LBrace)
+        var rev_sections_opt: Option<Box<AuditSectionList>> = None
+
+        while p.peek() != TokenKind::RBrace && p.peek() != TokenKind::Eof {
+            while p.peek() == TokenKind::Semi || p.peek() == TokenKind::Newline {
+                p = p.advance()
+            }
+            if p.peek() == TokenKind::RBrace || p.peek() == TokenKind::Eof {
+                break
+            }
+            let section_pair = p.parse_audit_section()
+            p = section_pair.0
+            rev_sections_opt = Some(Box::new(AuditSectionList {
+                head: section_pair.1,
+                tail: rev_sections_opt,
+            }))
+            while p.peek() == TokenKind::Semi {
+                p = p.advance()
+            }
+        }
+
+        p = p.expect(TokenKind::RBrace)
+
+        let span = p.span_from(start)
+        let adef = AuditDef {
+            name: name,
+            target_type: target_ty,
+            sections: reverse_audit_section_list_opt(rev_sections_opt),
+            span: span,
+        }
+
+        (p, Item {
+            kind: ItemKind::ItemAudit,
+            span: span,
+            is_pub: is_pub,
+            name: name,
+            fn_def: None,
+            struct_def: None,
+            enum_def: None,
+            impl_def: None,
+            type_alias_ty: None,
+            policy_def: None,
+            models_def: None,
+            validation_def: None,
+            audit_def: Some(Box::new(adef)),
+            use_path: empty_path(),
+            use_glob: false,
+            use_items: None,
+            effect_def: None,
+        })
+    }
+
+    fn parse_audit_section(self) -> (Parser, AuditSection) with Mut, IO, Panic, Div, Alloc {
+        let start = self.current_span()
+        let section_name = self.current_name()
+        var p = self.expect_ident()
+        p = p.expect(TokenKind::LBrace)
+
+        var rev_fields_opt: Option<Box<AuditFieldEntryList>> = None
+        while p.peek() != TokenKind::RBrace && p.peek() != TokenKind::Eof {
+            while p.peek() == TokenKind::Comma || p.peek() == TokenKind::Semi || p.peek() == TokenKind::Newline {
+                p = p.advance()
+            }
+            if p.peek() == TokenKind::RBrace || p.peek() == TokenKind::Eof {
+                break
+            }
+            let field_pair = p.parse_audit_field_entry()
+            p = field_pair.0
+            rev_fields_opt = Some(Box::new(AuditFieldEntryList {
+                head: field_pair.1,
+                tail: rev_fields_opt,
+            }))
+            while p.peek() == TokenKind::Comma || p.peek() == TokenKind::Semi {
+                p = p.advance()
+            }
+        }
+
+        p = p.expect(TokenKind::RBrace)
+        let span = p.span_from(start)
+        (p, AuditSection {
+            kind: audit_section_kind_from_name(section_name),
+            name: section_name,
+            fields: reverse_audit_field_entry_list_opt(rev_fields_opt),
+            span: span,
+        })
+    }
+
+    fn parse_audit_field_entry(self) -> (Parser, AuditFieldEntry) with Mut, IO, Panic, Div, Alloc {
+        let start = self.current_span()
+        let field_name = self.current_name()
+        var p = self.expect_ident()
+        p = p.expect(TokenKind::Colon)
+
+        var value_name = empty_name()
+        var value_f64 = 0.0
+        var value_kind = AuditValueKind::AuditValueName
+        if p.peek() == TokenKind::IntLit {
+            value_kind = AuditValueKind::AuditValueFloat
+            value_f64 = p.current().int_value as f64
+            p = p.advance()
+        } else if p.peek() == TokenKind::FloatLit {
+            value_kind = AuditValueKind::AuditValueFloat
+            value_f64 = p.current().float_value
+            p = p.advance()
+        } else {
+            let name_pair = p.parse_audit_name_value()
+            p = name_pair.0
+            value_name = name_pair.1
+        }
+
+        let span = p.span_from(start)
+        (p, AuditFieldEntry {
+            name: field_name,
+            value_name: value_name,
+            value_f64: value_f64,
+            value_kind: value_kind,
+            span: span,
+        })
+    }
+
+    fn parse_audit_name_value(self) -> (Parser, Name) with Mut, IO, Panic, Div, Alloc {
+        if self.peek() == TokenKind::StringLit {
+            let name = self.current_name()
+            (self.advance(), name)
+        } else if self.peek() == TokenKind::Ident {
+            if self.peek_ahead(1) == TokenKind::ColonColon {
+                let pair = self.parse_type_path()
+                (pair.0, copy_string_list_tail_to_name(pair.1.segments))
+            } else {
+                let name = self.current_name()
+                (self.expect_ident(), name)
+            }
+        } else {
+            var p = self
+            p.had_error = true
+            p.error_count = p.error_count + 1
+            (p.advance(), empty_name())
+        }
+    }
+
+    fn parse_policy_requirement(self) -> (Parser, PolicyRequirement) with Mut, IO, Panic, Div, Alloc {
+        let start = self.current_span()
+        var p = self.expect(TokenKind::Require)
+
+        let metric_name = p.current_name()
+        p = p.expect_ident()
+
+        let cmp_pair = p.parse_policy_compare_op()
+        p = cmp_pair.0
+        let cmp_op = cmp_pair.1
+
+        var threshold: f64 = 0.0
+        if p.peek() == TokenKind::IntLit {
+            threshold = p.current().int_value as f64
+            p = p.advance()
+        } else if p.peek() == TokenKind::FloatLit {
+            threshold = p.current().float_value
+            p = p.advance()
+        } else {
+            p.had_error = true
+            p.error_count = p.error_count + 1
+            p = p.advance()
+        }
+
+        let span = p.span_from(start)
+        (p, PolicyRequirement {
+            metric_name: metric_name,
+            op: cmp_op,
+            threshold: threshold,
+            span: span,
+        })
+    }
+
+    fn parse_policy_compare_op(self) -> (Parser, CompareOp) with Mut, IO, Panic, Div {
+        let op_tok = self.peek()
+        if op_tok == TokenKind::Lt {
+            (self.advance(), CompareOp::CmpLt)
+        } else if op_tok == TokenKind::LtEq {
+            (self.advance(), CompareOp::CmpLe)
+        } else if op_tok == TokenKind::Gt {
+            (self.advance(), CompareOp::CmpGt)
+        } else if op_tok == TokenKind::GtEq {
+            (self.advance(), CompareOp::CmpGe)
+        } else if op_tok == TokenKind::EqEq {
+            (self.advance(), CompareOp::CmpEq)
+        } else {
+            var p = self
+            p.had_error = true
+            p.error_count = p.error_count + 1
+            (p.advance(), CompareOp::CmpEq)
+        }
     }
 
     // ============================================================
@@ -671,15 +1125,111 @@ impl Parser {
             enum_def: None,
             impl_def: None,
             type_alias_ty: None,
+            policy_def: None,
+            models_def: None,
+            validation_def: None,
+            audit_def: None,
             use_path: path,
             use_glob: is_glob,
             use_items: use_items_opt,
+            effect_def: None,
         })
     }
 
     // ============================================================
     // Unit declaration: unit mg; | unit kg = 1000 * mg;
     // ============================================================
+
+    // ============================================================
+    // Effect declaration: effect Fail { fn fail(msg: string) -> ! }
+    // ============================================================
+
+    fn parse_effect_op_def(self) -> (Parser, EffectOpDef) with Mut, IO, Panic, Div, Alloc {
+        let start = self.current_span()
+        var p = self.advance()  // skip 'fn'
+
+        let name = p.current_name()
+        p = p.expect_ident()
+
+        p = p.expect(TokenKind::LParen)
+        let pair = p.parse_param_list()
+        p = pair.0
+        let params_opt = pair.1
+        p = p.expect(TokenKind::RParen)
+
+        let pair2 = p.parse_optional_return_type()
+        p = pair2.0
+        let ret_ty = pair2.1
+
+        let span = p.span_from(start)
+        (p, EffectOpDef {
+            name: name,
+            params: params_opt,
+            ret_ty: ret_ty,
+            span: span,
+        })
+    }
+
+    fn parse_effect_item(self, is_pub: bool) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
+        let start = self.current_span()
+        var p = self.advance()  // skip 'effect'
+
+        let name = p.current_name()
+        p = p.expect_ident()
+
+        p = p.expect(TokenKind::LBrace)
+        var rev_ops_opt: Option<Box<EffectOpDefList>> = None
+        var op_count: i64 = 0
+
+        while p.peek() != TokenKind::RBrace && p.peek() != TokenKind::Eof {
+            while p.peek() == TokenKind::Semi || p.peek() == TokenKind::Newline {
+                p = p.advance()
+            }
+            if p.peek() == TokenKind::RBrace || p.peek() == TokenKind::Eof {
+                break
+            }
+            if p.peek() == TokenKind::Fn {
+                let op_pair = p.parse_effect_op_def()
+                p = op_pair.0
+                rev_ops_opt = Some(Box::new(EffectOpDefList {
+                    head: op_pair.1,
+                    tail: rev_ops_opt,
+                }))
+                op_count = op_count + 1
+            } else {
+                p = p.advance()
+            }
+        }
+
+        p = p.expect(TokenKind::RBrace)
+        let span = p.span_from(start)
+        let edef = EffectDef {
+            name: name,
+            ops: reverse_effect_op_def_list_opt(rev_ops_opt),
+            op_count: op_count,
+            span: span,
+        }
+
+        (p, Item {
+            kind: ItemKind::ItemEffect,
+            span: span,
+            is_pub: is_pub,
+            name: name,
+            fn_def: None,
+            struct_def: None,
+            enum_def: None,
+            impl_def: None,
+            type_alias_ty: None,
+            policy_def: None,
+            models_def: None,
+            validation_def: None,
+            audit_def: None,
+            use_path: empty_path(),
+            use_glob: false,
+            use_items: None,
+            effect_def: Some(Box::new(edef)),
+        })
+    }
 
     fn parse_unit_item(self, is_pub: bool) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
         let start = self.current_span()
@@ -713,9 +1263,14 @@ impl Parser {
             enum_def: None,
             impl_def: None,
             type_alias_ty: None,
+            policy_def: None,
+            models_def: None,
+            validation_def: None,
+            audit_def: None,
             use_path: empty_path(),
             use_glob: false,
             use_items: None,
+            effect_def: None,
         })
     }
 }
@@ -782,6 +1337,22 @@ fn reverse_import_item_list_opt(list: Option<Box<ImportItemList>>) -> Option<Box
     reverse_import_item_list_loop(list, None)
 }
 
+fn reverse_policy_requirement_list_opt(list: Option<Box<PolicyRequirementList>>) -> Option<Box<PolicyRequirementList>> with Mut, Alloc {
+    reverse_policy_requirement_list_loop(list, None)
+}
+
+fn reverse_ast_path_list_opt(list: Option<Box<AstPathList>>) -> Option<Box<AstPathList>> with Mut, Alloc {
+    reverse_ast_path_list_loop(list, None)
+}
+
+fn reverse_audit_field_entry_list_opt(list: Option<Box<AuditFieldEntryList>>) -> Option<Box<AuditFieldEntryList>> with Mut, Alloc {
+    reverse_audit_field_entry_list_loop(list, None)
+}
+
+fn reverse_audit_section_list_opt(list: Option<Box<AuditSectionList>>) -> Option<Box<AuditSectionList>> with Mut, Alloc {
+    reverse_audit_section_list_loop(list, None)
+}
+
 fn reverse_import_item_list_loop(
     current: Option<Box<ImportItemList>>,
     acc: Option<Box<ImportItemList>>,
@@ -794,6 +1365,114 @@ fn reverse_import_item_list_loop(
             reverse_import_item_list_loop(next, Some(Box::new(rev_node)))
         },
     }
+}
+
+fn reverse_policy_requirement_list_loop(
+    current: Option<Box<PolicyRequirementList>>,
+    acc: Option<Box<PolicyRequirementList>>,
+) -> Option<Box<PolicyRequirementList>> with Mut, Alloc {
+    match current {
+        None => acc,
+        Some(node) => {
+            let next = (*node).tail
+            let rev_node = PolicyRequirementList { head: (*node).head, tail: acc }
+            reverse_policy_requirement_list_loop(next, Some(Box::new(rev_node)))
+        },
+    }
+}
+
+fn reverse_ast_path_list_loop(
+    current: Option<Box<AstPathList>>,
+    acc: Option<Box<AstPathList>>,
+) -> Option<Box<AstPathList>> with Mut, Alloc {
+    match current {
+        None => acc,
+        Some(node) => {
+            let next = (*node).tail
+            let rev_node = AstPathList { head: (*node).head, tail: acc }
+            reverse_ast_path_list_loop(next, Some(Box::new(rev_node)))
+        },
+    }
+}
+
+fn reverse_audit_field_entry_list_loop(
+    current: Option<Box<AuditFieldEntryList>>,
+    acc: Option<Box<AuditFieldEntryList>>,
+) -> Option<Box<AuditFieldEntryList>> with Mut, Alloc {
+    match current {
+        None => acc,
+        Some(node) => {
+            let next = (*node).tail
+            let rev_node = AuditFieldEntryList { head: (*node).head, tail: acc }
+            reverse_audit_field_entry_list_loop(next, Some(Box::new(rev_node)))
+        },
+    }
+}
+
+fn reverse_audit_section_list_loop(
+    current: Option<Box<AuditSectionList>>,
+    acc: Option<Box<AuditSectionList>>,
+) -> Option<Box<AuditSectionList>> with Mut, Alloc {
+    match current {
+        None => acc,
+        Some(node) => {
+            let next = (*node).tail
+            let rev_node = AuditSectionList { head: (*node).head, tail: acc }
+            reverse_audit_section_list_loop(next, Some(Box::new(rev_node)))
+        },
+    }
+}
+
+fn reverse_effect_op_def_list_opt(list: Option<Box<EffectOpDefList>>) -> Option<Box<EffectOpDefList>> with Mut, Alloc {
+    reverse_effect_op_def_list_loop(list, None)
+}
+
+fn reverse_effect_op_def_list_loop(
+    current: Option<Box<EffectOpDefList>>,
+    acc: Option<Box<EffectOpDefList>>,
+) -> Option<Box<EffectOpDefList>> with Mut, Alloc {
+    match current {
+        None => acc,
+        Some(node) => {
+            let next = (*node).tail
+            let rev_node = EffectOpDefList { head: (*node).head, tail: acc }
+            reverse_effect_op_def_list_loop(next, Some(Box::new(rev_node)))
+        },
+    }
+}
+
+fn audit_section_kind_from_name(name: Name) -> AuditSectionKind with Panic, Div {
+    if name.len == 7
+        && name.buf[0] == 109 as i8 && name.buf[1] == 101 as i8 && name.buf[2] == 116 as i8
+        && name.buf[3] == 114 as i8 && name.buf[4] == 105 as i8 && name.buf[5] == 99 as i8
+        && name.buf[6] == 115 as i8 {
+        return AuditSectionKind::AuditSectionMetrics
+    }
+    if name.len == 11
+        && name.buf[0] == 109 as i8 && name.buf[1] == 101 as i8 && name.buf[2] == 99 as i8
+        && name.buf[3] == 104 as i8 && name.buf[4] == 97 as i8 && name.buf[5] == 110 as i8
+        && name.buf[6] == 105 as i8 && name.buf[7] == 115 as i8 && name.buf[8] == 116 as i8
+        && name.buf[9] == 105 as i8 && name.buf[10] == 99 as i8 {
+        return AuditSectionKind::AuditSectionMechanistic
+    }
+    if name.len == 14
+        && name.buf[0] == 99 as i8 && name.buf[1] == 111 as i8 && name.buf[2] == 117 as i8
+        && name.buf[3] == 110 as i8 && name.buf[4] == 116 as i8 && name.buf[5] == 101 as i8
+        && name.buf[6] == 114 as i8 && name.buf[7] == 101 as i8 && name.buf[8] == 120 as i8
+        && name.buf[9] == 97 as i8 && name.buf[10] == 109 as i8 && name.buf[11] == 112 as i8
+        && name.buf[12] == 108 as i8 && name.buf[13] == 101 as i8 {
+        return AuditSectionKind::AuditSectionCounterexample
+    }
+    if name.len == 17
+        && name.buf[0] == 112 as i8 && name.buf[1] == 111 as i8 && name.buf[2] == 115 as i8
+        && name.buf[3] == 116 as i8 && name.buf[4] == 101 as i8 && name.buf[5] == 114 as i8
+        && name.buf[6] == 105 as i8 && name.buf[7] == 111 as i8 && name.buf[8] == 114 as i8
+        && name.buf[9] == 95 as i8 && name.buf[10] == 119 as i8 && name.buf[11] == 101 as i8
+        && name.buf[12] == 105 as i8 && name.buf[13] == 103 as i8 && name.buf[14] == 104 as i8
+        && name.buf[15] == 116 as i8 && name.buf[16] == 115 as i8 {
+        return AuditSectionKind::AuditSectionPosteriorWeights
+    }
+    AuditSectionKind::AuditSectionUnknown
 }
 
 fn extract_impl_name(ty: TypeExpr) -> Name with Mut, Panic, Div, Alloc {
