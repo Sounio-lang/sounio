@@ -32,7 +32,7 @@ echo "INPLACE_POLICY_SIGN_PASS" | tee -a "$GATE_LOG"
 
 if [ "${OMEGA_REQUIRE_CANONICAL_KEY_BOOTSTRAP:-1}" = "1" ]; then
   echo "==> omega sprint1 gate: canonical key bootstrap"
-  CANONICAL_BOOTSTRAP_SCRIPT="${OMEGA_CANONICAL_BOOTSTRAP_SCRIPT:-scripts/omega_canonical_key_bootstrap.sh}"
+  CANONICAL_BOOTSTRAP_SCRIPT="${OMEGA_CANONICAL_BOOTSTRAP_SCRIPT:-scripts/bootstrap/omega_canonical_key_bootstrap.sh}"
   CANONICAL_ENV_PATH="${OMEGA_CANONICAL_ENV_OUT:-artifacts/omega/canonical_key.env}"
   if [ ! -x "$CANONICAL_BOOTSTRAP_SCRIPT" ]; then
     echo "error: canonical key bootstrap script missing or not executable: $CANONICAL_BOOTSTRAP_SCRIPT" >&2
@@ -1470,7 +1470,7 @@ PY
     PIN_POLICY_PATH="bootstrap/policies/policy.v1.json"
   fi
   PIN_CANONICAL_ENV_PATH="${OMEGA_CANONICAL_ENV_OUT:-artifacts/omega/canonical_key.env}"
-  PIN_POLICY_SIGN_SCRIPT="${OMEGA_CANONICAL_POLICY_SIGN_SCRIPT:-scripts/omega_canonical_policy_sign.sh}"
+  PIN_POLICY_SIGN_SCRIPT="${OMEGA_CANONICAL_POLICY_SIGN_SCRIPT:-scripts/bootstrap/omega_canonical_policy_sign.sh}"
   PIN_SOUC_BIN="${OMEGA_POLICY_SOUC_BIN:-$ROOT_DIR/souc}"
   if [ ! -x "$PIN_POLICY_SIGN_SCRIPT" ]; then
     echo "error: missing canonical policy sign script: $PIN_POLICY_SIGN_SCRIPT" >&2

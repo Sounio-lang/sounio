@@ -14,8 +14,16 @@ if [[ ${#WORKFLOWS[@]} -eq 0 ]]; then
   exit 0
 fi
 
+workflow_script_refs() {
+  if command -v rg >/dev/null 2>&1; then
+    rg -No "(?:\\./)?scripts/[A-Za-z0-9_./-]+" "${WORKFLOWS[@]}"
+  else
+    grep -H -o -E "(\\./)?scripts/[A-Za-z0-9_./-]+" "${WORKFLOWS[@]}"
+  fi
+}
+
 mapfile -t REFS < <(
-  rg -No "(?:\\./)?scripts/[A-Za-z0-9_./-]+" "${WORKFLOWS[@]}" \
+  workflow_script_refs \
     | sed -E 's#^.+:##' \
     | sed -E 's#^[[:space:]]+##' \
     | sed -E 's#[\"\047),:;]+$##' \

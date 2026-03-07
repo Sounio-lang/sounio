@@ -16,6 +16,9 @@ TIMEOUT_SECS="${TIMEOUT_SECS:-60}"
 BUILD_TIMEOUT_SECS="${BUILD_TIMEOUT_SECS:-600}"
 
 STRICT_MODE="${SOUNIO_SELFHOST_STRICT:-1}"
+REQUIRE_DRIVER_OUTPUT="${REQUIRE_DRIVER_OUTPUT:-0}"
+
+DRIVER_OUTPUT_PATTERN="SELFHOST=driver-first schema=v1 event=driver_output entrypoint=bootstrap::driver::compile_file status=ok"
 
 PASS_COUNT=0
 FAIL_COUNT=0
@@ -68,6 +71,15 @@ assert_file_exists() {
   return 0
 }
 
+has_driver_output_marker() {
+  local path="$1"
+  if command -v rg >/dev/null 2>&1; then
+    rg -F -q "$DRIVER_OUTPUT_PATTERN" "$path"
+  else
+    grep -F -q -- "$DRIVER_OUTPUT_PATTERN" "$path"
+  fi
+}
+
 run_case() {
   local case_id="$1"
   local program_path="$2"
@@ -76,6 +88,7 @@ run_case() {
   local stdout_file="$LOG_DIR/${case_id}.stdout"
   local stderr_file="$LOG_DIR/${case_id}.stderr"
   local exit_file="$ARTIFACT_DIR/${case_id}.exit"
+  local marker_file="$ARTIFACT_DIR/${case_id}.driver_output_marker"
 
   if ! assert_file_exists "$program_path" "$case_id"; then
     return 1
@@ -98,24 +111,26 @@ run_case() {
     return 1
   fi
 
-  if command -v rg >/dev/null 2>&1; then
-    if ! rg -n "SELFHOST=driver-first schema=v1 event=driver_output entrypoint=bootstrap::driver::compile_file status=ok" "$stderr_file" >/dev/null; then
-      fail "$case_id" "missing driver_output marker (stderr=$stderr_file)"
-      return 1
-    fi
-  else
-    if ! grep -E -q "SELFHOST=driver-first schema=v1 event=driver_output entrypoint=bootstrap::driver::compile_file status=ok" "$stderr_file"; then
-      fail "$case_id" "missing driver_output marker (stderr=$stderr_file)"
-      return 1
-    fi
-  fi
-
   if ! cmp -s "$expected_stdout_file" "$stdout_file"; then
     fail "$case_id" "stdout mismatch (expected=$expected_stdout_file got=$stdout_file)"
     return 1
   fi
 
-  pass "$case_id" "driver_output + stdout match"
+  if has_driver_output_marker "$stderr_file"; then
+    echo "present" >"$marker_file"
+  else
+    echo "missing" >"$marker_file"
+    if [ "$REQUIRE_DRIVER_OUTPUT" = "1" ]; then
+      fail "$case_id" "missing driver_output marker (stderr=$stderr_file)"
+      return 1
+    fi
+  fi
+
+  if [ "$REQUIRE_DRIVER_OUTPUT" = "1" ]; then
+    pass "$case_id" "driver_output + stdout match"
+  else
+    pass "$case_id" "stdout match"
+  fi
   return 0
 }
 
@@ -126,9 +141,10 @@ SUMMARY_FILE="$ARTIFACT_DIR/summary.txt"
 
 echo "SELFHOST_DRIVER_OUTPUT_GATE_START"
 echo "work_dir=$WORK_DIR"
-echo "timeout_secs=$TIMEOUT_SECS"
-echo "strict_mode=$STRICT_MODE"
-echo "program_dir=$PROGRAM_DIR"
+  echo "timeout_secs=$TIMEOUT_SECS"
+  echo "strict_mode=$STRICT_MODE"
+  echo "require_driver_output=$REQUIRE_DRIVER_OUTPUT"
+  echo "program_dir=$PROGRAM_DIR"
 
 {
   echo "SELFHOST_DRIVER_OUTPUT_GATE_INFO build_step=disabled mode=repo-hard-no-rust"

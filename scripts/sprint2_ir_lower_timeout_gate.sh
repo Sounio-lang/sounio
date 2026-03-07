@@ -43,6 +43,16 @@ append_case() {
     "$name" "$status" "$reason" "$rc" "$(to_rel "$log_path")" "$markers" >> "$CASES_TSV"
 }
 
+has_literal() {
+  local needle="$1"
+  local log_path="$2"
+  if command -v rg >/dev/null 2>&1; then
+    rg -F -q "$needle" "$log_path"
+  else
+    grep -F -q -- "$needle" "$log_path"
+  fi
+}
+
 run_cmd_case() {
   local name="$1"
   local log_path="$2"
@@ -70,7 +80,7 @@ run_cmd_case() {
 marker_bool() {
   local needle="$1"
   local log_path="$2"
-  if rg -F -q "$needle" "$log_path"; then
+  if has_literal "$needle" "$log_path"; then
     printf '1'
   else
     printf '0'

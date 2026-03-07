@@ -42,6 +42,16 @@ append_case() {
     >> "$CASES_TSV"
 }
 
+has_literal() {
+  local needle="$1"
+  local log_path="$2"
+  if command -v rg >/dev/null 2>&1; then
+    rg -F -q "$needle" "$log_path"
+  else
+    grep -F -q -- "$needle" "$log_path"
+  fi
+}
+
 run_cmd_case() {
   local name="$1"
   local log_path="$2"
@@ -91,10 +101,10 @@ run_wasm_dispatch_case() {
 
   local dispatch_seen=0
   local fail_closed_seen=0
-  if rg -F -q "WASM dispatch:" "$log_path"; then
+  if has_literal "WASM dispatch:" "$log_path"; then
     dispatch_seen=1
   fi
-  if rg -F -q "WASM backend unavailable in self-hosted module_loader (temporary fail-closed)." "$log_path"; then
+  if has_literal "WASM backend unavailable in self-hosted module_loader (temporary fail-closed)." "$log_path"; then
     fail_closed_seen=1
   fi
 

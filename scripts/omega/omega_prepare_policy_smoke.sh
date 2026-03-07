@@ -79,8 +79,8 @@ if ! command -v "$SOUC_BIN" >/dev/null 2>&1 && [ ! -x "$SOUC_BIN" ]; then
 fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-CANONICAL_BOOTSTRAP_SCRIPT="${OMEGA_CANONICAL_BOOTSTRAP_SCRIPT:-$SCRIPT_DIR/omega_canonical_key_bootstrap.sh}"
-CANONICAL_POLICY_SIGN_SCRIPT="${OMEGA_CANONICAL_POLICY_SIGN_SCRIPT:-$SCRIPT_DIR/omega_canonical_policy_sign.sh}"
+CANONICAL_BOOTSTRAP_SCRIPT="${OMEGA_CANONICAL_BOOTSTRAP_SCRIPT:-$SCRIPT_DIR/bootstrap/omega_canonical_key_bootstrap.sh}"
+CANONICAL_POLICY_SIGN_SCRIPT="${OMEGA_CANONICAL_POLICY_SIGN_SCRIPT:-$SCRIPT_DIR/bootstrap/omega_canonical_policy_sign.sh}"
 if [ ! -x "$CANONICAL_BOOTSTRAP_SCRIPT" ]; then
   echo "error: canonical bootstrap script not executable: $CANONICAL_BOOTSTRAP_SCRIPT" >&2
   exit 2

@@ -6,6 +6,16 @@ cd "$ROOT_DIR"
 
 fail=0
 
+matches_pattern() {
+  local pattern="$1"
+  local file="$2"
+  if command -v rg >/dev/null 2>&1; then
+    rg -n -- "$pattern" "$file" >/dev/null 2>&1
+  else
+    grep -n -E -- "$pattern" "$file" >/dev/null 2>&1
+  fi
+}
+
 require_file() {
   local file="$1"
   if [[ ! -f "$file" ]]; then
@@ -18,7 +28,7 @@ require_pattern() {
   local pattern="$1"
   local file="$2"
   local message="$3"
-  if ! rg -n "$pattern" "$file" >/dev/null 2>&1; then
+  if ! matches_pattern "$pattern" "$file"; then
     echo "$message"
     fail=1
   fi
