@@ -53,6 +53,7 @@ struct Checker {
     policies: PolicyTable,
     validations: ValidationPolicyTable,
     contests: ContestTable,
+    audits: AuditTable,
     mechanistic_reports: MechanisticReportTable,
     posterior_weights: PosteriorWeightsTable,
     counterexamples: CounterexampleTable,
@@ -79,6 +80,10 @@ struct Checker {
     const_int_count: i64,
     const_int_scope_marks: [i64; 64],
     const_int_scope_depth: i64,
+    effects: EffectTable,
+    effect_ops: EffectOpTable,
+    handler_depth: i64,
+    current_handler_op_id: i64,
 }
 
 fn checker_new() -> Checker with Mut, Panic, Div {
@@ -95,6 +100,7 @@ fn checker_new() -> Checker with Mut, Panic, Div {
         policies: policy_table_new(),
         validations: validation_policy_table_new(),
         contests: contest_table_new(),
+        audits: audit_table_new(),
         mechanistic_reports: mechanistic_report_table_new(),
         posterior_weights: posterior_weights_table_new(),
         counterexamples: counterexample_table_new(),
@@ -121,6 +127,10 @@ fn checker_new() -> Checker with Mut, Panic, Div {
         const_int_count: 0,
         const_int_scope_marks: [0; 64],
         const_int_scope_depth: 0,
+        effects: effect_table_new(),
+        effect_ops: effect_op_table_new(),
+        handler_depth: 0,
+        current_handler_op_id: -1,
     }
 }
 
@@ -898,6 +908,177 @@ impl Checker {
         c
     }
 
+    fn report_audit_definition_requires_full_contest(self, span: Span, target_ty: TypeEntry) -> Checker with Mut, IO, Panic, Div, Alloc {
+        var c = self
+        c.error_count = c.error_count + 1
+        c.had_error = true
+        print("error[E085]")
+        if span.start > 0 || span.end > 0 {
+            print(" at ")
+            print_int(span.start)
+            print("..")
+            print_int(span.end)
+        }
+        print(": audit definition requires full Contest<T, Family, Policy>\n")
+        print("   |\n   = found target ")
+        print_type_name(target_ty)
+        print("\n   = help: declare the audit target as Contest<T, Family, Policy> with explicit models and policy names\n")
+        c
+    }
+
+    fn report_audit_attachment_requires_contest(self, span: Span, audit_name: Name, got: TypeEntry) -> Checker with Mut, IO, Panic, Div, Alloc {
+        var c = self
+        c.error_count = c.error_count + 1
+        c.had_error = true
+        print("error[E086]")
+        if span.start > 0 || span.end > 0 {
+            print(" at ")
+            print_int(span.start)
+            print("..")
+            print_int(span.end)
+        }
+        print(": `expr audit Name` requires Contest<T, Family, Policy>\n")
+        print("   |\n   = attempted attachment ")
+        print_name_value(audit_name)
+        print(" on ")
+        print_type_name(got)
+        print("\n   = help: attach named audits only to full contested values\n")
+        c
+    }
+
+    fn report_audit_target_mismatch(
+        self,
+        span: Span,
+        audit_name: Name,
+        audit_info: AuditInfo,
+        contest_inner: TypeEntry,
+        contest_info: ContestInfo
+    ) -> Checker with Mut, IO, Panic, Div, Alloc {
+        var c = self
+        c.error_count = c.error_count + 1
+        c.had_error = true
+        print("error[E087]")
+        if span.start > 0 || span.end > 0 {
+            print(" at ")
+            print_int(span.start)
+            print("..")
+            print_int(span.end)
+        }
+        print(": audit target does not match the attached contest\n")
+        print("   |\n   = audit ")
+        print_name_value(audit_name)
+        print(" expects Contest<")
+        print_type_name(audit_info.target_inner_ty)
+        print(", family#")
+        print_int(audit_info.family_id)
+        print(", policy#")
+        print_int(audit_info.policy_id)
+        print(">\n   = attached contest is Contest<")
+        print_type_name(contest_inner)
+        print(", family#")
+        print_int(contest_info.family_id)
+        print(", policy#")
+        print_int(contest_info.policy_id)
+        print(">\n")
+        c
+    }
+
+    fn report_audit_weights_family_mismatch(self, span: Span, audit_name: Name) -> Checker with Mut, IO, Panic, Div {
+        var c = self
+        c.error_count = c.error_count + 1
+        c.had_error = true
+        print("error[E088]")
+        if span.start > 0 || span.end > 0 {
+            print(" at ")
+            print_int(span.start)
+            print("..")
+            print_int(span.end)
+        }
+        print(": posterior weights do not match the declared model family\n")
+        print("   |\n   = audit ")
+        print_name_value(audit_name)
+        print(" must cover the family exactly once with no missing or extra models\n")
+        c
+    }
+
+    fn report_audit_weights_not_normalized(self, span: Span, audit_name: Name, total_weight: f64) -> Checker with Mut, IO, Panic, Div {
+        var c = self
+        c.error_count = c.error_count + 1
+        c.had_error = true
+        print("error[E089]")
+        if span.start > 0 || span.end > 0 {
+            print(" at ")
+            print_int(span.start)
+            print("..")
+            print_int(span.end)
+        }
+        print(": posterior weights are not normalized\n")
+        print("   |\n   = audit ")
+        print_name_value(audit_name)
+        print(" produced total weight ")
+        print_milli_ratio(total_weight)
+        print("\n   = help: keep all weights non-negative and sum them to 1.0 within tolerance 1e-6\n")
+        c
+    }
+
+    fn report_audit_mechanistic_incomplete(self, span: Span, audit_name: Name) -> Checker with Mut, IO, Panic, Div {
+        var c = self
+        c.error_count = c.error_count + 1
+        c.had_error = true
+        print("error[E090]")
+        if span.start > 0 || span.end > 0 {
+            print(" at ")
+            print_int(span.start)
+            print("..")
+            print_int(span.end)
+        }
+        print(": mechanistic section is incomplete\n")
+        print("   |\n   = audit ")
+        print_name_value(audit_name)
+        print(" must provide aggregate_divergence plus latent_state_divergence, causal_decomposition_divergence, intervention_response_divergence, parameter_role_divergence, and structural_explanation_distance\n")
+        c
+    }
+
+    fn report_audit_counterexample_incomplete(self, span: Span, audit_name: Name) -> Checker with Mut, IO, Panic, Div {
+        var c = self
+        c.error_count = c.error_count + 1
+        c.had_error = true
+        print("error[E091]")
+        if span.start > 0 || span.end > 0 {
+            print(" at ")
+            print_int(span.start)
+            print("..")
+            print_int(span.end)
+        }
+        print(": counterexample section is incomplete\n")
+        print("   |\n   = audit ")
+        print_name_value(audit_name)
+        print(" must provide model_name, subgroup_name, metric_name, observed_value, threshold_value, and summary\n")
+        c
+    }
+
+    fn report_audit_unknown_or_duplicate_field(self, span: Span, section_name: Name, field_name: Name) -> Checker with Mut, IO, Panic, Div {
+        var c = self
+        c.error_count = c.error_count + 1
+        c.had_error = true
+        print("error[E092]")
+        if span.start > 0 || span.end > 0 {
+            print(" at ")
+            print_int(span.start)
+            print("..")
+            print_int(span.end)
+        }
+        print(": duplicate or unknown audit field\n")
+        print("   |\n   = section ")
+        print_name_value(section_name)
+        if field_name.len > 0 {
+            print(", field ")
+            print_name_value(field_name)
+        }
+        print("\n   = help: keep only the supported audit fields once per section\n")
+        c
+    }
+
 
 
     fn report_mismatch(self, span: Span, code: i64, expected: TypeEntry, got: TypeEntry) -> Checker with Mut, IO, Panic, Div, Alloc {
@@ -1160,6 +1341,14 @@ fn print_error_message(code: i64) with IO, Mut, Panic, Div {
     else if code == 82 { print("mechanistic report is unavailable for this contest") }
     else if code == 83 { print("counterexample witness is unavailable for this contest") }
     else if code == 84 { print("posterior weight witness is unavailable for this contest") }
+    else if code == 85 { print("audit definition requires full Contest<T, Family, Policy>") }
+    else if code == 86 { print("audit attachment requires Contest<T, Family, Policy>") }
+    else if code == 87 { print("audit target does not match the attached contest") }
+    else if code == 88 { print("posterior weights do not match the declared model family") }
+    else if code == 89 { print("posterior weights are not normalized") }
+    else if code == 90 { print("mechanistic section is incomplete") }
+    else if code == 91 { print("counterexample section is incomplete") }
+    else if code == 92 { print("duplicate or unknown audit field") }
     else { print("unknown error") }
 }
 
@@ -1352,6 +1541,30 @@ fn print_error_help(code: i64) with IO, Mut, Panic, Div {
     }
     else if code == 84 {
         print("   |\n   = help: attach posterior weights before calling posterior_weights(contest_value)\n")
+    }
+    else if code == 85 {
+        print("   |\n   = help: declare the audit target as Contest<T, Family, Policy> with an explicit named models family and policy\n")
+    }
+    else if code == 86 {
+        print("   |\n   = help: attach named audits only to full Contest<T, Family, Policy> values\n")
+    }
+    else if code == 87 {
+        print("   |\n   = help: keep the audit target triple identical to the attached contest's inner type, family, and policy\n")
+    }
+    else if code == 88 {
+        print("   |\n   = help: cover the declared model family exactly once in posterior_weights { ... }\n")
+    }
+    else if code == 89 {
+        print("   |\n   = help: keep all posterior weights non-negative and normalized to 1.0 within the audit block\n")
+    }
+    else if code == 90 {
+        print("   |\n   = help: mechanistic { ... } must provide aggregate_divergence plus all five component distances\n")
+    }
+    else if code == 91 {
+        print("   |\n   = help: counterexample { ... } must provide model_name, subgroup_name, metric_name, observed_value, threshold_value, and summary\n")
+    }
+    else if code == 92 {
+        print("   |\n   = help: remove duplicate audit fields and keep section/field names within the supported audit schema\n")
     }
     else {
         // No help available for unknown errors
@@ -1547,6 +1760,30 @@ fn print_error_note(code: i64) with IO, Mut, Panic, Div {
     }
     else if code == 84 {
         print("   = note: posterior weights remain explicit contest metadata and are never inferred by silent averaging\n")
+    }
+    else if code == 85 {
+        print("   = note: named audit attachments are only well-typed for full contested values, not shorthand wrappers\n")
+    }
+    else if code == 86 {
+        print("   = note: audit attachment is zero-cost at runtime but strict at the type boundary\n")
+    }
+    else if code == 87 {
+        print("   = note: audits are evidence records for a specific contested claim, not reusable across different families or policies\n")
+    }
+    else if code == 88 {
+        print("   = note: posterior weights must preserve the declared model set instead of laundering disagreement through partial weight maps\n")
+    }
+    else if code == 89 {
+        print("   = note: posterior weights are audit data and must already sum to one before robustness is considered\n")
+    }
+    else if code == 90 {
+        print("   = note: mechanistic disagreement is not reducible to predictive spread, so partial mechanistic blocks are rejected\n")
+    }
+    else if code == 91 {
+        print("   = note: counterexample witnesses remain concrete single-record failure artifacts in this milestone\n")
+    }
+    else if code == 92 {
+        print("   = note: audit parsing preserves unknown or duplicate fields so the checker can fail closed semantically\n")
     }
     else {
         // No note available for unknown errors
@@ -1841,6 +2078,171 @@ fn contest_info_attach_family_id(info: ContestInfo, family_id: i64) -> ContestIn
     next
 }
 
+fn audit_metric_id_from_name(name: Name) -> i64 with Panic, Div {
+    if name_matches_str14(name, 115, 105, 103, 110, 95, 99, 111, 110, 115, 101, 110, 115, 117, 115) {
+        return CONTEST_METRIC_SIGN_CONSENSUS
+    }
+    if name_matches_str13(name, 114, 101, 108, 97, 116, 105, 118, 101, 95, 98, 97, 110, 100) {
+        return CONTEST_METRIC_RELATIVE_BAND
+    }
+    if name_matches_str13(name, 109, 97, 120, 95, 116, 97, 105, 108, 95, 114, 105, 115, 107) {
+        return CONTEST_METRIC_MAX_TAIL_RISK
+    }
+    if name_matches_str21(name, 105, 100, 101, 110, 116, 105, 102, 105, 97, 98, 105, 108, 105, 116, 121, 95, 102, 108, 111, 111, 114) {
+        return CONTEST_METRIC_IDENTIFIABILITY_FLOOR
+    }
+    -1
+}
+
+fn audit_mechanistic_field_id_from_name(name: Name) -> i64 with Panic, Div {
+    if name_matches_str20(name, 97, 103, 103, 114, 101, 103, 97, 116, 101, 95, 100, 105, 118, 101, 114, 103, 101, 110, 99, 101) {
+        return 0
+    }
+    if name.len == 23
+        && name.buf[0] == 108 as i8 && name.buf[1] == 97 as i8 && name.buf[2] == 116 as i8
+        && name.buf[3] == 101 as i8 && name.buf[4] == 110 as i8 && name.buf[5] == 116 as i8
+        && name.buf[6] == 95 as i8 && name.buf[7] == 115 as i8 && name.buf[8] == 116 as i8
+        && name.buf[9] == 97 as i8 && name.buf[10] == 116 as i8 && name.buf[11] == 101 as i8
+        && name.buf[12] == 95 as i8 && name.buf[13] == 100 as i8 && name.buf[14] == 105 as i8
+        && name.buf[15] == 118 as i8 && name.buf[16] == 101 as i8 && name.buf[17] == 114 as i8
+        && name.buf[18] == 103 as i8 && name.buf[19] == 101 as i8 && name.buf[20] == 110 as i8
+        && name.buf[21] == 99 as i8 && name.buf[22] == 101 as i8 {
+        return 1
+    }
+    if name.len == 31
+        && name.buf[0] == 99 as i8 && name.buf[1] == 97 as i8 && name.buf[2] == 117 as i8
+        && name.buf[3] == 115 as i8 && name.buf[4] == 97 as i8 && name.buf[5] == 108 as i8
+        && name.buf[6] == 95 as i8 && name.buf[7] == 100 as i8 && name.buf[8] == 101 as i8
+        && name.buf[9] == 99 as i8 && name.buf[10] == 111 as i8 && name.buf[11] == 109 as i8
+        && name.buf[12] == 112 as i8 && name.buf[13] == 111 as i8 && name.buf[14] == 115 as i8
+        && name.buf[15] == 105 as i8 && name.buf[16] == 116 as i8 && name.buf[17] == 105 as i8
+        && name.buf[18] == 111 as i8 && name.buf[19] == 110 as i8 && name.buf[20] == 95 as i8
+        && name.buf[21] == 100 as i8 && name.buf[22] == 105 as i8 && name.buf[23] == 118 as i8
+        && name.buf[24] == 101 as i8 && name.buf[25] == 114 as i8 && name.buf[26] == 103 as i8
+        && name.buf[27] == 101 as i8 && name.buf[28] == 110 as i8 && name.buf[29] == 99 as i8
+        && name.buf[30] == 101 as i8 {
+        return 2
+    }
+    if name.len == 32
+        && name.buf[0] == 105 as i8 && name.buf[1] == 110 as i8 && name.buf[2] == 116 as i8
+        && name.buf[3] == 101 as i8 && name.buf[4] == 114 as i8 && name.buf[5] == 118 as i8
+        && name.buf[6] == 101 as i8 && name.buf[7] == 110 as i8 && name.buf[8] == 116 as i8
+        && name.buf[9] == 105 as i8 && name.buf[10] == 111 as i8 && name.buf[11] == 110 as i8
+        && name.buf[12] == 95 as i8 && name.buf[13] == 114 as i8 && name.buf[14] == 101 as i8
+        && name.buf[15] == 115 as i8 && name.buf[16] == 112 as i8 && name.buf[17] == 111 as i8
+        && name.buf[18] == 110 as i8 && name.buf[19] == 115 as i8 && name.buf[20] == 101 as i8
+        && name.buf[21] == 95 as i8 && name.buf[22] == 100 as i8 && name.buf[23] == 105 as i8
+        && name.buf[24] == 118 as i8 && name.buf[25] == 101 as i8 && name.buf[26] == 114 as i8
+        && name.buf[27] == 103 as i8 && name.buf[28] == 101 as i8 && name.buf[29] == 110 as i8
+        && name.buf[30] == 99 as i8 && name.buf[31] == 101 as i8 {
+        return 3
+    }
+    if name.len == 25
+        && name.buf[0] == 112 as i8 && name.buf[1] == 97 as i8 && name.buf[2] == 114 as i8
+        && name.buf[3] == 97 as i8 && name.buf[4] == 109 as i8 && name.buf[5] == 101 as i8
+        && name.buf[6] == 116 as i8 && name.buf[7] == 101 as i8 && name.buf[8] == 114 as i8
+        && name.buf[9] == 95 as i8 && name.buf[10] == 114 as i8 && name.buf[11] == 111 as i8
+        && name.buf[12] == 108 as i8 && name.buf[13] == 101 as i8 && name.buf[14] == 95 as i8
+        && name.buf[15] == 100 as i8 && name.buf[16] == 105 as i8 && name.buf[17] == 118 as i8
+        && name.buf[18] == 101 as i8 && name.buf[19] == 114 as i8 && name.buf[20] == 103 as i8
+        && name.buf[21] == 101 as i8 && name.buf[22] == 110 as i8 && name.buf[23] == 99 as i8
+        && name.buf[24] == 101 as i8 {
+        return 4
+    }
+    if name.len == 31
+        && name.buf[0] == 115 as i8 && name.buf[1] == 116 as i8 && name.buf[2] == 114 as i8
+        && name.buf[3] == 117 as i8 && name.buf[4] == 99 as i8 && name.buf[5] == 116 as i8
+        && name.buf[6] == 117 as i8 && name.buf[7] == 114 as i8 && name.buf[8] == 97 as i8
+        && name.buf[9] == 108 as i8 && name.buf[10] == 95 as i8 && name.buf[11] == 101 as i8
+        && name.buf[12] == 120 as i8 && name.buf[13] == 112 as i8 && name.buf[14] == 108 as i8
+        && name.buf[15] == 97 as i8 && name.buf[16] == 110 as i8 && name.buf[17] == 97 as i8
+        && name.buf[18] == 116 as i8 && name.buf[19] == 105 as i8 && name.buf[20] == 111 as i8
+        && name.buf[21] == 110 as i8 && name.buf[22] == 95 as i8 && name.buf[23] == 100 as i8
+        && name.buf[24] == 105 as i8 && name.buf[25] == 115 as i8 && name.buf[26] == 116 as i8
+        && name.buf[27] == 97 as i8 && name.buf[28] == 110 as i8 && name.buf[29] == 99 as i8
+        && name.buf[30] == 101 as i8 {
+        return 5
+    }
+    -1
+}
+
+fn audit_counterexample_field_id_from_name(name: Name) -> i64 with Panic, Div {
+    if name_matches_str10(name, 109, 111, 100, 101, 108, 95, 110, 97, 109, 101) { return 0 }
+    if name_matches_str13(name, 115, 117, 98, 103, 114, 111, 117, 112, 95, 110, 97, 109, 101) { return 1 }
+    if name_matches_str11(name, 109, 101, 116, 114, 105, 99, 95, 110, 97, 109, 101) { return 2 }
+    if name_matches_str14(name, 111, 98, 115, 101, 114, 118, 101, 100, 95, 118, 97, 108, 117, 101) { return 3 }
+    if name.len == 15
+        && name.buf[0] == 116 as i8 && name.buf[1] == 104 as i8 && name.buf[2] == 114 as i8
+        && name.buf[3] == 101 as i8 && name.buf[4] == 115 as i8 && name.buf[5] == 104 as i8
+        && name.buf[6] == 111 as i8 && name.buf[7] == 108 as i8 && name.buf[8] == 100 as i8
+        && name.buf[9] == 95 as i8 && name.buf[10] == 118 as i8 && name.buf[11] == 97 as i8
+        && name.buf[12] == 108 as i8 && name.buf[13] == 117 as i8 && name.buf[14] == 101 as i8 {
+        return 4
+    }
+    if name_matches_str7(name, 115, 117, 109, 109, 97, 114, 121) { return 5 }
+    -1
+}
+
+fn contest_info_apply_audit(contest_info: ContestInfo, audit_info: AuditInfo, audit_id: i64) -> ContestInfo with Mut, Panic, Div {
+    var next = contest_info
+    next.audit_id = audit_id
+    var i: i64 = 0
+    while i < 8 {
+        if audit_info.metric_known[i as usize] == 1 {
+            next.metric_known[i as usize] = 1
+            next.metric_values[i as usize] = audit_info.metric_values[i as usize]
+        }
+        i = i + 1
+    }
+    if audit_info.mechanistic_report_id >= 0 {
+        next.mechanistic_report_id = audit_info.mechanistic_report_id
+    }
+    if audit_info.posterior_weights_id >= 0 {
+        next.posterior_weights_id = audit_info.posterior_weights_id
+    }
+    if audit_info.counterexample_id >= 0 {
+        next.counterexample_id = audit_info.counterexample_id
+    }
+    next
+}
+
+fn contest_matches_audit_target(contest_ty: TypeEntry, contest_info: ContestInfo, audit_info: AuditInfo) -> bool with Mut, Panic, Div, Alloc {
+    contest_ty.kind == TypeKind::TyContest
+    && types_compatible(knowledge_inner(contest_ty), audit_info.target_inner_ty)
+    && contest_info.family_id == audit_info.family_id
+    && contest_info.policy_id == audit_info.policy_id
+}
+
+fn contest_type_seeded_from_audit(self: Checker, audit_info: AuditInfo, audit_id: i64, span: Span) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc {
+    var c = self
+    if audit_info.family_id < 0 || audit_info.family_id >= c.model_families.count {
+        return (c.report_missing_model_family_metadata(span), ty_error())
+    }
+    let family_info = c.model_families.get(audit_info.family_id)
+    var info = contest_info_from_family_signature(family_info, audit_info.policy_id)
+    info = contest_info_attach_span(info, span)
+    info = contest_info_attach_family_id(info, audit_info.family_id)
+    info = contest_info_apply_audit(info, audit_info, audit_id)
+    let add_result = c.contests.add(info)
+    c.contests = add_result.0
+    (c, ty_contest(audit_info.target_inner_ty, add_result.1))
+}
+
+fn audit_abs_f64(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+fn model_family_model_index(family: ModelFamilyInfo, model_name: Name) -> i64 with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < family.model_count && i < 16 {
+        if name_eq(family.model_names[i as usize], model_name) {
+            return i
+        }
+        i = i + 1
+    }
+    -1
+}
+
 fn contest_witness_metric_id(kind: i64) -> i64 {
     if kind == CONTEST_WITNESS_SIGN_CONSENSUS { CONTEST_METRIC_SIGN_CONSENSUS }
     else if kind == CONTEST_WITNESS_RELATIVE_BAND { CONTEST_METRIC_RELATIVE_BAND }
@@ -1887,6 +2289,7 @@ fn robust_proof_info_from_contest(contest_id: i64, contest_info: ContestInfo, po
     var rp = empty_robust_proof_info()
     rp.span_start = span.start
     rp.span_end = span.end
+    rp.audit_id = contest_info.audit_id
     rp.contest_id = contest_id
     rp.policy_id = contest_info.policy_id
     rp.level_id = policy_info.level_id
@@ -2500,8 +2903,116 @@ impl Checker {
             ItemModels => self.collect_models_def(item.name, item.models_def)
             ItemPolicy => self.collect_policy_def(item.name, item.policy_def)
             ItemValidation => self.collect_validation_def(item.name, item.validation_def)
+            ItemAudit => self.collect_audit_def(item.name, item.audit_def)
             ItemUse => self
             ItemUnit => self.collect_unit_decl(item.name)
+            ItemEffect => self.collect_item_effect(item.effect_def)
+        }
+    }
+
+    fn collect_item_effect(self, opt: Option<Box<EffectDef>>) -> Checker with Mut, Panic, Div, Alloc, IO {
+        match opt {
+            None => self
+            Some(edef) => {
+                var c = self
+                let eid = 100 + c.effects.count
+                let first_op_id = c.effect_ops.count
+                let op_pair = c.collect_effect_op_defs((*edef).ops, eid)
+                c = op_pair.0
+                let op_count = op_pair.1
+                let info = EffectInfo {
+                    name: (*edef).name,
+                    op_count: op_count,
+                    first_op_id: first_op_id,
+                }
+                let add_result = c.effects.add(info)
+                c.effects = add_result.0
+                c
+            }
+        }
+    }
+
+    fn collect_effect_op_defs(self, opt: Option<Box<EffectOpDefList>>, effect_id: i64) -> (Checker, i64) with Mut, Panic, Div, Alloc, IO {
+        match opt {
+            None => (self, 0)
+            Some(node) => {
+                var c = self
+                let head = (*node).head
+                let ret_pair = match head.ret_ty {
+                    None => (c, ty_unit())
+                    Some(te_box) => c.lower_type_expr(*te_box)
+                }
+                c = ret_pair.0
+                let ret_ty = ret_pair.1
+                let op_info = EffectOpInfo {
+                    name: head.name,
+                    effect_id: effect_id,
+                    param_count: 0,
+                    ret_ty: ret_ty,
+                }
+                let add_result = c.effect_ops.add(op_info)
+                c.effect_ops = add_result.0
+                let tail_pair = c.collect_effect_op_defs((*node).tail, effect_id)
+                c = tail_pair.0
+                let count = 1 + tail_pair.1
+                (c, count)
+            }
+        }
+    }
+
+    fn lookup_user_effect_id(self, name_buf: [i8; 64], name_len: i64) -> i64 with Mut, Panic, Div {
+        var i: i64 = 0
+        while i < self.effects.count {
+            let entry = self.effects.entries[i as usize]
+            if entry.name.len == name_len {
+                var j: i64 = 0
+                var matched = true
+                while j < name_len && j < 64 {
+                    if entry.name.buf[j as usize] != name_buf[j as usize] {
+                        matched = false
+                    }
+                    j = j + 1
+                }
+                if matched {
+                    return 100 + i
+                }
+            }
+            i = i + 1
+        }
+        -1
+    }
+
+    fn extract_effects_with_checker(self, opt: Option<Box<EffectList>>) -> (Checker, [i64; 8], i64) with Mut, Panic, Div {
+        match opt {
+            None => (self, [0; 8], 0)
+            Some(list) => self.collect_effects_with_checker(*list, [0; 8], 0)
+        }
+    }
+
+    fn collect_effects_with_checker(self, list: EffectList, effects: [i64; 8], count: i64) -> (Checker, [i64; 8], i64) with Mut, Panic, Div {
+        var effs = effects
+        var n = count
+        var eff_id = effect_name_to_id(list.head.name_buf, list.head.name_len)
+        if eff_id < 0 {
+            eff_id = self.lookup_user_effect_id(list.head.name_buf, list.head.name_len)
+        }
+        if eff_id >= 0 && n < 8 {
+            var already_present = false
+            var i: i64 = 0
+            while i < n {
+                if effs[i as usize] == eff_id {
+                    already_present = true
+                }
+                i = i + 1
+            }
+            if !already_present {
+                effs[n as usize] = eff_id
+                n = n + 1
+            }
+        }
+        match list.tail {
+            None => (self, effs, n)
+            Some(next) => self.collect_effects_with_checker(*next, effs, n)
         }
     }
 
@@ -2661,6 +3172,380 @@ impl Checker {
         }
     }
 
+    fn lower_audit_target_type(self, te: TypeExpr, span: Span) -> (Checker, bool, TypeEntry, i64, i64) with Mut, Panic, Div, Alloc, IO {
+        if te.kind != TypeExprKind::TypeContest {
+            return (self, false, ty_error(), -1, -1)
+        }
+        match te.type_args {
+            Some(args) => {
+                match (*args).tail {
+                    Some(rest) => {
+                        match (*rest).tail {
+                            Some(last) => {
+                                match (*last).tail {
+                                    Some(_) => (self, false, ty_error(), -1, -1)
+                                    None => {
+                                        let inner_pair = self.lower_type_expr((*args).head)
+                                        var c = inner_pair.0
+                                        let inner_ty = inner_pair.1
+                                        let family_pair = c.lower_type_expr((*rest).head)
+                                        c = family_pair.0
+                                        let family_ty = family_pair.1
+                                        let policy_pair = c.lower_type_expr((*last).head)
+                                        c = policy_pair.0
+                                        let policy_ty = policy_pair.1
+                                        if family_ty.kind != TypeKind::TyModelFamily
+                                            || policy_ty.kind != TypeKind::TyPolicy
+                                            || family_ty.epistemic_meta_id < 0
+                                            || policy_ty.epistemic_meta_id < 0 {
+                                            return (c, false, ty_error(), -1, -1)
+                                        }
+                                        if !types_compatible(model_output_ty(family_ty), inner_ty)
+                                            || !types_compatible(knowledge_inner(policy_ty), inner_ty) {
+                                            c = c.report_error_at(span, 58, 0, 0, 0)
+                                            return (c, false, ty_error(), -1, -1)
+                                        }
+                                        (c, true, inner_ty, family_ty.epistemic_meta_id, policy_ty.epistemic_meta_id)
+                                    }
+                                }
+                            }
+                            None => (self, false, ty_error(), -1, -1)
+                        }
+                    }
+                    None => (self, false, ty_error(), -1, -1)
+                }
+            }
+            None => (self, false, ty_error(), -1, -1)
+        }
+    }
+
+    fn collect_audit_def(self, name: Name, opt: Option<Box<AuditDef>>) -> Checker with Mut, Panic, Div, Alloc, IO {
+        match opt {
+            Some(ad) => {
+                let target_pair = self.lower_audit_target_type((*ad).target_type, (*ad).span)
+                var c = target_pair.0
+                let ok = target_pair.1
+                let target_inner_ty = target_pair.2
+                let family_id = target_pair.3
+                let policy_id = target_pair.4
+                if !ok {
+                    return c.report_audit_definition_requires_full_contest((*ad).span, ty_error())
+                }
+
+                var info = empty_audit_info()
+                info.name = name
+                info.span_start = (*ad).span.start
+                info.span_end = (*ad).span.end
+                info.target_inner_ty = target_inner_ty
+                info.family_id = family_id
+                info.policy_id = policy_id
+
+                let sec_pair = c.collect_audit_sections(name, (*ad).sections, info, [0; 4])
+                c = sec_pair.0
+                info = sec_pair.1
+
+                let add_result = c.audits.add(info)
+                c.audits = add_result.0
+                c
+            }
+            None => self
+        }
+    }
+
+    fn collect_audit_sections(
+        self,
+        audit_name: Name,
+        opt: Option<Box<AuditSectionList>>,
+        seed: AuditInfo,
+        section_seen: [i64; 4]
+    ) -> (Checker, AuditInfo, [i64; 4]) with Mut, Panic, Div, Alloc, IO {
+        match opt {
+            Some(list) => {
+                let section = (*list).head
+                var c = self
+                var info = seed
+                var seen = section_seen
+                let section_idx =
+                    if section.kind == AuditSectionKind::AuditSectionMetrics { 0 }
+                    else if section.kind == AuditSectionKind::AuditSectionMechanistic { 1 }
+                    else if section.kind == AuditSectionKind::AuditSectionCounterexample { 2 }
+                    else if section.kind == AuditSectionKind::AuditSectionPosteriorWeights { 3 }
+                    else { -1 }
+
+                if section_idx < 0 {
+                    c = c.report_audit_unknown_or_duplicate_field(section.span, section.name, empty_name())
+                } else if seen[section_idx as usize] == 1 {
+                    c = c.report_audit_unknown_or_duplicate_field(section.span, section.name, empty_name())
+                } else {
+                    seen[section_idx as usize] = 1
+                    if section.kind == AuditSectionKind::AuditSectionMetrics {
+                        let pair = c.collect_audit_metrics_section(section.name, section.fields, info, [0; 8])
+                        c = pair.0
+                        info = pair.1
+                    } else if section.kind == AuditSectionKind::AuditSectionMechanistic {
+                        let pair = c.collect_audit_mechanistic_section(audit_name, section.name, section.fields)
+                        c = pair.0
+                        info.mechanistic_report_id = pair.1
+                        if pair.1 >= 0 && pair.1 < c.mechanistic_reports.count {
+                            let report = c.mechanistic_reports.get(pair.1)
+                            info.metric_known[CONTEST_METRIC_MECHANISTIC_DIVERGENCE as usize] = 1
+                            info.metric_values[CONTEST_METRIC_MECHANISTIC_DIVERGENCE as usize] = report.aggregate_divergence
+                        }
+                    } else if section.kind == AuditSectionKind::AuditSectionCounterexample {
+                        let pair = c.collect_audit_counterexample_section(audit_name, section.name, section.fields)
+                        c = pair.0
+                        info.counterexample_id = pair.1
+                    } else if section.kind == AuditSectionKind::AuditSectionPosteriorWeights {
+                        if info.family_id < 0 || info.family_id >= c.model_families.count {
+                            c = c.report_audit_weights_family_mismatch(section.span, audit_name)
+                        } else {
+                            let family = c.model_families.get(info.family_id)
+                            let pair = c.collect_audit_posterior_weights_section(audit_name, section.name, family, section.fields)
+                            c = pair.0
+                            info.posterior_weights_id = pair.1
+                        }
+                    }
+                }
+                c.collect_audit_sections(audit_name, (*list).tail, info, seen)
+            }
+            None => (self, seed, section_seen)
+        }
+    }
+
+    fn collect_audit_metrics_section(
+        self,
+        section_name: Name,
+        opt: Option<Box<AuditFieldEntryList>>,
+        seed: AuditInfo,
+        seen_fields: [i64; 8]
+    ) -> (Checker, AuditInfo, [i64; 8]) with Mut, Panic, Div, Alloc, IO {
+        match opt {
+            Some(list) => {
+                let field = (*list).head
+                var c = self
+                var info = seed
+                var seen = seen_fields
+                let metric_id = audit_metric_id_from_name(field.name)
+                if metric_id < 0 || field.value_kind != AuditValueKind::AuditValueFloat {
+                    c = c.report_audit_unknown_or_duplicate_field(field.span, section_name, field.name)
+                } else if seen[metric_id as usize] == 1 {
+                    c = c.report_audit_unknown_or_duplicate_field(field.span, section_name, field.name)
+                } else {
+                    seen[metric_id as usize] = 1
+                    info.metric_known[metric_id as usize] = 1
+                    info.metric_values[metric_id as usize] = field.value_f64
+                }
+                c.collect_audit_metrics_section(section_name, (*list).tail, info, seen)
+            }
+            None => (self, seed, seen_fields)
+        }
+    }
+
+    fn collect_audit_mechanistic_section(
+        self,
+        audit_name: Name,
+        section_name: Name,
+        opt: Option<Box<AuditFieldEntryList>>
+    ) -> (Checker, i64) with Mut, Panic, Div, Alloc, IO {
+        let pair = self.collect_audit_mechanistic_fields(section_name, opt, [0; 6], [0.0; 6])
+        var c = pair.0
+        let seen = pair.1
+        let values = pair.2
+        var i: i64 = 0
+        while i < 6 {
+            if seen[i as usize] != 1 {
+                c = c.report_audit_mechanistic_incomplete(Span { start: 0, end: 0 }, audit_name)
+                return (c, -1)
+            }
+            i = i + 1
+        }
+        let report = MechanisticReportInfo {
+            latent_state_divergence: values[1],
+            causal_decomposition_divergence: values[2],
+            intervention_response_divergence: values[3],
+            parameter_role_divergence: values[4],
+            structural_explanation_distance: values[5],
+            aggregate_divergence: values[0],
+        }
+        let add_result = c.mechanistic_reports.add(report)
+        c.mechanistic_reports = add_result.0
+        (c, add_result.1)
+    }
+
+    fn collect_audit_mechanistic_fields(
+        self,
+        section_name: Name,
+        opt: Option<Box<AuditFieldEntryList>>,
+        seen_fields: [i64; 6],
+        values: [f64; 6]
+    ) -> (Checker, [i64; 6], [f64; 6]) with Mut, Panic, Div, Alloc, IO {
+        match opt {
+            Some(list) => {
+                let field = (*list).head
+                var c = self
+                var seen = seen_fields
+                var vals = values
+                let field_id = audit_mechanistic_field_id_from_name(field.name)
+                if field_id < 0 || field.value_kind != AuditValueKind::AuditValueFloat {
+                    c = c.report_audit_unknown_or_duplicate_field(field.span, section_name, field.name)
+                } else if seen[field_id as usize] == 1 {
+                    c = c.report_audit_unknown_or_duplicate_field(field.span, section_name, field.name)
+                } else {
+                    seen[field_id as usize] = 1
+                    vals[field_id as usize] = field.value_f64
+                }
+                c.collect_audit_mechanistic_fields(section_name, (*list).tail, seen, vals)
+            }
+            None => (self, seen_fields, values)
+        }
+    }
+
+    fn collect_audit_counterexample_section(
+        self,
+        audit_name: Name,
+        section_name: Name,
+        opt: Option<Box<AuditFieldEntryList>>
+    ) -> (Checker, i64) with Mut, Panic, Div, Alloc, IO {
+        let pair = self.collect_audit_counterexample_fields(
+            section_name,
+            opt,
+            [0; 6],
+            [Name { buf: [0; 128], len: 0 }; 6],
+            [0.0; 6]
+        )
+        var c = pair.0
+        let seen = pair.1
+        let names = pair.2
+        let values = pair.3
+        var i: i64 = 0
+        while i < 6 {
+            if seen[i as usize] != 1 {
+                c = c.report_audit_counterexample_incomplete(Span { start: 0, end: 0 }, audit_name)
+                return (c, -1)
+            }
+            i = i + 1
+        }
+        let info = CounterexampleInfo {
+            model_name: names[0],
+            subgroup_name: names[1],
+            metric_name: names[2],
+            observed_value: values[3],
+            threshold_value: values[4],
+            summary: names[5],
+        }
+        let add_result = c.counterexamples.add(info)
+        c.counterexamples = add_result.0
+        (c, add_result.1)
+    }
+
+    fn collect_audit_counterexample_fields(
+        self,
+        section_name: Name,
+        opt: Option<Box<AuditFieldEntryList>>,
+        seen_fields: [i64; 6],
+        names: [Name; 6],
+        values: [f64; 6]
+    ) -> (Checker, [i64; 6], [Name; 6], [f64; 6]) with Mut, Panic, Div, Alloc, IO {
+        match opt {
+            Some(list) => {
+                let field = (*list).head
+                var c = self
+                var seen = seen_fields
+                var next_names = names
+                var next_values = values
+                let field_id = audit_counterexample_field_id_from_name(field.name)
+                if field_id < 0 || seen[field_id as usize] == 1 {
+                    c = c.report_audit_unknown_or_duplicate_field(field.span, section_name, field.name)
+                } else if (field_id == 3 || field_id == 4) && field.value_kind != AuditValueKind::AuditValueFloat {
+                    c = c.report_audit_unknown_or_duplicate_field(field.span, section_name, field.name)
+                } else if field_id != 3 && field_id != 4 && field.value_kind != AuditValueKind::AuditValueName {
+                    c = c.report_audit_unknown_or_duplicate_field(field.span, section_name, field.name)
+                } else {
+                    seen[field_id as usize] = 1
+                    if field_id == 3 || field_id == 4 {
+                        next_values[field_id as usize] = field.value_f64
+                    } else {
+                        next_names[field_id as usize] = field.value_name
+                    }
+                }
+                c.collect_audit_counterexample_fields(section_name, (*list).tail, seen, next_names, next_values)
+            }
+            None => (self, seen_fields, names, values)
+        }
+    }
+
+    fn collect_audit_posterior_weights_section(
+        self,
+        audit_name: Name,
+        section_name: Name,
+        family: ModelFamilyInfo,
+        opt: Option<Box<AuditFieldEntryList>>
+    ) -> (Checker, i64) with Mut, Panic, Div, Alloc, IO {
+        if family.model_count > 16 {
+            let c = self.report_audit_weights_family_mismatch(Span { start: 0, end: 0 }, audit_name)
+            return (c, -1)
+        }
+        let pair = self.collect_audit_posterior_weight_fields(section_name, family, opt, [0; 16], [0.0; 16])
+        var c = pair.0
+        let seen = pair.1
+        let weights = pair.2
+        var i: i64 = 0
+        var total = 0.0
+        while i < family.model_count && i < 16 {
+            if seen[i as usize] != 1 {
+                c = c.report_audit_weights_family_mismatch(Span { start: 0, end: 0 }, audit_name)
+                return (c, -1)
+            }
+            total = total + weights[i as usize]
+            i = i + 1
+        }
+        if audit_abs_f64(total - 1.0) > 0.000001 {
+            c = c.report_audit_weights_not_normalized(Span { start: 0, end: 0 }, audit_name, total)
+            return (c, -1)
+        }
+        let info = PosteriorWeightsInfo {
+            model_names: family.model_names,
+            weights: weights,
+            count: family.model_count,
+        }
+        let add_result = c.posterior_weights.add(info)
+        c.posterior_weights = add_result.0
+        (c, add_result.1)
+    }
+
+    fn collect_audit_posterior_weight_fields(
+        self,
+        section_name: Name,
+        family: ModelFamilyInfo,
+        opt: Option<Box<AuditFieldEntryList>>,
+        seen_fields: [i64; 16],
+        weights: [f64; 16]
+    ) -> (Checker, [i64; 16], [f64; 16]) with Mut, Panic, Div, Alloc, IO {
+        match opt {
+            Some(list) => {
+                let field = (*list).head
+                var c = self
+                var seen = seen_fields
+                var next_weights = weights
+                let model_idx = model_family_model_index(family, field.name)
+                if field.value_kind != AuditValueKind::AuditValueFloat {
+                    c = c.report_audit_unknown_or_duplicate_field(field.span, section_name, field.name)
+                } else if field.value_f64 < 0.0 {
+                    c = c.report_audit_weights_not_normalized(field.span, section_name, field.value_f64)
+                } else if model_idx < 0 {
+                    c = c.report_audit_weights_family_mismatch(field.span, section_name)
+                } else if seen[model_idx as usize] == 1 {
+                    c = c.report_audit_weights_family_mismatch(field.span, section_name)
+                } else {
+                    seen[model_idx as usize] = 1
+                    next_weights[model_idx as usize] = field.value_f64
+                }
+                c.collect_audit_posterior_weight_fields(section_name, family, (*list).tail, seen, next_weights)
+            }
+            None => (self, seen_fields, weights)
+        }
+    }
+
     fn collect_policy_requirements(self, opt: Option<Box<PolicyRequirementList>>) -> (Checker, Option<Box<PolicyRequirementInfoList>>, i64) with Mut, Panic, Div, Alloc, IO {
         match opt {
             Some(list) => {
@@ -2712,10 +3597,11 @@ impl Checker {
                 c = ret_pair.0
                 let ret_ty = ret_pair.1
 
-                // Extract effects from function signature
-                let eff_pair = extract_effects((*fd).effects)
-                let fn_effects = eff_pair.0
-                let fn_effect_count = eff_pair.1
+                // Extract effects from function signature (including user-defined)
+                let eff_pair = c.extract_effects_with_checker((*fd).effects)
+                c = eff_pair.0
+                let fn_effects = eff_pair.1
+                let fn_effect_count = eff_pair.2
 
                 let sig = FnSig {
                     name: name,
@@ -2912,10 +3798,11 @@ impl Checker {
                 c = ret_pair.0
                 let ret_ty = ret_pair.1
 
-                // Extract effects from method signature
-                let eff_pair = extract_effects((*fd).effects)
-                let fn_effects = eff_pair.0
-                let fn_effect_count = eff_pair.1
+                // Extract effects from method signature (including user-defined)
+                let eff_pair = c.extract_effects_with_checker((*fd).effects)
+                c = eff_pair.0
+                let fn_effects = eff_pair.1
+                let fn_effect_count = eff_pair.2
 
                 let sig = FnSig {
                     name: item.name,
@@ -2976,8 +3863,10 @@ impl Checker {
             ItemModels => self
             ItemPolicy => self
             ItemValidation => self
+            ItemAudit => self
             ItemUse => self
             ItemUnit => self  // Already handled in collect pass
+            ItemEffect => self  // Already handled in collect pass
         }
     }
 
@@ -3373,6 +4262,12 @@ impl Checker {
                     } else {
                         self.check_expr(*e)
                     }
+                } else if (*e).kind == ExprKind::ExprAuditAttach {
+                    if ann_ty.kind == TypeKind::TyContest {
+                        self.check_audit_attach_expr_expected(*e, ann_ty)
+                    } else {
+                        self.check_expr(*e)
+                    }
                 } else {
                     self.check_expr(*e)
                 }
@@ -3450,6 +4345,7 @@ impl Checker {
             ExprHandle => c.check_handle_expr(e)
             ExprClosure => c.check_closure_expr(e)
             ExprContest => c.check_contest_expr_no_annotation(e)
+            ExprAuditAttach => c.check_audit_attach_expr(e)
             ExprForIn => c.check_for_in_expr(e)
             ExprError => (c, ty_error())
         }
@@ -4041,6 +4937,13 @@ impl Checker {
                 let expected_info = c.contests.get(expected_contest_ty.epistemic_meta_id)
                 info.family_id = expected_info.family_id
                 info.policy_id = expected_info.policy_id
+                info.audit_id = expected_info.audit_id
+                var i: i64 = 0
+                while i < 8 {
+                    info.metric_known[i as usize] = expected_info.metric_known[i as usize]
+                    info.metric_values[i as usize] = expected_info.metric_values[i as usize]
+                    i = i + 1
+                }
                 info.mechanistic_report_id = expected_info.mechanistic_report_id
                 info.posterior_weights_id = expected_info.posterior_weights_id
                 info.counterexample_id = expected_info.counterexample_id
@@ -4066,6 +4969,83 @@ impl Checker {
                 (c, ty_contest(knowledge_inner(expected_contest_ty), add_result.1))
             }
         }
+    }
+
+    fn check_audit_attach_expr(self, e: Expr) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+        self.check_audit_attach_expr_expected(e, ty_error())
+    }
+
+    fn check_audit_attach_expr_expected(self, e: Expr, expected_contest_ty: TypeEntry) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+        let audit_id = self.audits.find(e.name)
+        if audit_id < 0 || audit_id >= self.audits.count {
+            return (self.report_error_at(e.span, 86, 0, 0, 0), ty_error())
+        }
+
+        let audit_info = self.audits.get(audit_id)
+        var seeded_expected_ty = expected_contest_ty
+        var seeded_checker = self
+        if expected_contest_ty.kind == TypeKind::TyContest
+        && expected_contest_ty.epistemic_meta_id >= 0
+        && expected_contest_ty.epistemic_meta_id < self.contests.count {
+            let expected_info = self.contests.get(expected_contest_ty.epistemic_meta_id)
+            if expected_info.family_id >= 0 && expected_info.policy_id >= 0 {
+                if !contest_matches_audit_target(expected_contest_ty, expected_info, audit_info) {
+                    return (self.report_audit_target_mismatch(e.span, e.name, audit_info, knowledge_inner(expected_contest_ty), expected_info), ty_error())
+                }
+                var merged_expected = contest_info_apply_audit(expected_info, audit_info, audit_id)
+                merged_expected = contest_info_attach_span(merged_expected, e.span)
+                seeded_checker.contests.entries[expected_contest_ty.epistemic_meta_id as usize] = merged_expected
+                seeded_expected_ty = ty_contest(knowledge_inner(expected_contest_ty), expected_contest_ty.epistemic_meta_id)
+            }
+        }
+        let contest_pair = match e.left {
+            Some(left_expr) => {
+                if (*left_expr).kind == ExprKind::ExprContest {
+                    let seeded_pair =
+                        if seeded_expected_ty.kind == TypeKind::TyContest { (seeded_checker, seeded_expected_ty) }
+                        else { self.contest_type_seeded_from_audit(audit_info, audit_id, e.span) }
+                    if seeded_pair.1.kind == TypeKind::TyError {
+                        seeded_pair
+                    } else {
+                        seeded_pair.0.check_contest_expr_expected(*left_expr, seeded_pair.1)
+                    }
+                } else if (*left_expr).kind == ExprKind::ExprCall && call_expr_is_builtin_lift_knowledge((*left_expr).left) {
+                    let seeded_pair =
+                        if seeded_expected_ty.kind == TypeKind::TyContest { (seeded_checker, seeded_expected_ty) }
+                        else { self.contest_type_seeded_from_audit(audit_info, audit_id, e.span) }
+                    if seeded_pair.1.kind == TypeKind::TyError {
+                        seeded_pair
+                    } else {
+                        seeded_pair.0.check_lift_knowledge_expr_expected(*left_expr, seeded_pair.1)
+                    }
+                } else {
+                    seeded_checker.check_expr(*left_expr)
+                }
+            }
+            None => (seeded_checker.report_error_at(e.span, 86, 0, 0, 0), ty_error())
+        }
+
+        var c = contest_pair.0
+        let contest_ty = contest_pair.1
+        if contest_ty.kind != TypeKind::TyContest {
+            return (c.report_audit_attachment_requires_contest(e.span, e.name, contest_ty), ty_error())
+        }
+        if contest_ty.epistemic_meta_id < 0 || contest_ty.epistemic_meta_id >= c.contests.count {
+            return (c.report_audit_attachment_requires_contest(e.span, e.name, contest_ty), ty_error())
+        }
+
+        let contest_info = c.contests.get(contest_ty.epistemic_meta_id)
+        if contest_info.family_id < 0 || contest_info.policy_id < 0 {
+            return (c.report_audit_attachment_requires_contest(e.span, e.name, contest_ty), ty_error())
+        }
+        if !contest_matches_audit_target(contest_ty, contest_info, audit_info) {
+            return (c.report_audit_target_mismatch(e.span, e.name, audit_info, knowledge_inner(contest_ty), contest_info), ty_error())
+        }
+
+        var merged = contest_info_apply_audit(contest_info, audit_info, audit_id)
+        merged = contest_info_attach_span(merged, e.span)
+        c.contests.entries[contest_ty.epistemic_meta_id as usize] = merged
+        (c, ty_contest(knowledge_inner(contest_ty), contest_ty.epistemic_meta_id))
     }
 
     fn check_prove_robust_expr(self, e: Expr) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
@@ -4174,9 +5154,11 @@ impl Checker {
             c = c.report_missing_robust_proof(e.span)
             return (c, ty_error())
         }
+        let proof_info = c.robust_proofs.get(robust_ty.epistemic_meta_id)
         let manifest_info = ValidatedManifestInfo {
             span_start: e.span.start,
             span_end: e.span.end,
+            audit_id: proof_info.audit_id,
             robust_proof_id: robust_ty.epistemic_meta_id,
             validation_id: validation_ty.epistemic_meta_id,
             inner_ty: inner_ty,
