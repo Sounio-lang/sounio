@@ -45,6 +45,17 @@ PY
     fi
   fi
 
+  if [[ -f "$BOOTSTRAP_MANIFEST_METADATA_PATH" ]]; then
+    local manifest_key
+    manifest_key="$(
+      sed -n 's/.*"key_id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$BOOTSTRAP_MANIFEST_METADATA_PATH" | head -n1
+    )"
+    if [[ -n "$manifest_key" ]]; then
+      echo "$manifest_key"
+      return 0
+    fi
+  fi
+
   echo "sounio-dev"
 }
 
