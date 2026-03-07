@@ -113,8 +113,38 @@ fn types_compatible(a: TypeEntry, b: TypeEntry) -> bool with Mut, Panic, Div, Al
         return a.knowledge_epsilon <= b.knowledge_epsilon
     }
 
+    if a.kind == TypeKind::TyModel && b.kind == TypeKind::TyModel {
+        return tuple_types_compatible(a.tuple_elems, b.tuple_elems)
+    }
+
+    if a.kind == TypeKind::TyModelFamily && b.kind == TypeKind::TyModelFamily {
+        if !tuple_types_compatible(a.tuple_elems, b.tuple_elems) {
+            return false
+        }
+        if a.epistemic_meta_id >= 0 && b.epistemic_meta_id >= 0 {
+            return a.epistemic_meta_id == b.epistemic_meta_id
+        }
+        return true
+    }
+
     if a.kind == TypeKind::TyPolicy && b.kind == TypeKind::TyPolicy {
-        return types_compatible_inner(a.inner, b.inner)
+        if !types_compatible_inner(a.inner, b.inner) {
+            return false
+        }
+        if a.epistemic_meta_id >= 0 && b.epistemic_meta_id >= 0 {
+            return a.epistemic_meta_id == b.epistemic_meta_id
+        }
+        return true
+    }
+
+    if a.kind == TypeKind::TyDecisionPolicy && b.kind == TypeKind::TyDecisionPolicy {
+        if !types_compatible_inner(a.inner, b.inner) {
+            return false
+        }
+        if a.epistemic_meta_id >= 0 && b.epistemic_meta_id >= 0 {
+            return a.epistemic_meta_id == b.epistemic_meta_id
+        }
+        return true
     }
 
     if a.kind == TypeKind::TyContest && b.kind == TypeKind::TyContest {
@@ -122,7 +152,19 @@ fn types_compatible(a: TypeEntry, b: TypeEntry) -> bool with Mut, Panic, Div, Al
     }
 
     if a.kind == TypeKind::TyRobust && b.kind == TypeKind::TyRobust {
-        return types_compatible_inner(a.inner, b.inner)
+        if !types_compatible_inner(a.inner, b.inner) {
+            return false
+        }
+        if a.robustness_level_id >= 0 && b.robustness_level_id >= 0 && a.robustness_level_id != b.robustness_level_id {
+            return false
+        }
+        if a.robustness_scope_id >= 0 && b.robustness_scope_id >= 0 && a.robustness_scope_id != b.robustness_scope_id {
+            return false
+        }
+        if a.epistemic_meta_id >= 0 && b.epistemic_meta_id >= 0 {
+            return a.epistemic_meta_id == b.epistemic_meta_id
+        }
+        return true
     }
 
     if a.kind == TypeKind::TyIntervention && b.kind == TypeKind::TyIntervention {
@@ -149,10 +191,76 @@ fn types_compatible(a: TypeEntry, b: TypeEntry) -> bool with Mut, Panic, Div, Al
         if !types_compatible_inner(a.inner, b.inner) {
             return false
         }
+        if a.epistemic_meta_id >= 0 && b.epistemic_meta_id >= 0 && a.epistemic_meta_id != b.epistemic_meta_id {
+            return false
+        }
         if a.knowledge_epsilon < 0.0 || b.knowledge_epsilon < 0.0 {
             return true
         }
         return a.knowledge_epsilon <= b.knowledge_epsilon
+    }
+
+    if a.kind == TypeKind::TyAdmissible && b.kind == TypeKind::TyAdmissible {
+        if !types_compatible_inner(a.inner, b.inner) {
+            return false
+        }
+        if a.epistemic_meta_id >= 0 && b.epistemic_meta_id >= 0 {
+            return a.epistemic_meta_id == b.epistemic_meta_id
+        }
+        return true
+    }
+
+    if a.kind == TypeKind::TyValidation && b.kind == TypeKind::TyValidation {
+        if !types_compatible_inner(a.inner, b.inner) {
+            return false
+        }
+        if a.epistemic_meta_id >= 0 && b.epistemic_meta_id >= 0 {
+            return a.epistemic_meta_id == b.epistemic_meta_id
+        }
+        return true
+    }
+
+    // Aleatoric types (H6.3): same kind, inner compatible, epsilon ordering
+    // Aleatoric <: Knowledge (upcast allowed), but NOT Aleatoric <: Epistemic
+    if a.kind == TypeKind::TyAleatoric && b.kind == TypeKind::TyAleatoric {
+        if !types_compatible_inner(a.inner, b.inner) {
+            return false
+        }
+        if a.knowledge_epsilon < 0.0 || b.knowledge_epsilon < 0.0 {
+            return true
+        }
+        return a.knowledge_epsilon <= b.knowledge_epsilon
+    }
+    if a.kind == TypeKind::TyAleatoric && b.kind == TypeKind::TyKnowledge {
+        return types_compatible_inner(a.inner, b.inner)
+    }
+
+    // Epistemic types (H6.3): same kind, inner compatible, epsilon ordering
+    // Epistemic <: Knowledge (upcast allowed), but NOT Epistemic <: Aleatoric
+    if a.kind == TypeKind::TyEpistemic && b.kind == TypeKind::TyEpistemic {
+        if !types_compatible_inner(a.inner, b.inner) {
+            return false
+        }
+        if a.knowledge_epsilon < 0.0 || b.knowledge_epsilon < 0.0 {
+            return true
+        }
+        return a.knowledge_epsilon <= b.knowledge_epsilon
+    }
+    if a.kind == TypeKind::TyEpistemic && b.kind == TypeKind::TyKnowledge {
+        return types_compatible_inner(a.inner, b.inner)
+    }
+
+    // Irreducibility boundary: Aleatoric and Epistemic are INCOMPATIBLE with each other
+    if a.kind == TypeKind::TyAleatoric && b.kind == TypeKind::TyEpistemic {
+        return false
+    }
+    if a.kind == TypeKind::TyEpistemic && b.kind == TypeKind::TyAleatoric {
+        return false
+    }
+
+    // CausalEffect compatibility (H6.4): same kind, inner (effect type) compatible
+    if a.kind == TypeKind::TyCausalEffect && b.kind == TypeKind::TyCausalEffect {
+        return types_compatible_inner(a.inner, b.inner)
     }
 
     // Hyper types: algebra kind must match, inner compatible
@@ -581,6 +689,14 @@ fn name_matches_str12(n: Name, a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, g
     (n.buf[8] as i64) == i && (n.buf[9] as i64) == j && (n.buf[10] as i64) == k && (n.buf[11] as i64) == l
 }
 
+fn name_matches_str13(n: Name, a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, g: i64, h: i64, i: i64, j: i64, k: i64, l: i64, m: i64) -> bool with Panic, Div {
+    if n.len != 13 { return false }
+    (n.buf[0] as i64) == a && (n.buf[1] as i64) == b && (n.buf[2] as i64) == c && (n.buf[3] as i64) == d &&
+    (n.buf[4] as i64) == e && (n.buf[5] as i64) == f && (n.buf[6] as i64) == g && (n.buf[7] as i64) == h &&
+    (n.buf[8] as i64) == i && (n.buf[9] as i64) == j && (n.buf[10] as i64) == k && (n.buf[11] as i64) == l &&
+    (n.buf[12] as i64) == m
+}
+
 fn name_matches_str14(n: Name, a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, g: i64, h: i64, i: i64, j: i64, k: i64, l: i64, m: i64, o: i64) -> bool with Panic, Div {
     if n.len != 14 { return false }
     (n.buf[0] as i64) == a && (n.buf[1] as i64) == b && (n.buf[2] as i64) == c && (n.buf[3] as i64) == d &&
@@ -596,6 +712,35 @@ fn name_matches_str17(n: Name, a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, g
     (n.buf[8] as i64) == i && (n.buf[9] as i64) == j && (n.buf[10] as i64) == k && (n.buf[11] as i64) == l &&
     (n.buf[12] as i64) == m && (n.buf[13] as i64) == o && (n.buf[14] as i64) == p && (n.buf[15] as i64) == q &&
     (n.buf[16] as i64) == r
+}
+
+fn name_matches_str20(n: Name, a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, g: i64, h: i64, i: i64, j: i64, k: i64, l: i64, m: i64, o: i64, p: i64, q: i64, r: i64, s: i64, t: i64, u: i64) -> bool with Panic, Div {
+    if n.len != 20 { return false }
+    (n.buf[0] as i64) == a && (n.buf[1] as i64) == b && (n.buf[2] as i64) == c && (n.buf[3] as i64) == d &&
+    (n.buf[4] as i64) == e && (n.buf[5] as i64) == f && (n.buf[6] as i64) == g && (n.buf[7] as i64) == h &&
+    (n.buf[8] as i64) == i && (n.buf[9] as i64) == j && (n.buf[10] as i64) == k && (n.buf[11] as i64) == l &&
+    (n.buf[12] as i64) == m && (n.buf[13] as i64) == o && (n.buf[14] as i64) == p && (n.buf[15] as i64) == q &&
+    (n.buf[16] as i64) == r && (n.buf[17] as i64) == s && (n.buf[18] as i64) == t && (n.buf[19] as i64) == u
+}
+
+fn name_matches_str21(n: Name, a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, g: i64, h: i64, i: i64, j: i64, k: i64, l: i64, m: i64, o: i64, p: i64, q: i64, r: i64, s: i64, t: i64, u: i64, v: i64) -> bool with Panic, Div {
+    if n.len != 21 { return false }
+    (n.buf[0] as i64) == a && (n.buf[1] as i64) == b && (n.buf[2] as i64) == c && (n.buf[3] as i64) == d &&
+    (n.buf[4] as i64) == e && (n.buf[5] as i64) == f && (n.buf[6] as i64) == g && (n.buf[7] as i64) == h &&
+    (n.buf[8] as i64) == i && (n.buf[9] as i64) == j && (n.buf[10] as i64) == k && (n.buf[11] as i64) == l &&
+    (n.buf[12] as i64) == m && (n.buf[13] as i64) == o && (n.buf[14] as i64) == p && (n.buf[15] as i64) == q &&
+    (n.buf[16] as i64) == r && (n.buf[17] as i64) == s && (n.buf[18] as i64) == t && (n.buf[19] as i64) == u &&
+    (n.buf[20] as i64) == v
+}
+
+fn name_matches_str22(n: Name, a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, g: i64, h: i64, i: i64, j: i64, k: i64, l: i64, m: i64, o: i64, p: i64, q: i64, r: i64, s: i64, t: i64, u: i64, v: i64, w: i64) -> bool with Panic, Div {
+    if n.len != 22 { return false }
+    (n.buf[0] as i64) == a && (n.buf[1] as i64) == b && (n.buf[2] as i64) == c && (n.buf[3] as i64) == d &&
+    (n.buf[4] as i64) == e && (n.buf[5] as i64) == f && (n.buf[6] as i64) == g && (n.buf[7] as i64) == h &&
+    (n.buf[8] as i64) == i && (n.buf[9] as i64) == j && (n.buf[10] as i64) == k && (n.buf[11] as i64) == l &&
+    (n.buf[12] as i64) == m && (n.buf[13] as i64) == o && (n.buf[14] as i64) == p && (n.buf[15] as i64) == q &&
+    (n.buf[16] as i64) == r && (n.buf[17] as i64) == s && (n.buf[18] as i64) == t && (n.buf[19] as i64) == u &&
+    (n.buf[20] as i64) == v && (n.buf[21] as i64) == w
 }
 
 // "i8" = [105, 56]

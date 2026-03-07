@@ -565,7 +565,7 @@ fn epsilon_is_valid(eps: f64) -> bool {
 
 // Check if metadata represents valid knowledge
 fn knowledge_meta_is_valid(meta: KnowledgeMeta) -> bool {
-    epsilon_is_valid(meta.epsilon)
+    meta.epsilon < 0.0 || epsilon_is_valid(meta.epsilon)
 }
 
 // ============================================================
@@ -946,12 +946,71 @@ fn check_robust_type(checker: Checker, span: Span, opt: Option<Box<TypeExprList>
                     c = c.report_error_at(span, 63, 0, 0, 0)
                     (c, ty_error())
                 }
-                None => (c, ty_robust(inner_ty, -1, -1))
+                None => (c, ty_robust(inner_ty, -1, -1, -1))
             }
         }
         None => {
             let c = checker.report_error_at(span, 63, 0, 0, 0)
             (c, ty_error())
         }
+    }
+}
+
+// ============================================================
+// Epistemic/Aleatoric uncertainty kind checking (H6.3)
+// ============================================================
+
+// Check that a type is not being incorrectly used as epistemic
+// when it is actually aleatoric. Returns error code 0 (ok) or 56/57 (error).
+// E056: cannot reduce aleatoric uncertainty (it is irreducible)
+// E057: cannot coerce epistemic to aleatoric
+fn check_uncertainty_kind_reduction(source_ty: TypeEntry, target_ty: TypeEntry) -> i64 {
+    match source_ty.kind {
+        TypeKind::TyAleatoric => {
+            match target_ty.kind {
+                TypeKind::TyEpistemic => 56  // E056: aleatoric is irreducible
+                TypeKind::TyKnowledge => 0   // OK: aleatoric <: Knowledge
+                TypeKind::TyAleatoric => 0   // OK: same kind
+                _ => 0
+            }
+        }
+        TypeKind::TyEpistemic => {
+            match target_ty.kind {
+                TypeKind::TyAleatoric => 57  // E057: cannot coerce epistemic to aleatoric
+                TypeKind::TyEpistemic => 0
+                TypeKind::TyKnowledge => 0   // OK: epistemic <: Knowledge
+                _ => 0
+            }
+        }
+        _ => 0
+    }
+}
+
+// Returns the resulting uncertainty TypeKind for a binary operation.
+// Propagation rules:
+//   Epistemic op Epistemic -> Epistemic (quadrature combination)
+//   Aleatoric op Aleatoric -> Aleatoric (irreducible, stays aleatoric)
+//   Epistemic op Aleatoric -> Knowledge  (mixed, conservative)
+//   Knowledge  op anything  -> Knowledge
+fn uncertainty_binary_result_kind(a: TypeEntry, b: TypeEntry) -> TypeKind {
+    match a.kind {
+        TypeKind::TyEpistemic => {
+            match b.kind {
+                TypeKind::TyEpistemic => TypeKind::TyEpistemic
+                TypeKind::TyAleatoric => TypeKind::TyKnowledge
+                TypeKind::TyKnowledge => TypeKind::TyKnowledge
+                _ => TypeKind::TyEpistemic
+            }
+        }
+        TypeKind::TyAleatoric => {
+            match b.kind {
+                TypeKind::TyAleatoric => TypeKind::TyAleatoric
+                TypeKind::TyEpistemic => TypeKind::TyKnowledge
+                TypeKind::TyKnowledge => TypeKind::TyKnowledge
+                _ => TypeKind::TyAleatoric
+            }
+        }
+        TypeKind::TyKnowledge => TypeKind::TyKnowledge
+        _ => TypeKind::TyKnowledge
     }
 }

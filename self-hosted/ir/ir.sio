@@ -2,7 +2,8 @@
 
 module ir::ir
 
-use parser::ast::{Name, StringList, AstPath, BinaryOp, UnaryOp}
+use parser::ast::{Name, StringList, AstPath, BinaryOp, UnaryOp, CompareOp}
+use check::types::{TypeEntry, empty_type_entry}
 
 // These caps gate what the self-hosted pipeline can lower and execute.
 // Sized for small test programs (selfhosted interpreter lane):
@@ -16,6 +17,19 @@ let IR_MAX_PARAMS: i64 = 64
 let IR_INVALID_REG: i64 = -1
 let IR_INVALID_LABEL: i64 = -1
 let IR_INVALID_FN: i64 = -1
+let IR_MAX_EPI_MODEL_FAMILIES: i64 = 128
+let IR_MAX_EPI_POLICIES: i64 = 128
+let IR_MAX_EPI_DECISION_POLICIES: i64 = 128
+let IR_MAX_EPI_VALIDATIONS: i64 = 128
+let IR_MAX_EPI_CONTESTS: i64 = 256
+let IR_MAX_EPI_MECHANISTIC_REPORTS: i64 = 128
+let IR_MAX_EPI_POSTERIOR_WEIGHTS: i64 = 128
+let IR_MAX_EPI_COUNTEREXAMPLES: i64 = 128
+let IR_MAX_EPI_AUDITS: i64 = 128
+let IR_MAX_EPI_CONTEST_WITNESSES: i64 = 256
+let IR_MAX_EPI_ROBUST_PROOFS: i64 = 256
+let IR_MAX_EPI_DECISION_CERTIFICATES: i64 = 256
+let IR_MAX_EPI_VALIDATED_MANIFESTS: i64 = 256
 
 enum IrOpcode {
     IrLoadImm,
@@ -191,6 +205,14 @@ enum IrOpcode {
     //   src1 = robust register (the proven Robust<T> subject)
     //   Codegen: MOV dst, src1 (zero-cost; validation is type-level only)
     IrValidated,           // validate_manifest(robust): Validated<T> terminal, zero-cost copy
+    // Decision-admissibility runtime — admit_action(value, robust, policy) terminal gate
+    //   dst  = destination register (holds the admitted datum)
+    //   src1 = value register (the datum/action being admitted)
+    //   src2 = robust register (the proof-carrying Robust<T> evidence)
+    //   imm_i64 = decision policy register (carried for metadata only)
+    //   label_id = decision certificate id
+    //   Codegen: MOV dst, src1 (zero-cost; admissibility is discharged at type-check)
+    IrAdmitAction,         // admit_action(value, robust, decision_policy): Admissible<T> terminal
 
     // Epistemic bridge — lift_knowledge(k: Knowledge<T>) → Contest<T> (H5.4)
     //   dst  = destination register (holds the lifted datum)
@@ -203,6 +225,15 @@ enum IrOpcode {
     //   src1 = value register (the T being measured)
     //   Codegen: MOV dst, src1 (zero-cost; uncertainty is type-level metadata)
     IrMeasure,             // measure(value, uncertainty): Knowledge<T> intro from raw observation
+
+    // Effect handler block boundaries — row-polymorphic effect handling (H6.2)
+    //   IrHandleBegin: marks the start of a handle block
+    //     src1 = handler_id register (identifies this handler scope)
+    //     imm_i64 = effect_def_id (which effect definition is being handled)
+    //   IrHandleEnd: marks the end of a handle block, produces result
+    //     src1 = result register (the handled expression's result)
+    IrHandleBegin,         // Begin handle block: src1=handler_id, imm_i64=effect_def_id
+    IrHandleEnd,           // End handle block: src1=result_reg
 }
 
 struct IrRegList {
@@ -238,11 +269,388 @@ struct IrFunction {
     param_regs: [i64; 64],
 }
 
+struct IrPolicyRequirementInfo {
+    metric_id: i64,
+    metric_name: Name,
+    op: CompareOp,
+    threshold: f64,
+}
+
+fn ir_empty_policy_requirement_info() -> IrPolicyRequirementInfo {
+    IrPolicyRequirementInfo {
+        metric_id: -1,
+        metric_name: ir_empty_name(),
+        op: CompareOp::CmpEq,
+        threshold: 0.0,
+    }
+}
+
+struct IrModelFamilyInfo {
+    id: i64,
+    name: Name,
+    model_names: [Name; 16],
+    model_count: i64,
+    input_ty: TypeEntry,
+    output_ty: TypeEntry,
+}
+
+fn ir_empty_model_family_info() -> IrModelFamilyInfo {
+    IrModelFamilyInfo {
+        id: -1,
+        name: ir_empty_name(),
+        model_names: [ir_empty_name(); 16],
+        model_count: 0,
+        input_ty: empty_type_entry(),
+        output_ty: empty_type_entry(),
+    }
+}
+
+struct IrPolicyInfo {
+    id: i64,
+    name: Name,
+    target_ty: TypeEntry,
+    level_name: Name,
+    scope_name: Name,
+    level_id: i64,
+    scope_id: i64,
+    requirements: [IrPolicyRequirementInfo; 8],
+    requirement_count: i64,
+}
+
+fn ir_empty_policy_info() -> IrPolicyInfo {
+    IrPolicyInfo {
+        id: -1,
+        name: ir_empty_name(),
+        target_ty: empty_type_entry(),
+        level_name: ir_empty_name(),
+        scope_name: ir_empty_name(),
+        level_id: -1,
+        scope_id: -1,
+        requirements: [ir_empty_policy_requirement_info(); 8],
+        requirement_count: 0,
+    }
+}
+
+struct IrDecisionPolicyInfo {
+    id: i64,
+    name: Name,
+    target_ty: TypeEntry,
+    requirements: [IrPolicyRequirementInfo; 8],
+    requirement_count: i64,
+}
+
+fn ir_empty_decision_policy_info() -> IrDecisionPolicyInfo {
+    IrDecisionPolicyInfo {
+        id: -1,
+        name: ir_empty_name(),
+        target_ty: empty_type_entry(),
+        requirements: [ir_empty_policy_requirement_info(); 8],
+        requirement_count: 0,
+    }
+}
+
+struct IrValidationPolicyInfo {
+    id: i64,
+    name: Name,
+    target_ty: TypeEntry,
+}
+
+fn ir_empty_validation_policy_info() -> IrValidationPolicyInfo {
+    IrValidationPolicyInfo {
+        id: -1,
+        name: ir_empty_name(),
+        target_ty: empty_type_entry(),
+    }
+}
+
+struct IrMechanisticReportInfo {
+    id: i64,
+    latent_state_divergence: f64,
+    causal_decomposition_divergence: f64,
+    intervention_response_divergence: f64,
+    parameter_role_divergence: f64,
+    structural_explanation_distance: f64,
+    aggregate_divergence: f64,
+}
+
+fn ir_empty_mechanistic_report_info() -> IrMechanisticReportInfo {
+    IrMechanisticReportInfo {
+        id: -1,
+        latent_state_divergence: 0.0,
+        causal_decomposition_divergence: 0.0,
+        intervention_response_divergence: 0.0,
+        parameter_role_divergence: 0.0,
+        structural_explanation_distance: 0.0,
+        aggregate_divergence: 0.0,
+    }
+}
+
+struct IrPosteriorWeightsInfo {
+    id: i64,
+    model_names: [Name; 16],
+    weights: [f64; 16],
+    count: i64,
+}
+
+fn ir_empty_posterior_weights_info() -> IrPosteriorWeightsInfo {
+    IrPosteriorWeightsInfo {
+        id: -1,
+        model_names: [ir_empty_name(); 16],
+        weights: [0.0; 16],
+        count: 0,
+    }
+}
+
+struct IrCounterexampleInfo {
+    id: i64,
+    model_name: Name,
+    subgroup_name: Name,
+    metric_name: Name,
+    observed_value: f64,
+    threshold_value: f64,
+    summary: Name,
+}
+
+fn ir_empty_counterexample_info() -> IrCounterexampleInfo {
+    IrCounterexampleInfo {
+        id: -1,
+        model_name: ir_empty_name(),
+        subgroup_name: ir_empty_name(),
+        metric_name: ir_empty_name(),
+        observed_value: 0.0,
+        threshold_value: 0.0,
+        summary: ir_empty_name(),
+    }
+}
+
+struct IrAuditInfo {
+    id: i64,
+    name: Name,
+    span_start: i64,
+    span_end: i64,
+    target_inner_ty: TypeEntry,
+    family_id: i64,
+    policy_id: i64,
+    metric_known: [i64; 8],
+    metric_values: [f64; 8],
+    mechanistic_report_id: i64,
+    posterior_weights_id: i64,
+    counterexample_id: i64,
+}
+
+fn ir_empty_audit_info() -> IrAuditInfo {
+    IrAuditInfo {
+        id: -1,
+        name: ir_empty_name(),
+        span_start: 0,
+        span_end: 0,
+        target_inner_ty: empty_type_entry(),
+        family_id: -1,
+        policy_id: -1,
+        metric_known: [0; 8],
+        metric_values: [0.0; 8],
+        mechanistic_report_id: -1,
+        posterior_weights_id: -1,
+        counterexample_id: -1,
+    }
+}
+
+struct IrContestWitnessInfo {
+    id: i64,
+    span_start: i64,
+    span_end: i64,
+    witness_kind: i64,
+    contest_id: i64,
+}
+
+fn ir_empty_contest_witness_info() -> IrContestWitnessInfo {
+    IrContestWitnessInfo {
+        id: -1,
+        span_start: 0,
+        span_end: 0,
+        witness_kind: -1,
+        contest_id: -1,
+    }
+}
+
+struct IrContestInfo {
+    id: i64,
+    span_start: i64,
+    span_end: i64,
+    audit_id: i64,
+    family_id: i64,
+    policy_id: i64,
+    model_names: [Name; 16],
+    model_count: i64,
+    metric_known: [i64; 8],
+    metric_values: [f64; 8],
+    mechanistic_report_id: i64,
+    posterior_weights_id: i64,
+    counterexample_id: i64,
+    provenance_bundle_id: i64,
+}
+
+fn ir_empty_contest_info() -> IrContestInfo {
+    IrContestInfo {
+        id: -1,
+        span_start: 0,
+        span_end: 0,
+        audit_id: -1,
+        family_id: -1,
+        policy_id: -1,
+        model_names: [ir_empty_name(); 16],
+        model_count: 0,
+        metric_known: [0; 8],
+        metric_values: [0.0; 8],
+        mechanistic_report_id: -1,
+        posterior_weights_id: -1,
+        counterexample_id: -1,
+        provenance_bundle_id: -1,
+    }
+}
+
+struct IrRobustProofInfo {
+    id: i64,
+    span_start: i64,
+    span_end: i64,
+    audit_id: i64,
+    contest_id: i64,
+    policy_id: i64,
+    level_id: i64,
+    scope_id: i64,
+    metric_known: [i64; 8],
+    metric_values: [f64; 8],
+}
+
+fn ir_empty_robust_proof_info() -> IrRobustProofInfo {
+    IrRobustProofInfo {
+        id: -1,
+        span_start: 0,
+        span_end: 0,
+        audit_id: -1,
+        contest_id: -1,
+        policy_id: -1,
+        level_id: -1,
+        scope_id: -1,
+        metric_known: [0; 8],
+        metric_values: [0.0; 8],
+    }
+}
+
+struct IrValidatedManifestInfo {
+    id: i64,
+    span_start: i64,
+    span_end: i64,
+    audit_id: i64,
+    robust_proof_id: i64,
+    validation_id: i64,
+    inner_ty: TypeEntry,
+}
+
+fn ir_empty_validated_manifest_info() -> IrValidatedManifestInfo {
+    IrValidatedManifestInfo {
+        id: -1,
+        span_start: 0,
+        span_end: 0,
+        audit_id: -1,
+        robust_proof_id: -1,
+        validation_id: -1,
+        inner_ty: empty_type_entry(),
+    }
+}
+
+struct IrDecisionCertificateInfo {
+    id: i64,
+    span_start: i64,
+    span_end: i64,
+    audit_id: i64,
+    robust_proof_id: i64,
+    decision_policy_id: i64,
+    inner_ty: TypeEntry,
+    metric_known: [i64; 8],
+    metric_values: [f64; 8],
+}
+
+fn ir_empty_decision_certificate_info() -> IrDecisionCertificateInfo {
+    IrDecisionCertificateInfo {
+        id: -1,
+        span_start: 0,
+        span_end: 0,
+        audit_id: -1,
+        robust_proof_id: -1,
+        decision_policy_id: -1,
+        inner_ty: empty_type_entry(),
+        metric_known: [0; 8],
+        metric_values: [0.0; 8],
+    }
+}
+
+struct IrEpistemicSection {
+    model_families: [IrModelFamilyInfo; 128],
+    model_family_count: i64,
+    policies: [IrPolicyInfo; 128],
+    policy_count: i64,
+    decision_policies: [IrDecisionPolicyInfo; 128],
+    decision_policy_count: i64,
+    validations: [IrValidationPolicyInfo; 128],
+    validation_count: i64,
+    mechanistic_reports: [IrMechanisticReportInfo; 128],
+    mechanistic_report_count: i64,
+    posterior_weights: [IrPosteriorWeightsInfo; 128],
+    posterior_weights_count: i64,
+    counterexamples: [IrCounterexampleInfo; 128],
+    counterexample_count: i64,
+    audits: [IrAuditInfo; 128],
+    audit_count: i64,
+    contests: [IrContestInfo; 256],
+    contest_count: i64,
+    contest_witnesses: [IrContestWitnessInfo; 256],
+    contest_witness_count: i64,
+    robust_proofs: [IrRobustProofInfo; 256],
+    robust_proof_count: i64,
+    decision_certificates: [IrDecisionCertificateInfo; 256],
+    decision_certificate_count: i64,
+    validated_manifests: [IrValidatedManifestInfo; 256],
+    validated_manifest_count: i64,
+}
+
+fn ir_empty_epistemic_section() -> IrEpistemicSection {
+    IrEpistemicSection {
+        model_families: [ir_empty_model_family_info(); 128],
+        model_family_count: 0,
+        policies: [ir_empty_policy_info(); 128],
+        policy_count: 0,
+        decision_policies: [ir_empty_decision_policy_info(); 128],
+        decision_policy_count: 0,
+        validations: [ir_empty_validation_policy_info(); 128],
+        validation_count: 0,
+        mechanistic_reports: [ir_empty_mechanistic_report_info(); 128],
+        mechanistic_report_count: 0,
+        posterior_weights: [ir_empty_posterior_weights_info(); 128],
+        posterior_weights_count: 0,
+        counterexamples: [ir_empty_counterexample_info(); 128],
+        counterexample_count: 0,
+        audits: [ir_empty_audit_info(); 128],
+        audit_count: 0,
+        contests: [ir_empty_contest_info(); 256],
+        contest_count: 0,
+        contest_witnesses: [ir_empty_contest_witness_info(); 256],
+        contest_witness_count: 0,
+        robust_proofs: [ir_empty_robust_proof_info(); 256],
+        robust_proof_count: 0,
+        decision_certificates: [ir_empty_decision_certificate_info(); 256],
+        decision_certificate_count: 0,
+        validated_manifests: [ir_empty_validated_manifest_info(); 256],
+        validated_manifest_count: 0,
+    }
+}
+
 struct IrModule {
     functions: [IrFunction; 1024],
     fn_count: i64,
     string_table: [Name; 4096],
     string_count: i64,
+    epistemic: IrEpistemicSection,
 }
 
 struct IrEnvBinding {
@@ -722,7 +1130,7 @@ fn ir_copy(dst: i64, src: i64) -> IrInstr {
 
 // IrContest: Contest<T> introduction — dst = subject datum, semantically tagged as contested
 // At machine level this is equivalent to IrCopy (MOV); model selection happens at proof-time.
-fn ir_contest(dst: i64, subject: i64, model_count: i64) -> IrInstr {
+fn ir_contest(dst: i64, subject: i64, model_count: i64, contest_id: i64) -> IrInstr {
     let base = ir_instr_new(IrOpcode::IrContest)
     IrInstr {
         op: base.op,
@@ -731,7 +1139,7 @@ fn ir_contest(dst: i64, subject: i64, model_count: i64) -> IrInstr {
         src2: base.src2,
         imm_i64: model_count,
         imm_f64: base.imm_f64,
-        label_id: base.label_id,
+        label_id: contest_id,
         fn_id: base.fn_id,
         field_idx: base.field_idx,
         imm_flags: base.imm_flags,
@@ -745,7 +1153,7 @@ fn ir_contest(dst: i64, subject: i64, model_count: i64) -> IrInstr {
 
 // IrProveRobust: prove_robust(contest, policy) introduction — dst = contest datum, Robust<T> tagged
 // At machine level this is equivalent to IrCopy (MOV); policy satisfaction is proof-time only.
-fn ir_prove_robust(dst: i64, contest_reg: i64, policy_reg: i64) -> IrInstr {
+fn ir_prove_robust(dst: i64, contest_reg: i64, policy_reg: i64, proof_id: i64) -> IrInstr {
     let base = ir_instr_new(IrOpcode::IrProveRobust)
     IrInstr {
         op: base.op,
@@ -754,7 +1162,7 @@ fn ir_prove_robust(dst: i64, contest_reg: i64, policy_reg: i64) -> IrInstr {
         src2: policy_reg,
         imm_i64: base.imm_i64,
         imm_f64: base.imm_f64,
-        label_id: base.label_id,
+        label_id: proof_id,
         fn_id: base.fn_id,
         field_idx: base.field_idx,
         imm_flags: base.imm_flags,
@@ -778,18 +1186,39 @@ fn ir_name_is_prove_robust(n: Name) -> bool {
     && n.buf[10] == 115 as i8 && n.buf[11] == 116 as i8
 }
 
-// IrValidated: validate_manifest(robust) introduction — dst = robust datum, Validated<T> tagged
-// At machine level this is equivalent to IrCopy (MOV); validation is fully type-level.
-fn ir_validated(dst: i64, robust_reg: i64) -> IrInstr {
+// IrValidated: validate_manifest(robust, validation) introduction — dst = robust datum, Validated<T> tagged
+// validation_reg is carried for audit/runtime metadata surfaces, but codegen remains a zero-cost copy of src1.
+fn ir_validated(dst: i64, robust_reg: i64, validation_reg: i64, manifest_id: i64) -> IrInstr {
     let base = ir_instr_new(IrOpcode::IrValidated)
     IrInstr {
         op: base.op,
         dst: dst,
         src1: robust_reg,
-        src2: base.src2,
+        src2: validation_reg,
         imm_i64: base.imm_i64,
         imm_f64: base.imm_f64,
-        label_id: base.label_id,
+        label_id: manifest_id,
+        fn_id: base.fn_id,
+        field_idx: base.field_idx,
+        imm_flags: base.imm_flags,
+        bin_op: base.bin_op,
+        un_op: base.un_op,
+        name: base.name,
+        call_args: base.call_args,
+        arg_count: base.arg_count,
+    }
+}
+
+fn ir_admit_action(dst: i64, value_reg: i64, robust_reg: i64, decision_policy_reg: i64, certificate_id: i64) -> IrInstr {
+    let base = ir_instr_new(IrOpcode::IrAdmitAction)
+    IrInstr {
+        op: base.op,
+        dst: dst,
+        src1: value_reg,
+        src2: robust_reg,
+        imm_i64: decision_policy_reg,
+        imm_f64: base.imm_f64,
+        label_id: certificate_id,
         fn_id: base.fn_id,
         field_idx: base.field_idx,
         imm_flags: base.imm_flags,
@@ -817,9 +1246,19 @@ fn ir_name_is_validate_manifest(n: Name) -> bool {
     && n.buf[16] == 116 as i8
 }
 
+fn ir_name_is_admit_action(n: Name) -> bool {
+    n.len == 12
+    && n.buf[0]  == 97  as i8 && n.buf[1]  == 100 as i8
+    && n.buf[2]  == 109 as i8 && n.buf[3]  == 105 as i8
+    && n.buf[4]  == 116 as i8 && n.buf[5]  == 95  as i8
+    && n.buf[6]  == 97  as i8 && n.buf[7]  == 99  as i8
+    && n.buf[8]  == 116 as i8 && n.buf[9]  == 105 as i8
+    && n.buf[10] == 111 as i8 && n.buf[11] == 110 as i8
+}
+
 // IrLiftKnowledge: lift_knowledge(k: Knowledge<T>) → Contest<T> bridge (H5.4)
 // At machine level this is equivalent to IrCopy (MOV); the bridge is fully type-level.
-fn ir_lift_knowledge(dst: i64, knowledge_reg: i64) -> IrInstr {
+fn ir_lift_knowledge(dst: i64, knowledge_reg: i64, contest_id: i64) -> IrInstr {
     let base = ir_instr_new(IrOpcode::IrLiftKnowledge)
     IrInstr {
         op: base.op,
@@ -828,7 +1267,7 @@ fn ir_lift_knowledge(dst: i64, knowledge_reg: i64) -> IrInstr {
         src2: base.src2,
         imm_i64: base.imm_i64,
         imm_f64: base.imm_f64,
-        label_id: base.label_id,
+        label_id: contest_id,
         fn_id: base.fn_id,
         field_idx: base.field_idx,
         imm_flags: base.imm_flags,
@@ -856,7 +1295,7 @@ fn ir_name_is_lift_knowledge(n: Name) -> bool {
 
 // IrMeasure: measure(v: T, uncertainty: f64) → Knowledge<T> source (H5.5)
 // At machine level this is equivalent to IrCopy (MOV); uncertainty is type-level only.
-fn ir_measure(dst: i64, value_reg: i64) -> IrInstr {
+fn ir_measure(dst: i64, value_reg: i64, knowledge_meta_id: i64) -> IrInstr {
     let base = ir_instr_new(IrOpcode::IrMeasure)
     IrInstr {
         op: base.op,
@@ -865,7 +1304,7 @@ fn ir_measure(dst: i64, value_reg: i64) -> IrInstr {
         src2: base.src2,
         imm_i64: base.imm_i64,
         imm_f64: base.imm_f64,
-        label_id: base.label_id,
+        label_id: knowledge_meta_id,
         fn_id: base.fn_id,
         field_idx: base.field_idx,
         imm_flags: base.imm_flags,
@@ -1131,5 +1570,6 @@ fn ir_empty_module() -> IrModule {
         fn_count: 0,
         string_table: [ir_empty_name(); 4096],
         string_count: 0,
+        epistemic: ir_empty_epistemic_section(),
     }
 }
