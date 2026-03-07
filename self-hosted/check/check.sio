@@ -13,10 +13,10 @@ const MAX_TYPE_DEPTH: i64 = 64
 const MAX_EXPR_DEPTH: i64 = 256
 const MAX_LOOP_DEPTH: i64 = 1024
 const MAX_TYPE_COMPLEXITY: i64 = 1000
-const MAX_BORROW_ENTRIES: i64 = 2048
-const MAX_SCOPE_DEPTH: i64 = 256
-const MAX_REFINEMENT_ENTRIES: i64 = 128
-const MAX_CONST_INT_BINDINGS: i64 = 4096
+const MAX_BORROW_ENTRIES: i64 = 128
+const MAX_SCOPE_DEPTH: i64 = 64
+const MAX_REFINEMENT_ENTRIES: i64 = 16
+const MAX_CONST_INT_BINDINGS: i64 = 128
 const ROBUST_LEVEL_FRAGILE: i64 = 0
 const ROBUST_LEVEL_CONDITIONAL: i64 = 1
 const ROBUST_LEVEL_STABLE: i64 = 2
@@ -27,6 +27,14 @@ const ROBUST_SCOPE_EXTRAPOLATIVE: i64 = 1
 const ROBUST_SCOPE_SUBGROUP_SPECIFIC: i64 = 2
 const ROBUST_SCOPE_IDENTIFIED_FAMILY: i64 = 3
 const ROBUST_SCOPE_TRANSPORTED_DOMAIN: i64 = 4
+const CONTEST_WITNESS_SIGN_CONSENSUS: i64 = 0
+const CONTEST_WITNESS_RELATIVE_BAND: i64 = 1
+const CONTEST_WITNESS_MAX_TAIL_RISK: i64 = 2
+const CONTEST_WITNESS_MECHANISTIC_DIVERGENCE: i64 = 3
+const CONTEST_WITNESS_IDENTIFIABILITY_FLOOR: i64 = 4
+const CONTEST_WITNESS_DISAGREEMENT: i64 = 5
+const CONTEST_WITNESS_COUNTEREXAMPLE: i64 = 6
+const CONTEST_WITNESS_POSTERIOR_WEIGHTS: i64 = 7
 
 // ============================================================
 // Checker state
@@ -46,7 +54,9 @@ struct Checker {
     validations: ValidationPolicyTable,
     contests: ContestTable,
     mechanistic_reports: MechanisticReportTable,
+    posterior_weights: PosteriorWeightsTable,
     counterexamples: CounterexampleTable,
+    contest_witnesses: ContestWitnessTable,
     robust_proofs: RobustProofTable,
     validated_manifests: ValidatedManifestTable,
     error_count: i64,
@@ -63,11 +73,11 @@ struct Checker {
     type_depth: i64,
     expr_depth: i64,
     complexity_budget: i64,
-    const_int_names: [Name; 4096],
-    const_int_values: [i64; 4096],
-    const_int_known: [i64; 4096], // 1=known constant int, 0=shadow/unknown
+    const_int_names: [Name; 128],
+    const_int_values: [i64; 128],
+    const_int_known: [i64; 128], // 1=known constant int, 0=shadow/unknown
     const_int_count: i64,
-    const_int_scope_marks: [i64; 256],
+    const_int_scope_marks: [i64; 64],
     const_int_scope_depth: i64,
 }
 
@@ -86,7 +96,9 @@ fn checker_new() -> Checker with Mut, Panic, Div {
         validations: validation_policy_table_new(),
         contests: contest_table_new(),
         mechanistic_reports: mechanistic_report_table_new(),
+        posterior_weights: posterior_weights_table_new(),
         counterexamples: counterexample_table_new(),
+        contest_witnesses: contest_witness_table_new(),
         robust_proofs: robust_proof_table_new(),
         validated_manifests: validated_manifest_table_new(),
         error_count: 0,
@@ -103,11 +115,11 @@ fn checker_new() -> Checker with Mut, Panic, Div {
         type_depth: 0,
         expr_depth: 0,
         complexity_budget: 0,
-        const_int_names: [Name { buf: [0; 128], len: 0 }; 4096],
-        const_int_values: [0; 4096],
-        const_int_known: [0; 4096],
+        const_int_names: [Name { buf: [0; 128], len: 0 }; 128],
+        const_int_values: [0; 128],
+        const_int_known: [0; 128],
         const_int_count: 0,
-        const_int_scope_marks: [0; 256],
+        const_int_scope_marks: [0; 64],
         const_int_scope_depth: 0,
     }
 }
@@ -381,14 +393,8 @@ fn policy_metric_id_from_name(name: Name) -> i64 with Panic, Div {
         && name.buf[21] == 101 as i8 {
         return CONTEST_METRIC_MECHANISTIC_DIVERGENCE
     }
-    if name.len == 20
-        && name.buf[0] == 105 as i8 && name.buf[1] == 100 as i8 && name.buf[2] == 101 as i8
-        && name.buf[3] == 110 as i8 && name.buf[4] == 116 as i8 && name.buf[5] == 105 as i8
-        && name.buf[6] == 102 as i8 && name.buf[7] == 105 as i8 && name.buf[8] == 97 as i8
-        && name.buf[9] == 98 as i8 && name.buf[10] == 105 as i8 && name.buf[11] == 108 as i8
-        && name.buf[12] == 105 as i8 && name.buf[13] == 116 as i8 && name.buf[14] == 121 as i8
-        && name.buf[15] == 95 as i8 && name.buf[16] == 102 as i8 && name.buf[17] == 108 as i8
-        && name.buf[18] == 111 as i8 && name.buf[19] == 111 as i8 && name.buf[20] == 114 as i8 {
+    if name_matches_str21(name,
+        105, 100, 101, 110, 116, 105, 102, 105, 97, 98, 105, 108, 105, 116, 121, 95, 102, 108, 111, 111, 114) {
         return CONTEST_METRIC_IDENTIFIABILITY_FLOOR
     }
     -1
@@ -754,6 +760,144 @@ impl Checker {
         c
     }
 
+    fn report_contest_witness_requires_contest(self, span: Span, builtin_name: Name, got: TypeEntry) -> Checker with Mut, IO, Panic, Div, Alloc {
+        var c = self
+        c.error_count = c.error_count + 1
+        c.had_error = true
+        print("error[E079]")
+        if span.start > 0 || span.end > 0 {
+            print(" at ")
+            print_int(span.start)
+            print("..")
+            print_int(span.end)
+        }
+        print(": contest witness builtin requires Contest<T, Family, Policy>\n")
+        print("   |\n   = builtin ")
+        print_name_value(builtin_name)
+        print(" expects a contested value, found ")
+        print_type_name(got)
+        print("\n   = help: call this builtin on a Contest<T, Family, Policy> value with realized contest metadata\n")
+        c
+    }
+
+    fn report_contest_witness_metadata_incomplete(self, span: Span, builtin_name: Name) -> Checker with Mut, IO, Panic, Div {
+        var c = self
+        c.error_count = c.error_count + 1
+        c.had_error = true
+        print("error[E080]")
+        if span.start > 0 || span.end > 0 {
+            print(" at ")
+            print_int(span.start)
+            print("..")
+            print_int(span.end)
+        }
+        print(": contest metadata is incomplete for witness projection\n")
+        print("   |\n   = builtin ")
+        print_name_value(builtin_name)
+        print(" requires a realized contest id, model family, and attached policy metadata\n")
+        print("   = help: bind the contest through an explicit Contest<T, Family, Policy> annotation before projecting witnesses\n")
+        c
+    }
+
+    fn report_contest_metric_unavailable(self, span: Span, metric_id: i64, contest_id: i64) -> Checker with Mut, IO, Panic, Div {
+        var c = self
+        c.error_count = c.error_count + 1
+        c.had_error = true
+        print("error[E081]")
+        if span.start > 0 || span.end > 0 {
+            print(" at ")
+            print_int(span.start)
+            print("..")
+            print_int(span.end)
+        }
+        print(": requested contest metric is unavailable\n")
+        print("   |\n   = metric ")
+        print_contest_metric_name(metric_id)
+        print(" is not attached to this contest witness site\n")
+        if contest_id >= 0 && contest_id < self.contests.count {
+            let contest_info = self.contests.get(contest_id)
+            if contest_info.model_count > 0 {
+                print("   = model family ")
+                print_contest_model_family(contest_info)
+                print("\n")
+            }
+        }
+        print("   = help: seed or compute the required contest diagnostic before projecting it\n")
+        c
+    }
+
+    fn report_mechanistic_report_unavailable(self, span: Span, contest_id: i64) -> Checker with Mut, IO, Panic, Div {
+        var c = self
+        c.error_count = c.error_count + 1
+        c.had_error = true
+        print("error[E082]")
+        if span.start > 0 || span.end > 0 {
+            print(" at ")
+            print_int(span.start)
+            print("..")
+            print_int(span.end)
+        }
+        print(": mechanistic report is unavailable for this contest\n")
+        if contest_id >= 0 && contest_id < self.contests.count {
+            let contest_info = self.contests.get(contest_id)
+            if contest_info.model_count > 0 {
+                print("   |\n   = model family ")
+                print_contest_model_family(contest_info)
+                print("\n")
+            }
+        }
+        print("   = help: attach latent-state, causal-decomposition, intervention-response, parameter-role, and structural explanation diagnostics before projecting disagreement\n")
+        c
+    }
+
+    fn report_counterexample_unavailable(self, span: Span, contest_id: i64) -> Checker with Mut, IO, Panic, Div {
+        var c = self
+        c.error_count = c.error_count + 1
+        c.had_error = true
+        print("error[E083]")
+        if span.start > 0 || span.end > 0 {
+            print(" at ")
+            print_int(span.start)
+            print("..")
+            print_int(span.end)
+        }
+        print(": counterexample witness is unavailable for this contest\n")
+        if contest_id >= 0 && contest_id < self.contests.count {
+            let contest_info = self.contests.get(contest_id)
+            if contest_info.model_count > 0 {
+                print("   |\n   = model family ")
+                print_contest_model_family(contest_info)
+                print("\n")
+            }
+        }
+        print("   = help: attach a concrete counterexample record before calling counterexample(contest_value)\n")
+        c
+    }
+
+    fn report_posterior_weights_unavailable(self, span: Span, contest_id: i64) -> Checker with Mut, IO, Panic, Div {
+        var c = self
+        c.error_count = c.error_count + 1
+        c.had_error = true
+        print("error[E084]")
+        if span.start > 0 || span.end > 0 {
+            print(" at ")
+            print_int(span.start)
+            print("..")
+            print_int(span.end)
+        }
+        print(": posterior weight witness is unavailable for this contest\n")
+        if contest_id >= 0 && contest_id < self.contests.count {
+            let contest_info = self.contests.get(contest_id)
+            if contest_info.model_count > 0 {
+                print("   |\n   = model family ")
+                print_contest_model_family(contest_info)
+                print("\n")
+            }
+        }
+        print("   = help: attach posterior weights before calling posterior_weights(contest_value)\n")
+        c
+    }
+
 
 
     fn report_mismatch(self, span: Span, code: i64, expected: TypeEntry, got: TypeEntry) -> Checker with Mut, IO, Panic, Div, Alloc {
@@ -1010,6 +1154,12 @@ fn print_error_message(code: i64) with IO, Mut, Panic, Div {
     else if code == 58 { print("prove_robust(...) requires Contest<T> and Policy<T> with the same inner type") }
     else if code == 59 { print("contest expressions require an explicit Contest<T> annotation") }
     else if code == 63 { print("epistemic wrapper metadata is malformed or unsupported in this compiler slice") }
+    else if code == 79 { print("contest witness builtin requires Contest<T, Family, Policy>") }
+    else if code == 80 { print("contest metadata is incomplete for witness projection") }
+    else if code == 81 { print("requested contest metric is unavailable") }
+    else if code == 82 { print("mechanistic report is unavailable for this contest") }
+    else if code == 83 { print("counterexample witness is unavailable for this contest") }
+    else if code == 84 { print("posterior weight witness is unavailable for this contest") }
     else { print("unknown error") }
 }
 
@@ -1184,6 +1334,24 @@ fn print_error_help(code: i64) with IO, Mut, Panic, Div {
     }
     else if code == 63 {
         print("   |\n   = help: use Model<I, O>, Contest<T, Family, Policy>, Robust<T, Level, Scope>, or the legacy single-argument migration forms with the correct arity\n")
+    }
+    else if code == 79 {
+        print("   |\n   = help: pass a Contest<T, Family, Policy> value instead of a plain datum or downstream proof token\n")
+    }
+    else if code == 80 {
+        print("   |\n   = help: ensure the contest was realized through an explicit Contest<T, Family, Policy> annotation before calling witness builtins\n")
+    }
+    else if code == 81 {
+        print("   |\n   = help: attach or compute the missing contest metric before projecting it\n")
+    }
+    else if code == 82 {
+        print("   |\n   = help: attach a mechanistic report before calling disagreement(contest_value) or mechanistic_divergence(contest_value)\n")
+    }
+    else if code == 83 {
+        print("   |\n   = help: attach a counterexample record before calling counterexample(contest_value)\n")
+    }
+    else if code == 84 {
+        print("   |\n   = help: attach posterior weights before calling posterior_weights(contest_value)\n")
     }
     else {
         // No help available for unknown errors
@@ -1362,6 +1530,24 @@ fn print_error_note(code: i64) with IO, Mut, Panic, Div {
     else if code == 63 {
         print("   = note: the self-hosted compiler now tracks selected Contest/Robust metadata, but malformed wrapper arity and unknown level/scope tags still fail closed\n")
     }
+    else if code == 79 {
+        print("   = note: witness builtins observe disagreement without collapsing Contest<T, ...> into a plain value\n")
+    }
+    else if code == 80 {
+        print("   = note: shorthand Contest<T> remains parser-compatible, but witness projections require realized contest metadata\n")
+    }
+    else if code == 81 {
+        print("   = note: scalar witness projections are proof-time reads from contest diagnostics, not runtime estimators\n")
+    }
+    else if code == 82 {
+        print("   = note: mechanistic disagreement is distinct from predictive spread and must be attached explicitly\n")
+    }
+    else if code == 83 {
+        print("   = note: counterexample witnesses are explicit failure records, not synthesized examples\n")
+    }
+    else if code == 84 {
+        print("   = note: posterior weights remain explicit contest metadata and are never inferred by silent averaging\n")
+    }
     else {
         // No note available for unknown errors
     }
@@ -1423,6 +1609,115 @@ fn call_expr_is_builtin_lift_knowledge(opt: Option<Box<Expr>>) -> bool with Mut,
         }
         None => false
     }
+}
+
+fn contest_witness_kind_from_name(name: Name) -> i64 with Panic, Div {
+    if name_matches_str14(name, 115, 105, 103, 110, 95, 99, 111, 110, 115, 101, 110, 115, 117, 115) {
+        return CONTEST_WITNESS_SIGN_CONSENSUS
+    }
+    if name_matches_str13(name, 114, 101, 108, 97, 116, 105, 118, 101, 95, 98, 97, 110, 100) {
+        return CONTEST_WITNESS_RELATIVE_BAND
+    }
+    if name_matches_str13(name, 109, 97, 120, 95, 116, 97, 105, 108, 95, 114, 105, 115, 107) {
+        return CONTEST_WITNESS_MAX_TAIL_RISK
+    }
+    if name_matches_str22(name, 109, 101, 99, 104, 97, 110, 105, 115, 116, 105, 99, 95, 100, 105, 118, 101, 114, 103, 101, 110, 99, 101) {
+        return CONTEST_WITNESS_MECHANISTIC_DIVERGENCE
+    }
+    if name_matches_str21(name, 105, 100, 101, 110, 116, 105, 102, 105, 97, 98, 105, 108, 105, 116, 121, 95, 102, 108, 111, 111, 114) {
+        return CONTEST_WITNESS_IDENTIFIABILITY_FLOOR
+    }
+    if name_matches_str12(name, 100, 105, 115, 97, 103, 114, 101, 101, 109, 101, 110, 116) {
+        return CONTEST_WITNESS_DISAGREEMENT
+    }
+    if name_matches_str14(name, 99, 111, 117, 110, 116, 101, 114, 101, 120, 97, 109, 112, 108, 101) {
+        return CONTEST_WITNESS_COUNTEREXAMPLE
+    }
+    if name_matches_str17(name, 112, 111, 115, 116, 101, 114, 105, 111, 114, 95, 119, 101, 105, 103, 104, 116, 115) {
+        return CONTEST_WITNESS_POSTERIOR_WEIGHTS
+    }
+    -1
+}
+
+fn call_expr_contest_witness_kind(opt: Option<Box<Expr>>) -> i64 with Mut, Panic, Div, Alloc, IO {
+    match opt {
+        Some(expr) => {
+            if (*expr).kind != ExprKind::ExprIdent {
+                return -1
+            }
+            contest_witness_kind_from_name((*expr).name)
+        }
+        None => -1
+    }
+}
+
+fn contest_disagreement_type_name() -> Name with Mut, Panic, Div {
+    var n = Name { buf: [0; 128], len: 19 }
+    n.buf[0] = 67   // C
+    n.buf[1] = 111  // o
+    n.buf[2] = 110  // n
+    n.buf[3] = 116  // t
+    n.buf[4] = 101  // e
+    n.buf[5] = 115  // s
+    n.buf[6] = 116  // t
+    n.buf[7] = 68   // D
+    n.buf[8] = 105  // i
+    n.buf[9] = 115  // s
+    n.buf[10] = 97  // a
+    n.buf[11] = 103 // g
+    n.buf[12] = 114 // r
+    n.buf[13] = 101 // e
+    n.buf[14] = 101 // e
+    n.buf[15] = 109 // m
+    n.buf[16] = 101 // e
+    n.buf[17] = 110 // n
+    n.buf[18] = 116 // t
+    n
+}
+
+fn contest_counterexample_type_name() -> Name with Mut, Panic, Div {
+    var n = Name { buf: [0; 128], len: 21 }
+    n.buf[0] = 67
+    n.buf[1] = 111
+    n.buf[2] = 110
+    n.buf[3] = 116
+    n.buf[4] = 101
+    n.buf[5] = 115
+    n.buf[6] = 116
+    n.buf[7] = 67
+    n.buf[8] = 111
+    n.buf[9] = 117
+    n.buf[10] = 110
+    n.buf[11] = 116
+    n.buf[12] = 101
+    n.buf[13] = 114
+    n.buf[14] = 101
+    n.buf[15] = 120
+    n.buf[16] = 97
+    n.buf[17] = 109
+    n.buf[18] = 112
+    n.buf[19] = 108
+    n.buf[20] = 101
+    n
+}
+
+fn contest_weights_type_name() -> Name with Mut, Panic, Div {
+    var n = Name { buf: [0; 128], len: 14 }
+    n.buf[0] = 67
+    n.buf[1] = 111
+    n.buf[2] = 110
+    n.buf[3] = 116
+    n.buf[4] = 101
+    n.buf[5] = 115
+    n.buf[6] = 116
+    n.buf[7] = 87
+    n.buf[8] = 101
+    n.buf[9] = 105
+    n.buf[10] = 103
+    n.buf[11] = 104
+    n.buf[12] = 116
+    n.buf[13] = 115
+    n
 }
 
 fn expr_list_head(opt: Option<Box<ExprList>>) -> Option<Box<Expr>> with Alloc {
@@ -1544,6 +1839,48 @@ fn contest_info_attach_family_id(info: ContestInfo, family_id: i64) -> ContestIn
     var next = info
     next.family_id = family_id
     next
+}
+
+fn contest_witness_metric_id(kind: i64) -> i64 {
+    if kind == CONTEST_WITNESS_SIGN_CONSENSUS { CONTEST_METRIC_SIGN_CONSENSUS }
+    else if kind == CONTEST_WITNESS_RELATIVE_BAND { CONTEST_METRIC_RELATIVE_BAND }
+    else if kind == CONTEST_WITNESS_MAX_TAIL_RISK { CONTEST_METRIC_MAX_TAIL_RISK }
+    else if kind == CONTEST_WITNESS_MECHANISTIC_DIVERGENCE { CONTEST_METRIC_MECHANISTIC_DIVERGENCE }
+    else if kind == CONTEST_WITNESS_IDENTIFIABILITY_FLOOR { CONTEST_METRIC_IDENTIFIABILITY_FLOOR }
+    else { -1 }
+}
+
+fn contest_witness_info_new(span: Span, witness_kind: i64, contest_id: i64) -> ContestWitnessInfo {
+    ContestWitnessInfo {
+        span_start: span.start,
+        span_end: span.end,
+        witness_kind: witness_kind,
+        contest_id: contest_id,
+    }
+}
+
+fn contest_witness_result_type(kind: i64) -> TypeEntry with Mut, Panic, Div {
+    if kind == CONTEST_WITNESS_DISAGREEMENT {
+        return ty_named(contest_disagreement_type_name())
+    }
+    if kind == CONTEST_WITNESS_COUNTEREXAMPLE {
+        return ty_named(contest_counterexample_type_name())
+    }
+    if kind == CONTEST_WITNESS_POSTERIOR_WEIGHTS {
+        return ty_named(contest_weights_type_name())
+    }
+    ty_f64()
+}
+
+fn contest_witness_requires_metric(kind: i64) -> bool {
+    kind == CONTEST_WITNESS_SIGN_CONSENSUS
+    || kind == CONTEST_WITNESS_RELATIVE_BAND
+    || kind == CONTEST_WITNESS_MAX_TAIL_RISK
+    || kind == CONTEST_WITNESS_IDENTIFIABILITY_FLOOR
+}
+
+fn contest_witness_requires_mechanistic(kind: i64) -> bool {
+    kind == CONTEST_WITNESS_MECHANISTIC_DIVERGENCE || kind == CONTEST_WITNESS_DISAGREEMENT
 }
 
 fn robust_proof_info_from_contest(contest_id: i64, contest_info: ContestInfo, policy_info: PolicyInfo, span: Span) -> RobustProofInfo with Mut, Panic, Div {
@@ -3113,6 +3450,7 @@ impl Checker {
             ExprHandle => c.check_handle_expr(e)
             ExprClosure => c.check_closure_expr(e)
             ExprContest => c.check_contest_expr_no_annotation(e)
+            ExprForIn => c.check_for_in_expr(e)
             ExprError => (c, ty_error())
         }
         (result.0.exit_expr_depth(), result.1)
@@ -3650,6 +3988,10 @@ impl Checker {
         if call_expr_is_builtin_measure(e.left) {
             return self.check_measure_expr(e)
         }
+        let witness_kind = call_expr_contest_witness_kind(e.left)
+        if witness_kind >= 0 {
+            return self.check_contest_witness_expr(e, witness_kind)
+        }
         let callee_pair = self.check_opt_expr(e.left)
         var c = callee_pair.0
         let callee_ty = callee_pair.1
@@ -3716,10 +4058,13 @@ impl Checker {
                         }
                     }
                 }
+                c.contests.entries[expected_contest_ty.epistemic_meta_id as usize] = info
+                (c, ty_contest(knowledge_inner(expected_contest_ty), expected_contest_ty.epistemic_meta_id))
+            } else {
+                let add_result = c.contests.add(info)
+                c.contests = add_result.0
+                (c, ty_contest(knowledge_inner(expected_contest_ty), add_result.1))
             }
-            let add_result = c.contests.add(info)
-            c.contests = add_result.0
-            (c, ty_contest(knowledge_inner(expected_contest_ty), add_result.1))
         }
     }
 
@@ -3841,6 +4186,96 @@ impl Checker {
         (c, ty_validated_with_policy(inner_ty, 0.0 - 1.0, add_result.1))
     }
 
+    fn check_contest_witness_expr(self, e: Expr, witness_kind: i64) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+        let builtin_name = match e.left {
+            Some(callee) => if (*callee).kind == ExprKind::ExprIdent { (*callee).name } else { empty_name() }
+            None => empty_name()
+        }
+        let first_arg = expr_list_head(e.args)
+        let contest_pair = self.check_opt_expr(first_arg)
+        var c = contest_pair.0
+        let contest_ty = contest_pair.1
+        if contest_ty.kind != TypeKind::TyContest {
+            c = c.report_contest_witness_requires_contest(e.span, builtin_name, contest_ty)
+            return (c, ty_error())
+        }
+        if contest_ty.epistemic_meta_id < 0 || contest_ty.epistemic_meta_id >= c.contests.count {
+            c = c.report_contest_witness_metadata_incomplete(e.span, builtin_name)
+            return (c, ty_error())
+        }
+        let contest_id = contest_ty.epistemic_meta_id
+        let contest_info = c.contests.get(contest_id)
+        if contest_info.family_id < 0 || contest_info.policy_id < 0 {
+            c = c.report_contest_witness_metadata_incomplete(e.span, builtin_name)
+            return (c, ty_error())
+        }
+
+        if contest_witness_requires_metric(witness_kind) {
+            let metric_id = contest_witness_metric_id(witness_kind)
+            let metric_pair = contest_info_get_metric(contest_info, metric_id)
+            if !metric_pair.0 {
+                c = c.report_contest_metric_unavailable(e.span, metric_id, contest_id)
+                return (c, ty_error())
+            }
+        }
+
+        if contest_witness_requires_mechanistic(witness_kind) {
+            if contest_info.mechanistic_report_id < 0 || contest_info.mechanistic_report_id >= c.mechanistic_reports.count {
+                c = c.report_mechanistic_report_unavailable(e.span, contest_id)
+                return (c, ty_error())
+            }
+        }
+
+        if witness_kind == CONTEST_WITNESS_DISAGREEMENT {
+            let sign_pair = contest_info_get_metric(contest_info, CONTEST_METRIC_SIGN_CONSENSUS)
+            if !sign_pair.0 {
+                c = c.report_contest_metric_unavailable(e.span, CONTEST_METRIC_SIGN_CONSENSUS, contest_id)
+                return (c, ty_error())
+            }
+            let band_pair = contest_info_get_metric(contest_info, CONTEST_METRIC_RELATIVE_BAND)
+            if !band_pair.0 {
+                c = c.report_contest_metric_unavailable(e.span, CONTEST_METRIC_RELATIVE_BAND, contest_id)
+                return (c, ty_error())
+            }
+            let tail_pair = contest_info_get_metric(contest_info, CONTEST_METRIC_MAX_TAIL_RISK)
+            if !tail_pair.0 {
+                c = c.report_contest_metric_unavailable(e.span, CONTEST_METRIC_MAX_TAIL_RISK, contest_id)
+                return (c, ty_error())
+            }
+            let ident_pair = contest_info_get_metric(contest_info, CONTEST_METRIC_IDENTIFIABILITY_FLOOR)
+            if !ident_pair.0 {
+                c = c.report_contest_metric_unavailable(e.span, CONTEST_METRIC_IDENTIFIABILITY_FLOOR, contest_id)
+                return (c, ty_error())
+            }
+            if contest_info.counterexample_id < 0 || contest_info.counterexample_id >= c.counterexamples.count {
+                c = c.report_counterexample_unavailable(e.span, contest_id)
+                return (c, ty_error())
+            }
+            if contest_info.posterior_weights_id < 0 || contest_info.posterior_weights_id >= c.posterior_weights.count {
+                c = c.report_posterior_weights_unavailable(e.span, contest_id)
+                return (c, ty_error())
+            }
+        }
+
+        if witness_kind == CONTEST_WITNESS_COUNTEREXAMPLE {
+            if contest_info.counterexample_id < 0 || contest_info.counterexample_id >= c.counterexamples.count {
+                c = c.report_counterexample_unavailable(e.span, contest_id)
+                return (c, ty_error())
+            }
+        }
+
+        if witness_kind == CONTEST_WITNESS_POSTERIOR_WEIGHTS {
+            if contest_info.posterior_weights_id < 0 || contest_info.posterior_weights_id >= c.posterior_weights.count {
+                c = c.report_posterior_weights_unavailable(e.span, contest_id)
+                return (c, ty_error())
+            }
+        }
+
+        let add_result = c.contest_witnesses.add(contest_witness_info_new(e.span, witness_kind, contest_id))
+        c.contest_witnesses = add_result.0
+        (c, contest_witness_result_type(witness_kind))
+    }
+
     fn check_lift_knowledge_expr(self, e: Expr) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
         // lift_knowledge(k: Knowledge<T>) -> Contest<T>
         // Type-check first arg; must be Knowledge<T>; produce Contest<T>
@@ -3874,9 +4309,8 @@ impl Checker {
         if expected_contest_ty.epistemic_meta_id >= 0 && expected_contest_ty.epistemic_meta_id < c.contests.count {
             var info = c.contests.get(expected_contest_ty.epistemic_meta_id)
             info = contest_info_attach_span(info, e.span)
-            let add_result = c.contests.add(info)
-            c.contests = add_result.0
-            return (c, ty_contest(expected_inner, add_result.1))
+            c.contests.entries[expected_contest_ty.epistemic_meta_id as usize] = info
+            return (c, ty_contest(expected_inner, expected_contest_ty.epistemic_meta_id))
         }
         (c, expected_contest_ty)
     }
@@ -4333,6 +4767,26 @@ impl Checker {
         (c, ty_never())
     }
 
+    fn check_for_in_expr(self, e: Expr) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+        // Check iterator expression (range)
+        let iter_pair = self.check_opt_expr(e.left)
+        var c = iter_pair.0
+        // Push scope for loop variable
+        c.env = c.env.push_scope()
+        c.borrows = c.borrows.push_scope()
+        c = c.push_const_scope()
+        c.env = c.env.bind(e.name, ty_i64(), false)
+        c.loop_depth = c.loop_depth + 1
+        c.borrows = c.borrows.release_exclusive_borrows()
+        let body_pair = c.check_opt_block(e.block)
+        c = body_pair.0
+        c.loop_depth = c.loop_depth - 1
+        c = c.pop_const_scope()
+        c.borrows = c.borrows.pop_scope()
+        c.env = c.env.pop_scope()
+        (c, ty_unit())
+    }
+
     fn check_while_expr(self, e: Expr) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
         let cond_pair = self.check_opt_expr(e.left)
         var c = cond_pair.0
@@ -4424,7 +4878,7 @@ impl Checker {
                 c = pair.0
                 let init_ty = pair.1
                 if !types_compatible(init_ty, field_ty) {
-                    c = c.report_mismatch((*list).head.span, 16, field_ty, init_ty)
+                    c = c.report_mismatch((*list).head.value.span, 16, field_ty, init_ty)
                 }
                 c.check_struct_field_inits_with_type((*list).tail, si)
             }
@@ -4498,23 +4952,42 @@ impl Checker {
     }
 
     fn check_tuple_elems(self, opt: Option<Box<ExprList>>) -> (Checker, Option<Box<TypeEntryList>>) with Mut, Panic, Div, Alloc, IO {
-        match opt {
-            Some(list) => {
-                let pair = self.check_expr((*list).head)
-                var c = pair.0
-                let head_ty = pair.1
-                let rest = c.check_tuple_elems((*list).tail)
-                c = rest.0
-                let head_entry = TypeEntryList { head: head_ty, tail: None }
-                match rest.1 {
-                    Some(rest_list) => {
-                        (c, Some(Box::new(TypeEntryList { head: head_ty, tail: Some(rest_list) })))
+        // Iterative: collect element types into array, then build list in reverse.
+        // Avoids recursive Checker copies that overflow the SOBC VM stack.
+        var c = self
+        var types: [TypeEntry; 16] = [empty_type_entry(); 16]
+        var count: i64 = 0
+        var cur = opt
+        var done = false
+        while !done {
+            match cur {
+                Some(list) => {
+                    if count < 16 {
+                        let pair = c.check_expr((*list).head)
+                        c = pair.0
+                        types[count] = pair.1
+                        count = count + 1
+                        cur = (*list).tail
+                    } else {
+                        done = true
                     }
-                    None => (c, Some(Box::new(head_entry)))
+                }
+                None => {
+                    done = true
                 }
             }
-            None => (self, None)
         }
+        if count == 0 {
+            return (c, None)
+        }
+        // Build TypeEntryList in reverse order (last element first)
+        var result: Option<Box<TypeEntryList>> = None
+        var j = count - 1
+        while j >= 0 {
+            result = Some(Box::new(TypeEntryList { head: types[j], tail: result }))
+            j = j - 1
+        }
+        (c, result)
     }
 
     // --------------------------------------------------------
