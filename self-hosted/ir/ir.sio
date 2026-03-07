@@ -21,6 +21,8 @@ let IR_MAX_EPI_MODEL_FAMILIES: i64 = 128
 let IR_MAX_EPI_POLICIES: i64 = 128
 let IR_MAX_EPI_DECISION_POLICIES: i64 = 128
 let IR_MAX_EPI_DEFERRAL_POLICIES: i64 = 128
+let IR_MAX_EPI_ACQUISITION_POLICIES: i64 = 128
+let IR_MAX_EPI_RECOURSE_POLICIES: i64 = 128
 let IR_MAX_EPI_VALIDATIONS: i64 = 128
 let IR_MAX_EPI_CONTESTS: i64 = 256
 let IR_MAX_EPI_MECHANISTIC_REPORTS: i64 = 128
@@ -32,6 +34,10 @@ let IR_MAX_EPI_ROBUST_PROOFS: i64 = 256
 let IR_MAX_EPI_DECISION_CERTIFICATES: i64 = 256
 let IR_MAX_EPI_DEFERRED_CERTIFICATES: i64 = 256
 let IR_MAX_EPI_DEFERRED_REASON_WITNESSES: i64 = 256
+let IR_MAX_EPI_ACQUISITION_PLANS: i64 = 256
+let IR_MAX_EPI_ACQUISITION_REASON_WITNESSES: i64 = 256
+let IR_MAX_EPI_RECOURSE_PLANS: i64 = 256
+let IR_MAX_EPI_RECOURSE_REASON_WITNESSES: i64 = 256
 let IR_MAX_EPI_VALIDATED_MANIFESTS: i64 = 256
 
 enum IrOpcode {
@@ -224,6 +230,20 @@ enum IrOpcode {
     //   label_id = deferred certificate id
     //   Codegen: MOV dst, src1 (zero-cost; deferral is discharged at type-check)
     IrDeferAction,         // defer_action(value, evidence, deferral_policy): Deferred<T> terminal
+    // Resolution runtime — plan_acquisition(value, deferred, policy) terminal gate
+    //   dst = destination register (holds the planned datum)
+    //   src1 = value register
+    //   src2 = deferred register
+    //   imm_i64 = acquisition policy register (metadata only)
+    //   label_id = acquisition plan id
+    IrPlanAcquisition,
+    // Resolution runtime — plan_recourse(value, deferred, policy) terminal gate
+    //   dst = destination register (holds the planned datum)
+    //   src1 = value register
+    //   src2 = deferred register
+    //   imm_i64 = recourse policy register (metadata only)
+    //   label_id = recourse plan id
+    IrPlanRecourse,
 
     // Epistemic bridge — lift_knowledge(k: Knowledge<T>) → Contest<T> (H5.4)
     //   dst  = destination register (holds the lifted datum)
@@ -285,6 +305,9 @@ struct IrPolicyRequirementInfo {
     metric_name: Name,
     op: CompareOp,
     threshold: f64,
+    threshold_kind: i64,
+    bool_threshold: bool,
+    name_threshold: Name,
 }
 
 fn ir_empty_policy_requirement_info() -> IrPolicyRequirementInfo {
@@ -293,6 +316,9 @@ fn ir_empty_policy_requirement_info() -> IrPolicyRequirementInfo {
         metric_name: ir_empty_name(),
         op: CompareOp::CmpEq,
         threshold: 0.0,
+        threshold_kind: 0,
+        bool_threshold: false,
+        name_threshold: ir_empty_name(),
     }
 }
 
@@ -374,6 +400,50 @@ fn ir_empty_deferral_policy_info() -> IrDeferralPolicyInfo {
         id: -1,
         name: ir_empty_name(),
         target_ty: empty_type_entry(),
+        route_name: ir_empty_name(),
+        requirements: [ir_empty_policy_requirement_info(); 8],
+        requirement_count: 0,
+    }
+}
+
+struct IrAcquisitionPolicyInfo {
+    id: i64,
+    name: Name,
+    target_ty: TypeEntry,
+    objective_name: Name,
+    route_name: Name,
+    requirements: [IrPolicyRequirementInfo; 8],
+    requirement_count: i64,
+}
+
+fn ir_empty_acquisition_policy_info() -> IrAcquisitionPolicyInfo {
+    IrAcquisitionPolicyInfo {
+        id: -1,
+        name: ir_empty_name(),
+        target_ty: empty_type_entry(),
+        objective_name: ir_empty_name(),
+        route_name: ir_empty_name(),
+        requirements: [ir_empty_policy_requirement_info(); 8],
+        requirement_count: 0,
+    }
+}
+
+struct IrRecoursePolicyInfo {
+    id: i64,
+    name: Name,
+    target_ty: TypeEntry,
+    strategy_name: Name,
+    route_name: Name,
+    requirements: [IrPolicyRequirementInfo; 8],
+    requirement_count: i64,
+}
+
+fn ir_empty_recourse_policy_info() -> IrRecoursePolicyInfo {
+    IrRecoursePolicyInfo {
+        id: -1,
+        name: ir_empty_name(),
+        target_ty: empty_type_entry(),
+        strategy_name: ir_empty_name(),
         route_name: ir_empty_name(),
         requirements: [ir_empty_policy_requirement_info(); 8],
         requirement_count: 0,
@@ -664,6 +734,102 @@ fn ir_empty_deferred_reason_witness_info() -> IrDeferredReasonWitnessInfo {
     }
 }
 
+struct IrAcquisitionPlanInfo {
+    id: i64,
+    span_start: i64,
+    span_end: i64,
+    deferred_certificate_id: i64,
+    acquisition_policy_id: i64,
+    audit_id: i64,
+    contest_id: i64,
+    objective_name: Name,
+    route_name: Name,
+    inner_ty: TypeEntry,
+    metric_known: [i64; 8],
+    metric_values: [f64; 8],
+}
+
+fn ir_empty_acquisition_plan_info() -> IrAcquisitionPlanInfo {
+    IrAcquisitionPlanInfo {
+        id: -1,
+        span_start: 0,
+        span_end: 0,
+        deferred_certificate_id: -1,
+        acquisition_policy_id: -1,
+        audit_id: -1,
+        contest_id: -1,
+        objective_name: ir_empty_name(),
+        route_name: ir_empty_name(),
+        inner_ty: empty_type_entry(),
+        metric_known: [0; 8],
+        metric_values: [0.0; 8],
+    }
+}
+
+struct IrAcquisitionReasonWitnessInfo {
+    id: i64,
+    span_start: i64,
+    span_end: i64,
+    acquisition_plan_id: i64,
+}
+
+fn ir_empty_acquisition_reason_witness_info() -> IrAcquisitionReasonWitnessInfo {
+    IrAcquisitionReasonWitnessInfo {
+        id: -1,
+        span_start: 0,
+        span_end: 0,
+        acquisition_plan_id: -1,
+    }
+}
+
+struct IrRecoursePlanInfo {
+    id: i64,
+    span_start: i64,
+    span_end: i64,
+    deferred_certificate_id: i64,
+    recourse_policy_id: i64,
+    audit_id: i64,
+    contest_id: i64,
+    strategy_name: Name,
+    route_name: Name,
+    inner_ty: TypeEntry,
+    metric_known: [i64; 8],
+    metric_values: [f64; 8],
+}
+
+fn ir_empty_recourse_plan_info() -> IrRecoursePlanInfo {
+    IrRecoursePlanInfo {
+        id: -1,
+        span_start: 0,
+        span_end: 0,
+        deferred_certificate_id: -1,
+        recourse_policy_id: -1,
+        audit_id: -1,
+        contest_id: -1,
+        strategy_name: ir_empty_name(),
+        route_name: ir_empty_name(),
+        inner_ty: empty_type_entry(),
+        metric_known: [0; 8],
+        metric_values: [0.0; 8],
+    }
+}
+
+struct IrRecourseReasonWitnessInfo {
+    id: i64,
+    span_start: i64,
+    span_end: i64,
+    recourse_plan_id: i64,
+}
+
+fn ir_empty_recourse_reason_witness_info() -> IrRecourseReasonWitnessInfo {
+    IrRecourseReasonWitnessInfo {
+        id: -1,
+        span_start: 0,
+        span_end: 0,
+        recourse_plan_id: -1,
+    }
+}
+
 struct IrEpistemicSection {
     model_families: [IrModelFamilyInfo; 128],
     model_family_count: i64,
@@ -673,6 +839,10 @@ struct IrEpistemicSection {
     decision_policy_count: i64,
     deferral_policies: [IrDeferralPolicyInfo; 128],
     deferral_policy_count: i64,
+    acquisition_policies: [IrAcquisitionPolicyInfo; 128],
+    acquisition_policy_count: i64,
+    recourse_policies: [IrRecoursePolicyInfo; 128],
+    recourse_policy_count: i64,
     validations: [IrValidationPolicyInfo; 128],
     validation_count: i64,
     mechanistic_reports: [IrMechanisticReportInfo; 128],
@@ -695,6 +865,14 @@ struct IrEpistemicSection {
     deferred_certificate_count: i64,
     deferred_reason_witnesses: [IrDeferredReasonWitnessInfo; 256],
     deferred_reason_witness_count: i64,
+    acquisition_plans: [IrAcquisitionPlanInfo; 256],
+    acquisition_plan_count: i64,
+    acquisition_reason_witnesses: [IrAcquisitionReasonWitnessInfo; 256],
+    acquisition_reason_witness_count: i64,
+    recourse_plans: [IrRecoursePlanInfo; 256],
+    recourse_plan_count: i64,
+    recourse_reason_witnesses: [IrRecourseReasonWitnessInfo; 256],
+    recourse_reason_witness_count: i64,
     validated_manifests: [IrValidatedManifestInfo; 256],
     validated_manifest_count: i64,
 }
@@ -709,6 +887,10 @@ fn ir_empty_epistemic_section() -> IrEpistemicSection {
         decision_policy_count: 0,
         deferral_policies: [ir_empty_deferral_policy_info(); 128],
         deferral_policy_count: 0,
+        acquisition_policies: [ir_empty_acquisition_policy_info(); 128],
+        acquisition_policy_count: 0,
+        recourse_policies: [ir_empty_recourse_policy_info(); 128],
+        recourse_policy_count: 0,
         validations: [ir_empty_validation_policy_info(); 128],
         validation_count: 0,
         mechanistic_reports: [ir_empty_mechanistic_report_info(); 128],
@@ -731,6 +913,14 @@ fn ir_empty_epistemic_section() -> IrEpistemicSection {
         deferred_certificate_count: 0,
         deferred_reason_witnesses: [ir_empty_deferred_reason_witness_info(); 256],
         deferred_reason_witness_count: 0,
+        acquisition_plans: [ir_empty_acquisition_plan_info(); 256],
+        acquisition_plan_count: 0,
+        acquisition_reason_witnesses: [ir_empty_acquisition_reason_witness_info(); 256],
+        acquisition_reason_witness_count: 0,
+        recourse_plans: [ir_empty_recourse_plan_info(); 256],
+        recourse_plan_count: 0,
+        recourse_reason_witnesses: [ir_empty_recourse_reason_witness_info(); 256],
+        recourse_reason_witness_count: 0,
         validated_manifests: [ir_empty_validated_manifest_info(); 256],
         validated_manifest_count: 0,
     }
@@ -1342,6 +1532,48 @@ fn ir_defer_action(dst: i64, value_reg: i64, evidence_reg: i64, deferral_policy_
     }
 }
 
+fn ir_plan_acquisition(dst: i64, value_reg: i64, deferred_reg: i64, acquisition_policy_reg: i64, plan_id: i64) -> IrInstr {
+    let base = ir_instr_new(IrOpcode::IrPlanAcquisition)
+    IrInstr {
+        op: base.op,
+        dst: dst,
+        src1: value_reg,
+        src2: deferred_reg,
+        imm_i64: acquisition_policy_reg,
+        imm_f64: base.imm_f64,
+        label_id: plan_id,
+        fn_id: base.fn_id,
+        field_idx: base.field_idx,
+        imm_flags: base.imm_flags,
+        bin_op: base.bin_op,
+        un_op: base.un_op,
+        name: base.name,
+        call_args: base.call_args,
+        arg_count: base.arg_count,
+    }
+}
+
+fn ir_plan_recourse(dst: i64, value_reg: i64, deferred_reg: i64, recourse_policy_reg: i64, plan_id: i64) -> IrInstr {
+    let base = ir_instr_new(IrOpcode::IrPlanRecourse)
+    IrInstr {
+        op: base.op,
+        dst: dst,
+        src1: value_reg,
+        src2: deferred_reg,
+        imm_i64: recourse_policy_reg,
+        imm_f64: base.imm_f64,
+        label_id: plan_id,
+        fn_id: base.fn_id,
+        field_idx: base.field_idx,
+        imm_flags: base.imm_flags,
+        bin_op: base.bin_op,
+        un_op: base.un_op,
+        name: base.name,
+        call_args: base.call_args,
+        arg_count: base.arg_count,
+    }
+}
+
 // Check if a name is "validate_manifest" (for IR lowering intercept)
 // "validate_manifest" = v(118) a(97) l(108) i(105) d(100) a(97) t(116) e(101)
 //                       _(95) m(109) a(97) n(110) i(105) f(102) e(101) s(115) t(116), len=17
@@ -1384,6 +1616,54 @@ fn ir_name_is_deferral_reason(n: Name) -> bool {
     && n.buf[2]  == 102 as i8 && n.buf[3]  == 101 as i8
     && n.buf[4]  == 114 as i8 && n.buf[5]  == 114 as i8
     && n.buf[6]  == 97  as i8 && n.buf[7]  == 108 as i8
+    && n.buf[8]  == 95  as i8 && n.buf[9]  == 114 as i8
+    && n.buf[10] == 101 as i8 && n.buf[11] == 97  as i8
+    && n.buf[12] == 115 as i8 && n.buf[13] == 111 as i8
+    && n.buf[14] == 110 as i8
+}
+
+fn ir_name_is_plan_acquisition(n: Name) -> bool {
+    n.len == 16
+    && n.buf[0]  == 112 as i8 && n.buf[1]  == 108 as i8
+    && n.buf[2]  == 97  as i8 && n.buf[3]  == 110 as i8
+    && n.buf[4]  == 95  as i8 && n.buf[5]  == 97  as i8
+    && n.buf[6]  == 99  as i8 && n.buf[7]  == 113 as i8
+    && n.buf[8]  == 117 as i8 && n.buf[9]  == 105 as i8
+    && n.buf[10] == 115 as i8 && n.buf[11] == 105 as i8
+    && n.buf[12] == 116 as i8 && n.buf[13] == 105 as i8
+    && n.buf[14] == 111 as i8 && n.buf[15] == 110 as i8
+}
+
+fn ir_name_is_acquisition_reason(n: Name) -> bool {
+    n.len == 18
+    && n.buf[0]  == 97  as i8 && n.buf[1]  == 99  as i8
+    && n.buf[2]  == 113 as i8 && n.buf[3]  == 117 as i8
+    && n.buf[4]  == 105 as i8 && n.buf[5]  == 115 as i8
+    && n.buf[6]  == 105 as i8 && n.buf[7]  == 116 as i8
+    && n.buf[8]  == 105 as i8 && n.buf[9]  == 111 as i8
+    && n.buf[10] == 110 as i8 && n.buf[11] == 95  as i8
+    && n.buf[12] == 114 as i8 && n.buf[13] == 101 as i8
+    && n.buf[14] == 97  as i8 && n.buf[15] == 115 as i8
+    && n.buf[16] == 111 as i8 && n.buf[17] == 110 as i8
+}
+
+fn ir_name_is_plan_recourse(n: Name) -> bool {
+    n.len == 13
+    && n.buf[0]  == 112 as i8 && n.buf[1]  == 108 as i8
+    && n.buf[2]  == 97  as i8 && n.buf[3]  == 110 as i8
+    && n.buf[4]  == 95  as i8 && n.buf[5]  == 114 as i8
+    && n.buf[6]  == 101 as i8 && n.buf[7]  == 99  as i8
+    && n.buf[8]  == 111 as i8 && n.buf[9]  == 117 as i8
+    && n.buf[10] == 114 as i8 && n.buf[11] == 115 as i8
+    && n.buf[12] == 101 as i8
+}
+
+fn ir_name_is_recourse_reason(n: Name) -> bool {
+    n.len == 15
+    && n.buf[0]  == 114 as i8 && n.buf[1]  == 101 as i8
+    && n.buf[2]  == 99  as i8 && n.buf[3]  == 111 as i8
+    && n.buf[4]  == 117 as i8 && n.buf[5]  == 114 as i8
+    && n.buf[6]  == 115 as i8 && n.buf[7]  == 101 as i8
     && n.buf[8]  == 95  as i8 && n.buf[9]  == 114 as i8
     && n.buf[10] == 101 as i8 && n.buf[11] == 97  as i8
     && n.buf[12] == 115 as i8 && n.buf[13] == 111 as i8

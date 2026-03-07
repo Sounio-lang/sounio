@@ -220,8 +220,44 @@ Recommended drafting loop for this paper lane:
 4. Update any claim whose supporting artifact changed.
 5. Export final claim-artifact checklist into submission package notes.
 
+## H7: Epistemic Session Types
+
+### Motivation
+
+Scientific web data pipelines combine external service calls with epistemic uncertainty tracking. Existing session type frameworks (Honda 1993, Gay and Hole 2005, Wadler 2012 GV) model protocol structure but carry no epistemic metadata. H7 fuses session types with Sounio's `Knowledge<T>` type, producing `EpistSession<P, ε>` where ε is a compile-time uncertainty bound derived from source provenance.
+
+### Novel Contributions
+
+1. **`EpistSession<P, ε>`**: Protocol type that carries an uncertainty bound alongside the communication structure. Protocol variables α are row-polymorphic (H6.2), enabling open protocols extensible at call sites.
+2. **Rule E-Session-Recv**: Receive operations on epistemic sessions automatically lift the payload into `Knowledge<T>` with ε = 1 - trust(source). No explicit annotation needed.
+3. **Rule E-Causal-Post**: HTTP POST is typed as a causal intervention (H6.4 CausalEffect) — sending a request to modify server state is a do(X←x) operation whose downstream effect is tracked.
+4. **Zero-cost erasure**: All epistemic session annotations erase at compile time. Machine code is identical to untyped send/recv. Verified by inspection of selfhosted native codegen.
+
+### Related Type Systems Superseded or Extended
+
+- Linear/affine session types (Caires/Pfenning 2010): H7 adds epistemic grading (H6.5) on top of the linear discipline.
+- Graded session types (Orchard/Yoshida 2016): H7 uses the H6.3 aleatoric/epistemic decomposition rather than a single resource grade.
+- Session types + effects (Lindley/Morris 2016 LINKS): H7 integrates with algebraic effects (H6.2 row-poly) rather than treating effects separately.
+
+### Stdlib Files
+
+- `stdlib/web/http.sio` — typed HTTP request/response structs with quality scoring
+- `stdlib/web/epistemic_http.sio` — EpistemicResponse, DataSource, provenance_quality
+- `stdlib/web/websocket.sio` — WsMessage session types
+- `stdlib/science/ncbi.sio` — NCBI genomics typed session (`GeneQuery` → `Knowledge<GeneExpression>`)
+- `stdlib/science/clintrials.sio` — ClinicalTrials.gov typed session with evidence quality scoring
+
+### Formal Rules
+
+See `paper/epistemic-types/session_types.tex` for the full grammar, duality, E-Session-Recv, and E-Causal-Post rules.
+
+### Gate
+
+`scripts/sprint19_epistemic_session_gate.sh` → `artifacts/sprint19/epistemic_session_gate.v1.json`
+
 ## Immediate Next Tasks
 
 1. Create `paper/oopsla2027/main.tex` using this blueprint and existing PACMPL style from `paper/popl2027/main.tex`.
 2. Populate Sections 1-4 first (story + architecture + SIR), then lock figures.
 3. Fill Evaluation only after rerunning the paper repro gate so numbers and statuses are current.
+4. Integrate H7 formal rules from `paper/epistemic-types/session_types.tex` into Section 2 (language surface) once H7 checker is wired.
