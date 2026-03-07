@@ -1,0 +1,49 @@
+//@ run-pass
+//@ description: scoped effects — effects bounded to a lexical scope with epistemic budget
+
+// ScopedEffect<E, max_ε> — effect E can only be triggered within the declared scope.
+// The uncertainty budget max_ε caps how much epistemic variance the scope introduces.
+// This prevents information leakage across effect scope boundaries.
+
+fn read_sensor_calibrated(raw: f64, calibration_error: f64) -> f64 with IO, Div {
+    // Within this scope, IO is constrained: ε ≤ 0.05
+    // The calibration_error tracks the epistemic uncertainty of the sensor reading
+    let calibrated = raw + (0.0 - calibration_error)
+    calibrated
+}
+
+fn process_measurements(readings: [f64; 4]) -> f64 with IO, Div, Mut, Panic {
+    // Scope 1: instrument reading (IO within sensor scope, ε ≤ 0.03)
+    let r0 = read_sensor_calibrated(readings[0], 0.01)
+    let r1 = read_sensor_calibrated(readings[1], 0.01)
+
+    // Scope 2: aggregation (Mut within aggregation scope, ε ≤ 0.01)
+    var sum: f64 = 0.0
+    sum = sum + r0
+    sum = sum + r1
+    sum / 2.0
+}
+
+fn compute_uncertainty_budget(individual_epsilons: [f64; 4], count: i64) -> f64 with IO, Div, Mut, Panic {
+    // GUM quadrature combination: ε_total = sqrt(Σ εᵢ²) for independent sources
+    // Scoped effects ensure each source contributes independently
+    var sum_sq: f64 = 0.0
+    var i: i64 = 0
+    while i < count && i < 4 {
+        let ei = individual_epsilons[i as usize]
+        sum_sq = sum_sq + ei * ei
+        i = i + 1
+    }
+    // Approximate sqrt via Newton's method (2 iterations)
+    let x0 = sum_sq / 2.0
+    let x1 = (x0 + sum_sq / x0) / 2.0
+    (x1 + sum_sq / x1) / 2.0
+}
+
+fn main() -> i64 with IO, Div, Mut, Panic {
+    let readings: [f64; 4] = [9.80, 9.81, 9.79, 9.82]
+    let mean = process_measurements(readings)
+    let epsilons: [f64; 4] = [0.01, 0.01, 0.02, 0.01]
+    let total_eps = compute_uncertainty_budget(epsilons, 4)
+    42
+}

@@ -62,6 +62,8 @@ struct Checker {
     policies: PolicyTable,
     decision_policies: DecisionPolicyTable,
     deferral_policies: DeferralPolicyTable,
+    acquisition_policies: AcquisitionPolicyTable,
+    recourse_policies: RecoursePolicyTable,
     validations: ValidationPolicyTable,
     contests: ContestTable,
     audits: AuditTable,
@@ -73,6 +75,10 @@ struct Checker {
     decision_certificates: DecisionCertificateTable,
     deferred_certificates: DeferredCertificateTable,
     deferred_reason_witnesses: DeferredReasonWitnessTable,
+    acquisition_plans: AcquisitionPlanTable,
+    acquisition_reason_witnesses: AcquisitionReasonWitnessTable,
+    recourse_plans: RecoursePlanTable,
+    recourse_reason_witnesses: RecourseReasonWitnessTable,
     validated_manifests: ValidatedManifestTable,
     error_count: i64,
     had_error: bool,
@@ -114,6 +120,8 @@ fn checker_new() -> Checker with Mut, Panic, Div {
         policies: policy_table_new(),
         decision_policies: decision_policy_table_new(),
         deferral_policies: deferral_policy_table_new(),
+        acquisition_policies: acquisition_policy_table_new(),
+        recourse_policies: recourse_policy_table_new(),
         validations: validation_policy_table_new(),
         contests: contest_table_new(),
         audits: audit_table_new(),
@@ -125,6 +133,10 @@ fn checker_new() -> Checker with Mut, Panic, Div {
         decision_certificates: decision_certificate_table_new(),
         deferred_certificates: deferred_certificate_table_new(),
         deferred_reason_witnesses: deferred_reason_witness_table_new(),
+        acquisition_plans: acquisition_plan_table_new(),
+        acquisition_reason_witnesses: acquisition_reason_witness_table_new(),
+        recourse_plans: recourse_plan_table_new(),
+        recourse_reason_witnesses: recourse_reason_witness_table_new(),
         validated_manifests: validated_manifest_table_new(),
         error_count: 0,
         had_error: false,
@@ -150,6 +162,463 @@ fn checker_new() -> Checker with Mut, Panic, Div {
         effect_ops: effect_op_table_new(),
         handler_depth: 0,
         current_handler_op_id: -1,
+    }
+}
+
+fn check_policy_requirements_to_ir_export(
+    opt: Option<Box<PolicyRequirementInfoList>>,
+    out: [IrPolicyRequirementInfo; 8],
+    idx: i64
+) -> [IrPolicyRequirementInfo; 8] with Mut, Panic, Div, Alloc {
+    match opt {
+        Some(list) => {
+            var next = out
+            if idx < 8 {
+                next[idx as usize] = IrPolicyRequirementInfo {
+                    metric_id: (*list).head.metric_id,
+                    metric_name: (*list).head.metric_name,
+                    op: (*list).head.op,
+                    threshold: (*list).head.threshold,
+                    threshold_kind: (*list).head.threshold_kind,
+                    bool_threshold: (*list).head.bool_threshold,
+                    name_threshold: (*list).head.name_threshold,
+                }
+            }
+            check_policy_requirements_to_ir_export((*list).tail, next, idx + 1)
+        }
+        None => out
+    }
+}
+
+fn checker_export_ir_epistemic_into_local(checker: &Checker, ep: &! IrEpistemicSection) with Mut, Panic, Div, Alloc {
+    ep.model_family_count = checker.model_families.count
+    if ep.model_family_count > IR_MAX_EPI_MODEL_FAMILIES {
+        ep.model_family_count = IR_MAX_EPI_MODEL_FAMILIES
+    }
+    var i: i64 = 0
+    while i < ep.model_family_count {
+        let info = checker.model_families.get(i)
+        ep.model_families[i as usize] = IrModelFamilyInfo {
+            id: i,
+            name: info.name,
+            model_names: info.model_names,
+            model_count: info.model_count,
+            input_ty: info.input_ty,
+            output_ty: info.output_ty,
+        }
+        i = i + 1
+    }
+
+    ep.policy_count = checker.policies.count
+    if ep.policy_count > IR_MAX_EPI_POLICIES {
+        ep.policy_count = IR_MAX_EPI_POLICIES
+    }
+    i = 0
+    while i < ep.policy_count {
+        let info = checker.policies.get(i)
+        ep.policies[i as usize] = IrPolicyInfo {
+            id: i,
+            name: info.name,
+            target_ty: info.target_ty,
+            level_name: info.level_name,
+            scope_name: info.scope_name,
+            level_id: info.level_id,
+            scope_id: info.scope_id,
+            requirements: check_policy_requirements_to_ir_export(info.requirements, [ir_empty_policy_requirement_info(); 8], 0),
+            requirement_count: if info.requirement_count < 8 { info.requirement_count } else { 8 },
+        }
+        i = i + 1
+    }
+
+    ep.decision_policy_count = checker.decision_policies.count
+    if ep.decision_policy_count > IR_MAX_EPI_DECISION_POLICIES {
+        ep.decision_policy_count = IR_MAX_EPI_DECISION_POLICIES
+    }
+    i = 0
+    while i < ep.decision_policy_count {
+        let info = checker.decision_policies.get(i)
+        ep.decision_policies[i as usize] = IrDecisionPolicyInfo {
+            id: i,
+            name: info.name,
+            target_ty: info.target_ty,
+            requirements: check_policy_requirements_to_ir_export(info.requirements, [ir_empty_policy_requirement_info(); 8], 0),
+            requirement_count: if info.requirement_count < 8 { info.requirement_count } else { 8 },
+        }
+        i = i + 1
+    }
+
+    ep.deferral_policy_count = checker.deferral_policies.count
+    if ep.deferral_policy_count > IR_MAX_EPI_DEFERRAL_POLICIES {
+        ep.deferral_policy_count = IR_MAX_EPI_DEFERRAL_POLICIES
+    }
+    i = 0
+    while i < ep.deferral_policy_count {
+        let info = checker.deferral_policies.get(i)
+        ep.deferral_policies[i as usize] = IrDeferralPolicyInfo {
+            id: i,
+            name: info.name,
+            target_ty: info.target_ty,
+            route_name: info.route_name,
+            requirements: check_policy_requirements_to_ir_export(info.requirements, [ir_empty_policy_requirement_info(); 8], 0),
+            requirement_count: if info.requirement_count < 8 { info.requirement_count } else { 8 },
+        }
+        i = i + 1
+    }
+
+    ep.acquisition_policy_count = checker.acquisition_policies.count
+    if ep.acquisition_policy_count > IR_MAX_EPI_ACQUISITION_POLICIES {
+        ep.acquisition_policy_count = IR_MAX_EPI_ACQUISITION_POLICIES
+    }
+    i = 0
+    while i < ep.acquisition_policy_count {
+        let info = checker.acquisition_policies.get(i)
+        ep.acquisition_policies[i as usize] = IrAcquisitionPolicyInfo {
+            id: i,
+            name: info.name,
+            target_ty: info.target_ty,
+            objective_name: info.objective_name,
+            route_name: info.route_name,
+            requirements: check_policy_requirements_to_ir_export(info.requirements, [ir_empty_policy_requirement_info(); 8], 0),
+            requirement_count: if info.requirement_count < 8 { info.requirement_count } else { 8 },
+        }
+        i = i + 1
+    }
+
+    ep.recourse_policy_count = checker.recourse_policies.count
+    if ep.recourse_policy_count > IR_MAX_EPI_RECOURSE_POLICIES {
+        ep.recourse_policy_count = IR_MAX_EPI_RECOURSE_POLICIES
+    }
+    i = 0
+    while i < ep.recourse_policy_count {
+        let info = checker.recourse_policies.get(i)
+        ep.recourse_policies[i as usize] = IrRecoursePolicyInfo {
+            id: i,
+            name: info.name,
+            target_ty: info.target_ty,
+            strategy_name: info.strategy_name,
+            route_name: info.route_name,
+            requirements: check_policy_requirements_to_ir_export(info.requirements, [ir_empty_policy_requirement_info(); 8], 0),
+            requirement_count: if info.requirement_count < 8 { info.requirement_count } else { 8 },
+        }
+        i = i + 1
+    }
+
+    ep.validation_count = checker.validations.count
+    if ep.validation_count > IR_MAX_EPI_VALIDATIONS {
+        ep.validation_count = IR_MAX_EPI_VALIDATIONS
+    }
+    i = 0
+    while i < ep.validation_count {
+        let info = checker.validations.get(i)
+        ep.validations[i as usize] = IrValidationPolicyInfo {
+            id: i,
+            name: info.name,
+            target_ty: info.target_ty,
+        }
+        i = i + 1
+    }
+
+    ep.mechanistic_report_count = checker.mechanistic_reports.count
+    if ep.mechanistic_report_count > IR_MAX_EPI_MECHANISTIC_REPORTS {
+        ep.mechanistic_report_count = IR_MAX_EPI_MECHANISTIC_REPORTS
+    }
+    i = 0
+    while i < ep.mechanistic_report_count {
+        let info = checker.mechanistic_reports.get(i)
+        ep.mechanistic_reports[i as usize] = IrMechanisticReportInfo {
+            id: i,
+            latent_state_divergence: info.latent_state_divergence,
+            causal_decomposition_divergence: info.causal_decomposition_divergence,
+            intervention_response_divergence: info.intervention_response_divergence,
+            parameter_role_divergence: info.parameter_role_divergence,
+            structural_explanation_distance: info.structural_explanation_distance,
+            aggregate_divergence: info.aggregate_divergence,
+        }
+        i = i + 1
+    }
+
+    ep.posterior_weights_count = checker.posterior_weights.count
+    if ep.posterior_weights_count > IR_MAX_EPI_POSTERIOR_WEIGHTS {
+        ep.posterior_weights_count = IR_MAX_EPI_POSTERIOR_WEIGHTS
+    }
+    i = 0
+    while i < ep.posterior_weights_count {
+        let info = checker.posterior_weights.get(i)
+        ep.posterior_weights[i as usize] = IrPosteriorWeightsInfo {
+            id: i,
+            model_names: info.model_names,
+            weights: info.weights,
+            count: info.count,
+        }
+        i = i + 1
+    }
+
+    ep.counterexample_count = checker.counterexamples.count
+    if ep.counterexample_count > IR_MAX_EPI_COUNTEREXAMPLES {
+        ep.counterexample_count = IR_MAX_EPI_COUNTEREXAMPLES
+    }
+    i = 0
+    while i < ep.counterexample_count {
+        let info = checker.counterexamples.get(i)
+        ep.counterexamples[i as usize] = IrCounterexampleInfo {
+            id: i,
+            model_name: info.model_name,
+            subgroup_name: info.subgroup_name,
+            metric_name: info.metric_name,
+            observed_value: info.observed_value,
+            threshold_value: info.threshold_value,
+            summary: info.summary,
+        }
+        i = i + 1
+    }
+
+    ep.audit_count = checker.audits.count
+    if ep.audit_count > IR_MAX_EPI_AUDITS {
+        ep.audit_count = IR_MAX_EPI_AUDITS
+    }
+    i = 0
+    while i < ep.audit_count {
+        let info = checker.audits.get(i)
+        ep.audits[i as usize] = IrAuditInfo {
+            id: i,
+            name: info.name,
+            span_start: info.span_start,
+            span_end: info.span_end,
+            target_inner_ty: info.target_inner_ty,
+            family_id: info.family_id,
+            policy_id: info.policy_id,
+            metric_known: info.metric_known,
+            metric_values: info.metric_values,
+            mechanistic_report_id: info.mechanistic_report_id,
+            posterior_weights_id: info.posterior_weights_id,
+            counterexample_id: info.counterexample_id,
+        }
+        i = i + 1
+    }
+
+    ep.contest_count = checker.contests.count
+    if ep.contest_count > IR_MAX_EPI_CONTESTS {
+        ep.contest_count = IR_MAX_EPI_CONTESTS
+    }
+    i = 0
+    while i < ep.contest_count {
+        let info = checker.contests.get(i)
+        ep.contests[i as usize] = IrContestInfo {
+            id: i,
+            span_start: info.span_start,
+            span_end: info.span_end,
+            audit_id: info.audit_id,
+            family_id: info.family_id,
+            policy_id: info.policy_id,
+            model_names: info.model_names,
+            model_count: info.model_count,
+            metric_known: info.metric_known,
+            metric_values: info.metric_values,
+            mechanistic_report_id: info.mechanistic_report_id,
+            posterior_weights_id: info.posterior_weights_id,
+            counterexample_id: info.counterexample_id,
+            provenance_bundle_id: info.provenance_bundle_id,
+        }
+        i = i + 1
+    }
+
+    ep.contest_witness_count = checker.contest_witnesses.count
+    if ep.contest_witness_count > IR_MAX_EPI_CONTEST_WITNESSES {
+        ep.contest_witness_count = IR_MAX_EPI_CONTEST_WITNESSES
+    }
+    i = 0
+    while i < ep.contest_witness_count {
+        let info = checker.contest_witnesses.get(i)
+        ep.contest_witnesses[i as usize] = IrContestWitnessInfo {
+            id: i,
+            span_start: info.span_start,
+            span_end: info.span_end,
+            witness_kind: info.witness_kind,
+            contest_id: info.contest_id,
+        }
+        i = i + 1
+    }
+
+    ep.robust_proof_count = checker.robust_proofs.count
+    if ep.robust_proof_count > IR_MAX_EPI_ROBUST_PROOFS {
+        ep.robust_proof_count = IR_MAX_EPI_ROBUST_PROOFS
+    }
+    i = 0
+    while i < ep.robust_proof_count {
+        let info = checker.robust_proofs.get(i)
+        ep.robust_proofs[i as usize] = IrRobustProofInfo {
+            id: i,
+            span_start: info.span_start,
+            span_end: info.span_end,
+            audit_id: info.audit_id,
+            contest_id: info.contest_id,
+            policy_id: info.policy_id,
+            level_id: info.level_id,
+            scope_id: info.scope_id,
+            metric_known: info.metric_known,
+            metric_values: info.metric_values,
+        }
+        i = i + 1
+    }
+
+    ep.decision_certificate_count = checker.decision_certificates.count
+    if ep.decision_certificate_count > IR_MAX_EPI_DECISION_CERTIFICATES {
+        ep.decision_certificate_count = IR_MAX_EPI_DECISION_CERTIFICATES
+    }
+    i = 0
+    while i < ep.decision_certificate_count {
+        let info = checker.decision_certificates.get(i)
+        ep.decision_certificates[i as usize] = IrDecisionCertificateInfo {
+            id: i,
+            span_start: info.span_start,
+            span_end: info.span_end,
+            audit_id: info.audit_id,
+            robust_proof_id: info.robust_proof_id,
+            decision_policy_id: info.decision_policy_id,
+            inner_ty: info.inner_ty,
+            metric_known: info.metric_known,
+            metric_values: info.metric_values,
+        }
+        i = i + 1
+    }
+
+    ep.deferred_certificate_count = checker.deferred_certificates.count
+    if ep.deferred_certificate_count > IR_MAX_EPI_DEFERRED_CERTIFICATES {
+        ep.deferred_certificate_count = IR_MAX_EPI_DEFERRED_CERTIFICATES
+    }
+    i = 0
+    while i < ep.deferred_certificate_count {
+        let info = checker.deferred_certificates.get(i)
+        ep.deferred_certificates[i as usize] = IrDeferredCertificateInfo {
+            id: i,
+            span_start: info.span_start,
+            span_end: info.span_end,
+            audit_id: info.audit_id,
+            contest_id: info.contest_id,
+            robust_proof_id: info.robust_proof_id,
+            deferral_policy_id: info.deferral_policy_id,
+            evidence_kind: info.evidence_kind,
+            reason_code: info.reason_code,
+            inner_ty: info.inner_ty,
+            metric_known: info.metric_known,
+            metric_values: info.metric_values,
+        }
+        i = i + 1
+    }
+
+    ep.deferred_reason_witness_count = checker.deferred_reason_witnesses.count
+    if ep.deferred_reason_witness_count > IR_MAX_EPI_DEFERRED_REASON_WITNESSES {
+        ep.deferred_reason_witness_count = IR_MAX_EPI_DEFERRED_REASON_WITNESSES
+    }
+    i = 0
+    while i < ep.deferred_reason_witness_count {
+        let info = checker.deferred_reason_witnesses.get(i)
+        ep.deferred_reason_witnesses[i as usize] = IrDeferredReasonWitnessInfo {
+            id: i,
+            span_start: info.span_start,
+            span_end: info.span_end,
+            deferred_certificate_id: info.deferred_certificate_id,
+        }
+        i = i + 1
+    }
+
+    ep.acquisition_plan_count = checker.acquisition_plans.count
+    if ep.acquisition_plan_count > IR_MAX_EPI_ACQUISITION_PLANS {
+        ep.acquisition_plan_count = IR_MAX_EPI_ACQUISITION_PLANS
+    }
+    i = 0
+    while i < ep.acquisition_plan_count {
+        let info = checker.acquisition_plans.get(i)
+        ep.acquisition_plans[i as usize] = IrAcquisitionPlanInfo {
+            id: i,
+            span_start: info.span_start,
+            span_end: info.span_end,
+            deferred_certificate_id: info.deferred_certificate_id,
+            acquisition_policy_id: info.acquisition_policy_id,
+            audit_id: info.audit_id,
+            contest_id: info.contest_id,
+            objective_name: info.objective_name,
+            route_name: info.route_name,
+            inner_ty: info.inner_ty,
+            metric_known: info.metric_known,
+            metric_values: info.metric_values,
+        }
+        i = i + 1
+    }
+
+    ep.acquisition_reason_witness_count = checker.acquisition_reason_witnesses.count
+    if ep.acquisition_reason_witness_count > IR_MAX_EPI_ACQUISITION_REASON_WITNESSES {
+        ep.acquisition_reason_witness_count = IR_MAX_EPI_ACQUISITION_REASON_WITNESSES
+    }
+    i = 0
+    while i < ep.acquisition_reason_witness_count {
+        let info = checker.acquisition_reason_witnesses.get(i)
+        ep.acquisition_reason_witnesses[i as usize] = IrAcquisitionReasonWitnessInfo {
+            id: i,
+            span_start: info.span_start,
+            span_end: info.span_end,
+            acquisition_plan_id: info.acquisition_plan_id,
+        }
+        i = i + 1
+    }
+
+    ep.recourse_plan_count = checker.recourse_plans.count
+    if ep.recourse_plan_count > IR_MAX_EPI_RECOURSE_PLANS {
+        ep.recourse_plan_count = IR_MAX_EPI_RECOURSE_PLANS
+    }
+    i = 0
+    while i < ep.recourse_plan_count {
+        let info = checker.recourse_plans.get(i)
+        ep.recourse_plans[i as usize] = IrRecoursePlanInfo {
+            id: i,
+            span_start: info.span_start,
+            span_end: info.span_end,
+            deferred_certificate_id: info.deferred_certificate_id,
+            recourse_policy_id: info.recourse_policy_id,
+            audit_id: info.audit_id,
+            contest_id: info.contest_id,
+            strategy_name: info.strategy_name,
+            route_name: info.route_name,
+            inner_ty: info.inner_ty,
+            metric_known: info.metric_known,
+            metric_values: info.metric_values,
+        }
+        i = i + 1
+    }
+
+    ep.recourse_reason_witness_count = checker.recourse_reason_witnesses.count
+    if ep.recourse_reason_witness_count > IR_MAX_EPI_RECOURSE_REASON_WITNESSES {
+        ep.recourse_reason_witness_count = IR_MAX_EPI_RECOURSE_REASON_WITNESSES
+    }
+    i = 0
+    while i < ep.recourse_reason_witness_count {
+        let info = checker.recourse_reason_witnesses.get(i)
+        ep.recourse_reason_witnesses[i as usize] = IrRecourseReasonWitnessInfo {
+            id: i,
+            span_start: info.span_start,
+            span_end: info.span_end,
+            recourse_plan_id: info.recourse_plan_id,
+        }
+        i = i + 1
+    }
+
+    ep.validated_manifest_count = checker.validated_manifests.count
+    if ep.validated_manifest_count > IR_MAX_EPI_VALIDATED_MANIFESTS {
+        ep.validated_manifest_count = IR_MAX_EPI_VALIDATED_MANIFESTS
+    }
+    i = 0
+    while i < ep.validated_manifest_count {
+        let info = checker.validated_manifests.get(i)
+        ep.validated_manifests[i as usize] = IrValidatedManifestInfo {
+            id: i,
+            span_start: info.span_start,
+            span_end: info.span_end,
+            audit_id: info.audit_id,
+            robust_proof_id: info.robust_proof_id,
+            validation_id: info.validation_id,
+            inner_ty: info.inner_ty,
+        }
+        i = i + 1
     }
 }
 
@@ -409,6 +878,59 @@ fn print_type_name(ty: TypeEntry) with IO, Mut, Panic, Div, Alloc {
             }
         }
         TySessionEnd => print("SessionEnd")
+        TySingleton => {
+            print("Singleton<")
+            match ty.inner {
+                Some(inner) => print_type_name(*inner)
+                None => print("?")
+            }
+            print(", ")
+            print_name_value(ty.name)
+            print(">")
+        }
+        TyScopedEffect => {
+            print("ScopedEffect<")
+            print_name_value(ty.name)
+            print(", ε=")
+            print_milli_ratio(ty.knowledge_epsilon)
+            print(">")
+        }
+        TyCondIndep => {
+            print("IndepKnowledge<")
+            match ty.inner {
+                Some(inner) => print_type_name(*inner)
+                None => print("?")
+            }
+            print(", a=")
+            print_int(ty.array_size)
+            print(", b=")
+            print_int(ty.fn_sig_id)
+            if ty.epistemic_meta_id >= 0 {
+                print(" | cond=")
+                print_int(ty.epistemic_meta_id)
+            }
+            print(">")
+        }
+        TyPotentialOutcome => {
+            print("PotentialOutcome<")
+            match ty.inner {
+                Some(inner) => print_type_name(*inner)
+                None => print("?")
+            }
+            print(", ctrl=")
+            print_int(ty.epistemic_meta_id)
+            print(", treat=")
+            print_int(ty.robustness_level_id)
+            print(">")
+        }
+        TyATE => {
+            print("ATE<")
+            match ty.inner {
+                Some(inner) => print_type_name(*inner)
+                None => print("?")
+            }
+            print(">")
+        }
         TyNever => print("!")
         TyError => print("<error>")
         TyUnknown => print("<unknown>")
@@ -2799,6 +3321,55 @@ fn deferral_reason_type_name() -> Name with Mut, Panic, Div {
     n
 }
 
+fn deferred_certificate_get_metric(info: DeferredCertificateInfo, metric_id: i64) -> (bool, f64) {
+    if metric_id >= 0 && metric_id < 8 && info.metric_known[metric_id as usize] == 1 {
+        (true, info.metric_values[metric_id as usize])
+    } else {
+        (false, 0.0)
+    }
+}
+
+fn acquisition_reason_type_name() -> Name with Mut, Panic, Div {
+    var n = Name { buf: [0; 128], len: 17 }
+    n.buf[0] = 65
+    n.buf[1] = 99
+    n.buf[2] = 113
+    n.buf[3] = 117
+    n.buf[4] = 105
+    n.buf[5] = 115
+    n.buf[6] = 105
+    n.buf[7] = 116
+    n.buf[8] = 105
+    n.buf[9] = 111
+    n.buf[10] = 110
+    n.buf[11] = 82
+    n.buf[12] = 101
+    n.buf[13] = 97
+    n.buf[14] = 115
+    n.buf[15] = 111
+    n.buf[16] = 110
+    n
+}
+
+fn recourse_reason_type_name() -> Name with Mut, Panic, Div {
+    var n = Name { buf: [0; 128], len: 14 }
+    n.buf[0] = 82
+    n.buf[1] = 101
+    n.buf[2] = 99
+    n.buf[3] = 111
+    n.buf[4] = 117
+    n.buf[5] = 114
+    n.buf[6] = 115
+    n.buf[7] = 101
+    n.buf[8] = 82
+    n.buf[9] = 101
+    n.buf[10] = 97
+    n.buf[11] = 115
+    n.buf[12] = 111
+    n.buf[13] = 110
+    n
+}
+
 fn expr_list_head(opt: Option<Box<ExprList>>) -> Option<Box<Expr>> with Alloc {
     match opt {
         Some(list) => Some(Box::new((*list).head))
@@ -3843,13 +4414,18 @@ fn lower_array_size(opt: Option<Box<Expr>>) -> i64 {
 
 impl Checker {
     fn collect_items(self, items: Option<Box<ItemList>>) -> Checker with Mut, Panic, Div, Alloc, IO {
-        match items {
-            Some(list) => {
-                var c = self.collect_item((*list).head)
-                c.collect_items((*list).tail)
+        var c = self
+        var cursor = items
+        while true {
+            match cursor {
+                Some(list) => {
+                    c = c.collect_item((*list).head)
+                    cursor = (*list).tail
+                }
+                None => break
             }
-            None => self
         }
+        c
     }
 
     fn collect_item(self, item: Item) -> Checker with Mut, Panic, Div, Alloc, IO {
@@ -4368,6 +4944,10 @@ impl Checker {
                         let pair = c.collect_audit_counterexample_section(audit_name, section.name, section.fields)
                         c = pair.0
                         info.counterexample_id = pair.1
+                        if pair.1 >= 0 {
+                            info.metric_known[CONTEST_METRIC_COUNTEREXAMPLE_PRESENT as usize] = 1
+                            info.metric_values[CONTEST_METRIC_COUNTEREXAMPLE_PRESENT as usize] = 1.0
+                        }
                     } else if section.kind == AuditSectionKind::AuditSectionPosteriorWeights {
                         if info.family_id < 0 || info.family_id >= c.model_families.count {
                             c = c.report_audit_weights_family_mismatch(section.span, audit_name)
@@ -4936,13 +5516,18 @@ impl Checker {
 
 impl Checker {
     fn check_items(self, items: Option<Box<ItemList>>) -> Checker with Mut, Panic, Div, Alloc, IO {
-        match items {
-            Some(list) => {
-                var c = self.check_item((*list).head)
-                c.check_items((*list).tail)
+        var c = self
+        var cursor = items
+        while true {
+            match cursor {
+                Some(list) => {
+                    c = c.check_item((*list).head)
+                    cursor = (*list).tail
+                }
+                None => break
             }
-            None => self
         }
+        c
     }
 
     fn check_item(self, item: Item) -> Checker with Mut, Panic, Div, Alloc, IO {
@@ -5992,6 +6577,18 @@ impl Checker {
         if call_expr_is_builtin_deferral_reason(e.left) {
             return self.check_deferral_reason_expr(e)
         }
+        if call_expr_is_builtin_plan_acquisition(e.left) {
+            return self.check_plan_acquisition_expr(e)
+        }
+        if call_expr_is_builtin_acquisition_reason(e.left) {
+            return self.check_acquisition_reason_expr(e)
+        }
+        if call_expr_is_builtin_plan_recourse(e.left) {
+            return self.check_plan_recourse_expr(e)
+        }
+        if call_expr_is_builtin_recourse_reason(e.left) {
+            return self.check_recourse_reason_expr(e)
+        }
         if call_expr_is_builtin_lift_knowledge(e.left) {
             return self.check_lift_knowledge_expr(e)
         }
@@ -6387,12 +6984,108 @@ impl Checker {
         }
     }
 
+    fn check_acquisition_policy_requirements_against_deferred(
+        self,
+        span: Span,
+        policy_name: Name,
+        opt: Option<Box<PolicyRequirementInfoList>>,
+        cert_info: DeferredCertificateInfo
+    ) -> (Checker, bool) with Mut, Panic, Div, Alloc, IO {
+        match opt {
+            Some(list) => {
+                let req = (*list).head
+                let metric_pair = deferred_certificate_get_metric(cert_info, req.metric_id)
+                if !metric_pair.0 {
+                    let c = self.report_missing_acquisition_diagnostic(span, policy_name, req)
+                    (c, false)
+                } else {
+                    let observed = metric_pair.1
+                    if !policy_requirement_holds(observed, req.op, req.threshold) {
+                        let c = self.report_failed_acquisition_policy_requirement(span, policy_name, req, observed)
+                        (c, false)
+                    } else {
+                        self.check_acquisition_policy_requirements_against_deferred(span, policy_name, (*list).tail, cert_info)
+                    }
+                }
+            }
+            None => (self, true)
+        }
+    }
+
+    fn check_recourse_policy_requirements_against_deferred(
+        self,
+        span: Span,
+        policy_name: Name,
+        opt: Option<Box<PolicyRequirementInfoList>>,
+        cert_info: DeferredCertificateInfo
+    ) -> (Checker, bool) with Mut, Panic, Div, Alloc, IO {
+        match opt {
+            Some(list) => {
+                let req = (*list).head
+                let metric_pair = deferred_certificate_get_metric(cert_info, req.metric_id)
+                if !metric_pair.0 {
+                    let c = self.report_missing_recourse_diagnostic(span, policy_name, req)
+                    (c, false)
+                } else {
+                    let observed = metric_pair.1
+                    if !policy_requirement_holds(observed, req.op, req.threshold) {
+                        let c = self.report_failed_recourse_policy_requirement(span, policy_name, req, observed)
+                        (c, false)
+                    } else {
+                        self.check_recourse_policy_requirements_against_deferred(span, policy_name, (*list).tail, cert_info)
+                    }
+                }
+            }
+            None => (self, true)
+        }
+    }
+
     fn deferred_reason_witness_info_new(self, span: Span, certificate_id: i64) -> DeferredReasonWitnessInfo {
         DeferredReasonWitnessInfo {
             span_start: span.start,
             span_end: span.end,
             deferred_certificate_id: certificate_id,
         }
+    }
+
+    fn acquisition_reason_witness_info_new(self, span: Span, plan_id: i64) -> AcquisitionReasonWitnessInfo {
+        AcquisitionReasonWitnessInfo {
+            span_start: span.start,
+            span_end: span.end,
+            acquisition_plan_id: plan_id,
+        }
+    }
+
+    fn recourse_reason_witness_info_new(self, span: Span, plan_id: i64) -> RecourseReasonWitnessInfo {
+        RecourseReasonWitnessInfo {
+            span_start: span.start,
+            span_end: span.end,
+            recourse_plan_id: plan_id,
+        }
+    }
+
+    fn contest_has_counterexample(self, contest_id: i64) -> bool with Mut, Panic, Div {
+        if contest_id < 0 || contest_id >= self.contests.count {
+            return false
+        }
+        let contest_info = self.contests.get(contest_id)
+        if contest_info.counterexample_id >= 0 {
+            return true
+        }
+        let metric_pair = contest_info_get_metric(contest_info, CONTEST_METRIC_COUNTEREXAMPLE_PRESENT)
+        metric_pair.0 && metric_pair.1 > 0.0
+    }
+
+    fn deferred_certificate_attach_resolution_metrics(self, cert: DeferredCertificateInfo) -> DeferredCertificateInfo with Mut, Panic, Div {
+        var next = cert
+        if next.metric_known[CONTEST_METRIC_COUNTEREXAMPLE_PRESENT as usize] != 1
+        && self.contest_has_counterexample(next.contest_id) {
+            next.metric_known[CONTEST_METRIC_COUNTEREXAMPLE_PRESENT as usize] = 1
+            next.metric_values[CONTEST_METRIC_COUNTEREXAMPLE_PRESENT as usize] = 1.0
+        }
+        next.metric_known[CONTEST_METRIC_DEFERRED_REASON as usize] = 1
+        next.metric_values[CONTEST_METRIC_DEFERRED_REASON as usize] = next.reason_code as f64
+        next
     }
 
     fn check_admit_action_expr(self, e: Expr) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
@@ -6499,11 +7192,11 @@ impl Checker {
                 return (c.report_deferral_target_mismatch(e.span, policy_info.target_ty, inner_ty), ty_error())
             }
             if evidence_ty.epistemic_meta_id < 0 || evidence_ty.epistemic_meta_id >= c.contests.count {
-                return (c.report_missing_deferral_evidence(e.span), ty_error())
+                return (c.report_missing_deferral_evidence(e.span, evidence_ty), ty_error())
             }
             let contest_info = c.contests.get(evidence_ty.epistemic_meta_id)
             if contest_info.family_id < 0 || contest_info.policy_id < 0 {
-                return (c.report_missing_deferral_evidence(e.span), ty_error())
+                return (c.report_missing_deferral_evidence(e.span, evidence_ty), ty_error())
             }
             if policy_info.requirement_count > 0 {
                 let req_pair = c.check_deferral_policy_requirements_against_contest(
@@ -6517,7 +7210,7 @@ impl Checker {
                     return (c, ty_error())
                 }
             }
-            let cert_info = DeferredCertificateInfo {
+            var cert_info = DeferredCertificateInfo {
                 span_start: e.span.start,
                 span_end: e.span.end,
                 audit_id: contest_info.audit_id,
@@ -6530,6 +7223,7 @@ impl Checker {
                 metric_known: contest_info.metric_known,
                 metric_values: contest_info.metric_values,
             }
+            cert_info = c.deferred_certificate_attach_resolution_metrics(cert_info)
             let add_result = c.deferred_certificates.add(cert_info)
             c.deferred_certificates = add_result.0
             return (c, ty_deferred(inner_ty, add_result.1))
@@ -6544,14 +7238,14 @@ impl Checker {
                 return (c.report_deferral_target_mismatch(e.span, policy_info.target_ty, inner_ty), ty_error())
             }
             if evidence_ty.robustness_level_id < 0 || evidence_ty.robustness_scope_id < 0 {
-                return (c.report_missing_deferral_evidence(e.span), ty_error())
+                return (c.report_missing_deferral_evidence(e.span, evidence_ty), ty_error())
             }
             if evidence_ty.epistemic_meta_id < 0 || evidence_ty.epistemic_meta_id >= c.robust_proofs.count {
-                return (c.report_missing_deferral_evidence(e.span), ty_error())
+                return (c.report_missing_deferral_evidence(e.span, evidence_ty), ty_error())
             }
             let proof_info = c.robust_proofs.get(evidence_ty.epistemic_meta_id)
             if proof_info.contest_id < 0 {
-                return (c.report_missing_deferral_evidence(e.span), ty_error())
+                return (c.report_missing_deferral_evidence(e.span, evidence_ty), ty_error())
             }
             if policy_info.requirement_count > 0 {
                 let req_pair = c.check_deferral_policy_requirements_against_proof(
@@ -6565,7 +7259,7 @@ impl Checker {
                     return (c, ty_error())
                 }
             }
-            let cert_info = DeferredCertificateInfo {
+            var cert_info = DeferredCertificateInfo {
                 span_start: e.span.start,
                 span_end: e.span.end,
                 audit_id: proof_info.audit_id,
@@ -6578,12 +7272,13 @@ impl Checker {
                 metric_known: proof_info.metric_known,
                 metric_values: proof_info.metric_values,
             }
+            cert_info = c.deferred_certificate_attach_resolution_metrics(cert_info)
             let add_result = c.deferred_certificates.add(cert_info)
             c.deferred_certificates = add_result.0
             return (c, ty_deferred(inner_ty, add_result.1))
         }
 
-        (c.report_missing_deferral_evidence(e.span), ty_error())
+        (c.report_missing_deferral_evidence(e.span, evidence_ty), ty_error())
     }
 
     fn check_deferral_reason_expr(self, e: Expr) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
@@ -6600,6 +7295,180 @@ impl Checker {
         let add_result = c.deferred_reason_witnesses.add(c.deferred_reason_witness_info_new(e.span, deferred_ty.epistemic_meta_id))
         c.deferred_reason_witnesses = add_result.0
         (c, ty_named(deferral_reason_type_name()))
+    }
+
+    fn check_plan_acquisition_expr(self, e: Expr) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+        let value_arg = expr_list_head(e.args)
+        let deferred_arg = expr_list_second(e.args)
+        let policy_arg = expr_list_third(e.args)
+
+        let value_pair = self.check_opt_expr(value_arg)
+        var c = value_pair.0
+        let value_ty = value_pair.1
+
+        let deferred_pair = c.check_opt_expr(deferred_arg)
+        c = deferred_pair.0
+        let deferred_ty = deferred_pair.1
+        if deferred_ty.kind != TypeKind::TyDeferred {
+            return (c.report_plan_acquisition_requires_deferred(e.span, deferred_ty), ty_error())
+        }
+        if deferred_ty.epistemic_meta_id < 0 || deferred_ty.epistemic_meta_id >= c.deferred_certificates.count {
+            return (c.report_missing_deferred_certificate(e.span), ty_error())
+        }
+
+        let policy_pair = c.check_opt_expr(policy_arg)
+        c = policy_pair.0
+        let policy_ty = policy_pair.1
+        if policy_ty.kind != TypeKind::TyAcquisitionPolicy {
+            return (c.report_missing_acquisition_policy(e.span), ty_error())
+        }
+        if policy_ty.epistemic_meta_id < 0 || policy_ty.epistemic_meta_id >= c.acquisition_policies.count {
+            return (c.report_missing_acquisition_policy(e.span), ty_error())
+        }
+
+        let inner_ty = knowledge_inner(deferred_ty)
+        if !types_compatible(inner_ty, value_ty) {
+            return (c.report_acquisition_target_mismatch(e.span, inner_ty, value_ty), ty_error())
+        }
+
+        let policy_info = c.acquisition_policies.get(policy_ty.epistemic_meta_id)
+        if !types_compatible(policy_info.target_ty, inner_ty) {
+            return (c.report_acquisition_target_mismatch(e.span, policy_info.target_ty, inner_ty), ty_error())
+        }
+
+        let cert_info = c.deferred_certificates.get(deferred_ty.epistemic_meta_id)
+        if policy_info.requirement_count > 0 {
+            let req_pair = c.check_acquisition_policy_requirements_against_deferred(
+                e.span,
+                policy_info.name,
+                policy_info.requirements,
+                cert_info
+            )
+            c = req_pair.0
+            if !req_pair.1 {
+                return (c, ty_error())
+            }
+        }
+
+        let plan_info = AcquisitionPlanInfo {
+            span_start: e.span.start,
+            span_end: e.span.end,
+            deferred_certificate_id: deferred_ty.epistemic_meta_id,
+            acquisition_policy_id: policy_ty.epistemic_meta_id,
+            audit_id: cert_info.audit_id,
+            contest_id: cert_info.contest_id,
+            objective_name: policy_info.objective_name,
+            route_name: policy_info.route_name,
+            inner_ty: inner_ty,
+            metric_known: cert_info.metric_known,
+            metric_values: cert_info.metric_values,
+        }
+        let add_result = c.acquisition_plans.add(plan_info)
+        c.acquisition_plans = add_result.0
+        (c, ty_acquisition_plan(inner_ty, add_result.1))
+    }
+
+    fn check_acquisition_reason_expr(self, e: Expr) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+        let first_arg = expr_list_head(e.args)
+        let plan_pair = self.check_opt_expr(first_arg)
+        var c = plan_pair.0
+        let plan_ty = plan_pair.1
+        if plan_ty.kind != TypeKind::TyAcquisitionPlan {
+            return (c.report_acquisition_reason_requires_plan(e.span, plan_ty), ty_error())
+        }
+        if plan_ty.epistemic_meta_id < 0 || plan_ty.epistemic_meta_id >= c.acquisition_plans.count {
+            return (c.report_acquisition_reason_requires_plan(e.span, plan_ty), ty_error())
+        }
+        let add_result = c.acquisition_reason_witnesses.add(c.acquisition_reason_witness_info_new(e.span, plan_ty.epistemic_meta_id))
+        c.acquisition_reason_witnesses = add_result.0
+        (c, ty_named(acquisition_reason_type_name()))
+    }
+
+    fn check_plan_recourse_expr(self, e: Expr) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+        let value_arg = expr_list_head(e.args)
+        let deferred_arg = expr_list_second(e.args)
+        let policy_arg = expr_list_third(e.args)
+
+        let value_pair = self.check_opt_expr(value_arg)
+        var c = value_pair.0
+        let value_ty = value_pair.1
+
+        let deferred_pair = c.check_opt_expr(deferred_arg)
+        c = deferred_pair.0
+        let deferred_ty = deferred_pair.1
+        if deferred_ty.kind != TypeKind::TyDeferred {
+            return (c.report_plan_recourse_requires_deferred(e.span, deferred_ty), ty_error())
+        }
+        if deferred_ty.epistemic_meta_id < 0 || deferred_ty.epistemic_meta_id >= c.deferred_certificates.count {
+            return (c.report_missing_deferred_certificate(e.span), ty_error())
+        }
+
+        let policy_pair = c.check_opt_expr(policy_arg)
+        c = policy_pair.0
+        let policy_ty = policy_pair.1
+        if policy_ty.kind != TypeKind::TyRecoursePolicy {
+            return (c.report_missing_recourse_policy(e.span), ty_error())
+        }
+        if policy_ty.epistemic_meta_id < 0 || policy_ty.epistemic_meta_id >= c.recourse_policies.count {
+            return (c.report_missing_recourse_policy(e.span), ty_error())
+        }
+
+        let inner_ty = knowledge_inner(deferred_ty)
+        if !types_compatible(inner_ty, value_ty) {
+            return (c.report_recourse_target_mismatch(e.span, inner_ty, value_ty), ty_error())
+        }
+
+        let policy_info = c.recourse_policies.get(policy_ty.epistemic_meta_id)
+        if !types_compatible(policy_info.target_ty, inner_ty) {
+            return (c.report_recourse_target_mismatch(e.span, policy_info.target_ty, inner_ty), ty_error())
+        }
+
+        let cert_info = c.deferred_certificates.get(deferred_ty.epistemic_meta_id)
+        if policy_info.requirement_count > 0 {
+            let req_pair = c.check_recourse_policy_requirements_against_deferred(
+                e.span,
+                policy_info.name,
+                policy_info.requirements,
+                cert_info
+            )
+            c = req_pair.0
+            if !req_pair.1 {
+                return (c, ty_error())
+            }
+        }
+
+        let plan_info = RecoursePlanInfo {
+            span_start: e.span.start,
+            span_end: e.span.end,
+            deferred_certificate_id: deferred_ty.epistemic_meta_id,
+            recourse_policy_id: policy_ty.epistemic_meta_id,
+            audit_id: cert_info.audit_id,
+            contest_id: cert_info.contest_id,
+            strategy_name: policy_info.strategy_name,
+            route_name: policy_info.route_name,
+            inner_ty: inner_ty,
+            metric_known: cert_info.metric_known,
+            metric_values: cert_info.metric_values,
+        }
+        let add_result = c.recourse_plans.add(plan_info)
+        c.recourse_plans = add_result.0
+        (c, ty_recourse_plan(inner_ty, add_result.1))
+    }
+
+    fn check_recourse_reason_expr(self, e: Expr) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+        let first_arg = expr_list_head(e.args)
+        let plan_pair = self.check_opt_expr(first_arg)
+        var c = plan_pair.0
+        let plan_ty = plan_pair.1
+        if plan_ty.kind != TypeKind::TyRecoursePlan {
+            return (c.report_recourse_reason_requires_plan(e.span, plan_ty), ty_error())
+        }
+        if plan_ty.epistemic_meta_id < 0 || plan_ty.epistemic_meta_id >= c.recourse_plans.count {
+            return (c.report_recourse_reason_requires_plan(e.span, plan_ty), ty_error())
+        }
+        let add_result = c.recourse_reason_witnesses.add(c.recourse_reason_witness_info_new(e.span, plan_ty.epistemic_meta_id))
+        c.recourse_reason_witnesses = add_result.0
+        (c, ty_named(recourse_reason_type_name()))
     }
 
     fn check_contest_witness_expr(self, e: Expr, witness_kind: i64) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {

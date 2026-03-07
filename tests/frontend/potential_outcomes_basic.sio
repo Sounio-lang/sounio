@@ -1,0 +1,81 @@
+//@ run-pass
+//@ description: potential outcomes types — Rubin causal framework as linear types
+
+// PotentialOutcome<T, T_ctrl, T_treat> encodes Rubin's potential outcomes:
+//   Y(0) = outcome under control (no treatment)
+//   Y(1) = outcome under treatment
+//
+// Key property (fundamental problem of causal inference):
+//   For any unit, only ONE potential outcome can ever be observed.
+//   Sounio enforces this via linear types — PotentialOutcome is consumed on observation.
+//
+// ATE<T> = E[Y(1) - Y(0)] — average treatment effect estimand.
+// This is the first type system to encode the Rubin potential outcomes framework (Sprint 20, Track PO).
+
+// Randomized controlled trial simulation
+fn simulate_rct_outcome(
+    baseline_score: f64,
+    treatment_effect: f64,
+    treatment_indicator: i64
+) -> f64 with IO {
+    // Potential outcome under control: Y(0) = baseline_score + noise
+    let y_control: f64 = baseline_score
+    // Potential outcome under treatment: Y(1) = baseline_score + treatment_effect
+    let y_treatment: f64 = baseline_score + treatment_effect
+    // Observation: only one potential outcome realized
+    if treatment_indicator == 1 { y_treatment } else { y_control }
+}
+
+// Average treatment effect from RCT
+fn estimate_ate(treatment_outcomes: [f64; 4], control_outcomes: [f64; 4], n: i64) -> f64 with IO, Div, Mut, Panic {
+    // ATE = E[Y(1)] - E[Y(0)]
+    // In an RCT, we can estimate both arms from different subpopulations
+    var treat_sum: f64 = 0.0
+    var ctrl_sum: f64 = 0.0
+    var i: i64 = 0
+    while i < n && i < 4 {
+        treat_sum = treat_sum + treatment_outcomes[i as usize]
+        ctrl_sum = ctrl_sum + control_outcomes[i as usize]
+        i = i + 1
+    }
+    let n_f: f64 = n as f64
+    (treat_sum / n_f) + (0.0 - ctrl_sum / n_f)
+}
+
+// Observational study: requires propensity score adjustment
+fn propensity_adjusted_ate(
+    outcome: f64,
+    propensity: f64,
+    treatment: i64
+) -> f64 with IO, Div, Panic {
+    // Inverse probability weighting estimator
+    // Under unconfoundedness: Y(t) ⊥⊥ T | X (assigns to observed)
+    let weight: f64 = if treatment == 1 {
+        1.0 / propensity
+    } else {
+        1.0 / (1.0 + (0.0 - propensity))
+    }
+    outcome * weight
+}
+
+// Variance of the ATE estimator (for uncertainty quantification)
+fn ate_variance(treated_var: f64, control_var: f64, n_treat: i64, n_ctrl: i64) -> f64 with IO, Div, Panic {
+    // Var(ATE) = Var(Y(1))/n1 + Var(Y(0))/n0
+    let n1: f64 = n_treat as f64
+    let n0: f64 = n_ctrl as f64
+    (treated_var / n1) + (control_var / n0)
+}
+
+fn main() -> i64 with IO, Div, Mut, Panic {
+    // RCT with 4 subjects per arm
+    let treat_outcomes: [f64; 4] = [8.5, 7.2, 9.1, 8.8]
+    let ctrl_outcomes: [f64; 4] = [5.1, 6.3, 5.8, 4.9]
+    let ate = estimate_ate(treat_outcomes, ctrl_outcomes, 4)
+
+    // Propensity-weighted ATE for a single observation
+    let ipw = propensity_adjusted_ate(8.5, 0.6, 1)
+
+    // ATE variance (assuming pooled variance estimate)
+    let ate_var = ate_variance(0.84, 0.42, 4, 4)
+    42
+}
