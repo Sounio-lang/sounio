@@ -5,9 +5,15 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
-SOUC="${SOUNIO_SOUC:-$ROOT_DIR/target/debug/souc}"
+if [ -n "${SOUNIO_SOUC:-}" ]; then
+  SOUC="$SOUNIO_SOUC"
+else
+  # shellcheck source=/dev/null
+  source "$ROOT_DIR/scripts/lib/resolve_souc.sh"
+  SOUC="$SOUC_BIN"
+fi
 OUT_JSON="${SOUNIO_SPRINT5_GATE_OUT:-$ROOT_DIR/artifacts/sprint5/contest_validated_gate.v1.json}"
-TIMEOUT_SECS="${SOUNIO_SPRINT5_TIMEOUT_SECS:-60}"
+TIMEOUT_SECS="${SOUNIO_SPRINT5_TIMEOUT_SECS:-180}"
 
 mkdir -p "$(dirname "$OUT_JSON")"
 
@@ -21,18 +27,87 @@ record() {
   printf '%s\t%s\t%s\n' "$name" "$status" "$reason" >> "$CASES_TSV"
 }
 
-# Case 1: souc check self-hosted/compiler/main.sio passes
+extract_error_patterns() {
+  local source_file="$1"
+  python3 - "$source_file" <<'PY'
+import re, sys
+from pathlib import Path
+
+source = Path(sys.argv[1]).read_text(encoding="utf-8")
+for line in source.splitlines():
+    m = re.match(r"\s*//@\s*error-pattern:\s*(.*)", line)
+    if m:
+        print(m.group(1))
+PY
+}
+
+run_selfhost_preflight_ok_case() {
+  local case_name="$1" source_file="$2" log_file="$3"
+  rm -f "$log_file"
+  set +e
+  timeout "$TIMEOUT_SECS" "$SOUC" run self-hosted/compiler/main.sio -- --probe-frontend "$source_file" > "$log_file" 2>&1
+  local rc=$?
+  set -e
+  if [ $rc -eq 124 ]; then
+    record "$case_name" "not_run" "timeout"
+  elif grep -q "probe_frontend: ok" "$log_file" 2>/dev/null; then
+    record "$case_name" "pass" "selfhost_frontend_preflight_ok"
+  elif grep -q "probe_frontend: fail" "$log_file" 2>/dev/null; then
+    local reason
+    reason="$(tail -1 "$log_file" | tr -s ' ' | head -c 120 || echo error)"
+    record "$case_name" "fail" "compile_failed: $reason"
+  else
+    local reason
+    reason="$(tail -1 "$log_file" | tr -s ' ' | head -c 120 || echo error)"
+    record "$case_name" "fail" "ambiguous_probe_output: $reason"
+  fi
+}
+
+run_selfhost_expect_fail_case() {
+  local case_name="$1" source_file="$2" log_file="$3"
+  shift 3
+  local patterns=("$@")
+  rm -f "$log_file"
+  set +e
+  timeout "$TIMEOUT_SECS" "$SOUC" run self-hosted/compiler/main.sio -- --probe-frontend "$source_file" > "$log_file" 2>&1
+  local rc=$?
+  set -e
+  if [ $rc -eq 124 ]; then
+    record "$case_name" "not_run" "timeout"
+    return
+  fi
+  if grep -q "probe_frontend: ok" "$log_file" 2>/dev/null; then
+    record "$case_name" "fail" "expected_compile_failure_but_probe_ok"
+    return
+  fi
+  if ! grep -q "probe_frontend: fail" "$log_file" 2>/dev/null; then
+    local reason
+    reason="$(tail -1 "$log_file" | tr -s ' ' | head -c 120 || echo error)"
+    record "$case_name" "fail" "ambiguous_probe_output: $reason"
+    return
+  fi
+  local pattern
+  for pattern in "${patterns[@]}"; do
+    if ! grep -qiF "$pattern" "$log_file" 2>/dev/null; then
+      record "$case_name" "fail" "missing_error_pattern: $pattern"
+      return
+    fi
+  done
+  record "$case_name" "pass" "selfhost_frontend_compile_fail_matched"
+}
+
+# Case 1: self-hosted compiler frontend probe for main.sio passes
 set +e
-timeout "$TIMEOUT_SECS" "$SOUC" check self-hosted/compiler/main.sio > /tmp/sprint5_check_main.log 2>&1
+timeout "$TIMEOUT_SECS" "$SOUC" run self-hosted/compiler/main.sio -- --self-test > /tmp/sprint5_check_main.log 2>&1
 rc=$?
 set -e
 if [ $rc -eq 0 ]; then
-  record "check_main_sio" "pass" "all_checks_passed"
+  record "selfhost_compiler_main_self_test" "pass" "all_checks_passed"
 elif [ $rc -eq 124 ]; then
-  record "check_main_sio" "not_run" "timeout"
+  record "selfhost_compiler_main_self_test" "not_run" "timeout"
 else
   reason="$(tail -1 /tmp/sprint5_check_main.log | tr -s ' ' | head -c 80 || echo error)"
-  record "check_main_sio" "fail" "check_failed: $reason"
+  record "selfhost_compiler_main_self_test" "fail" "check_failed: $reason"
 fi
 
 # Case 2: TyPolicy/TyContest/TyRobust in check/types.sio
@@ -53,7 +128,7 @@ for ctor in ty_policy ty_contest ty_robust; do
   fi
 done
 
-# Case 4: compile-fail test stubs exist
+# Case 4: compile-fail fixtures exist
 for f in contest_no_silent_unwrap contest_requires_annotation robust_not_validated; do
   tgt="tests/compile-fail/${f}.sio"
   if [ -f "$tgt" ]; then
@@ -78,6 +153,19 @@ for kind in TypePolicy TypeContest TypeRobust; do
     record "dispatch_$kind" "pass" "found_in_check_sio"
   else
     record "dispatch_$kind" "fail" "not_found_in_check_sio"
+  fi
+done
+
+# Case 7-9: self-hosted frontend enforces the compile-fail fixtures
+for f in contest_no_silent_unwrap contest_requires_annotation robust_not_validated; do
+  tgt="tests/compile-fail/${f}.sio"
+  if [ -f "$tgt" ]; then
+    mapfile -t patterns < <(extract_error_patterns "$tgt")
+    run_selfhost_expect_fail_case \
+      "compile_fail_fixture_${f}" \
+      "$tgt" \
+      "/tmp/${f}.selfhost_probe.log" \
+      "${patterns[@]}"
   fi
 done
 

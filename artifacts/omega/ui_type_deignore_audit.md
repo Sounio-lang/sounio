@@ -1,7 +1,7 @@
 # UI Type De-ignore Audit
 
-- generated_at_utc: 2026-03-02T08:25:22Z
-- souc_bin: /home/demetrios/work/sounio/artifacts/omega/souc-bin/souc-linux-x86_64
+- generated_at_utc: 2026-03-06T21:52:08Z
+- souc_bin: /home/demetrios/work/sounio/souc
 - ignored_files: 38
 - safe_deignore_candidates: 0
 - ready_count: 0
@@ -28,10 +28,10 @@
 - tests/ui/type/comparison_type_mismatch.sio (BLOCKED: pinned binary does not enforce comparison type matching; self-hosted checker has E004)
 - tests/ui/type/condition_not_bool.sio (BLOCKED: pinned binary does not enforce bool conditions; self-hosted checker has E006)
 - tests/ui/type/continue_outside_loop.sio (BLOCKED: pinned binary does not enforce continue in loops; self-hosted checker has E045)
+- tests/ui/type/division_by_zero.sio (BLOCKED: pinned binary does not detect literal div-by-zero; self-hosted checker has E056)
 - tests/ui/type/division_by_zero_assign_const.sio (BLOCKED: pinned binary does not propagate const assignment denominator; self-hosted checker has E056)
 - tests/ui/type/division_by_zero_const_expr.sio (BLOCKED: pinned binary does not fold const denominator; self-hosted checker has E056)
 - tests/ui/type/division_by_zero_const_ident.sio (BLOCKED: pinned binary does not track const id denominator; self-hosted checker has E056)
-- tests/ui/type/division_by_zero.sio (BLOCKED: pinned binary does not detect literal div-by-zero; self-hosted checker has E056)
 - tests/ui/type/extra_args.sio (BLOCKED: pinned binary does not enforce call arity; self-hosted checker has E010)
 - tests/ui/type/field_not_found.sio (BLOCKED: pinned binary does not enforce field existence; self-hosted checker has E012)
 - tests/ui/type/if_branch_mismatch.sio (BLOCKED: pinned binary does not enforce branch type compatibility; self-hosted checker has E007)
@@ -40,10 +40,10 @@
 - tests/ui/type/logical_not_bool.sio (BLOCKED: pinned binary does not enforce logical not on bool; self-hosted checker has E005)
 - tests/ui/type/match_arm_mismatch.sio (BLOCKED: pinned binary does not enforce match arm types; self-hosted checker has E018)
 - tests/ui/type/method_not_found.sio (BLOCKED: pinned binary does not enforce method existence; self-hosted checker has E011)
+- tests/ui/type/modulo_by_zero.sio (BLOCKED: pinned binary does not detect literal mod-by-zero; self-hosted checker has E057)
 - tests/ui/type/modulo_by_zero_assign_const.sio (BLOCKED: pinned binary does not propagate const assignment divisor; self-hosted checker has E057)
 - tests/ui/type/modulo_by_zero_const_expr.sio (BLOCKED: pinned binary does not fold const divisor; self-hosted checker has E057)
 - tests/ui/type/modulo_by_zero_const_ident.sio (BLOCKED: pinned binary does not track const id divisor; self-hosted checker has E057)
-- tests/ui/type/modulo_by_zero.sio (BLOCKED: pinned binary does not detect literal mod-by-zero; self-hosted checker has E057)
 - tests/ui/type/modulo_float.sio (BLOCKED: pinned binary does not enforce integer-only modulo; self-hosted checker has E050)
 - tests/ui/type/not_callable.sio (BLOCKED: pinned binary does not enforce callable check; self-hosted checker has E017)
 - tests/ui/type/not_indexable.sio (BLOCKED: pinned binary does not enforce array indexing; self-hosted checker has E013)
@@ -70,10 +70,10 @@
 - tests/ui/type/comparison_type_mismatch.sio (exit=0, pattern_hit=true, first_line=All checks passed: tests/ui/type/comparison_type_mismatch.sio)
 - tests/ui/type/condition_not_bool.sio (exit=0, pattern_hit=true, first_line=All checks passed: tests/ui/type/condition_not_bool.sio)
 - tests/ui/type/continue_outside_loop.sio (exit=0, pattern_hit=true, first_line=All checks passed: tests/ui/type/continue_outside_loop.sio)
+- tests/ui/type/division_by_zero.sio (exit=0, pattern_hit=true, first_line=All checks passed: tests/ui/type/division_by_zero.sio)
 - tests/ui/type/division_by_zero_assign_const.sio (exit=0, pattern_hit=true, first_line=All checks passed: tests/ui/type/division_by_zero_assign_const.sio)
 - tests/ui/type/division_by_zero_const_expr.sio (exit=0, pattern_hit=true, first_line=All checks passed: tests/ui/type/division_by_zero_const_expr.sio)
 - tests/ui/type/division_by_zero_const_ident.sio (exit=0, pattern_hit=true, first_line=All checks passed: tests/ui/type/division_by_zero_const_ident.sio)
-- tests/ui/type/division_by_zero.sio (exit=0, pattern_hit=true, first_line=All checks passed: tests/ui/type/division_by_zero.sio)
 - tests/ui/type/extra_args.sio (exit=0, pattern_hit=false, first_line=All checks passed: tests/ui/type/extra_args.sio)
 - tests/ui/type/field_not_found.sio (exit=0, pattern_hit=true, first_line=All checks passed: tests/ui/type/field_not_found.sio)
 - tests/ui/type/if_branch_mismatch.sio (exit=0, pattern_hit=true, first_line=All checks passed: tests/ui/type/if_branch_mismatch.sio)

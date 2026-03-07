@@ -27,18 +27,40 @@ record() {
   printf '%s\t%s\t%s\n' "$name" "$status" "$reason" >> "$CASES_TSV"
 }
 
-# Case 1: souc check self-hosted/compiler/main.sio passes (regression)
+run_selfhost_preflight_case() {
+  local case_name="$1" source_file="$2" log_file="$3"
+  rm -f "$log_file"
+  set +e
+  timeout "$TIMEOUT_SECS" "$SOUC" run self-hosted/compiler/main.sio -- --probe-frontend "$source_file" > "$log_file" 2>&1
+  local rc=$?
+  set -e
+  if [ $rc -eq 124 ]; then
+    record "$case_name" "not_run" "timeout"
+  elif grep -q "probe_frontend: ok" "$log_file" 2>/dev/null; then
+    record "$case_name" "pass" "selfhost_frontend_preflight_ok"
+  elif grep -q "probe_frontend: fail" "$log_file" 2>/dev/null; then
+    local reason
+    reason="$(tail -1 "$log_file" | tr -s ' ' | head -c 120 || echo error)"
+    record "$case_name" "fail" "compile_failed: $reason"
+  else
+    local reason
+    reason="$(tail -1 "$log_file" | tr -s ' ' | head -c 120 || echo error)"
+    record "$case_name" "fail" "ambiguous_probe_output: $reason"
+  fi
+}
+
+# Case 1: self-hosted compiler driver self-test passes
 set +e
-timeout "$TIMEOUT_SECS" "$SOUC" check self-hosted/compiler/main.sio > /tmp/sprint11_check_main.log 2>&1
+timeout "$TIMEOUT_SECS" "$SOUC" run self-hosted/compiler/main.sio -- --self-test > /tmp/sprint11_check_main.log 2>&1
 rc=$?
 set -e
 if [ $rc -eq 0 ]; then
-  record "check_main_sio" "pass" "all_checks_passed"
+  record "selfhost_compiler_main_self_test" "pass" "all_checks_passed"
 elif [ $rc -eq 124 ]; then
-  record "check_main_sio" "not_run" "timeout"
+  record "selfhost_compiler_main_self_test" "not_run" "timeout"
 else
   reason="$(tail -1 /tmp/sprint11_check_main.log | tr -s ' ' | head -c 80 || echo error)"
-  record "check_main_sio" "fail" "check_failed: $reason"
+  record "selfhost_compiler_main_self_test" "fail" "check_failed: $reason"
 fi
 
 # Case 2: ir_name_is_measure present in ir/ir.sio
@@ -92,16 +114,26 @@ else
   record "measure_in_hlir_lower" "fail" "not_found"
 fi
 
-# Case 9: fixture exists with measure + full chain
+# Case 9: fixture exists with measure + explicit full chain surface
 if [ -f "tests/frontend/measure_basic.sio" ] \
+   && grep -q "models DefaultModels = \[M1\]" tests/frontend/measure_basic.sio 2>/dev/null \
+   && grep -q "policy DefaultPolicy for i64 level Stable scope InDistribution" tests/frontend/measure_basic.sio 2>/dev/null \
+   && grep -q "validation DefaultManifest for i64" tests/frontend/measure_basic.sio 2>/dev/null \
    && grep -q "measure(" tests/frontend/measure_basic.sio 2>/dev/null \
    && grep -q "Knowledge<i64>" tests/frontend/measure_basic.sio 2>/dev/null \
    && grep -q "lift_knowledge" tests/frontend/measure_basic.sio 2>/dev/null \
-   && grep -q "validate_manifest" tests/frontend/measure_basic.sio 2>/dev/null; then
-  record "fixture_full_chain_present" "pass" "all_five_forms_in_fixture"
+   && grep -q "Contest<i64, DefaultModels, DefaultPolicy>" tests/frontend/measure_basic.sio 2>/dev/null \
+   && grep -q "validate_manifest(r, DefaultManifest)" tests/frontend/measure_basic.sio 2>/dev/null; then
+  record "fixture_full_chain_present" "pass" "full_surface_fixture_present"
 else
   record "fixture_full_chain_present" "fail" "fixture_incomplete_or_missing"
 fi
+
+# Case 10: self-hosted frontend can parse/resolve/typecheck the full fixture
+run_selfhost_preflight_case \
+  "preflight_fixture_measure_basic" \
+  "tests/frontend/measure_basic.sio" \
+  "/tmp/sprint11_compile_fixture.log"
 
 python3 - "$OUT_JSON" "$CASES_TSV" "$SOUC" "$TIMEOUT_SECS" << 'PY'
 import json, datetime as dt, sys

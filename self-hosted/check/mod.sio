@@ -8,6 +8,7 @@
 
 module check::mod
 
+use ir::ir::*
 use parser::ast::*
 
 struct CheckResult {
@@ -15,7 +16,377 @@ struct CheckResult {
     had_error: bool,
 }
 
+struct CheckArtifactsResult {
+    error_count: i64,
+    had_error: bool,
+    checker: Checker,
+}
+
+struct CheckEpistemicResult {
+    error_count: i64,
+    had_error: bool,
+    epistemic: IrEpistemicSection,
+}
+
+struct CheckBoxedEpistemicResult {
+    error_count: i64,
+    had_error: bool,
+    epistemic: Box<IrEpistemicSection>,
+}
+
+fn check_policy_requirements_to_ir(
+    opt: Option<Box<PolicyRequirementInfoList>>,
+    out: [IrPolicyRequirementInfo; 8],
+    idx: i64
+) -> [IrPolicyRequirementInfo; 8] with Mut, Panic, Div, Alloc {
+    match opt {
+        Some(list) => {
+            var next = out
+            if idx < 8 {
+                next[idx as usize] = IrPolicyRequirementInfo {
+                    metric_id: (*list).head.metric_id,
+                    metric_name: (*list).head.metric_name,
+                    op: (*list).head.op,
+                    threshold: (*list).head.threshold,
+                }
+            }
+            check_policy_requirements_to_ir((*list).tail, next, idx + 1)
+        }
+        None => out
+    }
+}
+
+fn checker_to_ir_epistemic(checker: Checker) -> IrEpistemicSection with Mut, Panic, Div, Alloc {
+    var ep = ir_empty_epistemic_section()
+
+    ep.model_family_count = checker.model_families.count
+    if ep.model_family_count > IR_MAX_EPI_MODEL_FAMILIES {
+        ep.model_family_count = IR_MAX_EPI_MODEL_FAMILIES
+    }
+    var i: i64 = 0
+    while i < ep.model_family_count {
+        let info = checker.model_families.get(i)
+        ep.model_families[i as usize] = IrModelFamilyInfo {
+            id: i,
+            name: info.name,
+            model_names: info.model_names,
+            model_count: info.model_count,
+            input_ty: info.input_ty,
+            output_ty: info.output_ty,
+        }
+        i = i + 1
+    }
+
+    ep.policy_count = checker.policies.count
+    if ep.policy_count > IR_MAX_EPI_POLICIES {
+        ep.policy_count = IR_MAX_EPI_POLICIES
+    }
+    i = 0
+    while i < ep.policy_count {
+        let info = checker.policies.get(i)
+        ep.policies[i as usize] = IrPolicyInfo {
+            id: i,
+            name: info.name,
+            target_ty: info.target_ty,
+            level_name: info.level_name,
+            scope_name: info.scope_name,
+            level_id: info.level_id,
+            scope_id: info.scope_id,
+            requirements: check_policy_requirements_to_ir(info.requirements, [ir_empty_policy_requirement_info(); 8], 0),
+            requirement_count: if info.requirement_count < 8 { info.requirement_count } else { 8 },
+        }
+        i = i + 1
+    }
+
+    ep.decision_policy_count = checker.decision_policies.count
+    if ep.decision_policy_count > IR_MAX_EPI_DECISION_POLICIES {
+        ep.decision_policy_count = IR_MAX_EPI_DECISION_POLICIES
+    }
+    i = 0
+    while i < ep.decision_policy_count {
+        let info = checker.decision_policies.get(i)
+        ep.decision_policies[i as usize] = IrDecisionPolicyInfo {
+            id: i,
+            name: info.name,
+            target_ty: info.target_ty,
+            requirements: check_policy_requirements_to_ir(info.requirements, [ir_empty_policy_requirement_info(); 8], 0),
+            requirement_count: if info.requirement_count < 8 { info.requirement_count } else { 8 },
+        }
+        i = i + 1
+    }
+
+    ep.deferral_policy_count = checker.deferral_policies.count
+    if ep.deferral_policy_count > IR_MAX_EPI_DEFERRAL_POLICIES {
+        ep.deferral_policy_count = IR_MAX_EPI_DEFERRAL_POLICIES
+    }
+    i = 0
+    while i < ep.deferral_policy_count {
+        let info = checker.deferral_policies.get(i)
+        ep.deferral_policies[i as usize] = IrDeferralPolicyInfo {
+            id: i,
+            name: info.name,
+            target_ty: info.target_ty,
+            route_name: info.route_name,
+            requirements: check_policy_requirements_to_ir(info.requirements, [ir_empty_policy_requirement_info(); 8], 0),
+            requirement_count: if info.requirement_count < 8 { info.requirement_count } else { 8 },
+        }
+        i = i + 1
+    }
+
+    ep.validation_count = checker.validations.count
+    if ep.validation_count > IR_MAX_EPI_VALIDATIONS {
+        ep.validation_count = IR_MAX_EPI_VALIDATIONS
+    }
+    i = 0
+    while i < ep.validation_count {
+        let info = checker.validations.get(i)
+        ep.validations[i as usize] = IrValidationPolicyInfo {
+            id: i,
+            name: info.name,
+            target_ty: info.target_ty,
+        }
+        i = i + 1
+    }
+
+    ep.mechanistic_report_count = checker.mechanistic_reports.count
+    if ep.mechanistic_report_count > IR_MAX_EPI_MECHANISTIC_REPORTS {
+        ep.mechanistic_report_count = IR_MAX_EPI_MECHANISTIC_REPORTS
+    }
+    i = 0
+    while i < ep.mechanistic_report_count {
+        let info = checker.mechanistic_reports.get(i)
+        ep.mechanistic_reports[i as usize] = IrMechanisticReportInfo {
+            id: i,
+            latent_state_divergence: info.latent_state_divergence,
+            causal_decomposition_divergence: info.causal_decomposition_divergence,
+            intervention_response_divergence: info.intervention_response_divergence,
+            parameter_role_divergence: info.parameter_role_divergence,
+            structural_explanation_distance: info.structural_explanation_distance,
+            aggregate_divergence: info.aggregate_divergence,
+        }
+        i = i + 1
+    }
+
+    ep.posterior_weights_count = checker.posterior_weights.count
+    if ep.posterior_weights_count > IR_MAX_EPI_POSTERIOR_WEIGHTS {
+        ep.posterior_weights_count = IR_MAX_EPI_POSTERIOR_WEIGHTS
+    }
+    i = 0
+    while i < ep.posterior_weights_count {
+        let info = checker.posterior_weights.get(i)
+        ep.posterior_weights[i as usize] = IrPosteriorWeightsInfo {
+            id: i,
+            model_names: info.model_names,
+            weights: info.weights,
+            count: info.count,
+        }
+        i = i + 1
+    }
+
+    ep.counterexample_count = checker.counterexamples.count
+    if ep.counterexample_count > IR_MAX_EPI_COUNTEREXAMPLES {
+        ep.counterexample_count = IR_MAX_EPI_COUNTEREXAMPLES
+    }
+    i = 0
+    while i < ep.counterexample_count {
+        let info = checker.counterexamples.get(i)
+        ep.counterexamples[i as usize] = IrCounterexampleInfo {
+            id: i,
+            model_name: info.model_name,
+            subgroup_name: info.subgroup_name,
+            metric_name: info.metric_name,
+            observed_value: info.observed_value,
+            threshold_value: info.threshold_value,
+            summary: info.summary,
+        }
+        i = i + 1
+    }
+
+    ep.audit_count = checker.audits.count
+    if ep.audit_count > IR_MAX_EPI_AUDITS {
+        ep.audit_count = IR_MAX_EPI_AUDITS
+    }
+    i = 0
+    while i < ep.audit_count {
+        let info = checker.audits.get(i)
+        ep.audits[i as usize] = IrAuditInfo {
+            id: i,
+            name: info.name,
+            span_start: info.span_start,
+            span_end: info.span_end,
+            target_inner_ty: info.target_inner_ty,
+            family_id: info.family_id,
+            policy_id: info.policy_id,
+            metric_known: info.metric_known,
+            metric_values: info.metric_values,
+            mechanistic_report_id: info.mechanistic_report_id,
+            posterior_weights_id: info.posterior_weights_id,
+            counterexample_id: info.counterexample_id,
+        }
+        i = i + 1
+    }
+
+    ep.contest_count = checker.contests.count
+    if ep.contest_count > IR_MAX_EPI_CONTESTS {
+        ep.contest_count = IR_MAX_EPI_CONTESTS
+    }
+    i = 0
+    while i < ep.contest_count {
+        let info = checker.contests.get(i)
+        ep.contests[i as usize] = IrContestInfo {
+            id: i,
+            span_start: info.span_start,
+            span_end: info.span_end,
+            audit_id: info.audit_id,
+            family_id: info.family_id,
+            policy_id: info.policy_id,
+            model_names: info.model_names,
+            model_count: info.model_count,
+            metric_known: info.metric_known,
+            metric_values: info.metric_values,
+            mechanistic_report_id: info.mechanistic_report_id,
+            posterior_weights_id: info.posterior_weights_id,
+            counterexample_id: info.counterexample_id,
+            provenance_bundle_id: info.provenance_bundle_id,
+        }
+        i = i + 1
+    }
+
+    ep.contest_witness_count = checker.contest_witnesses.count
+    if ep.contest_witness_count > IR_MAX_EPI_CONTEST_WITNESSES {
+        ep.contest_witness_count = IR_MAX_EPI_CONTEST_WITNESSES
+    }
+    i = 0
+    while i < ep.contest_witness_count {
+        let info = checker.contest_witnesses.get(i)
+        ep.contest_witnesses[i as usize] = IrContestWitnessInfo {
+            id: i,
+            span_start: info.span_start,
+            span_end: info.span_end,
+            witness_kind: info.witness_kind,
+            contest_id: info.contest_id,
+        }
+        i = i + 1
+    }
+
+    ep.robust_proof_count = checker.robust_proofs.count
+    if ep.robust_proof_count > IR_MAX_EPI_ROBUST_PROOFS {
+        ep.robust_proof_count = IR_MAX_EPI_ROBUST_PROOFS
+    }
+    i = 0
+    while i < ep.robust_proof_count {
+        let info = checker.robust_proofs.get(i)
+        ep.robust_proofs[i as usize] = IrRobustProofInfo {
+            id: i,
+            span_start: info.span_start,
+            span_end: info.span_end,
+            audit_id: info.audit_id,
+            contest_id: info.contest_id,
+            policy_id: info.policy_id,
+            level_id: info.level_id,
+            scope_id: info.scope_id,
+            metric_known: info.metric_known,
+            metric_values: info.metric_values,
+        }
+        i = i + 1
+    }
+
+    ep.decision_certificate_count = checker.decision_certificates.count
+    if ep.decision_certificate_count > IR_MAX_EPI_DECISION_CERTIFICATES {
+        ep.decision_certificate_count = IR_MAX_EPI_DECISION_CERTIFICATES
+    }
+    i = 0
+    while i < ep.decision_certificate_count {
+        let info = checker.decision_certificates.get(i)
+        ep.decision_certificates[i as usize] = IrDecisionCertificateInfo {
+            id: i,
+            span_start: info.span_start,
+            span_end: info.span_end,
+            audit_id: info.audit_id,
+            robust_proof_id: info.robust_proof_id,
+            decision_policy_id: info.decision_policy_id,
+            inner_ty: info.inner_ty,
+            metric_known: info.metric_known,
+            metric_values: info.metric_values,
+        }
+        i = i + 1
+    }
+
+    ep.deferred_certificate_count = checker.deferred_certificates.count
+    if ep.deferred_certificate_count > IR_MAX_EPI_DEFERRED_CERTIFICATES {
+        ep.deferred_certificate_count = IR_MAX_EPI_DEFERRED_CERTIFICATES
+    }
+    i = 0
+    while i < ep.deferred_certificate_count {
+        let info = checker.deferred_certificates.get(i)
+        ep.deferred_certificates[i as usize] = IrDeferredCertificateInfo {
+            id: i,
+            span_start: info.span_start,
+            span_end: info.span_end,
+            audit_id: info.audit_id,
+            contest_id: info.contest_id,
+            robust_proof_id: info.robust_proof_id,
+            deferral_policy_id: info.deferral_policy_id,
+            evidence_kind: info.evidence_kind,
+            reason_code: info.reason_code,
+            inner_ty: info.inner_ty,
+            metric_known: info.metric_known,
+            metric_values: info.metric_values,
+        }
+        i = i + 1
+    }
+
+    ep.deferred_reason_witness_count = checker.deferred_reason_witnesses.count
+    if ep.deferred_reason_witness_count > IR_MAX_EPI_DEFERRED_REASON_WITNESSES {
+        ep.deferred_reason_witness_count = IR_MAX_EPI_DEFERRED_REASON_WITNESSES
+    }
+    i = 0
+    while i < ep.deferred_reason_witness_count {
+        let info = checker.deferred_reason_witnesses.get(i)
+        ep.deferred_reason_witnesses[i as usize] = IrDeferredReasonWitnessInfo {
+            id: i,
+            span_start: info.span_start,
+            span_end: info.span_end,
+            deferred_certificate_id: info.deferred_certificate_id,
+        }
+        i = i + 1
+    }
+
+    ep.validated_manifest_count = checker.validated_manifests.count
+    if ep.validated_manifest_count > IR_MAX_EPI_VALIDATED_MANIFESTS {
+        ep.validated_manifest_count = IR_MAX_EPI_VALIDATED_MANIFESTS
+    }
+    i = 0
+    while i < ep.validated_manifest_count {
+        let info = checker.validated_manifests.get(i)
+        ep.validated_manifests[i as usize] = IrValidatedManifestInfo {
+            id: i,
+            span_start: info.span_start,
+            span_end: info.span_end,
+            audit_id: info.audit_id,
+            robust_proof_id: info.robust_proof_id,
+            validation_id: info.validation_id,
+            inner_ty: info.inner_ty,
+        }
+        i = i + 1
+    }
+
+    ep
+}
+
+fn check_result_to_ir_epistemic(result: CheckArtifactsResult) -> IrEpistemicSection with Mut, Panic, Div, Alloc {
+    checker_to_ir_epistemic(result.checker)
+}
+
 fn check_program(prog: Program) -> CheckResult with Mut, Panic, Div, Alloc, IO {
+    let artifacts = check_program_with_artifacts(prog)
+    CheckResult {
+        error_count: artifacts.error_count,
+        had_error: artifacts.had_error,
+    }
+}
+
+fn check_program_with_artifacts(prog: Program) -> CheckArtifactsResult with Mut, Panic, Div, Alloc, IO {
     var c = checker_new()
 
     // Pass 1: collect definitions
@@ -24,8 +395,46 @@ fn check_program(prog: Program) -> CheckResult with Mut, Panic, Div, Alloc, IO {
     // Pass 2: check bodies
     c = c.check_items(prog.items)
 
-    CheckResult {
+    CheckArtifactsResult {
         error_count: c.error_count,
         had_error: c.had_error,
+        checker: c,
+    }
+}
+
+fn check_program_epistemic(prog: Program) -> CheckEpistemicResult with Mut, Panic, Div, Alloc, IO {
+    var c = checker_new()
+
+    c = c.collect_items(prog.items)
+    c = c.check_items(prog.items)
+
+    let error_count = c.error_count
+    let had_error = c.had_error
+    let epistemic = checker_to_ir_epistemic(c)
+
+    CheckEpistemicResult {
+        error_count: error_count,
+        had_error: had_error,
+        epistemic: epistemic,
+    }
+}
+
+fn check_program_boxed_ir_epistemic(prog: Program) -> CheckBoxedEpistemicResult with Mut, Panic, Div, Alloc, IO {
+    var c = checker_new()
+
+    c = c.collect_items(prog.items)
+    c = c.check_items(prog.items)
+    let error_count = c.error_count
+    let had_error = c.had_error
+
+    var ep = ir_empty_epistemic_section()
+    if !had_error {
+        ep = checker_to_ir_epistemic(c)
+    }
+
+    CheckBoxedEpistemicResult {
+        error_count: error_count,
+        had_error: had_error,
+        epistemic: Box::new(ep),
     }
 }

@@ -202,6 +202,14 @@ fn print_item_kind_label(kind: ItemKind) with IO {
         ItemEnum => print("  enum ")
         ItemImpl => print("  impl ")
         ItemTypeAlias => print("  type ")
+        ItemModels => print("  models ")
+        ItemPolicy => print("  policy ")
+        ItemAcquisitionPolicy => print("  acquisition_policy ")
+        ItemRecoursePolicy => print("  recourse_policy ")
+        ItemDecisionPolicy => print("  decision_policy ")
+        ItemDeferralPolicy => print("  deferral_policy ")
+        ItemValidation => print("  validation ")
+        ItemAudit => print("  audit ")
         ItemUse => print("  use ")
         ItemUnit => print("  unit ")
     }
@@ -214,6 +222,14 @@ fn print_item_kind_tag(kind: ItemKind) with IO {
         ItemEnum => print(" (Enum)")
         ItemImpl => print(" (Impl)")
         ItemTypeAlias => print(" (TypeAlias)")
+        ItemModels => print(" (Models)")
+        ItemPolicy => print(" (Policy)")
+        ItemAcquisitionPolicy => print(" (AcquisitionPolicy)")
+        ItemRecoursePolicy => print(" (RecoursePolicy)")
+        ItemDecisionPolicy => print(" (DecisionPolicy)")
+        ItemDeferralPolicy => print(" (DeferralPolicy)")
+        ItemValidation => print(" (Validation)")
+        ItemAudit => print(" (Audit)")
         ItemUse => print(" (Use)")
         ItemUnit => print(" (Unit)")
     }
@@ -1266,26 +1282,421 @@ fn print_cli_version() with IO {
 // ============================================================================
 // --emit-manifest: reproducibility artifact bundle
 // Emits a JSON manifest with source hash (DJB2), Merkle root, compiler
-// version, and provenance label for the given source file.
+// version, and epistemic audit records derived from checker + IR metadata.
 // ============================================================================
 
-fn emit_source_manifest(source_path: string) -> i32 with IO, Mut, Div {
+fn manifest_empty_name() -> Name {
+    Name { buf: [0; 128], len: 0 }
+}
+
+fn manifest_print_json_string(s: string) with IO {
+    print("\"")
+    print(s)
+    print("\"")
+}
+
+fn manifest_print_name_json(n: Name) with IO, Mut, Panic, Div {
+    print("\"")
+    print_name_bytes(n)
+    print("\"")
+}
+
+fn manifest_print_f64_json(value: f64) with IO, Div, Panic {
+    let abs_value = if value < 0.0 { 0.0 - value } else { value }
+    let scaled = (abs_value * 1000.0) as i64
+    let whole = scaled / 1000
+    let frac = scaled - whole * 1000
+    if value < 0.0 {
+        print("-")
+    }
+    print_int(whole)
+    print(".")
+    if frac < 100 { print("0") }
+    if frac < 10 { print("0") }
+    print_int(frac)
+}
+
+fn manifest_print_metric_name(metric_id: i64) with IO {
+    if metric_id == 0 { print("sign_consensus") }
+    else if metric_id == 1 { print("relative_band") }
+    else if metric_id == 2 { print("max_tail_risk") }
+    else if metric_id == 3 { print("mechanistic_divergence") }
+    else if metric_id == 4 { print("identifiability_floor") }
+    else { print("unknown_metric") }
+}
+
+fn manifest_print_compare_op_json(op: CompareOp) with IO {
+    if op == CompareOp::CmpLt { print("\"<\"") }
+    else if op == CompareOp::CmpLe { print("\"<=\"") }
+    else if op == CompareOp::CmpEq { print("\"==\"") }
+    else if op == CompareOp::CmpGe { print("\">=\"") }
+    else { print("\">\"") }
+}
+
+fn manifest_type_entry_list_get(opt: Option<Box<TypeEntryList>>, idx: i64) -> TypeEntry with Panic, Div, Alloc {
+    match opt {
+        None => empty_type_entry(),
+        Some(list) => {
+            if idx <= 0 {
+                (*list).head
+            } else {
+                manifest_type_entry_list_get((*list).tail, idx - 1)
+            }
+        }
+    }
+}
+
+fn manifest_print_type_name(ty: TypeEntry) with IO, Mut, Panic, Div, Alloc {
+    if ty.kind == TypeKind::TyI8 { print("i8"); return }
+    if ty.kind == TypeKind::TyI32 { print("i32"); return }
+    if ty.kind == TypeKind::TyI64 { print("i64"); return }
+    if ty.kind == TypeKind::TyU8 { print("u8"); return }
+    if ty.kind == TypeKind::TyU32 { print("u32"); return }
+    if ty.kind == TypeKind::TyU64 { print("u64"); return }
+    if ty.kind == TypeKind::TyF32 { print("f32"); return }
+    if ty.kind == TypeKind::TyF64 { print("f64"); return }
+    if ty.kind == TypeKind::TyBool { print("bool"); return }
+    if ty.kind == TypeKind::TyUnit { print("()"); return }
+    if ty.kind == TypeKind::TyString { print("string"); return }
+    if ty.kind == TypeKind::TyChar { print("char"); return }
+    if ty.kind == TypeKind::TyNamed { print_name_bytes(ty.name); return }
+    if ty.kind == TypeKind::TyModel {
+        print("Model<")
+        manifest_print_type_name(manifest_type_entry_list_get(ty.tuple_elems, 0))
+        print(", ")
+        manifest_print_type_name(manifest_type_entry_list_get(ty.tuple_elems, 1))
+        print(">")
+        return
+    }
+    if ty.kind == TypeKind::TyModelFamily {
+        print("ModelFamily<")
+        manifest_print_type_name(manifest_type_entry_list_get(ty.tuple_elems, 0))
+        print(", ")
+        manifest_print_type_name(manifest_type_entry_list_get(ty.tuple_elems, 1))
+        print(">")
+        return
+    }
+    if ty.kind == TypeKind::TyKnowledge
+        || ty.kind == TypeKind::TyPolicy
+        || ty.kind == TypeKind::TyDecisionPolicy
+        || ty.kind == TypeKind::TyDeferralPolicy
+        || ty.kind == TypeKind::TyContest
+        || ty.kind == TypeKind::TyRobust
+        || ty.kind == TypeKind::TyIntervention
+        || ty.kind == TypeKind::TyCounterfactual
+        || ty.kind == TypeKind::TyValidated
+        || ty.kind == TypeKind::TyAdmissible
+        || ty.kind == TypeKind::TyDeferred
+        || ty.kind == TypeKind::TyValidation {
+        if ty.kind == TypeKind::TyKnowledge { print("Knowledge<") }
+        else if ty.kind == TypeKind::TyPolicy { print("Policy<") }
+        else if ty.kind == TypeKind::TyDecisionPolicy { print("DecisionPolicy<") }
+        else if ty.kind == TypeKind::TyDeferralPolicy { print("DeferralPolicy<") }
+        else if ty.kind == TypeKind::TyContest { print("Contest<") }
+        else if ty.kind == TypeKind::TyRobust { print("Robust<") }
+        else if ty.kind == TypeKind::TyIntervention { print("Intervention<") }
+        else if ty.kind == TypeKind::TyCounterfactual { print("Counterfactual<") }
+        else if ty.kind == TypeKind::TyValidated { print("Validated<") }
+        else if ty.kind == TypeKind::TyAdmissible { print("Admissible<") }
+        else if ty.kind == TypeKind::TyDeferred { print("Deferred<") }
+        else { print("Validation<") }
+        match ty.inner {
+            Some(inner) => manifest_print_type_name(*inner)
+            None => print("?")
+        }
+        print(">")
+        return
+    }
+    if ty.kind == TypeKind::TyArray {
+        print("[")
+        match ty.inner {
+            Some(inner) => manifest_print_type_name(*inner)
+            None => print("?")
+        }
+        print("; ")
+        print_int(ty.array_size)
+        print("]")
+        return
+    }
+    print("<unknown>")
+}
+
+fn manifest_model_family_name(ep: IrEpistemicSection, id: i64) -> Name with Panic, Div {
+    if id >= 0 && id < ep.model_family_count { ep.model_families[id].name } else { manifest_empty_name() }
+}
+
+fn manifest_policy_name(ep: IrEpistemicSection, id: i64) -> Name with Panic, Div {
+    if id >= 0 && id < ep.policy_count { ep.policies[id].name } else { manifest_empty_name() }
+}
+
+fn manifest_policy_level_name(ep: IrEpistemicSection, id: i64) -> Name with Panic, Div {
+    if id >= 0 && id < ep.policy_count { ep.policies[id].level_name } else { manifest_empty_name() }
+}
+
+fn manifest_policy_scope_name(ep: IrEpistemicSection, id: i64) -> Name with Panic, Div {
+    if id >= 0 && id < ep.policy_count { ep.policies[id].scope_name } else { manifest_empty_name() }
+}
+
+fn manifest_validation_name(ep: IrEpistemicSection, id: i64) -> Name with Panic, Div {
+    if id >= 0 && id < ep.validation_count { ep.validations[id].name } else { manifest_empty_name() }
+}
+
+fn manifest_print_name_array(names: [Name; 16], count: i64) with IO, Mut, Panic, Div {
+    print("[")
+    var i: i64 = 0
+    while i < count && i < 16 {
+        if i > 0 { print(", ") }
+        manifest_print_name_json(names[i])
+        i = i + 1
+    }
+    print("]")
+}
+
+fn manifest_print_metric_snapshot(metric_known: [i64; 8], metric_values: [f64; 8]) with IO, Mut, Panic, Div {
+    print("{")
+    var emitted: i64 = 0
+    var i: i64 = 0
+    while i < 5 {
+        if metric_known[i] == 1 {
+            if emitted > 0 { print(", ") }
+            print("\"")
+            manifest_print_metric_name(i)
+            print("\": ")
+            manifest_print_f64_json(metric_values[i])
+            emitted = emitted + 1
+        }
+        i = i + 1
+    }
+    print("}")
+}
+
+fn manifest_print_epistemic_json(ep: IrEpistemicSection) with IO, Mut, Panic, Div, Alloc {
+    print("    \"model_families\": [\n")
+    var i: i64 = 0
+    while i < ep.model_family_count {
+        if i > 0 { print(",\n") }
+        print("      {\"id\": ")
+        print_int(i)
+        print(", \"name\": ")
+        manifest_print_name_json(ep.model_families[i].name)
+        print(", \"input_type\": \"")
+        manifest_print_type_name(ep.model_families[i].input_ty)
+        print("\", \"output_type\": \"")
+        manifest_print_type_name(ep.model_families[i].output_ty)
+        print("\", \"models\": ")
+        manifest_print_name_array(ep.model_families[i].model_names, ep.model_families[i].model_count)
+        print("}")
+        i = i + 1
+    }
+    print("\n    ],\n")
+
+    print("    \"policies\": [\n")
+    i = 0
+    while i < ep.policy_count {
+        if i > 0 { print(",\n") }
+        print("      {\"id\": ")
+        print_int(ep.policies[i].id)
+        print(", \"name\": ")
+        manifest_print_name_json(ep.policies[i].name)
+        print(", \"target_type\": \"")
+        manifest_print_type_name(ep.policies[i].target_ty)
+        print("\", \"level\": ")
+        manifest_print_name_json(ep.policies[i].level_name)
+        print(", \"scope\": ")
+        manifest_print_name_json(ep.policies[i].scope_name)
+        print(", \"requirements\": [")
+        var j: i64 = 0
+        while j < ep.policies[i].requirement_count && j < 8 {
+            if j > 0 { print(", ") }
+            print("{\"metric\": ")
+            manifest_print_name_json(ep.policies[i].requirements[j].metric_name)
+            print(", \"op\": ")
+            manifest_print_compare_op_json(ep.policies[i].requirements[j].op)
+            print(", \"threshold\": ")
+            manifest_print_f64_json(ep.policies[i].requirements[j].threshold)
+            print("}")
+            j = j + 1
+        }
+        print("]}")
+        i = i + 1
+    }
+    print("\n    ],\n")
+
+    print("    \"validations\": [\n")
+    i = 0
+    while i < ep.validation_count {
+        if i > 0 { print(",\n") }
+        print("      {\"id\": ")
+        print_int(i)
+        print(", \"name\": ")
+        manifest_print_name_json(ep.validations[i].name)
+        print(", \"target_type\": \"")
+        manifest_print_type_name(ep.validations[i].target_ty)
+        print("\"}")
+        i = i + 1
+    }
+    print("\n    ],\n")
+
+    print("    \"mechanistic_reports\": [\n")
+    i = 0
+    while i < ep.mechanistic_report_count {
+        if i > 0 { print(",\n") }
+        print("      {\"id\": ")
+        print_int(i)
+        print(", \"latent_state_divergence\": ")
+        manifest_print_f64_json(ep.mechanistic_reports[i].latent_state_divergence)
+        print(", \"causal_decomposition_divergence\": ")
+        manifest_print_f64_json(ep.mechanistic_reports[i].causal_decomposition_divergence)
+        print(", \"intervention_response_divergence\": ")
+        manifest_print_f64_json(ep.mechanistic_reports[i].intervention_response_divergence)
+        print(", \"parameter_role_divergence\": ")
+        manifest_print_f64_json(ep.mechanistic_reports[i].parameter_role_divergence)
+        print(", \"structural_explanation_distance\": ")
+        manifest_print_f64_json(ep.mechanistic_reports[i].structural_explanation_distance)
+        print(", \"aggregate_divergence\": ")
+        manifest_print_f64_json(ep.mechanistic_reports[i].aggregate_divergence)
+        print("}")
+        i = i + 1
+    }
+    print("\n    ],\n")
+
+    print("    \"counterexamples\": [\n")
+    i = 0
+    while i < ep.counterexample_count {
+        if i > 0 { print(",\n") }
+        print("      {\"id\": ")
+        print_int(i)
+        print(", \"summary\": ")
+        manifest_print_name_json(ep.counterexamples[i].summary)
+        print("}")
+        i = i + 1
+    }
+    print("\n    ],\n")
+
+    print("    \"contests\": [\n")
+    i = 0
+    while i < ep.contest_count {
+        if i > 0 { print(",\n") }
+        print("      {\"id\": ")
+        print_int(i)
+        print(", \"family_id\": ")
+        print_int(ep.contests[i].family_id)
+        print(", \"family_name\": ")
+        manifest_print_name_json(manifest_model_family_name(ep, ep.contests[i].family_id))
+        print(", \"policy_id\": ")
+        print_int(ep.contests[i].policy_id)
+        print(", \"policy_name\": ")
+        manifest_print_name_json(manifest_policy_name(ep, ep.contests[i].policy_id))
+        print(", \"models\": ")
+        manifest_print_name_array(ep.contests[i].model_names, ep.contests[i].model_count)
+        print(", \"metrics\": ")
+        manifest_print_metric_snapshot(ep.contests[i].metric_known, ep.contests[i].metric_values)
+        print(", \"mechanistic_report_id\": ")
+        print_int(ep.contests[i].mechanistic_report_id)
+        print(", \"counterexample_id\": ")
+        print_int(ep.contests[i].counterexample_id)
+        print(", \"posterior_weights_id\": ")
+        print_int(ep.contests[i].posterior_weights_id)
+        print(", \"provenance_bundle_id\": ")
+        print_int(ep.contests[i].provenance_bundle_id)
+        print("}")
+        i = i + 1
+    }
+    print("\n    ],\n")
+
+    print("    \"robust_proofs\": [\n")
+    i = 0
+    while i < ep.robust_proof_count {
+        if i > 0 { print(",\n") }
+        print("      {\"id\": ")
+        print_int(i)
+        print(", \"contest_id\": ")
+        print_int(ep.robust_proofs[i].contest_id)
+        print(", \"policy_id\": ")
+        print_int(ep.robust_proofs[i].policy_id)
+        print(", \"policy_name\": ")
+        manifest_print_name_json(manifest_policy_name(ep, ep.robust_proofs[i].policy_id))
+        print(", \"level\": ")
+        manifest_print_name_json(manifest_policy_level_name(ep, ep.robust_proofs[i].policy_id))
+        print(", \"scope\": ")
+        manifest_print_name_json(manifest_policy_scope_name(ep, ep.robust_proofs[i].policy_id))
+        print(", \"metrics\": ")
+        manifest_print_metric_snapshot(ep.robust_proofs[i].metric_known, ep.robust_proofs[i].metric_values)
+        print("}")
+        i = i + 1
+    }
+    print("\n    ],\n")
+
+    print("    \"validated_manifests\": [\n")
+    i = 0
+    while i < ep.validated_manifest_count {
+        if i > 0 { print(",\n") }
+        print("      {\"id\": ")
+        print_int(i)
+        print(", \"robust_proof_id\": ")
+        print_int(ep.validated_manifests[i].robust_proof_id)
+        print(", \"validation_id\": ")
+        print_int(ep.validated_manifests[i].validation_id)
+        print(", \"validation_name\": ")
+        manifest_print_name_json(manifest_validation_name(ep, ep.validated_manifests[i].validation_id))
+        print(", \"inner_type\": \"")
+        manifest_print_type_name(ep.validated_manifests[i].inner_ty)
+        print("\"}")
+        i = i + 1
+    }
+    print("\n    ]\n")
+}
+
+fn emit_source_manifest(source_path: string) -> i32 with IO, Mut, Div, Panic, Alloc {
+    let state = read_source_file(source_path)
+    let prog = parse_program_preloaded(state.token_count)
+    if fail_if_parse_errors() {
+        return 1
+    }
+
+    let resolve_result = resolve_program(prog)
+    if resolve_result.had_error {
+        print("Resolve errors: ")
+        print_int(resolve_result.error_count)
+        print("\n")
+        return 1
+    }
+
+    let check_result = check_program(prog)
+    if check_result.had_error {
+        print("Check errors: ")
+        print_int(check_result.error_count)
+        print("\n")
+        return 1
+    }
+
+    let lower_result = lower_program_to_ir(prog)
+    if lower_result.had_error {
+        print("Lower errors: ")
+        print_int(lower_result.error_count)
+        print("\n")
+        return 1
+    }
+
     let source_hash = intern_hash_string(source_path)
     let version_hash = intern_hash_string("0.4.0-selfhost")
     let merkle_root = intern_merkle_mix(source_hash, version_hash, 0, INTERN_MERKLE_SALT_A)
     print("{\n")
-    print("  \"schema\": \"sounio.manifest.v1\",\n")
+    print("  \"schema\": \"sounio.manifest.v2\",\n")
     print("  \"version\": \"0.4.0-selfhost\",\n")
-    print("  \"path\": \"")
-    print(source_path)
-    print("\",\n")
+    print("  \"path\": ")
+    manifest_print_json_string(source_path)
+    print(",\n")
     print("  \"source_hash\": ")
     print_int(source_hash)
     print(",\n")
     print("  \"merkle_root\": ")
     print_int(merkle_root)
     print(",\n")
-    print("  \"provenance\": \"ProvSource\"\n")
+    print("  \"provenance\": \"ProvSource\",\n")
+    print("  \"epistemic\": {\n")
+    manifest_print_epistemic_json(lower_result.module.epistemic)
+    print("  }\n")
     print("}\n")
     0
 }

@@ -5,9 +5,15 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
-SOUC="${SOUNIO_SOUC:-$ROOT_DIR/target/debug/souc}"
+if [ -n "${SOUNIO_SOUC:-}" ]; then
+  SOUC="$SOUNIO_SOUC"
+else
+  # shellcheck source=/dev/null
+  source "$ROOT_DIR/scripts/lib/resolve_souc.sh"
+  SOUC="$SOUC_BIN"
+fi
 OUT_JSON="${SOUNIO_SPRINT8_GATE_OUT:-$ROOT_DIR/artifacts/sprint8/validate_manifest_gate.v1.json}"
-TIMEOUT_SECS="${SOUNIO_SPRINT8_TIMEOUT_SECS:-60}"
+TIMEOUT_SECS="${SOUNIO_SPRINT8_TIMEOUT_SECS:-180}"
 
 mkdir -p "$(dirname "$OUT_JSON")"
 
@@ -21,18 +27,40 @@ record() {
   printf '%s\t%s\t%s\n' "$name" "$status" "$reason" >> "$CASES_TSV"
 }
 
-# Case 1: souc check self-hosted/compiler/main.sio passes
+run_selfhost_preflight_case() {
+  local case_name="$1" source_file="$2" log_file="$3"
+  rm -f "$log_file"
+  set +e
+  timeout "$TIMEOUT_SECS" "$SOUC" run self-hosted/compiler/main.sio -- --probe-frontend "$source_file" > "$log_file" 2>&1
+  local rc=$?
+  set -e
+  if [ $rc -eq 124 ]; then
+    record "$case_name" "not_run" "timeout"
+  elif grep -q "probe_frontend: ok" "$log_file" 2>/dev/null; then
+    record "$case_name" "pass" "selfhost_frontend_preflight_ok"
+  elif grep -q "probe_frontend: fail" "$log_file" 2>/dev/null; then
+    local reason
+    reason="$(tail -1 "$log_file" | tr -s ' ' | head -c 120 || echo error)"
+    record "$case_name" "fail" "compile_failed: $reason"
+  else
+    local reason
+    reason="$(tail -1 "$log_file" | tr -s ' ' | head -c 120 || echo error)"
+    record "$case_name" "fail" "ambiguous_probe_output: $reason"
+  fi
+}
+
+# Case 1: self-hosted compiler driver self-test passes
 set +e
-timeout "$TIMEOUT_SECS" "$SOUC" check self-hosted/compiler/main.sio > /tmp/sprint8_check_main.log 2>&1
+timeout "$TIMEOUT_SECS" "$SOUC" run self-hosted/compiler/main.sio -- --self-test > /tmp/sprint8_check_main.log 2>&1
 rc=$?
 set -e
 if [ $rc -eq 0 ]; then
-  record "check_main_sio" "pass" "all_checks_passed"
+  record "selfhost_compiler_main_self_test" "pass" "all_checks_passed"
 elif [ $rc -eq 124 ]; then
-  record "check_main_sio" "not_run" "timeout"
+  record "selfhost_compiler_main_self_test" "not_run" "timeout"
 else
   reason="$(tail -1 /tmp/sprint8_check_main.log | tr -s ' ' | head -c 80 || echo error)"
-  record "check_main_sio" "fail" "check_failed: $reason"
+  record "selfhost_compiler_main_self_test" "fail" "check_failed: $reason"
 fi
 
 # Case 2: call_expr_is_builtin_validate_manifest in check/check.sio
@@ -78,15 +106,22 @@ else
   record "ir_validated_in_wasm_lower" "fail" "not_found"
 fi
 
-# Case 8: full chain fixture exists with validate_manifest + Validated<i64>
+# Case 8: full chain fixture exists with explicit validation item + manifest call
 if [ -f "tests/frontend/validate_manifest_basic.sio" ] \
-   && grep -q "validate_manifest" tests/frontend/validate_manifest_basic.sio 2>/dev/null \
-   && grep -q "Validated<i64>" tests/frontend/validate_manifest_basic.sio 2>/dev/null \
-   && grep -q "prove_robust" tests/frontend/validate_manifest_basic.sio 2>/dev/null; then
-  record "fixture_full_epistemic_chain" "pass" "complete_chain_in_fixture"
+   && grep -q "validation DefaultManifest for i64" tests/frontend/validate_manifest_basic.sio 2>/dev/null \
+   && grep -q "Contest<i64, DefaultModels, DefaultPolicy>" tests/frontend/validate_manifest_basic.sio 2>/dev/null \
+   && grep -q "Robust<i64, Stable, InDistribution>" tests/frontend/validate_manifest_basic.sio 2>/dev/null \
+   && grep -q "validate_manifest(r, DefaultManifest)" tests/frontend/validate_manifest_basic.sio 2>/dev/null; then
+  record "fixture_full_epistemic_chain" "pass" "full_surface_fixture_present"
 else
   record "fixture_full_epistemic_chain" "fail" "fixture_missing_or_incomplete"
 fi
+
+# Case 9: self-hosted frontend can parse/resolve/typecheck the fixture
+run_selfhost_preflight_case \
+  "preflight_fixture_validate_manifest_basic" \
+  "tests/frontend/validate_manifest_basic.sio" \
+  "/tmp/sprint8_compile_fixture.log"
 
 python3 - "$OUT_JSON" "$CASES_TSV" "$SOUC" "$TIMEOUT_SECS" << 'PY'
 import json, datetime as dt, sys

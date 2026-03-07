@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT_DIR"
 source "$ROOT_DIR/scripts/lib/resolve_souc.sh"
 
@@ -14,7 +14,37 @@ SEED_TIMEOUT_SECS="${SEED_TIMEOUT_SECS:-900}"
 SEED_FALLBACK_ENABLED="${SEED_FALLBACK_ENABLED:-0}"
 TRUSTED_SEED_FALLBACK_PATH="${TRUSTED_SEED_FALLBACK_PATH:-bootstrap/seeds/sounio-bootstrap-linux-x86_64.sio.bin}"
 BOOTSTRAP_KERNEL_MANIFEST_PATH="${BOOTSTRAP_KERNEL_MANIFEST_PATH:-${SOUNIO_SELFHOST_BOOTSTRAP_MANIFEST:-bootstrap/selfhost-kernel.manifest}}"
-BOOTSTRAP_SEED_TRUSTED_KEY="${SOUNIO_BOOTSTRAP_SEED_TRUSTED_KEY:-sounio-dev}"
+BOOTSTRAP_MANIFEST_METADATA_PATH="${BOOTSTRAP_MANIFEST_METADATA_PATH:-bootstrap/artifacts/manifest.v2.json}"
+BOOTSTRAP_SEED_TRUSTED_KEY="${SOUNIO_BOOTSTRAP_SEED_TRUSTED_KEY:-}"
+
+resolve_bootstrap_seed_trusted_key() {
+  if [[ -n "$BOOTSTRAP_SEED_TRUSTED_KEY" ]]; then
+    echo "$BOOTSTRAP_SEED_TRUSTED_KEY"
+    return 0
+  fi
+
+  if [[ -f "$BOOTSTRAP_MANIFEST_METADATA_PATH" ]] && command -v python3 >/dev/null 2>&1; then
+    local manifest_key
+    manifest_key="$(
+      python3 - "$BOOTSTRAP_MANIFEST_METADATA_PATH" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], "r", encoding="utf-8") as f:
+    payload = json.load(f)
+print(payload.get("key_id", ""))
+PY
+    )"
+    if [[ -n "$manifest_key" ]]; then
+      echo "$manifest_key"
+      return 0
+    fi
+  fi
+
+  echo "sounio-dev"
+}
+
+BOOTSTRAP_SEED_TRUSTED_KEY="$(resolve_bootstrap_seed_trusted_key)"
 
 run_with_timeout() {
   local seconds="$1"

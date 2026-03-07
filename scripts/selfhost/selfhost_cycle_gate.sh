@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT_DIR"
 
+EXPLICIT_SOUC_BIN="${SOUC_BIN:-}"
 SOUC_BIN="${SOUC_BIN:-./souc}"
-if [ -x "$ROOT_DIR/scripts/omega/omega_resolve_souc_bin.sh" ]; then
+if [ -z "$EXPLICIT_SOUC_BIN" ] && [ -x "$ROOT_DIR/scripts/omega/omega_resolve_souc_bin.sh" ]; then
   SOUC_BIN="$(
     OMEGA_SOUC_REQUIRE_PINNED="${OMEGA_SOUC_REQUIRE_PINNED:-1}" \
     OMEGA_SOUC_ALLOW_LOCAL_FALLBACK="${OMEGA_SOUC_ALLOW_LOCAL_FALLBACK:-0}" \
@@ -15,6 +16,8 @@ fi
 WORK_DIR="${WORK_DIR:-/tmp/sounio-selfhost-cycle-gate}"
 LOG_DIR="$WORK_DIR/logs"
 ARTIFACT_DIR="$WORK_DIR/artifacts"
+BOOTSTRAP_BUNDLE_DIR="${BOOTSTRAP_BUNDLE_DIR:-bootstrap}"
+BOOTSTRAP_STATE_BASE_DIR="${BOOTSTRAP_STATE_BASE_DIR:-$WORK_DIR/bootstrap-state}"
 
 STAGE1_PATH="${STAGE1_PATH:-$ARTIFACT_DIR/selfhost.stage1.sobc}"
 STAGE2_PATH="${STAGE2_PATH:-$ARTIFACT_DIR/selfhost.stage2.sobc}"
@@ -32,6 +35,37 @@ NO_RUST_MARKER_ENFORCE="${SOUNIO_SELFHOST_CYCLE_NO_RUST_MARKER_ENFORCE:-1}"
 NO_RUST_MARKER_TIMEOUT_SECS="${SOUNIO_SELFHOST_CYCLE_NO_RUST_MARKER_TIMEOUT_SECS:-30}"
 BOOTSTRAP_MANIFEST_PATH="${BOOTSTRAP_MANIFEST_PATH:-${SOUNIO_SELFHOST_BOOTSTRAP_MANIFEST:-bootstrap/selfhost-kernel.manifest}}"
 INDEPENDENCE_CONTRACT_PATH="${INDEPENDENCE_CONTRACT_PATH:-benchmarks/independence/contract.v1.json}"
+BOOTSTRAP_MANIFEST_METADATA_PATH="${BOOTSTRAP_MANIFEST_METADATA_PATH:-bootstrap/artifacts/manifest.v2.json}"
+BOOTSTRAP_SEED_TRUSTED_KEY="${SOUNIO_BOOTSTRAP_SEED_TRUSTED_KEY:-}"
+
+resolve_bootstrap_seed_trusted_key() {
+  if [[ -n "$BOOTSTRAP_SEED_TRUSTED_KEY" ]]; then
+    echo "$BOOTSTRAP_SEED_TRUSTED_KEY"
+    return 0
+  fi
+
+  if [[ -f "$BOOTSTRAP_MANIFEST_METADATA_PATH" ]] && command -v python3 >/dev/null 2>&1; then
+    local manifest_key
+    manifest_key="$(
+      python3 - "$BOOTSTRAP_MANIFEST_METADATA_PATH" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], "r", encoding="utf-8") as f:
+    payload = json.load(f)
+print(payload.get("key_id", ""))
+PY
+    )"
+    if [[ -n "$manifest_key" ]]; then
+      echo "$manifest_key"
+      return 0
+    fi
+  fi
+
+  echo "sounio-dev"
+}
+
+BOOTSTRAP_SEED_TRUSTED_KEY="$(resolve_bootstrap_seed_trusted_key)"
 
 if [ "$CYCLE_FORCE_DYNAMIC" = "1" ]; then
   # Cycle reproducibility should remain testable even when a seed is present.
@@ -83,8 +117,11 @@ echo "SELFHOST_CYCLE_GATE_START"
 echo "stage1_path=$STAGE1_PATH"
 echo "stage2_path=$STAGE2_PATH"
 echo "cache_path=$CACHE_PATH"
+echo "bootstrap_bundle_dir=$BOOTSTRAP_BUNDLE_DIR"
+echo "bootstrap_state_base_dir=$BOOTSTRAP_STATE_BASE_DIR"
 echo "seed_enforce=$SEED_ENFORCE"
 echo "seed_path=$SEED_PATH"
+echo "seed_trusted_key=$BOOTSTRAP_SEED_TRUSTED_KEY"
 echo "cycle_force_dynamic=$CYCLE_FORCE_DYNAMIC"
 echo "no_rust_marker_enforce=$NO_RUST_MARKER_ENFORCE"
 echo "bootstrap_manifest=$BOOTSTRAP_MANIFEST_PATH"
@@ -116,76 +153,80 @@ if [ ! -x "$SOUC_BIN" ]; then
   exit 1
 fi
 
-capture_stage_artifact() {
+extract_cycle_digest() {
+  local report_path="$1"
+  python3 - "$report_path" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], "r", encoding="utf-8") as f:
+    payload = json.load(f)
+
+stage1 = payload.get("stage1_digest", "")
+stage2 = payload.get("stage2_digest", "")
+deterministic = payload.get("deterministic", False)
+artifacts_checked = payload.get("artifacts_checked", 0)
+
+if not stage1 or not stage2:
+    raise SystemExit(f"missing cycle digest fields in {sys.argv[1]}")
+if stage1 != stage2:
+    raise SystemExit(
+        f"non-deterministic cycle report {sys.argv[1]} stage1={stage1} stage2={stage2}"
+    )
+
+print(f"cycle_digest={stage1}")
+print(f"deterministic={'1' if deterministic else '0'}")
+print(f"artifacts_checked={artifacts_checked}")
+PY
+}
+
+run_cycle_stage() {
   local stage_label="$1"
   local stage_log="$2"
   local stage_path="$3"
-  local marker_cmd="grep -E"
+  local state_dir="$4"
+  local cycle_report_path="$state_dir/bootstrap/cycle-report.v1.json"
 
-  if [ -f "$CACHE_PATH" ]; then
-    cp "$CACHE_PATH" "$stage_path"
-    return 0
+  rm -rf "$state_dir"
+
+  run_with_timeout "$COMPILE_TIMEOUT_SECS" env \
+    SOUNIO_BOOTSTRAP_SEED_ENFORCE="$SEED_ENFORCE" \
+    SOUNIO_BOOTSTRAP_SEED_PATH="$SEED_PATH" \
+    SOUNIO_BOOTSTRAP_SEED_SHA256_PATH="$SEED_SHA256_PATH" \
+    SOUNIO_BOOTSTRAP_SEED_SIG_PATH="$SEED_SIG_PATH" \
+    SOUNIO_BOOTSTRAP_SEED_TRUSTED_KEY="$BOOTSTRAP_SEED_TRUSTED_KEY" \
+    "$SOUC_BIN" bootstrap verify --bundle "$BOOTSTRAP_BUNDLE_DIR" >"$stage_log" 2>&1
+
+  run_with_timeout "$COMPILE_TIMEOUT_SECS" env \
+    SOUNIO_BOOTSTRAP_SEED_ENFORCE="$SEED_ENFORCE" \
+    SOUNIO_BOOTSTRAP_SEED_PATH="$SEED_PATH" \
+    SOUNIO_BOOTSTRAP_SEED_SHA256_PATH="$SEED_SHA256_PATH" \
+    SOUNIO_BOOTSTRAP_SEED_SIG_PATH="$SEED_SIG_PATH" \
+    SOUNIO_BOOTSTRAP_SEED_TRUSTED_KEY="$BOOTSTRAP_SEED_TRUSTED_KEY" \
+    "$SOUC_BIN" bootstrap init --bundle "$BOOTSTRAP_BUNDLE_DIR" --state "$state_dir" >>"$stage_log" 2>&1
+
+  run_with_timeout "$COMPILE_TIMEOUT_SECS" env \
+    SOUNIO_BOOTSTRAP_SEED_ENFORCE="$SEED_ENFORCE" \
+    SOUNIO_BOOTSTRAP_SEED_PATH="$SEED_PATH" \
+    SOUNIO_BOOTSTRAP_SEED_SHA256_PATH="$SEED_SHA256_PATH" \
+    SOUNIO_BOOTSTRAP_SEED_SIG_PATH="$SEED_SIG_PATH" \
+    SOUNIO_BOOTSTRAP_SEED_TRUSTED_KEY="$BOOTSTRAP_SEED_TRUSTED_KEY" \
+    "$SOUC_BIN" bootstrap cycle --state "$state_dir" >>"$stage_log" 2>&1
+
+  if [ ! -f "$cycle_report_path" ]; then
+    echo "error: missing ${stage_label} cycle report at $cycle_report_path" >&2
+    exit 1
   fi
 
-  if [ "$SEED_ENFORCE" = "1" ] && [ "$CYCLE_FORCE_DYNAMIC" != "1" ]; then
-    if [ ! -s "$stage_log" ]; then
-      echo "error: missing seed-root stage log payload: $stage_log" >&2
-      exit 1
-    fi
-
-    if command -v rg >/dev/null 2>&1; then
-      marker_cmd="rg -n"
-    fi
-
-    if ! $marker_cmd "SELFHOST=run schema=v1 event=selfhost_input_check status=resolved" "$stage_log" >/dev/null 2>&1; then
-      echo "error: seed-root stage log missing selfhost_input_check marker: $stage_log" >&2
-      exit 1
-    fi
-
-    if ! $marker_cmd "SELFHOST=seed schema=v1 event=bootstrap_seed status=ok" "$stage_log" >/dev/null 2>&1; then
-      echo "error: seed-root stage log missing bootstrap_seed marker: $stage_log" >&2
-      exit 1
-    fi
-
-    # Seed-root mode can execute directly from the trusted seed artifact without
-    # producing a dynamic directory cache; use deterministic stage logs as the
-    # reproducibility artifact in this mode.
-    cp "$stage_log" "$stage_path"
-    echo "SELFHOST_CYCLE_GATE_INFO stage=$stage_label artifact_source=log"
-    return 0
-  fi
-
-  echo "error: missing ${stage_label} cache artifact at $CACHE_PATH" >&2
-  exit 1
+  extract_cycle_digest "$cycle_report_path" >"$stage_path"
+  echo "SELFHOST_CYCLE_GATE_INFO stage=$stage_label artifact_source=cycle_report state_dir=$state_dir"
 }
 
-# Stage1: compile self-hosted suite and persist deterministic directory cache bytes.
-rm -f "$CACHE_PATH"
-run_with_timeout "$COMPILE_TIMEOUT_SECS" env \
-  SOUNIO_BOOTSTRAP_SEED_ENFORCE="$SEED_ENFORCE" \
-  SOUNIO_BOOTSTRAP_SEED_PATH="$SEED_PATH" \
-  SOUNIO_BOOTSTRAP_SEED_SHA256_PATH="$SEED_SHA256_PATH" \
-  SOUNIO_BOOTSTRAP_SEED_SIG_PATH="$SEED_SIG_PATH" \
-  SOUNIO_SELFHOST_BOOTSTRAP_MANIFEST="$BOOTSTRAP_MANIFEST_PATH" \
-  SOUNIO_SELFHOST_STRICT_MODULE_GATING="1" \
-  SOUNIO_SELFHOST_WRITE_DIR_CACHE="1" \
-  "$SOUC_BIN" run self-hosted/ -- parse-all shard 0 1 balanced >"$STAGE1_LOG" 2>&1
+STAGE1_STATE_DIR="$BOOTSTRAP_STATE_BASE_DIR/stage1"
+STAGE2_STATE_DIR="$BOOTSTRAP_STATE_BASE_DIR/stage2"
 
-capture_stage_artifact "stage1" "$STAGE1_LOG" "$STAGE1_PATH"
-
-# Stage2: repeat the self-hosted build and compare resulting cache bytes.
-rm -f "$CACHE_PATH"
-run_with_timeout "$COMPILE_TIMEOUT_SECS" env \
-  SOUNIO_BOOTSTRAP_SEED_ENFORCE="$SEED_ENFORCE" \
-  SOUNIO_BOOTSTRAP_SEED_PATH="$SEED_PATH" \
-  SOUNIO_BOOTSTRAP_SEED_SHA256_PATH="$SEED_SHA256_PATH" \
-  SOUNIO_BOOTSTRAP_SEED_SIG_PATH="$SEED_SIG_PATH" \
-  SOUNIO_SELFHOST_BOOTSTRAP_MANIFEST="$BOOTSTRAP_MANIFEST_PATH" \
-  SOUNIO_SELFHOST_STRICT_MODULE_GATING="1" \
-  SOUNIO_SELFHOST_WRITE_DIR_CACHE="1" \
-  "$SOUC_BIN" run self-hosted/ -- parse-all shard 0 1 balanced >"$STAGE2_LOG" 2>&1
-
-capture_stage_artifact "stage2" "$STAGE2_LOG" "$STAGE2_PATH"
+run_cycle_stage "stage1" "$STAGE1_LOG" "$STAGE1_PATH" "$STAGE1_STATE_DIR"
+run_cycle_stage "stage2" "$STAGE2_LOG" "$STAGE2_PATH" "$STAGE2_STATE_DIR"
 
 if ! cmp -s "$STAGE1_PATH" "$STAGE2_PATH"; then
   echo "error: self-host cycle mismatch: $STAGE1_PATH != $STAGE2_PATH" >&2
@@ -210,7 +251,8 @@ SHA_STAGE2="$(sha256sum "$STAGE2_PATH" | awk '{print $1}')"
   echo "stage1_sha256=$SHA_STAGE1"
   echo "stage2_sha256=$SHA_STAGE2"
   echo "stage_bytes=$(wc -c <"$STAGE1_PATH")"
-  echo "cache_path=$CACHE_PATH"
+  echo "stage1_state_dir=$STAGE1_STATE_DIR"
+  echo "stage2_state_dir=$STAGE2_STATE_DIR"
 } >"$SUMMARY_FILE"
 
 echo "SELFHOST_CYCLE_GATE_DONE sha=$SHA_STAGE1 bytes=$(wc -c <"$STAGE1_PATH")"

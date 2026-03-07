@@ -12,11 +12,15 @@ use parser::ast::*
 use lexer::mod::*
 use ir::ir::*
 use check::types::*
-use check::mod::{check_program, CheckResult}
+use check::mod::{check_program, check_program_epistemic, check_program_boxed_ir_epistemic}
 use resolve::mod::{resolve_modules, ResolveBatchResult}
+use resolve::resolve::*
+use resolve::imports::*
+use resolve::symbol::*
+use resolve::scope::*
 use parser::mod::{parse_program, count_items}
 use io::file_write::*
-use ir::lower::{lower_program_to_ir}
+use ir::lower::{lower_program_to_ir, lower_program_to_ir_with_epistemic}
 use ir::serialize::{serialize_ir_module}
 use native::encode::*
 use native::elf::*
@@ -278,6 +282,218 @@ fn path_directory(path: string) -> string with Mut, Panic, Div {
     str_from_bytes(buf, last_slash)
 }
 
+fn ir_epistemic_offset_id(id: i64, offset: i64) -> i64 {
+    if id >= 0 { id + offset } else { id }
+}
+
+fn ir_merge_adjust_epistemic_instr(instr: IrInstr, contest_offset: i64, robust_offset: i64, decision_offset: i64, deferred_offset: i64, validated_offset: i64) -> IrInstr {
+    var out = instr
+    if out.op == IrOpcode::IrContest || out.op == IrOpcode::IrLiftKnowledge {
+        out.label_id = ir_epistemic_offset_id(out.label_id, contest_offset)
+    } else if out.op == IrOpcode::IrProveRobust {
+        out.label_id = ir_epistemic_offset_id(out.label_id, robust_offset)
+    } else if out.op == IrOpcode::IrAdmitAction {
+        out.label_id = ir_epistemic_offset_id(out.label_id, decision_offset)
+    } else if out.op == IrOpcode::IrDeferAction {
+        out.label_id = ir_epistemic_offset_id(out.label_id, deferred_offset)
+    } else if out.op == IrOpcode::IrValidated {
+        out.label_id = ir_epistemic_offset_id(out.label_id, validated_offset)
+    }
+    out
+}
+
+fn ir_merge_epistemic_sections(dst: IrEpistemicSection, src: IrEpistemicSection) -> IrEpistemicSection with Mut, Panic, Div {
+    var merged = dst
+    let family_offset = dst.model_family_count
+    let policy_offset = dst.policy_count
+    let decision_policy_offset = dst.decision_policy_count
+    let deferral_policy_offset = dst.deferral_policy_count
+    let validation_offset = dst.validation_count
+    let mechanistic_offset = dst.mechanistic_report_count
+    let posterior_weights_offset = dst.posterior_weights_count
+    let counterexample_offset = dst.counterexample_count
+    let audit_offset = dst.audit_count
+    let contest_offset = dst.contest_count
+    let contest_witness_offset = dst.contest_witness_count
+    let robust_offset = dst.robust_proof_count
+    let decision_certificate_offset = dst.decision_certificate_count
+    let deferred_certificate_offset = dst.deferred_certificate_count
+    let deferred_reason_witness_offset = dst.deferred_reason_witness_count
+    let validated_offset = dst.validated_manifest_count
+
+    var i: i64 = 0
+    while i < src.model_family_count && merged.model_family_count < IR_MAX_EPI_MODEL_FAMILIES {
+        var info = src.model_families[i]
+        info.id = merged.model_family_count
+        merged.model_families[merged.model_family_count as usize] = info
+        merged.model_family_count = merged.model_family_count + 1
+        i = i + 1
+    }
+
+    i = 0
+    while i < src.policy_count && merged.policy_count < IR_MAX_EPI_POLICIES {
+        var info = src.policies[i]
+        info.id = merged.policy_count
+        merged.policies[merged.policy_count as usize] = info
+        merged.policy_count = merged.policy_count + 1
+        i = i + 1
+    }
+
+    i = 0
+    while i < src.decision_policy_count && merged.decision_policy_count < IR_MAX_EPI_DECISION_POLICIES {
+        var info = src.decision_policies[i]
+        info.id = merged.decision_policy_count
+        merged.decision_policies[merged.decision_policy_count as usize] = info
+        merged.decision_policy_count = merged.decision_policy_count + 1
+        i = i + 1
+    }
+
+    i = 0
+    while i < src.deferral_policy_count && merged.deferral_policy_count < IR_MAX_EPI_DEFERRAL_POLICIES {
+        var info = src.deferral_policies[i]
+        info.id = merged.deferral_policy_count
+        merged.deferral_policies[merged.deferral_policy_count as usize] = info
+        merged.deferral_policy_count = merged.deferral_policy_count + 1
+        i = i + 1
+    }
+
+    i = 0
+    while i < src.validation_count && merged.validation_count < IR_MAX_EPI_VALIDATIONS {
+        var info = src.validations[i]
+        info.id = merged.validation_count
+        merged.validations[merged.validation_count as usize] = info
+        merged.validation_count = merged.validation_count + 1
+        i = i + 1
+    }
+
+    i = 0
+    while i < src.mechanistic_report_count && merged.mechanistic_report_count < IR_MAX_EPI_MECHANISTIC_REPORTS {
+        var info = src.mechanistic_reports[i]
+        info.id = merged.mechanistic_report_count
+        merged.mechanistic_reports[merged.mechanistic_report_count as usize] = info
+        merged.mechanistic_report_count = merged.mechanistic_report_count + 1
+        i = i + 1
+    }
+
+    i = 0
+    while i < src.posterior_weights_count && merged.posterior_weights_count < IR_MAX_EPI_POSTERIOR_WEIGHTS {
+        var info = src.posterior_weights[i]
+        info.id = merged.posterior_weights_count
+        merged.posterior_weights[merged.posterior_weights_count as usize] = info
+        merged.posterior_weights_count = merged.posterior_weights_count + 1
+        i = i + 1
+    }
+
+    i = 0
+    while i < src.counterexample_count && merged.counterexample_count < IR_MAX_EPI_COUNTEREXAMPLES {
+        var info = src.counterexamples[i]
+        info.id = merged.counterexample_count
+        merged.counterexamples[merged.counterexample_count as usize] = info
+        merged.counterexample_count = merged.counterexample_count + 1
+        i = i + 1
+    }
+
+    i = 0
+    while i < src.audit_count && merged.audit_count < IR_MAX_EPI_AUDITS {
+        var info = src.audits[i]
+        info.id = merged.audit_count
+        info.family_id = ir_epistemic_offset_id(info.family_id, family_offset)
+        info.policy_id = ir_epistemic_offset_id(info.policy_id, policy_offset)
+        info.mechanistic_report_id = ir_epistemic_offset_id(info.mechanistic_report_id, mechanistic_offset)
+        info.posterior_weights_id = ir_epistemic_offset_id(info.posterior_weights_id, posterior_weights_offset)
+        info.counterexample_id = ir_epistemic_offset_id(info.counterexample_id, counterexample_offset)
+        merged.audits[merged.audit_count as usize] = info
+        merged.audit_count = merged.audit_count + 1
+        i = i + 1
+    }
+
+    i = 0
+    while i < src.contest_count && merged.contest_count < IR_MAX_EPI_CONTESTS {
+        var info = src.contests[i]
+        info.id = merged.contest_count
+        info.audit_id = ir_epistemic_offset_id(info.audit_id, audit_offset)
+        info.family_id = ir_epistemic_offset_id(info.family_id, family_offset)
+        info.policy_id = ir_epistemic_offset_id(info.policy_id, policy_offset)
+        info.mechanistic_report_id = ir_epistemic_offset_id(info.mechanistic_report_id, mechanistic_offset)
+        info.posterior_weights_id = ir_epistemic_offset_id(info.posterior_weights_id, posterior_weights_offset)
+        info.counterexample_id = ir_epistemic_offset_id(info.counterexample_id, counterexample_offset)
+        merged.contests[merged.contest_count as usize] = info
+        merged.contest_count = merged.contest_count + 1
+        i = i + 1
+    }
+
+    i = 0
+    while i < src.contest_witness_count && merged.contest_witness_count < IR_MAX_EPI_CONTEST_WITNESSES {
+        var info = src.contest_witnesses[i]
+        info.id = merged.contest_witness_count
+        info.contest_id = ir_epistemic_offset_id(info.contest_id, contest_offset)
+        merged.contest_witnesses[merged.contest_witness_count as usize] = info
+        merged.contest_witness_count = merged.contest_witness_count + 1
+        i = i + 1
+    }
+
+    i = 0
+    while i < src.robust_proof_count && merged.robust_proof_count < IR_MAX_EPI_ROBUST_PROOFS {
+        var info = src.robust_proofs[i]
+        info.id = merged.robust_proof_count
+        info.audit_id = ir_epistemic_offset_id(info.audit_id, audit_offset)
+        info.contest_id = ir_epistemic_offset_id(info.contest_id, contest_offset)
+        info.policy_id = ir_epistemic_offset_id(info.policy_id, policy_offset)
+        merged.robust_proofs[merged.robust_proof_count as usize] = info
+        merged.robust_proof_count = merged.robust_proof_count + 1
+        i = i + 1
+    }
+
+    i = 0
+    while i < src.validated_manifest_count && merged.validated_manifest_count < IR_MAX_EPI_VALIDATED_MANIFESTS {
+        var info = src.validated_manifests[i]
+        info.id = merged.validated_manifest_count
+        info.audit_id = ir_epistemic_offset_id(info.audit_id, audit_offset)
+        info.robust_proof_id = ir_epistemic_offset_id(info.robust_proof_id, robust_offset)
+        info.validation_id = ir_epistemic_offset_id(info.validation_id, validation_offset)
+        merged.validated_manifests[merged.validated_manifest_count as usize] = info
+        merged.validated_manifest_count = merged.validated_manifest_count + 1
+        i = i + 1
+    }
+
+    i = 0
+    while i < src.decision_certificate_count && merged.decision_certificate_count < IR_MAX_EPI_DECISION_CERTIFICATES {
+        var info = src.decision_certificates[i]
+        info.id = merged.decision_certificate_count
+        info.audit_id = ir_epistemic_offset_id(info.audit_id, audit_offset)
+        info.robust_proof_id = ir_epistemic_offset_id(info.robust_proof_id, robust_offset)
+        info.decision_policy_id = ir_epistemic_offset_id(info.decision_policy_id, decision_policy_offset)
+        merged.decision_certificates[merged.decision_certificate_count as usize] = info
+        merged.decision_certificate_count = merged.decision_certificate_count + 1
+        i = i + 1
+    }
+
+    i = 0
+    while i < src.deferred_certificate_count && merged.deferred_certificate_count < IR_MAX_EPI_DEFERRED_CERTIFICATES {
+        var info = src.deferred_certificates[i]
+        info.id = merged.deferred_certificate_count
+        info.audit_id = ir_epistemic_offset_id(info.audit_id, audit_offset)
+        info.contest_id = ir_epistemic_offset_id(info.contest_id, contest_offset)
+        info.robust_proof_id = ir_epistemic_offset_id(info.robust_proof_id, robust_offset)
+        info.deferral_policy_id = ir_epistemic_offset_id(info.deferral_policy_id, deferral_policy_offset)
+        merged.deferred_certificates[merged.deferred_certificate_count as usize] = info
+        merged.deferred_certificate_count = merged.deferred_certificate_count + 1
+        i = i + 1
+    }
+
+    i = 0
+    while i < src.deferred_reason_witness_count && merged.deferred_reason_witness_count < IR_MAX_EPI_DEFERRED_REASON_WITNESSES {
+        var info = src.deferred_reason_witnesses[i]
+        info.id = merged.deferred_reason_witness_count
+        info.deferred_certificate_id = ir_epistemic_offset_id(info.deferred_certificate_id, deferred_certificate_offset)
+        merged.deferred_reason_witnesses[merged.deferred_reason_witness_count as usize] = info
+        merged.deferred_reason_witness_count = merged.deferred_reason_witness_count + 1
+        i = i + 1
+    }
+
+    merged
+}
+
 // ============================================================
 // IR module merging
 // ============================================================
@@ -286,6 +502,11 @@ fn ir_merge_modules(dst: IrModule, src: IrModule) -> IrModule with Mut, Panic, D
     // Merge src functions into dst, adjusting fn_ids in call instructions
     var merged = dst
     let fn_offset = dst.fn_count  // src function IDs shift by this amount
+    let contest_offset = dst.epistemic.contest_count
+    let robust_offset = dst.epistemic.robust_proof_count
+    let decision_offset = dst.epistemic.decision_certificate_count
+    let deferred_offset = dst.epistemic.deferred_certificate_count
+    let validated_offset = dst.epistemic.validated_manifest_count
 
     // Copy functions
     var fi: i64 = 0
@@ -299,6 +520,7 @@ fn ir_merge_modules(dst: IrModule, src: IrModule) -> IrModule with Mut, Panic, D
                     func.instrs[ii].fn_id = func.instrs[ii].fn_id + fn_offset
                 }
             }
+            func.instrs[ii] = ir_merge_adjust_epistemic_instr(func.instrs[ii], contest_offset, robust_offset, decision_offset, deferred_offset, validated_offset)
             ii = ii + 1
         }
         merged.functions[merged.fn_count] = func
@@ -313,6 +535,8 @@ fn ir_merge_modules(dst: IrModule, src: IrModule) -> IrModule with Mut, Panic, D
         merged.string_count = merged.string_count + 1
         si = si + 1
     }
+
+    merged.epistemic = ir_merge_epistemic_sections(merged.epistemic, src.epistemic)
 
     merged
 }
@@ -342,6 +566,11 @@ struct MultiModuleIrResult {
     error_msg: string,
 }
 
+struct MultiModuleFrontendResult {
+    ok: bool,
+    error_msg: string,
+}
+
 fn multimodule_ir_ok(m: IrModule) -> MultiModuleIrResult {
     MultiModuleIrResult { ok: true, module: m, error_msg: "" }
 }
@@ -350,8 +579,15 @@ fn multimodule_ir_error(msg: string) -> MultiModuleIrResult {
     MultiModuleIrResult { ok: false, module: ir_empty_module(), error_msg: msg }
 }
 
-fn load_multimodule_ir(main_path: string) -> MultiModuleIrResult with IO, Mut, Div, Panic, Alloc {
-    // Step 1: Parse main file
+fn multimodule_frontend_ok() -> MultiModuleFrontendResult {
+    MultiModuleFrontendResult { ok: true, error_msg: "" }
+}
+
+fn multimodule_frontend_error(msg: string) -> MultiModuleFrontendResult {
+    MultiModuleFrontendResult { ok: false, error_msg: msg }
+}
+
+fn preflight_multimodule_frontend(main_path: string) -> MultiModuleFrontendResult with IO, Mut, Div, Panic, Alloc {
     let main_prog = load_module_file(main_path)
     let main_items = count_items(main_prog)
 
@@ -359,28 +595,21 @@ fn load_multimodule_ir(main_path: string) -> MultiModuleIrResult with IO, Mut, D
     print_int(main_items)
     print(" items\n")
 
-    // Step 3: Load imported modules transitively (BFS with visited-set)
-    // file_paths[] is parallel to programs[] — stores each module's resolved path
-    // so transitive imports resolve relative to the importing module's directory,
-    // not the root file's directory.
     var programs: [Program; 64] = [empty_program(); 64]
     var file_paths: [string; 64] = [""; 64]
     programs[0] = main_prog
     file_paths[0] = main_path
     var loaded: i64 = 1
 
-    // Visited set: tracks file paths already loaded to prevent re-loading and cycles
     var visited_paths: [string; 64] = [""; 64]
     var visited_count: i64 = 0
     visited_paths[0] = main_path
     visited_count = 1
 
-    // work_front: index into programs[] of the next module whose imports we must process
     var work_front: i64 = 0
     var i: i64 = 0
 
     while work_front < loaded && loaded < 64 {
-        // Derive base directory from the module being processed (not the root file)
         let cur_dir = path_directory(file_paths[work_front])
         let work_imports = extract_imports_from_ast(programs[work_front])
         work_front = work_front + 1
@@ -418,8 +647,6 @@ fn load_multimodule_ir(main_path: string) -> MultiModuleIrResult with IO, Mut, D
     print_int(loaded)
     print(" modules\n")
 
-    // Step 4: Resolve all modules together.
-    // Fast path: single module with no imports does not need cross-module resolution.
     let main_imports = extract_imports_from_ast(programs[0])
     let needs_resolution = loaded > 1 || main_imports.count > 0
     if needs_resolution {
@@ -428,13 +655,12 @@ fn load_multimodule_ir(main_path: string) -> MultiModuleIrResult with IO, Mut, D
             print("Module resolution failed: ")
             print_int(resolve_result.error_count)
             print(" errors\n")
-            return multimodule_ir_error("module_resolution_failed")
+            return multimodule_frontend_error("module_resolution_failed")
         }
     } else {
         print("Resolve skip: single module with no imports\n")
     }
 
-    // Step 5: Type check all modules
     i = 0
     while i < loaded {
         print("Type checking module ")
@@ -445,12 +671,63 @@ fn load_multimodule_ir(main_path: string) -> MultiModuleIrResult with IO, Mut, D
             print("Type check failed for module ")
             print_int(i)
             print("\n")
-            return multimodule_ir_error("type_check_failed")
+            return multimodule_frontend_error("type_check_failed")
         }
         print("Type check complete for module ")
         print_int(i)
         print("\n")
         i = i + 1
+    }
+
+    multimodule_frontend_ok()
+}
+
+fn load_multimodule_ir(main_path: string) -> MultiModuleIrResult with IO, Mut, Div, Panic, Alloc {
+    let main_prog = load_module_file(main_path)
+    var programs: [Program; 64] = [empty_program(); 64]
+    var file_paths: [string; 64] = [""; 64]
+    programs[0] = main_prog
+    file_paths[0] = main_path
+    var loaded: i64 = 1
+    var visited_paths: [string; 64] = [""; 64]
+    var visited_count: i64 = 0
+    visited_paths[0] = main_path
+    visited_count = 1
+    var work_front: i64 = 0
+    var i: i64 = 0
+
+    while work_front < loaded && loaded < 64 {
+        let cur_dir = path_directory(file_paths[work_front])
+        let work_imports = extract_imports_from_ast(programs[work_front])
+        work_front = work_front + 1
+        i = 0
+        while i < work_imports.count && loaded < 64 {
+            let file_path_local = use_path_to_file_path(work_imports.paths[i], cur_dir)
+            let file_path_stdlib = use_path_to_file_path(work_imports.paths[i], "stdlib")
+            var file_path = file_path_local
+            if !file_exists(file_path_local) {
+                file_path = file_path_stdlib
+            }
+            if !visited_contains(visited_paths, visited_count, file_path) {
+                visited_paths[visited_count] = file_path
+                visited_count = visited_count + 1
+                if file_exists(file_path) {
+                    programs[loaded] = load_module_file(file_path)
+                    file_paths[loaded] = file_path
+                    loaded = loaded + 1
+                }
+            }
+            i = i + 1
+        }
+    }
+
+    let main_imports = extract_imports_from_ast(programs[0])
+    let needs_resolution = loaded > 1 || main_imports.count > 0
+    if needs_resolution {
+        let resolve_result = resolve_modules(programs, loaded)
+        if resolve_result.had_error {
+            return multimodule_ir_error("module_resolution_failed")
+        }
     }
 
     // Step 6: Lower ALL modules to IR and merge.
@@ -459,21 +736,28 @@ fn load_multimodule_ir(main_path: string) -> MultiModuleIrResult with IO, Mut, D
         return multimodule_ir_error("no_modules_loaded")
     }
 
-    print("IR lowering module 0\n")
-    let seed_lower_result = lower_program_to_ir(programs[0])
+    let seed_check_result = check_program_epistemic(programs[0])
+    if seed_check_result.had_error {
+        print("Type check failed during IR lowering for module 0\n")
+        return multimodule_ir_error("type_check_failed")
+    }
+    let seed_lower_result = lower_program_to_ir_with_epistemic(programs[0], seed_check_result.epistemic)
     if seed_lower_result.had_error {
         print("IR lowering failed for module 0\n")
         return multimodule_ir_error("ir_lowering_failed")
     }
     var merged_module = seed_lower_result.module
-    print("IR lowering complete for module 0\n")
 
     i = 1
     while i < loaded {
-        print("IR lowering module ")
-        print_int(i)
-        print("\n")
-        let lower_result = lower_program_to_ir(programs[i])
+        let check_result = check_program_epistemic(programs[i])
+        if check_result.had_error {
+            print("Type check failed during IR lowering for module ")
+            print_int(i)
+            print("\n")
+            return multimodule_ir_error("type_check_failed")
+        }
+        let lower_result = lower_program_to_ir_with_epistemic(programs[i], check_result.epistemic)
         if lower_result.had_error {
             print("IR lowering failed for module ")
             print_int(i)
@@ -481,9 +765,6 @@ fn load_multimodule_ir(main_path: string) -> MultiModuleIrResult with IO, Mut, D
             return multimodule_ir_error("ir_lowering_failed")
         }
         merged_module = ir_merge_modules(merged_module, lower_result.module)
-        print("IR lowering complete for module ")
-        print_int(i)
-        print("\n")
         i = i + 1
     }
 
@@ -497,6 +778,69 @@ fn load_multimodule_ir(main_path: string) -> MultiModuleIrResult with IO, Mut, D
     }
 
     multimodule_ir_ok(merged_module)
+}
+
+fn load_multimodule_epistemic_into(main_path: string, out: &! IrEpistemicSection) -> MultiModuleFrontendResult with IO, Mut, Div, Panic, Alloc {
+    let main_prog = load_module_file(main_path)
+    var programs: [Program; 64] = [empty_program(); 64]
+    var file_paths: [string; 64] = [""; 64]
+    programs[0] = main_prog
+    file_paths[0] = main_path
+    var loaded: i64 = 1
+    var visited_paths: [string; 64] = [""; 64]
+    var visited_count: i64 = 0
+    visited_paths[0] = main_path
+    visited_count = 1
+    var work_front: i64 = 0
+    var i: i64 = 0
+
+    while work_front < loaded && loaded < 64 {
+        let cur_dir = path_directory(file_paths[work_front])
+        let work_imports = extract_imports_from_ast(programs[work_front])
+        work_front = work_front + 1
+        i = 0
+        while i < work_imports.count && loaded < 64 {
+            let file_path_local = use_path_to_file_path(work_imports.paths[i], cur_dir)
+            let file_path_stdlib = use_path_to_file_path(work_imports.paths[i], "stdlib")
+            var file_path = file_path_local
+            if !file_exists(file_path_local) {
+                file_path = file_path_stdlib
+            }
+            if !visited_contains(visited_paths, visited_count, file_path) {
+                visited_paths[visited_count] = file_path
+                visited_count = visited_count + 1
+                if file_exists(file_path) {
+                    programs[loaded] = load_module_file(file_path)
+                    file_paths[loaded] = file_path
+                    loaded = loaded + 1
+                }
+            }
+            i = i + 1
+        }
+    }
+
+    let main_imports = extract_imports_from_ast(programs[0])
+    let needs_resolution = loaded > 1 || main_imports.count > 0
+    if needs_resolution {
+        let resolve_result = resolve_modules(programs, loaded)
+        if resolve_result.had_error {
+            return multimodule_frontend_error("module_resolution_failed")
+        }
+    }
+
+    var merged_epistemic = ir_empty_epistemic_section()
+    i = 0
+    while i < loaded {
+        let check_result = check_program_boxed_ir_epistemic(programs[i])
+        if check_result.had_error {
+            return multimodule_frontend_error("type_check_failed")
+        }
+        merged_epistemic = ir_merge_epistemic_sections(merged_epistemic, *check_result.epistemic)
+        i = i + 1
+    }
+
+    (*out) = merged_epistemic
+    multimodule_frontend_ok()
 }
 
 // ============================================================

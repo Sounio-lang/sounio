@@ -42,6 +42,7 @@ FILES=(
   self-hosted/check/refinement.sio
   self-hosted/check/compat.sio
   self-hosted/check/check.sio
+  self-hosted/ir/ir.sio
   self-hosted/check/mod.sio
   self-hosted/test_knowledge_bootstrap.sio
 )

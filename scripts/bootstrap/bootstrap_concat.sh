@@ -12,7 +12,7 @@
 set -euo pipefail
 
 # ── Paths (relative to repo root) ──────────────────────────────────
-REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$REPO_ROOT"
 
 PINNED_BIN="artifacts/omega/souc-bin/souc-linux-x86_64"
@@ -625,6 +625,7 @@ echo ""
 echo "=== Concatenating ${#FILES[@]} files -> $OUTPUT_FILE ==="
 
 TOTAL_LINES=0
+STRIPPED_DECL_LINES=0
 
 # Start fresh
 > "$OUTPUT_FILE"
@@ -632,6 +633,8 @@ TOTAL_LINES=0
 for f in "${FILES[@]}"; do
   LINES=$(wc -l < "$f")
   TOTAL_LINES=$((TOTAL_LINES + LINES))
+  DECL_LINES=$(grep -Ec '^[[:space:]]*(module[[:space:]]+[A-Za-z0-9_:]+[[:space:]]*;?|use[[:space:]].*)[[:space:]]*$' "$f" || true)
+  STRIPPED_DECL_LINES=$((STRIPPED_DECL_LINES + DECL_LINES))
 
   {
     echo ""
@@ -639,16 +642,24 @@ for f in "${FILES[@]}"; do
     echo "// SOURCE: $f  ($LINES lines)"
     echo "// ════════════════════════════════════════════════════════════════"
     echo ""
-    cat "$f"
+    sed \
+      -e '/^[[:space:]]*module[[:space:]]\+[A-Za-z0-9_:]\+[[:space:]]*;*[[:space:]]*$/d' \
+      -e '/^[[:space:]]*use[[:space:]].*$/d' \
+      "$f"
   } >> "$OUTPUT_FILE"
 
-  printf "  %-45s %6d lines\n" "$f" "$LINES"
+  if [ "$DECL_LINES" -gt 0 ]; then
+    printf "  %-45s %6d lines  (stripped %d module/use decls)\n" "$f" "$LINES" "$DECL_LINES"
+  else
+    printf "  %-45s %6d lines\n" "$f" "$LINES"
+  fi
 done
 
 echo ""
 echo "  Total: $TOTAL_LINES source lines -> $OUTPUT_FILE"
 OUTPUT_LINES=$(wc -l < "$OUTPUT_FILE")
 echo "  Output file: $OUTPUT_LINES lines (includes separator comments)"
+echo "  Stripped module/use declarations: $STRIPPED_DECL_LINES"
 
 # ── Run the pinned binary checker ──────────────────────────────────
 echo ""

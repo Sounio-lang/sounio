@@ -52,6 +52,18 @@ impl Parser {
                 continue
             }
 
+            if op_kind == TokenKind::AuditLower {
+                p = p.advance()
+                let audit_name = p.current_name()
+                p = p.expect_ident()
+                let span = p.span_from(lhs.span)
+                var audit_e = mk_expr(ExprKind::ExprAuditAttach, span)
+                audit_e.left = Some(Box::new(lhs))
+                audit_e.name = audit_name
+                lhs = audit_e
+                continue
+            }
+
             // Range operators (non-associative)
             if op_kind == TokenKind::DotDot || op_kind == TokenKind::DotDotEq {
                 let bin_op = if op_kind == TokenKind::DotDot { BinaryOp::OpRange } else { BinaryOp::OpRangeInclusive }
@@ -333,13 +345,13 @@ impl Parser {
         if p.peek() != TokenKind::RBracket {
             let first_pair = p.parse_contest_model_expr()
             p = first_pair.0
-            rev_models_opt = Some(Box::new(ExprList { head: first_pair.1, tail: None }))
+            rev_models_opt = Some(Box::new(ExprList { label: empty_name(), head: first_pair.1, tail: None }))
 
             while p.peek() == TokenKind::Comma {
                 p = p.advance()
                 let next_pair = p.parse_contest_model_expr()
                 p = next_pair.0
-                rev_models_opt = Some(Box::new(ExprList { head: next_pair.1, tail: rev_models_opt }))
+                rev_models_opt = Some(Box::new(ExprList { label: empty_name(), head: next_pair.1, tail: rev_models_opt }))
             }
         }
 
@@ -385,12 +397,12 @@ impl Parser {
             if p.peek() == TokenKind::Comma {
                 // Tuple literal
                 p = p.advance()
-                var rev_list_opt: Option<Box<ExprList>> = Some(Box::new(ExprList { head: first, tail: None }))
+                var rev_list_opt: Option<Box<ExprList>> = Some(Box::new(ExprList { label: empty_name(), head: first, tail: None }))
                 while p.peek() != TokenKind::RParen && p.peek() != TokenKind::Eof {
                     let pair2 = p.parse_expr()
                     p = pair2.0
                     let next = pair2.1
-                    rev_list_opt = Some(Box::new(ExprList { head: next, tail: rev_list_opt }))
+                    rev_list_opt = Some(Box::new(ExprList { label: empty_name(), head: next, tail: rev_list_opt }))
                     if p.peek() == TokenKind::Comma {
                         p = p.advance()
                     }
@@ -439,14 +451,14 @@ impl Parser {
                 (p, e)
             } else {
                 // Array elements: [a, b, c]
-                var rev_list_opt: Option<Box<ExprList>> = Some(Box::new(ExprList { head: first, tail: None }))
+                var rev_list_opt: Option<Box<ExprList>> = Some(Box::new(ExprList { label: empty_name(), head: first, tail: None }))
                 while p.peek() == TokenKind::Comma {
                     p = p.advance()
                     if p.peek() == TokenKind::RBracket { break }
                     let pair2 = p.parse_expr()
                     p = pair2.0
                     let next = pair2.1
-                    rev_list_opt = Some(Box::new(ExprList { head: next, tail: rev_list_opt }))
+                    rev_list_opt = Some(Box::new(ExprList { label: empty_name(), head: next, tail: rev_list_opt }))
                 }
                 p = p.expect(TokenKind::RBracket)
                 let span = p.span_from(start)
@@ -933,6 +945,19 @@ impl Parser {
     // Call expression: callee(arg1, arg2)
     // ============================================================
 
+    fn parse_call_arg_expr(self) -> (Parser, ExprList) with Mut, IO, Panic, Div, Alloc {
+        var p = self
+        var label = empty_name()
+
+        if p.peek() == TokenKind::Ident && p.peek_ahead(1) == TokenKind::Colon {
+            label = p.current_name()
+            p = p.advance()
+            p = p.expect(TokenKind::Colon)
+        }
+        let pair = p.parse_expr()
+        (pair.0, ExprList { label: label, head: pair.1, tail: None })
+    }
+
     fn parse_call_expr(self, callee: Expr) -> (Parser, Expr) with Mut, IO, Panic, Div, Alloc {
         let start = callee.span
         var p = self.advance()  // skip (
@@ -940,18 +965,18 @@ impl Parser {
         var args_opt: Option<Box<ExprList>> = None
 
         if p.peek() != TokenKind::RParen {
-            let pair = p.parse_expr()
+            let pair = p.parse_call_arg_expr()
             p = pair.0
             let first = pair.1
-            var rev_list_opt: Option<Box<ExprList>> = Some(Box::new(ExprList { head: first, tail: None }))
+            var rev_list_opt: Option<Box<ExprList>> = Some(Box::new(first))
 
             while p.peek() == TokenKind::Comma {
                 p = p.advance()
                 if p.peek() == TokenKind::RParen { break }
-                let pair2 = p.parse_expr()
+                let pair2 = p.parse_call_arg_expr()
                 p = pair2.0
                 let next = pair2.1
-                rev_list_opt = Some(Box::new(ExprList { head: next, tail: rev_list_opt }))
+                rev_list_opt = Some(Box::new(ExprList { label: next.label, head: next.head, tail: rev_list_opt }))
             }
 
             args_opt = reverse_expr_list_opt(rev_list_opt)
@@ -999,18 +1024,18 @@ impl Parser {
             var args_opt: Option<Box<ExprList>> = None
 
             if p.peek() != TokenKind::RParen {
-                let pair = p.parse_expr()
+                let pair = p.parse_call_arg_expr()
                 p = pair.0
                 let first = pair.1
-                var rev_list_opt: Option<Box<ExprList>> = Some(Box::new(ExprList { head: first, tail: None }))
+                var rev_list_opt: Option<Box<ExprList>> = Some(Box::new(first))
 
                 while p.peek() == TokenKind::Comma {
                     p = p.advance()
                     if p.peek() == TokenKind::RParen { break }
-                    let pair2 = p.parse_expr()
+                    let pair2 = p.parse_call_arg_expr()
                     p = pair2.0
                     let next = pair2.1
-                    rev_list_opt = Some(Box::new(ExprList { head: next, tail: rev_list_opt }))
+                    rev_list_opt = Some(Box::new(ExprList { label: next.label, head: next.head, tail: rev_list_opt }))
                 }
                 args_opt = reverse_expr_list_opt(rev_list_opt)
             }
@@ -1079,15 +1104,15 @@ fn rewrite_hardware_publish_args(
                     let arg_rest = (*tail1).tail
                     let op_kind = kaxi_op_kind_from_expr(arg1)
                     if op_kind < 0 {
-                        let original_tail = Some(Box::new(ExprList { head: arg1, tail: arg_rest }))
-                        (Some(Box::new(ExprList { head: arg0, tail: original_tail })), -1)
+                        let original_tail = Some(Box::new(ExprList { label: empty_name(), head: arg1, tail: arg_rest }))
+                        (Some(Box::new(ExprList { label: empty_name(), head: arg0, tail: original_tail })), -1)
                     } else {
                         let op_lit = expr_int_lit(arg1.span, op_kind)
-                        let rewritten_tail = Some(Box::new(ExprList { head: op_lit, tail: arg_rest }))
-                        (Some(Box::new(ExprList { head: arg0, tail: rewritten_tail })), op_kind)
+                        let rewritten_tail = Some(Box::new(ExprList { label: empty_name(), head: op_lit, tail: arg_rest }))
+                        (Some(Box::new(ExprList { label: empty_name(), head: arg0, tail: rewritten_tail })), op_kind)
                     }
                 }
-                _ => (Some(Box::new(ExprList { head: arg0, tail: None })), -1),
+                _ => (Some(Box::new(ExprList { label: empty_name(), head: arg0, tail: None })), -1),
             }
         }
         _ => (None, -1),
@@ -1280,7 +1305,7 @@ fn reverse_expr_list_loop(
         None => acc,
         Some(node) => {
             let next = (*node).tail
-            let rev_node = ExprList { head: (*node).head, tail: acc }
+            let rev_node = ExprList { label: (*node).label, head: (*node).head, tail: acc }
             reverse_expr_list_loop(next, Some(Box::new(rev_node)))
         },
     }

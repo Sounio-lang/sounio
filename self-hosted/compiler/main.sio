@@ -12,7 +12,9 @@
 use lexer::mod::*
 use parser::ast::*
 use ir::ir::*
+use check::dependent::*
 use check::types::*
+use check::mod::{check_program_boxed_ir_epistemic}
 use io::file_write::*
 use native::encode::*
 use native::elf::*
@@ -22,7 +24,12 @@ use wasm::core::*
 use wasm::encode::*
 use wasm::lower::*
 use native::codegen::*
-use module_loader::{compile_multimodule_native, compile_multimodule_native_with_ir, load_multimodule_ir}
+use resolve::resolve::*
+use resolve::imports::*
+use resolve::symbol::*
+use resolve::scope::*
+use resolve::mod::{resolve_modules, ResolveBatchResult}
+use module_loader::{compile_multimodule_native, compile_multimodule_native_with_ir, load_multimodule_ir, preflight_multimodule_frontend, load_module_file, extract_imports_from_ast, path_directory, use_path_to_file_path, visited_contains, ir_merge_epistemic_sections, empty_program, file_exists}
 use parser::parser::{parser_last_error_count}
 
 // ============================================================================
@@ -241,6 +248,56 @@ fn run_probe_compile_capture(args: ArgList, flag_index: i64) with IO, Mut, Panic
             i = i + 1
         }
     }
+}
+
+fn run_probe_load_ir(args: ArgList, flag_index: i64) with IO, Mut, Panic, Div, Alloc {
+    if flag_index + 1 >= args.len {
+        panic("probe_load_ir: missing source file argument")
+    }
+    let source_path = arg_list_get(args, flag_index + 1)
+    println("probe_load_ir: begin")
+    print("probe_load_ir: source=")
+    print(source_path)
+    print("\n")
+    let ir_result = load_multimodule_ir(source_path)
+    let parse_errors = parser_last_error_count()
+    if ir_result.ok && parse_errors == 0 {
+        println("probe_load_ir: ok")
+        return
+    }
+    println("probe_load_ir: fail")
+    if !ir_result.ok && str_len(ir_result.error_msg) > 0 {
+        print("probe_load_ir: error=")
+        print(ir_result.error_msg)
+        print("\n")
+    }
+    if parse_errors > 0 {
+        println("probe_load_ir: parser_errors=" + int_to_string(parse_errors))
+    }
+    panic("probe_load_ir failed")
+}
+
+fn run_probe_frontend(args: ArgList, flag_index: i64) with IO, Mut, Panic, Div, Alloc {
+    if flag_index + 1 >= args.len {
+        panic("probe_frontend: missing source file argument")
+    }
+    let source_path = arg_list_get(args, flag_index + 1)
+    println("probe_frontend: begin")
+    print("probe_frontend: source=")
+    print(source_path)
+    print("\n")
+    let frontend_result = preflight_multimodule_frontend(source_path)
+    if frontend_result.ok {
+        println("probe_frontend: ok")
+        return
+    }
+    println("probe_frontend: fail")
+    if str_len(frontend_result.error_msg) > 0 {
+        print("probe_frontend: error=")
+        print(frontend_result.error_msg)
+        print("\n")
+    }
+    panic("probe_frontend failed")
 }
 
 fn log_wasm_dispatch(source_path: string, output_path: string) with IO {
@@ -494,6 +551,7 @@ struct CompilerOptions {
     verbose: bool,
     emit_ast: bool,
     emit_tokens: bool,
+    emit_manifest: bool,
     gpu_target: string,
     gpu_binary_format: string,
     gpu_strict_parity: bool,
@@ -540,6 +598,7 @@ fn print_help() with IO {
     println("  -v, --verbose          Verbose output")
     println("  --emit-ast             Print AST to stdout")
     println("  --emit-tokens          Print tokens to stdout")
+    println("  --emit-manifest        Print epistemic audit manifest JSON to stdout")
     println("  --gpu-target <name>    GPU target profile (cuda-smXX, rocm-gfxXXX)")
     println("  --gpu-binary-format    fatbin|cubin|hsaco|multi")
     println("  --gpu-strict-parity    Require strict CUDA/ROCm parity checks")
@@ -549,6 +608,8 @@ fn print_help() with IO {
     println("  --probe-arg-list-get <i>    Probe arg_list_get with fixed 3-item list")
     println("  --probe-compile-capture <source.sio>  Probe compile error capture path")
     println("  --probe-cc <source.sio>  Short alias for probe-compile-capture")
+    println("  --probe-frontend <source.sio>  Probe parse/resolve/typecheck path")
+    println("  --probe-load-ir <source.sio>  Probe parse/resolve/typecheck/IR lowering path")
     println("  --probe-wasm-dispatch <source.sio> [out.wasm]  Probe wasm dispatch marker path")
     println("  -h, --help             Print this help message")
     println("")
@@ -566,11 +627,12 @@ fn parse_options(args: ArgList) -> CompilerOptions with IO, Mut, Panic, Div {
     var verbose = false
     var emit_ast = false
     var emit_tokens = false
+    var emit_manifest = false
     var gpu_target = ""
     var gpu_binary_format = ""
     var gpu_strict_parity = false
 
-    var i: i64 = 1
+    var i: i64 = 0
     while i < args.len {
         let arg = arg_list_get(args, i)
 
@@ -597,6 +659,9 @@ fn parse_options(args: ArgList) -> CompilerOptions with IO, Mut, Panic, Div {
         }
         else if arg == "--emit-tokens" {
             emit_tokens = true
+        }
+        else if arg == "--emit-manifest" {
+            emit_manifest = true
         }
         else if arg == "--gpu-target" {
             i = i + 1
@@ -638,9 +703,698 @@ fn parse_options(args: ArgList) -> CompilerOptions with IO, Mut, Panic, Div {
         verbose: verbose,
         emit_ast: emit_ast,
         emit_tokens: emit_tokens,
+        emit_manifest: emit_manifest,
         gpu_target: gpu_target,
         gpu_binary_format: gpu_binary_format,
         gpu_strict_parity: gpu_strict_parity,
+    }
+}
+
+fn compiler_manifest_empty_name() -> Name {
+    Name { buf: [0; 128], len: 0 }
+}
+
+fn compiler_manifest_print_name(name: Name) with IO, Mut, Panic, Div {
+    var i: i64 = 0
+    while i < name.len {
+        print_char(name.buf[i] as i64)
+        i = i + 1
+    }
+}
+
+fn compiler_manifest_print_name_json(name: Name) with IO, Mut, Panic, Div {
+    print("\"")
+    compiler_manifest_print_name(name)
+    print("\"")
+}
+
+fn compiler_manifest_print_string_json(s: string) with IO {
+    print("\"")
+    print(s)
+    print("\"")
+}
+
+fn compiler_manifest_print_f64_json(value: f64) with IO, Div, Panic {
+    let abs_value = if value < 0.0 { 0.0 - value } else { value }
+    let scaled = (abs_value * 1000.0) as i64
+    let whole = scaled / 1000
+    let frac = scaled - whole * 1000
+    if value < 0.0 {
+        print("-")
+    }
+    print_int(whole)
+    print(".")
+    if frac < 100 { print("0") }
+    if frac < 10 { print("0") }
+    print_int(frac)
+}
+
+fn compiler_manifest_type_list_get(opt: Option<Box<TypeEntryList>>, idx: i64) -> TypeEntry with Panic, Div, Alloc {
+    match opt {
+        None => empty_type_entry(),
+        Some(list) => {
+            if idx <= 0 { (*list).head } else { compiler_manifest_type_list_get((*list).tail, idx - 1) }
+        }
+    }
+}
+
+fn compiler_manifest_print_type_name(ty: TypeEntry) with IO, Mut, Panic, Div, Alloc {
+    if ty.kind == TypeKind::TyI8 { print("i8"); return }
+    if ty.kind == TypeKind::TyI32 { print("i32"); return }
+    if ty.kind == TypeKind::TyI64 { print("i64"); return }
+    if ty.kind == TypeKind::TyU8 { print("u8"); return }
+    if ty.kind == TypeKind::TyU32 { print("u32"); return }
+    if ty.kind == TypeKind::TyU64 { print("u64"); return }
+    if ty.kind == TypeKind::TyF32 { print("f32"); return }
+    if ty.kind == TypeKind::TyF64 { print("f64"); return }
+    if ty.kind == TypeKind::TyBool { print("bool"); return }
+    if ty.kind == TypeKind::TyUnit { print("()"); return }
+    if ty.kind == TypeKind::TyString { print("string"); return }
+    if ty.kind == TypeKind::TyChar { print("char"); return }
+    if ty.kind == TypeKind::TyNamed { compiler_manifest_print_name(ty.name); return }
+    if ty.kind == TypeKind::TyModel {
+        print("Model<")
+        compiler_manifest_print_type_name(compiler_manifest_type_list_get(ty.tuple_elems, 0))
+        print(", ")
+        compiler_manifest_print_type_name(compiler_manifest_type_list_get(ty.tuple_elems, 1))
+        print(">")
+        return
+    }
+    if ty.kind == TypeKind::TyModelFamily {
+        print("ModelFamily<")
+        compiler_manifest_print_type_name(compiler_manifest_type_list_get(ty.tuple_elems, 0))
+        print(", ")
+        compiler_manifest_print_type_name(compiler_manifest_type_list_get(ty.tuple_elems, 1))
+        print(">")
+        return
+    }
+    if ty.kind == TypeKind::TyKnowledge
+        || ty.kind == TypeKind::TyPolicy
+        || ty.kind == TypeKind::TyDecisionPolicy
+        || ty.kind == TypeKind::TyDeferralPolicy
+        || ty.kind == TypeKind::TyContest
+        || ty.kind == TypeKind::TyRobust
+        || ty.kind == TypeKind::TyIntervention
+        || ty.kind == TypeKind::TyCounterfactual
+        || ty.kind == TypeKind::TyValidated
+        || ty.kind == TypeKind::TyAdmissible
+        || ty.kind == TypeKind::TyDeferred
+        || ty.kind == TypeKind::TyValidation {
+        if ty.kind == TypeKind::TyKnowledge { print("Knowledge<") }
+        else if ty.kind == TypeKind::TyPolicy { print("Policy<") }
+        else if ty.kind == TypeKind::TyDecisionPolicy { print("DecisionPolicy<") }
+        else if ty.kind == TypeKind::TyDeferralPolicy { print("DeferralPolicy<") }
+        else if ty.kind == TypeKind::TyContest { print("Contest<") }
+        else if ty.kind == TypeKind::TyRobust { print("Robust<") }
+        else if ty.kind == TypeKind::TyIntervention { print("Intervention<") }
+        else if ty.kind == TypeKind::TyCounterfactual { print("Counterfactual<") }
+        else if ty.kind == TypeKind::TyValidated { print("Validated<") }
+        else if ty.kind == TypeKind::TyAdmissible { print("Admissible<") }
+        else if ty.kind == TypeKind::TyDeferred { print("Deferred<") }
+        else { print("Validation<") }
+        match ty.inner {
+            Some(inner) => compiler_manifest_print_type_name(*inner)
+            None => print("?")
+        }
+        print(">")
+        return
+    }
+    print("<unknown>")
+}
+
+fn compiler_manifest_metric_name(metric_id: i64) -> string {
+    if metric_id == 0 { "sign_consensus" }
+    else if metric_id == 1 { "relative_band" }
+    else if metric_id == 2 { "max_tail_risk" }
+    else if metric_id == 3 { "mechanistic_divergence" }
+    else if metric_id == 4 { "identifiability_floor" }
+    else { "unknown_metric" }
+}
+
+fn compiler_manifest_policy_name(ep: &IrEpistemicSection, id: i64) -> Name with Panic, Div {
+    if id >= 0 && id < (*ep).policy_count { (*ep).policies[id].name } else { compiler_manifest_empty_name() }
+}
+
+fn compiler_manifest_decision_policy_name(ep: &IrEpistemicSection, id: i64) -> Name with Panic, Div {
+    if id >= 0 && id < (*ep).decision_policy_count { (*ep).decision_policies[id].name } else { compiler_manifest_empty_name() }
+}
+
+fn compiler_manifest_deferral_policy_name(ep: &IrEpistemicSection, id: i64) -> Name with Panic, Div {
+    if id >= 0 && id < (*ep).deferral_policy_count { (*ep).deferral_policies[id].name } else { compiler_manifest_empty_name() }
+}
+
+fn compiler_manifest_deferral_route_name(ep: &IrEpistemicSection, id: i64) -> Name with Panic, Div {
+    if id >= 0 && id < (*ep).deferral_policy_count { (*ep).deferral_policies[id].route_name } else { compiler_manifest_empty_name() }
+}
+
+fn compiler_manifest_policy_level_name(ep: &IrEpistemicSection, id: i64) -> Name with Panic, Div {
+    if id >= 0 && id < (*ep).policy_count { (*ep).policies[id].level_name } else { compiler_manifest_empty_name() }
+}
+
+fn compiler_manifest_policy_scope_name(ep: &IrEpistemicSection, id: i64) -> Name with Panic, Div {
+    if id >= 0 && id < (*ep).policy_count { (*ep).policies[id].scope_name } else { compiler_manifest_empty_name() }
+}
+
+fn compiler_manifest_validation_name(ep: &IrEpistemicSection, id: i64) -> Name with Panic, Div {
+    if id >= 0 && id < (*ep).validation_count { (*ep).validations[id].name } else { compiler_manifest_empty_name() }
+}
+
+fn compiler_manifest_model_family_name(ep: &IrEpistemicSection, id: i64) -> Name with Panic, Div {
+    if id >= 0 && id < (*ep).model_family_count { (*ep).model_families[id].name } else { compiler_manifest_empty_name() }
+}
+
+fn compiler_manifest_audit_name(ep: &IrEpistemicSection, id: i64) -> Name with Panic, Div {
+    if id >= 0 && id < (*ep).audit_count { (*ep).audits[id].name } else { compiler_manifest_empty_name() }
+}
+
+fn compiler_manifest_deferral_evidence_name(kind: i64) -> string {
+    if kind == 0 { "contest" } else if kind == 1 { "robust" } else { "unknown" }
+}
+
+fn compiler_manifest_deferral_reason_name(code: i64) -> string {
+    if code == 0 { "StructuralDisagreement" }
+    else if code == 1 { "MechanisticConflict" }
+    else if code == 2 { "CounterexampleHazard" }
+    else if code == 3 { "TailRisk" }
+    else if code == 4 { "IdentifiabilityGap" }
+    else if code == 5 { "TransportGap" }
+    else { "PolicyIncomplete" }
+}
+
+fn compiler_manifest_print_name_array(names: [Name; 16], count: i64) with IO, Mut, Panic, Div {
+    print("[")
+    var i: i64 = 0
+    while i < count && i < 16 {
+        if i > 0 { print(", ") }
+        compiler_manifest_print_name_json(names[i])
+        i = i + 1
+    }
+    print("]")
+}
+
+fn compiler_manifest_print_metric_snapshot(metric_known: [i64; 8], metric_values: [f64; 8]) with IO, Mut, Panic, Div {
+    print("{")
+    var emitted: i64 = 0
+    var i: i64 = 0
+    while i < 5 {
+        if metric_known[i] == 1 {
+            if emitted > 0 { print(", ") }
+            compiler_manifest_print_string_json(compiler_manifest_metric_name(i))
+            print(": ")
+            compiler_manifest_print_f64_json(metric_values[i])
+            emitted = emitted + 1
+        }
+        i = i + 1
+    }
+    print("}")
+}
+
+fn compiler_manifest_hash_string(s: string) -> i64 with Mut, Panic, Div {
+    var hash: i64 = 5381
+    let modp: i64 = 2147483647
+    var i: i64 = 0
+    while i < str_len(s) {
+        let ch = str_char_at(s, i) as i64
+        hash = ((hash * 131) + ch) % modp
+        i = i + 1
+    }
+    hash
+}
+
+fn compiler_manifest_merkle_mix(a: i64, b: i64, c: i64, salt: i64) -> i64 {
+    let modp: i64 = 2147483647
+    (((a % modp) * 31) + ((b % modp) * 131) + ((c % modp) * 17) + salt) % modp
+}
+
+fn compiler_emit_manifest_json(path: string, ep: &IrEpistemicSection) with IO, Mut, Panic, Div, Alloc {
+    let source_hash = compiler_manifest_hash_string(path)
+    let version_hash = compiler_manifest_hash_string("0.80.0-selfhost")
+    let merkle_root = compiler_manifest_merkle_mix(source_hash, version_hash, 0, 97)
+
+    print("{\n")
+    print("  \"schema\": \"sounio.manifest.v2\",\n")
+    print("  \"version\": \"0.80.0-selfhost\",\n")
+    print("  \"path\": ")
+    compiler_manifest_print_string_json(path)
+    print(",\n")
+    print("  \"source_hash\": ")
+    print_int(source_hash)
+    print(",\n")
+    print("  \"merkle_root\": ")
+    print_int(merkle_root)
+    print(",\n")
+    print("  \"epistemic\": {\n")
+
+    print("    \"model_families\": [\n")
+    var i: i64 = 0
+    while i < (*ep).model_family_count {
+        if i > 0 { print(",\n") }
+        print("      {\"id\": ")
+        print_int((*ep).model_families[i].id)
+        print(", \"name\": ")
+        compiler_manifest_print_name_json((*ep).model_families[i].name)
+        print(", \"input_type\": \"")
+        compiler_manifest_print_type_name((*ep).model_families[i].input_ty)
+        print("\", \"output_type\": \"")
+        compiler_manifest_print_type_name((*ep).model_families[i].output_ty)
+        print("\", \"models\": ")
+        compiler_manifest_print_name_array((*ep).model_families[i].model_names, (*ep).model_families[i].model_count)
+        print("}")
+        i = i + 1
+    }
+    print("\n    ],\n")
+
+    print("    \"policies\": [\n")
+    i = 0
+    while i < (*ep).policy_count {
+        if i > 0 { print(",\n") }
+        print("      {\"id\": ")
+        print_int((*ep).policies[i].id)
+        print(", \"name\": ")
+        compiler_manifest_print_name_json((*ep).policies[i].name)
+        print(", \"target_type\": \"")
+        compiler_manifest_print_type_name((*ep).policies[i].target_ty)
+        print("\", \"level\": ")
+        compiler_manifest_print_name_json((*ep).policies[i].level_name)
+        print(", \"scope\": ")
+        compiler_manifest_print_name_json((*ep).policies[i].scope_name)
+        print(", \"requirements\": [")
+        var j: i64 = 0
+        while j < (*ep).policies[i].requirement_count && j < 8 {
+            if j > 0 { print(", ") }
+            print("{\"metric\": ")
+            compiler_manifest_print_name_json((*ep).policies[i].requirements[j].metric_name)
+            print(", \"threshold\": ")
+            compiler_manifest_print_f64_json((*ep).policies[i].requirements[j].threshold)
+            print("}")
+            j = j + 1
+        }
+        print("]}")
+        i = i + 1
+    }
+    print("\n    ],\n")
+
+    print("    \"decision_policies\": [\n")
+    i = 0
+    while i < (*ep).decision_policy_count {
+        if i > 0 { print(",\n") }
+        print("      {\"id\": ")
+        print_int((*ep).decision_policies[i].id)
+        print(", \"name\": ")
+        compiler_manifest_print_name_json((*ep).decision_policies[i].name)
+        print(", \"target_type\": \"")
+        compiler_manifest_print_type_name((*ep).decision_policies[i].target_ty)
+        print("\", \"requirements\": [")
+        var dj: i64 = 0
+        while dj < (*ep).decision_policies[i].requirement_count && dj < 8 {
+            if dj > 0 { print(", ") }
+            print("{\"metric\": ")
+            compiler_manifest_print_name_json((*ep).decision_policies[i].requirements[dj].metric_name)
+            print(", \"threshold\": ")
+            compiler_manifest_print_f64_json((*ep).decision_policies[i].requirements[dj].threshold)
+            print("}")
+            dj = dj + 1
+        }
+        print("]}")
+        i = i + 1
+    }
+    print("\n    ],\n")
+
+    print("    \"deferral_policies\": [\n")
+    i = 0
+    while i < (*ep).deferral_policy_count {
+        if i > 0 { print(",\n") }
+        print("      {\"id\": ")
+        print_int((*ep).deferral_policies[i].id)
+        print(", \"name\": ")
+        compiler_manifest_print_name_json((*ep).deferral_policies[i].name)
+        print(", \"target_type\": \"")
+        compiler_manifest_print_type_name((*ep).deferral_policies[i].target_ty)
+        print("\", \"route\": ")
+        compiler_manifest_print_name_json((*ep).deferral_policies[i].route_name)
+        print(", \"requirements\": [")
+        var fk: i64 = 0
+        while fk < (*ep).deferral_policies[i].requirement_count && fk < 8 {
+            if fk > 0 { print(", ") }
+            print("{\"metric\": ")
+            compiler_manifest_print_name_json((*ep).deferral_policies[i].requirements[fk].metric_name)
+            print(", \"threshold\": ")
+            compiler_manifest_print_f64_json((*ep).deferral_policies[i].requirements[fk].threshold)
+            print("}")
+            fk = fk + 1
+        }
+        print("]}")
+        i = i + 1
+    }
+    print("\n    ],\n")
+
+    print("    \"validations\": [\n")
+    i = 0
+    while i < (*ep).validation_count {
+        if i > 0 { print(",\n") }
+        print("      {\"id\": ")
+        print_int((*ep).validations[i].id)
+        print(", \"name\": ")
+        compiler_manifest_print_name_json((*ep).validations[i].name)
+        print(", \"target_type\": \"")
+        compiler_manifest_print_type_name((*ep).validations[i].target_ty)
+        print("\"}")
+        i = i + 1
+    }
+    print("\n    ],\n")
+
+    print("    \"mechanistic_reports\": [\n")
+    i = 0
+    while i < (*ep).mechanistic_report_count {
+        if i > 0 { print(",\n") }
+        print("      {\"id\": ")
+        print_int((*ep).mechanistic_reports[i].id)
+        print(", \"latent_state_divergence\": ")
+        compiler_manifest_print_f64_json((*ep).mechanistic_reports[i].latent_state_divergence)
+        print(", \"causal_decomposition_divergence\": ")
+        compiler_manifest_print_f64_json((*ep).mechanistic_reports[i].causal_decomposition_divergence)
+        print(", \"intervention_response_divergence\": ")
+        compiler_manifest_print_f64_json((*ep).mechanistic_reports[i].intervention_response_divergence)
+        print(", \"parameter_role_divergence\": ")
+        compiler_manifest_print_f64_json((*ep).mechanistic_reports[i].parameter_role_divergence)
+        print(", \"structural_explanation_distance\": ")
+        compiler_manifest_print_f64_json((*ep).mechanistic_reports[i].structural_explanation_distance)
+        print(", \"aggregate_divergence\": ")
+        compiler_manifest_print_f64_json((*ep).mechanistic_reports[i].aggregate_divergence)
+        print("}")
+        i = i + 1
+    }
+    print("\n    ],\n")
+
+    print("    \"posterior_weights\": [\n")
+    i = 0
+    while i < (*ep).posterior_weights_count {
+        if i > 0 { print(",\n") }
+        print("      {\"id\": ")
+        print_int((*ep).posterior_weights[i].id)
+        print(", \"count\": ")
+        print_int((*ep).posterior_weights[i].count)
+        print(", \"model_names\": ")
+        compiler_manifest_print_name_array((*ep).posterior_weights[i].model_names, (*ep).posterior_weights[i].count)
+        print(", \"weights\": [")
+        var w: i64 = 0
+        while w < (*ep).posterior_weights[i].count && w < 16 {
+            if w > 0 { print(", ") }
+            compiler_manifest_print_f64_json((*ep).posterior_weights[i].weights[w])
+            w = w + 1
+        }
+        print("]}")
+        i = i + 1
+    }
+    print("\n    ],\n")
+
+    print("    \"counterexamples\": [\n")
+    i = 0
+    while i < (*ep).counterexample_count {
+        if i > 0 { print(",\n") }
+        print("      {\"id\": ")
+        print_int((*ep).counterexamples[i].id)
+        print(", \"model_name\": ")
+        compiler_manifest_print_name_json((*ep).counterexamples[i].model_name)
+        print(", \"subgroup_name\": ")
+        compiler_manifest_print_name_json((*ep).counterexamples[i].subgroup_name)
+        print(", \"metric_name\": ")
+        compiler_manifest_print_name_json((*ep).counterexamples[i].metric_name)
+        print(", \"observed_value\": ")
+        compiler_manifest_print_f64_json((*ep).counterexamples[i].observed_value)
+        print(", \"threshold_value\": ")
+        compiler_manifest_print_f64_json((*ep).counterexamples[i].threshold_value)
+        print(", \"summary\": ")
+        compiler_manifest_print_name_json((*ep).counterexamples[i].summary)
+        print("}")
+        i = i + 1
+    }
+    print("\n    ],\n")
+
+    print("    \"audits\": [\n")
+    i = 0
+    while i < (*ep).audit_count {
+        if i > 0 { print(",\n") }
+        print("      {\"id\": ")
+        print_int((*ep).audits[i].id)
+        print(", \"name\": ")
+        compiler_manifest_print_name_json((*ep).audits[i].name)
+        print(", \"target_type\": \"")
+        compiler_manifest_print_type_name((*ep).audits[i].target_inner_ty)
+        print("\", \"family_id\": ")
+        print_int((*ep).audits[i].family_id)
+        print(", \"family_name\": ")
+        compiler_manifest_print_name_json(compiler_manifest_model_family_name(ep, (*ep).audits[i].family_id))
+        print(", \"policy_id\": ")
+        print_int((*ep).audits[i].policy_id)
+        print(", \"policy_name\": ")
+        compiler_manifest_print_name_json(compiler_manifest_policy_name(ep, (*ep).audits[i].policy_id))
+        print(", \"metrics\": ")
+        compiler_manifest_print_metric_snapshot((*ep).audits[i].metric_known, (*ep).audits[i].metric_values)
+        print(", \"mechanistic_report_id\": ")
+        print_int((*ep).audits[i].mechanistic_report_id)
+        print(", \"posterior_weights_id\": ")
+        print_int((*ep).audits[i].posterior_weights_id)
+        print(", \"counterexample_id\": ")
+        print_int((*ep).audits[i].counterexample_id)
+        print("}")
+        i = i + 1
+    }
+    print("\n    ],\n")
+
+    print("    \"contests\": [\n")
+    i = 0
+    while i < (*ep).contest_count {
+        if i > 0 { print(",\n") }
+        print("      {\"id\": ")
+        print_int((*ep).contests[i].id)
+        print(", \"audit_id\": ")
+        print_int((*ep).contests[i].audit_id)
+        print(", \"audit_name\": ")
+        compiler_manifest_print_name_json(compiler_manifest_audit_name(ep, (*ep).contests[i].audit_id))
+        print(", \"family_id\": ")
+        print_int((*ep).contests[i].family_id)
+        print(", \"family_name\": ")
+        compiler_manifest_print_name_json(compiler_manifest_model_family_name(ep, (*ep).contests[i].family_id))
+        print(", \"policy_id\": ")
+        print_int((*ep).contests[i].policy_id)
+        print(", \"policy_name\": ")
+        compiler_manifest_print_name_json(compiler_manifest_policy_name(ep, (*ep).contests[i].policy_id))
+        print(", \"models\": ")
+        compiler_manifest_print_name_array((*ep).contests[i].model_names, (*ep).contests[i].model_count)
+        print(", \"metrics\": ")
+        compiler_manifest_print_metric_snapshot((*ep).contests[i].metric_known, (*ep).contests[i].metric_values)
+        print(", \"disagreement_summary\": {")
+        print("\"sign_consensus\": ")
+        compiler_manifest_print_f64_json((*ep).contests[i].metric_values[0])
+        print(", \"relative_band\": ")
+        compiler_manifest_print_f64_json((*ep).contests[i].metric_values[1])
+        print(", \"max_tail_risk\": ")
+        compiler_manifest_print_f64_json((*ep).contests[i].metric_values[2])
+        print(", \"identifiability_floor\": ")
+        compiler_manifest_print_f64_json((*ep).contests[i].metric_values[4])
+        print(", \"mechanistic_divergence\": ")
+        if (*ep).contests[i].mechanistic_report_id >= 0 && (*ep).contests[i].mechanistic_report_id < (*ep).mechanistic_report_count {
+            compiler_manifest_print_f64_json((*ep).mechanistic_reports[(*ep).contests[i].mechanistic_report_id].aggregate_divergence)
+        } else {
+            compiler_manifest_print_f64_json((*ep).contests[i].metric_values[3])
+        }
+        print("}")
+        print(", \"mechanistic_report_id\": ")
+        print_int((*ep).contests[i].mechanistic_report_id)
+        print(", \"posterior_weights_id\": ")
+        print_int((*ep).contests[i].posterior_weights_id)
+        print(", \"counterexample_id\": ")
+        print_int((*ep).contests[i].counterexample_id)
+        print(", \"provenance_bundle_id\": ")
+        print_int((*ep).contests[i].provenance_bundle_id)
+        print("}")
+        i = i + 1
+    }
+    print("\n    ],\n")
+
+    print("    \"robust_proofs\": [\n")
+    i = 0
+    while i < (*ep).robust_proof_count {
+        if i > 0 { print(",\n") }
+        print("      {\"id\": ")
+        print_int((*ep).robust_proofs[i].id)
+        print(", \"audit_id\": ")
+        print_int((*ep).robust_proofs[i].audit_id)
+        print(", \"audit_name\": ")
+        compiler_manifest_print_name_json(compiler_manifest_audit_name(ep, (*ep).robust_proofs[i].audit_id))
+        print(", \"contest_id\": ")
+        print_int((*ep).robust_proofs[i].contest_id)
+        print(", \"policy_id\": ")
+        print_int((*ep).robust_proofs[i].policy_id)
+        print(", \"policy_name\": ")
+        compiler_manifest_print_name_json(compiler_manifest_policy_name(ep, (*ep).robust_proofs[i].policy_id))
+        print(", \"level\": ")
+        compiler_manifest_print_name_json(compiler_manifest_policy_level_name(ep, (*ep).robust_proofs[i].policy_id))
+        print(", \"scope\": ")
+        compiler_manifest_print_name_json(compiler_manifest_policy_scope_name(ep, (*ep).robust_proofs[i].policy_id))
+        print(", \"metrics\": ")
+        compiler_manifest_print_metric_snapshot((*ep).robust_proofs[i].metric_known, (*ep).robust_proofs[i].metric_values)
+        print("}")
+        i = i + 1
+    }
+    print("\n    ],\n")
+
+    print("    \"validated_manifests\": [\n")
+    i = 0
+    while i < (*ep).validated_manifest_count {
+        if i > 0 { print(",\n") }
+        print("      {\"id\": ")
+        print_int((*ep).validated_manifests[i].id)
+        print(", \"audit_id\": ")
+        print_int((*ep).validated_manifests[i].audit_id)
+        print(", \"audit_name\": ")
+        compiler_manifest_print_name_json(compiler_manifest_audit_name(ep, (*ep).validated_manifests[i].audit_id))
+        print(", \"robust_proof_id\": ")
+        print_int((*ep).validated_manifests[i].robust_proof_id)
+        print(", \"validation_id\": ")
+        print_int((*ep).validated_manifests[i].validation_id)
+        print(", \"validation_name\": ")
+        compiler_manifest_print_name_json(compiler_manifest_validation_name(ep, (*ep).validated_manifests[i].validation_id))
+        print(", \"inner_type\": \"")
+        compiler_manifest_print_type_name((*ep).validated_manifests[i].inner_ty)
+        print("\"}")
+        i = i + 1
+    }
+    print("\n    ],\n")
+
+    print("    \"decision_certificates\": [\n")
+    i = 0
+    while i < (*ep).decision_certificate_count {
+        if i > 0 { print(",\n") }
+        print("      {\"id\": ")
+        print_int((*ep).decision_certificates[i].id)
+        print(", \"audit_id\": ")
+        print_int((*ep).decision_certificates[i].audit_id)
+        print(", \"audit_name\": ")
+        compiler_manifest_print_name_json(compiler_manifest_audit_name(ep, (*ep).decision_certificates[i].audit_id))
+        print(", \"robust_proof_id\": ")
+        print_int((*ep).decision_certificates[i].robust_proof_id)
+        print(", \"decision_policy_id\": ")
+        print_int((*ep).decision_certificates[i].decision_policy_id)
+        print(", \"decision_policy_name\": ")
+        compiler_manifest_print_name_json(compiler_manifest_decision_policy_name(ep, (*ep).decision_certificates[i].decision_policy_id))
+        print(", \"inner_type\": \"")
+        compiler_manifest_print_type_name((*ep).decision_certificates[i].inner_ty)
+        print("\", \"metrics\": ")
+        compiler_manifest_print_metric_snapshot((*ep).decision_certificates[i].metric_known, (*ep).decision_certificates[i].metric_values)
+        print("}")
+        i = i + 1
+    }
+    print("\n    ],\n")
+
+    print("    \"deferred_certificates\": [\n")
+    i = 0
+    while i < (*ep).deferred_certificate_count {
+        if i > 0 { print(",\n") }
+        print("      {\"id\": ")
+        print_int((*ep).deferred_certificates[i].id)
+        print(", \"audit_id\": ")
+        print_int((*ep).deferred_certificates[i].audit_id)
+        print(", \"audit_name\": ")
+        compiler_manifest_print_name_json(compiler_manifest_audit_name(ep, (*ep).deferred_certificates[i].audit_id))
+        print(", \"contest_id\": ")
+        print_int((*ep).deferred_certificates[i].contest_id)
+        print(", \"robust_proof_id\": ")
+        print_int((*ep).deferred_certificates[i].robust_proof_id)
+        print(", \"deferral_policy_id\": ")
+        print_int((*ep).deferred_certificates[i].deferral_policy_id)
+        print(", \"deferral_policy_name\": ")
+        compiler_manifest_print_name_json(compiler_manifest_deferral_policy_name(ep, (*ep).deferred_certificates[i].deferral_policy_id))
+        print(", \"route_name\": ")
+        compiler_manifest_print_name_json(compiler_manifest_deferral_route_name(ep, (*ep).deferred_certificates[i].deferral_policy_id))
+        print(", \"evidence_kind\": ")
+        compiler_manifest_print_string_json(compiler_manifest_deferral_evidence_name((*ep).deferred_certificates[i].evidence_kind))
+        print(", \"reason_code\": ")
+        print_int((*ep).deferred_certificates[i].reason_code)
+        print(", \"reason_name\": ")
+        compiler_manifest_print_string_json(compiler_manifest_deferral_reason_name((*ep).deferred_certificates[i].reason_code))
+        print(", \"inner_type\": \"")
+        compiler_manifest_print_type_name((*ep).deferred_certificates[i].inner_ty)
+        print("\", \"metrics\": ")
+        compiler_manifest_print_metric_snapshot((*ep).deferred_certificates[i].metric_known, (*ep).deferred_certificates[i].metric_values)
+        print("}")
+        i = i + 1
+    }
+    print("\n    ]\n")
+
+    print("  }\n")
+    print("}\n")
+}
+
+fn compile_emit_manifest_json_from_source(path: string) -> CompileResult with IO, Mut, Panic, Div, Alloc {
+    let main_prog = load_module_file(path)
+    var programs: [Program; 64] = [empty_program(); 64]
+    var file_paths: [string; 64] = [""; 64]
+    programs[0] = main_prog
+    file_paths[0] = path
+    var loaded: i64 = 1
+    var visited_paths: [string; 64] = [""; 64]
+    var visited_count: i64 = 0
+    visited_paths[0] = path
+    visited_count = 1
+    var work_front: i64 = 0
+    var i: i64 = 0
+
+    while work_front < loaded && loaded < 64 {
+        let cur_dir = path_directory(file_paths[work_front])
+        let work_imports = extract_imports_from_ast(programs[work_front])
+        work_front = work_front + 1
+        i = 0
+        while i < work_imports.count && loaded < 64 {
+            let file_path_local = use_path_to_file_path(work_imports.paths[i], cur_dir)
+            let file_path_stdlib = use_path_to_file_path(work_imports.paths[i], "stdlib")
+            var file_path = file_path_local
+            if !file_exists(file_path_local) {
+                file_path = file_path_stdlib
+            }
+            if !visited_contains(visited_paths, visited_count, file_path) {
+                visited_paths[visited_count] = file_path
+                visited_count = visited_count + 1
+                if file_exists(file_path) {
+                    programs[loaded] = load_module_file(file_path)
+                    file_paths[loaded] = file_path
+                    loaded = loaded + 1
+                }
+            }
+            i = i + 1
+        }
+    }
+
+    let main_imports = extract_imports_from_ast(programs[0])
+    let needs_resolution = loaded > 1 || main_imports.count > 0
+    if needs_resolution {
+        let resolve_result = resolve_modules(programs, loaded)
+        if resolve_result.had_error {
+            var resolve_errors = compile_errors_new()
+            resolve_errors = compile_push_ir_failure(resolve_errors, "module_resolution_failed")
+            return CompileResult { success: false, errors: resolve_errors, output: "" }
+        }
+    }
+
+    var merged_epistemic = ir_empty_epistemic_section()
+    i = 0
+    while i < loaded {
+        let check_result = check_program_boxed_ir_epistemic(programs[i])
+        if check_result.had_error {
+            var check_errors = compile_errors_new()
+            check_errors = compile_push_ir_failure(check_errors, "type_check_failed")
+            return CompileResult { success: false, errors: check_errors, output: "" }
+        }
+        merged_epistemic = ir_merge_epistemic_sections(merged_epistemic, *check_result.epistemic)
+        i = i + 1
+    }
+
+    compiler_emit_manifest_json(path, &merged_epistemic)
+    CompileResult {
+        success: true,
+        errors: compile_errors_new(),
+        output: "stdout",
     }
 }
 
@@ -671,6 +1425,10 @@ fn compile(opts: CompilerOptions) -> CompileResult with IO, Mut, Panic, Div, All
             errors: parse_like_errors,
             output: "",
         }
+    }
+
+    if opts.emit_manifest {
+        return compile_emit_manifest_json_from_source(opts.input_file)
     }
 
     // Preflight load catches parse/module-resolution failures early and avoids
@@ -859,6 +1617,12 @@ fn main() with IO, Mut, Panic, Div, Alloc {
             return
         } else if mode == "--probe-compile-capture" || mode == "--probe-cc" || starts_with(mode, "--probe-c") {
             run_probe_compile_capture(args, arg_idx)
+            return
+        } else if mode == "--probe-frontend" || starts_with(mode, "--probe-front") {
+            run_probe_frontend(args, arg_idx)
+            return
+        } else if mode == "--probe-load-ir" || starts_with(mode, "--probe-load") {
+            run_probe_load_ir(args, arg_idx)
             return
         } else if mode == "--probe-wasm-dispatch" || starts_with(mode, "--probe-wasm") {
             run_probe_wasm_dispatch(args, arg_idx)

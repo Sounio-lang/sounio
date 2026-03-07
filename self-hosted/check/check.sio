@@ -35,6 +35,15 @@ const CONTEST_WITNESS_IDENTIFIABILITY_FLOOR: i64 = 4
 const CONTEST_WITNESS_DISAGREEMENT: i64 = 5
 const CONTEST_WITNESS_COUNTEREXAMPLE: i64 = 6
 const CONTEST_WITNESS_POSTERIOR_WEIGHTS: i64 = 7
+const DEFERRAL_EVIDENCE_CONTEST: i64 = 0
+const DEFERRAL_EVIDENCE_ROBUST: i64 = 1
+const DEFERRAL_REASON_STRUCTURAL_DISAGREEMENT: i64 = 0
+const DEFERRAL_REASON_MECHANISTIC_CONFLICT: i64 = 1
+const DEFERRAL_REASON_COUNTEREXAMPLE_HAZARD: i64 = 2
+const DEFERRAL_REASON_TAIL_RISK: i64 = 3
+const DEFERRAL_REASON_IDENTIFIABILITY_GAP: i64 = 4
+const DEFERRAL_REASON_TRANSPORT_GAP: i64 = 5
+const DEFERRAL_REASON_POLICY_INCOMPLETE: i64 = 6
 
 // ============================================================
 // Checker state
@@ -51,6 +60,8 @@ struct Checker {
     models: ModelTable,
     model_families: ModelFamilyTable,
     policies: PolicyTable,
+    decision_policies: DecisionPolicyTable,
+    deferral_policies: DeferralPolicyTable,
     validations: ValidationPolicyTable,
     contests: ContestTable,
     audits: AuditTable,
@@ -59,6 +70,9 @@ struct Checker {
     counterexamples: CounterexampleTable,
     contest_witnesses: ContestWitnessTable,
     robust_proofs: RobustProofTable,
+    decision_certificates: DecisionCertificateTable,
+    deferred_certificates: DeferredCertificateTable,
+    deferred_reason_witnesses: DeferredReasonWitnessTable,
     validated_manifests: ValidatedManifestTable,
     error_count: i64,
     had_error: bool,
@@ -98,6 +112,8 @@ fn checker_new() -> Checker with Mut, Panic, Div {
         models: model_table_new(),
         model_families: model_family_table_new(),
         policies: policy_table_new(),
+        decision_policies: decision_policy_table_new(),
+        deferral_policies: deferral_policy_table_new(),
         validations: validation_policy_table_new(),
         contests: contest_table_new(),
         audits: audit_table_new(),
@@ -106,6 +122,9 @@ fn checker_new() -> Checker with Mut, Panic, Div {
         counterexamples: counterexample_table_new(),
         contest_witnesses: contest_witness_table_new(),
         robust_proofs: robust_proof_table_new(),
+        decision_certificates: decision_certificate_table_new(),
+        deferred_certificates: deferred_certificate_table_new(),
+        deferred_reason_witnesses: deferred_reason_witness_table_new(),
         validated_manifests: validated_manifest_table_new(),
         error_count: 0,
         had_error: false,
@@ -236,6 +255,22 @@ fn print_type_name(ty: TypeEntry) with IO, Mut, Panic, Div, Alloc {
             }
             print(">")
         }
+        TyDecisionPolicy => {
+            print("DecisionPolicy<")
+            match ty.inner {
+                Some(inner) => print_type_name(*inner)
+                None => print("?")
+            }
+            print(">")
+        }
+        TyDeferralPolicy => {
+            print("DeferralPolicy<")
+            match ty.inner {
+                Some(inner) => print_type_name(*inner)
+                None => print("?")
+            }
+            print(">")
+        }
         TyContest => {
             print("Contest<")
             match ty.inner {
@@ -276,6 +311,22 @@ fn print_type_name(ty: TypeEntry) with IO, Mut, Panic, Div, Alloc {
         }
         TyValidated => {
             print("Validated<")
+            match ty.inner {
+                Some(inner) => print_type_name(*inner)
+                None => print("?")
+            }
+            print(">")
+        }
+        TyAdmissible => {
+            print("Admissible<")
+            match ty.inner {
+                Some(inner) => print_type_name(*inner)
+                None => print("?")
+            }
+            print(">")
+        }
+        TyDeferred => {
+            print("Deferred<")
             match ty.inner {
                 Some(inner) => print_type_name(*inner)
                 None => print("?")
@@ -729,6 +780,256 @@ impl Checker {
         print(": validate_manifest(...) requires a proof-carrying Robust<T> value\n")
         print("   |\n   = help: use the result of prove_robust(contest_value, PolicyName) directly, instead of a bare Robust<T, Level, Scope> annotation\n")
         print("   = note: this compiler slice now records auditable robustness proofs and refuses validation when the proof record is missing\n")
+        c
+    }
+
+    fn report_missing_decision_policy(self, span: Span) -> Checker with Mut, IO, Panic, Div {
+        var c = self
+        c.error_count = c.error_count + 1
+        c.had_error = true
+        print("error[E093]")
+        if span.start > 0 || span.end > 0 {
+            print(" at ")
+            print_int(span.start)
+            print("..")
+            print_int(span.end)
+        }
+        print(": admit_action(...) requires a declared decision_policy item\n")
+        print("   |\n   = help: declare `decision_policy Name for T { ... }` and pass that named policy as the third argument\n")
+        print("   = note: DecisionPolicy<T> remains explicit so action admissibility cannot be laundered through wrapper syntax\n")
+        c
+    }
+
+    fn report_decision_target_mismatch(self, span: Span, expected: TypeEntry, got: TypeEntry) -> Checker with Mut, IO, Panic, Div, Alloc {
+        var c = self
+        c.error_count = c.error_count + 1
+        c.had_error = true
+        print("error[E094]")
+        if span.start > 0 || span.end > 0 {
+            print(" at ")
+            print_int(span.start)
+            print("..")
+            print_int(span.end)
+        }
+        print(": decision policy target does not match the admitted action type\n")
+        print("   |\n   = expected ")
+        print_type_name(expected)
+        print("\n   = found ")
+        print_type_name(got)
+        print("\n   = help: keep admit_action(value, robust, policy) on the same underlying T\n")
+        c
+    }
+
+    fn report_missing_admissibility_proof(self, span: Span) -> Checker with Mut, IO, Panic, Div {
+        var c = self
+        c.error_count = c.error_count + 1
+        c.had_error = true
+        print("error[E095]")
+        if span.start > 0 || span.end > 0 {
+            print(" at ")
+            print_int(span.start)
+            print("..")
+            print_int(span.end)
+        }
+        print(": admit_action(...) requires a proof-carrying Robust<T> value\n")
+        print("   |\n   = help: use the result of prove_robust(contest_value, PolicyName) directly instead of a bare Robust<T, Level, Scope> annotation\n")
+        print("   = note: decision admission consumes the recorded robustness proof, not just the wrapper shape\n")
+        c
+    }
+
+    fn report_missing_decision_diagnostic(self, span: Span, policy_name: Name, req: PolicyRequirementInfo) -> Checker with Mut, IO, Panic, Div {
+        var c = self
+        c.error_count = c.error_count + 1
+        c.had_error = true
+        print("error[E096]")
+        if span.start > 0 || span.end > 0 {
+            print(" at ")
+            print_int(span.start)
+            print("..")
+            print_int(span.end)
+        }
+        print(": decision admissibility obligation failed\n")
+        print("   |\n   = decision policy ")
+        print_name_value(policy_name)
+        print(" requires ")
+        print_contest_metric_name(req.metric_id)
+        print(" ")
+        print_compare_op_value(req.op)
+        print(" ")
+        print_milli_ratio(req.threshold)
+        print("\n   = required decision evidence is unavailable in the robustness proof snapshot\n")
+        print("   = help: strengthen the upstream contest audit or relax the decision policy explicitly\n")
+        c
+    }
+
+    fn report_failed_decision_policy_requirement(self, span: Span, policy_name: Name, req: PolicyRequirementInfo, observed: f64) -> Checker with Mut, IO, Panic, Div {
+        var c = self
+        c.error_count = c.error_count + 1
+        c.had_error = true
+        print("error[E096]")
+        if span.start > 0 || span.end > 0 {
+            print(" at ")
+            print_int(span.start)
+            print("..")
+            print_int(span.end)
+        }
+        print(": decision admissibility obligation failed\n")
+        print("   |\n   = decision policy ")
+        print_name_value(policy_name)
+        print(" requires ")
+        print_contest_metric_name(req.metric_id)
+        print(" ")
+        print_compare_op_value(req.op)
+        print(" ")
+        print_milli_ratio(req.threshold)
+        print("\n   = observed ")
+        print_contest_metric_name(req.metric_id)
+        print(" = ")
+        print_milli_ratio(observed)
+        print("\n   = help: keep the action deferred until the decision policy is satisfied\n")
+        c
+    }
+
+    fn report_missing_deferral_policy(self, span: Span) -> Checker with Mut, IO, Panic, Div {
+        var c = self
+        c.error_count = c.error_count + 1
+        c.had_error = true
+        print("error[E097]")
+        if span.start > 0 || span.end > 0 {
+            print(" at ")
+            print_int(span.start)
+            print("..")
+            print_int(span.end)
+        }
+        print(": defer_action(...) requires a declared deferral_policy item\n")
+        print("   |\n   = help: declare `deferral_policy Name for T route Review { ... }` and pass that named policy as the third argument\n")
+        print("   = note: deferral remains explicit so abstention cannot be laundered through wrapper syntax\n")
+        c
+    }
+
+    fn report_deferral_target_mismatch(self, span: Span, expected: TypeEntry, got: TypeEntry) -> Checker with Mut, IO, Panic, Div, Alloc {
+        var c = self
+        c.error_count = c.error_count + 1
+        c.had_error = true
+        print("error[E098]")
+        if span.start > 0 || span.end > 0 {
+            print(" at ")
+            print_int(span.start)
+            print("..")
+            print_int(span.end)
+        }
+        print(": deferral policy target does not match the deferred action type\n")
+        print("   |\n   = expected ")
+        print_type_name(expected)
+        print("\n   = found ")
+        print_type_name(got)
+        print("\n   = help: keep defer_action(value, evidence, policy) on the same underlying T\n")
+        c
+    }
+
+    fn report_missing_deferral_evidence(self, span: Span, got: TypeEntry) -> Checker with Mut, IO, Panic, Div, Alloc {
+        var c = self
+        c.error_count = c.error_count + 1
+        c.had_error = true
+        print("error[E099]")
+        if span.start > 0 || span.end > 0 {
+            print(" at ")
+            print_int(span.start)
+            print("..")
+            print_int(span.end)
+        }
+        print(": defer_action(...) requires Contest<T, Family, Policy> or proof-carrying Robust<T> evidence\n")
+        print("   |\n   = found ")
+        print_type_name(got)
+        print("\n   = help: fully annotate the contested evidence, or pass the result of prove_robust(...)\n")
+        c
+    }
+
+    fn report_missing_deferral_diagnostic(self, span: Span, policy_name: Name, req: PolicyRequirementInfo) -> Checker with Mut, IO, Panic, Div {
+        var c = self
+        c.error_count = c.error_count + 1
+        c.had_error = true
+        print("error[E100]")
+        if span.start > 0 || span.end > 0 {
+            print(" at ")
+            print_int(span.start)
+            print("..")
+            print_int(span.end)
+        }
+        print(": deferral policy obligation failed\n")
+        print("   |\n   = deferral policy ")
+        print_name_value(policy_name)
+        print(" requires ")
+        print_contest_metric_name(req.metric_id)
+        print(" ")
+        print_compare_op_value(req.op)
+        print(" ")
+        print_milli_ratio(req.threshold)
+        print("\n   = required deferral evidence is unavailable in the provided audit or robustness proof\n")
+        print("   = help: attach the missing audit evidence explicitly before deferring\n")
+        c
+    }
+
+    fn report_failed_deferral_policy_requirement(self, span: Span, policy_name: Name, req: PolicyRequirementInfo, observed: f64) -> Checker with Mut, IO, Panic, Div {
+        var c = self
+        c.error_count = c.error_count + 1
+        c.had_error = true
+        print("error[E100]")
+        if span.start > 0 || span.end > 0 {
+            print(" at ")
+            print_int(span.start)
+            print("..")
+            print_int(span.end)
+        }
+        print(": deferral policy obligation failed\n")
+        print("   |\n   = deferral policy ")
+        print_name_value(policy_name)
+        print(" requires ")
+        print_contest_metric_name(req.metric_id)
+        print(" ")
+        print_compare_op_value(req.op)
+        print(" ")
+        print_milli_ratio(req.threshold)
+        print("\n   = observed ")
+        print_contest_metric_name(req.metric_id)
+        print(" = ")
+        print_milli_ratio(observed)
+        print("\n   = help: keep using the non-deferred path until the deferral condition is explicitly satisfied\n")
+        c
+    }
+
+    fn report_deferral_reason_requires_deferred(self, span: Span, got: TypeEntry) -> Checker with Mut, IO, Panic, Div, Alloc {
+        var c = self
+        c.error_count = c.error_count + 1
+        c.had_error = true
+        print("error[E101]")
+        if span.start > 0 || span.end > 0 {
+            print(" at ")
+            print_int(span.start)
+            print("..")
+            print_int(span.end)
+        }
+        print(": deferral_reason(...) requires Deferred<T>\n")
+        print("   |\n   = found ")
+        print_type_name(got)
+        print("\n   = help: call deferral_reason(...) on the result of defer_action(...)\n")
+        c
+    }
+
+    fn report_missing_deferred_certificate(self, span: Span) -> Checker with Mut, IO, Panic, Div {
+        var c = self
+        c.error_count = c.error_count + 1
+        c.had_error = true
+        print("error[E102]")
+        if span.start > 0 || span.end > 0 {
+            print(" at ")
+            print_int(span.start)
+            print("..")
+            print_int(span.end)
+        }
+        print(": deferral_reason(...) requires a recorded deferral certificate\n")
+        print("   |\n   = help: use the result of defer_action(value, evidence, DeferralPolicyName) directly, instead of a bare Deferred<T> annotation\n")
+        print("   = note: deferral reasons are auditable witness values over recorded abstention decisions\n")
         c
     }
 
@@ -1349,6 +1650,16 @@ fn print_error_message(code: i64) with IO, Mut, Panic, Div {
     else if code == 90 { print("mechanistic section is incomplete") }
     else if code == 91 { print("counterexample section is incomplete") }
     else if code == 92 { print("duplicate or unknown audit field") }
+    else if code == 93 { print("admit_action(...) requires a declared decision_policy item") }
+    else if code == 94 { print("decision policy target does not match the admitted action type") }
+    else if code == 95 { print("admit_action(...) requires a proof-carrying Robust<T> value") }
+    else if code == 96 { print("decision admissibility obligation failed") }
+    else if code == 97 { print("defer_action(...) requires a declared deferral_policy item") }
+    else if code == 98 { print("deferral policy target does not match the deferred action type") }
+    else if code == 99 { print("defer_action(...) requires Contest<T, Family, Policy> or proof-carrying Robust<T> evidence") }
+    else if code == 100 { print("deferral policy obligation failed") }
+    else if code == 101 { print("deferral_reason(...) requires Deferred<T>") }
+    else if code == 102 { print("deferral_reason(...) requires a recorded deferral certificate") }
     else { print("unknown error") }
 }
 
@@ -1565,6 +1876,18 @@ fn print_error_help(code: i64) with IO, Mut, Panic, Div {
     }
     else if code == 92 {
         print("   |\n   = help: remove duplicate audit fields and keep section/field names within the supported audit schema\n")
+    }
+    else if code == 93 {
+        print("   |\n   = help: declare `decision_policy Name for T { ... }` and call admit_action(value, robust_value, Name)\n")
+    }
+    else if code == 94 {
+        print("   |\n   = help: keep the admitted value, Robust<T>, and decision_policy target on the same T\n")
+    }
+    else if code == 95 {
+        print("   |\n   = help: use the result of prove_robust(contest_value, PolicyName) directly instead of a bare Robust<T, Level, Scope> annotation\n")
+    }
+    else if code == 96 {
+        print("   |\n   = help: satisfy the decision policy obligations or strengthen the robust proof metadata before admitting action\n")
     }
     else {
         // No help available for unknown errors
@@ -1785,6 +2108,36 @@ fn print_error_note(code: i64) with IO, Mut, Panic, Div {
     else if code == 92 {
         print("   = note: audit parsing preserves unknown or duplicate fields so the checker can fail closed semantically\n")
     }
+    else if code == 93 {
+        print("   = note: decision admissibility is explicit and auditable; bare type annotations do not carry admission policy evidence\n")
+    }
+    else if code == 94 {
+        print("   = note: robust inference and admissible action are intentionally separated in this milestone\n")
+    }
+    else if code == 95 {
+        print("   = note: action admission consumes an auditable robustness proof record instead of trusting wrapper syntax alone\n")
+    }
+    else if code == 96 {
+        print("   = note: action remains fenced until the decision policy is satisfied by explicit proof-time evidence\n")
+    }
+    else if code == 97 {
+        print("   = note: deferral routing is explicit and auditable; bare wrapper shapes do not imply abstention\n")
+    }
+    else if code == 98 {
+        print("   = note: deferral policies are tied to a specific T so escalation cannot be laundered across subjects\n")
+    }
+    else if code == 99 {
+        print("   = note: deferral consumes contested or robust evidence explicitly; plain values cannot self-abstain\n")
+    }
+    else if code == 100 {
+        print("   = note: deferral policies are proof obligations, not a soft fallback when admission fails\n")
+    }
+    else if code == 101 {
+        print("   = note: deferral reasons are witness values over explicit deferral certificates only\n")
+    }
+    else if code == 102 {
+        print("   = note: deferred values must carry a recorded certificate so downstream routing stays auditable\n")
+    }
     else {
         // No note available for unknown errors
     }
@@ -1817,6 +2170,42 @@ fn call_expr_is_builtin_validate_manifest(opt: Option<Box<Expr>>) -> bool with M
             name_matches_str17((*expr).name,
                 118, 97, 108, 105, 100, 97, 116, 101, 95,
                 109, 97, 110, 105, 102, 101, 115, 116)
+        }
+        None => false
+    }
+}
+
+fn call_expr_is_builtin_admit_action(opt: Option<Box<Expr>>) -> bool with Mut, Panic, Div, Alloc, IO {
+    match opt {
+        Some(expr) => {
+            if (*expr).kind != ExprKind::ExprIdent {
+                return false
+            }
+            name_matches_str12((*expr).name, 97, 100, 109, 105, 116, 95, 97, 99, 116, 105, 111, 110)
+        }
+        None => false
+    }
+}
+
+fn call_expr_is_builtin_defer_action(opt: Option<Box<Expr>>) -> bool with Mut, Panic, Div, Alloc, IO {
+    match opt {
+        Some(expr) => {
+            if (*expr).kind != ExprKind::ExprIdent {
+                return false
+            }
+            name_matches_str12((*expr).name, 100, 101, 102, 101, 114, 95, 97, 99, 116, 105, 111, 110)
+        }
+        None => false
+    }
+}
+
+fn call_expr_is_builtin_deferral_reason(opt: Option<Box<Expr>>) -> bool with Mut, Panic, Div, Alloc, IO {
+    match opt {
+        Some(expr) => {
+            if (*expr).kind != ExprKind::ExprIdent {
+                return false
+            }
+            name_matches_str15((*expr).name, 100, 101, 102, 101, 114, 114, 97, 108, 95, 114, 101, 97, 115, 111, 110)
         }
         None => false
     }
@@ -1957,6 +2346,25 @@ fn contest_weights_type_name() -> Name with Mut, Panic, Div {
     n
 }
 
+fn deferral_reason_type_name() -> Name with Mut, Panic, Div {
+    var n = Name { buf: [0; 128], len: 14 }
+    n.buf[0] = 68
+    n.buf[1] = 101
+    n.buf[2] = 102
+    n.buf[3] = 101
+    n.buf[4] = 114
+    n.buf[5] = 114
+    n.buf[6] = 97
+    n.buf[7] = 108
+    n.buf[8] = 82
+    n.buf[9] = 101
+    n.buf[10] = 97
+    n.buf[11] = 115
+    n.buf[12] = 111
+    n.buf[13] = 110
+    n
+}
+
 fn expr_list_head(opt: Option<Box<ExprList>>) -> Option<Box<Expr>> with Alloc {
     match opt {
         Some(list) => Some(Box::new((*list).head))
@@ -1969,6 +2377,23 @@ fn expr_list_second(opt: Option<Box<ExprList>>) -> Option<Box<Expr>> with Alloc 
         Some(list) => {
             match (*list).tail {
                 Some(rest) => Some(Box::new((*rest).head))
+                None => None
+            }
+        }
+        None => None
+    }
+}
+
+fn expr_list_third(opt: Option<Box<ExprList>>) -> Option<Box<Expr>> with Alloc {
+    match opt {
+        Some(list) => {
+            match (*list).tail {
+                Some(rest) => {
+                    match (*rest).tail {
+                        Some(last) => Some(Box::new((*last).head))
+                        None => None
+                    }
+                }
                 None => None
             }
         }
@@ -2531,11 +2956,15 @@ impl Checker {
             TypeKnowledge => c.lower_knowledge_type(te.knowledge_info)
             TypeModel => c.lower_model_type(te.type_args, te.span)
             TypePolicy => c.lower_policy_type(te.type_args, te.span)
+            TypeDecisionPolicy => c.lower_decision_policy_type(te.type_args, te.span)
+            TypeDeferralPolicy => c.lower_deferral_policy_type(te.type_args, te.span)
             TypeContest => c.lower_contest_type(te.type_args, te.span)
             TypeRobust => c.lower_robust_type(te.type_args, te.span)
             TypeIntervention => c.lower_intervention_type(te.knowledge_info)
             TypeCounterfactual => c.lower_counterfactual_type(te.knowledge_info)
             TypeValidated => c.lower_validated_type(te.type_args, te.knowledge_info, te.span)
+            TypeAdmissible => c.lower_admissible_type(te.type_args, te.span)
+            TypeDeferred => c.lower_deferred_type(te.type_args, te.span)
             TypeRefinement => c.lower_refinement_type(te.refinement_info)
         }
         (result.0.exit_type_depth(), result.1)
@@ -2583,6 +3012,8 @@ impl Checker {
                     if bound_ty.kind == TypeKind::TyModel
                         || bound_ty.kind == TypeKind::TyModelFamily
                         || bound_ty.kind == TypeKind::TyPolicy
+                        || bound_ty.kind == TypeKind::TyDecisionPolicy
+                        || bound_ty.kind == TypeKind::TyDeferralPolicy
                         || bound_ty.kind == TypeKind::TyValidation {
                         (self, bound_ty)
                     } else {
@@ -2725,6 +3156,24 @@ impl Checker {
         }
     }
 
+    fn lower_decision_policy_type(self, opt: Option<Box<TypeExprList>>, span: Span) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+        let pair = self.lower_single_wrapper_arg(opt, span)
+        if pair.1.kind == TypeKind::TyError {
+            pair
+        } else {
+            (pair.0, ty_decision_policy(pair.1, -1))
+        }
+    }
+
+    fn lower_deferral_policy_type(self, opt: Option<Box<TypeExprList>>, span: Span) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+        let pair = self.lower_single_wrapper_arg(opt, span)
+        if pair.1.kind == TypeKind::TyError {
+            pair
+        } else {
+            (pair.0, ty_deferral_policy(pair.1, -1))
+        }
+    }
+
     fn lower_contest_type(self, opt: Option<Box<TypeExprList>>, span: Span) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
         match opt {
             Some(args) => {
@@ -2853,6 +3302,24 @@ impl Checker {
         }
     }
 
+    fn lower_admissible_type(self, opt: Option<Box<TypeExprList>>, span: Span) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+        let pair = self.lower_single_wrapper_arg(opt, span)
+        if pair.1.kind == TypeKind::TyError {
+            pair
+        } else {
+            (pair.0, ty_admissible(pair.1, -1))
+        }
+    }
+
+    fn lower_deferred_type(self, opt: Option<Box<TypeExprList>>, span: Span) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+        let pair = self.lower_single_wrapper_arg(opt, span)
+        if pair.1.kind == TypeKind::TyError {
+            pair
+        } else {
+            (pair.0, ty_deferred(pair.1, -1))
+        }
+    }
+
     fn lower_refinement_type(self, opt: Option<Box<RefinementInfo>>) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
         match opt {
             Some(info) => {
@@ -2902,6 +3369,8 @@ impl Checker {
             ItemTypeAlias => self.collect_type_alias(item.name, item.type_alias_ty)
             ItemModels => self.collect_models_def(item.name, item.models_def)
             ItemPolicy => self.collect_policy_def(item.name, item.policy_def)
+            ItemDecisionPolicy => self.collect_decision_policy_def(item.name, item.decision_policy_def)
+            ItemDeferralPolicy => self.collect_deferral_policy_def(item.name, item.deferral_policy_def)
             ItemValidation => self.collect_validation_def(item.name, item.validation_def)
             ItemAudit => self.collect_audit_def(item.name, item.audit_def)
             ItemUse => self
@@ -3101,6 +3570,59 @@ impl Checker {
                 let add_result = c.policies.add(info)
                 c.policies = add_result.0
                 c.env = c.env.bind(name, ty_policy(target_ty, add_result.1), false)
+                c = c.const_int_bind_unknown(name)
+                c
+            }
+            None => self
+        }
+    }
+
+    fn collect_decision_policy_def(self, name: Name, opt: Option<Box<DecisionPolicyDef>>) -> Checker with Mut, Panic, Div, Alloc, IO {
+        match opt {
+            Some(dd) => {
+                let target_pair = self.lower_type_expr((*dd).target_type)
+                var c = target_pair.0
+                let target_ty = target_pair.1
+                let req_pair = c.collect_policy_requirements((*dd).requirements)
+                c = req_pair.0
+                let requirements = req_pair.1
+                let requirement_count = req_pair.2
+                let info = DecisionPolicyInfo {
+                    name: name,
+                    target_ty: target_ty,
+                    requirements: requirements,
+                    requirement_count: requirement_count,
+                }
+                let add_result = c.decision_policies.add(info)
+                c.decision_policies = add_result.0
+                c.env = c.env.bind(name, ty_decision_policy(target_ty, add_result.1), false)
+                c = c.const_int_bind_unknown(name)
+                c
+            }
+            None => self
+        }
+    }
+
+    fn collect_deferral_policy_def(self, name: Name, opt: Option<Box<DeferralPolicyDef>>) -> Checker with Mut, Panic, Div, Alloc, IO {
+        match opt {
+            Some(dd) => {
+                let target_pair = self.lower_type_expr((*dd).target_type)
+                var c = target_pair.0
+                let target_ty = target_pair.1
+                let req_pair = c.collect_policy_requirements((*dd).requirements)
+                c = req_pair.0
+                let requirements = req_pair.1
+                let requirement_count = req_pair.2
+                let info = DeferralPolicyInfo {
+                    name: name,
+                    target_ty: target_ty,
+                    route_name: (*dd).route_name,
+                    requirements: requirements,
+                    requirement_count: requirement_count,
+                }
+                let add_result = c.deferral_policies.add(info)
+                c.deferral_policies = add_result.0
+                c.env = c.env.bind(name, ty_deferral_policy(target_ty, add_result.1), false)
                 c = c.const_int_bind_unknown(name)
                 c
             }
@@ -3862,6 +4384,8 @@ impl Checker {
             ItemTypeAlias => self
             ItemModels => self
             ItemPolicy => self
+            ItemDecisionPolicy => self
+            ItemDeferralPolicy => self
             ItemValidation => self
             ItemAudit => self
             ItemUse => self
@@ -4086,9 +4610,11 @@ impl Checker {
                 c = c.report_mismatch(s.span, 1, ann_ty, init_ty)
             }
             if ann_ty.kind == init_ty.kind
-                && (ann_ty.kind == TypeKind::TyContest
-                    || ann_ty.kind == TypeKind::TyRobust
-                    || ann_ty.kind == TypeKind::TyValidated) {
+                && (((ann_ty.kind == TypeKind::TyContest) && ann_ty.epistemic_meta_id >= 0)
+                    || ((ann_ty.kind == TypeKind::TyRobust) && ann_ty.robustness_level_id >= 0 && ann_ty.robustness_scope_id >= 0)
+                    || ann_ty.kind == TypeKind::TyValidated
+                    || ann_ty.kind == TypeKind::TyAdmissible
+                    || ann_ty.kind == TypeKind::TyDeferred) {
                 bind_ty = init_ty
             } else {
                 bind_ty = ann_ty
@@ -4125,9 +4651,11 @@ impl Checker {
                 c = c.report_mismatch(s.span, 1, ann_ty, init_ty)
             }
             if ann_ty.kind == init_ty.kind
-                && (ann_ty.kind == TypeKind::TyContest
-                    || ann_ty.kind == TypeKind::TyRobust
-                    || ann_ty.kind == TypeKind::TyValidated) {
+                && (((ann_ty.kind == TypeKind::TyContest) && ann_ty.epistemic_meta_id >= 0)
+                    || ((ann_ty.kind == TypeKind::TyRobust) && ann_ty.robustness_level_id >= 0 && ann_ty.robustness_scope_id >= 0)
+                    || ann_ty.kind == TypeKind::TyValidated
+                    || ann_ty.kind == TypeKind::TyAdmissible
+                    || ann_ty.kind == TypeKind::TyDeferred) {
                 bind_ty = init_ty
             } else {
                 bind_ty = ann_ty
@@ -4878,6 +5406,15 @@ impl Checker {
         if call_expr_is_builtin_validate_manifest(e.left) {
             return self.check_validate_manifest_expr(e)
         }
+        if call_expr_is_builtin_admit_action(e.left) {
+            return self.check_admit_action_expr(e)
+        }
+        if call_expr_is_builtin_defer_action(e.left) {
+            return self.check_defer_action_expr(e)
+        }
+        if call_expr_is_builtin_deferral_reason(e.left) {
+            return self.check_deferral_reason_expr(e)
+        }
         if call_expr_is_builtin_lift_knowledge(e.left) {
             return self.check_lift_knowledge_expr(e)
         }
@@ -5166,6 +5703,326 @@ impl Checker {
         let add_result = c.validated_manifests.add(manifest_info)
         c.validated_manifests = add_result.0
         (c, ty_validated_with_policy(inner_ty, 0.0 - 1.0, add_result.1))
+    }
+
+    fn check_decision_policy_requirements_against_proof(
+        self,
+        span: Span,
+        policy_name: Name,
+        opt: Option<Box<PolicyRequirementInfoList>>,
+        proof_info: RobustProofInfo
+    ) -> (Checker, bool) with Mut, Panic, Div, Alloc, IO {
+        match opt {
+            Some(list) => {
+                let req = (*list).head
+                if req.metric_id < 0 || req.metric_id >= 8 || proof_info.metric_known[req.metric_id as usize] != 1 {
+                    let c = self.report_missing_decision_diagnostic(span, policy_name, req)
+                    (c, false)
+                } else {
+                    let observed = proof_info.metric_values[req.metric_id as usize]
+                    if !policy_requirement_holds(observed, req.op, req.threshold) {
+                        let c = self.report_failed_decision_policy_requirement(span, policy_name, req, observed)
+                        (c, false)
+                    } else {
+                        self.check_decision_policy_requirements_against_proof(span, policy_name, (*list).tail, proof_info)
+                    }
+                }
+            }
+            None => (self, true)
+        }
+    }
+
+    fn deferral_reason_code_from_metric_id(self, metric_id: i64) -> i64 {
+        if metric_id == CONTEST_METRIC_SIGN_CONSENSUS || metric_id == CONTEST_METRIC_RELATIVE_BAND {
+            return DEFERRAL_REASON_STRUCTURAL_DISAGREEMENT
+        }
+        if metric_id == CONTEST_METRIC_MECHANISTIC_DIVERGENCE {
+            return DEFERRAL_REASON_MECHANISTIC_CONFLICT
+        }
+        if metric_id == CONTEST_METRIC_MAX_TAIL_RISK {
+            return DEFERRAL_REASON_TAIL_RISK
+        }
+        if metric_id == CONTEST_METRIC_IDENTIFIABILITY_FLOOR {
+            return DEFERRAL_REASON_IDENTIFIABILITY_GAP
+        }
+        DEFERRAL_REASON_POLICY_INCOMPLETE
+    }
+
+    fn deferral_reason_code_from_requirements(self, opt: Option<Box<PolicyRequirementInfoList>>) -> i64 with Mut, Panic, Div {
+        match opt {
+            Some(list) => self.deferral_reason_code_from_metric_id((*list).head.metric_id)
+            None => DEFERRAL_REASON_POLICY_INCOMPLETE
+        }
+    }
+
+    fn check_deferral_policy_requirements_against_contest(
+        self,
+        span: Span,
+        policy_name: Name,
+        opt: Option<Box<PolicyRequirementInfoList>>,
+        contest_info: ContestInfo
+    ) -> (Checker, bool) with Mut, Panic, Div, Alloc, IO {
+        match opt {
+            Some(list) => {
+                let req = (*list).head
+                let metric_pair = contest_info_get_metric(contest_info, req.metric_id)
+                if !metric_pair.0 {
+                    let c = self.report_missing_deferral_diagnostic(span, policy_name, req)
+                    (c, false)
+                } else {
+                    let observed = metric_pair.1
+                    if !policy_requirement_holds(observed, req.op, req.threshold) {
+                        let c = self.report_failed_deferral_policy_requirement(span, policy_name, req, observed)
+                        (c, false)
+                    } else {
+                        self.check_deferral_policy_requirements_against_contest(span, policy_name, (*list).tail, contest_info)
+                    }
+                }
+            }
+            None => (self, true)
+        }
+    }
+
+    fn check_deferral_policy_requirements_against_proof(
+        self,
+        span: Span,
+        policy_name: Name,
+        opt: Option<Box<PolicyRequirementInfoList>>,
+        proof_info: RobustProofInfo
+    ) -> (Checker, bool) with Mut, Panic, Div, Alloc, IO {
+        match opt {
+            Some(list) => {
+                let req = (*list).head
+                if req.metric_id < 0 || req.metric_id >= 8 || proof_info.metric_known[req.metric_id as usize] != 1 {
+                    let c = self.report_missing_deferral_diagnostic(span, policy_name, req)
+                    (c, false)
+                } else {
+                    let observed = proof_info.metric_values[req.metric_id as usize]
+                    if !policy_requirement_holds(observed, req.op, req.threshold) {
+                        let c = self.report_failed_deferral_policy_requirement(span, policy_name, req, observed)
+                        (c, false)
+                    } else {
+                        self.check_deferral_policy_requirements_against_proof(span, policy_name, (*list).tail, proof_info)
+                    }
+                }
+            }
+            None => (self, true)
+        }
+    }
+
+    fn deferred_reason_witness_info_new(self, span: Span, certificate_id: i64) -> DeferredReasonWitnessInfo {
+        DeferredReasonWitnessInfo {
+            span_start: span.start,
+            span_end: span.end,
+            deferred_certificate_id: certificate_id,
+        }
+    }
+
+    fn check_admit_action_expr(self, e: Expr) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+        let value_arg = expr_list_head(e.args)
+        let robust_arg = expr_list_second(e.args)
+        let policy_arg = expr_list_third(e.args)
+
+        let value_pair = self.check_opt_expr(value_arg)
+        var c = value_pair.0
+        let value_ty = value_pair.1
+
+        let robust_pair = c.check_opt_expr(robust_arg)
+        c = robust_pair.0
+        let robust_ty = robust_pair.1
+        if robust_ty.kind != TypeKind::TyRobust {
+            return (c.report_missing_admissibility_proof(e.span), ty_error())
+        }
+        if robust_ty.robustness_level_id < 0 || robust_ty.robustness_scope_id < 0 {
+            return (c.report_missing_admissibility_proof(e.span), ty_error())
+        }
+        if robust_ty.epistemic_meta_id < 0 || robust_ty.epistemic_meta_id >= c.robust_proofs.count {
+            return (c.report_missing_admissibility_proof(e.span), ty_error())
+        }
+
+        let decision_pair = c.check_opt_expr(policy_arg)
+        c = decision_pair.0
+        let decision_ty = decision_pair.1
+        if decision_ty.kind != TypeKind::TyDecisionPolicy {
+            return (c.report_missing_decision_policy(e.span), ty_error())
+        }
+        if decision_ty.epistemic_meta_id < 0 || decision_ty.epistemic_meta_id >= c.decision_policies.count {
+            return (c.report_missing_decision_policy(e.span), ty_error())
+        }
+
+        let inner_ty = knowledge_inner(robust_ty)
+        if !types_compatible(inner_ty, value_ty) {
+            return (c.report_decision_target_mismatch(e.span, inner_ty, value_ty), ty_error())
+        }
+
+        let policy_info = c.decision_policies.get(decision_ty.epistemic_meta_id)
+        if !types_compatible(policy_info.target_ty, inner_ty) {
+            return (c.report_decision_target_mismatch(e.span, policy_info.target_ty, inner_ty), ty_error())
+        }
+
+        let proof_info = c.robust_proofs.get(robust_ty.epistemic_meta_id)
+        if policy_info.requirement_count > 0 {
+            let req_pair = c.check_decision_policy_requirements_against_proof(
+                e.span,
+                policy_info.name,
+                policy_info.requirements,
+                proof_info
+            )
+            c = req_pair.0
+            if !req_pair.1 {
+                return (c, ty_error())
+            }
+        }
+
+        let cert_info = DecisionCertificateInfo {
+            span_start: e.span.start,
+            span_end: e.span.end,
+            audit_id: proof_info.audit_id,
+            robust_proof_id: robust_ty.epistemic_meta_id,
+            decision_policy_id: decision_ty.epistemic_meta_id,
+            inner_ty: inner_ty,
+            metric_known: proof_info.metric_known,
+            metric_values: proof_info.metric_values,
+        }
+        let add_result = c.decision_certificates.add(cert_info)
+        c.decision_certificates = add_result.0
+        (c, ty_admissible(inner_ty, add_result.1))
+    }
+
+    fn check_defer_action_expr(self, e: Expr) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+        let value_arg = expr_list_head(e.args)
+        let evidence_arg = expr_list_second(e.args)
+        let policy_arg = expr_list_third(e.args)
+
+        let value_pair = self.check_opt_expr(value_arg)
+        var c = value_pair.0
+        let value_ty = value_pair.1
+
+        let evidence_pair = c.check_opt_expr(evidence_arg)
+        c = evidence_pair.0
+        let evidence_ty = evidence_pair.1
+
+        let policy_pair = c.check_opt_expr(policy_arg)
+        c = policy_pair.0
+        let policy_ty = policy_pair.1
+        if policy_ty.kind != TypeKind::TyDeferralPolicy {
+            return (c.report_missing_deferral_policy(e.span), ty_error())
+        }
+        if policy_ty.epistemic_meta_id < 0 || policy_ty.epistemic_meta_id >= c.deferral_policies.count {
+            return (c.report_missing_deferral_policy(e.span), ty_error())
+        }
+        let policy_info = c.deferral_policies.get(policy_ty.epistemic_meta_id)
+
+        if evidence_ty.kind == TypeKind::TyContest {
+            let inner_ty = knowledge_inner(evidence_ty)
+            if !types_compatible(inner_ty, value_ty) {
+                return (c.report_deferral_target_mismatch(e.span, inner_ty, value_ty), ty_error())
+            }
+            if !types_compatible(policy_info.target_ty, inner_ty) {
+                return (c.report_deferral_target_mismatch(e.span, policy_info.target_ty, inner_ty), ty_error())
+            }
+            if evidence_ty.epistemic_meta_id < 0 || evidence_ty.epistemic_meta_id >= c.contests.count {
+                return (c.report_missing_deferral_evidence(e.span), ty_error())
+            }
+            let contest_info = c.contests.get(evidence_ty.epistemic_meta_id)
+            if contest_info.family_id < 0 || contest_info.policy_id < 0 {
+                return (c.report_missing_deferral_evidence(e.span), ty_error())
+            }
+            if policy_info.requirement_count > 0 {
+                let req_pair = c.check_deferral_policy_requirements_against_contest(
+                    e.span,
+                    policy_info.name,
+                    policy_info.requirements,
+                    contest_info
+                )
+                c = req_pair.0
+                if !req_pair.1 {
+                    return (c, ty_error())
+                }
+            }
+            let cert_info = DeferredCertificateInfo {
+                span_start: e.span.start,
+                span_end: e.span.end,
+                audit_id: contest_info.audit_id,
+                contest_id: evidence_ty.epistemic_meta_id,
+                robust_proof_id: -1,
+                deferral_policy_id: policy_ty.epistemic_meta_id,
+                evidence_kind: DEFERRAL_EVIDENCE_CONTEST,
+                reason_code: c.deferral_reason_code_from_requirements(policy_info.requirements),
+                inner_ty: inner_ty,
+                metric_known: contest_info.metric_known,
+                metric_values: contest_info.metric_values,
+            }
+            let add_result = c.deferred_certificates.add(cert_info)
+            c.deferred_certificates = add_result.0
+            return (c, ty_deferred(inner_ty, add_result.1))
+        }
+
+        if evidence_ty.kind == TypeKind::TyRobust {
+            let inner_ty = knowledge_inner(evidence_ty)
+            if !types_compatible(inner_ty, value_ty) {
+                return (c.report_deferral_target_mismatch(e.span, inner_ty, value_ty), ty_error())
+            }
+            if !types_compatible(policy_info.target_ty, inner_ty) {
+                return (c.report_deferral_target_mismatch(e.span, policy_info.target_ty, inner_ty), ty_error())
+            }
+            if evidence_ty.robustness_level_id < 0 || evidence_ty.robustness_scope_id < 0 {
+                return (c.report_missing_deferral_evidence(e.span), ty_error())
+            }
+            if evidence_ty.epistemic_meta_id < 0 || evidence_ty.epistemic_meta_id >= c.robust_proofs.count {
+                return (c.report_missing_deferral_evidence(e.span), ty_error())
+            }
+            let proof_info = c.robust_proofs.get(evidence_ty.epistemic_meta_id)
+            if proof_info.contest_id < 0 {
+                return (c.report_missing_deferral_evidence(e.span), ty_error())
+            }
+            if policy_info.requirement_count > 0 {
+                let req_pair = c.check_deferral_policy_requirements_against_proof(
+                    e.span,
+                    policy_info.name,
+                    policy_info.requirements,
+                    proof_info
+                )
+                c = req_pair.0
+                if !req_pair.1 {
+                    return (c, ty_error())
+                }
+            }
+            let cert_info = DeferredCertificateInfo {
+                span_start: e.span.start,
+                span_end: e.span.end,
+                audit_id: proof_info.audit_id,
+                contest_id: proof_info.contest_id,
+                robust_proof_id: evidence_ty.epistemic_meta_id,
+                deferral_policy_id: policy_ty.epistemic_meta_id,
+                evidence_kind: DEFERRAL_EVIDENCE_ROBUST,
+                reason_code: c.deferral_reason_code_from_requirements(policy_info.requirements),
+                inner_ty: inner_ty,
+                metric_known: proof_info.metric_known,
+                metric_values: proof_info.metric_values,
+            }
+            let add_result = c.deferred_certificates.add(cert_info)
+            c.deferred_certificates = add_result.0
+            return (c, ty_deferred(inner_ty, add_result.1))
+        }
+
+        (c.report_missing_deferral_evidence(e.span), ty_error())
+    }
+
+    fn check_deferral_reason_expr(self, e: Expr) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+        let first_arg = expr_list_head(e.args)
+        let deferred_pair = self.check_opt_expr(first_arg)
+        var c = deferred_pair.0
+        let deferred_ty = deferred_pair.1
+        if deferred_ty.kind != TypeKind::TyDeferred {
+            return (c.report_deferral_reason_requires_deferred(e.span, deferred_ty), ty_error())
+        }
+        if deferred_ty.epistemic_meta_id < 0 || deferred_ty.epistemic_meta_id >= c.deferred_certificates.count {
+            return (c.report_missing_deferred_certificate(e.span), ty_error())
+        }
+        let add_result = c.deferred_reason_witnesses.add(c.deferred_reason_witness_info_new(e.span, deferred_ty.epistemic_meta_id))
+        c.deferred_reason_witnesses = add_result.0
+        (c, ty_named(deferral_reason_type_name()))
     }
 
     fn check_contest_witness_expr(self, e: Expr, witness_kind: i64) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
