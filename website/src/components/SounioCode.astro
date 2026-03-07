@@ -1,0 +1,165 @@
+---
+// SounioCode.astro — Runnable Sounio code block
+//
+// Props:
+//   code   (string, required) — Sounio source to display and optionally run
+//   title  (string, optional) — label shown in the header bar
+//
+// Behaviour:
+//   • Renders the code with syntax-highlighted styling.
+//   • A "Run" button calls window.__sounioCheck(code) if present (injected by
+//     the playground's WASM shim), otherwise falls back to a graceful message.
+//   • Output is shown in a collapsible panel below the block.
+//   • No external dependencies beyond what the Astro/Tailwind stack provides.
+
+interface Props {
+  code: string;
+  title?: string;
+}
+
+const { code, title = 'example.sio' } = Astro.props;
+
+// Unique ID so multiple blocks on the same page work independently.
+const blockId = `sc-${Math.random().toString(36).slice(2, 9)}`;
+---
+
+<div class="sounio-code-block rounded-lg overflow-hidden border border-white/10 my-4" id={blockId}>
+  <!-- Header bar -->
+  <div class="flex items-center justify-between px-3 py-2 bg-[var(--color-navy-900,#0a0f1e)] border-b border-white/10">
+    <span class="text-white/50 text-xs font-mono">{title}</span>
+    <div class="flex items-center gap-2">
+      <button
+        class="run-btn px-3 py-1 text-xs font-medium bg-green-500 hover:bg-green-600 disabled:opacity-50 text-white rounded transition-colors"
+        aria-label="Run this code snippet"
+      >
+        Run
+      </button>
+      <button
+        class="copy-btn px-3 py-1 text-xs font-medium bg-white/10 hover:bg-white/20 text-white rounded transition-colors"
+        aria-label="Copy source to clipboard"
+      >
+        Copy
+      </button>
+    </div>
+  </div>
+
+  <!-- Code display -->
+  <pre
+    class="p-4 m-0 overflow-x-auto bg-[#1e1e1e] text-[#d4d4d4] text-sm font-mono leading-relaxed"
+    aria-label="Sounio source code"
+  ><code class="language-sounio">{code}</code></pre>
+
+  <!-- Output panel (hidden until Run is clicked) -->
+  <div
+    class="output-panel hidden border-t border-white/10 bg-[#1a1a2e]"
+    aria-live="polite"
+    aria-label="Program output"
+  >
+    <div class="flex items-center justify-between px-3 py-1.5 border-b border-white/10">
+      <span class="text-white/40 text-xs font-mono">output</span>
+      <button class="close-btn text-white/30 hover:text-white/60 text-xs">dismiss</button>
+    </div>
+    <pre class="output-text p-4 m-0 text-green-400 text-sm font-mono whitespace-pre-wrap"></pre>
+  </div>
+</div>
+
+<script define:vars={{ blockId, code }}>
+  (function () {
+    const root = document.getElementById(blockId);
+    if (!root) return;
+
+    const runBtn = root.querySelector('.run-btn');
+    const copyBtn = root.querySelector('.copy-btn');
+    const outputPanel = root.querySelector('.output-panel');
+    const outputText = root.querySelector('.output-text');
+    const closeBtn = root.querySelector('.close-btn');
+
+    function showOutput(text) {
+      outputPanel.classList.remove('hidden');
+      outputText.textContent = text;
+    }
+
+    function hideOutput() {
+      outputPanel.classList.add('hidden');
+      outputText.textContent = '';
+    }
+
+    // Run handler
+    runBtn.addEventListener('click', async function () {
+      runBtn.disabled = true;
+      runBtn.textContent = 'Running…';
+
+      try {
+        // Primary path: use the WASM shim exposed on window
+        if (typeof window.__sounioRun === 'function') {
+          const raw = window.__sounioRun(code);
+          const result = JSON.parse(raw);
+          const diags = (result.diagnostics || [])
+            .map(d => {
+              const loc = d.line ? ` [${d.line}:${d.column ?? 1}]` : '';
+              return `${d.severity.toUpperCase()}${loc}: ${d.message}`;
+            })
+            .join('\n');
+
+          let out = '';
+          if (diags) out += diags + '\n\n';
+          if (result.output) out += result.output;
+          if (result.returnValue != null) out += (out ? '\n\nReturn: ' : 'Return: ') + result.returnValue;
+          if (!out) out = result.success ? 'Program finished successfully.' : 'Program failed with no output.';
+          showOutput(out);
+          return;
+        }
+
+        // Secondary path: dynamic import of the WASM module
+        const mod = await import('/wasm/sounio_compiler.js').catch(() => null);
+        if (mod && typeof mod.run === 'function') {
+          // Expose for subsequent calls
+          window.__sounioRun = mod.run;
+          await mod.default('/wasm/sounio_compiler_bg.wasm').catch(() => {});
+          const raw = mod.run(code);
+          const result = JSON.parse(raw);
+          const diags = (result.diagnostics || [])
+            .map(d => {
+              const loc = d.line ? ` [${d.line}:${d.column ?? 1}]` : '';
+              return `${d.severity.toUpperCase()}${loc}: ${d.message}`;
+            })
+            .join('\n');
+
+          let out = '';
+          if (diags) out += diags + '\n\n';
+          if (result.output) out += result.output;
+          if (result.returnValue != null) out += (out ? '\n\nReturn: ' : 'Return: ') + result.returnValue;
+          if (!out) out = result.success ? 'Program finished successfully.' : 'Program failed with no output.';
+          showOutput(out);
+          return;
+        }
+
+        // Fallback
+        showOutput(
+          'WASM runtime not available.\n' +
+          'Build the playground assets first:\n' +
+          '  bash scripts/build_playground_wasm.sh'
+        );
+      } catch (err) {
+        showOutput('Runtime error:\n' + String(err));
+      } finally {
+        runBtn.disabled = false;
+        runBtn.textContent = 'Run';
+      }
+    });
+
+    // Copy handler
+    copyBtn.addEventListener('click', function () {
+      navigator.clipboard.writeText(code).then(
+        () => {
+          copyBtn.textContent = 'Copied!';
+          setTimeout(() => { copyBtn.textContent = 'Copy'; }, 1500);
+        },
+        () => { copyBtn.textContent = 'Failed'; }
+      );
+    });
+
+    // Close output
+    closeBtn.addEventListener('click', hideOutput);
+  })();
+</script>
