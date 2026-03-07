@@ -107,6 +107,7 @@ run_step "18-selfhost-independence-gate" env WORK_DIR="$RUN_DIR/selfhost-indepen
 run_step "18a-stdlib-native-lane-gate" env STDLIB_HYPER_GATE_MODE=required STDLIB_HYPER_STATUS_OUT="$RUN_DIR/stdlib_hyper_execution_status.v1.json" STDLIB_NATIVE_LANE_MATRIX_OUT="$RUN_DIR/native_lane_matrix.v1.json" bash "$ROOT_DIR/scripts/stdlib/stdlib_hyper_execution_gate.sh"
 run_step "19-full-gate" bash "$ROOT_DIR/scripts/full_gate.sh"
 run_step "20-sprint14-checker-parity" bash "$ROOT_DIR/scripts/sprint14_checker_parity_gate.sh"
+run_step "21-sprint16-effect-handlers" bash "$ROOT_DIR/scripts/sprint16_effect_handlers_gate.sh"
 
 write_summary
 echo "[release-pack] summary=$SUMMARY_MD"
