@@ -8,6 +8,11 @@
 //
 // Methods return (Resolver, ...) to thread state through value semantics.
 
+module resolve::resolve
+
+use parser::ast::*
+use lexer::span::*
+
 // ============================================================
 // Resolver state
 // ============================================================
@@ -164,6 +169,34 @@ impl Resolver {
                     self
                 }
             }
+            ItemModels => {
+                if !name_is_empty(item.name) {
+                    self.define(item.name, SymbolKind::SymTypeAlias, item.span)
+                } else {
+                    self
+                }
+            }
+            ItemPolicy => {
+                if !name_is_empty(item.name) {
+                    self.define(item.name, SymbolKind::SymPolicy, item.span)
+                } else {
+                    self
+                }
+            }
+            ItemValidation => {
+                if !name_is_empty(item.name) {
+                    self.define(item.name, SymbolKind::SymPolicy, item.span)
+                } else {
+                    self
+                }
+            }
+            ItemAudit => {
+                if !name_is_empty(item.name) {
+                    self.define(item.name, SymbolKind::SymAudit, item.span)
+                } else {
+                    self
+                }
+            }
             ItemImpl => self
             ItemUse => {
                 if self.modules.count > 0 {
@@ -178,6 +211,13 @@ impl Resolver {
                 // Unit declarations are handled by the checker, not the resolver
                 if !name_is_empty(item.name) {
                     self.define(item.name, SymbolKind::SymTypeAlias, item.span)
+                } else {
+                    self
+                }
+            }
+            ItemEffect => {
+                if !name_is_empty(item.name) {
+                    self.define(item.name, SymbolKind::SymEffect, item.span)
                 } else {
                     self
                 }
@@ -293,6 +333,10 @@ impl Resolver {
             ItemEnum => self  // variants already collected, no bodies to resolve
             ItemImpl => self.resolve_impl_def(item.impl_def)
             ItemTypeAlias => self.resolve_type_alias(item.type_alias_ty)
+            ItemModels => self.resolve_models_def(item.models_def)
+            ItemPolicy => self.resolve_policy_def(item.policy_def)
+            ItemValidation => self.resolve_validation_def(item.validation_def)
+            ItemAudit => self.resolve_audit_def(item.audit_def)
             ItemUse => {
                 // Imports are validated during pass 1 for multi-module mode.
                 // Flat mode keeps legacy behavior.
@@ -419,6 +463,20 @@ impl Resolver {
             None => self
         }
     }
+
+    fn resolve_policy_def(self, opt: Option<Box<PolicyDef>>) -> Resolver with Mut, Panic, Div, Alloc, IO {
+        match opt {
+            Some(pd) => self.resolve_type_expr((*pd).target_type)
+            None => self
+        }
+    }
+
+    fn resolve_audit_def(self, opt: Option<Box<AuditDef>>) -> Resolver with Mut, Panic, Div, Alloc, IO {
+        match opt {
+            Some(ad) => self.resolve_type_expr((*ad).target_type)
+            None => self
+        }
+    }
 }
 
 // ============================================================
@@ -454,6 +512,7 @@ impl Resolver {
                 // Resolve inner type of Knowledge[T, ...]
                 self.resolve_knowledge_inner(te.knowledge_info)
             }
+            TypeModel => self.resolve_type_args(te.type_args)
             TypePolicy => self.resolve_type_args(te.type_args)
             TypeContest => self.resolve_type_args(te.type_args)
             TypeRobust => self.resolve_type_args(te.type_args)
@@ -495,6 +554,30 @@ impl Resolver {
             Some(list) => {
                 var r = self.resolve_type_expr((*list).head)
                 r.resolve_type_args((*list).tail)
+            }
+            None => self
+        }
+    }
+
+    fn resolve_models_def(self, opt: Option<Box<ModelsDef>>) -> Resolver with Mut, Panic, Div, Alloc, IO {
+        match opt {
+            Some(md) => self.resolve_ast_path_list((*md).models)
+            None => self
+        }
+    }
+
+    fn resolve_validation_def(self, opt: Option<Box<ValidationDef>>) -> Resolver with Mut, Panic, Div, Alloc, IO {
+        match opt {
+            Some(vd) => self.resolve_type_expr((*vd).target_type)
+            None => self
+        }
+    }
+
+    fn resolve_ast_path_list(self, opt: Option<Box<AstPathList>>) -> Resolver with Mut, Panic, Div, Alloc, IO {
+        match opt {
+            Some(list) => {
+                var r = self.resolve_path((*list).head)
+                r.resolve_ast_path_list((*list).tail)
             }
             None => self
         }
@@ -602,6 +685,15 @@ impl Resolver {
             ExprContest => {
                 var r = self.resolve_opt_expr(e.left)
                 r
+            }
+            ExprAuditAttach => {
+                var r = self.resolve_opt_expr(e.left)
+                let found = r.lookup(e.name)
+                if found < 0 {
+                    r.report_error(e.span)
+                } else {
+                    r
+                }
             }
             ExprIf => {
                 var r = self.resolve_opt_expr(e.left)
