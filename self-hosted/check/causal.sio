@@ -890,8 +890,391 @@ fn check_causal_identifiability_extended(g: CausalGraph, cause_idx: i64, effect_
             if found_r2 {
                 (0, 2)
             } else {
-                (1, 0 - 1)
+                // Full Shpitser-Pearl ID algorithm
+                var x_set: [bool; 16] = [false; 16]
+                x_set[cause_idx as usize] = true
+                var y_set: [bool; 16] = [false; 16]
+                y_set[effect_idx as usize] = true
+                let id_result = id_algorithm(g, x_set, y_set, 0)
+                if id_result.0 == 0 {
+                    (0, 3)
+                } else {
+                    (1, 0 - 1)
+                }
             }
         }
     }
+}
+
+// ============================================================
+// Sprint 31: Shpitser-Pearl ID Algorithm (AAAI 2006)
+// Sound and complete causal identification via C-component decomposition.
+// ============================================================
+
+struct CComponent {
+    members: [bool; 16],
+    count: i64,
+}
+
+fn c_component_empty() -> CComponent {
+    CComponent { members: [false; 16], count: 0 }
+}
+
+fn c_component_contains(c: CComponent, node: i64) -> bool {
+    c.members[node as usize]
+}
+
+fn c_component_add(c: CComponent, node: i64) -> CComponent with Mut {
+    var out = c
+    if !out.members[node as usize] {
+        out.members[node as usize] = true
+        out.count = out.count + 1
+    }
+    out
+}
+
+struct CComponentList {
+    components: [CComponent; 16],
+    count: i64,
+}
+
+fn c_component_list_empty() -> CComponentList {
+    CComponentList { components: [c_component_empty(); 16], count: 0 }
+}
+
+// Compute C-components: connected components in the bidirected edge subgraph.
+// Two nodes are in the same C-component iff connected by bidirected (confounding) edges.
+fn causal_compute_c_components(g: CausalGraph) -> CComponentList with Mut {
+    var assigned: [i64; 16] = [0 - 1; 16]
+    var result = c_component_list_empty()
+
+    var ni: i64 = 0
+    while ni < g.node_count {
+        if assigned[ni as usize] < 0 {
+            // BFS from ni through bidirected edges
+            var comp = c_component_empty()
+            var queue: [i64; 16] = [0 - 1; 16]
+            var q_head: i64 = 0
+            var q_tail: i64 = 0
+            comp = c_component_add(comp, ni)
+            assigned[ni as usize] = result.count
+            queue[0] = ni
+            q_tail = 1
+            while q_head < q_tail {
+                let cur = queue[q_head as usize]
+                q_head = q_head + 1
+                var ei: i64 = 0
+                while ei < g.edge_count {
+                    let e = g.edges[ei as usize]
+                    if !e.is_directed {
+                        var neighbor: i64 = 0 - 1
+                        if e.from_idx == cur && assigned[e.to_idx as usize] < 0 {
+                            neighbor = e.to_idx
+                        }
+                        if e.to_idx == cur && assigned[e.from_idx as usize] < 0 {
+                            neighbor = e.from_idx
+                        }
+                        if neighbor >= 0 {
+                            comp = c_component_add(comp, neighbor)
+                            assigned[neighbor as usize] = result.count
+                            if q_tail < 16 {
+                                queue[q_tail as usize] = neighbor
+                                q_tail = q_tail + 1
+                            }
+                        }
+                    }
+                    ei = ei + 1
+                }
+            }
+            result.components[result.count as usize] = comp
+            result.count = result.count + 1
+        }
+        ni = ni + 1
+    }
+    result
+}
+
+// Find the C-component containing a specific node.
+fn causal_find_c_component_of(g: CausalGraph, node: i64) -> CComponent with Mut {
+    let ccs = causal_compute_c_components(g)
+    var i: i64 = 0
+    while i < ccs.count {
+        if c_component_contains(ccs.components[i as usize], node) {
+            return ccs.components[i as usize]
+        }
+        i = i + 1
+    }
+    c_component_empty()
+}
+
+// Topological sort via Kahn's algorithm. Returns sorted node indices + count.
+fn causal_topological_sort(g: CausalGraph) -> ([i64; 16], i64) with Mut {
+    var in_degree: [i64; 16] = [0; 16]
+    var ei: i64 = 0
+    while ei < g.edge_count {
+        let e = g.edges[ei as usize]
+        if e.is_directed {
+            in_degree[e.to_idx as usize] = in_degree[e.to_idx as usize] + 1
+        }
+        ei = ei + 1
+    }
+    var queue: [i64; 16] = [0 - 1; 16]
+    var q_head: i64 = 0
+    var q_tail: i64 = 0
+    var ni: i64 = 0
+    while ni < g.node_count {
+        if in_degree[ni as usize] == 0 {
+            queue[q_tail as usize] = ni
+            q_tail = q_tail + 1
+        }
+        ni = ni + 1
+    }
+    var sorted: [i64; 16] = [0 - 1; 16]
+    var s_count: i64 = 0
+    while q_head < q_tail {
+        let cur = queue[q_head as usize]
+        q_head = q_head + 1
+        sorted[s_count as usize] = cur
+        s_count = s_count + 1
+        var ej: i64 = 0
+        while ej < g.edge_count {
+            let e = g.edges[ej as usize]
+            if e.is_directed && e.from_idx == cur {
+                in_degree[e.to_idx as usize] = in_degree[e.to_idx as usize] - 1
+                if in_degree[e.to_idx as usize] == 0 && q_tail < 16 {
+                    queue[q_tail as usize] = e.to_idx
+                    q_tail = q_tail + 1
+                }
+            }
+            ej = ej + 1
+        }
+    }
+    (sorted, s_count)
+}
+
+// Extract subgraph induced by nodes in `keep` set.
+fn causal_subgraph(g: CausalGraph, keep: [bool; 16]) -> CausalGraph with Mut {
+    // Build node mapping: old index -> new index
+    var old_to_new: [i64; 16] = [0 - 1; 16]
+    var new_graph = causal_graph_new()
+    var ni: i64 = 0
+    while ni < g.node_count {
+        if keep[ni as usize] {
+            let new_idx = new_graph.node_count
+            old_to_new[ni as usize] = new_idx
+            new_graph.nodes[new_idx as usize] = g.nodes[ni as usize]
+            new_graph.node_count = new_graph.node_count + 1
+        }
+        ni = ni + 1
+    }
+    // Copy edges where both endpoints are in keep
+    var ei: i64 = 0
+    while ei < g.edge_count {
+        let e = g.edges[ei as usize]
+        if keep[e.from_idx as usize] && keep[e.to_idx as usize] {
+            let new_from = old_to_new[e.from_idx as usize]
+            let new_to = old_to_new[e.to_idx as usize]
+            if new_from >= 0 && new_to >= 0 && new_graph.edge_count < 32 {
+                new_graph.edges[new_graph.edge_count as usize] = CausalEdge {
+                    from_idx: new_from,
+                    to_idx: new_to,
+                    is_directed: e.is_directed,
+                }
+                new_graph.edge_count = new_graph.edge_count + 1
+            }
+        }
+        ei = ei + 1
+    }
+    new_graph
+}
+
+// Set operations on [bool; 16] node sets.
+fn set_union(a: [bool; 16], b: [bool; 16]) -> [bool; 16] with Mut {
+    var out: [bool; 16] = a
+    var i: i64 = 0
+    while i < 16 {
+        if b[i as usize] { out[i as usize] = true }
+        i = i + 1
+    }
+    out
+}
+
+fn set_subtract(a: [bool; 16], b: [bool; 16]) -> [bool; 16] with Mut {
+    var out: [bool; 16] = a
+    var i: i64 = 0
+    while i < 16 {
+        if b[i as usize] { out[i as usize] = false }
+        i = i + 1
+    }
+    out
+}
+
+fn set_is_subset(a: [bool; 16], b: [bool; 16]) -> bool {
+    var i: i64 = 0
+    while i < 16 {
+        if a[i as usize] && !b[i as usize] { return false }
+        i = i + 1
+    }
+    true
+}
+
+fn set_equals(a: [bool; 16], b: [bool; 16]) -> bool {
+    var i: i64 = 0
+    while i < 16 {
+        if a[i as usize] != b[i as usize] { return false }
+        i = i + 1
+    }
+    true
+}
+
+fn set_is_empty(s: [bool; 16]) -> bool {
+    var i: i64 = 0
+    while i < 16 {
+        if s[i as usize] { return false }
+        i = i + 1
+    }
+    true
+}
+
+fn set_count(s: [bool; 16]) -> i64 {
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < 16 {
+        if s[i as usize] { count = count + 1 }
+        i = i + 1
+    }
+    count
+}
+
+// Get all ancestors of all nodes in a set.
+fn causal_get_ancestors_set(g: CausalGraph, s: [bool; 16]) -> [bool; 16] with Mut {
+    var result = s
+    var i: i64 = 0
+    while i < 16 {
+        if s[i as usize] {
+            let anc = causal_get_ancestors(g, i)
+            result = set_union(result, anc)
+        }
+        i = i + 1
+    }
+    result
+}
+
+// Build V set (all nodes).
+fn causal_v_set(g: CausalGraph) -> [bool; 16] with Mut {
+    var v: [bool; 16] = [false; 16]
+    var i: i64 = 0
+    while i < g.node_count {
+        v[i as usize] = true
+        i = i + 1
+    }
+    v
+}
+
+// Shpitser-Pearl ID Algorithm (AAAI 2006).
+// Sound and complete for identification of causal effects in semi-Markovian models.
+//
+// Input:
+//   g = causal graph (DAG with bidirected confounding edges)
+//   x_set = intervention set (cause nodes)
+//   y_set = outcome set (effect nodes)
+//   depth = recursion depth (for termination safety, max 16)
+//
+// Returns:
+//   (status, step): status 0=identifiable, 1=non-identifiable (hedge found)
+//   step = which ID line resolved (1-7, or -1 for failure)
+fn id_algorithm(g: CausalGraph, x_set: [bool; 16], y_set: [bool; 16], depth: i64) -> (i64, i64) with Mut {
+    // Safety: prevent infinite recursion
+    if depth > 16 {
+        return (1, 0 - 1)
+    }
+
+    let v = causal_v_set(g)
+
+    // Line 1: If X is empty, trivially identifiable (marginalization)
+    if set_is_empty(x_set) {
+        return (0, 1)
+    }
+
+    // Line 2: If An(Y) in G != V, recurse on An(Y) subgraph
+    let an_y = causal_get_ancestors_set(g, y_set)
+    if !set_equals(an_y, v) {
+        // Restrict to ancestors of Y
+        let g_an = causal_subgraph(g, an_y)
+        // Remap x_set to only include nodes in An(Y)
+        var x_restricted: [bool; 16] = [false; 16]
+        var xi: i64 = 0
+        while xi < 16 {
+            if x_set[xi as usize] && an_y[xi as usize] {
+                x_restricted[xi as usize] = true
+            }
+            xi = xi + 1
+        }
+        return id_algorithm(g_an, x_restricted, y_set, depth + 1)
+    }
+
+    // Line 3: Let W = (V \ X) \ An(Y)_{G_Xbar}
+    let g_xbar = causal_graph_remove_incoming_set(g, x_set)
+    let an_y_xbar = causal_get_ancestors_set(g_xbar, y_set)
+    let v_minus_x = set_subtract(v, x_set)
+    let w = set_subtract(v_minus_x, an_y_xbar)
+    if !set_is_empty(w) {
+        let x_union_w = set_union(x_set, w)
+        return id_algorithm(g, x_union_w, y_set, depth + 1)
+    }
+
+    // Line 4: Compute C-components of G[V\X]
+    let g_vx = causal_subgraph(g, v_minus_x)
+    let ccs_vx = causal_compute_c_components(g_vx)
+
+    // Lines 5-7 depend on C-component structure
+    if ccs_vx.count == 1 {
+        // Line 5: If C(G[V\X]) has a single component equal to C(G), non-identifiable (hedge)
+        let ccs_g = causal_compute_c_components(g)
+        if ccs_g.count == 1 {
+            // The whole graph is one C-component and V\X is one C-component -> hedge
+            return (1, 5)
+        }
+        // Otherwise fall through to check if it's a subset of some C-component of G
+    }
+
+    // Line 6 & 7: Check each C-component of G[V\X]
+    if ccs_vx.count > 1 {
+        // Line 6: Multiple C-components -> identifiable via product formula
+        // Each component can be identified separately
+        var ci: i64 = 0
+        while ci < ccs_vx.count {
+            let comp = ccs_vx.components[ci as usize]
+            // Recursively identify P(S_i | do(V \ S_i))
+            let s_i = comp.members
+            let do_set = set_subtract(v, s_i)
+            let sub_result = id_algorithm(g, do_set, s_i, depth + 1)
+            if sub_result.0 != 0 {
+                return (1, 6)
+            }
+            ci = ci + 1
+        }
+        return (0, 6)
+    }
+
+    // Single C-component in G[V\X]: check against C-components of G
+    let ccs_g = causal_compute_c_components(g)
+    let single_comp = ccs_vx.components[0]
+
+    // Line 7: Find a C-component S_i of G such that S(G[V\X]) is a proper subset of S_i
+    var si: i64 = 0
+    while si < ccs_g.count {
+        let s_i = ccs_g.components[si as usize]
+        if set_is_subset(single_comp.members, s_i.members) && !set_equals(single_comp.members, s_i.members) {
+            // S(G[V\X]) is a proper subset of S_i
+            // Recurse on subgraph G[S_i] with restricted intervention
+            let g_si = causal_subgraph(g, s_i.members)
+            let x_si = set_subtract(s_i.members, single_comp.members)
+            return id_algorithm(g_si, x_si, y_set, depth + 1)
+        }
+        si = si + 1
+    }
+
+    // No matching C-component found -- non-identifiable
+    (1, 0 - 1)
 }
