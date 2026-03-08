@@ -1,15 +1,16 @@
 // Causal type checking — CausalEffect<X, Y, do(Z=z)> type system
 //
-// Provides structural identifiability checking for causal queries.
-// A causal query is identifiable if it can be estimated from
-// observational data without additional interventional experiments.
+// Provides structural identifiability checking for causal queries via
+// Pearl's backdoor criterion with graph traversal on a 16-node DAG.
+//
+// A causal query P(Y|do(X)) is identifiable if there exists a valid
+// adjustment set Z such that:
+//   1. No node in Z is a descendant of X (the cause)
+//   2. Z blocks every backdoor path from X to Y
 //
 // Error codes:
-//   E060: non_identifiable_query — the causal query is not identifiable
-//   E061: causal_type_mismatch   — cause/effect types incompatible
-//
-// This is a structural check (not full SMT-backed ID algorithm).
-// The check verifies basic type-level constraints on causal queries.
+//   E067: non_identifiable_query — no valid adjustment set exists
+//   E068: causal_type_mismatch   — cause/effect types incompatible
 
 
 // CausalGraph: simple adjacency structure for causal DAG verification.
@@ -112,27 +113,300 @@ fn causal_has_confound(g: CausalGraph, a: i64, b: i64) -> bool {
     found
 }
 
-// Structural identifiability check (simplified backdoor criterion).
-// Returns 0 if identifiable, 1 if non-identifiable (confounded), 2 if unknown.
+// ============================================================
+// Graph traversal algorithms for Pearl's backdoor criterion
+// ============================================================
+
+// Compute the descendant set of a node following directed edges only.
+// Returns a boolean mask: descendants[i] == true iff node i is reachable
+// from `start` via directed edges (X -> ... -> i).
+fn causal_get_descendants(g: CausalGraph, start: i64) -> [bool; 16] with Mut {
+    var desc: [bool; 16] = [false; 16]
+    var queue: [i64; 16] = [0 - 1; 16]
+    var q_head: i64 = 0
+    var q_tail: i64 = 0
+    // Seed with direct children of start
+    var ei: i64 = 0
+    while ei < g.edge_count {
+        let e = g.edges[ei as usize]
+        if e.is_directed && e.from_idx == start && !desc[e.to_idx as usize] {
+            desc[e.to_idx as usize] = true
+            queue[q_tail as usize] = e.to_idx
+            q_tail = q_tail + 1
+        }
+        ei = ei + 1
+    }
+    // BFS
+    while q_head < q_tail {
+        let cur = queue[q_head as usize]
+        q_head = q_head + 1
+        var ej: i64 = 0
+        while ej < g.edge_count {
+            let e = g.edges[ej as usize]
+            if e.is_directed && e.from_idx == cur && !desc[e.to_idx as usize] {
+                desc[e.to_idx as usize] = true
+                if q_tail < 16 {
+                    queue[q_tail as usize] = e.to_idx
+                    q_tail = q_tail + 1
+                }
+            }
+            ej = ej + 1
+        }
+    }
+    desc
+}
+
+// Check if `target` is a descendant of `start` (directed reachability).
+fn causal_is_descendant(g: CausalGraph, start: i64, target: i64) -> bool {
+    let desc = causal_get_descendants(g, start)
+    desc[target as usize]
+}
+
+// Get all parent nodes of `node` — nodes with a directed edge into `node`.
+// Returns count and array of parent indices.
+fn causal_get_parents(g: CausalGraph, node: i64) -> (i64, [i64; 16]) with Mut {
+    var parents: [i64; 16] = [0 - 1; 16]
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < g.edge_count {
+        let e = g.edges[i as usize]
+        if e.is_directed && e.to_idx == node {
+            parents[count as usize] = e.from_idx
+            count = count + 1
+        }
+        i = i + 1
+    }
+    (count, parents)
+}
+
+// Check if there exists a backdoor path from cause to effect.
+// A backdoor path is any path that enters `cause` via a non-causal direction:
+//   - A directed edge pointing INTO cause (parent -> cause)
+//   - A bidirected confounding edge (cause <-> neighbor)
+// Then connects to effect via any path (directed or bidirected, any direction).
 //
-// For a simple causal query X -> Y:
-// - If there exists a bidirected edge X <-> Y (hidden common cause), non-identifiable
-// - If there is no backdoor path, identifiable (conservative)
-fn check_causal_identifiability(g: CausalGraph, cause_idx: i64, effect_idx: i64) -> i64 {
-    if causal_has_confound(g, cause_idx, effect_idx) {
-        1  // non-identifiable: direct confounding
+// We check this by BFS from effect through the "ancestral" graph (ignoring
+// edges out of cause), seeing if we reach any parent/confounder of cause.
+fn causal_has_backdoor_path(g: CausalGraph, cause: i64, effect: i64) -> bool with Mut {
+    // BFS from effect through all edges except those LEAVING cause
+    var visited: [bool; 16] = [false; 16]
+    var queue: [i64; 16] = [0 - 1; 16]
+    var q_head: i64 = 0
+    var q_tail: i64 = 0
+    visited[effect as usize] = true
+    queue[0] = effect
+    q_tail = 1
+    while q_head < q_tail {
+        let cur = queue[q_head as usize]
+        q_head = q_head + 1
+        var ei: i64 = 0
+        while ei < g.edge_count {
+            let e = g.edges[ei as usize]
+            if e.is_directed {
+                // Follow directed edges in REVERSE (parent <- child) to find ancestors
+                if e.to_idx == cur && e.from_idx != cause && !visited[e.from_idx as usize] {
+                    visited[e.from_idx as usize] = true
+                    if q_tail < 16 {
+                        queue[q_tail as usize] = e.from_idx
+                        q_tail = q_tail + 1
+                    }
+                }
+                // Also follow directed edges FORWARD for paths through descendants
+                if e.from_idx == cur && e.to_idx != cause && !visited[e.to_idx as usize] {
+                    visited[e.to_idx as usize] = true
+                    if q_tail < 16 {
+                        queue[q_tail as usize] = e.to_idx
+                        q_tail = q_tail + 1
+                    }
+                }
+            } else {
+                // Bidirected (confounding) edges — traverse both directions
+                var neighbor: i64 = 0 - 1
+                if e.from_idx == cur && e.to_idx != cause {
+                    neighbor = e.to_idx
+                }
+                if e.to_idx == cur && e.from_idx != cause {
+                    neighbor = e.from_idx
+                }
+                if neighbor >= 0 && !visited[neighbor as usize] {
+                    visited[neighbor as usize] = true
+                    if q_tail < 16 {
+                        queue[q_tail as usize] = neighbor
+                        q_tail = q_tail + 1
+                    }
+                }
+            }
+            ei = ei + 1
+        }
+    }
+    // A backdoor path exists if we can reach any parent or confounder of cause
+    var has_backdoor: bool = false
+    var pi: i64 = 0
+    while pi < g.edge_count {
+        let e = g.edges[pi as usize]
+        if e.is_directed && e.to_idx == cause {
+            // e.from_idx is a parent of cause
+            if visited[e.from_idx as usize] {
+                has_backdoor = true
+            }
+        }
+        if !e.is_directed {
+            // Confounding edge — check both endpoints
+            if e.from_idx == cause && visited[e.to_idx as usize] {
+                has_backdoor = true
+            }
+            if e.to_idx == cause && visited[e.from_idx as usize] {
+                has_backdoor = true
+            }
+        }
+        pi = pi + 1
+    }
+    has_backdoor
+}
+
+// Check if backdoor paths are blocked by conditioning on nodes in `blocked`.
+// Same as causal_has_backdoor_path but skips blocked nodes during traversal.
+fn causal_has_backdoor_path_blocked_by(g: CausalGraph, cause: i64, effect: i64, blocked: [bool; 16]) -> bool with Mut {
+    var visited: [bool; 16] = [false; 16]
+    var queue: [i64; 16] = [0 - 1; 16]
+    var q_head: i64 = 0
+    var q_tail: i64 = 0
+    visited[effect as usize] = true
+    queue[0] = effect
+    q_tail = 1
+    while q_head < q_tail {
+        let cur = queue[q_head as usize]
+        q_head = q_head + 1
+        var ei: i64 = 0
+        while ei < g.edge_count {
+            let e = g.edges[ei as usize]
+            if e.is_directed {
+                if e.to_idx == cur && e.from_idx != cause && !visited[e.from_idx as usize] && !blocked[e.from_idx as usize] {
+                    visited[e.from_idx as usize] = true
+                    if q_tail < 16 {
+                        queue[q_tail as usize] = e.from_idx
+                        q_tail = q_tail + 1
+                    }
+                }
+                if e.from_idx == cur && e.to_idx != cause && !visited[e.to_idx as usize] && !blocked[e.to_idx as usize] {
+                    visited[e.to_idx as usize] = true
+                    if q_tail < 16 {
+                        queue[q_tail as usize] = e.to_idx
+                        q_tail = q_tail + 1
+                    }
+                }
+            } else {
+                var neighbor: i64 = 0 - 1
+                if e.from_idx == cur && e.to_idx != cause {
+                    neighbor = e.to_idx
+                }
+                if e.to_idx == cur && e.from_idx != cause {
+                    neighbor = e.from_idx
+                }
+                if neighbor >= 0 && !visited[neighbor as usize] && !blocked[neighbor as usize] {
+                    visited[neighbor as usize] = true
+                    if q_tail < 16 {
+                        queue[q_tail as usize] = neighbor
+                        q_tail = q_tail + 1
+                    }
+                }
+            }
+            ei = ei + 1
+        }
+    }
+    var has_backdoor: bool = false
+    var pi: i64 = 0
+    while pi < g.edge_count {
+        let e = g.edges[pi as usize]
+        if e.is_directed && e.to_idx == cause {
+            if visited[e.from_idx as usize] && !blocked[e.from_idx as usize] {
+                has_backdoor = true
+            }
+        }
+        if !e.is_directed {
+            if e.from_idx == cause && visited[e.to_idx as usize] && !blocked[e.to_idx as usize] {
+                has_backdoor = true
+            }
+            if e.to_idx == cause && visited[e.from_idx as usize] && !blocked[e.from_idx as usize] {
+                has_backdoor = true
+            }
+        }
+        pi = pi + 1
+    }
+    has_backdoor
+}
+
+// Find a valid adjustment set using Pearl's backdoor criterion.
+// Returns (0, adjustment_set) if found, (1, empty) if no valid set exists.
+//
+// Pearl's backdoor criterion: Z is valid if:
+//   1. No node in Z is a descendant of cause
+//   2. Z blocks every backdoor path from cause to effect
+//
+// Strategy: greedily include all observed non-descendants of cause,
+// then verify this maximal set blocks all backdoor paths. If the
+// maximal set doesn't work, no subset will either (monotonicity).
+fn causal_find_adjustment_set(g: CausalGraph, cause: i64, effect: i64) -> (i64, [bool; 16]) with Mut {
+    let desc = causal_get_descendants(g, cause)
+    // Build candidate set: all observed, non-descendant, non-cause, non-effect nodes
+    var adj_set: [bool; 16] = [false; 16]
+    var ni: i64 = 0
+    while ni < g.node_count {
+        if ni != cause && ni != effect && !desc[ni as usize] && g.nodes[ni as usize].is_observed {
+            adj_set[ni as usize] = true
+        }
+        ni = ni + 1
+    }
+    // Check if this adjustment set blocks all backdoor paths
+    if causal_has_backdoor_path_blocked_by(g, cause, effect, adj_set) {
+        // Maximal observed non-descendant set doesn't block — non-identifiable
+        (1, [false; 16])
     } else {
-        0  // identifiable (conservative)
+        (0, adj_set)
+    }
+}
+
+// ============================================================
+// Identifiability checking — integrates graph algorithms
+// ============================================================
+
+// Structural identifiability check via Pearl's backdoor criterion.
+// Returns 0 if identifiable, 1 if non-identifiable.
+//
+// Algorithm:
+//   1. If no backdoor path exists, trivially identifiable
+//   2. Otherwise, build maximal adjustment set (all observed non-descendants
+//      of cause, excluding cause and effect)
+//   3. If this set blocks all backdoor paths, identifiable; otherwise not
+fn check_causal_identifiability(g: CausalGraph, cause_idx: i64, effect_idx: i64) -> i64 with Mut {
+    if !causal_has_backdoor_path(g, cause_idx, effect_idx) {
+        0  // No backdoor paths — identifiable
+    } else {
+        // Build maximal adjustment set: observed non-descendants of cause
+        let desc = causal_get_descendants(g, cause_idx)
+        var adj_set: [bool; 16] = [false; 16]
+        var ni: i64 = 0
+        while ni < g.node_count {
+            if ni != cause_idx && ni != effect_idx && !desc[ni as usize] && g.nodes[ni as usize].is_observed {
+                adj_set[ni as usize] = true
+            }
+            ni = ni + 1
+        }
+        if causal_has_backdoor_path_blocked_by(g, cause_idx, effect_idx, adj_set) {
+            1  // Non-identifiable: maximal set doesn't block
+        } else {
+            0  // Identifiable: adjustment set found
+        }
     }
 }
 
 // Validate a CausalEffect type annotation.
-// Returns error code: 0=ok, 60=non_identifiable_query
+// Returns error code: 0=ok, 67=non_identifiable_query
 fn check_causal_effect_type(effect_ty: TypeEntry) -> i64 {
     match effect_ty.kind {
         TypeKind::TyCausalEffect => {
             if effect_ty.epistemic_meta_id == 1 {
-                60  // E060: non_identifiable_query
+                67  // E067: non_identifiable_query
             } else {
                 0
             }
