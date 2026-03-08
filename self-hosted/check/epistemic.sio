@@ -1834,3 +1834,397 @@ fn variational_family_expressiveness(family_ty: TypeEntry) -> i64 with IO {
     if family_ty.array_size == 4 { return 2 }
     1
 }
+
+// ================================================================
+// Sprint 24 Track A: Differentiable Programming Types (E100-E103)
+// References: Elliott ICFP 2018, Huot et al. LICS 2020,
+//             Pearlmutter & Siskind POPL 2008
+// ================================================================
+
+fn is_valid_differentiable(ty: TypeEntry) -> bool {
+    if ty.kind != TypeKind::TyDifferentiable { return false }
+    if ty.array_size < -1 { return false }
+    true
+}
+
+fn check_differentiable_type(ty: TypeEntry) -> i64 with IO {
+    // E100: invalid differentiable type
+    if ty.kind != TypeKind::TyDifferentiable { return 100 }
+    if ty.array_size < -1 { return 100 }
+    0
+}
+
+fn is_valid_gradient(ty: TypeEntry) -> bool {
+    if ty.kind != TypeKind::TyGradient { return false }
+    if ty.array_size == 0 { return false }
+    true
+}
+
+fn check_gradient_type(grad_ty: TypeEntry, fn_ty: TypeEntry) -> i64 with IO {
+    // E101: gradient dimension mismatch
+    if grad_ty.kind != TypeKind::TyGradient { return 101 }
+    if grad_ty.array_size != -1 && fn_ty.array_size != -1 {
+        if grad_ty.array_size != fn_ty.array_size { return 101 }
+    }
+    if grad_ty.algebra_kind == 0 { return 101 }
+    0
+}
+
+fn is_valid_jacobian(ty: TypeEntry) -> bool {
+    if ty.kind != TypeKind::TyJacobian { return false }
+    if ty.array_size == 0 { return false }
+    if ty.algebra_kind == 0 { return false }
+    true
+}
+
+fn check_jacobian_type(jac_ty: TypeEntry) -> i64 with IO {
+    // E102: Jacobian dimension invalid
+    if jac_ty.kind != TypeKind::TyJacobian { return 102 }
+    if jac_ty.array_size == 0 { return 102 }
+    if jac_ty.algebra_kind == 0 { return 102 }
+    0
+}
+
+fn check_ad_mode_compat(grad_ty: TypeEntry, requires_reverse: bool) -> i64 with IO {
+    // E103: forward-only mode incompatible with Langevin/reverse-mode context
+    if grad_ty.kind != TypeKind::TyGradient { return 103 }
+    if requires_reverse {
+        if grad_ty.epistemic_meta_id == 0 { return 103 }
+    }
+    0
+}
+
+fn diff_compose(outer: TypeEntry, inner_fn: TypeEntry) -> TypeEntry with IO, Alloc {
+    // Chain rule: C^k o C^j = C^min(k,j)
+    var k: i64 = outer.array_size
+    let j: i64 = inner_fn.array_size
+    if j != -1 && k != -1 {
+        if j < k { k = j }
+    } else {
+        if j == -1 && k == -1 { k = -1 }
+        else if j == -1 { k = k }
+        else { k = j }
+    }
+    ty_differentiable(inner_fn, k, -1, 0.0 - 1.0, outer.epistemic_meta_id)
+}
+
+fn gradient_norm_check(grad_ty: TypeEntry, actual_norm_milli: f64) -> i64 with IO {
+    if grad_ty.knowledge_epsilon < 0.0 { return 0 }
+    if actual_norm_milli <= grad_ty.knowledge_epsilon { return 0 }
+    103
+}
+
+fn jacobian_from_matrix_shape(mat_ty: TypeEntry, base_fn_id: i64) -> TypeEntry with IO, Alloc {
+    // BRIDGE: TyMatrixShaped -> TyJacobian
+    ty_jacobian(mat_ty, mat_ty.array_size, mat_ty.algebra_kind, base_fn_id, mat_ty.knowledge_epsilon, 0)
+}
+
+fn langevin_from_gradient(grad_ty: TypeEntry, temperature_milli: i64) -> TypeEntry with IO, Alloc {
+    // MOONSHOT BRIDGE A->B: TyGradient<loss,n,1> -> TySDE<x, -grad_f, sqrt(2*eta*T)>
+    // Langevin: dX = -grad_f(X) dt + sqrt(2T) dW, sde_kind=2 (Langevin)
+    let state_dim: i64 = grad_ty.array_size
+    let drift_id: i64 = grad_ty.fn_sig_id
+    let diffusion_bound: f64 = temperature_milli as f64
+    ty_sde(grad_ty, state_dim, drift_id, -1, diffusion_bound, 2)
+}
+
+// ================================================================
+// Sprint 24 Track B: Stochastic Process Types (E104-E107)
+// References: Oksendal (2003) SDEs, Doob (1953) martingales,
+//             Aguirre et al. POPL 2018
+// ================================================================
+
+fn is_valid_markov_chain(ty: TypeEntry) -> bool {
+    if ty.kind != TypeKind::TyMarkovChain { return false }
+    let ck: i64 = ty.epistemic_meta_id
+    if ck < 0 { return false }
+    if ck > 2 { return false }
+    true
+}
+
+fn check_markov_chain_type(ty: TypeEntry) -> i64 with IO {
+    // E104: Markov chain kind invalid
+    if ty.kind != TypeKind::TyMarkovChain { return 104 }
+    let ck: i64 = ty.epistemic_meta_id
+    if ck < 0 { return 104 }
+    if ck > 2 { return 104 }
+    if ty.array_size == 0 { return 104 }
+    0
+}
+
+fn is_valid_sde(ty: TypeEntry) -> bool {
+    if ty.kind != TypeKind::TySDE { return false }
+    if ty.array_size == 0 { return false }
+    let sk: i64 = ty.epistemic_meta_id
+    if sk < 0 { return false }
+    if sk > 3 { return false }
+    true
+}
+
+fn check_sde_type(ty: TypeEntry) -> i64 with IO {
+    // E105: SDE state_dim invalid or sde_kind out of range
+    if ty.kind != TypeKind::TySDE { return 105 }
+    if ty.array_size == 0 { return 105 }
+    let sk: i64 = ty.epistemic_meta_id
+    if sk < 0 { return 105 }
+    if sk > 3 { return 105 }
+    0
+}
+
+fn is_valid_martingale(ty: TypeEntry) -> bool {
+    if ty.kind != TypeKind::TyMartingale { return false }
+    let mk: i64 = ty.epistemic_meta_id
+    if mk < 0 { return false }
+    if mk > 2 { return false }
+    true
+}
+
+fn check_martingale_type(ty: TypeEntry) -> i64 with IO {
+    // E106: martingale kind invalid or Doob bound negative
+    if ty.kind != TypeKind::TyMartingale { return 106 }
+    let mk: i64 = ty.epistemic_meta_id
+    if mk < 0 { return 106 }
+    if mk > 2 { return 106 }
+    0
+}
+
+fn is_valid_stationary_dist(ty: TypeEntry) -> bool {
+    if ty.kind != TypeKind::TyStationaryDist { return false }
+    let pk: i64 = ty.array_size
+    if pk != 0 && pk != 1 { return false }
+    true
+}
+
+fn check_stationary_dist_type(ty: TypeEntry) -> i64 with IO {
+    // E107: process_kind not in {0, 1}
+    if ty.kind != TypeKind::TyStationaryDist { return 107 }
+    let pk: i64 = ty.array_size
+    if pk != 0 && pk != 1 { return 107 }
+    0
+}
+
+fn markov_to_distribution(mc_ty: TypeEntry) -> TypeEntry with IO, Alloc {
+    // BRIDGE: TyMarkovChain -> TyDistribution (parametric, kind=-1)
+    ty_distribution(mc_ty, -1, mc_ty.robustness_level_id, mc_ty.knowledge_epsilon, mc_ty.epistemic_meta_id)
+}
+
+fn sde_stationary_to_dist(sde_ty: TypeEntry, beta_milli: i64) -> TypeEntry with IO, Alloc {
+    // MOONSHOT BRIDGE B->Sprint23P:
+    // Ergodic Langevin SDE -> Gibbs/Boltzmann stationary distribution
+    // pi(x) proportional to exp(-beta U(x)), where drift = -grad_U
+    ty_distribution(sde_ty, -1, sde_ty.fn_sig_id, 1000.0, 0)
+}
+
+fn ergodic_to_robust(mc_ty: TypeEntry, proof_id: i64) -> TypeEntry with IO, Alloc {
+    // BRIDGE B->Sprint7: ergodic Markov chain -> TyRobust (stability guarantee)
+    ty_robust(mc_ty, proof_id, 0, -1)
+}
+
+// ================================================================
+// Sprint 24 Track C: Complexity/Resource Types (E108-E109)
+// References: Hoffmann & Hofmann POPL 2010, Hoffmann et al. POPL 2012
+// ================================================================
+
+fn is_valid_bigO(ty: TypeEntry) -> bool {
+    if ty.kind != TypeKind::TyBigO { return false }
+    if ty.array_size < -1 { return false }
+    let rk: i64 = ty.epistemic_meta_id
+    if rk < -1 { return false }
+    if rk > 2 { return false }
+    true
+}
+
+fn check_bigO_type(ty: TypeEntry) -> i64 with IO {
+    // E108: degree < -1 or resource_kind out of range
+    if ty.kind != TypeKind::TyBigO { return 108 }
+    if ty.array_size < -1 { return 108 }
+    let rk: i64 = ty.epistemic_meta_id
+    if rk < -1 { return 108 }
+    if rk > 2 { return 108 }
+    0
+}
+
+fn is_valid_amortized(ty: TypeEntry) -> bool {
+    if ty.kind != TypeKind::TyAmortized { return false }
+    let pm: i64 = ty.epistemic_meta_id
+    if pm < 0 { return false }
+    if pm > 2 { return false }
+    true
+}
+
+fn check_amortized_type(ty: TypeEntry) -> i64 with IO {
+    // E109: amortized per_op_degree > worst_case_degree
+    if ty.kind != TypeKind::TyAmortized { return 109 }
+    let pm: i64 = ty.epistemic_meta_id
+    if pm < 0 { return 109 }
+    if pm > 2 { return 109 }
+    if ty.robustness_level_id != -1 {
+        if ty.array_size > ty.robustness_level_id { return 109 }
+    }
+    0
+}
+
+fn bigO_subsumes(outer: TypeEntry, inner_ty: TypeEntry) -> bool with IO {
+    // O(n^k) subsumes O(n^j) iff k >= j
+    if outer.array_size == -1 { return true }
+    if inner_ty.array_size == -1 { return false }
+    outer.array_size >= inner_ty.array_size
+}
+
+fn bigO_compose(f_ty: TypeEntry, g_ty: TypeEntry) -> TypeEntry with IO, Alloc {
+    // O(n^a) composed with O(n^b): O(n^(a*b)), capped at degree 6
+    let a: i64 = f_ty.array_size
+    let b: i64 = g_ty.array_size
+    var deg: i64 = 0
+    if a == -1 || b == -1 {
+        deg = -1
+    } else {
+        deg = a * b
+        if deg > 6 { deg = 6 }
+    }
+    ty_bigO(f_ty, deg, -1, f_ty.knowledge_epsilon, f_ty.epistemic_meta_id, f_ty.algebra_kind)
+}
+
+fn matmul_complexity(left_mat: TypeEntry, right_mat: TypeEntry) -> TypeEntry with IO, Alloc {
+    // BRIDGE C<-Sprint23V: Matrix<T,m,k> x Matrix<T,k,n> -> BigO<T, degree=3>
+    ty_bigO(left_mat, 3, -1, 1000.0, 0, 0)
+}
+
+fn jacobian_complexity(jac_ty: TypeEntry) -> TypeEntry with IO, Alloc {
+    // BRIDGE C<-Track A: TyJacobian<f,n,m> -> BigO<T, degree=2>
+    ty_bigO(jac_ty, 2, -1, jac_ty.knowledge_epsilon, 0, 0)
+}
+
+// ================================================================
+// Sprint 24 Track D: Proof Certificate Types (E110-E113)
+// References: Wadler (2015) "Propositions as Types",
+//             Chlipala CPDT, Martin-Lof (1984)
+// ================================================================
+
+fn is_valid_proof(ty: TypeEntry) -> bool {
+    if ty.kind != TypeKind::TyProof { return false }
+    let pk: i64 = ty.array_size
+    if pk < 0 { return false }
+    if pk > 3 { return false }
+    if ty.epistemic_meta_id < 0 { return false }
+    true
+}
+
+fn check_proof_type(ty: TypeEntry) -> i64 with IO {
+    // E110: proof_kind invalid or axiom_count negative
+    if ty.kind != TypeKind::TyProof { return 110 }
+    let pk: i64 = ty.array_size
+    if pk < 0 { return 110 }
+    if pk > 3 { return 110 }
+    if ty.epistemic_meta_id < 0 { return 110 }
+    0
+}
+
+fn check_proof_completeness(ty: TypeEntry) -> i64 with IO {
+    // E110: proof has holes (fn_sig_id=-1) unless proof_kind=3 (witnessed)
+    if ty.kind != TypeKind::TyProof { return 110 }
+    if ty.fn_sig_id == -1 {
+        if ty.array_size != 3 { return 110 }
+    }
+    0
+}
+
+fn is_valid_lemma(ty: TypeEntry) -> bool {
+    if ty.kind != TypeKind::TyLemma { return false }
+    if ty.epistemic_meta_id < 0 { return false }
+    let st: i64 = ty.robustness_level_id
+    if st < 0 { return false }
+    if st > 2 { return false }
+    true
+}
+
+fn check_lemma_type(ty: TypeEntry) -> i64 with IO {
+    // E111: dependency_count negative or strength_tag invalid
+    if ty.kind != TypeKind::TyLemma { return 111 }
+    if ty.epistemic_meta_id < 0 { return 111 }
+    let st: i64 = ty.robustness_level_id
+    if st < 0 { return 111 }
+    if st > 2 { return 111 }
+    0
+}
+
+fn check_lemma_acyclic(lemma_ty: TypeEntry, dep_id: i64) -> i64 with IO {
+    // E111: self-reference (circular dependency)
+    if lemma_ty.array_size == dep_id { return 111 }
+    0
+}
+
+fn is_valid_axiom(ty: TypeEntry) -> bool {
+    if ty.kind != TypeKind::TyAxiom { return false }
+    let ac: i64 = ty.epistemic_meta_id
+    if ac < 0 { return false }
+    if ac > 3 { return false }
+    if ty.robustness_level_id < 0 { return false }
+    true
+}
+
+fn check_axiom_type(ty: TypeEntry) -> i64 with IO {
+    // E112: axiom_class not in [0,3]
+    if ty.kind != TypeKind::TyAxiom { return 112 }
+    let ac: i64 = ty.epistemic_meta_id
+    if ac < 0 { return 112 }
+    if ac > 3 { return 112 }
+    if ty.robustness_level_id < 0 { return 112 }
+    0
+}
+
+fn check_axiom_constructive(proof_ty: TypeEntry) -> i64 with IO {
+    // E112: axiom used as inner of constructive proof (proof_kind=0)
+    if proof_ty.kind != TypeKind::TyProof { return 0 }
+    if proof_ty.array_size != 0 { return 0 }
+    match proof_ty.inner {
+        Some(inner) => {
+            if (*inner).kind == TypeKind::TyAxiom { return 112 }
+            0
+        }
+        None => 0
+    }
+}
+
+fn check_proof_confidence(ty: TypeEntry, required_milli: f64) -> i64 with IO {
+    // E113: weak proof certificate (confidence < required)
+    if ty.kind != TypeKind::TyProof { return 113 }
+    if ty.knowledge_epsilon >= 0.0 {
+        if ty.knowledge_epsilon < required_milli { return 113 }
+    }
+    0
+}
+
+fn proof_to_robust(proof_ty: TypeEntry) -> TypeEntry with IO, Alloc {
+    // BRIDGE D->Sprint7: TyProof<robust(T)> -> TyRobust<T>
+    ty_robust(proof_ty, proof_ty.fn_sig_id, proof_ty.robustness_level_id, -1)
+}
+
+fn proof_to_validated(proof_ty: TypeEntry) -> TypeEntry with IO, Alloc {
+    // BRIDGE D->Sprint8: Proof<P> -> Validated<T>
+    ty_validated(proof_ty, proof_ty.knowledge_epsilon)
+}
+
+fn lemma_chain(l1: TypeEntry, l2: TypeEntry) -> TypeEntry with IO, Alloc {
+    // (A->B) ^ (B->C) -> (A->C): modus ponens composition
+    let new_dep: i64 = l1.epistemic_meta_id + l2.epistemic_meta_id + 1
+    ty_lemma(l2, l2.array_size, l2.fn_sig_id, l2.knowledge_epsilon, new_dep, l2.robustness_level_id)
+}
+
+fn axiom_to_proof(ax_ty: TypeEntry) -> TypeEntry with IO, Alloc {
+    // TyAxiom -> TyProof: probabilistic proof, no proof term, axiom_count=1
+    ty_proof(ax_ty, 2, -1, ax_ty.knowledge_epsilon, 1, -1)
+}
+
+// ================================================================
+// Sprint 24 Moonshot: SGD -> Langevin -> Gibbs -> Contest Bridge
+// References: Welling & Teh (2011) SGLD, Roberts & Tweedie (1996)
+// ================================================================
+
+fn gradient_bridge_complete(diff_ty: TypeEntry, temp_milli: i64, beta_milli: i64, model_count: i64) -> TypeEntry with IO, Alloc {
+    // Full chain: Differentiable -> Gradient -> SDE(Langevin) -> Distribution(Gibbs) -> Contest
+    let gradient_ty: TypeEntry = ty_gradient(diff_ty, diff_ty.array_size, 1, diff_ty.fn_sig_id, 0.0 - 1.0, 1)
+    let sde_ty: TypeEntry = langevin_from_gradient(gradient_ty, temp_milli)
+    let dist_ty: TypeEntry = sde_stationary_to_dist(sde_ty, beta_milli)
+    dist_to_contest(dist_ty, model_count)
+}
