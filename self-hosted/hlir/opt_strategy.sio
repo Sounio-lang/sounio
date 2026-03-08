@@ -1,0 +1,93 @@
+// self-hosted::hlir::opt_strategy — Strategy-directed HLIR optimization passes
+//
+// Applies optimization transformations to HLIR functions based on their
+// CompileStrategy annotation. This ensures that:
+//   - Validated data gets aggressive optimization (constant folding, SIMD, unrolling)
+//   - Uncertain data preserves numerical precision (no float reassociation)
+//   - GPU-targeted functions get kernel-specific optimizations
+//   - Probabilistic functions remain trace-compatible
+
+// ============================================================================
+// Strategy-aware float constant folding
+// ============================================================================
+// Only fold float constants when the strategy allows reassociation.
+// PrecisionPreserving and Instrumented strategies must NOT fold floats
+// because reordering can change rounding behavior.
+
+fn hlir_opt_can_fold_float_binary(strategy: CompileStrategy, op: i64) -> bool {
+    // Only aggressive and standard strategies allow float folding
+    if !hlir_strategy_allows_float_reassoc(strategy) {
+        return false
+    }
+    // Can fold: fadd, fsub, fmul, fdiv
+    op == HLIR_BIN_FADD || op == HLIR_BIN_FSUB || op == HLIR_BIN_FMUL || op == HLIR_BIN_FDIV
+}
+
+// ============================================================================
+// Strategy-aware binary simplification
+// ============================================================================
+// Check if a binary operation on two constants can be folded in this strategy.
+
+fn hlir_opt_try_fold_binary(strategy: CompileStrategy, op: i64, lhs_const: bool, rhs_const: bool, is_float: bool) -> bool {
+    // Integer constant folding is always safe
+    if !is_float {
+        return lhs_const && rhs_const
+    }
+    // Float constant folding requires strategy permission
+    if !hlir_opt_can_fold_float_binary(strategy, op) {
+        return false
+    }
+    lhs_const && rhs_const
+}
+
+// ============================================================================
+// Strategy metadata for codegen backends
+// ============================================================================
+// Backends query these to decide codegen behavior per-function.
+
+struct StrategyHints {
+    allow_float_reassoc: bool,
+    allow_simd_widening: bool,
+    allow_loop_unroll: bool,
+    require_strict_fp: bool,
+    emit_trace_prologue: bool,
+    emit_dual_path: bool,
+    is_gpu_kernel: bool,
+}
+
+fn hlir_strategy_hints(strategy: CompileStrategy) -> StrategyHints {
+    StrategyHints {
+        allow_float_reassoc: hlir_strategy_allows_float_reassoc(strategy),
+        allow_simd_widening: hlir_strategy_allows_simd_widening(strategy),
+        allow_loop_unroll: hlir_strategy_allows_loop_unroll(strategy),
+        require_strict_fp: hlir_strategy_requires_strict_fp(strategy),
+        emit_trace_prologue: match strategy {
+            CompileStrategy::StrategyProbabilistic => true,
+            _ => false,
+        },
+        emit_dual_path: hlir_strategy_needs_instrumentation(strategy),
+        is_gpu_kernel: match strategy {
+            CompileStrategy::StrategyGpuKernel => true,
+            _ => false,
+        },
+    }
+}
+
+// ============================================================================
+// Per-function optimization pass entry point
+// ============================================================================
+// Called by the lowering pipeline for each function. Applies strategy-aware
+// transforms to the function's HLIR blocks.
+
+fn hlir_opt_apply_strategy(func: HlirFunction) -> HlirFunction with Mut, Panic {
+    let hints = hlir_strategy_hints(func.compile_strategy)
+    var f = func
+
+    // For now, the strategy hints are consumed by backends at codegen time.
+    // Future sprints will add intra-function HLIR transforms here:
+    //   - Sprint 34: dual-path emission for StrategyInstrumented
+    //   - Float reassociation blocking for strict-fp strategies
+    //   - SIMD widening for StrategyAggressive
+
+    f
+}
