@@ -540,6 +540,149 @@ fn run_gpu_emit_pipeline(path: string, target: string, use_autotune: bool, use_f
     0
 }
 
+// IR VERIFICATION PIPELINES (--ir-verify, --ir-roundtrip)
+// ============================================================================
+
+fn run_ir_verify_pipeline(path_a: string, path_b: string) -> i32 with IO, Mut, Div, Panic, Alloc {
+    // Compile file A
+    let state_a = read_source_file(path_a)
+    let prog_a = parse_program_preloaded(state_a.token_count)
+    if fail_if_parse_errors() {
+        print("ir-verify: parse error in ")
+        print(path_a)
+        print("\n")
+        return 1
+    }
+    let res_a = resolve_program(prog_a)
+    if res_a.had_error {
+        print("ir-verify: resolve error in ")
+        print(path_a)
+        print("\n")
+        return 1
+    }
+    let chk_a = check_program(prog_a)
+    if chk_a.had_error {
+        print("ir-verify: check error in ")
+        print(path_a)
+        print("\n")
+        return 1
+    }
+    let low_a = lower_program_to_ir(prog_a)
+    if low_a.had_error {
+        print("ir-verify: lower error in ")
+        print(path_a)
+        print("\n")
+        return 1
+    }
+
+    // Compile file B
+    let state_b = read_source_file(path_b)
+    let prog_b = parse_program_preloaded(state_b.token_count)
+    if fail_if_parse_errors() {
+        print("ir-verify: parse error in ")
+        print(path_b)
+        print("\n")
+        return 1
+    }
+    let res_b = resolve_program(prog_b)
+    if res_b.had_error {
+        print("ir-verify: resolve error in ")
+        print(path_b)
+        print("\n")
+        return 1
+    }
+    let chk_b = check_program(prog_b)
+    if chk_b.had_error {
+        print("ir-verify: check error in ")
+        print(path_b)
+        print("\n")
+        return 1
+    }
+    let low_b = lower_program_to_ir(prog_b)
+    if low_b.had_error {
+        print("ir-verify: lower error in ")
+        print(path_b)
+        print("\n")
+        return 1
+    }
+
+    let code = verify_ir_equivalence(low_a.module, low_b.module)
+    if code == 0 {
+        print("ir-verify: EQUIVALENT\n")
+        0
+    } else {
+        print("ir-verify: DIFFERENT code=")
+        print_int(code)
+        print("\n")
+        1
+    }
+}
+
+fn run_ir_roundtrip_pipeline(path: string) -> i32 with IO, Mut, Div, Panic, Alloc {
+    let state = read_source_file(path)
+    let prog = parse_program_preloaded(state.token_count)
+    if fail_if_parse_errors() {
+        print("ir-roundtrip: parse error in ")
+        print(path)
+        print("\n")
+        return 1
+    }
+    let res = resolve_program(prog)
+    if res.had_error {
+        print("ir-roundtrip: resolve error in ")
+        print(path)
+        print("\n")
+        return 1
+    }
+    let chk = check_program(prog)
+    if chk.had_error {
+        print("ir-roundtrip: check error in ")
+        print(path)
+        print("\n")
+        return 1
+    }
+    let low = lower_program_to_ir(prog)
+    if low.had_error {
+        print("ir-roundtrip: lower error in ")
+        print(path)
+        print("\n")
+        return 1
+    }
+    // Serialize
+    let pair_a = serialize_ir_module(low.module)
+    let buf_a = pair_a.0
+    let len_a = pair_a.1
+    // Deserialize
+    let restored = deserialize_ir_module(buf_a, len_a)
+    // Re-serialize
+    let pair_b = serialize_ir_module(restored)
+    let buf_b = pair_b.0
+    let len_b = pair_b.1
+    // Compare
+    if len_a != len_b {
+        print("ir-roundtrip: FAIL length mismatch ")
+        print_int(len_a)
+        print(" vs ")
+        print_int(len_b)
+        print("\n")
+        return 1
+    }
+    var i: i64 = 0
+    while i < len_a {
+        if buf_a[i] != buf_b[i] {
+            print("ir-roundtrip: FAIL at byte ")
+            print_int(i)
+            print("\n")
+            return 1
+        }
+        i = i + 1
+    }
+    print("ir-roundtrip: OK (")
+    print_int(len_a)
+    print(" bytes)\n")
+    0
+}
+
 // COMPILE PIPELINE (--compile mode)
 // ============================================================================
 
@@ -1950,6 +2093,25 @@ fn main() -> i32 with IO, Mut, Div, Panic, Alloc {
             return 1
         }
         return run_gpu_emit_pipeline(gpu_source_path, gpu_target, gpu_autotune, gpu_fuse, gpu_epistemic)
+    }
+
+    if str_eq(cmd, "ir-verify") {
+        if argc < 3 {
+            print("Usage: sounio ir-verify <file_a.sio> <file_b.sio>\n")
+            return 1
+        }
+        let path_a = get_arg(1)
+        let path_b = get_arg(2)
+        return run_ir_verify_pipeline(path_a, path_b)
+    }
+
+    if str_eq(cmd, "ir-roundtrip") {
+        if argc < 2 {
+            print("Usage: sounio ir-roundtrip <file.sio>\n")
+            return 1
+        }
+        let rt_path = get_arg(1)
+        return run_ir_roundtrip_pipeline(rt_path)
     }
 
     if str_eq(cmd, "compile") {
