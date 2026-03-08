@@ -42,6 +42,9 @@ enum TypeKind {
     TyAcquisitionPlan,
     TyRecoursePolicy,
     TyRecoursePlan,
+    TyAlternativePolicy,
+    TyAlternativeSet,
+    TyAlternativeOption,
     TyDecisionPolicy,
     TyDeferralPolicy,
     TyContest,
@@ -69,6 +72,10 @@ enum TypeKind {
     TyATE,              // ATE<T> — average treatment effect estimand — Sprint 20 PO
     TyDiffPrivate,      // DiffPrivate<T, ε> — mechanism satisfying ε-differential privacy — Sprint 21 DP
     TyDPBudget,         // DPBudget<ε_total, ε_spent> — depleting privacy budget — Sprint 21 DP
+    TyTransportable,    // Transport<T, src, tgt, S> — causal effect identified across domains — Sprint 22 T
+    TySelectionDiagram, // SelectionDiagram<T, S> — encodes domain difference structure — Sprint 22 T
+    TyFairPrediction,   // FairPrediction<T, criterion, attr> — ML fairness constraint as type — Sprint 22 F
+    TyFairnessGap,      // FairnessGap<T, criterion> — measured disparity vs declared slack — Sprint 22 F
 }
 
 // ============================================================
@@ -809,6 +816,66 @@ fn ty_recourse_policy(inner: TypeEntry, meta_id: i64) -> TypeEntry with Alloc {
 fn ty_recourse_plan(inner: TypeEntry, meta_id: i64) -> TypeEntry with Alloc {
     TypeEntry {
         kind: TypeKind::TyRecoursePlan,
+        name: Name { buf: [0; 128], len: 0 },
+        inner: Some(Box::new(inner)),
+        array_size: -1,
+        fn_sig_id: -1,
+        tuple_elems: None,
+        knowledge_epsilon: -1.0,
+        algebra_kind: -1,
+        clifford_p: -1,
+        clifford_q: -1,
+        unit_id: -1,
+        refinement_id: -1,
+        epistemic_meta_id: meta_id,
+        robustness_level_id: -1,
+        robustness_scope_id: -1,
+    }
+}
+
+fn ty_alternative_policy(inner: TypeEntry, meta_id: i64) -> TypeEntry with Alloc {
+    TypeEntry {
+        kind: TypeKind::TyAlternativePolicy,
+        name: Name { buf: [0; 128], len: 0 },
+        inner: Some(Box::new(inner)),
+        array_size: -1,
+        fn_sig_id: -1,
+        tuple_elems: None,
+        knowledge_epsilon: -1.0,
+        algebra_kind: -1,
+        clifford_p: -1,
+        clifford_q: -1,
+        unit_id: -1,
+        refinement_id: -1,
+        epistemic_meta_id: meta_id,
+        robustness_level_id: -1,
+        robustness_scope_id: -1,
+    }
+}
+
+fn ty_alternative_set(inner: TypeEntry, meta_id: i64) -> TypeEntry with Alloc {
+    TypeEntry {
+        kind: TypeKind::TyAlternativeSet,
+        name: Name { buf: [0; 128], len: 0 },
+        inner: Some(Box::new(inner)),
+        array_size: -1,
+        fn_sig_id: -1,
+        tuple_elems: None,
+        knowledge_epsilon: -1.0,
+        algebra_kind: -1,
+        clifford_p: -1,
+        clifford_q: -1,
+        unit_id: -1,
+        refinement_id: -1,
+        epistemic_meta_id: meta_id,
+        robustness_level_id: -1,
+        robustness_scope_id: -1,
+    }
+}
+
+fn ty_alternative_option(inner: TypeEntry, meta_id: i64) -> TypeEntry with Alloc {
+    TypeEntry {
+        kind: TypeKind::TyAlternativeOption,
         name: Name { buf: [0; 128], len: 0 },
         inner: Some(Box::new(inner)),
         array_size: -1,
@@ -1582,6 +1649,152 @@ fn is_diff_private_type(t: TypeEntry) -> bool {
 fn is_dp_budget_type(t: TypeEntry) -> bool {
     match t.kind {
         TypeKind::TyDPBudget => true
+        _ => false
+    }
+}
+
+// ============================================================
+// Causal transportability types (Sprint 22 Track T)
+// ============================================================
+// TyTransportable<T, src, tgt, S>: causal effect P(Y|do(X)) estimated in source domain
+//   that is identified (S-admissible) in the target domain under selection diagram S.
+//
+// Reference: Pearl & Bareinboim (2014) "External Validity: From Do-Calculus to Transportability"
+//   Bareinboim & Pearl (2016) "Causal inference and the data-fusion problem"
+//   S-admissibility: the selection variable S does not confound transport when conditioning
+//   on the adjustment set in the target domain.
+//
+// Field mapping (reusing TypeEntry, no new fields):
+//   inner = causal effect type T (e.g. ATE<f64> or f64)
+//   fn_sig_id = selection_bias_id (index into selection diagram registry; -1=unidentified)
+//   epistemic_meta_id = source_domain_id
+//   robustness_level_id = target_domain_id
+//   knowledge_epsilon = transport_confidence_milli (1000=S-admissible/identified, 0=unknown)
+fn ty_transportable(effect_ty: TypeEntry, selection_id: i64, src_id: i64, tgt_id: i64, confidence_milli: i64) -> TypeEntry with Alloc {
+    TypeEntry {
+        kind: TypeKind::TyTransportable,
+        name: Name { buf: [0; 128], len: 0 },
+        inner: Some(Box::new(effect_ty)),
+        array_size: 0,
+        fn_sig_id: selection_id,
+        knowledge_epsilon: confidence_milli,
+        epistemic_meta_id: src_id,
+        robustness_level_id: tgt_id,
+        robustness_scope_id: -1,
+        unit_id: -1,
+        refinement_id: -1,
+    }
+}
+
+// TySelectionDiagram<T, S>: encodes where source and target populations differ.
+//   Selection nodes S ⊆ V indicate variables whose distributions change across domains.
+//   A selection diagram with S = {} means domains are identical (trivial transport).
+//
+// Field mapping:
+//   inner = DAG representation type (usually f64 placeholder in MVP)
+//   array_size = s_node_count (number of selection nodes; 0=no difference detected)
+//   fn_sig_id = diagram_id (index into causal graph registry; -1=unregistered)
+//   knowledge_epsilon = diagram_confidence_milli (1000=fully specified, 0=unknown)
+fn ty_selection_diagram(inner_ty: TypeEntry, diagram_id: i64, s_node_count: i64) -> TypeEntry with Alloc {
+    TypeEntry {
+        kind: TypeKind::TySelectionDiagram,
+        name: Name { buf: [0; 128], len: 0 },
+        inner: Some(Box::new(inner_ty)),
+        array_size: s_node_count,
+        fn_sig_id: diagram_id,
+        knowledge_epsilon: 1000,
+        epistemic_meta_id: -1,
+        robustness_level_id: -1,
+        robustness_scope_id: -1,
+        unit_id: -1,
+        refinement_id: -1,
+    }
+}
+
+fn is_transportable_type(t: TypeEntry) -> bool {
+    match t.kind {
+        TypeKind::TyTransportable => true
+        _ => false
+    }
+}
+
+fn is_selection_diagram_type(t: TypeEntry) -> bool {
+    match t.kind {
+        TypeKind::TySelectionDiagram => true
+        _ => false
+    }
+}
+
+// ============================================================
+// ML Fairness types (Sprint 22 Track F)
+// ============================================================
+// TyFairPrediction<T, criterion, protected_attr>: prediction satisfying a stated fairness criterion.
+//
+// Fairness criteria (array_size field):
+//   0 = demographic_parity      P(Ŷ=1|A=0) = P(Ŷ=1|A=1)           (Dwork et al. 2012)
+//   1 = equalized_odds          TPR(A=0)=TPR(A=1) ∧ FPR(A=0)=FPR(A=1) (Hardt et al. 2016)
+//   2 = individual_fairness     similar individuals → similar scores  (Dwork et al. 2012)
+//   3 = calibration_within_group P(Y=1|Ŷ=p,A=a) = p for all a       (Chouldechova 2017)
+//   4 = counterfactual_fairness Ŷ(A←a) = Ŷ(A←a') for all a, a'     (Kusner et al. 2017)
+//
+// Chouldechova (2017) impossibility: DP ∧ EO ∧ Calibration cannot all hold when base rates differ.
+//   Sounio encodes this as E082: contradictory fairness criteria.
+//
+// Field mapping:
+//   inner = prediction type T
+//   array_size = fairness_criterion (0-4 above)
+//   fn_sig_id = protected_attribute_id (-1 if unspecified)
+//   knowledge_epsilon = fairness_slack_milli (tolerance; 0=exact parity, >0=ε-approximate)
+//   epistemic_meta_id = group_count (-1=binary protected attribute, N=N-way)
+fn ty_fair_prediction(pred_ty: TypeEntry, criterion: i64, attr_id: i64, slack_milli: i64) -> TypeEntry with Alloc {
+    TypeEntry {
+        kind: TypeKind::TyFairPrediction,
+        name: Name { buf: [0; 128], len: 0 },
+        inner: Some(Box::new(pred_ty)),
+        array_size: criterion,
+        fn_sig_id: attr_id,
+        knowledge_epsilon: slack_milli,
+        epistemic_meta_id: -1,
+        robustness_level_id: -1,
+        robustness_scope_id: -1,
+        unit_id: -1,
+        refinement_id: -1,
+    }
+}
+
+// TyFairnessGap<T, criterion>: the measured disparity for a given fairness criterion.
+//   E081 is emitted when measured_gap_milli > the declared slack in TyFairPrediction.
+//
+// Field mapping:
+//   inner = prediction type T
+//   array_size = criterion (matches TyFairPrediction.array_size)
+//   knowledge_epsilon = measured_gap_milli (actual |Δ|×1000; 0=perfectly fair)
+fn ty_fairness_gap(pred_ty: TypeEntry, criterion: i64, measured_gap_milli: i64) -> TypeEntry with Alloc {
+    TypeEntry {
+        kind: TypeKind::TyFairnessGap,
+        name: Name { buf: [0; 128], len: 0 },
+        inner: Some(Box::new(pred_ty)),
+        array_size: criterion,
+        fn_sig_id: -1,
+        knowledge_epsilon: measured_gap_milli,
+        epistemic_meta_id: -1,
+        robustness_level_id: -1,
+        robustness_scope_id: -1,
+        unit_id: -1,
+        refinement_id: -1,
+    }
+}
+
+fn is_fair_prediction_type(t: TypeEntry) -> bool {
+    match t.kind {
+        TypeKind::TyFairPrediction => true
+        _ => false
+    }
+}
+
+fn is_fairness_gap_type(t: TypeEntry) -> bool {
+    match t.kind {
+        TypeKind::TyFairnessGap => true
         _ => false
     }
 }

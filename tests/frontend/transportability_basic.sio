@@ -1,0 +1,159 @@
+//@ run-pass
+//@ description: causal transportability — effect estimated in source domain transported to target
+
+// Transport scenario (Pearl & Bareinboim 2014, Example 1):
+// Drug efficacy P(Y|do(X)) estimated in a clinical trial (source π)
+// must be transported to the general population (target π*).
+//
+// KEY DIFFERENCE between domains: age distribution differs (Z in π ≠ Z in π*).
+// Selection diagram: S → Z (hospital selects patients based on age Z, not on outcome Y).
+// This means S is an ancestor of Z but NOT of Y (given do(X)).
+//
+// DIRECT TRANSPORT FORMULA (S-admissibility via backdoor criterion):
+//   P*(Y|do(X)) = Σ_z P(Y|do(X), Z=z) · P*(Z=z)
+//   = reweight the trial's stratum-specific effects by target age distribution
+//
+// Reference: Pearl & Bareinboim (2014) Theorem 1 (direct transportability)
+//   Bareinboim & Pearl (2016) "Causal inference and the data-fusion problem"
+
+// ============================================================
+// Trial effect by age stratum
+// ============================================================
+
+// Stratum-specific ATE: average treatment effect for one age group
+// In the trial, we can estimate P(Y|do(X), Z=z) for each stratum z
+fn stratum_ate(treated_outcomes: f64, control_outcomes: f64) -> f64 with IO, Div, Panic {
+    // ATE within stratum z: E[Y(1)|Z=z] - E[Y(0)|Z=z]
+    treated_outcomes + (0.0 - control_outcomes)
+}
+
+// ============================================================
+// Direct transport formula (reweighting by target age distribution)
+// ============================================================
+
+// compute_stratum_ates: estimate ATE for each age stratum from trial data
+fn compute_stratum_ates(
+    treat_means: [f64; 4],  // E[Y(1)|Z=z] for z=0..3
+    ctrl_means: [f64; 4],   // E[Y(0)|Z=z] for z=0..3
+    n_strata: i64
+) -> [f64; 4] with IO, Div, Mut, Panic {
+    var ates: [f64; 4] = [0.0; 4]
+    var i: i64 = 0
+    while i < n_strata && i < 4 {
+        ates[i as usize] = stratum_ate(treat_means[i as usize], ctrl_means[i as usize])
+        i = i + 1
+    }
+    ates
+}
+
+// direct_transport: P*(Y|do(X)) = Σ_z P(Y|do(X), Z=z) · P*(Z=z)
+// Reweights stratum-specific trial effects by target population's age distribution.
+// This is the direct transport formula under S-admissibility.
+fn direct_transport(
+    stratum_ates: [f64; 4],      // P(Y|do(X), Z=z) for each stratum — from trial
+    target_age_dist: [f64; 4],  // P*(Z=z) — target population age distribution
+    n_strata: i64
+) -> f64 with IO, Div, Mut, Panic {
+    // Transport formula: Σ_z ate(z) * P*(Z=z)
+    // Requires: Σ_z P*(Z=z) = 1 (valid probability distribution over strata)
+    var transported_ate: f64 = 0.0
+    var i: i64 = 0
+    while i < n_strata && i < 4 {
+        transported_ate = transported_ate + stratum_ates[i as usize] * target_age_dist[i as usize]
+        i = i + 1
+    }
+    transported_ate
+}
+
+// ============================================================
+// Selection bias assessment
+// ============================================================
+
+// s_admissibility_check: verifies that the selection mechanism S → Z does NOT
+// create a confounding path between X and Y in the target domain.
+// For the hospital-trial example: S → Z → X → Y (selection affects age, not outcome directly)
+// The backdoor path Z → X → Y is blocked by conditioning on Z (S-admissible).
+fn s_admissible_linear_chain(
+    s_affects_z: bool,
+    z_affects_x: bool,
+    s_affects_y_directly: bool
+) -> bool with IO {
+    // S is admissible if it does NOT directly affect Y (only through Z and X)
+    if s_affects_y_directly {
+        return false  // direct selection bias on outcome: not S-admissible
+    }
+    // S → Z → X → Y: S is admissible (we can condition on Z to block selection)
+    s_affects_z && z_affects_x
+}
+
+// ============================================================
+// Multi-study meta-analysis transport (Bareinboim & Pearl 2016)
+// ============================================================
+
+// meta_transport_estimate: transport from multiple source studies to target population
+// When individual strata ATEs are available from multiple studies, we can pool them.
+// Combined estimate: weighted average of study-specific transported ATEs.
+fn meta_transport_estimate(
+    study_ates: [f64; 4],       // transported ATE from each study
+    study_weights: [f64; 4],   // weight for each study (e.g. inverse variance)
+    n_studies: i64
+) -> f64 with IO, Div, Mut, Panic {
+    var weighted_sum: f64 = 0.0
+    var weight_total: f64 = 0.0
+    var i: i64 = 0
+    while i < n_studies && i < 4 {
+        weighted_sum = weighted_sum + study_ates[i as usize] * study_weights[i as usize]
+        weight_total = weight_total + study_weights[i as usize]
+        i = i + 1
+    }
+    weighted_sum / weight_total
+}
+
+// ============================================================
+// Surrogate experiments (Bareinboim & Pearl 2014)
+// ============================================================
+
+// surrogate_adjust: when we cannot measure Y directly in target domain,
+// use a surrogate W (measured in both domains) to identify the causal effect.
+// Requires: X → W → Y (W is a mediator on the causal path X → Y).
+fn surrogate_adjust(
+    trial_xy_effect: f64,    // P(Y|do(X)) from trial (source domain, X→Y direct)
+    surrogate_ratio: f64     // P*(W|do(X)) / P(W|do(X)) — surrogate reweighting factor
+) -> f64 with IO, Div, Panic {
+    // Surrogate-adjusted transport: trial effect × surrogate reweighting
+    trial_xy_effect * surrogate_ratio
+}
+
+// ============================================================
+// Main: demonstrate full transport pipeline
+// ============================================================
+
+fn main() -> i64 with IO, Div, Mut, Panic {
+    // Clinical trial data: 4 age strata (young, middle, senior, elderly)
+    // Source domain π (hospital trial — oversamples elderly patients)
+    let trial_treat_means: [f64; 4] = [0.8, 0.7, 0.6, 0.5]   // E[Y(1)|Z=z] by age strata
+    let trial_ctrl_means: [f64; 4]  = [0.4, 0.35, 0.3, 0.25]  // E[Y(0)|Z=z] by age strata
+
+    // Stratum-specific ATEs from trial
+    let stratum_ates = compute_stratum_ates(trial_treat_means, trial_ctrl_means, 4)
+
+    // Target domain π* (general population — younger age distribution)
+    let target_age_dist: [f64; 4] = [0.35, 0.30, 0.25, 0.10]  // P*(Z=z) — must sum to 1.0
+
+    // Direct transport: P*(Y|do(X)) using reweighting formula
+    let transported_ate = direct_transport(stratum_ates, target_age_dist, 4)
+
+    // S-admissibility check: S → Z (selection on age), Z → X → Y (causal chain)
+    let s_ok = s_admissible_linear_chain(true, true, false)  // S admissible: s_affects_y=false
+
+    // Multi-study pooling (3 independent replication studies)
+    let study_ates: [f64; 4] = [0.38, 0.41, 0.36, 0.0]
+    let study_weights: [f64; 4] = [0.4, 0.35, 0.25, 0.0]
+    let pooled_ate = meta_transport_estimate(study_ates, study_weights, 3)
+
+    // Surrogate experiment: use biomarker W instead of outcome Y in target
+    let surrogate_factor: f64 = 0.95  // target/source surrogate ratio ≈ 1 (similar populations)
+    let surrogate_transported = surrogate_adjust(transported_ate, surrogate_factor)
+
+    42
+}

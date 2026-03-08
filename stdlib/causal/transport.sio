@@ -1,0 +1,165 @@
+// stdlib/causal/transport.sio — Causal Transportability: cross-domain effect identification
+//
+// Implements Pearl & Bareinboim's transportability theory for identifying causal effects
+// P(Y|do(X)) estimated in a source population π and applying them to a target π*.
+//
+// THEORETICAL FOUNDATIONS:
+//   Pearl & Bareinboim (2014) "External Validity: From Do-Calculus to Transportability"
+//   Bareinboim & Pearl (2016) "Causal inference and the data-fusion problem" (PNAS)
+//   Theorem 1 (Direct Transportability): If Z is S-admissible, then
+//     P*(Y|do(X)) = Σ_z P(Y|do(X), Z=z) · P*(Z=z)
+//   Theorem 3 (μ-transportability): Transport via do-calculus rewriting on selection diagrams.
+//
+// Sounio Sprint 22 Track T — first type system with causal transportability as a type.
+// Paper: PLDI 2028 — "Causal Transportability as a Type: S-Admissibility at Compile Time"
+
+// ============================================================
+// Selection diagram structures
+// ============================================================
+
+// S-admissibility result codes
+let SADM_IDENTIFIED: i64 = 0     // transport is identified (S-admissible)
+let SADM_BLOCKED: i64 = 1        // selection bias blocks transport (not S-admissible)
+let SADM_UNKNOWN: i64 = 2        // cannot determine without full DAG
+
+// Structural S-admissibility check for a 3-variable system X → Z → Y with S → Z.
+// S is admissible when: (Y ⊥⊥ S | Z, do(X)) — blocking S through Z suffices.
+// Returns SADM_IDENTIFIED if transport is possible, SADM_BLOCKED if not.
+fn s_admissible_z_blocks_s(
+    s_affects_z: bool,       // S → Z (selection variable affects Z)
+    z_affects_y: bool,       // Z → Y or Z in adjustment set for X → Y
+    s_affects_y_directly: bool  // S → Y (direct effect on outcome — blocks transport)
+) -> i64 with IO {
+    if s_affects_y_directly {
+        SADM_BLOCKED  // selection bias on outcome: cannot transport without bias
+    } else if s_affects_z && z_affects_y {
+        SADM_IDENTIFIED  // S → Z → Y; conditioning on Z blocks S from Y
+    } else {
+        SADM_UNKNOWN
+    }
+}
+
+// ============================================================
+// Direct transport formula
+// ============================================================
+
+// direct_transport_1d: P*(Y|do(X)) = Σ_z ATE(z) · P*(Z=z)
+// Single covariate Z case with K strata.
+// Precondition: Σ_z target_dist[i] = 1.0 (valid probability distribution)
+fn direct_transport_1d(
+    stratum_ates: [f64; 8],    // P(Y|do(X), Z=z) — trial effect per stratum
+    target_dist: [f64; 8],    // P*(Z=z) — target population covariate distribution
+    n_strata: i64
+) -> f64 with IO, Div, Mut, Panic {
+    var transported: f64 = 0.0
+    var i: i64 = 0
+    while i < n_strata && i < 8 {
+        transported = transported + stratum_ates[i as usize] * target_dist[i as usize]
+        i = i + 1
+    }
+    transported
+}
+
+// direct_transport_bias: computes the transportability bias from source to target.
+// Bias = (trial_ate_source) - (trial_ate_reweighted_for_target)
+// A zero bias means the naive trial estimate applies directly to the target population.
+fn direct_transport_bias(
+    source_ate: f64,           // P(Y|do(X)) — naive trial estimate
+    transported_ate: f64       // P*(Y|do(X)) — reweighted for target
+) -> f64 with IO {
+    source_ate + (0.0 - transported_ate)  // positive = overestimate in source
+}
+
+// ============================================================
+// Inverse probability of selection weighting (IPSW)
+// ============================================================
+
+// ipsw_weight: inverse probability of selection weight for transporting individual i.
+// w_i = P*(Z=z_i) / P(Z=z_i | S=1) — upweights underrepresented target strata.
+// When P*(Z=z) >> P(Z=z|S=1): the trial underrepresents this stratum; upweight it.
+fn ipsw_weight(target_prob_z: f64, trial_prob_z_given_selection: f64) -> f64 with IO, Div, Panic {
+    target_prob_z / trial_prob_z_given_selection
+}
+
+// ipsw_estimate: IPSW-based transported ATE.
+// ATE* = Σ_i w_i * Y_i(1) / n_treat - Σ_i w_i * Y_i(0) / n_ctrl
+// Simplified for precomputed stratum statistics:
+fn ipsw_transport_ate(
+    treat_means: [f64; 8],
+    ctrl_means: [f64; 8],
+    ipsw_weights: [f64; 8],
+    n_strata: i64
+) -> f64 with IO, Div, Mut, Panic {
+    var weighted_treat: f64 = 0.0
+    var weighted_ctrl: f64 = 0.0
+    var weight_total: f64 = 0.0
+    var i: i64 = 0
+    while i < n_strata && i < 8 {
+        let w = ipsw_weights[i as usize]
+        weighted_treat = weighted_treat + w * treat_means[i as usize]
+        weighted_ctrl = weighted_ctrl + w * ctrl_means[i as usize]
+        weight_total = weight_total + w
+        i = i + 1
+    }
+    let n_f: f64 = weight_total
+    (weighted_treat + (0.0 - weighted_ctrl)) / n_f
+}
+
+// ============================================================
+// Multi-study transport (data fusion)
+// ============================================================
+
+// multi_study_transport: pool transported ATEs from multiple source studies.
+// Bareinboim & Pearl (2016): meta-analysis under selection diagrams.
+// Pooled estimate = Σ_k w_k * ATE*_k / Σ_k w_k
+// Recommended weights: inverse-variance (w_k = 1 / SE_k^2)
+fn multi_study_transport(
+    study_transported_ates: [f64; 8],  // ATE* from each study
+    study_weights: [f64; 8],           // inverse-variance weights
+    n_studies: i64
+) -> f64 with IO, Div, Mut, Panic {
+    var weighted_sum: f64 = 0.0
+    var weight_total: f64 = 0.0
+    var i: i64 = 0
+    while i < n_studies && i < 8 {
+        weighted_sum = weighted_sum + study_transported_ates[i as usize] * study_weights[i as usize]
+        weight_total = weight_total + study_weights[i as usize]
+        i = i + 1
+    }
+    weighted_sum / weight_total
+}
+
+// ============================================================
+// Heterogeneous treatment effects: Conditional ATE (CATE) transport
+// ============================================================
+
+// cate_transport: transport conditional ATE τ(x) = E[Y(1)-Y(0)|X=x] to target.
+// Under S-admissibility and given X as adjustment set:
+//   τ*(x) = P*(Y(1)|X=x) - P*(Y(0)|X=x)
+//        = P(Y(1)|X=x) - P(Y(0)|X=x)  [if S ⊥⊥ Y(t) | X in both domains]
+// Returns the difference in transported CATEs across two covariate levels.
+fn cate_transport_gap(
+    cate_level_a: f64,   // CATE at covariate level x=a (from source trial)
+    cate_level_b: f64,   // CATE at covariate level x=b
+    reweight_a: f64,     // P*(X=a) / P(X=a) reweighting factor
+    reweight_b: f64      // P*(X=b) / P(X=b) reweighting factor
+) -> f64 with IO {
+    // Transported CATE gap: (τ*(a) - τ*(b)) using reweighted estimates
+    (cate_level_a * reweight_a) + (0.0 - (cate_level_b * reweight_b))
+}
+
+// ============================================================
+// Sensitivity analysis for transportability
+// ============================================================
+
+// transport_sensitivity_bound: bound on transported ATE when S-admissibility is imperfect.
+// If selection variable S has a direct effect on Y of magnitude γ, the transported ATE
+// deviates from the truth by at most γ (Cinelli & Hazlett 2020 style sensitivity).
+fn transport_sensitivity_bound(
+    transported_ate: f64,
+    selection_direct_effect_bound: f64  // |γ| = max |E[Y|S=1] - E[Y|S=0]|
+) -> f64 with IO {
+    // Conservative bound: true ATE ∈ [transported - γ, transported + γ]
+    // Return upper bound of deviation
+    selection_direct_effect_bound
+}

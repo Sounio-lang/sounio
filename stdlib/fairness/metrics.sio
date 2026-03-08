@@ -1,0 +1,205 @@
+// stdlib/fairness/metrics.sio — ML Fairness Metrics and Impossibility Theorem
+//
+// Canonical implementations of the four most widely used group fairness criteria,
+// plus the Chouldechova (2017) impossibility theorem and Lipschitz individual fairness.
+//
+// REFERENCES:
+//   Dwork et al. (2012) "Fairness Through Awareness" — demographic parity, individual fairness
+//   Hardt et al. (2016) "Equality of Opportunity in Supervised Learning" — equalized odds
+//   Chouldechova (2017) "Fair Prediction with Disparate Impact" — impossibility theorem
+//   Kusner et al. (2017) "Counterfactual Fairness" — causal counterfactual criterion
+//   Barocas, Hardt & Narayanan (2023) "Fairness and Machine Learning" — textbook survey
+//   Menon & Williamson (2018) "The cost of fairness in binary classification"
+//
+// Sounio Sprint 22 Track F — first type system with fairness as a type-level constraint.
+// Paper: FAccT 2027 + POPL 2027 short paper "From Privacy to Fairness: Unified Responsible AI Types"
+
+// ============================================================
+// Fairness criterion codes (matches TyFairPrediction.array_size)
+// ============================================================
+
+let FAIRNESS_DP: i64 = 0   // demographic parity
+let FAIRNESS_EO: i64 = 1   // equalized odds
+let FAIRNESS_IF: i64 = 2   // individual fairness (Lipschitz)
+let FAIRNESS_CWG: i64 = 3  // calibration within group
+let FAIRNESS_CF: i64 = 4   // counterfactual fairness
+
+// ============================================================
+// Group fairness metrics
+// ============================================================
+
+// --- Demographic Parity ---
+
+// dp_gap: |P(Ŷ=1|A=0) - P(Ŷ=1|A=1)|
+// Perfect demographic parity: dp_gap = 0.
+// EU AI Act threshold (high-risk systems): dp_gap ≤ 0.05 recommended.
+fn dp_gap(rate_a0: f64, rate_a1: f64) -> f64 with IO {
+    let d = rate_a1 + (0.0 - rate_a0)
+    if d < 0.0 { 0.0 - d } else { d }
+}
+
+// dp_ratio: min(rate)/max(rate) — the "80% rule" (EEOC 1978, EU AI Act 2024)
+// Violation when dp_ratio < 0.8 (minority gets < 80% of majority's approval rate).
+fn dp_ratio(rate_a0: f64, rate_a1: f64) -> f64 with IO, Div, Panic {
+    let lo = if rate_a0 < rate_a1 { rate_a0 } else { rate_a1 }
+    let hi = if rate_a0 > rate_a1 { rate_a0 } else { rate_a1 }
+    lo / hi
+}
+
+// dp_satisfied: true if gap ≤ epsilon
+fn dp_satisfied(rate_a0: f64, rate_a1: f64, epsilon: f64) -> bool with IO {
+    dp_gap(rate_a0, rate_a1) <= epsilon
+}
+
+// --- Equalized Odds ---
+
+// eo_gap: max(|ΔTPR|, |ΔFPR|)
+// Both true and false positive rates must be equal across groups.
+fn eo_gap(tpr0: f64, tpr1: f64, fpr0: f64, fpr1: f64) -> f64 with IO {
+    let dt = tpr1 + (0.0 - tpr0)
+    let df = fpr1 + (0.0 - fpr0)
+    let at = if dt < 0.0 { 0.0 - dt } else { dt }
+    let af = if df < 0.0 { 0.0 - df } else { df }
+    if at > af { at } else { af }
+}
+
+// eop_gap: |ΔTPR| — equal opportunity (Hardt et al. 2016)
+// Weaker than equalized odds: only TPR must be equal.
+fn eop_gap(tpr0: f64, tpr1: f64) -> f64 with IO {
+    let d = tpr1 + (0.0 - tpr0)
+    if d < 0.0 { 0.0 - d } else { d }
+}
+
+// eo_satisfied: true if max(|ΔTPR|, |ΔFPR|) ≤ epsilon
+fn eo_satisfied(tpr0: f64, tpr1: f64, fpr0: f64, fpr1: f64, epsilon: f64) -> bool with IO {
+    eo_gap(tpr0, tpr1, fpr0, fpr1) <= epsilon
+}
+
+// --- Calibration within group ---
+
+// cwg_gap: |P(Y=1|Ŷ≈p, A=0) - P(Y=1|Ŷ≈p, A=1)|
+// At each predicted probability p, actual outcomes should not differ by group.
+fn cwg_gap(actual0: f64, actual1: f64) -> f64 with IO {
+    let d = actual1 + (0.0 - actual0)
+    if d < 0.0 { 0.0 - d } else { d }
+}
+
+// positive_predictive_value: P(Y=1|Ŷ=1) = TP / (TP + FP)
+// Required for Chouldechova impossibility calculation.
+fn ppv(true_positive_rate: f64, prevalence: f64, false_positive_rate: f64) -> f64 with IO, Div, Panic {
+    // Bayes theorem: PPV = TPR * P / (TPR * P + FPR * (1-P))
+    let num = true_positive_rate * prevalence
+    let denom = num + false_positive_rate * (1.0 + (0.0 - prevalence))
+    num / denom
+}
+
+// ============================================================
+// Chouldechova impossibility theorem (2017)
+// ============================================================
+
+// chouldechova_check: computes the necessary gap between PPV values when base rates differ.
+// When P(Y=1|A=0) ≠ P(Y=1|A=1), the following cannot all hold simultaneously:
+//   (a) Equal PPV across groups (calibration within group)
+//   (b) Equal FPR across groups (equalized odds component)
+//   (c) Equal TPR across groups (equalized odds component)
+// Returns the minimum inevitable PPV gap given different prevalences and equal TPR/FPR.
+fn chouldechova_ppv_gap(
+    prevalence_a0: f64,     // P(Y=1|A=0)
+    prevalence_a1: f64,     // P(Y=1|A=1)
+    shared_tpr: f64,        // common TPR (assuming equal TPR for equalized opportunity)
+    shared_fpr: f64         // common FPR (assuming equal FPR for equalized odds)
+) -> f64 with IO, Div, Panic {
+    // PPV for each group given shared TPR/FPR but different prevalences
+    let ppv0 = ppv(shared_tpr, prevalence_a0, shared_fpr)
+    let ppv1 = ppv(shared_tpr, prevalence_a1, shared_fpr)
+    let d = ppv1 + (0.0 - ppv0)
+    if d < 0.0 { 0.0 - d } else { d }
+}
+
+// fairness_criteria_incompatible: Chouldechova 2017 — returns true if
+// demographic parity and calibration within group are contradictory given unequal base rates.
+fn fairness_criteria_incompatible(criterion_a: i64, criterion_b: i64, base_rates_equal: bool) -> bool with IO {
+    // When base rates are equal, all criteria can be jointly satisfied.
+    if base_rates_equal {
+        return false
+    }
+    // Chouldechova: DP ∧ CWG is impossible when base rates differ
+    let dp_and_cwg = (criterion_a == FAIRNESS_DP && criterion_b == FAIRNESS_CWG)
+        || (criterion_a == FAIRNESS_CWG && criterion_b == FAIRNESS_DP)
+    // EO ∧ CWG is also impossible when base rates differ
+    let eo_and_cwg = (criterion_a == FAIRNESS_EO && criterion_b == FAIRNESS_CWG)
+        || (criterion_a == FAIRNESS_CWG && criterion_b == FAIRNESS_EO)
+    dp_and_cwg || eo_and_cwg
+}
+
+// ============================================================
+// Individual fairness (Lipschitz)
+// ============================================================
+
+// if_violation: |f(x) - f(x')| - L * d(x, x')
+// Negative means individual fairness holds (Lipschitz satisfied).
+// d(x, x') should be a task-specific metric capturing "similarity".
+fn if_violation(score_x: f64, score_x_prime: f64, lipschitz: f64, distance: f64) -> f64 with IO {
+    let sd = score_x + (0.0 - score_x_prime)
+    let abs_sd = if sd < 0.0 { 0.0 - sd } else { sd }
+    abs_sd + (0.0 - (lipschitz * distance))
+}
+
+// if_satisfied: true if Lipschitz condition holds (no individual fairness violation)
+fn if_satisfied(score_x: f64, score_x_prime: f64, lipschitz: f64, distance: f64) -> bool with IO {
+    if_violation(score_x, score_x_prime, lipschitz, distance) <= 0.0
+}
+
+// ============================================================
+// Counterfactual fairness
+// ============================================================
+
+// cf_gap: |Ŷ(A←a) - Ŷ(A←a')| — counterfactual gap
+// Counterfactually fair if cf_gap = 0 for all pairs (a, a').
+fn cf_gap(score_a0: f64, score_a1: f64) -> f64 with IO {
+    let d = score_a1 + (0.0 - score_a0)
+    if d < 0.0 { 0.0 - d } else { d }
+}
+
+// cf_satisfied: true if counterfactual gap ≤ epsilon
+fn cf_satisfied(score_a0: f64, score_a1: f64, epsilon: f64) -> bool with IO {
+    cf_gap(score_a0, score_a1) <= epsilon
+}
+
+// ============================================================
+// Fairness audit summary
+// ============================================================
+
+struct FairnessAuditResult {
+    dp_gap_val: f64,
+    eo_gap_val: f64,
+    cwg_gap_val: f64,
+    cf_gap_val: f64,
+    impossibility_triggered: bool,
+    overall_fair: bool,
+}
+
+fn fairness_audit(
+    rate_a0: f64, rate_a1: f64,       // approval rates for DP
+    tpr_a0: f64, tpr_a1: f64,         // true positive rates for EO
+    fpr_a0: f64, fpr_a1: f64,         // false positive rates for EO
+    cal_a0: f64, cal_a1: f64,         // calibration rates for CWG
+    score_cf_a0: f64, score_cf_a1: f64, // counterfactual scores
+    base_rates_equal: bool,           // are base rates equal? (for impossibility)
+    epsilon: f64                      // shared tolerance for all criteria
+) -> FairnessAuditResult with IO, Div, Panic {
+    let dp = dp_gap(rate_a0, rate_a1)
+    let eo = eo_gap(tpr_a0, tpr_a1, fpr_a0, fpr_a1)
+    let cwg = cwg_gap(cal_a0, cal_a1)
+    let cf = cf_gap(score_cf_a0, score_cf_a1)
+    let impossible = fairness_criteria_incompatible(FAIRNESS_DP, FAIRNESS_CWG, base_rates_equal)
+    let all_ok = dp <= epsilon && eo <= epsilon && cwg <= epsilon && cf <= epsilon
+    FairnessAuditResult {
+        dp_gap_val: dp,
+        eo_gap_val: eo,
+        cwg_gap_val: cwg,
+        cf_gap_val: cf,
+        impossibility_triggered: impossible,
+        overall_fair: all_ok,
+    }
+}

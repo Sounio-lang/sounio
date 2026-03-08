@@ -44,6 +44,12 @@ const DEFERRAL_REASON_TAIL_RISK: i64 = 3
 const DEFERRAL_REASON_IDENTIFIABILITY_GAP: i64 = 4
 const DEFERRAL_REASON_TRANSPORT_GAP: i64 = 5
 const DEFERRAL_REASON_POLICY_INCOMPLETE: i64 = 6
+const ALTERNATIVE_SOURCE_DEFERRED: i64 = 0
+const ALTERNATIVE_SOURCE_RECOURSE_PLAN: i64 = 1
+const ALTERNATIVE_METRIC_INTERVENTION_COST: i64 = 0
+const ALTERNATIVE_METRIC_RESIDUAL_TAIL_RISK: i64 = 1
+const ALTERNATIVE_METRIC_MECHANISTIC_DIVERGENCE: i64 = 2
+const ALTERNATIVE_METRIC_ADMISSIBILITY_MARGIN: i64 = 3
 
 // ============================================================
 // Checker state
@@ -64,6 +70,7 @@ struct Checker {
     deferral_policies: DeferralPolicyTable,
     acquisition_policies: AcquisitionPolicyTable,
     recourse_policies: RecoursePolicyTable,
+    alternative_policies: AlternativePolicyTable,
     validations: ValidationPolicyTable,
     contests: ContestTable,
     audits: AuditTable,
@@ -79,6 +86,10 @@ struct Checker {
     acquisition_reason_witnesses: AcquisitionReasonWitnessTable,
     recourse_plans: RecoursePlanTable,
     recourse_reason_witnesses: RecourseReasonWitnessTable,
+    alternative_frontiers: AlternativeFrontierTable,
+    alternative_candidates: AlternativeCandidateTable,
+    alternative_sets: AlternativeSetTable,
+    alternative_reason_witnesses: AlternativeReasonWitnessTable,
     validated_manifests: ValidatedManifestTable,
     error_count: i64,
     had_error: bool,
@@ -122,6 +133,7 @@ fn checker_new() -> Checker with Mut, Panic, Div {
         deferral_policies: deferral_policy_table_new(),
         acquisition_policies: acquisition_policy_table_new(),
         recourse_policies: recourse_policy_table_new(),
+        alternative_policies: alternative_policy_table_new(),
         validations: validation_policy_table_new(),
         contests: contest_table_new(),
         audits: audit_table_new(),
@@ -137,6 +149,10 @@ fn checker_new() -> Checker with Mut, Panic, Div {
         acquisition_reason_witnesses: acquisition_reason_witness_table_new(),
         recourse_plans: recourse_plan_table_new(),
         recourse_reason_witnesses: recourse_reason_witness_table_new(),
+        alternative_frontiers: alternative_frontier_table_new(),
+        alternative_candidates: alternative_candidate_table_new(),
+        alternative_sets: alternative_set_table_new(),
+        alternative_reason_witnesses: alternative_reason_witness_table_new(),
         validated_manifests: validated_manifest_table_new(),
         error_count: 0,
         had_error: false,
@@ -756,6 +772,30 @@ fn print_type_name(ty: TypeEntry) with IO, Mut, Panic, Div, Alloc {
             }
             print(">")
         }
+        TyAlternativePolicy => {
+            print("AlternativePolicy<")
+            match ty.inner {
+                Some(inner) => print_type_name(*inner)
+                None => print("?")
+            }
+            print(">")
+        }
+        TyAlternativeSet => {
+            print("AlternativeSet<")
+            match ty.inner {
+                Some(inner) => print_type_name(*inner)
+                None => print("?")
+            }
+            print(">")
+        }
+        TyAlternativeOption => {
+            print("AlternativeOption<")
+            match ty.inner {
+                Some(inner) => print_type_name(*inner)
+                None => print("?")
+            }
+            print(">")
+        }
         TyDecisionPolicy => {
             print("DecisionPolicy<")
             match ty.inner {
@@ -946,6 +986,42 @@ fn print_type_name(ty: TypeEntry) with IO, Mut, Panic, Div, Alloc {
             print_milli_ratio(ty.knowledge_epsilon)
             print(", spent=")
             print_milli_ratio(ty.array_size)
+            print(">")
+        }
+        TyTransportable => {
+            print("Transport<")
+            match ty.inner {
+                Some(inner) => print_type_name(*inner)
+                None => print("?")
+            }
+            print(", src=")
+            print_int(ty.epistemic_meta_id)
+            print(", tgt=")
+            print_int(ty.robustness_level_id)
+            print(">")
+        }
+        TySelectionDiagram => {
+            print("SelectionDiagram<s_nodes=")
+            print_int(ty.array_size)
+            print(">")
+        }
+        TyFairPrediction => {
+            print("FairPrediction<")
+            match ty.inner {
+                Some(inner) => print_type_name(*inner)
+                None => print("?")
+            }
+            print(", criterion=")
+            print_int(ty.array_size)
+            print(", slack=")
+            print_milli_ratio(ty.knowledge_epsilon)
+            print(">")
+        }
+        TyFairnessGap => {
+            print("FairnessGap<criterion=")
+            print_int(ty.array_size)
+            print(", gap=")
+            print_milli_ratio(ty.knowledge_epsilon)
             print(">")
         }
         TyNever => print("!")
@@ -3982,6 +4058,9 @@ impl Checker {
             TypeAcquisitionPlan => c.lower_acquisition_plan_type(te.type_args, te.span)
             TypeRecoursePolicy => c.lower_recourse_policy_type(te.type_args, te.span)
             TypeRecoursePlan => c.lower_recourse_plan_type(te.type_args, te.span)
+            TypeAlternativePolicy => c.lower_alternative_policy_type(te.type_args, te.span)
+            TypeAlternativeSet => c.lower_alternative_set_type(te.type_args, te.span)
+            TypeAlternativeOption => c.lower_alternative_option_type(te.type_args, te.span)
             TypeDecisionPolicy => c.lower_decision_policy_type(te.type_args, te.span)
             TypeDeferralPolicy => c.lower_deferral_policy_type(te.type_args, te.span)
             TypeContest => c.lower_contest_type(te.type_args, te.span)
@@ -4236,6 +4315,33 @@ impl Checker {
         }
     }
 
+    fn lower_alternative_policy_type(self, opt: Option<Box<TypeExprList>>, span: Span) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+        let pair = self.lower_single_wrapper_arg(opt, span)
+        if pair.1.kind == TypeKind::TyError {
+            pair
+        } else {
+            (pair.0, ty_alternative_policy(pair.1, -1))
+        }
+    }
+
+    fn lower_alternative_set_type(self, opt: Option<Box<TypeExprList>>, span: Span) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+        let pair = self.lower_single_wrapper_arg(opt, span)
+        if pair.1.kind == TypeKind::TyError {
+            pair
+        } else {
+            (pair.0, ty_alternative_set(pair.1, -1))
+        }
+    }
+
+    fn lower_alternative_option_type(self, opt: Option<Box<TypeExprList>>, span: Span) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+        let pair = self.lower_single_wrapper_arg(opt, span)
+        if pair.1.kind == TypeKind::TyError {
+            pair
+        } else {
+            (pair.0, ty_alternative_option(pair.1, -1))
+        }
+    }
+
     fn lower_decision_policy_type(self, opt: Option<Box<TypeExprList>>, span: Span) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
         let pair = self.lower_single_wrapper_arg(opt, span)
         if pair.1.kind == TypeKind::TyError {
@@ -4456,6 +4562,8 @@ impl Checker {
             ItemPolicy => self.collect_policy_def(item.name, item.policy_def)
             ItemAcquisitionPolicy => self.collect_acquisition_policy_def(item.name, item.acquisition_policy_def)
             ItemRecoursePolicy => self.collect_recourse_policy_def(item.name, item.recourse_policy_def)
+            ItemAlternativePolicy => self.collect_alternative_policy_def(item.name, item.alternative_policy_def)
+            ItemAlternativeFrontier => self.collect_alternative_frontier_def(item.name, item.alternative_frontier_def)
             ItemDecisionPolicy => self.collect_decision_policy_def(item.name, item.decision_policy_def)
             ItemDeferralPolicy => self.collect_deferral_policy_def(item.name, item.deferral_policy_def)
             ItemValidation => self.collect_validation_def(item.name, item.validation_def)
@@ -4718,6 +4826,163 @@ impl Checker {
                 c
             }
             None => self
+        }
+    }
+
+    fn collect_alternative_policy_def(self, name: Name, opt: Option<Box<AlternativePolicyDef>>) -> Checker with Mut, Panic, Div, Alloc, IO {
+        match opt {
+            Some(ap) => {
+                let target_pair = self.lower_type_expr((*ap).target_type)
+                var c = target_pair.0
+                let target_ty = target_pair.1
+                let obj_pair = c.collect_alternative_objectives((*ap).objectives, [-1; 8], [0; 8], 0)
+                c = obj_pair.0
+                let info = AlternativePolicyInfo {
+                    name: name,
+                    target_ty: target_ty,
+                    frontier_name: (*ap).frontier_name,
+                    objective_metric_ids: obj_pair.1,
+                    objective_directions: obj_pair.2,
+                    objective_count: obj_pair.3,
+                    max_options: (*ap).max_options,
+                }
+                let add_result = c.alternative_policies.add(info)
+                c.alternative_policies = add_result.0
+                c.env = c.env.bind(name, ty_alternative_policy(target_ty, add_result.1), false)
+                c
+            }
+            None => self
+        }
+    }
+
+    fn collect_alternative_frontier_def(self, name: Name, opt: Option<Box<AlternativeFrontierDef>>) -> Checker with Mut, Panic, Div, Alloc, IO {
+        match opt {
+            Some(fd) => {
+                let target_pair = self.lower_type_expr((*fd).target_type)
+                var c = target_pair.0
+                let target_ty = target_pair.1
+
+                var target_kind: i64 = -1
+                var inner_ty = ty_error()
+                if target_ty.kind == TypeKind::TyDeferred {
+                    target_kind = ALTERNATIVE_SOURCE_DEFERRED
+                    inner_ty = knowledge_inner(target_ty)
+                } else if target_ty.kind == TypeKind::TyRecoursePlan {
+                    target_kind = ALTERNATIVE_SOURCE_RECOURSE_PLAN
+                    inner_ty = knowledge_inner(target_ty)
+                } else {
+                    c = c.report_error_at((*fd).span, 114, 0, 0, 0)
+                }
+
+                let policy_id = c.alternative_policies.find((*fd).policy_name)
+                if policy_id < 0 {
+                    c = c.report_error_at((*fd).span, 119, 0, 0, 0)
+                } else {
+                    let policy_info = c.alternative_policies.get(policy_id)
+                    if !types_compatible(policy_info.target_ty, inner_ty) {
+                        c = c.report_error_at((*fd).span, 119, 0, 0, 0)
+                    }
+                }
+
+                let cand_pair = c.collect_alternative_candidates((*fd).candidates)
+                c = cand_pair.0
+                let info = AlternativeFrontierInfo {
+                    name: name,
+                    target_kind: target_kind,
+                    target_ty: target_ty,
+                    policy_id: policy_id,
+                    candidate_ids: cand_pair.1,
+                    candidate_count: cand_pair.2,
+                }
+                let add_result = c.alternative_frontiers.add(info)
+                c.alternative_frontiers = add_result.0
+                c
+            }
+            None => self
+        }
+    }
+
+    fn collect_alternative_objectives(
+        self,
+        opt: Option<Box<AlternativeObjectiveDefList>>,
+        metric_ids: [i64; 8],
+        directions: [i64; 8],
+        count: i64
+    ) -> (Checker, [i64; 8], [i64; 8], i64) with Mut, Panic, Div, Alloc, IO {
+        match opt {
+            Some(list) => {
+                var c = self
+                var mids = metric_ids
+                var dirs = directions
+                var next_count = count
+                let metric_id = alternative_metric_id_from_name((*list).head.metric_name)
+                if metric_id < 0 || count >= 8 {
+                    c = c.report_error_at((*list).head.span, 119, 0, 0, 0)
+                } else {
+                    mids[count as usize] = metric_id
+                    dirs[count as usize] =
+                        if (*list).head.direction == AlternativeObjectiveDirection::AlternativeObjectiveMaximize { 1 } else { 0 }
+                    next_count = count + 1
+                }
+                c.collect_alternative_objectives((*list).tail, mids, dirs, next_count)
+            }
+            None => (self, metric_ids, directions, count)
+        }
+    }
+
+    fn collect_alternative_candidates(self, opt: Option<Box<AlternativeCandidateDefList>>) -> (Checker, [i64; 16], i64) with Mut, Panic, Div, Alloc, IO {
+        match opt {
+            Some(list) => {
+                let pair = self.collect_alternative_candidates((*list).tail)
+                var c = pair.0
+                var ids = pair.1
+                var count = pair.2
+                if count < 16 {
+                    let metric_pair = c.collect_alternative_candidate_metrics((*list).head.metrics, [0; 4], [0.0; 4])
+                    c = metric_pair.0
+                    let info = AlternativeCandidateInfo {
+                        span_start: (*list).head.span.start,
+                        span_end: (*list).head.span.end,
+                        name: (*list).head.name,
+                        via_recourse_policy_name: (*list).head.via_name,
+                        uses_via: (*list).head.uses_via,
+                        value_expr: (*list).head.value_expr,
+                        value_repr: empty_name(),
+                        metric_known: metric_pair.1,
+                        metric_values: metric_pair.2,
+                    }
+                    let add_result = c.alternative_candidates.add(info)
+                    c.alternative_candidates = add_result.0
+                    ids[count as usize] = add_result.1
+                    count = count + 1
+                }
+                (c, ids, count)
+            }
+            None => (self, [-1; 16], 0)
+        }
+    }
+
+    fn collect_alternative_candidate_metrics(
+        self,
+        opt: Option<Box<AlternativeMetricEntryList>>,
+        known: [i64; 4],
+        values: [f64; 4]
+    ) -> (Checker, [i64; 4], [f64; 4]) with Mut, Panic, Div, Alloc, IO {
+        match opt {
+            Some(list) => {
+                var c = self
+                var next_known = known
+                var next_values = values
+                let metric_id = alternative_metric_id_from_name((*list).head.name)
+                if metric_id < 0 || metric_id >= 4 || known[metric_id as usize] == 1 {
+                    c = c.report_error_at((*list).head.span, 116, 0, 0, 0)
+                } else {
+                    next_known[metric_id as usize] = 1
+                    next_values[metric_id as usize] = (*list).head.value_f64
+                }
+                c.collect_alternative_candidate_metrics((*list).tail, next_known, next_values)
+            }
+            None => (self, known, values)
         }
     }
 
@@ -5558,6 +5823,8 @@ impl Checker {
             ItemPolicy => self
             ItemAcquisitionPolicy => self
             ItemRecoursePolicy => self
+            ItemAlternativePolicy => self
+            ItemAlternativeFrontier => self
             ItemDecisionPolicy => self
             ItemDeferralPolicy => self
             ItemValidation => self
