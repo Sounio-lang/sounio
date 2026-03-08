@@ -20,6 +20,8 @@ EPISTEMIC_TYPES=(
   "TyAlternativePolicy:alternative_policy,AlternativePolicy"
   "TyAlternativeSet:alternative_set,AlternativeSet"
   "TyAlternativeOption:alternative_option,AlternativeOption"
+  "TyTransitionPolicy:transition_policy,TransitionPolicy,commit_alternative"
+  "TyTransitionPlan:transition_plan,TransitionPlan,transition_reason"
   "TyDecisionPolicy:decision_policy,DecisionPolicy"
   "TyDeferralPolicy:deferral_policy,DeferralPolicy"
   "TyContest:contest,Contest,lift_knowledge"

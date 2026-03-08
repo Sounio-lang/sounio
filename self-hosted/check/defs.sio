@@ -304,6 +304,7 @@ struct FnSig {
     self_type_name: Name,
     effects: [i64; 8],        // Effect IDs (encoded as integers for now)
     effect_count: i64,
+    is_kernel: bool,
 }
 
 fn empty_fn_sig() -> FnSig {
@@ -316,6 +317,7 @@ fn empty_fn_sig() -> FnSig {
         self_type_name: Name { buf: [0; 128], len: 0 },
         effects: [0; 8],
         effect_count: 0,
+        is_kernel: false,
     }
 }
 
@@ -1728,6 +1730,7 @@ struct AlternativeCandidateInfo {
     metric_known: [i64; 8],
     metric_values: [f64; 8],
     source_kind: i64,
+    deferred_certificate_id: i64,
     source_policy_id: i64,
     source_plan_id: i64,
     strategy_name: Name,
@@ -1772,6 +1775,7 @@ fn empty_alternative_candidate_info() -> AlternativeCandidateInfo {
         metric_known: [0; 8],
         metric_values: [0.0; 8],
         source_kind: -1,
+        deferred_certificate_id: -1,
         source_policy_id: -1,
         source_plan_id: -1,
         strategy_name: Name { buf: [0; 128], len: 0 },
@@ -1965,6 +1969,304 @@ impl AlternativeReasonWitnessTable {
     }
 
     fn get(self, idx: i64) -> AlternativeReasonWitnessInfo with Panic, Div {
+        self.entries[idx]
+    }
+}
+
+struct TransitionPolicyInfo {
+    name: Name,
+    target_ty: TypeEntry,
+    route_name: Name,
+    requirements: Option<Box<PolicyRequirementInfoList>>,
+    requirement_count: i64,
+    max_steps: i64,
+    rollback_route_name: Name,
+}
+
+fn empty_transition_policy_info() -> TransitionPolicyInfo {
+    TransitionPolicyInfo {
+        name: Name { buf: [0; 128], len: 0 },
+        target_ty: empty_type_entry(),
+        route_name: Name { buf: [0; 128], len: 0 },
+        requirements: None,
+        requirement_count: 0,
+        max_steps: -1,
+        rollback_route_name: Name { buf: [0; 128], len: 0 },
+    }
+}
+
+struct TransitionPolicyTable {
+    entries: [TransitionPolicyInfo; 16],
+    count: i64,
+}
+
+fn transition_policy_table_new() -> TransitionPolicyTable {
+    TransitionPolicyTable {
+        entries: [empty_transition_policy_info(); 16],
+        count: 0,
+    }
+}
+
+impl TransitionPolicyTable {
+    fn add(self, info: TransitionPolicyInfo) -> (TransitionPolicyTable, i64) with Mut, Panic, Div {
+        var tbl = self
+        let idx = tbl.count
+        if tbl.count < 16 {
+            tbl.entries[tbl.count] = info
+            tbl.count = tbl.count + 1
+        }
+        (tbl, idx)
+    }
+
+    fn find(self, name: Name) -> i64 with Mut, Panic, Div {
+        var i: i64 = 0
+        while i < self.count {
+            if name_eq(self.entries[i].name, name) {
+                return i
+            }
+            i = i + 1
+        }
+        -1
+    }
+
+    fn get(self, idx: i64) -> TransitionPolicyInfo with Panic, Div {
+        self.entries[idx]
+    }
+}
+
+struct TransitionStepInfo {
+    span_start: i64,
+    span_end: i64,
+    protocol_id: i64,
+    name: Name,
+    value_expr: Expr,
+    value_repr: Name,
+    requirements: Option<Box<PolicyRequirementInfoList>>,
+    requirement_count: i64,
+}
+
+fn empty_transition_step_info() -> TransitionStepInfo {
+    TransitionStepInfo {
+        span_start: 0,
+        span_end: 0,
+        protocol_id: -1,
+        name: Name { buf: [0; 128], len: 0 },
+        value_expr: Expr {
+            kind: ExprKind::ExprError,
+            span: Span { file_id: 0, start: 0, end: 0 },
+            int_val: 0,
+            float_val: 0.0,
+            name: Name { buf: [0; 128], len: 0 },
+            path: empty_path(),
+            bin_op: BinaryOp::OpAdd,
+            un_op: UnaryOp::OpNeg,
+            left: None,
+            right: None,
+            block: None,
+            else_expr: None,
+            args: None,
+            arms: None,
+            fields: None,
+            cast_type: None,
+            handler_block: None,
+            closure_params: None,
+            closure_return: None,
+            closure_effects: None,
+            closure_body: None,
+        },
+        value_repr: Name { buf: [0; 128], len: 0 },
+        requirements: None,
+        requirement_count: 0,
+    }
+}
+
+struct TransitionStepTable {
+    entries: [TransitionStepInfo; 64],
+    count: i64,
+}
+
+fn transition_step_table_new() -> TransitionStepTable {
+    TransitionStepTable {
+        entries: [empty_transition_step_info(); 64],
+        count: 0,
+    }
+}
+
+impl TransitionStepTable {
+    fn add(self, info: TransitionStepInfo) -> (TransitionStepTable, i64) with Mut, Panic, Div {
+        var tbl = self
+        let idx = tbl.count
+        if tbl.count < 64 {
+            tbl.entries[tbl.count] = info
+            tbl.count = tbl.count + 1
+        }
+        (tbl, idx)
+    }
+
+    fn get(self, idx: i64) -> TransitionStepInfo with Panic, Div {
+        self.entries[idx]
+    }
+}
+
+struct TransitionProtocolInfo {
+    name: Name,
+    target_ty: TypeEntry,
+    transition_policy_id: i64,
+    step_ids: [i64; 16],
+    step_count: i64,
+}
+
+fn empty_transition_protocol_info() -> TransitionProtocolInfo {
+    TransitionProtocolInfo {
+        name: Name { buf: [0; 128], len: 0 },
+        target_ty: empty_type_entry(),
+        transition_policy_id: -1,
+        step_ids: [-1; 16],
+        step_count: 0,
+    }
+}
+
+struct TransitionProtocolTable {
+    entries: [TransitionProtocolInfo; 32],
+    count: i64,
+}
+
+fn transition_protocol_table_new() -> TransitionProtocolTable {
+    TransitionProtocolTable {
+        entries: [empty_transition_protocol_info(); 32],
+        count: 0,
+    }
+}
+
+impl TransitionProtocolTable {
+    fn add(self, info: TransitionProtocolInfo) -> (TransitionProtocolTable, i64) with Mut, Panic, Div {
+        var tbl = self
+        let idx = tbl.count
+        if tbl.count < 32 {
+            tbl.entries[tbl.count] = info
+            tbl.count = tbl.count + 1
+        }
+        (tbl, idx)
+    }
+
+    fn find(self, name: Name) -> i64 with Mut, Panic, Div {
+        var i: i64 = 0
+        while i < self.count {
+            if name_eq(self.entries[i].name, name) {
+                return i
+            }
+            i = i + 1
+        }
+        -1
+    }
+
+    fn get(self, idx: i64) -> TransitionProtocolInfo with Panic, Div {
+        self.entries[idx]
+    }
+}
+
+struct TransitionPlanInfo {
+    span_start: i64,
+    span_end: i64,
+    transition_policy_id: i64,
+    transition_protocol_id: i64,
+    alternative_option_id: i64,
+    audit_id: i64,
+    contest_id: i64,
+    route_name: Name,
+    rollback_route_name: Name,
+    step_count: i64,
+    final_value_repr: Name,
+    inner_ty: TypeEntry,
+    metric_known: [i64; 8],
+    metric_values: [f64; 8],
+}
+
+fn empty_transition_plan_info() -> TransitionPlanInfo {
+    TransitionPlanInfo {
+        span_start: 0,
+        span_end: 0,
+        transition_policy_id: -1,
+        transition_protocol_id: -1,
+        alternative_option_id: -1,
+        audit_id: -1,
+        contest_id: -1,
+        route_name: Name { buf: [0; 128], len: 0 },
+        rollback_route_name: Name { buf: [0; 128], len: 0 },
+        step_count: 0,
+        final_value_repr: Name { buf: [0; 128], len: 0 },
+        inner_ty: empty_type_entry(),
+        metric_known: [0; 8],
+        metric_values: [0.0; 8],
+    }
+}
+
+struct TransitionPlanTable {
+    entries: [TransitionPlanInfo; 32],
+    count: i64,
+}
+
+fn transition_plan_table_new() -> TransitionPlanTable {
+    TransitionPlanTable {
+        entries: [empty_transition_plan_info(); 32],
+        count: 0,
+    }
+}
+
+impl TransitionPlanTable {
+    fn add(self, info: TransitionPlanInfo) -> (TransitionPlanTable, i64) with Mut, Panic, Div {
+        var tbl = self
+        let idx = tbl.count
+        if tbl.count < 32 {
+            tbl.entries[tbl.count] = info
+            tbl.count = tbl.count + 1
+        }
+        (tbl, idx)
+    }
+
+    fn get(self, idx: i64) -> TransitionPlanInfo with Panic, Div {
+        self.entries[idx]
+    }
+}
+
+struct TransitionReasonWitnessInfo {
+    span_start: i64,
+    span_end: i64,
+    transition_plan_id: i64,
+}
+
+fn empty_transition_reason_witness_info() -> TransitionReasonWitnessInfo {
+    TransitionReasonWitnessInfo {
+        span_start: 0,
+        span_end: 0,
+        transition_plan_id: -1,
+    }
+}
+
+struct TransitionReasonWitnessTable {
+    entries: [TransitionReasonWitnessInfo; 64],
+    count: i64,
+}
+
+fn transition_reason_witness_table_new() -> TransitionReasonWitnessTable {
+    TransitionReasonWitnessTable {
+        entries: [empty_transition_reason_witness_info(); 64],
+        count: 0,
+    }
+}
+
+impl TransitionReasonWitnessTable {
+    fn add(self, info: TransitionReasonWitnessInfo) -> (TransitionReasonWitnessTable, i64) with Mut, Panic, Div {
+        var tbl = self
+        let idx = tbl.count
+        if tbl.count < 64 {
+            tbl.entries[tbl.count] = info
+            tbl.count = tbl.count + 1
+        }
+        (tbl, idx)
+    }
+
+    fn get(self, idx: i64) -> TransitionReasonWitnessInfo with Panic, Div {
         self.entries[idx]
     }
 }

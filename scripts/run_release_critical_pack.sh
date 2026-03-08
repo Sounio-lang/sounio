@@ -141,6 +141,8 @@ run_step "49-sprint22-responsible-ai" bash "$ROOT_DIR/scripts/sprint22_responsib
 run_step "50-sprint22-alternative-manifest" bash "$ROOT_DIR/scripts/sprint22_alternative_manifest_gate.sh"
 run_step "51-sprint23-statistical-types" bash "$ROOT_DIR/scripts/sprint23_statistical_types_gate.sh"
 run_step "52-sprint24-scientific-foundations" bash "$ROOT_DIR/scripts/sprint24_scientific_foundations_gate.sh"
+run_step "53-sprint23-transition-protocol" bash "$ROOT_DIR/scripts/sprint23_transition_protocol_gate.sh"
+run_step "54-sprint24-transition-manifest" bash "$ROOT_DIR/scripts/sprint24_transition_manifest_gate.sh"
 
 write_summary
 echo "[release-pack] summary=$SUMMARY_MD"

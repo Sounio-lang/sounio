@@ -1,0 +1,44 @@
+//@ compile-fail
+//@ error-pattern: transition protocol target does not match the supplied alternative type
+//@ error-pattern: FloatReduce
+
+type M1 = Model<i64, i64>
+models DefaultModels = [M1]
+policy DefaultPolicy for i64 level Stable scope InDistribution {
+    require max_tail_risk < 0.10
+}
+deferral_policy ReviewPolicy for i64 route pharmacy_review {
+    require max_tail_risk >= 0.05
+}
+recourse_policy ConservativeFallback for i64 strategy dose_reduction route pharmacy_review {
+    require deferred_reason == TailRisk
+    require max_tail_risk >= 0.05
+}
+alternative_policy DoseFrontier for i64 frontier Pareto {
+    objective minimize intervention_cost
+}
+transition_policy FloatStepdown for f64 route outpatient_review {
+    max_steps 2
+}
+transition_protocol FloatReduce for AlternativeOption<f64> under FloatStepdown {
+    step baseline { value: 50.0 }
+    step reduce_once { value: 45.0 }
+}
+audit ReviewAudit for Contest<i64, DefaultModels, DefaultPolicy> {
+    metrics { max_tail_risk: 0.08 }
+}
+alternative_frontier DoseDeferredFrontier for Deferred<i64> under DoseFrontier {
+    candidate Reduce10 via ConservativeFallback {
+        value: 45
+        metrics { intervention_cost: 0.10 }
+    }
+}
+
+fn main() {
+    let d: i64 = 50
+    let c: Contest<i64, DefaultModels, DefaultPolicy> = (contest [M1] on d) audit ReviewAudit
+    let deferred: Deferred<i64> = defer_action(d, c, ReviewPolicy)
+    let set: AlternativeSet<i64> = propose_alternatives(d, deferred, DoseDeferredFrontier)
+    let opt: AlternativeOption<i64> = alternative_option(set, 0)
+    let _plan: TransitionPlan<i64> = commit_alternative(d, opt, FloatReduce)
+}

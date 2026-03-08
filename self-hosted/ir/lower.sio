@@ -204,6 +204,30 @@ impl Lowerer {
         -1
     }
 
+    fn find_transition_plan_id_for_span(self, span: Span) -> i64 with Mut, Panic, Div {
+        var i: i64 = 0
+        while i < self.module.epistemic.transition_plan_count {
+            let info = self.module.epistemic.transition_plans[i]
+            if self.metadata_span_matches(span, info.span_start, info.span_end) {
+                return i
+            }
+            i = i + 1
+        }
+        -1
+    }
+
+    fn find_transition_reason_witness_id_for_span(self, span: Span) -> i64 with Mut, Panic, Div {
+        var i: i64 = 0
+        while i < self.module.epistemic.transition_reason_witness_count {
+            let info = self.module.epistemic.transition_reason_witnesses[i]
+            if self.metadata_span_matches(span, info.span_start, info.span_end) {
+                return i
+            }
+            i = i + 1
+        }
+        -1
+    }
+
     fn emit_i64_const(self, value: i64) -> (Lowerer, i64) with Mut, Panic, Div {
         let pair = self.fresh_reg()
         let lo = pair.0
@@ -429,6 +453,38 @@ impl Lowerer {
     fn epistemic_recourse_policy_strategy_name(self, policy_id: i64) -> Name with Mut, Panic, Div {
         if policy_id >= 0 && policy_id < self.module.epistemic.recourse_policy_count {
             self.module.epistemic.recourse_policies[policy_id as usize].strategy_name
+        } else {
+            ir_empty_name()
+        }
+    }
+
+    fn epistemic_transition_policy_name(self, policy_id: i64) -> Name with Mut, Panic, Div {
+        if policy_id >= 0 && policy_id < self.module.epistemic.transition_policy_count {
+            self.module.epistemic.transition_policies[policy_id as usize].name
+        } else {
+            ir_empty_name()
+        }
+    }
+
+    fn epistemic_transition_policy_route_name(self, policy_id: i64) -> Name with Mut, Panic, Div {
+        if policy_id >= 0 && policy_id < self.module.epistemic.transition_policy_count {
+            self.module.epistemic.transition_policies[policy_id as usize].route_name
+        } else {
+            ir_empty_name()
+        }
+    }
+
+    fn epistemic_transition_policy_rollback_route_name(self, policy_id: i64) -> Name with Mut, Panic, Div {
+        if policy_id >= 0 && policy_id < self.module.epistemic.transition_policy_count {
+            self.module.epistemic.transition_policies[policy_id as usize].rollback_route_name
+        } else {
+            ir_empty_name()
+        }
+    }
+
+    fn epistemic_transition_protocol_name(self, protocol_id: i64) -> Name with Mut, Panic, Div {
+        if protocol_id >= 0 && protocol_id < self.module.epistemic.transition_protocol_count {
+            self.module.epistemic.transition_protocols[protocol_id as usize].name
         } else {
             ir_empty_name()
         }
@@ -2150,6 +2206,116 @@ impl Lowerer {
         self.lower_alternative_reason_witness(self.module.epistemic.alternative_reason_witnesses[witness_id as usize])
     }
 
+    fn lower_commit_alternative_call(self, span: Span, args: Option<Box<ExprList>>) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        let value_expr = match args {
+            Some(list) => Some(Box::new((*list).head))
+            None => None
+        }
+        let value_pair = self.lower_opt_expr(value_expr)
+        let lo1 = value_pair.0
+        let value_reg = value_pair.1
+
+        let option_expr = match args {
+            Some(list) => match (*list).tail {
+                Some(rest) => Some(Box::new((*rest).head))
+                None => None
+            }
+            None => None
+        }
+        let option_pair = lo1.lower_opt_expr(option_expr)
+        let lo2 = option_pair.0
+        let option_reg = option_pair.1
+
+        let protocol_expr = match args {
+            Some(list) => match (*list).tail {
+                Some(rest) => match (*rest).tail {
+                    Some(rest2) => Some(Box::new((*rest2).head))
+                    None => None
+                }
+                None => None
+            }
+            None => None
+        }
+        let protocol_pair = lo2.lower_opt_expr(protocol_expr)
+        let lo3 = protocol_pair.0
+        let protocol_reg = protocol_pair.1
+
+        let pair_dst = lo3.fresh_reg()
+        let lo4 = pair_dst.0
+        let dst_reg = pair_dst.1
+        let plan_id = lo4.find_transition_plan_id_for_span(span)
+        let lo5 = lo4.emit(ir_commit_alternative(dst_reg, value_reg, option_reg, protocol_reg, plan_id))
+        (lo5, dst_reg)
+    }
+
+    fn lower_transition_reason_witness(self, info: IrTransitionPlanInfo) -> (Lowerer, i64) with Mut, Panic, Div {
+        let pair_dst = self.fresh_reg()
+        var lo = pair_dst.0
+        let dst = pair_dst.1
+        lo = lo.emit(ir_alloc(dst, 0))
+
+        let policy_name_pair = lo.emit_name_string(lo.epistemic_transition_policy_name(info.transition_policy_id))
+        lo = policy_name_pair.0
+        lo = lo.emit_named_field(dst, make_name("policy_name"), policy_name_pair.1)
+
+        let protocol_name_pair = lo.emit_name_string(lo.epistemic_transition_protocol_name(info.transition_protocol_id))
+        lo = protocol_name_pair.0
+        lo = lo.emit_named_field(dst, make_name("protocol_name"), protocol_name_pair.1)
+
+        let route_name_pair = lo.emit_name_string(info.route_name)
+        lo = route_name_pair.0
+        lo = lo.emit_named_field(dst, make_name("route_name"), route_name_pair.1)
+
+        let rollback_route_pair = lo.emit_name_string(info.rollback_route_name)
+        lo = rollback_route_pair.0
+        lo = lo.emit_named_field(dst, make_name("rollback_route_name"), rollback_route_pair.1)
+
+        let audit_name_pair = lo.emit_name_string(lo.epistemic_audit_name(info.audit_id))
+        lo = audit_name_pair.0
+        lo = lo.emit_named_field(dst, make_name("audit_name"), audit_name_pair.1)
+
+        let contest_pair = lo.emit_i64_const(info.contest_id)
+        lo = contest_pair.0
+        lo = lo.emit_named_field(dst, make_name("contest_id"), contest_pair.1)
+
+        let step_count_pair = lo.emit_i64_const(info.step_count)
+        lo = step_count_pair.0
+        lo = lo.emit_named_field(dst, make_name("step_count"), step_count_pair.1)
+
+        let final_value_pair = lo.emit_name_string(info.final_value_repr)
+        lo = final_value_pair.0
+        lo = lo.emit_named_field(dst, make_name("final_value_repr"), final_value_pair.1)
+
+        let snapshot_pair = lo.lower_metric_snapshot_literal(info.metric_values)
+        lo = snapshot_pair.0
+        lo = lo.emit_named_field(dst, make_name("metric_snapshot"), snapshot_pair.1)
+
+        (lo, dst)
+    }
+
+    fn lower_transition_reason_call(self, span: Span) -> (Lowerer, i64) with Mut, Panic, Div {
+        let witness_id = self.find_transition_reason_witness_id_for_span(span)
+        if witness_id < 0 || witness_id >= self.module.epistemic.transition_reason_witness_count {
+            let loe = self.report_error()
+            return loe.emit_unit()
+        }
+        let witness_info = self.module.epistemic.transition_reason_witnesses[witness_id as usize]
+        let plan_id = witness_info.transition_plan_id
+        if plan_id < 0 || plan_id >= self.module.epistemic.transition_plan_count {
+            let loe = self.report_error()
+            return loe.emit_unit()
+        }
+        self.lower_transition_reason_witness(self.module.epistemic.transition_plans[plan_id as usize])
+    }
+
+    fn lower_transition_step_count_call(self, span: Span) -> (Lowerer, i64) with Mut, Panic, Div {
+        let plan_id = self.find_transition_plan_id_for_span(span)
+        if plan_id < 0 || plan_id >= self.module.epistemic.transition_plan_count {
+            return self.emit_i64_const(0)
+        }
+        self.emit_i64_const(self.module.epistemic.transition_plans[plan_id as usize].step_count)
+    }
+
     // Bind the first sub-pattern of a Some(x) match to the scrutinee value
     fn bind_match_sub_pattern(self, scrut: i64, pats: Option<Box<PatternList>>) -> Lowerer with Mut, Panic, Div, Alloc {
         match pats {
@@ -2320,6 +2486,10 @@ impl Lowerer {
             if ir_name_is_propose_alternatives(callee_name) {
                 return self.lower_propose_alternatives_call(e.span, e.args)
             }
+            // Special case: commit_alternative(value, option, protocol) — zero-cost transition certificate op
+            if ir_name_is_commit_alternative(callee_name) {
+                return self.lower_commit_alternative_call(e.span, e.args)
+            }
             // Special case: alternative_count(set) — compile-time scalar witness
             if ir_name_is_alternative_count(callee_name) {
                 return self.lower_alternative_count_call(e.span)
@@ -2331,6 +2501,14 @@ impl Lowerer {
             // Special case: alternative_reason(option) — compile-time witness struct
             if ir_name_is_alternative_reason(callee_name) {
                 return self.lower_alternative_reason_call(e.span)
+            }
+            // Special case: transition_reason(plan) — compile-time witness struct
+            if ir_name_is_transition_reason(callee_name) {
+                return self.lower_transition_reason_call(e.span)
+            }
+            // Special case: transition_step_count(plan) — compile-time scalar witness
+            if ir_name_is_transition_step_count(callee_name) {
+                return self.lower_transition_step_count_call(e.span)
             }
             // Special case: lift_knowledge(k) — IrLiftKnowledge (H5.4 epistemic bridge)
             if ir_name_is_lift_knowledge(callee_name) {
