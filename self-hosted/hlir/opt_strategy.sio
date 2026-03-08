@@ -1,93 +1,263 @@
-// self-hosted::hlir::opt_strategy — Strategy-directed HLIR optimization passes
+// self-hosted::hlir::opt_strategy — Dual-path codegen for StrategyInstrumented
 //
-// Applies optimization transformations to HLIR functions based on their
-// CompileStrategy annotation. This ensures that:
-//   - Validated data gets aggressive optimization (constant folding, SIMD, unrolling)
-//   - Uncertain data preserves numerical precision (no float reassociation)
-//   - GPU-targeted functions get kernel-specific optimizations
-//   - Probabilistic functions remain trace-compatible
+// When a function returns Contest<T> or Robust<T>, the compile strategy is
+// StrategyInstrumented.  This module transforms a single-block function into
+// a four-block diamond:
+//
+//   dispatch_block ──┬── fast_block ──┬── merge_block
+//                    └── instr_block ─┘
+//
+// The dispatch block reads a synthetic __validated: i64 parameter and branches:
+//   __validated != 0 → fast_block   (zero-overhead path)
+//   __validated == 0 → instr_block  (interval-instrumented path)
+//
+// The instrumented path wraps every float binary op with lo/hi interval bounds.
 
 // ============================================================================
-// Strategy-aware float constant folding
+// CompileStrategy — mirrors hlir_compute_strategy in lower.sio
 // ============================================================================
-// Only fold float constants when the strategy allows reassociation.
-// PrecisionPreserving and Instrumented strategies must NOT fold floats
-// because reordering can change rounding behavior.
 
-fn hlir_opt_can_fold_float_binary(strategy: CompileStrategy, op: i64) -> bool {
-    // Only aggressive and standard strategies allow float folding
-    if !hlir_strategy_allows_float_reassoc(strategy) {
-        return false
-    }
-    // Can fold: fadd, fsub, fmul, fdiv
-    op == HLIR_BIN_FADD || op == HLIR_BIN_FSUB || op == HLIR_BIN_FMUL || op == HLIR_BIN_FDIV
-}
+let STRATEGY_DEFAULT: i64 = 0
+let STRATEGY_INSTRUMENTED: i64 = 1
 
 // ============================================================================
-// Strategy-aware binary simplification
+// StrategyHints — controls which optimisations to apply
 // ============================================================================
-// Check if a binary operation on two constants can be folded in this strategy.
-
-fn hlir_opt_try_fold_binary(strategy: CompileStrategy, op: i64, lhs_const: bool, rhs_const: bool, is_float: bool) -> bool {
-    // Integer constant folding is always safe
-    if !is_float {
-        return lhs_const && rhs_const
-    }
-    // Float constant folding requires strategy permission
-    if !hlir_opt_can_fold_float_binary(strategy, op) {
-        return false
-    }
-    lhs_const && rhs_const
-}
-
-// ============================================================================
-// Strategy metadata for codegen backends
-// ============================================================================
-// Backends query these to decide codegen behavior per-function.
 
 struct StrategyHints {
-    allow_float_reassoc: bool,
-    allow_simd_widening: bool,
-    allow_loop_unroll: bool,
-    require_strict_fp: bool,
-    emit_trace_prologue: bool,
     emit_dual_path: bool,
-    is_gpu_kernel: bool,
+    strategy: i64,
 }
 
-fn hlir_strategy_hints(strategy: CompileStrategy) -> StrategyHints {
+fn strategy_hints_default() -> StrategyHints {
     StrategyHints {
-        allow_float_reassoc: hlir_strategy_allows_float_reassoc(strategy),
-        allow_simd_widening: hlir_strategy_allows_simd_widening(strategy),
-        allow_loop_unroll: hlir_strategy_allows_loop_unroll(strategy),
-        require_strict_fp: hlir_strategy_requires_strict_fp(strategy),
-        emit_trace_prologue: match strategy {
-            CompileStrategy::StrategyProbabilistic => true,
-            _ => false,
-        },
-        emit_dual_path: hlir_strategy_needs_instrumentation(strategy),
-        is_gpu_kernel: match strategy {
-            CompileStrategy::StrategyGpuKernel => true,
-            _ => false,
-        },
+        emit_dual_path: false,
+        strategy: STRATEGY_DEFAULT,
+    }
+}
+
+fn strategy_hints_instrumented() -> StrategyHints {
+    StrategyHints {
+        emit_dual_path: true,
+        strategy: STRATEGY_INSTRUMENTED,
     }
 }
 
 // ============================================================================
-// Per-function optimization pass entry point
+// hlir_strategy_needs_instrumentation — predicate
 // ============================================================================
-// Called by the lowering pipeline for each function. Applies strategy-aware
-// transforms to the function's HLIR blocks.
 
-fn hlir_opt_apply_strategy(func: HlirFunction) -> HlirFunction with Mut, Panic {
-    let hints = hlir_strategy_hints(func.compile_strategy)
+fn hlir_strategy_needs_instrumentation(hints: StrategyHints) -> bool {
+    hints.strategy == STRATEGY_INSTRUMENTED
+}
+
+// ============================================================================
+// hlir_opt_clone_instrs — clone a block's instructions with ValueId offset
+// ============================================================================
+
+fn hlir_opt_clone_instrs(src: HlirBlock, id_offset: i64) -> HlirBlock with Mut, Panic {
+    var dst = hlir_block_new(src.id + id_offset, src.label)
+    var i: i64 = 0
+    while i < src.instr_count {
+        var instr = src.instrs[i as usize]
+        // Offset all value IDs so they don't collide with the fast path
+        if instr.result != HLIR_INVALID_VALUE {
+            instr.result = instr.result + id_offset
+        }
+        if instr.src != HLIR_INVALID_VALUE {
+            instr.src = instr.src + id_offset
+        }
+        if instr.lhs != HLIR_INVALID_VALUE {
+            instr.lhs = instr.lhs + id_offset
+        }
+        if instr.rhs != HLIR_INVALID_VALUE {
+            instr.rhs = instr.rhs + id_offset
+        }
+        if instr.store_ptr != HLIR_INVALID_VALUE {
+            instr.store_ptr = instr.store_ptr + id_offset
+        }
+        if instr.store_value != HLIR_INVALID_VALUE {
+            instr.store_value = instr.store_value + id_offset
+        }
+        if instr.call_func != HLIR_INVALID_VALUE {
+            instr.call_func = instr.call_func + id_offset
+        }
+        if instr.base != HLIR_INVALID_VALUE {
+            instr.base = instr.base + id_offset
+        }
+        if instr.index != HLIR_INVALID_VALUE {
+            instr.index = instr.index + id_offset
+        }
+        if instr.cast_value != HLIR_INVALID_VALUE {
+            instr.cast_value = instr.cast_value + id_offset
+        }
+        // Offset call args
+        var j: i64 = 0
+        while j < instr.call_arg_count {
+            if instr.call_args[j as usize] != HLIR_INVALID_VALUE {
+                instr.call_args[j as usize] = instr.call_args[j as usize] + id_offset
+            }
+            j = j + 1
+        }
+        dst = hlir_block_append_instr(dst, instr)
+        i = i + 1
+    }
+    dst
+}
+
+// ============================================================================
+// hlir_opt_wrap_float_interval — for a float binary op, emit interval triple
+//
+// Given instruction: result = lhs OP rhs
+// Emits:
+//   result        = lhs OP rhs          (original)
+//   result_lo     = lhs OP rhs          (lo-bound copy, same op)
+//   result_hi     = lhs OP rhs          (hi-bound copy, same op)
+//
+// This is structural: the lo/hi copies use the same operands.  A production
+// implementation would subtract/add epsilon for rounding-aware intervals.
+// ============================================================================
+
+fn hlir_opt_wrap_float_interval(block: HlirBlock, instr: HlirInstr, id_base: i64) -> HlirBlock with Mut, Panic {
+    var blk = block
+    // Emit the original instruction unchanged
+    blk = hlir_block_append_instr(blk, instr)
+
+    // Only wrap float binary ops
+    if instr.op_kind == HLIR_OP_BINARY {
+        let is_f64 = instr.ty.kind == HlirTypeKind::HlirTypeF64
+        let is_f32 = instr.ty.kind == HlirTypeKind::HlirTypeF32
+        if is_f64 || is_f32 {
+            // lo-bound copy
+            var lo_instr = instr
+            lo_instr.result = id_base
+            blk = hlir_block_append_instr(blk, lo_instr)
+            // hi-bound copy
+            var hi_instr = instr
+            hi_instr.result = id_base + 1
+            blk = hlir_block_append_instr(blk, hi_instr)
+        }
+    }
+    blk
+}
+
+// ============================================================================
+// hlir_opt_find_return_value — find the return value from a block's terminator
+// ============================================================================
+
+fn hlir_opt_find_return_value(block: HlirBlock) -> i64 {
+    if block.terminator.kind == HLIR_TERM_RETURN {
+        return block.terminator.return_value
+    }
+    HLIR_INVALID_VALUE
+}
+
+// ============================================================================
+// hlir_opt_apply_strategy — main entry point for strategy-based optimisation
+//
+// For StrategyInstrumented with emit_dual_path and a single-block function:
+//   - Adds __validated: i64 parameter
+//   - Creates 4-block diamond: dispatch → fast|instr → merge
+//   - fast_block: cloned original instructions (zero-overhead)
+//   - instr_block: interval-wrapped float ops
+//   - merge_block: PHI from both paths + RETURN
+// ============================================================================
+
+fn hlir_opt_apply_strategy(func: HlirFunction, hints: StrategyHints) -> HlirFunction with Mut, Panic {
+    // Only transform if dual-path is requested and function has exactly one block
+    if !hints.emit_dual_path {
+        return func
+    }
+    if func.block_count != 1 {
+        return func
+    }
+
+    let orig_block = func.blocks[0]
+    let ret_val = hlir_opt_find_return_value(orig_block)
+    if ret_val == HLIR_INVALID_VALUE {
+        return func
+    }
+
     var f = func
 
-    // For now, the strategy hints are consumed by backends at codegen time.
-    // Future sprints will add intra-function HLIR transforms here:
-    //   - Sprint 34: dual-path emission for StrategyInstrumented
-    //   - Float reassociation blocking for strict-fp strategies
-    //   - SIMD widening for StrategyAggressive
+    // --- Add __validated: i64 parameter ---
+    let validated_param_id = 10000
+    let validated_param = HlirParam {
+        value_id: validated_param_id,
+        name: hlir_name_from_str("__validated"),
+        ty: hlir_type_i64(),
+    }
+    f = hlir_function_add_param(f, validated_param)
+    f = hlir_function_register_local(f, validated_param_id, hlir_type_i64())
+
+    // --- Compute ID offset for instrumented path ---
+    // Use a large offset so cloned value IDs don't collide
+    let id_offset: i64 = 5000
+
+    // --- Block IDs ---
+    let dispatch_id: i64 = 100
+    let fast_id: i64 = 101
+    let instr_id: i64 = 102
+    let merge_id: i64 = 103
+
+    // === dispatch_block: COND_BRANCH on __validated ===
+    var dispatch_block = hlir_block_new(dispatch_id, hlir_name_from_str("dispatch"))
+    dispatch_block = hlir_block_set_terminator(dispatch_block,
+        hlir_term_cond_branch(validated_param_id, fast_id, instr_id))
+
+    // === fast_block: clone original instructions, BRANCH → merge ===
+    var fast_block = hlir_opt_clone_instrs(orig_block, 0)
+    fast_block.id = fast_id
+    fast_block.label = hlir_name_from_str("fast")
+    // Replace terminator: BRANCH → merge
+    let fast_ret_val = ret_val
+    fast_block = hlir_block_set_terminator(fast_block, hlir_term_branch(merge_id))
+
+    // === instr_block: clone with interval wrapping for float ops ===
+    var instr_block = hlir_block_new(instr_id, hlir_name_from_str("instr"))
+    var k: i64 = 0
+    var interval_id_base: i64 = 20000
+    while k < orig_block.instr_count {
+        var src_instr = orig_block.instrs[k as usize]
+        // Offset value IDs for the instrumented path
+        if src_instr.result != HLIR_INVALID_VALUE {
+            src_instr.result = src_instr.result + id_offset
+        }
+        if src_instr.src != HLIR_INVALID_VALUE {
+            src_instr.src = src_instr.src + id_offset
+        }
+        if src_instr.lhs != HLIR_INVALID_VALUE {
+            src_instr.lhs = src_instr.lhs + id_offset
+        }
+        if src_instr.rhs != HLIR_INVALID_VALUE {
+            src_instr.rhs = src_instr.rhs + id_offset
+        }
+        instr_block = hlir_opt_wrap_float_interval(instr_block, src_instr, interval_id_base)
+        interval_id_base = interval_id_base + 2
+        k = k + 1
+    }
+    let instr_ret_val = ret_val + id_offset
+    instr_block = hlir_block_set_terminator(instr_block, hlir_term_branch(merge_id))
+
+    // === merge_block: PHI + RETURN ===
+    var merge_block = hlir_block_new(merge_id, hlir_name_from_str("merge"))
+    let phi_result: i64 = 30000
+    var phi_instr = hlir_instr_new(HLIR_OP_PHI)
+    phi_instr.result = phi_result
+    phi_instr.ty = f.return_type
+    phi_instr.phi_incoming[0] = HlirPhiEntry { block_id: fast_id, value_id: fast_ret_val }
+    phi_instr.phi_incoming[1] = HlirPhiEntry { block_id: instr_id, value_id: instr_ret_val }
+    phi_instr.phi_count = 2
+    merge_block = hlir_block_append_instr(merge_block, phi_instr)
+    merge_block = hlir_block_set_terminator(merge_block, hlir_term_return(phi_result))
+    f = hlir_function_register_local(f, phi_result, f.return_type)
+
+    // === Replace blocks ===
+    f.blocks[0] = dispatch_block
+    f.block_count = 1
+    f = hlir_function_add_block(f, fast_block)
+    f = hlir_function_add_block(f, instr_block)
+    f = hlir_function_add_block(f, merge_block)
 
     f
 }
