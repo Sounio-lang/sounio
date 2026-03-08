@@ -6729,25 +6729,32 @@ impl Checker {
         known: [i64; 8],
         values: [f64; 8]
     ) -> (Checker, [i64; 8], [f64; 8]) with Mut, Panic, Div, Alloc, IO {
-        match opt {
-            Some(list) => {
-                var c = self
-                var next_known = known
-                var next_values = values
-                let metric_id = alternative_metric_id_from_name((*list).head.name)
-                if metric_id < 0
-                || metric_id >= 4
-                || known[metric_id as usize] == 1
-                || (*list).head.value_kind != AuditValueKind::AuditValueFloat {
-                    c = c.report_error_at((*list).head.span, 116, 0, 0, 0)
-                } else {
-                    next_known[metric_id as usize] = 1
-                    next_values[metric_id as usize] = (*list).head.value_f64
+        var c = self
+        var out_known = known
+        var out_values = values
+        var cur = opt
+        var done = false
+        while !done {
+            match cur {
+                Some(list) => {
+                    let metric_id = alternative_metric_id_from_name((*list).head.name)
+                    if metric_id < 0
+                    || metric_id >= 4
+                    || out_known[metric_id as usize] == 1
+                    || (*list).head.value_kind != AuditValueKind::AuditValueFloat {
+                        c = c.report_error_at((*list).head.span, 116, 0, 0, 0)
+                    } else {
+                        out_known[metric_id as usize] = 1
+                        out_values[metric_id as usize] = (*list).head.value_f64
+                    }
+                    cur = (*list).tail
                 }
-                c.collect_alternative_candidate_metrics((*list).tail, next_known, next_values)
+                None => {
+                    done = true
+                }
             }
-            None => (self, known, values)
         }
+        (c, out_known, out_values)
     }
 
     fn collect_decision_policy_def(self, name: Name, opt: Option<Box<DecisionPolicyDef>>) -> Checker with Mut, Panic, Div, Alloc, IO {
@@ -10325,20 +10332,27 @@ impl Checker {
         opt: Option<Box<PolicyRequirementInfoList>>,
         plan_info: TransitionPlanInfo
     ) -> bool with Mut, Panic, Div, Alloc {
-        match opt {
-            Some(list) => {
-                let req = (*list).head
-                let metric_pair = self.transition_plan_metric_pair(plan_info, req.metric_id)
-                if !metric_pair.0 {
-                    return true
+        var cur = opt
+        var done = false
+        while !done {
+            match cur {
+                Some(list) => {
+                    let req = (*list).head
+                    let metric_pair = self.transition_plan_metric_pair(plan_info, req.metric_id)
+                    if !metric_pair.0 {
+                        return true
+                    }
+                    if !policy_requirement_holds(metric_pair.1, req.op, req.threshold) {
+                        return true
+                    }
+                    cur = (*list).tail
                 }
-                if !policy_requirement_holds(metric_pair.1, req.op, req.threshold) {
-                    return true
+                None => {
+                    done = true
                 }
-                self.monitoring_policy_has_violation_or_unavailable((*list).tail, plan_info)
             }
-            None => false
         }
+        false
     }
 
     fn monitoring_policy_reason_code_from_plan(
@@ -10346,17 +10360,24 @@ impl Checker {
         opt: Option<Box<PolicyRequirementInfoList>>,
         plan_info: TransitionPlanInfo
     ) -> i64 with Mut, Panic, Div, Alloc {
-        match opt {
-            Some(list) => {
-                let req = (*list).head
-                let metric_pair = self.transition_plan_metric_pair(plan_info, req.metric_id)
-                if !metric_pair.0 || !policy_requirement_holds(metric_pair.1, req.op, req.threshold) {
-                    return self.deferral_reason_code_from_metric_id(req.metric_id)
+        var cur = opt
+        var done = false
+        while !done {
+            match cur {
+                Some(list) => {
+                    let req = (*list).head
+                    let metric_pair = self.transition_plan_metric_pair(plan_info, req.metric_id)
+                    if !metric_pair.0 || !policy_requirement_holds(metric_pair.1, req.op, req.threshold) {
+                        return self.deferral_reason_code_from_metric_id(req.metric_id)
+                    }
+                    cur = (*list).tail
                 }
-                self.monitoring_policy_reason_code_from_plan((*list).tail, plan_info)
+                None => {
+                    done = true
+                }
             }
-            None => DEFERRAL_REASON_POLICY_INCOMPLETE
         }
+        DEFERRAL_REASON_POLICY_INCOMPLETE
     }
 
     fn check_transition_reason_expr(self, e: Expr) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
@@ -10496,7 +10517,16 @@ impl Checker {
             return (c.report_monitoring_policy_target_mismatch(e.span, policy_info.name, policy_info.target_ty, inner_ty), ty_error())
         }
 
-        if !c.monitoring_policy_has_violation_or_unavailable(policy_info.requirements, plan_info) {
+        if policy_info.requirement_count <= 0 {
+            return (c.report_rollback_transition_requires_failure(e.span, policy_info.name), ty_error())
+        }
+        let hold_pair = c.check_monitoring_policy_requirements_against_plan(
+            e.span,
+            policy_info.name,
+            policy_info.requirements,
+            plan_info
+        )
+        if hold_pair.1 {
             return (c.report_rollback_transition_requires_failure(e.span, policy_info.name), ty_error())
         }
 

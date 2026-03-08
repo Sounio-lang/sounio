@@ -112,34 +112,15 @@ check_grep "test:collider_conditioning" "tests/compile-fail/causal_collider_cond
 # --- Section 4: souc check verification ---
 echo ""
 echo "--- souc check verification ---"
-if [ -n "$SOUC" ] && [ -x "$SOUC" ]; then
-  # Probe: check if souc binary supports CausalEffect keyword (Sprint 27)
-  PROBE_LOG="/tmp/sprint29_probe.log"
-  echo 'fn main() -> i64 with IO { let x: CausalEffect<f64> = 1.0; 42 }' > /tmp/sprint29_probe.sio
-  set +e
-  timeout 10 "$SOUC" check /tmp/sprint29_probe.sio >"$PROBE_LOG" 2>&1
-  set -e
-  if grep -q "Undefined type" "$PROBE_LOG" 2>/dev/null; then
-    echo "SKIP  souc binary does not support CausalEffect keyword (pre-built binary)"
-    echo "      Self-hosted compiler has full support — keywords will work after binary rebuild"
-    # Run compile-fail tests (they fail for type mismatch reasons, not keyword)
-    check_souc "souc:no_front_door" "tests/compile-fail/causal_no_front_door.sio" "fail"
-    check_souc "souc:front_door_bypass" "tests/compile-fail/causal_front_door_bypass.sio" "fail"
-    check_souc "souc:collider_conditioning" "tests/compile-fail/causal_collider_conditioning.sio" "fail"
-  else
-    check_souc "souc:front_door_basic" "tests/frontend/causal_front_door_basic.sio" "pass"
-    check_souc "souc:d_sep_chain" "tests/frontend/causal_d_sep_chain.sio" "pass"
-    check_souc "souc:d_sep_fork" "tests/frontend/causal_d_sep_fork.sio" "pass"
-    check_souc "souc:d_sep_collider" "tests/frontend/causal_d_sep_collider.sio" "pass"
-    check_souc "souc:do_calc_rule2" "tests/frontend/causal_do_calc_rule2.sio" "pass"
-    check_souc "souc:instrumental" "tests/frontend/causal_instrumental.sio" "pass"
-    check_souc "souc:no_front_door" "tests/compile-fail/causal_no_front_door.sio" "fail"
-    check_souc "souc:front_door_bypass" "tests/compile-fail/causal_front_door_bypass.sio" "fail"
-    check_souc "souc:collider_conditioning" "tests/compile-fail/causal_collider_conditioning.sio" "fail"
-  fi
-else
-  echo "SKIP  souc binary not available — structural checks only"
-fi
+check_souc "souc:front_door_basic" "tests/frontend/causal_front_door_basic.sio" "pass"
+check_souc "souc:d_sep_chain" "tests/frontend/causal_d_sep_chain.sio" "pass"
+check_souc "souc:d_sep_fork" "tests/frontend/causal_d_sep_fork.sio" "pass"
+check_souc "souc:d_sep_collider" "tests/frontend/causal_d_sep_collider.sio" "pass"
+check_souc "souc:do_calc_rule2" "tests/frontend/causal_do_calc_rule2.sio" "pass"
+check_souc "souc:instrumental" "tests/frontend/causal_instrumental.sio" "pass"
+check_souc "souc:no_front_door" "tests/compile-fail/causal_no_front_door.sio" "fail"
+check_souc "souc:front_door_bypass" "tests/compile-fail/causal_front_door_bypass.sio" "fail"
+check_souc "souc:collider_conditioning" "tests/compile-fail/causal_collider_conditioning.sio" "fail"
 
 # --- Section 5: Regression ---
 echo ""
@@ -153,6 +134,13 @@ if [ -f "tests/frontend/causal_identifiable_direct.sio" ]; then
   check_souc "souc:regression_causal_identifiable" "tests/frontend/causal_identifiable_direct.sio" "pass"
 else
   total=$((total + 1)); pass=$((pass + 1)); echo "SKIP  souc:regression_causal_identifiable (file not present)"
+fi
+if [ -f "tests/frontend/measure_basic.sio" ] && grep -q "//@ ignore" "tests/frontend/measure_basic.sio"; then
+  total=$((total + 1)); pass=$((pass + 1)); echo "SKIP  souc:regression_measure_basic (//@ ignore)"
+elif [ -f "tests/frontend/measure_basic.sio" ]; then
+  check_souc "souc:regression_measure_basic" "tests/frontend/measure_basic.sio" "pass"
+else
+  total=$((total + 1)); pass=$((pass + 1)); echo "SKIP  souc:regression_measure_basic (file not present)"
 fi
 
 echo ""

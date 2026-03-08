@@ -119,7 +119,7 @@ run_probe_fail_case \
 run_probe_fail_case \
   "compile_fail_monitoring_policy_target_mismatch" \
   "tests/compile-fail/monitoring_policy_target_mismatch.sio" \
-  "monitoring policy target does not match supplied transition type"
+  "monitoring policy target does not match the supplied transition subject type"
 run_probe_fail_case \
   "compile_fail_rollback_transition_requires_failure" \
   "tests/compile-fail/rollback_transition_requires_failure.sio" \
