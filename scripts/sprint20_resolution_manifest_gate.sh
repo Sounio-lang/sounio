@@ -8,9 +8,7 @@ cd "$ROOT_DIR"
 if [ -n "${SOUNIO_SOUC:-}" ]; then
   SOUC="$SOUNIO_SOUC"
 else
-  # shellcheck source=/dev/null
-  source "$ROOT_DIR/scripts/lib/resolve_souc.sh"
-  SOUC="$SOUC_BIN"
+  SOUC="$ROOT_DIR/souc"
 fi
 
 OUT_JSON="${SOUNIO_SPRINT20_GATE_OUT:-$ROOT_DIR/artifacts/sprint20/resolution_manifest_gate.v1.json}"

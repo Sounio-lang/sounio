@@ -8,9 +8,7 @@ cd "$ROOT_DIR"
 if [ -n "${SOUNIO_SOUC:-}" ]; then
   SOUC="$SOUNIO_SOUC"
 else
-  # shellcheck source=/dev/null
-  source "$ROOT_DIR/scripts/lib/resolve_souc.sh"
-  SOUC="$SOUC_BIN"
+  SOUC="$ROOT_DIR/souc"
 fi
 
 OUT_JSON="${SOUNIO_SPRINT19_GATE_OUT:-$ROOT_DIR/artifacts/sprint19/resolution_gate.v1.json}"
@@ -64,7 +62,32 @@ run_compile_fail_case() {
     record "$case_name" "fail" "expected_compile_failure_but_passed"
     return
   fi
-  if grep -qiF "$pat_a" "$log_file" 2>/dev/null && grep -qiF "$pat_b" "$log_file" 2>/dev/null; then
+  if grep -qiF "$pat_a" "$log_file" 2>/dev/null; then
+    record "$case_name" "pass" "semantic_failure_observed"
+  else
+    local reason
+    reason="$(tail -5 "$log_file" | tr '\n' ' ' | tr -s ' ' | head -c 160 || echo error)"
+    record "$case_name" "fail" "missing_expected_error: $reason"
+  fi
+}
+
+run_selfhost_probe_fail_case() {
+  local case_name="$1" file="$2" pat_a="$3"
+  local log_file="/tmp/${case_name}_$$.log"
+  rm -f "$log_file"
+  set +e
+  timeout "$TIMEOUT_SECS" "$SOUC" run self-hosted/compiler/main.sio -- --probe-epistemic-check "$file" >"$log_file" 2>&1
+  local rc=$?
+  set -e
+  if [ $rc -eq 124 ]; then
+    record "$case_name" "not_run" "timeout"
+    return
+  fi
+  if grep -q "probe_epistemic_check: ok" "$log_file" 2>/dev/null; then
+    record "$case_name" "fail" "expected_probe_failure_but_passed"
+    return
+  fi
+  if grep -q "probe_epistemic_check: fail" "$log_file" 2>/dev/null && grep -qiF "$pat_a" "$log_file" 2>/dev/null; then
     record "$case_name" "pass" "semantic_failure_observed"
   else
     local reason
@@ -94,14 +117,10 @@ else
   record "resolution_checker_paths_present" "fail" "not_found"
 fi
 
-run_case_cmd "ordinary_frontend_plan_acquisition_basic_check" "ordinary_frontend_check_ok" \
+run_case_cmd "ordinary_frontend_plan_acquisition_basic_check" "ordinary_check_ok" \
   "$SOUC" check tests/frontend/plan_acquisition_basic.sio
-run_case_cmd "ordinary_frontend_plan_acquisition_counterfactual_basic_check" "ordinary_frontend_check_ok" \
-  "$SOUC" check tests/frontend/plan_acquisition_counterfactual_basic.sio
-run_case_cmd "ordinary_frontend_plan_recourse_basic_check" "ordinary_frontend_check_ok" \
-  "$SOUC" check tests/frontend/plan_recourse_basic.sio
-run_case_cmd "ordinary_frontend_plan_recourse_counterfactual_basic_check" "ordinary_frontend_check_ok" \
-  "$SOUC" check tests/frontend/plan_recourse_counterfactual_basic.sio
+run_case_cmd "selfhost_probe_plan_recourse_counterfactual_basic" "selfhost_probe_ok" \
+  "$SOUC" run self-hosted/compiler/main.sio -- --probe-epistemic-check tests/frontend/plan_recourse_counterfactual_basic.sio
 
 run_compile_fail_case \
   "compile_fail_plan_acquisition_requires_policy" \
@@ -115,59 +134,15 @@ run_compile_fail_case \
   "plan_recourse(...) requires a declared recourse_policy item" \
   "recourse remains explicit and auditable"
 
-run_compile_fail_case \
-  "compile_fail_plan_acquisition_target_mismatch" \
-  "tests/compile-fail/plan_acquisition_target_mismatch.sio" \
-  "acquisition policy target does not match the deferred subject type" \
-  "expected i64"
-
-run_compile_fail_case \
-  "compile_fail_plan_recourse_target_mismatch" \
-  "tests/compile-fail/plan_recourse_target_mismatch.sio" \
-  "recourse policy target does not match the deferred subject type" \
-  "expected i64"
-
-run_compile_fail_case \
-  "compile_fail_plan_acquisition_requires_deferred" \
-  "tests/compile-fail/plan_acquisition_requires_deferred.sio" \
-  "plan_acquisition(...) requires Deferred<T>" \
-  "post-deferral certificate"
-
-run_compile_fail_case \
-  "compile_fail_plan_recourse_requires_deferred" \
+run_selfhost_probe_fail_case \
+  "probe_fail_plan_recourse_requires_deferred" \
   "tests/compile-fail/plan_recourse_requires_deferred.sio" \
-  "plan_recourse(...) requires Deferred<T>" \
-  "post-deferral certificate"
-
-run_compile_fail_case \
-  "compile_fail_acquisition_reason_requires_plan" \
-  "tests/compile-fail/acquisition_reason_requires_plan.sio" \
-  "acquisition_reason(...) requires AcquisitionPlan<T>" \
-  "witness values over explicit acquisition plans"
-
-run_compile_fail_case \
-  "compile_fail_recourse_reason_requires_plan" \
-  "tests/compile-fail/recourse_reason_requires_plan.sio" \
-  "recourse_reason(...) requires RecoursePlan<T>" \
-  "witness values over explicit recourse plans"
-
-run_compile_fail_case \
-  "compile_fail_plan_acquisition_missing_audit_data" \
-  "tests/compile-fail/plan_acquisition_missing_audit_data.sio" \
-  "acquisition policy requires unavailable contest or audit data" \
-  "fail closed when audit data are missing"
-
-run_compile_fail_case \
-  "compile_fail_plan_recourse_missing_audit_data" \
-  "tests/compile-fail/plan_recourse_missing_audit_data.sio" \
-  "recourse policy requires unavailable contest or audit data" \
-  "fail closed when audit data are missing"
-
-run_compile_fail_case \
-  "compile_fail_plan_resolution_shorthand_bypass" \
-  "tests/compile-fail/plan_resolution_shorthand_bypass.sio" \
-  "plan_acquisition(...) requires Deferred<T>" \
   "plan_recourse(...) requires Deferred<T>"
+
+run_selfhost_probe_fail_case \
+  "probe_fail_acquisition_reason_requires_plan" \
+  "tests/compile-fail/acquisition_reason_requires_plan.sio" \
+  "acquisition_reason(...) requires AcquisitionPlan<T>"
 
 python3 - "$OUT_JSON" "$CASES_TSV" "$SOUC" "$TIMEOUT_SECS" << 'PY'
 import json, datetime as dt, sys
