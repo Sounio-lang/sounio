@@ -1,0 +1,129 @@
+// Software triangle rasterizer using barycentric coordinates
+//
+// Implements scanline triangle fill with per-pixel color interpolation.
+// Supports z-buffer depth testing for correct occlusion.
+
+struct Vec3 { x: f64, y: f64, z: f64 }
+struct Color { r: f64, g: f64, b: f64, a: f64 }
+struct Vertex2D { x: f64, y: f64, z: f64, r: f64, g: f64, b: f64 }
+
+fn min_i64(a: i64, b: i64) -> i64 { if a < b { a } else { b } }
+fn max_i64(a: i64, b: i64) -> i64 { if a > b { a } else { b } }
+fn min_f64(a: f64, b: f64) -> f64 { if a < b { a } else { b } }
+fn max_f64(a: f64, b: f64) -> f64 { if a > b { a } else { b } }
+
+// Edge function for barycentric coordinates
+// Positive = left side, negative = right side
+fn edge_fn(ax: f64, ay: f64, bx: f64, by: f64, cx: f64, cy: f64) -> f64 {
+    (cx - ax) * (by - ay) - (cy - ay) * (bx - ax)
+}
+
+// Rasterize a single triangle into a framebuffer (flat arrays)
+// Returns number of pixels written
+fn rasterize_triangle(
+    v0: Vertex2D, v1: Vertex2D, v2: Vertex2D,
+    fb_r: &![i64; 65536], fb_g: &![i64; 65536], fb_b: &![i64; 65536],
+    fb_depth: &![f64; 65536],
+    fb_w: i64, fb_h: i64
+) -> i64 with Mut, Div, Panic {
+    // Bounding box
+    let min_x = max_i64(0, (min_f64(min_f64(v0.x, v1.x), v2.x)) as i64)
+    let max_x = min_i64(fb_w - 1, (max_f64(max_f64(v0.x, v1.x), v2.x)) as i64 + 1)
+    let min_y = max_i64(0, (min_f64(min_f64(v0.y, v1.y), v2.y)) as i64)
+    let max_y = min_i64(fb_h - 1, (max_f64(max_f64(v0.y, v1.y), v2.y)) as i64 + 1)
+
+    let area = edge_fn(v0.x, v0.y, v1.x, v1.y, v2.x, v2.y)
+    if area == 0.0 { return 0 }  // degenerate triangle
+
+    var pixels_written: i64 = 0
+    var py: i64 = min_y
+    while py <= max_y {
+        var px: i64 = min_x
+        while px <= max_x {
+            let cx = (px as f64) + 0.5
+            let cy = (py as f64) + 0.5
+
+            let w0 = edge_fn(v1.x, v1.y, v2.x, v2.y, cx, cy)
+            let w1 = edge_fn(v2.x, v2.y, v0.x, v0.y, cx, cy)
+            let w2 = edge_fn(v0.x, v0.y, v1.x, v1.y, cx, cy)
+
+            // Inside triangle if all same sign as area
+            let inside = if area > 0.0 {
+                w0 >= 0.0 && w1 >= 0.0 && w2 >= 0.0
+            } else {
+                w0 <= 0.0 && w1 <= 0.0 && w2 <= 0.0
+            }
+
+            if inside {
+                // Barycentric interpolation
+                let b0 = w0 / area
+                let b1 = w1 / area
+                let b2 = w2 / area
+
+                // Interpolate depth
+                let z = b0 * v0.z + b1 * v1.z + b2 * v2.z
+
+                let idx = py * fb_w + px
+                if z < (*fb_depth)[idx] {
+                    // Interpolate color
+                    let r = b0 * v0.r + b1 * v1.r + b2 * v2.r
+                    let g = b0 * v0.g + b1 * v1.g + b2 * v2.g
+                    let b_col = b0 * v0.b + b1 * v1.b + b2 * v2.b
+
+                    (*fb_r)[idx] = (r * 255.0) as i64
+                    (*fb_g)[idx] = (g * 255.0) as i64
+                    (*fb_b)[idx] = (b_col * 255.0) as i64
+                    (*fb_depth)[idx] = z
+                    pixels_written = pixels_written + 1
+                }
+            }
+            px = px + 1
+        }
+        py = py + 1
+    }
+    pixels_written
+}
+
+// Draw a line (Bresenham) into flat framebuffer arrays
+fn rasterize_line(
+    x0: i64, y0: i64, x1: i64, y1: i64,
+    r: i64, g: i64, b: i64,
+    fb_r: &![i64; 65536], fb_g: &![i64; 65536], fb_b: &![i64; 65536],
+    fb_w: i64, fb_h: i64
+) with Mut, Panic, Div {
+    var cx: i64 = x0
+    var cy: i64 = y0
+    var dx: i64 = x1 - x0
+    var dy: i64 = y1 - y0
+    if dx < 0 { dx = 0 - dx }
+    if dy < 0 { dy = 0 - dy }
+    let sx: i64 = if x0 < x1 { 1 } else { 0 - 1 }
+    let sy: i64 = if y0 < y1 { 1 } else { 0 - 1 }
+    var err: i64 = dx - dy
+
+    var steps: i64 = 0
+    let max_steps = dx + dy + 1
+    while steps < max_steps {
+        if cx >= 0 && cx < fb_w && cy >= 0 && cy < fb_h {
+            let idx = cy * fb_w + cx
+            (*fb_r)[idx] = r
+            (*fb_g)[idx] = g
+            (*fb_b)[idx] = b
+        }
+        if cx == x1 && cy == y1 { steps = max_steps }
+        let e2 = err * 2
+        if e2 > (0 - dy) {
+            err = err - dy
+            cx = cx + sx
+        }
+        if e2 < dx {
+            err = err + dx
+            cy = cy + sy
+        }
+        steps = steps + 1
+    }
+}
+
+fn main() -> i32 with IO {
+    0
+}
