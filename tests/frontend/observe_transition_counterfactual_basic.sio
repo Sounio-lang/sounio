@@ -1,0 +1,79 @@
+// Sprint 25: observe a counterfactual transition.
+
+type CFM = Model<i64, Counterfactual<i64>>
+models CounterfactualModels = [CFM]
+
+policy CounterfactualPolicy for Counterfactual<i64> level Stable scope InDistribution {
+    require max_tail_risk < 0.10
+}
+
+deferral_policy CounterfactualReview for Counterfactual<i64> route causal_review {
+    require max_tail_risk >= 0.05
+}
+
+recourse_policy CounterfactualFallback for Counterfactual<i64> strategy conservative_counterfactual route causal_review {
+    require deferred_reason == TailRisk
+    require max_tail_risk >= 0.05
+}
+
+alternative_policy CounterfactualFrontier for Counterfactual<i64> frontier Pareto {
+    objective minimize intervention_cost
+    objective minimize residual_tail_risk
+    objective minimize mechanistic_divergence
+    objective maximize admissibility_margin
+    max_options 4
+}
+
+transition_policy CounterfactualStepdown for Counterfactual<i64> route causal_review {
+    require max_tail_risk <= 0.10
+    max_steps 2
+    rollback_route causal_review
+}
+
+monitoring_policy CounterfactualMonitor for Counterfactual<i64> route causal_review {
+    rollback_route causal_review
+}
+
+audit CounterfactualAudit for Contest<Counterfactual<i64>, CounterfactualModels, CounterfactualPolicy> {
+    metrics {
+        max_tail_risk: 0.08
+    }
+}
+
+alternative_frontier CounterfactualDeferredFrontier for Deferred<Counterfactual<i64>> under CounterfactualFrontier {
+    candidate ConservativeCF via CounterfactualFallback {
+        value: cf
+        metrics {
+            intervention_cost: 0.12
+            residual_tail_risk: 0.04
+            mechanistic_divergence: 0.07
+            admissibility_margin: 0.14
+        }
+    }
+}
+
+transition_protocol PreserveCounterfactual for AlternativeOption<Counterfactual<i64>> under CounterfactualStepdown {
+    step baseline {
+        value: cf
+    }
+
+    step preserve_cf {
+        value: cf
+    }
+}
+
+fn observe_counterfactual(cf: Counterfactual<i64>) -> i64 {
+    let raw: i64 = 5
+    let c: Contest<Counterfactual<i64>, CounterfactualModels, CounterfactualPolicy> =
+        (contest [CFM] on raw) audit CounterfactualAudit
+    let deferred: Deferred<Counterfactual<i64>> = defer_action(cf, c, CounterfactualReview)
+    let set: AlternativeSet<Counterfactual<i64>> = propose_alternatives(cf, deferred, CounterfactualDeferredFrontier)
+    let opt: AlternativeOption<Counterfactual<i64>> = alternative_option(set, 0)
+    let plan: TransitionPlan<Counterfactual<i64>> = commit_alternative(cf, opt, PreserveCounterfactual)
+    let observed: ObservedTransition<Counterfactual<i64>> = observe_transition(cf, plan, CounterfactualMonitor)
+    0
+}
+
+fn main() -> i64 {
+    0
+}

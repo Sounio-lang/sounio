@@ -1402,3 +1402,614 @@ fn hlir_to_gpu_count_ops(m: GpuModuleOutput) -> i64 {
 fn hlir_to_gpu_sm_supports_fast_math(sm: i64) -> bool {
     sm >= 50
 }
+
+// ============================================================================
+// Section 24 — HLIR Module kernel extraction (Sprint 27)
+// ============================================================================
+
+// Count kernel functions in an HlirModule.
+fn hlir_extract_kernel_count(module: HlirModule) -> i64 {
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < module.function_count {
+        if module.functions[i as usize].is_kernel {
+            count = count + 1
+        }
+        i = i + 1
+    }
+    count
+}
+
+// Get the module-level index of the n-th kernel function (0-indexed).
+// Returns -1 if not found.
+fn hlir_get_kernel_index(module: HlirModule, kernel_idx: i64) -> i64 {
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < module.function_count {
+        if module.functions[i as usize].is_kernel {
+            if count == kernel_idx {
+                return i
+            }
+            count = count + 1
+        }
+        i = i + 1
+    }
+    0 - 1
+}
+
+// Map an HlirTypeKind to a GpuType for kernel parameter mapping.
+fn hlir_type_kind_to_gpu(kind: HlirTypeKind) -> GpuType {
+    if kind == HlirTypeKind::HlirTypeI32 { GpuType::GpuI32 }
+    else if kind == HlirTypeKind::HlirTypeI64 { GpuType::GpuI64 }
+    else if kind == HlirTypeKind::HlirTypeF32 { GpuType::GpuF32 }
+    else if kind == HlirTypeKind::HlirTypeF64 { GpuType::GpuF64 }
+    else if kind == HlirTypeKind::HlirTypeU32 { GpuType::GpuU32 }
+    else if kind == HlirTypeKind::HlirTypeU64 { GpuType::GpuU64 }
+    else if kind == HlirTypeKind::HlirTypeBool { GpuType::GpuBool }
+    else if kind == HlirTypeKind::HlirTypePtr { GpuType::GpuPtr }
+    else { GpuType::GpuI64 }
+}
+
+// Map a binary op tag (HlirOpAdd..HlirOpFGe) to a GpuOpcode.
+fn hlir_bin_op_to_gpu_opcode(bin_op: i64) -> GpuOpcode {
+    if bin_op == HlirOpAdd || bin_op == HlirOpFAdd { GpuOpcode::GpuAdd }
+    else if bin_op == HlirOpSub || bin_op == HlirOpFSub { GpuOpcode::GpuSub }
+    else if bin_op == HlirOpMul || bin_op == HlirOpFMul { GpuOpcode::GpuMul }
+    else if bin_op == HlirOpDiv || bin_op == HlirOpFDiv { GpuOpcode::GpuDiv }
+    else if bin_op == HlirOpLt || bin_op == HlirOpFLt { GpuOpcode::GpuSetpLt }
+    else if bin_op == HlirOpLe || bin_op == HlirOpFLe { GpuOpcode::GpuSetpLe }
+    else if bin_op == HlirOpGt || bin_op == HlirOpFGt { GpuOpcode::GpuSetpGt }
+    else if bin_op == HlirOpGe || bin_op == HlirOpFGe { GpuOpcode::GpuSetpGe }
+    else if bin_op == HlirOpEq || bin_op == HlirOpFEq { GpuOpcode::GpuSetpEq }
+    else if bin_op == HlirOpNe || bin_op == HlirOpFNe { GpuOpcode::GpuSetpNe }
+    else { GpuOpcode::GpuAdd }
+}
+
+// Map a binary op tag to a GpuType (float ops → f32, int ops → i32 default).
+fn hlir_bin_op_type(bin_op: i64) -> GpuType {
+    if bin_op >= HlirOpFAdd && bin_op <= HlirOpFGe { GpuType::GpuF32 }
+    else { GpuType::GpuI32 }
+}
+
+// Append a single GPU op to a GpuKernelIr. Returns the kernel with op appended.
+fn gpu_kernel_append_op(kernel: GpuKernelIr, op: GpuOp) -> GpuKernelIr with Mut {
+    var k = kernel
+    if k.op_count < 1024 {
+        k.ops[k.op_count as usize] = op
+        k.op_count = k.op_count + 1
+    }
+    k
+}
+
+// Lower a single HLIR instruction to GPU ops and append to kernel.
+fn hlir_instr_to_gpu_ops(kernel: GpuKernelIr, instr: HlirInstr) -> GpuKernelIr with Mut, Panic {
+    var k = kernel
+    let op_kind = instr.op_kind
+
+    if op_kind == HLIR_OP_BINARY {
+        var op = gpu_op_new()
+        op.opcode = hlir_bin_op_to_gpu_opcode(instr.bin_op)
+        op.dst_reg = instr.result
+        op.lhs_reg = instr.lhs
+        op.rhs_reg = instr.rhs
+        op.ty = hlir_bin_op_type(instr.bin_op)
+        k = gpu_kernel_append_op(k, op)
+    } else if op_kind == HLIR_OP_LOAD {
+        var op = gpu_op_new()
+        op.opcode = GpuOpcode::GpuLoadGlobal
+        op.dst_reg = instr.result
+        op.addr_reg = instr.src
+        op.ty = hlir_type_kind_to_gpu(instr.ty.kind)
+        op.memory_space = GpuMemorySpace::GpuMemGlobal
+        k = gpu_kernel_append_op(k, op)
+    } else if op_kind == HLIR_OP_STORE {
+        var op = gpu_op_new()
+        op.opcode = GpuOpcode::GpuStoreGlobal
+        op.addr_reg = instr.store_ptr
+        op.src_reg = instr.store_value
+        op.ty = hlir_type_kind_to_gpu(instr.ty.kind)
+        op.memory_space = GpuMemorySpace::GpuMemGlobal
+        k = gpu_kernel_append_op(k, op)
+    } else if op_kind == HLIR_OP_CONST {
+        // Emit constant as immediate load into a virtual register
+        var op = gpu_op_new()
+        op.opcode = GpuOpcode::GpuAddImm
+        op.dst_reg = instr.result
+        op.src_reg = 0
+        op.rhs_imm = instr.constant.int_val
+        op.ty = hlir_type_kind_to_gpu(instr.ty.kind)
+        k = gpu_kernel_append_op(k, op)
+    } else if op_kind == HLIR_OP_COPY {
+        // Copy maps to a mov (implemented as add with zero imm)
+        var op = gpu_op_new()
+        op.opcode = GpuOpcode::GpuAddImm
+        op.dst_reg = instr.result
+        op.src_reg = instr.src
+        op.rhs_imm = 0
+        op.ty = hlir_type_kind_to_gpu(instr.ty.kind)
+        k = gpu_kernel_append_op(k, op)
+    } else if op_kind == HLIR_OP_CAST {
+        // Type conversion
+        var op = gpu_op_new()
+        op.opcode = GpuOpcode::GpuCvt
+        op.dst_reg = instr.result
+        op.src_reg = instr.cast_value
+        op.dst_ty = hlir_type_kind_to_gpu(instr.cast_target.kind)
+        op.src_ty = hlir_type_kind_to_gpu(instr.cast_source.kind)
+        op.ty = hlir_type_kind_to_gpu(instr.cast_target.kind)
+        k = gpu_kernel_append_op(k, op)
+    } else if op_kind == HLIR_OP_ALLOCA {
+        // Stack allocations map to local memory — skip in MVP
+    } else if op_kind == HLIR_OP_PHI {
+        // PHI nodes resolved during register allocation — skip in MVP
+    } else if op_kind == HLIR_OP_UNARY {
+        // Unary ops — map negation to sub from zero
+        var op = gpu_op_new()
+        op.opcode = GpuOpcode::GpuSub
+        op.dst_reg = instr.result
+        op.lhs_reg = 0
+        op.rhs_reg = instr.src
+        op.ty = hlir_type_kind_to_gpu(instr.ty.kind)
+        k = gpu_kernel_append_op(k, op)
+    } else if op_kind == HLIR_OP_CALL_DIRECT {
+        // Check if it's a GPU intrinsic by name
+        // gpu_thread_id_x → GpuGetTid axis=0
+        // gpu_block_id_x  → GpuGetBid axis=0
+        // gpu_block_dim_x → GpuGetNtid axis=0
+        var op = gpu_op_new()
+        let cn = instr.call_name
+        // Match against known GPU builtins (name-based dispatch)
+        if hlir_name_starts_with_gpu_thread(cn) {
+            op.opcode = GpuOpcode::GpuGetTid
+            op.dst_reg = instr.result
+            op.axis = 0
+            op.ty = GpuType::GpuU32
+            k = gpu_kernel_append_op(k, op)
+        } else if hlir_name_starts_with_gpu_block_id(cn) {
+            op.opcode = GpuOpcode::GpuGetBid
+            op.dst_reg = instr.result
+            op.axis = 0
+            op.ty = GpuType::GpuU32
+            k = gpu_kernel_append_op(k, op)
+        } else if hlir_name_starts_with_gpu_block_dim(cn) {
+            op.opcode = GpuOpcode::GpuGetNtid
+            op.dst_reg = instr.result
+            op.axis = 0
+            op.ty = GpuType::GpuU32
+            k = gpu_kernel_append_op(k, op)
+        }
+        // Other calls: skip in MVP
+    }
+    // Unhandled ops silently skipped in MVP bridge
+
+    k
+}
+
+// Check if an HlirName starts with "gpu_thread_id" (13 chars).
+fn hlir_name_starts_with_gpu_thread(n: HlirName) -> bool {
+    if n.len < 13 { return false }
+    // "gpu_thread_id" = g(103) p(112) u(117) _(95) t(116) h(104) r(114) e(101) a(97) d(100) _(95) i(105) d(100)
+    n.buf[0] == 103 as i8 && n.buf[1] == 112 as i8 && n.buf[2] == 117 as i8 && n.buf[3] == 95 as i8 &&
+    n.buf[4] == 116 as i8 && n.buf[5] == 104 as i8 && n.buf[6] == 114 as i8 && n.buf[7] == 101 as i8 &&
+    n.buf[8] == 97 as i8 && n.buf[9] == 100 as i8 && n.buf[10] == 95 as i8 && n.buf[11] == 105 as i8 &&
+    n.buf[12] == 100 as i8
+}
+
+// Check if an HlirName starts with "gpu_block_id" (12 chars).
+fn hlir_name_starts_with_gpu_block_id(n: HlirName) -> bool {
+    if n.len < 12 { return false }
+    // "gpu_block_id" = g(103) p(112) u(117) _(95) b(98) l(108) o(111) c(99) k(107) _(95) i(105) d(100)
+    n.buf[0] == 103 as i8 && n.buf[1] == 112 as i8 && n.buf[2] == 117 as i8 && n.buf[3] == 95 as i8 &&
+    n.buf[4] == 98 as i8 && n.buf[5] == 108 as i8 && n.buf[6] == 111 as i8 && n.buf[7] == 99 as i8 &&
+    n.buf[8] == 107 as i8 && n.buf[9] == 95 as i8 && n.buf[10] == 105 as i8 && n.buf[11] == 100 as i8
+}
+
+// Check if an HlirName starts with "gpu_block_dim" (13 chars).
+fn hlir_name_starts_with_gpu_block_dim(n: HlirName) -> bool {
+    if n.len < 13 { return false }
+    // "gpu_block_dim" = g(103) p(112) u(117) _(95) b(98) l(108) o(111) c(99) k(107) _(95) d(100) i(105) m(109)
+    n.buf[0] == 103 as i8 && n.buf[1] == 112 as i8 && n.buf[2] == 117 as i8 && n.buf[3] == 95 as i8 &&
+    n.buf[4] == 98 as i8 && n.buf[5] == 108 as i8 && n.buf[6] == 111 as i8 && n.buf[7] == 99 as i8 &&
+    n.buf[8] == 107 as i8 && n.buf[9] == 95 as i8 && n.buf[10] == 100 as i8 && n.buf[11] == 105 as i8 &&
+    n.buf[12] == 109 as i8
+}
+
+// Convert HlirName → Name (structurally identical, different types).
+fn hlir_name_to_name(hn: HlirName) -> Name {
+    Name { buf: hn.buf, len: hn.len }
+}
+
+// Build a GpuKernelIr from an HlirFunction marked as kernel.
+// MVP: handles basic blocks with arithmetic, loads, stores, comparisons, GPU intrinsics.
+fn hlir_function_to_gpu_kernel(func: HlirFunction) -> GpuKernelIr with Mut, Panic, Div {
+    var kernel = gpu_kernel_new()
+
+    // Copy kernel name
+    kernel.kernel_name = hlir_name_to_name(func.name)
+
+    // Map HLIR params → GPU params
+    var pi: i64 = 0
+    while pi < func.param_count {
+        if pi < 8 {
+            let p = func.params[pi as usize]
+            kernel.params[pi as usize] = GpuParam {
+                name: hlir_name_to_name(p.name),
+                ty: hlir_type_kind_to_gpu(p.ty.kind),
+            }
+            kernel.param_count = kernel.param_count + 1
+        }
+        pi = pi + 1
+    }
+
+    // Walk all basic blocks and lower instructions + terminators
+    var bi: i64 = 0
+    while bi < func.block_count {
+        let block = func.blocks[bi as usize]
+
+        // Lower instructions in this block
+        var ii: i64 = 0
+        while ii < block.instr_count {
+            kernel = hlir_instr_to_gpu_ops(kernel, block.instrs[ii as usize])
+            ii = ii + 1
+        }
+
+        // Lower block terminator
+        let term = block.terminator
+        if term.kind == HLIR_TERM_RETURN {
+            var ret_op = gpu_op_new()
+            ret_op.opcode = GpuOpcode::GpuRet
+            kernel = gpu_kernel_append_op(kernel, ret_op)
+        } else if term.kind == HLIR_TERM_BRANCH {
+            var bra_op = gpu_op_new()
+            bra_op.opcode = GpuOpcode::GpuBra
+            bra_op.rhs_imm = term.branch_target
+            bra_op.pred_reg = 0 - 1
+            kernel = gpu_kernel_append_op(kernel, bra_op)
+        } else if term.kind == HLIR_TERM_COND_BRANCH {
+            // Conditional branch: setp on condition, then predicated branch
+            var setp_op = gpu_op_new()
+            setp_op.opcode = GpuOpcode::GpuSetpNe
+            setp_op.dst_reg = 0
+            setp_op.lhs_reg = term.cond_value
+            setp_op.rhs_imm = 0
+            setp_op.ty = GpuType::GpuI32
+            kernel = gpu_kernel_append_op(kernel, setp_op)
+
+            var bra_then = gpu_op_new()
+            bra_then.opcode = GpuOpcode::GpuBra
+            bra_then.rhs_imm = term.then_block
+            bra_then.pred_reg = 0
+            kernel = gpu_kernel_append_op(kernel, bra_then)
+
+            var bra_else = gpu_op_new()
+            bra_else.opcode = GpuOpcode::GpuBra
+            bra_else.rhs_imm = term.else_block
+            bra_else.pred_reg = 0 - 1
+            kernel = gpu_kernel_append_op(kernel, bra_else)
+        }
+        // UNREACHABLE/SWITCH: skip in MVP
+
+        bi = bi + 1
+    }
+
+    // If no explicit return was emitted, append one
+    if kernel.op_count == 0 || kernel.ops[(kernel.op_count - 1) as usize].opcode != GpuOpcode::GpuRet {
+        var ret_op = gpu_op_new()
+        ret_op.opcode = GpuOpcode::GpuRet
+        kernel = gpu_kernel_append_op(kernel, ret_op)
+    }
+
+    kernel
+}
+
+// ============================================================================
+// Section 25 — Epistemic kernel shadow register emission (Sprint 28)
+//
+// No prior art: Sounio is the first language to propagate epistemic uncertainty
+// through GPU kernels at the type level. Each arithmetic op on Knowledge<T>
+// values gets a companion shadow op that propagates uncertainty using
+// quadrature rules: eps_c = sqrt(eps_a^2 + eps_b^2) for addition,
+// eps_c = |a|*eps_b + |b|*eps_a for multiplication.
+// ============================================================================
+
+// Emit shadow uncertainty propagation ops for a binary arithmetic GpuOp.
+// Returns the kernel with shadow ops appended.
+// Shadow registers use ids starting at offset 512 (above normal regs).
+fn gpu_emit_epistemic_shadow_binary(
+    kernel: GpuKernelIr,
+    op: GpuOp,
+    shadow_offset: i64
+) -> GpuKernelIr with Mut, Panic {
+    var k = kernel
+    let eps_dst = op.dst_reg + shadow_offset
+    let eps_lhs = op.lhs_reg + shadow_offset
+    let eps_rhs = op.rhs_reg + shadow_offset
+
+    if op.opcode == GpuOpcode::GpuAdd || op.opcode == GpuOpcode::GpuSub {
+        // eps_c = sqrt(eps_a^2 + eps_b^2)  [quadrature addition]
+        // Step 1: tmp1 = eps_lhs * eps_lhs
+        var sq_lhs = gpu_op_new()
+        sq_lhs.opcode = GpuOpcode::GpuMul
+        sq_lhs.dst_reg = eps_dst + 1000
+        sq_lhs.lhs_reg = eps_lhs
+        sq_lhs.rhs_reg = eps_lhs
+        sq_lhs.ty = GpuType::GpuF64
+        k = gpu_kernel_append_op(k, sq_lhs)
+
+        // Step 2: tmp2 = eps_rhs * eps_rhs
+        var sq_rhs = gpu_op_new()
+        sq_rhs.opcode = GpuOpcode::GpuMul
+        sq_rhs.dst_reg = eps_dst + 1001
+        sq_rhs.lhs_reg = eps_rhs
+        sq_rhs.rhs_reg = eps_rhs
+        sq_rhs.ty = GpuType::GpuF64
+        k = gpu_kernel_append_op(k, sq_rhs)
+
+        // Step 3: tmp3 = tmp1 + tmp2
+        var add_sq = gpu_op_new()
+        add_sq.opcode = GpuOpcode::GpuAdd
+        add_sq.dst_reg = eps_dst + 1002
+        add_sq.lhs_reg = eps_dst + 1000
+        add_sq.rhs_reg = eps_dst + 1001
+        add_sq.ty = GpuType::GpuF64
+        k = gpu_kernel_append_op(k, add_sq)
+
+        // Step 4: eps_dst = sqrt(tmp3)
+        var sqrt_op = gpu_op_new()
+        sqrt_op.opcode = GpuOpcode::GpuSqrt
+        sqrt_op.dst_reg = eps_dst
+        sqrt_op.src_reg = eps_dst + 1002
+        sqrt_op.ty = GpuType::GpuF64
+        k = gpu_kernel_append_op(k, sqrt_op)
+    } else if op.opcode == GpuOpcode::GpuMul {
+        // eps_c = |a|*eps_b + |b|*eps_a  [first-order product rule]
+        // Step 1: tmp1 = abs(lhs) * eps_rhs
+        var abs_lhs = gpu_op_new()
+        abs_lhs.opcode = GpuOpcode::GpuAbs
+        abs_lhs.dst_reg = eps_dst + 1000
+        abs_lhs.src_reg = op.lhs_reg
+        abs_lhs.ty = GpuType::GpuF64
+        k = gpu_kernel_append_op(k, abs_lhs)
+
+        var mul1 = gpu_op_new()
+        mul1.opcode = GpuOpcode::GpuMul
+        mul1.dst_reg = eps_dst + 1001
+        mul1.lhs_reg = eps_dst + 1000
+        mul1.rhs_reg = eps_rhs
+        mul1.ty = GpuType::GpuF64
+        k = gpu_kernel_append_op(k, mul1)
+
+        // Step 2: tmp2 = abs(rhs) * eps_lhs
+        var abs_rhs = gpu_op_new()
+        abs_rhs.opcode = GpuOpcode::GpuAbs
+        abs_rhs.dst_reg = eps_dst + 1002
+        abs_rhs.src_reg = op.rhs_reg
+        abs_rhs.ty = GpuType::GpuF64
+        k = gpu_kernel_append_op(k, abs_rhs)
+
+        var mul2 = gpu_op_new()
+        mul2.opcode = GpuOpcode::GpuMul
+        mul2.dst_reg = eps_dst + 1003
+        mul2.lhs_reg = eps_dst + 1002
+        mul2.rhs_reg = eps_lhs
+        mul2.ty = GpuType::GpuF64
+        k = gpu_kernel_append_op(k, mul2)
+
+        // Step 3: eps_dst = tmp1 + tmp2
+        var add_eps = gpu_op_new()
+        add_eps.opcode = GpuOpcode::GpuAdd
+        add_eps.dst_reg = eps_dst
+        add_eps.lhs_reg = eps_dst + 1001
+        add_eps.rhs_reg = eps_dst + 1003
+        add_eps.ty = GpuType::GpuF64
+        k = gpu_kernel_append_op(k, add_eps)
+    } else if op.opcode == GpuOpcode::GpuDiv {
+        // eps_c = eps_a / |b|  [first-order quotient, simplified]
+        var abs_rhs = gpu_op_new()
+        abs_rhs.opcode = GpuOpcode::GpuAbs
+        abs_rhs.dst_reg = eps_dst + 1000
+        abs_rhs.src_reg = op.rhs_reg
+        abs_rhs.ty = GpuType::GpuF64
+        k = gpu_kernel_append_op(k, abs_rhs)
+
+        var div_eps = gpu_op_new()
+        div_eps.opcode = GpuOpcode::GpuDiv
+        div_eps.dst_reg = eps_dst
+        div_eps.lhs_reg = eps_lhs
+        div_eps.rhs_reg = eps_dst + 1000
+        div_eps.ty = GpuType::GpuF64
+        k = gpu_kernel_append_op(k, div_eps)
+    }
+    // Other ops: shadow passthrough (eps_dst = max(eps_lhs, eps_rhs))
+
+    k
+}
+
+// Lower an HlirFunction to GpuKernelIr with epistemic shadow registers.
+// Each parameter gets a shadow uncertainty register; each arithmetic op
+// gets companion uncertainty propagation ops.
+fn hlir_function_to_epistemic_gpu_kernel(func: HlirFunction) -> GpuKernelIr with Mut, Panic, Div {
+    var kernel = hlir_function_to_gpu_kernel(func)
+
+    // Shadow register offset: shadow for reg R is at R + 512
+    let shadow_offset: i64 = 512
+
+    // Walk ops and insert shadow propagation for arithmetic ops
+    // We work on a copy to avoid in-place insertion complexity
+    var src_ops: [GpuOp; 1024] = kernel.ops
+    let src_count = kernel.op_count
+
+    // Reset kernel ops and rebuild with interleaved shadow ops
+    kernel.op_count = 0
+    var oi: i64 = 0
+    while oi < src_count {
+        let op = src_ops[oi as usize]
+        // Append original op
+        kernel = gpu_kernel_append_op(kernel, op)
+
+        // If it's an arithmetic binary op, also emit shadow propagation
+        if op.opcode == GpuOpcode::GpuAdd || op.opcode == GpuOpcode::GpuSub ||
+           op.opcode == GpuOpcode::GpuMul || op.opcode == GpuOpcode::GpuDiv {
+            kernel = gpu_emit_epistemic_shadow_binary(kernel, op, shadow_offset)
+        }
+
+        oi = oi + 1
+    }
+
+    kernel
+}
+
+// ============================================================================
+// Section 26 — End-to-end pipeline orchestrators (Sprint 28)
+// ============================================================================
+
+// Extract all kernel functions from an HlirModule, lower each to GpuKernelIr,
+// then lower each to PTX and concatenate into a single PtxBuf.
+fn hlir_kernels_to_ptx(module: HlirModule) -> PtxBuf with Mut, Panic, Div, Alloc {
+    var combined = ptx_buf_new()
+    let kcount = hlir_extract_kernel_count(module)
+    if kcount == 0 {
+        return combined
+    }
+    var ki: i64 = 0
+    while ki < kcount {
+        let fidx = hlir_get_kernel_index(module, ki)
+        if fidx >= 0 {
+            let func = module.functions[fidx as usize]
+            let gpu_kernel = hlir_function_to_gpu_kernel(func)
+            let ptx = gpu_lower_to_ptx(gpu_kernel)
+            combined = ptx_buf_append(combined, ptx)
+        }
+        ki = ki + 1
+    }
+    combined
+}
+
+// Extract all kernel functions, apply auto-tuning, then lower to PTX.
+// Auto-tuning detects workload patterns and sets optimal CTA dimensions.
+fn hlir_kernels_to_tuned_ptx(module: HlirModule) -> PtxBuf with Mut, Panic, Div, Alloc {
+    var combined = ptx_buf_new()
+    let kcount = hlir_extract_kernel_count(module)
+    if kcount == 0 {
+        return combined
+    }
+    let cfg = gpu_autotune_config_default()
+    var ki: i64 = 0
+    while ki < kcount {
+        let fidx = hlir_get_kernel_index(module, ki)
+        if fidx >= 0 {
+            let func = module.functions[fidx as usize]
+            var gpu_kernel = hlir_function_to_gpu_kernel(func)
+            // Apply auto-tuning: analyze workload pattern, set block shape
+            let tuned = gpu_autotune_tune_kernel(gpu_kernel, cfg)
+            let threads = gpu_block_shape_total_threads(tuned.block_shape)
+            if threads > 0 {
+                gpu_kernel.max_threads = threads
+            }
+            if tuned.shared_mem_bytes > gpu_kernel.shared_mem_bytes {
+                gpu_kernel.shared_mem_bytes = tuned.shared_mem_bytes
+            }
+            let ptx = gpu_lower_to_ptx(gpu_kernel)
+            combined = ptx_buf_append(combined, ptx)
+        }
+        ki = ki + 1
+    }
+    combined
+}
+
+// Extract all kernel functions, attempt pairwise fusion, then lower to PTX.
+// Kernel fusion merges compatible adjacent kernels to reduce launch overhead.
+fn hlir_kernels_to_fused_ptx(module: HlirModule) -> PtxBuf with Mut, Panic, Div, Alloc {
+    var combined = ptx_buf_new()
+    let kcount = hlir_extract_kernel_count(module)
+    if kcount == 0 {
+        return combined
+    }
+    // Extract all kernels into array
+    var kernels: [GpuKernelIr; 32] = [gpu_kernel_new(); 32]
+    var actual: i64 = 0
+    var ki: i64 = 0
+    while ki < kcount && ki < 32 {
+        let fidx = hlir_get_kernel_index(module, ki)
+        if fidx >= 0 {
+            let func = module.functions[fidx as usize]
+            kernels[actual as usize] = hlir_function_to_gpu_kernel(func)
+            actual = actual + 1
+        }
+        ki = ki + 1
+    }
+
+    // Attempt pairwise fusion (greedy)
+    var fused_kernels: [GpuKernelIr; 32] = [gpu_kernel_new(); 32]
+    var fused_count: i64 = 0
+    var fi: i64 = 0
+    while fi < actual {
+        if fi + 1 < actual {
+            let pair = gpu_fuse_pair(kernels[fi as usize], kernels[(fi + 1) as usize])
+            if pair.1 {
+                // Fusion succeeded
+                fused_kernels[fused_count as usize] = pair.0
+                fused_count = fused_count + 1
+                fi = fi + 2
+            } else {
+                // Keep original
+                fused_kernels[fused_count as usize] = kernels[fi as usize]
+                fused_count = fused_count + 1
+                fi = fi + 1
+            }
+        } else {
+            fused_kernels[fused_count as usize] = kernels[fi as usize]
+            fused_count = fused_count + 1
+            fi = fi + 1
+        }
+    }
+
+    // Lower all (fused + unfused) kernels to PTX
+    var pi: i64 = 0
+    while pi < fused_count {
+        let ptx = gpu_lower_to_ptx(fused_kernels[pi as usize])
+        combined = ptx_buf_append(combined, ptx)
+        pi = pi + 1
+    }
+    combined
+}
+
+// Extract all kernel functions with epistemic shadow registers, then lower to PTX.
+// Each kernel gets companion uncertainty propagation ops for arithmetic operations.
+fn hlir_kernels_to_epistemic_ptx(module: HlirModule) -> PtxBuf with Mut, Panic, Div, Alloc {
+    var combined = ptx_buf_new()
+    let kcount = hlir_extract_kernel_count(module)
+    if kcount == 0 {
+        return combined
+    }
+    var ki: i64 = 0
+    while ki < kcount {
+        let fidx = hlir_get_kernel_index(module, ki)
+        if fidx >= 0 {
+            let func = module.functions[fidx as usize]
+            let gpu_kernel = hlir_function_to_epistemic_gpu_kernel(func)
+            let ptx = gpu_lower_to_ptx(gpu_kernel)
+            combined = ptx_buf_append(combined, ptx)
+        }
+        ki = ki + 1
+    }
+    combined
+}
+
+// Extract all kernel functions and lower to Metal MSL.
+fn hlir_kernels_to_metal(module: HlirModule) -> MetalBuf with Mut, Panic, Div, Alloc {
+    var combined = metal_buf_new()
+    let kcount = hlir_extract_kernel_count(module)
+    var ki: i64 = 0
+    while ki < kcount {
+        let fidx = hlir_get_kernel_index(module, ki)
+        if fidx >= 0 {
+            let func = module.functions[fidx as usize]
+            let gpu_kernel = hlir_function_to_gpu_kernel(func)
+            let metal = gpu_lower_to_metal(gpu_kernel)
+            combined = metal_buf_append(combined, metal)
+        }
+        ki = ki + 1
+    }
+    combined
+}

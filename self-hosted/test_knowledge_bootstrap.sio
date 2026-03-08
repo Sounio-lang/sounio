@@ -285,6 +285,48 @@ fn kb_transition_plan_type_expr(inner: TypeExpr) -> TypeExpr with Alloc {
     }
 }
 
+fn kb_monitoring_policy_type_expr(inner: TypeExpr) -> TypeExpr with Alloc {
+    TypeExpr {
+        kind: TypeExprKind::TypeMonitoringPolicy,
+        span: Span::dummy(),
+        path: kb_empty_path(),
+        type_args: Some(Box::new(TypeExprList { head: inner, tail: None })),
+        inner: None,
+        array_size: None,
+        effects: None,
+        knowledge_info: None,
+        refinement_info: None,
+    }
+}
+
+fn kb_observed_transition_type_expr(inner: TypeExpr) -> TypeExpr with Alloc {
+    TypeExpr {
+        kind: TypeExprKind::TypeObservedTransition,
+        span: Span::dummy(),
+        path: kb_empty_path(),
+        type_args: Some(Box::new(TypeExprList { head: inner, tail: None })),
+        inner: None,
+        array_size: None,
+        effects: None,
+        knowledge_info: None,
+        refinement_info: None,
+    }
+}
+
+fn kb_rollback_certificate_type_expr(inner: TypeExpr) -> TypeExpr with Alloc {
+    TypeExpr {
+        kind: TypeExprKind::TypeRollbackCertificate,
+        span: Span::dummy(),
+        path: kb_empty_path(),
+        type_args: Some(Box::new(TypeExprList { head: inner, tail: None })),
+        inner: None,
+        array_size: None,
+        effects: None,
+        knowledge_info: None,
+        refinement_info: None,
+    }
+}
+
 fn kb_robust_type_expr(inner: TypeExpr) -> TypeExpr with Alloc {
     TypeExpr {
         kind: TypeExprKind::TypeRobust,
@@ -660,27 +702,18 @@ fn kb_call_expr1(callee_name: Name, arg0: Expr) -> Expr with Alloc, Mut, Panic, 
     }
 }
 
-fn kb_transition_residual_tail_risk_name() -> Name with Mut, Panic, Div {
-    kb_name_from_str("residual_tail_risk")
+fn kb_transition_max_tail_risk_name() -> Name with Mut, Panic, Div {
+    kb_name_from_str("max_tail_risk")
 }
 
 fn kb_seed_transition_policy(checker: Checker, name: Name, op: CompareOp, threshold: f64, max_steps: i64) -> Checker with Mut, Panic, Div, Alloc {
     var c = checker
-    let req = PolicyRequirementInfo {
-        metric_id: TRANSITION_METRIC_RESIDUAL_TAIL_RISK,
-        metric_name: kb_transition_residual_tail_risk_name(),
-        op: op,
-        threshold: threshold,
-        threshold_kind: POLICY_THRESHOLD_F64,
-        bool_threshold: false,
-        name_threshold: kb_make_name(0, 0, 0, 0),
-    }
     let info = TransitionPolicyInfo {
         name: name,
         target_ty: ty_i64(),
         route_name: kb_name_from_str("outpatient_review"),
-        requirements: Some(Box::new(PolicyRequirementInfoList { head: req, tail: None })),
-        requirement_count: 1,
+        requirements: None,
+        requirement_count: 0,
         max_steps: max_steps,
         rollback_route_name: kb_name_from_str("rollback_review"),
     }
@@ -728,15 +761,6 @@ fn kb_seed_transition_protocol(checker: Checker, name: Name, option_id: i64, pol
     let add0 = c.transition_steps.add(step0)
     c.transition_steps = add0.0
 
-    let req = PolicyRequirementInfo {
-        metric_id: TRANSITION_METRIC_RESIDUAL_TAIL_RISK,
-        metric_name: kb_transition_residual_tail_risk_name(),
-        op: CompareOp::CmpLe,
-        threshold: 0.05,
-        threshold_kind: POLICY_THRESHOLD_F64,
-        bool_threshold: false,
-        name_threshold: kb_make_name(0, 0, 0, 0),
-    }
     let step1 = TransitionStepInfo {
         span_start: 0,
         span_end: 0,
@@ -744,8 +768,8 @@ fn kb_seed_transition_protocol(checker: Checker, name: Name, option_id: i64, pol
         name: kb_name_from_str("reduce_once"),
         value_expr: kb_int_expr(final_value),
         value_repr: kb_name_from_str("literal"),
-        requirements: Some(Box::new(PolicyRequirementInfoList { head: req, tail: None })),
-        requirement_count: 1,
+        requirements: None,
+        requirement_count: 0,
     }
     let add1 = c.transition_steps.add(step1)
     c.transition_steps = add1.0
@@ -766,6 +790,37 @@ fn kb_seed_transition_protocol(checker: Checker, name: Name, option_id: i64, pol
     s1.protocol_id = addp.1
     c.transition_steps.entries[add1.1 as usize] = s1
     c.env = c.env.bind(name, ty_unknown(), false)
+    c
+}
+
+fn kb_seed_monitoring_policy(checker: Checker, name: Name, metric_id: i64, op: CompareOp, threshold: f64) -> Checker with Mut, Panic, Div, Alloc {
+    var c = checker
+    let req = PolicyRequirementInfo {
+        metric_id: metric_id,
+        metric_name: kb_name_from_str("metric"),
+        op: op,
+        threshold: threshold,
+        threshold_kind: POLICY_THRESHOLD_F64,
+        bool_threshold: false,
+        name_threshold: empty_name(),
+    }
+    let requirements = if metric_id >= 0 {
+        Some(Box::new(PolicyRequirementInfoList { head: req, tail: None }))
+    } else {
+        None
+    }
+    let requirement_count = if metric_id >= 0 { 1 } else { 0 }
+    let info = MonitoringPolicyInfo {
+        name: name,
+        target_ty: ty_i64(),
+        route_name: kb_name_from_str("observe_review"),
+        requirements: requirements,
+        requirement_count: requirement_count,
+        rollback_route_name: kb_name_from_str("rollback_review"),
+    }
+    let add_result = c.monitoring_policies.add(info)
+    c.monitoring_policies = add_result.0
+    c.env = c.env.bind(name, ty_monitoring_policy(ty_i64(), add_result.1), false)
     c
 }
 
@@ -1600,6 +1655,91 @@ fn kb_test_transition_reason_records_witness_and_ir() -> bool with Mut, Panic, D
     ok
 }
 
+fn kb_test_check_monitoring_policy_type() -> bool with Mut, Panic, Div, Alloc, IO {
+    let te = kb_monitoring_policy_type_expr(kb_named_type3(105, 54, 52))
+    let pair = checker_new().lower_type_expr(te)
+    let ty = pair.1
+    ty.kind == TypeKind::TyMonitoringPolicy && knowledge_inner(ty).kind == TypeKind::TyI64
+}
+
+fn kb_test_check_observed_transition_type() -> bool with Mut, Panic, Div, Alloc, IO {
+    let te = kb_observed_transition_type_expr(kb_named_type3(105, 54, 52))
+    let pair = checker_new().lower_type_expr(te)
+    let ty = pair.1
+    ty.kind == TypeKind::TyObservedTransition && knowledge_inner(ty).kind == TypeKind::TyI64
+}
+
+fn kb_test_check_rollback_certificate_type() -> bool with Mut, Panic, Div, Alloc, IO {
+    let te = kb_rollback_certificate_type_expr(kb_named_type3(105, 54, 52))
+    let pair = checker_new().lower_type_expr(te)
+    let ty = pair.1
+    ty.kind == TypeKind::TyRollbackCertificate && knowledge_inner(ty).kind == TypeKind::TyI64
+}
+
+fn kb_test_observe_transition_records_metadata_and_ir() -> bool with Mut, Panic, Div, Alloc, IO {
+    let option_name = kb_name_from_str("opt")
+    let transition_policy_name = kb_name_from_str("tp")
+    let protocol_name = kb_name_from_str("proto")
+    let monitoring_name = kb_name_from_str("mp")
+    let commit_name = kb_name_from_str("commit_alternative")
+    let observe_name = kb_name_from_str("observe_transition")
+    var checker = checker_new()
+    checker = kb_seed_transition_policy(checker, transition_policy_name, CompareOp::CmpLe, 0.05, 2)
+    checker = kb_seed_alternative_option(checker, option_name, 45, 0.04)
+    let transition_ty = checker.env.lookup(transition_policy_name)
+    let option_ty = checker.env.lookup(option_name)
+    checker = kb_seed_transition_protocol(checker, protocol_name, option_ty.epistemic_meta_id, transition_ty.epistemic_meta_id, 45)
+    checker = kb_seed_monitoring_policy(checker, monitoring_name, -1, CompareOp::CmpLe, 0.0)
+    let plan_expr = kb_call_expr3(commit_name, kb_int_expr(50), kb_ident_expr(option_name), kb_ident_expr(protocol_name))
+    let pair = checker.check_expr(kb_call_expr3(observe_name, kb_int_expr(50), plan_expr, kb_ident_expr(monitoring_name)))
+    let checked = pair.0
+    let ty = pair.1
+    if checked.error_count > 0
+        || ty.kind != TypeKind::TyObservedTransition
+        || checked.observed_transitions.count != 1 {
+        return false
+    }
+    var ep = ir_empty_epistemic_section()
+    checker_to_ir_epistemic_into(&checked, &!ep)
+    let ok = ep.monitoring_policy_count == 1 &&
+        ep.transition_plan_count == 1 &&
+        ep.observed_transition_count == 1 &&
+        ep.observed_transitions[0].monitoring_policy_id == 0
+    ok
+}
+
+fn kb_test_rollback_transition_records_metadata_and_ir() -> bool with Mut, Panic, Div, Alloc, IO {
+    let option_name = kb_name_from_str("opt")
+    let transition_policy_name = kb_name_from_str("tp")
+    let protocol_name = kb_name_from_str("proto")
+    let monitoring_name = kb_name_from_str("mp")
+    let commit_name = kb_name_from_str("commit_alternative")
+    let rollback_name = kb_name_from_str("rollback_transition")
+    var checker = checker_new()
+    checker = kb_seed_transition_policy(checker, transition_policy_name, CompareOp::CmpLe, 0.05, 2)
+    checker = kb_seed_alternative_option(checker, option_name, 45, 0.04)
+    let transition_ty = checker.env.lookup(transition_policy_name)
+    let option_ty = checker.env.lookup(option_name)
+    checker = kb_seed_transition_protocol(checker, protocol_name, option_ty.epistemic_meta_id, transition_ty.epistemic_meta_id, 45)
+    checker = kb_seed_monitoring_policy(checker, monitoring_name, TRANSITION_METRIC_MECHANISTIC_DIVERGENCE, CompareOp::CmpLe, 0.05)
+    let plan_expr = kb_call_expr3(commit_name, kb_int_expr(50), kb_ident_expr(option_name), kb_ident_expr(protocol_name))
+    let pair = checker.check_expr(kb_call_expr3(rollback_name, kb_int_expr(50), plan_expr, kb_ident_expr(monitoring_name)))
+    let checked = pair.0
+    let ty = pair.1
+    if checked.error_count > 0
+        || ty.kind != TypeKind::TyRollbackCertificate
+        || checked.rollback_certificates.count != 1 {
+        return false
+    }
+    var ep = ir_empty_epistemic_section()
+    checker_to_ir_epistemic_into(&checked, &!ep)
+    let ok = ep.monitoring_policy_count == 1 &&
+        ep.transition_plan_count == 1 &&
+        ep.rollback_certificate_count == 1 &&
+        ep.rollback_certificates[0].monitoring_policy_id == 0
+    ok
+}
+
 fn run_knowledge_bootstrap_tests() -> i32 with IO, Mut, Div, Panic, Alloc {
     var passed: i64 = 0
     var total: i64 = 0
@@ -1719,6 +1859,21 @@ fn run_knowledge_bootstrap_tests() -> i32 with IO, Mut, Div, Panic, Alloc {
 
     total = total + 1
     if kb_test_transition_reason_records_witness_and_ir() { passed = passed + 1; print("  B38 OK: transition_reason records witness metadata and exports IR artifacts\n") } else { print("  FAIL: B38 transition_reason records witness metadata and exports IR artifacts\n") }
+
+    total = total + 1
+    if kb_test_check_monitoring_policy_type() { passed = passed + 1; print("  B39 OK: lower MonitoringPolicy<T>\n") } else { print("  FAIL: B39 lower MonitoringPolicy<T>\n") }
+
+    total = total + 1
+    if kb_test_check_observed_transition_type() { passed = passed + 1; print("  B40 OK: lower ObservedTransition<T>\n") } else { print("  FAIL: B40 lower ObservedTransition<T>\n") }
+
+    total = total + 1
+    if kb_test_check_rollback_certificate_type() { passed = passed + 1; print("  B41 OK: lower RollbackCertificate<T>\n") } else { print("  FAIL: B41 lower RollbackCertificate<T>\n") }
+
+    total = total + 1
+    if kb_test_observe_transition_records_metadata_and_ir() { passed = passed + 1; print("  B42 OK: observe_transition records metadata and exports IR artifacts\n") } else { print("  FAIL: B42 observe_transition records metadata and exports IR artifacts\n") }
+
+    total = total + 1
+    if kb_test_rollback_transition_records_metadata_and_ir() { passed = passed + 1; print("  B43 OK: rollback_transition records metadata and exports IR artifacts\n") } else { print("  FAIL: B43 rollback_transition records metadata and exports IR artifacts\n") }
 
     print("\nKnowledge bootstrap tests: ")
     print_int(passed)

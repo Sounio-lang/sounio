@@ -476,6 +476,70 @@ fn main_read_env(key: string) -> string with IO, Mut, Div, Panic {
 }
 
 // ============================================================================
+// GPU-EMIT PIPELINE (--gpu-emit mode) — Sprint 28
+// ============================================================================
+
+fn run_gpu_emit_pipeline(path: string, target: string, use_autotune: bool, use_fusion: bool, use_epistemic: bool) -> i32 with IO, Mut, Div, Panic, Alloc {
+    let state = read_source_file(path)
+    let prog = parse_program_preloaded(state.token_count)
+    if fail_if_parse_errors() {
+        return 1
+    }
+
+    // Resolve
+    let resolve_result = resolve_program(prog)
+    if resolve_result.had_error {
+        print("Resolve errors: ")
+        print_int(resolve_result.error_count)
+        print("\n")
+        return 1
+    }
+
+    // Check
+    let check_result = check_program(prog)
+    if check_result.had_error {
+        print("Check errors: ")
+        print_int(check_result.error_count)
+        print("\n")
+        return 1
+    }
+
+    // Lower AST to HLIR SSA
+    let hlir_module = hlir_lower_module(prog)
+
+    // Count kernels
+    let kcount = hlir_extract_kernel_count(hlir_module)
+    if kcount == 0 {
+        print("No kernel functions found in ")
+        print(path)
+        print("\n")
+        return 1
+    }
+
+    // Emit PTX (default) or Metal
+    if str_eq(target, "metal") {
+        let metal = hlir_kernels_to_metal(hlir_module)
+        metal_buf_print(metal)
+    } else if use_epistemic {
+        let ptx = hlir_kernels_to_epistemic_ptx(hlir_module)
+        ptx_buf_print(ptx)
+    } else if use_fusion {
+        let ptx = hlir_kernels_to_fused_ptx(hlir_module)
+        ptx_buf_print(ptx)
+    } else if use_autotune {
+        let ptx = hlir_kernels_to_tuned_ptx(hlir_module)
+        ptx_buf_print(ptx)
+    } else {
+        // Default: PTX without optimization
+        let ptx = hlir_kernels_to_ptx(hlir_module)
+        ptx_buf_print(ptx)
+    }
+
+    print_int(kcount)
+    print(" kernel(s) emitted\n")
+    0
+}
+
 // COMPILE PIPELINE (--compile mode)
 // ============================================================================
 
@@ -1848,6 +1912,44 @@ fn main() -> i32 with IO, Mut, Div, Panic, Alloc {
             print("\n")
             return 1
         }
+    }
+
+    if str_eq(cmd, "gpu-emit") {
+        if argc < 2 {
+            print("Usage: sounio gpu-emit [--target=ptx|metal] [--autotune] [--fuse] [--epistemic] <path.sio>\n")
+            return 1
+        }
+        var gpu_target: string = "ptx"
+        var gpu_source_path: string = ""
+        var gpu_autotune: bool = false
+        var gpu_fuse: bool = false
+        var gpu_epistemic: bool = false
+        var gpu_arg_idx: i64 = 1
+        while gpu_arg_idx < argc {
+            let arg = get_arg(gpu_arg_idx)
+            if starts_with(arg, "--target=") {
+                gpu_target = str_slice(arg, 9, str_len(arg))
+                gpu_arg_idx = gpu_arg_idx + 1
+            } else if str_eq(arg, "--autotune") {
+                gpu_autotune = true
+                gpu_arg_idx = gpu_arg_idx + 1
+            } else if str_eq(arg, "--fuse") {
+                gpu_fuse = true
+                gpu_arg_idx = gpu_arg_idx + 1
+            } else if str_eq(arg, "--epistemic") {
+                gpu_epistemic = true
+                gpu_arg_idx = gpu_arg_idx + 1
+            } else {
+                gpu_source_path = arg
+                gpu_arg_idx = gpu_arg_idx + 1
+                break
+            }
+        }
+        if str_len(gpu_source_path) == 0 {
+            print("Error: No source file specified\n")
+            return 1
+        }
+        return run_gpu_emit_pipeline(gpu_source_path, gpu_target, gpu_autotune, gpu_fuse, gpu_epistemic)
     }
 
     if str_eq(cmd, "compile") {
