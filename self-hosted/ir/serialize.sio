@@ -261,6 +261,9 @@ fn write_opcode(buf: [i8; 131072], pos: i64, op: IrOpcode) -> ([i8; 131072], i64
         IrOpcode::IrMeasure => 24,
         IrOpcode::IrAdmitAction => 25,
         IrOpcode::IrDeferAction => 26,
+        IrOpcode::IrPlanAcquisition => 27,
+        IrOpcode::IrPlanRecourse => 28,
+        IrOpcode::IrProposeAlternatives => 29,
     }
     write_i8(buf, pos, tag)
 }
@@ -295,7 +298,10 @@ fn read_opcode(buf: [i8; 131072], pos: i64) -> (IrOpcode, i64) with Mut, Panic, 
         else if tag == 23 { IrOpcode::IrLiftKnowledge }
         else if tag == 24 { IrOpcode::IrMeasure }
         else if tag == 25 { IrOpcode::IrAdmitAction }
-        else { IrOpcode::IrDeferAction }
+        else if tag == 26 { IrOpcode::IrDeferAction }
+        else if tag == 27 { IrOpcode::IrPlanAcquisition }
+        else if tag == 28 { IrOpcode::IrPlanRecourse }
+        else { IrOpcode::IrProposeAlternatives }
     (op, next_pos)
 }
 
@@ -619,7 +625,15 @@ fn write_policy_requirement_info(buf: [i8; 131072], pos: i64, req: IrPolicyRequi
     p = op_pair.1
     p = p + 7
     let threshold_pair = write_f64(b, p, req.threshold)
-    threshold_pair
+    b = threshold_pair.0
+    p = threshold_pair.1
+    let kind_pair = write_i64(b, p, req.threshold_kind)
+    b = kind_pair.0
+    p = kind_pair.1
+    let bool_pair = write_i64(b, p, if req.bool_threshold { 1 } else { 0 })
+    b = bool_pair.0
+    p = bool_pair.1
+    write_name(b, p, req.name_threshold)
 }
 
 fn read_policy_requirement_info(buf: [i8; 131072], pos: i64) -> (IrPolicyRequirementInfo, i64) with Mut, Panic, Div {
@@ -636,11 +650,23 @@ fn read_policy_requirement_info(buf: [i8; 131072], pos: i64) -> (IrPolicyRequire
     let threshold_pair = read_f64(buf, p)
     let threshold = threshold_pair.0
     p = threshold_pair.1
+    let kind_pair = read_i64(buf, p)
+    let threshold_kind = kind_pair.0
+    p = kind_pair.1
+    let bool_pair = read_i64(buf, p)
+    let bool_threshold = bool_pair.0 != 0
+    p = bool_pair.1
+    let name_threshold_pair = read_name(buf, p)
+    let name_threshold = name_threshold_pair.0
+    p = name_threshold_pair.1
     (IrPolicyRequirementInfo {
         metric_id: metric_id,
         metric_name: metric_name,
         op: op,
         threshold: threshold,
+        threshold_kind: threshold_kind,
+        bool_threshold: bool_threshold,
+        name_threshold: name_threshold,
     }, p)
 }
 
@@ -895,6 +921,146 @@ fn read_deferral_policy_info(buf: [i8; 131072], pos: i64) -> (IrDeferralPolicyIn
         id: id,
         name: name,
         target_ty: target_ty,
+        route_name: route_name,
+        requirements: requirements,
+        requirement_count: requirement_count,
+    }, p)
+}
+
+fn write_acquisition_policy_info(buf: [i8; 131072], pos: i64, info: IrAcquisitionPolicyInfo) -> ([i8; 131072], i64) with Mut, Panic, Div {
+    var b = buf
+    var p = pos
+    let id_pair = write_i64(b, p, info.id)
+    b = id_pair.0
+    p = id_pair.1
+    let name_pair = write_name(b, p, info.name)
+    b = name_pair.0
+    p = name_pair.1
+    let target_pair = write_type_tag(b, p, info.target_ty)
+    b = target_pair.0
+    p = target_pair.1
+    let objective_pair = write_name(b, p, info.objective_name)
+    b = objective_pair.0
+    p = objective_pair.1
+    let route_pair = write_name(b, p, info.route_name)
+    b = route_pair.0
+    p = route_pair.1
+    let req_count_pair = write_i64(b, p, info.requirement_count)
+    b = req_count_pair.0
+    p = req_count_pair.1
+    var i: i64 = 0
+    while i < info.requirement_count && i < 8 {
+        let req_pair = write_policy_requirement_info(b, p, info.requirements[i])
+        b = req_pair.0
+        p = req_pair.1
+        i = i + 1
+    }
+    (b, p)
+}
+
+fn read_acquisition_policy_info(buf: [i8; 131072], pos: i64) -> (IrAcquisitionPolicyInfo, i64) with Mut, Panic, Div, Alloc {
+    var p = pos
+    let id_pair = read_i64(buf, p)
+    let id = id_pair.0
+    p = id_pair.1
+    let name_pair = read_name(buf, p)
+    let name = name_pair.0
+    p = name_pair.1
+    let target_pair = read_type_tag(buf, p)
+    let target_ty = target_pair.0
+    p = target_pair.1
+    let objective_pair = read_name(buf, p)
+    let objective_name = objective_pair.0
+    p = objective_pair.1
+    let route_pair = read_name(buf, p)
+    let route_name = route_pair.0
+    p = route_pair.1
+    let req_count_pair = read_i64(buf, p)
+    let requirement_count = req_count_pair.0
+    p = req_count_pair.1
+    var requirements: [IrPolicyRequirementInfo; 8] = [ir_empty_policy_requirement_info(); 8]
+    var i: i64 = 0
+    while i < requirement_count && i < 8 {
+        let req_pair = read_policy_requirement_info(buf, p)
+        requirements[i] = req_pair.0
+        p = req_pair.1
+        i = i + 1
+    }
+    (IrAcquisitionPolicyInfo {
+        id: id,
+        name: name,
+        target_ty: target_ty,
+        objective_name: objective_name,
+        route_name: route_name,
+        requirements: requirements,
+        requirement_count: requirement_count,
+    }, p)
+}
+
+fn write_recourse_policy_info(buf: [i8; 131072], pos: i64, info: IrRecoursePolicyInfo) -> ([i8; 131072], i64) with Mut, Panic, Div {
+    var b = buf
+    var p = pos
+    let id_pair = write_i64(b, p, info.id)
+    b = id_pair.0
+    p = id_pair.1
+    let name_pair = write_name(b, p, info.name)
+    b = name_pair.0
+    p = name_pair.1
+    let target_pair = write_type_tag(b, p, info.target_ty)
+    b = target_pair.0
+    p = target_pair.1
+    let strategy_pair = write_name(b, p, info.strategy_name)
+    b = strategy_pair.0
+    p = strategy_pair.1
+    let route_pair = write_name(b, p, info.route_name)
+    b = route_pair.0
+    p = route_pair.1
+    let req_count_pair = write_i64(b, p, info.requirement_count)
+    b = req_count_pair.0
+    p = req_count_pair.1
+    var i: i64 = 0
+    while i < info.requirement_count && i < 8 {
+        let req_pair = write_policy_requirement_info(b, p, info.requirements[i])
+        b = req_pair.0
+        p = req_pair.1
+        i = i + 1
+    }
+    (b, p)
+}
+
+fn read_recourse_policy_info(buf: [i8; 131072], pos: i64) -> (IrRecoursePolicyInfo, i64) with Mut, Panic, Div, Alloc {
+    var p = pos
+    let id_pair = read_i64(buf, p)
+    let id = id_pair.0
+    p = id_pair.1
+    let name_pair = read_name(buf, p)
+    let name = name_pair.0
+    p = name_pair.1
+    let target_pair = read_type_tag(buf, p)
+    let target_ty = target_pair.0
+    p = target_pair.1
+    let strategy_pair = read_name(buf, p)
+    let strategy_name = strategy_pair.0
+    p = strategy_pair.1
+    let route_pair = read_name(buf, p)
+    let route_name = route_pair.0
+    p = route_pair.1
+    let req_count_pair = read_i64(buf, p)
+    let requirement_count = req_count_pair.0
+    p = req_count_pair.1
+    var requirements: [IrPolicyRequirementInfo; 8] = [ir_empty_policy_requirement_info(); 8]
+    var i: i64 = 0
+    while i < requirement_count && i < 8 {
+        let req_pair = read_policy_requirement_info(buf, p)
+        requirements[i] = req_pair.0
+        p = req_pair.1
+        i = i + 1
+    }
+    (IrRecoursePolicyInfo {
+        id: id,
+        name: name,
+        target_ty: target_ty,
+        strategy_name: strategy_name,
         route_name: route_name,
         requirements: requirements,
         requirement_count: requirement_count,
@@ -1738,6 +1904,714 @@ fn read_deferred_reason_witness_info(buf: [i8; 131072], pos: i64) -> (IrDeferred
     }, p)
 }
 
+fn write_acquisition_plan_info(buf: [i8; 131072], pos: i64, info: IrAcquisitionPlanInfo) -> ([i8; 131072], i64) with Mut, Panic, Div {
+    var b = buf
+    var p = pos
+    let p0 = write_i64(b, p, info.id)
+    b = p0.0
+    p = p0.1
+    let p1 = write_i64(b, p, info.span_start)
+    b = p1.0
+    p = p1.1
+    let p2 = write_i64(b, p, info.span_end)
+    b = p2.0
+    p = p2.1
+    let p3 = write_i64(b, p, info.deferred_certificate_id)
+    b = p3.0
+    p = p3.1
+    let p4 = write_i64(b, p, info.acquisition_policy_id)
+    b = p4.0
+    p = p4.1
+    let p5 = write_i64(b, p, info.audit_id)
+    b = p5.0
+    p = p5.1
+    let p6 = write_i64(b, p, info.contest_id)
+    b = p6.0
+    p = p6.1
+    let p7 = write_name(b, p, info.objective_name)
+    b = p7.0
+    p = p7.1
+    let p8 = write_name(b, p, info.route_name)
+    b = p8.0
+    p = p8.1
+    let p9 = write_type_tag(b, p, info.inner_ty)
+    b = p9.0
+    p = p9.1
+    var i: i64 = 0
+    while i < 8 {
+        let pair = write_i64(b, p, info.metric_known[i])
+        b = pair.0
+        p = pair.1
+        i = i + 1
+    }
+    i = 0
+    while i < 8 {
+        let pair = write_f64(b, p, info.metric_values[i])
+        b = pair.0
+        p = pair.1
+        i = i + 1
+    }
+    (b, p)
+}
+
+fn read_acquisition_plan_info(buf: [i8; 131072], pos: i64) -> (IrAcquisitionPlanInfo, i64) with Mut, Panic, Div, Alloc {
+    var p = pos
+    let p0 = read_i64(buf, p)
+    let id = p0.0
+    p = p0.1
+    let p1 = read_i64(buf, p)
+    let span_start = p1.0
+    p = p1.1
+    let p2 = read_i64(buf, p)
+    let span_end = p2.0
+    p = p2.1
+    let p3 = read_i64(buf, p)
+    let deferred_certificate_id = p3.0
+    p = p3.1
+    let p4 = read_i64(buf, p)
+    let acquisition_policy_id = p4.0
+    p = p4.1
+    let p5 = read_i64(buf, p)
+    let audit_id = p5.0
+    p = p5.1
+    let p6 = read_i64(buf, p)
+    let contest_id = p6.0
+    p = p6.1
+    let p7 = read_name(buf, p)
+    let objective_name = p7.0
+    p = p7.1
+    let p8 = read_name(buf, p)
+    let route_name = p8.0
+    p = p8.1
+    let p9 = read_type_tag(buf, p)
+    let inner_ty = p9.0
+    p = p9.1
+    var metric_known: [i64; 8] = [0; 8]
+    var i: i64 = 0
+    while i < 8 {
+        let pair = read_i64(buf, p)
+        metric_known[i] = pair.0
+        p = pair.1
+        i = i + 1
+    }
+    var metric_values: [f64; 8] = [0.0; 8]
+    i = 0
+    while i < 8 {
+        let pair = read_f64(buf, p)
+        metric_values[i] = pair.0
+        p = pair.1
+        i = i + 1
+    }
+    (IrAcquisitionPlanInfo {
+        id: id,
+        span_start: span_start,
+        span_end: span_end,
+        deferred_certificate_id: deferred_certificate_id,
+        acquisition_policy_id: acquisition_policy_id,
+        audit_id: audit_id,
+        contest_id: contest_id,
+        objective_name: objective_name,
+        route_name: route_name,
+        inner_ty: inner_ty,
+        metric_known: metric_known,
+        metric_values: metric_values,
+    }, p)
+}
+
+fn write_acquisition_reason_witness_info(buf: [i8; 131072], pos: i64, info: IrAcquisitionReasonWitnessInfo) -> ([i8; 131072], i64) with Mut, Panic, Div {
+    var b = buf
+    var p = pos
+    let p0 = write_i64(b, p, info.id)
+    b = p0.0
+    p = p0.1
+    let p1 = write_i64(b, p, info.span_start)
+    b = p1.0
+    p = p1.1
+    let p2 = write_i64(b, p, info.span_end)
+    b = p2.0
+    p = p2.1
+    write_i64(b, p, info.acquisition_plan_id)
+}
+
+fn read_acquisition_reason_witness_info(buf: [i8; 131072], pos: i64) -> (IrAcquisitionReasonWitnessInfo, i64) with Mut, Panic, Div, Alloc {
+    var p = pos
+    let p0 = read_i64(buf, p)
+    let id = p0.0
+    p = p0.1
+    let p1 = read_i64(buf, p)
+    let span_start = p1.0
+    p = p1.1
+    let p2 = read_i64(buf, p)
+    let span_end = p2.0
+    p = p2.1
+    let p3 = read_i64(buf, p)
+    let acquisition_plan_id = p3.0
+    p = p3.1
+    (IrAcquisitionReasonWitnessInfo {
+        id: id,
+        span_start: span_start,
+        span_end: span_end,
+        acquisition_plan_id: acquisition_plan_id,
+    }, p)
+}
+
+fn write_recourse_plan_info(buf: [i8; 131072], pos: i64, info: IrRecoursePlanInfo) -> ([i8; 131072], i64) with Mut, Panic, Div {
+    var b = buf
+    var p = pos
+    let p0 = write_i64(b, p, info.id)
+    b = p0.0
+    p = p0.1
+    let p1 = write_i64(b, p, info.span_start)
+    b = p1.0
+    p = p1.1
+    let p2 = write_i64(b, p, info.span_end)
+    b = p2.0
+    p = p2.1
+    let p3 = write_i64(b, p, info.deferred_certificate_id)
+    b = p3.0
+    p = p3.1
+    let p4 = write_i64(b, p, info.recourse_policy_id)
+    b = p4.0
+    p = p4.1
+    let p5 = write_i64(b, p, info.audit_id)
+    b = p5.0
+    p = p5.1
+    let p6 = write_i64(b, p, info.contest_id)
+    b = p6.0
+    p = p6.1
+    let p7 = write_name(b, p, info.strategy_name)
+    b = p7.0
+    p = p7.1
+    let p8 = write_name(b, p, info.route_name)
+    b = p8.0
+    p = p8.1
+    let p9 = write_type_tag(b, p, info.inner_ty)
+    b = p9.0
+    p = p9.1
+    var i: i64 = 0
+    while i < 8 {
+        let pair = write_i64(b, p, info.metric_known[i])
+        b = pair.0
+        p = pair.1
+        i = i + 1
+    }
+    i = 0
+    while i < 8 {
+        let pair = write_f64(b, p, info.metric_values[i])
+        b = pair.0
+        p = pair.1
+        i = i + 1
+    }
+    (b, p)
+}
+
+fn read_recourse_plan_info(buf: [i8; 131072], pos: i64) -> (IrRecoursePlanInfo, i64) with Mut, Panic, Div, Alloc {
+    var p = pos
+    let p0 = read_i64(buf, p)
+    let id = p0.0
+    p = p0.1
+    let p1 = read_i64(buf, p)
+    let span_start = p1.0
+    p = p1.1
+    let p2 = read_i64(buf, p)
+    let span_end = p2.0
+    p = p2.1
+    let p3 = read_i64(buf, p)
+    let deferred_certificate_id = p3.0
+    p = p3.1
+    let p4 = read_i64(buf, p)
+    let recourse_policy_id = p4.0
+    p = p4.1
+    let p5 = read_i64(buf, p)
+    let audit_id = p5.0
+    p = p5.1
+    let p6 = read_i64(buf, p)
+    let contest_id = p6.0
+    p = p6.1
+    let p7 = read_name(buf, p)
+    let strategy_name = p7.0
+    p = p7.1
+    let p8 = read_name(buf, p)
+    let route_name = p8.0
+    p = p8.1
+    let p9 = read_type_tag(buf, p)
+    let inner_ty = p9.0
+    p = p9.1
+    var metric_known: [i64; 8] = [0; 8]
+    var i: i64 = 0
+    while i < 8 {
+        let pair = read_i64(buf, p)
+        metric_known[i] = pair.0
+        p = pair.1
+        i = i + 1
+    }
+    var metric_values: [f64; 8] = [0.0; 8]
+    i = 0
+    while i < 8 {
+        let pair = read_f64(buf, p)
+        metric_values[i] = pair.0
+        p = pair.1
+        i = i + 1
+    }
+    (IrRecoursePlanInfo {
+        id: id,
+        span_start: span_start,
+        span_end: span_end,
+        deferred_certificate_id: deferred_certificate_id,
+        recourse_policy_id: recourse_policy_id,
+        audit_id: audit_id,
+        contest_id: contest_id,
+        strategy_name: strategy_name,
+        route_name: route_name,
+        inner_ty: inner_ty,
+        metric_known: metric_known,
+        metric_values: metric_values,
+    }, p)
+}
+
+fn write_recourse_reason_witness_info(buf: [i8; 131072], pos: i64, info: IrRecourseReasonWitnessInfo) -> ([i8; 131072], i64) with Mut, Panic, Div {
+    var b = buf
+    var p = pos
+    let p0 = write_i64(b, p, info.id)
+    b = p0.0
+    p = p0.1
+    let p1 = write_i64(b, p, info.span_start)
+    b = p1.0
+    p = p1.1
+    let p2 = write_i64(b, p, info.span_end)
+    b = p2.0
+    p = p2.1
+    write_i64(b, p, info.recourse_plan_id)
+}
+
+fn read_recourse_reason_witness_info(buf: [i8; 131072], pos: i64) -> (IrRecourseReasonWitnessInfo, i64) with Mut, Panic, Div, Alloc {
+    var p = pos
+    let p0 = read_i64(buf, p)
+    let id = p0.0
+    p = p0.1
+    let p1 = read_i64(buf, p)
+    let span_start = p1.0
+    p = p1.1
+    let p2 = read_i64(buf, p)
+    let span_end = p2.0
+    p = p2.1
+    let p3 = read_i64(buf, p)
+    let recourse_plan_id = p3.0
+    p = p3.1
+    (IrRecourseReasonWitnessInfo {
+        id: id,
+        span_start: span_start,
+        span_end: span_end,
+        recourse_plan_id: recourse_plan_id,
+    }, p)
+}
+
+fn write_alternative_policy_info(buf: [i8; 131072], pos: i64, info: IrAlternativePolicyInfo) -> ([i8; 131072], i64) with Mut, Panic, Div {
+    var b = buf
+    var p = pos
+    let p0 = write_i64(b, p, info.id)
+    b = p0.0
+    p = p0.1
+    let p1 = write_name(b, p, info.name)
+    b = p1.0
+    p = p1.1
+    let p2 = write_type_tag(b, p, info.target_ty)
+    b = p2.0
+    p = p2.1
+    let p3 = write_name(b, p, info.frontier_kind)
+    b = p3.0
+    p = p3.1
+    let p4 = write_i64(b, p, info.objective_count)
+    b = p4.0
+    p = p4.1
+    var i: i64 = 0
+    while i < 8 {
+        let n = write_name(b, p, info.objective_names[i])
+        b = n.0
+        p = n.1
+        i = i + 1
+    }
+    i = 0
+    while i < 8 {
+        let d = write_i64(b, p, info.objective_directions[i])
+        b = d.0
+        p = d.1
+        i = i + 1
+    }
+    write_i64(b, p, info.max_options)
+}
+
+fn read_alternative_policy_info(buf: [i8; 131072], pos: i64) -> (IrAlternativePolicyInfo, i64) with Mut, Panic, Div, Alloc {
+    var p = pos
+    let p0 = read_i64(buf, p)
+    let id = p0.0
+    p = p0.1
+    let p1 = read_name(buf, p)
+    let name = p1.0
+    p = p1.1
+    let p2 = read_type_tag(buf, p)
+    let target_ty = p2.0
+    p = p2.1
+    let p3 = read_name(buf, p)
+    let frontier_kind = p3.0
+    p = p3.1
+    let p4 = read_i64(buf, p)
+    let objective_count = p4.0
+    p = p4.1
+    var objective_names: [Name; 8] = [ir_empty_name(); 8]
+    var i: i64 = 0
+    while i < 8 {
+        let n = read_name(buf, p)
+        objective_names[i] = n.0
+        p = n.1
+        i = i + 1
+    }
+    var objective_directions: [i64; 8] = [0; 8]
+    i = 0
+    while i < 8 {
+        let d = read_i64(buf, p)
+        objective_directions[i] = d.0
+        p = d.1
+        i = i + 1
+    }
+    let p5 = read_i64(buf, p)
+    let max_options = p5.0
+    p = p5.1
+    (IrAlternativePolicyInfo {
+        id: id,
+        name: name,
+        target_ty: target_ty,
+        frontier_kind: frontier_kind,
+        objective_names: objective_names,
+        objective_directions: objective_directions,
+        objective_count: objective_count,
+        max_options: max_options,
+    }, p)
+}
+
+fn write_alternative_frontier_info(buf: [i8; 131072], pos: i64, info: IrAlternativeFrontierInfo) -> ([i8; 131072], i64) with Mut, Panic, Div {
+    var b = buf
+    var p = pos
+    let p0 = write_i64(b, p, info.id)
+    b = p0.0
+    p = p0.1
+    let p1 = write_name(b, p, info.name)
+    b = p1.0
+    p = p1.1
+    let p2 = write_i64(b, p, info.target_kind)
+    b = p2.0
+    p = p2.1
+    let p3 = write_type_tag(b, p, info.target_ty)
+    b = p3.0
+    p = p3.1
+    let p4 = write_i64(b, p, info.alternative_policy_id)
+    b = p4.0
+    p = p4.1
+    let p5 = write_i64(b, p, info.audit_id)
+    b = p5.0
+    p = p5.1
+    let p6 = write_i64(b, p, info.contest_id)
+    b = p6.0
+    p = p6.1
+    let p7 = write_i64(b, p, info.source_policy_id)
+    b = p7.0
+    p = p7.1
+    let p8 = write_i64(b, p, info.source_plan_id)
+    b = p8.0
+    p = p8.1
+    let p9 = write_i64(b, p, info.candidate_start)
+    b = p9.0
+    p = p9.1
+    write_i64(b, p, info.candidate_count)
+}
+
+fn read_alternative_frontier_info(buf: [i8; 131072], pos: i64) -> (IrAlternativeFrontierInfo, i64) with Mut, Panic, Div, Alloc {
+    var p = pos
+    let p0 = read_i64(buf, p)
+    let id = p0.0
+    p = p0.1
+    let p1 = read_name(buf, p)
+    let name = p1.0
+    p = p1.1
+    let p2 = read_i64(buf, p)
+    let target_kind = p2.0
+    p = p2.1
+    let p3 = read_type_tag(buf, p)
+    let target_ty = p3.0
+    p = p3.1
+    let p4 = read_i64(buf, p)
+    let alternative_policy_id = p4.0
+    p = p4.1
+    let p5 = read_i64(buf, p)
+    let audit_id = p5.0
+    p = p5.1
+    let p6 = read_i64(buf, p)
+    let contest_id = p6.0
+    p = p6.1
+    let p7 = read_i64(buf, p)
+    let source_policy_id = p7.0
+    p = p7.1
+    let p8 = read_i64(buf, p)
+    let source_plan_id = p8.0
+    p = p8.1
+    let p9 = read_i64(buf, p)
+    let candidate_start = p9.0
+    p = p9.1
+    let p10 = read_i64(buf, p)
+    let candidate_count = p10.0
+    p = p10.1
+    (IrAlternativeFrontierInfo {
+        id: id,
+        name: name,
+        target_kind: target_kind,
+        target_ty: target_ty,
+        alternative_policy_id: alternative_policy_id,
+        audit_id: audit_id,
+        contest_id: contest_id,
+        source_policy_id: source_policy_id,
+        source_plan_id: source_plan_id,
+        candidate_start: candidate_start,
+        candidate_count: candidate_count,
+    }, p)
+}
+
+fn write_alternative_candidate_info(buf: [i8; 131072], pos: i64, info: IrAlternativeCandidateInfo) -> ([i8; 131072], i64) with Mut, Panic, Div {
+    var b = buf
+    var p = pos
+    let p0 = write_i64(b, p, info.id)
+    b = p0.0
+    p = p0.1
+    let p1 = write_i64(b, p, info.frontier_id)
+    b = p1.0
+    p = p1.1
+    let p2 = write_name(b, p, info.name)
+    b = p2.0
+    p = p2.1
+    let p3 = write_name(b, p, info.value_repr)
+    b = p3.0
+    p = p3.1
+    let p4 = write_i64(b, p, info.source_kind)
+    b = p4.0
+    p = p4.1
+    let p5 = write_i64(b, p, info.source_policy_id)
+    b = p5.0
+    p = p5.1
+    let p6 = write_i64(b, p, info.source_plan_id)
+    b = p6.0
+    p = p6.1
+    let p7 = write_name(b, p, info.strategy_name)
+    b = p7.0
+    p = p7.1
+    let p8 = write_name(b, p, info.route_name)
+    b = p8.0
+    p = p8.1
+    let p9 = write_i64(b, p, info.audit_id)
+    b = p9.0
+    p = p9.1
+    let p10 = write_i64(b, p, info.contest_id)
+    b = p10.0
+    p = p10.1
+    let p11 = write_f64(b, p, info.intervention_cost)
+    b = p11.0
+    p = p11.1
+    let p12 = write_f64(b, p, info.residual_tail_risk)
+    b = p12.0
+    p = p12.1
+    let p13 = write_f64(b, p, info.mechanistic_divergence)
+    b = p13.0
+    p = p13.1
+    let p14 = write_f64(b, p, info.admissibility_margin)
+    b = p14.0
+    p = p14.1
+    write_i64(b, p, info.dominance_rank)
+}
+
+fn read_alternative_candidate_info(buf: [i8; 131072], pos: i64) -> (IrAlternativeCandidateInfo, i64) with Mut, Panic, Div, Alloc {
+    var p = pos
+    let p0 = read_i64(buf, p)
+    let id = p0.0
+    p = p0.1
+    let p1 = read_i64(buf, p)
+    let frontier_id = p1.0
+    p = p1.1
+    let p2 = read_name(buf, p)
+    let name = p2.0
+    p = p2.1
+    let p3 = read_name(buf, p)
+    let value_repr = p3.0
+    p = p3.1
+    let p4 = read_i64(buf, p)
+    let source_kind = p4.0
+    p = p4.1
+    let p5 = read_i64(buf, p)
+    let source_policy_id = p5.0
+    p = p5.1
+    let p6 = read_i64(buf, p)
+    let source_plan_id = p6.0
+    p = p6.1
+    let p7 = read_name(buf, p)
+    let strategy_name = p7.0
+    p = p7.1
+    let p8 = read_name(buf, p)
+    let route_name = p8.0
+    p = p8.1
+    let p9 = read_i64(buf, p)
+    let audit_id = p9.0
+    p = p9.1
+    let p10 = read_i64(buf, p)
+    let contest_id = p10.0
+    p = p10.1
+    let p11 = read_f64(buf, p)
+    let intervention_cost = p11.0
+    p = p11.1
+    let p12 = read_f64(buf, p)
+    let residual_tail_risk = p12.0
+    p = p12.1
+    let p13 = read_f64(buf, p)
+    let mechanistic_divergence = p13.0
+    p = p13.1
+    let p14 = read_f64(buf, p)
+    let admissibility_margin = p14.0
+    p = p14.1
+    let p15 = read_i64(buf, p)
+    let dominance_rank = p15.0
+    p = p15.1
+    (IrAlternativeCandidateInfo {
+        id: id,
+        frontier_id: frontier_id,
+        name: name,
+        value_repr: value_repr,
+        source_kind: source_kind,
+        source_policy_id: source_policy_id,
+        source_plan_id: source_plan_id,
+        strategy_name: strategy_name,
+        route_name: route_name,
+        audit_id: audit_id,
+        contest_id: contest_id,
+        intervention_cost: intervention_cost,
+        residual_tail_risk: residual_tail_risk,
+        mechanistic_divergence: mechanistic_divergence,
+        admissibility_margin: admissibility_margin,
+        dominance_rank: dominance_rank,
+    }, p)
+}
+
+fn write_alternative_set_info(buf: [i8; 131072], pos: i64, info: IrAlternativeSetInfo) -> ([i8; 131072], i64) with Mut, Panic, Div {
+    var b = buf
+    var p = pos
+    let p0 = write_i64(b, p, info.id)
+    b = p0.0
+    p = p0.1
+    let p1 = write_i64(b, p, info.span_start)
+    b = p1.0
+    p = p1.1
+    let p2 = write_i64(b, p, info.span_end)
+    b = p2.0
+    p = p2.1
+    let p3 = write_i64(b, p, info.frontier_id)
+    b = p3.0
+    p = p3.1
+    let p4 = write_i64(b, p, info.audit_id)
+    b = p4.0
+    p = p4.1
+    let p5 = write_i64(b, p, info.contest_id)
+    b = p5.0
+    p = p5.1
+    let p6 = write_type_tag(b, p, info.inner_ty)
+    b = p6.0
+    p = p6.1
+    let p7 = write_i64(b, p, info.candidate_start)
+    b = p7.0
+    p = p7.1
+    write_i64(b, p, info.candidate_count)
+}
+
+fn read_alternative_set_info(buf: [i8; 131072], pos: i64) -> (IrAlternativeSetInfo, i64) with Mut, Panic, Div, Alloc {
+    var p = pos
+    let p0 = read_i64(buf, p)
+    let id = p0.0
+    p = p0.1
+    let p1 = read_i64(buf, p)
+    let span_start = p1.0
+    p = p1.1
+    let p2 = read_i64(buf, p)
+    let span_end = p2.0
+    p = p2.1
+    let p3 = read_i64(buf, p)
+    let frontier_id = p3.0
+    p = p3.1
+    let p4 = read_i64(buf, p)
+    let audit_id = p4.0
+    p = p4.1
+    let p5 = read_i64(buf, p)
+    let contest_id = p5.0
+    p = p5.1
+    let p6 = read_type_tag(buf, p)
+    let inner_ty = p6.0
+    p = p6.1
+    let p7 = read_i64(buf, p)
+    let candidate_start = p7.0
+    p = p7.1
+    let p8 = read_i64(buf, p)
+    let candidate_count = p8.0
+    p = p8.1
+    (IrAlternativeSetInfo {
+        id: id,
+        span_start: span_start,
+        span_end: span_end,
+        frontier_id: frontier_id,
+        audit_id: audit_id,
+        contest_id: contest_id,
+        inner_ty: inner_ty,
+        candidate_start: candidate_start,
+        candidate_count: candidate_count,
+    }, p)
+}
+
+fn write_alternative_reason_witness_info(buf: [i8; 131072], pos: i64, info: IrAlternativeReasonWitnessInfo) -> ([i8; 131072], i64) with Mut, Panic, Div {
+    var b = buf
+    var p = pos
+    let p0 = write_i64(b, p, info.id)
+    b = p0.0
+    p = p0.1
+    let p1 = write_i64(b, p, info.span_start)
+    b = p1.0
+    p = p1.1
+    let p2 = write_i64(b, p, info.span_end)
+    b = p2.0
+    p = p2.1
+    let p3 = write_i64(b, p, info.alternative_set_id)
+    b = p3.0
+    p = p3.1
+    write_i64(b, p, info.candidate_id)
+}
+
+fn read_alternative_reason_witness_info(buf: [i8; 131072], pos: i64) -> (IrAlternativeReasonWitnessInfo, i64) with Mut, Panic, Div, Alloc {
+    var p = pos
+    let p0 = read_i64(buf, p)
+    let id = p0.0
+    p = p0.1
+    let p1 = read_i64(buf, p)
+    let span_start = p1.0
+    p = p1.1
+    let p2 = read_i64(buf, p)
+    let span_end = p2.0
+    p = p2.1
+    let p3 = read_i64(buf, p)
+    let alternative_set_id = p3.0
+    p = p3.1
+    let p4 = read_i64(buf, p)
+    let candidate_id = p4.0
+    p = p4.1
+    (IrAlternativeReasonWitnessInfo {
+        id: id,
+        span_start: span_start,
+        span_end: span_end,
+        alternative_set_id: alternative_set_id,
+        candidate_id: candidate_id,
+    }, p)
+}
+
 fn serialize_ir_epistemic_section(buf: [i8; 131072], pos: i64, ep: IrEpistemicSection) -> ([i8; 131072], i64) with Mut, Panic, Div, Alloc {
     var b = buf
     var p = pos
@@ -1915,6 +2789,127 @@ fn serialize_ir_epistemic_section(buf: [i8; 131072], pos: i64, ep: IrEpistemicSe
     i = 0
     while i < ep.deferred_reason_witness_count {
         let pair = write_deferred_reason_witness_info(b, p, ep.deferred_reason_witnesses[i])
+        b = pair.0
+        p = pair.1
+        i = i + 1
+    }
+
+    let c15 = write_i64(b, p, ep.acquisition_policy_count)
+    b = c15.0
+    p = c15.1
+    i = 0
+    while i < ep.acquisition_policy_count {
+        let pair = write_acquisition_policy_info(b, p, ep.acquisition_policies[i])
+        b = pair.0
+        p = pair.1
+        i = i + 1
+    }
+
+    let c16 = write_i64(b, p, ep.acquisition_plan_count)
+    b = c16.0
+    p = c16.1
+    i = 0
+    while i < ep.acquisition_plan_count {
+        let pair = write_acquisition_plan_info(b, p, ep.acquisition_plans[i])
+        b = pair.0
+        p = pair.1
+        i = i + 1
+    }
+
+    let c17 = write_i64(b, p, ep.acquisition_reason_witness_count)
+    b = c17.0
+    p = c17.1
+    i = 0
+    while i < ep.acquisition_reason_witness_count {
+        let pair = write_acquisition_reason_witness_info(b, p, ep.acquisition_reason_witnesses[i])
+        b = pair.0
+        p = pair.1
+        i = i + 1
+    }
+
+    let c18 = write_i64(b, p, ep.recourse_policy_count)
+    b = c18.0
+    p = c18.1
+    i = 0
+    while i < ep.recourse_policy_count {
+        let pair = write_recourse_policy_info(b, p, ep.recourse_policies[i])
+        b = pair.0
+        p = pair.1
+        i = i + 1
+    }
+
+    let c19 = write_i64(b, p, ep.recourse_plan_count)
+    b = c19.0
+    p = c19.1
+    i = 0
+    while i < ep.recourse_plan_count {
+        let pair = write_recourse_plan_info(b, p, ep.recourse_plans[i])
+        b = pair.0
+        p = pair.1
+        i = i + 1
+    }
+
+    let c20 = write_i64(b, p, ep.recourse_reason_witness_count)
+    b = c20.0
+    p = c20.1
+    i = 0
+    while i < ep.recourse_reason_witness_count {
+        let pair = write_recourse_reason_witness_info(b, p, ep.recourse_reason_witnesses[i])
+        b = pair.0
+        p = pair.1
+        i = i + 1
+    }
+
+    let c21 = write_i64(b, p, ep.alternative_policy_count)
+    b = c21.0
+    p = c21.1
+    i = 0
+    while i < ep.alternative_policy_count {
+        let pair = write_alternative_policy_info(b, p, ep.alternative_policies[i])
+        b = pair.0
+        p = pair.1
+        i = i + 1
+    }
+
+    let c22 = write_i64(b, p, ep.alternative_frontier_count)
+    b = c22.0
+    p = c22.1
+    i = 0
+    while i < ep.alternative_frontier_count {
+        let pair = write_alternative_frontier_info(b, p, ep.alternative_frontiers[i])
+        b = pair.0
+        p = pair.1
+        i = i + 1
+    }
+
+    let c23 = write_i64(b, p, ep.alternative_candidate_count)
+    b = c23.0
+    p = c23.1
+    i = 0
+    while i < ep.alternative_candidate_count {
+        let pair = write_alternative_candidate_info(b, p, ep.alternative_candidates[i])
+        b = pair.0
+        p = pair.1
+        i = i + 1
+    }
+
+    let c24 = write_i64(b, p, ep.alternative_set_count)
+    b = c24.0
+    p = c24.1
+    i = 0
+    while i < ep.alternative_set_count {
+        let pair = write_alternative_set_info(b, p, ep.alternative_sets[i])
+        b = pair.0
+        p = pair.1
+        i = i + 1
+    }
+
+    let c25 = write_i64(b, p, ep.alternative_reason_witness_count)
+    b = c25.0
+    p = c25.1
+    i = 0
+    while i < ep.alternative_reason_witness_count {
+        let pair = write_alternative_reason_witness_info(b, p, ep.alternative_reason_witnesses[i])
         b = pair.0
         p = pair.1
         i = i + 1
@@ -2113,10 +3108,153 @@ fn deserialize_ir_epistemic_section(buf: [i8; 131072], pos: i64) -> (IrEpistemic
         }
     }
 
+    if p < len {
+        let c15 = read_i64(buf, p)
+        ep.acquisition_policy_count = c15.0
+        p = c15.1
+        i = 0
+        while i < ep.acquisition_policy_count && i < IR_MAX_EPI_ACQUISITION_POLICIES {
+            let pair = read_acquisition_policy_info(buf, p)
+            ep.acquisition_policies[i] = pair.0
+            p = pair.1
+            i = i + 1
+        }
+    }
+
+    if p < len {
+        let c16 = read_i64(buf, p)
+        ep.acquisition_plan_count = c16.0
+        p = c16.1
+        i = 0
+        while i < ep.acquisition_plan_count && i < IR_MAX_EPI_ACQUISITION_PLANS {
+            let pair = read_acquisition_plan_info(buf, p)
+            ep.acquisition_plans[i] = pair.0
+            p = pair.1
+            i = i + 1
+        }
+    }
+
+    if p < len {
+        let c17 = read_i64(buf, p)
+        ep.acquisition_reason_witness_count = c17.0
+        p = c17.1
+        i = 0
+        while i < ep.acquisition_reason_witness_count && i < IR_MAX_EPI_ACQUISITION_REASON_WITNESSES {
+            let pair = read_acquisition_reason_witness_info(buf, p)
+            ep.acquisition_reason_witnesses[i] = pair.0
+            p = pair.1
+            i = i + 1
+        }
+    }
+
+    if p < len {
+        let c18 = read_i64(buf, p)
+        ep.recourse_policy_count = c18.0
+        p = c18.1
+        i = 0
+        while i < ep.recourse_policy_count && i < IR_MAX_EPI_RECOURSE_POLICIES {
+            let pair = read_recourse_policy_info(buf, p)
+            ep.recourse_policies[i] = pair.0
+            p = pair.1
+            i = i + 1
+        }
+    }
+
+    if p < len {
+        let c19 = read_i64(buf, p)
+        ep.recourse_plan_count = c19.0
+        p = c19.1
+        i = 0
+        while i < ep.recourse_plan_count && i < IR_MAX_EPI_RECOURSE_PLANS {
+            let pair = read_recourse_plan_info(buf, p)
+            ep.recourse_plans[i] = pair.0
+            p = pair.1
+            i = i + 1
+        }
+    }
+
+    if p < len {
+        let c20 = read_i64(buf, p)
+        ep.recourse_reason_witness_count = c20.0
+        p = c20.1
+        i = 0
+        while i < ep.recourse_reason_witness_count && i < IR_MAX_EPI_RECOURSE_REASON_WITNESSES {
+            let pair = read_recourse_reason_witness_info(buf, p)
+            ep.recourse_reason_witnesses[i] = pair.0
+            p = pair.1
+            i = i + 1
+        }
+    }
+
+    if p < len {
+        let c21 = read_i64(buf, p)
+        ep.alternative_policy_count = c21.0
+        p = c21.1
+        i = 0
+        while i < ep.alternative_policy_count && i < IR_MAX_EPI_ALTERNATIVE_POLICIES {
+            let pair = read_alternative_policy_info(buf, p)
+            ep.alternative_policies[i] = pair.0
+            p = pair.1
+            i = i + 1
+        }
+    }
+
+    if p < len {
+        let c22 = read_i64(buf, p)
+        ep.alternative_frontier_count = c22.0
+        p = c22.1
+        i = 0
+        while i < ep.alternative_frontier_count && i < IR_MAX_EPI_ALTERNATIVE_FRONTIERS {
+            let pair = read_alternative_frontier_info(buf, p)
+            ep.alternative_frontiers[i] = pair.0
+            p = pair.1
+            i = i + 1
+        }
+    }
+
+    if p < len {
+        let c23 = read_i64(buf, p)
+        ep.alternative_candidate_count = c23.0
+        p = c23.1
+        i = 0
+        while i < ep.alternative_candidate_count && i < IR_MAX_EPI_ALTERNATIVE_CANDIDATES {
+            let pair = read_alternative_candidate_info(buf, p)
+            ep.alternative_candidates[i] = pair.0
+            p = pair.1
+            i = i + 1
+        }
+    }
+
+    if p < len {
+        let c24 = read_i64(buf, p)
+        ep.alternative_set_count = c24.0
+        p = c24.1
+        i = 0
+        while i < ep.alternative_set_count && i < IR_MAX_EPI_ALTERNATIVE_SETS {
+            let pair = read_alternative_set_info(buf, p)
+            ep.alternative_sets[i] = pair.0
+            p = pair.1
+            i = i + 1
+        }
+    }
+
+    if p < len {
+        let c25 = read_i64(buf, p)
+        ep.alternative_reason_witness_count = c25.0
+        p = c25.1
+        i = 0
+        while i < ep.alternative_reason_witness_count && i < IR_MAX_EPI_ALTERNATIVE_REASON_WITNESSES {
+            let pair = read_alternative_reason_witness_info(buf, p)
+            ep.alternative_reason_witnesses[i] = pair.0
+            p = pair.1
+            i = i + 1
+        }
+    }
+
     (ep, p)
 }
 
-fn serialize_ir_module(module: IrModule) -> ([i8; 131072], i64) with Mut, Panic, Div {
+fn serialize_ir_module(module: IrModule) -> ([i8; 131072], i64) with Mut, Panic, Div, Alloc {
     var buf: [i8; 131072] = [0; 131072]
     var pos: i64 = 0
 
@@ -2168,7 +3306,7 @@ fn serialize_ir_module(module: IrModule) -> ([i8; 131072], i64) with Mut, Panic,
     (buf, pos)
 }
 
-fn deserialize_ir_module(buf: [i8; 131072], len: i64) -> IrModule with Mut, Panic, Div {
+fn deserialize_ir_module(buf: [i8; 131072], len: i64) -> IrModule with Mut, Panic, Div, Alloc {
     var pos: i64 = 0
 
     // Verify header magic - cast literals to i8 for comparison

@@ -17,28 +17,33 @@ let IR_MAX_PARAMS: i64 = 64
 let IR_INVALID_REG: i64 = -1
 let IR_INVALID_LABEL: i64 = -1
 let IR_INVALID_FN: i64 = -1
-let IR_MAX_EPI_MODEL_FAMILIES: i64 = 128
-let IR_MAX_EPI_POLICIES: i64 = 128
-let IR_MAX_EPI_DECISION_POLICIES: i64 = 128
-let IR_MAX_EPI_DEFERRAL_POLICIES: i64 = 128
-let IR_MAX_EPI_ACQUISITION_POLICIES: i64 = 128
-let IR_MAX_EPI_RECOURSE_POLICIES: i64 = 128
-let IR_MAX_EPI_VALIDATIONS: i64 = 128
-let IR_MAX_EPI_CONTESTS: i64 = 256
-let IR_MAX_EPI_MECHANISTIC_REPORTS: i64 = 128
-let IR_MAX_EPI_POSTERIOR_WEIGHTS: i64 = 128
-let IR_MAX_EPI_COUNTEREXAMPLES: i64 = 128
-let IR_MAX_EPI_AUDITS: i64 = 128
-let IR_MAX_EPI_CONTEST_WITNESSES: i64 = 256
-let IR_MAX_EPI_ROBUST_PROOFS: i64 = 256
-let IR_MAX_EPI_DECISION_CERTIFICATES: i64 = 256
-let IR_MAX_EPI_DEFERRED_CERTIFICATES: i64 = 256
-let IR_MAX_EPI_DEFERRED_REASON_WITNESSES: i64 = 256
-let IR_MAX_EPI_ACQUISITION_PLANS: i64 = 256
-let IR_MAX_EPI_ACQUISITION_REASON_WITNESSES: i64 = 256
-let IR_MAX_EPI_RECOURSE_PLANS: i64 = 256
-let IR_MAX_EPI_RECOURSE_REASON_WITNESSES: i64 = 256
-let IR_MAX_EPI_VALIDATED_MANIFESTS: i64 = 256
+let IR_MAX_EPI_MODEL_FAMILIES: i64 = 32
+let IR_MAX_EPI_POLICIES: i64 = 32
+let IR_MAX_EPI_DECISION_POLICIES: i64 = 32
+let IR_MAX_EPI_DEFERRAL_POLICIES: i64 = 32
+let IR_MAX_EPI_ACQUISITION_POLICIES: i64 = 32
+let IR_MAX_EPI_RECOURSE_POLICIES: i64 = 32
+let IR_MAX_EPI_VALIDATIONS: i64 = 32
+let IR_MAX_EPI_CONTESTS: i64 = 64
+let IR_MAX_EPI_MECHANISTIC_REPORTS: i64 = 32
+let IR_MAX_EPI_POSTERIOR_WEIGHTS: i64 = 32
+let IR_MAX_EPI_COUNTEREXAMPLES: i64 = 32
+let IR_MAX_EPI_AUDITS: i64 = 32
+let IR_MAX_EPI_CONTEST_WITNESSES: i64 = 64
+let IR_MAX_EPI_ROBUST_PROOFS: i64 = 64
+let IR_MAX_EPI_DECISION_CERTIFICATES: i64 = 64
+let IR_MAX_EPI_DEFERRED_CERTIFICATES: i64 = 64
+let IR_MAX_EPI_DEFERRED_REASON_WITNESSES: i64 = 64
+let IR_MAX_EPI_ACQUISITION_PLANS: i64 = 64
+let IR_MAX_EPI_ACQUISITION_REASON_WITNESSES: i64 = 64
+let IR_MAX_EPI_RECOURSE_PLANS: i64 = 64
+let IR_MAX_EPI_RECOURSE_REASON_WITNESSES: i64 = 64
+let IR_MAX_EPI_ALTERNATIVE_POLICIES: i64 = 32
+let IR_MAX_EPI_ALTERNATIVE_FRONTIERS: i64 = 64
+let IR_MAX_EPI_ALTERNATIVE_CANDIDATES: i64 = 128
+let IR_MAX_EPI_ALTERNATIVE_SETS: i64 = 64
+let IR_MAX_EPI_ALTERNATIVE_REASON_WITNESSES: i64 = 64
+let IR_MAX_EPI_VALIDATED_MANIFESTS: i64 = 64
 
 enum IrOpcode {
     IrLoadImm,
@@ -244,6 +249,13 @@ enum IrOpcode {
     //   imm_i64 = recourse policy register (metadata only)
     //   label_id = recourse plan id
     IrPlanRecourse,
+    // Alternative frontier runtime — propose_alternatives(value, evidence, frontier) terminal gate
+    //   dst = destination register (holds the certified AlternativeSet<T> datum)
+    //   src1 = value register
+    //   src2 = evidence register (Deferred<T> or RecoursePlan<T>)
+    //   imm_i64 = frontier/policy register (metadata only)
+    //   label_id = alternative set id
+    IrProposeAlternatives,
 
     // Epistemic bridge — lift_knowledge(k: Knowledge<T>) → Contest<T> (H5.4)
     //   dst  = destination register (holds the lifted datum)
@@ -830,98 +842,256 @@ fn ir_empty_recourse_reason_witness_info() -> IrRecourseReasonWitnessInfo {
     }
 }
 
+struct IrAlternativePolicyInfo {
+    id: i64,
+    name: Name,
+    target_ty: TypeEntry,
+    frontier_kind: Name,
+    objective_names: [Name; 8],
+    objective_directions: [i64; 8], // 0=minimize, 1=maximize
+    objective_count: i64,
+    max_options: i64,
+}
+
+fn ir_empty_alternative_policy_info() -> IrAlternativePolicyInfo {
+    IrAlternativePolicyInfo {
+        id: -1,
+        name: ir_empty_name(),
+        target_ty: empty_type_entry(),
+        frontier_kind: ir_empty_name(),
+        objective_names: [ir_empty_name(); 8],
+        objective_directions: [0; 8],
+        objective_count: 0,
+        max_options: 0,
+    }
+}
+
+struct IrAlternativeFrontierInfo {
+    id: i64,
+    name: Name,
+    target_kind: i64, // 0=Deferred<T>, 1=RecoursePlan<T>
+    target_ty: TypeEntry,
+    alternative_policy_id: i64,
+    audit_id: i64,
+    contest_id: i64,
+    source_policy_id: i64,
+    source_plan_id: i64,
+    candidate_start: i64,
+    candidate_count: i64,
+}
+
+fn ir_empty_alternative_frontier_info() -> IrAlternativeFrontierInfo {
+    IrAlternativeFrontierInfo {
+        id: -1,
+        name: ir_empty_name(),
+        target_kind: -1,
+        target_ty: empty_type_entry(),
+        alternative_policy_id: -1,
+        audit_id: -1,
+        contest_id: -1,
+        source_policy_id: -1,
+        source_plan_id: -1,
+        candidate_start: -1,
+        candidate_count: 0,
+    }
+}
+
+struct IrAlternativeCandidateInfo {
+    id: i64,
+    frontier_id: i64,
+    name: Name,
+    value_repr: Name,
+    source_kind: i64, // 0=DeferredRoute, 1=RecoursePlan
+    source_policy_id: i64,
+    source_plan_id: i64,
+    strategy_name: Name,
+    route_name: Name,
+    audit_id: i64,
+    contest_id: i64,
+    intervention_cost: f64,
+    residual_tail_risk: f64,
+    mechanistic_divergence: f64,
+    admissibility_margin: f64,
+    dominance_rank: i64,
+}
+
+fn ir_empty_alternative_candidate_info() -> IrAlternativeCandidateInfo {
+    IrAlternativeCandidateInfo {
+        id: -1,
+        frontier_id: -1,
+        name: ir_empty_name(),
+        value_repr: ir_empty_name(),
+        source_kind: -1,
+        source_policy_id: -1,
+        source_plan_id: -1,
+        strategy_name: ir_empty_name(),
+        route_name: ir_empty_name(),
+        audit_id: -1,
+        contest_id: -1,
+        intervention_cost: 0.0,
+        residual_tail_risk: 0.0,
+        mechanistic_divergence: 0.0,
+        admissibility_margin: 0.0,
+        dominance_rank: 0,
+    }
+}
+
+struct IrAlternativeSetInfo {
+    id: i64,
+    span_start: i64,
+    span_end: i64,
+    frontier_id: i64,
+    audit_id: i64,
+    contest_id: i64,
+    inner_ty: TypeEntry,
+    candidate_start: i64,
+    candidate_count: i64,
+}
+
+fn ir_empty_alternative_set_info() -> IrAlternativeSetInfo {
+    IrAlternativeSetInfo {
+        id: -1,
+        span_start: 0,
+        span_end: 0,
+        frontier_id: -1,
+        audit_id: -1,
+        contest_id: -1,
+        inner_ty: empty_type_entry(),
+        candidate_start: -1,
+        candidate_count: 0,
+    }
+}
+
+struct IrAlternativeReasonWitnessInfo {
+    id: i64,
+    span_start: i64,
+    span_end: i64,
+    alternative_set_id: i64,
+    candidate_id: i64,
+}
+
+fn ir_empty_alternative_reason_witness_info() -> IrAlternativeReasonWitnessInfo {
+    IrAlternativeReasonWitnessInfo {
+        id: -1,
+        span_start: 0,
+        span_end: 0,
+        alternative_set_id: -1,
+        candidate_id: -1,
+    }
+}
+
 struct IrEpistemicSection {
-    model_families: [IrModelFamilyInfo; 128],
+    model_families: [IrModelFamilyInfo; 32],
     model_family_count: i64,
-    policies: [IrPolicyInfo; 128],
+    policies: [IrPolicyInfo; 32],
     policy_count: i64,
-    decision_policies: [IrDecisionPolicyInfo; 128],
+    decision_policies: [IrDecisionPolicyInfo; 32],
     decision_policy_count: i64,
-    deferral_policies: [IrDeferralPolicyInfo; 128],
+    deferral_policies: [IrDeferralPolicyInfo; 32],
     deferral_policy_count: i64,
-    acquisition_policies: [IrAcquisitionPolicyInfo; 128],
+    acquisition_policies: [IrAcquisitionPolicyInfo; 32],
     acquisition_policy_count: i64,
-    recourse_policies: [IrRecoursePolicyInfo; 128],
+    recourse_policies: [IrRecoursePolicyInfo; 32],
     recourse_policy_count: i64,
-    validations: [IrValidationPolicyInfo; 128],
+    validations: [IrValidationPolicyInfo; 32],
     validation_count: i64,
-    mechanistic_reports: [IrMechanisticReportInfo; 128],
+    mechanistic_reports: [IrMechanisticReportInfo; 32],
     mechanistic_report_count: i64,
-    posterior_weights: [IrPosteriorWeightsInfo; 128],
+    posterior_weights: [IrPosteriorWeightsInfo; 32],
     posterior_weights_count: i64,
-    counterexamples: [IrCounterexampleInfo; 128],
+    counterexamples: [IrCounterexampleInfo; 32],
     counterexample_count: i64,
-    audits: [IrAuditInfo; 128],
+    audits: [IrAuditInfo; 32],
     audit_count: i64,
-    contests: [IrContestInfo; 256],
+    contests: [IrContestInfo; 64],
     contest_count: i64,
-    contest_witnesses: [IrContestWitnessInfo; 256],
+    contest_witnesses: [IrContestWitnessInfo; 64],
     contest_witness_count: i64,
-    robust_proofs: [IrRobustProofInfo; 256],
+    robust_proofs: [IrRobustProofInfo; 64],
     robust_proof_count: i64,
-    decision_certificates: [IrDecisionCertificateInfo; 256],
+    decision_certificates: [IrDecisionCertificateInfo; 64],
     decision_certificate_count: i64,
-    deferred_certificates: [IrDeferredCertificateInfo; 256],
+    deferred_certificates: [IrDeferredCertificateInfo; 64],
     deferred_certificate_count: i64,
-    deferred_reason_witnesses: [IrDeferredReasonWitnessInfo; 256],
+    deferred_reason_witnesses: [IrDeferredReasonWitnessInfo; 64],
     deferred_reason_witness_count: i64,
-    acquisition_plans: [IrAcquisitionPlanInfo; 256],
+    acquisition_plans: [IrAcquisitionPlanInfo; 64],
     acquisition_plan_count: i64,
-    acquisition_reason_witnesses: [IrAcquisitionReasonWitnessInfo; 256],
+    acquisition_reason_witnesses: [IrAcquisitionReasonWitnessInfo; 64],
     acquisition_reason_witness_count: i64,
-    recourse_plans: [IrRecoursePlanInfo; 256],
+    recourse_plans: [IrRecoursePlanInfo; 64],
     recourse_plan_count: i64,
-    recourse_reason_witnesses: [IrRecourseReasonWitnessInfo; 256],
+    recourse_reason_witnesses: [IrRecourseReasonWitnessInfo; 64],
     recourse_reason_witness_count: i64,
-    validated_manifests: [IrValidatedManifestInfo; 256],
+    alternative_policies: [IrAlternativePolicyInfo; 32],
+    alternative_policy_count: i64,
+    alternative_frontiers: [IrAlternativeFrontierInfo; 64],
+    alternative_frontier_count: i64,
+    alternative_candidates: [IrAlternativeCandidateInfo; 128],
+    alternative_candidate_count: i64,
+    alternative_sets: [IrAlternativeSetInfo; 64],
+    alternative_set_count: i64,
+    alternative_reason_witnesses: [IrAlternativeReasonWitnessInfo; 64],
+    alternative_reason_witness_count: i64,
+    validated_manifests: [IrValidatedManifestInfo; 64],
     validated_manifest_count: i64,
 }
 
 fn ir_empty_epistemic_section() -> IrEpistemicSection {
     IrEpistemicSection {
-        model_families: [ir_empty_model_family_info(); 128],
+        model_families: [ir_empty_model_family_info(); 32],
         model_family_count: 0,
-        policies: [ir_empty_policy_info(); 128],
+        policies: [ir_empty_policy_info(); 32],
         policy_count: 0,
-        decision_policies: [ir_empty_decision_policy_info(); 128],
+        decision_policies: [ir_empty_decision_policy_info(); 32],
         decision_policy_count: 0,
-        deferral_policies: [ir_empty_deferral_policy_info(); 128],
+        deferral_policies: [ir_empty_deferral_policy_info(); 32],
         deferral_policy_count: 0,
-        acquisition_policies: [ir_empty_acquisition_policy_info(); 128],
+        acquisition_policies: [ir_empty_acquisition_policy_info(); 32],
         acquisition_policy_count: 0,
-        recourse_policies: [ir_empty_recourse_policy_info(); 128],
+        recourse_policies: [ir_empty_recourse_policy_info(); 32],
         recourse_policy_count: 0,
-        validations: [ir_empty_validation_policy_info(); 128],
+        validations: [ir_empty_validation_policy_info(); 32],
         validation_count: 0,
-        mechanistic_reports: [ir_empty_mechanistic_report_info(); 128],
+        mechanistic_reports: [ir_empty_mechanistic_report_info(); 32],
         mechanistic_report_count: 0,
-        posterior_weights: [ir_empty_posterior_weights_info(); 128],
+        posterior_weights: [ir_empty_posterior_weights_info(); 32],
         posterior_weights_count: 0,
-        counterexamples: [ir_empty_counterexample_info(); 128],
+        counterexamples: [ir_empty_counterexample_info(); 32],
         counterexample_count: 0,
-        audits: [ir_empty_audit_info(); 128],
+        audits: [ir_empty_audit_info(); 32],
         audit_count: 0,
-        contests: [ir_empty_contest_info(); 256],
+        contests: [ir_empty_contest_info(); 64],
         contest_count: 0,
-        contest_witnesses: [ir_empty_contest_witness_info(); 256],
+        contest_witnesses: [ir_empty_contest_witness_info(); 64],
         contest_witness_count: 0,
-        robust_proofs: [ir_empty_robust_proof_info(); 256],
+        robust_proofs: [ir_empty_robust_proof_info(); 64],
         robust_proof_count: 0,
-        decision_certificates: [ir_empty_decision_certificate_info(); 256],
+        decision_certificates: [ir_empty_decision_certificate_info(); 64],
         decision_certificate_count: 0,
-        deferred_certificates: [ir_empty_deferred_certificate_info(); 256],
+        deferred_certificates: [ir_empty_deferred_certificate_info(); 64],
         deferred_certificate_count: 0,
-        deferred_reason_witnesses: [ir_empty_deferred_reason_witness_info(); 256],
+        deferred_reason_witnesses: [ir_empty_deferred_reason_witness_info(); 64],
         deferred_reason_witness_count: 0,
-        acquisition_plans: [ir_empty_acquisition_plan_info(); 256],
+        acquisition_plans: [ir_empty_acquisition_plan_info(); 64],
         acquisition_plan_count: 0,
-        acquisition_reason_witnesses: [ir_empty_acquisition_reason_witness_info(); 256],
+        acquisition_reason_witnesses: [ir_empty_acquisition_reason_witness_info(); 64],
         acquisition_reason_witness_count: 0,
-        recourse_plans: [ir_empty_recourse_plan_info(); 256],
+        recourse_plans: [ir_empty_recourse_plan_info(); 64],
         recourse_plan_count: 0,
-        recourse_reason_witnesses: [ir_empty_recourse_reason_witness_info(); 256],
+        recourse_reason_witnesses: [ir_empty_recourse_reason_witness_info(); 64],
         recourse_reason_witness_count: 0,
-        validated_manifests: [ir_empty_validated_manifest_info(); 256],
+        alternative_policies: [ir_empty_alternative_policy_info(); 32],
+        alternative_policy_count: 0,
+        alternative_frontiers: [ir_empty_alternative_frontier_info(); 64],
+        alternative_frontier_count: 0,
+        alternative_candidates: [ir_empty_alternative_candidate_info(); 128],
+        alternative_candidate_count: 0,
+        alternative_sets: [ir_empty_alternative_set_info(); 64],
+        alternative_set_count: 0,
+        alternative_reason_witnesses: [ir_empty_alternative_reason_witness_info(); 64],
+        alternative_reason_witness_count: 0,
+        validated_manifests: [ir_empty_validated_manifest_info(); 64],
         validated_manifest_count: 0,
     }
 }
@@ -1574,6 +1744,27 @@ fn ir_plan_recourse(dst: i64, value_reg: i64, deferred_reg: i64, recourse_policy
     }
 }
 
+fn ir_propose_alternatives(dst: i64, value_reg: i64, evidence_reg: i64, frontier_reg: i64, alternative_set_id: i64) -> IrInstr {
+    let base = ir_instr_new(IrOpcode::IrProposeAlternatives)
+    IrInstr {
+        op: base.op,
+        dst: dst,
+        src1: value_reg,
+        src2: evidence_reg,
+        imm_i64: frontier_reg,
+        imm_f64: base.imm_f64,
+        label_id: alternative_set_id,
+        fn_id: base.fn_id,
+        field_idx: base.field_idx,
+        imm_flags: base.imm_flags,
+        bin_op: base.bin_op,
+        un_op: base.un_op,
+        name: base.name,
+        call_args: base.call_args,
+        arg_count: base.arg_count,
+    }
+}
+
 // Check if a name is "validate_manifest" (for IR lowering intercept)
 // "validate_manifest" = v(118) a(97) l(108) i(105) d(100) a(97) t(116) e(101)
 //                       _(95) m(109) a(97) n(110) i(105) f(102) e(101) s(115) t(116), len=17
@@ -1668,6 +1859,59 @@ fn ir_name_is_recourse_reason(n: Name) -> bool {
     && n.buf[10] == 101 as i8 && n.buf[11] == 97  as i8
     && n.buf[12] == 115 as i8 && n.buf[13] == 111 as i8
     && n.buf[14] == 110 as i8
+}
+
+fn ir_name_is_propose_alternatives(n: Name) -> bool {
+    n.len == 20
+    && n.buf[0]  == 112 as i8 && n.buf[1]  == 114 as i8
+    && n.buf[2]  == 111 as i8 && n.buf[3]  == 112 as i8
+    && n.buf[4]  == 111 as i8 && n.buf[5]  == 115 as i8
+    && n.buf[6]  == 101 as i8 && n.buf[7]  == 95  as i8
+    && n.buf[8]  == 97  as i8 && n.buf[9]  == 108 as i8
+    && n.buf[10] == 116 as i8 && n.buf[11] == 101 as i8
+    && n.buf[12] == 114 as i8 && n.buf[13] == 110 as i8
+    && n.buf[14] == 97  as i8 && n.buf[15] == 116 as i8
+    && n.buf[16] == 105 as i8 && n.buf[17] == 118 as i8
+    && n.buf[18] == 101 as i8 && n.buf[19] == 115 as i8
+}
+
+fn ir_name_is_alternative_count(n: Name) -> bool {
+    n.len == 17
+    && n.buf[0]  == 97  as i8 && n.buf[1]  == 108 as i8
+    && n.buf[2]  == 116 as i8 && n.buf[3]  == 101 as i8
+    && n.buf[4]  == 114 as i8 && n.buf[5]  == 110 as i8
+    && n.buf[6]  == 97  as i8 && n.buf[7]  == 116 as i8
+    && n.buf[8]  == 105 as i8 && n.buf[9]  == 118 as i8
+    && n.buf[10] == 101 as i8 && n.buf[11] == 95  as i8
+    && n.buf[12] == 99  as i8 && n.buf[13] == 111 as i8
+    && n.buf[14] == 117 as i8 && n.buf[15] == 110 as i8
+    && n.buf[16] == 116 as i8
+}
+
+fn ir_name_is_alternative_option(n: Name) -> bool {
+    n.len == 18
+    && n.buf[0]  == 97  as i8 && n.buf[1]  == 108 as i8
+    && n.buf[2]  == 116 as i8 && n.buf[3]  == 101 as i8
+    && n.buf[4]  == 114 as i8 && n.buf[5]  == 110 as i8
+    && n.buf[6]  == 97  as i8 && n.buf[7]  == 116 as i8
+    && n.buf[8]  == 105 as i8 && n.buf[9]  == 118 as i8
+    && n.buf[10] == 101 as i8 && n.buf[11] == 95  as i8
+    && n.buf[12] == 111 as i8 && n.buf[13] == 112 as i8
+    && n.buf[14] == 116 as i8 && n.buf[15] == 105 as i8
+    && n.buf[16] == 111 as i8 && n.buf[17] == 110 as i8
+}
+
+fn ir_name_is_alternative_reason(n: Name) -> bool {
+    n.len == 18
+    && n.buf[0]  == 97  as i8 && n.buf[1]  == 108 as i8
+    && n.buf[2]  == 116 as i8 && n.buf[3]  == 101 as i8
+    && n.buf[4]  == 114 as i8 && n.buf[5]  == 110 as i8
+    && n.buf[6]  == 97  as i8 && n.buf[7]  == 116 as i8
+    && n.buf[8]  == 105 as i8 && n.buf[9]  == 118 as i8
+    && n.buf[10] == 101 as i8 && n.buf[11] == 95  as i8
+    && n.buf[12] == 114 as i8 && n.buf[13] == 101 as i8
+    && n.buf[14] == 97  as i8 && n.buf[15] == 115 as i8
+    && n.buf[16] == 111 as i8 && n.buf[17] == 110 as i8
 }
 
 // IrLiftKnowledge: lift_knowledge(k: Knowledge<T>) → Contest<T> bridge (H5.4)

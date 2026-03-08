@@ -5,7 +5,8 @@
 //   EnumTable    — enum name + variants
 //   FnSigTable   — fn name + params + return type + method info
 
-use parser::ast::{CompareOp, Name, name_eq}
+use parser::ast::{BinaryOp, CompareOp, Expr, ExprKind, Name, UnaryOp, empty_path, name_eq}
+use lexer::span::Span
 
 // ============================================================
 // Field info (for struct fields)
@@ -870,6 +871,67 @@ impl RecoursePolicyTable {
     }
 }
 
+struct AlternativePolicyInfo {
+    name: Name,
+    target_ty: TypeEntry,
+    frontier_name: Name,
+    objective_metric_ids: [i64; 8],
+    objective_directions: [i64; 8], // 0=minimize, 1=maximize
+    objective_count: i64,
+    max_options: i64,
+}
+
+fn empty_alternative_policy_info() -> AlternativePolicyInfo {
+    AlternativePolicyInfo {
+        name: Name { buf: [0; 128], len: 0 },
+        target_ty: empty_type_entry(),
+        frontier_name: Name { buf: [0; 128], len: 0 },
+        objective_metric_ids: [-1; 8],
+        objective_directions: [0; 8],
+        objective_count: 0,
+        max_options: -1,
+    }
+}
+
+struct AlternativePolicyTable {
+    entries: [AlternativePolicyInfo; 16],
+    count: i64,
+}
+
+fn alternative_policy_table_new() -> AlternativePolicyTable {
+    AlternativePolicyTable {
+        entries: [empty_alternative_policy_info(); 16],
+        count: 0,
+    }
+}
+
+impl AlternativePolicyTable {
+    fn add(self, info: AlternativePolicyInfo) -> (AlternativePolicyTable, i64) with Mut, Panic, Div {
+        var tbl = self
+        let idx = tbl.count
+        if tbl.count < 16 {
+            tbl.entries[tbl.count] = info
+            tbl.count = tbl.count + 1
+        }
+        (tbl, idx)
+    }
+
+    fn find(self, name: Name) -> i64 with Mut, Panic, Div {
+        var i: i64 = 0
+        while i < self.count {
+            if name_eq(self.entries[i].name, name) {
+                return i
+            }
+            i = i + 1
+        }
+        -1
+    }
+
+    fn get(self, idx: i64) -> AlternativePolicyInfo with Panic, Div {
+        self.entries[idx]
+    }
+}
+
 struct MechanisticReportInfo {
     latent_state_divergence: f64,
     causal_decomposition_divergence: f64,
@@ -1650,6 +1712,259 @@ impl RecourseReasonWitnessTable {
     }
 
     fn get(self, idx: i64) -> RecourseReasonWitnessInfo with Panic, Div {
+        self.entries[idx]
+    }
+}
+
+struct AlternativeCandidateInfo {
+    span_start: i64,
+    span_end: i64,
+    frontier_id: i64,
+    name: Name,
+    via_recourse_policy_name: Name,
+    uses_via: bool,
+    value_expr: Expr,
+    value_repr: Name,
+    metric_known: [i64; 8],
+    metric_values: [f64; 8],
+    source_kind: i64,
+    source_policy_id: i64,
+    source_plan_id: i64,
+    strategy_name: Name,
+    route_name: Name,
+    audit_id: i64,
+    contest_id: i64,
+    dominance_rank: i64,
+}
+
+fn empty_alternative_candidate_info() -> AlternativeCandidateInfo {
+    AlternativeCandidateInfo {
+        span_start: 0,
+        span_end: 0,
+        frontier_id: -1,
+        name: Name { buf: [0; 128], len: 0 },
+        via_recourse_policy_name: Name { buf: [0; 128], len: 0 },
+        uses_via: false,
+        value_expr: Expr {
+            kind: ExprKind::ExprError,
+            span: Span { file_id: 0, start: 0, end: 0 },
+            int_val: 0,
+            float_val: 0.0,
+            name: Name { buf: [0; 128], len: 0 },
+            path: empty_path(),
+            bin_op: BinaryOp::OpAdd,
+            un_op: UnaryOp::OpNeg,
+            left: None,
+            right: None,
+            block: None,
+            else_expr: None,
+            args: None,
+            arms: None,
+            fields: None,
+            cast_type: None,
+            handler_block: None,
+            closure_params: None,
+            closure_return: None,
+            closure_effects: None,
+            closure_body: None,
+        },
+        value_repr: Name { buf: [0; 128], len: 0 },
+        metric_known: [0; 8],
+        metric_values: [0.0; 8],
+        source_kind: -1,
+        source_policy_id: -1,
+        source_plan_id: -1,
+        strategy_name: Name { buf: [0; 128], len: 0 },
+        route_name: Name { buf: [0; 128], len: 0 },
+        audit_id: -1,
+        contest_id: -1,
+        dominance_rank: -1,
+    }
+}
+
+struct AlternativeCandidateTable {
+    entries: [AlternativeCandidateInfo; 64],
+    count: i64,
+}
+
+fn alternative_candidate_table_new() -> AlternativeCandidateTable {
+    AlternativeCandidateTable {
+        entries: [empty_alternative_candidate_info(); 64],
+        count: 0,
+    }
+}
+
+impl AlternativeCandidateTable {
+    fn add(self, info: AlternativeCandidateInfo) -> (AlternativeCandidateTable, i64) with Mut, Panic, Div {
+        var tbl = self
+        let idx = tbl.count
+        if tbl.count < 64 {
+            tbl.entries[tbl.count] = info
+            tbl.count = tbl.count + 1
+        }
+        (tbl, idx)
+    }
+
+    fn get(self, idx: i64) -> AlternativeCandidateInfo with Panic, Div {
+        self.entries[idx]
+    }
+}
+
+struct AlternativeFrontierInfo {
+    name: Name,
+    target_kind: i64, // 0=Deferred<T>, 1=RecoursePlan<T>
+    target_ty: TypeEntry,
+    policy_id: i64,
+    candidate_ids: [i64; 16],
+    candidate_count: i64,
+}
+
+fn empty_alternative_frontier_info() -> AlternativeFrontierInfo {
+    AlternativeFrontierInfo {
+        name: Name { buf: [0; 128], len: 0 },
+        target_kind: -1,
+        target_ty: empty_type_entry(),
+        policy_id: -1,
+        candidate_ids: [-1; 16],
+        candidate_count: 0,
+    }
+}
+
+struct AlternativeFrontierTable {
+    entries: [AlternativeFrontierInfo; 32],
+    count: i64,
+}
+
+fn alternative_frontier_table_new() -> AlternativeFrontierTable {
+    AlternativeFrontierTable {
+        entries: [empty_alternative_frontier_info(); 32],
+        count: 0,
+    }
+}
+
+impl AlternativeFrontierTable {
+    fn add(self, info: AlternativeFrontierInfo) -> (AlternativeFrontierTable, i64) with Mut, Panic, Div {
+        var tbl = self
+        let idx = tbl.count
+        if tbl.count < 32 {
+            tbl.entries[tbl.count] = info
+            tbl.count = tbl.count + 1
+        }
+        (tbl, idx)
+    }
+
+    fn find(self, name: Name) -> i64 with Mut, Panic, Div {
+        var i: i64 = 0
+        while i < self.count {
+            if name_eq(self.entries[i].name, name) {
+                return i
+            }
+            i = i + 1
+        }
+        -1
+    }
+
+    fn get(self, idx: i64) -> AlternativeFrontierInfo with Panic, Div {
+        self.entries[idx]
+    }
+}
+
+struct AlternativeSetInfo {
+    span_start: i64,
+    span_end: i64,
+    source_kind: i64, // 0=Deferred<T>, 1=RecoursePlan<T>
+    frontier_id: i64,
+    deferred_certificate_id: i64,
+    recourse_plan_id: i64,
+    audit_id: i64,
+    contest_id: i64,
+    inner_ty: TypeEntry,
+    candidate_ids: [i64; 16],
+    candidate_count: i64,
+}
+
+fn empty_alternative_set_info() -> AlternativeSetInfo {
+    AlternativeSetInfo {
+        span_start: 0,
+        span_end: 0,
+        source_kind: -1,
+        frontier_id: -1,
+        deferred_certificate_id: -1,
+        recourse_plan_id: -1,
+        audit_id: -1,
+        contest_id: -1,
+        inner_ty: empty_type_entry(),
+        candidate_ids: [-1; 16],
+        candidate_count: 0,
+    }
+}
+
+struct AlternativeSetTable {
+    entries: [AlternativeSetInfo; 64],
+    count: i64,
+}
+
+fn alternative_set_table_new() -> AlternativeSetTable {
+    AlternativeSetTable {
+        entries: [empty_alternative_set_info(); 64],
+        count: 0,
+    }
+}
+
+impl AlternativeSetTable {
+    fn add(self, info: AlternativeSetInfo) -> (AlternativeSetTable, i64) with Mut, Panic, Div {
+        var tbl = self
+        let idx = tbl.count
+        if tbl.count < 64 {
+            tbl.entries[tbl.count] = info
+            tbl.count = tbl.count + 1
+        }
+        (tbl, idx)
+    }
+
+    fn get(self, idx: i64) -> AlternativeSetInfo with Panic, Div {
+        self.entries[idx]
+    }
+}
+
+struct AlternativeReasonWitnessInfo {
+    span_start: i64,
+    span_end: i64,
+    candidate_id: i64,
+}
+
+fn empty_alternative_reason_witness_info() -> AlternativeReasonWitnessInfo {
+    AlternativeReasonWitnessInfo {
+        span_start: 0,
+        span_end: 0,
+        candidate_id: -1,
+    }
+}
+
+struct AlternativeReasonWitnessTable {
+    entries: [AlternativeReasonWitnessInfo; 64],
+    count: i64,
+}
+
+fn alternative_reason_witness_table_new() -> AlternativeReasonWitnessTable {
+    AlternativeReasonWitnessTable {
+        entries: [empty_alternative_reason_witness_info(); 64],
+        count: 0,
+    }
+}
+
+impl AlternativeReasonWitnessTable {
+    fn add(self, info: AlternativeReasonWitnessInfo) -> (AlternativeReasonWitnessTable, i64) with Mut, Panic, Div {
+        var tbl = self
+        let idx = tbl.count
+        if tbl.count < 64 {
+            tbl.entries[tbl.count] = info
+            tbl.count = tbl.count + 1
+        }
+        (tbl, idx)
+    }
+
+    fn get(self, idx: i64) -> AlternativeReasonWitnessInfo with Panic, Div {
         self.entries[idx]
     }
 }

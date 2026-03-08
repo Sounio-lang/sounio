@@ -12,7 +12,7 @@ use parser::ast::*
 use lexer::mod::*
 use ir::ir::*
 use check::types::*
-use check::mod::{check_program, check_program_epistemic, check_program_boxed_ir_epistemic}
+use check::mod::{check_program_ok, check_program_epistemic_into}
 use resolve::mod::{resolve_modules, ResolveBatchResult}
 use resolve::resolve::*
 use resolve::imports::*
@@ -286,7 +286,17 @@ fn ir_epistemic_offset_id(id: i64, offset: i64) -> i64 {
     if id >= 0 { id + offset } else { id }
 }
 
-fn ir_merge_adjust_epistemic_instr(instr: IrInstr, contest_offset: i64, robust_offset: i64, decision_offset: i64, deferred_offset: i64, validated_offset: i64) -> IrInstr {
+fn ir_merge_adjust_epistemic_instr(
+    instr: IrInstr,
+    contest_offset: i64,
+    robust_offset: i64,
+    decision_offset: i64,
+    deferred_offset: i64,
+    validated_offset: i64,
+    acquisition_plan_offset: i64,
+    recourse_plan_offset: i64,
+    alternative_set_offset: i64
+) -> IrInstr {
     var out = instr
     if out.op == IrOpcode::IrContest || out.op == IrOpcode::IrLiftKnowledge {
         out.label_id = ir_epistemic_offset_id(out.label_id, contest_offset)
@@ -298,6 +308,12 @@ fn ir_merge_adjust_epistemic_instr(instr: IrInstr, contest_offset: i64, robust_o
         out.label_id = ir_epistemic_offset_id(out.label_id, deferred_offset)
     } else if out.op == IrOpcode::IrValidated {
         out.label_id = ir_epistemic_offset_id(out.label_id, validated_offset)
+    } else if out.op == IrOpcode::IrPlanAcquisition {
+        out.label_id = ir_epistemic_offset_id(out.label_id, acquisition_plan_offset)
+    } else if out.op == IrOpcode::IrPlanRecourse {
+        out.label_id = ir_epistemic_offset_id(out.label_id, recourse_plan_offset)
+    } else if out.op == IrOpcode::IrProposeAlternatives {
+        out.label_id = ir_epistemic_offset_id(out.label_id, alternative_set_offset)
     }
     out
 }
@@ -308,6 +324,8 @@ fn ir_merge_epistemic_sections(dst: IrEpistemicSection, src: IrEpistemicSection)
     let policy_offset = dst.policy_count
     let decision_policy_offset = dst.decision_policy_count
     let deferral_policy_offset = dst.deferral_policy_count
+    let acquisition_policy_offset = dst.acquisition_policy_count
+    let recourse_policy_offset = dst.recourse_policy_count
     let validation_offset = dst.validation_count
     let mechanistic_offset = dst.mechanistic_report_count
     let posterior_weights_offset = dst.posterior_weights_count
@@ -319,6 +337,15 @@ fn ir_merge_epistemic_sections(dst: IrEpistemicSection, src: IrEpistemicSection)
     let decision_certificate_offset = dst.decision_certificate_count
     let deferred_certificate_offset = dst.deferred_certificate_count
     let deferred_reason_witness_offset = dst.deferred_reason_witness_count
+    let acquisition_plan_offset = dst.acquisition_plan_count
+    let acquisition_reason_witness_offset = dst.acquisition_reason_witness_count
+    let recourse_plan_offset = dst.recourse_plan_count
+    let recourse_reason_witness_offset = dst.recourse_reason_witness_count
+    let alternative_policy_offset = dst.alternative_policy_count
+    let alternative_frontier_offset = dst.alternative_frontier_count
+    let alternative_candidate_offset = dst.alternative_candidate_count
+    let alternative_set_offset = dst.alternative_set_count
+    let alternative_reason_witness_offset = dst.alternative_reason_witness_count
     let validated_offset = dst.validated_manifest_count
 
     var i: i64 = 0
@@ -354,6 +381,24 @@ fn ir_merge_epistemic_sections(dst: IrEpistemicSection, src: IrEpistemicSection)
         info.id = merged.deferral_policy_count
         merged.deferral_policies[merged.deferral_policy_count as usize] = info
         merged.deferral_policy_count = merged.deferral_policy_count + 1
+        i = i + 1
+    }
+
+    i = 0
+    while i < src.acquisition_policy_count && merged.acquisition_policy_count < IR_MAX_EPI_ACQUISITION_POLICIES {
+        var info = src.acquisition_policies[i]
+        info.id = merged.acquisition_policy_count
+        merged.acquisition_policies[merged.acquisition_policy_count as usize] = info
+        merged.acquisition_policy_count = merged.acquisition_policy_count + 1
+        i = i + 1
+    }
+
+    i = 0
+    while i < src.recourse_policy_count && merged.recourse_policy_count < IR_MAX_EPI_RECOURSE_POLICIES {
+        var info = src.recourse_policies[i]
+        info.id = merged.recourse_policy_count
+        merged.recourse_policies[merged.recourse_policy_count as usize] = info
+        merged.recourse_policy_count = merged.recourse_policy_count + 1
         i = i + 1
     }
 
@@ -491,6 +536,114 @@ fn ir_merge_epistemic_sections(dst: IrEpistemicSection, src: IrEpistemicSection)
         i = i + 1
     }
 
+    i = 0
+    while i < src.acquisition_plan_count && merged.acquisition_plan_count < IR_MAX_EPI_ACQUISITION_PLANS {
+        var info = src.acquisition_plans[i]
+        info.id = merged.acquisition_plan_count
+        info.deferred_certificate_id = ir_epistemic_offset_id(info.deferred_certificate_id, deferred_certificate_offset)
+        info.acquisition_policy_id = ir_epistemic_offset_id(info.acquisition_policy_id, acquisition_policy_offset)
+        info.audit_id = ir_epistemic_offset_id(info.audit_id, audit_offset)
+        info.contest_id = ir_epistemic_offset_id(info.contest_id, contest_offset)
+        merged.acquisition_plans[merged.acquisition_plan_count as usize] = info
+        merged.acquisition_plan_count = merged.acquisition_plan_count + 1
+        i = i + 1
+    }
+
+    i = 0
+    while i < src.acquisition_reason_witness_count && merged.acquisition_reason_witness_count < IR_MAX_EPI_ACQUISITION_REASON_WITNESSES {
+        var info = src.acquisition_reason_witnesses[i]
+        info.id = merged.acquisition_reason_witness_count
+        info.acquisition_plan_id = ir_epistemic_offset_id(info.acquisition_plan_id, acquisition_plan_offset)
+        merged.acquisition_reason_witnesses[merged.acquisition_reason_witness_count as usize] = info
+        merged.acquisition_reason_witness_count = merged.acquisition_reason_witness_count + 1
+        i = i + 1
+    }
+
+    i = 0
+    while i < src.recourse_plan_count && merged.recourse_plan_count < IR_MAX_EPI_RECOURSE_PLANS {
+        var info = src.recourse_plans[i]
+        info.id = merged.recourse_plan_count
+        info.deferred_certificate_id = ir_epistemic_offset_id(info.deferred_certificate_id, deferred_certificate_offset)
+        info.recourse_policy_id = ir_epistemic_offset_id(info.recourse_policy_id, recourse_policy_offset)
+        info.audit_id = ir_epistemic_offset_id(info.audit_id, audit_offset)
+        info.contest_id = ir_epistemic_offset_id(info.contest_id, contest_offset)
+        merged.recourse_plans[merged.recourse_plan_count as usize] = info
+        merged.recourse_plan_count = merged.recourse_plan_count + 1
+        i = i + 1
+    }
+
+    i = 0
+    while i < src.recourse_reason_witness_count && merged.recourse_reason_witness_count < IR_MAX_EPI_RECOURSE_REASON_WITNESSES {
+        var info = src.recourse_reason_witnesses[i]
+        info.id = merged.recourse_reason_witness_count
+        info.recourse_plan_id = ir_epistemic_offset_id(info.recourse_plan_id, recourse_plan_offset)
+        merged.recourse_reason_witnesses[merged.recourse_reason_witness_count as usize] = info
+        merged.recourse_reason_witness_count = merged.recourse_reason_witness_count + 1
+        i = i + 1
+    }
+
+    i = 0
+    while i < src.alternative_policy_count && merged.alternative_policy_count < IR_MAX_EPI_ALTERNATIVE_POLICIES {
+        var info = src.alternative_policies[i]
+        info.id = merged.alternative_policy_count
+        merged.alternative_policies[merged.alternative_policy_count as usize] = info
+        merged.alternative_policy_count = merged.alternative_policy_count + 1
+        i = i + 1
+    }
+
+    i = 0
+    while i < src.alternative_frontier_count && merged.alternative_frontier_count < IR_MAX_EPI_ALTERNATIVE_FRONTIERS {
+        var info = src.alternative_frontiers[i]
+        info.id = merged.alternative_frontier_count
+        info.alternative_policy_id = ir_epistemic_offset_id(info.alternative_policy_id, alternative_policy_offset)
+        info.audit_id = ir_epistemic_offset_id(info.audit_id, audit_offset)
+        info.contest_id = ir_epistemic_offset_id(info.contest_id, contest_offset)
+        info.source_policy_id = ir_epistemic_offset_id(info.source_policy_id, recourse_policy_offset)
+        info.source_plan_id = ir_epistemic_offset_id(info.source_plan_id, recourse_plan_offset)
+        info.candidate_start = ir_epistemic_offset_id(info.candidate_start, alternative_candidate_offset)
+        merged.alternative_frontiers[merged.alternative_frontier_count as usize] = info
+        merged.alternative_frontier_count = merged.alternative_frontier_count + 1
+        i = i + 1
+    }
+
+    i = 0
+    while i < src.alternative_candidate_count && merged.alternative_candidate_count < IR_MAX_EPI_ALTERNATIVE_CANDIDATES {
+        var info = src.alternative_candidates[i]
+        info.id = merged.alternative_candidate_count
+        info.frontier_id = ir_epistemic_offset_id(info.frontier_id, alternative_frontier_offset)
+        info.source_policy_id = ir_epistemic_offset_id(info.source_policy_id, recourse_policy_offset)
+        info.source_plan_id = ir_epistemic_offset_id(info.source_plan_id, recourse_plan_offset)
+        info.audit_id = ir_epistemic_offset_id(info.audit_id, audit_offset)
+        info.contest_id = ir_epistemic_offset_id(info.contest_id, contest_offset)
+        merged.alternative_candidates[merged.alternative_candidate_count as usize] = info
+        merged.alternative_candidate_count = merged.alternative_candidate_count + 1
+        i = i + 1
+    }
+
+    i = 0
+    while i < src.alternative_set_count && merged.alternative_set_count < IR_MAX_EPI_ALTERNATIVE_SETS {
+        var info = src.alternative_sets[i]
+        info.id = merged.alternative_set_count
+        info.frontier_id = ir_epistemic_offset_id(info.frontier_id, alternative_frontier_offset)
+        info.audit_id = ir_epistemic_offset_id(info.audit_id, audit_offset)
+        info.contest_id = ir_epistemic_offset_id(info.contest_id, contest_offset)
+        info.candidate_start = ir_epistemic_offset_id(info.candidate_start, alternative_candidate_offset)
+        merged.alternative_sets[merged.alternative_set_count as usize] = info
+        merged.alternative_set_count = merged.alternative_set_count + 1
+        i = i + 1
+    }
+
+    i = 0
+    while i < src.alternative_reason_witness_count && merged.alternative_reason_witness_count < IR_MAX_EPI_ALTERNATIVE_REASON_WITNESSES {
+        var info = src.alternative_reason_witnesses[i]
+        info.id = merged.alternative_reason_witness_count
+        info.alternative_set_id = ir_epistemic_offset_id(info.alternative_set_id, alternative_set_offset)
+        info.candidate_id = ir_epistemic_offset_id(info.candidate_id, alternative_candidate_offset)
+        merged.alternative_reason_witnesses[merged.alternative_reason_witness_count as usize] = info
+        merged.alternative_reason_witness_count = merged.alternative_reason_witness_count + 1
+        i = i + 1
+    }
+
     merged
 }
 
@@ -507,6 +660,9 @@ fn ir_merge_modules(dst: IrModule, src: IrModule) -> IrModule with Mut, Panic, D
     let decision_offset = dst.epistemic.decision_certificate_count
     let deferred_offset = dst.epistemic.deferred_certificate_count
     let validated_offset = dst.epistemic.validated_manifest_count
+    let acquisition_plan_offset = dst.epistemic.acquisition_plan_count
+    let recourse_plan_offset = dst.epistemic.recourse_plan_count
+    let alternative_set_offset = dst.epistemic.alternative_set_count
 
     // Copy functions
     var fi: i64 = 0
@@ -520,7 +676,17 @@ fn ir_merge_modules(dst: IrModule, src: IrModule) -> IrModule with Mut, Panic, D
                     func.instrs[ii].fn_id = func.instrs[ii].fn_id + fn_offset
                 }
             }
-            func.instrs[ii] = ir_merge_adjust_epistemic_instr(func.instrs[ii], contest_offset, robust_offset, decision_offset, deferred_offset, validated_offset)
+            func.instrs[ii] = ir_merge_adjust_epistemic_instr(
+                func.instrs[ii],
+                contest_offset,
+                robust_offset,
+                decision_offset,
+                deferred_offset,
+                validated_offset,
+                acquisition_plan_offset,
+                recourse_plan_offset,
+                alternative_set_offset
+            )
             ii = ii + 1
         }
         merged.functions[merged.fn_count] = func
@@ -666,8 +832,8 @@ fn preflight_multimodule_frontend(main_path: string) -> MultiModuleFrontendResul
         print("Type checking module ")
         print_int(i)
         print("\n")
-        let check_result = check_program(programs[i])
-        if check_result.had_error {
+        var epistemic = ir_empty_epistemic_section()
+        if !check_program_epistemic_into(programs[i], &!epistemic) {
             print("Type check failed for module ")
             print_int(i)
             print("\n")
@@ -736,12 +902,12 @@ fn load_multimodule_ir(main_path: string) -> MultiModuleIrResult with IO, Mut, D
         return multimodule_ir_error("no_modules_loaded")
     }
 
-    let seed_check_result = check_program_epistemic(programs[0])
-    if seed_check_result.had_error {
+    var seed_epistemic = ir_empty_epistemic_section()
+    if !check_program_epistemic_into(programs[0], &!seed_epistemic) {
         print("Type check failed during IR lowering for module 0\n")
         return multimodule_ir_error("type_check_failed")
     }
-    let seed_lower_result = lower_program_to_ir_with_epistemic(programs[0], seed_check_result.epistemic)
+    let seed_lower_result = lower_program_to_ir_with_epistemic(programs[0], seed_epistemic)
     if seed_lower_result.had_error {
         print("IR lowering failed for module 0\n")
         return multimodule_ir_error("ir_lowering_failed")
@@ -750,14 +916,14 @@ fn load_multimodule_ir(main_path: string) -> MultiModuleIrResult with IO, Mut, D
 
     i = 1
     while i < loaded {
-        let check_result = check_program_epistemic(programs[i])
-        if check_result.had_error {
+        var epistemic = ir_empty_epistemic_section()
+        if !check_program_epistemic_into(programs[i], &!epistemic) {
             print("Type check failed during IR lowering for module ")
             print_int(i)
             print("\n")
             return multimodule_ir_error("type_check_failed")
         }
-        let lower_result = lower_program_to_ir_with_epistemic(programs[i], check_result.epistemic)
+        let lower_result = lower_program_to_ir_with_epistemic(programs[i], epistemic)
         if lower_result.had_error {
             print("IR lowering failed for module ")
             print_int(i)
@@ -828,14 +994,21 @@ fn load_multimodule_epistemic_into(main_path: string, out: &! IrEpistemicSection
         }
     }
 
+    if loaded == 1 {
+        if !check_program_epistemic_into(programs[0], out) {
+            return multimodule_frontend_error("type_check_failed")
+        }
+        return multimodule_frontend_ok()
+    }
+
     var merged_epistemic = ir_empty_epistemic_section()
     i = 0
     while i < loaded {
-        let check_result = check_program_boxed_ir_epistemic(programs[i])
-        if check_result.had_error {
+        var epistemic = ir_empty_epistemic_section()
+        if !check_program_epistemic_into(programs[i], &!epistemic) {
             return multimodule_frontend_error("type_check_failed")
         }
-        merged_epistemic = ir_merge_epistemic_sections(merged_epistemic, *check_result.epistemic)
+        merged_epistemic = ir_merge_epistemic_sections(merged_epistemic, epistemic)
         i = i + 1
     }
 

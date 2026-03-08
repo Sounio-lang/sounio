@@ -14,7 +14,6 @@ use parser::ast::*
 use ir::ir::*
 use check::dependent::*
 use check::types::*
-use check::mod::{check_program_boxed_ir_epistemic}
 use io::file_write::*
 use native::encode::*
 use native::elf::*
@@ -29,7 +28,7 @@ use resolve::imports::*
 use resolve::symbol::*
 use resolve::scope::*
 use resolve::mod::{resolve_modules, ResolveBatchResult}
-use module_loader::{compile_multimodule_native, compile_multimodule_native_with_ir, load_multimodule_ir, preflight_multimodule_frontend, load_module_file, extract_imports_from_ast, path_directory, use_path_to_file_path, visited_contains, ir_merge_epistemic_sections, empty_program, file_exists}
+use module_loader::{compile_multimodule_native, compile_multimodule_native_with_ir, load_multimodule_ir, preflight_multimodule_frontend, load_multimodule_epistemic_into, load_module_file, extract_imports_from_ast, path_directory, use_path_to_file_path, visited_contains, ir_merge_epistemic_sections, empty_program, file_exists}
 use parser::parser::{parser_last_error_count}
 
 // ============================================================================
@@ -298,6 +297,43 @@ fn run_probe_frontend(args: ArgList, flag_index: i64) with IO, Mut, Panic, Div, 
         print("\n")
     }
     panic("probe_frontend failed")
+}
+
+fn run_probe_epistemic_check(args: ArgList, flag_index: i64) with IO, Mut, Panic, Div, Alloc {
+    if flag_index + 1 >= args.len {
+        panic("probe_epistemic_check: missing source file argument")
+    }
+    let source_path = arg_list_get(args, flag_index + 1)
+    println("probe_epistemic_check: begin")
+    print("probe_epistemic_check: source=")
+    print(source_path)
+    print("\n")
+
+    var merged_epistemic = ir_empty_epistemic_section()
+    let frontend_result = load_multimodule_epistemic_into(source_path, &!merged_epistemic)
+    if frontend_result.ok {
+        print("probe_epistemic_check: ok")
+        print(" contests=")
+        print_int(merged_epistemic.contest_count)
+        print(" robust=")
+        print_int(merged_epistemic.robust_proof_count)
+        print(" deferred=")
+        print_int(merged_epistemic.deferred_certificate_count)
+        print(" acquisition=")
+        print_int(merged_epistemic.acquisition_plan_count)
+        print(" recourse=")
+        print_int(merged_epistemic.recourse_plan_count)
+        print("\n")
+        return
+    }
+
+    println("probe_epistemic_check: fail")
+    if str_len(frontend_result.error_msg) > 0 {
+        print("probe_epistemic_check: error=")
+        print(frontend_result.error_msg)
+        print("\n")
+    }
+    panic("probe_epistemic_check failed")
 }
 
 fn log_wasm_dispatch(source_path: string, output_path: string) with IO {
@@ -609,6 +645,7 @@ fn print_help() with IO {
     println("  --probe-compile-capture <source.sio>  Probe compile error capture path")
     println("  --probe-cc <source.sio>  Short alias for probe-compile-capture")
     println("  --probe-frontend <source.sio>  Probe parse/resolve/typecheck path")
+    println("  --probe-epistemic-check <source.sio>  Probe epistemic parse/resolve/typecheck without manifest JSON")
     println("  --probe-load-ir <source.sio>  Probe parse/resolve/typecheck/IR lowering path")
     println("  --probe-wasm-dispatch <source.sio> [out.wasm]  Probe wasm dispatch marker path")
     println("  -h, --help             Print this help message")
@@ -792,6 +829,13 @@ fn compiler_manifest_print_type_name(ty: TypeEntry) with IO, Mut, Panic, Div, Al
         || ty.kind == TypeKind::TyPolicy
         || ty.kind == TypeKind::TyDecisionPolicy
         || ty.kind == TypeKind::TyDeferralPolicy
+        || ty.kind == TypeKind::TyAcquisitionPolicy
+        || ty.kind == TypeKind::TyAcquisitionPlan
+        || ty.kind == TypeKind::TyRecoursePolicy
+        || ty.kind == TypeKind::TyRecoursePlan
+        || ty.kind == TypeKind::TyAlternativePolicy
+        || ty.kind == TypeKind::TyAlternativeSet
+        || ty.kind == TypeKind::TyAlternativeOption
         || ty.kind == TypeKind::TyContest
         || ty.kind == TypeKind::TyRobust
         || ty.kind == TypeKind::TyIntervention
@@ -804,6 +848,13 @@ fn compiler_manifest_print_type_name(ty: TypeEntry) with IO, Mut, Panic, Div, Al
         else if ty.kind == TypeKind::TyPolicy { print("Policy<") }
         else if ty.kind == TypeKind::TyDecisionPolicy { print("DecisionPolicy<") }
         else if ty.kind == TypeKind::TyDeferralPolicy { print("DeferralPolicy<") }
+        else if ty.kind == TypeKind::TyAcquisitionPolicy { print("AcquisitionPolicy<") }
+        else if ty.kind == TypeKind::TyAcquisitionPlan { print("AcquisitionPlan<") }
+        else if ty.kind == TypeKind::TyRecoursePolicy { print("RecoursePolicy<") }
+        else if ty.kind == TypeKind::TyRecoursePlan { print("RecoursePlan<") }
+        else if ty.kind == TypeKind::TyAlternativePolicy { print("AlternativePolicy<") }
+        else if ty.kind == TypeKind::TyAlternativeSet { print("AlternativeSet<") }
+        else if ty.kind == TypeKind::TyAlternativeOption { print("AlternativeOption<") }
         else if ty.kind == TypeKind::TyContest { print("Contest<") }
         else if ty.kind == TypeKind::TyRobust { print("Robust<") }
         else if ty.kind == TypeKind::TyIntervention { print("Intervention<") }
@@ -828,6 +879,8 @@ fn compiler_manifest_metric_name(metric_id: i64) -> string {
     else if metric_id == 2 { "max_tail_risk" }
     else if metric_id == 3 { "mechanistic_divergence" }
     else if metric_id == 4 { "identifiability_floor" }
+    else if metric_id == 5 { "counterexample_present" }
+    else if metric_id == 6 { "deferred_reason" }
     else { "unknown_metric" }
 }
 
@@ -845,6 +898,38 @@ fn compiler_manifest_deferral_policy_name(ep: &IrEpistemicSection, id: i64) -> N
 
 fn compiler_manifest_deferral_route_name(ep: &IrEpistemicSection, id: i64) -> Name with Panic, Div {
     if id >= 0 && id < (*ep).deferral_policy_count { (*ep).deferral_policies[id].route_name } else { compiler_manifest_empty_name() }
+}
+
+fn compiler_manifest_acquisition_policy_name(ep: &IrEpistemicSection, id: i64) -> Name with Panic, Div {
+    if id >= 0 && id < (*ep).acquisition_policy_count { (*ep).acquisition_policies[id].name } else { compiler_manifest_empty_name() }
+}
+
+fn compiler_manifest_acquisition_objective_name(ep: &IrEpistemicSection, id: i64) -> Name with Panic, Div {
+    if id >= 0 && id < (*ep).acquisition_policy_count { (*ep).acquisition_policies[id].objective_name } else { compiler_manifest_empty_name() }
+}
+
+fn compiler_manifest_acquisition_route_name(ep: &IrEpistemicSection, id: i64) -> Name with Panic, Div {
+    if id >= 0 && id < (*ep).acquisition_policy_count { (*ep).acquisition_policies[id].route_name } else { compiler_manifest_empty_name() }
+}
+
+fn compiler_manifest_recourse_policy_name(ep: &IrEpistemicSection, id: i64) -> Name with Panic, Div {
+    if id >= 0 && id < (*ep).recourse_policy_count { (*ep).recourse_policies[id].name } else { compiler_manifest_empty_name() }
+}
+
+fn compiler_manifest_recourse_strategy_name(ep: &IrEpistemicSection, id: i64) -> Name with Panic, Div {
+    if id >= 0 && id < (*ep).recourse_policy_count { (*ep).recourse_policies[id].strategy_name } else { compiler_manifest_empty_name() }
+}
+
+fn compiler_manifest_recourse_route_name(ep: &IrEpistemicSection, id: i64) -> Name with Panic, Div {
+    if id >= 0 && id < (*ep).recourse_policy_count { (*ep).recourse_policies[id].route_name } else { compiler_manifest_empty_name() }
+}
+
+fn compiler_manifest_alternative_policy_name(ep: &IrEpistemicSection, id: i64) -> Name with Panic, Div {
+    if id >= 0 && id < (*ep).alternative_policy_count { (*ep).alternative_policies[id].name } else { compiler_manifest_empty_name() }
+}
+
+fn compiler_manifest_alternative_frontier_name(ep: &IrEpistemicSection, id: i64) -> Name with Panic, Div {
+    if id >= 0 && id < (*ep).alternative_frontier_count { (*ep).alternative_frontiers[id].name } else { compiler_manifest_empty_name() }
 }
 
 fn compiler_manifest_policy_level_name(ep: &IrEpistemicSection, id: i64) -> Name with Panic, Div {
@@ -881,6 +966,27 @@ fn compiler_manifest_deferral_reason_name(code: i64) -> string {
     else { "PolicyIncomplete" }
 }
 
+fn compiler_manifest_alternative_source_kind_name(kind: i64) -> string {
+    if kind == 0 { "DeferredRoute" }
+    else if kind == 1 { "RecoursePlan" }
+    else { "UnknownSource" }
+}
+
+fn compiler_manifest_compare_op_name(op: CompareOp) -> string {
+    if op == CompareOp::CmpEq { "==" }
+    else if op == CompareOp::CmpLt { "<" }
+    else if op == CompareOp::CmpLe { "<=" }
+    else if op == CompareOp::CmpGt { ">" }
+    else if op == CompareOp::CmpGe { ">=" }
+    else { "==" }
+}
+
+fn compiler_manifest_threshold_kind_name(kind: i64) -> string {
+    if kind == 1 { "bool" }
+    else if kind == 2 { "name" }
+    else { "f64" }
+}
+
 fn compiler_manifest_print_name_array(names: [Name; 16], count: i64) with IO, Mut, Panic, Div {
     print("[")
     var i: i64 = 0
@@ -895,18 +1001,229 @@ fn compiler_manifest_print_name_array(names: [Name; 16], count: i64) with IO, Mu
 fn compiler_manifest_print_metric_snapshot(metric_known: [i64; 8], metric_values: [f64; 8]) with IO, Mut, Panic, Div {
     print("{")
     var emitted: i64 = 0
-    var i: i64 = 0
-    while i < 5 {
-        if metric_known[i] == 1 {
-            if emitted > 0 { print(", ") }
-            compiler_manifest_print_string_json(compiler_manifest_metric_name(i))
-            print(": ")
-            compiler_manifest_print_f64_json(metric_values[i])
-            emitted = emitted + 1
-        }
-        i = i + 1
+    if metric_known[0] == 1 {
+        compiler_manifest_print_string_json(compiler_manifest_metric_name(0))
+        print(": ")
+        compiler_manifest_print_f64_json(metric_values[0])
+        emitted = 1
+    }
+    if metric_known[1] == 1 {
+        if emitted > 0 { print(", ") }
+        compiler_manifest_print_string_json(compiler_manifest_metric_name(1))
+        print(": ")
+        compiler_manifest_print_f64_json(metric_values[1])
+        emitted = emitted + 1
+    }
+    if metric_known[2] == 1 {
+        if emitted > 0 { print(", ") }
+        compiler_manifest_print_string_json(compiler_manifest_metric_name(2))
+        print(": ")
+        compiler_manifest_print_f64_json(metric_values[2])
+        emitted = emitted + 1
+    }
+    if metric_known[3] == 1 {
+        if emitted > 0 { print(", ") }
+        compiler_manifest_print_string_json(compiler_manifest_metric_name(3))
+        print(": ")
+        compiler_manifest_print_f64_json(metric_values[3])
+        emitted = emitted + 1
+    }
+    if metric_known[4] == 1 {
+        if emitted > 0 { print(", ") }
+        compiler_manifest_print_string_json(compiler_manifest_metric_name(4))
+        print(": ")
+        compiler_manifest_print_f64_json(metric_values[4])
+        emitted = emitted + 1
+    }
+    if metric_known[5] == 1 {
+        if emitted > 0 { print(", ") }
+        compiler_manifest_print_string_json(compiler_manifest_metric_name(5))
+        print(": ")
+        compiler_manifest_print_f64_json(metric_values[5])
+        emitted = emitted + 1
+    }
+    if metric_known[6] == 1 {
+        if emitted > 0 { print(", ") }
+        compiler_manifest_print_string_json(compiler_manifest_metric_name(6))
+        print(": ")
+        compiler_manifest_print_f64_json(metric_values[6])
     }
     print("}")
+}
+
+fn compiler_manifest_print_policy_requirement_json(req: IrPolicyRequirementInfo) with IO, Mut, Panic, Div {
+    print("{\"metric\": ")
+    compiler_manifest_print_name_json(req.metric_name)
+    print(", \"operator\": ")
+    compiler_manifest_print_string_json(compiler_manifest_compare_op_name(req.op))
+    print(", \"threshold_kind\": ")
+    compiler_manifest_print_string_json(compiler_manifest_threshold_kind_name(req.threshold_kind))
+    print(", \"threshold\": ")
+    if req.threshold_kind == 1 {
+        if req.bool_threshold { print("true") } else { print("false") }
+    } else if req.threshold_kind == 2 {
+        compiler_manifest_print_name_json(req.name_threshold)
+    } else {
+        compiler_manifest_print_f64_json(req.threshold)
+    }
+    print("}")
+}
+
+fn compiler_manifest_print_recourse_policies(ep: &IrEpistemicSection) with IO, Mut, Panic, Div, Alloc {
+    print("    \"recourse_policies\": [\n")
+    let recourse_policy_count: i64 = (*ep).recourse_policy_count
+    var i: i64 = 0
+    while i < recourse_policy_count {
+        if i > 0 { print(",\n") }
+        let recourse_policy_id: i64 = (*ep).recourse_policies[i].id
+        print("      {\"id\": ")
+        print_int(recourse_policy_id)
+        print(", \"name\": ")
+        compiler_manifest_print_name_json(compiler_manifest_recourse_policy_name(ep, recourse_policy_id))
+        print(", \"target_type\": \"")
+        compiler_manifest_print_type_name((*ep).recourse_policies[i].target_ty)
+        print("\", \"strategy_name\": ")
+        compiler_manifest_print_name_json(compiler_manifest_recourse_strategy_name(ep, recourse_policy_id))
+        print(", \"route_name\": ")
+        compiler_manifest_print_name_json(compiler_manifest_recourse_route_name(ep, recourse_policy_id))
+        print(", \"requirements\": [")
+        var rk: i64 = 0
+        while rk < (*ep).recourse_policies[i].requirement_count && rk < 8 {
+            if rk > 0 { print(", ") }
+            compiler_manifest_print_policy_requirement_json((*ep).recourse_policies[i].requirements[rk])
+            rk = rk + 1
+        }
+        print("]}")
+        i = i + 1
+    }
+    print("\n    ],\n")
+}
+
+fn compiler_manifest_print_model_families(ep: &IrEpistemicSection) with IO, Mut, Panic, Div, Alloc {
+    print("    \"model_families\": [\n")
+    var i: i64 = 0
+    while i < (*ep).model_family_count {
+        if i > 0 { print(",\n") }
+        print("      {\"id\": ")
+        print_int((*ep).model_families[i].id)
+        print(", \"name\": ")
+        compiler_manifest_print_name_json((*ep).model_families[i].name)
+        print(", \"input_type\": \"")
+        compiler_manifest_print_type_name((*ep).model_families[i].input_ty)
+        print("\", \"output_type\": \"")
+        compiler_manifest_print_type_name((*ep).model_families[i].output_ty)
+        print("\", \"models\": ")
+        compiler_manifest_print_name_array((*ep).model_families[i].model_names, (*ep).model_families[i].model_count)
+        print("}")
+        i = i + 1
+    }
+    print("\n    ],\n")
+}
+
+fn compiler_manifest_print_policies(ep: &IrEpistemicSection) with IO, Mut, Panic, Div, Alloc {
+    print("    \"policies\": [\n")
+    var i: i64 = 0
+    while i < (*ep).policy_count {
+        if i > 0 { print(",\n") }
+        print("      {\"id\": ")
+        print_int((*ep).policies[i].id)
+        print(", \"name\": ")
+        compiler_manifest_print_name_json((*ep).policies[i].name)
+        print(", \"target_type\": \"")
+        compiler_manifest_print_type_name((*ep).policies[i].target_ty)
+        print("\", \"level\": ")
+        compiler_manifest_print_name_json((*ep).policies[i].level_name)
+        print(", \"scope\": ")
+        compiler_manifest_print_name_json((*ep).policies[i].scope_name)
+        print(", \"requirements\": [")
+        var j: i64 = 0
+        while j < (*ep).policies[i].requirement_count && j < 8 {
+            if j > 0 { print(", ") }
+            compiler_manifest_print_policy_requirement_json((*ep).policies[i].requirements[j])
+            j = j + 1
+        }
+        print("]}")
+        i = i + 1
+    }
+    print("\n    ],\n")
+}
+
+fn compiler_manifest_print_decision_policies(ep: &IrEpistemicSection) with IO, Mut, Panic, Div, Alloc {
+    print("    \"decision_policies\": [\n")
+    var i: i64 = 0
+    while i < (*ep).decision_policy_count {
+        if i > 0 { print(",\n") }
+        print("      {\"id\": ")
+        print_int((*ep).decision_policies[i].id)
+        print(", \"name\": ")
+        compiler_manifest_print_name_json((*ep).decision_policies[i].name)
+        print(", \"target_type\": \"")
+        compiler_manifest_print_type_name((*ep).decision_policies[i].target_ty)
+        print("\", \"requirements\": [")
+        var dj: i64 = 0
+        while dj < (*ep).decision_policies[i].requirement_count && dj < 8 {
+            if dj > 0 { print(", ") }
+            compiler_manifest_print_policy_requirement_json((*ep).decision_policies[i].requirements[dj])
+            dj = dj + 1
+        }
+        print("]}")
+        i = i + 1
+    }
+    print("\n    ],\n")
+}
+
+fn compiler_manifest_print_deferral_policies(ep: &IrEpistemicSection) with IO, Mut, Panic, Div, Alloc {
+    print("    \"deferral_policies\": [\n")
+    var i: i64 = 0
+    while i < (*ep).deferral_policy_count {
+        if i > 0 { print(",\n") }
+        print("      {\"id\": ")
+        print_int((*ep).deferral_policies[i].id)
+        print(", \"name\": ")
+        compiler_manifest_print_name_json((*ep).deferral_policies[i].name)
+        print(", \"target_type\": \"")
+        compiler_manifest_print_type_name((*ep).deferral_policies[i].target_ty)
+        print("\", \"route\": ")
+        compiler_manifest_print_name_json((*ep).deferral_policies[i].route_name)
+        print(", \"requirements\": [")
+        var fk: i64 = 0
+        while fk < (*ep).deferral_policies[i].requirement_count && fk < 8 {
+            if fk > 0 { print(", ") }
+            compiler_manifest_print_policy_requirement_json((*ep).deferral_policies[i].requirements[fk])
+            fk = fk + 1
+        }
+        print("]}")
+        i = i + 1
+    }
+    print("\n    ],\n")
+}
+
+fn compiler_manifest_print_acquisition_policies(ep: &IrEpistemicSection) with IO, Mut, Panic, Div, Alloc {
+    print("    \"acquisition_policies\": [\n")
+    var i: i64 = 0
+    while i < (*ep).acquisition_policy_count {
+        if i > 0 { print(",\n") }
+        print("      {\"id\": ")
+        print_int((*ep).acquisition_policies[i].id)
+        print(", \"name\": ")
+        compiler_manifest_print_name_json((*ep).acquisition_policies[i].name)
+        print(", \"target_type\": \"")
+        compiler_manifest_print_type_name((*ep).acquisition_policies[i].target_ty)
+        print("\", \"objective_name\": ")
+        compiler_manifest_print_name_json((*ep).acquisition_policies[i].objective_name)
+        print(", \"route_name\": ")
+        compiler_manifest_print_name_json((*ep).acquisition_policies[i].route_name)
+        print(", \"requirements\": [")
+        var ak: i64 = 0
+        while ak < (*ep).acquisition_policies[i].requirement_count && ak < 8 {
+            if ak > 0 { print(", ") }
+            compiler_manifest_print_policy_requirement_json((*ep).acquisition_policies[i].requirements[ak])
+            ak = ak + 1
+        }
+        print("]}")
+        i = i + 1
+    }
+    print("\n    ],\n")
 }
 
 fn compiler_manifest_hash_string(s: string) -> i64 with Mut, Panic, Div {
@@ -930,6 +1247,7 @@ fn compiler_emit_manifest_json(path: string, ep: &IrEpistemicSection) with IO, M
     let source_hash = compiler_manifest_hash_string(path)
     let version_hash = compiler_manifest_hash_string("0.80.0-selfhost")
     let merkle_root = compiler_manifest_merkle_mix(source_hash, version_hash, 0, 97)
+    var i: i64 = 0
 
     print("{\n")
     print("  \"schema\": \"sounio.manifest.v2\",\n")
@@ -945,103 +1263,43 @@ fn compiler_emit_manifest_json(path: string, ep: &IrEpistemicSection) with IO, M
     print(",\n")
     print("  \"epistemic\": {\n")
 
-    print("    \"model_families\": [\n")
-    var i: i64 = 0
-    while i < (*ep).model_family_count {
-        if i > 0 { print(",\n") }
-        print("      {\"id\": ")
-        print_int((*ep).model_families[i].id)
-        print(", \"name\": ")
-        compiler_manifest_print_name_json((*ep).model_families[i].name)
-        print(", \"input_type\": \"")
-        compiler_manifest_print_type_name((*ep).model_families[i].input_ty)
-        print("\", \"output_type\": \"")
-        compiler_manifest_print_type_name((*ep).model_families[i].output_ty)
-        print("\", \"models\": ")
-        compiler_manifest_print_name_array((*ep).model_families[i].model_names, (*ep).model_families[i].model_count)
-        print("}")
-        i = i + 1
-    }
-    print("\n    ],\n")
+    compiler_manifest_print_model_families(ep)
+    compiler_manifest_print_policies(ep)
+    compiler_manifest_print_decision_policies(ep)
 
-    print("    \"policies\": [\n")
-    i = 0
-    while i < (*ep).policy_count {
-        if i > 0 { print(",\n") }
-        print("      {\"id\": ")
-        print_int((*ep).policies[i].id)
-        print(", \"name\": ")
-        compiler_manifest_print_name_json((*ep).policies[i].name)
-        print(", \"target_type\": \"")
-        compiler_manifest_print_type_name((*ep).policies[i].target_ty)
-        print("\", \"level\": ")
-        compiler_manifest_print_name_json((*ep).policies[i].level_name)
-        print(", \"scope\": ")
-        compiler_manifest_print_name_json((*ep).policies[i].scope_name)
-        print(", \"requirements\": [")
-        var j: i64 = 0
-        while j < (*ep).policies[i].requirement_count && j < 8 {
-            if j > 0 { print(", ") }
-            print("{\"metric\": ")
-            compiler_manifest_print_name_json((*ep).policies[i].requirements[j].metric_name)
-            print(", \"threshold\": ")
-            compiler_manifest_print_f64_json((*ep).policies[i].requirements[j].threshold)
-            print("}")
-            j = j + 1
-        }
-        print("]}")
-        i = i + 1
-    }
-    print("\n    ],\n")
+    compiler_manifest_print_deferral_policies(ep)
+    compiler_manifest_print_acquisition_policies(ep)
 
-    print("    \"decision_policies\": [\n")
-    i = 0
-    while i < (*ep).decision_policy_count {
-        if i > 0 { print(",\n") }
-        print("      {\"id\": ")
-        print_int((*ep).decision_policies[i].id)
-        print(", \"name\": ")
-        compiler_manifest_print_name_json((*ep).decision_policies[i].name)
-        print(", \"target_type\": \"")
-        compiler_manifest_print_type_name((*ep).decision_policies[i].target_ty)
-        print("\", \"requirements\": [")
-        var dj: i64 = 0
-        while dj < (*ep).decision_policies[i].requirement_count && dj < 8 {
-            if dj > 0 { print(", ") }
-            print("{\"metric\": ")
-            compiler_manifest_print_name_json((*ep).decision_policies[i].requirements[dj].metric_name)
-            print(", \"threshold\": ")
-            compiler_manifest_print_f64_json((*ep).decision_policies[i].requirements[dj].threshold)
-            print("}")
-            dj = dj + 1
-        }
-        print("]}")
-        i = i + 1
-    }
-    print("\n    ],\n")
+    compiler_manifest_print_recourse_policies(ep)
 
-    print("    \"deferral_policies\": [\n")
+    print("    \"alternative_policies\": [\n")
     i = 0
-    while i < (*ep).deferral_policy_count {
+    while i < (*ep).alternative_policy_count {
         if i > 0 { print(",\n") }
         print("      {\"id\": ")
-        print_int((*ep).deferral_policies[i].id)
+        print_int((*ep).alternative_policies[i].id)
         print(", \"name\": ")
-        compiler_manifest_print_name_json((*ep).deferral_policies[i].name)
+        compiler_manifest_print_name_json((*ep).alternative_policies[i].name)
         print(", \"target_type\": \"")
-        compiler_manifest_print_type_name((*ep).deferral_policies[i].target_ty)
-        print("\", \"route\": ")
-        compiler_manifest_print_name_json((*ep).deferral_policies[i].route_name)
-        print(", \"requirements\": [")
-        var fk: i64 = 0
-        while fk < (*ep).deferral_policies[i].requirement_count && fk < 8 {
-            if fk > 0 { print(", ") }
-            print("{\"metric\": ")
-            compiler_manifest_print_name_json((*ep).deferral_policies[i].requirements[fk].metric_name)
-            print(", \"threshold\": ")
-            compiler_manifest_print_f64_json((*ep).deferral_policies[i].requirements[fk].threshold)
+        compiler_manifest_print_type_name((*ep).alternative_policies[i].target_ty)
+        print("\", \"frontier_kind\": ")
+        compiler_manifest_print_name_json((*ep).alternative_policies[i].frontier_kind)
+        print(", \"max_options\": ")
+        print_int((*ep).alternative_policies[i].max_options)
+        print(", \"objectives\": [")
+        var ao: i64 = 0
+        while ao < (*ep).alternative_policies[i].objective_count && ao < 8 {
+            if ao > 0 { print(", ") }
+            print("{\"name\": ")
+            compiler_manifest_print_name_json((*ep).alternative_policies[i].objective_names[ao])
+            print(", \"direction\": ")
+            if (*ep).alternative_policies[i].objective_directions[ao] == 1 {
+                compiler_manifest_print_string_json("maximize")
+            } else {
+                compiler_manifest_print_string_json("minimize")
+            }
             print("}")
-            fk = fk + 1
+            ao = ao + 1
         }
         print("]}")
         i = i + 1
@@ -1321,6 +1579,185 @@ fn compiler_emit_manifest_json(path: string, ep: &IrEpistemicSection) with IO, M
         print("}")
         i = i + 1
     }
+    print("\n    ],\n")
+
+    print("    \"acquisition_plans\": [\n")
+    i = 0
+    while i < (*ep).acquisition_plan_count {
+        if i > 0 { print(",\n") }
+        print("      {\"id\": ")
+        print_int((*ep).acquisition_plans[i].id)
+        print(", \"audit_id\": ")
+        print_int((*ep).acquisition_plans[i].audit_id)
+        print(", \"audit_name\": ")
+        compiler_manifest_print_name_json(compiler_manifest_audit_name(ep, (*ep).acquisition_plans[i].audit_id))
+        print(", \"contest_id\": ")
+        print_int((*ep).acquisition_plans[i].contest_id)
+        print(", \"deferred_certificate_id\": ")
+        print_int((*ep).acquisition_plans[i].deferred_certificate_id)
+        print(", \"policy_id\": ")
+        print_int((*ep).acquisition_plans[i].acquisition_policy_id)
+        print(", \"policy_name\": ")
+        compiler_manifest_print_name_json(compiler_manifest_acquisition_policy_name(ep, (*ep).acquisition_plans[i].acquisition_policy_id))
+        print(", \"objective_name\": ")
+        compiler_manifest_print_name_json(compiler_manifest_acquisition_objective_name(ep, (*ep).acquisition_plans[i].acquisition_policy_id))
+        print(", \"route_name\": ")
+        compiler_manifest_print_name_json(compiler_manifest_acquisition_route_name(ep, (*ep).acquisition_plans[i].acquisition_policy_id))
+        print(", \"inner_type\": \"")
+        compiler_manifest_print_type_name((*ep).acquisition_plans[i].inner_ty)
+        print("\", \"metric_snapshot\": ")
+        compiler_manifest_print_metric_snapshot((*ep).acquisition_plans[i].metric_known, (*ep).acquisition_plans[i].metric_values)
+        print("}")
+        i = i + 1
+    }
+    print("\n    ],\n")
+
+    print("    \"recourse_plans\": [\n")
+    i = 0
+    while i < (*ep).recourse_plan_count {
+        if i > 0 { print(",\n") }
+        print("      {\"id\": ")
+        print_int((*ep).recourse_plans[i].id)
+        print(", \"audit_id\": ")
+        print_int((*ep).recourse_plans[i].audit_id)
+        print(", \"audit_name\": ")
+        compiler_manifest_print_name_json(compiler_manifest_audit_name(ep, (*ep).recourse_plans[i].audit_id))
+        print(", \"contest_id\": ")
+        print_int((*ep).recourse_plans[i].contest_id)
+        print(", \"deferred_certificate_id\": ")
+        print_int((*ep).recourse_plans[i].deferred_certificate_id)
+        print(", \"policy_id\": ")
+        print_int((*ep).recourse_plans[i].recourse_policy_id)
+        print(", \"policy_name\": ")
+        compiler_manifest_print_name_json(compiler_manifest_recourse_policy_name(ep, (*ep).recourse_plans[i].recourse_policy_id))
+        print(", \"strategy_name\": ")
+        compiler_manifest_print_name_json(compiler_manifest_recourse_strategy_name(ep, (*ep).recourse_plans[i].recourse_policy_id))
+        print(", \"route_name\": ")
+        compiler_manifest_print_name_json(compiler_manifest_recourse_route_name(ep, (*ep).recourse_plans[i].recourse_policy_id))
+        print(", \"inner_type\": \"")
+        compiler_manifest_print_type_name((*ep).recourse_plans[i].inner_ty)
+        print("\", \"metric_snapshot\": ")
+        compiler_manifest_print_metric_snapshot((*ep).recourse_plans[i].metric_known, (*ep).recourse_plans[i].metric_values)
+        print("}")
+        i = i + 1
+    }
+    print("\n    ],\n")
+
+    print("    \"alternative_frontiers\": [\n")
+    i = 0
+    while i < (*ep).alternative_frontier_count {
+        if i > 0 { print(",\n") }
+        print("      {\"id\": ")
+        print_int((*ep).alternative_frontiers[i].id)
+        print(", \"name\": ")
+        compiler_manifest_print_name_json((*ep).alternative_frontiers[i].name)
+        print(", \"target_kind\": ")
+        if (*ep).alternative_frontiers[i].target_kind == 1 {
+            compiler_manifest_print_string_json("RecoursePlan")
+        } else {
+            compiler_manifest_print_string_json("Deferred")
+        }
+        print(", \"target_type\": \"")
+        compiler_manifest_print_type_name((*ep).alternative_frontiers[i].target_ty)
+        print("\", \"policy_id\": ")
+        print_int((*ep).alternative_frontiers[i].alternative_policy_id)
+        print(", \"policy_name\": ")
+        compiler_manifest_print_name_json(compiler_manifest_alternative_policy_name(ep, (*ep).alternative_frontiers[i].alternative_policy_id))
+        print(", \"audit_id\": ")
+        print_int((*ep).alternative_frontiers[i].audit_id)
+        print(", \"audit_name\": ")
+        compiler_manifest_print_name_json(compiler_manifest_audit_name(ep, (*ep).alternative_frontiers[i].audit_id))
+        print(", \"contest_id\": ")
+        print_int((*ep).alternative_frontiers[i].contest_id)
+        print(", \"source_policy_id\": ")
+        print_int((*ep).alternative_frontiers[i].source_policy_id)
+        print(", \"source_policy_name\": ")
+        compiler_manifest_print_name_json(compiler_manifest_recourse_policy_name(ep, (*ep).alternative_frontiers[i].source_policy_id))
+        print(", \"source_plan_id\": ")
+        print_int((*ep).alternative_frontiers[i].source_plan_id)
+        print(", \"candidate_start\": ")
+        print_int((*ep).alternative_frontiers[i].candidate_start)
+        print(", \"candidate_count\": ")
+        print_int((*ep).alternative_frontiers[i].candidate_count)
+        print("}")
+        i = i + 1
+    }
+    print("\n    ],\n")
+
+    print("    \"alternative_sets\": [\n")
+    i = 0
+    while i < (*ep).alternative_set_count {
+        if i > 0 { print(",\n") }
+        print("      {\"id\": ")
+        print_int((*ep).alternative_sets[i].id)
+        print(", \"frontier_id\": ")
+        print_int((*ep).alternative_sets[i].frontier_id)
+        print(", \"frontier_name\": ")
+        compiler_manifest_print_name_json(compiler_manifest_alternative_frontier_name(ep, (*ep).alternative_sets[i].frontier_id))
+        print(", \"audit_id\": ")
+        print_int((*ep).alternative_sets[i].audit_id)
+        print(", \"audit_name\": ")
+        compiler_manifest_print_name_json(compiler_manifest_audit_name(ep, (*ep).alternative_sets[i].audit_id))
+        print(", \"contest_id\": ")
+        print_int((*ep).alternative_sets[i].contest_id)
+        print(", \"inner_type\": \"")
+        compiler_manifest_print_type_name((*ep).alternative_sets[i].inner_ty)
+        print("\", \"candidate_start\": ")
+        print_int((*ep).alternative_sets[i].candidate_start)
+        print(", \"candidate_count\": ")
+        print_int((*ep).alternative_sets[i].candidate_count)
+        print("}")
+        i = i + 1
+    }
+    print("\n    ],\n")
+
+    print("    \"alternative_candidates\": [\n")
+    i = 0
+    while i < (*ep).alternative_candidate_count {
+        if i > 0 { print(",\n") }
+        print("      {\"id\": ")
+        print_int((*ep).alternative_candidates[i].id)
+        print(", \"frontier_id\": ")
+        print_int((*ep).alternative_candidates[i].frontier_id)
+        print(", \"frontier_name\": ")
+        compiler_manifest_print_name_json(compiler_manifest_alternative_frontier_name(ep, (*ep).alternative_candidates[i].frontier_id))
+        print(", \"candidate_name\": ")
+        compiler_manifest_print_name_json((*ep).alternative_candidates[i].name)
+        print(", \"value_repr\": ")
+        compiler_manifest_print_name_json((*ep).alternative_candidates[i].value_repr)
+        print(", \"source_kind\": ")
+        compiler_manifest_print_string_json(compiler_manifest_alternative_source_kind_name((*ep).alternative_candidates[i].source_kind))
+        print(", \"source_policy_id\": ")
+        print_int((*ep).alternative_candidates[i].source_policy_id)
+        print(", \"source_policy_name\": ")
+        compiler_manifest_print_name_json(compiler_manifest_recourse_policy_name(ep, (*ep).alternative_candidates[i].source_policy_id))
+        print(", \"source_plan_id\": ")
+        print_int((*ep).alternative_candidates[i].source_plan_id)
+        print(", \"strategy_name\": ")
+        compiler_manifest_print_name_json((*ep).alternative_candidates[i].strategy_name)
+        print(", \"route_name\": ")
+        compiler_manifest_print_name_json((*ep).alternative_candidates[i].route_name)
+        print(", \"audit_id\": ")
+        print_int((*ep).alternative_candidates[i].audit_id)
+        print(", \"audit_name\": ")
+        compiler_manifest_print_name_json(compiler_manifest_audit_name(ep, (*ep).alternative_candidates[i].audit_id))
+        print(", \"contest_id\": ")
+        print_int((*ep).alternative_candidates[i].contest_id)
+        print(", \"metric_snapshot\": {")
+        print("\"intervention_cost\": ")
+        compiler_manifest_print_f64_json((*ep).alternative_candidates[i].intervention_cost)
+        print(", \"residual_tail_risk\": ")
+        compiler_manifest_print_f64_json((*ep).alternative_candidates[i].residual_tail_risk)
+        print(", \"mechanistic_divergence\": ")
+        compiler_manifest_print_f64_json((*ep).alternative_candidates[i].mechanistic_divergence)
+        print(", \"admissibility_margin\": ")
+        compiler_manifest_print_f64_json((*ep).alternative_candidates[i].admissibility_margin)
+        print("}")
+        print(", \"dominance_rank\": ")
+        print_int((*ep).alternative_candidates[i].dominance_rank)
+        print("}")
+        i = i + 1
+    }
     print("\n    ]\n")
 
     print("  }\n")
@@ -1328,66 +1765,12 @@ fn compiler_emit_manifest_json(path: string, ep: &IrEpistemicSection) with IO, M
 }
 
 fn compile_emit_manifest_json_from_source(path: string) -> CompileResult with IO, Mut, Panic, Div, Alloc {
-    let main_prog = load_module_file(path)
-    var programs: [Program; 64] = [empty_program(); 64]
-    var file_paths: [string; 64] = [""; 64]
-    programs[0] = main_prog
-    file_paths[0] = path
-    var loaded: i64 = 1
-    var visited_paths: [string; 64] = [""; 64]
-    var visited_count: i64 = 0
-    visited_paths[0] = path
-    visited_count = 1
-    var work_front: i64 = 0
-    var i: i64 = 0
-
-    while work_front < loaded && loaded < 64 {
-        let cur_dir = path_directory(file_paths[work_front])
-        let work_imports = extract_imports_from_ast(programs[work_front])
-        work_front = work_front + 1
-        i = 0
-        while i < work_imports.count && loaded < 64 {
-            let file_path_local = use_path_to_file_path(work_imports.paths[i], cur_dir)
-            let file_path_stdlib = use_path_to_file_path(work_imports.paths[i], "stdlib")
-            var file_path = file_path_local
-            if !file_exists(file_path_local) {
-                file_path = file_path_stdlib
-            }
-            if !visited_contains(visited_paths, visited_count, file_path) {
-                visited_paths[visited_count] = file_path
-                visited_count = visited_count + 1
-                if file_exists(file_path) {
-                    programs[loaded] = load_module_file(file_path)
-                    file_paths[loaded] = file_path
-                    loaded = loaded + 1
-                }
-            }
-            i = i + 1
-        }
-    }
-
-    let main_imports = extract_imports_from_ast(programs[0])
-    let needs_resolution = loaded > 1 || main_imports.count > 0
-    if needs_resolution {
-        let resolve_result = resolve_modules(programs, loaded)
-        if resolve_result.had_error {
-            var resolve_errors = compile_errors_new()
-            resolve_errors = compile_push_ir_failure(resolve_errors, "module_resolution_failed")
-            return CompileResult { success: false, errors: resolve_errors, output: "" }
-        }
-    }
-
     var merged_epistemic = ir_empty_epistemic_section()
-    i = 0
-    while i < loaded {
-        let check_result = check_program_boxed_ir_epistemic(programs[i])
-        if check_result.had_error {
-            var check_errors = compile_errors_new()
-            check_errors = compile_push_ir_failure(check_errors, "type_check_failed")
-            return CompileResult { success: false, errors: check_errors, output: "" }
-        }
-        merged_epistemic = ir_merge_epistemic_sections(merged_epistemic, *check_result.epistemic)
-        i = i + 1
+    let frontend_result = load_multimodule_epistemic_into(path, &!merged_epistemic)
+    if !frontend_result.ok {
+        var check_errors = compile_errors_new()
+        check_errors = compile_push_ir_failure(check_errors, frontend_result.error_msg)
+        return CompileResult { success: false, errors: check_errors, output: "" }
     }
 
     compiler_emit_manifest_json(path, &merged_epistemic)
@@ -1620,6 +2003,9 @@ fn main() with IO, Mut, Panic, Div, Alloc {
             return
         } else if mode == "--probe-frontend" || starts_with(mode, "--probe-front") {
             run_probe_frontend(args, arg_idx)
+            return
+        } else if mode == "--probe-epistemic-check" || starts_with(mode, "--probe-epi") {
+            run_probe_epistemic_check(args, arg_idx)
             return
         } else if mode == "--probe-load-ir" || starts_with(mode, "--probe-load") {
             run_probe_load_ir(args, arg_idx)
