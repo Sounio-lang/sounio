@@ -9,250 +9,403 @@
 #define SOIR_MAGIC 0x52494F53  /* "SOIR" in little-endian */
 #define SOIR_VERSION 1
 #define MAX_FILE_SIZE (128 * 1024)
+#define MAX_STRING_TABLE_ENTRIES 4096
+
+typedef struct {
+    const uint8_t *buf;
+    size_t size;
+    size_t pos;
+    LoaderStatus status;
+} SoirReader;
+
+static bool reader_take(SoirReader *reader, size_t count, const uint8_t **out) {
+    if (reader->status != LOADER_STATUS_OK) {
+        return false;
+    }
+    if (count > reader->size - reader->pos) {
+        reader->status = LOADER_STATUS_INVALID_BYTECODE;
+        return false;
+    }
+    *out = reader->buf + reader->pos;
+    reader->pos += count;
+    return true;
+}
 
 /* Read little-endian int64 */
-static int64_t read_i64(const uint8_t *buf, size_t *pos) {
+static int64_t read_i64(SoirReader *reader) {
+    const uint8_t *data;
     uint64_t val = 0;
-    for (int i = 0; i < 8; i++) {
-        val |= ((uint64_t)buf[*pos + i]) << (i * 8);
+    int i;
+
+    if (!reader_take(reader, 8, &data)) {
+        return 0;
     }
-    *pos += 8;
-    /* Convert from little-endian to host byte order */
+    for (i = 0; i < 8; i++) {
+        val |= ((uint64_t)data[i]) << (i * 8);
+    }
     val = platform_le64_to_host(val);
     return (int64_t)val;
 }
 
 /* Read little-endian int8 */
-static int8_t read_i8(const uint8_t *buf, size_t *pos) {
-    int8_t val = (int8_t)buf[*pos];
-    (*pos)++;
-    return val;
+static int8_t read_i8(SoirReader *reader) {
+    const uint8_t *data;
+    if (!reader_take(reader, 1, &data)) {
+        return 0;
+    }
+    return (int8_t)data[0];
 }
 
 /* Read double (as raw i64 bits, little-endian) */
-static double read_f64(const uint8_t *buf, size_t *pos) {
+static double read_f64(SoirReader *reader) {
+    const uint8_t *data;
     union {
         uint64_t u;
         double d;
     } conv;
-    /* Read as little-endian uint64 */
+    int i;
+
     conv.u = 0;
-    for (int i = 0; i < 8; i++) {
-        conv.u |= ((uint64_t)buf[*pos + i]) << (i * 8);
+    if (!reader_take(reader, 8, &data)) {
+        return 0.0;
     }
-    *pos += 8;
-    /* Convert from little-endian to host byte order */
+    for (i = 0; i < 8; i++) {
+        conv.u |= ((uint64_t)data[i]) << (i * 8);
+    }
     conv.u = platform_le64_to_host(conv.u);
     return conv.d;
 }
 
 /* Read Name structure */
-static Name read_name(const uint8_t *buf, size_t *pos) {
-    Name n;
-    n.len = read_i64(buf, pos);
-    memcpy(n.buf, buf + *pos, NAME_BUF_SIZE);
-    *pos += NAME_BUF_SIZE;
-    return n;
+static void read_name(SoirReader *reader, Name *out) {
+    const uint8_t *data;
+
+    memset(out, 0, sizeof(*out));
+    out->len = read_i64(reader);
+    if (reader->status != LOADER_STATUS_OK) {
+        return;
+    }
+    if (out->len < 0 || out->len > NAME_BUF_SIZE) {
+        reader->status = LOADER_STATUS_INVALID_BYTECODE;
+        return;
+    }
+    if (!reader_take(reader, NAME_BUF_SIZE, &data)) {
+        return;
+    }
+    memcpy(out->buf, data, NAME_BUF_SIZE);
 }
 
 /* Read Opcode */
-static Opcode read_opcode(const uint8_t *buf, size_t *pos) {
-    int8_t tag = read_i8(buf, pos);
-    /* 7 bytes padding */
-    *pos += 7;
-    return (Opcode)tag;
+static Opcode read_opcode(SoirReader *reader) {
+    const uint8_t *padding;
+    Opcode tag = (Opcode)read_i8(reader);
+    if (!reader_take(reader, 7, &padding)) {
+        return OP_NOP;
+    }
+    return tag;
 }
 
 /* Read BinaryOp */
-static BinaryOp read_binop(const uint8_t *buf, size_t *pos) {
-    int8_t tag = read_i8(buf, pos);
-    /* 7 bytes padding */
-    *pos += 7;
-    return (BinaryOp)tag;
+static BinaryOp read_binop(SoirReader *reader) {
+    const uint8_t *padding;
+    BinaryOp tag = (BinaryOp)read_i8(reader);
+    if (!reader_take(reader, 7, &padding)) {
+        return BINOP_ADD;
+    }
+    return tag;
 }
 
 /* Read UnaryOp */
-static UnaryOp read_unop(const uint8_t *buf, size_t *pos) {
-    int8_t tag = read_i8(buf, pos);
-    /* 7 bytes padding */
-    *pos += 7;
-    return (UnaryOp)tag;
+static UnaryOp read_unop(SoirReader *reader) {
+    const uint8_t *padding;
+    UnaryOp tag = (UnaryOp)read_i8(reader);
+    if (!reader_take(reader, 7, &padding)) {
+        return UNOP_NEG;
+    }
+    return tag;
 }
 
 /* Read Instruction */
-static Instruction read_instruction(const uint8_t *buf, size_t *pos) {
-    Instruction ins;
-    ins.op = read_opcode(buf, pos);
-    ins.dst = read_i64(buf, pos);
-    ins.src1 = read_i64(buf, pos);
-    ins.src2 = read_i64(buf, pos);
-    ins.imm_i64 = read_i64(buf, pos);
-    ins.imm_f64 = read_f64(buf, pos);
-    ins.label_id = read_i64(buf, pos);
-    ins.fn_id = read_i64(buf, pos);
-    ins.field_idx = read_i64(buf, pos);
-    ins.bin_op = read_binop(buf, pos);
-    ins.un_op = read_unop(buf, pos);
-    ins.name = read_name(buf, pos);
-    ins.arg_count = read_i64(buf, pos);
-    return ins;
+static void read_instruction(SoirReader *reader, Instruction *out) {
+    memset(out, 0, sizeof(*out));
+    out->op = read_opcode(reader);
+    out->dst = read_i64(reader);
+    out->src1 = read_i64(reader);
+    out->src2 = read_i64(reader);
+    out->imm_i64 = read_i64(reader);
+    out->imm_f64 = read_f64(reader);
+    out->label_id = read_i64(reader);
+    out->fn_id = read_i64(reader);
+    out->field_idx = read_i64(reader);
+    out->bin_op = read_binop(reader);
+    out->un_op = read_unop(reader);
+    read_name(reader, &out->name);
+    out->arg_count = read_i64(reader);
+    if (reader->status != LOADER_STATUS_OK) {
+        return;
+    }
+    if (out->arg_count < 0 || out->arg_count > MAX_PARAMS) {
+        reader->status = LOADER_STATUS_INVALID_BYTECODE;
+    }
 }
 
 /* Read Function */
-static Function read_function(const uint8_t *buf, size_t *pos) {
-    Function func;
-    func.name = read_name(buf, pos);
-    func.instr_count = read_i64(buf, pos);
-    func.reg_count = read_i64(buf, pos);
-    func.label_count = read_i64(buf, pos);
-    func.param_count = read_i64(buf, pos);
+static LoaderStatus read_function(SoirReader *reader, Function *func) {
+    int i;
+    int64_t instr_idx;
 
-    /* Read param_regs array */
-    for (int i = 0; i < MAX_PARAMS; i++) {
-        func.param_regs[i] = read_i64(buf, pos);
+    memset(func, 0, sizeof(*func));
+    read_name(reader, &func->name);
+    func->instr_count = read_i64(reader);
+    func->reg_count = read_i64(reader);
+    func->label_count = read_i64(reader);
+    func->param_count = read_i64(reader);
+    if (reader->status != LOADER_STATUS_OK) {
+        return reader->status;
+    }
+    if (func->instr_count < 0 || func->instr_count > MAX_INSTRUCTIONS ||
+        func->reg_count < 0 || func->reg_count > MAX_REGISTERS ||
+        func->label_count < 0 || func->label_count > MAX_INSTRUCTIONS ||
+        func->param_count < 0 || func->param_count > MAX_PARAMS) {
+        return LOADER_STATUS_INVALID_BYTECODE;
     }
 
-    /* Allocate and read instructions */
-    func.instrs = platform_calloc(func.instr_count, sizeof(Instruction));
-    if (!func.instrs) {
-        fprintf(stderr, "Failed to allocate instructions\n");
-        exit(1);
+    for (i = 0; i < MAX_PARAMS; i++) {
+        func->param_regs[i] = read_i64(reader);
+    }
+    if (reader->status != LOADER_STATUS_OK) {
+        return reader->status;
     }
 
-    for (int64_t i = 0; i < func.instr_count; i++) {
-        func.instrs[i] = read_instruction(buf, pos);
+    if (func->instr_count > 0) {
+        func->instrs = platform_calloc((size_t)func->instr_count, sizeof(Instruction));
+        if (!func->instrs) {
+            return LOADER_STATUS_OUT_OF_MEMORY;
+        }
     }
 
-    return func;
+    for (instr_idx = 0; instr_idx < func->instr_count; instr_idx++) {
+        read_instruction(reader, &func->instrs[instr_idx]);
+        if (reader->status != LOADER_STATUS_OK) {
+            return reader->status;
+        }
+    }
+
+    return LOADER_STATUS_OK;
+}
+
+const char *loader_status_message(LoaderStatus status) {
+    switch (status) {
+        case LOADER_STATUS_OK:
+            return "ok";
+        case LOADER_STATUS_INVALID_ARGUMENT:
+            return "invalid argument";
+        case LOADER_STATUS_IO_ERROR:
+            return "i/o error";
+        case LOADER_STATUS_FILE_TOO_LARGE:
+            return "file too large";
+        case LOADER_STATUS_INVALID_BYTECODE:
+            return "invalid bytecode";
+        case LOADER_STATUS_UNSUPPORTED_VERSION:
+            return "unsupported version";
+        case LOADER_STATUS_OUT_OF_MEMORY:
+            return "out of memory";
+        default:
+            return "unknown loader status";
+    }
+}
+
+LoaderStatus load_soir_buffer_checked(const uint8_t *buf, size_t size, Module **out_module) {
+    SoirReader reader;
+    Module *module;
+    const uint8_t *data;
+    uint32_t magic = 0;
+    uint8_t version;
+    int i;
+    int64_t fn_idx;
+    int64_t str_idx;
+
+    if (!out_module) {
+        return LOADER_STATUS_INVALID_ARGUMENT;
+    }
+    *out_module = NULL;
+    if (!buf || size == 0) {
+        return LOADER_STATUS_INVALID_ARGUMENT;
+    }
+
+    reader.buf = buf;
+    reader.size = size;
+    reader.pos = 0;
+    reader.status = LOADER_STATUS_OK;
+
+    if (!reader_take(&reader, 4, &data)) {
+        return reader.status;
+    }
+    for (i = 0; i < 4; i++) {
+        magic |= ((uint32_t)data[i]) << (i * 8);
+    }
+    if (magic != SOIR_MAGIC) {
+        return LOADER_STATUS_INVALID_BYTECODE;
+    }
+
+    if (!reader_take(&reader, 1, &data)) {
+        return reader.status;
+    }
+    version = data[0];
+    if (version != SOIR_VERSION) {
+        return LOADER_STATUS_UNSUPPORTED_VERSION;
+    }
+
+    if (!reader_take(&reader, 3, &data)) {
+        return reader.status;
+    }
+
+    module = platform_calloc(1, sizeof(Module));
+    if (!module) {
+        return LOADER_STATUS_OUT_OF_MEMORY;
+    }
+
+    module->fn_count = read_i64(&reader);
+    if (reader.status != LOADER_STATUS_OK) {
+        free_module(module);
+        return reader.status;
+    }
+    if (module->fn_count < 0 || module->fn_count > MAX_FUNCTIONS) {
+        free_module(module);
+        return LOADER_STATUS_INVALID_BYTECODE;
+    }
+
+    if (module->fn_count > 0) {
+        module->functions = platform_calloc((size_t)module->fn_count, sizeof(Function));
+        if (!module->functions) {
+            free_module(module);
+            return LOADER_STATUS_OUT_OF_MEMORY;
+        }
+    }
+
+    for (fn_idx = 0; fn_idx < module->fn_count; fn_idx++) {
+        LoaderStatus fn_status = read_function(&reader, &module->functions[fn_idx]);
+        if (fn_status != LOADER_STATUS_OK) {
+            free_module(module);
+            return fn_status;
+        }
+    }
+
+    module->string_count = read_i64(&reader);
+    if (reader.status != LOADER_STATUS_OK) {
+        free_module(module);
+        return reader.status;
+    }
+    if (module->string_count < 0 || module->string_count > MAX_STRING_TABLE_ENTRIES) {
+        free_module(module);
+        return LOADER_STATUS_INVALID_BYTECODE;
+    }
+
+    if (module->string_count > 0) {
+        module->string_table = platform_calloc((size_t)module->string_count, sizeof(Name));
+        if (!module->string_table) {
+            free_module(module);
+            return LOADER_STATUS_OUT_OF_MEMORY;
+        }
+        for (str_idx = 0; str_idx < module->string_count; str_idx++) {
+            read_name(&reader, &module->string_table[str_idx]);
+            if (reader.status != LOADER_STATUS_OK) {
+                free_module(module);
+                return reader.status;
+            }
+        }
+    }
+
+    *out_module = module;
+    return LOADER_STATUS_OK;
+}
+
+LoaderStatus load_soir_file_checked(const char *filename, Module **out_module) {
+    FILE *file;
+    long file_size;
+    uint8_t *buf;
+    size_t nread;
+    LoaderStatus status;
+
+    if (!out_module) {
+        return LOADER_STATUS_INVALID_ARGUMENT;
+    }
+    *out_module = NULL;
+    if (!filename) {
+        return LOADER_STATUS_INVALID_ARGUMENT;
+    }
+
+    file = fopen(filename, "rb");
+    if (!file) {
+        return LOADER_STATUS_IO_ERROR;
+    }
+
+    if (fseek(file, 0, SEEK_END) != 0) {
+        fclose(file);
+        return LOADER_STATUS_IO_ERROR;
+    }
+    file_size = ftell(file);
+    if (file_size < 0) {
+        fclose(file);
+        return LOADER_STATUS_IO_ERROR;
+    }
+    if (fseek(file, 0, SEEK_SET) != 0) {
+        fclose(file);
+        return LOADER_STATUS_IO_ERROR;
+    }
+    if (file_size > MAX_FILE_SIZE) {
+        fclose(file);
+        return LOADER_STATUS_FILE_TOO_LARGE;
+    }
+
+    buf = platform_malloc((size_t)file_size);
+    if (!buf && file_size > 0) {
+        fclose(file);
+        return LOADER_STATUS_OUT_OF_MEMORY;
+    }
+
+    nread = fread(buf, 1, (size_t)file_size, file);
+    fclose(file);
+    if (nread != (size_t)file_size) {
+        platform_free(buf);
+        return LOADER_STATUS_IO_ERROR;
+    }
+
+    status = load_soir_buffer_checked(buf, (size_t)file_size, out_module);
+    platform_free(buf);
+    return status;
 }
 
 /* Load SOIR from buffer */
 Module* load_soir_buffer(const uint8_t *buf, size_t size) {
-    size_t pos = 0;
-
-    /* Read header */
-    if (size < 8) {
-        fprintf(stderr, "File too small\n");
+    Module *module = NULL;
+    if (load_soir_buffer_checked(buf, size, &module) != LOADER_STATUS_OK) {
         return NULL;
     }
-
-    uint32_t magic = 0;
-    for (int i = 0; i < 4; i++) {
-        magic |= ((uint32_t)buf[pos++]) << (i * 8);
-    }
-
-    if (magic != SOIR_MAGIC) {
-        fprintf(stderr, "Invalid magic: 0x%08x (expected 0x%08x)\n", magic, SOIR_MAGIC);
-        return NULL;
-    }
-
-    uint8_t version = buf[pos++];
-    if (version != SOIR_VERSION) {
-        fprintf(stderr, "Unsupported version: %d\n", version);
-        return NULL;
-    }
-
-    /* Skip 3 reserved bytes */
-    pos += 3;
-
-    /* Allocate module */
-    Module *module = platform_calloc(1, sizeof(Module));
-    if (!module) {
-        fprintf(stderr, "Failed to allocate module\n");
-        return NULL;
-    }
-
-    /* Read function count */
-    module->fn_count = read_i64(buf, &pos);
-
-    /* Allocate functions array */
-    module->functions = platform_calloc(module->fn_count, sizeof(Function));
-    if (!module->functions) {
-        fprintf(stderr, "Failed to allocate functions\n");
-        platform_free(module);
-        return NULL;
-    }
-
-    /* Read functions */
-    for (int64_t i = 0; i < module->fn_count; i++) {
-        module->functions[i] = read_function(buf, &pos);
-    }
-
-    /* Read string count */
-    module->string_count = read_i64(buf, &pos);
-
-    /* Allocate string table */
-    if (module->string_count > 0) {
-        module->string_table = platform_calloc(module->string_count, sizeof(Name));
-        if (!module->string_table) {
-            fprintf(stderr, "Failed to allocate string table\n");
-            for (int64_t i = 0; i < module->fn_count; i++) {
-                platform_free(module->functions[i].instrs);
-            }
-            platform_free(module->functions);
-            platform_free(module);
-            return NULL;
-        }
-
-        for (int64_t i = 0; i < module->string_count; i++) {
-            module->string_table[i] = read_name(buf, &pos);
-        }
-    } else {
-        module->string_table = NULL;
-    }
-
     return module;
 }
 
 /* Load SOIR from file */
 Module* load_soir_file(const char *filename) {
-    FILE *f = fopen(filename, "rb");
-    if (!f) {
-        perror("Failed to open file");
+    Module *module = NULL;
+    if (load_soir_file_checked(filename, &module) != LOADER_STATUS_OK) {
         return NULL;
     }
-
-    /* Get file size */
-    fseek(f, 0, SEEK_END);
-    long fsize = ftell(f);
-    fseek(f, 0, SEEK_SET);
-
-    if (fsize > MAX_FILE_SIZE) {
-        fprintf(stderr, "File too large: %ld bytes (max %d)\n", fsize, MAX_FILE_SIZE);
-        fclose(f);
-        return NULL;
-    }
-
-    /* Read file into buffer */
-    uint8_t *buf = platform_malloc(fsize);
-    if (!buf) {
-        fprintf(stderr, "Failed to allocate buffer\n");
-        fclose(f);
-        return NULL;
-    }
-
-    size_t nread = fread(buf, 1, fsize, f);
-    fclose(f);
-
-    if (nread != (size_t)fsize) {
-        fprintf(stderr, "Read error\n");
-        platform_free(buf);
-        return NULL;
-    }
-
-    /* Deserialize */
-    Module *module = load_soir_buffer(buf, fsize);
-    platform_free(buf);
-
     return module;
 }
 
 /* Free module */
 void free_module(Module *module) {
-    if (!module) return;
+    int64_t i;
 
-    for (int64_t i = 0; i < module->fn_count; i++) {
-        platform_free(module->functions[i].instrs);
+    if (!module) {
+        return;
+    }
+
+    if (module->functions) {
+        for (i = 0; i < module->fn_count; i++) {
+            platform_free(module->functions[i].instrs);
+        }
     }
     platform_free(module->functions);
     platform_free(module->string_table);

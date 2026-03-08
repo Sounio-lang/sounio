@@ -2,45 +2,44 @@
 
 #include <stdio.h>
 #include <stdlib.h>
-#include "loader.h"
-#include "vm.h"
-#include "runtime.h"
+#include "poseidon.h"
 
 int main(int argc, char **argv) {
+    PoseidonModule *module = NULL;
+    PoseidonRunConfig config;
+    PoseidonRunResult run_result;
+    PoseidonStatus status;
+
     if (argc != 2) {
         fprintf(stderr, "Usage: %s <soir-file>\n", argv[0]);
         return 1;
     }
 
-    /* Load SOIR module */
-    Module *module = load_soir_file(argv[1]);
-    if (!module) {
-        fprintf(stderr, "Failed to load module\n");
+    status = poseidon_module_load_file(argv[1], &module);
+    if (status != POSEIDON_STATUS_OK) {
+        fprintf(stderr, "Failed to load module: %s\n", poseidon_status_message(status));
         return 1;
     }
 
-    /* Find main function */
-    int64_t main_fn = vm_find_main_fn(module);
-    if (main_fn < 0) {
+    config = poseidon_default_config();
+    run_result = poseidon_run_module(module, &config);
+    poseidon_module_free(module);
+
+    if (run_result.status == POSEIDON_STATUS_NO_MAIN_FUNCTION) {
         fprintf(stderr, "No main function found\n");
-        free_module(module);
         return 1;
     }
-
-    /* Initialize VM */
-    VMState vm;
-    vm_init(&vm, main_fn);
-
-    /* Run with 10000 step limit */
-    int64_t result = vm_run(&vm, module, 10000);
-
-    /* Cleanup */
-    free_module(module);
-
-    if (result == -2) {
+    if (run_result.status == POSEIDON_STATUS_EXECUTION_TIMEOUT) {
         fprintf(stderr, "Execution timeout (max 10000 steps)\n");
         return 1;
     }
+    if (run_result.status != POSEIDON_STATUS_OK) {
+        fprintf(stderr, "Execution failed: %s\n", poseidon_status_message(run_result.status));
+        if (run_result.exit_code != 0) {
+            return (int)run_result.exit_code;
+        }
+        return 1;
+    }
 
-    return (int)result;
+    return (int)run_result.exit_code;
 }

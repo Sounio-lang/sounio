@@ -64,6 +64,8 @@ typedef struct {
     int64_t return_reg;
 } CallFrame;
 
+typedef void (*VmPrintIntCallback)(int64_t value, void *user_data);
+
 /* VM state */
 typedef struct {
     int64_t regs[MAX_REGISTERS];
@@ -72,12 +74,25 @@ typedef struct {
     int64_t call_depth;
     int64_t current_fn;
     bool halted;
+    bool step_error;
     int64_t exit_code;
+    int64_t steps_executed;
+    VmPrintIntCallback print_int_cb;
+    void *print_int_user_data;
 } VMState;
+
+typedef struct {
+    int64_t exit_code;
+    int64_t steps_executed;
+    bool timed_out;
+    bool step_error;
+} VmRunStats;
 
 /* VM API */
 void vm_init(VMState *vm, int64_t entry_fn);
+void vm_set_print_int_callback(VMState *vm, VmPrintIntCallback cb, void *user_data);
 int vm_step(VMState *vm, const Module *module);
+VmRunStats vm_run_with_stats(VMState *vm, const Module *module, int64_t max_steps);
 int64_t vm_run(VMState *vm, const Module *module, int64_t max_steps);
 
 /* Utility */

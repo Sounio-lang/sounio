@@ -7,18 +7,17 @@
 
 /* Initialize VM state */
 void vm_init(VMState *vm, int64_t entry_fn) {
-    memset(vm->regs, 0, sizeof(vm->regs));
-    vm->pc = 0;
-    memset(vm->call_stack, 0, sizeof(vm->call_stack));
-    vm->call_depth = 0;
+    memset(vm, 0, sizeof(*vm));
     vm->current_fn = entry_fn;
-    vm->halted = false;
-    vm->exit_code = 0;
+}
+
+void vm_set_print_int_callback(VMState *vm, VmPrintIntCallback cb, void *user_data) {
+    vm->print_int_cb = cb;
+    vm->print_int_user_data = user_data;
 }
 
 /* Find main function by name */
 int64_t vm_find_main_fn(const Module *module) {
-    const char *main_name = "main";
     for (int64_t i = 0; i < module->fn_count; i++) {
         const Name *n = &module->functions[i].name;
         if (n->len == 4 &&
@@ -109,6 +108,7 @@ int vm_step(VMState *vm, const Module *module) {
 
     if (vm->current_fn < 0 || vm->current_fn >= module->fn_count) {
         vm->halted = true;
+        vm->step_error = true;
         vm->exit_code = 1;
         return -1;
     }
@@ -177,7 +177,11 @@ int vm_step(VMState *vm, const Module *module) {
             /* Check for builtin print_int */
             if (is_print_int(&ins->name)) {
                 if (ins->src1 >= 0 && ins->src1 < MAX_REGISTERS) {
-                    runtime_print_int(vm->regs[ins->src1]);
+                    if (vm->print_int_cb) {
+                        vm->print_int_cb(vm->regs[ins->src1], vm->print_int_user_data);
+                    } else {
+                        runtime_print_int(vm->regs[ins->src1]);
+                    }
                 }
                 if (ins->dst >= 0 && ins->dst < MAX_REGISTERS) {
                     vm->regs[ins->dst] = 0;
@@ -197,6 +201,7 @@ int vm_step(VMState *vm, const Module *module) {
 
             if (vm->call_depth >= MAX_CALL_DEPTH) {
                 vm->halted = true;
+                vm->step_error = true;
                 vm->exit_code = 2;
                 return -1;
             }
@@ -273,8 +278,15 @@ int vm_step(VMState *vm, const Module *module) {
 }
 
 /* Run VM until halt or max steps */
-int64_t vm_run(VMState *vm, const Module *module, int64_t max_steps) {
+VmRunStats vm_run_with_stats(VMState *vm, const Module *module, int64_t max_steps) {
+    VmRunStats stats;
     int64_t steps = 0;
+
+    stats.exit_code = 0;
+    stats.steps_executed = 0;
+    stats.timed_out = false;
+    stats.step_error = false;
+
     while (!vm->halted && steps < max_steps) {
         if (vm_step(vm, module) < 0) {
             break;
@@ -282,7 +294,21 @@ int64_t vm_run(VMState *vm, const Module *module, int64_t max_steps) {
         steps++;
     }
 
-    if (!vm->halted) {
+    if (!vm->halted && steps >= max_steps) {
+        stats.timed_out = true;
+    }
+
+    vm->steps_executed = steps;
+    stats.exit_code = vm->exit_code;
+    stats.steps_executed = steps;
+    stats.step_error = vm->step_error;
+    return stats;
+}
+
+int64_t vm_run(VMState *vm, const Module *module, int64_t max_steps) {
+    VmRunStats stats = vm_run_with_stats(vm, module, max_steps);
+
+    if (stats.timed_out) {
         return -2; /* Timeout */
     }
 

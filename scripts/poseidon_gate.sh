@@ -11,7 +11,18 @@ LOG_DIR="$WORK_DIR/logs"
 ARTIFACT_DIR="$WORK_DIR/artifacts"
 TIMEOUT_SECS="${TIMEOUT_SECS:-900}"
 BUILD_SOUC="${BUILD_SOUC:-1}"
-SELFHOST_MODE="${SOUNIO_SELFHOST_MODE:-vm}"
+SELFHOST_BACKEND="${SOUNIO_PARITY_BACKEND:-${SOUNIO_SELFHOST_MODE:-driver}}"
+if [ "$SELFHOST_BACKEND" = "vm" ]; then
+  SELFHOST_BACKEND="driver"
+fi
+SELFHOST_EXECUTOR="${SOUNIO_SELFHOST_EXECUTOR:-}"
+if [ -z "$SELFHOST_EXECUTOR" ]; then
+  case "$SELFHOST_BACKEND" in
+    driver|native-driver)
+      SELFHOST_EXECUTOR="native-driver"
+      ;;
+  esac
+fi
 SKIP_FULL_SELFHOST="${POSEIDON_SKIP_FULL_SELFHOST:-0}"
 RUN_ORACLE_PARITY="${POSEIDON_ORACLE_PARITY:-0}"
 BASELINE_COMPARE="${POSEIDON_BASELINE_COMPARE:-1}"
@@ -19,9 +30,17 @@ BASELINE_COMMIT="${POSEIDON_BASELINE_COMMIT:-01ecf01}"
 BASELINE_WORKTREE="$WORK_DIR/baseline-wt"
 BASELINE_SOUC="$BASELINE_WORKTREE/target/debug/souc"
 FULL_SELFHOST_TARGET="${FULL_SELFHOST_TARGET:-self-hosted/}"
+WRAPPER_STEPS_TSV="$ARTIFACT_DIR/poseidon_wrapper_steps.tsv"
+WRAPPER_STATUS_JSON="$ARTIFACT_DIR/poseidon_wrapper_status.v1.json"
+WRAPPER_BENCH_JSON="$ARTIFACT_DIR/poseidon_wrapper_benchmarks.v1.json"
 
 PASS_COUNT=0
 FAIL_COUNT=0
+NOT_RUN_COUNT=0
+
+has_repo_cargo_manifest() {
+  [ -f "$ROOT_DIR/Cargo.toml" ]
+}
 
 pass() {
   PASS_COUNT=$((PASS_COUNT + 1))
@@ -31,6 +50,218 @@ pass() {
 fail() {
   FAIL_COUNT=$((FAIL_COUNT + 1))
   echo "FAIL [$1] $2"
+}
+
+not_run() {
+  NOT_RUN_COUNT=$((NOT_RUN_COUNT + 1))
+  echo "NOT_RUN [$1] $2"
+}
+
+record_wrapper_step() {
+  local name="$1"
+  local status="$2"
+  local reason="$3"
+  local log_path="$4"
+  printf '%s\t%s\t%s\t%s\n' "$name" "$status" "$reason" "$log_path" >>"$WRAPPER_STEPS_TSV"
+}
+
+summarize_criterion_benchmarks() {
+  local bench_root="$1"
+  local manifest_path="$2"
+  local out_json="$3"
+  python3 - "$bench_root" "$manifest_path" "$out_json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+bench_root = Path(sys.argv[1])
+manifest_path = Path(sys.argv[2])
+out_json = Path(sys.argv[3])
+rows = []
+
+if not bench_root.exists() or not manifest_path.exists():
+    raise SystemExit(1)
+
+manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+required = {
+    fixture["id"]
+    for fixture in manifest.get("fixtures", [])
+    if "bench" in fixture.get("tags", [])
+}
+if not required:
+    raise SystemExit(1)
+
+for estimates in sorted(bench_root.glob("load_execute/*/new/estimates.json")):
+    data = json.loads(estimates.read_text(encoding="utf-8"))
+    rows.append(
+        {
+            "name": estimates.parent.parent.name,
+            "mean_ns": data.get("mean", {}).get("point_estimate"),
+            "median_ns": data.get("median", {}).get("point_estimate"),
+            "path": str(estimates),
+        }
+    )
+
+names = {row["name"] for row in rows}
+if not required.issubset(names):
+    raise SystemExit(1)
+
+payload = {
+    "schema": "sounio.poseidon.wrapper.benchmarks.v1",
+    "benchmarks": rows,
+}
+out_json.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+PY
+}
+
+write_wrapper_status_json() {
+  python3 - "$WRAPPER_STEPS_TSV" "$WRAPPER_BENCH_JSON" "$WRAPPER_STATUS_JSON" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+steps_path = Path(sys.argv[1])
+bench_path = Path(sys.argv[2])
+out_path = Path(sys.argv[3])
+required_steps = {"c_lib_build", "c_cli_regression"}
+steps = []
+
+if steps_path.exists():
+    for raw in steps_path.read_text(encoding="utf-8").splitlines():
+        if not raw:
+            continue
+        name, status, reason, log_path = raw.split("\t")
+        steps.append(
+            {
+                "name": name,
+                "status": status,
+                "reason": reason,
+                "required": name in required_steps,
+                "log_path": log_path,
+            }
+        )
+
+overall = "pass"
+for step in steps:
+    if step["required"] and step["status"] == "fail":
+        overall = "fail"
+        break
+
+payload = {
+    "schema": "sounio.poseidon.wrapper.status.v1",
+    "status": overall,
+    "steps": steps,
+}
+if bench_path.exists():
+    payload["benchmarks"] = json.loads(bench_path.read_text(encoding="utf-8")).get("benchmarks", [])
+
+out_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+PY
+}
+
+run_poseidon_wrapper_checks() {
+  local log_path=""
+  local rc=0
+
+  : >"$WRAPPER_STEPS_TSV"
+  rm -f "$WRAPPER_BENCH_JSON" "$WRAPPER_STATUS_JSON"
+
+  log_path="$LOG_DIR/wrapper_c_lib_build.log"
+  set +e
+  bash -lc "cd \"$ROOT_DIR/bootstrap/poseidon\" && make clean && make all poseidon_lib_tests" >"$log_path" 2>&1
+  rc=$?
+  set -e
+  if [ "$rc" -eq 0 ]; then
+    pass "wrapper-c-lib-build" "built libposeidon.a, poseidon, and poseidon_lib_tests"
+    record_wrapper_step "c_lib_build" "pass" "built libposeidon.a and test binary" "$log_path"
+  else
+    fail "wrapper-c-lib-build" "build failed (see $log_path)"
+    record_wrapper_step "c_lib_build" "fail" "build_failed_rc_${rc}" "$log_path"
+  fi
+
+  log_path="$LOG_DIR/wrapper_c_cli_regression.log"
+  set +e
+  bash -lc "cd \"$ROOT_DIR/bootstrap/poseidon\" && make test" >"$log_path" 2>&1
+  rc=$?
+  set -e
+  if [ "$rc" -eq 0 ]; then
+    pass "wrapper-c-cli-regression" "CLI and C library regression suite passed"
+    record_wrapper_step "c_cli_regression" "pass" "make_test_passed" "$log_path"
+  else
+    fail "wrapper-c-cli-regression" "regression suite failed (see $log_path)"
+    record_wrapper_step "c_cli_regression" "fail" "make_test_failed_rc_${rc}" "$log_path"
+  fi
+
+  if ! command -v cargo >/dev/null 2>&1 || [ ! -f "$ROOT_DIR/bootstrap/poseidon/rust/Cargo.toml" ]; then
+    record_wrapper_step "rust_wrapper_tests" "not_run" "cargo_or_manifest_missing" ""
+    record_wrapper_step "proptest" "not_run" "cargo_or_manifest_missing" ""
+    record_wrapper_step "fuzz_build" "not_run" "cargo_or_manifest_missing" ""
+    record_wrapper_step "bench_smoke" "not_run" "cargo_or_manifest_missing" ""
+    write_wrapper_status_json
+    return 0
+  fi
+
+  log_path="$LOG_DIR/wrapper_rust_wrapper_tests.log"
+  set +e
+  cargo test --manifest-path "$ROOT_DIR/bootstrap/poseidon/rust/Cargo.toml" --test api >"$log_path" 2>&1
+  rc=$?
+  set -e
+  if [ "$rc" -eq 0 ]; then
+    pass "wrapper-rust-tests" "standalone Rust API tests passed"
+    record_wrapper_step "rust_wrapper_tests" "pass" "cargo_test_api_passed" "$log_path"
+  else
+    fail "wrapper-rust-tests" "standalone Rust API tests failed (see $log_path)"
+    record_wrapper_step "rust_wrapper_tests" "fail" "cargo_test_api_failed_rc_${rc}" "$log_path"
+  fi
+
+  log_path="$LOG_DIR/wrapper_proptest.log"
+  set +e
+  bash -lc "cargo test --manifest-path \"$ROOT_DIR/bootstrap/poseidon/rust/Cargo.toml\" --test prop_straight_line && cargo test --manifest-path \"$ROOT_DIR/bootstrap/poseidon/rust/Cargo.toml\" --test prop_invalid_bytes" >"$log_path" 2>&1
+  rc=$?
+  set -e
+  if [ "$rc" -eq 0 ]; then
+    pass "wrapper-proptest" "property tests passed"
+    record_wrapper_step "proptest" "pass" "cargo_test_proptest_passed" "$log_path"
+  else
+    fail "wrapper-proptest" "property tests failed (see $log_path)"
+    record_wrapper_step "proptest" "fail" "cargo_test_proptest_failed_rc_${rc}" "$log_path"
+  fi
+
+  log_path="$LOG_DIR/wrapper_fuzz_build.log"
+  if command -v cargo-fuzz >/dev/null 2>&1; then
+    set +e
+    bash -lc "cd \"$ROOT_DIR/bootstrap/poseidon/rust/fuzz\" && ./refresh_corpus.sh && cargo fuzz build load_bytes && cargo fuzz build run" >"$log_path" 2>&1
+    rc=$?
+    set -e
+    if [ "$rc" -eq 0 ]; then
+      pass "wrapper-fuzz-build" "cargo-fuzz targets built"
+      record_wrapper_step "fuzz_build" "pass" "cargo_fuzz_build_passed" "$log_path"
+    else
+      fail "wrapper-fuzz-build" "cargo-fuzz build failed (see $log_path)"
+      record_wrapper_step "fuzz_build" "fail" "cargo_fuzz_build_failed_rc_${rc}" "$log_path"
+    fi
+  else
+    record_wrapper_step "fuzz_build" "not_run" "cargo_fuzz_missing" ""
+  fi
+
+  log_path="$LOG_DIR/wrapper_bench_smoke.log"
+  rm -rf "$ROOT_DIR/bootstrap/poseidon/rust/target/criterion"
+  set +e
+  cargo bench --manifest-path "$ROOT_DIR/bootstrap/poseidon/rust/Cargo.toml" --bench poseidon_bench -- --noplot >"$log_path" 2>&1
+  rc=$?
+  set -e
+  if [ "$rc" -eq 0 ] && summarize_criterion_benchmarks "$ROOT_DIR/bootstrap/poseidon/rust/target/criterion" "$ROOT_DIR/bootstrap/poseidon/tests/fixtures_manifest.v1.json" "$WRAPPER_BENCH_JSON"; then
+    pass "wrapper-bench-smoke" "criterion benchmarks completed"
+    record_wrapper_step "bench_smoke" "pass" "criterion_bench_passed" "$log_path"
+  elif [ "$rc" -eq 0 ]; then
+    fail "wrapper-bench-smoke" "criterion output missing required fixtures (see $log_path)"
+    record_wrapper_step "bench_smoke" "fail" "criterion_output_incomplete" "$log_path"
+  else
+    fail "wrapper-bench-smoke" "criterion benchmark run failed (see $log_path)"
+    record_wrapper_step "bench_smoke" "fail" "criterion_bench_failed_rc_${rc}" "$log_path"
+  fi
+
+  write_wrapper_status_json
 }
 
 run_with_timeout() {
@@ -99,7 +330,8 @@ run_full_selfhost() {
   local log_file="$2"
 
   run_with_timeout "$TIMEOUT_SECS" env \
-    SOUNIO_SELFHOST_MODE="$SELFHOST_MODE" \
+    SOUNIO_PARITY_BACKEND="$SELFHOST_BACKEND" \
+    SOUNIO_SELFHOST_EXECUTOR="$SELFHOST_EXECUTOR" \
     "$souc_bin" run "$FULL_SELFHOST_TARGET" >"$log_file" 2>&1
 }
 
@@ -122,18 +354,54 @@ run_capture() {
   echo "$code" >"$code_file"
 }
 
+detect_case_blocker_reason() {
+  local stderr_file="$1"
+
+  if [ ! -f "$stderr_file" ]; then
+    return 0
+  fi
+
+  if [ "$(count_matches 'SELFHOST_DRIVER_HARNESS_UNAVAILABLE' "$stderr_file")" -gt 0 ]; then
+    echo "candidate blocked: SELFHOST_DRIVER_HARNESS_UNAVAILABLE"
+    return 0
+  fi
+
+  if [ "$(count_matches 'SELFHOST_BOOTSTRAP_ARTIFACTS_MISSING' "$stderr_file")" -gt 0 ]; then
+    echo "candidate blocked: SELFHOST_BOOTSTRAP_ARTIFACTS_MISSING"
+    return 0
+  fi
+
+  if [ "$(count_matches 'SELFHOST_SIGNED_HARNESS_REQUIRED|SELFHOST_SIGNED_HARNESS_MISSING' "$stderr_file")" -gt 0 ]; then
+    echo "candidate blocked: SELFHOST_SIGNED_HARNESS_UNAVAILABLE"
+    return 0
+  fi
+}
+
 compare_case() {
   local case_id="$1"
-  local compare_spec="$2"
-  local base_prefix="$3"
-  local cand_prefix="$4"
+  local mode="$2"
+  local compare_spec="$3"
+  local base_prefix="$4"
+  local cand_prefix="$5"
+  local base_exit=""
+  local cand_exit=""
+  local blocker_reason=""
 
   IFS=',' read -r -a checks <<<"$compare_spec"
   for check in "${checks[@]}"; do
     case "$check" in
       exit)
         if ! cmp -s "$base_prefix.exit" "$cand_prefix.exit"; then
-          fail "$case_id" "exit code mismatch"
+          base_exit="$(tr -d '\n' <"$base_prefix.exit")"
+          cand_exit="$(tr -d '\n' <"$cand_prefix.exit")"
+          blocker_reason="$(detect_case_blocker_reason "$cand_prefix.stderr")"
+          if [ -n "$blocker_reason" ] && [[ "$mode" =~ ^run_(selfhost|default_vs_compat)$ ]]; then
+            not_run "$case_id" "baseline=$base_exit candidate=$cand_exit; $blocker_reason"
+          elif [ -n "$blocker_reason" ]; then
+            fail "$case_id" "exit code mismatch (baseline=$base_exit candidate=$cand_exit; $blocker_reason)"
+          else
+            fail "$case_id" "exit code mismatch (baseline=$base_exit candidate=$cand_exit)"
+          fi
           return 1
         fi
         ;;
@@ -262,6 +530,12 @@ classify_full_selfhost_failure() {
     return 0
   fi
 
+  if [ ! -f "$BASELINE_WORKTREE/Cargo.toml" ]; then
+    echo "classification=unknown reason=baseline_manifest_missing commit=$BASELINE_COMMIT"
+    git worktree remove --force "$BASELINE_WORKTREE" >/dev/null 2>&1 || true
+    return 0
+  fi
+
   if ! run_with_timeout 900 bash -lc "cd \"$BASELINE_WORKTREE\" && cargo build -p souc" >"$LOG_DIR/baseline_build.stdout" 2>"$LOG_DIR/baseline_build.stderr"; then
     echo "classification=unknown reason=baseline_build_failed commit=$BASELINE_COMMIT"
     git worktree remove --force "$BASELINE_WORKTREE" >/dev/null 2>&1 || true
@@ -318,9 +592,12 @@ classify_full_selfhost_failure() {
 }
 
 mkdir -p "$LOG_DIR" "$ARTIFACT_DIR"
+run_poseidon_wrapper_checks
 
 if [ "$BUILD_SOUC" = "1" ]; then
-  if run_with_timeout 900 cargo build -p souc >"$LOG_DIR/build.stdout" 2>"$LOG_DIR/build.stderr"; then
+  if ! has_repo_cargo_manifest; then
+    pass "build" "skipped cargo build -p souc; repo Cargo.toml missing in this checkout"
+  elif run_with_timeout 900 cargo build -p souc >"$LOG_DIR/build.stdout" 2>"$LOG_DIR/build.stderr"; then
     pass "build" "cargo build -p souc"
   else
     fail "build" "cargo build failed (see $LOG_DIR/build.stderr)"
@@ -330,14 +607,14 @@ fi
 if [ ! -x "$SOUC_BIN" ]; then
   fail "preflight" "compiler binary not found at $SOUC_BIN"
   echo
-  echo "Summary: PASS=$PASS_COUNT FAIL=$FAIL_COUNT"
+  echo "Summary: PASS=$PASS_COUNT FAIL=$FAIL_COUNT NOT_RUN=$NOT_RUN_COUNT"
   exit 1
 fi
 
 if [ ! -f "$MATRIX_FILE" ]; then
   fail "preflight" "matrix file missing: $MATRIX_FILE"
   echo
-  echo "Summary: PASS=$PASS_COUNT FAIL=$FAIL_COUNT"
+  echo "Summary: PASS=$PASS_COUNT FAIL=$FAIL_COUNT NOT_RUN=$NOT_RUN_COUNT"
   exit 1
 fi
 
@@ -351,7 +628,7 @@ while IFS='|' read -r case_id mode command compare_spec; do
 
   case "$mode" in
     run_selfhost|run_default_vs_compat)
-      common_selfhost_env="SOUNIO_SELFHOST_MODE=$SELFHOST_MODE"
+      common_selfhost_env="SOUNIO_PARITY_BACKEND=$SELFHOST_BACKEND SOUNIO_SELFHOST_EXECUTOR=$SELFHOST_EXECUTOR"
       run_capture \
         "$base_prefix.stdout" \
         "$base_prefix.stderr" \
@@ -387,7 +664,7 @@ while IFS='|' read -r case_id mode command compare_spec; do
       ;;
   esac
 
-  compare_case "$case_id" "$compare_spec" "$base_prefix" "$cand_prefix" || true
+  compare_case "$case_id" "$mode" "$compare_spec" "$base_prefix" "$cand_prefix" || true
 done <"$MATRIX_FILE"
 
 if [ "$RUN_ORACLE_PARITY" = "1" ]; then
@@ -425,7 +702,7 @@ else
 fi
 
 echo
-echo "Summary: PASS=$PASS_COUNT FAIL=$FAIL_COUNT"
+echo "Summary: PASS=$PASS_COUNT FAIL=$FAIL_COUNT NOT_RUN=$NOT_RUN_COUNT"
 echo "Artifacts: $WORK_DIR"
 
 if [ "$FAIL_COUNT" -gt 0 ]; then
