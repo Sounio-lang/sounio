@@ -1,0 +1,164 @@
+// stdlib::math::ga::dual_quaternion — Dual quaternions as PGA motors
+//
+// A dual quaternion is the even subalgebra of Cl(3,0,1), encoding rigid body
+// transforms (rotation + translation) in 8 components.
+//
+// Layout in PGA Multivector (16 components, only even grades used):
+//   Grade 0: scalar (index 0)        — real quaternion w
+//   Grade 2: e01(3), e02(5), e03(9)  — dual quaternion translation part
+//            e12(6), e13(10), e23(12) — real quaternion rotation part
+//   Grade 4: e0123(15)               — dual quaternion w
+//
+// Mapping: real quaternion (rw, rx, ry, rz) + dual (dw, dx, dy, dz)
+//   rw -> scalar(0), rx -> e23(12), ry -> e13(10), rz -> e12(6)
+//   dw -> e0123(15), dx -> e01(3),  dy -> e02(5),  dz -> e03(9)
+
+// ============================================================================
+// Constructors
+// ============================================================================
+
+fn dquat_new(rw: f64, rx: f64, ry: f64, rz: f64, dw: f64, dx: f64, dy: f64, dz: f64) -> Multivector with Mut {
+    let sig = ga_sig_pga3d()
+    var mv = ga_zero(sig)
+    // Real quaternion part
+    mv.components[0] = rw          // scalar
+    mv.components[12] = rx         // e23
+    mv.components[10] = ry         // e13
+    mv.components[6] = rz          // e12
+    // Dual quaternion part
+    mv.components[15] = dw         // e0123
+    mv.components[3] = dx          // e01
+    mv.components[5] = dy          // e02
+    mv.components[9] = dz          // e03
+    mv.grade_mask = 21             // grades 0, 2, 4
+    mv
+}
+
+fn dquat_from_rotation(qw: f64, qx: f64, qy: f64, qz: f64) -> Multivector with Mut {
+    // Pure rotation motor (no translation): dual part = 0
+    dquat_new(qw, qx, qy, qz, 0.0, 0.0, 0.0, 0.0)
+}
+
+fn dquat_from_translation(tx: f64, ty: f64, tz: f64) -> Multivector with Mut {
+    // Pure translation motor: 1 + (t/2) * e0i bivectors
+    // T = 1 + (tx/2)*e01 + (ty/2)*e02 + (tz/2)*e03
+    dquat_new(1.0, 0.0, 0.0, 0.0, 0.0, tx * 0.5, ty * 0.5, tz * 0.5)
+}
+
+fn dquat_from_rotation_translation(qw: f64, qx: f64, qy: f64, qz: f64, tx: f64, ty: f64, tz: f64) -> Multivector with Mut {
+    // Combined rigid transform: T * R (translation after rotation)
+    let rot = dquat_from_rotation(qw, qx, qy, qz)
+    let trans = dquat_from_translation(tx, ty, tz)
+    dquat_compose(trans, rot)
+}
+
+// ============================================================================
+// Operations
+// ============================================================================
+
+fn dquat_compose(a: Multivector, b: Multivector) -> Multivector with Mut {
+    // Motor composition = geometric product
+    ga_product(a, b)
+}
+
+fn dquat_apply(dq: Multivector, point: Multivector) -> Multivector with Mut {
+    // Apply rigid transform via sandwich product
+    pga_sandwich(dq, point)
+}
+
+fn dquat_conjugate(dq: Multivector) -> Multivector with Mut {
+    // Reverse = motor inverse for unit motors
+    ga_reverse(dq)
+}
+
+fn dquat_norm_sq(dq: Multivector) -> f64 {
+    // Squared norm of the real quaternion part
+    let s = dq.components[0]
+    let rx = dq.components[12]
+    let ry = dq.components[10]
+    let rz = dq.components[6]
+    s * s + rx * rx + ry * ry + rz * rz
+}
+
+fn dquat_normalize(dq: Multivector) -> Multivector with Mut {
+    // Normalize dual quaternion so real part has unit norm
+    let n2 = dquat_norm_sq(dq)
+    if n2 < 1e-24 {
+        return pga_identity_motor()
+    }
+    // Approximate 1/sqrt(n2) using Newton's method
+    var inv_n = 1.0 / n2
+    // Actually just divide each component (need sqrt)
+    // Use x * inversesqrt approximation: start with 1/n2, refine
+    // For now, compute sqrt via Babylonian method
+    var s = 1.0
+    var iter: i64 = 0
+    while iter < 20 {
+        s = (s + n2 / s) * 0.5
+        iter = iter + 1
+    }
+    let inv = 1.0 / s
+
+    let sig = ga_sig_pga3d()
+    var result = ga_zero(sig)
+    var i: i64 = 0
+    while i < 16 {
+        result.components[i as usize] = dq.components[i as usize] * inv
+        i = i + 1
+    }
+    result.grade_mask = 21
+    result
+}
+
+fn dquat_sclerp(a: Multivector, b: Multivector, t: f64) -> Multivector with Mut {
+    // Screw linear interpolation (simplified: linear blend + normalize)
+    // True sclerp requires log/exp which needs trig functions.
+    // For MVP: nlerp-style interpolation.
+    let sig = ga_sig_pga3d()
+    var result = ga_zero(sig)
+    let one_minus_t = 1.0 - t
+    var i: i64 = 0
+    while i < 16 {
+        result.components[i as usize] = a.components[i as usize] * one_minus_t + b.components[i as usize] * t
+        i = i + 1
+    }
+    result.grade_mask = 21
+    dquat_normalize(result)
+}
+
+fn dquat_extract_rotation(dq: Multivector) -> Multivector with Mut {
+    // Extract rotation part (real quaternion only, zero dual part)
+    dquat_new(dq.components[0], dq.components[12], dq.components[10], dq.components[6], 0.0, 0.0, 0.0, 0.0)
+}
+
+fn dquat_extract_translation(dq: Multivector) -> Multivector with Mut {
+    // Extract translation vector as (tx, ty, tz) stored in components [0..2]
+    // t = 2 * dual(q) * conj(real(q))
+    // For unit dual quaternion: tx = 2*(dw*rx + dx*rw + dy*rz - dz*ry) etc.
+    // Simplified: the e0i bivector components encode t/2 in the translation-only case
+    // For general case, compute 2 * d * conj(r)
+    let rw = dq.components[0]
+    let rx = dq.components[12]
+    let ry = dq.components[10]
+    let rz = dq.components[6]
+    let dw = dq.components[15]
+    let dx = dq.components[3]
+    let dy = dq.components[5]
+    let dz = dq.components[9]
+
+    // t = 2 * (dw*rw + dx*rx + dy*ry + dz*rz,  -- should be 0 for unit dq
+    //          dx*rw - dw*rx + dz*ry - dy*rz,     -- tx
+    //          dy*rw - dz*rx - dw*ry + dx*rz,     -- ty
+    //          dz*rw + dy*rx - dx*ry - dw*rz)     -- tz
+    let tx = 2.0 * (dx * rw - dw * rx + dz * ry - dy * rz)
+    let ty = 2.0 * (dy * rw - dz * rx - dw * ry + dx * rz)
+    let tz = 2.0 * (dz * rw + dy * rx - dx * ry - dw * rz)
+
+    let sig = ga_sig_pga3d()
+    var result = ga_zero(sig)
+    result.components[0] = tx
+    result.components[1] = ty
+    result.components[2] = tz
+    result.grade_mask = 0
+    result
+}

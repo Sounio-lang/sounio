@@ -1,0 +1,171 @@
+// stdlib::math::ga::simd — SIMD batch multivector operations
+//
+// SoA (Struct of Arrays) layout for 4-wide lane-parallel GA operations.
+// Each MvBatch4 holds 4 independent multivectors stored in interleaved format:
+//   comp[c*4 + lane] = component c of multivector in lane.
+//
+// Works with any AlgebraSignature (not PGA-specific).
+// When SIMD intrinsics are available, the inner loops map to 4-wide f64 ops.
+
+// ============================================================================
+// Batch type
+// ============================================================================
+
+struct MvBatch4 {
+    comp: [f64; 128],          // 4 multivectors x 32 components, SoA: comp[c*4+lane]
+    sig: AlgebraSignature,
+    grade_mask: i64,
+    count: i64,                // active lanes (1-4)
+}
+
+// ============================================================================
+// Constructors
+// ============================================================================
+
+fn mv_batch4_zero(sig: AlgebraSignature) -> MvBatch4 with Mut {
+    MvBatch4 { comp: [0.0; 128], sig: sig, grade_mask: 0, count: 4 }
+}
+
+fn mv_batch4_load(m0: Multivector, m1: Multivector, m2: Multivector, m3: Multivector) -> MvBatch4 with Mut {
+    // Transpose AoS to SoA
+    var batch = mv_batch4_zero(m0.sig)
+    let n = m0.component_count
+    var c: i64 = 0
+    while c < n {
+        let base = c * 4
+        batch.comp[(base + 0) as usize] = m0.components[c as usize]
+        batch.comp[(base + 1) as usize] = m1.components[c as usize]
+        batch.comp[(base + 2) as usize] = m2.components[c as usize]
+        batch.comp[(base + 3) as usize] = m3.components[c as usize]
+        c = c + 1
+    }
+    // Merge grade masks
+    var gm = m0.grade_mask
+    // OR via: a + b - AND(a,b) for each pair
+    gm = gm + m1.grade_mask - ga_and(gm, m1.grade_mask, 16)
+    gm = gm + m2.grade_mask - ga_and(gm, m2.grade_mask, 16)
+    gm = gm + m3.grade_mask - ga_and(gm, m3.grade_mask, 16)
+    batch.grade_mask = gm
+    batch.count = 4
+    batch
+}
+
+fn mv_batch4_extract(batch: MvBatch4, lane: i64) -> Multivector with Mut {
+    // Extract one multivector from batch (lane 0..3)
+    var mv = ga_zero(batch.sig)
+    let n = mv.component_count
+    var c: i64 = 0
+    while c < n {
+        mv.components[c as usize] = batch.comp[(c * 4 + lane) as usize]
+        c = c + 1
+    }
+    mv.grade_mask = batch.grade_mask
+    mv
+}
+
+// ============================================================================
+// Arithmetic
+// ============================================================================
+
+fn mv_batch4_add(a: MvBatch4, b: MvBatch4) -> MvBatch4 with Mut {
+    // Lane-parallel addition
+    var result = mv_batch4_zero(a.sig)
+    let n = ga_blade_count(a.sig)
+    var c: i64 = 0
+    while c < n {
+        let base = c * 4
+        var lane: i64 = 0
+        while lane < 4 {
+            result.comp[(base + lane) as usize] = a.comp[(base + lane) as usize] + b.comp[(base + lane) as usize]
+            lane = lane + 1
+        }
+        c = c + 1
+    }
+    var gm = a.grade_mask
+    gm = gm + b.grade_mask - ga_and(gm, b.grade_mask, 16)
+    result.grade_mask = gm
+    result.count = a.count
+    result
+}
+
+fn mv_batch4_scale(a: MvBatch4, s: f64) -> MvBatch4 with Mut {
+    // Scalar multiply all lanes
+    var result = mv_batch4_zero(a.sig)
+    let n = ga_blade_count(a.sig)
+    var c: i64 = 0
+    while c < n {
+        let base = c * 4
+        var lane: i64 = 0
+        while lane < 4 {
+            result.comp[(base + lane) as usize] = a.comp[(base + lane) as usize] * s
+            lane = lane + 1
+        }
+        c = c + 1
+    }
+    result.grade_mask = a.grade_mask
+    result.count = a.count
+    result
+}
+
+fn mv_batch4_sub(a: MvBatch4, b: MvBatch4) -> MvBatch4 with Mut {
+    // Lane-parallel subtraction
+    var result = mv_batch4_zero(a.sig)
+    let n = ga_blade_count(a.sig)
+    var c: i64 = 0
+    while c < n {
+        let base = c * 4
+        var lane: i64 = 0
+        while lane < 4 {
+            result.comp[(base + lane) as usize] = a.comp[(base + lane) as usize] - b.comp[(base + lane) as usize]
+            lane = lane + 1
+        }
+        c = c + 1
+    }
+    var gm = a.grade_mask
+    gm = gm + b.grade_mask - ga_and(gm, b.grade_mask, 16)
+    result.grade_mask = gm
+    result.count = a.count
+    result
+}
+
+// ============================================================================
+// Geometric product (batched)
+// ============================================================================
+
+fn mv_batch4_product(a: MvBatch4, b: MvBatch4) -> MvBatch4 with Mut {
+    // Lane-parallel geometric product: each lane computed independently
+    // Extract, compute, reload — future: inline the blade loop across lanes
+    let m0a = mv_batch4_extract(a, 0)
+    let m1a = mv_batch4_extract(a, 1)
+    let m2a = mv_batch4_extract(a, 2)
+    let m3a = mv_batch4_extract(a, 3)
+    let m0b = mv_batch4_extract(b, 0)
+    let m1b = mv_batch4_extract(b, 1)
+    let m2b = mv_batch4_extract(b, 2)
+    let m3b = mv_batch4_extract(b, 3)
+    let r0 = ga_product(m0a, m0b)
+    let r1 = ga_product(m1a, m1b)
+    let r2 = ga_product(m2a, m2b)
+    let r3 = ga_product(m3a, m3b)
+    mv_batch4_load(r0, r1, r2, r3)
+}
+
+// ============================================================================
+// PGA motor batch sandwich
+// ============================================================================
+
+fn mv_batch4_reverse(a: MvBatch4) -> MvBatch4 with Mut {
+    // Lane-parallel reverse
+    let m0 = ga_reverse(mv_batch4_extract(a, 0))
+    let m1 = ga_reverse(mv_batch4_extract(a, 1))
+    let m2 = ga_reverse(mv_batch4_extract(a, 2))
+    let m3 = ga_reverse(mv_batch4_extract(a, 3))
+    mv_batch4_load(m0, m1, m2, m3)
+}
+
+fn pga_motor_batch4_sandwich(motors: MvBatch4, points: MvBatch4) -> MvBatch4 with Mut {
+    // Batch sandwich: motors[i] * points[i] * ~motors[i] for i in 0..3
+    let rev = mv_batch4_reverse(motors)
+    let mp = mv_batch4_product(motors, points)
+    mv_batch4_product(mp, rev)
+}

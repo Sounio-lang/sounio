@@ -1,0 +1,151 @@
+// stdlib::math::ga::pga — Projective Geometric Algebra Cl(3,0,1)
+//
+// PGA for 3D Euclidean geometry. Basis: e0 (degenerate, e0^2=0), e1, e2, e3 (Euclidean).
+// 16 basis blades indexed by bitfield: e0=bit0(1), e1=bit1(2), e2=bit2(4), e3=bit3(8).
+//
+// Grade 0: scalar (0)
+// Grade 1: e0(1), e1(2), e2(4), e3(8)                    — planes
+// Grade 2: e01(3), e02(5), e03(9), e12(6), e13(10), e23(12) — lines
+// Grade 3: e012(7), e013(11), e023(13), e123(14)          — points
+// Grade 4: e0123(15)                                       — pseudoscalar
+//
+// Points are grade-3 trivectors (dual representation).
+// Planes are grade-1 vectors.
+// Motors (rigid transforms) are even-grade elements (grades 0, 2, 4).
+
+// ============================================================================
+// Constructors
+// ============================================================================
+
+fn pga_point(x: f64, y: f64, z: f64) -> Multivector with Mut {
+    // Homogeneous point as grade-3 trivector:
+    // x*e032 + y*e013 + z*e021 + 1*e123
+    // e032 = e0^e3^e2: index = 1|8|4 = 13
+    // e013 = e0^e1^e3: index = 1|2|8 = 11
+    // e021 = e0^e2^e1: index = 1|4|2 = 7
+    // e123 = e1^e2^e3: index = 2|4|8 = 14
+    let sig = ga_sig_pga3d()
+    var mv = ga_zero(sig)
+    mv.components[13] = x       // e032
+    mv.components[11] = y       // e013
+    mv.components[7] = z        // e021
+    mv.components[14] = 1.0     // e123
+    mv.grade_mask = 8           // bit 3 = grade 3
+    mv
+}
+
+fn pga_plane(a: f64, b: f64, c: f64, d: f64) -> Multivector with Mut {
+    // Grade-1 vector: a*e1 + b*e2 + c*e3 + d*e0
+    // e0=1, e1=2, e2=4, e3=8
+    let sig = ga_sig_pga3d()
+    var mv = ga_zero(sig)
+    mv.components[1] = d       // e0
+    mv.components[2] = a       // e1
+    mv.components[4] = b       // e2
+    mv.components[8] = c       // e3
+    mv.grade_mask = 2          // bit 1 = grade 1
+    mv
+}
+
+fn pga_identity_motor() -> Multivector with Mut {
+    // Identity motor: scalar 1.0, even grades
+    let sig = ga_sig_pga3d()
+    var mv = ga_zero(sig)
+    mv.components[0] = 1.0
+    mv.grade_mask = 21         // bits 0,2,4 = 1+4+16 = 21 (grades 0,2,4)
+    mv
+}
+
+fn pga_line(e01: f64, e02: f64, e03: f64, e12: f64, e13: f64, e23: f64) -> Multivector with Mut {
+    // Grade-2 bivector representing a line
+    let sig = ga_sig_pga3d()
+    var mv = ga_zero(sig)
+    mv.components[3] = e01     // e01 = index 3
+    mv.components[5] = e02     // e02 = index 5
+    mv.components[9] = e03     // e03 = index 9
+    mv.components[6] = e12     // e12 = index 6
+    mv.components[10] = e13    // e13 = index 10
+    mv.components[12] = e23    // e23 = index 12
+    mv.grade_mask = 4          // bit 2 = grade 2
+    mv
+}
+
+// ============================================================================
+// Operations
+// ============================================================================
+
+fn pga_join(a: Multivector, b: Multivector) -> Multivector with Mut {
+    // Progressive product = outer product
+    ga_outer(a, b)
+}
+
+fn pga_meet(a: Multivector, b: Multivector) -> Multivector with Mut {
+    // Regressive product via dualization: dual(outer(dual(a), dual(b)))
+    let da = ga_dual(a)
+    let db = ga_dual(b)
+    let outer = ga_outer(da, db)
+    ga_dual(outer)
+}
+
+fn pga_sandwich(motor: Multivector, x: Multivector) -> Multivector with Mut {
+    // Motor application: m * x * ~m
+    let rev = ga_reverse(motor)
+    let mx = ga_product(motor, x)
+    ga_product(mx, rev)
+}
+
+fn pga_normalize_point(p: Multivector) -> Multivector with Mut {
+    // Dehomogenize: divide by e123 component (index 14)
+    let w = p.components[14]
+    var result = ga_zero(p.sig)
+    if w == 0.0 {
+        // Ideal point (at infinity), return as-is
+        result.components[13] = p.components[13]
+        result.components[11] = p.components[11]
+        result.components[7] = p.components[7]
+        result.components[14] = 0.0
+    } else {
+        result.components[13] = p.components[13] / w
+        result.components[11] = p.components[11] / w
+        result.components[7] = p.components[7] / w
+        result.components[14] = 1.0
+    }
+    result.grade_mask = 8      // grade 3
+    result
+}
+
+fn pga_point_to_xyz(p: Multivector) -> Multivector with Mut {
+    // Extract Euclidean (x,y,z) coordinates from a normalized point.
+    // Returns a Multivector with x in comp[0], y in comp[1], z in comp[2]
+    // (abuse of storage for returning 3 values without tuples)
+    let norm = pga_normalize_point(p)
+    var result = ga_zero(p.sig)
+    result.components[0] = norm.components[13]   // x from e032
+    result.components[1] = norm.components[11]   // y from e013
+    result.components[2] = norm.components[7]    // z from e021
+    result.grade_mask = 0
+    result
+}
+
+fn pga_motor_from_axis_angle(lx: f64, ly: f64, lz: f64, angle: f64) -> Multivector with Mut {
+    // Create a rotation motor from axis (lx,ly,lz) and angle.
+    // Motor = cos(angle/2) + sin(angle/2) * (lx*e23 + ly*e13 + lz*e12)
+    // Note: axis should be normalized.
+    let half = angle * 0.5
+    let sig = ga_sig_pga3d()
+    var mv = ga_zero(sig)
+    // We need sin/cos but they may not be available in this stdlib context.
+    // Use the polynomial approximations from core.sio if linked.
+    // For now, store the half-angle components directly.
+    // cos(half) -> scalar, sin(half) -> bivector
+    // Approximation: sin(x) ~ x - x^3/6, cos(x) ~ 1 - x^2/2 (for small angles)
+    let h2 = half * half
+    let c = 1.0 - h2 * 0.5 + h2 * h2 / 24.0
+    let s = half - half * h2 / 6.0 + half * h2 * h2 / 120.0
+    mv.components[0] = c              // scalar
+    mv.components[12] = s * lx        // e23 = index 12
+    mv.components[10] = s * ly        // e13 = index 10
+    mv.components[6] = s * lz         // e12 = index 6
+    mv.grade_mask = 21                // grades 0, 2, 4
+    mv
+}
