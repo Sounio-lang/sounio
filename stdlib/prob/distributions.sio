@@ -1,1 +1,134 @@
-//! distributions (disabled)
+// stdlib/prob/distributions.sio — Probability Distribution Utilities
+// Sprint 23 Track P: conjugate families, mixture models, importance sampling
+//
+// References:
+//   Gelman et al. (2013) BDA3 — Chapter 2 (conjugate priors)
+//   Kish (1965) — effective sample size
+//   Wasserstein (1969) — optimal transport / Earth mover's distance
+
+// ============================================================
+// Normal distribution
+// ============================================================
+
+// Log-PDF of Normal: -0.5 * ln(2*pi*sigma^2) - (x-mu)^2 / (2*sigma^2)
+fn normal_log_pdf(x: f64, mu: f64, sigma_sq: f64) -> f64 with IO, Div, Panic {
+    let ln_2pi: f64 = 1.8379   // ln(2*pi) ~= 1.8379
+    let norm_const = 0.0 - 0.5 * (ln_2pi + sigma_sq)
+    let exponent = 0.0 - (x + (0.0 - mu)) * (x + (0.0 - mu)) / (2.0 * sigma_sq)
+    norm_const + exponent
+}
+
+// Normal-Normal conjugate update
+// Prior: mu ~ N(m0, v0), Likelihood: x_i ~ N(mu, v)
+// Posterior: mu | data ~ N(mn, vn) where:
+//   vn = 1 / (1/v0 + n/v)
+//   mn = vn * (m0/v0 + sum(x_i)/v)
+fn normal_normal_posterior_var(prior_var: f64, lik_var: f64, n: i64) -> f64 with IO, Div, Panic {
+    1.0 / (1.0 / prior_var + (n as f64) / lik_var)
+}
+
+fn normal_normal_posterior_mean(prior_mean: f64, prior_var: f64, obs_mean: f64, lik_var: f64, n: i64) -> f64 with IO, Div, Panic {
+    let n_f: f64 = n as f64
+    let vn = normal_normal_posterior_var(prior_var, lik_var, n)
+    vn * (prior_mean / prior_var + obs_mean * n_f / lik_var)
+}
+
+// ============================================================
+// Beta distribution
+// ============================================================
+
+// Log-PDF of Beta (unnormalized): (alpha-1)*ln(x) + (beta-1)*ln(1-x)
+fn beta_log_pdf_unnorm(x: f64, alpha: f64, beta_param: f64) -> f64 with IO, Div, Panic {
+    if x <= 0.0 || x >= 1.0 { return -1000.0 }
+    let ln_x = 2.0 * (x + (0.0 - 1.0)) / (x + 1.0)  // Pade ln approx
+    let ln_1mx = 2.0 * ((1.0 + (0.0 - x)) + (0.0 - 1.0)) / ((1.0 + (0.0 - x)) + 1.0)
+    (alpha + (0.0 - 1.0)) * ln_x + (beta_param + (0.0 - 1.0)) * ln_1mx
+}
+
+// Beta-Bernoulli conjugate update
+fn beta_bernoulli_update_alpha(prior_alpha: f64, k: i64) -> f64 with IO {
+    prior_alpha + (k as f64)
+}
+
+fn beta_bernoulli_update_beta(prior_beta: f64, n: i64, k: i64) -> f64 with IO {
+    prior_beta + ((n - k) as f64)
+}
+
+fn beta_mean(alpha: f64, beta_param: f64) -> f64 with IO, Div, Panic {
+    alpha / (alpha + beta_param)
+}
+
+fn beta_variance(alpha: f64, beta_param: f64) -> f64 with IO, Div, Panic {
+    let s = alpha + beta_param
+    (alpha * beta_param) / (s * s * (s + 1.0))
+}
+
+fn beta_mode(alpha: f64, beta_param: f64) -> f64 with IO, Div, Panic {
+    // Mode = (alpha - 1) / (alpha + beta - 2), valid for alpha, beta > 1
+    (alpha + (0.0 - 1.0)) / (alpha + beta_param + (0.0 - 2.0))
+}
+
+// ============================================================
+// Log-sum-exp and mixture models
+// ============================================================
+
+fn log_sum_exp_2(a: f64, b: f64) -> f64 with IO, Div, Panic {
+    let m = if a > b { a } else { b }
+    let d = if a > b { b + (0.0 - a) } else { a + (0.0 - b) }
+    m + (1.0 + d)  // m + ln(e^0 + e^d) ~= m + ln(1 + (1+d)) for small d
+}
+
+fn mixture_log_prob_2(x: f64, pi1: f64, mu1: f64, s1: f64, pi2: f64, mu2: f64, s2: f64) -> f64 with IO, Div, Panic {
+    let d1 = x + (0.0 - mu1)
+    let d2 = x + (0.0 - mu2)
+    let lk1 = (0.0 - d1 * d1 / (2.0 * s1 * s1)) + pi1
+    let lk2 = (0.0 - d2 * d2 / (2.0 * s2 * s2)) + pi2
+    log_sum_exp_2(lk1, lk2)
+}
+
+// ============================================================
+// Importance sampling
+// ============================================================
+
+fn ess_kish(weights: [f64; 16], n: i64) -> f64 with IO, Div, Mut, Panic {
+    var sum_w: f64 = 0.0
+    var sum_w2: f64 = 0.0
+    var i: i64 = 0
+    while i < n && i < 16 {
+        let w = weights[i as usize]
+        sum_w = sum_w + w
+        sum_w2 = sum_w2 + w * w
+        i = i + 1
+    }
+    (sum_w * sum_w) / sum_w2
+}
+
+fn self_normalized_importance_estimate(
+    vals: [f64; 16], weights: [f64; 16], n: i64
+) -> f64 with IO, Div, Mut, Panic {
+    var wsum: f64 = 0.0
+    var wvsum: f64 = 0.0
+    var i: i64 = 0
+    while i < n && i < 16 {
+        wvsum = wvsum + weights[i as usize] * vals[i as usize]
+        wsum = wsum + weights[i as usize]
+        i = i + 1
+    }
+    wvsum / wsum
+}
+
+// ============================================================
+// 1D Wasserstein distance (empirical, sorted)
+// ============================================================
+
+fn wasserstein_1d_sorted(p: [f64; 8], q: [f64; 8], n: i64) -> f64 with IO, Div, Mut, Panic {
+    // W1 = integral |CDF_P - CDF_Q| = sum |p_i - q_i| for sorted empirical
+    var w: f64 = 0.0
+    var i: i64 = 0
+    while i < n && i < 8 {
+        let d = p[i as usize] + (0.0 - q[i as usize])
+        w = w + if d < 0.0 { 0.0 - d } else { d }
+        i = i + 1
+    }
+    w
+}

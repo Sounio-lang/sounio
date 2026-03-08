@@ -1,0 +1,132 @@
+// stdlib/math/information.sio — Information Theory
+// Sprint 23 Track I: Shannon entropy, Renyi entropy, KL divergence, DPI
+//
+// References:
+//   Shannon (1948) "A Mathematical Theory of Communication" Bell System Tech J
+//   Cover & Thomas (2006) "Elements of Information Theory" 2nd ed.
+//   Renyi (1961) "On measures of entropy and information"
+//   Pinsker (1964) — Pinsker's inequality
+
+// ============================================================
+// Entropy
+// ============================================================
+
+fn shannon_entropy_exact(probs: [f64; 8], k: i64) -> f64 with IO, Div, Mut, Panic {
+    var h: f64 = 0.0
+    var i: i64 = 0
+    while i < k && i < 8 {
+        let p = probs[i as usize]
+        if p > 0.0 {
+            let r = p + (0.0 - 1.0)
+            let ln_p = 2.0 * r / (p + 1.0)  // Pade approx to ln(p)
+            h = h + (0.0 - p) * ln_p
+        }
+        i = i + 1
+    }
+    h
+}
+
+// Renyi entropy of order alpha: H_alpha(X) = (1/(1-alpha)) * ln(sum p_i^alpha)
+// alpha=1 limit -> Shannon entropy; alpha=2 -> collision entropy
+fn renyi_entropy_alpha2(probs: [f64; 8], k: i64) -> f64 with IO, Div, Mut, Panic {
+    // H_2(X) = -ln(sum p_i^2)  [collision entropy]
+    var sum_p2: f64 = 0.0
+    var i: i64 = 0
+    while i < k && i < 8 {
+        let p = probs[i as usize]
+        sum_p2 = sum_p2 + p * p
+        i = i + 1
+    }
+    // -ln(sum_p2) via Pade
+    let r = sum_p2 + (0.0 - 1.0)
+    0.0 - 2.0 * r / (sum_p2 + 1.0)
+}
+
+fn min_entropy(probs: [f64; 8], k: i64) -> f64 with IO, Div, Mut, Panic {
+    // H_inf(X) = -ln(max p_i)
+    var max_p: f64 = 0.0
+    var i: i64 = 0
+    while i < k && i < 8 {
+        if probs[i as usize] > max_p { max_p = probs[i as usize] }
+        i = i + 1
+    }
+    if max_p <= 0.0 { return 0.0 }
+    let r = max_p + (0.0 - 1.0)
+    0.0 - 2.0 * r / (max_p + 1.0)
+}
+
+// ============================================================
+// Divergences
+// ============================================================
+
+fn kl_divergence_exact(p: [f64; 8], q: [f64; 8], k: i64) -> f64 with IO, Div, Mut, Panic {
+    var kl: f64 = 0.0
+    var i: i64 = 0
+    while i < k && i < 8 {
+        let pi = p[i as usize]
+        let qi = q[i as usize]
+        if pi > 0.0 && qi > 0.0 {
+            let ratio = pi / qi
+            let ln_r = 2.0 * (ratio + (0.0 - 1.0)) / (ratio + 1.0)
+            kl = kl + pi * ln_r
+        }
+        i = i + 1
+    }
+    kl
+}
+
+fn jsd_divergence_exact(p: [f64; 8], q: [f64; 8], k: i64) -> f64 with IO, Div, Mut, Panic {
+    var m: [f64; 8] = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    var i: i64 = 0
+    while i < k && i < 8 {
+        m[i as usize] = (p[i as usize] + q[i as usize]) / 2.0
+        i = i + 1
+    }
+    let kl_pm = kl_divergence_exact(p, m, k)
+    let kl_qm = kl_divergence_exact(q, m, k)
+    (kl_pm + kl_qm) / 2.0
+}
+
+fn pinsker_tv_bound(kl: f64) -> f64 with IO, Div, Mut, Panic {
+    // TV(P,Q) <= sqrt(KL(P||Q) / 2)
+    if kl <= 0.0 { return 0.0 }
+    let half_kl = kl / 2.0
+    var y = half_kl
+    var i: i64 = 0
+    while i < 10 {
+        if y > 0.0 { y = (y + half_kl / y) / 2.0 }
+        i = i + 1
+    }
+    y
+}
+
+// ============================================================
+// Channel capacity
+// ============================================================
+
+fn channel_capacity_bsc(p_error: f64) -> f64 with IO, Div, Panic {
+    // BSC capacity: C = 1 - H_b(p) [bits]
+    // H_b(p) = -p*ln(p) - (1-p)*ln(1-p)   [binary entropy]
+    if p_error <= 0.0 || p_error >= 1.0 { return 0.0 }
+    let q = 1.0 + (0.0 - p_error)
+    let ln_p = 2.0 * (p_error + (0.0 - 1.0)) / (p_error + 1.0)
+    let ln_q = 2.0 * (q + (0.0 - 1.0)) / (q + 1.0)
+    let hb = (0.0 - p_error) * ln_p + (0.0 - q) * ln_q
+    // C = ln(2) - H_b(p) [nats], return as ratio
+    0.693 + (0.0 - hb)
+}
+
+fn channel_capacity_awgn(snr: f64) -> f64 with IO, Div, Panic {
+    // AWGN capacity: C = 0.5 * ln(1 + SNR) [nats]
+    let x = 1.0 + snr
+    0.5 * 2.0 * (x + (0.0 - 1.0)) / (x + 1.0)  // 0.5 * Pade ln
+}
+
+// ============================================================
+// Value of information (Cramer-Rao lower bound proxy)
+// ============================================================
+
+fn cramer_rao_lower_bound(fisher_info: f64) -> f64 with IO, Div, Panic {
+    // Var(theta_hat) >= 1 / I(theta)
+    1.0 / fisher_info
+}

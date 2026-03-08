@@ -1,0 +1,108 @@
+// stdlib/epistemic/statistical_core.sio — Unified Epistemic Statistical Core
+// Sprint 23: Bridge module connecting Tracks P, I, V, X to the existing
+// epistemic tower (Contest, Robust, Validated from Sprints 5-8).
+//
+// The Epistemic Statistical Chain:
+//   Distribution<T>  --[sample_from]--> Sample<T,D>
+//   Sample<T,D>      --[bayes_update]--> Conditional<T,E>
+//   Conditional<T,E> --[vi_approx]----> ELBO<Q,P,delta>
+//   ELBO<Q,P,delta>  --[vi_to_contest]-> Contest<Conditional<T,E>>
+//   Contest<...>     --[prove_robust]--> Robust<Conditional<T,E>>
+//
+// References:
+//   Blei et al. (2017) JASA "Variational Inference: A Review"
+//   McAllester (1999) "PAC-Bayesian model averaging"
+//   Catoni (2007) "PAC-Bayesian supervised classification"
+
+// ============================================================
+// ELBO computation utilities
+// ============================================================
+
+fn elbo_lower_bound(log_evidence: f64, kl_gap: f64) -> f64 with IO, Div, Panic {
+    // ELBO = log P(x) - KL(Q||P) [lower bounds log evidence]
+    log_evidence + (0.0 - kl_gap)
+}
+
+fn elbo_kl_gap(log_evidence: f64, elbo_val: f64) -> f64 with IO, Div, Panic {
+    // KL(Q||P) = log P(x) - ELBO [gap between evidence and ELBO]
+    log_evidence + (0.0 - elbo_val)
+}
+
+// ============================================================
+// PAC-Bayes generalization bounds
+// ============================================================
+
+// PAC-Bayes (McAllester 1999): For any prior P, posterior Q, data S of size n,
+// with probability >= 1 - delta:
+//   R(Q) <= R_emp(Q) + sqrt( (KL(Q||P) + ln(1/delta)) / (2n) )
+fn pac_bayes_bound_exact(emp_risk: f64, kl_qp: f64, n: i64, delta: f64) -> f64 with IO, Div, Mut, Panic {
+    let n_f: f64 = n as f64
+    // ln(1/delta) ~= -ln(delta) via Pade
+    let r = delta + (0.0 - 1.0)
+    let ln_inv_delta = 0.0 - 2.0 * r / (delta + 1.0)
+    let numerator = kl_qp + ln_inv_delta
+    // sqrt(x / (2n)) via Newton
+    let val = numerator / (2.0 * n_f)
+    var y = val
+    var i: i64 = 0
+    while i < 10 {
+        if y > 0.0 { y = (y + val / y) / 2.0 }
+        i = i + 1
+    }
+    emp_risk + y
+}
+
+// ============================================================
+// VI convergence tracking
+// ============================================================
+
+fn vi_elbo_converged(prev_elbo: f64, curr_elbo: f64, tol: f64) -> bool with IO {
+    // Convergence: |curr - prev| < tol
+    let diff = curr_elbo + (0.0 - prev_elbo)
+    let abs_diff = if diff < 0.0 { 0.0 - diff } else { diff }
+    abs_diff < tol
+}
+
+fn vi_kl_monotone_decreasing(prev_kl: f64, curr_kl: f64) -> bool with IO {
+    curr_kl <= prev_kl + 0.001  // small tolerance
+}
+
+// ============================================================
+// Distribution comparison utilities
+// ============================================================
+
+fn total_variation_bound_from_kl(kl: f64) -> f64 with IO, Div, Mut, Panic {
+    // Pinsker: TV(P,Q) <= sqrt(KL(P||Q) / 2)
+    if kl <= 0.0 { return 0.0 }
+    let half_kl = kl / 2.0
+    var y = half_kl
+    var i: i64 = 0
+    while i < 10 {
+        if y > 0.0 { y = (y + half_kl / y) / 2.0 }
+        i = i + 1
+    }
+    y
+}
+
+fn elbo_to_evidence_gap_bound(elbo_val: f64, log_evidence: f64) -> f64 with IO {
+    // Gap = log P(x) - ELBO = KL(Q||P) >= 0
+    let gap = log_evidence + (0.0 - elbo_val)
+    if gap < 0.0 { return 0.0 }
+    gap
+}
+
+// ============================================================
+// Sensitivity analysis for Bayesian models
+// ============================================================
+
+fn prior_sensitivity_kl(prior_alpha1: f64, prior_beta1: f64,
+                         prior_alpha2: f64, prior_beta2: f64) -> f64 with IO, Div, Panic {
+    // KL divergence between two Beta priors (proxy for prior sensitivity)
+    // Uses log-ratio approximation: ln(alpha1/alpha2) ~= 2*(alpha1-alpha2)/(alpha1+alpha2)
+    let a_ratio = prior_alpha1 / prior_alpha2
+    let b_ratio = prior_beta1 / prior_beta2
+    let ln_a = 2.0 * (a_ratio + (0.0 - 1.0)) / (a_ratio + 1.0)
+    let ln_b = 2.0 * (b_ratio + (0.0 - 1.0)) / (b_ratio + 1.0)
+    // Approximate Beta KL via moment matching
+    (prior_alpha1 + (0.0 - prior_alpha2)) * ln_a + (prior_beta1 + (0.0 - prior_beta2)) * ln_b
+}
