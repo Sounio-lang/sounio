@@ -1825,6 +1825,65 @@ fn gpu_emit_epistemic_shadow_binary(
     k
 }
 
+// Emit shadow uncertainty propagation for unary GpuOps (Sprint 30).
+// Sqrt: eps = eps_in / (2 * |val|)  [derivative of sqrt]
+// Abs/Neg: eps = eps_in              [passthrough]
+fn gpu_emit_epistemic_shadow_unary(
+    kernel: GpuKernelIr,
+    op: GpuOp,
+    shadow_offset: i64
+) -> GpuKernelIr with Mut, Panic {
+    var k = kernel
+    let eps_dst = op.dst_reg + shadow_offset
+    let eps_src = op.src_reg + shadow_offset
+
+    if op.opcode == GpuOpcode::GpuSqrt {
+        // eps_sqrt = eps_in / (2 * |val|)
+        // Step 1: tmp1 = abs(val)
+        var abs_val = gpu_op_new()
+        abs_val.opcode = GpuOpcode::GpuAbs
+        abs_val.dst_reg = eps_dst + 1000
+        abs_val.src_reg = op.src_reg
+        abs_val.ty = GpuType::GpuF64
+        k = gpu_kernel_append_op(k, abs_val)
+
+        // Step 2: tmp2 = 2.0 * abs(val)
+        var two_const = gpu_op_new()
+        two_const.opcode = GpuOpcode::GpuConst
+        two_const.dst_reg = eps_dst + 1001
+        two_const.imm_i64 = 2
+        two_const.ty = GpuType::GpuF64
+        k = gpu_kernel_append_op(k, two_const)
+
+        var mul_two = gpu_op_new()
+        mul_two.opcode = GpuOpcode::GpuMul
+        mul_two.dst_reg = eps_dst + 1002
+        mul_two.lhs_reg = eps_dst + 1001
+        mul_two.rhs_reg = eps_dst + 1000
+        mul_two.ty = GpuType::GpuF64
+        k = gpu_kernel_append_op(k, mul_two)
+
+        // Step 3: eps_dst = eps_src / tmp2
+        var div_eps = gpu_op_new()
+        div_eps.opcode = GpuOpcode::GpuDiv
+        div_eps.dst_reg = eps_dst
+        div_eps.lhs_reg = eps_src
+        div_eps.rhs_reg = eps_dst + 1002
+        div_eps.ty = GpuType::GpuF64
+        k = gpu_kernel_append_op(k, div_eps)
+    } else if op.opcode == GpuOpcode::GpuAbs || op.opcode == GpuOpcode::GpuNeg {
+        // eps passthrough: uncertainty unchanged by abs/neg
+        var copy_eps = gpu_op_new()
+        copy_eps.opcode = GpuOpcode::GpuCopy
+        copy_eps.dst_reg = eps_dst
+        copy_eps.src_reg = eps_src
+        copy_eps.ty = GpuType::GpuF64
+        k = gpu_kernel_append_op(k, copy_eps)
+    }
+
+    k
+}
+
 // Lower an HlirFunction to GpuKernelIr with epistemic shadow registers.
 // Each parameter gets a shadow uncertainty register; each arithmetic op
 // gets companion uncertainty propagation ops.
@@ -1851,6 +1910,11 @@ fn hlir_function_to_epistemic_gpu_kernel(func: HlirFunction) -> GpuKernelIr with
         if op.opcode == GpuOpcode::GpuAdd || op.opcode == GpuOpcode::GpuSub ||
            op.opcode == GpuOpcode::GpuMul || op.opcode == GpuOpcode::GpuDiv {
             kernel = gpu_emit_epistemic_shadow_binary(kernel, op, shadow_offset)
+        }
+        // Unary ops: sqrt, abs, neg (Sprint 30)
+        if op.opcode == GpuOpcode::GpuSqrt || op.opcode == GpuOpcode::GpuAbs ||
+           op.opcode == GpuOpcode::GpuNeg {
+            kernel = gpu_emit_epistemic_shadow_unary(kernel, op, shadow_offset)
         }
 
         oi = oi + 1
