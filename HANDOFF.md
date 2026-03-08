@@ -123,7 +123,9 @@ cat artifacts/sprint26/transition_monitoring_manifest_gate.v1.json
     - `not_run=0`
 
 ## Checkpoint git
-- Commit atual desta handoff:
+- HEAD atual desta handoff:
+  - `324890af` — `docs(handoff): note local checkpoint commit`
+- Commit imediatamente anterior com o checkpoint da lane:
   - `b4643d6e` — `chore(handoff): checkpoint transition monitoring lane`
 - Esse commit está **local neste host** até ser pushado.
 - Para levar para outra máquina via remote:
