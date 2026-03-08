@@ -123,7 +123,15 @@ cat artifacts/sprint26/transition_monitoring_manifest_gate.v1.json
     - `not_run=0`
 
 ## Checkpoint git
-- O checkpoint desta handoff deve conter apenas:
+- Commit atual desta handoff:
+  - `b4643d6e` — `chore(handoff): checkpoint transition monitoring lane`
+- Esse commit está **local neste host** até ser pushado.
+- Para levar para outra máquina via remote:
+```bash
+cd /home/demetrios/work/sounio
+git push origin codex/ci-signal-recovery-20260307
+```
+- O checkpoint contém apenas:
   - `self-hosted/check/refinement.sio`
   - `scripts/sprint25_transition_monitoring_gate.sh`
   - `artifacts/omega/bootstrap_knowledge_tests.v1.json`
