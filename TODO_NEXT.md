@@ -17,7 +17,6 @@ cat artifacts/sprint26/transition_monitoring_manifest_gate.v1.json
 - `not_run=0`
 
 ## Se falhar
-Rodar imediatamente:
 ```bash
 ./target/debug/souc run self-hosted/compiler/main.sio -- --self-test
 bash scripts/bootstrap/run_knowledge_bootstrap_tests.sh
