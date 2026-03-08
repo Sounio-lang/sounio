@@ -414,3 +414,484 @@ fn check_causal_effect_type(effect_ty: TypeEntry) -> i64 {
         _ => 0
     }
 }
+
+// ============================================================
+// Sprint 29: Do-Calculus Type Checking
+// D-separation (Bayes-Ball), front-door criterion, Rules 1-3
+// References: Pearl (1995), Shpitser-Pearl (2006), Shachter (1998)
+// ============================================================
+
+// BFS upward through directed edges. Returns [bool; 16] ancestor mask.
+fn causal_get_ancestors(g: CausalGraph, node: i64) -> [bool; 16] with Mut {
+    var anc: [bool; 16] = [false; 16]
+    var queue: [i64; 16] = [0 - 1; 16]
+    var q_head: i64 = 0
+    var q_tail: i64 = 0
+    var ei: i64 = 0
+    while ei < g.edge_count {
+        let e = g.edges[ei as usize]
+        if e.is_directed && e.to_idx == node && !anc[e.from_idx as usize] {
+            anc[e.from_idx as usize] = true
+            queue[q_tail as usize] = e.from_idx
+            q_tail = q_tail + 1
+        }
+        ei = ei + 1
+    }
+    while q_head < q_tail {
+        let cur = queue[q_head as usize]
+        q_head = q_head + 1
+        var ej: i64 = 0
+        while ej < g.edge_count {
+            let e = g.edges[ej as usize]
+            if e.is_directed && e.to_idx == cur && !anc[e.from_idx as usize] {
+                anc[e.from_idx as usize] = true
+                if q_tail < 16 {
+                    queue[q_tail as usize] = e.from_idx
+                    q_tail = q_tail + 1
+                }
+            }
+            ej = ej + 1
+        }
+    }
+    anc
+}
+
+// Remove all directed edges pointing INTO `node`. Produces G_{X-bar} (intervention graph).
+fn causal_graph_remove_incoming(g: CausalGraph, node: i64) -> CausalGraph with Mut {
+    var result = g
+    var new_count: i64 = 0
+    var i: i64 = 0
+    while i < g.edge_count {
+        let e = g.edges[i as usize]
+        if e.is_directed && e.to_idx == node {
+            // Skip (remove incoming edge)
+            i = i + 1
+        } else {
+            result.edges[new_count as usize] = e
+            new_count = new_count + 1
+            i = i + 1
+        }
+    }
+    result.edge_count = new_count
+    result
+}
+
+// Remove all directed edges leaving `node`. Produces G_{X_} (underbar).
+fn causal_graph_remove_outgoing(g: CausalGraph, node: i64) -> CausalGraph with Mut {
+    var result = g
+    var new_count: i64 = 0
+    var i: i64 = 0
+    while i < g.edge_count {
+        let e = g.edges[i as usize]
+        if e.is_directed && e.from_idx == node {
+            i = i + 1
+        } else {
+            result.edges[new_count as usize] = e
+            new_count = new_count + 1
+            i = i + 1
+        }
+    }
+    result.edge_count = new_count
+    result
+}
+
+// Remove incoming edges for all nodes in set.
+fn causal_graph_remove_incoming_set(g: CausalGraph, set: [bool; 16]) -> CausalGraph with Mut {
+    var result = g
+    var new_count: i64 = 0
+    var i: i64 = 0
+    while i < g.edge_count {
+        let e = g.edges[i as usize]
+        if e.is_directed && set[e.to_idx as usize] {
+            i = i + 1
+        } else {
+            result.edges[new_count as usize] = e
+            new_count = new_count + 1
+            i = i + 1
+        }
+    }
+    result.edge_count = new_count
+    result
+}
+
+// Remove outgoing edges for all nodes in set.
+fn causal_graph_remove_outgoing_set(g: CausalGraph, set: [bool; 16]) -> CausalGraph with Mut {
+    var result = g
+    var new_count: i64 = 0
+    var i: i64 = 0
+    while i < g.edge_count {
+        let e = g.edges[i as usize]
+        if e.is_directed && set[e.from_idx as usize] {
+            i = i + 1
+        } else {
+            result.edges[new_count as usize] = e
+            new_count = new_count + 1
+            i = i + 1
+        }
+    }
+    result.edge_count = new_count
+    result
+}
+
+// ============================================================
+// D-Separation (Bayes-Ball algorithm, Shachter 1998)
+// ============================================================
+
+// D-separation test: Is X independent of Y given conditioning set Z in graph G?
+// Uses Bayes-Ball algorithm with (node, direction) state pairs.
+// visited[node*2 + direction]: direction 0=from_parent, 1=from_child.
+fn causal_d_separated(g: CausalGraph, x: i64, y: i64, z_set: [bool; 16]) -> bool with Mut {
+    var visited: [bool; 32] = [false; 32]
+    var queue: [i64; 64] = [0 - 1; 64]
+    var q_head: i64 = 0
+    var q_tail: i64 = 0
+    var reached_y: bool = false
+
+    // Get descendants of Z nodes (needed for collider activation)
+    var z_or_desc: [bool; 16] = z_set
+    var zi: i64 = 0
+    while zi < g.node_count {
+        if z_set[zi as usize] {
+            let desc = causal_get_descendants(g, zi)
+            var di: i64 = 0
+            while di < g.node_count {
+                if desc[di as usize] {
+                    z_or_desc[di as usize] = true
+                }
+                di = di + 1
+            }
+        }
+        zi = zi + 1
+    }
+
+    // Seed: edges from X
+    var ei: i64 = 0
+    while ei < g.edge_count {
+        let e = g.edges[ei as usize]
+        if e.is_directed && e.from_idx == x {
+            let state = e.to_idx * 2 + 0
+            if !visited[state as usize] {
+                visited[state as usize] = true
+                queue[q_tail as usize] = state
+                q_tail = q_tail + 1
+            }
+        }
+        if e.is_directed && e.to_idx == x {
+            let state = e.from_idx * 2 + 1
+            if !visited[state as usize] {
+                visited[state as usize] = true
+                queue[q_tail as usize] = state
+                q_tail = q_tail + 1
+            }
+        }
+        if !e.is_directed {
+            var other: i64 = 0 - 1
+            if e.from_idx == x {
+                other = e.to_idx
+            }
+            if e.to_idx == x {
+                other = e.from_idx
+            }
+            if other >= 0 {
+                let state = other * 2 + 0
+                if !visited[state as usize] {
+                    visited[state as usize] = true
+                    queue[q_tail as usize] = state
+                    q_tail = q_tail + 1
+                }
+            }
+        }
+        ei = ei + 1
+    }
+
+    // BFS
+    while q_head < q_tail && !reached_y {
+        let state = queue[q_head as usize]
+        q_head = q_head + 1
+        let node = state / 2
+        let from_parent = (state % 2) == 0
+
+        if node == y {
+            reached_y = true
+        }
+
+        if !reached_y {
+            if from_parent {
+                // Arrived via directed edge from parent
+                if !z_set[node as usize] {
+                    // Not conditioned: pass to children and through bidirected
+                    var ej: i64 = 0
+                    while ej < g.edge_count {
+                        let e = g.edges[ej as usize]
+                        if e.is_directed && e.from_idx == node {
+                            let ns = e.to_idx * 2 + 0
+                            if !visited[ns as usize] && q_tail < 64 {
+                                visited[ns as usize] = true
+                                queue[q_tail as usize] = ns
+                                q_tail = q_tail + 1
+                            }
+                        }
+                        if !e.is_directed {
+                            var other: i64 = 0 - 1
+                            if e.from_idx == node {
+                                other = e.to_idx
+                            }
+                            if e.to_idx == node {
+                                other = e.from_idx
+                            }
+                            if other >= 0 {
+                                let ns = other * 2 + 0
+                                if !visited[ns as usize] && q_tail < 64 {
+                                    visited[ns as usize] = true
+                                    queue[q_tail as usize] = ns
+                                    q_tail = q_tail + 1
+                                }
+                            }
+                        }
+                        ej = ej + 1
+                    }
+                }
+                // Collider activation: if node or descendant is in Z
+                if z_or_desc[node as usize] {
+                    var ek: i64 = 0
+                    while ek < g.edge_count {
+                        let e = g.edges[ek as usize]
+                        if e.is_directed && e.to_idx == node {
+                            let ns = e.from_idx * 2 + 1
+                            if !visited[ns as usize] && q_tail < 64 {
+                                visited[ns as usize] = true
+                                queue[q_tail as usize] = ns
+                                q_tail = q_tail + 1
+                            }
+                        }
+                        ek = ek + 1
+                    }
+                }
+            } else {
+                // Arrived from child (going backward along directed edge)
+                if !z_set[node as usize] {
+                    // Not conditioned: continue to parents and fork to children
+                    var ej: i64 = 0
+                    while ej < g.edge_count {
+                        let e = g.edges[ej as usize]
+                        if e.is_directed && e.to_idx == node {
+                            let ns = e.from_idx * 2 + 1
+                            if !visited[ns as usize] && q_tail < 64 {
+                                visited[ns as usize] = true
+                                queue[q_tail as usize] = ns
+                                q_tail = q_tail + 1
+                            }
+                        }
+                        if e.is_directed && e.from_idx == node {
+                            let ns = e.to_idx * 2 + 0
+                            if !visited[ns as usize] && q_tail < 64 {
+                                visited[ns as usize] = true
+                                queue[q_tail as usize] = ns
+                                q_tail = q_tail + 1
+                            }
+                        }
+                        if !e.is_directed {
+                            var other: i64 = 0 - 1
+                            if e.from_idx == node {
+                                other = e.to_idx
+                            }
+                            if e.to_idx == node {
+                                other = e.from_idx
+                            }
+                            if other >= 0 {
+                                let ns = other * 2 + 0
+                                if !visited[ns as usize] && q_tail < 64 {
+                                    visited[ns as usize] = true
+                                    queue[q_tail as usize] = ns
+                                    q_tail = q_tail + 1
+                                }
+                            }
+                        }
+                        ej = ej + 1
+                    }
+                }
+                // If conditioned, block the path (chain/fork blocked)
+            }
+        }
+    }
+    !reached_y
+}
+
+// ============================================================
+// Front-Door Criterion
+// ============================================================
+
+// Check if all directed paths from `from` to `to` are intercepted by z_set.
+// BFS from `from` following only directed edges, skipping z_set nodes.
+// Returns true if `to` is NOT reachable (all paths intercepted).
+fn causal_intercepts_all_directed_paths(g: CausalGraph, from: i64, to: i64, z_set: [bool; 16]) -> bool with Mut {
+    var visited: [bool; 16] = [false; 16]
+    var queue: [i64; 16] = [0 - 1; 16]
+    var q_head: i64 = 0
+    var q_tail: i64 = 0
+    var reached_to: bool = false
+    visited[from as usize] = true
+    queue[0] = from
+    q_tail = 1
+    while q_head < q_tail && !reached_to {
+        let cur = queue[q_head as usize]
+        q_head = q_head + 1
+        if cur == to {
+            reached_to = true
+        }
+        if !reached_to {
+            var ei: i64 = 0
+            while ei < g.edge_count {
+                let e = g.edges[ei as usize]
+                if e.is_directed && e.from_idx == cur {
+                    let next = e.to_idx
+                    if !visited[next as usize] && !z_set[next as usize] {
+                        visited[next as usize] = true
+                        if q_tail < 16 {
+                            queue[q_tail as usize] = next
+                            q_tail = q_tail + 1
+                        }
+                    }
+                }
+                ei = ei + 1
+            }
+        }
+    }
+    !reached_to
+}
+
+// Find a front-door adjustment set for (cause, effect).
+// Returns (status, set): status 0=found, 1=not found.
+// Brute-force over single-node mediator candidates (max 16 iterations).
+fn causal_find_front_door_set(g: CausalGraph, cause: i64, effect: i64) -> (i64, [bool; 16]) with Mut {
+    var found_status: i64 = 1
+    var found_set: [bool; 16] = [false; 16]
+    var m: i64 = 0
+    while m < g.node_count && found_status == 1 {
+        if m != cause && m != effect && g.nodes[m as usize].is_observed {
+            var z_set: [bool; 16] = [false; 16]
+            z_set[m as usize] = true
+            // Condition 1: Z intercepts all directed paths from cause to effect
+            let cond1 = causal_intercepts_all_directed_paths(g, cause, effect, z_set)
+            if cond1 {
+                // Condition 2: No unblocked backdoor from cause to Z in G_{X-bar}
+                let g_xbar = causal_graph_remove_incoming(g, cause)
+                let cond2 = !causal_has_backdoor_path(g_xbar, cause, m)
+                if cond2 {
+                    // Condition 3: All backdoor paths from Z to Y blocked by X
+                    var x_cond: [bool; 16] = [false; 16]
+                    x_cond[cause as usize] = true
+                    let g_zbar = causal_graph_remove_incoming(g, m)
+                    let cond3 = causal_d_separated(g_zbar, m, effect, x_cond)
+                    if !cond3 {
+                        found_status = 0
+                        found_set = z_set
+                    }
+                }
+            }
+        }
+        m = m + 1
+    }
+    (found_status, found_set)
+}
+
+// Wrapper: check front-door identifiability. Returns 0 if identifiable, 1 if not.
+fn causal_check_front_door(g: CausalGraph, cause: i64, effect: i64) -> i64 with Mut {
+    let result = causal_find_front_door_set(g, cause, effect)
+    result.0
+}
+
+// ============================================================
+// Do-Calculus Rules 1-3 (Pearl 1995)
+// ============================================================
+
+// Rule 1: Insertion/deletion of observations.
+// P(y|do(x),z,w) = P(y|do(x),w) if (Y ⊥ Z | X,W) in G_{X-bar}
+fn do_calculus_rule1(g: CausalGraph, y: i64, x: i64, z: i64, w_set: [bool; 16]) -> bool with Mut {
+    let g_xbar = causal_graph_remove_incoming(g, x)
+    var cond_set: [bool; 16] = w_set
+    cond_set[x as usize] = true
+    causal_d_separated(g_xbar, y, z, cond_set)
+}
+
+// Rule 2: Action/observation exchange.
+// P(y|do(x),do(z),w) = P(y|do(x),z,w) if (Y ⊥ Z | X,W) in G_{X-bar, Z_}
+fn do_calculus_rule2(g: CausalGraph, y: i64, x: i64, z: i64, w_set: [bool; 16]) -> bool with Mut {
+    let g_xbar = causal_graph_remove_incoming(g, x)
+    let g_xbar_zunder = causal_graph_remove_outgoing(g_xbar, z)
+    var cond_set: [bool; 16] = w_set
+    cond_set[x as usize] = true
+    causal_d_separated(g_xbar_zunder, y, z, cond_set)
+}
+
+// Rule 3: Insertion/deletion of actions.
+// P(y|do(x),do(z),w) = P(y|do(x),w) if (Y ⊥ Z | X,W) in G_{X-bar, Z-bar(S)}
+// where S = An(W) in G_{X-bar}, excluding Z nodes not ancestral to W.
+fn do_calculus_rule3(g: CausalGraph, y: i64, x: i64, z: i64, w_set: [bool; 16]) -> bool with Mut {
+    let g_xbar = causal_graph_remove_incoming(g, x)
+    // Compute ancestors of W in G_{X-bar}
+    var ancestors_of_w: [bool; 16] = [false; 16]
+    var wi: i64 = 0
+    while wi < g.node_count {
+        if w_set[wi as usize] {
+            let anc = causal_get_ancestors(g_xbar, wi)
+            var ai: i64 = 0
+            while ai < g.node_count {
+                if anc[ai as usize] {
+                    ancestors_of_w[ai as usize] = true
+                }
+                ai = ai + 1
+            }
+            ancestors_of_w[wi as usize] = true
+        }
+        wi = wi + 1
+    }
+    // Build Z-bar(S): remove incoming to Z only if Z is NOT in An(W) ∪ W
+    var g_modified = g_xbar
+    if !ancestors_of_w[z as usize] {
+        g_modified = causal_graph_remove_incoming(g_xbar, z)
+    }
+    var cond_set: [bool; 16] = w_set
+    cond_set[x as usize] = true
+    causal_d_separated(g_modified, y, z, cond_set)
+}
+
+// ============================================================
+// Extended Identifiability Cascade
+// ============================================================
+
+// Extended identifiability: backdoor → front-door → do-calculus Rule 2.
+// Returns (status, method): status 0=identifiable, 1=non-identifiable.
+// method: 0=backdoor, 1=front-door, 2=do-calculus-rule2, -1=none.
+fn check_causal_identifiability_extended(g: CausalGraph, cause_idx: i64, effect_idx: i64) -> (i64, i64) with Mut {
+    // Try backdoor criterion first
+    let bd = check_causal_identifiability(g, cause_idx, effect_idx)
+    if bd == 0 {
+        (0, 0)
+    } else {
+        // Try front-door criterion
+        let fd = causal_check_front_door(g, cause_idx, effect_idx)
+        if fd == 0 {
+            (0, 1)
+        } else {
+            // Try do-calculus Rule 2 with each intermediate node as Z
+            var found_r2: bool = false
+            var zi: i64 = 0
+            while zi < g.node_count && !found_r2 {
+                if zi != cause_idx && zi != effect_idx {
+                    var empty_w: [bool; 16] = [false; 16]
+                    let r2 = do_calculus_rule2(g, effect_idx, cause_idx, zi, empty_w)
+                    if r2 {
+                        found_r2 = true
+                    }
+                }
+                zi = zi + 1
+            }
+            if found_r2 {
+                (0, 2)
+            } else {
+                (1, 0 - 1)
+            }
+        }
+    }
+}

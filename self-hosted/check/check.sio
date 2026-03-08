@@ -109,6 +109,9 @@ struct Checker {
     transition_steps: TransitionStepTable,
     transition_plans: TransitionPlanTable,
     transition_reason_witnesses: TransitionReasonWitnessTable,
+    monitoring_policies: MonitoringPolicyTable,
+    observed_transitions: ObservedTransitionTable,
+    rollback_certificates: RollbackCertificateTable,
     alternative_frontiers: AlternativeFrontierTable,
     alternative_candidates: AlternativeCandidateTable,
     alternative_sets: AlternativeSetTable,
@@ -177,6 +180,9 @@ fn checker_new() -> Checker with Mut, Panic, Div {
         transition_steps: transition_step_table_new(),
         transition_plans: transition_plan_table_new(),
         transition_reason_witnesses: transition_reason_witness_table_new(),
+        monitoring_policies: monitoring_policy_table_new(),
+        observed_transitions: observed_transition_table_new(),
+        rollback_certificates: rollback_certificate_table_new(),
         alternative_frontiers: alternative_frontier_table_new(),
         alternative_candidates: alternative_candidate_table_new(),
         alternative_sets: alternative_set_table_new(),
@@ -744,6 +750,74 @@ fn checker_export_ir_epistemic_into_local(checker: &Checker, ep: &! IrEpistemicS
             span_start: info.span_start,
             span_end: info.span_end,
             transition_plan_id: info.transition_plan_id,
+        }
+        i = i + 1
+    }
+
+    ep.monitoring_policy_count = checker.monitoring_policies.count
+    if ep.monitoring_policy_count > IR_MAX_EPI_MONITORING_POLICIES {
+        ep.monitoring_policy_count = IR_MAX_EPI_MONITORING_POLICIES
+    }
+    i = 0
+    while i < ep.monitoring_policy_count {
+        let info = checker.monitoring_policies.get(i)
+        ep.monitoring_policies[i as usize] = IrMonitoringPolicyInfo {
+            id: i,
+            name: info.name,
+            target_ty: info.target_ty,
+            route_name: info.route_name,
+            requirements: check_policy_requirements_to_ir(info.requirements, [ir_empty_policy_requirement_info(); 8], 0),
+            requirement_count: info.requirement_count,
+            rollback_route_name: info.rollback_route_name,
+        }
+        i = i + 1
+    }
+
+    ep.observed_transition_count = checker.observed_transitions.count
+    if ep.observed_transition_count > IR_MAX_EPI_OBSERVED_TRANSITIONS {
+        ep.observed_transition_count = IR_MAX_EPI_OBSERVED_TRANSITIONS
+    }
+    i = 0
+    while i < ep.observed_transition_count {
+        let info = checker.observed_transitions.get(i)
+        ep.observed_transitions[i as usize] = IrObservedTransitionInfo {
+            id: i,
+            span_start: info.span_start,
+            span_end: info.span_end,
+            transition_plan_id: info.transition_plan_id,
+            monitoring_policy_id: info.monitoring_policy_id,
+            audit_id: info.audit_id,
+            contest_id: info.contest_id,
+            route_name: info.route_name,
+            rollback_route_name: info.rollback_route_name,
+            inner_ty: info.inner_ty,
+            metric_known: info.metric_known,
+            metric_values: info.metric_values,
+        }
+        i = i + 1
+    }
+
+    ep.rollback_certificate_count = checker.rollback_certificates.count
+    if ep.rollback_certificate_count > IR_MAX_EPI_ROLLBACK_CERTIFICATES {
+        ep.rollback_certificate_count = IR_MAX_EPI_ROLLBACK_CERTIFICATES
+    }
+    i = 0
+    while i < ep.rollback_certificate_count {
+        let info = checker.rollback_certificates.get(i)
+        ep.rollback_certificates[i as usize] = IrRollbackCertificateInfo {
+            id: i,
+            span_start: info.span_start,
+            span_end: info.span_end,
+            transition_plan_id: info.transition_plan_id,
+            monitoring_policy_id: info.monitoring_policy_id,
+            audit_id: info.audit_id,
+            contest_id: info.contest_id,
+            route_name: info.route_name,
+            rollback_route_name: info.rollback_route_name,
+            reason_code: info.reason_code,
+            inner_ty: info.inner_ty,
+            metric_known: info.metric_known,
+            metric_values: info.metric_values,
         }
         i = i + 1
     }
@@ -2949,6 +3023,134 @@ impl Checker {
         c
     }
 
+    fn report_observe_transition_requires_plan(self, span: Span, got: TypeEntry) -> Checker with Mut, IO, Panic, Div, Alloc {
+        var c = self
+        c.error_count = c.error_count + 1
+        c.had_error = true
+        print("error[E131]")
+        if span.start > 0 || span.end > 0 {
+            print(" at ")
+            print_int(span.start)
+            print("..")
+            print_int(span.end)
+        }
+        print(": observe_transition(...) requires TransitionPlan<T>\n")
+        print("   |\n   = found ")
+        print_type_name(got)
+        print("\n")
+        c
+    }
+
+    fn report_monitoring_policy_target_mismatch(self, span: Span, policy_name: Name, expected: TypeEntry, got: TypeEntry) -> Checker with Mut, IO, Panic, Div, Alloc {
+        var c = self
+        c.error_count = c.error_count + 1
+        c.had_error = true
+        print("error[E132]")
+        if span.start > 0 || span.end > 0 {
+            print(" at ")
+            print_int(span.start)
+            print("..")
+            print_int(span.end)
+        }
+        print(": monitoring policy target does not match the supplied transition subject type\n")
+        print("   |\n   = policy ")
+        print_name_value(policy_name)
+        print(" expects ")
+        print_type_name(expected)
+        print(", found ")
+        print_type_name(got)
+        print("\n")
+        c
+    }
+
+    fn report_rollback_transition_requires_plan(self, span: Span, got: TypeEntry) -> Checker with Mut, IO, Panic, Div, Alloc {
+        var c = self
+        c.error_count = c.error_count + 1
+        c.had_error = true
+        print("error[E133]")
+        if span.start > 0 || span.end > 0 {
+            print(" at ")
+            print_int(span.start)
+            print("..")
+            print_int(span.end)
+        }
+        print(": rollback_transition(...) requires TransitionPlan<T>\n")
+        print("   |\n   = found ")
+        print_type_name(got)
+        print("\n")
+        c
+    }
+
+    fn report_rollback_transition_requires_failure(self, span: Span, policy_name: Name) -> Checker with Mut, IO, Panic, Div {
+        var c = self
+        c.error_count = c.error_count + 1
+        c.had_error = true
+        print("error[E134]")
+        if span.start > 0 || span.end > 0 {
+            print(" at ")
+            print_int(span.start)
+            print("..")
+            print_int(span.end)
+        }
+        print(": rollback_transition(...) requires a violated or unavailable monitoring guard\n")
+        print("   |\n   = monitoring policy ")
+        print_name_value(policy_name)
+        print(" did not trigger rollback on this transition plan\n")
+        c
+    }
+
+    fn report_missing_monitoring_diagnostic(self, span: Span, policy_name: Name, req: PolicyRequirementInfo) -> Checker with Mut, IO, Panic, Div {
+        var c = self
+        c.error_count = c.error_count + 1
+        c.had_error = true
+        print("error[E135]")
+        if span.start > 0 || span.end > 0 {
+            print(" at ")
+            print_int(span.start)
+            print("..")
+            print_int(span.end)
+        }
+        print(": monitoring policy requires unavailable transition evidence\n")
+        print("   |\n   = monitoring policy ")
+        print_name_value(policy_name)
+        print(" requires ")
+        print_transition_metric_name(req.metric_id)
+        print(" ")
+        print_compare_op_value(req.op)
+        print(" ")
+        print_policy_requirement_value(req)
+        print("\n")
+        c
+    }
+
+    fn report_failed_monitoring_policy_requirement(self, span: Span, policy_name: Name, req: PolicyRequirementInfo, observed: f64) -> Checker with Mut, IO, Panic, Div {
+        var c = self
+        c.error_count = c.error_count + 1
+        c.had_error = true
+        print("error[E136]")
+        if span.start > 0 || span.end > 0 {
+            print(" at ")
+            print_int(span.start)
+            print("..")
+            print_int(span.end)
+        }
+        print(": monitoring policy obligation failed\n")
+        print("   |\n   = monitoring policy ")
+        print_name_value(policy_name)
+        print(" requires ")
+        print_transition_metric_name(req.metric_id)
+        print(" ")
+        print_compare_op_value(req.op)
+        print(" ")
+        print_policy_requirement_value(req)
+        print("\n   = observed ")
+        print_transition_metric_name(req.metric_id)
+        print(" = ")
+        print_milli_ratio(observed)
+        print("\n")
+        c
+    }
+
     fn report_policy_missing_robustness_metadata(self, span: Span, policy_name: Name) -> Checker with Mut, IO, Panic, Div {
         var c = self
         c.error_count = c.error_count + 1
@@ -3607,6 +3809,17 @@ fn print_error_message(code: i64) with IO, Mut, Panic, Div {
     else if code == 128 { print("transition protocol exceeds the declared max_steps bound") }
     else if code == 129 { print("transition requirement references unavailable evidence") }
     else if code == 130 { print("transition_reason(...) requires TransitionPlan<T>") }
+    else if code == 131 { print("observe_transition(...) requires TransitionPlan<T>") }
+    else if code == 132 { print("monitoring policy target does not match the supplied transition subject type") }
+    else if code == 133 { print("rollback_transition(...) requires TransitionPlan<T>") }
+    else if code == 134 { print("rollback_transition(...) requires a violated or unavailable monitoring guard") }
+    else if code == 135 { print("monitoring policy requires unavailable transition evidence") }
+    else if code == 136 { print("monitoring policy obligation failed") }
+    // Sprint 29: Do-calculus type checking errors (138-141)
+    else if code == 138 { print("front-door criterion failed: no mediator set intercepts all directed paths from cause to effect") }
+    else if code == 139 { print("do-calculus Rule 1 violated: observation is not d-separated from outcome given intervention") }
+    else if code == 140 { print("do-calculus Rule 2 violated: action cannot be replaced by observation in this graph") }
+    else if code == 141 { print("do-calculus Rule 3 violated: action cannot be deleted from this graph") }
     // GPU kernel constraints (70-72)
     else if code == 70 { print("kernel function cannot have IO, Mut, or Alloc effect") }
     else if code == 71 { print("kernel function parameter type is not GPU-compatible") }
@@ -3856,6 +4069,19 @@ fn print_error_help(code: i64) with IO, Mut, Panic, Div {
     }
     else if code == 72 {
         print("   |\n   = help: kernel functions execute on GPU and cannot return values; use &![T] output parameters instead\n")
+    }
+    // Sprint 29: Do-calculus type checking (138-141)
+    else if code == 138 {
+        print("   |\n   = help: ensure a mediating variable exists on all directed paths, with no confounding bypasses\n")
+    }
+    else if code == 139 {
+        print("   |\n   = help: the observation variable has a non-causal path to the outcome; consider adjusting the conditioning set\n")
+    }
+    else if code == 140 {
+        print("   |\n   = help: the intervention do(Z) cannot be reduced to observation Z in this causal graph\n")
+    }
+    else if code == 141 {
+        print("   |\n   = help: the intervention do(Z) has an effect on the outcome that cannot be eliminated\n")
     }
     else {
         // No help available for unknown errors
@@ -4366,6 +4592,30 @@ fn call_expr_is_builtin_transition_step_count(opt: Option<Box<Expr>>) -> bool wi
                 return false
             }
             name_matches_str21((*expr).name, 116, 114, 97, 110, 115, 105, 116, 105, 111, 110, 95, 115, 116, 101, 112, 95, 99, 111, 117, 110, 116)
+        }
+        None => false
+    }
+}
+
+fn call_expr_is_builtin_observe_transition(opt: Option<Box<Expr>>) -> bool with Mut, Panic, Div, Alloc, IO {
+    match opt {
+        Some(expr) => {
+            if (*expr).kind != ExprKind::ExprIdent {
+                return false
+            }
+            name_matches_str18((*expr).name, 111, 98, 115, 101, 114, 118, 101, 95, 116, 114, 97, 110, 115, 105, 116, 105, 111, 110)
+        }
+        None => false
+    }
+}
+
+fn call_expr_is_builtin_rollback_transition(opt: Option<Box<Expr>>) -> bool with Mut, Panic, Div, Alloc, IO {
+    match opt {
+        Some(expr) => {
+            if (*expr).kind != ExprKind::ExprIdent {
+                return false
+            }
+            name_matches_str19((*expr).name, 114, 111, 108, 108, 98, 97, 99, 107, 95, 116, 114, 97, 110, 115, 105, 116, 105, 111, 110)
         }
         None => false
     }
@@ -5214,6 +5464,9 @@ impl Checker {
             TypeRecoursePlan => c.lower_recourse_plan_type(te.type_args, te.span)
             TypeTransitionPolicy => c.lower_transition_policy_type(te.type_args, te.span)
             TypeTransitionPlan => c.lower_transition_plan_type(te.type_args, te.span)
+            TypeMonitoringPolicy => c.lower_monitoring_policy_type(te.type_args, te.span)
+            TypeObservedTransition => c.lower_observed_transition_type(te.type_args, te.span)
+            TypeRollbackCertificate => c.lower_rollback_certificate_type(te.type_args, te.span)
             TypeAlternativePolicy => c.lower_alternative_policy_type(te.type_args, te.span)
             TypeAlternativeSet => c.lower_alternative_set_type(te.type_args, te.span)
             TypeAlternativeOption => c.lower_alternative_option_type(te.type_args, te.span)
@@ -5302,6 +5555,7 @@ impl Checker {
                         || bound_ty.kind == TypeKind::TyRecoursePlan
                         || bound_ty.kind == TypeKind::TyTransitionPolicy
                         || bound_ty.kind == TypeKind::TyTransitionPlan
+                        || bound_ty.kind == TypeKind::TyMonitoringPolicy
                         || bound_ty.kind == TypeKind::TyDecisionPolicy
                         || bound_ty.kind == TypeKind::TyDeferralPolicy
                         || bound_ty.kind == TypeKind::TyValidation {
@@ -5497,6 +5751,33 @@ impl Checker {
             pair
         } else {
             (pair.0, ty_transition_plan(pair.1, -1))
+        }
+    }
+
+    fn lower_monitoring_policy_type(self, opt: Option<Box<TypeExprList>>, span: Span) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+        let pair = self.lower_single_wrapper_arg(opt, span)
+        if pair.1.kind == TypeKind::TyError {
+            pair
+        } else {
+            (pair.0, ty_monitoring_policy(pair.1, -1))
+        }
+    }
+
+    fn lower_observed_transition_type(self, opt: Option<Box<TypeExprList>>, span: Span) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+        let pair = self.lower_single_wrapper_arg(opt, span)
+        if pair.1.kind == TypeKind::TyError {
+            pair
+        } else {
+            (pair.0, ty_observed_transition(pair.1, -1))
+        }
+    }
+
+    fn lower_rollback_certificate_type(self, opt: Option<Box<TypeExprList>>, span: Span) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+        let pair = self.lower_single_wrapper_arg(opt, span)
+        if pair.1.kind == TypeKind::TyError {
+            pair
+        } else {
+            (pair.0, ty_rollback_certificate(pair.1, -1))
         }
     }
 
@@ -5825,6 +6106,7 @@ impl Checker {
             ItemRecoursePolicy => self.collect_recourse_policy_def(item.name, item.recourse_policy_def)
             ItemTransitionPolicy => self.collect_transition_policy_def(item.name, item.transition_policy_def)
             ItemTransitionProtocol => self.collect_transition_protocol_def(item.name, item.transition_protocol_def)
+            ItemMonitoringPolicy => self.collect_monitoring_policy_def(item.name, item.monitoring_policy_def)
             ItemAlternativePolicy => self.collect_alternative_policy_def(item.name, item.alternative_policy_def)
             ItemAlternativeFrontier => self.collect_alternative_frontier_def(item.name, item.alternative_frontier_def)
             ItemDecisionPolicy => self.collect_decision_policy_def(item.name, item.decision_policy_def)
@@ -6112,6 +6394,32 @@ impl Checker {
                 let add_result = c.transition_policies.add(info)
                 c.transition_policies = add_result.0
                 c.env = c.env.bind(name, ty_transition_policy(target_ty, add_result.1), false)
+                c = c.const_int_bind_unknown(name)
+                c
+            }
+            None => self
+        }
+    }
+
+    fn collect_monitoring_policy_def(self, name: Name, opt: Option<Box<MonitoringPolicyDef>>) -> Checker with Mut, Panic, Div, Alloc, IO {
+        match opt {
+            Some(mp) => {
+                let target_pair = self.lower_type_expr((*mp).target_type)
+                var c = target_pair.0
+                let target_ty = target_pair.1
+                let req_pair = c.collect_transition_policy_requirements((*mp).requirements)
+                c = req_pair.0
+                let info = MonitoringPolicyInfo {
+                    name: name,
+                    target_ty: target_ty,
+                    route_name: (*mp).route_name,
+                    requirements: req_pair.1,
+                    requirement_count: req_pair.2,
+                    rollback_route_name: (*mp).rollback_route_name,
+                }
+                let add_result = c.monitoring_policies.add(info)
+                c.monitoring_policies = add_result.0
+                c.env = c.env.bind(name, ty_monitoring_policy(target_ty, add_result.1), false)
                 c = c.const_int_bind_unknown(name)
                 c
             }
@@ -7388,6 +7696,7 @@ impl Checker {
             ItemRecoursePolicy => self
             ItemTransitionPolicy => self
             ItemTransitionProtocol => self
+            ItemMonitoringPolicy => self
             ItemAlternativePolicy => self
             ItemAlternativeFrontier => self
             ItemDecisionPolicy => self
@@ -7625,6 +7934,8 @@ impl Checker {
                     || ann_ty.kind == TypeKind::TyAcquisitionPlan
                     || ann_ty.kind == TypeKind::TyRecoursePlan
                     || ann_ty.kind == TypeKind::TyTransitionPlan
+                    || ann_ty.kind == TypeKind::TyObservedTransition
+                    || ann_ty.kind == TypeKind::TyRollbackCertificate
                     || ann_ty.kind == TypeKind::TyAlternativeSet
                     || ann_ty.kind == TypeKind::TyAlternativeOption) {
                 bind_ty = init_ty
@@ -7671,6 +7982,8 @@ impl Checker {
                     || ann_ty.kind == TypeKind::TyAcquisitionPlan
                     || ann_ty.kind == TypeKind::TyRecoursePlan
                     || ann_ty.kind == TypeKind::TyTransitionPlan
+                    || ann_ty.kind == TypeKind::TyObservedTransition
+                    || ann_ty.kind == TypeKind::TyRollbackCertificate
                     || ann_ty.kind == TypeKind::TyAlternativeSet
                     || ann_ty.kind == TypeKind::TyAlternativeOption) {
                 bind_ty = init_ty
@@ -8465,6 +8778,12 @@ impl Checker {
         if call_expr_is_builtin_transition_step_count(e.left) {
             return self.check_transition_step_count_expr(e)
         }
+        if call_expr_is_builtin_observe_transition(e.left) {
+            return self.check_observe_transition_expr(e)
+        }
+        if call_expr_is_builtin_rollback_transition(e.left) {
+            return self.check_rollback_transition_expr(e)
+        }
         if call_expr_is_builtin_lift_knowledge(e.left) {
             return self.check_lift_knowledge_expr(e)
         }
@@ -9029,6 +9348,25 @@ impl Checker {
                 }
             }
             return (false, 0.0)
+        }
+
+        (false, 0.0)
+    }
+
+    fn transition_plan_metric_pair(self, plan: TransitionPlanInfo, metric_id: i64) -> (bool, f64) with Mut, Panic, Div {
+        if self.transition_metric_is_candidate(metric_id) {
+            let alt_metric_id = self.transition_metric_to_candidate_metric(metric_id)
+            if alt_metric_id >= 0 && alt_metric_id < 8 && plan.metric_known[alt_metric_id as usize] == 1 {
+                return (true, plan.metric_values[alt_metric_id as usize])
+            }
+        }
+
+        if plan.alternative_option_id >= 0 && plan.alternative_option_id < self.alternative_candidates.count {
+            return self.transition_candidate_metric_pair(self.alternative_candidates.get(plan.alternative_option_id), metric_id)
+        }
+
+        if plan.contest_id >= 0 && plan.contest_id < self.contests.count {
+            return contest_info_get_metric(self.contests.get(plan.contest_id), metric_id)
         }
 
         (false, 0.0)
@@ -9954,6 +10292,73 @@ impl Checker {
         (c, ty_transition_plan(inner_ty, add_result.1))
     }
 
+    fn check_monitoring_policy_requirements_against_plan(
+        self,
+        span: Span,
+        policy_name: Name,
+        opt: Option<Box<PolicyRequirementInfoList>>,
+        plan_info: TransitionPlanInfo
+    ) -> (Checker, bool) with Mut, Panic, Div, Alloc, IO {
+        match opt {
+            Some(list) => {
+                let req = (*list).head
+                let metric_pair = self.transition_plan_metric_pair(plan_info, req.metric_id)
+                if !metric_pair.0 {
+                    let c = self.report_missing_monitoring_diagnostic(span, policy_name, req)
+                    (c, false)
+                } else {
+                    let observed = metric_pair.1
+                    if !policy_requirement_holds(observed, req.op, req.threshold) {
+                        let c = self.report_failed_monitoring_policy_requirement(span, policy_name, req, observed)
+                        (c, false)
+                    } else {
+                        self.check_monitoring_policy_requirements_against_plan(span, policy_name, (*list).tail, plan_info)
+                    }
+                }
+            }
+            None => (self, true)
+        }
+    }
+
+    fn monitoring_policy_has_violation_or_unavailable(
+        self,
+        opt: Option<Box<PolicyRequirementInfoList>>,
+        plan_info: TransitionPlanInfo
+    ) -> bool with Mut, Panic, Div, Alloc {
+        match opt {
+            Some(list) => {
+                let req = (*list).head
+                let metric_pair = self.transition_plan_metric_pair(plan_info, req.metric_id)
+                if !metric_pair.0 {
+                    return true
+                }
+                if !policy_requirement_holds(metric_pair.1, req.op, req.threshold) {
+                    return true
+                }
+                self.monitoring_policy_has_violation_or_unavailable((*list).tail, plan_info)
+            }
+            None => false
+        }
+    }
+
+    fn monitoring_policy_reason_code_from_plan(
+        self,
+        opt: Option<Box<PolicyRequirementInfoList>>,
+        plan_info: TransitionPlanInfo
+    ) -> i64 with Mut, Panic, Div, Alloc {
+        match opt {
+            Some(list) => {
+                let req = (*list).head
+                let metric_pair = self.transition_plan_metric_pair(plan_info, req.metric_id)
+                if !metric_pair.0 || !policy_requirement_holds(metric_pair.1, req.op, req.threshold) {
+                    return self.deferral_reason_code_from_metric_id(req.metric_id)
+                }
+                self.monitoring_policy_reason_code_from_plan((*list).tail, plan_info)
+            }
+            None => DEFERRAL_REASON_POLICY_INCOMPLETE
+        }
+    }
+
     fn check_transition_reason_expr(self, e: Expr) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
         let first_arg = expr_list_head(e.args)
         let plan_pair = self.check_opt_expr(first_arg)
@@ -9980,6 +10385,138 @@ impl Checker {
             return (c.report_transition_step_count_requires_plan(e.span, plan_ty), ty_error())
         }
         (c, ty_i64())
+    }
+
+    fn check_observe_transition_expr(self, e: Expr) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+        let value_arg = expr_list_head(e.args)
+        let plan_arg = expr_list_second(e.args)
+        let policy_arg = expr_list_third(e.args)
+
+        let value_pair = self.check_opt_expr(value_arg)
+        var c = value_pair.0
+        let value_ty = value_pair.1
+
+        let plan_pair = c.check_opt_expr(plan_arg)
+        c = plan_pair.0
+        let plan_ty = plan_pair.1
+        if plan_ty.kind != TypeKind::TyTransitionPlan
+            || plan_ty.epistemic_meta_id < 0
+            || plan_ty.epistemic_meta_id >= c.transition_plans.count {
+            return (c.report_observe_transition_requires_plan(e.span, plan_ty), ty_error())
+        }
+
+        let inner_ty = knowledge_inner(plan_ty)
+        if !types_compatible(inner_ty, value_ty) {
+            return (c.report_monitoring_policy_target_mismatch(e.span, empty_name(), inner_ty, value_ty), ty_error())
+        }
+
+        let policy_pair = c.check_opt_expr(policy_arg)
+        c = policy_pair.0
+        let policy_ty = policy_pair.1
+        let policy_name = c.transition_protocol_name_from_expr(policy_arg)
+        if policy_ty.kind != TypeKind::TyMonitoringPolicy
+            || policy_ty.epistemic_meta_id < 0
+            || policy_ty.epistemic_meta_id >= c.monitoring_policies.count {
+            return (c.report_monitoring_policy_target_mismatch(e.span, policy_name, inner_ty, policy_ty), ty_error())
+        }
+
+        let plan_info = c.transition_plans.get(plan_ty.epistemic_meta_id)
+        let policy_info = c.monitoring_policies.get(policy_ty.epistemic_meta_id)
+        if !types_compatible(policy_info.target_ty, inner_ty) {
+            return (c.report_monitoring_policy_target_mismatch(e.span, policy_info.name, policy_info.target_ty, inner_ty), ty_error())
+        }
+
+        if policy_info.requirement_count > 0 {
+            let req_pair = c.check_monitoring_policy_requirements_against_plan(
+                e.span,
+                policy_info.name,
+                policy_info.requirements,
+                plan_info
+            )
+            c = req_pair.0
+            if !req_pair.1 {
+                return (c, ty_error())
+            }
+        }
+
+        let observed_info = ObservedTransitionInfo {
+            span_start: e.span.start,
+            span_end: e.span.end,
+            transition_plan_id: plan_ty.epistemic_meta_id,
+            monitoring_policy_id: policy_ty.epistemic_meta_id,
+            audit_id: plan_info.audit_id,
+            contest_id: plan_info.contest_id,
+            route_name: if !name_is_empty(policy_info.route_name) { policy_info.route_name } else { plan_info.route_name },
+            rollback_route_name: if !name_is_empty(policy_info.rollback_route_name) { policy_info.rollback_route_name } else { plan_info.rollback_route_name },
+            inner_ty: inner_ty,
+            metric_known: plan_info.metric_known,
+            metric_values: plan_info.metric_values,
+        }
+        let add_result = c.observed_transitions.add(observed_info)
+        c.observed_transitions = add_result.0
+        (c, ty_observed_transition(inner_ty, add_result.1))
+    }
+
+    fn check_rollback_transition_expr(self, e: Expr) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+        let value_arg = expr_list_head(e.args)
+        let plan_arg = expr_list_second(e.args)
+        let policy_arg = expr_list_third(e.args)
+
+        let value_pair = self.check_opt_expr(value_arg)
+        var c = value_pair.0
+        let value_ty = value_pair.1
+
+        let plan_pair = c.check_opt_expr(plan_arg)
+        c = plan_pair.0
+        let plan_ty = plan_pair.1
+        if plan_ty.kind != TypeKind::TyTransitionPlan
+            || plan_ty.epistemic_meta_id < 0
+            || plan_ty.epistemic_meta_id >= c.transition_plans.count {
+            return (c.report_rollback_transition_requires_plan(e.span, plan_ty), ty_error())
+        }
+
+        let inner_ty = knowledge_inner(plan_ty)
+        if !types_compatible(inner_ty, value_ty) {
+            return (c.report_monitoring_policy_target_mismatch(e.span, empty_name(), inner_ty, value_ty), ty_error())
+        }
+
+        let policy_pair = c.check_opt_expr(policy_arg)
+        c = policy_pair.0
+        let policy_ty = policy_pair.1
+        let policy_name = c.transition_protocol_name_from_expr(policy_arg)
+        if policy_ty.kind != TypeKind::TyMonitoringPolicy
+            || policy_ty.epistemic_meta_id < 0
+            || policy_ty.epistemic_meta_id >= c.monitoring_policies.count {
+            return (c.report_monitoring_policy_target_mismatch(e.span, policy_name, inner_ty, policy_ty), ty_error())
+        }
+
+        let plan_info = c.transition_plans.get(plan_ty.epistemic_meta_id)
+        let policy_info = c.monitoring_policies.get(policy_ty.epistemic_meta_id)
+        if !types_compatible(policy_info.target_ty, inner_ty) {
+            return (c.report_monitoring_policy_target_mismatch(e.span, policy_info.name, policy_info.target_ty, inner_ty), ty_error())
+        }
+
+        if !c.monitoring_policy_has_violation_or_unavailable(policy_info.requirements, plan_info) {
+            return (c.report_rollback_transition_requires_failure(e.span, policy_info.name), ty_error())
+        }
+
+        let rollback_info = RollbackCertificateInfo {
+            span_start: e.span.start,
+            span_end: e.span.end,
+            transition_plan_id: plan_ty.epistemic_meta_id,
+            monitoring_policy_id: policy_ty.epistemic_meta_id,
+            audit_id: plan_info.audit_id,
+            contest_id: plan_info.contest_id,
+            route_name: if !name_is_empty(policy_info.route_name) { policy_info.route_name } else { plan_info.route_name },
+            rollback_route_name: if !name_is_empty(policy_info.rollback_route_name) { policy_info.rollback_route_name } else { plan_info.rollback_route_name },
+            reason_code: c.monitoring_policy_reason_code_from_plan(policy_info.requirements, plan_info),
+            inner_ty: inner_ty,
+            metric_known: plan_info.metric_known,
+            metric_values: plan_info.metric_values,
+        }
+        let add_result = c.rollback_certificates.add(rollback_info)
+        c.rollback_certificates = add_result.0
+        (c, ty_rollback_certificate(inner_ty, add_result.1))
     }
 
     fn check_contest_witness_expr(self, e: Expr, witness_kind: i64) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {

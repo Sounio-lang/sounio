@@ -48,6 +48,9 @@ let IR_MAX_EPI_TRANSITION_PROTOCOLS: i64 = 32
 let IR_MAX_EPI_TRANSITION_STEPS: i64 = 64
 let IR_MAX_EPI_TRANSITION_PLANS: i64 = 64
 let IR_MAX_EPI_TRANSITION_REASON_WITNESSES: i64 = 64
+let IR_MAX_EPI_MONITORING_POLICIES: i64 = 32
+let IR_MAX_EPI_OBSERVED_TRANSITIONS: i64 = 64
+let IR_MAX_EPI_ROLLBACK_CERTIFICATES: i64 = 64
 let IR_MAX_EPI_VALIDATED_MANIFESTS: i64 = 64
 
 enum IrOpcode {
@@ -268,6 +271,20 @@ enum IrOpcode {
     //   imm_i64 = transition protocol register (metadata only)
     //   label_id = transition plan id
     IrCommitAlternative,
+    // Transition monitoring runtime — observe_transition(value, plan, monitoring_policy) terminal gate
+    //   dst = destination register (holds the certified ObservedTransition<T> datum)
+    //   src1 = value register
+    //   src2 = TransitionPlan<T> register
+    //   imm_i64 = monitoring policy register (metadata only)
+    //   label_id = observed transition id
+    IrObserveTransition,
+    // Transition rollback runtime — rollback_transition(value, plan, monitoring_policy) terminal gate
+    //   dst = destination register (holds the certified RollbackCertificate<T> datum)
+    //   src1 = value register
+    //   src2 = TransitionPlan<T> register
+    //   imm_i64 = monitoring policy register (metadata only)
+    //   label_id = rollback certificate id
+    IrRollbackTransition,
 
     // Epistemic bridge — lift_knowledge(k: Knowledge<T>) → Contest<T> (H5.4)
     //   dst  = destination register (holds the lifted datum)
@@ -289,6 +306,16 @@ enum IrOpcode {
     //     src1 = result register (the handled expression's result)
     IrHandleBegin,         // Begin handle block: src1=handler_id, imm_i64=effect_def_id
     IrHandleEnd,           // End handle block: src1=result_reg
+
+    // Debug-mode policy guard — conditional trap for witness enforcement (Sprint 28)
+    //   src1 = metric value register (i64 or f64)
+    //   imm_f64 = threshold value for policy requirement
+    //   field_idx = comparison operator (0=Eq, 1=Ne, 2=Lt, 3=Le, 4=Gt, 5=Ge)
+    //   label_id = policy requirement index (for diagnostics)
+    //   name = policy name (for debug error message)
+    //   Codegen (debug): CMP/UCOMISD + conditional jump over UD2 trap
+    //   Codegen (release): not emitted (zero cost)
+    IrDebugGuard,
 }
 
 struct IrRegList {
@@ -1114,6 +1141,94 @@ fn ir_empty_transition_reason_witness_info() -> IrTransitionReasonWitnessInfo {
     }
 }
 
+struct IrMonitoringPolicyInfo {
+    id: i64,
+    name: Name,
+    target_ty: TypeEntry,
+    route_name: Name,
+    requirements: [IrPolicyRequirementInfo; 8],
+    requirement_count: i64,
+    rollback_route_name: Name,
+}
+
+fn ir_empty_monitoring_policy_info() -> IrMonitoringPolicyInfo {
+    IrMonitoringPolicyInfo {
+        id: -1,
+        name: ir_empty_name(),
+        target_ty: empty_type_entry(),
+        route_name: ir_empty_name(),
+        requirements: [ir_empty_policy_requirement_info(); 8],
+        requirement_count: 0,
+        rollback_route_name: ir_empty_name(),
+    }
+}
+
+struct IrObservedTransitionInfo {
+    id: i64,
+    span_start: i64,
+    span_end: i64,
+    transition_plan_id: i64,
+    monitoring_policy_id: i64,
+    audit_id: i64,
+    contest_id: i64,
+    route_name: Name,
+    rollback_route_name: Name,
+    inner_ty: TypeEntry,
+    metric_known: [i64; 8],
+    metric_values: [f64; 8],
+}
+
+fn ir_empty_observed_transition_info() -> IrObservedTransitionInfo {
+    IrObservedTransitionInfo {
+        id: -1,
+        span_start: 0,
+        span_end: 0,
+        transition_plan_id: -1,
+        monitoring_policy_id: -1,
+        audit_id: -1,
+        contest_id: -1,
+        route_name: ir_empty_name(),
+        rollback_route_name: ir_empty_name(),
+        inner_ty: empty_type_entry(),
+        metric_known: [0; 8],
+        metric_values: [0.0; 8],
+    }
+}
+
+struct IrRollbackCertificateInfo {
+    id: i64,
+    span_start: i64,
+    span_end: i64,
+    transition_plan_id: i64,
+    monitoring_policy_id: i64,
+    audit_id: i64,
+    contest_id: i64,
+    route_name: Name,
+    rollback_route_name: Name,
+    reason_code: i64,
+    inner_ty: TypeEntry,
+    metric_known: [i64; 8],
+    metric_values: [f64; 8],
+}
+
+fn ir_empty_rollback_certificate_info() -> IrRollbackCertificateInfo {
+    IrRollbackCertificateInfo {
+        id: -1,
+        span_start: 0,
+        span_end: 0,
+        transition_plan_id: -1,
+        monitoring_policy_id: -1,
+        audit_id: -1,
+        contest_id: -1,
+        route_name: ir_empty_name(),
+        rollback_route_name: ir_empty_name(),
+        reason_code: -1,
+        inner_ty: empty_type_entry(),
+        metric_known: [0; 8],
+        metric_values: [0.0; 8],
+    }
+}
+
 struct IrEpistemicSection {
     model_families: [IrModelFamilyInfo; 32],
     model_family_count: i64,
@@ -1177,6 +1292,12 @@ struct IrEpistemicSection {
     transition_plan_count: i64,
     transition_reason_witnesses: [IrTransitionReasonWitnessInfo; 64],
     transition_reason_witness_count: i64,
+    monitoring_policies: [IrMonitoringPolicyInfo; 32],
+    monitoring_policy_count: i64,
+    observed_transitions: [IrObservedTransitionInfo; 64],
+    observed_transition_count: i64,
+    rollback_certificates: [IrRollbackCertificateInfo; 64],
+    rollback_certificate_count: i64,
     validated_manifests: [IrValidatedManifestInfo; 64],
     validated_manifest_count: i64,
 }
@@ -1245,6 +1366,12 @@ fn ir_empty_epistemic_section() -> IrEpistemicSection {
         transition_plan_count: 0,
         transition_reason_witnesses: [ir_empty_transition_reason_witness_info(); 64],
         transition_reason_witness_count: 0,
+        monitoring_policies: [ir_empty_monitoring_policy_info(); 32],
+        monitoring_policy_count: 0,
+        observed_transitions: [ir_empty_observed_transition_info(); 64],
+        observed_transition_count: 0,
+        rollback_certificates: [ir_empty_rollback_certificate_info(); 64],
+        rollback_certificate_count: 0,
         validated_manifests: [ir_empty_validated_manifest_info(); 64],
         validated_manifest_count: 0,
     }
@@ -2185,6 +2312,28 @@ fn ir_measure(dst: i64, value_reg: i64, knowledge_meta_id: i64) -> IrInstr {
         bin_op: base.bin_op,
         un_op: base.un_op,
         name: base.name,
+        call_args: base.call_args,
+        arg_count: base.arg_count,
+    }
+}
+
+// IrDebugGuard: debug-mode policy guard — conditional trap (Sprint 28)
+fn ir_debug_guard(metric_reg: i64, threshold: f64, cmp_op: i64, req_idx: i64, policy_name: Name) -> IrInstr {
+    let base = ir_instr_new(IrOpcode::IrDebugGuard)
+    IrInstr {
+        op: base.op,
+        dst: base.dst,
+        src1: metric_reg,
+        src2: base.src2,
+        imm_i64: base.imm_i64,
+        imm_f64: threshold,
+        label_id: req_idx,
+        fn_id: base.fn_id,
+        field_idx: cmp_op,
+        imm_flags: base.imm_flags,
+        bin_op: base.bin_op,
+        un_op: base.un_op,
+        name: policy_name,
         call_args: base.call_args,
         arg_count: base.arg_count,
     }
