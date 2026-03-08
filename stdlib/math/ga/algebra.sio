@@ -1,0 +1,229 @@
+// stdlib::math::ga::algebra — Geometric Algebra core types
+//
+// Multivector representation for Clifford algebras Cl(p,q,r).
+// The algebra signature (p positive, q negative, r zero basis vectors)
+// and active grade mask are tracked for compile-time sparsity elimination.
+//
+// Grade mask is a bitfield: bit k = 1 means grade-k components are present.
+//   Scalar:     grade_mask = 0b1       (grade 0 only)
+//   Vector:     grade_mask = 0b10      (grade 1 only)
+//   Bivector:   grade_mask = 0b100     (grade 2 only)
+//   Quaternion: grade_mask = 0b101     (grades 0 + 2)
+//   Full:       grade_mask = 0b11111   (all grades for dim <= 4)
+
+let GA_MAX_COMPONENTS: i64 = 32   // supports up to Cl(5,0,0) = 2^5 = 32 components
+let GA_MAX_DIM: i64 = 5
+
+// ============================================================================
+// Algebra signature
+// ============================================================================
+
+struct AlgebraSignature {
+    p: i64,       // positive basis vectors (e_i^2 = +1)
+    q: i64,       // negative basis vectors (e_j^2 = -1)
+    r: i64,       // zero/degenerate basis vectors (e_k^2 = 0)
+}
+
+fn ga_signature(p: i64, q: i64, r: i64) -> AlgebraSignature {
+    AlgebraSignature { p: p, q: q, r: r }
+}
+
+fn ga_dim(sig: AlgebraSignature) -> i64 {
+    sig.p + sig.q + sig.r
+}
+
+// Total number of basis blades = 2^dim
+fn ga_blade_count(sig: AlgebraSignature) -> i64 with Mut {
+    let d = ga_dim(sig)
+    var result: i64 = 1
+    var i: i64 = 0
+    while i < d {
+        result = result * 2
+        i = i + 1
+    }
+    result
+}
+
+// ============================================================================
+// Common algebra signatures
+// ============================================================================
+
+fn ga_sig_complex() -> AlgebraSignature { ga_signature(0, 1, 0) }    // Cl(0,1) — complex numbers
+fn ga_sig_dual() -> AlgebraSignature { ga_signature(0, 0, 1) }       // Cl(0,0,1) — dual numbers
+fn ga_sig_quaternion() -> AlgebraSignature { ga_signature(0, 2, 0) }  // Cl(0,2) — quaternions
+fn ga_sig_vga3d() -> AlgebraSignature { ga_signature(3, 0, 0) }      // Cl(3,0,0) — 3D VGA
+fn ga_sig_pga3d() -> AlgebraSignature { ga_signature(3, 0, 1) }      // Cl(3,0,1) — 3D PGA
+fn ga_sig_cga3d() -> AlgebraSignature { ga_signature(4, 1, 0) }      // Cl(4,1,0) — 3D CGA
+fn ga_sig_sta() -> AlgebraSignature { ga_signature(1, 3, 0) }        // Cl(1,3,0) — spacetime algebra
+
+// ============================================================================
+// Multivector
+// ============================================================================
+
+struct Multivector {
+    components: [f64; 32],     // up to 2^5 = 32 basis blade coefficients
+    component_count: i64,      // active component count (= blade_count for full, less for sparse)
+    sig: AlgebraSignature,     // algebra signature
+    grade_mask: i64,           // bitfield of active grades
+}
+
+fn ga_zero(sig: AlgebraSignature) -> Multivector with Mut {
+    Multivector {
+        components: [0.0; 32],
+        component_count: ga_blade_count(sig),
+        sig: sig,
+        grade_mask: 0,
+    }
+}
+
+fn ga_scalar(sig: AlgebraSignature, value: f64) -> Multivector with Mut {
+    var mv = ga_zero(sig)
+    mv.components[0 as usize] = value
+    mv.grade_mask = 1   // bit 0 = scalar grade
+    mv
+}
+
+fn ga_basis(sig: AlgebraSignature, index: i64) -> Multivector with Mut {
+    var mv = ga_zero(sig)
+    if index >= 0 && index < ga_blade_count(sig) {
+        mv.components[index as usize] = 1.0
+        // Grade of basis blade = popcount of index (number of 1-bits)
+        let grade = ga_popcount(index)
+        mv.grade_mask = ga_bit(grade)
+    }
+    mv
+}
+
+// ============================================================================
+// Bit manipulation helpers
+// ============================================================================
+
+fn ga_bit(n: i64) -> i64 {
+    var result: i64 = 1
+    var i: i64 = 0
+    while i < n {
+        result = result * 2
+        i = i + 1
+    }
+    result
+}
+
+fn ga_popcount(n: i64) -> i64 {
+    var count: i64 = 0
+    var v: i64 = n
+    while v > 0 {
+        count = count + (v % 2)
+        v = v / 2
+    }
+    count
+}
+
+fn ga_has_bit(mask: i64, bit: i64) -> bool {
+    (mask / ga_bit(bit)) % 2 == 1
+}
+
+// ============================================================================
+// Component access
+// ============================================================================
+
+fn ga_get(mv: Multivector, index: i64) -> f64 {
+    if index >= 0 && index < mv.component_count {
+        mv.components[index as usize]
+    } else {
+        0.0
+    }
+}
+
+fn ga_set(mv: Multivector, index: i64, value: f64) -> Multivector with Mut {
+    var m = mv
+    if index >= 0 && index < m.component_count {
+        m.components[index as usize] = value
+        let grade = ga_popcount(index)
+        m.grade_mask = m.grade_mask | ga_bit(grade)
+    }
+    m
+}
+
+// Grade of a basis blade (= number of 1-bits in its index)
+fn ga_blade_grade(blade_index: i64) -> i64 {
+    ga_popcount(blade_index)
+}
+
+// Extract the scalar (grade-0) part
+fn ga_scalar_part(mv: Multivector) -> f64 {
+    ga_get(mv, 0)
+}
+
+// ============================================================================
+// Grade extraction
+// ============================================================================
+
+fn ga_grade_extract(mv: Multivector, grade: i64) -> Multivector with Mut {
+    var result = ga_zero(mv.sig)
+    var i: i64 = 0
+    while i < mv.component_count {
+        if ga_blade_grade(i) == grade {
+            result.components[i as usize] = mv.components[i as usize]
+        }
+        i = i + 1
+    }
+    result.grade_mask = ga_bit(grade)
+    result
+}
+
+// ============================================================================
+// Basic arithmetic
+// ============================================================================
+
+fn ga_add(a: Multivector, b: Multivector) -> Multivector with Mut {
+    var result = ga_zero(a.sig)
+    var i: i64 = 0
+    let n = a.component_count
+    while i < n {
+        result.components[i as usize] = a.components[i as usize] + b.components[i as usize]
+        i = i + 1
+    }
+    result.grade_mask = a.grade_mask | b.grade_mask
+    result
+}
+
+fn ga_sub(a: Multivector, b: Multivector) -> Multivector with Mut {
+    var result = ga_zero(a.sig)
+    var i: i64 = 0
+    let n = a.component_count
+    while i < n {
+        result.components[i as usize] = a.components[i as usize] - b.components[i as usize]
+        i = i + 1
+    }
+    result.grade_mask = a.grade_mask | b.grade_mask
+    result
+}
+
+fn ga_scale(mv: Multivector, s: f64) -> Multivector with Mut {
+    var result = ga_zero(mv.sig)
+    var i: i64 = 0
+    while i < mv.component_count {
+        result.components[i as usize] = mv.components[i as usize] * s
+        i = i + 1
+    }
+    result.grade_mask = mv.grade_mask
+    result
+}
+
+fn ga_negate(mv: Multivector) -> Multivector with Mut {
+    ga_scale(mv, 0.0 - 1.0)
+}
+
+// ============================================================================
+// Norm (squared)
+// ============================================================================
+
+fn ga_norm_sq(mv: Multivector) -> f64 {
+    var sum: f64 = 0.0
+    var i: i64 = 0
+    while i < mv.component_count {
+        sum = sum + mv.components[i as usize] * mv.components[i as usize]
+        i = i + 1
+    }
+    sum
+}

@@ -1,0 +1,218 @@
+// stdlib::math::ga::product — Geometric product for Clifford algebras
+//
+// The geometric product ab of two basis blades e_A and e_B produces:
+//   e_A * e_B = sign(A,B) * e_{A xor B}
+// where sign(A,B) accounts for anticommutation and the metric signature.
+
+// ============================================================================
+// Sign computation for basis blade product
+// ============================================================================
+
+// Count the number of transpositions needed to bring blade A*B into canonical order.
+// This gives the sign from anticommutation of basis vectors.
+fn ga_canonical_reorder_sign(a: i64, b: i64) -> i64 {
+    var sum: i64 = 0
+    var i: i64 = a / 2   // shift right by 1
+    while i > 0 {
+        sum = sum + ga_popcount(i & b)
+        i = i / 2
+    }
+    if sum % 2 == 0 { 1 } else { 0 - 1 }
+}
+
+// Compute the metric factor for contracting basis vector e_i with itself.
+// In Cl(p,q,r): first p vectors square to +1, next q to -1, next r to 0.
+fn ga_metric_factor(sig: AlgebraSignature, vector_index: i64) -> i64 {
+    if vector_index < sig.p {
+        1        // e_i^2 = +1 for positive dimensions
+    } else if vector_index < sig.p + sig.q {
+        0 - 1    // e_j^2 = -1 for negative dimensions
+    } else {
+        0        // e_k^2 = 0 for degenerate dimensions
+    }
+}
+
+// Full sign + metric for the product of two basis blades.
+// Returns the scalar coefficient: +1, -1, or 0.
+fn ga_blade_product_sign(sig: AlgebraSignature, a: i64, b: i64) -> i64 with Mut {
+    // First, account for anticommutation
+    var sign = ga_canonical_reorder_sign(a, b)
+
+    // Then, account for metric: for each shared basis vector,
+    // multiply by its metric factor.
+    let shared = a & b
+    let dim = ga_dim(sig)
+    var i: i64 = 0
+    while i < dim {
+        if ga_has_bit(shared, i) {
+            let mf = ga_metric_factor(sig, i)
+            if mf == 0 {
+                return 0  // degenerate: whole product vanishes
+            }
+            sign = sign * mf
+        }
+        i = i + 1
+    }
+    sign
+}
+
+// ============================================================================
+// Geometric product
+// ============================================================================
+
+fn ga_product(a: Multivector, b: Multivector) -> Multivector with Mut {
+    let n = a.component_count
+    var result = ga_zero(a.sig)
+
+    var i: i64 = 0
+    while i < n {
+        if a.components[i as usize] != 0.0 {
+            var j: i64 = 0
+            while j < n {
+                if b.components[j as usize] != 0.0 {
+                    let sign = ga_blade_product_sign(a.sig, i, j)
+                    if sign != 0 {
+                        let result_blade = i ^ j
+                        let coeff = a.components[i as usize] * b.components[j as usize] * (sign as f64)
+                        result.components[result_blade as usize] = result.components[result_blade as usize] + coeff
+                    }
+                }
+                j = j + 1
+            }
+        }
+        i = i + 1
+    }
+
+    // Recompute grade mask from non-zero components
+    result.grade_mask = 0
+    var k: i64 = 0
+    while k < n {
+        if result.components[k as usize] != 0.0 {
+            result.grade_mask = result.grade_mask | ga_bit(ga_blade_grade(k))
+        }
+        k = k + 1
+    }
+
+    result
+}
+
+// ============================================================================
+// Inner product (grade contraction)
+// ============================================================================
+
+fn ga_inner(a: Multivector, b: Multivector) -> Multivector with Mut {
+    let n = a.component_count
+    var result = ga_zero(a.sig)
+
+    var i: i64 = 0
+    while i < n {
+        if a.components[i as usize] != 0.0 {
+            let ga = ga_blade_grade(i)
+            var j: i64 = 0
+            while j < n {
+                if b.components[j as usize] != 0.0 {
+                    let gb = ga_blade_grade(j)
+                    let result_blade = i ^ j
+                    let gr = ga_blade_grade(result_blade)
+                    // Inner product: grade |ga - gb|
+                    let target_grade = if ga > gb { ga - gb } else { gb - ga }
+                    if gr == target_grade && (ga > 0 || gb > 0) {
+                        let sign = ga_blade_product_sign(a.sig, i, j)
+                        if sign != 0 {
+                            let coeff = a.components[i as usize] * b.components[j as usize] * (sign as f64)
+                            result.components[result_blade as usize] = result.components[result_blade as usize] + coeff
+                        }
+                    }
+                }
+                j = j + 1
+            }
+        }
+        i = i + 1
+    }
+
+    // Recompute grade mask
+    result.grade_mask = 0
+    var k: i64 = 0
+    while k < n {
+        if result.components[k as usize] != 0.0 {
+            result.grade_mask = result.grade_mask | ga_bit(ga_blade_grade(k))
+        }
+        k = k + 1
+    }
+    result
+}
+
+// ============================================================================
+// Outer (wedge) product
+// ============================================================================
+
+fn ga_outer(a: Multivector, b: Multivector) -> Multivector with Mut {
+    let n = a.component_count
+    var result = ga_zero(a.sig)
+
+    var i: i64 = 0
+    while i < n {
+        if a.components[i as usize] != 0.0 {
+            let ga = ga_blade_grade(i)
+            var j: i64 = 0
+            while j < n {
+                if b.components[j as usize] != 0.0 {
+                    let gb = ga_blade_grade(j)
+                    let result_blade = i ^ j
+                    let gr = ga_blade_grade(result_blade)
+                    // Outer product: grade ga + gb
+                    if gr == ga + gb {
+                        let sign = ga_canonical_reorder_sign(i, j)
+                        let coeff = a.components[i as usize] * b.components[j as usize] * (sign as f64)
+                        result.components[result_blade as usize] = result.components[result_blade as usize] + coeff
+                    }
+                }
+                j = j + 1
+            }
+        }
+        i = i + 1
+    }
+
+    // Recompute grade mask
+    result.grade_mask = 0
+    var k: i64 = 0
+    while k < n {
+        if result.components[k as usize] != 0.0 {
+            result.grade_mask = result.grade_mask | ga_bit(ga_blade_grade(k))
+        }
+        k = k + 1
+    }
+    result
+}
+
+// ============================================================================
+// Reverse (~mv): reverses the order of basis vectors in each blade
+// ============================================================================
+// For a grade-k blade: reverse sign = (-1)^(k*(k-1)/2)
+
+fn ga_reverse(mv: Multivector) -> Multivector with Mut {
+    var result = ga_zero(mv.sig)
+    var i: i64 = 0
+    while i < mv.component_count {
+        let grade = ga_blade_grade(i)
+        let sign_exp = (grade * (grade - 1)) / 2
+        let sign = if sign_exp % 2 == 0 { 1.0 } else { 0.0 - 1.0 }
+        result.components[i as usize] = mv.components[i as usize] * sign
+        i = i + 1
+    }
+    result.grade_mask = mv.grade_mask
+    result
+}
+
+// ============================================================================
+// Dual (Hodge star): multiply by pseudoscalar inverse
+// ============================================================================
+
+fn ga_dual(mv: Multivector) -> Multivector with Mut {
+    let dim = ga_dim(mv.sig)
+    let pseudoscalar_idx = ga_blade_count(mv.sig) - 1  // all-1s index
+    let pss = ga_basis(mv.sig, pseudoscalar_idx)
+    let pss_rev = ga_reverse(pss)
+    // dual(mv) = mv * pss_rev (right complement)
+    ga_product(mv, pss_rev)
+}
