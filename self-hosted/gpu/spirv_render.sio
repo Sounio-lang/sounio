@@ -1,0 +1,366 @@
+// SPIR-V graphics pipeline shader emitter
+//
+// Emits SPIR-V binary for Vulkan vertex+fragment render pipeline.
+// Execution models: Vertex=0, Fragment=3 (vs GLCompute=5 for compute).
+//
+// Shader pipeline for triangle rendering:
+//   Vertex:   in_position (Location=0) → gl_Position (builtin)
+//             in_color    (Location=1) → frag_color (Location=0)
+//   Fragment: frag_color  (Location=0) → out_color  (Location=0)
+//
+// Self-contained: inlines minimal SpvBuf + emitters needed for render pipeline.
+
+// ============================================================================
+// Minimal SpvBuf (mirrors spirv.sio for standalone use)
+// ============================================================================
+
+struct RenderSpvBuf {
+    words: [i64; 4096],
+    word_count: i64,
+}
+
+fn rspv_buf_new() -> RenderSpvBuf {
+    RenderSpvBuf { words: [0; 4096], word_count: 0 }
+}
+
+fn rspv_push_word(buf: RenderSpvBuf, w: i64) -> RenderSpvBuf with Mut, Panic {
+    var out = buf
+    out.words[out.word_count] = w
+    out.word_count = out.word_count + 1
+    out
+}
+
+fn rspv_encode_op(word_count: i64, opcode: i64) -> i64 {
+    word_count * 65536 + opcode
+}
+
+// ============================================================================
+// Core SPIR-V emit helpers (render subset)
+// ============================================================================
+
+// OpCapability (word_count=2, opcode=17)
+fn rspv_emit_capability(buf: RenderSpvBuf, cap: i64) -> RenderSpvBuf with Mut, Panic {
+    var b = buf
+    b = rspv_push_word(b, rspv_encode_op(2, 17))
+    b = rspv_push_word(b, cap)
+    b
+}
+
+// OpMemoryModel (word_count=3, opcode=14)
+fn rspv_emit_memory_model(buf: RenderSpvBuf, addressing: i64, model: i64) -> RenderSpvBuf with Mut, Panic {
+    var b = buf
+    b = rspv_push_word(b, rspv_encode_op(3, 14))
+    b = rspv_push_word(b, addressing)
+    b = rspv_push_word(b, model)
+    b
+}
+
+// OpEntryPoint (variable-length; we encode name as 4 chars "main" = 1 word + null)
+// word_count = 4 + iface_count
+fn rspv_emit_entry_point(buf: RenderSpvBuf, exec_model: i64, func_id: i64, iface0: i64, iface1: i64, iface2: i64, iface3: i64, iface_count: i64) -> RenderSpvBuf with Mut, Panic {
+    var b = buf
+    // "main\0" fits in 1 word (4 bytes, null-padded)
+    let name_word: i64 = 1852990317  // 'm'=0x6D, 'a'=0x61, 'i'=0x69, 'n'=0x6E → little-endian word
+    let wc = 4 + iface_count
+    b = rspv_push_word(b, rspv_encode_op(wc, 15))
+    b = rspv_push_word(b, exec_model)
+    b = rspv_push_word(b, func_id)
+    b = rspv_push_word(b, name_word)
+    if iface_count >= 1 { b = rspv_push_word(b, iface0) }
+    if iface_count >= 2 { b = rspv_push_word(b, iface1) }
+    if iface_count >= 3 { b = rspv_push_word(b, iface2) }
+    if iface_count >= 4 { b = rspv_push_word(b, iface3) }
+    b
+}
+
+// OpExecutionMode (word_count=3, opcode=16)
+fn rspv_emit_execution_mode(buf: RenderSpvBuf, entry: i64, mode: i64) -> RenderSpvBuf with Mut, Panic {
+    var b = buf
+    b = rspv_push_word(b, rspv_encode_op(3, 16))
+    b = rspv_push_word(b, entry)
+    b = rspv_push_word(b, mode)
+    b
+}
+
+// OpTypeVoid (word_count=2, opcode=19)
+fn rspv_emit_type_void(buf: RenderSpvBuf, result: i64) -> RenderSpvBuf with Mut, Panic {
+    var b = buf
+    b = rspv_push_word(b, rspv_encode_op(2, 19))
+    b = rspv_push_word(b, result)
+    b
+}
+
+// OpTypeFloat (word_count=3, opcode=22)
+fn rspv_emit_type_float(buf: RenderSpvBuf, result: i64, width: i64) -> RenderSpvBuf with Mut, Panic {
+    var b = buf
+    b = rspv_push_word(b, rspv_encode_op(3, 22))
+    b = rspv_push_word(b, result)
+    b = rspv_push_word(b, width)
+    b
+}
+
+// OpTypeVector (word_count=4, opcode=23)
+fn rspv_emit_type_vector(buf: RenderSpvBuf, result: i64, component_type: i64, count: i64) -> RenderSpvBuf with Mut, Panic {
+    var b = buf
+    b = rspv_push_word(b, rspv_encode_op(4, 23))
+    b = rspv_push_word(b, result)
+    b = rspv_push_word(b, component_type)
+    b = rspv_push_word(b, count)
+    b
+}
+
+// OpTypeFunction (word_count=3 for void(), opcode=33)
+fn rspv_emit_type_function(buf: RenderSpvBuf, result: i64, return_type: i64) -> RenderSpvBuf with Mut, Panic {
+    var b = buf
+    b = rspv_push_word(b, rspv_encode_op(3, 33))
+    b = rspv_push_word(b, result)
+    b = rspv_push_word(b, return_type)
+    b
+}
+
+// OpTypePointer (word_count=4, opcode=32)
+fn rspv_emit_type_pointer(buf: RenderSpvBuf, result: i64, storage_class: i64, pointee: i64) -> RenderSpvBuf with Mut, Panic {
+    var b = buf
+    b = rspv_push_word(b, rspv_encode_op(4, 32))
+    b = rspv_push_word(b, result)
+    b = rspv_push_word(b, storage_class)
+    b = rspv_push_word(b, pointee)
+    b
+}
+
+// OpVariable (word_count=4, opcode=59)
+fn rspv_emit_variable(buf: RenderSpvBuf, type_id: i64, result_id: i64, storage_class: i64) -> RenderSpvBuf with Mut, Panic {
+    var b = buf
+    b = rspv_push_word(b, rspv_encode_op(4, 59))
+    b = rspv_push_word(b, type_id)
+    b = rspv_push_word(b, result_id)
+    b = rspv_push_word(b, storage_class)
+    b
+}
+
+// OpDecorate (word_count=4, opcode=71) — with one value
+fn rspv_emit_decorate(buf: RenderSpvBuf, target: i64, decoration: i64, value: i64) -> RenderSpvBuf with Mut, Panic {
+    var b = buf
+    b = rspv_push_word(b, rspv_encode_op(4, 71))
+    b = rspv_push_word(b, target)
+    b = rspv_push_word(b, decoration)
+    b = rspv_push_word(b, value)
+    b
+}
+
+// Decoration 11=Builtin, 30=Location
+fn rspv_emit_decorate_builtin(buf: RenderSpvBuf, target: i64, builtin: i64) -> RenderSpvBuf with Mut, Panic {
+    rspv_emit_decorate(buf, target, 11, builtin)
+}
+
+fn rspv_emit_decorate_location(buf: RenderSpvBuf, target: i64, loc: i64) -> RenderSpvBuf with Mut, Panic {
+    rspv_emit_decorate(buf, target, 30, loc)
+}
+
+// OpFunction (word_count=5, opcode=54)
+fn rspv_emit_function(buf: RenderSpvBuf, result_type: i64, result_id: i64, func_ctrl: i64, func_type: i64) -> RenderSpvBuf with Mut, Panic {
+    var b = buf
+    b = rspv_push_word(b, rspv_encode_op(5, 54))
+    b = rspv_push_word(b, result_type)
+    b = rspv_push_word(b, result_id)
+    b = rspv_push_word(b, func_ctrl)
+    b = rspv_push_word(b, func_type)
+    b
+}
+
+// OpLabel (word_count=2, opcode=248)
+fn rspv_emit_label(buf: RenderSpvBuf, result_id: i64) -> RenderSpvBuf with Mut, Panic {
+    var b = buf
+    b = rspv_push_word(b, rspv_encode_op(2, 248))
+    b = rspv_push_word(b, result_id)
+    b
+}
+
+// OpLoad (word_count=4, opcode=61)
+fn rspv_emit_load(buf: RenderSpvBuf, type_id: i64, result_id: i64, pointer: i64) -> RenderSpvBuf with Mut, Panic {
+    var b = buf
+    b = rspv_push_word(b, rspv_encode_op(4, 61))
+    b = rspv_push_word(b, type_id)
+    b = rspv_push_word(b, result_id)
+    b = rspv_push_word(b, pointer)
+    b
+}
+
+// OpStore (word_count=3, opcode=62)
+fn rspv_emit_store(buf: RenderSpvBuf, pointer: i64, value: i64) -> RenderSpvBuf with Mut, Panic {
+    var b = buf
+    b = rspv_push_word(b, rspv_encode_op(3, 62))
+    b = rspv_push_word(b, pointer)
+    b = rspv_push_word(b, value)
+    b
+}
+
+// OpReturn (word_count=1, opcode=253)
+fn rspv_emit_return(buf: RenderSpvBuf) -> RenderSpvBuf with Mut, Panic {
+    rspv_push_word(buf, rspv_encode_op(1, 253))
+}
+
+// OpFunctionEnd (word_count=1, opcode=56)
+fn rspv_emit_function_end(buf: RenderSpvBuf) -> RenderSpvBuf with Mut, Panic {
+    rspv_push_word(buf, rspv_encode_op(1, 56))
+}
+
+// SPIR-V magic + version header (5 words)
+fn rspv_emit_header(buf: RenderSpvBuf, bound: i64) -> RenderSpvBuf with Mut, Panic {
+    var b = buf
+    b = rspv_push_word(b, 119734787)   // 0x07230203 magic
+    b = rspv_push_word(b, 66048)        // version 1.0 = 0x00010000
+    b = rspv_push_word(b, 0)            // generator magic (0 = unknown)
+    b = rspv_push_word(b, bound)        // ID bound
+    b = rspv_push_word(b, 0)            // schema
+    b
+}
+
+// ============================================================================
+// SPIR-V execution model constants
+// ============================================================================
+
+fn SPV_EXEC_VERTEX() -> i64 { 0 }
+fn SPV_EXEC_FRAGMENT() -> i64 { 3 }
+
+// SPIR-V builtin decoration constants
+fn SPV_BUILTIN_POSITION() -> i64 { 0 }
+fn SPV_BUILTIN_FRAG_COORD() -> i64 { 15 }
+
+// ============================================================================
+// Vertex shader emitter
+//
+// Pipeline: in_position(loc=0), in_color(loc=1) → gl_Position(builtin), frag_color(loc=0)
+//
+// ID plan:
+//   1=void, 2=void fn type, 3=f32, 4=vec4<f32>
+//   5=ptr(Output,vec4), 6=ptr(Input,vec4)
+//   9=gl_Position, 10=in_position, 11=in_color, 12=frag_color
+//   13=main fn, 14=entry label, 15=loaded pos, 16=loaded color
+//   Bound=20
+// ============================================================================
+
+fn spirv_emit_vertex_shader() -> RenderSpvBuf with Mut, Panic {
+    var b = rspv_buf_new()
+    b = rspv_emit_header(b, 20)
+    b = rspv_emit_capability(b, 1)         // Shader
+    b = rspv_emit_memory_model(b, 0, 1)    // Logical, GLSL450
+
+    // Entry point: Vertex "main", func=13, interface=[9,10,11,12]
+    b = rspv_emit_entry_point(b, SPV_EXEC_VERTEX(), 13, 9, 10, 11, 12, 4)
+
+    // Types
+    b = rspv_emit_type_void(b, 1)
+    b = rspv_emit_type_float(b, 3, 32)
+    b = rspv_emit_type_vector(b, 4, 3, 4)  // vec4<f32>
+    b = rspv_emit_type_function(b, 2, 1)   // void()
+    // Pointer types: Output=3, Input=1
+    b = rspv_emit_type_pointer(b, 5, 3, 4) // Output vec4
+    b = rspv_emit_type_pointer(b, 6, 1, 4) // Input vec4
+
+    // Variables
+    b = rspv_emit_variable(b, 5, 9, 3)    // gl_Position: Output
+    b = rspv_emit_variable(b, 6, 10, 1)   // in_position: Input
+    b = rspv_emit_variable(b, 6, 11, 1)   // in_color: Input
+    b = rspv_emit_variable(b, 5, 12, 3)   // frag_color: Output
+
+    // Decorations
+    b = rspv_emit_decorate_builtin(b, 9, SPV_BUILTIN_POSITION())
+    b = rspv_emit_decorate_location(b, 10, 0)
+    b = rspv_emit_decorate_location(b, 11, 1)
+    b = rspv_emit_decorate_location(b, 12, 0)
+
+    // main()
+    b = rspv_emit_function(b, 1, 13, 0, 2)
+    b = rspv_emit_label(b, 14)
+    b = rspv_emit_load(b, 4, 15, 10)      // load in_position
+    b = rspv_emit_store(b, 9, 15)          // store → gl_Position
+    b = rspv_emit_load(b, 4, 16, 11)      // load in_color
+    b = rspv_emit_store(b, 12, 16)         // store → frag_color
+    b = rspv_emit_return(b)
+    b = rspv_emit_function_end(b)
+    b
+}
+
+// ============================================================================
+// Fragment shader emitter
+//
+// Pipeline: frag_color_in(loc=0) → out_color(loc=0)
+//
+// ID plan:
+//   1=void, 2=void fn type, 3=f32, 4=vec4<f32>
+//   5=ptr(Input,vec4), 6=ptr(Output,vec4)
+//   7=frag_color_in, 8=out_color
+//   9=main fn, 10=entry label, 11=loaded
+//   Bound=15
+// ============================================================================
+
+fn spirv_emit_fragment_shader() -> RenderSpvBuf with Mut, Panic {
+    var b = rspv_buf_new()
+    b = rspv_emit_header(b, 15)
+    b = rspv_emit_capability(b, 1)         // Shader
+    b = rspv_emit_memory_model(b, 0, 1)    // Logical, GLSL450
+
+    // Entry point: Fragment "main", func=9, interface=[7,8]
+    b = rspv_emit_entry_point(b, SPV_EXEC_FRAGMENT(), 9, 7, 8, 0, 0, 2)
+
+    // OriginUpperLeft execution mode (mode=7) for fragment shaders
+    b = rspv_emit_execution_mode(b, 9, 7)
+
+    // Types
+    b = rspv_emit_type_void(b, 1)
+    b = rspv_emit_type_float(b, 3, 32)
+    b = rspv_emit_type_vector(b, 4, 3, 4)  // vec4<f32>
+    b = rspv_emit_type_function(b, 2, 1)   // void()
+    b = rspv_emit_type_pointer(b, 5, 1, 4) // Input vec4
+    b = rspv_emit_type_pointer(b, 6, 3, 4) // Output vec4
+
+    // Variables
+    b = rspv_emit_variable(b, 5, 7, 1)    // frag_color_in: Input
+    b = rspv_emit_variable(b, 6, 8, 3)    // out_color: Output
+
+    // Decorations
+    b = rspv_emit_decorate_location(b, 7, 0)
+    b = rspv_emit_decorate_location(b, 8, 0)
+
+    // main()
+    b = rspv_emit_function(b, 1, 9, 0, 2)
+    b = rspv_emit_label(b, 10)
+    b = rspv_emit_load(b, 4, 11, 7)       // load frag_color_in
+    b = rspv_emit_store(b, 8, 11)          // store → out_color
+    b = rspv_emit_return(b)
+    b = rspv_emit_function_end(b)
+    b
+}
+
+// ============================================================================
+// Print SPIR-V binary as hex words (for inspection/testing)
+// ============================================================================
+
+fn spirv_render_print_hex(buf: RenderSpvBuf) with IO, Mut, Panic, Div {
+    print("// SPIR-V render shader binary: ")
+    print_int(buf.word_count)
+    print(" words\n")
+    var i: i64 = 0
+    while i < buf.word_count {
+        print_int(buf.words[i])
+        print(" ")
+        if (i + 1) % 8 == 0 {
+            print("\n")
+        }
+        i = i + 1
+    }
+    print("\n")
+}
+
+fn main() -> i32 with IO, Mut, Panic {
+    let vs = spirv_emit_vertex_shader()
+    let fs = spirv_emit_fragment_shader()
+    print("vertex shader words: ")
+    print_int(vs.word_count)
+    print("\n")
+    print("fragment shader words: ")
+    print_int(fs.word_count)
+    print("\n")
+    0
+}

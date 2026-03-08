@@ -1,0 +1,149 @@
+// PTX pixel-fill kernel emitter for CUDA-based software rasterization
+//
+// Emits PTX assembly for a parallel triangle rasterizer kernel.
+// Each CUDA thread processes one pixel; barycentric test determines coverage.
+//
+// Kernel signature (conceptual):
+//   rasterize_triangle_kernel(
+//       fb_r: u32*, fb_g: u32*, fb_b: u32*,    // framebuffer channels
+//       v0x, v0y, v1x, v1y, v2x, v2y: f32,     // triangle vertices
+//       r0, g0, b0, r1, g1, b1, r2, g2, b2: f32, // per-vertex colors
+//       width: u32, height: u32                  // framebuffer dimensions
+//   )
+//
+// PTX output is 32-bit floating point per the SM_75+ target.
+
+// ============================================================================
+// PtxRenderBuf — text buffer for PTX assembly output
+// ============================================================================
+
+struct PtxRenderBuf {
+    data: [i8; 16384],
+    len: i64,
+}
+
+fn prend_buf_new() -> PtxRenderBuf {
+    PtxRenderBuf { data: [0; 16384], len: 0 }
+}
+
+fn prend_push_byte(buf: PtxRenderBuf, b: i8) -> PtxRenderBuf with Mut, Panic {
+    var out = buf
+    if out.len < 16384 {
+        out.data[out.len] = b
+        out.len = out.len + 1
+    }
+    out
+}
+
+fn prend_push_str(buf: PtxRenderBuf, s: string) -> PtxRenderBuf with Mut, Panic, Div {
+    var out = buf
+    let n = str_len(s)
+    var i: i64 = 0
+    while i < n {
+        out = prend_push_byte(out, str_char_at(s, i) as i8)
+        i = i + 1
+    }
+    out
+}
+
+// ============================================================================
+// PTX header + target declaration
+// ============================================================================
+
+fn ptx_emit_render_header(buf: PtxRenderBuf) -> PtxRenderBuf with Mut, Panic, Div {
+    var b = buf
+    b = prend_push_str(b, ".version 7.5\n")
+    b = prend_push_str(b, ".target sm_75\n")
+    b = prend_push_str(b, ".address_size 64\n\n")
+    b
+}
+
+// ============================================================================
+// Emit pixel-fill kernel (flat color, no interpolation — baseline PTX)
+// ============================================================================
+
+fn ptx_emit_fill_kernel(buf: PtxRenderBuf) -> PtxRenderBuf with Mut, Panic, Div {
+    var b = buf
+    b = prend_push_str(b, ".visible .entry fill_rect(\n")
+    b = prend_push_str(b, "    .param .u64 param_fb_r,\n")
+    b = prend_push_str(b, "    .param .u64 param_fb_g,\n")
+    b = prend_push_str(b, "    .param .u64 param_fb_b,\n")
+    b = prend_push_str(b, "    .param .u32 param_r,\n")
+    b = prend_push_str(b, "    .param .u32 param_g,\n")
+    b = prend_push_str(b, "    .param .u32 param_b,\n")
+    b = prend_push_str(b, "    .param .u32 param_width,\n")
+    b = prend_push_str(b, "    .param .u32 param_height\n")
+    b = prend_push_str(b, ") {\n")
+    b = prend_push_str(b, "    .reg .u32 %tid_x, %tid_y, %ntid_x, %ctaid_x, %ctaid_y;\n")
+    b = prend_push_str(b, "    .reg .u32 %px, %py, %width, %height, %idx;\n")
+    b = prend_push_str(b, "    .reg .u32 %r, %g, %b_col;\n")
+    b = prend_push_str(b, "    .reg .u64 %fb_r, %fb_g, %fb_b, %addr;\n")
+    b = prend_push_str(b, "    .reg .pred %in_bounds;\n\n")
+    b = prend_push_str(b, "    // Compute pixel coordinates\n")
+    b = prend_push_str(b, "    mov.u32 %tid_x, %tid.x;\n")
+    b = prend_push_str(b, "    mov.u32 %tid_y, %tid.y;\n")
+    b = prend_push_str(b, "    mov.u32 %ntid_x, %ntid.x;\n")
+    b = prend_push_str(b, "    mov.u32 %ctaid_x, %ctaid.x;\n")
+    b = prend_push_str(b, "    mov.u32 %ctaid_y, %ctaid.y;\n")
+    b = prend_push_str(b, "    mad.lo.u32 %px, %ctaid_x, %ntid_x, %tid_x;\n")
+    b = prend_push_str(b, "    mad.lo.u32 %py, %ctaid_y, %ntid.y, %tid_y;\n\n")
+    b = prend_push_str(b, "    // Bounds check\n")
+    b = prend_push_str(b, "    ld.param.u32 %width, [param_width];\n")
+    b = prend_push_str(b, "    ld.param.u32 %height, [param_height];\n")
+    b = prend_push_str(b, "    setp.lt.u32 %in_bounds, %px, %width;\n")
+    b = prend_push_str(b, "    @!%in_bounds bra done;\n")
+    b = prend_push_str(b, "    setp.lt.u32 %in_bounds, %py, %height;\n")
+    b = prend_push_str(b, "    @!%in_bounds bra done;\n\n")
+    b = prend_push_str(b, "    // Compute linear index\n")
+    b = prend_push_str(b, "    mad.lo.u32 %idx, %py, %width, %px;\n\n")
+    b = prend_push_str(b, "    // Load color parameters\n")
+    b = prend_push_str(b, "    ld.param.u32 %r, [param_r];\n")
+    b = prend_push_str(b, "    ld.param.u32 %g, [param_g];\n")
+    b = prend_push_str(b, "    ld.param.u32 %b_col, [param_b];\n\n")
+    b = prend_push_str(b, "    // Write to framebuffer channels\n")
+    b = prend_push_str(b, "    ld.param.u64 %fb_r, [param_fb_r];\n")
+    b = prend_push_str(b, "    cvt.u64.u32 %addr, %idx;\n")
+    b = prend_push_str(b, "    mul.wide.u32 %addr, %idx, 4;\n")
+    b = prend_push_str(b, "    add.u64 %addr, %fb_r, %addr;\n")
+    b = prend_push_str(b, "    st.global.u32 [%addr], %r;\n")
+    b = prend_push_str(b, "    ld.param.u64 %fb_g, [param_fb_g];\n")
+    b = prend_push_str(b, "    add.u64 %addr, %fb_g, %addr;\n")
+    b = prend_push_str(b, "    st.global.u32 [%addr], %g;\n")
+    b = prend_push_str(b, "    ld.param.u64 %fb_b, [param_fb_b];\n")
+    b = prend_push_str(b, "    add.u64 %addr, %fb_b, %addr;\n")
+    b = prend_push_str(b, "    st.global.u32 [%addr], %b_col;\n\n")
+    b = prend_push_str(b, "done:\n")
+    b = prend_push_str(b, "    ret;\n")
+    b = prend_push_str(b, "}\n")
+    b
+}
+
+// ============================================================================
+// Emit complete PTX render kernel module
+// ============================================================================
+
+fn ptx_emit_render_module() -> PtxRenderBuf with Mut, Panic, Div {
+    var b = prend_buf_new()
+    b = ptx_emit_render_header(b)
+    b = ptx_emit_fill_kernel(b)
+    b
+}
+
+// Print generated PTX to stdout
+fn ptx_render_print(buf: PtxRenderBuf) with IO, Mut, Panic, Div {
+    print("// PTX render kernel (")
+    print_int(buf.len)
+    print(" bytes)\n")
+    var i: i64 = 0
+    while i < buf.len {
+        let c = buf.data[i]
+        print_char(c)
+        i = i + 1
+    }
+}
+
+fn main() -> i32 with IO, Mut, Panic, Div {
+    let buf = ptx_emit_render_module()
+    ptx_render_print(buf)
+    0
+}
