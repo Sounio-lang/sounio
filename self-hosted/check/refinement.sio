@@ -30,8 +30,8 @@ struct RefinementType {
 }
 
 struct RefinementTable {
-    entries: [RefinementType; 16],
-    names: [Name; 16],
+    entries: [RefinementType; 64],
+    names: [Name; 64],
     count: i64,
 }
 
@@ -57,8 +57,8 @@ fn empty_refinement_type() -> RefinementType {
 
 fn refinement_table_new() -> RefinementTable {
     RefinementTable {
-        entries: [empty_refinement_type(); 16],
-        names: [Name { buf: [0; 128], len: 0 }; 16],
+        entries: [empty_refinement_type(); 64],
+        names: [Name { buf: [0; 128], len: 0 }; 64],
         count: 0,
     }
 }
@@ -82,12 +82,33 @@ fn refinement_table_add(t: RefinementTable, name: Name, rt: RefinementType) -> R
         out.names[idx as usize] = name
         return out
     }
-    if out.count < 16 {
+    if out.count < 64 {
         out.entries[out.count as usize] = rt
         out.names[out.count as usize] = name
         out.count = out.count + 1
     }
     out
+}
+
+fn make_refinement_synth_name(idx: i64) -> Name with Mut {
+    var n = Name { buf: [0; 128], len: 0 }
+    // Write "__ref" prefix
+    n.buf[0] = 95   // '_'
+    n.buf[1] = 95   // '_'
+    n.buf[2] = 114  // 'r'
+    n.buf[3] = 101  // 'e'
+    n.buf[4] = 102  // 'f'
+    if idx < 10 {
+        n.buf[5] = (48 + idx) as i8   // '0'..'9'
+        n.len = 6
+    } else {
+        let tens = idx / 10
+        let ones = idx % 10
+        n.buf[5] = (48 + tens) as i8
+        n.buf[6] = (48 + ones) as i8
+        n.len = 7
+    }
+    n
 }
 
 fn pred_make_int(op: i64, var_name: Name, val: i64) -> RefinementPred {
@@ -430,7 +451,11 @@ fn pred_implies(a: RefinementPred, b: RefinementPred) -> bool with Mut, Panic, D
     if a.is_float || b.is_float {
         pred_implies_atomic_float(a, b)
     } else {
-        pred_implies_atomic_int(a, b)
+        if pred_implies_atomic_int(a, b) {
+            true
+        } else {
+            pred_interval_implies(a, b)
+        }
     }
 }
 
@@ -482,5 +507,167 @@ fn print_pred(pred: RefinementPred) with IO, Mut, Panic, Div {
         print("/1000")
     } else {
         print_int(pred.rhs_int)
+    }
+}
+
+// Interval representation for refinement predicate proving.
+// Used by pred_interval_implies as an SMT-lite solver.
+struct Interval {
+    lo: i64,
+    hi: i64,
+    lo_strict: bool,  // true = exclusive (>), false = inclusive (>=)
+    hi_strict: bool,   // true = exclusive (<), false = inclusive (<=)
+    lo_unbounded: bool,
+    hi_unbounded: bool,
+}
+
+fn interval_full() -> Interval {
+    Interval { lo: 0, hi: 0, lo_strict: false, hi_strict: false, lo_unbounded: true, hi_unbounded: true }
+}
+
+fn interval_empty() -> Interval {
+    Interval { lo: 1, hi: 0, lo_strict: false, hi_strict: false, lo_unbounded: false, hi_unbounded: false }
+}
+
+fn interval_is_empty(iv: Interval) -> bool {
+    if iv.lo_unbounded || iv.hi_unbounded { false }
+    else if iv.lo > iv.hi { true }
+    else if iv.lo == iv.hi && (iv.lo_strict || iv.hi_strict) { true }
+    else { false }
+}
+
+// Convert a single atomic predicate to an interval.
+fn pred_to_interval(p: RefinementPred) -> Interval with Mut {
+    let v = p.rhs_int
+    if p.op == refinement_op_gt() {
+        Interval { lo: v, hi: 0, lo_strict: true, hi_strict: false, lo_unbounded: false, hi_unbounded: true }
+    } else if p.op == refinement_op_gt_eq() {
+        Interval { lo: v, hi: 0, lo_strict: false, hi_strict: false, lo_unbounded: false, hi_unbounded: true }
+    } else if p.op == refinement_op_lt() {
+        Interval { lo: 0, hi: v, lo_strict: false, hi_strict: true, lo_unbounded: true, hi_unbounded: false }
+    } else if p.op == refinement_op_lt_eq() {
+        Interval { lo: 0, hi: v, lo_strict: false, hi_strict: false, lo_unbounded: true, hi_unbounded: false }
+    } else if p.op == refinement_op_eq() {
+        Interval { lo: v, hi: v, lo_strict: false, hi_strict: false, lo_unbounded: false, hi_unbounded: false }
+    } else {
+        interval_full()
+    }
+}
+
+// Intersect two intervals (for And predicates).
+fn interval_intersect(a: Interval, b: Interval) -> Interval with Mut {
+    var lo = a.lo
+    var lo_strict = a.lo_strict
+    var lo_unbounded = a.lo_unbounded
+    var hi = a.hi
+    var hi_strict = a.hi_strict
+    var hi_unbounded = a.hi_unbounded
+
+    if !b.lo_unbounded {
+        if lo_unbounded || b.lo > lo || (b.lo == lo && b.lo_strict && !lo_strict) {
+            lo = b.lo
+            lo_strict = b.lo_strict
+            lo_unbounded = false
+        }
+    }
+    if !b.hi_unbounded {
+        if hi_unbounded || b.hi < hi || (b.hi == hi && b.hi_strict && !hi_strict) {
+            hi = b.hi
+            hi_strict = b.hi_strict
+            hi_unbounded = false
+        }
+    }
+    Interval { lo: lo, hi: hi, lo_strict: lo_strict, hi_strict: hi_strict, lo_unbounded: lo_unbounded, hi_unbounded: hi_unbounded }
+}
+
+// Convert a compound predicate to an interval (handles And chains).
+fn pred_to_interval_compound(p: RefinementPred) -> Interval with Mut, Panic, Div {
+    if pred_is_atomic(p) {
+        pred_to_interval(p)
+    } else if p.op == refinement_op_and() {
+        var iv = interval_full()
+        match p.left {
+            Some(lp) => {
+                let left_iv = pred_to_interval_compound(*lp)
+                iv = interval_intersect(iv, left_iv)
+            }
+            None => {}
+        }
+        match p.right {
+            Some(rp) => {
+                let right_iv = pred_to_interval_compound(*rp)
+                iv = interval_intersect(iv, right_iv)
+            }
+            None => {}
+        }
+        iv
+    } else {
+        interval_full()
+    }
+}
+
+// Check if interval `iv` satisfies predicate `target`.
+fn interval_implies_pred(iv: Interval, target: RefinementPred) -> bool with Mut {
+    if interval_is_empty(iv) { return true }
+    let tv = target.rhs_int
+    if target.op == refinement_op_gt() {
+        if iv.lo_unbounded { false }
+        else if iv.lo > tv { true }
+        else if iv.lo == tv && iv.lo_strict { true }
+        else { false }
+    } else if target.op == refinement_op_gt_eq() {
+        if iv.lo_unbounded { false }
+        else if iv.lo > tv { true }
+        else if iv.lo == tv && !iv.lo_strict { true }
+        else { false }
+    } else if target.op == refinement_op_lt() {
+        if iv.hi_unbounded { false }
+        else if iv.hi < tv { true }
+        else if iv.hi == tv && iv.hi_strict { true }
+        else { false }
+    } else if target.op == refinement_op_lt_eq() {
+        if iv.hi_unbounded { false }
+        else if iv.hi < tv { true }
+        else if iv.hi == tv && !iv.hi_strict { true }
+        else { false }
+    } else {
+        false
+    }
+}
+
+// Interval-based entailment: does predicate `a` imply predicate `b`?
+fn pred_interval_implies(a: RefinementPred, b: RefinementPred) -> bool with Mut, Panic, Div {
+    let iv = pred_to_interval_compound(a)
+    if interval_is_empty(iv) { return true }
+    if pred_is_atomic(b) {
+        interval_implies_pred(iv, b)
+    } else if b.op == refinement_op_and() {
+        var left_ok = true
+        match b.left {
+            Some(bl) => { left_ok = pred_interval_implies(a, *bl) }
+            None => {}
+        }
+        if !left_ok { return false }
+        var right_ok = true
+        match b.right {
+            Some(br) => { right_ok = pred_interval_implies(a, *br) }
+            None => {}
+        }
+        right_ok
+    } else if b.op == refinement_op_or() {
+        var left_ok = false
+        match b.left {
+            Some(bl) => { left_ok = pred_interval_implies(a, *bl) }
+            None => {}
+        }
+        if left_ok { return true }
+        var right_ok = false
+        match b.right {
+            Some(br) => { right_ok = pred_interval_implies(a, *br) }
+            None => {}
+        }
+        right_ok
+    } else {
+        false
     }
 }

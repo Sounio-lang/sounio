@@ -5,6 +5,8 @@
 //
 // Methods return (Checker, ...) to thread state through value semantics.
 
+use check::refinement::*
+
 // ============================================================
 // Security limits
 // ============================================================
@@ -6052,11 +6054,26 @@ impl Checker {
         match opt {
             Some(info) => {
                 let ri = *info
-                // Lower the base type
                 match ri.base_type {
                     Some(bte) => {
                         let pair = self.lower_type_expr(*bte)
-                        (pair.0, pair.1)
+                        var c = pair.0
+                        let base_ty = pair.1
+                        // Build refinement predicate from inline annotation
+                        if ri.pred_op > 0 {
+                            let pred = if ri.pred_is_float {
+                                pred_make_float(ri.pred_op, ri.var_name, ri.pred_float_val)
+                            } else {
+                                pred_make_int(ri.pred_op, ri.var_name, ri.pred_int_val)
+                            }
+                            let rt = RefinementType { base_type: base_ty, var_name: ri.var_name, predicate: pred }
+                            let synth_name = make_refinement_synth_name(c.refinements.count)
+                            c.refinements = refinement_table_add(c.refinements, synth_name, rt)
+                            let ref_idx = c.refinements.count - 1
+                            (c, ty_with_refinement(base_ty, ref_idx))
+                        } else {
+                            (c, base_ty)
+                        }
                     }
                     None => (self, ty_error())
                 }
@@ -7433,6 +7450,26 @@ impl Checker {
                     }
                 }
 
+                // Detect epistemic kernel: any param with Knowledge/Epistemic type
+                var has_epistemic_param = false
+                if is_kernel_fn {
+                    var walk_params = params
+                    var walk_i: i64 = 0
+                    while walk_i < param_count {
+                        match walk_params {
+                            Some(plist) => {
+                                let pty = (*plist).head.ty
+                                if is_epistemic_type(pty) || pty.kind == TypeKind::TyEpistemic || pty.kind == TypeKind::TyAleatoric {
+                                    has_epistemic_param = true
+                                }
+                                walk_params = (*plist).tail
+                            }
+                            None => { walk_i = param_count }
+                        }
+                        walk_i = walk_i + 1
+                    }
+                }
+
                 let sig = FnSig {
                     name: name,
                     params: params,
@@ -7443,6 +7480,7 @@ impl Checker {
                     effects: kernel_effects,
                     effect_count: kernel_effect_count,
                     is_kernel: is_kernel_fn,
+                    is_epistemic_kernel: has_epistemic_param,
                 }
                 let add_result = c.fn_sigs.add(sig)
                 c.fn_sigs = add_result.0
@@ -10380,6 +10418,34 @@ impl Checker {
         DEFERRAL_REASON_POLICY_INCOMPLETE
     }
 
+    fn monitoring_policy_requirements_hold_silent(
+        self,
+        opt: Option<Box<PolicyRequirementInfoList>>,
+        plan_info: TransitionPlanInfo
+    ) -> bool with Mut, Panic, Div, Alloc {
+        var cur = opt
+        var done = false
+        while !done {
+            match cur {
+                Some(list) => {
+                    let req = (*list).head
+                    let metric_pair = self.transition_plan_metric_pair(plan_info, req.metric_id)
+                    if !metric_pair.0 {
+                        return false
+                    }
+                    if !policy_requirement_holds(metric_pair.1, req.op, req.threshold) {
+                        return false
+                    }
+                    cur = (*list).tail
+                }
+                None => {
+                    done = true
+                }
+            }
+        }
+        true
+    }
+
     fn check_transition_reason_expr(self, e: Expr) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
         let first_arg = expr_list_head(e.args)
         let plan_pair = self.check_opt_expr(first_arg)
@@ -10517,16 +10583,8 @@ impl Checker {
             return (c.report_monitoring_policy_target_mismatch(e.span, policy_info.name, policy_info.target_ty, inner_ty), ty_error())
         }
 
-        if policy_info.requirement_count <= 0 {
-            return (c.report_rollback_transition_requires_failure(e.span, policy_info.name), ty_error())
-        }
-        let hold_pair = c.check_monitoring_policy_requirements_against_plan(
-            e.span,
-            policy_info.name,
-            policy_info.requirements,
-            plan_info
-        )
-        if hold_pair.1 {
+        if policy_info.requirement_count <= 0
+        || c.monitoring_policy_requirements_hold_silent(policy_info.requirements, plan_info) {
             return (c.report_rollback_transition_requires_failure(e.span, policy_info.name), ty_error())
         }
 
