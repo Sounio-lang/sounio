@@ -1,0 +1,205 @@
+// stdlib::math::ga::epistemic — Epistemic uncertainty on geometric algebra types
+//
+// UncertainMv wraps a Multivector with per-component epsilon bounds.
+// Operations propagate uncertainty through geometric products via first-order
+// Jacobian analysis (from uncertainty.sio).
+//
+// Key types in the Sounio epistemic chain:
+//   Knowledge<Multivector>  → PrecisionPreserving strategy (no float reassoc)
+//   Contest<Multivector>    → Instrumented strategy (dual-path codegen)
+//   Validated<Multivector>  → Aggressive strategy (full optimization)
+//
+// SOTA context:
+//   - Bingham distribution on S³ for quaternion uncertainty (antipodal q≡-q)
+//   - Motor uncertainty: Gaussian on Lie algebra (bivector log space, R⁶ for PGA)
+//   - No existing system tracks uncertainty through geometric products at type level
+
+// ============================================================================
+// UncertainMv — Multivector with per-component uncertainty
+// ============================================================================
+
+struct UncertainMv {
+    mv: Multivector,            // the central value
+    epsilon: [f64; 32],         // per-component uncertainty bound
+    epsilon_count: i64,         // number of active epsilon components
+}
+
+fn uncertain_mv(mv: Multivector, eps: [f64; 32]) -> UncertainMv {
+    UncertainMv {
+        mv: mv,
+        epsilon: eps,
+        epsilon_count: mv.component_count,
+    }
+}
+
+fn uncertain_mv_zero(sig: AlgebraSignature) -> UncertainMv with Mut {
+    UncertainMv {
+        mv: ga_zero(sig),
+        epsilon: [0.0; 32],
+        epsilon_count: ga_blade_count(sig),
+    }
+}
+
+// ============================================================================
+// Uncertain geometric product
+// ============================================================================
+
+// Compute c = a ⊗ b with uncertainty propagation.
+// Uses first-order Jacobian analysis from uncertainty.sio.
+fn uncertain_product(a: UncertainMv, b: UncertainMv) -> UncertainMv with Mut {
+    let sig = a.mv.sig
+    let n = a.mv.component_count
+
+    // Compute central value
+    let mv_result = ga_product(a.mv, b.mv)
+
+    // Compute Jacobians
+    let jac_a = ga_product_jacobian_a(b.mv, sig)
+    let jac_b = ga_product_jacobian_b(a.mv, sig)
+
+    // Propagate uncertainty
+    let eps_result = propagate_bilinear_uncertainty(a.epsilon, b.epsilon, jac_a, jac_b, n)
+
+    UncertainMv {
+        mv: mv_result,
+        epsilon: eps_result,
+        epsilon_count: n,
+    }
+}
+
+// ============================================================================
+// Uncertain sandwich product (motor application)
+// ============================================================================
+
+// Compute m * x * ~m with uncertainty on both motor and operand.
+// Two-stage propagation: first m*x, then (m*x)*~m.
+fn uncertain_sandwich(m: UncertainMv, x: UncertainMv) -> UncertainMv with Mut {
+    // Stage 1: tmp = m * x
+    let tmp = uncertain_product(m, x)
+
+    // Stage 2: result = tmp * reverse(m)
+    // reverse(m) has same uncertainty as m (reverse is linear, sign changes don't affect |epsilon|)
+    let m_rev_mv = ga_reverse(m.mv)
+    let m_rev = UncertainMv {
+        mv: m_rev_mv,
+        epsilon: m.epsilon,
+        epsilon_count: m.epsilon_count,
+    }
+
+    uncertain_product(tmp, m_rev)
+}
+
+// ============================================================================
+// Uncertain quaternion from Bingham distribution
+// ============================================================================
+
+// Create an uncertain quaternion Cl(0,2) from Bingham concentration parameters.
+// The concentration parameters (kappa1, kappa2, kappa3) control spread on S³.
+// More negative kappa = more concentrated (less uncertainty).
+fn uncertain_quat_from_bingham(
+    kappa1: f64, kappa2: f64, kappa3: f64,
+    w: f64, x: f64, y: f64, z: f64
+) -> UncertainMv with Mut {
+    let sig = ga_sig_quaternion()
+
+    // Create quaternion multivector: Cl(0,2), indices 0(scalar), 1(e1), 2(e2), 3(e12)
+    var mv = ga_zero(sig)
+    mv.components[0] = w    // scalar
+    mv.components[1] = x    // e1
+    mv.components[2] = y    // e2
+    mv.components[3] = z    // e12
+    mv.grade_mask = 5       // 0b101 = grades 0 + 2
+
+    // Convert Bingham concentrations to per-component sigma
+    let sigma = bingham_concentration_to_sigma(kappa1, kappa2, kappa3)
+
+    var eps: [f64; 32] = [0.0; 32]
+    eps[0] = sigma[0]   // w uncertainty
+    eps[1] = sigma[1]   // x uncertainty
+    eps[2] = sigma[2]   // y uncertainty
+    eps[3] = sigma[3]   // z uncertainty
+
+    UncertainMv {
+        mv: mv,
+        epsilon: eps,
+        epsilon_count: 4,
+    }
+}
+
+// ============================================================================
+// Uncertain motor from log-space (Lie algebra) uncertainty
+// ============================================================================
+
+// Create an uncertain PGA motor from a bivector (log-space representation)
+// with Gaussian uncertainty on the bivector components.
+//
+// For PGA Cl(3,0,1), the Lie algebra is R⁶ (6 bivector components).
+// Gaussian uncertainty on the Lie algebra is valid because it's a vector space.
+// The exp map transfers uncertainty to the motor (group element).
+//
+// For small uncertainties, the Jacobian of exp at identity ≈ I,
+// so motor epsilon ≈ bivector sigma (first-order approximation).
+fn uncertain_motor_from_log(
+    bivector: Multivector,
+    biv_sigma: [f64; 32]
+) -> UncertainMv with Mut {
+    let sig = ga_sig_pga3d()
+
+    // For MVP: identity motor + bivector perturbation
+    // motor ≈ 1 + bivector (first-order approximation of exp)
+    var motor = ga_zero(sig)
+    motor.components[0] = 1.0   // scalar part = 1
+
+    // Add bivector components (grade-2 of PGA: indices 3,5,6,9,10,12)
+    motor.components[3] = bivector.components[3]     // e01
+    motor.components[5] = bivector.components[5]     // e02
+    motor.components[6] = bivector.components[6]     // e12
+    motor.components[9] = bivector.components[9]     // e03
+    motor.components[10] = bivector.components[10]   // e13
+    motor.components[12] = bivector.components[12]   // e23
+    motor.grade_mask = 21  // 0b10101 = grades 0 + 2 + 4
+
+    // Transfer bivector sigma to motor epsilon (first-order: J_exp ≈ I)
+    var eps: [f64; 32] = [0.0; 32]
+    eps[0] = 0.001   // scalar part near-certain
+    eps[3] = biv_sigma[3]
+    eps[5] = biv_sigma[5]
+    eps[6] = biv_sigma[6]
+    eps[9] = biv_sigma[9]
+    eps[10] = biv_sigma[10]
+    eps[12] = biv_sigma[12]
+
+    UncertainMv {
+        mv: motor,
+        epsilon: eps,
+        epsilon_count: 16,
+    }
+}
+
+// ============================================================================
+// Utility: max epsilon (scalar summary of total uncertainty)
+// ============================================================================
+
+fn uncertain_mv_max_epsilon(u: UncertainMv) -> f64 {
+    var max_eps: f64 = 0.0
+    var i: i64 = 0
+    while i < u.epsilon_count {
+        if u.epsilon[i as usize] > max_eps {
+            max_eps = u.epsilon[i as usize]
+        }
+        i = i + 1
+    }
+    max_eps
+}
+
+// Sum of squared epsilons (L2 norm squared of uncertainty vector)
+fn uncertain_mv_epsilon_norm_sq(u: UncertainMv) -> f64 {
+    var sum: f64 = 0.0
+    var i: i64 = 0
+    while i < u.epsilon_count {
+        let e = u.epsilon[i as usize]
+        sum = sum + e * e
+        i = i + 1
+    }
+    sum
+}

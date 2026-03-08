@@ -1,0 +1,186 @@
+// stdlib::math::ga::uncertainty — First-order uncertainty propagation for GA
+//
+// Propagates per-component uncertainty (epsilon bounds) through geometric
+// products using Jacobian-based first-order error analysis.
+//
+// For the geometric product c = a ⊗ b:
+//   c_k = sum_{i xor j = k} sign(i,j) * a_i * b_j
+//
+// The partial derivative dc_k/da_i = sign(i, k xor i) * b_{k xor i}
+// (where k xor i plays the role of j, since i xor j = k => j = k xor i).
+//
+// SOTA context:
+//   - Bingham distribution on S³ for quaternion uncertainty (JAIF 2024)
+//   - First-order propagation is exact for linear maps, approximate for bilinear
+//   - Motor uncertainty: Gaussian on Lie algebra (bivector log space) is valid
+
+// ============================================================================
+// Jacobian of geometric product w.r.t. first operand
+// ============================================================================
+
+// Compute dc_k/da_i for the geometric product c = a ⊗ b.
+// Returns a 32x32 matrix stored row-major in [f64; 1024].
+// jac[k * 32 + i] = sign(sig, i, k^i) * b.components[k^i]
+fn ga_product_jacobian_a(b: Multivector, sig: AlgebraSignature) -> [f64; 1024] with Mut {
+    let n = b.component_count
+    var jac: [f64; 1024] = [0.0; 1024]
+
+    var k: i64 = 0
+    while k < n {
+        var i: i64 = 0
+        while i < n {
+            let j = k ^ i    // j such that i xor j = k
+            if j < n {
+                let sign = ga_blade_product_sign(sig, i, j)
+                if sign != 0 {
+                    jac[(k * 32 + i) as usize] = (sign as f64) * b.components[j as usize]
+                }
+            }
+            i = i + 1
+        }
+        k = k + 1
+    }
+    jac
+}
+
+// Compute dc_k/db_j for the geometric product c = a ⊗ b.
+// jac[k * 32 + j] = sign(sig, k^j, j) * a.components[k^j]
+fn ga_product_jacobian_b(a: Multivector, sig: AlgebraSignature) -> [f64; 1024] with Mut {
+    let n = a.component_count
+    var jac: [f64; 1024] = [0.0; 1024]
+
+    var k: i64 = 0
+    while k < n {
+        var j: i64 = 0
+        while j < n {
+            let i = k ^ j    // i such that i xor j = k
+            if i < n {
+                let sign = ga_blade_product_sign(sig, i, j)
+                if sign != 0 {
+                    jac[(k * 32 + j) as usize] = (sign as f64) * a.components[i as usize]
+                }
+            }
+            j = j + 1
+        }
+        k = k + 1
+    }
+    jac
+}
+
+// ============================================================================
+// First-order uncertainty propagation through bilinear map
+// ============================================================================
+
+// For c = f(a, b) bilinear:
+//   eps_c[k] = sqrt( sum_i (Ja[k,i] * eps_a[i])^2 + sum_j (Jb[k,j] * eps_b[j])^2 )
+fn propagate_bilinear_uncertainty(
+    eps_a: [f64; 32],
+    eps_b: [f64; 32],
+    jac_a: [f64; 1024],
+    jac_b: [f64; 1024],
+    n: i64
+) -> [f64; 32] with Mut {
+    var eps_c: [f64; 32] = [0.0; 32]
+
+    var k: i64 = 0
+    while k < n {
+        var sum_sq: f64 = 0.0
+
+        // Contribution from a's uncertainty
+        var i: i64 = 0
+        while i < n {
+            let ja = jac_a[(k * 32 + i) as usize]
+            if ja != 0.0 {
+                let contrib = ja * eps_a[i as usize]
+                sum_sq = sum_sq + contrib * contrib
+            }
+            i = i + 1
+        }
+
+        // Contribution from b's uncertainty
+        var j: i64 = 0
+        while j < n {
+            let jb = jac_b[(k * 32 + j) as usize]
+            if jb != 0.0 {
+                let contrib = jb * eps_b[j as usize]
+                sum_sq = sum_sq + contrib * contrib
+            }
+            j = j + 1
+        }
+
+        eps_c[k as usize] = ga_sqrt_approx(sum_sq)
+        k = k + 1
+    }
+    eps_c
+}
+
+// ============================================================================
+// Approximate sqrt for uncertainty computation
+// ============================================================================
+
+// Newton's method sqrt: 3 iterations, sufficient for uncertainty bounds.
+fn ga_sqrt_approx(x: f64) -> f64 {
+    if x <= 0.0 {
+        return 0.0
+    }
+    // Initial guess: x/2 for small, x for large
+    var guess: f64 = x
+    if x > 1.0 {
+        guess = x / 2.0
+    } else {
+        guess = 1.0
+    }
+    // 6 Newton iterations: guess = (guess + x/guess) / 2
+    guess = (guess + x / guess) / 2.0
+    guess = (guess + x / guess) / 2.0
+    guess = (guess + x / guess) / 2.0
+    guess = (guess + x / guess) / 2.0
+    guess = (guess + x / guess) / 2.0
+    guess = (guess + x / guess) / 2.0
+    guess
+}
+
+// ============================================================================
+// Bingham distribution → per-component sigma (quaternion uncertainty)
+// ============================================================================
+
+// The Bingham distribution on S³ is parameterized by concentration matrix Z
+// with eigenvalues 0 >= kappa1 >= kappa2 >= kappa3 (most negative = most concentrated).
+//
+// Approximate marginal standard deviation for each quaternion component:
+//   sigma_i ≈ 1 / sqrt(2 * |kappa_i|)  for large |kappa_i|
+//   sigma_0 ≈ 0  (mode direction, near-zero uncertainty)
+//
+// Returns [sigma_w, sigma_x, sigma_y, sigma_z] for quat components.
+fn bingham_concentration_to_sigma(kappa1: f64, kappa2: f64, kappa3: f64) -> [f64; 4] with Mut {
+    var sigma: [f64; 4] = [0.0; 4]
+
+    // Mode direction (w component): near-zero uncertainty
+    sigma[0] = 0.001
+
+    // Other axes: sigma ≈ 1/sqrt(2|kappa|)
+    // For kappa = 0 (uniform), sigma = large
+    let abs_k1 = if kappa1 < 0.0 { 0.0 - kappa1 } else { kappa1 }
+    let abs_k2 = if kappa2 < 0.0 { 0.0 - kappa2 } else { kappa2 }
+    let abs_k3 = if kappa3 < 0.0 { 0.0 - kappa3 } else { kappa3 }
+
+    if abs_k1 > 0.01 {
+        sigma[1] = ga_sqrt_approx(1.0 / (2.0 * abs_k1))
+    } else {
+        sigma[1] = 1.0  // near-uniform
+    }
+
+    if abs_k2 > 0.01 {
+        sigma[2] = ga_sqrt_approx(1.0 / (2.0 * abs_k2))
+    } else {
+        sigma[2] = 1.0
+    }
+
+    if abs_k3 > 0.01 {
+        sigma[3] = ga_sqrt_approx(1.0 / (2.0 * abs_k3))
+    } else {
+        sigma[3] = 1.0
+    }
+
+    sigma
+}
