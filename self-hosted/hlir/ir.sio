@@ -82,6 +82,24 @@ fn hlir_name_to_string(n: HlirName) -> string with Mut, Panic, Div, Alloc {
 }
 
 // ============================================================================
+// Compile Strategy — type+effect-directed compilation mode
+// ============================================================================
+//
+// Selected during HIR→HLIR lowering based on the function's effect signature
+// and return type epistemic classification.  Guides optimization passes and
+// codegen: aggressive paths for validated data, precision-preserving paths
+// for uncertain data, GPU kernel extraction for GPU-effected functions.
+
+enum CompileStrategy {
+    StrategyStandard,           // default — standard native compilation
+    StrategyAggressive,         // pure + Validated<T> — full inlining, SIMD, no guards
+    StrategyPrecisionPreserving,// pure + Knowledge<T> — no float reassociation, interval tracking
+    StrategyInstrumented,       // Epistemic<T> — dual-path: fast + instrumented
+    StrategyGpuKernel,          // with GPU — GPU kernel extraction
+    StrategyProbabilistic,      // with Prob — trace-compatible for MCMC/VI
+}
+
+// ============================================================================
 // HLIR Type System
 // ============================================================================
 
@@ -1150,6 +1168,7 @@ struct HlirFunction {
     is_variadic: bool,
     abi: HlirAbi,
     is_exported: bool,
+    compile_strategy: CompileStrategy,
 }
 
 fn hlir_function_new(func_id: i64, name: HlirName) -> HlirFunction {
@@ -1170,6 +1189,44 @@ fn hlir_function_new(func_id: i64, name: HlirName) -> HlirFunction {
         is_variadic: false,
         abi: HlirAbi::HlirAbiSounio,
         is_exported: false,
+        compile_strategy: CompileStrategy::StrategyStandard,
+    }
+}
+
+// ============================================================================
+// Compile strategy queries
+// ============================================================================
+
+fn hlir_strategy_name(s: CompileStrategy) -> string {
+    match s {
+        CompileStrategy::StrategyStandard => "standard",
+        CompileStrategy::StrategyAggressive => "aggressive",
+        CompileStrategy::StrategyPrecisionPreserving => "precision_preserving",
+        CompileStrategy::StrategyInstrumented => "instrumented",
+        CompileStrategy::StrategyGpuKernel => "gpu_kernel",
+        CompileStrategy::StrategyProbabilistic => "probabilistic",
+    }
+}
+
+fn hlir_strategy_is_aggressive(s: CompileStrategy) -> bool {
+    match s {
+        CompileStrategy::StrategyAggressive => true,
+        _ => false,
+    }
+}
+
+fn hlir_strategy_allows_float_reassoc(s: CompileStrategy) -> bool {
+    match s {
+        CompileStrategy::StrategyAggressive => true,
+        CompileStrategy::StrategyStandard => true,
+        _ => false,
+    }
+}
+
+fn hlir_strategy_needs_instrumentation(s: CompileStrategy) -> bool {
+    match s {
+        CompileStrategy::StrategyInstrumented => true,
+        _ => false,
     }
 }
 

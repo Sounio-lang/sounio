@@ -1198,6 +1198,73 @@ fn hlir_lower_add_effect(state: HlirLowerState, effect_name: string) -> HlirLowe
     s
 }
 
+// Set the compile strategy for the current function.
+fn hlir_lower_set_strategy(state: HlirLowerState, strategy: CompileStrategy) -> HlirLowerState with Mut {
+    var s = state
+    s.builder.func.compile_strategy = strategy
+    s
+}
+
+// Transfer effects from AST EffectList to the HLIR function being built.
+fn hlir_lower_effects_from_ast(state: HlirLowerState, effects: Option<Box<EffectList>>) -> HlirLowerState with Mut, Panic, Div {
+    match effects {
+        Some(list) => {
+            var s = state
+            let eff = (*list).head
+            let ename = str_from_bytes(eff.name_buf, eff.name_len)
+            s = hlir_lower_add_effect(s, ename)
+            hlir_lower_effects_from_ast(s, (*list).tail)
+        }
+        None => state,
+    }
+}
+
+// Check if a function has a specific named effect.
+fn hlir_func_has_effect_named(func: HlirFunction, name: string) -> bool with Mut, Panic, Div {
+    let target = hlir_name_from_str(name)
+    var i: i64 = 0
+    while i < func.effect_count {
+        if hlir_name_eq(func.effects[i as usize], target) {
+            return true
+        }
+        i = i + 1
+    }
+    false
+}
+
+// Compute the CompileStrategy for a function based on its return type and effects.
+//
+// Priority order (highest wins):
+//   1. GPU effect     → StrategyGpuKernel
+//   2. Prob effect    → StrategyProbabilistic
+//   3. Validated<T>   → StrategyAggressive   (proven correct, optimize hard)
+//   4. Knowledge<T>   → StrategyPrecisionPreserving  (uncertain, preserve precision)
+//   5. Contest/Robust → StrategyInstrumented  (reducible uncertainty, dual-path)
+//   6. otherwise      → StrategyStandard
+fn hlir_compute_strategy(func: HlirFunction) -> CompileStrategy with Mut, Panic, Div {
+    // Effect-based strategies take priority
+    if hlir_func_has_effect_named(func, "GPU") {
+        return CompileStrategy::StrategyGpuKernel
+    }
+    if hlir_func_has_effect_named(func, "Prob") {
+        return CompileStrategy::StrategyProbabilistic
+    }
+
+    // Return-type-based strategies
+    let rk = func.return_type.kind
+    if rk == HlirTypeKind::HlirTypeValidated {
+        return CompileStrategy::StrategyAggressive
+    }
+    if rk == HlirTypeKind::HlirTypeKnowledge {
+        return CompileStrategy::StrategyPrecisionPreserving
+    }
+    if rk == HlirTypeKind::HlirTypeContest || rk == HlirTypeKind::HlirTypeRobust {
+        return CompileStrategy::StrategyInstrumented
+    }
+
+    CompileStrategy::StrategyStandard
+}
+
 // ============================================================================
 // Composite construction helpers
 // ============================================================================
@@ -2208,6 +2275,11 @@ fn hlir_lower_function(state: HlirLowerState, ast_func: FnDef, is_kernel: bool) 
     if is_kernel {
         s = hlir_lower_set_kernel(s)
     }
+    // Transfer effects from AST to HLIR function
+    s = hlir_lower_effects_from_ast(s, ast_func.effects)
+    // Compute compile strategy from effects + return type
+    let strategy = hlir_compute_strategy(s.builder.func)
+    s = hlir_lower_set_strategy(s, strategy)
     s = hlir_scope_push(s)
     s = hlir_lower_params(s, ast_func.params)
     s = hlir_lower_block_from_ast(s, ast_func.body)
