@@ -19,6 +19,7 @@ LOG_PATH="${OMEGA_GPU_COMPREHENSIVE_LOG:-$ROOT_DIR/artifacts/omega/gpu_comprehen
 
 RUN_STDLIB_NATIVE_GATE="${OMEGA_GPU_RUN_STDLIB_NATIVE_GATE:-1}"
 RUN_OMEGA_GATES="${OMEGA_GPU_RUN_OMEGA_GATES:-1}"
+RUN_PUBLIC_CONTRACT_GATE="${OMEGA_GPU_RUN_PUBLIC_CONTRACT_GATE:-1}"
 RUN_L4_GATE="${OMEGA_GPU_RUN_L4_GATE:-1}"
 L4_ENABLE_NCU="${OMEGA_GPU_COMPREHENSIVE_ENABLE_NCU:-0}"
 
@@ -27,6 +28,7 @@ STDLIB_STATUS_JSON="${OMEGA_STDLIB_HYPER_STATUS_JSON:-$ROOT_DIR/artifacts/stdlib
 PARITY_JSON="${OMEGA_GPU_CODEGEN_PARITY_JSON:-$ROOT_DIR/artifacts/omega/gpu_codegen_parity.v1.json}"
 BINARY_JSON="${OMEGA_GPU_BINARY_ATTEST_JSON:-$ROOT_DIR/artifacts/omega/gpu_binary_attestation.v1.json}"
 RUNTIME_JSON="${OMEGA_GPU_RUNTIME_GATE_JSON:-$ROOT_DIR/artifacts/omega/gpu_runtime_attest_gate.v1.json}"
+PUBLIC_CONTRACT_JSON="${OMEGA_GPU_PUBLIC_CONTRACT_JSON:-$ROOT_DIR/artifacts/omega/gpu_public_contract.v1.json}"
 L4_JSON="${OMEGA_L4_NATIVE_GATE_JSON:-$ROOT_DIR/artifacts/omega/l4_native_shadow_gate.v1.json}"
 
 GPU_HOST="${GPU_HOST:-10.100.100.215}"
@@ -52,6 +54,7 @@ STDLIB_MODE="$(mode_for_stage "${OMEGA_GPU_COMPREHENSIVE_STDLIB_MODE:-}")"
 PARITY_MODE="$(mode_for_stage "${OMEGA_GPU_COMPREHENSIVE_PARITY_MODE:-}")"
 BINARY_MODE="$(mode_for_stage "${OMEGA_GPU_COMPREHENSIVE_BINARY_MODE:-}")"
 RUNTIME_MODE="$(mode_for_stage "${OMEGA_GPU_COMPREHENSIVE_RUNTIME_MODE:-}")"
+PUBLIC_CONTRACT_MODE="$(mode_for_stage "${OMEGA_GPU_COMPREHENSIVE_PUBLIC_CONTRACT_MODE:-}")"
 L4_MODE="$(mode_for_stage "${OMEGA_GPU_COMPREHENSIVE_L4_MODE:-}")"
 
 case "$MODE" in
@@ -76,6 +79,7 @@ normalize_bool() {
 
 RUN_STDLIB_NATIVE_GATE="$(normalize_bool "$RUN_STDLIB_NATIVE_GATE")"
 RUN_OMEGA_GATES="$(normalize_bool "$RUN_OMEGA_GATES")"
+RUN_PUBLIC_CONTRACT_GATE="$(normalize_bool "$RUN_PUBLIC_CONTRACT_GATE")"
 RUN_L4_GATE="$(normalize_bool "$RUN_L4_GATE")"
 L4_ENABLE_NCU="$(normalize_bool "$L4_ENABLE_NCU")"
 
@@ -256,6 +260,21 @@ else
   append_step_record "gpu_runtime_attestation" false "not_run" "disabled" 0 "$RUNTIME_JSON" '[]' '{}'
 fi
 
+if [[ "$MODE" != "off" && "$RUN_PUBLIC_CONTRACT_GATE" == "1" ]]; then
+  run_step_script \
+    "gpu_public_contract" \
+    "$PUBLIC_CONTRACT_JSON" \
+    env \
+      OMEGA_GPU_PUBLIC_CONTRACT_MODE="$PUBLIC_CONTRACT_MODE" \
+      OMEGA_GPU_PUBLIC_CONTRACT_OUT="$PUBLIC_CONTRACT_JSON" \
+      OMEGA_GPU_CODEGEN_PARITY_JSON="$PARITY_JSON" \
+      OMEGA_GPU_BINARY_ATTEST_JSON="$BINARY_JSON" \
+      OMEGA_GPU_RUNTIME_GATE_JSON="$RUNTIME_JSON" \
+      bash "$ROOT_DIR/scripts/omega/omega_gpu_public_contract_gate.sh"
+else
+  append_step_record "gpu_public_contract" false "not_run" "disabled" 0 "$PUBLIC_CONTRACT_JSON" '[]' '{}'
+fi
+
 if [[ "$MODE" != "off" && "$RUN_L4_GATE" == "1" ]]; then
   run_step_script \
     "l4_native_shadow_benchmark" \
@@ -272,7 +291,7 @@ else
   append_step_record "l4_native_shadow_benchmark" false "not_run" "disabled" 0 "$L4_JSON" '[]' '{}'
 fi
 
-python3 - "$ROOT_DIR" "$MODE" "$OUT_JSON" "$LOG_PATH" "$STEPS_JSONL" "$STDLIB_STATUS_JSON" "$NATIVE_LANE_MATRIX_JSON" "$PARITY_JSON" "$BINARY_JSON" "$RUNTIME_JSON" "$L4_JSON" "$GPU_HOST" "$GPU_USER" "$REMOTE_DIR" <<'PY'
+python3 - "$ROOT_DIR" "$MODE" "$OUT_JSON" "$LOG_PATH" "$STEPS_JSONL" "$STDLIB_STATUS_JSON" "$NATIVE_LANE_MATRIX_JSON" "$PARITY_JSON" "$BINARY_JSON" "$RUNTIME_JSON" "$PUBLIC_CONTRACT_JSON" "$L4_JSON" "$GPU_HOST" "$GPU_USER" "$REMOTE_DIR" <<'PY'
 import json
 from datetime import datetime, timezone
 from pathlib import Path
@@ -288,10 +307,11 @@ lane_matrix_path = Path(sys.argv[7])
 parity_path = Path(sys.argv[8])
 binary_path = Path(sys.argv[9])
 runtime_path = Path(sys.argv[10])
-l4_gate_path = Path(sys.argv[11])
-gpu_host = sys.argv[12]
-gpu_user = sys.argv[13]
-remote_dir = sys.argv[14]
+public_contract_path = Path(sys.argv[11])
+l4_gate_path = Path(sys.argv[12])
+gpu_host = sys.argv[13]
+gpu_user = sys.argv[14]
+remote_dir = sys.argv[15]
 
 
 def rel(p: Path) -> str:
@@ -340,12 +360,14 @@ lane_matrix = load_json(lane_matrix_path) or {}
 parity = load_json(parity_path) or {}
 binary = load_json(binary_path) or {}
 runtime = load_json(runtime_path) or {}
+public_contract = load_json(public_contract_path) or {}
 l4_gate = load_json(l4_gate_path) or {}
 
 all_blockers.extend([str(x) for x in stdlib_status.get("blockers", []) if str(x)])
 all_blockers.extend([str(x) for x in parity.get("blockers", []) if str(x)])
 all_blockers.extend([str(x) for x in binary.get("blockers", []) if str(x)])
 all_blockers.extend([str(x) for x in runtime.get("blockers", []) if str(x)])
+all_blockers.extend([str(x) for x in public_contract.get("blockers", []) if str(x)])
 all_blockers.extend([str(x) for x in l4_gate.get("benchmark", {}).get("blocked_reasons", []) if str(x)])
 
 executed_steps = [s for s in steps if s.get("executed")]
@@ -558,6 +580,7 @@ payload = {
         "gpu_codegen_parity": rel(parity_path),
         "gpu_binary_attestation": rel(binary_path),
         "gpu_runtime_attestation": rel(runtime_path),
+        "gpu_public_contract": rel(public_contract_path),
         "l4_native_shadow_gate": rel(l4_gate_path),
     },
     "steps": steps,

@@ -4,7 +4,8 @@ import path from 'node:path';
 const root = path.resolve(process.cwd());
 
 const locales = ['pt', 'el', 'zh', 'ja', 'es'];
-const iaRoutes = ['/', '/language', '/platform', '/science', '/learn', '/packages', '/insights', '/about', '/releases'];
+const fallbackRoutes = ['/', '/language', '/platform', '/science', '/packages', '/insights', '/about', '/releases'];
+const localizedDocsRoutes = ['/learn', '/learn/feature-status', '/learn/vancomycin-uncertainty'];
 const fallbackNotice = 'Localized V2 rewrite for this language is in progress. Showing English-first content for now.';
 
 function routeToDistFile(route, locale) {
@@ -24,7 +25,7 @@ async function run() {
   const errors = [];
   let checked = 0;
 
-  for (const route of iaRoutes) {
+  for (const route of fallbackRoutes) {
     try {
       const en = await readDist(route, 'en');
       checked += 1;
@@ -52,6 +53,38 @@ async function run() {
         }
       } catch {
         errors.push(`Missing localized IA route output: ${routeToDistFile(route, locale)}`);
+      }
+    }
+  }
+
+  for (const route of localizedDocsRoutes) {
+    try {
+      const en = await readDist(route, 'en');
+      checked += 1;
+
+      if (en.html.includes(fallbackNotice)) {
+        errors.push(`Unexpected fallback notice on English docs route ${en.rel}`);
+      }
+      if (!en.html.includes('lang="en"')) {
+        errors.push(`Missing lang="en" on ${en.rel}`);
+      }
+    } catch {
+      errors.push(`Missing English docs route output: ${routeToDistFile(route, 'en')}`);
+    }
+
+    for (const locale of locales) {
+      try {
+        const localized = await readDist(route, locale);
+        checked += 1;
+
+        if (localized.html.includes(fallbackNotice)) {
+          errors.push(`Unexpected fallback notice on localized docs route ${localized.rel}`);
+        }
+        if (!localized.html.includes(`lang="${locale}"`)) {
+          errors.push(`Missing lang="${locale}" on ${localized.rel}`);
+        }
+      } catch {
+        errors.push(`Missing localized docs route output: ${routeToDistFile(route, locale)}`);
       }
     }
   }

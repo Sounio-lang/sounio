@@ -193,13 +193,16 @@ fn elf_emit_u64(bin: Elf64Binary, val: i64) -> Elf64Binary with Mut, Panic, Div 
 //   offset 31: .shstrtab\0           — 10 bytes  (sh_name=31)
 //   offset 41: .note.gnu.property\0  — 20 bytes  (sh_name=41)
 //
-// Section table order (with rodata):
+// Section table order (with rodata + data):
+//   0=NULL, 1=.text, 2=.rodata, 3=.data, 4=.symtab, 5=.strtab, 6=.note.gnu.property, 7=.shstrtab
+// Section table order (with rodata, no data):
 //   0=NULL, 1=.text, 2=.rodata, 3=.symtab, 4=.strtab, 5=.note.gnu.property, 6=.shstrtab
 // Section table order (without rodata):
 //   0=NULL, 1=.text, 2=.symtab, 3=.strtab, 4=.note.gnu.property, 5=.shstrtab
 fn finalize_elf64(
     code: CodeBuffer,
     rodata: StringTable,
+    data: StringTable,
     entry_offset: i64,
     base_addr: i64,
     symbols: SymbolData,
@@ -211,9 +214,12 @@ fn finalize_elf64(
     // Compute segment offsets (page-aligned at 4096 bytes)
     let text_offset = 4096
     let rodata_offset = align_page(text_offset + code.len)
+    let data_offset = if data.len > 0 { align_page(rodata_offset + rodata.len) } else { 0 }
 
-    // phnum: text + gnu_stack (always), + rodata if non-empty
-    let phnum = if rodata.len > 0 { 3 } else { 2 }
+    // phnum: text + gnu_stack (always), + rodata if non-empty, + .data if non-empty
+    var phnum = 2
+    if rodata.len > 0 { phnum = phnum + 1 }
+    if data.len > 0 { phnum = phnum + 1 }
 
     // ELF header (64 bytes) — e_shoff/e_shnum/e_shentsize patched later
     bin = emit_elf_header(bin, entry_offset, base_addr, phnum)
@@ -222,6 +228,9 @@ fn finalize_elf64(
     bin = emit_program_header_text(bin, code.len, text_offset, base_addr)
     if rodata.len > 0 {
         bin = emit_program_header_rodata(bin, rodata.len, rodata_offset, base_addr)
+    }
+    if data.len > 0 {
+        bin = emit_program_header_data(bin, data.len, data_offset, base_addr)
     }
     // PT_GNU_STACK: marks stack non-executable (NX), required by many distros
     bin = emit_program_header_gnu_stack(bin)
@@ -248,6 +257,18 @@ fn finalize_elf64(
     while j < rodata.len {
         bin = elf_emit_byte(bin, rodata.bytes[j as usize] as i64)
         j = j + 1
+    }
+
+    // .data segment (profiling counters — zero-initialized)
+    if data.len > 0 {
+        while bin.len < data_offset {
+            bin = elf_emit_byte(bin, 0)
+        }
+        var dk = 0
+        while dk < data.len {
+            bin = elf_emit_byte(bin, data.bytes[dk as usize] as i64)
+            dk = dk + 1
+        }
     }
 
     // ----------------------------------------------------------------
@@ -355,6 +376,10 @@ fn finalize_elf64(
     bin = elf_emit_byte(bin, 101) bin = elf_emit_byte(bin, 114)     //            er
     bin = elf_emit_byte(bin, 116) bin = elf_emit_byte(bin, 121)     //            ty
     bin = elf_emit_byte(bin, 0)                                      //            \0
+    // offset 61: .data\0
+    bin = elf_emit_byte(bin, 46)  bin = elf_emit_byte(bin, 100)     //            .d
+    bin = elf_emit_byte(bin, 97)  bin = elf_emit_byte(bin, 116)     //            at
+    bin = elf_emit_byte(bin, 97)  bin = elf_emit_byte(bin, 0)       //            a\0
     let shstrtab_size = bin.len - shstrtab_offset
 
     // ----------------------------------------------------------------
@@ -368,9 +393,11 @@ fn finalize_elf64(
     let shoff = bin.len
 
     // Section counts and indices
-    // With rodata:    NULL(0) .text(1) .rodata(2) .symtab(3) .strtab(4) .note(5) .shstrtab(6) → shnum=7
-    // Without rodata: NULL(0) .text(1) .symtab(2) .strtab(3) .note(4) .shstrtab(5)            → shnum=6
-    let shnum = if rodata.len > 0 { 7 } else { 6 }
+    // Base: NULL(0) .text(1) + .symtab + .strtab + .note + .shstrtab = 6
+    // +1 for .rodata, +1 for .data (inserted before .symtab)
+    var shnum = 6
+    if rodata.len > 0 { shnum = shnum + 1 }
+    if data.len > 0 { shnum = shnum + 1 }
     let shstrndx = shnum - 1      // .shstrtab is always last
     let strtab_shndx = shnum - 3  // .strtab is 3rd-to-last (note + shstrtab after it)
 
@@ -397,6 +424,15 @@ fn finalize_elf64(
         bin = emit_section_header(bin,
             7, sht_progbits, shf_alloc,
             rodata_va, rodata_offset, rodata.len, 0, 0, 8, 0)
+    }
+
+    // .data (SHT_PROGBITS, SHF_ALLOC|SHF_WRITE) — profiling counters, only if non-empty
+    let shf_write = 1
+    if data.len > 0 {
+        let data_va = base_addr + data_offset
+        bin = emit_section_header(bin,
+            61, sht_progbits, shf_alloc + shf_write,
+            data_va, data_offset, data.len, 0, 0, 8, 0)
     }
 
     // .symtab: sh_link=strtab_shndx, sh_info=1 (first global symbol at index 1),
@@ -555,6 +591,34 @@ fn emit_program_header_rodata(bin: Elf64Binary, rodata_len: i64, rodata_offset: 
     // p_filesz, p_memsz (same for .rodata)
     b = elf_emit_u64(b, rodata_len)
     b = elf_emit_u64(b, rodata_len)
+
+    // p_align (4096 bytes)
+    b = elf_emit_u64(b, 4096)
+
+    b
+}
+
+// Sprint 45: .data PT_LOAD program header (writable, for profiling counters)
+fn emit_program_header_data(bin: Elf64Binary, data_len: i64, data_offset: i64, base_addr: i64) -> Elf64Binary with Mut, Panic, Div {
+    var b = bin
+
+    // p_type
+    b = elf_emit_u32(b, elf_pt_load())
+
+    // p_flags (R|W — writable for counter increments)
+    b = elf_emit_u32(b, elf_pf_r() + 2)
+
+    // p_offset (file offset)
+    b = elf_emit_u64(b, data_offset)
+
+    // p_vaddr, p_paddr (virtual/physical address)
+    let data_va = base_addr + data_offset
+    b = elf_emit_u64(b, data_va)
+    b = elf_emit_u64(b, data_va)
+
+    // p_filesz, p_memsz (same for .data)
+    b = elf_emit_u64(b, data_len)
+    b = elf_emit_u64(b, data_len)
 
     // p_align (4096 bytes)
     b = elf_emit_u64(b, 4096)

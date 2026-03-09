@@ -1,0 +1,138 @@
+module frontend_callsite_probe
+
+use parser::ast::*
+use parser::parser::{parser_last_error_count}
+use ir::ir::*
+use ir::lower::{lower_program_to_ir_probe}
+use module_loader::{preflight_multimodule_frontend, load_module_file}
+
+fn frontend_callsite_probe_find_fn(m: IrModule, name: Name) -> i64 with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < m.fn_count {
+        if ir_name_eq(m.functions[i].name, name) {
+            return i
+        }
+        i = i + 1
+    }
+    -1
+}
+
+fn frontend_callsite_probe_find_call_idx(f: IrFunction, callee_idx: i64, callee_name: Name) -> i64 with Mut, Panic, Div {
+    var i: i64 = 0
+    var first_call_idx: i64 = -1
+    var call_count: i64 = 0
+    while i < f.instr_count {
+        if f.instrs[i].op == IrOpcode::IrCall {
+            if first_call_idx < 0 {
+                first_call_idx = i
+            }
+            call_count = call_count + 1
+            if f.instrs[i].fn_id == callee_idx || ir_name_eq(f.instrs[i].name, callee_name) {
+                return i
+            }
+        }
+        i = i + 1
+    }
+    if call_count == 1 {
+        return first_call_idx
+    }
+    -1
+}
+
+fn frontend_callsite_probe_has_load_imm_dst_value(f: IrFunction, dst: i64, value: i64) -> bool with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < f.instr_count {
+        if f.instrs[i].op == IrOpcode::IrLoadImm &&
+           f.instrs[i].dst == dst &&
+           f.instrs[i].imm_i64 == value {
+            return true
+        }
+        i = i + 1
+    }
+    false
+}
+
+fn frontend_callsite_probe_print_name(name: Name) with IO, Mut, Panic, Div {
+    var i: i64 = 0
+    while i < name.len {
+        print_char(name.buf[i] as i64)
+        i = i + 1
+    }
+}
+
+fn run_frontend_callsite_probe(source_path: string, caller_name_str: string, callee_name_str: string) with IO, Mut, Panic, Div, Alloc {
+    let caller_name = make_name(caller_name_str)
+    let callee_name = make_name(callee_name_str)
+    println("probe_ir_callsite: begin")
+    print("probe_ir_callsite: source=")
+    print(source_path)
+    print(" caller=")
+    print(caller_name_str)
+    print(" callee=")
+    print(callee_name_str)
+    print("\n")
+
+    let frontend_result = preflight_multimodule_frontend(source_path)
+    let parse_errors = parser_last_error_count()
+    if !frontend_result.ok || parse_errors > 0 {
+        println("probe_ir_callsite: fail")
+        if str_len(frontend_result.error_msg) > 0 {
+            print("probe_ir_callsite: error=")
+            print(frontend_result.error_msg)
+            print("\n")
+        }
+        if parse_errors > 0 {
+            println("probe_ir_callsite: parser_errors=" + int_to_string(parse_errors))
+        }
+        panic("probe_ir_callsite failed")
+    }
+
+    let prog = load_module_file(source_path)
+    let ir_result = lower_program_to_ir_probe(prog)
+    if ir_result.had_error {
+        println("probe_ir_callsite: fail")
+        println("probe_ir_callsite: error=ir_lowering_failed")
+        panic("probe_ir_callsite failed")
+    }
+
+    let caller_idx = frontend_callsite_probe_find_fn(ir_result.module, caller_name)
+    let callee_idx = frontend_callsite_probe_find_fn(ir_result.module, callee_name)
+    if caller_idx < 0 || callee_idx < 0 {
+        println("probe_ir_callsite: fail")
+        println("probe_ir_callsite: error=function_not_found")
+        panic("probe_ir_callsite failed")
+    }
+
+    let caller_fn = ir_result.module.functions[caller_idx as usize]
+    let callee_fn = ir_result.module.functions[callee_idx as usize]
+    let call_idx = frontend_callsite_probe_find_call_idx(caller_fn, callee_idx, callee_name)
+    if call_idx < 0 {
+        println("probe_ir_callsite: fail")
+        println("probe_ir_callsite: error=call_not_found")
+        panic("probe_ir_callsite failed")
+    }
+
+    let call = caller_fn.instrs[call_idx as usize]
+    let forwards_param0 = caller_fn.param_count > 0 && call.src1 == caller_fn.param_regs[0]
+    let fallback_load_imm1 = frontend_callsite_probe_has_load_imm_dst_value(caller_fn, call.src1, 1)
+    print("probe_ir_callsite: caller=")
+    frontend_callsite_probe_print_name(caller_fn.name)
+    print(" callee=")
+    frontend_callsite_probe_print_name(callee_fn.name)
+    print(" caller_strategy=")
+    print(ir_strategy_name(caller_fn.compile_strategy))
+    print(" callee_strategy=")
+    print(ir_strategy_name(callee_fn.compile_strategy))
+    print(" arg_count=")
+    print_int(call.arg_count)
+    print(" src1=")
+    print_int(call.src1)
+    print(" src2=")
+    print_int(call.src2)
+    print(" forwards_param0=")
+    if forwards_param0 { print("true") } else { print("false") }
+    print(" fallback_load_imm1=")
+    if fallback_load_imm1 { print("true") } else { print("false") }
+    print("\n")
+    println("probe_ir_callsite: ok")
+}

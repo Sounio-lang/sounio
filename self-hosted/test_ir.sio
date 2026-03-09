@@ -1047,6 +1047,293 @@ fn ir_test_23_kaxi_intrinsic_5arg_passthrough() -> bool with Mut, Panic, Div, Al
     irt_count_opcode(f, IrOpcode::IrLoadFloat) == 0
 }
 
+fn irt_hlir_find_block_index(func: HlirFunction, block_id: i64) -> i64 {
+    var i: i64 = 0
+    while i < func.block_count {
+        if func.blocks[i as usize].id == block_id {
+            return i
+        }
+        i = i + 1
+    }
+    -1
+}
+
+fn irt_hlir_phi_has_edge(instr: HlirInstr, block_id: i64, value_id: i64) -> bool {
+    var i: i64 = 0
+    while i < instr.phi_count {
+        let edge = instr.phi_incoming[i as usize]
+        if edge.block_id == block_id && edge.value_id == value_id {
+            return true
+        }
+        i = i + 1
+    }
+    false
+}
+
+fn ir_test_24_hlir_dual_path_cfg_if_phi() -> bool with Mut, Panic, Div {
+    var func = hlir_function_new(0, hlir_name_from_str("cfg_if_phi"))
+    func.return_type = hlir_type_f64()
+    func = hlir_function_add_param(func, HlirParam { value_id: 0, name: hlir_name_from_str("cond"), ty: hlir_type_bool() })
+    func = hlir_function_add_param(func, HlirParam { value_id: 1, name: hlir_name_from_str("x"), ty: hlir_type_f64() })
+    func = hlir_function_register_local(func, 0, hlir_type_bool())
+    func = hlir_function_register_local(func, 1, hlir_type_f64())
+    func = hlir_function_register_local(func, 2, hlir_type_f64())
+    func = hlir_function_register_local(func, 3, hlir_type_f64())
+    func = hlir_function_register_local(func, 4, hlir_type_f64())
+
+    var entry = hlir_block_new(0, hlir_name_from_str("entry"))
+    entry = hlir_block_set_terminator(entry, hlir_term_cond_branch(0, 1, 2))
+
+    var then_block = hlir_block_new(1, hlir_name_from_str("then"))
+    then_block = hlir_block_append_instr(then_block, hlir_instr_binary(2, HLIR_BIN_ADD, 1, 1, hlir_type_f64()))
+    then_block = hlir_block_set_terminator(then_block, hlir_term_branch(3))
+
+    var else_block = hlir_block_new(2, hlir_name_from_str("else"))
+    else_block = hlir_block_append_instr(else_block, hlir_instr_binary(3, HLIR_BIN_MUL, 1, 1, hlir_type_f64()))
+    else_block = hlir_block_set_terminator(else_block, hlir_term_branch(3))
+
+    var merge_block = hlir_block_new(3, hlir_name_from_str("merge.src"))
+    var src_phi = hlir_instr_new(HLIR_OP_PHI)
+    src_phi.result = 4
+    src_phi.ty = hlir_type_f64()
+    src_phi.phi_incoming[0] = HlirPhiEntry { block_id: 1, value_id: 2 }
+    src_phi.phi_incoming[1] = HlirPhiEntry { block_id: 2, value_id: 3 }
+    src_phi.phi_count = 2
+    merge_block = hlir_block_append_instr(merge_block, src_phi)
+    merge_block = hlir_block_set_terminator(merge_block, hlir_term_return(4))
+
+    func = hlir_function_add_block(func, entry)
+    func = hlir_function_add_block(func, then_block)
+    func = hlir_function_add_block(func, else_block)
+    func = hlir_function_add_block(func, merge_block)
+
+    let transformed = hlir_opt_apply_strategy(func, strategy_hints_instrumented())
+    let dispatch = transformed.blocks[irt_hlir_find_block_index(transformed, 8) as usize]
+    let instr_then = transformed.blocks[irt_hlir_find_block_index(transformed, 5) as usize]
+    let instr_merge = transformed.blocks[irt_hlir_find_block_index(transformed, 7) as usize]
+    let final_merge = transformed.blocks[irt_hlir_find_block_index(transformed, 9) as usize]
+    let final_phi = final_merge.instrs[0]
+    let remapped_phi = instr_merge.instrs[0]
+
+    transformed.param_count == 3 &&
+    transformed.block_count == 10 &&
+    transformed.params[0].value_id == 0 &&
+    transformed.params[1].value_id == 1 &&
+    dispatch.terminator.kind == HLIR_TERM_COND_BRANCH &&
+    dispatch.terminator.then_block == 0 &&
+    dispatch.terminator.else_block == 4 &&
+    instr_then.instr_count == 3 &&
+    instr_then.instrs[0].lhs == 1 &&
+    instr_then.instrs[0].rhs == 1 &&
+    remapped_phi.op_kind == HLIR_OP_PHI &&
+    irt_hlir_phi_has_edge(remapped_phi, 5, 7) &&
+    irt_hlir_phi_has_edge(remapped_phi, 6, 8) &&
+    final_merge.terminator.kind == HLIR_TERM_RETURN &&
+    final_phi.op_kind == HLIR_OP_PHI &&
+    final_phi.phi_count == 2 &&
+    irt_hlir_phi_has_edge(final_phi, 3, 4) &&
+    irt_hlir_phi_has_edge(final_phi, 7, 9)
+}
+
+fn ir_test_25_hlir_dual_path_multi_return_merge() -> bool with Mut, Panic, Div {
+    var func = hlir_function_new(1, hlir_name_from_str("multi_return"))
+    func.return_type = hlir_type_i64()
+    func = hlir_function_add_param(func, HlirParam { value_id: 0, name: hlir_name_from_str("cond"), ty: hlir_type_bool() })
+    func = hlir_function_add_param(func, HlirParam { value_id: 1, name: hlir_name_from_str("x"), ty: hlir_type_i64() })
+    func = hlir_function_register_local(func, 0, hlir_type_bool())
+    func = hlir_function_register_local(func, 1, hlir_type_i64())
+    func = hlir_function_register_local(func, 2, hlir_type_i64())
+
+    var entry = hlir_block_new(0, hlir_name_from_str("entry"))
+    entry = hlir_block_set_terminator(entry, hlir_term_cond_branch(0, 1, 2))
+
+    var then_block = hlir_block_new(1, hlir_name_from_str("then"))
+    then_block = hlir_block_set_terminator(then_block, hlir_term_return(1))
+
+    var else_block = hlir_block_new(2, hlir_name_from_str("else"))
+    else_block = hlir_block_append_instr(else_block, hlir_instr_const(2, hlir_const_int(7, hlir_type_i64()), hlir_type_i64()))
+    else_block = hlir_block_set_terminator(else_block, hlir_term_return(2))
+
+    func = hlir_function_add_block(func, entry)
+    func = hlir_function_add_block(func, then_block)
+    func = hlir_function_add_block(func, else_block)
+
+    let transformed = hlir_opt_apply_strategy(func, strategy_hints_instrumented())
+    let final_merge = transformed.blocks[irt_hlir_find_block_index(transformed, 7) as usize]
+    let final_phi = final_merge.instrs[0]
+
+    final_merge.terminator.kind == HLIR_TERM_RETURN &&
+    final_phi.op_kind == HLIR_OP_PHI &&
+    final_phi.phi_count == 4 &&
+    irt_hlir_phi_has_edge(final_phi, 1, 1) &&
+    irt_hlir_phi_has_edge(final_phi, 2, 2) &&
+    irt_hlir_phi_has_edge(final_phi, 4, 1) &&
+    irt_hlir_phi_has_edge(final_phi, 5, 5)
+}
+
+fn ir_test_26_hlir_dual_path_switch_targets_remapped() -> bool with Mut, Panic, Div {
+    var func = hlir_function_new(2, hlir_name_from_str("switch_cfg"))
+    func.return_type = hlir_type_i64()
+    func = hlir_function_add_param(func, HlirParam { value_id: 0, name: hlir_name_from_str("tag"), ty: hlir_type_i64() })
+    func = hlir_function_register_local(func, 0, hlir_type_i64())
+    func = hlir_function_register_local(func, 1, hlir_type_i64())
+    func = hlir_function_register_local(func, 2, hlir_type_i64())
+    func = hlir_function_register_local(func, 3, hlir_type_i64())
+
+    var entry = hlir_block_new(0, hlir_name_from_str("entry"))
+    var switch_term = hlir_term_unreachable()
+    switch_term.kind = HLIR_TERM_SWITCH
+    switch_term.switch_value = 0
+    switch_term.switch_default = 3
+    switch_term.switch_cases[0] = HlirSwitchCase { value: 1, target: 1 }
+    switch_term.switch_cases[1] = HlirSwitchCase { value: 2, target: 2 }
+    switch_term.switch_case_count = 2
+    entry = hlir_block_set_terminator(entry, switch_term)
+
+    var case_one = hlir_block_new(1, hlir_name_from_str("case1"))
+    case_one = hlir_block_append_instr(case_one, hlir_instr_const(1, hlir_const_int(11, hlir_type_i64()), hlir_type_i64()))
+    case_one = hlir_block_set_terminator(case_one, hlir_term_return(1))
+
+    var case_two = hlir_block_new(2, hlir_name_from_str("case2"))
+    case_two = hlir_block_append_instr(case_two, hlir_instr_const(2, hlir_const_int(22, hlir_type_i64()), hlir_type_i64()))
+    case_two = hlir_block_set_terminator(case_two, hlir_term_return(2))
+
+    var default_block = hlir_block_new(3, hlir_name_from_str("default"))
+    default_block = hlir_block_append_instr(default_block, hlir_instr_const(3, hlir_const_int(33, hlir_type_i64()), hlir_type_i64()))
+    default_block = hlir_block_set_terminator(default_block, hlir_term_return(3))
+
+    func = hlir_function_add_block(func, entry)
+    func = hlir_function_add_block(func, case_one)
+    func = hlir_function_add_block(func, case_two)
+    func = hlir_function_add_block(func, default_block)
+
+    let transformed = hlir_opt_apply_strategy(func, strategy_hints_instrumented())
+    let instr_entry = transformed.blocks[irt_hlir_find_block_index(transformed, 4) as usize]
+    let final_merge = transformed.blocks[irt_hlir_find_block_index(transformed, 9) as usize]
+    let final_phi = final_merge.instrs[0]
+
+    instr_entry.terminator.kind == HLIR_TERM_SWITCH &&
+    instr_entry.terminator.switch_default == 7 &&
+    instr_entry.terminator.switch_case_count == 2 &&
+    instr_entry.terminator.switch_cases[0].target == 5 &&
+    instr_entry.terminator.switch_cases[1].target == 6 &&
+    final_phi.op_kind == HLIR_OP_PHI &&
+    final_phi.phi_count == 6
+}
+
+fn ir_test_27_ir_dual_path_dispatch_and_merge() -> bool with Mut, Panic, Div {
+    var func = ir_empty_function()
+    func.name = irt_name4(109, 97, 105, 110)
+    func.param_count = 1
+    func.param_regs[0] = 0
+    func.reg_count = 4
+    func.label_count = 3
+    func.compile_strategy = IR_STRATEGY_INSTRUMENTED
+    func.instr_count = 8
+    func.instrs[0] = ir_branch_false(0, 1)
+    func.instrs[1] = ir_load_imm(1, 11)
+    func.instrs[2] = ir_copy(3, 1)
+    func.instrs[3] = ir_jump(2)
+    func.instrs[4] = ir_label(1)
+    func.instrs[5] = ir_load_imm(2, 22)
+    func.instrs[6] = ir_copy(3, 2)
+    func.instrs[7] = ir_return(3)
+
+    let transformed = ir_opt_apply_strategy(func)
+    let dispatch_label = ir_opt_max_label(func) + 1
+    let instr_label = dispatch_label + 1
+    let merge_label = dispatch_label + 2
+
+    transformed.instr_count == 20 &&
+    transformed.label_count == 6 &&
+    transformed.instrs[0].op == IrOpcode::IrLabel &&
+    transformed.instrs[0].label_id == dispatch_label &&
+    transformed.instrs[1].op == IrOpcode::IrBranchTrue &&
+    transformed.instrs[1].src1 == 0 &&
+    transformed.instrs[1].label_id == 0 &&
+    transformed.instrs[2].op == IrOpcode::IrJump &&
+    transformed.instrs[2].label_id == instr_label &&
+    transformed.instrs[18].op == IrOpcode::IrLabel &&
+    transformed.instrs[18].label_id == merge_label &&
+    transformed.instrs[19].op == IrOpcode::IrReturn &&
+    transformed.instrs[19].src1 == 3 &&
+    irt_count_opcode(transformed, IrOpcode::IrReturn) == 1
+}
+
+fn ir_test_28_ir_dual_path_branch_targets_remapped() -> bool with Mut, Panic, Div {
+    var func = ir_empty_function()
+    func.name = irt_name4(98, 114, 97, 110)
+    func.param_count = 1
+    func.param_regs[0] = 0
+    func.reg_count = 4
+    func.label_count = 3
+    func.compile_strategy = IR_STRATEGY_INSTRUMENTED
+    func.instr_count = 8
+    func.instrs[0] = ir_branch_false(0, 1)
+    func.instrs[1] = ir_load_imm(1, 11)
+    func.instrs[2] = ir_copy(3, 1)
+    func.instrs[3] = ir_jump(2)
+    func.instrs[4] = ir_label(1)
+    func.instrs[5] = ir_load_imm(2, 22)
+    func.instrs[6] = ir_copy(3, 2)
+    func.instrs[7] = ir_return(3)
+
+    let transformed = ir_opt_apply_strategy(func)
+    let label_offset = ir_opt_max_label(func) + 1
+
+    var saw_remapped_branch = false
+    var saw_remapped_jump = false
+    var saw_remapped_label = false
+    var i: i64 = 0
+    while i < transformed.instr_count {
+        let instr = transformed.instrs[i as usize]
+        if instr.op == IrOpcode::IrBranchFalse && instr.label_id == 1 + label_offset {
+            saw_remapped_branch = true
+        }
+        if instr.op == IrOpcode::IrJump && instr.label_id == 2 + label_offset {
+            saw_remapped_jump = true
+        }
+        if instr.op == IrOpcode::IrLabel && instr.label_id == 1 + label_offset {
+            saw_remapped_label = true
+        }
+        i = i + 1
+    }
+
+    saw_remapped_branch && saw_remapped_jump && saw_remapped_label
+}
+
+fn ir_test_29_ir_dual_path_keeps_params_shared() -> bool with Mut, Panic, Div {
+    var func = ir_empty_function()
+    func.name = irt_name4(97, 100, 100, 50)
+    func.param_count = 2
+    func.param_regs[0] = 0
+    func.param_regs[1] = 1
+    func.reg_count = 3
+    func.compile_strategy = IR_STRATEGY_INSTRUMENTED
+    func.instr_count = 2
+    func.instrs[0] = ir_binop(2, 0, BinaryOp::OpAdd, 1)
+    func.instrs[1] = ir_return(2)
+
+    let transformed = ir_opt_apply_strategy(func)
+    let vreg_offset = ir_opt_max_vreg(func) + 1
+
+    var saw_cloned_binop = false
+    var i: i64 = 0
+    while i < transformed.instr_count {
+        let instr = transformed.instrs[i as usize]
+        if instr.op == IrOpcode::IrBinOp &&
+           instr.bin_op == BinaryOp::OpAdd &&
+           instr.dst == 2 + vreg_offset &&
+           instr.src1 == 0 &&
+           instr.src2 == 1 {
+            saw_cloned_binop = true
+        }
+        i = i + 1
+    }
+
+    transformed.reg_count == func.reg_count + vreg_offset && saw_cloned_binop
+}
+
 fn run_ir_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
     var passed: i64 = 0
     var total: i64 = 0
@@ -1102,6 +1389,18 @@ fn run_ir_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
     if ir_test_22_hardware_publish_expands_to_5_args() { passed = passed + 1; print("  T22 OK\n") } else { print("  FAIL T22\n") }
     total = total + 1
     if ir_test_23_kaxi_intrinsic_5arg_passthrough() { passed = passed + 1; print("  T23 OK\n") } else { print("  FAIL T23\n") }
+    total = total + 1
+    if ir_test_24_hlir_dual_path_cfg_if_phi() { passed = passed + 1; print("  T24 OK\n") } else { print("  FAIL T24\n") }
+    total = total + 1
+    if ir_test_25_hlir_dual_path_multi_return_merge() { passed = passed + 1; print("  T25 OK\n") } else { print("  FAIL T25\n") }
+    total = total + 1
+    if ir_test_26_hlir_dual_path_switch_targets_remapped() { passed = passed + 1; print("  T26 OK\n") } else { print("  FAIL T26\n") }
+    total = total + 1
+    if ir_test_27_ir_dual_path_dispatch_and_merge() { passed = passed + 1; print("  T27 OK\n") } else { print("  FAIL T27\n") }
+    total = total + 1
+    if ir_test_28_ir_dual_path_branch_targets_remapped() { passed = passed + 1; print("  T28 OK\n") } else { print("  FAIL T28\n") }
+    total = total + 1
+    if ir_test_29_ir_dual_path_keeps_params_shared() { passed = passed + 1; print("  T29 OK\n") } else { print("  FAIL T29\n") }
 
     if passed == total { print("\n✅ IR tests: all passed\n") } else { print("\n❌ IR tests: suite fail\n") }
 

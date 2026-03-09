@@ -9,261 +9,169 @@ source_of_truth: docs/governance/topic-registry.v1.json#website.docs.getting-sta
 
 # Getting Started with Sounio
 
-Welcome to **Sounio**, a systems programming language for epistemic computing — where every value can carry its uncertainty.
+Welcome to **Sounio**, a programming language and research platform for scientific code that needs explicit uncertainty, provenance, and gate-backed validation.
 
-## Installation
+This guide is intentionally conservative. It reflects the repository state validated on March 9, 2026.
 
-### From Binary (Recommended)
+## 1. Use A Real Compiler Artifact
 
-Download the latest release for your platform:
-
-```bash
-# Linux/macOS
-curl -sSf https://souniolang.org/install.sh | sh
-
-# Or download directly
-wget https://github.com/sounio-lang/sounio/releases/latest/download/souc-linux-x64.tar.gz
-tar xzf souc-linux-x64.tar.gz
-sudo mv souc /usr/local/bin/
-```
-
-### From Source
+For this checkout, the easiest path is the signed Linux `x86_64` JIT artifact already committed under `artifacts/omega/souc-bin/`:
 
 ```bash
 git clone https://github.com/sounio-lang/sounio.git
 cd sounio
 
-# Basic build (Cranelift JIT)
-cargo build -p souc --release
+export SOUC_BIN="$(pwd)/artifacts/omega/souc-bin/souc-linux-x86_64-jit"
+export SOUNIO_STDLIB_PATH="$(pwd)/stdlib"
 
-# With LLVM backend (recommended for production)
-# Requires: LLVM 17, libzstd-dev
-cargo build --release --features llvm17
-
-# Install to PATH
-sudo cp target/release/souc /usr/local/bin/
+"$SOUC_BIN" --version
+"$SOUC_BIN" info
+"$SOUC_BIN" sysroot stdlib-paths
 ```
 
-For detailed dependency installation, see the [installation guide](installation.md).
+In this repo snapshot, that artifact reports `souc 1.0.0-beta.4`.
 
-### Verify Installation
+There is also a separate checked GPU artifact for GPU-specific workflows:
 
 ```bash
-souc --version
-# souc 1.0.0
+export SOUC_GPU_BIN="$(pwd)/artifacts/omega/souc-bin/souc-linux-x86_64-gpu"
+"$SOUC_GPU_BIN" info
+"$SOUC_GPU_BIN" check examples/gpu.sio
+"$SOUC_GPU_BIN" build examples/kernel_matmul.sio --backend gpu -o /tmp/kernel_matmul.ptx
 ```
 
-## Your First Program
+If you need the repo to resolve a pinned binary path for you:
+
+```bash
+scripts/omega/omega_resolve_souc_bin.sh --print-path --allow-local-fallback
+```
+
+## 2. Start With `check`
+
+The most reliable way to validate language features in this repo is `souc check`.
+
+```bash
+"$SOUC_BIN" check examples/hello.sio
+"$SOUC_BIN" check tests/run-pass/covid_2020_kernel.sio
+"$SOUC_BIN" check tests/run-pass/vancomycin_propagation.sio
+"$SOUC_BIN" check tests/compile-fail/vancomycin_low_conf.sio
+```
+
+Expected behavior:
+
+- `examples/hello.sio` passes
+- `covid_2020_kernel.sio` passes
+- `vancomycin_propagation.sio` passes
+- `vancomycin_low_conf.sio` fails with the expected confidence-bound type error
+
+## 3. Your First Program
 
 Create a file `hello.sio`:
 
 ```sounio
-fn main() -> i32 {
-    print("Hello, Sounio!")
-    println()
-    0
+fn main() with IO {
+    println("Hello, Sounio!")
 }
 ```
 
-Compile and run:
+Type-check it:
 
 ```bash
-souc run hello.sio
-# Output: Hello, Sounio!
+"$SOUC_BIN" check hello.sio
 ```
 
-Or just check types:
+If your selected `souc` variant supports the runtime path you need, you can then try:
 
 ```bash
-souc check hello.sio
+"$SOUC_BIN" run hello.sio
 ```
 
-## Key Concepts
+## 4. What Is Actually Verified Today
+
+The gate-backed public summary in this repo is:
+
+- `artifacts/stdlib/stdlib_reliability_status.v1.json`: `81 pass / 0 fail / 1 skip / 82 total`
+- `artifacts/stdlib/stdlib_science_pipeline_status.v1.json`: `pass` for `fmri` and `darwin_pbpk`
+- `artifacts/stdlib/stdlib_hyper_execution_status.v1.json`: `pass` for 7 required hyper lanes
+- `artifacts/omega/gpu_runtime_attest_gate.v1.json`: `pass` for the current GPU runtime smoke set on the checked GPU lane
+- local science runtime regression probes are still recorded in `soft` mode unless strict CI enforcement is enabled
+
+For the full conservative contract, read [Minimum Viable Sounio](MINIMUM_VIABLE_SOUNIO.md).
+
+## 5. Key Concepts
 
 ### 1. Epistemic Types
 
-Sounio's signature feature is the `Knowledge<T>` type — values that carry their uncertainty:
+Sounio's signature feature is the `Knowledge<T>` type:
 
 ```sounio
-import sounio::epistemic::*
-
-fn main() -> i32 {
-    // Value with uncertainty
-    let measurement = Knowledge::new(
-        value: 42.0,
-        uncertainty: 0.5,
-        confidence: 0.95
-    )
-
-    // Uncertainty propagates through operations
-    let doubled = measurement.mul(Knowledge::exact(2.0))
-
-    print(doubled.to_string())
-    // Output: 84.0000 +/- 1.9600 (95% CI)
-
-    0
-}
+let risky = Knowledge { value: 15.0, epsilon: 0.4 }
+let safe = Knowledge { value: 15.0, epsilon: 0.9 }
 ```
 
 ### 2. Variables
 
 ```sounio
-let x = 5              // immutable
-var y = 10             // mutable
+let x = 5
+var y = 10
 
-y = y + 1              // OK: y is mutable
-// x = 6               // Error: x is immutable
+y = y + 1
 ```
 
 ### 3. References
 
-Sounio uses `&!` for mutable references (not `&mut` like Rust):
+Sounio uses `&!` for mutable references:
 
 ```sounio
 fn increment(x: &!i32) {
     *x = *x + 1
 }
-
-fn main() -> i32 {
-    var value = 10
-    increment(&!value)
-    print(value)  // 11
-    0
-}
 ```
 
 ### 4. Physical Units
 
-Type-safe dimensional analysis:
-
 ```sounio
 let distance: f64<m> = 100.0 m
 let time: f64<s> = 9.58 s
-let speed = distance / time  // Type: f64<m/s>
-
-// Compile error: can't add meters and seconds
-// let invalid = distance + time
+let speed = distance / time
 ```
 
 ### 5. Effects
 
-Functions declare their side effects:
-
 ```sounio
 fn read_file(path: &str) -> String with IO {
-    // Can perform I/O
-}
-
-fn pure_function(x: i32) -> i32 {
-    // No effects allowed
-    x * 2
+    "demo"
 }
 ```
 
-### 6. MedLang DSL
-
-Domain-specific syntax for pharmacometrics:
-
-```sounio
-import sounio::medlang::*
-
-model OneCompartment {
-    param CL: Knowledge<f64> = Knowledge::new(
-        value: 10.0,
-        uncertainty: 3.0,
-        confidence: 0.95
-    )
-    param V: Knowledge<f64> = Knowledge::new(
-        value: 50.0,
-        uncertainty: 12.5,
-        confidence: 0.95
-    )
-
-    compartment Central { volume: V }
-    flow Central -> Elimination: CL
-
-    observe Cp = Central.concentration
-}
-```
-
-## Project Structure
-
-A typical Sounio project:
-
-```
-my_project/
-├── src/
-│   ├── main.sio
-│   └── lib.sio
-├── tests/
-│   └── test_main.sio
-├── examples/
-│   └── demo.sio
-└── sounio.toml
-```
-
-## Command Reference
+## 6. Command Reference
 
 ```bash
-# Type-check a file
 souc check file.sio
-
-# Run a file (JIT compilation)
 souc run file.sio
-
-# Compile to executable
 souc build file.sio -o output
-
-# Show AST
 souc check file.sio --show-ast
-
-# Show types
 souc check file.sio --show-types
-
-# Watch mode (recompile on changes)
-souc watch file.sio
-
-# Get help
-souc --help
+souc sysroot stdlib-paths
+souc info
 ```
 
-## Examples
+## 7. Examples
 
-The `examples/` directory contains many working examples:
+Prefer these when validating the repo:
 
 | File | Description |
 |------|-------------|
-| `hello.sio` | Hello World |
-| `fibonacci.sio` | Recursive and iterative Fibonacci |
-| `uncertainty.sio` | Knowledge<T> uncertainty propagation |
-| `pkpd.sio` | Two-compartment PK model |
-| `effects.sio` | Algebraic effects demo |
-| `gpu.sio` | GPU kernel example |
-| `ode_demo.sio` | ODE solving |
-| `autodiff.sio` | Automatic differentiation |
+| `examples/hello.sio` | Hello World |
+| `tests/run-pass/covid_2020_kernel.sio` | Typed epistemic and temporal acceptance |
+| `tests/run-pass/vancomycin_propagation.sio` | Confidence propagation |
+| `tests/compile-fail/vancomycin_low_conf.sio` | Compile-time refusal on weak evidence |
 
-Run any example:
-
-```bash
-cd examples
-souc run hello.sio
-souc run fibonacci.sio
-souc run uncertainty.sio
-```
+Do not assume every file under `examples/` is equally runnable. Some are exploratory, backend-dependent, or represent partially implemented surfaces.
 
 ## Next Steps
 
-- [Programming Guide](programming.md) — Complete syntax and capability guide
-- [Standard Library](../stdlib/STDLIB_REFERENCE.md) — Browse the stdlib
-- [Examples](../../examples/README.md) — Working code examples
-- [CHANGELOG](../../CHANGELOG.md) — Version history
-
-## Getting Help
-
-- **GitHub Issues**: [sounio-lang/sounio](https://github.com/sounio-lang/sounio/issues)
-- **Discussions**: [GitHub Discussions](https://github.com/sounio-lang/sounio/discussions)
-- **Website**: [souniolang.org](https://souniolang.org)
-
----
-
-🏛️ **Sounio** — Compute at the Horizon of Certainty
+- [Minimum Viable Sounio](MINIMUM_VIABLE_SOUNIO.md)
+- [Installation Guide](../../INSTALL.md)
+- [Standard Library Reference](../reference/STDLIB_REFERENCE.md)
+- [Examples](../../tests/README.md)

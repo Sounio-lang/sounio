@@ -7,424 +7,126 @@ validated_by: A7
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.implementation.tooling-summary
 -->
 
-# Rustless Cutover Tooling Summary
+# Sounio Tooling Summary
 
-**Created**: 2026-02-13
-**Status**: Complete
-**See**: [RUSTLESS_CUTOVER.md](RUSTLESS_CUTOVER.md)
+This document summarizes the current toolchain around Sounio as it actually ships today. The important distinction is:
 
-## Overview
+- the public and docs-facing workflow is artifact-first
+- deeper bootstrap and IR inspection tooling still exists for contributors, but it is not the default onboarding path
 
-The Rustless Cutover tooling provides a complete workflow for developing, testing, and verifying the self-hosted Sounio compiler. This document summarizes the available tools and how they fit together.
+## 1. Default public workflow
 
-## Tools Provided
+For user-facing docs and ordinary verification, start with the checked JIT artifact:
 
-### 1. sounio-verify CLI
-
-**Location**: `scripts/sounio-verify`
-**Purpose**: Swiss-army knife for SOIR verification and inspection
-
-**Commands**:
 ```bash
-# Compare two SOIR files for equivalence
-sounio-verify compare stage1.soir stage2.soir [--verbose]
+export SOUC_BIN="$(pwd)/artifacts/omega/souc-bin/souc-linux-x86_64-jit"
+export SOUNIO_STDLIB_PATH="$(pwd)/stdlib"
 
-# Show normalized IR for a source file
-sounio-verify normalize file.sio
-
-# Compile source to SOIR bytecode
-sounio-verify serialize input.sio output.soir
-
-# Disassemble SOIR to human-readable format
-sounio-verify inspect file.soir [--function name] [--stats]
-
-# Validate SOIR file structure
-sounio-verify validate file.soir
+"$SOUC_BIN" --version
+"$SOUC_BIN" info
+"$SOUC_BIN" check examples/hello.sio
 ```
 
-**Features**:
-- Color-coded output (✓ success, ✗ error, → info)
-- Automatic normalization for comparison
-- Detailed error messages with debugging hints
-- Integration with self-hosted serializer
+Why this is the default:
 
-### 2. Makefile Verification Targets
+- it matches the artifact the website docs validate against
+- it avoids overpromising features that are only present in source form
+- it gives you the exact backend and feature toggles for the binary you are documenting
 
-**Location**: `Makefile.verify`
-**Purpose**: Convenient make targets for common workflows
+On the current snapshot, that artifact reports:
 
-**Quick Commands**:
+- `souc 1.0.0-beta.4`
+- Cranelift JIT enabled
+- LLVM and GPU codegen disabled
+- LSP, SMT, ontology, distributed, and package-manager features disabled
+
+For GPU-specific verification, use the separate checked GPU artifact:
+
 ```bash
-# Fast validation (single-stage)
-make -f Makefile.verify verify-quick
-
-# Full 3-stage bootstrap
-make -f Makefile.verify verify
-
-# Individual stages
-make -f Makefile.verify stage1
-make -f Makefile.verify stage2
-make -f Makefile.verify compare-stages
-
-# Inspection
-make -f Makefile.verify inspect-stage1
-make -f Makefile.verify stats
-
-# Help
-make -f Makefile.verify help-verify
+export SOUC_GPU_BIN="$(pwd)/artifacts/omega/souc-bin/souc-linux-x86_64-gpu"
+"$SOUC_GPU_BIN" info
+"$SOUC_GPU_BIN" check examples/gpu.sio
+"$SOUC_GPU_BIN" build examples/kernel_matmul.sio --backend gpu -o /tmp/kernel_matmul.ptx
 ```
 
-**What it does**:
-1. Builds souc (Rust compiler) if needed
-2. Compiles Stage 1 (Rust → self-hosted compiler)
-3. Compiles Stage 2 (Stage 1 → self-hosted compiler)
-4. Verifies Stage 1 ≡ Stage 2
-5. Runs test suites on both stages
+## 2. Core verification commands
 
-### 3. Self-Hosted Disassembler
+Use these as the baseline commands when you need to confirm docs or contributor claims:
 
-**Location**: `self-hosted/ir/disasm.sio`
-**Purpose**: Human-readable IR output
-
-**Features**:
-- Pretty-prints SOIR bytecode
-- Shows function signatures, parameters, registers
-- Annotates instructions with operand details
-- Prints string table
-
-**Integration**: Used by `sounio-verify inspect`
-
-### 4. Self-Hosted Serializer
-
-**Location**: `self-hosted/ir/serialize.sio`
-**Purpose**: Binary SOIR encoding/decoding
-
-**Features**:
-- Encode IrModule → SOIR v1 binary format
-- Decode SOIR v1 → IrModule
-- Header validation (magic bytes, version)
-- Roundtrip testing
-
-**Integration**: Used by `sounio-verify serialize` and `compare`
-
-## Workflow Integration
-
-### Daily Development Workflow
-
-```
-┌──────────────────────────────────────────┐
-│ 1. Make changes to self-hosted compiler │
-│    vim self-hosted/check/type_check.sio │
-└──────────────┬───────────────────────────┘
-               │
-               v
-┌──────────────────────────────────────────┐
-│ 2. Run quick validation                  │
-│    make -f Makefile.verify verify-quick  │
-│                                           │
-│    → Compiles source                     │
-│    → Runs test suite                     │
-│    → ~30 seconds                          │
-└──────────────┬───────────────────────────┘
-               │
-               v
-         ┌─────┴─────┐
-         │  Pass?    │
-         └─────┬─────┘
-         Yes   │   No
-               │   │
-               │   └──> Debug and retry
-               v
-┌──────────────────────────────────────────┐
-│ 3. Run full verification (before commit)│
-│    make -f Makefile.verify verify        │
-│                                           │
-│    → Stage 1: Rust → self-hosted         │
-│    → Stage 2: Stage 1 → self-hosted      │
-│    → Compare: Stage 1 ≡ Stage 2?         │
-│    → Test both stages                    │
-│    → ~2-5 minutes                         │
-└──────────────┬───────────────────────────┘
-               │
-               v
-         ┌─────┴─────┐
-         │  Pass?    │
-         └─────┬─────┘
-         Yes   │   No
-               │   │
-               │   └──> Debug Stage 1 ≠ Stage 2
-               v        (see Troubleshooting)
-┌──────────────────────────────────────────┐
-│ 4. Commit and push                       │
-│    git commit -m "[check] Fix type bug"  │
-│    git push                              │
-└──────────────┬───────────────────────────┘
-               │
-               v
-┌──────────────────────────────────────────┐
-│ 5. CI runs full verification             │
-│    .github/workflows/selfhost.yml        │
-│                                           │
-│    → Same as local verify                │
-│    → Must pass before merge              │
-└──────────────────────────────────────────┘
-```
-
-### Debugging Workflow
-
-```
-Stage 1 ≠ Stage 2 detected
-         │
-         v
-┌──────────────────────────────────────────┐
-│ 1. Get detailed diff                     │
-│    sounio-verify compare \               │
-│      stage1.soir stage2.soir --verbose   │
-└──────────────┬───────────────────────────┘
-               │
-               v
-┌──────────────────────────────────────────┐
-│ 2. Inspect both stages                   │
-│    sounio-verify inspect stage1.soir \   │
-│      > stage1.txt                        │
-│    sounio-verify inspect stage2.soir \   │
-│      > stage2.txt                        │
-│    diff -u stage1.txt stage2.txt         │
-└──────────────┬───────────────────────────┘
-               │
-               v
-┌──────────────────────────────────────────┐
-│ 3. Look for patterns                     │
-│    - Vreg numbers differ?                │
-│      → Non-deterministic allocation      │
-│    - Instruction order differs?          │
-│      → HashMap/HashSet iteration         │
-│    - String indices differ?              │
-│      → Non-deterministic string table    │
-└──────────────┬───────────────────────────┘
-               │
-               v
-┌──────────────────────────────────────────┐
-│ 4. Find the culprit                      │
-│    grep -r "HashMap\|HashSet" \          │
-│      self-hosted/                        │
-│                                           │
-│    Look for unordered iteration          │
-└──────────────┬───────────────────────────┘
-               │
-               v
-┌──────────────────────────────────────────┐
-│ 5. Fix: Sort before iteration            │
-│    var keys = map.keys().collect_vec()   │
-│    keys.sort()                           │
-│    for key in keys { ... }               │
-└──────────────┬───────────────────────────┘
-               │
-               v
-┌──────────────────────────────────────────┐
-│ 6. Verify fix                            │
-│    make -f Makefile.verify verify        │
-└──────────────────────────────────────────┘
-```
-
-## File Organization
-
-```
-sounio/
-├── docs/
-│   ├── RUSTLESS_CUTOVER.md       ← Main documentation (start here)
-│   ├── SOIR_REFERENCE.md         ← Format specification
-│   ├── DEVELOPER_WORKFLOW.md     ← Daily workflow guide
-│   └── TOOLING_SUMMARY.md        ← This file
-│
-├── scripts/
-│   └── sounio-verify             ← CLI tool (executable)
-│
-├── self-hosted/
-│   ├── ir/
-│   │   ├── ir.sio                ← IR definitions
-│   │   ├── serialize.sio         ← SOIR encoder/decoder
-│   │   └── disasm.sio            ← Human-readable output
-│   └── bootstrap/
-│       ├── driver.sio            ← Main compilation driver
-│       └── verify.sio            ← Bootstrap verification
-│
-├── Makefile.verify               ← Verification make targets
-│
-└── .github/
-    └── workflows/
-        └── selfhost.yml          ← CI integration (future)
-```
-
-## Integration Points
-
-### With Rust Compiler (souc)
-
-The `sounio-verify` tool wraps the Rust compiler (`target/release/souc`) and uses it to:
-- Compile Sounio source to IR
-- Run self-hosted serializer/deserializer
-- Execute VM for stage comparisons
-
-**Bridge**: The Rust compiler remains as Stage 0 bootstrap until fully replaced.
-
-### With Self-Hosted Compiler
-
-Self-hosted modules are executed by:
-1. Rust VM (current): `souc run file.sio`
-2. Poseidon VM (future): `poseidon file.soir`
-3. Native binary (future): `./sounio file.sio`
-
-**Bridge**: SOIR v1 format is the stable interface between stages.
-
-### With CI/CD
-
-GitHub Actions workflow calls:
 ```bash
-make -f Makefile.verify ci-verify
+"$SOUC_BIN" check examples/hello.sio
+"$SOUC_BIN" check tests/run-pass/covid_2020_kernel.sio
+"$SOUC_BIN" check tests/run-pass/vancomycin_propagation.sio
+"$SOUC_BIN" check tests/compile-fail/vancomycin_low_conf.sio
 ```
 
-This ensures every PR:
-- Builds cleanly
-- Passes all tests
-- Maintains Stage 1 ≡ Stage 2 reproducibility
+Then read the committed gate artifacts:
 
-**Gate**: PRs cannot merge if verification fails.
+- `artifacts/stdlib/stdlib_reliability_status.v1.json`
+- `artifacts/stdlib/stdlib_science_pipeline_status.v1.json`
+- `artifacts/stdlib/stdlib_hyper_execution_status.v1.json`
 
-## Performance Characteristics
+Current committed status:
 
-### Quick Verification (~30 seconds)
-- Single-stage compilation
-- Runs test suite once
-- Good for rapid iteration
+- stdlib reliability: `81/82` pass with `0` failures
+- science pipeline: `2/2` required lanes pass
+- hyper execution: `7/7` required lanes pass
+- science runtime regressions are still recorded separately and currently show `4` failures under soft local enforcement
 
-### Full Verification (~2-5 minutes)
-- Three-stage bootstrap
-- IR comparison and normalization
-- Test suite on both stages
-- Good for pre-commit checks
+## 3. Docs and website tooling
 
-### CI Verification (~5-10 minutes)
-- Full verification + additional checks
-- Multiple test configurations
-- Artifact uploads
-- Good for merge gate
+For docs-domain work, the active quality gates live in `website/package.json`:
 
-## Future Enhancements
-
-### Phase R1: Poseidon VM Integration
-
-Replace Rust VM with C-based poseidon:
 ```bash
-# Current:
-souc run stage1.soir
-
-# Future:
-poseidon stage1.soir
+npm --prefix website run check:docs-parity
+npm --prefix website run check:i18n
+npm --prefix website run build
+npm --prefix website run check:routes
+npm --prefix website run check:redirects
+npm --prefix website run check:nav
+npm --prefix website run check:pagefind
+npm --prefix website run check:locale-fallback
 ```
 
-**Benefit**: Removes Rust from execution path
+For repo-native docs governance, use:
 
-### Phase R2: Native Compilation
-
-Compile directly to native binary:
 ```bash
-# Current: SOIR bytecode
-sounio-verify serialize file.sio file.soir
-
-# Future: Native ELF
-sounio-verify compile file.sio file.elf
-chmod +x file.elf
-./file.elf
+bash scripts/check_docs_registry.sh
+bash scripts/check_docs_consistency.sh
 ```
 
-**Benefit**: ~10x faster execution
+## 4. Bootstrap and IR inspection tooling
 
-### Phase R3: Incremental Verification
+Contributor-only tooling still exists for deeper work:
 
-Cache normalized IR to speed up comparisons:
-```bash
-# Current: Re-normalize every time
-sounio-verify compare stage1.soir stage2.soir
+- `scripts/sounio-verify`: SOIR inspection and comparison helper
+- `Makefile.verify`: local convenience targets for multi-stage verification experiments
+- `self-hosted/ir/`: serializer, normalizer, disassembler, and IR helpers
+- `self-hosted/test_ir.sio`: self-hosted IR-facing verification surface
 
-# Future: Cached normalization
-sounio-verify compare stage1.soir stage2.soir --cached
-```
+Important caveats:
 
-**Benefit**: ~3x faster verification
+- `scripts/sounio-verify` targets `target/release/souc`, not the checked artifact under `artifacts/omega/`
+- it will try to build a Rust release binary if the expected local binary is missing
+- this makes it useful for maintainers working on bootstrap and IR internals, but not the right default for end-user docs
 
-## FAQ
+## 5. When Rust tooling still matters
 
-### Q: Do I need to run full verification for every change?
+Rust-side tooling is still required when you touch artifact production or bridge code. Use targeted Rust commands when you change files under `crates/`, build plumbing, or release packaging.
 
-**A**: No. Use `verify-quick` during development. Only run `verify` before committing.
+What not to do:
 
-### Q: What if I'm only changing tests, not compiler code?
+- do not present a top-level Cargo build as the primary public installation or onboarding story
+- do not assume a source-tree backend is available in the checked artifact without confirming it via `souc info`
 
-**A**: Still run `verify-quick` to ensure tests pass. Full `verify` is not needed unless you modify core compiler logic.
+## 6. Recommended tool selection
 
-### Q: Can I use sounio-verify without the Makefile?
+Use this rule of thumb:
 
-**A**: Yes. The `sounio-verify` script is standalone and can be used directly:
-```bash
-./scripts/sounio-verify compare file1.soir file2.soir
-```
+- public docs, examples, and ordinary validation: checked artifact + `souc check`
+- docs publishing and route integrity: `npm --prefix website run ...`
+- repo docs governance: `scripts/check_docs_registry.sh` and `scripts/check_docs_consistency.sh`
+- bootstrap, SOIR, and deep IR debugging: `scripts/sounio-verify`, `Makefile.verify`, and `self-hosted/ir/`
+- Rust bridge or artifact-production changes: targeted Cargo commands in the affected crate or release path
 
-### Q: What's the difference between normalize and compare?
-
-**A**:
-- `normalize`: Shows normalized IR for a single file (for inspection)
-- `compare`: Normalizes two files and checks if they're equivalent (for verification)
-
-### Q: How do I know if my SOIR file is valid?
-
-**A**: Run:
-```bash
-sounio-verify validate file.soir
-```
-
-This checks:
-- Magic bytes (SOIR)
-- Version (1)
-- File size (< 128KB)
-- Register/label/function constraints
-
-### Q: Can I inspect a specific function in a SOIR file?
-
-**A**: Yes:
-```bash
-sounio-verify inspect file.soir --function type_infer_expr
-```
-
-## Getting Help
-
-### Documentation
-1. [RUSTLESS_CUTOVER.md](RUSTLESS_CUTOVER.md) - Complete documentation
-2. [DEVELOPER_WORKFLOW.md](DEVELOPER_WORKFLOW.md) - Daily workflow
-3. [SOIR_REFERENCE.md](SOIR_REFERENCE.md) - Format specification
-
-### Tools
-```bash
-# Help for CLI tool
-sounio-verify help
-
-# Help for Makefile
-make -f Makefile.verify help-verify
-```
-
-### Support
-- GitHub Issues: Technical problems
-- Discussions: Usage questions
-- `.claude/decisions/`: Design rationale
-
-## Summary
-
-The Rustless Cutover tooling provides a complete, integrated workflow for self-hosted compiler development. Key components:
-
-1. **sounio-verify**: CLI tool for SOIR operations
-2. **Makefile.verify**: Convenient make targets
-3. **Self-hosted modules**: SOIR serialization and disassembly
-4. **Documentation**: Comprehensive guides
-
-**Goal**: Make self-hosted development as smooth as possible while maintaining rigorous verification of bootstrap reproducibility.
-
-**Status**: Ready for daily use. All tools integrated and tested.
+This is the tooling picture contributors should rely on now. Older "rustless cutover" language may still appear in historical notes, but the current repo contract is artifact-first for users and self-hosted-first for implementation work.

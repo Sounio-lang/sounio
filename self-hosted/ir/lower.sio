@@ -8,6 +8,8 @@ use ir::ir::*
 struct Lowerer {
     module: Box<IrModule>,
     current_fn: i64,
+    current_func: IrFunction,
+    current_func_loaded: bool,
     env: Option<Box<IrEnvList>>,
     scope_depth: i64,
     break_labels: [i64; 256],
@@ -21,12 +23,16 @@ struct Lowerer {
     struct_layouts: Box<StructLayoutTable>,
     // Sprint 28: Debug-mode witness enforcement
     debug_mode: bool,
+    // Sprint 44: probe-mode lowering skips heavyweight epistemic metadata lookup.
+    probe_mode: bool,
 }
 
 fn lowerer_new() -> Lowerer with Alloc {
     Lowerer {
         module: Box::new(ir_empty_module()),
         current_fn: IR_INVALID_FN,
+        current_func: ir_empty_function(),
+        current_func_loaded: false,
         env: None,
         scope_depth: 0,
         break_labels: [IR_INVALID_LABEL; 256],
@@ -37,6 +43,7 @@ fn lowerer_new() -> Lowerer with Alloc {
         enum_variants: Box::new(empty_enum_variant_table()),
         struct_layouts: Box::new(empty_struct_layout_table()),
         debug_mode: false,
+        probe_mode: false,
     }
 }
 
@@ -46,8 +53,50 @@ fn lowerer_new_with_epistemic(epistemic: IrEpistemicSection) -> Lowerer with All
     lo
 }
 
+fn lowerer_new_probe() -> Lowerer with Alloc, Mut {
+    var lo = lowerer_new()
+    lo.probe_mode = true
+    lo
+}
+
 impl Lowerer {
+    fn current_fn_compile_strategy(self) -> i64 with Mut, Panic, Div {
+        if self.current_fn < 0 || self.current_fn >= self.module.fn_count {
+            return IR_STRATEGY_STANDARD
+        }
+        if self.current_func_loaded {
+            self.current_func.compile_strategy
+        } else {
+            self.module.functions[self.current_fn as usize].compile_strategy
+        }
+    }
+
+    fn current_fn_validated_reg(self) -> i64 with Mut, Panic, Div {
+        if self.current_fn < 0 || self.current_fn >= self.module.fn_count {
+            return IR_INVALID_REG
+        }
+        if self.current_func_loaded && self.current_func.param_count > 0 {
+            self.current_func.param_regs[0]
+        } else {
+            self.module.functions[self.current_fn as usize].param_regs[0]
+        }
+    }
+
+    fn flush_current_func(self) -> Lowerer with Mut, Panic, Div {
+        var lo = self
+        if lo.current_func_loaded && lo.current_fn >= 0 && lo.current_fn < lo.module.fn_count {
+            var m = lo.module
+            m.functions[lo.current_fn as usize] = lo.current_func
+            lo.module = m
+        }
+        lo.current_func_loaded = false
+        lo
+    }
+
     fn metadata_span_matches(self, span: Span, start: i64, end: i64) -> bool {
+        if self.probe_mode {
+            return false
+        }
         start == span.start && end == span.end
     }
 
@@ -799,13 +848,8 @@ impl Lowerer {
             let loe = lo.report_error()
             return (loe, 0)
         }
-        let fn_id = lo.current_fn
-        var m = lo.module
-        var f = m.functions[fn_id as usize]
-        let reg = f.reg_count
-        f.reg_count = reg + 1
-        m.functions[fn_id as usize] = f
-        lo.module = m
+        let reg = lo.current_func.reg_count
+        lo.current_func.reg_count = reg + 1
         (lo, reg)
     }
 
@@ -815,13 +859,8 @@ impl Lowerer {
             let loe = lo.report_error()
             return (loe, 0)
         }
-        let fn_id = lo.current_fn
-        var m = lo.module
-        var f = m.functions[fn_id as usize]
-        let label = f.label_count
-        f.label_count = label + 1
-        m.functions[fn_id as usize] = f
-        lo.module = m
+        let label = lo.current_func.label_count
+        lo.current_func.label_count = label + 1
         (lo, label)
     }
 
@@ -830,15 +869,10 @@ impl Lowerer {
         if lo.current_fn < 0 || lo.current_fn >= lo.module.fn_count {
             return lo.report_error()
         }
-        let fn_id = lo.current_fn
-        var m = lo.module
-        var f = m.functions[fn_id as usize]
-        let instr_count = f.instr_count
+        let instr_count = lo.current_func.instr_count
         if instr_count < IR_MAX_INSTRS {
-            f.instrs[instr_count as usize] = instr
-            f.instr_count = instr_count + 1
-            m.functions[fn_id as usize] = f
-            lo.module = m
+            lo.current_func.instrs[instr_count as usize] = instr
+            lo.current_func.instr_count = instr_count + 1
             lo
         } else {
             lo.report_error()
@@ -895,6 +929,7 @@ impl Lowerer {
             f.label_count = 0
             f.param_count = 0
             f.param_regs = [IR_INVALID_REG; 64]
+            f.compile_strategy = IR_STRATEGY_STANDARD
             m.functions[idx] = f
             m.fn_count = m.fn_count + 1
             lo.module = m
@@ -909,11 +944,11 @@ impl Lowerer {
         if self.current_fn < 0 || self.current_fn >= self.module.fn_count {
             return false
         }
-        let count = self.module.functions[self.current_fn].instr_count
+        let count = self.current_func.instr_count
         if count <= 0 {
             return false
         }
-        let last = self.module.functions[self.current_fn].instrs[count - 1]
+        let last = self.current_func.instrs[count - 1]
         last.op == IrOpcode::IrReturn
     }
 
@@ -1136,6 +1171,26 @@ impl Lowerer {
         }
     }
 
+    // Sprint 42: Inject hidden __validated: i64 as param_regs[0] for instrumented
+    // functions.  The validated flag is the first formal in the native ABI, consumed
+    // by ir_opt_apply_strategy()'s dispatch block (IrBranchTrue on param_regs[0]).
+    // Must be called after compile_strategy is set, before lower_fn_params().
+    // Mirrors hlir_opt_apply_strategy()'s validated_param injection (hlir/opt_strategy.sio).
+    fn ir_lower_inject_validated_param(self, fn_id: i64) -> Lowerer with Mut, Panic, IO {
+        let pair = self.fresh_reg()
+        var lo = pair.0
+        let validated_vreg = pair.1
+        // Shift existing params up by 1 to make room at position 0 for __validated
+        var j: i64 = lo.current_func.param_count
+        while j > 0 {
+            lo.current_func.param_regs[j as usize] = lo.current_func.param_regs[(j - 1) as usize]
+            j = j - 1
+        }
+        lo.current_func.param_regs[0] = validated_vreg
+        lo.current_func.param_count = lo.current_func.param_count + 1
+        lo
+    }
+
     fn lower_fn_params(self, params: Option<Box<ParamList>>) -> Lowerer with Mut, Panic, Div, Alloc, IO {
         match params {
             Some(pl) => {
@@ -1146,14 +1201,10 @@ impl Lowerer {
                 let fn_id = lo.current_fn
                 if fn_id < 0 || fn_id >= lo.module.fn_count {
                     lo = lo.report_error()
-                } else if lo.module.functions[fn_id as usize].param_count < IR_MAX_PARAMS {
-                    var m = lo.module
-                    var f = m.functions[fn_id as usize]
-                    let param_count = f.param_count
-                    f.param_regs[param_count as usize] = preg
-                    f.param_count = param_count + 1
-                    m.functions[fn_id as usize] = f
-                    lo.module = m
+                } else if lo.current_func.param_count < IR_MAX_PARAMS {
+                    let param_count = lo.current_func.param_count
+                    lo.current_func.param_regs[param_count as usize] = preg
+                    lo.current_func.param_count = param_count + 1
                 } else {
                     lo = lo.report_error()
                 }
@@ -1165,50 +1216,159 @@ impl Lowerer {
         }
     }
 
+    // ================================================================
+    // Compile strategy computation — Sprint 38
+    //
+    // Determines the compile strategy for a function based on its
+    // AST return type and effect signature.  Mirrors the logic in
+    // hlir_compute_strategy (hlir/lower.sio) but operates on the
+    // AST directly so the native backend path can consume it.
+    // ================================================================
+
+    fn ir_effect_list_has_name(self, effects: Option<Box<EffectList>>, target: string) -> bool with Mut, Panic, Div {
+        match effects {
+            Some(el) => {
+                let eff = (*el).head
+                var matches = true
+                let tlen = str_len(target)
+                if eff.name_len != tlen {
+                    matches = false
+                } else {
+                    var k: i64 = 0
+                    while k < tlen {
+                        if eff.name_buf[k as usize] != (str_char_at(target, k) as i8) {
+                            matches = false
+                        }
+                        k = k + 1
+                    }
+                }
+                if matches { true }
+                else { self.ir_effect_list_has_name((*el).tail, target) }
+            }
+            None => false,
+        }
+    }
+
+    fn ir_compute_strategy_from_ast(
+        self,
+        return_type: Option<Box<TypeExpr>>,
+        effects: Option<Box<EffectList>>
+    ) -> i64 with Mut, Panic, Div {
+        // Effects take priority (same precedence order as hlir_compute_strategy)
+        if self.ir_effect_list_has_name(effects, "GPU") {
+            return IR_STRATEGY_GPU_KERNEL
+        }
+        if self.ir_effect_list_has_name(effects, "Prob") {
+            return IR_STRATEGY_PROBABILISTIC
+        }
+
+        // Check return type for epistemic classification
+        match return_type {
+            Some(rt) => {
+                let rk = (*rt).kind
+                if rk == TypeExprKind::TypeValidated {
+                    IR_STRATEGY_AGGRESSIVE
+                } else if rk == TypeExprKind::TypeKnowledge {
+                    IR_STRATEGY_PRECISION_PRESERVING
+                } else if rk == TypeExprKind::TypeContest || rk == TypeExprKind::TypeRobust {
+                    IR_STRATEGY_INSTRUMENTED
+                } else {
+                    IR_STRATEGY_STANDARD
+                }
+            }
+            None => IR_STRATEGY_STANDARD,
+        }
+    }
+
+    fn ir_lower_prepend_validated_arg(
+        self,
+        fn_id: i64,
+        args: Option<Box<IrRegList>>,
+        argc: i64
+    ) -> (Lowerer, Option<Box<IrRegList>>, i64) with Mut, Panic, Div, Alloc, IO {
+        let callee_strategy: i64 = if fn_id >= 0 && fn_id < self.module.fn_count {
+            self.module.functions[fn_id as usize].compile_strategy
+        } else {
+            IR_STRATEGY_STANDARD
+        }
+        var final_args = args
+        var final_argc = argc
+        var lo = self
+        if callee_strategy == IR_STRATEGY_INSTRUMENTED {
+            let caller_strategy: i64 = lo.current_fn_compile_strategy()
+            if caller_strategy == IR_STRATEGY_INSTRUMENTED {
+                let caller_validated_vreg: i64 = lo.current_fn_validated_reg()
+                final_args = lo.prepend_arg(caller_validated_vreg, final_args)
+            } else {
+                let pair_v = lo.fresh_reg()
+                lo = pair_v.0
+                let validated_vreg = pair_v.1
+                lo = lo.emit(ir_load_imm(validated_vreg, 1))
+                final_args = lo.prepend_arg(validated_vreg, final_args)
+            }
+            final_argc = final_argc + 1
+        }
+        (lo, final_args, final_argc)
+    }
+
     fn lower_fn_item(self, name: Name, opt: Option<Box<FnDef>>) -> Lowerer with Mut, Panic, Div, Alloc, IO {
         match opt {
             Some(fd) => {
-                print("IR lower fn start\n")
                 let pair = self.find_or_add_fn_id(name)
                 var lo = pair.0
                 let fn_id = pair.1
-                print("IR lower fn after find/add\n")
                 if fn_id < 0 {
                     return lo.report_error()
                 }
 
                 lo.current_fn = fn_id
+                lo.current_func = lo.module.functions[fn_id as usize]
+                lo.current_func_loaded = true
                 lo.env = None
                 lo.scope_depth = 0
                 lo.loop_depth = 0
-                print("IR lower fn context set\n")
+
+                // Sprint 38: Compute compile strategy from AST return type + effects
+                let strategy = lo.ir_compute_strategy_from_ast((*fd).return_type, (*fd).effects)
+                lo.current_func.compile_strategy = strategy
+
+                // Sprint 44: allocate profiling counter for instrumented functions
+                if strategy == IR_STRATEGY_INSTRUMENTED {
+                    let ctr_idx = lo.module.prof_counter_count
+                    if ctr_idx < 64 {
+                        lo.module.prof_counters[ctr_idx as usize] = IrProfCounterInfo {
+                            fn_id: fn_id,
+                            fn_name: lo.current_func.name,
+                            counter_id: ctr_idx,
+                        }
+                        lo.module.prof_counter_count = ctr_idx + 1
+                        lo.current_func.prof_counter_id = ctr_idx
+                    }
+                }
+
+                // Sprint 42: inject __validated hidden param before user params for instrumented fns
+                if strategy == IR_STRATEGY_INSTRUMENTED {
+                    lo = lo.ir_lower_inject_validated_param(fn_id)
+                }
 
                 let fd_params: Option<Box<ParamList>> = (*fd).params
                 let fd_body: Block = (*fd).body
 
                 lo.scope_depth = lo.scope_depth + 1
                 lo = lo.lower_fn_params(fd_params)
-                print("IR lower fn params done\n")
                 let bpair = lo.lower_block(fd_body)
                 lo = bpair.0
                 let result_reg = bpair.1
-                print("IR lower fn block done\n")
 
                 if !lo.fn_ends_with_return() {
-                    print("IR lower fn emit return start\n")
                     lo = lo.emit(ir_return(result_reg))
-                    print("IR lower fn emit return done\n")
                 }
 
-                print("IR lower fn exit_scope start\n")
                 if lo.scope_depth > 0 {
                     lo.scope_depth = lo.scope_depth - 1
                 }
-                print("IR lower fn exit_scope done\n")
-                print("IR lower fn invalidate current_fn start\n")
+                lo = lo.flush_current_func()
                 lo.current_fn = IR_INVALID_FN
-                print("IR lower fn invalidate current_fn done\n")
-                print("IR lower fn done\n")
                 lo
             }
             _ => self,
@@ -1216,24 +1376,20 @@ impl Lowerer {
     }
 
     fn lower_block(self, blk: Block) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
-        print("IR lower block enter\n")
         var lo = self
         lo.scope_depth = lo.scope_depth + 1
         let pair = lo.lower_stmt_list(blk.stmts)
         lo = pair.0
-        print("IR lower block after stmt_list\n")
         let reg = pair.1
         if lo.scope_depth > 0 {
             lo.scope_depth = lo.scope_depth - 1
         }
-        print("IR lower block done\n")
         (lo, reg)
     }
 
     fn lower_stmt_list(self, stmts: Option<Box<StmtList>>) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         match stmts {
             Some(list) => {
-                print("IR lower stmt step\n")
                 let head_stmt: Stmt = (*list).head
                 let tail_stmts: Option<Box<StmtList>> = (*list).tail
                 let pair1 = self.lower_stmt(head_stmt)
@@ -1697,59 +1853,23 @@ impl Lowerer {
             Some(list) => Some(Box::new((*list).head))
             None => None
         }
-        // Extract second arg (policy expression)
-        let policy_expr = match args {
-            Some(list) => match (*list).tail {
-                Some(rest) => Some(Box::new((*rest).head))
-                None => None
-            }
-            None => None
-        }
         let contest_pair = self.lower_opt_expr(contest_expr)
         let lo1 = contest_pair.0
         let contest_reg = contest_pair.1
-        let policy_pair = lo1.lower_opt_expr(policy_expr)
-        let lo2 = policy_pair.0
-        let policy_reg = policy_pair.1
-        let dst_pair = lo2.fresh_reg()
-        let lo3 = dst_pair.0
-        let dst_reg = dst_pair.1
-        let proof_id = lo3.find_robust_proof_id_for_span(span)
-        let lo4 = lo3.emit(ir_prove_robust(dst_reg, contest_reg, policy_reg, proof_id))
-        (lo4, dst_reg)
-    }
-
-    // measure(v: T, uncertainty: f64) → IrMeasure (zero-cost copy; epistemic source H5.5)
-    fn lower_measure_call(self, _span: Span, args: Option<Box<ExprList>>) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
-        let value_expr = match args {
-            Some(list) => Some(Box::new((*list).head))
-            None => None
-        }
-        let value_pair = self.lower_opt_expr(value_expr)
-        let lo1 = value_pair.0
-        let value_reg = value_pair.1
+        let policy_reg = IR_INVALID_REG
         let dst_pair = lo1.fresh_reg()
         let lo2 = dst_pair.0
         let dst_reg = dst_pair.1
-        let lo3 = lo2.emit(ir_measure(dst_reg, value_reg, -1))
+        let proof_id = lo2.find_robust_proof_id_for_span(span)
+        let lo3 = lo2.emit(ir_prove_robust(dst_reg, contest_reg, policy_reg, proof_id))
         (lo3, dst_reg)
     }
 
-    // lift_knowledge(k: Knowledge<T>) → IrLiftKnowledge (zero-cost copy; epistemic bridge H5.4)
-    fn lower_lift_knowledge_call(self, span: Span, args: Option<Box<ExprList>>) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
-        let knowledge_expr = match args {
-            Some(list) => Some(Box::new((*list).head))
-            None => None
-        }
-        let knowledge_pair = self.lower_opt_expr(knowledge_expr)
-        let lo1 = knowledge_pair.0
-        let knowledge_reg = knowledge_pair.1
-        let dst_pair = lo1.fresh_reg()
-        let lo2 = dst_pair.0
-        let dst_reg = dst_pair.1
-        let contest_id = lo2.find_contest_id_for_span(span)
-        let lo3 = lo2.emit(ir_lift_knowledge(dst_reg, knowledge_reg, contest_id))
-        (lo3, dst_reg)
+    // Policy / validation / protocol arguments in epistemic terminal calls are
+    // proof-time metadata, not runtime values. Lowering them as ExprPath would
+    // spuriously report errors on names like `DefaultPolicy`.
+    fn lower_compile_time_only_arg_reg(self) -> i64 with Mut, Panic, Div {
+        IR_INVALID_REG
     }
 
     // validate_manifest(robust, validation) → IrValidated (zero-cost copy; terminal epistemic gate)
@@ -1761,22 +1881,13 @@ impl Lowerer {
         let robust_pair = self.lower_opt_expr(robust_expr)
         let lo1 = robust_pair.0
         let robust_reg = robust_pair.1
-        let validation_expr = match args {
-            Some(list) => match (*list).tail {
-                Some(rest) => Some(Box::new((*rest).head))
-                None => None
-            }
-            None => None
-        }
-        let validation_pair = lo1.lower_opt_expr(validation_expr)
-        let lo2 = validation_pair.0
-        let validation_reg = validation_pair.1
-        let dst_pair = lo2.fresh_reg()
-        let lo3 = dst_pair.0
+        let validation_reg = lo1.lower_compile_time_only_arg_reg()
+        let dst_pair = lo1.fresh_reg()
+        let lo2 = dst_pair.0
         let dst_reg = dst_pair.1
-        let manifest_id = lo3.find_validated_manifest_id_for_span(span)
-        let lo4 = lo3.emit(ir_validated(dst_reg, robust_reg, validation_reg, manifest_id))
-        (lo4, dst_reg)
+        let manifest_id = lo2.find_validated_manifest_id_for_span(span)
+        let lo3 = lo2.emit(ir_validated(dst_reg, robust_reg, validation_reg, manifest_id))
+        (lo3, dst_reg)
     }
 
     // admit_action(value, robust, decision_policy) → IrAdmitAction (zero-cost copy; terminal decision gate)
@@ -1799,27 +1910,14 @@ impl Lowerer {
         let robust_pair = lo1.lower_opt_expr(robust_expr)
         let lo2 = robust_pair.0
         let robust_reg = robust_pair.1
+        let decision_policy_reg = lo2.lower_compile_time_only_arg_reg()
 
-        let decision_policy_expr = match args {
-            Some(list) => match (*list).tail {
-                Some(rest) => match (*rest).tail {
-                    Some(rest2) => Some(Box::new((*rest2).head))
-                    None => None
-                }
-                None => None
-            }
-            None => None
-        }
-        let decision_policy_pair = lo2.lower_opt_expr(decision_policy_expr)
-        let lo3 = decision_policy_pair.0
-        let decision_policy_reg = decision_policy_pair.1
-
-        let dst_pair = lo3.fresh_reg()
-        let lo4 = dst_pair.0
+        let dst_pair = lo2.fresh_reg()
+        let lo3 = dst_pair.0
         let dst_reg = dst_pair.1
-        let certificate_id = lo4.find_decision_certificate_id_for_span(span)
-        let lo5 = lo4.emit(ir_admit_action(dst_reg, value_reg, robust_reg, decision_policy_reg, certificate_id))
-        (lo5, dst_reg)
+        let certificate_id = lo3.find_decision_certificate_id_for_span(span)
+        let lo4 = lo3.emit(ir_admit_action(dst_reg, value_reg, robust_reg, decision_policy_reg, certificate_id))
+        (lo4, dst_reg)
     }
 
     fn lower_defer_action_call(self, span: Span, args: Option<Box<ExprList>>) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
@@ -1841,27 +1939,14 @@ impl Lowerer {
         let evidence_pair = lo1.lower_opt_expr(evidence_expr)
         let lo2 = evidence_pair.0
         let evidence_reg = evidence_pair.1
+        let policy_reg = lo2.lower_compile_time_only_arg_reg()
 
-        let policy_expr = match args {
-            Some(list) => match (*list).tail {
-                Some(rest) => match (*rest).tail {
-                    Some(rest2) => Some(Box::new((*rest2).head))
-                    None => None
-                }
-                None => None
-            }
-            None => None
-        }
-        let policy_pair = lo2.lower_opt_expr(policy_expr)
-        let lo3 = policy_pair.0
-        let policy_reg = policy_pair.1
-
-        let dst_pair = lo3.fresh_reg()
-        let lo4 = dst_pair.0
+        let dst_pair = lo2.fresh_reg()
+        let lo3 = dst_pair.0
         let dst_reg = dst_pair.1
-        let certificate_id = lo4.find_deferred_certificate_id_for_span(span)
-        let lo5 = lo4.emit(ir_defer_action(dst_reg, value_reg, evidence_reg, policy_reg, certificate_id))
-        (lo5, dst_reg)
+        let certificate_id = lo3.find_deferred_certificate_id_for_span(span)
+        let lo4 = lo3.emit(ir_defer_action(dst_reg, value_reg, evidence_reg, policy_reg, certificate_id))
+        (lo4, dst_reg)
     }
 
     fn lower_deferral_reason_call(self, span: Span) -> (Lowerer, i64) with Mut, Panic, Div {
@@ -1898,27 +1983,14 @@ impl Lowerer {
         let deferred_pair = lo1.lower_opt_expr(deferred_expr)
         let lo2 = deferred_pair.0
         let deferred_reg = deferred_pair.1
+        let policy_reg = lo2.lower_compile_time_only_arg_reg()
 
-        let policy_expr = match args {
-            Some(list) => match (*list).tail {
-                Some(rest) => match (*rest).tail {
-                    Some(rest2) => Some(Box::new((*rest2).head))
-                    None => None
-                }
-                None => None
-            }
-            None => None
-        }
-        let policy_pair = lo2.lower_opt_expr(policy_expr)
-        let lo3 = policy_pair.0
-        let policy_reg = policy_pair.1
-
-        let dst_pair = lo3.fresh_reg()
-        let lo4 = dst_pair.0
+        let dst_pair = lo2.fresh_reg()
+        let lo3 = dst_pair.0
         let dst_reg = dst_pair.1
-        let plan_id = lo4.find_acquisition_plan_id_for_span(span)
-        let lo5 = lo4.emit(ir_plan_acquisition(dst_reg, value_reg, deferred_reg, policy_reg, plan_id))
-        (lo5, dst_reg)
+        let plan_id = lo3.find_acquisition_plan_id_for_span(span)
+        let lo4 = lo3.emit(ir_plan_acquisition(dst_reg, value_reg, deferred_reg, policy_reg, plan_id))
+        (lo4, dst_reg)
     }
 
     fn lower_acquisition_reason_witness(self, info: IrAcquisitionPlanInfo) -> (Lowerer, i64) with Mut, Panic, Div {
@@ -1992,27 +2064,14 @@ impl Lowerer {
         let deferred_pair = lo1.lower_opt_expr(deferred_expr)
         let lo2 = deferred_pair.0
         let deferred_reg = deferred_pair.1
+        let policy_reg = lo2.lower_compile_time_only_arg_reg()
 
-        let policy_expr = match args {
-            Some(list) => match (*list).tail {
-                Some(rest) => match (*rest).tail {
-                    Some(rest2) => Some(Box::new((*rest2).head))
-                    None => None
-                }
-                None => None
-            }
-            None => None
-        }
-        let policy_pair = lo2.lower_opt_expr(policy_expr)
-        let lo3 = policy_pair.0
-        let policy_reg = policy_pair.1
-
-        let dst_pair = lo3.fresh_reg()
-        let lo4 = dst_pair.0
+        let dst_pair = lo2.fresh_reg()
+        let lo3 = dst_pair.0
         let dst_reg = dst_pair.1
-        let plan_id = lo4.find_recourse_plan_id_for_span(span)
-        let lo5 = lo4.emit(ir_plan_recourse(dst_reg, value_reg, deferred_reg, policy_reg, plan_id))
-        (lo5, dst_reg)
+        let plan_id = lo3.find_recourse_plan_id_for_span(span)
+        let lo4 = lo3.emit(ir_plan_recourse(dst_reg, value_reg, deferred_reg, policy_reg, plan_id))
+        (lo4, dst_reg)
     }
 
     fn lower_recourse_reason_witness(self, info: IrRecoursePlanInfo) -> (Lowerer, i64) with Mut, Panic, Div {
@@ -2107,6 +2166,39 @@ impl Lowerer {
         let set_id = lo4.find_alternative_set_id_for_span(span)
         let lo5 = lo4.emit(ir_propose_alternatives(dst_reg, value_reg, evidence_reg, frontier_reg, set_id))
         (lo5, dst_reg)
+    }
+
+    // measure(v: T, uncertainty: f64) → IrMeasure (zero-cost copy; epistemic source H5.5)
+    fn lower_measure_call(self, _span: Span, args: Option<Box<ExprList>>) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        let value_expr = match args {
+            Some(list) => Some(Box::new((*list).head))
+            None => None
+        }
+        let value_pair = self.lower_opt_expr(value_expr)
+        let lo1 = value_pair.0
+        let value_reg = value_pair.1
+        let dst_pair = lo1.fresh_reg()
+        let lo2 = dst_pair.0
+        let dst_reg = dst_pair.1
+        let lo3 = lo2.emit(ir_measure(dst_reg, value_reg, -1))
+        (lo3, dst_reg)
+    }
+
+    // lift_knowledge(k: Knowledge<T>) → IrLiftKnowledge (zero-cost copy; epistemic bridge H5.4)
+    fn lower_lift_knowledge_call(self, span: Span, args: Option<Box<ExprList>>) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        let knowledge_expr = match args {
+            Some(list) => Some(Box::new((*list).head))
+            None => None
+        }
+        let knowledge_pair = self.lower_opt_expr(knowledge_expr)
+        let lo1 = knowledge_pair.0
+        let knowledge_reg = knowledge_pair.1
+        let dst_pair = lo1.fresh_reg()
+        let lo2 = dst_pair.0
+        let dst_reg = dst_pair.1
+        let contest_id = lo2.find_contest_id_for_span(span)
+        let lo3 = lo2.emit(ir_lift_knowledge(dst_reg, knowledge_reg, contest_id))
+        (lo3, dst_reg)
     }
 
     fn lower_alternative_count_call(self, span: Span) -> (Lowerer, i64) with Mut, Panic, Div {
@@ -2349,7 +2441,6 @@ impl Lowerer {
     }
 
     fn lower_expr(self, e: Expr) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
-        print("IR lower expr enter\n")
         if e.kind == ExprKind::ExprIntLit {
             let pair = self.fresh_reg()
             let lo = pair.0
@@ -2554,8 +2645,15 @@ impl Lowerer {
             let pair_d = lo2.fresh_reg()
             let lo3 = pair_d.0
             let dst = pair_d.1
-            let lo4 = lo3.emit(ir_call(dst, fn_id, callee_name, args, argc))
-            (lo4, dst)
+            // Sprint 43: hidden __validated is part of the call ABI, not out-of-band metadata.
+            // Forward caller param_regs[0] for instrumented->instrumented calls, otherwise
+            // synthesize constant 1 for standard callers entering the dual-path world.
+            let pair_call = lo3.ir_lower_prepend_validated_arg(fn_id, args, argc)
+            let lo4 = pair_call.0
+            let final_args = pair_call.1
+            let final_argc = pair_call.2
+            let lo5 = lo4.emit(ir_call(dst, fn_id, callee_name, final_args, final_argc))
+            (lo5, dst)
         } else if e.kind == ExprKind::ExprBinary {
             let pair_l = self.lower_opt_expr(e.left)
             let lo1 = pair_l.0
@@ -2611,11 +2709,15 @@ impl Lowerer {
             let pair_fn = lo2.find_or_add_fn_id(e.name)
             let lo3 = pair_fn.0
             let fn_id = pair_fn.1
-            let pair_d = lo3.fresh_reg()
-            let lo4 = pair_d.0
+            let pair_call = lo3.ir_lower_prepend_validated_arg(fn_id, args2, arg_count + 1)
+            let lo4 = pair_call.0
+            let final_args = pair_call.1
+            let final_argc = pair_call.2
+            let pair_d = lo4.fresh_reg()
+            let lo5 = pair_d.0
             let dst = pair_d.1
-            let lo5 = lo4.emit(ir_call(dst, fn_id, e.name, args2, arg_count + 1))
-            (lo5, dst)
+            let lo6 = lo5.emit(ir_call(dst, fn_id, e.name, final_args, final_argc))
+            (lo6, dst)
         } else if e.kind == ExprKind::ExprIf {
             let pair_cond = self.lower_opt_expr(e.left)
             let lo1 = pair_cond.0
@@ -2825,22 +2927,193 @@ fn count_expr_list(elems: Option<Box<ExprList>>) -> i64 with Alloc {
     }
 }
 
-fn lower_program_to_ir(prog: Program) -> IrLowerResult with Mut, Panic, Div, Alloc, IO {
+fn ir_reg_list_prepend(reg: i64, args: Option<Box<IrRegList>>) -> Option<Box<IrRegList>> with Alloc {
+    Some(Box::new(IrRegList { head: reg, tail: args }))
+}
+
+fn ir_call_needs_validated_patch(
+    fn_count: i64,
+    callee_strategies: [i64; 256],
+    callee_param_counts: [i64; 256],
+    instr: IrInstr
+) -> bool with Mut, Panic, Div {
+    if instr.op != IrOpcode::IrCall { return false }
+    if instr.fn_id < 0 || instr.fn_id >= fn_count { return false }
+    callee_strategies[instr.fn_id as usize] == IR_STRATEGY_INSTRUMENTED &&
+    instr.arg_count + 1 == callee_param_counts[instr.fn_id as usize]
+}
+
+fn ir_function_has_opcode(func: IrFunction, op: IrOpcode) -> bool with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < func.instr_count {
+        if func.instrs[i as usize].op == op {
+            return true
+        }
+        i = i + 1
+    }
+    false
+}
+
+fn ir_function_insert_instr_front(func: &! IrFunction, instr: IrInstr) -> bool with Mut, Panic, Div {
+    if func.instr_count >= 4095 {
+        return false
+    }
+    var i = func.instr_count
+    while i > 0 {
+        func.instrs[i as usize] = func.instrs[(i - 1) as usize]
+        i = i - 1
+    }
+    func.instrs[0] = instr
+    func.instr_count = func.instr_count + 1
+    true
+}
+
+fn ir_patch_validated_call_instr(instr: &! IrInstr, validated_reg: i64) with Mut, Panic, Div, Alloc {
+    let patched_args = ir_reg_list_prepend(validated_reg, instr.call_args)
+    let pair_regs = ir_reg_list_first_two(patched_args)
+    instr.call_args = patched_args
+    instr.arg_count = instr.arg_count + 1
+    instr.src1 = pair_regs.0
+    instr.src2 = pair_regs.1
+}
+
+fn ir_patch_validated_calls_in_function(
+    fn_count: i64,
+    callee_strategies: [i64; 256],
+    callee_param_counts: [i64; 256],
+    func: &! IrFunction,
+    stats: &! IrValidatedPatchStats
+) with Mut, Panic, Div, Alloc {
+    if !ir_function_has_opcode(*func, IrOpcode::IrCall) {
+        return
+    }
+
+    var needs_patch = false
+    var patch_count: i64 = 0
+    var shared_validated_reg = IR_INVALID_REG
+
+    var scan_i: i64 = 0
+    while scan_i < func.instr_count {
+        if ir_call_needs_validated_patch(fn_count, callee_strategies, callee_param_counts, func.instrs[scan_i as usize]) {
+            needs_patch = true
+            break
+        }
+        scan_i = scan_i + 1
+    }
+    if !needs_patch {
+        return
+    }
+
+    if func.compile_strategy != IR_STRATEGY_INSTRUMENTED {
+        shared_validated_reg = func.reg_count
+        func.reg_count = func.reg_count + 1
+        if ir_function_insert_instr_front(func, ir_load_imm(shared_validated_reg, 1)) {
+            stats.fallback_insertions = stats.fallback_insertions + 1
+        } else {
+            return
+        }
+    }
+
+    var i: i64 = 0
+    while i < func.instr_count {
+        if ir_call_needs_validated_patch(fn_count, callee_strategies, callee_param_counts, func.instrs[i as usize]) {
+            let validated_reg = if func.compile_strategy == IR_STRATEGY_INSTRUMENTED {
+                func.param_regs[0]
+            } else {
+                shared_validated_reg
+            }
+            var instr = func.instrs[i as usize]
+            ir_patch_validated_call_instr(&! instr, validated_reg)
+            func.instrs[i as usize] = instr
+            patch_count = patch_count + 1
+        }
+        i = i + 1
+    }
+    if patch_count > 0 {
+        stats.patched_functions = stats.patched_functions + 1
+        stats.patched_calls = stats.patched_calls + patch_count
+    }
+}
+
+fn ir_patch_validated_calls(module: &! IrModule) -> IrValidatedPatchStats with Mut, Panic, Div, Alloc {
+    var callee_strategies: [i64; 256] = [IR_STRATEGY_STANDARD; 256]
+    var callee_param_counts: [i64; 256] = [0; 256]
+    var stats = ir_empty_validated_patch_stats()
+    var i: i64 = 0
+    while i < module.fn_count {
+        callee_strategies[i as usize] = module.functions[i as usize].compile_strategy
+        callee_param_counts[i as usize] = module.functions[i as usize].param_count
+        i = i + 1
+    }
+
+    i = 0
+    while i < module.fn_count {
+        var func = module.functions[i as usize]
+        ir_patch_validated_calls_in_function(module.fn_count, callee_strategies, callee_param_counts, &! func, &! stats)
+        module.functions[i as usize] = func
+        i = i + 1
+    }
+    stats
+}
+
+fn lower_program_to_ir_trace(
+    prog: Program,
+    patch_stats: &! IrValidatedPatchStats
+) -> IrLowerResult with Mut, Panic, Div, Alloc, IO {
     let lo = lowerer_new()
-    let lo2 = lo.lower_program_items(prog.items)
+    var lo2 = lo.lower_program_items(prog.items)
+    (*patch_stats) = ir_empty_validated_patch_stats()
+    if !lo2.had_error {
+        (*patch_stats) = ir_patch_validated_calls(&! lo2.module)
+    }
     IrLowerResult {
         module: *lo2.module,
         error_count: lo2.error_count,
         had_error: lo2.had_error,
+        patch_stats: (*patch_stats),
+    }
+}
+
+fn lower_program_to_ir(prog: Program) -> IrLowerResult with Mut, Panic, Div, Alloc, IO {
+    var patch_stats = ir_empty_validated_patch_stats()
+    lower_program_to_ir_trace(prog, &! patch_stats)
+}
+
+fn lower_program_to_ir_probe(prog: Program) -> IrLowerResult with Mut, Panic, Div, Alloc, IO {
+    let lo = lowerer_new_probe()
+    var lo2 = lo.lower_program_items(prog.items)
+    var patch_stats = ir_empty_validated_patch_stats()
+    if !lo2.had_error {
+        patch_stats = ir_patch_validated_calls(&! lo2.module)
+    }
+    IrLowerResult {
+        module: *lo2.module,
+        error_count: lo2.error_count,
+        had_error: lo2.had_error,
+        patch_stats: patch_stats,
+    }
+}
+
+fn lower_program_to_ir_with_epistemic_trace(
+    prog: Program,
+    epistemic: IrEpistemicSection,
+    patch_stats: &! IrValidatedPatchStats
+) -> IrLowerResult with Mut, Panic, Div, Alloc, IO {
+    let lo = lowerer_new_with_epistemic(epistemic)
+    var lo2 = lo.lower_program_items(prog.items)
+    (*patch_stats) = ir_empty_validated_patch_stats()
+    if !lo2.had_error {
+        (*patch_stats) = ir_patch_validated_calls(&! lo2.module)
+    }
+    IrLowerResult {
+        module: *lo2.module,
+        error_count: lo2.error_count,
+        had_error: lo2.had_error,
+        patch_stats: (*patch_stats),
     }
 }
 
 fn lower_program_to_ir_with_epistemic(prog: Program, epistemic: IrEpistemicSection) -> IrLowerResult with Mut, Panic, Div, Alloc, IO {
-    let lo = lowerer_new_with_epistemic(epistemic)
-    let lo2 = lo.lower_program_items(prog.items)
-    IrLowerResult {
-        module: *lo2.module,
-        error_count: lo2.error_count,
-        had_error: lo2.had_error,
-    }
+    var patch_stats = ir_empty_validated_patch_stats()
+    lower_program_to_ir_with_epistemic_trace(prog, epistemic, &! patch_stats)
 }

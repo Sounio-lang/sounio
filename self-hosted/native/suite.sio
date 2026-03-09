@@ -8,6 +8,7 @@ use native::frame::*
 use native::elf::*
 use native::reloc::*
 use native::codegen::*
+use native::lower_ir::*
 use ir::ir::*
 use parser::ast::*
 
@@ -15,6 +16,18 @@ use parser::ast::*
 fn native_byte_u8(b: i8) -> i64 {
     let x = b as i64
     if x < 0 { x + 256 } else { x }
+}
+
+fn native_code_eq(a: CodeBuffer, b: CodeBuffer) -> bool {
+    if a.len != b.len { return false }
+    var i = 0
+    while i < a.len {
+        if native_byte_u8(a.bytes[i as usize]) != native_byte_u8(b.bytes[i as usize]) {
+            return false
+        }
+        i = i + 1
+    }
+    true
 }
 
 // ============================================================================
@@ -458,11 +471,74 @@ fn native_test_dispatch_matrix_normalization() -> i64 with Mut, Panic, Div {
 }
 
 // ============================================================================
+// T13: compile_strategy metadata reaches native function codegen
+// ============================================================================
+fn native_test_compile_strategy_propagates_to_codegen() -> i64 with Mut, Panic, Div, Alloc {
+    var func = ir_empty_function()
+    func.name = ir_name_from_bytes(109, 97, 105, 110, 4)  // "main"
+    func.reg_count = 3
+    func.instr_count = 4
+    func.compile_strategy = IR_STRATEGY_AGGRESSIVE
+    func.instrs[0] = ir_load_float(0, 1.5)
+    func.instrs[1] = ir_load_float(1, 2.5)
+    func.instrs[2] = ir_binop(2, 0, BinaryOp::OpAdd, 1)
+    func.instrs[3] = ir_return(2)
+
+    var nc = compiler_new()
+    nc = compile_ir_function(nc, func, 0)
+
+    if nc.current_strategy != IR_STRATEGY_AGGRESSIVE { return 1 }
+    if nc.code.len <= 0 { return 2 }
+    if nc.rodata.len <= 0 { return 3 }
+    0
+}
+
+// ============================================================================
+// T14: strict FP modes keep source order; aggressive may commute float add/mul
+// ============================================================================
+fn native_test_float_strategy_changes_lowering() -> i64 with Mut, Panic, Div {
+    let instr = ir_binop(2, 0, BinaryOp::OpAdd, 1)
+
+    var standard = compiler_new()
+    standard.current_strategy = IR_STRATEGY_STANDARD
+    standard.is_float_reg[0] = 1
+    standard.is_float_reg[1] = 1
+    standard = lower_ir_binop(standard, instr)
+
+    var precision = compiler_new()
+    precision.current_strategy = IR_STRATEGY_PRECISION_PRESERVING
+    precision.is_float_reg[0] = 1
+    precision.is_float_reg[1] = 1
+    precision = lower_ir_binop(precision, instr)
+
+    var aggressive = compiler_new()
+    aggressive.current_strategy = IR_STRATEGY_AGGRESSIVE
+    aggressive.is_float_reg[0] = 1
+    aggressive.is_float_reg[1] = 1
+    aggressive = lower_ir_binop(aggressive, instr)
+
+    if standard.is_float_reg[2] != 1 { return 1 }
+    if precision.is_float_reg[2] != 1 { return 2 }
+    if aggressive.is_float_reg[2] != 1 { return 3 }
+    if !native_code_eq(standard.code, precision.code) { return 4 }
+    if native_code_eq(standard.code, aggressive.code) { return 5 }
+    if standard.code.len < 19 || aggressive.code.len < 19 { return 6 }
+
+    // strict/standard path: first load uses src1 (rbp-8), second load uses src2 (rbp-16)
+    if native_byte_u8(standard.code.bytes[3]) != 0xf8 { return 7 }
+    if native_byte_u8(standard.code.bytes[15]) != 0xf0 { return 8 }
+    // aggressive path: commuted add loads src2 first, then src1
+    if native_byte_u8(aggressive.code.bytes[3]) != 0xf0 { return 9 }
+    if native_byte_u8(aggressive.code.bytes[15]) != 0xf8 { return 10 }
+    0
+}
+
+// ============================================================================
 // Test runner
 // ============================================================================
 fn run_native_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
     var passed: i64 = 0
-    let total: i64 = 12
+    let total: i64 = 15
 
     print("=== Native Backend Tests ===\n")
 
@@ -489,6 +565,12 @@ fn run_native_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
     if native_test_dispatch_native_auto_resolves() == 0 { passed = passed + 1; print("  T11 OK (native-auto resolves)\n") } else { print("  FAIL: T11 native-auto resolves\n") }
 
     if native_test_dispatch_matrix_normalization() == 0 { passed = passed + 1; print("  T12 OK (matrix normalization)\n") } else { print("  FAIL: T12 matrix normalization\n") }
+
+    if native_test_compile_strategy_propagates_to_codegen() == 0 { passed = passed + 1; print("  T13 OK (compile strategy reaches codegen)\n") } else { print("  FAIL: T13 compile strategy reaches codegen\n") }
+
+    if native_test_float_strategy_changes_lowering() == 0 { passed = passed + 1; print("  T14 OK (float strategy changes lowering)\n") } else { print("  FAIL: T14 float strategy changes lowering\n") }
+
+    if cgplan_run_tests() == 0 { passed = passed + 1; print("  T15 OK (codegen plan multiblock)\n") } else { print("  FAIL: T15 codegen plan multiblock\n") }
 
     print("\nNative tests: ")
     print_int(passed)

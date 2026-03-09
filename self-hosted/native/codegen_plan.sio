@@ -267,7 +267,7 @@ fn cgplan_find_last_reader(
     result
 }
 
-// Build all dependencies for block 0 by scanning register defs and uses.
+// Build dependencies for every block by scanning register defs and uses.
 // Detects:
 //   - DATA deps: write(r) -> read(r)
 //   - ANTI deps: read(r) -> write(r)
@@ -278,68 +278,63 @@ fn cgplan_build_deps(plan: CodegenPlan) -> CodegenPlan with Mut, Div, Panic {
     if p.block_count == 0 {
         return p
     }
-    let bi: i64 = 0
-    // Reset dependency count to rebuild from scratch
-    p.blocks[bi as usize].dep_count = 0
+    var bi: i64 = 0
+    while bi < p.block_count {
+        p.blocks[bi as usize].dep_count = 0
 
-    var i: i64 = 0
-    while i < p.blocks[bi as usize].instr_count {
-        let instr = p.blocks[bi as usize].instrs[i as usize]
+        var i: i64 = 0
+        while i < p.blocks[bi as usize].instr_count {
+            let instr = p.blocks[bi as usize].instrs[i as usize]
 
-        // DATA dependency: for each source register, find the last writer
-        if instr.src1_reg >= 0 {
-            let writer = cgplan_find_last_writer(p.blocks[bi as usize], instr.src1_reg, i)
-            if writer >= 0 {
-                let lat = p.blocks[bi as usize].instrs[writer as usize].latency
-                let edge = dep_edge_new(writer, i, DEP_DATA, lat)
-                p = cgplan_add_dep(p, edge)
-            }
-        }
-        if instr.src2_reg >= 0 {
-            let writer = cgplan_find_last_writer(p.blocks[bi as usize], instr.src2_reg, i)
-            if writer >= 0 {
-                let lat = p.blocks[bi as usize].instrs[writer as usize].latency
-                let edge = dep_edge_new(writer, i, DEP_DATA, lat)
-                p = cgplan_add_dep(p, edge)
-            }
-        }
-
-        // ANTI dependency: if this instr writes a register that was last read before
-        if instr.dst_reg >= 0 {
-            let reader = cgplan_find_last_reader(p.blocks[bi as usize], instr.dst_reg, i)
-            if reader >= 0 {
-                // Anti deps have latency 0 (no data to wait for)
-                let edge = dep_edge_new(reader, i, DEP_ANTI, 0)
-                p = cgplan_add_dep(p, edge)
-            }
-        }
-
-        // OUTPUT dependency: if this instr writes a register that was last written before
-        if instr.dst_reg >= 0 {
-            let prev_writer = cgplan_find_last_writer(p.blocks[bi as usize], instr.dst_reg, i)
-            if prev_writer >= 0 {
-                let edge = dep_edge_new(prev_writer, i, DEP_OUTPUT, 1)
-                p = cgplan_add_dep(p, edge)
-            }
-        }
-
-        // CONTROL dependency: branches/calls/returns create barriers
-        if instr.opcode == CGOP_BRANCH || instr.opcode == CGOP_CALL || instr.opcode == CGOP_RET {
-            // All prior non-scheduled instructions must complete before this
-            var j: i64 = 0
-            while j < i {
-                let prior = p.blocks[bi as usize].instrs[j as usize]
-                // Only add control dep if no other dep already exists from j -> i
-                let has_dep = cgplan_has_dep(p, bi, j, i)
-                if !(has_dep) {
-                    let edge = dep_edge_new(j, i, DEP_CONTROL, prior.latency)
-                    p = cgplan_add_dep(p, edge)
+            if instr.src1_reg >= 0 {
+                let writer = cgplan_find_last_writer(p.blocks[bi as usize], instr.src1_reg, i)
+                if writer >= 0 {
+                    let lat = p.blocks[bi as usize].instrs[writer as usize].latency
+                    let edge = dep_edge_new(writer, i, DEP_DATA, lat)
+                    p = cgplan_add_dep_to_block(p, bi, edge)
                 }
-                j = j + 1
             }
-        }
+            if instr.src2_reg >= 0 {
+                let writer = cgplan_find_last_writer(p.blocks[bi as usize], instr.src2_reg, i)
+                if writer >= 0 {
+                    let lat = p.blocks[bi as usize].instrs[writer as usize].latency
+                    let edge = dep_edge_new(writer, i, DEP_DATA, lat)
+                    p = cgplan_add_dep_to_block(p, bi, edge)
+                }
+            }
 
-        i = i + 1
+            if instr.dst_reg >= 0 {
+                let reader = cgplan_find_last_reader(p.blocks[bi as usize], instr.dst_reg, i)
+                if reader >= 0 {
+                    let edge = dep_edge_new(reader, i, DEP_ANTI, 0)
+                    p = cgplan_add_dep_to_block(p, bi, edge)
+                }
+            }
+
+            if instr.dst_reg >= 0 {
+                let prev_writer = cgplan_find_last_writer(p.blocks[bi as usize], instr.dst_reg, i)
+                if prev_writer >= 0 {
+                    let edge = dep_edge_new(prev_writer, i, DEP_OUTPUT, 1)
+                    p = cgplan_add_dep_to_block(p, bi, edge)
+                }
+            }
+
+            if instr.opcode == CGOP_BRANCH || instr.opcode == CGOP_CALL || instr.opcode == CGOP_RET {
+                var j: i64 = 0
+                while j < i {
+                    let prior = p.blocks[bi as usize].instrs[j as usize]
+                    let has_dep = cgplan_has_dep(p, bi, j, i)
+                    if !(has_dep) {
+                        let edge = dep_edge_new(j, i, DEP_CONTROL, prior.latency)
+                        p = cgplan_add_dep_to_block(p, bi, edge)
+                    }
+                    j = j + 1
+                }
+            }
+
+            i = i + 1
+        }
+        bi = bi + 1
     }
     p
 }
@@ -397,54 +392,55 @@ fn cgplan_compute_priority_inner(
     prio
 }
 
-// Compute scheduling priorities for all instructions in block 0.
+// Compute scheduling priorities for all instructions in all blocks.
 // Higher priority = longer critical path = should be scheduled first.
 fn cgplan_compute_priority(plan: CodegenPlan) -> CodegenPlan with Mut, Div, Panic {
     var p = plan
     if p.block_count == 0 {
         return p
     }
-    let bi: i64 = 0
+    var bi: i64 = 0
+    while bi < p.block_count {
+        var prio: [i64; 512] = [0; 512]
+        var k: i64 = 0
+        while k < CGPLAN_MAX_INSTRS {
+            prio[k as usize] = 0 - 1
+            k = k + 1
+        }
 
-    // Initialise priorities to -1 (uncomputed)
-    var prio: [i64; 512] = [0; 512]
-    var k: i64 = 0
-    while k < CGPLAN_MAX_INSTRS {
-        prio[k as usize] = 0 - 1
-        k = k + 1
-    }
+        var i: i64 = 0
+        while i < p.blocks[bi as usize].instr_count {
+            prio = cgplan_compute_priority_inner(p.blocks[bi as usize], i, prio)
+            i = i + 1
+        }
 
-    // Compute for every instruction
-    var i: i64 = 0
-    while i < p.blocks[bi as usize].instr_count {
-        prio = cgplan_compute_priority_inner(p.blocks[bi as usize], i, prio)
-        i = i + 1
-    }
-
-    // Store priority in the earliest_cycle field (repurposed during scheduling)
-    // We will use a separate array in the scheduler; here we update the instrs.
-    var j: i64 = 0
-    while j < p.blocks[bi as usize].instr_count {
-        p.blocks[bi as usize].instrs[j as usize].earliest_cycle = prio[j as usize]
-        j = j + 1
+        var j: i64 = 0
+        while j < p.blocks[bi as usize].instr_count {
+            p.blocks[bi as usize].instrs[j as usize].earliest_cycle = prio[j as usize]
+            j = j + 1
+        }
+        bi = bi + 1
     }
     p
 }
 
-// Return the critical path length for block 0 — the maximum priority value.
+// Return the maximum critical path length across all blocks.
 fn cgplan_critical_path(plan: CodegenPlan) -> i64 with Mut, Div, Panic {
     if plan.block_count == 0 {
         return 0
     }
-    let bi: i64 = 0
     var max_cp: i64 = 0
-    var i: i64 = 0
-    while i < plan.blocks[bi as usize].instr_count {
-        let cp = plan.blocks[bi as usize].instrs[i as usize].earliest_cycle
-        if cp > max_cp {
-            max_cp = cp
+    var bi: i64 = 0
+    while bi < plan.block_count {
+        var i: i64 = 0
+        while i < plan.blocks[bi as usize].instr_count {
+            let cp = plan.blocks[bi as usize].instrs[i as usize].earliest_cycle
+            if cp > max_cp {
+                max_cp = cp
+            }
+            i = i + 1
         }
-        i = i + 1
+        bi = bi + 1
     }
     max_cp
 }
@@ -550,7 +546,7 @@ fn cgplan_pick_best_ready(
     best_id
 }
 
-// Main list scheduling pass for block 0.
+// Main list scheduling pass for all blocks.
 // Steps:
 //   1. Compute priorities via critical path
 //   2. Save priorities (will be overwritten with issue cycles)
@@ -562,57 +558,51 @@ fn cgplan_list_schedule(plan: CodegenPlan) -> CodegenPlan with Mut, Div, Panic {
     if p.block_count == 0 {
         return p
     }
-    let bi: i64 = 0
-    let n = p.blocks[bi as usize].instr_count
-    if n == 0 {
-        return p
-    }
-
-    // Compute priorities
     p = cgplan_compute_priority(p)
 
-    // Save priorities before we overwrite earliest_cycle with issue cycles
-    var saved_prio: [i64; 512] = [0; 512]
-    var k: i64 = 0
-    while k < n {
-        saved_prio[k as usize] = p.blocks[bi as usize].instrs[k as usize].earliest_cycle
-        k = k + 1
-    }
+    p.total_cycles = 0
+    var bi: i64 = 0
+    while bi < p.block_count {
+        let n = p.blocks[bi as usize].instr_count
+        if n > 0 {
+            var saved_prio: [i64; 512] = [0; 512]
+            var k: i64 = 0
+            while k < n {
+                saved_prio[k as usize] = p.blocks[bi as usize].instrs[k as usize].earliest_cycle
+                k = k + 1
+            }
 
-    // Reset scheduling state
-    var ri: i64 = 0
-    while ri < n {
-        p.blocks[bi as usize].instrs[ri as usize].is_scheduled = false
-        p.blocks[bi as usize].instrs[ri as usize].earliest_cycle = 0
-        ri = ri + 1
-    }
-    p.blocks[bi as usize].schedule_len = 0
+            var ri: i64 = 0
+            while ri < n {
+                p.blocks[bi as usize].instrs[ri as usize].is_scheduled = false
+                p.blocks[bi as usize].instrs[ri as usize].earliest_cycle = 0
+                ri = ri + 1
+            }
+            p.blocks[bi as usize].schedule_len = 0
 
-    // Schedule loop
-    var scheduled_count: i64 = 0
-    var cycle: i64 = 0
-    var stall_limit: i64 = n * 10  // safety bound to prevent infinite loops
+            var scheduled_count: i64 = 0
+            var cycle: i64 = 0
+            var stall_limit: i64 = n * 10
 
-    while scheduled_count < n && cycle < stall_limit {
-        let best = cgplan_pick_best_ready(p, bi, cycle, saved_prio)
-        if best >= 0 {
-            // Schedule this instruction at `cycle`
-            p.blocks[bi as usize].instrs[best as usize].is_scheduled = true
-            p.blocks[bi as usize].instrs[best as usize].earliest_cycle = cycle
-            p.blocks[bi as usize].schedule[scheduled_count as usize] = best
-            scheduled_count = scheduled_count + 1
-            // Advance cycle by the instruction's latency (could issue next in parallel
-            // on a superscalar machine, but we model single-issue for simplicity)
-            cycle = cycle + 1
-        } else {
-            // Nothing ready — stall (advance cycle)
-            cycle = cycle + 1
+            while scheduled_count < n && cycle < stall_limit {
+                let best = cgplan_pick_best_ready(p, bi, cycle, saved_prio)
+                if best >= 0 {
+                    p.blocks[bi as usize].instrs[best as usize].is_scheduled = true
+                    p.blocks[bi as usize].instrs[best as usize].earliest_cycle = cycle
+                    p.blocks[bi as usize].schedule[scheduled_count as usize] = best
+                    scheduled_count = scheduled_count + 1
+                    cycle = cycle + 1
+                } else {
+                    cycle = cycle + 1
+                }
+            }
+
+            p.blocks[bi as usize].schedule_len = scheduled_count
+            p.blocks[bi as usize].cycle_count = cycle
+            p.total_cycles = p.total_cycles + cycle
         }
+        bi = bi + 1
     }
-
-    p.blocks[bi as usize].schedule_len = scheduled_count
-    p.blocks[bi as usize].cycle_count = cycle
-    p.total_cycles = cycle
     p
 }
 
@@ -644,52 +634,51 @@ fn cgplan_last_use_cycle(
     last
 }
 
-// Estimate register pressure at each cycle for block 0.
+// Estimate register pressure across the concatenated per-block schedules.
 // Stores into plan.reg_pressure[cycle] = number of live registers at that cycle.
 fn cgplan_estimate_pressure(plan: CodegenPlan) -> CodegenPlan with Mut, Div, Panic {
     var p = plan
     if p.block_count == 0 {
         return p
     }
-    let bi: i64 = 0
-    let block = p.blocks[bi as usize]
-    let total_cyc = block.cycle_count
-
-    // Clear pressure array
     var c: i64 = 0
     while c < CGPLAN_MAX_CYCLES {
         p.reg_pressure[c as usize] = 0
         c = c + 1
     }
 
-    // For each scheduled instruction that defines a register, add 1 to
-    // pressure for every cycle in [def_cycle, last_use_cycle].
-    var si: i64 = 0
-    while si < block.schedule_len {
-        let iid = block.schedule[si as usize]
-        let instr = block.instrs[iid as usize]
-        let dst = instr.dst_reg
-        if dst >= 0 {
-            let def_cyc = instr.earliest_cycle
-            let last_use = cgplan_last_use_cycle(block, dst)
-            // If the register is defined but never used, it is live for 1 cycle
-            var end_cyc = def_cyc
-            if last_use >= def_cyc {
-                end_cyc = last_use
-            }
-            // Clamp to valid range
-            if end_cyc >= CGPLAN_MAX_CYCLES {
-                end_cyc = CGPLAN_MAX_CYCLES - 1
-            }
-            var cyc: i64 = def_cyc
-            while cyc <= end_cyc {
-                if cyc >= 0 && cyc < CGPLAN_MAX_CYCLES {
-                    p.reg_pressure[cyc as usize] = p.reg_pressure[cyc as usize] + 1
+    var block_base_cycle: i64 = 0
+    var bi: i64 = 0
+    while bi < p.block_count {
+        let block = p.blocks[bi as usize]
+        var si: i64 = 0
+        while si < block.schedule_len {
+            let iid = block.schedule[si as usize]
+            let instr = block.instrs[iid as usize]
+            let dst = instr.dst_reg
+            if dst >= 0 {
+                let def_cyc = instr.earliest_cycle
+                let last_use = cgplan_last_use_cycle(block, dst)
+                var end_cyc = def_cyc
+                if last_use >= def_cyc {
+                    end_cyc = last_use
                 }
-                cyc = cyc + 1
+                if end_cyc >= CGPLAN_MAX_CYCLES {
+                    end_cyc = CGPLAN_MAX_CYCLES - 1
+                }
+                var cyc: i64 = def_cyc
+                while cyc <= end_cyc {
+                    let global_cyc = block_base_cycle + cyc
+                    if global_cyc >= 0 && global_cyc < CGPLAN_MAX_CYCLES {
+                        p.reg_pressure[global_cyc as usize] = p.reg_pressure[global_cyc as usize] + 1
+                    }
+                    cyc = cyc + 1
+                }
             }
+            si = si + 1
         }
-        si = si + 1
+        block_base_cycle = block_base_cycle + block.cycle_count
+        bi = bi + 1
     }
     p
 }
@@ -769,50 +758,42 @@ fn cgplan_reorder_for_pressure(plan: CodegenPlan, max_regs: i64) -> CodegenPlan 
     if p.block_count == 0 {
         return p
     }
-    let bi: i64 = 0
-    let slen = p.blocks[bi as usize].schedule_len
+    var bi: i64 = 0
+    while bi < p.block_count {
+        let slen = p.blocks[bi as usize].schedule_len
 
-    // Multiple passes
-    var pass: i64 = 0
-    while pass < 3 {
-        var i: i64 = 0
-        while i < slen - 1 {
-            let id_a = p.blocks[bi as usize].schedule[i as usize]
-            let id_b = p.blocks[bi as usize].schedule[(i + 1) as usize]
-
-            // Cannot swap if there is a dependency
-            let a_dep_b = cgplan_depends_on(p.blocks[bi as usize], id_a, id_b)
-            let b_dep_a = cgplan_depends_on(p.blocks[bi as usize], id_b, id_a)
-            if !(a_dep_b) && !(b_dep_a) {
-                // Heuristic: prefer instructions with fewer live outputs earlier
-                // (i.e., instructions that do not define a register, or whose
-                // result is used soon, should come first)
-                let a_dst = p.blocks[bi as usize].instrs[id_a as usize].dst_reg
-                let b_dst = p.blocks[bi as usize].instrs[id_b as usize].dst_reg
-
-                let a_has_dst = if a_dst >= 0 { 1 } else { 0 }
-                let b_has_dst = if b_dst >= 0 { 1 } else { 0 }
-
-                // Swap if b has no destination (reduces live set earlier)
-                if a_has_dst > b_has_dst {
-                    p.blocks[bi as usize].schedule[i as usize] = id_b
-                    p.blocks[bi as usize].schedule[(i + 1) as usize] = id_a
+        var pass: i64 = 0
+        while pass < 3 {
+            var i: i64 = 0
+            while i < slen - 1 {
+                let id_a = p.blocks[bi as usize].schedule[i as usize]
+                let id_b = p.blocks[bi as usize].schedule[(i + 1) as usize]
+                let a_dep_b = cgplan_depends_on(p.blocks[bi as usize], id_a, id_b)
+                let b_dep_a = cgplan_depends_on(p.blocks[bi as usize], id_b, id_a)
+                if !(a_dep_b) && !(b_dep_a) {
+                    let a_dst = p.blocks[bi as usize].instrs[id_a as usize].dst_reg
+                    let b_dst = p.blocks[bi as usize].instrs[id_b as usize].dst_reg
+                    let a_has_dst = if a_dst >= 0 { 1 } else { 0 }
+                    let b_has_dst = if b_dst >= 0 { 1 } else { 0 }
+                    if a_has_dst > b_has_dst {
+                        p.blocks[bi as usize].schedule[i as usize] = id_b
+                        p.blocks[bi as usize].schedule[(i + 1) as usize] = id_a
+                    }
                 }
+                i = i + 1
             }
-            i = i + 1
+            pass = pass + 1
         }
-        pass = pass + 1
+
+        var si: i64 = 0
+        while si < slen {
+            let iid = p.blocks[bi as usize].schedule[si as usize]
+            p.blocks[bi as usize].instrs[iid as usize].earliest_cycle = si
+            si = si + 1
+        }
+        bi = bi + 1
     }
 
-    // Reassign cycle numbers after reordering
-    var si: i64 = 0
-    while si < slen {
-        let iid = p.blocks[bi as usize].schedule[si as usize]
-        p.blocks[bi as usize].instrs[iid as usize].earliest_cycle = si
-        si = si + 1
-    }
-
-    // Recompute pressure
     p = cgplan_estimate_pressure(p)
     p = cgplan_update_spills(p, max_regs)
     p
@@ -835,86 +816,78 @@ fn cgplan_peephole(plan: CodegenPlan) -> CodegenPlan with Mut, Div, Panic {
     if p.block_count == 0 {
         return p
     }
-    let bi: i64 = 0
-    let n = p.blocks[bi as usize].instr_count
+    var bi: i64 = 0
+    while bi < p.block_count {
+        let n = p.blocks[bi as usize].instr_count
 
-    // Pattern 1: self-move elimination
-    var i: i64 = 0
-    while i < n {
-        let instr = p.blocks[bi as usize].instrs[i as usize]
-        if instr.opcode == CGOP_MOV {
-            if instr.dst_reg == instr.src1_reg && instr.dst_reg >= 0 {
-                // Self-move: convert to NOP
-                p.blocks[bi as usize].instrs[i as usize].opcode = CGOP_NOP
-                p.blocks[bi as usize].instrs[i as usize].dst_reg = REG_NONE
-                p.blocks[bi as usize].instrs[i as usize].src1_reg = REG_NONE
-                p.blocks[bi as usize].instrs[i as usize].src2_reg = REG_NONE
-                p.blocks[bi as usize].instrs[i as usize].latency = 0
+        var i: i64 = 0
+        while i < n {
+            let instr = p.blocks[bi as usize].instrs[i as usize]
+            if instr.opcode == CGOP_MOV {
+                if instr.dst_reg == instr.src1_reg && instr.dst_reg >= 0 {
+                    p.blocks[bi as usize].instrs[i as usize].opcode = CGOP_NOP
+                    p.blocks[bi as usize].instrs[i as usize].dst_reg = REG_NONE
+                    p.blocks[bi as usize].instrs[i as usize].src1_reg = REG_NONE
+                    p.blocks[bi as usize].instrs[i as usize].src2_reg = REG_NONE
+                    p.blocks[bi as usize].instrs[i as usize].latency = 0
+                }
             }
+            i = i + 1
         }
-        i = i + 1
-    }
 
-    // Pattern 2: ADD with zero source (src2 == REG_NONE implies immediate 0 encoding)
-    // In our model, src2_reg == 0 and opcode == CGOP_ADD where src2 encodes a zero register
-    // We detect this as: ADD dst, src1, src1 where src2 is the "zero" sentinel
-    // For simplicity, detect ADD where src1 == dst and src2 == REG_NONE
-    var j: i64 = 0
-    while j < n {
-        let instr = p.blocks[bi as usize].instrs[j as usize]
-        if instr.opcode == CGOP_ADD && instr.src2_reg == REG_NONE {
-            // ADD dst, src1, <none> -> effectively MOV dst, src1
-            if instr.dst_reg == instr.src1_reg {
-                p.blocks[bi as usize].instrs[j as usize].opcode = CGOP_NOP
-                p.blocks[bi as usize].instrs[j as usize].dst_reg = REG_NONE
-                p.blocks[bi as usize].instrs[j as usize].src1_reg = REG_NONE
-                p.blocks[bi as usize].instrs[j as usize].latency = 0
+        var j: i64 = 0
+        while j < n {
+            let instr = p.blocks[bi as usize].instrs[j as usize]
+            if instr.opcode == CGOP_ADD && instr.src2_reg == REG_NONE {
+                if instr.dst_reg == instr.src1_reg {
+                    p.blocks[bi as usize].instrs[j as usize].opcode = CGOP_NOP
+                    p.blocks[bi as usize].instrs[j as usize].dst_reg = REG_NONE
+                    p.blocks[bi as usize].instrs[j as usize].src1_reg = REG_NONE
+                    p.blocks[bi as usize].instrs[j as usize].latency = 0
+                }
             }
+            j = j + 1
         }
-        j = j + 1
-    }
 
-    // Pattern 3: SUB with no second source
-    var m: i64 = 0
-    while m < n {
-        let instr = p.blocks[bi as usize].instrs[m as usize]
-        if instr.opcode == CGOP_SUB && instr.src2_reg == REG_NONE {
-            if instr.dst_reg == instr.src1_reg {
-                p.blocks[bi as usize].instrs[m as usize].opcode = CGOP_NOP
-                p.blocks[bi as usize].instrs[m as usize].dst_reg = REG_NONE
-                p.blocks[bi as usize].instrs[m as usize].src1_reg = REG_NONE
-                p.blocks[bi as usize].instrs[m as usize].latency = 0
+        var m: i64 = 0
+        while m < n {
+            let instr = p.blocks[bi as usize].instrs[m as usize]
+            if instr.opcode == CGOP_SUB && instr.src2_reg == REG_NONE {
+                if instr.dst_reg == instr.src1_reg {
+                    p.blocks[bi as usize].instrs[m as usize].opcode = CGOP_NOP
+                    p.blocks[bi as usize].instrs[m as usize].dst_reg = REG_NONE
+                    p.blocks[bi as usize].instrs[m as usize].src1_reg = REG_NONE
+                    p.blocks[bi as usize].instrs[m as usize].latency = 0
+                }
             }
+            m = m + 1
         }
-        m = m + 1
-    }
 
-    // Pattern 4: Consecutive redundant MOVs: MOV a, b; MOV b, a -> NOP second
-    var q: i64 = 0
-    while q < n - 1 {
-        let first = p.blocks[bi as usize].instrs[q as usize]
-        let second = p.blocks[bi as usize].instrs[(q + 1) as usize]
-        if first.opcode == CGOP_MOV && second.opcode == CGOP_MOV {
-            if first.dst_reg == second.src1_reg && first.src1_reg == second.dst_reg {
-                // Second MOV is redundant
-                p.blocks[bi as usize].instrs[(q + 1) as usize].opcode = CGOP_NOP
-                p.blocks[bi as usize].instrs[(q + 1) as usize].dst_reg = REG_NONE
-                p.blocks[bi as usize].instrs[(q + 1) as usize].src1_reg = REG_NONE
-                p.blocks[bi as usize].instrs[(q + 1) as usize].src2_reg = REG_NONE
-                p.blocks[bi as usize].instrs[(q + 1) as usize].latency = 0
+        var q: i64 = 0
+        while q < n - 1 {
+            let first = p.blocks[bi as usize].instrs[q as usize]
+            let second = p.blocks[bi as usize].instrs[(q + 1) as usize]
+            if first.opcode == CGOP_MOV && second.opcode == CGOP_MOV {
+                if first.dst_reg == second.src1_reg && first.src1_reg == second.dst_reg {
+                    p.blocks[bi as usize].instrs[(q + 1) as usize].opcode = CGOP_NOP
+                    p.blocks[bi as usize].instrs[(q + 1) as usize].dst_reg = REG_NONE
+                    p.blocks[bi as usize].instrs[(q + 1) as usize].src1_reg = REG_NONE
+                    p.blocks[bi as usize].instrs[(q + 1) as usize].src2_reg = REG_NONE
+                    p.blocks[bi as usize].instrs[(q + 1) as usize].latency = 0
+                }
             }
+            q = q + 1
         }
-        q = q + 1
-    }
 
-    // Count remaining non-NOP instructions
-    var nop_count: i64 = 0
-    var ni: i64 = 0
-    while ni < n {
-        if p.blocks[bi as usize].instrs[ni as usize].opcode == CGOP_NOP {
-            nop_count = nop_count + 1
+        var nop_count: i64 = 0
+        var ni: i64 = 0
+        while ni < n {
+            if p.blocks[bi as usize].instrs[ni as usize].opcode == CGOP_NOP {
+                nop_count = nop_count + 1
+            }
+            ni = ni + 1
         }
-        ni = ni + 1
+        bi = bi + 1
     }
 
     p
@@ -937,96 +910,90 @@ fn cgplan_count_deps_of_kind(plan: CodegenPlan, block_idx: i64, kind: i64) -> i6
     count
 }
 
-// Count scheduled instructions (is_scheduled == true) in block 0.
+// Count scheduled instructions (is_scheduled == true) across all blocks.
 fn cgplan_count_scheduled(plan: CodegenPlan) -> i64 with Mut, Div, Panic {
-    if plan.block_count == 0 {
-        return 0
-    }
-    let bi: i64 = 0
     var count: i64 = 0
-    var i: i64 = 0
-    while i < plan.blocks[bi as usize].instr_count {
-        if plan.blocks[bi as usize].instrs[i as usize].is_scheduled {
-            count = count + 1
+    var bi: i64 = 0
+    while bi < plan.block_count {
+        var i: i64 = 0
+        while i < plan.blocks[bi as usize].instr_count {
+            if plan.blocks[bi as usize].instrs[i as usize].is_scheduled {
+                count = count + 1
+            }
+            i = i + 1
         }
-        i = i + 1
+        bi = bi + 1
     }
     count
 }
 
-// Count NOP instructions in block 0.
+// Count NOP instructions across all blocks.
 fn cgplan_count_nops(plan: CodegenPlan) -> i64 with Mut, Div, Panic {
-    if plan.block_count == 0 {
-        return 0
-    }
-    let bi: i64 = 0
     var count: i64 = 0
-    var i: i64 = 0
-    while i < plan.blocks[bi as usize].instr_count {
-        if plan.blocks[bi as usize].instrs[i as usize].opcode == CGOP_NOP {
-            count = count + 1
+    var bi: i64 = 0
+    while bi < plan.block_count {
+        var i: i64 = 0
+        while i < plan.blocks[bi as usize].instr_count {
+            if plan.blocks[bi as usize].instrs[i as usize].opcode == CGOP_NOP {
+                count = count + 1
+            }
+            i = i + 1
         }
-        i = i + 1
+        bi = bi + 1
     }
     count
 }
 
-// Validate schedule: every instruction id in schedule[] is unique and in range.
+// Validate every block schedule: every instruction id in schedule[] is unique and in range.
 fn cgplan_validate_schedule(plan: CodegenPlan) -> bool with Mut, Div, Panic {
-    if plan.block_count == 0 {
-        return true
-    }
-    let bi: i64 = 0
-    let slen = plan.blocks[bi as usize].schedule_len
-    let n = plan.blocks[bi as usize].instr_count
-
-    // Check: schedule length == instr count
-    if slen != n {
-        return false
-    }
-
-    // Check each id is in range and unique
-    var seen: [i64; 512] = [0; 512]
-    var i: i64 = 0
-    while i < slen {
-        let id = plan.blocks[bi as usize].schedule[i as usize]
-        if id < 0 || id >= n {
+    var bi: i64 = 0
+    while bi < plan.block_count {
+        let slen = plan.blocks[bi as usize].schedule_len
+        let n = plan.blocks[bi as usize].instr_count
+        if slen != n {
             return false
         }
-        if seen[id as usize] != 0 {
-            return false
+
+        var seen: [i64; 512] = [0; 512]
+        var i: i64 = 0
+        while i < slen {
+            let id = plan.blocks[bi as usize].schedule[i as usize]
+            if id < 0 || id >= n {
+                return false
+            }
+            if seen[id as usize] != 0 {
+                return false
+            }
+            seen[id as usize] = 1
+            i = i + 1
         }
-        seen[id as usize] = 1
-        i = i + 1
+        bi = bi + 1
     }
     true
 }
 
-// Validate that the schedule respects all dependencies.
+// Validate that every block schedule respects all dependencies.
 fn cgplan_validate_deps(plan: CodegenPlan) -> bool with Mut, Div, Panic {
-    if plan.block_count == 0 {
-        return true
-    }
-    let bi: i64 = 0
-    let block = plan.blocks[bi as usize]
-
-    // Build position map: pos[instr_id] = index in schedule
-    var pos: [i64; 512] = [0; 512]
-    var i: i64 = 0
-    while i < block.schedule_len {
-        let id = block.schedule[i as usize]
-        pos[id as usize] = i
-        i = i + 1
-    }
-
-    // Check all deps: from must come before to in the schedule
-    var d: i64 = 0
-    while d < block.dep_count {
-        let edge = block.deps[d as usize]
-        if pos[edge.from_id as usize] >= pos[edge.to_id as usize] {
-            return false
+    var bi: i64 = 0
+    while bi < plan.block_count {
+        let block = plan.blocks[bi as usize]
+        var pos: [i64; 512] = [0; 512]
+        var i: i64 = 0
+        while i < block.schedule_len {
+            let id = block.schedule[i as usize]
+            pos[id as usize] = i
+            i = i + 1
         }
-        d = d + 1
+
+        var d: i64 = 0
+        while d < block.dep_count {
+            let edge = block.deps[d as usize]
+            if pos[edge.from_id as usize] >= pos[edge.to_id as usize] {
+                return false
+            }
+            d = d + 1
+        }
+        bi = bi + 1
     }
     true
 }
@@ -1037,13 +1004,7 @@ fn cgplan_validate_deps(plan: CodegenPlan) -> bool with Mut, Div, Panic {
 
 // Schedule all blocks in the plan (applies list scheduling to each).
 fn cgplan_schedule_all_blocks(plan: CodegenPlan) -> CodegenPlan with Mut, Div, Panic {
-    var p = plan
-    // For now, only block 0 is scheduled by cgplan_list_schedule.
-    // A full implementation would iterate over all blocks.
-    if p.block_count > 0 {
-        p = cgplan_list_schedule(p)
-    }
-    p
+    cgplan_list_schedule(plan)
 }
 
 // Compute total cycles across all blocks.
@@ -1564,6 +1525,40 @@ fn test_cgplan_diamond_deps() -> i64 with Mut, Div, Panic {
     0
 }
 
+fn test_cgplan_schedule_all_blocks_multiblock() -> i64 with Mut, Div, Panic {
+    var p = codegen_plan_new()
+    p = cgplan_add_instr_to_block(p, 0, codegen_instr_new(0, CGOP_ADD, 1, 2, 3, 1))
+    p = cgplan_add_instr_to_block(p, 1, codegen_instr_new(0, CGOP_MUL, 4, 5, 6, 2))
+    p = cgplan_build_deps(p)
+    p = cgplan_schedule_all_blocks(p)
+
+    let r1 = cgplan_assert_true(p.blocks[0 as usize].schedule_len == 1, 1)
+    if r1 != 0 { return r1 }
+    let r2 = cgplan_assert_true(p.blocks[1 as usize].schedule_len == 1, 2)
+    if r2 != 0 { return r2 }
+    let r3 = cgplan_assert_true(p.total_cycles == 2, 3)
+    if r3 != 0 { return r3 }
+    0
+}
+
+fn test_cgplan_validate_multiblock() -> i64 with Mut, Div, Panic {
+    var p = codegen_plan_new()
+    p = cgplan_add_instr_to_block(p, 0, codegen_instr_new(0, CGOP_LOAD, 1, REG_NONE, REG_NONE, 1))
+    p = cgplan_add_instr_to_block(p, 0, codegen_instr_new(1, CGOP_ADD, 2, 1, 3, 1))
+    p = cgplan_add_instr_to_block(p, 1, codegen_instr_new(0, CGOP_LOAD, 4, REG_NONE, REG_NONE, 1))
+    p = cgplan_add_instr_to_block(p, 1, codegen_instr_new(1, CGOP_SUB, 5, 4, 6, 1))
+    p = cgplan_build_deps(p)
+    p = cgplan_schedule_all_blocks(p)
+
+    let r1 = cgplan_assert_true(cgplan_validate_schedule(p), 1)
+    if r1 != 0 { return r1 }
+    let r2 = cgplan_assert_true(cgplan_validate_deps(p), 2)
+    if r2 != 0 { return r2 }
+    let r3 = cgplan_assert_true(cgplan_count_scheduled(p) == 4, 3)
+    if r3 != 0 { return r3 }
+    0
+}
+
 // ============================================================================
 // Test runner
 // ============================================================================
@@ -1660,6 +1655,12 @@ fn cgplan_run_tests() -> i64 with Mut, Div, Panic {
 
     let t30 = test_cgplan_diamond_deps()
     if t30 != 0 { print_int(230) fail = fail + 1 }
+
+    let t31 = test_cgplan_schedule_all_blocks_multiblock()
+    if t31 != 0 { print_int(231) fail = fail + 1 }
+
+    let t32 = test_cgplan_validate_multiblock()
+    if t32 != 0 { print_int(232) fail = fail + 1 }
 
     fail
 }

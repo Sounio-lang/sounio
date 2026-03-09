@@ -57,6 +57,9 @@ if [[ "${SOUNIO_SKIP_GPU:-}" != "1" ]]; then
 
   echo "[e2e] gpu runtime attestation gate"
   bash "$ROOT_DIR/scripts/omega/omega_gpu_runtime_attest_gate.sh"
+
+  echo "[e2e] gpu public contract gate"
+  bash "$ROOT_DIR/scripts/omega/omega_gpu_public_contract_gate.sh"
 else
   echo "[e2e] gpu skipped (SOUNIO_SKIP_GPU=1)"
 fi

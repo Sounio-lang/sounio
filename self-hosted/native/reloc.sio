@@ -8,7 +8,7 @@ use native::encode::{CodeBuffer, low8}
 
 // Relocation kinds
 struct RelocKind {
-    kind_code: i64,   // 1=rel32 function call, 2=RIP-relative data
+    kind_code: i64,   // 1=rel32 function call, 2=RIP-relative rodata, 3=RIP-relative .data
 }
 
 fn reloc_rel32() -> RelocKind {
@@ -17,6 +17,10 @@ fn reloc_rel32() -> RelocKind {
 
 fn reloc_rip_rel32() -> RelocKind {
     RelocKind { kind_code: 2 }
+}
+
+fn reloc_data_rel32() -> RelocKind {
+    RelocKind { kind_code: 3 }
 }
 
 // Relocation target types
@@ -42,7 +46,7 @@ struct Relocation {
 
 // Relocation table (fixed-size array for bootstrap)
 struct RelocationTable {
-    entries: [Relocation; 64],
+    entries: [Relocation; 256],
     count: i64,
 }
 
@@ -53,7 +57,7 @@ fn reloc_table_new() -> RelocationTable {
         kind: reloc_rel32(),
     }
     RelocationTable {
-        entries: [empty_reloc; 64],
+        entries: [empty_reloc; 256],
         count: 0,
     }
 }
@@ -61,7 +65,7 @@ fn reloc_table_new() -> RelocationTable {
 // Add a call relocation (rel32)
 fn add_call_reloc(table: RelocationTable, offset: i64, target_func: i64) -> RelocationTable with Mut, Panic {
     var t = table
-    if t.count < 64 {
+    if t.count < 256 {
         t.entries[t.count as usize] = Relocation {
             offset: offset,
             target: reloc_target_function(target_func),
@@ -75,7 +79,7 @@ fn add_call_reloc(table: RelocationTable, offset: i64, target_func: i64) -> Relo
 // Add a data relocation (rip-relative)
 fn add_data_reloc(table: RelocationTable, offset: i64, data_offset: i64) -> RelocationTable with Mut, Panic {
     var t = table
-    if t.count < 64 {
+    if t.count < 256 {
         t.entries[t.count as usize] = Relocation {
             offset: offset,
             target: reloc_target_data(data_offset),
@@ -89,11 +93,25 @@ fn add_data_reloc(table: RelocationTable, offset: i64, data_offset: i64) -> Relo
 // Add RIP-relative relocation for string literals
 fn add_rip_reloc(table: RelocationTable, lea_disp_offset: i64, rodata_offset: i64) -> RelocationTable with Mut, Panic {
     var t = table
-    if t.count < 64 {
+    if t.count < 256 {
         t.entries[t.count as usize] = Relocation {
             offset: lea_disp_offset,
             target: reloc_target_data(rodata_offset),
             kind: reloc_rip_rel32(),
+        }
+        t.count = t.count + 1
+    }
+    t
+}
+
+// Add RIP-relative relocation targeting .data section (profiling counters)
+fn add_data_section_reloc(table: RelocationTable, disp_offset: i64, data_offset: i64) -> RelocationTable with Mut, Panic {
+    var t = table
+    if t.count < 256 {
+        t.entries[t.count as usize] = Relocation {
+            offset: disp_offset,
+            target: reloc_target_data(data_offset),
+            kind: reloc_data_rel32(),
         }
         t.count = t.count + 1
     }
@@ -106,7 +124,8 @@ fn apply_relocations(
     buf: CodeBuffer,
     fn_offsets: [i64; 32],
     fn_count: i64,
-    rodata_file_offset: i64
+    rodata_file_offset: i64,
+    data_file_offset: i64
 ) -> CodeBuffer with Mut, Panic, Div {
     var b = buf
     var i = 0
@@ -133,6 +152,14 @@ fn apply_relocations(
             let string_va = rodata_file_offset + str_offset
             let disp32 = string_va - lea_next_ip
             b = patch_u32_le(b, patch_offset, disp32)
+        } else if reloc.kind.kind_code == 3 {
+            // .data RIP-relative: same formula as rodata but with data_file_offset
+            let data_off = reloc.target.target_index
+            let text_file_offset2 = 4096
+            let next_ip = text_file_offset2 + patch_offset + 4
+            let counter_va = data_file_offset + data_off
+            let disp32_data = counter_va - next_ip
+            b = patch_u32_le(b, patch_offset, disp32_data)
         }
 
         i = i + 1

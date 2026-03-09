@@ -25,8 +25,8 @@ This comprehensive guide enables LLMs to correctly generate Sounio code. Sounio 
 | Effects system (type-level tracking) | ✅ Implemented |
 | Units of measure | ✅ Implemented |
 | Epistemic types (`Knowledge<T>`) | ✅ Interpreter only |
-| GPU kernels (codegen) | ✅ Implemented |
-| GPU kernel launch | ⚠️ Runtime stub |
+| GPU kernels (codegen) | ✅ Implemented in the checked GPU artifact |
+| GPU kernel launch surface | ✅ Checkable syntax; runtime proof is gate-backed |
 | Basic async (spawn, await, channels) | ✅ Implemented |
 | Async join/select | ⚠️ Not implemented |
 | Refinement types (parsing) | ✅ Implemented |
@@ -858,119 +858,50 @@ struct Patient {
 ### Kernel Definition
 
 ```d
-// GPU kernel function
-kernel fn vector_add(
-    a: &[f32],
-    b: &[f32],
-    c: &mut [f32],
-    n: u32
-) {
-    let i = gpu.thread_id.x + gpu.block_id.x * gpu.block_dim.x
-    
-    if i < n {
-        c[i] = a[i] + b[i]
-    }
+kernel fn vector_add(n: i64) with GPU {
+}
+
+kernel fn scale_vector(factor: f64, n: i64) with GPU, Div {
 }
 ```
 
-### GPU Intrinsics
+### Checked Public Surface
 
 ```d
-// Thread indexing
-gpu.thread_id.x    // Thread ID in block (x dimension)
-gpu.thread_id.y
-gpu.thread_id.z
-gpu.block_id.x     // Block ID in grid
-gpu.block_id.y
-gpu.block_id.z
-gpu.block_dim.x    // Block dimensions
-gpu.block_dim.y
-gpu.block_dim.z
-
-// Synchronization
-gpu.sync()         // Barrier synchronization
-
-// Shared memory
-shared sdata: [f32; 256]
+perform GPU.launch(vector_add, grid, block)(n)
+perform GPU.launch(scale_vector, grid, block)(2.0, n)
+perform GPU.sync()
 ```
 
 ### Launching Kernels
 
-> ⚠️ **PARTIAL**: Kernel codegen works (PTX/Metal/SPIR-V). Runtime launch is stubbed.
+Use the checked GPU profile when validating GPU syntax:
 
 ```d
-fn main() with GPU, Alloc {
-    let n = 1024<u32>
+fn main() with GPU, IO {
+    let n: i64 = 1024
+    let grid = (16, 1, 1)
+    let block = (64, 1, 1)
 
-    // Allocate GPU memory
-    let a = gpu.alloc<f32>(n)
-    let b = gpu.alloc<f32>(n)
-    let c = gpu.alloc<f32>(n)
-    
-    // Define grid and block dimensions
-    let grid = (n / 256, 1, 1)
-    let block = (256, 1, 1)
-    
-    // Launch kernel
-    perform GPU.launch(vector_add, grid, block)(a, b, c, n)
+    perform GPU.launch(vector_add, grid, block)(n)
     perform GPU.sync()
 }
 ```
 
-### Matrix Operations
+Validation commands:
 
 ```d
-kernel fn matmul(
-    a: &[f32],
-    b: &[f32],
-    c: &mut [f32],
-    m: u32, n: u32, k: u32
-) {
-    let row = gpu.thread_id.y + gpu.block_id.y * gpu.block_dim.y
-    let col = gpu.thread_id.x + gpu.block_id.x * gpu.block_dim.x
-    
-    if row < m && col < n {
-        var sum = 0.0<f32>
-        for i in 0..k {
-            sum += a[row * k + i] * b[i * n + col]
-        }
-        c[row * n + col] = sum
-    }
-}
+"$SOUC_GPU_BIN" check examples/gpu.sio
+"$SOUC_GPU_BIN" check tests/run-pass/gpu_launch_surface.sio
+"$SOUC_GPU_BIN" build examples/kernel_matmul.sio --backend gpu -o /tmp/kernel_matmul.ptx
 ```
 
-### Reduction with Shared Memory
+### Important Limitation
 
 ```d
-kernel fn reduce_sum(
-    input: &[f32],
-    output: &mut [f32],
-    n: u32
-) {
-    shared sdata: [f32; 256]
-    
-    let tid = gpu.thread_id.x
-    let i = gpu.block_id.x * gpu.block_dim.x + tid
-    
-    // Load into shared memory
-    sdata[tid] = if i < n { input[i] } else { 0.0 }
-    gpu.sync()
-    
-    // Reduction in shared memory
-    var s = gpu.block_dim.x / 2
-    while s > 0 {
-        if tid < s {
-            sdata[tid] += sdata[tid + s]
-        }
-        gpu.sync()
-        s /= 2
-    }
-    
-    // Write result
-    if tid == 0 {
-        output[gpu.block_id.x] = sdata[0]
-    }
-}
+// Older sketches used `gpu.thread_id`, `gpu.block_id`, `gpu.block_dim`,
+// and `gpu.alloc`. Those names are not yet resolved by the checked public
+// GPU artifact, so do not present them as the default public syntax.
 ```
 
 ---
@@ -1776,25 +1707,15 @@ fn training_loop() {
 
 #### GPU Acceleration
 
-All ONN operations compile to GPU kernels:
+The repo contains substantial GPU backend work, but contributor docs should tie
+execution claims back to the checked GPU artifact and Omega GPU artifacts:
 
 ```sio
-// Compile with GPU support
-// cargo build --features gpu
-
-fn gpu_accelerated_training() {
-    // Automatic GPU dispatch via compiler intrinsics
-    // Oct_mul, Oct_linear_fwd, Oct_conv2d_fwd all run on GPU (PTX/Metal)
-
-    let output = oct_linear_forward(layer, weights, input, bias)
-    // Generates efficient PTX (NVIDIA) or Metal (Apple) code
-
-    // Backward pass also GPU-accelerated
-    let (grad_input, grad_weights, grad_bias) = oct_linear_backward(
-        layer, weights, input, grad_output
-    )
-}
+"$SOUC_GPU_BIN" build examples/kernel_matmul.sio --backend gpu -o /tmp/kernel_matmul.ptx
 ```
+
+Use `docs/features/GPU_RUNTIME.md` for the current artifact-backed GPU contract
+before claiming automatic runtime execution behavior.
 
 #### Important Notes
 
@@ -2330,18 +2251,13 @@ fn drug_concentration(
     return (dose * bioavailability) / volume
 }
 
-// GPU-accelerated computation
-fn parallel_process(data: &[f64]) -> Vec<f64> with GPU {
-    let n = len(data)
-    let result = gpu.alloc<f64>(n)
-    
+// GPU launch syntax accepted by the checked artifact
+fn parallel_process(n: i64) with GPU, IO {
     let grid = ((n + 255) / 256, 1, 1)
     let block = (256, 1, 1)
-    
-    perform GPU.launch(process_kernel, grid, block)(data, result, n)
+
+    perform GPU.launch(process_kernel, grid, block)(n)
     perform GPU.sync()
-    
-    return result.to_vec()
 }
 ```
 

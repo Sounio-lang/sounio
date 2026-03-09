@@ -1,0 +1,137 @@
+// self-hosted::ir::profile — .sprof profile reader + strategy promotion
+//
+// Sprint 47: Reads text-based .sprof profiling data at compile time.
+// Format:
+//   [sprof]
+//   fn_name count
+//   other_fn count
+//
+// sprof_parse() builds a SprofProfile from raw bytes.
+// sprof_lookup() finds a function's count by name.
+// sprof_apply_promotion() overrides compile_strategy for hot functions.
+
+module ir::profile
+
+use parser::ast::{Name, empty_name}
+use ir::ir::{IrModule, ir_name_eq, IR_STRATEGY_AGGRESSIVE, IR_STRATEGY_PRECISION_PRESERVING}
+
+struct SprofEntry {
+    fn_name: Name,
+    count: i64,
+}
+
+fn sprof_empty_entry() -> SprofEntry {
+    SprofEntry { fn_name: empty_name(), count: 0 }
+}
+
+struct SprofProfile {
+    entries: [SprofEntry; 64],
+    entry_count: i64,
+}
+
+fn sprof_empty_profile() -> SprofProfile {
+    SprofProfile {
+        entries: [sprof_empty_entry(); 64],
+        entry_count: 0,
+    }
+}
+
+// Parse a .sprof file buffer into a SprofProfile
+// buf: raw file bytes, buf_len: number of valid bytes
+fn sprof_parse(buf: [i8; 4096], buf_len: i64) -> SprofProfile with Mut, Panic, Div {
+    var profile = sprof_empty_profile()
+    var pos: i64 = 0
+
+    // Skip [sprof] header line: scan past first newline
+    while pos < buf_len {
+        let b = buf[pos as usize]
+        pos = pos + 1
+        if b == 10 as i8 {
+            // found newline, header consumed
+            break
+        }
+    }
+
+    // Parse remaining lines: "fn_name count\n"
+    while pos < buf_len && profile.entry_count < 64 {
+        // Skip any leading whitespace/empty lines
+        if buf[pos as usize] == 10 as i8 {
+            pos = pos + 1
+            continue
+        }
+
+        // Read function name: bytes until space (0x20)
+        var name = empty_name()
+        var name_len: i64 = 0
+        while pos < buf_len && buf[pos as usize] != 32 as i8 && buf[pos as usize] != 10 as i8 {
+            if name_len < 128 {
+                name.buf[name_len as usize] = buf[pos as usize]
+                name_len = name_len + 1
+            }
+            pos = pos + 1
+        }
+        name.len = name_len
+
+        // Skip space
+        if pos < buf_len && buf[pos as usize] == 32 as i8 {
+            pos = pos + 1
+        }
+
+        // Read count: decimal digits
+        var count: i64 = 0
+        while pos < buf_len && buf[pos as usize] >= 48 as i8 && buf[pos as usize] <= 57 as i8 {
+            count = count * 10 + ((buf[pos as usize] as i64) - 48)
+            pos = pos + 1
+        }
+
+        // Skip newline
+        if pos < buf_len && buf[pos as usize] == 10 as i8 {
+            pos = pos + 1
+        }
+
+        // Store entry (only if name is non-empty)
+        if name_len > 0 {
+            var entry = sprof_empty_entry()
+            entry.fn_name = name
+            entry.count = count
+            profile.entries[profile.entry_count as usize] = entry
+            profile.entry_count = profile.entry_count + 1
+        }
+    }
+
+    profile
+}
+
+// Look up a function's execution count by name
+// Returns count if found, -1 if not found
+fn sprof_lookup(profile: &SprofProfile, name: &Name) -> i64 with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < profile.entry_count {
+        if ir_name_eq(profile.entries[i as usize].fn_name, *name) {
+            return profile.entries[i as usize].count
+        }
+        i = i + 1
+    }
+    -1
+}
+
+// Apply profile-guided strategy promotion to an IR module
+// count > 1000 → AGGRESSIVE (hot function, optimize for speed)
+// count > 100  → PRECISION_PRESERVING (warm function, optimize carefully)
+// count <= 100 → keep original strategy
+fn sprof_apply_promotion(module: &!IrModule, profile: &SprofProfile) with Mut, Panic, Div {
+    var fi: i64 = 0
+    while fi < module.fn_count {
+        let count = sprof_lookup(profile, &module.functions[fi as usize].name)
+        if count > 1000 {
+            var func = module.functions[fi as usize]
+            func.compile_strategy = IR_STRATEGY_AGGRESSIVE
+            module.functions[fi as usize] = func
+        } else if count > 100 {
+            var func = module.functions[fi as usize]
+            func.compile_strategy = IR_STRATEGY_PRECISION_PRESERVING
+            module.functions[fi as usize] = func
+        }
+        fi = fi + 1
+    }
+}

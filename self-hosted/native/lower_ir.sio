@@ -5,7 +5,7 @@ module native::lower_ir
 use parser::ast::{BinaryOp, UnaryOp}
 use ir::ir::{IrInstr, IrOpcode, IrRegList, IR_MAX_FUNCS}
 use native::encode::*
-use native::reloc::{RelocationTable, add_call_reloc, add_rip_reloc, patch_u32_le}
+use native::reloc::{RelocationTable, add_call_reloc, add_rip_reloc, add_data_section_reloc, patch_u32_le}
 use native::elf::{StringTable, string_table_add, data_section_add_f64}
 use native::regs::{param_reg}
 use native::frame::*
@@ -156,6 +156,19 @@ fn lower_instr(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut, P
         // IrDebugGuard: debug-mode policy guard — NOP stub for bootstrap (Sprint 28)
         // Full implementation (UCOMISD + UD2 trap) will be wired when binary is rebuilt
         nc
+    } else if instr.op == IrOpcode::IrProfCounter {
+        // Sprint 45: INC QWORD PTR [RIP+disp32] — counter increment
+        // Encoding: 48 FF 05 <disp32> (7 bytes, replaces Sprint 44 NOP)
+        // disp32 patched by apply_relocations() targeting .data[counter_id * 8]
+        let counter_id = instr.imm_i64
+        var c = nc
+        c.code = emit_byte(c.code, 0x48)   // REX.W
+        c.code = emit_byte(c.code, 0xFF)   // INC r/m64
+        c.code = emit_byte(c.code, 0x05)   // ModR/M: [RIP+disp32], /0
+        let disp_offset = c.code.len
+        c.code = emit_u32_le(c.code, 0)    // placeholder disp32
+        c.relocs = add_data_section_reloc(c.relocs, disp_offset, counter_id * 8)
+        c
     } else {
         // Unsupported opcode — skip silently for bootstrap
         nc
@@ -366,6 +379,18 @@ fn is_comparison_op(op: BinaryOp) -> i64 {
     else { 0 }
 }
 
+// Sprint 38: Strategy-aware float binary operation emission
+//
+// Strategy behaviour:
+//   IR_STRATEGY_PRECISION_PRESERVING (2): strict scalar SSE2 — no reassociation,
+//       no FMA fusion, no approximate reciprocal.  Every operation executes in
+//       program order with IEEE 754 rounding semantics.
+//   IR_STRATEGY_AGGRESSIVE (1): allows future peephole optimisations —
+//       FMA fusion, commutative reordering, approximate reciprocal for division.
+//       Currently emits same code as Standard (optimisations gated in Sprint 39).
+//   IR_STRATEGY_STANDARD (0) / others: scalar SSE2, same as PrecisionPreserving
+//       for now.  Will diverge when peephole passes land.
+//
 // Float binary operation: xmm0 = LHS, xmm1 = RHS, result in rax
 fn emit_float_binop_code(nc: NativeCompiler, op: BinaryOp) -> NativeCompiler with Mut, Panic, Div {
     var c = nc
@@ -411,6 +436,40 @@ fn emit_float_binop_code(nc: NativeCompiler, op: BinaryOp) -> NativeCompiler wit
     c
 }
 
+// Sprint 38: Strategy query helpers for native codegen
+fn ir_native_strategy_allows_float_reassoc(strategy: i64) -> bool {
+    // Only StrategyAggressive allows float reassociation
+    strategy == 1
+}
+
+fn ir_native_strategy_requires_strict_fp(strategy: i64) -> bool {
+    // PrecisionPreserving, Instrumented, and Probabilistic require strict FP
+    strategy == 2 || strategy == 3 || strategy == 5
+}
+
+fn ir_native_strategy_can_commute_float_binop(strategy: i64, op: BinaryOp) -> bool {
+    if !ir_native_strategy_allows_float_reassoc(strategy) {
+        false
+    } else {
+        op == BinaryOp::OpAdd || op == BinaryOp::OpMul
+    }
+}
+
+fn lower_ir_load_float_binop_operands(
+    nc: NativeCompiler, instr: IrInstr, swap_operands: bool
+) -> NativeCompiler with Mut, Panic, Div {
+    var c = nc
+    let lhs = if swap_operands { instr.src2 } else { instr.src1 }
+    let rhs = if swap_operands { instr.src1 } else { instr.src2 }
+
+    // Float path: load lhs → rax → xmm0, rhs → rax → xmm1
+    c.code = emit_load_rbp_disp32_rax(c.code, ir_slot_offset(lhs))
+    c.code = emit_movq_xmm0_rax(c.code)
+    c.code = emit_load_rbp_disp32_rax(c.code, ir_slot_offset(rhs))
+    c.code = emit_movq_xmm1_rax(c.code)
+    c
+}
+
 fn lower_ir_binop(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut, Panic, Div {
     var c = nc
 
@@ -428,12 +487,12 @@ fn lower_ir_binop(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut
     }
 
     if is_float == 1 {
-        // Float path: load src1 → rax → xmm0, src2 → rax → xmm1
-        c.code = emit_load_rbp_disp32_rax(c.code, ir_slot_offset(instr.src1))
-        c.code = emit_movq_xmm0_rax(c.code)
-        c.code = emit_load_rbp_disp32_rax(c.code, ir_slot_offset(instr.src2))
-        c.code = emit_movq_xmm1_rax(c.code)
+        let strict_fp = ir_native_strategy_requires_strict_fp(c.current_strategy)
+            || !ir_native_strategy_allows_float_reassoc(c.current_strategy)
+        let swap_operands = !strict_fp
+            && ir_native_strategy_can_commute_float_binop(c.current_strategy, instr.bin_op)
 
+        c = lower_ir_load_float_binop_operands(c, instr, swap_operands)
         c = emit_float_binop_code(c, instr.bin_op)
         let is_cmp = is_comparison_op(instr.bin_op)
 

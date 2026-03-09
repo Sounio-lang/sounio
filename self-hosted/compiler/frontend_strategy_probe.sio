@@ -1,0 +1,140 @@
+module frontend_strategy_probe
+
+use parser::ast::*
+use parser::parser::{parser_last_error_count}
+use ir::ir::*
+use module_loader::{preflight_multimodule_frontend, load_module_file}
+
+fn frontend_strategy_probe_print_name(name: Name) with IO, Mut, Panic, Div {
+    var i: i64 = 0
+    while i < name.len {
+        print_char(name.buf[i] as i64)
+        i = i + 1
+    }
+}
+
+fn frontend_strategy_probe_effect_list_has_name(effects: Option<Box<EffectList>>, target: string) -> bool with Mut, Panic, Div {
+    match effects {
+        Some(el) => {
+            let eff = (*el).head
+            var matches = true
+            let tlen = str_len(target)
+            if eff.name_len != tlen {
+                matches = false
+            } else {
+                var k: i64 = 0
+                while k < tlen {
+                    if eff.name_buf[k as usize] != (str_char_at(target, k) as i8) {
+                        matches = false
+                    }
+                    k = k + 1
+                }
+            }
+            if matches { true }
+            else { frontend_strategy_probe_effect_list_has_name((*el).tail, target) }
+        }
+        None => false,
+    }
+}
+
+fn frontend_strategy_probe_strategy_from_signature(
+    return_type: Option<Box<TypeExpr>>,
+    effects: Option<Box<EffectList>>
+) -> i64 with Mut, Panic, Div {
+    if frontend_strategy_probe_effect_list_has_name(effects, "GPU") {
+        return IR_STRATEGY_GPU_KERNEL
+    }
+    if frontend_strategy_probe_effect_list_has_name(effects, "Prob") {
+        return IR_STRATEGY_PROBABILISTIC
+    }
+    match return_type {
+        Some(rt) => {
+            let rk = (*rt).kind
+            if rk == TypeExprKind::TypeValidated {
+                IR_STRATEGY_AGGRESSIVE
+            } else if rk == TypeExprKind::TypeKnowledge {
+                IR_STRATEGY_PRECISION_PRESERVING
+            } else if rk == TypeExprKind::TypeContest || rk == TypeExprKind::TypeRobust {
+                IR_STRATEGY_INSTRUMENTED
+            } else {
+                IR_STRATEGY_STANDARD
+            }
+        }
+        None => IR_STRATEGY_STANDARD,
+    }
+}
+
+fn frontend_strategy_probe_param_count(params: Option<Box<ParamList>>) -> i64 with Alloc {
+    match params {
+        Some(pl) => 1 + frontend_strategy_probe_param_count((*pl).tail),
+        None => 0,
+    }
+}
+
+fn frontend_strategy_probe_count_fn_items(items: Option<Box<ItemList>>) -> i64 with Alloc {
+    match items {
+        Some(list) => {
+            let rest = frontend_strategy_probe_count_fn_items((*list).tail)
+            if (*list).head.kind == ItemKind::ItemFn { 1 + rest } else { rest }
+        }
+        None => 0,
+    }
+}
+
+fn frontend_strategy_probe_print_items(items: Option<Box<ItemList>>) with IO, Mut, Panic, Div, Alloc {
+    match items {
+        Some(list) => {
+            let item = (*list).head
+            if item.kind == ItemKind::ItemFn {
+                match item.fn_def {
+                    Some(fd) => {
+                        let strategy = frontend_strategy_probe_strategy_from_signature((*fd).return_type, (*fd).effects)
+                        let user_param_count = frontend_strategy_probe_param_count((*fd).params)
+                        let validated_param = strategy == IR_STRATEGY_INSTRUMENTED
+                        let final_param_count = if validated_param { user_param_count + 1 } else { user_param_count }
+                        print("probe_frontend_strategy: fn=")
+                        frontend_strategy_probe_print_name(item.name)
+                        print(" strategy=")
+                        print(ir_strategy_name(strategy))
+                        print(" validated_param=")
+                        if validated_param { print("true") } else { print("false") }
+                        print(" param_count=")
+                        print_int(final_param_count)
+                        print("\n")
+                    }
+                    None => {}
+                }
+            }
+            frontend_strategy_probe_print_items((*list).tail)
+        }
+        None => {}
+    }
+}
+
+fn run_frontend_strategy_probe(source_path: string) with IO, Mut, Panic, Div, Alloc {
+    println("probe_frontend_strategy: begin")
+    print("probe_frontend_strategy: source=")
+    print(source_path)
+    print("\n")
+    let frontend_result = preflight_multimodule_frontend(source_path)
+    let parse_errors = parser_last_error_count()
+    if frontend_result.ok && parse_errors == 0 {
+        let main_prog = load_module_file(source_path)
+        println("probe_frontend_strategy: ok")
+        print("probe_frontend_strategy: functions=")
+        print_int(frontend_strategy_probe_count_fn_items(main_prog.items))
+        print("\n")
+        frontend_strategy_probe_print_items(main_prog.items)
+        return
+    }
+    println("probe_frontend_strategy: fail")
+    if str_len(frontend_result.error_msg) > 0 {
+        print("probe_frontend_strategy: error=")
+        print(frontend_result.error_msg)
+        print("\n")
+    }
+    if parse_errors > 0 {
+        println("probe_frontend_strategy: parser_errors=" + int_to_string(parse_errors))
+    }
+    panic("probe_frontend_strategy failed")
+}

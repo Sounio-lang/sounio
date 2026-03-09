@@ -45,8 +45,8 @@ export function CinematicHero({ localePath }: Props) {
     }),
   };
 
-  const line1 = "The Language of".split(" ");
-  const line2 = "Defensible Science".split(" ");
+  const line1 = "Scientific Code".split(" ");
+  const line2 = "That Shows Its Work".split(" ");
 
   return (
     <section className="relative h-[100vh] w-full overflow-hidden bg-[#020617] flex items-center justify-center">
@@ -92,7 +92,7 @@ export function CinematicHero({ localePath }: Props) {
           className="mb-8"
         >
           <span className="px-4 py-1.5 rounded-full border border-white/10 bg-white/5 backdrop-blur-md text-xs font-mono tracking-[0.2em] text-[var(--color-accent-gold-soft)] uppercase">
-            v1.0.0-beta.5 · Self-Hosted Native ELF
+            Current Contract · Beta Compiler + Gated Stdlib
           </span>
         </motion.div>
 
@@ -135,7 +135,7 @@ export function CinematicHero({ localePath }: Props) {
           animate={{ opacity: isLoaded ? 1 : 0 }}
           transition={{ delay: 2.2, duration: 1.5 }}
         >
-          Epistemic types — Knowledge&lt;T&gt;, Validated&lt;T&gt;, Intervention&lt;T&gt;, Counterfactual&lt;T&gt; — compile to self-hosted native ELF. Scientific trust is a type-system concern, not a convention.
+          Sounio combines explicit uncertainty, provenance-aware types, and gate-backed compiler workflows. The current repo is strongest as a check-first platform with validated scientific lanes, not as a fully finished all-backends release.
         </motion.p>
 
         {/* Actions */}
@@ -150,7 +150,7 @@ export function CinematicHero({ localePath }: Props) {
             className="group relative px-8 py-4 bg-white text-black font-semibold rounded-full overflow-hidden transition-transform hover:scale-105 duration-300"
           >
             <div className="absolute inset-0 bg-gradient-to-r from-[var(--color-accent-gold)] to-[var(--color-accent-teal)] opacity-0 group-hover:opacity-20 transition-opacity duration-500" />
-            <span className="relative z-10">Explore the Language</span>
+            <span className="relative z-10">Read the Current Contract</span>
           </a>
           
           <a

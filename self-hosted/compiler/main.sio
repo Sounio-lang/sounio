@@ -19,6 +19,7 @@ use native::encode::*
 use native::elf::*
 use native::reloc::*
 use native::frame::*
+use native::lower_ir::*
 use wasm::core::*
 use wasm::encode::*
 use wasm::lower::*
@@ -28,8 +29,13 @@ use resolve::imports::*
 use resolve::symbol::*
 use resolve::scope::*
 use resolve::mod::{resolve_modules, ResolveBatchResult}
-use module_loader::{compile_multimodule_native, compile_multimodule_native_with_ir, load_multimodule_ir, preflight_multimodule_frontend, load_multimodule_epistemic_into, load_module_file, extract_imports_from_ast, path_directory, use_path_to_file_path, visited_contains, ir_merge_epistemic_sections, empty_program, file_exists}
+use module_loader::{compile_multimodule_native, compile_multimodule_native_with_ir, load_multimodule_ir, load_multimodule_ir_traced, empty_load_multimodule_ir_trace, preflight_multimodule_frontend, load_multimodule_epistemic_into, load_module_file, extract_imports_from_ast, path_directory, use_path_to_file_path, visited_contains, ir_merge_epistemic_sections, empty_program, file_exists}
+use frontend_callsite_probe::{run_frontend_callsite_probe}
+use frontend_strategy_probe::{run_frontend_strategy_probe}
 use parser::parser::{parser_last_error_count}
+use ir::opt_strategy::{ir_opt_apply_strategy, ir_opt_find_return_vreg, ir_opt_max_label, ir_opt_max_vreg}
+use ir::lower::{ir_patch_validated_calls}
+use ir::profile::*
 
 // ============================================================================
 // STRING UTILITIES
@@ -262,6 +268,18 @@ fn run_probe_load_ir(args: ArgList, flag_index: i64) with IO, Mut, Panic, Div, A
     let parse_errors = parser_last_error_count()
     if ir_result.ok && parse_errors == 0 {
         println("probe_load_ir: ok")
+        print("probe_load_ir: functions=")
+        print_int(ir_result.module.fn_count)
+        print("\n")
+        var fi: i64 = 0
+        while fi < ir_result.module.fn_count {
+            print("probe_load_ir: fn=")
+            compiler_manifest_print_name(ir_result.module.functions[fi as usize].name)
+            print(" strategy=")
+            print(ir_strategy_name(ir_result.module.functions[fi as usize].compile_strategy))
+            print("\n")
+            fi = fi + 1
+        }
         return
     }
     println("probe_load_ir: fail")
@@ -274,6 +292,136 @@ fn run_probe_load_ir(args: ArgList, flag_index: i64) with IO, Mut, Panic, Div, A
         println("probe_load_ir: parser_errors=" + int_to_string(parse_errors))
     }
     panic("probe_load_ir failed")
+}
+
+fn run_probe_frontend_strategy(args: ArgList, flag_index: i64) with IO, Mut, Panic, Div, Alloc {
+    if flag_index + 1 >= args.len {
+        panic("probe_frontend_strategy: missing source file argument")
+    }
+    let source_path = arg_list_get(args, flag_index + 1)
+    run_frontend_strategy_probe(source_path)
+}
+
+fn run_probe_load_ir_trace(args: ArgList, flag_index: i64) with IO, Mut, Panic, Div, Alloc {
+    if flag_index + 1 >= args.len {
+        panic("probe_load_ir_trace: missing source file argument")
+    }
+    let source_path = arg_list_get(args, flag_index + 1)
+    println("probe_load_ir_trace: begin")
+    print("probe_load_ir_trace: source=")
+    print(source_path)
+    print("\n")
+    var trace = empty_load_multimodule_ir_trace()
+    let ir_result = load_multimodule_ir_traced(source_path, &! trace)
+    let parse_errors = parser_last_error_count()
+    print("probe_load_ir_trace: stage=")
+    print(trace.last_stage)
+    print(" modules=")
+    print_int(trace.loaded_modules)
+    print(" lowered=")
+    print_int(trace.lowered_modules)
+    print(" patched_calls=")
+    print_int(trace.patched_calls)
+    print(" fallback_insertions=")
+    print_int(trace.fallback_insertions)
+    print("\n")
+    print("probe_load_ir_trace: resolved=")
+    print_int(trace.resolved_modules)
+    print(" typechecked=")
+    print_int(trace.typechecked_modules)
+    print(" merged=")
+    print_int(trace.merged_modules)
+    print(" patched_functions=")
+    print_int(trace.patched_functions)
+    print(" last_module_index=")
+    print_int(trace.last_module_index)
+    print("\n")
+    if ir_result.ok && parse_errors == 0 {
+        println("probe_load_ir_trace: ok")
+        return
+    }
+    println("probe_load_ir_trace: fail")
+    if !ir_result.ok && str_len(ir_result.error_msg) > 0 {
+        print("probe_load_ir_trace: error=")
+        print(ir_result.error_msg)
+        print("\n")
+    }
+    if parse_errors > 0 {
+        println("probe_load_ir_trace: parser_errors=" + int_to_string(parse_errors))
+    }
+    panic("probe_load_ir_trace failed")
+}
+
+fn run_probe_ir_callsite(args: ArgList, flag_index: i64) with IO, Mut, Panic, Div, Alloc {
+    if flag_index + 3 >= args.len {
+        panic("probe_ir_callsite: expected <source.sio> <caller_fn> <callee_fn>")
+    }
+    let source_path = arg_list_get(args, flag_index + 1)
+    let caller_name_str = arg_list_get(args, flag_index + 2)
+    let callee_name_str = arg_list_get(args, flag_index + 3)
+    run_frontend_callsite_probe(source_path, caller_name_str, callee_name_str)
+}
+
+fn run_probe_ir_opt_strategy(args: ArgList, flag_index: i64) with IO, Mut, Panic, Div, Alloc {
+    if flag_index + 1 >= args.len {
+        panic("probe_ir_opt_strategy: missing source file argument")
+    }
+    let source_path = arg_list_get(args, flag_index + 1)
+    println("probe_ir_opt_strategy: begin")
+    print("probe_ir_opt_strategy: source=")
+    print(source_path)
+    print("\n")
+    let ir_result = load_multimodule_ir(source_path)
+    let parse_errors = parser_last_error_count()
+    if ir_result.ok && parse_errors == 0 {
+        println("probe_ir_opt_strategy: ok")
+        print("probe_ir_opt_strategy: functions=")
+        print_int(ir_result.module.fn_count)
+        print("\n")
+        var fi: i64 = 0
+        while fi < ir_result.module.fn_count {
+            let func = ir_result.module.functions[fi as usize]
+            print("probe_ir_opt_strategy: fn=")
+            compiler_manifest_print_name(func.name)
+            print(" strategy=")
+            print(ir_strategy_name(func.compile_strategy))
+            if func.compile_strategy == IR_STRATEGY_INSTRUMENTED {
+                let transformed = ir_opt_apply_strategy(func)
+                let dispatch_label = ir_opt_max_label(func) + 1
+                let instr_label = dispatch_label + 1
+                let merge_label = dispatch_label + 2
+                print(" transformed_instrs=")
+                print_int(func.instr_count)
+                print("->")
+                print_int(transformed.instr_count)
+                print(" labels=")
+                print_int(func.label_count)
+                print("->")
+                print_int(transformed.label_count)
+                print(" merge_result_vreg=")
+                print_int(ir_opt_find_return_vreg(func))
+                print(" dispatch_label=")
+                print_int(dispatch_label)
+                print(" instr_label=")
+                print_int(instr_label)
+                print(" merge_label=")
+                print_int(merge_label)
+            }
+            print("\n")
+            fi = fi + 1
+        }
+        return
+    }
+    println("probe_ir_opt_strategy: fail")
+    if !ir_result.ok && str_len(ir_result.error_msg) > 0 {
+        print("probe_ir_opt_strategy: error=")
+        print(ir_result.error_msg)
+        print("\n")
+    }
+    if parse_errors > 0 {
+        println("probe_ir_opt_strategy: parser_errors=" + int_to_string(parse_errors))
+    }
+    panic("probe_ir_opt_strategy failed")
 }
 
 fn run_probe_frontend(args: ArgList, flag_index: i64) with IO, Mut, Panic, Div, Alloc {
@@ -599,6 +747,9 @@ struct CompilerOptions {
     gpu_strict_parity: bool,
     // Sprint 28: Debug-mode witness enforcement
     debug_witnesses: bool,
+    // Sprint 47: .sprof profile-guided strategy promotion
+    use_profile: bool,
+    use_profile_path: string,
 }
 
 struct CompileResult {
@@ -655,8 +806,13 @@ fn print_help() with IO {
     println("  --probe-cc <source.sio>  Short alias for probe-compile-capture")
     println("  --probe-frontend <source.sio>  Probe parse/resolve/typecheck path")
     println("  --probe-epistemic-check <source.sio>  Probe epistemic parse/resolve/typecheck without manifest JSON")
+    println("  --probe-frontend-strategy <source.sio>  Probe parsed frontend strategy assignment on the fast IR lane")
     println("  --probe-load-ir <source.sio>  Probe parse/resolve/typecheck/IR lowering path")
+    println("  --probe-load-ir-trace <source.sio>  Probe traced IR lowering path with stage counters")
+    println("  --probe-ir-callsite <source.sio> <caller_fn> <callee_fn>  Probe lowered callsite hidden-arg behavior")
+    println("  --probe-ir-opt-strategy <source.sio>  Probe ir_opt_apply_strategy() on instrumented IR fns")
     println("  --probe-wasm-dispatch <source.sio> [out.wasm]  Probe wasm dispatch marker path")
+    println("  --use-profile <file>   Apply .sprof profile for strategy promotion")
     println("  -h, --help             Print this help message")
     println("")
     println("Examples:")
@@ -678,6 +834,8 @@ fn parse_options(args: ArgList) -> CompilerOptions with IO, Mut, Panic, Div {
     var gpu_binary_format = ""
     var gpu_strict_parity = false
     var debug_witnesses = false
+    var use_profile = false
+    var use_profile_path = ""
 
     var i: i64 = 0
     while i < args.len {
@@ -728,6 +886,13 @@ fn parse_options(args: ArgList) -> CompilerOptions with IO, Mut, Panic, Div {
         else if arg == "--debug-witnesses" {
             debug_witnesses = true
         }
+        else if arg == "--use-profile" {
+            i = i + 1
+            if i < args.len {
+                use_profile_path = arg_list_get(args, i)
+                use_profile = true
+            }
+        }
         else if arg == "-h" || arg == "--help" {
             print_help()
             exit_process(0)
@@ -758,6 +923,8 @@ fn parse_options(args: ArgList) -> CompilerOptions with IO, Mut, Panic, Div {
         gpu_binary_format: gpu_binary_format,
         gpu_strict_parity: gpu_strict_parity,
         debug_witnesses: debug_witnesses,
+        use_profile: use_profile,
+        use_profile_path: use_profile_path,
     }
 }
 
@@ -2067,7 +2234,7 @@ fn compile(opts: CompilerOptions) -> CompileResult with IO, Mut, Panic, Div, All
 
     // Preflight load catches parse/module-resolution failures early and avoids
     // driving native compilation on obviously invalid inputs.
-    let ir_result = load_multimodule_ir(opts.input_file)
+    var ir_result = load_multimodule_ir(opts.input_file)
     let preflight_parse_errors = parser_last_error_count()
     if !ir_result.ok || preflight_parse_errors > 0 {
         var preflight_errors = compile_errors_new()
@@ -2084,6 +2251,22 @@ fn compile(opts: CompilerOptions) -> CompileResult with IO, Mut, Panic, Div, All
             success: false,
             errors: preflight_errors,
             output: "",
+        }
+    }
+
+    // Sprint 47: apply .sprof profile-guided strategy promotion
+    if opts.use_profile {
+        let prof_size = file_size(opts.use_profile_path)
+        if prof_size > 0 {
+            let prof_bytes = read_file(opts.use_profile_path)
+            var prof_buf: [i8; 4096] = [0; 4096]
+            var pi: i64 = 0
+            while pi < prof_size && pi < 4096 {
+                prof_buf[pi as usize] = prof_bytes[pi as usize]
+                pi = pi + 1
+            }
+            let profile = sprof_parse(prof_buf, prof_size)
+            sprof_apply_promotion(&!ir_result.module, &profile)
         }
     }
 
@@ -2174,9 +2357,529 @@ fn compiler_main_test_int_to_string() -> bool with Mut, Panic, Div {
     int_to_string(i64_min) == "-9223372036854775808"
 }
 
+fn compiler_main_native_byte_u8(b: i8) -> i64 {
+    let x = b as i64
+    if x < 0 { x + 256 } else { x }
+}
+
+fn compiler_main_native_code_eq(a: CodeBuffer, b: CodeBuffer) -> bool {
+    if a.len != b.len { return false }
+    var i: i64 = 0
+    while i < a.len {
+        if compiler_main_native_byte_u8(a.bytes[i as usize]) != compiler_main_native_byte_u8(b.bytes[i as usize]) {
+            return false
+        }
+        i = i + 1
+    }
+    true
+}
+
+fn compiler_main_find_fn(m: IrModule, name: Name) -> i64 with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < m.fn_count {
+        if ir_name_eq(m.functions[i].name, name) {
+            return i
+        }
+        i = i + 1
+    }
+    -1
+}
+
+fn compiler_main_find_call_idx(f: IrFunction, callee_name: Name) -> i64 with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < f.instr_count {
+        if f.instrs[i].op == IrOpcode::IrCall &&
+           ir_name_eq(f.instrs[i].name, callee_name) {
+            return i
+        }
+        i = i + 1
+    }
+    -1
+}
+
+fn compiler_main_has_load_imm_dst_value(f: IrFunction, dst: i64, value: i64) -> bool with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < f.instr_count {
+        if f.instrs[i].op == IrOpcode::IrLoadImm &&
+           f.instrs[i].dst == dst &&
+           f.instrs[i].imm_i64 == value {
+            return true
+        }
+        i = i + 1
+    }
+    false
+}
+
+fn compiler_main_test_strategy_float_strict_modes_match() -> bool with Mut, Panic, Div {
+    let instr = ir_binop(2, 0, BinaryOp::OpAdd, 1)
+
+    var standard = compiler_new()
+    standard.current_strategy = IR_STRATEGY_STANDARD
+    standard.is_float_reg[0] = 1
+    standard.is_float_reg[1] = 1
+    standard = lower_ir_binop(standard, instr)
+
+    var precision = compiler_new()
+    precision.current_strategy = IR_STRATEGY_PRECISION_PRESERVING
+    precision.is_float_reg[0] = 1
+    precision.is_float_reg[1] = 1
+    precision = lower_ir_binop(precision, instr)
+
+    standard.is_float_reg[2] == 1 &&
+    precision.is_float_reg[2] == 1 &&
+    compiler_main_native_code_eq(standard.code, precision.code) &&
+    standard.code.len >= 19 &&
+    compiler_main_native_byte_u8(standard.code.bytes[3]) == 0xf8 &&
+    compiler_main_native_byte_u8(standard.code.bytes[15]) == 0xf0 &&
+    compiler_main_native_byte_u8(precision.code.bytes[3]) == 0xf8 &&
+    compiler_main_native_byte_u8(precision.code.bytes[15]) == 0xf0
+}
+
+fn compiler_main_test_strategy_float_aggressive_diverges() -> bool with Mut, Panic, Div {
+    let instr = ir_binop(2, 0, BinaryOp::OpAdd, 1)
+
+    var standard = compiler_new()
+    standard.current_strategy = IR_STRATEGY_STANDARD
+    standard.is_float_reg[0] = 1
+    standard.is_float_reg[1] = 1
+    standard = lower_ir_binop(standard, instr)
+
+    var aggressive = compiler_new()
+    aggressive.current_strategy = IR_STRATEGY_AGGRESSIVE
+    aggressive.is_float_reg[0] = 1
+    aggressive.is_float_reg[1] = 1
+    aggressive = lower_ir_binop(aggressive, instr)
+
+    standard.is_float_reg[2] == 1 &&
+    aggressive.is_float_reg[2] == 1 &&
+    !compiler_main_native_code_eq(standard.code, aggressive.code) &&
+    standard.code.len >= 19 &&
+    aggressive.code.len >= 19 &&
+    compiler_main_native_byte_u8(standard.code.bytes[3]) == 0xf8 &&
+    compiler_main_native_byte_u8(standard.code.bytes[15]) == 0xf0 &&
+    compiler_main_native_byte_u8(aggressive.code.bytes[3]) == 0xf0 &&
+    compiler_main_native_byte_u8(aggressive.code.bytes[15]) == 0xf8
+}
+
+fn compiler_main_one_arg(reg: i64) -> Option<Box<IrRegList>> with Alloc {
+    Some(Box::new(IrRegList { head: reg, tail: None }))
+}
+
+fn compiler_main_test_validated_chain_forwarding() -> bool with Mut, Panic, Div, Alloc {
+    var module = ir_empty_module()
+    module.fn_count = 2
+
+    var outer_fn = ir_empty_function()
+    outer_fn.name = make_name("outer_contested")
+    outer_fn.compile_strategy = IR_STRATEGY_INSTRUMENTED
+    outer_fn.param_count = 2
+    outer_fn.param_regs[0] = 0
+    outer_fn.param_regs[1] = 1
+    outer_fn.reg_count = 3
+    outer_fn.instr_count = 2
+    outer_fn.instrs[0] = ir_call(2, 1, make_name("inner_contested"), compiler_main_one_arg(1), 1)
+    outer_fn.instrs[1] = ir_return(2)
+
+    var inner_fn = ir_empty_function()
+    inner_fn.name = make_name("inner_contested")
+    inner_fn.compile_strategy = IR_STRATEGY_INSTRUMENTED
+    inner_fn.param_count = 2
+    inner_fn.param_regs[0] = 0
+    inner_fn.param_regs[1] = 1
+    inner_fn.reg_count = 2
+    inner_fn.instr_count = 1
+    inner_fn.instrs[0] = ir_return(1)
+
+    module.functions[0] = outer_fn
+    module.functions[1] = inner_fn
+    ir_patch_validated_calls(&! module)
+
+    let patched_outer = module.functions[0]
+    let call = patched_outer.instrs[0]
+    call.op == IrOpcode::IrCall &&
+    call.fn_id == 1 &&
+    call.arg_count == 2 &&
+    call.src1 == patched_outer.param_regs[0] &&
+    call.src2 == patched_outer.param_regs[1]
+}
+
+fn compiler_main_test_validated_chain_top_level_fallback() -> bool with Mut, Panic, Div, Alloc {
+    var module = ir_empty_module()
+    module.fn_count = 2
+
+    var main_fn = ir_empty_function()
+    main_fn.name = make_name("main")
+    main_fn.compile_strategy = IR_STRATEGY_STANDARD
+    main_fn.reg_count = 2
+    main_fn.instr_count = 3
+    main_fn.instrs[0] = ir_load_imm(0, 5)
+    main_fn.instrs[1] = ir_call(1, 1, make_name("outer_contested"), compiler_main_one_arg(0), 1)
+    main_fn.instrs[2] = ir_return(1)
+
+    var outer_fn = ir_empty_function()
+    outer_fn.name = make_name("outer_contested")
+    outer_fn.compile_strategy = IR_STRATEGY_INSTRUMENTED
+    outer_fn.param_count = 2
+    outer_fn.param_regs[0] = 0
+    outer_fn.param_regs[1] = 1
+    outer_fn.reg_count = 2
+    outer_fn.instr_count = 1
+    outer_fn.instrs[0] = ir_return(1)
+
+    module.functions[0] = main_fn
+    module.functions[1] = outer_fn
+    ir_patch_validated_calls(&! module)
+
+    let patched_main = module.functions[0]
+    let call = patched_main.instrs[2]
+    patched_main.instr_count == 4 &&
+    patched_main.reg_count == 3 &&
+    patched_main.instrs[0].op == IrOpcode::IrLoadImm &&
+    patched_main.instrs[0].imm_i64 == 1 &&
+    call.op == IrOpcode::IrCall &&
+    call.fn_id == 1 &&
+    call.arg_count == 2 &&
+    call.src1 == patched_main.instrs[0].dst &&
+    call.src2 == 0
+}
+
+fn compiler_main_test_ir_opt_dispatch_and_merge() -> bool with Mut, Panic, Div {
+    var func = ir_empty_function()
+    func.name = ir_name_from_bytes(109, 97, 105, 110, 4)
+    func.param_count = 1
+    func.param_regs[0] = 0
+    func.reg_count = 4
+    func.label_count = 3
+    func.compile_strategy = IR_STRATEGY_INSTRUMENTED
+    func.instr_count = 8
+    func.instrs[0] = ir_branch_false(0, 1)
+    func.instrs[1] = ir_load_imm(1, 11)
+    func.instrs[2] = ir_copy(3, 1)
+    func.instrs[3] = ir_jump(2)
+    func.instrs[4] = ir_label(1)
+    func.instrs[5] = ir_load_imm(2, 22)
+    func.instrs[6] = ir_copy(3, 2)
+    func.instrs[7] = ir_return(3)
+
+    let transformed = ir_opt_apply_strategy(func)
+    let dispatch_label = ir_opt_max_label(func) + 1
+    let instr_label = dispatch_label + 1
+    let merge_label = dispatch_label + 2
+
+    transformed.instr_count == 24 &&
+    transformed.label_count == 6 &&
+    transformed.instrs[0].op == IrOpcode::IrLabel &&
+    transformed.instrs[0].label_id == dispatch_label &&
+    transformed.instrs[1].op == IrOpcode::IrBranchTrue &&
+    transformed.instrs[1].src1 == 0 &&
+    transformed.instrs[1].label_id == 0 &&
+    transformed.instrs[2].op == IrOpcode::IrJump &&
+    transformed.instrs[2].label_id == instr_label &&
+    transformed.instrs[22].op == IrOpcode::IrLabel &&
+    transformed.instrs[22].label_id == merge_label &&
+    transformed.instrs[23].op == IrOpcode::IrReturn &&
+    transformed.instrs[23].src1 == 3
+}
+
+fn compiler_main_test_ir_opt_branch_targets_remapped() -> bool with Mut, Panic, Div {
+    var func = ir_empty_function()
+    func.name = ir_name_from_bytes(98, 114, 97, 110, 4)
+    func.param_count = 1
+    func.param_regs[0] = 0
+    func.reg_count = 4
+    func.label_count = 3
+    func.compile_strategy = IR_STRATEGY_INSTRUMENTED
+    func.instr_count = 8
+    func.instrs[0] = ir_branch_false(0, 1)
+    func.instrs[1] = ir_load_imm(1, 11)
+    func.instrs[2] = ir_copy(3, 1)
+    func.instrs[3] = ir_jump(2)
+    func.instrs[4] = ir_label(1)
+    func.instrs[5] = ir_load_imm(2, 22)
+    func.instrs[6] = ir_copy(3, 2)
+    func.instrs[7] = ir_return(3)
+
+    let transformed = ir_opt_apply_strategy(func)
+    let label_offset = ir_opt_max_label(func) + 1
+
+    var saw_remapped_branch = false
+    var saw_remapped_jump = false
+    var saw_remapped_label = false
+    var i: i64 = 0
+    while i < transformed.instr_count {
+        let instr = transformed.instrs[i as usize]
+        if instr.op == IrOpcode::IrBranchFalse && instr.label_id == 1 + label_offset {
+            saw_remapped_branch = true
+        }
+        if instr.op == IrOpcode::IrJump && instr.label_id == 2 + label_offset {
+            saw_remapped_jump = true
+        }
+        if instr.op == IrOpcode::IrLabel && instr.label_id == 1 + label_offset {
+            saw_remapped_label = true
+        }
+        i = i + 1
+    }
+
+    saw_remapped_branch && saw_remapped_jump && saw_remapped_label
+}
+
+fn compiler_main_test_ir_opt_expands_local_reg_range() -> bool with Mut, Panic, Div {
+    var func = ir_empty_function()
+    func.name = ir_name_from_bytes(97, 100, 100, 50, 4)
+    func.param_count = 2
+    func.param_regs[0] = 0
+    func.param_regs[1] = 1
+    func.reg_count = 3
+    func.compile_strategy = IR_STRATEGY_INSTRUMENTED
+    func.instr_count = 2
+    func.instrs[0] = ir_binop(2, 0, BinaryOp::OpAdd, 1)
+    func.instrs[1] = ir_return(2)
+
+    let transformed = ir_opt_apply_strategy(func)
+    var total_binops: i64 = 0
+    var saw_expanded_dst = false
+    var i: i64 = 0
+    while i < transformed.instr_count {
+        let instr = transformed.instrs[i as usize]
+        if instr.op == IrOpcode::IrBinOp && instr.bin_op == BinaryOp::OpAdd {
+            total_binops = total_binops + 1
+            if instr.dst >= func.reg_count {
+                saw_expanded_dst = true
+            }
+        }
+        i = i + 1
+    }
+
+    transformed.reg_count > func.reg_count && total_binops == 2 && saw_expanded_dst
+}
+
+// Sprint 44: verify IrProfCounter is injected in the instrumented path
+fn compiler_main_test_prof_counter_in_instrumented_path() -> bool with Mut, Panic, Div {
+    var func = ir_empty_function()
+    func.name = ir_name_from_bytes(112, 114, 111, 102, 4)
+    func.param_count = 1
+    func.param_regs[0] = 0
+    func.reg_count = 2
+    func.compile_strategy = IR_STRATEGY_INSTRUMENTED
+    func.prof_counter_id = 7
+    func.instr_count = 2
+    func.instrs[0] = ir_load_imm(1, 42)
+    func.instrs[1] = ir_return(1)
+
+    let transformed = ir_opt_apply_strategy(func)
+    let label_offset = ir_opt_max_label(func) + 1
+    let instr_label = label_offset + 1
+
+    var saw_prof_counter = false
+    var after_instr_label = false
+    var saw_instr_label = false
+    var i: i64 = 0
+    while i < transformed.instr_count {
+        let instr = transformed.instrs[i as usize]
+        if instr.op == IrOpcode::IrLabel && instr.label_id == instr_label {
+            saw_instr_label = true
+        }
+        if instr.op == IrOpcode::IrProfCounter {
+            saw_prof_counter = true
+            if saw_instr_label {
+                after_instr_label = true
+            }
+        }
+        i = i + 1
+    }
+    saw_prof_counter && after_instr_label
+}
+
+// Sprint 44: verify NO IrProfCounter appears in the fast path region
+fn compiler_main_test_prof_counter_absent_from_fast_path() -> bool with Mut, Panic, Div {
+    var func = ir_empty_function()
+    func.name = ir_name_from_bytes(102, 97, 115, 116, 4)
+    func.param_count = 1
+    func.param_regs[0] = 0
+    func.reg_count = 2
+    func.compile_strategy = IR_STRATEGY_INSTRUMENTED
+    func.prof_counter_id = 3
+    func.instr_count = 2
+    func.instrs[0] = ir_load_imm(1, 99)
+    func.instrs[1] = ir_return(1)
+
+    let transformed = ir_opt_apply_strategy(func)
+    let label_offset = ir_opt_max_label(func) + 1
+    let instr_label = label_offset + 1
+
+    // Fast path is between the dispatch jump (index 2) and the instr_label
+    var in_fast_path = false
+    var counter_in_fast_path = false
+    var i: i64 = 0
+    while i < transformed.instr_count {
+        let instr = transformed.instrs[i as usize]
+        if i == 3 { in_fast_path = true }
+        if instr.op == IrOpcode::IrLabel && instr.label_id == instr_label {
+            in_fast_path = false
+        }
+        if in_fast_path && instr.op == IrOpcode::IrProfCounter {
+            counter_in_fast_path = true
+        }
+        i = i + 1
+    }
+    !counter_in_fast_path
+}
+
+// Sprint 45: verify INC encoding (48 FF 05) emitted for IrProfCounter
+fn compiler_main_test_prof_counter_inc_encoding() -> bool with Mut, Panic, Div {
+    var nc = compiler_new()
+    let instr = ir_prof_counter(3)
+    nc = lower_instr(nc, instr)
+    // INC QWORD PTR [RIP+disp32]: 48 FF 05 <4 bytes disp32> = 7 bytes total
+    if nc.code.len != 7 { return false }
+    if nc.code.bytes[0] != 0x48 as i8 { return false }
+    if nc.code.bytes[1] != 0xFF as i8 { return false }
+    if nc.code.bytes[2] != 0x05 as i8 { return false }
+    true
+}
+
+// Sprint 45: verify .data relocation recorded with kind_code=3
+fn compiler_main_test_prof_counter_reloc_recorded() -> bool with Mut, Panic, Div {
+    var nc = compiler_new()
+    let instr = ir_prof_counter(3)
+    nc = lower_instr(nc, instr)
+    if nc.relocs.count != 1 { return false }
+    let reloc = nc.relocs.entries[0]
+    // kind_code must be 3 (.data RIP-relative)
+    if reloc.kind.kind_code != 3 { return false }
+    // target_index must be counter_id * 8 = 24
+    if reloc.target.target_index != 24 { return false }
+    true
+}
+
+// Sprint 46: verify __prof_dump function is emitted when prof_counter_count > 0
+fn compiler_main_test_prof_dump_emitted() -> bool with Mut, Panic, Div {
+    var nc = compiler_new()
+    // Simulate: 1 prof counter with fn_name "test" at .rodata offset 0
+    nc.prof_counter_count = 1
+    nc.prof_counter_names[0] = 0
+    // Create minimal module with 1 prof counter entry
+    var module = ir_empty_module()
+    module.prof_counter_count = 1
+    var pc_info = ir_empty_prof_counter_info()
+    pc_info.fn_id = 0
+    pc_info.counter_id = 0
+    module.prof_counters[0] = pc_info
+    // Emit the dump function
+    let before_len = nc.code.len
+    nc = emit_prof_dump_function(nc, &module)
+    // Verify: code was emitted (prologue + at least one syscall + epilogue)
+    if nc.code.len <= before_len { return false }
+    // Verify: function ends with ret (0xC3)
+    if nc.code.bytes[(nc.code.len - 1) as usize] != 0xC3 as i8 { return false }
+    true
+}
+
+// Sprint 46: verify __prof_dump writes to stderr (fd=2) and records relocations
+fn compiler_main_test_prof_dump_writes_stderr() -> bool with Mut, Panic, Div {
+    var nc = compiler_new()
+    nc.prof_counter_count = 1
+    nc.prof_counter_names[0] = 0
+    var module = ir_empty_module()
+    module.prof_counter_count = 1
+    var pc_info = ir_empty_prof_counter_info()
+    pc_info.fn_id = 0
+    pc_info.counter_id = 0
+    module.prof_counters[0] = pc_info
+    nc = emit_prof_dump_function(nc, &module)
+    // Verify: relocations recorded (at least 1 .rodata name + 1 .data counter)
+    if nc.relocs.count < 2 { return false }
+    // Check that we have both kind_code=2 (rodata) and kind_code=3 (data) relocs
+    var has_rodata = false
+    var has_data = false
+    var ri: i64 = 0
+    while ri < nc.relocs.count {
+        let r = nc.relocs.entries[ri as usize]
+        if r.kind.kind_code == 2 { has_rodata = true }
+        if r.kind.kind_code == 3 { has_data = true }
+        ri = ri + 1
+    }
+    if !has_rodata { return false }
+    if !has_data { return false }
+    true
+}
+
+// Sprint 47: verify sprof_parse correctly parses a .sprof text buffer
+fn compiler_main_test_sprof_parse() -> bool with Mut, Panic, Div {
+    // Construct a buffer with "[sprof]\ntest_fn 42\n"
+    var buf: [i8; 4096] = [0; 4096]
+    // [sprof]\n = 91 115 112 114 111 102 93 10
+    buf[0] = 91 as i8     // '['
+    buf[1] = 115 as i8    // 's'
+    buf[2] = 112 as i8    // 'p'
+    buf[3] = 114 as i8    // 'r'
+    buf[4] = 111 as i8    // 'o'
+    buf[5] = 102 as i8    // 'f'
+    buf[6] = 93 as i8     // ']'
+    buf[7] = 10 as i8     // '\n'
+    // test_fn 42\n = 116 101 115 116 95 102 110 32 52 50 10
+    buf[8] = 116 as i8    // 't'
+    buf[9] = 101 as i8    // 'e'
+    buf[10] = 115 as i8   // 's'
+    buf[11] = 116 as i8   // 't'
+    buf[12] = 95 as i8    // '_'
+    buf[13] = 102 as i8   // 'f'
+    buf[14] = 110 as i8   // 'n'
+    buf[15] = 32 as i8    // ' '
+    buf[16] = 52 as i8    // '4'
+    buf[17] = 50 as i8    // '2'
+    buf[18] = 10 as i8    // '\n'
+    let profile = sprof_parse(buf, 19)
+    // Verify: 1 entry parsed
+    if profile.entry_count != 1 { return false }
+    // Verify: name is "test_fn" (7 chars)
+    if profile.entries[0].fn_name.len != 7 { return false }
+    // Verify: count is 42
+    if profile.entries[0].count != 42 { return false }
+    true
+}
+
+// Sprint 47: verify .sprof lookup and aggressive promotion on a hot function
+fn compiler_main_test_sprof_promotion() -> bool with Mut, Panic, Div {
+    var profile = sprof_empty_profile()
+    var entry = sprof_empty_entry()
+
+    var hot_name = empty_name()
+    hot_name.buf[0] = 104 as i8
+    hot_name.buf[1] = 111 as i8
+    hot_name.buf[2] = 116 as i8
+    hot_name.len = 3
+
+    entry.fn_name = hot_name
+    entry.count = 1500
+    profile.entries[0] = entry
+    profile.entry_count = 1
+
+    let count = sprof_lookup(&profile, &hot_name)
+    if count != 1500 { return false }
+
+    var miss = empty_name()
+    miss.buf[0] = 120 as i8   // 'x'
+    miss.len = 1
+    let miss_count = sprof_lookup(&profile, &miss)
+    if miss_count != -1 { return false }
+
+    var module = ir_empty_module()
+    var hot_fn = ir_empty_function()
+    hot_fn.name = hot_name
+    hot_fn.compile_strategy = IR_STRATEGY_STANDARD
+    module.functions[0] = hot_fn
+    module.fn_count = 1
+
+    sprof_apply_promotion(&! module, &profile)
+    if module.functions[0].compile_strategy != IR_STRATEGY_AGGRESSIVE { return false }
+
+    true
+}
+
 fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div {
     var passed: i64 = 0
-    let total: i64 = 5
+    let total: i64 = 19
 
     println("=== compiler/main.sio self-tests ===")
 
@@ -2213,6 +2916,104 @@ fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div {
         passed = passed + 1
     } else {
         println("  FAIL: T05 int_to_string edge cases")
+    }
+
+    if compiler_main_test_strategy_float_strict_modes_match() {
+        println("  T06 OK: standard and precision float lowering match")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T06 standard and precision float lowering match")
+    }
+
+    if compiler_main_test_strategy_float_aggressive_diverges() {
+        println("  T07 OK: aggressive float lowering diverges")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T07 aggressive float lowering diverges")
+    }
+
+    if compiler_main_test_ir_opt_dispatch_and_merge() {
+        println("  T08 OK: ir_opt dispatch and merge layout")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T08 ir_opt dispatch and merge layout")
+    }
+
+    if compiler_main_test_ir_opt_branch_targets_remapped() {
+        println("  T09 OK: ir_opt remaps cloned branch targets")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T09 ir_opt remaps cloned branch targets")
+    }
+
+    if compiler_main_test_validated_chain_forwarding() {
+        println("  T10 OK: validated chain forwards caller flag")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T10 validated chain forwards caller flag")
+    }
+
+    if compiler_main_test_validated_chain_top_level_fallback() {
+        println("  T11 OK: validated chain keeps top-level fallback")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T11 validated chain keeps top-level fallback")
+    }
+
+    if compiler_main_test_prof_counter_in_instrumented_path() {
+        println("  T12 OK: prof counter in instrumented path")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T12 prof counter in instrumented path")
+    }
+
+    if compiler_main_test_prof_counter_absent_from_fast_path() {
+        println("  T13 OK: prof counter absent from fast path")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T13 prof counter absent from fast path")
+    }
+
+    if compiler_main_test_prof_counter_inc_encoding() {
+        println("  T14 OK: prof counter INC encoding")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T14 prof counter INC encoding")
+    }
+
+    if compiler_main_test_prof_counter_reloc_recorded() {
+        println("  T15 OK: prof counter reloc recorded")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T15 prof counter reloc recorded")
+    }
+
+    if compiler_main_test_prof_dump_emitted() {
+        println("  T16 OK: prof dump emitted")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T16 prof dump emitted")
+    }
+
+    if compiler_main_test_prof_dump_writes_stderr() {
+        println("  T17 OK: prof dump writes stderr")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T17 prof dump writes stderr")
+    }
+
+    if compiler_main_test_sprof_parse() {
+        println("  T18 OK: sprof parse")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T18 sprof parse")
+    }
+
+    if compiler_main_test_sprof_promotion() {
+        println("  T19 OK: sprof promotion")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T19 sprof promotion")
     }
 
     println("")
@@ -2252,14 +3053,26 @@ fn main() with IO, Mut, Panic, Div, Alloc {
         } else if mode == "--probe-compile-capture" || mode == "--probe-cc" || starts_with(mode, "--probe-c") {
             run_probe_compile_capture(args, arg_idx)
             return
+        } else if mode == "--probe-frontend-strategy" || starts_with(mode, "--probe-front-strat") {
+            run_probe_frontend_strategy(args, arg_idx)
+            return
         } else if mode == "--probe-frontend" || starts_with(mode, "--probe-front") {
             run_probe_frontend(args, arg_idx)
             return
         } else if mode == "--probe-epistemic-check" || starts_with(mode, "--probe-epi") {
             run_probe_epistemic_check(args, arg_idx)
             return
+        } else if mode == "--probe-load-ir-trace" || starts_with(mode, "--probe-load-ir-t") {
+            run_probe_load_ir_trace(args, arg_idx)
+            return
         } else if mode == "--probe-load-ir" || starts_with(mode, "--probe-load") {
             run_probe_load_ir(args, arg_idx)
+            return
+        } else if mode == "--probe-ir-callsite" || starts_with(mode, "--probe-ir-call") {
+            run_probe_ir_callsite(args, arg_idx)
+            return
+        } else if mode == "--probe-ir-opt-strategy" || starts_with(mode, "--probe-ir-opt") {
+            run_probe_ir_opt_strategy(args, arg_idx)
             return
         } else if mode == "--probe-wasm-dispatch" || starts_with(mode, "--probe-wasm") {
             run_probe_wasm_dispatch(args, arg_idx)

@@ -19,6 +19,7 @@ Artifacts covered:
 - `artifacts/omega/gpu_codegen_parity.v1.json`
 - `artifacts/omega/gpu_binary_attestation.v1.json`
 - `artifacts/omega/gpu_runtime_attest_gate.v1.json`
+- `artifacts/omega/gpu_public_contract.v1.json`
 - `artifacts/omega/gpu_comprehensive_run.v1.json`
 
 Primary scripts:
@@ -26,6 +27,7 @@ Primary scripts:
 - `scripts/omega/omega_gpu_codegen_parity_gate.sh`
 - `scripts/omega/omega_gpu_binary_attest_gate.sh`
 - `scripts/omega/omega_gpu_runtime_attest_gate.sh`
+- `scripts/omega/omega_gpu_public_contract_gate.sh`
 - `scripts/omega/omega_gpu_comprehensive_run.sh`
 
 ## Shared Status Semantics
@@ -52,6 +54,9 @@ Canonical blocker classes:
 - `pinned_version_mismatch`
 - `gpu_backend_unavailable`
 - `runtime_test_fail`
+- `public_contract_mismatch`
+- `public_example_fail`
+- `public_ptx_emit_fail`
 - `native_lane_missing`
 - `native_lane_compile_fail`
 - `native_lane_runtime_fail`
@@ -113,10 +118,36 @@ The runtime attestation contract now includes:
 This keeps runtime proof tied to concrete codegen and binary materialization
 artifacts.
 
+## `gpu_public_contract.v1.json`
+
+Purpose: prove the shipped GPU profile still matches the public docs and
+examples instead of relying only on backend internals.
+
+Required top-level fields:
+
+- `schema = "sounio.omega.gpu_public_contract.v1"`
+- `generated_at_utc`
+- `mode`
+- `status_summary`
+- `reason`
+- `profile` with `souc_path`, `souc_version`, and `public_surface`
+- `checks[]` covering:
+  - `souc info` reports GPU codegen enabled and JIT disabled
+  - `build --help` advertises `--backend gpu`
+  - public GPU examples pass `check`
+  - public GPU examples emit PTX through `build --backend gpu`
+  - `GPU.launch` / `GPU.sync` check successfully
+  - unresolved `gpu.thread_id` / `gpu.alloc` remain classified as not-public in
+    the checked artifact
+- `support_evidence` linking the parity, binary-attestation, and runtime
+  attestation artifacts
+- `blockers[]`
+
 ## `gpu_comprehensive_run.v1.json`
 
 Purpose: aggregate native-lane execution status, GPU codegen/attestation/runtime
-gates, and real-L4 benchmark outcomes into one optimization-ready run artifact.
+gates, the public-contract gate, and real-L4 benchmark outcomes into one
+optimization-ready run artifact.
 
 Required top-level fields:
 

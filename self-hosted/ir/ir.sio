@@ -316,6 +316,10 @@ enum IrOpcode {
     //   Codegen (debug): CMP/UCOMISD + conditional jump over UD2 trap
     //   Codegen (release): not emitted (zero cost)
     IrDebugGuard,
+    // Profiling counter increment — slow-path entry (Sprint 44)
+    //   imm_i64 = counter_id (index into IrModule.prof_counters)
+    //   Native lowering: 7-byte NOP placeholder (Sprint 44), ADD [RIP+disp32],1 (Sprint 45)
+    IrProfCounter,
 }
 
 struct IrRegList {
@@ -341,6 +345,32 @@ struct IrInstr {
     arg_count: i64,
 }
 
+// ============================================================================
+// Compile strategy constants — type+effect-directed compilation mode
+// ============================================================================
+//
+// Selected during AST→IR lowering based on the function's return type
+// and effect signature.  Guides native codegen behaviour: aggressive
+// paths for validated data, precision-preserving paths for uncertain
+// data, dual-path instrumented codegen for contested/robust data.
+
+let IR_STRATEGY_STANDARD: i64 = 0           // default — standard native compilation
+let IR_STRATEGY_AGGRESSIVE: i64 = 1         // Validated<T> — full optimisation, SIMD, float reassoc
+let IR_STRATEGY_PRECISION_PRESERVING: i64 = 2 // Knowledge<T> — no float reassociation, strict FP
+let IR_STRATEGY_INSTRUMENTED: i64 = 3       // Contest<T>/Robust<T> — dual-path: fast + instrumented
+let IR_STRATEGY_GPU_KERNEL: i64 = 4         // with GPU — GPU kernel extraction
+let IR_STRATEGY_PROBABILISTIC: i64 = 5      // with Prob — trace-compatible for MCMC/VI
+
+fn ir_strategy_name(s: i64) -> string {
+    if s == IR_STRATEGY_STANDARD { "standard" }
+    else if s == IR_STRATEGY_AGGRESSIVE { "aggressive" }
+    else if s == IR_STRATEGY_PRECISION_PRESERVING { "precision_preserving" }
+    else if s == IR_STRATEGY_INSTRUMENTED { "instrumented" }
+    else if s == IR_STRATEGY_GPU_KERNEL { "gpu_kernel" }
+    else if s == IR_STRATEGY_PROBABILISTIC { "probabilistic" }
+    else { "unknown" }
+}
+
 struct IrFunction {
     name: Name,
     instrs: [IrInstr; 128],
@@ -349,6 +379,15 @@ struct IrFunction {
     label_count: i64,
     param_count: i64,
     param_regs: [i64; 64],
+    compile_strategy: i64,
+    prof_counter_id: i64,
+}
+
+// Sprint 44: profiling counter metadata — one per instrumented function
+struct IrProfCounterInfo {
+    fn_id: i64,
+    fn_name: Name,
+    counter_id: i64,
 }
 
 struct IrPolicyRequirementInfo {
@@ -1383,6 +1422,8 @@ struct IrModule {
     string_table: [Name; 4096],
     string_count: i64,
     epistemic: IrEpistemicSection,
+    prof_counters: [IrProfCounterInfo; 64],
+    prof_counter_count: i64,
 }
 
 struct IrEnvBinding {
@@ -1397,10 +1438,25 @@ struct IrEnvList {
     tail: Option<Box<IrEnvList>>,
 }
 
+struct IrValidatedPatchStats {
+    patched_functions: i64,
+    patched_calls: i64,
+    fallback_insertions: i64,
+}
+
+fn ir_empty_validated_patch_stats() -> IrValidatedPatchStats {
+    IrValidatedPatchStats {
+        patched_functions: 0,
+        patched_calls: 0,
+        fallback_insertions: 0,
+    }
+}
+
 struct IrLowerResult {
     module: IrModule,
     error_count: i64,
     had_error: bool,
+    patch_stats: IrValidatedPatchStats,
 }
 
 // ============================================================================
@@ -1503,6 +1559,10 @@ fn ir_mangle_method_name(type_name: Name, method_name: Name) -> Name with Mut, P
 
 fn ir_empty_name() -> Name {
     Name { buf: [0; 128], len: 0 }
+}
+
+fn ir_empty_prof_counter_info() -> IrProfCounterInfo {
+    IrProfCounterInfo { fn_id: -1, fn_name: ir_empty_name(), counter_id: -1 }
 }
 
 fn ir_name_eq(a: Name, b: Name) -> bool with Mut, Panic, Div {
@@ -2339,6 +2399,28 @@ fn ir_debug_guard(metric_reg: i64, threshold: f64, cmp_op: i64, req_idx: i64, po
     }
 }
 
+// Sprint 44: profiling counter increment — instrumented slow-path entry
+fn ir_prof_counter(counter_id: i64) -> IrInstr {
+    let base = ir_instr_new(IrOpcode::IrProfCounter)
+    IrInstr {
+        op: base.op,
+        dst: base.dst,
+        src1: base.src1,
+        src2: base.src2,
+        imm_i64: counter_id,
+        imm_f64: base.imm_f64,
+        label_id: base.label_id,
+        fn_id: base.fn_id,
+        field_idx: base.field_idx,
+        imm_flags: base.imm_flags,
+        bin_op: base.bin_op,
+        un_op: base.un_op,
+        name: base.name,
+        call_args: base.call_args,
+        arg_count: base.arg_count,
+    }
+}
+
 // Check if a name is "measure" (for IR lowering intercept)
 // "measure" = m(109) e(101) a(97) s(115) u(117) r(114) e(101), len=7
 fn ir_name_is_measure(n: Name) -> bool {
@@ -2584,6 +2666,8 @@ fn ir_empty_function() -> IrFunction {
         label_count: 0,
         param_count: 0,
         param_regs: [IR_INVALID_REG; 64],
+        compile_strategy: IR_STRATEGY_STANDARD,
+        prof_counter_id: -1,
     }
 }
 
@@ -2594,5 +2678,7 @@ fn ir_empty_module() -> IrModule {
         string_table: [ir_empty_name(); 4096],
         string_count: 0,
         epistemic: ir_empty_epistemic_section(),
+        prof_counters: [ir_empty_prof_counter_info(); 64],
+        prof_counter_count: 0,
     }
 }

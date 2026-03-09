@@ -9,114 +9,136 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.guide.minimum-
 
 # Minimum Viable Sounio (Current Contract)
 
-This guide is intentionally conservative: it describes what is currently
-validated by repository gates, not long-term roadmap intent.
+This guide is intentionally conservative. It describes what is currently validated by committed artifacts and repository gates, not the full ambition implied by the source tree.
 
-Snapshot date: **2026-03-02**
+Snapshot date: **2026-03-07**
 
-## What Is Reliable Right Now
+## What is reliable right now
 
-1. Compiler/runtime path needed to execute `tests/stdlib` through:
-- `bash scripts/run_stdlib_e2e.sh`
-- `bash scripts/stdlib_science_pipeline_gate.sh`
-- `bash scripts/stdlib_reliability_gate.sh`
+### 1. Checked compiler entry point
 
-2. STDLIB reliability lane:
-- E2E totals: `pass=71 fail=0 skip=9 total=80`
-- Gate status: `status_summary=pass`
-- Artifact: `artifacts/stdlib/stdlib_reliability_status.v1.json`
+For user-facing docs, the safest entry point is the checked JIT artifact:
 
-3. STDLIB science lane (required in fast/full gates):
-- Lanes: `fmri`, `darwin_pbpk`
-- fMRI lane is real executable NIfTI-driven (`tests/stdlib/fmri/test_pipeline_real_e2e.sio`)
-- Totals: `pass=2 fail=0 not_run=0 total=2`
-- Gate status: `status_summary=pass`
-- Artifacts:
-  - `artifacts/stdlib/stdlib_science_pipeline_status.v1.json`
-  - `tests/fixtures/fmri/fixture_manifest.v1.json`
-  - `tests/fixtures/fmri/pipeline_golden.v1.json`
-- Policy: no `//@ ignore` is allowed in `tests/stdlib/fmri/` and `tests/stdlib/darwin_pbpk/`.
-- Runtime regression telemetry is always recorded in `runtime_regressions` from committed probes under `tests/stdlib/runtime_regression/`.
-- Runtime provenance is always recorded in `runtime_provenance` (`souc_bin`, `souc_version`, `pinned_version_expected`).
-- Local default enforcement is soft; required CI full gate runs strict mode via `STDLIB_RUNTIME_REGRESSION_STRICT=1`.
-- Strict mode is fail-closed by design and requires probe pass for CI success.
+```bash
+export SOUC_BIN="$(pwd)/artifacts/omega/souc-bin/souc-linux-x86_64-jit"
+export SOUNIO_STDLIB_PATH="$(pwd)/stdlib"
 
-4. STDLIB hyper execution lane (required by reliability gate):
-- Gate script: `bash scripts/stdlib_hyper_execution_gate.sh`
-- Lanes: `nn`, `onn`, `qnn`, `snn`, `math` (required run-pass tests)
-- Totals: `pass=5 fail=0 skip=0 total=5`
-- Gate status: `status_summary=pass`
-- Artifact: `artifacts/stdlib/stdlib_hyper_execution_status.v1.json`
-- Policy: no `//@ ignore` in required hyper tests.
+"$SOUC_BIN" --version
+"$SOUC_BIN" info
+```
 
-5. GPU runtime attestation lane (required in CI full gate):
-- Codegen parity gate: `bash scripts/omega/omega_gpu_codegen_parity_gate.sh`
-- Binary attestation gate: `bash scripts/omega/omega_gpu_binary_attest_gate.sh`
-- Gate script: `bash scripts/omega/omega_gpu_runtime_attest_gate.sh`
-- Artifacts:
-  - `artifacts/omega/gpu_codegen_parity.v1.json`
-  - `artifacts/omega/gpu_binary_attestation.v1.json`
-- Artifact: `artifacts/omega/gpu_runtime_attest_gate.v1.json`
-- Modes:
-  - local default: `OMEGA_GPU_RUNTIME_GATE_MODE=auto`
-  - required CI: `OMEGA_GPU_RUNTIME_GATE_MODE=required`
-- In required mode, any non-pass (`fail` or `not_run`) is fail-closed.
-- Canonical pinned `souc` version is sourced from `scripts/omega/omega_resolve_souc_bin.sh` (with optional `SOUNIO_SOUC_VERSION` override).
-- Blockers are normalized as: `target_unavailable`, `isa_encode_unsupported`, `binary_pack_fail`, `driver_reject`, `parity_fail`, `perf_regression`, `attestation_invalid`, `ssh_unreachable`, `remote_env_missing`, `pinned_version_mismatch`, `gpu_backend_unavailable`, `runtime_test_fail`.
+Current checked-artifact status:
 
-4. Module/test workflow:
-- `use`-based imports work for currently active module surfaces.
-- Not every module path is callable; some are stubs or disabled files.
+- version `1.0.0-beta.4`
+- Cranelift JIT enabled
+- LLVM and GPU codegen disabled
+- LSP, SMT, ontology, distributed, and package-manager features disabled
 
-## STDLIB Contract Levels
+There is also a separate checked GPU profile at
+`artifacts/omega/souc-bin/souc-linux-x86_64-gpu`. That profile is real and
+useful, but it is not the conservative default because it describes a different
+backend contract:
 
-Use these levels when deciding how to test module behavior:
+- GPU codegen enabled
+- Cranelift JIT disabled
+- public PTX emission via `build --backend gpu`
+
+### 2. STDLIB reliability lane
+
+Source: `artifacts/stdlib/stdlib_reliability_status.v1.json`
+
+- totals: `pass=81 fail=0 skip=1 total=82`
+- gate status: `status_summary=pass`
+- inventory:
+  - `604` `.sio` files
+  - `111` disabled files
+  - `44` stub module files
+  - `92` active module entrypoints
+
+### 3. STDLIB science pipeline
+
+Source: `artifacts/stdlib/stdlib_science_pipeline_status.v1.json`
+
+- required lanes: `fmri`, `darwin_pbpk`
+- totals: `pass=2 fail=0 not_run=0 total=2`
+- gate status: `status_summary=pass`
+
+Additional reliability detail from `artifacts/stdlib/stdlib_reliability_status.v1.json`:
+
+- runtime regression enforcement is `soft` locally
+- runtime regression summary currently shows `fail`
+- recorded runtime regression failures: `4`
+- strict enforcement should still be treated as release-blocking when enabled
+
+### 4. STDLIB hyper execution lane
+
+Source: `artifacts/stdlib/stdlib_hyper_execution_status.v1.json`
+
+- totals: `pass=7 fail=0 skip=0 total=7`
+- required lanes:
+  - `nn`
+  - `onn`
+  - `qnn`
+  - `snn`
+  - `spnn`
+  - `quantnn`
+  - `math`
+- gate status: `status_summary=pass`
+
+### 5. Module and test workflow
+
+- `use`-based imports work for active module surfaces.
+- Not every module path is callable. The repo contains active entrypoints, stub surfaces, and disabled files at the same time.
+- `tests/run-pass/` and `tests/compile-fail/` are better evidence than directory names when deciding whether a language or stdlib feature is reliable.
+
+## Contract levels for stdlib claims
+
+Use these labels when describing support:
 
 1. `active_callable`
-- Callable APIs verified with `//@ run-pass` tests.
+   Verified with executable run-pass coverage.
 
 2. `stub_surface`
-- Module entrypoint exists but callable API is not reliable/complete.
-- Use `//@ check-only` surface tests.
+   Module entrypoint exists, but callable API should not be described as reliable. Check-only or import-contract tests are the right evidence.
 
 3. `disabled_file`
-- Implementation appears as `*.sio.disabled`.
-- Do not write callable expectations against that lane.
+   Implementation is disabled or parked. Do not describe it as available.
 
-## Important Clarification
+## What not to infer
 
-The module system is available for active surfaces, but should not be treated as
-"all stdlib modules are fully implemented." Reliability now depends on current
-active exports, and the gate is the source of truth.
+- Do not infer support from a directory existing under `stdlib/` or `self-hosted/`.
+- Do not infer runtime maturity from `check` alone.
+- Do not describe LLVM, GPU, or LSP support for a checked artifact unless `souc info` for that specific artifact confirms it.
 
-## How To Verify Before Claiming Support
+## Minimal verification sequence
 
 Run from repository root:
 
 ```bash
-bash scripts/scan_stdlib.sh --json-out artifacts/stdlib/stdlib_inventory.v1.json
-OMEGA_GPU_CODEGEN_PARITY_MODE=required bash scripts/omega/omega_gpu_codegen_parity_gate.sh
-OMEGA_GPU_BINARY_ATTEST_MODE=required bash scripts/omega/omega_gpu_binary_attest_gate.sh
-OMEGA_GPU_RUNTIME_GATE_MODE=required bash scripts/omega/omega_gpu_runtime_attest_gate.sh
+export SOUC_BIN="$(pwd)/artifacts/omega/souc-bin/souc-linux-x86_64-jit"
+export SOUNIO_STDLIB_PATH="$(pwd)/stdlib"
+
+"$SOUC_BIN" check examples/hello.sio
+"$SOUC_BIN" check tests/run-pass/covid_2020_kernel.sio
+"$SOUC_BIN" check tests/run-pass/vancomycin_propagation.sio
+"$SOUC_BIN" check tests/compile-fail/vancomycin_low_conf.sio
+
 bash scripts/stdlib_hyper_execution_gate.sh
-STDLIB_RUNTIME_REGRESSION_STRICT=1 bash scripts/stdlib_science_pipeline_gate.sh
-STDLIB_RUNTIME_REGRESSION_STRICT=1 bash scripts/stdlib_reliability_gate.sh
-bash scripts/omega/omega_gpu_codegen_parity_gate.sh
-bash scripts/omega/omega_gpu_binary_attest_gate.sh
-bash scripts/omega/omega_gpu_runtime_attest_gate.sh
-bash scripts/stdlib_hyper_execution_gate.sh
-bash scripts/run_stdlib_e2e.sh
 bash scripts/stdlib_science_pipeline_gate.sh
 bash scripts/stdlib_reliability_gate.sh
 ```
 
 Then read:
-- `artifacts/stdlib/stdlib_inventory.v1.json`
-- `artifacts/stdlib/stdlib_science_pipeline_status.v1.json`
+
 - `artifacts/stdlib/stdlib_hyper_execution_status.v1.json`
+- `artifacts/stdlib/stdlib_science_pipeline_status.v1.json`
 - `artifacts/stdlib/stdlib_reliability_status.v1.json`
+
+If a required gate is not `pass`, treat the affected lane as not reliable.
+
+For GPU-specific work, also read:
+
 - `artifacts/omega/gpu_codegen_parity.v1.json`
 - `artifacts/omega/gpu_binary_attestation.v1.json`
 - `artifacts/omega/gpu_runtime_attest_gate.v1.json`
-
-If the gate is not `pass`, treat the affected lanes as not reliable.
+- `artifacts/omega/gpu_public_contract.v1.json`

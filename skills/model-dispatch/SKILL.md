@@ -30,7 +30,7 @@ Enable manually on: check/epistemic.sio, check/causal.sio, hlir/ir.sio type enum
 
 ## Fallback Chain
 
-Opus 4.6 -> Sonnet 4.6 -> GPT-5.3-Codex (for implementation). Gemini has no substitute for codebase sweeps (use manual grep).
+Opus 4.6 -> GPT-5.3-Codex -> Gemini 3.1 Pro -> Sonnet 4.6. GLM-5 for cross-checks.
 
 ## Targets
 

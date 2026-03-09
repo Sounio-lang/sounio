@@ -1,28 +1,17 @@
 // self-hosted::hlir::opt_strategy — Dual-path codegen for StrategyInstrumented
 //
-// When a function returns Contest<T> or Robust<T>, the compile strategy is
-// StrategyInstrumented.  This module transforms a single-block function into
-// a four-block diamond:
+// Contest<T>/Robust<T> functions use StrategyInstrumented. We lower them into
+// a dispatch block plus two copies of the whole CFG:
 //
-//   dispatch_block ──┬── fast_block ──┬── merge_block
-//                    └── instr_block ─┘
+//   dispatch -> fast CFG -> merge
+//            -> instr CFG -> merge
 //
-// The dispatch block reads a synthetic __validated: i64 parameter and branches:
-//   __validated != 0 → fast_block   (zero-overhead path)
-//   __validated == 0 → instr_block  (interval-instrumented path)
-//
-// The instrumented path wraps every float binary op with lo/hi interval bounds.
-
-// ============================================================================
-// CompileStrategy — mirrors hlir_compute_strategy in lower.sio
-// ============================================================================
+// The fast CFG preserves the original IDs. The instrumented CFG remaps every
+// non-parameter SSA value and every block ID so both copies can coexist.
+// Every cloned return is rewritten to branch into a common merge/exit block.
 
 let STRATEGY_DEFAULT: i64 = 0
 let STRATEGY_INSTRUMENTED: i64 = 1
-
-// ============================================================================
-// StrategyHints — controls which optimisations to apply
-// ============================================================================
 
 struct StrategyHints {
     emit_dual_path: bool,
@@ -43,221 +32,399 @@ fn strategy_hints_instrumented() -> StrategyHints {
     }
 }
 
-// ============================================================================
-// hlir_strategy_needs_instrumentation — predicate
-// ============================================================================
+fn hlir_strategy_hints_for_compile_strategy(strategy: CompileStrategy) -> StrategyHints {
+    match strategy {
+        CompileStrategy::StrategyInstrumented => strategy_hints_instrumented(),
+        _ => strategy_hints_default(),
+    }
+}
 
 fn hlir_strategy_needs_instrumentation(hints: StrategyHints) -> bool {
     hints.strategy == STRATEGY_INSTRUMENTED
 }
 
-// ============================================================================
-// hlir_opt_clone_instrs — clone a block's instructions with ValueId offset
-// ============================================================================
-
-fn hlir_opt_clone_instrs(src: HlirBlock, id_offset: i64) -> HlirBlock with Mut, Panic {
-    var dst = hlir_block_new(src.id + id_offset, src.label)
+fn hlir_opt_is_param_value(func: HlirFunction, value_id: i64) -> bool {
     var i: i64 = 0
-    while i < src.instr_count {
-        var instr = src.instrs[i as usize]
-        // Offset all value IDs so they don't collide with the fast path
-        if instr.result != HLIR_INVALID_VALUE {
-            instr.result = instr.result + id_offset
+    while i < func.param_count {
+        if func.params[i as usize].value_id == value_id {
+            return true
         }
-        if instr.src != HLIR_INVALID_VALUE {
-            instr.src = instr.src + id_offset
-        }
-        if instr.lhs != HLIR_INVALID_VALUE {
-            instr.lhs = instr.lhs + id_offset
-        }
-        if instr.rhs != HLIR_INVALID_VALUE {
-            instr.rhs = instr.rhs + id_offset
-        }
-        if instr.store_ptr != HLIR_INVALID_VALUE {
-            instr.store_ptr = instr.store_ptr + id_offset
-        }
-        if instr.store_value != HLIR_INVALID_VALUE {
-            instr.store_value = instr.store_value + id_offset
-        }
-        if instr.call_func != HLIR_INVALID_VALUE {
-            instr.call_func = instr.call_func + id_offset
-        }
-        if instr.base != HLIR_INVALID_VALUE {
-            instr.base = instr.base + id_offset
-        }
-        if instr.index != HLIR_INVALID_VALUE {
-            instr.index = instr.index + id_offset
-        }
-        if instr.cast_value != HLIR_INVALID_VALUE {
-            instr.cast_value = instr.cast_value + id_offset
-        }
-        // Offset call args
-        var j: i64 = 0
-        while j < instr.call_arg_count {
-            if instr.call_args[j as usize] != HLIR_INVALID_VALUE {
-                instr.call_args[j as usize] = instr.call_args[j as usize] + id_offset
-            }
-            j = j + 1
-        }
-        dst = hlir_block_append_instr(dst, instr)
         i = i + 1
     }
-    dst
+    false
 }
 
-// ============================================================================
-// hlir_opt_wrap_float_interval — for a float binary op, emit interval triple
-//
-// Given instruction: result = lhs OP rhs
-// Emits:
-//   result        = lhs OP rhs          (original)
-//   result_lo     = lhs OP rhs          (lo-bound copy, same op)
-//   result_hi     = lhs OP rhs          (hi-bound copy, same op)
-//
-// This is structural: the lo/hi copies use the same operands.  A production
-// implementation would subtract/add epsilon for rounding-aware intervals.
-// ============================================================================
+fn hlir_opt_has_local(func: HlirFunction, value_id: i64) -> bool {
+    var i: i64 = 0
+    while i < func.local_count {
+        if func.locals[i as usize].value_id == value_id {
+            return true
+        }
+        i = i + 1
+    }
+    false
+}
+
+fn hlir_opt_remap_value(func: HlirFunction, value_id: i64, value_offset: i64) -> i64 {
+    if value_id == HLIR_INVALID_VALUE || value_id == HLIR_UNIT_VALUE {
+        return value_id
+    }
+    if value_offset == 0 {
+        return value_id
+    }
+    if hlir_opt_is_param_value(func, value_id) {
+        return value_id
+    }
+    if hlir_opt_has_local(func, value_id) {
+        return value_id + value_offset
+    }
+    value_id
+}
+
+fn hlir_opt_remap_block(block_id: i64, block_offset: i64) -> i64 {
+    if block_id == HLIR_INVALID_BLOCK || block_offset == 0 {
+        return block_id
+    }
+    block_id + block_offset
+}
+
+fn hlir_opt_instr_needs_interval(instr: HlirInstr) -> bool {
+    if instr.op_kind != HLIR_OP_BINARY {
+        return false
+    }
+    let is_f64 = instr.ty.kind == HlirTypeKind::HlirTypeF64
+    let is_f32 = instr.ty.kind == HlirTypeKind::HlirTypeF32
+    is_f64 || is_f32
+}
+
+fn hlir_opt_clone_instr(func: HlirFunction, src_instr: HlirInstr, value_offset: i64, block_offset: i64) -> HlirInstr with Mut {
+    var instr = src_instr
+    instr.result = hlir_opt_remap_value(func, instr.result, value_offset)
+    instr.src = hlir_opt_remap_value(func, instr.src, value_offset)
+    instr.lhs = hlir_opt_remap_value(func, instr.lhs, value_offset)
+    instr.rhs = hlir_opt_remap_value(func, instr.rhs, value_offset)
+    instr.call_func = hlir_opt_remap_value(func, instr.call_func, value_offset)
+    instr.base = hlir_opt_remap_value(func, instr.base, value_offset)
+    instr.index = hlir_opt_remap_value(func, instr.index, value_offset)
+    instr.store_ptr = hlir_opt_remap_value(func, instr.store_ptr, value_offset)
+    instr.store_value = hlir_opt_remap_value(func, instr.store_value, value_offset)
+    instr.cast_value = hlir_opt_remap_value(func, instr.cast_value, value_offset)
+    instr.insert_value = hlir_opt_remap_value(func, instr.insert_value, value_offset)
+    instr.select_cond = hlir_opt_remap_value(func, instr.select_cond, value_offset)
+    instr.select_true = hlir_opt_remap_value(func, instr.select_true, value_offset)
+    instr.select_false = hlir_opt_remap_value(func, instr.select_false, value_offset)
+
+    var i: i64 = 0
+    while i < instr.call_arg_count {
+        instr.call_args[i as usize] = hlir_opt_remap_value(func, instr.call_args[i as usize], value_offset)
+        i = i + 1
+    }
+
+    var j: i64 = 0
+    while j < instr.phi_count {
+        let entry = instr.phi_incoming[j as usize]
+        instr.phi_incoming[j as usize] = HlirPhiEntry {
+            block_id: hlir_opt_remap_block(entry.block_id, block_offset),
+            value_id: hlir_opt_remap_value(func, entry.value_id, value_offset),
+        }
+        j = j + 1
+    }
+
+    var k: i64 = 0
+    while k < instr.elem_count {
+        instr.elems[k as usize] = hlir_opt_remap_value(func, instr.elems[k as usize], value_offset)
+        k = k + 1
+    }
+
+    var field_idx: i64 = 0
+    while field_idx < instr.struct_field_count {
+        var field = instr.struct_fields[field_idx as usize]
+        field.value_id = hlir_opt_remap_value(func, field.value_id, value_offset)
+        instr.struct_fields[field_idx as usize] = field
+        field_idx = field_idx + 1
+    }
+
+    var effect_idx: i64 = 0
+    while effect_idx < instr.effect_arg_count {
+        instr.effect_args[effect_idx as usize] = hlir_opt_remap_value(func, instr.effect_args[effect_idx as usize], value_offset)
+        effect_idx = effect_idx + 1
+    }
+
+    instr
+}
+
+fn hlir_opt_clone_terminator(func: HlirFunction, term: HlirTerminator, value_offset: i64, block_offset: i64) -> HlirTerminator with Mut {
+    var out = term
+    out.return_value = hlir_opt_remap_value(func, out.return_value, value_offset)
+    out.branch_target = hlir_opt_remap_block(out.branch_target, block_offset)
+    out.cond_value = hlir_opt_remap_value(func, out.cond_value, value_offset)
+    out.then_block = hlir_opt_remap_block(out.then_block, block_offset)
+    out.else_block = hlir_opt_remap_block(out.else_block, block_offset)
+    out.switch_value = hlir_opt_remap_value(func, out.switch_value, value_offset)
+    out.switch_default = hlir_opt_remap_block(out.switch_default, block_offset)
+
+    var i: i64 = 0
+    while i < out.switch_case_count {
+        var case = out.switch_cases[i as usize]
+        case.target = hlir_opt_remap_block(case.target, block_offset)
+        out.switch_cases[i as usize] = case
+        i = i + 1
+    }
+    out
+}
 
 fn hlir_opt_wrap_float_interval(block: HlirBlock, instr: HlirInstr, id_base: i64) -> HlirBlock with Mut, Panic {
     var blk = block
-    // Emit the original instruction unchanged
     blk = hlir_block_append_instr(blk, instr)
-
-    // Only wrap float binary ops
-    if instr.op_kind == HLIR_OP_BINARY {
-        let is_f64 = instr.ty.kind == HlirTypeKind::HlirTypeF64
-        let is_f32 = instr.ty.kind == HlirTypeKind::HlirTypeF32
-        if is_f64 || is_f32 {
-            // lo-bound copy
-            var lo_instr = instr
-            lo_instr.result = id_base
-            blk = hlir_block_append_instr(blk, lo_instr)
-            // hi-bound copy
-            var hi_instr = instr
-            hi_instr.result = id_base + 1
-            blk = hlir_block_append_instr(blk, hi_instr)
-        }
+    if hlir_opt_instr_needs_interval(instr) {
+        var lo_instr = instr
+        lo_instr.result = id_base
+        blk = hlir_block_append_instr(blk, lo_instr)
+        var hi_instr = instr
+        hi_instr.result = id_base + 1
+        blk = hlir_block_append_instr(blk, hi_instr)
     }
     blk
 }
 
-// ============================================================================
-// hlir_opt_find_return_value — find the return value from a block's terminator
-// ============================================================================
+fn hlir_opt_clone_instrs(
+    func: HlirFunction,
+    dst_func: HlirFunction,
+    src: HlirBlock,
+    value_offset: i64,
+    block_offset: i64,
+    instrumented: bool,
+    interval_id_base: i64
+) -> (HlirBlock, i64, HlirFunction) with Mut, Panic {
+    var dst = hlir_block_new(src.id + block_offset, src.label)
+    var out_func = dst_func
+    var next_interval_id = interval_id_base
 
-fn hlir_opt_find_return_value(block: HlirBlock) -> i64 {
-    if block.terminator.kind == HLIR_TERM_RETURN {
-        return block.terminator.return_value
+    dst.param_count = src.param_count
+    var param_idx: i64 = 0
+    while param_idx < src.param_count {
+        var param = src.params[param_idx as usize]
+        param.value_id = hlir_opt_remap_value(func, param.value_id, value_offset)
+        dst.params[param_idx as usize] = param
+        param_idx = param_idx + 1
     }
-    HLIR_INVALID_VALUE
+
+    var i: i64 = 0
+    while i < src.instr_count {
+        let instr = hlir_opt_clone_instr(func, src.instrs[i as usize], value_offset, block_offset)
+        if instrumented && hlir_opt_instr_needs_interval(instr) {
+            out_func = hlir_function_register_local(out_func, next_interval_id, instr.ty)
+            out_func = hlir_function_register_local(out_func, next_interval_id + 1, instr.ty)
+            dst = hlir_opt_wrap_float_interval(dst, instr, next_interval_id)
+            next_interval_id = next_interval_id + 2
+        } else {
+            dst = hlir_block_append_instr(dst, instr)
+        }
+        i = i + 1
+    }
+
+    (dst, next_interval_id, out_func)
 }
 
-// ============================================================================
-// hlir_opt_apply_strategy — main entry point for strategy-based optimisation
-//
-// For StrategyInstrumented with emit_dual_path and a single-block function:
-//   - Adds __validated: i64 parameter
-//   - Creates 4-block diamond: dispatch → fast|instr → merge
-//   - fast_block: cloned original instructions (zero-overhead)
-//   - instr_block: interval-wrapped float ops
-//   - merge_block: PHI from both paths + RETURN
-// ============================================================================
+fn hlir_opt_max_value_id(func: HlirFunction) -> i64 {
+    var max_id: i64 = -1
+    var i: i64 = 0
+    while i < func.local_count {
+        let value_id = func.locals[i as usize].value_id
+        if value_id > max_id {
+            max_id = value_id
+        }
+        i = i + 1
+    }
+    var j: i64 = 0
+    while j < func.param_count {
+        let value_id = func.params[j as usize].value_id
+        if value_id > max_id {
+            max_id = value_id
+        }
+        j = j + 1
+    }
+    max_id
+}
+
+fn hlir_opt_max_block_id(func: HlirFunction) -> i64 {
+    var max_id: i64 = -1
+    var i: i64 = 0
+    while i < func.block_count {
+        let block_id = func.blocks[i as usize].id
+        if block_id > max_id {
+            max_id = block_id
+        }
+        i = i + 1
+    }
+    max_id
+}
+
+fn hlir_opt_add_original_params(dst: HlirFunction, src: HlirFunction) -> HlirFunction with Mut, Panic {
+    var out = dst
+    var i: i64 = 0
+    while i < src.param_count {
+        let param = src.params[i as usize]
+        out = hlir_function_add_param(out, param)
+        out = hlir_function_register_local(out, param.value_id, param.ty)
+        i = i + 1
+    }
+    out
+}
+
+fn hlir_opt_add_original_locals(dst: HlirFunction, src: HlirFunction) -> HlirFunction with Mut, Panic {
+    var out = dst
+    var i: i64 = 0
+    while i < src.local_count {
+        let local = src.locals[i as usize]
+        if !hlir_opt_is_param_value(src, local.value_id) {
+            out = hlir_function_register_local(out, local.value_id, local.ty)
+        }
+        i = i + 1
+    }
+    out
+}
+
+fn hlir_opt_add_instrumented_locals(dst: HlirFunction, src: HlirFunction, value_offset: i64) -> HlirFunction with Mut, Panic {
+    var out = dst
+    var i: i64 = 0
+    while i < src.local_count {
+        let local = src.locals[i as usize]
+        if !hlir_opt_is_param_value(src, local.value_id) {
+            out = hlir_function_register_local(out, local.value_id + value_offset, local.ty)
+        }
+        i = i + 1
+    }
+    out
+}
 
 fn hlir_opt_apply_strategy(func: HlirFunction, hints: StrategyHints) -> HlirFunction with Mut, Panic {
-    // Only transform if dual-path is requested and function has exactly one block
-    if !hints.emit_dual_path {
+    if !hints.emit_dual_path || !hlir_strategy_needs_instrumentation(hints) {
         return func
     }
-    if func.block_count != 1 {
-        return func
-    }
-
-    let orig_block = func.blocks[0]
-    let ret_val = hlir_opt_find_return_value(orig_block)
-    if ret_val == HLIR_INVALID_VALUE {
+    if func.block_count <= 0 {
         return func
     }
 
-    var f = func
+    let max_value_id = hlir_opt_max_value_id(func)
+    let value_offset = if max_value_id < 0 { 1 } else { max_value_id + 1 }
+    let validated_param_id = (value_offset * 2)
+    let merge_phi_id = validated_param_id + 1
+    let validated_zero_id = merge_phi_id + 1
+    let validated_cond_id = merge_phi_id + 2
 
-    // --- Add __validated: i64 parameter ---
-    let validated_param_id = 10000
+    let max_block_id = hlir_opt_max_block_id(func)
+    let block_offset = max_block_id + 1
+    let dispatch_id = (block_offset * 2)
+    let merge_id = dispatch_id + 1
+
+    var out = func
+    out.param_count = 0
+    out.block_count = 0
+    out.local_count = 0
+
+    out = hlir_opt_add_original_params(out, func)
+    out = hlir_opt_add_original_locals(out, func)
+    out = hlir_opt_add_instrumented_locals(out, func, value_offset)
+
     let validated_param = HlirParam {
         value_id: validated_param_id,
         name: hlir_name_from_str("__validated"),
         ty: hlir_type_i64(),
     }
-    f = hlir_function_add_param(f, validated_param)
-    f = hlir_function_register_local(f, validated_param_id, hlir_type_i64())
+    out = hlir_function_add_param(out, validated_param)
+    out = hlir_function_register_local(out, validated_param_id, hlir_type_i64())
+    out = hlir_function_register_local(out, validated_zero_id, hlir_type_i64())
+    out = hlir_function_register_local(out, validated_cond_id, hlir_type_bool())
 
-    // --- Compute ID offset for instrumented path ---
-    // Use a large offset so cloned value IDs don't collide
-    let id_offset: i64 = 5000
-
-    // --- Block IDs ---
-    let dispatch_id: i64 = 100
-    let fast_id: i64 = 101
-    let instr_id: i64 = 102
-    let merge_id: i64 = 103
-
-    // === dispatch_block: COND_BRANCH on __validated ===
     var dispatch_block = hlir_block_new(dispatch_id, hlir_name_from_str("dispatch"))
-    dispatch_block = hlir_block_set_terminator(dispatch_block,
-        hlir_term_cond_branch(validated_param_id, fast_id, instr_id))
+    dispatch_block = hlir_block_append_instr(
+        dispatch_block,
+        hlir_instr_const(validated_zero_id, hlir_const_int(0, hlir_type_i64()), hlir_type_i64())
+    )
+    dispatch_block = hlir_block_append_instr(
+        dispatch_block,
+        hlir_instr_binary(validated_cond_id, HLIR_BIN_NE, validated_param_id, validated_zero_id, hlir_type_bool())
+    )
+    dispatch_block = hlir_block_set_terminator(
+        dispatch_block,
+        hlir_term_cond_branch(validated_cond_id, func.blocks[0].id, func.blocks[0].id + block_offset)
+    )
+    out = hlir_function_add_block(out, dispatch_block)
 
-    // === fast_block: clone original instructions, BRANCH → merge ===
-    var fast_block = hlir_opt_clone_instrs(orig_block, 0)
-    fast_block.id = fast_id
-    fast_block.label = hlir_name_from_str("fast")
-    // Replace terminator: BRANCH → merge
-    let fast_ret_val = ret_val
-    fast_block = hlir_block_set_terminator(fast_block, hlir_term_branch(merge_id))
+    var return_entries: [HlirPhiEntry; 64] = [hlir_phi_entry_empty(); 64]
+    var return_count: i64 = 0
+    var saw_return = false
+    var interval_id_base = merge_phi_id + 3
 
-    // === instr_block: clone with interval wrapping for float ops ===
-    var instr_block = hlir_block_new(instr_id, hlir_name_from_str("instr"))
-    var k: i64 = 0
-    var interval_id_base: i64 = 20000
-    while k < orig_block.instr_count {
-        var src_instr = orig_block.instrs[k as usize]
-        // Offset value IDs for the instrumented path
-        if src_instr.result != HLIR_INVALID_VALUE {
-            src_instr.result = src_instr.result + id_offset
+    var bi: i64 = 0
+    while bi < func.block_count {
+        let src_block = func.blocks[bi as usize]
+
+        let fast_pair = hlir_opt_clone_instrs(func, out, src_block, 0, 0, false, interval_id_base)
+        var fast_block = fast_pair.0
+        interval_id_base = fast_pair.1
+        out = fast_pair.2
+        let fast_term = hlir_opt_clone_terminator(func, src_block.terminator, 0, 0)
+        if fast_term.kind == HLIR_TERM_RETURN {
+            saw_return = true
+            if return_count < 64 && func.return_type.kind != HlirTypeKind::HlirTypeVoid {
+                return_entries[return_count as usize] = HlirPhiEntry {
+                    block_id: fast_block.id,
+                    value_id: fast_term.return_value,
+                }
+                return_count = return_count + 1
+            }
+            fast_block = hlir_block_set_terminator(fast_block, hlir_term_branch(merge_id))
+        } else {
+            fast_block = hlir_block_set_terminator(fast_block, fast_term)
         }
-        if src_instr.src != HLIR_INVALID_VALUE {
-            src_instr.src = src_instr.src + id_offset
+        out = hlir_function_add_block(out, fast_block)
+
+        let instr_pair = hlir_opt_clone_instrs(func, out, src_block, value_offset, block_offset, true, interval_id_base)
+        var instr_block = instr_pair.0
+        interval_id_base = instr_pair.1
+        out = instr_pair.2
+        let instr_term = hlir_opt_clone_terminator(func, src_block.terminator, value_offset, block_offset)
+        if instr_term.kind == HLIR_TERM_RETURN {
+            saw_return = true
+            if return_count < 64 && func.return_type.kind != HlirTypeKind::HlirTypeVoid {
+                return_entries[return_count as usize] = HlirPhiEntry {
+                    block_id: instr_block.id,
+                    value_id: instr_term.return_value,
+                }
+                return_count = return_count + 1
+            }
+            instr_block = hlir_block_set_terminator(instr_block, hlir_term_branch(merge_id))
+        } else {
+            instr_block = hlir_block_set_terminator(instr_block, instr_term)
         }
-        if src_instr.lhs != HLIR_INVALID_VALUE {
-            src_instr.lhs = src_instr.lhs + id_offset
-        }
-        if src_instr.rhs != HLIR_INVALID_VALUE {
-            src_instr.rhs = src_instr.rhs + id_offset
-        }
-        instr_block = hlir_opt_wrap_float_interval(instr_block, src_instr, interval_id_base)
-        interval_id_base = interval_id_base + 2
-        k = k + 1
+        out = hlir_function_add_block(out, instr_block)
+
+        bi = bi + 1
     }
-    let instr_ret_val = ret_val + id_offset
-    instr_block = hlir_block_set_terminator(instr_block, hlir_term_branch(merge_id))
 
-    // === merge_block: PHI + RETURN ===
+    if !saw_return {
+        return func
+    }
+
     var merge_block = hlir_block_new(merge_id, hlir_name_from_str("merge"))
-    let phi_result: i64 = 30000
-    var phi_instr = hlir_instr_new(HLIR_OP_PHI)
-    phi_instr.result = phi_result
-    phi_instr.ty = f.return_type
-    phi_instr.phi_incoming[0] = HlirPhiEntry { block_id: fast_id, value_id: fast_ret_val }
-    phi_instr.phi_incoming[1] = HlirPhiEntry { block_id: instr_id, value_id: instr_ret_val }
-    phi_instr.phi_count = 2
-    merge_block = hlir_block_append_instr(merge_block, phi_instr)
-    merge_block = hlir_block_set_terminator(merge_block, hlir_term_return(phi_result))
-    f = hlir_function_register_local(f, phi_result, f.return_type)
+    if func.return_type.kind == HlirTypeKind::HlirTypeVoid {
+        merge_block = hlir_block_set_terminator(merge_block, hlir_term_return(HLIR_INVALID_VALUE))
+    } else {
+        if return_count <= 0 {
+            return func
+        }
+        var phi_instr = hlir_instr_new(HLIR_OP_PHI)
+        phi_instr.result = merge_phi_id
+        phi_instr.ty = out.return_type
+        phi_instr.phi_incoming = return_entries
+        phi_instr.phi_count = return_count
+        merge_block = hlir_block_append_instr(merge_block, phi_instr)
+        merge_block = hlir_block_set_terminator(merge_block, hlir_term_return(merge_phi_id))
+        out = hlir_function_register_local(out, merge_phi_id, out.return_type)
+    }
+    out = hlir_function_add_block(out, merge_block)
 
-    // === Replace blocks ===
-    f.blocks[0] = dispatch_block
-    f.block_count = 1
-    f = hlir_function_add_block(f, fast_block)
-    f = hlir_function_add_block(f, instr_block)
-    f = hlir_function_add_block(f, merge_block)
-
-    f
+    out
 }

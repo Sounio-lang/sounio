@@ -14,6 +14,8 @@ use native::reloc::*
 use native::frame::*
 use native::lower_ir::{lower_instr}
 use native::regs::{param_reg}
+// Sprint 40: IR-level dual-path transformation for Instrumented strategy
+use ir::opt_strategy::{ir_opt_apply_strategy}
 // Note: native::avx512 EVEX emitters are available in native/avx512.sio.
 // They will be wired into the lowering pass in Horizon 3.2 (vector IR ops).
 
@@ -1019,16 +1021,50 @@ fn compile_module(nc: NativeCompiler, module: &IrModule) -> NativeCompiler with 
         fi = fi + 1
     }
 
+    // Sprint 45: pre-allocate counter storage in .data (8 bytes per counter)
+    // StringTable.bytes is zero-initialized, so counters start at 0
+    if module.prof_counter_count > 0 {
+        c.data.len = module.prof_counter_count * 8
+    }
+
+    // Sprint 46: store profiling counter function names in .rodata
+    if module.prof_counter_count > 0 {
+        var pi = 0
+        while pi < module.prof_counter_count {
+            let pc = module.prof_counters[pi as usize]
+            c.rodata = string_table_add(c.rodata, pc.fn_name.buf, pc.fn_name.len)
+            c.prof_counter_names[pi as usize] = c.rodata.last_offset
+            pi = pi + 1
+        }
+        c.prof_counter_count = module.prof_counter_count
+
+        // Sprint 47: store "profile.sprof" filename in .rodata
+        let sprof_name = make_sprof_filename()
+        c.rodata = string_table_add(c.rodata, sprof_name.buf, sprof_name.len)
+        c.prof_sprof_name_offset = c.rodata.last_offset
+    }
+
+    // Sprint 46: emit __prof_dump function (if counters exist)
+    if c.prof_counter_count > 0 {
+        c.prof_dump_fn_index = c.fn_count
+        c.fn_offsets[c.fn_count as usize] = c.code.len
+        c.fn_count = c.fn_count + 1
+        c = emit_prof_dump_function(c, module)
+    }
+
     // Pass 2: Emit entry trampoline (_start: call main; sys_exit)
     let main_idx = find_main_index(module)
     if main_idx >= 0 {
         c = emit_entry_trampoline(c, main_idx)
     }
 
-    // Pass 3: Apply relocations (function calls + RIP-relative data)
+    // Pass 3: Apply relocations (function calls + RIP-relative data + .data counters)
     let text_file_offset = 4096
     let rodata_file_offset = align_page(text_file_offset + c.code.len)
-    c.code = apply_relocations(c.relocs, c.code, c.fn_offsets, c.fn_count, rodata_file_offset)
+    let data_file_offset = if c.data.len > 0 {
+        align_page(rodata_file_offset + c.rodata.len)
+    } else { 0 }
+    c.code = apply_relocations(c.relocs, c.code, c.fn_offsets, c.fn_count, rodata_file_offset, data_file_offset)
 
     c
 }
@@ -1074,20 +1110,31 @@ fn compile_ir_function(nc: NativeCompiler, func: IrFunction, fn_index: i64) -> N
     if name_is_write_file(func.name) { return emit_builtin_write_file(c) }
     if name_is_file_size(func.name) { return emit_builtin_file_size(c) }
 
-    // Compute frame size from virtual register count
-    let frame_size = align16(func.reg_count * 8)
+    // Sprint 38: Set compile strategy from IR function metadata
+    c.current_strategy = func.compile_strategy
+
+    // Sprint 40: Apply dual-path transformation for Instrumented strategy (Contest<T>/Robust<T>)
+    // IR_STRATEGY_INSTRUMENTED (3) triggers ir_opt_apply_strategy(), which rewrites the flat
+    // instruction array into a 4-block diamond: dispatch_block → fast_path | instrumented_path → merge_block
+    var effective_func = func
+    if func.compile_strategy == IR_STRATEGY_INSTRUMENTED {
+        effective_func = ir_opt_apply_strategy(func)
+    }
+
+    // Compute frame size from virtual register count (expanded by dual-path if applied)
+    let frame_size = align16(effective_func.reg_count * 8)
     c.current_frame_size = frame_size
 
     // Emit prologue
     c.code = emit_prologue(c.code, frame_size)
 
     // Spill parameters from ABI registers to their stack slots
-    c = spill_ir_params(c, func)
+    c = spill_ir_params(c, effective_func)
 
     // Lower each IR instruction
     var ip = 0
-    while ip < func.instr_count {
-        c = lower_instr(c, func.instrs[ip as usize])
+    while ip < effective_func.instr_count {
+        c = lower_instr(c, effective_func.instrs[ip as usize])
         ip = ip + 1
     }
 
@@ -1117,6 +1164,395 @@ fn spill_ir_params(nc: NativeCompiler, func: IrFunction) -> NativeCompiler with 
         }
         i = i + 1
     }
+    c
+}
+
+// ============================================================================
+// Sprint 46: Profiling counter dump helpers
+// ============================================================================
+
+// Write "[prof] " (7 bytes) to stderr via immediate stack construction
+fn emit_prof_write_prefix(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
+    var c = nc
+    // mov dword [rsp], 0x6f72705b  — "[pro" in little-endian
+    // C7 44 24 00 5b 70 72 6f
+    c.code = emit_byte(c.code, 0xC7)
+    c.code = emit_byte(c.code, 0x44)
+    c.code = emit_byte(c.code, 0x24)
+    c.code = emit_byte(c.code, 0x00)
+    c.code = emit_byte(c.code, 0x5B)   // '['
+    c.code = emit_byte(c.code, 0x70)   // 'p'
+    c.code = emit_byte(c.code, 0x72)   // 'r'
+    c.code = emit_byte(c.code, 0x6F)   // 'o'
+    // mov word [rsp+4], 0x5d66  — "f]" in little-endian
+    // 66 C7 44 24 04 66 5d
+    c.code = emit_byte(c.code, 0x66)
+    c.code = emit_byte(c.code, 0xC7)
+    c.code = emit_byte(c.code, 0x44)
+    c.code = emit_byte(c.code, 0x24)
+    c.code = emit_byte(c.code, 0x04)
+    c.code = emit_byte(c.code, 0x66)   // 'f'
+    c.code = emit_byte(c.code, 0x5D)   // ']'
+    // mov byte [rsp+6], 0x20  — " "
+    // C6 44 24 06 20
+    c.code = emit_byte(c.code, 0xC6)
+    c.code = emit_byte(c.code, 0x44)
+    c.code = emit_byte(c.code, 0x24)
+    c.code = emit_byte(c.code, 0x06)
+    c.code = emit_byte(c.code, 0x20)   // ' '
+    // sys_write(2, rsp, 7)
+    c.code = emit_mov_rsi_rsp(c.code)        // rsi = rsp (buffer)
+    c.code = emit_mov_reg_imm(c.code, 2, 7)  // rdx = 7
+    c.code = emit_mov_rdi_imm(c.code, 2)     // rdi = 2 (stderr)
+    c.code = emit_mov_rax_imm(c.code, 1)     // rax = 1 (sys_write)
+    c.code = emit_syscall(c.code)
+    c
+}
+
+// Write ": " (2 bytes) to stderr via immediate stack construction
+fn emit_prof_write_colon_sep(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
+    var c = nc
+    // mov word [rsp], 0x203a  — ": " in little-endian
+    // 66 C7 44 24 00 3a 20
+    c.code = emit_byte(c.code, 0x66)
+    c.code = emit_byte(c.code, 0xC7)
+    c.code = emit_byte(c.code, 0x44)
+    c.code = emit_byte(c.code, 0x24)
+    c.code = emit_byte(c.code, 0x00)
+    c.code = emit_byte(c.code, 0x3A)   // ':'
+    c.code = emit_byte(c.code, 0x20)   // ' '
+    // sys_write(2, rsp, 2)
+    c.code = emit_mov_rsi_rsp(c.code)
+    c.code = emit_mov_reg_imm(c.code, 2, 2)  // rdx = 2
+    c.code = emit_mov_rdi_imm(c.code, 2)     // rdi = stderr
+    c.code = emit_mov_rax_imm(c.code, 1)     // sys_write
+    c.code = emit_syscall(c.code)
+    c
+}
+
+// Write "\n" (1 byte) to stderr via immediate stack construction
+fn emit_prof_write_newline(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
+    var c = nc
+    // mov byte [rsp], 0x0a  — "\n"
+    // C6 44 24 00 0a
+    c.code = emit_byte(c.code, 0xC6)
+    c.code = emit_byte(c.code, 0x44)
+    c.code = emit_byte(c.code, 0x24)
+    c.code = emit_byte(c.code, 0x00)
+    c.code = emit_byte(c.code, 0x0A)   // '\n'
+    // sys_write(2, rsp, 1)
+    c.code = emit_mov_rsi_rsp(c.code)
+    c.code = emit_mov_reg_imm(c.code, 2, 1)  // rdx = 1
+    c.code = emit_mov_rdi_imm(c.code, 2)     // rdi = stderr
+    c.code = emit_mov_rax_imm(c.code, 1)     // sys_write
+    c.code = emit_syscall(c.code)
+    c
+}
+
+// Inline strlen: rsi = string pointer, sets rcx = length (preserves rsi)
+fn emit_inline_strlen(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
+    var c = nc
+    c.code = emit_mov_reg_reg(c.code, 7, 6)     // mov rdi, rsi (work on rdi, preserve rsi)
+    c.code = emit_xor_rcx_rcx(c.code)            // rcx = 0
+    // loop body: 16 bytes total
+    c.code = emit_movzx_rax_byte_rdi(c.code)     // 4: movzx rax, byte [rdi]
+    c.code = emit_test_al_al(c.code)              // 2: test al, al
+    c.code = emit_jz_rel8(c.code, 8)              // 2: jz +8 (skip inc+inc+jmp = 3+3+2)
+    c.code = emit_inc_rdi(c.code)                 // 3: inc rdi
+    c.code = emit_inc_rcx(c.code)                 // 3: inc rcx
+    c.code = emit_jmp_rel8(c.code, -16)           // 2: jmp -16 (back to movzx)
+    c
+}
+
+// Inline itoa + sys_write to stderr: rdi = value (non-negative i64)
+// Uses rbp-relative stack buffer (sub rsp, 48 assumed by caller)
+// Same div-by-10 algorithm as emit_builtin_print_int but fd=2 and no negative handling
+fn emit_inline_itoa_stderr(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
+    var c = nc
+    // rdi = value to print
+    c.code = emit_mov_reg_reg(c.code, 0, 7)      // mov rax, rdi
+    // rsi = rbp - 1 (buffer end, within the 48-byte stack frame)
+    c.code = emit_mov_reg_reg(c.code, 6, 5)      // mov rsi, rbp
+    c.code = emit_sub_rsi_imm8(c.code, 1)         // sub rsi, 1
+    c.code = emit_xor_rcx_rcx(c.code)             // rcx = 0 (digit count)
+
+    // Handle zero case: if rax == 0, emit single '0'
+    c.code = emit_test_rax_rax(c.code)             // 3 bytes
+    // jnz +15 (skip zero path: mov_byte(3) + mov_rcx_1(10) + jmp(2) = 15)
+    c.code = emit_jnz_rel8(c.code, 15)            // 2 bytes
+    // Zero path
+    c.code = emit_mov_byte_mem_rsi_imm8(c.code, 48)  // [rsi] = '0'  — 3 bytes
+    c.code = emit_mov_reg_imm(c.code, 1, 1)          // rcx = 1      — 10 bytes
+    c.code = emit_jmp_rel8(c.code, 28)                // skip digit loop — 2 bytes
+    // jmp target: 28 bytes ahead = the digit loop body (30 bytes) minus the 2-byte jnz at end
+
+    // Digit loop: 30 bytes body
+    let loop_top = c.code.len
+    c.code = emit_xor_rdx_rdx(c.code)                // 3: xor rdx, rdx
+    c.code = emit_mov_reg_imm(c.code, 3, 10)         // 10: mov rbx, 10
+    c.code = emit_div_rbx(c.code)                     // 3: div rbx (rax=quot, rdx=rem)
+    c.code = emit_add_rdx_imm8(c.code, 48)           // 4: add rdx, '0'
+    c.code = emit_mov_byte_mem_rsi_dl(c.code)         // 2: mov [rsi], dl
+    c.code = emit_dec_rsi(c.code)                     // 3: dec rsi
+    c.code = emit_inc_rcx(c.code)                     // 3: inc rcx
+    c.code = emit_test_rax_rax(c.code)                // 3: test rax, rax
+    let loop_end = c.code.len
+    let loop_body_size = loop_end - loop_top          // should be ~31 bytes
+    c.code = emit_jnz_rel8(c.code, -(loop_body_size + 2))  // 2: jnz back (body + 2 for jnz itself)
+    // After loop: rsi points one before first digit
+    c.code = emit_inc_rsi(c.code)                     // 3: inc rsi (point to first digit)
+
+    // sys_write(2, rsi, rcx)
+    c.code = emit_mov_reg_reg(c.code, 2, 1)      // mov rdx, rcx (length)
+    c.code = emit_mov_rdi_imm(c.code, 2)          // rdi = 2 (stderr)
+    c.code = emit_mov_rax_imm(c.code, 1)          // rax = 1 (sys_write)
+    c.code = emit_syscall(c.code)
+    c
+}
+
+// ============================================================================
+// Sprint 47: .sprof file output helpers
+// ============================================================================
+
+// Build a Name containing "profile.sprof" (13 bytes)
+fn make_sprof_filename() -> Name with Mut, Panic, Div {
+    var n = empty_name()
+    // p=112 r=114 o=111 f=102 i=105 l=108 e=101 .=46 s=115 p=112 r=114 o=111 f=102
+    n.buf[0] = 112 as i8     // 'p'
+    n.buf[1] = 114 as i8     // 'r'
+    n.buf[2] = 111 as i8     // 'o'
+    n.buf[3] = 102 as i8     // 'f'
+    n.buf[4] = 105 as i8     // 'i'
+    n.buf[5] = 108 as i8     // 'l'
+    n.buf[6] = 101 as i8     // 'e'
+    n.buf[7] = 46 as i8      // '.'
+    n.buf[8] = 115 as i8     // 's'
+    n.buf[9] = 112 as i8     // 'p'
+    n.buf[10] = 114 as i8    // 'r'
+    n.buf[11] = 111 as i8    // 'o'
+    n.buf[12] = 102 as i8    // 'f'
+    n.len = 13
+    n
+}
+
+// Write "[sprof]\n" header (8 bytes) to fd via immediate stack construction
+// fd is in r12
+fn emit_prof_write_sprof_header(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
+    var c = nc
+    // mov dword [rsp], 0x7270735b  — "[spr" in little-endian
+    // C7 44 24 00 5b 73 70 72
+    c.code = emit_byte(c.code, 0xC7)
+    c.code = emit_byte(c.code, 0x44)
+    c.code = emit_byte(c.code, 0x24)
+    c.code = emit_byte(c.code, 0x00)
+    c.code = emit_byte(c.code, 0x5B)   // '['
+    c.code = emit_byte(c.code, 0x73)   // 's'
+    c.code = emit_byte(c.code, 0x70)   // 'p'
+    c.code = emit_byte(c.code, 0x72)   // 'r'
+    // mov dword [rsp+4], 0x0a5d666f  — "of]\n" in little-endian
+    // C7 44 24 04 6f 66 5d 0a
+    c.code = emit_byte(c.code, 0xC7)
+    c.code = emit_byte(c.code, 0x44)
+    c.code = emit_byte(c.code, 0x24)
+    c.code = emit_byte(c.code, 0x04)
+    c.code = emit_byte(c.code, 0x6F)   // 'o'
+    c.code = emit_byte(c.code, 0x66)   // 'f'
+    c.code = emit_byte(c.code, 0x5D)   // ']'
+    c.code = emit_byte(c.code, 0x0A)   // '\n'
+    // sys_write(r12, rsp, 8)
+    c.code = emit_mov_rsi_rsp(c.code)        // rsi = rsp (buffer)
+    c.code = emit_mov_reg_imm(c.code, 2, 8)  // rdx = 8
+    c.code = emit_mov_rdi_r12(c.code)         // rdi = r12 (fd)
+    c.code = emit_mov_rax_imm(c.code, 1)     // rax = 1 (sys_write)
+    c.code = emit_syscall(c.code)
+    c
+}
+
+// Write " " (1 byte, space separator) to fd in r12 via immediate stack construction
+fn emit_prof_write_space_to_fd(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
+    var c = nc
+    // mov byte [rsp], 0x20  — " "
+    c.code = emit_byte(c.code, 0xC6)
+    c.code = emit_byte(c.code, 0x44)
+    c.code = emit_byte(c.code, 0x24)
+    c.code = emit_byte(c.code, 0x00)
+    c.code = emit_byte(c.code, 0x20)   // ' '
+    // sys_write(r12, rsp, 1)
+    c.code = emit_mov_rsi_rsp(c.code)
+    c.code = emit_mov_reg_imm(c.code, 2, 1)  // rdx = 1
+    c.code = emit_mov_rdi_r12(c.code)         // rdi = r12 (fd)
+    c.code = emit_mov_rax_imm(c.code, 1)     // sys_write
+    c.code = emit_syscall(c.code)
+    c
+}
+
+// Write "\n" (1 byte) to fd in r12 via immediate stack construction
+fn emit_prof_write_newline_to_fd(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
+    var c = nc
+    // mov byte [rsp], 0x0a  — "\n"
+    c.code = emit_byte(c.code, 0xC6)
+    c.code = emit_byte(c.code, 0x44)
+    c.code = emit_byte(c.code, 0x24)
+    c.code = emit_byte(c.code, 0x00)
+    c.code = emit_byte(c.code, 0x0A)   // '\n'
+    // sys_write(r12, rsp, 1)
+    c.code = emit_mov_rsi_rsp(c.code)
+    c.code = emit_mov_reg_imm(c.code, 2, 1)  // rdx = 1
+    c.code = emit_mov_rdi_r12(c.code)         // rdi = r12 (fd)
+    c.code = emit_mov_rax_imm(c.code, 1)     // sys_write
+    c.code = emit_syscall(c.code)
+    c
+}
+
+// itoa (rdi = value) + sys_write to fd in r12 (same algorithm as emit_inline_itoa_stderr but fd=r12)
+fn emit_inline_itoa_fd(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
+    var c = nc
+    // rdi = value to print
+    c.code = emit_mov_reg_reg(c.code, 0, 7)      // mov rax, rdi
+    // rsi = rbp - 1 (buffer end, within the 48-byte stack frame)
+    c.code = emit_mov_reg_reg(c.code, 6, 5)      // mov rsi, rbp
+    c.code = emit_sub_rsi_imm8(c.code, 1)         // sub rsi, 1
+    c.code = emit_xor_rcx_rcx(c.code)             // rcx = 0 (digit count)
+
+    // Handle zero case: if rax == 0, emit single '0'
+    c.code = emit_test_rax_rax(c.code)             // 3 bytes
+    // jnz +15 (skip zero path: mov_byte(3) + mov_rcx_1(10) + jmp(2) = 15)
+    c.code = emit_jnz_rel8(c.code, 15)            // 2 bytes
+    // Zero path
+    c.code = emit_mov_byte_mem_rsi_imm8(c.code, 48)  // [rsi] = '0'  — 3 bytes
+    c.code = emit_mov_reg_imm(c.code, 1, 1)          // rcx = 1      — 10 bytes
+    c.code = emit_jmp_rel8(c.code, 28)                // skip digit loop — 2 bytes
+
+    // Digit loop
+    let loop_top = c.code.len
+    c.code = emit_xor_rdx_rdx(c.code)                // 3: xor rdx, rdx
+    c.code = emit_mov_reg_imm(c.code, 3, 10)         // 10: mov rbx, 10
+    c.code = emit_div_rbx(c.code)                     // 3: div rbx (rax=quot, rdx=rem)
+    c.code = emit_add_rdx_imm8(c.code, 48)           // 4: add rdx, '0'
+    c.code = emit_mov_byte_mem_rsi_dl(c.code)         // 2: mov [rsi], dl
+    c.code = emit_dec_rsi(c.code)                     // 3: dec rsi
+    c.code = emit_inc_rcx(c.code)                     // 3: inc rcx
+    c.code = emit_test_rax_rax(c.code)                // 3: test rax, rax
+    let loop_end = c.code.len
+    let loop_body_size = loop_end - loop_top
+    c.code = emit_jnz_rel8(c.code, -(loop_body_size + 2))  // 2: jnz back
+    // After loop: rsi points one before first digit
+    c.code = emit_inc_rsi(c.code)                     // 3: inc rsi
+
+    // sys_write(r12, rsi, rcx)
+    c.code = emit_mov_reg_reg(c.code, 2, 1)      // mov rdx, rcx (length)
+    c.code = emit_mov_rdi_r12(c.code)              // rdi = r12 (fd)
+    c.code = emit_mov_rax_imm(c.code, 1)          // rax = 1 (sys_write)
+    c.code = emit_syscall(c.code)
+    c
+}
+
+// Emit the __prof_dump function: reads counters from .data, writes summary to stderr
+// Unrolled: one block per counter, no runtime loop variable needed
+fn emit_prof_dump_function(nc: NativeCompiler, module: &IrModule) -> NativeCompiler with Mut, Panic, Div {
+    var c = nc
+    c.code = emit_push_rbp(c.code)
+    c.code = emit_mov_rbp_rsp(c.code)
+    c.code = emit_sub_rsp_imm32(c.code, 48)    // stack buffer for itoa + immediate strings
+
+    var ci = 0
+    while ci < c.prof_counter_count {
+        // --- Write "[prof] " (7 bytes) from immediate stack construction ---
+        c = emit_prof_write_prefix(c)
+
+        // --- Write function name from .rodata ---
+        let name_rodata_offset = c.prof_counter_names[ci as usize]
+        let lea_pos = c.code.len + 3     // disp32 is at byte 3 of LEA instruction
+        c.code = emit_lea_rax_rip_disp32(c.code, 0)  // placeholder disp32
+        c.relocs = add_rip_reloc(c.relocs, lea_pos, name_rodata_offset)
+        // rax = pointer to name string in .rodata
+        c.code = emit_mov_reg_reg(c.code, 6, 0)      // mov rsi, rax
+        c = emit_inline_strlen(c)                      // rcx = length, rsi preserved
+        // sys_write(2, rsi, rcx)
+        c.code = emit_mov_reg_reg(c.code, 2, 1)      // mov rdx, rcx
+        c.code = emit_mov_rdi_imm(c.code, 2)          // fd = stderr
+        c.code = emit_mov_rax_imm(c.code, 1)          // sys_write
+        c.code = emit_syscall(c.code)
+
+        // --- Write ": " (2 bytes) from immediate stack construction ---
+        c = emit_prof_write_colon_sep(c)
+
+        // --- Load counter value from .data, itoa, write ---
+        let counter_id = module.prof_counters[ci as usize].counter_id
+        let load_disp_pos = c.code.len + 3  // disp32 at byte 3 of MOV [rip+disp32]
+        c.code = emit_mov_rax_rip_disp32(c.code, 0)   // placeholder disp32
+        c.relocs = add_data_section_reloc(c.relocs, load_disp_pos, counter_id * 8)
+        // rax = counter value
+        c.code = emit_mov_rdi_rax(c.code)              // rdi = counter value
+        c = emit_inline_itoa_stderr(c)                  // itoa + sys_write(2, ...)
+
+        // --- Write "\n" (1 byte) ---
+        c = emit_prof_write_newline(c)
+
+        ci = ci + 1
+    }
+
+    // Sprint 47: write .sprof file (persistent profile output)
+    // Save r12 (callee-saved, holds heap base from trampoline)
+    c.code = emit_push_r12(c.code)
+
+    // sys_open("profile.sprof", O_WRONLY|O_CREAT|O_TRUNC=577, 0644=420)
+    let sprof_lea_pos = c.code.len + 3
+    c.code = emit_lea_rax_rip_disp32(c.code, 0)     // placeholder → .rodata "profile.sprof"
+    c.relocs = add_rip_reloc(c.relocs, sprof_lea_pos, c.prof_sprof_name_offset)
+    c.code = emit_mov_rdi_rax(c.code)                // rdi = filename pointer
+    c.code = emit_mov_reg_imm(c.code, 6, 577)        // rsi = O_WRONLY|O_CREAT|O_TRUNC
+    c.code = emit_mov_reg_imm(c.code, 2, 420)        // rdx = 0644
+    c.code = emit_mov_rax_imm(c.code, 2)             // rax = sys_open
+    c.code = emit_syscall(c.code)
+    c.code = emit_mov_r12_rax(c.code)                // r12 = file fd
+
+    // Write "[sprof]\n" header to file
+    c = emit_prof_write_sprof_header(c)
+
+    // Write per-counter lines: "fn_name count\n" to file
+    var fi = 0
+    while fi < c.prof_counter_count {
+        // --- Write function name from .rodata to file ---
+        let fn_rodata_offset = c.prof_counter_names[fi as usize]
+        let fn_lea_pos = c.code.len + 3
+        c.code = emit_lea_rax_rip_disp32(c.code, 0)  // placeholder
+        c.relocs = add_rip_reloc(c.relocs, fn_lea_pos, fn_rodata_offset)
+        c.code = emit_mov_reg_reg(c.code, 6, 0)      // mov rsi, rax
+        c = emit_inline_strlen(c)                      // rcx = length
+        c.code = emit_mov_reg_reg(c.code, 2, 1)      // mov rdx, rcx
+        c.code = emit_mov_rdi_r12(c.code)              // rdi = r12 (file fd)
+        c.code = emit_mov_rax_imm(c.code, 1)          // sys_write
+        c.code = emit_syscall(c.code)
+
+        // --- Write " " (space separator) to file ---
+        c = emit_prof_write_space_to_fd(c)
+
+        // --- Load counter value, itoa, write to file ---
+        let file_counter_id = module.prof_counters[fi as usize].counter_id
+        let file_load_pos = c.code.len + 3
+        c.code = emit_mov_rax_rip_disp32(c.code, 0)   // placeholder
+        c.relocs = add_data_section_reloc(c.relocs, file_load_pos, file_counter_id * 8)
+        c.code = emit_mov_rdi_rax(c.code)              // rdi = counter value
+        c = emit_inline_itoa_fd(c)                      // itoa + sys_write(r12, ...)
+
+        // --- Write "\n" to file ---
+        c = emit_prof_write_newline_to_fd(c)
+
+        fi = fi + 1
+    }
+
+    // sys_close(r12)
+    c.code = emit_mov_rdi_r12(c.code)                 // rdi = fd
+    c.code = emit_mov_rax_imm(c.code, 3)              // rax = sys_close
+    c.code = emit_syscall(c.code)
+
+    // Restore r12 (heap base)
+    c.code = emit_pop_r12(c.code)
+
+    c.code = emit_mov_rsp_rbp(c.code)
+    c.code = emit_pop_rbp(c.code)
+    c.code = emit_ret(c.code)
     c
 }
 
@@ -1180,6 +1616,15 @@ fn emit_entry_trampoline(nc: NativeCompiler, main_fn_index: i64) -> NativeCompil
     // mov rdi, rax (exit code = main's return value)
     c.code = emit_mov_rdi_rax(c.code)
 
+    // Sprint 46: call __prof_dump if counters exist (preserves rdi = exit code)
+    if c.prof_counter_count > 0 {
+        c.code = emit_push_rdi(c.code)       // save exit code
+        let dump_call_pos = c.code.len
+        c.code = emit_call_rel32_placeholder(c.code)
+        c.relocs = add_call_reloc(c.relocs, dump_call_pos + 1, c.prof_dump_fn_index)
+        c.code = emit_pop_rdi(c.code)        // restore exit code
+    }
+
     // mov rax, 60 (sys_exit)
     c.code = emit_mov_rax_imm(c.code, 60)
 
@@ -1240,5 +1685,5 @@ fn compile_to_elf(module: &IrModule, base_addr: i64) -> Elf64Binary with Mut, Pa
     nc = compile_module(nc, module)
 
     let entry = trampoline_offset(nc)
-    finalize_elf64(nc.code, nc.rodata, entry, base_addr, nc.symbols, nc.fn_offsets, nc.fn_count)
+    finalize_elf64(nc.code, nc.rodata, nc.data, entry, base_addr, nc.symbols, nc.fn_offsets, nc.fn_count)
 }
