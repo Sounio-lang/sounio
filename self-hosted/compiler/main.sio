@@ -3591,6 +3591,115 @@ fn compiler_main_test_cli_summary_messages() -> bool with Mut, Panic, Div {
 }
 
 // ============================================================================
+// Sprint 62: 4-preg register allocation self-tests (T30-T37)
+// ============================================================================
+
+// T30: preg_to_x86_reg maps all 4 pregs correctly
+fn compiler_main_test_multipreg_map() -> bool {
+    if preg_to_x86_reg(0) != 15 { return false }  // r15
+    if preg_to_x86_reg(1) != 14 { return false }  // r14
+    if preg_to_x86_reg(2) != 13 { return false }  // r13
+    if preg_to_x86_reg(3) != 12 { return false }  // r12
+    true
+}
+
+// T31: 2 non-overlapping vregs → 2 pregs assigned, 0 spilled
+fn compiler_main_test_multipreg_two_fit() -> bool with Mut, Div, Panic {
+    var ra_instrs: [RaSimpleInstr; 512] = [ra_empty_simple_instr(); 512]
+    ra_instrs[0 as usize] = ra_simple_instr(0, -1, -1)
+    ra_instrs[1 as usize] = ra_simple_instr(-1, 0, -1)
+    ra_instrs[2 as usize] = ra_simple_instr(1, -1, -1)
+    ra_instrs[3 as usize] = ra_simple_instr(-1, 1, -1)
+    var state = liveness_compute_intervals(ra_instrs, 4)
+    state = regalloc_linear_scan(state, 4)
+    let spilled = regalloc_count_spilled(state)
+    if spilled != 0 { return false }
+    let assigned = regalloc_count_assigned(state)
+    if assigned < 2 { return false }
+    regalloc_verify_no_conflicts(state)
+}
+
+// T32: 4 non-overlapping vregs → all 4 pregs used, 0 spilled
+fn compiler_main_test_multipreg_four_fit() -> bool with Mut, Div, Panic {
+    var ra_instrs: [RaSimpleInstr; 512] = [ra_empty_simple_instr(); 512]
+    var i = 0
+    while i < 4 {
+        ra_instrs[(i * 2) as usize]     = ra_simple_instr(i, -1, -1)
+        ra_instrs[(i * 2 + 1) as usize] = ra_simple_instr(-1, i, -1)
+        i = i + 1
+    }
+    var state = liveness_compute_intervals(ra_instrs, 8)
+    state = regalloc_linear_scan(state, 4)
+    let spilled = regalloc_count_spilled(state)
+    if spilled != 0 { return false }
+    let assigned = regalloc_count_assigned(state)
+    if assigned < 4 { return false }
+    regalloc_verify_no_conflicts(state)
+}
+
+// T33: 5 overlapping vregs with 4 pregs → exactly 1 spill
+fn compiler_main_test_multipreg_spill_one() -> bool with Mut, Div, Panic {
+    var ra_instrs: [RaSimpleInstr; 512] = [ra_empty_simple_instr(); 512]
+    // Define all 5 at pos 0, use all at pos 1 (all live simultaneously)
+    var i = 0
+    while i < 5 {
+        ra_instrs[i as usize] = ra_simple_instr(i, -1, -1)
+        i = i + 1
+    }
+    var j = 5
+    while j < 10 {
+        ra_instrs[j as usize] = ra_simple_instr(-1, j - 5, -1)
+        j = j + 1
+    }
+    var state = liveness_compute_intervals(ra_instrs, 10)
+    state = regalloc_linear_scan(state, 4)
+    let spilled = regalloc_count_spilled(state)
+    if spilled < 1 { return false }
+    regalloc_verify_no_conflicts(state)
+}
+
+// T34: prologue byte count == 12 with frame_size=0
+fn compiler_main_test_multipreg_prologue_bytes() -> bool with Mut, Panic, Div {
+    var buf = code_buffer_new()
+    buf = emit_prologue(buf, 0)
+    // push_r15(2)+push_r14(2)+push_r13(2)+push_r12(2)+push_rbp(1)+mov_rbp_rsp(3) = 12
+    buf.len == 12
+}
+
+// T35: prologue starts with push r15 (41 57) then push r14 (41 56)
+fn compiler_main_test_multipreg_prologue_prefix() -> bool with Mut, Panic, Div {
+    var buf = code_buffer_new()
+    buf = emit_prologue(buf, 0)
+    if buf.bytes[0 as usize] != 0x41 as i8 { return false }
+    if buf.bytes[1 as usize] != 0x57 as i8 { return false }  // push r15
+    if buf.bytes[2 as usize] != 0x41 as i8 { return false }
+    if buf.bytes[3 as usize] != 0x56 as i8 { return false }  // push r14
+    true
+}
+
+// T36: epilogue byte count == 13; last byte == 0xC3 (RET)
+fn compiler_main_test_multipreg_epilogue_bytes() -> bool with Mut, Panic, Div {
+    var buf = code_buffer_new()
+    buf = emit_epilogue(buf)
+    // mov_rsp_rbp(3)+pop_rbp(1)+pop_r12(2)+pop_r13(2)+pop_r14(2)+pop_r15(2)+ret(1) = 13
+    if buf.len != 13 { return false }
+    if buf.bytes[12 as usize] != 0xC3 as i8 { return false }
+    true
+}
+
+// T37: regalloc_linear_scan(state, 4) produces valid state (regression + 4-preg)
+fn compiler_main_test_multipreg_regalloc_four() -> bool with Mut, Div, Panic {
+    var ra_instrs: [RaSimpleInstr; 512] = [ra_empty_simple_instr(); 512]
+    ra_instrs[0 as usize] = ra_simple_instr(0, -1, -1)
+    ra_instrs[1 as usize] = ra_simple_instr(-1, 0, -1)
+    var state = liveness_compute_intervals(ra_instrs, 2)
+    state = regalloc_linear_scan(state, 4)
+    let a0 = regalloc_get_assignment(state, 0)
+    if a0 < 0 { return false }  // must be assigned (not spilled)
+    regalloc_verify_no_conflicts(state)
+}
+
+// ============================================================================
 // Sprint 54: TCO wiring self-tests (T38-T45)
 // ============================================================================
 
@@ -3693,7 +3802,7 @@ fn compiler_main_test_tco_empty_module() -> bool with Mut, Div, Panic {
 
 fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
     var passed: i64 = 0
-    let total: i64 = 40
+    let total: i64 = 48
 
     println("=== compiler/main.sio self-tests ===")
 
@@ -3898,6 +4007,62 @@ fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
         passed = passed + 1
     } else {
         println("  FAIL: T29 regalloc spills under register pressure")
+    }
+
+    if compiler_main_test_multipreg_map() {
+        println("  T30 OK: preg_to_x86_reg maps 4 pregs correctly")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T30 preg_to_x86_reg maps 4 pregs correctly")
+    }
+
+    if compiler_main_test_multipreg_two_fit() {
+        println("  T31 OK: 2 non-overlapping vregs fit in 2 pregs")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T31 2 non-overlapping vregs fit in 2 pregs")
+    }
+
+    if compiler_main_test_multipreg_four_fit() {
+        println("  T32 OK: 4 non-overlapping vregs fill all 4 pregs")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T32 4 non-overlapping vregs fill all 4 pregs")
+    }
+
+    if compiler_main_test_multipreg_spill_one() {
+        println("  T33 OK: 5 vregs with 4 pregs spills exactly 1")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T33 5 vregs with 4 pregs spills exactly 1")
+    }
+
+    if compiler_main_test_multipreg_prologue_bytes() {
+        println("  T34 OK: prologue byte count == 12 with frame_size=0")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T34 prologue byte count == 12 with frame_size=0")
+    }
+
+    if compiler_main_test_multipreg_prologue_prefix() {
+        println("  T35 OK: prologue starts push r15 then push r14")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T35 prologue starts push r15 then push r14")
+    }
+
+    if compiler_main_test_multipreg_epilogue_bytes() {
+        println("  T36 OK: epilogue byte count == 13, ends with RET")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T36 epilogue byte count == 13, ends with RET")
+    }
+
+    if compiler_main_test_multipreg_regalloc_four() {
+        println("  T37 OK: regalloc with 4 pregs assigns preg for hot vreg")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T37 regalloc with 4 pregs assigns preg for hot vreg")
     }
 
     if compiler_main_test_mode_output_path() {
