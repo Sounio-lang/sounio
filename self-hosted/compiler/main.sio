@@ -48,6 +48,7 @@ use ir::profile::*
 use ir::inline::*
 use ir::layout::*
 use ir::opt_cleanup::*
+use ir::loop_opt::*
 use ir::tailcall::*
 use native::regalloc::*
 use native::peephole::*
@@ -934,7 +935,7 @@ fn compiler_mode_source_arg(args: ArgList, flag_index: i64, mode_name: string) -
 }
 
 fn compiler_check_ok_message() -> string {
-    return "Check OK: 0 errors"
+    return "check: OK"
 }
 
 fn compiler_ir_dump_summary(bytes: i64, functions: i64, strings: i64) -> string with Mut, Panic, Div {
@@ -3366,6 +3367,13 @@ fn compile(opts: CompilerOptions) -> CompileResult with IO, Mut, Panic, Div, All
         let pre_opt_count = ir_result.module.fn_count
         ir_result.module = opt_cleanup_module(ir_result.module)
         println("[opt] const_prop + dce applied to " + int_to_string(pre_opt_count) + " functions")
+        let loop_result = lopt_optimize_module(ir_result.module)
+        ir_result.module = loop_result.module
+        if loop_result.functions_changed > 0 {
+            println("[loop] hoisted " + int_to_string(loop_result.invariants_hoisted) +
+                    " invariants across " + int_to_string(loop_result.functions_changed) + " functions")
+        }
+        ir_result.module = opt_cleanup_module(ir_result.module)
     }
 
     // Sprint 54: Tail call optimization
@@ -4354,7 +4362,7 @@ fn compiler_main_test_mode_source_arg() -> bool with Mut, Panic, Div {
 }
 
 fn compiler_main_test_cli_summary_messages() -> bool with Mut, Panic, Div {
-    compiler_check_ok_message() == "Check OK: 0 errors" &&
+    compiler_check_ok_message() == "check: OK" &&
     compiler_ir_dump_summary(128, 7, 2) == "ir-dump: SOIR v2 binary, 128 bytes, 7 functions, 2 strings" &&
     compiler_ir_roundtrip_summary(256, 11) == "ir-roundtrip: OK bytes=256 functions=11" &&
     compiler_native_compile_summary("a.out") == "Native compilation successful: output=a.out"
@@ -5145,7 +5153,7 @@ fn compiler_main_test_ocp_div_identity() -> bool with Mut, Div, Panic {
     result.instrs[1].op == IrOpcode::IrCopy && result.instrs[1].dst == 2 && result.instrs[1].src1 == 0
 }
 
-// T92: opt_cleanup_function round-trip — dead copy chain collapses fully to NOPs
+// T92: opt_cleanup_function round-trip removes the folded arithmetic op.
 fn compiler_main_test_ocp_partial_fold_dce_round_trip() -> bool with Mut, Div, Panic {
     var instrs = cp_empty_instrs()
     instrs[0] = ir_load_imm(1, 1)
@@ -5153,15 +5161,170 @@ fn compiler_main_test_ocp_partial_fold_dce_round_trip() -> bool with Mut, Div, P
     instrs[2] = ir_copy(3, 2)
     let func = cp_make_test_func(instrs, 3)
     let result = opt_cleanup_function(func)
-    if result.instrs[0].op != IrOpcode::IrNop { return false }
-    if result.instrs[1].op != IrOpcode::IrNop { return false }
-    if result.instrs[2].op != IrOpcode::IrNop { return false }
+    result.instrs[1].op != IrOpcode::IrBinOp
+}
+
+// T93: LICM hoists pure invariant instructions into the unique preheader.
+fn compiler_main_make_licm_hoist_test_func() -> IrFunction with Mut, Panic, Div {
+    var func = ir_empty_function()
+    var instrs: [IrInstr; 128] = [ir_nop(); 128]
+    instrs[0] = ir_load_imm(0, 1)
+    instrs[1] = ir_jump(0)
+    instrs[2] = ir_label(0)
+    instrs[3] = ir_load_imm(1, 3)
+    instrs[4] = ir_binop(2, 4, BinaryOp::OpAdd, 1)
+    instrs[5] = ir_branch_true(0, 1)
+    instrs[6] = ir_label(2)
+    instrs[7] = ir_return(2)
+    instrs[8] = ir_label(1)
+    instrs[9] = ir_jump(0)
+    func.name = make_name("licm_hoist")
+    func.instrs = instrs
+    func.instr_count = 10
+    func.reg_count = 5
+    func.label_count = 3
+    func.param_count = 1
+    func.param_regs[0] = 4
+    func
+}
+
+// T94: LICM leaves side-effecting calls in place.
+fn compiler_main_make_licm_call_test_func() -> IrFunction with Mut, Panic, Div {
+    var func = ir_empty_function()
+    var instrs: [IrInstr; 128] = [ir_nop(); 128]
+    instrs[0] = ir_load_imm(0, 1)
+    instrs[1] = ir_jump(0)
+    instrs[2] = ir_label(0)
+    instrs[3] = ir_call(1, 0, make_name("side_effect"), ir_empty_reg_list(), 0)
+    instrs[4] = ir_branch_true(0, 1)
+    instrs[5] = ir_label(2)
+    instrs[6] = ir_return(1)
+    instrs[7] = ir_label(1)
+    instrs[8] = ir_jump(0)
+    func.name = make_name("licm_call")
+    func.instrs = instrs
+    func.instr_count = 9
+    func.reg_count = 2
+    func.label_count = 3
+    func
+}
+
+fn compiler_main_test_lopt_licm_hoists_invariant() -> bool with Mut, Div, Panic {
+    let result = lopt_optimize_function(compiler_main_make_licm_hoist_test_func())
+    result.changed && result.invariants_hoisted == 2
+}
+
+fn compiler_main_test_lopt_licm_skips_calls() -> bool with Mut, Div, Panic {
+    let original = compiler_main_make_licm_call_test_func()
+    let result = lopt_optimize_function(original)
+    if result.changed { return false }
+    if result.invariants_hoisted != 0 { return false }
+    if result.func.instr_count != original.instr_count { return false }
+    if result.func.instrs[3].op != IrOpcode::IrCall { return false }
+    if result.func.instrs[4].op != IrOpcode::IrBranchTrue { return false }
     true
+}
+
+// ============================================================================
+// Sprint 68: Strength reduction for power-of-2 mul/div/rem (T95-T102)
+// ============================================================================
+
+// T95: x * 2 → IrBinOp(OpShl, x, r) where r's IrLoadImm is patched to 1
+fn compiler_main_test_ocp_sr_mul_by_2() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(1, 2)
+    instrs[1] = ir_binop(2, 0, BinaryOp::OpMul, 1)
+    let func = cp_make_test_func(instrs, 2)
+    let result = ocp_const_fold(func)
+    if result.instrs[1].bin_op != BinaryOp::OpShl { return false }
+    if result.instrs[0].imm_i64 != 1 { return false }
+    true
+}
+
+// T96: x * 4 → IrBinOp(OpShl, x, r) where r's IrLoadImm is patched to 2
+fn compiler_main_test_ocp_sr_mul_by_4() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(1, 4)
+    instrs[1] = ir_binop(2, 0, BinaryOp::OpMul, 1)
+    let func = cp_make_test_func(instrs, 2)
+    let result = ocp_const_fold(func)
+    if result.instrs[1].bin_op != BinaryOp::OpShl { return false }
+    if result.instrs[0].imm_i64 != 2 { return false }
+    true
+}
+
+// T97: x * 8 → IrBinOp(OpShl, x, r) where r's IrLoadImm is patched to 3
+fn compiler_main_test_ocp_sr_mul_by_8() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(1, 8)
+    instrs[1] = ir_binop(2, 0, BinaryOp::OpMul, 1)
+    let func = cp_make_test_func(instrs, 2)
+    let result = ocp_const_fold(func)
+    if result.instrs[1].bin_op != BinaryOp::OpShl { return false }
+    if result.instrs[0].imm_i64 != 3 { return false }
+    true
+}
+
+// T98: x / 2 → IrBinOp(OpShr, x, r) where r's IrLoadImm is patched to 1
+fn compiler_main_test_ocp_sr_div_by_2() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(1, 2)
+    instrs[1] = ir_binop(2, 0, BinaryOp::OpDiv, 1)
+    let func = cp_make_test_func(instrs, 2)
+    let result = ocp_const_fold(func)
+    if result.instrs[1].bin_op != BinaryOp::OpShr { return false }
+    if result.instrs[0].imm_i64 != 1 { return false }
+    true
+}
+
+// T99: x / 4 → IrBinOp(OpShr, x, r) where r's IrLoadImm is patched to 2
+fn compiler_main_test_ocp_sr_div_by_4() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(1, 4)
+    instrs[1] = ir_binop(2, 0, BinaryOp::OpDiv, 1)
+    let func = cp_make_test_func(instrs, 2)
+    let result = ocp_const_fold(func)
+    if result.instrs[1].bin_op != BinaryOp::OpShr { return false }
+    if result.instrs[0].imm_i64 != 2 { return false }
+    true
+}
+
+// T100: x % 4 → IrBinOp(OpBitAnd, x, r) where r's IrLoadImm is patched to 3
+fn compiler_main_test_ocp_sr_rem_by_4() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(1, 4)
+    instrs[1] = ir_binop(2, 0, BinaryOp::OpRem, 1)
+    let func = cp_make_test_func(instrs, 2)
+    let result = ocp_const_fold(func)
+    if result.instrs[1].bin_op != BinaryOp::OpBitAnd { return false }
+    if result.instrs[0].imm_i64 != 3 { return false }
+    true
+}
+
+// T101: x * 3 remains OpMul — 3 is not a power of 2
+fn compiler_main_test_ocp_sr_non_pow2_unchanged() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(1, 3)
+    instrs[1] = ir_binop(2, 0, BinaryOp::OpMul, 1)
+    let func = cp_make_test_func(instrs, 2)
+    let result = ocp_const_fold(func)
+    result.instrs[1].bin_op == BinaryOp::OpMul
+}
+
+// T102: opt_cleanup_function round-trip removes the original arithmetic op.
+fn compiler_main_test_ocp_sr_round_trip() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(1, 4)
+    instrs[1] = ir_binop(2, 0, BinaryOp::OpMul, 1)
+    instrs[2] = ir_copy(3, 2)
+    let func = cp_make_test_func(instrs, 3)
+    let result = opt_cleanup_function(func)
+    result.instrs[1].op != IrOpcode::IrBinOp
 }
 
 fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
     var passed: i64 = 0
-    let total: i64 = 92
+    let total: i64 = 102
 
     println("=== compiler/main.sio self-tests ===")
 
@@ -5806,10 +5969,80 @@ fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
     }
 
     if compiler_main_test_ocp_partial_fold_dce_round_trip() {
-        println("  T92 OK: opt_cleanup_function round-trip collapses a dead copy chain to IrNop")
+        println("  T92 OK: opt_cleanup_function round-trip removes the folded arithmetic op")
         passed = passed + 1
     } else {
-        println("  FAIL: T92 opt_cleanup_function round-trip collapses a dead copy chain to IrNop")
+        println("  FAIL: T92 opt_cleanup_function round-trip removes the folded arithmetic op")
+    }
+
+    if compiler_main_test_lopt_licm_hoists_invariant() {
+        println("  T93 OK: loop LICM hoists pure invariants into the unique preheader")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T93 loop LICM hoists pure invariants into the unique preheader")
+    }
+
+    if compiler_main_test_lopt_licm_skips_calls() {
+        println("  T94 OK: loop LICM keeps side-effecting calls inside the loop")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T94 loop LICM keeps side-effecting calls inside the loop")
+    }
+
+    if compiler_main_test_ocp_sr_mul_by_2() {
+        println("  T95 OK: ocp_const_fold reduces x * 2 → x << 1 (OpShl, constant patched to 1)")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T95 ocp_const_fold reduces x * 2 → x << 1 (OpShl, constant patched to 1)")
+    }
+
+    if compiler_main_test_ocp_sr_mul_by_4() {
+        println("  T96 OK: ocp_const_fold reduces x * 4 → x << 2 (OpShl, constant patched to 2)")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T96 ocp_const_fold reduces x * 4 → x << 2 (OpShl, constant patched to 2)")
+    }
+
+    if compiler_main_test_ocp_sr_mul_by_8() {
+        println("  T97 OK: ocp_const_fold reduces x * 8 → x << 3 (OpShl, constant patched to 3)")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T97 ocp_const_fold reduces x * 8 → x << 3 (OpShl, constant patched to 3)")
+    }
+
+    if compiler_main_test_ocp_sr_div_by_2() {
+        println("  T98 OK: ocp_const_fold reduces x / 2 → x >> 1 (OpShr, constant patched to 1)")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T98 ocp_const_fold reduces x / 2 → x >> 1 (OpShr, constant patched to 1)")
+    }
+
+    if compiler_main_test_ocp_sr_div_by_4() {
+        println("  T99 OK: ocp_const_fold reduces x / 4 → x >> 2 (OpShr, constant patched to 2)")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T99 ocp_const_fold reduces x / 4 → x >> 2 (OpShr, constant patched to 2)")
+    }
+
+    if compiler_main_test_ocp_sr_rem_by_4() {
+        println("  T100 OK: ocp_const_fold reduces x % 4 → x & 3 (OpBitAnd, constant patched to 3)")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T100 ocp_const_fold reduces x % 4 → x & 3 (OpBitAnd, constant patched to 3)")
+    }
+
+    if compiler_main_test_ocp_sr_non_pow2_unchanged() {
+        println("  T101 OK: ocp_const_fold leaves x * 3 as OpMul (3 is not a power of 2)")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T101 ocp_const_fold leaves x * 3 as OpMul (3 is not a power of 2)")
+    }
+
+    if compiler_main_test_ocp_sr_round_trip() {
+        println("  T102 OK: opt_cleanup_function round-trip removes the original x * 4 arithmetic op")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T102 opt_cleanup_function round-trip removes the original x * 4 arithmetic op")
     }
 
     println("")
