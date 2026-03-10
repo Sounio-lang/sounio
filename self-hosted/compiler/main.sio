@@ -36,6 +36,7 @@ use parser::parser::{parser_last_error_count}
 use ir::opt_strategy::{ir_opt_apply_strategy, ir_opt_find_return_vreg, ir_opt_max_label, ir_opt_max_vreg}
 use ir::lower::{ir_patch_validated_calls}
 use ir::profile::*
+use ir::inline::*
 
 // ============================================================================
 // STRING UTILITIES
@@ -2320,6 +2321,13 @@ fn compile(opts: CompilerOptions) -> CompileResult with IO, Mut, Panic, Div, All
         }
     }
 
+    // Sprint 49: Apply inlining pass when -O is set
+    if opts.optimize {
+        let pre_inline_count = ir_result.module.fn_count
+        ir_result.module = inl_run_pass(ir_result.module)
+        println("[inline] pass complete: " + int_to_string(pre_inline_count) + " functions processed")
+    }
+
     let exit_code = compile_multimodule_native_with_ir(
         opts.input_file,
         ir_result.module,
@@ -2951,9 +2959,92 @@ fn compiler_main_test_sprof_promotion_target_no_change() -> bool {
     true
 }
 
+// Sprint 49: verify strategy-aware benefit boost in inline cost model
+fn compiler_main_test_inline_strategy_boost() -> bool with Mut, Div, Panic {
+    // Build a small leaf callee function
+    var callee = ir_empty_function()
+    var callee_name = empty_name()
+    callee_name.buf[0] = 102 as i8  // 'f'
+    callee_name.len = 1
+    callee.name = callee_name
+    callee.instr_count = 5
+    callee.compile_strategy = 0  // STANDARD
+
+    // Analyze with STANDARD strategy
+    let info_std = inl_analyze_function(callee, 0)
+    if info_std.compile_strategy != 0 { return false }
+
+    // Analyze with AGGRESSIVE strategy
+    callee.compile_strategy = 1
+    let info_agg = inl_analyze_function(callee, 0)
+    if info_agg.compile_strategy != 1 { return false }
+
+    // Build context with the STANDARD callee
+    var ctx_std = inl_context_new()
+    ctx_std.func_infos[0] = info_std
+    ctx_std.func_info_count = 1
+
+    // Add a call site targeting callee 0
+    var site = InlCallSite { caller_id: 1, callee_id: 0, call_instr_idx: 0, arg_count: 0, benefit_score: 0 }
+    ctx_std.call_sites[0] = site
+    ctx_std.call_site_count = 1
+
+    let score_std = inl_compute_benefit(ctx_std, 0)
+
+    // Build context with the AGGRESSIVE callee
+    var ctx_agg = inl_context_new()
+    ctx_agg.func_infos[0] = info_agg
+    ctx_agg.func_info_count = 1
+    ctx_agg.call_sites[0] = site
+    ctx_agg.call_site_count = 1
+
+    let score_agg = inl_compute_benefit(ctx_agg, 0)
+
+    // AGGRESSIVE callee should have higher benefit
+    if score_agg <= score_std { return false }
+    // Difference should be exactly INL_STRATEGY_AGGRESSIVE_BONUS (80)
+    if score_agg - score_std != 80 { return false }
+
+    true
+}
+
+// Sprint 49: verify inl_run_pass returns valid module
+fn compiler_main_test_inline_pass_returns_module() -> bool with Mut, Div, Panic {
+    var module = ir_empty_module()
+
+    // Add a small callee function
+    var callee = ir_empty_function()
+    var callee_name = empty_name()
+    callee_name.buf[0] = 103 as i8  // 'g'
+    callee_name.len = 1
+    callee.name = callee_name
+    callee.instrs[0] = ir_return(0)
+    callee.instr_count = 1
+    callee.reg_count = 1
+    module.functions[0] = callee
+
+    // Add a caller function
+    var caller = ir_empty_function()
+    var caller_name = empty_name()
+    caller_name.buf[0] = 109 as i8  // 'm'
+    caller_name.len = 1
+    caller.name = caller_name
+    caller.instrs[0] = ir_return(0)
+    caller.instr_count = 1
+    caller.reg_count = 1
+    module.functions[1] = caller
+
+    module.fn_count = 2
+
+    let result = inl_run_pass(module)
+    if result.fn_count != 2 { return false }
+
+    true
+}
+
 fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div {
     var passed: i64 = 0
-    let total: i64 = 21
+    let total: i64 = 23
 
     println("=== compiler/main.sio self-tests ===")
 
@@ -3102,6 +3193,20 @@ fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div {
         passed = passed + 1
     } else {
         println("  FAIL: T21 sprof promotion target no change")
+    }
+
+    if compiler_main_test_inline_strategy_boost() {
+        println("  T22 OK: inline strategy boost")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T22 inline strategy boost")
+    }
+
+    if compiler_main_test_inline_pass_returns_module() {
+        println("  T23 OK: inline pass returns module")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T23 inline pass returns module")
     }
 
     println("")

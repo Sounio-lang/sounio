@@ -2,7 +2,7 @@
 topic_id: repo.docs.qnn.programming-guide
 authority: repo_only
 audience: users
-last_validated: 2026-03-07
+last_validated: 2026-03-10
 validated_by: A2
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.qnn.programming-guide
 -->
@@ -11,7 +11,15 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.qnn.programmin
 
 > *In 1843, William Rowan Hamilton carved the quaternion multiplication rules into Broom Bridge in Dublin: i² = j² = k² = ijk = −1. Nearly two centuries later, these hypercomplex numbers unlock 4× parameter efficiency in neural networks, naturally encoding the rotations and orientations that pervade 3D vision, robotics, and bioinformatics.*
 
-Sounio brings quaternionic neural networks (QNNs) to first-class citizenship—not as a library bolted onto real-valued tensors, but as native types with compiler-optimized operations, SIMD vectorization, and GPU acceleration.
+Sounio brings quaternionic neural networks (QNNs) into the language and source
+tree as native types and compiler-oriented operations. Public execution claims,
+especially GPU claims, still need to be tied to the exact checked artifact being
+discussed rather than inferred from implementation breadth alone.
+
+> Current public status: the checked JIT artifact is the default docs entry
+> point; the checked GPU artifact is used for verified GPU syntax and PTX
+> emission through `build --backend gpu`. Do not read this guide as proof that
+> every QNN workflow already runs on the checked public GPU artifact.
 
 ---
 

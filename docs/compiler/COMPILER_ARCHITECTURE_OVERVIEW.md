@@ -18,19 +18,28 @@ There are two views you need to hold at the same time:
 - implementation view: learn the compiler from `self-hosted/`
 - public behavior view: validate claims against the checked compiler artifact under `artifacts/omega/`
 
-The checked artifact used by the docs is:
+The checked artifacts used by the docs are:
 
 ```bash
 artifacts/omega/souc-bin/souc-linux-x86_64-jit
+artifacts/omega/souc-bin/souc-linux-x86_64-gpu
 ```
 
-On the current snapshot, `souc info` reports:
+On the current snapshot, `souc info` for the default JIT profile reports:
 
 - version `1.0.0-beta.4`
 - Cranelift JIT enabled
 - LLVM disabled in the checked artifact
-- GPU codegen disabled in the checked artifact
+- GPU codegen disabled in the checked JIT artifact
 - LSP, SMT, ontology, distributed, and package-manager features disabled in the checked artifact
+
+For the separate checked GPU profile, `souc info` reports:
+
+- version `1.0.0-beta.4`
+- GPU codegen enabled
+- Cranelift JIT disabled
+- public PTX emission through `build --backend gpu`
+- the same disabled feature families unless you rebuild a different artifact
 
 ## 2. Pipeline map
 
@@ -111,7 +120,9 @@ Tooling-adjacent subsystems live nearby:
 - `self-hosted/bootstrap/` for multi-stage verification work
 - `self-hosted/tools/` for support tooling
 
-The repo therefore contains more backend and tooling work than the checked artifact exposes. Always separate "implemented in source" from "enabled in the artifact you are discussing."
+The repo therefore contains more backend and tooling work than any one checked
+artifact exposes. Always separate "implemented in source" from "enabled in the
+artifact you are discussing."
 
 ## 7. Evidence-backed status
 
@@ -136,15 +147,17 @@ These artifacts matter more than aspirational architecture diagrams when you are
 If you are new to the implementation:
 
 1. run `artifacts/omega/souc-bin/souc-linux-x86_64-jit info`
-2. read `self-hosted/compiler/main.sio`
-3. inspect the relevant subsystem directory under `self-hosted/`
-4. confirm the claim with a run-pass or compile-fail fixture
-5. read the committed status JSON before documenting stdlib or science support
+2. run `artifacts/omega/souc-bin/souc-linux-x86_64-gpu info` if the claim touches GPU codegen
+3. read `self-hosted/compiler/main.sio`
+4. inspect the relevant subsystem directory under `self-hosted/`
+5. confirm the claim with a run-pass, compile-fail, or `build --backend gpu` fixture
+6. read the committed status JSON before documenting stdlib or science support
 
 ## 9. Common documentation mistakes to avoid
 
 - describing the active compiler as primarily `crates/souc/src/*`
 - claiming backend support from source-tree presence alone
+- describing GPU as globally disabled because the default JIT profile reports it off
 - assuming all stdlib modules are equally callable
 - treating `check` success as proof that every runtime and codegen path is equally mature
 

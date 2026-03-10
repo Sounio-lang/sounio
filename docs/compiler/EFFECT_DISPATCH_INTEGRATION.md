@@ -11,6 +11,11 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.compiler.effec
 
 This document describes the unified effect dispatch system and how it's integrated across all backends.
 
+This is an implementation architecture document. It does not mean every backend
+path described here is exposed by the checked public compiler artifacts. Public
+docs still need to distinguish source-tree integration from artifact-backed CLI
+support.
+
 ## Architecture
 
 ```text

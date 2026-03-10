@@ -20,6 +20,11 @@
 //   Cooper & Torczon: "Engineering a Compiler" (2011), Ch. 8.7
 //   Ayers, Gottlieb, Schooler: "Aggressive Inlining" (1997)
 
+module ir::inline
+
+use ir::ir::*
+use parser::ast::{Name, empty_name}
+
 // ============================================================================
 // Section 1: Constants
 // ============================================================================
@@ -51,6 +56,10 @@ let INL_LEAF_BONUS: i64 = 3
 // invocations get a benefit boost
 let INL_HOT_THRESHOLD: i64 = 5
 
+// Sprint 49: Strategy-aware benefit bonuses from PGO
+let INL_STRATEGY_AGGRESSIVE_BONUS: i64 = 80
+let INL_STRATEGY_PRECISION_BONUS: i64 = 40
+
 // ============================================================================
 // Section 2: Structs
 // ============================================================================
@@ -73,6 +82,7 @@ struct InlFuncInfo {
     is_leaf: bool,
     has_loops: bool,
     estimated_cost: i64,
+    compile_strategy: i64,
 }
 
 // An inlining decision for a specific call site
@@ -150,6 +160,7 @@ fn inl_func_info_new(fid: i64) -> InlFuncInfo {
         is_leaf: true,
         has_loops: false,
         estimated_cost: 0,
+        compile_strategy: 0,
     }
 }
 
@@ -162,6 +173,7 @@ fn inl_default_func_info() -> InlFuncInfo {
         is_leaf: true,
         has_loops: false,
         estimated_cost: 0,
+        compile_strategy: 0,
     }
 }
 
@@ -214,6 +226,50 @@ fn inl_order_new() -> InlOrder {
 }
 
 // ============================================================================
+// Section 3b: Local opcode comparison (module-scoped, avoids flat-namespace dep)
+// ============================================================================
+
+fn inl_matches_opcode(op: IrOpcode, target: IrOpcode) -> bool {
+    match op {
+        IrOpcode::IrLoadImm => match target { IrOpcode::IrLoadImm => true, _ => false },
+        IrOpcode::IrLoadFloat => match target { IrOpcode::IrLoadFloat => true, _ => false },
+        IrOpcode::IrLoadBool => match target { IrOpcode::IrLoadBool => true, _ => false },
+        IrOpcode::IrLoadString => match target { IrOpcode::IrLoadString => true, _ => false },
+        IrOpcode::IrCopy => match target { IrOpcode::IrCopy => true, _ => false },
+        IrOpcode::IrBinOp => match target { IrOpcode::IrBinOp => true, _ => false },
+        IrOpcode::IrUnaryOp => match target { IrOpcode::IrUnaryOp => true, _ => false },
+        IrOpcode::IrCall => match target { IrOpcode::IrCall => true, _ => false },
+        IrOpcode::IrReturn => match target { IrOpcode::IrReturn => true, _ => false },
+        IrOpcode::IrJump => match target { IrOpcode::IrJump => true, _ => false },
+        IrOpcode::IrBranchTrue => match target { IrOpcode::IrBranchTrue => true, _ => false },
+        IrOpcode::IrBranchFalse => match target { IrOpcode::IrBranchFalse => true, _ => false },
+        IrOpcode::IrLabel => match target { IrOpcode::IrLabel => true, _ => false },
+        IrOpcode::IrNop => match target { IrOpcode::IrNop => true, _ => false },
+        _ => false,
+    }
+}
+
+fn opcodes_equal(a: IrOpcode, b: IrOpcode) -> bool {
+    match a {
+        IrOpcode::IrCall => inl_matches_opcode(b, IrOpcode::IrCall),
+        IrOpcode::IrReturn => inl_matches_opcode(b, IrOpcode::IrReturn),
+        IrOpcode::IrJump => inl_matches_opcode(b, IrOpcode::IrJump),
+        IrOpcode::IrBranchTrue => inl_matches_opcode(b, IrOpcode::IrBranchTrue),
+        IrOpcode::IrBranchFalse => inl_matches_opcode(b, IrOpcode::IrBranchFalse),
+        IrOpcode::IrLabel => inl_matches_opcode(b, IrOpcode::IrLabel),
+        IrOpcode::IrNop => inl_matches_opcode(b, IrOpcode::IrNop),
+        IrOpcode::IrLoadImm => inl_matches_opcode(b, IrOpcode::IrLoadImm),
+        IrOpcode::IrLoadFloat => inl_matches_opcode(b, IrOpcode::IrLoadFloat),
+        IrOpcode::IrLoadBool => inl_matches_opcode(b, IrOpcode::IrLoadBool),
+        IrOpcode::IrLoadString => inl_matches_opcode(b, IrOpcode::IrLoadString),
+        IrOpcode::IrCopy => inl_matches_opcode(b, IrOpcode::IrCopy),
+        IrOpcode::IrBinOp => inl_matches_opcode(b, IrOpcode::IrBinOp),
+        IrOpcode::IrUnaryOp => inl_matches_opcode(b, IrOpcode::IrUnaryOp),
+        _ => false,
+    }
+}
+
+// ============================================================================
 // Section 4: Opcode classification helpers
 // ============================================================================
 
@@ -261,6 +317,7 @@ fn inl_is_nop(instr: IrInstr) -> bool {
 fn inl_analyze_function(func: IrFunction, func_id: i64) -> InlFuncInfo with Mut, Div, Panic {
     var info = inl_func_info_new(func_id)
     info.instr_count = func.instr_count
+    info.compile_strategy = func.compile_strategy
 
     var i: i64 = 0
     while i < func.instr_count {
@@ -484,6 +541,14 @@ fn inl_compute_benefit(ctx: InlContext, site_idx: i64) -> i64 with Mut, Div, Pan
     // Leaf function bonus: no further call overhead
     if callee_info.is_leaf {
         score = score + 30 * INL_LEAF_BONUS
+    }
+
+    // Sprint 49: Strategy-aware benefit boost from PGO
+    if callee_info.compile_strategy == 1 {
+        score = score + INL_STRATEGY_AGGRESSIVE_BONUS
+    }
+    if callee_info.compile_strategy == 2 {
+        score = score + INL_STRATEGY_PRECISION_BONUS
     }
 
     // Penalty for large functions

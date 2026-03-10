@@ -59,6 +59,13 @@ fn lowerer_new_probe() -> Lowerer with Alloc, Mut {
     lo
 }
 
+fn ir_param_list_count(params: Option<Box<ParamList>>) -> i64 with Alloc {
+    match params {
+        Some(pl) => 1 + ir_param_list_count((*pl).tail),
+        None => 0,
+    }
+}
+
 impl Lowerer {
     fn current_fn_compile_strategy(self) -> i64 with Mut, Panic, Div {
         if self.current_fn < 0 || self.current_fn >= self.module.fn_count {
@@ -1122,6 +1129,87 @@ impl Lowerer {
         }
     }
 
+    fn preseed_program_function_summaries(self, items: Option<Box<ItemList>>, skip_name: Name) -> Lowerer with Mut, Panic, Div, Alloc, IO {
+        match items {
+            Some(list) => {
+                var lo = self
+                let item = (*list).head
+                if item.kind == ItemKind::ItemFn {
+                    if !ir_name_eq(item.name, skip_name) {
+                        lo = lo.preseed_fn_item_summary(item.name, item.fn_def)
+                    }
+                } else if item.kind == ItemKind::ItemImpl {
+                    match item.impl_def {
+                        Some(id) => {
+                            lo = lo.preseed_impl_method_summaries(item.name, (*id).methods, skip_name)
+                        }
+                        _ => {}
+                    }
+                }
+                lo.preseed_program_function_summaries((*list).tail, skip_name)
+            }
+            _ => self,
+        }
+    }
+
+    fn preseed_fn_item_summary(self, name: Name, opt: Option<Box<FnDef>>) -> Lowerer with Mut, Panic, Div, Alloc, IO {
+        match opt {
+            Some(fd) => {
+                let pair = self.find_or_add_fn_id(name)
+                var lo = pair.0
+                let fn_id = pair.1
+                if fn_id < 0 {
+                    return lo.report_error()
+                }
+
+                let strategy = lo.ir_compute_strategy_from_ast((*fd).return_type, (*fd).effects)
+                var m = lo.module
+                var f = m.functions[fn_id as usize]
+                f.compile_strategy = strategy
+                f.param_count = ir_param_list_count((*fd).params)
+                if strategy == IR_STRATEGY_INSTRUMENTED {
+                    f.param_count = f.param_count + 1
+                }
+                f.param_regs = [IR_INVALID_REG; 64]
+                f.instr_count = 0
+                f.reg_count = 0
+                f.label_count = 0
+                m.functions[fn_id as usize] = f
+                lo.module = m
+                lo
+            }
+            _ => self,
+        }
+    }
+
+    fn preseed_impl_method_summaries(self, type_name: Name, methods: Option<Box<ItemList>>, skip_name: Name) -> Lowerer with Mut, Panic, Div, Alloc, IO {
+        match methods {
+            Some(list) => {
+                var lo = self
+                let head = (*list).head
+                if head.kind == ItemKind::ItemFn {
+                    let mangled = ir_mangle_method_name(type_name, head.name)
+                    if !ir_name_eq(mangled, skip_name) {
+                        lo = lo.preseed_fn_item_summary(mangled, head.fn_def)
+                    }
+                }
+                lo.preseed_impl_method_summaries(type_name, (*list).tail, skip_name)
+            }
+            _ => self,
+        }
+    }
+
+    fn lower_program_items_filtered(self, items: Option<Box<ItemList>>, target_name: Name) -> Lowerer with Mut, Panic, Div, Alloc, IO {
+        match items {
+            Some(list) => {
+                let tail_items: Option<Box<ItemList>> = (*list).tail
+                let lo1 = self.lower_item_filtered((*list).head, target_name)
+                lo1.lower_program_items_filtered(tail_items, target_name)
+            }
+            _ => self,
+        }
+    }
+
     fn lower_item(self, item: Item) -> Lowerer with Mut, Panic, Div, Alloc, IO {
         let k = item.kind
         let name = item.name
@@ -1152,6 +1240,37 @@ impl Lowerer {
         }
     }
 
+    fn lower_item_filtered(self, item: Item, target_name: Name) -> Lowerer with Mut, Panic, Div, Alloc, IO {
+        let k = item.kind
+        let name = item.name
+        if k == ItemKind::ItemFn {
+            if ir_name_eq(name, target_name) {
+                self.lower_fn_item(name, item.fn_def)
+            } else {
+                self
+            }
+        } else if k == ItemKind::ItemStruct {
+            match item.struct_def {
+                Some(sd) => self.register_struct_fields(name, (*sd).fields, 0),
+                _ => self,
+            }
+        } else if k == ItemKind::ItemEnum {
+            match item.enum_def {
+                Some(ed) => self.register_enum_variants(name, (*ed).variants, 0),
+                _ => self,
+            }
+        } else if k == ItemKind::ItemImpl {
+            match item.impl_def {
+                Some(id) => self.lower_impl_methods_filtered(name, (*id).methods, target_name),
+                _ => self,
+            }
+        } else if k == ItemKind::ItemTypeAlias {
+            self
+        } else {
+            self
+        }
+    }
+
     // Phase 3.3: Lower impl block methods as mangled free functions
     // e.g., `impl Checker { fn check_expr(self, e: Expr) -> ... }`
     //     becomes `Checker_check_expr(self: Checker, e: Expr) -> ...`
@@ -1166,6 +1285,23 @@ impl Lowerer {
                     lo = lo.lower_fn_item(mangled, head.fn_def)
                 }
                 lo.lower_impl_methods(type_name, (*list).tail)
+            }
+            _ => self,
+        }
+    }
+
+    fn lower_impl_methods_filtered(self, type_name: Name, methods: Option<Box<ItemList>>, target_name: Name) -> Lowerer with Mut, Panic, Div, Alloc, IO {
+        match methods {
+            Some(list) => {
+                var lo = self
+                let head = (*list).head
+                if head.kind == ItemKind::ItemFn {
+                    let mangled = ir_mangle_method_name(type_name, head.name)
+                    if ir_name_eq(mangled, target_name) {
+                        lo = lo.lower_fn_item(mangled, head.fn_def)
+                    }
+                }
+                lo.lower_impl_methods_filtered(type_name, (*list).tail, target_name)
             }
             _ => self,
         }
@@ -3082,6 +3218,22 @@ fn lower_program_to_ir(prog: Program) -> IrLowerResult with Mut, Panic, Div, All
 fn lower_program_to_ir_probe(prog: Program) -> IrLowerResult with Mut, Panic, Div, Alloc, IO {
     let lo = lowerer_new_probe()
     var lo2 = lo.lower_program_items(prog.items)
+    var patch_stats = ir_empty_validated_patch_stats()
+    if !lo2.had_error {
+        patch_stats = ir_patch_validated_calls(&! lo2.module)
+    }
+    IrLowerResult {
+        module: *lo2.module,
+        error_count: lo2.error_count,
+        had_error: lo2.had_error,
+        patch_stats: patch_stats,
+    }
+}
+
+fn lower_program_to_ir_probe_callsite(prog: Program, caller_name: Name) -> IrLowerResult with Mut, Panic, Div, Alloc, IO {
+    let lo = lowerer_new_probe()
+    var lo2 = lo.preseed_program_function_summaries(prog.items, caller_name)
+    lo2 = lo2.lower_program_items_filtered(prog.items, caller_name)
     var patch_stats = ir_empty_validated_patch_stats()
     if !lo2.had_error {
         patch_stats = ir_patch_validated_calls(&! lo2.module)

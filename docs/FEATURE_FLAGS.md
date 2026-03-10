@@ -2,180 +2,79 @@
 topic_id: repo.docs.feature-flags
 authority: repo_only
 audience: users
-last_validated: 2026-03-07
+last_validated: 2026-03-10
 validated_by: A2
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.feature-flags
 -->
 
 # Sounio Feature Flags Reference
 
-This document provides a comprehensive reference for all Cargo feature flags available in the Sounio compiler.
+This page now describes the real capability surface users can rely on in this
+repository. The public compiler contract is artifact-based, not "run one root
+Cargo build and inherit every feature flag from the README".
 
-## Table of Contents
+## 1. Public profiles you can verify today
 
-- [Overview](#overview)
-- [Feature Matrix](#feature-matrix)
-- [Code Generation Backends](#code-generation-backends)
-- [Optional Features](#optional-features)
-- [Build Profiles](#build-profiles)
-- [Common Configurations](#common-configurations)
+The checked compiler artifacts live under `artifacts/omega/souc-bin/`.
 
----
+| Profile | Artifact | What `souc info` proves |
+|---------|----------|-------------------------|
+| Default JIT profile | `souc-linux-x86_64-jit` | Cranelift JIT enabled; LLVM and GPU codegen disabled |
+| GPU profile | `souc-linux-x86_64-gpu` | GPU codegen enabled; Cranelift JIT disabled; PTX emission via `build --backend gpu` |
 
-## Overview
-
-Sounio uses Cargo feature flags to enable optional functionality. This allows users to build only what they need, reducing compile time and binary size.
-
-**Default build** (no features):
-```bash
-cargo build --release
-```
-
-The default build includes the core compiler (lexer, parser, type checker, HIR/SIR/HLIR) but no code generation backends.
-
----
-
-## Feature Matrix
-
-| Feature | Description | Dependencies | Build Time Impact |
-|---------|-------------|--------------|-------------------|
-| `jit` | Cranelift JIT compilation | Cranelift crates | +30s |
-| `llvm` | LLVM native codegen (default: LLVM 15) | LLVM 15, libzstd | +60s |
-| `llvm14` | LLVM 14 backend | LLVM 14, libzstd | +60s |
-| `llvm15` | LLVM 15 backend | LLVM 15, libzstd | +60s |
-| `llvm16` | LLVM 16 backend | LLVM 16, libzstd | +60s |
-| `llvm17` | LLVM 17 backend | LLVM 17, libzstd | +60s |
-| `gpu` | GPU codegen (PTX, SPIR-V) | rspirv, spirv | +15s |
-| `cuda` | CUDA runtime execution | cudarc, CUDA toolkit | +20s |
-| `smt` | Z3 refinement type verification | z3, cmake | +45s |
-| `lsp` | Language Server Protocol | tower-lsp, tokio | +25s |
-| `ontology` | Scientific ontology (15M+ terms) | rusqlite | +10s |
-| `ontology-build` | OWL/RDF parsing for ontology builds | rio_turtle, rio_xml | +10s |
-| `pkg` | Package manager with registry | tokio, reqwest, tar | +20s |
-| `distributed` | Distributed build system | axum, hyper, tower | +25s |
-| `wasm` | WebAssembly target | wasm-bindgen | +15s |
-| `llm` | LLM integration | regex | +5s |
-| `glm` | GLM-4.7 ML-guided optimization | regex, lazy_static | +5s |
-| `full` | All features combined | All dependencies | +180s |
-
----
-
-## Code Generation Backends
-
-### Cranelift JIT (`jit`)
-
-Fast JIT compilation using Cranelift. Recommended for development and REPL.
+Recommended verification:
 
 ```bash
-cargo build --features jit
+./artifacts/omega/souc-bin/souc-linux-x86_64-jit info
+./artifacts/omega/souc-bin/souc-linux-x86_64-gpu info
+./artifacts/omega/souc-bin/souc-linux-x86_64-gpu build examples/gpu.sio --backend gpu -o /tmp/sounio-gpu.ptx
 ```
 
-**Enables:**
-- `cranelift-codegen` - Code generation
-- `cranelift-frontend` - IR builder
-- `cranelift-jit` - JIT execution
-- `cranelift-module` - Module management
-- `cranelift-native` - Host target support
-- `cranelift-object` - Object file emission
-- `target-lexicon` - Target triple parsing
+## 2. What "feature flags" mean now
 
-**No external dependencies required.**
+For the main public compiler workflow, feature names such as `jit`, `llvm`,
+`gpu`, `smt`, `lsp`, `ontology`, `distributed`, and `pkg` are best understood
+as rebuild-only capability families reported by `souc info`.
 
-### LLVM Backend (`llvm`, `llvm14`-`llvm17`)
+That means:
 
-Optimized native code generation via LLVM.
+- they are real compiler capability groups
+- they are not exposed through a single root-level `Cargo.toml` in this checkout
+- they must be confirmed on the exact binary you are documenting
+
+## 3. Source-build guidance
+
+If you are rebuilding internal components or historical Rust subtrees:
+
+- use the local manifest that actually exists in that subtree
+- treat its features as component-local, not as the public Sounio compiler contract
+- verify the rebuilt compiler with `souc info` before documenting its behavior
+
+This repository currently has Rust manifests for subcomponents such as:
+
+- `bootstrap/poseidon/rust/Cargo.toml`
+- `tests/jit/Cargo.toml`
+
+Those are not a substitute for the public compiler artifact contract.
+
+## 4. GPU-specific rule
+
+For public GPU documentation, use the checked GPU profile and the public CLI
+path:
 
 ```bash
-# Default (LLVM 15)
-cargo build --features llvm
-
-# Specific version
-cargo build --features llvm17
+./artifacts/omega/souc-bin/souc-linux-x86_64-gpu build examples/gpu.sio --backend gpu -o /tmp/sounio-gpu.ptx
 ```
 
-**Version selection:**
+Do not describe top-level `gpu-emit` as a public checked command, and do not
+describe older `gpu.*` intrinsic-heavy examples as if they already passed in the
+checked public artifact.
 
-| Feature | LLVM Version | Environment Variable |
-|---------|--------------|----------------------|
-| `llvm14` | 14.x | `LLVM_SYS_140_PREFIX` |
-| `llvm15` | 15.x | `LLVM_SYS_150_PREFIX` |
-| `llvm16` | 16.x | `LLVM_SYS_160_PREFIX` |
-| `llvm17` | 17.x | `LLVM_SYS_170_PREFIX` |
+## 5. Documentation rule of thumb
 
-**Requirements:**
-- LLVM installation (matching version)
-- `libzstd-dev` for compression support
-- C++ compiler for LLVM bindings
-
-**Features are mutually exclusive** - only enable one LLVM version.
-
-### GPU Backend (`gpu`)
-
-PTX (NVIDIA) and SPIR-V code generation for GPU kernels.
-
-```bash
-cargo build --features gpu
-```
-
-**Enables:**
-- `rspirv` - SPIR-V manipulation
-- `spirv` - SPIR-V types
-
-**No runtime required** - generates shader code that can be executed elsewhere.
-
-### CUDA Runtime (`cuda`)
-
-Execute GPU kernels on NVIDIA GPUs.
-
-```bash
-cargo build --features "gpu,cuda"
-```
-
-**Enables:**
-- `cudarc` - CUDA Driver API bindings
-
-**Requirements:**
-- CUDA toolkit 11.0+
-- NVIDIA GPU with compute capability 6.0+
-
----
-
-## Optional Features
-
-### SMT Solver (`smt`)
-
-Z3-backed refinement type verification.
-
-```bash
-cargo build --features smt
-```
-
-**Enables:**
-- Compile-time verification of refinement predicates
-- Z3 constraint solving
-
-**Requirements:**
-- Z3 library 4.8+
-- CMake (for z3-sys build)
-
-**Without `smt`**: Refinement types fall back to runtime assertions.
-
-### Language Server (`lsp`)
-
-LSP server for IDE integration.
-
-```bash
-cargo build --features lsp
-
-# Run LSP server
-cargo run --features lsp --bin sounio-lsp
-```
-
-**Enables:**
-- `tower-lsp` - LSP protocol implementation
-- `tokio` - Async runtime
-- `dashmap` - Concurrent hash maps
-- `ropey` - Rope data structure for text
+- Cite the exact artifact or binary you tested.
+- Use `souc info` as the first proof point.
+- Treat source-tree presence as implementation evidence, not as proof that the checked public binary exposes the same feature.
 
 ### Scientific Ontology (`ontology`)
 

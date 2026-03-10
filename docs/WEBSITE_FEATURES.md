@@ -2,222 +2,96 @@
 topic_id: repo.docs.website-features
 authority: repo_only
 audience: users
-last_validated: 2026-03-07
+last_validated: 2026-03-10
 validated_by: A2
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.website-features
 -->
 
 # Sounio Language: Website Features Overview
 
-**Sounio** is a systems programming language for epistemic computing—computation that tracks uncertainty, confidence, and provenance as first-class language features. This document highlights the cutting-edge capabilities that make Sounio unique for scientific computing, medical modeling, and high-performance applications.
+This page is the source-of-truth summary for what the website should claim right
+now. It is intentionally narrower than the full source tree: every item below
+must be supportable by a checked artifact, a committed status artifact, or an
+explicitly scoped implementation note.
 
----
+## 1. Public compiler profiles
 
-## 1. GPU Computing Revolution
+The website should distinguish two checked compiler artifacts:
 
-Sounio provides first-class GPU support with multiple backend technologies, enabling thousands of concurrent kernels with seamless integration into the type system.
+- default profile: `artifacts/omega/souc-bin/souc-linux-x86_64-jit`
+- GPU profile: `artifacts/omega/souc-bin/souc-linux-x86_64-gpu`
 
-### PTX Support for NVIDIA GPUs
+What they prove today:
 
-- **Native CUDA PTX compilation**: Direct support for NVIDIA parallel thread execution (PTX) intermediate language
-- **Thousands of concurrent kernels**: Efficient kernel registry supporting unlimited simultaneous GPU kernels
-- **Full compute capability support**: Compatible with compute capability 6.0+ (Tesla, RTX, A100 architectures)
-- **Kernel launching with 3D grid/block configuration**: Flexible parallel decomposition for diverse workload patterns
-- **Unified memory management**: Seamless host-device memory transfers with `__sounio_gpu_copy_htod()` and `__sounio_gpu_copy_dtoh()`
+- the checked JIT profile reports Cranelift JIT enabled
+- the checked JIT profile reports LLVM and GPU codegen disabled
+- the checked GPU profile reports GPU codegen enabled and Cranelift JIT disabled
+- the checked GPU profile emits PTX through `build --backend gpu`
 
-**Example**:
-```sio
-kernel fn vector_add(a: &[f32], b: &[f32], c: &![f32]) {
-    let i = gpu.thread_id.x
-    c[i] = a[i] + b[i]
-}
+The website should not collapse these into one "all backends enabled" story.
 
-fn main() with GPU, IO {
-    let n = 1024
-    let a: [f32; 1024] = [1.0; 1024]
-    let b: [f32; 1024] = [2.0; 1024]
-    var c: [f32; 1024] = [0.0; 1024]
+## 2. GPU claims the website may make
 
-    gpu.launch(vector_add, n, 256, &a, &b, &!c)
-    gpu.sync()
-}
-```
+The public GPU story is real, but constrained:
 
-### Metal Support for Apple GPU Acceleration
+- the checked GPU artifact accepts `kernel fn`
+- the checked GPU artifact accepts `perform GPU.launch(...)`
+- the checked GPU artifact accepts `perform GPU.sync()`
+- the public checked CLI path for PTX emission is `build --backend gpu`
 
-- **Native Metal shader compilation**: Generates Metal shading language code for Apple Silicon and discrete GPUs
-- **Cross-platform GPU abstractions**: Unified API for NVIDIA, AMD, and Apple hardware
-- **Fallback to simulated backend**: Testing without GPU hardware, ideal for CI/CD pipelines
-- **Thread-safe GPU runtime bridge**: Global singleton pattern with mutex protection for concurrent access
+The website should not claim, without further artifact evidence:
 
-### SIMD Optimization for Vectorized Operations
+- that the default JIT artifact is GPU-enabled
+- that top-level `gpu-emit` is exposed by the checked public GPU CLI
+- that older `gpu.thread_id.*`, `gpu.block_id.*`, `gpu.block_dim.*`, or `gpu.alloc(...)` surfaces are already part of the checked public contract
+- that every backend present in `self-hosted/gpu/` is equally public and equally attested
 
-- **Automatic vectorization**: Compiler detects parallelizable loops and generates SIMD instructions
-- **Manual SIMD intrinsics**: Fine-grained control via `gpu.thread_id`, `gpu.block_id`, `gpu.warp_size`
-- **Register-level optimization**: Efficient memory access patterns with bank conflict detection
-- **Occupancy analysis**: Kernel parameter analysis for optimal block configuration
+If a page discusses backend breadth, it must explicitly separate:
 
-**Performance Features**:
-- Zero-copy data transfer with unified memory (supported GPUs)
-- Kernel compilation caching with automatic recompilation on code changes
-- Statistics tracking: kernel launches, memory copies, buffer allocations
+- source-tree implementation work
+- Omega or internal gates
+- checked public artifact behavior
 
----
+## 3. Scientific and epistemic claims the website may make
 
-## 2. Sedenion Mathematics: 16-Dimensional Hypercomplex Algebra
+The website may continue to describe Sounio as an epistemic and scientific
+language, but those claims should anchor to committed artifacts instead of
+marketing-only prose.
 
-Sounio implements sedenions—16-dimensional hypercomplex numbers extending quaternions and octonions—as a native type with full algebraic semantics and GPU acceleration.
+Current committed signals:
 
-### Mathematical Foundation
+- stdlib reliability totals: `81 pass / 0 fail / 1 skip / 82 total`
+- stdlib inventory: `604` `.sio` files, `111` disabled files, `44` stub module files, `92` active module entrypoints
+- science pipeline lanes: `2/2` required lanes passing
+- hyper execution lanes: `7/7` required lanes passing
+- science runtime regressions remain tracked separately, with `4` soft local failures at the current snapshot
 
-- **16-dimensional hypercomplex algebra**: Elements of the form `e₀ + e₁·i + e₂·j + ... + e₁₅·s` where indices represent coordinates
-- **Non-associative multiplication**: Preserves sedenion algebra properties with proper bracket conventions
-- **Complete algebraic operations**: Addition, subtraction, multiplication, conjugation, norm computation
-- **GPU-accelerated sedenion kernels**: Parallel sedenion matrix multiplication, batch operations, tensor contractions
+These numbers come from committed status artifacts and should be preferred over
+generic "fully production-ready" language.
 
-### Medical Imaging Applications
+## 4. Website copy rules
 
-#### EEG Signal Processing with Sedenion Encoding
+Every website-facing claim should follow these rules:
 
-- **16-channel electrode clusters**: Each sedenion naturally encodes brain signals from 16 electrodes simultaneously
-- **10-20 system montage mapping**: Standard electrode positioning (Fp1/Fp2, F3/F4, C3/C4, O1/O2, etc.)
-- **Spatial-temporal analysis**: Sedenion multiplication captures cross-channel correlations in one operation
-- **Event-related potential extraction**: ERP features aligned with sedenion conjugation (spatial inversion)
+- name the exact artifact or gate when the claim depends on backend availability
+- use `souc info` and committed status JSON as primary evidence
+- describe implementation breadth separately from public CLI exposure
+- remove aspirational wording if the feature is still public-facing but not artifact-backed
+- preserve the `/learn/*` docs path as the canonical website docs surface
 
-**Supported Features**:
-```
-e0  = Fp1 (frontal pole left)    e8  = T7 (temporal left)
-e1  = Fp2 (frontal pole right)   e9  = T8 (temporal right)
-e2  = F3 (frontal left)          e10 = P7 (parietal left)
-e3  = F4 (frontal right)         e11 = P8 (parietal right)
-e4  = C3 (central left)          e12 = O1 (occipital left)
-e5  = C4 (central right)         e13 = O2 (occipital right)
-e6  = Fz (frontal midline)       e14 = Pz (parietal midline)
-e7  = Cz (central midline)       e15 = Oz (occipital midline)
-```
+## 5. Where to point readers
 
-#### fMRI Analysis with Sedenion Connectivity
+Use these pages as the public website references:
 
-- **Brain connectivity matrices**: Sedenion representation of 16-region fMRI networks
-- **Network motif detection**: Sedenion conjugate operations identify reciprocal connections
-- **Source localization**: Spatial relationships encoded naturally in sedenion structure
-- **GPU-accelerated fMRI preprocessing**: Fast convolution, temporal smoothing, statistical inference
+- `website/src/content/docs/en/getting-started.mdx`
+- `website/src/content/docs/en/feature-status.mdx`
+- `website/src/content/docs/en/gpu.mdx`
+- `website/src/content/showcases/gpu.mdx`
+- `docs/implementation/GPU_COMPILER_CONTRACTS.md`
 
-### Pharmacokinetics with Sedenion Compartmental Models
-
-- **16-compartment PBPK modeling**: Sedenion encoding of drug amounts in body compartments
-- **Whole-body physiological distribution**:
-  - e₀ = Plasma (central)
-  - e₁ = Heart, e₂ = Lung, e₃ = Brain
-  - e₄ = Liver, e₅ = Kidney, e₆ = Muscle, e₇ = Fat
-  - e₈ = Skin, e₉ = Bone, e₁₀ = Gut, e₁₁ = Spleen
-  - e₁₂ = Pancreas, e₁₃ = Thyroid, e₁₄ = Adrenal, e₁₅ = Gonads
-
-- **Population heterogeneity**: Batch sedenion simulations for cohort studies
-- **Automated uncertainty propagation**: Knowledge<Sedenion> for epistemic PK/PD modeling
-- **GUM-compliant error handling**: Measurement uncertainty flows through all compartments
-
-### Fully GPU-Accelerated Sedenion Operations
-
-- **Batch sedenion multiplication**: Process thousands of sedenion operations simultaneously
-- **Tensor contraction on GPU**: Sedenion-valued tensors for multi-subject studies
-- **Automatic differentiation**: Gradient computation for optimization on device
-- **Memory-efficient operations**: Shared memory usage, warp-level primitives
-
----
-
-## 3. Epistemic Computing: Knowledge with Uncertainty
-
-The core innovation of Sounio: making uncertainty an integral, traceable part of computation.
-
-### Knowledge<T> Type System
-
-Every value can carry its own uncertainty representation:
-
-```sio
-struct Knowledge<T> {
-    value: T,                    // The measured/computed value
-    uncertainty: f64,            // Standard deviation or margin
-    confidence: f64,             // Confidence level [0, 1]
-    source: string              // Provenance tracking
-}
-```
-
-**Key Properties**:
-- **Type-preserving**: `Knowledge<i32>`, `Knowledge<f64>`, `Knowledge<[f32; 1024]>` all supported
-- **Infectious uncertainty**: Operations on `Knowledge<T>` return `Knowledge<T>`, preventing accidental loss of uncertainty
-- **GUM-compliant propagation**: Measurement uncertainty law of propagation (Guide to Expression of Uncertainty in Measurement)
-- **Confidence gates**: Conditional execution based on measurement confidence
-
-**Example**:
-```sio
-let dose: Knowledge<mg> = measure(500.0, uncertainty: 2.5)
-
-if dose.confidence > 0.95 {
-    administer(dose.value)
-} else {
-    require_confirmation(dose)
-}
-
-// Uncertainty automatically propagates
-let blood_conc = pharmacokinetics(dose)  // Returns Knowledge<mg/L>
-```
-
-### Natural Gradient Optimization for Statistical Inference
-
-- **Fisher Information Matrix**: Metric geometry on probability distribution spaces
-- **Mean-precision parameterization**: Numerically stable Fisher matrix computation via (μ,ν) coordinates
-- **Natural gradient descent**: Riemannian optimization with 5-10x faster convergence than Euclidean gradients
-- **Line search with Armijo conditions**: Adaptive step sizing for robust optimization
-- **Integration with ML pipelines**: Differentiable type inference with statistical guarantees
-
-**Performance Metrics**:
-- Natural gradient computation: 250 µs/iteration
-- Per-iteration overhead: 13.3x (compensated by 5-10x fewer iterations)
-- Trigamma function (polygamma series): 186 ns (range-optimal), 7.6 ns (asymptotic)
-
-### Fisher Information Geometry Integration
-
-- **Type parameter space geometry**: Fisher-Rao metric on parameter distributions
-- **Metric tensor computation**: 2×2 Fisher matrix for Beta distribution confidence bounds
-- **Geodesic type inference**: Shortest paths on distribution manifolds
-- **Dual geometry**: α-connections for forward/reverse KL divergence minimization
-- **Condition number analysis**: Numerical stability assessment for type computations
-
-**Mathematical Foundation**:
-```
-I(μ,ν) = [ ν² (ψ₁(α) + ψ₁(β))      ν (ψ₁(α) - ψ₁(β))              ]
-         [ ν (ψ₁(α) - ψ₁(β))        ψ₁(α) + ψ₁(β) - ψ₁(α+β)        ]
-```
-
-where ψ₁ is the trigamma function, ensuring positive definiteness across all valid parameter ranges.
-
-### Optimal Transport (Wasserstein Geometry)
-
-- **Wasserstein-2 distance**: Ground truth metric for distribution comparisons
-- **Barycenter computation**: Optimal type centroids for heterogeneous data sources
-- **Triangle inequality verification**: Mathematical soundness of type metric
-- **Transport cost semantics**: Type compatibility quantified as optimal coupling cost
-- **Beta distribution quantile functions**: Efficient numerical implementation via binary search
-
-**Applications**:
-- Type inference in federated settings
-- Multi-source data fusion with uncertainty bounds
-- Distribution matching for domain adaptation
-
----
-
-## 4. Advanced Type System
-
-Sounio combines multiple type system innovations for unprecedented safety and expressiveness.
-
-### Refinement Types with SMT Solver Verification
-
-- **Liquid types**: Precise specifications using refinement logic
-- **Z3 SMT integration**: Automated theorem proving for type verification
-- **Compile-time bounds checking**: Eliminate runtime checks for provably safe operations
-
-**Example**:
+Do not use this file to resurrect older marketing copy about fully exposed GPU
+intrinsics, full backend parity, or root-Cargo feature toggles unless those
+claims have been revalidated first.
 ```sio
 type Pos = { x: i32 | x > 0 }
 type NonEmpty<T> = { arr: [T] | arr.len > 0 }
