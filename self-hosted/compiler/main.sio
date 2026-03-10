@@ -512,6 +512,42 @@ fn run_probe_wasm_dispatch(args: ArgList, flag_index: i64) with IO, Mut, Panic, 
     println("probe_wasm_dispatch: ok")
 }
 
+// Sprint 48: --show-profile probe — inspect .sprof file and show promotion decisions
+fn run_probe_show_profile(args: ArgList, flag_index: i64) with IO, Mut, Panic, Div {
+    if flag_index + 1 >= args.len {
+        panic("show-profile: missing .sprof file argument")
+    }
+    let sprof_path = arg_list_get(args, flag_index + 1)
+    let prof_size = file_size(sprof_path)
+    if prof_size <= 0 {
+        println("[sprof] error: file not found or empty: " + sprof_path)
+        return
+    }
+    let prof_bytes = read_file(sprof_path)
+    var prof_buf: [i8; 4096] = [0; 4096]
+    var pi: i64 = 0
+    while pi < prof_size && pi < 4096 {
+        prof_buf[pi as usize] = prof_bytes[pi as usize]
+        pi = pi + 1
+    }
+    let profile = sprof_parse(prof_buf, prof_size)
+    println("[sprof] profile: " + sprof_path + " (" + int_to_string(profile.entry_count) + " entries)")
+    var ei: i64 = 0
+    while ei < profile.entry_count {
+        let entry = profile.entries[ei as usize]
+        let target = sprof_promotion_target(entry.count)
+        print("[sprof] ")
+        compiler_manifest_print_name(entry.fn_name)
+        print(": count " + int_to_string(entry.count) + " -> ")
+        if target >= 0 {
+            println("strategy " + ir_strategy_name(target))
+        } else {
+            println("no promotion")
+        }
+        ei = ei + 1
+    }
+}
+
 fn char_from_i64(n: i64) -> string with Mut, Panic {
     if n < 0 || n > 9 {
         panic(char_from_i64_error(n))
@@ -812,6 +848,7 @@ fn print_help() with IO {
     println("  --probe-ir-callsite <source.sio> <caller_fn> <callee_fn>  Probe lowered callsite hidden-arg behavior")
     println("  --probe-ir-opt-strategy <source.sio>  Probe ir_opt_apply_strategy() on instrumented IR fns")
     println("  --probe-wasm-dispatch <source.sio> [out.wasm]  Probe wasm dispatch marker path")
+    println("  --show-profile <file>  Inspect .sprof profile and show promotion decisions")
     println("  --use-profile <file>   Apply .sprof profile for strategy promotion")
     println("  -h, --help             Print this help message")
     println("")
@@ -2267,6 +2304,19 @@ fn compile(opts: CompilerOptions) -> CompileResult with IO, Mut, Panic, Div, All
             }
             let profile = sprof_parse(prof_buf, prof_size)
             sprof_apply_promotion(&!ir_result.module, &profile)
+
+            // Sprint 48: log promotion decisions
+            var li: i64 = 0
+            while li < ir_result.module.fn_count {
+                let lcount = sprof_lookup(&profile, &ir_result.module.functions[li as usize].name)
+                let ltarget = sprof_promotion_target(lcount)
+                if ltarget >= 0 {
+                    print("[sprof] ")
+                    compiler_manifest_print_name(ir_result.module.functions[li as usize].name)
+                    println(": count " + int_to_string(lcount) + " -> strategy " + ir_strategy_name(ltarget))
+                }
+                li = li + 1
+            }
         }
     }
 
@@ -2877,9 +2927,33 @@ fn compiler_main_test_sprof_promotion() -> bool with Mut, Panic, Div {
     true
 }
 
+// Sprint 48: verify sprof_promotion_target thresholds
+fn compiler_main_test_sprof_promotion_target_thresholds() -> bool {
+    // Hot: 1500 → AGGRESSIVE (1)
+    if sprof_promotion_target(1500) != IR_STRATEGY_AGGRESSIVE { return false }
+    // Warm: 500 → PRECISION_PRESERVING (2)
+    if sprof_promotion_target(500) != IR_STRATEGY_PRECISION_PRESERVING { return false }
+    // Cold: 50 → -1 (no promotion)
+    if sprof_promotion_target(50) != -1 { return false }
+    // Boundary: 1000 → PRECISION (not AGGRESSIVE)
+    if sprof_promotion_target(1000) != IR_STRATEGY_PRECISION_PRESERVING { return false }
+    // Boundary: 100 → -1 (not PRECISION)
+    if sprof_promotion_target(100) != -1 { return false }
+    // Zero → -1
+    if sprof_promotion_target(0) != -1 { return false }
+    true
+}
+
+// Sprint 48: verify sprof_promotion_target returns -1 for negative/low counts
+fn compiler_main_test_sprof_promotion_target_no_change() -> bool {
+    if sprof_promotion_target(-1) != -1 { return false }
+    if sprof_promotion_target(1) != -1 { return false }
+    true
+}
+
 fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div {
     var passed: i64 = 0
-    let total: i64 = 19
+    let total: i64 = 21
 
     println("=== compiler/main.sio self-tests ===")
 
@@ -3016,6 +3090,20 @@ fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div {
         println("  FAIL: T19 sprof promotion")
     }
 
+    if compiler_main_test_sprof_promotion_target_thresholds() {
+        println("  T20 OK: sprof promotion target thresholds")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T20 sprof promotion target thresholds")
+    }
+
+    if compiler_main_test_sprof_promotion_target_no_change() {
+        println("  T21 OK: sprof promotion target no change")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T21 sprof promotion target no change")
+    }
+
     println("")
     println("compiler/main tests: " + int_to_string(passed) + "/" + int_to_string(total) + " passed")
     if passed == total { 0 } else { 1 }
@@ -3076,6 +3164,9 @@ fn main() with IO, Mut, Panic, Div, Alloc {
             return
         } else if mode == "--probe-wasm-dispatch" || starts_with(mode, "--probe-wasm") {
             run_probe_wasm_dispatch(args, arg_idx)
+            return
+        } else if mode == "--show-profile" || starts_with(mode, "--show-prof") {
+            run_probe_show_profile(args, arg_idx)
             return
         } else if starts_with(mode, "--probe") {
             run_probe_compile_capture(args, arg_idx)

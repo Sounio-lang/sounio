@@ -2,23 +2,26 @@
 
 ## Immediate goal
 
-Stabilize the frontend validation lane for strategy/validated propagation.
+Reduce parsed-frontend callsite probe latency while keeping the recovered Sprint 44 validation surface stable.
 
 ## Why this is next
 
-Sprint 43 is now implemented and executable through `compiler/main -- --self-test` plus `scripts/sprint43_chain_propagation_gate.sh`. The remaining gap is that the heavier frontend probe path (`--probe-load-ir`) is still not the acceptance surface for this sprint on this machine.
+Sprint 39–44 are now green again through `compiler/main -- --self-test` plus the repaired Sprint 43 and Sprint 44 gates. The remaining quality issue is speed, not correctness: `--probe-ir-callsite` still takes the slower lowering path, and the previous boxed-`current_func` optimization attempt broke emitted frontend IR.
 
 ## Target behavior
 
-- Keep Sprint 43 self-test coverage green.
-- Recover a stable end-to-end frontend probe for at least one validated/instrumented chain fixture.
-- If probe recovery is not practical, add a dedicated lighter-weight frontend check that exercises parsed AST -> IR lowering without the full unstable harness path.
+- Keep `compiler/main -- --self-test` green at `19/19`.
+- Keep `scripts/sprint43_chain_propagation_gate.sh` and `scripts/sprint44_frontend_probe_gate.sh` green.
+- Reduce `--probe-ir-callsite` runtime without changing its output contract.
+- Avoid reintroducing the lowering regression where frontend functions flushed with `instr_count = 0`.
 
 ## Likely edit points
 
-1. `self-hosted/compiler/main.sio`
-2. `self-hosted/compiler/module_loader.sio`
-3. `scripts/sprint43_chain_propagation_gate.sh`
+1. `self-hosted/ir/lower.sio`
+2. `self-hosted/compiler/frontend_callsite_probe.sio`
+3. `self-hosted/compiler/main.sio`
+4. `scripts/sprint43_chain_propagation_gate.sh`
+5. `scripts/sprint44_frontend_probe_gate.sh`
 
 ## Current green baseline
 
@@ -29,10 +32,11 @@ bash scripts/sprint40_dual_path_native_gate.sh
 bash scripts/sprint41_merge_block_probe_gate.sh
 bash scripts/sprint42_validated_param_gate.sh
 bash scripts/sprint43_chain_propagation_gate.sh
+bash scripts/sprint44_frontend_probe_gate.sh
 ```
 
 ## If something regresses first
 
 - Recheck `self-hosted/compiler/main.sio -- --self-test`
-- Recheck `scripts/sprint40_dual_path_native_gate.sh`
 - Recheck `scripts/sprint43_chain_propagation_gate.sh`
+- Recheck `scripts/sprint44_frontend_probe_gate.sh`
