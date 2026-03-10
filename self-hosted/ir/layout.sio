@@ -1,0 +1,218 @@
+// self-hosted::ir::layout — Profile-guided function layout optimization
+//
+// Reorders functions in an IrModule so hot functions (high execution count
+// in .sprof profile) are emitted first in the binary. Improves I-cache
+// locality without a post-link tool (BOLT, AutoFDO).
+//
+// Critical: IrCall.fn_id is a positional index into module.functions[].
+// After reordering, all fn_id references must be patched via a remap table.
+//
+// References:
+//   Pettis & Hansen: "Profile Guided Code Positioning" (PLDI 1990)
+//   Ottoni & Maher: "Optimizing Function Placement (HFSort)" (CGO 2017)
+//   Luk, Muth, et al.: "BOLT: A Post-Link Optimizer" (CGO 2019)
+
+module ir::layout
+
+use ir::ir::*
+use ir::profile::{SprofProfile, sprof_lookup}
+use parser::ast::{Name, empty_name}
+
+// ============================================================================
+// Constants
+// ============================================================================
+
+let LAYOUT_MAX_FUNCS: i64 = 1024
+let LAYOUT_UNKNOWN_COUNT: i64 = -1
+
+// ============================================================================
+// Structs
+// ============================================================================
+
+struct LayoutScore {
+    func_idx: i64,
+    count: i64,
+}
+
+fn layout_empty_score() -> LayoutScore {
+    LayoutScore { func_idx: -1, count: -1 }
+}
+
+struct LayoutResult {
+    module: IrModule,
+    hot_count: i64,
+    cold_count: i64,
+    reordered: bool,
+}
+
+// ============================================================================
+// Scoring: assign execution count to each function
+// ============================================================================
+
+fn layout_score_functions(module: &IrModule, profile: &SprofProfile) -> ([LayoutScore; 1024], i64) with Mut, Panic, Div {
+    var scores: [LayoutScore; 1024] = [layout_empty_score(); 1024]
+    var i: i64 = 0
+    while i < module.fn_count && i < LAYOUT_MAX_FUNCS {
+        let count = sprof_lookup(profile, &module.functions[i as usize].name)
+        scores[i as usize] = LayoutScore { func_idx: i, count: count }
+        i = i + 1
+    }
+    (scores, module.fn_count)
+}
+
+// ============================================================================
+// Sorting: bubble sort descending by count, unknown (-1) last, stable
+// ============================================================================
+
+fn layout_sort_scores(scores: [LayoutScore; 1024], count: i64) -> [LayoutScore; 1024] with Mut, Panic, Div {
+    var s = scores
+    var i: i64 = 0
+    while i < count {
+        var j: i64 = i + 1
+        while j < count {
+            var swap = false
+            if s[j as usize].count > s[i as usize].count {
+                // j has higher count -> should come first
+                swap = true
+            }
+            if s[j as usize].count == s[i as usize].count {
+                // Equal count -> stable: lower original index first
+                if s[j as usize].func_idx < s[i as usize].func_idx {
+                    swap = true
+                }
+            }
+            // Special case: unknown (-1) should sort after any non-negative
+            if s[i as usize].count == -1 && s[j as usize].count >= 0 {
+                swap = true
+            }
+            if swap {
+                let tmp = s[i as usize]
+                s[i as usize] = s[j as usize]
+                s[j as usize] = tmp
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    s
+}
+
+// ============================================================================
+// Reorder detection: true if any function moved
+// ============================================================================
+
+fn layout_is_reordered(scores: &[LayoutScore; 1024], count: i64) -> bool {
+    var i: i64 = 0
+    while i < count {
+        if scores[i as usize].func_idx != i {
+            return true
+        }
+        i = i + 1
+    }
+    false
+}
+
+// ============================================================================
+// Remap table: old_index -> new_index
+// ============================================================================
+
+fn layout_build_remap(scores: &[LayoutScore; 1024], count: i64) -> [i64; 1024] with Mut, Panic, Div {
+    var remap: [i64; 1024] = [-1; 1024]
+    var i: i64 = 0
+    while i < count {
+        let old_idx = scores[i as usize].func_idx
+        remap[old_idx as usize] = i
+        i = i + 1
+    }
+    remap
+}
+
+// ============================================================================
+// Reorder: physically rearrange module.functions[]
+// ============================================================================
+
+fn layout_reorder_functions(module: IrModule, scores: &[LayoutScore; 1024]) -> IrModule with Mut, Panic, Div {
+    var result = module
+    var i: i64 = 0
+    while i < module.fn_count {
+        let old_idx = scores[i as usize].func_idx
+        result.functions[i as usize] = module.functions[old_idx as usize]
+        i = i + 1
+    }
+    result
+}
+
+// ============================================================================
+// Patch: fix all IrCall.fn_id after reorder
+// ============================================================================
+
+fn layout_is_call_opcode(op: IrOpcode) -> bool {
+    match op {
+        IrOpcode::IrCall => true,
+        _ => false,
+    }
+}
+
+fn layout_patch_fn_ids(module: &!IrModule, remap: &[i64; 1024]) with Mut, Panic, Div {
+    var fi: i64 = 0
+    while fi < module.fn_count {
+        var ii: i64 = 0
+        while ii < module.functions[fi as usize].instr_count {
+            if layout_is_call_opcode(module.functions[fi as usize].instrs[ii as usize].op) {
+                let old_id = module.functions[fi as usize].instrs[ii as usize].fn_id
+                if old_id >= 0 && old_id < module.fn_count {
+                    var instr = module.functions[fi as usize].instrs[ii as usize]
+                    instr.fn_id = remap[old_id as usize]
+                    module.functions[fi as usize].instrs[ii as usize] = instr
+                }
+            }
+            ii = ii + 1
+        }
+        fi = fi + 1
+    }
+}
+
+// ============================================================================
+// Top-level: score -> sort -> reorder -> patch -> return
+// ============================================================================
+
+fn layout_sort_by_profile(module: IrModule, profile: &SprofProfile) -> LayoutResult with Mut, Panic, Div {
+    let scored = layout_score_functions(&module, profile)
+    let scores = scored.0
+    let count = scored.1
+
+    let sorted = layout_sort_scores(scores, count)
+
+    if !layout_is_reordered(&sorted, count) {
+        return LayoutResult {
+            module: module,
+            hot_count: 0,
+            cold_count: count,
+            reordered: false,
+        }
+    }
+
+    let remap = layout_build_remap(&sorted, count)
+    var reordered = layout_reorder_functions(module, &sorted)
+    layout_patch_fn_ids(&!reordered, &remap)
+
+    // Count hot (count > 0) vs cold (count <= 0 or unknown)
+    var hot: i64 = 0
+    var cold: i64 = 0
+    var ci: i64 = 0
+    while ci < count {
+        if sorted[ci as usize].count > 0 {
+            hot = hot + 1
+        } else {
+            cold = cold + 1
+        }
+        ci = ci + 1
+    }
+
+    LayoutResult {
+        module: reordered,
+        hot_count: hot,
+        cold_count: cold,
+        reordered: true,
+    }
+}
