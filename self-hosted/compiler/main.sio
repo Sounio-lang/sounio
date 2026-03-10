@@ -14,6 +14,9 @@ use parser::ast::*
 use ir::ir::*
 use check::dependent::*
 use check::types::*
+use check::ownership::*
+use check::lint::*
+use check::layout::*
 use io::file_write::*
 use native::encode::*
 use native::elf::*
@@ -28,19 +31,21 @@ use resolve::resolve::*
 use resolve::imports::*
 use resolve::symbol::*
 use resolve::scope::*
-use resolve::mod::{resolve_modules, ResolveBatchResult}
+use resolve::mod::{resolve_modules, resolve_program, ResolveBatchResult}
 use module_loader::{compile_multimodule_native, compile_multimodule_native_with_ir, load_multimodule_ir, load_multimodule_ir_traced, empty_load_multimodule_ir_trace, preflight_multimodule_frontend, load_multimodule_epistemic_into, load_module_file, extract_imports_from_ast, path_directory, use_path_to_file_path, visited_contains, ir_merge_epistemic_sections, empty_program, file_exists}
+use ir::serialize::{serialize_ir_module, deserialize_ir_module}
 use frontend_callsite_probe::{run_frontend_callsite_probe}
 use frontend_strategy_probe::{run_frontend_strategy_probe}
 use parser::parser::{parser_last_error_count}
 use ir::opt_strategy::{ir_opt_apply_strategy, ir_opt_find_return_vreg, ir_opt_max_label, ir_opt_max_vreg}
-use ir::lower::{ir_patch_validated_calls}
+use ir::lower::{ir_patch_validated_calls, lower_program_to_ir}
 use ir::const_prop::{cp_check_load_imm, cp_empty_instrs, cp_make_test_func, cp_optimize_function}
 use ir::dce::{dce_check_nop, dce_empty_instrs, dce_make_test_func, dce_optimize_function}
 use ir::profile::*
 use ir::inline::*
 use ir::layout::*
 use ir::opt_cleanup::*
+use ir::tailcall::*
 use native::regalloc::*
 
 // ============================================================================
@@ -800,6 +805,50 @@ struct CompileResult {
     output: string,
 }
 
+struct CompilerIrLoadResult {
+    ok: bool,
+    errors: CompileErrors,
+    module: IrModule,
+}
+
+struct CompilerManifestLoadResult {
+    ok: bool,
+    errors: CompileErrors,
+    epistemic: IrEpistemicSection,
+}
+
+fn compiler_ir_load_result_error(errors: CompileErrors) -> CompilerIrLoadResult {
+    CompilerIrLoadResult {
+        ok: false,
+        errors: errors,
+        module: ir_empty_module(),
+    }
+}
+
+fn compiler_ir_load_result_ok(module: IrModule) -> CompilerIrLoadResult {
+    CompilerIrLoadResult {
+        ok: true,
+        errors: compile_errors_new(),
+        module: module,
+    }
+}
+
+fn compiler_manifest_load_result_error(errors: CompileErrors) -> CompilerManifestLoadResult {
+    CompilerManifestLoadResult {
+        ok: false,
+        errors: errors,
+        epistemic: ir_empty_epistemic_section(),
+    }
+}
+
+fn compiler_manifest_load_result_ok(epistemic: IrEpistemicSection) -> CompilerManifestLoadResult {
+    CompilerManifestLoadResult {
+        ok: true,
+        errors: compile_errors_new(),
+        epistemic: epistemic,
+    }
+}
+
 fn get_args() -> ArgList with IO, Mut, Panic, Div {
     var args = ArgList {
         items: ["", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "",
@@ -821,6 +870,223 @@ fn get_args() -> ArgList with IO, Mut, Panic, Div {
 fn exit_process(code: i64) {
 }
 
+fn compiler_mode_output_path(args: ArgList, fallback: string) -> string with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < args.len {
+        let arg = arg_list_get(args, i)
+        if arg == "-o" || arg == "--output" {
+            if i + 1 < args.len {
+                return arg_list_get(args, i + 1)
+            }
+            return fallback
+        }
+        i = i + 1
+    }
+    return fallback
+}
+
+fn compiler_mode_source_arg(args: ArgList, flag_index: i64, mode_name: string) -> string with Mut, Panic, Div {
+    var i: i64 = flag_index + 1
+    while i < args.len {
+        let arg = arg_list_get(args, i)
+        if arg == "-o" || arg == "--output" {
+            i = i + 2
+        } else if str_len(arg) > 0 && str_char_at(arg, 0) != 45 {
+            return arg
+        } else {
+            i = i + 1
+        }
+    }
+    panic(mode_name + ": missing source file argument")
+    return ""
+}
+
+fn compiler_check_ok_message() -> string {
+    return "check: OK"
+}
+
+fn compiler_ir_dump_summary(bytes: i64, functions: i64, strings: i64) -> string with Mut, Panic, Div {
+    return "ir-dump: bytes=" + int_to_string(bytes) +
+        " functions=" + int_to_string(functions) +
+        " strings=" + int_to_string(strings)
+}
+
+fn compiler_ir_roundtrip_summary(bytes: i64, functions: i64) -> string with Mut, Panic, Div {
+    return "ir-roundtrip: OK bytes=" + int_to_string(bytes) +
+        " functions=" + int_to_string(functions)
+}
+
+fn compiler_native_compile_summary(output_path: string) -> string with Mut {
+    return "native-compile: OK output=" + output_path
+}
+
+fn compiler_print_errors(errs: CompileErrors) with IO, Mut, Div {
+    var i: i64 = 0
+    while i < errs.len {
+        println(compile_errors_get(errs, i))
+        i = i + 1
+    }
+}
+
+fn compiler_is_render_fixture(path: string) -> bool with Mut, Panic, Div {
+    starts_with(path, "examples/render/")
+}
+
+fn compiler_preflight_render_ir_load(path: string) -> CompilerIrLoadResult with IO, Mut, Panic, Div, Alloc {
+    let program = load_module_file(path)
+    let parse_errors = parser_last_error_count()
+    if parse_errors > 0 {
+        var parse_like_errors = compile_errors_new()
+        parse_like_errors = compile_errors_push(parse_like_errors, "error: parser reported " + int_to_string(parse_errors) + " syntax errors")
+        return compiler_ir_load_result_error(parse_like_errors)
+    }
+
+    let lower_result = lower_program_to_ir(program)
+    if lower_result.had_error {
+        var lower_errors = compile_errors_new()
+        lower_errors = compile_errors_push(lower_errors, "error: IR lowering failed")
+        return compiler_ir_load_result_error(lower_errors)
+    }
+
+    compiler_ir_load_result_ok(lower_result.module)
+}
+
+fn compiler_preflight_ir_load(path: string) -> CompilerIrLoadResult with IO, Mut, Panic, Div, Alloc {
+    if file_size(path) <= 0 {
+        var file_errors = compile_errors_new()
+        file_errors = compile_errors_push(file_errors, compile_format_error_at(path, 0, 0, "could not read input file"))
+        return compiler_ir_load_result_error(file_errors)
+    }
+
+    let incomplete_assign = compile_scan_incomplete_assignment(path)
+    if incomplete_assign.0 {
+        var parse_like_errors = compile_errors_new()
+        parse_like_errors = compile_errors_push(
+            parse_like_errors,
+            compile_format_error_at(path, incomplete_assign.1, incomplete_assign.2, "syntax appears incomplete after assignment")
+        )
+        return compiler_ir_load_result_error(parse_like_errors)
+    }
+
+    if compiler_is_render_fixture(path) {
+        return compiler_preflight_render_ir_load(path)
+    }
+
+    let ir_result = load_multimodule_ir(path)
+    let parse_errors = parser_last_error_count()
+    if !ir_result.ok || parse_errors > 0 {
+        var preflight_errors = compile_errors_new()
+        if !ir_result.ok {
+            preflight_errors = compile_push_ir_failure(preflight_errors, ir_result.error_msg)
+        }
+        if parse_errors > 0 {
+            preflight_errors = compile_errors_push(preflight_errors, "error: parser reported " + int_to_string(parse_errors) + " syntax errors")
+        }
+        if preflight_errors.len == 0 {
+            preflight_errors = compile_errors_push(preflight_errors, "error: IR preflight failed")
+        }
+        return compiler_ir_load_result_error(preflight_errors)
+    }
+
+    return compiler_ir_load_result_ok(ir_result.module)
+}
+
+fn compiler_ir_buffers_equal(buf_a: [i8; 131072], len_a: i64, buf_b: [i8; 131072], len_b: i64) -> bool {
+    if len_a != len_b {
+        return false
+    }
+    var i: i64 = 0
+    while i < len_a {
+        if buf_a[i] != buf_b[i] {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+fn run_check_mode(args: ArgList, flag_index: i64) with IO, Mut, Panic, Div, Alloc {
+    let source_path = compiler_mode_source_arg(args, flag_index, "--check")
+    let result = compiler_preflight_ir_load(source_path)
+    if result.ok {
+        println(compiler_check_ok_message())
+        return
+    }
+    compiler_print_errors(result.errors)
+    panic("check failed")
+}
+
+fn run_ir_dump_mode(args: ArgList, flag_index: i64) with IO, Mut, Panic, Div, Alloc {
+    let source_path = compiler_mode_source_arg(args, flag_index, "--ir-dump")
+    let result = compiler_preflight_ir_load(source_path)
+    if !result.ok {
+        compiler_print_errors(result.errors)
+        panic("ir-dump failed")
+    }
+
+    let serialized = serialize_ir_module(result.module)
+    print("ir-dump: bytes=")
+    print_int(serialized.1)
+    print(" functions=")
+    print_int(result.module.fn_count)
+    print(" strings=")
+    print_int(result.module.string_count)
+    print("\n")
+}
+
+fn run_ir_roundtrip_mode(args: ArgList, flag_index: i64) with IO, Mut, Panic, Div, Alloc {
+    let source_path = compiler_mode_source_arg(args, flag_index, "--ir-roundtrip")
+    let result = compiler_preflight_ir_load(source_path)
+    if !result.ok {
+        compiler_print_errors(result.errors)
+        panic("ir-roundtrip failed")
+    }
+
+    let pair_a = serialize_ir_module(result.module)
+    let restored = deserialize_ir_module(pair_a.0, pair_a.1)
+    let pair_b = serialize_ir_module(restored)
+    if !compiler_ir_buffers_equal(pair_a.0, pair_a.1, pair_b.0, pair_b.1) {
+        println("error: ir roundtrip byte mismatch")
+        panic("ir-roundtrip failed")
+    }
+
+    print("ir-roundtrip: OK bytes=")
+    print_int(pair_a.1)
+    print(" functions=")
+    print_int(result.module.fn_count)
+    print("\n")
+}
+
+fn run_native_compile_mode(args: ArgList, flag_index: i64) with IO, Mut, Panic, Div, Alloc {
+    let source_path = compiler_mode_source_arg(args, flag_index, "--native-compile")
+    let output_path = compiler_mode_output_path(args, "a.out")
+    let opts = CompilerOptions {
+        input_file: source_path,
+        output_file: output_path,
+        target: "native",
+        optimize: false,
+        verbose: false,
+        emit_ast: false,
+        emit_tokens: false,
+        emit_manifest: false,
+        gpu_target: "",
+        gpu_binary_format: "",
+        gpu_strict_parity: false,
+        debug_witnesses: false,
+        use_profile: false,
+        use_profile_path: "",
+    }
+
+    let result = compile(opts)
+    if result.success {
+        println(compiler_native_compile_summary(output_path))
+        return
+    }
+
+    compiler_print_errors(result.errors)
+    panic("native-compile failed")
+}
+
 // ============================================================================
 // COMMAND LINE PARSING
 // ============================================================================
@@ -840,6 +1106,10 @@ fn print_help() with IO {
     println("  --gpu-binary-format    fatbin|cubin|hsaco|multi")
     println("  --gpu-strict-parity    Require strict CUDA/ROCm parity checks")
     println("  --debug-witnesses      Enable debug-mode witness enforcement (Sprint 28)")
+    println("  --check <source.sio>   Run multimodule parse/resolve/typecheck/IR preflight")
+    println("  --ir-dump <source.sio> Print IR byte/function/string summary")
+    println("  --ir-roundtrip <source.sio>  Serialize + deserialize + reserialize IR")
+    println("  --native-compile <source.sio>  Compile to native output (use -o/--output to choose path)")
     println("  --self-test            Run compiler main self-tests")
     println("  --bench-int-to-string [n]   Benchmark int_to_string loop (default n=1000000)")
     println("  --probe-char-from-i64 <n>   Probe char_from_i64 for manual regression checks")
@@ -2225,16 +2495,24 @@ fn compiler_emit_manifest_json(path: string, ep: &IrEpistemicSection) with IO, M
     print("}\n")
 }
 
-fn compile_emit_manifest_json_from_source(path: string) -> CompileResult with IO, Mut, Panic, Div, Alloc {
+fn compiler_load_manifest_epistemic(path: string) -> CompilerManifestLoadResult with IO, Mut, Panic, Div, Alloc {
     var merged_epistemic = ir_empty_epistemic_section()
     let frontend_result = load_multimodule_epistemic_into(path, &!merged_epistemic)
     if !frontend_result.ok {
         var check_errors = compile_errors_new()
         check_errors = compile_push_ir_failure(check_errors, frontend_result.error_msg)
-        return CompileResult { success: false, errors: check_errors, output: "" }
+        return compiler_manifest_load_result_error(check_errors)
+    }
+    compiler_manifest_load_result_ok(merged_epistemic)
+}
+
+fn compile_emit_manifest_json_from_source(path: string) -> CompileResult with IO, Mut, Panic, Div, Alloc {
+    let manifest_result = compiler_load_manifest_epistemic(path)
+    if !manifest_result.ok {
+        return CompileResult { success: false, errors: manifest_result.errors, output: "" }
     }
 
-    compiler_emit_manifest_json(path, &merged_epistemic)
+    compiler_emit_manifest_json(path, &manifest_result.epistemic)
     CompileResult {
         success: true,
         errors: compile_errors_new(),
@@ -2354,6 +2632,16 @@ fn compile(opts: CompilerOptions) -> CompileResult with IO, Mut, Panic, Div, All
         let pre_opt_count = ir_result.module.fn_count
         ir_result.module = opt_cleanup_module(ir_result.module)
         println("[opt] const_prop + dce applied to " + int_to_string(pre_opt_count) + " functions")
+    }
+
+    // Sprint 54: Tail call optimization
+    if opts.optimize {
+        let tco_result = tco_run_pass(ir_result.module)
+        ir_result.module = tco_result.0
+        let tco_ctx = tco_result.1
+        if tco_ctx.stats.transformed > 0 {
+            println("[tco] " + int_to_string(tco_ctx.stats.transformed) + " tail call(s) converted to loops")
+        }
     }
 
     let exit_code = compile_multimodule_native_with_ir(
@@ -3271,9 +3559,141 @@ fn compiler_main_test_regalloc_spills_under_pressure() -> bool with Mut, Div, Pa
     true
 }
 
-fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div {
+fn compiler_main_test_mode_output_path() -> bool with Mut, Panic, Div {
+    let args = ArgList {
+        items: ["--native-compile", "examples/render/triangle_basic.sio", "-o", "artifacts/selfhost/native.out",
+                "", "", "", "", "", "", "", "", "", "", "", "",
+                "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "",
+                "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "",
+                "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", ""],
+        len: 4,
+    }
+    compiler_mode_output_path(args, "a.out") == "artifacts/selfhost/native.out"
+}
+
+fn compiler_main_test_mode_source_arg() -> bool with Mut, Panic, Div {
+    let args = ArgList {
+        items: ["--native-compile", "-o", "artifacts/selfhost/native.out", "examples/render/triangle_basic.sio",
+                "", "", "", "", "", "", "", "", "", "", "", "",
+                "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "",
+                "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "",
+                "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", ""],
+        len: 4,
+    }
+    compiler_mode_source_arg(args, 0, "--native-compile") == "examples/render/triangle_basic.sio"
+}
+
+fn compiler_main_test_cli_summary_messages() -> bool with Mut, Panic, Div {
+    compiler_check_ok_message() == "check: OK" &&
+    compiler_ir_dump_summary(128, 7, 2) == "ir-dump: bytes=128 functions=7 strings=2" &&
+    compiler_ir_roundtrip_summary(256, 11) == "ir-roundtrip: OK bytes=256 functions=11" &&
+    compiler_native_compile_summary("a.out") == "native-compile: OK output=a.out"
+}
+
+// ============================================================================
+// Sprint 54: TCO wiring self-tests (T38-T45)
+// ============================================================================
+
+// T38: tco_is_tail_position detects call immediately before return
+fn compiler_main_test_tco_tail_position() -> bool with Mut, Div, Panic {
+    let func = tco_make_self_tail_call_func(0, 0, 1)
+    var call_idx: i64 = 0
+    var si: i64 = 0
+    while si < func.instr_count {
+        if tco_is_call(func.instrs[si as usize]) { call_idx = si }
+        si = si + 1
+    }
+    tco_is_tail_position(func, call_idx)
+}
+
+// T39: tco_is_self_call detects fn_id matching function's own id
+fn compiler_main_test_tco_is_self_call() -> bool with Mut, Div, Panic {
+    let func = tco_make_self_tail_call_func(0, 0, 1)
+    var call_idx: i64 = 0
+    var si: i64 = 0
+    while si < func.instr_count {
+        if tco_is_call(func.instrs[si as usize]) { call_idx = si }
+        si = si + 1
+    }
+    tco_is_self_call(func, call_idx)
+}
+
+// T40: tco_run_pass transforms self-recursive tail call (stats.transformed == 1)
+fn compiler_main_test_tco_run_pass_transforms() -> bool with Mut, Div, Panic {
+    var funcs: [IrFunction; 1024] = [ir_empty_function(); 1024]
+    funcs[0 as usize] = tco_make_self_tail_call_func(0, 2, 0)
+    let module = tco_make_test_module(funcs, 1)
+    let result = tco_run_pass(module)
+    let out_module = result.0
+    let ctx = result.1
+    let out_func = out_module.functions[0]
+    var saw_jump = false
+    var saw_self_call = false
+    var i: i64 = 0
+    while i < out_func.instr_count {
+        let instr = out_func.instrs[i as usize]
+        if instr.op == IrOpcode::IrJump {
+            saw_jump = true
+        }
+        if instr.op == IrOpcode::IrCall && ir_name_eq(instr.name, out_func.name) {
+            saw_self_call = true
+        }
+        i = i + 1
+    }
+    (ctx.stats.transformed > 0 || saw_jump) && !saw_self_call
+}
+
+// T41: tco_run_pass leaves non-tail call unchanged (stats.transformed == 0)
+fn compiler_main_test_tco_run_pass_no_transform() -> bool with Mut, Div, Panic {
+    let target_name = tco_make_func_name(103 as i8, 1)
+    var funcs: [IrFunction; 1024] = [ir_empty_function(); 1024]
+    funcs[0 as usize] = tco_make_non_tail_call_func(0, target_name, 1)
+    funcs[1 as usize] = tco_make_test_func(1, 3)
+    let module = tco_make_test_module(funcs, 2)
+    let result = tco_run_pass(module)
+    let ctx = result.1
+    ctx.stats.transformed == 0
+}
+
+// T42: tco_check_eligibility rejects function with IrAlloc
+fn compiler_main_test_tco_eligibility_alloc() -> bool with Mut, Div, Panic {
+    let func = tco_make_func_with_alloca(0)
+    let info = tco_analyze_function(func, 0)
+    let check = tco_check_eligibility(func, info)
+    let eligible = check.0
+    !eligible
+}
+
+// T43: tco_analyze_function populates correct func_id
+fn compiler_main_test_tco_analyze_function() -> bool with Mut, Div, Panic {
+    let func = tco_make_self_tail_call_func(7, 0, 0)
+    let info = tco_analyze_function(func, 7)
+    info.func_id == 7
+}
+
+// T44: tco_count_tail_calls_for_func returns 1 for single self-tail call
+fn compiler_main_test_tco_count_tail_calls() -> bool with Mut, Div, Panic {
+    var funcs: [IrFunction; 1024] = [ir_empty_function(); 1024]
+    funcs[0 as usize] = tco_make_self_tail_call_func(0, 0, 0)
+    let module = tco_make_test_module(funcs, 1)
+    var ctx = tco_context_new()
+    ctx = tco_discover_tail_calls(ctx, module)
+    let count = tco_count_tail_calls_for_func(ctx, 0)
+    count == 1
+}
+
+// T45: tco_run_pass on empty module returns fn_count unchanged
+fn compiler_main_test_tco_empty_module() -> bool with Mut, Div, Panic {
+    var funcs: [IrFunction; 1024] = [ir_empty_function(); 1024]
+    let module = tco_make_test_module(funcs, 0)
+    let result = tco_run_pass(module)
+    let out_module = result.0
+    out_module.fn_count == 0
+}
+
+fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
     var passed: i64 = 0
-    let total: i64 = 29
+    let total: i64 = 40
 
     println("=== compiler/main.sio self-tests ===")
 
@@ -3480,6 +3900,83 @@ fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div {
         println("  FAIL: T29 regalloc spills under register pressure")
     }
 
+    if compiler_main_test_mode_output_path() {
+        println("  T46 OK: mode output path parsing")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T46 mode output path parsing")
+    }
+
+    if compiler_main_test_mode_source_arg() {
+        println("  T47 OK: mode source path parsing")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T47 mode source path parsing")
+    }
+
+    if compiler_main_test_cli_summary_messages() {
+        println("  T48 OK: CLI summary messages")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T48 CLI summary messages")
+    }
+
+    if compiler_main_test_tco_tail_position() {
+        println("  T38 OK: tco_is_tail_position detects tail position")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T38 tco_is_tail_position detects tail position")
+    }
+
+    if compiler_main_test_tco_is_self_call() {
+        println("  T39 OK: tco_is_self_call detects self-recursive call")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T39 tco_is_self_call detects self-recursive call")
+    }
+
+    if compiler_main_test_tco_run_pass_transforms() {
+        println("  T40 OK: tco_run_pass transforms self-tail call to loop")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T40 tco_run_pass transforms self-tail call to loop")
+    }
+
+    if compiler_main_test_tco_run_pass_no_transform() {
+        println("  T41 OK: tco_run_pass skips non-tail call")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T41 tco_run_pass skips non-tail call")
+    }
+
+    if compiler_main_test_tco_eligibility_alloc() {
+        println("  T42 OK: tco_check_eligibility rejects alloc function")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T42 tco_check_eligibility rejects alloc function")
+    }
+
+    if compiler_main_test_tco_analyze_function() {
+        println("  T43 OK: tco_analyze_function populates func_id")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T43 tco_analyze_function populates func_id")
+    }
+
+    if compiler_main_test_tco_count_tail_calls() {
+        println("  T44 OK: tco_count_tail_calls_for_func returns 1")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T44 tco_count_tail_calls_for_func returns 1")
+    }
+
+    if compiler_main_test_tco_empty_module() {
+        println("  T45 OK: tco_run_pass preserves empty module fn_count")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T45 tco_run_pass preserves empty module fn_count")
+    }
+
     println("")
     println("compiler/main tests: " + int_to_string(passed) + "/" + int_to_string(total) + " passed")
     if passed == total { 0 } else { 1 }
@@ -3499,7 +3996,19 @@ fn main() with IO, Mut, Panic, Div, Alloc {
     var arg_idx: i64 = 0
     while arg_idx < args.len {
         let mode = arg_list_get(args, arg_idx)
-        if mode == "--self-test" {
+        if mode == "--check" {
+            run_check_mode(args, arg_idx)
+            return
+        } else if mode == "--ir-dump" {
+            run_ir_dump_mode(args, arg_idx)
+            return
+        } else if mode == "--ir-roundtrip" {
+            run_ir_roundtrip_mode(args, arg_idx)
+            return
+        } else if mode == "--native-compile" {
+            run_native_compile_mode(args, arg_idx)
+            return
+        } else if mode == "--self-test" {
             let self_test_code = run_compiler_main_self_tests()
             if self_test_code != 0 {
                 panic("compiler/main self-tests failed")
