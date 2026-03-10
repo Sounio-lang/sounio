@@ -8,7 +8,7 @@ use ir::ir::*
 struct Lowerer {
     module: Box<IrModule>,
     current_fn: i64,
-    current_func: IrFunction,
+    current_func: Box<IrFunction>,
     current_func_loaded: bool,
     env: Option<Box<IrEnvList>>,
     scope_depth: i64,
@@ -31,7 +31,7 @@ fn lowerer_new() -> Lowerer with Alloc {
     Lowerer {
         module: Box::new(ir_empty_module()),
         current_fn: IR_INVALID_FN,
-        current_func: ir_empty_function(),
+        current_func: Box::new(ir_empty_function()),
         current_func_loaded: false,
         env: None,
         scope_depth: 0,
@@ -93,10 +93,23 @@ impl Lowerer {
         var lo = self
         if lo.current_func_loaded && lo.current_fn >= 0 && lo.current_fn < lo.module.fn_count {
             var m = lo.module
-            m.functions[lo.current_fn as usize] = lo.current_func
+            m.functions[lo.current_fn as usize] = *lo.current_func
             lo.module = m
         }
         lo.current_func_loaded = false
+        lo
+    }
+
+    fn begin_function_body_lowering(self, fn_id: i64, name: Name) -> Lowerer with Mut, Panic, Div {
+        var lo = self.flush_current_func()
+        lo.current_fn = fn_id
+        var func = ir_empty_function()
+        func.name = name
+        lo.current_func = Box::new(func)
+        lo.current_func_loaded = true
+        lo.env = None
+        lo.scope_depth = 0
+        lo.loop_depth = 0
         lo
     }
 
@@ -1129,6 +1142,43 @@ impl Lowerer {
         }
     }
 
+    fn preseed_program_items(self, items: Option<Box<ItemList>>, skip_name: Name) -> Lowerer with Mut, Panic, Div, Alloc, IO {
+        match items {
+            Some(list) => {
+                var lo = self
+                let item = (*list).head
+                if item.kind == ItemKind::ItemFn {
+                    if !ir_name_eq(item.name, skip_name) {
+                        lo = lo.preseed_fn_item_summary(item.name, item.fn_def)
+                    }
+                } else if item.kind == ItemKind::ItemStruct {
+                    match item.struct_def {
+                        Some(sd) => {
+                            lo = lo.register_struct_fields(item.name, (*sd).fields, 0)
+                        }
+                        _ => {}
+                    }
+                } else if item.kind == ItemKind::ItemEnum {
+                    match item.enum_def {
+                        Some(ed) => {
+                            lo = lo.register_enum_variants(item.name, (*ed).variants, 0)
+                        }
+                        _ => {}
+                    }
+                } else if item.kind == ItemKind::ItemImpl {
+                    match item.impl_def {
+                        Some(id) => {
+                            lo = lo.preseed_impl_method_summaries(item.name, (*id).methods, skip_name)
+                        }
+                        _ => {}
+                    }
+                }
+                lo.preseed_program_items((*list).tail, skip_name)
+            }
+            _ => self,
+        }
+    }
+
     fn preseed_program_function_summaries(self, items: Option<Box<ItemList>>, skip_name: Name) -> Lowerer with Mut, Panic, Div, Alloc, IO {
         match items {
             Some(list) => {
@@ -1147,6 +1197,17 @@ impl Lowerer {
                     }
                 }
                 lo.preseed_program_function_summaries((*list).tail, skip_name)
+            }
+            _ => self,
+        }
+    }
+
+    fn lower_program_bodies(self, items: Option<Box<ItemList>>) -> Lowerer with Mut, Panic, Div, Alloc, IO {
+        match items {
+            Some(list) => {
+                let tail_items: Option<Box<ItemList>> = (*list).tail
+                let lo1 = self.lower_item_body((*list).head)
+                lo1.lower_program_bodies(tail_items)
             }
             _ => self,
         }
@@ -1210,6 +1271,17 @@ impl Lowerer {
         }
     }
 
+    fn lower_program_bodies_filtered(self, items: Option<Box<ItemList>>, target_name: Name) -> Lowerer with Mut, Panic, Div, Alloc, IO {
+        match items {
+            Some(list) => {
+                let tail_items: Option<Box<ItemList>> = (*list).tail
+                let lo1 = self.lower_item_body_filtered((*list).head, target_name)
+                lo1.lower_program_bodies_filtered(tail_items, target_name)
+            }
+            _ => self,
+        }
+    }
+
     fn lower_item(self, item: Item) -> Lowerer with Mut, Panic, Div, Alloc, IO {
         let k = item.kind
         let name = item.name
@@ -1235,6 +1307,21 @@ impl Lowerer {
             }
         } else if k == ItemKind::ItemTypeAlias {
             self
+        } else {
+            self
+        }
+    }
+
+    fn lower_item_body(self, item: Item) -> Lowerer with Mut, Panic, Div, Alloc, IO {
+        let k = item.kind
+        let name = item.name
+        if k == ItemKind::ItemFn {
+            self.lower_fn_item(name, item.fn_def)
+        } else if k == ItemKind::ItemImpl {
+            match item.impl_def {
+                Some(id) => self.lower_impl_methods(name, (*id).methods),
+                _ => self,
+            }
         } else {
             self
         }
@@ -1266,6 +1353,25 @@ impl Lowerer {
             }
         } else if k == ItemKind::ItemTypeAlias {
             self
+        } else {
+            self
+        }
+    }
+
+    fn lower_item_body_filtered(self, item: Item, target_name: Name) -> Lowerer with Mut, Panic, Div, Alloc, IO {
+        let k = item.kind
+        let name = item.name
+        if k == ItemKind::ItemFn {
+            if ir_name_eq(name, target_name) {
+                self.lower_fn_item(name, item.fn_def)
+            } else {
+                self
+            }
+        } else if k == ItemKind::ItemImpl {
+            match item.impl_def {
+                Some(id) => self.lower_impl_methods_filtered(name, (*id).methods, target_name),
+                _ => self,
+            }
         } else {
             self
         }
@@ -1457,12 +1563,7 @@ impl Lowerer {
                     return lo.report_error()
                 }
 
-                lo.current_fn = fn_id
-                lo.current_func = lo.module.functions[fn_id as usize]
-                lo.current_func_loaded = true
-                lo.env = None
-                lo.scope_depth = 0
-                lo.loop_depth = 0
+                lo = lo.begin_function_body_lowering(fn_id, name)
 
                 // Sprint 38: Compute compile strategy from AST return type + effects
                 let strategy = lo.ir_compute_strategy_from_ast((*fd).return_type, (*fd).effects)
@@ -3192,12 +3293,15 @@ fn ir_patch_validated_calls(module: &! IrModule) -> IrValidatedPatchStats with M
     stats
 }
 
-fn lower_program_to_ir_trace(
+fn lower_program_to_ir_staged_with_lowerer_trace(
+    lo: Lowerer,
     prog: Program,
     patch_stats: &! IrValidatedPatchStats
 ) -> IrLowerResult with Mut, Panic, Div, Alloc, IO {
-    let lo = lowerer_new()
-    var lo2 = lo.lower_program_items(prog.items)
+    var lo2 = lo.preseed_program_items(prog.items, ir_empty_name())
+    if !lo2.had_error {
+        lo2 = lo2.lower_program_bodies(prog.items)
+    }
     (*patch_stats) = ir_empty_validated_patch_stats()
     if !lo2.had_error {
         (*patch_stats) = ir_patch_validated_calls(&! lo2.module)
@@ -3208,6 +3312,14 @@ fn lower_program_to_ir_trace(
         had_error: lo2.had_error,
         patch_stats: (*patch_stats),
     }
+}
+
+fn lower_program_to_ir_trace(
+    prog: Program,
+    patch_stats: &! IrValidatedPatchStats
+) -> IrLowerResult with Mut, Panic, Div, Alloc, IO {
+    let lo = lowerer_new()
+    lower_program_to_ir_staged_with_lowerer_trace(lo, prog, &! patch_stats)
 }
 
 fn lower_program_to_ir(prog: Program) -> IrLowerResult with Mut, Panic, Div, Alloc, IO {
@@ -3230,10 +3342,21 @@ fn lower_program_to_ir_probe(prog: Program) -> IrLowerResult with Mut, Panic, Di
     }
 }
 
+fn lower_program_to_ir_probe_summary(prog: Program) -> IrLowerResult with Mut, Panic, Div, Alloc, IO {
+    let lo = lowerer_new_probe()
+    let lo2 = lo.preseed_program_items(prog.items, ir_empty_name())
+    IrLowerResult {
+        module: *lo2.module,
+        error_count: lo2.error_count,
+        had_error: lo2.had_error,
+        patch_stats: ir_empty_validated_patch_stats(),
+    }
+}
+
 fn lower_program_to_ir_probe_callsite(prog: Program, caller_name: Name) -> IrLowerResult with Mut, Panic, Div, Alloc, IO {
     let lo = lowerer_new_probe()
-    var lo2 = lo.preseed_program_function_summaries(prog.items, caller_name)
-    lo2 = lo2.lower_program_items_filtered(prog.items, caller_name)
+    var lo2 = lo.preseed_program_items(prog.items, caller_name)
+    lo2 = lo2.lower_program_bodies_filtered(prog.items, caller_name)
     var patch_stats = ir_empty_validated_patch_stats()
     if !lo2.had_error {
         patch_stats = ir_patch_validated_calls(&! lo2.module)
@@ -3252,17 +3375,7 @@ fn lower_program_to_ir_with_epistemic_trace(
     patch_stats: &! IrValidatedPatchStats
 ) -> IrLowerResult with Mut, Panic, Div, Alloc, IO {
     let lo = lowerer_new_with_epistemic(epistemic)
-    var lo2 = lo.lower_program_items(prog.items)
-    (*patch_stats) = ir_empty_validated_patch_stats()
-    if !lo2.had_error {
-        (*patch_stats) = ir_patch_validated_calls(&! lo2.module)
-    }
-    IrLowerResult {
-        module: *lo2.module,
-        error_count: lo2.error_count,
-        had_error: lo2.had_error,
-        patch_stats: (*patch_stats),
-    }
+    lower_program_to_ir_staged_with_lowerer_trace(lo, prog, &! patch_stats)
 }
 
 fn lower_program_to_ir_with_epistemic(prog: Program, epistemic: IrEpistemicSection) -> IrLowerResult with Mut, Panic, Div, Alloc, IO {
