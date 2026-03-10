@@ -41,6 +41,7 @@ use ir::profile::*
 use ir::inline::*
 use ir::layout::*
 use ir::opt_cleanup::*
+use native::regalloc::*
 
 // ============================================================================
 // STRING UTILITIES
@@ -3219,9 +3220,60 @@ fn compiler_main_test_dce_removes_dead() -> bool with Mut, Div, Panic {
     dce_check_nop(&result, 1)
 }
 
+// Sprint 52: verify regalloc assigns a preg when register pressure is low (1 vreg, 1 preg)
+fn compiler_main_test_regalloc_assigns_preg() -> bool with Mut, Div, Panic {
+    // Build: r0 = 3, r1 = r0 + 4, return r1
+    var ra_instrs: [RaSimpleInstr; 512] = [ra_empty_simple_instr(); 512]
+    ra_instrs[0 as usize] = ra_simple_instr(0, -1, -1)   // r0 = imm (def r0)
+    ra_instrs[1 as usize] = ra_simple_instr(1, 0, -1)    // r1 = r0 + imm (def r1, use r0)
+    ra_instrs[2 as usize] = ra_simple_instr(-1, 1, -1)   // return r1 (use r1)
+    var state = liveness_compute_intervals(ra_instrs, 3)
+    state = regalloc_linear_scan(state, 1)
+    // r0 and r1 don't overlap fully — at least one should get preg 0
+    let a0 = regalloc_get_assignment(state, 0)
+    let a1 = regalloc_get_assignment(state, 1)
+    // At least one should be assigned (not spilled)
+    if a0 < 0 && a1 < 0 { return false }
+    // The allocator should not report any conflicts
+    regalloc_verify_no_conflicts(state)
+}
+
+// Sprint 52: verify regalloc spills when pressure exceeds available registers
+fn compiler_main_test_regalloc_spills_under_pressure() -> bool with Mut, Div, Panic {
+    // Build: 6 live intervals all overlapping (start 0, end 10), only 1 preg
+    var ra_instrs: [RaSimpleInstr; 512] = [ra_empty_simple_instr(); 512]
+    var i = 0
+    while i < 6 {
+        ra_instrs[i as usize] = ra_simple_instr(i, -1, -1)
+        i = i + 1
+    }
+    // Add uses so intervals extend to pos 10
+    var j = 6
+    while j < 12 {
+        let vreg = j - 6
+        ra_instrs[j as usize] = ra_simple_instr(-1, vreg, -1)
+        j = j + 1
+    }
+    var state = liveness_compute_intervals(ra_instrs, 12)
+    state = regalloc_linear_scan(state, 1)
+    // With 6 overlapping vregs and 1 preg, at least 5 must be spilled
+    let spilled = regalloc_count_spilled(state)
+    if spilled < 5 { return false }
+    // vreg_spill_slots should be valid for spilled vregs
+    var v = 0
+    while v < 6 {
+        if regalloc_is_spilled(state, v) {
+            let slot = regalloc_get_spill_slot(state, v)
+            if slot < 0 { return false }
+        }
+        v = v + 1
+    }
+    true
+}
+
 fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div {
     var passed: i64 = 0
-    let total: i64 = 27
+    let total: i64 = 29
 
     println("=== compiler/main.sio self-tests ===")
 
@@ -3412,6 +3464,20 @@ fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div {
         passed = passed + 1
     } else {
         println("  FAIL: T27 dce removes dead instruction")
+    }
+
+    if compiler_main_test_regalloc_assigns_preg() {
+        println("  T28 OK: regalloc assigns preg under low pressure")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T28 regalloc assigns preg under low pressure")
+    }
+
+    if compiler_main_test_regalloc_spills_under_pressure() {
+        println("  T29 OK: regalloc spills under register pressure")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T29 regalloc spills under register pressure")
     }
 
     println("")

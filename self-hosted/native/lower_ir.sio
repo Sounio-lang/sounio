@@ -3,7 +3,8 @@
 module native::lower_ir
 
 use parser::ast::{BinaryOp, UnaryOp}
-use ir::ir::{IrInstr, IrOpcode, IrRegList, IR_MAX_FUNCS}
+use ir::ir::{IrInstr, IrOpcode, IrRegList, IR_MAX_FUNCS, IrFunction}
+use native::regalloc::*
 use native::encode::*
 use native::reloc::{RelocationTable, add_call_reloc, add_rip_reloc, add_data_section_reloc, patch_u32_le}
 use native::elf::{StringTable, string_table_add, data_section_add_f64}
@@ -15,6 +16,95 @@ use native::frame::*
 // Evaluation model: every IR virtual register lives in a stack slot at
 // rbp - (vreg+1)*8.  Expressions evaluate through rax (and rbx for
 // binary RHS).  This avoids register allocation entirely.
+
+// ============================================================================
+// Sprint 52: Register allocation wiring
+// ============================================================================
+
+// Map preg index (0-based) to x86-64 register number.
+// Sprint 52: only preg 0 is used → r15 (x86 reg 15).
+fn preg_to_x86_reg(preg: i64) -> i64 {
+    15    // All pregs map to r15 in Sprint 52 (num_pregs=1)
+}
+
+// Run linear-scan register allocation on func and populate nc.vreg_to_preg.
+// Must be called before instruction lowering, after effective_func is set.
+fn nc_run_regalloc(nc: NativeCompiler, func: IrFunction) -> NativeCompiler with Mut, Panic, Div {
+    var c = nc
+    // 1. Build RaSimpleInstr array from IR instructions
+    var ra_instrs: [RaSimpleInstr; 512] = [ra_empty_simple_instr(); 512]
+    let count = func.instr_count
+    var i = 0
+    while i < count && i < 128 {
+        let instr = func.instrs[i as usize]
+        ra_instrs[i as usize] = ra_simple_instr(instr.dst, instr.src1, instr.src2)
+        i = i + 1
+    }
+    // 2. Compute live intervals and run linear scan with 1 physical register (r15)
+    var state = liveness_compute_intervals(ra_instrs, count)
+    state = regalloc_linear_scan(state, 1)
+    // 3. Populate vreg_to_preg / vreg_spill_slots from allocation results
+    var v = 0
+    while v < state.count {
+        let interval = state.intervals[v as usize]
+        let vreg = interval.vreg
+        if vreg >= 0 && vreg < 512 {
+            if interval.assigned_preg >= 0 {
+                // Map logical preg to x86 reg number
+                c.vreg_to_preg[vreg as usize] = preg_to_x86_reg(interval.assigned_preg)
+            } else {
+                c.vreg_to_preg[vreg as usize] = interval.assigned_preg   // RA_SPILLED(-1)
+            }
+            c.vreg_spill_slots[vreg as usize] = interval.spill_slot
+        }
+        v = v + 1
+    }
+    // 4. Param vregs are always in stack slots — override any allocation
+    var pi = 0
+    while pi < func.param_count {
+        let pvreg = func.param_regs[pi as usize]
+        if pvreg >= 0 && pvreg < 512 {
+            c.vreg_to_preg[pvreg as usize] = -2    // RA_UNASSIGNED: use stack fallback
+        }
+        pi = pi + 1
+    }
+    c
+}
+
+// Load vreg to rax. Uses the physical register if allocated, else falls back to stack slot.
+fn nc_load_vreg_to_rax(nc: NativeCompiler, vreg: i64) -> NativeCompiler with Mut, Panic, Div {
+    var c = nc
+    if vreg < 0 || vreg >= 512 {
+        c.code = emit_xor_rax_rax(c.code)
+        return c
+    }
+    let preg = c.vreg_to_preg[vreg as usize]
+    if preg >= 0 {
+        // Allocated to a physical register: emit MOV rax, preg
+        c.code = emit_mov_rax_preg(c.code, preg)
+    } else {
+        // Spilled or unassigned: use stack slot formula
+        c.code = emit_load_rbp_disp32_rax(c.code, ir_slot_offset(vreg))
+    }
+    c
+}
+
+// Store rax to vreg. Uses the physical register if allocated, else falls back to stack slot.
+fn nc_store_rax_to_vreg(nc: NativeCompiler, vreg: i64) -> NativeCompiler with Mut, Panic, Div {
+    var c = nc
+    if vreg < 0 || vreg >= 512 {
+        return c
+    }
+    let preg = c.vreg_to_preg[vreg as usize]
+    if preg >= 0 {
+        // Allocated to a physical register: emit MOV preg, rax
+        c.code = emit_mov_preg_rax(c.code, preg)
+    } else {
+        // Spilled or unassigned: use stack slot formula
+        c.code = emit_store_rax_rbp_disp32(c.code, ir_slot_offset(vreg))
+    }
+    c
+}
 
 // ============================================================================
 // Instruction dispatch
@@ -278,7 +368,7 @@ fn lower_load_imm(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut
     var c = nc
     c.code = emit_mov_rax_imm(c.code, instr.imm_i64)
     if instr.dst >= 0 {
-        c.code = emit_store_rax_rbp_disp32(c.code, ir_slot_offset(instr.dst))
+        c = nc_store_rax_to_vreg(c, instr.dst)
     }
     c
 }
@@ -288,7 +378,7 @@ fn lower_load_bool(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mu
     let val = instr.imm_i64   // 1 for true, 0 for false
     c.code = emit_mov_rax_imm(c.code, val)
     if instr.dst >= 0 {
-        c.code = emit_store_rax_rbp_disp32(c.code, ir_slot_offset(instr.dst))
+        c = nc_store_rax_to_vreg(c, instr.dst)
     }
     c
 }
@@ -353,9 +443,9 @@ fn lower_load_string(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with 
 
 fn lower_copy(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut, Panic, Div {
     var c = nc
-    c.code = emit_load_rbp_disp32_rax(c.code, ir_slot_offset(instr.src1))
+    c = nc_load_vreg_to_rax(c, instr.src1)
     if instr.dst >= 0 {
-        c.code = emit_store_rax_rbp_disp32(c.code, ir_slot_offset(instr.dst))
+        c = nc_store_rax_to_vreg(c, instr.dst)
         // Propagate float type tracking
         if instr.src1 >= 0 && instr.src1 < 512 {
             c.is_float_reg[instr.dst as usize] = c.is_float_reg[instr.src1 as usize]
@@ -463,9 +553,9 @@ fn lower_ir_load_float_binop_operands(
     let rhs = if swap_operands { instr.src1 } else { instr.src2 }
 
     // Float path: load lhs → rax → xmm0, rhs → rax → xmm1
-    c.code = emit_load_rbp_disp32_rax(c.code, ir_slot_offset(lhs))
+    c = nc_load_vreg_to_rax(c, lhs)
     c.code = emit_movq_xmm0_rax(c.code)
-    c.code = emit_load_rbp_disp32_rax(c.code, ir_slot_offset(rhs))
+    c = nc_load_vreg_to_rax(c, rhs)
     c.code = emit_movq_xmm1_rax(c.code)
     c
 }
@@ -496,9 +586,9 @@ fn lower_ir_binop(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut
         c = emit_float_binop_code(c, instr.bin_op)
         let is_cmp = is_comparison_op(instr.bin_op)
 
-        // Store result (in rax) to dst slot
+        // Store result (in rax) to dst slot/register
         if instr.dst >= 0 {
-            c.code = emit_store_rax_rbp_disp32(c.code, ir_slot_offset(instr.dst))
+            c = nc_store_rax_to_vreg(c, instr.dst)
             // Comparisons produce integer 0/1; arithmetic keeps float
             if is_cmp == 1 {
                 c.is_float_reg[instr.dst as usize] = 0
@@ -507,20 +597,20 @@ fn lower_ir_binop(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut
             }
         }
     } else {
-        // Integer path (original)
-        c.code = emit_load_rbp_disp32_rax(c.code, ir_slot_offset(instr.src1))
+        // Integer path: load src1 via regalloc-aware helper, then push, load src2, pop rbx
+        c = nc_load_vreg_to_rax(c, instr.src1)
         c.code = emit_push_rax(c.code)
         c.code = emit_sub_rsp_8(c.code)      // maintain 16-byte alignment
-        c.code = emit_load_rbp_disp32_rax(c.code, ir_slot_offset(instr.src2))
+        c = nc_load_vreg_to_rax(c, instr.src2)
         c.code = emit_add_rsp_8(c.code)
         c.code = emit_pop_rbx(c.code)
 
         // Now rbx = LHS, rax = RHS
         c = emit_binop_code(c, instr.bin_op)
 
-        // Store result (in rax) to dst slot
+        // Store result (in rax) to dst slot/register
         if instr.dst >= 0 {
-            c.code = emit_store_rax_rbp_disp32(c.code, ir_slot_offset(instr.dst))
+            c = nc_store_rax_to_vreg(c, instr.dst)
         }
     }
     c
@@ -605,7 +695,7 @@ fn emit_binop_code(nc: NativeCompiler, op: BinaryOp) -> NativeCompiler with Mut,
 
 fn lower_unaryop(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut, Panic, Div {
     var c = nc
-    c.code = emit_load_rbp_disp32_rax(c.code, ir_slot_offset(instr.src1))
+    c = nc_load_vreg_to_rax(c, instr.src1)
 
     if instr.un_op == UnaryOp::OpNeg {
         c.code = emit_neg_rax(c.code)
@@ -616,13 +706,13 @@ fn lower_unaryop(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut,
         c.code = emit_load_rax_mem_rax(c.code)
     } else if instr.un_op == UnaryOp::OpRef || instr.un_op == UnaryOp::OpRefMut {
         // Reference: produce pointer to the src1 stack slot
-        // rax already holds the value; reload as address using LEA
+        // OpRef/OpRefMut always takes address of stack slot (not register)
         let slot_off = ir_slot_offset(instr.src1)
         c.code = emit_lea_rax_rbp_disp32(c.code, slot_off)
     }
 
     if instr.dst >= 0 {
-        c.code = emit_store_rax_rbp_disp32(c.code, ir_slot_offset(instr.dst))
+        c = nc_store_rax_to_vreg(c, instr.dst)
     }
     c
 }
@@ -636,7 +726,7 @@ fn lower_return(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut, 
 
     // Load return value into rax
     if instr.src1 >= 0 {
-        c.code = emit_load_rbp_disp32_rax(c.code, ir_slot_offset(instr.src1))
+        c = nc_load_vreg_to_rax(c, instr.src1)
     } else {
         c.code = emit_xor_rax_rax(c.code)
     }

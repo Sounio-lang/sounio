@@ -77,9 +77,11 @@ fn zmm_stack_slot_offset(slot_index: i64) -> i64 {
     -(slot_index + 1) * 64
 }
 
-// Emit function prologue: push rbp; mov rbp, rsp; sub rsp, <frame_size>
+// Emit function prologue: push r15; push rbp; mov rbp, rsp; sub rsp, <frame_size>
+// r15 is the Sprint 52 callee-saved physical register used by the register allocator.
 fn emit_prologue(buf: CodeBuffer, frame_size: i64) -> CodeBuffer with Mut, Panic, Div {
     var b = buf
+    b = emit_push_r15(b)       // Sprint 52: save r15 (callee-saved alloc reg)
     b = emit_push_rbp(b)
     b = emit_mov_rbp_rsp(b)
 
@@ -89,11 +91,12 @@ fn emit_prologue(buf: CodeBuffer, frame_size: i64) -> CodeBuffer with Mut, Panic
     b
 }
 
-// Emit function epilogue: mov rsp, rbp; pop rbp; ret
+// Emit function epilogue: mov rsp, rbp; pop rbp; pop r15; ret
 fn emit_epilogue(buf: CodeBuffer) -> CodeBuffer with Mut, Panic, Div {
     var b = buf
     b = emit_mov_rsp_rbp(b)
     b = emit_pop_rbp(b)
+    b = emit_pop_r15(b)        // Sprint 52: restore r15
     b = emit_ret(b)
     b
 }
@@ -170,6 +173,11 @@ struct NativeCompiler {
 
     // Sprint 47: .sprof file output metadata
     prof_sprof_name_offset: i64,       // .rodata offset for "profile.sprof" filename
+
+    // Sprint 52: register allocation — vreg → physical register mapping
+    // RA_UNASSIGNED(-2) = not processed, RA_SPILLED(-1) = on stack, >=0 = x86 reg number
+    vreg_to_preg: [i64; 512],
+    vreg_spill_slots: [i64; 512],      // spill slot index when vreg_to_preg[v] == -1
 }
 
 fn compiler_new() -> NativeCompiler {
@@ -194,6 +202,8 @@ fn compiler_new() -> NativeCompiler {
         prof_counter_count: 0,
         prof_dump_fn_index: -1,
         prof_sprof_name_offset: 0,
+        vreg_to_preg: [-2; 512],
+        vreg_spill_slots: [-1; 512],
     }
 }
 
@@ -219,6 +229,13 @@ fn reset_function_state(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, D
         j = j + 1
     }
     c.current_strategy = 0
+    // Sprint 52: reset register allocation state
+    var ra = 0
+    while ra < 512 {
+        c.vreg_to_preg[ra as usize] = -2
+        c.vreg_spill_slots[ra as usize] = -1
+        ra = ra + 1
+    }
     c
 }
 
