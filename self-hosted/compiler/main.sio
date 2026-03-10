@@ -3800,9 +3800,173 @@ fn compiler_main_test_tco_empty_module() -> bool with Mut, Div, Panic {
     out_module.fn_count == 0
 }
 
+// ============================================================================
+// Sprint 63: Adaptive stack slot encoding self-tests (T49-T56)
+// ============================================================================
+
+// T49: ir_slot_fits_disp8 returns true for offset -8 (vreg 0)
+fn compiler_main_test_disp8_fits_vreg0() -> bool {
+    ir_slot_fits_disp8(-8)
+}
+
+// T50: ir_slot_fits_disp8 returns true for offset -128 (vreg 15, boundary)
+fn compiler_main_test_disp8_fits_boundary() -> bool {
+    ir_slot_fits_disp8(-128)
+}
+
+// T51: ir_slot_fits_disp8 returns false for offset -136 (vreg 16, beyond disp8)
+fn compiler_main_test_disp8_no_fit_vreg16() -> bool {
+    !ir_slot_fits_disp8(-136)
+}
+
+// T52: emit_load_rbp_disp8_rax emits 4 bytes: 0x48 0x8B 0x45 0xF8 (disp=-8)
+fn compiler_main_test_disp8_load_bytes() -> bool with Mut, Panic, Div {
+    var buf = code_buffer_new()
+    buf = emit_load_rbp_disp8_rax(buf, -8)
+    if buf.len != 4 { return false }
+    if buf.bytes[0 as usize] != 0x48 as i8 { return false }
+    if buf.bytes[1 as usize] != 0x8b as i8 { return false }
+    if buf.bytes[2 as usize] != 0x45 as i8 { return false }
+    if buf.bytes[3 as usize] != 0xf8 as i8 { return false }  // low8(-8) = 0xF8
+    true
+}
+
+// T53: emit_store_rax_rbp_disp8 emits 4 bytes: 0x48 0x89 0x45 0xF0 (disp=-16)
+fn compiler_main_test_disp8_store_bytes() -> bool with Mut, Panic, Div {
+    var buf = code_buffer_new()
+    buf = emit_store_rax_rbp_disp8(buf, -16)
+    if buf.len != 4 { return false }
+    if buf.bytes[0 as usize] != 0x48 as i8 { return false }
+    if buf.bytes[1 as usize] != 0x89 as i8 { return false }
+    if buf.bytes[2 as usize] != 0x45 as i8 { return false }
+    if buf.bytes[3 as usize] != 0xf0 as i8 { return false }  // low8(-16) = 0xF0
+    true
+}
+
+// T54: emit_load_rbp_disp32_rax still emits 7 bytes (regression)
+fn compiler_main_test_disp32_load_len() -> bool with Mut, Panic, Div {
+    var buf = code_buffer_new()
+    buf = emit_load_rbp_disp32_rax(buf, -8)
+    buf.len == 7
+}
+
+// T55: emit_store_rax_rbp_disp32 still emits 7 bytes (regression)
+fn compiler_main_test_disp32_store_len() -> bool with Mut, Panic, Div {
+    var buf = code_buffer_new()
+    buf = emit_store_rax_rbp_disp32(buf, -8)
+    buf.len == 7
+}
+
+// T56: ir_slot_fits_disp8 agrees with ir_slot_offset for vreg boundary (15 fits, 16 doesn't)
+fn compiler_main_test_disp8_slot_boundary() -> bool {
+    if !ir_slot_fits_disp8(ir_slot_offset(15)) { return false }
+    if ir_slot_fits_disp8(ir_slot_offset(16)) { return false }
+    true
+}
+
+// T57: native v2 runtime context layout is language-visible and deopt-ready
+fn compiler_main_test_native_v2_runtime_context_contract() -> bool with Mut, Panic, Div {
+    let layout = native_v2_runtime_context_layout()
+    if !layout.language_visible { return false }
+    if !layout.tracing_gc { return false }
+    if !layout.precise_stack_maps { return false }
+    if !layout.safepoints { return false }
+    if !layout.deopt_enabled { return false }
+    if !layout.osr_enabled { return false }
+    if native_v2_runtime_context_group_count() != 7 { return false }
+    if !str_eq(native_v2_runtime_context_group_name(0), "gc_heap") { return false }
+    if !str_eq(native_v2_runtime_context_group_name(6), "provenance") { return false }
+    native_v2_runtime_context_total_fields(layout) >= 21
+}
+
+// T58: native v2 x86 policy exposes reserved + allocatable pools explicitly
+fn compiler_main_test_native_v2_target_policy_x86() -> bool with IO, Mut, Panic, Div {
+    let spec = native_resolve_target("x86_64-linux", "auto", true)
+    let summary = native_v2_target_policy_summary(spec)
+    if !native_v2_target_contract_supported(spec) { return false }
+    if summary.reserved_count != 3 { return false }
+    if summary.allocatable_count != 4 { return false }
+    if summary.scratch_count != 5 { return false }
+    if !summary.emitter_ready { return false }
+    if !str_eq(native_v2_target_policy_group_name(spec, NATIVE_V2_POLICY_GROUP_RESERVED(), 2), "rbx") { return false }
+    if !str_eq(native_v2_target_policy_group_name(spec, NATIVE_V2_POLICY_GROUP_ALLOCATABLE(), 0), "r12") { return false }
+    if !str_eq(native_v2_target_policy_group_name(spec, NATIVE_V2_POLICY_GROUP_RETURNS(), 0), "rax") { return false }
+    true
+}
+
+// T59: native v2 aarch64 policy is present even before emitter graduation
+fn compiler_main_test_native_v2_target_policy_aarch64() -> bool with IO, Mut, Panic, Div {
+    let spec = native_resolve_target("aarch64-macos", "auto", true)
+    let summary = native_v2_target_policy_summary(spec)
+    if !native_v2_target_contract_supported(spec) { return false }
+    if summary.reserved_count != 4 { return false }
+    if summary.allocatable_count != 4 { return false }
+    if summary.arg_count != 8 { return false }
+    if summary.emitter_ready { return false }
+    if !str_eq(native_v2_target_policy_group_name(spec, NATIVE_V2_POLICY_GROUP_RESERVED(), 3), "x18") { return false }
+    if !str_eq(native_v2_target_policy_group_name(spec, NATIVE_V2_POLICY_GROUP_ALLOCATABLE(), 0), "x19") { return false }
+    if !str_eq(native_v2_target_policy_group_name(spec, NATIVE_V2_POLICY_GROUP_ARGS(), 0), "x0") { return false }
+    true
+}
+
+// T60: native v2 shadow machine module reports tiering + deopt substrate
+fn compiler_main_test_native_v2_machine_shadow_module() -> bool with IO, Mut, Panic, Div {
+    let spec = native_resolve_target("x86_64-linux", "auto", true)
+    var module = ir_empty_module()
+    var func = ir_empty_function()
+    var name = empty_name()
+    name.buf[0] = 109 as i8
+    name.buf[1] = 97 as i8
+    name.buf[2] = 105 as i8
+    name.buf[3] = 110 as i8
+    name.len = 4
+    func.name = name
+    func.instrs[0] = ir_load_imm(0, 7)
+    func.instrs[1] = ir_return(0)
+    func.instr_count = 2
+    func.reg_count = 1
+    module.functions[0] = func
+    module.fn_count = 1
+    let machine = native_v2_shadow_machine_module(&module, spec)
+    if machine.fn_count != 1 { return false }
+    if machine.ir_instr_count != 2 { return false }
+    if machine.optimized_tier_count != 2 { return false }
+    if !machine.has_runtime_context { return false }
+    if !machine.supports_stack_maps { return false }
+    if !machine.supports_deopt { return false }
+    if !machine.supports_osr { return false }
+    machine.target_arch_id == ARCH_X86_64()
+}
+
+// T61: native v2 shadow contract writer emits a JSON artifact
+fn compiler_main_test_native_v2_shadow_contract_write() -> bool with IO, Mut, Panic, Div {
+    let spec = native_resolve_target("x86_64-linux", "auto", true)
+    let path = "artifacts/omega/native_backend_v2_shadow_contract.selftest.json"
+    var module = ir_empty_module()
+    var func = ir_empty_function()
+    var name = empty_name()
+    name.buf[0] = 109 as i8
+    name.buf[1] = 97 as i8
+    name.buf[2] = 105 as i8
+    name.buf[3] = 110 as i8
+    name.len = 4
+    func.name = name
+    func.instrs[0] = ir_load_imm(0, 11)
+    func.instrs[1] = ir_return(0)
+    func.instr_count = 2
+    func.reg_count = 1
+    module.functions[0] = func
+    module.fn_count = 1
+    if !native_v2_write_shadow_contract(path, &module, spec, true, ERR_OK(), "selftest") { return false }
+    let size = file_size(path)
+    if size <= 0 { return false }
+    let data = read_file(path)
+    data[0 as usize] == (123 as i8)
+}
+
 fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
     var passed: i64 = 0
-    let total: i64 = 48
+    let total: i64 = 61
 
     println("=== compiler/main.sio self-tests ===")
 
@@ -4140,6 +4304,97 @@ fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
         passed = passed + 1
     } else {
         println("  FAIL: T45 tco_run_pass preserves empty module fn_count")
+    }
+
+    if compiler_main_test_disp8_fits_vreg0() {
+        println("  T49 OK: ir_slot_fits_disp8(-8) == true (vreg 0)")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T49 ir_slot_fits_disp8(-8) == true (vreg 0)")
+    }
+
+    if compiler_main_test_disp8_fits_boundary() {
+        println("  T50 OK: ir_slot_fits_disp8(-128) == true (vreg 15 boundary)")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T50 ir_slot_fits_disp8(-128) == true (vreg 15 boundary)")
+    }
+
+    if compiler_main_test_disp8_no_fit_vreg16() {
+        println("  T51 OK: ir_slot_fits_disp8(-136) == false (vreg 16)")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T51 ir_slot_fits_disp8(-136) == false (vreg 16)")
+    }
+
+    if compiler_main_test_disp8_load_bytes() {
+        println("  T52 OK: emit_load_rbp_disp8_rax emits 4 bytes 48 8B 45 F8")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T52 emit_load_rbp_disp8_rax emits 4 bytes 48 8B 45 F8")
+    }
+
+    if compiler_main_test_disp8_store_bytes() {
+        println("  T53 OK: emit_store_rax_rbp_disp8 emits 4 bytes 48 89 45 F0")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T53 emit_store_rax_rbp_disp8 emits 4 bytes 48 89 45 F0")
+    }
+
+    if compiler_main_test_disp32_load_len() {
+        println("  T54 OK: emit_load_rbp_disp32_rax emits 7 bytes (regression)")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T54 emit_load_rbp_disp32_rax emits 7 bytes (regression)")
+    }
+
+    if compiler_main_test_disp32_store_len() {
+        println("  T55 OK: emit_store_rax_rbp_disp32 emits 7 bytes (regression)")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T55 emit_store_rax_rbp_disp32 emits 7 bytes (regression)")
+    }
+
+    if compiler_main_test_disp8_slot_boundary() {
+        println("  T56 OK: ir_slot_fits_disp8 boundary: vreg 15 fits, vreg 16 doesn't")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T56 ir_slot_fits_disp8 boundary: vreg 15 fits, vreg 16 doesn't")
+    }
+
+    if compiler_main_test_native_v2_runtime_context_contract() {
+        println("  T57 OK: native v2 runtime context is language-visible and deopt-ready")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T57 native v2 runtime context is language-visible and deopt-ready")
+    }
+
+    if compiler_main_test_native_v2_target_policy_x86() {
+        println("  T58 OK: native v2 x86 policy exposes reserved and allocatable pools")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T58 native v2 x86 policy exposes reserved and allocatable pools")
+    }
+
+    if compiler_main_test_native_v2_target_policy_aarch64() {
+        println("  T59 OK: native v2 aarch64 policy is defined before emitter graduation")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T59 native v2 aarch64 policy is defined before emitter graduation")
+    }
+
+    if compiler_main_test_native_v2_machine_shadow_module() {
+        println("  T60 OK: native v2 shadow machine module reports tiering and deopt")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T60 native v2 shadow machine module reports tiering and deopt")
+    }
+
+    if compiler_main_test_native_v2_shadow_contract_write() {
+        println("  T61 OK: native v2 shadow contract writer emits JSON artifact")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T61 native v2 shadow contract writer emits JSON artifact")
     }
 
     println("")
