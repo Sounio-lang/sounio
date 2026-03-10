@@ -36,7 +36,7 @@ use resolve::imports::*
 use resolve::symbol::*
 use resolve::scope::*
 use resolve::mod::{resolve_modules, resolve_program, ResolveBatchResult}
-use module_loader::{compile_multimodule_native, compile_multimodule_native_with_ir, load_multimodule_ir, load_multimodule_ir_traced, empty_load_multimodule_ir_trace, preflight_multimodule_frontend, load_multimodule_epistemic_into, load_module_file, extract_imports_from_ast, path_directory, use_path_to_file_path, visited_contains, ir_merge_epistemic_sections, empty_program, file_exists}
+use module_loader::{compile_multimodule_native, compile_multimodule_native_with_ir, load_multimodule_ir, load_multimodule_ir_traced, load_multimodule_ir_probe_summary, load_multimodule_ir_probe_summary_traced, empty_load_multimodule_ir_trace, preflight_multimodule_frontend, load_multimodule_epistemic_into, load_module_file, extract_imports_from_ast, path_directory, use_path_to_file_path, visited_contains, ir_merge_epistemic_sections, empty_program, file_exists}
 use frontend_callsite_probe::{run_frontend_callsite_probe}
 use frontend_strategy_probe::{run_frontend_strategy_probe}
 use parser::parser::{parser_last_error_count}
@@ -280,7 +280,7 @@ fn run_probe_load_ir(args: ArgList, flag_index: i64) with IO, Mut, Panic, Div, A
     print("probe_load_ir: source=")
     print(source_path)
     print("\n")
-    let ir_result = load_multimodule_ir(source_path)
+    let ir_result = load_multimodule_ir_probe_summary(source_path)
     let parse_errors = parser_last_error_count()
     if ir_result.ok && parse_errors == 0 {
         println("probe_load_ir: ok")
@@ -328,7 +328,7 @@ fn run_probe_load_ir_trace(args: ArgList, flag_index: i64) with IO, Mut, Panic, 
     print(source_path)
     print("\n")
     var trace = empty_load_multimodule_ir_trace()
-    let ir_result = load_multimodule_ir_traced(source_path, &! trace)
+    let ir_result = load_multimodule_ir_probe_summary_traced(source_path, &! trace)
     let parse_errors = parser_last_error_count()
     print("probe_load_ir_trace: stage=")
     print(trace.last_stage)
@@ -5320,6 +5320,83 @@ fn compiler_main_test_ocp_sr_round_trip() -> bool with Mut, Div, Panic {
     let func = cp_make_test_func(instrs, 3)
     let result = opt_cleanup_function(func)
     result.instrs[1].op != IrOpcode::IrBinOp
+}
+
+// ============================================================================
+// Sprint 69: Constant propagation through IrCopy (T103-T108)
+// ============================================================================
+
+// T103: copy prop enables full-constant fold: r0=5; r1=IrCopy(r0); r2=r1+r3(=3) → r2=8
+fn compiler_main_test_ocp_cp_enables_full_fold() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(0, 5)
+    instrs[1] = ir_copy(1, 0)
+    instrs[2] = ir_load_imm(2, 3)
+    instrs[3] = ir_binop(3, 1, BinaryOp::OpAdd, 2)
+    let func = cp_make_test_func(instrs, 4)
+    let result = ocp_const_fold(func)
+    result.instrs[3].op == IrOpcode::IrLoadImm && result.instrs[3].imm_i64 == 8
+}
+
+// T104: copy prop enables strength reduction: r0=4; r1=IrCopy(r0); r2=x*r1 → r2=x<<2
+fn compiler_main_test_ocp_cp_enables_strength_reduction() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(1, 4)
+    instrs[1] = ir_copy(2, 1)
+    instrs[2] = ir_binop(3, 0, BinaryOp::OpMul, 2)
+    let func = cp_make_test_func(instrs, 3)
+    let result = ocp_const_fold(func)
+    result.instrs[2].bin_op == BinaryOp::OpShl
+}
+
+// T105: transitive copy chain: r0=6; r1=IrCopy(r0); r2=IrCopy(r1) → r2 is also constant=6
+fn compiler_main_test_ocp_cp_transitive_chain() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(0, 6)
+    instrs[1] = ir_copy(1, 0)
+    instrs[2] = ir_copy(2, 1)
+    instrs[3] = ir_load_imm(3, 6)
+    instrs[4] = ir_binop(4, 2, BinaryOp::OpAdd, 3)
+    let func = cp_make_test_func(instrs, 5)
+    let result = ocp_const_fold(func)
+    result.instrs[4].op == IrOpcode::IrLoadImm && result.instrs[4].imm_i64 == 12
+}
+
+// T106: copy prop enables identity fold: r0=1; r1=IrCopy(r0); r2=x*r1 → r2=IrCopy(x)
+fn compiler_main_test_ocp_cp_enables_identity_fold() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(1, 1)
+    instrs[1] = ir_copy(2, 1)
+    instrs[2] = ir_binop(3, 0, BinaryOp::OpMul, 2)
+    let func = cp_make_test_func(instrs, 3)
+    let result = ocp_const_fold(func)
+    result.instrs[2].op == IrOpcode::IrCopy && result.instrs[2].src1 == 0
+}
+
+// T107: non-const source not propagated: r1=IrCopy(r_param) → r1 stays non-constant
+fn compiler_main_test_ocp_cp_non_const_not_propagated() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_copy(1, 0)
+    instrs[1] = ir_load_imm(2, 3)
+    instrs[2] = ir_binop(3, 1, BinaryOp::OpAdd, 2)
+    let func = cp_make_test_func(instrs, 3)
+    let result = ocp_const_fold(func)
+    result.instrs[2].op == IrOpcode::IrBinOp
+}
+
+// T108: round-trip: copy prop + full fold + DCE removes dead loads
+fn compiler_main_test_ocp_cp_round_trip_dce() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(0, 7)
+    instrs[1] = ir_copy(1, 0)
+    instrs[2] = ir_load_imm(2, 3)
+    instrs[3] = ir_binop(3, 1, BinaryOp::OpAdd, 2)
+    instrs[4] = ir_copy(4, 3)
+    let func = cp_make_test_func(instrs, 5)
+    let result = opt_cleanup_function(func)
+    if result.instrs[3].op != IrOpcode::IrLoadImm { return false }
+    if result.instrs[3].imm_i64 != 10 { return false }
+    true
 }
 
 fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div, Alloc {

@@ -1,35 +1,129 @@
 //@ run-pass
 // Uncertainty field visualization — epistemic rendering showcase
 //
-// Renders a 2D grid of Knowledge<f64> values as a color-mapped heatmap
+// Renders a 2D grid of Knowledge values as a color-mapped heatmap
 // where color intensity = value and blur/alpha = uncertainty.
 // This is Sounio's novel contribution: type-directed uncertainty rendering.
+// Integer arithmetic version (scaled by 1000 to avoid f64).
 
-struct Color { r: f64, g: f64, b: f64, a: f64 }
+struct Color { r: i64, g: i64, b: i64, a: i64 }
 
-fn uncertainty_to_alpha(eps: f64) -> f64 with Div {
-    // Higher uncertainty → more transparent
-    let clamped = if eps > 1.0 { 1.0 } else { eps }
-    1.0 - clamped * 0.7
+fn clamp_byte(v: i64) -> i64 {
+    if v < 0 { return 0 }
+    if v > 255 { return 255 }
+    v
 }
 
-fn value_to_color(v: f64, eps: f64) -> Color with Div {
-    // Temperature colormap: blue (cold) → red (hot)
-    // Alpha modulated by uncertainty
-    let t = if v > 1.0 { 1.0 } else { if v < 0.0 { 0.0 } else { v } }
+// uncertainty_to_alpha: higher uncertainty → more transparent (scaled *1000)
+fn uncertainty_to_alpha_1000(eps_1000: i64) -> i64 with Div {
+    let clamped = if eps_1000 > 1000 { 1000 } else { eps_1000 }
+    1000 - clamped * 700 / 1000
+}
+
+// value_to_color: temperature colormap blue→red, alpha modulated by uncertainty
+// v_1000 and eps_1000 are scaled *1000
+fn value_to_color(v_1000: i64, eps_1000: i64) -> Color with Div {
+    let t_1000 = if v_1000 > 1000 { 1000 } else { if v_1000 < 0 { 0 } else { v_1000 } }
     Color {
-        r: t,
-        g: 0.2,
-        b: 1.0 - t,
-        a: uncertainty_to_alpha(eps),
+        r: t_1000,
+        g: 200,
+        b: 1000 - t_1000,
+        a: uncertainty_to_alpha_1000(eps_1000),
     }
 }
 
-fn main() -> i32 with IO, Div {
-    // Grid of measurements with varying uncertainty
-    let c1 = value_to_color(0.8, 0.1)   // high value, low uncertainty → bright red, opaque
-    let c2 = value_to_color(0.3, 0.9)   // low value, high uncertainty → dim blue, transparent
-    let c3 = value_to_color(0.5, 0.5)   // medium both → purple, semi-transparent
-    // Sprint 35: render grid cells as colored rectangles to PPM
-    0
+fn fill_channel(
+    x0: i64, y0: i64, rw: i64, rh: i64,
+    v: i64,
+    fb: &![i64; 65536],
+    fb_w: i64, fb_h: i64
+) with Mut, Panic, Div {
+    var dy: i64 = 0
+    while dy < rh {
+        var dx: i64 = 0
+        while dx < rw {
+            let px = x0 + dx
+            let py = y0 + dy
+            if px >= 0 && px < fb_w && py >= 0 && py < fb_h {
+                let idx = py * fb_w + px;
+                (*fb)[idx] = v;
+            }
+            dx = dx + 1
+        }
+        dy = dy + 1
+    }
+}
+
+fn get_channel(fb: &[i64; 65536], i: i64) -> i64 with Panic {
+    (*fb)[i]
+}
+
+fn rasterize_rect(
+    x0: i64, y0: i64, rw: i64, rh: i64,
+    r: i64, g: i64, b: i64,
+    fb_r: &![i64; 65536], fb_g: &![i64; 65536], fb_b: &![i64; 65536],
+    fb_w: i64, fb_h: i64
+) with Mut, Panic, Div {
+    fill_channel(x0, y0, rw, rh, r, fb_r, fb_w, fb_h)
+    fill_channel(x0, y0, rw, rh, g, fb_g, fb_w, fb_h)
+    fill_channel(x0, y0, rw, rh, b, fb_b, fb_w, fb_h)
+}
+
+fn emit_ppm(
+    w: i64, h: i64,
+    fb_r: &[i64; 65536], fb_g: &[i64; 65536], fb_b: &[i64; 65536]
+) with IO, Mut, Panic, Div {
+    print("P3\n")
+    print_int(w)
+    print(" ")
+    print_int(h)
+    print("\n255\n")
+    var i: i64 = 0
+    while i < w * h {
+        print_int(clamp_byte(get_channel(fb_r, i)))
+        print(" ")
+        print_int(clamp_byte(get_channel(fb_g, i)))
+        print(" ")
+        print_int(clamp_byte(get_channel(fb_b, i)))
+        print("\n")
+        i = i + 1
+    }
+}
+
+fn main() with IO, Mut, Div, Panic {
+    let w: i64 = 128
+    let h: i64 = 128
+    let cell_w: i64 = 8
+    let cell_h: i64 = 8
+
+    var fb_r: [i64; 65536] = [10; 65536]
+    var fb_g: [i64; 65536] = [10; 65536]
+    var fb_b: [i64; 65536] = [14; 65536]
+
+    var gy: i64 = 0
+    while gy < 16 {
+        var gx: i64 = 0
+        while gx < 16 {
+            // value = gx / 15 (scaled *1000)
+            let value_1000 = gx * 1000 / 15
+            // eps = gy / 15 (scaled *1000)
+            let eps_1000 = gy * 1000 / 15
+            let c = value_to_color(value_1000, eps_1000)
+            // brightness = 1.0 - eps * 0.7 = c.a (scaled *1000)
+            let brightness_1000 = c.a
+            // r, g, b: channel * brightness * 255 / 1000000
+            let r = clamp_byte(c.r * brightness_1000 * 255 / 1000000)
+            let g = clamp_byte(c.g * brightness_1000 * 255 / 1000000)
+            let b = clamp_byte(c.b * brightness_1000 * 255 / 1000000)
+            rasterize_rect(
+                gx * cell_w, gy * cell_h, cell_w, cell_h,
+                r, g, b,
+                &!fb_r, &!fb_g, &!fb_b, w, h
+            )
+            gx = gx + 1
+        }
+        gy = gy + 1
+    }
+
+    emit_ppm(w, h, &fb_r, &fb_g, &fb_b)
 }

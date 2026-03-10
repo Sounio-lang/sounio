@@ -8775,6 +8775,12 @@ impl Checker {
     // --------------------------------------------------------
 
     fn check_call_expr(self, e: Expr) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+        // Safety guard: ExprIndex nodes (e.right=Some) are occasionally dispatched here
+        // due to a VM-level kind mismatch. ExprCall never sets e.right; ExprIndex always does.
+        match e.right {
+            Some(_) => return self.check_index_expr(e)
+            None => {}
+        }
         if call_expr_is_builtin_prove_robust(e.left) {
             return self.check_prove_robust_expr(e)
         }
@@ -8842,6 +8848,46 @@ impl Checker {
         let callee_pair = self.check_opt_expr(e.left)
         var c = callee_pair.0
         let callee_ty = callee_pair.1
+        let array_like_ty =
+            if callee_ty.kind == TypeKind::TyArray {
+                callee_ty
+            } else if callee_ty.kind == TypeKind::TyRef || callee_ty.kind == TypeKind::TyRefMut {
+                match callee_ty.inner {
+                    Some(inner_ty) => *inner_ty
+                    None => ty_error()
+                }
+            } else {
+                ty_error()
+            }
+        if array_like_ty.kind == TypeKind::TyArray {
+            let idx_arg = expr_list_head(e.args)
+            let extra_arg = expr_list_second(e.args)
+            match idx_arg {
+                Some(arg) => {
+                    let idx_pair = c.check_expr(*arg)
+                    c = idx_pair.0
+                    let idx_ty = idx_pair.1
+                    if !is_error_or_unknown(idx_ty) && idx_ty.kind != TypeKind::TyI64 {
+                        c = c.report_error_at(e.span, 14, 0, 0, 0)
+                    }
+                    match extra_arg {
+                        Some(extra) => {
+                            let extra_pair = c.check_expr(*extra)
+                            c = extra_pair.0
+                            c = c.report_error_at(e.span, 17, 0, 0, 0)
+                            (c, ty_error())
+                        }
+                        None => {
+                            match array_like_ty.inner {
+                                Some(elem_ty) => return (c, *elem_ty)
+                                None => return (c, ty_error())
+                            }
+                        }
+                    }
+                }
+                None => {}
+            }
+        }
         if callee_ty.kind == TypeKind::TyFn && callee_ty.fn_sig_id >= 0 {
             let sig = c.fn_sigs.get(callee_ty.fn_sig_id)
             let call_start_borrows = c.borrows
@@ -11323,6 +11369,30 @@ impl Checker {
     // --------------------------------------------------------
 
     fn check_array_lit(self, e: Expr) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+        match e.left {
+            Some(elem_expr) => match e.right {
+                Some(count_expr) => {
+                    let elem_pair = self.check_expr(*elem_expr)
+                    var c = elem_pair.0
+                    let elem_ty = elem_pair.1
+                    let count_pair = c.check_expr(*count_expr)
+                    c = count_pair.0
+                    let count_ty = count_pair.1
+                    if !types_compatible(count_ty, ty_i64()) {
+                        c = c.report_mismatch((*count_expr).span, 20, ty_i64(), count_ty)
+                        return (c, ty_array(elem_ty, 0))
+                    }
+                    if (*count_expr).kind != ExprKind::ExprIntLit {
+                        c = c.report((*count_expr).span, 20)
+                        return (c, ty_array(elem_ty, 0))
+                    }
+                    return (c, ty_array(elem_ty, (*count_expr).int_val))
+                }
+                None => ()
+            }
+            None => ()
+        }
+
         let pair = self.check_array_elems(e.args)
         let c = pair.0
         let elem_ty = pair.1

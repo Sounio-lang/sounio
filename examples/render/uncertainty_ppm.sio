@@ -5,6 +5,7 @@
 //
 // 16x16 grid of "measurements" with varying uncertainty.
 // Color: temperature map (blue→red). Alpha/brightness modulated by uncertainty.
+// Integer arithmetic version (scaled by 1000 to avoid f64).
 
 fn clamp_byte(v: i64) -> i64 {
     if v < 0 { return 0 }
@@ -12,13 +13,71 @@ fn clamp_byte(v: i64) -> i64 {
     v
 }
 
-fn main() -> i32 with IO, Mut, Div, Panic {
+fn fill_channel(
+    x0: i64, y0: i64, rw: i64, rh: i64,
+    v: i64,
+    fb: &![i64; 65536],
+    fb_w: i64, fb_h: i64
+) with Mut, Panic, Div {
+    var dy: i64 = 0
+    while dy < rh {
+        var dx: i64 = 0
+        while dx < rw {
+            let px = x0 + dx
+            let py = y0 + dy
+            if px >= 0 && px < fb_w && py >= 0 && py < fb_h {
+                let idx = py * fb_w + px;
+                (*fb)[idx] = v;
+            }
+            dx = dx + 1
+        }
+        dy = dy + 1
+    }
+}
+
+fn get_channel(fb: &[i64; 65536], i: i64) -> i64 with Panic {
+    (*fb)[i]
+}
+
+fn rasterize_rect(
+    x0: i64, y0: i64, rw: i64, rh: i64,
+    r: i64, g: i64, b: i64,
+    fb_r: &![i64; 65536], fb_g: &![i64; 65536], fb_b: &![i64; 65536],
+    fb_w: i64, fb_h: i64
+) with Mut, Panic, Div {
+    fill_channel(x0, y0, rw, rh, r, fb_r, fb_w, fb_h)
+    fill_channel(x0, y0, rw, rh, g, fb_g, fb_w, fb_h)
+    fill_channel(x0, y0, rw, rh, b, fb_b, fb_w, fb_h)
+}
+
+fn emit_ppm(
+    w: i64, h: i64,
+    fb_r: &[i64; 65536], fb_g: &[i64; 65536], fb_b: &[i64; 65536]
+) with IO, Mut, Panic, Div {
+    print("P3\n")
+    print_int(w)
+    print(" ")
+    print_int(h)
+    print("\n255\n")
+    var i: i64 = 0
+    while i < w * h {
+        print_int(get_channel(fb_r, i))
+        print(" ")
+        print_int(get_channel(fb_g, i))
+        print(" ")
+        print_int(get_channel(fb_b, i))
+        print("\n")
+        i = i + 1
+    }
+}
+
+fn main() with IO, Mut, Div, Panic {
     let w: i64 = 128
     let h: i64 = 128
 
-    var fb_r: [i64; 16384] = [10; 16384]
-    var fb_g: [i64; 16384] = [10; 16384]
-    var fb_b: [i64; 16384] = [15; 16384]
+    var fb_r: [i64; 65536] = [10; 65536]
+    var fb_g: [i64; 65536] = [10; 65536]
+    var fb_b: [i64; 65536] = [15; 65536]
 
     // Render 16x16 grid of uncertainty cells
     let cell_w: i64 = 8
@@ -28,57 +87,27 @@ fn main() -> i32 with IO, Mut, Div, Panic {
     while gy < 16 {
         var gx: i64 = 0
         while gx < 16 {
-            // Simulated measurement: value increases left-to-right
-            let value = (gx as f64) / 15.0
-            // Uncertainty increases top-to-bottom
-            let eps = (gy as f64) / 15.0
+            // value = gx / 15 (scaled *1000)
+            let value_1000 = gx * 1000 / 15
+            // eps = gy / 15 (scaled *1000)
+            let eps_1000 = gy * 1000 / 15
+            // confidence = 1.0 - eps * 0.7 (scaled *1000)
+            let conf_1000 = 1000 - eps_1000 * 700 / 1000
 
             // Temperature colormap modulated by confidence
-            let confidence = 1.0 - eps * 0.7
-            let r_f = value * confidence
-            let g_f = 0.15 * confidence
-            let b_f = (1.0 - value) * confidence
+            let r_byte = clamp_byte(value_1000 * conf_1000 * 255 / 1000000)
+            let g_byte = clamp_byte(38 * conf_1000 / 1000)
+            let b_byte = clamp_byte((1000 - value_1000) * conf_1000 * 255 / 1000000)
 
-            let r_byte = clamp_byte((r_f * 255.0) as i64)
-            let g_byte = clamp_byte((g_f * 255.0) as i64)
-            let b_byte = clamp_byte((b_f * 255.0) as i64)
-
-            // Fill cell
-            var cy: i64 = 0
-            while cy < cell_h {
-                var cx: i64 = 0
-                while cx < cell_w {
-                    let px = gx * cell_w + cx
-                    let py = gy * cell_h + cy
-                    let idx = py * w + px
-                    fb_r[idx] = r_byte
-                    fb_g[idx] = g_byte
-                    fb_b[idx] = b_byte
-                    cx = cx + 1
-                }
-                cy = cy + 1
-            }
+            rasterize_rect(
+                gx * cell_w, gy * cell_h, cell_w, cell_h,
+                r_byte, g_byte, b_byte,
+                &!fb_r, &!fb_g, &!fb_b, w, h
+            )
             gx = gx + 1
         }
         gy = gy + 1
     }
 
-    // Emit PPM
-    print("P3\n")
-    print_int(w)
-    print(" ")
-    print_int(h)
-    print("\n255\n")
-    var i: i64 = 0
-    while i < w * h {
-        print_int(fb_r[i])
-        print(" ")
-        print_int(fb_g[i])
-        print(" ")
-        print_int(fb_b[i])
-        print("\n")
-        i = i + 1
-    }
-
-    0
+    emit_ppm(w, h, &fb_r, &fb_g, &fb_b)
 }
