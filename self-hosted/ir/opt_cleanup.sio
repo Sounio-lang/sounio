@@ -1,0 +1,220 @@
+// self-hosted::ir::opt_cleanup — Post-inlining constant folding + DCE
+//
+// Runs two cleanup passes per function, in sequence:
+//   1. Constant propagation + folding: IrLoadImm values tracked; IrBinOp
+//      instructions where both operands are known constants are replaced
+//      with an IrLoadImm of the folded result.
+//   2. Dead code elimination (mark-sweep): instructions whose destination
+//      register is never used as a source, and have no side effects,
+//      are replaced with IrNop.
+//
+// Both passes iterate the instruction array once. No heap allocation.
+//
+// References:
+//   Briggs & Cooper: "Effective Partial Redundancy Elimination" (1994)
+//   Cooper, Harvey, Kennedy: "A Simple, Fast Dominance Algorithm" (2001)
+
+module ir::opt_cleanup
+
+use ir::ir::*
+use parser::ast::*
+
+// ============================================================================
+// Opcode helpers (local, no flat-namespace dependency)
+// ============================================================================
+
+fn ocp_is_load_imm(op: IrOpcode) -> bool {
+    match op { IrOpcode::IrLoadImm => true, _ => false }
+}
+
+fn ocp_is_binop(op: IrOpcode) -> bool {
+    match op { IrOpcode::IrBinOp => true, _ => false }
+}
+
+fn ocp_is_nop(op: IrOpcode) -> bool {
+    match op { IrOpcode::IrNop => true, _ => false }
+}
+
+// Returns true if this opcode produces a destination register value
+fn ocp_has_dst(op: IrOpcode) -> bool {
+    match op {
+        IrOpcode::IrLoadImm => true,
+        IrOpcode::IrLoadFloat => true,
+        IrOpcode::IrLoadBool => true,
+        IrOpcode::IrLoadString => true,
+        IrOpcode::IrBinOp => true,
+        IrOpcode::IrUnaryOp => true,
+        IrOpcode::IrCopy => true,
+        IrOpcode::IrCall => true,
+        IrOpcode::IrFieldGet => true,
+        IrOpcode::IrIndexGet => true,
+        IrOpcode::IrAlloc => true,
+        IrOpcode::IrMeasure => true,
+        IrOpcode::IrContest => true,
+        IrOpcode::IrProveRobust => true,
+        IrOpcode::IrValidated => true,
+        _ => false,
+    }
+}
+
+// Returns true if this opcode has observable side effects (must not be removed)
+fn ocp_has_side_effect(op: IrOpcode) -> bool {
+    match op {
+        IrOpcode::IrCall => true,
+        IrOpcode::IrReturn => true,
+        IrOpcode::IrJump => true,
+        IrOpcode::IrBranchTrue => true,
+        IrOpcode::IrBranchFalse => true,
+        IrOpcode::IrLabel => true,
+        IrOpcode::IrFieldSet => true,
+        IrOpcode::IrIndexSet => true,
+        IrOpcode::IrProfCounter => true,
+        IrOpcode::IrAdmitAction => true,
+        _ => false,
+    }
+}
+
+// ============================================================================
+// Pass 1: Constant propagation + folding
+// ============================================================================
+
+// Run constant propagation + folding on a single function.
+// Tracks integer constants in a fixed-size register map (256 regs max).
+// Folds IrBinOp when both src operands are known integer constants.
+fn ocp_const_fold(func: IrFunction) -> IrFunction with Mut, Div, Panic {
+    var result = func
+    var is_const: [bool; 256] = [false; 256]
+    var const_val: [i64; 256] = [0; 256]
+
+    var i: i64 = 0
+    while i < result.instr_count {
+        let instr = result.instrs[i as usize]
+
+        // Track IrLoadImm: register dst becomes a known constant
+        if ocp_is_load_imm(instr.op) {
+            if instr.dst >= 0 && instr.dst < 256 {
+                is_const[instr.dst as usize] = true
+                const_val[instr.dst as usize] = instr.imm_i64
+            }
+        }
+
+        // Fold IrBinOp with two known integer constants
+        if ocp_is_binop(instr.op) {
+            let s1 = instr.src1
+            let s2 = instr.src2
+            if s1 >= 0 && s1 < 256 && s2 >= 0 && s2 < 256 {
+                if is_const[s1 as usize] && is_const[s2 as usize] {
+                    let v1 = const_val[s1 as usize]
+                    let v2 = const_val[s2 as usize]
+                    var fold_val: i64 = 0
+                    var did_fold = false
+                    if instr.bin_op == BinaryOp::OpAdd {
+                        fold_val = v1 + v2
+                        did_fold = true
+                    }
+                    if instr.bin_op == BinaryOp::OpSub {
+                        fold_val = v1 - v2
+                        did_fold = true
+                    }
+                    if instr.bin_op == BinaryOp::OpMul {
+                        fold_val = v1 * v2
+                        did_fold = true
+                    }
+                    if instr.bin_op == BinaryOp::OpDiv && v2 != 0 {
+                        fold_val = v1 / v2
+                        did_fold = true
+                    }
+                    if instr.bin_op == BinaryOp::OpRem && v2 != 0 {
+                        fold_val = v1 % v2
+                        did_fold = true
+                    }
+                    if did_fold {
+                        result.instrs[i as usize] = ir_load_imm(instr.dst, fold_val)
+                        if instr.dst >= 0 && instr.dst < 256 {
+                            is_const[instr.dst as usize] = true
+                            const_val[instr.dst as usize] = fold_val
+                        }
+                    }
+                }
+            }
+        }
+
+        i = i + 1
+    }
+
+    result
+}
+
+// ============================================================================
+// Pass 2: Dead code elimination (mark-sweep)
+// ============================================================================
+
+// Mark which registers are used as source operands across the function.
+fn ocp_mark_used(func: &IrFunction, used: &![bool; 256]) with Mut {
+    var i: i64 = 0
+    while i < func.instr_count {
+        let instr = func.instrs[i as usize]
+        if instr.src1 >= 0 && instr.src1 < 256 {
+            used[instr.src1 as usize] = true
+        }
+        if instr.src2 >= 0 && instr.src2 < 256 {
+            used[instr.src2 as usize] = true
+        }
+        i = i + 1
+    }
+}
+
+// Sweep: remove instructions whose dst is unused and have no side effects.
+fn ocp_sweep(func: IrFunction, used: &[bool; 256]) -> (IrFunction, i64) with Mut {
+    var result = func
+    var removed: i64 = 0
+    var i: i64 = 0
+    while i < result.instr_count {
+        let instr = result.instrs[i as usize]
+        if ocp_has_dst(instr.op) && !ocp_has_side_effect(instr.op) {
+            if instr.dst >= 0 && instr.dst < 256 {
+                if !used[instr.dst as usize] {
+                    result.instrs[i as usize] = ir_nop()
+                    removed = removed + 1
+                }
+            }
+        }
+        i = i + 1
+    }
+    (result, removed)
+}
+
+// Run DCE on a single function.
+fn ocp_dce(func: IrFunction) -> IrFunction with Mut {
+    var used: [bool; 256] = [false; 256]
+    ocp_mark_used(&func, &!used)
+    let swept = ocp_sweep(func, &used)
+    swept.0
+}
+
+// ============================================================================
+// Public API
+// ============================================================================
+
+struct OptCleanupResult {
+    module: IrModule,
+    functions_processed: i64,
+    instrs_folded: i64,
+}
+
+// Run const_fold + DCE on a single IrFunction. Returns the optimized function.
+fn opt_cleanup_function(func: IrFunction) -> IrFunction with Mut, Div, Panic {
+    let folded = ocp_const_fold(func)
+    ocp_dce(folded)
+}
+
+// Run const_fold + DCE on every function in an IrModule.
+fn opt_cleanup_module(module: IrModule) -> IrModule with Mut, Div, Panic {
+    var result = module
+    var fi: i64 = 0
+    while fi < result.fn_count {
+        result.functions[fi as usize] = opt_cleanup_function(result.functions[fi as usize])
+        fi = fi + 1
+    }
+    result
+}

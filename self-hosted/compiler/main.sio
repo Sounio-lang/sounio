@@ -35,8 +35,12 @@ use frontend_strategy_probe::{run_frontend_strategy_probe}
 use parser::parser::{parser_last_error_count}
 use ir::opt_strategy::{ir_opt_apply_strategy, ir_opt_find_return_vreg, ir_opt_max_label, ir_opt_max_vreg}
 use ir::lower::{ir_patch_validated_calls}
+use ir::const_prop::{cp_check_load_imm, cp_empty_instrs, cp_make_test_func, cp_optimize_function}
+use ir::dce::{dce_check_nop, dce_empty_instrs, dce_make_test_func, dce_optimize_function}
 use ir::profile::*
 use ir::inline::*
+use ir::layout::*
+use ir::opt_cleanup::*
 
 // ============================================================================
 // STRING UTILITIES
@@ -2292,6 +2296,10 @@ fn compile(opts: CompilerOptions) -> CompileResult with IO, Mut, Panic, Div, All
         }
     }
 
+    // Sprint 50: hoist profile for layout pass
+    var has_valid_profile = false
+    var loaded_profile = sprof_empty_profile()
+
     // Sprint 47: apply .sprof profile-guided strategy promotion
     if opts.use_profile {
         let prof_size = file_size(opts.use_profile_path)
@@ -2318,6 +2326,9 @@ fn compile(opts: CompilerOptions) -> CompileResult with IO, Mut, Panic, Div, All
                 }
                 li = li + 1
             }
+
+            loaded_profile = profile
+            has_valid_profile = true
         }
     }
 
@@ -2326,6 +2337,22 @@ fn compile(opts: CompilerOptions) -> CompileResult with IO, Mut, Panic, Div, All
         let pre_inline_count = ir_result.module.fn_count
         ir_result.module = inl_run_pass(ir_result.module)
         println("[inline] pass complete: " + int_to_string(pre_inline_count) + " functions processed")
+    }
+
+    // Sprint 50: Profile-guided function layout
+    if has_valid_profile {
+        let layout_result = layout_sort_by_profile(ir_result.module, &loaded_profile)
+        ir_result.module = layout_result.module
+        if layout_result.reordered {
+            println("[layout] reordered " + int_to_string(ir_result.module.fn_count) + " functions (" + int_to_string(layout_result.hot_count) + " hot, " + int_to_string(layout_result.cold_count) + " cold)")
+        }
+    }
+
+    // Sprint 51: const_fold + DCE cleanup after inlining
+    if opts.optimize {
+        let pre_opt_count = ir_result.module.fn_count
+        ir_result.module = opt_cleanup_module(ir_result.module)
+        println("[opt] const_prop + dce applied to " + int_to_string(pre_opt_count) + " functions")
     }
 
     let exit_code = compile_multimodule_native_with_ir(
@@ -3042,9 +3069,159 @@ fn compiler_main_test_inline_pass_returns_module() -> bool with Mut, Div, Panic 
     true
 }
 
+// Sprint 50: verify layout_sort_by_profile reorders hot functions first
+fn compiler_main_test_layout_sort_hot_first() -> bool with Mut, Div, Panic {
+    var module = ir_empty_module()
+
+    // Function 0: "alpha" (count=10, cold)
+    var f0 = ir_empty_function()
+    var n0 = empty_name()
+    n0.buf[0] = 97 as i8   // 'a'
+    n0.buf[1] = 108 as i8  // 'l'
+    n0.buf[2] = 112 as i8  // 'p'
+    n0.buf[3] = 104 as i8  // 'h'
+    n0.buf[4] = 97 as i8   // 'a'
+    n0.len = 5
+    f0.name = n0
+    f0.instrs[0] = ir_return(0)
+    f0.instr_count = 1
+    f0.reg_count = 1
+    module.functions[0] = f0
+
+    // Function 1: "beta" (count=5000, hot)
+    var f1 = ir_empty_function()
+    var n1 = empty_name()
+    n1.buf[0] = 98 as i8   // 'b'
+    n1.buf[1] = 101 as i8  // 'e'
+    n1.buf[2] = 116 as i8  // 't'
+    n1.buf[3] = 97 as i8   // 'a'
+    n1.len = 4
+    f1.name = n1
+    f1.instrs[0] = ir_return(0)
+    f1.instr_count = 1
+    f1.reg_count = 1
+    module.functions[1] = f1
+
+    // Function 2: "gamma" (count=500, warm)
+    var f2 = ir_empty_function()
+    var n2 = empty_name()
+    n2.buf[0] = 103 as i8  // 'g'
+    n2.buf[1] = 97 as i8   // 'a'
+    n2.buf[2] = 109 as i8  // 'm'
+    n2.buf[3] = 109 as i8  // 'm'
+    n2.buf[4] = 97 as i8   // 'a'
+    n2.len = 5
+    f2.name = n2
+    f2.instrs[0] = ir_return(0)
+    f2.instr_count = 1
+    f2.reg_count = 1
+    module.functions[2] = f2
+
+    module.fn_count = 3
+
+    // Build profile: alpha=10, beta=5000, gamma=500
+    var profile = sprof_empty_profile()
+    var e0 = sprof_empty_entry()
+    e0.fn_name = n0
+    e0.count = 10
+    profile.entries[0] = e0
+    var e1 = sprof_empty_entry()
+    e1.fn_name = n1
+    e1.count = 5000
+    profile.entries[1] = e1
+    var e2 = sprof_empty_entry()
+    e2.fn_name = n2
+    e2.count = 500
+    profile.entries[2] = e2
+    profile.entry_count = 3
+
+    let result = layout_sort_by_profile(module, &profile)
+
+    // Must be reordered
+    if !result.reordered { return false }
+
+    // Order should be: beta (5000), gamma (500), alpha (10) — descending
+    if !ir_name_eq(result.module.functions[0].name, n1) { return false }
+    if !ir_name_eq(result.module.functions[1].name, n2) { return false }
+    if !ir_name_eq(result.module.functions[2].name, n0) { return false }
+
+    // All 3 have positive counts → all hot
+    if result.hot_count != 3 { return false }
+
+    true
+}
+
+// Sprint 50: verify layout with empty profile preserves order
+fn compiler_main_test_layout_sort_no_profile() -> bool with Mut, Div, Panic {
+    var module = ir_empty_module()
+
+    // Function 0: "xx"
+    var f0 = ir_empty_function()
+    var n0 = empty_name()
+    n0.buf[0] = 120 as i8  // 'x'
+    n0.buf[1] = 120 as i8  // 'x'
+    n0.len = 2
+    f0.name = n0
+    f0.instrs[0] = ir_return(0)
+    f0.instr_count = 1
+    f0.reg_count = 1
+    module.functions[0] = f0
+
+    // Function 1: "yy"
+    var f1 = ir_empty_function()
+    var n1 = empty_name()
+    n1.buf[0] = 121 as i8  // 'y'
+    n1.buf[1] = 121 as i8  // 'y'
+    n1.len = 2
+    f1.name = n1
+    f1.instrs[0] = ir_return(0)
+    f1.instr_count = 1
+    f1.reg_count = 1
+    module.functions[1] = f1
+
+    module.fn_count = 2
+
+    // Empty profile — no counts for either function
+    let profile = sprof_empty_profile()
+
+    let result = layout_sort_by_profile(module, &profile)
+
+    // Should NOT be reordered (both have count -1, stable sort preserves order)
+    if result.reordered { return false }
+
+    // Names should be unchanged
+    if !ir_name_eq(result.module.functions[0].name, n0) { return false }
+    if !ir_name_eq(result.module.functions[1].name, n1) { return false }
+
+    true
+}
+
+// Sprint 51: verify the cleanup const-fold step folds a constant binop
+fn compiler_main_test_cp_folds_constant() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(0, 3)                      // r0 = 3
+    instrs[1] = ir_load_imm(1, 4)                      // r1 = 4
+    instrs[2] = ir_binop(2, 0, BinaryOp::OpAdd, 1)    // r2 = r0 + r1 = 7
+    instrs[3] = ir_return(2)
+    var func = cp_make_test_func(instrs, 4)
+    let result = ocp_const_fold(func)
+    cp_check_load_imm(&result, 2, 7)
+}
+
+// Sprint 51: verify DCE removes a dead instruction
+fn compiler_main_test_dce_removes_dead() -> bool with Mut, Div, Panic {
+    var instrs = dce_empty_instrs()
+    instrs[0] = ir_load_imm(0, 42)   // r0 = 42 (used by return)
+    instrs[1] = ir_load_imm(1, 99)   // r1 = 99 (dead, never used)
+    instrs[2] = ir_return(0)
+    var func = dce_make_test_func(instrs, 3)
+    let result = dce_optimize_function(func)
+    dce_check_nop(&result, 1)
+}
+
 fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div {
     var passed: i64 = 0
-    let total: i64 = 23
+    let total: i64 = 27
 
     println("=== compiler/main.sio self-tests ===")
 
@@ -3207,6 +3384,34 @@ fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div {
         passed = passed + 1
     } else {
         println("  FAIL: T23 inline pass returns module")
+    }
+
+    if compiler_main_test_layout_sort_hot_first() {
+        println("  T24 OK: layout sort hot first")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T24 layout sort hot first")
+    }
+
+    if compiler_main_test_layout_sort_no_profile() {
+        println("  T25 OK: layout sort no profile")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T25 layout sort no profile")
+    }
+
+    if compiler_main_test_cp_folds_constant() {
+        println("  T26 OK: cp folds constant binop")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T26 cp folds constant binop")
+    }
+
+    if compiler_main_test_dce_removes_dead() {
+        println("  T27 OK: dce removes dead instruction")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T27 dce removes dead instruction")
     }
 
     println("")
