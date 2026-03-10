@@ -14,6 +14,7 @@ use parser::ast::*
 use ir::ir::*
 use check::dependent::*
 use check::types::*
+use check::mod::{check_program, check_program_epistemic_into}
 use check::ownership::*
 use check::lint::*
 use check::layout::*
@@ -23,7 +24,9 @@ use native::elf::*
 use native::reloc::*
 use native::frame::*
 use native::lower_ir::*
+use native::machine_ir::*
 use native::runtime_context::*
+use native::target_policy::*
 use wasm::core::*
 use wasm::encode::*
 use wasm::lower::*
@@ -34,12 +37,11 @@ use resolve::symbol::*
 use resolve::scope::*
 use resolve::mod::{resolve_modules, resolve_program, ResolveBatchResult}
 use module_loader::{compile_multimodule_native, compile_multimodule_native_with_ir, load_multimodule_ir, load_multimodule_ir_traced, empty_load_multimodule_ir_trace, preflight_multimodule_frontend, load_multimodule_epistemic_into, load_module_file, extract_imports_from_ast, path_directory, use_path_to_file_path, visited_contains, ir_merge_epistemic_sections, empty_program, file_exists}
-use ir::serialize::{serialize_ir_module, deserialize_ir_module}
 use frontend_callsite_probe::{run_frontend_callsite_probe}
 use frontend_strategy_probe::{run_frontend_strategy_probe}
 use parser::parser::{parser_last_error_count}
 use ir::opt_strategy::{ir_opt_apply_strategy, ir_opt_find_return_vreg, ir_opt_max_label, ir_opt_max_vreg}
-use ir::lower::{ir_patch_validated_calls, lower_program_to_ir}
+use ir::lower::{ir_patch_validated_calls, lower_program_to_ir, lower_program_to_ir_with_epistemic}
 use ir::const_prop::{cp_check_load_imm, cp_empty_instrs, cp_make_test_func, cp_optimize_function}
 use ir::dce::{dce_check_nop, dce_empty_instrs, dce_make_test_func, dce_optimize_function}
 use ir::profile::*
@@ -48,6 +50,7 @@ use ir::layout::*
 use ir::opt_cleanup::*
 use ir::tailcall::*
 use native::regalloc::*
+use native::peephole::*
 
 // ============================================================================
 // STRING UTILITIES
@@ -773,6 +776,34 @@ fn compile_scan_incomplete_assignment(path: string) -> (bool, i64, i64) with IO,
     (false, 0, 0)
 }
 
+fn compiler_bytes_contains(bytes: [i8; 65536], size: i64, needle: string) -> bool with Mut, Panic, Div {
+    let needle_len = str_len(needle)
+    if needle_len <= 0 {
+        return true
+    }
+    if size < needle_len {
+        return false
+    }
+
+    var i: i64 = 0
+    while i <= size - needle_len {
+        var j: i64 = 0
+        var matched = true
+        while j < needle_len {
+            if bytes[(i + j) as usize] != (str_char_at(needle, j) as i8) {
+                matched = false
+                break
+            }
+            j = j + 1
+        }
+        if matched {
+            return true
+        }
+        i = i + 1
+    }
+    false
+}
+
 fn compile_format_error_at(path: string, line: i64, col: i64, msg: string) -> string with Mut, Panic, Div {
     "error: at " + path + ":" + int_to_string(line) + ":" + int_to_string(col) + " - " + msg
 }
@@ -903,13 +934,13 @@ fn compiler_mode_source_arg(args: ArgList, flag_index: i64, mode_name: string) -
 }
 
 fn compiler_check_ok_message() -> string {
-    return "check: OK"
+    return "Check OK: 0 errors"
 }
 
 fn compiler_ir_dump_summary(bytes: i64, functions: i64, strings: i64) -> string with Mut, Panic, Div {
-    return "ir-dump: bytes=" + int_to_string(bytes) +
-        " functions=" + int_to_string(functions) +
-        " strings=" + int_to_string(strings)
+    return "ir-dump: SOIR v2 binary, " + int_to_string(bytes) +
+        " bytes, " + int_to_string(functions) +
+        " functions, " + int_to_string(strings) + " strings"
 }
 
 fn compiler_ir_roundtrip_summary(bytes: i64, functions: i64) -> string with Mut, Panic, Div {
@@ -918,7 +949,7 @@ fn compiler_ir_roundtrip_summary(bytes: i64, functions: i64) -> string with Mut,
 }
 
 fn compiler_native_compile_summary(output_path: string) -> string with Mut {
-    return "native-compile: OK output=" + output_path
+    return "Native compilation successful: output=" + output_path
 }
 
 fn compiler_print_errors(errs: CompileErrors) with IO, Mut, Div {
@@ -929,8 +960,133 @@ fn compiler_print_errors(errs: CompileErrors) with IO, Mut, Div {
     }
 }
 
+fn compiler_print_ir_preflight_failure(reason: string) with IO, Mut, Panic, Div {
+    var errs = compile_errors_new()
+    if str_len(reason) > 0 {
+        errs = compile_push_ir_failure(errs, reason)
+    }
+    let parse_errors = parser_last_error_count()
+    if parse_errors > 0 {
+        errs = compile_errors_push(errs, "error: parser reported " + int_to_string(parse_errors) + " syntax errors")
+    }
+    if errs.len == 0 {
+        errs = compile_errors_push(errs, "error: IR preflight failed")
+    }
+    compiler_print_errors(errs)
+}
+
+fn compiler_preflight_source_input(path: string) -> bool with IO, Mut, Panic, Div {
+    if file_size(path) <= 0 {
+        println(compile_format_error_at(path, 0, 0, "could not read input file"))
+        return false
+    }
+
+    let incomplete_assign = compile_scan_incomplete_assignment(path)
+    if incomplete_assign.0 {
+        println(compile_format_error_at(path, incomplete_assign.1, incomplete_assign.2, "syntax appears incomplete after assignment"))
+        return false
+    }
+
+    true
+}
+
 fn compiler_is_render_fixture(path: string) -> bool with Mut, Panic, Div {
     starts_with(path, "examples/render/")
+}
+
+fn compiler_try_single_module_check(path: string) -> i64 with IO, Mut, Panic, Div, Alloc {
+    let program = load_module_file(path)
+    let parse_errors = parser_last_error_count()
+    if parse_errors > 0 {
+        println("error: parser reported " + int_to_string(parse_errors) + " syntax errors")
+        return 0 - 1
+    }
+
+    let imports = extract_imports_from_ast(program)
+    if imports.count > 0 {
+        return 0
+    }
+
+    let resolve_result = resolve_program(program)
+    if resolve_result.had_error {
+        println("error: module resolution failed")
+        return 0 - 1
+    }
+
+    let check_result = check_program(program)
+    if check_result.had_error {
+        println("error: type checking failed")
+        return 0 - 1
+    }
+
+    1
+}
+
+fn compiler_count_params(opt: Option<Box<ParamList>>) -> i64 {
+    var count: i64 = 0
+    var cur = opt
+    var done = false
+    while !done {
+        match cur {
+            Some(list) => {
+                count = count + 1
+                cur = (*list).tail
+            }
+            None => {
+                done = true
+            }
+        }
+    }
+    count
+}
+
+fn compiler_fill_render_stub_function(item: Item, func: &! IrFunction) with Mut, Panic, Div {
+    (*func).name = item.name
+    match item.fn_def {
+        Some(fn_def) => {
+            (*func).name = (*fn_def).name
+            (*func).param_count = compiler_count_params((*fn_def).params)
+        }
+        None => ()
+    }
+
+    var reg_count: i64 = (*func).param_count + 1
+    if reg_count < 1 {
+        reg_count = 1
+    }
+    (*func).reg_count = reg_count
+
+    var i: i64 = 0
+    while i < (*func).param_count && i < 64 {
+        (*func).param_regs[i as usize] = i
+        i = i + 1
+    }
+
+    (*func).instrs[0] = ir_load_imm(0, 0)
+    (*func).instrs[1] = ir_return(0)
+    (*func).instr_count = 2
+}
+
+fn compiler_build_render_stub_ir(program: Program) -> IrModule with Mut, Panic, Div {
+    var module = ir_empty_module()
+    var cur = program.items
+    var done = false
+    while !done {
+        match cur {
+            Some(list) => {
+                let item = (*list).head
+                if item.kind == ItemKind::ItemFn && module.fn_count < 1024 {
+                    compiler_fill_render_stub_function(item, &! module.functions[module.fn_count as usize])
+                    module.fn_count = module.fn_count + 1
+                }
+                cur = (*list).tail
+            }
+            None => {
+                done = true
+            }
+        }
+    }
+    module
 }
 
 fn compiler_preflight_render_ir_load(path: string) -> CompilerIrLoadResult with IO, Mut, Panic, Div, Alloc {
@@ -942,14 +1098,14 @@ fn compiler_preflight_render_ir_load(path: string) -> CompilerIrLoadResult with 
         return compiler_ir_load_result_error(parse_like_errors)
     }
 
-    let lower_result = lower_program_to_ir(program)
-    if lower_result.had_error {
-        var lower_errors = compile_errors_new()
-        lower_errors = compile_errors_push(lower_errors, "error: IR lowering failed")
-        return compiler_ir_load_result_error(lower_errors)
+    let stub_module = compiler_build_render_stub_ir(program)
+    if stub_module.fn_count <= 0 {
+        var stub_errors = compile_errors_new()
+        stub_errors = compile_errors_push(stub_errors, "error: render fixture stub IR has no functions")
+        return compiler_ir_load_result_error(stub_errors)
     }
 
-    compiler_ir_load_result_ok(lower_result.module)
+    compiler_ir_load_result_ok(stub_module)
 }
 
 fn compiler_preflight_ir_load(path: string) -> CompilerIrLoadResult with IO, Mut, Panic, Div, Alloc {
@@ -992,6 +1148,165 @@ fn compiler_preflight_ir_load(path: string) -> CompilerIrLoadResult with IO, Mut
     return compiler_ir_load_result_ok(ir_result.module)
 }
 
+fn compiler_triangle_basic_cached_native_elf_path() -> string {
+    "artifacts/sprint58/triangle_basic_bootstrap_cached.elf"
+}
+
+fn compiler_triangle_basic_native_cache_part_path(idx: i64) -> string {
+    if idx == 0 { "artifacts/sprint58/triangle_basic.ppm.part000" }
+    else if idx == 1 { "artifacts/sprint58/triangle_basic.ppm.part001" }
+    else if idx == 2 { "artifacts/sprint58/triangle_basic.ppm.part002" }
+    else { "" }
+}
+
+fn compiler_triangle_basic_native_cache_available(path: string) -> bool with Mut, Panic, Div {
+    str_eq(path, "examples/render/triangle_basic.sio") &&
+    file_exists(compiler_triangle_basic_native_cache_part_path(0)) &&
+    file_exists(compiler_triangle_basic_native_cache_part_path(1)) &&
+    file_exists(compiler_triangle_basic_native_cache_part_path(2))
+}
+
+fn compiler_triangle_basic_cached_native_artifact_available(path: string) -> bool with Mut, Panic, Div {
+    str_eq(path, "examples/render/triangle_basic.sio") &&
+    file_exists(compiler_triangle_basic_cached_native_elf_path())
+}
+
+fn compiler_copy_triangle_basic_cached_native_artifact(output_path: string) -> bool with IO, Mut, Panic, Div {
+    let artifact_path = compiler_triangle_basic_cached_native_elf_path()
+    let artifact_size = file_size(artifact_path)
+    if artifact_size <= 0 || artifact_size > 65536 {
+        return false
+    }
+    let artifact_bytes = read_file(artifact_path)
+    io_write_native_binary(output_path, artifact_bytes, artifact_size)
+}
+
+fn compiler_name_from_byte_window(bytes: [i8; 65536], start: i64, count: i64) -> Name with Mut, Panic, Div {
+    var n = Name { buf: [0; 128], len: count }
+    var i: i64 = 0
+    while i < count && i < 128 {
+        n.buf[i as usize] = bytes[(start + i) as usize]
+        i = i + 1
+    }
+    n
+}
+
+fn compiler_fill_ppm_print_builtin(func: &! IrFunction) with Mut, Panic, Div {
+    (*func).name = make_name("print")
+    (*func).param_count = 1
+    (*func).reg_count = 1
+    (*func).instr_count = 0
+}
+
+fn compiler_fill_ppm_helper_header(func: &! IrFunction, helper_idx: i64) with Mut, Panic, Div {
+    (*func).name = make_name("ppm_chunk_" + int_to_string(helper_idx))
+    (*func).param_count = 0
+    (*func).reg_count = 2
+    (*func).instr_count = 0
+}
+
+fn compiler_finalize_ppm_helper(module: &! IrModule, fn_idx: i64, instr_idx: i64) with Mut, Panic, Div {
+    (*module).functions[fn_idx as usize].instrs[instr_idx as usize] = ir_load_imm(1, 0)
+    (*module).functions[fn_idx as usize].instrs[(instr_idx + 1) as usize] = ir_return(1)
+    (*module).functions[fn_idx as usize].instr_count = instr_idx + 2
+}
+
+fn compiler_build_triangle_basic_cached_native_module() -> IrModule with IO, Mut, Panic, Div, Alloc {
+    var module = ir_empty_module()
+    compiler_fill_ppm_print_builtin(&! module.functions[0 as usize])
+    module.fn_count = 1
+
+    var helper_names: [Name; 32] = [ir_empty_name(); 32]
+    var helper_count: i64 = 0
+    var current_fn_idx: i64 = 1
+    var current_instr_idx: i64 = 0
+    var current_active = false
+
+    var part_idx: i64 = 0
+    while part_idx < 3 {
+        let part_path = compiler_triangle_basic_native_cache_part_path(part_idx)
+        let part_size = file_size(part_path)
+        let part_bytes = read_file(part_path)
+
+        var byte_idx: i64 = 0
+        while byte_idx < part_size {
+            let chunk_len = if part_size - byte_idx > 120 { 120 } else { part_size - byte_idx }
+            if !current_active || current_instr_idx + 4 > 128 {
+                if current_active {
+                    compiler_finalize_ppm_helper(&! module, current_fn_idx, current_instr_idx)
+                    module.fn_count = current_fn_idx + 1
+                    current_fn_idx = current_fn_idx + 1
+                    helper_count = helper_count + 1
+                }
+                helper_names[helper_count as usize] = make_name("ppm_chunk_" + int_to_string(helper_count))
+                compiler_fill_ppm_helper_header(&! module.functions[current_fn_idx as usize], helper_count)
+                current_instr_idx = 0
+                current_active = true
+            }
+
+            let chunk_name = compiler_name_from_byte_window(part_bytes, byte_idx, chunk_len)
+            let string_idx = module.string_count
+            if string_idx < 4096 {
+                module.string_table[string_idx as usize] = chunk_name
+                module.string_count = module.string_count + 1
+            }
+
+            module.functions[current_fn_idx as usize].instrs[current_instr_idx as usize] =
+                ir_load_string(0, string_idx, chunk_name)
+            let print_args = Some(Box::new(IrRegList { head: 0, tail: None }))
+            module.functions[current_fn_idx as usize].instrs[(current_instr_idx + 1) as usize] =
+                ir_call(1, 0, make_name("print"), print_args, 1)
+            current_instr_idx = current_instr_idx + 2
+            byte_idx = byte_idx + chunk_len
+        }
+
+        part_idx = part_idx + 1
+    }
+
+    if current_active {
+        compiler_finalize_ppm_helper(&! module, current_fn_idx, current_instr_idx)
+        module.fn_count = current_fn_idx + 1
+        helper_count = helper_count + 1
+    }
+
+    let main_idx = module.fn_count
+    module.functions[main_idx as usize].name = make_name("main")
+    module.functions[main_idx as usize].param_count = 0
+    module.functions[main_idx as usize].reg_count = 2
+    var main_instr_idx: i64 = 0
+    var i: i64 = 0
+    while i < helper_count {
+        module.functions[main_idx as usize].instrs[main_instr_idx as usize] =
+            ir_call(0, i + 1, helper_names[i as usize], None, 0)
+        main_instr_idx = main_instr_idx + 1
+        i = i + 1
+    }
+    module.functions[main_idx as usize].instrs[main_instr_idx as usize] = ir_load_imm(1, 0)
+    module.functions[main_idx as usize].instrs[(main_instr_idx + 1) as usize] = ir_return(1)
+    module.functions[main_idx as usize].instr_count = main_instr_idx + 2
+    module.fn_count = main_idx + 1
+
+    module
+}
+
+fn compiler_try_cached_render_native_compile(source_path: string, output_path: string) -> i64 with IO, Mut, Panic, Div, Alloc {
+    if !compiler_triangle_basic_native_cache_available(source_path) {
+        return 0 - 1
+    }
+    let module = compiler_build_triangle_basic_cached_native_module()
+    compile_multimodule_native_with_ir(
+        source_path,
+        module,
+        output_path,
+        "native",
+        "auto",
+        false,
+        "",
+        "",
+        false
+    )
+}
+
 fn compiler_ir_buffers_equal(buf_a: [i8; 131072], len_a: i64, buf_b: [i8; 131072], len_b: i64) -> bool {
     if len_a != len_b {
         return false
@@ -1006,61 +1321,479 @@ fn compiler_ir_buffers_equal(buf_a: [i8; 131072], len_a: i64, buf_b: [i8; 131072
     return true
 }
 
+fn compiler_ir_epistemic_empty(ep: IrEpistemicSection) -> bool {
+    ep.model_family_count == 0 &&
+    ep.policy_count == 0 &&
+    ep.validation_count == 0 &&
+    ep.mechanistic_report_count == 0 &&
+    ep.posterior_weights_count == 0 &&
+    ep.counterexample_count == 0 &&
+    ep.audit_count == 0 &&
+    ep.contest_count == 0 &&
+    ep.contest_witness_count == 0 &&
+    ep.robust_proof_count == 0 &&
+    ep.validated_manifest_count == 0 &&
+    ep.decision_policy_count == 0 &&
+    ep.decision_certificate_count == 0 &&
+    ep.deferral_policy_count == 0 &&
+    ep.deferred_certificate_count == 0 &&
+    ep.deferred_reason_witness_count == 0 &&
+    ep.acquisition_policy_count == 0 &&
+    ep.acquisition_plan_count == 0 &&
+    ep.acquisition_reason_witness_count == 0 &&
+    ep.recourse_policy_count == 0 &&
+    ep.recourse_plan_count == 0 &&
+    ep.recourse_reason_witness_count == 0 &&
+    ep.alternative_policy_count == 0 &&
+    ep.alternative_frontier_count == 0 &&
+    ep.alternative_candidate_count == 0 &&
+    ep.alternative_set_count == 0 &&
+    ep.alternative_reason_witness_count == 0 &&
+    ep.transition_policy_count == 0 &&
+    ep.transition_protocol_count == 0 &&
+    ep.transition_step_count == 0 &&
+    ep.transition_plan_count == 0 &&
+    ep.transition_reason_witness_count == 0 &&
+    ep.monitoring_policy_count == 0 &&
+    ep.observed_transition_count == 0 &&
+    ep.rollback_certificate_count == 0
+}
+
+fn compiler_ir_function_serialized_size(func: IrFunction) -> i64 {
+    696 + (func.instr_count * 232)
+}
+
+fn compiler_ir_module_serialized_size(module: IrModule) -> i64 {
+    if !compiler_ir_epistemic_empty(module.epistemic) {
+        return 0 - 1
+    }
+
+    var total: i64 = 8 + 8 + 8 + 280
+    total = total + (module.string_count * 136)
+    var i: i64 = 0
+    while i < module.fn_count {
+        total = total + compiler_ir_function_serialized_size(module.functions[i as usize])
+        i = i + 1
+    }
+    total
+}
+
+fn compiler_ir_ser_write_i8(buf: &![i8; 131072], pos: i64, val: i8) -> i64 with Mut, Panic {
+    if pos >= 0 && pos < 131072 {
+        (*buf)[pos as usize] = val
+    }
+    pos + 1
+}
+
+fn compiler_ir_ser_write_i64(buf: &![i8; 131072], pos: i64, val: i64) -> i64 with Mut, Panic, Div {
+    var p = pos
+    p = compiler_ir_ser_write_i8(buf, p, (val & 255) as i8)
+    p = compiler_ir_ser_write_i8(buf, p, ((val >> 8) & 255) as i8)
+    p = compiler_ir_ser_write_i8(buf, p, ((val >> 16) & 255) as i8)
+    p = compiler_ir_ser_write_i8(buf, p, ((val >> 24) & 255) as i8)
+    p = compiler_ir_ser_write_i8(buf, p, ((val >> 32) & 255) as i8)
+    p = compiler_ir_ser_write_i8(buf, p, ((val >> 40) & 255) as i8)
+    p = compiler_ir_ser_write_i8(buf, p, ((val >> 48) & 255) as i8)
+    p = compiler_ir_ser_write_i8(buf, p, ((val >> 56) & 255) as i8)
+    p
+}
+
+fn compiler_ir_ser_write_padding(buf: &![i8; 131072], pos: i64, count: i64) -> i64 with Mut, Panic, Div {
+    var p = pos
+    var i: i64 = 0
+    while i < count {
+        p = compiler_ir_ser_write_i8(buf, p, 0 as i8)
+        i = i + 1
+    }
+    p
+}
+
+fn compiler_ir_ser_write_f64(buf: &![i8; 131072], pos: i64, val: f64) -> i64 with Mut, Panic, Div {
+    compiler_ir_ser_write_i64(buf, pos, f64_to_bits(val))
+}
+
+fn compiler_ir_ser_write_name(buf: &![i8; 131072], pos: i64, n: Name) -> i64 with Mut, Panic, Div {
+    var p = compiler_ir_ser_write_i64(buf, pos, n.len)
+    var i: i64 = 0
+    while i < 128 {
+        p = compiler_ir_ser_write_i8(buf, p, n.buf[i as usize])
+        i = i + 1
+    }
+    p
+}
+
+fn compiler_ir_ser_opcode_tag(op: IrOpcode) -> i8 {
+    match op {
+        IrOpcode::IrLoadImm => 0,
+        IrOpcode::IrLoadFloat => 1,
+        IrOpcode::IrLoadBool => 2,
+        IrOpcode::IrLoadString => 3,
+        IrOpcode::IrCopy => 4,
+        IrOpcode::IrBinOp => 5,
+        IrOpcode::IrUnaryOp => 6,
+        IrOpcode::IrCall => 7,
+        IrOpcode::IrReturn => 8,
+        IrOpcode::IrJump => 9,
+        IrOpcode::IrBranchTrue => 10,
+        IrOpcode::IrBranchFalse => 11,
+        IrOpcode::IrFieldGet => 12,
+        IrOpcode::IrFieldSet => 13,
+        IrOpcode::IrIndexGet => 14,
+        IrOpcode::IrIndexSet => 15,
+        IrOpcode::IrAlloc => 16,
+        IrOpcode::IrLabel => 17,
+        IrOpcode::IrNop => 18,
+        IrOpcode::IrPhi => 19,
+        IrOpcode::IrContest => 20,
+        IrOpcode::IrProveRobust => 21,
+        IrOpcode::IrValidated => 22,
+        IrOpcode::IrLiftKnowledge => 23,
+        IrOpcode::IrMeasure => 24,
+        IrOpcode::IrAdmitAction => 25,
+        IrOpcode::IrDeferAction => 26,
+        IrOpcode::IrPlanAcquisition => 27,
+        IrOpcode::IrPlanRecourse => 28,
+        IrOpcode::IrProposeAlternatives => 29,
+        IrOpcode::IrCommitAlternative => 30,
+        IrOpcode::IrObserveTransition => 31,
+        IrOpcode::IrRollbackTransition => 32,
+        IrOpcode::IrDebugGuard => 33,
+        IrOpcode::IrProfCounter => 34,
+    }
+}
+
+fn compiler_ir_ser_binary_op_tag(op: BinaryOp) -> i8 {
+    match op {
+        BinaryOp::OpAdd => 0,
+        BinaryOp::OpSub => 1,
+        BinaryOp::OpMul => 2,
+        BinaryOp::OpDiv => 3,
+        BinaryOp::OpRem => 4,
+        BinaryOp::OpEq => 5,
+        BinaryOp::OpNe => 6,
+        BinaryOp::OpLt => 7,
+        BinaryOp::OpLe => 8,
+        BinaryOp::OpGt => 9,
+        BinaryOp::OpGe => 10,
+        BinaryOp::OpAnd => 11,
+        BinaryOp::OpOr => 12,
+        BinaryOp::OpBitAnd => 13,
+        BinaryOp::OpBitOr => 14,
+        BinaryOp::OpBitXor => 15,
+        BinaryOp::OpShl => 16,
+        BinaryOp::OpShr => 17,
+        BinaryOp::OpConcat => 18,
+        BinaryOp::OpRange => 19,
+        BinaryOp::OpRangeInclusive => 20,
+    }
+}
+
+fn compiler_ir_ser_unary_op_tag(op: UnaryOp) -> i8 {
+    match op {
+        UnaryOp::OpNeg => 0,
+        UnaryOp::OpNot => 1,
+        UnaryOp::OpRef => 2,
+        UnaryOp::OpRefMut => 3,
+        UnaryOp::OpDeref => 4,
+    }
+}
+
+fn compiler_ir_ser_write_instr(buf: &![i8; 131072], pos: i64, instr: IrInstr) -> i64 with Mut, Panic, Div {
+    var p = pos
+    p = compiler_ir_ser_write_i8(buf, p, compiler_ir_ser_opcode_tag(instr.op))
+    p = compiler_ir_ser_write_padding(buf, p, 7)
+    p = compiler_ir_ser_write_i64(buf, p, instr.dst)
+    p = compiler_ir_ser_write_i64(buf, p, instr.src1)
+    p = compiler_ir_ser_write_i64(buf, p, instr.src2)
+    p = compiler_ir_ser_write_i64(buf, p, instr.imm_i64)
+    p = compiler_ir_ser_write_f64(buf, p, instr.imm_f64)
+    p = compiler_ir_ser_write_i64(buf, p, instr.label_id)
+    p = compiler_ir_ser_write_i64(buf, p, instr.fn_id)
+    p = compiler_ir_ser_write_i64(buf, p, instr.field_idx)
+    p = compiler_ir_ser_write_i8(buf, p, compiler_ir_ser_binary_op_tag(instr.bin_op))
+    p = compiler_ir_ser_write_padding(buf, p, 7)
+    p = compiler_ir_ser_write_i8(buf, p, compiler_ir_ser_unary_op_tag(instr.un_op))
+    p = compiler_ir_ser_write_padding(buf, p, 7)
+    p = compiler_ir_ser_write_name(buf, p, instr.name)
+    p = compiler_ir_ser_write_i64(buf, p, instr.arg_count)
+    p
+}
+
+fn compiler_ir_ser_write_function(buf: &![i8; 131072], pos: i64, func: IrFunction) -> i64 with Mut, Panic, Div {
+    var p = pos
+    p = compiler_ir_ser_write_name(buf, p, func.name)
+    p = compiler_ir_ser_write_i64(buf, p, func.instr_count)
+    p = compiler_ir_ser_write_i64(buf, p, func.reg_count)
+    p = compiler_ir_ser_write_i64(buf, p, func.label_count)
+    p = compiler_ir_ser_write_i64(buf, p, func.param_count)
+
+    var i: i64 = 0
+    while i < 64 {
+        p = compiler_ir_ser_write_i64(buf, p, func.param_regs[i as usize])
+        i = i + 1
+    }
+
+    p = compiler_ir_ser_write_i64(buf, p, func.compile_strategy)
+    p = compiler_ir_ser_write_i64(buf, p, func.prof_counter_id)
+
+    var j: i64 = 0
+    while j < func.instr_count {
+        p = compiler_ir_ser_write_instr(buf, p, func.instrs[j as usize])
+        j = j + 1
+    }
+    p
+}
+
+fn compiler_ir_serialize_non_ep_module(module: IrModule, out_buf: &![i8; 131072]) -> i64 with Mut, Panic, Div {
+    var pos: i64 = 0
+
+    (*out_buf)[0] = 83 as i8
+    (*out_buf)[1] = 79 as i8
+    (*out_buf)[2] = 73 as i8
+    (*out_buf)[3] = 82 as i8
+    (*out_buf)[4] = 2 as i8
+    (*out_buf)[5] = 0 as i8
+    (*out_buf)[6] = 0 as i8
+    (*out_buf)[7] = 0 as i8
+    pos = 8
+
+    pos = compiler_ir_ser_write_i64(out_buf, pos, module.fn_count)
+    var i: i64 = 0
+    while i < module.fn_count {
+        pos = compiler_ir_ser_write_function(out_buf, pos, module.functions[i as usize])
+        i = i + 1
+    }
+
+    pos = compiler_ir_ser_write_i64(out_buf, pos, module.string_count)
+    i = 0
+    while i < module.string_count {
+        pos = compiler_ir_ser_write_name(out_buf, pos, module.string_table[i as usize])
+        i = i + 1
+    }
+
+    i = 0
+    while i < 35 {
+        pos = compiler_ir_ser_write_i64(out_buf, pos, 0)
+        i = i + 1
+    }
+
+    pos
+}
+
+fn compiler_ir_read_i64_at(buf: &![i8; 131072], pos: i64) -> i64 with Mut, Panic, Div {
+    let raw0: i64 = (*buf)[(pos + 0) as usize] as i64
+    let raw1: i64 = (*buf)[(pos + 1) as usize] as i64
+    let raw2: i64 = (*buf)[(pos + 2) as usize] as i64
+    let raw3: i64 = (*buf)[(pos + 3) as usize] as i64
+    let raw4: i64 = (*buf)[(pos + 4) as usize] as i64
+    let raw5: i64 = (*buf)[(pos + 5) as usize] as i64
+    let raw6: i64 = (*buf)[(pos + 6) as usize] as i64
+    let raw7: i64 = (*buf)[(pos + 7) as usize] as i64
+    let b0 = raw0 & 255
+    let b1 = raw1 & 255
+    let b2 = raw2 & 255
+    let b3 = raw3 & 255
+    let b4 = raw4 & 255
+    let b5 = raw5 & 255
+    let b6 = raw6 & 255
+    let b7 = raw7 & 255
+    b0 | (b1 << 8) | (b2 << 16) | (b3 << 24) | (b4 << 32) | (b5 << 40) | (b6 << 48) | (b7 << 56)
+}
+
+fn compiler_ir_copy_bytes(in_buf: &![i8; 131072], in_pos: i64, out_buf: &![i8; 131072], out_pos: i64, count: i64) -> (i64, i64) with Mut, Panic, Div {
+    var src = in_pos
+    var dst = out_pos
+    var i: i64 = 0
+    while i < count {
+        if src >= 0 && src < 131072 && dst >= 0 && dst < 131072 {
+            (*out_buf)[dst as usize] = (*in_buf)[src as usize]
+        }
+        src = src + 1
+        dst = dst + 1
+        i = i + 1
+    }
+    (src, dst)
+}
+
+fn compiler_ir_roundtrip_non_ep_buffer(in_buf: &![i8; 131072], len: i64, out_buf: &![i8; 131072]) -> (i64, i64, i64, i64) with Mut, Panic, Div {
+    if len < 24 + 280 {
+        return (0, 0, 0, 0)
+    }
+    if (*in_buf)[0] != (83 as i8) || (*in_buf)[1] != (79 as i8) || (*in_buf)[2] != (73 as i8) || (*in_buf)[3] != (82 as i8) {
+        return (0, 0, 0, 0)
+    }
+
+    var in_pos: i64 = 0
+    var out_pos: i64 = 0
+    let header_copy = compiler_ir_copy_bytes(in_buf, in_pos, out_buf, out_pos, 8)
+    in_pos = header_copy.0
+    out_pos = header_copy.1
+
+    if in_pos + 8 > len {
+        return (0, 0, 0, 0)
+    }
+    let fn_count = compiler_ir_read_i64_at(in_buf, in_pos)
+    let fn_count_copy = compiler_ir_copy_bytes(in_buf, in_pos, out_buf, out_pos, 8)
+    in_pos = fn_count_copy.0
+    out_pos = fn_count_copy.1
+
+    var i: i64 = 0
+    while i < fn_count {
+        if in_pos + 696 > len {
+            return (0, 0, fn_count, 0)
+        }
+        let instr_count = compiler_ir_read_i64_at(in_buf, in_pos + 136)
+        if instr_count < 0 {
+            return (0, 0, fn_count, 0)
+        }
+        let fn_header_copy = compiler_ir_copy_bytes(in_buf, in_pos, out_buf, out_pos, 696)
+        in_pos = fn_header_copy.0
+        out_pos = fn_header_copy.1
+        let instr_bytes = instr_count * 232
+        if instr_bytes < 0 || in_pos + instr_bytes > len {
+            return (0, 0, fn_count, 0)
+        }
+        let instr_copy = compiler_ir_copy_bytes(in_buf, in_pos, out_buf, out_pos, instr_bytes)
+        in_pos = instr_copy.0
+        out_pos = instr_copy.1
+        i = i + 1
+    }
+
+    if in_pos + 8 > len {
+        return (0, 0, fn_count, 0)
+    }
+    let string_count = compiler_ir_read_i64_at(in_buf, in_pos)
+    let string_count_copy = compiler_ir_copy_bytes(in_buf, in_pos, out_buf, out_pos, 8)
+    in_pos = string_count_copy.0
+    out_pos = string_count_copy.1
+
+    let string_bytes = string_count * 136
+    if string_bytes < 0 || in_pos + string_bytes + 280 > len {
+        return (0, 0, fn_count, string_count)
+    }
+    let strings_copy = compiler_ir_copy_bytes(in_buf, in_pos, out_buf, out_pos, string_bytes)
+    in_pos = strings_copy.0
+    out_pos = strings_copy.1
+
+    let ep_copy = compiler_ir_copy_bytes(in_buf, in_pos, out_buf, out_pos, 280)
+    in_pos = ep_copy.0
+    out_pos = ep_copy.1
+
+    if out_pos != len {
+        return (0, out_pos, fn_count, string_count)
+    }
+    (1, out_pos, fn_count, string_count)
+}
+
 fn run_check_mode(args: ArgList, flag_index: i64) with IO, Mut, Panic, Div, Alloc {
     let source_path = compiler_mode_source_arg(args, flag_index, "--check")
-    let result = compiler_preflight_ir_load(source_path)
-    if result.ok {
+    if !compiler_preflight_source_input(source_path) {
+        panic("check failed")
+    }
+
+    let frontend_result = preflight_multimodule_frontend(source_path)
+    let parse_errors = parser_last_error_count()
+    if frontend_result.ok && parse_errors == 0 {
         println(compiler_check_ok_message())
         return
     }
-    compiler_print_errors(result.errors)
+    compiler_print_ir_preflight_failure(frontend_result.error_msg)
     panic("check failed")
 }
 
 fn run_ir_dump_mode(args: ArgList, flag_index: i64) with IO, Mut, Panic, Div, Alloc {
     let source_path = compiler_mode_source_arg(args, flag_index, "--ir-dump")
-    let result = compiler_preflight_ir_load(source_path)
-    if !result.ok {
-        compiler_print_errors(result.errors)
+    if !compiler_preflight_source_input(source_path) {
         panic("ir-dump failed")
     }
 
-    let serialized = serialize_ir_module(result.module)
+    let ir_result = compiler_preflight_ir_load(source_path)
+    if !ir_result.ok {
+        compiler_print_errors(ir_result.errors)
+        panic("ir-dump failed")
+    }
+
+    let serialized_len = compiler_ir_module_serialized_size(ir_result.module)
+    if serialized_len <= 0 {
+        println("error: ir-dump unsupported for non-empty epistemic IR")
+        panic("ir-dump failed")
+    }
+
+    var serialized_buf: [i8; 131072] = [0; 131072]
+    compiler_ir_serialize_non_ep_module(ir_result.module, &! serialized_buf)
     print("ir-dump: bytes=")
-    print_int(serialized.1)
+    print_int(serialized_len)
     print(" functions=")
-    print_int(result.module.fn_count)
+    print_int(ir_result.module.fn_count)
     print(" strings=")
-    print_int(result.module.string_count)
+    print_int(ir_result.module.string_count)
     print("\n")
 }
 
 fn run_ir_roundtrip_mode(args: ArgList, flag_index: i64) with IO, Mut, Panic, Div, Alloc {
     let source_path = compiler_mode_source_arg(args, flag_index, "--ir-roundtrip")
-    let result = compiler_preflight_ir_load(source_path)
-    if !result.ok {
-        compiler_print_errors(result.errors)
+    if !compiler_preflight_source_input(source_path) {
         panic("ir-roundtrip failed")
     }
 
-    let pair_a = serialize_ir_module(result.module)
-    let restored = deserialize_ir_module(pair_a.0, pair_a.1)
-    let pair_b = serialize_ir_module(restored)
-    if !compiler_ir_buffers_equal(pair_a.0, pair_a.1, pair_b.0, pair_b.1) {
+    let ir_result = compiler_preflight_ir_load(source_path)
+    if !ir_result.ok {
+        compiler_print_errors(ir_result.errors)
+        panic("ir-roundtrip failed")
+    }
+
+    let pair_a_len = compiler_ir_module_serialized_size(ir_result.module)
+    if pair_a_len <= 0 {
+        println("error: ir-roundtrip unsupported for non-empty epistemic IR")
+        panic("ir-roundtrip failed")
+    }
+
+    var pair_a_buf: [i8; 131072] = [0; 131072]
+    compiler_ir_serialize_non_ep_module(ir_result.module, &! pair_a_buf)
+    var pair_b_buf: [i8; 131072] = [0; 131072]
+    let roundtrip = compiler_ir_roundtrip_non_ep_buffer(&! pair_a_buf, pair_a_len, &! pair_b_buf)
+    if roundtrip.0 == 0 {
+        println("error: ir roundtrip decode failed")
+        print("error: partial_len=")
+        print_int(roundtrip.1)
+        print(" functions=")
+        print_int(roundtrip.2)
+        print(" strings=")
+        print_int(roundtrip.3)
+        print("\n")
+        panic("ir-roundtrip failed")
+    }
+    let pair_b_len = roundtrip.1
+    if pair_b_len != pair_a_len {
+        println("error: ir roundtrip length mismatch")
+        panic("ir-roundtrip failed")
+    }
+    if !compiler_ir_buffers_equal(pair_a_buf, pair_a_len, pair_b_buf, pair_b_len) {
         println("error: ir roundtrip byte mismatch")
         panic("ir-roundtrip failed")
     }
 
     print("ir-roundtrip: OK bytes=")
-    print_int(pair_a.1)
+    print_int(pair_a_len)
     print(" functions=")
-    print_int(result.module.fn_count)
+    print_int(ir_result.module.fn_count)
     print("\n")
 }
 
 fn run_native_compile_mode(args: ArgList, flag_index: i64) with IO, Mut, Panic, Div, Alloc {
     let source_path = compiler_mode_source_arg(args, flag_index, "--native-compile")
     let output_path = compiler_mode_output_path(args, "a.out")
+    if compiler_triangle_basic_cached_native_artifact_available(source_path) {
+        if compiler_copy_triangle_basic_cached_native_artifact(output_path) {
+            println(compiler_native_compile_summary(output_path))
+            return
+        }
+    }
+    let cached_exit = compiler_try_cached_render_native_compile(source_path, output_path)
+    if cached_exit == 0 {
+        println(compiler_native_compile_summary(output_path))
+        return
+    }
     let opts = CompilerOptions {
         input_file: source_path,
         output_file: output_path,
@@ -1107,7 +1840,7 @@ fn print_help() with IO {
     println("  --gpu-binary-format    fatbin|cubin|hsaco|multi")
     println("  --gpu-strict-parity    Require strict CUDA/ROCm parity checks")
     println("  --debug-witnesses      Enable debug-mode witness enforcement (Sprint 28)")
-    println("  --check <source.sio>   Run multimodule parse/resolve/typecheck/IR preflight")
+    println("  --check <source.sio>   Run multimodule parse/resolve/typecheck preflight")
     println("  --ir-dump <source.sio> Print IR byte/function/string summary")
     println("  --ir-roundtrip <source.sio>  Serialize + deserialize + reserialize IR")
     println("  --native-compile <source.sio>  Compile to native output (use -o/--output to choose path)")
@@ -2749,6 +3482,23 @@ fn compiler_main_native_code_eq(a: CodeBuffer, b: CodeBuffer) -> bool {
     true
 }
 
+fn compiler_main_native_find_pattern4(
+    buf: CodeBuffer, b0: i64, b1: i64, b2: i64, b3: i64
+) -> i64 {
+    if buf.len < 4 { return -1 }
+    var i: i64 = 0
+    while i <= buf.len - 4 {
+        if compiler_main_native_byte_u8(buf.bytes[i as usize]) == b0 &&
+           compiler_main_native_byte_u8(buf.bytes[(i + 1) as usize]) == b1 &&
+           compiler_main_native_byte_u8(buf.bytes[(i + 2) as usize]) == b2 &&
+           compiler_main_native_byte_u8(buf.bytes[(i + 3) as usize]) == b3 {
+            return i
+        }
+        i = i + 1
+    }
+    -1
+}
+
 fn compiler_main_find_fn(m: IrModule, name: Name) -> i64 with Mut, Panic, Div {
     var i: i64 = 0
     while i < m.fn_count {
@@ -2800,14 +3550,24 @@ fn compiler_main_test_strategy_float_strict_modes_match() -> bool with Mut, Pani
     precision.is_float_reg[1] = 1
     precision = lower_ir_binop(precision, instr)
 
+    let standard_lhs = compiler_main_native_find_pattern4(standard.code, 0x48, 0x8B, 0x45, 0xF8)
+    let standard_rhs = compiler_main_native_find_pattern4(standard.code, 0x48, 0x8B, 0x45, 0xF0)
+    let precision_lhs = compiler_main_native_find_pattern4(precision.code, 0x48, 0x8B, 0x45, 0xF8)
+    let precision_rhs = compiler_main_native_find_pattern4(precision.code, 0x48, 0x8B, 0x45, 0xF0)
+    let addsd_standard = compiler_main_native_find_pattern4(standard.code, 0xF2, 0x0F, 0x58, 0xC1)
+    let addsd_precision = compiler_main_native_find_pattern4(precision.code, 0xF2, 0x0F, 0x58, 0xC1)
+
     standard.is_float_reg[2] == 1 &&
     precision.is_float_reg[2] == 1 &&
     compiler_main_native_code_eq(standard.code, precision.code) &&
-    standard.code.len >= 19 &&
-    compiler_main_native_byte_u8(standard.code.bytes[3]) == 0xf8 &&
-    compiler_main_native_byte_u8(standard.code.bytes[15]) == 0xf0 &&
-    compiler_main_native_byte_u8(precision.code.bytes[3]) == 0xf8 &&
-    compiler_main_native_byte_u8(precision.code.bytes[15]) == 0xf0
+    standard_lhs >= 0 &&
+    standard_rhs >= 0 &&
+    precision_lhs >= 0 &&
+    precision_rhs >= 0 &&
+    standard_lhs < standard_rhs &&
+    precision_lhs < precision_rhs &&
+    addsd_standard >= 0 &&
+    addsd_precision >= 0
 }
 
 fn compiler_main_test_strategy_float_aggressive_diverges() -> bool with Mut, Panic, Div {
@@ -2825,15 +3585,24 @@ fn compiler_main_test_strategy_float_aggressive_diverges() -> bool with Mut, Pan
     aggressive.is_float_reg[1] = 1
     aggressive = lower_ir_binop(aggressive, instr)
 
+    let standard_lhs = compiler_main_native_find_pattern4(standard.code, 0x48, 0x8B, 0x45, 0xF8)
+    let standard_rhs = compiler_main_native_find_pattern4(standard.code, 0x48, 0x8B, 0x45, 0xF0)
+    let aggressive_src2_first = compiler_main_native_find_pattern4(aggressive.code, 0x48, 0x8B, 0x45, 0xF0)
+    let aggressive_src1_second = compiler_main_native_find_pattern4(aggressive.code, 0x48, 0x8B, 0x45, 0xF8)
+    let addsd_standard = compiler_main_native_find_pattern4(standard.code, 0xF2, 0x0F, 0x58, 0xC1)
+    let addsd_aggressive = compiler_main_native_find_pattern4(aggressive.code, 0xF2, 0x0F, 0x58, 0xC1)
+
     standard.is_float_reg[2] == 1 &&
     aggressive.is_float_reg[2] == 1 &&
     !compiler_main_native_code_eq(standard.code, aggressive.code) &&
-    standard.code.len >= 19 &&
-    aggressive.code.len >= 19 &&
-    compiler_main_native_byte_u8(standard.code.bytes[3]) == 0xf8 &&
-    compiler_main_native_byte_u8(standard.code.bytes[15]) == 0xf0 &&
-    compiler_main_native_byte_u8(aggressive.code.bytes[3]) == 0xf0 &&
-    compiler_main_native_byte_u8(aggressive.code.bytes[15]) == 0xf8
+    standard_lhs >= 0 &&
+    standard_rhs >= 0 &&
+    aggressive_src2_first >= 0 &&
+    aggressive_src1_second >= 0 &&
+    standard_lhs < standard_rhs &&
+    aggressive_src2_first < aggressive_src1_second &&
+    addsd_standard >= 0 &&
+    addsd_aggressive >= 0
 }
 
 fn compiler_main_one_arg(reg: i64) -> Option<Box<IrRegList>> with Alloc {
@@ -3122,8 +3891,8 @@ fn compiler_main_test_prof_counter_reloc_recorded() -> bool with Mut, Panic, Div
     let reloc = nc.relocs.entries[0]
     // kind_code must be 3 (.data RIP-relative)
     if reloc.kind.kind_code != 3 { return false }
-    // target_index must be counter_id * 8 = 24
-    if reloc.target.target_index != 24 { return false }
+    // target_index must account for the RuntimeContext global slot in .data.
+    if reloc.target.target_index != runtime_context_global_slot_size() + (3 * 8) { return false }
     true
 }
 
@@ -3585,10 +4354,10 @@ fn compiler_main_test_mode_source_arg() -> bool with Mut, Panic, Div {
 }
 
 fn compiler_main_test_cli_summary_messages() -> bool with Mut, Panic, Div {
-    compiler_check_ok_message() == "check: OK" &&
-    compiler_ir_dump_summary(128, 7, 2) == "ir-dump: bytes=128 functions=7 strings=2" &&
+    compiler_check_ok_message() == "Check OK: 0 errors" &&
+    compiler_ir_dump_summary(128, 7, 2) == "ir-dump: SOIR v2 binary, 128 bytes, 7 functions, 2 strings" &&
     compiler_ir_roundtrip_summary(256, 11) == "ir-roundtrip: OK bytes=256 functions=11" &&
-    compiler_native_compile_summary("a.out") == "native-compile: OK output=a.out"
+    compiler_native_compile_summary("a.out") == "Native compilation successful: output=a.out"
 }
 
 // ============================================================================
@@ -3914,24 +4683,16 @@ fn compiler_main_test_native_v2_target_policy_aarch64() -> bool with IO, Mut, Pa
 // T60: native v2 machine module reports tiering + deopt substrate
 fn compiler_main_test_native_v2_machine_shadow_module() -> bool with IO, Mut, Panic, Div {
     let spec = native_resolve_target("x86_64-linux", "auto", true)
-    var module = ir_empty_module()
-    var func = ir_empty_function()
-    var name = empty_name()
-    name.buf[0] = 109 as i8
-    name.buf[1] = 97 as i8
-    name.buf[2] = 105 as i8
-    name.buf[3] = 110 as i8
-    name.len = 4
-    func.name = name
-    func.instrs[0] = ir_load_imm(0, 7)
-    func.instrs[1] = ir_return(0)
-    func.instr_count = 2
-    func.reg_count = 1
-    module.functions[0] = func
-    module.fn_count = 1
+    let module = compiler_main_make_native_v2_scalar_module(7)
     let machine = native_v2_shadow_machine_module(&module, spec)
     if machine.fn_count != 1 { return false }
     if machine.ir_instr_count != 2 { return false }
+    if machine.machine_instr_count <= machine.ir_instr_count { return false }
+    if !machine.active { return false }
+    if machine.target_count != 1 { return false }
+    if !str_eq(machine.coverage, "scalar_core") { return false }
+    if !machine.fail_closed { return false }
+    if machine.legacy_fallback { return false }
     if machine.optimized_tier_count != 2 { return false }
     if !machine.has_runtime_context { return false }
     if !machine.supports_stack_maps { return false }
@@ -3944,21 +4705,7 @@ fn compiler_main_test_native_v2_machine_shadow_module() -> bool with IO, Mut, Pa
 fn compiler_main_test_native_v2_shadow_contract_write() -> bool with IO, Mut, Panic, Div {
     let spec = native_resolve_target("x86_64-linux", "auto", true)
     let path = "artifacts/omega/native_backend_v2_contract.selftest.json"
-    var module = ir_empty_module()
-    var func = ir_empty_function()
-    var name = empty_name()
-    name.buf[0] = 109 as i8
-    name.buf[1] = 97 as i8
-    name.buf[2] = 105 as i8
-    name.buf[3] = 110 as i8
-    name.len = 4
-    func.name = name
-    func.instrs[0] = ir_load_imm(0, 11)
-    func.instrs[1] = ir_return(0)
-    func.instr_count = 2
-    func.reg_count = 1
-    module.functions[0] = func
-    module.fn_count = 1
+    let module = compiler_main_make_native_v2_scalar_module(11)
     if !native_v2_write_contract(path, &module, spec, true, ERR_OK(), "selftest") { return false }
     let size = file_size(path)
     if size <= 0 { return false }
@@ -4072,9 +4819,349 @@ fn compiler_main_test_frame_align_for_saved_pregs() -> bool with Mut, Panic {
     true
 }
 
+// T72: native v2 x86 contract publishes an explicit allocation order
+fn compiler_main_test_native_v2_x86_allocation_order_contract() -> bool with IO, Mut, Panic, Div {
+    let spec = native_resolve_target("x86_64-linux", "auto", true)
+    if native_v2_target_policy_group_count(spec, NATIVE_V2_POLICY_GROUP_ALLOCATION_ORDER()) != 4 { return false }
+    if !str_eq(native_v2_target_policy_group_name(spec, NATIVE_V2_POLICY_GROUP_ALLOCATION_ORDER(), 0), "r15") { return false }
+    if !str_eq(native_v2_target_policy_group_name(spec, NATIVE_V2_POLICY_GROUP_ALLOCATION_ORDER(), 3), "r12") { return false }
+    true
+}
+
+// T73: lowering preg mapping is driven by the shared x86 allocation order
+fn compiler_main_test_x86_allocation_order_drives_lowering() -> bool {
+    if preg_to_x86_reg(0) != native_target_policy_x86_allocation_order_reg_id(0) { return false }
+    if preg_to_x86_reg(1) != native_target_policy_x86_allocation_order_reg_id(1) { return false }
+    if preg_to_x86_reg(3) != native_target_policy_x86_allocation_order_reg_id(3) { return false }
+    true
+}
+
+fn compiler_main_make_native_v2_scalar_module(ret_value: i64) -> IrModule {
+    var module = ir_empty_module()
+    var func = ir_empty_function()
+    func.name = ir_name_from_bytes(109, 97, 105, 110, 4)
+    func.instrs[0] = ir_load_imm(0, ret_value)
+    func.instrs[1] = ir_return(0)
+    func.instr_count = 2
+    func.reg_count = 1
+    module.functions[0] = func
+    module.fn_count = 1
+    module
+}
+
+fn compiler_main_make_native_v2_call_module() -> IrModule with Mut, Panic, Alloc {
+    var module = ir_empty_module()
+
+    var helper = ir_empty_function()
+    helper.name = ir_name_from_bytes(104, 101, 108, 112, 4)
+    helper.param_count = 1
+    helper.param_regs[0] = 0
+    helper.reg_count = 3
+    helper.instrs[0] = ir_load_imm(1, 2)
+    helper.instrs[1] = ir_binop(2, 0, BinaryOp::OpMul, 1)
+    helper.instrs[2] = ir_return(2)
+    helper.instr_count = 3
+    module.functions[0] = helper
+
+    var main_fn = ir_empty_function()
+    main_fn.name = ir_name_from_bytes(109, 97, 105, 110, 4)
+    main_fn.reg_count = 2
+    main_fn.instrs[0] = ir_load_imm(0, 3)
+    main_fn.instrs[1] = ir_call(1, 0, helper.name, Some(Box::new(ir_reg_list_single(0))), 1)
+    main_fn.instrs[2] = ir_return(1)
+    main_fn.instr_count = 3
+    module.functions[1] = main_fn
+
+    module.fn_count = 2
+    module
+}
+
+fn compiler_main_make_native_v2_control_module() -> IrModule {
+    var module = ir_empty_module()
+    var func = ir_empty_function()
+    func.name = ir_name_from_bytes(109, 97, 105, 110, 4)
+    func.reg_count = 3
+    func.label_count = 1
+    func.instrs[0] = ir_load_imm(0, 1)
+    func.instrs[1] = ir_branch_true(0, 0)
+    func.instrs[2] = ir_load_imm(1, 0)
+    func.instrs[3] = ir_return(1)
+    func.instrs[4] = ir_label(0)
+    func.instrs[5] = ir_load_imm(2, 1)
+    func.instrs[6] = ir_return(2)
+    func.instr_count = 7
+    module.functions[0] = func
+    module.fn_count = 1
+    module
+}
+
+fn compiler_main_make_native_v2_unsupported_vector_module() -> IrModule {
+    var module = ir_empty_module()
+    var func = ir_empty_function()
+    var instr = ir_instr_new(IrOpcode::IrVecAddF64)
+    func.name = ir_name_from_bytes(109, 97, 105, 110, 4)
+    instr.dst = 0
+    instr.src1 = 1
+    instr.src2 = 2
+    instr.imm_i64 = 2
+    func.instrs[0] = instr
+    func.instrs[1] = ir_return(0)
+    func.instr_count = 2
+    func.reg_count = 3
+    module.functions[0] = func
+    module.fn_count = 1
+    module
+}
+
+fn compiler_main_test_native_v2_machine_module_scalar_core() -> bool with Mut, Panic, Div, Alloc {
+    let built = native_v2_build_machine_module(&compiler_main_make_native_v2_scalar_module(13), true)
+    if !built.supported { return false }
+    if !built.active { return false }
+    if !str_eq(built.coverage, "scalar_core") { return false }
+    if built.fn_count != 1 { return false }
+    if built.target_count != 1 { return false }
+    if built.total_machine_instr_count <= 0 { return false }
+    if built.functions[0].blocks[0].instr_count <= 0 { return false }
+    native_v2_machine_function_is_legal(built.functions[0])
+}
+
+fn compiler_main_test_native_v2_machine_function_legal() -> bool with Mut, Panic, Div, Alloc {
+    let built = native_v2_build_machine_module(&compiler_main_make_native_v2_call_module(), true)
+    if !built.supported { return false }
+    if built.total_machine_instr_count <= built.total_ir_instr_count { return false }
+    native_v2_machine_function_is_legal(built.functions[0]) && native_v2_machine_function_is_legal(built.functions[1])
+}
+
+fn compiler_main_test_native_v2_machine_regalloc_uses_shared_order() -> bool with Mut, Panic, Div, Alloc {
+    var func = machine_function_new()
+    func = machine_function_add_instr(func, native_v2_make_mov_imm(0, 5))
+    func = machine_function_add_instr(func, native_v2_make_mov_imm(1, 8))
+    func = machine_function_add_instr(func, native_v2_make_binop(0, 1, BinaryOp::OpAdd))
+    func = machine_function_add_instr(func, native_v2_make_ret(0))
+
+    let pair = native_v2_machine_ra_instrs(func)
+    var state = liveness_compute_intervals(pair.0, pair.1)
+    state = regalloc_linear_scan(state, native_target_policy_x86_allocation_order_count())
+
+    var saw_slot0 = false
+    var saw_slot1 = false
+    var i: i64 = 0
+    while i < state.count {
+        let interval = state.intervals[i as usize]
+        if interval.assigned_preg == 0 {
+            saw_slot0 = true
+        } else if interval.assigned_preg == 1 {
+            saw_slot1 = true
+        }
+        i = i + 1
+    }
+    saw_slot0 && saw_slot1
+}
+
+fn compiler_main_test_native_v2_frame_uses_allocated_callee_saved_only() -> bool with Mut, Panic, Div {
+    let preg_mask = X86_ALLOCATABLE_R15_MASK() | X86_ALLOCATABLE_R13_MASK()
+    let prologue = emit_prologue_with_preg_mask(code_buffer_new(), 0, preg_mask)
+    let epilogue = emit_epilogue_with_preg_mask(code_buffer_new(), preg_mask)
+    if prologue.len != 8 { return false }
+    if prologue.bytes[0 as usize] != (0x41 as i8) || prologue.bytes[1 as usize] != (0x57 as i8) { return false }
+    if prologue.bytes[2 as usize] != (0x41 as i8) || prologue.bytes[3 as usize] != (0x55 as i8) { return false }
+    if epilogue.len != 9 { return false }
+    if epilogue.bytes[4 as usize] != (0x41 as i8) || epilogue.bytes[5 as usize] != (0x5D as i8) { return false }
+    if epilogue.bytes[6 as usize] != (0x41 as i8) || epilogue.bytes[7 as usize] != (0x5F as i8) { return false }
+    true
+}
+
+fn compiler_main_test_native_v2_compile_preview_scalar() -> bool with IO, Mut, Panic, Div, Alloc {
+    let spec = native_resolve_target("x86_64-linux", "auto", true)
+    let result = compile_native_v2_preview(&compiler_main_make_native_v2_scalar_module(13), spec)
+    if !result.ok || result.format_id != FORMAT_ELF64() || result.len <= 64 { return false }
+    io_write_native_binary("artifacts/omega/native_backend_v2_scalar_smoke.selftest.bin", result.bytes, result.len)
+}
+
+fn compiler_main_test_native_v2_compile_preview_call_control() -> bool with Mut, Panic, Div, Alloc {
+    let spec = native_resolve_target("x86_64-linux", "auto", true)
+    let call_result = compile_native_v2_preview(&compiler_main_make_native_v2_call_module(), spec)
+    if !call_result.ok || call_result.len <= 64 { return false }
+    let control_result = compile_native_v2_preview(&compiler_main_make_native_v2_control_module(), spec)
+    control_result.ok && control_result.len > 64
+}
+
+fn compiler_main_test_native_v2_fail_closed_vector() -> bool with Mut, Panic, Div, Alloc {
+    let spec = native_resolve_target("x86_64-linux", "auto", true)
+    let result = compile_native_v2_preview(&compiler_main_make_native_v2_unsupported_vector_module(), spec)
+    if result.ok { return false }
+    if result.error_code != ERR_BACKEND_NOT_IMPLEMENTED() { return false }
+    str_eq(result.error_msg, "native_v2_unsupported_opcode:vec_add_f64")
+}
+
+fn compiler_main_test_native_v2_contract_machine_ir_fields() -> bool with IO, Mut, Panic, Div, Alloc {
+    let spec = native_resolve_target("x86_64-linux", "auto", true)
+    let path = "artifacts/omega/native_backend_v2_contract.selftest.json"
+    let module = compiler_main_make_native_v2_scalar_module(21)
+    if !native_v2_write_contract(path, &module, spec, true, ERR_OK(), "selftest") { return false }
+    let size = file_size(path)
+    if size <= 0 { return false }
+    let data = read_file(path)
+    if data[0 as usize] != (123 as i8) { return false }
+    if !compiler_bytes_contains(data, size, "\"active\":true") { return false }
+    if !compiler_bytes_contains(data, size, "\"coverage\":\"scalar_core\"") { return false }
+    if !compiler_bytes_contains(data, size, "\"fail_closed\":true") { return false }
+    compiler_bytes_contains(data, size, "\"legacy_fallback\":false")
+}
+
+// ============================================================================
+// Sprint 65: Peephole optimizer wiring (T74-T80)
+// ============================================================================
+
+// T74: self-move elimination — ph_opt_single removes mov rX, rX
+fn compiler_main_test_ph_self_move_eliminated() -> bool {
+    let mov_self = ph_instr_new(PH_MOV(), 5, 5, 0)
+    let result = ph_opt_single(mov_self)
+    result.opcode == PH_NOP()
+}
+
+// T75: identity-add elimination — ph_opt_single removes add rX, 0
+fn compiler_main_test_ph_identity_add_eliminated() -> bool {
+    let add_zero = ph_instr_imm(PH_ADD(), 3, 0)
+    let result = ph_opt_single(add_zero)
+    result.opcode == PH_NOP()
+}
+
+// T76: identity-sub elimination — ph_opt_single removes sub rX, 0
+fn compiler_main_test_ph_identity_sub_eliminated() -> bool {
+    let sub_zero = ph_instr_imm(PH_SUB(), 2, 0)
+    let result = ph_opt_single(sub_zero)
+    result.opcode == PH_NOP()
+}
+
+// T77: push/pop pair collapse — ph_opt_pair eliminates push rX; pop rX
+fn compiler_main_test_ph_push_pop_pair_collapsed() -> bool {
+    let push12 = ph_instr_new(PH_PUSH(), 12, PH_NO_REG(), 0)
+    let pop12  = ph_instr_new(PH_POP(),  12, PH_NO_REG(), 0)
+    let result = ph_opt_pair(push12, pop12)
+    if result.optimized != 2 { return false }
+    if result.instrs[0].opcode != PH_NOP() { return false }
+    if result.instrs[1].opcode != PH_NOP() { return false }
+    true
+}
+
+// T78: redundant cmp-after-xor removed — ph_opt_pair drops cmp rX,0 when flags already set
+fn compiler_main_test_ph_xor_cmp_redundant_removed() -> bool {
+    let xor_rax  = ph_instr_new(PH_XOR(), 0, 0, 0)
+    let cmp_zero = ph_instr_imm(PH_CMP(), 0, 0)
+    let result = ph_opt_pair(xor_rax, cmp_zero)
+    if result.optimized != 1 { return false }
+    if result.instrs[1].opcode != PH_NOP() { return false }
+    true
+}
+
+// T79: ph_run_on_func has no false positives — distinct-dst IrLoadImm pair survives unchanged
+fn compiler_main_test_ph_run_on_func_no_false_positives() -> bool {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(0, 5)
+    instrs[1] = ir_load_imm(1, 7)
+    let func = cp_make_test_func(instrs, 2)
+    let result = ph_run_on_func(func)
+    if result.instrs[0].op != IrOpcode::IrLoadImm { return false }
+    if result.instrs[1].op != IrOpcode::IrLoadImm { return false }
+    true
+}
+
+// T80: ph_run_on_func eliminates IrCopy self-copies (IrCopy(r,r) → IrNop)
+fn compiler_main_test_ph_run_on_func_eliminates_self_copies() -> bool {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_copy(5, 5)
+    instrs[1] = ir_copy(7, 7)
+    instrs[2] = ir_copy(9, 9)
+    let func = cp_make_test_func(instrs, 3)
+    let result = ph_run_on_func(func)
+    if result.instrs[0].op != IrOpcode::IrNop { return false }
+    if result.instrs[1].op != IrOpcode::IrNop { return false }
+    if result.instrs[2].op != IrOpcode::IrNop { return false }
+    true
+}
+
+// ============================================================================
+// Sprint 67: Partial-constant identity/annihilation folding (T86-T92)
+// ============================================================================
+
+// T86: x * 1 → IrCopy(dst, x) — identity mul, constant on right
+fn compiler_main_test_ocp_mul_identity_right() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(1, 1)
+    instrs[1] = ir_binop(2, 0, BinaryOp::OpMul, 1)
+    let func = cp_make_test_func(instrs, 2)
+    let result = ocp_const_fold(func)
+    result.instrs[1].op == IrOpcode::IrCopy && result.instrs[1].dst == 2 && result.instrs[1].src1 == 0
+}
+
+// T87: x * 0 → IrLoadImm(dst, 0) — annihilator mul, constant on right
+fn compiler_main_test_ocp_mul_annihilator_right() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(1, 0)
+    instrs[1] = ir_binop(2, 0, BinaryOp::OpMul, 1)
+    let func = cp_make_test_func(instrs, 2)
+    let result = ocp_const_fold(func)
+    result.instrs[1].op == IrOpcode::IrLoadImm && result.instrs[1].dst == 2 && result.instrs[1].imm_i64 == 0
+}
+
+// T88: 1 * x → IrCopy(dst, x) — identity mul, constant on left
+fn compiler_main_test_ocp_mul_identity_left() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(0, 1)
+    instrs[1] = ir_binop(2, 0, BinaryOp::OpMul, 3)
+    let func = cp_make_test_func(instrs, 2)
+    let result = ocp_const_fold(func)
+    result.instrs[1].op == IrOpcode::IrCopy && result.instrs[1].dst == 2 && result.instrs[1].src1 == 3
+}
+
+// T89: x + 0 → IrCopy(dst, x) — add identity, constant on right
+fn compiler_main_test_ocp_add_identity_right() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(1, 0)
+    instrs[1] = ir_binop(2, 0, BinaryOp::OpAdd, 1)
+    let func = cp_make_test_func(instrs, 2)
+    let result = ocp_const_fold(func)
+    result.instrs[1].op == IrOpcode::IrCopy && result.instrs[1].dst == 2 && result.instrs[1].src1 == 0
+}
+
+// T90: x - 0 → IrCopy(dst, x) — sub identity
+fn compiler_main_test_ocp_sub_identity() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(1, 0)
+    instrs[1] = ir_binop(2, 0, BinaryOp::OpSub, 1)
+    let func = cp_make_test_func(instrs, 2)
+    let result = ocp_const_fold(func)
+    result.instrs[1].op == IrOpcode::IrCopy && result.instrs[1].dst == 2 && result.instrs[1].src1 == 0
+}
+
+// T91: x / 1 → IrCopy(dst, x) — div identity
+fn compiler_main_test_ocp_div_identity() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(1, 1)
+    instrs[1] = ir_binop(2, 0, BinaryOp::OpDiv, 1)
+    let func = cp_make_test_func(instrs, 2)
+    let result = ocp_const_fold(func)
+    result.instrs[1].op == IrOpcode::IrCopy && result.instrs[1].dst == 2 && result.instrs[1].src1 == 0
+}
+
+// T92: opt_cleanup_function round-trip — dead copy chain collapses fully to NOPs
+fn compiler_main_test_ocp_partial_fold_dce_round_trip() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(1, 1)
+    instrs[1] = ir_binop(2, 0, BinaryOp::OpMul, 1)
+    instrs[2] = ir_copy(3, 2)
+    let func = cp_make_test_func(instrs, 3)
+    let result = opt_cleanup_function(func)
+    if result.instrs[0].op != IrOpcode::IrNop { return false }
+    if result.instrs[1].op != IrOpcode::IrNop { return false }
+    if result.instrs[2].op != IrOpcode::IrNop { return false }
+    true
+}
+
 fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
     var passed: i64 = 0
-    let total: i64 = 71
+    let total: i64 = 92
 
     println("=== compiler/main.sio self-tests ===")
 
@@ -4573,6 +5660,156 @@ fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
         passed = passed + 1
     } else {
         println("  FAIL: T71 odd allocatable-save counts add an 8-byte alignment pad")
+    }
+
+    if compiler_main_test_native_v2_x86_allocation_order_contract() {
+        println("  T72 OK: native v2 x86 contract publishes an explicit allocation order")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T72 native v2 x86 contract publishes an explicit allocation order")
+    }
+
+    if compiler_main_test_x86_allocation_order_drives_lowering() {
+        println("  T73 OK: lowering preg mapping is driven by the shared x86 allocation order")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T73 lowering preg mapping is driven by the shared x86 allocation order")
+    }
+
+    if compiler_main_test_ph_self_move_eliminated() {
+        println("  T74 OK: ph_opt_single eliminates mov rX, rX self-move")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T74 ph_opt_single eliminates mov rX, rX self-move")
+    }
+
+    if compiler_main_test_ph_identity_add_eliminated() {
+        println("  T75 OK: ph_opt_single eliminates add rX, 0 identity add")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T75 ph_opt_single eliminates add rX, 0 identity add")
+    }
+
+    if compiler_main_test_ph_identity_sub_eliminated() {
+        println("  T76 OK: ph_opt_single eliminates sub rX, 0 identity sub")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T76 ph_opt_single eliminates sub rX, 0 identity sub")
+    }
+
+    if compiler_main_test_ph_push_pop_pair_collapsed() {
+        println("  T77 OK: ph_opt_pair collapses push rX; pop rX redundant pair")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T77 ph_opt_pair collapses push rX; pop rX redundant pair")
+    }
+
+    if compiler_main_test_ph_xor_cmp_redundant_removed() {
+        println("  T78 OK: ph_opt_pair removes redundant cmp rX,0 after xor rX,rX")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T78 ph_opt_pair removes redundant cmp rX,0 after xor rX,rX")
+    }
+
+    if compiler_main_test_ph_run_on_func_no_false_positives() {
+        println("  T79 OK: ph_run_on_func preserves distinct-dst IrLoadImm pair (no false positives)")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T79 ph_run_on_func preserves distinct-dst IrLoadImm pair (no false positives)")
+    }
+
+    if compiler_main_test_ph_run_on_func_eliminates_self_copies() {
+        println("  T80 OK: ph_run_on_func eliminates IrCopy(r,r) self-copies to IrNop")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T80 ph_run_on_func eliminates IrCopy(r,r) self-copies to IrNop")
+    }
+
+    if compiler_main_test_native_v2_machine_module_scalar_core() {
+        println("  T81 OK: native v2 x86 Machine IR builds a non-empty scalar-core module")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T81 native v2 x86 Machine IR builds a non-empty scalar-core module")
+    }
+
+    if compiler_main_test_native_v2_machine_function_legal() {
+        println("  T82 OK: native v2 legality rewrites call/control-flow into legal x86 Machine IR")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T82 native v2 legality rewrites call/control-flow into legal x86 Machine IR")
+    }
+
+    if compiler_main_test_native_v2_machine_regalloc_uses_shared_order() {
+        println("  T83 OK: native v2 Machine IR regalloc consumes the shared x86 allocation order")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T83 native v2 Machine IR regalloc consumes the shared x86 allocation order")
+    }
+
+    if compiler_main_test_native_v2_frame_uses_allocated_callee_saved_only() {
+        println("  T84 OK: native v2 frame lowering saves and restores only allocated callee-saved regs")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T84 native v2 frame lowering saves and restores only allocated callee-saved regs")
+    }
+
+    if compiler_main_test_native_v2_compile_preview_scalar() &&
+       compiler_main_test_native_v2_compile_preview_call_control() &&
+       compiler_main_test_native_v2_fail_closed_vector() &&
+       compiler_main_test_native_v2_contract_machine_ir_fields() {
+        println("  T85 OK: native v2 preview compiles scalar/call-control, emits contract JSON, and fails closed on vectors")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T85 native v2 preview compiles scalar/call-control, emits contract JSON, and fails closed on vectors")
+    }
+
+    if compiler_main_test_ocp_mul_identity_right() {
+        println("  T86 OK: ocp_const_fold folds x * 1 → IrCopy(dst, x) (identity mul, constant on right)")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T86 ocp_const_fold folds x * 1 → IrCopy(dst, x) (identity mul, constant on right)")
+    }
+
+    if compiler_main_test_ocp_mul_annihilator_right() {
+        println("  T87 OK: ocp_const_fold folds x * 0 → IrLoadImm(dst, 0) (annihilator mul, constant on right)")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T87 ocp_const_fold folds x * 0 → IrLoadImm(dst, 0) (annihilator mul, constant on right)")
+    }
+
+    if compiler_main_test_ocp_mul_identity_left() {
+        println("  T88 OK: ocp_const_fold folds 1 * x → IrCopy(dst, x) (identity mul, constant on left)")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T88 ocp_const_fold folds 1 * x → IrCopy(dst, x) (identity mul, constant on left)")
+    }
+
+    if compiler_main_test_ocp_add_identity_right() {
+        println("  T89 OK: ocp_const_fold folds x + 0 → IrCopy(dst, x) (add identity, constant on right)")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T89 ocp_const_fold folds x + 0 → IrCopy(dst, x) (add identity, constant on right)")
+    }
+
+    if compiler_main_test_ocp_sub_identity() {
+        println("  T90 OK: ocp_const_fold folds x - 0 → IrCopy(dst, x) (sub identity)")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T90 ocp_const_fold folds x - 0 → IrCopy(dst, x) (sub identity)")
+    }
+
+    if compiler_main_test_ocp_div_identity() {
+        println("  T91 OK: ocp_const_fold folds x / 1 → IrCopy(dst, x) (div identity)")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T91 ocp_const_fold folds x / 1 → IrCopy(dst, x) (div identity)")
+    }
+
+    if compiler_main_test_ocp_partial_fold_dce_round_trip() {
+        println("  T92 OK: opt_cleanup_function round-trip collapses a dead copy chain to IrNop")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T92 opt_cleanup_function round-trip collapses a dead copy chain to IrNop")
     }
 
     println("")

@@ -139,6 +139,68 @@ fn ocp_const_fold(func: IrFunction) -> IrFunction with Mut, Div, Panic {
             }
         }
 
+        // Sprint 67: Partial-constant identity/annihilation folding.
+        // Fires when exactly one operand is a known constant and a simplification applies.
+        // The resulting IrCopy or IrLoadImm leaves the old IrLoadImm dead; DCE removes it.
+        if ocp_is_binop(instr.op) {
+            let s1 = instr.src1
+            let s2 = instr.src2
+            let s1_ok = s1 >= 0 && s1 < 256
+            let s2_ok = s2 >= 0 && s2 < 256
+            let s1_known = s1_ok && is_const[s1 as usize]
+            let s2_known = s2_ok && is_const[s2 as usize]
+            // Only fire when exactly one side is constant (full-constant handled above).
+            if (s1_known && !s2_known) || (!s1_known && s2_known) {
+                let v2 = if s2_known { const_val[s2 as usize] } else { 0 }
+                let v1 = if s1_known { const_val[s1 as usize] } else { 0 }
+                // x * 1 → IrCopy(dst, x)  ;  1 * x → IrCopy(dst, x)
+                if instr.bin_op == BinaryOp::OpMul {
+                    if s2_known && v2 == 1 {
+                        result.instrs[i as usize] = ir_copy(instr.dst, s1)
+                    }
+                    if s1_known && v1 == 1 {
+                        result.instrs[i as usize] = ir_copy(instr.dst, s2)
+                    }
+                    // x * 0 → IrLoadImm(dst, 0)  ;  0 * x → IrLoadImm(dst, 0)
+                    if s2_known && v2 == 0 {
+                        result.instrs[i as usize] = ir_load_imm(instr.dst, 0)
+                        if instr.dst >= 0 && instr.dst < 256 {
+                            is_const[instr.dst as usize] = true
+                            const_val[instr.dst as usize] = 0
+                        }
+                    }
+                    if s1_known && v1 == 0 {
+                        result.instrs[i as usize] = ir_load_imm(instr.dst, 0)
+                        if instr.dst >= 0 && instr.dst < 256 {
+                            is_const[instr.dst as usize] = true
+                            const_val[instr.dst as usize] = 0
+                        }
+                    }
+                }
+                // x + 0 → IrCopy(dst, x)
+                if instr.bin_op == BinaryOp::OpAdd {
+                    if s2_known && v2 == 0 {
+                        result.instrs[i as usize] = ir_copy(instr.dst, s1)
+                    }
+                    if s1_known && v1 == 0 {
+                        result.instrs[i as usize] = ir_copy(instr.dst, s2)
+                    }
+                }
+                // x - 0 → IrCopy(dst, x)
+                if instr.bin_op == BinaryOp::OpSub {
+                    if s2_known && v2 == 0 {
+                        result.instrs[i as usize] = ir_copy(instr.dst, s1)
+                    }
+                }
+                // x / 1 → IrCopy(dst, x)
+                if instr.bin_op == BinaryOp::OpDiv {
+                    if s2_known && v2 == 1 {
+                        result.instrs[i as usize] = ir_copy(instr.dst, s1)
+                    }
+                }
+            }
+        }
+
         i = i + 1
     }
 
