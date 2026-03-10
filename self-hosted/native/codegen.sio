@@ -12,10 +12,12 @@ use native::encode::*
 use native::elf::*
 use native::reloc::*
 use native::frame::*
-use native::lower_ir::{lower_instr, nc_run_regalloc}
+use native::lower_ir::{lower_instr, nc_run_regalloc, nc_min_frame_size}
 use native::regs::{param_reg}
+use native::runtime_context::*
 // Sprint 40: IR-level dual-path transformation for Instrumented strategy
 use ir::opt_strategy::{ir_opt_apply_strategy}
+use io::file_write::{io_trace_append_byte, io_trace_append_string, io_trace_append_json_string, io_trace_bool_string, io_trace_i64_string, io_write_bytes_to_file}
 // Note: native::avx512 EVEX emitters are available in native/avx512.sio.
 // They will be wired into the lowering pass in Horizon 3.2 (vector IR ops).
 
@@ -130,6 +132,536 @@ struct NativeCompileResult {
     format_id: i64,
     error_code: i64,
     error_msg: string,
+}
+
+struct NativeV2RuntimeContextLayout {
+    language_visible: bool,
+    tracing_gc: bool,
+    precise_stack_maps: bool,
+    safepoints: bool,
+    deopt_enabled: bool,
+    osr_enabled: bool,
+    unified_jit_aot: bool,
+    heterogeneous_shared: bool,
+    gc_field_count: i64,
+    io_field_count: i64,
+    instrumentation_field_count: i64,
+    deopt_field_count: i64,
+    capability_field_count: i64,
+    heterogeneous_field_count: i64,
+    provenance_field_count: i64,
+}
+
+struct NativeV2MachineModule {
+    target_arch_id: i64,
+    fn_count: i64,
+    ir_instr_count: i64,
+    has_runtime_context: bool,
+    supports_stack_maps: bool,
+    supports_safepoints: bool,
+    supports_deopt: bool,
+    supports_osr: bool,
+    unified_jit_aot: bool,
+    heterogeneous_shared: bool,
+    optimized_tier_count: i64,
+}
+
+struct NativeV2TargetPolicySummary {
+    reserved_count: i64,
+    allocatable_count: i64,
+    scratch_count: i64,
+    arg_count: i64,
+    ret_count: i64,
+    frame_has_gc_area: bool,
+    frame_has_deopt_area: bool,
+    frame_has_unwind: bool,
+    frame_has_vector_align: bool,
+    emitter_ready: bool,
+}
+
+fn native_v2_backend_name() -> string {
+    "native-v2"
+}
+
+fn native_v2_shadow_alias_name() -> string {
+    "native-v2-shadow"
+}
+
+fn native_v2_backend_stage() -> string {
+    "preview-v2"
+}
+
+fn NATIVE_V2_POLICY_GROUP_RESERVED() -> i64 { 0 }
+fn NATIVE_V2_POLICY_GROUP_ALLOCATABLE() -> i64 { 1 }
+fn NATIVE_V2_POLICY_GROUP_SCRATCH() -> i64 { 2 }
+fn NATIVE_V2_POLICY_GROUP_ARGS() -> i64 { 3 }
+fn NATIVE_V2_POLICY_GROUP_RETURNS() -> i64 { 4 }
+
+fn native_v2_runtime_context_layout() -> NativeV2RuntimeContextLayout {
+    NativeV2RuntimeContextLayout {
+        language_visible: true,
+        tracing_gc: true,
+        precise_stack_maps: true,
+        safepoints: true,
+        deopt_enabled: true,
+        osr_enabled: true,
+        unified_jit_aot: true,
+        heterogeneous_shared: true,
+        gc_field_count: 4,
+        io_field_count: 4,
+        instrumentation_field_count: 2,
+        deopt_field_count: 3,
+        capability_field_count: 2,
+        heterogeneous_field_count: 3,
+        provenance_field_count: 3,
+    }
+}
+
+fn native_v2_runtime_context_total_fields(layout: NativeV2RuntimeContextLayout) -> i64 {
+    layout.gc_field_count +
+    layout.io_field_count +
+    layout.instrumentation_field_count +
+    layout.deopt_field_count +
+    layout.capability_field_count +
+    layout.heterogeneous_field_count +
+    layout.provenance_field_count
+}
+
+fn native_v2_runtime_context_group_count() -> i64 {
+    7
+}
+
+fn native_v2_runtime_context_group_name(idx: i64) -> string {
+    if idx == 0 { return "gc_heap" }
+    if idx == 1 { return "process_io" }
+    if idx == 2 { return "instrumentation" }
+    if idx == 3 { return "deopt_osr" }
+    if idx == 4 { return "capabilities" }
+    if idx == 5 { return "gpu_render" }
+    if idx == 6 { return "provenance" }
+    "unknown"
+}
+
+fn native_v2_target_contract_supported(spec: NativeTargetSpec) -> bool {
+    if spec.arch_id == ARCH_X86_64() && spec.os_id == OS_LINUX() { return true }
+    if spec.arch_id == ARCH_AARCH64() && spec.os_id == OS_MACOS() { return true }
+    false
+}
+
+fn native_v2_target_policy_summary(spec: NativeTargetSpec) -> NativeV2TargetPolicySummary {
+    if spec.arch_id == ARCH_X86_64() && spec.os_id == OS_LINUX() {
+        return NativeV2TargetPolicySummary {
+            reserved_count: 3,
+            allocatable_count: 4,
+            scratch_count: 5,
+            arg_count: 6,
+            ret_count: 1,
+            frame_has_gc_area: true,
+            frame_has_deopt_area: true,
+            frame_has_unwind: true,
+            frame_has_vector_align: true,
+            emitter_ready: true,
+        }
+    }
+    if spec.arch_id == ARCH_AARCH64() && spec.os_id == OS_MACOS() {
+        return NativeV2TargetPolicySummary {
+            reserved_count: 4,
+            allocatable_count: 10,
+            scratch_count: 7,
+            arg_count: 8,
+            ret_count: 1,
+            frame_has_gc_area: true,
+            frame_has_deopt_area: true,
+            frame_has_unwind: true,
+            frame_has_vector_align: true,
+            emitter_ready: false,
+        }
+    }
+    NativeV2TargetPolicySummary {
+        reserved_count: 0,
+        allocatable_count: 0,
+        scratch_count: 0,
+        arg_count: 0,
+        ret_count: 0,
+        frame_has_gc_area: true,
+        frame_has_deopt_area: true,
+        frame_has_unwind: true,
+        frame_has_vector_align: true,
+        emitter_ready: false,
+    }
+}
+
+fn native_v2_target_policy_group_count(spec: NativeTargetSpec, group: i64) -> i64 {
+    let summary = native_v2_target_policy_summary(spec)
+    if group == NATIVE_V2_POLICY_GROUP_RESERVED() { return summary.reserved_count }
+    if group == NATIVE_V2_POLICY_GROUP_ALLOCATABLE() { return summary.allocatable_count }
+    if group == NATIVE_V2_POLICY_GROUP_SCRATCH() { return summary.scratch_count }
+    if group == NATIVE_V2_POLICY_GROUP_ARGS() { return summary.arg_count }
+    if group == NATIVE_V2_POLICY_GROUP_RETURNS() { return summary.ret_count }
+    0
+}
+
+fn native_v2_target_policy_group_name(spec: NativeTargetSpec, group: i64, idx: i64) -> string {
+    if spec.arch_id == ARCH_X86_64() && spec.os_id == OS_LINUX() {
+        if group == NATIVE_V2_POLICY_GROUP_RESERVED() {
+            if idx == 0 { return "rsp" }
+            if idx == 1 { return "rbp" }
+            if idx == 2 { return "rbx" }
+        }
+        if group == NATIVE_V2_POLICY_GROUP_ALLOCATABLE() {
+            if idx == 0 { return "r12" }
+            if idx == 1 { return "r13" }
+            if idx == 2 { return "r14" }
+            if idx == 3 { return "r15" }
+        }
+        if group == NATIVE_V2_POLICY_GROUP_SCRATCH() {
+            if idx == 0 { return "rax" }
+            if idx == 1 { return "rcx" }
+            if idx == 2 { return "rdx" }
+            if idx == 3 { return "r10" }
+            if idx == 4 { return "r11" }
+        }
+        if group == NATIVE_V2_POLICY_GROUP_ARGS() {
+            if idx == 0 { return "rdi" }
+            if idx == 1 { return "rsi" }
+            if idx == 2 { return "rdx" }
+            if idx == 3 { return "rcx" }
+            if idx == 4 { return "r8" }
+            if idx == 5 { return "r9" }
+        }
+        if group == NATIVE_V2_POLICY_GROUP_RETURNS() {
+            if idx == 0 { return "rax" }
+        }
+    }
+    if spec.arch_id == ARCH_AARCH64() && spec.os_id == OS_MACOS() {
+        if group == NATIVE_V2_POLICY_GROUP_RESERVED() {
+            if idx == 0 { return "sp" }
+            if idx == 1 { return "fp" }
+            if idx == 2 { return "lr" }
+            if idx == 3 { return "x18" }
+        }
+        if group == NATIVE_V2_POLICY_GROUP_ALLOCATABLE() {
+            if idx == 0 { return "x19" }
+            if idx == 1 { return "x20" }
+            if idx == 2 { return "x21" }
+            if idx == 3 { return "x22" }
+            if idx == 4 { return "x23" }
+            if idx == 5 { return "x24" }
+            if idx == 6 { return "x25" }
+            if idx == 7 { return "x26" }
+            if idx == 8 { return "x27" }
+            if idx == 9 { return "x28" }
+        }
+        if group == NATIVE_V2_POLICY_GROUP_SCRATCH() {
+            if idx == 0 { return "x9" }
+            if idx == 1 { return "x10" }
+            if idx == 2 { return "x11" }
+            if idx == 3 { return "x12" }
+            if idx == 4 { return "x13" }
+            if idx == 5 { return "x14" }
+            if idx == 6 { return "x15" }
+        }
+        if group == NATIVE_V2_POLICY_GROUP_ARGS() {
+            if idx == 0 { return "x0" }
+            if idx == 1 { return "x1" }
+            if idx == 2 { return "x2" }
+            if idx == 3 { return "x3" }
+            if idx == 4 { return "x4" }
+            if idx == 5 { return "x5" }
+            if idx == 6 { return "x6" }
+            if idx == 7 { return "x7" }
+        }
+        if group == NATIVE_V2_POLICY_GROUP_RETURNS() {
+            if idx == 0 { return "x0" }
+        }
+    }
+    "unknown"
+}
+
+fn native_v2_target_emitter_mode(spec: NativeTargetSpec) -> string {
+    if spec.arch_id == ARCH_X86_64() && spec.os_id == OS_LINUX() {
+        return "delegated-stable-native"
+    }
+    if spec.arch_id == ARCH_AARCH64() && spec.os_id == OS_MACOS() {
+        return "preview-contract-only"
+    }
+    "unsupported"
+}
+
+fn native_v2_count_ir_instrs(module: &IrModule) -> i64 with Mut, Panic, Div {
+    var total: i64 = 0
+    var i: i64 = 0
+    while i < module.fn_count {
+        total = total + module.functions[i as usize].instr_count
+        i = i + 1
+    }
+    total
+}
+
+fn native_v2_shadow_machine_module(module: &IrModule, spec: NativeTargetSpec) -> NativeV2MachineModule with Mut, Panic, Div {
+    NativeV2MachineModule {
+        target_arch_id: spec.arch_id,
+        fn_count: module.fn_count,
+        ir_instr_count: native_v2_count_ir_instrs(module),
+        has_runtime_context: true,
+        supports_stack_maps: true,
+        supports_safepoints: true,
+        supports_deopt: true,
+        supports_osr: true,
+        unified_jit_aot: true,
+        heterogeneous_shared: true,
+        optimized_tier_count: 2,
+    }
+}
+
+fn native_v2_append_named_json_string(buf: [i8; 65536], pos: i64, key: string, value: string, comma: bool) -> ([i8; 65536], i64) with Mut, Panic, Div {
+    var out = buf
+    var p = pos
+    let p0 = io_trace_append_byte(out, p, 34)
+    out = p0.0; p = p0.1
+    let p1 = io_trace_append_string(out, p, key)
+    out = p1.0; p = p1.1
+    let p2 = io_trace_append_string(out, p, "\":\"")
+    out = p2.0; p = p2.1
+    let p3 = io_trace_append_json_string(out, p, value)
+    out = p3.0; p = p3.1
+    let p4 = io_trace_append_byte(out, p, 34)
+    out = p4.0; p = p4.1
+    if comma {
+        let p5 = io_trace_append_byte(out, p, 44)
+        out = p5.0; p = p5.1
+    }
+    (out, p)
+}
+
+fn native_v2_append_named_json_bool(buf: [i8; 65536], pos: i64, key: string, value: bool, comma: bool) -> ([i8; 65536], i64) with Mut, Panic, Div {
+    var out = buf
+    var p = pos
+    let p0 = io_trace_append_byte(out, p, 34)
+    out = p0.0; p = p0.1
+    let p1 = io_trace_append_string(out, p, key)
+    out = p1.0; p = p1.1
+    let p2 = io_trace_append_string(out, p, "\":")
+    out = p2.0; p = p2.1
+    let p3 = io_trace_append_string(out, p, io_trace_bool_string(value))
+    out = p3.0; p = p3.1
+    if comma {
+        let p4 = io_trace_append_byte(out, p, 44)
+        out = p4.0; p = p4.1
+    }
+    (out, p)
+}
+
+fn native_v2_append_named_json_i64(buf: [i8; 65536], pos: i64, key: string, value: i64, comma: bool) -> ([i8; 65536], i64) with Mut, Panic, Div {
+    var out = buf
+    var p = pos
+    let p0 = io_trace_append_byte(out, p, 34)
+    out = p0.0; p = p0.1
+    let p1 = io_trace_append_string(out, p, key)
+    out = p1.0; p = p1.1
+    let p2 = io_trace_append_string(out, p, "\":")
+    out = p2.0; p = p2.1
+    let p3 = io_trace_append_string(out, p, io_trace_i64_string(value))
+    out = p3.0; p = p3.1
+    if comma {
+        let p4 = io_trace_append_byte(out, p, 44)
+        out = p4.0; p = p4.1
+    }
+    (out, p)
+}
+
+fn native_v2_append_runtime_group_array(buf: [i8; 65536], pos: i64) -> ([i8; 65536], i64) with Mut, Panic, Div {
+    var out = buf
+    var p = pos
+    let p0 = io_trace_append_string(out, p, "\"field_groups\":[")
+    out = p0.0; p = p0.1
+    var i: i64 = 0
+    while i < native_v2_runtime_context_group_count() {
+        let p1 = io_trace_append_byte(out, p, 34)
+        out = p1.0; p = p1.1
+        let p2 = io_trace_append_json_string(out, p, native_v2_runtime_context_group_name(i))
+        out = p2.0; p = p2.1
+        let p3 = io_trace_append_byte(out, p, 34)
+        out = p3.0; p = p3.1
+        if i + 1 < native_v2_runtime_context_group_count() {
+            let p4 = io_trace_append_byte(out, p, 44)
+            out = p4.0; p = p4.1
+        }
+        i = i + 1
+    }
+    let p5 = io_trace_append_byte(out, p, 93)
+    out = p5.0; p = p5.1
+    (out, p)
+}
+
+fn native_v2_append_policy_group_array(buf: [i8; 65536], pos: i64, key: string, spec: NativeTargetSpec, group: i64) -> ([i8; 65536], i64) with Mut, Panic, Div {
+    var out = buf
+    var p = pos
+    let p0 = io_trace_append_byte(out, p, 34)
+    out = p0.0; p = p0.1
+    let p1 = io_trace_append_string(out, p, key)
+    out = p1.0; p = p1.1
+    let p2 = io_trace_append_string(out, p, "\":[")
+    out = p2.0; p = p2.1
+    let count = native_v2_target_policy_group_count(spec, group)
+    var i: i64 = 0
+    while i < count {
+        let p3 = io_trace_append_byte(out, p, 34)
+        out = p3.0; p = p3.1
+        let p4 = io_trace_append_json_string(out, p, native_v2_target_policy_group_name(spec, group, i))
+        out = p4.0; p = p4.1
+        let p5 = io_trace_append_byte(out, p, 34)
+        out = p5.0; p = p5.1
+        if i + 1 < count {
+            let p6 = io_trace_append_byte(out, p, 44)
+            out = p6.0; p = p6.1
+        }
+        i = i + 1
+    }
+    let p7 = io_trace_append_byte(out, p, 93)
+    out = p7.0; p = p7.1
+    (out, p)
+}
+
+fn native_v2_write_contract(path: string, module: &IrModule, target_spec: NativeTargetSpec, compile_ok: bool, error_code: i64, output_path: string) -> bool with IO, Mut, Panic, Div {
+    var buf: [i8; 65536] = [0; 65536]
+    var p: i64 = 0
+    let runtime = native_v2_runtime_context_layout()
+    let machine = native_v2_shadow_machine_module(module, target_spec)
+    let policy = native_v2_target_policy_summary(target_spec)
+
+    let p0 = io_trace_append_byte(buf, p, 123)
+    buf = p0.0; p = p0.1
+
+    let p1 = native_v2_append_named_json_string(buf, p, "schema", "sounio.native_backend_v2_contract.v1", true)
+    buf = p1.0; p = p1.1
+    let p2 = native_v2_append_named_json_string(buf, p, "backend", native_v2_backend_name(), true)
+    buf = p2.0; p = p2.1
+    let p3 = native_v2_append_named_json_string(buf, p, "stage", native_v2_backend_stage(), true)
+    buf = p3.0; p = p3.1
+    let p4 = native_v2_append_named_json_string(buf, p, "requested_target", target_spec.requested_target, true)
+    buf = p4.0; p = p4.1
+    let p5 = native_v2_append_named_json_string(buf, p, "resolved_target", target_spec.resolved_target, true)
+    buf = p5.0; p = p5.1
+    let p6 = native_v2_append_named_json_string(buf, p, "matrix_mode", native_matrix_mode_string(target_spec.matrix_mode), true)
+    buf = p6.0; p = p6.1
+    let p7 = native_v2_append_named_json_bool(buf, p, "public_shell_preserved", true, true)
+    buf = p7.0; p = p7.1
+    let p8 = native_v2_append_named_json_bool(buf, p, "compile_ok", compile_ok, true)
+    buf = p8.0; p = p8.1
+    let p9 = native_v2_append_named_json_i64(buf, p, "error_code", error_code, true)
+    buf = p9.0; p = p9.1
+    let p10 = native_v2_append_named_json_string(buf, p, "output_path", output_path, true)
+    buf = p10.0; p = p10.1
+
+    let p11 = io_trace_append_string(buf, p, "\"runtime_context\":{")
+    buf = p11.0; p = p11.1
+    let p12 = native_v2_append_named_json_bool(buf, p, "language_visible", runtime.language_visible, true)
+    buf = p12.0; p = p12.1
+    let p13 = native_v2_append_named_json_bool(buf, p, "tracing_gc", runtime.tracing_gc, true)
+    buf = p13.0; p = p13.1
+    let p14 = native_v2_append_named_json_bool(buf, p, "precise_stack_maps", runtime.precise_stack_maps, true)
+    buf = p14.0; p = p14.1
+    let p15 = native_v2_append_named_json_bool(buf, p, "safepoints", runtime.safepoints, true)
+    buf = p15.0; p = p15.1
+    let p16 = native_v2_append_named_json_bool(buf, p, "deopt_enabled", runtime.deopt_enabled, true)
+    buf = p16.0; p = p16.1
+    let p17 = native_v2_append_named_json_bool(buf, p, "osr_enabled", runtime.osr_enabled, true)
+    buf = p17.0; p = p17.1
+    let p18 = native_v2_append_named_json_i64(buf, p, "total_fields", native_v2_runtime_context_total_fields(runtime), true)
+    buf = p18.0; p = p18.1
+    let p19 = native_v2_append_runtime_group_array(buf, p)
+    buf = p19.0; p = p19.1
+    let p20 = io_trace_append_byte(buf, p, 125)
+    buf = p20.0; p = p20.1
+    let p21 = io_trace_append_byte(buf, p, 44)
+    buf = p21.0; p = p21.1
+
+    let p22 = io_trace_append_string(buf, p, "\"machine_ir\":{")
+    buf = p22.0; p = p22.1
+    let p23 = native_v2_append_named_json_i64(buf, p, "functions", machine.fn_count, true)
+    buf = p23.0; p = p23.1
+    let p24 = native_v2_append_named_json_i64(buf, p, "ir_instructions", machine.ir_instr_count, true)
+    buf = p24.0; p = p24.1
+    let p25 = native_v2_append_named_json_i64(buf, p, "optimized_tiers", machine.optimized_tier_count, true)
+    buf = p25.0; p = p25.1
+    let p26 = native_v2_append_named_json_bool(buf, p, "supports_stack_maps", machine.supports_stack_maps, true)
+    buf = p26.0; p = p26.1
+    let p27 = native_v2_append_named_json_bool(buf, p, "supports_safepoints", machine.supports_safepoints, true)
+    buf = p27.0; p = p27.1
+    let p28 = native_v2_append_named_json_bool(buf, p, "supports_deopt", machine.supports_deopt, true)
+    buf = p28.0; p = p28.1
+    let p29 = native_v2_append_named_json_bool(buf, p, "supports_osr", machine.supports_osr, true)
+    buf = p29.0; p = p29.1
+    let p30 = native_v2_append_named_json_bool(buf, p, "heterogeneous_shared", machine.heterogeneous_shared, false)
+    buf = p30.0; p = p30.1
+    let p31 = io_trace_append_byte(buf, p, 125)
+    buf = p31.0; p = p31.1
+    let p32 = io_trace_append_byte(buf, p, 44)
+    buf = p32.0; p = p32.1
+
+    let p33 = io_trace_append_string(buf, p, "\"target_policy\":{")
+    buf = p33.0; p = p33.1
+    let p34 = native_v2_append_named_json_bool(buf, p, "contract_supported", native_v2_target_contract_supported(target_spec), true)
+    buf = p34.0; p = p34.1
+    let p35 = native_v2_append_named_json_string(buf, p, "emitter_mode", native_v2_target_emitter_mode(target_spec), true)
+    buf = p35.0; p = p35.1
+    let p36 = native_v2_append_policy_group_array(buf, p, "reserved_regs", target_spec, NATIVE_V2_POLICY_GROUP_RESERVED())
+    buf = p36.0; p = p36.1
+    let p37 = io_trace_append_byte(buf, p, 44)
+    buf = p37.0; p = p37.1
+    let p38 = native_v2_append_policy_group_array(buf, p, "allocatable_regs", target_spec, NATIVE_V2_POLICY_GROUP_ALLOCATABLE())
+    buf = p38.0; p = p38.1
+    let p39 = io_trace_append_byte(buf, p, 44)
+    buf = p39.0; p = p39.1
+    let p40 = native_v2_append_policy_group_array(buf, p, "scratch_regs", target_spec, NATIVE_V2_POLICY_GROUP_SCRATCH())
+    buf = p40.0; p = p40.1
+    let p41 = io_trace_append_byte(buf, p, 44)
+    buf = p41.0; p = p41.1
+    let p42 = native_v2_append_policy_group_array(buf, p, "arg_regs", target_spec, NATIVE_V2_POLICY_GROUP_ARGS())
+    buf = p42.0; p = p42.1
+    let p43 = io_trace_append_byte(buf, p, 44)
+    buf = p43.0; p = p43.1
+    let p44 = native_v2_append_policy_group_array(buf, p, "return_regs", target_spec, NATIVE_V2_POLICY_GROUP_RETURNS())
+    buf = p44.0; p = p44.1
+    let p45 = io_trace_append_byte(buf, p, 44)
+    buf = p45.0; p = p45.1
+    let p46 = native_v2_append_named_json_bool(buf, p, "frame_has_gc_area", policy.frame_has_gc_area, true)
+    buf = p46.0; p = p46.1
+    let p47 = native_v2_append_named_json_bool(buf, p, "frame_has_deopt_area", policy.frame_has_deopt_area, true)
+    buf = p47.0; p = p47.1
+    let p48 = native_v2_append_named_json_bool(buf, p, "frame_has_unwind", policy.frame_has_unwind, true)
+    buf = p48.0; p = p48.1
+    let p49 = native_v2_append_named_json_bool(buf, p, "frame_has_vector_align", policy.frame_has_vector_align, true)
+    buf = p49.0; p = p49.1
+    let p50 = native_v2_append_named_json_bool(buf, p, "emitter_ready", policy.emitter_ready, false)
+    buf = p50.0; p = p50.1
+    let p51 = io_trace_append_byte(buf, p, 125)
+    buf = p51.0; p = p51.1
+    let p52 = io_trace_append_byte(buf, p, 44)
+    buf = p52.0; p = p52.1
+
+    let p53 = io_trace_append_string(buf, p, "\"promotion_tiers\":{")
+    buf = p53.0; p = p53.1
+    let p54 = native_v2_append_named_json_string(buf, p, "cpu", "stable-first", true)
+    buf = p54.0; p = p54.1
+    let p55 = native_v2_append_named_json_string(buf, p, "gpu", "preview", true)
+    buf = p55.0; p = p55.1
+    let p56 = native_v2_append_named_json_string(buf, p, "render", "preview", false)
+    buf = p56.0; p = p56.1
+    let p57 = io_trace_append_byte(buf, p, 125)
+    buf = p57.0; p = p57.1
+
+    let p58 = io_trace_append_byte(buf, p, 125)
+    buf = p58.0; p = p58.1
+    let p59 = io_trace_append_byte(buf, p, 10)
+    buf = p59.0; p = p59.1
+
+    io_write_bytes_to_file(path, buf, p)
+}
+
+fn native_v2_write_shadow_contract(path: string, module: &IrModule, target_spec: NativeTargetSpec, compile_ok: bool, error_code: i64, output_path: string) -> bool with IO, Mut, Panic, Div {
+    native_v2_write_contract(path, module, target_spec, compile_ok, error_code, output_path)
 }
 
 struct NativeTargetParse {
@@ -536,6 +1068,25 @@ fn name_is_file_size(n: Name) -> bool with Mut, Panic, Div {
 // Builtin runtime function emitters (hand-coded x86-64)
 // ============================================================================
 
+fn emit_load_runtime_context_field_rdi(nc: NativeCompiler, field_offset: i64) -> NativeCompiler with Mut, Panic, Div {
+    var c = emit_load_runtime_context_field_rax(nc, field_offset)
+    c.code = emit_mov_rdi_rax(c.code)
+    c
+}
+
+fn emit_load_runtime_context_field_r12(nc: NativeCompiler, field_offset: i64) -> NativeCompiler with Mut, Panic, Div {
+    var c = emit_load_runtime_context_field_rax(nc, field_offset)
+    c.code = emit_mov_r12_rax(c.code)
+    c
+}
+
+fn emit_store_runtime_context_imm(nc: NativeCompiler, field_offset: i64, value: i64) -> NativeCompiler with Mut, Panic, Div {
+    var c = emit_load_runtime_context_ptr_rbx(nc)
+    c.code = emit_mov_rax_imm(c.code, value)
+    c.code = emit_store_rax_mem_rbx_disp32(c.code, field_offset)
+    c
+}
+
 fn emit_builtin_print_int(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
     var c = nc
     c.code = emit_push_rbp(c.code)
@@ -577,7 +1128,7 @@ fn emit_builtin_print_int(nc: NativeCompiler) -> NativeCompiler with Mut, Panic,
     c.code = emit_jnz_rel8(c.code, -30)               // 75 e2
     c.code = emit_inc_rsi(c.code)
     c.code = emit_mov_reg_reg(c.code, 2, 1)           // mov rdx, rcx
-    c.code = emit_mov_rdi_imm(c.code, 1)
+    c = emit_load_runtime_context_field_rdi(c, runtime_context_field_stdout_fd())
     c.code = emit_mov_rax_imm(c.code, 1)
     c.code = emit_syscall(c.code)
     c.code = emit_mov_rsp_rbp(c.code)
@@ -591,7 +1142,7 @@ fn emit_builtin_print_char(nc: NativeCompiler) -> NativeCompiler with Mut, Panic
     c.code = emit_push_rdi(c.code)
     c.code = emit_mov_rsi_rsp(c.code)
     c.code = emit_mov_reg_imm(c.code, 2, 1)           // mov rdx, 1
-    c.code = emit_mov_rdi_imm(c.code, 1)              // mov rdi, 1
+    c = emit_load_runtime_context_field_rdi(c, runtime_context_field_stdout_fd())
     c.code = emit_mov_rax_imm(c.code, 1)              // mov rax, 1
     c.code = emit_syscall(c.code)
     c.code = emit_add_rsp_8(c.code)
@@ -614,7 +1165,7 @@ fn emit_builtin_print_str(nc: NativeCompiler) -> NativeCompiler with Mut, Panic,
     c.code = emit_jmp_rel8(c.code, -16)                // 2
     // done_scan:
     c.code = emit_mov_reg_reg(c.code, 2, 1)           // mov rdx, rcx
-    c.code = emit_mov_rdi_imm(c.code, 1)
+    c = emit_load_runtime_context_field_rdi(c, runtime_context_field_stdout_fd())
     c.code = emit_mov_rax_imm(c.code, 1)
     c.code = emit_syscall(c.code)
     c.code = emit_pop_rbp(c.code)
@@ -627,22 +1178,20 @@ fn emit_builtin_print_str(nc: NativeCompiler) -> NativeCompiler with Mut, Panic,
 // ============================================================================
 
 // get_arg_count() -> i64
-// Returns argc stored at [r12] (saved by entry trampoline)
+// Returns argc stored in RuntimeContext memory.
 fn emit_builtin_get_arg_count(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
     var c = nc
-    // mov rax, [r12]  — argc was stored at heap base
-    c.code = emit_mov_rax_mem_r12(c.code)
+    c = emit_load_runtime_context_field_rax(c, runtime_context_field_argc())
     c.code = emit_ret(c.code)
     c
 }
 
 // get_arg(n: i64) -> *u8
-// Returns argv[n], where argv base pointer is stored at [r12 + 8]
+// Returns argv[n], where argv base pointer is stored in RuntimeContext.
 fn emit_builtin_get_arg(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
     var c = nc
     // rdi = n (index into argv)
-    // Load argv base from [r12 + 8]
-    c.code = emit_mov_rax_mem_r12_disp8(c.code, 8)
+    c = emit_load_runtime_context_field_rax(c, runtime_context_field_argv_ptr())
     // Now rax = argv pointer, rdi = n
     // We need rax = [rax + rdi*8]
     c.code = emit_mov_reg_reg(c.code, 3, 7)       // mov rbx, rdi (index n)
@@ -777,7 +1326,7 @@ fn emit_builtin_starts_with(nc: NativeCompiler) -> NativeCompiler with Mut, Pani
 }
 
 // str_concat(a: *u8, b: *u8) -> *u8
-// Allocates len_a + len_b + 1 bytes from heap bump pointer (r13),
+// Allocates len_a + len_b + 1 bytes from RuntimeContext.heap_cursor,
 // copies a then b, null-terminates, returns pointer to new string.
 fn emit_builtin_str_concat(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
     var c = nc
@@ -816,8 +1365,8 @@ fn emit_builtin_str_concat(nc: NativeCompiler) -> NativeCompiler with Mut, Panic
     c.code = emit_jmp_rel8(c.code, -13)                  // 2: jmp loop_b
     // done_b: rcx = len_b
 
-    // Phase 3: Allocate from heap (r13 = bump pointer)
-    c.code = emit_mov_rax_r13(c.code)                    // 3: rax = current heap ptr (= result)
+    // Phase 3: Allocate from RuntimeContext.heap_cursor
+    c = emit_load_runtime_context_field_rax(c, runtime_context_field_heap_cursor())
     c.code = emit_store_rax_rbp_disp32(c.code, -40)      // 7: save result at [rbp-40]
     c.code = emit_load_rbp_disp32_rax(c.code, -24)       // 7: rax = len_a
     c.code = emit_add_reg_reg(c.code, 0, 1)              // 3: rax += rcx (len_b)
@@ -829,9 +1378,9 @@ fn emit_builtin_str_concat(nc: NativeCompiler) -> NativeCompiler with Mut, Panic
     ab = emit_byte(ab, 0x01)
     c.code = ab                                           // 4: rax = total
     c.code = emit_mov_rcx_rax(c.code)                    // 3: rcx = total
-    c.code = emit_mov_rax_r13(c.code)                    // 3: rax = old r13
+    c = emit_load_runtime_context_field_rax(c, runtime_context_field_heap_cursor())
     c.code = emit_add_reg_reg(c.code, 0, 1)              // 3: rax = new r13
-    c.code = emit_mov_r13_rax(c.code)                    // 3: r13 = new r13
+    c = emit_store_rax_runtime_context_field(c, runtime_context_field_heap_cursor())
 
     // Phase 4: Copy a → result
     c.code = emit_load_rbp_disp32_rax(c.code, -8)        // 7: rax = a
@@ -1013,18 +1562,15 @@ fn emit_builtin_file_size(nc: NativeCompiler) -> NativeCompiler with Mut, Panic,
 fn compile_module(nc: NativeCompiler, module: &IrModule) -> NativeCompiler with Mut, Panic, Div, Alloc {
     var c = nc
     c.fn_count = module.fn_count
+    c.runtime_context_slot_offset = 0
+    c.prof_counter_data_base = runtime_context_global_slot_size()
+    c.data.len = c.prof_counter_data_base + (module.prof_counter_count * 8)
 
     // Pass 1: Compile all functions
     var fi = 0
     while fi < module.fn_count {
         c = compile_ir_function(c, module.functions[fi as usize], fi)
         fi = fi + 1
-    }
-
-    // Sprint 45: pre-allocate counter storage in .data (8 bytes per counter)
-    // StringTable.bytes is zero-initialized, so counters start at 0
-    if module.prof_counter_count > 0 {
-        c.data.len = module.prof_counter_count * 8
     }
 
     // Sprint 46: store profiling counter function names in .rodata
@@ -1121,15 +1667,16 @@ fn compile_ir_function(nc: NativeCompiler, func: IrFunction, fn_index: i64) -> N
         effective_func = ir_opt_apply_strategy(func)
     }
 
-    // Compute frame size from virtual register count (expanded by dual-path if applied)
-    let frame_size = align16(effective_func.reg_count * 8)
-    c.current_frame_size = frame_size
-
     // Sprint 52: Run register allocation before instruction lowering
     c = nc_run_regalloc(c, effective_func)
 
+    // Frame size now combines actual spill pressure with the allocatable preg save set.
+    let preg_mask = nc_used_allocatable_preg_mask(c, effective_func.reg_count)
+    let frame_size = x86_align_frame_size_for_calls(nc_min_frame_size(c, effective_func), preg_mask)
+    c.current_frame_size = frame_size
+
     // Emit prologue
-    c.code = emit_prologue(c.code, frame_size)
+    c.code = emit_prologue_with_preg_mask(c.code, frame_size, preg_mask)
 
     // Spill parameters from ABI registers to their stack slots
     c = spill_ir_params(c, effective_func)
@@ -1143,7 +1690,7 @@ fn compile_ir_function(nc: NativeCompiler, func: IrFunction, fn_index: i64) -> N
 
     // Record epilogue offset, emit epilogue
     let epilogue_offset = c.code.len
-    c.code = emit_epilogue(c.code)
+    c.code = emit_epilogue_with_preg_mask(c.code, preg_mask)
 
     // Patch all return jumps to point to the epilogue
     c = patch_return_jumps(c, epilogue_offset)
@@ -1203,10 +1750,10 @@ fn emit_prof_write_prefix(nc: NativeCompiler) -> NativeCompiler with Mut, Panic,
     c.code = emit_byte(c.code, 0x24)
     c.code = emit_byte(c.code, 0x06)
     c.code = emit_byte(c.code, 0x20)   // ' '
-    // sys_write(2, rsp, 7)
+    // sys_write(stderr_fd, rsp, 7)
     c.code = emit_mov_rsi_rsp(c.code)        // rsi = rsp (buffer)
     c.code = emit_mov_reg_imm(c.code, 2, 7)  // rdx = 7
-    c.code = emit_mov_rdi_imm(c.code, 2)     // rdi = 2 (stderr)
+    c = emit_load_runtime_context_field_rdi(c, runtime_context_field_stderr_fd())
     c.code = emit_mov_rax_imm(c.code, 1)     // rax = 1 (sys_write)
     c.code = emit_syscall(c.code)
     c
@@ -1224,10 +1771,10 @@ fn emit_prof_write_colon_sep(nc: NativeCompiler) -> NativeCompiler with Mut, Pan
     c.code = emit_byte(c.code, 0x00)
     c.code = emit_byte(c.code, 0x3A)   // ':'
     c.code = emit_byte(c.code, 0x20)   // ' '
-    // sys_write(2, rsp, 2)
+    // sys_write(stderr_fd, rsp, 2)
     c.code = emit_mov_rsi_rsp(c.code)
     c.code = emit_mov_reg_imm(c.code, 2, 2)  // rdx = 2
-    c.code = emit_mov_rdi_imm(c.code, 2)     // rdi = stderr
+    c = emit_load_runtime_context_field_rdi(c, runtime_context_field_stderr_fd())
     c.code = emit_mov_rax_imm(c.code, 1)     // sys_write
     c.code = emit_syscall(c.code)
     c
@@ -1243,10 +1790,10 @@ fn emit_prof_write_newline(nc: NativeCompiler) -> NativeCompiler with Mut, Panic
     c.code = emit_byte(c.code, 0x24)
     c.code = emit_byte(c.code, 0x00)
     c.code = emit_byte(c.code, 0x0A)   // '\n'
-    // sys_write(2, rsp, 1)
+    // sys_write(stderr_fd, rsp, 1)
     c.code = emit_mov_rsi_rsp(c.code)
     c.code = emit_mov_reg_imm(c.code, 2, 1)  // rdx = 1
-    c.code = emit_mov_rdi_imm(c.code, 2)     // rdi = stderr
+    c = emit_load_runtime_context_field_rdi(c, runtime_context_field_stderr_fd())
     c.code = emit_mov_rax_imm(c.code, 1)     // sys_write
     c.code = emit_syscall(c.code)
     c
@@ -1269,7 +1816,7 @@ fn emit_inline_strlen(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div
 
 // Inline itoa + sys_write to stderr: rdi = value (non-negative i64)
 // Uses rbp-relative stack buffer (sub rsp, 48 assumed by caller)
-// Same div-by-10 algorithm as emit_builtin_print_int but fd=2 and no negative handling
+// Same div-by-10 algorithm as emit_builtin_print_int but writes to RuntimeContext.stderr_fd.
 fn emit_inline_itoa_stderr(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
     var c = nc
     // rdi = value to print
@@ -1305,9 +1852,9 @@ fn emit_inline_itoa_stderr(nc: NativeCompiler) -> NativeCompiler with Mut, Panic
     // After loop: rsi points one before first digit
     c.code = emit_inc_rsi(c.code)                     // 3: inc rsi (point to first digit)
 
-    // sys_write(2, rsi, rcx)
+    // sys_write(stderr_fd, rsi, rcx)
     c.code = emit_mov_reg_reg(c.code, 2, 1)      // mov rdx, rcx (length)
-    c.code = emit_mov_rdi_imm(c.code, 2)          // rdi = 2 (stderr)
+    c = emit_load_runtime_context_field_rdi(c, runtime_context_field_stderr_fd())
     c.code = emit_mov_rax_imm(c.code, 1)          // rax = 1 (sys_write)
     c.code = emit_syscall(c.code)
     c
@@ -1471,9 +2018,9 @@ fn emit_prof_dump_function(nc: NativeCompiler, module: &IrModule) -> NativeCompi
         // rax = pointer to name string in .rodata
         c.code = emit_mov_reg_reg(c.code, 6, 0)      // mov rsi, rax
         c = emit_inline_strlen(c)                      // rcx = length, rsi preserved
-        // sys_write(2, rsi, rcx)
+        // sys_write(stderr_fd, rsi, rcx)
         c.code = emit_mov_reg_reg(c.code, 2, 1)      // mov rdx, rcx
-        c.code = emit_mov_rdi_imm(c.code, 2)          // fd = stderr
+        c = emit_load_runtime_context_field_rdi(c, runtime_context_field_stderr_fd())
         c.code = emit_mov_rax_imm(c.code, 1)          // sys_write
         c.code = emit_syscall(c.code)
 
@@ -1484,7 +2031,7 @@ fn emit_prof_dump_function(nc: NativeCompiler, module: &IrModule) -> NativeCompi
         let counter_id = module.prof_counters[ci as usize].counter_id
         let load_disp_pos = c.code.len + 3  // disp32 at byte 3 of MOV [rip+disp32]
         c.code = emit_mov_rax_rip_disp32(c.code, 0)   // placeholder disp32
-        c.relocs = add_data_section_reloc(c.relocs, load_disp_pos, counter_id * 8)
+        c.relocs = add_data_section_reloc(c.relocs, load_disp_pos, c.prof_counter_data_base + (counter_id * 8))
         // rax = counter value
         c.code = emit_mov_rdi_rax(c.code)              // rdi = counter value
         c = emit_inline_itoa_stderr(c)                  // itoa + sys_write(2, ...)
@@ -1496,7 +2043,7 @@ fn emit_prof_dump_function(nc: NativeCompiler, module: &IrModule) -> NativeCompi
     }
 
     // Sprint 47: write .sprof file (persistent profile output)
-    // Save r12 (callee-saved, holds heap base from trampoline)
+    // Save r12 for local file-descriptor scratch use.
     c.code = emit_push_r12(c.code)
 
     // sys_open("profile.sprof", O_WRONLY|O_CREAT|O_TRUNC=577, 0644=420)
@@ -1535,7 +2082,7 @@ fn emit_prof_dump_function(nc: NativeCompiler, module: &IrModule) -> NativeCompi
         let file_counter_id = module.prof_counters[fi as usize].counter_id
         let file_load_pos = c.code.len + 3
         c.code = emit_mov_rax_rip_disp32(c.code, 0)   // placeholder
-        c.relocs = add_data_section_reloc(c.relocs, file_load_pos, file_counter_id * 8)
+        c.relocs = add_data_section_reloc(c.relocs, file_load_pos, c.prof_counter_data_base + (file_counter_id * 8))
         c.code = emit_mov_rdi_rax(c.code)              // rdi = counter value
         c = emit_inline_itoa_fd(c)                      // itoa + sys_write(r12, ...)
 
@@ -1550,7 +2097,7 @@ fn emit_prof_dump_function(nc: NativeCompiler, module: &IrModule) -> NativeCompi
     c.code = emit_mov_rax_imm(c.code, 3)              // rax = sys_close
     c.code = emit_syscall(c.code)
 
-    // Restore r12 (heap base)
+    // Restore r12 after local file-descriptor use.
     c.code = emit_pop_r12(c.code)
 
     c.code = emit_mov_rsp_rbp(c.code)
@@ -1585,21 +2132,35 @@ fn emit_entry_trampoline(nc: NativeCompiler, main_fn_index: i64) -> NativeCompil
     c.code = emit_mov_r9_imm32(c.code, 0)         // r9 = offset = 0
     c.code = emit_syscall(c.code)
 
-    // rax = heap base pointer
-    c.code = emit_mov_r12_rax(c.code)             // r12 = heap base
-    c.code = emit_mov_r13_rax(c.code)             // r13 = heap bump pointer (starts at base)
+    // Publish the RuntimeContext pointer into the .data slot.
+    let ctx_slot_disp = c.code.len + 3
+    c.code = emit_mov_rip_disp32_rax(c.code, 0)
+    c.relocs = add_data_section_reloc(c.relocs, ctx_slot_disp, c.runtime_context_slot_offset)
 
-    // M4: Store argc and argv at heap[0] and heap[8]
+    // Heap allocation starts after the fixed-size RuntimeContext header.
+    c.code = emit_mov_reg_imm(c.code, 1, runtime_context_size())
+    c.code = emit_add_reg_reg(c.code, 0, 1)
+    c = emit_store_rax_runtime_context_field(c, runtime_context_field_heap_base())
+    c = emit_store_rax_runtime_context_field(c, runtime_context_field_heap_cursor())
+
+    // heap_limit = heap_base + (mmap_size - runtime_context_size)
+    c = emit_load_runtime_context_field_rax(c, runtime_context_field_heap_base())
+    c.code = emit_mov_reg_imm(c.code, 1, 536870912 - runtime_context_size())
+    c.code = emit_add_reg_reg(c.code, 0, 1)
+    c = emit_store_rax_runtime_context_field(c, runtime_context_field_heap_limit())
+
+    // M4: Store argc and argv in RuntimeContext memory.
     c.code = emit_mov_rax_mem_r14(c.code)          // rax = [r14] = argc
-    c.code = emit_mov_mem_r12_rax(c.code)          // [r12] = argc
+    c = emit_store_rax_runtime_context_field(c, runtime_context_field_argc())
     c.code = emit_lea_rax_r14_disp8(c.code, 8)    // rax = r14 + 8 = argv pointer
-    c.code = emit_mov_mem_r12_disp8_rax(c.code, 8) // [r12 + 8] = argv
-    c.code = emit_add_r13_imm8(c.code, 16)        // r13 += 16 (bump past argc/argv)
+    c = emit_store_rax_runtime_context_field(c, runtime_context_field_argv_ptr())
+    c = emit_store_runtime_context_imm(c, runtime_context_field_stdout_fd(), 1)
+    c = emit_store_runtime_context_imm(c, runtime_context_field_stderr_fd(), 2)
 
     // AVX10.2-aware capability guard: abort (exit 200) if CPU lacks any vector support.
     // emit_avx10_detect probes leaf 7.1 EDX[19] for AVX10, falls back to leaf 7.0
     // EBX[16] for legacy AVX-512F CPUs.  Sets r15 = VL capability mask:
-    //   bit0=128-bit, bit1=256-bit, bit2=512-bit (persistent across call to main).
+    //   bit0=128-bit, bit1=256-bit, bit2=512-bit.
     // Returns rax = 1 if any vector support detected, 0 otherwise.
     c.code = emit_avx10_detect(c.code)
     c.code = emit_test_rax_rax(c.code)
@@ -1610,6 +2171,8 @@ fn emit_entry_trampoline(nc: NativeCompiler, main_fn_index: i64) -> NativeCompil
     c.code = emit_syscall(c.code)
     let avx_ok = c.code.len
     c.code = patch_u32_le(c.code, avx_jnz + 2, avx_ok - (avx_jnz + 6))
+    c.code = emit_mov_rax_preg(c.code, 15)
+    c = emit_store_rax_runtime_context_field(c, runtime_context_field_simd_capability_mask())
 
     // call main (placeholder, will be relocated)
     let call_pos = c.code.len
@@ -1649,10 +2212,10 @@ fn trampoline_offset(nc: NativeCompiler) -> i64 {
 // Full pipeline: IrModule -> ELF64 binary
 // ============================================================================
 
-fn compile_to_macho_arm64_placeholder(module: &IrModule, target_spec: NativeTargetSpec) -> NativeCompileResult {
+fn compile_to_macho_arm64_preview_stub(module: &IrModule, target_spec: NativeTargetSpec) -> NativeCompileResult {
     let _module = module
     let _target = target_spec
-    native_compile_result_error(ERR_BACKEND_NOT_IMPLEMENTED(), "backend_not_implemented:aarch64-macos")
+    native_compile_result_error(ERR_BACKEND_NOT_IMPLEMENTED(), "native_v2_preview_emitter_pending:aarch64-macos")
 }
 
 fn compile_to_elf_riscv_placeholder(module: &IrModule, target_spec: NativeTargetSpec) -> NativeCompileResult {
@@ -1673,7 +2236,7 @@ fn compile_native(module: &IrModule, target_spec: NativeTargetSpec) -> NativeCom
     }
 
     if target_spec.arch_id == ARCH_AARCH64() && target_spec.os_id == OS_MACOS() {
-        return compile_to_macho_arm64_placeholder(module, target_spec)
+        return compile_to_macho_arm64_preview_stub(module, target_spec)
     }
 
     if target_spec.arch_id == ARCH_RISCV64() && target_spec.os_id == OS_LINUX() {

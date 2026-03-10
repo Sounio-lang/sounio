@@ -23,6 +23,7 @@ use native::elf::*
 use native::reloc::*
 use native::frame::*
 use native::lower_ir::*
+use native::runtime_context::*
 use wasm::core::*
 use wasm::encode::*
 use wasm::lower::*
@@ -3894,22 +3895,23 @@ fn compiler_main_test_native_v2_target_policy_x86() -> bool with IO, Mut, Panic,
     true
 }
 
-// T59: native v2 aarch64 policy is present even before emitter graduation
+// T59: native v2 aarch64 policy is present for the full reserved/allocatable contract
 fn compiler_main_test_native_v2_target_policy_aarch64() -> bool with IO, Mut, Panic, Div {
     let spec = native_resolve_target("aarch64-macos", "auto", true)
     let summary = native_v2_target_policy_summary(spec)
     if !native_v2_target_contract_supported(spec) { return false }
     if summary.reserved_count != 4 { return false }
-    if summary.allocatable_count != 4 { return false }
+    if summary.allocatable_count != 10 { return false }
     if summary.arg_count != 8 { return false }
     if summary.emitter_ready { return false }
     if !str_eq(native_v2_target_policy_group_name(spec, NATIVE_V2_POLICY_GROUP_RESERVED(), 3), "x18") { return false }
     if !str_eq(native_v2_target_policy_group_name(spec, NATIVE_V2_POLICY_GROUP_ALLOCATABLE(), 0), "x19") { return false }
+    if !str_eq(native_v2_target_policy_group_name(spec, NATIVE_V2_POLICY_GROUP_ALLOCATABLE(), 9), "x28") { return false }
     if !str_eq(native_v2_target_policy_group_name(spec, NATIVE_V2_POLICY_GROUP_ARGS(), 0), "x0") { return false }
     true
 }
 
-// T60: native v2 shadow machine module reports tiering + deopt substrate
+// T60: native v2 machine module reports tiering + deopt substrate
 fn compiler_main_test_native_v2_machine_shadow_module() -> bool with IO, Mut, Panic, Div {
     let spec = native_resolve_target("x86_64-linux", "auto", true)
     var module = ir_empty_module()
@@ -3938,10 +3940,10 @@ fn compiler_main_test_native_v2_machine_shadow_module() -> bool with IO, Mut, Pa
     machine.target_arch_id == ARCH_X86_64()
 }
 
-// T61: native v2 shadow contract writer emits a JSON artifact
+// T61: native v2 contract writer emits a JSON artifact
 fn compiler_main_test_native_v2_shadow_contract_write() -> bool with IO, Mut, Panic, Div {
     let spec = native_resolve_target("x86_64-linux", "auto", true)
-    let path = "artifacts/omega/native_backend_v2_shadow_contract.selftest.json"
+    let path = "artifacts/omega/native_backend_v2_contract.selftest.json"
     var module = ir_empty_module()
     var func = ir_empty_function()
     var name = empty_name()
@@ -3957,16 +3959,122 @@ fn compiler_main_test_native_v2_shadow_contract_write() -> bool with IO, Mut, Pa
     func.reg_count = 1
     module.functions[0] = func
     module.fn_count = 1
-    if !native_v2_write_shadow_contract(path, &module, spec, true, ERR_OK(), "selftest") { return false }
+    if !native_v2_write_contract(path, &module, spec, true, ERR_OK(), "selftest") { return false }
     let size = file_size(path)
     if size <= 0 { return false }
     let data = read_file(path)
     data[0 as usize] == (123 as i8)
 }
 
+// ============================================================================
+// Sprint 64: Compact frame sizing self-tests (T62-T69)
+// ============================================================================
+
+// T62: nc_min_frame_size returns 0 for empty function (reg_count=0)
+fn compiler_main_test_frame_trim_empty() -> bool with Mut, Panic, Div {
+    var nc = compiler_new()
+    var func = ir_empty_function()
+    func.reg_count = 0
+    nc_min_frame_size(nc, func) == 0
+}
+
+// T63: nc_min_frame_size returns 0 when all vregs preg-allocated
+fn compiler_main_test_frame_trim_all_preg() -> bool with Mut, Panic, Div {
+    var nc = compiler_new()
+    nc.vreg_to_preg[0 as usize] = 15   // r15
+    nc.vreg_to_preg[1 as usize] = 14   // r14
+    var func = ir_empty_function()
+    func.reg_count = 2
+    nc_min_frame_size(nc, func) == 0
+}
+
+// T64: nc_min_frame_size returns 16 for 1 spilled vreg at index 0 (align16(8)=16)
+fn compiler_main_test_frame_trim_one_spill() -> bool with Mut, Panic, Div {
+    var nc = compiler_new()
+    nc.vreg_to_preg[0 as usize] = -1   // RA_SPILLED
+    var func = ir_empty_function()
+    func.reg_count = 1
+    nc_min_frame_size(nc, func) == 16
+}
+
+// T65: nc_min_frame_size returns 32 when highest stack vreg is index 3
+fn compiler_main_test_frame_trim_vreg3_stack() -> bool with Mut, Panic, Div {
+    var nc = compiler_new()
+    nc.vreg_to_preg[0 as usize] = 15   // preg-alloc
+    nc.vreg_to_preg[1 as usize] = 14   // preg-alloc
+    nc.vreg_to_preg[2 as usize] = 13   // preg-alloc
+    nc.vreg_to_preg[3 as usize] = -1   // RA_SPILLED (highest stack vreg)
+    var func = ir_empty_function()
+    func.reg_count = 4
+    nc_min_frame_size(nc, func) == 32
+}
+
+// T66: nc_min_frame_size returns 16 when middle vreg is spilled, higher is preg-alloc
+fn compiler_main_test_frame_trim_middle_spill() -> bool with Mut, Panic, Div {
+    var nc = compiler_new()
+    nc.vreg_to_preg[0 as usize] = 15   // preg-alloc
+    nc.vreg_to_preg[1 as usize] = -1   // RA_SPILLED
+    nc.vreg_to_preg[2 as usize] = 14   // preg-alloc (higher index, no slot needed)
+    var func = ir_empty_function()
+    func.reg_count = 3
+    nc_min_frame_size(nc, func) == 16
+}
+
+// T67: nc_min_frame_size returns 0 for 4 preg-alloc vregs (all 4 callee-saved registers used)
+fn compiler_main_test_frame_trim_four_preg() -> bool with Mut, Panic, Div {
+    var nc = compiler_new()
+    nc.vreg_to_preg[0 as usize] = 15   // r15
+    nc.vreg_to_preg[1 as usize] = 14   // r14
+    nc.vreg_to_preg[2 as usize] = 13   // r13
+    nc.vreg_to_preg[3 as usize] = 12   // r12
+    var func = ir_empty_function()
+    func.reg_count = 4
+    nc_min_frame_size(nc, func) == 0
+}
+
+// T68: nc_min_frame_size returns 48 for spilled vreg at index 4 (align16(40)=48)
+fn compiler_main_test_frame_trim_vreg4_spill() -> bool with Mut, Panic, Div {
+    var nc = compiler_new()
+    nc.vreg_to_preg[0 as usize] = 15
+    nc.vreg_to_preg[1 as usize] = 14
+    nc.vreg_to_preg[2 as usize] = 13
+    nc.vreg_to_preg[3 as usize] = 12
+    nc.vreg_to_preg[4 as usize] = -1   // RA_SPILLED
+    var func = ir_empty_function()
+    func.reg_count = 5
+    nc_min_frame_size(nc, func) == 48
+}
+
+// T69: nc_min_frame_size handles param vreg (preg=-2 RA_UNASSIGNED) as needing stack slot
+fn compiler_main_test_frame_trim_param_vreg() -> bool with Mut, Panic, Div {
+    var nc = compiler_new()
+    nc.vreg_to_preg[0 as usize] = -2   // RA_UNASSIGNED (param)
+    nc.vreg_to_preg[1 as usize] = 15   // preg-alloc
+    var func = ir_empty_function()
+    func.reg_count = 2
+    nc_min_frame_size(nc, func) == 16
+}
+
+// T70: used allocatable preg mask tracks only r12-r15 assignments
+fn compiler_main_test_used_allocatable_preg_mask() -> bool {
+    var nc = compiler_new()
+    nc.vreg_to_preg[0 as usize] = 15
+    nc.vreg_to_preg[1 as usize] = 12
+    nc.vreg_to_preg[2 as usize] = -1
+    nc.vreg_to_preg[3 as usize] = 0
+    nc_used_allocatable_preg_mask(nc, 4) == (X86_ALLOCATABLE_R12_MASK() | X86_ALLOCATABLE_R15_MASK())
+}
+
+// T71: odd allocatable-save counts add an 8-byte alignment pad before calls
+fn compiler_main_test_frame_align_for_saved_pregs() -> bool with Mut, Panic {
+    if x86_align_frame_size_for_calls(0, X86_ALLOCATABLE_R15_MASK()) != 8 { return false }
+    if x86_align_frame_size_for_calls(16, X86_ALLOCATABLE_R15_MASK() | X86_ALLOCATABLE_R14_MASK()) != 16 { return false }
+    true
+}
+
 fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
     var passed: i64 = 0
-    let total: i64 = 61
+    let total: i64 = 71
 
     println("=== compiler/main.sio self-tests ===")
 
@@ -4377,24 +4485,94 @@ fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
     }
 
     if compiler_main_test_native_v2_target_policy_aarch64() {
-        println("  T59 OK: native v2 aarch64 policy is defined before emitter graduation")
+        println("  T59 OK: native v2 aarch64 policy exposes the full reserved/allocatable contract")
         passed = passed + 1
     } else {
-        println("  FAIL: T59 native v2 aarch64 policy is defined before emitter graduation")
+        println("  FAIL: T59 native v2 aarch64 policy exposes the full reserved/allocatable contract")
     }
 
     if compiler_main_test_native_v2_machine_shadow_module() {
-        println("  T60 OK: native v2 shadow machine module reports tiering and deopt")
+        println("  T60 OK: native v2 machine module reports tiering and deopt")
         passed = passed + 1
     } else {
-        println("  FAIL: T60 native v2 shadow machine module reports tiering and deopt")
+        println("  FAIL: T60 native v2 machine module reports tiering and deopt")
     }
 
     if compiler_main_test_native_v2_shadow_contract_write() {
-        println("  T61 OK: native v2 shadow contract writer emits JSON artifact")
+        println("  T61 OK: native v2 contract writer emits JSON artifact")
         passed = passed + 1
     } else {
-        println("  FAIL: T61 native v2 shadow contract writer emits JSON artifact")
+        println("  FAIL: T61 native v2 contract writer emits JSON artifact")
+    }
+
+    if compiler_main_test_frame_trim_empty() {
+        println("  T62 OK: nc_min_frame_size returns 0 for empty function (reg_count=0)")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T62 nc_min_frame_size returns 0 for empty function")
+    }
+
+    if compiler_main_test_frame_trim_all_preg() {
+        println("  T63 OK: nc_min_frame_size returns 0 when all vregs preg-allocated")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T63 nc_min_frame_size returns 0 when all vregs preg-allocated")
+    }
+
+    if compiler_main_test_frame_trim_one_spill() {
+        println("  T64 OK: nc_min_frame_size returns 16 for 1 spilled vreg at index 0")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T64 nc_min_frame_size returns 16 for 1 spilled vreg at index 0")
+    }
+
+    if compiler_main_test_frame_trim_vreg3_stack() {
+        println("  T65 OK: nc_min_frame_size returns 32 when highest stack vreg is index 3")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T65 nc_min_frame_size returns 32 when highest stack vreg is index 3")
+    }
+
+    if compiler_main_test_frame_trim_middle_spill() {
+        println("  T66 OK: nc_min_frame_size returns 16 when middle vreg spilled, higher is preg-alloc")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T66 nc_min_frame_size returns 16 when middle vreg spilled, higher is preg-alloc")
+    }
+
+    if compiler_main_test_frame_trim_four_preg() {
+        println("  T67 OK: nc_min_frame_size returns 0 for 4 preg-alloc vregs")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T67 nc_min_frame_size returns 0 for 4 preg-alloc vregs")
+    }
+
+    if compiler_main_test_frame_trim_vreg4_spill() {
+        println("  T68 OK: nc_min_frame_size returns 48 for spilled vreg at index 4")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T68 nc_min_frame_size returns 48 for spilled vreg at index 4")
+    }
+
+    if compiler_main_test_frame_trim_param_vreg() {
+        println("  T69 OK: nc_min_frame_size handles param vreg (RA_UNASSIGNED) as stack slot")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T69 nc_min_frame_size handles param vreg (RA_UNASSIGNED) as stack slot")
+    }
+
+    if compiler_main_test_used_allocatable_preg_mask() {
+        println("  T70 OK: used allocatable preg mask tracks only r12-r15 assignments")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T70 used allocatable preg mask tracks only r12-r15 assignments")
+    }
+
+    if compiler_main_test_frame_align_for_saved_pregs() {
+        println("  T71 OK: odd allocatable-save counts add an 8-byte alignment pad")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T71 odd allocatable-save counts add an 8-byte alignment pad")
     }
 
     println("")

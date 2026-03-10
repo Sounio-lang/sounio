@@ -10,6 +10,7 @@ use native::reloc::{RelocationTable, add_call_reloc, add_rip_reloc, add_data_sec
 use native::elf::{StringTable, string_table_add, data_section_add_f64}
 use native::regs::{param_reg}
 use native::frame::*
+use native::runtime_context::{runtime_context_field_heap_cursor}
 //
 // Phase 1: Full instruction lowering.
 //
@@ -124,6 +125,26 @@ fn nc_store_rax_to_vreg(nc: NativeCompiler, vreg: i64) -> NativeCompiler with Mu
         }
     }
     c
+}
+
+// Compute minimum frame size after register allocation.
+// Scans vreg_to_preg[0..func.reg_count]: only vregs with preg < 0 need a stack slot.
+// Returns align16((highest_stack_vreg + 1) * 8), or 0 if all vregs are preg-allocated.
+// Sprint 64: replaces align16(reg_count * 8) to eliminate sub rsp for preg-only functions.
+fn nc_min_frame_size(nc: NativeCompiler, func: IrFunction) -> i64 with Mut, Panic, Div {
+    var max_stack_vreg: i64 = -1
+    var v: i64 = 0
+    while v < func.reg_count && v < 512 {
+        if nc.vreg_to_preg[v as usize] < 0 {
+            max_stack_vreg = v
+        }
+        v = v + 1
+    }
+    if max_stack_vreg < 0 {
+        0
+    } else {
+        align16((max_stack_vreg + 1) * 8)
+    }
 }
 
 // ============================================================================
@@ -277,7 +298,7 @@ fn lower_instr(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut, P
         c.code = emit_byte(c.code, 0x05)   // ModR/M: [RIP+disp32], /0
         let disp_offset = c.code.len
         c.code = emit_u32_le(c.code, 0)    // placeholder disp32
-        c.relocs = add_data_section_reloc(c.relocs, disp_offset, counter_id * 8)
+        c.relocs = add_data_section_reloc(c.relocs, disp_offset, c.prof_counter_data_base + (counter_id * 8))
         c
     } else {
         // Unsupported opcode — skip silently for bootstrap
@@ -293,7 +314,7 @@ fn lower_alloc(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut, P
     var c = nc
 
     // Return pointer to start of newly allocated object in dst slot.
-    // Heap objects are backed by a monotonic bump allocator starting at r13.
+    // Heap objects are backed by RuntimeContext.heap_cursor in memory.
     //
     // imm_i64 carries a type tag from IR lowering:
     //   0 = struct  → 512 bytes (64 slots * 8B, covers hash-based field_idx up to 63)
@@ -308,11 +329,13 @@ fn lower_alloc(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut, P
         else if tag == 8 { 16 }
         else if tag < 64 { 64 }
         else { ((tag + 7) / 8) * 8 }
-    c.code = emit_mov_rax_r13(c.code)                // rax = current heap pointer
+    c = emit_load_runtime_context_field_rax(c, runtime_context_field_heap_cursor())
     if instr.dst >= 0 {
         c.code = emit_store_rax_rbp_disp32(c.code, ir_slot_offset(instr.dst))
     }
-    c.code = emit_add_r13_imm32(c.code, alloc_size)  // bump pointer
+    c.code = emit_mov_reg_imm(c.code, 1, alloc_size)
+    c.code = emit_add_reg_reg(c.code, 0, 1)
+    c = emit_store_rax_runtime_context_field(c, runtime_context_field_heap_cursor())
     c
 }
 
