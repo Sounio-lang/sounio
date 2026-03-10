@@ -279,6 +279,50 @@ fn ocp_const_fold(func: IrFunction) -> IrFunction with Mut, Div, Panic {
             }
         }
 
+        // Sprint 71 Block A: Same-register algebraic fold.
+        // When src1 == src2 for certain ops the result is statically known.
+        //   x - x → 0   (OpSub with same register)
+        //   x ^ x → 0   (OpBitXor with same register)
+        if ocp_is_binop(result.instrs[i as usize].op) {
+            let sr_instr = result.instrs[i as usize]
+            let sr_s1 = sr_instr.src1
+            let sr_s2 = sr_instr.src2
+            if sr_s1 >= 0 && sr_s1 == sr_s2 {
+                if sr_instr.bin_op == BinaryOp::OpSub || sr_instr.bin_op == BinaryOp::OpBitXor {
+                    result.instrs[i as usize] = ir_load_imm(sr_instr.dst, 0)
+                    if sr_instr.dst >= 0 && sr_instr.dst < 256 {
+                        is_const[sr_instr.dst as usize] = true
+                        const_val[sr_instr.dst as usize] = 0
+                        def_at[sr_instr.dst as usize] = i
+                    }
+                }
+            }
+        }
+
+        // Sprint 71 Block B: Left-constant commutative strength reduction.
+        // Sprint 68 SR only fires when the constant is on src2 (right).
+        // For OpMul (commutative), when a power-of-2 constant is on src1 (left),
+        // apply the same SR: 4 * x → x << 2.
+        if ocp_is_binop(result.instrs[i as usize].op) {
+            let cm_instr = result.instrs[i as usize]
+            let cm_s1 = cm_instr.src1
+            let cm_s2 = cm_instr.src2
+            let cm_s1_ok = cm_s1 >= 0 && cm_s1 < 256
+            let cm_s2_ok = cm_s2 >= 0 && cm_s2 < 256
+            if cm_instr.bin_op == BinaryOp::OpMul {
+                if cm_s1_ok && cm_s2_ok && is_const[cm_s1 as usize] && !is_const[cm_s2 as usize] {
+                    let cm_v1 = const_val[cm_s1 as usize]
+                    let cm_def = def_at[cm_s1 as usize]
+                    if cm_def >= 0 && ocp_is_power_of_two(cm_v1) {
+                        let shift = ocp_log2(cm_v1)
+                        result.instrs[cm_def as usize] = ir_load_imm(cm_s1, shift)
+                        result.instrs[i as usize] = ir_binop(cm_instr.dst, cm_s2, BinaryOp::OpShl, cm_s1)
+                        const_val[cm_s1 as usize] = shift
+                    }
+                }
+            }
+        }
+
         i = i + 1
     }
 

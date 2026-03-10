@@ -5399,9 +5399,112 @@ fn compiler_main_test_ocp_cp_round_trip_dce() -> bool with Mut, Div, Panic {
     true
 }
 
+// ============================================================================
+// Sprint 71: Algebraic normalization — same-register fold + commutative SR (T109–T116)
+// ============================================================================
+
+// T109: x - x → IrLoadImm(0) (same-register sub)
+fn compiler_main_test_alg_same_reg_sub() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    // r0 is a parameter (not a constant), r1 = r0 - r0
+    instrs[0] = ir_binop(1, 0, BinaryOp::OpSub, 0)
+    instrs[1] = ir_return(1)
+    let func = cp_make_test_func(instrs, 2)
+    let result = ocp_const_fold(func)
+    if result.instrs[0].op != IrOpcode::IrLoadImm { return false }
+    if result.instrs[0].imm_i64 != 0 { return false }
+    true
+}
+
+// T110: x ^ x → IrLoadImm(0) (same-register XOR)
+fn compiler_main_test_alg_same_reg_xor() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_binop(1, 0, BinaryOp::OpBitXor, 0)
+    instrs[1] = ir_return(1)
+    let func = cp_make_test_func(instrs, 2)
+    let result = ocp_const_fold(func)
+    if result.instrs[0].op != IrOpcode::IrLoadImm { return false }
+    if result.instrs[0].imm_i64 != 0 { return false }
+    true
+}
+
+// T111: 4 * x → x << 2 (left-constant commutative SR, constant on left)
+fn compiler_main_test_alg_comm_sr_4x() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(1, 4)
+    instrs[1] = ir_binop(2, 1, BinaryOp::OpMul, 0)
+    let func = cp_make_test_func(instrs, 3)
+    let result = ocp_const_fold(func)
+    if result.instrs[1].bin_op != BinaryOp::OpShl { return false }
+    if result.instrs[0].imm_i64 != 2 { return false }
+    true
+}
+
+// T112: 8 * x → x << 3 (left-constant commutative SR)
+fn compiler_main_test_alg_comm_sr_8x() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(1, 8)
+    instrs[1] = ir_binop(2, 1, BinaryOp::OpMul, 0)
+    let func = cp_make_test_func(instrs, 3)
+    let result = ocp_const_fold(func)
+    if result.instrs[1].bin_op != BinaryOp::OpShl { return false }
+    if result.instrs[0].imm_i64 != 3 { return false }
+    true
+}
+
+// T113: 2 * x → x << 1 (left-constant commutative SR)
+fn compiler_main_test_alg_comm_sr_2x() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(1, 2)
+    instrs[1] = ir_binop(2, 1, BinaryOp::OpMul, 0)
+    let func = cp_make_test_func(instrs, 3)
+    let result = ocp_const_fold(func)
+    if result.instrs[1].bin_op != BinaryOp::OpShl { return false }
+    if result.instrs[0].imm_i64 != 1 { return false }
+    true
+}
+
+// T114: 3 * x stays as OpMul (3 is not a power of 2)
+fn compiler_main_test_alg_comm_sr_3x_no_reduce() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(1, 3)
+    instrs[1] = ir_binop(2, 1, BinaryOp::OpMul, 0)
+    let func = cp_make_test_func(instrs, 3)
+    let result = ocp_const_fold(func)
+    if result.instrs[1].bin_op != BinaryOp::OpMul { return false }
+    true
+}
+
+// T115: round-trip: x - x → 0 survives DCE (result register is used by return)
+fn compiler_main_test_alg_same_reg_sub_roundtrip() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_binop(1, 0, BinaryOp::OpSub, 0)
+    instrs[1] = ir_return(1)
+    let func = cp_make_test_func(instrs, 2)
+    let result = opt_cleanup_function(func)
+    if result.instrs[0].op != IrOpcode::IrLoadImm { return false }
+    if result.instrs[0].imm_i64 != 0 { return false }
+    true
+}
+
+// T116: copy-prop + left-constant SR interop: r0=4; r1=copy(r0); r1 * x → x << 2
+fn compiler_main_test_alg_comm_sr_via_copy_prop() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(1, 4)
+    instrs[1] = ir_copy(2, 1)
+    instrs[2] = ir_binop(3, 2, BinaryOp::OpMul, 0)
+    instrs[3] = ir_return(3)
+    let func = cp_make_test_func(instrs, 4)
+    let result = ocp_const_fold(func)
+    // r2 is const-prop'd from r1=4, so r2*r0 (left=r2=4, right=r0=param)
+    // Block B fires: r2=4 is constant on left, r0 is not constant
+    if result.instrs[2].bin_op != BinaryOp::OpShl { return false }
+    true
+}
+
 fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
     var passed: i64 = 0
-    let total: i64 = 108
+    let total: i64 = 116
 
     println("=== compiler/main.sio self-tests ===")
 
@@ -6162,6 +6265,62 @@ fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
         passed = passed + 1
     } else {
         println("  FAIL: T108 copy prop round-trip: prop+fold+DCE removes dead loads")
+    }
+
+    if compiler_main_test_alg_same_reg_sub() {
+        println("  T109 OK: same-register sub folds to IrLoadImm(0) (x - x → 0)")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T109 same-register sub folds to IrLoadImm(0)")
+    }
+
+    if compiler_main_test_alg_same_reg_xor() {
+        println("  T110 OK: same-register XOR folds to IrLoadImm(0) (x ^ x → 0)")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T110 same-register XOR folds to IrLoadImm(0)")
+    }
+
+    if compiler_main_test_alg_comm_sr_4x() {
+        println("  T111 OK: left-constant commutative SR: 4 * x → x << 2")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T111 left-constant commutative SR: 4 * x → x << 2")
+    }
+
+    if compiler_main_test_alg_comm_sr_8x() {
+        println("  T112 OK: left-constant commutative SR: 8 * x → x << 3")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T112 left-constant commutative SR: 8 * x → x << 3")
+    }
+
+    if compiler_main_test_alg_comm_sr_2x() {
+        println("  T113 OK: left-constant commutative SR: 2 * x → x << 1")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T113 left-constant commutative SR: 2 * x → x << 1")
+    }
+
+    if compiler_main_test_alg_comm_sr_3x_no_reduce() {
+        println("  T114 OK: left-constant non-pow2 stays as OpMul (3 * x not reduced)")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T114 left-constant non-pow2 stays as OpMul")
+    }
+
+    if compiler_main_test_alg_same_reg_sub_roundtrip() {
+        println("  T115 OK: same-register sub round-trip: opt_cleanup folds x - x to 0")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T115 same-register sub round-trip")
+    }
+
+    if compiler_main_test_alg_comm_sr_via_copy_prop() {
+        println("  T116 OK: copy-prop + left-constant SR: r0=4; r1=copy(r0); r1 * x → x << 2")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T116 copy-prop + left-constant SR interop")
     }
 
     println("")
