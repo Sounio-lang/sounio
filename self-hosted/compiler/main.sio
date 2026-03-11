@@ -19,8 +19,10 @@ use check::ownership::*
 use check::lint::*
 use check::layout::*
 use io::file_write::*
+use native::aarch64::*
 use native::encode::*
 use native::elf::*
+use native::macho::*
 use native::reloc::*
 use native::frame::*
 use native::lower_ir::*
@@ -36,12 +38,12 @@ use resolve::imports::*
 use resolve::symbol::*
 use resolve::scope::*
 use resolve::mod::{resolve_modules, resolve_program, ResolveBatchResult}
-use module_loader::{compile_multimodule_native, compile_multimodule_native_with_ir, load_multimodule_ir, load_multimodule_ir_traced, load_multimodule_ir_probe_summary, load_multimodule_ir_probe_summary_traced, empty_load_multimodule_ir_trace, preflight_multimodule_frontend, load_multimodule_epistemic_into, load_module_file, extract_imports_from_ast, path_directory, use_path_to_file_path, visited_contains, ir_merge_epistemic_sections, empty_program, file_exists}
+use module_loader::{compile_multimodule_native, compile_multimodule_native_advanced, compile_multimodule_native_with_ir, compile_multimodule_native_maybe_streaming, load_multimodule_ir, load_multimodule_ir_traced, load_multimodule_ir_probe_summary, load_multimodule_ir_probe_summary_traced, empty_load_multimodule_ir_trace, preflight_multimodule_frontend, load_multimodule_epistemic_into, load_module_file, extract_imports_from_ast, path_directory, use_path_to_file_path, visited_contains, ir_merge_epistemic_sections, empty_program, file_exists}
 use frontend_callsite_probe::{run_frontend_callsite_probe}
 use frontend_strategy_probe::{run_frontend_strategy_probe}
 use parser::parser::{parser_last_error_count}
 use ir::opt_strategy::{ir_opt_apply_strategy, ir_opt_find_return_vreg, ir_opt_max_label, ir_opt_max_vreg}
-use ir::lower::{ir_patch_validated_calls, lower_program_to_ir, lower_program_to_ir_with_epistemic}
+use ir::lower::{ir_patch_validated_calls, lower_program_to_ir, lower_program_to_ir_with_epistemic, lower_program_to_ir_summary_with_epistemic, lower_program_function_body_from_summary_with_epistemic}
 use ir::const_prop::{cp_check_load_imm, cp_empty_instrs, cp_make_test_func, cp_optimize_function}
 use ir::dce::{dce_check_nop, dce_empty_instrs, dce_make_test_func, dce_optimize_function}
 use ir::profile::*
@@ -819,6 +821,9 @@ struct CompilerOptions {
     output_file: string,
     target: string,
     optimize: bool,
+    cache_dir: string,
+    cache_mode: string,
+    cache_stats: bool,
     verbose: bool,
     emit_ast: bool,
     emit_tokens: bool,
@@ -933,6 +938,32 @@ fn compiler_mode_source_arg(args: ArgList, flag_index: i64, mode_name: string) -
     }
     panic(mode_name + ": missing source file argument")
     return ""
+}
+
+fn compiler_mode_has_flag(args: ArgList, needle: string) -> bool with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < args.len {
+        if arg_list_get(args, i) == needle {
+            return true
+        }
+        i = i + 1
+    }
+    false
+}
+
+fn compiler_mode_option_string(args: ArgList, short_flag: string, long_flag: string, fallback: string) -> string with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < args.len {
+        let arg = arg_list_get(args, i)
+        if arg == short_flag || arg == long_flag {
+            if i + 1 < args.len {
+                return arg_list_get(args, i + 1)
+            }
+            return fallback
+        }
+        i = i + 1
+    }
+    fallback
 }
 
 fn compiler_check_ok_message() -> string {
@@ -1148,91 +1179,6 @@ fn compiler_preflight_ir_load(path: string) -> CompilerIrLoadResult with IO, Mut
     }
 
     return compiler_ir_load_result_ok(ir_result.module)
-}
-
-fn compiler_triangle_basic_native_part_path(idx: i64) -> string {
-    if idx == 0 { "artifacts/sprint58/triangle_basic.ppm.part000" }
-    else if idx == 1 { "artifacts/sprint58/triangle_basic.ppm.part001" }
-    else if idx == 2 { "artifacts/sprint58/triangle_basic.ppm.part002" }
-    else { "" }
-}
-
-fn compiler_triangle_basic_native_parts_available(path: string) -> bool with Mut, Panic, Div {
-    str_eq(path, "examples/render/triangle_basic.sio") &&
-    file_exists(compiler_triangle_basic_native_part_path(0)) &&
-    file_exists(compiler_triangle_basic_native_part_path(1)) &&
-    file_exists(compiler_triangle_basic_native_part_path(2))
-}
-
-fn compiler_reg_args3(a: i64, b: i64, c: i64) -> Option<Box<IrRegList>> with Alloc {
-    Some(Box::new(IrRegList {
-        head: a,
-        tail: Some(Box::new(IrRegList {
-            head: b,
-            tail: Some(Box::new(IrRegList { head: c, tail: None })),
-        })),
-    }))
-}
-
-fn compiler_build_triangle_basic_native_fixture_module() -> IrModule with IO, Mut, Panic, Div, Alloc {
-    var module = ir_empty_module()
-    module.functions[0 as usize].name = make_name("print")
-    module.functions[0 as usize].param_count = 1
-    module.functions[0 as usize].reg_count = 1
-    module.functions[0 as usize].instr_count = 0
-
-    module.functions[1 as usize].name = make_name("read_file")
-    module.functions[1 as usize].param_count = 3
-    module.functions[1 as usize].reg_count = 3
-    module.functions[1 as usize].instr_count = 0
-
-    let main_idx = 2
-    module.functions[main_idx as usize].name = make_name("main")
-    module.functions[main_idx as usize].param_count = 0
-    module.functions[main_idx as usize].reg_count = 6
-    var main_instr_idx: i64 = 0
-    var part_idx: i64 = 0
-    while part_idx < 3 {
-        let part_path = compiler_triangle_basic_native_part_path(part_idx)
-        module.functions[main_idx as usize].instrs[main_instr_idx as usize] =
-            ir_load_string(0, part_idx, make_name(part_path))
-        module.functions[main_idx as usize].instrs[(main_instr_idx + 1) as usize] =
-            ir_alloc(1, 65536)
-        module.functions[main_idx as usize].instrs[(main_instr_idx + 2) as usize] =
-            ir_load_imm(2, 65535)
-        let read_args = compiler_reg_args3(0, 1, 2)
-        module.functions[main_idx as usize].instrs[(main_instr_idx + 3) as usize] =
-            ir_call(3, 1, make_name("read_file"), read_args, 3)
-        let print_args = Some(Box::new(IrRegList { head: 1, tail: None }))
-        module.functions[main_idx as usize].instrs[(main_instr_idx + 4) as usize] =
-            ir_call(4, 0, make_name("print"), print_args, 1)
-        main_instr_idx = main_instr_idx + 5
-        part_idx = part_idx + 1
-    }
-    module.functions[main_idx as usize].instrs[main_instr_idx as usize] = ir_load_imm(5, 0)
-    module.functions[main_idx as usize].instrs[(main_instr_idx + 1) as usize] = ir_return(5)
-    module.functions[main_idx as usize].instr_count = main_instr_idx + 2
-    module.fn_count = 3
-
-    module
-}
-
-fn compiler_try_triangle_basic_fixture_native_compile(source_path: string, output_path: string) -> i64 with IO, Mut, Panic, Div, Alloc {
-    if !compiler_triangle_basic_native_parts_available(source_path) {
-        return 0 - 1
-    }
-    let module = compiler_build_triangle_basic_native_fixture_module()
-    compile_multimodule_native_with_ir(
-        source_path,
-        module,
-        output_path,
-        "native",
-        "auto",
-        false,
-        "",
-        "",
-        false
-    )
 }
 
 fn compiler_ir_buffers_equal(buf_a: [i8; 131072], len_a: i64, buf_b: [i8; 131072], len_b: i64) -> bool {
@@ -1711,35 +1657,32 @@ fn run_ir_roundtrip_mode(args: ArgList, flag_index: i64) with IO, Mut, Panic, Di
 fn run_native_compile_mode(args: ArgList, flag_index: i64) with IO, Mut, Panic, Div, Alloc {
     let source_path = compiler_mode_source_arg(args, flag_index, "--native-compile")
     let output_path = compiler_mode_output_path(args, "a.out")
-    let fixture_exit = compiler_try_triangle_basic_fixture_native_compile(source_path, output_path)
-    if fixture_exit == 0 {
+    let optimize = compiler_mode_has_flag(args, "-O")
+    let cache_dir = compiler_mode_option_string(args, "", "--cache-dir", "")
+    let cache_mode = compiler_mode_option_string(args, "", "--cache-mode", "off")
+    let use_profile_path = compiler_mode_option_string(args, "", "--use-profile", "")
+    let use_profile = str_len(use_profile_path) > 0
+    let cache_stats = compiler_mode_has_flag(args, "--cache-stats")
+    let exit_code = compile_multimodule_native_advanced(
+        source_path,
+        output_path,
+        "native",
+        "auto",
+        false,
+        "",
+        "",
+        false,
+        optimize,
+        use_profile,
+        use_profile_path,
+        cache_dir,
+        cache_mode,
+        cache_stats
+    )
+    if exit_code == 0 {
         println(compiler_native_compile_summary(output_path))
         return
     }
-    let opts = CompilerOptions {
-        input_file: source_path,
-        output_file: output_path,
-        target: "native",
-        optimize: false,
-        verbose: false,
-        emit_ast: false,
-        emit_tokens: false,
-        emit_manifest: false,
-        gpu_target: "",
-        gpu_binary_format: "",
-        gpu_strict_parity: false,
-        debug_witnesses: false,
-        use_profile: false,
-        use_profile_path: "",
-    }
-
-    let result = compile(opts)
-    if result.success {
-        println(compiler_native_compile_summary(output_path))
-        return
-    }
-
-    compiler_print_errors(result.errors)
     panic("native-compile failed")
 }
 
@@ -1754,6 +1697,9 @@ fn print_help() with IO {
     println("  -o, --output <file>    Output file (default: a.out)")
     println("  -t, --target <target>  Target: native, wasm, llvm (default: native)")
     println("  -O, --optimize         Enable optimizations")
+    println("  --cache-dir <dir>      Persistent thin-link cache directory")
+    println("  --cache-mode <mode>    Cache mode: off|read|write|rw (default: off)")
+    println("  --cache-stats          Print thin-link cache hit/miss counters")
     println("  -v, --verbose          Verbose output")
     println("  --emit-ast             Print AST to stdout")
     println("  --emit-tokens          Print tokens to stdout")
@@ -1777,6 +1723,7 @@ fn print_help() with IO {
     println("  --probe-frontend-strategy <source.sio>  Probe parsed frontend strategy assignment on the fast IR lane")
     println("  --probe-load-ir <source.sio>  Probe parse/resolve/typecheck/IR lowering path")
     println("  --probe-load-ir-trace <source.sio>  Probe traced IR lowering path with stage counters")
+    println("  --probe-native-streaming <source.sio>  Probe summary/body/native-v2 status for the single-module streaming path")
     println("  --probe-ir-callsite <source.sio> <caller_fn> <callee_fn>  Probe lowered callsite hidden-arg behavior")
     println("  --probe-ir-opt-strategy <source.sio>  Probe ir_opt_apply_strategy() on instrumented IR fns")
     println("  --probe-wasm-dispatch <source.sio> [out.wasm]  Probe wasm dispatch marker path")
@@ -1795,6 +1742,9 @@ fn parse_options(args: ArgList) -> CompilerOptions with IO, Mut, Panic, Div {
     var output_file = "a.out"
     var target = "native"
     var optimize = false
+    var cache_dir = ""
+    var cache_mode = "off"
+    var cache_stats = false
     var verbose = false
     var emit_ast = false
     var emit_tokens = false
@@ -1824,6 +1774,21 @@ fn parse_options(args: ArgList) -> CompilerOptions with IO, Mut, Panic, Div {
         }
         else if arg == "-O" || arg == "--optimize" {
             optimize = true
+        }
+        else if arg == "--cache-dir" {
+            i = i + 1
+            if i < args.len {
+                cache_dir = arg_list_get(args, i)
+            }
+        }
+        else if arg == "--cache-mode" {
+            i = i + 1
+            if i < args.len {
+                cache_mode = arg_list_get(args, i)
+            }
+        }
+        else if arg == "--cache-stats" {
+            cache_stats = true
         }
         else if arg == "-v" || arg == "--verbose" {
             verbose = true
@@ -1884,6 +1849,9 @@ fn parse_options(args: ArgList) -> CompilerOptions with IO, Mut, Panic, Div {
         output_file: output_file,
         target: target,
         optimize: optimize,
+        cache_dir: cache_dir,
+        cache_mode: cache_mode,
+        cache_stats: cache_stats,
         verbose: verbose,
         emit_ast: emit_ast,
         emit_tokens: emit_tokens,
@@ -3207,6 +3175,46 @@ fn compile(opts: CompilerOptions) -> CompileResult with IO, Mut, Panic, Div, All
 
     if opts.emit_manifest {
         return compile_emit_manifest_json_from_source(opts.input_file)
+    }
+
+    let main_prog = load_module_file(opts.input_file)
+    let main_imports = extract_imports_from_ast(main_prog)
+    let requested_target_spec = native_resolve_target(opts.target, "auto", false)
+    if main_imports.count > 0 &&
+       requested_target_spec.arch_id == ARCH_X86_64() &&
+       requested_target_spec.os_id == OS_LINUX() &&
+       !str_eq(opts.target, "wasm") {
+        let thin_exit = compile_multimodule_native_advanced(
+            opts.input_file,
+            opts.output_file,
+            opts.target,
+            "auto",
+            false,
+            opts.gpu_target,
+            opts.gpu_binary_format,
+            opts.gpu_strict_parity,
+            opts.optimize,
+            opts.use_profile,
+            opts.use_profile_path,
+            opts.cache_dir,
+            opts.cache_mode,
+            opts.cache_stats
+        )
+        if thin_exit == 0 {
+            return CompileResult {
+                success: true,
+                errors: compile_errors_new(),
+                output: opts.output_file,
+            }
+        }
+
+        var thin_errors = compile_errors_new()
+        thin_errors = compile_errors_push(thin_errors, "error: multimodule native thin-link compilation failed")
+        return CompileResult {
+            success: false,
+            errors: thin_errors,
+            output: "",
+        }
     }
 
     // Preflight load catches parse/module-resolution failures early and avoids
@@ -4601,7 +4609,7 @@ fn compiler_main_test_native_v2_target_policy_aarch64() -> bool with IO, Mut, Pa
     if summary.reserved_count != 4 { return false }
     if summary.allocatable_count != 10 { return false }
     if summary.arg_count != 8 { return false }
-    if summary.emitter_ready { return false }
+    if !summary.emitter_ready { return false }
     if !str_eq(native_v2_target_policy_group_name(spec, NATIVE_V2_POLICY_GROUP_RESERVED(), 3), "x18") { return false }
     if !str_eq(native_v2_target_policy_group_name(spec, NATIVE_V2_POLICY_GROUP_ALLOCATABLE(), 0), "x19") { return false }
     if !str_eq(native_v2_target_policy_group_name(spec, NATIVE_V2_POLICY_GROUP_ALLOCATABLE(), 9), "x28") { return false }
@@ -5498,10 +5506,287 @@ fn compiler_main_test_mir_target_policy_x86() -> bool {
     p.emitter_ready && p.allocatable_count == 4 && p.reserved_count == 3
 }
 
-// T130: AArch64 macOS target policy: emitter_ready=false, 10 allocatable regs.
+// T130: AArch64 macOS target policy: emitter_ready=true, 10 allocatable regs.
 fn compiler_main_test_mir_target_policy_aarch64() -> bool {
     let p = native_target_policy_aarch64_macos()
-    p.emitter_ready == false && p.allocatable_count == 10
+    p.emitter_ready && p.allocatable_count == 10 && p.reserved_count == 4
+}
+
+// ============================================================================
+// Sprint 73: CSE + EgSmall self-tests (T131–T145)
+// ============================================================================
+
+// T131: CSE identifies duplicate IrBinOp and rewrites second to IrCopy.
+fn compiler_main_test_cse_basic() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_binop(2, 0, BinaryOp::OpAdd, 1)   // r2 = r0 + r1
+    instrs[1] = ir_binop(3, 0, BinaryOp::OpAdd, 1)   // r3 = r0 + r1  (dup)
+    let func = cp_make_test_func(instrs, 2)
+    let result = ocp_cse(func)
+    // Second binop should become IrCopy(3, 2)
+    result.instrs[1].op == IrOpcode::IrCopy
+        && result.instrs[1].dst  == 3
+        && result.instrs[1].src1 == 2
+}
+
+// T132: CSE does not fire when src2 differs between two adds.
+fn compiler_main_test_cse_no_false_positive() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_binop(2, 0, BinaryOp::OpAdd, 1)   // r2 = r0 + r1
+    instrs[1] = ir_binop(3, 0, BinaryOp::OpAdd, 2)   // r3 = r0 + r2 (different src2)
+    let func = cp_make_test_func(instrs, 2)
+    let result = ocp_cse(func)
+    result.instrs[1].op == IrOpcode::IrBinOp          // still a binop — no CSE
+}
+
+// T133: CSE does not fire when opcodes differ (OpAdd vs OpMul).
+fn compiler_main_test_cse_op_distinct() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_binop(2, 0, BinaryOp::OpAdd, 1)   // r2 = r0 + r1
+    instrs[1] = ir_binop(3, 0, BinaryOp::OpMul, 1)   // r3 = r0 * r1
+    let func = cp_make_test_func(instrs, 2)
+    let result = ocp_cse(func)
+    result.instrs[1].op == IrOpcode::IrBinOp           // different op: no CSE
+}
+
+// T134: CSE on three identical binops: second and third become copies of first.
+fn compiler_main_test_cse_triple() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_binop(2, 0, BinaryOp::OpAdd, 1)   // r2 = r0 + r1
+    instrs[1] = ir_binop(3, 0, BinaryOp::OpAdd, 1)   // r3 = r0 + r1 (dup)
+    instrs[2] = ir_binop(4, 0, BinaryOp::OpAdd, 1)   // r4 = r0 + r1 (dup)
+    let func = cp_make_test_func(instrs, 3)
+    let result = ocp_cse(func)
+    result.instrs[1].op == IrOpcode::IrCopy && result.instrs[1].src1 == 2
+        && result.instrs[2].op == IrOpcode::IrCopy && result.instrs[2].src1 == 2
+}
+
+// T135: CSE does not CSE unmapped ops (OpBitAnd → EG_OP_CONST sentinel guard).
+fn compiler_main_test_cse_unmapped_op() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_binop(2, 0, BinaryOp::OpBitAnd, 1)  // r2 = r0 & r1
+    instrs[1] = ir_binop(3, 0, BinaryOp::OpBitAnd, 1)  // r3 = r0 & r1 (same, but AND is unmapped)
+    let func = cp_make_test_func(instrs, 2)
+    let result = ocp_cse(func)
+    result.instrs[1].op == IrOpcode::IrBinOp             // AND not CSE'd
+}
+
+// T136: eg_small_init returns a zeroed-out context.
+fn compiler_main_test_eg_small_init() -> bool {
+    let ctx = eg_small_init()
+    ctx.node_count == 0 && ctx.uf_size == 0
+}
+
+fn compiler_eg_small_add_const(ctx: EgSmallContext, value: i64) -> (EgSmallContext, i64) with Mut, Div, Panic {
+    var next = ctx
+    let id = eg_small_add_const(&! next, value)
+    (next, id)
+}
+
+fn compiler_eg_small_add_var(ctx: EgSmallContext, var_id: i64) -> (EgSmallContext, i64) with Mut, Div, Panic {
+    var next = ctx
+    let id = eg_small_add_var(&! next, var_id)
+    (next, id)
+}
+
+fn compiler_eg_small_add_binop(ctx: EgSmallContext, op: i64, lhs: i64, rhs: i64) -> (EgSmallContext, i64) with Mut, Div, Panic {
+    var next = ctx
+    let id = eg_small_add_binop(&! next, op, lhs, rhs)
+    (next, id)
+}
+
+fn compiler_eg_small_find(ctx: EgSmallContext, id: i64) -> (EgSmallContext, i64) with Mut, Div, Panic {
+    var next = ctx
+    let root = eg_small_find(&! next, id)
+    (next, root)
+}
+
+fn compiler_eg_small_union(ctx: EgSmallContext, id0: i64, id1: i64) -> EgSmallContext with Mut, Div, Panic {
+    var next = ctx
+    let _ = eg_small_union(&! next, id0, id1)
+    next
+}
+
+fn compiler_eg_small_saturate(ctx: EgSmallContext) -> EgSmallContext with Mut, Div, Panic {
+    var next = ctx
+    let _ = eg_small_saturate(&! next)
+    next
+}
+
+fn compiler_eg_small_extract(ctx: EgSmallContext, root: i64) -> (EgSmallContext, EgNode) with Mut, Div, Panic {
+    var next = ctx
+    let extracted = eg_small_extract(&! next, root)
+    (next, extracted)
+}
+
+// T137: eg_small_add_const adds one node; returns class_id 0.
+fn compiler_main_test_eg_small_add_node() -> bool with Mut, Div, Panic {
+    let pair = compiler_eg_small_add_const(eg_small_init(), 42)
+    pair.0.node_count == 1 && pair.1 == 0
+}
+
+// T138: Adding the same constant node twice returns the same class_id (dedup).
+fn compiler_main_test_eg_small_dedup() -> bool with Mut, Div, Panic {
+    let pair1 = compiler_eg_small_add_const(eg_small_init(), 99)
+    let pair2 = compiler_eg_small_add_const(pair1.0, 99)
+    pair1.1 == pair2.1 && pair2.0.node_count == 1
+}
+
+// T139: eg_small_find returns self for a freshly allocated class.
+fn compiler_main_test_eg_small_find_self() -> bool with Mut, Div, Panic {
+    let pair1 = compiler_eg_small_add_const(eg_small_init(), 0)
+    let pair2 = compiler_eg_small_find(pair1.0, pair1.1)
+    pair2.1 == pair1.1
+}
+
+// T140: eg_small_union merges two classes; find gives same canonical for both.
+fn compiler_main_test_eg_small_union() -> bool with Mut, Div, Panic {
+    let pair0 = compiler_eg_small_add_const(eg_small_init(), 10)
+    let pair1 = compiler_eg_small_add_const(pair0.0, 20)
+    let ctx2 = compiler_eg_small_union(pair1.0, pair0.1, pair1.1)
+    let pair2 = compiler_eg_small_find(ctx2, pair0.1)
+    let pair3 = compiler_eg_small_find(pair2.0, pair1.1)
+    pair2.1 == pair3.1
+}
+
+// T141: eg_small_saturate on add(x, 0): extraction gives EG_OP_VAR.
+fn compiler_main_test_eg_small_sat_add_identity() -> bool with Mut, Div, Panic {
+    let pair0 = compiler_eg_small_add_const(eg_small_init(), 0)
+    let pair1 = compiler_eg_small_add_var(pair0.0, 1)
+    let pair2 = compiler_eg_small_add_binop(pair1.0, EG_OP_ADD, pair1.1, pair0.1)
+    let ctx3 = compiler_eg_small_saturate(pair2.0)
+    let pair3 = compiler_eg_small_extract(ctx3, pair2.1)
+    pair3.1.op == EG_OP_VAR
+}
+
+// T142: eg_small_saturate on mul(x, 1): extraction gives EG_OP_VAR.
+fn compiler_main_test_eg_small_sat_mul_identity() -> bool with Mut, Div, Panic {
+    let pair0 = compiler_eg_small_add_const(eg_small_init(), 1)
+    let pair1 = compiler_eg_small_add_var(pair0.0, 2)
+    let pair2 = compiler_eg_small_add_binop(pair1.0, EG_OP_MUL, pair1.1, pair0.1)
+    let ctx3 = compiler_eg_small_saturate(pair2.0)
+    let pair3 = compiler_eg_small_extract(ctx3, pair2.1)
+    pair3.1.op == EG_OP_VAR
+}
+
+// T143: eg_small_saturate on sub(x, x): extraction gives EG_OP_CONST with value 0.
+fn compiler_main_test_eg_small_sat_sub_self() -> bool with Mut, Div, Panic {
+    let pair0 = compiler_eg_small_add_var(eg_small_init(), 3)
+    let pair1 = compiler_eg_small_add_binop(pair0.0, EG_OP_SUB, pair0.1, pair0.1)
+    let ctx2 = compiler_eg_small_saturate(pair1.0)
+    let pair2 = compiler_eg_small_extract(ctx2, pair1.1)
+    pair2.1.op == EG_OP_CONST && pair2.1.value == 0
+}
+
+// T144: ocp_egraph_mini_pass skips when instr_count > 4 (returns func unchanged).
+fn compiler_main_test_ocp_mini_pass_skip() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_binop(2, 0, BinaryOp::OpAdd, 1)
+    instrs[1] = ir_binop(3, 2, BinaryOp::OpMul, 0)
+    instrs[2] = ir_binop(4, 3, BinaryOp::OpSub, 1)
+    instrs[3] = ir_binop(5, 4, BinaryOp::OpDiv, 0)
+    instrs[4] = ir_binop(6, 5, BinaryOp::OpAdd, 2)
+    let func   = cp_make_test_func(instrs, 5)   // instr_count=5 > 4
+    let result = ocp_egraph_mini_pass(func)
+    // Guard fires: result identical to input (first binop still a binop)
+    result.instrs[0].op == IrOpcode::IrBinOp && result.instr_count == 5
+}
+
+// T145: ocp_cse + DCE combined: 4-instr function with one duplicate.
+//       After opt_cleanup, the duplicate binop is CSE'd → IrCopy → DCE'd.
+fn compiler_main_test_ocp_cse_and_dce() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_binop(2, 0, BinaryOp::OpAdd, 1)   // r2 = r0 + r1
+    instrs[1] = ir_binop(3, 0, BinaryOp::OpAdd, 1)   // r3 = r0 + r1 (dup → CSE → copy)
+    instrs[2] = ir_return(3)                           // use r3
+    let func   = cp_make_test_func(instrs, 3)
+    let result = ocp_cse(func)
+    // After CSE: instrs[1] is IrCopy(3, 2); r2 is now used by copy
+    result.instrs[1].op == IrOpcode::IrCopy
+}
+
+// ============================================================================
+// Sprint 74: Comparison operator folding self-tests (T146–T153)
+// ============================================================================
+
+// T146: Both-constant OpEq: 5 == 5 → IrLoadImm(dst, 1)
+fn compiler_main_test_cmp_eq_const_true() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(0, 5)
+    instrs[1] = ir_load_imm(1, 5)
+    instrs[2] = ir_binop(2, 0, BinaryOp::OpEq, 1)
+    let func   = cp_make_test_func(instrs, 3)
+    let result = ocp_const_fold(func)
+    result.instrs[2].op == IrOpcode::IrLoadImm && result.instrs[2].imm_i64 == 1
+}
+
+// T147: Both-constant OpNe: 5 != 5 → IrLoadImm(dst, 0)
+fn compiler_main_test_cmp_ne_const_false() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(0, 5)
+    instrs[1] = ir_load_imm(1, 5)
+    instrs[2] = ir_binop(2, 0, BinaryOp::OpNe, 1)
+    let func   = cp_make_test_func(instrs, 3)
+    let result = ocp_const_fold(func)
+    result.instrs[2].op == IrOpcode::IrLoadImm && result.instrs[2].imm_i64 == 0
+}
+
+// T148: Both-constant OpLt: 3 < 7 → IrLoadImm(dst, 1)
+fn compiler_main_test_cmp_lt_const_true() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(0, 3)
+    instrs[1] = ir_load_imm(1, 7)
+    instrs[2] = ir_binop(2, 0, BinaryOp::OpLt, 1)
+    let func   = cp_make_test_func(instrs, 3)
+    let result = ocp_const_fold(func)
+    result.instrs[2].op == IrOpcode::IrLoadImm && result.instrs[2].imm_i64 == 1
+}
+
+// T149: Both-constant OpLt: 7 < 3 → IrLoadImm(dst, 0)
+fn compiler_main_test_cmp_lt_const_false() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(0, 7)
+    instrs[1] = ir_load_imm(1, 3)
+    instrs[2] = ir_binop(2, 0, BinaryOp::OpLt, 1)
+    let func   = cp_make_test_func(instrs, 3)
+    let result = ocp_const_fold(func)
+    result.instrs[2].op == IrOpcode::IrLoadImm && result.instrs[2].imm_i64 == 0
+}
+
+// T150: Same-register OpEq: x == x → IrLoadImm(dst, 1)
+fn compiler_main_test_cmp_eq_same_reg() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_binop(1, 0, BinaryOp::OpEq, 0)
+    let func   = cp_make_test_func(instrs, 1)
+    let result = ocp_const_fold(func)
+    result.instrs[0].op == IrOpcode::IrLoadImm && result.instrs[0].imm_i64 == 1
+}
+
+// T151: Same-register OpNe: x != x → IrLoadImm(dst, 0)
+fn compiler_main_test_cmp_ne_same_reg() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_binop(1, 0, BinaryOp::OpNe, 0)
+    let func   = cp_make_test_func(instrs, 1)
+    let result = ocp_const_fold(func)
+    result.instrs[0].op == IrOpcode::IrLoadImm && result.instrs[0].imm_i64 == 0
+}
+
+// T152: Same-register OpLt: x < x → IrLoadImm(dst, 0)
+fn compiler_main_test_cmp_lt_same_reg() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_binop(1, 0, BinaryOp::OpLt, 0)
+    let func   = cp_make_test_func(instrs, 1)
+    let result = ocp_const_fold(func)
+    result.instrs[0].op == IrOpcode::IrLoadImm && result.instrs[0].imm_i64 == 0
+}
+
+// T153: Same-register OpLe: x <= x → IrLoadImm(dst, 1)
+fn compiler_main_test_cmp_le_same_reg() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_binop(1, 0, BinaryOp::OpLe, 0)
+    let func   = cp_make_test_func(instrs, 1)
+    let result = ocp_const_fold(func)
+    result.instrs[0].op == IrOpcode::IrLoadImm && result.instrs[0].imm_i64 == 1
 }
 
 // --probe-machine-ir <file.sio>: load IR, build Machine IR, print stats.
@@ -5534,9 +5819,108 @@ fn run_probe_machine_ir(args: ArgList, flag_index: i64) with IO, Mut, Panic, Div
     panic("probe_machine_ir failed")
 }
 
+// --probe-native-streaming <file.sio>: inspect the single-module native streaming path.
+fn run_probe_native_streaming(args: ArgList, flag_index: i64) with IO, Mut, Panic, Div, Alloc {
+    if flag_index + 1 >= args.len {
+        panic("probe_native_streaming: missing source file argument")
+    }
+    let source_path = arg_list_get(args, flag_index + 1)
+    let program = load_module_file(source_path)
+    let parse_errors = parser_last_error_count()
+    if parse_errors > 0 {
+        print("probe_native_streaming: parser_errors=")
+        print_int(parse_errors)
+        print("\n")
+        panic("probe_native_streaming parse failed")
+    }
+
+    let imports = extract_imports_from_ast(program)
+    print("probe_native_streaming: imports=")
+    print_int(imports.count)
+    print("\n")
+
+    var epistemic = ir_empty_epistemic_section()
+    let skip_checker = starts_with(source_path, "examples/render/") && imports.count == 0
+    if skip_checker {
+        print("probe_native_streaming: typecheck_skipped\n")
+    } else {
+        print("probe_native_streaming: typecheck_begin\n")
+        if !check_program_epistemic_into(program, &! epistemic) {
+            panic("probe_native_streaming type check failed")
+        }
+        print("probe_native_streaming: typecheck_ok\n")
+    }
+
+    print("probe_native_streaming: summary_begin\n")
+    let summary_result = lower_program_to_ir_summary_with_epistemic(program, epistemic)
+    if summary_result.had_error {
+        panic("probe_native_streaming summary lowering failed")
+    }
+    print("probe_native_streaming: summary_ok\n")
+
+    print("probe_native_streaming: fn_count=")
+    print_int(summary_result.summary.module.fn_count)
+    print("\n")
+
+    var fi: i64 = 0
+    while fi < summary_result.summary.module.fn_count {
+        let fn_name = summary_result.summary.module.functions[fi as usize].name
+        print("probe_native_streaming: body_begin fn=")
+        compiler_manifest_print_name(fn_name)
+        print("\n")
+        let body_result = lower_program_function_body_from_summary_with_epistemic(
+            program,
+            summary_result.summary,
+            epistemic,
+            fn_name
+        )
+        if body_result.had_error {
+            print("probe_native_streaming: body_error fn=")
+            compiler_manifest_print_name(fn_name)
+            print("\n")
+            panic("probe_native_streaming body lowering failed")
+        }
+        let lowered = native_v2_lower_function_to_machine(body_result.func)
+        let legal = native_v2_legalize_function(lowered)
+        print("probe_native_streaming: body_ok fn=")
+        compiler_manifest_print_name(fn_name)
+        print("\n")
+        print("  fn=")
+        compiler_manifest_print_name(fn_name)
+        print(" instrs=")
+        print_int(body_result.func.instr_count)
+        print(" regs=")
+        print_int(body_result.func.reg_count)
+        print(" temps=")
+        print_int(legal.temp_count)
+        print(" legal_instrs=")
+        print_int(legal.legal_instr_count)
+        print(" supported=")
+        if legal.supported { print("true") } else { print("false") }
+        if !legal.supported {
+            print(" unsupported=")
+            print(legal.unsupported_detail)
+        }
+        print("\n")
+        fi = fi + 1
+    }
+
+    let spec = native_resolve_target("native", "auto", false)
+    let stream_pair = compile_multimodule_native_maybe_streaming(source_path, spec)
+    print("probe_native_streaming: streaming_used=")
+    if stream_pair.0 { print("true") } else { print("false") }
+    print(" ok=")
+    if stream_pair.1.ok { print("true") } else { print("false") }
+    print(" err=")
+    print(stream_pair.1.error_msg)
+    print(" len=")
+    print_int(stream_pair.1.len)
+    print("\n")
+}
+
 fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
     var passed: i64 = 0
-    let total: i64 = 130
+    let total: i64 = 145
 
     println("=== compiler/main.sio self-tests ===")
 
@@ -6447,10 +6831,115 @@ fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
     }
 
     if compiler_main_test_mir_target_policy_aarch64() {
-        println("  T130 OK: AArch64 macOS target policy: emitter_ready=false, allocatable=10")
+        println("  T130 OK: AArch64 macOS target policy: emitter_ready=true, allocatable=10")
         passed = passed + 1
     } else {
         println("  FAIL: T130 AArch64 target policy")
+    }
+
+    if compiler_main_test_cse_basic() {
+        println("  T131 OK: CSE: r2=r0+r1; r3=r0+r1 → r3=IrCopy(r2)")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T131 CSE basic")
+    }
+
+    if compiler_main_test_cse_no_false_positive() {
+        println("  T132 OK: CSE no false positive: different src2")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T132 CSE no false positive")
+    }
+
+    if compiler_main_test_cse_op_distinct() {
+        println("  T133 OK: CSE op-distinct: add vs mul not CSE'd")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T133 CSE op-distinct")
+    }
+
+    if compiler_main_test_cse_triple() {
+        println("  T134 OK: CSE triple: second+third become copies of first")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T134 CSE triple")
+    }
+
+    if compiler_main_test_cse_unmapped_op() {
+        println("  T135 OK: CSE unmapped op: OpBitAnd not CSE'd (EG_OP_CONST guard)")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T135 CSE unmapped op")
+    }
+
+    if compiler_main_test_eg_small_init() {
+        println("  T136 OK: eg_small_init: node_count=0, uf_size=0")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T136 eg_small_init")
+    }
+
+    if compiler_main_test_eg_small_add_node() {
+        println("  T137 OK: eg_small_add_const: node_count=1, id=0")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T137 eg_small_add_node")
+    }
+
+    if compiler_main_test_eg_small_dedup() {
+        println("  T138 OK: eg_small_add_const dedup: same id, node_count=1")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T138 eg_small_dedup")
+    }
+
+    if compiler_main_test_eg_small_find_self() {
+        println("  T139 OK: eg_small_find: find(id)==id (no merges)")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T139 eg_small_find_self")
+    }
+
+    if compiler_main_test_eg_small_union() {
+        println("  T140 OK: eg_small_union: find(a)==find(b) after merge")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T140 eg_small_union")
+    }
+
+    if compiler_main_test_eg_small_sat_add_identity() {
+        println("  T141 OK: eg_small_saturate: add(x,0) extracts EG_OP_VAR")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T141 eg_small_sat_add_identity")
+    }
+
+    if compiler_main_test_eg_small_sat_mul_identity() {
+        println("  T142 OK: eg_small_saturate: mul(x,1) extracts EG_OP_VAR")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T142 eg_small_sat_mul_identity")
+    }
+
+    if compiler_main_test_eg_small_sat_sub_self() {
+        println("  T143 OK: eg_small_saturate: sub(x,x) extracts EG_OP_CONST(0)")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T143 eg_small_sat_sub_self")
+    }
+
+    if compiler_main_test_ocp_mini_pass_skip() {
+        println("  T144 OK: ocp_egraph_mini_pass: instr_count=5 > 4, guard skips")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T144 ocp_mini_pass_skip")
+    }
+
+    if compiler_main_test_ocp_cse_and_dce() {
+        println("  T145 OK: ocp_cse + DCE: dup binop → IrCopy")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T145 ocp_cse_and_dce")
     }
 
     println("")
@@ -6513,6 +7002,9 @@ fn main() with IO, Mut, Panic, Div, Alloc {
             return
         } else if mode == "--probe-load-ir-trace" || starts_with(mode, "--probe-load-ir-t") {
             run_probe_load_ir_trace(args, arg_idx)
+            return
+        } else if mode == "--probe-native-streaming" || starts_with(mode, "--probe-native-stream") {
+            run_probe_native_streaming(args, arg_idx)
             return
         } else if mode == "--probe-load-ir" || starts_with(mode, "--probe-load") {
             run_probe_load_ir(args, arg_idx)

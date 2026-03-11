@@ -1281,6 +1281,312 @@ fn eg_ctx_node_child(ctx: &EgContext, node_idx: i64, child_idx: i64) -> i64 with
 }
 
 // ============================================================================
+// Section 14c: Small E-graph (safe under double-JIT interpretation, ~7KB)
+// ============================================================================
+//
+// EgSmallContext compresses EgContext from ~4MB to ~7KB by limiting node/UF
+// capacity from 16384/8192 to 64/128.  Used by ocp_egraph_mini_pass on
+// IrFunctions with ≤4 instructions — safe to allocate on the interpreter stack
+// under double-JIT.  Same algebraic rules as EgContext; saturation ≤ 8 iters.
+//
+// References:
+//   Willsey et al. "egg: Fast and Extensible Equality Saturation" (2021)
+
+struct EgSmallContext {
+    nodes:      [EgNode; 64],
+    node_count: i64,
+    parent:     [i64; 128],
+    rank:       [i64; 128],
+    uf_size:    i64,
+    costs:      [i64; 64],
+    best:       [i64; 64],
+}
+
+fn eg_small_init() -> EgSmallContext {
+    EgSmallContext {
+        nodes:      [eg_node_new(); 64],
+        node_count: 0,
+        parent:     [EG_INVALID; 128],
+        rank:       [0; 128],
+        uf_size:    0,
+        costs:      [999999; 64],
+        best:       [EG_INVALID; 64],
+    }
+}
+
+// Allocate a fresh equivalence class; returns its id, or EG_INVALID if full.
+fn eg_small_make_set(ctx: &! EgSmallContext) -> i64 with Mut, Div, Panic {
+    let id = ctx.uf_size
+    if id >= 128 { return EG_INVALID }
+    ctx.parent[id as usize] = id
+    ctx.rank[id as usize]   = 0
+    ctx.uf_size = ctx.uf_size + 1
+    id
+}
+
+// Path-compressing find on the small union-find.
+fn eg_small_find(ctx: &! EgSmallContext, x: i64) -> i64 with Mut, Div {
+    if x < 0 || x >= 128 { return x }
+    var root = x
+    while ctx.parent[root as usize] != root {
+        root = ctx.parent[root as usize]
+    }
+    var cur = x
+    while cur != root {
+        let next = ctx.parent[cur as usize]
+        ctx.parent[cur as usize] = root
+        cur = next
+    }
+    root
+}
+
+// Rank-based union.  Returns true if a real merge happened (classes were distinct).
+fn eg_small_union(ctx: &! EgSmallContext, a: i64, b: i64) -> bool with Mut, Div {
+    let ra = eg_small_find(ctx, a)
+    let rb = eg_small_find(ctx, b)
+    if ra == rb { return false }
+    let rank_a = ctx.rank[ra as usize]
+    let rank_b = ctx.rank[rb as usize]
+    if rank_a < rank_b {
+        ctx.parent[ra as usize] = rb
+    } else if rank_a > rank_b {
+        ctx.parent[rb as usize] = ra
+    } else {
+        ctx.parent[rb as usize] = ra
+        ctx.rank[ra as usize] = rank_a + 1
+    }
+    true
+}
+
+// Hash-consing node add: linear-scan dedup over node_count (≤64) entries.
+// Returns the equivalence class of the (possibly existing) node.
+fn eg_small_add_node(ctx: &! EgSmallContext, node: EgNode) -> i64 with Mut, Div {
+    var i: i64 = 0
+    while i < ctx.node_count {
+        let ex = ctx.nodes[i as usize]
+        if ex.op          == node.op
+            && ex.value       == node.value
+            && ex.child_count == node.child_count
+            && ex.children[0] == node.children[0]
+            && ex.children[1] == node.children[1] {
+            return ex.eclass_id
+        }
+        i = i + 1
+    }
+    if ctx.node_count >= 64 { return EG_INVALID }
+    let id = eg_small_make_set(ctx)
+    if id == EG_INVALID { return EG_INVALID }
+    var new_node = node
+    new_node.eclass_id = id
+    ctx.nodes[ctx.node_count as usize] = new_node
+    ctx.node_count = ctx.node_count + 1
+    id
+}
+
+fn eg_small_add_const(ctx: &! EgSmallContext, value: i64) -> i64 with Mut, Div {
+    let node = EgNode {
+        op:          EG_OP_CONST,
+        children:    [EG_INVALID, EG_INVALID, EG_INVALID, EG_INVALID],
+        child_count: 0,
+        value:       value,
+        eclass_id:   EG_INVALID,
+    }
+    eg_small_add_node(ctx, node)
+}
+
+fn eg_small_add_var(ctx: &! EgSmallContext, var_id: i64) -> i64 with Mut, Div {
+    let node = EgNode {
+        op:          EG_OP_VAR,
+        children:    [var_id, EG_INVALID, EG_INVALID, EG_INVALID],
+        child_count: 1,
+        value:       var_id,
+        eclass_id:   EG_INVALID,
+    }
+    eg_small_add_node(ctx, node)
+}
+
+fn eg_small_add_binop(ctx: &! EgSmallContext, op: i64, lhs: i64, rhs: i64) -> i64 with Mut, Div {
+    let node = EgNode {
+        op:          op,
+        children:    [lhs, rhs, EG_INVALID, EG_INVALID],
+        child_count: 2,
+        value:       0,
+        eclass_id:   EG_INVALID,
+    }
+    eg_small_add_node(ctx, node)
+}
+
+// Simple cost function: CONST/VAR cost 1, everything else costs 2.
+fn eg_small_cost_by_op(op: i64) -> i64 {
+    if op == EG_OP_CONST { return EG_COST_CONST }
+    if op == EG_OP_VAR   { return EG_COST_VAR   }
+    EG_COST_OP
+}
+
+// Apply algebraic saturation rules on the small graph.
+// Rules: add(x,0)→x, add(0,x)→x, mul(x,1)→x, mul(1,x)→x, sub(x,x)→0.
+// Returns total merge count; 0 indicates already saturated.
+fn eg_small_saturate(ctx: &! EgSmallContext) -> i64 with Mut, Div {
+    var total_merges: i64 = 0
+    var iter: i64 = 0
+    while iter < 8 {
+        var merges: i64 = 0
+        var i: i64 = 0
+        while i < ctx.node_count {
+            let node     = ctx.nodes[i as usize]
+            let cls      = eg_small_find(ctx, node.eclass_id)
+            if node.op == EG_OP_ADD && node.child_count == 2 {
+                let lhs_cls = eg_small_find(ctx, node.children[0])
+                let rhs_cls = eg_small_find(ctx, node.children[1])
+                var j: i64 = 0
+                while j < ctx.node_count {
+                    let other = ctx.nodes[j as usize]
+                    if other.op == EG_OP_CONST && other.value == 0 {
+                        let zero_cls = eg_small_find(ctx, other.eclass_id)
+                        // add(x, 0) → x
+                        if rhs_cls == zero_cls {
+                            if eg_small_union(ctx, cls, lhs_cls) { merges = merges + 1 }
+                        }
+                        // add(0, x) → x
+                        if lhs_cls == zero_cls {
+                            if eg_small_union(ctx, cls, rhs_cls) { merges = merges + 1 }
+                        }
+                    }
+                    j = j + 1
+                }
+            }
+            if node.op == EG_OP_MUL && node.child_count == 2 {
+                let lhs_cls = eg_small_find(ctx, node.children[0])
+                let rhs_cls = eg_small_find(ctx, node.children[1])
+                var j: i64 = 0
+                while j < ctx.node_count {
+                    let other = ctx.nodes[j as usize]
+                    if other.op == EG_OP_CONST && other.value == 1 {
+                        let one_cls = eg_small_find(ctx, other.eclass_id)
+                        // mul(x, 1) → x
+                        if rhs_cls == one_cls {
+                            if eg_small_union(ctx, cls, lhs_cls) { merges = merges + 1 }
+                        }
+                        // mul(1, x) → x
+                        if lhs_cls == one_cls {
+                            if eg_small_union(ctx, cls, rhs_cls) { merges = merges + 1 }
+                        }
+                    }
+                    j = j + 1
+                }
+            }
+            if node.op == EG_OP_SUB && node.child_count == 2 {
+                // sub(x, x) → 0
+                let lhs_cls = eg_small_find(ctx, node.children[0])
+                let rhs_cls = eg_small_find(ctx, node.children[1])
+                if lhs_cls == rhs_cls {
+                    let zero_id = eg_small_add_const(ctx, 0)
+                    if zero_id != EG_INVALID {
+                        let zero_cls = eg_small_find(ctx, zero_id)
+                        if eg_small_union(ctx, cls, zero_cls) { merges = merges + 1 }
+                    }
+                }
+            }
+            i = i + 1
+        }
+        total_merges = total_merges + merges
+        if merges == 0 { return total_merges }
+        iter = iter + 1
+    }
+    total_merges
+}
+
+// Cost-based extraction: return the cheapest EgNode in the equivalence class
+// of class_id (using path-compression-aware find).
+fn eg_small_extract(ctx: &! EgSmallContext, class_id: i64) -> EgNode with Mut, Div {
+    let canonical  = eg_small_find(ctx, class_id)
+    var best       = eg_node_new()
+    var best_cost: i64 = 999999
+    var i: i64 = 0
+    while i < ctx.node_count {
+        let node = ctx.nodes[i as usize]
+        if node.eclass_id >= 0 {
+            let node_cls = eg_small_find(ctx, node.eclass_id)
+            if node_cls == canonical {
+                let cost = eg_small_cost_by_op(node.op)
+                if cost < best_cost {
+                    best_cost = cost
+                    best      = node
+                }
+            }
+        }
+        i = i + 1
+    }
+    best
+}
+
+// ── Small E-graph tests ────────────────────────────────────────────────────
+
+fn test_eg_small_init() -> bool {
+    let ctx = eg_small_init()
+    ctx.node_count == 0 && ctx.uf_size == 0
+}
+
+fn test_eg_small_add_node() -> bool with Mut, Div {
+    var ctx = eg_small_init()
+    let id = eg_small_add_const(&! ctx, 42)
+    ctx.node_count == 1 && id == 0
+}
+
+fn test_eg_small_dedup() -> bool with Mut, Div {
+    var ctx = eg_small_init()
+    let id1 = eg_small_add_const(&! ctx, 42)
+    let id2 = eg_small_add_const(&! ctx, 42)
+    id1 == id2 && ctx.node_count == 1
+}
+
+fn test_eg_small_find_self() -> bool with Mut, Div {
+    var ctx = eg_small_init()
+    let id = eg_small_add_const(&! ctx, 0)
+    let found = eg_small_find(&! ctx, id)
+    found == id
+}
+
+fn test_eg_small_union_basic() -> bool with Mut, Div {
+    var ctx = eg_small_init()
+    let id0 = eg_small_add_const(&! ctx, 10)
+    let id1 = eg_small_add_const(&! ctx, 20)
+    eg_small_union(&! ctx, id0, id1)
+    let r0 = eg_small_find(&! ctx, id0)
+    let r1 = eg_small_find(&! ctx, id1)
+    r0 == r1
+}
+
+fn test_eg_small_sat_add_identity() -> bool with Mut, Div {
+    var ctx  = eg_small_init()
+    let zero = eg_small_add_const(&! ctx, 0)
+    let x    = eg_small_add_var(&! ctx, 1)
+    let root = eg_small_add_binop(&! ctx, EG_OP_ADD, x, zero)
+    eg_small_saturate(&! ctx)
+    let extracted = eg_small_extract(&! ctx, root)
+    extracted.op == EG_OP_VAR
+}
+
+fn test_eg_small_sat_mul_identity() -> bool with Mut, Div {
+    var ctx = eg_small_init()
+    let one  = eg_small_add_const(&! ctx, 1)
+    let x    = eg_small_add_var(&! ctx, 2)
+    let root = eg_small_add_binop(&! ctx, EG_OP_MUL, x, one)
+    eg_small_saturate(&! ctx)
+    let extracted = eg_small_extract(&! ctx, root)
+    extracted.op == EG_OP_VAR
+}
+
+fn test_eg_small_sat_sub_self() -> bool with Mut, Div {
+    var ctx = eg_small_init()
+    let x    = eg_small_add_var(&! ctx, 3)
+    let root = eg_small_add_binop(&! ctx, EG_OP_SUB, x, x)
+    eg_small_saturate(&! ctx)
+    let extracted = eg_small_extract(&! ctx, root)
+    extracted.op == EG_OP_CONST && extracted.value == 0
+}
+
+// ============================================================================
 // Section 15: Test Helpers
 // ============================================================================
 

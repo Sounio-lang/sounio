@@ -387,6 +387,67 @@ fn ocp_const_fold(func: IrFunction) -> IrFunction with Mut, Div, Panic {
             }
         }
 
+        // Sprint 74 Block E: Comparison operator constant folding.
+        // References: Wegman & Zadeck, "Constant Propagation with Conditional Branches"
+        //   (TOPLAS 1991) §2 — comparison lattice values are the foundation for SCCP.
+        //
+        // Both-constant: fold OpEq/Ne/Lt/Le/Gt/Ge when both srcs are known integers.
+        //   5 == 5 → IrLoadImm(dst, 1)   5 != 5 → IrLoadImm(dst, 0)
+        //   3 < 7  → IrLoadImm(dst, 1)   7 < 3  → IrLoadImm(dst, 0)
+        //   3 <= 3 → IrLoadImm(dst, 1)   3 > 3  → IrLoadImm(dst, 0)
+        //
+        // Same-register: fold when src1 == src2 (reflexive relations).
+        //   x == x → 1   x != x → 0
+        //   x < x  → 0   x <= x → 1
+        //   x > x  → 0   x >= x → 1
+        if ocp_is_binop(result.instrs[i as usize].op) {
+            let cmp = result.instrs[i as usize]
+            let cmp_s1 = cmp.src1
+            let cmp_s2 = cmp.src2
+            let cmp_is_cmp =
+                cmp.bin_op == BinaryOp::OpEq || cmp.bin_op == BinaryOp::OpNe
+                || cmp.bin_op == BinaryOp::OpLt || cmp.bin_op == BinaryOp::OpLe
+                || cmp.bin_op == BinaryOp::OpGt || cmp.bin_op == BinaryOp::OpGe
+            if cmp_is_cmp {
+                let cmp_s1_ok = cmp_s1 >= 0 && cmp_s1 < 256
+                let cmp_s2_ok = cmp_s2 >= 0 && cmp_s2 < 256
+                // Both-constant fold
+                if cmp_s1_ok && cmp_s2_ok && is_const[cmp_s1 as usize] && is_const[cmp_s2 as usize] {
+                    let cv1 = const_val[cmp_s1 as usize]
+                    let cv2 = const_val[cmp_s2 as usize]
+                    var cmp_result: i64 = 0
+                    if cmp.bin_op == BinaryOp::OpEq { cmp_result = if cv1 == cv2 { 1 } else { 0 } }
+                    if cmp.bin_op == BinaryOp::OpNe { cmp_result = if cv1 != cv2 { 1 } else { 0 } }
+                    if cmp.bin_op == BinaryOp::OpLt { cmp_result = if cv1 < cv2  { 1 } else { 0 } }
+                    if cmp.bin_op == BinaryOp::OpLe { cmp_result = if cv1 <= cv2 { 1 } else { 0 } }
+                    if cmp.bin_op == BinaryOp::OpGt { cmp_result = if cv1 > cv2  { 1 } else { 0 } }
+                    if cmp.bin_op == BinaryOp::OpGe { cmp_result = if cv1 >= cv2 { 1 } else { 0 } }
+                    result.instrs[i as usize] = ir_load_imm(cmp.dst, cmp_result)
+                    if cmp.dst >= 0 && cmp.dst < 256 {
+                        is_const[cmp.dst as usize] = true
+                        const_val[cmp.dst as usize] = cmp_result
+                        def_at[cmp.dst as usize] = i
+                    }
+                }
+                // Same-register fold
+                if cmp_s1_ok && cmp_s1 == cmp_s2 {
+                    var sr_cmp: i64 = 0
+                    if cmp.bin_op == BinaryOp::OpEq { sr_cmp = 1 }
+                    if cmp.bin_op == BinaryOp::OpNe { sr_cmp = 0 }
+                    if cmp.bin_op == BinaryOp::OpLt { sr_cmp = 0 }
+                    if cmp.bin_op == BinaryOp::OpLe { sr_cmp = 1 }
+                    if cmp.bin_op == BinaryOp::OpGt { sr_cmp = 0 }
+                    if cmp.bin_op == BinaryOp::OpGe { sr_cmp = 1 }
+                    result.instrs[i as usize] = ir_load_imm(cmp.dst, sr_cmp)
+                    if cmp.dst >= 0 && cmp.dst < 256 {
+                        is_const[cmp.dst as usize] = true
+                        const_val[cmp.dst as usize] = sr_cmp
+                        def_at[cmp.dst as usize] = i
+                    }
+                }
+            }
+        }
+
         i = i + 1
     }
 
@@ -447,7 +508,7 @@ fn ocp_dce(func: IrFunction) -> IrFunction with Mut {
 }
 
 // ============================================================================
-// Sprint 72: E-graph equality saturation pass
+// Sprint 72: E-graph equality saturation pass (full, deferred)
 // ============================================================================
 
 // E-graph equality saturation pass (Sprint 72 foundation).
@@ -469,6 +530,143 @@ fn ocp_egraph_pass(func: IrFunction) -> IrFunction with Mut, Div, Panic {
 }
 
 // ============================================================================
+// Sprint 73: Common Subexpression Elimination (CSE)
+// ============================================================================
+//
+// Forward single-pass scan over IrBinOp instructions.  For each IrBinOp,
+// check a table of previously seen (eg_op_key, src1, src2) triples.
+// On match: rewrite to IrCopy(dst, prev_dst).  DCE downstream removes any
+// now-dead definitions.
+//
+// Only mapped ops (OpAdd/Sub/Mul/Div → EG_OP_ADD/SUB/MUL/DIV) are eligible;
+// unmapped ops (AND/OR/XOR → EG_OP_CONST) are excluded conservatively.
+//
+// References:
+//   Cooper & Torczon: "Engineering a Compiler", Ch. 8 (Value Numbering / CSE)
+fn ocp_cse_invalidate_reg(
+    cse_op: [i64; 128],
+    cse_src1: [i64; 128],
+    cse_src2: [i64; 128],
+    cse_dst: [i64; 128],
+    cse_len: i64,
+    reg: i64
+) -> ([i64; 128], [i64; 128], [i64; 128], [i64; 128], i64) with Mut, Div {
+    var next_op = cse_op
+    var next_src1 = cse_src1
+    var next_src2 = cse_src2
+    var next_dst = cse_dst
+    var out_len: i64 = 0
+    var i: i64 = 0
+    while i < cse_len {
+        let matches_src1 = next_src1[i as usize] == reg
+        let matches_src2 = next_src2[i as usize] == reg
+        let matches_dst = next_dst[i as usize] == reg
+        if !(matches_src1 || matches_src2 || matches_dst) {
+            next_op[out_len as usize] = next_op[i as usize]
+            next_src1[out_len as usize] = next_src1[i as usize]
+            next_src2[out_len as usize] = next_src2[i as usize]
+            next_dst[out_len as usize] = next_dst[i as usize]
+            out_len = out_len + 1
+        }
+        i = i + 1
+    }
+    (next_op, next_src1, next_src2, next_dst, out_len)
+}
+
+fn ocp_cse(func: IrFunction) -> IrFunction with Mut {
+    var result  = func
+    var cse_op:   [i64; 128] = [0; 128]
+    var cse_src1: [i64; 128] = [0; 128]
+    var cse_src2: [i64; 128] = [0; 128]
+    var cse_dst:  [i64; 128] = [0; 128]
+    var cse_len: i64 = 0
+    var i: i64 = 0
+    while i < result.instr_count {
+        let instr   = result.instrs[i as usize]
+        if ocp_has_dst(instr.op) && instr.dst >= 0 {
+            let invalidated = ocp_cse_invalidate_reg(cse_op, cse_src1, cse_src2, cse_dst, cse_len, instr.dst)
+            cse_op = invalidated.0
+            cse_src1 = invalidated.1
+            cse_src2 = invalidated.2
+            cse_dst = invalidated.3
+            cse_len = invalidated.4
+        }
+        if ocp_is_binop(instr.op) {
+            let op_key = ocp_binop_to_eg_op(instr.bin_op)
+            // EG_OP_CONST (==1) is sentinel for unmapped ops — skip conservatively
+            if op_key != EG_OP_CONST {
+                var j: i64 = 0
+                var found: i64 = 0 - 1
+                while j < cse_len {
+                    let same_op = cse_op[j as usize] == op_key
+                    let same_src1 = cse_src1[j as usize] == instr.src1
+                    let same_src2 = cse_src2[j as usize] == instr.src2
+                    if same_op && same_src1 && same_src2 {
+                        found = j
+                        break
+                    }
+                    j = j + 1
+                }
+                if found >= 0 {
+                    result.instrs[i as usize] = ir_copy(instr.dst, cse_dst[found as usize])
+                } else {
+                    if cse_len < 128 {
+                        cse_op[cse_len as usize]   = op_key
+                        cse_src1[cse_len as usize] = instr.src1
+                        cse_src2[cse_len as usize] = instr.src2
+                        cse_dst[cse_len as usize]  = instr.dst
+                        cse_len = cse_len + 1
+                    }
+                }
+            }
+        }
+        i = i + 1
+    }
+    result
+}
+
+// ============================================================================
+// Sprint 73: Mini e-graph pass — live activation for small functions
+// ============================================================================
+//
+// Uses EgSmallContext (~7KB stack) instead of EgContext (~4MB).
+// Activates when func.instr_count <= 4: scans for the first mapped IrBinOp,
+// builds a tiny e-graph with var nodes for its operands, saturates with
+// algebraic rules (add-identity, mul-identity, sub-self), and patches the
+// instruction if extraction finds a cheaper form (VAR or CONST).
+fn ocp_egraph_mini_pass(func: IrFunction) -> IrFunction with Mut, Div, Panic {
+    if func.instr_count > 4 { return func }
+    var ctx = eg_small_init()
+    var i: i64 = 0
+    while i < func.instr_count {
+        let instr  = func.instrs[i as usize]
+        if ocp_is_binop(instr.op) {
+            let eg_op = ocp_binop_to_eg_op(instr.bin_op)
+            if eg_op != EG_OP_CONST {
+                let lhs  = eg_small_add_var(&! ctx, instr.src1)
+                let rhs  = eg_small_add_var(&! ctx, instr.src2)
+                let root = eg_small_add_binop(&! ctx, eg_op, lhs, rhs)
+                eg_small_saturate(&! ctx)
+                let extracted = eg_small_extract(&! ctx, root)
+                if extracted.op == EG_OP_VAR {
+                    let src = if extracted.value == instr.src1 { instr.src1 } else { instr.src2 }
+                    var result = func
+                    result.instrs[i as usize] = ir_copy(instr.dst, src)
+                    return result
+                }
+                if extracted.op == EG_OP_CONST {
+                    var result = func
+                    result.instrs[i as usize] = ir_load_imm(instr.dst, extracted.value)
+                    return result
+                }
+            }
+        }
+        i = i + 1
+    }
+    func
+}
+
+// ============================================================================
 // Public API
 // ============================================================================
 
@@ -478,10 +676,12 @@ struct OptCleanupResult {
     instrs_folded: i64,
 }
 
-// Run const_fold + egraph pass + DCE on a single IrFunction.
+// Run const_fold → egraph (full, deferred) → egraph_mini → CSE → DCE on a single IrFunction.
 fn opt_cleanup_function(func: IrFunction) -> IrFunction with Mut, Div, Panic {
     var current = ocp_const_fold(func)
-    current = ocp_egraph_pass(current)
+    current = ocp_egraph_pass(current)        // full e-graph: deferred (always skips guard)
+    current = ocp_egraph_mini_pass(current)   // mini e-graph: activates for instr_count <= 4
+    current = ocp_cse(current)                // CSE: always active
     var iter: i64 = 0
     while iter < 8 {
         let swept = ocp_dce_once(current)
