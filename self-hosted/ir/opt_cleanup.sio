@@ -448,6 +448,31 @@ fn ocp_const_fold(func: IrFunction) -> IrFunction with Mut, Div, Panic {
             }
         }
 
+        // Sprint 75 Block F: Conditional branch folding.
+        // When a branch condition register holds a known constant, the branch outcome is static.
+        // IrBranchTrue(r, L)  + is_const[r]=true + const_val[r]!=0 → IrJump(L)
+        // IrBranchTrue(r, L)  + is_const[r]=true + const_val[r]==0 → IrNop
+        // IrBranchFalse(r, L) + is_const[r]=true + const_val[r]==0 → IrJump(L)
+        // IrBranchFalse(r, L) + is_const[r]=true + const_val[r]!=0 → IrNop
+        // SOTA: Wegman & Zadeck TOPLAS 1991 §3 (executable edge marking);
+        //   Cooper & Torczon §9.3 (dead-branch elimination via constant condition).
+        if result.instrs[i as usize].op == IrOpcode::IrBranchTrue
+            || result.instrs[i as usize].op == IrOpcode::IrBranchFalse {
+            let br = result.instrs[i as usize]
+            let br_cond = br.src1
+            if br_cond >= 0 && br_cond < 256 && is_const[br_cond as usize] {
+                let cv = const_val[br_cond as usize]
+                let taken =
+                    if br.op == IrOpcode::IrBranchTrue { cv != 0 }
+                    else { cv == 0 }
+                if taken {
+                    result.instrs[i as usize] = ir_jump(br.label_id)
+                } else {
+                    result.instrs[i as usize] = ir_nop()
+                }
+            }
+        }
+
         i = i + 1
     }
 
@@ -635,7 +660,8 @@ fn ocp_cse(func: IrFunction) -> IrFunction with Mut {
 // algebraic rules (add-identity, mul-identity, sub-self), and patches the
 // instruction if extraction finds a cheaper form (VAR or CONST).
 fn ocp_egraph_mini_pass(func: IrFunction) -> IrFunction with Mut, Div, Panic {
-    if func.instr_count > 4 { return func }
+    // Sprint 74: expanded activation from ≤4 to ≤8 instrs (EgSmallContext 64 nodes, still ~7KB)
+    if func.instr_count > 8 { return func }
     var ctx = eg_small_init()
     var i: i64 = 0
     while i < func.instr_count {

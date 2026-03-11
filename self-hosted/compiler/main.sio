@@ -27,7 +27,9 @@ use native::reloc::*
 use native::frame::*
 use native::lower_ir::*
 use native::machine_ir::*
+use native::gc::*
 use native::runtime_context::*
+use native::stack_maps::*
 use native::target_policy::*
 use wasm::core::*
 use wasm::encode::*
@@ -40,10 +42,9 @@ use resolve::scope::*
 use resolve::mod::{resolve_modules, resolve_program, ResolveBatchResult}
 use module_loader::{compile_multimodule_native, compile_multimodule_native_advanced, compile_multimodule_native_with_ir, compile_multimodule_native_maybe_streaming, load_multimodule_ir, load_multimodule_ir_traced, load_multimodule_ir_probe_summary, load_multimodule_ir_probe_summary_traced, empty_load_multimodule_ir_trace, preflight_multimodule_frontend, load_multimodule_epistemic_into, load_module_file, extract_imports_from_ast, path_directory, use_path_to_file_path, visited_contains, ir_merge_epistemic_sections, empty_program, file_exists}
 use frontend_callsite_probe::{run_frontend_callsite_probe}
-use frontend_strategy_probe::{run_frontend_strategy_probe}
 use parser::parser::{parser_last_error_count}
 use ir::opt_strategy::{ir_opt_apply_strategy, ir_opt_find_return_vreg, ir_opt_max_label, ir_opt_max_vreg}
-use ir::lower::{ir_patch_validated_calls, lower_program_to_ir, lower_program_to_ir_with_epistemic, lower_program_to_ir_summary_with_epistemic, lower_program_function_body_from_summary_with_epistemic}
+use ir::lower::{ir_patch_validated_calls, lower_program_to_ir, lower_program_to_ir_with_epistemic, lower_program_to_ir_summary_with_epistemic_ref, lower_program_function_body_from_summary_with_epistemic_ref}
 use ir::const_prop::{cp_check_load_imm, cp_empty_instrs, cp_make_test_func, cp_optimize_function}
 use ir::dce::{dce_check_nop, dce_empty_instrs, dce_make_test_func, dce_optimize_function}
 use ir::profile::*
@@ -313,12 +314,146 @@ fn run_probe_load_ir(args: ArgList, flag_index: i64) with IO, Mut, Panic, Div, A
     panic("probe_load_ir failed")
 }
 
+fn probe_frontend_strategy_print_name_local(name: Name) with IO, Mut, Panic, Div {
+    var i: i64 = 0
+    while i < name.len {
+        print_char(name.buf[i] as i64)
+        i = i + 1
+    }
+}
+
+fn probe_frontend_strategy_has_effect_local(effects: Option<Box<EffectList>>, target: string) -> bool with Mut, Panic, Div {
+    match effects {
+        Some(node) => {
+            let list = *node
+            let eff = list.head
+            var matches = true
+            let tlen = str_len(target)
+            if eff.name_len != tlen {
+                matches = false
+            } else {
+                var i: i64 = 0
+                while i < tlen {
+                    if eff.name_buf[i as usize] != (str_char_at(target, i) as i8) {
+                        matches = false
+                    }
+                    i = i + 1
+                }
+            }
+            if matches { true } else { probe_frontend_strategy_has_effect_local(list.tail, target) }
+        }
+        None => false,
+    }
+}
+
+fn probe_frontend_strategy_from_signature_local(
+    return_type: Option<Box<TypeExpr>>,
+    effects: Option<Box<EffectList>>
+) -> i64 with Mut, Panic, Div {
+    if probe_frontend_strategy_has_effect_local(effects, "GPU") {
+        return IR_STRATEGY_GPU_KERNEL
+    }
+    if probe_frontend_strategy_has_effect_local(effects, "Prob") {
+        return IR_STRATEGY_PROBABILISTIC
+    }
+    match return_type {
+        Some(node) => {
+            let ty = *node
+            if ty.kind == TypeExprKind::TypeValidated {
+                IR_STRATEGY_AGGRESSIVE
+            } else if ty.kind == TypeExprKind::TypeKnowledge {
+                IR_STRATEGY_PRECISION_PRESERVING
+            } else if ty.kind == TypeExprKind::TypeContest || ty.kind == TypeExprKind::TypeRobust {
+                IR_STRATEGY_INSTRUMENTED
+            } else {
+                IR_STRATEGY_STANDARD
+            }
+        }
+        None => IR_STRATEGY_STANDARD,
+    }
+}
+
+fn probe_frontend_strategy_param_count_local(params: Option<Box<ParamList>>) -> i64 with Alloc {
+    match params {
+        Some(node) => {
+            let list = *node
+            1 + probe_frontend_strategy_param_count_local(list.tail)
+        }
+        None => 0,
+    }
+}
+
+fn probe_frontend_strategy_count_fn_items_local(items: Option<Box<ItemList>>) -> i64 with Alloc {
+    match items {
+        Some(list) => {
+            let rest = probe_frontend_strategy_count_fn_items_local((*list).tail)
+            if (*list).head.kind == ItemKind::ItemFn { 1 + rest } else { rest }
+        }
+        None => 0,
+    }
+}
+
+fn probe_frontend_strategy_print_items_local(items: Option<Box<ItemList>>) with IO, Mut, Panic, Div, Alloc {
+    match items {
+        Some(list) => {
+            let item = (*list).head
+            if item.kind == ItemKind::ItemFn {
+                match item.fn_def {
+                    Some(node) => {
+                        let fn_def = *node
+                        let strategy = probe_frontend_strategy_from_signature_local(fn_def.return_type, fn_def.effects)
+                        let user_param_count = probe_frontend_strategy_param_count_local(fn_def.params)
+                        let validated_param = strategy == IR_STRATEGY_INSTRUMENTED
+                        let final_param_count = if validated_param { user_param_count + 1 } else { user_param_count }
+                        print("probe_frontend_strategy: fn=")
+                        probe_frontend_strategy_print_name_local(item.name)
+                        print(" strategy=")
+                        print(ir_strategy_name(strategy))
+                        print(" validated_param=")
+                        if validated_param { print("true") } else { print("false") }
+                        print(" param_count=")
+                        print_int(final_param_count)
+                        print("\n")
+                    }
+                    None => {}
+                }
+            }
+            probe_frontend_strategy_print_items_local((*list).tail)
+        }
+        None => {}
+    }
+}
+
 fn run_probe_frontend_strategy(args: ArgList, flag_index: i64) with IO, Mut, Panic, Div, Alloc {
     if flag_index + 1 >= args.len {
         panic("probe_frontend_strategy: missing source file argument")
     }
     let source_path = arg_list_get(args, flag_index + 1)
-    run_frontend_strategy_probe(source_path)
+    println("probe_frontend_strategy: begin")
+    print("probe_frontend_strategy: source=")
+    print(source_path)
+    print("\n")
+    let frontend_result = preflight_multimodule_frontend(source_path)
+    let parse_errors = parser_last_error_count()
+    if frontend_result.ok && parse_errors == 0 {
+        let main_prog = load_module_file(source_path)
+        println("probe_frontend_strategy: ok")
+        print("probe_frontend_strategy: functions=")
+        print_int(probe_frontend_strategy_count_fn_items_local(main_prog.items))
+        print("\n")
+        probe_frontend_strategy_print_items_local(main_prog.items)
+        return
+    }
+    println("probe_frontend_strategy: fail")
+    if str_len(frontend_result.error_msg) > 0 {
+        print("probe_frontend_strategy: error=")
+        print(frontend_result.error_msg)
+        print("\n")
+    }
+    if parse_errors > 0 {
+        println("probe_frontend_strategy: parser_errors=" + int_to_string(parse_errors))
+    }
+    panic("probe_frontend_strategy failed")
 }
 
 fn run_probe_load_ir_trace(args: ArgList, flag_index: i64) with IO, Mut, Panic, Div, Alloc {
@@ -795,6 +930,33 @@ fn compiler_bytes_contains(bytes: [i8; 65536], size: i64, needle: string) -> boo
         var matched = true
         while j < needle_len {
             if bytes[(i + j) as usize] != (str_char_at(needle, j) as i8) {
+                matched = false
+                break
+            }
+            j = j + 1
+        }
+        if matched {
+            return true
+        }
+        i = i + 1
+    }
+    false
+}
+
+fn compiler_bytes_contains_seq_i64(bytes: [i8; 65536], size: i64, seq: [i64; 32], seq_len: i64) -> bool with Mut, Panic, Div {
+    if seq_len <= 0 {
+        return true
+    }
+    if size < seq_len {
+        return false
+    }
+
+    var i: i64 = 0
+    while i <= size - seq_len {
+        var j: i64 = 0
+        var matched = true
+        while j < seq_len {
+            if bytes[(i + j) as usize] != (seq[j as usize] as i8) {
                 matched = false
                 break
             }
@@ -4850,6 +5012,20 @@ fn compiler_main_make_native_v2_unsupported_vector_module() -> IrModule {
     module
 }
 
+fn compiler_main_make_native_v2_huge_alloc_module() -> IrModule {
+    var module = ir_empty_module()
+    var func = ir_empty_function()
+    func.name = ir_name_from_bytes(109, 97, 105, 110, 4)
+    func.reg_count = 2
+    func.instrs[0] = ir_alloc(0, 536870920)
+    func.instrs[1] = ir_load_imm(1, 0)
+    func.instrs[2] = ir_return(1)
+    func.instr_count = 3
+    module.functions[0] = func
+    module.fn_count = 1
+    module
+}
+
 fn compiler_main_test_native_v2_machine_module_scalar_core() -> bool with Mut, Panic, Div, Alloc {
     let built = native_v2_build_machine_module(&compiler_main_make_native_v2_scalar_module(13), true)
     if !built.supported { return false }
@@ -4947,6 +5123,9 @@ fn compiler_main_test_native_v2_contract_machine_ir_fields() -> bool with IO, Mu
     if !compiler_bytes_contains(data, size, "\"stack_map_records\":1") { return false }
     if !compiler_bytes_contains(data, size, "\"safepoint_count\":1") { return false }
     if !compiler_bytes_contains(data, size, "\"runtime_metadata_embedded\":true") { return false }
+    if !compiler_bytes_contains(data, size, "\"gc_state_embedded\":true") { return false }
+    if !compiler_bytes_contains(data, size, "\"gc_slow_path_active\":true") { return false }
+    if !compiler_bytes_contains(data, size, "\"stack_maps_runtime_active\":true") { return false }
     true
 }
 
@@ -4979,6 +5158,67 @@ fn compiler_main_test_native_v2_runtime_metadata_shape() -> bool with Mut, Panic
         i = i + 1
     }
     saw_call
+}
+
+fn compiler_main_test_native_v2_stack_map_decoder() -> bool with Mut, Panic, Div, Alloc {
+    let pair = compile_module_v2(compiler_new(), &compiler_main_make_native_v2_call_module())
+    let nc = pair.0
+    if !str_eq(pair.1, "") { return false }
+    let blob = native_v2_stack_map_blob_decode(nc.data, nc.stack_map_data_offset)
+    if !blob.valid { return false }
+    if blob.version != 1 { return false }
+    if blob.record_count != nc.stack_map_record_count { return false }
+    if blob.safepoint_count != nc.safepoint_count { return false }
+    if blob.deopt_point_count != nc.deopt_point_count { return false }
+    if blob.records[0].kind != NATIVE_V2_SAFEPOINT_RET() { return false }
+    var saw_call = false
+    var i: i64 = 0
+    while i < blob.record_count {
+        if blob.records[i as usize].kind == NATIVE_V2_SAFEPOINT_CALL() {
+            saw_call = true
+        }
+        i = i + 1
+    }
+    saw_call
+}
+
+fn compiler_main_test_native_v2_gc_state_blob() -> bool with Mut, Panic, Div, Alloc {
+    let pair = compile_module_v2(compiler_new(), &compiler_main_make_native_v2_call_module())
+    let nc = pair.0
+    if !str_eq(pair.1, "") { return false }
+    if nc.gc_state_data_offset <= nc.deopt_state_data_offset { return false }
+    let state = native_v2_gc_state_decode(nc.data, nc.gc_state_data_offset)
+    if !state.valid { return false }
+    if state.flags != native_v2_gc_flag_ready() { return false }
+    if state.collection_requests != 0 { return false }
+    if state.stack_maps_offset != nc.stack_map_data_offset { return false }
+    if state.deopt_state_offset != nc.deopt_state_data_offset { return false }
+    if state.last_reason != native_v2_gc_reason_none() { return false }
+    true
+}
+
+fn compiler_main_test_native_v2_alloc_slow_path_trap() -> bool with Mut, Panic, Div, Alloc {
+    let pair = compile_module_v2(compiler_new(), &compiler_main_make_native_v2_huge_alloc_module())
+    let nc = pair.0
+    if !str_eq(pair.1, "") { return false }
+    var seq: [i64; 32] = [0; 32]
+    seq[0] = 0x48
+    seq[1] = 0xC7
+    seq[2] = 0xC0
+    seq[3] = 0x3C
+    seq[4] = 0x00
+    seq[5] = 0x00
+    seq[6] = 0x00
+    seq[7] = 0x48
+    seq[8] = 0xC7
+    seq[9] = 0xC7
+    seq[10] = 0xB5
+    seq[11] = 0x00
+    seq[12] = 0x00
+    seq[13] = 0x00
+    seq[14] = 0x0F
+    seq[15] = 0x05
+    compiler_bytes_contains_seq_i64(nc.code.bytes, nc.code.len, seq, 16)
 }
 
 // ============================================================================
@@ -5887,7 +6127,7 @@ fn run_probe_native_streaming(args: ArgList, flag_index: i64) with IO, Mut, Pani
     }
 
     print("probe_native_streaming: summary_begin\n")
-    let summary_result = lower_program_to_ir_summary_with_epistemic(program, epistemic)
+    let summary_result = lower_program_to_ir_summary_with_epistemic_ref(&program, epistemic)
     if summary_result.had_error {
         panic("probe_native_streaming summary lowering failed")
     }
@@ -5903,9 +6143,9 @@ fn run_probe_native_streaming(args: ArgList, flag_index: i64) with IO, Mut, Pani
         print("probe_native_streaming: body_begin fn=")
         compiler_manifest_print_name(fn_name)
         print("\n")
-        let body_result = lower_program_function_body_from_summary_with_epistemic(
-            program,
-            summary_result.summary,
+        let body_result = lower_program_function_body_from_summary_with_epistemic_ref(
+            &program,
+            &summary_result.summary,
             epistemic,
             fn_name
         )
@@ -5953,9 +6193,185 @@ fn run_probe_native_streaming(args: ArgList, flag_index: i64) with IO, Mut, Pani
     print("\n")
 }
 
+// ============================================================================
+// Sprint 74: Mul-annihilation + activation expansion self-tests (T157–T165)
+// ============================================================================
+
+// T157: eg_small_saturate on mul(x, 0): extraction gives EG_OP_CONST with value 0.
+fn compiler_main_test_eg_small_sat_mul_annihil_rhs() -> bool with Mut, Div, Panic {
+    let pair0 = compiler_eg_small_add_const(eg_small_init(), 0)         // const 0
+    let pair1 = compiler_eg_small_add_var(pair0.0, 5)                    // var x (reg 5)
+    let pair2 = compiler_eg_small_add_binop(pair1.0, EG_OP_MUL, pair1.1, pair0.1)  // mul(x, 0)
+    let ctx3  = compiler_eg_small_saturate(pair2.0)
+    let pair3 = compiler_eg_small_extract(ctx3, pair2.1)
+    pair3.1.op == EG_OP_CONST && pair3.1.value == 0
+}
+
+// T158: eg_small_saturate on mul(0, x): extraction gives EG_OP_CONST with value 0.
+fn compiler_main_test_eg_small_sat_mul_annihil_lhs() -> bool with Mut, Div, Panic {
+    let pair0 = compiler_eg_small_add_const(eg_small_init(), 0)         // const 0
+    let pair1 = compiler_eg_small_add_var(pair0.0, 7)                    // var x (reg 7)
+    let pair2 = compiler_eg_small_add_binop(pair1.0, EG_OP_MUL, pair0.1, pair1.1)  // mul(0, x)
+    let ctx3  = compiler_eg_small_saturate(pair2.0)
+    let pair3 = compiler_eg_small_extract(ctx3, pair2.1)
+    pair3.1.op == EG_OP_CONST && pair3.1.value == 0
+}
+
+// T159: ocp_egraph_mini_pass fires on 7-instr func (new ≤8 guard) — sub(r3,r3) simplifies.
+// With old >4 guard this was skipped; with new >8 guard the pass activates.
+fn compiler_main_test_ocp_mini_pass_7_instrs() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(0, 10)
+    instrs[1] = ir_load_imm(1, 20)
+    instrs[2] = ir_load_imm(2, 30)
+    instrs[3] = ir_load_imm(3, 40)
+    instrs[4] = ir_load_imm(4, 50)
+    instrs[5] = ir_load_imm(5, 60)
+    instrs[6] = ir_binop(6, 3, BinaryOp::OpSub, 3)   // r6 = r3 - r3 → sub-self → 0
+    let func   = cp_make_test_func(instrs, 7)
+    let result = ocp_egraph_mini_pass(func)
+    // Mini pass fires: sub(r3, r3) → IrLoadImm(r6, 0)
+    result.instrs[6].op == IrOpcode::IrLoadImm && result.instrs[6].imm_i64 == 0
+}
+
+// T160: ocp_egraph_mini_pass skips 9-instr func (instr_count=9 > 8).
+fn compiler_main_test_ocp_mini_pass_9_instrs() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_binop(2, 0, BinaryOp::OpAdd, 1)
+    instrs[1] = ir_binop(3, 2, BinaryOp::OpMul, 0)
+    instrs[2] = ir_binop(4, 3, BinaryOp::OpSub, 1)
+    instrs[3] = ir_binop(5, 4, BinaryOp::OpDiv, 0)
+    instrs[4] = ir_binop(6, 5, BinaryOp::OpAdd, 2)
+    instrs[5] = ir_binop(7, 6, BinaryOp::OpMul, 1)
+    instrs[6] = ir_binop(8, 7, BinaryOp::OpSub, 0)
+    instrs[7] = ir_binop(9, 8, BinaryOp::OpDiv, 1)
+    instrs[8] = ir_binop(10, 9, BinaryOp::OpAdd, 0)
+    let func   = cp_make_test_func(instrs, 9)   // instr_count=9 > 8, guard skips
+    let result = ocp_egraph_mini_pass(func)
+    result.instrs[0].op == IrOpcode::IrBinOp && result.instr_count == 9
+}
+
+// T161: Both-constant OpLe: 3 <= 3 → IrLoadImm(dst, 1).
+fn compiler_main_test_cmp_le_const_true() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(0, 3)
+    instrs[1] = ir_load_imm(1, 3)
+    instrs[2] = ir_binop(2, 0, BinaryOp::OpLe, 1)
+    let func   = cp_make_test_func(instrs, 3)
+    let result = ocp_const_fold(func)
+    result.instrs[2].op == IrOpcode::IrLoadImm && result.instrs[2].imm_i64 == 1
+}
+
+// T162: Same-register OpGt: x > x → IrLoadImm(dst, 0).
+fn compiler_main_test_cmp_gt_same_reg() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_binop(1, 0, BinaryOp::OpGt, 0)
+    let func   = cp_make_test_func(instrs, 1)
+    let result = ocp_const_fold(func)
+    result.instrs[0].op == IrOpcode::IrLoadImm && result.instrs[0].imm_i64 == 0
+}
+
+// T163: Same-register OpGe: x >= x → IrLoadImm(dst, 1).
+fn compiler_main_test_cmp_ge_same_reg() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_binop(1, 0, BinaryOp::OpGe, 0)
+    let func   = cp_make_test_func(instrs, 1)
+    let result = ocp_const_fold(func)
+    result.instrs[0].op == IrOpcode::IrLoadImm && result.instrs[0].imm_i64 == 1
+}
+
+// T164: Comparison chain fold: r0=5; r1=3; r2=(r0 > r1) → r2=IrLoadImm(1).
+fn compiler_main_test_cmp_chain_fold() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(0, 5)
+    instrs[1] = ir_load_imm(1, 3)
+    instrs[2] = ir_binop(2, 0, BinaryOp::OpGt, 1)
+    let func   = cp_make_test_func(instrs, 3)
+    let result = ocp_const_fold(func)
+    result.instrs[2].op == IrOpcode::IrLoadImm && result.instrs[2].imm_i64 == 1
+}
+
+// T165: Block E + DCE chain: r2=(5==5) folds to IrLoadImm(1); r0,r1 become dead → IrNop.
+fn compiler_main_test_block_e_dce_chain() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(0, 5)
+    instrs[1] = ir_load_imm(1, 5)
+    instrs[2] = ir_binop(2, 0, BinaryOp::OpEq, 1)
+    instrs[3] = ir_return(2)
+    let func   = cp_make_test_func(instrs, 4)
+    let result = opt_cleanup_function(func)
+    // After const_fold: instrs[2] → IrLoadImm(2, 1) (5==5 → 1); r0,r1 become dead.
+    result.instrs[2].op == IrOpcode::IrLoadImm && result.instrs[2].imm_i64 == 1
+}
+
+// ============================================================================
+// Sprint 75: Conditional branch folding Block F self-tests (T169–T174)
+// ============================================================================
+
+// T169: IrBranchTrue with const-1 condition → IrJump (branch always taken).
+fn compiler_main_test_branch_true_const_taken() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(0, 1)
+    instrs[1] = ir_branch_true(0, 7)
+    let func   = cp_make_test_func(instrs, 2)
+    let result = ocp_const_fold(func)
+    result.instrs[1].op == IrOpcode::IrJump && result.instrs[1].label_id == 7
+}
+
+// T170: IrBranchTrue with const-0 condition → IrNop (branch never taken).
+fn compiler_main_test_branch_true_const_not_taken() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(0, 0)
+    instrs[1] = ir_branch_true(0, 7)
+    let func   = cp_make_test_func(instrs, 2)
+    let result = ocp_const_fold(func)
+    result.instrs[1].op == IrOpcode::IrNop
+}
+
+// T171: IrBranchFalse with const-0 condition → IrJump (condition false → branch taken).
+fn compiler_main_test_branch_false_const_taken() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(0, 0)
+    instrs[1] = ir_branch_false(0, 11)
+    let func   = cp_make_test_func(instrs, 2)
+    let result = ocp_const_fold(func)
+    result.instrs[1].op == IrOpcode::IrJump && result.instrs[1].label_id == 11
+}
+
+// T172: IrBranchFalse with const-1 condition → IrNop (condition true → branch not taken).
+fn compiler_main_test_branch_false_const_not_taken() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(0, 1)
+    instrs[1] = ir_branch_false(0, 11)
+    let func   = cp_make_test_func(instrs, 2)
+    let result = ocp_const_fold(func)
+    result.instrs[1].op == IrOpcode::IrNop
+}
+
+// T173: IrBranchTrue with non-constant condition → left unchanged (no fold).
+fn compiler_main_test_branch_no_fold_nonconstant() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_binop(1, 0, BinaryOp::OpAdd, 2)   // r1 = r0 + r2 (non-const)
+    instrs[1] = ir_branch_true(1, 7)
+    let func   = cp_make_test_func(instrs, 2)
+    let result = ocp_const_fold(func)
+    result.instrs[1].op == IrOpcode::IrBranchTrue
+}
+
+// T174: Block E → Block F chain: x==x folds to 1 (Block E), then BranchTrue(1) → IrJump (Block F).
+fn compiler_main_test_branch_fold_chain_e_f() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(0, 3)                      // r0 = 3
+    instrs[1] = ir_binop(1, 0, BinaryOp::OpEq, 0)     // r1 = (r0 == r0) → Block E: IrLoadImm(1,1)
+    instrs[2] = ir_branch_true(1, 9)                    // BranchTrue(r1,9) → Block F: IrJump(9)
+    let func   = cp_make_test_func(instrs, 3)
+    let result = ocp_const_fold(func)
+    result.instrs[2].op == IrOpcode::IrJump && result.instrs[2].label_id == 9
+}
+
 fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
     var passed: i64 = 0
-    let total: i64 = 156
+    let total: i64 = 174
 
     println("=== compiler/main.sio self-tests ===")
 
@@ -7052,6 +7468,132 @@ fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
         passed = passed + 1
     } else {
         println("  FAIL: T156 native v2 contract runtime metadata fields")
+    }
+
+    if compiler_main_test_eg_small_sat_mul_annihil_rhs() {
+        println("  T157 OK: Sprint 74 Block F: eg_small mul(x,0) → EG_OP_CONST(0)")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T157 eg_small mul-annihilation rhs")
+    }
+
+    if compiler_main_test_eg_small_sat_mul_annihil_lhs() {
+        println("  T158 OK: Sprint 74 Block F: eg_small mul(0,x) → EG_OP_CONST(0)")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T158 eg_small mul-annihilation lhs")
+    }
+
+    if compiler_main_test_ocp_mini_pass_7_instrs() {
+        println("  T159 OK: Sprint 74: mini_pass ≤8 guard fires on 7-instr func, sub-self simplifies")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T159 ocp_mini_pass 7-instr activation")
+    }
+
+    if compiler_main_test_ocp_mini_pass_9_instrs() {
+        println("  T160 OK: Sprint 74: mini_pass >8 guard skips 9-instr func")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T160 ocp_mini_pass 9-instr skip")
+    }
+
+    if compiler_main_test_cmp_le_const_true() {
+        println("  T161 OK: Block E: 3 <= 3 → IrLoadImm(1) (both-constant OpLe)")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T161 Block E: 3 <= 3 → 1")
+    }
+
+    if compiler_main_test_cmp_gt_same_reg() {
+        println("  T162 OK: Block E: x > x → IrLoadImm(0) (same-register OpGt)")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T162 Block E: x > x → 0")
+    }
+
+    if compiler_main_test_cmp_ge_same_reg() {
+        println("  T163 OK: Block E: x >= x → IrLoadImm(1) (same-register OpGe)")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T163 Block E: x >= x → 1")
+    }
+
+    if compiler_main_test_cmp_chain_fold() {
+        println("  T164 OK: Block E chain: 5 > 3 → IrLoadImm(1) (both-constant chain)")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T164 Block E chain: 5 > 3 → 1")
+    }
+
+    if compiler_main_test_block_e_dce_chain() {
+        println("  T165 OK: Block E + DCE: (5==5) folds to 1; dead IrLoadImms cleaned")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T165 Block E + DCE chain")
+    }
+
+    if compiler_main_test_native_v2_stack_map_decoder() {
+        println("  T166 OK: native v2 stack-map blob decodes into concrete safepoint records")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T166 native v2 stack-map decoder")
+    }
+
+    if compiler_main_test_native_v2_gc_state_blob() {
+        println("  T167 OK: native v2 emits a GC-state blob that points at stack-map and deopt metadata")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T167 native v2 gc-state blob")
+    }
+
+    if compiler_main_test_native_v2_alloc_slow_path_trap() {
+        println("  T168 OK: native v2 alloc overflow compiles a real runtime slow-path trap")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T168 native v2 alloc slow-path trap")
+    }
+
+    if compiler_main_test_branch_true_const_taken() {
+        println("  T169 OK: Block F: IrBranchTrue(const=1, L7) → IrJump(L7)")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T169 Block F: BranchTrue const-taken → IrJump")
+    }
+
+    if compiler_main_test_branch_true_const_not_taken() {
+        println("  T170 OK: Block F: IrBranchTrue(const=0, L7) → IrNop")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T170 Block F: BranchTrue const-not-taken → IrNop")
+    }
+
+    if compiler_main_test_branch_false_const_taken() {
+        println("  T171 OK: Block F: IrBranchFalse(const=0, L11) → IrJump(L11)")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T171 Block F: BranchFalse const-taken → IrJump")
+    }
+
+    if compiler_main_test_branch_false_const_not_taken() {
+        println("  T172 OK: Block F: IrBranchFalse(const=1, L11) → IrNop")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T172 Block F: BranchFalse const-not-taken → IrNop")
+    }
+
+    if compiler_main_test_branch_no_fold_nonconstant() {
+        println("  T173 OK: Block F: IrBranchTrue(non-const cond) left unchanged")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T173 Block F: non-constant branch should not fold")
+    }
+
+    if compiler_main_test_branch_fold_chain_e_f() {
+        println("  T174 OK: Block E+F chain: x==x→1 (Block E), BranchTrue(1)→IrJump (Block F)")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T174 Block E+F chain: comparison fold drives branch fold")
     }
 
     println("")
