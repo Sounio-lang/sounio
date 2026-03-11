@@ -1848,6 +1848,19 @@ fn run_native_compile_mode(args: ArgList, flag_index: i64) with IO, Mut, Panic, 
     panic("native-compile failed")
 }
 
+fn run_native_v2_preview_smoke() with IO, Mut, Panic, Div, Alloc {
+    if !compiler_main_test_native_v2_compile_preview_scalar() {
+        panic("native-v2 preview scalar smoke failed")
+    }
+    if !compiler_main_test_native_v2_compile_preview_call_control() {
+        panic("native-v2 preview call/control smoke failed")
+    }
+    if !compiler_main_test_native_v2_fail_closed_vector() {
+        panic("native-v2 preview fail-closed smoke failed")
+    }
+    println("native_v2_preview_smoke: ok")
+}
+
 // ============================================================================
 // COMMAND LINE PARSING
 // ============================================================================
@@ -1874,6 +1887,7 @@ fn print_help() with IO {
     println("  --ir-dump <source.sio> Print IR byte/function/string summary")
     println("  --ir-roundtrip <source.sio>  Serialize + deserialize + reserialize IR")
     println("  --native-compile <source.sio>  Compile to native output (use -o/--output to choose path)")
+    println("  --native-v2-preview-smoke  Run dedicated native-v2 scalar/call/control/fail-closed smoke")
     println("  --self-test            Run compiler main self-tests")
     println("  --bench-int-to-string [n]   Benchmark int_to_string loop (default n=1000000)")
     println("  --probe-char-from-i64 <n>   Probe char_from_i64 for manual regression checks")
@@ -6682,7 +6696,7 @@ fn compiler_main_test_sccp_copy_prop() -> bool with Mut, Div, Panic {
     result.instrs[1].op == IrOpcode::IrLoadImm && result.instrs[1].imm_i64 == 5
 }
 
-// T192: cp_optimize_function folds x*1 → IrCopy via identity rule.
+// T192: cp_optimize_function fully folds constant x*1 → IrLoadImm(x).
 fn compiler_main_test_sccp_identity_fold() -> bool with Mut, Div, Panic {
     var instrs = cp_empty_instrs()
     instrs[0] = ir_load_imm(0, 42)
@@ -6690,7 +6704,7 @@ fn compiler_main_test_sccp_identity_fold() -> bool with Mut, Div, Panic {
     instrs[2] = ir_binop(2, 0, BinaryOp::OpMul, 1)
     let func   = cp_make_test_func(instrs, 3)
     let result = cp_optimize_function(func)
-    result.instrs[2].op == IrOpcode::IrCopy && result.instrs[2].src1 == 0
+    result.instrs[2].op == IrOpcode::IrLoadImm && result.instrs[2].imm_i64 == 42
 }
 
 // T193: cp_optimize_function folds 5==5 → IrLoadImm(1).
@@ -6727,9 +6741,76 @@ fn compiler_main_test_sccp_chain_fold() -> bool with Mut, Div, Panic {
     result.instrs[4].op == IrOpcode::IrLoadImm && result.instrs[4].imm_i64 == 3
 }
 
+// Sprint 81 Block I: Bitwise + shift both-constant folding + rem-by-1 (T198–T203)
+
+// T198: 3 & 5 → IrLoadImm(1) — both-const BitAnd (011 & 101 = 001).
+fn compiler_main_test_block_i_bitand_const() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(0, 3)
+    instrs[1] = ir_load_imm(1, 5)
+    instrs[2] = ir_binop(2, 0, BinaryOp::OpBitAnd, 1)
+    let func   = cp_make_test_func(instrs, 3)
+    let result = ocp_const_fold(func)
+    result.instrs[2].op == IrOpcode::IrLoadImm && result.instrs[2].imm_i64 == 1
+}
+
+// T199: 3 | 5 → IrLoadImm(7) — both-const BitOr (011 | 101 = 111).
+fn compiler_main_test_block_i_bitor_const() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(0, 3)
+    instrs[1] = ir_load_imm(1, 5)
+    instrs[2] = ir_binop(2, 0, BinaryOp::OpBitOr, 1)
+    let func   = cp_make_test_func(instrs, 3)
+    let result = ocp_const_fold(func)
+    result.instrs[2].op == IrOpcode::IrLoadImm && result.instrs[2].imm_i64 == 7
+}
+
+// T200: 3 ^ 5 → IrLoadImm(6) — both-const BitXor (011 ^ 101 = 110).
+fn compiler_main_test_block_i_bitxor_const() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(0, 3)
+    instrs[1] = ir_load_imm(1, 5)
+    instrs[2] = ir_binop(2, 0, BinaryOp::OpBitXor, 1)
+    let func   = cp_make_test_func(instrs, 3)
+    let result = ocp_const_fold(func)
+    result.instrs[2].op == IrOpcode::IrLoadImm && result.instrs[2].imm_i64 == 6
+}
+
+// T201: 3 << 2 → IrLoadImm(12) — both-const Shl.
+fn compiler_main_test_block_i_shl_const() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(0, 3)
+    instrs[1] = ir_load_imm(1, 2)
+    instrs[2] = ir_binop(2, 0, BinaryOp::OpShl, 1)
+    let func   = cp_make_test_func(instrs, 3)
+    let result = ocp_const_fold(func)
+    result.instrs[2].op == IrOpcode::IrLoadImm && result.instrs[2].imm_i64 == 12
+}
+
+// T202: 12 >> 2 → IrLoadImm(3) — both-const Shr.
+fn compiler_main_test_block_i_shr_const() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(0, 12)
+    instrs[1] = ir_load_imm(1, 2)
+    instrs[2] = ir_binop(2, 0, BinaryOp::OpShr, 1)
+    let func   = cp_make_test_func(instrs, 3)
+    let result = ocp_const_fold(func)
+    result.instrs[2].op == IrOpcode::IrLoadImm && result.instrs[2].imm_i64 == 3
+}
+
+// T203: x % 1 → IrLoadImm(0) — remainder by 1 is always 0 (partial-const rule).
+fn compiler_main_test_block_i_rem_by_one() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(1, 1)
+    instrs[1] = ir_binop(2, 0, BinaryOp::OpRem, 1)
+    let func   = cp_make_test_func(instrs, 2)
+    let result = ocp_const_fold(func)
+    result.instrs[1].op == IrOpcode::IrLoadImm && result.instrs[1].imm_i64 == 0
+}
+
 fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
     var passed: i64 = 0
-    let total: i64 = 197
+    let total: i64 = 203
 
     println("=== compiler/main.sio self-tests ===")
 
@@ -7321,14 +7402,12 @@ fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
         println("  FAIL: T84 native v2 frame lowering saves and restores only allocated callee-saved regs")
     }
 
-    if compiler_main_test_native_v2_compile_preview_scalar() &&
-       compiler_main_test_native_v2_compile_preview_call_control() &&
-       compiler_main_test_native_v2_fail_closed_vector() &&
+    if compiler_main_test_native_v2_fail_closed_vector() &&
        compiler_main_test_native_v2_contract_machine_ir_fields() {
-        println("  T85 OK: native v2 preview compiles scalar/call-control, emits contract JSON, and fails closed on vectors")
+        println("  T85 OK: native v2 preview contract emits JSON and fails closed on unsupported vectors")
         passed = passed + 1
     } else {
-        println("  FAIL: T85 native v2 preview compiles scalar/call-control, emits contract JSON, and fails closed on vectors")
+        println("  FAIL: T85 native v2 preview contract/vector fail-closed")
     }
 
     if compiler_main_test_ocp_mul_identity_right() {
@@ -8074,10 +8153,10 @@ fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
     }
 
     if compiler_main_test_sccp_identity_fold() {
-        println("  T192 OK: Sprint 78 SCCP: x*1 → IrCopy via identity rule")
+        println("  T192 OK: Sprint 78 SCCP: known-constant x*1 fully folds to IrLoadImm(42)")
         passed = passed + 1
     } else {
-        println("  FAIL: T192 Sprint 78 SCCP: identity fold x*1")
+        println("  FAIL: T192 Sprint 78 SCCP: constant x*1 should fold to IrLoadImm(42)")
     }
 
     if compiler_main_test_sccp_cmp_fold() {
@@ -8113,6 +8192,48 @@ fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
         passed = passed + 1
     } else {
         println("  FAIL: T197 native-v2 stack-map decoder root fields")
+    }
+
+    if compiler_main_test_block_i_bitand_const() {
+        println("  T198 OK: Sprint 81 Block I: 3 & 5 → IrLoadImm(1) (both-const BitAnd)")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T198 Sprint 81 Block I: both-const BitAnd fold")
+    }
+
+    if compiler_main_test_block_i_bitor_const() {
+        println("  T199 OK: Sprint 81 Block I: 3 | 5 → IrLoadImm(7) (both-const BitOr)")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T199 Sprint 81 Block I: both-const BitOr fold")
+    }
+
+    if compiler_main_test_block_i_bitxor_const() {
+        println("  T200 OK: Sprint 81 Block I: 3 ^ 5 → IrLoadImm(6) (both-const BitXor)")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T200 Sprint 81 Block I: both-const BitXor fold")
+    }
+
+    if compiler_main_test_block_i_shl_const() {
+        println("  T201 OK: Sprint 81 Block I: 3 << 2 → IrLoadImm(12) (both-const Shl)")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T201 Sprint 81 Block I: both-const Shl fold")
+    }
+
+    if compiler_main_test_block_i_shr_const() {
+        println("  T202 OK: Sprint 81 Block I: 12 >> 2 → IrLoadImm(3) (both-const Shr)")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T202 Sprint 81 Block I: both-const Shr fold")
+    }
+
+    if compiler_main_test_block_i_rem_by_one() {
+        println("  T203 OK: Sprint 81 Block I: x % 1 → IrLoadImm(0) (rem-by-1 partial-const)")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T203 Sprint 81 Block I: rem-by-1 partial-const fold")
     }
 
     println("")
@@ -8151,6 +8272,9 @@ fn main() with IO, Mut, Panic, Div, Alloc {
             if self_test_code != 0 {
                 panic("compiler/main self-tests failed")
             }
+            return
+        } else if mode == "--native-v2-preview-smoke" {
+            run_native_v2_preview_smoke()
             return
         } else if mode == "--bench-int-to-string" {
             run_int_to_string_bench_from_args(args, arg_idx)
