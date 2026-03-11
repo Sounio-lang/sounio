@@ -1,0 +1,126 @@
+//! stdlib/neuro/connectome.sio - Connectome-to-Sedenion Embedding Pipeline
+//!
+//! Takes a brain connectome (per-ROI feature vectors) and produces a graph-level
+//! sedenion c in S for FSNN processing.
+//!
+//! Per-ROI feature mapping (16 components -> 1 sedenion per ROI):
+//!   [0]  node strength       (fMRI)
+//!   [1]  clustering coeff    (fMRI)
+//!   [2]  betweenness cent    (DTI)
+//!   [3]  eigenvector cent    (fMRI)
+//!   [4]  participation coeff (fMRI)
+//!   [5]  local efficiency    (DTI)
+//!   [6]  PageRank            (fMRI)
+//!   [7]  degree              (structural)
+//!   [8]  ORC mean            (Ollivier-Ricci curvature)
+//!   [9]  ORC std dev         (curvature heterogeneity)
+//!   [10] Shannon entropy     (signal complexity)
+//!   [11] within-module z     (modular hub score)
+//!   [12] k-core number       (resilience)
+//!   [13] closeness cent      (DTI)
+//!   [14] triangle count      (motif density)
+//!   [15] noise / spare       (measurement noise)
+//!
+//! Embedding strategies:
+//! - Mean: c = (1/N) sum_i s_i
+//! - Interaction: c = (1/M) sum_m s_{i_m} * s_{j_m} over top-M edges
+
+use math::sedenion64::*
+use fractal::mandelbrot::{OrbitConfig, compute_orbit}
+use fractal::fsnn::{FSNNFeatures, fsnn_extract_features}
+
+// ============================================================================
+// ROI FEATURES
+// ============================================================================
+
+pub struct ROIFeatures {
+    data: [f64; 16],
+}
+
+pub fn roi_features_zero() -> ROIFeatures {
+    ROIFeatures { data: [0.0; 16] }
+}
+
+pub fn roi_to_sedenion(r: ROIFeatures) -> Sedenion64 {
+    sed64(r.data[0], r.data[1], r.data[2], r.data[3],
+          r.data[4], r.data[5], r.data[6], r.data[7],
+          r.data[8], r.data[9], r.data[10], r.data[11],
+          r.data[12], r.data[13], r.data[14], r.data[15])
+}
+
+// ============================================================================
+// MEAN EMBEDDING
+// ============================================================================
+// c = (1/N) sum_{i=0}^{N-1} s_i
+// Simplest strategy. Preserves mean feature magnitudes.
+
+pub fn connectome_embed_mean(features: [ROIFeatures; 256], n_rois: i32) -> Sedenion64 {
+    var sum = sed64_zero()
+    var i = 0
+    while i < n_rois {
+        let si = roi_to_sedenion(features[i])
+        sum = sed64_add(sum, si)
+        i = i + 1
+    }
+    if n_rois > 0 {
+        sed64_scale(sum, 1.0 / (n_rois as f64))
+    } else {
+        sed64_zero()
+    }
+}
+
+// ============================================================================
+// INTERACTION EMBEDDING
+// ============================================================================
+// c = (1/M) sum_{m=0}^{M-1} s_{i_m} * s_{j_m}
+// Non-commutative product encodes edge directionality.
+// Top-M edges are pre-selected by weight (caller provides edge lists).
+
+pub fn connectome_embed_interaction(
+    features: [ROIFeatures; 256],
+    edge_i: [i32; 256],
+    edge_j: [i32; 256],
+    n_edges: i32
+) -> Sedenion64 {
+    var sum = sed64_zero()
+    var m = 0
+    while m < n_edges {
+        let si = roi_to_sedenion(features[edge_i[m]])
+        let sj = roi_to_sedenion(features[edge_j[m]])
+        let product = sed64_mul(si, sj)
+        sum = sed64_add(sum, product)
+        m = m + 1
+    }
+    if n_edges > 0 {
+        sed64_scale(sum, 1.0 / (n_edges as f64))
+    } else {
+        sed64_zero()
+    }
+}
+
+// ============================================================================
+// FULL PIPELINE
+// ============================================================================
+// Connectome -> sedenion embedding -> Mandelbrot orbit -> FSNN features
+
+pub fn connectome_to_features(
+    features: [ROIFeatures; 256],
+    n_rois: i32,
+    config: OrbitConfig
+) -> FSNNFeatures {
+    let c = connectome_embed_mean(features, n_rois)
+    let orbit = compute_orbit(c, config)
+    fsnn_extract_features(orbit, config)
+}
+
+pub fn connectome_to_features_interaction(
+    features: [ROIFeatures; 256],
+    edge_i: [i32; 256],
+    edge_j: [i32; 256],
+    n_edges: i32,
+    config: OrbitConfig
+) -> FSNNFeatures {
+    let c = connectome_embed_interaction(features, edge_i, edge_j, n_edges)
+    let orbit = compute_orbit(c, config)
+    fsnn_extract_features(orbit, config)
+}
