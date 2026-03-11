@@ -155,6 +155,9 @@ fn ocp_const_fold(func: IrFunction) -> IrFunction with Mut, Div, Panic {
     var ra_base:      [i64;  256] = [-1;   256]
     var ra_const_val: [i64;  256] = [0;    256]
     var ra_op:        [i64;  256] = [0;    256]
+    // Sprint 86 Block M: Negation tracking for double-neg and neg-arithmetic.
+    var is_neg:  [bool; 256] = [false; 256]
+    var neg_src: [i64;  256] = [-1;    256]
 
     var i: i64 = 0
     while i < result.instr_count {
@@ -390,6 +393,69 @@ fn ocp_const_fold(func: IrFunction) -> IrFunction with Mut, Div, Panic {
                     is_const[instr.dst as usize] = true
                     const_val[instr.dst as usize] = not_val
                     def_at[instr.dst as usize] = i
+                }
+            }
+        }
+
+        // Sprint 86 Block M: Negation tracking — populate.
+        // Record when a register is produced by OpNeg for double-neg detection.
+        if instr.op == IrOpcode::IrUnaryOp && instr.un_op == UnaryOp::OpNeg {
+            if instr.dst >= 0 && instr.dst < 256 {
+                is_neg[instr.dst as usize]  = true
+                neg_src[instr.dst as usize] = instr.src1
+            }
+        }
+
+        // Sprint 86 Block M: Negation arithmetic fold.
+        // x * (-1) → 0 - x  ;  x / (-1) → 0 - x  ;  x % (-1) → 0
+        // neg(neg(x)) → IrCopy(x)
+        // SOTA: LLVM InstCombine; Cooper & Torczon §9 — negation is an algebraic
+        //       inverse; propagating it eliminates redundant sign inversions.
+        if ocp_is_binop(instr.op) {
+            let mn_s1 = instr.src1
+            let mn_s2 = instr.src2
+            let mn_s1_ok = mn_s1 >= 0 && mn_s1 < 256
+            let mn_s2_ok = mn_s2 >= 0 && mn_s2 < 256
+            let mn_s2_k = mn_s2_ok && is_const[mn_s2 as usize]
+            let mn_s1_k = mn_s1_ok && is_const[mn_s1 as usize]
+            // x * (-1) → 0 - x  ;  x / (-1) → 0 - x
+            if instr.bin_op == BinaryOp::OpMul || instr.bin_op == BinaryOp::OpDiv {
+                if mn_s2_k && const_val[mn_s2 as usize] == -1 && !mn_s1_k {
+                    let c_def = def_at[mn_s2 as usize]
+                    if c_def >= 0 {
+                        result.instrs[c_def as usize] = ir_load_imm(mn_s2, 0)
+                        const_val[mn_s2 as usize] = 0
+                    }
+                    result.instrs[i as usize] = ir_binop(instr.dst, mn_s2, BinaryOp::OpSub, mn_s1)
+                }
+                // (-1) * x → 0 - x  (commutative flip: s1 is const -1, s2 is var)
+                if mn_s1_k && const_val[mn_s1 as usize] == -1 && !mn_s2_k {
+                    let c_def = def_at[mn_s1 as usize]
+                    if c_def >= 0 {
+                        result.instrs[c_def as usize] = ir_load_imm(mn_s1, 0)
+                        const_val[mn_s1 as usize] = 0
+                    }
+                    result.instrs[i as usize] = ir_binop(instr.dst, mn_s1, BinaryOp::OpSub, mn_s2)
+                }
+            }
+            // x % (-1) → IrLoadImm(0)  (remainder by -1 is always 0)
+            if instr.bin_op == BinaryOp::OpRem {
+                if mn_s2_k && const_val[mn_s2 as usize] == -1 {
+                    result.instrs[i as usize] = ir_load_imm(instr.dst, 0)
+                    if instr.dst >= 0 && instr.dst < 256 {
+                        is_const[instr.dst as usize] = true
+                        const_val[instr.dst as usize] = 0
+                    }
+                }
+            }
+        }
+        // neg(neg(x)) → IrCopy(x)  (double negation elimination)
+        if instr.op == IrOpcode::IrUnaryOp && instr.un_op == UnaryOp::OpNeg {
+            let nn_s = instr.src1
+            if nn_s >= 0 && nn_s < 256 && is_neg[nn_s as usize] {
+                result.instrs[i as usize] = ir_copy(instr.dst, neg_src[nn_s as usize])
+                if instr.dst >= 0 && instr.dst < 256 {
+                    is_neg[instr.dst as usize] = false
                 }
             }
         }

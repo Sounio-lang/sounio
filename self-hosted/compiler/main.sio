@@ -6398,20 +6398,22 @@ fn run_probe_native_streaming(args: ArgList, flag_index: i64) with IO, Mut, Pani
     }
     print("probe_native_streaming: summary_ok\n")
 
-    let summary_fn_count = summary_result.summary.module.fn_count
+    var summary = summary_result.summary
+    summary.probe_mode = true
+    let summary_fn_count = summary.module.fn_count
     print("probe_native_streaming: fn_count=")
     print_int(summary_fn_count)
     print("\n")
 
     var fi: i64 = 0
     while fi < summary_fn_count {
-        let fn_name = summary_result.summary.module.functions[fi as usize].name
+        let fn_name = summary.module.functions[fi as usize].name
         print("probe_native_streaming: body_begin fn=")
         compiler_manifest_print_name(fn_name)
         print("\n")
         let body_result = lower_program_function_body_from_summary_flat_with_epistemic_ref(
             &program,
-            &summary_result.summary,
+            &summary,
             epistemic,
             fn_name
         )
@@ -7137,9 +7139,70 @@ fn compiler_main_test_assoc_non_assoc_no_fold() -> bool with Mut, Div, Panic {
     result.instrs[3].op == IrOpcode::IrBinOp && result.instrs[3].src1 == 2
 }
 
+// Sprint 86 Block M: Negation arithmetic self-tests (T230–T235)
+
+// T230: x * (-1) → IrBinOp(Sub, r_zero, x) — mul by -1 becomes 0-x.
+fn compiler_main_test_neg_mul_minus_one() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(1, -1)
+    instrs[1] = ir_binop(2, 0, BinaryOp::OpMul, 1)
+    let func   = cp_make_test_func(instrs, 2)
+    let result = ocp_const_fold(func)
+    result.instrs[1].op == IrOpcode::IrBinOp && result.instrs[1].bin_op == BinaryOp::OpSub
+}
+
+// T231: x / (-1) → IrBinOp(Sub, r_zero, x) — div by -1 becomes 0-x.
+fn compiler_main_test_neg_div_minus_one() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(1, -1)
+    instrs[1] = ir_binop(2, 0, BinaryOp::OpDiv, 1)
+    let func   = cp_make_test_func(instrs, 2)
+    let result = ocp_const_fold(func)
+    result.instrs[1].op == IrOpcode::IrBinOp && result.instrs[1].bin_op == BinaryOp::OpSub
+}
+
+// T232: x % (-1) → IrLoadImm(0) — remainder by -1 is always 0.
+fn compiler_main_test_neg_rem_minus_one() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(1, -1)
+    instrs[1] = ir_binop(2, 0, BinaryOp::OpRem, 1)
+    let func   = cp_make_test_func(instrs, 2)
+    let result = ocp_const_fold(func)
+    result.instrs[1].op == IrOpcode::IrLoadImm && result.instrs[1].imm_i64 == 0
+}
+
+// T233: neg(neg(x)) → IrCopy(x) — double negation eliminated.
+fn compiler_main_test_neg_double_neg() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_unaryop(1, UnaryOp::OpNeg, 0)
+    instrs[1] = ir_unaryop(2, UnaryOp::OpNeg, 1)
+    let func   = cp_make_test_func(instrs, 2)
+    let result = ocp_const_fold(func)
+    result.instrs[1].op == IrOpcode::IrCopy && result.instrs[1].src1 == 0
+}
+
+// T234: neg(x) single — no double-neg fold, stays as IrUnaryOp(Neg).
+fn compiler_main_test_neg_single_no_fold() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_unaryop(1, UnaryOp::OpNeg, 0)
+    let func   = cp_make_test_func(instrs, 1)
+    let result = ocp_const_fold(func)
+    result.instrs[0].op == IrOpcode::IrUnaryOp && result.instrs[0].un_op == UnaryOp::OpNeg
+}
+
+// T235: (-1) * x → IrBinOp(Sub, r_zero, x) — commutative flip (s1 is const -1).
+fn compiler_main_test_neg_commut_mul_minus_one() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(0, -1)
+    instrs[1] = ir_binop(2, 0, BinaryOp::OpMul, 1)
+    let func   = cp_make_test_func(instrs, 2)
+    let result = ocp_const_fold(func)
+    result.instrs[1].op == IrOpcode::IrBinOp && result.instrs[1].bin_op == BinaryOp::OpSub
+}
+
 fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
     var passed: i64 = 0
-    let total: i64 = 229
+    let total: i64 = 235
 
     println("=== compiler/main.sio self-tests ===")
 
@@ -8745,6 +8808,48 @@ fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
         passed = passed + 1
     } else {
         println("  FAIL: T229 Sprint 85: native_v2_compile_gc_retry_smoke")
+    }
+
+    if compiler_main_test_neg_mul_minus_one() {
+        println("  T230 OK: Sprint 86 Block M: x * (-1) → IrBinOp(Sub, zero, x)")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T230 Sprint 86 Block M: mul by -1")
+    }
+
+    if compiler_main_test_neg_div_minus_one() {
+        println("  T231 OK: Sprint 86 Block M: x / (-1) → IrBinOp(Sub, zero, x)")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T231 Sprint 86 Block M: div by -1")
+    }
+
+    if compiler_main_test_neg_rem_minus_one() {
+        println("  T232 OK: Sprint 86 Block M: x % (-1) → IrLoadImm(0)")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T232 Sprint 86 Block M: rem by -1")
+    }
+
+    if compiler_main_test_neg_double_neg() {
+        println("  T233 OK: Sprint 86 Block M: neg(neg(x)) → IrCopy(x)")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T233 Sprint 86 Block M: double negation")
+    }
+
+    if compiler_main_test_neg_single_no_fold() {
+        println("  T234 OK: Sprint 86 Block M: neg(x) single — no double-neg fold")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T234 Sprint 86 Block M: single neg no-fold guard")
+    }
+
+    if compiler_main_test_neg_commut_mul_minus_one() {
+        println("  T235 OK: Sprint 86 Block M: (-1) * x → IrBinOp(Sub, zero, x) commutative")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T235 Sprint 86 Block M: commutative mul by -1")
     }
 
     println("")
