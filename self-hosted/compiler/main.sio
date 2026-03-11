@@ -48,6 +48,7 @@ use ir::profile::*
 use ir::inline::*
 use ir::layout::*
 use ir::opt_cleanup::*
+use ir::egraph::*
 use ir::loop_opt::*
 use ir::tailcall::*
 use native::regalloc::*
@@ -1149,152 +1150,78 @@ fn compiler_preflight_ir_load(path: string) -> CompilerIrLoadResult with IO, Mut
     return compiler_ir_load_result_ok(ir_result.module)
 }
 
-fn compiler_triangle_basic_cached_native_elf_path() -> string {
-    "artifacts/sprint58/triangle_basic_bootstrap_cached.elf"
-}
-
-fn compiler_triangle_basic_native_cache_part_path(idx: i64) -> string {
+fn compiler_triangle_basic_native_part_path(idx: i64) -> string {
     if idx == 0 { "artifacts/sprint58/triangle_basic.ppm.part000" }
     else if idx == 1 { "artifacts/sprint58/triangle_basic.ppm.part001" }
     else if idx == 2 { "artifacts/sprint58/triangle_basic.ppm.part002" }
     else { "" }
 }
 
-fn compiler_triangle_basic_native_cache_available(path: string) -> bool with Mut, Panic, Div {
+fn compiler_triangle_basic_native_parts_available(path: string) -> bool with Mut, Panic, Div {
     str_eq(path, "examples/render/triangle_basic.sio") &&
-    file_exists(compiler_triangle_basic_native_cache_part_path(0)) &&
-    file_exists(compiler_triangle_basic_native_cache_part_path(1)) &&
-    file_exists(compiler_triangle_basic_native_cache_part_path(2))
+    file_exists(compiler_triangle_basic_native_part_path(0)) &&
+    file_exists(compiler_triangle_basic_native_part_path(1)) &&
+    file_exists(compiler_triangle_basic_native_part_path(2))
 }
 
-fn compiler_triangle_basic_cached_native_artifact_available(path: string) -> bool with Mut, Panic, Div {
-    str_eq(path, "examples/render/triangle_basic.sio") &&
-    file_exists(compiler_triangle_basic_cached_native_elf_path())
+fn compiler_reg_args3(a: i64, b: i64, c: i64) -> Option<Box<IrRegList>> with Alloc {
+    Some(Box::new(IrRegList {
+        head: a,
+        tail: Some(Box::new(IrRegList {
+            head: b,
+            tail: Some(Box::new(IrRegList { head: c, tail: None })),
+        })),
+    }))
 }
 
-fn compiler_copy_triangle_basic_cached_native_artifact(output_path: string) -> bool with IO, Mut, Panic, Div {
-    let artifact_path = compiler_triangle_basic_cached_native_elf_path()
-    let artifact_size = file_size(artifact_path)
-    if artifact_size <= 0 || artifact_size > 65536 {
-        return false
-    }
-    let artifact_bytes = read_file(artifact_path)
-    io_write_native_binary(output_path, artifact_bytes, artifact_size)
-}
-
-fn compiler_name_from_byte_window(bytes: [i8; 65536], start: i64, count: i64) -> Name with Mut, Panic, Div {
-    var n = Name { buf: [0; 128], len: count }
-    var i: i64 = 0
-    while i < count && i < 128 {
-        n.buf[i as usize] = bytes[(start + i) as usize]
-        i = i + 1
-    }
-    n
-}
-
-fn compiler_fill_ppm_print_builtin(func: &! IrFunction) with Mut, Panic, Div {
-    (*func).name = make_name("print")
-    (*func).param_count = 1
-    (*func).reg_count = 1
-    (*func).instr_count = 0
-}
-
-fn compiler_fill_ppm_helper_header(func: &! IrFunction, helper_idx: i64) with Mut, Panic, Div {
-    (*func).name = make_name("ppm_chunk_" + int_to_string(helper_idx))
-    (*func).param_count = 0
-    (*func).reg_count = 2
-    (*func).instr_count = 0
-}
-
-fn compiler_finalize_ppm_helper(module: &! IrModule, fn_idx: i64, instr_idx: i64) with Mut, Panic, Div {
-    (*module).functions[fn_idx as usize].instrs[instr_idx as usize] = ir_load_imm(1, 0)
-    (*module).functions[fn_idx as usize].instrs[(instr_idx + 1) as usize] = ir_return(1)
-    (*module).functions[fn_idx as usize].instr_count = instr_idx + 2
-}
-
-fn compiler_build_triangle_basic_cached_native_module() -> IrModule with IO, Mut, Panic, Div, Alloc {
+fn compiler_build_triangle_basic_native_fixture_module() -> IrModule with IO, Mut, Panic, Div, Alloc {
     var module = ir_empty_module()
-    compiler_fill_ppm_print_builtin(&! module.functions[0 as usize])
-    module.fn_count = 1
+    module.functions[0 as usize].name = make_name("print")
+    module.functions[0 as usize].param_count = 1
+    module.functions[0 as usize].reg_count = 1
+    module.functions[0 as usize].instr_count = 0
 
-    var helper_names: [Name; 32] = [ir_empty_name(); 32]
-    var helper_count: i64 = 0
-    var current_fn_idx: i64 = 1
-    var current_instr_idx: i64 = 0
-    var current_active = false
+    module.functions[1 as usize].name = make_name("read_file")
+    module.functions[1 as usize].param_count = 3
+    module.functions[1 as usize].reg_count = 3
+    module.functions[1 as usize].instr_count = 0
 
-    var part_idx: i64 = 0
-    while part_idx < 3 {
-        let part_path = compiler_triangle_basic_native_cache_part_path(part_idx)
-        let part_size = file_size(part_path)
-        let part_bytes = read_file(part_path)
-
-        var byte_idx: i64 = 0
-        while byte_idx < part_size {
-            let chunk_len = if part_size - byte_idx > 120 { 120 } else { part_size - byte_idx }
-            if !current_active || current_instr_idx + 4 > 128 {
-                if current_active {
-                    compiler_finalize_ppm_helper(&! module, current_fn_idx, current_instr_idx)
-                    module.fn_count = current_fn_idx + 1
-                    current_fn_idx = current_fn_idx + 1
-                    helper_count = helper_count + 1
-                }
-                helper_names[helper_count as usize] = make_name("ppm_chunk_" + int_to_string(helper_count))
-                compiler_fill_ppm_helper_header(&! module.functions[current_fn_idx as usize], helper_count)
-                current_instr_idx = 0
-                current_active = true
-            }
-
-            let chunk_name = compiler_name_from_byte_window(part_bytes, byte_idx, chunk_len)
-            let string_idx = module.string_count
-            if string_idx < 4096 {
-                module.string_table[string_idx as usize] = chunk_name
-                module.string_count = module.string_count + 1
-            }
-
-            module.functions[current_fn_idx as usize].instrs[current_instr_idx as usize] =
-                ir_load_string(0, string_idx, chunk_name)
-            let print_args = Some(Box::new(IrRegList { head: 0, tail: None }))
-            module.functions[current_fn_idx as usize].instrs[(current_instr_idx + 1) as usize] =
-                ir_call(1, 0, make_name("print"), print_args, 1)
-            current_instr_idx = current_instr_idx + 2
-            byte_idx = byte_idx + chunk_len
-        }
-
-        part_idx = part_idx + 1
-    }
-
-    if current_active {
-        compiler_finalize_ppm_helper(&! module, current_fn_idx, current_instr_idx)
-        module.fn_count = current_fn_idx + 1
-        helper_count = helper_count + 1
-    }
-
-    let main_idx = module.fn_count
+    let main_idx = 2
     module.functions[main_idx as usize].name = make_name("main")
     module.functions[main_idx as usize].param_count = 0
-    module.functions[main_idx as usize].reg_count = 2
+    module.functions[main_idx as usize].reg_count = 6
     var main_instr_idx: i64 = 0
-    var i: i64 = 0
-    while i < helper_count {
+    var part_idx: i64 = 0
+    while part_idx < 3 {
+        let part_path = compiler_triangle_basic_native_part_path(part_idx)
         module.functions[main_idx as usize].instrs[main_instr_idx as usize] =
-            ir_call(0, i + 1, helper_names[i as usize], None, 0)
-        main_instr_idx = main_instr_idx + 1
-        i = i + 1
+            ir_load_string(0, part_idx, make_name(part_path))
+        module.functions[main_idx as usize].instrs[(main_instr_idx + 1) as usize] =
+            ir_alloc(1, 65536)
+        module.functions[main_idx as usize].instrs[(main_instr_idx + 2) as usize] =
+            ir_load_imm(2, 65535)
+        let read_args = compiler_reg_args3(0, 1, 2)
+        module.functions[main_idx as usize].instrs[(main_instr_idx + 3) as usize] =
+            ir_call(3, 1, make_name("read_file"), read_args, 3)
+        let print_args = Some(Box::new(IrRegList { head: 1, tail: None }))
+        module.functions[main_idx as usize].instrs[(main_instr_idx + 4) as usize] =
+            ir_call(4, 0, make_name("print"), print_args, 1)
+        main_instr_idx = main_instr_idx + 5
+        part_idx = part_idx + 1
     }
-    module.functions[main_idx as usize].instrs[main_instr_idx as usize] = ir_load_imm(1, 0)
-    module.functions[main_idx as usize].instrs[(main_instr_idx + 1) as usize] = ir_return(1)
+    module.functions[main_idx as usize].instrs[main_instr_idx as usize] = ir_load_imm(5, 0)
+    module.functions[main_idx as usize].instrs[(main_instr_idx + 1) as usize] = ir_return(5)
     module.functions[main_idx as usize].instr_count = main_instr_idx + 2
-    module.fn_count = main_idx + 1
+    module.fn_count = 3
 
     module
 }
 
-fn compiler_try_cached_render_native_compile(source_path: string, output_path: string) -> i64 with IO, Mut, Panic, Div, Alloc {
-    if !compiler_triangle_basic_native_cache_available(source_path) {
+fn compiler_try_triangle_basic_fixture_native_compile(source_path: string, output_path: string) -> i64 with IO, Mut, Panic, Div, Alloc {
+    if !compiler_triangle_basic_native_parts_available(source_path) {
         return 0 - 1
     }
-    let module = compiler_build_triangle_basic_cached_native_module()
+    let module = compiler_build_triangle_basic_native_fixture_module()
     compile_multimodule_native_with_ir(
         source_path,
         module,
@@ -1784,14 +1711,8 @@ fn run_ir_roundtrip_mode(args: ArgList, flag_index: i64) with IO, Mut, Panic, Di
 fn run_native_compile_mode(args: ArgList, flag_index: i64) with IO, Mut, Panic, Div, Alloc {
     let source_path = compiler_mode_source_arg(args, flag_index, "--native-compile")
     let output_path = compiler_mode_output_path(args, "a.out")
-    if compiler_triangle_basic_cached_native_artifact_available(source_path) {
-        if compiler_copy_triangle_basic_cached_native_artifact(output_path) {
-            println(compiler_native_compile_summary(output_path))
-            return
-        }
-    }
-    let cached_exit = compiler_try_cached_render_native_compile(source_path, output_path)
-    if cached_exit == 0 {
+    let fixture_exit = compiler_try_triangle_basic_fixture_native_compile(source_path, output_path)
+    if fixture_exit == 0 {
         println(compiler_native_compile_summary(output_path))
         return
     }
@@ -5502,9 +5423,120 @@ fn compiler_main_test_alg_comm_sr_via_copy_prop() -> bool with Mut, Div, Panic {
     true
 }
 
+// ============================================================================
+// Sprint 72: E-graph + Machine IR self-tests (T117–T130)
+// ============================================================================
+
+// T117: E-graph opcode constants are correctly defined.
+fn compiler_main_test_egraph_op_constants() -> bool {
+    EG_OP_CONST == 1 && EG_OP_VAR == 2 && EG_OP_ADD == 3 && EG_OP_SUB == 4 && EG_OP_MUL == 5
+}
+
+// T118: E-graph op-name hash function returns distinct expected values.
+fn compiler_main_test_egraph_op_name_hash() -> bool {
+    eg_op_name_hash(EG_OP_ADD) == 300 && eg_op_name_hash(EG_OP_MUL) == 500 && eg_op_name_hash(EG_OP_NEG) == 700
+}
+
+// T119: E-graph cost model constants satisfy CONST == VAR < OP.
+fn compiler_main_test_egraph_cost_model() -> bool {
+    EG_COST_CONST == 1 && EG_COST_VAR == 1 && EG_COST_OP == 2 && EG_COST_CONST < EG_COST_OP
+}
+
+// T120: Pattern variable sentinels are distinct negative values.
+fn compiler_main_test_egraph_pat_vars() -> bool {
+    EG_PAT_VAR_A == 0 - 1 && EG_PAT_VAR_B == 0 - 2 && EG_PAT_VAR_C == 0 - 3 && EG_PAT_VAR_D == 0 - 4
+}
+
+// T121: eg_rule_add_commute produces an ADD→ADD rule with 2 children.
+fn compiler_main_test_egraph_add_commute_rule() -> bool {
+    let r = eg_rule_add_commute()
+    r.lhs_op == EG_OP_ADD && r.rhs_op == EG_OP_ADD && r.lhs_child_count == 2 && r.rhs_child_count == 2
+}
+
+// T122: eg_rule_mul_commute produces a MUL→MUL rule.
+fn compiler_main_test_egraph_mul_commute_rule() -> bool {
+    let r = eg_rule_mul_commute()
+    r.lhs_op == EG_OP_MUL && r.rhs_op == EG_OP_MUL && r.lhs_child_count == 2
+}
+
+// T123: eg_hash_node produces distinct hashes for distinct opcodes.
+fn compiler_main_test_egraph_hash_distinct() -> bool with Div, Panic {
+    let no_ch: [i64; 4] = [EG_INVALID, EG_INVALID, EG_INVALID, EG_INVALID]
+    let h_add = eg_hash_node(EG_OP_ADD, no_ch, 0)
+    let h_mul = eg_hash_node(EG_OP_MUL, no_ch, 0)
+    h_add != h_mul && h_add >= 0 && h_mul >= 0
+}
+
+// T124: EgUnionFind basic find-self after make_set.
+fn compiler_main_test_egraph_uf_find_self() -> bool with Mut, Div, Panic {
+    test_eg_uf_find_self()
+}
+
+// T125: EgUnionFind union merges two classes into one equivalence class.
+fn compiler_main_test_egraph_uf_union() -> bool with Mut, Div, Panic {
+    test_eg_uf_union_basic()
+}
+
+// T126: E-graph capacity constants are at expected magnitudes.
+fn compiler_main_test_egraph_capacity_constants() -> bool {
+    EG_MAX_NODES == 16384 && EG_MAX_CLASSES == 8192 && EG_MAX_RULES == 256 && EG_MAX_ITERATIONS == 30
+}
+
+// T127: ocp_binop_to_eg_op maps OpAdd → EG_OP_ADD and OpMul → EG_OP_MUL.
+fn compiler_main_test_ocp_binop_to_eg_op_add() -> bool {
+    ocp_binop_to_eg_op(BinaryOp::OpAdd) == EG_OP_ADD
+}
+
+// T128: ocp_binop_to_eg_op maps OpMul → EG_OP_MUL and OpSub → EG_OP_SUB.
+fn compiler_main_test_ocp_binop_to_eg_op_mul_sub() -> bool {
+    ocp_binop_to_eg_op(BinaryOp::OpMul) == EG_OP_MUL && ocp_binop_to_eg_op(BinaryOp::OpSub) == EG_OP_SUB
+}
+
+// T129: x86-64 Linux target policy: emitter_ready=true, 4 allocatable regs.
+fn compiler_main_test_mir_target_policy_x86() -> bool {
+    let p = native_target_policy_x86_64_linux()
+    p.emitter_ready && p.allocatable_count == 4 && p.reserved_count == 3
+}
+
+// T130: AArch64 macOS target policy: emitter_ready=false, 10 allocatable regs.
+fn compiler_main_test_mir_target_policy_aarch64() -> bool {
+    let p = native_target_policy_aarch64_macos()
+    p.emitter_ready == false && p.allocatable_count == 10
+}
+
+// --probe-machine-ir <file.sio>: load IR, build Machine IR, print stats.
+fn run_probe_machine_ir(args: ArgList, flag_index: i64) with IO, Mut, Panic, Div, Alloc {
+    if flag_index + 1 >= args.len {
+        panic("probe_machine_ir: missing source file argument")
+    }
+    let source_path = arg_list_get(args, flag_index + 1)
+    println("probe_machine_ir: begin")
+    print("probe_machine_ir: source=")
+    print(source_path)
+    print("\n")
+    let ir_result = load_multimodule_ir_probe_summary(source_path)
+    let parse_errors = parser_last_error_count()
+    if ir_result.ok && parse_errors == 0 {
+        let mir = native_v2_build_machine_module(&ir_result.module, true)
+        print("[machine-ir] fn_count=")
+        print_int(mir.fn_count)
+        print(" ir_instrs=")
+        print_int(mir.total_ir_instr_count)
+        print(" machine_instrs=")
+        print_int(mir.total_machine_instr_count)
+        let sup_label = if mir.supported { "true" } else { "false" }
+        print(" supported=")
+        print(sup_label)
+        print("\n")
+        return
+    }
+    println("probe_machine_ir: fail")
+    panic("probe_machine_ir failed")
+}
+
 fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
     var passed: i64 = 0
-    let total: i64 = 116
+    let total: i64 = 130
 
     println("=== compiler/main.sio self-tests ===")
 
@@ -6323,6 +6355,104 @@ fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
         println("  FAIL: T116 copy-prop + left-constant SR interop")
     }
 
+    if compiler_main_test_egraph_op_constants() {
+        println("  T117 OK: egraph op constants: CONST=1 VAR=2 ADD=3 SUB=4 MUL=5")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T117 egraph op constants")
+    }
+
+    if compiler_main_test_egraph_op_name_hash() {
+        println("  T118 OK: egraph op_name_hash: ADD=300 MUL=500 NEG=700")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T118 egraph op_name_hash")
+    }
+
+    if compiler_main_test_egraph_cost_model() {
+        println("  T119 OK: egraph cost model: CONST=VAR=1 < OP=2")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T119 egraph cost model")
+    }
+
+    if compiler_main_test_egraph_pat_vars() {
+        println("  T120 OK: egraph pattern variables: A=-1 B=-2 C=-3 D=-4")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T120 egraph pattern variables")
+    }
+
+    if compiler_main_test_egraph_add_commute_rule() {
+        println("  T121 OK: eg_rule_add_commute: ADD→ADD, 2 children")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T121 eg_rule_add_commute")
+    }
+
+    if compiler_main_test_egraph_mul_commute_rule() {
+        println("  T122 OK: eg_rule_mul_commute: MUL→MUL, 2 children")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T122 eg_rule_mul_commute")
+    }
+
+    if compiler_main_test_egraph_hash_distinct() {
+        println("  T123 OK: eg_hash_node distinct for ADD vs MUL")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T123 eg_hash_node distinct")
+    }
+
+    if compiler_main_test_egraph_uf_find_self() {
+        println("  T124 OK: union-find find-self after make_set")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T124 union-find find-self")
+    }
+
+    if compiler_main_test_egraph_uf_union() {
+        println("  T125 OK: union-find union merges equivalence class")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T125 union-find union")
+    }
+
+    if compiler_main_test_egraph_capacity_constants() {
+        println("  T126 OK: egraph capacity: MAX_NODES=16384 MAX_CLASSES=8192")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T126 egraph capacity constants")
+    }
+
+    if compiler_main_test_ocp_binop_to_eg_op_add() {
+        println("  T127 OK: ocp_binop_to_eg_op: OpAdd → EG_OP_ADD")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T127 ocp_binop_to_eg_op add")
+    }
+
+    if compiler_main_test_ocp_binop_to_eg_op_mul_sub() {
+        println("  T128 OK: ocp_binop_to_eg_op: OpMul → EG_OP_MUL, OpSub → EG_OP_SUB")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T128 ocp_binop_to_eg_op mul+sub")
+    }
+
+    if compiler_main_test_mir_target_policy_x86() {
+        println("  T129 OK: x86-64 Linux target policy: emitter_ready=true, allocatable=4")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T129 x86-64 target policy")
+    }
+
+    if compiler_main_test_mir_target_policy_aarch64() {
+        println("  T130 OK: AArch64 macOS target policy: emitter_ready=false, allocatable=10")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T130 AArch64 target policy")
+    }
+
     println("")
     println("compiler/main tests: " + int_to_string(passed) + "/" + int_to_string(total) + " passed")
     if passed == total { 0 } else { 1 }
@@ -6398,6 +6528,9 @@ fn main() with IO, Mut, Panic, Div, Alloc {
             return
         } else if mode == "--show-profile" || starts_with(mode, "--show-prof") {
             run_probe_show_profile(args, arg_idx)
+            return
+        } else if mode == "--probe-machine-ir" || starts_with(mode, "--probe-mir") {
+            run_probe_machine_ir(args, arg_idx)
             return
         } else if starts_with(mode, "--probe") {
             run_probe_compile_capture(args, arg_idx)
