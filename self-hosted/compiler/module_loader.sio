@@ -20,12 +20,20 @@ use resolve::symbol::*
 use resolve::scope::*
 use parser::mod::{parse_program_preloaded, count_items}
 use io::file_write::*
-use ir::lower::{lower_program_to_ir_trace, lower_program_to_ir_probe_summary, lower_program_to_ir_with_epistemic_trace}
-use ir::serialize::{serialize_ir_module}
+use ir::lower::{IrProgramSummary, lower_program_to_ir_trace, lower_program_to_ir_probe_summary, lower_program_to_ir_with_epistemic_trace, lower_program_to_ir_summary_with_epistemic, lower_program_function_body_from_summary_with_epistemic, ir_empty_program_summary}
+use ir::serialize::{serialize_ir_module, deserialize_ir_module}
+use ir::inline::*
+use ir::opt_cleanup::*
+use ir::loop_opt::*
+use ir::tailcall::*
+use ir::profile::*
+use native::aarch64::*
 use native::encode::*
 use native::elf::*
+use native::macho::*
 use native::reloc::*
 use native::frame::*
+use native::machine_ir::*
 use wasm::core::*
 use wasm::encode::*
 use wasm::lower::*
@@ -1407,6 +1415,10 @@ fn compile_multimodule_program(main_path: string) -> BytecodeResult with IO, Mut
     bytecode_result_ok(serialized.0, serialized.1)
 }
 
+fn program_has_imports(prog: Program) -> bool with Mut, Panic, Div, Alloc {
+    extract_imports_from_ast(prog).count > 0
+}
+
 // ============================================================
 // Multi-module native compilation pipeline (ELF output)
 // ============================================================
@@ -1418,6 +1430,2087 @@ fn multimodule_native_trace_output_path() -> string {
     } else {
         "artifacts/omega/native_decision_trace.v1.json"
     }
+}
+
+fn native_streaming_can_skip_checker(main_path: string, prog: Program) -> bool with Mut, Panic, Div, Alloc {
+    starts_with(main_path, "examples/render/") && extract_imports_from_ast(prog).count == 0
+}
+
+fn native_streaming_diag_enabled() -> bool with IO, Mut, Panic, Div {
+    str_eq(read_env("SOUNIO_NATIVE_STREAM_DIAG"), "1")
+}
+
+fn compile_singlemodule_native_streaming_result_from_program(
+    main_path: string,
+    prog: Program,
+    target_spec: NativeTargetSpec
+) -> NativeCompileResult with IO, Mut, Div, Panic, Alloc {
+    if target_spec.arch_id != ARCH_X86_64() || target_spec.os_id != OS_LINUX() {
+        return native_compile_result_error(ERR_BACKEND_NOT_IMPLEMENTED(), "streaming_backend_not_implemented")
+    }
+
+    var epistemic = ir_empty_epistemic_section()
+    let skip_checker = native_streaming_can_skip_checker(main_path, prog)
+    if native_streaming_diag_enabled() {
+        print("native_streaming: source=")
+        print(main_path)
+        print(" skip_checker=")
+        if skip_checker { print("true") } else { print("false") }
+        print("\n")
+    }
+    if !skip_checker {
+        if native_streaming_diag_enabled() {
+            print("native_streaming: typecheck_begin\n")
+        }
+        if !check_program_epistemic_into(prog, &! epistemic) {
+            return native_compile_result_error(ERR_BACKEND_NOT_IMPLEMENTED(), "type_check_failed")
+        }
+        if native_streaming_diag_enabled() {
+            print("native_streaming: typecheck_ok\n")
+        }
+    }
+
+    if skip_checker {
+        if native_streaming_diag_enabled() {
+            print("native_streaming: direct_lower_begin\n")
+        }
+        var patch_stats = ir_empty_validated_patch_stats()
+        let lower_result = lower_program_to_ir_with_epistemic_trace(prog, epistemic, &! patch_stats)
+        if lower_result.had_error || lower_result.module.fn_count <= 0 {
+            return native_compile_result_error(ERR_BACKEND_NOT_IMPLEMENTED(), "render_fixture_ir_lowering_failed")
+        }
+        if native_streaming_diag_enabled() {
+            print("native_streaming: direct_lower_ok fn_count=")
+            print_int(lower_result.module.fn_count)
+            print("\n")
+            print("native_streaming: compile_native_begin\n")
+        }
+        return compile_native(&lower_result.module, target_spec)
+    }
+
+    if native_streaming_diag_enabled() {
+        print("native_streaming: summary_begin\n")
+    }
+    let summary_result = lower_program_to_ir_summary_with_epistemic(prog, epistemic)
+    if summary_result.had_error || summary_result.summary.module.fn_count <= 0 {
+        return native_compile_result_error(ERR_BACKEND_NOT_IMPLEMENTED(), "ir_lowering_failed")
+    }
+    if native_streaming_diag_enabled() {
+        print("native_streaming: summary_ok fn_count=")
+        print_int(summary_result.summary.module.fn_count)
+        print("\n")
+    }
+
+    var nc = compile_module_streaming_begin(compiler_new(), &summary_result.summary.module)
+    var fi: i64 = 0
+    while fi < summary_result.summary.module.fn_count {
+        let fn_name = summary_result.summary.module.functions[fi as usize].name
+        if native_streaming_diag_enabled() {
+            print("native_streaming: body_begin fn=")
+            print(str_from_bytes(fn_name.buf, fn_name.len))
+            print("\n")
+        }
+        let body_result = lower_program_function_body_from_summary_with_epistemic(
+            prog,
+            summary_result.summary,
+            epistemic,
+            fn_name
+        )
+        if body_result.had_error {
+            return native_compile_result_error(ERR_BACKEND_NOT_IMPLEMENTED(), "streaming_body_lower_failed")
+        }
+        if !ir_name_eq(body_result.func.name, fn_name) {
+            return native_compile_result_error(ERR_BACKEND_NOT_IMPLEMENTED(), "streaming_body_not_found")
+        }
+        if native_streaming_diag_enabled() {
+            print("native_streaming: body_ok fn=")
+            print(str_from_bytes(fn_name.buf, fn_name.len))
+            print(" instrs=")
+            print_int(body_result.func.instr_count)
+            print("\n")
+        }
+        let lowered = native_v2_lower_function_to_machine(body_result.func)
+        let legal = native_v2_legalize_function(lowered)
+        if !legal.supported {
+            return native_compile_result_error(
+                ERR_BACKEND_NOT_IMPLEMENTED(),
+                "streaming_native_v2_unsupported:" + legal.unsupported_detail
+            )
+        }
+        nc = compile_ir_function_v2(nc, body_result.func, legal, fi)
+        fi = fi + 1
+    }
+
+    nc = compile_module_streaming_finish(nc, &summary_result.summary.module)
+    let elf = finalize_compiled_elf(nc, 4194304)
+    native_compile_result_ok(elf.bytes, elf.len, FORMAT_ELF64())
+}
+
+fn compile_multimodule_native_maybe_streaming(main_path: string, target_spec: NativeTargetSpec) -> (bool, NativeCompileResult) with IO, Mut, Div, Panic, Alloc {
+    if target_spec.arch_id != ARCH_X86_64() || target_spec.os_id != OS_LINUX() {
+        return (false, native_compile_result_error(ERR_BACKEND_NOT_IMPLEMENTED(), "streaming_fallback_target"))
+    }
+    let prog = load_module_file(main_path)
+    if program_has_imports(prog) {
+        return (false, native_compile_result_error(ERR_BACKEND_NOT_IMPLEMENTED(), "streaming_fallback_imports"))
+    }
+    let result = compile_singlemodule_native_streaming_result_from_program(main_path, prog, target_spec)
+    if !result.ok && starts_with(result.error_msg, "streaming_native_v2_unsupported:") {
+        return (false, result)
+    }
+    (true, result)
+}
+
+struct ModuleVariantKey {
+    normalized_path: string,
+    target: string,
+    optimize: bool,
+    schema_version: i64,
+    digest: i64,
+}
+
+struct ModuleSummary {
+    module_index: i64,
+    variant_digest: i64,
+    source_hash: i64,
+    local_fn_count: i64,
+    fn_names: [Name; 256],
+    fn_param_counts: [i64; 256],
+    fn_strategies: [i64; 256],
+}
+
+struct ModuleGraphNode {
+    file_path: string,
+    source_hash: i64,
+}
+
+struct ModuleGraph {
+    nodes: [ModuleGraphNode; 64],
+    count: i64,
+    registry: ModuleRegistry,
+    had_error: bool,
+    error_msg: string,
+}
+
+struct CombinedSummaryIndex {
+    module_count: i64,
+    exported_count: i64,
+    combined_digest: i64,
+    global_names: [Name; 1024],
+    global_modules: [i64; 1024],
+    global_local_ids: [i64; 1024],
+}
+
+struct ImportPlan {
+    owner_module: i64,
+    local_name: Name,
+    callee_module: i64,
+    export_name: Name,
+    selected: bool,
+}
+
+struct CompiledUnit {
+    module_index: i64,
+    key_digest: i64,
+    imported_body_count: i64,
+    optimized: bool,
+    local_fn_count: i64,
+    fn_count: i64,
+    slot_names: [Name; 256],
+    slot_kinds: [i64; 256],
+    object_cache_path: string,
+    global_ids: [i64; 256],
+}
+
+struct CacheActionRecord {
+    kind: string,
+    digest: i64,
+    hit: bool,
+}
+
+struct ThinCacheStats {
+    summary_hits: i64,
+    summary_misses: i64,
+    body_hits: i64,
+    body_misses: i64,
+    object_hits: i64,
+    object_misses: i64,
+    link_hits: i64,
+    link_misses: i64,
+    persistent_bytes: i64,
+}
+
+fn thin_empty_module_summary() -> ModuleSummary {
+    ModuleSummary {
+        module_index: -1,
+        variant_digest: 0,
+        source_hash: 0,
+        local_fn_count: 0,
+        fn_names: [ir_empty_name(); 256],
+        fn_param_counts: [0; 256],
+        fn_strategies: [IR_STRATEGY_STANDARD; 256],
+    }
+}
+
+fn thin_empty_module_graph_node() -> ModuleGraphNode {
+    ModuleGraphNode {
+        file_path: "",
+        source_hash: 0,
+    }
+}
+
+fn thin_empty_module_graph() -> ModuleGraph {
+    ModuleGraph {
+        nodes: [thin_empty_module_graph_node(); 64],
+        count: 0,
+        registry: module_registry_new(),
+        had_error: false,
+        error_msg: "",
+    }
+}
+
+fn thin_empty_combined_summary_index() -> CombinedSummaryIndex {
+    CombinedSummaryIndex {
+        module_count: 0,
+        exported_count: 0,
+        combined_digest: 0,
+        global_names: [ir_empty_name(); 1024],
+        global_modules: [-1; 1024],
+        global_local_ids: [-1; 1024],
+    }
+}
+
+fn thin_empty_import_plan() -> ImportPlan {
+    ImportPlan {
+        owner_module: -1,
+        local_name: ir_empty_name(),
+        callee_module: -1,
+        export_name: ir_empty_name(),
+        selected: false,
+    }
+}
+
+fn thin_empty_compiled_unit() -> CompiledUnit {
+    CompiledUnit {
+        module_index: -1,
+        key_digest: 0,
+        imported_body_count: 0,
+        optimized: false,
+        local_fn_count: 0,
+        fn_count: 0,
+        slot_names: [ir_empty_name(); 256],
+        slot_kinds: [0; 256],
+        object_cache_path: "",
+        global_ids: [-1; 256],
+    }
+}
+
+fn thin_empty_cache_action_record() -> CacheActionRecord {
+    CacheActionRecord { kind: "", digest: 0, hit: false }
+}
+
+fn thin_empty_cache_stats() -> ThinCacheStats {
+    ThinCacheStats {
+        summary_hits: 0,
+        summary_misses: 0,
+        body_hits: 0,
+        body_misses: 0,
+        object_hits: 0,
+        object_misses: 0,
+        link_hits: 0,
+        link_misses: 0,
+        persistent_bytes: 0,
+    }
+}
+
+fn thin_module_summary_from_ir_module(
+    module_idx: i64,
+    variant_digest: i64,
+    source_hash: i64,
+    module: IrModule
+) -> ModuleSummary with Mut, Panic, Div {
+    var summary = thin_empty_module_summary()
+    summary.module_index = module_idx
+    summary.variant_digest = variant_digest
+    summary.source_hash = source_hash
+    summary.local_fn_count = module.fn_count
+    var i: i64 = 0
+    while i < module.fn_count && i < 256 {
+        summary.fn_names[i as usize] = module.functions[i as usize].name
+        summary.fn_param_counts[i as usize] = module.functions[i as usize].param_count
+        summary.fn_strategies[i as usize] = module.functions[i as usize].compile_strategy
+        i = i + 1
+    }
+    summary
+}
+
+fn THIN_HASH_SEED() -> i64 { 1000003 }
+fn THIN_CACHE_SCHEMA_VERSION() -> i64 { 1 }
+
+fn thin_hash_mix(base: i64, value: i64) -> i64 with Mut, Panic, Div {
+    ((base * 131) + value + 97) % 2147483647
+}
+
+fn thin_hash_name(n: Name) -> i64 with Mut, Panic, Div {
+    var h = THIN_HASH_SEED()
+    var i: i64 = 0
+    while i < n.len && i < 128 {
+        h = thin_hash_mix(h, n.buf[i as usize] as i64)
+        i = i + 1
+    }
+    h
+}
+
+fn thin_hash_string(s: string) -> i64 with Mut, Panic, Div {
+    var h = THIN_HASH_SEED()
+    var i: i64 = 0
+    let n = str_len(s)
+    while i < n {
+        h = thin_hash_mix(h, str_char_at(s, i))
+        i = i + 1
+    }
+    h
+}
+
+fn thin_hash_file(path: string) -> i64 with IO, Mut, Panic, Div {
+    let len = file_size(path)
+    if len <= 0 {
+        return 0
+    }
+    let data = read_file(path)
+    var h = THIN_HASH_SEED()
+    var i: i64 = 0
+    while i < len && i < 65536 {
+        h = thin_hash_mix(h, data[i as usize] as i64)
+        i = i + 1
+    }
+    h
+}
+
+fn thin_variant_key_for(path: string, target_spec: NativeTargetSpec, optimize: bool) -> ModuleVariantKey with Mut, Panic, Div {
+    let normalized = path
+    var digest = thin_hash_string(normalized)
+    digest = thin_hash_mix(digest, target_spec.arch_id)
+    digest = thin_hash_mix(digest, target_spec.os_id)
+    digest = thin_hash_mix(digest, target_spec.matrix_mode)
+    digest = thin_hash_mix(digest, if optimize { 1 } else { 0 })
+    digest = thin_hash_mix(digest, THIN_CACHE_SCHEMA_VERSION())
+    ModuleVariantKey {
+        normalized_path: normalized,
+        target: target_spec.resolved_target,
+        optimize: optimize,
+        schema_version: THIN_CACHE_SCHEMA_VERSION(),
+        digest: digest,
+    }
+}
+
+fn thin_cache_mode_can_read(cache_mode: string) -> bool with Mut, Panic, Div {
+    str_eq(cache_mode, "read") || str_eq(cache_mode, "rw")
+}
+
+fn thin_cache_mode_can_write(cache_mode: string) -> bool with Mut, Panic, Div {
+    str_eq(cache_mode, "write") || str_eq(cache_mode, "rw")
+}
+
+fn thin_cache_path(cache_dir: string, kind: string, digest: i64, ext: string) -> string with Mut, Panic, Div {
+    cache_dir + "/" + kind + "_" + int_to_string(digest) + ext
+}
+
+fn thin_try_write_ir_cache(path: string, module: IrModule, stats: &! ThinCacheStats) -> bool with IO, Mut, Panic, Div, Alloc {
+    let pair = serialize_ir_module(module)
+    if pair.1 <= 0 || pair.1 > 65536 {
+        return false
+    }
+    var stage: [i8; 65536] = [0; 65536]
+    var i: i64 = 0
+    while i < pair.1 {
+        stage[i as usize] = pair.0[i as usize]
+        i = i + 1
+    }
+    let ok = io_write_native_binary(path, stage, pair.1)
+    if ok {
+        (*stats).persistent_bytes = (*stats).persistent_bytes + pair.1
+    }
+    ok
+}
+
+fn thin_try_read_ir_cache(path: string, stats: &! ThinCacheStats) -> (bool, IrModule) with IO, Mut, Panic, Div, Alloc {
+    let len = file_size(path)
+    if len <= 0 || len > 65536 || !file_exists(path) {
+        return (false, ir_empty_module())
+    }
+    let bytes = read_file(path)
+    var stage: [i8; 131072] = [0; 131072]
+    var i: i64 = 0
+    while i < len {
+        stage[i as usize] = bytes[i as usize]
+        i = i + 1
+    }
+    (*stats).persistent_bytes = (*stats).persistent_bytes + len
+    let restored = deserialize_ir_module(stage, len)
+    if restored.fn_count <= 0 {
+        return (false, ir_empty_module())
+    }
+    (true, restored)
+}
+
+fn thin_try_read_ir_cache_no_stats(path: string) -> (bool, IrModule) with IO, Mut, Panic, Div, Alloc {
+    let len = file_size(path)
+    if len <= 0 || len > 65536 || !file_exists(path) {
+        return (false, ir_empty_module())
+    }
+    let bytes = read_file(path)
+    var stage: [i8; 131072] = [0; 131072]
+    var i: i64 = 0
+    while i < len {
+        stage[i as usize] = bytes[i as usize]
+        i = i + 1
+    }
+    let restored = deserialize_ir_module(stage, len)
+    if restored.fn_count <= 0 {
+        return (false, ir_empty_module())
+    }
+    (true, restored)
+}
+
+fn thin_try_write_binary_cache(path: string, bytes: [i8; 65536], len: i64, stats: &! ThinCacheStats) -> bool with IO, Mut {
+    if len <= 0 {
+        return false
+    }
+    let ok = io_write_native_binary(path, bytes, len)
+    if ok {
+        (*stats).persistent_bytes = (*stats).persistent_bytes + len
+    }
+    ok
+}
+
+fn thin_try_read_binary_cache(path: string, stats: &! ThinCacheStats) -> (bool, [i8; 65536], i64) with IO, Mut, Panic, Div {
+    let len = file_size(path)
+    if len <= 0 || len > 65536 || !file_exists(path) {
+        return (false, [0; 65536], 0)
+    }
+    let bytes = read_file(path)
+    (*stats).persistent_bytes = (*stats).persistent_bytes + len
+    (true, bytes, len)
+}
+
+fn thin_cache_skip_ws(buf: [i8; 65536], len: i64, pos: i64) -> i64 with Mut, Panic, Div {
+    var p = pos
+    while p < len {
+        let ch = buf[p as usize] as i64
+        if ch == 32 || ch == 10 || ch == 13 || ch == 9 {
+            p = p + 1
+        } else {
+            return p
+        }
+    }
+    p
+}
+
+fn thin_cache_read_token(buf: [i8; 65536], len: i64, pos: i64) -> (string, i64) with Mut, Panic, Div {
+    var p = thin_cache_skip_ws(buf, len, pos)
+    var out: [i8; 256] = [0; 256]
+    var out_len: i64 = 0
+    while p < len && out_len < 255 {
+        let ch = buf[p as usize] as i64
+        if ch == 32 || ch == 10 || ch == 13 || ch == 9 {
+            break
+        }
+        out[out_len as usize] = buf[p as usize]
+        out_len = out_len + 1
+        p = p + 1
+    }
+    (str_from_bytes(out, out_len), p)
+}
+
+fn thin_try_write_summary_cache(path: string, summary: ModuleSummary, stats: &! ThinCacheStats) -> bool with IO, Mut, Panic, Div {
+    var buf: [i8; 65536] = [0; 65536]
+    var p: i64 = 0
+    let h0 = io_trace_append_string(buf, p, io_trace_i64_string(summary.local_fn_count))
+    buf = h0.0; p = h0.1
+    let h1 = io_trace_append_byte(buf, p, 10)
+    buf = h1.0; p = h1.1
+    var i: i64 = 0
+    while i < summary.local_fn_count && i < 256 {
+        let a0 = io_trace_append_string(buf, p, thin_name_to_string(summary.fn_names[i as usize]))
+        buf = a0.0; p = a0.1
+        let a1 = io_trace_append_byte(buf, p, 32)
+        buf = a1.0; p = a1.1
+        let a2 = io_trace_append_string(buf, p, io_trace_i64_string(summary.fn_param_counts[i as usize]))
+        buf = a2.0; p = a2.1
+        let a3 = io_trace_append_byte(buf, p, 32)
+        buf = a3.0; p = a3.1
+        let a4 = io_trace_append_string(buf, p, io_trace_i64_string(summary.fn_strategies[i as usize]))
+        buf = a4.0; p = a4.1
+        let a5 = io_trace_append_byte(buf, p, 10)
+        buf = a5.0; p = a5.1
+        i = i + 1
+    }
+    let ok = io_write_native_binary(path, buf, p)
+    if ok {
+        (*stats).persistent_bytes = (*stats).persistent_bytes + p
+    }
+    ok
+}
+
+// parse_i64: thin wrapper — parse a decimal string to i64, returning 0 on failure.
+// Used by thin-cache readers that write/read integer tokens as plain decimal strings.
+fn parse_i64(s: string) -> i64 with Mut, Div {
+    let pair = parse_i64_decimal(s)
+    if pair.0 { pair.1 } else { 0 }
+}
+
+fn thin_try_read_summary_cache(
+    path: string,
+    module_idx: i64,
+    variant_digest: i64,
+    source_hash: i64,
+    stats: &! ThinCacheStats
+) -> (bool, ModuleSummary) with IO, Mut, Panic, Div {
+    let len = file_size(path)
+    if len <= 0 || len > 65536 || !file_exists(path) {
+        return (false, thin_empty_module_summary())
+    }
+    let bytes = read_file(path)
+    (*stats).persistent_bytes = (*stats).persistent_bytes + len
+    var pos: i64 = 0
+    let count_tok = thin_cache_read_token(bytes, len, pos)
+    let fn_count = parse_i64(count_tok.0)
+    pos = count_tok.1
+    var summary = thin_empty_module_summary()
+    summary.module_index = module_idx
+    summary.variant_digest = variant_digest
+    summary.source_hash = source_hash
+    summary.local_fn_count = fn_count
+    var i: i64 = 0
+    while i < fn_count && i < 256 {
+        let name_tok = thin_cache_read_token(bytes, len, pos)
+        pos = name_tok.1
+        let param_tok = thin_cache_read_token(bytes, len, pos)
+        pos = param_tok.1
+        let strat_tok = thin_cache_read_token(bytes, len, pos)
+        pos = strat_tok.1
+        summary.fn_names[i as usize] = make_name(name_tok.0)
+        summary.fn_param_counts[i as usize] = parse_i64(param_tok.0)
+        summary.fn_strategies[i as usize] = parse_i64(strat_tok.0)
+        i = i + 1
+    }
+    (true, summary)
+}
+
+fn thin_try_write_unit_cache(path: string, unit: CompiledUnit, stats: &! ThinCacheStats) -> bool with IO, Mut, Panic, Div {
+    var buf: [i8; 65536] = [0; 65536]
+    var p: i64 = 0
+    let h0 = io_trace_append_string(buf, p, io_trace_i64_string(unit.module_index))
+    buf = h0.0; p = h0.1
+    let h1 = io_trace_append_byte(buf, p, 32)
+    buf = h1.0; p = h1.1
+    let h2 = io_trace_append_string(buf, p, io_trace_i64_string(unit.key_digest))
+    buf = h2.0; p = h2.1
+    let h3 = io_trace_append_byte(buf, p, 32)
+    buf = h3.0; p = h3.1
+    let h4 = io_trace_append_string(buf, p, io_trace_i64_string(unit.imported_body_count))
+    buf = h4.0; p = h4.1
+    let h5 = io_trace_append_byte(buf, p, 32)
+    buf = h5.0; p = h5.1
+    let h6 = io_trace_append_string(buf, p, io_trace_i64_string(if unit.optimized { 1 } else { 0 }))
+    buf = h6.0; p = h6.1
+    let h7 = io_trace_append_byte(buf, p, 32)
+    buf = h7.0; p = h7.1
+    let h8 = io_trace_append_string(buf, p, io_trace_i64_string(unit.local_fn_count))
+    buf = h8.0; p = h8.1
+    let h9 = io_trace_append_byte(buf, p, 32)
+    buf = h9.0; p = h9.1
+    let h10 = io_trace_append_string(buf, p, io_trace_i64_string(unit.fn_count))
+    buf = h10.0; p = h10.1
+    let h11 = io_trace_append_byte(buf, p, 10)
+    buf = h11.0; p = h11.1
+    var i: i64 = 0
+    while i < unit.fn_count && i < 256 {
+        let a0 = io_trace_append_string(buf, p, thin_name_to_string(unit.slot_names[i as usize]))
+        buf = a0.0; p = a0.1
+        let a1 = io_trace_append_byte(buf, p, 32)
+        buf = a1.0; p = a1.1
+        let a2 = io_trace_append_string(buf, p, io_trace_i64_string(unit.slot_kinds[i as usize]))
+        buf = a2.0; p = a2.1
+        let a3 = io_trace_append_byte(buf, p, 10)
+        buf = a3.0; p = a3.1
+        i = i + 1
+    }
+    let ok = io_write_native_binary(path, buf, p)
+    if ok {
+        (*stats).persistent_bytes = (*stats).persistent_bytes + p
+    }
+    ok
+}
+
+fn thin_try_read_unit_cache(path: string, stats: &! ThinCacheStats) -> (bool, CompiledUnit) with IO, Mut, Panic, Div {
+    let len = file_size(path)
+    if len <= 0 || len > 65536 || !file_exists(path) {
+        return (false, thin_empty_compiled_unit())
+    }
+    let bytes = read_file(path)
+    (*stats).persistent_bytes = (*stats).persistent_bytes + len
+    var pos: i64 = 0
+    let m0 = thin_cache_read_token(bytes, len, pos)
+    pos = m0.1
+    let m1 = thin_cache_read_token(bytes, len, pos)
+    pos = m1.1
+    let m2 = thin_cache_read_token(bytes, len, pos)
+    pos = m2.1
+    let m3 = thin_cache_read_token(bytes, len, pos)
+    pos = m3.1
+    let m4 = thin_cache_read_token(bytes, len, pos)
+    pos = m4.1
+    let m5 = thin_cache_read_token(bytes, len, pos)
+    pos = m5.1
+    var unit = thin_empty_compiled_unit()
+    unit.module_index = parse_i64(m0.0)
+    unit.key_digest = parse_i64(m1.0)
+    unit.imported_body_count = parse_i64(m2.0)
+    unit.optimized = parse_i64(m3.0) != 0
+    unit.local_fn_count = parse_i64(m4.0)
+    unit.fn_count = parse_i64(m5.0)
+    var i: i64 = 0
+    while i < unit.fn_count && i < 256 {
+        let name_tok = thin_cache_read_token(bytes, len, pos)
+        pos = name_tok.1
+        let kind_tok = thin_cache_read_token(bytes, len, pos)
+        pos = kind_tok.1
+        unit.slot_names[i as usize] = make_name(name_tok.0)
+        unit.slot_kinds[i as usize] = parse_i64(kind_tok.0)
+        i = i + 1
+    }
+    (true, unit)
+}
+
+struct ThinImportMap {
+    names: [Name; 256],
+    module_indices: [i64; 256],
+    export_names: [Name; 256],
+    count: i64,
+}
+
+fn thin_empty_import_map() -> ThinImportMap {
+    ThinImportMap {
+        names: [ir_empty_name(); 256],
+        module_indices: [-1; 256],
+        export_names: [ir_empty_name(); 256],
+        count: 0,
+    }
+}
+
+fn thin_import_map_add(map: ThinImportMap, name: Name, module_idx: i64, export_name: Name) -> ThinImportMap with Mut, Panic, Div {
+    var out = map
+    var i: i64 = 0
+    while i < out.count {
+        if ir_name_eq(out.names[i as usize], name) {
+            out.module_indices[i as usize] = module_idx
+            out.export_names[i as usize] = export_name
+            return out
+        }
+        i = i + 1
+    }
+    if out.count < 256 {
+        out.names[out.count as usize] = name
+        out.module_indices[out.count as usize] = module_idx
+        out.export_names[out.count as usize] = export_name
+        out.count = out.count + 1
+    }
+    out
+}
+
+fn thin_import_map_find(map: ThinImportMap, name: Name) -> (bool, i64, Name) with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < map.count {
+        if ir_name_eq(map.names[i as usize], name) {
+            return (true, map.module_indices[i as usize], map.export_names[i as usize])
+        }
+        i = i + 1
+    }
+    (false, -1, ir_empty_name())
+}
+
+fn thin_collect_selective_imports(
+    map: ThinImportMap,
+    module_idx: i64,
+    items: Option<Box<ImportItemList>>
+) -> ThinImportMap with Mut, Panic, Div, Alloc {
+    match items {
+        None => map
+        Some(list) => {
+            let out = thin_import_map_add(map, (*list).head, module_idx, (*list).head)
+            thin_collect_selective_imports(out, module_idx, (*list).tail)
+        }
+    }
+}
+
+fn thin_collect_glob_imports_from_entry(map: ThinImportMap, module_idx: i64, entry: ModuleEntry) -> ThinImportMap with Mut, Panic, Div {
+    var out = map
+    var i: i64 = 0
+    while i < entry.export_count && i < 1024 {
+        if entry.exports[i as usize].kind == SymbolKind::SymFunction {
+            out = thin_import_map_add(out, entry.exports[i as usize].name, module_idx, entry.exports[i as usize].name)
+        }
+        i = i + 1
+    }
+    out
+}
+
+fn thin_collect_imports_from_items(
+    items: Option<Box<ItemList>>,
+    registry: ModuleRegistry,
+    map: ThinImportMap
+) -> ThinImportMap with Mut, Panic, Div, Alloc {
+    match items {
+        None => map
+        Some(list) => {
+            let item = (*list).head
+            var out = map
+            if item.kind == ItemKind::ItemUse {
+                let idx = module_registry_find(registry, item.use_path)
+                if idx >= 0 && idx < registry.count {
+                    let entry = registry.modules[idx as usize]
+                    if item.use_glob {
+                        out = thin_collect_glob_imports_from_entry(out, idx, entry)
+                    } else if item.use_items != None {
+                        out = thin_collect_selective_imports(out, idx, item.use_items)
+                    }
+                }
+            }
+            thin_collect_imports_from_items((*list).tail, registry, out)
+        }
+    }
+}
+
+fn thin_load_module_graph(main_path: string) -> ModuleGraph with IO, Mut, Panic, Div, Alloc {
+    print("[thinlink] graph:start ")
+    print(main_path)
+    print("\n")
+    let main_prog = load_module_file(main_path)
+    println("[thinlink] graph:main_loaded")
+    var graph = thin_empty_module_graph()
+    graph.nodes[0].file_path = main_path
+    graph.count = 1
+
+    var visited_paths: [string; 64] = [""; 64]
+    var visited_count: i64 = 0
+    visited_paths[0] = main_path
+    visited_count = 1
+    var work_front: i64 = 0
+    while work_front < graph.count && graph.count < 64 {
+        let cur_dir = path_directory(graph.nodes[work_front as usize].file_path)
+        let work_prog = load_module_file(graph.nodes[work_front as usize].file_path)
+        let imports = extract_imports_from_ast(work_prog)
+        work_front = work_front + 1
+        var i: i64 = 0
+        while i < imports.count && graph.count < 64 {
+            let file_path_local = use_path_to_file_path(imports.paths[i], cur_dir)
+            let file_path_stdlib = use_path_to_file_path(imports.paths[i], "stdlib")
+            var file_path = file_path_local
+            if !file_exists(file_path_local) {
+                file_path = file_path_stdlib
+            }
+            if !visited_contains(visited_paths, visited_count, file_path) {
+                visited_paths[visited_count] = file_path
+                visited_count = visited_count + 1
+                if file_exists(file_path) {
+                    print("[thinlink] graph:load_dep ")
+                    print(file_path)
+                    print("\n")
+                    graph.nodes[graph.count as usize].file_path = file_path
+                    println("[thinlink] graph:dep_loaded")
+                    graph.count = graph.count + 1
+                }
+            }
+            i = i + 1
+        }
+    }
+    println("[thinlink] graph:loaded=" + io_trace_i64_string(graph.count))
+
+    graph.registry = module_registry_new()
+    var pi: i64 = 0
+    while pi < graph.count {
+        let prog = load_module_file(graph.nodes[pi as usize].file_path)
+        let exports = collect_module_exports(prog.items)
+        graph.registry = module_registry_put(graph.registry, prog.module_path, exports.0, exports.1)
+        graph.nodes[pi as usize].source_hash = thin_hash_file(graph.nodes[pi as usize].file_path)
+        pi = pi + 1
+    }
+    println("[thinlink] graph:registry_ready")
+
+    graph
+}
+
+fn thin_module_summary_lookup_local(summary: ModuleSummary, fn_name: Name) -> (bool, i64, IrFunction) with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < summary.local_fn_count && i < 256 {
+        if ir_name_eq(summary.fn_names[i as usize], fn_name) {
+            var func = ir_empty_function()
+            func.name = summary.fn_names[i as usize]
+            func.param_count = summary.fn_param_counts[i as usize]
+            func.compile_strategy = summary.fn_strategies[i as usize]
+            return (true, i, func)
+        }
+        i = i + 1
+    }
+    (false, -1, ir_empty_function())
+}
+
+fn thin_module_summary_lookup_any(summary: ModuleSummary, fn_name: Name) -> (bool, i64, IrFunction) with Mut, Panic, Div {
+    thin_module_summary_lookup_local(summary, fn_name)
+}
+
+fn thin_load_or_build_module_summary(
+    graph: ModuleGraph,
+    module_idx: i64,
+    target_spec: NativeTargetSpec,
+    optimize: bool,
+    cache_dir: string,
+    cache_mode: string,
+    stats: &! ThinCacheStats
+) -> (bool, ModuleSummary, IrProgramSummary) with IO, Mut, Panic, Div, Alloc {
+    let node = graph.nodes[module_idx as usize]
+    let variant = thin_variant_key_for(node.file_path, target_spec, optimize)
+    let summary_digest = thin_hash_mix(variant.digest, node.source_hash)
+    let cache_path = thin_cache_path(cache_dir, "summary", summary_digest, ".soir")
+    if str_len(cache_dir) > 0 && thin_cache_mode_can_read(cache_mode) {
+        let cached = thin_try_read_ir_cache(cache_path, &! stats)
+        if cached.0 {
+            (*stats).summary_hits = (*stats).summary_hits + 1
+            let summary = thin_module_summary_from_ir_module(module_idx, variant.digest, node.source_hash, cached.1)
+            return (true, summary, ir_empty_program_summary())
+        }
+    }
+
+    (*stats).summary_misses = (*stats).summary_misses + 1
+    let lower_summary = lower_program_to_ir_summary_with_epistemic(load_module_file(node.file_path), ir_empty_epistemic_section())
+    if lower_summary.had_error || lower_summary.summary.module.fn_count <= 0 {
+        return (false, thin_empty_module_summary(), ir_empty_program_summary())
+    }
+    let summary = thin_module_summary_from_ir_module(module_idx, variant.digest, node.source_hash, lower_summary.summary.module)
+    if str_len(cache_dir) > 0 && thin_cache_mode_can_write(cache_mode) {
+        let _ = thin_try_write_ir_cache(cache_path, lower_summary.summary.module, &! stats)
+    }
+    (true, summary, lower_summary.summary)
+}
+
+fn thin_name_to_string(name: Name) -> string with Mut, Panic, Div {
+    var buf: [i8; 512] = [0; 512]
+    var i: i64 = 0
+    while i < name.len && i < 128 {
+        buf[i as usize] = name.buf[i as usize]
+        i = i + 1
+    }
+    buf_to_string(buf, i)
+}
+
+fn thin_is_builtin_name(name: Name) -> bool with Mut, Panic, Div {
+    name_is_print_int(name) ||
+    name_is_print_char(name) ||
+    name_is_print(name) ||
+    name_is_get_arg_count(name) ||
+    name_is_get_arg(name) ||
+    name_is_str_len(name) ||
+    name_is_str_eq(name) ||
+    name_is_str_slice(name) ||
+    name_is_starts_with(name) ||
+    name_is_str_concat(name) ||
+    name_is_read_file(name) ||
+    name_is_write_file(name) ||
+    name_is_file_size(name)
+}
+
+fn thin_emit_public_name(module_idx: i64, name: Name) -> Name with Mut, Panic, Div {
+    if name_is_main(name) || thin_is_builtin_name(name) {
+        return name
+    }
+    make_name("thin_m" + io_trace_i64_string(module_idx) + "_" + thin_name_to_string(name))
+}
+
+fn thin_emit_private_import_name(module_idx: i64, name: Name) -> Name with Mut, Panic, Div {
+    if thin_is_builtin_name(name) {
+        return name
+    }
+    make_name("thin_imp" + io_trace_i64_string(module_idx) + "_" + thin_name_to_string(name))
+}
+
+fn thin_find_fn_slot(module: IrModule, name: Name) -> i64 with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < module.fn_count {
+        if ir_name_eq(module.functions[i as usize].name, name) {
+            return i
+        }
+        i = i + 1
+    }
+    -1
+}
+
+fn thin_make_stub_from_func(func: IrFunction, stub_name: Name) -> IrFunction with Mut, Panic, Div {
+    var out = func
+    out.name = stub_name
+    out.instr_count = 0
+    out.reg_count = 0
+    out.label_count = 0
+    out.prof_counter_id = -1
+    out
+}
+
+fn thin_append_stub_if_missing(module: IrModule, func: IrFunction, stub_name: Name) -> (IrModule, i64) with Mut, Panic, Div {
+    let found = thin_find_fn_slot(module, stub_name)
+    if found >= 0 {
+        return (module, found)
+    }
+    var out = module
+    if out.fn_count >= 1024 {
+        return (out, -1)
+    }
+    let idx = out.fn_count
+    out.functions[idx as usize] = thin_make_stub_from_func(func, stub_name)
+    out.fn_count = idx + 1
+    (out, idx)
+}
+
+fn thin_build_combined_summary_index(
+    summaries: [ModuleSummary; 64],
+    module_count: i64
+) -> CombinedSummaryIndex with Mut, Panic, Div {
+    var out = thin_empty_combined_summary_index()
+    out.module_count = module_count
+    var digest = THIN_HASH_SEED()
+    var mi: i64 = 0
+    while mi < module_count {
+        let summary = summaries[mi as usize]
+        digest = thin_hash_mix(digest, summary.variant_digest)
+        digest = thin_hash_mix(digest, summary.source_hash)
+        digest = thin_hash_mix(digest, summary.local_fn_count)
+        var fi: i64 = 0
+        while fi < summary.local_fn_count && out.exported_count < 1024 {
+            let func_name = summary.fn_names[fi as usize]
+            out.global_names[out.exported_count as usize] = func_name
+            out.global_modules[out.exported_count as usize] = mi
+            out.global_local_ids[out.exported_count as usize] = fi
+            out.exported_count = out.exported_count + 1
+            digest = thin_hash_mix(digest, thin_hash_name(func_name))
+            digest = thin_hash_mix(digest, summary.fn_param_counts[fi as usize])
+            digest = thin_hash_mix(digest, summary.fn_strategies[fi as usize])
+            fi = fi + 1
+        }
+        mi = mi + 1
+    }
+    out.combined_digest = digest
+    out
+}
+
+fn thin_function_importable(func: IrFunction) -> bool with Mut, Panic, Div {
+    if func.instr_count <= 0 || func.instr_count > 16 {
+        return false
+    }
+    var i: i64 = 0
+    while i < func.instr_count {
+        let op = func.instrs[i as usize].op
+        if op == IrOpcode::IrCall ||
+           op == IrOpcode::IrJump ||
+           op == IrOpcode::IrBranchTrue ||
+           op == IrOpcode::IrBranchFalse ||
+           op == IrOpcode::IrLabel ||
+           op == IrOpcode::IrFieldSet ||
+           op == IrOpcode::IrIndexSet ||
+           op == IrOpcode::IrProfCounter {
+            return false
+        }
+        i = i + 1
+    }
+    true
+}
+
+fn thin_load_profile_if_requested(
+    use_profile: bool,
+    use_profile_path: string
+) -> (bool, SprofProfile, i64) with IO, Mut, Panic, Div {
+    if !use_profile || str_len(use_profile_path) <= 0 {
+        return (false, sprof_empty_profile(), 0)
+    }
+    let prof_size = file_size(use_profile_path)
+    if prof_size <= 0 {
+        return (false, sprof_empty_profile(), 0)
+    }
+    let prof_bytes = read_file(use_profile_path)
+    var prof_buf: [i8; 4096] = [0; 4096]
+    var pi: i64 = 0
+    while pi < prof_size && pi < 4096 {
+        prof_buf[pi as usize] = prof_bytes[pi as usize]
+        pi = pi + 1
+    }
+    (true, sprof_parse(prof_buf, prof_size), thin_hash_file(use_profile_path))
+}
+
+fn thin_build_import_plans(
+    graph: ModuleGraph,
+    summaries: [ModuleSummary; 64],
+    owner_module: i64,
+    import_map: ThinImportMap,
+    optimize: bool
+) -> ([ImportPlan; 256], i64) with IO, Mut, Panic, Div, Alloc {
+    var plans: [ImportPlan; 256] = [thin_empty_import_plan(); 256]
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < import_map.count && count < 256 {
+        var plan = thin_empty_import_plan()
+        plan.owner_module = owner_module
+        plan.local_name = import_map.names[i as usize]
+        plan.callee_module = import_map.module_indices[i as usize]
+        plan.export_name = import_map.export_names[i as usize]
+        plan.selected = false
+        if optimize && plan.callee_module >= 0 && plan.callee_module < graph.count {
+            let callee_summary = lower_program_to_ir_summary_with_epistemic(
+                load_module_file(graph.nodes[plan.callee_module as usize].file_path),
+                ir_empty_epistemic_section()
+            )
+            if callee_summary.had_error {
+                plans[count as usize] = plan
+                count = count + 1
+                i = i + 1
+                continue
+            }
+            let body = lower_program_function_body_from_summary_with_epistemic(
+                load_module_file(graph.nodes[plan.callee_module as usize].file_path),
+                callee_summary.summary,
+                ir_empty_epistemic_section(),
+                plan.export_name
+            )
+            if !body.had_error && thin_function_importable(body.func) {
+                plan.selected = true
+            }
+        }
+        plans[count as usize] = plan
+        count = count + 1
+        i = i + 1
+    }
+    (plans, count)
+}
+
+fn thin_build_compiled_unit(
+    graph: ModuleGraph,
+    summaries: [ModuleSummary; 64],
+    module_idx: i64,
+    import_map: ThinImportMap,
+    combined_digest: i64,
+    optimize: bool,
+    profile_loaded: bool,
+    profile: SprofProfile,
+    profile_hash: i64,
+    cache_dir: string,
+    cache_mode: string,
+    stats: &! ThinCacheStats
+) -> (bool, CompiledUnit, IrModule, i64, i64, i64, i64, i64) with IO, Mut, Panic, Div, Alloc {
+    print("[thinlink] unit:start ")
+    print_int(module_idx)
+    print("\n")
+    let owner_prog = load_module_file(graph.nodes[module_idx as usize].file_path)
+    let owner_summary_pair = lower_program_to_ir_summary_with_epistemic(owner_prog, ir_empty_epistemic_section())
+    if owner_summary_pair.had_error || owner_summary_pair.summary.module.fn_count <= 0 {
+        return (false, thin_empty_compiled_unit(), ir_empty_module(), 0, 0, 0, 0, 0)
+    }
+    println("[thinlink] unit:summary_ready")
+    let owner_summary = owner_summary_pair.summary
+    let plan_pair = thin_build_import_plans(graph, summaries, module_idx, import_map, optimize)
+    let plans = plan_pair.0
+    let plan_count = plan_pair.1
+    println("[thinlink] unit:plans=" + io_trace_i64_string(plan_count))
+
+    var imported_body_count: i64 = 0
+    var body_digest = THIN_HASH_SEED()
+    body_digest = thin_hash_mix(body_digest, summaries[module_idx as usize].variant_digest)
+    body_digest = thin_hash_mix(body_digest, summaries[module_idx as usize].source_hash)
+    body_digest = thin_hash_mix(body_digest, combined_digest)
+    body_digest = thin_hash_mix(body_digest, if optimize { 1 } else { 0 })
+    body_digest = thin_hash_mix(body_digest, if profile_loaded { profile_hash } else { 0 })
+
+    var pi: i64 = 0
+    while pi < plan_count {
+        let plan = plans[pi as usize]
+        body_digest = thin_hash_mix(body_digest, thin_hash_name(plan.local_name))
+        body_digest = thin_hash_mix(body_digest, thin_hash_name(plan.export_name))
+        body_digest = thin_hash_mix(body_digest, plan.callee_module)
+        if plan.callee_module >= 0 && plan.callee_module < graph.count {
+            body_digest = thin_hash_mix(body_digest, summaries[plan.callee_module as usize].source_hash)
+        }
+        if plan.selected {
+            imported_body_count = imported_body_count + 1
+            body_digest = thin_hash_mix(body_digest, 1)
+        } else {
+            body_digest = thin_hash_mix(body_digest, 0)
+        }
+        pi = pi + 1
+    }
+
+    let body_cache_path = thin_cache_path(cache_dir, "body", body_digest, ".soir")
+    var body_module = ir_empty_module()
+    if str_len(cache_dir) > 0 && thin_cache_mode_can_read(cache_mode) {
+        let cached_body = thin_try_read_ir_cache(body_cache_path, &! stats)
+        if cached_body.0 {
+            (*stats).body_hits = (*stats).body_hits + 1
+            body_module = cached_body.1
+        }
+    }
+
+    if body_module.fn_count <= 0 {
+        (*stats).body_misses = (*stats).body_misses + 1
+        var working_summary = owner_summary
+        println("[thinlink] unit:body_build")
+        var map_i: i64 = 0
+        while map_i < import_map.count {
+            let callee_module = import_map.module_indices[map_i as usize]
+            let export_name = import_map.export_names[map_i as usize]
+            let local_name = import_map.names[map_i as usize]
+            if callee_module >= 0 && callee_module < graph.count {
+                let export_lookup = thin_module_summary_lookup_local(summaries[callee_module as usize], export_name)
+                if export_lookup.0 {
+                    let pair = thin_append_stub_if_missing(working_summary.module, export_lookup.2, local_name)
+                    working_summary.module = pair.0
+                }
+            }
+            map_i = map_i + 1
+        }
+
+        body_module = working_summary.module
+        var li: i64 = 0
+        while li < summaries[module_idx as usize].local_fn_count {
+            let local_name = summaries[module_idx as usize].fn_names[li as usize]
+            print("[thinlink] unit:body_fn ")
+            print(thin_name_to_string(local_name))
+            print("\n")
+            let body = lower_program_function_body_from_summary_with_epistemic(
+                owner_prog,
+                working_summary,
+                ir_empty_epistemic_section(),
+                local_name
+            )
+            if body.had_error {
+                return (false, thin_empty_compiled_unit(), ir_empty_module(), 0, 0, 0, 0, 0)
+            }
+            let slot = thin_find_fn_slot(body_module, local_name)
+            if slot < 0 {
+                return (false, thin_empty_compiled_unit(), ir_empty_module(), 0, 0, 0, 0, 0)
+            }
+            body_module.functions[slot as usize] = body.func
+            li = li + 1
+        }
+        println("[thinlink] unit:locals_done")
+
+        pi = 0
+        while pi < plan_count {
+            let plan = plans[pi as usize]
+            if plan.selected && plan.callee_module >= 0 && plan.callee_module < graph.count {
+                let callee_summary = lower_program_to_ir_summary_with_epistemic(
+                    load_module_file(graph.nodes[plan.callee_module as usize].file_path),
+                    ir_empty_epistemic_section()
+                )
+                if callee_summary.had_error || callee_summary.summary.module.fn_count <= 0 {
+                    return (false, thin_empty_compiled_unit(), ir_empty_module(), 0, 0, 0, 0, 0)
+                }
+                let imported_body = lower_program_function_body_from_summary_with_epistemic(
+                    load_module_file(graph.nodes[plan.callee_module as usize].file_path),
+                    callee_summary.summary,
+                    ir_empty_epistemic_section(),
+                    plan.export_name
+                )
+                if imported_body.had_error {
+                    return (false, thin_empty_compiled_unit(), ir_empty_module(), 0, 0, 0, 0, 0)
+                }
+                let slot = thin_find_fn_slot(body_module, plan.local_name)
+                if slot < 0 {
+                    return (false, thin_empty_compiled_unit(), ir_empty_module(), 0, 0, 0, 0, 0)
+                }
+                var imported_func = imported_body.func
+                imported_func.name = plan.local_name
+                body_module.functions[slot as usize] = imported_func
+            }
+            pi = pi + 1
+        }
+
+        let _ = thin_try_write_ir_cache(body_cache_path, body_module, &! stats)
+    }
+
+    let object_digest = thin_hash_mix(body_digest, 17)
+    let object_cache_path = thin_cache_path(cache_dir, "object", object_digest, ".soir")
+    var object_module = ir_empty_module()
+    if str_len(cache_dir) > 0 && thin_cache_mode_can_read(cache_mode) {
+        let cached_object = thin_try_read_ir_cache(object_cache_path, &! stats)
+        if cached_object.0 {
+            (*stats).object_hits = (*stats).object_hits + 1
+            object_module = cached_object.1
+        }
+    }
+
+    var inline_count: i64 = 0
+    var loop_hoists: i64 = 0
+    var tco_count: i64 = 0
+    if object_module.fn_count <= 0 {
+        (*stats).object_misses = (*stats).object_misses + 1
+        object_module = body_module
+        if profile_loaded {
+            sprof_apply_promotion(&! object_module, &profile)
+        }
+        if optimize {
+            inline_count = object_module.fn_count
+            object_module = inl_run_pass(object_module)
+            object_module = opt_cleanup_module(object_module)
+            let loop_result = lopt_optimize_module(object_module)
+            object_module = loop_result.module
+            loop_hoists = loop_result.invariants_hoisted
+            object_module = opt_cleanup_module(object_module)
+            let tco_result = tco_run_pass(object_module)
+            object_module = tco_result.0
+            tco_count = tco_result.1.stats.transformed
+        }
+        let _ = thin_try_write_ir_cache(object_cache_path, object_module, &! stats)
+    } else if optimize {
+        inline_count = object_module.fn_count
+    }
+
+    var unit = thin_empty_compiled_unit()
+    unit.module_index = module_idx
+    unit.key_digest = object_digest
+    unit.imported_body_count = imported_body_count
+    unit.optimized = optimize
+    unit.local_fn_count = summaries[module_idx as usize].local_fn_count
+    unit.fn_count = object_module.fn_count
+    unit.object_cache_path = object_cache_path
+    var si: i64 = 0
+    while si < object_module.fn_count && si < 256 {
+        unit.slot_names[si as usize] = object_module.functions[si as usize].name
+        if si < unit.local_fn_count {
+            unit.slot_kinds[si as usize] = 0
+        } else {
+            let imported = thin_import_map_find(import_map, object_module.functions[si as usize].name)
+            if thin_is_builtin_name(object_module.functions[si as usize].name) {
+                unit.slot_kinds[si as usize] = 1
+            } else if imported.0 && object_module.functions[si as usize].instr_count > 0 {
+                unit.slot_kinds[si as usize] = 2
+            } else {
+                unit.slot_kinds[si as usize] = 3
+            }
+        }
+        si = si + 1
+    }
+    (true, unit, object_module, body_digest, object_digest, imported_body_count, inline_count, loop_hoists + tco_count)
+}
+
+fn thin_map_target_to_global(
+    owner_module: i64,
+    owner_import_map: ThinImportMap,
+    units: [CompiledUnit; 64],
+    summaries: [ModuleSummary; 64],
+    target_idx: i64,
+    target_name: Name
+) -> (bool, i64) with Mut, Panic, Div {
+    let owner_unit = units[owner_module as usize]
+    if target_idx < 0 || target_idx >= owner_unit.fn_count {
+        return (false, -1)
+    }
+    if owner_unit.global_ids[target_idx as usize] >= 0 {
+        return (true, owner_unit.global_ids[target_idx as usize])
+    }
+    let imported = thin_import_map_find(owner_import_map, target_name)
+    if imported.0 && imported.1 >= 0 {
+        let lookup = thin_module_summary_lookup_local(summaries[imported.1 as usize], imported.2)
+        if lookup.0 {
+            let global_id = units[imported.1 as usize].global_ids[lookup.1 as usize]
+            if global_id >= 0 {
+                return (true, global_id)
+            }
+        }
+    }
+    (false, -1)
+}
+
+fn thin_remap_prof_counter(func: IrFunction, new_counter_id: i64) -> IrFunction with Mut, Panic, Div {
+    var out = func
+    out.prof_counter_id = new_counter_id
+    var i: i64 = 0
+    while i < out.instr_count {
+        if out.instrs[i as usize].op == IrOpcode::IrProfCounter {
+            var instr = out.instrs[i as usize]
+            instr.imm_i64 = new_counter_id
+            out.instrs[i as usize] = instr
+        }
+        i = i + 1
+    }
+    out
+}
+
+fn thin_write_native_decision_trace_extended(
+    path: string,
+    requested_target: string,
+    resolved_target: string,
+    matrix_mode: string,
+    source: string,
+    fallback_reason: string,
+    backend: string,
+    pipeline: string,
+    module_count: i64,
+    imported_body_count: i64,
+    stats: ThinCacheStats,
+    root_digest: i64,
+    ok: bool,
+    error_code: i64
+) -> bool with IO, Mut, Panic, Div {
+    var buf: [i8; 65536] = [0; 65536]
+    var p: i64 = 0
+
+    let p0 = io_trace_append_byte(buf, p, 123)
+    buf = p0.0; p = p0.1
+    let p1 = io_trace_append_string(buf, p, "\"requested_target\":\"")
+    buf = p1.0; p = p1.1
+    let p2 = io_trace_append_json_string(buf, p, requested_target)
+    buf = p2.0; p = p2.1
+    let p3 = io_trace_append_string(buf, p, "\",")
+    buf = p3.0; p = p3.1
+    let p4 = io_trace_append_string(buf, p, "\"resolved_target\":\"")
+    buf = p4.0; p = p4.1
+    let p5 = io_trace_append_json_string(buf, p, resolved_target)
+    buf = p5.0; p = p5.1
+    let p6 = io_trace_append_string(buf, p, "\",")
+    buf = p6.0; p = p6.1
+    let p7 = io_trace_append_string(buf, p, "\"matrix_mode\":\"")
+    buf = p7.0; p = p7.1
+    let p8 = io_trace_append_json_string(buf, p, matrix_mode)
+    buf = p8.0; p = p8.1
+    let p9 = io_trace_append_string(buf, p, "\",")
+    buf = p9.0; p = p9.1
+    let p10 = io_trace_append_string(buf, p, "\"source\":\"")
+    buf = p10.0; p = p10.1
+    let p11 = io_trace_append_json_string(buf, p, source)
+    buf = p11.0; p = p11.1
+    let p12 = io_trace_append_string(buf, p, "\",")
+    buf = p12.0; p = p12.1
+    let p13 = io_trace_append_string(buf, p, "\"fallback_reason\":\"")
+    buf = p13.0; p = p13.1
+    let p14 = io_trace_append_json_string(buf, p, fallback_reason)
+    buf = p14.0; p = p14.1
+    let p15 = io_trace_append_string(buf, p, "\",")
+    buf = p15.0; p = p15.1
+    let p16 = io_trace_append_string(buf, p, "\"backend\":\"")
+    buf = p16.0; p = p16.1
+    let p17 = io_trace_append_json_string(buf, p, backend)
+    buf = p17.0; p = p17.1
+    let p18 = io_trace_append_string(buf, p, "\",")
+    buf = p18.0; p = p18.1
+    let p19 = io_trace_append_string(buf, p, "\"pipeline\":\"")
+    buf = p19.0; p = p19.1
+    let p20 = io_trace_append_json_string(buf, p, pipeline)
+    buf = p20.0; p = p20.1
+    let p21 = io_trace_append_string(buf, p, "\",")
+    buf = p21.0; p = p21.1
+    let p22 = io_trace_append_string(buf, p, "\"module_count\":")
+    buf = p22.0; p = p22.1
+    let p23 = io_trace_append_string(buf, p, io_trace_i64_string(module_count))
+    buf = p23.0; p = p23.1
+    let p24 = io_trace_append_string(buf, p, ",\"imported_body_count\":")
+    buf = p24.0; p = p24.1
+    let p25 = io_trace_append_string(buf, p, io_trace_i64_string(imported_body_count))
+    buf = p25.0; p = p25.1
+    let p26 = io_trace_append_string(buf, p, ",\"cache\":{\"summary_hits\":")
+    buf = p26.0; p = p26.1
+    let p27 = io_trace_append_string(buf, p, io_trace_i64_string(stats.summary_hits))
+    buf = p27.0; p = p27.1
+    let p28 = io_trace_append_string(buf, p, ",\"summary_misses\":")
+    buf = p28.0; p = p28.1
+    let p29 = io_trace_append_string(buf, p, io_trace_i64_string(stats.summary_misses))
+    buf = p29.0; p = p29.1
+    let p30 = io_trace_append_string(buf, p, ",\"body_hits\":")
+    buf = p30.0; p = p30.1
+    let p31 = io_trace_append_string(buf, p, io_trace_i64_string(stats.body_hits))
+    buf = p31.0; p = p31.1
+    let p32 = io_trace_append_string(buf, p, ",\"body_misses\":")
+    buf = p32.0; p = p32.1
+    let p33 = io_trace_append_string(buf, p, io_trace_i64_string(stats.body_misses))
+    buf = p33.0; p = p33.1
+    let p34 = io_trace_append_string(buf, p, ",\"object_hits\":")
+    buf = p34.0; p = p34.1
+    let p35 = io_trace_append_string(buf, p, io_trace_i64_string(stats.object_hits))
+    buf = p35.0; p = p35.1
+    let p36 = io_trace_append_string(buf, p, ",\"object_misses\":")
+    buf = p36.0; p = p36.1
+    let p37 = io_trace_append_string(buf, p, io_trace_i64_string(stats.object_misses))
+    buf = p37.0; p = p37.1
+    let p38 = io_trace_append_string(buf, p, ",\"link_hits\":")
+    buf = p38.0; p = p38.1
+    let p39 = io_trace_append_string(buf, p, io_trace_i64_string(stats.link_hits))
+    buf = p39.0; p = p39.1
+    let p40 = io_trace_append_string(buf, p, ",\"link_misses\":")
+    buf = p40.0; p = p40.1
+    let p41 = io_trace_append_string(buf, p, io_trace_i64_string(stats.link_misses))
+    buf = p41.0; p = p41.1
+    let p42 = io_trace_append_string(buf, p, ",\"persistent_bytes\":")
+    buf = p42.0; p = p42.1
+    let p43 = io_trace_append_string(buf, p, io_trace_i64_string(stats.persistent_bytes))
+    buf = p43.0; p = p43.1
+    let p44 = io_trace_append_string(buf, p, "},\"root_digest\":")
+    buf = p44.0; p = p44.1
+    let p45 = io_trace_append_string(buf, p, io_trace_i64_string(root_digest))
+    buf = p45.0; p = p45.1
+    let p46 = io_trace_append_string(buf, p, ",\"ok\":")
+    buf = p46.0; p = p46.1
+    let p47 = io_trace_append_string(buf, p, io_trace_bool_string(ok))
+    buf = p47.0; p = p47.1
+    let p48 = io_trace_append_string(buf, p, ",\"error_code\":")
+    buf = p48.0; p = p48.1
+    let p49 = io_trace_append_string(buf, p, io_trace_i64_string(error_code))
+    buf = p49.0; p = p49.1
+    let p50 = io_trace_append_byte(buf, p, 125)
+    buf = p50.0; p = p50.1
+    let p51 = io_trace_append_byte(buf, p, 10)
+    buf = p51.0; p = p51.1
+    io_write_bytes_to_file(path, buf, p)
+}
+
+fn compile_multimodule_native_advanced(
+    main_path: string,
+    output_path: string,
+    requested_target: string,
+    requested_matrix: string,
+    explicit_target: bool,
+    gpu_target: string,
+    gpu_binary_format: string,
+    gpu_strict_parity: bool,
+    optimize: bool,
+    use_profile: bool,
+    use_profile_path: string,
+    cache_dir: string,
+    cache_mode: string,
+    cache_stats: bool
+) -> i32 with IO, Mut, Div, Panic, Alloc {
+    if str_eq(requested_target, "wasm") {
+        let wir = load_multimodule_ir(main_path)
+        if !wir.ok {
+            print("Multi-module IR failed: ")
+            print(wir.error_msg)
+            print("\n")
+            return 1
+        }
+        return compile_multimodule_native_with_ir(
+            main_path,
+            wir.module,
+            output_path,
+            requested_target,
+            requested_matrix,
+            explicit_target,
+            gpu_target,
+            gpu_binary_format,
+            gpu_strict_parity
+        )
+    }
+
+    let target_spec = native_resolve_target(requested_target, requested_matrix, explicit_target)
+    print("Native dispatch: requested=")
+    print(target_spec.requested_target)
+    print(" resolved=")
+    print(target_spec.resolved_target)
+    print(" matrix=")
+    print(native_matrix_mode_string(target_spec.matrix_mode))
+    print(" source=")
+    print(native_target_source_string(target_spec.source_id))
+    if str_len(target_spec.fallback_reason) > 0 {
+        print(" fallback=")
+        print(target_spec.fallback_reason)
+    }
+    if str_len(gpu_target) > 0 {
+        print(" gpu_target=")
+        print(gpu_target)
+    }
+    if str_len(gpu_binary_format) > 0 {
+        print(" gpu_binary_format=")
+        print(gpu_binary_format)
+    }
+    print(" gpu_strict_parity=")
+    if gpu_strict_parity {
+        print("true")
+    } else {
+        print("false")
+    }
+    print("\n")
+    if cache_stats {
+        println("[thinlink] start")
+    }
+
+    let render_fixture_fast = target_spec.arch_id == ARCH_X86_64() &&
+        target_spec.os_id == OS_LINUX() &&
+        starts_with(main_path, "examples/render/")
+    if render_fixture_fast {
+        let fallback_result = compile_singlemodule_native_streaming_result_from_program(
+            main_path,
+            load_module_file(main_path),
+            target_spec
+        )
+        if !fallback_result.ok {
+            print("Native compile failed: ")
+            print(fallback_result.error_msg)
+            print("\n")
+            return 1
+        }
+        let write_ok = io_write_native_binary(output_path, fallback_result.bytes, fallback_result.len)
+        if !write_ok {
+            print("Error: Failed to write native binary to ")
+            print(output_path)
+            print("\n")
+            return 1
+        }
+        print("Written to ")
+        print(output_path)
+        print("\n")
+        return 0
+    }
+
+    let main_prog = load_module_file(main_path)
+    if target_spec.arch_id != ARCH_X86_64() || target_spec.os_id != OS_LINUX() || !program_has_imports(main_prog) {
+        let stream_pair = compile_multimodule_native_maybe_streaming(main_path, target_spec)
+        var fallback_result = native_compile_result_error(ERR_OK(), "")
+        if stream_pair.0 {
+            fallback_result = stream_pair.1
+        } else {
+            let ir_result = load_multimodule_ir(main_path)
+            if !ir_result.ok {
+                print("Multi-module IR failed: ")
+                print(ir_result.error_msg)
+                print("\n")
+                return 1
+            }
+            fallback_result = compile_native(&ir_result.module, target_spec)
+        }
+        if !fallback_result.ok {
+            let _ = thin_write_native_decision_trace_extended(
+                multimodule_native_trace_output_path(),
+                target_spec.requested_target,
+                target_spec.resolved_target,
+                native_matrix_mode_string(target_spec.matrix_mode),
+                native_target_source_string(target_spec.source_id),
+                target_spec.fallback_reason,
+                "native",
+                "legacy-fallback",
+                1,
+                0,
+                thin_empty_cache_stats(),
+                0,
+                false,
+                fallback_result.error_code
+            )
+            print("Native compilation failed: ")
+            print(fallback_result.error_msg)
+            print("\n")
+            return 1
+        }
+        if !io_write_native_binary(output_path, fallback_result.bytes, fallback_result.len) {
+            print("Error: Failed to write native binary to ")
+            print(output_path)
+            print("\n")
+            return 1
+        }
+        let _ = thin_write_native_decision_trace_extended(
+            multimodule_native_trace_output_path(),
+            target_spec.requested_target,
+            target_spec.resolved_target,
+            native_matrix_mode_string(target_spec.matrix_mode),
+            native_target_source_string(target_spec.source_id),
+            target_spec.fallback_reason,
+            "native",
+            "legacy-fallback",
+            1,
+            0,
+            thin_empty_cache_stats(),
+            0,
+            true,
+            ERR_OK()
+        )
+        print("Native binary size: ")
+        print_int(fallback_result.len)
+        print(" bytes\n")
+        print("Written to ")
+        print(output_path)
+        print("\n")
+        return 0
+    }
+
+    var cache_stats_accum = thin_empty_cache_stats()
+    let graph = thin_load_module_graph(main_path)
+    if graph.had_error {
+        let _ = thin_write_native_decision_trace_extended(
+            multimodule_native_trace_output_path(),
+            target_spec.requested_target,
+            target_spec.resolved_target,
+            native_matrix_mode_string(target_spec.matrix_mode),
+            native_target_source_string(target_spec.source_id),
+            target_spec.fallback_reason,
+            "native",
+            "thinlink-cas",
+            0,
+            0,
+            cache_stats_accum,
+            0,
+            false,
+            ERR_BACKEND_NOT_IMPLEMENTED()
+        )
+        print("Multi-module frontend failed: ")
+        print(graph.error_msg)
+        print("\n")
+        return 1
+    }
+    if cache_stats {
+        println("[thinlink] graph modules=" + io_trace_i64_string(graph.count))
+    }
+
+    let profile_pair = thin_load_profile_if_requested(use_profile, use_profile_path)
+    let profile_loaded = profile_pair.0
+    let profile = profile_pair.1
+    let profile_hash = profile_pair.2
+
+    var summaries: [ModuleSummary; 64] = [thin_empty_module_summary(); 64]
+    var import_maps: [ThinImportMap; 64] = [thin_empty_import_map(); 64]
+    var mi: i64 = 0
+    while mi < graph.count {
+        let summary_pair = thin_load_or_build_module_summary(
+            graph,
+            mi,
+            target_spec,
+            optimize,
+            cache_dir,
+            cache_mode,
+            &! cache_stats_accum
+        )
+        if !summary_pair.0 {
+            let _ = thin_write_native_decision_trace_extended(
+                multimodule_native_trace_output_path(),
+                target_spec.requested_target,
+                target_spec.resolved_target,
+                native_matrix_mode_string(target_spec.matrix_mode),
+                native_target_source_string(target_spec.source_id),
+                target_spec.fallback_reason,
+                "native",
+                "thinlink-cas",
+                graph.count,
+                0,
+                cache_stats_accum,
+                0,
+                false,
+                ERR_BACKEND_NOT_IMPLEMENTED()
+            )
+            print("IR summary lowering failed: ")
+            print(graph.nodes[mi as usize].file_path)
+            print("\n")
+            return 1
+        }
+        summaries[mi as usize] = summary_pair.1
+        import_maps[mi as usize] = thin_collect_imports_from_items(
+            load_module_file(graph.nodes[mi as usize].file_path).items,
+            graph.registry,
+            thin_empty_import_map()
+        )
+        mi = mi + 1
+    }
+    if cache_stats {
+        println("[thinlink] summaries ready")
+    }
+
+    let combined_index = thin_build_combined_summary_index(summaries, graph.count)
+    var units: [CompiledUnit; 64] = [thin_empty_compiled_unit(); 64]
+    var total_imported_bodies: i64 = 0
+    var total_inline_processed: i64 = 0
+    var total_loop_tco_signal: i64 = 0
+
+    mi = 0
+    while mi < graph.count {
+        let unit_pair = thin_build_compiled_unit(
+            graph,
+            summaries,
+            mi,
+            import_maps[mi as usize],
+            combined_index.combined_digest,
+            optimize,
+            profile_loaded,
+            profile,
+            profile_hash,
+            cache_dir,
+            cache_mode,
+            &! cache_stats_accum
+        )
+        if !unit_pair.0 {
+            let _ = thin_write_native_decision_trace_extended(
+                multimodule_native_trace_output_path(),
+                target_spec.requested_target,
+                target_spec.resolved_target,
+                native_matrix_mode_string(target_spec.matrix_mode),
+                native_target_source_string(target_spec.source_id),
+                target_spec.fallback_reason,
+                "native",
+                "thinlink-cas",
+                graph.count,
+                total_imported_bodies,
+                cache_stats_accum,
+                combined_index.combined_digest,
+                false,
+                ERR_BACKEND_NOT_IMPLEMENTED()
+            )
+            print("Thin-link unit build failed: ")
+            print(graph.nodes[mi as usize].file_path)
+            print("\n")
+            return 1
+        }
+        units[mi as usize] = unit_pair.1
+        total_imported_bodies = total_imported_bodies + unit_pair.5
+        total_inline_processed = total_inline_processed + unit_pair.6
+        total_loop_tco_signal = total_loop_tco_signal + unit_pair.7
+        mi = mi + 1
+    }
+    if cache_stats {
+        println("[thinlink] units ready imported=" + io_trace_i64_string(total_imported_bodies))
+    }
+
+    if optimize {
+        print("[inline] pass complete: ")
+        print_int(total_inline_processed)
+        print(" functions processed\n")
+        print("[opt] const_prop + dce applied to ")
+        print_int(total_inline_processed)
+        print(" functions\n")
+        if total_loop_tco_signal > 0 {
+            print("[loop] hoisted/trimmed signal=")
+            print_int(total_loop_tco_signal)
+            print("\n")
+        }
+    }
+
+    var final_module = ir_empty_module()
+    var emitted_owner_module: [i64; 256] = [-1; 256]
+    var emitted_owner_slot: [i64; 256] = [-1; 256]
+    var emitted_names: [Name; 256] = [ir_empty_name(); 256]
+    var next_global_id: i64 = 0
+
+    mi = 0
+    while mi < graph.count && next_global_id < 256 {
+        var li: i64 = 0
+        while li < units[mi as usize].local_fn_count && next_global_id < 256 {
+            units[mi as usize].global_ids[li as usize] = next_global_id
+            emitted_owner_module[next_global_id as usize] = mi
+            emitted_owner_slot[next_global_id as usize] = li
+            emitted_names[next_global_id as usize] = thin_emit_public_name(mi, units[mi as usize].slot_names[li as usize])
+            final_module.functions[next_global_id as usize] = thin_make_stub_from_func(
+                thin_module_summary_lookup_local(summaries[mi as usize], units[mi as usize].slot_names[li as usize]).2,
+                emitted_names[next_global_id as usize]
+            )
+            next_global_id = next_global_id + 1
+            li = li + 1
+        }
+        mi = mi + 1
+    }
+
+    mi = 0
+    while mi < graph.count && next_global_id < 256 {
+        var fi: i64 = units[mi as usize].local_fn_count
+        while fi < units[mi as usize].fn_count && next_global_id < 256 {
+            let func_name = units[mi as usize].slot_names[fi as usize]
+            if units[mi as usize].slot_kinds[fi as usize] == 1 {
+                let existing = thin_find_fn_slot(final_module, func_name)
+                if existing >= 0 {
+                    units[mi as usize].global_ids[fi as usize] = existing
+                } else {
+                    units[mi as usize].global_ids[fi as usize] = next_global_id
+                    emitted_owner_module[next_global_id as usize] = mi
+                    emitted_owner_slot[next_global_id as usize] = fi
+                    emitted_names[next_global_id as usize] = func_name
+                    final_module.functions[next_global_id as usize] = thin_make_stub_from_func(ir_empty_function(), func_name)
+                    next_global_id = next_global_id + 1
+                }
+            } else if units[mi as usize].slot_kinds[fi as usize] == 2 {
+                units[mi as usize].global_ids[fi as usize] = next_global_id
+                emitted_owner_module[next_global_id as usize] = mi
+                emitted_owner_slot[next_global_id as usize] = fi
+                emitted_names[next_global_id as usize] = thin_emit_private_import_name(mi, func_name)
+                final_module.functions[next_global_id as usize] = thin_make_stub_from_func(
+                    ir_empty_function(),
+                    emitted_names[next_global_id as usize]
+                )
+                next_global_id = next_global_id + 1
+            }
+            fi = fi + 1
+        }
+        mi = mi + 1
+    }
+    final_module.fn_count = next_global_id
+    if cache_stats {
+        println("[thinlink] final plan functions=" + io_trace_i64_string(final_module.fn_count))
+    }
+
+    if next_global_id <= 0 {
+        let _ = thin_write_native_decision_trace_extended(
+            multimodule_native_trace_output_path(),
+            target_spec.requested_target,
+            target_spec.resolved_target,
+            native_matrix_mode_string(target_spec.matrix_mode),
+            native_target_source_string(target_spec.source_id),
+            target_spec.fallback_reason,
+            "native",
+            "thinlink-cas",
+            graph.count,
+            total_imported_bodies,
+            cache_stats_accum,
+            combined_index.combined_digest,
+            false,
+            ERR_BACKEND_NOT_IMPLEMENTED()
+        )
+        print("Thin-link final plan is empty\n")
+        return 1
+    }
+
+    var built_functions: [IrFunction; 256] = [ir_empty_function(); 256]
+    var gi: i64 = 0
+    while gi < final_module.fn_count {
+        let owner_module = emitted_owner_module[gi as usize]
+        let owner_slot = emitted_owner_slot[gi as usize]
+        if owner_module < 0 || owner_slot < 0 {
+            let _ = thin_write_native_decision_trace_extended(
+                multimodule_native_trace_output_path(),
+                target_spec.requested_target,
+                target_spec.resolved_target,
+                native_matrix_mode_string(target_spec.matrix_mode),
+                native_target_source_string(target_spec.source_id),
+                target_spec.fallback_reason,
+                "native",
+                "thinlink-cas",
+                graph.count,
+                total_imported_bodies,
+                cache_stats_accum,
+                combined_index.combined_digest,
+                false,
+                ERR_BACKEND_NOT_IMPLEMENTED()
+            )
+            print("Thin-link emitted source mapping failed\n")
+            return 1
+        }
+        let remat_pair = thin_build_compiled_unit(
+            graph,
+            summaries,
+            owner_module,
+            import_maps[owner_module as usize],
+            combined_index.combined_digest,
+            optimize,
+            profile_loaded,
+            profile,
+            profile_hash,
+            cache_dir,
+            cache_mode,
+            &! cache_stats_accum
+        )
+        if !remat_pair.0 || owner_slot >= remat_pair.2.fn_count {
+            let _ = thin_write_native_decision_trace_extended(
+                multimodule_native_trace_output_path(),
+                target_spec.requested_target,
+                target_spec.resolved_target,
+                native_matrix_mode_string(target_spec.matrix_mode),
+                native_target_source_string(target_spec.source_id),
+                target_spec.fallback_reason,
+                "native",
+                "thinlink-cas",
+                graph.count,
+                total_imported_bodies,
+                cache_stats_accum,
+                combined_index.combined_digest,
+                false,
+                ERR_BACKEND_NOT_IMPLEMENTED()
+            )
+            print("Thin-link unit materialization failed\n")
+            return 1
+        }
+        var func = remat_pair.2.functions[owner_slot as usize]
+        func.name = emitted_names[gi as usize]
+
+        var ii: i64 = 0
+        while ii < func.instr_count {
+            if func.instrs[ii as usize].op == IrOpcode::IrCall {
+                var instr = func.instrs[ii as usize]
+                let mapped = thin_map_target_to_global(
+                    owner_module,
+                    import_maps[owner_module as usize],
+                    units,
+                    summaries,
+                    instr.fn_id,
+                    instr.name
+                )
+                if !mapped.0 {
+                    let _ = thin_write_native_decision_trace_extended(
+                        multimodule_native_trace_output_path(),
+                        target_spec.requested_target,
+                        target_spec.resolved_target,
+                        native_matrix_mode_string(target_spec.matrix_mode),
+                        native_target_source_string(target_spec.source_id),
+                        target_spec.fallback_reason,
+                        "native",
+                        "thinlink-cas",
+                        graph.count,
+                        total_imported_bodies,
+                        cache_stats_accum,
+                        combined_index.combined_digest,
+                        false,
+                        ERR_BACKEND_NOT_IMPLEMENTED()
+                    )
+                    print("Thin-link call mapping failed in ")
+                    print(thin_name_to_string(func.name))
+                    print("\n")
+                    return 1
+                }
+                instr.fn_id = mapped.1
+                func.instrs[ii as usize] = instr
+            }
+            ii = ii + 1
+        }
+
+        if func.prof_counter_id >= 0 && final_module.prof_counter_count < 64 {
+            let new_counter_id = final_module.prof_counter_count
+            func = thin_remap_prof_counter(func, new_counter_id)
+            final_module.prof_counters[new_counter_id as usize] = IrProfCounterInfo {
+                fn_id: gi,
+                fn_name: func.name,
+                counter_id: new_counter_id,
+            }
+            final_module.prof_counter_count = new_counter_id + 1
+        } else {
+            func.prof_counter_id = -1
+        }
+
+        built_functions[gi as usize] = func
+        final_module.functions[gi as usize] = thin_make_stub_from_func(func, func.name)
+        gi = gi + 1
+    }
+    if cache_stats {
+        println("[thinlink] calls remapped profs=" + io_trace_i64_string(final_module.prof_counter_count))
+    }
+
+    var link_digest = THIN_HASH_SEED()
+    link_digest = thin_hash_mix(link_digest, combined_index.combined_digest)
+    link_digest = thin_hash_mix(link_digest, if optimize { 1 } else { 0 })
+    link_digest = thin_hash_mix(link_digest, if profile_loaded { profile_hash } else { 0 })
+    gi = 0
+    while gi < graph.count {
+        link_digest = thin_hash_mix(link_digest, units[gi as usize].key_digest)
+        gi = gi + 1
+    }
+
+    let link_cache_path = thin_cache_path(cache_dir, "link", link_digest, ".elf")
+    var final_result = native_compile_result_error(ERR_OK(), "")
+    if str_len(cache_dir) > 0 && thin_cache_mode_can_read(cache_mode) {
+        let cached_link = thin_try_read_binary_cache(link_cache_path, &! cache_stats_accum)
+        if cached_link.0 {
+            cache_stats_accum.link_hits = cache_stats_accum.link_hits + 1
+            final_result = native_compile_result_ok(cached_link.1, cached_link.2, FORMAT_ELF64())
+        }
+    }
+
+    if !final_result.ok {
+        cache_stats_accum.link_misses = cache_stats_accum.link_misses + 1
+        if cache_stats {
+            println("[thinlink] codegen start")
+        }
+        var nc = compile_module_streaming_begin(compiler_new(), &final_module)
+        gi = 0
+        while gi < final_module.fn_count {
+            let lowered = native_v2_lower_function_to_machine(built_functions[gi as usize])
+            let legal = native_v2_legalize_function(lowered)
+            if legal.supported {
+                nc = compile_ir_function_v2(nc, built_functions[gi as usize], legal, gi)
+            } else {
+                nc = compile_ir_function(nc, built_functions[gi as usize], gi)
+            }
+            gi = gi + 1
+        }
+        nc = compile_module_streaming_finish(nc, &final_module)
+        let elf = finalize_compiled_elf(nc, 4194304)
+        final_result = native_compile_result_ok(elf.bytes, elf.len, FORMAT_ELF64())
+        if str_len(cache_dir) > 0 && thin_cache_mode_can_write(cache_mode) {
+            let _ = thin_try_write_binary_cache(link_cache_path, elf.bytes, elf.len, &! cache_stats_accum)
+        }
+    }
+
+    if !final_result.ok {
+        let _ = thin_write_native_decision_trace_extended(
+            multimodule_native_trace_output_path(),
+            target_spec.requested_target,
+            target_spec.resolved_target,
+            native_matrix_mode_string(target_spec.matrix_mode),
+            native_target_source_string(target_spec.source_id),
+            target_spec.fallback_reason,
+            "native",
+            "thinlink-cas",
+            graph.count,
+            total_imported_bodies,
+            cache_stats_accum,
+            link_digest,
+            false,
+            final_result.error_code
+        )
+        print("Native compilation failed: ")
+        print(final_result.error_msg)
+        print("\n")
+        return 1
+    }
+
+    if !io_write_native_binary(output_path, final_result.bytes, final_result.len) {
+        let _ = thin_write_native_decision_trace_extended(
+            multimodule_native_trace_output_path(),
+            target_spec.requested_target,
+            target_spec.resolved_target,
+            native_matrix_mode_string(target_spec.matrix_mode),
+            native_target_source_string(target_spec.source_id),
+            target_spec.fallback_reason,
+            "native",
+            "thinlink-cas",
+            graph.count,
+            total_imported_bodies,
+            cache_stats_accum,
+            link_digest,
+            false,
+            ERR_OK()
+        )
+        print("Error: Failed to write native binary to ")
+        print(output_path)
+        print("\n")
+        return 1
+    }
+
+    let _ = thin_write_native_decision_trace_extended(
+        multimodule_native_trace_output_path(),
+        target_spec.requested_target,
+        target_spec.resolved_target,
+        native_matrix_mode_string(target_spec.matrix_mode),
+        native_target_source_string(target_spec.source_id),
+        target_spec.fallback_reason,
+        "native",
+        "thinlink-cas",
+        graph.count,
+        total_imported_bodies,
+        cache_stats_accum,
+        link_digest,
+        true,
+        ERR_OK()
+    )
+
+    print("Native binary size: ")
+    print_int(final_result.len)
+    print(" bytes\n")
+    if cache_stats {
+        println(
+            "[cache] summary h/m=" + io_trace_i64_string(cache_stats_accum.summary_hits) + "/" + io_trace_i64_string(cache_stats_accum.summary_misses) +
+            " body h/m=" + io_trace_i64_string(cache_stats_accum.body_hits) + "/" + io_trace_i64_string(cache_stats_accum.body_misses) +
+            " object h/m=" + io_trace_i64_string(cache_stats_accum.object_hits) + "/" + io_trace_i64_string(cache_stats_accum.object_misses) +
+            " link h/m=" + io_trace_i64_string(cache_stats_accum.link_hits) + "/" + io_trace_i64_string(cache_stats_accum.link_misses) +
+            " bytes=" + io_trace_i64_string(cache_stats_accum.persistent_bytes) +
+            " imported=" + io_trace_i64_string(total_imported_bodies)
+        )
+    }
+    print("Written to ")
+    print(output_path)
+    print("\n")
+    return 0
 }
 
 fn compile_multimodule_native_with_ir(
@@ -1590,6 +3683,30 @@ fn compile_multimodule_native(
     gpu_binary_format: string,
     gpu_strict_parity: bool
 ) -> i32 with IO, Mut, Div, Panic, Alloc {
+    let main_prog = load_module_file(main_path)
+    let target_spec = native_resolve_target(requested_target, requested_matrix, explicit_target)
+    if !str_eq(requested_target, "wasm") &&
+       target_spec.arch_id == ARCH_X86_64() &&
+       target_spec.os_id == OS_LINUX() &&
+       program_has_imports(main_prog) {
+        return compile_multimodule_native_advanced(
+            main_path,
+            output_path,
+            requested_target,
+            requested_matrix,
+            explicit_target,
+            gpu_target,
+            gpu_binary_format,
+            gpu_strict_parity,
+            false,
+            false,
+            "",
+            "",
+            "off",
+            false
+        )
+    }
+
     // WASM backend short-circuit — bypass native ELF path entirely
     if str_eq(requested_target, "wasm") {
         let wir = load_multimodule_ir(main_path)
@@ -1612,7 +3729,6 @@ fn compile_multimodule_native(
         )
     }
 
-    let target_spec = native_resolve_target(requested_target, requested_matrix, explicit_target)
     print("Native dispatch: requested=")
     print(target_spec.requested_target)
     print(" resolved=")
@@ -1641,32 +3757,38 @@ fn compile_multimodule_native(
     }
     print("\n")
 
-    let ir_result = load_multimodule_ir(main_path)
-    if !ir_result.ok {
-        print("Multi-module IR failed: ")
-        print(ir_result.error_msg)
-        print("\n")
-        let trace_ok = io_write_native_decision_trace(
-            multimodule_native_trace_output_path(),
-            target_spec.requested_target,
-            target_spec.resolved_target,
-            native_matrix_mode_string(target_spec.matrix_mode),
-            native_target_source_string(target_spec.source_id),
-            target_spec.fallback_reason,
-            "native",
-            false,
-            ERR_OK()
-        )
-        if !trace_ok {
-            print("Error: Failed to write native decision trace to ")
-            print(multimodule_native_trace_output_path())
+    var native_result = native_compile_result_error(ERR_OK(), "")
+    let stream_pair = compile_multimodule_native_maybe_streaming(main_path, target_spec)
+    if stream_pair.0 {
+        native_result = stream_pair.1
+    } else {
+        let ir_result = load_multimodule_ir(main_path)
+        if !ir_result.ok {
+            print("Multi-module IR failed: ")
+            print(ir_result.error_msg)
             print("\n")
+            let trace_ok = io_write_native_decision_trace(
+                multimodule_native_trace_output_path(),
+                target_spec.requested_target,
+                target_spec.resolved_target,
+                native_matrix_mode_string(target_spec.matrix_mode),
+                native_target_source_string(target_spec.source_id),
+                target_spec.fallback_reason,
+                "native",
+                false,
+                ERR_OK()
+            )
+            if !trace_ok {
+                print("Error: Failed to write native decision trace to ")
+                print(multimodule_native_trace_output_path())
+                print("\n")
+                return 1
+            }
             return 1
         }
-        return 1
+        native_result = compile_native(&ir_result.module, target_spec)
     }
 
-    let native_result = compile_native(&ir_result.module, target_spec)
     if !native_result.ok {
         let trace_ok = io_write_native_decision_trace(
             multimodule_native_trace_output_path(),
