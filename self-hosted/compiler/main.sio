@@ -5026,6 +5026,23 @@ fn compiler_main_make_native_v2_huge_alloc_module() -> IrModule {
     module
 }
 
+fn compiler_main_make_native_v2_alloc_field_module() -> IrModule {
+    var module = ir_empty_module()
+    var func = ir_empty_function()
+    let field_name = ir_name_from_bytes(118, 97, 108, 0, 3)
+    func.name = ir_name_from_bytes(109, 97, 105, 110, 4)
+    func.reg_count = 4
+    func.instrs[0] = ir_alloc(0, 0)
+    func.instrs[1] = ir_load_imm(1, 7)
+    func.instrs[2] = ir_field_set(0, 0, 1, field_name)
+    func.instrs[3] = ir_field_get(2, 0, 0, field_name)
+    func.instrs[4] = ir_return(2)
+    func.instr_count = 5
+    module.functions[0] = func
+    module.fn_count = 1
+    module
+}
+
 fn compiler_main_test_native_v2_machine_module_scalar_core() -> bool with Mut, Panic, Div, Alloc {
     let built = native_v2_build_machine_module(&compiler_main_make_native_v2_scalar_module(13), true)
     if !built.supported { return false }
@@ -5126,6 +5143,10 @@ fn compiler_main_test_native_v2_contract_machine_ir_fields() -> bool with IO, Mu
     if !compiler_bytes_contains(data, size, "\"gc_state_embedded\":true") { return false }
     if !compiler_bytes_contains(data, size, "\"gc_slow_path_active\":true") { return false }
     if !compiler_bytes_contains(data, size, "\"stack_maps_runtime_active\":true") { return false }
+    if !compiler_bytes_contains(data, size, "\"managed_handles\":true") { return false }
+    if !compiler_bytes_contains(data, size, "\"descriptor_tables\":true") { return false }
+    if !compiler_bytes_contains(data, size, "\"handle_indirection\":true") { return false }
+    if !compiler_bytes_contains(data, size, "\"descriptor_tables_embedded\":true") { return false }
     true
 }
 
@@ -5189,10 +5210,13 @@ fn compiler_main_test_native_v2_gc_state_blob() -> bool with Mut, Panic, Div, Al
     if nc.gc_state_data_offset <= nc.deopt_state_data_offset { return false }
     let state = native_v2_gc_state_decode(nc.data, nc.gc_state_data_offset)
     if !state.valid { return false }
-    if state.flags != native_v2_gc_flag_ready() { return false }
+    if state.flags != native_v2_gc_flag_ready() + native_v2_gc_flag_managed_handles() { return false }
     if state.collection_requests != 0 { return false }
     if state.stack_maps_offset != nc.stack_map_data_offset { return false }
     if state.deopt_state_offset != nc.deopt_state_data_offset { return false }
+    if state.handle_capacity != native_v2_handle_table_capacity_default() { return false }
+    if state.descriptor_table_offset != nc.descriptor_data_offset { return false }
+    if state.descriptor_count != nc.descriptor_count { return false }
     if state.last_reason != native_v2_gc_reason_none() { return false }
     true
 }
@@ -5219,6 +5243,53 @@ fn compiler_main_test_native_v2_alloc_slow_path_trap() -> bool with Mut, Panic, 
     seq[14] = 0x0F
     seq[15] = 0x05
     compiler_bytes_contains_seq_i64(nc.code.bytes, nc.code.len, seq, 16)
+}
+
+fn compiler_main_test_native_v2_runtime_context_handles() -> bool {
+    if runtime_context_field_handle_table_base() != 24 { return false }
+    if runtime_context_field_descriptor_table() != 48 { return false }
+    if runtime_context_field_gc_state() != 120 { return false }
+    if runtime_context_field_collector_epoch() != 168 { return false }
+    runtime_context_size() == 192
+}
+
+fn compiler_main_test_native_v2_descriptor_table_blob() -> bool with Mut, Panic, Div, Alloc {
+    let pair = compile_module_v2(compiler_new(), &compiler_main_make_native_v2_alloc_field_module())
+    let nc = pair.0
+    if !str_eq(pair.1, "") { return false }
+    if nc.descriptor_data_offset < runtime_context_global_slot_size() { return false }
+    if nc.descriptor_count != 5 { return false }
+    let table = native_v2_descriptor_table_decode(nc.data, nc.descriptor_data_offset)
+    if !table.valid { return false }
+    if table.count != nc.descriptor_count { return false }
+    if table.entries[0].id != 0 { return false }
+    if table.entries[0].kind != native_v2_descriptor_kind_struct() { return false }
+    if table.entries[0].payload_bytes != 512 { return false }
+    if table.entries[3].id != 8 { return false }
+    if table.entries[3].kind != native_v2_descriptor_kind_box() { return false }
+    table.entries[4].id == 255 && table.entries[4].kind == native_v2_descriptor_kind_opaque()
+}
+
+fn compiler_main_test_native_v2_alloc_uses_descriptor_handles() -> bool with Mut, Panic, Div, Alloc {
+    let built = native_v2_build_machine_module(&compiler_main_make_native_v2_alloc_field_module(), true)
+    if !built.supported { return false }
+    let func = built.functions[0]
+    var saw_alloc = false
+    var saw_field_get = false
+    var i: i64 = 0
+    while i < func.blocks[0].instr_count {
+        let instr = func.blocks[0].instrs[i as usize]
+        if instr.opcode == MIR_OP_ALLOC {
+            saw_alloc = true
+            if instr.aux.kind != MIR_OPERAND_IMM64 { return false }
+            if instr.aux.value != 0 { return false }
+        }
+        if instr.opcode == MIR_OP_FIELD_LOAD {
+            saw_field_get = true
+        }
+        i = i + 1
+    }
+    saw_alloc && saw_field_get
 }
 
 // ============================================================================
@@ -6459,9 +6530,73 @@ fn compiler_main_test_shift_chain_e_g() -> bool with Mut, Div, Panic {
     result.instrs[3].op == IrOpcode::IrLoadImm && result.instrs[3].imm_i64 == 0
 }
 
+// ============================================================================
+// Sprint 77: Commutative CSE canonicalization Block H self-tests (T181–T186)
+// ============================================================================
+
+// T181: r0+r1 then r1+r0 → IrCopy (OpAdd commutative CSE hit after Block H).
+fn compiler_main_test_cse_commut_add() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_binop(2, 0, BinaryOp::OpAdd, 1)   // r2 = r0 + r1 (stored as (ADD,0,1))
+    instrs[1] = ir_binop(3, 1, BinaryOp::OpAdd, 0)   // r3 = r1 + r0 (canonical: (ADD,0,1)) → hit
+    let func   = cp_make_test_func(instrs, 2)
+    let result = ocp_cse(func)
+    result.instrs[1].op == IrOpcode::IrCopy && result.instrs[1].src1 == 2
+}
+
+// T182: r3*r5 then r5*r3 → IrCopy (OpMul commutative CSE hit).
+fn compiler_main_test_cse_commut_mul() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_binop(2, 3, BinaryOp::OpMul, 5)   // r2 = r3 * r5 (stored as (MUL,3,5))
+    instrs[1] = ir_binop(4, 5, BinaryOp::OpMul, 3)   // r4 = r5 * r3 (canonical: (MUL,3,5)) → hit
+    let func   = cp_make_test_func(instrs, 2)
+    let result = ocp_cse(func)
+    result.instrs[1].op == IrOpcode::IrCopy && result.instrs[1].src1 == 2
+}
+
+// T183: r0|r1 then r1|r0 → IrCopy (OpOr commutative CSE hit).
+fn compiler_main_test_cse_commut_or() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_binop(2, 0, BinaryOp::OpOr, 1)    // r2 = r0 | r1
+    instrs[1] = ir_binop(3, 1, BinaryOp::OpOr, 0)    // r3 = r1 | r0 → hit
+    let func   = cp_make_test_func(instrs, 2)
+    let result = ocp_cse(func)
+    result.instrs[1].op == IrOpcode::IrCopy && result.instrs[1].src1 == 2
+}
+
+// T184: r0-r1 then r1-r0 → NOT IrCopy (OpSub is non-commutative, no CSE hit).
+fn compiler_main_test_cse_noncommut_sub() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_binop(2, 0, BinaryOp::OpSub, 1)   // r2 = r0 - r1
+    instrs[1] = ir_binop(3, 1, BinaryOp::OpSub, 0)   // r3 = r1 - r0 (different op, no hit)
+    let func   = cp_make_test_func(instrs, 2)
+    let result = ocp_cse(func)
+    result.instrs[1].op == IrOpcode::IrBinOp
+}
+
+// T185: r0+r1 twice in same order → IrCopy (existing exact-match CSE still works, regression).
+fn compiler_main_test_cse_same_order_regress() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_binop(2, 0, BinaryOp::OpAdd, 1)   // r2 = r0 + r1
+    instrs[1] = ir_binop(3, 0, BinaryOp::OpAdd, 1)   // r3 = r0 + r1 (same order) → hit
+    let func   = cp_make_test_func(instrs, 2)
+    let result = ocp_cse(func)
+    result.instrs[1].op == IrOpcode::IrCopy && result.instrs[1].src1 == 2
+}
+
+// T186: r2&r4 then r4&r2 → IrCopy (OpAnd commutative CSE hit).
+fn compiler_main_test_cse_commut_and() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_binop(3, 2, BinaryOp::OpAnd, 4)   // r3 = r2 & r4 (stored as (AND,2,4))
+    instrs[1] = ir_binop(5, 4, BinaryOp::OpAnd, 2)   // r5 = r4 & r2 (canonical: (AND,2,4)) → hit
+    let func   = cp_make_test_func(instrs, 2)
+    let result = ocp_cse(func)
+    result.instrs[1].op == IrOpcode::IrCopy && result.instrs[1].src1 == 3
+}
+
 fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
     var passed: i64 = 0
-    let total: i64 = 180
+    let total: i64 = 189
 
     println("=== compiler/main.sio self-tests ===")
 
@@ -7726,6 +7861,69 @@ fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
         passed = passed + 1
     } else {
         println("  FAIL: T180 Block E+G chain: comparison→shift zero-annihilator")
+    }
+
+    if compiler_main_test_cse_commut_add() {
+        println("  T181 OK: Block H: r0+r1 and r1+r0 → commutative CSE hit (OpAdd)")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T181 Block H: commutative OpAdd CSE")
+    }
+
+    if compiler_main_test_cse_commut_mul() {
+        println("  T182 OK: Block H: r3*r5 and r5*r3 → commutative CSE hit (OpMul)")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T182 Block H: commutative OpMul CSE")
+    }
+
+    if compiler_main_test_cse_commut_or() {
+        println("  T183 OK: Block H: r0|r1 and r1|r0 → commutative CSE hit (OpOr)")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T183 Block H: commutative OpOr CSE")
+    }
+
+    if compiler_main_test_cse_noncommut_sub() {
+        println("  T184 OK: Block H: r0-r1 and r1-r0 → NOT CSE hit (OpSub non-commutative)")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T184 Block H: non-commutative OpSub should not CSE")
+    }
+
+    if compiler_main_test_cse_same_order_regress() {
+        println("  T185 OK: Block H: r0+r1 twice (same order) → IrCopy (exact-match regression)")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T185 Block H: same-order CSE regression")
+    }
+
+    if compiler_main_test_cse_commut_and() {
+        println("  T186 OK: Block H: r2&r4 and r4&r2 → commutative CSE hit (OpAnd)")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T186 Block H: commutative OpAnd CSE")
+    }
+
+    if compiler_main_test_native_v2_runtime_context_handles() {
+        println("  T187 OK: native-v2 RuntimeContext reserves explicit handle and descriptor slots")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T187 native-v2 RuntimeContext reserves explicit handle and descriptor slots")
+    }
+
+    if compiler_main_test_native_v2_descriptor_table_blob() {
+        println("  T188 OK: native-v2 emits a decodable managed-object descriptor table")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T188 native-v2 emits a decodable managed-object descriptor table")
+    }
+
+    if compiler_main_test_native_v2_alloc_uses_descriptor_handles() {
+        println("  T189 OK: native-v2 alloc legalization keeps descriptor ids on managed handle allocs")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T189 native-v2 alloc legalization keeps descriptor ids on managed handle allocs")
     }
 
     println("")

@@ -109,6 +109,18 @@ fn ocp_binop_to_eg_op(op: BinaryOp) -> i64 {
     EG_OP_CONST
 }
 
+// CSE can canonicalize a few more commutative ops than the small e-graph layer.
+// Keep those keys local so the e-graph surface does not need to pretend it
+// understands OR/AND/XOR rewrites it cannot yet optimize.
+fn ocp_binop_to_cse_key(op: BinaryOp) -> i64 {
+    let eg = ocp_binop_to_eg_op(op)
+    if eg != EG_OP_CONST { return eg }
+    if op == BinaryOp::OpOr { return 1001 }
+    if op == BinaryOp::OpAnd { return 1002 }
+    if op == BinaryOp::OpBitXor { return 1003 }
+    0
+}
+
 // ============================================================================
 // Pass 1: Constant propagation + folding
 // ============================================================================
@@ -624,6 +636,14 @@ fn ocp_cse_invalidate_reg(
     (next_op, next_src1, next_src2, next_dst, out_len)
 }
 
+// Sprint 77: Return true for commutative binary ops whose operands can be
+// canonicalized (src1 ← min, src2 ← max) without changing semantics.
+fn ocp_is_commutative_op(bin_op: BinaryOp) -> bool {
+    bin_op == BinaryOp::OpAdd || bin_op == BinaryOp::OpMul
+    || bin_op == BinaryOp::OpOr || bin_op == BinaryOp::OpAnd
+    || bin_op == BinaryOp::OpBitXor
+}
+
 fn ocp_cse(func: IrFunction) -> IrFunction with Mut {
     var result  = func
     var cse_op:   [i64; 128] = [0; 128]
@@ -643,15 +663,25 @@ fn ocp_cse(func: IrFunction) -> IrFunction with Mut {
             cse_len = invalidated.4
         }
         if ocp_is_binop(instr.op) {
-            let op_key = ocp_binop_to_eg_op(instr.bin_op)
-            // EG_OP_CONST (==1) is sentinel for unmapped ops — skip conservatively
-            if op_key != EG_OP_CONST {
+            let op_key = ocp_binop_to_cse_key(instr.bin_op)
+            if op_key != 0 {
+                // Sprint 77 Block H: Commutative CSE canonicalization.
+                // For commutative ops, sort (src1, src2) so smaller register is first.
+                // This makes a+b and b+a hash to the same CSE table entry.
+                // SOTA: Click "Value Numbering" PLDI 1995 §3.1 (canonical operand ordering).
+                var cse_s1 = instr.src1
+                var cse_s2 = instr.src2
+                if ocp_is_commutative_op(instr.bin_op) && cse_s1 > cse_s2 {
+                    let tmp = cse_s1
+                    cse_s1 = cse_s2
+                    cse_s2 = tmp
+                }
                 var j: i64 = 0
                 var found: i64 = 0 - 1
                 while j < cse_len {
                     let same_op = cse_op[j as usize] == op_key
-                    let same_src1 = cse_src1[j as usize] == instr.src1
-                    let same_src2 = cse_src2[j as usize] == instr.src2
+                    let same_src1 = cse_src1[j as usize] == cse_s1
+                    let same_src2 = cse_src2[j as usize] == cse_s2
                     if same_op && same_src1 && same_src2 {
                         found = j
                         break
@@ -663,8 +693,8 @@ fn ocp_cse(func: IrFunction) -> IrFunction with Mut {
                 } else {
                     if cse_len < 128 {
                         cse_op[cse_len as usize]   = op_key
-                        cse_src1[cse_len as usize] = instr.src1
-                        cse_src2[cse_len as usize] = instr.src2
+                        cse_src1[cse_len as usize] = cse_s1
+                        cse_src2[cse_len as usize] = cse_s2
                         cse_dst[cse_len as usize]  = instr.dst
                         cse_len = cse_len + 1
                     }
