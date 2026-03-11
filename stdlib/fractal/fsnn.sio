@@ -1,0 +1,305 @@
+//! stdlib/fractal/fsnn.sio - Fractal Sedenionic Neural Network Layer
+//!
+//! Takes a sedenionic embedding c in S, runs the Mandelbrot orbit,
+//! and extracts a 16-dimensional feature vector phi(c) for downstream classification.
+//!
+//! Feature vector components:
+//!   [0]  escape_ratio       n_esc / N_max
+//!   [1]  terminal_norm      |z_N|
+//!   [2]  jacobian_op_norm   sigma_1(J_N)
+//!   [3]  jacobian_frob_norm ||J_N||_F
+//!   [4]  jacobian_condition sigma_1 / sigma_16
+//!   [5]  hessian_frob_norm  ||H_N||_F
+//!   [6]  curvature_ratio    ||H||_F / ||J||_op^2
+//!   [7]  distance_estimator |z_N| ln|z_N| / ||J||_op
+//!   [8]  lyapunov_max       (1/n) sum_k ln sigma_1(J_k)
+//!   [9]  lyapunov_min       (1/n) ln sigma_16
+//!   [10] lyapunov_dim       # expanding singular values (sigma > 1)
+//!   [11] zero_div_proximity Moreno analytic distance to Z
+//!   [12] orbit_mean         mean(|z_n|)
+//!   [13] orbit_std          std(|z_n|)
+//!   [14] orbit_skewness     skewness(|z_n|)
+//!   [15] orbit_kurtosis     excess kurtosis(|z_n|)
+
+use math::sedenion64::*
+use linalg::mat16::*
+use linalg::tensor16::*
+use fractal::mandelbrot::{OrbitConfig, OrbitResult, compute_orbit, orbit_config_default}
+use fractal::zero_divisor::{zd_moreno_proximity}
+
+// ============================================================================
+// FSNN FEATURES TYPE
+// ============================================================================
+
+pub struct FSNNFeatures {
+    escape_ratio: f64,
+    terminal_norm: f64,
+    jacobian_op_norm: f64,
+    jacobian_frob_norm: f64,
+    jacobian_condition: f64,
+    hessian_frob_norm: f64,
+    curvature_ratio: f64,
+    distance_estimator: f64,
+    lyapunov_max: f64,
+    lyapunov_min: f64,
+    lyapunov_dim: f64,
+    zero_div_proximity: f64,
+    orbit_mean: f64,
+    orbit_std: f64,
+    orbit_skewness: f64,
+    orbit_kurtosis: f64,
+}
+
+// ============================================================================
+// MATH HELPERS
+// ============================================================================
+
+fn fsnn_sqrt(x: f64) -> f64 {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    return y
+}
+
+fn fsnn_abs(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+fn fsnn_ln(x: f64) -> f64 {
+    if x <= 0.0 { return 0.0 }
+    var y = 0.0
+    var t = x
+    if t > 1.0 {
+        while t > 2.718281828 {
+            t = t / 2.718281828
+            y = y + 1.0
+        }
+        y = y + (t - 1.0) / t
+    } else {
+        while t < 0.367879441 {
+            t = t * 2.718281828
+            y = y - 1.0
+        }
+        y = y + (t - 1.0) / t
+    }
+    // Newton refinement
+    var i = 0
+    while i < 8 {
+        let ey = fsnn_exp_approx(y)
+        y = y + (x - ey) / ey
+        i = i + 1
+    }
+    return y
+}
+
+fn fsnn_exp_approx(x: f64) -> f64 {
+    var k = 0
+    var r = x
+    while r > 1.0 {
+        r = r * 0.5
+        k = k + 1
+    }
+    while r < -1.0 {
+        r = r * 0.5
+        k = k + 1
+    }
+    let r2 = r * r
+    let r3 = r2 * r
+    let r4 = r3 * r
+    let r5 = r4 * r
+    let r6 = r5 * r
+    var result = 1.0 + r + r2 * 0.5 + r3 / 6.0 + r4 / 24.0 + r5 / 120.0 + r6 / 720.0
+    var j = 0
+    while j < k {
+        result = result * result
+        j = j + 1
+    }
+    return result
+}
+
+fn fsnn_max(a: f64, b: f64) -> f64 {
+    if a > b { a } else { b }
+}
+
+// ============================================================================
+// STATISTICS HELPERS
+// ============================================================================
+
+pub fn fsnn_stat_mean(arr: [f64; 256], n: i32) -> f64 {
+    if n <= 0 { return 0.0 }
+    var sum = 0.0
+    var i = 0
+    while i < n {
+        sum = sum + arr[i]
+        i = i + 1
+    }
+    sum / (n as f64)
+}
+
+pub fn fsnn_stat_std(arr: [f64; 256], n: i32) -> f64 {
+    if n <= 1 { return 0.0 }
+    let mean = fsnn_stat_mean(arr, n)
+    var sum_sq = 0.0
+    var i = 0
+    while i < n {
+        let d = arr[i] - mean
+        sum_sq = sum_sq + d * d
+        i = i + 1
+    }
+    fsnn_sqrt(sum_sq / ((n - 1) as f64))
+}
+
+pub fn fsnn_stat_skewness(arr: [f64; 256], n: i32) -> f64 {
+    if n <= 2 { return 0.0 }
+    let mean = fsnn_stat_mean(arr, n)
+    let std = fsnn_stat_std(arr, n)
+    if std < 1e-30 { return 0.0 }
+    var sum_cube = 0.0
+    var i = 0
+    while i < n {
+        let d = (arr[i] - mean) / std
+        sum_cube = sum_cube + d * d * d
+        i = i + 1
+    }
+    sum_cube / (n as f64)
+}
+
+pub fn fsnn_stat_kurtosis(arr: [f64; 256], n: i32) -> f64 {
+    if n <= 3 { return 0.0 }
+    let mean = fsnn_stat_mean(arr, n)
+    let std = fsnn_stat_std(arr, n)
+    if std < 1e-30 { return 0.0 }
+    var sum_quad = 0.0
+    var i = 0
+    while i < n {
+        let d = (arr[i] - mean) / std
+        sum_quad = sum_quad + d * d * d * d
+        i = i + 1
+    }
+    sum_quad / (n as f64) - 3.0    // excess kurtosis
+}
+
+// ============================================================================
+// FEATURE EXTRACTION
+// ============================================================================
+
+pub fn fsnn_extract_features(orbit: OrbitResult, config: OrbitConfig) -> FSNNFeatures {
+    let eps = 1e-10
+    let n = orbit.n_escape as f64
+    let z_norm = sed64_norm(orbit.z_final)
+
+    // Singular values of Jacobian
+    let sv = mat16_singular_values(orbit.jacobian)
+    let J_op = fsnn_max(sv[0], eps)
+    let J_frob = mat16_frobenius_norm(orbit.jacobian)
+    let H_frob = tensor16_frobenius_norm(orbit.hessian)
+
+    // Count expanding directions (sigma > 1)
+    var lyap_dim = 0.0
+    var si = 0
+    while si < 16 {
+        if sv[si] > 1.0 {
+            lyap_dim = lyap_dim + 1.0
+        }
+        si = si + 1
+    }
+
+    // Analytic Moreno proximity (O(1), replaces Monte Carlo)
+    let zd_prox = zd_moreno_proximity(orbit.z_final)
+
+    // Distance estimator: |z| ln|z| / ||J||_op
+    var dist_est = 0.0
+    if z_norm > eps {
+        dist_est = z_norm * fsnn_ln(z_norm) / (J_op + eps)
+    }
+
+    // Oseledec (1968) Lyapunov exponent: (1/N) sum_n ln sigma_1(J_n)
+    // Uses per-iteration sigma_1 approximations stored in jacobian_op_norms.
+    var lya_sum = 0.0
+    var lk = 0
+    while lk < orbit.history_len {
+        let jk = orbit.jacobian_op_norms[lk]
+        if jk > eps { lya_sum = lya_sum + fsnn_ln(jk) }
+        lk = lk + 1
+    }
+    let n_hist = fsnn_max(orbit.history_len as f64, 1.0)
+
+    FSNNFeatures {
+        escape_ratio:       n / (config.max_iter as f64),
+        terminal_norm:      z_norm,
+        jacobian_op_norm:   J_op,
+        jacobian_frob_norm: J_frob,
+        jacobian_condition: sv[0] / fsnn_max(sv[15], eps),
+        hessian_frob_norm:  H_frob,
+        curvature_ratio:    H_frob / (J_op * J_op + eps),
+        distance_estimator: dist_est,
+        lyapunov_max:       lya_sum / n_hist,
+        lyapunov_min:       fsnn_ln(fsnn_max(sv[15], eps)) / fsnn_max(n, 1.0),
+        lyapunov_dim:       lyap_dim,
+        zero_div_proximity: zd_prox,
+        orbit_mean:         fsnn_stat_mean(orbit.orbit_norms, orbit.history_len),
+        orbit_std:          fsnn_stat_std(orbit.orbit_norms, orbit.history_len),
+        orbit_skewness:     fsnn_stat_skewness(orbit.orbit_norms, orbit.history_len),
+        orbit_kurtosis:     fsnn_stat_kurtosis(orbit.orbit_norms, orbit.history_len),
+    }
+}
+
+// Full FSNN forward pass: embedding -> orbit -> features
+pub fn fsnn_forward(c: Sedenion64, config: OrbitConfig) -> FSNNFeatures {
+    let orbit = compute_orbit(c, config)
+    fsnn_extract_features(orbit, config)
+}
+
+// Convert features to flat array for downstream ML
+pub fn fsnn_features_to_array(f: FSNNFeatures) -> [f64; 16] {
+    var arr = [0.0; 16]
+    arr[0] = f.escape_ratio
+    arr[1] = f.terminal_norm
+    arr[2] = f.jacobian_op_norm
+    arr[3] = f.jacobian_frob_norm
+    arr[4] = f.jacobian_condition
+    arr[5] = f.hessian_frob_norm
+    arr[6] = f.curvature_ratio
+    arr[7] = f.distance_estimator
+    arr[8] = f.lyapunov_max
+    arr[9] = f.lyapunov_min
+    arr[10] = f.lyapunov_dim
+    arr[11] = f.zero_div_proximity
+    arr[12] = f.orbit_mean
+    arr[13] = f.orbit_std
+    arr[14] = f.orbit_skewness
+    arr[15] = f.orbit_kurtosis
+    return arr
+}
+
+pub fn fsnn_features_from_array(arr: [f64; 16]) -> FSNNFeatures {
+    FSNNFeatures {
+        escape_ratio:       arr[0],
+        terminal_norm:      arr[1],
+        jacobian_op_norm:   arr[2],
+        jacobian_frob_norm: arr[3],
+        jacobian_condition: arr[4],
+        hessian_frob_norm:  arr[5],
+        curvature_ratio:    arr[6],
+        distance_estimator: arr[7],
+        lyapunov_max:       arr[8],
+        lyapunov_min:       arr[9],
+        lyapunov_dim:       arr[10],
+        zero_div_proximity: arr[11],
+        orbit_mean:         arr[12],
+        orbit_std:          arr[13],
+        orbit_skewness:     arr[14],
+        orbit_kurtosis:     arr[15],
+    }
+}

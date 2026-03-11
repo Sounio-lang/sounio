@@ -1,0 +1,467 @@
+//! stdlib/math/sedenion64.sio - f64-Precision Sedenion Algebra
+//!
+//! Sedenion algebra S = R^16 via Cayley-Dickson doubling of octonions.
+//! Layout: [e0..e7, e8..e15] where z = alpha + beta*l, alpha,beta in O.
+//!
+//! CRITICAL: Unlike octonions, sedenions have ZERO DIVISORS.
+//! Non-zero a,b with a*b = 0. Example: (e3 + e10)*(e6 - e15) = 0.
+//! Sedenions are NOT a division algebra, NOT alternative, NOT a composition algebra.
+//! They ARE power-associative. They are NOT flexible, NOT alternative.
+//!
+//! This module provides f64 precision for the FSNN pipeline (Mandelbrot orbit
+//! iteration is numerically sensitive). The f32 version is in sedenion.sio.
+//!
+//! References:
+//! - Cayley-Dickson construction: R -> C -> H -> O -> S
+//! - "On the Sedenions" by Robert de Marrais
+//! - Chiuratto Agourakis, "Generalised Wirtinger Calculus on Sedenions" (2026)
+
+use math::cayley_dickson::{oct64_mul_components, oct64_conj_components,
+                            cd_product_16, oct64_norm_sq_components}
+
+// ============================================================================
+// SEDENION64 TYPE
+// ============================================================================
+
+// 16-dimensional hypercomplex number with f64 precision
+// Components e0 (real) + e1..e15 (imaginary basis elements)
+pub struct Sedenion64 {
+    e0: f64,
+    e1: f64,
+    e2: f64,
+    e3: f64,
+    e4: f64,
+    e5: f64,
+    e6: f64,
+    e7: f64,
+    e8: f64,
+    e9: f64,
+    e10: f64,
+    e11: f64,
+    e12: f64,
+    e13: f64,
+    e14: f64,
+    e15: f64,
+}
+
+// ============================================================================
+// CONSTRUCTORS
+// ============================================================================
+
+pub fn sed64(e0: f64, e1: f64, e2: f64, e3: f64, e4: f64, e5: f64, e6: f64, e7: f64,
+             e8: f64, e9: f64, e10: f64, e11: f64, e12: f64, e13: f64, e14: f64, e15: f64) -> Sedenion64 {
+    Sedenion64 {
+        e0: e0, e1: e1, e2: e2, e3: e3, e4: e4, e5: e5, e6: e6, e7: e7,
+        e8: e8, e9: e9, e10: e10, e11: e11, e12: e12, e13: e13, e14: e14, e15: e15
+    }
+}
+
+pub fn sed64_zero() -> Sedenion64 {
+    sed64(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+          0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+}
+
+pub fn sed64_one() -> Sedenion64 {
+    sed64(1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+          0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+}
+
+// Basis element e_k (k = 0..15) with unit coefficient
+pub fn sed64_basis(index: i32) -> Sedenion64 {
+    if index == 0 { sed64(1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0) }
+    else if index == 1 { sed64(0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0) }
+    else if index == 2 { sed64(0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0) }
+    else if index == 3 { sed64(0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0) }
+    else if index == 4 { sed64(0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0) }
+    else if index == 5 { sed64(0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0) }
+    else if index == 6 { sed64(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0) }
+    else if index == 7 { sed64(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0) }
+    else if index == 8 { sed64(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0) }
+    else if index == 9 { sed64(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0) }
+    else if index == 10 { sed64(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0) }
+    else if index == 11 { sed64(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0) }
+    else if index == 12 { sed64(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0) }
+    else if index == 13 { sed64(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0) }
+    else if index == 14 { sed64(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0) }
+    else { sed64(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0) }
+}
+
+pub fn sed64_from_real(r: f64) -> Sedenion64 {
+    sed64(r, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+          0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+}
+
+// ============================================================================
+// COMPONENT ACCESS
+// ============================================================================
+
+pub fn sed64_get(s: Sedenion64, idx: i32) -> f64 {
+    if idx == 0 { s.e0 }
+    else if idx == 1 { s.e1 }
+    else if idx == 2 { s.e2 }
+    else if idx == 3 { s.e3 }
+    else if idx == 4 { s.e4 }
+    else if idx == 5 { s.e5 }
+    else if idx == 6 { s.e6 }
+    else if idx == 7 { s.e7 }
+    else if idx == 8 { s.e8 }
+    else if idx == 9 { s.e9 }
+    else if idx == 10 { s.e10 }
+    else if idx == 11 { s.e11 }
+    else if idx == 12 { s.e12 }
+    else if idx == 13 { s.e13 }
+    else if idx == 14 { s.e14 }
+    else { s.e15 }
+}
+
+pub fn sed64_real(s: Sedenion64) -> f64 { s.e0 }
+
+// ============================================================================
+// ARITHMETIC
+// ============================================================================
+
+pub fn sed64_add(a: Sedenion64, b: Sedenion64) -> Sedenion64 {
+    Sedenion64 {
+        e0: a.e0 + b.e0, e1: a.e1 + b.e1, e2: a.e2 + b.e2, e3: a.e3 + b.e3,
+        e4: a.e4 + b.e4, e5: a.e5 + b.e5, e6: a.e6 + b.e6, e7: a.e7 + b.e7,
+        e8: a.e8 + b.e8, e9: a.e9 + b.e9, e10: a.e10 + b.e10, e11: a.e11 + b.e11,
+        e12: a.e12 + b.e12, e13: a.e13 + b.e13, e14: a.e14 + b.e14, e15: a.e15 + b.e15
+    }
+}
+
+pub fn sed64_sub(a: Sedenion64, b: Sedenion64) -> Sedenion64 {
+    Sedenion64 {
+        e0: a.e0 - b.e0, e1: a.e1 - b.e1, e2: a.e2 - b.e2, e3: a.e3 - b.e3,
+        e4: a.e4 - b.e4, e5: a.e5 - b.e5, e6: a.e6 - b.e6, e7: a.e7 - b.e7,
+        e8: a.e8 - b.e8, e9: a.e9 - b.e9, e10: a.e10 - b.e10, e11: a.e11 - b.e11,
+        e12: a.e12 - b.e12, e13: a.e13 - b.e13, e14: a.e14 - b.e14, e15: a.e15 - b.e15
+    }
+}
+
+pub fn sed64_scale(s: Sedenion64, k: f64) -> Sedenion64 {
+    Sedenion64 {
+        e0: s.e0 * k, e1: s.e1 * k, e2: s.e2 * k, e3: s.e3 * k,
+        e4: s.e4 * k, e5: s.e5 * k, e6: s.e6 * k, e7: s.e7 * k,
+        e8: s.e8 * k, e9: s.e9 * k, e10: s.e10 * k, e11: s.e11 * k,
+        e12: s.e12 * k, e13: s.e13 * k, e14: s.e14 * k, e15: s.e15 * k
+    }
+}
+
+pub fn sed64_neg(s: Sedenion64) -> Sedenion64 {
+    Sedenion64 {
+        e0: 0.0 - s.e0, e1: 0.0 - s.e1, e2: 0.0 - s.e2, e3: 0.0 - s.e3,
+        e4: 0.0 - s.e4, e5: 0.0 - s.e5, e6: 0.0 - s.e6, e7: 0.0 - s.e7,
+        e8: 0.0 - s.e8, e9: 0.0 - s.e9, e10: 0.0 - s.e10, e11: 0.0 - s.e11,
+        e12: 0.0 - s.e12, e13: 0.0 - s.e13, e14: 0.0 - s.e14, e15: 0.0 - s.e15
+    }
+}
+
+// Conjugation: conj(alpha, beta) = (conj(alpha), -beta)
+// Equivalently: negate all imaginary components e1..e15, keep e0
+pub fn sed64_conj(s: Sedenion64) -> Sedenion64 {
+    Sedenion64 {
+        e0: s.e0,
+        e1: 0.0 - s.e1, e2: 0.0 - s.e2, e3: 0.0 - s.e3,
+        e4: 0.0 - s.e4, e5: 0.0 - s.e5, e6: 0.0 - s.e6, e7: 0.0 - s.e7,
+        e8: 0.0 - s.e8, e9: 0.0 - s.e9, e10: 0.0 - s.e10, e11: 0.0 - s.e11,
+        e12: 0.0 - s.e12, e13: 0.0 - s.e13, e14: 0.0 - s.e14, e15: 0.0 - s.e15
+    }
+}
+
+// Norm squared: |z|^2 = sum of squares of all components
+pub fn sed64_norm_sq(s: Sedenion64) -> f64 {
+    s.e0*s.e0 + s.e1*s.e1 + s.e2*s.e2 + s.e3*s.e3 +
+    s.e4*s.e4 + s.e5*s.e5 + s.e6*s.e6 + s.e7*s.e7 +
+    s.e8*s.e8 + s.e9*s.e9 + s.e10*s.e10 + s.e11*s.e11 +
+    s.e12*s.e12 + s.e13*s.e13 + s.e14*s.e14 + s.e15*s.e15
+}
+
+// Euclidean norm
+fn sed64_sqrt(x: f64) -> f64 {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    return y
+}
+
+fn sed64_abs(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+fn sed64_ln(x: f64) -> f64 {
+    // Natural log via Halley's method: ln(x) where x > 0
+    if x <= 0.0 { return 0.0 }
+    // Initial guess using exponent decomposition
+    var y = 0.0
+    var t = x
+    if t > 1.0 {
+        while t > 2.718281828 {
+            t = t / 2.718281828
+            y = y + 1.0
+        }
+        y = y + (t - 1.0) / t
+    } else {
+        while t < 0.367879441 {
+            t = t * 2.718281828
+            y = y - 1.0
+        }
+        y = y + (t - 1.0) / t
+    }
+    // Newton refinement for exp(y) = x  =>  y = y + (x - exp(y))/exp(y)
+    // Use exp approximation
+    var i = 0
+    while i < 8 {
+        // exp(y) via Taylor
+        let ey = sed64_exp_approx(y)
+        y = y + (x - ey) / ey
+        i = i + 1
+    }
+    return y
+}
+
+fn sed64_exp_approx(x: f64) -> f64 {
+    // exp(x) via range reduction + polynomial
+    var k = 0
+    var r = x
+    while r > 1.0 {
+        r = r * 0.5
+        k = k + 1
+    }
+    while r < -1.0 {
+        r = r * 0.5
+        k = k + 1
+    }
+    // Taylor: 1 + r + r^2/2 + r^3/6 + r^4/24 + r^5/120 + r^6/720
+    let r2 = r * r
+    let r3 = r2 * r
+    let r4 = r3 * r
+    let r5 = r4 * r
+    let r6 = r5 * r
+    var result = 1.0 + r + r2 * 0.5 + r3 / 6.0 + r4 / 24.0 + r5 / 120.0 + r6 / 720.0
+    var j = 0
+    while j < k {
+        result = result * result
+        j = j + 1
+    }
+    return result
+}
+
+pub fn sed64_norm(s: Sedenion64) -> f64 {
+    sed64_sqrt(sed64_norm_sq(s))
+}
+
+// Dot product
+pub fn sed64_dot(a: Sedenion64, b: Sedenion64) -> f64 {
+    a.e0*b.e0 + a.e1*b.e1 + a.e2*b.e2 + a.e3*b.e3 +
+    a.e4*b.e4 + a.e5*b.e5 + a.e6*b.e6 + a.e7*b.e7 +
+    a.e8*b.e8 + a.e9*b.e9 + a.e10*b.e10 + a.e11*b.e11 +
+    a.e12*b.e12 + a.e13*b.e13 + a.e14*b.e14 + a.e15*b.e15
+}
+
+// ============================================================================
+// MULTIPLICATION (Cayley-Dickson)
+// ============================================================================
+// (a,b) * (c,d) = (a*c - conj(d)*b, d*a + b*conj(c))
+// Delegates to cd_product_16 in cayley_dickson.sio
+
+pub fn sed64_mul(a: Sedenion64, b: Sedenion64) -> Sedenion64 {
+    let r = cd_product_16(
+        a.e0, a.e1, a.e2, a.e3, a.e4, a.e5, a.e6, a.e7,
+        a.e8, a.e9, a.e10, a.e11, a.e12, a.e13, a.e14, a.e15,
+        b.e0, b.e1, b.e2, b.e3, b.e4, b.e5, b.e6, b.e7,
+        b.e8, b.e9, b.e10, b.e11, b.e12, b.e13, b.e14, b.e15
+    )
+    Sedenion64 {
+        e0: r.0, e1: r.1, e2: r.2, e3: r.3,
+        e4: r.4, e5: r.5, e6: r.6, e7: r.7,
+        e8: r.8, e9: r.9, e10: r.10, e11: r.11,
+        e12: r.12, e13: r.13, e14: r.14, e15: r.15
+    }
+}
+
+// ============================================================================
+// ALGEBRAIC PRODUCTS
+// ============================================================================
+
+// Jordan product: {a,b} = ab + ba (always commutative)
+pub fn sed64_jordan(a: Sedenion64, b: Sedenion64) -> Sedenion64 {
+    sed64_add(sed64_mul(a, b), sed64_mul(b, a))
+}
+
+// Commutator: [a,b] = ab - ba (zero iff a,b commute)
+pub fn sed64_commutator(a: Sedenion64, b: Sedenion64) -> Sedenion64 {
+    sed64_sub(sed64_mul(a, b), sed64_mul(b, a))
+}
+
+// Associator: [a,b,c] = (ab)c - a(bc)
+pub fn sed64_associator(a: Sedenion64, b: Sedenion64, c: Sedenion64) -> Sedenion64 {
+    sed64_sub(sed64_mul(sed64_mul(a, b), c), sed64_mul(a, sed64_mul(b, c)))
+}
+
+// ============================================================================
+// MULTIPLICATION MATRICES (16x16)
+// ============================================================================
+// These are the hot path for the Jacobian recursion in the FSNN orbit.
+
+// Left multiplication matrix L_a: column j = a * e_j
+// L_a[i][j] = component i of (a * basis(j))
+// Stored row-major in [f64; 256]: index = i * 16 + j
+pub fn sed64_left_mul_matrix(a: Sedenion64) -> [f64; 256] {
+    var L = [0.0; 256]
+    var j = 0
+    while j < 16 {
+        let ej = sed64_basis(j)
+        let col = sed64_mul(a, ej)
+        L[0 * 16 + j] = col.e0
+        L[1 * 16 + j] = col.e1
+        L[2 * 16 + j] = col.e2
+        L[3 * 16 + j] = col.e3
+        L[4 * 16 + j] = col.e4
+        L[5 * 16 + j] = col.e5
+        L[6 * 16 + j] = col.e6
+        L[7 * 16 + j] = col.e7
+        L[8 * 16 + j] = col.e8
+        L[9 * 16 + j] = col.e9
+        L[10 * 16 + j] = col.e10
+        L[11 * 16 + j] = col.e11
+        L[12 * 16 + j] = col.e12
+        L[13 * 16 + j] = col.e13
+        L[14 * 16 + j] = col.e14
+        L[15 * 16 + j] = col.e15
+        j = j + 1
+    }
+    return L
+}
+
+// Right multiplication matrix R_a: column j = e_j * a
+pub fn sed64_right_mul_matrix(a: Sedenion64) -> [f64; 256] {
+    var R = [0.0; 256]
+    var j = 0
+    while j < 16 {
+        let ej = sed64_basis(j)
+        let col = sed64_mul(ej, a)
+        R[0 * 16 + j] = col.e0
+        R[1 * 16 + j] = col.e1
+        R[2 * 16 + j] = col.e2
+        R[3 * 16 + j] = col.e3
+        R[4 * 16 + j] = col.e4
+        R[5 * 16 + j] = col.e5
+        R[6 * 16 + j] = col.e6
+        R[7 * 16 + j] = col.e7
+        R[8 * 16 + j] = col.e8
+        R[9 * 16 + j] = col.e9
+        R[10 * 16 + j] = col.e10
+        R[11 * 16 + j] = col.e11
+        R[12 * 16 + j] = col.e12
+        R[13 * 16 + j] = col.e13
+        R[14 * 16 + j] = col.e14
+        R[15 * 16 + j] = col.e15
+        j = j + 1
+    }
+    return R
+}
+
+// Jordan operator matrix J_a = L_a + R_a
+// J_a * x = a*x + x*a (Jordan product as matrix-vector multiply)
+pub fn sed64_jordan_matrix(a: Sedenion64) -> [f64; 256] {
+    let L = sed64_left_mul_matrix(a)
+    let R = sed64_right_mul_matrix(a)
+    var J = [0.0; 256]
+    var i = 0
+    while i < 256 {
+        J[i] = L[i] + R[i]
+        i = i + 1
+    }
+    return J
+}
+
+// ============================================================================
+// ZERO-DIVISOR CHECK
+// ============================================================================
+// A sedenion z = alpha + beta*l is a zero divisor iff (Moreno 1998):
+//   (1) |alpha| = |beta|           (norm equality)
+//   (2) <alpha, beta> = 0          (orthogonality of the two 8D halves)
+// Both conditions are necessary and sufficient.
+
+pub fn sed64_is_zero_divisor(s: Sedenion64, tol: f64) -> bool {
+    let alpha_nsq = oct64_norm_sq_components(s.e0, s.e1, s.e2, s.e3, s.e4, s.e5, s.e6, s.e7)
+    let beta_nsq = oct64_norm_sq_components(s.e8, s.e9, s.e10, s.e11, s.e12, s.e13, s.e14, s.e15)
+    let a_norm = sed64_sqrt(alpha_nsq)
+    let b_norm = sed64_sqrt(beta_nsq)
+    // Condition 1: |alpha| ~ |beta|
+    let norm_diff = sed64_abs(a_norm - b_norm)
+    if norm_diff >= tol * (a_norm + b_norm + 1e-15) { return 0 }
+    // Condition 2: <alpha, beta> ~ 0  (Euclidean dot product of the two halves)
+    let inner = s.e0*s.e8 + s.e1*s.e9 + s.e2*s.e10 + s.e3*s.e11 +
+                s.e4*s.e12 + s.e5*s.e13 + s.e6*s.e14 + s.e7*s.e15
+    sed64_abs(inner) < tol * (a_norm * b_norm + 1e-15)
+}
+
+// ============================================================================
+// ARRAY CONVERSIONS
+// ============================================================================
+
+pub fn sed64_to_array(s: Sedenion64) -> [f64; 16] {
+    var arr = [0.0; 16]
+    arr[0] = s.e0
+    arr[1] = s.e1
+    arr[2] = s.e2
+    arr[3] = s.e3
+    arr[4] = s.e4
+    arr[5] = s.e5
+    arr[6] = s.e6
+    arr[7] = s.e7
+    arr[8] = s.e8
+    arr[9] = s.e9
+    arr[10] = s.e10
+    arr[11] = s.e11
+    arr[12] = s.e12
+    arr[13] = s.e13
+    arr[14] = s.e14
+    arr[15] = s.e15
+    return arr
+}
+
+pub fn sed64_from_array(c: [f64; 16]) -> Sedenion64 {
+    Sedenion64 {
+        e0: c[0], e1: c[1], e2: c[2], e3: c[3],
+        e4: c[4], e5: c[5], e6: c[6], e7: c[7],
+        e8: c[8], e9: c[9], e10: c[10], e11: c[11],
+        e12: c[12], e13: c[13], e14: c[14], e15: c[15]
+    }
+}
+
+// ============================================================================
+// NORMALIZATION AND INVERSE
+// ============================================================================
+
+pub fn sed64_normalize(s: Sedenion64) -> Sedenion64 with Panic {
+    let n = sed64_norm(s)
+    if n < 1e-30 {
+        sed64_one()
+    } else {
+        sed64_scale(s, 1.0 / n)
+    }
+}
+
+// Putative inverse: conj(z) / |z|^2
+// WARNING: undefined at zero divisors
+pub fn sed64_putative_inv(s: Sedenion64) -> Sedenion64 with Panic {
+    let nsq = sed64_norm_sq(s)
+    if nsq < 1e-30 {
+        sed64_one()
+    } else {
+        sed64_scale(sed64_conj(s), 1.0 / nsq)
+    }
+}

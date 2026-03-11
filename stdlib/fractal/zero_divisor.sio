@@ -1,0 +1,265 @@
+//! stdlib/fractal/zero_divisor.sio - Zero-Divisor Infrastructure in S
+//!
+//! S has zero divisors: non-zero a,b with a*b = 0.
+//! A sedenion z = alpha + beta*l is a zero divisor iff |alpha| = |beta| and
+//! alpha * conj(beta) satisfies the Moreno constraint (1998).
+//!
+//! This module provides:
+//! - Monte Carlo proximity estimation to the zero-divisor variety Z in S
+//! - Deterministic sampling of zero divisors for testing
+//! - Basis zero-divisor pair enumeration
+//!
+//! Reference: Moreno, "The zero divisors of the Cayley-Dickson algebras..." (1998)
+
+use math::sedenion64::*
+use math::cayley_dickson::{oct64_norm_sq_components}
+
+// ============================================================================
+// PRNG (Linear Congruential Generator)
+// ============================================================================
+// Simple deterministic PRNG for reproducible Monte Carlo sampling.
+// Parameters from Numerical Recipes: a=6364136223846793005, c=1442695040888963407
+
+fn zd_lcg_next(state: i64) -> i64 {
+    // Avoid overflow: use the modular arithmetic naturally
+    let a = 6364136223846793005
+    let c = 1442695040888963407
+    return state * a + c
+}
+
+// Convert LCG state to f64 in [-1, 1]
+fn zd_lcg_to_f64(state: i64) -> f64 {
+    // Use upper bits for better quality
+    let shifted = state / 4294967296   // >> 32 equivalent
+    let f = shifted
+    // Normalize to roughly [-1, 1]
+    return (f as f64) / 2147483648.0
+}
+
+// ============================================================================
+// ZERO-DIVISOR SAMPLING
+// ============================================================================
+// Construct a zero divisor z = alpha + beta*l where:
+// - alpha is a purely imaginary octonion (e0 component = 0)
+// - beta is a purely imaginary octonion orthogonal to alpha
+// - |alpha| = |beta|
+// This satisfies the necessary condition for zero divisors.
+
+fn zd_sqrt(x: f64) -> f64 {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    return y
+}
+
+fn zd_abs(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+pub fn zd_sample(seed: i64) -> Sedenion64 {
+    // Generate random purely imaginary octonion alpha (7 components)
+    var s = seed
+    var a1 = 0.0
+    var a2 = 0.0
+    var a3 = 0.0
+    var a4 = 0.0
+    var a5 = 0.0
+    var a6 = 0.0
+    var a7 = 0.0
+
+    s = zd_lcg_next(s)
+    a1 = zd_lcg_to_f64(s)
+    s = zd_lcg_next(s)
+    a2 = zd_lcg_to_f64(s)
+    s = zd_lcg_next(s)
+    a3 = zd_lcg_to_f64(s)
+    s = zd_lcg_next(s)
+    a4 = zd_lcg_to_f64(s)
+    s = zd_lcg_next(s)
+    a5 = zd_lcg_to_f64(s)
+    s = zd_lcg_next(s)
+    a6 = zd_lcg_to_f64(s)
+    s = zd_lcg_next(s)
+    a7 = zd_lcg_to_f64(s)
+
+    // Normalize alpha to unit norm
+    let a_nsq = a1*a1 + a2*a2 + a3*a3 + a4*a4 + a5*a5 + a6*a6 + a7*a7
+    let a_norm = zd_sqrt(a_nsq)
+    if a_norm < 1e-15 {
+        // Fallback: use a known zero divisor
+        return sed64_add(sed64_basis(3), sed64_basis(10))
+    }
+    let inv_a = 1.0 / a_norm
+    a1 = a1 * inv_a
+    a2 = a2 * inv_a
+    a3 = a3 * inv_a
+    a4 = a4 * inv_a
+    a5 = a5 * inv_a
+    a6 = a6 * inv_a
+    a7 = a7 * inv_a
+
+    // Generate random beta, then Gram-Schmidt orthogonalize against alpha
+    var b1 = 0.0
+    var b2 = 0.0
+    var b3 = 0.0
+    var b4 = 0.0
+    var b5 = 0.0
+    var b6 = 0.0
+    var b7 = 0.0
+
+    s = zd_lcg_next(s)
+    b1 = zd_lcg_to_f64(s)
+    s = zd_lcg_next(s)
+    b2 = zd_lcg_to_f64(s)
+    s = zd_lcg_next(s)
+    b3 = zd_lcg_to_f64(s)
+    s = zd_lcg_next(s)
+    b4 = zd_lcg_to_f64(s)
+    s = zd_lcg_next(s)
+    b5 = zd_lcg_to_f64(s)
+    s = zd_lcg_next(s)
+    b6 = zd_lcg_to_f64(s)
+    s = zd_lcg_next(s)
+    b7 = zd_lcg_to_f64(s)
+
+    // Gram-Schmidt: b = b - (b . a) * a
+    let dot = b1*a1 + b2*a2 + b3*a3 + b4*a4 + b5*a5 + b6*a6 + b7*a7
+    b1 = b1 - dot * a1
+    b2 = b2 - dot * a2
+    b3 = b3 - dot * a3
+    b4 = b4 - dot * a4
+    b5 = b5 - dot * a5
+    b6 = b6 - dot * a6
+    b7 = b7 - dot * a7
+
+    // Normalize beta to unit norm (same as alpha)
+    let b_nsq = b1*b1 + b2*b2 + b3*b3 + b4*b4 + b5*b5 + b6*b6 + b7*b7
+    let b_norm = zd_sqrt(b_nsq)
+    if b_norm < 1e-15 {
+        return sed64_add(sed64_basis(3), sed64_basis(10))
+    }
+    let inv_b = 1.0 / b_norm
+    b1 = b1 * inv_b
+    b2 = b2 * inv_b
+    b3 = b3 * inv_b
+    b4 = b4 * inv_b
+    b5 = b5 * inv_b
+    b6 = b6 * inv_b
+    b7 = b7 * inv_b
+
+    // Construct z = (0, a1..a7, 0, b1..b7) with |alpha|=|beta|=1
+    // alpha = (0, a1..a7), beta = (0, b1..b7) — purely imaginary
+    sed64(0.0, a1, a2, a3, a4, a5, a6, a7,
+          0.0, b1, b2, b3, b4, b5, b6, b7)
+}
+
+// ============================================================================
+// PROXIMITY ESTIMATION
+// ============================================================================
+// Estimate minimum distance from z to the zero-divisor variety Z via
+// Monte Carlo sampling. Returns the smallest ||z - zd|| found.
+
+pub fn zd_proximity(z: Sedenion64, n_samples: i32) -> f64 {
+    let z_norm = sed64_norm(z)
+    if z_norm < 1e-15 { return 0.0 }
+
+    var min_dist = 1e30
+    var seed = 42 as i64
+    var i = 0
+    while i < n_samples {
+        let zd = zd_sample(seed)
+        // Scale to match norm of z
+        let scaled_zd = sed64_scale(zd, z_norm)
+        let dist = sed64_norm(sed64_sub(z, scaled_zd))
+        if dist < min_dist {
+            min_dist = dist
+        }
+        seed = zd_lcg_next(seed)
+        i = i + 1
+    }
+    return min_dist
+}
+
+// ============================================================================
+// ANALYTIC MORENO PROXIMITY
+// ============================================================================
+// Analytic distance from z to the zero-divisor variety Z in S, based on the
+// full Moreno (1998) characterization: z=(alpha,beta) is a zero divisor iff
+//   (1) |alpha| = |beta|         — norm equality
+//   (2) <alpha, beta> = 0        — orthogonality of the two halves
+//
+// Returns a combined relative distance in [0, sqrt(2)]:
+//   0   => z is exactly on the zero-divisor variety
+//   >0  => distance proportional to violation of Moreno constraints
+//
+// O(1) cost; replaces Monte Carlo zd_proximity for feature extraction.
+
+pub fn zd_moreno_proximity(z: Sedenion64) -> f64 {
+    let alpha_nsq = z.e0*z.e0 + z.e1*z.e1 + z.e2*z.e2 + z.e3*z.e3 +
+                    z.e4*z.e4 + z.e5*z.e5 + z.e6*z.e6 + z.e7*z.e7
+    let beta_nsq  = z.e8*z.e8 + z.e9*z.e9 + z.e10*z.e10 + z.e11*z.e11 +
+                    z.e12*z.e12 + z.e13*z.e13 + z.e14*z.e14 + z.e15*z.e15
+    let a_norm = zd_sqrt(alpha_nsq)
+    let b_norm = zd_sqrt(beta_nsq)
+    // Condition 1: relative norm imbalance — 0 when |alpha|=|beta|
+    let norm_sum = a_norm + b_norm + 1e-30
+    let norm_imb = zd_abs(a_norm - b_norm) / norm_sum
+    // Condition 2: relative orthogonality violation — 0 when <alpha,beta>=0
+    let inner = z.e0*z.e8 + z.e1*z.e9 + z.e2*z.e10 + z.e3*z.e11 +
+                z.e4*z.e12 + z.e5*z.e13 + z.e6*z.e14 + z.e7*z.e15
+    let orth_viol = zd_abs(inner) / (a_norm * b_norm + 1e-30)
+    // Combined: 0 iff both conditions satisfied
+    zd_sqrt(norm_imb * norm_imb + orth_viol * orth_viol)
+}
+
+// ============================================================================
+// BASIS ZERO-DIVISOR ENUMERATION
+// ============================================================================
+// Count zero-divisor pairs among basis element combinations (e_i +/- e_j)
+// where i in {1..7} and j in {8..15}.
+// Returns the number of pairs found.
+
+pub fn zd_enumerate_basis_pairs_count() -> i32 {
+    var count = 0
+    var i = 1
+    while i <= 7 {
+        var j = 8
+        while j <= 15 {
+            // Test a = e_i + e_j, search for annihilator b = e_k +/- e_l
+            let a_plus = sed64_add(sed64_basis(i), sed64_basis(j))
+
+            var k = 1
+            while k <= 7 {
+                var l = 8
+                while l <= 15 {
+                    // b = e_k + e_l
+                    let b_plus = sed64_add(sed64_basis(k), sed64_basis(l))
+                    let prod_pp = sed64_mul(a_plus, b_plus)
+                    if sed64_norm(prod_pp) < 1e-10 {
+                        count = count + 1
+                    }
+                    // b = e_k - e_l
+                    let b_minus = sed64_sub(sed64_basis(k), sed64_basis(l))
+                    let prod_pm = sed64_mul(a_plus, b_minus)
+                    if sed64_norm(prod_pm) < 1e-10 {
+                        count = count + 1
+                    }
+                    l = l + 1
+                }
+                k = k + 1
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    return count
+}
