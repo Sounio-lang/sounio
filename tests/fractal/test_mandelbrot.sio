@@ -1,0 +1,107 @@
+//@ run-pass
+//! Test suite for stdlib/fractal/mandelbrot.sio - Mandelbrot orbit validation
+//!
+//! Verifies:
+//! - Origin fixed point: c=0 -> z stays 0
+//! - Large c escapes quickly
+//! - Classical reduction: c in R -> J[0,0] matches scalar recursion
+//! - Hessian symmetry: H[i,j,k] = H[i,k,j]
+
+use math::sedenion64::*
+use linalg::mat16::*
+use linalg::tensor16::*
+use fractal::mandelbrot::*
+
+fn check_near_f(a: f64, b: f64, tol: f64) -> i32 {
+    let d = a - b
+    let ad = if d < 0.0 { 0.0 - d } else { d }
+    if ad < tol { 0 } else { 1 }
+}
+
+fn tm_abs(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+// c=0: z_n stays at 0 for all n, orbit does not escape
+fn test_origin_fixed_point() -> i32 {
+    var fail = 0
+    let c = sed64_zero()
+    let config = OrbitConfig { max_iter: 50, escape_radius: 4.0, compute_hessian: 0 }
+    let orbit = compute_orbit(c, config)
+
+    if orbit.escaped != 0 { fail = fail + 1 }
+    let z_norm = sed64_norm(orbit.z_final)
+    fail = fail + check_near_f(z_norm, 0.0, 1e-12)
+    return fail
+}
+
+// c = 3.0 (real): z_1 = 3, z_2 = 12, ... escapes quickly
+fn test_large_c_escapes() -> i32 {
+    var fail = 0
+    let c = sed64_from_real(3.0)
+    let config = OrbitConfig { max_iter: 50, escape_radius: 4.0, compute_hessian: 0 }
+    let orbit = compute_orbit(c, config)
+
+    if orbit.escaped != 1 { fail = fail + 1 }
+    if orbit.n_escape > 5 { fail = fail + 1 }
+    return fail
+}
+
+// Classical reduction: when c is real, the Jacobian J[0,0] should match
+// the scalar recursion w_{n+1} = 2*z_n*w_n + 1, w_0 = 0
+fn test_classical_reduction() -> i32 {
+    let c_val = 0.0 - 0.5
+    let c = sed64_from_real(c_val)
+    let max_n = 15
+    let config = OrbitConfig { max_iter: max_n, escape_radius: 100.0, compute_hessian: 0 }
+    let orbit = compute_orbit(c, config)
+
+    // Scalar recursion
+    var z_scalar = 0.0
+    var w_scalar = 0.0
+    var n = 0
+    while n < max_n {
+        w_scalar = 2.0 * z_scalar * w_scalar + 1.0
+        z_scalar = z_scalar * z_scalar + c_val
+        n = n + 1
+    }
+
+    let j00 = mat16_get(orbit.jacobian, 0, 0)
+    return check_near_f(j00, w_scalar, 1e-4)
+}
+
+// Hessian symmetry: H[i,j,k] = H[i,k,j] for all i,j,k
+fn test_hessian_symmetry() -> i32 {
+    let c = sed64(0.1, 0.05, -0.03, 0.02, 0.0, 0.0, 0.0, 0.0,
+                  0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+    let config = OrbitConfig { max_iter: 10, escape_radius: 4.0, compute_hessian: 1 }
+    let orbit = compute_orbit(c, config)
+
+    var max_asym = 0.0
+    var i = 0
+    while i < 16 {
+        var j = 0
+        while j < 16 {
+            var k = j + 1
+            while k < 16 {
+                let hjk = tensor16_get(orbit.hessian, i, j, k)
+                let hkj = tensor16_get(orbit.hessian, i, k, j)
+                let asym = tm_abs(hjk - hkj)
+                if asym > max_asym { max_asym = asym }
+                k = k + 1
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    if max_asym < 1e-8 { 0 } else { 1 }
+}
+
+fn main() -> i32 {
+    var fail = 0
+    fail = fail + test_origin_fixed_point()
+    fail = fail + test_large_c_escapes()
+    fail = fail + test_classical_reduction()
+    fail = fail + test_hessian_symmetry()
+    return fail
+}

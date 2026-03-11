@@ -1,0 +1,177 @@
+//@ run-pass
+//! Test suite for stdlib/math/sedenion64.sio - f64 sedenion algebra validation
+//!
+//! Verifies algebraic properties of the Cayley-Dickson sedenion construction:
+//! - Basis element squares: e_i^2 = -1 for i=1..15
+//! - Identity: e0 * z = z * e0 = z
+//! - Conjugation involution: conj(conj(z)) = z
+//! - Conjugation anti-homomorphism: conj(xy) = conj(y)*conj(x)
+//! - Zero divisor existence: (e3+e10)*(e6-e15) = 0
+//! - Power associativity: z^2 * z = z * z^2
+//! - Non-commutativity: exists x,y with xy != yx
+//! - Jordan operator: J_a(e0) = 2a
+//!
+//! NOTE: Per-component checks used to work around JIT limitation passing
+//! 128-byte struct return values through sed64_sub->sed64_norm chains.
+//! Sedenions are NOT flexible (lost at sedenion level), NOT alternative.
+//! Jordan matrix J_a = L_a + R_a is NOT symmetric (non-commutative algebra).
+
+use math::sedenion64::*
+
+fn t_abs(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+fn check_near(a: f64, b: f64, tol: f64) -> i32 {
+    let d = t_abs(a - b)
+    if d < tol { 0 } else { 1 }
+}
+
+// Per-component Sedenion64 comparison (avoids JIT struct-passing limitation)
+fn check_sed_eq(a: Sedenion64, b: Sedenion64, tol: f64) -> i32 {
+    var f = 0
+    f = f + check_near(a.e0, b.e0, tol)
+    f = f + check_near(a.e1, b.e1, tol)
+    f = f + check_near(a.e2, b.e2, tol)
+    f = f + check_near(a.e3, b.e3, tol)
+    f = f + check_near(a.e4, b.e4, tol)
+    f = f + check_near(a.e5, b.e5, tol)
+    f = f + check_near(a.e6, b.e6, tol)
+    f = f + check_near(a.e7, b.e7, tol)
+    f = f + check_near(a.e8, b.e8, tol)
+    f = f + check_near(a.e9, b.e9, tol)
+    f = f + check_near(a.e10, b.e10, tol)
+    f = f + check_near(a.e11, b.e11, tol)
+    f = f + check_near(a.e12, b.e12, tol)
+    f = f + check_near(a.e13, b.e13, tol)
+    f = f + check_near(a.e14, b.e14, tol)
+    f = f + check_near(a.e15, b.e15, tol)
+    return f
+}
+
+// e_i^2 = -1 for i = 1..15, e_0^2 = 1
+fn test_basis_squares() -> i32 {
+    var fail = 0
+    let e0_sq = sed64_mul(sed64_basis(0), sed64_basis(0))
+    fail = fail + check_sed_eq(e0_sq, sed64_one(), 1e-12)
+    let neg_one = sed64_from_real(0.0 - 1.0)
+    var i = 1
+    while i < 16 {
+        let ei = sed64_basis(i)
+        let ei_sq = sed64_mul(ei, ei)
+        fail = fail + check_sed_eq(ei_sq, neg_one, 1e-12)
+        i = i + 1
+    }
+    return fail
+}
+
+// e0 * z = z = z * e0 for generic z
+fn test_identity_mul() -> i32 {
+    var fail = 0
+    let z = sed64(1.5, 0.3, -0.7, 2.1, -1.0, 0.5, -0.2, 0.8,
+                  -0.4, 1.2, 0.6, -0.9, 0.1, -1.3, 0.7, -0.5)
+    fail = fail + check_sed_eq(sed64_mul(sed64_one(), z), z, 1e-12)
+    fail = fail + check_sed_eq(sed64_mul(z, sed64_one()), z, 1e-12)
+    return fail
+}
+
+// conj(conj(z)) = z
+fn test_conjugation_involution() -> i32 {
+    let z = sed64(1.5, 0.3, -0.7, 2.1, -1.0, 0.5, -0.2, 0.8,
+                  -0.4, 1.2, 0.6, -0.9, 0.1, -1.3, 0.7, -0.5)
+    return check_sed_eq(sed64_conj(sed64_conj(z)), z, 1e-14)
+}
+
+// conj(xy) = conj(y) * conj(x) (anti-homomorphism)
+fn test_conj_anti_homo() -> i32 {
+    let x = sed64(0.5, -0.3, 0.7, -0.1, 0.4, 0.2, -0.6, 0.8,
+                  0.1, -0.5, 0.3, 0.9, -0.2, 0.4, -0.7, 0.1)
+    let y = sed64(0.8, 0.2, -0.4, 0.6, -0.3, 0.5, 0.1, -0.7,
+                  0.4, -0.2, 0.6, -0.8, 0.3, -0.1, 0.5, -0.3)
+    let lhs = sed64_conj(sed64_mul(x, y))
+    let rhs = sed64_mul(sed64_conj(y), sed64_conj(x))
+    return check_sed_eq(lhs, rhs, 1e-10)
+}
+
+// Known zero divisor pair: (e3 + e10) * (e6 - e15) = 0
+fn test_zero_divisor_pair() -> i32 {
+    let a = sed64_add(sed64_basis(3), sed64_basis(10))
+    let b = sed64_sub(sed64_basis(6), sed64_basis(15))
+    let product = sed64_mul(a, b)
+    return check_sed_eq(product, sed64_zero(), 1e-10)
+}
+
+// Power associativity: z^2 * z = z * z^2
+fn test_power_associativity() -> i32 {
+    var fail = 0
+    let z1 = sed64(0.3, -0.1, 0.4, 0.2, -0.5, 0.1, 0.3, -0.2,
+                   0.1, 0.4, -0.3, 0.2, -0.1, 0.5, -0.4, 0.3)
+    let z1_sq = sed64_mul(z1, z1)
+    let z3_l = sed64_mul(z1_sq, z1)
+    let z3_r = sed64_mul(z1, z1_sq)
+    fail = fail + check_sed_eq(z3_l, z3_r, 1e-10)
+
+    let z2 = sed64(1.0, 0.5, -0.3, 0.7, 0.2, -0.4, 0.6, -0.1,
+                   -0.5, 0.3, 0.8, -0.2, 0.4, -0.6, 0.1, 0.9)
+    let z2_sq = sed64_mul(z2, z2)
+    let z3_l2 = sed64_mul(z2_sq, z2)
+    let z3_r2 = sed64_mul(z2, z2_sq)
+    fail = fail + check_sed_eq(z3_l2, z3_r2, 1e-9)
+    return fail
+}
+
+// Non-commutativity: there exist x,y with xy != yx
+fn test_non_commutativity() -> i32 {
+    let xy = sed64_mul(sed64_basis(1), sed64_basis(9))
+    let yx = sed64_mul(sed64_basis(9), sed64_basis(1))
+    var max_d = 0.0
+    let d0 = t_abs(xy.e0 - yx.e0)
+    let d1 = t_abs(xy.e1 - yx.e1)
+    let d8 = t_abs(xy.e8 - yx.e8)
+    let d9 = t_abs(xy.e9 - yx.e9)
+    if d0 > max_d { max_d = d0 }
+    if d1 > max_d { max_d = d1 }
+    if d8 > max_d { max_d = d8 }
+    if d9 > max_d { max_d = d9 }
+    if max_d > 1e-10 { 0 } else { 1 }
+}
+
+// Jordan operator: J_a(e0) = a*e0 + e0*a = 2a
+// Column 0 of J_a matrix: J[i*16 + 0] = 2*a_i
+fn test_jordan_operator() -> i32 {
+    var fail = 0
+    let a = sed64(1.0, 0.5, -0.3, 0.2, 0.7, -0.1, 0.4, -0.6,
+                  0.3, -0.8, 0.1, 0.5, -0.2, 0.6, -0.4, 0.9)
+    let J = sed64_jordan_matrix(a)
+    // J[i*16 + 0] should be 2 * a.e_i
+    fail = fail + check_near(J[0], 2.0, 1e-12)
+    fail = fail + check_near(J[16], 1.0, 1e-12)
+    fail = fail + check_near(J[32], 0.0 - 0.6, 1e-12)
+    fail = fail + check_near(J[48], 0.4, 1e-12)
+    fail = fail + check_near(J[64], 1.4, 1e-12)
+    fail = fail + check_near(J[80], 0.0 - 0.2, 1e-12)
+    fail = fail + check_near(J[96], 0.8, 1e-12)
+    fail = fail + check_near(J[112], 0.0 - 1.2, 1e-12)
+    fail = fail + check_near(J[128], 0.6, 1e-12)
+    fail = fail + check_near(J[144], 0.0 - 1.6, 1e-12)
+    fail = fail + check_near(J[160], 0.2, 1e-12)
+    fail = fail + check_near(J[176], 1.0, 1e-12)
+    fail = fail + check_near(J[192], 0.0 - 0.4, 1e-12)
+    fail = fail + check_near(J[208], 1.2, 1e-12)
+    fail = fail + check_near(J[224], 0.0 - 0.8, 1e-12)
+    fail = fail + check_near(J[240], 1.8, 1e-12)
+    return fail
+}
+
+fn main() -> i32 {
+    var fail = 0
+    fail = fail + test_basis_squares()
+    fail = fail + test_identity_mul()
+    fail = fail + test_conjugation_involution()
+    fail = fail + test_conj_anti_homo()
+    fail = fail + test_zero_divisor_pair()
+    fail = fail + test_power_associativity()
+    fail = fail + test_non_commutativity()
+    fail = fail + test_jordan_operator()
+    return fail
+}

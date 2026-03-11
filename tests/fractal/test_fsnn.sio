@@ -1,0 +1,91 @@
+//@ run-pass
+//! Test suite for stdlib/fractal/fsnn.sio - FSNN feature extraction validation
+//!
+//! Verifies:
+//! - Features are finite (no NaN/Inf)
+//! - c=0 gives expected degenerate features
+//! - Array roundtrip preserves values
+
+use math::sedenion64::*
+use fractal::mandelbrot::*
+use fractal::fsnn::*
+
+fn tf_abs(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+fn is_finite(x: f64) -> bool {
+    // A number is finite if |x| < some large value
+    // NaN and Inf will fail this check
+    let a = tf_abs(x)
+    a < 1e100
+}
+
+fn check_near_f(a: f64, b: f64, tol: f64) -> i32 {
+    let d = a - b
+    let ad = tf_abs(d)
+    if ad < tol { 0 } else { 1 }
+}
+
+// Run FSNN on a small non-zero c and verify all 16 features are finite
+fn test_features_finite() -> i32 {
+    let c = sed64(0.2, 0.1, -0.05, 0.03, 0.0, 0.0, 0.0, 0.0,
+                  0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+    let config = OrbitConfig { max_iter: 20, escape_radius: 4.0, compute_hessian: 1 }
+    let features = fsnn_forward(c, config)
+    let arr = fsnn_features_to_array(features)
+
+    var fail = 0
+    var i = 0
+    while i < 16 {
+        if !is_finite(arr[i]) {
+            fail = fail + 1
+        }
+        i = i + 1
+    }
+    return fail
+}
+
+// c=0: orbit stays at zero, escape_ratio=1.0 (never escapes, max_iter reached)
+// terminal_norm should be ~0
+fn test_zero_c_features() -> i32 {
+    var fail = 0
+    let c = sed64_zero()
+    let config = OrbitConfig { max_iter: 20, escape_radius: 4.0, compute_hessian: 0 }
+    let features = fsnn_forward(c, config)
+
+    // escape_ratio = max_iter/max_iter = 1.0 (orbit never escapes)
+    fail = fail + check_near_f(features.escape_ratio, 1.0, 1e-10)
+
+    // terminal_norm = |z_N| should be 0
+    fail = fail + check_near_f(features.terminal_norm, 0.0, 1e-10)
+
+    return fail
+}
+
+// Array roundtrip: features -> array -> features should preserve values
+fn test_features_array_roundtrip() -> i32 {
+    let c = sed64(0.1, 0.05, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                  0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+    let config = OrbitConfig { max_iter: 10, escape_radius: 4.0, compute_hessian: 1 }
+    let features = fsnn_forward(c, config)
+    let arr = fsnn_features_to_array(features)
+    let recovered = fsnn_features_from_array(arr)
+    let arr2 = fsnn_features_to_array(recovered)
+
+    var fail = 0
+    var i = 0
+    while i < 16 {
+        fail = fail + check_near_f(arr[i], arr2[i], 1e-14)
+        i = i + 1
+    }
+    return fail
+}
+
+fn main() -> i32 {
+    var fail = 0
+    fail = fail + test_features_finite()
+    fail = fail + test_zero_c_features()
+    fail = fail + test_features_array_roundtrip()
+    return fail
+}
