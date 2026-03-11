@@ -44,7 +44,7 @@ use module_loader::{compile_multimodule_native, compile_multimodule_native_advan
 use frontend_callsite_probe::{run_frontend_callsite_probe}
 use parser::parser::{parser_last_error_count}
 use ir::opt_strategy::{ir_opt_apply_strategy, ir_opt_find_return_vreg, ir_opt_max_label, ir_opt_max_vreg}
-use ir::lower::{ir_patch_validated_calls, lower_program_to_ir, lower_program_to_ir_with_epistemic, lower_program_to_ir_summary_with_epistemic_ref, lower_program_function_body_from_summary_with_epistemic_ref}
+use ir::lower::{ir_patch_validated_calls, lower_program_to_ir, lower_program_to_ir_with_epistemic, lower_program_to_ir_summary_flat_with_epistemic_ref, lower_program_function_body_from_summary_flat_with_epistemic_ref}
 use ir::const_prop::{cp_check_load_imm, cp_empty_instrs, cp_make_test_func, cp_optimize_function}
 use ir::dce::{dce_check_nop, dce_empty_instrs, dce_make_test_func, dce_optimize_function}
 use ir::profile::*
@@ -1861,6 +1861,13 @@ fn run_native_v2_preview_smoke() with IO, Mut, Panic, Div, Alloc {
     println("native_v2_preview_smoke: ok")
 }
 
+fn run_native_v2_gc_retry_smoke() with IO, Mut, Panic, Div, Alloc {
+    if !compiler_main_test_native_v2_compile_gc_retry_smoke() {
+        panic("native-v2 GC retry smoke failed")
+    }
+    println("native_v2_gc_retry_smoke: ok")
+}
+
 // ============================================================================
 // COMMAND LINE PARSING
 // ============================================================================
@@ -1888,6 +1895,7 @@ fn print_help() with IO {
     println("  --ir-roundtrip <source.sio>  Serialize + deserialize + reserialize IR")
     println("  --native-compile <source.sio>  Compile to native output (use -o/--output to choose path)")
     println("  --native-v2-preview-smoke  Run dedicated native-v2 scalar/call/control/fail-closed smoke")
+    println("  --native-v2-gc-retry-smoke Run dedicated native-v2 alloc-retry smoke")
     println("  --self-test            Run compiler main self-tests")
     println("  --bench-int-to-string [n]   Benchmark int_to_string loop (default n=1000000)")
     println("  --probe-char-from-i64 <n>   Probe char_from_i64 for manual regression checks")
@@ -6384,23 +6392,24 @@ fn run_probe_native_streaming(args: ArgList, flag_index: i64) with IO, Mut, Pani
     }
 
     print("probe_native_streaming: summary_begin\n")
-    let summary_result = lower_program_to_ir_summary_with_epistemic_ref(&program, epistemic)
+    let summary_result = lower_program_to_ir_summary_flat_with_epistemic_ref(&program, epistemic)
     if summary_result.had_error {
         panic("probe_native_streaming summary lowering failed")
     }
     print("probe_native_streaming: summary_ok\n")
 
+    let summary_fn_count = summary_result.summary.module.fn_count
     print("probe_native_streaming: fn_count=")
-    print_int(summary_result.summary.module.fn_count)
+    print_int(summary_fn_count)
     print("\n")
 
     var fi: i64 = 0
-    while fi < summary_result.summary.module.fn_count {
+    while fi < summary_fn_count {
         let fn_name = summary_result.summary.module.functions[fi as usize].name
         print("probe_native_streaming: body_begin fn=")
         compiler_manifest_print_name(fn_name)
         print("\n")
-        let body_result = lower_program_function_body_from_summary_with_epistemic_ref(
+        let body_result = lower_program_function_body_from_summary_flat_with_epistemic_ref(
             &program,
             &summary_result.summary,
             epistemic,
@@ -7130,7 +7139,7 @@ fn compiler_main_test_assoc_non_assoc_no_fold() -> bool with Mut, Div, Panic {
 
 fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
     var passed: i64 = 0
-    let total: i64 = 226
+    let total: i64 = 229
 
     println("=== compiler/main.sio self-tests ===")
 
@@ -8710,11 +8719,32 @@ fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
         println("  FAIL: T225 Sprint 84 Block L: non-assoc no-fold guard")
     }
 
-    if compiler_main_test_native_v2_compile_gc_retry_smoke() {
-        println("  T226 OK: native-v2 emits a GC retry smoke ELF for empty-live-set recovery")
+    if compiler_main_test_ir_opt_expands_local_reg_range() {
+        println("  T226 OK: Sprint 85: ir_opt_apply_strategy expands local reg range for dual-path")
         passed = passed + 1
     } else {
-        println("  FAIL: T226 native-v2 GC retry smoke artifact")
+        println("  FAIL: T226 Sprint 85: ir_opt_expands_local_reg_range")
+    }
+
+    if compiler_main_test_native_v2_compile_preview_scalar() {
+        println("  T227 OK: Sprint 85: native-v2 compile_preview produces valid ELF64 for scalar module")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T227 Sprint 85: native_v2_compile_preview_scalar")
+    }
+
+    if compiler_main_test_native_v2_compile_preview_call_control() {
+        println("  T228 OK: Sprint 85: native-v2 compile_preview handles call + control modules")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T228 Sprint 85: native_v2_compile_preview_call_control")
+    }
+
+    if compiler_main_test_native_v2_compile_gc_retry_smoke() {
+        println("  T229 OK: Sprint 85: native-v2 compile_preview GC-retry module produces valid ELF64")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T229 Sprint 85: native_v2_compile_gc_retry_smoke")
     }
 
     println("")
@@ -8756,6 +8786,9 @@ fn main() with IO, Mut, Panic, Div, Alloc {
             return
         } else if mode == "--native-v2-preview-smoke" {
             run_native_v2_preview_smoke()
+            return
+        } else if mode == "--native-v2-gc-retry-smoke" {
+            run_native_v2_gc_retry_smoke()
             return
         } else if mode == "--bench-int-to-string" {
             run_int_to_string_bench_from_args(args, arg_idx)
