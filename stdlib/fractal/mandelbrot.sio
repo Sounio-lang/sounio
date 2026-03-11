@@ -1,0 +1,154 @@
+//! stdlib/fractal/mandelbrot.sio - Mandelbrot Orbit in Sedenionic Space (f64)
+//!
+//! Computes z_{n+1} = z_n^2 + c in S with first-order Jacobian J_n and
+//! second-order Hessian H_n recursions.
+//!
+//! Mathematical kernel for the FSNN architecture.
+//!
+//! Recursions (Chiuratto Agourakis, "Generalised Wirtinger Calculus on Sedenions", 2026):
+//!   Orbit:     z_{n+1} = z_n^2 + c
+//!   Jacobian:  J_{n+1} = J_{z_n} * J_n + I_16     (Theorem 4.2)
+//!   Hessian:   H_{n+1}[d1,d2] = Jordan(J_n[d1], J_n[d2]) + J_{z_n}(H_n[d1,d2])  (Theorem 4.4)
+//!
+//! where J_{z_n} = L_{z_n} + R_{z_n} is the Jordan operator matrix.
+
+use math::sedenion64::*
+use linalg::mat16::*
+use linalg::tensor16::*
+
+// ============================================================================
+// CONFIGURATION AND RESULT TYPES
+// ============================================================================
+
+pub struct OrbitConfig {
+    max_iter: i32,
+    escape_radius: f64,
+    compute_hessian: i32,    // 0=no, 1=yes
+}
+
+pub fn orbit_config_default() -> OrbitConfig {
+    OrbitConfig { max_iter: 50, escape_radius: 4.0, compute_hessian: 1 }
+}
+
+pub struct OrbitResult {
+    z_final: Sedenion64,
+    jacobian: Mat16,
+    hessian: Tensor16,
+    n_escape: i32,
+    escaped: i32,
+    orbit_norms: [f64; 256],
+    jacobian_op_norms: [f64; 256],
+    hessian_frob_norms: [f64; 256],
+    history_len: i32,
+}
+
+// ============================================================================
+// ORBIT COMPUTATION
+// ============================================================================
+
+// Compute the Mandelbrot orbit for parameter c in S.
+// Returns an OrbitResult containing the terminal state and all derivative
+// information needed for FSNN feature extraction.
+pub fn compute_orbit(c: Sedenion64, config: OrbitConfig) -> OrbitResult {
+    var z = sed64_zero()
+    var J = mat16_zeros()
+    var H = tensor16_zeros()
+    let I16 = mat16_identity()
+
+    var orbit_norms = [0.0; 256]
+    var j_norms = [0.0; 256]
+    var h_norms = [0.0; 256]
+    orbit_norms[0] = 0.0
+    j_norms[0] = 0.0
+    h_norms[0] = 0.0
+
+    var escaped = 0
+    var n_escape = config.max_iter
+    var history_len = 1
+
+    var n = 0
+    while n < config.max_iter {
+        // ---- Orbit step: z_{n+1} = z_n^2 + c ----
+        let z_new = sed64_add(sed64_mul(z, z), c)
+
+        // ---- Jacobian recursion: J_{n+1} = J_{z_n} * J_n + I_16 ----
+        // J_{z_n} = L_{z_n} + R_{z_n} (Jordan operator matrix)
+        let Jz_data = sed64_jordan_matrix(z)
+        let Jz = mat16_from_array(Jz_data)
+        let J_new = mat16_add(mat16_mul(Jz, J), I16)
+
+        // ---- Hessian recursion (if enabled) ----
+        if config.compute_hessian == 1 {
+            // Transport: J_{z_n}(H_n) — apply Jz to each fibre H[:,j,k]
+            var H_new = tensor16_jordan_transport(Jz, H)
+
+            // Curvature source: for each (j,k), Jordan product of J_n*e_j and J_n*e_k
+            // Jordan(u, v) = u*v + v*u as sedenions
+            var j = 0
+            while j < 16 {
+                // J_n * e_j: column j of J_n, interpreted as sedenion
+                let col_j = mat16_column(J, j)
+                let Jj = sed64_from_array(col_j)
+
+                var k = j
+                while k < 16 {
+                    let col_k = mat16_column(J, k)
+                    let Jk = sed64_from_array(col_k)
+
+                    // Jordan product of Jj and Jk
+                    let jp = sed64_jordan(Jj, Jk)
+
+                    // Add to H_new
+                    var i = 0
+                    while i < 16 {
+                        let val = sed64_get(jp, i)
+                        let old_jk = tensor16_get(H_new, i, j, k)
+                        H_new = tensor16_set(H_new, i, j, k, old_jk + val)
+                        if k != j {
+                            let old_kj = tensor16_get(H_new, i, k, j)
+                            H_new = tensor16_set(H_new, i, k, j, old_kj + val)
+                        }
+                        i = i + 1
+                    }
+                    k = k + 1
+                }
+                j = j + 1
+            }
+            H = H_new
+        }
+
+        z = z_new
+        J = J_new
+
+        // Record norms
+        let z_norm = sed64_norm(z)
+        if history_len < 256 {
+            orbit_norms[history_len] = z_norm
+            j_norms[history_len] = mat16_operator_norm_approx(J)
+            if config.compute_hessian == 1 {
+                h_norms[history_len] = tensor16_frobenius_norm(H)
+            }
+            history_len = history_len + 1
+        }
+
+        // Escape check
+        if z_norm > config.escape_radius {
+            escaped = 1
+            n_escape = n + 1
+            n = config.max_iter
+        }
+        n = n + 1
+    }
+
+    OrbitResult {
+        z_final: z,
+        jacobian: J,
+        hessian: H,
+        n_escape: n_escape,
+        escaped: escaped,
+        orbit_norms: orbit_norms,
+        jacobian_op_norms: j_norms,
+        hessian_frob_norms: h_norms,
+        history_len: history_len,
+    }
+}
