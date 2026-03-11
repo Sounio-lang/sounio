@@ -5057,6 +5057,25 @@ fn compiler_main_make_native_v2_alloc_field_module() -> IrModule {
     module
 }
 
+fn compiler_main_make_native_v2_gc_retry_module() -> IrModule {
+    var module = ir_empty_module()
+    var func = ir_empty_function()
+    func.name = ir_name_from_bytes(109, 97, 105, 110, 4)
+    func.reg_count = 2
+    func.instrs[0] = ir_load_imm(0, 0)
+    func.instrs[1] = ir_load_imm(1, 0)
+    func.instrs[2] = ir_alloc(0, 536674000)
+    func.instrs[3] = ir_load_imm(0, 0)
+    func.instrs[4] = ir_load_imm(1, 0)
+    func.instrs[5] = ir_alloc(0, 128)
+    func.instrs[6] = ir_load_imm(1, 23)
+    func.instrs[7] = ir_return(1)
+    func.instr_count = 8
+    module.functions[0] = func
+    module.fn_count = 1
+    module
+}
+
 fn compiler_main_test_native_v2_machine_module_scalar_core() -> bool with Mut, Panic, Div, Alloc {
     let built = native_v2_build_machine_module(&compiler_main_make_native_v2_scalar_module(13), true)
     if !built.supported { return false }
@@ -5170,6 +5189,8 @@ fn compiler_main_test_native_v2_contract_machine_ir_fields() -> bool with IO, Mu
     if !compiler_bytes_contains(data, size, "\"gc_precise_descriptor_scanning\":true") { return false }
     if !compiler_bytes_contains(data, size, "\"gc_handle_relocation_model\":true") { return false }
     if !compiler_bytes_contains(data, size, "\"ffi_pinning_model\":true") { return false }
+    if !compiler_bytes_contains(data, size, "\"gc_runtime_retry_active\":true") { return false }
+    if !compiler_bytes_contains(data, size, "\"gc_current_frame_root_scan\":true") { return false }
     true
 }
 
@@ -5373,6 +5394,13 @@ fn compiler_main_test_native_v2_alloc_uses_descriptor_handles() -> bool with Mut
         i = i + 1
     }
     saw_alloc && saw_field_get
+}
+
+fn compiler_main_test_native_v2_compile_gc_retry_smoke() -> bool with IO, Mut, Panic, Div, Alloc {
+    let spec = native_resolve_target("x86_64-linux", "auto", true)
+    let result = compile_native_v2_preview(&compiler_main_make_native_v2_gc_retry_module(), spec)
+    if !result.ok || result.format_id != FORMAT_ELF64() || result.len <= 64 { return false }
+    io_write_native_binary("artifacts/omega/native_backend_v2_gc_retry_smoke.selftest.bin", result.bytes, result.len)
 }
 
 fn compiler_main_make_native_v2_gc_model() -> NativeV2GcModel with Mut, Panic, Div {
@@ -7014,9 +7042,95 @@ fn compiler_main_test_loadbool_mul_annihilate() -> bool with Mut, Div, Panic {
     result.instrs[2].op == IrOpcode::IrLoadImm && result.instrs[2].imm_i64 == 0
 }
 
+// Sprint 84 Block L: Associative constant-chain folding self-tests (T220–T225)
+
+// T220: (r0+3)+5 → r0+8 via Block L add-chain fold.
+fn compiler_main_test_assoc_add_chain() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(1, 3)
+    instrs[1] = ir_binop(2, 0, BinaryOp::OpAdd, 1)   // r2 = r0 + 3
+    instrs[2] = ir_load_imm(3, 5)
+    instrs[3] = ir_binop(4, 2, BinaryOp::OpAdd, 3)   // r4 = r2 + 5 → r0 + 8
+    let func   = cp_make_test_func(instrs, 4)
+    let result = ocp_const_fold(func)
+    // r3 (const reg) should be patched to 8; r4's src1 should be r0 (reg 0)
+    result.instrs[3].op == IrOpcode::IrBinOp
+        && result.instrs[3].src1 == 0
+        && result.instrs[2].imm_i64 == 8
+}
+
+// T221: (r0*2)*4 → r0*8 via Block L mul-chain fold.
+fn compiler_main_test_assoc_mul_chain() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(1, 2)
+    instrs[1] = ir_binop(2, 0, BinaryOp::OpMul, 1)   // r2 = r0 * 2
+    instrs[2] = ir_load_imm(3, 4)
+    instrs[3] = ir_binop(4, 2, BinaryOp::OpMul, 3)   // r4 = r2 * 4 → r0 * 8
+    let func   = cp_make_test_func(instrs, 4)
+    let result = ocp_const_fold(func)
+    result.instrs[3].op == IrOpcode::IrBinOp
+        && result.instrs[3].src1 == 0
+        && result.instrs[2].imm_i64 == 8
+}
+
+// T222: (r0 & 0xFF) & 0x0F → r0 & 0x0F via Block L bitand-chain fold.
+fn compiler_main_test_assoc_bitand_chain() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(1, 255)
+    instrs[1] = ir_binop(2, 0, BinaryOp::OpBitAnd, 1)  // r2 = r0 & 0xFF
+    instrs[2] = ir_load_imm(3, 15)
+    instrs[3] = ir_binop(4, 2, BinaryOp::OpBitAnd, 3)  // r4 = r2 & 0x0F → r0 & 0x0F
+    let func   = cp_make_test_func(instrs, 4)
+    let result = ocp_const_fold(func)
+    result.instrs[3].op == IrOpcode::IrBinOp
+        && result.instrs[3].src1 == 0
+        && result.instrs[2].imm_i64 == 15
+}
+
+// T223: (r0 | 0x80) | 0x40 → r0 | 0xC0 via Block L bitor-chain fold.
+fn compiler_main_test_assoc_bitor_chain() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(1, 128)
+    instrs[1] = ir_binop(2, 0, BinaryOp::OpBitOr, 1)   // r2 = r0 | 0x80
+    instrs[2] = ir_load_imm(3, 64)
+    instrs[3] = ir_binop(4, 2, BinaryOp::OpBitOr, 3)   // r4 = r2 | 0x40 → r0 | 0xC0
+    let func   = cp_make_test_func(instrs, 4)
+    let result = ocp_const_fold(func)
+    result.instrs[3].op == IrOpcode::IrBinOp
+        && result.instrs[3].src1 == 0
+        && result.instrs[2].imm_i64 == 192
+}
+
+// T224: (r0 ^ 5) ^ 3 → r0 ^ 6 via Block L bitxor-chain fold (5^3=6).
+fn compiler_main_test_assoc_bitxor_chain() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(1, 5)
+    instrs[1] = ir_binop(2, 0, BinaryOp::OpBitXor, 1)  // r2 = r0 ^ 5
+    instrs[2] = ir_load_imm(3, 3)
+    instrs[3] = ir_binop(4, 2, BinaryOp::OpBitXor, 3)  // r4 = r2 ^ 3 → r0 ^ 6
+    let func   = cp_make_test_func(instrs, 4)
+    let result = ocp_const_fold(func)
+    result.instrs[3].op == IrOpcode::IrBinOp
+        && result.instrs[3].src1 == 0
+        && result.instrs[2].imm_i64 == 6
+}
+
+// T225: (r0-3)-5 → no Block L fold (OpSub not in assoc set).
+fn compiler_main_test_assoc_non_assoc_no_fold() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(1, 3)
+    instrs[1] = ir_binop(2, 0, BinaryOp::OpSub, 1)     // r2 = r0 - 3
+    instrs[2] = ir_load_imm(3, 5)
+    instrs[3] = ir_binop(4, 2, BinaryOp::OpSub, 3)     // r4 = r2 - 5 (no fold)
+    let func   = cp_make_test_func(instrs, 4)
+    let result = ocp_const_fold(func)
+    // r4 should still be r2-5 (unchanged: src1=r2, not patched to r0)
+    result.instrs[3].op == IrOpcode::IrBinOp && result.instrs[3].src1 == 2
+}
+
 fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
     var passed: i64 = 0
-    let total: i64 = 219
+    let total: i64 = 226
 
     println("=== compiler/main.sio self-tests ===")
 
@@ -8552,6 +8666,55 @@ fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
         passed = passed + 1
     } else {
         println("  FAIL: T219 Sprint 83 Block K: loadbool mul annihilate")
+    }
+
+    if compiler_main_test_assoc_add_chain() {
+        println("  T220 OK: Sprint 84 Block L: (r0+3)+5 → r0+8 (add-chain fold)")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T220 Sprint 84 Block L: add-chain fold")
+    }
+
+    if compiler_main_test_assoc_mul_chain() {
+        println("  T221 OK: Sprint 84 Block L: (r0*2)*4 → r0*8 (mul-chain fold)")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T221 Sprint 84 Block L: mul-chain fold")
+    }
+
+    if compiler_main_test_assoc_bitand_chain() {
+        println("  T222 OK: Sprint 84 Block L: (r0&0xFF)&0x0F → r0&0x0F (bitand-chain fold)")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T222 Sprint 84 Block L: bitand-chain fold")
+    }
+
+    if compiler_main_test_assoc_bitor_chain() {
+        println("  T223 OK: Sprint 84 Block L: (r0|0x80)|0x40 → r0|0xC0 (bitor-chain fold)")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T223 Sprint 84 Block L: bitor-chain fold")
+    }
+
+    if compiler_main_test_assoc_bitxor_chain() {
+        println("  T224 OK: Sprint 84 Block L: (r0^5)^3 → r0^6 (bitxor-chain fold, 5^3=6)")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T224 Sprint 84 Block L: bitxor-chain fold")
+    }
+
+    if compiler_main_test_assoc_non_assoc_no_fold() {
+        println("  T225 OK: Sprint 84 Block L: (r0-3)-5 → no fold (OpSub not associative)")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T225 Sprint 84 Block L: non-assoc no-fold guard")
+    }
+
+    if compiler_main_test_native_v2_compile_gc_retry_smoke() {
+        println("  T226 OK: native-v2 emits a GC retry smoke ELF for empty-live-set recovery")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T226 native-v2 GC retry smoke artifact")
     }
 
     println("")

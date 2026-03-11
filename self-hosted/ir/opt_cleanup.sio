@@ -122,6 +122,19 @@ fn ocp_binop_to_cse_key(op: BinaryOp) -> i64 {
     0
 }
 
+// Sprint 84: Returns a non-zero key for ops that are associative over integers.
+// Used by Block L to detect reassociation opportunities.
+// Only Add, Mul, BitAnd, BitOr, BitXor are included — Sub/Div/Shl/Shr are excluded.
+// SOTA: Click "Combining Reductions" PLDI 1995 §4.
+fn ocp_binop_to_ra_key(op: BinaryOp) -> i64 {
+    if op == BinaryOp::OpAdd    { return 1 }
+    if op == BinaryOp::OpMul    { return 2 }
+    if op == BinaryOp::OpBitAnd { return 3 }
+    if op == BinaryOp::OpBitOr  { return 4 }
+    if op == BinaryOp::OpBitXor { return 5 }
+    0
+}
+
 // ============================================================================
 // Pass 1: Constant propagation + folding
 // ============================================================================
@@ -136,6 +149,12 @@ fn ocp_const_fold(func: IrFunction) -> IrFunction with Mut, Div, Panic {
     var is_const: [bool; 256] = [false; 256]
     var const_val: [i64; 256] = [0; 256]
     var def_at: [i64; 256] = [-1; 256]
+    // Sprint 84 Block L: Associative chain tracking.
+    // has_ra[r]=true means r = (ra_base[r] assoc_op ra_const_val[r]).
+    var has_ra:       [bool; 256] = [false; 256]
+    var ra_base:      [i64;  256] = [-1;   256]
+    var ra_const_val: [i64;  256] = [0;    256]
+    var ra_op:        [i64;  256] = [0;    256]
 
     var i: i64 = 0
     while i < result.instr_count {
@@ -425,6 +444,79 @@ fn ocp_const_fold(func: IrFunction) -> IrFunction with Mut, Div, Panic {
                     is_const[dst as usize] = true
                     const_val[dst as usize] = const_val[src as usize]
                     def_at[dst as usize] = def_at[src as usize]
+                }
+            }
+        }
+
+        // Sprint 84 Block L: Associative constant-chain folding.
+        // Detects the pattern: r1 = (base assoc_op c1), r2 = r1 assoc_op c2
+        // and folds to: r2 = base assoc_op (c1 assoc_op c2).
+        // In-place: patches def_at[c2_reg] → IrLoadImm(c2_reg, combined)
+        //           patches current instr   → IrBinOp(dst, base, op, c2_reg)
+        // r1 becomes dead → DCE removes it on next pass.
+        // Sub-pass 2: records has_ra metadata for future chain folding.
+        // Supports Add, Mul, BitAnd, BitOr, BitXor (associative over integers).
+        // SOTA: Click "Combining Reductions" PLDI 1995 §4;
+        //   Aho, Lam, Sethi, Ullman "Compilers" §8.5 (reassociation of constants).
+        if ocp_is_binop(result.instrs[i as usize].op) {
+            let la_instr = result.instrs[i as usize]
+            let la_s1 = la_instr.src1
+            let la_s2 = la_instr.src2
+            let la_s1_ok = la_s1 >= 0 && la_s1 < 256
+            let la_s2_ok = la_s2 >= 0 && la_s2 < 256
+            let la_ra_key = ocp_binop_to_ra_key(la_instr.bin_op)
+            // Sub-pass 1: fold (base assoc c1) assoc c2 → base assoc (c1+c2)
+            if la_ra_key != 0 && la_s1_ok && la_s2_ok
+                && has_ra[la_s1 as usize]
+                && ra_op[la_s1 as usize] == la_ra_key
+                && is_const[la_s2 as usize] {
+                let la_c1 = ra_const_val[la_s1 as usize]
+                let la_c2 = const_val[la_s2 as usize]
+                let la_c2_def = def_at[la_s2 as usize]
+                let la_base = ra_base[la_s1 as usize]
+                var la_combined: i64 = 0
+                var la_did = false
+                if la_instr.bin_op == BinaryOp::OpAdd    { la_combined = la_c1 + la_c2; la_did = true }
+                if la_instr.bin_op == BinaryOp::OpMul    { la_combined = la_c1 * la_c2; la_did = true }
+                if la_instr.bin_op == BinaryOp::OpBitAnd { la_combined = la_c1 & la_c2; la_did = true }
+                if la_instr.bin_op == BinaryOp::OpBitOr  { la_combined = la_c1 | la_c2; la_did = true }
+                if la_instr.bin_op == BinaryOp::OpBitXor { la_combined = la_c1 ^ la_c2; la_did = true }
+                if la_did && la_c2_def >= 0 {
+                    result.instrs[la_c2_def as usize] = ir_load_imm(la_s2, la_combined)
+                    result.instrs[i as usize] = ir_binop(la_instr.dst, la_base, la_instr.bin_op, la_s2)
+                    const_val[la_s2 as usize] = la_combined
+                    if la_instr.dst >= 0 && la_instr.dst < 256 {
+                        has_ra[la_instr.dst as usize] = true
+                        ra_base[la_instr.dst as usize] = la_base
+                        ra_const_val[la_instr.dst as usize] = la_combined
+                        ra_op[la_instr.dst as usize] = la_ra_key
+                    }
+                }
+            }
+            // Sub-pass 2: record has_ra for the (possibly rewritten) current instr.
+            let la_rec = result.instrs[i as usize]
+            let la_rec_s1 = la_rec.src1
+            let la_rec_s2 = la_rec.src2
+            let la_rec_s1_ok = la_rec_s1 >= 0 && la_rec_s1 < 256
+            let la_rec_s2_ok = la_rec_s2 >= 0 && la_rec_s2 < 256
+            let la_rec_key = ocp_binop_to_ra_key(la_rec.bin_op)
+            if la_rec_key != 0 && ocp_is_binop(la_rec.op)
+                && la_rec.dst >= 0 && la_rec.dst < 256
+                && la_rec_s1_ok && la_rec_s2_ok {
+                // s1 non-const, s2 const
+                if !is_const[la_rec_s1 as usize] && is_const[la_rec_s2 as usize] {
+                    has_ra[la_rec.dst as usize] = true
+                    ra_base[la_rec.dst as usize] = la_rec_s1
+                    ra_const_val[la_rec.dst as usize] = const_val[la_rec_s2 as usize]
+                    ra_op[la_rec.dst as usize] = la_rec_key
+                }
+                // s1 const, s2 non-const (commutative assoc ops only)
+                if is_const[la_rec_s1 as usize] && !is_const[la_rec_s2 as usize]
+                    && ocp_is_commutative_op(la_rec.bin_op) {
+                    has_ra[la_rec.dst as usize] = true
+                    ra_base[la_rec.dst as usize] = la_rec_s2
+                    ra_const_val[la_rec.dst as usize] = const_val[la_rec_s1 as usize]
+                    ra_op[la_rec.dst as usize] = la_rec_key
                 }
             }
         }
