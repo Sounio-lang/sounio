@@ -6155,8 +6155,33 @@ fn run_probe_native_streaming(args: ArgList, flag_index: i64) with IO, Mut, Pani
             print("\n")
             panic("probe_native_streaming body lowering failed")
         }
+        print("probe_native_streaming: body_ir_ok fn=")
+        compiler_manifest_print_name(fn_name)
+        print(" instrs=")
+        print_int(body_result.func.instr_count)
+        print(" regs=")
+        print_int(body_result.func.reg_count)
+        print("\n")
         let lowered = native_v2_lower_function_to_machine(body_result.func)
+        print("probe_native_streaming: machine_lower_ok fn=")
+        compiler_manifest_print_name(fn_name)
+        print(" supported=")
+        if lowered.supported { print("true") } else { print("false") }
+        if !lowered.supported {
+            print(" unsupported=")
+            print(lowered.unsupported_detail)
+        }
+        print("\n")
         let legal = native_v2_legalize_function(lowered)
+        print("probe_native_streaming: legalize_ok fn=")
+        compiler_manifest_print_name(fn_name)
+        print(" supported=")
+        if legal.supported { print("true") } else { print("false") }
+        if !legal.supported {
+            print(" unsupported=")
+            print(legal.unsupported_detail)
+        }
+        print("\n")
         print("probe_native_streaming: body_ok fn=")
         compiler_manifest_print_name(fn_name)
         print("\n")
@@ -6369,9 +6394,74 @@ fn compiler_main_test_branch_fold_chain_e_f() -> bool with Mut, Div, Panic {
     result.instrs[2].op == IrOpcode::IrJump && result.instrs[2].label_id == 9
 }
 
+// ============================================================================
+// Sprint 76: Shift identity/annihilator folding Block G self-tests (T175–T180)
+// ============================================================================
+
+// T175: x << 0 → IrCopy(x) — shift-by-zero identity (OpShl, right-const=0).
+fn compiler_main_test_shl_by_zero() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(1, 0)                          // r1 = 0 (shift amount)
+    instrs[1] = ir_binop(2, 0, BinaryOp::OpShl, 1)        // r2 = r0 << r1 (r0 unknown, r1=0)
+    let func   = cp_make_test_func(instrs, 2)
+    let result = ocp_const_fold(func)
+    result.instrs[1].op == IrOpcode::IrCopy && result.instrs[1].src1 == 0
+}
+
+// T176: x >> 0 → IrCopy(x) — shift-by-zero identity (OpShr, right-const=0).
+fn compiler_main_test_shr_by_zero() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(1, 0)                          // r1 = 0 (shift amount)
+    instrs[1] = ir_binop(2, 0, BinaryOp::OpShr, 1)        // r2 = r0 >> r1 (r0 unknown, r1=0)
+    let func   = cp_make_test_func(instrs, 2)
+    let result = ocp_const_fold(func)
+    result.instrs[1].op == IrOpcode::IrCopy && result.instrs[1].src1 == 0
+}
+
+// T177: 0 << n → IrLoadImm(0) — zero-shift annihilator (OpShl, left-const=0).
+fn compiler_main_test_zero_shl_n() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(0, 0)                          // r0 = 0 (value to shift)
+    instrs[1] = ir_binop(2, 0, BinaryOp::OpShl, 1)        // r2 = r0 << r1 (r0=0, r1 unknown)
+    let func   = cp_make_test_func(instrs, 2)
+    let result = ocp_const_fold(func)
+    result.instrs[1].op == IrOpcode::IrLoadImm && result.instrs[1].imm_i64 == 0
+}
+
+// T178: 0 >> n → IrLoadImm(0) — zero-shift annihilator (OpShr, left-const=0).
+fn compiler_main_test_zero_shr_n() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(0, 0)                          // r0 = 0 (value to shift)
+    instrs[1] = ir_binop(2, 0, BinaryOp::OpShr, 1)        // r2 = r0 >> r1 (r0=0, r1 unknown)
+    let func   = cp_make_test_func(instrs, 2)
+    let result = ocp_const_fold(func)
+    result.instrs[1].op == IrOpcode::IrLoadImm && result.instrs[1].imm_i64 == 0
+}
+
+// T179: r1 << r2 (both unknown) → stays IrBinOp (no fold).
+fn compiler_main_test_shift_no_fold() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_binop(2, 0, BinaryOp::OpShl, 1)        // r2 = r0 << r1 (both unknown)
+    let func   = cp_make_test_func(instrs, 1)
+    let result = ocp_const_fold(func)
+    result.instrs[0].op == IrOpcode::IrBinOp
+}
+
+// T180: Block E → Block G chain: (5 < 3) → IrLoadImm(0) (Block E), then 0 << r4 → IrLoadImm(0) (Block G).
+fn compiler_main_test_shift_chain_e_g() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(0, 5)
+    instrs[1] = ir_load_imm(1, 3)
+    instrs[2] = ir_binop(2, 0, BinaryOp::OpLt, 1)         // r2 = (5 < 3) → Block E: IrLoadImm(0)
+    instrs[3] = ir_binop(3, 2, BinaryOp::OpShl, 4)        // r3 = r2 << r4 → Block G: IrLoadImm(0)
+    let func   = cp_make_test_func(instrs, 4)
+    let result = ocp_const_fold(func)
+    result.instrs[3].op == IrOpcode::IrLoadImm && result.instrs[3].imm_i64 == 0
+}
+
 fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
     var passed: i64 = 0
-    let total: i64 = 174
+    let total: i64 = 180
 
     println("=== compiler/main.sio self-tests ===")
 
@@ -7594,6 +7684,48 @@ fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
         passed = passed + 1
     } else {
         println("  FAIL: T174 Block E+F chain: comparison fold drives branch fold")
+    }
+
+    if compiler_main_test_shl_by_zero() {
+        println("  T175 OK: Block G: x << 0 → IrCopy(x) (shift-by-zero identity, OpShl)")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T175 Block G: x << 0 → IrCopy")
+    }
+
+    if compiler_main_test_shr_by_zero() {
+        println("  T176 OK: Block G: x >> 0 → IrCopy(x) (shift-by-zero identity, OpShr)")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T176 Block G: x >> 0 → IrCopy")
+    }
+
+    if compiler_main_test_zero_shl_n() {
+        println("  T177 OK: Block G: 0 << n → IrLoadImm(0) (zero-shift annihilator, OpShl)")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T177 Block G: 0 << n → 0")
+    }
+
+    if compiler_main_test_zero_shr_n() {
+        println("  T178 OK: Block G: 0 >> n → IrLoadImm(0) (zero-shift annihilator, OpShr)")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T178 Block G: 0 >> n → 0")
+    }
+
+    if compiler_main_test_shift_no_fold() {
+        println("  T179 OK: Block G: r1 << r2 (both unknown) stays IrBinOp (no fold)")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T179 Block G: non-constant shift should not fold")
+    }
+
+    if compiler_main_test_shift_chain_e_g() {
+        println("  T180 OK: Block E+G chain: (5<3)→0 (Block E), 0<<r4→0 (Block G)")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T180 Block E+G chain: comparison→shift zero-annihilator")
     }
 
     println("")
