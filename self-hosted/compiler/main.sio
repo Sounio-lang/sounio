@@ -5166,6 +5166,10 @@ fn compiler_main_test_native_v2_contract_machine_ir_fields() -> bool with IO, Mu
     if !compiler_bytes_contains(data, size, "\"descriptor_tables\":true") { return false }
     if !compiler_bytes_contains(data, size, "\"handle_indirection\":true") { return false }
     if !compiler_bytes_contains(data, size, "\"descriptor_tables_embedded\":true") { return false }
+    if !compiler_bytes_contains(data, size, "\"gc_mark_compact_model\":true") { return false }
+    if !compiler_bytes_contains(data, size, "\"gc_precise_descriptor_scanning\":true") { return false }
+    if !compiler_bytes_contains(data, size, "\"gc_handle_relocation_model\":true") { return false }
+    if !compiler_bytes_contains(data, size, "\"ffi_pinning_model\":true") { return false }
     true
 }
 
@@ -5369,6 +5373,81 @@ fn compiler_main_test_native_v2_alloc_uses_descriptor_handles() -> bool with Mut
         i = i + 1
     }
     saw_alloc && saw_field_get
+}
+
+fn compiler_main_make_native_v2_gc_model() -> NativeV2GcModel with Mut, Panic, Div {
+    var model = native_v2_gc_model_empty()
+    model.heap_base = 4096
+    model = native_v2_gc_model_add_descriptor(model, 1, native_v2_descriptor_kind_struct(), 16, 2, 1)
+    model = native_v2_gc_model_add_descriptor(model, 255, native_v2_descriptor_kind_opaque(), 16, 2, 0)
+    model
+}
+
+fn compiler_main_test_native_v2_gc_precise_descriptor_scanning() -> bool with Mut, Panic, Div, Alloc {
+    var model = compiler_main_make_native_v2_gc_model()
+    model = native_v2_gc_model_define_handle(model, 1, 4096, 32, 1, 0)
+    model = native_v2_gc_model_define_handle(model, 2, 4128, 32, 255, 0)
+    model = native_v2_gc_model_define_handle(model, 3, 4160, 32, 255, 0)
+    model = native_v2_gc_model_set_slot(model, 1, 0, 2)
+    model = native_v2_gc_model_set_slot(model, 1, 1, 3)
+    model = native_v2_gc_model_add_root(model, 1)
+    let collected = native_v2_gc_model_collect(model)
+    if !collected.handles[1 as usize].in_use { return false }
+    if !collected.handles[2 as usize].in_use { return false }
+    if collected.handles[3 as usize].in_use { return false }
+    if collected.live_count != 2 { return false }
+    collected.freed_count == 1
+}
+
+fn compiler_main_test_native_v2_gc_compacts_live_handles() -> bool with Mut, Panic, Div, Alloc {
+    var model = compiler_main_make_native_v2_gc_model()
+    model.heap_base = 8192
+    model = native_v2_gc_model_define_handle(model, 1, 8192, 32, 255, 0)
+    model = native_v2_gc_model_define_handle(model, 2, 8224, 32, 255, 0)
+    model = native_v2_gc_model_define_handle(model, 3, 8256, 32, 255, 0)
+    model = native_v2_gc_model_add_root(model, 1)
+    model = native_v2_gc_model_add_root(model, 3)
+    let collected = native_v2_gc_model_collect(model)
+    if collected.handles[1 as usize].object_base != 8192 { return false }
+    if collected.handles[2 as usize].in_use { return false }
+    if collected.handles[3 as usize].object_base != 8224 { return false }
+    if collected.moved_count != 1 { return false }
+    collected.state.last_heap_cursor == 8256
+}
+
+fn compiler_main_test_native_v2_gc_pins_block_relocation() -> bool with Mut, Panic, Div, Alloc {
+    var model = compiler_main_make_native_v2_gc_model()
+    model.heap_base = 1000
+    model = native_v2_gc_model_define_handle(model, 1, 1000, 32, 255, 0)
+    model = native_v2_gc_model_define_handle(model, 2, 1100, 32, 255, 1)
+    model = native_v2_gc_model_define_handle(model, 3, 1200, 32, 255, 0)
+    model = native_v2_gc_model_add_root(model, 1)
+    model = native_v2_gc_model_add_root(model, 3)
+    let collected = native_v2_gc_model_collect(model)
+    if !collected.handles[2 as usize].in_use { return false }
+    if collected.handles[2 as usize].object_base != 1100 { return false }
+    if (collected.handles[2 as usize].flags & native_v2_gc_handle_flag_pinned()) == 0 { return false }
+    if collected.handles[3 as usize].object_base != 1132 { return false }
+    collected.pinned_live_count == 1
+}
+
+fn compiler_main_test_native_v2_gc_state_updates_after_collection() -> bool with Mut, Panic, Div, Alloc {
+    var model = compiler_main_make_native_v2_gc_model()
+    model.heap_base = 2048
+    model = native_v2_gc_model_define_handle(model, 1, 2048, 24, 255, 0)
+    model = native_v2_gc_model_define_handle(model, 2, 2072, 24, 255, 0)
+    model = native_v2_gc_model_add_root(model, 1)
+    let collected = native_v2_gc_model_collect(model)
+    if collected.state.collection_requests != 1 { return false }
+    if collected.state.collections_completed != 1 { return false }
+    if collected.state.collector_epoch != 1 { return false }
+    if collected.state.compaction_count != 1 { return false }
+    if collected.state.last_reason != native_v2_gc_reason_heap_limit() { return false }
+    if collected.state.handle_count != collected.live_count { return false }
+    if collected.state.descriptor_count != collected.descriptor_table.count { return false }
+    if collected.state.handle_capacity != NATIVE_V2_GC_MODEL_MAX_HANDLES { return false }
+    if collected.state.flags != native_v2_gc_flag_ready() + native_v2_gc_flag_managed_handles() { return false }
+    collected.live_count == native_v2_gc_model_active_handle_count(collected)
 }
 
 // ============================================================================
@@ -6871,9 +6950,73 @@ fn compiler_main_test_unary_neg_nonconst() -> bool with Mut, Div, Panic {
     result.instrs[0].op == IrOpcode::IrUnaryOp
 }
 
+// Sprint 83 Block K: IrLoadBool constant tracking self-tests (T214–T219)
+
+// T214: IrLoadBool(true) + BranchTrue(bool_reg, L) → IrJump(L) via Block F chain.
+fn compiler_main_test_loadbool_true_branch_true() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_bool(0, true)
+    instrs[1] = ir_branch_true(0, 42)
+    let func   = cp_make_test_func(instrs, 2)
+    let result = ocp_const_fold(func)
+    result.instrs[1].op == IrOpcode::IrJump && result.instrs[1].label_id == 42
+}
+
+// T215: IrLoadBool(false) + BranchTrue(bool_reg, L) → IrNop (not taken).
+fn compiler_main_test_loadbool_false_branch_true() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_bool(0, false)
+    instrs[1] = ir_branch_true(0, 42)
+    let func   = cp_make_test_func(instrs, 2)
+    let result = ocp_const_fold(func)
+    result.instrs[1].op == IrOpcode::IrNop
+}
+
+// T216: IrLoadBool(false) + BranchFalse(bool_reg, L) → IrJump(L) (false==0 → taken).
+fn compiler_main_test_loadbool_false_branch_false() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_bool(0, false)
+    instrs[1] = ir_branch_false(0, 99)
+    let func   = cp_make_test_func(instrs, 2)
+    let result = ocp_const_fold(func)
+    result.instrs[1].op == IrOpcode::IrJump && result.instrs[1].label_id == 99
+}
+
+// T217: IrLoadBool(true) + BranchFalse(bool_reg, L) → IrNop (true!=0 → not taken).
+fn compiler_main_test_loadbool_true_branch_false() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_bool(0, true)
+    instrs[1] = ir_branch_false(0, 99)
+    let func   = cp_make_test_func(instrs, 2)
+    let result = ocp_const_fold(func)
+    result.instrs[1].op == IrOpcode::IrNop
+}
+
+// T218: IrLoadBool(true) + IrBinOp(Add, bool_reg, imm_3) → IrLoadImm(4).
+fn compiler_main_test_loadbool_binop_fold() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_bool(0, true)
+    instrs[1] = ir_load_imm(1, 3)
+    instrs[2] = ir_binop(2, 0, BinaryOp::OpAdd, 1)
+    let func   = cp_make_test_func(instrs, 3)
+    let result = ocp_const_fold(func)
+    result.instrs[2].op == IrOpcode::IrLoadImm && result.instrs[2].imm_i64 == 4
+}
+
+// T219: IrLoadBool(false) + IrBinOp(Mul, imm_7, bool_reg) → IrLoadImm(0).
+fn compiler_main_test_loadbool_mul_annihilate() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(0, 7)
+    instrs[1] = ir_load_bool(1, false)
+    instrs[2] = ir_binop(2, 0, BinaryOp::OpMul, 1)
+    let func   = cp_make_test_func(instrs, 3)
+    let result = ocp_const_fold(func)
+    result.instrs[2].op == IrOpcode::IrLoadImm && result.instrs[2].imm_i64 == 0
+}
+
 fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
     var passed: i64 = 0
-    let total: i64 = 209
+    let total: i64 = 219
 
     println("=== compiler/main.sio self-tests ===")
 
@@ -8339,6 +8482,76 @@ fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
         passed = passed + 1
     } else {
         println("  FAIL: T209 Sprint 82 Block J: neg nonconst no-fold")
+    }
+
+    if compiler_main_test_native_v2_gc_precise_descriptor_scanning() {
+        println("  T210 OK: native-v2 GC scans only descriptor-declared pointer slots")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T210 native-v2 GC precise descriptor scanning")
+    }
+
+    if compiler_main_test_native_v2_gc_compacts_live_handles() {
+        println("  T211 OK: native-v2 GC compacts live unpinned handles and frees dead ones")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T211 native-v2 GC compaction over live handles")
+    }
+
+    if compiler_main_test_native_v2_gc_pins_block_relocation() {
+        println("  T212 OK: native-v2 GC keeps pinned handles stable while compacting others")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T212 native-v2 GC pin-aware relocation")
+    }
+
+    if compiler_main_test_native_v2_gc_state_updates_after_collection() {
+        println("  T213 OK: native-v2 GC collection updates state counters and handle totals")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T213 native-v2 GC state accounting")
+    }
+
+    if compiler_main_test_loadbool_true_branch_true() {
+        println("  T214 OK: Sprint 83 Block K: IrLoadBool(true) + BranchTrue → IrJump")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T214 Sprint 83 Block K: loadbool true + branch_true")
+    }
+
+    if compiler_main_test_loadbool_false_branch_true() {
+        println("  T215 OK: Sprint 83 Block K: IrLoadBool(false) + BranchTrue → IrNop")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T215 Sprint 83 Block K: loadbool false + branch_true")
+    }
+
+    if compiler_main_test_loadbool_false_branch_false() {
+        println("  T216 OK: Sprint 83 Block K: IrLoadBool(false) + BranchFalse → IrJump")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T216 Sprint 83 Block K: loadbool false + branch_false")
+    }
+
+    if compiler_main_test_loadbool_true_branch_false() {
+        println("  T217 OK: Sprint 83 Block K: IrLoadBool(true) + BranchFalse → IrNop")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T217 Sprint 83 Block K: loadbool true + branch_false")
+    }
+
+    if compiler_main_test_loadbool_binop_fold() {
+        println("  T218 OK: Sprint 83 Block K: IrLoadBool(true) + 3 → IrLoadImm(4)")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T218 Sprint 83 Block K: loadbool + binop fold")
+    }
+
+    if compiler_main_test_loadbool_mul_annihilate() {
+        println("  T219 OK: Sprint 83 Block K: 7 * IrLoadBool(false) → IrLoadImm(0)")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T219 Sprint 83 Block K: loadbool mul annihilate")
     }
 
     println("")
