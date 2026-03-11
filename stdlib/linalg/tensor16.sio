@@ -1,0 +1,134 @@
+//! stdlib/linalg/tensor16.sio - Rank-3 Tensor (16x16x16, f64)
+//!
+//! Dense storage for the FSNN Hessian H_n in R^{16x16x16}.
+//! The Hessian is symmetric in the last two indices: H[i,j,k] = H[i,k,j].
+//! Stored as flat [f64; 4096]: element (i,j,k) at index i*256 + j*16 + k.
+//! Total size: 4096 * 8 = 32 KiB (fits in L1 cache).
+//!
+//! Key operations for the orbit engine:
+//! - tensor16_jordan_transport: apply J_{z_n} to each fibre H[:,j,k]
+//! - tensor16_frobenius_norm: ||H_n||_F for feature extraction
+
+use linalg::mat16::{Mat16, mat16_vec_mul}
+
+// ============================================================================
+// TENSOR16 TYPE
+// ============================================================================
+
+pub struct Tensor16 {
+    data: [f64; 4096],
+}
+
+// ============================================================================
+// CONSTRUCTORS
+// ============================================================================
+
+pub fn tensor16_zeros() -> Tensor16 {
+    Tensor16 { data: [0.0; 4096] }
+}
+
+// ============================================================================
+// ELEMENT ACCESS
+// ============================================================================
+// Index: i*256 + j*16 + k
+
+pub fn tensor16_get(t: Tensor16, i: i32, j: i32, k: i32) -> f64 {
+    t.data[i * 256 + j * 16 + k]
+}
+
+pub fn tensor16_set(t: Tensor16, i: i32, j: i32, k: i32, val: f64) -> Tensor16 {
+    var result = t
+    result.data[i * 256 + j * 16 + k] = val
+    return result
+}
+
+// Set symmetrically: H[i,j,k] = H[i,k,j] = val
+pub fn tensor16_set_sym(t: Tensor16, i: i32, j: i32, k: i32, val: f64) -> Tensor16 {
+    var result = t
+    result.data[i * 256 + j * 16 + k] = val
+    result.data[i * 256 + k * 16 + j] = val
+    return result
+}
+
+// ============================================================================
+// NORMS
+// ============================================================================
+
+fn t16_sqrt(x: f64) -> f64 {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    return y
+}
+
+// Frobenius norm: ||H||_F = sqrt(sum of squares of all elements)
+pub fn tensor16_frobenius_norm(t: Tensor16) -> f64 {
+    var sum = 0.0
+    var i = 0
+    while i < 4096 {
+        sum = sum + t.data[i] * t.data[i]
+        i = i + 1
+    }
+    t16_sqrt(sum)
+}
+
+// ============================================================================
+// JORDAN TRANSPORT
+// ============================================================================
+// Apply the 16x16 Jordan matrix Jz to each fibre H[:,j,k].
+// For each (j,k) pair, compute: result[i,j,k] = sum_m Jz[i,m] * H[m,j,k]
+// This is 16*16 = 256 matrix-vector products of size 16.
+// Total: 256 * 256 = 65536 FMA.
+
+pub fn tensor16_jordan_transport(jz: Mat16, h: Tensor16) -> Tensor16 {
+    var result = Tensor16 { data: [0.0; 4096] }
+    var j = 0
+    while j < 16 {
+        var k = 0
+        while k < 16 {
+            // Extract fibre h[:,j,k] as a 16-vector
+            var fibre = [0.0; 16]
+            var m = 0
+            while m < 16 {
+                fibre[m] = h.data[m * 256 + j * 16 + k]
+                m = m + 1
+            }
+            // Apply Jz: new_fibre = Jz * fibre
+            let new_fibre = mat16_vec_mul(jz, fibre)
+            // Store back
+            var i = 0
+            while i < 16 {
+                result.data[i * 256 + j * 16 + k] = new_fibre[i]
+                i = i + 1
+            }
+            k = k + 1
+        }
+        j = j + 1
+    }
+    return result
+}
+
+// ============================================================================
+// ADDITION
+// ============================================================================
+
+pub fn tensor16_add(a: Tensor16, b: Tensor16) -> Tensor16 {
+    var d = [0.0; 4096]
+    var i = 0
+    while i < 4096 {
+        d[i] = a.data[i] + b.data[i]
+        i = i + 1
+    }
+    Tensor16 { data: d }
+}

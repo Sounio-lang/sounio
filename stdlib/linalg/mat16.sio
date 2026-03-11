@@ -1,0 +1,381 @@
+//! stdlib/linalg/mat16.sio - 16x16 Matrix Type (f64)
+//!
+//! Dense 16x16 matrix for the FSNN Jacobian recursion J_{n+1} = J_{z_n} * J_n + I.
+//! Row-major storage in [f64; 256]: element (i,j) at index i*16+j.
+//!
+//! Key operations for the orbit engine:
+//! - mat16_mul: 16x16 matrix product (4096 FMA, hot path)
+//! - mat16_vec_mul: matrix-vector product (256 FMA)
+//! - mat16_singular_values: Jacobi SVD for Lyapunov exponents
+//! - mat16_frobenius_norm, mat16_operator_norm_approx
+
+// ============================================================================
+// HELPERS
+// ============================================================================
+
+fn m16_abs(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+fn m16_sqrt(x: f64) -> f64 {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    return y
+}
+
+// ============================================================================
+// MAT16 TYPE
+// ============================================================================
+
+pub struct Mat16 {
+    data: [f64; 256],
+}
+
+// ============================================================================
+// CONSTRUCTORS
+// ============================================================================
+
+pub fn mat16_zeros() -> Mat16 {
+    Mat16 { data: [0.0; 256] }
+}
+
+pub fn mat16_identity() -> Mat16 {
+    var d = [0.0; 256]
+    var i = 0
+    while i < 16 {
+        d[i * 16 + i] = 1.0
+        i = i + 1
+    }
+    Mat16 { data: d }
+}
+
+// ============================================================================
+// ELEMENT ACCESS
+// ============================================================================
+
+pub fn mat16_get(m: Mat16, row: i32, col: i32) -> f64 {
+    m.data[row * 16 + col]
+}
+
+pub fn mat16_set(m: Mat16, row: i32, col: i32, val: f64) -> Mat16 {
+    var result = m
+    result.data[row * 16 + col] = val
+    return result
+}
+
+// Extract column j as [f64; 16]
+pub fn mat16_column(m: Mat16, j: i32) -> [f64; 16] {
+    var col = [0.0; 16]
+    var i = 0
+    while i < 16 {
+        col[i] = m.data[i * 16 + j]
+        i = i + 1
+    }
+    return col
+}
+
+// ============================================================================
+// ARITHMETIC
+// ============================================================================
+
+pub fn mat16_add(a: Mat16, b: Mat16) -> Mat16 {
+    var d = [0.0; 256]
+    var i = 0
+    while i < 256 {
+        d[i] = a.data[i] + b.data[i]
+        i = i + 1
+    }
+    Mat16 { data: d }
+}
+
+pub fn mat16_sub(a: Mat16, b: Mat16) -> Mat16 {
+    var d = [0.0; 256]
+    var i = 0
+    while i < 256 {
+        d[i] = a.data[i] - b.data[i]
+        i = i + 1
+    }
+    Mat16 { data: d }
+}
+
+pub fn mat16_scale(m: Mat16, s: f64) -> Mat16 {
+    var d = [0.0; 256]
+    var i = 0
+    while i < 256 {
+        d[i] = m.data[i] * s
+        i = i + 1
+    }
+    Mat16 { data: d }
+}
+
+// 16x16 matrix multiplication: C = A * B
+// C[i][j] = sum_k A[i][k] * B[k][j]
+// 16^3 = 4096 multiply-add operations
+pub fn mat16_mul(a: Mat16, b: Mat16) -> Mat16 {
+    var d = [0.0; 256]
+    var i = 0
+    while i < 16 {
+        var j = 0
+        while j < 16 {
+            var sum = 0.0
+            var k = 0
+            while k < 16 {
+                sum = sum + a.data[i * 16 + k] * b.data[k * 16 + j]
+                k = k + 1
+            }
+            d[i * 16 + j] = sum
+            j = j + 1
+        }
+        i = i + 1
+    }
+    Mat16 { data: d }
+}
+
+// Matrix-vector product: y = M * v
+pub fn mat16_vec_mul(m: Mat16, v: [f64; 16]) -> [f64; 16] {
+    var result = [0.0; 16]
+    var i = 0
+    while i < 16 {
+        var sum = 0.0
+        var j = 0
+        while j < 16 {
+            sum = sum + m.data[i * 16 + j] * v[j]
+            j = j + 1
+        }
+        result[i] = sum
+        i = i + 1
+    }
+    return result
+}
+
+// ============================================================================
+// NORMS
+// ============================================================================
+
+// Frobenius norm: ||M||_F = sqrt(sum of squares of all elements)
+pub fn mat16_frobenius_norm(m: Mat16) -> f64 {
+    var sum = 0.0
+    var i = 0
+    while i < 256 {
+        sum = sum + m.data[i] * m.data[i]
+        i = i + 1
+    }
+    m16_sqrt(sum)
+}
+
+// Operator norm approximation via power iteration (largest singular value sigma_1)
+// Computes ||M||_2 = max singular value using 20 iterations of power method on M^T M
+pub fn mat16_operator_norm_approx(m: Mat16) -> f64 {
+    // Start with random-ish unit vector
+    var v = [0.0; 16]
+    var i = 0
+    while i < 16 {
+        v[i] = 1.0 / 4.0
+        i = i + 1
+    }
+
+    // Power iteration on M^T * M
+    var iter = 0
+    while iter < 30 {
+        // w = M * v
+        let w = mat16_vec_mul(m, v)
+        // u = M^T * w  (= M^T M v)
+        var u = [0.0; 16]
+        var ii = 0
+        while ii < 16 {
+            var sum = 0.0
+            var jj = 0
+            while jj < 16 {
+                sum = sum + m.data[jj * 16 + ii] * w[jj]
+                jj = jj + 1
+            }
+            u[ii] = sum
+            ii = ii + 1
+        }
+        // Normalize u -> v
+        var norm_sq = 0.0
+        var k = 0
+        while k < 16 {
+            norm_sq = norm_sq + u[k] * u[k]
+            k = k + 1
+        }
+        let norm = m16_sqrt(norm_sq)
+        if norm < 1e-30 { return 0.0 }
+        var kk = 0
+        while kk < 16 {
+            v[kk] = u[kk] / norm
+            kk = kk + 1
+        }
+        iter = iter + 1
+    }
+
+    // Compute ||M * v|| as the approximate operator norm
+    let mv = mat16_vec_mul(m, v)
+    var nsq = 0.0
+    var j = 0
+    while j < 16 {
+        nsq = nsq + mv[j] * mv[j]
+        j = j + 1
+    }
+    m16_sqrt(nsq)
+}
+
+// ============================================================================
+// SVD (SINGULAR VALUES ONLY)
+// ============================================================================
+// One-sided Jacobi SVD: computes singular values of M via eigenvalues of M^T * M.
+// Returns 16 singular values in descending order.
+// Used for: Lyapunov exponents, condition number, Lyapunov dimension.
+
+pub fn mat16_singular_values(m: Mat16) -> [f64; 16] {
+    // Compute G = M^T * M (symmetric positive semi-definite)
+    var G = [0.0; 256]
+    var i = 0
+    while i < 16 {
+        var j = i
+        while j < 16 {
+            var sum = 0.0
+            var k = 0
+            while k < 16 {
+                sum = sum + m.data[k * 16 + i] * m.data[k * 16 + j]
+                k = k + 1
+            }
+            G[i * 16 + j] = sum
+            G[j * 16 + i] = sum
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    // Jacobi eigenvalue iteration on G (symmetric)
+    // Sweep off-diagonal elements to zero via Givens rotations
+    var sweep = 0
+    while sweep < 50 {
+        var max_off = 0.0
+        var p = 0
+        while p < 16 {
+            var q = p + 1
+            while q < 16 {
+                let v = m16_abs(G[p * 16 + q])
+                if v > max_off { max_off = v }
+                q = q + 1
+            }
+            p = p + 1
+        }
+        // Convergence check
+        if max_off < 1e-14 {
+            sweep = 100
+        } else {
+            // One Jacobi sweep: rotate each off-diagonal pair
+            var pp = 0
+            while pp < 16 {
+                var qq = pp + 1
+                while qq < 16 {
+                    let apq = G[pp * 16 + qq]
+                    if m16_abs(apq) > 1e-20 {
+                        let app = G[pp * 16 + pp]
+                        let aqq = G[qq * 16 + qq]
+                        let tau = (aqq - app) / (2.0 * apq)
+                        var t = 0.0
+                        if tau >= 0.0 {
+                            t = 1.0 / (tau + m16_sqrt(1.0 + tau * tau))
+                        } else {
+                            t = 0.0 - 1.0 / (m16_sqrt(1.0 + tau * tau) - tau)
+                        }
+                        let c = 1.0 / m16_sqrt(1.0 + t * t)
+                        let s = t * c
+
+                        // Apply rotation to G
+                        G[pp * 16 + pp] = app - t * apq
+                        G[qq * 16 + qq] = aqq + t * apq
+                        G[pp * 16 + qq] = 0.0
+                        G[qq * 16 + pp] = 0.0
+
+                        var r = 0
+                        while r < 16 {
+                            if r != pp {
+                                if r != qq {
+                                    let grp = G[r * 16 + pp]
+                                    let grq = G[r * 16 + qq]
+                                    G[r * 16 + pp] = c * grp - s * grq
+                                    G[pp * 16 + r] = c * grp - s * grq
+                                    G[r * 16 + qq] = s * grp + c * grq
+                                    G[qq * 16 + r] = s * grp + c * grq
+                                }
+                            }
+                            r = r + 1
+                        }
+                    }
+                    qq = qq + 1
+                }
+                pp = pp + 1
+            }
+            sweep = sweep + 1
+        }
+    }
+
+    // Extract eigenvalues (diagonal of G) and take sqrt for singular values
+    var sv = [0.0; 16]
+    var ii = 0
+    while ii < 16 {
+        let eigval = G[ii * 16 + ii]
+        if eigval > 0.0 {
+            sv[ii] = m16_sqrt(eigval)
+        } else {
+            sv[ii] = 0.0
+        }
+        ii = ii + 1
+    }
+
+    // Sort descending (bubble sort, 16 elements)
+    var pass = 0
+    while pass < 16 {
+        var idx = 0
+        while idx < 15 {
+            if sv[idx] < sv[idx + 1] {
+                let tmp = sv[idx]
+                sv[idx] = sv[idx + 1]
+                sv[idx + 1] = tmp
+            }
+            idx = idx + 1
+        }
+        pass = pass + 1
+    }
+
+    return sv
+}
+
+// ============================================================================
+// CONSTRUCTION FROM FLAT ARRAY
+// ============================================================================
+
+pub fn mat16_from_array(data: [f64; 256]) -> Mat16 {
+    Mat16 { data: data }
+}
+
+// Transpose
+pub fn mat16_transpose(m: Mat16) -> Mat16 {
+    var d = [0.0; 256]
+    var i = 0
+    while i < 16 {
+        var j = 0
+        while j < 16 {
+            d[i * 16 + j] = m.data[j * 16 + i]
+            j = j + 1
+        }
+        i = i + 1
+    }
+    Mat16 { data: d }
+}
