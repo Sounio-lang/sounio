@@ -1,0 +1,189 @@
+use parser::ast::*
+use ir::ir::*
+
+fn probe_max_vreg(func: &IrFunction) -> i64 {
+    var max_id: i64 = -1
+    var i: i64 = 0
+    while i < (*func).instr_count {
+        let instr = (*func).instrs[i as usize]
+        if instr.dst > max_id { max_id = instr.dst }
+        if instr.src1 > max_id { max_id = instr.src1 }
+        if instr.src2 > max_id { max_id = instr.src2 }
+        i = i + 1
+    }
+    max_id
+}
+
+fn probe_max_label(func: &IrFunction) -> i64 {
+    var max_id: i64 = -1
+    var i: i64 = 0
+    while i < (*func).instr_count {
+        let instr = (*func).instrs[i as usize]
+        if instr.label_id > max_id { max_id = instr.label_id }
+        i = i + 1
+    }
+    max_id
+}
+
+fn probe_find_return_vreg(func: &IrFunction) -> i64 {
+    var i: i64 = 0
+    while i < (*func).instr_count {
+        let instr = (*func).instrs[i as usize]
+        if instr.op == IrOpcode::IrReturn {
+            return instr.src1
+        }
+        i = i + 1
+    }
+    0
+}
+
+fn probe_remap_vreg(vreg: i64, vreg_offset: i64, param_count: i64) -> i64 {
+    if vreg < 0 { return vreg }
+    if vreg < param_count { return vreg }
+    vreg + vreg_offset
+}
+
+fn probe_remap_label(label_id: i64, label_offset: i64) -> i64 {
+    if label_id < 0 { return label_id }
+    label_id + label_offset
+}
+
+fn probe_clone_instr(instr: IrInstr, vreg_offset: i64, label_offset: i64, param_count: i64) -> IrInstr {
+    IrInstr {
+        op:        instr.op,
+        dst:       probe_remap_vreg(instr.dst, vreg_offset, param_count),
+        src1:      probe_remap_vreg(instr.src1, vreg_offset, param_count),
+        src2:      probe_remap_vreg(instr.src2, vreg_offset, param_count),
+        imm_i64:   instr.imm_i64,
+        imm_f64:   instr.imm_f64,
+        label_id:  probe_remap_label(instr.label_id, label_offset),
+        fn_id:     instr.fn_id,
+        field_idx: instr.field_idx,
+        imm_flags: instr.imm_flags,
+        bin_op:    instr.bin_op,
+        un_op:     instr.un_op,
+        name:      instr.name,
+        call_args: instr.call_args,
+        arg_count: instr.arg_count,
+    }
+}
+
+fn probe_append(instrs: &! [IrInstr; 128], count: i64, instr: IrInstr) -> i64 with Mut, Panic {
+    if count < 128 {
+        (*instrs)[count as usize] = instr
+    }
+    count + 1
+}
+
+fn probe_apply_strategy_into(func: &IrFunction, out: &! IrFunction) with Mut, Panic, Div {
+    let vreg_offset = probe_max_vreg(func) + 1
+    let label_offset = probe_max_label(func) + 1
+    let dispatch_label = label_offset
+    let instr_label = label_offset + 1
+    let merge_label = label_offset + 2
+
+    var out_count: i64 = 0
+    (*out).name = (*func).name
+    (*out).reg_count = (*func).reg_count + vreg_offset
+    (*out).label_count = (*func).label_count + 3
+    (*out).param_count = (*func).param_count
+    (*out).compile_strategy = (*func).compile_strategy
+    (*out).prof_counter_id = (*func).prof_counter_id
+    var pi: i64 = 0
+    while pi < 64 {
+        (*out).param_regs[pi as usize] = (*func).param_regs[pi as usize]
+        pi = pi + 1
+    }
+    out_count = probe_append(&! ((*out).instrs), out_count, ir_label(dispatch_label))
+    out_count = probe_append(&! ((*out).instrs), out_count, ir_branch_true((*func).param_regs[0], 0))
+    out_count = probe_append(&! ((*out).instrs), out_count, ir_jump(instr_label))
+
+    var fi: i64 = 0
+    while fi < (*func).instr_count {
+        var orig = (*func).instrs[fi as usize]
+        if orig.op == IrOpcode::IrReturn {
+            orig = ir_jump(merge_label)
+        }
+        out_count = probe_append(&! ((*out).instrs), out_count, orig)
+        fi = fi + 1
+    }
+    out_count = probe_append(&! ((*out).instrs), out_count, ir_jump(merge_label))
+    out_count = probe_append(&! ((*out).instrs), out_count, ir_label(instr_label))
+
+    var ii: i64 = 0
+    while ii < (*func).instr_count {
+        var cloned = probe_clone_instr((*func).instrs[ii as usize], vreg_offset, label_offset, (*func).param_count)
+        if cloned.op == IrOpcode::IrReturn {
+            cloned = ir_jump(merge_label)
+        }
+        out_count = probe_append(&! ((*out).instrs), out_count, cloned)
+        ii = ii + 1
+    }
+    out_count = probe_append(&! ((*out).instrs), out_count, ir_jump(merge_label))
+    out_count = probe_append(&! ((*out).instrs), out_count, ir_label(merge_label))
+    out_count = probe_append(&! ((*out).instrs), out_count, ir_return(probe_find_return_vreg(func)))
+    (*out).instr_count = out_count
+}
+
+fn main() -> i64 with IO, Mut, Panic, Div {
+    var func = ir_empty_function()
+    func.name = ir_name_from_bytes(97, 100, 100, 50, 4)
+    func.param_count = 2
+    func.param_regs[0] = 0
+    func.param_regs[1] = 1
+    func.reg_count = 3
+    func.compile_strategy = IR_STRATEGY_INSTRUMENTED
+    func.instr_count = 2
+    func.instrs[0] = ir_binop(2, 0, BinaryOp::OpAdd, 1)
+    func.instrs[1] = ir_return(2)
+
+    var transformed = ir_empty_function()
+    probe_apply_strategy_into(&func, &! transformed)
+    print("reg_count=")
+    print_int(transformed.reg_count)
+    print(" instr_count=")
+    print_int(transformed.instr_count)
+    print("\n")
+
+    var total_binops: i64 = 0
+    var saw_expanded_dst = false
+    var i: i64 = 0
+    while i < transformed.instr_count {
+        let instr = transformed.instrs[i as usize]
+        print("[")
+        print_int(i)
+        print("] op=")
+        if instr.op == IrOpcode::IrLabel { print("label") }
+        else if instr.op == IrOpcode::IrBranchTrue { print("branch_true") }
+        else if instr.op == IrOpcode::IrJump { print("jump") }
+        else if instr.op == IrOpcode::IrBinOp { print("binop") }
+        else if instr.op == IrOpcode::IrReturn { print("return") }
+        else { print("other") }
+        print(" dst=")
+        print_int(instr.dst)
+        print(" src1=")
+        print_int(instr.src1)
+        print(" src2=")
+        print_int(instr.src2)
+        print(" label=")
+        print_int(instr.label_id)
+        print(" bin=")
+        if instr.bin_op == BinaryOp::OpAdd { print("add") }
+        else { print("other") }
+        print("\n")
+        if instr.op == IrOpcode::IrBinOp && instr.bin_op == BinaryOp::OpAdd {
+            total_binops = total_binops + 1
+            if instr.dst >= func.reg_count {
+                saw_expanded_dst = true
+            }
+        }
+        i = i + 1
+    }
+
+    print("total_binops=")
+    print_int(total_binops)
+    print(" saw_expanded_dst=")
+    if saw_expanded_dst { print("true") } else { print("false") }
+    print("\n")
+    0
+}

@@ -1,0 +1,82 @@
+// self-hosted::compiler::streaming_body_lower_smoke
+//
+// Direct Sprint 71 smoke for summary-seed + single-body lowering.
+
+use lexer::mod::*
+use parser::ast::*
+use ir::ir::*
+use check::dependent::*
+use check::types::*
+use check::mod::{check_program, check_program_epistemic_into}
+use check::ownership::*
+use check::lint::*
+use check::layout::*
+use io::file_write::*
+use native::aarch64::*
+use native::encode::*
+use native::elf::*
+use native::macho::*
+use native::reloc::*
+use native::frame::*
+use native::lower_ir::*
+use native::machine_ir::*
+use native::gc::*
+use native::runtime_context::*
+use native::stack_maps::*
+use native::target_policy::*
+use wasm::core::*
+use wasm::encode::*
+use wasm::lower::*
+use native::codegen::*
+use resolve::resolve::*
+use resolve::imports::*
+use resolve::symbol::*
+use resolve::scope::*
+use resolve::mod::{resolve_modules, resolve_program, ResolveBatchResult}
+use module_loader::{load_module_file}
+use parser::parser::{parser_last_error_count}
+use ir::opt_strategy::{ir_opt_apply_strategy, ir_opt_find_return_vreg, ir_opt_max_label, ir_opt_max_vreg}
+use ir::lower::{lower_program_to_ir_summary_with_epistemic_ref, lower_program_function_body_from_summary_with_epistemic_ref}
+use ir::const_prop::{cp_check_load_imm, cp_empty_instrs, cp_make_test_func, cp_optimize_function}
+use ir::dce::{dce_check_nop, dce_empty_instrs, dce_make_test_func, dce_optimize_function}
+use ir::profile::*
+use ir::inline::*
+use ir::layout::*
+use ir::opt_cleanup::*
+use ir::loop_opt::*
+use ir::tailcall::*
+use native::regalloc::*
+use native::peephole::*
+
+fn main() -> i64 with IO, Mut, Panic, Div, Alloc {
+    let prog = load_module_file("tests/frontend/lowering_stability_param_fn.sio")
+    var epistemic = ir_empty_epistemic_section()
+    if !check_program_epistemic_into(prog, &! epistemic) { return 1 }
+    if parser_last_error_count() > 0 { return 2 }
+
+    let summary_result = lower_program_to_ir_summary_with_epistemic_ref(&prog, epistemic)
+    if summary_result.had_error { return 3 }
+    if (*summary_result.summary.module).fn_count != 2 { return 4 }
+
+    let fn_name = make_name("add_pair")
+    let body_result = lower_program_function_body_from_summary_with_epistemic_ref(
+        &prog,
+        &summary_result.summary,
+        epistemic,
+        fn_name
+    )
+    if body_result.had_error { return 5 }
+    if !ir_name_eq(body_result.func.name, fn_name) { return 6 }
+    if body_result.func.param_count != 2 { return 7 }
+    if body_result.func.instr_count <= 0 { return 8 }
+    if body_result.func.compile_strategy != IR_STRATEGY_STANDARD { return 9 }
+
+    print("streaming_body_lower_smoke: fn=")
+    print("add_pair")
+    print(" params=")
+    print_int(body_result.func.param_count)
+    print(" instrs=")
+    print_int(body_result.func.instr_count)
+    print("\n")
+    0
+}

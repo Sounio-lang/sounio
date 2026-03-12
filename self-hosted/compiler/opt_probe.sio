@@ -1,0 +1,175 @@
+use parser::ast::*
+use ir::ir::*
+use ir::opt_strategy::{ir_opt_apply_strategy}
+use ir::opt_cleanup::{ocp_const_fold}
+use ir::const_prop::*
+use ir::egraph::*
+use ir::normalize::{opcodes_equal}
+
+fn print_binop(instr: IrInstr) with IO {
+    print("dst=")
+    print_int(instr.dst)
+    print(" src1=")
+    print_int(instr.src1)
+    print(" src2=")
+    print_int(instr.src2)
+    print(" op=")
+    if instr.bin_op == BinaryOp::OpAdd {
+        print("add")
+    } else if instr.bin_op == BinaryOp::OpMul {
+        print("mul")
+    } else if instr.bin_op == BinaryOp::OpShl {
+        print("shl")
+    } else if instr.bin_op == BinaryOp::OpBitAnd {
+        print("bitand")
+    } else {
+        print("other")
+    }
+    print("\n")
+}
+
+fn print_unary(instr: IrInstr) with IO {
+    print("dst=")
+    print_int(instr.dst)
+    print(" src1=")
+    print_int(instr.src1)
+    print(" op=")
+    if instr.un_op == UnaryOp::OpNeg {
+        print("neg")
+    } else if instr.un_op == UnaryOp::OpNot {
+        print("not")
+    } else {
+        print("other")
+    }
+    print("\n")
+}
+
+fn main() -> i64 with IO, Mut, Panic, Div {
+    var func = ir_empty_function()
+    func.name = ir_name_from_bytes(97, 100, 100, 50, 4)
+    func.param_count = 2
+    func.param_regs[0] = 0
+    func.param_regs[1] = 1
+    func.reg_count = 3
+    func.compile_strategy = IR_STRATEGY_INSTRUMENTED
+    func.instr_count = 2
+    func.instrs[0] = ir_binop(2, 0, BinaryOp::OpAdd, 1)
+    func.instrs[1] = ir_return(2)
+    let transformed = ir_opt_apply_strategy(func)
+    if !(transformed.reg_count > func.reg_count) { return 11 }
+    if !(transformed.instr_count > func.instr_count) { return 12 }
+    var add_count: i64 = 0
+    var saw_expanded_dst = false
+    var i: i64 = 0
+    while i < transformed.instr_count {
+        let instr = transformed.instrs[i as usize]
+        if instr.op == IrOpcode::IrBinOp {
+            if instr.bin_op == BinaryOp::OpAdd {
+                add_count = add_count + 1
+                if instr.dst >= func.reg_count {
+                    saw_expanded_dst = true
+                }
+            }
+        }
+        i = i + 1
+    }
+    if add_count != 2 { return 13 }
+    if !saw_expanded_dst { return 14 }
+
+    var fold = ir_empty_function()
+    fold.name = ir_name_from_bytes(109, 117, 108, 52, 4)
+    fold.reg_count = 5
+    fold.instr_count = 4
+    fold.instrs[0] = ir_load_imm(1, 2)
+    fold.instrs[1] = ir_binop(2, 0, BinaryOp::OpMul, 1)
+    fold.instrs[2] = ir_load_imm(3, 4)
+    fold.instrs[3] = ir_binop(4, 2, BinaryOp::OpMul, 3)
+    let folded = ocp_const_fold(fold)
+    let first = folded.instrs[1]
+    let second_const = folded.instrs[2]
+    let last = folded.instrs[3]
+    if !(first.op == IrOpcode::IrBinOp) { return 21 }
+    if first.bin_op == BinaryOp::OpShl { return 22 }
+    if !(first.bin_op == BinaryOp::OpMul) { return 23 }
+    if !(second_const.op == IrOpcode::IrLoadImm) { return 24 }
+    if second_const.imm_i64 == 3 { return 25 }
+    if second_const.imm_i64 == 4 { return 26 }
+    if second_const.imm_i64 != 8 { return 27 }
+    if !(last.op == IrOpcode::IrBinOp) { return 28 }
+    if last.bin_op == BinaryOp::OpShl { return 29 }
+    if !(last.bin_op == BinaryOp::OpMul && last.src1 == 0 && last.src2 == 3) { return 30 }
+
+    var unary = ir_empty_function()
+    unary.name = ir_name_from_bytes(110, 101, 103, 50, 4)
+    unary.reg_count = 3
+    unary.instr_count = 3
+    unary.instrs[0] = ir_load_imm(0, 7)
+    unary.instrs[1] = ir_unaryop(1, UnaryOp::OpNeg, 0)
+    unary.instrs[2] = ir_unaryop(2, UnaryOp::OpNeg, 1)
+    let unary_folded = ocp_const_fold(unary)
+    print("T208:\n")
+    print("  i0 op=")
+    if unary_folded.instrs[0].op == IrOpcode::IrLoadImm { print("loadimm") } else { print("other") }
+    print(" imm=")
+    print_int(unary_folded.instrs[0].imm_i64)
+    print("\n")
+    print("  i1 op=")
+    if unary_folded.instrs[1].op == IrOpcode::IrLoadImm { print("loadimm") } else if unary_folded.instrs[1].op == IrOpcode::IrUnaryOp { print("unary") } else { print("other") }
+    if unary_folded.instrs[1].op == IrOpcode::IrUnaryOp { print_unary(unary_folded.instrs[1]) } else { print(" imm="); print_int(unary_folded.instrs[1].imm_i64); print("\n") }
+    print("  i2 op=")
+    if unary_folded.instrs[2].op == IrOpcode::IrLoadImm { print("loadimm") } else if unary_folded.instrs[2].op == IrOpcode::IrUnaryOp { print("unary") } else { print("other") }
+    if unary_folded.instrs[2].op == IrOpcode::IrUnaryOp { print_unary(unary_folded.instrs[2]) } else { print(" imm="); print_int(unary_folded.instrs[2].imm_i64); print("\n") }
+
+    print("T221:\n")
+    print("  i1 "); print_binop(first)
+    print("  i2 op=")
+    if second_const.op == IrOpcode::IrLoadImm { print("loadimm") } else { print("other") }
+    print(" imm=")
+    print_int(second_const.imm_i64)
+    print("\n")
+    print("  i3 "); print_binop(last)
+
+    print("T226:\n")
+    print("  reg_count=")
+    print_int(transformed.reg_count)
+    print(" instr_count=")
+    print_int(transformed.instr_count)
+    print("\n")
+    i = 0
+    while i < transformed.instr_count {
+        let instr = transformed.instrs[i as usize]
+        print("  [")
+        print_int(i)
+        print("] ")
+        if instr.op == IrOpcode::IrBinOp {
+            print("binop ")
+            print_binop(instr)
+        } else if instr.op == IrOpcode::IrReturn {
+            print("return src=")
+            print_int(instr.src1)
+            print("\n")
+        } else if instr.op == IrOpcode::IrBranchTrue {
+            print("branch_true src=")
+            print_int(instr.src1)
+            print(" label=")
+            print_int(instr.label_id)
+            print("\n")
+        } else if instr.op == IrOpcode::IrJump {
+            print("jump label=")
+            print_int(instr.label_id)
+            print("\n")
+        } else if instr.op == IrOpcode::IrLabel {
+            print("label id=")
+            print_int(instr.label_id)
+            print("\n")
+        } else if instr.op == IrOpcode::IrProfCounter {
+            print("prof counter=")
+            print_int(instr.imm_i64)
+            print("\n")
+        } else {
+            print("other\n")
+        }
+        i = i + 1
+    }
+    0
+}
