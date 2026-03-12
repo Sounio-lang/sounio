@@ -1359,6 +1359,38 @@ fn native_v2_record_safepoint(
     c
 }
 
+fn native_v2_record_safepoint_mut(
+    nc: &! NativeCompiler,
+    fn_index: i64,
+    kind: i64,
+    machine_instr_index: i64,
+    code_offset: i64,
+    temp_count: i64,
+    spill_count: i64
+) with Mut, Panic, Div {
+    if (*nc).stack_map_record_count < 256 {
+        let idx = (*nc).stack_map_record_count
+        let deopt_id = (*nc).deopt_point_count
+        (*nc).stack_map_fn_indices[idx as usize] = fn_index
+        (*nc).stack_map_kinds[idx as usize] = kind
+        (*nc).stack_map_machine_instr_indices[idx as usize] = machine_instr_index
+        (*nc).stack_map_code_offsets[idx as usize] = code_offset
+        (*nc).stack_map_frame_sizes[idx as usize] = (*nc).current_frame_size
+        (*nc).stack_map_temp_counts[idx as usize] = temp_count
+        (*nc).stack_map_spill_counts[idx as usize] = spill_count
+        (*nc).stack_map_root_temp_counts[idx as usize] = temp_count
+        (*nc).stack_map_root_spill_counts[idx as usize] = spill_count
+        (*nc).stack_map_callee_saved_root_masks[idx as usize] = 0
+        (*nc).stack_map_root_kind_masks[idx as usize] = native_v2_stack_map_root_kind_mixed()
+        (*nc).stack_map_deopt_ids[idx as usize] = deopt_id
+        (*nc).stack_map_tier_ids[idx as usize] = native_v2_stack_map_tier_baseline()
+        (*nc).stack_map_osr_eligibility[idx as usize] = if kind == NATIVE_V2_SAFEPOINT_CALL() { native_v2_stack_map_osr_eligible() } else { native_v2_stack_map_osr_ineligible() }
+        (*nc).stack_map_record_count = idx + 1
+    }
+    (*nc).safepoint_count = (*nc).safepoint_count + 1
+    (*nc).deopt_point_count = (*nc).deopt_point_count + 1
+}
+
 fn native_v2_emit_runtime_metadata(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
     var c = nc
     c = native_v2_emit_descriptor_table(c)
@@ -2180,14 +2212,19 @@ fn native_v2_machine_ra_instrs(func: MachineFunction) -> ([RaSimpleInstr; 512], 
 
 fn native_v2_run_machine_regalloc(nc: NativeCompiler, func: MachineFunction) -> NativeCompiler with Mut, Panic, Div {
     var c = nc
+    native_v2_run_machine_regalloc_mut(&! c, func)
+    c
+}
+
+fn native_v2_run_machine_regalloc_mut(nc: &! NativeCompiler, func: MachineFunction) with Mut, Panic, Div {
     let pair = native_v2_machine_ra_instrs(func)
     var state = liveness_compute_intervals(pair.0, pair.1)
     state = regalloc_linear_scan(state, native_target_policy_x86_allocation_order_count())
 
     var i: i64 = 0
     while i < 512 {
-        c.vreg_to_preg[i as usize] = -2
-        c.vreg_spill_slots[i as usize] = -1
+        (*nc).vreg_to_preg[i as usize] = -2
+        (*nc).vreg_spill_slots[i as usize] = -1
         i = i + 1
     }
 
@@ -2197,17 +2234,16 @@ fn native_v2_run_machine_regalloc(nc: NativeCompiler, func: MachineFunction) -> 
         let vreg = interval.vreg
         if vreg >= 0 && vreg < 512 {
             if interval.assigned_preg >= 0 {
-                c.vreg_to_preg[vreg as usize] = native_target_policy_x86_allocation_order_reg_id(interval.assigned_preg)
+                (*nc).vreg_to_preg[vreg as usize] = native_target_policy_x86_allocation_order_reg_id(interval.assigned_preg)
             } else {
-                c.vreg_to_preg[vreg as usize] = interval.assigned_preg
+                (*nc).vreg_to_preg[vreg as usize] = interval.assigned_preg
             }
-            c.vreg_spill_slots[vreg as usize] = interval.spill_slot
+            (*nc).vreg_spill_slots[vreg as usize] = interval.spill_slot
         }
         v = v + 1
     }
-    c.current_machine_base_slots = func.temp_count
-    c.current_machine_spill_count = state.spill_count
-    c
+    (*nc).current_machine_base_slots = func.temp_count
+    (*nc).current_machine_spill_count = state.spill_count
 }
 
 fn native_v2_emit_unary_code(nc: NativeCompiler, op: UnaryOp) -> NativeCompiler with Mut, Panic, Div {
@@ -2290,7 +2326,7 @@ fn native_v2_emit_machine_instr(nc: NativeCompiler, instr: MachineInstr) -> Nati
             } else {
                 let jmp_pos = c.code.len
                 c.code = emit_jmp_rel32(c.code)
-                c = record_label_patch(c, label_id, jmp_pos + 1)
+                record_label_patch_mut(&! c, label_id, jmp_pos + 1)
             }
         }
         return c
@@ -2310,7 +2346,7 @@ fn native_v2_emit_machine_instr(nc: NativeCompiler, instr: MachineInstr) -> Nati
                 } else {
                     let jz_pos = c.code.len
                     c.code = emit_jz_rel32(c.code)
-                    c = record_label_patch(c, label_id, jz_pos + 2)
+                    record_label_patch_mut(&! c, label_id, jz_pos + 2)
                 }
             } else if instr.cond == MIR_CC_NZ {
                 if target >= 0 {
@@ -2322,7 +2358,7 @@ fn native_v2_emit_machine_instr(nc: NativeCompiler, instr: MachineInstr) -> Nati
                 } else {
                     let jnz_pos = c.code.len
                     c.code = emit_jnz_rel32(c.code)
-                    c = record_label_patch(c, label_id, jnz_pos + 2)
+                    record_label_patch_mut(&! c, label_id, jnz_pos + 2)
                 }
             }
         }
@@ -2330,7 +2366,8 @@ fn native_v2_emit_machine_instr(nc: NativeCompiler, instr: MachineInstr) -> Nati
     }
 
     if instr.opcode == MIR_OP_LABEL {
-        return record_label(c, instr.dst.value)
+        record_label_mut(&! c, instr.dst.value)
+        return c
     }
 
     if instr.opcode == MIR_OP_ARG_MOVE {
@@ -2359,7 +2396,8 @@ fn native_v2_emit_machine_instr(nc: NativeCompiler, instr: MachineInstr) -> Nati
         } else {
             c.code = emit_xor_rax_rax(c.code)
         }
-        return record_return_jump(c)
+        record_return_jump_mut(&! c)
+        return c
     }
 
     if instr.opcode == MIR_OP_ALLOC {
@@ -2595,82 +2633,96 @@ fn native_v2_emit_machine_instr(nc: NativeCompiler, instr: MachineInstr) -> Nati
 
 fn native_v2_emit_machine_function(nc: NativeCompiler, func: MachineFunction, fn_index: i64, fn_offset: i64) -> NativeCompiler with Mut, Panic, Div {
     var c = nc
+    native_v2_emit_machine_function_mut(&! c, func, fn_index, fn_offset)
+    c
+}
+
+fn native_v2_emit_machine_function_mut(nc: &! NativeCompiler, func: MachineFunction, fn_index: i64, fn_offset: i64) with Mut, Panic, Div {
     var i: i64 = 0
     while i < func.blocks[0].instr_count {
         let instr = func.blocks[0].instrs[i as usize]
         if native_v2_machine_instr_is_safepoint(instr) {
             let kind = if instr.opcode == MIR_OP_CALL { NATIVE_V2_SAFEPOINT_CALL() } else { NATIVE_V2_SAFEPOINT_RET() }
-            c = native_v2_record_safepoint(c, fn_index, kind, i, c.code.len - fn_offset, func.temp_count, c.current_machine_spill_count)
+            native_v2_record_safepoint_mut(nc, fn_index, kind, i, (*nc).code.len - fn_offset, func.temp_count, (*nc).current_machine_spill_count)
         }
-        c = native_v2_emit_machine_instr(c, instr)
+        (*nc) = native_v2_emit_machine_instr((*nc), instr)
         i = i + 1
     }
-    c
 }
 
 fn compile_ir_function_v2(nc: NativeCompiler, func: IrFunction, machine_func: MachineFunction, fn_index: i64) -> NativeCompiler with Mut, Panic, Div, Alloc {
-    var c = reset_function_state(nc)
-
-    c.fn_offsets[fn_index as usize] = c.code.len
-    c.symbols = symbol_data_add_name(c.symbols, fn_index, func.name.buf, func.name.len)
-
-    if name_is_print_int(func.name) { return emit_builtin_print_int(c) }
-    if name_is_print_char(func.name) { return emit_builtin_print_char(c) }
-    if name_is_print(func.name) { return emit_builtin_print_str(c) }
-    if name_is_get_arg_count(func.name) { return emit_builtin_get_arg_count(c) }
-    if name_is_get_arg(func.name) { return emit_builtin_get_arg(c) }
-    if name_is_str_len(func.name) { return emit_builtin_str_len(c) }
-    if name_is_str_eq(func.name) { return emit_builtin_str_eq(c) }
-    if name_is_str_slice(func.name) { return emit_builtin_str_slice(c) }
-    if name_is_starts_with(func.name) { return emit_builtin_starts_with(c) }
-    if name_is_str_concat(func.name) { return emit_builtin_str_concat(c) }
-    if name_is_read_file(func.name) { return emit_builtin_read_file(c) }
-    if name_is_write_file(func.name) { return emit_builtin_write_file(c) }
-    if name_is_file_size(func.name) { return emit_builtin_file_size(c) }
-
-    c.current_strategy = func.compile_strategy
-    c = native_v2_run_machine_regalloc(c, machine_func)
-
-    let preg_mask = nc_used_allocatable_preg_mask(c, machine_func.temp_count)
-    let frame_size = x86_align_frame_size_for_calls(native_v2_local_frame_size(machine_func.temp_count, c.current_machine_spill_count), preg_mask)
-    c.current_frame_size = frame_size
-
-    c.code = emit_prologue_with_preg_mask(c.code, frame_size, preg_mask)
-    c = spill_ir_params(c, func)
-    c = native_v2_emit_machine_function(c, machine_func, fn_index, c.fn_offsets[fn_index as usize])
-
-    let epilogue_offset = c.code.len
-    c.code = emit_epilogue_with_preg_mask(c.code, preg_mask)
-    c = patch_return_jumps(c, epilogue_offset)
-    c = patch_label_forwards(c)
+    var c = nc
+    compile_ir_function_v2_mut(&! c, func, machine_func, fn_index)
     c
+}
+
+fn compile_ir_function_v2_mut(nc: &! NativeCompiler, func: IrFunction, machine_func: MachineFunction, fn_index: i64) with Mut, Panic, Div, Alloc {
+    reset_function_state_mut(nc)
+
+    (*nc).fn_offsets[fn_index as usize] = (*nc).code.len
+    (*nc).symbols = symbol_data_add_name((*nc).symbols, fn_index, func.name.buf, func.name.len)
+
+    if name_is_print_int(func.name) { (*nc) = emit_builtin_print_int((*nc)); return }
+    if name_is_print_char(func.name) { (*nc) = emit_builtin_print_char((*nc)); return }
+    if name_is_print(func.name) { (*nc) = emit_builtin_print_str((*nc)); return }
+    if name_is_get_arg_count(func.name) { (*nc) = emit_builtin_get_arg_count((*nc)); return }
+    if name_is_get_arg(func.name) { (*nc) = emit_builtin_get_arg((*nc)); return }
+    if name_is_str_len(func.name) { (*nc) = emit_builtin_str_len((*nc)); return }
+    if name_is_str_eq(func.name) { (*nc) = emit_builtin_str_eq((*nc)); return }
+    if name_is_str_slice(func.name) { (*nc) = emit_builtin_str_slice((*nc)); return }
+    if name_is_starts_with(func.name) { (*nc) = emit_builtin_starts_with((*nc)); return }
+    if name_is_str_concat(func.name) { (*nc) = emit_builtin_str_concat((*nc)); return }
+    if name_is_read_file(func.name) { (*nc) = emit_builtin_read_file((*nc)); return }
+    if name_is_write_file(func.name) { (*nc) = emit_builtin_write_file((*nc)); return }
+    if name_is_file_size(func.name) { (*nc) = emit_builtin_file_size((*nc)); return }
+
+    (*nc).current_strategy = func.compile_strategy
+    native_v2_run_machine_regalloc_mut(nc, machine_func)
+
+    let preg_mask = nc_used_allocatable_preg_mask((*nc), machine_func.temp_count)
+    let frame_size = x86_align_frame_size_for_calls(native_v2_local_frame_size(machine_func.temp_count, (*nc).current_machine_spill_count), preg_mask)
+    (*nc).current_frame_size = frame_size
+
+    (*nc).code = emit_prologue_with_preg_mask((*nc).code, frame_size, preg_mask)
+    spill_ir_params_mut(nc, func)
+    native_v2_emit_machine_function_mut(nc, machine_func, fn_index, (*nc).fn_offsets[fn_index as usize])
+
+    let epilogue_offset = (*nc).code.len
+    (*nc).code = emit_epilogue_with_preg_mask((*nc).code, preg_mask)
+    patch_return_jumps_mut(nc, epilogue_offset)
+    patch_label_forwards_mut(nc)
 }
 
 fn compile_module_v2(nc: NativeCompiler, module: &IrModule) -> (NativeCompiler, string) with Mut, Panic, Div, Alloc {
     var c = nc
-    c.fn_count = module.fn_count
-    c.runtime_context_slot_offset = 0
-    c.prof_counter_data_base = runtime_context_global_slot_size()
-    c.descriptor_data_offset = -1
-    c.descriptor_count = 0
-    c.gc_state_data_offset = -1
-    c.stack_map_data_offset = -1
-    c.deopt_state_data_offset = -1
-    c.stack_map_record_count = 0
-    c.safepoint_count = 0
-    c.deopt_point_count = 0
-    var module_data = c.data
-    module_data.len = c.prof_counter_data_base + (module.prof_counter_count * 8)
-    c.data = module_data
+    let err = compile_module_v2_mut(&! c, module)
+    (c, err)
+}
+
+fn compile_module_v2_mut(nc: &! NativeCompiler, module: &IrModule) -> string with Mut, Panic, Div, Alloc {
+    (*nc).fn_count = module.fn_count
+    (*nc).runtime_context_slot_offset = 0
+    (*nc).prof_counter_data_base = runtime_context_global_slot_size()
+    (*nc).descriptor_data_offset = -1
+    (*nc).descriptor_count = 0
+    (*nc).gc_state_data_offset = -1
+    (*nc).stack_map_data_offset = -1
+    (*nc).deopt_state_data_offset = -1
+    (*nc).stack_map_record_count = 0
+    (*nc).safepoint_count = 0
+    (*nc).deopt_point_count = 0
+    var module_data = (*nc).data
+    module_data.len = (*nc).prof_counter_data_base + (module.prof_counter_count * 8)
+    (*nc).data = module_data
 
     let built = native_v2_build_machine_module(module, true)
     if !built.supported {
-        return (c, built.unsupported_detail)
+        return built.unsupported_detail
     }
 
     var fi: i64 = 0
     while fi < module.fn_count {
-        c = compile_ir_function_v2(c, module.functions[fi as usize], built.functions[fi as usize], fi)
+        compile_ir_function_v2_mut(nc, module.functions[fi as usize], built.functions[fi as usize], fi)
         fi = fi + 1
     }
 
@@ -2678,54 +2730,58 @@ fn compile_module_v2(nc: NativeCompiler, module: &IrModule) -> (NativeCompiler, 
         var pi: i64 = 0
         while pi < module.prof_counter_count {
             let pc = module.prof_counters[pi as usize]
-            c.rodata = string_table_add(c.rodata, pc.fn_name.buf, pc.fn_name.len)
-            c.prof_counter_names[pi as usize] = c.rodata.last_offset
+            (*nc).rodata = string_table_add((*nc).rodata, pc.fn_name.buf, pc.fn_name.len)
+            (*nc).prof_counter_names[pi as usize] = (*nc).rodata.last_offset
             pi = pi + 1
         }
-        c.prof_counter_count = module.prof_counter_count
+        (*nc).prof_counter_count = module.prof_counter_count
         let sprof_name = make_sprof_filename()
-        c.rodata = string_table_add(c.rodata, sprof_name.buf, sprof_name.len)
-        c.prof_sprof_name_offset = c.rodata.last_offset
+        (*nc).rodata = string_table_add((*nc).rodata, sprof_name.buf, sprof_name.len)
+        (*nc).prof_sprof_name_offset = (*nc).rodata.last_offset
     }
 
-    if c.prof_counter_count > 0 {
-        c.prof_dump_fn_index = c.fn_count
-        c.fn_offsets[c.fn_count as usize] = c.code.len
-        c.fn_count = c.fn_count + 1
-        c = emit_prof_dump_function(c, module)
+    if (*nc).prof_counter_count > 0 {
+        (*nc).prof_dump_fn_index = (*nc).fn_count
+        (*nc).fn_offsets[(*nc).fn_count as usize] = (*nc).code.len
+        (*nc).fn_count = (*nc).fn_count + 1
+        (*nc) = emit_prof_dump_function((*nc), module)
     }
 
-    c = native_v2_emit_runtime_metadata(c)
+    (*nc) = native_v2_emit_runtime_metadata((*nc))
 
     let main_idx = find_main_index(module)
     if main_idx >= 0 {
-        c = emit_entry_trampoline(c, main_idx)
+        (*nc) = emit_entry_trampoline((*nc), main_idx)
     }
 
     let text_file_offset = 4096
-    let rodata_file_offset = align_page(text_file_offset + c.code.len)
-    let data_file_offset = if c.data.len > 0 {
-        align_page(rodata_file_offset + c.rodata.len)
+    let rodata_file_offset = align_page(text_file_offset + (*nc).code.len)
+    let data_file_offset = if (*nc).data.len > 0 {
+        align_page(rodata_file_offset + (*nc).rodata.len)
     } else { 0 }
-    c.code = apply_relocations(c.relocs, c.code, c.fn_offsets, c.fn_count, rodata_file_offset, data_file_offset)
+    (*nc).code = apply_relocations((*nc).relocs, (*nc).code, (*nc).fn_offsets, (*nc).fn_count, rodata_file_offset, data_file_offset)
 
-    (c, "")
+    ""
 }
 
 // Spill parameter registers to their IR-assigned stack slots
 fn spill_ir_params(nc: NativeCompiler, func: IrFunction) -> NativeCompiler with Mut, Panic, Div {
     var c = nc
+    spill_ir_params_mut(&! c, func)
+    c
+}
+
+fn spill_ir_params_mut(nc: &! NativeCompiler, func: IrFunction) with Mut, Panic, Div {
     var i = 0
     while i < func.param_count && i < 6 {
         let vreg = func.param_regs[i as usize]
         if vreg >= 0 {
             let preg = param_reg(i)
             let offset = ir_slot_offset(vreg)
-            c.code = emit_store_reg_rbp_disp32(c.code, offset, preg)
+            (*nc).code = emit_store_reg_rbp_disp32((*nc).code, offset, preg)
         }
         i = i + 1
     }
-    c
 }
 
 // ============================================================================
@@ -3692,9 +3748,8 @@ fn compile_to_elf_riscv_placeholder(module: &IrModule, target_spec: NativeTarget
 }
 
 fn compile_to_elf_v2(module: &IrModule, base_addr: i64) -> NativeCompileResult with Mut, Panic, Div, Alloc {
-    let pair = compile_module_v2(compiler_new(), module)
-    var nc = pair.0
-    let err = pair.1
+    var nc = compiler_new()
+    let err = compile_module_v2_mut(&! nc, module)
     if str_len(err) > 0 {
         return native_compile_result_error(ERR_BACKEND_NOT_IMPLEMENTED(), "native_v2_unsupported_opcode:" + err)
     }
