@@ -39,12 +39,15 @@ use resolve::resolve::*
 use resolve::imports::*
 use resolve::symbol::*
 use resolve::scope::*
+
 use resolve::mod::{resolve_modules, resolve_program, ResolveBatchResult}
 use module_loader::{compile_multimodule_native, compile_multimodule_native_advanced, compile_multimodule_native_with_ir, compile_multimodule_native_maybe_streaming, compile_multimodule_llvm, load_multimodule_ir, load_multimodule_ir_traced, load_multimodule_ir_probe_summary, load_multimodule_ir_probe_summary_traced, empty_load_multimodule_ir_trace, preflight_multimodule_frontend, load_multimodule_epistemic_into, load_module_file, extract_imports_from_ast, path_directory, use_path_to_file_path, visited_contains, ir_merge_epistemic_sections, empty_program, file_exists}
 use frontend_callsite_probe::{run_frontend_callsite_probe}
 use parser::parser::{parser_last_error_count}
 use ir::opt_strategy::{ir_opt_apply_strategy, ir_opt_find_return_vreg, ir_opt_max_label, ir_opt_max_vreg}
-use ir::lower::{ir_patch_validated_calls, lower_program_to_ir, lower_program_to_ir_with_epistemic, lower_program_to_ir_probe_summary_ref, lower_program_to_ir_summary_box_probe_with_epistemic_ref, lower_program_function_body_from_summary_with_epistemic_ref, lower_program_to_ir_summary_flat_with_epistemic_ref, lower_program_function_body_from_summary_flat_with_epistemic_ref}
+use ir::lower::{ir_patch_validated_calls, lower_program_to_ir, lower_program_to_ir_with_epistemic, lower_program_to_ir_probe_summary_ref, lower_program_to_ir_probe_summary_box_ref, lower_program_to_ir_summary_box_probe_with_epistemic_ref, lower_program_function_body_from_summary_with_epistemic_ref, lower_program_to_ir_summary_flat_with_epistemic_ref, lower_program_function_body_from_summary_flat_with_epistemic_ref}
+use ir::lower::{lower_program_to_ir_with_epistemic_ref, lower_program_to_ir_ordered_with_epistemic_boxed_trace_ref}
+use ir::lower::{lower_program_function_body_from_program_with_epistemic_ref}
 use ir::const_prop::{cp_check_load_imm, cp_empty_instrs, cp_make_test_func, cp_optimize_function}
 use ir::dce::{dce_check_nop, dce_empty_instrs, dce_make_test_func, dce_optimize_function}
 use ir::profile::*
@@ -1825,10 +1828,11 @@ fn run_native_compile_mode(args: ArgList, flag_index: i64) with IO, Mut, Panic, 
     let use_profile_path = compiler_mode_option_string(args, "", "--use-profile", "")
     let use_profile = str_len(use_profile_path) > 0
     let cache_stats = compiler_mode_has_flag(args, "--cache-stats")
+    let target = compiler_mode_option_string(args, "-t", "--target", "native")
     let exit_code = compile_multimodule_native_advanced(
         source_path,
         output_path,
-        "native",
+        target,
         "auto",
         false,
         "",
@@ -6426,40 +6430,31 @@ fn run_probe_native_streaming(args: ArgList, flag_index: i64) with IO, Mut, Pani
     }
 
     print("probe_native_streaming: summary_probe_begin\n")
-    let summary_probe = lower_program_to_ir_probe_summary_ref(&program)
+    let summary_probe = lower_program_to_ir_probe_summary_box_ref(&program)
     if summary_probe.had_error {
         panic("probe_native_streaming summary probe failed")
     }
     print("probe_native_streaming: summary_probe_ok fn_count=")
-    print_int(summary_probe.module.fn_count)
+    print_int((*summary_probe.module).fn_count)
     print("\n")
 
     print("probe_native_streaming: summary_begin\n")
-    let summary_result = lower_program_to_ir_summary_box_probe_with_epistemic_ref(&program, epistemic)
-    if summary_result.had_error {
-        panic("probe_native_streaming summary lowering failed")
-    }
+    let summary_result = summary_probe
     print("probe_native_streaming: summary_ok\n")
 
-    var summary = summary_result.summary
-    (*summary).probe_mode = true
-    let summary_fn_count = (*summary).module.fn_count
+    let summary_module = &(*summary_result.module)
+    let summary_fn_count = (*summary_module).fn_count
     print("probe_native_streaming: fn_count=")
     print_int(summary_fn_count)
     print("\n")
 
     var fi: i64 = 0
     while fi < summary_fn_count {
-        let fn_name = (*summary).module.functions[fi as usize].name
+        let fn_name = (*summary_module).functions[fi as usize].name
         print("probe_native_streaming: body_begin fn=")
         compiler_manifest_print_name(fn_name)
         print("\n")
-        let body_result = lower_program_function_body_from_summary_with_epistemic_ref(
-            &program,
-            &(*summary),
-            epistemic,
-            fn_name
-        )
+        let body_result = lower_program_function_body_from_program_with_epistemic_ref(&program, epistemic, fn_name)
         if body_result.had_error {
             print("probe_native_streaming: body_error fn=")
             compiler_manifest_print_name(fn_name)

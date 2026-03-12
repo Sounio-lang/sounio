@@ -51,11 +51,11 @@ fn ir_opt_remap_label(label_id: i64, label_offset: i64) -> i64 {
 
 // Scan the flat instruction array for the maximum vreg ID used (dst, src1, src2).
 // Returns -1 if no valid vregs found.
-fn ir_opt_max_vreg(func: IrFunction) -> i64 {
+fn ir_opt_max_vreg_ref(func: &IrFunction) -> i64 {
     var max_id: i64 = -1
     var i: i64 = 0
-    while i < func.instr_count {
-        let instr = func.instrs[i as usize]
+    while i < (*func).instr_count {
+        let instr = (*func).instrs[i as usize]
         if instr.dst > max_id { max_id = instr.dst }
         if instr.src1 > max_id { max_id = instr.src1 }
         if instr.src2 > max_id { max_id = instr.src2 }
@@ -64,17 +64,25 @@ fn ir_opt_max_vreg(func: IrFunction) -> i64 {
     max_id
 }
 
+fn ir_opt_max_vreg(func: IrFunction) -> i64 {
+    ir_opt_max_vreg_ref(&func)
+}
+
 // Scan the flat instruction array for the maximum label_id (IrLabel, IrJump, IrBranch*).
 // Returns -1 if no labels found.
-fn ir_opt_max_label(func: IrFunction) -> i64 {
+fn ir_opt_max_label_ref(func: &IrFunction) -> i64 {
     var max_id: i64 = -1
     var i: i64 = 0
-    while i < func.instr_count {
-        let instr = func.instrs[i as usize]
+    while i < (*func).instr_count {
+        let instr = (*func).instrs[i as usize]
         if instr.label_id > max_id { max_id = instr.label_id }
         i = i + 1
     }
     max_id
+}
+
+fn ir_opt_max_label(func: IrFunction) -> i64 {
+    ir_opt_max_label_ref(&func)
 }
 
 // ============================================================================
@@ -121,20 +129,68 @@ fn ir_opt_append(
     instrs: &! [IrInstr; 128],
     count: i64,
     instr: IrInstr
-) -> i64 with Mut {
+) -> i64 with Mut, Panic {
     if count < 128 {
         (*instrs)[count as usize] = instr
     }
     count + 1
 }
 
+fn ir_opt_apply_strategy_instrs_into(
+    func: &IrFunction,
+    instrs: &! [IrInstr; 128],
+    vreg_offset: i64,
+    label_offset: i64,
+    count: i64,
+    merge_result_vreg: i64
+) -> i64 with Mut, Panic, Div {
+    let dispatch_label = label_offset
+    let instr_label = label_offset + 1
+    let merge_label = label_offset + 2
+
+    var out_count = count
+    out_count = ir_opt_append(instrs, out_count, ir_label(dispatch_label))
+    out_count = ir_opt_append(instrs, out_count, ir_branch_true((*func).param_regs[0], 0))
+    out_count = ir_opt_append(instrs, out_count, ir_jump(instr_label))
+
+    var fi: i64 = 0
+    while fi < (*func).instr_count {
+        var orig = (*func).instrs[fi as usize]
+        if orig.op == IrOpcode::IrReturn {
+            orig = ir_jump(merge_label)
+        }
+        out_count = ir_opt_append(instrs, out_count, orig)
+        fi = fi + 1
+    }
+    out_count = ir_opt_append(instrs, out_count, ir_jump(merge_label))
+    out_count = ir_opt_append(instrs, out_count, ir_label(instr_label))
+
+    if (*func).prof_counter_id >= 0 {
+        out_count = ir_opt_append(instrs, out_count, ir_prof_counter((*func).prof_counter_id))
+    }
+
+    var ii: i64 = 0
+    while ii < (*func).instr_count {
+        var cloned = ir_opt_clone_instr((*func).instrs[ii as usize], vreg_offset, label_offset, (*func).param_count)
+        if cloned.op == IrOpcode::IrReturn {
+            cloned = ir_jump(merge_label)
+        }
+        out_count = ir_opt_append(instrs, out_count, cloned)
+        ii = ii + 1
+    }
+    out_count = ir_opt_append(instrs, out_count, ir_jump(merge_label))
+    out_count = ir_opt_append(instrs, out_count, ir_label(merge_label))
+    out_count = ir_opt_append(instrs, out_count, ir_return(merge_result_vreg))
+    out_count
+}
+
 // Scan flat IrFunction for the first IrReturn and return its src1 (the result vreg).
 // Returns 0 as fallback if no IrReturn is found (functions with no explicit return).
 // Used by ir_opt_apply_strategy() to determine what vreg to return from the merge_block.
-fn ir_opt_find_return_vreg(func: IrFunction) -> i64 {
+fn ir_opt_find_return_vreg_ref(func: &IrFunction) -> i64 {
     var i: i64 = 0
-    while i < func.instr_count {
-        let instr = func.instrs[i as usize]
+    while i < (*func).instr_count {
+        let instr = (*func).instrs[i as usize]
         if instr.op == IrOpcode::IrReturn {
             return instr.src1
         }
@@ -143,104 +199,62 @@ fn ir_opt_find_return_vreg(func: IrFunction) -> i64 {
     0
 }
 
+fn ir_opt_find_return_vreg(func: IrFunction) -> i64 {
+    ir_opt_find_return_vreg_ref(&func)
+}
+
 // Transform a flat IrFunction into the 4-block diamond layout required by the
-// Instrumented strategy.  The result has the same name/params/compile_strategy
-// as the input but a new instrs[] and instr_count covering all four blocks.
-//
-// Layout in output instrs[]:
-//   --- dispatch_block ---
-//   IrLabel(dispatch_label)
-//   IrBranchTrue(param_regs[0], fast_label=0)     // param 0 = __validated flag
-//   IrJump(instr_label)
-//   --- fast_path ---
-//   <original instrs; IrReturn → IrJump(merge_label)>
-//   IrJump(merge_label)                            // fallthrough guard
-//   --- instrumented_path ---
-//   IrLabel(instr_label)
-//   <cloned instrs (vreg+label offset); IrReturn → IrJump(merge_label)>
-//   IrJump(merge_label)                            // fallthrough guard
-//   --- merge_block ---
-//   IrLabel(merge_label)
-//   IrReturn(merge_result_vreg)                    // actual result vreg from original IrReturn.src1
-//
-fn ir_opt_apply_strategy(func: IrFunction) -> IrFunction with Mut {
-    let vreg_offset  = ir_opt_max_vreg(func) + 1
-    let label_offset = ir_opt_max_label(func) + 1
+// Instrumented strategy. The transformed instruction stream is written through
+// the fixed array reference, while scalar metadata is assigned locally before
+// the final IrFunction is returned.
+fn ir_opt_apply_strategy(func: IrFunction) -> IrFunction with Mut, Panic, Div {
+    let vreg_offset = ir_opt_max_vreg_ref(&func) + 1
+    let label_offset = ir_opt_max_label_ref(&func) + 1
+    let merge_result_vreg = ir_opt_find_return_vreg_ref(&func)
 
-    // New label IDs beyond the original maximum — dispatch_label, instr_label, merge_label
-    let dispatch_label = label_offset
-    let instr_label    = label_offset + 1
-    let merge_label    = label_offset + 2
+    var out = ir_empty_function()
+    out.name = func.name
+    out.reg_count = func.reg_count + vreg_offset
+    out.label_count = func.label_count + 3
+    out.param_count = func.param_count
+    out.compile_strategy = func.compile_strategy
+    out.prof_counter_id = func.prof_counter_id
 
-    // Build the output instruction sequence
-    var out_instrs: [IrInstr; 128] = [ir_empty_instr(); 128]
-    var out_count: i64 = 0
-
-    // --- dispatch_block ---
-    out_count = ir_opt_append(&! out_instrs, out_count, ir_label(dispatch_label))
-
-    // Sprint 42: param_regs[0] is the hidden __validated param injected by
-    // ir_lower_inject_validated_param() in ir/lower.sio before user params are lowered.
-    // 1 → fast path (label 0), 0 → instrumented path (instr_label)
-    let validated_vreg = func.param_regs[0]
-    out_count = ir_opt_append(&! out_instrs, out_count, ir_branch_true(validated_vreg, 0))
-
-    out_count = ir_opt_append(&! out_instrs, out_count, ir_jump(instr_label))
-
-    // --- fast_path: original instructions; IrReturn → IrJump(merge_label) ---
-    var fi: i64 = 0
-    while fi < func.instr_count {
-        var orig = func.instrs[fi as usize]
-        if orig.op == IrOpcode::IrReturn {
-            // Rewrite return to jump to merge block
-            orig = ir_jump(merge_label)
-        }
-        out_count = ir_opt_append(&! out_instrs, out_count, orig)
-        fi = fi + 1
-    }
-    // Fallthrough guard for fast path (in case original had no explicit return)
-    out_count = ir_opt_append(&! out_instrs, out_count, ir_jump(merge_label))
-
-    // --- instrumented_path: IrLabel + cloned instrs + IrJump ---
-    out_count = ir_opt_append(&! out_instrs, out_count, ir_label(instr_label))
-
-    // Sprint 44: inject profiling counter at instrumented path entry
-    if func.prof_counter_id >= 0 {
-        out_count = ir_opt_append(&! out_instrs, out_count, ir_prof_counter(func.prof_counter_id))
+    var pi: i64 = 0
+    while pi < 64 {
+        out.param_regs[pi as usize] = func.param_regs[pi as usize]
+        pi = pi + 1
     }
 
-    var ii: i64 = 0
-    while ii < func.instr_count {
-        var cloned = ir_opt_clone_instr(func.instrs[ii as usize], vreg_offset, label_offset, func.param_count)
-        if cloned.op == IrOpcode::IrReturn {
-            cloned = ir_jump(merge_label)
-        }
-        out_count = ir_opt_append(&! out_instrs, out_count, cloned)
-        ii = ii + 1
+    out.instr_count = ir_opt_apply_strategy_instrs_into(
+        &func,
+        &! out.instrs,
+        vreg_offset,
+        label_offset,
+        0,
+        merge_result_vreg
+    )
+    out
+}
+
+fn ir_opt_apply_strategy_box_ref(func: &IrFunction) -> Box<IrFunction> with Mut, Panic, Div, Alloc {
+    Box::new(ir_opt_apply_strategy((*func)))
+}
+
+fn ir_opt_apply_strategy_box(func: IrFunction) -> Box<IrFunction> with Mut, Panic, Div, Alloc {
+    Box::new(ir_opt_apply_strategy(func))
+}
+
+fn ir_opt_apply_strategy_into_ref(func: &IrFunction, out: &! IrFunction) with Mut, Panic, Div {
+    let transformed = ir_opt_apply_strategy((*func))
+    var i: i64 = 0
+    while i < transformed.instr_count {
+        (*out).instrs[i as usize] = transformed.instrs[i as usize]
+        i = i + 1
     }
-    // Fallthrough guard for instrumented path
-    out_count = ir_opt_append(&! out_instrs, out_count, ir_jump(merge_label))
-
-    // --- merge_block: IrLabel + IrReturn ---
-    out_count = ir_opt_append(&! out_instrs, out_count, ir_label(merge_label))
-
-    // Return the actual result vreg from the original function's IrReturn
-    // (not hardcoded to vreg 0 — the result could be in any vreg).
-    // ir_opt_find_return_vreg() scans for IrReturn.src1 in the original func.
-    let merge_result_vreg = ir_opt_find_return_vreg(func)
-    out_count = ir_opt_append(&! out_instrs, out_count, ir_return(merge_result_vreg))
-
-    // Produce the transformed IrFunction
-    // reg_count expanded to cover instrumented-path vregs (vreg_offset doubles the range)
-    IrFunction {
-        name:             func.name,
-        instrs:           out_instrs,
-        instr_count:      out_count,
-        reg_count:        func.reg_count + vreg_offset,
-        label_count:      func.label_count + 3,   // dispatch + instr + merge
-        param_count:      func.param_count,
-        param_regs:       func.param_regs,
-        compile_strategy: func.compile_strategy,
-        prof_counter_id: func.prof_counter_id,
+    var pi: i64 = 0
+    while pi < 64 {
+        (*out).param_regs[pi as usize] = transformed.param_regs[pi as usize]
+        pi = pi + 1
     }
 }

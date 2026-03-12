@@ -22,6 +22,10 @@
 //   Cooper & Torczon: "Engineering a Compiler" (2011), Ch. 7-8
 //   Wolfe: "High Performance Compilers for Parallel Computing" (1996)
 
+module ir::loop_opt
+
+use ir::ir::*
+
 // ============================================================================
 // Section 1: Constants
 // ============================================================================
@@ -3570,4 +3574,692 @@ fn lopt_run_tests() -> i32 with IO, Mut, Div, Panic {
     } else {
         1
     }
+}
+
+// ============================================================================
+// Section 26: Compiler-facing real-IR LICM (Sprint 52)
+// ============================================================================
+
+let LOPT_IR_MAX_BLOCKS: i64 = 128
+let LOPT_IR_MAX_LABELS: i64 = 128
+let LOPT_IR_MAX_REGS: i64 = 256
+
+struct LoptIrBlock {
+    id: i64,
+    instr_start: i64,
+    instr_end: i64,
+    label_id: i64,
+    succs: [i64; 8],
+    succ_count: i64,
+    preds: [i64; 8],
+    pred_count: i64,
+}
+
+struct LoptIrCfg {
+    blocks: [LoptIrBlock; 128],
+    block_count: i64,
+    instr_block: [i64; 128],
+    label_ids: [i64; 128],
+    label_blocks: [i64; 128],
+    label_count: i64,
+    dom: [[bool; 128]; 128],
+}
+
+struct LoptFunctionResult {
+    func: IrFunction,
+    changed: bool,
+    invariants_hoisted: i64,
+}
+
+struct LoptScheduleResult {
+    assigned: [i64; 128],
+    total: i64,
+}
+
+struct LoptModuleResult {
+    module: IrModule,
+    functions_processed: i64,
+    functions_changed: i64,
+    invariants_hoisted: i64,
+}
+
+fn lopt_ir_block_new() -> LoptIrBlock {
+    LoptIrBlock {
+        id: LOPT_INVALID,
+        instr_start: 0,
+        instr_end: 0,
+        label_id: LOPT_INVALID,
+        succs: [LOPT_INVALID; 8],
+        succ_count: 0,
+        preds: [LOPT_INVALID; 8],
+        pred_count: 0,
+    }
+}
+
+fn lopt_ir_cfg_new() -> LoptIrCfg {
+    LoptIrCfg {
+        blocks: [lopt_ir_block_new(); 128],
+        block_count: 0,
+        instr_block: [LOPT_INVALID; 128],
+        label_ids: [LOPT_INVALID; 128],
+        label_blocks: [LOPT_INVALID; 128],
+        label_count: 0,
+        dom: [[false; 128]; 128],
+    }
+}
+
+fn lopt_function_result_new(func: IrFunction) -> LoptFunctionResult {
+    LoptFunctionResult {
+        func: func,
+        changed: false,
+        invariants_hoisted: 0,
+    }
+}
+
+fn lopt_schedule_result_new(assigned: [i64; 128]) -> LoptScheduleResult {
+    LoptScheduleResult {
+        assigned: assigned,
+        total: 0,
+    }
+}
+
+fn lopt_ir_is_terminator(op: IrOpcode) -> bool {
+    match op {
+        IrOpcode::IrJump => true,
+        IrOpcode::IrBranchTrue => true,
+        IrOpcode::IrBranchFalse => true,
+        IrOpcode::IrReturn => true,
+        _ => false,
+    }
+}
+
+fn lopt_ir_is_label(op: IrOpcode) -> bool {
+    match op {
+        IrOpcode::IrLabel => true,
+        _ => false,
+    }
+}
+
+fn lopt_ir_is_jump(op: IrOpcode) -> bool {
+    match op {
+        IrOpcode::IrJump => true,
+        _ => false,
+    }
+}
+
+fn lopt_ir_is_branch(op: IrOpcode) -> bool {
+    match op {
+        IrOpcode::IrBranchTrue => true,
+        IrOpcode::IrBranchFalse => true,
+        _ => false,
+    }
+}
+
+fn lopt_ir_is_return(op: IrOpcode) -> bool {
+    match op {
+        IrOpcode::IrReturn => true,
+        _ => false,
+    }
+}
+
+fn lopt_ir_has_dst(op: IrOpcode) -> bool {
+    match op {
+        IrOpcode::IrReturn => false,
+        IrOpcode::IrJump => false,
+        IrOpcode::IrBranchTrue => false,
+        IrOpcode::IrBranchFalse => false,
+        IrOpcode::IrFieldSet => false,
+        IrOpcode::IrIndexSet => false,
+        IrOpcode::IrLabel => false,
+        IrOpcode::IrNop => false,
+        IrOpcode::IrHandleBegin => false,
+        IrOpcode::IrHandleEnd => false,
+        IrOpcode::IrDebugGuard => false,
+        IrOpcode::IrProfCounter => false,
+        _ => true,
+    }
+}
+
+fn lopt_ir_is_hoistable_opcode(op: IrOpcode) -> bool {
+    match op {
+        IrOpcode::IrLoadImm => true,
+        IrOpcode::IrLoadFloat => true,
+        IrOpcode::IrLoadBool => true,
+        IrOpcode::IrCopy => true,
+        IrOpcode::IrBinOp => true,
+        IrOpcode::IrUnaryOp => true,
+        _ => false,
+    }
+}
+
+fn lopt_ir_contains8(arr: [i64; 8], count: i64, value: i64) -> bool with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < count {
+        if arr[i as usize] == value {
+            return true
+        }
+        i = i + 1
+    }
+    false
+}
+
+fn lopt_ir_record_label(cfg: &! LoptIrCfg, label_id: i64, block_id: i64) with Mut, Panic, Div {
+    if cfg.label_count >= LOPT_IR_MAX_LABELS {
+        return
+    }
+    cfg.label_ids[cfg.label_count as usize] = label_id
+    cfg.label_blocks[cfg.label_count as usize] = block_id
+    cfg.label_count = cfg.label_count + 1
+}
+
+fn lopt_ir_lookup_label_block(cfg: &LoptIrCfg, label_id: i64) -> i64 with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < cfg.label_count {
+        if cfg.label_ids[i as usize] == label_id {
+            return cfg.label_blocks[i as usize]
+        }
+        i = i + 1
+    }
+    LOPT_INVALID
+}
+
+fn lopt_ir_block_in_body(body: [bool; 128], block_id: i64) -> bool {
+    if block_id < 0 || block_id >= LOPT_IR_MAX_BLOCKS {
+        return false
+    }
+    body[block_id as usize]
+}
+
+fn lopt_ir_add_edge(cfg: LoptIrCfg, from: i64, to: i64) -> LoptIrCfg with Mut, Panic, Div {
+    var result = cfg
+    if from < 0 || from >= result.block_count {
+        return result
+    }
+    if to < 0 || to >= result.block_count {
+        return result
+    }
+
+    var from_blk = result.blocks[from as usize]
+    if lopt_ir_contains8(from_blk.succs, from_blk.succ_count, to) == false {
+        let sc = from_blk.succ_count
+        if sc < 8 {
+            from_blk.succs[sc as usize] = to
+            from_blk.succ_count = sc + 1
+        }
+    }
+    result.blocks[from as usize] = from_blk
+
+    var to_blk = result.blocks[to as usize]
+    if lopt_ir_contains8(to_blk.preds, to_blk.pred_count, from) == false {
+        let pc = to_blk.pred_count
+        if pc < 8 {
+            to_blk.preds[pc as usize] = from
+            to_blk.pred_count = pc + 1
+        }
+    }
+    result.blocks[to as usize] = to_blk
+    result
+}
+
+fn lopt_ir_build_cfg(func: &IrFunction) -> LoptIrCfg with Mut, Panic, Div {
+    var cfg = lopt_ir_cfg_new()
+    if func.instr_count <= 0 {
+        return cfg
+    }
+
+    var starts: [i64; 128] = [LOPT_INVALID; 128]
+    var start_count: i64 = 0
+    starts[0] = 0
+    start_count = 1
+
+    var i: i64 = 1
+    while i < func.instr_count {
+        let prev = func.instrs[(i - 1) as usize]
+        let cur = func.instrs[i as usize]
+        var is_start = false
+        if lopt_ir_is_label(cur.op) {
+            is_start = true
+        }
+        if lopt_ir_is_terminator(prev.op) {
+            is_start = true
+        }
+        if is_start && starts[(start_count - 1) as usize] != i && start_count < LOPT_IR_MAX_BLOCKS {
+            starts[start_count as usize] = i
+            start_count = start_count + 1
+        }
+        i = i + 1
+    }
+
+    var bi: i64 = 0
+    while bi < start_count {
+        let start = starts[bi as usize]
+        let end = if bi + 1 < start_count { starts[(bi + 1) as usize] } else { func.instr_count }
+        var blk = lopt_ir_block_new()
+        blk.id = bi
+        blk.instr_start = start
+        blk.instr_end = end
+        if start < func.instr_count && lopt_ir_is_label(func.instrs[start as usize].op) {
+            blk.label_id = func.instrs[start as usize].label_id
+            lopt_ir_record_label(&! cfg, blk.label_id, bi)
+        }
+        cfg.blocks[bi as usize] = blk
+        cfg.block_count = bi + 1
+
+        var ii: i64 = start
+        while ii < end {
+            cfg.instr_block[ii as usize] = bi
+            ii = ii + 1
+        }
+        bi = bi + 1
+    }
+
+    bi = 0
+    while bi < cfg.block_count {
+        let blk = cfg.blocks[bi as usize]
+        if blk.instr_end > blk.instr_start {
+            let term = func.instrs[(blk.instr_end - 1) as usize]
+            if lopt_ir_is_jump(term.op) {
+                let target = lopt_ir_lookup_label_block(&cfg, term.label_id)
+                cfg = lopt_ir_add_edge(cfg, bi, target)
+            } else if lopt_ir_is_branch(term.op) {
+                let target = lopt_ir_lookup_label_block(&cfg, term.label_id)
+                cfg = lopt_ir_add_edge(cfg, bi, target)
+                if bi + 1 < cfg.block_count {
+                    cfg = lopt_ir_add_edge(cfg, bi, bi + 1)
+                }
+            } else if lopt_ir_is_return(term.op) == false {
+                if bi + 1 < cfg.block_count {
+                    cfg = lopt_ir_add_edge(cfg, bi, bi + 1)
+                }
+            }
+        }
+        bi = bi + 1
+    }
+
+    cfg
+}
+
+fn lopt_ir_compute_dominators(cfg: &! LoptIrCfg) with Mut, Panic, Div {
+    var b: i64 = 0
+    while b < cfg.block_count {
+        var d: i64 = 0
+        while d < cfg.block_count {
+            if b == 0 {
+                cfg.dom[b as usize][d as usize] = d == 0
+            } else {
+                cfg.dom[b as usize][d as usize] = true
+            }
+            d = d + 1
+        }
+        b = b + 1
+    }
+
+    var changed = true
+    var guard: i64 = 0
+    while changed && guard < 128 {
+        changed = false
+        guard = guard + 1
+        b = 1
+        while b < cfg.block_count {
+            var new_dom: [bool; 128] = [false; 128]
+            var d: i64 = 0
+            while d < cfg.block_count {
+                new_dom[d as usize] = true
+                d = d + 1
+            }
+
+            if cfg.blocks[b as usize].pred_count == 0 {
+                d = 0
+                while d < cfg.block_count {
+                    new_dom[d as usize] = false
+                    d = d + 1
+                }
+            } else {
+                var pi: i64 = 0
+                while pi < cfg.blocks[b as usize].pred_count {
+                    let pred = cfg.blocks[b as usize].preds[pi as usize]
+                    d = 0
+                    while d < cfg.block_count {
+                        new_dom[d as usize] = new_dom[d as usize] && cfg.dom[pred as usize][d as usize]
+                        d = d + 1
+                    }
+                    pi = pi + 1
+                }
+            }
+            new_dom[b as usize] = true
+
+            d = 0
+            while d < cfg.block_count {
+                if cfg.dom[b as usize][d as usize] != new_dom[d as usize] {
+                    cfg.dom[b as usize][d as usize] = new_dom[d as usize]
+                    changed = true
+                }
+                d = d + 1
+            }
+            b = b + 1
+        }
+    }
+}
+
+fn lopt_ir_is_back_edge(cfg: &LoptIrCfg, from: i64, to: i64) -> bool {
+    if from < 0 || from >= cfg.block_count {
+        return false
+    }
+    if to < 0 || to >= cfg.block_count {
+        return false
+    }
+    cfg.dom[from as usize][to as usize]
+}
+
+fn lopt_ir_compute_loop_body(cfg: &LoptIrCfg, header: i64, latch: i64) -> ([bool; 128], i64) with Mut, Panic, Div {
+    var body: [bool; 128] = [false; 128]
+    var worklist: [i64; 128] = [LOPT_INVALID; 128]
+    var head: i64 = 0
+    var tail: i64 = 0
+    var count: i64 = 0
+
+    if header >= 0 && header < cfg.block_count {
+        body[header as usize] = true
+        count = 1
+    }
+    if latch >= 0 && latch < cfg.block_count && latch != header {
+        body[latch as usize] = true
+        worklist[tail as usize] = latch
+        tail = tail + 1
+        count = count + 1
+    }
+
+    while head < tail {
+        let cur = worklist[head as usize]
+        head = head + 1
+        var pi: i64 = 0
+        while pi < cfg.blocks[cur as usize].pred_count {
+            let pred = cfg.blocks[cur as usize].preds[pi as usize]
+            if pred >= 0 && pred < cfg.block_count && body[pred as usize] == false {
+                body[pred as usize] = true
+                if tail < LOPT_IR_MAX_BLOCKS {
+                    worklist[tail as usize] = pred
+                    tail = tail + 1
+                }
+                count = count + 1
+            }
+            pi = pi + 1
+        }
+    }
+
+    (body, count)
+}
+
+fn lopt_ir_header_backedge_counts(cfg: &LoptIrCfg) -> [i64; 128] with Mut, Panic, Div {
+    var counts: [i64; 128] = [0; 128]
+    var b: i64 = 0
+    while b < cfg.block_count {
+        var si: i64 = 0
+        while si < cfg.blocks[b as usize].succ_count {
+            let succ = cfg.blocks[b as usize].succs[si as usize]
+            if lopt_ir_is_back_edge(cfg, b, succ) {
+                counts[succ as usize] = counts[succ as usize] + 1
+            }
+            si = si + 1
+        }
+        b = b + 1
+    }
+    counts
+}
+
+fn lopt_ir_loop_has_nested_header(header_counts: [i64; 128], body: [bool; 128], header: i64, block_count: i64) -> bool {
+    var b: i64 = 0
+    while b < block_count {
+        if b != header && body[b as usize] && header_counts[b as usize] > 0 {
+            return true
+        }
+        b = b + 1
+    }
+    false
+}
+
+fn lopt_ir_find_preheader(cfg: &LoptIrCfg, body: [bool; 128], header: i64) -> i64 with Mut, Panic, Div {
+    if header < 0 || header >= cfg.block_count {
+        return LOPT_INVALID
+    }
+    var found = LOPT_INVALID
+    var count: i64 = 0
+    var pi: i64 = 0
+    while pi < cfg.blocks[header as usize].pred_count {
+        let pred = cfg.blocks[header as usize].preds[pi as usize]
+        if lopt_ir_block_in_body(body, pred) == false {
+            found = pred
+            count = count + 1
+        }
+        pi = pi + 1
+    }
+    if count == 1 { found } else { LOPT_INVALID }
+}
+
+fn lopt_ir_reg_is_invariant(reg: i64, body: [bool; 128], def_instr: [i64; 256], def_block: [i64; 256], hoisted_defs: [bool; 256]) -> bool with Mut, Panic, Div {
+    if reg < 0 {
+        return true
+    }
+    if reg >= LOPT_IR_MAX_REGS {
+        return false
+    }
+    if hoisted_defs[reg as usize] {
+        return true
+    }
+    let di = def_instr[reg as usize]
+    if di == LOPT_INVALID {
+        return true
+    }
+    if di == -2 {
+        return false
+    }
+    let db = def_block[reg as usize]
+    if db < 0 {
+        return true
+    }
+    lopt_ir_block_in_body(body, db) == false
+}
+
+fn lopt_ir_operands_invariant(instr: IrInstr, body: [bool; 128], def_instr: [i64; 256], def_block: [i64; 256], hoisted_defs: [bool; 256]) -> bool with Mut, Panic, Div {
+    let s1_ok = lopt_ir_reg_is_invariant(instr.src1, body, def_instr, def_block, hoisted_defs)
+    let s2_ok = lopt_ir_reg_is_invariant(instr.src2, body, def_instr, def_block, hoisted_defs)
+    s1_ok && s2_ok
+}
+
+fn lopt_ir_build_defs(func: &IrFunction, cfg: &LoptIrCfg) -> ([i64; 256], [i64; 256]) with Mut, Panic, Div {
+    var def_instr: [i64; 256] = [LOPT_INVALID; 256]
+    var def_block: [i64; 256] = [LOPT_INVALID; 256]
+    var i: i64 = 0
+    while i < func.instr_count {
+        let instr = func.instrs[i as usize]
+        if lopt_ir_has_dst(instr.op) && instr.dst >= 0 && instr.dst < LOPT_IR_MAX_REGS {
+            if def_instr[instr.dst as usize] == LOPT_INVALID {
+                def_instr[instr.dst as usize] = i
+                def_block[instr.dst as usize] = cfg.instr_block[i as usize]
+            } else {
+                def_instr[instr.dst as usize] = -2
+                def_block[instr.dst as usize] = -2
+            }
+        }
+        i = i + 1
+    }
+    (def_instr, def_block)
+}
+
+fn lopt_ir_schedule_loop_hoists(func: &IrFunction, cfg: &LoptIrCfg, body: [bool; 128], preheader: i64, assigned: [i64; 128]) -> LoptScheduleResult with Mut, Panic, Div {
+    var result = lopt_schedule_result_new(assigned)
+    let defs = lopt_ir_build_defs(func, cfg)
+    let def_instr = defs.0
+    let def_block = defs.1
+    var hoisted_defs: [bool; 256] = [false; 256]
+    var changed = true
+    var guard: i64 = 0
+
+    while changed && guard < 128 {
+        changed = false
+        guard = guard + 1
+        var i: i64 = 0
+        while i < func.instr_count {
+            if result.assigned[i as usize] == LOPT_INVALID {
+                let block_id = cfg.instr_block[i as usize]
+                if lopt_ir_block_in_body(body, block_id) {
+                    let instr = func.instrs[i as usize]
+                    if lopt_ir_is_hoistable_opcode(instr.op) {
+                        if lopt_ir_operands_invariant(instr, body, def_instr, def_block, hoisted_defs) {
+                            result.assigned[i as usize] = preheader
+                            if instr.dst >= 0 && instr.dst < LOPT_IR_MAX_REGS {
+                                hoisted_defs[instr.dst as usize] = true
+                            }
+                            result.total = result.total + 1
+                            changed = true
+                        }
+                    }
+                }
+            }
+            i = i + 1
+        }
+    }
+
+    result
+}
+
+fn lopt_ir_count_assigned(assigned: [i64; 128]) -> i64 {
+    var total: i64 = 0
+    var i: i64 = 0
+    while i < 128 {
+        if assigned[i as usize] != LOPT_INVALID {
+            total = total + 1
+        }
+        i = i + 1
+    }
+    total
+}
+
+fn lopt_ir_rewrite_function(func: IrFunction, cfg: &LoptIrCfg, assigned: [i64; 128]) -> IrFunction with Mut, Panic, Div {
+    var result = func
+    var out_instrs: [IrInstr; 128] = [ir_nop(); 128]
+    var out_count: i64 = 0
+
+    var b: i64 = 0
+    while b < cfg.block_count {
+        let blk = cfg.blocks[b as usize]
+        var inserted = false
+        let term_idx = if blk.instr_end > blk.instr_start {
+            let term = func.instrs[(blk.instr_end - 1) as usize]
+            if lopt_ir_is_terminator(term.op) { blk.instr_end - 1 } else { LOPT_INVALID }
+        } else { LOPT_INVALID }
+
+        var i: i64 = blk.instr_start
+        while i < blk.instr_end {
+            if term_idx != LOPT_INVALID && i == term_idx && inserted == false {
+                var hi: i64 = 0
+                while hi < func.instr_count {
+                    if assigned[hi as usize] == b && out_count < 128 {
+                        out_instrs[out_count as usize] = func.instrs[hi as usize]
+                        out_count = out_count + 1
+                    }
+                    hi = hi + 1
+                }
+                inserted = true
+            }
+            var instr = func.instrs[i as usize]
+            if assigned[i as usize] != LOPT_INVALID {
+                instr = ir_nop()
+            }
+            if out_count < 128 {
+                out_instrs[out_count as usize] = instr
+                out_count = out_count + 1
+            }
+            i = i + 1
+        }
+
+        if inserted == false {
+            var hi: i64 = 0
+            while hi < func.instr_count {
+                if assigned[hi as usize] == b && out_count < 128 {
+                    out_instrs[out_count as usize] = func.instrs[hi as usize]
+                    out_count = out_count + 1
+                }
+                hi = hi + 1
+            }
+        }
+        b = b + 1
+    }
+
+    result.instrs = out_instrs
+    result.instr_count = out_count
+    result
+}
+
+fn lopt_optimize_function(func: IrFunction) -> LoptFunctionResult with Mut, Panic, Div {
+    var result = lopt_function_result_new(func)
+    if func.instr_count <= 0 {
+        return result
+    }
+
+    var cfg = lopt_ir_build_cfg(&func)
+    if cfg.block_count <= 1 {
+        return result
+    }
+    lopt_ir_compute_dominators(&! cfg)
+
+    let header_counts = lopt_ir_header_backedge_counts(&cfg)
+    var assigned: [i64; 128] = [LOPT_INVALID; 128]
+    var total_hoisted: i64 = 0
+
+    var b: i64 = 0
+    while b < cfg.block_count {
+        var si: i64 = 0
+        while si < cfg.blocks[b as usize].succ_count {
+            let succ = cfg.blocks[b as usize].succs[si as usize]
+            if lopt_ir_is_back_edge(&cfg, b, succ) && header_counts[succ as usize] == 1 {
+                let body_pair = lopt_ir_compute_loop_body(&cfg, succ, b)
+                let body = body_pair.0
+                if lopt_ir_loop_has_nested_header(header_counts, body, succ, cfg.block_count) == false {
+                    let preheader = lopt_ir_find_preheader(&cfg, body, succ)
+                    if preheader != LOPT_INVALID {
+                        let schedule = lopt_ir_schedule_loop_hoists(&func, &cfg, body, preheader, assigned)
+                        assigned = schedule.assigned
+                        total_hoisted = total_hoisted + schedule.total
+                    }
+                }
+            }
+            si = si + 1
+        }
+        b = b + 1
+    }
+
+    if total_hoisted <= 0 {
+        return result
+    }
+    if func.instr_count + total_hoisted > 128 {
+        return result
+    }
+
+    result.func = lopt_ir_rewrite_function(func, &cfg, assigned)
+    result.changed = true
+    result.invariants_hoisted = total_hoisted
+    result
+}
+
+fn lopt_optimize_module(module: IrModule) -> LoptModuleResult with Mut, Panic, Div {
+    var result = LoptModuleResult {
+        module: module,
+        functions_processed: module.fn_count,
+        functions_changed: 0,
+        invariants_hoisted: 0,
+    }
+
+    var fi: i64 = 0
+    while fi < result.module.fn_count {
+        let fn_result = lopt_optimize_function(result.module.functions[fi as usize])
+        result.module.functions[fi as usize] = fn_result.func
+        if fn_result.changed {
+            result.functions_changed = result.functions_changed + 1
+            result.invariants_hoisted = result.invariants_hoisted + fn_result.invariants_hoisted
+        }
+        fi = fi + 1
+    }
+
+    result
 }

@@ -9,6 +9,8 @@ module native::frame
 use native::encode::*
 use native::reloc::{RelocationTable, reloc_table_new, patch_u32_le}
 use native::elf::{StringTable, string_table_new, SymbolData, symbol_data_new}
+use native::runtime_context::{runtime_context_global_slot_size}
+use native::target_policy::{native_target_policy_x86_allocatable_mask_for_reg}
 
 // Stack frame state for a single function
 struct StackFrame {
@@ -77,14 +79,51 @@ fn zmm_stack_slot_offset(slot_index: i64) -> i64 {
     -(slot_index + 1) * 64
 }
 
-// Emit function prologue: push r15, r14, r13, r12; push rbp; mov rbp, rsp; sub rsp, <frame_size>
-// Sprint 62: 4 callee-saved pregs (r15/r14/r13/r12). 5 pushes = 40 bytes → rsp 16-aligned for CALLs.
-fn emit_prologue(buf: CodeBuffer, frame_size: i64) -> CodeBuffer with Mut, Panic, Div {
+fn X86_ALLOCATABLE_R12_MASK() -> i64 { native_target_policy_x86_allocatable_mask_for_reg(12) }
+fn X86_ALLOCATABLE_R13_MASK() -> i64 { native_target_policy_x86_allocatable_mask_for_reg(13) }
+fn X86_ALLOCATABLE_R14_MASK() -> i64 { native_target_policy_x86_allocatable_mask_for_reg(14) }
+fn X86_ALLOCATABLE_R15_MASK() -> i64 { native_target_policy_x86_allocatable_mask_for_reg(15) }
+
+fn x86_allocatable_mask_for_reg(reg: i64) -> i64 {
+    native_target_policy_x86_allocatable_mask_for_reg(reg)
+}
+
+fn x86_allocatable_preg_count(mask: i64) -> i64 {
+    var count: i64 = 0
+    if (mask & X86_ALLOCATABLE_R12_MASK()) != 0 { count = count + 1 }
+    if (mask & X86_ALLOCATABLE_R13_MASK()) != 0 { count = count + 1 }
+    if (mask & X86_ALLOCATABLE_R14_MASK()) != 0 { count = count + 1 }
+    if (mask & X86_ALLOCATABLE_R15_MASK()) != 0 { count = count + 1 }
+    count
+}
+
+fn nc_used_allocatable_preg_mask(nc: NativeCompiler, reg_count: i64) -> i64 {
+    var mask: i64 = 0
+    var v: i64 = 0
+    while v < reg_count {
+        mask = mask | x86_allocatable_mask_for_reg(nc.vreg_to_preg[v as usize])
+        v = v + 1
+    }
+    mask
+}
+
+// SysV x86-64 requires rsp%16==0 before an internal CALL.
+// With push rbp always present, odd numbers of saved allocatable regs need an extra 8-byte pad.
+fn x86_align_frame_size_for_calls(frame_size: i64, preg_mask: i64) -> i64 with Mut, Panic {
+    if (x86_allocatable_preg_count(preg_mask) % 2) == 0 {
+        frame_size
+    } else {
+        frame_size + 8
+    }
+}
+
+// Emit function prologue for the allocatable preg subset actually used by the lowered function.
+fn emit_prologue_with_preg_mask(buf: CodeBuffer, frame_size: i64, preg_mask: i64) -> CodeBuffer with Mut, Panic, Div {
     var b = buf
-    b = emit_push_r15(b)       // preg 0
-    b = emit_push_r14(b)       // preg 1
-    b = emit_push_r13(b)       // preg 2
-    b = emit_push_r12(b)       // preg 3
+    if (preg_mask & X86_ALLOCATABLE_R15_MASK()) != 0 { b = emit_push_r15(b) }
+    if (preg_mask & X86_ALLOCATABLE_R14_MASK()) != 0 { b = emit_push_r14(b) }
+    if (preg_mask & X86_ALLOCATABLE_R13_MASK()) != 0 { b = emit_push_r13(b) }
+    if (preg_mask & X86_ALLOCATABLE_R12_MASK()) != 0 { b = emit_push_r12(b) }
     b = emit_push_rbp(b)
     b = emit_mov_rbp_rsp(b)
     if frame_size > 0 {
@@ -93,17 +132,38 @@ fn emit_prologue(buf: CodeBuffer, frame_size: i64) -> CodeBuffer with Mut, Panic
     b
 }
 
-// Emit function epilogue: mov rsp, rbp; pop rbp; pop r12, r13, r14, r15; ret
-fn emit_epilogue(buf: CodeBuffer) -> CodeBuffer with Mut, Panic, Div {
+fn emit_epilogue_with_preg_mask(buf: CodeBuffer, preg_mask: i64) -> CodeBuffer with Mut, Panic, Div {
     var b = buf
     b = emit_mov_rsp_rbp(b)
     b = emit_pop_rbp(b)
-    b = emit_pop_r12(b)        // preg 3
-    b = emit_pop_r13(b)        // preg 2
-    b = emit_pop_r14(b)        // preg 1
-    b = emit_pop_r15(b)        // preg 0
+    if (preg_mask & X86_ALLOCATABLE_R12_MASK()) != 0 { b = emit_pop_r12(b) }
+    if (preg_mask & X86_ALLOCATABLE_R13_MASK()) != 0 { b = emit_pop_r13(b) }
+    if (preg_mask & X86_ALLOCATABLE_R14_MASK()) != 0 { b = emit_pop_r14(b) }
+    if (preg_mask & X86_ALLOCATABLE_R15_MASK()) != 0 { b = emit_pop_r15(b) }
     b = emit_ret(b)
     b
+}
+
+// Compatibility wrappers for the existing low-level encoder tests.
+fn emit_prologue(buf: CodeBuffer, frame_size: i64) -> CodeBuffer with Mut, Panic, Div {
+    emit_prologue_with_preg_mask(
+        buf,
+        frame_size,
+        X86_ALLOCATABLE_R12_MASK() |
+        X86_ALLOCATABLE_R13_MASK() |
+        X86_ALLOCATABLE_R14_MASK() |
+        X86_ALLOCATABLE_R15_MASK()
+    )
+}
+
+fn emit_epilogue(buf: CodeBuffer) -> CodeBuffer with Mut, Panic, Div {
+    emit_epilogue_with_preg_mask(
+        buf,
+        X86_ALLOCATABLE_R12_MASK() |
+        X86_ALLOCATABLE_R13_MASK() |
+        X86_ALLOCATABLE_R14_MASK() |
+        X86_ALLOCATABLE_R15_MASK()
+    )
 }
 
 // Get local variable offset from rbp (negative offsets)
@@ -145,7 +205,7 @@ struct NativeCompiler {
     symbols: SymbolData,            // Function name symbol table for .symtab/.strtab
 
     // Module-level: function layout
-    fn_offsets: [i64; 32],         // function index -> code buffer offset
+    fn_offsets: [i64; 256],         // function index -> code buffer offset
     fn_count: i64,
 
     // Per-function: return jump patching
@@ -153,8 +213,8 @@ struct NativeCompiler {
     return_jump_count: i64,
 
     // Per-function: label tracking for branches
-    label_offsets: [i64; 64],      // label_id -> code offset (-1 = undefined)
-    label_patches: [LabelPatch; 64],
+    label_offsets: [i64; 256],      // label_id -> code offset (-1 = undefined)
+    label_patches: [LabelPatch; 256],
     label_patch_count: i64,
 
     // Per-function: frame info
@@ -164,7 +224,7 @@ struct NativeCompiler {
     entry_offset: i64,
 
     // Per-function: float register tracking (vreg index -> 1 if f64, 0 if i64)
-    is_float_reg: [i64; 64],
+    is_float_reg: [i64; 512],
 
     // Per-function: compile strategy (Sprint 38)
     // 0=standard, 1=aggressive, 2=precision_preserving, 3=instrumented,
@@ -172,17 +232,49 @@ struct NativeCompiler {
     current_strategy: i64,
 
     // Sprint 46: profiling counter metadata for exit-time dump
-    prof_counter_names: [i64; 32],     // .rodata offset for each counter's fn name
+    prof_counter_names: [i64; 256],     // .rodata offset for each counter's fn name
     prof_counter_count: i64,           // number of profiling counters
     prof_dump_fn_index: i64,           // fn_offsets index for __prof_dump function
 
     // Sprint 47: .sprof file output metadata
     prof_sprof_name_offset: i64,       // .rodata offset for "profile.sprof" filename
 
+    // RuntimeContext metadata (.data slot + counter base)
+    runtime_context_slot_offset: i64,
+    prof_counter_data_base: i64,
+    descriptor_data_offset: i64,
+    descriptor_count: i64,
+    gc_state_data_offset: i64,
+    stack_map_data_offset: i64,
+    deopt_state_data_offset: i64,
+
+    // Native-v2 runtime metadata publication
+    stack_map_record_count: i64,
+    safepoint_count: i64,
+    deopt_point_count: i64,
+    stack_map_fn_indices: [i64; 256],
+    stack_map_kinds: [i64; 256],
+    stack_map_machine_instr_indices: [i64; 256],
+    stack_map_code_offsets: [i64; 256],
+    stack_map_frame_sizes: [i64; 256],
+    stack_map_temp_counts: [i64; 256],
+    stack_map_spill_counts: [i64; 256],
+    stack_map_root_temp_counts: [i64; 256],
+    stack_map_root_spill_counts: [i64; 256],
+    stack_map_callee_saved_root_masks: [i64; 256],
+    stack_map_root_kind_masks: [i64; 256],
+    stack_map_deopt_ids: [i64; 256],
+    stack_map_tier_ids: [i64; 256],
+    stack_map_osr_eligibility: [i64; 256],
+
     // Sprint 52: register allocation — vreg → physical register mapping
     // RA_UNASSIGNED(-2) = not processed, RA_SPILLED(-1) = on stack, >=0 = x86 reg number
     vreg_to_preg: [i64; 512],
     vreg_spill_slots: [i64; 512],      // spill slot index when vreg_to_preg[v] == -1
+
+    // Native-v2 Machine IR frame metadata
+    current_machine_base_slots: i64,
+    current_machine_spill_count: i64,
 }
 
 fn compiler_new() -> NativeCompiler {
@@ -192,23 +284,49 @@ fn compiler_new() -> NativeCompiler {
         rodata: string_table_new(),
         data: string_table_new(),
         symbols: symbol_data_new(),
-        fn_offsets: [-1; 32],
+        fn_offsets: [-1; 256],
         fn_count: 0,
         return_jumps: [0; 16],
         return_jump_count: 0,
-        label_offsets: [-1; 64],
-        label_patches: [empty_label_patch(); 64],
+        label_offsets: [-1; 256],
+        label_patches: [empty_label_patch(); 256],
         label_patch_count: 0,
         current_frame_size: 0,
         entry_offset: 0,
-        is_float_reg: [0; 64],
+        is_float_reg: [0; 512],
         current_strategy: 0,
-        prof_counter_names: [0; 32],
+        prof_counter_names: [0; 256],
         prof_counter_count: 0,
         prof_dump_fn_index: -1,
         prof_sprof_name_offset: 0,
+        runtime_context_slot_offset: 0,
+        prof_counter_data_base: runtime_context_global_slot_size(),
+        descriptor_data_offset: -1,
+        descriptor_count: 0,
+        gc_state_data_offset: -1,
+        stack_map_data_offset: -1,
+        deopt_state_data_offset: -1,
+        stack_map_record_count: 0,
+        safepoint_count: 0,
+        deopt_point_count: 0,
+        stack_map_fn_indices: [0; 256],
+        stack_map_kinds: [0; 256],
+        stack_map_machine_instr_indices: [0; 256],
+        stack_map_code_offsets: [0; 256],
+        stack_map_frame_sizes: [0; 256],
+        stack_map_temp_counts: [0; 256],
+        stack_map_spill_counts: [0; 256],
+        stack_map_root_temp_counts: [0; 256],
+        stack_map_root_spill_counts: [0; 256],
+        stack_map_callee_saved_root_masks: [0; 256],
+        stack_map_root_kind_masks: [0; 256],
+        stack_map_deopt_ids: [0; 256],
+        stack_map_tier_ids: [0; 256],
+        stack_map_osr_eligibility: [0; 256],
         vreg_to_preg: [-2; 512],
         vreg_spill_slots: [-1; 512],
+        current_machine_base_slots: 0,
+        current_machine_spill_count: 0,
     }
 }
 
@@ -216,31 +334,55 @@ fn codegen_new() -> NativeCompiler {
     compiler_new()
 }
 
+fn reset_function_state_mut(nc: &! NativeCompiler) with Mut, Panic, Div {
+    (*nc).return_jump_count = 0
+    var i = 0
+    while i < 256 {
+        (*nc).label_offsets[i as usize] = -1
+        i = i + 1
+    }
+    (*nc).label_patch_count = 0
+    (*nc).current_frame_size = 0
+    var j = 0
+    while j < 512 {
+        (*nc).is_float_reg[j as usize] = 0
+        j = j + 1
+    }
+    (*nc).current_strategy = 0
+    var ra = 0
+    while ra < 512 {
+        (*nc).vreg_to_preg[ra as usize] = -2
+        (*nc).vreg_spill_slots[ra as usize] = -1
+        ra = ra + 1
+    }
+    (*nc).current_machine_base_slots = 0
+    (*nc).current_machine_spill_count = 0
+}
+
 // Reset per-function state before compiling a new function
 fn reset_function_state(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
     var c = nc
-    c.return_jump_count = 0
-    var i = 0
-    while i < 256 {
-        c.label_offsets[i as usize] = -1
-        i = i + 1
-    }
-    c.label_patch_count = 0
-    c.current_frame_size = 0
-    // Clear float register tracking
-    var j = 0
-    while j < 512 {
-        c.is_float_reg[j as usize] = 0
-        j = j + 1
-    }
-    c.current_strategy = 0
-    // Sprint 52: reset register allocation state
-    var ra = 0
-    while ra < 512 {
-        c.vreg_to_preg[ra as usize] = -2
-        c.vreg_spill_slots[ra as usize] = -1
-        ra = ra + 1
-    }
+    reset_function_state_mut(&! c)
+    c
+}
+
+fn emit_load_runtime_context_ptr_rbx(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
+    var c = nc
+    let disp_pos = c.code.len + 3
+    c.code = emit_mov_rbx_rip_disp32(c.code, 0)
+    c.relocs = add_data_section_reloc(c.relocs, disp_pos, c.runtime_context_slot_offset)
+    c
+}
+
+fn emit_load_runtime_context_field_rax(nc: NativeCompiler, field_offset: i64) -> NativeCompiler with Mut, Panic, Div {
+    var c = emit_load_runtime_context_ptr_rbx(nc)
+    c.code = emit_load_rax_mem_rbx_disp32(c.code, field_offset)
+    c
+}
+
+fn emit_store_rax_runtime_context_field(nc: NativeCompiler, field_offset: i64) -> NativeCompiler with Mut, Panic, Div {
+    var c = emit_load_runtime_context_ptr_rbx(nc)
+    c.code = emit_store_rax_mem_rbx_disp32(c.code, field_offset)
     c
 }
 
@@ -259,64 +401,80 @@ fn ir_slot_offset(vreg: i64) -> i64 {
 
 fn record_return_jump(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
     var c = nc
-    let jmp_pos = c.code.len
-    c.code = emit_jmp_rel32(c.code)
-    if c.return_jump_count < 16 {
-        c.return_jumps[c.return_jump_count as usize] = jmp_pos + 1
-        c.return_jump_count = c.return_jump_count + 1
-    }
+    record_return_jump_mut(&! c)
     c
+}
+
+fn record_return_jump_mut(nc: &! NativeCompiler) with Mut, Panic, Div {
+    let jmp_pos = (*nc).code.len
+    (*nc).code = emit_jmp_rel32((*nc).code)
+    if (*nc).return_jump_count < 16 {
+        (*nc).return_jumps[(*nc).return_jump_count as usize] = jmp_pos + 1
+        (*nc).return_jump_count = (*nc).return_jump_count + 1
+    }
 }
 
 fn patch_return_jumps(nc: NativeCompiler, epilogue_offset: i64) -> NativeCompiler with Mut, Panic, Div {
     var c = nc
-    var i = 0
-    while i < c.return_jump_count {
-        let imm_offset = c.return_jumps[i as usize]
-        let next_ip = imm_offset + 4
-        let rel = epilogue_offset - next_ip
-        c.code = patch_u32_le(c.code, imm_offset, rel)
-        i = i + 1
-    }
+    patch_return_jumps_mut(&! c, epilogue_offset)
     c
 }
 
-// ============================================================================
-// Label tracking for intra-function control flow
-// ============================================================================
+fn patch_return_jumps_mut(nc: &! NativeCompiler, epilogue_offset: i64) with Mut, Panic, Div {
+    var i = 0
+    while i < (*nc).return_jump_count {
+        let imm_offset = (*nc).return_jumps[i as usize]
+        let next_ip = imm_offset + 4
+        let rel = epilogue_offset - next_ip
+        (*nc).code = patch_u32_le((*nc).code, imm_offset, rel)
+        i = i + 1
+    }
+}
 
 fn record_label(nc: NativeCompiler, label_id: i64) -> NativeCompiler with Mut, Panic {
     var c = nc
-    if label_id >= 0 && label_id < 256 {
-        c.label_offsets[label_id as usize] = c.code.len
-    }
+    record_label_mut(&! c, label_id)
     c
+}
+
+fn record_label_mut(nc: &! NativeCompiler, label_id: i64) with Mut, Panic {
+    if label_id >= 0 && label_id < 256 {
+        (*nc).label_offsets[label_id as usize] = (*nc).code.len
+    }
 }
 
 fn record_label_patch(nc: NativeCompiler, label_id: i64, rel32_offset: i64) -> NativeCompiler with Mut, Panic {
     var c = nc
-    if c.label_patch_count < 256 {
-        c.label_patches[c.label_patch_count as usize] = LabelPatch {
+    record_label_patch_mut(&! c, label_id, rel32_offset)
+    c
+}
+
+fn record_label_patch_mut(nc: &! NativeCompiler, label_id: i64, rel32_offset: i64) with Mut, Panic {
+    if (*nc).label_patch_count < 256 {
+        (*nc).label_patches[(*nc).label_patch_count as usize] = LabelPatch {
             code_offset: rel32_offset,
             label_id: label_id,
         }
-        c.label_patch_count = c.label_patch_count + 1
+        (*nc).label_patch_count = (*nc).label_patch_count + 1
     }
-    c
+}
+
+fn patch_label_forwards_mut(nc: &! NativeCompiler) with Mut, Panic, Div {
+    var i = 0
+    while i < (*nc).label_patch_count {
+        let patch = (*nc).label_patches[i as usize]
+        let target = (*nc).label_offsets[patch.label_id as usize]
+        if target >= 0 {
+            let next_ip = patch.code_offset + 4
+            let rel = target - next_ip
+            (*nc).code = patch_u32_le((*nc).code, patch.code_offset, rel)
+        }
+        i = i + 1
+    }
 }
 
 fn patch_label_forwards(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
     var c = nc
-    var i = 0
-    while i < c.label_patch_count {
-        let patch = c.label_patches[i as usize]
-        let target = c.label_offsets[patch.label_id as usize]
-        if target >= 0 {
-            let next_ip = patch.code_offset + 4
-            let rel = target - next_ip
-            c.code = patch_u32_le(c.code, patch.code_offset, rel)
-        }
-        i = i + 1
-    }
+    patch_label_forwards_mut(&! c)
     c
 }

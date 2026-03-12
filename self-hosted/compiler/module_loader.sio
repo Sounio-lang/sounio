@@ -20,7 +20,9 @@ use resolve::symbol::*
 use resolve::scope::*
 use parser::mod::{parse_program_preloaded, count_items}
 use io::file_write::*
-use ir::lower::{IrProgramSummary, lower_program_to_ir_trace, lower_program_to_ir_probe_summary, lower_program_to_ir_with_epistemic_trace, lower_program_to_ir_summary_with_epistemic, lower_program_function_body_from_summary_with_epistemic, ir_empty_program_summary}
+use ir::lower::{IrProgramSummary, IrLowerBoxResult, lower_program_to_ir_trace, lower_program_to_ir_probe_summary, lower_program_to_ir_probe_summary_box_ref, lower_program_to_ir_with_epistemic_trace, lower_program_to_ir_summary_with_epistemic, lower_program_function_body_from_summary_with_epistemic, ir_empty_program_summary}
+use ir::lower::{lower_program_to_ir_with_epistemic_ref, lower_program_to_ir_ordered_boxed_trace, lower_program_to_ir_ordered_with_epistemic_boxed_trace_ref, lower_program_to_ir_with_epistemic_boxed_trace_ref}
+use ir::lower::{lower_program_function_body_from_program_with_epistemic_ref}
 use ir::serialize::{serialize_ir_module, deserialize_ir_module}
 use ir::inline::*
 use ir::opt_cleanup::*
@@ -1415,6 +1417,18 @@ fn compile_multimodule_program(main_path: string) -> BytecodeResult with IO, Mut
     bytecode_result_ok(serialized.0, serialized.1)
 }
 
+fn compile_multimodule_llvm(main_path: string, output_path: string, optimize: bool) -> i32 with IO, Mut, Div, Panic, Alloc {
+    print("LLVM multimodule backend is unavailable in this build: ")
+    print(main_path)
+    print(" -> ")
+    print(output_path)
+    if optimize {
+        print(" (opt)")
+    }
+    print("\n")
+    1
+}
+
 fn program_has_imports(prog: Program) -> bool with Mut, Panic, Div, Alloc {
     extract_imports_from_ast(prog).count > 0
 }
@@ -1432,8 +1446,8 @@ fn multimodule_native_trace_output_path() -> string {
     }
 }
 
-fn native_streaming_can_skip_checker(main_path: string, prog: Program) -> bool with Mut, Panic, Div, Alloc {
-    starts_with(main_path, "examples/render/") && extract_imports_from_ast(prog).count == 0
+fn native_streaming_can_skip_checker(main_path: string, prog: &Program) -> bool with Mut, Panic, Div, Alloc {
+    starts_with(main_path, "examples/render/") && extract_imports_from_ast(*prog).count == 0
 }
 
 fn native_streaming_diag_enabled() -> bool with IO, Mut, Panic, Div {
@@ -1442,7 +1456,7 @@ fn native_streaming_diag_enabled() -> bool with IO, Mut, Panic, Div {
 
 fn compile_singlemodule_native_streaming_result_from_program(
     main_path: string,
-    prog: Program,
+    prog: &Program,
     target_spec: NativeTargetSpec
 ) -> NativeCompileResult with IO, Mut, Div, Panic, Alloc {
     if target_spec.arch_id != ARCH_X86_64() || target_spec.os_id != OS_LINUX() {
@@ -1462,7 +1476,7 @@ fn compile_singlemodule_native_streaming_result_from_program(
         if native_streaming_diag_enabled() {
             print("native_streaming: typecheck_begin\n")
         }
-        if !check_program_epistemic_into(prog, &! epistemic) {
+        if !check_program_epistemic_into(*prog, &! epistemic) {
             return native_compile_result_error(ERR_BACKEND_NOT_IMPLEMENTED(), "type_check_failed")
         }
         if native_streaming_diag_enabled() {
@@ -1470,52 +1484,38 @@ fn compile_singlemodule_native_streaming_result_from_program(
         }
     }
 
-    if skip_checker {
-        if native_streaming_diag_enabled() {
-            print("native_streaming: direct_lower_begin\n")
-        }
-        var patch_stats = ir_empty_validated_patch_stats()
-        let lower_result = lower_program_to_ir_with_epistemic_trace(prog, epistemic, &! patch_stats)
-        if lower_result.had_error || lower_result.module.fn_count <= 0 {
-            return native_compile_result_error(ERR_BACKEND_NOT_IMPLEMENTED(), "render_fixture_ir_lowering_failed")
-        }
-        if native_streaming_diag_enabled() {
-            print("native_streaming: direct_lower_ok fn_count=")
-            print_int(lower_result.module.fn_count)
-            print("\n")
-            print("native_streaming: compile_native_begin\n")
-        }
-        return compile_native(&lower_result.module, target_spec)
-    }
+    // NOTE: skip_checker=true no longer takes a separate compile_native path.
+    // compile_native → compile_module_v2 → native_v2_build_machine_module returns
+    // a ~42 MB MachineModule by value, which is too slow under JIT.
+    // Instead, always use the streaming path that processes one function at a time.
 
     if native_streaming_diag_enabled() {
         print("native_streaming: summary_begin\n")
     }
-    let summary_result = lower_program_to_ir_summary_with_epistemic(prog, epistemic)
-    if summary_result.had_error || summary_result.summary.module.fn_count <= 0 {
+    let summary_result = lower_program_to_ir_probe_summary_box_ref(prog)
+    if summary_result.had_error {
+        return native_compile_result_error(ERR_BACKEND_NOT_IMPLEMENTED(), "ir_lowering_failed")
+    }
+    let summary_module = &(*summary_result.module)
+    if (*summary_module).fn_count <= 0 {
         return native_compile_result_error(ERR_BACKEND_NOT_IMPLEMENTED(), "ir_lowering_failed")
     }
     if native_streaming_diag_enabled() {
         print("native_streaming: summary_ok fn_count=")
-        print_int(summary_result.summary.module.fn_count)
+        print_int((*summary_module).fn_count)
         print("\n")
     }
 
-    var nc = compile_module_streaming_begin(compiler_new(), &summary_result.summary.module)
+    var nc = compile_module_streaming_begin(compiler_new(), summary_module)
     var fi: i64 = 0
-    while fi < summary_result.summary.module.fn_count {
-        let fn_name = summary_result.summary.module.functions[fi as usize].name
+    while fi < (*summary_module).fn_count {
+        let fn_name = (*summary_module).functions[fi as usize].name
         if native_streaming_diag_enabled() {
             print("native_streaming: body_begin fn=")
             print(str_from_bytes(fn_name.buf, fn_name.len))
             print("\n")
         }
-        let body_result = lower_program_function_body_from_summary_with_epistemic(
-            prog,
-            summary_result.summary,
-            epistemic,
-            fn_name
-        )
+        let body_result = lower_program_function_body_from_program_with_epistemic_ref(prog, epistemic, fn_name)
         if body_result.had_error {
             return native_compile_result_error(ERR_BACKEND_NOT_IMPLEMENTED(), "streaming_body_lower_failed")
         }
@@ -1541,7 +1541,7 @@ fn compile_singlemodule_native_streaming_result_from_program(
         fi = fi + 1
     }
 
-    nc = compile_module_streaming_finish(nc, &summary_result.summary.module)
+    nc = compile_module_streaming_finish(nc, summary_module)
     let elf = finalize_compiled_elf(nc, 4194304)
     native_compile_result_ok(elf.bytes, elf.len, FORMAT_ELF64())
 }
@@ -1554,7 +1554,7 @@ fn compile_multimodule_native_maybe_streaming(main_path: string, target_spec: Na
     if program_has_imports(prog) {
         return (false, native_compile_result_error(ERR_BACKEND_NOT_IMPLEMENTED(), "streaming_fallback_imports"))
     }
-    let result = compile_singlemodule_native_streaming_result_from_program(main_path, prog, target_spec)
+    let result = compile_singlemodule_native_streaming_result_from_program(main_path, &prog, target_spec)
     if !result.ok && starts_with(result.error_msg, "streaming_native_v2_unsupported:") {
         return (false, result)
     }
@@ -1727,18 +1727,18 @@ fn thin_module_summary_from_ir_module(
     module_idx: i64,
     variant_digest: i64,
     source_hash: i64,
-    module: IrModule
+    module: &IrModule
 ) -> ModuleSummary with Mut, Panic, Div {
     var summary = thin_empty_module_summary()
     summary.module_index = module_idx
     summary.variant_digest = variant_digest
     summary.source_hash = source_hash
-    summary.local_fn_count = module.fn_count
+    summary.local_fn_count = (*module).fn_count
     var i: i64 = 0
-    while i < module.fn_count && i < 256 {
-        summary.fn_names[i as usize] = module.functions[i as usize].name
-        summary.fn_param_counts[i as usize] = module.functions[i as usize].param_count
-        summary.fn_strategies[i as usize] = module.functions[i as usize].compile_strategy
+    while i < (*module).fn_count && i < 256 {
+        summary.fn_names[i as usize] = (*module).functions[i as usize].name
+        summary.fn_param_counts[i as usize] = (*module).functions[i as usize].param_count
+        summary.fn_strategies[i as usize] = (*module).functions[i as usize].compile_strategy
         i = i + 1
     }
     summary
@@ -1816,8 +1816,8 @@ fn thin_cache_path(cache_dir: string, kind: string, digest: i64, ext: string) ->
     cache_dir + "/" + kind + "_" + int_to_string(digest) + ext
 }
 
-fn thin_try_write_ir_cache(path: string, module: IrModule, stats: &! ThinCacheStats) -> bool with IO, Mut, Panic, Div, Alloc {
-    let pair = serialize_ir_module(module)
+fn thin_try_write_ir_cache(path: string, module: &IrModule, stats: &! ThinCacheStats) -> bool with IO, Mut, Panic, Div, Alloc {
+    let pair = serialize_ir_module(*module)
     if pair.1 <= 0 || pair.1 > 65536 {
         return false
     }
@@ -2278,19 +2278,24 @@ fn thin_load_or_build_module_summary(
         let cached = thin_try_read_ir_cache(cache_path, &! stats)
         if cached.0 {
             (*stats).summary_hits = (*stats).summary_hits + 1
-            let summary = thin_module_summary_from_ir_module(module_idx, variant.digest, node.source_hash, cached.1)
+            let cached_module = cached.1
+            let summary = thin_module_summary_from_ir_module(module_idx, variant.digest, node.source_hash, &cached_module)
             return (true, summary, ir_empty_program_summary())
         }
     }
 
     (*stats).summary_misses = (*stats).summary_misses + 1
     let lower_summary = lower_program_to_ir_summary_with_epistemic(load_module_file(node.file_path), ir_empty_epistemic_section())
-    if lower_summary.had_error || lower_summary.summary.module.fn_count <= 0 {
+    if lower_summary.had_error {
         return (false, thin_empty_module_summary(), ir_empty_program_summary())
     }
-    let summary = thin_module_summary_from_ir_module(module_idx, variant.digest, node.source_hash, lower_summary.summary.module)
+    let lower_summary_module = &(*lower_summary.summary.module)
+    if (*lower_summary_module).fn_count <= 0 {
+        return (false, thin_empty_module_summary(), ir_empty_program_summary())
+    }
+    let summary = thin_module_summary_from_ir_module(module_idx, variant.digest, node.source_hash, lower_summary_module)
     if str_len(cache_dir) > 0 && thin_cache_mode_can_write(cache_mode) {
-        let _ = thin_try_write_ir_cache(cache_path, lower_summary.summary.module, &! stats)
+        let _ = thin_try_write_ir_cache(cache_path, lower_summary_module, &! stats)
     }
     (true, summary, lower_summary.summary)
 }
@@ -2509,11 +2514,14 @@ fn thin_build_compiled_unit(
     print("\n")
     let owner_prog = load_module_file(graph.nodes[module_idx as usize].file_path)
     let owner_summary_pair = lower_program_to_ir_summary_with_epistemic(owner_prog, ir_empty_epistemic_section())
-    if owner_summary_pair.had_error || owner_summary_pair.summary.module.fn_count <= 0 {
+    if owner_summary_pair.had_error {
         return (false, thin_empty_compiled_unit(), ir_empty_module(), 0, 0, 0, 0, 0)
     }
     println("[thinlink] unit:summary_ready")
     let owner_summary = owner_summary_pair.summary
+    if (*owner_summary.module).fn_count <= 0 {
+        return (false, thin_empty_compiled_unit(), ir_empty_module(), 0, 0, 0, 0, 0)
+    }
     let plan_pair = thin_build_import_plans(graph, summaries, module_idx, import_map, optimize)
     let plans = plan_pair.0
     let plan_count = plan_pair.1
@@ -2567,14 +2575,14 @@ fn thin_build_compiled_unit(
             if callee_module >= 0 && callee_module < graph.count {
                 let export_lookup = thin_module_summary_lookup_local(summaries[callee_module as usize], export_name)
                 if export_lookup.0 {
-                    let pair = thin_append_stub_if_missing(working_summary.module, export_lookup.2, local_name)
-                    working_summary.module = pair.0
+                    let pair = thin_append_stub_if_missing(*working_summary.module, export_lookup.2, local_name)
+                    working_summary.module = Box::new(pair.0)
                 }
             }
             map_i = map_i + 1
         }
 
-        body_module = working_summary.module
+        body_module = *working_summary.module
         var li: i64 = 0
         while li < summaries[module_idx as usize].local_fn_count {
             let local_name = summaries[module_idx as usize].fn_names[li as usize]
@@ -2607,7 +2615,7 @@ fn thin_build_compiled_unit(
                     load_module_file(graph.nodes[plan.callee_module as usize].file_path),
                     ir_empty_epistemic_section()
                 )
-                if callee_summary.had_error || callee_summary.summary.module.fn_count <= 0 {
+                if callee_summary.had_error || (*callee_summary.summary.module).fn_count <= 0 {
                     return (false, thin_empty_compiled_unit(), ir_empty_module(), 0, 0, 0, 0, 0)
                 }
                 let imported_body = lower_program_function_body_from_summary_with_epistemic(
@@ -2630,7 +2638,7 @@ fn thin_build_compiled_unit(
             pi = pi + 1
         }
 
-        let _ = thin_try_write_ir_cache(body_cache_path, body_module, &! stats)
+        let _ = thin_try_write_ir_cache(body_cache_path, &body_module, &! stats)
     }
 
     let object_digest = thin_hash_mix(body_digest, 17)
@@ -2665,7 +2673,7 @@ fn thin_build_compiled_unit(
             object_module = tco_result.0
             tco_count = tco_result.1.stats.transformed
         }
-        let _ = thin_try_write_ir_cache(object_cache_path, object_module, &! stats)
+        let _ = thin_try_write_ir_cache(object_cache_path, &object_module, &! stats)
     } else if optimize {
         inline_count = object_module.fn_count
     }
@@ -2936,23 +2944,28 @@ fn compile_multimodule_native_advanced(
         println("[thinlink] start")
     }
 
+    let main_prog = load_module_file(main_path)
+
     let render_fixture_fast = target_spec.arch_id == ARCH_X86_64() &&
         target_spec.os_id == OS_LINUX() &&
         starts_with(main_path, "examples/render/")
     if render_fixture_fast {
-        let fallback_result = compile_singlemodule_native_streaming_result_from_program(
+        // Skip ordered lowering (takes >240s under JIT, causes OOM).
+        // Go directly to the streaming native backend.
+        print("native_advanced: streaming_direct\n")
+        let render_result = compile_singlemodule_native_streaming_result_from_program(
             main_path,
-            load_module_file(main_path),
+            &main_prog,
             target_spec
         )
-        if !fallback_result.ok {
+        if !render_result.ok {
             print("Native compile failed: ")
-            print(fallback_result.error_msg)
+            print(render_result.error_msg)
             print("\n")
             return 1
         }
-        let write_ok = io_write_native_binary(output_path, fallback_result.bytes, fallback_result.len)
-        if !write_ok {
+        let render_write_ok = io_write_native_binary(output_path, render_result.bytes, render_result.len)
+        if !render_write_ok {
             print("Error: Failed to write native binary to ")
             print(output_path)
             print("\n")
@@ -2964,7 +2977,6 @@ fn compile_multimodule_native_advanced(
         return 0
     }
 
-    let main_prog = load_module_file(main_path)
     if target_spec.arch_id != ARCH_X86_64() || target_spec.os_id != OS_LINUX() || !program_has_imports(main_prog) {
         let stream_pair = compile_multimodule_native_maybe_streaming(main_path, target_spec)
         var fallback_result = native_compile_result_error(ERR_OK(), "")

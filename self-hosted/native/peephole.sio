@@ -11,6 +11,10 @@
 //
 // All opcodes are i64 constants. All prefixes ph_.
 
+module native::peephole
+
+use ir::ir::{IrInstr, IrFunction, IrOpcode, ir_nop}
+
 // ============================================================================
 // Opcode constants
 // ============================================================================
@@ -883,4 +887,74 @@ fn ph_run_all_tests() -> i64 {
     if ph_test_flag_removed_is_4() { pass = pass + 1 } else { fail = fail + 1 }
 
     pass
+}
+
+// ============================================================================
+// IR↔PhInstr translation layer (Sprint 65 wiring)
+// ============================================================================
+
+// Map one IrInstr to a PhInstr for peephole analysis.
+// IrCopy and IrLoadImm map to PH_MOV so self-move and duplicate-load patterns fire.
+// IrNop maps to ph_nop_instr (already eliminated).
+// All other opcodes map to PH_JMP (opaque pass-through — no rule touches it).
+fn ir_instr_to_ph(instr: IrInstr) -> PhInstr {
+    if instr.op == IrOpcode::IrCopy {
+        return ph_instr_new(PH_MOV(), instr.dst, instr.src1, 0)
+    }
+    if instr.op == IrOpcode::IrLoadImm {
+        return ph_instr_imm(PH_MOV(), instr.dst, instr.imm_i64)
+    }
+    if instr.op == IrOpcode::IrNop {
+        return ph_nop_instr()
+    }
+    ph_instr_new(PH_JMP(), PH_NO_REG(), PH_NO_REG(), 0)
+}
+
+// Run the peephole optimizer over an IR function.
+// Returns a new IrFunction with eliminated instructions replaced by IrNop.
+// Integration point: call after regalloc, before instruction lowering.
+//
+// Patterns caught at the IR level:
+//   IrCopy(r, r)          → IrNop  (self-move; arises when regalloc assigns same preg to both)
+//   IrLoadImm(r, _) twice → first IrNop  (duplicate immediate load to same register)
+fn ph_run_on_func(func: IrFunction) -> IrFunction with Mut, Panic {
+    var ph_work: [PhInstr; 128] = [ph_empty_instr(); 128]
+    var i: i64 = 0
+    while i < func.instr_count {
+        ph_work[i as usize] = ir_instr_to_ph(func.instrs[i as usize])
+        i = i + 1
+    }
+
+    // Pass 1: single-instruction optimizations (identity moves, identity add/sub)
+    i = 0
+    while i < func.instr_count {
+        ph_work[i as usize] = ph_opt_single(ph_work[i as usize])
+        i = i + 1
+    }
+
+    // Pass 2: pair optimizations (duplicate loads, push/pop pairs, xor/cmp)
+    i = 0
+    while i < func.instr_count - 1 {
+        let a = ph_work[i as usize]
+        let b = ph_work[(i + 1) as usize]
+        if a.opcode != PH_NOP() && b.opcode != PH_NOP() {
+            let pair_result = ph_opt_pair(a, b)
+            if pair_result.optimized > 0 {
+                ph_work[i as usize]       = pair_result.instrs[0]
+                ph_work[(i + 1) as usize] = pair_result.instrs[1]
+            }
+        }
+        i = i + 1
+    }
+
+    // Write back: positions optimized to PH_NOP → IrNop
+    var out_func = func
+    i = 0
+    while i < func.instr_count {
+        if ph_work[i as usize].opcode == PH_NOP() {
+            out_func.instrs[i as usize] = ir_nop()
+        }
+        i = i + 1
+    }
+    out_func
 }

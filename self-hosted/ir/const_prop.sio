@@ -553,6 +553,36 @@ fn cp_worklist_clear(wl: &! CpWorklist) -> i64 with Mut {
     0
 }
 
+// Nested field mutation on ctx.state / ctx.worklist does not persist reliably
+// through direct borrows in this runtime, so copy out and write back explicitly.
+fn cp_ctx_set_reg(ctx: &! CpContext, reg: i64, val: CpLattice) -> bool with Mut, Div, Panic {
+    var state = ctx.state
+    let changed = cp_set_reg(&! state, reg, val)
+    ctx.state = state
+    changed
+}
+
+fn cp_ctx_update_reg(ctx: &! CpContext, dst: i64, new_val: CpLattice) -> bool with Mut, Div, Panic {
+    var state = ctx.state
+    let changed = cp_update_reg(&! state, dst, new_val)
+    ctx.state = state
+    changed
+}
+
+fn cp_ctx_worklist_push(ctx: &! CpContext, idx: i64) -> bool with Mut, Div, Panic {
+    var wl = ctx.worklist
+    let pushed = cp_worklist_push(&! wl, idx)
+    ctx.worklist = wl
+    pushed
+}
+
+fn cp_ctx_worklist_pop(ctx: &! CpContext) -> i64 with Mut, Div, Panic {
+    var wl = ctx.worklist
+    let idx = cp_worklist_pop(&! wl)
+    ctx.worklist = wl
+    idx
+}
+
 // ============================================================================
 // Section 8: Constant Folding -- Binary Operations
 // ============================================================================
@@ -1274,6 +1304,11 @@ fn cp_apply_folding(ctx: &! CpContext, func: &! IrFunction) -> i64 with Mut, Div
                     ctx.instrs[i as usize].opcode = CP_OP_LOAD_IMM
                     ctx.instrs[i as usize].imm_int = dst_lat.int_val
                     folded = folded + 1
+                } else if cp_is_const_bool(dst_lat) {
+                    func.instrs[i as usize] = ir_load_bool(dst, dst_lat.bool_val)
+                    ctx.instrs[i as usize].opcode = CP_OP_LOAD_BOOL
+                    ctx.instrs[i as usize].imm_bool = dst_lat.bool_val
+                    folded = folded + 1
                 } else if cp_is_const_float(dst_lat) {
                     func.instrs[i as usize] = ir_load_float(dst, dst_lat.float_val)
                     ctx.instrs[i as usize].opcode = CP_OP_LOAD_FLOAT
@@ -1442,7 +1477,7 @@ fn cp_push_users(ctx: &! CpContext, reg: i64) -> i64 with Mut, Div, Panic {
             }
         }
         if uses_reg {
-            let ok = cp_worklist_push(&! ctx.worklist, i)
+            let ok = cp_ctx_worklist_push(ctx, i)
             if ok { pushed = pushed + 1 }
         }
         i = i + 1
@@ -1462,7 +1497,7 @@ fn cp_sccp_init(ctx: &! CpContext) -> i64 with Mut, Div, Panic {
 
         if opc == CP_OP_LOAD_IMM {
             if dst >= 0 && dst < CP_MAX_REGS {
-                let changed = cp_set_reg(&! ctx.state, dst, cp_lattice_int(ci.imm_int))
+                let changed = cp_ctx_set_reg(ctx, dst, cp_lattice_int(ci.imm_int))
                 if changed {
                     let p = cp_push_users(ctx, dst)
                     seeded = seeded + p
@@ -1470,7 +1505,7 @@ fn cp_sccp_init(ctx: &! CpContext) -> i64 with Mut, Div, Panic {
             }
         } else if opc == CP_OP_LOAD_FLOAT {
             if dst >= 0 && dst < CP_MAX_REGS {
-                let changed = cp_set_reg(&! ctx.state, dst, cp_lattice_float(ci.imm_float))
+                let changed = cp_ctx_set_reg(ctx, dst, cp_lattice_float(ci.imm_float))
                 if changed {
                     let p = cp_push_users(ctx, dst)
                     seeded = seeded + p
@@ -1478,7 +1513,7 @@ fn cp_sccp_init(ctx: &! CpContext) -> i64 with Mut, Div, Panic {
             }
         } else if opc == CP_OP_LOAD_BOOL {
             if dst >= 0 && dst < CP_MAX_REGS {
-                let changed = cp_set_reg(&! ctx.state, dst, cp_lattice_bool(ci.imm_bool))
+                let changed = cp_ctx_set_reg(ctx, dst, cp_lattice_bool(ci.imm_bool))
                 if changed {
                     let p = cp_push_users(ctx, dst)
                     seeded = seeded + p
@@ -1488,7 +1523,7 @@ fn cp_sccp_init(ctx: &! CpContext) -> i64 with Mut, Div, Panic {
                   opc == CP_OP_INDEX_GET || opc == CP_OP_LOAD_STRING {
             // These produce unknown values
             if dst >= 0 && dst < CP_MAX_REGS {
-                let changed = cp_set_reg(&! ctx.state, dst, cp_lattice_bottom())
+                let changed = cp_ctx_set_reg(ctx, dst, cp_lattice_bottom())
                 if changed {
                     let p = cp_push_users(ctx, dst)
                     seeded = seeded + p
@@ -1520,9 +1555,9 @@ fn cp_update_reg(state: &! CpState, dst: i64, new_val: CpLattice) -> bool with M
 
 // Apply a lattice update: read old, meet, write, push users if changed.
 fn cp_apply_update(ctx: &! CpContext, dst: i64, new_val: CpLattice) -> i64 with Mut, Div, Panic {
-    let changed = cp_update_reg(&! ctx.state, dst, new_val)
+    let changed = cp_ctx_update_reg(ctx, dst, new_val)
     if changed {
-        let pushed = cp_push_users(ctx, dst)
+        let _pushed = cp_push_users(ctx, dst)
     }
     1
 }
@@ -1530,7 +1565,7 @@ fn cp_apply_update(ctx: &! CpContext, dst: i64, new_val: CpLattice) -> i64 with 
 // Run one SCCP iteration: pop from worklist, evaluate, update, push users.
 // Returns 1 if progress was made, 0 otherwise.
 fn cp_sccp_step(ctx: &! CpContext) -> i64 with Mut, Div, Panic {
-    let idx = cp_worklist_pop(&! ctx.worklist)
+    let idx = cp_ctx_worklist_pop(ctx)
     if idx == CP_INVALID {
         return 0
     }
@@ -1622,7 +1657,7 @@ fn cp_run(func: &! IrFunction) -> CpStats with Mut, Div, Panic {
 // Convenience: run constant propagation and return the modified function.
 fn cp_optimize_function(func: IrFunction) -> IrFunction with Mut, Div, Panic {
     var result = func
-    let stats = cp_run(&! result)
+    let _stats = cp_run(&! result)
     result
 }
 
