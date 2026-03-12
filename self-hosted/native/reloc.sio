@@ -167,6 +167,91 @@ fn apply_relocations(
     b
 }
 
+// ============================================================================
+// RELA SECTION — ET_REL object file support
+// ============================================================================
+
+// Raw byte buffer for .rela.text — 256 Elf64_Rela entries max (24 bytes each = 6144 bytes)
+struct RelaSection {
+    bytes: [i8; 8192],
+    len: i64,
+}
+
+fn rela_section_new() -> RelaSection {
+    RelaSection { bytes: [0; 8192], len: 0 }
+}
+
+fn rela_emit_byte(rs: RelaSection, b: i64) -> RelaSection with Mut, Panic, Div {
+    var r = rs
+    if r.len < 8192 {
+        r.bytes[r.len as usize] = low8(b) as i8
+        r.len = r.len + 1
+    }
+    r
+}
+
+fn rela_emit_i64_le(rs: RelaSection, v: i64) -> RelaSection with Mut, Panic, Div {
+    var r = rs
+    r = rela_emit_byte(r, low8(v))
+    r = rela_emit_byte(r, low8(v >> 8))
+    r = rela_emit_byte(r, low8(v >> 16))
+    r = rela_emit_byte(r, low8(v >> 24))
+    r = rela_emit_byte(r, low8(v >> 32))
+    r = rela_emit_byte(r, low8(v >> 40))
+    r = rela_emit_byte(r, low8(v >> 48))
+    r = rela_emit_byte(r, low8(v >> 56))
+    r
+}
+
+// Collect Elf64_Rela entries for .rela.text (ET_REL output).
+// Does NOT patch the code buffer — relocations remain unresolved for the linker.
+//
+// sym_first_fn : symbol index of the first function symbol in .symtab
+// sym_rodata   : symbol index of .rodata section symbol (0 if no rodata)
+// sym_data     : symbol index of .data section symbol (0 if no data)
+//
+// R_X86_64_PLT32=4 for function calls (addend=-4)
+// R_X86_64_PC32=2  for RIP-relative data refs (addend=target_offset-4)
+fn collect_rela_section(
+    table: RelocationTable,
+    sym_first_fn: i64,
+    sym_rodata: i64,
+    sym_data: i64
+) -> RelaSection with Mut, Panic, Div {
+    var rela = rela_section_new()
+    var i = 0
+    while i < table.count {
+        let reloc = table.entries[i as usize]
+        let r_offset = reloc.offset
+        let r_type: i64
+        let r_sym: i64
+        let r_addend: i64
+        if reloc.kind.kind_code == 1 {
+            // Function call: R_X86_64_PLT32
+            r_type = 4
+            r_sym = sym_first_fn + reloc.target.target_index
+            r_addend = -4
+        } else if reloc.kind.kind_code == 2 {
+            // RIP-relative .rodata ref: R_X86_64_PC32
+            r_type = 2
+            r_sym = sym_rodata
+            r_addend = reloc.target.target_index - 4
+        } else {
+            // RIP-relative .data ref: R_X86_64_PC32
+            r_type = 2
+            r_sym = sym_data
+            r_addend = reloc.target.target_index - 4
+        }
+        // r_info = (r_sym << 32) | r_type
+        let r_info = r_sym * 4294967296 + r_type
+        rela = rela_emit_i64_le(rela, r_offset)
+        rela = rela_emit_i64_le(rela, r_info)
+        rela = rela_emit_i64_le(rela, r_addend)
+        i = i + 1
+    }
+    rela
+}
+
 // Patch a u32 at the given offset
 fn patch_u32_le(buf: CodeBuffer, offset: i64, val: i64) -> CodeBuffer with Mut, Panic, Div {
     var b = buf
