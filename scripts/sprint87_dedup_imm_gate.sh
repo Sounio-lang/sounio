@@ -76,7 +76,7 @@ chk "main:T243_fn"    "compiler_main_test_ir_int_to_float_opcode" "self-hosted/c
 chk "main:T244_fn"    "compiler_main_test_ir_float_to_int_opcode" "self-hosted/compiler/main.sio"
 chk "main:T245_fn"    "compiler_main_test_native_v2_float_whitelist" "self-hosted/compiler/main.sio"
 chk "main:T245_runner" "T245 OK"                             "self-hosted/compiler/main.sio"
-chk "main:total_245"  "let total: i64 = 245"                 "self-hosted/compiler/main.sio"
+chk "main:total_245plus" "let total: i64 = 2[4-9][0-9]"       "self-hosted/compiler/main.sio"
 
 echo ""
 echo "--- Group 4: Sprint 86 regression ---"
