@@ -7934,9 +7934,84 @@ fn compiler_main_test_dead_after_jump_label_resets() -> bool with Mut, Div, Pani
     result.instrs[1].op == IrOpcode::IrNop && result.instrs[3].op == IrOpcode::IrBinOp
 }
 
+// Sprint 99 Block W — unreachable label elimination tests (T294-T299)
+
+// T294: Label(L0) with no jumps targeting it → NOP'd.
+fn compiler_main_test_dead_label_basic() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(0, 42)
+    instrs[1] = ir_label(0)             // no jump targets L0
+    instrs[2] = ir_binop(1, 0, BinaryOp::OpAdd, 0)
+    let func = cp_make_test_func(instrs, 3)
+    let result = ocp_dead_label(func)
+    result.instrs[1].op == IrOpcode::IrNop
+}
+
+// T295: Label(L0) with IrJump(L0) targeting it → survives.
+fn compiler_main_test_dead_label_referenced() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_jump(0)
+    instrs[1] = ir_label(0)
+    let func = cp_make_test_func(instrs, 2)
+    let result = ocp_dead_label(func)
+    result.instrs[1].op == IrOpcode::IrLabel
+}
+
+// T296: Label(L0) with IrBranchTrue targeting it → survives.
+fn compiler_main_test_dead_label_branch_ref() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(0, 1)
+    instrs[1] = ir_branch_true(0, 0)
+    instrs[2] = ir_label(0)
+    let func = cp_make_test_func(instrs, 3)
+    let result = ocp_dead_label(func)
+    result.instrs[2].op == IrOpcode::IrLabel
+}
+
+// T297: Multiple labels — L0 referenced, L1 unreferenced → only L1 NOP'd.
+fn compiler_main_test_dead_label_mixed() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_jump(0)
+    instrs[1] = ir_label(0)             // referenced → survives
+    instrs[2] = ir_label(1)             // unreferenced → NOP'd
+    instrs[3] = ir_binop(1, 0, BinaryOp::OpAdd, 0)
+    let func = cp_make_test_func(instrs, 4)
+    let result = ocp_dead_label(func)
+    result.instrs[1].op == IrOpcode::IrLabel && result.instrs[2].op == IrOpcode::IrNop
+}
+
+// T298: Dead label + dead_after_jump integration.
+// IrJump(L0); IrLoadImm(dead); IrLabel(L1, unreferenced); IrBinOp; IrLabel(L0)
+// → dead_label NOP's L1, then dead_after_jump can NOP IrLoadImm+IrBinOp.
+fn compiler_main_test_dead_label_integration() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_jump(0)
+    instrs[1] = ir_load_imm(1, 5)       // dead after jump
+    instrs[2] = ir_label(1)             // unreferenced
+    instrs[3] = ir_binop(2, 0, BinaryOp::OpAdd, 1)  // was reachable via L1, now dead
+    instrs[4] = ir_label(0)
+    let func = cp_make_test_func(instrs, 5)
+    // First eliminate dead labels, then dead-after-jump.
+    let pass1 = ocp_dead_label(func)
+    let pass2 = ocp_dead_after_jump(pass1)
+    // L1 NOP'd, then everything between IrJump and IrLabel(L0) is dead.
+    pass2.instrs[1].op == IrOpcode::IrNop && pass2.instrs[2].op == IrOpcode::IrNop && pass2.instrs[3].op == IrOpcode::IrNop
+}
+
+// T299: No labels at all — pass is a no-op.
+fn compiler_main_test_dead_label_no_labels() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(0, 1)
+    instrs[1] = ir_load_imm(1, 2)
+    instrs[2] = ir_binop(2, 0, BinaryOp::OpAdd, 1)
+    let func = cp_make_test_func(instrs, 3)
+    let result = ocp_dead_label(func)
+    result.instrs[0].op == IrOpcode::IrLoadImm && result.instrs[1].op == IrOpcode::IrLoadImm
+}
+
 fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
     var passed: i64 = 0
-    let total: i64 = 293
+    let total: i64 = 299
 
     println("=== compiler/main.sio self-tests ===")
 
@@ -9995,6 +10070,49 @@ fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
         passed = passed + 1
     } else {
         println("  FAIL: T293 Sprint 98 Block V: label resets dead")
+    }
+
+    // Sprint 99 Block W — Unreachable Label Elimination (T294-T299)
+    if compiler_main_test_dead_label_basic() {
+        println("  T294 OK: Sprint 99 Block W: unreferenced label NOP'd")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T294 Sprint 99 Block W: basic dead label")
+    }
+
+    if compiler_main_test_dead_label_referenced() {
+        println("  T295 OK: Sprint 99 Block W: referenced label survives")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T295 Sprint 99 Block W: referenced label")
+    }
+
+    if compiler_main_test_dead_label_branch_ref() {
+        println("  T296 OK: Sprint 99 Block W: branch-referenced label survives")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T296 Sprint 99 Block W: branch ref")
+    }
+
+    if compiler_main_test_dead_label_mixed() {
+        println("  T297 OK: Sprint 99 Block W: mixed — referenced survives, unreferenced NOP'd")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T297 Sprint 99 Block W: mixed labels")
+    }
+
+    if compiler_main_test_dead_label_integration() {
+        println("  T298 OK: Sprint 99 Block W: dead_label + dead_after_jump integration")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T298 Sprint 99 Block W: integration")
+    }
+
+    if compiler_main_test_dead_label_no_labels() {
+        println("  T299 OK: Sprint 99 Block W: no labels — pass is no-op")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T299 Sprint 99 Block W: no labels")
     }
 
     println("")
