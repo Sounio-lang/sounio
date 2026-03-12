@@ -7861,9 +7861,82 @@ fn compiler_main_test_redundant_jump_multi() -> bool with Mut, Div, Panic {
     result.instrs[0].op == IrOpcode::IrNop && result.instrs[2].op == IrOpcode::IrNop
 }
 
+// Sprint 98 Block V — unreachable code elimination tests (T288-T293)
+
+// T288: IrJump(L0); IrLoadImm(r1,5); IrLabel(L0) → IrLoadImm becomes NOP.
+fn compiler_main_test_dead_after_jump_basic() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(0, 42)
+    instrs[1] = ir_jump(0)
+    instrs[2] = ir_load_imm(1, 5)        // unreachable
+    instrs[3] = ir_label(0)
+    let func = cp_make_test_func(instrs, 4)
+    let result = ocp_dead_after_jump(func)
+    result.instrs[2].op == IrOpcode::IrNop
+}
+
+// T289: IrReturn(r0); IrLoadImm(r1,7); IrLabel(L0) → IrLoadImm becomes NOP.
+fn compiler_main_test_dead_after_return() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_return(0)
+    instrs[1] = ir_load_imm(1, 7)        // unreachable
+    instrs[2] = ir_label(0)
+    let func = cp_make_test_func(instrs, 3)
+    let result = ocp_dead_after_jump(func)
+    result.instrs[1].op == IrOpcode::IrNop
+}
+
+// T290: IrJump(L0); IrLabel(L0) → nothing between, no change needed.
+fn compiler_main_test_dead_after_jump_adjacent() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_jump(0)
+    instrs[1] = ir_label(0)
+    let func = cp_make_test_func(instrs, 2)
+    let result = ocp_dead_after_jump(func)
+    result.instrs[0].op == IrOpcode::IrJump && result.instrs[1].op == IrOpcode::IrLabel
+}
+
+// T291: IrBranchTrue(cond,L0); IrLoadImm; IrLabel(L0) → IrLoadImm survives
+// (conditional branch is NOT unconditional — fall-through path is live).
+fn compiler_main_test_dead_after_branch_not_dead() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_branch_true(0, 0)
+    instrs[1] = ir_load_imm(1, 99)       // reachable via fall-through
+    instrs[2] = ir_label(0)
+    let func = cp_make_test_func(instrs, 3)
+    let result = ocp_dead_after_jump(func)
+    result.instrs[1].op == IrOpcode::IrLoadImm
+}
+
+// T292: IrReturn; IrLoadImm; IrBinOp; IrLabel(L0) → both dead instrs NOP'd.
+fn compiler_main_test_dead_after_return_multi() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_return(0)
+    instrs[1] = ir_load_imm(1, 10)       // unreachable
+    instrs[2] = ir_binop(2, 0, BinaryOp::OpAdd, 1)  // unreachable
+    instrs[3] = ir_label(0)
+    let func = cp_make_test_func(instrs, 4)
+    let result = ocp_dead_after_jump(func)
+    result.instrs[1].op == IrOpcode::IrNop && result.instrs[2].op == IrOpcode::IrNop
+}
+
+// T293: IrJump(L0); IrLoadImm(dead); IrLabel(L1); IrBinOp(live); IrLabel(L0)
+// → IrLoadImm NOP'd, IrBinOp survives (L1 resets dead state).
+fn compiler_main_test_dead_after_jump_label_resets() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_jump(0)
+    instrs[1] = ir_load_imm(1, 5)        // unreachable
+    instrs[2] = ir_label(1)              // resets dead
+    instrs[3] = ir_binop(2, 0, BinaryOp::OpAdd, 1)  // reachable
+    instrs[4] = ir_label(0)
+    let func = cp_make_test_func(instrs, 5)
+    let result = ocp_dead_after_jump(func)
+    result.instrs[1].op == IrOpcode::IrNop && result.instrs[3].op == IrOpcode::IrBinOp
+}
+
 fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
     var passed: i64 = 0
-    let total: i64 = 287
+    let total: i64 = 293
 
     println("=== compiler/main.sio self-tests ===")
 
@@ -9879,6 +9952,49 @@ fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
         passed = passed + 1
     } else {
         println("  FAIL: T287 Sprint 97 Block U: multi redundant")
+    }
+
+    // Sprint 98 Block V — Unreachable Code Elimination (T288-T293)
+    if compiler_main_test_dead_after_jump_basic() {
+        println("  T288 OK: Sprint 98 Block V: dead code after IrJump NOP'd")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T288 Sprint 98 Block V: basic dead after jump")
+    }
+
+    if compiler_main_test_dead_after_return() {
+        println("  T289 OK: Sprint 98 Block V: dead code after IrReturn NOP'd")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T289 Sprint 98 Block V: dead after return")
+    }
+
+    if compiler_main_test_dead_after_jump_adjacent() {
+        println("  T290 OK: Sprint 98 Block V: adjacent jump+label — no spurious NOP")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T290 Sprint 98 Block V: adjacent jump+label")
+    }
+
+    if compiler_main_test_dead_after_branch_not_dead() {
+        println("  T291 OK: Sprint 98 Block V: conditional branch fall-through survives")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T291 Sprint 98 Block V: branch not dead")
+    }
+
+    if compiler_main_test_dead_after_return_multi() {
+        println("  T292 OK: Sprint 98 Block V: multiple dead instrs after return")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T292 Sprint 98 Block V: multi dead after return")
+    }
+
+    if compiler_main_test_dead_after_jump_label_resets() {
+        println("  T293 OK: Sprint 98 Block V: IrLabel resets dead state")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T293 Sprint 98 Block V: label resets dead")
     }
 
     println("")
