@@ -6,13 +6,11 @@ use parser::ast::{Name, StringList, AstPath, BinaryOp, UnaryOp, CompareOp}
 use check::types::{TypeEntry, empty_type_entry}
 
 // These caps gate what the self-hosted pipeline can lower and execute.
-// Sized for small test programs (selfhosted interpreter lane):
-//   32 fns × 32 instrs × ~250B + 128 strings × 136B ≈ 260KB per IrModule copy —
-//   fast enough for value-semantics threading in the SOBC/JIT VM.
-//   The Rust-based pipeline uses its own separate IR structures.
-let IR_MAX_FUNCS: i64 = 32
-let IR_MAX_STRINGS: i64 = 128
-let IR_MAX_INSTRS: i64 = 32
+// Keep them aligned with the fixed backing storage in IrModule/IrFunction so
+// the lowering path can use the capacity that is already physically allocated.
+let IR_MAX_FUNCS: i64 = 1024
+let IR_MAX_STRINGS: i64 = 4096
+let IR_MAX_INSTRS: i64 = 128
 let IR_MAX_PARAMS: i64 = 64
 let IR_INVALID_REG: i64 = -1
 let IR_INVALID_LABEL: i64 = -1
@@ -56,6 +54,8 @@ let IR_MAX_EPI_VALIDATED_MANIFESTS: i64 = 64
 enum IrOpcode {
     IrLoadImm,
     IrLoadFloat,
+    IrIntToFloat,  // CVTSI2SD: i64 src → f64 dst (Sprint 87)
+    IrFloatToInt,  // CVTTSD2SI: f64 src → i64 dst, truncate (Sprint 87)
     IrLoadBool,
     IrLoadString,
     IrCopy,
@@ -126,6 +126,24 @@ enum IrOpcode {
     IrHyperConjugateO, // Octonion conjugate: 2×VXORPD, flip e₁–e₇ in both YMM halves (12 bytes)
     IrHyperMulO,       // Octonion Hamilton product, Fano single-ZMM, 31 instr / 186 bytes
     IrHyperNormSqO,    // Octonion norm-squared Σeᵢ², 7 instr / 44 bytes, broadcast to all lanes
+    // Sedenion hypercomplex ops (Horizon 5.1 — FSNN pipeline)
+    //   IrHyperMulS: Cayley-Dickson sedenion multiply via 4 Fano-plane octonionic products.
+    //   (a,b)*(c,d) = (ac - conj(d)*b, da + b*conj(c))
+    //   Each sedenion = 2 ZMM registers (alpha in even, beta in odd):
+    //     src1   = ZMM alpha_a (lanes 0-7 = e0-e7)
+    //     src1+1 = ZMM beta_b  (lanes 0-7 = e8-e15)
+    //     src2   = ZMM alpha_c
+    //     src2+1 = ZMM beta_d
+    //     dst    = ZMM result alpha
+    //     dst+1  = ZMM result beta
+    //   Scratch: dst+2..dst+9 (8 scratch ZMMs)
+    //   label_id encoding: same as IrHyperMulO
+    //     bits 2:0 = mask_k (0 = k0 = no mask)
+    //     bits 7:4 = ctrl_base for 21 Fano constants
+    //     bits 11:8 = conj_sign_zmm (ZMM with lanes 1-7 = 0x8000..., lane 0 = 0x0)
+    //   imm_flags bit 0 = z-bit
+    //   Total: 4×31 (Fano) + 2 (conjugate) + 2 (add/sub) = 128 EVEX instructions
+    IrHyperMulS,       // Sedenion Hamilton product, 2×ZMM Cayley-Dickson, 128 instr / 768 bytes
     // G₂-equivariant ops (Horizon 3.7)
     //   G₂ = Aut(𝕆), the 14-dimensional exceptional Lie group preserving the Fano-plane
     //   multiplication table. Its Lie algebra 𝔤₂ consists of derivations acting on Im(𝕆) ≅ ℝ⁷
@@ -1690,17 +1708,20 @@ fn ir_env_push(env: Option<Box<IrEnvList>>, b: IrEnvBinding) -> Option<Box<IrEnv
 }
 
 fn ir_env_lookup(env: Option<Box<IrEnvList>>, name: Name, depth: i64) -> i64 with Mut, Panic, Div, Alloc {
-    match env {
-        Some(list) => {
-            let b = (*list).head
-            if b.depth <= depth && ir_name_eq(b.name, name) {
-                b.reg
-            } else {
-                ir_env_lookup((*list).tail, name, depth)
+    var current = env
+    while true {
+        match current {
+            Some(list) => {
+                let b = (*list).head
+                if b.depth <= depth && ir_name_eq(b.name, name) {
+                    return b.reg
+                }
+                current = (*list).tail
             }
+            _ => break
         }
-        _ => IR_INVALID_REG,
     }
+    IR_INVALID_REG
 }
 
 fn ir_instr_new(op: IrOpcode) -> IrInstr {
@@ -1845,6 +1866,48 @@ fn ir_load_float(dst: i64, value: f64) -> IrInstr {
         src2: base.src2,
         imm_i64: base.imm_i64,
         imm_f64: value,
+        label_id: base.label_id,
+        fn_id: base.fn_id,
+        field_idx: base.field_idx,
+        imm_flags: base.imm_flags,
+        bin_op: base.bin_op,
+        un_op: base.un_op,
+        name: base.name,
+        call_args: base.call_args,
+        arg_count: base.arg_count,
+    }
+}
+
+fn ir_int_to_float(dst: i64, src: i64) -> IrInstr {
+    let base = ir_instr_new(IrOpcode::IrIntToFloat)
+    IrInstr {
+        op: base.op,
+        dst: dst,
+        src1: src,
+        src2: base.src2,
+        imm_i64: base.imm_i64,
+        imm_f64: base.imm_f64,
+        label_id: base.label_id,
+        fn_id: base.fn_id,
+        field_idx: base.field_idx,
+        imm_flags: base.imm_flags,
+        bin_op: base.bin_op,
+        un_op: base.un_op,
+        name: base.name,
+        call_args: base.call_args,
+        arg_count: base.arg_count,
+    }
+}
+
+fn ir_float_to_int(dst: i64, src: i64) -> IrInstr {
+    let base = ir_instr_new(IrOpcode::IrFloatToInt)
+    IrInstr {
+        op: base.op,
+        dst: dst,
+        src1: src,
+        src2: base.src2,
+        imm_i64: base.imm_i64,
+        imm_f64: base.imm_f64,
         label_id: base.label_id,
         fn_id: base.fn_id,
         field_idx: base.field_idx,

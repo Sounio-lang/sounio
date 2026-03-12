@@ -11,6 +11,7 @@ use native::elf::{StringTable, string_table_add, data_section_add_f64}
 use native::regs::{param_reg}
 use native::frame::*
 use native::runtime_context::{runtime_context_field_heap_cursor}
+use native::target_policy::{native_target_policy_x86_allocation_order_count, native_target_policy_x86_allocation_order_reg_id}
 //
 // Phase 1: Full instruction lowering.
 //
@@ -30,12 +31,9 @@ fn ir_slot_fits_disp8(offset: i64) -> bool {
 }
 
 // Map preg index (0-based) to x86-64 register number.
-// Sprint 52: only preg 0 is used → r15 (x86 reg 15).
+// Uses the shared target-policy allocation order rather than a local hardcoded table.
 fn preg_to_x86_reg(preg: i64) -> i64 {
-    if preg == 1 { 14 }
-    else if preg == 2 { 13 }
-    else if preg == 3 { 12 }
-    else { 15 }
+    native_target_policy_x86_allocation_order_reg_id(preg)
 }
 
 // Run linear-scan register allocation on func and populate nc.vreg_to_preg.
@@ -51,9 +49,9 @@ fn nc_run_regalloc(nc: NativeCompiler, func: IrFunction) -> NativeCompiler with 
         ra_instrs[i as usize] = ra_simple_instr(instr.dst, instr.src1, instr.src2)
         i = i + 1
     }
-    // 2. Compute live intervals and run linear scan with 4 physical registers (r15/r14/r13/r12)
+    // 2. Compute live intervals and run linear scan with the shared x86 allocation order.
     var state = liveness_compute_intervals(ra_instrs, count)
-    state = regalloc_linear_scan(state, 4)
+    state = regalloc_linear_scan(state, native_target_policy_x86_allocation_order_count())
     // 3. Populate vreg_to_preg / vreg_spill_slots from allocation results
     var v = 0
     while v < state.count {
@@ -160,6 +158,10 @@ fn lower_instr(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut, P
         lower_load_string(nc, instr)
     } else if instr.op == IrOpcode::IrLoadFloat {
         lower_load_float(nc, instr)
+    } else if instr.op == IrOpcode::IrIntToFloat {
+        lower_int_to_float(nc, instr)
+    } else if instr.op == IrOpcode::IrFloatToInt {
+        lower_float_to_int(nc, instr)
     } else if instr.op == IrOpcode::IrAlloc {
         lower_alloc(nc, instr)
     } else if instr.op == IrOpcode::IrFieldGet {
@@ -226,6 +228,8 @@ fn lower_instr(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut, P
         lower_hyper_mul_o_fano(nc, instr)
     } else if instr.op == IrOpcode::IrHyperNormSqO {
         lower_hyper_norm_sq_o(nc, instr)
+    } else if instr.op == IrOpcode::IrHyperMulS {
+        lower_hyper_mul_s(nc, instr)
     } else if instr.op == IrOpcode::IrG2ProjectImO {
         lower_g2_project_im_o(nc, instr)
     } else if instr.op == IrOpcode::IrG2ApplyGenO {
@@ -450,6 +454,39 @@ fn lower_load_float(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with M
 }
 
 // ============================================================================
+// Sprint 87: int-to-float (CVTSI2SD) and float-to-int (CVTTSD2SI)
+// ============================================================================
+
+fn lower_int_to_float(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut, Panic, Div {
+    var c = nc
+    // Load integer source → rax
+    c = nc_load_vreg_to_rax(c, instr.src1)
+    // CVTSI2SD xmm0, rax — convert i64 to f64
+    c.code = emit_cvtsi2sd_xmm0_rax(c.code)
+    // MOVQ rax, xmm0 — move float bits to rax for stack storage
+    c.code = emit_movq_rax_xmm0(c.code)
+    if instr.dst >= 0 {
+        c.code = emit_store_rax_rbp_disp32(c.code, ir_slot_offset(instr.dst))
+        c.is_float_reg[instr.dst as usize] = 1
+    }
+    c
+}
+
+fn lower_float_to_int(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut, Panic, Div {
+    var c = nc
+    // Load float source bits → rax, then move to xmm0
+    c = nc_load_vreg_to_rax(c, instr.src1)
+    c.code = emit_movq_xmm0_rax(c.code)
+    // CVTTSD2SI rax, xmm0 — truncate f64 to i64
+    c.code = emit_cvttsd2si_rax_xmm0(c.code)
+    if instr.dst >= 0 {
+        c.code = emit_store_rax_rbp_disp32(c.code, ir_slot_offset(instr.dst))
+        c.is_float_reg[instr.dst as usize] = 0
+    }
+    c
+}
+
+// ============================================================================
 // Load string literal (RIP-relative addressing)
 // ============================================================================
 
@@ -595,11 +632,23 @@ fn lower_ir_load_float_binop_operands(
     let lhs = if swap_operands { instr.src2 } else { instr.src1 }
     let rhs = if swap_operands { instr.src1 } else { instr.src2 }
 
-    // Float path: load lhs → rax → xmm0, rhs → rax → xmm1
+    // Load lhs to xmm0: if it's an integer, convert via CVTSI2SD; else bit-move
     c = nc_load_vreg_to_rax(c, lhs)
-    c.code = emit_movq_xmm0_rax(c.code)
+    if lhs >= 0 && lhs < 512 && c.is_float_reg[lhs as usize] == 0 {
+        c.code = emit_cvtsi2sd_xmm0_rax(c.code)
+    } else {
+        c.code = emit_movq_xmm0_rax(c.code)
+    }
+    // Load rhs to xmm1: same pattern
     c = nc_load_vreg_to_rax(c, rhs)
-    c.code = emit_movq_xmm1_rax(c.code)
+    if rhs >= 0 && rhs < 512 && c.is_float_reg[rhs as usize] == 0 {
+        // Need rhs in xmm1, not xmm0 — use CVTSI2SD then move to xmm1
+        c.code = emit_cvtsi2sd_xmm0_rax(c.code)
+        c.code = emit_movq_rax_xmm0(c.code)     // xmm0 bits → rax
+        c.code = emit_movq_xmm1_rax(c.code)     // rax → xmm1
+    } else {
+        c.code = emit_movq_xmm1_rax(c.code)
+    }
     c
 }
 
@@ -1545,6 +1594,99 @@ fn lower_hyper_mul_o(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with 
     c.code = emit_quat_mul_r(c.code, a_hi, conj_bl, tmp_qcq, sc1, sc2, sc3)
     // Step 32: dst_hi = VADDPD{mask_k}{z}(tmp_pp, tmp_qcq)  — masked output
     c.code = emit_evex_pd_rr_full(c.code, 1, 0x58, dst_hi, tmp_pp, tmp_qcq, vl, mask_k, zb)
+    c
+}
+
+//
+// Helper: emit Fano-plane octonion multiply inline (no final masked store).
+// Result ends up in `accum` register.  Uses t_bj and t_aj as scratch.
+// All args are ZMM register indices; ctrl_base indexes the 21 pre-loaded constants.
+//
+fn emit_fano_inline(buf: CodeBuffer, za: i64, zb_in: i64, accum: i64,
+                     t_bj: i64, t_aj: i64, ctrl_base: i64) -> CodeBuffer with Mut, Panic, Div {
+    let vl = 2   // ZMM
+    // Column 0: identity — VBROADCASTSD + VMULPD
+    var b = emit_vbroadcastsd(buf, t_bj, zb_in, vl, 0, 0)
+    b = emit_evex_pd_rr_full(b, 1, 0x59, accum, za, t_bj, vl, 0, 0)
+    // Columns 1-7: VPERMPD(broadcast) + VPERMPD(permute) + VXORPD(sign) + VFMADD231PD
+    var col = 0
+    while col < 7 {
+        b = emit_evex_pd_rr_full(b, 2, 0x16, t_bj, ctrl_base + col,     zb_in, vl, 0, 0)
+        b = emit_evex_pd_rr_full(b, 2, 0x16, t_aj, ctrl_base + 7 + col, za,    vl, 0, 0)
+        b = emit_evex_pd_rr_full(b, 1, 0x57, t_aj, t_aj, ctrl_base + 14 + col, vl, 0, 0)
+        b = emit_evex_pd_rr_full(b, 2, 0xB8, accum, t_aj, t_bj,         vl, 0, 0)
+        col = col + 1
+    }
+    b
+}
+
+//
+// IrHyperMulS → Cayley-Dickson sedenion multiply via 4 Fano-plane octonionic products
+//
+// Algorithm: (a,b)*(c,d) = (ac - conj(d)*b, da + b*conj(c))
+//   where a,b,c,d are octonions and conj flips lanes 1-7.
+//
+// Register layout:
+//   src1   = ZMM alpha_a (e0-e7)     src1+1 = ZMM beta_b  (e8-e15)
+//   src2   = ZMM alpha_c (e0-e7)     src2+1 = ZMM beta_d  (e8-e15)
+//   dst    = ZMM result alpha        dst+1  = ZMM result beta
+//   dst+2  = t_bj (Fano scratch: broadcast b[j])
+//   dst+4  = t_aj (Fano scratch: permuted+signed a column j)
+//   dst+6  = p1_accum / p3_accum (Fano result: a*c then d*a)
+//   dst+8  = p2_accum / p4_accum (Fano result: conj(d)*b then b*conj(c))
+//   conj_sign_zmm = (label_id >> 8) & 0xF  — ZMM with lane 0 = 0x0, lanes 1-7 = 0x8000...
+//
+// Steps:
+//   1. p1 = fano(alpha_a, alpha_c)          →  a*c  in dst+6
+//   2. conj_d = VXORPD(beta_d, conj_sign)  →  conj(d) in dst+4 (reuses t_aj temporarily)
+//   3. p2 = fano(conj_d, beta_b)           →  conj(d)*b in dst+8
+//   4. dst = VSUBPD(p1, p2)                →  ac - conj(d)*b  (result alpha)
+//   5. p3 = fano(beta_d, alpha_a)           →  d*a in dst+6 (reuse)
+//   6. conj_c = VXORPD(alpha_c, conj_sign) →  conj(c) in dst+4 (reuse)
+//   7. p4 = fano(beta_b, conj_c)           →  b*conj(c) in dst+8 (reuse)
+//   8. dst+1 = VADDPD(p3, p4)             →  da + b*conj(c)  (result beta)
+//
+// Total: 4×31 (Fano) + 2 (conjugate) + 2 (add/sub) = 128 EVEX instructions
+// Bytes: 128×6 = 768
+//
+fn lower_hyper_mul_s(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut, Panic, Div {
+    var c = nc
+    let vl         = 2   // ZMM
+    let mask_k     = instr.label_id & 7
+    let zb         = instr.imm_flags & 1
+    let ctrl_base  = (instr.label_id >> 4) & 0xF
+    let conj_sign  = (instr.label_id >> 8) & 0xF
+    // Operand registers
+    let alpha_a    = instr.src1
+    let beta_b     = instr.src1 + 1
+    let alpha_c    = instr.src2
+    let beta_d     = instr.src2 + 1
+    let dst_lo     = instr.dst
+    let dst_hi     = instr.dst + 1
+    // Scratch
+    let t_bj       = instr.dst + 2
+    let t_aj       = instr.dst + 4
+    let p1_accum   = instr.dst + 6
+    let p2_accum   = instr.dst + 8
+    // Step 1: p1 = fano(alpha_a, alpha_c) → a*c
+    c.code = emit_fano_inline(c.code, alpha_a, alpha_c, p1_accum, t_bj, t_aj, ctrl_base)
+    // Step 2: conj_d = VXORPD(beta_d, conj_sign) → conjugate d (negate lanes 1-7)
+    //   Store in t_aj temporarily (will be overwritten by step 3's Fano)
+    c.code = emit_evex_pd_rr_full(c.code, 1, 0x57, t_aj, beta_d, conj_sign, vl, 0, 0)
+    let conj_d = t_aj
+    // Step 3: p2 = fano(conj_d, beta_b) → conj(d)*b
+    c.code = emit_fano_inline(c.code, conj_d, beta_b, p2_accum, t_bj, t_aj, ctrl_base)
+    // Step 4: dst_lo = p1 - p2  (with masking)
+    c.code = emit_evex_pd_rr_full(c.code, 1, 0x5C, dst_lo, p1_accum, p2_accum, vl, mask_k, zb)
+    // Step 5: p3 = fano(beta_d, alpha_a) → d*a  (reuse p1_accum)
+    c.code = emit_fano_inline(c.code, beta_d, alpha_a, p1_accum, t_bj, t_aj, ctrl_base)
+    // Step 6: conj_c = VXORPD(alpha_c, conj_sign) → conjugate c
+    c.code = emit_evex_pd_rr_full(c.code, 1, 0x57, t_aj, alpha_c, conj_sign, vl, 0, 0)
+    let conj_c = t_aj
+    // Step 7: p4 = fano(beta_b, conj_c) → b*conj(c)  (reuse p2_accum)
+    c.code = emit_fano_inline(c.code, beta_b, conj_c, p2_accum, t_bj, t_aj, ctrl_base)
+    // Step 8: dst_hi = p3 + p4  (with masking)
+    c.code = emit_evex_pd_rr_full(c.code, 1, 0x58, dst_hi, p1_accum, p2_accum, vl, mask_k, zb)
     c
 }
 
