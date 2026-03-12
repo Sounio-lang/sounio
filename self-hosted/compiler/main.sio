@@ -44,7 +44,7 @@ use module_loader::{compile_multimodule_native, compile_multimodule_native_advan
 use frontend_callsite_probe::{run_frontend_callsite_probe}
 use parser::parser::{parser_last_error_count}
 use ir::opt_strategy::{ir_opt_apply_strategy, ir_opt_find_return_vreg, ir_opt_max_label, ir_opt_max_vreg}
-use ir::lower::{ir_patch_validated_calls, lower_program_to_ir, lower_program_to_ir_with_epistemic, lower_program_to_ir_summary_flat_with_epistemic_ref, lower_program_function_body_from_summary_flat_with_epistemic_ref}
+use ir::lower::{ir_patch_validated_calls, lower_program_to_ir, lower_program_to_ir_with_epistemic, lower_program_to_ir_probe_summary_ref, lower_program_to_ir_summary_box_with_epistemic_ref, lower_program_function_body_from_summary_with_epistemic_ref, lower_program_to_ir_summary_flat_with_epistemic_ref, lower_program_function_body_from_summary_flat_with_epistemic_ref}
 use ir::const_prop::{cp_check_load_imm, cp_empty_instrs, cp_make_test_func, cp_optimize_function}
 use ir::dce::{dce_check_nop, dce_empty_instrs, dce_make_test_func, dce_optimize_function}
 use ir::profile::*
@@ -3901,6 +3901,12 @@ fn compiler_main_test_ir_opt_expands_local_reg_range() -> bool with Mut, Panic, 
     func.instrs[1] = ir_return(2)
 
     let transformed = ir_opt_apply_strategy(func)
+    if !(transformed.reg_count > func.reg_count) {
+        return false
+    }
+    if !(transformed.instr_count > func.instr_count) {
+        return false
+    }
     var total_binops: i64 = 0
     var saw_expanded_dst = false
     var i: i64 = 0
@@ -3915,7 +3921,9 @@ fn compiler_main_test_ir_opt_expands_local_reg_range() -> bool with Mut, Panic, 
         i = i + 1
     }
 
-    transformed.reg_count > func.reg_count && total_binops == 2 && saw_expanded_dst
+    if total_binops != 2 { return false }
+    if !saw_expanded_dst { return false }
+    true
 }
 
 // Sprint 44: verify IrProfCounter is injected in the instrumented path
@@ -6391,29 +6399,38 @@ fn run_probe_native_streaming(args: ArgList, flag_index: i64) with IO, Mut, Pani
         print("probe_native_streaming: typecheck_ok\n")
     }
 
+    print("probe_native_streaming: summary_probe_begin\n")
+    let summary_probe = lower_program_to_ir_probe_summary_ref(&program)
+    if summary_probe.had_error {
+        panic("probe_native_streaming summary probe failed")
+    }
+    print("probe_native_streaming: summary_probe_ok fn_count=")
+    print_int(summary_probe.module.fn_count)
+    print("\n")
+
     print("probe_native_streaming: summary_begin\n")
-    let summary_result = lower_program_to_ir_summary_flat_with_epistemic_ref(&program, epistemic)
+    let summary_result = lower_program_to_ir_summary_box_with_epistemic_ref(&program, epistemic)
     if summary_result.had_error {
         panic("probe_native_streaming summary lowering failed")
     }
     print("probe_native_streaming: summary_ok\n")
 
     var summary = summary_result.summary
-    summary.probe_mode = true
-    let summary_fn_count = summary.module.fn_count
+    (*summary).probe_mode = true
+    let summary_fn_count = (*summary).module.fn_count
     print("probe_native_streaming: fn_count=")
     print_int(summary_fn_count)
     print("\n")
 
     var fi: i64 = 0
     while fi < summary_fn_count {
-        let fn_name = summary.module.functions[fi as usize].name
+        let fn_name = (*summary).module.functions[fi as usize].name
         print("probe_native_streaming: body_begin fn=")
         compiler_manifest_print_name(fn_name)
         print("\n")
-        let body_result = lower_program_function_body_from_summary_flat_with_epistemic_ref(
+        let body_result = lower_program_function_body_from_summary_with_epistemic_ref(
             &program,
-            &summary,
+            &(*summary),
             epistemic,
             fn_name
         )
@@ -6976,7 +6993,14 @@ fn compiler_main_test_unary_double_neg_chain() -> bool with Mut, Div, Panic {
     instrs[2] = ir_unaryop(2, UnaryOp::OpNeg, 1)
     let func   = cp_make_test_func(instrs, 3)
     let result = ocp_const_fold(func)
-    result.instrs[2].op == IrOpcode::IrLoadImm && result.instrs[2].imm_i64 == 7
+    let ok = result.instrs[2].op == IrOpcode::IrLoadImm && result.instrs[2].imm_i64 == 7
+    if !ok {
+        println("DBG T208:")
+        print("  i0 op="); if result.instrs[0].op == IrOpcode::IrLoadImm { print("loadimm") } else if result.instrs[0].op == IrOpcode::IrUnaryOp { print("unary") } else if result.instrs[0].op == IrOpcode::IrCopy { print("copy") } else { print("other") }; print(" src1="); print_int(result.instrs[0].src1); print(" imm="); print_int(result.instrs[0].imm_i64); print("\n")
+        print("  i1 op="); if result.instrs[1].op == IrOpcode::IrLoadImm { print("loadimm") } else if result.instrs[1].op == IrOpcode::IrUnaryOp { print("unary") } else if result.instrs[1].op == IrOpcode::IrCopy { print("copy") } else { print("other") }; print(" src1="); print_int(result.instrs[1].src1); print(" imm="); print_int(result.instrs[1].imm_i64); print(" un="); if result.instrs[1].un_op == UnaryOp::OpNeg { print("neg") } else if result.instrs[1].un_op == UnaryOp::OpNot { print("not") } else { print("other") }; print("\n")
+        print("  i2 op="); if result.instrs[2].op == IrOpcode::IrLoadImm { print("loadimm") } else if result.instrs[2].op == IrOpcode::IrUnaryOp { print("unary") } else if result.instrs[2].op == IrOpcode::IrCopy { print("copy") } else { print("other") }; print(" src1="); print_int(result.instrs[2].src1); print(" imm="); print_int(result.instrs[2].imm_i64); print(" un="); if result.instrs[2].un_op == UnaryOp::OpNeg { print("neg") } else if result.instrs[2].un_op == UnaryOp::OpNot { print("not") } else { print("other") }; print("\n")
+    }
+    ok
 }
 
 // T209: OpNeg on non-const source → no fold (stays IrUnaryOp).
@@ -7079,9 +7103,17 @@ fn compiler_main_test_assoc_mul_chain() -> bool with Mut, Div, Panic {
     instrs[3] = ir_binop(4, 2, BinaryOp::OpMul, 3)   // r4 = r2 * 4 → r0 * 8
     let func   = cp_make_test_func(instrs, 4)
     let result = ocp_const_fold(func)
-    result.instrs[3].op == IrOpcode::IrBinOp
+    let ok = result.instrs[3].op == IrOpcode::IrBinOp
         && result.instrs[3].src1 == 0
         && result.instrs[2].imm_i64 == 8
+    if !ok {
+        println("DBG T221:")
+        print("  i0 op="); if result.instrs[0].op == IrOpcode::IrLoadImm { print("loadimm") } else { print("other") }; print(" imm="); print_int(result.instrs[0].imm_i64); print("\n")
+        print("  i1 op="); if result.instrs[1].op == IrOpcode::IrBinOp { print("binop") } else if result.instrs[1].op == IrOpcode::IrCopy { print("copy") } else if result.instrs[1].op == IrOpcode::IrLoadImm { print("loadimm") } else { print("other") }; print(" dst="); print_int(result.instrs[1].dst); print(" src1="); print_int(result.instrs[1].src1); print(" src2="); print_int(result.instrs[1].src2); print(" bin="); if result.instrs[1].bin_op == BinaryOp::OpMul { print("mul") } else if result.instrs[1].bin_op == BinaryOp::OpShl { print("shl") } else if result.instrs[1].bin_op == BinaryOp::OpAdd { print("add") } else { print("other") }; print("\n")
+        print("  i2 op="); if result.instrs[2].op == IrOpcode::IrLoadImm { print("loadimm") } else { print("other") }; print(" imm="); print_int(result.instrs[2].imm_i64); print("\n")
+        print("  i3 op="); if result.instrs[3].op == IrOpcode::IrBinOp { print("binop") } else if result.instrs[3].op == IrOpcode::IrCopy { print("copy") } else if result.instrs[3].op == IrOpcode::IrLoadImm { print("loadimm") } else { print("other") }; print(" dst="); print_int(result.instrs[3].dst); print(" src1="); print_int(result.instrs[3].src1); print(" src2="); print_int(result.instrs[3].src2); print(" bin="); if result.instrs[3].bin_op == BinaryOp::OpMul { print("mul") } else if result.instrs[3].bin_op == BinaryOp::OpShl { print("shl") } else if result.instrs[3].bin_op == BinaryOp::OpAdd { print("add") } else { print("other") }; print("\n")
+    }
+    ok
 }
 
 // T222: (r0 & 0xFF) & 0x0F → r0 & 0x0F via Block L bitand-chain fold.

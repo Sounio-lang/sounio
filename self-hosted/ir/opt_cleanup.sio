@@ -162,6 +162,7 @@ fn ocp_const_fold(func: IrFunction) -> IrFunction with Mut, Div, Panic {
     var i: i64 = 0
     while i < result.instr_count {
         let instr = result.instrs[i as usize]
+        var preserve_mul_chain = false
 
         // Track IrLoadImm: register dst becomes a known constant
         if ocp_is_load_imm(instr.op) {
@@ -450,49 +451,14 @@ fn ocp_const_fold(func: IrFunction) -> IrFunction with Mut, Div, Panic {
             }
         }
         // neg(neg(x)) → IrCopy(x)  (double negation elimination)
-        if instr.op == IrOpcode::IrUnaryOp && instr.un_op == UnaryOp::OpNeg {
-            let nn_s = instr.src1
+        if result.instrs[i as usize].op == IrOpcode::IrUnaryOp
+            && result.instrs[i as usize].un_op == UnaryOp::OpNeg {
+            let nn_instr = result.instrs[i as usize]
+            let nn_s = nn_instr.src1
             if nn_s >= 0 && nn_s < 256 && is_neg[nn_s as usize] {
-                result.instrs[i as usize] = ir_copy(instr.dst, neg_src[nn_s as usize])
-                if instr.dst >= 0 && instr.dst < 256 {
-                    is_neg[instr.dst as usize] = false
-                }
-            }
-        }
-
-        // Sprint 68: Strength reduction for power-of-2 mul/div/rem.
-        // Re-reads the current instruction so previous blocks' rewrites are respected.
-        // Patches both the IrBinOp and the preceding IrLoadImm (via def_at) in place.
-        //   x * 2^n → x << n  (OpMul → OpShl, constant patched to log2)
-        //   x / 2^n → x >> n  (OpDiv → OpShr, constant patched to log2)
-        //   x % 2^n → x & (2^n-1)  (OpRem → OpBitAnd, constant patched to mask)
-        if ocp_is_binop(result.instrs[i as usize].op) {
-            let cur = result.instrs[i as usize]
-            let s2 = cur.src2
-            let s1 = cur.src1
-            let s2_ok = s2 >= 0 && s2 < 256
-            if s2_ok && is_const[s2 as usize] {
-                let v2 = const_val[s2 as usize]
-                let def_idx = def_at[s2 as usize]
-                if def_idx >= 0 && ocp_is_power_of_two(v2) {
-                    if cur.bin_op == BinaryOp::OpMul {
-                        let shift = ocp_log2(v2)
-                        result.instrs[def_idx as usize] = ir_load_imm(s2, shift)
-                        result.instrs[i as usize] = ir_binop(cur.dst, s1, BinaryOp::OpShl, s2)
-                        const_val[s2 as usize] = shift
-                    }
-                    if cur.bin_op == BinaryOp::OpDiv {
-                        let shift = ocp_log2(v2)
-                        result.instrs[def_idx as usize] = ir_load_imm(s2, shift)
-                        result.instrs[i as usize] = ir_binop(cur.dst, s1, BinaryOp::OpShr, s2)
-                        const_val[s2 as usize] = shift
-                    }
-                    if cur.bin_op == BinaryOp::OpRem {
-                        let mask = v2 - 1
-                        result.instrs[def_idx as usize] = ir_load_imm(s2, mask)
-                        result.instrs[i as usize] = ir_binop(cur.dst, s1, BinaryOp::OpBitAnd, s2)
-                        const_val[s2 as usize] = mask
-                    }
+                result.instrs[i as usize] = ir_copy(nn_instr.dst, neg_src[nn_s as usize])
+                if nn_instr.dst >= 0 && nn_instr.dst < 256 {
+                    is_neg[nn_instr.dst as usize] = false
                 }
             }
         }
@@ -522,6 +488,8 @@ fn ocp_const_fold(func: IrFunction) -> IrFunction with Mut, Div, Panic {
         // r1 becomes dead → DCE removes it on next pass.
         // Sub-pass 2: records has_ra metadata for future chain folding.
         // Supports Add, Mul, BitAnd, BitOr, BitXor (associative over integers).
+        // Runs before power-of-two strength reduction so mul chains still see
+        // their original OpMul shape long enough to reassociate.
         // SOTA: Click "Combining Reductions" PLDI 1995 §4;
         //   Aho, Lam, Sethi, Ullman "Compilers" §8.5 (reassociation of constants).
         if ocp_is_binop(result.instrs[i as usize].op) {
@@ -557,6 +525,9 @@ fn ocp_const_fold(func: IrFunction) -> IrFunction with Mut, Div, Panic {
                         ra_const_val[la_instr.dst as usize] = la_combined
                         ra_op[la_instr.dst as usize] = la_ra_key
                     }
+                    if la_instr.bin_op == BinaryOp::OpMul {
+                        preserve_mul_chain = true
+                    }
                 }
             }
             // Sub-pass 2: record has_ra for the (possibly rewritten) current instr.
@@ -583,6 +554,43 @@ fn ocp_const_fold(func: IrFunction) -> IrFunction with Mut, Div, Panic {
                     ra_base[la_rec.dst as usize] = la_rec_s2
                     ra_const_val[la_rec.dst as usize] = const_val[la_rec_s1 as usize]
                     ra_op[la_rec.dst as usize] = la_rec_key
+                }
+            }
+        }
+
+        // Sprint 68: Strength reduction for power-of-2 mul/div/rem.
+        // Re-reads the current instruction so previous blocks' rewrites are respected.
+        // Patches both the IrBinOp and the preceding IrLoadImm (via def_at) in place.
+        //   x * 2^n → x << n  (OpMul → OpShl, constant patched to log2)
+        //   x / 2^n → x >> n  (OpDiv → OpShr, constant patched to log2)
+        //   x % 2^n → x & (2^n-1)  (OpRem → OpBitAnd, constant patched to mask)
+        if ocp_is_binop(result.instrs[i as usize].op) {
+            let cur = result.instrs[i as usize]
+            let s2 = cur.src2
+            let s1 = cur.src1
+            let s2_ok = s2 >= 0 && s2 < 256
+            if s2_ok && is_const[s2 as usize] {
+                let v2 = const_val[s2 as usize]
+                let def_idx = def_at[s2 as usize]
+                if def_idx >= 0 && ocp_is_power_of_two(v2) {
+                    if cur.bin_op == BinaryOp::OpMul && !preserve_mul_chain {
+                        let shift = ocp_log2(v2)
+                        result.instrs[def_idx as usize] = ir_load_imm(s2, shift)
+                        result.instrs[i as usize] = ir_binop(cur.dst, s1, BinaryOp::OpShl, s2)
+                        const_val[s2 as usize] = shift
+                    }
+                    if cur.bin_op == BinaryOp::OpDiv {
+                        let shift = ocp_log2(v2)
+                        result.instrs[def_idx as usize] = ir_load_imm(s2, shift)
+                        result.instrs[i as usize] = ir_binop(cur.dst, s1, BinaryOp::OpShr, s2)
+                        const_val[s2 as usize] = shift
+                    }
+                    if cur.bin_op == BinaryOp::OpRem {
+                        let mask = v2 - 1
+                        result.instrs[def_idx as usize] = ir_load_imm(s2, mask)
+                        result.instrs[i as usize] = ir_binop(cur.dst, s1, BinaryOp::OpBitAnd, s2)
+                        const_val[s2 as usize] = mask
+                    }
                 }
             }
         }
