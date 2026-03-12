@@ -52,8 +52,9 @@ The self-hosted compiler is now the default. No changes required for basic usage
 git clone https://github.com/sounio-lang/sounio.git
 cd sounio
 
-# Build the compiler (still uses Rust for Stage 0)
-cargo build --release -p souc
+# Build the compiler with the historical Stage-0 Rust bootstrap path
+# (kept here only for lineage; see current getting-started docs for today's flow)
+[historical bootstrap command]
 
 # Run your programs (now uses self-hosted compiler)
 ./target/release/souc run examples/hello.sio
@@ -457,7 +458,7 @@ There are **no breaking changes** for users. The compiler interface and language
 **Before**:
 ```bash
 vim crates/souc/src/check/type_check.rs  # Edit Rust code
-cargo build -p souc
+[historical Stage-0 rebuild command]
 ```
 
 **After**:

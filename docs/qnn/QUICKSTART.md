@@ -11,17 +11,18 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.qnn.quickstart
 
 Get started with Quaternion Neural Networks in 5 minutes.
 
+Public execution in this repository should start from the checked JIT artifact.
+Treat older Rust-era `cargo run` snippets as historical unless they have been
+revalidated against the exact binary you are using.
+
 ---
 
 ## 1. Install & Run
 
 ```bash
-# Build Sounio
-cd /home/demetrios/sounio-1/compiler
-cargo build --release
-
-# Run hello quaternion example
-cargo run -- check ../examples/qnn/01_hello_quaternion.sio
+cd /home/demetrios/RustroverProjects/sounio
+export SOUC_BIN="$(pwd)/artifacts/omega/souc-bin/souc-linux-x86_64-jit"
+"$SOUC_BIN" check examples/qnn/01_hello_quaternion.sio
 ```
 
 ---
@@ -66,7 +67,7 @@ fn main() {
 
 **Run it:**
 ```bash
-cargo run -- check examples/qnn/02_basic_linear.sio
+"$SOUC_BIN" check examples/qnn/02_basic_linear.sio
 ```
 
 ---
@@ -242,13 +243,13 @@ let cos = quat_cosine_similarity_loss(&pred, &target)  // Rotation alignment
 ### Run Examples
 ```bash
 # Hello quaternion
-cargo run --features jit -- run examples/qnn/01_hello_quaternion.sio
+"$SOUC_BIN" run examples/qnn/01_hello_quaternion.sio
 
 # Basic linear layer
-cargo run --features jit -- run examples/qnn/02_basic_linear.sio
+"$SOUC_BIN" run examples/qnn/02_basic_linear.sio
 
 # Full MNIST training
-cargo run --features jit -- run examples/qnn_mnist.sio
+"$SOUC_BIN" run examples/qnn_mnist.sio
 ```
 
 ### Migrate from PyTorch
@@ -297,7 +298,7 @@ Check [FAQ.md](FAQ.md) for 15 detailed Q&As covering:
 
 **Ready?** Run the first example:
 ```bash
-cargo run --features jit -- run examples/qnn/01_hello_quaternion.sio
+"$SOUC_BIN" run examples/qnn/01_hello_quaternion.sio
 ```
 
 Good luck! 🚀

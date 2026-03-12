@@ -28,15 +28,11 @@ A step-by-step guide to learning Sounio, the language for epistemic computing.
 ### Installation
 
 ```bash
-# Clone the repository
 git clone https://github.com/sounio-lang/sounio.git
 cd sounio
 
-# Build the compiler
-cargo build -p souc --release
-
-# Add to PATH (optional)
-export PATH=$PATH:$(pwd)/target/release
+export SOUC_BIN="$(pwd)/artifacts/omega/souc-bin/souc-linux-x86_64-jit"
+"$SOUC_BIN" info
 ```
 
 ### Your First Program
@@ -53,7 +49,7 @@ fn main() -> i32 {
 Run it:
 
 ```bash
-souc run hello.sio
+"$SOUC_BIN" run hello.sio
 ```
 
 ---

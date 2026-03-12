@@ -61,7 +61,7 @@ On the current repository snapshot, `souc info` for that JIT artifact reports:
 - version `1.0.0-beta.4`
 - Cranelift JIT enabled
 - LLVM disabled in the checked artifact
-- GPU codegen disabled in the checked artifact
+- GPU codegen disabled in the checked JIT artifact
 - LSP, SMT, ontology, distributed, and package-manager features disabled in the checked artifact
 
 The repository also ships a separate checked GPU artifact:
@@ -78,7 +78,21 @@ That means contributors should distinguish clearly between:
 - source-tree presence: a subsystem exists in `self-hosted/`
 - checked-artifact availability: the default binary actually exposes that subsystem
 
-## 3. Evidence surfaces that matter
+## 3. Current checkpoint lanes
+
+The current repo-wide checkpoint is broader than the older Sprint 52-only
+baseline.
+
+- optimizer lanes: Sprints `43`, `44`, `50`, `51`, `52`
+- render/bootstrap lanes: Sprints `53`, `54`, `55`, `56`, `57`, `58`
+- skills/dispatch lanes: Sprints `59`, `60`, `61`, `65`, `66`
+- authoritative self-hosted driver: `self-hosted/compiler/main.sio`
+- frozen self-hosted CLI surface: `--check`, `--ir-dump`, `--ir-roundtrip`,
+  `--native-compile`
+- website graphics evidence: 5 checked-JIT raster previews generated from
+  `examples/render/`
+
+## 4. Evidence surfaces that matter
 
 When documentation or code claims support, confirm it against one of these:
 
@@ -98,7 +112,7 @@ Current committed stdlib status from `artifacts/stdlib/stdlib_reliability_status
 - hyper execution: `7/7` required lanes passing
 - runtime regression enforcement for science remains `soft` locally, with `4` recorded regression failures that become release-blocking under strict enforcement
 
-## 4. Website and docs model
+## 5. Website and docs model
 
 - Public docs content lives under `website/src/content/docs/`.
 - `/learn/*` is the canonical public docs surface.
@@ -110,7 +124,7 @@ If you are updating docs, keep the public and repo-native stories aligned:
 - website docs should explain the checked artifact and user-facing contract
 - repo docs should explain the self-hosted implementation map and contributor workflow
 
-## 5. Release-critical paths
+## 6. Release-critical paths
 
 The most important paths to protect when changing the compiler or docs are:
 
@@ -120,7 +134,7 @@ The most important paths to protect when changing the compiler or docs are:
 - `website/src/content/docs/`, `website/src/pages/learn/`, and docs/i18n support code for docs-domain changes
 - `docs/governance/` metadata and `scripts/check_docs_registry.sh` for docs governance
 
-## 6. Current contributor checklist
+## 7. Current contributor checklist
 
 Use a checklist that matches the part of the repository you changed:
 

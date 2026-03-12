@@ -434,20 +434,16 @@ Functions to mark as `#[inline]` for ~10% speedup:
 
 Commands for optimization:
 ```bash
-# Maximum optimization
-cargo build --release --features llvm
-
-# With LTO
-RUSTFLAGS="-C lto=fat" cargo build --release
-
-# Profile-guided optimization
-cargo pgo build
+# LLVM remains an alternate-build path, not a checked public default.
+# Rebuild-specific commands must be documented against the exact compiler
+# profile you produced and verified with `souc info`.
 ```
 
 ### 8.3 Cranelift JIT
 
 ```bash
-cargo run --features jit -- examples/qnn_mnist.sio
+export SOUC_BIN="$(pwd)/artifacts/omega/souc-bin/souc-linux-x86_64-jit"
+"$SOUC_BIN" run examples/qnn_mnist.sio
 ```
 
 Expected speedup: 1.2-1.5x over native backend due to specialization.

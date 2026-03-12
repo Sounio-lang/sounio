@@ -1,4 +1,4 @@
-# Sounio Handoff — 2026-03-09
+# Sounio Handoff — 2026-03-10
 
 ## Branch
 
@@ -6,59 +6,102 @@
 
 ## Current checkpoint
 
-Strategy-directed native compilation plus parsed-frontend probe recovery are now executable through Sprint 44 on this machine.
+The current repo-wide stabilization checkpoint is green through the optimizer,
+render/bootstrap, and skills/dispatch lanes on this machine.
 
 Validated coverage status:
 
 | Sprint | Gate | Status |
 |--------|------|--------|
-| 38 | `sprint38_strategy_codegen_gate.sh` | PASS |
-| 38 | `sprint38_dual_path_cfg_gate.sh` | PASS |
-| 39 | `sprint39_strategy_impact_gate.sh` | PASS |
-| 40 | `sprint40_dual_path_native_gate.sh` | PASS |
-| 41 | `sprint41_merge_block_probe_gate.sh` | PASS |
-| 42 | `sprint42_validated_param_gate.sh` | PASS |
 | 43 | `sprint43_chain_propagation_gate.sh` | PASS |
 | 44 | `sprint44_frontend_probe_gate.sh` | PASS |
+| 50 | `sprint50_layout_pgo_gate.sh` | PASS |
+| 51 | `sprint51_opt_cleanup_gate.sh` | PASS |
+| 52 | `sprint52_loop_licm_gate.sh` | PASS |
+| 53 | `sprint53_render_platform_gate.sh` | PASS |
+| 54 | `sprint54_gpu_contract_gate.sh` | PASS |
+| 55 | `sprint55_website_render_gate.sh` | PASS |
+| 56 | `sprint56_selfhost_render_check_gate.sh` | PASS |
+| 57 | `sprint57_selfhost_ir_gate.sh` | PASS |
+| 58 | `sprint58_selfhost_native_render_gate.sh` | PASS |
+| 59 | `sprint59_skills_new_gate.sh` | PASS |
+| 60 | `sprint60_dispatch_gate.sh` | PASS |
+| 61 | `sprint61_skills_coverage_gate.sh` | PASS |
+| 65 | `sprint65_peephole_gate.sh` | PASS |
+| 66 | `sprint66_native_codegen_skill_gate.sh` | PASS |
 
-## What changed in the recovery pass
+## What changed in the current pass
 
-- The self-hosted checker no longer depends on fragile local-enum resolution for epistemic provenance metadata.
-- `.sprof` strategy promotion now mutates `IrModule.functions[i]` with copy-mutate-writeback, and `compiler/main -- --self-test` is green again at `19/19`.
-- Parsed-frontend `--probe-ir-callsite` is working again for both Sprint 43 chain edges.
-- The boxed `current_func` experiment in IR lowering was reverted; it reduced probe latency but broke frontend lowering by dropping emitted instructions.
+- `self-hosted/compiler/main.sio` is the authoritative self-hosted driver for
+  the checkpoint and now keeps the stable self-test surface green at `108/108`.
+- The authoritative self-hosted CLI surface is frozen as `--check`,
+  `--ir-dump`, `--ir-roundtrip`, and `--native-compile`.
+- The render platform is integrated end-to-end: the repo ships seven real
+  render fixtures, the website ships five checked-JIT raster previews, and
+  Sprint 58 preserves the current bootstrap-native proof for
+  `triangle_basic.sio`.
+- Obsolete Sprint 56-58 draft gates and draft artifacts have been removed from
+  the checkpoint scope so each in-scope sprint has one authoritative gate and
+  one matching artifact.
+- Repo-facing docs and website-facing claims now describe the same post-Sprint
+  66 baseline instead of stopping at Sprint 52.
 
 ## Important files
 
 - `self-hosted/compiler/main.sio`
-- `self-hosted/compiler/frontend_callsite_probe.sio`
-- `self-hosted/check/epistemic.sio`
-- `self-hosted/ir/profile.sio`
-- `self-hosted/ir/lower.sio`
-- `self-hosted/ir/opt_strategy.sio`
-- `scripts/sprint43_chain_propagation_gate.sh`
-- `scripts/sprint44_frontend_probe_gate.sh`
-- `tests/frontend/chain_validated_param_contest.sio`
+- `self-hosted/check/check.sio`
+- `self-hosted/parser/exprs.sio`
+- `self-hosted/compiler/module_loader.sio`
+- `scripts/sprint53_render_platform_gate.sh`
+- `scripts/sprint54_gpu_contract_gate.sh`
+- `scripts/sprint55_website_render_gate.sh`
+- `scripts/sprint56_selfhost_render_check_gate.sh`
+- `scripts/sprint57_selfhost_ir_gate.sh`
+- `scripts/sprint58_selfhost_native_render_gate.sh`
+- `scripts/sprint59_skills_new_gate.sh`
+- `scripts/sprint60_dispatch_gate.sh`
+- `scripts/sprint61_skills_coverage_gate.sh`
+- `scripts/sprint65_peephole_gate.sh`
+- `scripts/sprint66_native_codegen_skill_gate.sh`
+- `website/scripts/render-assets.mjs`
+- `website/src/content/showcases/graphics.mdx`
+- `tests/selfhost/render_ir_expectations.tsv`
 
 ## Current verification commands
 
 ```bash
-timeout 180 ./artifacts/omega/souc-bin/souc-linux-x86_64-jit run self-hosted/compiler/main.sio -- --self-test
-bash scripts/sprint39_strategy_impact_gate.sh
-bash scripts/sprint40_dual_path_native_gate.sh
-bash scripts/sprint41_merge_block_probe_gate.sh
-bash scripts/sprint42_validated_param_gate.sh
+timeout 240 ./artifacts/omega/souc-bin/souc-linux-x86_64-jit run self-hosted/compiler/main.sio -- --self-test
 bash scripts/sprint43_chain_propagation_gate.sh
 bash scripts/sprint44_frontend_probe_gate.sh
+bash scripts/sprint50_layout_pgo_gate.sh
+bash scripts/sprint51_opt_cleanup_gate.sh
+bash scripts/sprint52_loop_licm_gate.sh
+bash scripts/sprint53_render_platform_gate.sh
+bash scripts/sprint54_gpu_contract_gate.sh
+bash scripts/sprint55_website_render_gate.sh
+bash scripts/sprint56_selfhost_render_check_gate.sh
+bash scripts/sprint57_selfhost_ir_gate.sh
+bash scripts/sprint58_selfhost_native_render_gate.sh
+bash scripts/sprint59_skills_new_gate.sh
+bash scripts/sprint60_dispatch_gate.sh
+bash scripts/sprint61_skills_coverage_gate.sh
+bash scripts/sprint65_peephole_gate.sh
+bash scripts/sprint66_native_codegen_skill_gate.sh
 ```
 
 ## Next natural step
 
-Reduce parsed-frontend callsite probe latency without changing its output contract.
+Graduate the preview native-v2 backend from the current cached-bootstrap proof
+to a general self-hosted native path, then retire the `native-v2-shadow` alias
+once equivalent runtime/codegen coverage exists.
 
-Correctness is back and Sprint 39–44 are green, but `--probe-ir-callsite` still spends most of its time in the slower frontend lowering path. The next useful step is to optimize that path or reintroduce a safe fast lane for callsite semantics without reopening the earlier lowering regressions.
+The checkpoint above is green and internally consistent. The next unresolved
+technical gap is no longer render/bootstrap correctness or self-hosted frontend
+parity; it is making the native-v2 sovereignty lane honest without depending on
+the narrow cached `triangle_basic` proof.
 
 ## Notes
 
-- `HANDOFF.md` and `TODO_NEXT.md` now reflect Sprint 44 as complete.
-- The worktree is dirty in multiple unrelated areas. Do not reset or clean broadly.
+- Sprint 69 draft work remains out of the authoritative checkpoint scope.
+- The worktree is dirty in multiple unrelated areas. Do not reset or clean
+  broadly.

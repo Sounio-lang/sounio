@@ -2,7 +2,7 @@
 topic_id: repo.docs.getting-started
 authority: repo_only
 audience: users
-last_validated: 2026-03-10
+last_validated: 2026-03-07
 validated_by: A2
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.getting-started
 -->
@@ -33,6 +33,9 @@ What this default artifact proves today:
 Use this profile for the ordinary docs workflow, examples, and `check`-first
 validation.
 
+The website graphics showcase is also generated from this checked JIT artifact:
+it currently publishes five real raster previews from `examples/render/`.
+
 ## 2. GPU workflow
 
 ```bash
@@ -52,7 +55,25 @@ What this GPU artifact proves today:
 Use this profile only when the claim is specifically about public GPU syntax or
 PTX emission.
 
-## 3. The shortest useful command set
+## 3. Self-hosted checkpoint workflow
+
+For repo contributors, `self-hosted/compiler/main.sio` is the authoritative
+self-hosted driver in this snapshot. The stabilized checkpoint surface is:
+
+- `--check`
+- `--ir-dump`
+- `--ir-roundtrip`
+- `--native-compile`
+
+```bash
+timeout 240 "$SOUC_BIN" run self-hosted/compiler/main.sio -- --self-test
+timeout 180 "$SOUC_BIN" run self-hosted/compiler/main.sio -- --check examples/render/triangle_basic.sio
+timeout 60 "$SOUC_BIN" run self-hosted/compiler/main.sio -- --ir-dump examples/render/triangle_basic.sio
+timeout 60 "$SOUC_BIN" run self-hosted/compiler/main.sio -- --ir-roundtrip examples/render/triangle_basic.sio
+timeout 60 "$SOUC_BIN" run self-hosted/compiler/main.sio -- --native-compile examples/render/triangle_basic.sio -o /tmp/triangle_basic_bootstrap
+```
+
+## 4. The shortest useful command set
 
 ```bash
 # Type-check without running
@@ -68,7 +89,7 @@ PTX emission.
 "$SOUC_BIN" fmt examples/hello.sio
 ```
 
-## 4. Build-from-source note
+## 5. Build-from-source note
 
 If you are working on internal or historical build paths, treat them as
 component-local workflows. The root of this repository does not expose a single
@@ -80,9 +101,9 @@ When you rebuild any compiler profile yourself:
 - document the exact binary you rebuilt
 - do not describe source-tree presence alone as public feature availability
 
-## 5. Next reads
+## 6. Next reads
 
-- [docs/guide/getting-started.md](docs/guide/getting-started.md) for the current repo-facing walkthrough
-- [docs/compiler/GPU_KERNELS.md](docs/compiler/GPU_KERNELS.md) for the checked GPU surface
-- [docs/features/GPU_RUNTIME.md](docs/features/GPU_RUNTIME.md) for the public GPU runtime contract
+- [docs/guide/getting-started.md](guide/getting-started.md) for the current repo-facing walkthrough
+- [docs/compiler/GPU_KERNELS.md](compiler/GPU_KERNELS.md) for the checked GPU surface
+- [docs/features/GPU_RUNTIME.md](features/GPU_RUNTIME.md) for the public GPU runtime contract
 - [examples/showcase/README.md](../examples/showcase/README.md) for example descriptions

@@ -93,6 +93,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.implementation.implementation-summary | historical | docs/implementation/IMPLEMENTATION_SUMMARY.md | - | A7 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.implementation.migration-guide | historical | docs/implementation/MIGRATION_GUIDE.md | - | A7 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.implementation.mv-core-checklist | repo_only | docs/implementation/MV_CORE_CHECKLIST.md | - | A7 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.implementation.native-backend-sovereignty | historical | docs/implementation/NATIVE_BACKEND_SOVEREIGNTY.md | - | A7 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.implementation.omega-sprint5-scaffold | historical | docs/implementation/OMEGA_SPRINT5_SCAFFOLD.md | - | A7 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.implementation.omega-sprint5-track1 | historical | docs/implementation/OMEGA_SPRINT5_TRACK1.md | - | A7 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.implementation.paper-artifact-packaging-spec | repo_only | docs/implementation/PAPER_ARTIFACT_PACKAGING_SPEC.md | - | A7 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |

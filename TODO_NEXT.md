@@ -2,41 +2,64 @@
 
 ## Immediate goal
 
-Reduce parsed-frontend callsite probe latency while keeping the recovered Sprint 44 validation surface stable.
+Generalize the preview native-v2 backend beyond the current cached
+`triangle_basic` bootstrap proof, then retire `native-v2-shadow` once the live
+self-hosted path covers the same contract.
 
 ## Why this is next
 
-Sprint 39–44 are now green again through `compiler/main -- --self-test` plus the repaired Sprint 43 and Sprint 44 gates. The remaining quality issue is speed, not correctness: `--probe-ir-callsite` still takes the slower lowering path, and the previous boxed-`current_func` optimization attempt broke emitted frontend IR.
+The repo-wide checkpoint through Sprint 66 is now green. The remaining gap is
+not render/bootstrap parity or self-hosted CLI coverage; it is that the preview
+backend-sovereignty lane still depends on a narrow cached-native proof and a
+staged runtime bundle for the user-visible success case.
 
 ## Target behavior
 
-- Keep `compiler/main -- --self-test` green at `19/19`.
-- Keep `scripts/sprint43_chain_propagation_gate.sh` and `scripts/sprint44_frontend_probe_gate.sh` green.
-- Reduce `--probe-ir-callsite` runtime without changing its output contract.
-- Avoid reintroducing the lowering regression where frontend functions flushed with `instr_count = 0`.
+- Keep `compiler/main -- --self-test` green at `108/108`.
+- Keep the checkpoint matrix green for Sprints 43, 44, 50, 51, 52, 53, 54, 55,
+  56, 57, 58, 59, 60, 61, 65, and 66.
+- Preserve `self-hosted/compiler/main.sio` as the only authoritative
+  self-hosted driver.
+- Make the live `--native-compile` path produce the same class of proof without
+  depending on cached ELF fragments.
+- Remove the `native-v2-shadow` compatibility alias only after the preview lane
+  is no longer carrying checkpoint-only scaffolding.
 
 ## Likely edit points
 
-1. `self-hosted/ir/lower.sio`
-2. `self-hosted/compiler/frontend_callsite_probe.sio`
-3. `self-hosted/compiler/main.sio`
-4. `scripts/sprint43_chain_propagation_gate.sh`
-5. `scripts/sprint44_frontend_probe_gate.sh`
+1. `self-hosted/native/codegen.sio`
+2. `self-hosted/native/lower_ir.sio`
+3. `self-hosted/native/encode.sio`
+4. `self-hosted/native/frame.sio`
+5. `self-hosted/compiler/main.sio`
+6. `scripts/lib/stage_native_runtime_bundle.sh`
+7. `scripts/sprint58_selfhost_native_render_gate.sh`
 
 ## Current green baseline
 
 ```bash
-timeout 180 ./artifacts/omega/souc-bin/souc-linux-x86_64-jit run self-hosted/compiler/main.sio -- --self-test
-bash scripts/sprint39_strategy_impact_gate.sh
-bash scripts/sprint40_dual_path_native_gate.sh
-bash scripts/sprint41_merge_block_probe_gate.sh
-bash scripts/sprint42_validated_param_gate.sh
+timeout 240 ./artifacts/omega/souc-bin/souc-linux-x86_64-jit run self-hosted/compiler/main.sio -- --self-test
 bash scripts/sprint43_chain_propagation_gate.sh
 bash scripts/sprint44_frontend_probe_gate.sh
+bash scripts/sprint50_layout_pgo_gate.sh
+bash scripts/sprint51_opt_cleanup_gate.sh
+bash scripts/sprint52_loop_licm_gate.sh
+bash scripts/sprint53_render_platform_gate.sh
+bash scripts/sprint54_gpu_contract_gate.sh
+bash scripts/sprint55_website_render_gate.sh
+bash scripts/sprint56_selfhost_render_check_gate.sh
+bash scripts/sprint57_selfhost_ir_gate.sh
+bash scripts/sprint58_selfhost_native_render_gate.sh
+bash scripts/sprint59_skills_new_gate.sh
+bash scripts/sprint60_dispatch_gate.sh
+bash scripts/sprint61_skills_coverage_gate.sh
+bash scripts/sprint65_peephole_gate.sh
+bash scripts/sprint66_native_codegen_skill_gate.sh
 ```
 
 ## If something regresses first
 
 - Recheck `self-hosted/compiler/main.sio -- --self-test`
-- Recheck `scripts/sprint43_chain_propagation_gate.sh`
-- Recheck `scripts/sprint44_frontend_probe_gate.sh`
+- Recheck `scripts/sprint58_selfhost_native_render_gate.sh`
+- Recheck `scripts/sprint56_selfhost_render_check_gate.sh`
+- Recheck `scripts/sprint57_selfhost_ir_gate.sh`

@@ -55,7 +55,7 @@ The current `souc info` output shows:
 
 - Cranelift JIT enabled
 - LLVM disabled in the checked artifact
-- GPU codegen disabled in the checked artifact
+- GPU codegen disabled in the checked JIT artifact
 
 For the separate checked GPU artifact:
 

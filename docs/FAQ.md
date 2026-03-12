@@ -39,13 +39,16 @@ Existing languages treat uncertainty as an afterthought (manual error propagatio
 
 ### Is Sounio production-ready?
 
-**Current status (v0.100.0)**: Pre-1.0, suitable for research and evaluation.
-- ✅ Core language features stable
-- ✅ 215K+ lines standard library
-- 🚧 Some advanced features experimental (LLVM backend, LSP)
-- 📋 API may change before 1.0
+**Current checked-artifact status (`souc 1.0.0-beta.4`)**: suitable for
+research, evaluation, and artifact-backed workflows, but still not "everything
+in the source tree is equally public".
+- ✅ Core language and science lanes are artifact-backed
+- ✅ Checked JIT and GPU compiler profiles exist
+- ✅ The repo-wide checkpoint now includes self-hosted render/bootstrap proofs and the skills/dispatch wave
+- 🚧 Advanced or alternate-build features such as LLVM, SMT, and LSP remain profile-dependent
+- 📋 Public docs should still track the exact artifact and gate behind each claim
 
-See [Project Status](../README.md#project-status) for details.
+See [Current State](../README.md#current-state) for details.
 
 ### How does Sounio compare to Rust?
 
@@ -190,11 +193,19 @@ if a < b with_confidence 0.95 { }
 ```bash
 git clone https://github.com/sounio-lang/sounio.git
 cd sounio
-cargo build -p souc --release
-
-# Add to PATH
-export PATH=$PATH:$(pwd)/target/release
+export SOUC_BIN="$(pwd)/artifacts/omega/souc-bin/souc-linux-x86_64-jit"
+"$SOUC_BIN" info
+"$SOUC_BIN" check examples/hello.sio
 ```
+
+### Does the self-hosted compiler work today?
+
+Yes. `self-hosted/compiler/main.sio` is the authoritative repo-checkpoint
+driver, and the stabilized contributor-facing modes are `--check`,
+`--ir-dump`, `--ir-roundtrip`, and `--native-compile`.
+
+The current gates use that driver to validate all 7 render fixtures and the
+`triangle_basic.sio` bootstrap-native render proof.
 
 ### Is there IDE support?
 
@@ -404,7 +415,9 @@ fn sqrt(x: Positive) -> f64 {
 }
 ```
 
-Enable with: `cargo build -p souc --features smt`
+The checked public artifacts currently report SMT as disabled. Treat SMT as a
+rebuild-only capability family and confirm it with `souc info` on the exact
+binary you built before documenting it as available.
 
 ---
 

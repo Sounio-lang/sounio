@@ -22,6 +22,19 @@ This checkout is active and substantial, but it is not an "everything is product
 - `artifacts/stdlib/stdlib_hyper_execution_status.v1.json` reports `status_summary=pass` for 7 required hyper-execution lanes.
 - The current stdlib inventory records `604` `.sio` files, `111` disabled files, `44` stub module files, and `92` active module entrypoints.
 - The local science gate still records 4 runtime regression probe failures in `soft` mode. Strict CI treats those probes as fail-closed.
+- The self-hosted shell now recognizes `--backend=native-v2` as the preview backend-sovereignty lane; the old `native-v2-shadow` alias has been retired.
+- The current repo-wide checkpoint is green for Sprints `43`, `44`, `50`,
+  `51`, `52`, `53`, `54`, `55`, `56`, `57`, `58`, `59`, `60`, `61`, `65`,
+  and `66`.
+- `self-hosted/compiler/main.sio` is the authoritative self-hosted driver in
+  this snapshot and exposes `--check`, `--ir-dump`, `--ir-roundtrip`, and
+  `--native-compile`.
+- The graphics showcase now ships five raster previews generated from the exact
+  checked-JIT output of `triangle_basic`, `cube_wireframe`,
+  `uncertainty_field`, `causal_dag`, and `quaternion_rotation`.
+- The Sprint 58 bootstrap proof on this machine confirms that the self-hosted
+  native render path reproduces `triangle_basic.sio` byte-for-byte against the
+  checked JIT reference.
 
 For the conservative contract, start with [docs/guide/MINIMUM_VIABLE_SOUNIO.md](docs/guide/MINIMUM_VIABLE_SOUNIO.md).
 
@@ -57,6 +70,16 @@ If you want the repo to resolve a pinned release binary for you, use:
 scripts/omega/omega_resolve_souc_bin.sh --print-path --allow-local-fallback
 ```
 
+If you want the checked JIT artifact to build a native binary directly, stage the
+runtime C shim bundle first:
+
+```bash
+source scripts/lib/stage_native_runtime_bundle.sh
+sounio_stage_native_runtime_bundle "$SOUC_BIN"
+"$SOUC_BIN" build examples/simple_test.sio --backend native -o /tmp/simple_test_native
+/tmp/simple_test_native
+```
+
 If you need the checked GPU profile:
 
 ```bash
@@ -89,6 +112,7 @@ Use these rules when deciding what to rely on:
 
 - There is no top-level Cargo workspace in this checkout, so `cargo build` from the repo root is not the correct default setup story here.
 - The checked-in JIT binary reports Cranelift JIT support; the checked-in GPU binary reports GPU codegen support and PTX emission through `build --backend gpu`. Other features still depend on how a given `souc` binary was built.
+- `native-v2` is the preview native sovereignty lane for maintainers in the self-hosted shell. On `x86-64` it now emits strict scalar-core native ELFs, publishes real stack-map/deopt metadata through `RuntimeContext`, includes the v2 root-map/deopt-id/OSR-eligibility schema in those stack-map records, initializes a concrete `gc_state` block plus managed-object descriptor metadata, uses a fixed-capacity handle table for native-v2 heap objects, compiles alloc overflow to a real runtime slow-path trap, and ships an executable descriptor-driven mark/compact GC model with precise slot scanning, handle relocation, and pin-aware movement rules exercised in self-tests; `AArch64` now has matching scalar-core preview emission but is still compile-only. The checked outer CLI still exposes stable `--backend=native`.
 - The self-hosted WASM emitter exists in `self-hosted/wasm/`, but it is not yet integrated into the normal CLI flow.
 - Some scientific/runtime lanes are validated only under specific gates, and local runtime regression enforcement is still `soft` unless you opt into strict mode.
 
@@ -96,6 +120,7 @@ Use these rules when deciding what to rely on:
 
 - [docs/guide/MINIMUM_VIABLE_SOUNIO.md](docs/guide/MINIMUM_VIABLE_SOUNIO.md)
 - [docs/guide/getting-started.md](docs/guide/getting-started.md)
+- [docs/implementation/NATIVE_BACKEND_SOVEREIGNTY.md](docs/implementation/NATIVE_BACKEND_SOVEREIGNTY.md)
 - [INSTALL.md](INSTALL.md)
 - [docs/reference/STDLIB_REFERENCE.md](docs/reference/STDLIB_REFERENCE.md)
 - [website/src/content/docs/en/feature-status.mdx](website/src/content/docs/en/feature-status.mdx)

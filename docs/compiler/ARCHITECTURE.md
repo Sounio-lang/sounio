@@ -7,6 +7,10 @@ validated_by: A4
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.compiler.architecture
 -->
 
+> Status note: this page describes an older Rust-first architecture map. For the
+> current contributor-facing compiler map, start with
+> [COMPILER_ARCHITECTURE_OVERVIEW.md](COMPILER_ARCHITECTURE_OVERVIEW.md).
+
 # Sounio Compiler Architecture
 
 High-level overview of the Sounio compiler design for contributors.
@@ -43,7 +47,7 @@ The Sounio compiler (`souc`) is a multi-stage ahead-of-time compiler with option
 - **Parser**: Recursive descent with operator precedence
 - **Type Inference**: Bidirectional (synthesis + checking)
 - **Codegen**: Cranelift (JIT/AOT), Native (ELF/Mach-O), LLVM (experimental)
-- **Dependencies**: See [Cargo.toml](../../Cargo.toml)
+- **Dependencies**: historical Rust dependencies lived in component-local Cargo manifests; current public/compiler orientation starts with `self-hosted/` and the checked artifacts under `artifacts/omega/`
 
 ---
 
@@ -415,7 +419,7 @@ Executable
    ```bash
    git clone https://github.com/sounio-lang/sounio.git
    cd sounio
-   cargo build -p souc
+   ./artifacts/omega/souc-bin/souc-linux-x86_64-jit info
    ```
 
 2. **Run tests**:

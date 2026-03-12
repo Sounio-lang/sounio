@@ -23,6 +23,7 @@ high-confidence internal workflows.
 
 ### Experimental / controlled
 - `souc build --backend=selfhosted-native`
+- self-hosted `compile --backend=native-v2`
 - `--enable-cps`
 - LLVM and Cranelift behavior on edge cases
 - GPU codegen and runtime paths
@@ -34,19 +35,37 @@ high-confidence internal workflows.
   fails fast on parser/typecheck/codegen errors.
 - `--backend=selfhosted-native --enable-cps` is currently blocked and returns an
   explicit error (experimental flag only for native LLVM/Cranelift paths).
+- `--backend=native-v2` is the preview self-hosted x86 Machine-IR lane. It
+  emits the canonical v2 contract artifact, produces strict scalar-core native
+  ELFs, publishes stack-map/deopt metadata plus a concrete `gc_state` block and
+  managed-object descriptor table into `RuntimeContext`, emits the v2 root-map
+  schema fields alongside each safepoint record, routes native-v2 heap objects
+  through a fixed-capacity handle table, compiles allocation overflow to a
+  real runtime slow-path trap, and carries an executable descriptor-driven
+  mark/compact GC model with precise slot scanning and pin-aware relocation
+  rules validated in compiler self-tests. `--backend=native-v2-shadow` has
+  been retired and is not a separate runtime profile.
 
 ## 3) Linux setup (recommended)
 
-1. Build compiler:
-   - `cargo build -p souc --release`
+1. Use the checked JIT compiler artifact:
+   - `export SOUC_BIN="$(pwd)/artifacts/omega/souc-bin/souc-linux-x86_64-jit"`
+   - `"$SOUC_BIN" info`
+   - `source scripts/lib/stage_native_runtime_bundle.sh`
+   - `sounio_stage_native_runtime_bundle "$SOUC_BIN"`
 2. Set stdlib path for CI / non-root runs:
    - `export SOUNIO_STDLIB_PATH=/path/to/sounio/stdlib`
 3. Smoke check:
-   - `./target/release/souc build examples/hello.sio --backend=selfhosted-native -o /tmp/hello`
-   - `/tmp/hello`
+   - `"$SOUC_BIN" check examples/hello.sio`
+   - `"$SOUC_BIN" run examples/hello.sio`
+   - `"$SOUC_BIN" build examples/simple_test.sio --backend native -o /tmp/simple_test_native`
 4. Validate output:
    - exit code should be `0`
    - command should complete with diagnostics only on failure
+
+If you are validating an internal selfhosted-native profile, document that
+binary separately. Do not treat a root-level Cargo bootstrap command as the
+canonical setup story for this repo snapshot.
 
 ## 4) Troubleshooting
 
@@ -62,6 +81,16 @@ high-confidence internal workflows.
 ### `backend=selfhosted-native` fails on unsupported host
 - This is expected on non-Linux or non-x86-64 hosts; use `--backend=native` for
   broader local experimentation.
+
+### `backend=native-v2` does not behave like a new production backend
+- This is expected. The preview lane exists to pin `RuntimeContext`, target
+  register policy, Machine IR, deopt, and GC contract expectations in emitted
+  artifacts before the full backend rewrite graduates. On `x86-64` it now owns
+  a real scalar-core preview emitter, runtime metadata publication, a managed
+  handle/descriptor substrate for heap objects, an allocation slow-path
+  substrate in the self-hosted shell, and an executable mark/compact GC model,
+  but the checked outer `souc` binary still treats stable `--backend=native` as
+  the public native path.
 
 ## 5) Release rollback procedure
 
@@ -82,4 +111,3 @@ high-confidence internal workflows.
 - `cargo test -p souc --test selfhost_native_e2e`
 - `cargo test -p souc --test integration_cli -- --nocapture`
 - no critical regression on CLI stable contract for two weeks before go-live
-
