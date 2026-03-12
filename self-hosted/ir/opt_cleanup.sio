@@ -170,6 +170,13 @@ fn ocp_const_fold(func: IrFunction) -> IrFunction with Mut, Div, Panic {
     var as_var_src: [i64;  256] = [-1;    256]
     var as_const_v: [i64;  256] = [0;     256]
     var as_is_add:  [bool; 256] = [false; 256]
+    // Sprint 96 Block T: Shift-chain combining — track r = x << C or r = x >> C.
+    // (x << C1) << C2 → x << (C1+C2)  ;  (x >> C1) >> C2 → x >> (C1+C2).
+    // SOTA: Bernstein SODA 1986; LLVM InstCombineShifts.cpp.
+    var sh_valid:   [bool; 256] = [false; 256]
+    var sh_var_src: [i64;  256] = [-1;    256]
+    var sh_amount:  [i64;  256] = [0;     256]
+    var sh_is_left: [bool; 256] = [false; 256]
 
     var i: i64 = 0
     while i < result.instr_count {
@@ -753,6 +760,50 @@ fn ocp_const_fold(func: IrFunction) -> IrFunction with Mut, Div, Panic {
                         result.instrs[cm_def as usize] = ir_load_imm(cm_s1, shift)
                         result.instrs[i as usize] = ir_binop(cm_instr.dst, cm_s2, BinaryOp::OpShl, cm_s1)
                         const_val[cm_s1 as usize] = shift
+                    }
+                }
+            }
+        }
+
+        // Sprint 96 Block T: Shift-chain combining.
+        // (x << C1) << C2 → x << (C1+C2)  ;  (x >> C1) >> C2 → x >> (C1+C2).
+        // The fold fires when src1 was itself a shift-by-constant with the same direction.
+        // After folding, track the result for further chaining.
+        if ocp_is_binop(result.instrs[i as usize].op) {
+            let sh_instr = result.instrs[i as usize]
+            let sh_s1 = sh_instr.src1
+            let sh_s2 = sh_instr.src2
+            let sh_s1_ok = sh_s1 >= 0 && sh_s1 < 256
+            let sh_s2_ok = sh_s2 >= 0 && sh_s2 < 256
+            let sh_is_shl = sh_instr.bin_op == BinaryOp::OpShl
+            let sh_is_shr = sh_instr.bin_op == BinaryOp::OpShr
+            if (sh_is_shl || sh_is_shr) && sh_s1_ok && sh_s2_ok && is_const[sh_s2 as usize] {
+                let sh_c2 = const_val[sh_s2 as usize]
+                // Fold: src1 was tracked as (base shift C1), same direction → combine.
+                if sh_valid[sh_s1 as usize]
+                    && ((sh_is_shl && sh_is_left[sh_s1 as usize]) || (sh_is_shr && !sh_is_left[sh_s1 as usize])) {
+                    let sh_c1 = sh_amount[sh_s1 as usize]
+                    let sh_base = sh_var_src[sh_s1 as usize]
+                    let sh_combined = sh_c1 + sh_c2
+                    let sh_c2_def = def_at[sh_s2 as usize]
+                    if sh_c2_def >= 0 && sh_combined >= 0 && sh_combined < 64 {
+                        result.instrs[sh_c2_def as usize] = ir_load_imm(sh_s2, sh_combined)
+                        result.instrs[i as usize] = ir_binop(sh_instr.dst, sh_base, sh_instr.bin_op, sh_s2)
+                        const_val[sh_s2 as usize] = sh_combined
+                        if sh_instr.dst >= 0 && sh_instr.dst < 256 {
+                            sh_valid[sh_instr.dst as usize] = true
+                            sh_var_src[sh_instr.dst as usize] = sh_base
+                            sh_amount[sh_instr.dst as usize] = sh_combined
+                            sh_is_left[sh_instr.dst as usize] = sh_is_shl
+                        }
+                    }
+                } else {
+                    // Track: r = x << C or r = x >> C.
+                    if sh_instr.dst >= 0 && sh_instr.dst < 256 {
+                        sh_valid[sh_instr.dst as usize] = true
+                        sh_var_src[sh_instr.dst as usize] = sh_s1
+                        sh_amount[sh_instr.dst as usize] = sh_c2
+                        sh_is_left[sh_instr.dst as usize] = sh_is_shl
                     }
                 }
             }

@@ -5184,7 +5184,7 @@ fn compiler_main_test_native_v2_compile_preview_scalar() -> bool with IO, Mut, P
     let spec = native_resolve_target("x86_64-linux", "auto", true)
     let result = compile_native_v2_preview(&compiler_main_make_native_v2_scalar_module(13), spec)
     if !result.ok || result.format_id != FORMAT_ELF64() || result.len <= 64 { return false }
-    io_write_native_binary("artifacts/omega/native_backend_v2_scalar_smoke.selftest.bin", result.bytes, result.len)
+    io_write_native_binary_large("artifacts/omega/native_backend_v2_scalar_smoke.selftest.bin", result.bytes, result.len)
 }
 
 fn compiler_main_test_native_v2_compile_preview_call_control() -> bool with Mut, Panic, Div, Alloc {
@@ -5446,7 +5446,7 @@ fn compiler_main_test_native_v2_compile_gc_retry_smoke() -> bool with IO, Mut, P
     let spec = native_resolve_target("x86_64-linux", "auto", true)
     let result = compile_native_v2_preview(&compiler_main_make_native_v2_gc_retry_module(), spec)
     if !result.ok || result.format_id != FORMAT_ELF64() || result.len <= 64 { return false }
-    io_write_native_binary("artifacts/omega/native_backend_v2_gc_retry_smoke.selftest.bin", result.bytes, result.len)
+    io_write_native_binary_large("artifacts/omega/native_backend_v2_gc_retry_smoke.selftest.bin", result.bytes, result.len)
 }
 
 fn compiler_main_make_native_v2_gc_model() -> NativeV2GcModel with Mut, Panic, Div {
@@ -7714,9 +7714,88 @@ fn compiler_main_test_div_rem_chain() -> bool with Mut, Div, Panic {
     result.instrs[3].op == IrOpcode::IrLoadImm && result.instrs[3].imm_i64 == 1
 }
 
+// Sprint 96 Block T — shift-chain combining tests (T276-T281)
+
+// T276: (x << 2) << 3 → x << 5.
+fn compiler_main_test_shift_chain_shl() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(1, 2)
+    instrs[1] = ir_binop(2, 0, BinaryOp::OpShl, 1)     // r2 = r0 << 2
+    instrs[2] = ir_load_imm(3, 3)
+    instrs[3] = ir_binop(4, 2, BinaryOp::OpShl, 3)     // r4 = r2 << 3 → r0 << 5
+    let func = cp_make_test_func(instrs, 4)
+    let result = ocp_const_fold(func)
+    // r4 should now be (r0 << 5), and the constant should be combined to 5.
+    result.instrs[3].src1 == 0 && result.instrs[2].imm_i64 == 5
+}
+
+// T277: (x >> 1) >> 4 → x >> 5.
+fn compiler_main_test_shift_chain_shr() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(1, 1)
+    instrs[1] = ir_binop(2, 0, BinaryOp::OpShr, 1)     // r2 = r0 >> 1
+    instrs[2] = ir_load_imm(3, 4)
+    instrs[3] = ir_binop(4, 2, BinaryOp::OpShr, 3)     // r4 = r2 >> 4 → r0 >> 5
+    let func = cp_make_test_func(instrs, 4)
+    let result = ocp_const_fold(func)
+    result.instrs[3].src1 == 0 && result.instrs[2].imm_i64 == 5
+}
+
+// T278: Mixed directions — (x << 2) >> 3 — NO fold (different shift directions).
+fn compiler_main_test_shift_chain_mixed_no_fold() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(1, 2)
+    instrs[1] = ir_binop(2, 0, BinaryOp::OpShl, 1)     // r2 = r0 << 2
+    instrs[2] = ir_load_imm(3, 3)
+    instrs[3] = ir_binop(4, 2, BinaryOp::OpShr, 3)     // r4 = r2 >> 3 — no fold
+    let func = cp_make_test_func(instrs, 4)
+    let result = ocp_const_fold(func)
+    // Should NOT fold — src1 stays r2, const stays 3.
+    result.instrs[3].src1 == 2 && result.instrs[2].imm_i64 == 3
+}
+
+// T279: Triple chain — (x << 1) << 2) << 3 → x << 6.
+fn compiler_main_test_shift_chain_triple() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(1, 1)
+    instrs[1] = ir_binop(2, 0, BinaryOp::OpShl, 1)     // r2 = r0 << 1
+    instrs[2] = ir_load_imm(3, 2)
+    instrs[3] = ir_binop(4, 2, BinaryOp::OpShl, 3)     // r4 = r2 << 2 → r0 << 3
+    instrs[4] = ir_load_imm(5, 3)
+    instrs[5] = ir_binop(6, 4, BinaryOp::OpShl, 5)     // r6 = r4 << 3 → r0 << 6
+    let func = cp_make_test_func(instrs, 6)
+    let result = ocp_const_fold(func)
+    result.instrs[5].src1 == 0 && result.instrs[4].imm_i64 == 6
+}
+
+// T280: Shift with non-const amount — (x << r) << 3 — no chain (r not const).
+fn compiler_main_test_shift_chain_nonconst() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_binop(2, 0, BinaryOp::OpShl, 1)     // r2 = r0 << r1 (r1 not const)
+    instrs[1] = ir_load_imm(3, 3)
+    instrs[2] = ir_binop(4, 2, BinaryOp::OpShl, 3)     // r4 = r2 << 3
+    let func = cp_make_test_func(instrs, 3)
+    let result = ocp_const_fold(func)
+    // First shift has non-const amount → no tracking → no chain fold.
+    result.instrs[2].src1 == 2
+}
+
+// T281: SR + shift chain — x*4 → x<<2, then (x<<2)<<1 → x<<3.
+fn compiler_main_test_shift_chain_sr_integration() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(1, 4)
+    instrs[1] = ir_binop(2, 0, BinaryOp::OpMul, 1)     // r2 = r0 * 4 → SR: r0 << 2
+    instrs[2] = ir_load_imm(3, 1)
+    instrs[3] = ir_binop(4, 2, BinaryOp::OpShl, 3)     // r4 = r2 << 1 → chain: r0 << 3
+    let func = cp_make_test_func(instrs, 4)
+    let result = ocp_const_fold(func)
+    // SR converts r2=r0*4 → r2=r0<<2, then shift-chain: r4 = r0 << 3.
+    result.instrs[3].src1 == 0 && result.instrs[2].imm_i64 == 3
+}
+
 fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
     var passed: i64 = 0
-    let total: i64 = 275
+    let total: i64 = 281
 
     println("=== compiler/main.sio self-tests ===")
 
@@ -9646,6 +9725,49 @@ fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
         passed = passed + 1
     } else {
         println("  FAIL: T275 Sprint 95 Block S: div/rem chain fold")
+    }
+
+    // Sprint 96 Block T — Shift-Chain Combining (T276-T281)
+    if compiler_main_test_shift_chain_shl() {
+        println("  T276 OK: Sprint 96 Block T: (x<<2)<<3 → x<<5")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T276 Sprint 96 Block T: shl chain")
+    }
+
+    if compiler_main_test_shift_chain_shr() {
+        println("  T277 OK: Sprint 96 Block T: (x>>1)>>4 → x>>5")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T277 Sprint 96 Block T: shr chain")
+    }
+
+    if compiler_main_test_shift_chain_mixed_no_fold() {
+        println("  T278 OK: Sprint 96 Block T: (x<<2)>>3 — no fold (mixed dirs)")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T278 Sprint 96 Block T: mixed no fold")
+    }
+
+    if compiler_main_test_shift_chain_triple() {
+        println("  T279 OK: Sprint 96 Block T: (x<<1)<<2)<<3 → x<<6 (triple)")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T279 Sprint 96 Block T: triple chain")
+    }
+
+    if compiler_main_test_shift_chain_nonconst() {
+        println("  T280 OK: Sprint 96 Block T: (x<<r)<<3 — no fold (non-const)")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T280 Sprint 96 Block T: nonconst no fold")
+    }
+
+    if compiler_main_test_shift_chain_sr_integration() {
+        println("  T281 OK: Sprint 96 Block T: x*4→x<<2, then (x<<2)<<1 → x<<3")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T281 Sprint 96 Block T: SR+shift chain integration")
     }
 
     println("")
