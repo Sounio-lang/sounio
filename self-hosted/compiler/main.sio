@@ -6480,12 +6480,6 @@ fn run_probe_native_streaming(args: ArgList, flag_index: i64) with IO, Mut, Pani
         let legal = native_v2_legalize_function(lowered)
         print("probe_native_streaming: legalize_ok fn=")
         compiler_manifest_print_name(fn_name)
-        print(" supported=")
-        if legal.supported { print("true") } else { print("false") }
-        if !legal.supported {
-            print(" unsupported=")
-            print(legal.unsupported_detail)
-        }
         print("\n")
         print("probe_native_streaming: body_ok fn=")
         compiler_manifest_print_name(fn_name)
@@ -6500,12 +6494,6 @@ fn run_probe_native_streaming(args: ArgList, flag_index: i64) with IO, Mut, Pani
         print_int(legal.temp_count)
         print(" legal_instrs=")
         print_int(legal.legal_instr_count)
-        print(" supported=")
-        if legal.supported { print("true") } else { print("false") }
-        if !legal.supported {
-            print(" unsupported=")
-            print(legal.unsupported_detail)
-        }
         print("\n")
         fi = fi + 1
     }
@@ -7662,9 +7650,73 @@ fn compiler_main_test_dse_copy_integration() -> bool with Mut, Div, Panic {
     result.instrs[0].op == IrOpcode::IrNop && result.instrs[1].op == IrOpcode::IrLoadImm
 }
 
+// Sprint 95 Block S — division/remainder identity folding tests (T270-T275)
+
+// T270: x / x → IrLoadImm(dst, 1)  (same-register division).
+fn compiler_main_test_div_self() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(0, 42)
+    instrs[1] = ir_binop(1, 0, BinaryOp::OpDiv, 0)
+    let func = cp_make_test_func(instrs, 2)
+    let result = ocp_const_fold(func)
+    result.instrs[1].op == IrOpcode::IrLoadImm && result.instrs[1].imm_i64 == 1
+}
+
+// T271: x % x → IrLoadImm(dst, 0)  (same-register remainder).
+fn compiler_main_test_rem_self() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(0, 42)
+    instrs[1] = ir_binop(1, 0, BinaryOp::OpRem, 0)
+    let func = cp_make_test_func(instrs, 2)
+    let result = ocp_const_fold(func)
+    result.instrs[1].op == IrOpcode::IrLoadImm && result.instrs[1].imm_i64 == 0
+}
+
+// T272: 0 / x → IrLoadImm(dst, 0)  (zero dividend).
+fn compiler_main_test_zero_div() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(0, 0)
+    instrs[1] = ir_binop(2, 0, BinaryOp::OpDiv, 1)
+    let func = cp_make_test_func(instrs, 2)
+    let result = ocp_const_fold(func)
+    result.instrs[1].op == IrOpcode::IrLoadImm && result.instrs[1].imm_i64 == 0
+}
+
+// T273: 0 % x → IrLoadImm(dst, 0)  (zero dividend mod).
+fn compiler_main_test_zero_rem() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(0, 0)
+    instrs[1] = ir_binop(2, 0, BinaryOp::OpRem, 1)
+    let func = cp_make_test_func(instrs, 2)
+    let result = ocp_const_fold(func)
+    result.instrs[1].op == IrOpcode::IrLoadImm && result.instrs[1].imm_i64 == 0
+}
+
+// T274: x / 1 remains IrCopy (pre-existing, regression check).
+fn compiler_main_test_div_one_regr() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(1, 1)
+    instrs[1] = ir_binop(2, 0, BinaryOp::OpDiv, 1)
+    let func = cp_make_test_func(instrs, 2)
+    let result = ocp_const_fold(func)
+    result.instrs[1].op == IrOpcode::IrCopy && result.instrs[1].src1 == 0
+}
+
+// T275: x/x chain — (x/x) + (x%x) → 1 + 0 → IrLoadImm(1).
+fn compiler_main_test_div_rem_chain() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(0, 7)
+    instrs[1] = ir_binop(1, 0, BinaryOp::OpDiv, 0)
+    instrs[2] = ir_binop(2, 0, BinaryOp::OpRem, 0)
+    instrs[3] = ir_binop(3, 1, BinaryOp::OpAdd, 2)
+    let func = cp_make_test_func(instrs, 4)
+    let result = ocp_const_fold(func)
+    result.instrs[3].op == IrOpcode::IrLoadImm && result.instrs[3].imm_i64 == 1
+}
+
 fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
     var passed: i64 = 0
-    let total: i64 = 269
+    let total: i64 = 275
 
     println("=== compiler/main.sio self-tests ===")
 
@@ -9551,6 +9603,49 @@ fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
         passed = passed + 1
     } else {
         println("  FAIL: T269 Sprint 94 Block R: copy+DSE integration")
+    }
+
+    // Sprint 95 Block S — Division/Remainder Identity (T270-T275)
+    if compiler_main_test_div_self() {
+        println("  T270 OK: Sprint 95 Block S: x/x → IrLoadImm(1)")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T270 Sprint 95 Block S: x/x")
+    }
+
+    if compiler_main_test_rem_self() {
+        println("  T271 OK: Sprint 95 Block S: x%x → IrLoadImm(0)")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T271 Sprint 95 Block S: x%x")
+    }
+
+    if compiler_main_test_zero_div() {
+        println("  T272 OK: Sprint 95 Block S: 0/x → IrLoadImm(0)")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T272 Sprint 95 Block S: zero dividend div")
+    }
+
+    if compiler_main_test_zero_rem() {
+        println("  T273 OK: Sprint 95 Block S: 0%x → IrLoadImm(0)")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T273 Sprint 95 Block S: zero dividend rem")
+    }
+
+    if compiler_main_test_div_one_regr() {
+        println("  T274 OK: Sprint 95 Block S: x/1 → IrCopy(x) (regression)")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T274 Sprint 95 Block S: div-by-1 regression")
+    }
+
+    if compiler_main_test_div_rem_chain() {
+        println("  T275 OK: Sprint 95 Block S: (x/x)+(x%x) → 1+0 → IrLoadImm(1)")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T275 Sprint 95 Block S: div/rem chain fold")
     }
 
     println("")
