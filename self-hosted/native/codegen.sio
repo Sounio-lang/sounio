@@ -3963,3 +3963,237 @@ fn finalize_compiled_elf(nc: NativeCompiler, base_addr: i64) -> Elf64Binary with
     let entry = trampoline_offset(nc)
     finalize_elf64(nc.code, nc.rodata, nc.data, entry, base_addr, nc.symbols, nc.fn_offsets, nc.fn_count)
 }
+
+// ============================================================================
+// ET_REL object file emission
+// ============================================================================
+//
+// Section layout (codegen.sio owns this because it imports both elf::* and reloc::*)
+//   0=NULL, 1=.text, [2=.rodata], [N=.data],
+//   M=.symtab, M+1=.strtab, M+2=.rela.text, M+3=.shstrtab
+//
+// .shstrtab fixed offsets:
+//   0:\0  1:.text\0  7:.rodata\0  15:.data\0  21:.symtab\0
+//   29:.strtab\0  37:.rela.text\0  48:.shstrtab\0
+fn obj_emit_elf_rel_header(bin: &! Elf64Binary) -> () with Mut, Panic, Div {
+    elf_emit_byte_ref(bin, elf_magic_0())
+    elf_emit_byte_ref(bin, elf_magic_1())
+    elf_emit_byte_ref(bin, elf_magic_2())
+    elf_emit_byte_ref(bin, elf_magic_3())
+    elf_emit_byte_ref(bin, elf_class_64())
+    elf_emit_byte_ref(bin, elf_data_lsb())
+    elf_emit_byte_ref(bin, elf_version())
+    elf_emit_byte_ref(bin, elf_osabi_sysv())
+    var pad = 0
+    while pad < 8 { elf_emit_byte_ref(bin, 0); pad = pad + 1 }
+    elf_emit_u16_ref(bin, elf_type_rel())
+    elf_emit_u16_ref(bin, elf_machine_x86_64())
+    elf_emit_u32_ref(bin, elf_version())
+    elf_emit_u64_ref(bin, 0)    // e_entry = 0
+    elf_emit_u64_ref(bin, 0)    // e_phoff = 0
+    elf_emit_u64_ref(bin, 0)    // e_shoff (patched later at byte 40)
+    elf_emit_u32_ref(bin, 0)    // e_flags
+    elf_emit_u16_ref(bin, 64)   // e_ehsize
+    elf_emit_u16_ref(bin, 56)   // e_phentsize
+    elf_emit_u16_ref(bin, 0)    // e_phnum = 0
+    elf_emit_u16_ref(bin, 64)   // e_shentsize
+    elf_emit_u16_ref(bin, 0)    // e_shnum (patched later at byte 60)
+    elf_emit_u16_ref(bin, 0)    // e_shstrndx (patched later at byte 62)
+}
+
+fn finalize_elf64_relocatable(
+    code: CodeBuffer,
+    rodata: StringTable,
+    data: StringTable,
+    rela: RelaSection,
+    symbols: SymbolData,
+    fn_offsets: [i64; 256],
+    fn_count: i64
+) -> Elf64Binary with Mut, Panic, Div {
+    var bin = elf_binary_new()
+
+    let has_rodata = rodata.len > 0
+    let has_data = data.len > 0
+
+    obj_emit_elf_rel_header(&! bin)
+
+    // .text
+    let text_offset = bin.len
+    var ti = 0
+    while ti < code.len { elf_emit_byte_ref(&! bin, code.bytes[ti as usize] as i64); ti = ti + 1 }
+
+    // .rodata
+    let rodata_file_offset = bin.len
+    if has_rodata {
+        var ri = 0
+        while ri < rodata.len { elf_emit_byte_ref(&! bin, rodata.bytes[ri as usize] as i64); ri = ri + 1 }
+    }
+
+    // .data (8-byte aligned)
+    while bin.len % 8 != 0 { elf_emit_byte_ref(&! bin, 0) }
+    let data_file_offset = bin.len
+    if has_data {
+        var di = 0
+        while di < data.len { elf_emit_byte_ref(&! bin, data.bytes[di as usize] as i64); di = di + 1 }
+    }
+
+    // .strtab
+    while bin.len % 8 != 0 { elf_emit_byte_ref(&! bin, 0) }
+    let strtab_offset = bin.len
+    let strtab_emit_len = if symbols.strtab_len > 0 { symbols.strtab_len } else { 1 }
+    var si = 0
+    while si < strtab_emit_len { elf_emit_byte_ref(&! bin, symbols.strtab[si as usize] as i64); si = si + 1 }
+    let strtab_size = bin.len - strtab_offset
+
+    // .symtab — section indices
+    while bin.len % 8 != 0 { elf_emit_byte_ref(&! bin, 0) }
+    let symtab_offset = bin.len
+    let sec_text: i64 = 1
+    let sec_rodata: i64 = if has_rodata { 2 } else { 0 }
+    let sec_data_idx: i64 = if has_data { (if has_rodata { 3 } else { 2 }) } else { 0 }
+    let sec_after_data: i64 = 1 + (if has_rodata { 1 } else { 0 }) + (if has_data { 1 } else { 0 })
+    let sec_symtab: i64 = sec_after_data + 1
+    let sec_strtab: i64 = sec_after_data + 2
+    let sec_rela_text: i64 = sec_after_data + 3
+    let sec_shstrtab: i64 = sec_after_data + 4
+    let shnum: i64 = sec_shstrtab + 1
+
+    // sym 0: NULL
+    emit_symtab_entry_ref(&! bin, 0, 0, 0, 0, 0, 0)
+    // sym 1: .text section (STT_SECTION=3, STB_LOCAL=0)
+    emit_symtab_entry_ref(&! bin, 0, 3, 0, sec_text, 0, 0)
+    if has_rodata {
+        emit_symtab_entry_ref(&! bin, 0, 3, 0, sec_rodata, 0, 0)
+    }
+    if has_data {
+        emit_symtab_entry_ref(&! bin, 0, 3, 0, sec_data_idx, 0, 0)
+    }
+    let sym_first_fn = 1 + 1 + (if has_rodata { 1 } else { 0 }) + (if has_data { 1 } else { 0 })
+
+    // function symbols (STT_FUNC=2, STB_GLOBAL=1, shndx=.text=1)
+    var fi = 0
+    while fi < fn_count {
+        let fn_name_off = symbols.name_offsets[fi as usize]
+        let fn_off = fn_offsets[fi as usize]
+        emit_symtab_entry_ref(&! bin, fn_name_off, 2, 1, sec_text, fn_off, 0)
+        fi = fi + 1
+    }
+    let symtab_size = bin.len - symtab_offset
+
+    // .rela.text
+    while bin.len % 8 != 0 { elf_emit_byte_ref(&! bin, 0) }
+    let rela_file_offset = bin.len
+    var rei = 0
+    while rei < rela.len { elf_emit_byte_ref(&! bin, rela.bytes[rei as usize] as i64); rei = rei + 1 }
+    let rela_size = rela.len
+
+    // .shstrtab
+    while bin.len % 8 != 0 { elf_emit_byte_ref(&! bin, 0) }
+    let shstrtab_offset = bin.len
+    // \0
+    elf_emit_byte_ref(&! bin, 0)
+    // ".text\0" offset 1
+    elf_emit_byte_ref(&! bin, 46); elf_emit_byte_ref(&! bin, 116); elf_emit_byte_ref(&! bin, 101)
+    elf_emit_byte_ref(&! bin, 120); elf_emit_byte_ref(&! bin, 116); elf_emit_byte_ref(&! bin, 0)
+    // ".rodata\0" offset 7
+    elf_emit_byte_ref(&! bin, 46); elf_emit_byte_ref(&! bin, 114); elf_emit_byte_ref(&! bin, 111)
+    elf_emit_byte_ref(&! bin, 100); elf_emit_byte_ref(&! bin, 97); elf_emit_byte_ref(&! bin, 116)
+    elf_emit_byte_ref(&! bin, 97); elf_emit_byte_ref(&! bin, 0)
+    // ".data\0" offset 15
+    elf_emit_byte_ref(&! bin, 46); elf_emit_byte_ref(&! bin, 100); elf_emit_byte_ref(&! bin, 97)
+    elf_emit_byte_ref(&! bin, 116); elf_emit_byte_ref(&! bin, 97); elf_emit_byte_ref(&! bin, 0)
+    // ".symtab\0" offset 21
+    elf_emit_byte_ref(&! bin, 46); elf_emit_byte_ref(&! bin, 115); elf_emit_byte_ref(&! bin, 121)
+    elf_emit_byte_ref(&! bin, 109); elf_emit_byte_ref(&! bin, 116); elf_emit_byte_ref(&! bin, 97)
+    elf_emit_byte_ref(&! bin, 98); elf_emit_byte_ref(&! bin, 0)
+    // ".strtab\0" offset 29
+    elf_emit_byte_ref(&! bin, 46); elf_emit_byte_ref(&! bin, 115); elf_emit_byte_ref(&! bin, 116)
+    elf_emit_byte_ref(&! bin, 114); elf_emit_byte_ref(&! bin, 116); elf_emit_byte_ref(&! bin, 97)
+    elf_emit_byte_ref(&! bin, 98); elf_emit_byte_ref(&! bin, 0)
+    // ".rela.text\0" offset 37
+    elf_emit_byte_ref(&! bin, 46); elf_emit_byte_ref(&! bin, 114); elf_emit_byte_ref(&! bin, 101)
+    elf_emit_byte_ref(&! bin, 108); elf_emit_byte_ref(&! bin, 97); elf_emit_byte_ref(&! bin, 46)
+    elf_emit_byte_ref(&! bin, 116); elf_emit_byte_ref(&! bin, 101); elf_emit_byte_ref(&! bin, 120)
+    elf_emit_byte_ref(&! bin, 116); elf_emit_byte_ref(&! bin, 0)
+    // ".shstrtab\0" offset 48
+    elf_emit_byte_ref(&! bin, 46); elf_emit_byte_ref(&! bin, 115); elf_emit_byte_ref(&! bin, 104)
+    elf_emit_byte_ref(&! bin, 115); elf_emit_byte_ref(&! bin, 116); elf_emit_byte_ref(&! bin, 114)
+    elf_emit_byte_ref(&! bin, 116); elf_emit_byte_ref(&! bin, 97); elf_emit_byte_ref(&! bin, 98)
+    elf_emit_byte_ref(&! bin, 0)
+    let shstrtab_size = bin.len - shstrtab_offset
+
+    // Section header table
+    while bin.len % 8 != 0 { elf_emit_byte_ref(&! bin, 0) }
+    let shoff = bin.len
+
+    let sht_progbits = 1
+    let sht_symtab = 2
+    let sht_strtab = 3
+    let sht_rela = 4
+    let shf_alloc = 2
+    let shf_execinstr = 4
+    let shf_write = 1
+
+    // 0: NULL
+    emit_section_header_ref(&! bin, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+    // 1: .text (sh_addr=0 for ET_REL)
+    emit_section_header_ref(&! bin, 1, sht_progbits, shf_alloc + shf_execinstr,
+        0, text_offset, code.len, 0, 0, 16, 0)
+    // 2: .rodata (optional)
+    if has_rodata {
+        emit_section_header_ref(&! bin, 7, sht_progbits, shf_alloc,
+            0, rodata_file_offset, rodata.len, 0, 0, 8, 0)
+    }
+    // N: .data (optional)
+    if has_data {
+        emit_section_header_ref(&! bin, 15, sht_progbits, shf_alloc + shf_write,
+            0, data_file_offset, data.len, 0, 0, 8, 0)
+    }
+    // .symtab (sh_link=.strtab, sh_info=first_global_sym_idx)
+    emit_section_header_ref(&! bin, 21, sht_symtab, 0,
+        0, symtab_offset, symtab_size, sec_strtab, sym_first_fn, 8, 24)
+    // .strtab
+    emit_section_header_ref(&! bin, 29, sht_strtab, 0,
+        0, strtab_offset, strtab_size, 0, 0, 1, 0)
+    // .rela.text (sh_link=.symtab, sh_info=.text=1)
+    emit_section_header_ref(&! bin, 37, sht_rela, 0,
+        0, rela_file_offset, rela_size, sec_symtab, sec_text, 8, 24)
+    // .shstrtab
+    emit_section_header_ref(&! bin, 48, sht_strtab, 0,
+        0, shstrtab_offset, shstrtab_size, 0, 0, 1, 0)
+
+    elf_patch_u64_ref(&! bin, 40, shoff)
+    elf_patch_u16_ref(&! bin, 60, shnum)
+    elf_patch_u16_ref(&! bin, 62, sec_shstrtab)
+
+    bin
+}
+
+// Compile module to ET_REL relocatable .o (no entry trampoline, no reloc patching)
+fn compile_module_for_obj(nc: NativeCompiler, module: &IrModule) -> NativeCompiler with Mut, Panic, Div, Alloc {
+    var c = compile_module_streaming_begin(nc, module)
+    var fi = 0
+    while fi < module.fn_count {
+        c = compile_ir_function(c, module.functions[fi as usize], fi)
+        fi = fi + 1
+    }
+    c
+}
+
+fn compile_to_obj(module: &IrModule) -> Elf64Binary with Mut, Panic, Div, Alloc {
+    var nc = compiler_new()
+    nc = compile_module_for_obj(nc, module)
+
+    let has_rodata = nc.rodata.len > 0
+    let has_data = nc.data.len > 0
+    let sym_first_fn = 1 + 1
+        + (if has_rodata { 1 } else { 0 })
+        + (if has_data { 1 } else { 0 })
+    let sym_rodata: i64 = if has_rodata { 2 } else { 0 }
+    let sym_data: i64 = if has_data {
+        (if has_rodata { 3 } else { 2 })
+    } else { 0 }
+
+    let rela = collect_rela_section(nc.relocs, sym_first_fn, sym_rodata, sym_data)
+    finalize_elf64_relocatable(nc.code, nc.rodata, nc.data, rela, nc.symbols, nc.fn_offsets, nc.fn_count)
+}
