@@ -59,6 +59,8 @@ use ir::loop_opt::*
 use ir::tailcall::*
 use native::regalloc::*
 use native::peephole::*
+use interop::protocol::*
+use interop::server::*
 
 // ============================================================================
 // STRING UTILITIES
@@ -1900,6 +1902,7 @@ fn print_help() with IO {
     println("  --native-compile <source.sio>  Compile to native output (use -o/--output to choose path)")
     println("  --native-v2-preview-smoke  Run dedicated native-v2 scalar/call/control/fail-closed smoke")
     println("  --native-v2-gc-retry-smoke Run dedicated native-v2 alloc-retry smoke")
+    println("  --serve                Start IPC server (binary protocol on stdin/stdout)")
     println("  --self-test            Run compiler main self-tests")
     println("  --bench-int-to-string [n]   Benchmark int_to_string loop (default n=1000000)")
     println("  --probe-char-from-i64 <n>   Probe char_from_i64 for manual regression checks")
@@ -8131,9 +8134,463 @@ fn compiler_main_test_target_policy_for_x86_macos() -> bool {
     p.emitter_ready && p.arch_id == native_policy_arch_x86_64() && p.os_id == native_policy_os_macos()
 }
 
+// ============================================================================
+// Sprint 106 Block AD — Jump-to-return folding tests (T306-T311)
+// ============================================================================
+
+// T306: IrJump(L0) where IrLabel(L0)+IrReturn(r0) → IrReturn(r0)
+fn compiler_main_test_jump_to_return_basic() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(0, 42)
+    instrs[1] = ir_jump(0)
+    instrs[2] = ir_load_imm(1, 99)
+    instrs[3] = ir_label(0)
+    instrs[4] = ir_return(0)
+    let func = cp_make_test_func(instrs, 5)
+    let result = ocp_jump_to_return(func)
+    result.instrs[1].op == IrOpcode::IrReturn && result.instrs[1].src1 == 0
+}
+
+// T307: IrLabel(L0) NOT followed by IrReturn → no fold
+fn compiler_main_test_jump_to_return_no_fold() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(0, 42)
+    instrs[1] = ir_jump(0)
+    instrs[2] = ir_label(0)
+    instrs[3] = ir_binop(1, 0, BinaryOp::OpAdd, 0)
+    instrs[4] = ir_return(1)
+    let func = cp_make_test_func(instrs, 5)
+    let result = ocp_jump_to_return(func)
+    result.instrs[1].op == IrOpcode::IrJump
+}
+
+// T308: Conditional branch NOT folded
+fn compiler_main_test_jump_to_return_cond_no_fold() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(0, 1)
+    instrs[1] = ir_branch_true(0, 0)
+    instrs[2] = ir_load_imm(1, 99)
+    instrs[3] = ir_label(0)
+    instrs[4] = ir_return(0)
+    let func = cp_make_test_func(instrs, 5)
+    let result = ocp_jump_to_return(func)
+    result.instrs[1].op == IrOpcode::IrBranchTrue
+}
+
+// T309: Multiple jumps to same return label → all folded
+fn compiler_main_test_jump_to_return_multi() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(0, 10)
+    instrs[1] = ir_jump(0)
+    instrs[2] = ir_load_imm(1, 20)
+    instrs[3] = ir_jump(0)
+    instrs[4] = ir_label(0)
+    instrs[5] = ir_return(0)
+    let func = cp_make_test_func(instrs, 6)
+    let result = ocp_jump_to_return(func)
+    result.instrs[1].op == IrOpcode::IrReturn && result.instrs[3].op == IrOpcode::IrReturn
+}
+
+// T310: Missing label → no fold
+fn compiler_main_test_jump_to_return_missing_label() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(0, 42)
+    instrs[1] = ir_jump(5)
+    instrs[2] = ir_label(0)
+    instrs[3] = ir_return(0)
+    let func = cp_make_test_func(instrs, 4)
+    let result = ocp_jump_to_return(func)
+    result.instrs[1].op == IrOpcode::IrJump
+}
+
+// T311: Label+return at end of function
+fn compiler_main_test_jump_to_return_end_of_func() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(0, 7)
+    instrs[1] = ir_jump(0)
+    instrs[2] = ir_label(0)
+    instrs[3] = ir_return(0)
+    let func = cp_make_test_func(instrs, 4)
+    let result = ocp_jump_to_return(func)
+    result.instrs[1].op == IrOpcode::IrReturn && result.instrs[1].src1 == 0
+}
+
+// ============================================================================
+// Sprint 105 Block AC — Load sinking tests (T312-T317)
+// ============================================================================
+
+// T312: Two IrLoadImms adjacent — no swap
+fn compiler_main_test_sink_loads_no_swap_imm_pair() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(1, 5)
+    instrs[1] = ir_load_imm(2, 10)
+    instrs[2] = ir_binop(3, 0, BinaryOp::OpAdd, 2)
+    instrs[3] = ir_return(3)
+    let func = cp_make_test_func(instrs, 4)
+    let result = ocp_sink_loads(func)
+    result.instrs[0 as usize].op == IrOpcode::IrLoadImm && result.instrs[0 as usize].imm_i64 == 5
+}
+
+// T313: Next uses the dst → no swap
+fn compiler_main_test_sink_loads_no_swap_adjacent_use() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(1, 5)
+    instrs[1] = ir_binop(2, 0, BinaryOp::OpAdd, 1)
+    instrs[2] = ir_return(2)
+    let func = cp_make_test_func(instrs, 3)
+    let result = ocp_sink_loads(func)
+    result.instrs[0 as usize].op == IrOpcode::IrLoadImm
+}
+
+// T314: Label blocks sinking
+fn compiler_main_test_sink_loads_no_swap_label() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(1, 5)
+    instrs[1] = ir_label(0)
+    instrs[2] = ir_return(1)
+    let func = cp_make_test_func(instrs, 3)
+    let result = ocp_sink_loads(func)
+    result.instrs[0 as usize].op == IrOpcode::IrLoadImm && result.instrs[1 as usize].op == IrOpcode::IrLabel
+}
+
+// T315: Next uses dst as src1 → no swap
+fn compiler_main_test_sink_loads_no_swap_src1() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(1, 5)
+    instrs[1] = ir_binop(2, 1, BinaryOp::OpAdd, 0)
+    instrs[2] = ir_return(2)
+    let func = cp_make_test_func(instrs, 3)
+    let result = ocp_sink_loads(func)
+    result.instrs[0 as usize].op == IrOpcode::IrLoadImm
+}
+
+// T316: Sinks past independent binop
+fn compiler_main_test_sink_loads_swap_past_binop() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(3, 99)
+    instrs[1] = ir_binop(2, 0, BinaryOp::OpAdd, 1)
+    instrs[2] = ir_binop(4, 2, BinaryOp::OpMul, 3)
+    instrs[3] = ir_return(4)
+    let func = cp_make_test_func(instrs, 4)
+    let result = ocp_sink_loads(func)
+    result.instrs[0 as usize].op == IrOpcode::IrBinOp && result.instrs[1 as usize].op == IrOpcode::IrLoadImm
+}
+
+// T317: No IrLoadImm → no-op
+fn compiler_main_test_sink_loads_noop() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_binop(2, 0, BinaryOp::OpAdd, 1)
+    instrs[1] = ir_return(2)
+    let func = cp_make_test_func(instrs, 2)
+    let result = ocp_sink_loads(func)
+    result.instrs[0 as usize].op == IrOpcode::IrBinOp
+}
+
+// ============================================================================
+// Sprint 103 Block AA — LICM tests (T318-T323)
+// ============================================================================
+
+// T318: IrLoadImm hoisted before loop label
+fn compiler_main_test_licm_hoist_loadimm() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(0, 1)
+    instrs[1] = ir_label(0)
+    instrs[2] = ir_load_imm(1, 42)
+    instrs[3] = ir_binop(2, 0, BinaryOp::OpAdd, 1)
+    instrs[4] = ir_jump(0)
+    let func = cp_make_test_func(instrs, 5)
+    let result = ocp_licm(func)
+    result.instrs[1 as usize].op == IrOpcode::IrLoadImm && result.instrs[1 as usize].imm_i64 == 42
+}
+
+// T319: Dst written elsewhere → NOT hoisted
+fn compiler_main_test_licm_no_hoist_written_elsewhere() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(0, 1)
+    instrs[1] = ir_label(0)
+    instrs[2] = ir_load_imm(1, 42)
+    instrs[3] = ir_load_imm(1, 99)
+    instrs[4] = ir_jump(0)
+    let func = cp_make_test_func(instrs, 5)
+    let result = ocp_licm(func)
+    result.instrs[1 as usize].op == IrOpcode::IrLabel
+}
+
+// T320: Forward jump → no hoisting
+fn compiler_main_test_licm_forward_jump_no_hoist() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(0, 1)
+    instrs[1] = ir_jump(0)
+    instrs[2] = ir_load_imm(1, 42)
+    instrs[3] = ir_label(0)
+    instrs[4] = ir_return(0)
+    let func = cp_make_test_func(instrs, 5)
+    let result = ocp_licm(func)
+    result.instrs[1 as usize].op == IrOpcode::IrJump
+}
+
+// T321: Non-IrLoadImm not hoisted
+fn compiler_main_test_licm_binop_not_hoisted() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(0, 1)
+    instrs[1] = ir_label(0)
+    instrs[2] = ir_binop(2, 0, BinaryOp::OpAdd, 0)
+    instrs[3] = ir_jump(0)
+    let func = cp_make_test_func(instrs, 4)
+    let result = ocp_licm(func)
+    result.instrs[1 as usize].op == IrOpcode::IrLabel
+}
+
+// T322: Multiple IrLoadImm → first hoisted
+fn compiler_main_test_licm_first_hoisted() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(0, 1)
+    instrs[1] = ir_label(0)
+    instrs[2] = ir_load_imm(1, 42)
+    instrs[3] = ir_load_imm(2, 99)
+    instrs[4] = ir_jump(0)
+    let func = cp_make_test_func(instrs, 5)
+    let result = ocp_licm(func)
+    result.instrs[1 as usize].op == IrOpcode::IrLoadImm && result.instrs[1 as usize].imm_i64 == 42
+}
+
+// T323: Empty loop no crash
+fn compiler_main_test_licm_empty_loop() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_label(0)
+    instrs[1] = ir_jump(0)
+    instrs[2] = ir_return(0)
+    let func = cp_make_test_func(instrs, 3)
+    let result = ocp_licm(func)
+    result.instrs[0 as usize].op == IrOpcode::IrLabel
+}
+
+// ============================================================================
+// Sprint 102 Block Z — Non-pow-2 multiply SR tests (T324-T329)
+// ============================================================================
+
+// T324: x * 3 → two ADDs
+fn compiler_main_test_mul3_basic() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(1, 3)
+    instrs[1] = ir_binop(2, 0, BinaryOp::OpMul, 1)
+    let func = cp_make_test_func(instrs, 2)
+    let result = ocp_mul3_sr(func)
+    ocp_is_binop(result.instrs[0 as usize].op) && result.instrs[0 as usize].bin_op == BinaryOp::OpAdd
+}
+
+// T325: 3 * x → two ADDs (left-constant)
+fn compiler_main_test_mul3_left_const() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(1, 3)
+    instrs[1] = ir_binop(2, 1, BinaryOp::OpMul, 0)
+    let func = cp_make_test_func(instrs, 2)
+    let result = ocp_mul3_sr(func)
+    ocp_is_binop(result.instrs[0 as usize].op) && result.instrs[0 as usize].bin_op == BinaryOp::OpAdd
+}
+
+// T326: x * 4 → NOT folded by mul3
+fn compiler_main_test_mul3_skip_pow2() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(1, 4)
+    instrs[1] = ir_binop(2, 0, BinaryOp::OpMul, 1)
+    let func = cp_make_test_func(instrs, 2)
+    let result = ocp_mul3_sr(func)
+    ocp_is_load_imm(result.instrs[0 as usize].op)
+}
+
+// T327: x * 5 → NOT folded (only handle 3)
+fn compiler_main_test_mul3_skip_5() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(1, 5)
+    instrs[1] = ir_binop(2, 0, BinaryOp::OpMul, 1)
+    let func = cp_make_test_func(instrs, 2)
+    let result = ocp_mul3_sr(func)
+    ocp_is_load_imm(result.instrs[0 as usize].op)
+}
+
+// T328: Both-const → const_fold takes priority
+fn compiler_main_test_mul3_both_const_skip() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(0, 3)
+    instrs[1] = ir_load_imm(1, 7)
+    instrs[2] = ir_binop(2, 0, BinaryOp::OpMul, 1)
+    let func = cp_make_test_func(instrs, 3)
+    let folded = ocp_const_fold(func)
+    let result = ocp_mul3_sr(folded)
+    ocp_is_load_imm(result.instrs[2 as usize].op) && result.instrs[2 as usize].imm_i64 == 21
+}
+
+// T329: ADD sequence structure verification
+fn compiler_main_test_mul3_add_sequence() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(1, 3)
+    instrs[1] = ir_binop(2, 0, BinaryOp::OpMul, 1)
+    let func = cp_make_test_func(instrs, 2)
+    let result = ocp_mul3_sr(func)
+    let i0 = result.instrs[0 as usize]
+    let i1 = result.instrs[1 as usize]
+    ocp_is_binop(i0.op) && i0.bin_op == BinaryOp::OpAdd && i0.dst == 1 && i0.src1 == 0 && i0.src2 == 0
+        && ocp_is_binop(i1.op) && i1.bin_op == BinaryOp::OpAdd && i1.dst == 2 && i1.src1 == 1 && i1.src2 == 0
+}
+
+// ============================================================================
+// Sprint 101 Block Y — Boolean simplification tests (T330-T335)
+// ============================================================================
+
+// T330: (r0 == 0) == 0 → IrCopy(r0) (double negation)
+fn compiler_main_test_bool_simp_double_eq() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(1, 0)
+    instrs[1] = ir_binop(2, 0, BinaryOp::OpEq, 1)
+    instrs[2] = ir_load_imm(3, 0)
+    instrs[3] = ir_binop(4, 2, BinaryOp::OpEq, 3)
+    let func = cp_make_test_func(instrs, 4)
+    let result = ocp_const_fold(func)
+    result.instrs[3 as usize].op == IrOpcode::IrCopy && result.instrs[3 as usize].src1 == 0
+}
+
+// T331: (r0 != 0) != 0 → IrCopy(r0)
+fn compiler_main_test_bool_simp_double_ne() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(1, 0)
+    instrs[1] = ir_binop(2, 0, BinaryOp::OpNe, 1)
+    instrs[2] = ir_load_imm(3, 0)
+    instrs[3] = ir_binop(4, 2, BinaryOp::OpNe, 3)
+    let func = cp_make_test_func(instrs, 4)
+    let result = ocp_const_fold(func)
+    result.instrs[3 as usize].op == IrOpcode::IrCopy && result.instrs[3 as usize].src1 == 0
+}
+
+// T332: (r0 == 0) != 0 → IrCopy(r2) (bool identity: bool != 0 → bool)
+fn compiler_main_test_bool_simp_mixed_eq_ne() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(1, 0)
+    instrs[1] = ir_binop(2, 0, BinaryOp::OpEq, 1)
+    instrs[2] = ir_load_imm(3, 0)
+    instrs[3] = ir_binop(4, 2, BinaryOp::OpNe, 3)
+    let func = cp_make_test_func(instrs, 4)
+    let result = ocp_const_fold(func)
+    result.instrs[3 as usize].op == IrOpcode::IrCopy && result.instrs[3 as usize].src1 == 2
+}
+
+// T333: (r0 != 0) == 0 → NOT folded (not a simple identity)
+fn compiler_main_test_bool_simp_mixed_ne_eq() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(1, 0)
+    instrs[1] = ir_binop(2, 0, BinaryOp::OpNe, 1)
+    instrs[2] = ir_load_imm(3, 0)
+    instrs[3] = ir_binop(4, 2, BinaryOp::OpEq, 3)
+    let func = cp_make_test_func(instrs, 4)
+    let result = ocp_const_fold(func)
+    result.instrs[3 as usize].op == IrOpcode::IrBinOp
+}
+
+// T334: Commutative: 0 == (r0 == 0) → IrCopy(r0)
+fn compiler_main_test_bool_simp_commutative() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(1, 0)
+    instrs[1] = ir_binop(2, 0, BinaryOp::OpEq, 1)
+    instrs[2] = ir_load_imm(3, 0)
+    instrs[3] = ir_binop(4, 3, BinaryOp::OpEq, 2)
+    let func = cp_make_test_func(instrs, 4)
+    let result = ocp_const_fold(func)
+    result.instrs[3 as usize].op == IrOpcode::IrCopy && result.instrs[3 as usize].src1 == 0
+}
+
+// T335: Non-zero const → no fold
+fn compiler_main_test_bool_simp_nonzero_no_fold() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(1, 0)
+    instrs[1] = ir_binop(2, 0, BinaryOp::OpEq, 1)
+    instrs[2] = ir_load_imm(3, 5)
+    instrs[3] = ir_binop(4, 2, BinaryOp::OpEq, 3)
+    let func = cp_make_test_func(instrs, 4)
+    let result = ocp_const_fold(func)
+    result.instrs[3 as usize].op == IrOpcode::IrBinOp
+}
+
+// ============================================================================
+// Sprint 104 Block AB — GVN tests (T336-T341)
+// ============================================================================
+
+// T336: Duplicate binop → IrCopy
+fn compiler_main_test_gvn_basic_redundancy() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(0, 10)
+    instrs[1] = ir_load_imm(1, 20)
+    instrs[2] = ir_binop(2, 0, BinaryOp::OpAdd, 1)
+    instrs[3] = ir_binop(3, 0, BinaryOp::OpAdd, 1)
+    let func = cp_make_test_func(instrs, 4)
+    let result = ocp_gvn(func)
+    result.instrs[3 as usize].op == IrOpcode::IrCopy && result.instrs[3 as usize].src1 == 2
+}
+
+// T337: Different ops → not folded
+fn compiler_main_test_gvn_different_ops() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(0, 10)
+    instrs[1] = ir_load_imm(1, 20)
+    instrs[2] = ir_binop(2, 0, BinaryOp::OpAdd, 1)
+    instrs[3] = ir_binop(3, 0, BinaryOp::OpSub, 1)
+    let func = cp_make_test_func(instrs, 4)
+    let result = ocp_gvn(func)
+    result.instrs[3 as usize].op == IrOpcode::IrBinOp
+}
+
+// T338: Label invalidates table
+fn compiler_main_test_gvn_label_invalidates() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(0, 10)
+    instrs[1] = ir_load_imm(1, 20)
+    instrs[2] = ir_binop(2, 0, BinaryOp::OpAdd, 1)
+    instrs[3] = ir_label(0)
+    instrs[4] = ir_binop(3, 0, BinaryOp::OpAdd, 1)
+    let func = cp_make_test_func(instrs, 5)
+    let result = ocp_gvn(func)
+    result.instrs[4 as usize].op == IrOpcode::IrBinOp
+}
+
+// T339: IrCopy inherits VN
+fn compiler_main_test_gvn_copy_inherits_vn() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(0, 10)
+    instrs[1] = ir_load_imm(1, 20)
+    instrs[2] = ir_binop(2, 0, BinaryOp::OpAdd, 1)
+    instrs[3] = ir_copy(3, 2)
+    instrs[4] = ir_binop(4, 0, BinaryOp::OpAdd, 1)
+    let func = cp_make_test_func(instrs, 5)
+    let result = ocp_gvn(func)
+    result.instrs[4 as usize].op == IrOpcode::IrCopy && result.instrs[4 as usize].src1 == 2
+}
+
+// T340: No binops → no-op
+fn compiler_main_test_gvn_no_binops() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(0, 42)
+    instrs[1] = ir_return(0)
+    let func = cp_make_test_func(instrs, 2)
+    let result = ocp_gvn(func)
+    result.instrs[0 as usize].op == IrOpcode::IrLoadImm
+}
+
+// T341: Chained GVN
+fn compiler_main_test_gvn_chain() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(0, 5)
+    instrs[1] = ir_load_imm(1, 10)
+    instrs[2] = ir_binop(2, 0, BinaryOp::OpAdd, 1)
+    instrs[3] = ir_binop(3, 0, BinaryOp::OpAdd, 1)
+    instrs[4] = ir_binop(4, 2, BinaryOp::OpMul, 3)
+    instrs[5] = ir_binop(5, 2, BinaryOp::OpMul, 3)
+    let func = cp_make_test_func(instrs, 6)
+    let result = ocp_gvn(func)
+    result.instrs[3 as usize].op == IrOpcode::IrCopy && result.instrs[5 as usize].op == IrOpcode::IrCopy
+}
+
 fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
     var passed: i64 = 0
-    let total: i64 = 311
+    let total: i64 = 347
 
     println("=== compiler/main.sio self-tests ===")
 
@@ -10323,6 +10780,162 @@ fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
         println("  FAIL: T311 Sprint 101: native_target_policy_for x86_64-macos dispatch")
     }
 
+    // Sprint 106 Block AD — Jump-to-return (T306-T311)
+    if compiler_main_test_jump_to_return_basic() {
+        println("  T306 OK: Sprint 106 Block AD: jump-to-return basic")
+        passed = passed + 1
+    } else { println("  FAIL: T306") }
+    if compiler_main_test_jump_to_return_no_fold() {
+        println("  T307 OK: Sprint 106 Block AD: no return after label")
+        passed = passed + 1
+    } else { println("  FAIL: T307") }
+    if compiler_main_test_jump_to_return_cond_no_fold() {
+        println("  T308 OK: Sprint 106 Block AD: cond branch not folded")
+        passed = passed + 1
+    } else { println("  FAIL: T308") }
+    if compiler_main_test_jump_to_return_multi() {
+        println("  T309 OK: Sprint 106 Block AD: multiple jumps folded")
+        passed = passed + 1
+    } else { println("  FAIL: T309") }
+    if compiler_main_test_jump_to_return_missing_label() {
+        println("  T310 OK: Sprint 106 Block AD: missing label no fold")
+        passed = passed + 1
+    } else { println("  FAIL: T310") }
+    if compiler_main_test_jump_to_return_end_of_func() {
+        println("  T311 OK: Sprint 106 Block AD: end-of-func folded")
+        passed = passed + 1
+    } else { println("  FAIL: T311") }
+
+    // Sprint 105 Block AC — Load sinking (T312-T317)
+    if compiler_main_test_sink_loads_no_swap_imm_pair() {
+        println("  T312 OK: Sprint 105 Block AC: imm pair no swap")
+        passed = passed + 1
+    } else { println("  FAIL: T312") }
+    if compiler_main_test_sink_loads_no_swap_adjacent_use() {
+        println("  T313 OK: Sprint 105 Block AC: adjacent use no swap")
+        passed = passed + 1
+    } else { println("  FAIL: T313") }
+    if compiler_main_test_sink_loads_no_swap_label() {
+        println("  T314 OK: Sprint 105 Block AC: label blocks sink")
+        passed = passed + 1
+    } else { println("  FAIL: T314") }
+    if compiler_main_test_sink_loads_no_swap_src1() {
+        println("  T315 OK: Sprint 105 Block AC: src1 use no swap")
+        passed = passed + 1
+    } else { println("  FAIL: T315") }
+    if compiler_main_test_sink_loads_swap_past_binop() {
+        println("  T316 OK: Sprint 105 Block AC: sink past binop")
+        passed = passed + 1
+    } else { println("  FAIL: T316") }
+    if compiler_main_test_sink_loads_noop() {
+        println("  T317 OK: Sprint 105 Block AC: no IrLoadImm no-op")
+        passed = passed + 1
+    } else { println("  FAIL: T317") }
+
+    // Sprint 103 Block AA — LICM (T318-T323)
+    if compiler_main_test_licm_hoist_loadimm() {
+        println("  T318 OK: Sprint 103 Block AA: hoist IrLoadImm")
+        passed = passed + 1
+    } else { println("  FAIL: T318") }
+    if compiler_main_test_licm_no_hoist_written_elsewhere() {
+        println("  T319 OK: Sprint 103 Block AA: no hoist written elsewhere")
+        passed = passed + 1
+    } else { println("  FAIL: T319") }
+    if compiler_main_test_licm_forward_jump_no_hoist() {
+        println("  T320 OK: Sprint 103 Block AA: forward jump no hoist")
+        passed = passed + 1
+    } else { println("  FAIL: T320") }
+    if compiler_main_test_licm_binop_not_hoisted() {
+        println("  T321 OK: Sprint 103 Block AA: binop not hoisted")
+        passed = passed + 1
+    } else { println("  FAIL: T321") }
+    if compiler_main_test_licm_first_hoisted() {
+        println("  T322 OK: Sprint 103 Block AA: first IrLoadImm hoisted")
+        passed = passed + 1
+    } else { println("  FAIL: T322") }
+    if compiler_main_test_licm_empty_loop() {
+        println("  T323 OK: Sprint 103 Block AA: empty loop no crash")
+        passed = passed + 1
+    } else { println("  FAIL: T323") }
+
+    // Sprint 102 Block Z — Mul3 SR (T324-T329)
+    if compiler_main_test_mul3_basic() {
+        println("  T324 OK: Sprint 102 Block Z: x*3 → 2 ADDs")
+        passed = passed + 1
+    } else { println("  FAIL: T324") }
+    if compiler_main_test_mul3_left_const() {
+        println("  T325 OK: Sprint 102 Block Z: 3*x left-const")
+        passed = passed + 1
+    } else { println("  FAIL: T325") }
+    if compiler_main_test_mul3_skip_pow2() {
+        println("  T326 OK: Sprint 102 Block Z: pow-2 not folded")
+        passed = passed + 1
+    } else { println("  FAIL: T326") }
+    if compiler_main_test_mul3_skip_5() {
+        println("  T327 OK: Sprint 102 Block Z: x*5 not folded")
+        passed = passed + 1
+    } else { println("  FAIL: T327") }
+    if compiler_main_test_mul3_both_const_skip() {
+        println("  T328 OK: Sprint 102 Block Z: both-const skip")
+        passed = passed + 1
+    } else { println("  FAIL: T328") }
+    if compiler_main_test_mul3_add_sequence() {
+        println("  T329 OK: Sprint 102 Block Z: ADD sequence correct")
+        passed = passed + 1
+    } else { println("  FAIL: T329") }
+
+    // Sprint 101 Block Y — Boolean simplification (T330-T335)
+    if compiler_main_test_bool_simp_double_eq() {
+        println("  T330 OK: Sprint 101 Block Y: (x==0)==0 → IrCopy(x)")
+        passed = passed + 1
+    } else { println("  FAIL: T330") }
+    if compiler_main_test_bool_simp_double_ne() {
+        println("  T331 OK: Sprint 101 Block Y: (x!=0)!=0 → IrCopy(x)")
+        passed = passed + 1
+    } else { println("  FAIL: T331") }
+    if compiler_main_test_bool_simp_mixed_eq_ne() {
+        println("  T332 OK: Sprint 101 Block Y: bool!=0 → IrCopy(bool)")
+        passed = passed + 1
+    } else { println("  FAIL: T332") }
+    if compiler_main_test_bool_simp_mixed_ne_eq() {
+        println("  T333 OK: Sprint 101 Block Y: (x!=0)==0 no fold")
+        passed = passed + 1
+    } else { println("  FAIL: T333") }
+    if compiler_main_test_bool_simp_commutative() {
+        println("  T334 OK: Sprint 101 Block Y: 0==(x==0) commutative")
+        passed = passed + 1
+    } else { println("  FAIL: T334") }
+    if compiler_main_test_bool_simp_nonzero_no_fold() {
+        println("  T335 OK: Sprint 101 Block Y: nonzero no fold")
+        passed = passed + 1
+    } else { println("  FAIL: T335") }
+
+    // Sprint 104 Block AB — GVN (T336-T341)
+    if compiler_main_test_gvn_basic_redundancy() {
+        println("  T336 OK: Sprint 104 Block AB: duplicate → IrCopy")
+        passed = passed + 1
+    } else { println("  FAIL: T336") }
+    if compiler_main_test_gvn_different_ops() {
+        println("  T337 OK: Sprint 104 Block AB: different ops no fold")
+        passed = passed + 1
+    } else { println("  FAIL: T337") }
+    if compiler_main_test_gvn_label_invalidates() {
+        println("  T338 OK: Sprint 104 Block AB: label invalidates")
+        passed = passed + 1
+    } else { println("  FAIL: T338") }
+    if compiler_main_test_gvn_copy_inherits_vn() {
+        println("  T339 OK: Sprint 104 Block AB: copy inherits VN")
+        passed = passed + 1
+    } else { println("  FAIL: T339") }
+    if compiler_main_test_gvn_no_binops() {
+        println("  T340 OK: Sprint 104 Block AB: no binops no-op")
+        passed = passed + 1
+    } else { println("  FAIL: T340") }
+    if compiler_main_test_gvn_chain() {
+        println("  T341 OK: Sprint 104 Block AB: chained GVN")
+        passed = passed + 1
+    } else { println("  FAIL: T341") }
+
     println("")
     println("compiler/main tests: " + int_to_string(passed) + "/" + int_to_string(total) + " passed")
     if passed == total { 0 } else { 1 }
@@ -10334,6 +10947,12 @@ fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
 
 fn main() with IO, Mut, Panic, Div, Alloc {
     let args = get_args()
+
+    // Check for --serve BEFORE printing banner (stdout is binary protocol)
+    if compiler_mode_has_flag(args, "--serve") {
+        ipc_serve()
+        return
+    }
 
     println("SOUNIO SELF-HOSTED COMPILER v0.80.0")
     println("Horizon 3: self-hosted primary compiler.")
@@ -10353,6 +10972,9 @@ fn main() with IO, Mut, Panic, Div, Alloc {
             return
         } else if mode == "--native-compile" {
             run_native_compile_mode(args, arg_idx)
+            return
+        } else if mode == "--serve" {
+            ipc_serve()
             return
         } else if mode == "--self-test" {
             let self_test_code = run_compiler_main_self_tests()

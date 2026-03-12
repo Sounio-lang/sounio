@@ -177,6 +177,13 @@ fn ocp_const_fold(func: IrFunction) -> IrFunction with Mut, Div, Panic {
     var sh_var_src: [i64;  256] = [-1;    256]
     var sh_amount:  [i64;  256] = [0;     256]
     var sh_is_left: [bool; 256] = [false; 256]
+    // Sprint 101 Block Y: Boolean simplification — track comparison results.
+    // is_cmp_result[r]=true means r was produced by a comparison (OpEq/OpNe/etc).
+    // cmp_orig_src[r] = the first operand of the comparison.
+    // cmp_op_code[r] = 1 for OpEq, 2 for OpNe, 3 for other comparisons.
+    var is_cmp_result: [bool; 256] = [false; 256]
+    var cmp_orig_src:  [i64;  256] = [-1;    256]
+    var cmp_op_code:   [i64;  256] = [0;     256]
 
     var i: i64 = 0
     while i < result.instr_count {
@@ -870,7 +877,87 @@ fn ocp_const_fold(func: IrFunction) -> IrFunction with Mut, Div, Panic {
             }
         }
 
-        // Sprint 75 Block F: Conditional branch folding.
+        // Sprint 101 Block Y: Track comparison results for boolean simplification.
+        if ocp_is_binop(result.instrs[i as usize].op) {
+            let bl = result.instrs[i as usize]
+            let bl_d = bl.dst
+            if bl_d >= 0 && bl_d < 256 {
+                if bl.bin_op == BinaryOp::OpEq {
+                    is_cmp_result[bl_d as usize] = true
+                    cmp_orig_src[bl_d as usize] = bl.src1
+                    cmp_op_code[bl_d as usize] = 1
+                }
+                if bl.bin_op == BinaryOp::OpNe {
+                    is_cmp_result[bl_d as usize] = true
+                    cmp_orig_src[bl_d as usize] = bl.src1
+                    cmp_op_code[bl_d as usize] = 2
+                }
+                if bl.bin_op == BinaryOp::OpLt || bl.bin_op == BinaryOp::OpLe
+                        || bl.bin_op == BinaryOp::OpGt || bl.bin_op == BinaryOp::OpGe {
+                    is_cmp_result[bl_d as usize] = true
+                    cmp_orig_src[bl_d as usize] = bl.src1
+                    cmp_op_code[bl_d as usize] = 3
+                }
+            }
+        }
+
+        // Sprint 101 Block Y: Boolean simplification.
+        // (x == 0) == 0 → IrCopy(x)  (double boolean negation)
+        // (x != 0) != 0 → IrCopy(x)  (double negation via Ne)
+        // bool != 0 → IrCopy(bool)   (general: any comparison result != 0 is identity)
+        // 0 == (x == 0) → IrCopy(x)  (commutative variant)
+        // SOTA: LLVM InstCombineCompares.cpp; Click PLDI 1995 §2.
+        if ocp_is_binop(result.instrs[i as usize].op) {
+            let bl = result.instrs[i as usize]
+            let bl_s1 = bl.src1
+            let bl_s2 = bl.src2
+            let bl_s1_ok = bl_s1 >= 0 && bl_s1 < 256
+            let bl_s2_ok = bl_s2 >= 0 && bl_s2 < 256
+            // (x == 0) == 0 → IrCopy(x): s2 is const 0, s1 is cmp_result with OpEq, cmp_orig_src[s1]=x
+            if bl.bin_op == BinaryOp::OpEq && bl_s2_ok && is_const[bl_s2 as usize]
+                    && const_val[bl_s2 as usize] == 0
+                    && bl_s1_ok && is_cmp_result[bl_s1 as usize]
+                    && cmp_op_code[bl_s1 as usize] == 1 {
+                let orig = cmp_orig_src[bl_s1 as usize]
+                result.instrs[i as usize] = ir_copy(bl.dst, orig)
+                if bl.dst >= 0 && bl.dst < 256 {
+                    is_cmp_result[bl.dst as usize] = false
+                }
+            }
+            // (x != 0) != 0 → IrCopy(x)
+            if bl.bin_op == BinaryOp::OpNe && bl_s2_ok && is_const[bl_s2 as usize]
+                    && const_val[bl_s2 as usize] == 0
+                    && bl_s1_ok && is_cmp_result[bl_s1 as usize]
+                    && cmp_op_code[bl_s1 as usize] == 2 {
+                let orig = cmp_orig_src[bl_s1 as usize]
+                result.instrs[i as usize] = ir_copy(bl.dst, orig)
+                if bl.dst >= 0 && bl.dst < 256 {
+                    is_cmp_result[bl.dst as usize] = false
+                }
+            }
+            // bool != 0 → IrCopy(bool): any comparison result != 0 is identity
+            if bl.bin_op == BinaryOp::OpNe && bl_s2_ok && is_const[bl_s2 as usize]
+                    && const_val[bl_s2 as usize] == 0
+                    && bl_s1_ok && is_cmp_result[bl_s1 as usize] {
+                result.instrs[i as usize] = ir_copy(bl.dst, bl_s1)
+                if bl.dst >= 0 && bl.dst < 256 {
+                    is_cmp_result[bl.dst as usize] = false
+                }
+            }
+            // 0 == (x == 0) → IrCopy(x): commutative — const on left, cmp_result on right
+            if bl.bin_op == BinaryOp::OpEq && bl_s1_ok && is_const[bl_s1 as usize]
+                    && const_val[bl_s1 as usize] == 0
+                    && bl_s2_ok && is_cmp_result[bl_s2 as usize]
+                    && cmp_op_code[bl_s2 as usize] == 1 {
+                let orig = cmp_orig_src[bl_s2 as usize]
+                result.instrs[i as usize] = ir_copy(bl.dst, orig)
+                if bl.dst >= 0 && bl.dst < 256 {
+                    is_cmp_result[bl.dst as usize] = false
+                }
+            }
+        }
+
+                // Sprint 75 Block F: Conditional branch folding.
         // When a branch condition register holds a known constant, the branch outcome is static.
         // IrBranchTrue(r, L)  + is_const[r]=true + const_val[r]!=0 → IrJump(L)
         // IrBranchTrue(r, L)  + is_const[r]=true + const_val[r]==0 → IrNop
@@ -1405,17 +1492,334 @@ fn ocp_dead_label(func: IrFunction) -> IrFunction with Mut {
     result
 }
 
+
+// ============================================================================
+// Sprint 102 Block Z: Non-pow-2 multiply strength reduction (x*3)
+// ============================================================================
+// x * 3 → (x + x) + x using two ADD instructions instead of MUL.
+// Only handles constant 3; pow-2 cases handled by existing strength reduction.
+// Two-pass: build constant lattice, then rewrite x*3 patterns.
+// SOTA: LLVM InstCombine; Cooper & Torczon §8.4.
+fn ocp_mul3_sr(func: IrFunction) -> IrFunction with Mut {
+    var result = func
+    // Pass 1: build constant lattice
+    var is_const: [bool; 256] = [false; 256]
+    var const_val: [i64; 256] = [0; 256]
+    var def_at: [i64; 256] = [-1; 256]
+    var i: i64 = 0
+    while i < result.instr_count {
+        let instr = result.instrs[i as usize]
+        if instr.op == IrOpcode::IrLoadImm && instr.dst >= 0 && instr.dst < 256 {
+            is_const[instr.dst as usize] = true
+            const_val[instr.dst as usize] = instr.imm_i64
+            def_at[instr.dst as usize] = i
+        }
+        i = i + 1
+    }
+    // Pass 2: rewrite x * 3 patterns
+    i = 0
+    while i < result.instr_count {
+        let instr = result.instrs[i as usize]
+        if instr.op == IrOpcode::IrBinOp && instr.bin_op == BinaryOp::OpMul {
+            let s1 = instr.src1
+            let s2 = instr.src2
+            let s1_k = s1 >= 0 && s1 < 256 && is_const[s1 as usize]
+            let s2_k = s2 >= 0 && s2 < 256 && is_const[s2 as usize]
+            // Skip if both const — const_fold handles that
+            if s1_k && s2_k {
+                i = i + 1
+                continue
+            }
+            // x * 3: s2 is const 3, s1 is variable
+            if s2_k && const_val[s2 as usize] == 3 && !s1_k {
+                // Rewrite IrLoadImm(rC, 3) → IrBinOp(rC, s1, OpAdd, s1)
+                let c_def = def_at[s2 as usize]
+                if c_def >= 0 {
+                    result.instrs[c_def as usize] = ir_binop(s2, s1, BinaryOp::OpAdd, s1)
+                    is_const[s2 as usize] = false
+                }
+                // Rewrite mul → IrBinOp(dst, rC, OpAdd, s1)
+                result.instrs[i as usize] = ir_binop(instr.dst, s2, BinaryOp::OpAdd, s1)
+            }
+            // 3 * x: s1 is const 3, s2 is variable
+            if s1_k && const_val[s1 as usize] == 3 && !s2_k {
+                let c_def = def_at[s1 as usize]
+                if c_def >= 0 {
+                    result.instrs[c_def as usize] = ir_binop(s1, s2, BinaryOp::OpAdd, s2)
+                    is_const[s1 as usize] = false
+                }
+                result.instrs[i as usize] = ir_binop(instr.dst, s1, BinaryOp::OpAdd, s2)
+            }
+        }
+        i = i + 1
+    }
+    result
+}
+
+// ============================================================================
+// Sprint 103 Block AA: Loop-Invariant Code Motion (LICM)
+// ============================================================================
+// Detects back-edges (IrJump to earlier label) and hoists IrLoadImm
+// instructions whose dst is not written elsewhere in the loop body.
+// Only hoists IrLoadImm (safe: no side effects, no data dependencies).
+// SOTA: Muchnick §13.2; Cooper & Torczon §10.3.
+fn ocp_licm(func: IrFunction) -> IrFunction with Mut {
+    var result = func
+    // Pass 1: record label positions
+    var label_pos: [i64; 256] = [-1; 256]
+    var i: i64 = 0
+    while i < result.instr_count {
+        let instr = result.instrs[i as usize]
+        if instr.op == IrOpcode::IrLabel && instr.label_id >= 0 && instr.label_id < 256 {
+            label_pos[instr.label_id as usize] = i
+        }
+        i = i + 1
+    }
+    // Pass 2: detect back-edges and hoist
+    i = 0
+    while i < result.instr_count {
+        let instr = result.instrs[i as usize]
+        if instr.op == IrOpcode::IrJump && instr.label_id >= 0 && instr.label_id < 256 {
+            let lp = label_pos[instr.label_id as usize]
+            if lp >= 0 && lp < i {
+                // Back-edge: loop from lp to i
+                // Scan loop body for hoistable IrLoadImm
+                var j: i64 = lp + 1
+                while j < i {
+                    let li = result.instrs[j as usize]
+                    if li.op == IrOpcode::IrLoadImm && li.dst >= 0 && li.dst < 256 {
+                        // Check dst not written elsewhere in loop
+                        var written_elsewhere: bool = false
+                        var k: i64 = lp + 1
+                        while k < i {
+                            if k != j {
+                                let ki = result.instrs[k as usize]
+                                if ki.dst == li.dst && ki.op != IrOpcode::IrNop {
+                                    written_elsewhere = true
+                                    k = i  // break
+                                }
+                            }
+                            k = k + 1
+                        }
+                        if !written_elsewhere {
+                            // Hoist: swap with loop header position
+                            // Place the IrLoadImm just before the label
+                            if lp > 0 {
+                                let prev = result.instrs[(lp - 1) as usize]
+                                result.instrs[(lp - 1) as usize] = li
+                                result.instrs[j as usize] = prev
+                                j = i  // break after first hoist per loop
+                            }
+                        }
+                    }
+                    j = j + 1
+                }
+            }
+        }
+        i = i + 1
+    }
+    result
+}
+
+// ============================================================================
+// Sprint 104 Block AB: Global Value Numbering (GVN)
+// ============================================================================
+// Assigns value numbers to registers; IrBinOp with matching VN pair
+// is replaced with IrCopy of the first occurrence.
+// Hash table: 128 entries, linear probe, key = op*10000 + vn1*100 + vn2.
+// Labels invalidate the entire table (conservative).
+// SOTA: Click PLDI 1995 §2; Cooper & Torczon §8.4.
+fn ocp_gvn(func: IrFunction) -> IrFunction with Mut {
+    var result = func
+    var vn: [i64; 256] = [-1; 256]
+    var next_vn: i64 = 0
+    // Hash table
+    var ht_key:  [i64; 128] = [-1; 128]
+    var ht_vn:   [i64; 128] = [-1; 128]
+    var ht_reg:  [i64; 128] = [-1; 128]
+    var ht_used: [bool; 128] = [false; 128]
+    var i: i64 = 0
+    while i < result.instr_count {
+        let instr = result.instrs[i as usize]
+        // IrLoadImm: fresh VN
+        if instr.op == IrOpcode::IrLoadImm && instr.dst >= 0 && instr.dst < 256 {
+            vn[instr.dst as usize] = next_vn
+            next_vn = next_vn + 1
+        }
+        // IrCopy: inherit VN from src
+        if instr.op == IrOpcode::IrCopy && instr.dst >= 0 && instr.dst < 256 {
+            if instr.src1 >= 0 && instr.src1 < 256 && vn[instr.src1 as usize] >= 0 {
+                vn[instr.dst as usize] = vn[instr.src1 as usize]
+            } else {
+                vn[instr.dst as usize] = next_vn
+                next_vn = next_vn + 1
+            }
+        }
+        // IrLabel: invalidate hash table (conservative at control flow merge)
+        if instr.op == IrOpcode::IrLabel {
+            var ci: i64 = 0
+            while ci < 128 {
+                ht_used[ci as usize] = false
+                ht_key[ci as usize] = -1
+                ci = ci + 1
+            }
+        }
+        // IrBinOp: compute hash, look up, replace or insert
+        if instr.op == IrOpcode::IrBinOp && instr.dst >= 0 && instr.dst < 256 {
+            let s1 = instr.src1
+            let s2 = instr.src2
+            if s1 >= 0 && s1 < 256 && s2 >= 0 && s2 < 256 {
+                let vn1 = vn[s1 as usize]
+                let vn2 = vn[s2 as usize]
+                if vn1 >= 0 && vn2 >= 0 {
+                    let op_val = ocp_binop_to_cse_key(instr.bin_op)
+                    let key = op_val * 10000 + vn1 * 100 + vn2
+                    var hash = key % 128
+                    if hash < 0 { hash = 0 - hash }
+                    // Linear probe lookup
+                    var found: bool = false
+                    var found_reg: i64 = -1
+                    var probe: i64 = 0
+                    while probe < 8 {
+                        let idx = (hash + probe) % 128
+                        if !ht_used[idx as usize] {
+                            probe = 8  // break: empty slot, not found
+                        } else {
+                            if ht_key[idx as usize] == key {
+                                found = true
+                                found_reg = ht_reg[idx as usize]
+                                probe = 8  // break
+                            }
+                        }
+                        probe = probe + 1
+                    }
+                    if found && found_reg >= 0 {
+                        // Replace with IrCopy
+                        result.instrs[i as usize] = ir_copy(instr.dst, found_reg)
+                        vn[instr.dst as usize] = vn[found_reg as usize]
+                    } else {
+                        // Insert into hash table
+                        vn[instr.dst as usize] = next_vn
+                        next_vn = next_vn + 1
+                        var slot: i64 = hash
+                        var sp: i64 = 0
+                        while sp < 8 {
+                            let idx = (slot + sp) % 128
+                            if !ht_used[idx as usize] {
+                                ht_used[idx as usize] = true
+                                ht_key[idx as usize] = key
+                                ht_vn[idx as usize] = vn[instr.dst as usize]
+                                ht_reg[idx as usize] = instr.dst
+                                sp = 8  // break
+                            }
+                            sp = sp + 1
+                        }
+                    }
+                } else {
+                    // Unknown VN for operands — assign fresh
+                    vn[instr.dst as usize] = next_vn
+                    next_vn = next_vn + 1
+                }
+            }
+        }
+        i = i + 1
+    }
+    result
+}
+
+// ============================================================================
+// Sprint 105 Block AC: Instruction scheduling — load sinking
+// ============================================================================
+// Bubble-sort adjacent swaps: IrLoadImm sinks past independent instructions
+// to reduce register pressure (closer to use). Up to 4 passes.
+// Only swaps if next instruction doesn't use/write dst, isn't control flow.
+// SOTA: Hennessy & Patterson §A.2; Muchnick §17.
+fn ocp_sink_loads(func: IrFunction) -> IrFunction with Mut {
+    var result = func
+    var pass: i64 = 0
+    while pass < 4 {
+        var swapped: bool = false
+        var i: i64 = 0
+        while i < result.instr_count - 1 {
+            let cur = result.instrs[i as usize]
+            let nxt = result.instrs[(i + 1) as usize]
+            if cur.op == IrOpcode::IrLoadImm && nxt.op != IrOpcode::IrLoadImm
+                    && nxt.op != IrOpcode::IrNop && nxt.op != IrOpcode::IrLabel
+                    && nxt.op != IrOpcode::IrJump && nxt.op != IrOpcode::IrBranchTrue
+                    && nxt.op != IrOpcode::IrBranchFalse && nxt.op != IrOpcode::IrReturn
+                    && nxt.op != IrOpcode::IrCall {
+                // Check next doesn't use our dst
+                let d = cur.dst
+                if nxt.src1 != d && nxt.src2 != d && nxt.dst != d {
+                    // Swap
+                    result.instrs[i as usize] = nxt
+                    result.instrs[(i + 1) as usize] = cur
+                    swapped = true
+                }
+            }
+            i = i + 1
+        }
+        if !swapped {
+            pass = 4  // break
+        }
+        pass = pass + 1
+    }
+    result
+}
+
+// ============================================================================
+// Sprint 106 Block AD: Jump-to-return folding
+// ============================================================================
+// IrJump(L) where IrLabel(L) is immediately followed by IrReturn(v) →
+// replace the IrJump with IrReturn(v). Eliminates one branch per tail return.
+// Only unconditional jumps; conditional branches excluded.
+// SOTA: Muchnick §13.1 (branch optimization); Cooper & Torczon §8.7.
+fn ocp_jump_to_return(func: IrFunction) -> IrFunction with Mut {
+    var result = func
+    // Pass 1: find label positions
+    var label_pos: [i64; 256] = [-1; 256]
+    var i: i64 = 0
+    while i < result.instr_count {
+        let instr = result.instrs[i as usize]
+        if instr.op == IrOpcode::IrLabel && instr.label_id >= 0 && instr.label_id < 256 {
+            label_pos[instr.label_id as usize] = i
+        }
+        i = i + 1
+    }
+    // Pass 2: fold IrJump(L) where L+1 is IrReturn
+    i = 0
+    while i < result.instr_count {
+        let instr = result.instrs[i as usize]
+        if instr.op == IrOpcode::IrJump && instr.label_id >= 0 && instr.label_id < 256 {
+            let lp = label_pos[instr.label_id as usize]
+            if lp >= 0 && lp + 1 < result.instr_count {
+                let next = result.instrs[(lp + 1) as usize]
+                if next.op == IrOpcode::IrReturn {
+                    result.instrs[i as usize] = ir_return(next.src1)
+                }
+            }
+        }
+        i = i + 1
+    }
+    result
+}
+
 fn opt_cleanup_function(func: IrFunction) -> IrFunction with Mut, Div, Panic {
     var current = ocp_dedup_imm(func)
     current = ocp_const_fold(current)
+    current = ocp_mul3_sr(current)            // Sprint 102 Block Z: non-pow-2 multiply SR
     current = ocp_egraph_pass(current)        // full e-graph: deferred (always skips guard)
     current = ocp_egraph_mini_pass(current)   // mini e-graph: activates for instr_count <= 4
     current = ocp_cse(current)                // CSE: always active
+    current = ocp_gvn(current)                // Sprint 104 Block AB: global value numbering
     current = ocp_copy_prop(current)          // Sprint 93 Block Q: copy chain collapse
     current = ocp_dse(current)                // Sprint 94 Block R: dead store elimination
     current = ocp_redundant_jump(current)     // Sprint 97 Block U: redundant jump elimination
+    current = ocp_jump_to_return(current)     // Sprint 106 Block AD: jump-to-return folding
     current = ocp_dead_after_jump(current)    // Sprint 98 Block V: unreachable code elimination
     current = ocp_dead_label(current)         // Sprint 99 Block W: unreachable label elimination
+    current = ocp_licm(current)              // Sprint 103 Block AA: LICM
+    current = ocp_sink_loads(current)         // Sprint 105 Block AC: load sinking
     var iter: i64 = 0
     while iter < 8 {
         let swept = ocp_dce_once(current)
