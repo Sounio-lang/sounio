@@ -2227,3 +2227,92 @@ fn gradient_bridge_complete(diff_ty: TypeEntry, temp_milli: i64, beta_milli: i64
     let dist_ty: TypeEntry = sde_stationary_to_dist(sde_ty, beta_milli)
     dist_to_contest(dist_ty, model_count)
 }
+
+// ================================================================
+// FSNN Orbit Epistemic Classification (Horizon 5.1)
+//
+// When a Mandelbrot orbit is near the escape boundary
+// (|z_n| ∈ [0.8R, R] where R = escape_radius), the classification
+// "escaped" vs "bounded" is epistemically contested.
+//
+// Orbit result classification rules:
+//   1. OrbitResult with |z_final| < 0.8*R     → bounded, uncontested
+//   2. OrbitResult with |z_final| > R          → escaped, uncontested
+//   3. OrbitResult with |z_final| ∈ [0.8R, R]  → Contest<OrbitResult>
+//
+// Propagation:
+//   Contest<OrbitResult> → fsnn_extract_features → Contest<FSNNFeatures>
+//   (boundary sensitivity contaminates downstream features)
+//
+// Zero-divisor proximity also introduces Contest when zd_proximity < 0.1:
+//   Near zero-divisor ⇒ putative inverse is ill-conditioned
+//   ⇒ Contest wrapping with PROVENANCE_KIND_COMPUTED
+// ================================================================
+
+const PROVENANCE_KIND_ORBIT_BOUNDARY: i64 = 6
+
+// Classify orbit result epsilon based on distance to escape boundary.
+// Returns epsilon in [0, 1]: 0 = confidently classified, 1 = on boundary.
+// Linear interpolation within the boundary band [0.8R, R].
+fn orbit_boundary_epsilon(terminal_norm: f64, escape_radius: f64) -> f64 {
+    let lower = 0.8 * escape_radius
+    let upper = escape_radius
+    if terminal_norm < lower {
+        // Confidently bounded
+        0.0
+    } else if terminal_norm > upper {
+        // Confidently escaped
+        0.0
+    } else {
+        // In boundary band: epsilon scales linearly from 0 at edges to 1 at midpoint
+        let mid = 0.5 * (lower + upper)
+        let half_width = 0.5 * (upper - lower)
+        if half_width < 1e-30 { return 1.0 }
+        let dist_from_mid = terminal_norm - mid
+        let abs_dist = if dist_from_mid < 0.0 { 0.0 - dist_from_mid } else { dist_from_mid }
+        1.0 - abs_dist / half_width
+    }
+}
+
+// Classify zero-divisor proximity epsilon.
+// When the orbit passes near the zero-divisor variety Z,
+// the sedenionic inverse becomes ill-conditioned and the
+// Jacobian norm may spike. This introduces epistemic uncertainty.
+fn zero_divisor_epsilon(zd_proximity: f64) -> f64 {
+    if zd_proximity > 0.1 {
+        0.0
+    } else if zd_proximity < 1e-10 {
+        1.0
+    } else {
+        // Linear interpolation: closer to Z → higher epsilon
+        1.0 - zd_proximity / 0.1
+    }
+}
+
+// Combine orbit boundary and zero-divisor epsilon into a single
+// epistemic uncertainty for the FSNN feature vector.
+// Uses quadrature combination: epsilon = sqrt(e1^2 + e2^2), clamped to [0,1].
+fn orbit_combined_epsilon(boundary_eps: f64, zd_eps: f64) -> f64 {
+    let combined_sq = boundary_eps * boundary_eps + zd_eps * zd_eps
+    if combined_sq <= 0.0 { return 0.0 }
+    // Newton-Raphson sqrt (6 iterations, sufficient for epsilon precision)
+    var y = combined_sq
+    y = 0.5 * (y + combined_sq / y)
+    y = 0.5 * (y + combined_sq / y)
+    y = 0.5 * (y + combined_sq / y)
+    y = 0.5 * (y + combined_sq / y)
+    y = 0.5 * (y + combined_sq / y)
+    y = 0.5 * (y + combined_sq / y)
+    if y > 1.0 { 1.0 } else { y }
+}
+
+// Check whether an orbit result should be wrapped in Contest<T>.
+// Returns 1 if the result is epistemically contested (near boundary or near Z),
+// 0 if uncontested.
+fn orbit_is_contested(terminal_norm: f64, escape_radius: f64, zd_proximity: f64) -> i64 {
+    let eps = orbit_combined_epsilon(
+        orbit_boundary_epsilon(terminal_norm, escape_radius),
+        zero_divisor_epsilon(zd_proximity)
+    )
+    if eps > 0.01 { 1 } else { 0 }
+}

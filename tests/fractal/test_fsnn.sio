@@ -7,6 +7,7 @@
 //! - Array roundtrip preserves values
 
 use math::sedenion64::*
+use linalg::mat16::*
 use fractal::mandelbrot::*
 use fractal::fsnn::*
 
@@ -82,10 +83,71 @@ fn test_features_array_roundtrip() -> i32 {
     return fail
 }
 
+// Natural log via range reduction + Taylor series (sufficient precision for tests).
+fn tf_ln(x: f64) -> f64 {
+    if x <= 0.0 { return 0.0 - 1000000.0 }
+    let ln2 = 0.6931471805599453
+    var v = x
+    var k: i64 = 0
+    while v > 2.0 { v = v / 2.0; k = k + 1 }
+    while v < 1.0 { v = v * 2.0; k = k - 1 }
+    let y = v - 1.0
+    let r = y * (1.0 - y * (0.5 - y * (0.3333333333333333 - y * 0.25)))
+    r + (k as f64) * ln2
+}
+
+// Lyapunov exponent must use the Oseledec running sum (1/N) Σ ln σ₁(Jₙ),
+// NOT the terminal shortcut (1/N) ln σ₁(J_N).
+// With c = e1 and max_iter=10 (bounded), the per-iteration sigma values vary,
+// so the sum diverges from the terminal-only approximation.
+fn test_lyapunov_uses_sum_not_terminal() -> i32 {
+    let c = sed64_basis(1)
+    let config = OrbitConfig { max_iter: 10, escape_radius: 4.0, compute_hessian: 0 }
+    let orbit = compute_orbit(c, config)
+    let features = fsnn_extract_features(orbit, config)
+
+    // Terminal-only (wrong) formula: ln(sigma_max(J_N)) / history_len
+    let sigma_terminal = mat16_operator_norm_approx(orbit.jacobian)
+    let n = orbit.history_len as f64
+    let lyap_terminal_only = tf_ln(sigma_terminal + 1e-30) / n
+
+    // Oseledec sum (correct) formula — stored in features.lyapunov_max
+    let diff = tf_abs(features.lyapunov_max - lyap_terminal_only)
+
+    // They must differ by more than numerical noise (> 1e-10)
+    if diff > 1e-10 { 0 } else { 1 }
+}
+
+// zero_div_proximity must be computed by the analytic Moreno formula (O(1)),
+// not Monte Carlo. Test properties of the analytic formula directly:
+//   - c=0: z_final=0, which sits on Z (norm_imb=0, orth_viol=0) => proximity~0
+//   - c=e0 (real 1): z escapes quickly; z_final has large real part, zero beta
+//     half => norm_imb~1 => proximity > 0.1
+fn test_zd_proximity_is_analytic() -> i32 {
+    var fail = 0
+
+    // c=0: orbit stays at 0; z_final = zero sedenion => on zero-divisor variety
+    let c_zero = sed64_zero()
+    let cfg0 = OrbitConfig { max_iter: 5, escape_radius: 4.0, compute_hessian: 0 }
+    let f0 = fsnn_forward(c_zero, cfg0)
+    if f0.zero_div_proximity > 1e-8 { fail = fail + 1 }
+
+    // c=e0 (purely real 1): escapes; z_final has real component >> 0, beta=0
+    // => alpha_norm >> 0, beta_norm = 0 => norm_imb = 1.0 => distance = 1.0
+    let c_real = sed64_basis(0)
+    let cfg1 = OrbitConfig { max_iter: 20, escape_radius: 100.0, compute_hessian: 0 }
+    let f1 = fsnn_forward(c_real, cfg1)
+    if f1.zero_div_proximity < 0.1 { fail = fail + 1 }
+
+    return fail
+}
+
 fn main() -> i32 {
     var fail = 0
     fail = fail + test_features_finite()
     fail = fail + test_zero_c_features()
     fail = fail + test_features_array_roundtrip()
+    fail = fail + test_lyapunov_uses_sum_not_terminal()
+    fail = fail + test_zd_proximity_is_analytic()
     return fail
 }
