@@ -158,6 +158,11 @@ fn ocp_const_fold(func: IrFunction) -> IrFunction with Mut, Div, Panic {
     // Sprint 86 Block M: Negation tracking for double-neg and neg-arithmetic.
     var is_neg:  [bool; 256] = [false; 256]
     var neg_src: [i64;  256] = [-1;    256]
+    // Sprint 88 Block O: Mul-div cancellation — track r = x * C (partial-const mul).
+    // (x * C) / C → x.  SOTA: LLVM InstCombineMulDivRem.cpp; Cooper & Torczon §9.
+    var mul_valid:   [bool; 256] = [false; 256]
+    var mul_var_src: [i64;  256] = [-1;    256]
+    var mul_const_v: [i64;  256] = [0;     256]
 
     var i: i64 = 0
     while i < result.instr_count {
@@ -288,6 +293,19 @@ fn ocp_const_fold(func: IrFunction) -> IrFunction with Mut, Div, Panic {
                             const_val[instr.dst as usize] = 0
                         }
                     }
+                    // Sprint 88 Block O: Track r = x * C for mul-div cancellation.
+                    if instr.dst >= 0 && instr.dst < 256 {
+                        if s2_known && v2 != 0 && !s1_known {
+                            mul_valid[instr.dst as usize]   = true
+                            mul_var_src[instr.dst as usize] = s1
+                            mul_const_v[instr.dst as usize] = v2
+                        }
+                        if s1_known && v1 != 0 && !s2_known {
+                            mul_valid[instr.dst as usize]   = true
+                            mul_var_src[instr.dst as usize] = s2
+                            mul_const_v[instr.dst as usize] = v1
+                        }
+                    }
                 }
                 // x + 0 → IrCopy(dst, x)
                 if instr.bin_op == BinaryOp::OpAdd {
@@ -308,6 +326,16 @@ fn ocp_const_fold(func: IrFunction) -> IrFunction with Mut, Div, Panic {
                 if instr.bin_op == BinaryOp::OpDiv {
                     if s2_known && v2 == 1 {
                         result.instrs[i as usize] = ir_copy(instr.dst, s1)
+                    }
+                    // Sprint 88 Block O: (x * C) / C → x — mul-div cancellation.
+                    // Safe: v2 != 0 guard prevents div-by-zero; only fires when s1=r was produced
+                    // by a partial-const mul with the same constant C.
+                    if s2_known && v2 != 0 && s1 >= 0 && s1 < 256 && mul_valid[s1 as usize]
+                            && mul_const_v[s1 as usize] == v2 {
+                        result.instrs[i as usize] = ir_copy(instr.dst, mul_var_src[s1 as usize])
+                        if instr.dst >= 0 && instr.dst < 256 {
+                            mul_valid[instr.dst as usize] = false
+                        }
                     }
                 }
                 // Sprint 81 Block I: x % 1 → IrLoadImm(dst, 0)

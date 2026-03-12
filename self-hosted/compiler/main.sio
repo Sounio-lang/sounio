@@ -7329,9 +7329,88 @@ fn compiler_main_test_native_v2_float_whitelist() -> bool with Mut, Div, Panic {
     native_v2_supported_ir_opcode(IrOpcode::IrFloatToInt)
 }
 
+// ============================================================================
+// Sprint 88 Block O — mul-div cancellation tests (T246-T251)
+// ============================================================================
+
+// T246: r1=x*4; r2=r1/4 → r2=IrCopy(x).
+fn compiler_main_test_muldiv_cancel_basic() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(1, 4)
+    instrs[1] = ir_binop(2, 0, BinaryOp::OpMul, 1)
+    instrs[2] = ir_load_imm(3, 4)
+    instrs[3] = ir_binop(4, 2, BinaryOp::OpDiv, 3)
+    let func   = cp_make_test_func(instrs, 4)
+    let result = ocp_const_fold(func)
+    result.instrs[3].op == IrOpcode::IrCopy && result.instrs[3].src1 == 0
+}
+
+// T247: r1=x*4; r2=r1/5 → no fold (4 ≠ 5).
+fn compiler_main_test_muldiv_no_cancel_diff() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(1, 4)
+    instrs[1] = ir_binop(2, 0, BinaryOp::OpMul, 1)
+    instrs[2] = ir_load_imm(3, 5)
+    instrs[3] = ir_binop(4, 2, BinaryOp::OpDiv, 3)
+    let func   = cp_make_test_func(instrs, 4)
+    let result = ocp_const_fold(func)
+    result.instrs[3].op == IrOpcode::IrBinOp
+}
+
+// T248: r1=x*0 skipped (C=0 guard — zero mul not tracked).
+fn compiler_main_test_muldiv_no_cancel_zero() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(1, 0)
+    instrs[1] = ir_binop(2, 0, BinaryOp::OpMul, 1)
+    instrs[2] = ir_load_imm(3, 0)
+    instrs[3] = ir_binop(4, 2, BinaryOp::OpDiv, 3)
+    let func   = cp_make_test_func(instrs, 4)
+    let result = ocp_const_fold(func)
+    // r2=x*0 folds to IrLoadImm(0); r4=0/0 not a muldiv cancel (C=0 guard)
+    result.instrs[1].op == IrOpcode::IrLoadImm
+}
+
+// T249: r1=4*x (commutative) → r2=r1/4 → r2=IrCopy(x).
+fn compiler_main_test_muldiv_cancel_commut() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(1, 4)
+    instrs[1] = ir_binop(2, 1, BinaryOp::OpMul, 0)
+    instrs[2] = ir_load_imm(3, 4)
+    instrs[3] = ir_binop(4, 2, BinaryOp::OpDiv, 3)
+    let func   = cp_make_test_func(instrs, 4)
+    let result = ocp_const_fold(func)
+    result.instrs[3].op == IrOpcode::IrCopy && result.instrs[3].src1 == 0
+}
+
+// T250: r1=x+4 (add, not mul) → r2=r1/4 — no fold.
+fn compiler_main_test_muldiv_no_cancel_non_mul() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(1, 4)
+    instrs[1] = ir_binop(2, 0, BinaryOp::OpAdd, 1)
+    instrs[2] = ir_load_imm(3, 4)
+    instrs[3] = ir_binop(4, 2, BinaryOp::OpDiv, 3)
+    let func   = cp_make_test_func(instrs, 4)
+    let result = ocp_const_fold(func)
+    result.instrs[3].op == IrOpcode::IrBinOp
+}
+
+// T251: r1=x*7; r2=r1/7; r3=r2+0 — r2=IrCopy(x), r3=IrCopy via identity.
+fn compiler_main_test_muldiv_cancel_chain() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(1, 7)
+    instrs[1] = ir_binop(2, 0, BinaryOp::OpMul, 1)
+    instrs[2] = ir_load_imm(3, 7)
+    instrs[3] = ir_binop(4, 2, BinaryOp::OpDiv, 3)
+    instrs[4] = ir_load_imm(5, 0)
+    instrs[5] = ir_binop(6, 4, BinaryOp::OpAdd, 5)
+    let func   = cp_make_test_func(instrs, 6)
+    let result = ocp_const_fold(func)
+    result.instrs[3].op == IrOpcode::IrCopy && result.instrs[5].op == IrOpcode::IrCopy
+}
+
 fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
     var passed: i64 = 0
-    let total: i64 = 245
+    let total: i64 = 251
 
     println("=== compiler/main.sio self-tests ===")
 
@@ -9049,6 +9128,48 @@ fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
         passed = passed + 1
     } else {
         println("  FAIL: T245 Sprint 87: native-v2 float whitelist")
+    }
+
+    if compiler_main_test_muldiv_cancel_basic() {
+        println("  T246 OK: Sprint 88 Block O: (x*4)/4 → IrCopy(x)")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T246 Sprint 88 Block O: muldiv cancel basic")
+    }
+
+    if compiler_main_test_muldiv_no_cancel_diff() {
+        println("  T247 OK: Sprint 88 Block O: (x*4)/5 — no cancel (4≠5)")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T247 Sprint 88 Block O: no cancel diff const")
+    }
+
+    if compiler_main_test_muldiv_no_cancel_zero() {
+        println("  T248 OK: Sprint 88 Block O: x*0 not tracked (C=0 guard)")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T248 Sprint 88 Block O: C=0 guard")
+    }
+
+    if compiler_main_test_muldiv_cancel_commut() {
+        println("  T249 OK: Sprint 88 Block O: (4*x)/4 → IrCopy(x) commutative")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T249 Sprint 88 Block O: commutative cancel")
+    }
+
+    if compiler_main_test_muldiv_no_cancel_non_mul() {
+        println("  T250 OK: Sprint 88 Block O: (x+4)/4 — no cancel (not mul)")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T250 Sprint 88 Block O: non-mul no cancel")
+    }
+
+    if compiler_main_test_muldiv_cancel_chain() {
+        println("  T251 OK: Sprint 88 Block O: (x*7)/7; r+0 chain cancel")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T251 Sprint 88 Block O: chain cancel")
     }
 
     println("")
