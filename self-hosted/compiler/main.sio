@@ -8009,9 +8009,82 @@ fn compiler_main_test_dead_label_no_labels() -> bool with Mut, Div, Panic {
     result.instrs[0].op == IrOpcode::IrLoadImm && result.instrs[1].op == IrOpcode::IrLoadImm
 }
 
+// Sprint 100 Block X — NOP compaction tests (T300-T305)
+
+// T300: [IrLoadImm, IrNop, IrBinOp] → compacts to [IrLoadImm, IrBinOp], count=2.
+fn compiler_main_test_compact_basic() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(0, 5)
+    instrs[1] = ir_nop()
+    instrs[2] = ir_binop(1, 0, BinaryOp::OpAdd, 0)
+    let func = cp_make_test_func(instrs, 3)
+    let result = ocp_compact_nops(func)
+    result.instr_count == 2 && result.instrs[0].op == IrOpcode::IrLoadImm && result.instrs[1].op == IrOpcode::IrBinOp
+}
+
+// T301: All NOPs → count=0.
+fn compiler_main_test_compact_all_nops() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_nop()
+    instrs[1] = ir_nop()
+    instrs[2] = ir_nop()
+    let func = cp_make_test_func(instrs, 3)
+    let result = ocp_compact_nops(func)
+    result.instr_count == 0
+}
+
+// T302: No NOPs → count unchanged.
+fn compiler_main_test_compact_no_nops() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(0, 1)
+    instrs[1] = ir_load_imm(1, 2)
+    instrs[2] = ir_binop(2, 0, BinaryOp::OpAdd, 1)
+    let func = cp_make_test_func(instrs, 3)
+    let result = ocp_compact_nops(func)
+    result.instr_count == 3
+}
+
+// T303: Interspersed NOPs — preserves instruction order.
+fn compiler_main_test_compact_interspersed() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_nop()
+    instrs[1] = ir_load_imm(0, 10)
+    instrs[2] = ir_nop()
+    instrs[3] = ir_nop()
+    instrs[4] = ir_load_imm(1, 20)
+    instrs[5] = ir_nop()
+    let func = cp_make_test_func(instrs, 6)
+    let result = ocp_compact_nops(func)
+    result.instr_count == 2 && result.instrs[0].imm_i64 == 10 && result.instrs[1].imm_i64 == 20
+}
+
+// T304: Labels survive compaction — label_id is symbolic.
+fn compiler_main_test_compact_labels() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_jump(0)
+    instrs[1] = ir_nop()
+    instrs[2] = ir_nop()
+    instrs[3] = ir_label(0)
+    let func = cp_make_test_func(instrs, 4)
+    let result = ocp_compact_nops(func)
+    result.instr_count == 2 && result.instrs[0].op == IrOpcode::IrJump && result.instrs[1].op == IrOpcode::IrLabel
+}
+
+// T305: Full pipeline integration — opt_cleanup_function compacts NOPs at the end.
+fn compiler_main_test_compact_pipeline() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(0, 3)
+    instrs[1] = ir_load_imm(1, 3)       // duplicate imm → dedup_imm NOP's one
+    instrs[2] = ir_binop(2, 0, BinaryOp::OpAdd, 1)
+    let func = cp_make_test_func(instrs, 3)
+    let result = opt_cleanup_function(func)
+    // After full pipeline, NOPs from dedup+const_fold+DCE are compacted.
+    result.instr_count < 3
+}
+
 fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
     var passed: i64 = 0
-    let total: i64 = 299
+    let total: i64 = 305
 
     println("=== compiler/main.sio self-tests ===")
 
@@ -10113,6 +10186,49 @@ fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
         passed = passed + 1
     } else {
         println("  FAIL: T299 Sprint 99 Block W: no labels")
+    }
+
+    // Sprint 100 Block X — NOP Compaction (T300-T305)
+    if compiler_main_test_compact_basic() {
+        println("  T300 OK: Sprint 100 Block X: [imm,nop,binop] → [imm,binop], count=2")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T300 Sprint 100 Block X: basic compaction")
+    }
+
+    if compiler_main_test_compact_all_nops() {
+        println("  T301 OK: Sprint 100 Block X: all NOPs → count=0")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T301 Sprint 100 Block X: all NOPs")
+    }
+
+    if compiler_main_test_compact_no_nops() {
+        println("  T302 OK: Sprint 100 Block X: no NOPs → count unchanged")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T302 Sprint 100 Block X: no NOPs")
+    }
+
+    if compiler_main_test_compact_interspersed() {
+        println("  T303 OK: Sprint 100 Block X: interspersed NOPs preserve order")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T303 Sprint 100 Block X: interspersed")
+    }
+
+    if compiler_main_test_compact_labels() {
+        println("  T304 OK: Sprint 100 Block X: labels survive compaction")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T304 Sprint 100 Block X: labels")
+    }
+
+    if compiler_main_test_compact_pipeline() {
+        println("  T305 OK: Sprint 100 Block X: full pipeline compacts NOPs")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T305 Sprint 100 Block X: pipeline integration")
     }
 
     println("")
