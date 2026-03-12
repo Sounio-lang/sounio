@@ -1,9 +1,13 @@
 // stdlib/sync/mutex — Mutex via pthread FFI
 //
 // Provides mutual exclusion using POSIX threads.
-// Functions: mutex_new, mutex_lock, mutex_try_lock, mutex_unlock
+// pthread_mutex_t is heap-allocated (stable address required by pthreads).
+// Functions: mutex_new, mutex_lock, mutex_try_lock, mutex_unlock,
+//            mutex_destroy, mutex_is_locked
 
 extern "C" {
+    fn malloc(size: usize) -> *mut u8;
+    fn free(ptr: *mut u8);
     fn pthread_mutex_init(mutex: *mut u8, attr: *mut u8) -> i32;
     fn pthread_mutex_lock(mutex: *mut u8) -> i32;
     fn pthread_mutex_trylock(mutex: *mut u8) -> i32;
@@ -11,35 +15,46 @@ extern "C" {
     fn pthread_mutex_destroy(mutex: *mut u8) -> i32;
 }
 
-// pthread_mutex_t is ~48 bytes on Linux. We store it as 6 i64 words.
+// pthread_mutex_t is ~48 bytes on Linux x86-64. We allocate 64 bytes
+// to give headroom across platforms and alignment variants.
 struct Mutex {
-    d0: i64,
-    d1: i64,
-    d2: i64,
-    d3: i64,
-    d4: i64,
-    d5: i64,
+    ptr: *mut u8,
 }
 
+// Allocate and initialize a new mutex with default attributes.
 fn mutex_new() -> Mutex {
-    Mutex { d0: 0, d1: 0, d2: 0, d3: 0, d4: 0, d5: 0 }
+    let ptr = malloc(64 as usize)
+    let null_attr = (0 as usize) as *mut u8
+    let _rc = pthread_mutex_init(ptr, null_attr)
+    Mutex { ptr: ptr }
 }
 
+// Block until the mutex is acquired.
 fn mutex_lock(m: &! Mutex) {
-    // Single-threaded no-op stub for now
-    m.d0 = 1
+    let _rc = pthread_mutex_lock(m.ptr)
 }
 
+// Try to acquire the mutex without blocking.
+// Returns true if the lock was acquired, false if already held.
 fn mutex_try_lock(m: &! Mutex) -> bool {
-    if m.d0 != 0 { return false }
-    m.d0 = 1
-    true
+    let rc = pthread_mutex_trylock(m.ptr)
+    rc == 0
 }
 
+// Release the mutex. Caller must hold the lock.
 fn mutex_unlock(m: &! Mutex) {
-    m.d0 = 0
+    let _rc = pthread_mutex_unlock(m.ptr)
 }
 
-fn mutex_is_locked(m: &Mutex) -> bool {
-    m.d0 != 0
+// Destroy the mutex and free its heap storage.
+// After this call the Mutex must not be used.
+fn mutex_destroy(m: &! Mutex) {
+    let _rc = pthread_mutex_destroy(m.ptr)
+    free(m.ptr)
+    m.ptr = (0 as usize) as *mut u8
+}
+
+// Returns true if the mutex handle is valid (initialized and not yet destroyed).
+fn mutex_is_valid(m: &Mutex) -> bool {
+    (m.ptr as usize) != 0
 }
