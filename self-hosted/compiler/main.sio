@@ -44,7 +44,7 @@ use module_loader::{compile_multimodule_native, compile_multimodule_native_advan
 use frontend_callsite_probe::{run_frontend_callsite_probe}
 use parser::parser::{parser_last_error_count}
 use ir::opt_strategy::{ir_opt_apply_strategy, ir_opt_find_return_vreg, ir_opt_max_label, ir_opt_max_vreg}
-use ir::lower::{ir_patch_validated_calls, lower_program_to_ir, lower_program_to_ir_with_epistemic, lower_program_to_ir_probe_summary_ref, lower_program_to_ir_summary_box_with_epistemic_ref, lower_program_function_body_from_summary_with_epistemic_ref, lower_program_to_ir_summary_flat_with_epistemic_ref, lower_program_function_body_from_summary_flat_with_epistemic_ref}
+use ir::lower::{ir_patch_validated_calls, lower_program_to_ir, lower_program_to_ir_with_epistemic, lower_program_to_ir_probe_summary_ref, lower_program_to_ir_summary_box_probe_with_epistemic_ref, lower_program_function_body_from_summary_with_epistemic_ref, lower_program_to_ir_summary_flat_with_epistemic_ref, lower_program_function_body_from_summary_flat_with_epistemic_ref}
 use ir::const_prop::{cp_check_load_imm, cp_empty_instrs, cp_make_test_func, cp_optimize_function}
 use ir::dce::{dce_check_nop, dce_empty_instrs, dce_make_test_func, dce_optimize_function}
 use ir::profile::*
@@ -6409,7 +6409,7 @@ fn run_probe_native_streaming(args: ArgList, flag_index: i64) with IO, Mut, Pani
     print("\n")
 
     print("probe_native_streaming: summary_begin\n")
-    let summary_result = lower_program_to_ir_summary_box_with_epistemic_ref(&program, epistemic)
+    let summary_result = lower_program_to_ir_summary_box_probe_with_epistemic_ref(&program, epistemic)
     if summary_result.had_error {
         panic("probe_native_streaming summary lowering failed")
     }
@@ -7232,9 +7232,106 @@ fn compiler_main_test_neg_commut_mul_minus_one() -> bool with Mut, Div, Panic {
     result.instrs[1].op == IrOpcode::IrBinOp && result.instrs[1].bin_op == BinaryOp::OpSub
 }
 
+// ============================================================================
+// Sprint 87 Block N — IrLoadImm deduplication tests (T236-T241)
+// ============================================================================
+
+// T236: two IrLoadImm with same value → second becomes IrCopy of first.
+fn compiler_main_test_dedup_same_value() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(0, 7)
+    instrs[1] = ir_load_imm(1, 7)
+    let func   = cp_make_test_func(instrs, 2)
+    let result = opt_cleanup_function(func)
+    result.instrs[1].op == IrOpcode::IrCopy && result.instrs[1].src1 == 0
+}
+
+// T237: two IrLoadImm with different values → no dedup.
+fn compiler_main_test_dedup_diff_values() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(0, 7)
+    instrs[1] = ir_load_imm(1, 8)
+    let func   = cp_make_test_func(instrs, 2)
+    let result = opt_cleanup_function(func)
+    result.instrs[1].op == IrOpcode::IrLoadImm && result.instrs[1].imm_i64 == 8
+}
+
+// T238: dedup + downstream const-fold: r0=7, r1=7 (dedup→IrCopy), r2=r0+r1 → IrLoadImm(14).
+fn compiler_main_test_dedup_then_fold() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(0, 7)
+    instrs[1] = ir_load_imm(1, 7)
+    instrs[2] = ir_binop(2, 0, BinaryOp::OpAdd, 1)
+    let func   = cp_make_test_func(instrs, 3)
+    let result = opt_cleanup_function(func)
+    result.instrs[2].op == IrOpcode::IrLoadImm && result.instrs[2].imm_i64 == 14
+}
+
+// T239: three occurrences of same constant → second and third both IrCopy of first.
+fn compiler_main_test_dedup_triple() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(0, 42)
+    instrs[1] = ir_load_imm(1, 42)
+    instrs[2] = ir_load_imm(2, 42)
+    let func   = cp_make_test_func(instrs, 3)
+    let result = opt_cleanup_function(func)
+    result.instrs[1].op == IrOpcode::IrCopy && result.instrs[2].op == IrOpcode::IrCopy
+}
+
+// T240: dedup preserves first occurrence; r0 stays IrLoadImm.
+fn compiler_main_test_dedup_first_kept() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(0, 99)
+    instrs[1] = ir_load_imm(1, 99)
+    let func   = cp_make_test_func(instrs, 2)
+    let result = opt_cleanup_function(func)
+    result.instrs[0].op == IrOpcode::IrLoadImm && result.instrs[0].imm_i64 == 99
+}
+
+// T241: different constants interleaved → no cross-dedup.
+fn compiler_main_test_dedup_no_cross() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(0, 3)
+    instrs[1] = ir_load_imm(1, 5)
+    instrs[2] = ir_load_imm(2, 3)
+    let func   = cp_make_test_func(instrs, 3)
+    let result = opt_cleanup_function(func)
+    // r1 stays IrLoadImm(5); r2 becomes IrCopy(0) because 3==3
+    result.instrs[1].op == IrOpcode::IrLoadImm && result.instrs[2].op == IrOpcode::IrCopy
+}
+
+// ============================================================================
+// Sprint 87: float IR opcode + native-v2 whitelist tests (T242–T245)
+// ============================================================================
+
+// T242: ir_load_float sets op=IrLoadFloat and stores bits correctly.
+fn compiler_main_test_ir_load_float_opcode() -> bool with Mut, Div, Panic {
+    let instr = ir_load_float(3, 1.5)
+    instr.op == IrOpcode::IrLoadFloat && instr.dst == 3
+}
+
+// T243: ir_int_to_float sets op=IrIntToFloat with correct dst/src1.
+fn compiler_main_test_ir_int_to_float_opcode() -> bool with Mut, Div, Panic {
+    let instr = ir_int_to_float(5, 2)
+    instr.op == IrOpcode::IrIntToFloat && instr.dst == 5 && instr.src1 == 2
+}
+
+// T244: ir_float_to_int sets op=IrFloatToInt with correct dst/src1.
+fn compiler_main_test_ir_float_to_int_opcode() -> bool with Mut, Div, Panic {
+    let instr = ir_float_to_int(7, 4)
+    instr.op == IrOpcode::IrFloatToInt && instr.dst == 7 && instr.src1 == 4
+}
+
+// T245: native-v2 whitelist accepts all three new float opcodes.
+fn compiler_main_test_native_v2_float_whitelist() -> bool with Mut, Div, Panic {
+    native_v2_supported_ir_opcode(IrOpcode::IrLoadFloat) &&
+    native_v2_supported_ir_opcode(IrOpcode::IrIntToFloat) &&
+    native_v2_supported_ir_opcode(IrOpcode::IrFloatToInt)
+}
+
 fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
     var passed: i64 = 0
-    let total: i64 = 235
+    let total: i64 = 245
 
     println("=== compiler/main.sio self-tests ===")
 
@@ -8882,6 +8979,76 @@ fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
         passed = passed + 1
     } else {
         println("  FAIL: T235 Sprint 86 Block M: commutative mul by -1")
+    }
+
+    if compiler_main_test_dedup_same_value() {
+        println("  T236 OK: Sprint 87 Block N: dedup same IrLoadImm value → IrCopy")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T236 Sprint 87 Block N: dedup same value")
+    }
+
+    if compiler_main_test_dedup_diff_values() {
+        println("  T237 OK: Sprint 87 Block N: different values — no dedup")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T237 Sprint 87 Block N: no dedup on diff values")
+    }
+
+    if compiler_main_test_dedup_then_fold() {
+        println("  T238 OK: Sprint 87 Block N: dedup + const-fold chain")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T238 Sprint 87 Block N: dedup + fold")
+    }
+
+    if compiler_main_test_dedup_triple() {
+        println("  T239 OK: Sprint 87 Block N: triple dedup → second+third become IrCopy")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T239 Sprint 87 Block N: triple dedup")
+    }
+
+    if compiler_main_test_dedup_first_kept() {
+        println("  T240 OK: Sprint 87 Block N: first occurrence stays IrLoadImm")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T240 Sprint 87 Block N: first kept")
+    }
+
+    if compiler_main_test_dedup_no_cross() {
+        println("  T241 OK: Sprint 87 Block N: no cross-dedup on different constants")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T241 Sprint 87 Block N: no cross-dedup")
+    }
+
+    if compiler_main_test_ir_load_float_opcode() {
+        println("  T242 OK: Sprint 87: ir_load_float sets IrLoadFloat opcode")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T242 Sprint 87: ir_load_float opcode")
+    }
+
+    if compiler_main_test_ir_int_to_float_opcode() {
+        println("  T243 OK: Sprint 87: ir_int_to_float sets IrIntToFloat opcode with dst/src1")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T243 Sprint 87: ir_int_to_float opcode")
+    }
+
+    if compiler_main_test_ir_float_to_int_opcode() {
+        println("  T244 OK: Sprint 87: ir_float_to_int sets IrFloatToInt opcode with dst/src1")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T244 Sprint 87: ir_float_to_int opcode")
+    }
+
+    if compiler_main_test_native_v2_float_whitelist() {
+        println("  T245 OK: Sprint 87: native-v2 whitelist accepts IrLoadFloat/IrIntToFloat/IrFloatToInt")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T245 Sprint 87: native-v2 float whitelist")
     }
 
     println("")
