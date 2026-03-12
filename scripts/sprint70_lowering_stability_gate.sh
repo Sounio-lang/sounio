@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # sprint70_lowering_stability_gate.sh — Staged IR lowering foundation
-set -eo pipefail
+set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
@@ -153,9 +153,9 @@ echo "--- Group 6: Sprint 44 compatibility ---"
 check_probe_line "compat:probe_load_ir_standard" \
     "probe_load_ir: fn=add_floats strategy=standard" \
     --probe-load-ir tests/frontend/compile_strategy_ir_standard.sio
-check_grep "compat:chain_fixture_exists" \
-    "fn " \
-    "tests/frontend/chain_validated_param_contest.sio"
+check_probe_line "compat:probe_load_ir_trace_chain" \
+    "probe_load_ir_trace: stage=done modules=1 lowered=1 patched_calls=0 fallback_insertions=0" \
+    --probe-load-ir-trace tests/frontend/chain_validated_param_contest.sio
 
 echo ""
 echo "=== Results: $PASS passed, $FAIL failed, $NOT_RUN not_run (total $TOTAL) ==="

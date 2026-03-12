@@ -19,11 +19,14 @@ PRINT_PATH=0
 if [ "$SOUC_VARIANT" = "jit" ]; then
   SOUC_DEFAULT_ASSET_NAME="souc-${SOUC_PLATFORM}-jit"
   SOUC_DEFAULT_PROVENANCE_OUT="$ROOT_DIR/artifacts/omega/souc_release_provenance.jit.v1.json"
+elif [ "$SOUC_VARIANT" = "llvm" ]; then
+  SOUC_DEFAULT_ASSET_NAME="souc-${SOUC_PLATFORM}-llvm"
+  SOUC_DEFAULT_PROVENANCE_OUT="$ROOT_DIR/artifacts/omega/souc_release_provenance_llvm.v1.json"
 elif [ "$SOUC_VARIANT" = "std" ]; then
   SOUC_DEFAULT_ASSET_NAME="souc-${SOUC_PLATFORM}"
   SOUC_DEFAULT_PROVENANCE_OUT="$ROOT_DIR/artifacts/omega/souc_release_provenance.v1.json"
 else
-  echo "error: unsupported SOUNIO_SOUC_VARIANT '$SOUC_VARIANT' (expected std|jit)" >&2
+  echo "error: unsupported SOUNIO_SOUC_VARIANT '$SOUC_VARIANT' (expected std|jit|llvm)" >&2
   exit 2
 fi
 

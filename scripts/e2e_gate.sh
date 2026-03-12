@@ -3,6 +3,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$ROOT_DIR/scripts/lib/resolve_souc.sh"
+source "$ROOT_DIR/scripts/lib/stage_native_runtime_bundle.sh"
 
 # Ensure stdlib is discoverable for tests that import from it.
 export SOUNIO_STDLIB_PATH="${SOUNIO_STDLIB_PATH:-$ROOT_DIR/stdlib}"
@@ -17,7 +18,7 @@ else
   TARGET_DIR="$ROOT_DIR/target"
 fi
 
-SOUC_BIN="${SOUC_BIN:-$TARGET_DIR/debug/souc}"
+SOUC_BIN="${SOUC_BIN:-$ROOT_DIR/artifacts/omega/souc-bin/souc-linux-x86_64-jit}"
 EXAMPLE="$ROOT_DIR/examples/simple_test.sio"
 GPU_FIXTURE="$ROOT_DIR/scripts/fixtures/gpu_minimal.sio"
 
@@ -26,8 +27,16 @@ trap 'rm -rf "$OUT_DIR"' EXIT
 
 echo "[e2e] native build + run"
 sounio_require_souc
+sounio_stage_native_runtime_bundle "$SOUC_BIN"
 "$SOUC_BIN" build "$EXAMPLE" --backend native -o "$OUT_DIR/simple_test_native"
 "$OUT_DIR/simple_test_native"
+
+if [[ "${SOUNIO_SKIP_NATIVE_V2:-${SOUNIO_SKIP_NATIVE_V2_SHADOW:-0}}" != "1" ]]; then
+  echo "[e2e] native v2 machine-ir gate + smoke"
+  bash "$ROOT_DIR/scripts/omega/omega_native_v2_shadow_gate.sh"
+else
+  echo "[e2e] native v2 contract skipped (SOUNIO_SKIP_NATIVE_V2=1)"
+fi
 
 if [[ "${SOUNIO_SKIP_LLVM:-}" != "1" ]]; then
   echo "[e2e] llvm build + run"
@@ -42,24 +51,28 @@ fi
 
 if [[ "${SOUNIO_SKIP_GPU:-}" != "1" ]]; then
   echo "[e2e] gpu backend compile smoke"
+  GPU_BACKEND_AVAILABLE=0
   if "$SOUC_BIN" build "$GPU_FIXTURE" --backend gpu -o "$OUT_DIR/gpu_minimal.ptx" 2>/dev/null; then
     test -s "$OUT_DIR/gpu_minimal.ptx"
     grep -q "\\.entry" "$OUT_DIR/gpu_minimal.ptx"
+    GPU_BACKEND_AVAILABLE=1
   else
     echo "[e2e] gpu skipped (binary not built with gpu feature)"
   fi
 
-  echo "[e2e] gpu codegen parity gate"
-  bash "$ROOT_DIR/scripts/omega/omega_gpu_codegen_parity_gate.sh"
+  if [[ "$GPU_BACKEND_AVAILABLE" = "1" ]]; then
+    echo "[e2e] gpu codegen parity gate"
+    bash "$ROOT_DIR/scripts/omega/omega_gpu_codegen_parity_gate.sh"
 
-  echo "[e2e] gpu binary attestation gate"
-  bash "$ROOT_DIR/scripts/omega/omega_gpu_binary_attest_gate.sh"
+    echo "[e2e] gpu binary attestation gate"
+    bash "$ROOT_DIR/scripts/omega/omega_gpu_binary_attest_gate.sh"
 
-  echo "[e2e] gpu runtime attestation gate"
-  bash "$ROOT_DIR/scripts/omega/omega_gpu_runtime_attest_gate.sh"
+    echo "[e2e] gpu runtime attestation gate"
+    bash "$ROOT_DIR/scripts/omega/omega_gpu_runtime_attest_gate.sh"
 
-  echo "[e2e] gpu public contract gate"
-  bash "$ROOT_DIR/scripts/omega/omega_gpu_public_contract_gate.sh"
+    echo "[e2e] gpu public contract gate"
+    bash "$ROOT_DIR/scripts/omega/omega_gpu_public_contract_gate.sh"
+  fi
 else
   echo "[e2e] gpu skipped (SOUNIO_SKIP_GPU=1)"
 fi
