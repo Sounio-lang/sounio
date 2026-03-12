@@ -1117,12 +1117,61 @@ fn ocp_dedup_imm(func: IrFunction) -> IrFunction with Mut, Panic {
 }
 
 // Run dedup_imm → const_fold → egraph (full, deferred) → egraph_mini → CSE → DCE on a single IrFunction.
+// ============================================================================
+// Pass: Copy propagation (Block Q, Sprint 93)
+// ============================================================================
+
+// When r1 = IrCopy(r0), rewrite all subsequent uses of r1 → r0.
+// Chains collapse: r1=IrCopy(r0), r2=IrCopy(r1) → r2 references r0.
+// After rewriting, the original IrCopy becomes dead and is removed by DCE.
+// SOTA: Cytron et al. TOPLAS 1991 §5; Cooper & Torczon §8.5.
+fn ocp_copy_prop(func: IrFunction) -> IrFunction with Mut {
+    var result = func
+    // copy_target[r] = the ultimate source register for r, or -1 if not a copy.
+    var copy_target: [i64; 256] = [-1; 256]
+    var i: i64 = 0
+    while i < result.instr_count {
+        let instr = result.instrs[i as usize]
+
+        // Rewrite src1 through copy chain.
+        if instr.src1 >= 0 && instr.src1 < 256 && copy_target[instr.src1 as usize] >= 0 {
+            result.instrs[i as usize].src1 = copy_target[instr.src1 as usize]
+        }
+        // Rewrite src2 through copy chain.
+        if instr.src2 >= 0 && instr.src2 < 256 && copy_target[instr.src2 as usize] >= 0 {
+            result.instrs[i as usize].src2 = copy_target[instr.src2 as usize]
+        }
+
+        // Re-read after rewrite.
+        let cur = result.instrs[i as usize]
+
+        // Record new copies (chase chains).
+        if cur.op == IrOpcode::IrCopy && cur.dst >= 0 && cur.dst < 256 {
+            let src = cur.src1
+            if src >= 0 && src < 256 && copy_target[src as usize] >= 0 {
+                // Chain collapse: r2=IrCopy(r1), r1=IrCopy(r0) → r2 maps to r0.
+                copy_target[cur.dst as usize] = copy_target[src as usize]
+                result.instrs[i as usize].src1 = copy_target[src as usize]
+            } else {
+                copy_target[cur.dst as usize] = src
+            }
+        } else if cur.dst >= 0 && cur.dst < 256 {
+            // Non-copy write to dst: invalidate copy mapping.
+            copy_target[cur.dst as usize] = -1
+        }
+
+        i = i + 1
+    }
+    result
+}
+
 fn opt_cleanup_function(func: IrFunction) -> IrFunction with Mut, Div, Panic {
     var current = ocp_dedup_imm(func)
     current = ocp_const_fold(current)
     current = ocp_egraph_pass(current)        // full e-graph: deferred (always skips guard)
     current = ocp_egraph_mini_pass(current)   // mini e-graph: activates for instr_count <= 4
     current = ocp_cse(current)                // CSE: always active
+    current = ocp_copy_prop(current)          // Sprint 93 Block Q: copy chain collapse
     var iter: i64 = 0
     while iter < 8 {
         let swept = ocp_dce_once(current)

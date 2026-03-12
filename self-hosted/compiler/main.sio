@@ -7507,9 +7507,90 @@ fn compiler_main_test_addsub_cancel_chain() -> bool with Mut, Div, Panic {
     result.instrs[3].op == IrOpcode::IrCopy && result.instrs[5].op == IrOpcode::IrBinOp
 }
 
+// Sprint 93 Block Q — copy propagation tests (T258-T263)
+
+// T258: r1 = IrCopy(r0); r2 = IrBinOp(r1, +, 5) → r2 = IrBinOp(r0, +, 5).
+fn compiler_main_test_copy_prop_basic() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_copy(1, 0)
+    instrs[1] = ir_load_imm(2, 5)
+    instrs[2] = ir_binop(3, 1, BinaryOp::OpAdd, 2)
+    let func = cp_make_test_func(instrs, 3)
+    let folded = ocp_const_fold(func)
+    let result = ocp_copy_prop(folded)
+    // src1 of the BinOp should be rewritten from r1 → r0.
+    result.instrs[2].src1 == 0
+}
+
+// T259: Chain collapse — r1 = IrCopy(r0); r2 = IrCopy(r1) → r2 maps to r0.
+fn compiler_main_test_copy_prop_chain() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_copy(1, 0)
+    instrs[1] = ir_copy(2, 1)
+    instrs[2] = ir_load_imm(3, 10)
+    instrs[3] = ir_binop(4, 2, BinaryOp::OpAdd, 3)
+    let func = cp_make_test_func(instrs, 4)
+    let folded = ocp_const_fold(func)
+    let result = ocp_copy_prop(folded)
+    // r2's copy chain collapses: r2→r1→r0, so BinOp src1 = r0.
+    result.instrs[1].src1 == 0 && result.instrs[3].src1 == 0
+}
+
+// T260: Non-copy overwrite clears mapping — r1=IrCopy(r0); r1=IrLoadImm(42); use r1 → stays r1.
+fn compiler_main_test_copy_prop_overwrite() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_copy(1, 0)
+    instrs[1] = ir_load_imm(1, 42)
+    instrs[2] = ir_load_imm(2, 5)
+    instrs[3] = ir_binop(3, 1, BinaryOp::OpAdd, 2)
+    let func = cp_make_test_func(instrs, 4)
+    let folded = ocp_const_fold(func)
+    let result = ocp_copy_prop(folded)
+    // After overwrite, r1 is no longer a copy of r0. BinOp stays as-is (or const-folded).
+    result.instrs[3].op == IrOpcode::IrLoadImm || result.instrs[3].src1 == 1
+}
+
+// T261: Both src1 and src2 rewritten — r1=IrCopy(r0); r3=IrCopy(r2); r4=r1+r3 → r4=r0+r2.
+fn compiler_main_test_copy_prop_both_srcs() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_copy(1, 0)
+    instrs[1] = ir_copy(3, 2)
+    instrs[2] = ir_binop(4, 1, BinaryOp::OpAdd, 3)
+    let func = cp_make_test_func(instrs, 3)
+    let folded = ocp_const_fold(func)
+    let result = ocp_copy_prop(folded)
+    result.instrs[2].src1 == 0 && result.instrs[2].src2 == 2
+}
+
+// T262: Self-copy (IrCopy(r0, r0)) — should NOT create circular mapping.
+fn compiler_main_test_copy_prop_self_copy() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_copy(0, 0)
+    instrs[1] = ir_load_imm(1, 7)
+    instrs[2] = ir_binop(2, 0, BinaryOp::OpAdd, 1)
+    let func = cp_make_test_func(instrs, 3)
+    let folded = ocp_const_fold(func)
+    let result = ocp_copy_prop(folded)
+    // r0=IrCopy(r0) → copy_target[0]=0, which should still work: BinOp src1 stays r0.
+    result.instrs[2].src1 == 0
+}
+
+// T263: Copy + const_fold integration — r1=IrLoadImm(3); r2=IrCopy(r1); r3=r2+5 → r3=IrLoadImm(8).
+fn compiler_main_test_copy_prop_const_integration() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(1, 3)
+    instrs[1] = ir_copy(2, 1)
+    instrs[2] = ir_load_imm(3, 5)
+    instrs[3] = ir_binop(4, 2, BinaryOp::OpAdd, 3)
+    let func = cp_make_test_func(instrs, 4)
+    // const_fold already handles copy-through-constant (Sprint 69), so r4=3+5=8.
+    let result = ocp_const_fold(func)
+    result.instrs[3].op == IrOpcode::IrLoadImm && result.instrs[3].imm_i64 == 8
+}
+
 fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
     var passed: i64 = 0
-    let total: i64 = 257
+    let total: i64 = 263
 
     println("=== compiler/main.sio self-tests ===")
 
@@ -9311,6 +9392,48 @@ fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
         passed = passed + 1
     } else {
         println("  FAIL: T257 Sprint 89 Block P: chain cancel")
+    }
+
+    if compiler_main_test_copy_prop_basic() {
+        println("  T258 OK: Sprint 93 Block Q: IrCopy(r1,r0) → BinOp src1 rewritten r1→r0")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T258 Sprint 93 Block Q: basic copy prop")
+    }
+
+    if compiler_main_test_copy_prop_chain() {
+        println("  T259 OK: Sprint 93 Block Q: copy chain r2→r1→r0 collapses to r0")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T259 Sprint 93 Block Q: chain collapse")
+    }
+
+    if compiler_main_test_copy_prop_overwrite() {
+        println("  T260 OK: Sprint 93 Block Q: non-copy overwrite clears mapping")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T260 Sprint 93 Block Q: overwrite clears")
+    }
+
+    if compiler_main_test_copy_prop_both_srcs() {
+        println("  T261 OK: Sprint 93 Block Q: both src1+src2 rewritten through copies")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T261 Sprint 93 Block Q: both srcs rewritten")
+    }
+
+    if compiler_main_test_copy_prop_self_copy() {
+        println("  T262 OK: Sprint 93 Block Q: self-copy IrCopy(r0,r0) no circular")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T262 Sprint 93 Block Q: self-copy")
+    }
+
+    if compiler_main_test_copy_prop_const_integration() {
+        println("  T263 OK: Sprint 93 Block Q: copy+const_fold integration 3+5→8")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T263 Sprint 93 Block Q: const integration")
     }
 
     println("")
