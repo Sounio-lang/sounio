@@ -1484,52 +1484,38 @@ fn compile_singlemodule_native_streaming_result_from_program(
         }
     }
 
-    // NOTE: skip_checker=true no longer takes a separate compile_native path.
-    // compile_native → compile_module_v2 → native_v2_build_machine_module returns
-    // a ~42 MB MachineModule by value, which is too slow under JIT.
-    // Instead, always use the streaming path that processes one function at a time.
-
+    // Full body lowering (boxed, ~34 MB heap) includes both user functions AND builtins
+    // (print, print_int, etc.) with consistent fn_ids throughout. This is required because
+    // per-function streaming body lowering adds builtins with fn_ids > user_fn_count that
+    // don't match the summary module's fn_count, breaking CALL relocations.
     if native_streaming_diag_enabled() {
-        print("native_streaming: summary_begin\n")
+        print("native_streaming: full_lower_begin\n")
     }
-    let summary_result = lower_program_to_ir_probe_summary_box_ref(prog)
-    if summary_result.had_error {
+    var patch_stats = ir_empty_validated_patch_stats()
+    let full_result = lower_program_to_ir_ordered_with_epistemic_boxed_trace_ref(prog, epistemic, &! patch_stats)
+    if full_result.had_error {
         return native_compile_result_error(ERR_BACKEND_NOT_IMPLEMENTED(), "ir_lowering_failed")
     }
-    let summary_module = &(*summary_result.module)
-    if (*summary_module).fn_count <= 0 {
-        return native_compile_result_error(ERR_BACKEND_NOT_IMPLEMENTED(), "ir_lowering_failed")
+    let full_module = &(*full_result.module)
+    if (*full_module).fn_count <= 0 {
+        return native_compile_result_error(ERR_BACKEND_NOT_IMPLEMENTED(), "ir_lowering_empty")
     }
     if native_streaming_diag_enabled() {
-        print("native_streaming: summary_ok fn_count=")
-        print_int((*summary_module).fn_count)
+        print("native_streaming: full_lower_ok fn_count=")
+        print_int((*full_module).fn_count)
         print("\n")
     }
 
-    var nc = compile_module_streaming_begin(compiler_new(), summary_module)
+    var nc = compile_module_streaming_begin(compiler_new(), full_module)
     var fi: i64 = 0
-    while fi < (*summary_module).fn_count {
-        let fn_name = (*summary_module).functions[fi as usize].name
+    while fi < (*full_module).fn_count {
+        let fn_body = (*full_module).functions[fi as usize]
         if native_streaming_diag_enabled() {
-            print("native_streaming: body_begin fn=")
-            print(str_from_bytes(fn_name.buf, fn_name.len))
+            print("native_streaming: compile_fn fn=")
+            print(str_from_bytes(fn_body.name.buf, fn_body.name.len))
             print("\n")
         }
-        let body_result = lower_program_function_body_from_program_with_epistemic_ref(prog, epistemic, fn_name)
-        if body_result.had_error {
-            return native_compile_result_error(ERR_BACKEND_NOT_IMPLEMENTED(), "streaming_body_lower_failed")
-        }
-        if !ir_name_eq(body_result.func.name, fn_name) {
-            return native_compile_result_error(ERR_BACKEND_NOT_IMPLEMENTED(), "streaming_body_not_found")
-        }
-        if native_streaming_diag_enabled() {
-            print("native_streaming: body_ok fn=")
-            print(str_from_bytes(fn_name.buf, fn_name.len))
-            print(" instrs=")
-            print_int(body_result.func.instr_count)
-            print("\n")
-        }
-        let lowered = native_v2_lower_function_to_machine(body_result.func)
+        let lowered = native_v2_lower_function_to_machine(fn_body)
         let legal = native_v2_legalize_function(lowered)
         if !legal.supported {
             return native_compile_result_error(
@@ -1537,11 +1523,11 @@ fn compile_singlemodule_native_streaming_result_from_program(
                 "streaming_native_v2_unsupported:" + legal.unsupported_detail
             )
         }
-        nc = compile_ir_function_v2(nc, body_result.func, legal, fi)
+        nc = compile_ir_function_v2(nc, fn_body, legal, fi)
         fi = fi + 1
     }
 
-    nc = compile_module_streaming_finish(nc, summary_module)
+    nc = compile_module_streaming_finish(nc, full_module)
     let elf = finalize_compiled_elf(nc, 4194304)
     native_compile_result_ok(elf.bytes, elf.len, FORMAT_ELF64())
 }
@@ -2950,8 +2936,6 @@ fn compile_multimodule_native_advanced(
         target_spec.os_id == OS_LINUX() &&
         starts_with(main_path, "examples/render/")
     if render_fixture_fast {
-        // Skip ordered lowering (takes >240s under JIT, causes OOM).
-        // Go directly to the streaming native backend.
         print("native_advanced: streaming_direct\n")
         let render_result = compile_singlemodule_native_streaming_result_from_program(
             main_path,
