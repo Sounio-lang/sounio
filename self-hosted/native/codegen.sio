@@ -727,6 +727,9 @@ fn native_target_parse(raw: string) -> NativeTargetParse {
     if str_eq(raw, "aarch64-linux") {
         return NativeTargetParse { ok: true, arch_id: ARCH_AARCH64(), os_id: OS_LINUX(), canonical: "aarch64-linux" }
     }
+    if str_eq(raw, "x86_64-macos") {
+        return NativeTargetParse { ok: true, arch_id: ARCH_X86_64(), os_id: OS_MACOS(), canonical: "x86_64-macos" }
+    }
     if str_eq(raw, "aarch64-macos") {
         return NativeTargetParse { ok: true, arch_id: ARCH_AARCH64(), os_id: OS_MACOS(), canonical: "aarch64-macos" }
     }
@@ -791,6 +794,9 @@ fn native_host_probe_target() -> string with IO, Mut, Panic, Div {
     }
     if (starts_with(host_type, "arm64") || starts_with(host_type, "aarch64")) && is_linux {
         return "aarch64-linux"
+    }
+    if (starts_with(host_type, "x86_64") || starts_with(host_type, "amd64")) && is_macos {
+        return "x86_64-macos"
     }
     if (starts_with(host_type, "arm64") || starts_with(host_type, "aarch64")) && is_macos {
         return "aarch64-macos"
@@ -3295,6 +3301,93 @@ fn emit_entry_trampoline(nc: NativeCompiler, main_fn_index: i64) -> NativeCompil
     c
 }
 
+// macOS x86-64 syscall numbers (BSD layer = 0x2000000 + unix_num)
+fn MACOS_SYS_EXIT() -> i64 { 33554433 }       // 0x2000001
+fn MACOS_SYS_WRITE() -> i64 { 33554436 }      // 0x2000004
+fn MACOS_SYS_MMAP() -> i64 { 33554629 }       // 0x20000C5 (197)
+fn MACOS_SYS_OPEN() -> i64 { 33554437 }       // 0x2000005
+
+// macOS x86-64 entry trampoline — same System V ABI as Linux, different syscall numbers.
+fn emit_entry_trampoline_macos_x86(nc: NativeCompiler, main_fn_index: i64) -> NativeCompiler with Mut, Panic, Div {
+    var c = nc
+    c.entry_offset = c.code.len
+    c.code = emit_mov_r14_rsp(c.code)
+    c.code = emit_mov_rax_imm(c.code, MACOS_SYS_MMAP())
+    c.code = emit_mov_rdi_imm(c.code, 0)
+    c.code = emit_mov_reg_imm(c.code, 6, 536870912)
+    c.code = emit_mov_reg_imm(c.code, 2, 3)
+    c.code = emit_mov_r10_imm32(c.code, 4098)
+    c.code = emit_mov_r8_imm32(c.code, -1)
+    c.code = emit_mov_r9_imm32(c.code, 0)
+    c.code = emit_syscall(c.code)
+    let ctx_slot_disp = c.code.len + 3
+    c.code = emit_mov_rip_disp32_rax(c.code, 0)
+    c.relocs = add_data_section_reloc(c.relocs, ctx_slot_disp, c.runtime_context_slot_offset)
+    c.code = emit_mov_reg_imm(c.code, 1, runtime_context_size())
+    c.code = emit_add_reg_reg(c.code, 0, 1)
+    c = emit_store_rax_runtime_context_field(c, runtime_context_field_handle_table_base())
+    c = emit_store_runtime_context_imm(c, runtime_context_field_handle_count(), 0)
+    c = emit_store_runtime_context_imm(c, runtime_context_field_handle_capacity(), native_v2_handle_table_capacity_default())
+    c = emit_store_runtime_context_imm(c, runtime_context_field_pin_registry(), 0)
+    c = emit_store_runtime_context_imm(c, runtime_context_field_pin_count(), 0)
+    c = emit_store_runtime_context_imm(c, runtime_context_field_collector_epoch(), 0)
+    c = emit_store_runtime_context_imm(c, runtime_context_field_last_gc_stats(), 0)
+    c = emit_load_runtime_context_field_rax(c, runtime_context_field_handle_table_base())
+    c.code = emit_mov_reg_imm(c.code, 1, native_v2_handle_table_bytes())
+    c.code = emit_add_reg_reg(c.code, 0, 1)
+    c = emit_store_rax_runtime_context_field(c, runtime_context_field_heap_base())
+    c = emit_store_rax_runtime_context_field(c, runtime_context_field_heap_cursor())
+    c = emit_load_runtime_context_field_rax(c, runtime_context_field_heap_base())
+    c.code = emit_mov_reg_imm(c.code, 1, 536870912 - runtime_context_size() - native_v2_handle_table_bytes())
+    c.code = emit_add_reg_reg(c.code, 0, 1)
+    c = emit_store_rax_runtime_context_field(c, runtime_context_field_heap_limit())
+    c.code = emit_mov_rax_mem_r14(c.code)
+    c = emit_store_rax_runtime_context_field(c, runtime_context_field_argc())
+    c.code = emit_lea_rax_r14_disp8(c.code, 8)
+    c = emit_store_rax_runtime_context_field(c, runtime_context_field_argv_ptr())
+    c = emit_store_runtime_context_imm(c, runtime_context_field_stdout_fd(), 1)
+    c = emit_store_runtime_context_imm(c, runtime_context_field_stderr_fd(), 2)
+    c.code = emit_avx10_detect(c.code)
+    c.code = emit_test_rax_rax(c.code)
+    let avx_jnz = c.code.len
+    c.code = emit_jnz_rel32(c.code)
+    c.code = emit_mov_rdi_imm(c.code, 200)
+    c.code = emit_mov_rax_imm(c.code, MACOS_SYS_EXIT())
+    c.code = emit_syscall(c.code)
+    let avx_ok = c.code.len
+    c.code = patch_u32_le(c.code, avx_jnz + 2, avx_ok - (avx_jnz + 6))
+    c.code = emit_mov_rax_preg(c.code, 15)
+    c = emit_store_rax_runtime_context_field(c, runtime_context_field_simd_capability_mask())
+    if c.descriptor_data_offset >= 0 {
+        c = emit_store_runtime_context_data_ptr(c, runtime_context_field_descriptor_table(), c.descriptor_data_offset)
+    }
+    c = emit_store_runtime_context_imm(c, runtime_context_field_descriptor_count(), c.descriptor_count)
+    if c.gc_state_data_offset >= 0 {
+        c = emit_store_runtime_context_data_ptr(c, runtime_context_field_gc_state(), c.gc_state_data_offset)
+    }
+    if c.stack_map_data_offset >= 0 {
+        c = emit_store_runtime_context_data_ptr(c, runtime_context_field_stack_maps(), c.stack_map_data_offset)
+    }
+    if c.deopt_state_data_offset >= 0 {
+        c = emit_store_runtime_context_data_ptr(c, runtime_context_field_deopt_state(), c.deopt_state_data_offset)
+    }
+    let call_pos = c.code.len
+    c.code = emit_call_rel32_placeholder(c.code)
+    c.relocs = add_call_reloc(c.relocs, call_pos + 1, main_fn_index)
+    c.code = emit_mov_rdi_rax(c.code)
+    if c.prof_counter_count > 0 {
+        c.code = emit_push_rdi(c.code)
+        let dump_call_pos = c.code.len
+        c.code = emit_call_rel32_placeholder(c.code)
+        c.relocs = add_call_reloc(c.relocs, dump_call_pos + 1, c.prof_dump_fn_index)
+        c.code = emit_pop_rdi(c.code)
+    }
+    c.code = emit_mov_rax_imm(c.code, MACOS_SYS_EXIT())
+    c.code = emit_syscall(c.code)
+    c.code = emit_ud2(c.code)
+    c
+}
+
 // Get the entry trampoline offset (recorded during emit_entry_trampoline)
 fn trampoline_offset(nc: NativeCompiler) -> i64 {
     nc.entry_offset
@@ -3642,8 +3735,9 @@ fn a64_preview_emit_entry_trampoline_macos(c: A64PreviewCompiler, main_fn_index:
     let patch_offset = out.code.len
     out.code = a64_emit_bl(out.code, 0)
     out = a64_preview_record_call_patch(out, patch_offset, main_fn_index)
-    // macOS runtime execution is not attested from this Linux host yet; trap after main.
-    out.code = a64_emit_brk(out.code, 0)
+    // macOS ARM64 exit: mov x16, #1 (sys_exit), svc #0x80
+    out.code = a64_emit_mov_imm64(out.code, A64_X16, 1)
+    out.code = a64_emit_svc(out.code, 128)
     out
 }
 
@@ -3763,6 +3857,32 @@ fn compile_to_elf_v2(module: &IrModule, base_addr: i64) -> NativeCompileResult w
     native_compile_result_ok(elf.bytes, elf.len, FORMAT_ELF64())
 }
 
+fn compile_to_macho_x86_64(module: &IrModule, target_spec: NativeTargetSpec) -> NativeCompileResult with Mut, Panic, Div, Alloc {
+    let _target = target_spec
+    var nc = compiler_new()
+    let err = compile_module_v2_mut(&! nc, module)
+    if str_len(err) > 0 {
+        return native_compile_result_error(ERR_BACKEND_NOT_IMPLEMENTED(), "native_v2_unsupported_opcode:" + err)
+    }
+    var final_data = nc.data
+    if final_data.len < runtime_context_global_slot_size() {
+        final_data.len = runtime_context_global_slot_size()
+        nc.data = final_data
+    }
+    let main_idx = find_main_index(module)
+    if main_idx < 0 {
+        return native_compile_result_error(ERR_INVALID_TARGET(), "macho_x86_64_missing_main")
+    }
+    nc = emit_entry_trampoline_macos_x86(nc, main_idx)
+    let text_offset = MACHO_PAGE_SIZE
+    let text_vmaddr: i64 = 4294967296 + text_offset
+    var w = macho_writer_new()
+    w.strtab = macho_strtab_init()
+    w = macho_add_section(w, macho_make_text_section(text_vmaddr, nc.code.len, text_offset))
+    let macho = macho_assemble_executable(w, nc.code.bytes, nc.code.len, [0; 65536], 0, text_offset + nc.entry_offset)
+    native_compile_result_ok(macho.buf, macho.buf_len, FORMAT_MACHO64())
+}
+
 fn compile_native_v2_preview(module: &IrModule, target_spec: NativeTargetSpec) -> NativeCompileResult with Mut, Panic, Div, Alloc {
     if target_spec.matrix_mode < 0 {
         return native_compile_result_error(ERR_INVALID_MATRIX(), "invalid_matrix")
@@ -3770,6 +3890,10 @@ fn compile_native_v2_preview(module: &IrModule, target_spec: NativeTargetSpec) -
 
     if target_spec.arch_id == ARCH_X86_64() && target_spec.os_id == OS_LINUX() {
         return compile_to_elf_v2(module, 4194304)
+    }
+
+    if target_spec.arch_id == ARCH_X86_64() && target_spec.os_id == OS_MACOS() {
+        return compile_to_macho_x86_64(module, target_spec)
     }
 
     if target_spec.arch_id == ARCH_AARCH64() && target_spec.os_id == OS_LINUX() {
@@ -3808,6 +3932,10 @@ fn compile_native(module: &IrModule, target_spec: NativeTargetSpec) -> NativeCom
         let base_addr: i64 = 4194304  // 0x400000
         let elf = compile_to_elf(module, base_addr)
         return native_compile_result_ok(elf.bytes, elf.len, FORMAT_ELF64())
+    }
+
+    if target_spec.arch_id == ARCH_X86_64() && target_spec.os_id == OS_MACOS() {
+        return compile_to_macho_x86_64(module, target_spec)
     }
 
     if target_spec.arch_id == ARCH_AARCH64() && target_spec.os_id == OS_LINUX() {
