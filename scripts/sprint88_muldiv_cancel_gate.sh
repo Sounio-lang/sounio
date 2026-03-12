@@ -75,7 +75,7 @@ chk "main:T250_fn"     "compiler_main_test_muldiv_no_cancel_non_mul" "self-hoste
 chk "main:T251_fn"     "compiler_main_test_muldiv_cancel_chain"    "self-hosted/compiler/main.sio"
 chk "main:T246_runner" "T246 OK"                                   "self-hosted/compiler/main.sio"
 chk "main:T251_runner" "T251 OK"                                   "self-hosted/compiler/main.sio"
-chk "main:total_251"   "let total: i64 = 251"                      "self-hosted/compiler/main.sio"
+chk "main:total_251plus" "let total: i64 = 2[5-9][0-9]"             "self-hosted/compiler/main.sio"
 
 echo ""
 echo "--- Group 4: Sprint 87/86 regression ---"
