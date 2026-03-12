@@ -13,17 +13,33 @@
 // ============================================================================
 
 struct MetalRenderBuf {
-    data: [i8; 8192],
+    data: [i8; 16384],
     len: i64,
 }
 
+struct RenderScene {
+    v0x: f64, v0y: f64, v0z: f64, v0r: f64, v0g: f64, v0b: f64,
+    v1x: f64, v1y: f64, v1z: f64, v1r: f64, v1g: f64, v1b: f64,
+    v2x: f64, v2y: f64, v2z: f64, v2r: f64, v2g: f64, v2b: f64,
+    triangle_count: i64,
+}
+
+fn render_scene_default() -> RenderScene {
+    RenderScene {
+        v0x: 0.0, v0y: 0.72, v0z: 0.1, v0r: 1.0, v0g: 0.15, v0b: 0.12,
+        v1x: 0.0 - 0.76, v1y: 0.0 - 0.58, v1z: 0.4, v1r: 0.18, v1g: 0.95, v1b: 0.28,
+        v2x: 0.76, v2y: 0.0 - 0.58, v2z: 0.2, v2r: 0.1, v2g: 0.35, v2b: 1.0,
+        triangle_count: 1,
+    }
+}
+
 fn mrend_buf_new() -> MetalRenderBuf {
-    MetalRenderBuf { data: [0; 8192], len: 0 }
+    MetalRenderBuf { data: [0; 16384], len: 0 }
 }
 
 fn mrend_push_byte(buf: MetalRenderBuf, b: i8) -> MetalRenderBuf with Mut, Panic {
     var out = buf
-    if out.len < 8192 {
+    if out.len < 16384 {
         out.data[out.len] = b
         out.len = out.len + 1
     }
@@ -42,6 +58,37 @@ fn mrend_push_str(buf: MetalRenderBuf, s: string) -> MetalRenderBuf with Mut, Pa
     out
 }
 
+fn render_i64_to_string(n: i64) -> string with Mut, Panic, Div, Alloc {
+    if n == 0 { return "0" }
+    if n < 0 { return "-" + render_i64_to_string(0 - n) }
+
+    var rev: [i8; 32] = [0; 32]
+    var rev_len: i64 = 0
+    var value = n
+    while value > 0 {
+        let digit = value % 10
+        rev[rev_len] = 48 + digit as i8
+        rev_len = rev_len + 1
+        value = value / 10
+    }
+
+    var out: [i8; 32] = [0; 32]
+    var i: i64 = 0
+    while i < rev_len {
+        out[i] = rev[rev_len - i - 1]
+        i = i + 1
+    }
+    str_from_bytes(out, rev_len)
+}
+
+fn scene_to_milli_i64(v: f64) -> i64 {
+    (v * 1000.0) as i64
+}
+
+fn mrend_push_i64(buf: MetalRenderBuf, value: i64) -> MetalRenderBuf with Mut, Panic, Div, Alloc {
+    mrend_push_str(buf, render_i64_to_string(value))
+}
+
 // ============================================================================
 // Emit vertex struct + VertexOut struct
 // ============================================================================
@@ -58,6 +105,67 @@ fn mrend_emit_structs(buf: MetalRenderBuf) -> MetalRenderBuf with Mut, Panic, Di
     b = mrend_push_str(b, "    float4 position [[position]];\n")
     b = mrend_push_str(b, "    float4 color;\n")
     b = mrend_push_str(b, "};\n\n")
+    b
+}
+
+fn metal_emit_scene_constant(buf: MetalRenderBuf, name: string, value: i64) -> MetalRenderBuf with Mut, Panic, Div, Alloc {
+    var b = buf
+    b = mrend_push_str(b, "constant int ")
+    b = mrend_push_str(b, name)
+    b = mrend_push_str(b, " = ")
+    b = mrend_push_i64(b, value)
+    b = mrend_push_str(b, ";\n")
+    b
+}
+
+fn metal_emit_scene_constants(buf: MetalRenderBuf, scene: RenderScene) -> MetalRenderBuf with Mut, Panic, Div, Alloc {
+    var b = buf
+    b = metal_emit_scene_constant(b, "SCENE_TRIANGLE_COUNT", scene.triangle_count)
+    b = metal_emit_scene_constant(b, "SCENE_V0X_MILLI", scene_to_milli_i64(scene.v0x))
+    b = metal_emit_scene_constant(b, "SCENE_V0Y_MILLI", scene_to_milli_i64(scene.v0y))
+    b = metal_emit_scene_constant(b, "SCENE_V0Z_MILLI", scene_to_milli_i64(scene.v0z))
+    b = metal_emit_scene_constant(b, "SCENE_V0R_MILLI", scene_to_milli_i64(scene.v0r))
+    b = metal_emit_scene_constant(b, "SCENE_V0G_MILLI", scene_to_milli_i64(scene.v0g))
+    b = metal_emit_scene_constant(b, "SCENE_V0B_MILLI", scene_to_milli_i64(scene.v0b))
+    b = metal_emit_scene_constant(b, "SCENE_V1X_MILLI", scene_to_milli_i64(scene.v1x))
+    b = metal_emit_scene_constant(b, "SCENE_V1Y_MILLI", scene_to_milli_i64(scene.v1y))
+    b = metal_emit_scene_constant(b, "SCENE_V1Z_MILLI", scene_to_milli_i64(scene.v1z))
+    b = metal_emit_scene_constant(b, "SCENE_V1R_MILLI", scene_to_milli_i64(scene.v1r))
+    b = metal_emit_scene_constant(b, "SCENE_V1G_MILLI", scene_to_milli_i64(scene.v1g))
+    b = metal_emit_scene_constant(b, "SCENE_V1B_MILLI", scene_to_milli_i64(scene.v1b))
+    b = metal_emit_scene_constant(b, "SCENE_V2X_MILLI", scene_to_milli_i64(scene.v2x))
+    b = metal_emit_scene_constant(b, "SCENE_V2Y_MILLI", scene_to_milli_i64(scene.v2y))
+    b = metal_emit_scene_constant(b, "SCENE_V2Z_MILLI", scene_to_milli_i64(scene.v2z))
+    b = metal_emit_scene_constant(b, "SCENE_V2R_MILLI", scene_to_milli_i64(scene.v2r))
+    b = metal_emit_scene_constant(b, "SCENE_V2G_MILLI", scene_to_milli_i64(scene.v2g))
+    b = metal_emit_scene_constant(b, "SCENE_V2B_MILLI", scene_to_milli_i64(scene.v2b))
+    b = mrend_push_str(b, "\n")
+    b
+}
+
+fn metal_emit_scene_helpers(buf: MetalRenderBuf) -> MetalRenderBuf with Mut, Panic, Div {
+    var b = buf
+    b = mrend_push_str(b, "float scene_scalar(int milli) {\n")
+    b = mrend_push_str(b, "    return float(milli) / 1000.0;\n")
+    b = mrend_push_str(b, "}\n\n")
+    b = mrend_push_str(b, "float4 scene_position_0() {\n")
+    b = mrend_push_str(b, "    return float4(scene_scalar(SCENE_V0X_MILLI), scene_scalar(SCENE_V0Y_MILLI), scene_scalar(SCENE_V0Z_MILLI), 1.0);\n")
+    b = mrend_push_str(b, "}\n\n")
+    b = mrend_push_str(b, "float4 scene_position_1() {\n")
+    b = mrend_push_str(b, "    return float4(scene_scalar(SCENE_V1X_MILLI), scene_scalar(SCENE_V1Y_MILLI), scene_scalar(SCENE_V1Z_MILLI), 1.0);\n")
+    b = mrend_push_str(b, "}\n\n")
+    b = mrend_push_str(b, "float4 scene_position_2() {\n")
+    b = mrend_push_str(b, "    return float4(scene_scalar(SCENE_V2X_MILLI), scene_scalar(SCENE_V2Y_MILLI), scene_scalar(SCENE_V2Z_MILLI), 1.0);\n")
+    b = mrend_push_str(b, "}\n\n")
+    b = mrend_push_str(b, "float4 scene_color_0() {\n")
+    b = mrend_push_str(b, "    return float4(scene_scalar(SCENE_V0R_MILLI), scene_scalar(SCENE_V0G_MILLI), scene_scalar(SCENE_V0B_MILLI), 1.0);\n")
+    b = mrend_push_str(b, "}\n\n")
+    b = mrend_push_str(b, "float4 scene_color_1() {\n")
+    b = mrend_push_str(b, "    return float4(scene_scalar(SCENE_V1R_MILLI), scene_scalar(SCENE_V1G_MILLI), scene_scalar(SCENE_V1B_MILLI), 1.0);\n")
+    b = mrend_push_str(b, "}\n\n")
+    b = mrend_push_str(b, "float4 scene_color_2() {\n")
+    b = mrend_push_str(b, "    return float4(scene_scalar(SCENE_V2R_MILLI), scene_scalar(SCENE_V2G_MILLI), scene_scalar(SCENE_V2B_MILLI), 1.0);\n")
+    b = mrend_push_str(b, "}\n\n")
     b
 }
 
@@ -104,6 +212,19 @@ fn metal_emit_render_pipeline() -> MetalRenderBuf with Mut, Panic, Div {
     b
 }
 
+fn metal_emit_scene_comment(buf: MetalRenderBuf, scene: RenderScene) -> MetalRenderBuf with Mut, Panic, Div, Alloc {
+    var b = buf
+    b = mrend_push_str(b, "// Sounio scene: triangle_count=")
+    b = mrend_push_i64(b, scene.triangle_count)
+    b = mrend_push_str(b, "\n")
+    b = mrend_emit_structs(b)
+    b = metal_emit_scene_constants(b, scene)
+    b = metal_emit_scene_helpers(b)
+    b = metal_emit_vertex_shader(b)
+    b = metal_emit_fragment_shader(b)
+    b
+}
+
 // Print generated MSL to stdout
 fn metal_render_print(buf: MetalRenderBuf) with IO, Mut, Panic, Div {
     print("// Metal render pipeline MSL (")
@@ -117,8 +238,9 @@ fn metal_render_print(buf: MetalRenderBuf) with IO, Mut, Panic, Div {
     }
 }
 
-fn main() -> i32 with IO, Mut, Panic, Div {
-    let buf = metal_emit_render_pipeline()
+fn main() -> i32 with IO, Mut, Panic, Div, Alloc {
+    let scene = render_scene_default()
+    let buf = metal_emit_scene_comment(mrend_buf_new(), scene)
     metal_render_print(buf)
     0
 }

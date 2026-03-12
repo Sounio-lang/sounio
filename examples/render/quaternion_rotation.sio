@@ -13,6 +13,12 @@ struct Quaternion {
     z: f64,
 }
 
+struct ScreenPt {
+    sx: i64,
+    sy: i64,
+    depth: f64,
+}
+
 fn quat_from_axis_angle(ax: f64, ay: f64, az: f64, angle: f64) -> Quaternion with Div {
     // half_angle = angle / 2; sin_ha ≈ angle/2 for small angles (placeholder)
     let ha = angle * 0.5
@@ -39,11 +45,128 @@ fn quat_rotate_point(q: Quaternion, p: Vec3) -> Vec3 {
     Vec3 { x: result.x, y: result.y, z: result.z }
 }
 
-fn main() -> i32 with IO, Div {
-    // Rotate a point around Y axis by 45 degrees (≈0.785 rad)
+fn clamp_byte(v: i64) -> i64 {
+    if v < 0 { return 0 }
+    if v > 255 { return 255 }
+    v
+}
+
+fn project_pt(v: Vec3, focal: f64, z_offset: f64, fb_w: i64, fb_h: i64) -> ScreenPt with Div, Panic {
+    let z_cam = v.z + z_offset
+    let scale = focal / z_cam
+    ScreenPt {
+        sx: (v.x * scale + ((fb_w as f64) * 0.5)) as i64,
+        sy: ((0.0 - v.y) * scale + ((fb_h as f64) * 0.5)) as i64,
+        depth: z_cam,
+    }
+}
+
+fn rasterize_line(
+    x0: i64, y0: i64, x1: i64, y1: i64,
+    r: i64, g: i64, b: i64,
+    fb_r: &![i64; 65536], fb_g: &![i64; 65536], fb_b: &![i64; 65536],
+    fb_w: i64, fb_h: i64
+) with Mut, Panic, Div {
+    var cx: i64 = x0
+    var cy: i64 = y0
+    var dx: i64 = x1 - x0
+    var dy: i64 = y1 - y0
+    if dx < 0 { dx = 0 - dx }
+    if dy < 0 { dy = 0 - dy }
+    let sx: i64 = if x0 < x1 { 1 } else { 0 - 1 }
+    let sy: i64 = if y0 < y1 { 1 } else { 0 - 1 }
+    var err: i64 = dx - dy
+
+    loop {
+        if cx >= 0 && cx < fb_w && cy >= 0 && cy < fb_h {
+            let idx = cy * fb_w + cx;
+            (*fb_r)[idx] = r;
+            (*fb_g)[idx] = g;
+            (*fb_b)[idx] = b;
+        }
+        if cx == x1 && cy == y1 { return }
+        let e2 = err * 2
+        if e2 > (0 - dy) {
+            err = err - dy
+            cx = cx + sx
+        }
+        if e2 < dx {
+            err = err + dx
+            cy = cy + sy
+        }
+    }
+}
+
+fn emit_ppm(
+    w: i64, h: i64,
+    fb_r: &[i64; 65536], fb_g: &[i64; 65536], fb_b: &[i64; 65536]
+) with IO, Mut, Panic, Div {
+    print("P3\n")
+    print_int(w)
+    print(" ")
+    print_int(h)
+    print("\n255\n")
+    var i: i64 = 0
+    while i < w * h {
+        print_int(clamp_byte((*fb_r)[i]))
+        print(" ")
+        print_int(clamp_byte((*fb_g)[i]))
+        print(" ")
+        print_int(clamp_byte((*fb_b)[i]))
+        print("\n")
+        i = i + 1
+    }
+}
+
+fn main() with IO, Mut, Div, Panic {
+    let w: i64 = 192
+    let h: i64 = 192
+    let focal = 110.0
+    let z_offset = 3.5
     let q = quat_from_axis_angle(0.0, 1.0, 0.0, 0.785)
-    let point = Vec3 { x: 1.0, y: 0.0, z: 0.0 }
-    let rotated = quat_rotate_point(q, point)
-    // Sprint 35: render original + rotated point, draw rotation arc
-    0
+
+    var fb_r: [i64; 65536] = [8; 65536]
+    var fb_g: [i64; 65536] = [10; 65536]
+    var fb_b: [i64; 65536] = [18; 65536]
+
+    let v0 = Vec3 { x: 0.0, y: 1.0, z: 0.0 }
+    let v1 = Vec3 { x: 0.942, y: 0.0 - 0.333, z: 0.0 }
+    let v2 = Vec3 { x: 0.0 - 0.471, y: 0.0 - 0.333, z: 0.816 }
+    let v3 = Vec3 { x: 0.0 - 0.471, y: 0.0 - 0.333, z: 0.0 - 0.816 }
+
+    let rv0 = quat_rotate_point(q, v0)
+    let rv1 = quat_rotate_point(q, v1)
+    let rv2 = quat_rotate_point(q, v2)
+    let rv3 = quat_rotate_point(q, v3)
+
+    let p0 = project_pt(v0, focal, z_offset, w, h)
+    let p1 = project_pt(v1, focal, z_offset, w, h)
+    let p2 = project_pt(v2, focal, z_offset, w, h)
+    let p3 = project_pt(v3, focal, z_offset, w, h)
+
+    let rp0 = project_pt(rv0, focal, z_offset, w, h)
+    let rp1 = project_pt(rv1, focal, z_offset, w, h)
+    let rp2 = project_pt(rv2, focal, z_offset, w, h)
+    let rp3 = project_pt(rv3, focal, z_offset, w, h)
+
+    rasterize_line(p0.sx, p0.sy, p1.sx, p1.sy, 60, 60, 90, &!fb_r, &!fb_g, &!fb_b, w, h)
+    rasterize_line(p0.sx, p0.sy, p2.sx, p2.sy, 60, 60, 90, &!fb_r, &!fb_g, &!fb_b, w, h)
+    rasterize_line(p0.sx, p0.sy, p3.sx, p3.sy, 60, 60, 90, &!fb_r, &!fb_g, &!fb_b, w, h)
+    rasterize_line(p1.sx, p1.sy, p2.sx, p2.sy, 60, 60, 90, &!fb_r, &!fb_g, &!fb_b, w, h)
+    rasterize_line(p1.sx, p1.sy, p3.sx, p3.sy, 60, 60, 90, &!fb_r, &!fb_g, &!fb_b, w, h)
+    rasterize_line(p2.sx, p2.sy, p3.sx, p3.sy, 60, 60, 90, &!fb_r, &!fb_g, &!fb_b, w, h)
+
+    rasterize_line(rp0.sx, rp0.sy, rp1.sx, rp1.sy, 50, 200, 80, &!fb_r, &!fb_g, &!fb_b, w, h)
+    rasterize_line(rp0.sx, rp0.sy, rp2.sx, rp2.sy, 50, 200, 80, &!fb_r, &!fb_g, &!fb_b, w, h)
+    rasterize_line(rp0.sx, rp0.sy, rp3.sx, rp3.sy, 50, 200, 80, &!fb_r, &!fb_g, &!fb_b, w, h)
+    rasterize_line(rp1.sx, rp1.sy, rp2.sx, rp2.sy, 50, 200, 80, &!fb_r, &!fb_g, &!fb_b, w, h)
+    rasterize_line(rp1.sx, rp1.sy, rp3.sx, rp3.sy, 50, 200, 80, &!fb_r, &!fb_g, &!fb_b, w, h)
+    rasterize_line(rp2.sx, rp2.sy, rp3.sx, rp3.sy, 50, 200, 80, &!fb_r, &!fb_g, &!fb_b, w, h)
+
+    rasterize_line(p0.sx, p0.sy, rp0.sx, rp0.sy, 200, 200, 150, &!fb_r, &!fb_g, &!fb_b, w, h)
+    rasterize_line(p1.sx, p1.sy, rp1.sx, rp1.sy, 200, 200, 150, &!fb_r, &!fb_g, &!fb_b, w, h)
+    rasterize_line(p2.sx, p2.sy, rp2.sx, rp2.sy, 200, 200, 150, &!fb_r, &!fb_g, &!fb_b, w, h)
+    rasterize_line(p3.sx, p3.sy, rp3.sx, rp3.sy, 200, 200, 150, &!fb_r, &!fb_g, &!fb_b, w, h)
+
+    emit_ppm(w, h, &fb_r, &fb_g, &fb_b)
 }

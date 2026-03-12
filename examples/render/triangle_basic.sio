@@ -1,13 +1,14 @@
 //@ run-pass
-// Basic triangle rendering — foundation for the Sounio render pipeline
+// Basic triangle rendering as real PPM output.
 //
-// Sprint 34: Types only. Sprint 35 adds software rasterizer (PPM output).
-// Sprint 36 adds GPU backends (SPIR-V/Metal/WGSL).
+// Run:
+//   souc run examples/render/triangle_basic.sio > triangle_basic.ppm
 
 struct Vec3 { x: f64, y: f64, z: f64 }
 struct Color { r: f64, g: f64, b: f64, a: f64 }
 struct Vertex { pos: Vec3, col: Color }
 struct Triangle { v0: Vertex, v1: Vertex, v2: Vertex }
+struct Vertex2D { x: f64, y: f64, z: f64, r: f64, g: f64, b: f64 }
 
 fn vertex(x: f64, y: f64, z: f64, r: f64, g: f64, b: f64) -> Vertex {
     Vertex {
@@ -18,14 +19,148 @@ fn vertex(x: f64, y: f64, z: f64, r: f64, g: f64, b: f64) -> Vertex {
 
 fn make_triangle() -> Triangle {
     Triangle {
-        v0: vertex(0.0, 0.5, 0.0, 1.0, 0.0, 0.0),
-        v1: vertex(0.0 - 0.5, 0.0 - 0.5, 0.0, 0.0, 1.0, 0.0),
-        v2: vertex(0.5, 0.0 - 0.5, 0.0, 0.0, 0.0, 1.0),
+        v0: vertex(0.0, 0.72, 0.1, 1.0, 0.15, 0.12),
+        v1: vertex(0.0 - 0.76, 0.0 - 0.58, 0.4, 0.18, 0.95, 0.28),
+        v2: vertex(0.76, 0.0 - 0.58, 0.2, 0.1, 0.35, 1.0),
     }
 }
 
-fn main() -> i32 with IO {
+fn clamp_byte(v: i64) -> i64 {
+    if v < 0 { return 0 }
+    if v > 255 { return 255 }
+    v
+}
+
+fn edge_fn(ax: f64, ay: f64, bx: f64, by: f64, cx: f64, cy: f64) -> f64 {
+    (cx - ax) * (by - ay) - (cy - ay) * (bx - ax)
+}
+
+fn project_vertex(v: Vertex, width: i64, height: i64) -> Vertex2D {
+    let px = ((v.pos.x + 1.0) * 0.5) * ((width - 1) as f64)
+    let py = (1.0 - ((v.pos.y + 1.0) * 0.5)) * ((height - 1) as f64)
+    Vertex2D {
+        x: px,
+        y: py,
+        z: v.pos.z,
+        r: v.col.r,
+        g: v.col.g,
+        b: v.col.b,
+    }
+}
+
+fn emit_ppm(
+    width: i64,
+    height: i64,
+    fb_r: &[i64; 65536],
+    fb_g: &[i64; 65536],
+    fb_b: &[i64; 65536]
+) with IO, Mut, Panic, Div {
+    print("P3\n")
+    print_int(width)
+    print(" ")
+    print_int(height)
+    print("\n255\n")
+
+    var i: i64 = 0
+    let total = width * height
+    while i < total {
+        print_int(clamp_byte((*fb_r)[i]))
+        print(" ")
+        print_int(clamp_byte((*fb_g)[i]))
+        print(" ")
+        print_int(clamp_byte((*fb_b)[i]))
+        print("\n")
+        i = i + 1
+    }
+}
+
+fn fill_background(
+    width: i64,
+    height: i64,
+    fb_r: &![i64; 65536],
+    fb_g: &![i64; 65536],
+    fb_b: &![i64; 65536]
+) with Mut, Panic, Div {
+    var py: i64 = 0
+    while py < height {
+        var px: i64 = 0
+        while px < width {
+            let idx = py * width + px
+            (*fb_r)[idx] = 12 + py / 10 + px / 32
+            (*fb_g)[idx] = 16 + py / 8
+            (*fb_b)[idx] = 28 + py / 5
+            px = px + 1
+        }
+        py = py + 1
+    }
+}
+
+fn rasterize_triangle(
+    width: i64,
+    height: i64,
+    v0: Vertex2D,
+    v1: Vertex2D,
+    v2: Vertex2D,
+    area: f64,
+    fb_r: &![i64; 65536],
+    fb_g: &![i64; 65536],
+    fb_b: &![i64; 65536]
+) with Mut, Panic, Div {
+    var py: i64 = 0
+    while py < height {
+        var px: i64 = 0
+        while px < width {
+            let cx = (px as f64) + 0.5
+            let cy = (py as f64) + 0.5
+
+            let w0 = edge_fn(v1.x, v1.y, v2.x, v2.y, cx, cy)
+            let w1 = edge_fn(v2.x, v2.y, v0.x, v0.y, cx, cy)
+            let w2 = edge_fn(v0.x, v0.y, v1.x, v1.y, cx, cy)
+
+            let inside = if area > 0.0 {
+                w0 >= 0.0 && w1 >= 0.0 && w2 >= 0.0
+            } else {
+                w0 <= 0.0 && w1 <= 0.0 && w2 <= 0.0
+            }
+
+            if inside {
+                let b0 = w0 / area
+                let b1 = w1 / area
+                let b2 = w2 / area
+
+                let r = b0 * v0.r + b1 * v1.r + b2 * v2.r
+                let g = b0 * v0.g + b1 * v1.g + b2 * v2.g
+                let b_col = b0 * v0.b + b1 * v1.b + b2 * v2.b
+                let shade = 0.82 + (1.0 - (b0 * v0.z + b1 * v1.z + b2 * v2.z)) * 0.2
+
+                let idx = py * width + px
+                (*fb_r)[idx] = clamp_byte((r * shade * 255.0) as i64)
+                (*fb_g)[idx] = clamp_byte((g * shade * 255.0) as i64)
+                (*fb_b)[idx] = clamp_byte((b_col * shade * 255.0) as i64)
+            }
+            px = px + 1
+        }
+        py = py + 1
+    }
+}
+
+fn main() with IO, Mut, Div, Panic {
+    let width: i64 = 128
+    let height: i64 = 128
+
+    var fb_r: [i64; 65536] = [0; 65536]
+    var fb_g: [i64; 65536] = [0; 65536]
+    var fb_b: [i64; 65536] = [0; 65536]
+
+    fill_background(width, height, &! fb_r, &! fb_g, &! fb_b)
+
     let tri = make_triangle()
-    // Sprint 35: render_triangle(tri, config) -> PPM file
-    0
+    let v0 = project_vertex(tri.v0, width, height)
+    let v1 = project_vertex(tri.v1, width, height)
+    let v2 = project_vertex(tri.v2, width, height)
+    let area = edge_fn(v0.x, v0.y, v1.x, v1.y, v2.x, v2.y)
+
+    rasterize_triangle(width, height, v0, v1, v2, area, &! fb_r, &! fb_g, &! fb_b)
+
+    emit_ppm(width, height, &fb_r, &fb_g, &fb_b)
 }

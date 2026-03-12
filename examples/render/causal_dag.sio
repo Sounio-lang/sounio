@@ -32,6 +32,9 @@ fn edge(from: i64, to: i64) -> GraphEdge {
 }
 
 fn node_color(n: GraphNode) -> Color {
+    if n.label_char == 85 {
+        return Color { r: 0.39, g: 0.39, b: 0.39, a: 1.0 }
+    }
     if n.is_intervention {
         Color { r: 1.0, g: 0.3, b: 0.1, a: 1.0 }   // red for do(X)
     } else {
@@ -39,17 +42,183 @@ fn node_color(n: GraphNode) -> Color {
     }
 }
 
-fn main() -> i32 with IO {
-    // Classic front-door criterion DAG: X → M → Y, X ← U → Y
-    let x = node(100.0, 200.0, 88, true)    // X (intervened)
-    let m = node(300.0, 200.0, 77, false)   // M (mediator)
-    let y = node(500.0, 200.0, 89, false)   // Y (outcome)
+fn clamp_byte(v: i64) -> i64 {
+    if v < 0 { return 0 }
+    if v > 255 { return 255 }
+    v
+}
 
-    let e1 = edge(0, 1)  // X → M
-    let e2 = edge(1, 2)  // M → Y
+fn rasterize_rect(
+    x0: i64, y0: i64, rw: i64, rh: i64,
+    r: i64, g: i64, b: i64,
+    fb_r: &![i64; 65536], fb_g: &![i64; 65536], fb_b: &![i64; 65536],
+    fb_w: i64, fb_h: i64
+) with Mut, Panic, Div {
+    var dy: i64 = 0
+    while dy < rh {
+        var dx: i64 = 0
+        while dx < rw {
+            let px = x0 + dx
+            let py = y0 + dy
+            if px >= 0 && px < fb_w && py >= 0 && py < fb_h {
+                let idx = py * fb_w + px;
+                (*fb_r)[idx] = r;
+                (*fb_g)[idx] = g;
+                (*fb_b)[idx] = b;
+            }
+            dx = dx + 1
+        }
+        dy = dy + 1
+    }
+}
 
-    let cx = node_color(x)
-    let cm = node_color(m)
-    // Sprint 35: render nodes as circles, edges as arrows, output PPM
-    0
+fn rasterize_line(
+    x0: i64, y0: i64, x1: i64, y1: i64,
+    r: i64, g: i64, b: i64,
+    fb_r: &![i64; 65536], fb_g: &![i64; 65536], fb_b: &![i64; 65536],
+    fb_w: i64, fb_h: i64
+) with Mut, Panic, Div {
+    var cx: i64 = x0
+    var cy: i64 = y0
+    var dx: i64 = x1 - x0
+    var dy: i64 = y1 - y0
+    if dx < 0 { dx = 0 - dx }
+    if dy < 0 { dy = 0 - dy }
+    let sx: i64 = if x0 < x1 { 1 } else { 0 - 1 }
+    let sy: i64 = if y0 < y1 { 1 } else { 0 - 1 }
+    var err: i64 = dx - dy
+
+    loop {
+        if cx >= 0 && cx < fb_w && cy >= 0 && cy < fb_h {
+            let idx = cy * fb_w + cx;
+            (*fb_r)[idx] = r;
+            (*fb_g)[idx] = g;
+            (*fb_b)[idx] = b;
+        }
+        if cx == x1 && cy == y1 { return }
+        let e2 = err * 2
+        if e2 > (0 - dy) {
+            err = err - dy
+            cx = cx + sx
+        }
+        if e2 < dx {
+            err = err + dx
+            cy = cy + sy
+        }
+    }
+}
+
+fn draw_arrowhead_right(
+    tip_x: i64, tip_y: i64,
+    r: i64, g: i64, b: i64,
+    fb_r: &![i64; 65536], fb_g: &![i64; 65536], fb_b: &![i64; 65536],
+    fb_w: i64, fb_h: i64
+) with Mut, Panic, Div {
+    rasterize_line(tip_x, tip_y, tip_x - 6, tip_y - 4, r, g, b, fb_r, fb_g, fb_b, fb_w, fb_h)
+    rasterize_line(tip_x, tip_y, tip_x - 6, tip_y + 4, r, g, b, fb_r, fb_g, fb_b, fb_w, fb_h)
+}
+
+fn draw_arrowhead_ul(
+    tip_x: i64, tip_y: i64,
+    r: i64, g: i64, b: i64,
+    fb_r: &![i64; 65536], fb_g: &![i64; 65536], fb_b: &![i64; 65536],
+    fb_w: i64, fb_h: i64
+) with Mut, Panic, Div {
+    rasterize_line(tip_x, tip_y, tip_x + 6, tip_y, r, g, b, fb_r, fb_g, fb_b, fb_w, fb_h)
+    rasterize_line(tip_x, tip_y, tip_x, tip_y - 6, r, g, b, fb_r, fb_g, fb_b, fb_w, fb_h)
+}
+
+fn draw_arrowhead_ur(
+    tip_x: i64, tip_y: i64,
+    r: i64, g: i64, b: i64,
+    fb_r: &![i64; 65536], fb_g: &![i64; 65536], fb_b: &![i64; 65536],
+    fb_w: i64, fb_h: i64
+) with Mut, Panic, Div {
+    rasterize_line(tip_x, tip_y, tip_x - 6, tip_y, r, g, b, fb_r, fb_g, fb_b, fb_w, fb_h)
+    rasterize_line(tip_x, tip_y, tip_x, tip_y - 6, r, g, b, fb_r, fb_g, fb_b, fb_w, fb_h)
+}
+
+fn draw_node_box(
+    n: GraphNode,
+    fb_r: &![i64; 65536], fb_g: &![i64; 65536], fb_b: &![i64; 65536],
+    fb_w: i64, fb_h: i64
+) with Mut, Panic, Div {
+    let c = node_color(n)
+    let fill_r = clamp_byte((c.r * 255.0) as i64)
+    let fill_g = clamp_byte((c.g * 255.0) as i64)
+    let fill_b = clamp_byte((c.b * 255.0) as i64)
+    let x = (n.x as i64) - 12
+    let y = (n.y as i64) - 9
+    rasterize_rect(x, y, 24, 18, fill_r, fill_g, fill_b, fb_r, fb_g, fb_b, fb_w, fb_h)
+    rasterize_line(x, y, x + 23, y, 230, 230, 230, fb_r, fb_g, fb_b, fb_w, fb_h)
+    rasterize_line(x, y + 17, x + 23, y + 17, 230, 230, 230, fb_r, fb_g, fb_b, fb_w, fb_h)
+    rasterize_line(x, y, x, y + 17, 230, 230, 230, fb_r, fb_g, fb_b, fb_w, fb_h)
+    rasterize_line(x + 23, y, x + 23, y + 17, 230, 230, 230, fb_r, fb_g, fb_b, fb_w, fb_h)
+}
+
+fn emit_ppm(
+    w: i64, h: i64,
+    fb_r: &[i64; 65536], fb_g: &[i64; 65536], fb_b: &[i64; 65536]
+) with IO, Mut, Panic, Div {
+    print("P3\n")
+    print_int(w)
+    print(" ")
+    print_int(h)
+    print("\n255\n")
+    var i: i64 = 0
+    while i < w * h {
+        print_int(clamp_byte((*fb_r)[i]))
+        print(" ")
+        print_int(clamp_byte((*fb_g)[i]))
+        print(" ")
+        print_int(clamp_byte((*fb_b)[i]))
+        print("\n")
+        i = i + 1
+    }
+}
+
+fn main() with IO, Mut, Panic, Div {
+    let w: i64 = 256
+    let h: i64 = 128
+
+    var fb_r: [i64; 65536] = [14; 65536]
+    var fb_g: [i64; 65536] = [16; 65536]
+    var fb_b: [i64; 65536] = [24; 65536]
+
+    let x = node(48.0, 64.0, 88, true)
+    let m = node(128.0, 64.0, 77, false)
+    let y = node(208.0, 64.0, 89, false)
+    let u = node(128.0, 24.0, 85, false)
+
+    let e1 = edge(0, 1)
+    let e2 = edge(1, 2)
+    let e3 = edge(3, 0)
+    let e4 = edge(3, 2)
+    let edge_r: i64 = 235
+    let edge_g: i64 = 235
+    let edge_b: i64 = 215
+
+    if !e1.is_blocked {
+        rasterize_line(60, 64, 116, 64, edge_r, edge_g, edge_b, &!fb_r, &!fb_g, &!fb_b, w, h)
+        draw_arrowhead_right(116, 64, edge_r, edge_g, edge_b, &!fb_r, &!fb_g, &!fb_b, w, h)
+    }
+    if !e2.is_blocked {
+        rasterize_line(140, 64, 196, 64, edge_r, edge_g, edge_b, &!fb_r, &!fb_g, &!fb_b, w, h)
+        draw_arrowhead_right(196, 64, edge_r, edge_g, edge_b, &!fb_r, &!fb_g, &!fb_b, w, h)
+    }
+    if !e3.is_blocked {
+        rasterize_line(124, 32, 56, 56, edge_r, edge_g, edge_b, &!fb_r, &!fb_g, &!fb_b, w, h)
+        draw_arrowhead_ul(56, 56, edge_r, edge_g, edge_b, &!fb_r, &!fb_g, &!fb_b, w, h)
+    }
+    if !e4.is_blocked {
+        rasterize_line(132, 32, 200, 56, edge_r, edge_g, edge_b, &!fb_r, &!fb_g, &!fb_b, w, h)
+        draw_arrowhead_ur(200, 56, edge_r, edge_g, edge_b, &!fb_r, &!fb_g, &!fb_b, w, h)
+    }
+
+    draw_node_box(x, &!fb_r, &!fb_g, &!fb_b, w, h)
+    draw_node_box(m, &!fb_r, &!fb_g, &!fb_b, w, h)
+    draw_node_box(y, &!fb_r, &!fb_g, &!fb_b, w, h)
+    draw_node_box(u, &!fb_r, &!fb_g, &!fb_b, w, h)
+
+    emit_ppm(w, h, &fb_r, &fb_g, &fb_b)
 }

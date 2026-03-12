@@ -1,11 +1,10 @@
 //@ run-pass
-// Wireframe cube with camera — 3D rendering foundation
+// Wireframe cube with perspective projection as real PPM output.
 //
-// Demonstrates camera setup, 3D geometry, and edge rendering.
-// Sprint 35 adds rasterizer; Sprint 36 adds GPU vertex+fragment shaders.
+// Run:
+//   souc run examples/render/cube_wireframe.sio > cube_wireframe.ppm
 
 struct Vec3 { x: f64, y: f64, z: f64 }
-struct Color { r: f64, g: f64, b: f64, a: f64 }
 
 struct Camera {
     pos_x: f64, pos_y: f64, pos_z: f64,
@@ -13,31 +12,250 @@ struct Camera {
     fov: f64,
 }
 
+struct ScreenPoint {
+    x: i64,
+    y: i64,
+    z: f64,
+}
+
 fn camera_default() -> Camera {
     Camera {
         pos_x: 3.0, pos_y: 2.0, pos_z: 5.0,
         target_x: 0.0, target_y: 0.0, target_z: 0.0,
-        fov: 60.0,
+        fov: 110.0,
     }
 }
 
-// Cube: 8 vertices, 12 edges
-fn cube_vertex(idx: i64) -> Vec3 {
-    // Vertices of a unit cube centered at origin
-    if idx == 0 { return Vec3 { x: 0.0 - 0.5, y: 0.0 - 0.5, z: 0.0 - 0.5 } }
-    if idx == 1 { return Vec3 { x: 0.5, y: 0.0 - 0.5, z: 0.0 - 0.5 } }
-    if idx == 2 { return Vec3 { x: 0.5, y: 0.5, z: 0.0 - 0.5 } }
-    if idx == 3 { return Vec3 { x: 0.0 - 0.5, y: 0.5, z: 0.0 - 0.5 } }
-    if idx == 4 { return Vec3 { x: 0.0 - 0.5, y: 0.0 - 0.5, z: 0.5 } }
-    if idx == 5 { return Vec3 { x: 0.5, y: 0.0 - 0.5, z: 0.5 } }
-    if idx == 6 { return Vec3 { x: 0.5, y: 0.5, z: 0.5 } }
-    Vec3 { x: 0.0 - 0.5, y: 0.5, z: 0.5 }
+fn clamp_byte(v: i64) -> i64 {
+    if v < 0 { return 0 }
+    if v > 255 { return 255 }
+    v
 }
 
-fn main() -> i32 with IO {
+fn cube_vertex(idx: i64) -> Vec3 {
+    if idx == 0 { return Vec3 { x: 0.0 - 0.9, y: 0.0 - 0.9, z: 0.0 - 0.9 } }
+    if idx == 1 { return Vec3 { x: 0.9, y: 0.0 - 0.9, z: 0.0 - 0.9 } }
+    if idx == 2 { return Vec3 { x: 0.9, y: 0.9, z: 0.0 - 0.9 } }
+    if idx == 3 { return Vec3 { x: 0.0 - 0.9, y: 0.9, z: 0.0 - 0.9 } }
+    if idx == 4 { return Vec3 { x: 0.0 - 0.9, y: 0.0 - 0.9, z: 0.9 } }
+    if idx == 5 { return Vec3 { x: 0.9, y: 0.0 - 0.9, z: 0.9 } }
+    if idx == 6 { return Vec3 { x: 0.9, y: 0.9, z: 0.9 } }
+    Vec3 { x: 0.0 - 0.9, y: 0.9, z: 0.9 }
+}
+
+fn rotate_y(v: Vec3) -> Vec3 {
+    let c = 0.819152
+    let s = 0.573576
+    Vec3 {
+        x: v.x * c + v.z * s,
+        y: v.y,
+        z: (0.0 - v.x) * s + v.z * c,
+    }
+}
+
+fn rotate_x(v: Vec3) -> Vec3 {
+    let c = 0.906308
+    let s = 0.422618
+    Vec3 {
+        x: v.x,
+        y: v.y * c + (0.0 - v.z) * s,
+        z: v.y * s + v.z * c,
+    }
+}
+
+fn project_point(v: Vec3, width: i64, height: i64, focal: f64) -> ScreenPoint with Div, Panic {
+    let z_cam = v.z + 4.8
+    let scale = focal / z_cam
+    ScreenPoint {
+        x: (v.x * scale + ((width as f64) * 0.5)) as i64,
+        y: ((0.0 - v.y) * scale + ((height as f64) * 0.5)) as i64,
+        z: z_cam,
+    }
+}
+
+fn set_pixel(
+    fb_r: &![i64; 65536], fb_g: &![i64; 65536], fb_b: &![i64; 65536],
+    width: i64, height: i64, x: i64, y: i64, r: i64, g: i64, b: i64
+) with Mut, Panic {
+    if x < 0 || x >= width || y < 0 || y >= height { return }
+    let idx = y * width + x;
+    (*fb_r)[idx] = clamp_byte(r);
+    (*fb_g)[idx] = clamp_byte(g);
+    (*fb_b)[idx] = clamp_byte(b);
+}
+
+fn draw_point(
+    fb_r: &![i64; 65536], fb_g: &![i64; 65536], fb_b: &![i64; 65536],
+    width: i64, height: i64, x: i64, y: i64, r: i64, g: i64, b: i64
+) with Mut, Panic {
+    set_pixel(fb_r, fb_g, fb_b, width, height, x, y, r, g, b)
+    set_pixel(fb_r, fb_g, fb_b, width, height, x - 1, y, r, g, b)
+    set_pixel(fb_r, fb_g, fb_b, width, height, x + 1, y, r, g, b)
+    set_pixel(fb_r, fb_g, fb_b, width, height, x, y - 1, r, g, b)
+    set_pixel(fb_r, fb_g, fb_b, width, height, x, y + 1, r, g, b)
+}
+
+fn rasterize_line(
+    fb_r: &![i64; 65536], fb_g: &![i64; 65536], fb_b: &![i64; 65536],
+    width: i64, height: i64,
+    x0: i64, y0: i64, x1: i64, y1: i64,
+    r: i64, g: i64, b: i64
+) with Mut, Panic, Div {
+    var cx = x0
+    var cy = y0
+    var dx = x1 - x0
+    var dy = y1 - y0
+    if dx < 0 { dx = 0 - dx }
+    if dy < 0 { dy = 0 - dy }
+    let sx = if x0 < x1 { 1 } else { 0 - 1 }
+    let sy = if y0 < y1 { 1 } else { 0 - 1 }
+    var err = dx - dy
+
+    loop {
+        set_pixel(fb_r, fb_g, fb_b, width, height, cx, cy, r, g, b)
+        if cx == x1 && cy == y1 { return }
+        let e2 = err * 2
+        if e2 > (0 - dy) {
+            err = err - dy
+            cx = cx + sx
+        }
+        if e2 < dx {
+            err = err + dx
+            cy = cy + sy
+        }
+    }
+}
+
+fn edge_a(idx: i64) -> i64 {
+    if idx == 0 { return 0 }
+    if idx == 1 { return 1 }
+    if idx == 2 { return 2 }
+    if idx == 3 { return 3 }
+    if idx == 4 { return 4 }
+    if idx == 5 { return 5 }
+    if idx == 6 { return 6 }
+    if idx == 7 { return 7 }
+    if idx == 8 { return 0 }
+    if idx == 9 { return 1 }
+    if idx == 10 { return 2 }
+    3
+}
+
+fn edge_b(idx: i64) -> i64 {
+    if idx == 0 { return 1 }
+    if idx == 1 { return 2 }
+    if idx == 2 { return 3 }
+    if idx == 3 { return 0 }
+    if idx == 4 { return 5 }
+    if idx == 5 { return 6 }
+    if idx == 6 { return 7 }
+    if idx == 7 { return 4 }
+    if idx == 8 { return 4 }
+    if idx == 9 { return 5 }
+    if idx == 10 { return 6 }
+    7
+}
+
+fn emit_ppm(
+    width: i64,
+    height: i64,
+    fb_r: &[i64; 65536],
+    fb_g: &[i64; 65536],
+    fb_b: &[i64; 65536]
+) with IO, Mut, Panic, Div {
+    print("P3\n")
+    print_int(width)
+    print(" ")
+    print_int(height)
+    print("\n255\n")
+
+    var i: i64 = 0
+    let total = width * height
+    while i < total {
+        print_int(clamp_byte((*fb_r)[i]))
+        print(" ")
+        print_int(clamp_byte((*fb_g)[i]))
+        print(" ")
+        print_int(clamp_byte((*fb_b)[i]))
+        print("\n")
+        i = i + 1
+    }
+}
+
+fn main() with IO, Mut, Panic, Div {
     let cam = camera_default()
-    let v0 = cube_vertex(0)
-    let v7 = cube_vertex(7)
-    // Sprint 35: project vertices, draw edges, output PPM
-    0
+    let width: i64 = 192
+    let height: i64 = 192
+
+    var fb_r: [i64; 65536] = [0; 65536]
+    var fb_g: [i64; 65536] = [0; 65536]
+    var fb_b: [i64; 65536] = [0; 65536]
+
+    // Background gradient.
+    var py: i64 = 0
+    while py < height {
+        var px: i64 = 0
+        while px < width {
+            let idx = py * width + px
+            fb_r[idx] = 10 + py / 14
+            fb_g[idx] = 12 + py / 10 + px / 40
+            fb_b[idx] = 18 + py / 5
+            px = px + 1
+        }
+        py = py + 1
+    }
+
+    var screen_x: [i64; 8] = [0; 8]
+    var screen_y: [i64; 8] = [0; 8]
+    var depth: [f64; 8] = [0.0; 8]
+
+    var i: i64 = 0
+    while i < 8 {
+        let base = cube_vertex(i)
+        let rotated = rotate_x(rotate_y(base))
+        let projected = project_point(rotated, width, height, cam.fov)
+        screen_x[i] = projected.x
+        screen_y[i] = projected.y
+        depth[i] = projected.z
+        i = i + 1
+    }
+
+    // Draw axes from cube center.
+    let axis_origin = project_point(rotate_x(rotate_y(Vec3 { x: 0.0, y: 0.0, z: 0.0 })), width, height, cam.fov)
+    let axis_x = project_point(rotate_x(rotate_y(Vec3 { x: 1.5, y: 0.0, z: 0.0 })), width, height, cam.fov)
+    let axis_y = project_point(rotate_x(rotate_y(Vec3 { x: 0.0, y: 1.5, z: 0.0 })), width, height, cam.fov)
+    let axis_z = project_point(rotate_x(rotate_y(Vec3 { x: 0.0, y: 0.0, z: 1.5 })), width, height, cam.fov)
+    rasterize_line(&!fb_r, &!fb_g, &!fb_b, width, height, axis_origin.x, axis_origin.y, axis_x.x, axis_x.y, 255, 96, 96)
+    rasterize_line(&!fb_r, &!fb_g, &!fb_b, width, height, axis_origin.x, axis_origin.y, axis_y.x, axis_y.y, 110, 255, 150)
+    rasterize_line(&!fb_r, &!fb_g, &!fb_b, width, height, axis_origin.x, axis_origin.y, axis_z.x, axis_z.y, 120, 170, 255)
+
+    i = 0
+    while i < 12 {
+        let a = edge_a(i)
+        let b_idx = edge_b(i)
+        let avg_z = (depth[a] + depth[b_idx]) * 0.5
+        let depth_t = (avg_z - 3.6) / 2.4
+        let blend = if depth_t < 0.0 {
+            0.0
+        } else {
+            if depth_t > 1.0 { 1.0 } else { depth_t }
+        }
+        let line_r = clamp_byte((245.0 - blend * 120.0) as i64)
+        let line_g = clamp_byte((250.0 - blend * 80.0) as i64)
+        let line_b = clamp_byte((255.0 - blend * 25.0) as i64)
+        rasterize_line(
+            &!fb_r, &!fb_g, &!fb_b, width, height,
+            screen_x[a], screen_y[a], screen_x[b_idx], screen_y[b_idx],
+            line_r, line_g, line_b
+        )
+        i = i + 1
+    }
+
+    i = 0
+    while i < 8 {
+        draw_point(&!fb_r, &!fb_g, &!fb_b, width, height, screen_x[i], screen_y[i], 255, 255, 255)
+        i = i + 1
+    }
+
+    emit_ppm(width, height, &fb_r, &fb_g, &fb_b)
 }
