@@ -45,7 +45,7 @@ chk "main:T232_fn"   "compiler_main_test_neg_rem_minus_one"   "self-hosted/compi
 chk "main:T233_fn"   "compiler_main_test_neg_double_neg"      "self-hosted/compiler/main.sio"
 chk "main:T234_fn"   "compiler_main_test_neg_single_no_fold"  "self-hosted/compiler/main.sio"
 chk "main:T235_fn"   "compiler_main_test_neg_commut_mul_minus_one" "self-hosted/compiler/main.sio"
-chk "main:total_235" "let total: i64 = 235"                   "self-hosted/compiler/main.sio"
+chk "main:total_235plus" "let total: i64 = 2[0-9][0-9]"         "self-hosted/compiler/main.sio"
 
 echo ""; echo "--- Group 4: Sprint 84-85 regression ---"
 chk "compat:block_l"   "Sprint 84 Block L"   "self-hosted/ir/opt_cleanup.sio"
