@@ -5,12 +5,15 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
 SOUC="./artifacts/omega/souc-bin/souc-linux-x86_64-jit"
+SELFHOST_RUN="./scripts/lib/run_selfhost_fresh.sh"
 SH="self-hosted/compiler/main.sio"
+SUMMARY_SMOKE="self-hosted/compiler/render_streaming_body_smoke.sio"
 TIMEOUT=480
 OUT_BIN="/tmp/selfhost_triangle_basic_bootstrap"
 REF_PPM="/tmp/selfhost_triangle_basic_ref.ppm"
 OUT_PPM="/tmp/selfhost_triangle_basic_out.ppm"
 ARTIFACT="artifacts/sprint58/selfhost_native_render_gate.v1.json"
+TRACE_ARTIFACT="artifacts/omega/native_decision_trace.v1.json"
 
 PASS=0
 FAIL=0
@@ -61,7 +64,7 @@ check_absent_grep() {
 check_native_compile() {
     TOTAL=$((TOTAL + 1))
     rm -f "$OUT_BIN"
-    if timeout "$TIMEOUT" "$SOUC" run "$SH" -- --native-compile examples/render/triangle_basic.sio -o "$OUT_BIN" >/tmp/sprint58_compile.out 2>&1; then
+    if timeout "$TIMEOUT" "$SELFHOST_RUN" "$SOUC" "$SH" -- --native-compile examples/render/triangle_basic.sio -o "$OUT_BIN" >/tmp/sprint58_compile.out 2>&1; then
         echo "PASS  native:compile"
         PASS=$((PASS + 1))
     else
@@ -125,13 +128,18 @@ echo "=== Sprint 58: Self-hosted Native Render Gate ==="
 echo ""
 echo "--- Group 1: Preconditions ---"
 check_file_exists "native:selfhost_main" "$SH"
+check_file_exists "native:selfhost_runner" "$SELFHOST_RUN"
+check_file_exists "native:summary_body_smoke" "$SUMMARY_SMOKE"
 check_file_exists "native:render_source" "examples/render/triangle_basic.sio"
 check_absent_grep "native:no_cached_elf_path" "triangle_basic_bootstrap_cached\\.elf" "$SH"
 check_absent_grep "native:no_cached_compile_helper" "compiler_try_cached_render_native_compile" "$SH"
+check_absent_grep "native:no_stage_runtime_helper" "stage_native_runtime_bundle" "scripts/e2e_gate.sh"
 echo ""
 echo "--- Group 2: Compile And Execute ---"
 check_run "native:reference_ppm" bash -lc "$SOUC run examples/render/triangle_basic.sio > \"$REF_PPM\""
+check_run "native:summary_body_streaming_smoke" "$SELFHOST_RUN" "$SOUC" "$SUMMARY_SMOKE"
 check_native_compile
+check_run "native:decision_trace_pipeline" grep -qE '"pipeline":"(thinlink-cas|streaming-direct)"' "$TRACE_ARTIFACT"
 check_run "native:binary_exists" test -f "$OUT_BIN"
 check_run "native:chmod" chmod +x "$OUT_BIN"
 check_run "native:execute_binary" bash -lc "\"$OUT_BIN\" > \"$OUT_PPM\""
