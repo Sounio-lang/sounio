@@ -40,7 +40,7 @@ use resolve::imports::*
 use resolve::symbol::*
 use resolve::scope::*
 use resolve::mod::{resolve_modules, resolve_program, ResolveBatchResult}
-use module_loader::{compile_multimodule_native, compile_multimodule_native_advanced, compile_multimodule_native_with_ir, compile_multimodule_native_maybe_streaming, load_multimodule_ir, load_multimodule_ir_traced, load_multimodule_ir_probe_summary, load_multimodule_ir_probe_summary_traced, empty_load_multimodule_ir_trace, preflight_multimodule_frontend, load_multimodule_epistemic_into, load_module_file, extract_imports_from_ast, path_directory, use_path_to_file_path, visited_contains, ir_merge_epistemic_sections, empty_program, file_exists}
+use module_loader::{compile_multimodule_native, compile_multimodule_native_advanced, compile_multimodule_native_with_ir, compile_multimodule_native_maybe_streaming, compile_multimodule_llvm, load_multimodule_ir, load_multimodule_ir_traced, load_multimodule_ir_probe_summary, load_multimodule_ir_probe_summary_traced, empty_load_multimodule_ir_trace, preflight_multimodule_frontend, load_multimodule_epistemic_into, load_module_file, extract_imports_from_ast, path_directory, use_path_to_file_path, visited_contains, ir_merge_epistemic_sections, empty_program, file_exists}
 use frontend_callsite_probe::{run_frontend_callsite_probe}
 use parser::parser::{parser_last_error_count}
 use ir::opt_strategy::{ir_opt_apply_strategy, ir_opt_find_return_vreg, ir_opt_max_label, ir_opt_max_vreg}
@@ -3361,6 +3361,25 @@ fn compile(opts: CompilerOptions) -> CompileResult with IO, Mut, Panic, Div, All
         return compile_emit_manifest_json_from_source(opts.input_file)
     }
 
+    if str_eq(opts.target, "llvm") {
+        let llvm_exit = compile_multimodule_llvm(opts.input_file, opts.output_file, opts.optimize)
+        if llvm_exit == 0 {
+            return CompileResult {
+                success: true,
+                errors: compile_errors_new(),
+                output: opts.output_file,
+            }
+        }
+
+        var llvm_errors = compile_errors_new()
+        llvm_errors = compile_errors_push(llvm_errors, "error: multimodule llvm compilation failed")
+        return CompileResult {
+            success: false,
+            errors: llvm_errors,
+            output: "",
+        }
+    }
+
     let main_prog = load_module_file(opts.input_file)
     let main_imports = extract_imports_from_ast(main_prog)
     let requested_target_spec = native_resolve_target(opts.target, "auto", false)
@@ -4795,17 +4814,24 @@ fn compiler_main_test_native_v2_target_policy_x86() -> bool with IO, Mut, Panic,
 
 // T59: native v2 aarch64 policy is present for the full reserved/allocatable contract
 fn compiler_main_test_native_v2_target_policy_aarch64() -> bool with IO, Mut, Panic, Div {
-    let spec = native_resolve_target("aarch64-macos", "auto", true)
-    let summary = native_v2_target_policy_summary(spec)
-    if !native_v2_target_contract_supported(spec) { return false }
-    if summary.reserved_count != 4 { return false }
-    if summary.allocatable_count != 10 { return false }
-    if summary.arg_count != 8 { return false }
-    if !summary.emitter_ready { return false }
-    if !str_eq(native_v2_target_policy_group_name(spec, NATIVE_V2_POLICY_GROUP_RESERVED(), 3), "x18") { return false }
-    if !str_eq(native_v2_target_policy_group_name(spec, NATIVE_V2_POLICY_GROUP_ALLOCATABLE(), 0), "x19") { return false }
-    if !str_eq(native_v2_target_policy_group_name(spec, NATIVE_V2_POLICY_GROUP_ALLOCATABLE(), 9), "x28") { return false }
-    if !str_eq(native_v2_target_policy_group_name(spec, NATIVE_V2_POLICY_GROUP_ARGS(), 0), "x0") { return false }
+    let mac_spec = native_resolve_target("aarch64-macos", "auto", true)
+    let linux_spec = native_resolve_target("aarch64-linux", "auto", true)
+    let mac_summary = native_v2_target_policy_summary(mac_spec)
+    let linux_summary = native_v2_target_policy_summary(linux_spec)
+    if !native_v2_target_contract_supported(mac_spec) { return false }
+    if !native_v2_target_contract_supported(linux_spec) { return false }
+    if mac_summary.reserved_count != 4 || linux_summary.reserved_count != 4 { return false }
+    if mac_summary.allocatable_count != 10 || linux_summary.allocatable_count != 10 { return false }
+    if mac_summary.arg_count != 8 || linux_summary.arg_count != 8 { return false }
+    if !mac_summary.emitter_ready || !linux_summary.emitter_ready { return false }
+    if !str_eq(native_v2_target_policy_group_name(mac_spec, NATIVE_V2_POLICY_GROUP_RESERVED(), 3), "x18") { return false }
+    if !str_eq(native_v2_target_policy_group_name(linux_spec, NATIVE_V2_POLICY_GROUP_RESERVED(), 3), "x18") { return false }
+    if !str_eq(native_v2_target_policy_group_name(mac_spec, NATIVE_V2_POLICY_GROUP_ALLOCATABLE(), 0), "x19") { return false }
+    if !str_eq(native_v2_target_policy_group_name(linux_spec, NATIVE_V2_POLICY_GROUP_ALLOCATABLE(), 0), "x19") { return false }
+    if !str_eq(native_v2_target_policy_group_name(mac_spec, NATIVE_V2_POLICY_GROUP_ALLOCATABLE(), 9), "x28") { return false }
+    if !str_eq(native_v2_target_policy_group_name(linux_spec, NATIVE_V2_POLICY_GROUP_ALLOCATABLE(), 9), "x28") { return false }
+    if !str_eq(native_v2_target_policy_group_name(mac_spec, NATIVE_V2_POLICY_GROUP_ARGS(), 0), "x0") { return false }
+    if !str_eq(native_v2_target_policy_group_name(linux_spec, NATIVE_V2_POLICY_GROUP_ARGS(), 0), "x0") { return false }
     true
 }
 
@@ -7408,9 +7434,87 @@ fn compiler_main_test_muldiv_cancel_chain() -> bool with Mut, Div, Panic {
     result.instrs[3].op == IrOpcode::IrCopy && result.instrs[5].op == IrOpcode::IrCopy
 }
 
+// Sprint 89 Block P — add-sub/sub-add cancellation tests (T252-T257)
+// (x + C) - C → IrCopy(x)  ;  (x - C) + C → IrCopy(x).
+// SOTA: LLVM InstCombineAddSub.cpp; Muchnick §12.2.
+
+// T252: r1 = x + 10; r2 = r1 - 10  →  r2 = IrCopy(x).
+fn compiler_main_test_addsub_cancel_add_first() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(1, 10)
+    instrs[1] = ir_binop(2, 0, BinaryOp::OpAdd, 1)
+    instrs[2] = ir_load_imm(3, 10)
+    instrs[3] = ir_binop(4, 2, BinaryOp::OpSub, 3)
+    let func   = cp_make_test_func(instrs, 4)
+    let result = ocp_const_fold(func)
+    result.instrs[3].op == IrOpcode::IrCopy && result.instrs[3].src1 == 0
+}
+
+// T253: r1 = x - 7; r2 = r1 + 7  →  r2 = IrCopy(x).
+fn compiler_main_test_addsub_cancel_sub_first() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(1, 7)
+    instrs[1] = ir_binop(2, 0, BinaryOp::OpSub, 1)
+    instrs[2] = ir_load_imm(3, 7)
+    instrs[3] = ir_binop(4, 2, BinaryOp::OpAdd, 3)
+    let func   = cp_make_test_func(instrs, 4)
+    let result = ocp_const_fold(func)
+    result.instrs[3].op == IrOpcode::IrCopy && result.instrs[3].src1 == 0
+}
+
+// T254: Commutative — r1 = 5 + x; r2 = r1 - 5  →  r2 = IrCopy(x).
+fn compiler_main_test_addsub_cancel_commut() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(1, 5)
+    instrs[1] = ir_binop(2, 1, BinaryOp::OpAdd, 0)
+    instrs[2] = ir_load_imm(3, 5)
+    instrs[3] = ir_binop(4, 2, BinaryOp::OpSub, 3)
+    let func   = cp_make_test_func(instrs, 4)
+    let result = ocp_const_fold(func)
+    result.instrs[3].op == IrOpcode::IrCopy && result.instrs[3].src1 == 0
+}
+
+// T255: Mismatched constants — r1 = x + 3; r2 = r1 - 5  →  no fold.
+fn compiler_main_test_addsub_no_cancel_mismatch() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(1, 3)
+    instrs[1] = ir_binop(2, 0, BinaryOp::OpAdd, 1)
+    instrs[2] = ir_load_imm(3, 5)
+    instrs[3] = ir_binop(4, 2, BinaryOp::OpSub, 3)
+    let func   = cp_make_test_func(instrs, 4)
+    let result = ocp_const_fold(func)
+    result.instrs[3].op == IrOpcode::IrBinOp
+}
+
+// T256: Negative constant — r1 = x + (-4); r2 = r1 - (-4)  →  r2 = IrCopy(x).
+fn compiler_main_test_addsub_cancel_neg_const() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(1, -4)
+    instrs[1] = ir_binop(2, 0, BinaryOp::OpAdd, 1)
+    instrs[2] = ir_load_imm(3, -4)
+    instrs[3] = ir_binop(4, 2, BinaryOp::OpSub, 3)
+    let func   = cp_make_test_func(instrs, 4)
+    let result = ocp_const_fold(func)
+    result.instrs[3].op == IrOpcode::IrCopy && result.instrs[3].src1 == 0
+}
+
+// T257: Chain — r1 = x + 10; r2 = r1 - 10; r3 = r2 + 1 — r2=IrCopy(x), r3=BinOp(x, 1).
+fn compiler_main_test_addsub_cancel_chain() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(1, 10)
+    instrs[1] = ir_binop(2, 0, BinaryOp::OpAdd, 1)
+    instrs[2] = ir_load_imm(3, 10)
+    instrs[3] = ir_binop(4, 2, BinaryOp::OpSub, 3)
+    instrs[4] = ir_load_imm(5, 1)
+    instrs[5] = ir_binop(6, 4, BinaryOp::OpAdd, 5)
+    let func   = cp_make_test_func(instrs, 6)
+    let result = ocp_const_fold(func)
+    result.instrs[3].op == IrOpcode::IrCopy && result.instrs[5].op == IrOpcode::IrBinOp
+}
+
 fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
     var passed: i64 = 0
-    let total: i64 = 251
+    let total: i64 = 257
 
     println("=== compiler/main.sio self-tests ===")
 
@@ -9170,6 +9274,48 @@ fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
         passed = passed + 1
     } else {
         println("  FAIL: T251 Sprint 88 Block O: chain cancel")
+    }
+
+    if compiler_main_test_addsub_cancel_add_first() {
+        println("  T252 OK: Sprint 89 Block P: (x+10)-10 → IrCopy(x)")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T252 Sprint 89 Block P: (x+10)-10 cancel")
+    }
+
+    if compiler_main_test_addsub_cancel_sub_first() {
+        println("  T253 OK: Sprint 89 Block P: (x-7)+7 → IrCopy(x)")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T253 Sprint 89 Block P: (x-7)+7 cancel")
+    }
+
+    if compiler_main_test_addsub_cancel_commut() {
+        println("  T254 OK: Sprint 89 Block P: (5+x)-5 → IrCopy(x)")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T254 Sprint 89 Block P: commutative cancel")
+    }
+
+    if compiler_main_test_addsub_no_cancel_mismatch() {
+        println("  T255 OK: Sprint 89 Block P: mismatch constants — no cancel")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T255 Sprint 89 Block P: mismatch no cancel")
+    }
+
+    if compiler_main_test_addsub_cancel_neg_const() {
+        println("  T256 OK: Sprint 89 Block P: (x+(-4))-(-4) → IrCopy(x)")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T256 Sprint 89 Block P: negative constant cancel")
+    }
+
+    if compiler_main_test_addsub_cancel_chain() {
+        println("  T257 OK: Sprint 89 Block P: (x+10)-10 cancel; chain +1 stays BinOp")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T257 Sprint 89 Block P: chain cancel")
     }
 
     println("")

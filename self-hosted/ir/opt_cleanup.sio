@@ -163,6 +163,13 @@ fn ocp_const_fold(func: IrFunction) -> IrFunction with Mut, Div, Panic {
     var mul_valid:   [bool; 256] = [false; 256]
     var mul_var_src: [i64;  256] = [-1;    256]
     var mul_const_v: [i64;  256] = [0;     256]
+    // Sprint 89 Block P: Add-sub/sub-add cancellation — track r = x +/- C.
+    // (x + C) - C → x  ;  (x - C) + C → x.
+    // SOTA: LLVM InstCombineAddSub.cpp; Muchnick §12.2.
+    var as_valid:   [bool; 256] = [false; 256]
+    var as_var_src: [i64;  256] = [-1;    256]
+    var as_const_v: [i64;  256] = [0;     256]
+    var as_is_add:  [bool; 256] = [false; 256]
 
     var i: i64 = 0
     while i < result.instr_count {
@@ -304,6 +311,48 @@ fn ocp_const_fold(func: IrFunction) -> IrFunction with Mut, Div, Panic {
                             mul_valid[instr.dst as usize]   = true
                             mul_var_src[instr.dst as usize] = s2
                             mul_const_v[instr.dst as usize] = v1
+                        }
+                    }
+                    // Sprint 89 Block P: Track r = x + C (commutative).
+                    if instr.bin_op == BinaryOp::OpAdd && instr.dst >= 0 && instr.dst < 256 {
+                        if s2_known && !s1_known && s1 >= 0 && s1 < 256 {
+                            as_valid[instr.dst as usize]   = true
+                            as_var_src[instr.dst as usize] = s1
+                            as_const_v[instr.dst as usize] = v2
+                            as_is_add[instr.dst as usize]  = true
+                        }
+                        if s1_known && !s2_known && s2 >= 0 && s2 < 256 {
+                            as_valid[instr.dst as usize]   = true
+                            as_var_src[instr.dst as usize] = s2
+                            as_const_v[instr.dst as usize] = v1
+                            as_is_add[instr.dst as usize]  = true
+                        }
+                    }
+                    // Sprint 89 Block P: Track r = x - C.
+                    if instr.bin_op == BinaryOp::OpSub && instr.dst >= 0 && instr.dst < 256 {
+                        if s2_known && !s1_known && s1 >= 0 && s1 < 256 {
+                            as_valid[instr.dst as usize]   = true
+                            as_var_src[instr.dst as usize] = s1
+                            as_const_v[instr.dst as usize] = v2
+                            as_is_add[instr.dst as usize]  = false
+                        }
+                    }
+                    // Sprint 89 Block P fold: (x + C) - C → IrCopy(x).
+                    if instr.bin_op == BinaryOp::OpSub && s2_known && !s1_known
+                            && s1 >= 0 && s1 < 256 && as_valid[s1 as usize]
+                            && as_is_add[s1 as usize] && as_const_v[s1 as usize] == v2 {
+                        result.instrs[i as usize] = ir_copy(instr.dst, as_var_src[s1 as usize])
+                        if instr.dst >= 0 && instr.dst < 256 {
+                            as_valid[instr.dst as usize] = false
+                        }
+                    }
+                    // Sprint 89 Block P fold: (x - C) + C → IrCopy(x).
+                    if instr.bin_op == BinaryOp::OpAdd && s2_known && !s1_known
+                            && s1 >= 0 && s1 < 256 && as_valid[s1 as usize]
+                            && !as_is_add[s1 as usize] && as_const_v[s1 as usize] == v2 {
+                        result.instrs[i as usize] = ir_copy(instr.dst, as_var_src[s1 as usize])
+                        if instr.dst >= 0 && instr.dst < 256 {
+                            as_valid[instr.dst as usize] = false
                         }
                     }
                 }
