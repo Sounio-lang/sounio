@@ -45,7 +45,7 @@ use module_loader::{compile_multimodule_native, compile_multimodule_native_advan
 use frontend_callsite_probe::{run_frontend_callsite_probe}
 use parser::parser::{parser_last_error_count}
 use ir::opt_strategy::{ir_opt_apply_strategy, ir_opt_find_return_vreg, ir_opt_max_label, ir_opt_max_vreg}
-use ir::lower::{ir_patch_validated_calls, lower_program_to_ir, lower_program_to_ir_with_epistemic, lower_program_to_ir_probe_summary_ref, lower_program_to_ir_probe_summary_box_ref, lower_program_to_ir_summary_box_probe_with_epistemic_ref, lower_program_function_body_from_summary_with_epistemic_ref, lower_program_to_ir_summary_flat_with_epistemic_ref, lower_program_function_body_from_summary_flat_with_epistemic_ref}
+use ir::lower::{ir_patch_validated_calls, lower_program_to_ir, lower_program_to_ir_with_epistemic, lower_program_to_ir_probe_summary_ref, lower_program_to_ir_probe_summary_box_ref, lower_program_to_ir_summary_box_probe_with_epistemic_ref, lower_program_function_body_from_summary_with_epistemic_ref, lower_program_to_ir_summary_flat_with_epistemic_ref, lower_program_function_body_from_summary_flat_with_epistemic_ref, lower_program_to_ir_summary_flat_owned_with_epistemic_ref}
 use ir::lower::{lower_program_to_ir_with_epistemic_ref, lower_program_to_ir_ordered_with_epistemic_boxed_trace_ref}
 use ir::lower::{lower_program_function_body_from_program_with_epistemic_ref}
 use ir::const_prop::{cp_check_load_imm, cp_empty_instrs, cp_make_test_func, cp_optimize_function}
@@ -6429,20 +6429,14 @@ fn run_probe_native_streaming(args: ArgList, flag_index: i64) with IO, Mut, Pani
         print("probe_native_streaming: typecheck_ok\n")
     }
 
-    print("probe_native_streaming: summary_probe_begin\n")
-    let summary_probe = lower_program_to_ir_probe_summary_box_ref(&program)
-    if summary_probe.had_error {
-        panic("probe_native_streaming summary probe failed")
-    }
-    print("probe_native_streaming: summary_probe_ok fn_count=")
-    print_int((*summary_probe.module).fn_count)
-    print("\n")
-
     print("probe_native_streaming: summary_begin\n")
-    let summary_result = summary_probe
+    let summary_result = lower_program_to_ir_summary_flat_owned_with_epistemic_ref(&program, epistemic)
+    if summary_result.had_error {
+        panic("probe_native_streaming summary failed")
+    }
     print("probe_native_streaming: summary_ok\n")
 
-    let summary_module = &(*summary_result.module)
+    let summary_module = &summary_result.summary.module
     let summary_fn_count = (*summary_module).fn_count
     print("probe_native_streaming: fn_count=")
     print_int(summary_fn_count)
@@ -6454,7 +6448,12 @@ fn run_probe_native_streaming(args: ArgList, flag_index: i64) with IO, Mut, Pani
         print("probe_native_streaming: body_begin fn=")
         compiler_manifest_print_name(fn_name)
         print("\n")
-        let body_result = lower_program_function_body_from_program_with_epistemic_ref(&program, epistemic, fn_name)
+        let body_result = lower_program_function_body_from_summary_flat_with_epistemic_ref(
+            &program,
+            &summary_result.summary,
+            epistemic,
+            fn_name
+        )
         if body_result.had_error {
             print("probe_native_streaming: body_error fn=")
             compiler_manifest_print_name(fn_name)
@@ -7588,9 +7587,84 @@ fn compiler_main_test_copy_prop_const_integration() -> bool with Mut, Div, Panic
     result.instrs[3].op == IrOpcode::IrLoadImm && result.instrs[3].imm_i64 == 8
 }
 
+// Sprint 94 Block R — dead store elimination tests (T264-T269)
+
+// T264: r1=IrLoadImm(10); r1=IrLoadImm(20); use r1 → first store is dead.
+fn compiler_main_test_dse_basic() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(1, 10)
+    instrs[1] = ir_load_imm(1, 20)
+    instrs[2] = ir_binop(2, 1, BinaryOp::OpAdd, 0)
+    let func = cp_make_test_func(instrs, 3)
+    let result = ocp_dse(func)
+    // First IrLoadImm(1,10) should be NOP'd.
+    result.instrs[0].op == IrOpcode::IrNop && result.instrs[1].op == IrOpcode::IrLoadImm
+}
+
+// T265: r1=IrLoadImm(10); use r1; r1=IrLoadImm(20) → first store is live (read in between).
+fn compiler_main_test_dse_live_store() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(1, 10)
+    instrs[1] = ir_binop(2, 1, BinaryOp::OpAdd, 0)
+    instrs[2] = ir_load_imm(1, 20)
+    let func = cp_make_test_func(instrs, 3)
+    let result = ocp_dse(func)
+    // First store is live (r1 read at [1]), should NOT be NOP'd.
+    result.instrs[0].op == IrOpcode::IrLoadImm && result.instrs[0].imm_i64 == 10
+}
+
+// T266: r1=IrLoadImm(5); label; r1=IrLoadImm(7) → label clears tracking, no DSE.
+fn compiler_main_test_dse_label_barrier() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(1, 5)
+    instrs[1] = ir_label(0)
+    instrs[2] = ir_load_imm(1, 7)
+    let func = cp_make_test_func(instrs, 3)
+    let result = ocp_dse(func)
+    // Label is a barrier — first store survives.
+    result.instrs[0].op == IrOpcode::IrLoadImm && result.instrs[0].imm_i64 == 5
+}
+
+// T267: Multiple dead stores — r1=10; r1=20; r1=30 → only last survives.
+fn compiler_main_test_dse_chain() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(1, 10)
+    instrs[1] = ir_load_imm(1, 20)
+    instrs[2] = ir_load_imm(1, 30)
+    instrs[3] = ir_binop(2, 1, BinaryOp::OpAdd, 0)
+    let func = cp_make_test_func(instrs, 4)
+    let result = ocp_dse(func)
+    // First two stores are dead.
+    result.instrs[0].op == IrOpcode::IrNop && result.instrs[1].op == IrOpcode::IrNop && result.instrs[2].op == IrOpcode::IrLoadImm
+}
+
+// T268: Different registers — r1=10; r2=20; use r1 → r1 is live, r2 is not affected.
+fn compiler_main_test_dse_different_regs() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(1, 10)
+    instrs[1] = ir_load_imm(2, 20)
+    instrs[2] = ir_binop(3, 1, BinaryOp::OpAdd, 2)
+    let func = cp_make_test_func(instrs, 3)
+    let result = ocp_dse(func)
+    // Both are read — no dead stores.
+    result.instrs[0].op == IrOpcode::IrLoadImm && result.instrs[1].op == IrOpcode::IrLoadImm
+}
+
+// T269: DSE + copy_prop integration — r1=IrCopy(r0); r1=IrLoadImm(42) → copy is dead after DSE.
+fn compiler_main_test_dse_copy_integration() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_copy(1, 0)
+    instrs[1] = ir_load_imm(1, 42)
+    instrs[2] = ir_binop(2, 1, BinaryOp::OpAdd, 0)
+    let func = cp_make_test_func(instrs, 3)
+    let result = ocp_dse(func)
+    // IrCopy to r1 is dead (overwritten without read).
+    result.instrs[0].op == IrOpcode::IrNop && result.instrs[1].op == IrOpcode::IrLoadImm
+}
+
 fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
     var passed: i64 = 0
-    let total: i64 = 263
+    let total: i64 = 269
 
     println("=== compiler/main.sio self-tests ===")
 
@@ -9434,6 +9508,49 @@ fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
         passed = passed + 1
     } else {
         println("  FAIL: T263 Sprint 93 Block Q: const integration")
+    }
+
+    // Sprint 94 Block R — Dead Store Elimination (T264-T269)
+    if compiler_main_test_dse_basic() {
+        println("  T264 OK: Sprint 94 Block R: dead store r1=10; r1=20 → first NOP'd")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T264 Sprint 94 Block R: basic DSE")
+    }
+
+    if compiler_main_test_dse_live_store() {
+        println("  T265 OK: Sprint 94 Block R: live store (read between writes) survives")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T265 Sprint 94 Block R: live store")
+    }
+
+    if compiler_main_test_dse_label_barrier() {
+        println("  T266 OK: Sprint 94 Block R: label barrier prevents DSE across blocks")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T266 Sprint 94 Block R: label barrier")
+    }
+
+    if compiler_main_test_dse_chain() {
+        println("  T267 OK: Sprint 94 Block R: chain r1=10;20;30 → only last survives")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T267 Sprint 94 Block R: chain DSE")
+    }
+
+    if compiler_main_test_dse_different_regs() {
+        println("  T268 OK: Sprint 94 Block R: different regs both live")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T268 Sprint 94 Block R: different regs")
+    }
+
+    if compiler_main_test_dse_copy_integration() {
+        println("  T269 OK: Sprint 94 Block R: DSE removes dead copy before overwrite")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T269 Sprint 94 Block R: copy+DSE integration")
     }
 
     println("")

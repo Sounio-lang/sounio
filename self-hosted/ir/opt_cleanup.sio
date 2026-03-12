@@ -1165,6 +1165,59 @@ fn ocp_copy_prop(func: IrFunction) -> IrFunction with Mut {
     result
 }
 
+// ============================================================================
+// Sprint 94 Block R: Dead Store Elimination (DSE)
+// ============================================================================
+//
+// Forward scan: track last_write_pos[reg] = instruction index of the most
+// recent write to each register.  When a register is read (as src1/src2),
+// clear its last_write entry (the store is live).  When a register is written
+// again and last_write is still set, the earlier write is a dead store — NOP it.
+// Skips side-effecting instructions (calls, stores, branches, labels, returns).
+// SOTA: Cooper & Torczon §8.4; Bodik, Gupta & Soffa PLDI 1998.
+fn ocp_dse(func: IrFunction) -> IrFunction with Mut {
+    var result = func
+    // last_write[r] = instruction index of most recent write to r, or -1.
+    var last_write: [i64; 256] = [-1; 256]
+    var i: i64 = 0
+    while i < result.instr_count {
+        let instr = result.instrs[i as usize]
+
+        // Mark src1 as read → its store is live (clear last_write).
+        if instr.src1 >= 0 && instr.src1 < 256 {
+            last_write[instr.src1 as usize] = -1
+        }
+        // Mark src2 as read → its store is live.
+        if instr.src2 >= 0 && instr.src2 < 256 {
+            last_write[instr.src2 as usize] = -1
+        }
+
+        // Check if this instruction writes to dst.
+        if ocp_has_dst(instr.op) && !ocp_has_side_effect(instr.op) {
+            if instr.dst >= 0 && instr.dst < 256 {
+                let prev = last_write[instr.dst as usize]
+                if prev >= 0 {
+                    // Previous write to this reg was never read → dead store.
+                    result.instrs[prev as usize] = ir_nop()
+                }
+                last_write[instr.dst as usize] = i
+            }
+        }
+
+        // Labels and branches break basic blocks — conservatively clear all.
+        if instr.op == IrOpcode::IrLabel || instr.op == IrOpcode::IrJump || instr.op == IrOpcode::IrBranchTrue || instr.op == IrOpcode::IrBranchFalse {
+            var k: i64 = 0
+            while k < 256 {
+                last_write[k as usize] = -1
+                k = k + 1
+            }
+        }
+
+        i = i + 1
+    }
+    result
+}
+
 fn opt_cleanup_function(func: IrFunction) -> IrFunction with Mut, Div, Panic {
     var current = ocp_dedup_imm(func)
     current = ocp_const_fold(current)
@@ -1172,6 +1225,7 @@ fn opt_cleanup_function(func: IrFunction) -> IrFunction with Mut, Div, Panic {
     current = ocp_egraph_mini_pass(current)   // mini e-graph: activates for instr_count <= 4
     current = ocp_cse(current)                // CSE: always active
     current = ocp_copy_prop(current)          // Sprint 93 Block Q: copy chain collapse
+    current = ocp_dse(current)                // Sprint 94 Block R: dead store elimination
     var iter: i64 = 0
     while iter < 8 {
         let swept = ocp_dce_once(current)
