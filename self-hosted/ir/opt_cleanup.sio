@@ -185,6 +185,12 @@ fn ocp_const_fold(func: IrFunction) -> IrFunction with Mut, Div, Panic {
     var cmp_orig_src:  [i64;  256] = [-1;    256]
     var cmp_op_code:   [i64;  256] = [0;     256]
 
+    // Sprint 108 Block AE: And-mask fold — track r = x & C.
+    // (x & C1) & C2 → x & (C1 & C2).  SOTA: LLVM InstCombineAndOrXor.cpp.
+    var and_valid:     [bool; 256] = [false; 256]
+    var and_var_src:   [i64;  256] = [-1;    256]
+    var and_const_val: [i64;  256] = [0;     256]
+
     var i: i64 = 0
     while i < result.instr_count {
         let instr = result.instrs[i as usize]
@@ -449,6 +455,49 @@ fn ocp_const_fold(func: IrFunction) -> IrFunction with Mut, Div, Panic {
                     }
                     if s1_known && v1 == -1 {
                         result.instrs[i as usize] = ir_copy(instr.dst, s2)
+                    }
+                }
+                // Sprint 108 Block AE: And-mask chain fold — (x & C1) & C2 → x & (C1 & C2).
+                if instr.bin_op == BinaryOp::OpBitAnd {
+                    if s2_known && s1 >= 0 && s1 < 256 && and_valid[s1 as usize] {
+                        let c1 = and_const_val[s1 as usize]
+                        let merged = c1 & v2
+                        let def_idx = def_at[s2 as usize]
+                        if def_idx >= 0 {
+                            result.instrs[def_idx as usize] = ir_load_imm(s2, merged)
+                            const_val[s2 as usize] = merged
+                        }
+                        result.instrs[i as usize] = ir_binop(instr.dst, and_var_src[s1 as usize], BinaryOp::OpBitAnd, s2)
+                        if instr.dst >= 0 && instr.dst < 256 {
+                            and_valid[instr.dst as usize]     = true
+                            and_var_src[instr.dst as usize]   = and_var_src[s1 as usize]
+                            and_const_val[instr.dst as usize] = merged
+                        }
+                    }
+                    if s1_known && s2 >= 0 && s2 < 256 && and_valid[s2 as usize] {
+                        let c2_prev = and_const_val[s2 as usize]
+                        let merged = v1 & c2_prev
+                        let def_idx = def_at[s1 as usize]
+                        if def_idx >= 0 {
+                            result.instrs[def_idx as usize] = ir_load_imm(s1, merged)
+                            const_val[s1 as usize] = merged
+                        }
+                        result.instrs[i as usize] = ir_binop(instr.dst, and_var_src[s2 as usize], BinaryOp::OpBitAnd, s1)
+                        if instr.dst >= 0 && instr.dst < 256 {
+                            and_valid[instr.dst as usize]     = true
+                            and_var_src[instr.dst as usize]   = and_var_src[s2 as usize]
+                            and_const_val[instr.dst as usize] = merged
+                        }
+                    }
+                    if s2_known && !s1_known && instr.dst >= 0 && instr.dst < 256 {
+                        and_valid[instr.dst as usize]     = true
+                        and_var_src[instr.dst as usize]   = s1
+                        and_const_val[instr.dst as usize] = v2
+                    }
+                    if s1_known && !s2_known && instr.dst >= 0 && instr.dst < 256 {
+                        and_valid[instr.dst as usize]     = true
+                        and_var_src[instr.dst as usize]   = s2
+                        and_const_val[instr.dst as usize] = v1
                     }
                 }
                 if instr.bin_op == BinaryOp::OpBitOr {

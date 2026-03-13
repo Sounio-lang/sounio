@@ -61,6 +61,7 @@ use native::regalloc::*
 use native::peephole::*
 use interop::protocol::*
 use interop::server::*
+use interop::contract::*
 
 // ============================================================================
 // STRING UTILITIES
@@ -8631,9 +8632,92 @@ fn compiler_main_test_float_legalize() -> bool with Mut, Div, Panic, Alloc {
     legal.supported && legal.is_float_slot[0 as usize] == 1
 }
 
+// Sprint 108 Block AE: And-mask truncation folding tests (T352-T357).
+// (x & C1) & C2 → x & (C1 & C2).  SOTA: LLVM InstCombineAndOrXor.cpp.
+
+// T352: (r0 & 0xFF00) & 0x0F00 → r0 & 0x0F00.
+fn compiler_main_test_and_mask_basic() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(1, 65280)
+    instrs[1] = ir_binop(2, 0, BinaryOp::OpBitAnd, 1)
+    instrs[2] = ir_load_imm(3, 3840)
+    instrs[3] = ir_binop(4, 2, BinaryOp::OpBitAnd, 3)
+    let func   = cp_make_test_func(instrs, 4)
+    let result = ocp_const_fold(func)
+    result.instrs[3].op == IrOpcode::IrBinOp
+        && result.instrs[3].src1 == 0
+        && result.instrs[2].imm_i64 == 3840
+}
+
+// T353: Three-deep: ((r0 & 0xFFFF) & 0xFF00) & 0x0F00 → r0 & 0x0F00.
+fn compiler_main_test_and_mask_three_deep() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(1, 65535)
+    instrs[1] = ir_binop(2, 0, BinaryOp::OpBitAnd, 1)
+    instrs[2] = ir_load_imm(3, 65280)
+    instrs[3] = ir_binop(4, 2, BinaryOp::OpBitAnd, 3)
+    instrs[4] = ir_load_imm(5, 3840)
+    instrs[5] = ir_binop(6, 4, BinaryOp::OpBitAnd, 5)
+    let func   = cp_make_test_func(instrs, 6)
+    let result = ocp_const_fold(func)
+    result.instrs[5].op == IrOpcode::IrBinOp
+        && result.instrs[5].src1 == 0
+        && result.instrs[4].imm_i64 == 3840
+}
+
+// T354: Disjoint masks (r0 & 0xF0) & 0x0F → merged const = 0.
+fn compiler_main_test_and_mask_to_zero() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(1, 240)
+    instrs[1] = ir_binop(2, 0, BinaryOp::OpBitAnd, 1)
+    instrs[2] = ir_load_imm(3, 15)
+    instrs[3] = ir_binop(4, 2, BinaryOp::OpBitAnd, 3)
+    let func   = cp_make_test_func(instrs, 4)
+    let result = ocp_const_fold(func)
+    result.instrs[2].imm_i64 == 0
+}
+
+// T355: Wider mask is identity: (r0 & 0xFF) & 0xFFFF → r0 & 0xFF.
+fn compiler_main_test_and_mask_identity() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(1, 255)
+    instrs[1] = ir_binop(2, 0, BinaryOp::OpBitAnd, 1)
+    instrs[2] = ir_load_imm(3, 65535)
+    instrs[3] = ir_binop(4, 2, BinaryOp::OpBitAnd, 3)
+    let func   = cp_make_test_func(instrs, 4)
+    let result = ocp_const_fold(func)
+    result.instrs[3].op == IrOpcode::IrBinOp
+        && result.instrs[3].src1 == 0
+        && result.instrs[2].imm_i64 == 255
+}
+
+// T356: OR chain does NOT trigger Block AE (AND-only).
+fn compiler_main_test_and_mask_or_no_fold() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(1, 240)
+    instrs[1] = ir_binop(2, 0, BinaryOp::OpBitOr, 1)
+    instrs[2] = ir_load_imm(3, 15)
+    instrs[3] = ir_binop(4, 2, BinaryOp::OpBitAnd, 3)
+    let func   = cp_make_test_func(instrs, 4)
+    let result = ocp_const_fold(func)
+    result.instrs[3].src1 == 2
+}
+
+// T357: Sub does NOT set AND tracking.
+fn compiler_main_test_and_mask_sub_no_track() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(1, 5)
+    instrs[1] = ir_binop(2, 0, BinaryOp::OpSub, 1)
+    instrs[2] = ir_load_imm(3, 255)
+    instrs[3] = ir_binop(4, 2, BinaryOp::OpBitAnd, 3)
+    let func   = cp_make_test_func(instrs, 4)
+    let result = ocp_const_fold(func)
+    result.instrs[3].src1 == 2
+}
+
 fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
     var passed: i64 = 0
-    let total: i64 = 349
+    let total: i64 = 357
 
     println("=== compiler/main.sio self-tests ===")
 
@@ -10986,6 +11070,30 @@ fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
         println("  T343 OK: Sprint 89: float legalize PSEUDO_LOAD_FLOAT → LOAD_FLOAT_RIP")
         passed = passed + 1
     } else { println("  FAIL: T343 float legalize") }
+    if compiler_main_test_and_mask_basic() {
+        println("  T352 OK: Sprint 108 Block AE: and-mask chain basic")
+        passed = passed + 1
+    } else { println("  FAIL: T352") }
+    if compiler_main_test_and_mask_three_deep() {
+        println("  T353 OK: Sprint 108 Block AE: and-mask three-deep chain")
+        passed = passed + 1
+    } else { println("  FAIL: T353") }
+    if compiler_main_test_and_mask_to_zero() {
+        println("  T354 OK: Sprint 108 Block AE: disjoint masks fold to zero")
+        passed = passed + 1
+    } else { println("  FAIL: T354") }
+    if compiler_main_test_and_mask_identity() {
+        println("  T355 OK: Sprint 108 Block AE: wider mask identity")
+        passed = passed + 1
+    } else { println("  FAIL: T355") }
+    if compiler_main_test_and_mask_or_no_fold() {
+        println("  T356 OK: Sprint 108 Block AE: OR does not trigger AND chain")
+        passed = passed + 1
+    } else { println("  FAIL: T356") }
+    if compiler_main_test_and_mask_sub_no_track() {
+        println("  T357 OK: Sprint 108 Block AE: SUB does not trigger AND tracking")
+        passed = passed + 1
+    } else { println("  FAIL: T357") }
 
     println("")
     println("compiler/main tests: " + int_to_string(passed) + "/" + int_to_string(total) + " passed")
@@ -11004,7 +11112,6 @@ fn main() with IO, Mut, Panic, Div, Alloc {
         ipc_serve()
         return
     }
-
     println("SOUNIO SELF-HOSTED COMPILER v0.80.0")
     println("Horizon 3: self-hosted primary compiler.")
     println("")
