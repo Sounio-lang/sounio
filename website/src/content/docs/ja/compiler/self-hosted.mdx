@@ -1,0 +1,98 @@
+---
+title: "Self-Hosted Compiler"
+description: "Architecture and pipeline of the Sounio self-hosted native compiler."
+weight: 25
+category: "compiler"
+topic_id: "website.docs.compiler.self-hosted"
+authority: "website_only"
+audience: "contributors"
+last_validated: "2026-03-07"
+validated_by: "A4"
+source_of_truth: "docs/governance/topic-registry.v1.json#website.docs.compiler.self-hosted"
+---
+
+# セルフホストコンパイラ
+
+Sounioには、すべて `.sio` ファイルで記述されたセルフホストコンパイラが含まれています。このコンパイラは、LLVM、Cranelift、その他の外部コードジェネレータに依存することなく、パース、型チェック、IRへの変換、最適化、ネイティブx86-64 ELFバイナリの出力が可能です。
+
+## パイプライン
+
+```
+Source (.sio) → Lexer → Parser → AST
+    → ir/lower.sio → IrModule (custom IR)
+    → Optimization passes
+    → native/codegen.sio → x86-64 machine code
+    → native/elf.sio → ELF binary
+```
+
+このパイプラインは、Rustホストコンパイラが使用するHLIR/LLVMパスとは別のものです。ネイティブバックエンドは、中間オブジェクトファイルなしでELFバイナリを直接生成します。
+
+## 主要モジュール
+
+| モジュール | ファイル | 目的 |
+|--------|------|---------|
+| Lexer | `self-hosted/lexer/` | トークン化 |
+| Parser | `self-hosted/parser/` | AST構築 |
+| IR lowering | `self-hosted/ir/lower.sio` | ASTからIRへの変換、ストラテジ計算 |
+| IR types | `self-hosted/ir/ir.sio` | IrFunction、IrModule、IrInstrの定義 |
+| Optimizer | `self-hosted/ir/opt_cleanup.sio` | 定数畳み込み、DCE、強度削減 |
+| Profile | `self-hosted/ir/profile.sio` | .sprofプロファイリングデータ、ストラテジ昇格 |
+| Inliner | `self-hosted/ir/inline.sio` | プロファイル誘導インライン展開 |
+| Layout | `self-hosted/ir/layout.sio` | プロファイル誘導関数配置 |
+| E-graph | `self-hosted/ir/egraph.sio` | 代数規則のための等価飽和 |
+| Codegen | `self-hosted/native/codegen.sio` | x86-64命令生成 |
+| Frame | `self-hosted/native/frame.sio` | スタックフレームレイアウト、レジスタ割り当て |
+| ELF | `self-hosted/native/elf.sio` | ELFバイナリフォーマット出力 |
+| Relocations | `self-hosted/native/reloc.sio` | シンボルおよびセクションリロケーション |
+| Entry | `self-hosted/compiler/main.sio` | CLIドライバとコンパイルオーケストレーション |
+
+## 最適化パス
+
+セルフホストオプティマイザには、スプリント51-110にわたって段階的に構築された20以上のパスが含まれています:
+
+- **定数畳み込み**: コンパイル時に既知の定数算術を評価します。
+- **デッドコード除去**: マークスイープにより未使用命令を削除します。
+- **強度削減**: `x * 2^n` を `x << n` に、`x / 2^n` を `x >> n` に、`x % 2^n` を `x & (2^n - 1)` に置き換えます。
+- **コピー伝播**: `IrCopy` チェーンを追跡し、さらなる畳み込みを可能にします。
+- **ピープホール最適化**: `IrCopy(r,r)` を `IrNop` に、重複する `IrLoadImm` を除去します。
+- **代数正規化**: `x - x` を0に、`x ^ x` を0に、定数チェーン畳み込み `(x + 3) + 5` を `x + 8` にします。
+- **E-graph飽和**: 可換正規化、ビット演算恒等式、乗算消滅。
+- **CSE（共通部分式除去）**: 正規化されたオペランド順序を持つ128エントリハッシュテーブル。
+- **LICM（ループ不変コード移動）**: ループ不変の `IrLoadImm` をバックエッジの外にホイストします。
+- **GVN（大域値番号付け）**: 128エントリテーブルによる大域値番号付け。
+- **ブール簡約**: `(x == 0) == 0` を `IrCopy(x)` に、`bool != 0` を `IrCopy(bool)` にします。
+- **条件分岐畳み込み**: `BranchTrue(known_const)` を `IrJump` または `IrNop` にします。
+- **ジャンプからリターンへの変換**: `IrJump(L)` で `L+1 = IrReturn` の場合、`IrReturn` に畳み込みます。
+
+## レジスタ割り当て
+
+ネイティブバックエンドは、`r12`、`r13`、`r14`、`r15`（callee-saved）を対象とした4レジスタ線形走査アロケータを使用します。スタックスピルは適応的な `disp8`/`disp32` エンコーディングによりコードサイズを最小化します。
+
+## プロファイル誘導最適化
+
+セルフホストコンパイラは完全なPGOパイプラインを実装しています:
+
+1. **計装**: `IrProfCounter` オペコードが関数エントリに `INC [RIP+disp32]` を注入します。
+2. **プロファイルダンプ**: `__prof_dump` が終了時に関数ごとの実行回数を含む `.sprof` ファイルを書き出します。
+3. **ストラテジ昇格**: ホット関数（カウント > 1000）は `AGGRESSIVE` に、ウォーム関数（> 100）は `PRECISION` に昇格されます。
+4. **プロファイル誘導インライン展開**: インラインスコアリングにストラテジボーナスを組み込みます。
+5. **プロファイル誘導レイアウト**: ホット関数をバイナリの先頭にソートし、キャッシュ局所性を向上させます。
+
+## セルフホストコンパイラの実行
+
+```bash
+SOUC=./artifacts/omega/souc-bin/souc-linux-x86_64-jit
+
+# Self-test (runs all internal test cases)
+$SOUC run self-hosted/compiler/main.sio -- --self-test
+
+# Check only (no codegen)
+$SOUC run self-hosted/compiler/main.sio -- --check
+
+# IR dump for specific function
+$SOUC run self-hosted/compiler/main.sio -- --ir-dump --fn=main
+```
+
+## 検証
+
+セルフホストコンパイラは、すべての最適化パスをカバーする347以上のセルフテストにより自己検証を行います。ゲートスクリプト（例: `scripts/sprint52_regalloc_gate.sh`）がテストマトリクス全体を実行し、PASS/FAIL/NOT_RUNのカウントを報告します。

@@ -1,0 +1,98 @@
+---
+title: "Self-Hosted Compiler"
+description: "Architecture and pipeline of the Sounio self-hosted native compiler."
+weight: 25
+category: "compiler"
+topic_id: "website.docs.compiler.self-hosted"
+authority: "website_only"
+audience: "contributors"
+last_validated: "2026-03-07"
+validated_by: "A4"
+source_of_truth: "docs/governance/topic-registry.v1.json#website.docs.compiler.self-hosted"
+---
+
+# Compilador self-hosted
+
+Sounio incluye un compilador self-hosted escrito enteramente en archivos `.sio`. Este compilador puede parsear, verificar tipos, bajar a IR, optimizar y emitir binarios ELF nativos para x86-64 — sin depender de LLVM, Cranelift ni ningun generador de codigo externo.
+
+## Pipeline
+
+```
+Source (.sio) → Lexer → Parser → AST
+    → ir/lower.sio → IrModule (custom IR)
+    → Optimization passes
+    → native/codegen.sio → x86-64 machine code
+    → native/elf.sio → ELF binary
+```
+
+Este pipeline es independiente de la ruta HLIR/LLVM utilizada por el compilador hospedado en Rust. El backend nativo genera binarios ELF directamente, sin archivos objeto intermedios.
+
+## Modulos principales
+
+| Modulo | Archivo | Proposito |
+|--------|---------|-----------|
+| Lexer | `self-hosted/lexer/` | Tokenizacion |
+| Parser | `self-hosted/parser/` | Construccion del AST |
+| IR lowering | `self-hosted/ir/lower.sio` | Conversion de AST a IR, computo de estrategia |
+| Tipos IR | `self-hosted/ir/ir.sio` | Definiciones de IrFunction, IrModule, IrInstr |
+| Optimizador | `self-hosted/ir/opt_cleanup.sio` | Constant folding, DCE, strength reduction |
+| Perfil | `self-hosted/ir/profile.sio` | Datos de profiling .sprof, promocion de estrategia |
+| Inliner | `self-hosted/ir/inline.sio` | Inlining guiado por perfil |
+| Layout | `self-hosted/ir/layout.sio` | Ordenamiento de funciones guiado por perfil |
+| E-graph | `self-hosted/ir/egraph.sio` | Saturacion de igualdad para reglas algebraicas |
+| Codegen | `self-hosted/native/codegen.sio` | Emision de instrucciones x86-64 |
+| Frame | `self-hosted/native/frame.sio` | Layout de stack frame, asignacion de registros |
+| ELF | `self-hosted/native/elf.sio` | Emision del formato binario ELF |
+| Relocaciones | `self-hosted/native/reloc.sio` | Relocaciones de simbolos y secciones |
+| Entrada | `self-hosted/compiler/main.sio` | Driver CLI y orquestacion de compilacion |
+
+## Pases de optimizacion
+
+El optimizador self-hosted incluye mas de 20 pases, construidos incrementalmente a lo largo de los sprints 51-110:
+
+- **Constant folding**: Evalua aritmetica de constantes conocidas en tiempo de compilacion.
+- **Eliminacion de codigo muerto**: Mark-sweep para remover instrucciones no utilizadas.
+- **Strength reduction**: Reemplaza `x * 2^n` con `x << n`, `x / 2^n` con `x >> n`, `x % 2^n` con `x & (2^n - 1)`.
+- **Propagacion de copias**: Rastrea cadenas de `IrCopy` para habilitar mas folding.
+- **Peephole**: `IrCopy(r,r)` a `IrNop`, eliminacion de `IrLoadImm` duplicados.
+- **Normalizacion algebraica**: `x - x` a 0, `x ^ x` a 0, folding de cadenas de constantes `(x + 3) + 5` a `x + 8`.
+- **Saturacion de e-graph**: Canonicalizacion conmutativa, identidades bitwise, aniquilacion por multiplicacion.
+- **CSE**: Tabla hash de 128 entradas con ordenamiento canonico de operandos.
+- **LICM**: Elevar `IrLoadImm` invariantes de loop mas alla de aristas de retorno.
+- **GVN**: Numeracion de valores global con tabla de 128 entradas.
+- **Simplificacion booleana**: `(x == 0) == 0` a `IrCopy(x)`, `bool != 0` a `IrCopy(bool)`.
+- **Folding de branch condicional**: `BranchTrue(const_conocida)` a `IrJump` o `IrNop`.
+- **Jump-to-return**: `IrJump(L)` donde `L+1 = IrReturn` se pliega a `IrReturn`.
+
+## Asignacion de registros
+
+El backend nativo usa un asignador linear-scan de 4 registros apuntando a `r12`, `r13`, `r14`, `r15` (callee-saved). Los spills a stack usan codificacion adaptativa `disp8`/`disp32` para minimizar el tamano del codigo.
+
+## Optimizacion guiada por perfil
+
+El compilador self-hosted implementa un pipeline completo de PGO:
+
+1. **Instrumentacion**: Opcodes `IrProfCounter` inyectan `INC [RIP+disp32]` en las entradas de funciones.
+2. **Volcado de perfil**: `__prof_dump` escribe archivos `.sprof` al salir con conteos de ejecucion por funcion.
+3. **Promocion de estrategia**: Las funciones calientes (conteo > 1000) se promueven a `AGGRESSIVE`, las tibias (> 100) a `PRECISION`.
+4. **Inlining guiado por perfil**: El scoring de inlining incorpora bonificaciones por estrategia.
+5. **Layout guiado por perfil**: Las funciones calientes se ordenan al frente del binario para localidad de cache.
+
+## Ejecutar el compilador self-hosted
+
+```bash
+SOUC=./artifacts/omega/souc-bin/souc-linux-x86_64-jit
+
+# Self-test (runs all internal test cases)
+$SOUC run self-hosted/compiler/main.sio -- --self-test
+
+# Check only (no codegen)
+$SOUC run self-hosted/compiler/main.sio -- --check
+
+# IR dump for specific function
+$SOUC run self-hosted/compiler/main.sio -- --ir-dump --fn=main
+```
+
+## Verificacion
+
+El compilador self-hosted se valida a si mismo mediante 347+ self-tests que cubren cada pase de optimizacion. Los scripts de gate (por ejemplo, `scripts/sprint52_regalloc_gate.sh`) ejecutan la matriz completa de tests y reportan conteos de PASS/FAIL/NOT_RUN.

@@ -1,0 +1,98 @@
+---
+title: "Self-Hosted Compiler"
+description: "Architecture and pipeline of the Sounio self-hosted native compiler."
+weight: 25
+category: "compiler"
+topic_id: "website.docs.compiler.self-hosted"
+authority: "website_only"
+audience: "contributors"
+last_validated: "2026-03-07"
+validated_by: "A4"
+source_of_truth: "docs/governance/topic-registry.v1.json#website.docs.compiler.self-hosted"
+---
+
+# 自托管编译器
+
+Sounio 包含一个完全用 `.sio` 文件编写的自托管编译器。该编译器能够解析、类型检查、降低到 IR、优化并生成原生 x86-64 ELF 二进制文件 —— 无需依赖 LLVM、Cranelift 或任何外部代码生成器。
+
+## 编译流水线
+
+```
+Source (.sio) → Lexer → Parser → AST
+    → ir/lower.sio → IrModule (custom IR)
+    → Optimization passes
+    → native/codegen.sio → x86-64 machine code
+    → native/elf.sio → ELF binary
+```
+
+该流水线与 Rust 宿主编译器使用的 HLIR/LLVM 路径是分开的。原生后端直接生成 ELF 二进制文件，没有中间目标文件。
+
+## 关键模块
+
+| 模块 | 文件 | 用途 |
+|--------|------|---------|
+| Lexer | `self-hosted/lexer/` | 词法分析 |
+| Parser | `self-hosted/parser/` | AST 构造 |
+| IR 降低 | `self-hosted/ir/lower.sio` | AST 到 IR 的转换，策略计算 |
+| IR 类型 | `self-hosted/ir/ir.sio` | IrFunction、IrModule、IrInstr 定义 |
+| 优化器 | `self-hosted/ir/opt_cleanup.sio` | 常量折叠、死代码消除、强度削减 |
+| 性能剖析 | `self-hosted/ir/profile.sio` | .sprof 剖析数据，策略提升 |
+| 内联器 | `self-hosted/ir/inline.sio` | 基于剖析的函数内联 |
+| 布局 | `self-hosted/ir/layout.sio` | 基于剖析的函数排序 |
+| E-graph | `self-hosted/ir/egraph.sio` | 代数规则的等式饱和 |
+| 代码生成 | `self-hosted/native/codegen.sio` | x86-64 指令发射 |
+| 栈帧 | `self-hosted/native/frame.sio` | 栈帧布局，寄存器分配 |
+| ELF | `self-hosted/native/elf.sio` | ELF 二进制格式发射 |
+| 重定位 | `self-hosted/native/reloc.sio` | 符号和段重定位 |
+| 入口 | `self-hosted/compiler/main.sio` | CLI 驱动和编译编排 |
+
+## 优化遍
+
+自托管优化器包含超过 20 个优化遍，在 Sprint 51-110 中逐步构建：
+
+- **常量折叠**：在编译期计算已知常量的算术运算。
+- **死代码消除**：标记-清扫法移除未使用的指令。
+- **强度削减**：将 `x * 2^n` 替换为 `x << n`，`x / 2^n` 替换为 `x >> n`，`x % 2^n` 替换为 `x & (2^n - 1)`。
+- **拷贝传播**：跟踪 `IrCopy` 链以启用进一步的折叠。
+- **窥孔优化**：`IrCopy(r,r)` 转为 `IrNop`，消除重复的 `IrLoadImm`。
+- **代数规范化**：`x - x` 转为 0，`x ^ x` 转为 0，常量链折叠 `(x + 3) + 5` 转为 `x + 8`。
+- **E-graph 饱和**：交换律规范化、按位恒等式、乘法湮灭。
+- **公共子表达式消除（CSE）**：128 项哈希表，操作数规范排序。
+- **循环不变代码外提（LICM）**：将循环不变的 `IrLoadImm` 提升到回边之前。
+- **全局值编号（GVN）**：128 项表的全局值编号。
+- **布尔简化**：`(x == 0) == 0` 转为 `IrCopy(x)`，`bool != 0` 转为 `IrCopy(bool)`。
+- **条件分支折叠**：`BranchTrue(known_const)` 转为 `IrJump` 或 `IrNop`。
+- **跳转到返回**：当 `L+1 = IrReturn` 时，`IrJump(L)` 折叠为 `IrReturn`。
+
+## 寄存器分配
+
+原生后端使用 4 寄存器线性扫描分配器，目标寄存器为 `r12`、`r13`、`r14`、`r15`（被调用者保存）。栈溢出使用自适应 `disp8`/`disp32` 编码以最小化代码大小。
+
+## 基于剖析的优化（PGO）
+
+自托管编译器实现了完整的 PGO 流水线：
+
+1. **插桩**：`IrProfCounter` 操作码在函数入口注入 `INC [RIP+disp32]`。
+2. **剖析数据导出**：`__prof_dump` 在退出时写入 `.sprof` 文件，记录每个函数的执行次数。
+3. **策略提升**：热函数（计数 > 1000）提升为 `AGGRESSIVE`，温函数（> 100）提升为 `PRECISION`。
+4. **基于剖析的内联**：内联评分包含策略加分。
+5. **基于剖析的布局**：热函数排列到二进制文件前部以提高缓存局部性。
+
+## 运行自托管编译器
+
+```bash
+SOUC=./artifacts/omega/souc-bin/souc-linux-x86_64-jit
+
+# Self-test (runs all internal test cases)
+$SOUC run self-hosted/compiler/main.sio -- --self-test
+
+# Check only (no codegen)
+$SOUC run self-hosted/compiler/main.sio -- --check
+
+# IR dump for specific function
+$SOUC run self-hosted/compiler/main.sio -- --ir-dump --fn=main
+```
+
+## 验证
+
+自托管编译器通过 347+ 个自测试来验证自身，覆盖每个优化遍。门控脚本（例如 `scripts/sprint52_regalloc_gate.sh`）运行完整的测试矩阵并报告 PASS/FAIL/NOT_RUN 计数。

@@ -19,32 +19,32 @@ This is the editor-in-chief acceptance snapshot generated from `docs/governance/
 
 ## Scope Summary
 
-- Total governed topics: 182
+- Total governed topics: 190
 - Repo-backed topics: 148
-- Website-backed topics: 47
+- Website-backed topics: 55
 - Dual-canon topics: 13
 - Authority count `archived`: 7
 - Authority count `dual`: 13
 - Authority count `historical`: 30
 - Authority count `repo_only`: 98
-- Authority count `website_only`: 34
+- Authority count `website_only`: 42
 
 ## Ownership Summary
 
 - A0: 1 topics
 - A1: 1 topics
-- A2: 62 topics
+- A2: 69 topics
 - A3: 7 topics
-- A4: 21 topics
+- A4: 22 topics
 - A5: 17 topics
 - A6: 34 topics
 - A7: 39 topics
 
 ## Locale Acceptance
 
-- Docs collection topics with full six-locale coverage: 30/30
+- Docs collection topics with full six-locale coverage: 37/37
 - All governed website docs topics are present in `en`, `pt`, `el`, `zh`, `ja`, and `es`.
-- English-only website collections allowed by policy and marked in the registry: tutorials: 6; showcases: 9; blog: 2
+- English-only website collections allowed by policy and marked in the registry: tutorials: 6; showcases: 9; blog: 3
 
 ## Evidence-Bearing Topics
 

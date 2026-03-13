@@ -1,0 +1,79 @@
+---
+title: "Refinement Types"
+description: "Attach logical predicates to types so the compiler can prove constraints at compile time."
+weight: 15
+category: "language"
+topic_id: "website.docs.language.refinement-types"
+authority: "website_only"
+audience: "users"
+last_validated: "2026-03-07"
+validated_by: "A2"
+source_of_truth: "docs/governance/topic-registry.v1.json#website.docs.language.refinement-types"
+---
+
+# Refinement Types
+
+Um refinement type (tipo refinado) restringe um tipo base com um predicado logico. O compilador usa um SMT solver (Z3) para verificar que os valores satisfazem o predicado em tempo de compilacao, capturando erros de faixa antes que o programa execute.
+
+## Sintaxe
+
+```sio
+type Positive = { x: i32 | x > 0 }
+type Percentage = { p: f64 | p >= 0.0 && p <= 100.0 }
+type NonEmpty<T> = { arr: [T] | len(arr) > 0 }
+```
+
+O predicado apos o `|` deve ser uma expressao booleana pura sobre a variavel vinculada e constantes. O compilador delega isso ao Z3 para verificacao de satisfatibilidade.
+
+## Usando refinement types
+
+```sio
+fn safe_divide(a: f64, b: { b: f64 | b != 0.0 }) -> f64 {
+    a / b
+}
+
+fn main() with IO {
+    let result = safe_divide(10.0, 3.0)   // OK: 3.0 != 0.0 proven
+    println(result)
+
+    // safe_divide(10.0, 0.0)  // compile error: cannot prove 0.0 != 0.0
+}
+```
+
+Quando um literal e passado, o solver pode verificar a restricao imediatamente. Quando uma variavel e passada, o solver usa os refinements conhecidos da variavel a partir do seu local de declaracao.
+
+## Exemplo de dosagem
+
+Refinement types sao especialmente poderosos em dominios cientificos onde restricoes fisicas importam:
+
+```sio
+type ValidDose = { dose: mg | dose > 0.0 && dose <= 2000.0 }
+
+fn administer(patient_id: i64, dose: ValidDose) with IO {
+    println("Administering dose")
+}
+
+fn main() with IO {
+    let dose: mg = 500.0
+    administer(1, dose)     // OK: 500.0 within range
+
+    // let bad: mg = 5000.0
+    // administer(1, bad)   // compile error: 5000.0 > 2000.0
+}
+```
+
+## Interacao com tipos epistemicos
+
+Predicados de refinement compoem com `Knowledge<T>`: um `Knowledge<ValidDose>` carrega tanto o envelope de incerteza quanto a restricao de refinement. O compilador verifica ambos independentemente — o refinement vale sobre o valor nominal, e a propagacao de confianca rastreia a incerteza de medicao.
+
+## Onde o refinement checking e implementado
+
+- Verificacao de refinement types: `self-hosted/check/refinements.sio`
+- Integracao com SMT: `compiler/src/smt/` (bindings Z3, requer feature flag `smt`)
+- O artefato JIT checado (`souc-linux-x86_64-jit`) tem SMT desabilitado; a verificacao de refinement esta disponivel ao compilar com `--features smt`
+
+## Limitacoes atuais
+
+- A integracao com Z3 requer a feature flag `smt` em tempo de build.
+- Nem todas as formas de predicado sao suportadas — o solver lida com comparacoes aritmeticas, conectivos booleanos e restricoes de tamanho de array. Chamadas de funcoes customizadas em predicados ainda nao sao suportadas.
+- Um fallback de assercao em runtime esta disponivel para predicados que nao podem ser verificados estaticamente.

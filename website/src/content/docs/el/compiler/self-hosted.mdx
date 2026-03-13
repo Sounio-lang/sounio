@@ -1,0 +1,98 @@
+---
+title: "Self-Hosted Compiler"
+description: "Architecture and pipeline of the Sounio self-hosted native compiler."
+weight: 25
+category: "compiler"
+topic_id: "website.docs.compiler.self-hosted"
+authority: "website_only"
+audience: "contributors"
+last_validated: "2026-03-07"
+validated_by: "A4"
+source_of_truth: "docs/governance/topic-registry.v1.json#website.docs.compiler.self-hosted"
+---
+
+# Self-Hosted Compiler
+
+Η Sounio περιλαμβάνει έναν self-hosted compiler γραμμένο εξ ολοκλήρου σε αρχεία `.sio`. Αυτός ο compiler μπορεί να κάνει parse, έλεγχο τύπων, lowering σε IR, βελτιστοποίηση και εκπομπή native x86-64 ELF binaries — χωρίς εξάρτηση από LLVM, Cranelift ή οποιονδήποτε εξωτερικό code generator.
+
+## Pipeline
+
+```
+Source (.sio) → Lexer → Parser → AST
+    → ir/lower.sio → IrModule (custom IR)
+    → Optimization passes
+    → native/codegen.sio → x86-64 machine code
+    → native/elf.sio → ELF binary
+```
+
+Αυτό το pipeline είναι ξεχωριστό από τη διαδρομή HLIR/LLVM που χρησιμοποιεί ο Rust-hosted compiler. Το native backend παράγει ELF binaries απευθείας, χωρίς ενδιάμεσα αρχεία αντικειμένου.
+
+## Βασικά modules
+
+| Module | Αρχείο | Σκοπός |
+|--------|--------|--------|
+| Lexer | `self-hosted/lexer/` | Tokenization |
+| Parser | `self-hosted/parser/` | Κατασκευή AST |
+| IR lowering | `self-hosted/ir/lower.sio` | Μετατροπή AST σε IR, υπολογισμός strategy |
+| IR types | `self-hosted/ir/ir.sio` | Ορισμοί IrFunction, IrModule, IrInstr |
+| Optimizer | `self-hosted/ir/opt_cleanup.sio` | Constant folding, DCE, strength reduction |
+| Profile | `self-hosted/ir/profile.sio` | Δεδομένα profiling .sprof, προαγωγή strategy |
+| Inliner | `self-hosted/ir/inline.sio` | Profile-guided function inlining |
+| Layout | `self-hosted/ir/layout.sio` | Profile-guided διάταξη συναρτήσεων |
+| E-graph | `self-hosted/ir/egraph.sio` | Equality saturation για αλγεβρικούς κανόνες |
+| Codegen | `self-hosted/native/codegen.sio` | Εκπομπή εντολών x86-64 |
+| Frame | `self-hosted/native/frame.sio` | Διάταξη stack frame, register allocation |
+| ELF | `self-hosted/native/elf.sio` | Εκπομπή μορφής ELF binary |
+| Relocations | `self-hosted/native/reloc.sio` | Relocations συμβόλων και sections |
+| Entry | `self-hosted/compiler/main.sio` | CLI driver και ενορχήστρωση μεταγλώττισης |
+
+## Περάσματα βελτιστοποίησης
+
+Ο self-hosted optimizer περιλαμβάνει πάνω από 20 περάσματα, χτισμένα σταδιακά κατά τα sprints 51-110:
+
+- **Constant folding**: Υπολογισμός γνωστών σταθερών αριθμητικών πράξεων κατά τη μεταγλώττιση.
+- **Dead code elimination**: Mark-sweep για αφαίρεση αχρησιμοποίητων εντολών.
+- **Strength reduction**: Αντικατάσταση `x * 2^n` με `x << n`, `x / 2^n` με `x >> n`, `x % 2^n` με `x & (2^n - 1)`.
+- **Copy propagation**: Παρακολούθηση αλυσίδων `IrCopy` για περαιτέρω folding.
+- **Peephole**: `IrCopy(r,r)` σε `IrNop`, εξάλειψη διπλότυπων `IrLoadImm`.
+- **Algebraic normalization**: `x - x` σε 0, `x ^ x` σε 0, folding αλυσίδων σταθερών `(x + 3) + 5` σε `x + 8`.
+- **E-graph saturation**: Αντιμεταθετική κανονικοποίηση, ταυτότητες bitwise, mul-annihilation.
+- **CSE**: Πίνακας hash 128 εγγραφών με κανονική σειρά τελεστών.
+- **LICM**: Ανύψωση loop-invariant `IrLoadImm` πέρα από back edges.
+- **GVN**: Global value numbering με πίνακα 128 εγγραφών.
+- **Boolean simplification**: `(x == 0) == 0` σε `IrCopy(x)`, `bool != 0` σε `IrCopy(bool)`.
+- **Conditional branch folding**: `BranchTrue(known_const)` σε `IrJump` ή `IrNop`.
+- **Jump-to-return**: `IrJump(L)` όπου `L+1 = IrReturn` γίνεται `IrReturn`.
+
+## Register allocation
+
+Το native backend χρησιμοποιεί γραμμικό allocator 4 registers στοχεύοντας `r12`, `r13`, `r14`, `r15` (callee-saved). Τα stack spills χρησιμοποιούν προσαρμοστική κωδικοποίηση `disp8`/`disp32` για ελαχιστοποίηση του μεγέθους κώδικα.
+
+## Profile-guided optimization
+
+Ο self-hosted compiler υλοποιεί ένα πλήρες PGO pipeline:
+
+1. **Instrumentation**: Τα opcodes `IrProfCounter` εισάγουν `INC [RIP+disp32]` στις εισόδους συναρτήσεων.
+2. **Profile dump**: Η `__prof_dump` γράφει αρχεία `.sprof` κατά την έξοδο με μετρητές εκτέλεσης ανά συνάρτηση.
+3. **Προαγωγή strategy**: Οι hot συναρτήσεις (count > 1000) προάγονται σε `AGGRESSIVE`, οι warm (> 100) σε `PRECISION`.
+4. **Profile-guided inlining**: Η βαθμολόγηση inlining ενσωματώνει bonuses strategy.
+5. **Profile-guided layout**: Οι hot συναρτήσεις ταξινομούνται στην αρχή του binary για τοπικότητα cache.
+
+## Εκτέλεση του self-hosted compiler
+
+```bash
+SOUC=./artifacts/omega/souc-bin/souc-linux-x86_64-jit
+
+# Self-test (runs all internal test cases)
+$SOUC run self-hosted/compiler/main.sio -- --self-test
+
+# Check only (no codegen)
+$SOUC run self-hosted/compiler/main.sio -- --check
+
+# IR dump for specific function
+$SOUC run self-hosted/compiler/main.sio -- --ir-dump --fn=main
+```
+
+## Επαλήθευση
+
+Ο self-hosted compiler επικυρώνει τον εαυτό του μέσω 347+ self-tests που καλύπτουν κάθε πέρασμα βελτιστοποίησης. Τα gate scripts (π.χ. `scripts/sprint52_regalloc_gate.sh`) εκτελούν τον πλήρη πίνακα δοκιμών και αναφέρουν μετρητές PASS/FAIL/NOT_RUN.

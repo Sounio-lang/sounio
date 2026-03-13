@@ -1,0 +1,97 @@
+---
+title: "Linear Types & Ownership"
+description: "Resource management through linear types, exclusive references, and move semantics."
+weight: 14
+category: "language"
+topic_id: "website.docs.language.linear-types"
+authority: "website_only"
+audience: "users"
+last_validated: "2026-03-07"
+validated_by: "A2"
+source_of_truth: "docs/governance/topic-registry.v1.json#website.docs.language.linear-types"
+---
+
+# 線形型と所有権
+
+Sounioは線形型(linear types)を通じてリソースの安全性を保証します。線形値はちょうど一度だけ使用しなければなりません。ファイルハンドル、データベース接続、GPUバッファを暗黙的にドロップすることはできません。コンパイラは、線形リソースの消費を忘れたプログラムを拒否します。
+
+## 線形構造体
+
+構造体に `linear` を付けると、ちょうど一度の消費が要求されます:
+
+```sio
+linear struct FileHandle {
+    fd: i32
+}
+
+fn open_file(path: &str) -> FileHandle with IO {
+    // OS-level open; returns a linear handle
+    FileHandle { fd: sys_open(path) }
+}
+
+fn close_file(handle: FileHandle) with IO {
+    sys_close(handle.fd)
+    // handle is consumed here — compiler satisfied
+}
+
+fn main() with IO {
+    let h = open_file("/tmp/data.txt")
+    // If we forget close_file(h), the compiler rejects this program.
+    close_file(h)
+}
+```
+
+`close_file(h)` の呼び出しを削除すると、コンパイラはエラーを出します。線形値 `h` が消費されていないためです。
+
+## 参照: 共有参照と排他参照
+
+Sounioでは、共有（読み取り専用）参照に `&T`、排他（変更可能）参照に `&!T` を使用します。これはRustの `&mut` とは異なります。`&!` シジルは排他的アクセスを示します。
+
+```sio
+fn read_value(r: &i64) -> i64 {
+    *r
+}
+
+fn increment(r: &!i64) {
+    *r = *r + 1
+}
+
+fn main() with IO {
+    var x = 10
+    println(read_value(&x))   // shared borrow
+    increment(&!x)            // exclusive borrow
+    println(x)                // prints 11
+}
+```
+
+コンパイラは、排他参照と同じ値への他の参照が同時にエイリアスされることを防ぎます。
+
+## ムーブセマンティクス
+
+`Copy` でない値は代入時にムーブされます。ムーブ後、元のバインディングは無効になります:
+
+```sio
+fn consume(h: FileHandle) with IO {
+    close_file(h)
+}
+
+fn main() with IO {
+    let h = open_file("/tmp/data.txt")
+    consume(h)
+    // h is no longer valid here — using it is a compile error
+}
+```
+
+## アフィン緩和
+
+一部の型は厳密な線形型ではなくアフィン型です。最大一度だけ使用でき、暗黙的にドロップすることが許容されます。標準的なスカラー型（`i32`、`i64`、`f64`、`bool`）は `Copy` であり、自由に使用できます。`linear` キーワードを持たないカスタム構造体はムーブセマンティクスに従いますが、消費が必須ではありません。
+
+## 所有権チェックの実装箇所
+
+所有権チェッカーは `self-hosted/check/ownership.sio` に実装されており、型チェックの後に実行されます。どのバインディングがムーブされたか、どのバインディングが借用されているかを追跡し、`linear struct` 型の線形性制約を適用します。
+
+## 注意事項
+
+- 非線形構造体内のネストされた線形フィールドは再帰的に追跡されます。
+- 現在のチェッカーは、`match` アームやクロージャ内の線形値に関するすべてのパターンをまだ処理できていません。現在のカバレッジについてはフィーチャーステータスページを参照してください。
+- Cranelift JITを通じた `&!` の変更には既知の制限があります。呼び出し元に変更を反映する必要がある場合は、値返却パターンを推奨します。

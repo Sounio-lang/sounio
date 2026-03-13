@@ -4,7 +4,7 @@ import path from 'node:path';
 const root = path.resolve(process.cwd());
 const distDir = path.join(root, 'dist');
 
-const ASSET_EXT_RE = /\.(?:png|jpe?g|webp|avif|gif|svg|ico|css|js|mjs|map|txt|xml|json|pdf|woff2?|ttf|otf)$/i;
+const ASSET_EXT_RE = /\.(?:png|jpe?g|webp|avif|gif|svg|ico|css|js|mjs|map|txt|xml|json|pdf|woff2?|ttf|otf|webmanifest)$/i;
 const HASH_HREF_RE = /^#(.+)$/;
 const EXTERNAL_RE = /^(?:[a-z][a-z0-9+.-]*:)?\/\//i;
 const SCHEME_RE = /^(?:mailto:|tel:|javascript:|data:)/i;
@@ -101,6 +101,10 @@ async function run() {
     const rel = path.relative(distDir, abs);
     const currentRoute = fileToRoute(rel);
     if (!currentRoute) continue;
+
+    // Skip link checking on 404 page — it's a hosting-level page with locale
+    // switcher links that legitimately point to non-existent localized 404 routes.
+    if (rel === '404.html') continue;
 
     const html = await readFile(abs, 'utf8');
     const hrefs = extractHrefs(html);

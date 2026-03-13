@@ -1,0 +1,97 @@
+---
+title: "Linear Types & Ownership"
+description: "Resource management through linear types, exclusive references, and move semantics."
+weight: 14
+category: "language"
+topic_id: "website.docs.language.linear-types"
+authority: "website_only"
+audience: "users"
+last_validated: "2026-03-07"
+validated_by: "A2"
+source_of_truth: "docs/governance/topic-registry.v1.json#website.docs.language.linear-types"
+---
+
+# 线性类型与所有权
+
+Sounio 通过线性类型（linear types）来保障资源安全。线性值必须被恰好使用一次：你不能悄悄丢弃一个文件句柄、数据库连接或 GPU 缓冲区。编译器会拒绝那些忘记消费线性资源的程序。
+
+## 线性结构体
+
+使用 `linear` 关键字标记一个结构体，使其要求恰好被消费一次：
+
+```sio
+linear struct FileHandle {
+    fd: i32
+}
+
+fn open_file(path: &str) -> FileHandle with IO {
+    // OS-level open; returns a linear handle
+    FileHandle { fd: sys_open(path) }
+}
+
+fn close_file(handle: FileHandle) with IO {
+    sys_close(handle.fd)
+    // handle is consumed here — compiler satisfied
+}
+
+fn main() with IO {
+    let h = open_file("/tmp/data.txt")
+    // If we forget close_file(h), the compiler rejects this program.
+    close_file(h)
+}
+```
+
+如果你移除 `close_file(h)` 调用，编译器会报错：线性值 `h` 未被消费。
+
+## 引用：共享与独占
+
+Sounio 使用 `&T` 表示共享（只读）引用，`&!T` 表示独占（可变）引用。这不是 Rust 的 `&mut` —— `&!` 符号明确表示独占访问。
+
+```sio
+fn read_value(r: &i64) -> i64 {
+    *r
+}
+
+fn increment(r: &!i64) {
+    *r = *r + 1
+}
+
+fn main() with IO {
+    var x = 10
+    println(read_value(&x))   // shared borrow
+    increment(&!x)            // exclusive borrow
+    println(x)                // prints 11
+}
+```
+
+编译器会阻止独占引用与指向同一值的任何其他引用同时存在（别名）。
+
+## 移动语义
+
+非 `Copy` 类型的值在赋值时会被移动。移动之后，原始绑定不再有效：
+
+```sio
+fn consume(h: FileHandle) with IO {
+    close_file(h)
+}
+
+fn main() with IO {
+    let h = open_file("/tmp/data.txt")
+    consume(h)
+    // h is no longer valid here — using it is a compile error
+}
+```
+
+## 仿射放宽
+
+部分类型是仿射（affine）的，而非严格线性的：它们必须被*最多*使用一次，但可以被静默丢弃。标准标量类型（`i32`、`i64`、`f64`、`bool`）是 `Copy` 的，可以自由使用。没有 `linear` 关键字的自定义结构体遵循移动语义，但不要求必须被消费。
+
+## 所有权检查的位置
+
+所有权检查器实现在 `self-hosted/check/ownership.sio` 中，在类型检查之后运行。它跟踪哪些绑定已被移动、哪些正在被借用，并对 `linear struct` 类型强制执行线性约束。
+
+## 注意事项
+
+- 非线性结构体中的嵌套线性字段会被递归跟踪。
+- 当前检查器尚未处理所有涉及 `match` 分支或闭包中线性值的模式 —— 请查阅功能状态页面了解当前覆盖范围。
+- 通过 Cranelift JIT 进行的 `&!` 修改存在一个已知限制：对于需要对调用方可见的修改，建议使用按值返回模式。

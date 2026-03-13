@@ -1,0 +1,97 @@
+---
+title: "Linear Types & Ownership"
+description: "Resource management through linear types, exclusive references, and move semantics."
+weight: 14
+category: "language"
+topic_id: "website.docs.language.linear-types"
+authority: "website_only"
+audience: "users"
+last_validated: "2026-03-07"
+validated_by: "A2"
+source_of_truth: "docs/governance/topic-registry.v1.json#website.docs.language.linear-types"
+---
+
+# Tipos lineales y ownership
+
+Sounio garantiza la seguridad de recursos mediante tipos lineales. Un valor lineal debe usarse exactamente una vez: no se puede descartar silenciosamente un file handle, una conexion a base de datos o un buffer de GPU. El compilador rechaza programas que olviden consumir recursos lineales.
+
+## Structs lineales
+
+Marca un struct como `linear` para requerir que se consuma exactamente una vez:
+
+```sio
+linear struct FileHandle {
+    fd: i32
+}
+
+fn open_file(path: &str) -> FileHandle with IO {
+    // OS-level open; returns a linear handle
+    FileHandle { fd: sys_open(path) }
+}
+
+fn close_file(handle: FileHandle) with IO {
+    sys_close(handle.fd)
+    // handle is consumed here — compiler satisfied
+}
+
+fn main() with IO {
+    let h = open_file("/tmp/data.txt")
+    // If we forget close_file(h), the compiler rejects this program.
+    close_file(h)
+}
+```
+
+Si se omite la llamada a `close_file(h)`, el compilador emite un error: el valor lineal `h` no fue consumido.
+
+## Referencias: compartidas vs exclusivas
+
+Sounio usa `&T` para referencias compartidas (solo lectura) y `&!T` para referencias exclusivas (mutables). Esto no es el `&mut` de Rust — el sigilo `&!` indica acceso exclusivo.
+
+```sio
+fn read_value(r: &i64) -> i64 {
+    *r
+}
+
+fn increment(r: &!i64) {
+    *r = *r + 1
+}
+
+fn main() with IO {
+    var x = 10
+    println(read_value(&x))   // shared borrow
+    increment(&!x)            // exclusive borrow
+    println(x)                // prints 11
+}
+```
+
+El compilador impide crear alias de una referencia exclusiva con cualquier otra referencia al mismo valor.
+
+## Semantica de movimiento
+
+Los valores que no son `Copy` se mueven al asignarlos. Despues de un movimiento, el binding original deja de ser valido:
+
+```sio
+fn consume(h: FileHandle) with IO {
+    close_file(h)
+}
+
+fn main() with IO {
+    let h = open_file("/tmp/data.txt")
+    consume(h)
+    // h is no longer valid here — using it is a compile error
+}
+```
+
+## Relajacion afin
+
+Algunos tipos son afines en lugar de estrictamente lineales: deben usarse *como maximo* una vez, pero pueden descartarse silenciosamente. Los tipos escalares estandar (`i32`, `i64`, `f64`, `bool`) son `Copy` y pueden usarse libremente. Los structs personalizados sin la palabra clave `linear` siguen la semantica de movimiento, pero no es obligatorio consumirlos.
+
+## Donde vive la verificacion de ownership
+
+El verificador de ownership esta implementado en `self-hosted/check/ownership.sio` y se ejecuta despues del chequeo de tipos. Rastrea que bindings han sido movidos, cuales estan prestados (borrowed), y aplica el contrato de linealidad para los tipos `linear struct`.
+
+## Advertencias
+
+- Los campos lineales anidados dentro de structs no lineales se rastrean recursivamente.
+- El verificador actual aun no maneja todos los patrones que involucran valores lineales dentro de brazos de `match` o closures — consulta la pagina de estado de funcionalidades para ver la cobertura actual.
+- Las mutaciones mediante `&!` a traves del JIT de Cranelift tienen una limitacion conocida: se recomienda usar patrones de retorno por valor para mutaciones que deban ser visibles para el caller.

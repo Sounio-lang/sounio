@@ -1,0 +1,97 @@
+---
+title: "Linear Types & Ownership"
+description: "Resource management through linear types, exclusive references, and move semantics."
+weight: 14
+category: "language"
+topic_id: "website.docs.language.linear-types"
+authority: "website_only"
+audience: "users"
+last_validated: "2026-03-07"
+validated_by: "A2"
+source_of_truth: "docs/governance/topic-registry.v1.json#website.docs.language.linear-types"
+---
+
+# Linear Types & Ownership
+
+Η Sounio επιβάλλει ασφάλεια πόρων μέσω linear types (γραμμικών τύπων). Μια γραμμική τιμή πρέπει να χρησιμοποιηθεί ακριβώς μία φορά: δεν μπορείτε να αγνοήσετε σιωπηλά ένα file handle, μια σύνδεση βάσης δεδομένων ή ένα GPU buffer. Ο compiler απορρίπτει προγράμματα που ξεχνούν να καταναλώσουν γραμμικούς πόρους.
+
+## Linear structs
+
+Σημειώστε ένα struct ως `linear` για να απαιτήσετε κατανάλωση ακριβώς μία φορά:
+
+```sio
+linear struct FileHandle {
+    fd: i32
+}
+
+fn open_file(path: &str) -> FileHandle with IO {
+    // OS-level open; returns a linear handle
+    FileHandle { fd: sys_open(path) }
+}
+
+fn close_file(handle: FileHandle) with IO {
+    sys_close(handle.fd)
+    // handle is consumed here — compiler satisfied
+}
+
+fn main() with IO {
+    let h = open_file("/tmp/data.txt")
+    // If we forget close_file(h), the compiler rejects this program.
+    close_file(h)
+}
+```
+
+Αν αφαιρέσετε την κλήση `close_file(h)`, ο compiler εκπέμπει σφάλμα: η γραμμική τιμή `h` δεν καταναλώθηκε.
+
+## Αναφορές: κοινές και αποκλειστικές
+
+Η Sounio χρησιμοποιεί `&T` για κοινές (μόνο ανάγνωσης) αναφορές και `&!T` για αποκλειστικές (μεταβλητές) αναφορές. Αυτό δεν είναι το `&mut` της Rust — το σύμβολο `&!` σηματοδοτεί αποκλειστική πρόσβαση.
+
+```sio
+fn read_value(r: &i64) -> i64 {
+    *r
+}
+
+fn increment(r: &!i64) {
+    *r = *r + 1
+}
+
+fn main() with IO {
+    var x = 10
+    println(read_value(&x))   // shared borrow
+    increment(&!x)            // exclusive borrow
+    println(x)                // prints 11
+}
+```
+
+Ο compiler αποτρέπει την ταυτόχρονη ύπαρξη αποκλειστικής αναφοράς με οποιαδήποτε άλλη αναφορά στην ίδια τιμή.
+
+## Move semantics
+
+Οι τιμές που δεν είναι `Copy` μετακινούνται κατά την ανάθεση. Μετά από ένα move, το αρχικό binding δεν είναι πλέον έγκυρο:
+
+```sio
+fn consume(h: FileHandle) with IO {
+    close_file(h)
+}
+
+fn main() with IO {
+    let h = open_file("/tmp/data.txt")
+    consume(h)
+    // h is no longer valid here — using it is a compile error
+}
+```
+
+## Affine χαλάρωση
+
+Ορισμένοι τύποι είναι affine αντί για αυστηρά linear: πρέπει να χρησιμοποιηθούν *το πολύ* μία φορά, αλλά μπορούν να απορριφθούν σιωπηλά. Οι βασικοί βαθμωτοί τύποι (`i32`, `i64`, `f64`, `bool`) είναι `Copy` και μπορούν να χρησιμοποιηθούν ελεύθερα. Τα custom structs χωρίς τη λέξη-κλειδί `linear` ακολουθούν move semantics αλλά δεν απαιτείται να καταναλωθούν.
+
+## Πού βρίσκεται ο έλεγχος ownership
+
+Ο ελεγκτής ownership υλοποιείται στο `self-hosted/check/ownership.sio` και εκτελείται μετά τον έλεγχο τύπων. Παρακολουθεί ποια bindings έχουν μετακινηθεί, ποια είναι δανεισμένα, και επιβάλλει το συμβόλαιο γραμμικότητας για τύπους `linear struct`.
+
+## Επιφυλάξεις
+
+- Τα εμφωλευμένα γραμμικά πεδία σε μη γραμμικά structs παρακολουθούνται αναδρομικά.
+- Ο τρέχων ελεγκτής δεν χειρίζεται ακόμα όλα τα patterns που περιλαμβάνουν γραμμικές τιμές μέσα σε `match` arms ή closures — συμβουλευτείτε τη σελίδα κατάστασης δυνατοτήτων για την τρέχουσα κάλυψη.
+- Οι μεταλλάξεις `&!` μέσω του Cranelift JIT έχουν έναν γνωστό περιορισμό: προτιμήστε patterns επιστροφής κατά τιμή για μεταλλάξεις που πρέπει να είναι ορατές στον καλούντα.

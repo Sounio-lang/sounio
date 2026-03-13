@@ -1,0 +1,79 @@
+---
+title: "Refinement Types"
+description: "Attach logical predicates to types so the compiler can prove constraints at compile time."
+weight: 15
+category: "language"
+topic_id: "website.docs.language.refinement-types"
+authority: "website_only"
+audience: "users"
+last_validated: "2026-03-07"
+validated_by: "A2"
+source_of_truth: "docs/governance/topic-registry.v1.json#website.docs.language.refinement-types"
+---
+
+# 篩型（Refinement Types）
+
+篩型は、基本型に論理述語を付加して絞り込む型です。コンパイラはSMTソルバー（Z3）を使用して、値がコンパイル時に述語を満たすことを検証し、範囲外エラーをプログラム実行前に検出します。
+
+## 構文
+
+```sio
+type Positive = { x: i32 | x > 0 }
+type Percentage = { p: f64 | p >= 0.0 && p <= 100.0 }
+type NonEmpty<T> = { arr: [T] | len(arr) > 0 }
+```
+
+`|` の後の述語は、束縛変数と定数に関する純粋なブール式でなければなりません。コンパイラはこれをZ3に委譲して充足可能性を検査します。
+
+## 篩型の使用
+
+```sio
+fn safe_divide(a: f64, b: { b: f64 | b != 0.0 }) -> f64 {
+    a / b
+}
+
+fn main() with IO {
+    let result = safe_divide(10.0, 3.0)   // OK: 3.0 != 0.0 proven
+    println(result)
+
+    // safe_divide(10.0, 0.0)  // compile error: cannot prove 0.0 != 0.0
+}
+```
+
+リテラルが渡された場合、ソルバーは制約を即座に検証できます。変数が渡された場合、ソルバーは宣言時に既知の篩型情報を使用します。
+
+## 投薬量の例
+
+篩型は、物理的制約が重要な科学分野で特に威力を発揮します:
+
+```sio
+type ValidDose = { dose: mg | dose > 0.0 && dose <= 2000.0 }
+
+fn administer(patient_id: i64, dose: ValidDose) with IO {
+    println("Administering dose")
+}
+
+fn main() with IO {
+    let dose: mg = 500.0
+    administer(1, dose)     // OK: 500.0 within range
+
+    // let bad: mg = 5000.0
+    // administer(1, bad)   // compile error: 5000.0 > 2000.0
+}
+```
+
+## 認識論的型との相互作用
+
+篩型の述語は `Knowledge<T>` と組み合わせることができます。`Knowledge<ValidDose>` は、不確かさの範囲と篩型の制約の両方を持ちます。コンパイラはそれぞれを独立に検査します。篩型は公称値に対して適用され、信頼度伝播は測定の不確かさを追跡します。
+
+## 篩型チェックの実装箇所
+
+- 篩型の型検査: `self-hosted/check/refinements.sio`
+- SMT統合: `compiler/src/smt/`（Z3バインディング、`smt` フィーチャーフラグが必要）
+- チェック済みJITアーティファクト（`souc-linux-x86_64-jit`）ではSMTは無効です。篩型チェックは `--features smt` でビルドする場合に利用可能です。
+
+## 現在の制限事項
+
+- Z3統合にはビルド時に `smt` フィーチャーフラグが必要です。
+- すべての述語形式がサポートされているわけではありません。ソルバーは算術比較、ブール結合子、配列長制約を処理します。述語内のカスタム関数呼び出しはまだサポートされていません。
+- 静的に検証できない述語に対しては、ランタイムアサーションのフォールバックが利用可能です。

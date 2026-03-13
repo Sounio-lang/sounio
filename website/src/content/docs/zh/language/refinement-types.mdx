@@ -1,0 +1,79 @@
+---
+title: "Refinement Types"
+description: "Attach logical predicates to types so the compiler can prove constraints at compile time."
+weight: 15
+category: "language"
+topic_id: "website.docs.language.refinement-types"
+authority: "website_only"
+audience: "users"
+last_validated: "2026-03-07"
+validated_by: "A2"
+source_of_truth: "docs/governance/topic-registry.v1.json#website.docs.language.refinement-types"
+---
+
+# 细化类型
+
+细化类型（refinement type）通过逻辑谓词缩小基础类型的范围。编译器使用 SMT 求解器（Z3）在编译期检查值是否满足谓词，从而在程序运行之前捕获越界错误。
+
+## 语法
+
+```sio
+type Positive = { x: i32 | x > 0 }
+type Percentage = { p: f64 | p >= 0.0 && p <= 100.0 }
+type NonEmpty<T> = { arr: [T] | len(arr) > 0 }
+```
+
+`|` 之后的谓词必须是关于绑定变量和常量的纯布尔表达式。编译器将其委托给 Z3 进行可满足性检查。
+
+## 使用细化类型
+
+```sio
+fn safe_divide(a: f64, b: { b: f64 | b != 0.0 }) -> f64 {
+    a / b
+}
+
+fn main() with IO {
+    let result = safe_divide(10.0, 3.0)   // OK: 3.0 != 0.0 proven
+    println(result)
+
+    // safe_divide(10.0, 0.0)  // compile error: cannot prove 0.0 != 0.0
+}
+```
+
+当传入字面量时，求解器可以立即验证约束。当传入变量时，求解器会使用该变量在声明处已知的细化信息。
+
+## 药物剂量示例
+
+细化类型在物理约束至关重要的科学领域特别强大：
+
+```sio
+type ValidDose = { dose: mg | dose > 0.0 && dose <= 2000.0 }
+
+fn administer(patient_id: i64, dose: ValidDose) with IO {
+    println("Administering dose")
+}
+
+fn main() with IO {
+    let dose: mg = 500.0
+    administer(1, dose)     // OK: 500.0 within range
+
+    // let bad: mg = 5000.0
+    // administer(1, bad)   // compile error: 5000.0 > 2000.0
+}
+```
+
+## 与认知类型的交互
+
+细化谓词可以与 `Knowledge<T>` 组合使用：`Knowledge<ValidDose>` 同时携带不确定性包络和细化约束。编译器独立检查两者 —— 细化约束作用于标称值，而置信度传播跟踪测量不确定性。
+
+## 细化检查的位置
+
+- 细化类型检查：`self-hosted/check/refinements.sio`
+- SMT 集成：`compiler/src/smt/`（Z3 绑定，需要 `smt` feature flag）
+- 预编译的 JIT 产物（`souc-linux-x86_64-jit`）禁用了 SMT；细化检查在使用 `--features smt` 构建时可用
+
+## 当前限制
+
+- Z3 集成需要在构建时启用 `smt` feature flag。
+- 并非所有谓词形式都受支持 —— 求解器处理算术比较、布尔连接词和数组长度约束。谓词中的自定义函数调用尚不支持。
+- 对于无法静态验证的谓词，可以使用运行时断言作为后备方案。

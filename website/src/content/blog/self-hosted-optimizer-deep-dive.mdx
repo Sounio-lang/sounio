@@ -1,0 +1,88 @@
+---
+title: "60 Sprints of Optimization: Building a Native Compiler in Sounio"
+description: "How we built 20+ optimization passes — from constant folding to e-graph saturation — in the self-hosted Sounio compiler, entirely in .sio source files."
+author: "The Sounio Team"
+publishedAt: 2026-03-13
+tags: ["engineering", "compiler", "optimization"]
+topic_id: "website.blog.self-hosted-optimizer-deep-dive"
+authority: "website_only"
+audience: "users"
+last_validated: "2026-03-07"
+validated_by: "A2"
+source_of_truth: "docs/governance/topic-registry.v1.json#website.blog.self-hosted-optimizer-deep-dive"
+---
+
+# 60 Sprints of Optimization
+
+Over the past 60 sprints, we built a complete optimizing native backend for Sounio — written entirely in Sounio itself. This post walks through the architecture, the key optimization passes, and what we learned along the way.
+
+## The starting point
+
+Sprint 50 delivered the first profile-guided function layout pass. At that point, the self-hosted compiler could parse Sounio source, lower it to a custom IR (`IrModule`/`IrFunction`/`IrInstr`), and emit x86-64 machine code into ELF binaries. But the generated code was naive: every value lived on the stack, every constant was loaded fresh, and dead code lingered everywhere.
+
+## The optimization stack
+
+We built the passes incrementally, each validated by a gate script that reports PASS/FAIL/NOT_RUN counts. Here's the progression:
+
+### Phase 1: Classical dataflow (Sprints 51-54)
+
+**Constant folding** (`ocp_const_fold`): Track which virtual registers hold known constants via `def_at[256]` and `val_at[256]` arrays. When both operands of an `IrBinOp` are known, fold to `IrLoadImm`. This unlocked everything downstream.
+
+**Dead code elimination** (`ocp_dce`): Mark-sweep over the instruction array. Mark all registers read by any instruction, then sweep: any instruction with an unused destination and no side effects becomes `IrNop`.
+
+**Copy propagation**: Trace `IrCopy` chains so that `IrCopy(r5, r3)` where `r3 = IrLoadImm(42)` enables `r5` to participate in constant folding.
+
+**Peephole**: `IrCopy(r, r)` → `IrNop`. Duplicate `IrLoadImm` elimination. These fire after register allocation cleans up the IR.
+
+### Phase 2: Strength reduction (Sprints 62-68)
+
+**Power-of-two arithmetic**: `x * 2^n` → `x << n`, `x / 2^n` → `x >> n`, `x % 2^n` → `x & (2^n - 1)`. The `def_at` tracking from constant folding tells us when a divisor/multiplier is a known power of two.
+
+**Non-power-of-two multiply**: `x * 3` → `(x + x) + x`. Small constant multiplies become shift-add sequences.
+
+**Identity/annihilation**: `x * 1` → `IrCopy`, `x * 0` → `IrLoadImm(0)`, `x + 0` → `IrCopy`, `x - 0` → `IrCopy`, `x / 1` → `IrCopy`.
+
+### Phase 3: Algebraic reasoning (Sprints 71-77)
+
+**Same-register folding**: `x - x` → `IrLoadImm(0)`, `x ^ x` → `IrLoadImm(0)`. If both source registers of a subtraction or XOR are the same virtual register, the result is always zero.
+
+**Associative chain folding**: `(x + 3) + 5` → `x + 8`. When one operand of an add is another add with a known constant, combine the constants.
+
+**E-graph saturation**: We implemented a small e-graph engine (`EgNode`/`EgClass`/`EgUnionFind`) that discovers equivalences like `x * 0 = 0` through rewrite rules and union-find. The e-graph activates for small functions (≤ 8 instructions) to keep compile times bounded.
+
+**Commutative CSE**: Canonicalize commutative operations (add, mul, or, and, xor) by sorting operands `src1 ≤ src2`. This doubles the hit rate of the CSE hash table.
+
+### Phase 4: Control flow (Sprints 75-76, 101-106)
+
+**Conditional branch folding**: `IrBranchTrue(known_const)` where the constant is 1 → `IrJump`. Where the constant is 0 → `IrNop`. This cleans up branches after constant propagation proves a condition.
+
+**Jump-to-return**: `IrJump(L)` where `L+1 = IrReturn` folds directly to `IrReturn`.
+
+**Boolean simplification**: `(x == 0) == 0` → `IrCopy(x)`, `bool != 0` → `IrCopy(bool)`.
+
+**LICM**: Hoist loop-invariant `IrLoadImm` instructions past back edges.
+
+**GVN**: Global value numbering with a 128-entry hash table and value-number assignment.
+
+## Register allocation
+
+The linear-scan allocator targets four callee-saved registers (`r12`-`r15`) with stack spills using adaptive `disp8`/`disp32` encoding. Compact frame sizing ensures functions with ≤ 4 live values use no stack frame at all.
+
+## Profile-guided optimization
+
+The full PGO pipeline:
+1. Inject `INC [RIP+disp32]` counters at instrumented function entries.
+2. `__prof_dump` writes execution counts to `.sprof` files at exit.
+3. Re-compile with `--use-profile profile.sprof` to promote hot functions.
+4. Profile-guided inlining scores callees with strategy bonuses (+80 for AGGRESSIVE, +40 for PRECISION).
+5. Layout pass sorts hot functions to the front for instruction cache locality.
+
+## Verification
+
+Every optimization pass has a gate script. The current test matrix stands at **347 self-tests** across all passes, with FAIL=0 and NOT_RUN=1 (JIT OOM on the full self-test). Each gate runs in under 60 seconds.
+
+## What's next
+
+The foundation is solid. The native backend produces correct ELF binaries for arithmetic, control flow, function calls, and profiling instrumentation. The next frontier is closing the gap on the full self-hosted compilation loop — where the self-hosted compiler compiles itself to a native binary.
+
+The code is all in `self-hosted/` in the repository. Every pass, every test, every gate script — written in Sounio.
