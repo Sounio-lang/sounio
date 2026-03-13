@@ -501,6 +501,27 @@ fn native_v2_alloc_descriptor_from_tag(tag: i64) -> i64 {
     255
 }
 
+
+// By-value instruction append (avoids JIT &! bug)
+fn _emit_legal_byval(func: MachineFunction, instr: MachineInstr) -> MachineFunction with Mut, Panic, Div {
+    var f = func
+    if f.blocks[0].instr_count < 512 {
+        f.blocks[0].instrs[f.blocks[0].instr_count as usize] = instr
+        f.blocks[0].instr_count = f.blocks[0].instr_count + 1
+        f.legal_instr_count = f.legal_instr_count + 1
+    }
+    f
+}
+
+fn _add_instr_byval(func: MachineFunction, instr: MachineInstr) -> MachineFunction with Mut, Panic, Div {
+    var f = func
+    if f.blocks[0].instr_count < 512 {
+        f.blocks[0].instrs[f.blocks[0].instr_count as usize] = instr
+        f.blocks[0].instr_count = f.blocks[0].instr_count + 1
+    }
+    f
+}
+
 fn native_v2_lower_function_to_machine(func: IrFunction) -> MachineFunction with Mut, Panic, Div, Alloc {
     var out = machine_function_new()
     out.base_slot_count = func.reg_count
@@ -518,7 +539,7 @@ fn native_v2_lower_function_to_machine(func: IrFunction) -> MachineFunction with
             out.unsupported_detail = native_v2_ir_opcode_name(instr.op)
             return out
         }
-        machine_function_add_instr_mut(&! out, native_v2_pseudo_from_ir(instr))
+        out = _add_instr_byval(out, native_v2_pseudo_from_ir(instr))
         i = i + 1
     }
 
@@ -755,29 +776,29 @@ fn native_v2_legalize_function(func: MachineFunction) -> MachineFunction with Mu
         if instr.opcode == MIR_OP_PSEUDO_LOAD_IMM {
             let temp = out.temp_count
             out.temp_count = temp + 1
-            native_v2_emit_legal_instr_mut(&! out, native_v2_make_mov_imm(temp, instr.src1.value))
-            native_v2_emit_legal_instr_mut(&! out, native_v2_make_store_stack(instr.dst.value, temp))
+            out = _emit_legal_byval(out, native_v2_make_mov_imm(temp, instr.src1.value))
+            out = _emit_legal_byval(out, native_v2_make_store_stack(instr.dst.value, temp))
         } else if instr.opcode == MIR_OP_PSEUDO_LOAD_STRING {
             let temp = out.temp_count
             out.temp_count = temp + 1
             let load = native_v2_make_load_data_addr(temp, instr.name)
-            native_v2_emit_legal_instr_mut(&! out, load)
-            native_v2_emit_legal_instr_mut(&! out, native_v2_make_store_stack(instr.dst.value, temp))
+            out = _emit_legal_byval(out, load)
+            out = _emit_legal_byval(out, native_v2_make_store_stack(instr.dst.value, temp))
         } else if instr.opcode == MIR_OP_PSEUDO_COPY {
             // Sprint 87: propagate float-ness for COPY
             let src_slot = instr.src1.value
             let dst_slot = instr.dst.value
             let src_is_float = if src_slot >= 0 && src_slot < 256 { out.is_float_slot[src_slot as usize] } else { 0 }
             if src_is_float == 1 {
-                native_v2_emit_legal_instr_mut(&! out, native_v2_make_float_move(dst_slot, src_slot))
+                out = _emit_legal_byval(out, native_v2_make_float_move(dst_slot, src_slot))
                 if dst_slot >= 0 && dst_slot < 256 {
                     out.is_float_slot[dst_slot as usize] = 1
                 }
             } else {
                 let temp = out.temp_count
                 out.temp_count = temp + 1
-                native_v2_emit_legal_instr_mut(&! out, native_v2_make_load_stack(temp, instr.src1.value))
-                native_v2_emit_legal_instr_mut(&! out, native_v2_make_store_stack(instr.dst.value, temp))
+                out = _emit_legal_byval(out, native_v2_make_load_stack(temp, instr.src1.value))
+                out = _emit_legal_byval(out, native_v2_make_store_stack(instr.dst.value, temp))
             }
         } else if instr.opcode == MIR_OP_PSEUDO_BINOP {
             // Sprint 87: check if either operand is a float slot → emit FLOAT_BINOP
@@ -786,7 +807,7 @@ fn native_v2_legalize_function(func: MachineFunction) -> MachineFunction with Mu
             let s1f = if s1 >= 0 && s1 < 256 { out.is_float_slot[s1 as usize] } else { 0 }
             let s2f = if s2 >= 0 && s2 < 256 { out.is_float_slot[s2 as usize] } else { 0 }
             if s1f == 1 || s2f == 1 {
-                native_v2_emit_legal_instr_mut(&! out, native_v2_make_float_binop(instr.dst.value, s1, s2, instr.bin_op, s1f, s2f))
+                out = _emit_legal_byval(out, native_v2_make_float_binop(instr.dst.value, s1, s2, instr.bin_op, s1f, s2f))
                 let dslot = instr.dst.value
                 if dslot >= 0 && dslot < 256 {
                     if instr.bin_op == BinaryOp::OpAdd || instr.bin_op == BinaryOp::OpSub || instr.bin_op == BinaryOp::OpMul || instr.bin_op == BinaryOp::OpDiv {
@@ -798,21 +819,21 @@ fn native_v2_legalize_function(func: MachineFunction) -> MachineFunction with Mu
                 out.temp_count = lhs + 1
                 let rhs = out.temp_count
                 out.temp_count = rhs + 1
-                native_v2_emit_legal_instr_mut(&! out, native_v2_make_load_stack(lhs, instr.src1.value))
-                native_v2_emit_legal_instr_mut(&! out, native_v2_make_load_stack(rhs, instr.src2.value))
-                native_v2_emit_legal_instr_mut(&! out, native_v2_make_binop(lhs, rhs, instr.bin_op))
-                native_v2_emit_legal_instr_mut(&! out, native_v2_make_store_stack(instr.dst.value, lhs))
+                out = _emit_legal_byval(out, native_v2_make_load_stack(lhs, instr.src1.value))
+                out = _emit_legal_byval(out, native_v2_make_load_stack(rhs, instr.src2.value))
+                out = _emit_legal_byval(out, native_v2_make_binop(lhs, rhs, instr.bin_op))
+                out = _emit_legal_byval(out, native_v2_make_store_stack(instr.dst.value, lhs))
             }
         } else if instr.opcode == MIR_OP_PSEUDO_UNARY {
             let temp = out.temp_count
             out.temp_count = temp + 1
             if instr.un_op == UnaryOp::OpRef || instr.un_op == UnaryOp::OpRefMut {
-                native_v2_emit_legal_instr_mut(&! out, native_v2_make_lea_stack(temp, instr.src1.value))
+                out = _emit_legal_byval(out, native_v2_make_lea_stack(temp, instr.src1.value))
             } else {
-                native_v2_emit_legal_instr_mut(&! out, native_v2_make_load_stack(temp, instr.src1.value))
-                native_v2_emit_legal_instr_mut(&! out, native_v2_make_unary(temp, temp, instr.un_op))
+                out = _emit_legal_byval(out, native_v2_make_load_stack(temp, instr.src1.value))
+                out = _emit_legal_byval(out, native_v2_make_unary(temp, temp, instr.un_op))
             }
-            native_v2_emit_legal_instr_mut(&! out, native_v2_make_store_stack(instr.dst.value, temp))
+            out = _emit_legal_byval(out, native_v2_make_store_stack(instr.dst.value, temp))
         } else if instr.opcode == MIR_OP_PSEUDO_CALL {
             if instr.call_arg_count > 6 {
                 out.supported = false
@@ -823,63 +844,63 @@ fn native_v2_legalize_function(func: MachineFunction) -> MachineFunction with Mu
             while ai < instr.call_arg_count {
                 let temp = out.temp_count
                 out.temp_count = temp + 1
-                native_v2_emit_legal_instr_mut(&! out, native_v2_make_load_stack(temp, instr.call_arg_values[ai as usize]))
-                native_v2_emit_legal_instr_mut(&! out, native_v2_make_arg_move(ai, temp))
+                out = _emit_legal_byval(out, native_v2_make_load_stack(temp, instr.call_arg_values[ai as usize]))
+                out = _emit_legal_byval(out, native_v2_make_arg_move(ai, temp))
                 ai = ai + 1
             }
-            native_v2_emit_legal_instr_mut(&! out, native_v2_make_call(instr.src1.value))
+            out = _emit_legal_byval(out, native_v2_make_call(instr.src1.value))
             if instr.dst.value >= 0 {
                 let temp = out.temp_count
                 out.temp_count = temp + 1
-                native_v2_emit_legal_instr_mut(&! out, native_v2_make_capture_ret(temp))
-                native_v2_emit_legal_instr_mut(&! out, native_v2_make_store_stack(instr.dst.value, temp))
+                out = _emit_legal_byval(out, native_v2_make_capture_ret(temp))
+                out = _emit_legal_byval(out, native_v2_make_store_stack(instr.dst.value, temp))
             }
         } else if instr.opcode == MIR_OP_PSEUDO_RET {
             if instr.src1.kind == MIR_OPERAND_STACK_SLOT {
                 let temp = out.temp_count
                 out.temp_count = temp + 1
-                native_v2_emit_legal_instr_mut(&! out, native_v2_make_load_stack(temp, instr.src1.value))
-                native_v2_emit_legal_instr_mut(&! out, native_v2_make_ret(temp))
+                out = _emit_legal_byval(out, native_v2_make_load_stack(temp, instr.src1.value))
+                out = _emit_legal_byval(out, native_v2_make_ret(temp))
             } else {
-                native_v2_emit_legal_instr_mut(&! out, native_v2_make_ret(-1))
+                out = _emit_legal_byval(out, native_v2_make_ret(-1))
             }
         } else if instr.opcode == MIR_OP_PSEUDO_JUMP {
-            native_v2_emit_legal_instr_mut(&! out, native_v2_make_jump(instr.dst.value))
+            out = _emit_legal_byval(out, native_v2_make_jump(instr.dst.value))
         } else if instr.opcode == MIR_OP_PSEUDO_BRANCH_TRUE {
             let temp = out.temp_count
             out.temp_count = temp + 1
-            native_v2_emit_legal_instr_mut(&! out, native_v2_make_load_stack(temp, instr.src1.value))
-            native_v2_emit_legal_instr_mut(&! out, native_v2_make_cmp_zero(temp))
-            native_v2_emit_legal_instr_mut(&! out, native_v2_make_jcc(instr.dst.value, MIR_CC_NZ))
+            out = _emit_legal_byval(out, native_v2_make_load_stack(temp, instr.src1.value))
+            out = _emit_legal_byval(out, native_v2_make_cmp_zero(temp))
+            out = _emit_legal_byval(out, native_v2_make_jcc(instr.dst.value, MIR_CC_NZ))
         } else if instr.opcode == MIR_OP_PSEUDO_BRANCH_FALSE {
             let temp = out.temp_count
             out.temp_count = temp + 1
-            native_v2_emit_legal_instr_mut(&! out, native_v2_make_load_stack(temp, instr.src1.value))
-            native_v2_emit_legal_instr_mut(&! out, native_v2_make_cmp_zero(temp))
-            native_v2_emit_legal_instr_mut(&! out, native_v2_make_jcc(instr.dst.value, MIR_CC_Z))
+            out = _emit_legal_byval(out, native_v2_make_load_stack(temp, instr.src1.value))
+            out = _emit_legal_byval(out, native_v2_make_cmp_zero(temp))
+            out = _emit_legal_byval(out, native_v2_make_jcc(instr.dst.value, MIR_CC_Z))
         } else if instr.opcode == MIR_OP_PSEUDO_LABEL {
-            native_v2_emit_legal_instr_mut(&! out, native_v2_make_label(instr.dst.value))
+            out = _emit_legal_byval(out, native_v2_make_label(instr.dst.value))
         } else if instr.opcode == MIR_OP_PSEUDO_ALLOC {
             let temp = out.temp_count
             out.temp_count = temp + 1
-            native_v2_emit_legal_instr_mut(&! out, native_v2_make_alloc(temp, native_v2_alloc_size_from_tag(instr.src1.value), native_v2_alloc_descriptor_from_tag(instr.src1.value)))
-            native_v2_emit_legal_instr_mut(&! out, native_v2_make_store_stack(instr.dst.value, temp))
+            out = _emit_legal_byval(out, native_v2_make_alloc(temp, native_v2_alloc_size_from_tag(instr.src1.value), native_v2_alloc_descriptor_from_tag(instr.src1.value)))
+            out = _emit_legal_byval(out, native_v2_make_store_stack(instr.dst.value, temp))
         } else if instr.opcode == MIR_OP_PSEUDO_FIELD_GET {
             let base = out.temp_count
             out.temp_count = base + 1
             let dst = out.temp_count
             out.temp_count = dst + 1
-            native_v2_emit_legal_instr_mut(&! out, native_v2_make_load_stack(base, instr.src1.value))
-            native_v2_emit_legal_instr_mut(&! out, native_v2_make_field_load(dst, base, instr.aux.value))
-            native_v2_emit_legal_instr_mut(&! out, native_v2_make_store_stack(instr.dst.value, dst))
+            out = _emit_legal_byval(out, native_v2_make_load_stack(base, instr.src1.value))
+            out = _emit_legal_byval(out, native_v2_make_field_load(dst, base, instr.aux.value))
+            out = _emit_legal_byval(out, native_v2_make_store_stack(instr.dst.value, dst))
         } else if instr.opcode == MIR_OP_PSEUDO_FIELD_SET {
             let base = out.temp_count
             out.temp_count = base + 1
             let src = out.temp_count
             out.temp_count = src + 1
-            native_v2_emit_legal_instr_mut(&! out, native_v2_make_load_stack(base, instr.src1.value))
-            native_v2_emit_legal_instr_mut(&! out, native_v2_make_load_stack(src, instr.src2.value))
-            native_v2_emit_legal_instr_mut(&! out, native_v2_make_field_store(base, src, instr.aux.value))
+            out = _emit_legal_byval(out, native_v2_make_load_stack(base, instr.src1.value))
+            out = _emit_legal_byval(out, native_v2_make_load_stack(src, instr.src2.value))
+            out = _emit_legal_byval(out, native_v2_make_field_store(base, src, instr.aux.value))
         } else if instr.opcode == MIR_OP_PSEUDO_INDEX_GET {
             let base = out.temp_count
             out.temp_count = base + 1
@@ -887,10 +908,10 @@ fn native_v2_legalize_function(func: MachineFunction) -> MachineFunction with Mu
             out.temp_count = idx + 1
             let dst = out.temp_count
             out.temp_count = dst + 1
-            native_v2_emit_legal_instr_mut(&! out, native_v2_make_load_stack(base, instr.src1.value))
-            native_v2_emit_legal_instr_mut(&! out, native_v2_make_load_stack(idx, instr.src2.value))
-            native_v2_emit_legal_instr_mut(&! out, native_v2_make_index_load(dst, base, idx))
-            native_v2_emit_legal_instr_mut(&! out, native_v2_make_store_stack(instr.dst.value, dst))
+            out = _emit_legal_byval(out, native_v2_make_load_stack(base, instr.src1.value))
+            out = _emit_legal_byval(out, native_v2_make_load_stack(idx, instr.src2.value))
+            out = _emit_legal_byval(out, native_v2_make_index_load(dst, base, idx))
+            out = _emit_legal_byval(out, native_v2_make_store_stack(instr.dst.value, dst))
         } else if instr.opcode == MIR_OP_PSEUDO_INDEX_SET {
             let base = out.temp_count
             out.temp_count = base + 1
@@ -898,25 +919,25 @@ fn native_v2_legalize_function(func: MachineFunction) -> MachineFunction with Mu
             out.temp_count = idx + 1
             let src = out.temp_count
             out.temp_count = src + 1
-            native_v2_emit_legal_instr_mut(&! out, native_v2_make_load_stack(base, instr.src1.value))
-            native_v2_emit_legal_instr_mut(&! out, native_v2_make_load_stack(idx, instr.src2.value))
-            native_v2_emit_legal_instr_mut(&! out, native_v2_make_load_stack(src, instr.aux.value))
-            native_v2_emit_legal_instr_mut(&! out, native_v2_make_index_store(base, idx, src))
+            out = _emit_legal_byval(out, native_v2_make_load_stack(base, instr.src1.value))
+            out = _emit_legal_byval(out, native_v2_make_load_stack(idx, instr.src2.value))
+            out = _emit_legal_byval(out, native_v2_make_load_stack(src, instr.aux.value))
+            out = _emit_legal_byval(out, native_v2_make_index_store(base, idx, src))
         } else if instr.opcode == MIR_OP_PSEUDO_LOAD_FLOAT {
             // Sprint 87: float literal → LOAD_FLOAT_RIP stack slot
-            native_v2_emit_legal_instr_mut(&! out, native_v2_make_load_float_rip(instr.dst.value, instr.src1.value))
+            out = _emit_legal_byval(out, native_v2_make_load_float_rip(instr.dst.value, instr.src1.value))
             if instr.dst.value >= 0 && instr.dst.value < 256 {
                 out.is_float_slot[instr.dst.value as usize] = 1
             }
         } else if instr.opcode == MIR_OP_PSEUDO_INT_TO_FLOAT {
             // Sprint 87: int stack slot → CVTSI2SD → float stack slot
-            native_v2_emit_legal_instr_mut(&! out, native_v2_make_int_to_float(instr.dst.value, instr.src1.value))
+            out = _emit_legal_byval(out, native_v2_make_int_to_float(instr.dst.value, instr.src1.value))
             if instr.dst.value >= 0 && instr.dst.value < 256 {
                 out.is_float_slot[instr.dst.value as usize] = 1
             }
         } else if instr.opcode == MIR_OP_PSEUDO_FLOAT_TO_INT {
             // Sprint 87: float stack slot → CVTTSD2SI → int stack slot
-            native_v2_emit_legal_instr_mut(&! out, native_v2_make_float_to_int(instr.dst.value, instr.src1.value))
+            out = _emit_legal_byval(out, native_v2_make_float_to_int(instr.dst.value, instr.src1.value))
             if instr.dst.value >= 0 && instr.dst.value < 256 {
                 out.is_float_slot[instr.dst.value as usize] = 0
             }
