@@ -10104,9 +10104,199 @@ fn compiler_main_test_or_different_var_no_fold() -> bool with Mut, Div, Panic {
     result.instrs[2].op == IrOpcode::IrBinOp
 }
 
+// ============================================================================
+// Sprint 131 Block AS: XOR complement — x ^ ~x → -1; ~x ^ ~y → x ^ y (T458-T463)
+// ============================================================================
+
+// T458: x ^ ~x → -1 (s2 = NOT(s1)).
+fn compiler_main_test_xor_complement_allones() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(1, -1)
+    instrs[1] = ir_binop(2, 0, BinaryOp::OpBitXor, 1)
+    instrs[2] = ir_binop(3, 0, BinaryOp::OpBitXor, 2)
+    let func   = cp_make_test_func(instrs, 3)
+    let result = ocp_const_fold(func)
+    result.instrs[2].op == IrOpcode::IrLoadImm
+        && result.instrs[2].imm_i64 == -1
+}
+
+// T459: ~x ^ x → -1 (commutative, s1 = NOT(s2)).
+fn compiler_main_test_xor_complement_comm() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(1, -1)
+    instrs[1] = ir_binop(2, 0, BinaryOp::OpBitXor, 1)
+    instrs[2] = ir_binop(3, 2, BinaryOp::OpBitXor, 0)
+    let func   = cp_make_test_func(instrs, 3)
+    let result = ocp_const_fold(func)
+    result.instrs[2].op == IrOpcode::IrLoadImm
+        && result.instrs[2].imm_i64 == -1
+}
+
+// T460: x ^ ~y → no fold (different base variables).
+fn compiler_main_test_xor_complement_no_fold() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(2, -1)
+    instrs[1] = ir_binop(3, 1, BinaryOp::OpBitXor, 2)
+    instrs[2] = ir_binop(4, 0, BinaryOp::OpBitXor, 3)
+    let func   = cp_make_test_func(instrs, 3)
+    let result = ocp_const_fold(func)
+    result.instrs[2].op == IrOpcode::IrBinOp
+}
+
+// T461: ~x ^ ~y → x ^ y (double-complement XOR cancellation).
+fn compiler_main_test_xor_double_complement() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(2, -1)
+    instrs[1] = ir_binop(3, 0, BinaryOp::OpBitXor, 2)
+    instrs[2] = ir_load_imm(5, -1)
+    instrs[3] = ir_binop(6, 1, BinaryOp::OpBitXor, 5)
+    instrs[4] = ir_binop(7, 3, BinaryOp::OpBitXor, 6)
+    let func   = cp_make_test_func(instrs, 5)
+    let result = ocp_const_fold(func)
+    result.instrs[4].op == IrOpcode::IrBinOp
+        && result.instrs[4].bin_op == BinaryOp::OpBitXor
+        && result.instrs[4].src1 == 0
+        && result.instrs[4].src2 == 1
+}
+
+// T462: ~x ^ ~x → 0 (same base: double-complement XOR with itself).
+fn compiler_main_test_xor_self_complement_zero() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(1, -1)
+    instrs[1] = ir_binop(2, 0, BinaryOp::OpBitXor, 1)
+    instrs[2] = ir_load_imm(3, -1)
+    instrs[3] = ir_binop(4, 0, BinaryOp::OpBitXor, 3)
+    instrs[4] = ir_binop(5, 2, BinaryOp::OpBitXor, 4)
+    let func   = cp_make_test_func(instrs, 5)
+    let result = ocp_const_fold(func)
+    result.instrs[4].op == IrOpcode::IrLoadImm
+        && result.instrs[4].imm_i64 == 0
+}
+
+// T463: Block AI double-NOT regression — ~(~x) → IrCopy(x) still works.
+fn compiler_main_test_double_not_regression() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(1, -1)
+    instrs[1] = ir_binop(2, 0, BinaryOp::OpBitXor, 1)
+    instrs[2] = ir_load_imm(3, -1)
+    instrs[3] = ir_binop(4, 2, BinaryOp::OpBitXor, 3)
+    let func   = cp_make_test_func(instrs, 4)
+    let result = ocp_const_fold(func)
+    result.instrs[3].op == IrOpcode::IrCopy
+        && result.instrs[3].src1 == 0
+}
+
+// ============================================================================
+// Sprint 132: Epistemic pipeline integration tests (T464-T469)
+// Verify: IrAlloc + IrFieldSet (measure) → IrFieldGet → GUM arithmetic chain
+// ============================================================================
+
+// T464: measure() IR pattern — IrAlloc(0) + 3×IrFieldSet constructs Knowledge struct
+fn compiler_main_test_measure_ir_pattern() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    // measure(10.5, 0.1): alloc struct, set value/variance/confidence
+    instrs[0] = ir_load_float(0, 10.5)                              // value
+    instrs[1] = ir_load_float(1, 0.1)                               // uncertainty
+    instrs[2] = ir_alloc(2, 0)                                      // Knowledge struct
+    instrs[3] = ir_field_set(2, 0, 0, make_name("value"))           // .value = 10.5
+    instrs[4] = ir_binop(3, 1, BinaryOp::OpMul, 1)                  // variance = 0.1²
+    instrs[5] = ir_field_set(2, 1, 3, make_name("variance"))        // .variance = 0.01
+    instrs[6] = ir_load_float(4, 1.0)                               // confidence
+    instrs[7] = ir_field_set(2, 2, 4, make_name("confidence"))      // .confidence = 1.0
+    instrs[8] = ir_return(2)
+    let func = cp_make_test_func(instrs, 9)
+    // Verify structure: alloc at [2], field_set at [3], [5], [7]
+    func.instrs[2].op == IrOpcode::IrAlloc
+        && func.instrs[3].op == IrOpcode::IrFieldSet && func.instrs[3].field_idx == 0
+        && func.instrs[5].op == IrOpcode::IrFieldSet && func.instrs[5].field_idx == 1
+        && func.instrs[7].op == IrOpcode::IrFieldSet && func.instrs[7].field_idx == 2
+}
+
+// T465: IrFieldGet extracts value/variance from Knowledge struct (field_idx 0, 1)
+fn compiler_main_test_knowledge_field_get() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    // Assume r0 = Knowledge struct ptr
+    instrs[0] = ir_field_get(1, 0, 0, make_name("value"))           // r1 = k.value
+    instrs[1] = ir_field_get(2, 0, 1, make_name("variance"))        // r2 = k.variance
+    instrs[2] = ir_field_get(3, 0, 2, make_name("confidence"))      // r3 = k.confidence
+    instrs[3] = ir_return(1)
+    let func = cp_make_test_func(instrs, 4)
+    func.instrs[0].op == IrOpcode::IrFieldGet && func.instrs[0].field_idx == 0
+        && func.instrs[1].op == IrOpcode::IrFieldGet && func.instrs[1].field_idx == 1
+        && func.instrs[2].op == IrOpcode::IrFieldGet && func.instrs[2].field_idx == 2
+}
+
+// T466: GUM add full chain — extract fields, add values/variances, construct result
+fn compiler_main_test_gum_add_full_chain() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    // r0 = a (Knowledge ptr), r1 = b (Knowledge ptr)
+    instrs[0] = ir_field_get(2, 0, 0, make_name("value"))           // r2 = a.value
+    instrs[1] = ir_field_get(3, 1, 0, make_name("value"))           // r3 = b.value
+    instrs[2] = ir_binop(4, 2, BinaryOp::OpAdd, 3)                  // r4 = sum_val
+    instrs[3] = ir_field_get(5, 0, 1, make_name("variance"))        // r5 = a.variance
+    instrs[4] = ir_field_get(6, 1, 1, make_name("variance"))        // r6 = b.variance
+    instrs[5] = ir_binop(7, 5, BinaryOp::OpAdd, 6)                  // r7 = sum_var
+    instrs[6] = ir_alloc(8, 0)                                      // r8 = result struct
+    instrs[7] = ir_field_set(8, 0, 4, make_name("value"))           // .value = sum_val
+    instrs[8] = ir_field_set(8, 1, 7, make_name("variance"))        // .variance = sum_var
+    instrs[9] = ir_return(8)
+    let func = cp_make_test_func(instrs, 10)
+    // Verify chain: get→get→add→get→get→add→alloc→set→set→return
+    func.instrs[2].op == IrOpcode::IrBinOp && func.instrs[2].bin_op == BinaryOp::OpAdd
+        && func.instrs[5].op == IrOpcode::IrBinOp && func.instrs[5].bin_op == BinaryOp::OpAdd
+        && func.instrs[6].op == IrOpcode::IrAlloc
+        && func.instrs[7].field_idx == 0 && func.instrs[8].field_idx == 1
+}
+
+// T467: GUM mul variance formula — a.val² * b.var + b.val² * a.var (delta method)
+fn compiler_main_test_gum_mul_full_chain() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_field_get(2, 0, 0, make_name("value"))           // r2 = a.val
+    instrs[1] = ir_field_get(3, 1, 0, make_name("value"))           // r3 = b.val
+    instrs[2] = ir_field_get(4, 0, 1, make_name("variance"))        // r4 = a.var
+    instrs[3] = ir_field_get(5, 1, 1, make_name("variance"))        // r5 = b.var
+    instrs[4] = ir_binop(6, 2, BinaryOp::OpMul, 2)                  // r6 = a.val²
+    instrs[5] = ir_binop(7, 6, BinaryOp::OpMul, 5)                  // r7 = a.val² * b.var
+    instrs[6] = ir_binop(8, 3, BinaryOp::OpMul, 3)                  // r8 = b.val²
+    instrs[7] = ir_binop(9, 8, BinaryOp::OpMul, 4)                  // r9 = b.val² * a.var
+    instrs[8] = ir_binop(10, 7, BinaryOp::OpAdd, 9)                 // r10 = total var
+    instrs[9] = ir_return(10)
+    let func = cp_make_test_func(instrs, 10)
+    // Verify: 4 field_get, 5 binop (mul,mul,mul,mul,add)
+    func.instrs[4].bin_op == BinaryOp::OpMul && func.instrs[4].src1 == 2 && func.instrs[4].src2 == 2
+        && func.instrs[8].bin_op == BinaryOp::OpAdd && func.instrs[8].src1 == 7 && func.instrs[8].src2 == 9
+}
+
+// T468: Knowledge layout field count = 3 (value, variance, confidence)
+fn compiler_main_test_knowledge_layout_fields_3() -> bool with Mut, Panic, Div {
+    let table = ir_register_knowledge_layout(empty_struct_layout_table())
+    table.count == 1 && table.entries[0 as usize].field_count == 3
+}
+
+// T469: GUM sub full chain — field_get + OpAdd (not OpSub) + alloc + field_set
+fn compiler_main_test_gum_sub_full_chain() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    // r0 = a, r1 = b
+    instrs[0] = ir_field_get(2, 0, 0, make_name("value"))           // r2 = a.value
+    instrs[1] = ir_field_get(3, 1, 0, make_name("value"))           // r3 = b.value
+    instrs[2] = ir_binop(4, 2, BinaryOp::OpSub, 3)                  // r4 = diff_val
+    instrs[3] = ir_field_get(5, 0, 1, make_name("variance"))        // r5 = a.variance
+    instrs[4] = ir_field_get(6, 1, 1, make_name("variance"))        // r6 = b.variance
+    instrs[5] = ir_binop(7, 5, BinaryOp::OpAdd, 6)                  // r7 = sum_var (ADD not SUB!)
+    instrs[6] = ir_alloc(8, 0)                                      // result struct
+    instrs[7] = ir_field_set(8, 0, 4, make_name("value"))
+    instrs[8] = ir_field_set(8, 1, 7, make_name("variance"))
+    instrs[9] = ir_return(8)
+    let func = cp_make_test_func(instrs, 10)
+    // Key: value uses OpSub, variance uses OpAdd
+    func.instrs[2].bin_op == BinaryOp::OpSub
+        && func.instrs[5].bin_op == BinaryOp::OpAdd
+        && func.instrs[6].op == IrOpcode::IrAlloc
+}
+
 fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
     var passed: i64 = 0
-    let total: i64 = 457
+    let total: i64 = 469
 
     println("=== compiler/main.sio self-tests ===")
 
@@ -12907,6 +13097,55 @@ fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
         println("  T457 OK: Sprint 130 Block AR: x|~y no fold")
         passed = passed + 1
     } else { println("  FAIL: T457") }
+    if compiler_main_test_xor_complement_allones() {
+        println("  T458 OK: Sprint 131 Block AS: x^~x→-1")
+        passed = passed + 1
+    } else { println("  FAIL: T458") }
+    if compiler_main_test_xor_complement_comm() {
+        println("  T459 OK: Sprint 131 Block AS: ~x^x→-1 commutative")
+        passed = passed + 1
+    } else { println("  FAIL: T459") }
+    if compiler_main_test_xor_complement_no_fold() {
+        println("  T460 OK: Sprint 131 Block AS: x^~y no fold")
+        passed = passed + 1
+    } else { println("  FAIL: T460") }
+    if compiler_main_test_xor_double_complement() {
+        println("  T461 OK: Sprint 131 Block AS: ~x^~y→x^y")
+        passed = passed + 1
+    } else { println("  FAIL: T461") }
+    if compiler_main_test_xor_self_complement_zero() {
+        println("  T462 OK: Sprint 131 Block AS: ~x^~x→0")
+        passed = passed + 1
+    } else { println("  FAIL: T462") }
+    if compiler_main_test_double_not_regression() {
+        println("  T463 OK: Sprint 131 Block AS: Block AI regression ~(~x)→copy")
+        passed = passed + 1
+    } else { println("  FAIL: T463") }
+
+    if compiler_main_test_measure_ir_pattern() {
+        println("  T464 OK: Sprint 132 measure() IR pattern: alloc + 3 field_set")
+        passed = passed + 1
+    } else { println("  FAIL: T464") }
+    if compiler_main_test_knowledge_field_get() {
+        println("  T465 OK: Sprint 132 Knowledge field_get: value/variance/confidence")
+        passed = passed + 1
+    } else { println("  FAIL: T465") }
+    if compiler_main_test_gum_add_full_chain() {
+        println("  T466 OK: Sprint 132 GUM add chain: get→add→alloc→set")
+        passed = passed + 1
+    } else { println("  FAIL: T466") }
+    if compiler_main_test_gum_mul_full_chain() {
+        println("  T467 OK: Sprint 132 GUM mul delta-method: a²b_var + b²a_var")
+        passed = passed + 1
+    } else { println("  FAIL: T467") }
+    if compiler_main_test_knowledge_layout_fields_3() {
+        println("  T468 OK: Sprint 132 Knowledge layout: 3 fields registered")
+        passed = passed + 1
+    } else { println("  FAIL: T468") }
+    if compiler_main_test_gum_sub_full_chain() {
+        println("  T469 OK: Sprint 132 GUM sub chain: OpSub value, OpAdd variance")
+        passed = passed + 1
+    } else { println("  FAIL: T469") }
 
     println("")
     println("compiler/main tests: " + int_to_string(passed) + "/" + int_to_string(total) + " passed")

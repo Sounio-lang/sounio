@@ -224,6 +224,12 @@ fn ocp_const_fold(func: IrFunction) -> IrFunction with Mut, Div, Panic {
     var aq_mul_rr_valid: [bool; 256] = [false; 256]
     var aq_mul_rr_lhs:   [i64;  256] = [-1;    256]
     var aq_mul_rr_rhs:   [i64;  256] = [-1;    256]
+    // Sprint 131 Block AS: Register-register XOR tracking for self-inverse cancellation.
+    // (a ^ b) ^ b → a, (a ^ b) ^ a → b.
+    // SOTA: LLVM InstCombineAndOrXor; GF(2) field: XOR is its own inverse.
+    var as_xor_rr_valid: [bool; 256] = [false; 256]
+    var as_xor_rr_lhs:   [i64;  256] = [-1;    256]
+    var as_xor_rr_rhs:   [i64;  256] = [-1;    256]
 
     var i: i64 = 0
     while i < result.instr_count {
@@ -856,7 +862,87 @@ fn ocp_const_fold(func: IrFunction) -> IrFunction with Mut, Div, Panic {
                 }
             }
 
-            // ---- Tracking population (Sprints 127 + 129) ----
+            // ---- Block AS: XOR self-inverse cancellation ----
+            // (a ^ b) ^ b → a  ;  (a ^ b) ^ a → b
+            // XOR is its own inverse in GF(2): a ⊕ b ⊕ b = a.
+            // SOTA: LLVM InstCombineAndOrXor.cpp; Hacker's Delight §2-3.
+            if ao_instr.bin_op == BinaryOp::OpBitXor && ao_s1_ok && as_xor_rr_valid[ao_s1 as usize] {
+                if ao_s2 == as_xor_rr_rhs[ao_s1 as usize] {
+                    result.instrs[i as usize] = ir_copy(ao_instr.dst, as_xor_rr_lhs[ao_s1 as usize])
+                }
+                if ao_s2 == as_xor_rr_lhs[ao_s1 as usize] {
+                    result.instrs[i as usize] = ir_copy(ao_instr.dst, as_xor_rr_rhs[ao_s1 as usize])
+                }
+            }
+            // b ^ (a ^ b) → a  ;  a ^ (a ^ b) → b  [commutative]
+            if ao_instr.bin_op == BinaryOp::OpBitXor && ao_s2_ok && as_xor_rr_valid[ao_s2 as usize] {
+                if ao_s1 == as_xor_rr_rhs[ao_s2 as usize] {
+                    result.instrs[i as usize] = ir_copy(ao_instr.dst, as_xor_rr_lhs[ao_s2 as usize])
+                }
+                if ao_s1 == as_xor_rr_lhs[ao_s2 as usize] {
+                    result.instrs[i as usize] = ir_copy(ao_instr.dst, as_xor_rr_rhs[ao_s2 as usize])
+                }
+            }
+
+            // ---- Block AT: NOT-distributive simplification ----
+            // ~a & (a | b) → ~a & b  (eliminates the OR via complement distribution)
+            // Proof: ~a & (a | b) = (~a & a) | (~a & b) = 0 | (~a & b) = ~a & b.
+            // SOTA: LLVM InstCombineAndOrXor.cpp SimplifyDemandedBits;
+            //   Boolean algebra distributive + complement axioms.
+            if ao_instr.bin_op == BinaryOp::OpBitAnd {
+                // ~a & (a | b) → ~a & b  [s1=~a, s2=a|b, bnot_src[s1]==one of s2's OR operands]
+                if ao_s1_ok && is_bnot[ao_s1 as usize]
+                        && ao_s2_ok && ao_or_rr_valid[ao_s2 as usize] {
+                    let at_a = bnot_src[ao_s1 as usize]
+                    if ao_or_rr_lhs[ao_s2 as usize] == at_a {
+                        // ~a & (a | b) → ~a & b
+                        result.instrs[i as usize] = ir_binop(ao_instr.dst, ao_s1, BinaryOp::OpBitAnd, ao_or_rr_rhs[ao_s2 as usize])
+                    }
+                    if ao_or_rr_rhs[ao_s2 as usize] == at_a {
+                        // ~a & (b | a) → ~a & b
+                        result.instrs[i as usize] = ir_binop(ao_instr.dst, ao_s1, BinaryOp::OpBitAnd, ao_or_rr_lhs[ao_s2 as usize])
+                    }
+                }
+                // (a | b) & ~a → ~a & b  [commutative: s1=a|b, s2=~a]
+                if ao_s2_ok && is_bnot[ao_s2 as usize]
+                        && ao_s1_ok && ao_or_rr_valid[ao_s1 as usize] {
+                    let at_a = bnot_src[ao_s2 as usize]
+                    if ao_or_rr_lhs[ao_s1 as usize] == at_a {
+                        result.instrs[i as usize] = ir_binop(ao_instr.dst, ao_s2, BinaryOp::OpBitAnd, ao_or_rr_rhs[ao_s1 as usize])
+                    }
+                    if ao_or_rr_rhs[ao_s1 as usize] == at_a {
+                        result.instrs[i as usize] = ir_binop(ao_instr.dst, ao_s2, BinaryOp::OpBitAnd, ao_or_rr_lhs[ao_s1 as usize])
+                    }
+                }
+            }
+            // ~a | (a & b) → ~a | b  (dual: eliminates the AND)
+            // Proof: ~a | (a & b) = (~a | a) & (~a | b) = -1 & (~a | b) = ~a | b.
+            if ao_instr.bin_op == BinaryOp::OpBitOr {
+                // ~a | (a & b) → ~a | b
+                if ao_s1_ok && is_bnot[ao_s1 as usize]
+                        && ao_s2_ok && ao_and_rr_valid[ao_s2 as usize] {
+                    let at_a = bnot_src[ao_s1 as usize]
+                    if ao_and_rr_lhs[ao_s2 as usize] == at_a {
+                        result.instrs[i as usize] = ir_binop(ao_instr.dst, ao_s1, BinaryOp::OpBitOr, ao_and_rr_rhs[ao_s2 as usize])
+                    }
+                    if ao_and_rr_rhs[ao_s2 as usize] == at_a {
+                        result.instrs[i as usize] = ir_binop(ao_instr.dst, ao_s1, BinaryOp::OpBitOr, ao_and_rr_lhs[ao_s2 as usize])
+                    }
+                }
+                // (a & b) | ~a → ~a | b  [commutative]
+                if ao_s2_ok && is_bnot[ao_s2 as usize]
+                        && ao_s1_ok && ao_and_rr_valid[ao_s1 as usize] {
+                    let at_a = bnot_src[ao_s2 as usize]
+                    if ao_and_rr_lhs[ao_s1 as usize] == at_a {
+                        result.instrs[i as usize] = ir_binop(ao_instr.dst, ao_s2, BinaryOp::OpBitOr, ao_and_rr_rhs[ao_s1 as usize])
+                    }
+                    if ao_and_rr_rhs[ao_s1 as usize] == at_a {
+                        result.instrs[i as usize] = ir_binop(ao_instr.dst, ao_s2, BinaryOp::OpBitOr, ao_and_rr_lhs[ao_s1 as usize])
+                    }
+                }
+            }
+
+            // ---- Tracking population (Sprints 127 + 129 + 131) ----
             // Only populate if instruction was not folded (still a BinOp).
             if ocp_is_binop(result.instrs[i as usize].op) {
                 let trk = result.instrs[i as usize]
@@ -887,6 +973,11 @@ fn ocp_const_fold(func: IrFunction) -> IrFunction with Mut, Div, Panic {
                         aq_mul_rr_valid[trk_dst as usize] = true
                         aq_mul_rr_lhs[trk_dst as usize]   = trk_s1
                         aq_mul_rr_rhs[trk_dst as usize]   = trk_s2
+                    }
+                    if trk.bin_op == BinaryOp::OpBitXor {
+                        as_xor_rr_valid[trk_dst as usize] = true
+                        as_xor_rr_lhs[trk_dst as usize]   = trk_s1
+                        as_xor_rr_rhs[trk_dst as usize]   = trk_s2
                     }
                 }
             }
@@ -938,6 +1029,43 @@ fn ocp_const_fold(func: IrFunction) -> IrFunction with Mut, Div, Panic {
                 if ar_instr.dst >= 0 && ar_instr.dst < 256 {
                     is_const[ar_instr.dst as usize] = true
                     const_val[ar_instr.dst as usize] = -1
+                }
+            }
+            // Sprint 131 Block AS: XOR complement — x ^ ~x → -1; ~x ^ ~y → x ^ y.
+            // x ^ ~x = -1 (all bits set). ~x ^ ~y = x ^ y (double-NOT cancellation).
+            // Extends Block AR (AND/OR complement) to XOR domain. Zero new arrays.
+            // SOTA: LLVM InstCombineAndOrXor.cpp; Hacker's Delight §2-2.
+            if ar_instr.bin_op == BinaryOp::OpBitXor {
+                // x ^ ~x → -1  (s2 is NOT(s1))
+                if ar_s2_ok && is_bnot[ar_s2 as usize] && bnot_src[ar_s2 as usize] == ar_s1 {
+                    result.instrs[i as usize] = ir_load_imm(ar_instr.dst, -1)
+                    if ar_instr.dst >= 0 && ar_instr.dst < 256 {
+                        is_const[ar_instr.dst as usize] = true
+                        const_val[ar_instr.dst as usize] = -1
+                    }
+                }
+                // ~x ^ x → -1  (s1 is NOT(s2), commutative)
+                if ar_s1_ok && is_bnot[ar_s1 as usize] && bnot_src[ar_s1 as usize] == ar_s2 {
+                    result.instrs[i as usize] = ir_load_imm(ar_instr.dst, -1)
+                    if ar_instr.dst >= 0 && ar_instr.dst < 256 {
+                        is_const[ar_instr.dst as usize] = true
+                        const_val[ar_instr.dst as usize] = -1
+                    }
+                }
+                // ~x ^ ~y → x ^ y (both are NOT: complements cancel out).
+                // Special case ~x ^ ~x → 0 handled by base1 == base2 check.
+                if ar_s1_ok && ar_s2_ok && is_bnot[ar_s1 as usize] && is_bnot[ar_s2 as usize] {
+                    let as_base1 = bnot_src[ar_s1 as usize]
+                    let as_base2 = bnot_src[ar_s2 as usize]
+                    if as_base1 == as_base2 {
+                        result.instrs[i as usize] = ir_load_imm(ar_instr.dst, 0)
+                        if ar_instr.dst >= 0 && ar_instr.dst < 256 {
+                            is_const[ar_instr.dst as usize] = true
+                            const_val[ar_instr.dst as usize] = 0
+                        }
+                    } else {
+                        result.instrs[i as usize] = ir_binop(ar_instr.dst, as_base1, BinaryOp::OpBitXor, as_base2)
+                    }
                 }
             }
         }
