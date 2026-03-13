@@ -10294,9 +10294,191 @@ fn compiler_main_test_gum_sub_full_chain() -> bool with Mut, Div, Panic {
         && func.instrs[6].op == IrOpcode::IrAlloc
 }
 
+// Sprint 131: Block AS — XOR self-inverse cancellation (T470-T475)
+// (a ^ b) ^ b → a  via GF(2) self-inverse; LLVM InstCombineAndOrXor.cpp
+
+// T470: (a ^ b) ^ b → a  [basic XOR self-inverse]
+fn compiler_main_test_xor_self_inverse_basic() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    // r0, r1 are implicit params (non-constant)
+    instrs[0] = ir_binop(2, 0, BinaryOp::OpBitXor, 1)  // r2 = a ^ b
+    instrs[1] = ir_binop(3, 2, BinaryOp::OpBitXor, 1)  // r3 = (a^b) ^ b → a
+    instrs[2] = ir_return(3)
+    let func = cp_make_test_func(instrs, 3)
+    let opt = opt_cleanup_function(func)
+    opt.instrs[1].op == IrOpcode::IrCopy && opt.instrs[1].src1 == 0
+}
+
+// T471: (a ^ b) ^ a → b
+fn compiler_main_test_xor_self_inverse_lhs() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_binop(2, 0, BinaryOp::OpBitXor, 1)  // r2 = a ^ b
+    instrs[1] = ir_binop(3, 2, BinaryOp::OpBitXor, 0)  // r3 = (a^b) ^ a → b
+    instrs[2] = ir_return(3)
+    let func = cp_make_test_func(instrs, 3)
+    let opt = opt_cleanup_function(func)
+    opt.instrs[1].op == IrOpcode::IrCopy && opt.instrs[1].src1 == 1
+}
+
+// T472: b ^ (a ^ b) → a  [commutative]
+fn compiler_main_test_xor_self_inverse_commutative() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_binop(2, 0, BinaryOp::OpBitXor, 1)  // r2 = a ^ b
+    instrs[1] = ir_binop(3, 1, BinaryOp::OpBitXor, 2)  // r3 = b ^ (a^b) → a
+    instrs[2] = ir_return(3)
+    let func = cp_make_test_func(instrs, 3)
+    let opt = opt_cleanup_function(func)
+    opt.instrs[1].op == IrOpcode::IrCopy && opt.instrs[1].src1 == 0
+}
+
+// T473: a ^ (a ^ b) → b  [commutative lhs]
+fn compiler_main_test_xor_self_inverse_commutative_lhs() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_binop(2, 0, BinaryOp::OpBitXor, 1)  // r2 = a ^ b
+    instrs[1] = ir_binop(3, 0, BinaryOp::OpBitXor, 2)  // r3 = a ^ (a^b) → b
+    instrs[2] = ir_return(3)
+    let func = cp_make_test_func(instrs, 3)
+    let opt = opt_cleanup_function(func)
+    opt.instrs[1].op == IrOpcode::IrCopy && opt.instrs[1].src1 == 1
+}
+
+// T474: negative — (a ^ b) ^ c does NOT fold (c ≠ a, c ≠ b)
+// r4 = c is a separate non-constant param
+fn compiler_main_test_xor_self_inverse_neg() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_binop(2, 0, BinaryOp::OpBitXor, 1)  // r2 = a ^ b
+    instrs[1] = ir_binop(3, 2, BinaryOp::OpBitXor, 4)  // r3 = (a^b) ^ c — no fold (r4 ≠ r0, r4 ≠ r1)
+    instrs[2] = ir_return(3)
+    let func = cp_make_test_func(instrs, 3)
+    let opt = opt_cleanup_function(func)
+    opt.instrs[1].op == IrOpcode::IrBinOp && opt.instrs[1].bin_op == BinaryOp::OpBitXor
+}
+
+// T475: triple XOR chain: ((a^b)^b)^a — first fold yields copy(a)
+fn compiler_main_test_xor_self_inverse_chain() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_binop(2, 0, BinaryOp::OpBitXor, 1)  // r2 = a ^ b
+    instrs[1] = ir_binop(3, 2, BinaryOp::OpBitXor, 1)  // r3 = (a^b)^b → copy(a)=r0
+    instrs[2] = ir_binop(5, 3, BinaryOp::OpBitXor, 0)  // r5 = r3 ^ a
+    instrs[3] = ir_return(5)
+    let func = cp_make_test_func(instrs, 4)
+    let opt = opt_cleanup_function(func)
+    // After XOR self-inverse: r3=copy(r0), then r5=r3^r0
+    // At minimum, r3 must be folded to copy(r0)
+    opt.instrs[1].op == IrOpcode::IrCopy && opt.instrs[1].src1 == 0
+}
+
+// Sprint 132: Block AT — NOT-distributive simplification (T476-T481)
+// ~a & (a | b) → ~a & b via complement + distribution axioms
+// SOTA: LLVM InstCombineAndOrXor.cpp SimplifyDemandedBits
+
+// T476: ~a & (a | b) → ~a & b  [basic NOT-distributive AND]
+// NOT is represented as x ^ (-1) in IR (is_bnot tracking)
+fn compiler_main_test_not_dist_and_basic() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    // r0 = a, r1 = b (implicit non-constant params)
+    instrs[0] = ir_load_imm(6, -1)                       // r6 = -1 (all-ones)
+    instrs[1] = ir_binop(2, 0, BinaryOp::OpBitXor, 6)   // r2 = a ^ (-1) = ~a
+    instrs[2] = ir_binop(3, 0, BinaryOp::OpBitOr, 1)    // r3 = a | b
+    instrs[3] = ir_binop(4, 2, BinaryOp::OpBitAnd, 3)   // r4 = ~a & (a|b) → ~a & b
+    instrs[4] = ir_return(4)
+    let func = cp_make_test_func(instrs, 5)
+    let opt = opt_cleanup_function(func)
+    // Should become: r4 = ~a & b (AND with r2 and r1)
+    opt.instrs[3].op == IrOpcode::IrBinOp
+        && opt.instrs[3].bin_op == BinaryOp::OpBitAnd
+        && opt.instrs[3].src1 == 2 && opt.instrs[3].src2 == 1
+}
+
+// T477: (a | b) & ~a → ~a & b  [commutative]
+fn compiler_main_test_not_dist_and_commutative() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(0, 0)
+    instrs[1] = ir_load_imm(1, 0)
+    instrs[2] = ir_load_imm(6, -1)
+    instrs[3] = ir_binop(2, 0, BinaryOp::OpBitXor, 6)   // r2 = ~a
+    instrs[4] = ir_binop(3, 0, BinaryOp::OpBitOr, 1)    // r3 = a | b
+    instrs[5] = ir_binop(4, 3, BinaryOp::OpBitAnd, 2)   // r4 = (a|b) & ~a → ~a & b
+    instrs[6] = ir_return(4)
+    let func = cp_make_test_func(instrs, 7)
+    let opt = opt_cleanup_function(func)
+    opt.instrs[5].op == IrOpcode::IrBinOp
+        && opt.instrs[5].bin_op == BinaryOp::OpBitAnd
+        && opt.instrs[5].src1 == 2 && opt.instrs[5].src2 == 1
+}
+
+// T478: ~a | (a & b) → ~a | b  [NOT-distributive OR]
+fn compiler_main_test_not_dist_or_basic() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(0, 0)
+    instrs[1] = ir_load_imm(1, 0)
+    instrs[2] = ir_load_imm(6, -1)
+    instrs[3] = ir_binop(2, 0, BinaryOp::OpBitXor, 6)   // r2 = ~a
+    instrs[4] = ir_binop(3, 0, BinaryOp::OpBitAnd, 1)   // r3 = a & b
+    instrs[5] = ir_binop(4, 2, BinaryOp::OpBitOr, 3)    // r4 = ~a | (a&b) → ~a | b
+    instrs[6] = ir_return(4)
+    let func = cp_make_test_func(instrs, 7)
+    let opt = opt_cleanup_function(func)
+    opt.instrs[5].op == IrOpcode::IrBinOp
+        && opt.instrs[5].bin_op == BinaryOp::OpBitOr
+        && opt.instrs[5].src1 == 2 && opt.instrs[5].src2 == 1
+}
+
+// T479: (a & b) | ~a → ~a | b  [commutative OR]
+fn compiler_main_test_not_dist_or_commutative() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(0, 0)
+    instrs[1] = ir_load_imm(1, 0)
+    instrs[2] = ir_load_imm(6, -1)
+    instrs[3] = ir_binop(2, 0, BinaryOp::OpBitXor, 6)   // r2 = ~a
+    instrs[4] = ir_binop(3, 0, BinaryOp::OpBitAnd, 1)   // r3 = a & b
+    instrs[5] = ir_binop(4, 3, BinaryOp::OpBitOr, 2)    // r4 = (a&b) | ~a → ~a | b
+    instrs[6] = ir_return(4)
+    let func = cp_make_test_func(instrs, 7)
+    let opt = opt_cleanup_function(func)
+    opt.instrs[5].op == IrOpcode::IrBinOp
+        && opt.instrs[5].bin_op == BinaryOp::OpBitOr
+        && opt.instrs[5].src1 == 2 && opt.instrs[5].src2 == 1
+}
+
+// T480: negative — ~a & (c | b) does NOT fold (c ≠ a)
+fn compiler_main_test_not_dist_neg() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(0, 0)      // r0 = a
+    instrs[1] = ir_load_imm(1, 0)      // r1 = b
+    instrs[2] = ir_load_imm(5, 0)      // r5 = c (different from a)
+    instrs[3] = ir_load_imm(6, -1)
+    instrs[4] = ir_binop(2, 0, BinaryOp::OpBitXor, 6)   // r2 = ~a
+    instrs[5] = ir_binop(3, 5, BinaryOp::OpBitOr, 1)    // r3 = c | b  (c ≠ a)
+    instrs[6] = ir_binop(4, 2, BinaryOp::OpBitAnd, 3)   // r4 = ~a & (c|b) — no fold
+    instrs[7] = ir_return(4)
+    let func = cp_make_test_func(instrs, 8)
+    let opt = opt_cleanup_function(func)
+    // Should remain as AND — no simplification
+    opt.instrs[6].op == IrOpcode::IrBinOp && opt.instrs[6].bin_op == BinaryOp::OpBitAnd
+        && opt.instrs[6].src1 == 2 && opt.instrs[6].src2 == 3
+}
+
+// T481: ~a & (b | a) → ~a & b  [inner OR operand order reversed]
+fn compiler_main_test_not_dist_inner_commutative() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(0, 0)
+    instrs[1] = ir_load_imm(1, 0)
+    instrs[2] = ir_load_imm(6, -1)
+    instrs[3] = ir_binop(2, 0, BinaryOp::OpBitXor, 6)   // r2 = ~a
+    instrs[4] = ir_binop(3, 1, BinaryOp::OpBitOr, 0)    // r3 = b | a  (reversed)
+    instrs[5] = ir_binop(4, 2, BinaryOp::OpBitAnd, 3)   // r4 = ~a & (b|a) → ~a & b
+    instrs[6] = ir_return(4)
+    let func = cp_make_test_func(instrs, 7)
+    let opt = opt_cleanup_function(func)
+    opt.instrs[5].op == IrOpcode::IrBinOp
+        && opt.instrs[5].bin_op == BinaryOp::OpBitAnd
+        && opt.instrs[5].src1 == 2 && opt.instrs[5].src2 == 1
+}
+
 fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
     var passed: i64 = 0
-    let total: i64 = 469
+    let total: i64 = 481
 
     println("=== compiler/main.sio self-tests ===")
 
@@ -13146,6 +13328,58 @@ fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
         println("  T469 OK: Sprint 132 GUM sub chain: OpSub value, OpAdd variance")
         passed = passed + 1
     } else { println("  FAIL: T469") }
+
+    // Sprint 131 Block AS: XOR self-inverse cancellation (T470-T475)
+    if compiler_main_test_xor_self_inverse_basic() {
+        println("  T470 OK: Sprint 131 Block AS: (a^b)^b → a")
+        passed = passed + 1
+    } else { println("  FAIL: T470") }
+    if compiler_main_test_xor_self_inverse_lhs() {
+        println("  T471 OK: Sprint 131 Block AS: (a^b)^a → b")
+        passed = passed + 1
+    } else { println("  FAIL: T471") }
+    if compiler_main_test_xor_self_inverse_commutative() {
+        println("  T472 OK: Sprint 131 Block AS: b^(a^b) → a [commutative]")
+        passed = passed + 1
+    } else { println("  FAIL: T472") }
+    if compiler_main_test_xor_self_inverse_commutative_lhs() {
+        println("  T473 OK: Sprint 131 Block AS: a^(a^b) → b [commutative]")
+        passed = passed + 1
+    } else { println("  FAIL: T473") }
+    if compiler_main_test_xor_self_inverse_neg() {
+        println("  T474 OK: Sprint 131 Block AS: (a^b)^c no fold [negative]")
+        passed = passed + 1
+    } else { println("  FAIL: T474") }
+    if compiler_main_test_xor_self_inverse_chain() {
+        println("  T475 OK: Sprint 131 Block AS: ((a^b)^b)^a chain")
+        passed = passed + 1
+    } else { println("  FAIL: T475") }
+
+    // Sprint 132 Block AT: NOT-distributive simplification (T476-T481)
+    if compiler_main_test_not_dist_and_basic() {
+        println("  T476 OK: Sprint 132 Block AT: ~a & (a|b) → ~a & b")
+        passed = passed + 1
+    } else { println("  FAIL: T476") }
+    if compiler_main_test_not_dist_and_commutative() {
+        println("  T477 OK: Sprint 132 Block AT: (a|b) & ~a → ~a & b")
+        passed = passed + 1
+    } else { println("  FAIL: T477") }
+    if compiler_main_test_not_dist_or_basic() {
+        println("  T478 OK: Sprint 132 Block AT: ~a | (a&b) → ~a | b")
+        passed = passed + 1
+    } else { println("  FAIL: T478") }
+    if compiler_main_test_not_dist_or_commutative() {
+        println("  T479 OK: Sprint 132 Block AT: (a&b) | ~a → ~a | b")
+        passed = passed + 1
+    } else { println("  FAIL: T479") }
+    if compiler_main_test_not_dist_neg() {
+        println("  T480 OK: Sprint 132 Block AT: ~a & (c|b) no fold [negative]")
+        passed = passed + 1
+    } else { println("  FAIL: T480") }
+    if compiler_main_test_not_dist_inner_commutative() {
+        println("  T481 OK: Sprint 132 Block AT: ~a & (b|a) → ~a & b [inner commutative]")
+        passed = passed + 1
+    } else { println("  FAIL: T481") }
 
     println("")
     println("compiler/main tests: " + int_to_string(passed) + "/" + int_to_string(total) + " passed")
