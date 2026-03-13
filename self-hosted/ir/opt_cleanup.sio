@@ -193,6 +193,13 @@ fn ocp_const_fold(func: IrFunction) -> IrFunction with Mut, Div, Panic {
     var and_valid:     [bool; 256] = [false; 256]
     var and_var_src:   [i64;  256] = [-1;    256]
     var and_const_val: [i64;  256] = [0;     256]
+    // Sprint 115 Block AL: Sub-tracking for neg reversal.
+    // al_is_sub[r]=true means r = al_sub_lhs[r] - al_sub_rhs[r].
+    // neg(a - b) -> b - a  ;  0 - (a - b) -> b - a.
+    // SOTA: LLVM InstCombineAddSub.cpp; Cooper & Torczon §8.4.
+    var al_is_sub:  [bool; 256] = [false; 256]
+    var al_sub_lhs: [i64;  256] = [-1;    256]
+    var al_sub_rhs: [i64;  256] = [-1;    256]
 
     var i: i64 = 0
     while i < result.instr_count {
@@ -678,6 +685,17 @@ fn ocp_const_fold(func: IrFunction) -> IrFunction with Mut, Div, Panic {
             }
         }
 
+        // Sprint 115 Block AL: Subtract tracking — populate.
+        // Record when a register is produced by OpSub for downstream neg-reversal.
+        if ocp_is_binop(instr.op) && instr.bin_op == BinaryOp::OpSub {
+            let al_instr = result.instrs[i as usize]
+            if al_instr.dst >= 0 && al_instr.dst < 256 {
+                al_is_sub[al_instr.dst as usize]  = true
+                al_sub_lhs[al_instr.dst as usize] = al_instr.src1
+                al_sub_rhs[al_instr.dst as usize] = al_instr.src2
+            }
+        }
+
         // Sprint 86 Block M: Negation arithmetic fold.
         // x * (-1) → 0 - x  ;  x / (-1) → 0 - x  ;  x % (-1) → 0
         // neg(neg(x)) → IrCopy(x)
@@ -734,6 +752,36 @@ fn ocp_const_fold(func: IrFunction) -> IrFunction with Mut, Div, Panic {
             }
         }
 
+        // Sprint 115 Block AL: neg(a - b) → b - a  (subtract reversal through negation).
+        // If the operand of OpNeg was produced by OpSub, reverse the operands.
+        // SOTA: LLVM InstCombineAddSub.cpp; Cooper & Torczon §8.4.
+        if result.instrs[i as usize].op == IrOpcode::IrUnaryOp
+            && result.instrs[i as usize].un_op == UnaryOp::OpNeg {
+            let nn_instr = result.instrs[i as usize]
+            let nn_s = nn_instr.src1
+            if nn_s >= 0 && nn_s < 256 && al_is_sub[nn_s as usize] {
+                result.instrs[i as usize] = ir_binop(nn_instr.dst, al_sub_rhs[nn_s as usize], BinaryOp::OpSub, al_sub_lhs[nn_s as usize])
+                if nn_instr.dst >= 0 && nn_instr.dst < 256 {
+                    is_neg[nn_instr.dst as usize] = false
+                }
+            }
+        }
+
+        // Sprint 115 Block AL: 0 - (a - b) → b - a  (explicit zero-minus form).
+        // If s1 is const 0 and s2 was produced by OpSub, reverse the operands.
+        if ocp_is_binop(result.instrs[i as usize].op) {
+            let zm_instr = result.instrs[i as usize]
+            if zm_instr.bin_op == BinaryOp::OpSub {
+                let s1 = zm_instr.src1
+                let s2 = zm_instr.src2
+                let s1_ok = s1 >= 0 && s1 < 256
+                let s2_ok = s2 >= 0 && s2 < 256
+                if s1_ok && is_const[s1 as usize] && const_val[s1 as usize] == 0
+                    && s2_ok && al_is_sub[s2 as usize] {
+                    result.instrs[i as usize] = ir_binop(zm_instr.dst, al_sub_rhs[s2 as usize], BinaryOp::OpSub, al_sub_lhs[s2 as usize])
+                }
+            }
+        }
 
         // Sprint 110 Block AG: Add/sub with negated operand simplification.
         // x + neg(y) → x - y  ;  x - neg(y) → x + y  ;  neg(x) + y → y - x.
