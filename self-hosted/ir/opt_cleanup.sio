@@ -1184,6 +1184,46 @@ fn ocp_const_fold(func: IrFunction) -> IrFunction with Mut, Div, Panic {
                     is_cmp_result[bl.dst as usize] = false
                 }
             }
+            // Sprint 113 Block AJ: Boolean comparison with 1.
+            // bool == 1 → IrCopy(bool)  (comparison results are 0 or 1)
+            // 1 == bool → IrCopy(bool)  (commutative)
+            // bool != 1 → (bool == 0)   (boolean negation — rewrite to Eq with 0)
+            // SOTA: LLVM InstCombineCompares.cpp; standard boolean identity.
+            // s2 is const 1, s1 is comparison result
+            if bl.bin_op == BinaryOp::OpEq && bl_s2_ok && is_const[bl_s2 as usize]
+                    && const_val[bl_s2 as usize] == 1
+                    && bl_s1_ok && is_cmp_result[bl_s1 as usize] {
+                result.instrs[i as usize] = ir_copy(bl.dst, bl_s1)
+            }
+            // s1 is const 1, s2 is comparison result (commutative)
+            if bl.bin_op == BinaryOp::OpEq && bl_s1_ok && is_const[bl_s1 as usize]
+                    && const_val[bl_s1 as usize] == 1
+                    && bl_s2_ok && is_cmp_result[bl_s2 as usize] {
+                result.instrs[i as usize] = ir_copy(bl.dst, bl_s2)
+            }
+            // bool != 1 → rewrite to (bool == 0): keeps boolean semantics,
+            // enables further (x==0)==0 folding by Block Y on next pass.
+            if bl.bin_op == BinaryOp::OpNe && bl_s2_ok && is_const[bl_s2 as usize]
+                    && const_val[bl_s2 as usize] == 1
+                    && bl_s1_ok && is_cmp_result[bl_s1 as usize] {
+                let aj_def = def_at[bl_s2 as usize]
+                if aj_def >= 0 {
+                    result.instrs[aj_def as usize] = ir_load_imm(bl_s2, 0)
+                    const_val[bl_s2 as usize] = 0
+                    result.instrs[i as usize] = ir_binop(bl.dst, bl_s1, BinaryOp::OpEq, bl_s2)
+                }
+            }
+            // 1 != bool → rewrite to (bool == 0) (commutative)
+            if bl.bin_op == BinaryOp::OpNe && bl_s1_ok && is_const[bl_s1 as usize]
+                    && const_val[bl_s1 as usize] == 1
+                    && bl_s2_ok && is_cmp_result[bl_s2 as usize] {
+                let aj_def = def_at[bl_s1 as usize]
+                if aj_def >= 0 {
+                    result.instrs[aj_def as usize] = ir_load_imm(bl_s1, 0)
+                    const_val[bl_s1 as usize] = 0
+                    result.instrs[i as usize] = ir_binop(bl.dst, bl_s2, BinaryOp::OpEq, bl_s1)
+                }
+            }
         }
 
                 // Sprint 75 Block F: Conditional branch folding.
