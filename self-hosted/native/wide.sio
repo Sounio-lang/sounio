@@ -3,6 +3,9 @@
 // Provides 256KB ELF binary buffer, 1024-entry relocation table, and
 // 1024-function symbol table. The WideCodeBuffer in encode.sio provides
 // the 256KB code buffer.
+//
+// Also provides finalize_elf64_wide() — a 256KB-capable version of
+// finalize_elf64() that supports up to 1024 functions.
 
 module native::wide
 
@@ -157,4 +160,567 @@ fn wide_add_symbol(s: WideSymbolData, name: string, offset: i64) -> WideSymbolDa
         out.count = out.count + 1
     }
     out
+}
+
+// ============================================================================
+// WIDE CODE BUFFER COPY
+// ============================================================================
+
+fn wide_elf_copy_wide_code(bin: WideElf64Binary, src: WideCodeBuffer) -> WideElf64Binary with Mut, Panic, Div {
+    var out = bin
+    var i: i64 = 0
+    while i < src.len && out.len < 262144 {
+        out.bytes[out.len as usize] = src.bytes[i as usize]
+        out.len = out.len + 1
+        i = i + 1
+    }
+    out
+}
+
+// ============================================================================
+// WIDE RELOCATION APPLICATION
+// ============================================================================
+
+fn wide_apply_call_relocs(code: WideCodeBuffer, relocs: WideRelocationTable) -> WideCodeBuffer with Mut, Panic, Div {
+    var out = code
+    var i: i64 = 0
+    while i < relocs.count {
+        let r = relocs.entries[i as usize]
+        if r.kind_code == 1 {
+            let disp = r.target - (r.offset + 4)
+            if r.offset >= 0 && r.offset + 4 <= out.len {
+                out.bytes[r.offset as usize] = (disp & 255) as i8
+                out.bytes[(r.offset + 1) as usize] = ((disp / 256) & 255) as i8
+                out.bytes[(r.offset + 2) as usize] = ((disp / 65536) & 255) as i8
+                out.bytes[(r.offset + 3) as usize] = ((disp / 16777216) & 255) as i8
+            }
+        }
+        i = i + 1
+    }
+    out
+}
+
+// ============================================================================
+// WIDE ELF EMIT HELPERS (&! ref pattern for performance)
+// ============================================================================
+
+fn wide_emit_byte_ref(bin: &! WideElf64Binary, b: i64) with Mut, Panic, Div {
+    if (*bin).len < 262144 {
+        (*bin).bytes[(*bin).len as usize] = low8(b) as i8
+        (*bin).len = (*bin).len + 1
+    }
+}
+
+fn wide_emit_u16_ref(bin: &! WideElf64Binary, val: i64) with Mut, Panic, Div {
+    wide_emit_byte_ref(bin, low8(val))
+    wide_emit_byte_ref(bin, low8(val >> 8))
+}
+
+fn wide_emit_u32_ref(bin: &! WideElf64Binary, val: i64) with Mut, Panic, Div {
+    wide_emit_byte_ref(bin, low8(val))
+    wide_emit_byte_ref(bin, low8(val >> 8))
+    wide_emit_byte_ref(bin, low8(val >> 16))
+    wide_emit_byte_ref(bin, low8(val >> 24))
+}
+
+fn wide_emit_u64_ref(bin: &! WideElf64Binary, val: i64) with Mut, Panic, Div {
+    wide_emit_u32_ref(bin, val)
+    wide_emit_u32_ref(bin, val >> 32)
+}
+
+fn wide_patch_u16_ref(bin: &! WideElf64Binary, offset: i64, val: i64) with Mut, Panic, Div {
+    if offset >= 0 && offset + 2 <= (*bin).len {
+        (*bin).bytes[offset as usize] = low8(val) as i8
+        (*bin).bytes[(offset + 1) as usize] = low8(val >> 8) as i8
+    }
+}
+
+fn wide_patch_u64_ref(bin: &! WideElf64Binary, offset: i64, val: i64) with Mut, Panic, Div {
+    if offset >= 0 && offset + 8 <= (*bin).len {
+        (*bin).bytes[(offset + 0) as usize] = low8(val) as i8
+        (*bin).bytes[(offset + 1) as usize] = low8(val >> 8) as i8
+        (*bin).bytes[(offset + 2) as usize] = low8(val >> 16) as i8
+        (*bin).bytes[(offset + 3) as usize] = low8(val >> 24) as i8
+        (*bin).bytes[(offset + 4) as usize] = low8(val >> 32) as i8
+        (*bin).bytes[(offset + 5) as usize] = low8(val >> 40) as i8
+        (*bin).bytes[(offset + 6) as usize] = low8(val >> 48) as i8
+        (*bin).bytes[(offset + 7) as usize] = low8(val >> 56) as i8
+    }
+}
+
+fn wide_emit_symtab_entry_ref(
+    bin: &! WideElf64Binary,
+    st_name: i64,
+    st_type: i64,
+    st_bind: i64,
+    st_shndx: i64,
+    st_value: i64,
+    st_size: i64
+) with Mut, Panic, Div {
+    wide_emit_u32_ref(bin, st_name)
+    wide_emit_byte_ref(bin, st_bind * 16 + st_type)
+    wide_emit_byte_ref(bin, 0)
+    wide_emit_u16_ref(bin, st_shndx)
+    wide_emit_u64_ref(bin, st_value)
+    wide_emit_u64_ref(bin, st_size)
+}
+
+// ============================================================================
+// WIDE ELF HEADER + PROGRAM HEADER EMITTERS
+// ============================================================================
+
+fn wide_emit_elf_header_ref(bin: &! WideElf64Binary, entry_offset: i64, base_addr: i64, phnum: i64, machine_id: i64) with Mut, Panic, Div {
+    wide_emit_byte_ref(bin, 0x7f)
+    wide_emit_byte_ref(bin, 0x45)
+    wide_emit_byte_ref(bin, 0x4c)
+    wide_emit_byte_ref(bin, 0x46)
+    wide_emit_byte_ref(bin, 2)
+    wide_emit_byte_ref(bin, 1)
+    wide_emit_byte_ref(bin, 1)
+    wide_emit_byte_ref(bin, 0)
+    var pad = 0
+    while pad < 8 {
+        wide_emit_byte_ref(bin, 0)
+        pad = pad + 1
+    }
+    wide_emit_u16_ref(bin, 2)
+    wide_emit_u16_ref(bin, machine_id)
+    wide_emit_u32_ref(bin, 1)
+    let entry_va = base_addr + 4096 + entry_offset
+    wide_emit_u64_ref(bin, entry_va)
+    wide_emit_u64_ref(bin, 64)
+    wide_emit_u64_ref(bin, 0)
+    wide_emit_u32_ref(bin, 0)
+    wide_emit_u16_ref(bin, 64)
+    wide_emit_u16_ref(bin, 56)
+    wide_emit_u16_ref(bin, phnum)
+    wide_emit_u16_ref(bin, 0)
+    wide_emit_u16_ref(bin, 0)
+    wide_emit_u16_ref(bin, 0)
+}
+
+fn wide_emit_phdr_text_ref(bin: &! WideElf64Binary, code_len: i64, text_offset: i64, base_addr: i64) with Mut, Panic, Div {
+    wide_emit_u32_ref(bin, 1)
+    wide_emit_u32_ref(bin, 5)
+    wide_emit_u64_ref(bin, text_offset)
+    let text_va = base_addr + text_offset
+    wide_emit_u64_ref(bin, text_va)
+    wide_emit_u64_ref(bin, text_va)
+    wide_emit_u64_ref(bin, code_len)
+    wide_emit_u64_ref(bin, code_len)
+    wide_emit_u64_ref(bin, 4096)
+}
+
+fn wide_emit_phdr_rodata_ref(bin: &! WideElf64Binary, rodata_len: i64, rodata_offset: i64, base_addr: i64) with Mut, Panic, Div {
+    wide_emit_u32_ref(bin, 1)
+    wide_emit_u32_ref(bin, 4)
+    wide_emit_u64_ref(bin, rodata_offset)
+    let rodata_va = base_addr + rodata_offset
+    wide_emit_u64_ref(bin, rodata_va)
+    wide_emit_u64_ref(bin, rodata_va)
+    wide_emit_u64_ref(bin, rodata_len)
+    wide_emit_u64_ref(bin, rodata_len)
+    wide_emit_u64_ref(bin, 4096)
+}
+
+fn wide_emit_phdr_data_ref(bin: &! WideElf64Binary, data_len: i64, data_offset: i64, base_addr: i64) with Mut, Panic, Div {
+    wide_emit_u32_ref(bin, 1)
+    wide_emit_u32_ref(bin, 6)
+    wide_emit_u64_ref(bin, data_offset)
+    let data_va = base_addr + data_offset
+    wide_emit_u64_ref(bin, data_va)
+    wide_emit_u64_ref(bin, data_va)
+    wide_emit_u64_ref(bin, data_len)
+    wide_emit_u64_ref(bin, data_len)
+    wide_emit_u64_ref(bin, 4096)
+}
+
+fn wide_emit_phdr_gnu_stack_ref(bin: &! WideElf64Binary) with Mut, Panic, Div {
+    wide_emit_u32_ref(bin, 0x6474e551)
+    wide_emit_u32_ref(bin, 6)
+    wide_emit_u64_ref(bin, 0)
+    wide_emit_u64_ref(bin, 0)
+    wide_emit_u64_ref(bin, 0)
+    wide_emit_u64_ref(bin, 0)
+    wide_emit_u64_ref(bin, 0)
+    wide_emit_u64_ref(bin, 16)
+}
+
+fn wide_emit_section_header_ref(
+    bin: &! WideElf64Binary,
+    sh_name: i64,
+    sh_type: i64,
+    sh_flags: i64,
+    sh_addr: i64,
+    sh_offset: i64,
+    sh_size: i64,
+    sh_link: i64,
+    sh_info: i64,
+    sh_addralign: i64,
+    sh_entsize: i64
+) with Mut, Panic, Div {
+    wide_emit_u32_ref(bin, sh_name)
+    wide_emit_u32_ref(bin, sh_type)
+    wide_emit_u64_ref(bin, sh_flags)
+    wide_emit_u64_ref(bin, sh_addr)
+    wide_emit_u64_ref(bin, sh_offset)
+    wide_emit_u64_ref(bin, sh_size)
+    wide_emit_u32_ref(bin, sh_link)
+    wide_emit_u32_ref(bin, sh_info)
+    wide_emit_u64_ref(bin, sh_addralign)
+    wide_emit_u64_ref(bin, sh_entsize)
+}
+
+// ============================================================================
+// WIDE .shstrtab EMITTER
+// ============================================================================
+
+fn wide_emit_shstrtab(bin: &! WideElf64Binary) with Mut, Panic, Div {
+    wide_emit_byte_ref(bin, 0)
+    wide_emit_byte_ref(bin, 46)
+    wide_emit_byte_ref(bin, 116)
+    wide_emit_byte_ref(bin, 101)
+    wide_emit_byte_ref(bin, 120)
+    wide_emit_byte_ref(bin, 116)
+    wide_emit_byte_ref(bin, 0)
+    wide_emit_byte_ref(bin, 46)
+    wide_emit_byte_ref(bin, 114)
+    wide_emit_byte_ref(bin, 111)
+    wide_emit_byte_ref(bin, 100)
+    wide_emit_byte_ref(bin, 97)
+    wide_emit_byte_ref(bin, 116)
+    wide_emit_byte_ref(bin, 97)
+    wide_emit_byte_ref(bin, 0)
+    wide_emit_byte_ref(bin, 46)
+    wide_emit_byte_ref(bin, 115)
+    wide_emit_byte_ref(bin, 121)
+    wide_emit_byte_ref(bin, 109)
+    wide_emit_byte_ref(bin, 116)
+    wide_emit_byte_ref(bin, 97)
+    wide_emit_byte_ref(bin, 98)
+    wide_emit_byte_ref(bin, 0)
+    wide_emit_byte_ref(bin, 46)
+    wide_emit_byte_ref(bin, 115)
+    wide_emit_byte_ref(bin, 116)
+    wide_emit_byte_ref(bin, 114)
+    wide_emit_byte_ref(bin, 116)
+    wide_emit_byte_ref(bin, 97)
+    wide_emit_byte_ref(bin, 98)
+    wide_emit_byte_ref(bin, 0)
+    wide_emit_byte_ref(bin, 46)
+    wide_emit_byte_ref(bin, 115)
+    wide_emit_byte_ref(bin, 104)
+    wide_emit_byte_ref(bin, 115)
+    wide_emit_byte_ref(bin, 116)
+    wide_emit_byte_ref(bin, 114)
+    wide_emit_byte_ref(bin, 116)
+    wide_emit_byte_ref(bin, 97)
+    wide_emit_byte_ref(bin, 98)
+    wide_emit_byte_ref(bin, 0)
+    wide_emit_byte_ref(bin, 46)
+    wide_emit_byte_ref(bin, 110)
+    wide_emit_byte_ref(bin, 111)
+    wide_emit_byte_ref(bin, 116)
+    wide_emit_byte_ref(bin, 101)
+    wide_emit_byte_ref(bin, 46)
+    wide_emit_byte_ref(bin, 103)
+    wide_emit_byte_ref(bin, 110)
+    wide_emit_byte_ref(bin, 117)
+    wide_emit_byte_ref(bin, 46)
+    wide_emit_byte_ref(bin, 112)
+    wide_emit_byte_ref(bin, 114)
+    wide_emit_byte_ref(bin, 111)
+    wide_emit_byte_ref(bin, 112)
+    wide_emit_byte_ref(bin, 101)
+    wide_emit_byte_ref(bin, 114)
+    wide_emit_byte_ref(bin, 116)
+    wide_emit_byte_ref(bin, 121)
+    wide_emit_byte_ref(bin, 0)
+    wide_emit_byte_ref(bin, 46)
+    wide_emit_byte_ref(bin, 100)
+    wide_emit_byte_ref(bin, 97)
+    wide_emit_byte_ref(bin, 116)
+    wide_emit_byte_ref(bin, 97)
+    wide_emit_byte_ref(bin, 0)
+}
+
+// ============================================================================
+// FINALIZE ELF64 (WIDE) — 256KB output, 1024 functions
+// ============================================================================
+
+fn wide_align_page(offset: i64) -> i64 with Mut, Panic {
+    var aligned = offset
+    let remainder = offset % 4096
+    if remainder != 0 {
+        aligned = offset + (4096 - remainder)
+    }
+    aligned
+}
+
+fn finalize_elf64_wide(
+    code: WideCodeBuffer,
+    rodata: StringTable,
+    data: StringTable,
+    entry_offset: i64,
+    base_addr: i64,
+    symbols: WideSymbolData,
+    fn_offsets: [i64; 1024],
+    fn_count: i64
+) -> WideElf64Binary with Mut, Panic, Div {
+    var bin = wide_elf64_new()
+
+    let text_offset = 4096
+    let rodata_offset = wide_align_page(text_offset + code.len)
+    let data_offset = if data.len > 0 { wide_align_page(rodata_offset + rodata.len) } else { 0 }
+
+    var phnum = 2
+    if rodata.len > 0 { phnum = phnum + 1 }
+    if data.len > 0 { phnum = phnum + 1 }
+
+    wide_emit_elf_header_ref(&! bin, entry_offset, base_addr, phnum, 0x3e)
+
+    wide_emit_phdr_text_ref(&! bin, code.len, text_offset, base_addr)
+    if rodata.len > 0 {
+        wide_emit_phdr_rodata_ref(&! bin, rodata.len, rodata_offset, base_addr)
+    }
+    if data.len > 0 {
+        wide_emit_phdr_data_ref(&! bin, data.len, data_offset, base_addr)
+    }
+    wide_emit_phdr_gnu_stack_ref(&! bin)
+
+    while bin.len < text_offset {
+        wide_emit_byte_ref(&! bin, 0)
+    }
+
+    var i = 0
+    while i < code.len {
+        wide_emit_byte_ref(&! bin, code.bytes[i as usize] as i64)
+        i = i + 1
+    }
+
+    while bin.len < rodata_offset {
+        wide_emit_byte_ref(&! bin, 0)
+    }
+
+    var j = 0
+    while j < rodata.len {
+        wide_emit_byte_ref(&! bin, rodata.bytes[j as usize] as i64)
+        j = j + 1
+    }
+
+    if data.len > 0 {
+        while bin.len < data_offset {
+            wide_emit_byte_ref(&! bin, 0)
+        }
+        var dk = 0
+        while dk < data.len {
+            wide_emit_byte_ref(&! bin, data.bytes[dk as usize] as i64)
+            dk = dk + 1
+        }
+    }
+
+    let strtab_offset = bin.len
+    var si = 0
+    let strtab_emit_len = if symbols.strtab_len > 0 { symbols.strtab_len } else { 1 }
+    while si < strtab_emit_len {
+        wide_emit_byte_ref(&! bin, symbols.strtab[si as usize] as i64)
+        si = si + 1
+    }
+    let strtab_size = bin.len - strtab_offset
+
+    while bin.len % 8 != 0 {
+        wide_emit_byte_ref(&! bin, 0)
+    }
+
+    let symtab_offset = bin.len
+    wide_emit_symtab_entry_ref(&! bin, 0, 0, 0, 0, 0, 0)
+
+    let text_va_base = base_addr + text_offset
+    var fi = 0
+    while fi < fn_count {
+        let fn_name_off = symbols.name_offsets[fi as usize]
+        let fn_va = text_va_base + fn_offsets[fi as usize]
+        wide_emit_symtab_entry_ref(&! bin, fn_name_off, 2, 1, 1, fn_va, 0)
+        fi = fi + 1
+    }
+    let symtab_size = bin.len - symtab_offset
+
+    while bin.len % 8 != 0 {
+        wide_emit_byte_ref(&! bin, 0)
+    }
+
+    let noteprop_offset = bin.len
+    wide_emit_u32_ref(&! bin, 4)
+    wide_emit_u32_ref(&! bin, 16)
+    wide_emit_u32_ref(&! bin, 5)
+    wide_emit_byte_ref(&! bin, 71)
+    wide_emit_byte_ref(&! bin, 78)
+    wide_emit_byte_ref(&! bin, 85)
+    wide_emit_byte_ref(&! bin, 0)
+    wide_emit_u32_ref(&! bin, 0xc0010002)
+    wide_emit_u32_ref(&! bin, 4)
+    wide_emit_u32_ref(&! bin, 0x10)
+    wide_emit_u32_ref(&! bin, 0)
+    let noteprop_size = bin.len - noteprop_offset
+
+    while bin.len % 8 != 0 {
+        wide_emit_byte_ref(&! bin, 0)
+    }
+
+    let shstrtab_offset = bin.len
+    wide_emit_shstrtab(&! bin)
+    let shstrtab_size = bin.len - shstrtab_offset
+
+    while bin.len % 8 != 0 {
+        wide_emit_byte_ref(&! bin, 0)
+    }
+
+    let shoff = bin.len
+
+    var shnum = 6
+    if rodata.len > 0 { shnum = shnum + 1 }
+    if data.len > 0 { shnum = shnum + 1 }
+    let shstrndx = shnum - 1
+    let strtab_shndx = shnum - 3
+
+    let sht_progbits = 1
+    let sht_symtab = 2
+    let sht_strtab = 3
+    let shf_alloc = 2
+    let shf_execinstr = 4
+
+    wide_emit_section_header_ref(&! bin, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+
+    let text_va = base_addr + text_offset
+    wide_emit_section_header_ref(&! bin,
+        1, sht_progbits, shf_alloc + shf_execinstr,
+        text_va, text_offset, code.len, 0, 0, 16, 0)
+
+    if rodata.len > 0 {
+        let rodata_va = base_addr + rodata_offset
+        wide_emit_section_header_ref(&! bin,
+            7, sht_progbits, shf_alloc,
+            rodata_va, rodata_offset, rodata.len, 0, 0, 8, 0)
+    }
+
+    let shf_write = 1
+    if data.len > 0 {
+        let data_va = base_addr + data_offset
+        wide_emit_section_header_ref(&! bin,
+            61, sht_progbits, shf_alloc + shf_write,
+            data_va, data_offset, data.len, 0, 0, 8, 0)
+    }
+
+    wide_emit_section_header_ref(&! bin,
+        15, sht_symtab, 0,
+        0, symtab_offset, symtab_size, strtab_shndx, 1, 8, 24)
+
+    wide_emit_section_header_ref(&! bin,
+        23, sht_strtab, 0,
+        0, strtab_offset, strtab_size, 0, 0, 1, 0)
+
+    let sht_note = 7
+    wide_emit_section_header_ref(&! bin,
+        41, sht_note, shf_alloc,
+        0, noteprop_offset, noteprop_size, 0, 0, 8, 0)
+
+    wide_emit_section_header_ref(&! bin,
+        31, sht_strtab, 0,
+        0, shstrtab_offset, shstrtab_size, 0, 0, 1, 0)
+
+    wide_patch_u64_ref(&! bin, 40, shoff)
+    wide_patch_u16_ref(&! bin, 58, 64)
+    wide_patch_u16_ref(&! bin, 60, shnum)
+    wide_patch_u16_ref(&! bin, 62, shstrndx)
+
+    bin
+}
+
+// ============================================================================
+// SELF-TESTS
+// ============================================================================
+
+fn wide_self_test_elf_magic() -> bool with Mut, Panic, Div {
+    var code = wide_code_buffer_new()
+    let rodata = string_table_new()
+    let data = string_table_new()
+    let symbols = wide_symbol_data_new()
+    let fn_offsets: [i64; 1024] = [0; 1024]
+    let elf = finalize_elf64_wide(code, rodata, data, 0, 0x400000, symbols, fn_offsets, 0)
+    let b0 = elf.bytes[0] as i64
+    let b1 = elf.bytes[1] as i64
+    let b2 = elf.bytes[2] as i64
+    let b3 = elf.bytes[3] as i64
+    b0 == 127 && b1 == 69 && b2 == 76 && b3 == 70
+}
+
+fn wide_self_test_symbol_data() -> bool with Mut, Panic, Div {
+    var sym = wide_symbol_data_new()
+    sym = wide_add_symbol(sym, "main", 0)
+    sym = wide_add_symbol(sym, "foo", 128)
+    sym.count == 2 && sym.fn_offsets[0] == 0 && sym.fn_offsets[1] == 128
+}
+
+fn wide_self_test_reloc_table() -> bool with Mut, Panic, Div {
+    var relocs = wide_relocation_table_new()
+    var i: i64 = 0
+    while i < 300 {
+        relocs = wide_add_relocation(relocs, i * 5, i * 100, 1)
+        i = i + 1
+    }
+    relocs.count == 300 && relocs.entries[299].offset == 1495
+}
+
+fn wide_self_test_code_relocs() -> bool with Mut, Panic, Div {
+    var code = wide_code_buffer_new()
+    code = wide_emit_byte(code, 0xe8)
+    code = wide_emit_byte(code, 0)
+    code = wide_emit_byte(code, 0)
+    code = wide_emit_byte(code, 0)
+    code = wide_emit_byte(code, 0)
+    var relocs = wide_relocation_table_new()
+    relocs = wide_add_relocation(relocs, 1, 100, 1)
+    code = wide_apply_call_relocs(code, relocs)
+    let patched = code.bytes[1] as i64
+    patched == 95
+}
+
+fn wide_self_test_elf_size() -> bool with Mut, Panic, Div {
+    var code = wide_code_buffer_new()
+    var i: i64 = 0
+    while i < 100 {
+        code = wide_emit_byte(code, 0x90)
+        i = i + 1
+    }
+    let rodata = string_table_new()
+    let data = string_table_new()
+    var symbols = wide_symbol_data_new()
+    symbols = wide_add_symbol(symbols, "_start", 0)
+    var fn_offsets: [i64; 1024] = [0; 1024]
+    fn_offsets[0] = 0
+    let elf = finalize_elf64_wide(code, rodata, data, 0, 0x400000, symbols, fn_offsets, 1)
+    elf.len > 4096 && elf.len < 262144
+}
+
+fn run_wide_self_tests() -> i64 with IO, Mut, Panic, Div {
+    var pass = 0
+    var fail = 0
+
+    if wide_self_test_elf_magic() { pass = pass + 1; println("  PASS T1: wide ELF magic") }
+    else { fail = fail + 1; println("  FAIL T1: wide ELF magic") }
+
+    if wide_self_test_symbol_data() { pass = pass + 1; println("  PASS T2: wide symbol data") }
+    else { fail = fail + 1; println("  FAIL T2: wide symbol data") }
+
+    if wide_self_test_reloc_table() { pass = pass + 1; println("  PASS T3: wide reloc table >256") }
+    else { fail = fail + 1; println("  FAIL T3: wide reloc table >256") }
+
+    if wide_self_test_code_relocs() { pass = pass + 1; println("  PASS T4: wide call reloc patching") }
+    else { fail = fail + 1; println("  FAIL T4: wide call reloc patching") }
+
+    if wide_self_test_elf_size() { pass = pass + 1; println("  PASS T5: wide ELF size sanity") }
+    else { fail = fail + 1; println("  FAIL T5: wide ELF size sanity") }
+
+    println("=== wide.sio self-tests done ===")
+    fail
 }
