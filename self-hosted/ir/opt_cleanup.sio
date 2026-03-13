@@ -539,8 +539,39 @@ fn ocp_const_fold(func: IrFunction) -> IrFunction with Mut, Div, Panic {
                         result.instrs[i as usize] = ir_copy(instr.dst, s2)
                     }
                 }
-                // Sprint 108 Block AE: And-mask chain fold — (x & C1) & C2 → x & (C1 & C2).
+                // Sprint 114 Block AK: Redundant AND elimination (superset mask).
+                // (x & C1) & C2 where (C1 & C2) == C1 → IrCopy(src1).
+                // The outer mask is a superset of the inner — AND is a no-op.
+                // SOTA: LLVM InstCombineAndOrXor.cpp; known-bits analysis.
                 if instr.bin_op == BinaryOp::OpBitAnd {
+                    // s2 is const, s1 was AND-masked: check superset
+                    if s2_known && s1 >= 0 && s1 < 256 && and_valid[s1 as usize] {
+                        let ak_c1 = and_const_val[s1 as usize]
+                        if (ak_c1 & v2) == ak_c1 {
+                            result.instrs[i as usize] = ir_copy(instr.dst, s1)
+                            if instr.dst >= 0 && instr.dst < 256 {
+                                and_valid[instr.dst as usize]     = true
+                                and_var_src[instr.dst as usize]   = and_var_src[s1 as usize]
+                                and_const_val[instr.dst as usize] = ak_c1
+                            }
+                        }
+                    }
+                    // s1 is const, s2 was AND-masked: check superset (commutative)
+                    if s1_known && s2 >= 0 && s2 < 256 && and_valid[s2 as usize] {
+                        let ak_c2 = and_const_val[s2 as usize]
+                        if (ak_c2 & v1) == ak_c2 {
+                            result.instrs[i as usize] = ir_copy(instr.dst, s2)
+                            if instr.dst >= 0 && instr.dst < 256 {
+                                and_valid[instr.dst as usize]     = true
+                                and_var_src[instr.dst as usize]   = and_var_src[s2 as usize]
+                                and_const_val[instr.dst as usize] = ak_c2
+                            }
+                        }
+                    }
+                }
+                // Sprint 108 Block AE: And-mask chain fold — (x & C1) & C2 → x & (C1 & C2).
+                // Only fires if Block AK didn't already fold to IrCopy.
+                if ocp_is_binop(result.instrs[i as usize].op) && result.instrs[i as usize].bin_op == BinaryOp::OpBitAnd {
                     if s2_known && s1 >= 0 && s1 < 256 && and_valid[s1 as usize] {
                         let c1 = and_const_val[s1 as usize]
                         let merged = c1 & v2

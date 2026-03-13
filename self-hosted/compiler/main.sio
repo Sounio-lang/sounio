@@ -9141,9 +9141,91 @@ fn compiler_main_test_bool_eq_one_chain() -> bool with Mut, Div, Panic {
     result.instrs[2].op == IrOpcode::IrCopy
 }
 
+
+// Sprint 114 Block AK: Redundant AND elimination — superset mask (T388-T393).
+// SOTA: LLVM InstCombineAndOrXor.cpp; known-bits analysis.
+
+// T388: (x & 0xFF) & 0xFFFF → IrCopy (0xFF is subset of 0xFFFF).
+fn compiler_main_test_and_superset_copy() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(1, 255)
+    instrs[1] = ir_binop(2, 0, BinaryOp::OpBitAnd, 1)
+    instrs[2] = ir_load_imm(3, 65535)
+    instrs[3] = ir_binop(4, 2, BinaryOp::OpBitAnd, 3)
+    let func   = cp_make_test_func(instrs, 4)
+    let result = ocp_const_fold(func)
+    result.instrs[3].op == IrOpcode::IrCopy
+        && result.instrs[3].src1 == 2
+}
+
+// T389: (x & 0xF) & 0xFF → IrCopy (0xF subset of 0xFF).
+fn compiler_main_test_and_superset_nibble() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(1, 15)
+    instrs[1] = ir_binop(2, 0, BinaryOp::OpBitAnd, 1)
+    instrs[2] = ir_load_imm(3, 255)
+    instrs[3] = ir_binop(4, 2, BinaryOp::OpBitAnd, 3)
+    let func   = cp_make_test_func(instrs, 4)
+    let result = ocp_const_fold(func)
+    result.instrs[3].op == IrOpcode::IrCopy
+        && result.instrs[3].src1 == 2
+}
+
+// T390: (x & 0xFF) & 0x0F → NOT superset (0xFF has bits outside 0x0F) → Block AE fold.
+fn compiler_main_test_and_not_superset() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(1, 255)
+    instrs[1] = ir_binop(2, 0, BinaryOp::OpBitAnd, 1)
+    instrs[2] = ir_load_imm(3, 15)
+    instrs[3] = ir_binop(4, 2, BinaryOp::OpBitAnd, 3)
+    let func   = cp_make_test_func(instrs, 4)
+    let result = ocp_const_fold(func)
+    // Not a superset: 0xFF & 0x0F = 0x0F != 0xFF. Block AE fires instead.
+    result.instrs[3].op == IrOpcode::IrBinOp
+        && result.instrs[3].bin_op == BinaryOp::OpBitAnd
+}
+
+// T391: (x & 0xFF) & 0xFF → same mask = superset → IrCopy.
+fn compiler_main_test_and_same_mask_copy() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(1, 255)
+    instrs[1] = ir_binop(2, 0, BinaryOp::OpBitAnd, 1)
+    instrs[2] = ir_load_imm(3, 255)
+    instrs[3] = ir_binop(4, 2, BinaryOp::OpBitAnd, 3)
+    let func   = cp_make_test_func(instrs, 4)
+    let result = ocp_const_fold(func)
+    result.instrs[3].op == IrOpcode::IrCopy
+        && result.instrs[3].src1 == 2
+}
+
+// T392: Commutative — const on left: 0xFFFF & (x & 0xFF) → IrCopy.
+fn compiler_main_test_and_superset_commutative() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(1, 255)
+    instrs[1] = ir_binop(2, 0, BinaryOp::OpBitAnd, 1)
+    instrs[2] = ir_load_imm(3, 65535)
+    instrs[3] = ir_binop(4, 3, BinaryOp::OpBitAnd, 2)
+    let func   = cp_make_test_func(instrs, 4)
+    let result = ocp_const_fold(func)
+    result.instrs[3].op == IrOpcode::IrCopy
+        && result.instrs[3].src1 == 2
+}
+
+// T393: No AND tracking on src → no fold.
+fn compiler_main_test_and_no_track_no_fold() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_binop(1, 2, BinaryOp::OpAdd, 3)
+    instrs[1] = ir_load_imm(4, 255)
+    instrs[2] = ir_binop(5, 1, BinaryOp::OpBitAnd, 4)
+    let func   = cp_make_test_func(instrs, 3)
+    let result = ocp_const_fold(func)
+    result.instrs[2].op == IrOpcode::IrBinOp
+        && result.instrs[2].bin_op == BinaryOp::OpBitAnd
+}
+
 fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
     var passed: i64 = 0
-    let total: i64 = 385
+    let total: i64 = 391
 
     println("=== compiler/main.sio self-tests ===")
 
@@ -11653,6 +11735,31 @@ fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
         println("  T387 OK: Sprint 113 Block AJ: bool == 1 chain")
         passed = passed + 1
     } else { println("  FAIL: T387") }
+
+    if compiler_main_test_and_superset_copy() {
+        println("  T388 OK: Sprint 114 Block AK: (x&0xFF)&0xFFFF → copy")
+        passed = passed + 1
+    } else { println("  FAIL: T388") }
+    if compiler_main_test_and_superset_nibble() {
+        println("  T389 OK: Sprint 114 Block AK: (x&0xF)&0xFF → copy")
+        passed = passed + 1
+    } else { println("  FAIL: T389") }
+    if compiler_main_test_and_not_superset() {
+        println("  T390 OK: Sprint 114 Block AK: non-superset → AE fold")
+        passed = passed + 1
+    } else { println("  FAIL: T390") }
+    if compiler_main_test_and_same_mask_copy() {
+        println("  T391 OK: Sprint 114 Block AK: same mask → copy")
+        passed = passed + 1
+    } else { println("  FAIL: T391") }
+    if compiler_main_test_and_superset_commutative() {
+        println("  T392 OK: Sprint 114 Block AK: superset commutative")
+        passed = passed + 1
+    } else { println("  FAIL: T392") }
+    if compiler_main_test_and_no_track_no_fold() {
+        println("  T393 OK: Sprint 114 Block AK: no AND track no fold")
+        passed = passed + 1
+    } else { println("  FAIL: T393") }
 
     println("")
     println("compiler/main tests: " + int_to_string(passed) + "/" + int_to_string(total) + " passed")
