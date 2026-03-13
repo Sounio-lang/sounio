@@ -1,0 +1,278 @@
+// self-hosted::ir::reachability — Whole-program dead function elimination.
+//
+// Builds a call graph from IrCall.fn_id edges, marks all functions reachable
+// from main() via fixed-point BFS, then compacts the IrModule to contain only
+// reachable functions. All IrCall.fn_id references are remapped to new indices.
+//
+// This pass dramatically reduces function count before codegen, shrinking
+// both JIT compile time and output binary size. Critical for bootstrapping
+// the self-hosted compiler under JIT memory constraints.
+//
+// Algorithm (O(F * I) fixed-point BFS, F = fn_count, I = instr_count):
+//   1. Seed mark[main_idx] = true
+//   2. Repeat: for each marked fn, scan IrCall instrs, mark callee fn_ids
+//   3. Until no new functions are marked
+//   4. Compact: copy only marked fns to new positions
+//   5. Patch: remap all IrCall.fn_id to new indices
+//
+// References:
+//   Appel: "Modern Compiler Implementation" Ch. 18 (closure conversion + DCE)
+//   Grove & Chambers: "A Framework for Call Graph Construction Algorithms" (2001)
+//
+// Sprint 129: thin compilation pass for self-hosted bootstrap.
+
+module ir::reachability
+
+use ir::ir::*
+use parser::ast::*
+
+// ============================================================================
+// Result
+// ============================================================================
+
+struct ReachResult {
+    module: IrModule,
+    original_fn_count: i64,
+    reachable_fn_count: i64,
+    eliminated_fn_count: i64,
+}
+
+// ============================================================================
+// Helpers
+// ============================================================================
+
+fn reach_name_is_main(n: Name) -> bool with Mut, Panic, Div {
+    if n.len != 4 { return false }
+    if n.buf[0] != 109 as i8 { return false }   // 'm'
+    if n.buf[1] != 97 as i8 { return false }    // 'a'
+    if n.buf[2] != 105 as i8 { return false }   // 'i'
+    if n.buf[3] != 110 as i8 { return false }   // 'n'
+    true
+}
+
+fn reach_find_main(module: &IrModule) -> i64 with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < module.fn_count {
+        if reach_name_is_main(module.functions[i as usize].name) {
+            return i
+        }
+        i = i + 1
+    }
+    -1
+}
+
+fn reach_is_call(op: IrOpcode) -> bool {
+    match op {
+        IrOpcode::IrCall => true,
+        _ => false,
+    }
+}
+
+// ============================================================================
+// Fixed-point reachability marking
+// ============================================================================
+
+// One BFS pass: extend mark[] by scanning all currently-marked functions
+// for IrCall edges. Returns (updated_mark, changed).
+fn reach_mark_one_pass(mark: [bool; 1024], module: &IrModule) -> ([bool; 1024], bool) with Mut, Panic, Div {
+    var out = mark
+    var changed = false
+    var fi: i64 = 0
+    while fi < module.fn_count {
+        if out[fi as usize] {
+            var ii: i64 = 0
+            while ii < module.functions[fi as usize].instr_count {
+                let instr = module.functions[fi as usize].instrs[ii as usize]
+                if reach_is_call(instr.op) {
+                    let callee = instr.fn_id
+                    if callee >= 0 && callee < 1024 && !out[callee as usize] {
+                        out[callee as usize] = true
+                        changed = true
+                    }
+                }
+                ii = ii + 1
+            }
+        }
+        fi = fi + 1
+    }
+    (out, changed)
+}
+
+fn reach_mark_all(module: &IrModule, start_idx: i64) -> [bool; 1024] with Mut, Panic, Div {
+    var mark: [bool; 1024] = [false; 1024]
+    if start_idx >= 0 && start_idx < 1024 {
+        mark[start_idx as usize] = true
+    }
+    var pass_done = false
+    while !pass_done {
+        let pass_result = reach_mark_one_pass(mark, module)
+        mark = pass_result.0
+        let changed = pass_result.1
+        if !changed { pass_done = true }
+    }
+    mark
+}
+
+// ============================================================================
+// Compaction and remapping
+// ============================================================================
+
+// Build old_idx → new_idx table (-1 = unreachable / eliminated).
+fn reach_build_remap(mark: [bool; 1024], fn_count: i64) -> [i64; 1024] with Mut, Panic, Div {
+    var remap: [i64; 1024] = [-1; 1024]
+    var new_idx: i64 = 0
+    var i: i64 = 0
+    while i < fn_count {
+        if mark[i as usize] {
+            remap[i as usize] = new_idx
+            new_idx = new_idx + 1
+        }
+        i = i + 1
+    }
+    remap
+}
+
+// Copy only reachable functions into compacted positions.
+fn reach_compact_module(module: IrModule, mark: [bool; 1024], remap: [i64; 1024]) -> IrModule with Mut, Panic, Div {
+    var result = module
+    var new_idx: i64 = 0
+    var i: i64 = 0
+    while i < module.fn_count {
+        if mark[i as usize] {
+            result.functions[new_idx as usize] = module.functions[i as usize]
+            new_idx = new_idx + 1
+        }
+        i = i + 1
+    }
+    result.fn_count = new_idx
+    result
+}
+
+// Patch all IrCall.fn_id references using the remap table.
+fn reach_patch_calls(module: &!IrModule, remap: &[i64; 1024]) with Mut, Panic, Div {
+    var fi: i64 = 0
+    while fi < module.fn_count {
+        var ii: i64 = 0
+        while ii < module.functions[fi as usize].instr_count {
+            if reach_is_call(module.functions[fi as usize].instrs[ii as usize].op) {
+                let old_id = module.functions[fi as usize].instrs[ii as usize].fn_id
+                if old_id >= 0 && old_id < 1024 {
+                    let new_id = remap[old_id as usize]
+                    if new_id >= 0 {
+                        var instr = module.functions[fi as usize].instrs[ii as usize]
+                        instr.fn_id = new_id
+                        module.functions[fi as usize].instrs[ii as usize] = instr
+                    }
+                }
+            }
+            ii = ii + 1
+        }
+        fi = fi + 1
+    }
+}
+
+// ============================================================================
+// Top-level entry point
+// ============================================================================
+
+fn reach_thin_module(module: IrModule) -> ReachResult with Mut, Panic, Div {
+    let original_count = module.fn_count
+    let main_idx = reach_find_main(&module)
+
+    if main_idx < 0 {
+        // No main found — library module, pass through unchanged.
+        return ReachResult {
+            module: module,
+            original_fn_count: original_count,
+            reachable_fn_count: original_count,
+            eliminated_fn_count: 0,
+        }
+    }
+
+    let mark = reach_mark_all(&module, main_idx)
+    let remap = reach_build_remap(mark, original_count)
+    var compacted = reach_compact_module(module, mark, remap)
+    reach_patch_calls(&!compacted, &remap)
+
+    let reachable_count = compacted.fn_count
+    ReachResult {
+        module: compacted,
+        original_fn_count: original_count,
+        reachable_fn_count: reachable_count,
+        eliminated_fn_count: original_count - reachable_count,
+    }
+}
+
+// ============================================================================
+// Self-tests
+// ============================================================================
+
+fn reach_self_test_name_main() -> i64 with Mut, Panic, Div {
+    var n: Name = empty_name()
+    n.buf[0] = 109 as i8   // 'm'
+    n.buf[1] = 97 as i8    // 'a'
+    n.buf[2] = 105 as i8   // 'i'
+    n.buf[3] = 110 as i8   // 'n'
+    n.len = 4
+    if !reach_name_is_main(n) { return 1 }
+    0
+}
+
+fn reach_self_test_name_not_main() -> i64 with Mut, Panic, Div {
+    var n: Name = empty_name()
+    n.buf[0] = 102 as i8   // 'f'
+    n.buf[1] = 111 as i8   // 'o'
+    n.buf[2] = 111 as i8   // 'o'
+    n.len = 3
+    if reach_name_is_main(n) { return 1 }
+    0
+}
+
+fn reach_self_test_build_remap() -> i64 with Mut, Panic, Div {
+    var mark: [bool; 1024] = [false; 1024]
+    mark[0] = true    // fn 0 → new index 0
+    // fn 1 unreachable
+    mark[2] = true    // fn 2 → new index 1
+    let remap = reach_build_remap(mark, 3)
+    if remap[0] != 0 { return 1 }
+    if remap[1] != -1 { return 2 }
+    if remap[2] != 1 { return 3 }
+    0
+}
+
+fn reach_self_test_compact() -> i64 with Mut, Panic, Div {
+    var module = ir_empty_module()
+    var f0 = ir_empty_function()
+    f0.name.buf[0] = 102 as i8  // 'f'
+    f0.name.len = 1
+    var f1 = ir_empty_function()
+    f1.name.buf[0] = 103 as i8  // 'g' (unreachable)
+    f1.name.len = 1
+    var f2 = ir_empty_function()
+    f2.name.buf[0] = 104 as i8  // 'h'
+    f2.name.len = 1
+    module.functions[0] = f0
+    module.functions[1] = f1
+    module.functions[2] = f2
+    module.fn_count = 3
+    var mark: [bool; 1024] = [false; 1024]
+    mark[0] = true
+    mark[2] = true
+    var remap: [i64; 1024] = [-1; 1024]
+    remap[0] = 0
+    remap[2] = 1
+    let result = reach_compact_module(module, mark, remap)
+    if result.fn_count != 2 { return 1 }
+    if result.functions[0].name.buf[0] != 102 as i8 { return 2 }  // 'f'
+    if result.functions[1].name.buf[0] != 104 as i8 { return 3 }  // 'h'
+    0
+}
+
+fn reach_run_self_tests() -> i64 with Mut, Panic, Div {
+    var failures: i64 = 0
+    failures = failures + reach_self_test_name_main()
+    failures = failures + reach_self_test_name_not_main()
+    failures = failures + reach_self_test_build_remap()
+    failures = failures + reach_self_test_compact()
+    failures
+}
