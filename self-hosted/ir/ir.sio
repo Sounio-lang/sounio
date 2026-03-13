@@ -51,6 +51,11 @@ let IR_MAX_EPI_OBSERVED_TRANSITIONS: i64 = 64
 let IR_MAX_EPI_ROLLBACK_CERTIFICATES: i64 = 64
 let IR_MAX_EPI_VALIDATED_MANIFESTS: i64 = 64
 
+let SOUNIO_ABI_VERSION: i64 = 1
+let SOUNIO_RUNTIME_VERSION_MAJOR: i64 = 1
+let SOUNIO_RUNTIME_VERSION_MINOR: i64 = 0
+let SOUNIO_RUNTIME_VERSION_PATCH: i64 = 0
+
 enum IrOpcode {
     IrLoadImm,
     IrLoadFloat,
@@ -338,6 +343,9 @@ enum IrOpcode {
     //   imm_i64 = counter_id (index into IrModule.prof_counters)
     //   Native lowering: 7-byte NOP placeholder (Sprint 44), ADD [RIP+disp32],1 (Sprint 45)
     IrProfCounter,
+    // Call to external C ABI function (Sprint 108: extern "C" fn FFI)
+    //   name = C symbol name, call_args/arg_count = SysV args, dst = result reg
+    IrCallExtern,
 }
 
 struct IrRegList {
@@ -378,6 +386,8 @@ let IR_STRATEGY_PRECISION_PRESERVING: i64 = 2 // Knowledge<T> — no float reass
 let IR_STRATEGY_INSTRUMENTED: i64 = 3       // Contest<T>/Robust<T> — dual-path: fast + instrumented
 let IR_STRATEGY_GPU_KERNEL: i64 = 4         // with GPU — GPU kernel extraction
 let IR_STRATEGY_PROBABILISTIC: i64 = 5      // with Prob — trace-compatible for MCMC/VI
+let IR_STRATEGY_EXTERN: i64 = 6             // extern "C" fn — no body, C ABI stub (Sprint 108)
+let IR_STRATEGY_EXPORTED: i64 = 7           // export "C" fn — C ABI visibility (Sprint 109)
 
 fn ir_strategy_name(s: i64) -> string {
     if s == IR_STRATEGY_STANDARD { "standard" }
@@ -1442,6 +1452,8 @@ struct IrModule {
     epistemic: IrEpistemicSection,
     prof_counters: [IrProfCounterInfo; 64],
     prof_counter_count: i64,
+    export_names: [Name; 64],
+    export_count: i64,
 }
 
 struct IrEnvBinding {
@@ -2743,5 +2755,25 @@ fn ir_empty_module() -> IrModule {
         epistemic: ir_empty_epistemic_section(),
         prof_counters: [ir_empty_prof_counter_info(); 64],
         prof_counter_count: 0,
+        export_names: [ir_empty_name(); 64],
+        export_count: 0,
     }
+}
+
+fn ir_call_extern(dst: i64, symbol: Name, args: Option<Box<IrRegList>>, arg_count: i64) -> IrInstr {
+    var instr = ir_instr_new(IrOpcode::IrCallExtern)
+    instr.dst = dst
+    instr.name = symbol
+    instr.call_args = args
+    instr.arg_count = arg_count
+    instr
+}
+
+fn ir_module_add_export(module: IrModule, name: Name) -> IrModule with Mut, Panic {
+    var m = module
+    if m.export_count < 64 {
+        m.export_names[m.export_count as usize] = name
+        m.export_count = m.export_count + 1
+    }
+    m
 }

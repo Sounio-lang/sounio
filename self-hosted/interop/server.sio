@@ -1,0 +1,152 @@
+// interop::server — IPC server for Sounio ↔ F# interop.
+//
+// Runs a message loop on stdin/stdout using the binary wire protocol
+// defined in interop::protocol. Dispatches incoming CALL_FUNC messages
+// to registered Sounio functions.
+//
+// Built-in functions available for interop:
+//   dot_product(a[0..n], b[0..n])  -> i64  (inner product of two i64 vectors)
+//   vec_add(a[0..n], b[0..n])      -> i64[n] (element-wise sum)
+//   vec_scale(scalar, v[0..n])     -> i64[n] (scalar * each element)
+//   sum(v[0..n])                   -> i64  (sum of all elements)
+//   ping()                         -> i64  (returns 1, for health check)
+
+module interop::server
+
+use interop::protocol::*
+
+// ============================================================================
+// BUILT-IN INTEROP FUNCTIONS
+// ============================================================================
+
+// dot_product: args = [a0..a_{n/2-1}, b0..b_{n/2-1}], arg_count must be even
+fn ipc_builtin_dot_product(args: &[i64; 8192], arg_count: i64) -> (i64, i64) with Mut, Panic, Div {
+    if arg_count < 2 || (arg_count % 2) != 0 {
+        return (0, -1)
+    }
+    let half = arg_count / 2
+    var acc: i64 = 0
+    var i: i64 = 0
+    while i < half {
+        let a = (*args)[i as usize]
+        let b = (*args)[(i + half) as usize]
+        acc = acc + a * b
+        i = i + 1
+    }
+    (acc, 0)
+}
+
+// sum: args = [v0..v_{n-1}], returns single value
+fn ipc_builtin_sum(args: &[i64; 8192], arg_count: i64) -> i64 with Mut, Panic, Div {
+    var acc: i64 = 0
+    var i: i64 = 0
+    while i < arg_count {
+        acc = acc + (*args)[i as usize]
+        i = i + 1
+    }
+    acc
+}
+
+// vec_add: write result directly via ipc_write_result
+fn ipc_handle_vec_add_direct(args: &[i64; 8192], arg_count: i64) with IO, Mut, Panic, Div {
+    if arg_count < 2 || (arg_count % 2) != 0 {
+        ipc_write_error("vec_add: arg_count must be even")
+        return
+    }
+    let half = arg_count / 2
+    // Build result in a local buffer, then write
+    var result: [i64; 8192] = [0; 8192]
+    var i: i64 = 0
+    while i < half {
+        result[i as usize] = (*args)[i as usize] + (*args)[(i + half) as usize]
+        i = i + 1
+    }
+    ipc_write_result(&result, half)
+}
+
+// vec_scale: write result directly via ipc_write_result
+fn ipc_handle_vec_scale_direct(args: &[i64; 8192], arg_count: i64) with IO, Mut, Panic, Div {
+    if arg_count < 2 {
+        ipc_write_error("vec_scale: need at least 2 args (scalar + vector)")
+        return
+    }
+    let scalar = (*args)[0]
+    let count = arg_count - 1
+    var result: [i64; 8192] = [0; 8192]
+    var i: i64 = 0
+    while i < count {
+        result[i as usize] = scalar * (*args)[(i + 1) as usize]
+        i = i + 1
+    }
+    ipc_write_result(&result, count)
+}
+
+// ============================================================================
+// INFO AND CAPABILITIES HANDLERS
+// ============================================================================
+
+fn ipc_handle_info() with IO, Mut, Panic, Div {
+    // ABI version 1, runtime 1.0.0, max_args=8192, max_functions=1024
+    ipc_write_info_response(1, 1, 0, 0, IPC_MAX_ARGS(), 1024)
+}
+
+fn ipc_handle_capabilities() with IO, Mut, Panic, Div {
+    // Current capabilities: FFI + EXPORT + PROFILING
+    let caps = IPC_CAP_FFI() + IPC_CAP_EXPORT() + IPC_CAP_PROFILING()
+    ipc_write_result_single(caps)
+}
+
+// ============================================================================
+// DISPATCHER
+// ============================================================================
+
+fn ipc_dispatch(msg: &IpcMessage) with IO, Mut, Panic, Div {
+    if ipc_func_name_equals(msg, "ping") {
+        ipc_write_result_single(1)
+    } else if ipc_func_name_equals(msg, "dot_product") {
+        let result = ipc_builtin_dot_product(&msg.args, msg.arg_count)
+        if result.1 < 0 {
+            ipc_write_error("dot_product: arg_count must be even")
+        } else {
+            ipc_write_result_single(result.0)
+        }
+    } else if ipc_func_name_equals(msg, "sum") {
+        let result = ipc_builtin_sum(&msg.args, msg.arg_count)
+        ipc_write_result_single(result)
+    } else if ipc_func_name_equals(msg, "vec_add") {
+        ipc_handle_vec_add_direct(&msg.args, msg.arg_count)
+    } else if ipc_func_name_equals(msg, "vec_scale") {
+        ipc_handle_vec_scale_direct(&msg.args, msg.arg_count)
+    } else {
+        let name = ipc_func_name_to_string(msg)
+        ipc_write_error("unknown function: " + name)
+    }
+}
+
+// ============================================================================
+// SERVER LOOP
+// ============================================================================
+
+fn ipc_serve() with IO, Mut, Panic, Div {
+    // Write a ready signal so the host process knows we're listening
+    ipc_write_result_single(0)
+
+    var running: bool = true
+    while running {
+        let msg = ipc_read_message()
+        if !msg.valid {
+            running = false
+        } else if msg.msg_type == IPC_MSG_SHUTDOWN() {
+            ipc_write_shutdown()
+            running = false
+        } else if msg.msg_type == IPC_MSG_INFO() {
+            ipc_handle_info()
+        } else if msg.msg_type == IPC_MSG_CAPABILITIES() {
+            ipc_handle_capabilities()
+        } else if msg.msg_type == IPC_MSG_CALL_FUNC() {
+            ipc_dispatch(&msg)
+        } else {
+            ipc_write_error("unsupported message type")
+        }
+    }
+}

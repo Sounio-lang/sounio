@@ -1,0 +1,351 @@
+// interop::protocol — Binary wire protocol for Sounio ↔ F# interop.
+//
+// Message format (little-endian):
+//   [magic: 4 bytes = 0x53 0x4E 0x49 0x4F ("SNIO")]
+//   [msg_type: 1 byte]
+//   [body_len: 4 bytes, little-endian, count of payload bytes]
+//   [payload: body_len bytes]
+//
+// Message types:
+//   1 = CALL_FUNC    payload: [name_len: 2 bytes][name: name_len bytes][arg_count: 8 bytes LE][args: arg_count * 8 bytes (f64 LE)]
+//   2 = RESULT       payload: [result_count: 8 bytes LE][values: result_count * 8 bytes (f64 LE)]
+//   3 = ERROR        payload: [error_len: 2 bytes][error_msg: error_len bytes]
+//   4 = SHUTDOWN     payload: empty
+//   5 = INFO         payload: empty (response: 6 i64 values via RESULT)
+//   6 = CAPABILITIES payload: empty (response: capability bitmask via RESULT)
+//
+// All multi-byte integers are little-endian (x86-64 native order).
+
+module interop::protocol
+
+// ============================================================================
+// CONSTANTS
+// ============================================================================
+
+fn IPC_MAGIC_0() -> i64 { 83 }   // 'S'
+fn IPC_MAGIC_1() -> i64 { 78 }   // 'N'
+fn IPC_MAGIC_2() -> i64 { 73 }   // 'I'
+fn IPC_MAGIC_3() -> i64 { 79 }   // 'O'
+
+fn IPC_MSG_CALL_FUNC() -> i64 { 1 }
+fn IPC_MSG_RESULT() -> i64 { 2 }
+fn IPC_MSG_ERROR() -> i64 { 3 }
+fn IPC_MSG_SHUTDOWN() -> i64 { 4 }
+fn IPC_MSG_INFO() -> i64 { 5 }
+fn IPC_MSG_CAPABILITIES() -> i64 { 6 }
+
+fn IPC_MAX_NAME_LEN() -> i64 { 256 }
+fn IPC_MAX_ARGS() -> i64 { 8192 }
+fn IPC_MAX_PAYLOAD() -> i64 { 65536 }
+
+// Capability bitmask constants
+fn IPC_CAP_FFI() -> i64 { 1 }
+fn IPC_CAP_EXPORT() -> i64 { 2 }
+fn IPC_CAP_PROFILING() -> i64 { 4 }
+fn IPC_CAP_GC() -> i64 { 8 }
+fn IPC_CAP_SIMD() -> i64 { 16 }
+fn IPC_CAP_GPU() -> i64 { 32 }
+
+// ============================================================================
+// INCOMING MESSAGE (parsed from stdin)
+// ============================================================================
+
+struct IpcMessage {
+    msg_type: i64,
+    func_name: [i64; 256],
+    func_name_len: i64,
+    args: [i64; 8192],
+    arg_count: i64,
+    error_buf: [i64; 256],
+    error_len: i64,
+    valid: bool,
+}
+
+fn ipc_message_empty() -> IpcMessage with Mut {
+    IpcMessage {
+        msg_type: 0,
+        func_name: [0; 256],
+        func_name_len: 0,
+        args: [0; 8192],
+        arg_count: 0,
+        error_buf: [0; 256],
+        error_len: 0,
+        valid: false,
+    }
+}
+
+// ============================================================================
+// READ HELPERS  (read from stdin via read_byte builtin)
+// ============================================================================
+
+fn ipc_read_u8() -> i64 with IO {
+    read_byte()
+}
+
+fn ipc_read_u16_le() -> i64 with IO {
+    let b0 = read_byte()
+    if b0 < 0 { return -1 }
+    let b1 = read_byte()
+    if b1 < 0 { return -1 }
+    b0 + b1 * 256
+}
+
+fn ipc_read_u32_le() -> i64 with IO {
+    let b0 = read_byte()
+    if b0 < 0 { return -1 }
+    let b1 = read_byte()
+    if b1 < 0 { return -1 }
+    let b2 = read_byte()
+    if b2 < 0 { return -1 }
+    let b3 = read_byte()
+    if b3 < 0 { return -1 }
+    b0 + b1 * 256 + b2 * 65536 + b3 * 16777216
+}
+
+fn ipc_read_i64_le() -> i64 with IO {
+    let b0 = read_byte()
+    if b0 < 0 { return -1 }
+    let b1 = read_byte()
+    if b1 < 0 { return -1 }
+    let b2 = read_byte()
+    if b2 < 0 { return -1 }
+    let b3 = read_byte()
+    if b3 < 0 { return -1 }
+    let b4 = read_byte()
+    if b4 < 0 { return -1 }
+    let b5 = read_byte()
+    if b5 < 0 { return -1 }
+    let b6 = read_byte()
+    if b6 < 0 { return -1 }
+    let b7 = read_byte()
+    if b7 < 0 { return -1 }
+    b0 + b1 * 256 + b2 * 65536 + b3 * 16777216
+        + b4 * 4294967296 + b5 * 1099511627776
+        + b6 * 281474976710656 + b7 * 72057594037927936
+}
+
+// ============================================================================
+// WRITE HELPERS  (write to stdout via print builtin)
+// ============================================================================
+
+// ipc_byte_to_char must precede ipc_write_u8 (no forward refs in Sounio)
+fn ipc_byte_to_char(n: i64) -> string with Mut, Panic {
+    if n < 0 || n > 255 {
+        panic("ipc_byte_to_char: byte out of range")
+    }
+    var buf: [i8; 1] = [0]
+    buf[0] = n as i8
+    str_from_bytes(buf, 1)
+}
+
+fn ipc_write_u8(b: i64) with IO, Mut, Panic, Div {
+    let ch = b % 256
+    print(ipc_byte_to_char(ch))
+}
+
+fn ipc_write_u16_le(v: i64) with IO, Mut, Panic, Div {
+    ipc_write_u8(v % 256)
+    ipc_write_u8((v / 256) % 256)
+}
+
+fn ipc_write_u32_le(v: i64) with IO, Mut, Panic, Div {
+    ipc_write_u8(v % 256)
+    ipc_write_u8((v / 256) % 256)
+    ipc_write_u8((v / 65536) % 256)
+    ipc_write_u8((v / 16777216) % 256)
+}
+
+fn ipc_write_i64_le(v: i64) with IO, Mut, Panic, Div {
+    ipc_write_u8(v % 256)
+    ipc_write_u8((v / 256) % 256)
+    ipc_write_u8((v / 65536) % 256)
+    ipc_write_u8((v / 16777216) % 256)
+    ipc_write_u8((v / 4294967296) % 256)
+    ipc_write_u8((v / 1099511627776) % 256)
+    ipc_write_u8((v / 281474976710656) % 256)
+    ipc_write_u8((v / 72057594037927936) % 256)
+}
+
+// ============================================================================
+// MAGIC VALIDATION
+// ============================================================================
+
+fn ipc_read_magic() -> bool with IO {
+    let m0 = read_byte()
+    if m0 < 0 { return false }
+    if m0 != IPC_MAGIC_0() { return false }
+    let m1 = read_byte()
+    if m1 < 0 { return false }
+    if m1 != IPC_MAGIC_1() { return false }
+    let m2 = read_byte()
+    if m2 < 0 { return false }
+    if m2 != IPC_MAGIC_2() { return false }
+    let m3 = read_byte()
+    if m3 < 0 { return false }
+    if m3 != IPC_MAGIC_3() { return false }
+    true
+}
+
+fn ipc_write_magic() with IO, Mut, Panic, Div {
+    ipc_write_u8(IPC_MAGIC_0())
+    ipc_write_u8(IPC_MAGIC_1())
+    ipc_write_u8(IPC_MAGIC_2())
+    ipc_write_u8(IPC_MAGIC_3())
+}
+
+// ============================================================================
+// READ MESSAGE
+// ============================================================================
+
+fn ipc_read_call_func_body(msg: IpcMessage, body_len: i64) -> IpcMessage with IO, Mut, Div, Panic {
+    var out = msg
+
+    let name_len = ipc_read_u16_le()
+    if name_len < 0 || name_len > IPC_MAX_NAME_LEN() {
+        return out
+    }
+    out.func_name_len = name_len
+
+    var ni: i64 = 0
+    while ni < name_len {
+        let ch = read_byte()
+        if ch < 0 { return out }
+        out.func_name[ni as usize] = ch
+        ni = ni + 1
+    }
+
+    let arg_count = ipc_read_i64_le()
+    if arg_count < 0 || arg_count > IPC_MAX_ARGS() {
+        return out
+    }
+    out.arg_count = arg_count
+
+    var ai: i64 = 0
+    while ai < arg_count {
+        let val = ipc_read_i64_le()
+        out.args[ai as usize] = val
+        ai = ai + 1
+    }
+
+    out.valid = true
+    out
+}
+
+fn ipc_read_message() -> IpcMessage with IO, Mut, Div, Panic {
+    var msg = ipc_message_empty()
+
+    if !ipc_read_magic() {
+        return msg
+    }
+
+    let msg_type = ipc_read_u8()
+    if msg_type < 0 {
+        return msg
+    }
+    msg.msg_type = msg_type
+
+    let body_len = ipc_read_u32_le()
+    if body_len < 0 || body_len > IPC_MAX_PAYLOAD() {
+        return msg
+    }
+
+    if msg_type == IPC_MSG_CALL_FUNC() {
+        msg = ipc_read_call_func_body(msg, body_len)
+    } else if msg_type == IPC_MSG_SHUTDOWN() {
+        msg.valid = true
+    } else if msg_type == IPC_MSG_INFO() {
+        msg.valid = true
+    } else if msg_type == IPC_MSG_CAPABILITIES() {
+        msg.valid = true
+    } else {
+        var i: i64 = 0
+        while i < body_len {
+            let skip = read_byte()
+            if skip < 0 { return msg }
+            i = i + 1
+        }
+    }
+
+    msg
+}
+
+// ============================================================================
+// WRITE MESSAGES
+// ============================================================================
+
+fn ipc_write_result(values: &[i64; 8192], count: i64) with IO, Mut, Panic, Div {
+    ipc_write_magic()
+    ipc_write_u8(IPC_MSG_RESULT())
+    let body_len = 8 + count * 8
+    ipc_write_u32_le(body_len)
+    ipc_write_i64_le(count)
+    var i: i64 = 0
+    while i < count {
+        ipc_write_i64_le((*values)[i as usize])
+        i = i + 1
+    }
+}
+
+fn ipc_write_result_single(value: i64) with IO, Mut, Panic, Div {
+    var buf: [i64; 8192] = [0; 8192]
+    buf[0] = value
+    ipc_write_result(&buf, 1)
+}
+
+fn ipc_write_error(error_msg: string) with IO, Mut, Panic, Div {
+    let len = str_len(error_msg)
+    let capped = if len > IPC_MAX_NAME_LEN() { IPC_MAX_NAME_LEN() } else { len }
+    ipc_write_magic()
+    ipc_write_u8(IPC_MSG_ERROR())
+    ipc_write_u32_le(2 + capped)
+    ipc_write_u16_le(capped)
+    var i: i64 = 0
+    while i < capped {
+        ipc_write_u8(str_char_at(error_msg, i))
+        i = i + 1
+    }
+}
+
+fn ipc_write_shutdown() with IO, Mut, Panic, Div {
+    ipc_write_magic()
+    ipc_write_u8(IPC_MSG_SHUTDOWN())
+    ipc_write_u32_le(0)
+}
+
+fn ipc_write_info_response(abi_version: i64, major: i64, minor: i64, patch: i64, max_args: i64, max_functions: i64) with IO, Mut, Panic, Div {
+    var buf: [i64; 8192] = [0; 8192]
+    buf[0] = abi_version
+    buf[1] = major
+    buf[2] = minor
+    buf[3] = patch
+    buf[4] = max_args
+    buf[5] = max_functions
+    ipc_write_result(&buf, 6)
+}
+
+// ============================================================================
+// FUNC NAME HELPERS
+// ============================================================================
+
+fn ipc_func_name_to_string(msg: &IpcMessage) -> string with Mut, Panic, Div {
+    var buf: [i8; 256] = [0; 256]
+    var i: i64 = 0
+    while i < msg.func_name_len && i < 256 {
+        buf[i as usize] = msg.func_name[i as usize] as i8
+        i = i + 1
+    }
+    str_from_bytes(buf, i)
+}
+
+fn ipc_func_name_equals(msg: &IpcMessage, name: string) -> bool with Mut, Panic, Div {
+    let len = str_len(name)
+    if len != msg.func_name_len { return false }
+    var i: i64 = 0
+    while i < len {
+        if msg.func_name[i as usize] != str_char_at(name, i) {
+            return false
+        }
+        i = i + 1
+    }
+    true
+}
