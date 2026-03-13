@@ -1,0 +1,271 @@
+// interop::session — Session lifecycle for the Sounio embedding ABI.
+//
+// A session encapsulates a compilation+execution context.  Host processes
+// (F#, Python, Julia, C) create a session, load/describe kernels within it,
+// execute those kernels, and finally destroy the session to release resources.
+//
+// Session slots are pre-allocated (max 8 concurrent sessions).  Each session
+// tracks its own diagnostics, kernel registry, and execution statistics.
+
+module interop::session
+
+use interop::contract::*
+
+// ============================================================================
+// CONSTANTS
+// ============================================================================
+
+fn SES_MAX_SESSIONS() -> i64 { 8 }
+fn SES_MAX_KERNELS_PER_SESSION() -> i64 { 32 }
+
+// Session states
+fn SES_STATE_FREE() -> i64 { 0 }
+fn SES_STATE_CREATED() -> i64 { 1 }
+fn SES_STATE_READY() -> i64 { 2 }
+fn SES_STATE_EXECUTING() -> i64 { 3 }
+fn SES_STATE_ERROR() -> i64 { 4 }
+
+// Session creation flags (bitmask)
+fn SES_FLAG_OPTIMIZE() -> i64 { 1 }
+fn SES_FLAG_TRACE() -> i64 { 2 }
+fn SES_FLAG_PROFILE() -> i64 { 4 }
+fn SES_FLAG_STRICT_DIAGNOSTICS() -> i64 { 8 }
+
+// ============================================================================
+// KERNEL DESCRIPTOR
+// ============================================================================
+
+struct KernelDescriptor {
+    kernel_id: i64,
+    source_path: string,
+    entry_point: string,
+    param_count: i64,
+    return_count: i64,
+    compile_strategy: i64,
+    valid: bool,
+}
+
+fn kernel_descriptor_empty() -> KernelDescriptor with Mut, Panic, Div {
+    KernelDescriptor {
+        kernel_id: -1,
+        source_path: "",
+        entry_point: "",
+        param_count: 0,
+        return_count: 0,
+        compile_strategy: 0,
+        valid: false,
+    }
+}
+
+// ============================================================================
+// SESSION
+// ============================================================================
+
+struct EmbedSession {
+    session_id: i64,
+    state: i64,
+    flags: i64,
+    kernels: [KernelDescriptor; 32],
+    kernel_count: i64,
+    diagnostics: KernelDiagnostics,
+    provenance: KernelProvenance,
+    execute_count: i64,
+    error_count: i64,
+    last_error: string,
+}
+
+fn embed_session_empty() -> EmbedSession with Mut, Panic, Div {
+    EmbedSession {
+        session_id: -1,
+        state: SES_STATE_FREE(),
+        flags: 0,
+        kernels: [KernelDescriptor {
+            kernel_id: -1,
+            source_path: "",
+            entry_point: "",
+            param_count: 0,
+            return_count: 0,
+            compile_strategy: 0,
+            valid: false,
+        }; 32],
+        kernel_count: 0,
+        diagnostics: kernel_diagnostics_empty(),
+        provenance: kernel_provenance_empty(),
+        execute_count: 0,
+        error_count: 0,
+        last_error: "",
+    }
+}
+
+// ============================================================================
+// SESSION TABLE  (global pre-allocated slots)
+// ============================================================================
+
+struct SessionTable {
+    sessions: [EmbedSession; 8],
+    next_id: i64,
+}
+
+fn session_table_empty() -> SessionTable with Mut, Panic, Div {
+    SessionTable {
+        sessions: [embed_session_empty(); 8],
+        next_id: 1,
+    }
+}
+
+// ============================================================================
+// SESSION LIFECYCLE
+// ============================================================================
+
+fn session_create(table: SessionTable, flags: i64) -> (SessionTable, i64) with Mut, Panic, Div {
+    var t = table
+    // Find a free slot
+    var slot: i64 = -1
+    var i: i64 = 0
+    while i < SES_MAX_SESSIONS() {
+        if t.sessions[i as usize].state == SES_STATE_FREE() {
+            slot = i
+            i = SES_MAX_SESSIONS()  // break
+        }
+        i = i + 1
+    }
+    if slot < 0 {
+        return (t, -1)  // no free slots
+    }
+    let sid = t.next_id
+    t.next_id = t.next_id + 1
+    t.sessions[slot as usize] = embed_session_empty()
+    t.sessions[slot as usize].session_id = sid
+    t.sessions[slot as usize].state = SES_STATE_CREATED()
+    t.sessions[slot as usize].flags = flags
+    (t, sid)
+}
+
+fn session_find_slot(table: &SessionTable, session_id: i64) -> i64 with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < SES_MAX_SESSIONS() {
+        if (*table).sessions[i as usize].session_id == session_id && (*table).sessions[i as usize].state != SES_STATE_FREE() {
+            return i
+        }
+        i = i + 1
+    }
+    -1
+}
+
+fn session_destroy(table: SessionTable, session_id: i64) -> (SessionTable, bool) with Mut, Panic, Div {
+    var t = table
+    let slot = session_find_slot(&t, session_id)
+    if slot < 0 {
+        return (t, false)
+    }
+    t.sessions[slot as usize].state = SES_STATE_FREE()
+    t.sessions[slot as usize].session_id = -1
+    (t, true)
+}
+
+fn session_get_state(table: &SessionTable, session_id: i64) -> i64 with Mut, Panic, Div {
+    let slot = session_find_slot(table, session_id)
+    if slot < 0 { return -1 }
+    (*table).sessions[slot as usize].state
+}
+
+// ============================================================================
+// KERNEL REGISTRATION
+// ============================================================================
+
+fn session_add_kernel(table: SessionTable, session_id: i64, source_path: string, entry_point: string, param_count: i64, return_count: i64) -> (SessionTable, i64) with Mut, Panic, Div {
+    var t = table
+    let slot = session_find_slot(&t, session_id)
+    if slot < 0 {
+        return (t, -1)
+    }
+    let kcount = t.sessions[slot as usize].kernel_count
+    if kcount >= SES_MAX_KERNELS_PER_SESSION() {
+        return (t, -1)
+    }
+    let kid = kcount  // kernel_id = index within session
+    t.sessions[slot as usize].kernels[kid as usize] = KernelDescriptor {
+        kernel_id: kid,
+        source_path: source_path,
+        entry_point: entry_point,
+        param_count: param_count,
+        return_count: return_count,
+        compile_strategy: 0,
+        valid: true,
+    }
+    t.sessions[slot as usize].kernel_count = kcount + 1
+    t.sessions[slot as usize].state = SES_STATE_READY()
+    (t, kid)
+}
+
+fn session_get_kernel(table: &SessionTable, session_id: i64, kernel_id: i64) -> KernelDescriptor with Mut, Panic, Div {
+    let slot = session_find_slot(table, session_id)
+    if slot < 0 {
+        return kernel_descriptor_empty()
+    }
+    let kcount = (*table).sessions[slot as usize].kernel_count
+    if kernel_id < 0 || kernel_id >= kcount {
+        return kernel_descriptor_empty()
+    }
+    (*table).sessions[slot as usize].kernels[kernel_id as usize]
+}
+
+// ============================================================================
+// DIAGNOSTICS ACCESS
+// ============================================================================
+
+fn session_add_diagnostic(table: SessionTable, session_id: i64, severity: i64, line: i64, col: i64, code: i64, msg: string, fix: string) -> SessionTable with Mut, Panic, Div {
+    var t = table
+    let slot = session_find_slot(&t, session_id)
+    if slot < 0 { return t }
+    t.sessions[slot as usize].diagnostics = kernel_diagnostics_add(
+        t.sessions[slot as usize].diagnostics,
+        severity, line, col, code, msg, fix
+    )
+    t
+}
+
+fn session_get_diagnostics(table: &SessionTable, session_id: i64) -> KernelDiagnostics with Mut, Panic, Div {
+    let slot = session_find_slot(table, session_id)
+    if slot < 0 { return kernel_diagnostics_empty() }
+    (*table).sessions[slot as usize].diagnostics
+}
+
+fn session_clear_diagnostics(table: SessionTable, session_id: i64) -> SessionTable with Mut, Panic, Div {
+    var t = table
+    let slot = session_find_slot(&t, session_id)
+    if slot < 0 { return t }
+    t.sessions[slot as usize].diagnostics = kernel_diagnostics_empty()
+    t
+}
+
+// ============================================================================
+// EXECUTION TRACKING
+// ============================================================================
+
+fn session_mark_executing(table: SessionTable, session_id: i64) -> SessionTable with Mut, Panic, Div {
+    var t = table
+    let slot = session_find_slot(&t, session_id)
+    if slot < 0 { return t }
+    t.sessions[slot as usize].state = SES_STATE_EXECUTING()
+    t.sessions[slot as usize].execute_count = t.sessions[slot as usize].execute_count + 1
+    t
+}
+
+fn session_mark_ready(table: SessionTable, session_id: i64) -> SessionTable with Mut, Panic, Div {
+    var t = table
+    let slot = session_find_slot(&t, session_id)
+    if slot < 0 { return t }
+    t.sessions[slot as usize].state = SES_STATE_READY()
+    t
+}
+
+fn session_mark_error(table: SessionTable, session_id: i64, error_msg: string) -> SessionTable with Mut, Panic, Div {
+    var t = table
+    let slot = session_find_slot(&t, session_id)
+    if slot < 0 { return t }
+    t.sessions[slot as usize].state = SES_STATE_ERROR()
+    t.sessions[slot as usize].error_count = t.sessions[slot as usize].error_count + 1
+    t.sessions[slot as usize].last_error = error_msg
+    t
+}
