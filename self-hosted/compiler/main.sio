@@ -10553,9 +10553,96 @@ fn compiler_main_test_xor_cancel_const_no_track() -> bool with Mut, Div, Panic {
     opt.instrs[3].src1 == 4 && opt.instrs[3].src2 == 5
 }
 
+// Sprint 135: Block AW — Negation propagation through multiplication (T488-T493)
+// neg(a) * neg(b) → a * b — ring theory: (-a)(-b) = ab
+// neg(a) / neg(b) → a / b — field theory extension
+// SOTA: LLVM InstCombineMulDivRem.cpp
+
+// T488: neg(a) * neg(b) → a * b  [double-neg mul elimination]
+fn compiler_main_test_neg_neg_mul() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    // r0=a, r1=b (implicit params)
+    instrs[0] = ir_unaryop(2, UnaryOp::OpNeg, 0)        // r2 = neg(a)
+    instrs[1] = ir_unaryop(3, UnaryOp::OpNeg, 1)        // r3 = neg(b)
+    instrs[2] = ir_binop(4, 2, BinaryOp::OpMul, 3)      // r4 = neg(a) * neg(b) → a * b
+    instrs[3] = ir_return(4)
+    let func = cp_make_test_func(instrs, 4)
+    let opt = opt_cleanup_function(func)
+    opt.instrs[2].op == IrOpcode::IrBinOp
+        && opt.instrs[2].bin_op == BinaryOp::OpMul
+        && opt.instrs[2].src1 == 0 && opt.instrs[2].src2 == 1
+}
+
+// T489: neg(a) / neg(b) → a / b  [double-neg div elimination]
+fn compiler_main_test_neg_neg_div() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_unaryop(2, UnaryOp::OpNeg, 0)
+    instrs[1] = ir_unaryop(3, UnaryOp::OpNeg, 1)
+    instrs[2] = ir_binop(4, 2, BinaryOp::OpDiv, 3)      // r4 = neg(a) / neg(b) → a / b
+    instrs[3] = ir_return(4)
+    let func = cp_make_test_func(instrs, 4)
+    let opt = opt_cleanup_function(func)
+    opt.instrs[2].op == IrOpcode::IrBinOp
+        && opt.instrs[2].bin_op == BinaryOp::OpDiv
+        && opt.instrs[2].src1 == 0 && opt.instrs[2].src2 == 1
+}
+
+// T490: neg(a) * b — single negation, should NOT be folded
+fn compiler_main_test_neg_single_mul() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_unaryop(2, UnaryOp::OpNeg, 0)        // r2 = neg(a)
+    instrs[1] = ir_binop(4, 2, BinaryOp::OpMul, 1)      // r4 = neg(a) * b — no fold
+    instrs[2] = ir_return(4)
+    let func = cp_make_test_func(instrs, 3)
+    let opt = opt_cleanup_function(func)
+    opt.instrs[1].op == IrOpcode::IrBinOp
+        && opt.instrs[1].bin_op == BinaryOp::OpMul
+        && opt.instrs[1].src1 == 2
+}
+
+// T491: a * neg(b) — single negation on rhs, should NOT fold
+fn compiler_main_test_neg_single_mul_rhs() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_unaryop(3, UnaryOp::OpNeg, 1)        // r3 = neg(b)
+    instrs[1] = ir_binop(4, 0, BinaryOp::OpMul, 3)      // r4 = a * neg(b) — no fold
+    instrs[2] = ir_return(4)
+    let func = cp_make_test_func(instrs, 3)
+    let opt = opt_cleanup_function(func)
+    opt.instrs[1].op == IrOpcode::IrBinOp
+        && opt.instrs[1].bin_op == BinaryOp::OpMul
+}
+
+// T492: neg(a) * neg(a) → a * a  [same operand double-neg]
+fn compiler_main_test_neg_neg_mul_same() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_unaryop(2, UnaryOp::OpNeg, 0)        // r2 = neg(a)
+    instrs[1] = ir_binop(4, 2, BinaryOp::OpMul, 2)      // r4 = neg(a) * neg(a) → a * a
+    instrs[2] = ir_return(4)
+    let func = cp_make_test_func(instrs, 3)
+    let opt = opt_cleanup_function(func)
+    opt.instrs[1].op == IrOpcode::IrBinOp
+        && opt.instrs[1].bin_op == BinaryOp::OpMul
+        && opt.instrs[1].src1 == 0 && opt.instrs[1].src2 == 0
+}
+
+// T493: neg(a) * neg(b) + c — result used downstream, verify rewrite is sound
+fn compiler_main_test_neg_neg_mul_used() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_unaryop(2, UnaryOp::OpNeg, 0)        // r2 = neg(a)
+    instrs[1] = ir_unaryop(3, UnaryOp::OpNeg, 1)        // r3 = neg(b)
+    instrs[2] = ir_binop(4, 2, BinaryOp::OpMul, 3)      // r4 = neg(a)*neg(b) → a*b
+    instrs[3] = ir_binop(7, 4, BinaryOp::OpAdd, 6)      // r7 = result + c
+    instrs[4] = ir_return(7)
+    let func = cp_make_test_func(instrs, 5)
+    let opt = opt_cleanup_function(func)
+    opt.instrs[2].op == IrOpcode::IrBinOp
+        && opt.instrs[2].bin_op == BinaryOp::OpMul
+        && opt.instrs[2].src1 == 0 && opt.instrs[2].src2 == 1
+}
+
 fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
     var passed: i64 = 0
-    let total: i64 = 487
+    let total: i64 = 493
 
     println("=== compiler/main.sio self-tests ===")
 
@@ -13483,6 +13570,32 @@ fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
         println("  T487 OK: Sprint 133 Block AU: const-src prevents XOR track [negative]")
         passed = passed + 1
     } else { println("  FAIL: T487") }
+
+    // Sprint 135 Block AW: Negation propagation through mul/div (T488-T493)
+    if compiler_main_test_neg_neg_mul() {
+        println("  T488 OK: Sprint 135 Block AW: neg(a)*neg(b) → a*b")
+        passed = passed + 1
+    } else { println("  FAIL: T488") }
+    if compiler_main_test_neg_neg_div() {
+        println("  T489 OK: Sprint 135 Block AW: neg(a)/neg(b) → a/b")
+        passed = passed + 1
+    } else { println("  FAIL: T489") }
+    if compiler_main_test_neg_single_mul() {
+        println("  T490 OK: Sprint 135 Block AW: neg(a)*b no fold [negative]")
+        passed = passed + 1
+    } else { println("  FAIL: T490") }
+    if compiler_main_test_neg_single_mul_rhs() {
+        println("  T491 OK: Sprint 135 Block AW: a*neg(b) no fold [negative]")
+        passed = passed + 1
+    } else { println("  FAIL: T491") }
+    if compiler_main_test_neg_neg_mul_same() {
+        println("  T492 OK: Sprint 135 Block AW: neg(a)*neg(a) → a*a")
+        passed = passed + 1
+    } else { println("  FAIL: T492") }
+    if compiler_main_test_neg_neg_mul_used() {
+        println("  T493 OK: Sprint 135 Block AW: neg(a)*neg(b)+c downstream")
+        passed = passed + 1
+    } else { println("  FAIL: T493") }
 
     println("")
     println("compiler/main tests: " + int_to_string(passed) + "/" + int_to_string(total) + " passed")
