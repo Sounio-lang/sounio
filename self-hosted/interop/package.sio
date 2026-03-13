@@ -1,0 +1,162 @@
+// interop::package — Sounio package format (.snpkg)
+//
+// A simple flat package format for bundling source, object, profile, and provenance.
+
+module interop::package
+
+use parser::ast::*
+
+// ============================================================================
+// PACKAGE HEADER
+// ============================================================================
+
+let SNPKG_MAGIC_0: i64 = 83   // 'S'
+let SNPKG_MAGIC_1: i64 = 78   // 'N'
+let SNPKG_MAGIC_2: i64 = 80   // 'P'
+let SNPKG_MAGIC_3: i64 = 75   // 'K'
+
+let SNPKG_VERSION: i64 = 1
+
+let SNPKG_KIND_SOURCE: i64 = 1
+let SNPKG_KIND_OBJECT: i64 = 2
+let SNPKG_KIND_PROFILE: i64 = 3
+let SNPKG_KIND_PROVENANCE: i64 = 4
+
+struct SnpkgEntry {
+    kind: i64,
+    name_hash: i64,
+    offset: i64,
+    size: i64,
+}
+
+fn snpkg_entry_empty() -> SnpkgEntry with Mut {
+    SnpkgEntry {
+        kind: 0,
+        name_hash: 0,
+        offset: 0,
+        size: 0,
+    }
+}
+
+struct SnpkgHeader {
+    magic: [i64; 4],
+    version: i64,
+    entry_count: i64,
+    manifest_hash: i64,
+}
+
+fn snpkg_header_empty() -> SnpkgHeader with Mut {
+    SnpkgHeader {
+        magic: [SNPKG_MAGIC_0, SNPKG_MAGIC_1, SNPKG_MAGIC_2, SNPKG_MAGIC_3],
+        version: SNPKG_VERSION,
+        entry_count: 0,
+        manifest_hash: 0,
+    }
+}
+
+// ============================================================================
+// PACKAGE BUFFER
+// ============================================================================
+
+struct SnpkgBuffer {
+    data: [i8; 65536],
+    len: i64,
+    entries: [SnpkgEntry; 64],
+    entry_count: i64,
+}
+
+fn snpkg_buffer_empty() -> SnpkgBuffer with Mut {
+    SnpkgBuffer {
+        data: [0; 65536],
+        len: 0,
+        entries: [snpkg_entry_empty(); 64],
+        entry_count: 0,
+    }
+}
+
+// ============================================================================
+// WRITE HELPERS
+// ============================================================================
+
+fn snpkg_write_byte(buf: SnpkgBuffer, val: i64) -> SnpkgBuffer with Mut, Panic {
+    var out = buf
+    if out.len < 65536 {
+        out.data[out.len as usize] = val as i8
+        out.len = out.len + 1
+    }
+    out
+}
+
+fn snpkg_write_i64_le(buf: SnpkgBuffer, val: i64) -> SnpkgBuffer with Mut, Panic, Div {
+    var out = buf
+    if out.len + 8 <= 65536 {
+        var v = val
+        var i: i64 = 0
+        while i < 8 {
+            out.data[(out.len + i) as usize] = (v & 255) as i8
+            v = v / 256
+            i = i + 1
+        }
+        out.len = out.len + 8
+    }
+    out
+}
+
+fn snpkg_write_header(buf: SnpkgBuffer, header: SnpkgHeader) -> SnpkgBuffer with Mut, Panic, Div {
+    var out = buf
+    out = snpkg_write_byte(out, header.magic[0])
+    out = snpkg_write_byte(out, header.magic[1])
+    out = snpkg_write_byte(out, header.magic[2])
+    out = snpkg_write_byte(out, header.magic[3])
+    out = snpkg_write_i64_le(out, header.version)
+    out = snpkg_write_i64_le(out, header.entry_count)
+    out = snpkg_write_i64_le(out, header.manifest_hash)
+    out
+}
+
+fn snpkg_add_entry(buf: SnpkgBuffer, kind: i64, name_hash: i64, payload_size: i64) -> SnpkgBuffer with Mut, Panic {
+    var out = buf
+    if out.entry_count < 64 {
+        out.entries[out.entry_count as usize] = SnpkgEntry {
+            kind: kind,
+            name_hash: name_hash,
+            offset: out.len,
+            size: payload_size,
+        }
+        out.entry_count = out.entry_count + 1
+    }
+    out
+}
+
+// ============================================================================
+// VERIFICATION
+// ============================================================================
+
+fn snpkg_verify_magic(data: [i8; 65536]) -> bool with Panic {
+    let b0 = data[0 as usize] as i64
+    let b1 = data[1 as usize] as i64
+    let b2 = data[2 as usize] as i64
+    let b3 = data[3 as usize] as i64
+    b0 == SNPKG_MAGIC_0 && b1 == SNPKG_MAGIC_1 && b2 == SNPKG_MAGIC_2 && b3 == SNPKG_MAGIC_3
+}
+
+fn snpkg_read_i64_le(data: [i8; 65536], offset: i64) -> i64 with Mut, Panic, Div {
+    var val: i64 = 0
+    var i: i64 = 0
+    var mul: i64 = 1
+    while i < 8 {
+        let byte_val = data[(offset + i) as usize] as i64
+        let unsigned = if byte_val < 0 { byte_val + 256 } else { byte_val }
+        val = val + (unsigned * mul)
+        mul = mul * 256
+        i = i + 1
+    }
+    val
+}
+
+fn snpkg_verify(data: [i8; 65536], len: i64) -> bool with Mut, Panic, Div {
+    if len < 28 { return false }
+    if !snpkg_verify_magic(data) { return false }
+    let version = snpkg_read_i64_le(data, 4)
+    version == SNPKG_VERSION
+}
