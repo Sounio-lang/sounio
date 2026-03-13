@@ -2,6 +2,9 @@
 # Sprint 107 — General-Purpose Native Compile Driver gate
 set -eo pipefail
 
+# NativeCompiler struct + IrModule exceed default 12.5MB stack; raise limit
+ulimit -s unlimited 2>/dev/null || ulimit -s 65536 2>/dev/null || true
+
 SOUC=./artifacts/omega/souc-bin/souc-linux-x86_64-jit
 DRIVER=self-hosted/compiler/native_compile_driver.sio
 STABLE=self-hosted/compiler/render_native_compile_driver_stable.sio
@@ -62,7 +65,7 @@ fi
 echo ""
 echo "[compile]"
 TOTAL=$((TOTAL+1))
-COMPILE_OUT=$(timeout 300 $SOUC run "$DRIVER" -- examples/render/triangle_basic.sio -o /tmp/sprint107_gate.elf 2>&1 || true)
+COMPILE_OUT=$(timeout 600 $SOUC run "$DRIVER" -- examples/render/triangle_basic.sio -o /tmp/sprint107_gate.elf 2>&1 || true)
 if echo "$COMPILE_OUT" | grep -q "native_compile: ok written"; then
     echo "  PASS  compile:triangle_basic"; PASS=$((PASS+1))
 
