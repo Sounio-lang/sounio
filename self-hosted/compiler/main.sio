@@ -10466,9 +10466,96 @@ fn compiler_main_test_not_dist_inner_commutative() -> bool with Mut, Div, Panic 
         && opt.instrs[3].src1 == 2 && opt.instrs[3].src2 == 1
 }
 
+
+// Sprint 133: Block AU — XOR operand cancellation (T482-T487)
+
+// T482: (a^b)^(a^c)→b^c  [lhs-lhs match: common factor a]
+fn compiler_main_test_xor_cancel_lhs_lhs() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_binop(3, 0, BinaryOp::OpBitXor, 1)   // r3 = r0 ^ r1
+    instrs[1] = ir_binop(4, 0, BinaryOp::OpBitXor, 2)   // r4 = r0 ^ r2
+    instrs[2] = ir_binop(5, 3, BinaryOp::OpBitXor, 4)   // r5 = r3 ^ r4 → r1 ^ r2
+    instrs[3] = ir_return(5)
+    let func = cp_make_test_func(instrs, 4)
+    let opt = opt_cleanup_function(func)
+    opt.instrs[2].op == IrOpcode::IrBinOp
+        && opt.instrs[2].bin_op == BinaryOp::OpBitXor
+        && opt.instrs[2].src1 == 1 && opt.instrs[2].src2 == 2
+}
+
+// T483: (a^b)^(c^a)→b^c  [lhs-rhs match: common factor a]
+fn compiler_main_test_xor_cancel_lhs_rhs() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_binop(3, 0, BinaryOp::OpBitXor, 1)   // r3 = r0 ^ r1
+    instrs[1] = ir_binop(4, 2, BinaryOp::OpBitXor, 0)   // r4 = r2 ^ r0
+    instrs[2] = ir_binop(5, 3, BinaryOp::OpBitXor, 4)   // r5 = r3 ^ r4 → r1 ^ r2
+    instrs[3] = ir_return(5)
+    let func = cp_make_test_func(instrs, 4)
+    let opt = opt_cleanup_function(func)
+    opt.instrs[2].op == IrOpcode::IrBinOp
+        && opt.instrs[2].bin_op == BinaryOp::OpBitXor
+        && opt.instrs[2].src1 == 1 && opt.instrs[2].src2 == 2
+}
+
+// T484: (b^a)^(a^c)→b^c  [rhs-lhs match: common factor a]
+fn compiler_main_test_xor_cancel_rhs_lhs() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_binop(3, 1, BinaryOp::OpBitXor, 0)   // r3 = r1 ^ r0
+    instrs[1] = ir_binop(4, 0, BinaryOp::OpBitXor, 2)   // r4 = r0 ^ r2
+    instrs[2] = ir_binop(5, 3, BinaryOp::OpBitXor, 4)   // r5 = r3 ^ r4 → r1 ^ r2
+    instrs[3] = ir_return(5)
+    let func = cp_make_test_func(instrs, 4)
+    let opt = opt_cleanup_function(func)
+    opt.instrs[2].op == IrOpcode::IrBinOp
+        && opt.instrs[2].bin_op == BinaryOp::OpBitXor
+        && opt.instrs[2].src1 == 1 && opt.instrs[2].src2 == 2
+}
+
+// T485: (b^a)^(c^a)→b^c  [rhs-rhs match: common factor a]
+fn compiler_main_test_xor_cancel_rhs_rhs() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_binop(3, 1, BinaryOp::OpBitXor, 0)   // r3 = r1 ^ r0
+    instrs[1] = ir_binop(4, 2, BinaryOp::OpBitXor, 0)   // r4 = r2 ^ r0
+    instrs[2] = ir_binop(5, 3, BinaryOp::OpBitXor, 4)   // r5 = r3 ^ r4 → r1 ^ r2
+    instrs[3] = ir_return(5)
+    let func = cp_make_test_func(instrs, 4)
+    let opt = opt_cleanup_function(func)
+    opt.instrs[2].op == IrOpcode::IrBinOp
+        && opt.instrs[2].bin_op == BinaryOp::OpBitXor
+        && opt.instrs[2].src1 == 1 && opt.instrs[2].src2 == 2
+}
+
+// T486: (a^b)^(c^d) — no common factor, no fold
+fn compiler_main_test_xor_cancel_no_fold() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_binop(4, 0, BinaryOp::OpBitXor, 1)   // r4 = r0 ^ r1
+    instrs[1] = ir_binop(5, 2, BinaryOp::OpBitXor, 3)   // r5 = r2 ^ r3
+    instrs[2] = ir_binop(6, 4, BinaryOp::OpBitXor, 5)   // r6 = r4 ^ r5 [no common factor]
+    instrs[3] = ir_return(6)
+    let func = cp_make_test_func(instrs, 4)
+    let opt = opt_cleanup_function(func)
+    // Must NOT fold — still r4 ^ r5
+    opt.instrs[2].op == IrOpcode::IrBinOp
+        && opt.instrs[2].src1 == 4 && opt.instrs[2].src2 == 5
+}
+
+// T487: const source prevents XOR tracking — (r0^42)^(r0^r1) does NOT fold via Block AU
+fn compiler_main_test_xor_cancel_const_no_track() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(3, 42)                       // r3 = 42
+    instrs[1] = ir_binop(4, 0, BinaryOp::OpBitXor, 3)   // r4 = r0 ^ 42 (not tracked: r3 is const)
+    instrs[2] = ir_binop(5, 0, BinaryOp::OpBitXor, 1)   // r5 = r0 ^ r1 (tracked)
+    instrs[3] = ir_binop(6, 4, BinaryOp::OpBitXor, 5)   // r6 = r4 ^ r5 [no AU fold: r4 not tracked]
+    instrs[4] = ir_return(6)
+    let func = cp_make_test_func(instrs, 5)
+    let opt = opt_cleanup_function(func)
+    // Block AU should not fire — r4 not in as_xor_rr_valid
+    opt.instrs[3].src1 == 4 && opt.instrs[3].src2 == 5
+}
+
 fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
     var passed: i64 = 0
-    let total: i64 = 481
+    let total: i64 = 487
 
     println("=== compiler/main.sio self-tests ===")
 
@@ -13370,6 +13457,32 @@ fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
         println("  T481 OK: Sprint 132 Block AT: ~a & (b|a) → ~a & b [inner commutative]")
         passed = passed + 1
     } else { println("  FAIL: T481") }
+
+    // Sprint 133 Block AU: XOR operand cancellation (T482-T487)
+    if compiler_main_test_xor_cancel_lhs_lhs() {
+        println("  T482 OK: Sprint 133 Block AU: (a^b)^(a^c) -> b^c [lhs-lhs]")
+        passed = passed + 1
+    } else { println("  FAIL: T482") }
+    if compiler_main_test_xor_cancel_lhs_rhs() {
+        println("  T483 OK: Sprint 133 Block AU: (a^b)^(c^a) -> b^c [lhs-rhs]")
+        passed = passed + 1
+    } else { println("  FAIL: T483") }
+    if compiler_main_test_xor_cancel_rhs_lhs() {
+        println("  T484 OK: Sprint 133 Block AU: (b^a)^(a^c) -> b^c [rhs-lhs]")
+        passed = passed + 1
+    } else { println("  FAIL: T484") }
+    if compiler_main_test_xor_cancel_rhs_rhs() {
+        println("  T485 OK: Sprint 133 Block AU: (b^a)^(c^a) -> b^c [rhs-rhs]")
+        passed = passed + 1
+    } else { println("  FAIL: T485") }
+    if compiler_main_test_xor_cancel_no_fold() {
+        println("  T486 OK: Sprint 133 Block AU: (a^b)^(c^d) no fold [negative]")
+        passed = passed + 1
+    } else { println("  FAIL: T486") }
+    if compiler_main_test_xor_cancel_const_no_track() {
+        println("  T487 OK: Sprint 133 Block AU: const-src prevents XOR track [negative]")
+        passed = passed + 1
+    } else { println("  FAIL: T487") }
 
     println("")
     println("compiler/main tests: " + int_to_string(passed) + "/" + int_to_string(total) + " passed")
