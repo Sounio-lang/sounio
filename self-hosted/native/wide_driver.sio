@@ -1,0 +1,346 @@
+// native::wide_driver — Wide compilation driver for large modules.
+//
+// Compiles IrModules with up to 1024 functions by batching compilation
+// through the standard NativeCompiler (which only supports 256 functions)
+// and accumulating results into wide buffers.
+//
+// Strategy:
+//   1. Compile functions in batches of WIDE_BATCH_SIZE (200)
+//   2. After each batch, copy code to WideCodeBuffer, collect relocations
+//      in WideRelocationTable, record symbols in WideSymbolData
+//   3. Emit entry trampoline in the final batch
+//   4. Apply all relocations using global wide_fn_offsets
+//   5. Finalize with finalize_elf64_wide()
+
+module native::wide_driver
+
+use native::encode::*
+use native::elf::*
+use native::reloc::*
+use native::wide::*
+use native::frame::*
+use native::codegen::*
+use ir::ir::*
+use parser::ast::*
+
+fn WIDE_BATCH_SIZE() -> i64 { 200 }
+fn WIDE_BASE_ADDR() -> i64 { 0x400000 }
+
+// ============================================================================
+// WIDE RELOCATION ENTRY (stores full relocation info)
+// ============================================================================
+
+struct WideReloc {
+    offset: i64,         // position in wide code buffer to patch
+    target_index: i64,   // function index (kind=1) or data offset (kind=2,3)
+    is_function: i64,    // 1 if target is a function, 0 if data
+    kind_code: i64,      // 1=rel32 call, 2=RIP-rel rodata, 3=RIP-rel data
+}
+
+struct WideRelocTable {
+    entries: [WideReloc; 4096],
+    count: i64,
+}
+
+fn wide_reloc_table_new() -> WideRelocTable with Mut {
+    WideRelocTable {
+        entries: [WideReloc { offset: 0, target_index: 0, is_function: 0, kind_code: 0 }; 4096],
+        count: 0,
+    }
+}
+
+fn wide_reloc_add(t: WideRelocTable, offset: i64, target_index: i64, is_function: i64, kind_code: i64) -> WideRelocTable with Mut, Panic {
+    var out = t
+    if out.count < 4096 {
+        out.entries[out.count as usize] = WideReloc {
+            offset: offset,
+            target_index: target_index,
+            is_function: is_function,
+            kind_code: kind_code,
+        }
+        out.count = out.count + 1
+    }
+    out
+}
+
+// ============================================================================
+// WIDE RODATA ACCUMULATOR (32KB)
+// ============================================================================
+
+struct WideRodata {
+    bytes: [i8; 32768],
+    len: i64,
+}
+
+fn wide_rodata_new() -> WideRodata with Mut {
+    WideRodata { bytes: [0; 32768], len: 0 }
+}
+
+fn wide_rodata_append(dst: WideRodata, src: StringTable) -> WideRodata with Mut, Panic {
+    var out = dst
+    var i: i64 = 0
+    while i < src.len && out.len < 32768 {
+        out.bytes[out.len as usize] = src.bytes[i as usize]
+        out.len = out.len + 1
+        i = i + 1
+    }
+    out
+}
+
+// ============================================================================
+// APPLY WIDE RELOCATIONS
+// ============================================================================
+
+fn wide_apply_all_relocations(
+    code: WideCodeBuffer,
+    relocs: WideRelocTable,
+    fn_offsets: [i64; 1024],
+    fn_count: i64,
+    rodata_file_offset: i64,
+    data_file_offset: i64
+) -> WideCodeBuffer with Mut, Panic, Div {
+    var b = code
+    var i: i64 = 0
+
+    while i < relocs.count {
+        let r = relocs.entries[i as usize]
+        let patch_offset = r.offset
+
+        if r.kind_code == 1 {
+            // Function call: rel32 = target_offset - (patch_offset + 4)
+            if r.is_function == 1 && r.target_index < fn_count {
+                let target_offset = fn_offsets[r.target_index as usize]
+                let rel32 = target_offset - (patch_offset + 4)
+                if patch_offset >= 0 && patch_offset + 4 <= b.len {
+                    b.bytes[patch_offset as usize] = (rel32 & 255) as i8
+                    b.bytes[(patch_offset + 1) as usize] = ((rel32 / 256) & 255) as i8
+                    b.bytes[(patch_offset + 2) as usize] = ((rel32 / 65536) & 255) as i8
+                    b.bytes[(patch_offset + 3) as usize] = ((rel32 / 16777216) & 255) as i8
+                }
+            }
+        } else if r.kind_code == 2 {
+            // RIP-relative rodata: disp32 = (rodata_file_offset + str_offset) - (text_file_offset + patch_offset + 4)
+            let str_offset = r.target_index
+            let text_file_offset = 4096
+            let lea_next_ip = text_file_offset + patch_offset + 4
+            let string_va = rodata_file_offset + str_offset
+            let disp32 = string_va - lea_next_ip
+            if patch_offset >= 0 && patch_offset + 4 <= b.len {
+                b.bytes[patch_offset as usize] = (disp32 & 255) as i8
+                b.bytes[(patch_offset + 1) as usize] = ((disp32 / 256) & 255) as i8
+                b.bytes[(patch_offset + 2) as usize] = ((disp32 / 65536) & 255) as i8
+                b.bytes[(patch_offset + 3) as usize] = ((disp32 / 16777216) & 255) as i8
+            }
+        } else if r.kind_code == 3 {
+            // RIP-relative .data: same formula but with data_file_offset
+            let data_off = r.target_index
+            let text_file_offset2 = 4096
+            let next_ip = text_file_offset2 + patch_offset + 4
+            let counter_va = data_file_offset + data_off
+            let disp32_data = counter_va - next_ip
+            if patch_offset >= 0 && patch_offset + 4 <= b.len {
+                b.bytes[patch_offset as usize] = (disp32_data & 255) as i8
+                b.bytes[(patch_offset + 1) as usize] = ((disp32_data / 256) & 255) as i8
+                b.bytes[(patch_offset + 2) as usize] = ((disp32_data / 65536) & 255) as i8
+                b.bytes[(patch_offset + 3) as usize] = ((disp32_data / 16777216) & 255) as i8
+            }
+        }
+
+        i = i + 1
+    }
+    b
+}
+
+// ============================================================================
+// COPY BATCH RELOCATIONS TO WIDE TABLE
+// ============================================================================
+
+fn wide_copy_batch_relocs(
+    wide_relocs: WideRelocTable,
+    batch_relocs: RelocationTable,
+    batch_code_base: i64,
+    rodata_base_offset: i64
+) -> WideRelocTable with Mut, Panic {
+    var out = wide_relocs
+    var i: i64 = 0
+    while i < batch_relocs.count {
+        let r = batch_relocs.entries[i as usize]
+        let adjusted_offset = r.offset + batch_code_base
+        if r.kind.kind_code == 1 {
+            // Function call — target_index is global fn_id, keep as-is
+            out = wide_reloc_add(out, adjusted_offset, r.target.target_index, r.target.is_function, 1)
+        } else if r.kind.kind_code == 2 {
+            // Rodata reference — adjust target by cumulative rodata offset
+            out = wide_reloc_add(out, adjusted_offset, r.target.target_index + rodata_base_offset, 0, 2)
+        } else if r.kind.kind_code == 3 {
+            // Data reference — target is absolute within .data, no adjustment needed
+            out = wide_reloc_add(out, adjusted_offset, r.target.target_index, 0, 3)
+        }
+        i = i + 1
+    }
+    out
+}
+
+// ============================================================================
+// COPY BATCH CODE TO WIDE BUFFER
+// ============================================================================
+
+fn wide_copy_batch_code(wide: WideCodeBuffer, batch: CodeBuffer) -> WideCodeBuffer with Mut, Panic {
+    var out = wide
+    var i: i64 = 0
+    while i < batch.len && out.len < 262144 {
+        out.bytes[out.len as usize] = batch.bytes[i as usize]
+        out.len = out.len + 1
+        i = i + 1
+    }
+    out
+}
+
+// ============================================================================
+// NAME TO STRING HELPER
+// ============================================================================
+
+fn name_to_string(name: Name) -> string with Mut, Panic, Div {
+    var buf: [i8; 128] = name.buf
+    str_from_bytes(buf, name.len)
+}
+
+// ============================================================================
+// WIDE COMPILE AND EMIT
+// ============================================================================
+
+struct WideCompileResult {
+    ok: bool,
+    fn_count: i64,
+    code_size: i64,
+    reloc_count: i64,
+}
+
+fn wide_compile_result_empty() -> WideCompileResult with Mut {
+    WideCompileResult { ok: false, fn_count: 0, code_size: 0, reloc_count: 0 }
+}
+
+fn wide_compile_and_emit(module: &IrModule, output_path: string) -> WideCompileResult with IO, Mut, Panic, Div, Alloc {
+    var wide_code = wide_code_buffer_new()
+    var wide_relocs = wide_reloc_table_new()
+    var wide_symbols = wide_symbol_data_new()
+    var wide_fn_offsets: [i64; 1024] = [0; 1024]
+    var wide_rodata = wide_rodata_new()
+    var total_rodata_len: i64 = 0
+
+    let batch_size = WIDE_BATCH_SIZE()
+    var batch_start: i64 = 0
+    var total_fn_count: i64 = module.fn_count
+
+    // ---- Phase 1: Compile functions in batches ----
+    while batch_start < total_fn_count {
+        var batch_end = batch_start + batch_size
+        if batch_end > total_fn_count { batch_end = total_fn_count }
+
+        // Fresh compiler for this batch
+        var nc = compiler_new()
+        nc = compile_module_streaming_begin(nc, module)
+
+        // Compile each function in the batch
+        var fi = batch_start
+        while fi < batch_end {
+            let local_idx = fi - batch_start
+            nc = compile_ir_function(nc, module.functions[fi as usize], local_idx)
+            fi = fi + 1
+        }
+
+        // Record where this batch's code starts in the wide buffer
+        let batch_code_base = wide_code.len
+
+        // Copy batch code to wide buffer
+        wide_code = wide_copy_batch_code(wide_code, nc.code)
+
+        // Map local fn_offsets to global wide_fn_offsets
+        var oi = batch_start
+        while oi < batch_end {
+            let local_idx = oi - batch_start
+            wide_fn_offsets[oi as usize] = nc.fn_offsets[local_idx as usize] + batch_code_base
+            oi = oi + 1
+        }
+
+        // Record symbol names
+        var si = batch_start
+        while si < batch_end {
+            let fn_name = name_to_string(module.functions[si as usize].name)
+            wide_symbols = wide_add_symbol(wide_symbols, fn_name, wide_fn_offsets[si as usize])
+            si = si + 1
+        }
+
+        // Copy relocations (offset-adjusted, rodata-offset-adjusted)
+        wide_relocs = wide_copy_batch_relocs(wide_relocs, nc.relocs, batch_code_base, total_rodata_len)
+
+        // Accumulate rodata
+        wide_rodata = wide_rodata_append(wide_rodata, nc.rodata)
+        total_rodata_len = total_rodata_len + nc.rodata.len
+
+        batch_start = batch_end
+    }
+
+    // ---- Phase 2: Emit entry trampoline ----
+    let main_idx = find_main_index(module)
+    if main_idx >= 0 {
+        // Compile entry trampoline in a final mini-batch
+        var nc_tramp = compiler_new()
+        nc_tramp = compile_module_streaming_begin(nc_tramp, module)
+        nc_tramp = emit_entry_trampoline(nc_tramp, main_idx)
+
+        let tramp_code_base = wide_code.len
+        let entry_offset = nc_tramp.entry_offset + tramp_code_base
+
+        // Copy trampoline code
+        wide_code = wide_copy_batch_code(wide_code, nc_tramp.code)
+
+        // Copy trampoline relocations (may include .data relocs for RuntimeContext)
+        wide_relocs = wide_copy_batch_relocs(wide_relocs, nc_tramp.relocs, tramp_code_base, total_rodata_len)
+
+        // Accumulate any trampoline rodata
+        wide_rodata = wide_rodata_append(wide_rodata, nc_tramp.rodata)
+
+        // ---- Phase 3: Apply all relocations ----
+        let text_file_offset = 4096
+        let rodata_file_offset = wide_align_page(text_file_offset + wide_code.len)
+        let data_file_offset = 0  // No profiling data for now
+
+        wide_code = wide_apply_all_relocations(
+            wide_code, wide_relocs, wide_fn_offsets, total_fn_count,
+            rodata_file_offset, data_file_offset
+        )
+
+        // ---- Phase 4: Build merged rodata as StringTable ----
+        var merged_rodata = string_table_new()
+        var ri: i64 = 0
+        while ri < wide_rodata.len && merged_rodata.len < 8192 {
+            merged_rodata.bytes[merged_rodata.len as usize] = wide_rodata.bytes[ri as usize]
+            merged_rodata.len = merged_rodata.len + 1
+            ri = ri + 1
+        }
+
+        let empty_data = string_table_new()
+
+        // ---- Phase 5: Finalize ELF ----
+        let elf = finalize_elf64_wide(
+            wide_code, merged_rodata, empty_data,
+            entry_offset, WIDE_BASE_ADDR(),
+            wide_symbols, wide_fn_offsets, total_fn_count
+        )
+
+        // ---- Phase 6: Write to file ----
+        let write_ok = io_write_wide_elf(output_path, elf)
+
+        if write_ok {
+            return WideCompileResult {
+                ok: true,
+                fn_count: total_fn_count,
+                code_size: wide_code.len,
+                reloc_count: wide_relocs.count,
+            }
+        }
+    }
+
+    wide_compile_result_empty()
+}
