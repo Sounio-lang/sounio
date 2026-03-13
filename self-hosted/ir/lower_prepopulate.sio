@@ -1,0 +1,85 @@
+// self-hosted::ir::lower_prepop
+//
+// Pre-population wrapper for the Lowerer. Uses the flat-owned summary approach
+// to correctly set fn_count and function metadata before body lowering.
+//
+// This sidesteps the JIT &! Box mutation bug:
+//   (*lo.module).fn_count = N         -- silently lost (store hits param stack slot)
+//   (*lo.module).functions[i] = f     -- silently lost
+//
+// The flat-owned approach builds a local IrModule (1-level writes only), then
+// wraps it via Box::new — all reads/writes through Box are correct after that.
+//
+// Usage:
+//   let lo = lowerer_prepopulate_from_program_ref(&prog, epistemic)
+//   let lo2 = lo.lower_program_bodies_ref(&prog.items)
+//   // lo2.module.fn_count is correct; all function bodies are flushed
+
+module ir::lower_prepop
+
+use lexer::mod::*
+use parser::ast::*
+use ir::ir::*
+use check::dependent::*
+use check::types::*
+use check::mod::{check_program, check_program_epistemic_into}
+use check::ownership::*
+use check::lint::*
+use check::layout::*
+use io::file_write::*
+use interop::contract::*
+use native::aarch64::*
+use native::encode::*
+use native::elf::*
+use native::elf_bulk::*
+use native::macho::*
+use native::reloc::*
+use native::frame::*
+use native::lower_ir::*
+use native::machine_ir::*
+use native::gc::*
+use native::runtime_context::*
+use native::stack_maps::*
+use native::target_policy::*
+use wasm::core::*
+use wasm::encode::*
+use wasm::lower::*
+use native::codegen::*
+use resolve::resolve::*
+use resolve::imports::*
+use resolve::symbol::*
+use resolve::scope::*
+use resolve::mod::{resolve_modules, resolve_program, ResolveBatchResult}
+use parser::mod::{parse_program_preloaded, count_items}
+use parser::parser::{parser_last_error_count}
+use ir::opt_strategy::{ir_opt_apply_strategy, ir_opt_find_return_vreg, ir_opt_max_label, ir_opt_max_vreg}
+use ir::lower::{ir_patch_validated_calls, lower_program_to_ir, lower_program_to_ir_with_epistemic, lower_program_to_ir_probe_summary_ref, lower_program_to_ir_probe_summary_box_ref, lower_program_to_ir_summary_box_probe_with_epistemic_ref, lower_program_function_body_from_summary_with_epistemic_ref, lower_program_to_ir_summary_flat_with_epistemic_ref, lower_program_function_body_from_summary_flat_with_epistemic_ref, lower_program_to_ir_summary_flat_owned_with_epistemic_ref, lowerer_new_from_program_summary_flat, Lowerer}
+use ir::lower::{lower_program_to_ir_with_epistemic_ref, lower_program_to_ir_ordered_with_epistemic_boxed_trace_ref}
+use ir::lower::{lower_program_function_body_from_program_with_epistemic_ref}
+use ir::const_prop::{cp_check_load_imm, cp_empty_instrs, cp_make_test_func, cp_optimize_function}
+use ir::dce::{dce_check_nop, dce_empty_instrs, dce_make_test_func, dce_optimize_function}
+use ir::profile::*
+use ir::inline::*
+use ir::layout::*
+use ir::opt_cleanup::*
+use ir::egraph::*
+use ir::loop_opt::*
+use ir::tailcall::*
+use native::regalloc::*
+use native::peephole::*
+
+// Create a Lowerer pre-populated with correct fn_count, param_count, compile_strategy
+// and function names. Ready to accept lower_program_bodies_ref without needing
+// preseed_program_items_ref (which is broken under JIT for the fn_count writes).
+fn lowerer_prepopulate_from_program_ref(
+    prog: &Program,
+    epistemic: IrEpistemicSection
+) -> Lowerer with Alloc, Mut, Panic, Div, IO {
+    let summary_result = lower_program_to_ir_summary_flat_owned_with_epistemic_ref(prog, epistemic)
+    lowerer_new_from_program_summary_flat(&summary_result.summary, epistemic)
+}
+
+// Convenience: pre-populate with empty epistemic section.
+fn lowerer_prepopulate_from_program_plain_ref(prog: &Program) -> Lowerer with Alloc, Mut, Panic, Div, IO {
+    lowerer_prepopulate_from_program_ref(prog, ir_empty_epistemic_section())
+}

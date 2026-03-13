@@ -968,18 +968,57 @@ fn ast_compile_expr(code: CodeBuffer, expr: &Expr,
         c
     } else if expr.kind == ExprKind::ExprUnary {
         let uop_ref: &Option<Box<Expr>> = &expr.left
-        match *uop_ref {
-            Some(ue) => {
-                c = ast_compile_expr(c, &(*ue), local_names, local_slots, local_count)
+        if expr.un_op == UnaryOp::OpRef || expr.un_op == UnaryOp::OpRefMut {
+            // &arr / &! arr → emit address (LEA) of the base slot rather than loading its value
+            match *uop_ref {
+                Some(ue) => {
+                    if (*ue).kind == ExprKind::ExprIdent {
+                        var ref_slot: i64 = -1
+                        var rli = local_count - 1
+                        while rli >= 0 {
+                            if ir_name_eq(local_names[rli as usize], (*ue).name) {
+                                ref_slot = local_slots[rli as usize]
+                                rli = -1
+                            } else { rli = rli - 1 }
+                        }
+                        if ref_slot >= 0 {
+                            // lea rax, [rbp - 8*(ref_slot+1)]
+                            let ref_disp = 0 - ((ref_slot + 1) * 8)
+                            c = emit_byte(c, 0x48); c = emit_byte(c, 0x8d); c = emit_byte(c, 0x85)
+                            c = emit_byte(c, ref_disp & 0xFF); c = emit_byte(c, (ref_disp >> 8) & 0xFF)
+                            c = emit_byte(c, (ref_disp >> 16) & 0xFF); c = emit_byte(c, (ref_disp >> 24) & 0xFF)
+                        } else {
+                            c = emit_byte(c, 0x48); c = emit_byte(c, 0x31); c = emit_byte(c, 0xc0)
+                        }
+                    } else {
+                        c = ast_compile_expr(c, &(*ue), local_names, local_slots, local_count)
+                    }
+                }
+                _ => { c = emit_byte(c, 0x48); c = emit_byte(c, 0x31); c = emit_byte(c, 0xc0) }
             }
-            _ => {}
-        }
-        if expr.un_op == UnaryOp::OpNeg {
-            // neg rax
-            c = emit_byte(c, 0x48); c = emit_byte(c, 0xf7); c = emit_byte(c, 0xd8)
-        } else if expr.un_op == UnaryOp::OpNot {
-            // xor rax, 1
-            c = emit_byte(c, 0x48); c = emit_byte(c, 0x83); c = emit_byte(c, 0xf0); c = emit_byte(c, 0x01)
+        } else if expr.un_op == UnaryOp::OpDeref {
+            // *ptr → compile ptr → rax, then load [rax]
+            match *uop_ref {
+                Some(ue) => {
+                    c = ast_compile_expr(c, &(*ue), local_names, local_slots, local_count)
+                }
+                _ => {}
+            }
+            c = emit_byte(c, 0x48); c = emit_byte(c, 0x8b); c = emit_byte(c, 0x00)
+        } else {
+            match *uop_ref {
+                Some(ue) => {
+                    c = ast_compile_expr(c, &(*ue), local_names, local_slots, local_count)
+                }
+                _ => {}
+            }
+            if expr.un_op == UnaryOp::OpNeg {
+                // neg rax
+                c = emit_byte(c, 0x48); c = emit_byte(c, 0xf7); c = emit_byte(c, 0xd8)
+            } else if expr.un_op == UnaryOp::OpNot {
+                // xor rax, 1
+                c = emit_byte(c, 0x48); c = emit_byte(c, 0x83); c = emit_byte(c, 0xf0); c = emit_byte(c, 0x01)
+            }
         }
         c
     } else if expr.kind == ExprKind::ExprCast {
@@ -1044,18 +1083,39 @@ fn ast_compile_expr(code: CodeBuffer, expr: &Expr,
         }
         c
     } else if expr.kind == ExprKind::ExprIndex {
-        // Array index: base[index] → load from stack slot (base_slot + index)
+        // Array index: base[index] — base is local ident or (*ptr) deref
         var idx_base_slot: i64 = -1
+        var idx_use_ptr: i64 = 0  // 0=local LEA, 1=load ptr value (MOV)
         let idx_base_ref: &Option<Box<Expr>> = &expr.left
         match *idx_base_ref {
             Some(be) => {
                 if (*be).kind == ExprKind::ExprIdent {
+                    // Local array: address computed via LEA
                     var li = local_count - 1
                     while li >= 0 {
                         if ir_name_eq(local_names[li as usize], (*be).name) {
                             idx_base_slot = local_slots[li as usize]
                             li = -1
                         } else { li = li - 1 }
+                    }
+                    idx_use_ptr = 0
+                } else if (*be).kind == ExprKind::ExprUnary {
+                    // (*ptr)[i] — deref case: ptr slot holds the base address
+                    let deref_inner: &Option<Box<Expr>> = &(*be).left
+                    match *deref_inner {
+                        Some(de) => {
+                            if (*de).kind == ExprKind::ExprIdent {
+                                var li2 = local_count - 1
+                                while li2 >= 0 {
+                                    if ir_name_eq(local_names[li2 as usize], (*de).name) {
+                                        idx_base_slot = local_slots[li2 as usize]
+                                        li2 = -1
+                                    } else { li2 = li2 - 1 }
+                                }
+                                idx_use_ptr = 1
+                            }
+                        }
+                        _ => {}
                     }
                 }
             }
@@ -1070,18 +1130,21 @@ fn ast_compile_expr(code: CodeBuffer, expr: &Expr,
                 }
                 _ => { c = emit_byte(c, 0x48); c = emit_byte(c, 0x31); c = emit_byte(c, 0xc0) }
             }
-            // mov rcx, rax  (index in rcx)
+            // mov rcx, rax (index in rcx)
             c = emit_byte(c, 0x48); c = emit_byte(c, 0x89); c = emit_byte(c, 0xc1)
-            // lea rax, [rbp - 8*(idx_base_slot+1)]  (address of array[0])
             let idx_disp = 0 - ((idx_base_slot + 1) * 8)
-            c = emit_byte(c, 0x48); c = emit_byte(c, 0x8d); c = emit_byte(c, 0x85)
+            if idx_use_ptr == 0 {
+                // lea rax, [rbp - 8*(slot+1)] — local array base address
+                c = emit_byte(c, 0x48); c = emit_byte(c, 0x8d); c = emit_byte(c, 0x85)
+            } else {
+                // mov rax, [rbp - 8*(slot+1)] — load pointer value (which IS the base address)
+                c = emit_byte(c, 0x48); c = emit_byte(c, 0x8b); c = emit_byte(c, 0x85)
+            }
             c = emit_byte(c, idx_disp & 0xFF); c = emit_byte(c, (idx_disp >> 8) & 0xFF)
             c = emit_byte(c, (idx_disp >> 16) & 0xFF); c = emit_byte(c, (idx_disp >> 24) & 0xFF)
-            // neg rcx   (so that rax + (-index)*8 = rax - index*8)
+            // neg rcx; lea rax, [rax + rcx*8] = element address; mov rax, [rax]
             c = emit_byte(c, 0x48); c = emit_byte(c, 0xf7); c = emit_byte(c, 0xd9)
-            // lea rax, [rax + rcx*8]  = address of array[index]
             c = emit_byte(c, 0x48); c = emit_byte(c, 0x8d); c = emit_byte(c, 0x04); c = emit_byte(c, 0xc8)
-            // mov rax, [rax]
             c = emit_byte(c, 0x48); c = emit_byte(c, 0x8b); c = emit_byte(c, 0x00)
         } else {
             c = emit_byte(c, 0x48); c = emit_byte(c, 0x31); c = emit_byte(c, 0xc0)
@@ -1231,9 +1294,10 @@ fn ast_compile_block(code: CodeBuffer, blk: &Block,
                                     c = micro_store_rax(c, slot)
                                 }
                             } else if (*te).kind == ExprKind::ExprIndex {
-                                // arr[i] = val — val already in rax
+                                // arr[i] = val or (*ptr)[i] = val — val in rax
                                 c = emit_byte(c, 0x50)  // push rax (value)
                                 var blk_asgn_base: i64 = -1
+                                var blk_asgn_use_ptr: i64 = 0
                                 let blk_asgn_arr_ref: &Option<Box<Expr>> = &(*te).left
                                 match *blk_asgn_arr_ref {
                                     Some(abe) => {
@@ -1244,6 +1308,24 @@ fn ast_compile_block(code: CodeBuffer, blk: &Block,
                                                     blk_asgn_base = ls[li2 as usize]
                                                     li2 = -1
                                                 } else { li2 = li2 - 1 }
+                                            }
+                                            blk_asgn_use_ptr = 0
+                                        } else if (*abe).kind == ExprKind::ExprUnary {
+                                            let blk_deref_ref: &Option<Box<Expr>> = &(*abe).left
+                                            match *blk_deref_ref {
+                                                Some(de) => {
+                                                    if (*de).kind == ExprKind::ExprIdent {
+                                                        var li3 = lc - 1
+                                                        while li3 >= 0 {
+                                                            if ir_name_eq(ln[li3 as usize], (*de).name) {
+                                                                blk_asgn_base = ls[li3 as usize]
+                                                                li3 = -1
+                                                            } else { li3 = li3 - 1 }
+                                                        }
+                                                        blk_asgn_use_ptr = 1
+                                                    }
+                                                }
+                                                _ => {}
                                             }
                                         }
                                     }
@@ -1259,16 +1341,17 @@ fn ast_compile_block(code: CodeBuffer, blk: &Block,
                                     }
                                     // mov rcx, rax
                                     c = emit_byte(c, 0x48); c = emit_byte(c, 0x89); c = emit_byte(c, 0xc1)
-                                    // lea rax, [rbp - 8*(blk_asgn_base+1)]
                                     let blk_asgn_disp = 0 - ((blk_asgn_base + 1) * 8)
-                                    c = emit_byte(c, 0x48); c = emit_byte(c, 0x8d); c = emit_byte(c, 0x85)
+                                    if blk_asgn_use_ptr == 0 {
+                                        c = emit_byte(c, 0x48); c = emit_byte(c, 0x8d); c = emit_byte(c, 0x85)
+                                    } else {
+                                        c = emit_byte(c, 0x48); c = emit_byte(c, 0x8b); c = emit_byte(c, 0x85)
+                                    }
                                     c = emit_byte(c, blk_asgn_disp & 0xFF); c = emit_byte(c, (blk_asgn_disp >> 8) & 0xFF)
                                     c = emit_byte(c, (blk_asgn_disp >> 16) & 0xFF); c = emit_byte(c, (blk_asgn_disp >> 24) & 0xFF)
-                                    // neg rcx
+                                    // neg rcx; lea rax, [rax+rcx*8]; pop rdx; mov [rax], rdx
                                     c = emit_byte(c, 0x48); c = emit_byte(c, 0xf7); c = emit_byte(c, 0xd9)
-                                    // lea rax, [rax + rcx*8]
                                     c = emit_byte(c, 0x48); c = emit_byte(c, 0x8d); c = emit_byte(c, 0x04); c = emit_byte(c, 0xc8)
-                                    // pop rdx; mov [rax], rdx
                                     c = emit_byte(c, 0x5a)
                                     c = emit_byte(c, 0x48); c = emit_byte(c, 0x89); c = emit_byte(c, 0x10)
                                 } else {
@@ -1461,9 +1544,10 @@ fn ast_compile_fn_body(code: CodeBuffer, fd: &FnDef,
                                     c = micro_store_rax(c, slot)
                                 }
                             } else if (*te).kind == ExprKind::ExprIndex {
-                                // arr[i] = val — val already in rax
+                                // arr[i] = val or (*ptr)[i] = val — val in rax
                                 c = emit_byte(c, 0x50)  // push rax (value)
                                 var fn_asgn_base: i64 = -1
+                                var fn_asgn_use_ptr: i64 = 0
                                 let fn_asgn_arr_ref: &Option<Box<Expr>> = &(*te).left
                                 match *fn_asgn_arr_ref {
                                     Some(abe) => {
@@ -1474,6 +1558,24 @@ fn ast_compile_fn_body(code: CodeBuffer, fd: &FnDef,
                                                     fn_asgn_base = local_slots[li2 as usize]
                                                     li2 = -1
                                                 } else { li2 = li2 - 1 }
+                                            }
+                                            fn_asgn_use_ptr = 0
+                                        } else if (*abe).kind == ExprKind::ExprUnary {
+                                            let fn_deref_ref: &Option<Box<Expr>> = &(*abe).left
+                                            match *fn_deref_ref {
+                                                Some(de) => {
+                                                    if (*de).kind == ExprKind::ExprIdent {
+                                                        var li3 = local_count - 1
+                                                        while li3 >= 0 {
+                                                            if ir_name_eq(local_names[li3 as usize], (*de).name) {
+                                                                fn_asgn_base = local_slots[li3 as usize]
+                                                                li3 = -1
+                                                            } else { li3 = li3 - 1 }
+                                                        }
+                                                        fn_asgn_use_ptr = 1
+                                                    }
+                                                }
+                                                _ => {}
                                             }
                                         }
                                     }
@@ -1489,16 +1591,17 @@ fn ast_compile_fn_body(code: CodeBuffer, fd: &FnDef,
                                     }
                                     // mov rcx, rax
                                     c = emit_byte(c, 0x48); c = emit_byte(c, 0x89); c = emit_byte(c, 0xc1)
-                                    // lea rax, [rbp - 8*(fn_asgn_base+1)]
                                     let fn_asgn_disp = 0 - ((fn_asgn_base + 1) * 8)
-                                    c = emit_byte(c, 0x48); c = emit_byte(c, 0x8d); c = emit_byte(c, 0x85)
+                                    if fn_asgn_use_ptr == 0 {
+                                        c = emit_byte(c, 0x48); c = emit_byte(c, 0x8d); c = emit_byte(c, 0x85)
+                                    } else {
+                                        c = emit_byte(c, 0x48); c = emit_byte(c, 0x8b); c = emit_byte(c, 0x85)
+                                    }
                                     c = emit_byte(c, fn_asgn_disp & 0xFF); c = emit_byte(c, (fn_asgn_disp >> 8) & 0xFF)
                                     c = emit_byte(c, (fn_asgn_disp >> 16) & 0xFF); c = emit_byte(c, (fn_asgn_disp >> 24) & 0xFF)
-                                    // neg rcx
+                                    // neg rcx; lea rax, [rax+rcx*8]; pop rdx; mov [rax], rdx
                                     c = emit_byte(c, 0x48); c = emit_byte(c, 0xf7); c = emit_byte(c, 0xd9)
-                                    // lea rax, [rax + rcx*8]
                                     c = emit_byte(c, 0x48); c = emit_byte(c, 0x8d); c = emit_byte(c, 0x04); c = emit_byte(c, 0xc8)
-                                    // pop rdx; mov [rax], rdx
                                     c = emit_byte(c, 0x5a)
                                     c = emit_byte(c, 0x48); c = emit_byte(c, 0x89); c = emit_byte(c, 0x10)
                                 } else {
