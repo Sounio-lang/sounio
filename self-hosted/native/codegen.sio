@@ -1140,6 +1140,23 @@ fn name_is_print_f64(n: Name) -> bool with Mut, Panic, Div {
     true
 }
 
+fn name_is_exp(n: Name) -> bool with Mut, Panic, Div {
+    if n.len != 3 { return false }
+    if n.buf[0] != 101 as i8 { return false }   // 'e'
+    if n.buf[1] != 120 as i8 { return false }   // 'x'
+    if n.buf[2] != 112 as i8 { return false }   // 'p'
+    true
+}
+
+fn name_is_log(n: Name) -> bool with Mut, Panic, Div {
+    if n.len != 3 { return false }
+    if n.buf[0] != 108 as i8 { return false }   // 'l'
+    if n.buf[1] != 111 as i8 { return false }   // 'o'
+    if n.buf[2] != 103 as i8 { return false }   // 'g'
+    true
+}
+
+
 // ============================================================================
 // Builtin runtime function emitters (hand-coded x86-64)
 // ============================================================================
@@ -1942,6 +1959,321 @@ fn emit_builtin_sqrt(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div 
     c.code = emit_ret(c.code)
     c
 }
+// Sprint 119: exp builtin — range-reduction + degree-6 minimax polynomial
+// Algorithm: x = n*ln(2) + r, exp(r) via Horner, scale by 2^n
+// Stack layout: [rbp-8]=input x, [rbp-16]=r, [rbp-24]=n_float, [rbp-32]=result
+// Uses only xmm0/xmm1 with stack temps for intermediates
+fn emit_builtin_exp(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
+    var c = nc
+
+    // Store constants in .rodata
+    // 1/ln(2) = 0x3FF71547652B82FE
+    c.rodata = data_section_add_f64(c.rodata, 0x3FF71547652B82FE)
+    let inv_ln2_off = c.rodata.last_offset
+    // ln(2) = 0x3FE62E42FEFA39EF
+    c.rodata = data_section_add_f64(c.rodata, 0x3FE62E42FEFA39EF)
+    let ln2_off = c.rodata.last_offset
+    // c6 = 1/720 = 0x3F56C16C16C16C17
+    c.rodata = data_section_add_f64(c.rodata, 0x3F56C16C16C16C17)
+    let c6_off = c.rodata.last_offset
+    // c5 = 1/120 = 0x3F81111111111111
+    c.rodata = data_section_add_f64(c.rodata, 0x3F81111111111111)
+    let c5_off = c.rodata.last_offset
+    // c4 = 1/24 = 0x3FA5555555555555
+    c.rodata = data_section_add_f64(c.rodata, 0x3FA5555555555555)
+    let c4_off = c.rodata.last_offset
+    // c3 = 1/6 = 0x3FC5555555555555
+    c.rodata = data_section_add_f64(c.rodata, 0x3FC5555555555555)
+    let c3_off = c.rodata.last_offset
+    // c2 = 0.5 = 0x3FE0000000000000
+    c.rodata = data_section_add_f64(c.rodata, 0x3FE0000000000000)
+    let c2_off = c.rodata.last_offset
+    // 1.0 = 0x3FF0000000000000
+    c.rodata = data_section_add_f64(c.rodata, 0x3FF0000000000000)
+    let one_off = c.rodata.last_offset
+
+    c.code = emit_push_rbp(c.code)
+    c.code = emit_mov_rbp_rsp(c.code)
+    c.code = emit_sub_rsp_imm32(c.code, 64)
+
+    // rdi = f64 bit pattern of x
+    c.code = emit_mov_reg_reg(c.code, 0, 7)       // mov rax, rdi
+    c.code = emit_movq_xmm0_rax(c.code)           // xmm0 = x
+    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -8)   // [rbp-8] = x
+
+    // Step 1: n_float = x * (1/ln2)
+    let load_inv_ln2_pos = c.code.len
+    c.code = emit_movsd_xmm1_rip_disp32(c.code, 0)
+    c.relocs = add_rip_reloc(c.relocs, load_inv_ln2_pos + 4, inv_ln2_off)
+    c.code = emit_mulsd_xmm0_xmm1(c.code)         // xmm0 = x / ln(2)
+
+    // Step 2: n = truncate to integer, n_f64 = convert back
+    c.code = emit_cvttsd2si_rax_xmm0(c.code)      // rax = trunc(x/ln2)
+    c.code = emit_store_rax_rbp_disp32(c.code, -32) // [rbp-32] = n (integer)
+    c.code = emit_cvtsi2sd_xmm0_rax(c.code)        // xmm0 = n_f64
+    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -24) // [rbp-24] = n_f64
+
+    // Step 3: r = x - n_f64 * ln2
+    let load_ln2_pos = c.code.len
+    c.code = emit_movsd_xmm1_rip_disp32(c.code, 0)
+    c.relocs = add_rip_reloc(c.relocs, load_ln2_pos + 4, ln2_off)
+    c.code = emit_mulsd_xmm0_xmm1(c.code)         // xmm0 = n_f64 * ln2
+    c.code = emit_movsd_rbp_disp8_xmm1(c.code, -16) // save n*ln2 to [rbp-16] temporarily
+    c.code = emit_movsd_xmm0_rbp_disp8(c.code, -8)  // xmm0 = x
+    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -16) // xmm1 = n*ln2
+    c.code = emit_subsd_xmm0_xmm1(c.code)         // xmm0 = r = x - n*ln2
+    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -16) // [rbp-16] = r
+
+    // Step 4: Horner's method
+    // result = 1 + r*(1 + r*(c2 + r*(c3 + r*(c4 + r*(c5 + r*c6)))))
+    // Start from innermost: acc = c6
+    let load_c6_pos = c.code.len
+    c.code = emit_movsd_xmm0_rip_disp32(c.code, 0)
+    c.relocs = add_rip_reloc(c.relocs, load_c6_pos + 4, c6_off)
+    // acc = c5 + r * c6
+    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -40)  // [rbp-40] = acc (c6)
+    c.code = emit_movsd_xmm0_rbp_disp8(c.code, -16)  // xmm0 = r
+    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -40)  // xmm1 = acc
+    c.code = emit_mulsd_xmm0_xmm1(c.code)             // xmm0 = r * acc
+    let load_c5_pos = c.code.len
+    c.code = emit_movsd_xmm1_rip_disp32(c.code, 0)
+    c.relocs = add_rip_reloc(c.relocs, load_c5_pos + 4, c5_off)
+    c.code = emit_addsd_xmm0_xmm1(c.code)             // xmm0 = c5 + r*c6
+    // acc = c4 + r * (c5 + r*c6)
+    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -40)
+    c.code = emit_movsd_xmm0_rbp_disp8(c.code, -16)
+    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -40)
+    c.code = emit_mulsd_xmm0_xmm1(c.code)
+    let load_c4_pos = c.code.len
+    c.code = emit_movsd_xmm1_rip_disp32(c.code, 0)
+    c.relocs = add_rip_reloc(c.relocs, load_c4_pos + 4, c4_off)
+    c.code = emit_addsd_xmm0_xmm1(c.code)
+    // acc = c3 + r * acc
+    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -40)
+    c.code = emit_movsd_xmm0_rbp_disp8(c.code, -16)
+    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -40)
+    c.code = emit_mulsd_xmm0_xmm1(c.code)
+    let load_c3_pos = c.code.len
+    c.code = emit_movsd_xmm1_rip_disp32(c.code, 0)
+    c.relocs = add_rip_reloc(c.relocs, load_c3_pos + 4, c3_off)
+    c.code = emit_addsd_xmm0_xmm1(c.code)
+    // acc = c2 + r * acc
+    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -40)
+    c.code = emit_movsd_xmm0_rbp_disp8(c.code, -16)
+    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -40)
+    c.code = emit_mulsd_xmm0_xmm1(c.code)
+    let load_c2_pos = c.code.len
+    c.code = emit_movsd_xmm1_rip_disp32(c.code, 0)
+    c.relocs = add_rip_reloc(c.relocs, load_c2_pos + 4, c2_off)
+    c.code = emit_addsd_xmm0_xmm1(c.code)
+    // acc = 1.0 + r * acc
+    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -40)
+    c.code = emit_movsd_xmm0_rbp_disp8(c.code, -16)
+    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -40)
+    c.code = emit_mulsd_xmm0_xmm1(c.code)
+    let load_one1_pos = c.code.len
+    c.code = emit_movsd_xmm1_rip_disp32(c.code, 0)
+    c.relocs = add_rip_reloc(c.relocs, load_one1_pos + 4, one_off)
+    c.code = emit_addsd_xmm0_xmm1(c.code)
+    // acc = 1.0 + r * acc  (outermost)
+    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -40)
+    c.code = emit_movsd_xmm0_rbp_disp8(c.code, -16)
+    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -40)
+    c.code = emit_mulsd_xmm0_xmm1(c.code)
+    let load_one2_pos = c.code.len
+    c.code = emit_movsd_xmm1_rip_disp32(c.code, 0)
+    c.relocs = add_rip_reloc(c.relocs, load_one2_pos + 4, one_off)
+    c.code = emit_addsd_xmm0_xmm1(c.code)
+    // xmm0 = exp(r) approx
+
+    // Step 5: Scale by 2^n — add n<<52 to IEEE 754 exponent bits
+    c.code = emit_movq_rax_xmm0(c.code)           // rax = result bits
+    c.code = emit_store_rax_rbp_disp32(c.code, -48) // [rbp-48] = result bits
+    c.code = emit_load_rbp_disp32_rax(c.code, -32)  // rax = n (integer)
+    // shl rax, 52: mov cl, 52; shl rax, cl
+    c.code = emit_mov_reg_imm(c.code, 1, 52)      // mov rcx, 52
+    c.code = emit_shl_rax_cl(c.code)               // rax = n << 52
+    c.code = emit_mov_reg_reg(c.code, 3, 0)        // mov rbx, rax
+    c.code = emit_load_rbp_disp32_rax(c.code, -48)  // rax = result bits
+    c.code = emit_add_rax_rbx(c.code)              // rax = result + (n<<52)
+    c.code = emit_add_rsp_imm32(c.code, 64)
+    c.code = emit_pop_rbp(c.code)
+    c.code = emit_ret(c.code)
+    c
+}
+
+// Sprint 119: log builtin — exponent extraction + series approximation
+// Algorithm: log(x) = e*ln(2) + 2*f*(1 + f^2/3 + f^4/5 + f^6/7)
+// where e = exponent, m = mantissa in [1,2), f = (m-1)/(m+1)
+// Stack layout: [rbp-8]=input bits, [rbp-16]=e_f64, [rbp-24]=f, [rbp-32]=f^2
+fn emit_builtin_log(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
+    var c = nc
+
+    // Store constants in .rodata
+    // ln(2) = 0x3FE62E42FEFA39EF
+    c.rodata = data_section_add_f64(c.rodata, 0x3FE62E42FEFA39EF)
+    let ln2_off = c.rodata.last_offset
+    // 1.0 = 0x3FF0000000000000
+    c.rodata = data_section_add_f64(c.rodata, 0x3FF0000000000000)
+    let one_off = c.rodata.last_offset
+    // 2.0 = 0x4000000000000000
+    c.rodata = data_section_add_f64(c.rodata, 0x4000000000000000)
+    let two_off = c.rodata.last_offset
+    // 1/3 = 0x3FD5555555555555
+    c.rodata = data_section_add_f64(c.rodata, 0x3FD5555555555555)
+    let third_off = c.rodata.last_offset
+    // 1/5 = 0x3FC999999999999A
+    c.rodata = data_section_add_f64(c.rodata, 0x3FC999999999999A)
+    let fifth_off = c.rodata.last_offset
+    // 1/7 = 0x3FB2492492492492
+    c.rodata = data_section_add_f64(c.rodata, 0x3FB2492492492492)
+    let seventh_off = c.rodata.last_offset
+
+    c.code = emit_push_rbp(c.code)
+    c.code = emit_mov_rbp_rsp(c.code)
+    c.code = emit_sub_rsp_imm32(c.code, 64)
+
+    // rdi = f64 bit pattern of x
+    c.code = emit_mov_reg_reg(c.code, 0, 7)       // mov rax, rdi
+    c.code = emit_store_rax_rbp_disp32(c.code, -8)  // [rbp-8] = input bits
+
+    // Step 1: Extract biased exponent e = (bits >> 52) & 0x7FF
+    c.code = emit_mov_reg_imm(c.code, 1, 52)      // mov rcx, 52
+    // shr rax, cl: 48 D3 E8
+    var b1 = c.code
+    b1 = emit_byte(b1, 0x48)
+    b1 = emit_byte(b1, 0xD3)
+    b1 = emit_byte(b1, 0xE8)
+    c.code = b1
+    // and rax, 0x7FF: use rbx
+    c.code = emit_mov_reg_imm(c.code, 3, 0x7FF)   // mov rbx, 0x7FF
+    c.code = emit_and_rax_rbx(c.code)              // rax = biased exponent
+
+    // e_unbiased = e - 1023
+    c.code = emit_mov_reg_imm(c.code, 3, 1023)    // mov rbx, 1023
+    // sub rax, rbx: 48 29 D8
+    var b2 = c.code
+    b2 = emit_byte(b2, 0x48)
+    b2 = emit_byte(b2, 0x29)
+    b2 = emit_byte(b2, 0xD8)
+    c.code = b2
+    // Convert e_unbiased to f64
+    c.code = emit_cvtsi2sd_xmm0_rax(c.code)        // xmm0 = e_unbiased (f64)
+    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -16)  // [rbp-16] = e_f64
+
+    // Step 2: Extract mantissa m ∈ [1,2)
+    // m_bits = (bits & 0x000FFFFFFFFFFFFF) | 0x3FF0000000000000
+    c.code = emit_load_rbp_disp32_rax(c.code, -8)   // rax = input bits
+    c.code = emit_mov_reg_imm(c.code, 3, 0x000FFFFFFFFFFFFF)
+    c.code = emit_and_rax_rbx(c.code)              // rax = mantissa bits only
+    c.code = emit_mov_reg_imm(c.code, 3, 0x3FF0000000000000)
+    c.code = emit_or_rax_rbx(c.code)               // rax = m in [1,2) bits
+    c.code = emit_movq_xmm0_rax(c.code)            // xmm0 = m
+
+    // Step 3: f = (m - 1) / (m + 1)
+    // Save m to [rbp-40]
+    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -40)  // [rbp-40] = m
+    // xmm0 = m, load 1.0 into xmm1
+    let load_one1_pos = c.code.len
+    c.code = emit_movsd_xmm1_rip_disp32(c.code, 0)
+    c.relocs = add_rip_reloc(c.relocs, load_one1_pos + 4, one_off)
+    // m - 1 in xmm0
+    c.code = emit_subsd_xmm0_xmm1(c.code)         // xmm0 = m - 1
+    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -48)  // [rbp-48] = m - 1
+
+    // m + 1: reload m
+    c.code = emit_movsd_xmm0_rbp_disp8(c.code, -40)  // xmm0 = m
+    let load_one2_pos = c.code.len
+    c.code = emit_movsd_xmm1_rip_disp32(c.code, 0)
+    c.relocs = add_rip_reloc(c.relocs, load_one2_pos + 4, one_off)
+    c.code = emit_addsd_xmm0_xmm1(c.code)         // xmm0 = m + 1
+
+    // f = (m-1) / (m+1)
+    c.code = emit_movsd_rbp_disp8_xmm1(c.code, -48) // save (m-1) to xmm1 via stack? No, swap:
+    // xmm1 = m+1, xmm0 = m-1
+    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -56)  // [rbp-56] = m+1
+    c.code = emit_movsd_xmm0_rbp_disp8(c.code, -48)  // xmm0 = m-1
+    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -56)  // xmm1 = m+1
+    c.code = emit_divsd_xmm0_xmm1(c.code)          // xmm0 = f = (m-1)/(m+1)
+    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -24)  // [rbp-24] = f
+
+    // Step 4: f^2
+    c.code = emit_movsd_rbp_disp8_xmm1(c.code, -24) // xmm1 = f (via store/load trick)
+    c.code = emit_movsd_xmm0_rbp_disp8(c.code, -24) // xmm0 = f
+    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -24) // xmm1 = f
+    c.code = emit_mulsd_xmm0_xmm1(c.code)          // xmm0 = f^2
+    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -32)  // [rbp-32] = f^2
+
+    // Step 5: Series: log(m) = 2*f*(1 + f^2/3 + f^4/5 + f^6/7)
+    // Compute f^4 = f^2 * f^2
+    c.code = emit_movsd_xmm0_rbp_disp8(c.code, -32)  // xmm0 = f^2
+    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -32)  // xmm1 = f^2
+    c.code = emit_mulsd_xmm0_xmm1(c.code)          // xmm0 = f^4
+    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -48)  // [rbp-48] = f^4
+
+    // Compute f^6 = f^4 * f^2
+    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -32)  // xmm1 = f^2
+    c.code = emit_mulsd_xmm0_xmm1(c.code)          // xmm0 = f^6
+    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -56)  // [rbp-56] = f^6
+
+    // term4 = f^6 / 7
+    let load_seventh_pos = c.code.len
+    c.code = emit_movsd_xmm1_rip_disp32(c.code, 0)
+    c.relocs = add_rip_reloc(c.relocs, load_seventh_pos + 4, seventh_off)
+    c.code = emit_mulsd_xmm0_xmm1(c.code)          // xmm0 = f^6 * (1/7)
+
+    // + f^4 / 5
+    c.code = emit_movsd_rbp_disp8_xmm1(c.code, -40)  // save partial to [rbp-40]
+    c.code = emit_movsd_xmm0_rbp_disp8(c.code, -48)  // xmm0 = f^4
+    let load_fifth_pos = c.code.len
+    c.code = emit_movsd_xmm1_rip_disp32(c.code, 0)
+    c.relocs = add_rip_reloc(c.relocs, load_fifth_pos + 4, fifth_off)
+    c.code = emit_mulsd_xmm0_xmm1(c.code)          // xmm0 = f^4 * (1/5)
+    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -40)  // xmm1 = f^6/7
+    c.code = emit_addsd_xmm0_xmm1(c.code)          // xmm0 = f^4/5 + f^6/7
+
+    // + f^2 / 3
+    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -40)  // save partial
+    c.code = emit_movsd_xmm0_rbp_disp8(c.code, -32)  // xmm0 = f^2
+    let load_third_pos = c.code.len
+    c.code = emit_movsd_xmm1_rip_disp32(c.code, 0)
+    c.relocs = add_rip_reloc(c.relocs, load_third_pos + 4, third_off)
+    c.code = emit_mulsd_xmm0_xmm1(c.code)          // xmm0 = f^2 * (1/3)
+    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -40)  // xmm1 = f^4/5 + f^6/7
+    c.code = emit_addsd_xmm0_xmm1(c.code)          // xmm0 = f^2/3 + f^4/5 + f^6/7
+
+    // + 1.0
+    let load_one3_pos = c.code.len
+    c.code = emit_movsd_xmm1_rip_disp32(c.code, 0)
+    c.relocs = add_rip_reloc(c.relocs, load_one3_pos + 4, one_off)
+    c.code = emit_addsd_xmm0_xmm1(c.code)          // xmm0 = 1 + f^2/3 + f^4/5 + f^6/7
+
+    // * 2 * f
+    let load_two_pos = c.code.len
+    c.code = emit_movsd_xmm1_rip_disp32(c.code, 0)
+    c.relocs = add_rip_reloc(c.relocs, load_two_pos + 4, two_off)
+    c.code = emit_mulsd_xmm0_xmm1(c.code)          // xmm0 *= 2
+    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -24)  // xmm1 = f
+    c.code = emit_mulsd_xmm0_xmm1(c.code)          // xmm0 = log(m)
+
+    // Step 6: result = e * ln(2) + log(m)
+    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -40)  // [rbp-40] = log(m)
+    c.code = emit_movsd_xmm0_rbp_disp8(c.code, -16)  // xmm0 = e_f64
+    let load_ln2_pos = c.code.len
+    c.code = emit_movsd_xmm1_rip_disp32(c.code, 0)
+    c.relocs = add_rip_reloc(c.relocs, load_ln2_pos + 4, ln2_off)
+    c.code = emit_mulsd_xmm0_xmm1(c.code)          // xmm0 = e * ln(2)
+    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -40)  // xmm1 = log(m)
+    c.code = emit_addsd_xmm0_xmm1(c.code)          // xmm0 = e*ln2 + log(m)
+
+    // Return as bit pattern in rax
+    c.code = emit_movq_rax_xmm0(c.code)
+    c.code = emit_add_rsp_imm32(c.code, 64)
+    c.code = emit_pop_rbp(c.code)
+    c.code = emit_ret(c.code)
+    c
+}
+
 
 // Sprint 118: print_f64 builtin — multiply-and-truncate f64 → stdout
 fn emit_builtin_print_f64(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
@@ -2293,6 +2625,8 @@ fn compile_ir_function(nc: NativeCompiler, func: IrFunction, fn_index: i64) -> N
     if name_is_file_size(func.name) { return emit_builtin_file_size(c) }
     if name_is_sqrt(func.name) { return emit_builtin_sqrt(c) }
     if name_is_print_f64(func.name) { return emit_builtin_print_f64(c) }
+    if name_is_exp(func.name) { return emit_builtin_exp(c) }
+    if name_is_log(func.name) { return emit_builtin_log(c) }
 
     // Sprint 38: Set compile strategy from IR function metadata
     c.current_strategy = func.compile_strategy
@@ -2944,6 +3278,8 @@ fn compile_ir_function_v2(nc: NativeCompiler, func: IrFunction, machine_func: Ma
     if name_is_file_size(func.name) { return emit_builtin_file_size(c) }
     if name_is_sqrt(func.name) { return emit_builtin_sqrt(c) }
     if name_is_print_f64(func.name) { return emit_builtin_print_f64(c) }
+    if name_is_exp(func.name) { return emit_builtin_exp(c) }
+    if name_is_log(func.name) { return emit_builtin_log(c) }
 
     c.current_strategy = func.compile_strategy
 
@@ -3050,6 +3386,8 @@ fn compile_ir_function_v2_mut(nc: &! NativeCompiler, func: IrFunction, machine_f
     if name_is_file_size(func.name) { (*nc) = emit_builtin_file_size((*nc)); return }
     if name_is_sqrt(func.name) { (*nc) = emit_builtin_sqrt((*nc)); return }
     if name_is_print_f64(func.name) { (*nc) = emit_builtin_print_f64((*nc)); return }
+    if name_is_exp(func.name) { (*nc) = emit_builtin_exp((*nc)); return }
+    if name_is_log(func.name) { (*nc) = emit_builtin_log((*nc)); return }
 
     (*nc).current_strategy = func.compile_strategy
     native_v2_run_machine_regalloc_mut(nc, machine_func)
