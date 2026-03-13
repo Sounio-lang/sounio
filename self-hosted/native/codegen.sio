@@ -1116,6 +1116,30 @@ fn name_is_file_size(n: Name) -> bool with Mut, Panic, Div {
     true
 }
 
+
+fn name_is_sqrt(n: Name) -> bool with Mut, Panic, Div {
+    if n.len != 4 { return false }
+    if n.buf[0] != 115 as i8 { return false }     // 's'
+    if n.buf[1] != 113 as i8 { return false }     // 'q'
+    if n.buf[2] != 114 as i8 { return false }     // 'r'
+    if n.buf[3] != 116 as i8 { return false }     // 't'
+    true
+}
+
+fn name_is_print_f64(n: Name) -> bool with Mut, Panic, Div {
+    if n.len != 9 { return false }
+    if n.buf[0] != 112 as i8 { return false }     // 'p'
+    if n.buf[1] != 114 as i8 { return false }     // 'r'
+    if n.buf[2] != 105 as i8 { return false }     // 'i'
+    if n.buf[3] != 110 as i8 { return false }     // 'n'
+    if n.buf[4] != 116 as i8 { return false }     // 't'
+    if n.buf[5] != 95 as i8 { return false }      // '_'
+    if n.buf[6] != 102 as i8 { return false }     // 'f'
+    if n.buf[7] != 54 as i8 { return false }      // '6'
+    if n.buf[8] != 52 as i8 { return false }      // '4'
+    true
+}
+
 // ============================================================================
 // Builtin runtime function emitters (hand-coded x86-64)
 // ============================================================================
@@ -1905,6 +1929,207 @@ fn emit_builtin_write_file(nc: NativeCompiler) -> NativeCompiler with Mut, Panic
 // file_size(path: *u8) -> i64
 // Uses sys_stat (syscall 4) with 144-byte stat buffer on stack
 // st_size is at offset 48 in struct stat
+// Sprint 115: sqrt builtin — hardware SQRTSD
+fn emit_builtin_sqrt(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
+    var c = nc
+    c.code = emit_push_rbp(c.code)
+    c.code = emit_mov_rbp_rsp(c.code)
+    c.code = emit_mov_reg_reg(c.code, 0, 7)           // mov rax, rdi
+    c.code = emit_movq_xmm0_rax(c.code)               // movq xmm0, rax
+    c.code = emit_sqrtsd_xmm0_xmm0(c.code)            // sqrtsd xmm0, xmm0
+    c.code = emit_movq_rax_xmm0(c.code)               // movq rax, xmm0
+    c.code = emit_pop_rbp(c.code)
+    c.code = emit_ret(c.code)
+    c
+}
+
+// Sprint 118: print_f64 builtin — multiply-and-truncate f64 → stdout
+fn emit_builtin_print_f64(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
+    var c = nc
+
+    // Store 1e6 constant in .rodata
+    c.rodata = data_section_add_f64(c.rodata, 0x4124680000000000)
+    let rodata_1e6_offset = c.rodata.last_offset
+
+    c.code = emit_push_rbp(c.code)
+    c.code = emit_mov_rbp_rsp(c.code)
+    c.code = emit_sub_rsp_imm32(c.code, 64)
+
+    // rdi = f64 bit pattern
+    c.code = emit_mov_reg_reg(c.code, 0, 7)           // mov rax, rdi
+    c.code = emit_movq_xmm0_rax(c.code)               // movq xmm0, rax
+
+    // Sign check: test rdi, rdi; jns skip_neg
+    c.code = emit_test_rdi_rdi(c.code)
+    let jns_pos = c.code.len
+    c.code = emit_jns_rel8(c.code, 0)                 // placeholder
+
+    // Negative path: emit '-'
+    var cb1 = c.code
+    cb1 = emit_byte(cb1, 0xc6)                         // mov byte [rbp-33], '-'
+    cb1 = emit_byte(cb1, 0x45)
+    cb1 = emit_byte(cb1, 0xdf)
+    cb1 = emit_byte(cb1, 0x2d)
+    c.code = cb1
+    var cb2 = c.code
+    cb2 = emit_byte(cb2, 0x48)                         // lea rsi, [rbp-33]
+    cb2 = emit_byte(cb2, 0x8d)
+    cb2 = emit_byte(cb2, 0x75)
+    cb2 = emit_byte(cb2, 0xdf)
+    c.code = cb2
+    c.code = emit_mov_reg_imm(c.code, 2, 1)           // mov rdx, 1
+    c = emit_load_runtime_context_field_rdi(c, runtime_context_field_stdout_fd())
+    c.code = emit_mov_rax_imm(c.code, 1)
+    c.code = emit_syscall(c.code)
+
+    // Clear sign bit
+    c.code = emit_mov_reg_reg(c.code, 0, 7)           // mov rax, rdi
+    c.code = emit_mov_reg_imm(c.code, 3, 0x7FFFFFFFFFFFFFFF)
+    c.code = emit_and_rax_rbx(c.code)
+    c.code = emit_mov_reg_reg(c.code, 7, 0)           // mov rdi, rax
+    c.code = emit_movq_xmm0_rax(c.code)
+
+    // Patch jns displacement
+    let neg_block_len = c.code.len - (jns_pos + 2)
+    if jns_pos + 1 < 65536 {
+        c.code.bytes[(jns_pos + 1) as usize] = low8(neg_block_len) as i8
+    }
+
+    // Integer part: cvttsd2si
+    c.code = emit_movq_rax_xmm0(c.code)
+    c.code = emit_store_rax_rbp_disp32(c.code, -48)   // save f64 bits
+    c.code = emit_movq_xmm0_rax(c.code)
+    c.code = emit_cvttsd2si_rax_xmm0(c.code)
+    c.code = emit_store_rax_rbp_disp32(c.code, -56)   // save int_part
+
+    // itoa for integer part
+    c.code = emit_mov_reg_reg(c.code, 6, 5)           // mov rsi, rbp
+    c.code = emit_sub_rsi_imm8(c.code, 1)
+    c.code = emit_xor_rcx_rcx(c.code)
+
+    c.code = emit_xor_rdx_rdx(c.code)
+    c.code = emit_mov_reg_imm(c.code, 3, 10)
+    c.code = emit_div_rbx(c.code)
+    c.code = emit_add_rdx_imm8(c.code, 48)
+    c.code = emit_mov_byte_mem_rsi_dl(c.code)
+    c.code = emit_dec_rsi(c.code)
+    c.code = emit_inc_rcx(c.code)
+    c.code = emit_test_rax_rax(c.code)
+    c.code = emit_jnz_rel8(c.code, -30)
+
+    c.code = emit_inc_rsi(c.code)
+    c.code = emit_mov_reg_reg(c.code, 2, 1)           // mov rdx, rcx
+    c = emit_load_runtime_context_field_rdi(c, runtime_context_field_stdout_fd())
+    c.code = emit_mov_rax_imm(c.code, 1)
+    c.code = emit_syscall(c.code)
+
+    // Print '.'
+    var cb3 = c.code
+    cb3 = emit_byte(cb3, 0xc6)
+    cb3 = emit_byte(cb3, 0x45)
+    cb3 = emit_byte(cb3, 0xdf)
+    cb3 = emit_byte(cb3, 0x2e)
+    c.code = cb3
+    var cb4 = c.code
+    cb4 = emit_byte(cb4, 0x48)
+    cb4 = emit_byte(cb4, 0x8d)
+    cb4 = emit_byte(cb4, 0x75)
+    cb4 = emit_byte(cb4, 0xdf)
+    c.code = cb4
+    c.code = emit_mov_reg_imm(c.code, 2, 1)
+    c = emit_load_runtime_context_field_rdi(c, runtime_context_field_stdout_fd())
+    c.code = emit_mov_rax_imm(c.code, 1)
+    c.code = emit_syscall(c.code)
+
+    // Fractional part
+    c.code = emit_load_rbp_disp32_rax(c.code, -48)
+    c.code = emit_movq_xmm0_rax(c.code)
+    c.code = emit_load_rbp_disp32_rax(c.code, -56)
+    // cvtsi2sd xmm1, rax (F2 48 0F 2A C8)
+    var cb5 = c.code
+    cb5 = emit_byte(cb5, 0xF2)
+    cb5 = emit_byte(cb5, 0x48)
+    cb5 = emit_byte(cb5, 0x0F)
+    cb5 = emit_byte(cb5, 0x2A)
+    cb5 = emit_byte(cb5, 0xC8)
+    c.code = cb5
+
+    c.code = emit_subsd_xmm0_xmm1(c.code)
+
+    // Load 1e6 from .rodata
+    let movsd1_pos = c.code.len
+    c.code = emit_movsd_xmm1_rip_disp32(c.code, 0)
+    c.relocs = add_rip_reloc(c.relocs, movsd1_pos + 4, rodata_1e6_offset)
+
+    c.code = emit_mulsd_xmm0_xmm1(c.code)
+    c.code = emit_cvttsd2si_rax_xmm0(c.code)
+
+    // Ensure non-negative
+    c.code = emit_test_rax_rax(c.code)
+    c.code = emit_jns_rel8(c.code, 3)
+    c.code = emit_xor_rax_rax(c.code)
+
+    // 6-digit fixed-width itoa (unrolled)
+    c.code = emit_mov_reg_reg(c.code, 6, 5)           // mov rsi, rbp
+    c.code = emit_sub_rsi_imm8(c.code, 3)
+
+    // iter 1
+    c.code = emit_xor_rdx_rdx(c.code)
+    c.code = emit_mov_reg_imm(c.code, 3, 10)
+    c.code = emit_div_rbx(c.code)
+    c.code = emit_add_rdx_imm8(c.code, 48)
+    c.code = emit_mov_byte_mem_rsi_dl(c.code)
+    c.code = emit_dec_rsi(c.code)
+    // iter 2
+    c.code = emit_xor_rdx_rdx(c.code)
+    c.code = emit_mov_reg_imm(c.code, 3, 10)
+    c.code = emit_div_rbx(c.code)
+    c.code = emit_add_rdx_imm8(c.code, 48)
+    c.code = emit_mov_byte_mem_rsi_dl(c.code)
+    c.code = emit_dec_rsi(c.code)
+    // iter 3
+    c.code = emit_xor_rdx_rdx(c.code)
+    c.code = emit_mov_reg_imm(c.code, 3, 10)
+    c.code = emit_div_rbx(c.code)
+    c.code = emit_add_rdx_imm8(c.code, 48)
+    c.code = emit_mov_byte_mem_rsi_dl(c.code)
+    c.code = emit_dec_rsi(c.code)
+    // iter 4
+    c.code = emit_xor_rdx_rdx(c.code)
+    c.code = emit_mov_reg_imm(c.code, 3, 10)
+    c.code = emit_div_rbx(c.code)
+    c.code = emit_add_rdx_imm8(c.code, 48)
+    c.code = emit_mov_byte_mem_rsi_dl(c.code)
+    c.code = emit_dec_rsi(c.code)
+    // iter 5
+    c.code = emit_xor_rdx_rdx(c.code)
+    c.code = emit_mov_reg_imm(c.code, 3, 10)
+    c.code = emit_div_rbx(c.code)
+    c.code = emit_add_rdx_imm8(c.code, 48)
+    c.code = emit_mov_byte_mem_rsi_dl(c.code)
+    c.code = emit_dec_rsi(c.code)
+    // iter 6
+    c.code = emit_xor_rdx_rdx(c.code)
+    c.code = emit_mov_reg_imm(c.code, 3, 10)
+    c.code = emit_div_rbx(c.code)
+    c.code = emit_add_rdx_imm8(c.code, 48)
+    c.code = emit_mov_byte_mem_rsi_dl(c.code)
+
+    // sys_write 6 fractional digits
+    c.code = emit_mov_reg_reg(c.code, 6, 5)           // mov rsi, rbp
+    c.code = emit_sub_rsi_imm8(c.code, 8)
+    c.code = emit_mov_reg_imm(c.code, 2, 6)
+    c = emit_load_runtime_context_field_rdi(c, runtime_context_field_stdout_fd())
+    c.code = emit_mov_rax_imm(c.code, 1)
+    c.code = emit_syscall(c.code)
+
+    // Epilogue
+    c.code = emit_mov_rsp_rbp(c.code)
+    c.code = emit_pop_rbp(c.code)
+    c.code = emit_ret(c.code)
+    c
+}
+
 fn emit_builtin_file_size(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
     var c = nc
     c.code = emit_push_rbp(c.code)
@@ -2066,6 +2291,8 @@ fn compile_ir_function(nc: NativeCompiler, func: IrFunction, fn_index: i64) -> N
     if name_is_read_file(func.name) { return emit_builtin_read_file(c) }
     if name_is_write_file(func.name) { return emit_builtin_write_file(c) }
     if name_is_file_size(func.name) { return emit_builtin_file_size(c) }
+    if name_is_sqrt(func.name) { return emit_builtin_sqrt(c) }
+    if name_is_print_f64(func.name) { return emit_builtin_print_f64(c) }
 
     // Sprint 38: Set compile strategy from IR function metadata
     c.current_strategy = func.compile_strategy
@@ -2715,6 +2942,8 @@ fn compile_ir_function_v2(nc: NativeCompiler, func: IrFunction, machine_func: Ma
     if name_is_read_file(func.name) { return emit_builtin_read_file(c) }
     if name_is_write_file(func.name) { return emit_builtin_write_file(c) }
     if name_is_file_size(func.name) { return emit_builtin_file_size(c) }
+    if name_is_sqrt(func.name) { return emit_builtin_sqrt(c) }
+    if name_is_print_f64(func.name) { return emit_builtin_print_f64(c) }
 
     c.current_strategy = func.compile_strategy
 
@@ -2819,6 +3048,8 @@ fn compile_ir_function_v2_mut(nc: &! NativeCompiler, func: IrFunction, machine_f
     if name_is_read_file(func.name) { (*nc) = emit_builtin_read_file((*nc)); return }
     if name_is_write_file(func.name) { (*nc) = emit_builtin_write_file((*nc)); return }
     if name_is_file_size(func.name) { (*nc) = emit_builtin_file_size((*nc)); return }
+    if name_is_sqrt(func.name) { (*nc) = emit_builtin_sqrt((*nc)); return }
+    if name_is_print_f64(func.name) { (*nc) = emit_builtin_print_f64((*nc)); return }
 
     (*nc).current_strategy = func.compile_strategy
     native_v2_run_machine_regalloc_mut(nc, machine_func)

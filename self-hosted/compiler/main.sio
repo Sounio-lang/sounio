@@ -9438,9 +9438,89 @@ fn compiler_main_test_knowledge_field_idx_lookup() -> bool with Mut, Panic, Div 
     true
 }
 
+
+// Sprint 116 Block AM: OR superset mask elimination (T406-T411).
+// SOTA: LLVM InstCombineAndOrXor.cpp.
+
+// T406: (x | 0xFF) | 0x0F → IrCopy (0x0F subset of 0xFF).
+fn compiler_main_test_or_superset_copy() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(1, 255)
+    instrs[1] = ir_binop(2, 0, BinaryOp::OpBitOr, 1)
+    instrs[2] = ir_load_imm(3, 15)
+    instrs[3] = ir_binop(4, 2, BinaryOp::OpBitOr, 3)
+    let func   = cp_make_test_func(instrs, 4)
+    let result = ocp_const_fold(func)
+    result.instrs[3].op == IrOpcode::IrCopy
+        && result.instrs[3].src1 == 2
+}
+
+// T407: (x | 0xFFFF) | 0xFF → IrCopy (0xFF subset of 0xFFFF).
+fn compiler_main_test_or_superset_wide() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(1, 65535)
+    instrs[1] = ir_binop(2, 0, BinaryOp::OpBitOr, 1)
+    instrs[2] = ir_load_imm(3, 255)
+    instrs[3] = ir_binop(4, 2, BinaryOp::OpBitOr, 3)
+    let func   = cp_make_test_func(instrs, 4)
+    let result = ocp_const_fold(func)
+    result.instrs[3].op == IrOpcode::IrCopy
+        && result.instrs[3].src1 == 2
+}
+
+// T408: (x | 0x0F) | 0xFF → NOT superset (0xFF has bits outside 0x0F).
+fn compiler_main_test_or_not_superset() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(1, 15)
+    instrs[1] = ir_binop(2, 0, BinaryOp::OpBitOr, 1)
+    instrs[2] = ir_load_imm(3, 255)
+    instrs[3] = ir_binop(4, 2, BinaryOp::OpBitOr, 3)
+    let func   = cp_make_test_func(instrs, 4)
+    let result = ocp_const_fold(func)
+    result.instrs[3].op == IrOpcode::IrBinOp
+        && result.instrs[3].bin_op == BinaryOp::OpBitOr
+}
+
+// T409: (x | 0xFF) | 0xFF → same mask = superset → IrCopy.
+fn compiler_main_test_or_same_mask_copy() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(1, 255)
+    instrs[1] = ir_binop(2, 0, BinaryOp::OpBitOr, 1)
+    instrs[2] = ir_load_imm(3, 255)
+    instrs[3] = ir_binop(4, 2, BinaryOp::OpBitOr, 3)
+    let func   = cp_make_test_func(instrs, 4)
+    let result = ocp_const_fold(func)
+    result.instrs[3].op == IrOpcode::IrCopy
+        && result.instrs[3].src1 == 2
+}
+
+// T410: Commutative — 0x0F | (x | 0xFF) → IrCopy.
+fn compiler_main_test_or_superset_commutative() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(1, 255)
+    instrs[1] = ir_binop(2, 0, BinaryOp::OpBitOr, 1)
+    instrs[2] = ir_load_imm(3, 15)
+    instrs[3] = ir_binop(4, 3, BinaryOp::OpBitOr, 2)
+    let func   = cp_make_test_func(instrs, 4)
+    let result = ocp_const_fold(func)
+    result.instrs[3].op == IrOpcode::IrCopy
+        && result.instrs[3].src1 == 2
+}
+
+// T411: No OR tracking on src → no fold.
+fn compiler_main_test_or_no_track_no_fold() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_binop(1, 2, BinaryOp::OpAdd, 3)
+    instrs[1] = ir_load_imm(4, 15)
+    instrs[2] = ir_binop(5, 1, BinaryOp::OpBitOr, 4)
+    let func   = cp_make_test_func(instrs, 3)
+    let result = ocp_const_fold(func)
+    result.instrs[2].op == IrOpcode::IrBinOp
+        && result.instrs[2].bin_op == BinaryOp::OpBitOr
+}
 fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
     var passed: i64 = 0
-    let total: i64 = 405
+    let total: i64 = 411
 
     println("=== compiler/main.sio self-tests ===")
 
@@ -12025,6 +12105,31 @@ fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
         println("  T405 OK: Sprint 116: Knowledge field index lookup")
         passed = passed + 1
     } else { println("  FAIL: T405") }
+
+    if compiler_main_test_or_superset_copy() {
+        println("  T406 OK: Sprint 116 Block AM: (x|0xFF)|0x0F → copy")
+        passed = passed + 1
+    } else { println("  FAIL: T406") }
+    if compiler_main_test_or_superset_wide() {
+        println("  T407 OK: Sprint 116 Block AM: (x|0xFFFF)|0xFF → copy")
+        passed = passed + 1
+    } else { println("  FAIL: T407") }
+    if compiler_main_test_or_not_superset() {
+        println("  T408 OK: Sprint 116 Block AM: non-superset no fold")
+        passed = passed + 1
+    } else { println("  FAIL: T408") }
+    if compiler_main_test_or_same_mask_copy() {
+        println("  T409 OK: Sprint 116 Block AM: same mask → copy")
+        passed = passed + 1
+    } else { println("  FAIL: T409") }
+    if compiler_main_test_or_superset_commutative() {
+        println("  T410 OK: Sprint 116 Block AM: OR superset commutative")
+        passed = passed + 1
+    } else { println("  FAIL: T410") }
+    if compiler_main_test_or_no_track_no_fold() {
+        println("  T411 OK: Sprint 116 Block AM: no OR track no fold")
+        passed = passed + 1
+    } else { println("  FAIL: T411") }
 
     println("")
     println("compiler/main tests: " + int_to_string(passed) + "/" + int_to_string(total) + " passed")

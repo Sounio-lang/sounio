@@ -109,6 +109,26 @@ struct IrLowerBoxResult {
     patch_stats: IrValidatedPatchStats,
 }
 
+// Sprint 116: Register Knowledge<f64> struct layout (value, variance, confidence)
+fn ir_register_knowledge_layout(table: StructLayoutTable) -> StructLayoutTable with Mut, Panic, Div {
+    var t = table
+    if t.count >= 256 {
+        return t
+    }
+    let idx = t.count
+    var fields: [StructFieldEntry; 64] = [empty_struct_field_entry(); 64]
+    fields[0] = StructFieldEntry { name: make_name("value"), index: 0 }
+    fields[1] = StructFieldEntry { name: make_name("variance"), index: 1 }
+    fields[2] = StructFieldEntry { name: make_name("confidence"), index: 2 }
+    t.entries[idx as usize] = StructLayoutEntry {
+        type_name: make_name("Knowledge"),
+        fields: fields,
+        field_count: 3,
+    }
+    t.count = idx + 1
+    t
+}
+
 fn lowerer_new() -> Lowerer with Alloc {
     Lowerer {
         module: Box::new(ir_empty_module()),
@@ -129,17 +149,21 @@ fn lowerer_new() -> Lowerer with Alloc {
     }
 }
 
-fn lowerer_new_with_epistemic(epistemic: IrEpistemicSection) -> Lowerer with Alloc, Mut {
+fn lowerer_new_with_epistemic(epistemic: IrEpistemicSection) -> Lowerer with Alloc, Mut, Panic, Div {
     var lo = lowerer_new()
     var module = *lo.module
     module.epistemic = epistemic
     lo.module = Box::new(module)
+    // Sprint 116: pre-register Knowledge<f64> layout
+    lo.struct_layouts = Box::new(ir_register_knowledge_layout(*lo.struct_layouts))
     lo
 }
 
-fn lowerer_new_probe() -> Lowerer with Alloc, Mut {
+fn lowerer_new_probe() -> Lowerer with Alloc, Mut, Panic, Div {
     var lo = lowerer_new()
     lo.probe_mode = true
+    // Sprint 116: pre-register Knowledge<f64> layout
+    lo.struct_layouts = Box::new(ir_register_knowledge_layout(*lo.struct_layouts))
     lo
 }
 
@@ -1323,7 +1347,13 @@ fn lowerer_lower_fn_item_mut(
         print_int(strategy)
         print("\n")
     }
-    (*(*lo).current_func).compile_strategy = strategy
+    // Sprint 108/109: preserve extern/exported strategy set during preseed
+    let preseed_strategy_m = (*(*lo).current_func).compile_strategy
+    if preseed_strategy_m == 6 || preseed_strategy_m == 7 {
+        (*(*lo).current_func).compile_strategy = preseed_strategy_m
+    } else {
+        (*(*lo).current_func).compile_strategy = strategy
+    }
 
     if strategy == IR_STRATEGY_INSTRUMENTED {
         if (*(*lo).current_func).prof_counter_id < 0 {
@@ -2851,10 +2881,41 @@ impl Lowerer {
                     }
                     if kind == ItemKind::ItemFn {
                         if !ir_name_eq(name, skip_name) {
+                            print("preseed_trace: fn name=")
+                            print(str_from_bytes(name.buf, name.len))
+                            print(" fn_count_before=")
+                            print_int((*lo.module).fn_count)
+                            print("\n")
                             let fn_def_opt_ref: &Option<Box<FnDef>> = &head.fn_def
                             match *fn_def_opt_ref {
                                 Some(fd) => {
                                     lo = lo.preseed_fn_signature_ref(name, &(*fd).params, &(*fd).return_type, &(*fd).effects)
+                                    print("preseed_trace: after_sig fn_count=")
+                                    print_int((*lo.module).fn_count)
+                                    print("\n")
+                                    // Sprint 108/109: set strategy for extern/export fns
+                                    let pair_ps = lo.find_or_add_fn_id(name)
+                                    lo = pair_ps.0
+                                    let fn_id_ps = pair_ps.1
+                                    print("preseed_trace: fn_id_ps=")
+                                    print_int(fn_id_ps)
+                                    print(" is_kernel=")
+                                    if (*fd).is_kernel { print("true") } else { print("false") }
+                                    print(" is_pub=")
+                                    if head.is_pub { print("true") } else { print("false") }
+                                    print("\n")
+                                    if fn_id_ps >= 0 {
+                                        if (*fd).is_kernel {
+                                            (*lo.module).functions[fn_id_ps as usize].compile_strategy = 6
+                                        } else if head.is_pub {
+                                            (*lo.module).functions[fn_id_ps as usize].compile_strategy = 7
+                                            let exp_count = (*lo.module).export_count
+                                            if exp_count < 64 {
+                                                (*lo.module).export_names[exp_count as usize] = name
+                                                (*lo.module).export_count = exp_count + 1
+                                            }
+                                        }
+                                    }
                                 }
                                 _ => {}
                             }
@@ -3598,7 +3659,13 @@ impl Lowerer {
             print_int(strategy)
             print("\n")
         }
-        (*lo.current_func).compile_strategy = strategy
+        // Sprint 108/109: preserve extern/exported strategy set during preseed
+        let preseed_strategy = (*lo.current_func).compile_strategy
+        if preseed_strategy == 6 || preseed_strategy == 7 {
+            (*lo.current_func).compile_strategy = preseed_strategy
+        } else {
+            (*lo.current_func).compile_strategy = strategy
+        }
 
         // Sprint 44: allocate profiling counter for instrumented functions
         if strategy == IR_STRATEGY_INSTRUMENTED {
@@ -3785,7 +3852,13 @@ impl Lowerer {
         print(" strategy=")
         print_int(strategy)
         print("\n")
-        (*lo.current_func).compile_strategy = strategy
+        // Sprint 108/109: preserve extern/exported strategy set during preseed
+        let preseed_strategy_o = (*lo.current_func).compile_strategy
+        if preseed_strategy_o == 6 || preseed_strategy_o == 7 {
+            (*lo.current_func).compile_strategy = preseed_strategy_o
+        } else {
+            (*lo.current_func).compile_strategy = strategy
+        }
 
         if strategy == IR_STRATEGY_INSTRUMENTED {
             if (*lo.current_func).prof_counter_id < 0 {
@@ -4877,8 +4950,9 @@ impl Lowerer {
         (lo5, dst_reg)
     }
 
-    // measure(v: T, uncertainty: f64) → IrMeasure (zero-cost copy; epistemic source H5.5)
+    // Sprint 116: measure(v, uncertainty) → Knowledge<f64> struct construction
     fn lower_measure_call(self, _span: Span, args: Option<Box<ExprList>>) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        // Extract first argument: value
         let value_expr = match args {
             Some(list) => Some(Box::new((*list).head))
             None => None
@@ -4886,11 +4960,43 @@ impl Lowerer {
         let value_pair = self.lower_opt_expr(value_expr)
         let lo1 = value_pair.0
         let value_reg = value_pair.1
-        let dst_pair = lo1.fresh_reg()
-        let lo2 = dst_pair.0
+
+        // Extract second argument: uncertainty
+        let unc_expr = match args {
+            Some(list) => match (*list).tail {
+                Some(rest) => Some(Box::new((*rest).head))
+                None => None
+            }
+            None => None
+        }
+        let unc_pair = lo1.lower_opt_expr(unc_expr)
+        let lo2 = unc_pair.0
+        let unc_reg = unc_pair.1
+
+        // IrAlloc for Knowledge struct
+        let dst_pair = lo2.fresh_reg()
+        let lo3 = dst_pair.0
         let dst_reg = dst_pair.1
-        let lo3 = lo2.emit(ir_measure(dst_reg, value_reg, -1))
-        (lo3, dst_reg)
+        let lo4 = lo3.emit(ir_alloc(dst_reg, 0))
+
+        // field 0: value
+        let lo5 = lo4.emit(ir_field_set(dst_reg, 0, value_reg, make_name("value")))
+
+        // field 1: variance = uncertainty * uncertainty
+        let var_pair = lo5.fresh_reg()
+        let lo6 = var_pair.0
+        let variance_reg = var_pair.1
+        let lo7 = lo6.emit(ir_binop(variance_reg, unc_reg, BinaryOp::OpMul, unc_reg))
+        let lo8 = lo7.emit(ir_field_set(dst_reg, 1, variance_reg, make_name("variance")))
+
+        // field 2: confidence = 1.0
+        let conf_pair = lo8.fresh_reg()
+        let lo9 = conf_pair.0
+        let conf_reg = conf_pair.1
+        let lo10 = lo9.emit(ir_load_float(conf_reg, 1.0))
+        let lo11 = lo10.emit(ir_field_set(dst_reg, 2, conf_reg, make_name("confidence")))
+
+        (lo11, dst_reg)
     }
 
     // lift_knowledge(k: Knowledge<T>) → IrLiftKnowledge (zero-cost copy; epistemic bridge H5.4)
