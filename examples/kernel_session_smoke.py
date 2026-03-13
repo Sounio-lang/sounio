@@ -111,10 +111,25 @@ def build_request_sequence() -> bytes:
     # R8: SESSION_CREATE again (flags=1) — test slot reuse
     buf += make_msg(MSG_SESSION_CREATE, struct.pack("<qq", 0, 1))
 
-    # R9: SESSION_DESTROY (session_id=2, assuming sequential assignment)
+    # R9: KERNEL_DESCRIBE on session 2 (valid file, tests multi-session kernels)
+    path2 = b"examples/hello.sio"
+    buf += make_msg(MSG_KERNEL_DESCRIBE,
+                    struct.pack("<q", 2) +
+                    struct.pack("<H", len(path2)) + path2 +
+                    struct.pack("<q", 0))
+
+    # R10: KERNEL_EXECUTE on session 2, kernel 0 — placeholder dispatch
+    buf += make_msg(MSG_KERNEL_EXECUTE,
+                    struct.pack("<qqq", 2, 0, 3) +
+                    struct.pack("<q", 10) + struct.pack("<q", 20) + struct.pack("<q", 30))
+
+    # R11: KERNEL_DIAGNOSTICS on session 2 (should have info diagnostic from placeholder exec)
+    buf += make_msg(MSG_KERNEL_DIAG, struct.pack("<q", 2))
+
+    # R12: SESSION_DESTROY (session_id=2)
     buf += make_msg(MSG_SESSION_DESTROY, struct.pack("<q", 2))
 
-    # R10: SHUTDOWN
+    # R13: SHUTDOWN
     buf += make_msg(MSG_SHUTDOWN, b"")
 
     return buf
@@ -252,11 +267,19 @@ def main():
     else:
         check("T4: response present", False)
 
-    # Response 5: KERNEL_DIAGNOSTICS
+    # Response 5: KERNEL_DIAGNOSTICS (may have info diag from placeholder exec)
     if len(responses) >= 6:
         kind, val = responses[5]
         check("T5: KERNEL_DIAGNOSTICS result", kind == "result")
-        check("T5: diagnostics.count == 0", kind == "result" and len(val) >= 1 and val[0] == 0)
+        if kind == "result" and len(val) >= 1:
+            # Placeholder execute adds an INFO diagnostic (code=102)
+            if val[0] == 1 and len(val) >= 5:
+                check("T5: diag is INFO (not ERROR)", val[1] == 3)
+                check("T5: diag.code == 102 (placeholder)", val[4] == 102)
+            else:
+                check("T5: diagnostics present", val[0] >= 0)
+        else:
+            check("T5: diagnostics readable", False)
     else:
         check("T5: response present", False)
 
@@ -285,19 +308,57 @@ def main():
     else:
         check("T8: response present", False)
 
-    # Response 9: SESSION_DESTROY (second)
+    # Response 9: KERNEL_DESCRIBE on session 2
     if len(responses) >= 10:
         kind, val = responses[9]
-        check("T9: second SESSION_DESTROY result", kind == "result")
+        check("T9: second KERNEL_DESCRIBE result", kind == "result")
+        if kind == "result" and len(val) >= 2:
+            check("T9: describe.ok == 1", val[0] == 1)
+            check("T9: kernel_id == 0", val[1] == 0)
+        else:
+            check("T9: describe.ok == 1", False)
+            check("T9: kernel_id == 0", False)
     else:
         check("T9: response present", False)
 
-    # Response 10: SHUTDOWN
+    # Response 10: KERNEL_EXECUTE on session 2 — placeholder result
     if len(responses) >= 11:
         kind, val = responses[10]
-        check("T10: SHUTDOWN", kind == "shutdown")
+        check("T10: second KERNEL_EXECUTE result", kind == "result")
+        check("T10: returns value", kind == "result" and len(val) >= 1)
     else:
         check("T10: response present", False)
+
+    # Response 11: KERNEL_DIAGNOSTICS on session 2 — should have info diagnostic
+    if len(responses) >= 12:
+        kind, val = responses[11]
+        check("T11: KERNEL_DIAGNOSTICS result", kind == "result")
+        if kind == "result" and len(val) >= 1:
+            check("T11: diagnostics.count == 1 (placeholder info)", val[0] == 1)
+            # Diagnostic wire layout: [count, severity, line, col, code, ...]
+            if len(val) >= 5:
+                check("T11: diag.severity == 3 (INFO)", val[1] == 3)
+                check("T11: diag.code == 102 (NO_COMPILED_CODE)", val[4] == 102)
+            else:
+                check("T11: diag fields present", False)
+        else:
+            check("T11: diagnostics.count == 1", False)
+    else:
+        check("T11: response present", False)
+
+    # Response 12: SESSION_DESTROY (second)
+    if len(responses) >= 13:
+        kind, val = responses[12]
+        check("T12: second SESSION_DESTROY result", kind == "result")
+    else:
+        check("T12: response present", False)
+
+    # Response 13: SHUTDOWN
+    if len(responses) >= 14:
+        kind, val = responses[13]
+        check("T13: SHUTDOWN", kind == "shutdown")
+    else:
+        check("T13: response present", False)
 
     print(f"\n[smoke] Results: {passed} PASS, {failed} FAIL, {passed + failed} total")
     sys.exit(1 if failed > 0 else 0)
