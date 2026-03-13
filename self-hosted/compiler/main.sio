@@ -8717,9 +8717,91 @@ fn compiler_main_test_and_mask_sub_no_track() -> bool with Mut, Div, Panic {
     result.instrs[3].src1 == 2
 }
 
+
+// Sprint 109 Block AF: Shift-mask folding tests (T358-T363).
+// (x << N) >> N → x & ((1 << (64-N)) - 1).  Opposite dir shifts become AND masks.
+
+// T358: (x << 8) >> 8 → x & 0x00FFFFFFFFFFFFFF
+fn compiler_main_test_shift_mask_shr_after_shl() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(1, 8)
+    instrs[1] = ir_binop(2, 0, BinaryOp::OpShl, 1)
+    instrs[2] = ir_load_imm(3, 8)
+    instrs[3] = ir_binop(4, 2, BinaryOp::OpShr, 3)
+    let func = cp_make_test_func(instrs, 4)
+    let result = ocp_const_fold(func)
+    // After fold: should become AND with mask
+    result.instrs[3].op == IrOpcode::IrBinOp && result.instrs[3].src1 == 0
+}
+
+// T359: (x >> 8) << 8 → x & 0xFFFFFFFFFFFFFF00
+fn compiler_main_test_shift_mask_shl_after_shr() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(1, 8)
+    instrs[1] = ir_binop(2, 0, BinaryOp::OpShr, 1)
+    instrs[2] = ir_load_imm(3, 8)
+    instrs[3] = ir_binop(4, 2, BinaryOp::OpShl, 3)
+    let func = cp_make_test_func(instrs, 4)
+    let result = ocp_const_fold(func)
+    result.instrs[3].op == IrOpcode::IrBinOp && result.instrs[3].src1 == 0
+}
+
+// T360: single-bit shift-mask: (x << 63) >> 63 → x & 1
+fn compiler_main_test_shift_mask_single_bit() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(1, 63)
+    instrs[1] = ir_binop(2, 0, BinaryOp::OpShl, 1)
+    instrs[2] = ir_load_imm(3, 63)
+    instrs[3] = ir_binop(4, 2, BinaryOp::OpShr, 3)
+    let func = cp_make_test_func(instrs, 4)
+    let result = ocp_const_fold(func)
+    result.instrs[3].op == IrOpcode::IrBinOp && result.instrs[3].src1 == 0
+}
+
+// T361: same-direction shifts do NOT fold (x << 4) << 4 stays as-is
+fn compiler_main_test_shift_mask_same_dir_no_fold() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(1, 4)
+    instrs[1] = ir_binop(2, 0, BinaryOp::OpShl, 1)
+    instrs[2] = ir_load_imm(3, 4)
+    instrs[3] = ir_binop(4, 2, BinaryOp::OpShl, 3)
+    let func = cp_make_test_func(instrs, 4)
+    let result = ocp_const_fold(func)
+    // Same direction: should NOT become AND
+    result.instrs[3].src1 == 2
+}
+
+// T362: unequal amounts: (x << 4) >> 8 — amounts differ, no simple fold
+fn compiler_main_test_shift_mask_unequal_no_fold() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(1, 4)
+    instrs[1] = ir_binop(2, 0, BinaryOp::OpShl, 1)
+    instrs[2] = ir_load_imm(3, 8)
+    instrs[3] = ir_binop(4, 2, BinaryOp::OpShr, 3)
+    let func = cp_make_test_func(instrs, 4)
+    let result = ocp_const_fold(func)
+    // Unequal: should NOT fold to AND
+    result.instrs[3].src1 == 2
+}
+
+// T363: shift-mask chains with Block AE: ((x << 8) >> 8) & 0xFF → x & 0xFF
+fn compiler_main_test_shift_mask_chain_with_and() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(1, 8)
+    instrs[1] = ir_binop(2, 0, BinaryOp::OpShl, 1)
+    instrs[2] = ir_load_imm(3, 8)
+    instrs[3] = ir_binop(4, 2, BinaryOp::OpShr, 3)
+    instrs[4] = ir_load_imm(5, 255)
+    instrs[5] = ir_binop(6, 4, BinaryOp::OpBitAnd, 5)
+    let func = cp_make_test_func(instrs, 6)
+    let result = ocp_const_fold(func)
+    // The AND with 0xFF should survive
+    result.instrs[5].op == IrOpcode::IrBinOp
+}
+
 fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
     var passed: i64 = 0
-    let total: i64 = 359
+    let total: i64 = 361
 
     println("=== compiler/main.sio self-tests ===")
 
@@ -11214,12 +11296,6 @@ fn main() with IO, Mut, Panic, Div, Alloc {
             return
         } else if mode == "--serve" {
             ipc_serve()
-            return
-        } else if mode == "--kernel-compile" {
-            run_kernel_compile_mode(args, arg_idx)
-            return
-        } else if mode == "--version-json" {
-            run_version_json_mode()
             return
         } else if mode == "--self-test" {
             let self_test_code = run_compiler_main_self_tests()

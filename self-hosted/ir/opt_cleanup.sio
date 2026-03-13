@@ -853,6 +853,36 @@ fn ocp_const_fold(func: IrFunction) -> IrFunction with Mut, Div, Panic {
                             sh_is_left[sh_instr.dst as usize] = sh_is_shl
                         }
                     }
+                // Sprint 109 Block AF: Opposite-direction shift pair → AND mask.
+                // (x << N) >> N → x & ((1 << (64-N)) - 1)   [zero-extension]
+                // (x >> N) << N → x & ~((1 << N) - 1)        [alignment mask]
+                // SOTA: LLVM InstCombineShifts.cpp; Hacker's Delight §2.
+                } else if sh_valid[sh_s1 as usize]
+                    && ((sh_is_shl && !sh_is_left[sh_s1 as usize]) || (sh_is_shr && sh_is_left[sh_s1 as usize]))
+                    && sh_amount[sh_s1 as usize] == sh_c2 {
+                    let af_base = sh_var_src[sh_s1 as usize]
+                    let af_n = sh_c2
+                    if af_n > 0 && af_n < 64 {
+                        var af_mask: i64 = 0
+                        if sh_is_shr {
+                            af_mask = (1 << (64 - af_n)) - 1
+                        } else {
+                            af_mask = -1 ^ ((1 << af_n) - 1)
+                        }
+                        let af_def = def_at[sh_s2 as usize]
+                        if af_def >= 0 {
+                            result.instrs[af_def as usize] = ir_load_imm(sh_s2, af_mask)
+                            result.instrs[i as usize] = ir_binop(sh_instr.dst, af_base, BinaryOp::OpBitAnd, sh_s2)
+                            const_val[sh_s2 as usize] = af_mask
+                            is_const[sh_s2 as usize] = true
+                            if sh_instr.dst >= 0 && sh_instr.dst < 256 {
+                                and_valid[sh_instr.dst as usize]     = true
+                                and_var_src[sh_instr.dst as usize]   = af_base
+                                and_const_val[sh_instr.dst as usize] = af_mask
+                                sh_valid[sh_instr.dst as usize] = false
+                            }
+                        }
+                    }
                 } else {
                     // Track: r = x << C or r = x >> C.
                     if sh_instr.dst >= 0 && sh_instr.dst < 256 {
