@@ -1,0 +1,1593 @@
+// self-hosted::compiler::render_native_compile_driver_lean
+//
+// Ultra-lean native compile driver with micro-emitter.
+// Avoids NativeCompiler by-value returns (broken under Cranelift JIT).
+// Uses ONLY CodeBuffer by-value returns (65KB, proven JIT-safe).
+//
+// Pipeline: parse → flat IR summary → per-body lower → micro-emit x86-64 → inline ELF → write
+//
+// Usage:
+//   souc run self-hosted/compiler/render_native_compile_driver_lean.sio -- <source> <output>
+
+use lexer::mod::*
+use parser::ast::*
+use ir::ir::*
+use check::dependent::*
+use check::types::*
+use check::mod::{check_program, check_program_epistemic_into}
+use check::ownership::*
+use check::lint::*
+use check::layout::*
+use io::file_write::*
+use interop::contract::*
+use native::aarch64::*
+use native::encode::*
+use native::elf::*
+use native::macho::*
+use native::reloc::*
+use native::frame::*
+use native::lower_ir::*
+use native::machine_ir::*
+use native::gc::*
+use native::runtime_context::*
+use native::stack_maps::*
+use native::target_policy::*
+use native::codegen::*
+use native::regalloc::*
+use native::peephole::*
+use resolve::resolve::*
+use resolve::imports::*
+use resolve::symbol::*
+use resolve::scope::*
+use resolve::mod::{resolve_modules, resolve_program, ResolveBatchResult}
+use parser::mod::{parse_program_preloaded, count_items}
+use parser::parser::{parser_last_error_count}
+use ir::opt_strategy::{ir_opt_apply_strategy, ir_opt_find_return_vreg, ir_opt_max_label, ir_opt_max_vreg}
+use ir::lower::{lower_program_to_ir_summary_flat_owned_with_epistemic_ref, lower_program_function_body_from_summary_flat_with_epistemic_ref, lower_program_bodies_from_summary_flat_with_epistemic_ref}
+
+// Helpers required by codegen dependency chain (flat-namespace resolution).
+fn char_from_i64(n: i64) -> string with Mut, Panic {
+    if n == 0 { "0" }
+    else if n == 1 { "1" }
+    else if n == 2 { "2" }
+    else if n == 3 { "3" }
+    else if n == 4 { "4" }
+    else if n == 5 { "5" }
+    else if n == 6 { "6" }
+    else if n == 7 { "7" }
+    else if n == 8 { "8" }
+    else if n == 9 { "9" }
+    else { "?" }
+}
+
+fn pow10_idx(idx: i64) -> i64 {
+    if idx == 0 { 1000000000000000000 }
+    else if idx == 1 { 100000000000000000 }
+    else if idx == 2 { 10000000000000000 }
+    else if idx == 3 { 1000000000000000 }
+    else if idx == 4 { 100000000000000 }
+    else if idx == 5 { 10000000000000 }
+    else if idx == 6 { 1000000000000 }
+    else if idx == 7 { 100000000000 }
+    else if idx == 8 { 10000000000 }
+    else if idx == 9 { 1000000000 }
+    else if idx == 10 { 100000000 }
+    else if idx == 11 { 10000000 }
+    else if idx == 12 { 1000000 }
+    else if idx == 13 { 100000 }
+    else if idx == 14 { 10000 }
+    else if idx == 15 { 1000 }
+    else if idx == 16 { 100 }
+    else if idx == 17 { 10 }
+    else { 1 }
+}
+
+fn digit_for_power(rem: i64, power: i64) -> i64 {
+    if rem <= (0 - (9 * power)) { 9 }
+    else if rem <= (0 - (8 * power)) { 8 }
+    else if rem <= (0 - (7 * power)) { 7 }
+    else if rem <= (0 - (6 * power)) { 6 }
+    else if rem <= (0 - (5 * power)) { 5 }
+    else if rem <= (0 - (4 * power)) { 4 }
+    else if rem <= (0 - (3 * power)) { 3 }
+    else if rem <= (0 - (2 * power)) { 2 }
+    else if rem <= (0 - power) { 1 }
+    else { 0 }
+}
+
+fn i64_to_digits_no_div(rem: i64, idx: i64, started: bool) -> string with Mut, Panic {
+    if idx >= 19 { return "" }
+    let power = pow10_idx(idx)
+    let digit = digit_for_power(rem, power)
+    let rem_next = rem + (digit * power)
+    let emit = started || digit > 0 || idx == 18
+    let head = if emit { char_from_i64(digit) } else { "" }
+    head + i64_to_digits_no_div(rem_next, idx + 1, emit)
+}
+
+fn int_to_string(n: i64) -> string with Mut, Panic, Div {
+    if n == 0 { return "0" }
+    let negative = n < 0
+    let rem = if negative { n } else { 0 - n }
+    let digits = i64_to_digits_no_div(rem, 0, false)
+    if negative { "-" + digits } else { digits }
+}
+
+fn parse_i64_decimal(raw: string) -> (bool, i64) with Mut, Div {
+    if str_len(raw) == 0 { return (false, 0) }
+    var idx: i64 = 0
+    var negative = false
+    if str_char_at(raw, 0) == "-" {
+        negative = true
+        idx = 1
+        if idx >= str_len(raw) { return (false, 0) }
+    }
+    var value: i64 = 0
+    while idx < str_len(raw) {
+        let ch = str_char_at(raw, idx)
+        if ch < "0" || ch > "9" { return (false, 0) }
+        value = value * 10 + ((ch as i64) - ("0" as i64))
+        idx = idx + 1
+    }
+    if negative { (true, 0 - value) } else { (true, value) }
+}
+
+// Extract IEEE 754 bit pattern from f64 (runs at compile time in JIT)
+fn f64_bits(v: f64) -> i64 with Div {
+    if v == 0.0 { return 0 }
+    var sign: i64 = 0
+    var abs_v = v
+    if v < 0.0 { sign = 1; abs_v = 0.0 - v }
+    var exp: i64 = 1023
+    var m = abs_v
+    while m >= 2.0 { m = m / 2.0; exp = exp + 1 }
+    while m < 1.0 { m = m * 2.0; exp = exp - 1 }
+    let mant = ((m - 1.0) * 4503599627370496.0) as i64
+    (sign << 63) | (exp << 52) | mant
+}
+
+fn load_source_file(path: string) -> Program with IO, Mut, Div, Panic, Alloc {
+    let data = read_file(path)
+    let size = file_size(path)
+    var buf: [i8; 1048576] = [0; 1048576]
+    var i: i64 = 0
+    while i < size && i < 1048576 {
+        buf[i as usize] = data[i as usize]
+        i = i + 1
+    }
+    let state = lex(buf, size, 0)
+    parse_program_preloaded(state.token_count)
+}
+
+// ============================================================================
+// Micro-emitter: IR → x86-64 using ONLY CodeBuffer (65KB by-value, JIT-safe)
+// Stack-slot model: vreg N → [rbp - 8*(N+1)]
+// ============================================================================
+
+fn micro_store_rax(code: CodeBuffer, vreg: i64) -> CodeBuffer with Mut, Panic, Div {
+    var c = code
+    let disp = 0 - ((vreg + 1) * 8)
+    c = emit_byte(c, 0x48)
+    c = emit_byte(c, 0x89)
+    c = emit_byte(c, 0x85)
+    c = emit_byte(c, disp & 0xFF)
+    c = emit_byte(c, (disp >> 8) & 0xFF)
+    c = emit_byte(c, (disp >> 16) & 0xFF)
+    c = emit_byte(c, (disp >> 24) & 0xFF)
+    c
+}
+
+fn micro_load_rax(code: CodeBuffer, vreg: i64) -> CodeBuffer with Mut, Panic, Div {
+    var c = code
+    let disp = 0 - ((vreg + 1) * 8)
+    c = emit_byte(c, 0x48)
+    c = emit_byte(c, 0x8b)
+    c = emit_byte(c, 0x85)
+    c = emit_byte(c, disp & 0xFF)
+    c = emit_byte(c, (disp >> 8) & 0xFF)
+    c = emit_byte(c, (disp >> 16) & 0xFF)
+    c = emit_byte(c, (disp >> 24) & 0xFF)
+    c
+}
+
+fn micro_load_rcx(code: CodeBuffer, vreg: i64) -> CodeBuffer with Mut, Panic, Div {
+    var c = code
+    let disp = 0 - ((vreg + 1) * 8)
+    c = emit_byte(c, 0x48)
+    c = emit_byte(c, 0x8b)
+    c = emit_byte(c, 0x8d)
+    c = emit_byte(c, disp & 0xFF)
+    c = emit_byte(c, (disp >> 8) & 0xFF)
+    c = emit_byte(c, (disp >> 16) & 0xFF)
+    c = emit_byte(c, (disp >> 24) & 0xFF)
+    c
+}
+
+// XMM micro helpers — same stack layout, SSE2 MOVSD encoding
+// MOVSD [rbp+disp32], xmm0: F2 0F 11 85 <disp32>
+fn micro_store_xmm0(code: CodeBuffer, vreg: i64) -> CodeBuffer with Mut, Panic, Div {
+    var c = code
+    let disp = 0 - ((vreg + 1) * 8)
+    c = emit_byte(c, 0xF2 as i64)
+    c = emit_byte(c, 0x0F)
+    c = emit_byte(c, 0x11)
+    c = emit_byte(c, 0x85 as i64)
+    c = emit_byte(c, disp & 0xFF)
+    c = emit_byte(c, (disp >> 8) & 0xFF)
+    c = emit_byte(c, (disp >> 16) & 0xFF)
+    c = emit_byte(c, (disp >> 24) & 0xFF)
+    c
+}
+
+// MOVSD xmm0, [rbp+disp32]: F2 0F 10 85 <disp32>
+fn micro_load_xmm0(code: CodeBuffer, vreg: i64) -> CodeBuffer with Mut, Panic, Div {
+    var c = code
+    let disp = 0 - ((vreg + 1) * 8)
+    c = emit_byte(c, 0xF2 as i64)
+    c = emit_byte(c, 0x0F)
+    c = emit_byte(c, 0x10)
+    c = emit_byte(c, 0x85 as i64)
+    c = emit_byte(c, disp & 0xFF)
+    c = emit_byte(c, (disp >> 8) & 0xFF)
+    c = emit_byte(c, (disp >> 16) & 0xFF)
+    c = emit_byte(c, (disp >> 24) & 0xFF)
+    c
+}
+
+// MOVSD xmm1, [rbp+disp32]: F2 0F 10 8D <disp32>
+fn micro_load_xmm1(code: CodeBuffer, vreg: i64) -> CodeBuffer with Mut, Panic, Div {
+    var c = code
+    let disp = 0 - ((vreg + 1) * 8)
+    c = emit_byte(c, 0xF2 as i64)
+    c = emit_byte(c, 0x0F)
+    c = emit_byte(c, 0x10)
+    c = emit_byte(c, 0x8D as i64)
+    c = emit_byte(c, disp & 0xFF)
+    c = emit_byte(c, (disp >> 8) & 0xFF)
+    c = emit_byte(c, (disp >> 16) & 0xFF)
+    c = emit_byte(c, (disp >> 24) & 0xFF)
+    c
+}
+
+fn micro_compile_function(code: CodeBuffer, func: IrFunction, fn_offsets: [i64; 256]) -> CodeBuffer with Mut, Panic, Div {
+    let frame_raw = (func.reg_count + 2) * 8
+    let frame_size = ((frame_raw + 15) / 16) * 16
+
+    // Prologue
+    var c = code
+    c = emit_byte(c, 0x55)
+    c = emit_byte(c, 0x48)
+    c = emit_byte(c, 0x89)
+    c = emit_byte(c, 0xe5)
+    if frame_size > 0 {
+        c = emit_byte(c, 0x48)
+        c = emit_byte(c, 0x81)
+        c = emit_byte(c, 0xec)
+        c = emit_byte(c, frame_size & 0xFF)
+        c = emit_byte(c, (frame_size >> 8) & 0xFF)
+        c = emit_byte(c, (frame_size >> 16) & 0xFF)
+        c = emit_byte(c, (frame_size >> 24) & 0xFF)
+    }
+
+    // Spill params (rdi→p0, rsi→p1, rdx→p2, rcx→p3)
+    var pi: i64 = 0
+    while pi < func.param_count && pi < 4 {
+        let vreg = func.param_regs[pi as usize]
+        if vreg >= 0 {
+            if pi == 0 {
+                c = emit_byte(c, 0x48)
+                c = emit_byte(c, 0x89)
+                c = emit_byte(c, 0xf8)
+            } else if pi == 1 {
+                c = emit_byte(c, 0x48)
+                c = emit_byte(c, 0x89)
+                c = emit_byte(c, 0xf0)
+            } else if pi == 2 {
+                c = emit_byte(c, 0x48)
+                c = emit_byte(c, 0x89)
+                c = emit_byte(c, 0xd0)
+            } else if pi == 3 {
+                c = emit_byte(c, 0x48)
+                c = emit_byte(c, 0x89)
+                c = emit_byte(c, 0xc8)
+            }
+            c = micro_store_rax(c, vreg)
+        }
+        pi = pi + 1
+    }
+
+    // Label offsets and patch lists
+    var labels: [i64; 256] = [-1; 256]
+    var ret_sites: [i64; 64] = [0; 64]
+    var ret_count: i64 = 0
+    var fwd_sites: [i64; 128] = [0; 128]
+    var fwd_count: i64 = 0
+
+    // Type tracking: 0=i64, 1=f64
+    var vreg_is_float: [i64; 256] = [0; 256]
+
+    // Emit instructions
+    print("  MICRO instr_count=")
+    print_int(func.instr_count)
+    print(" reg_count=")
+    print_int(func.reg_count)
+    print("\n")
+    var ip: i64 = 0
+    while ip < func.instr_count {
+        let instr = func.instrs[ip as usize]
+        print("  ir[")
+        print_int(ip)
+        print("]=")
+        print_int(instr.op as i64)
+        print(" dst=")
+        print_int(instr.dst)
+        print(" s1=")
+        print_int(instr.src1)
+        print(" s2=")
+        print_int(instr.src2)
+        print("\n")
+
+        if instr.op == IrOpcode::IrLoadImm || instr.op == IrOpcode::IrLoadBool {
+            // Inline mov rax, imm64 — avoid nested CodeBuffer returns
+            c = emit_byte(c, 0x48)
+            c = emit_byte(c, 0xb8)
+            c = emit_byte(c, instr.imm_i64 & 0xFF)
+            c = emit_byte(c, (instr.imm_i64 >> 8) & 0xFF)
+            c = emit_byte(c, (instr.imm_i64 >> 16) & 0xFF)
+            c = emit_byte(c, (instr.imm_i64 >> 24) & 0xFF)
+            c = emit_byte(c, (instr.imm_i64 >> 32) & 0xFF)
+            c = emit_byte(c, (instr.imm_i64 >> 40) & 0xFF)
+            c = emit_byte(c, (instr.imm_i64 >> 48) & 0xFF)
+            c = emit_byte(c, (instr.imm_i64 >> 56) & 0xFF)
+            if instr.dst >= 0 { c = micro_store_rax(c, instr.dst) }
+
+        } else if instr.op == IrOpcode::IrLoadFloat {
+            // Store f64 bit pattern via RAX into stack slot, mark as float
+            let fbits = f64_bits(instr.imm_f64)
+            c = emit_byte(c, 0x48)
+            c = emit_byte(c, 0xb8)
+            c = emit_byte(c, fbits & 0xFF)
+            c = emit_byte(c, (fbits >> 8) & 0xFF)
+            c = emit_byte(c, (fbits >> 16) & 0xFF)
+            c = emit_byte(c, (fbits >> 24) & 0xFF)
+            c = emit_byte(c, (fbits >> 32) & 0xFF)
+            c = emit_byte(c, (fbits >> 40) & 0xFF)
+            c = emit_byte(c, (fbits >> 48) & 0xFF)
+            c = emit_byte(c, (fbits >> 56) & 0xFF)
+            if instr.dst >= 0 {
+                c = micro_store_rax(c, instr.dst)
+                vreg_is_float[instr.dst as usize] = 1
+            }
+
+        } else if instr.op == IrOpcode::IrIntToFloat {
+            // CVTSI2SD xmm0, rax: F2 48 0F 2A C0
+            if instr.src1 >= 0 { c = micro_load_rax(c, instr.src1) }
+            c = emit_byte(c, 0xF2 as i64)
+            c = emit_byte(c, 0x48)
+            c = emit_byte(c, 0x0F)
+            c = emit_byte(c, 0x2A)
+            c = emit_byte(c, 0xC0 as i64)
+            if instr.dst >= 0 {
+                c = micro_store_xmm0(c, instr.dst)
+                vreg_is_float[instr.dst as usize] = 1
+            }
+
+        } else if instr.op == IrOpcode::IrFloatToInt {
+            // CVTTSD2SI rax, xmm0: F2 48 0F 2C C0
+            if instr.src1 >= 0 { c = micro_load_xmm0(c, instr.src1) }
+            c = emit_byte(c, 0xF2 as i64)
+            c = emit_byte(c, 0x48)
+            c = emit_byte(c, 0x0F)
+            c = emit_byte(c, 0x2C)
+            c = emit_byte(c, 0xC0 as i64)
+            if instr.dst >= 0 {
+                c = micro_store_rax(c, instr.dst)
+                vreg_is_float[instr.dst as usize] = 0
+            }
+
+        } else if instr.op == IrOpcode::IrReturn {
+            if instr.src1 >= 0 {
+                if vreg_is_float[instr.src1 as usize] == 1 {
+                    // f64 return: MOVSD xmm0, [slot]; then MOVQ rax, xmm0
+                    c = micro_load_xmm0(c, instr.src1)
+                    // MOVQ rax, xmm0: 66 48 0F 7E C0
+                    c = emit_byte(c, 0x66)
+                    c = emit_byte(c, 0x48)
+                    c = emit_byte(c, 0x0F)
+                    c = emit_byte(c, 0x7E)
+                    c = emit_byte(c, 0xC0 as i64)
+                } else {
+                    c = micro_load_rax(c, instr.src1)
+                }
+            }
+            let site = c.len
+            c = emit_byte(c, 0xe9)
+            c = emit_byte(c, 0)
+            c = emit_byte(c, 0)
+            c = emit_byte(c, 0)
+            c = emit_byte(c, 0)
+            if ret_count < 64 { ret_sites[ret_count as usize] = site }
+            ret_count = ret_count + 1
+
+        } else if instr.op == IrOpcode::IrBinOp {
+            let is_float_op = instr.src1 >= 0 && vreg_is_float[instr.src1 as usize] == 1
+            if is_float_op {
+                // Float path: load xmm0 ← src1, xmm1 ← src2
+                c = micro_load_xmm0(c, instr.src1)
+                c = micro_load_xmm1(c, instr.src2)
+                if instr.bin_op == BinaryOp::OpAdd {
+                    // ADDSD xmm0, xmm1: F2 0F 58 C1
+                    c = emit_byte(c, 0xF2 as i64); c = emit_byte(c, 0x0F)
+                    c = emit_byte(c, 0x58); c = emit_byte(c, 0xC1 as i64)
+                } else if instr.bin_op == BinaryOp::OpSub {
+                    // SUBSD xmm0, xmm1: F2 0F 5C C1
+                    c = emit_byte(c, 0xF2 as i64); c = emit_byte(c, 0x0F)
+                    c = emit_byte(c, 0x5C); c = emit_byte(c, 0xC1 as i64)
+                } else if instr.bin_op == BinaryOp::OpMul {
+                    // MULSD xmm0, xmm1: F2 0F 59 C1
+                    c = emit_byte(c, 0xF2 as i64); c = emit_byte(c, 0x0F)
+                    c = emit_byte(c, 0x59); c = emit_byte(c, 0xC1 as i64)
+                } else if instr.bin_op == BinaryOp::OpDiv {
+                    // DIVSD xmm0, xmm1: F2 0F 5E C1
+                    c = emit_byte(c, 0xF2 as i64); c = emit_byte(c, 0x0F)
+                    c = emit_byte(c, 0x5E); c = emit_byte(c, 0xC1 as i64)
+                } else if instr.bin_op == BinaryOp::OpLt {
+                    // COMISD xmm1, xmm0: 66 0F 2F C8 ; SETA al; MOVZX rax, al
+                    c = emit_byte(c, 0x66); c = emit_byte(c, 0x0F)
+                    c = emit_byte(c, 0x2F); c = emit_byte(c, 0xC8 as i64)
+                    c = emit_byte(c, 0x0F); c = emit_byte(c, 0x97 as i64); c = emit_byte(c, 0xC0 as i64)
+                    c = emit_byte(c, 0x48); c = emit_byte(c, 0x0F); c = emit_byte(c, 0xB6 as i64); c = emit_byte(c, 0xC0 as i64)
+                } else if instr.bin_op == BinaryOp::OpLe {
+                    // COMISD xmm1, xmm0: 66 0F 2F C8 ; SETAE al; MOVZX rax, al
+                    c = emit_byte(c, 0x66); c = emit_byte(c, 0x0F)
+                    c = emit_byte(c, 0x2F); c = emit_byte(c, 0xC8 as i64)
+                    c = emit_byte(c, 0x0F); c = emit_byte(c, 0x93 as i64); c = emit_byte(c, 0xC0 as i64)
+                    c = emit_byte(c, 0x48); c = emit_byte(c, 0x0F); c = emit_byte(c, 0xB6 as i64); c = emit_byte(c, 0xC0 as i64)
+                } else if instr.bin_op == BinaryOp::OpGt {
+                    // COMISD xmm0, xmm1: 66 0F 2F C1 ; SETA al; MOVZX rax, al
+                    c = emit_byte(c, 0x66); c = emit_byte(c, 0x0F)
+                    c = emit_byte(c, 0x2F); c = emit_byte(c, 0xC1 as i64)
+                    c = emit_byte(c, 0x0F); c = emit_byte(c, 0x97 as i64); c = emit_byte(c, 0xC0 as i64)
+                    c = emit_byte(c, 0x48); c = emit_byte(c, 0x0F); c = emit_byte(c, 0xB6 as i64); c = emit_byte(c, 0xC0 as i64)
+                } else if instr.bin_op == BinaryOp::OpGe {
+                    // COMISD xmm0, xmm1: 66 0F 2F C1 ; SETAE al; MOVZX rax, al
+                    c = emit_byte(c, 0x66); c = emit_byte(c, 0x0F)
+                    c = emit_byte(c, 0x2F); c = emit_byte(c, 0xC1 as i64)
+                    c = emit_byte(c, 0x0F); c = emit_byte(c, 0x93 as i64); c = emit_byte(c, 0xC0 as i64)
+                    c = emit_byte(c, 0x48); c = emit_byte(c, 0x0F); c = emit_byte(c, 0xB6 as i64); c = emit_byte(c, 0xC0 as i64)
+                } else if instr.bin_op == BinaryOp::OpEq {
+                    // COMISD xmm0, xmm1: 66 0F 2F C1 ; SETE al; MOVZX rax, al
+                    c = emit_byte(c, 0x66); c = emit_byte(c, 0x0F)
+                    c = emit_byte(c, 0x2F); c = emit_byte(c, 0xC1 as i64)
+                    c = emit_byte(c, 0x0F); c = emit_byte(c, 0x94 as i64); c = emit_byte(c, 0xC0 as i64)
+                    c = emit_byte(c, 0x48); c = emit_byte(c, 0x0F); c = emit_byte(c, 0xB6 as i64); c = emit_byte(c, 0xC0 as i64)
+                } else if instr.bin_op == BinaryOp::OpNe {
+                    // COMISD xmm0, xmm1: 66 0F 2F C1 ; SETNE al; MOVZX rax, al
+                    c = emit_byte(c, 0x66); c = emit_byte(c, 0x0F)
+                    c = emit_byte(c, 0x2F); c = emit_byte(c, 0xC1 as i64)
+                    c = emit_byte(c, 0x0F); c = emit_byte(c, 0x95 as i64); c = emit_byte(c, 0xC0 as i64)
+                    c = emit_byte(c, 0x48); c = emit_byte(c, 0x0F); c = emit_byte(c, 0xB6 as i64); c = emit_byte(c, 0xC0 as i64)
+                }
+                // Float arithmetic results stay in xmm0 → store as float
+                if instr.bin_op == BinaryOp::OpAdd || instr.bin_op == BinaryOp::OpSub || instr.bin_op == BinaryOp::OpMul || instr.bin_op == BinaryOp::OpDiv {
+                    if instr.dst >= 0 {
+                        c = micro_store_xmm0(c, instr.dst)
+                        vreg_is_float[instr.dst as usize] = 1
+                    }
+                } else {
+                    // Comparison results are i64 (0 or 1) in rax
+                    if instr.dst >= 0 {
+                        c = micro_store_rax(c, instr.dst)
+                        vreg_is_float[instr.dst as usize] = 0
+                    }
+                }
+            } else {
+                // Integer path (original)
+                c = micro_load_rax(c, instr.src1)
+                c = micro_load_rcx(c, instr.src2)
+                if instr.bin_op == BinaryOp::OpAdd {
+                    c = emit_byte(c, 0x48); c = emit_byte(c, 0x01); c = emit_byte(c, 0xc8)
+                } else if instr.bin_op == BinaryOp::OpSub {
+                    c = emit_byte(c, 0x48); c = emit_byte(c, 0x29); c = emit_byte(c, 0xc8)
+                } else if instr.bin_op == BinaryOp::OpMul {
+                    c = emit_byte(c, 0x48); c = emit_byte(c, 0x0f); c = emit_byte(c, 0xaf); c = emit_byte(c, 0xc1)
+                } else if instr.bin_op == BinaryOp::OpDiv {
+                    c = emit_byte(c, 0x48); c = emit_byte(c, 0x99)
+                    c = emit_byte(c, 0x48); c = emit_byte(c, 0xf7); c = emit_byte(c, 0xf9)
+                } else if instr.bin_op == BinaryOp::OpRem {
+                    c = emit_byte(c, 0x48); c = emit_byte(c, 0x99)
+                    c = emit_byte(c, 0x48); c = emit_byte(c, 0xf7); c = emit_byte(c, 0xf9)
+                    c = emit_byte(c, 0x48); c = emit_byte(c, 0x89); c = emit_byte(c, 0xd0)
+                } else if instr.bin_op == BinaryOp::OpLt {
+                    c = emit_byte(c, 0x48); c = emit_byte(c, 0x39); c = emit_byte(c, 0xc8)
+                    c = emit_byte(c, 0x0f); c = emit_byte(c, 0x9c); c = emit_byte(c, 0xc0)
+                    c = emit_byte(c, 0x48); c = emit_byte(c, 0x0f); c = emit_byte(c, 0xb6); c = emit_byte(c, 0xc0)
+                } else if instr.bin_op == BinaryOp::OpLe {
+                    c = emit_byte(c, 0x48); c = emit_byte(c, 0x39); c = emit_byte(c, 0xc8)
+                    c = emit_byte(c, 0x0f); c = emit_byte(c, 0x9e); c = emit_byte(c, 0xc0)
+                    c = emit_byte(c, 0x48); c = emit_byte(c, 0x0f); c = emit_byte(c, 0xb6); c = emit_byte(c, 0xc0)
+                } else if instr.bin_op == BinaryOp::OpGt {
+                    c = emit_byte(c, 0x48); c = emit_byte(c, 0x39); c = emit_byte(c, 0xc8)
+                    c = emit_byte(c, 0x0f); c = emit_byte(c, 0x9f); c = emit_byte(c, 0xc0)
+                    c = emit_byte(c, 0x48); c = emit_byte(c, 0x0f); c = emit_byte(c, 0xb6); c = emit_byte(c, 0xc0)
+                } else if instr.bin_op == BinaryOp::OpGe {
+                    c = emit_byte(c, 0x48); c = emit_byte(c, 0x39); c = emit_byte(c, 0xc8)
+                    c = emit_byte(c, 0x0f); c = emit_byte(c, 0x9d); c = emit_byte(c, 0xc0)
+                    c = emit_byte(c, 0x48); c = emit_byte(c, 0x0f); c = emit_byte(c, 0xb6); c = emit_byte(c, 0xc0)
+                } else if instr.bin_op == BinaryOp::OpEq {
+                    c = emit_byte(c, 0x48); c = emit_byte(c, 0x39); c = emit_byte(c, 0xc8)
+                    c = emit_byte(c, 0x0f); c = emit_byte(c, 0x94); c = emit_byte(c, 0xc0)
+                    c = emit_byte(c, 0x48); c = emit_byte(c, 0x0f); c = emit_byte(c, 0xb6); c = emit_byte(c, 0xc0)
+                } else if instr.bin_op == BinaryOp::OpNe {
+                    c = emit_byte(c, 0x48); c = emit_byte(c, 0x39); c = emit_byte(c, 0xc8)
+                    c = emit_byte(c, 0x0f); c = emit_byte(c, 0x95); c = emit_byte(c, 0xc0)
+                    c = emit_byte(c, 0x48); c = emit_byte(c, 0x0f); c = emit_byte(c, 0xb6); c = emit_byte(c, 0xc0)
+                }
+                if instr.dst >= 0 { c = micro_store_rax(c, instr.dst) }
+            }
+
+        } else if instr.op == IrOpcode::IrCall {
+            // Push caller-saved regs if needed, load args, call, store result
+            if instr.arg_count >= 1 && instr.src1 >= 0 {
+                c = micro_load_rax(c, instr.src1)
+                c = emit_byte(c, 0x48)
+                c = emit_byte(c, 0x89)
+                c = emit_byte(c, 0xc7)
+            }
+            if instr.arg_count >= 2 && instr.src2 >= 0 {
+                c = micro_load_rax(c, instr.src2)
+                c = emit_byte(c, 0x48)
+                c = emit_byte(c, 0x89)
+                c = emit_byte(c, 0xc6)
+            }
+            let cs = c.len
+            let tgt = fn_offsets[instr.fn_id as usize]
+            let disp = tgt - (cs + 5)
+            c = emit_byte(c, 0xe8)
+            c = emit_byte(c, disp & 0xFF)
+            c = emit_byte(c, (disp >> 8) & 0xFF)
+            c = emit_byte(c, (disp >> 16) & 0xFF)
+            c = emit_byte(c, (disp >> 24) & 0xFF)
+            if instr.dst >= 0 { c = micro_store_rax(c, instr.dst) }
+
+        } else if instr.op == IrOpcode::IrCopy {
+            if instr.src1 >= 0 && vreg_is_float[instr.src1 as usize] == 1 {
+                c = micro_load_xmm0(c, instr.src1)
+                if instr.dst >= 0 {
+                    c = micro_store_xmm0(c, instr.dst)
+                    vreg_is_float[instr.dst as usize] = 1
+                }
+            } else {
+                c = micro_load_rax(c, instr.src1)
+                if instr.dst >= 0 { c = micro_store_rax(c, instr.dst) }
+            }
+
+        } else if instr.op == IrOpcode::IrLabel {
+            labels[instr.label_id as usize] = c.len
+
+        } else if instr.op == IrOpcode::IrJump {
+            let tgt = labels[instr.label_id as usize]
+            let site = c.len
+            c = emit_byte(c, 0xe9)
+            if tgt >= 0 {
+                let d = tgt - (site + 5)
+                c = emit_byte(c, d & 0xFF)
+                c = emit_byte(c, (d >> 8) & 0xFF)
+                c = emit_byte(c, (d >> 16) & 0xFF)
+                c = emit_byte(c, (d >> 24) & 0xFF)
+            } else {
+                c = emit_byte(c, 0)
+                c = emit_byte(c, 0)
+                c = emit_byte(c, 0)
+                c = emit_byte(c, 0)
+                if fwd_count < 128 {
+                    fwd_sites[fwd_count as usize] = (site + 1) + (instr.label_id * 65536)
+                    fwd_count = fwd_count + 1
+                }
+            }
+
+        } else if instr.op == IrOpcode::IrBranchTrue {
+            c = micro_load_rax(c, instr.src1)
+            c = emit_byte(c, 0x48)
+            c = emit_byte(c, 0x85)
+            c = emit_byte(c, 0xc0)
+            let tgt = labels[instr.label_id as usize]
+            let site = c.len
+            c = emit_byte(c, 0x0f)
+            c = emit_byte(c, 0x85)
+            if tgt >= 0 {
+                let d = tgt - (site + 6)
+                c = emit_byte(c, d & 0xFF)
+                c = emit_byte(c, (d >> 8) & 0xFF)
+                c = emit_byte(c, (d >> 16) & 0xFF)
+                c = emit_byte(c, (d >> 24) & 0xFF)
+            } else {
+                c = emit_byte(c, 0)
+                c = emit_byte(c, 0)
+                c = emit_byte(c, 0)
+                c = emit_byte(c, 0)
+                if fwd_count < 128 {
+                    fwd_sites[fwd_count as usize] = (site + 2) + (instr.label_id * 65536)
+                    fwd_count = fwd_count + 1
+                }
+            }
+
+        } else if instr.op == IrOpcode::IrBranchFalse {
+            c = micro_load_rax(c, instr.src1)
+            c = emit_byte(c, 0x48)
+            c = emit_byte(c, 0x85)
+            c = emit_byte(c, 0xc0)
+            let tgt = labels[instr.label_id as usize]
+            let site = c.len
+            c = emit_byte(c, 0x0f)
+            c = emit_byte(c, 0x84)
+            if tgt >= 0 {
+                let d = tgt - (site + 6)
+                c = emit_byte(c, d & 0xFF)
+                c = emit_byte(c, (d >> 8) & 0xFF)
+                c = emit_byte(c, (d >> 16) & 0xFF)
+                c = emit_byte(c, (d >> 24) & 0xFF)
+            } else {
+                c = emit_byte(c, 0)
+                c = emit_byte(c, 0)
+                c = emit_byte(c, 0)
+                c = emit_byte(c, 0)
+                if fwd_count < 128 {
+                    fwd_sites[fwd_count as usize] = (site + 2) + (instr.label_id * 65536)
+                    fwd_count = fwd_count + 1
+                }
+            }
+
+        } else if instr.op == IrOpcode::IrNop {
+            // skip
+        } else if instr.op == IrOpcode::IrLoadString {
+            c = emit_byte(c, 0x48)
+            c = emit_byte(c, 0xb8)
+            c = emit_byte(c, instr.imm_i64 & 0xFF)
+            c = emit_byte(c, (instr.imm_i64 >> 8) & 0xFF)
+            c = emit_byte(c, (instr.imm_i64 >> 16) & 0xFF)
+            c = emit_byte(c, (instr.imm_i64 >> 24) & 0xFF)
+            c = emit_byte(c, (instr.imm_i64 >> 32) & 0xFF)
+            c = emit_byte(c, (instr.imm_i64 >> 40) & 0xFF)
+            c = emit_byte(c, (instr.imm_i64 >> 48) & 0xFF)
+            c = emit_byte(c, (instr.imm_i64 >> 56) & 0xFF)
+            if instr.dst >= 0 { c = micro_store_rax(c, instr.dst) }
+        } else {
+            print("  UNSUPPORTED op=")
+            print_int(instr.op as i64)
+            print("\n")
+        }
+        ip = ip + 1
+    }
+
+    // Epilogue
+    let epilogue_off = c.len
+    c = emit_byte(c, 0xc9)
+    c = emit_byte(c, 0xc3)
+
+    // Patch return jumps
+    var ri: i64 = 0
+    while ri < ret_count && ri < 64 {
+        let s = ret_sites[ri as usize]
+        let d = epilogue_off - (s + 5)
+        c.bytes[(s + 1) as usize] = (d & 0xFF) as i8
+        c.bytes[(s + 2) as usize] = ((d >> 8) & 0xFF) as i8
+        c.bytes[(s + 3) as usize] = ((d >> 16) & 0xFF) as i8
+        c.bytes[(s + 4) as usize] = ((d >> 24) & 0xFF) as i8
+        ri = ri + 1
+    }
+
+    // Patch forward branches
+    var fi: i64 = 0
+    while fi < fwd_count {
+        let enc = fwd_sites[fi as usize]
+        let s = enc % 65536
+        let lid = enc / 65536
+        let tgt = labels[lid as usize]
+        if tgt >= 0 {
+            let d = tgt - (s + 4)
+            c.bytes[(s + 0) as usize] = (d & 0xFF) as i8
+            c.bytes[(s + 1) as usize] = ((d >> 8) & 0xFF) as i8
+            c.bytes[(s + 2) as usize] = ((d >> 16) & 0xFF) as i8
+            c.bytes[(s + 3) as usize] = ((d >> 24) & 0xFF) as i8
+        }
+        fi = fi + 1
+    }
+
+    c
+}
+
+// ============================================================================
+// Direct AST to x86-64 compiler (bypasses IR lowering entirely)
+// Uses inline arrays for locals (no Box) to avoid JIT by-value corruption.
+// ============================================================================
+
+// Helper: determine if an expression produces an f64 value
+fn ast_expr_is_float(expr: &Expr, local_names: [Name; 64], local_types: [i64; 64], local_count: i64) -> bool with Mut, Panic, Div {
+    if expr.kind == ExprKind::ExprFloatLit { return true }
+    if expr.kind == ExprKind::ExprIdent {
+        var li = local_count - 1
+        while li >= 0 {
+            if ir_name_eq(local_names[li as usize], expr.name) {
+                return local_types[li as usize] == 1
+            }
+            li = li - 1
+        }
+        return false
+    }
+    if expr.kind == ExprKind::ExprBinary {
+        let left_ref: &Option<Box<Expr>> = &expr.left
+        match *left_ref {
+            Some(le) => { return ast_expr_is_float(&(*le), local_names, local_types, local_count) }
+            _ => { return false }
+        }
+    }
+    if expr.kind == ExprKind::ExprCast {
+        let sub_ref: &Option<Box<Expr>> = &expr.left
+        match *sub_ref {
+            Some(se) => {
+                let src_float = ast_expr_is_float(&(*se), local_names, local_types, local_count)
+                return !src_float
+            }
+            _ => { return false }
+        }
+    }
+    false
+}
+
+fn ast_compile_expr(code: CodeBuffer, expr: &Expr,
+    local_names: [Name; 64], local_slots: [i64; 64], local_types: [i64; 64], local_count: i64
+) -> CodeBuffer with Mut, Panic, Div, IO {
+    var c = code
+    if expr.kind == ExprKind::ExprIntLit {
+        c = emit_byte(c, 0x48)
+        c = emit_byte(c, 0xb8)
+        c = emit_byte(c, expr.int_val & 0xFF)
+        c = emit_byte(c, (expr.int_val >> 8) & 0xFF)
+        c = emit_byte(c, (expr.int_val >> 16) & 0xFF)
+        c = emit_byte(c, (expr.int_val >> 24) & 0xFF)
+        c = emit_byte(c, (expr.int_val >> 32) & 0xFF)
+        c = emit_byte(c, (expr.int_val >> 40) & 0xFF)
+        c = emit_byte(c, (expr.int_val >> 48) & 0xFF)
+        c = emit_byte(c, (expr.int_val >> 56) & 0xFF)
+        c
+    } else if expr.kind == ExprKind::ExprBoolTrue {
+        c = emit_byte(c, 0x48); c = emit_byte(c, 0xb8)
+        c = emit_byte(c, 1)
+        var bi: i64 = 0
+        while bi < 7 { c = emit_byte(c, 0); bi = bi + 1 }
+        c
+    } else if expr.kind == ExprKind::ExprBoolFalse {
+        c = emit_byte(c, 0x48); c = emit_byte(c, 0xb8)
+        var bi: i64 = 0
+        while bi < 8 { c = emit_byte(c, 0); bi = bi + 1 }
+        c
+    } else if expr.kind == ExprKind::ExprFloatLit {
+        // Store f64 IEEE 754 bit pattern in RAX (shares stack slots with i64)
+        let fbits = f64_bits(expr.float_val)
+        c = emit_byte(c, 0x48)
+        c = emit_byte(c, 0xb8)
+        c = emit_byte(c, fbits & 0xFF)
+        c = emit_byte(c, (fbits >> 8) & 0xFF)
+        c = emit_byte(c, (fbits >> 16) & 0xFF)
+        c = emit_byte(c, (fbits >> 24) & 0xFF)
+        c = emit_byte(c, (fbits >> 32) & 0xFF)
+        c = emit_byte(c, (fbits >> 40) & 0xFF)
+        c = emit_byte(c, (fbits >> 48) & 0xFF)
+        c = emit_byte(c, (fbits >> 56) & 0xFF)
+        c
+    } else if expr.kind == ExprKind::ExprCast {
+        // Compile source expression first
+        let sub_ref: &Option<Box<Expr>> = &expr.left
+        match *sub_ref {
+            Some(se) => {
+                c = ast_compile_expr(c, &(*se), local_names, local_slots, local_types, local_count)
+                let src_is_float = ast_expr_is_float(&(*se), local_names, local_types, local_count)
+                if src_is_float {
+                    // f64→i64: MOVQ xmm0, rax then CVTTSD2SI rax, xmm0
+                    // MOVQ xmm0, rax: 66 48 0F 6E C0
+                    c = emit_byte(c, 0x66); c = emit_byte(c, 0x48)
+                    c = emit_byte(c, 0x0F); c = emit_byte(c, 0x6E); c = emit_byte(c, 0xC0 as i64)
+                    // CVTTSD2SI rax, xmm0: F2 48 0F 2C C0
+                    c = emit_byte(c, 0xF2 as i64); c = emit_byte(c, 0x48)
+                    c = emit_byte(c, 0x0F); c = emit_byte(c, 0x2C); c = emit_byte(c, 0xC0 as i64)
+                } else {
+                    // i64→f64: CVTSI2SD xmm0, rax then MOVQ rax, xmm0
+                    // CVTSI2SD xmm0, rax: F2 48 0F 2A C0
+                    c = emit_byte(c, 0xF2 as i64); c = emit_byte(c, 0x48)
+                    c = emit_byte(c, 0x0F); c = emit_byte(c, 0x2A); c = emit_byte(c, 0xC0 as i64)
+                    // MOVQ rax, xmm0: 66 48 0F 7E C0
+                    c = emit_byte(c, 0x66); c = emit_byte(c, 0x48)
+                    c = emit_byte(c, 0x0F); c = emit_byte(c, 0x7E); c = emit_byte(c, 0xC0 as i64)
+                }
+            }
+            _ => {}
+        }
+        c
+    } else if expr.kind == ExprKind::ExprIdent {
+        var slot: i64 = -1
+        var li = local_count - 1
+        while li >= 0 {
+            if ir_name_eq(local_names[li as usize], expr.name) {
+                slot = local_slots[li as usize]
+                li = -1
+            } else {
+                li = li - 1
+            }
+        }
+        if slot >= 0 {
+            c = micro_load_rax(c, slot)
+        } else {
+            c = emit_byte(c, 0x48); c = emit_byte(c, 0x31); c = emit_byte(c, 0xc0)
+        }
+        c
+    } else if expr.kind == ExprKind::ExprBinary {
+        // Check if this is a float operation
+        var is_float_binop = false
+        let left_ref: &Option<Box<Expr>> = &expr.left
+        match *left_ref {
+            Some(le) => {
+                is_float_binop = ast_expr_is_float(&(*le), local_names, local_types, local_count)
+            }
+            _ => {}
+        }
+        // Compile left → rax
+        match *left_ref {
+            Some(le) => {
+                c = ast_compile_expr(c, &(*le), local_names, local_slots, local_types, local_count)
+            }
+            _ => {}
+        }
+        c = emit_byte(c, 0x50)  // push rax (left f64 bits or i64)
+        let right_ref: &Option<Box<Expr>> = &expr.right
+        match *right_ref {
+            Some(re) => {
+                c = ast_compile_expr(c, &(*re), local_names, local_slots, local_types, local_count)
+            }
+            _ => {}
+        }
+        if is_float_binop {
+            // rax = right f64 bits (on stack: left f64 bits)
+            // MOVQ xmm1, rax: 66 48 0F 6E C8
+            c = emit_byte(c, 0x66); c = emit_byte(c, 0x48)
+            c = emit_byte(c, 0x0F); c = emit_byte(c, 0x6E); c = emit_byte(c, 0xC8 as i64)
+            // pop rax (left bits)
+            c = emit_byte(c, 0x58)
+            // MOVQ xmm0, rax: 66 48 0F 6E C0
+            c = emit_byte(c, 0x66); c = emit_byte(c, 0x48)
+            c = emit_byte(c, 0x0F); c = emit_byte(c, 0x6E); c = emit_byte(c, 0xC0 as i64)
+            // Now xmm0=left, xmm1=right
+            if expr.bin_op == BinaryOp::OpAdd {
+                // ADDSD xmm0, xmm1: F2 0F 58 C1
+                c = emit_byte(c, 0xF2 as i64); c = emit_byte(c, 0x0F)
+                c = emit_byte(c, 0x58); c = emit_byte(c, 0xC1 as i64)
+            } else if expr.bin_op == BinaryOp::OpSub {
+                c = emit_byte(c, 0xF2 as i64); c = emit_byte(c, 0x0F)
+                c = emit_byte(c, 0x5C); c = emit_byte(c, 0xC1 as i64)
+            } else if expr.bin_op == BinaryOp::OpMul {
+                c = emit_byte(c, 0xF2 as i64); c = emit_byte(c, 0x0F)
+                c = emit_byte(c, 0x59); c = emit_byte(c, 0xC1 as i64)
+            } else if expr.bin_op == BinaryOp::OpDiv {
+                c = emit_byte(c, 0xF2 as i64); c = emit_byte(c, 0x0F)
+                c = emit_byte(c, 0x5E); c = emit_byte(c, 0xC1 as i64)
+            } else if expr.bin_op == BinaryOp::OpGt {
+                // COMISD xmm0, xmm1: 66 0F 2F C1 ; SETA al; MOVZX rax, al
+                c = emit_byte(c, 0x66); c = emit_byte(c, 0x0F)
+                c = emit_byte(c, 0x2F); c = emit_byte(c, 0xC1 as i64)
+                c = emit_byte(c, 0x0F); c = emit_byte(c, 0x97 as i64); c = emit_byte(c, 0xC0 as i64)
+                c = emit_byte(c, 0x48); c = emit_byte(c, 0x0F); c = emit_byte(c, 0xB6 as i64); c = emit_byte(c, 0xC0 as i64)
+            } else if expr.bin_op == BinaryOp::OpGe {
+                c = emit_byte(c, 0x66); c = emit_byte(c, 0x0F)
+                c = emit_byte(c, 0x2F); c = emit_byte(c, 0xC1 as i64)
+                c = emit_byte(c, 0x0F); c = emit_byte(c, 0x93 as i64); c = emit_byte(c, 0xC0 as i64)
+                c = emit_byte(c, 0x48); c = emit_byte(c, 0x0F); c = emit_byte(c, 0xB6 as i64); c = emit_byte(c, 0xC0 as i64)
+            } else if expr.bin_op == BinaryOp::OpLt {
+                // COMISD xmm1, xmm0: 66 0F 2F C8 ; SETA al
+                c = emit_byte(c, 0x66); c = emit_byte(c, 0x0F)
+                c = emit_byte(c, 0x2F); c = emit_byte(c, 0xC8 as i64)
+                c = emit_byte(c, 0x0F); c = emit_byte(c, 0x97 as i64); c = emit_byte(c, 0xC0 as i64)
+                c = emit_byte(c, 0x48); c = emit_byte(c, 0x0F); c = emit_byte(c, 0xB6 as i64); c = emit_byte(c, 0xC0 as i64)
+            } else if expr.bin_op == BinaryOp::OpLe {
+                c = emit_byte(c, 0x66); c = emit_byte(c, 0x0F)
+                c = emit_byte(c, 0x2F); c = emit_byte(c, 0xC8 as i64)
+                c = emit_byte(c, 0x0F); c = emit_byte(c, 0x93 as i64); c = emit_byte(c, 0xC0 as i64)
+                c = emit_byte(c, 0x48); c = emit_byte(c, 0x0F); c = emit_byte(c, 0xB6 as i64); c = emit_byte(c, 0xC0 as i64)
+            } else if expr.bin_op == BinaryOp::OpEq {
+                c = emit_byte(c, 0x66); c = emit_byte(c, 0x0F)
+                c = emit_byte(c, 0x2F); c = emit_byte(c, 0xC1 as i64)
+                c = emit_byte(c, 0x0F); c = emit_byte(c, 0x94 as i64); c = emit_byte(c, 0xC0 as i64)
+                c = emit_byte(c, 0x48); c = emit_byte(c, 0x0F); c = emit_byte(c, 0xB6 as i64); c = emit_byte(c, 0xC0 as i64)
+            } else if expr.bin_op == BinaryOp::OpNe {
+                c = emit_byte(c, 0x66); c = emit_byte(c, 0x0F)
+                c = emit_byte(c, 0x2F); c = emit_byte(c, 0xC1 as i64)
+                c = emit_byte(c, 0x0F); c = emit_byte(c, 0x95 as i64); c = emit_byte(c, 0xC0 as i64)
+                c = emit_byte(c, 0x48); c = emit_byte(c, 0x0F); c = emit_byte(c, 0xB6 as i64); c = emit_byte(c, 0xC0 as i64)
+            }
+            // For arithmetic ops, result is in xmm0 — move to rax as f64 bits
+            if expr.bin_op == BinaryOp::OpAdd || expr.bin_op == BinaryOp::OpSub || expr.bin_op == BinaryOp::OpMul || expr.bin_op == BinaryOp::OpDiv {
+                // MOVQ rax, xmm0: 66 48 0F 7E C0
+                c = emit_byte(c, 0x66); c = emit_byte(c, 0x48)
+                c = emit_byte(c, 0x0F); c = emit_byte(c, 0x7E); c = emit_byte(c, 0xC0 as i64)
+            }
+        } else {
+            // Integer path (original)
+            c = emit_byte(c, 0x48); c = emit_byte(c, 0x89); c = emit_byte(c, 0xc1)  // mov rcx, rax
+            c = emit_byte(c, 0x58)  // pop rax
+            if expr.bin_op == BinaryOp::OpAdd {
+                c = emit_byte(c, 0x48); c = emit_byte(c, 0x01); c = emit_byte(c, 0xc8)
+            } else if expr.bin_op == BinaryOp::OpSub {
+                c = emit_byte(c, 0x48); c = emit_byte(c, 0x29); c = emit_byte(c, 0xc8)
+            } else if expr.bin_op == BinaryOp::OpMul {
+                c = emit_byte(c, 0x48); c = emit_byte(c, 0x0f); c = emit_byte(c, 0xaf); c = emit_byte(c, 0xc1)
+            } else if expr.bin_op == BinaryOp::OpDiv {
+                c = emit_byte(c, 0x48); c = emit_byte(c, 0x99)
+                c = emit_byte(c, 0x48); c = emit_byte(c, 0xf7); c = emit_byte(c, 0xf9)
+            } else if expr.bin_op == BinaryOp::OpRem {
+                c = emit_byte(c, 0x48); c = emit_byte(c, 0x99)
+                c = emit_byte(c, 0x48); c = emit_byte(c, 0xf7); c = emit_byte(c, 0xf9)
+                c = emit_byte(c, 0x48); c = emit_byte(c, 0x89); c = emit_byte(c, 0xd0)
+            } else if expr.bin_op == BinaryOp::OpEq {
+                c = emit_byte(c, 0x48); c = emit_byte(c, 0x39); c = emit_byte(c, 0xc8)
+                c = emit_byte(c, 0x0f); c = emit_byte(c, 0x94); c = emit_byte(c, 0xc0)
+                c = emit_byte(c, 0x48); c = emit_byte(c, 0x0f); c = emit_byte(c, 0xb6); c = emit_byte(c, 0xc0)
+            } else if expr.bin_op == BinaryOp::OpNe {
+                c = emit_byte(c, 0x48); c = emit_byte(c, 0x39); c = emit_byte(c, 0xc8)
+                c = emit_byte(c, 0x0f); c = emit_byte(c, 0x95); c = emit_byte(c, 0xc0)
+                c = emit_byte(c, 0x48); c = emit_byte(c, 0x0f); c = emit_byte(c, 0xb6); c = emit_byte(c, 0xc0)
+            } else if expr.bin_op == BinaryOp::OpLt {
+                c = emit_byte(c, 0x48); c = emit_byte(c, 0x39); c = emit_byte(c, 0xc8)
+                c = emit_byte(c, 0x0f); c = emit_byte(c, 0x9c); c = emit_byte(c, 0xc0)
+                c = emit_byte(c, 0x48); c = emit_byte(c, 0x0f); c = emit_byte(c, 0xb6); c = emit_byte(c, 0xc0)
+            } else if expr.bin_op == BinaryOp::OpLe {
+                c = emit_byte(c, 0x48); c = emit_byte(c, 0x39); c = emit_byte(c, 0xc8)
+                c = emit_byte(c, 0x0f); c = emit_byte(c, 0x9e); c = emit_byte(c, 0xc0)
+                c = emit_byte(c, 0x48); c = emit_byte(c, 0x0f); c = emit_byte(c, 0xb6); c = emit_byte(c, 0xc0)
+            } else if expr.bin_op == BinaryOp::OpGt {
+                c = emit_byte(c, 0x48); c = emit_byte(c, 0x39); c = emit_byte(c, 0xc8)
+                c = emit_byte(c, 0x0f); c = emit_byte(c, 0x9f); c = emit_byte(c, 0xc0)
+                c = emit_byte(c, 0x48); c = emit_byte(c, 0x0f); c = emit_byte(c, 0xb6); c = emit_byte(c, 0xc0)
+            } else if expr.bin_op == BinaryOp::OpGe {
+                c = emit_byte(c, 0x48); c = emit_byte(c, 0x39); c = emit_byte(c, 0xc8)
+                c = emit_byte(c, 0x0f); c = emit_byte(c, 0x9d); c = emit_byte(c, 0xc0)
+                c = emit_byte(c, 0x48); c = emit_byte(c, 0x0f); c = emit_byte(c, 0xb6); c = emit_byte(c, 0xc0)
+            }
+        }
+        c
+    } else if expr.kind == ExprKind::ExprCall {
+        let callee_opt: &Option<Box<Expr>> = &expr.left
+        var callee_name = ir_empty_name()
+        match *callee_opt {
+            Some(ce) => { callee_name = (*ce).name }
+            _ => {}
+        }
+        var fn_slot: i64 = -1
+        var li = local_count - 1
+        while li >= 0 {
+            if ir_name_eq(local_names[li as usize], callee_name) {
+                fn_slot = local_slots[li as usize]
+                li = -1
+            } else {
+                li = li - 1
+            }
+        }
+        var arg_count: i64 = 0
+        let args_ref: &Option<Box<ExprList>> = &expr.args
+        var current_arg = args_ref
+        while true {
+            match *current_arg {
+                Some(al) => {
+                    c = ast_compile_expr(c, &(*al).head, local_names, local_slots, local_types, local_count)
+                    c = emit_byte(c, 0x50)
+                    arg_count = arg_count + 1
+                    current_arg = &(*al).tail
+                }
+                _ => break
+            }
+        }
+        if arg_count >= 4 { c = emit_byte(c, 0x59) }
+        if arg_count >= 3 { c = emit_byte(c, 0x5a) }
+        if arg_count >= 2 { c = emit_byte(c, 0x5e) }
+        if arg_count >= 1 { c = emit_byte(c, 0x5f) }
+        if fn_slot <= -1000 {
+            let target_idx = 0 - (fn_slot + 1000)
+            c = emit_byte(c, 0xe8)
+            c = emit_byte(c, target_idx & 0xFF)
+            c = emit_byte(c, (target_idx >> 8) & 0xFF)
+            c = emit_byte(c, 0xCA as i64)
+            c = emit_byte(c, 0xFE as i64)
+        }
+        c
+    } else if expr.kind == ExprKind::ExprIf {
+        let cond_ref: &Option<Box<Expr>> = &expr.left
+        match *cond_ref {
+            Some(ce) => {
+                c = ast_compile_expr(c, &(*ce), local_names, local_slots, local_types, local_count)
+            }
+            _ => {}
+        }
+        c = emit_byte(c, 0x48); c = emit_byte(c, 0x85); c = emit_byte(c, 0xc0)
+        let jz_site = c.len
+        c = emit_byte(c, 0x0f); c = emit_byte(c, 0x84)
+        c = emit_byte(c, 0); c = emit_byte(c, 0); c = emit_byte(c, 0); c = emit_byte(c, 0)
+        let then_ref: &Option<Box<Block>> = &expr.block
+        match *then_ref {
+            Some(tb) => {
+                c = ast_compile_block(c, &(*tb), local_names, local_slots, local_types, local_count)
+            }
+            _ => {
+                c = emit_byte(c, 0x48); c = emit_byte(c, 0x31); c = emit_byte(c, 0xc0)
+            }
+        }
+        let jmp_site = c.len
+        c = emit_byte(c, 0xe9)
+        c = emit_byte(c, 0); c = emit_byte(c, 0); c = emit_byte(c, 0); c = emit_byte(c, 0)
+        let else_off = c.len
+        let jz_disp = else_off - (jz_site + 6)
+        c.bytes[(jz_site + 2) as usize] = (jz_disp & 0xFF) as i8
+        c.bytes[(jz_site + 3) as usize] = ((jz_disp >> 8) & 0xFF) as i8
+        c.bytes[(jz_site + 4) as usize] = ((jz_disp >> 16) & 0xFF) as i8
+        c.bytes[(jz_site + 5) as usize] = ((jz_disp >> 24) & 0xFF) as i8
+        let else_expr_ref: &Option<Box<Expr>> = &expr.else_expr
+        match *else_expr_ref {
+            Some(ee) => {
+                c = ast_compile_expr(c, &(*ee), local_names, local_slots, local_types, local_count)
+            }
+            _ => {
+                c = emit_byte(c, 0x48); c = emit_byte(c, 0x31); c = emit_byte(c, 0xc0)
+            }
+        }
+        let end_off = c.len
+        let jmp_disp = end_off - (jmp_site + 5)
+        c.bytes[(jmp_site + 1) as usize] = (jmp_disp & 0xFF) as i8
+        c.bytes[(jmp_site + 2) as usize] = ((jmp_disp >> 8) & 0xFF) as i8
+        c.bytes[(jmp_site + 3) as usize] = ((jmp_disp >> 16) & 0xFF) as i8
+        c.bytes[(jmp_site + 4) as usize] = ((jmp_disp >> 24) & 0xFF) as i8
+        c
+    } else if expr.kind == ExprKind::ExprWhile {
+        let loop_top = c.len
+        let wcond_ref: &Option<Box<Expr>> = &expr.left
+        match *wcond_ref {
+            Some(wce) => {
+                c = ast_compile_expr(c, &(*wce), local_names, local_slots, local_types, local_count)
+            }
+            _ => {}
+        }
+        c = emit_byte(c, 0x48); c = emit_byte(c, 0x85); c = emit_byte(c, 0xc0)
+        let wjz_site = c.len
+        c = emit_byte(c, 0x0f); c = emit_byte(c, 0x84)
+        c = emit_byte(c, 0); c = emit_byte(c, 0); c = emit_byte(c, 0); c = emit_byte(c, 0)
+        let wbody_ref: &Option<Box<Block>> = &expr.block
+        match *wbody_ref {
+            Some(wb) => {
+                c = ast_compile_block(c, &(*wb), local_names, local_slots, local_types, local_count)
+            }
+            _ => {}
+        }
+        let jback_site = c.len
+        let jback_disp = loop_top - (jback_site + 5)
+        c = emit_byte(c, 0xe9)
+        c = emit_byte(c, jback_disp & 0xFF)
+        c = emit_byte(c, (jback_disp >> 8) & 0xFF)
+        c = emit_byte(c, (jback_disp >> 16) & 0xFF)
+        c = emit_byte(c, (jback_disp >> 24) & 0xFF)
+        let wend_off = c.len
+        let wjz_disp = wend_off - (wjz_site + 6)
+        c.bytes[(wjz_site + 2) as usize] = (wjz_disp & 0xFF) as i8
+        c.bytes[(wjz_site + 3) as usize] = ((wjz_disp >> 8) & 0xFF) as i8
+        c.bytes[(wjz_site + 4) as usize] = ((wjz_disp >> 16) & 0xFF) as i8
+        c.bytes[(wjz_site + 5) as usize] = ((wjz_disp >> 24) & 0xFF) as i8
+        c = emit_byte(c, 0x48); c = emit_byte(c, 0x31); c = emit_byte(c, 0xc0)
+        c
+    } else if expr.kind == ExprKind::ExprReturn {
+        let ret_ref: &Option<Box<Expr>> = &expr.left
+        match *ret_ref {
+            Some(re) => {
+                c = ast_compile_expr(c, &(*re), local_names, local_slots, local_types, local_count)
+            }
+            _ => {
+                c = emit_byte(c, 0x48); c = emit_byte(c, 0x31); c = emit_byte(c, 0xc0)
+            }
+        }
+        c = emit_byte(c, 0xc9)
+        c = emit_byte(c, 0xc3)
+        c
+    } else if expr.kind == ExprKind::ExprBlock {
+        let blk_ref: &Option<Box<Block>> = &expr.block
+        match *blk_ref {
+            Some(blk) => {
+                c = ast_compile_block(c, &(*blk), local_names, local_slots, local_types, local_count)
+            }
+            _ => {
+                c = emit_byte(c, 0x48); c = emit_byte(c, 0x31); c = emit_byte(c, 0xc0)
+            }
+        }
+        c
+    } else {
+        c = emit_byte(c, 0x48)
+        c = emit_byte(c, 0x31)
+        c = emit_byte(c, 0xc0)
+        c
+    }
+}
+fn ast_compile_block(code: CodeBuffer, blk: &Block,
+    local_names: [Name; 64], local_slots: [i64; 64], local_types: [i64; 64], local_count: i64
+) -> CodeBuffer with Mut, Panic, Div, IO {
+    var c = code
+    var ln = local_names
+    var ls = local_slots
+    var lt = local_types
+    var lc = local_count
+    var next_slot: i64 = 0
+    // Find max existing slot to avoid conflicts
+    var si: i64 = 0
+    while si < lc {
+        if ls[si as usize] >= next_slot {
+            next_slot = ls[si as usize] + 1
+        }
+        si = si + 1
+    }
+    let stmts_ref: &Option<Box<StmtList>> = &blk.stmts
+    var stmt_cur = stmts_ref
+    while true {
+        match *stmt_cur {
+            Some(sl) => {
+                let s: &Stmt = &(*sl).head
+                if s.kind == StmtKind::StmtLet || s.kind == StmtKind::StmtVar {
+                    let init_ref: &Option<Box<Expr>> = &s.expr
+                    match *init_ref {
+                        Some(ie) => {
+                            c = ast_compile_expr(c, &(*ie), ln, ls, lt, lc)
+                        }
+                        _ => {
+                            c = emit_byte(c, 0x48); c = emit_byte(c, 0x31); c = emit_byte(c, 0xc0)
+                        }
+                    }
+                    let slot = next_slot
+                    next_slot = next_slot + 1
+                    c = micro_store_rax(c, slot)
+                    var blk_init_float: i64 = 0
+                    match *init_ref {
+                        Some(ie2) => {
+                            if ast_expr_is_float(&(*ie2), ln, lt, lc) {
+                                blk_init_float = 1
+                            }
+                        }
+                        _ => {}
+                    }
+                    ln[lc as usize] = s.name
+                    ls[lc as usize] = slot
+                    lt[lc as usize] = blk_init_float
+                    lc = lc + 1
+                } else if s.kind == StmtKind::StmtExpr {
+                    let expr_ref: &Option<Box<Expr>> = &s.expr
+                    match *expr_ref {
+                        Some(ee) => {
+                            c = ast_compile_expr(c, &(*ee), ln, ls, lt, lc)
+                        }
+                        _ => {}
+                    }
+                } else if s.kind == StmtKind::StmtAssign {
+                    let rhs_ref: &Option<Box<Expr>> = &s.expr
+                    match *rhs_ref {
+                        Some(re) => {
+                            c = ast_compile_expr(c, &(*re), ln, ls, lt, lc)
+                        }
+                        _ => {}
+                    }
+                    let tgt_ref: &Option<Box<Expr>> = &s.target
+                    match *tgt_ref {
+                        Some(te) => {
+                            if (*te).kind == ExprKind::ExprIdent {
+                                var slot: i64 = -1
+                                var li = lc - 1
+                                while li >= 0 {
+                                    if ir_name_eq(ln[li as usize], (*te).name) {
+                                        slot = ls[li as usize]
+                                        li = -1
+                                    } else { li = li - 1 }
+                                }
+                                if slot >= 0 {
+                                    c = micro_store_rax(c, slot)
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                stmt_cur = &(*sl).tail
+            }
+            _ => break
+        }
+    }
+    c
+}
+
+fn ast_compile_fn_body(code: CodeBuffer, fd: &FnDef,
+    fn_names: [Name; 64], fn_count: i64
+) -> CodeBuffer with Mut, Panic, Div, IO {
+    var c = code
+    var local_names: [Name; 64] = [ir_empty_name(); 64]
+    var local_slots: [i64; 64] = [0; 64]
+    var local_types: [i64; 64] = [0; 64]
+    var local_count: i64 = 0
+    var next_slot: i64 = 0
+
+    // Register function names as locals with negative slots (for call resolution)
+    // This is a simple approach — function calls will be patched by the caller
+    var fi: i64 = 0
+    while fi < fn_count {
+        local_names[local_count as usize] = fn_names[fi as usize]
+        local_slots[local_count as usize] = 0 - 1000 - fi
+        local_count = local_count + 1
+        fi = fi + 1
+    }
+
+    // Register params: rdi=p0, rsi=p1, rdx=p2, rcx=p3
+    var param_ref: &Option<Box<ParamList>> = &fd.params
+    var param_idx: i64 = 0
+    while true {
+        match *param_ref {
+            Some(pl) => {
+                let p_name = (*pl).head.name
+                let p_slot = next_slot
+                next_slot = next_slot + 1
+                local_names[local_count as usize] = p_name
+                local_slots[local_count as usize] = p_slot
+                local_count = local_count + 1
+                // Spill param register to stack slot
+                if param_idx == 0 {
+                    // mov rax, rdi
+                    c = emit_byte(c, 0x48); c = emit_byte(c, 0x89); c = emit_byte(c, 0xf8)
+                } else if param_idx == 1 {
+                    c = emit_byte(c, 0x48); c = emit_byte(c, 0x89); c = emit_byte(c, 0xf0)
+                } else if param_idx == 2 {
+                    c = emit_byte(c, 0x48); c = emit_byte(c, 0x89); c = emit_byte(c, 0xd0)
+                } else if param_idx == 3 {
+                    c = emit_byte(c, 0x48); c = emit_byte(c, 0x89); c = emit_byte(c, 0xc8)
+                }
+                c = micro_store_rax(c, p_slot)
+                param_idx = param_idx + 1
+                param_ref = &(*pl).tail
+            }
+            _ => break
+        }
+    }
+
+    // Walk body stmts
+    let stmts_ref: &Option<Box<StmtList>> = &fd.body.stmts
+    var stmt_cur = stmts_ref
+    var last_expr_emitted = false
+    while true {
+        match *stmt_cur {
+            Some(sl) => {
+                let s: &Stmt = &(*sl).head
+                if s.kind == StmtKind::StmtLet || s.kind == StmtKind::StmtVar {
+                    // Compile init expression → rax
+                    let init_ref: &Option<Box<Expr>> = &s.expr
+                    match *init_ref {
+                        Some(ie) => {
+                            c = ast_compile_expr(c, &(*ie), local_names, local_slots, local_types, local_count)
+                        }
+                        _ => {
+                            // No init — load 0
+                            c = emit_byte(c, 0x48); c = emit_byte(c, 0x31); c = emit_byte(c, 0xc0)
+                        }
+                    }
+                    // Bind local
+                    let slot = next_slot
+                    next_slot = next_slot + 1
+                    c = micro_store_rax(c, slot)
+                    // Determine type from init expression
+                    var init_is_float: i64 = 0
+                    match *init_ref {
+                        Some(ie2) => {
+                            if ast_expr_is_float(&(*ie2), local_names, local_types, local_count) {
+                                init_is_float = 1
+                            }
+                        }
+                        _ => {}
+                    }
+                    local_names[local_count as usize] = s.name
+                    local_slots[local_count as usize] = slot
+                    local_types[local_count as usize] = init_is_float
+                    local_count = local_count + 1
+                    last_expr_emitted = false
+                } else if s.kind == StmtKind::StmtExpr {
+                    // Compile expression → rax
+                    let expr_ref: &Option<Box<Expr>> = &s.expr
+                    match *expr_ref {
+                        Some(ee) => {
+                            c = ast_compile_expr(c, &(*ee), local_names, local_slots, local_types, local_count)
+                            last_expr_emitted = true
+                        }
+                        _ => { last_expr_emitted = false }
+                    }
+                } else if s.kind == StmtKind::StmtAssign {
+                    // Compile RHS → rax
+                    let rhs_ref: &Option<Box<Expr>> = &s.expr
+                    match *rhs_ref {
+                        Some(re) => {
+                            c = ast_compile_expr(c, &(*re), local_names, local_slots, local_types, local_count)
+                        }
+                        _ => {}
+                    }
+                    // Store to target
+                    let tgt_ref: &Option<Box<Expr>> = &s.target
+                    match *tgt_ref {
+                        Some(te) => {
+                            if (*te).kind == ExprKind::ExprIdent {
+                                var slot: i64 = -1
+                                var li = local_count - 1
+                                while li >= 0 {
+                                    if ir_name_eq(local_names[li as usize], (*te).name) {
+                                        slot = local_slots[li as usize]
+                                        li = -1
+                                    } else { li = li - 1 }
+                                }
+                                if slot >= 0 {
+                                    c = micro_store_rax(c, slot)
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                    last_expr_emitted = false
+                }
+                stmt_cur = &(*sl).tail
+            }
+            _ => break
+        }
+    }
+    // rax already has the result of the last expression
+    c
+}
+
+fn main() -> i64 with IO, Mut, Panic, Div, Alloc {
+    let argc = arg_count()
+    if argc < 2 {
+        print("Usage: render_native_compile_driver_lean.sio <source.sio> <output>\n")
+        return 1
+    }
+    let source_path = get_arg(0)
+    let output_path = get_arg(1)
+
+    print("render_compile: source=")
+    print(source_path)
+    print(" output=")
+    print(output_path)
+    print("\n")
+
+    let prog = load_source_file(source_path)
+    if parser_last_error_count() > 0 {
+        print("render_compile: parse_error\n")
+        return 1
+    }
+
+    // ---- AST-direct compilation (bypasses IR lowering + JIT Box bugs) ----
+
+    // Collect function names and FnDef pointers from AST
+    var fn_names: [Name; 64] = [ir_empty_name(); 64]
+    var fn_count: i64 = 0
+    var main_fn_idx: i64 = -1
+
+    // First pass: collect function names
+    let items_ref: &Option<Box<ItemList>> = &prog.items
+    var item_cur = items_ref
+    while true {
+        match *item_cur {
+            Some(il) => {
+                let itm: &Item = &(*il).head
+                if itm.kind == ItemKind::ItemFn {
+                    fn_names[fn_count as usize] = itm.name
+                    let ns = str_from_bytes(itm.name.buf, itm.name.len)
+                    if str_eq(ns, "main") { main_fn_idx = fn_count }
+                    fn_count = fn_count + 1
+                }
+                item_cur = &(*il).tail
+            }
+            _ => break
+        }
+    }
+    print("render_compile: fn_count=")
+    print_int(fn_count)
+    print("\n")
+
+    if main_fn_idx < 0 {
+        print("render_compile: no_main\n")
+        return 4
+    }
+
+    // Second pass: compile each function body from AST
+    var code = code_buffer_new()
+    var fn_offsets: [i64; 256] = [-1; 256]
+    var call_patches: [i64; 256] = [0; 256]  // code offset of each call rel32
+    var call_targets: [i64; 256] = [0; 256]  // target fn index for each call
+    var call_patch_count: i64 = 0
+
+    item_cur = items_ref
+    var fn_idx: i64 = 0
+    while true {
+        match *item_cur {
+            Some(il) => {
+                let itm: &Item = &(*il).head
+                if itm.kind == ItemKind::ItemFn {
+                    let fdef_ref: &Option<Box<FnDef>> = &itm.fn_def
+                    match *fdef_ref {
+                        Some(fd) => {
+                            fn_offsets[fn_idx as usize] = code.len
+                            let ns = str_from_bytes(itm.name.buf, itm.name.len)
+                            print("render_compile: fn=")
+                            print(ns)
+
+                            // Estimate frame size (conservative: 64 slots)
+                            let frame_size: i64 = 512
+                            // Prologue: push rbp; mov rbp, rsp; sub rsp, frame_size
+                            code = emit_byte(code, 0x55)
+                            code = emit_byte(code, 0x48)
+                            code = emit_byte(code, 0x89)
+                            code = emit_byte(code, 0xe5)
+                            code = emit_byte(code, 0x48)
+                            code = emit_byte(code, 0x81)
+                            code = emit_byte(code, 0xec)
+                            code = emit_byte(code, frame_size & 0xFF)
+                            code = emit_byte(code, (frame_size >> 8) & 0xFF)
+                            code = emit_byte(code, (frame_size >> 16) & 0xFF)
+                            code = emit_byte(code, (frame_size >> 24) & 0xFF)
+
+                            // Compile body
+                            let code_before = code.len
+                            code = ast_compile_fn_body(code, &(*fd), fn_names, fn_count)
+
+                            // Epilogue: leave; ret
+                            code = emit_byte(code, 0xc9)
+                            code = emit_byte(code, 0xc3)
+
+                            let sz = code.len - fn_offsets[fn_idx as usize]
+                            print(" off=")
+                            print_int(fn_offsets[fn_idx as usize])
+                            print(" sz=")
+                            print_int(sz)
+                            print("\n")
+                        }
+                        _ => {
+                            fn_offsets[fn_idx as usize] = code.len
+                        }
+                    }
+                    fn_idx = fn_idx + 1
+                }
+                item_cur = &(*il).tail
+            }
+            _ => break
+        }
+    }
+
+    // Patch call instructions: scan for call rel32 placeholders
+    // In ast_compile_expr ExprCall, we emit call rel32 with 0 displacement
+    // We need to find these and patch them with the correct relative offset
+    // For now, we'll do a post-pass scan for 0xe8 0x00 0x00 0x00 0x00 patterns
+    // Post-pass: patch call rel32 instructions
+    // Scan for pattern: 0xe8 <fn_idx_lo> <fn_idx_hi> 0xCA 0xFE
+    var pi: i64 = 0
+    while pi < code.len - 4 {
+        if code.bytes[pi as usize] == (0xe8 as i8) &&
+           code.bytes[(pi + 3) as usize] == (0xCA as i8) &&
+           code.bytes[(pi + 4) as usize] == (0xFE as i8) {
+            let lo_byte = code.bytes[(pi + 1) as usize] as i64
+            let hi_byte = code.bytes[(pi + 2) as usize] as i64
+            let target_idx = (lo_byte & 0xFF) + ((hi_byte & 0xFF) << 8)
+            if target_idx >= 0 && target_idx < fn_count {
+                let target_off = fn_offsets[target_idx as usize]
+                let call_site = pi
+                let disp = target_off - (call_site + 5)
+                code.bytes[(pi + 1) as usize] = (disp & 0xFF) as i8
+                code.bytes[(pi + 2) as usize] = ((disp >> 8) & 0xFF) as i8
+                code.bytes[(pi + 3) as usize] = ((disp >> 16) & 0xFF) as i8
+                code.bytes[(pi + 4) as usize] = ((disp >> 24) & 0xFF) as i8
+            }
+        }
+        pi = pi + 1
+    }
+
+    // Inline trampoline: call main; mov edi,eax; mov eax,60; syscall
+    let tramp_off = code.len
+    let cs = code.len
+    let moff = fn_offsets[main_fn_idx as usize]
+    let cd = moff - (cs + 5)
+    code = emit_byte(code, 0xe8)
+    code = emit_byte(code, cd & 0xFF)
+    code = emit_byte(code, (cd >> 8) & 0xFF)
+    code = emit_byte(code, (cd >> 16) & 0xFF)
+    code = emit_byte(code, (cd >> 24) & 0xFF)
+    code = emit_byte(code, 0x89)
+    code = emit_byte(code, 0xc7)
+    code = emit_byte(code, 0xb8)
+    code = emit_byte(code, 0x3c)
+    code = emit_byte(code, 0x00)
+    code = emit_byte(code, 0x00)
+    code = emit_byte(code, 0x00)
+    code = emit_byte(code, 0x0f)
+    code = emit_byte(code, 0x05)
+
+    let total_code = code.len
+    print("render_compile: total_code=")
+    print_int(total_code)
+    print(" tramp=")
+    print_int(tramp_off)
+    print("\n")
+
+    // Inline ELF writer
+    let base_addr: i64 = 4194304
+    let text_off: i64 = 4096
+    let entry_va = base_addr + text_off + tramp_off
+
+    var out: [i8; 65536] = [0; 65536]
+    out[0 as usize] = 0x7f as i8
+    out[1 as usize] = 69 as i8
+    out[2 as usize] = 76 as i8
+    out[3 as usize] = 70 as i8
+    out[4 as usize] = 2 as i8
+    out[5 as usize] = 1 as i8
+    out[6 as usize] = 1 as i8
+    out[16 as usize] = 2 as i8
+    out[18 as usize] = 0x3e as i8
+    out[20 as usize] = 1 as i8
+    out[24 as usize] = (entry_va & 0xFF) as i8
+    out[25 as usize] = ((entry_va >> 8) & 0xFF) as i8
+    out[26 as usize] = ((entry_va >> 16) & 0xFF) as i8
+    out[27 as usize] = ((entry_va >> 24) & 0xFF) as i8
+    out[28 as usize] = ((entry_va >> 32) & 0xFF) as i8
+    out[29 as usize] = ((entry_va >> 40) & 0xFF) as i8
+    out[30 as usize] = ((entry_va >> 48) & 0xFF) as i8
+    out[31 as usize] = ((entry_va >> 56) & 0xFF) as i8
+    out[32 as usize] = 64 as i8
+    out[52 as usize] = 64 as i8
+    out[54 as usize] = 56 as i8
+    out[56 as usize] = 2 as i8
+    out[58 as usize] = 64 as i8
+    out[64 as usize] = 1 as i8
+    out[68 as usize] = 5 as i8
+    out[80 as usize] = (base_addr & 0xFF) as i8
+    out[81 as usize] = ((base_addr >> 8) & 0xFF) as i8
+    out[82 as usize] = ((base_addr >> 16) & 0xFF) as i8
+    out[83 as usize] = ((base_addr >> 24) & 0xFF) as i8
+    out[88 as usize] = (base_addr & 0xFF) as i8
+    out[89 as usize] = ((base_addr >> 8) & 0xFF) as i8
+    out[90 as usize] = ((base_addr >> 16) & 0xFF) as i8
+    out[91 as usize] = ((base_addr >> 24) & 0xFF) as i8
+    let fsz = text_off + total_code
+    out[96 as usize] = (fsz & 0xFF) as i8
+    out[97 as usize] = ((fsz >> 8) & 0xFF) as i8
+    out[98 as usize] = ((fsz >> 16) & 0xFF) as i8
+    out[99 as usize] = ((fsz >> 24) & 0xFF) as i8
+    out[104 as usize] = (fsz & 0xFF) as i8
+    out[105 as usize] = ((fsz >> 8) & 0xFF) as i8
+    out[106 as usize] = ((fsz >> 16) & 0xFF) as i8
+    out[107 as usize] = ((fsz >> 24) & 0xFF) as i8
+    out[112 as usize] = 0 as i8
+    out[113 as usize] = 16 as i8
+    out[120 as usize] = 0x51 as i8
+    out[121 as usize] = 0xe5 as i8
+    out[122 as usize] = 0x74 as i8
+    out[123 as usize] = 0x64 as i8
+    out[124 as usize] = 6 as i8
+
+    var ci: i64 = 0
+    while ci < total_code && (text_off + ci) < 65536 {
+        out[(text_off + ci) as usize] = code.bytes[ci as usize]
+        ci = ci + 1
+    }
+
+    let total_len = text_off + total_code
+    let write_ok = io_write_native_binary(output_path, out, total_len)
+    if !write_ok {
+        print("render_compile: write_error\n")
+        return 5
+    }
+
+    print("render_compile: ok written=")
+    print(output_path)
+    print(" size=")
+    print_int(total_len)
+    print("\n")
+    0
+}
