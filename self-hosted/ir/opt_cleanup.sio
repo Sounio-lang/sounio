@@ -200,6 +200,12 @@ fn ocp_const_fold(func: IrFunction) -> IrFunction with Mut, Div, Panic {
     var al_is_sub:  [bool; 256] = [false; 256]
     var al_sub_lhs: [i64;  256] = [-1;    256]
     var al_sub_rhs: [i64;  256] = [-1;    256]
+    // Sprint 116 Block AM: OR-mask tracking for superset elimination.
+    // (x | C1) | C2 where (C1 | C2) == C1 → IrCopy(src1).
+    // SOTA: LLVM InstCombineAndOrXor.cpp.
+    var am_or_valid:     [bool; 256] = [false; 256]
+    var am_or_var_src:   [i64;  256] = [-1;    256]
+    var am_or_const_val: [i64;  256] = [0;     256]
 
     var i: i64 = 0
     while i < result.instr_count {
@@ -633,6 +639,41 @@ fn ocp_const_fold(func: IrFunction) -> IrFunction with Mut, Div, Panic {
                             is_const[instr.dst as usize] = true
                             const_val[instr.dst as usize] = -1
                         }
+                    }
+                    // Sprint 116 Block AM: OR superset mask — (x | C1) | C2 where (C1 | C2) == C1 → IrCopy.
+                    if s2_known && s1 >= 0 && s1 < 256 && am_or_valid[s1 as usize] {
+                        let am_c1 = am_or_const_val[s1 as usize]
+                        if (am_c1 | v2) == am_c1 {
+                            result.instrs[i as usize] = ir_copy(instr.dst, s1)
+                            if instr.dst >= 0 && instr.dst < 256 {
+                                am_or_valid[instr.dst as usize]     = true
+                                am_or_var_src[instr.dst as usize]   = am_or_var_src[s1 as usize]
+                                am_or_const_val[instr.dst as usize] = am_c1
+                            }
+                        }
+                    }
+                    // Commutative: C2 | (x | C1) where (C1 | C2) == C1 → IrCopy.
+                    if s1_known && s2 >= 0 && s2 < 256 && am_or_valid[s2 as usize] {
+                        let am_c2 = am_or_const_val[s2 as usize]
+                        if (am_c2 | v1) == am_c2 {
+                            result.instrs[i as usize] = ir_copy(instr.dst, s2)
+                            if instr.dst >= 0 && instr.dst < 256 {
+                                am_or_valid[instr.dst as usize]     = true
+                                am_or_var_src[instr.dst as usize]   = am_or_var_src[s2 as usize]
+                                am_or_const_val[instr.dst as usize] = am_c2
+                            }
+                        }
+                    }
+                    // Track new OR-with-constant for chaining.
+                    if s2_known && !s1_known && instr.dst >= 0 && instr.dst < 256 {
+                        am_or_valid[instr.dst as usize]     = true
+                        am_or_var_src[instr.dst as usize]   = s1
+                        am_or_const_val[instr.dst as usize] = v2
+                    }
+                    if s1_known && !s2_known && instr.dst >= 0 && instr.dst < 256 {
+                        am_or_valid[instr.dst as usize]     = true
+                        am_or_var_src[instr.dst as usize]   = s2
+                        am_or_const_val[instr.dst as usize] = v1
                     }
                 }
                 if instr.bin_op == BinaryOp::OpBitXor {
