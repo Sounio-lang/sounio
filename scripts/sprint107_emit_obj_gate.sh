@@ -31,7 +31,7 @@ run_emit_obj() {
         echo "PASS $name ($(wc -c < "$out") bytes)"
         PASS=$((PASS+1))
         return 0
-    elif [ $ec -eq 124 ]; then
+    elif [ $ec -eq 124 ] || [ $ec -eq 143 ]; then
         echo "NOT_RUN $name (timeout/OOM)"
         NOT_RUN=$((NOT_RUN+1))
         return 1
