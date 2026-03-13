@@ -158,6 +158,9 @@ fn ocp_const_fold(func: IrFunction) -> IrFunction with Mut, Div, Panic {
     // Sprint 86 Block M: Negation tracking for double-neg and neg-arithmetic.
     var is_neg:  [bool; 256] = [false; 256]
     var neg_src: [i64;  256] = [-1;    256]
+    // Sprint 112 Block AI: Bitwise NOT via XOR(-1) tracking.
+    var is_bnot:  [bool; 256] = [false; 256]
+    var bnot_src: [i64;  256] = [-1;    256]
     // Sprint 88 Block O: Mul-div cancellation — track r = x * C (partial-const mul).
     // (x * C) / C → x.  SOTA: LLVM InstCombineMulDivRem.cpp; Cooper & Torczon §9.
     var mul_valid:   [bool; 256] = [false; 256]
@@ -722,6 +725,49 @@ fn ocp_const_fold(func: IrFunction) -> IrFunction with Mut, Div, Panic {
             // x - neg(y) → x + y
             if ag_instr.bin_op == BinaryOp::OpSub && ag_s2_ok && is_neg[ag_s2 as usize] {
                 result.instrs[i as usize] = ir_binop(ag_instr.dst, ag_s1, BinaryOp::OpAdd, neg_src[ag_s2 as usize])
+            }
+        }
+
+        // Sprint 112 Block AI: Bitwise NOT via XOR(-1) tracking + double-NOT.
+        // Track r = x ^ (-1) as NOT(x).  NOT(NOT(x)) → IrCopy(x).
+        // SOTA: LLVM InstCombineAndOrXor.cpp; Hacker's Delight §2-2.
+        if ocp_is_binop(result.instrs[i as usize].op) {
+            let bn_instr = result.instrs[i as usize]
+            if bn_instr.bin_op == BinaryOp::OpBitXor {
+                let bn_s1 = bn_instr.src1
+                let bn_s2 = bn_instr.src2
+                let bn_s1_ok = bn_s1 >= 0 && bn_s1 < 256
+                let bn_s2_ok = bn_s2 >= 0 && bn_s2 < 256
+                // x ^ (-1): s2 is const -1
+                if bn_s2_ok && is_const[bn_s2 as usize] && const_val[bn_s2 as usize] == -1 && bn_s1_ok {
+                    // Double-NOT: src1 was itself x ^ (-1)
+                    if is_bnot[bn_s1 as usize] {
+                        result.instrs[i as usize] = ir_copy(bn_instr.dst, bnot_src[bn_s1 as usize])
+                        if bn_instr.dst >= 0 && bn_instr.dst < 256 {
+                            is_bnot[bn_instr.dst as usize] = false
+                        }
+                    } else {
+                        // Track: dst = NOT(src1)
+                        if bn_instr.dst >= 0 && bn_instr.dst < 256 {
+                            is_bnot[bn_instr.dst as usize] = true
+                            bnot_src[bn_instr.dst as usize] = bn_s1
+                        }
+                    }
+                }
+                // (-1) ^ x: s1 is const -1 (commutative)
+                if bn_s1_ok && is_const[bn_s1 as usize] && const_val[bn_s1 as usize] == -1 && bn_s2_ok {
+                    if is_bnot[bn_s2 as usize] {
+                        result.instrs[i as usize] = ir_copy(bn_instr.dst, bnot_src[bn_s2 as usize])
+                        if bn_instr.dst >= 0 && bn_instr.dst < 256 {
+                            is_bnot[bn_instr.dst as usize] = false
+                        }
+                    } else {
+                        if bn_instr.dst >= 0 && bn_instr.dst < 256 {
+                            is_bnot[bn_instr.dst as usize] = true
+                            bnot_src[bn_instr.dst as usize] = bn_s2
+                        }
+                    }
+                }
             }
         }
 

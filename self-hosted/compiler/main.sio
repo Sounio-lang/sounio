@@ -8956,9 +8956,94 @@ fn compiler_main_test_mul_then_sub_no_fold() -> bool with Mut, Div, Panic {
     result.instrs[2].imm_i64 == 5
 }
 
+
+// Sprint 112 Block AI: Bitwise NOT via XOR(-1) — double-NOT elimination (T376-T381).
+// SOTA: LLVM InstCombineAndOrXor.cpp; Hacker's Delight §2-2.
+
+// T376: NOT(NOT(x)) → IrCopy(x).
+fn compiler_main_test_double_bnot() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(1, -1)
+    instrs[1] = ir_binop(2, 0, BinaryOp::OpBitXor, 1)
+    instrs[2] = ir_load_imm(3, -1)
+    instrs[3] = ir_binop(4, 2, BinaryOp::OpBitXor, 3)
+    let func   = cp_make_test_func(instrs, 4)
+    let result = ocp_const_fold(func)
+    result.instrs[3].op == IrOpcode::IrCopy
+        && result.instrs[3].src1 == 0
+}
+
+// T377: NOT(NOT(x)) with (-1) on left → IrCopy(x).
+fn compiler_main_test_double_bnot_commutative() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(1, -1)
+    instrs[1] = ir_binop(2, 1, BinaryOp::OpBitXor, 0)
+    instrs[2] = ir_load_imm(3, -1)
+    instrs[3] = ir_binop(4, 3, BinaryOp::OpBitXor, 2)
+    let func   = cp_make_test_func(instrs, 4)
+    let result = ocp_const_fold(func)
+    result.instrs[3].op == IrOpcode::IrCopy
+        && result.instrs[3].src1 == 0
+}
+
+// T378: Single NOT tracked but not folded.
+fn compiler_main_test_single_bnot_no_fold() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(1, -1)
+    instrs[1] = ir_binop(2, 0, BinaryOp::OpBitXor, 1)
+    let func   = cp_make_test_func(instrs, 2)
+    let result = ocp_const_fold(func)
+    result.instrs[1].op == IrOpcode::IrBinOp
+        && result.instrs[1].bin_op == BinaryOp::OpBitXor
+}
+
+// T379: XOR with non-(-1) constant → no NOT tracking.
+fn compiler_main_test_xor_not_neg1_no_track() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(1, 42)
+    instrs[1] = ir_binop(2, 0, BinaryOp::OpBitXor, 1)
+    instrs[2] = ir_load_imm(3, 42)
+    instrs[3] = ir_binop(4, 2, BinaryOp::OpBitXor, 3)
+    let func   = cp_make_test_func(instrs, 4)
+    let result = ocp_const_fold(func)
+    // Block L (assoc XOR): x ^ 42 ^ 42 → x ^ 0 → x ^ 0 (identity caught later)
+    // But NOT tracking should NOT fire — this is not double-NOT.
+    result.instrs[3].op != IrOpcode::IrCopy || result.instrs[3].src1 != 0
+}
+
+// T380: AND with NOT → no fold (just tracking).
+fn compiler_main_test_bnot_with_and() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(1, -1)
+    instrs[1] = ir_binop(2, 0, BinaryOp::OpBitXor, 1)
+    instrs[2] = ir_binop(3, 2, BinaryOp::OpBitAnd, 4)
+    let func   = cp_make_test_func(instrs, 3)
+    let result = ocp_const_fold(func)
+    result.instrs[2].op == IrOpcode::IrBinOp
+        && result.instrs[2].bin_op == BinaryOp::OpBitAnd
+}
+
+// T381: Triple NOT → single NOT (first two cancel).
+fn compiler_main_test_triple_bnot() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(1, -1)
+    instrs[1] = ir_binop(2, 0, BinaryOp::OpBitXor, 1)
+    instrs[2] = ir_load_imm(3, -1)
+    instrs[3] = ir_binop(4, 2, BinaryOp::OpBitXor, 3)
+    instrs[4] = ir_load_imm(5, -1)
+    instrs[5] = ir_binop(6, 4, BinaryOp::OpBitXor, 5)
+    let func   = cp_make_test_func(instrs, 6)
+    let result = ocp_const_fold(func)
+    // First double-NOT: instrs[3] → IrCopy(r0)
+    // Third NOT: r6 = r4 ^ (-1). r4 = IrCopy(r0), so via copy prop
+    // r6 = r0 ^ (-1) — still a NOT (not eliminated). Check instrs[3] is copy.
+    result.instrs[3].op == IrOpcode::IrCopy
+        && result.instrs[3].src1 == 0
+}
+
 fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
     var passed: i64 = 0
-    let total: i64 = 373
+    let total: i64 = 379
 
     println("=== compiler/main.sio self-tests ===")
 
@@ -11418,6 +11503,31 @@ fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
         println("  T375 OK: Sprint 111 Block AH: mul-then-sub no fold")
         passed = passed + 1
     } else { println("  FAIL: T375") }
+
+    if compiler_main_test_double_bnot() {
+        println("  T376 OK: Sprint 112 Block AI: NOT(NOT(x)) → x")
+        passed = passed + 1
+    } else { println("  FAIL: T376") }
+    if compiler_main_test_double_bnot_commutative() {
+        println("  T377 OK: Sprint 112 Block AI: commutative double-NOT")
+        passed = passed + 1
+    } else { println("  FAIL: T377") }
+    if compiler_main_test_single_bnot_no_fold() {
+        println("  T378 OK: Sprint 112 Block AI: single NOT no fold")
+        passed = passed + 1
+    } else { println("  FAIL: T378") }
+    if compiler_main_test_xor_not_neg1_no_track() {
+        println("  T379 OK: Sprint 112 Block AI: XOR non-(-1) no NOT track")
+        passed = passed + 1
+    } else { println("  FAIL: T379") }
+    if compiler_main_test_bnot_with_and() {
+        println("  T380 OK: Sprint 112 Block AI: NOT then AND unchanged")
+        passed = passed + 1
+    } else { println("  FAIL: T380") }
+    if compiler_main_test_triple_bnot() {
+        println("  T381 OK: Sprint 112 Block AI: triple NOT (first pair cancels)")
+        passed = passed + 1
+    } else { println("  FAIL: T381") }
 
     println("")
     println("compiler/main tests: " + int_to_string(passed) + "/" + int_to_string(total) + " passed")
