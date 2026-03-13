@@ -982,6 +982,80 @@ fn ast_compile_expr(code: CodeBuffer, expr: &Expr,
             c = emit_byte(c, 0x48); c = emit_byte(c, 0x83); c = emit_byte(c, 0xf0); c = emit_byte(c, 0x01)
         }
         c
+    } else if expr.kind == ExprKind::ExprCast {
+        // Type cast — integer casts are no-ops at x86-64 level
+        // Just compile the inner expression; the value in rax is the cast result
+        let cast_ref: &Option<Box<Expr>> = &expr.left
+        match *cast_ref {
+            Some(ie) => {
+                c = ast_compile_expr(c, &(*ie), local_names, local_slots, local_count)
+            }
+            _ => {
+                c = emit_byte(c, 0x48); c = emit_byte(c, 0x31); c = emit_byte(c, 0xc0)
+            }
+        }
+        c
+    } else if expr.kind == ExprKind::ExprFieldAccess {
+        // Field access: expr.left = base (a reference/pointer), expr.name = field name
+        // Compile base → rax (a pointer to the struct)
+        let base_ref: &Option<Box<Expr>> = &expr.left
+        match *base_ref {
+            Some(be) => {
+                c = ast_compile_expr(c, &(*be), local_names, local_slots, local_count)
+            }
+            _ => {
+                c = emit_byte(c, 0x48); c = emit_byte(c, 0x31); c = emit_byte(c, 0xc0)
+            }
+        }
+        // Load field via [rax + offset], using known field offsets for common structs
+        // CodeBuffer: bytes@0 (65536 bytes), len@65536
+        // Name: buf@0 (128 bytes), len@128
+        let fname = expr.name
+        let is_len = fname.len == 3 &&
+            fname.buf[0 as usize] == (108 as i8) &&  // l
+            fname.buf[1 as usize] == (101 as i8) &&  // e
+            fname.buf[2 as usize] == (110 as i8)     // n
+        let is_bytes = fname.len == 5 &&
+            fname.buf[0 as usize] == (98 as i8) &&   // b
+            fname.buf[1 as usize] == (121 as i8) &&  // y
+            fname.buf[2 as usize] == (116 as i8) &&  // t
+            fname.buf[3 as usize] == (101 as i8) &&  // e
+            fname.buf[4 as usize] == (115 as i8)     // s
+        let is_buf = fname.len == 3 &&
+            fname.buf[0 as usize] == (98 as i8) &&   // b
+            fname.buf[1 as usize] == (117 as i8) &&  // u
+            fname.buf[2 as usize] == (102 as i8)     // f
+        if is_len {
+            // CodeBuffer.len is at offset 65536; Name.len is at offset 128
+            // We detect by context: if base type known...
+            // Conservative: emit mov rax, [rax + 65536] (CodeBuffer)
+            // For now, must distinguish. Use a large disp32.
+            // TODO: type-aware dispatch. For now always CodeBuffer.len offset.
+            let off: i64 = 65536
+            c = emit_byte(c, 0x48); c = emit_byte(c, 0x8b); c = emit_byte(c, 0x80)
+            c = emit_byte(c, off & 0xFF); c = emit_byte(c, (off >> 8) & 0xFF)
+            c = emit_byte(c, (off >> 16) & 0xFF); c = emit_byte(c, (off >> 24) & 0xFF)
+        } else if is_bytes || is_buf {
+            // .bytes/.buf at offset 0 → rax is already the array start address
+            // leave rax as the base pointer (no load needed, it IS the array)
+        } else {
+            // Unknown field — load from [rax + 0] as fallback
+            c = emit_byte(c, 0x48); c = emit_byte(c, 0x8b); c = emit_byte(c, 0x00)
+        }
+        c
+    } else if expr.kind == ExprKind::ExprIndex {
+        // Array index: requires struct-aware stack allocation (not yet implemented)
+        // Return 0 safely to avoid crash
+        c = emit_byte(c, 0x48); c = emit_byte(c, 0x31); c = emit_byte(c, 0xc0)
+        c
+    } else if expr.kind == ExprKind::ExprBreak {
+        // break — emit jump to nearest loop end (placeholder: NOP for now)
+        c = emit_byte(c, 0x90)  // nop
+        c
+    } else if expr.kind == ExprKind::ExprContinue {
+        // continue — emit jump to loop top (placeholder: NOP for now)
+        c = emit_byte(c, 0x90)  // nop
+        c
     } else {
         c = emit_byte(c, 0x48)
         c = emit_byte(c, 0x31)
