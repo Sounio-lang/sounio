@@ -1871,6 +1871,22 @@ fn run_emit_obj_mode(args: ArgList, flag_index: i64) with IO, Mut, Panic, Div, A
     panic("emit-obj: write failed")
 }
 
+fn run_emit_so_mode(args: ArgList, flag_index: i64) with IO, Mut, Panic, Div, Alloc {
+    let source_path = compiler_mode_source_arg(args, flag_index, "--emit-so")
+    let output_path = compiler_mode_output_path(args, "output.so")
+    let ir_result = load_multimodule_ir(source_path)
+    if !ir_result.ok {
+        panic("emit-so: frontend failed")
+    }
+    let so = compile_to_shared(&ir_result.module)
+    let ok = io_write_elf_to_file(output_path, so)
+    if ok {
+        println("emit-so: " + output_path + " (" + int_to_string(so.len) + " bytes)")
+        return
+    }
+    panic("emit-so: write failed")
+}
+
 fn run_native_v2_preview_smoke() with IO, Mut, Panic, Div, Alloc {
     if !compiler_main_test_native_v2_compile_preview_scalar() {
         panic("native-v2 preview scalar smoke failed")
@@ -1918,6 +1934,7 @@ fn print_help() with IO {
     println("  --ir-roundtrip <source.sio>  Serialize + deserialize + reserialize IR")
     println("  --native-compile <source.sio>  Compile to native output (use -o/--output to choose path)")
     println("  --emit-obj <source.sio>  Emit relocatable .o object file (use -o to choose path)")
+    println("  --emit-so <source.sio>   Emit ET_DYN shared library .so (use -o to choose path)")
     println("  --native-v2-preview-smoke  Run dedicated native-v2 scalar/call/control/fail-closed smoke")
     println("  --native-v2-gc-retry-smoke Run dedicated native-v2 alloc-retry smoke")
     println("  --serve                Start IPC server (binary protocol on stdin/stdout)")
@@ -5207,7 +5224,7 @@ fn compiler_main_test_native_v2_compile_preview_scalar() -> bool with IO, Mut, P
     let spec = native_resolve_target("x86_64-linux", "auto", true)
     let result = compile_native_v2_preview(&compiler_main_make_native_v2_scalar_module(13), spec)
     if !result.ok || result.format_id != FORMAT_ELF64() || result.len <= 64 { return false }
-    io_write_native_binary("artifacts/omega/native_backend_v2_scalar_smoke.selftest.bin", result.bytes, result.len)
+    write_file("artifacts/omega/native_backend_v2_scalar_smoke.selftest.bin", result.bytes, result.len) == 0
 }
 
 fn compiler_main_test_native_v2_compile_preview_call_control() -> bool with Mut, Panic, Div, Alloc {
@@ -5469,7 +5486,7 @@ fn compiler_main_test_native_v2_compile_gc_retry_smoke() -> bool with IO, Mut, P
     let spec = native_resolve_target("x86_64-linux", "auto", true)
     let result = compile_native_v2_preview(&compiler_main_make_native_v2_gc_retry_module(), spec)
     if !result.ok || result.format_id != FORMAT_ELF64() || result.len <= 64 { return false }
-    io_write_native_binary("artifacts/omega/native_backend_v2_gc_retry_smoke.selftest.bin", result.bytes, result.len)
+    write_file("artifacts/omega/native_backend_v2_gc_retry_smoke.selftest.bin", result.bytes, result.len) == 0
 }
 
 fn compiler_main_make_native_v2_gc_model() -> NativeV2GcModel with Mut, Panic, Div {
@@ -8870,9 +8887,95 @@ fn compiler_main_test_double_neg_add_chain() -> bool with Mut, Div, Panic {
         && result.instrs[2].src1 == 0
 }
 
+
+// Sprint 111 Block AH: Add/sub chain constant merging (T370-T375).
+// SOTA: LLVM InstCombineAddSub.cpp; Click PLDI 1995 §4.
+
+// T370: (x - 3) - 5 → x - 8.
+fn compiler_main_test_sub_sub_chain() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(1, 3)
+    instrs[1] = ir_binop(2, 0, BinaryOp::OpSub, 1)
+    instrs[2] = ir_load_imm(3, 5)
+    instrs[3] = ir_binop(4, 2, BinaryOp::OpSub, 3)
+    let func   = cp_make_test_func(instrs, 4)
+    let result = ocp_const_fold(func)
+    result.instrs[3].bin_op == BinaryOp::OpSub
+        && result.instrs[3].src1 == 0
+        && result.instrs[2].imm_i64 == 8
+}
+
+// T371: (x - 3) + 10 → x + 7 (net positive).
+fn compiler_main_test_sub_add_net_pos() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(1, 3)
+    instrs[1] = ir_binop(2, 0, BinaryOp::OpSub, 1)
+    instrs[2] = ir_load_imm(3, 10)
+    instrs[3] = ir_binop(4, 2, BinaryOp::OpAdd, 3)
+    let func   = cp_make_test_func(instrs, 4)
+    let result = ocp_const_fold(func)
+    result.instrs[3].bin_op == BinaryOp::OpAdd
+        && result.instrs[3].src1 == 0
+        && result.instrs[2].imm_i64 == 7
+}
+
+// T372: (x - 10) + 3 → x - 7 (net negative).
+fn compiler_main_test_sub_add_net_neg() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(1, 10)
+    instrs[1] = ir_binop(2, 0, BinaryOp::OpSub, 1)
+    instrs[2] = ir_load_imm(3, 3)
+    instrs[3] = ir_binop(4, 2, BinaryOp::OpAdd, 3)
+    let func   = cp_make_test_func(instrs, 4)
+    let result = ocp_const_fold(func)
+    result.instrs[3].bin_op == BinaryOp::OpSub
+        && result.instrs[3].src1 == 0
+        && result.instrs[2].imm_i64 == 7
+}
+
+// T373: (x + 3) - 10 → x - 7 (add then sub, net negative).
+fn compiler_main_test_add_sub_net_neg() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(1, 3)
+    instrs[1] = ir_binop(2, 0, BinaryOp::OpAdd, 1)
+    instrs[2] = ir_load_imm(3, 10)
+    instrs[3] = ir_binop(4, 2, BinaryOp::OpSub, 3)
+    let func   = cp_make_test_func(instrs, 4)
+    let result = ocp_const_fold(func)
+    result.instrs[3].bin_op == BinaryOp::OpSub
+        && result.instrs[3].src1 == 0
+        && result.instrs[2].imm_i64 == 7
+}
+
+// T374: (x + 10) - 3 → x + 7 (add then sub, net positive).
+fn compiler_main_test_add_sub_net_pos() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(1, 10)
+    instrs[1] = ir_binop(2, 0, BinaryOp::OpAdd, 1)
+    instrs[2] = ir_load_imm(3, 3)
+    instrs[3] = ir_binop(4, 2, BinaryOp::OpSub, 3)
+    let func   = cp_make_test_func(instrs, 4)
+    let result = ocp_const_fold(func)
+    result.instrs[3].bin_op == BinaryOp::OpAdd
+        && result.instrs[3].src1 == 0
+        && result.instrs[2].imm_i64 == 7
+}
+
+// T375: Negative test — (x * 3) - 5 → no fold (mul not add/sub tracked).
+fn compiler_main_test_mul_then_sub_no_fold() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(1, 3)
+    instrs[1] = ir_binop(2, 0, BinaryOp::OpMul, 1)
+    instrs[2] = ir_load_imm(3, 5)
+    instrs[3] = ir_binop(4, 2, BinaryOp::OpSub, 3)
+    let func   = cp_make_test_func(instrs, 4)
+    let result = ocp_const_fold(func)
+    result.instrs[2].imm_i64 == 5
+}
+
 fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
     var passed: i64 = 0
-    let total: i64 = 367
+    let total: i64 = 373
 
     println("=== compiler/main.sio self-tests ===")
 
@@ -11308,6 +11411,31 @@ fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
         passed = passed + 1
     } else { println("  FAIL: T369") }
 
+    if compiler_main_test_sub_sub_chain() {
+        println("  T370 OK: Sprint 111 Block AH: (x-C1)-C2 → x-(C1+C2)")
+        passed = passed + 1
+    } else { println("  FAIL: T370") }
+    if compiler_main_test_sub_add_net_pos() {
+        println("  T371 OK: Sprint 111 Block AH: (x-C1)+C2 → x+(C2-C1)")
+        passed = passed + 1
+    } else { println("  FAIL: T371") }
+    if compiler_main_test_sub_add_net_neg() {
+        println("  T372 OK: Sprint 111 Block AH: (x-C1)+C2 → x-(C1-C2)")
+        passed = passed + 1
+    } else { println("  FAIL: T372") }
+    if compiler_main_test_add_sub_net_neg() {
+        println("  T373 OK: Sprint 111 Block AH: (x+C1)-C2 → x-(C2-C1)")
+        passed = passed + 1
+    } else { println("  FAIL: T373") }
+    if compiler_main_test_add_sub_net_pos() {
+        println("  T374 OK: Sprint 111 Block AH: (x+C1)-C2 → x+(C1-C2)")
+        passed = passed + 1
+    } else { println("  FAIL: T374") }
+    if compiler_main_test_mul_then_sub_no_fold() {
+        println("  T375 OK: Sprint 111 Block AH: mul-then-sub no fold")
+        passed = passed + 1
+    } else { println("  FAIL: T375") }
+
     println("")
     println("compiler/main tests: " + int_to_string(passed) + "/" + int_to_string(total) + " passed")
     if passed == total { 0 } else { 1 }
@@ -11389,6 +11517,9 @@ fn main() with IO, Mut, Panic, Div, Alloc {
             return
         } else if mode == "--emit-obj" {
             run_emit_obj_mode(args, arg_idx)
+            return
+        } else if mode == "--emit-so" {
+            run_emit_so_mode(args, arg_idx)
             return
         } else if mode == "--serve" {
             ipc_serve()

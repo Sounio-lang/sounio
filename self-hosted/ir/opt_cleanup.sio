@@ -375,6 +375,85 @@ fn ocp_const_fold(func: IrFunction) -> IrFunction with Mut, Div, Panic {
                             as_valid[instr.dst as usize] = false
                         }
                     }
+                    // Sprint 111 Block AH: Add/sub chain constant merging (unequal C).
+                    // (x - C1) - C2 → x - (C1+C2)
+                    // (x - C1) + C2 → x +/- |C2-C1|  (net offset)
+                    // (x + C1) - C2 → x +/- |C1-C2|  (net offset)
+                    // SOTA: LLVM InstCombineAddSub.cpp; Click PLDI 1995 §4.
+                    if s2_known && !s1_known && s1 >= 0 && s1 < 256 && as_valid[s1 as usize]
+                            && as_const_v[s1 as usize] != v2 {
+                        let ah_base = as_var_src[s1 as usize]
+                        let ah_c1   = as_const_v[s1 as usize]
+                        let ah_was_add = as_is_add[s1 as usize]
+                        let ah_c2_def = def_at[s2 as usize]
+                        if ah_c2_def >= 0 {
+                            // (x - C1) - C2 → x - (C1 + C2)
+                            if !ah_was_add && instr.bin_op == BinaryOp::OpSub {
+                                let ah_merged = ah_c1 + v2
+                                result.instrs[ah_c2_def as usize] = ir_load_imm(s2, ah_merged)
+                                result.instrs[i as usize] = ir_binop(instr.dst, ah_base, BinaryOp::OpSub, s2)
+                                const_val[s2 as usize] = ah_merged
+                                if instr.dst >= 0 && instr.dst < 256 {
+                                    as_valid[instr.dst as usize]   = true
+                                    as_var_src[instr.dst as usize] = ah_base
+                                    as_const_v[instr.dst as usize] = ah_merged
+                                    as_is_add[instr.dst as usize]  = false
+                                }
+                            }
+                            // (x - C1) + C2, C2 > C1 → x + (C2 - C1)
+                            if !ah_was_add && instr.bin_op == BinaryOp::OpAdd && v2 > ah_c1 {
+                                let ah_net = v2 - ah_c1
+                                result.instrs[ah_c2_def as usize] = ir_load_imm(s2, ah_net)
+                                result.instrs[i as usize] = ir_binop(instr.dst, ah_base, BinaryOp::OpAdd, s2)
+                                const_val[s2 as usize] = ah_net
+                                if instr.dst >= 0 && instr.dst < 256 {
+                                    as_valid[instr.dst as usize]   = true
+                                    as_var_src[instr.dst as usize] = ah_base
+                                    as_const_v[instr.dst as usize] = ah_net
+                                    as_is_add[instr.dst as usize]  = true
+                                }
+                            }
+                            // (x - C1) + C2, C2 < C1 → x - (C1 - C2)
+                            if !ah_was_add && instr.bin_op == BinaryOp::OpAdd && v2 < ah_c1 {
+                                let ah_net = ah_c1 - v2
+                                result.instrs[ah_c2_def as usize] = ir_load_imm(s2, ah_net)
+                                result.instrs[i as usize] = ir_binop(instr.dst, ah_base, BinaryOp::OpSub, s2)
+                                const_val[s2 as usize] = ah_net
+                                if instr.dst >= 0 && instr.dst < 256 {
+                                    as_valid[instr.dst as usize]   = true
+                                    as_var_src[instr.dst as usize] = ah_base
+                                    as_const_v[instr.dst as usize] = ah_net
+                                    as_is_add[instr.dst as usize]  = false
+                                }
+                            }
+                            // (x + C1) - C2, C2 > C1 → x - (C2 - C1)
+                            if ah_was_add && instr.bin_op == BinaryOp::OpSub && v2 > ah_c1 {
+                                let ah_net = v2 - ah_c1
+                                result.instrs[ah_c2_def as usize] = ir_load_imm(s2, ah_net)
+                                result.instrs[i as usize] = ir_binop(instr.dst, ah_base, BinaryOp::OpSub, s2)
+                                const_val[s2 as usize] = ah_net
+                                if instr.dst >= 0 && instr.dst < 256 {
+                                    as_valid[instr.dst as usize]   = true
+                                    as_var_src[instr.dst as usize] = ah_base
+                                    as_const_v[instr.dst as usize] = ah_net
+                                    as_is_add[instr.dst as usize]  = false
+                                }
+                            }
+                            // (x + C1) - C2, C2 < C1 → x + (C1 - C2)
+                            if ah_was_add && instr.bin_op == BinaryOp::OpSub && v2 < ah_c1 {
+                                let ah_net = ah_c1 - v2
+                                result.instrs[ah_c2_def as usize] = ir_load_imm(s2, ah_net)
+                                result.instrs[i as usize] = ir_binop(instr.dst, ah_base, BinaryOp::OpAdd, s2)
+                                const_val[s2 as usize] = ah_net
+                                if instr.dst >= 0 && instr.dst < 256 {
+                                    as_valid[instr.dst as usize]   = true
+                                    as_var_src[instr.dst as usize] = ah_base
+                                    as_const_v[instr.dst as usize] = ah_net
+                                    as_is_add[instr.dst as usize]  = true
+                                }
+                            }
+                        }
+                    }
                 }
                 // x + 0 → IrCopy(dst, x)
                 if instr.bin_op == BinaryOp::OpAdd {
