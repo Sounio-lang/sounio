@@ -2332,7 +2332,10 @@ fn native_v2_emit_machine_instr(nc: NativeCompiler, instr: MachineInstr) -> Nati
             } else {
                 let jmp_pos = c.code.len
                 c.code = emit_jmp_rel32(c.code)
-                record_label_patch_mut(&! c, label_id, jmp_pos + 1)
+                if c.label_patch_count < 256 {
+                    c.label_patches[c.label_patch_count as usize] = LabelPatch { code_offset: jmp_pos + 1, label_id: label_id }
+                    c.label_patch_count = c.label_patch_count + 1
+                }
             }
         }
         return c
@@ -2352,7 +2355,10 @@ fn native_v2_emit_machine_instr(nc: NativeCompiler, instr: MachineInstr) -> Nati
                 } else {
                     let jz_pos = c.code.len
                     c.code = emit_jz_rel32(c.code)
-                    record_label_patch_mut(&! c, label_id, jz_pos + 2)
+                    if c.label_patch_count < 256 {
+                        c.label_patches[c.label_patch_count as usize] = LabelPatch { code_offset: jz_pos + 2, label_id: label_id }
+                        c.label_patch_count = c.label_patch_count + 1
+                    }
                 }
             } else if instr.cond == MIR_CC_NZ {
                 if target >= 0 {
@@ -2364,7 +2370,10 @@ fn native_v2_emit_machine_instr(nc: NativeCompiler, instr: MachineInstr) -> Nati
                 } else {
                     let jnz_pos = c.code.len
                     c.code = emit_jnz_rel32(c.code)
-                    record_label_patch_mut(&! c, label_id, jnz_pos + 2)
+                    if c.label_patch_count < 256 {
+                        c.label_patches[c.label_patch_count as usize] = LabelPatch { code_offset: jnz_pos + 2, label_id: label_id }
+                        c.label_patch_count = c.label_patch_count + 1
+                    }
                 }
             }
         }
@@ -2372,7 +2381,9 @@ fn native_v2_emit_machine_instr(nc: NativeCompiler, instr: MachineInstr) -> Nati
     }
 
     if instr.opcode == MIR_OP_LABEL {
-        record_label_mut(&! c, instr.dst.value)
+        if instr.dst.value >= 0 && instr.dst.value < 256 {
+            c.label_offsets[instr.dst.value as usize] = c.code.len
+        }
         return c
     }
 
@@ -2402,7 +2413,12 @@ fn native_v2_emit_machine_instr(nc: NativeCompiler, instr: MachineInstr) -> Nati
         } else {
             c.code = emit_xor_rax_rax(c.code)
         }
-        record_return_jump_mut(&! c)
+        let rj_pos = c.code.len
+        c.code = emit_jmp_rel32(c.code)
+        if c.return_jump_count < 16 {
+            c.return_jumps[c.return_jump_count as usize] = rj_pos + 1
+            c.return_jump_count = c.return_jump_count + 1
+        }
         return c
     }
 
@@ -2658,7 +2674,129 @@ fn native_v2_emit_machine_function_mut(nc: &! NativeCompiler, func: MachineFunct
 
 fn compile_ir_function_v2(nc: NativeCompiler, func: IrFunction, machine_func: MachineFunction, fn_index: i64) -> NativeCompiler with Mut, Panic, Div, Alloc {
     var c = nc
-    compile_ir_function_v2_mut(&! c, func, machine_func, fn_index)
+
+    // --- reset_function_state (inlined, no &!) ---
+    c.return_jump_count = 0
+    var rst_i = 0
+    while rst_i < 256 {
+        c.label_offsets[rst_i as usize] = -1
+        rst_i = rst_i + 1
+    }
+    c.label_patch_count = 0
+    c.current_frame_size = 0
+    var rst_j = 0
+    while rst_j < 512 {
+        c.is_float_reg[rst_j as usize] = 0
+        rst_j = rst_j + 1
+    }
+    c.current_strategy = 0
+    var rst_ra = 0
+    while rst_ra < 512 {
+        c.vreg_to_preg[rst_ra as usize] = -2
+        c.vreg_spill_slots[rst_ra as usize] = -1
+        rst_ra = rst_ra + 1
+    }
+    c.current_machine_base_slots = 0
+    c.current_machine_spill_count = 0
+
+    c.fn_offsets[fn_index as usize] = c.code.len
+    c.symbols = symbol_data_add_name(c.symbols, fn_index, func.name.buf, func.name.len)
+
+    if name_is_print_int(func.name) { return emit_builtin_print_int(c) }
+    if name_is_print_char(func.name) { return emit_builtin_print_char(c) }
+    if name_is_print(func.name) { return emit_builtin_print_str(c) }
+    if name_is_get_arg_count(func.name) { return emit_builtin_get_arg_count(c) }
+    if name_is_get_arg(func.name) { return emit_builtin_get_arg(c) }
+    if name_is_str_len(func.name) { return emit_builtin_str_len(c) }
+    if name_is_str_eq(func.name) { return emit_builtin_str_eq(c) }
+    if name_is_str_slice(func.name) { return emit_builtin_str_slice(c) }
+    if name_is_starts_with(func.name) { return emit_builtin_starts_with(c) }
+    if name_is_str_concat(func.name) { return emit_builtin_str_concat(c) }
+    if name_is_read_file(func.name) { return emit_builtin_read_file(c) }
+    if name_is_write_file(func.name) { return emit_builtin_write_file(c) }
+    if name_is_file_size(func.name) { return emit_builtin_file_size(c) }
+
+    c.current_strategy = func.compile_strategy
+
+    // --- native_v2_run_machine_regalloc (inlined, no &!) ---
+    let ra_pair = native_v2_machine_ra_instrs(machine_func)
+    var ra_state = liveness_compute_intervals(ra_pair.0, ra_pair.1)
+    ra_state = regalloc_linear_scan(ra_state, native_target_policy_x86_allocation_order_count())
+
+    var ra_v: i64 = 0
+    while ra_v < ra_state.count {
+        let ra_interval = ra_state.intervals[ra_v as usize]
+        let ra_vreg = ra_interval.vreg
+        if ra_vreg >= 0 && ra_vreg < 512 {
+            if ra_interval.assigned_preg >= 0 {
+                c.vreg_to_preg[ra_vreg as usize] = native_target_policy_x86_allocation_order_reg_id(ra_interval.assigned_preg)
+            } else {
+                c.vreg_to_preg[ra_vreg as usize] = ra_interval.assigned_preg
+            }
+            c.vreg_spill_slots[ra_vreg as usize] = ra_interval.spill_slot
+        }
+        ra_v = ra_v + 1
+    }
+    c.current_machine_base_slots = machine_func.temp_count
+    c.current_machine_spill_count = ra_state.spill_count
+
+    let preg_mask = nc_used_allocatable_preg_mask(c, machine_func.temp_count)
+    let frame_size = x86_align_frame_size_for_calls(native_v2_local_frame_size(machine_func.temp_count, c.current_machine_spill_count), preg_mask)
+    c.current_frame_size = frame_size
+
+    c.code = emit_prologue_with_preg_mask(c.code, frame_size, preg_mask)
+
+    // --- spill_ir_params (inlined, no &!) ---
+    var sp_i = 0
+    while sp_i < func.param_count && sp_i < 6 {
+        let sp_vreg = func.param_regs[sp_i as usize]
+        if sp_vreg >= 0 {
+            let sp_preg = param_reg(sp_i)
+            let sp_offset = ir_slot_offset(sp_vreg)
+            c.code = emit_store_reg_rbp_disp32(c.code, sp_offset, sp_preg)
+        }
+        sp_i = sp_i + 1
+    }
+
+    // --- native_v2_emit_machine_function (inlined, no &!) ---
+    let fn_offset = c.fn_offsets[fn_index as usize]
+    var mi: i64 = 0
+    while mi < machine_func.blocks[0].instr_count {
+        let em_instr = machine_func.blocks[0].instrs[mi as usize]
+        if native_v2_machine_instr_is_safepoint(em_instr) {
+            let sp_kind = if em_instr.opcode == MIR_OP_CALL { NATIVE_V2_SAFEPOINT_CALL() } else { NATIVE_V2_SAFEPOINT_RET() }
+            c = native_v2_record_safepoint(c, fn_index, sp_kind, mi, c.code.len - fn_offset, machine_func.temp_count, c.current_machine_spill_count)
+        }
+        c = native_v2_emit_machine_instr(c, em_instr)
+        mi = mi + 1
+    }
+
+    let epilogue_offset = c.code.len
+    c.code = emit_epilogue_with_preg_mask(c.code, preg_mask)
+
+    // --- patch_return_jumps (inlined, no &!) ---
+    var rj_i = 0
+    while rj_i < c.return_jump_count {
+        let rj_imm_offset = c.return_jumps[rj_i as usize]
+        let rj_next_ip = rj_imm_offset + 4
+        let rj_rel = epilogue_offset - rj_next_ip
+        c.code = patch_u32_le(c.code, rj_imm_offset, rj_rel)
+        rj_i = rj_i + 1
+    }
+
+    // --- patch_label_forwards (inlined, no &!) ---
+    var lf_i = 0
+    while lf_i < c.label_patch_count {
+        let lf_patch = c.label_patches[lf_i as usize]
+        let lf_target = c.label_offsets[lf_patch.label_id as usize]
+        if lf_target >= 0 {
+            let lf_next_ip = lf_patch.code_offset + 4
+            let lf_rel = lf_target - lf_next_ip
+            c.code = patch_u32_le(c.code, lf_patch.code_offset, lf_rel)
+        }
+        lf_i = lf_i + 1
+    }
+
     c
 }
 
@@ -4196,4 +4334,140 @@ fn compile_to_obj(module: &IrModule) -> Elf64Binary with Mut, Panic, Div, Alloc 
 
     let rela = collect_rela_section(nc.relocs, sym_first_fn, sym_rodata, sym_data)
     finalize_elf64_relocatable(nc.code, nc.rodata, nc.data, rela, nc.symbols, nc.fn_offsets, nc.fn_count)
+}
+
+// Sprint 110: ET_DYN shared object (.so) emission
+fn so_emit_dyn_elf_hdr(bin: &! Elf64Binary, phnum: i64) with Mut, Panic, Div {
+    elf_emit_byte_ref(bin, elf_magic_0())
+    elf_emit_byte_ref(bin, elf_magic_1())
+    elf_emit_byte_ref(bin, elf_magic_2())
+    elf_emit_byte_ref(bin, elf_magic_3())
+    elf_emit_byte_ref(bin, elf_class_64())
+    elf_emit_byte_ref(bin, elf_data_lsb())
+    elf_emit_byte_ref(bin, elf_version())
+    elf_emit_byte_ref(bin, elf_osabi_sysv())
+    var pad = 0
+    while pad < 8 { elf_emit_byte_ref(bin, 0); pad = pad + 1 }
+    elf_emit_u16_ref(bin, 3)                    // e_type = ET_DYN
+    elf_emit_u16_ref(bin, elf_machine_x86_64())
+    elf_emit_u32_ref(bin, elf_version())
+    elf_emit_u64_ref(bin, 0)
+    elf_emit_u64_ref(bin, 64)
+    elf_emit_u64_ref(bin, 0)    // e_shoff patched later
+    elf_emit_u32_ref(bin, 0)
+    elf_emit_u16_ref(bin, 64)
+    elf_emit_u16_ref(bin, 56)
+    elf_emit_u16_ref(bin, phnum)
+    elf_emit_u16_ref(bin, 64)
+    elf_emit_u16_ref(bin, 0)    // e_shnum patched later
+    elf_emit_u16_ref(bin, 0)    // e_shstrndx patched later
+}
+
+fn so_emit_phdr(bin: &! Elf64Binary, p_type: i64, p_flags: i64, p_offset: i64, p_vaddr: i64, p_filesz: i64, p_memsz: i64, p_align: i64) with Mut, Panic, Div {
+    elf_emit_u32_ref(bin, p_type)
+    elf_emit_u32_ref(bin, p_flags)
+    elf_emit_u64_ref(bin, p_offset)
+    elf_emit_u64_ref(bin, p_vaddr)
+    elf_emit_u64_ref(bin, p_vaddr)
+    elf_emit_u64_ref(bin, p_filesz)
+    elf_emit_u64_ref(bin, p_memsz)
+    elf_emit_u64_ref(bin, p_align)
+}
+
+fn finalize_elf64_shared(code: CodeBuffer, symbols: SymbolData, fn_offsets: [i64; 256], export_names: [Name; 64], export_count: i64) -> Elf64Binary with Mut, Panic, Div {
+    var bin = elf_binary_new()
+    so_emit_dyn_elf_hdr(&! bin, 2)
+    let phdr0_pos = bin.len
+    so_emit_phdr(&! bin, 1, 5, 0, 0, 0, 0, 4096)
+    let phdr1_pos = bin.len
+    so_emit_phdr(&! bin, 2, 6, 0, 0, 0, 0, 8)
+    while bin.len < 4096 { elf_emit_byte_ref(&! bin, 0) }
+    let text_offset = bin.len
+    var ti = 0
+    while ti < code.len { elf_emit_byte_ref(&! bin, code.bytes[ti as usize] as i64); ti = ti + 1 }
+    while bin.len % 8 != 0 { elf_emit_byte_ref(&! bin, 0) }
+    let dynsym_offset = bin.len
+    emit_symtab_entry_ref(&! bin, 0, 0, 0, 0, 0, 0)
+    var dynstr_buf: [i8; 2048] = [0; 2048]
+    var dynstr_len: i64 = 1
+    var dynstr_name_offsets: [i64; 64] = [0; 64]
+    var ei = 0
+    while ei < export_count {
+        dynstr_name_offsets[ei as usize] = dynstr_len
+        let en = export_names[ei as usize]
+        var ni = 0
+        while ni < en.len {
+            if dynstr_len < 2048 { dynstr_buf[dynstr_len as usize] = en.buf[ni as usize]; dynstr_len = dynstr_len + 1 }
+            ni = ni + 1
+        }
+        if dynstr_len < 2048 { dynstr_buf[dynstr_len as usize] = 0; dynstr_len = dynstr_len + 1 }
+        emit_symtab_entry_ref(&! bin, dynstr_name_offsets[ei as usize], 2, 1, 1, 4096, 0)
+        ei = ei + 1
+    }
+    let dynsym_size = bin.len - dynsym_offset
+    let dynsym_count = 1 + export_count
+    let dynstr_offset = bin.len
+    var dsi = 0
+    while dsi < dynstr_len { elf_emit_byte_ref(&! bin, dynstr_buf[dsi as usize] as i64); dsi = dsi + 1 }
+    let dynstr_size = dynstr_len
+    while bin.len % 4 != 0 { elf_emit_byte_ref(&! bin, 0) }
+    let hash_offset = bin.len
+    elf_emit_u32_ref(&! bin, 1)
+    elf_emit_u32_ref(&! bin, dynsym_count)
+    let bucket_val: i64 = if export_count > 0 { 1 } else { 0 }
+    elf_emit_u32_ref(&! bin, bucket_val)
+    elf_emit_u32_ref(&! bin, 0)
+    var ci = 1
+    while ci < dynsym_count { let next_ci: i64 = if ci + 1 < dynsym_count { ci + 1 } else { 0 }; elf_emit_u32_ref(&! bin, next_ci); ci = ci + 1 }
+    let hash_size = bin.len - hash_offset
+    while bin.len % 8 != 0 { elf_emit_byte_ref(&! bin, 0) }
+    let dynamic_offset = bin.len
+    elf_emit_u64_ref(&! bin, 4); elf_emit_u64_ref(&! bin, hash_offset)
+    elf_emit_u64_ref(&! bin, 5); elf_emit_u64_ref(&! bin, dynstr_offset)
+    elf_emit_u64_ref(&! bin, 6); elf_emit_u64_ref(&! bin, dynsym_offset)
+    elf_emit_u64_ref(&! bin, 10); elf_emit_u64_ref(&! bin, dynstr_size)
+    elf_emit_u64_ref(&! bin, 11); elf_emit_u64_ref(&! bin, 24)
+    elf_emit_u64_ref(&! bin, 0); elf_emit_u64_ref(&! bin, 0)
+    let dynamic_size = bin.len - dynamic_offset
+    let shstrtab_offset = bin.len
+    elf_emit_byte_ref(&! bin, 0)
+    elf_emit_byte_ref(&! bin, 46); elf_emit_byte_ref(&! bin, 116); elf_emit_byte_ref(&! bin, 101); elf_emit_byte_ref(&! bin, 120); elf_emit_byte_ref(&! bin, 116); elf_emit_byte_ref(&! bin, 0)
+    elf_emit_byte_ref(&! bin, 46); elf_emit_byte_ref(&! bin, 100); elf_emit_byte_ref(&! bin, 121); elf_emit_byte_ref(&! bin, 110); elf_emit_byte_ref(&! bin, 115); elf_emit_byte_ref(&! bin, 121); elf_emit_byte_ref(&! bin, 109); elf_emit_byte_ref(&! bin, 0)
+    elf_emit_byte_ref(&! bin, 46); elf_emit_byte_ref(&! bin, 100); elf_emit_byte_ref(&! bin, 121); elf_emit_byte_ref(&! bin, 110); elf_emit_byte_ref(&! bin, 115); elf_emit_byte_ref(&! bin, 116); elf_emit_byte_ref(&! bin, 114); elf_emit_byte_ref(&! bin, 0)
+    elf_emit_byte_ref(&! bin, 46); elf_emit_byte_ref(&! bin, 104); elf_emit_byte_ref(&! bin, 97); elf_emit_byte_ref(&! bin, 115); elf_emit_byte_ref(&! bin, 104); elf_emit_byte_ref(&! bin, 0)
+    elf_emit_byte_ref(&! bin, 46); elf_emit_byte_ref(&! bin, 100); elf_emit_byte_ref(&! bin, 121); elf_emit_byte_ref(&! bin, 110); elf_emit_byte_ref(&! bin, 97); elf_emit_byte_ref(&! bin, 109); elf_emit_byte_ref(&! bin, 105); elf_emit_byte_ref(&! bin, 99); elf_emit_byte_ref(&! bin, 0)
+    elf_emit_byte_ref(&! bin, 46); elf_emit_byte_ref(&! bin, 115); elf_emit_byte_ref(&! bin, 104); elf_emit_byte_ref(&! bin, 115); elf_emit_byte_ref(&! bin, 116); elf_emit_byte_ref(&! bin, 114); elf_emit_byte_ref(&! bin, 116); elf_emit_byte_ref(&! bin, 97); elf_emit_byte_ref(&! bin, 98); elf_emit_byte_ref(&! bin, 0)
+    let shstrtab_size = bin.len - shstrtab_offset
+    while bin.len % 8 != 0 { elf_emit_byte_ref(&! bin, 0) }
+    let shoff = bin.len
+    let shnum: i64 = 7
+    let shstrndx: i64 = 6
+    emit_section_header_ref(&! bin, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+    emit_section_header_ref(&! bin, 1, 1, 6, 4096, text_offset, code.len, 0, 0, 16, 0)
+    emit_section_header_ref(&! bin, 7, 11, 2, dynsym_offset, dynsym_offset, dynsym_size, 3, 1, 8, 24)
+    emit_section_header_ref(&! bin, 15, 3, 2, dynstr_offset, dynstr_offset, dynstr_size, 0, 0, 1, 0)
+    emit_section_header_ref(&! bin, 23, 5, 2, hash_offset, hash_offset, hash_size, 2, 0, 4, 4)
+    emit_section_header_ref(&! bin, 29, 6, 3, dynamic_offset, dynamic_offset, dynamic_size, 3, 0, 8, 16)
+    emit_section_header_ref(&! bin, 38, 3, 0, 0, shstrtab_offset, shstrtab_size, 0, 0, 1, 0)
+    let total_size = bin.len
+    elf_patch_u64_ref(&! bin, 40, shoff)
+    elf_patch_u16_ref(&! bin, 60, shnum)
+    elf_patch_u16_ref(&! bin, 62, shstrndx)
+    elf_patch_u64_ref(&! bin, phdr0_pos + 8, 0)
+    elf_patch_u64_ref(&! bin, phdr0_pos + 16, 0)
+    elf_patch_u64_ref(&! bin, phdr0_pos + 24, 0)
+    elf_patch_u64_ref(&! bin, phdr0_pos + 32, total_size)
+    elf_patch_u64_ref(&! bin, phdr0_pos + 40, total_size)
+    elf_patch_u64_ref(&! bin, phdr1_pos + 8, dynamic_offset)
+    elf_patch_u64_ref(&! bin, phdr1_pos + 16, dynamic_offset)
+    elf_patch_u64_ref(&! bin, phdr1_pos + 24, dynamic_offset)
+    elf_patch_u64_ref(&! bin, phdr1_pos + 32, dynamic_size)
+    elf_patch_u64_ref(&! bin, phdr1_pos + 40, dynamic_size)
+    bin
+}
+
+fn compile_to_shared(module: &IrModule) -> Elf64Binary with Mut, Panic, Div, Alloc {
+    var nc = compiler_new()
+    nc = compile_module_for_obj(nc, module)
+    finalize_elf64_shared(nc.code, nc.symbols, nc.fn_offsets, module.export_names, module.export_count)
 }

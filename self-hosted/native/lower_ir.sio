@@ -6,7 +6,7 @@ use parser::ast::{BinaryOp, UnaryOp}
 use ir::ir::{IrInstr, IrOpcode, IrRegList, IR_MAX_FUNCS, IrFunction}
 use native::regalloc::*
 use native::encode::*
-use native::reloc::{RelocationTable, add_call_reloc, add_rip_reloc, add_data_section_reloc, patch_u32_le}
+use native::reloc::*
 use native::elf::{StringTable, string_table_add, data_section_add_f64}
 use native::regs::{param_reg}
 use native::frame::*
@@ -182,6 +182,8 @@ fn lower_instr(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut, P
         lower_return(nc, instr)
     } else if instr.op == IrOpcode::IrCall {
         lower_call(nc, instr)
+    } else if instr.op == IrOpcode::IrCallExtern {
+        lower_call_extern(nc, instr)
     } else if instr.op == IrOpcode::IrLabel {
         lower_label(nc, instr)
     } else if instr.op == IrOpcode::IrJump {
@@ -880,6 +882,30 @@ fn lower_call(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut, Pa
         c.code = emit_store_rax_rbp_disp32(c.code, ir_slot_offset(instr.dst))
     }
 
+    c
+}
+
+// Sprint 108: extern "C" fn call — SysV ABI, extern reloc
+fn lower_call_extern(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut, Panic, Div, Alloc {
+    var c = nc
+    let argc = instr.arg_count
+    c = push_arg_list(c, instr.call_args)
+    var i = argc - 1
+    if i >= 6 { i = 5 }
+    while i >= 0 {
+        c.code = emit_pop_arg_reg(c.code, i)
+        i = i - 1
+    }
+    let call_pos = c.code.len
+    c.code = emit_call_rel32_placeholder(c.code)
+    let er_idx = c.extern_relocs.count
+    if er_idx < 128 {
+        c.extern_relocs.entries[er_idx as usize] = ExternReloc { offset: call_pos + 1, sym_buf: instr.name.buf, sym_len: instr.name.len }
+        c.extern_relocs.count = er_idx + 1
+    }
+    if instr.dst >= 0 {
+        c.code = emit_store_rax_rbp_disp32(c.code, ir_slot_offset(instr.dst))
+    }
     c
 }
 
