@@ -698,6 +698,165 @@ fn micro_compile_function(code: CodeBuffer, func: IrFunction, fn_offsets: [i64; 
 }
 
 // ============================================================================
+// Builtin function emitters for static ELF binaries
+// ============================================================================
+
+// Emit print_int(n: i64) — converts n to decimal, writes to stdout
+// n arrives in rdi. Uses stack buffer for itoa.
+// Layout: push rbp; mov rbp,rsp; sub rsp,32 (32-byte buffer at [rbp-32..rbp-1])
+fn ast_emit_print_int_builtin(code: CodeBuffer) -> CodeBuffer with Mut, Panic, Div {
+    var c = code
+    // prologue
+    c = emit_byte(c, 0x55)                   // push rbp
+    c = emit_byte(c, 0x48); c = emit_byte(c, 0x89); c = emit_byte(c, 0xe5) // mov rbp, rsp
+    c = emit_byte(c, 0x48); c = emit_byte(c, 0x83); c = emit_byte(c, 0xec); c = emit_byte(c, 0x30) // sub rsp, 48
+
+    // mov rax, rdi (n)
+    c = emit_byte(c, 0x48); c = emit_byte(c, 0x89); c = emit_byte(c, 0xf8)
+
+    // r8 = write position = rbp - 1 (end of buffer, write right-to-left)
+    // lea r8, [rbp-1]
+    c = emit_byte(c, 0x4c); c = emit_byte(c, 0x8d); c = emit_byte(c, 0x45); c = emit_byte(c, 0xFF)
+
+    // Handle sign: if rax < 0, negate and set r9=1
+    // xor r9d, r9d  (sign flag)
+    c = emit_byte(c, 0x45); c = emit_byte(c, 0x31); c = emit_byte(c, 0xc9)
+    // test rax, rax
+    c = emit_byte(c, 0x48); c = emit_byte(c, 0x85); c = emit_byte(c, 0xc0)
+    // jns +6 (skip neg rax [3 bytes] + mov r9b,1 [3 bytes])
+    c = emit_byte(c, 0x79); c = emit_byte(c, 0x06)
+    // neg rax
+    c = emit_byte(c, 0x48); c = emit_byte(c, 0xf7); c = emit_byte(c, 0xd8)
+    // mov r9d, 1
+    c = emit_byte(c, 0x41); c = emit_byte(c, 0xb1); c = emit_byte(c, 0x01)
+
+    // Handle zero: test rax, rax; jnz itoa_loop
+    // test rax, rax
+    c = emit_byte(c, 0x48); c = emit_byte(c, 0x85); c = emit_byte(c, 0xc0)
+    // jnz +9 (skip zero handling: 4 bytes mov + 3 bytes dec + 2 bytes jmp)
+    c = emit_byte(c, 0x75); c = emit_byte(c, 0x09)
+    // mov byte [r8], '0' (0x30)
+    c = emit_byte(c, 0x41); c = emit_byte(c, 0xc6); c = emit_byte(c, 0x00); c = emit_byte(c, 0x30)
+    // dec r8 (so do_write's inc r8 points to first digit)
+    c = emit_byte(c, 0x49); c = emit_byte(c, 0xff); c = emit_byte(c, 0xc8)
+    // jmp do_write
+    let jmp_zero_site = c.len
+    c = emit_byte(c, 0xeb); c = emit_byte(c, 0x00) // placeholder
+
+    // itoa_loop:
+    let itoa_loop = c.len
+    // xor edx, edx
+    c = emit_byte(c, 0x31); c = emit_byte(c, 0xd2)
+    // mov rcx, 10
+    c = emit_byte(c, 0x48); c = emit_byte(c, 0xc7); c = emit_byte(c, 0xc1)
+    c = emit_byte(c, 0x0a); c = emit_byte(c, 0x00); c = emit_byte(c, 0x00); c = emit_byte(c, 0x00)
+    // div rcx  (rax = quotient, rdx = remainder)
+    c = emit_byte(c, 0x48); c = emit_byte(c, 0xf7); c = emit_byte(c, 0xf1)
+    // add dl, '0'
+    c = emit_byte(c, 0x80); c = emit_byte(c, 0xc2); c = emit_byte(c, 0x30)
+    // mov [r8], dl
+    c = emit_byte(c, 0x41); c = emit_byte(c, 0x88); c = emit_byte(c, 0x10)
+    // dec r8
+    c = emit_byte(c, 0x49); c = emit_byte(c, 0xff); c = emit_byte(c, 0xc8)
+    // test rax, rax
+    c = emit_byte(c, 0x48); c = emit_byte(c, 0x85); c = emit_byte(c, 0xc0)
+    // jnz itoa_loop
+    let jnz_back = c.len
+    let back_disp = itoa_loop - (jnz_back + 2)
+    c = emit_byte(c, 0x75); c = emit_byte(c, back_disp & 0xFF)
+
+    // Check sign: test r9b, r9b; jz do_write
+    // test r9b, r9b
+    c = emit_byte(c, 0x45); c = emit_byte(c, 0x84); c = emit_byte(c, 0xc9)
+    // jz +7 (skip: mov byte [4] + dec r8 [3] = 7 bytes)
+    c = emit_byte(c, 0x74); c = emit_byte(c, 0x07)
+    // mov byte [r8], '-' (0x2d)
+    c = emit_byte(c, 0x41); c = emit_byte(c, 0xc6); c = emit_byte(c, 0x00); c = emit_byte(c, 0x2d)
+    // dec r8
+    c = emit_byte(c, 0x49); c = emit_byte(c, 0xff); c = emit_byte(c, 0xc8)
+
+    // do_write:
+    let do_write = c.len
+    // Patch jmp_zero_site
+    let zero_disp = do_write - (jmp_zero_site + 2)
+    c.bytes[(jmp_zero_site + 1) as usize] = (zero_disp & 0xFF) as i8
+
+    // r8+1 = start of string, rbp-1 = last byte written
+    // inc r8 (point to first digit)
+    c = emit_byte(c, 0x49); c = emit_byte(c, 0xff); c = emit_byte(c, 0xc0)
+    // lea rsi, [r8]  (buf ptr for sys_write)
+    c = emit_byte(c, 0x4c); c = emit_byte(c, 0x89); c = emit_byte(c, 0xc6)
+    // lea rdx, [rbp]  (end+1)
+    c = emit_byte(c, 0x48); c = emit_byte(c, 0x89); c = emit_byte(c, 0xea)
+    // sub rdx, r8  (len = rbp - r8... but r8 was already incremented)
+    // Actually: len = (rbp) - (r8) where r8 = first digit, last byte at [rbp-1]
+    // so len = rbp - r8
+    c = emit_byte(c, 0x4c); c = emit_byte(c, 0x29); c = emit_byte(c, 0xc2) // sub rdx, r8
+
+    // sys_write(1, rsi, rdx): mov edi, 1; mov eax, 1; syscall
+    c = emit_byte(c, 0xbf); c = emit_byte(c, 0x01); c = emit_byte(c, 0x00); c = emit_byte(c, 0x00); c = emit_byte(c, 0x00)
+    c = emit_byte(c, 0xb8); c = emit_byte(c, 0x01); c = emit_byte(c, 0x00); c = emit_byte(c, 0x00); c = emit_byte(c, 0x00)
+    c = emit_byte(c, 0x0f); c = emit_byte(c, 0x05)
+
+    // epilogue: leave; ret
+    c = emit_byte(c, 0xc9)
+    c = emit_byte(c, 0xc3)
+    c
+}
+
+// Emit inline print of a string literal: embeds bytes in code, emits sys_write
+// str_buf/str_len = the string literal content from AST Name field
+fn ast_emit_inline_print_str(code: CodeBuffer, str_buf: [i8; 128], str_len: i64) -> CodeBuffer with Mut, Panic, Div {
+    var c = code
+    // jmp over string data
+    let jmp_site = c.len
+    c = emit_byte(c, 0xeb); c = emit_byte(c, 0x00) // placeholder disp8
+
+    // Embed string bytes
+    let str_start = c.len
+    var si: i64 = 0
+    while si < str_len {
+        c = emit_byte(c, str_buf[si as usize] as i64)
+        si = si + 1
+    }
+
+    // Patch jmp disp8
+    let jmp_disp = c.len - (jmp_site + 2)
+    c.bytes[(jmp_site + 1) as usize] = (jmp_disp & 0xFF) as i8
+
+    // lea rsi, [rip - (current - str_start)]
+    // The string is at str_start in the code buffer. At runtime, we need its VA.
+    // RIP-relative: [rip + disp32] where rip = address after this instruction
+    // lea rsi, [rip + disp32]: 48 8d 35 <disp32>
+    let lea_pos = c.len
+    c = emit_byte(c, 0x48); c = emit_byte(c, 0x8d); c = emit_byte(c, 0x35)
+    // disp32 = str_start - (lea_pos + 7)  (7 = size of LEA instruction)
+    let lea_disp = str_start - (lea_pos + 7)
+    c = emit_byte(c, lea_disp & 0xFF)
+    c = emit_byte(c, (lea_disp >> 8) & 0xFF)
+    c = emit_byte(c, (lea_disp >> 16) & 0xFF)
+    c = emit_byte(c, (lea_disp >> 24) & 0xFF)
+
+    // mov edx, str_len  (len for sys_write)
+    c = emit_byte(c, 0xba)
+    c = emit_byte(c, str_len & 0xFF)
+    c = emit_byte(c, (str_len >> 8) & 0xFF)
+    c = emit_byte(c, (str_len >> 16) & 0xFF)
+    c = emit_byte(c, (str_len >> 24) & 0xFF)
+
+    // mov edi, 1  (fd = stdout)
+    c = emit_byte(c, 0xbf); c = emit_byte(c, 0x01); c = emit_byte(c, 0x00); c = emit_byte(c, 0x00); c = emit_byte(c, 0x00)
+
+    // mov eax, 1  (sys_write)
+    c = emit_byte(c, 0xb8); c = emit_byte(c, 0x01); c = emit_byte(c, 0x00); c = emit_byte(c, 0x00); c = emit_byte(c, 0x00)
+
+    // syscall
+    c = emit_byte(c, 0x0f); c = emit_byte(c, 0x05)
+
+    c
+}
+
+// ============================================================================
 // Direct AST to x86-64 compiler (bypasses IR lowering entirely)
 // Uses inline arrays for locals (no Box) to avoid JIT by-value corruption.
 // ============================================================================
@@ -990,41 +1149,65 @@ fn ast_compile_expr(code: CodeBuffer, expr: &Expr,
             Some(ce) => { callee_name = (*ce).name }
             _ => {}
         }
-        var fn_slot: i64 = -1
-        var li = local_count - 1
-        while li >= 0 {
-            if ir_name_eq(local_names[li as usize], callee_name) {
-                fn_slot = local_slots[li as usize]
-                li = -1
-            } else {
-                li = li - 1
-            }
-        }
-        var arg_count: i64 = 0
-        let args_ref: &Option<Box<ExprList>> = &expr.args
-        var current_arg = args_ref
-        while true {
-            match *current_arg {
-                Some(al) => {
-                    c = ast_compile_expr(c, &(*al).head, local_names, local_slots, local_types, local_count)
-                    c = emit_byte(c, 0x50)
-                    arg_count = arg_count + 1
-                    current_arg = &(*al).tail
+
+        // Check for print("string_literal") — emit inline syscall
+        var is_print_str = false
+        if callee_name.len == 5 &&
+           callee_name.buf[0 as usize] == (112 as i8) &&
+           callee_name.buf[1 as usize] == (114 as i8) &&
+           callee_name.buf[2 as usize] == (105 as i8) &&
+           callee_name.buf[3 as usize] == (110 as i8) &&
+           callee_name.buf[4 as usize] == (116 as i8) {
+            // Check if first arg is a string literal
+            let pargs: &Option<Box<ExprList>> = &expr.args
+            match *pargs {
+                Some(pal) => {
+                    if (*pal).head.kind == ExprKind::ExprStringLit {
+                        c = ast_emit_inline_print_str(c, (*pal).head.name.buf, (*pal).head.name.len)
+                        is_print_str = true
+                    }
                 }
-                _ => break
+                _ => {}
             }
         }
-        if arg_count >= 4 { c = emit_byte(c, 0x59) }
-        if arg_count >= 3 { c = emit_byte(c, 0x5a) }
-        if arg_count >= 2 { c = emit_byte(c, 0x5e) }
-        if arg_count >= 1 { c = emit_byte(c, 0x5f) }
-        if fn_slot <= -1000 {
-            let target_idx = 0 - (fn_slot + 1000)
-            c = emit_byte(c, 0xe8)
-            c = emit_byte(c, target_idx & 0xFF)
-            c = emit_byte(c, (target_idx >> 8) & 0xFF)
-            c = emit_byte(c, 0xCA as i64)
-            c = emit_byte(c, 0xFE as i64)
+
+        if !is_print_str {
+            var fn_slot: i64 = -1
+            var li = local_count - 1
+            while li >= 0 {
+                if ir_name_eq(local_names[li as usize], callee_name) {
+                    fn_slot = local_slots[li as usize]
+                    li = -1
+                } else {
+                    li = li - 1
+                }
+            }
+            var arg_count: i64 = 0
+            let args_ref: &Option<Box<ExprList>> = &expr.args
+            var current_arg = args_ref
+            while true {
+                match *current_arg {
+                    Some(al) => {
+                        c = ast_compile_expr(c, &(*al).head, local_names, local_slots, local_types, local_count)
+                        c = emit_byte(c, 0x50)
+                        arg_count = arg_count + 1
+                        current_arg = &(*al).tail
+                    }
+                    _ => break
+                }
+            }
+            if arg_count >= 4 { c = emit_byte(c, 0x59) }
+            if arg_count >= 3 { c = emit_byte(c, 0x5a) }
+            if arg_count >= 2 { c = emit_byte(c, 0x5e) }
+            if arg_count >= 1 { c = emit_byte(c, 0x5f) }
+            if fn_slot <= -1000 {
+                let target_idx = 0 - (fn_slot + 1000)
+                c = emit_byte(c, 0xe8)
+                c = emit_byte(c, target_idx & 0xFF)
+                c = emit_byte(c, (target_idx >> 8) & 0xFF)
+                c = emit_byte(c, 0xCA as i64)
+                c = emit_byte(c, 0xFE as i64)
+            }
         }
         c
     } else if expr.kind == ExprKind::ExprIf {
@@ -1442,21 +1625,65 @@ fn main() -> i64 with IO, Mut, Panic, Div, Alloc {
             _ => break
         }
     }
+    // Register builtins after source functions
+    var print_int_idx = fn_count
+    var piname = ir_empty_name()
+    piname.buf[0 as usize] = 112 as i8  // p
+    piname.buf[1 as usize] = 114 as i8  // r
+    piname.buf[2 as usize] = 105 as i8  // i
+    piname.buf[3 as usize] = 110 as i8  // n
+    piname.buf[4 as usize] = 116 as i8  // t
+    piname.buf[5 as usize] = 95 as i8   // _
+    piname.buf[6 as usize] = 105 as i8  // i
+    piname.buf[7 as usize] = 110 as i8  // n
+    piname.buf[8 as usize] = 116 as i8  // t
+    piname.len = 9
+    fn_names[fn_count as usize] = piname
+    fn_return_types[fn_count as usize] = 0
+    fn_count = fn_count + 1
+
+    // "print" registered so ast_expr_is_float can find it, but calls are inlined
+    var print_idx = fn_count
+    var prname = ir_empty_name()
+    prname.buf[0 as usize] = 112 as i8  // p
+    prname.buf[1 as usize] = 114 as i8  // r
+    prname.buf[2 as usize] = 105 as i8  // i
+    prname.buf[3 as usize] = 110 as i8  // n
+    prname.buf[4 as usize] = 116 as i8  // t
+    prname.len = 5
+    fn_names[fn_count as usize] = prname
+    fn_return_types[fn_count as usize] = 0
+    fn_count = fn_count + 1
+
     print("render_compile: fn_count=")
     print_int(fn_count)
-    print("\n")
+    print(" (incl builtins)\n")
 
     if main_fn_idx < 0 {
         print("render_compile: no_main\n")
         return 4
     }
 
-    // Second pass: compile each function body from AST
+    // Second pass: emit builtins + compile source functions
     var code = code_buffer_new()
     var fn_offsets: [i64; 256] = [-1; 256]
     var call_patches: [i64; 256] = [0; 256]  // code offset of each call rel32
     var call_targets: [i64; 256] = [0; 256]  // target fn index for each call
     var call_patch_count: i64 = 0
+
+    // Emit print_int builtin
+    fn_offsets[print_int_idx as usize] = code.len
+    code = ast_emit_print_int_builtin(code)
+    print("render_compile: builtin=print_int off=")
+    print_int(fn_offsets[print_int_idx as usize])
+    print(" sz=")
+    print_int(code.len - fn_offsets[print_int_idx as usize])
+    print("\n")
+
+    // print() is handled inline at call sites — emit a no-op stub
+    fn_offsets[print_idx as usize] = code.len
+    // Minimal stub: ret (in case it's called without string literal arg)
+    code = emit_byte(code, 0xc3)
 
     item_cur = items_ref
     var fn_idx: i64 = 0
