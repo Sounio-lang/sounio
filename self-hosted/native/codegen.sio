@@ -1156,6 +1156,24 @@ fn name_is_log(n: Name) -> bool with Mut, Panic, Div {
     true
 }
 
+// Sprint 121: sin builtin name recognizer
+fn name_is_sin(n: Name) -> bool with Mut, Panic, Div {
+    if n.len != 3 { return false }
+    if n.buf[0] != 115 as i8 { return false }   // 's'
+    if n.buf[1] != 105 as i8 { return false }   // 'i'
+    if n.buf[2] != 110 as i8 { return false }   // 'n'
+    true
+}
+
+// Sprint 121: cos builtin name recognizer
+fn name_is_cos(n: Name) -> bool with Mut, Panic, Div {
+    if n.len != 3 { return false }
+    if n.buf[0] != 99 as i8 { return false }    // 'c'
+    if n.buf[1] != 111 as i8 { return false }   // 'o'
+    if n.buf[2] != 115 as i8 { return false }   // 's'
+    true
+}
+
 
 // ============================================================================
 // Builtin runtime function emitters (hand-coded x86-64)
@@ -2275,6 +2293,197 @@ fn emit_builtin_log(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
 }
 
 
+// Sprint 121: sin builtin — range reduction + degree-7 minimax polynomial
+// Algorithm: sin(x) ≈ x(1 - x²(1/6 - x²(1/120 - x²/5040)))
+// Range reduction: n = round(x/(2π)), r = x - n*2π
+// Stack layout: [rbp-8]=r, [rbp-16]=r², [rbp-24]=scratch
+fn emit_builtin_sin(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
+    var c = nc
+
+    // .rodata constants
+    c.rodata = data_section_add_f64(c.rodata, 0x401921FB54442D18)   // 2π
+    let two_pi_off = c.rodata.last_offset
+    c.rodata = data_section_add_f64(c.rodata, 0x3FC45F306DC9C883)   // 1/(2π)
+    let inv_two_pi_off = c.rodata.last_offset
+    c.rodata = data_section_add_f64(c.rodata, 0x3FF0000000000000)   // 1.0
+    let one_off = c.rodata.last_offset
+    c.rodata = data_section_add_f64(c.rodata, 0x3FC5555555555555)   // 1/6
+    let c3_off = c.rodata.last_offset
+    c.rodata = data_section_add_f64(c.rodata, 0x3F81111111111111)   // 1/120
+    let c5_off = c.rodata.last_offset
+    c.rodata = data_section_add_f64(c.rodata, 0x3F2A01A01A01A01A)   // 1/5040
+    let c7_off = c.rodata.last_offset
+
+    c.code = emit_push_rbp(c.code)
+    c.code = emit_mov_rbp_rsp(c.code)
+    c.code = emit_sub_rsp_imm32(c.code, 48)
+
+    // rdi = f64 bit pattern of x
+    c.code = emit_mov_reg_reg(c.code, 0, 7)           // mov rax, rdi
+    c.code = emit_movq_xmm0_rax(c.code)               // xmm0 = x
+
+    // Step 1: Range reduction — n = round(x/(2π)), r = x - n*2π
+    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -24)   // [rbp-24] = x (save)
+    let sin_inv2pi = c.code.len
+    c.code = emit_movsd_xmm1_rip_disp32(c.code, 0)
+    c.relocs = add_rip_reloc(c.relocs, sin_inv2pi + 4, inv_two_pi_off)
+    c.code = emit_mulsd_xmm0_xmm1(c.code)             // xmm0 = x/(2π)
+    c.code = emit_cvtsd2si_rax_xmm0(c.code)           // rax = round(x/(2π))
+    c.code = emit_cvtsi2sd_xmm0_rax(c.code)           // xmm0 = n (as f64)
+    let sin_2pi = c.code.len
+    c.code = emit_movsd_xmm1_rip_disp32(c.code, 0)
+    c.relocs = add_rip_reloc(c.relocs, sin_2pi + 4, two_pi_off)
+    c.code = emit_mulsd_xmm0_xmm1(c.code)             // xmm0 = n*2π
+    // r = x - n*2π
+    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -32)   // [rbp-32] = n*2π
+    c.code = emit_movsd_xmm0_rbp_disp8(c.code, -24)   // xmm0 = x
+    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -32)   // xmm1 = n*2π
+    c.code = emit_subsd_xmm0_xmm1(c.code)             // xmm0 = r = x - n*2π
+
+    // Store r and compute r²
+    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -8)    // [rbp-8] = r
+    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -24)   // [rbp-24] = r (copy for mul)
+    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -24)   // xmm1 = r
+    c.code = emit_mulsd_xmm0_xmm1(c.code)             // xmm0 = r²
+    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -16)   // [rbp-16] = r²
+
+    // Step 2: Horner — sin(x) = r * (1 - r²(1/6 - r²(1/120 - r²*1/5040)))
+    // Innermost: s = 1/5040
+    let sin_c7 = c.code.len
+    c.code = emit_movsd_xmm0_rip_disp32(c.code, 0)
+    c.relocs = add_rip_reloc(c.relocs, sin_c7 + 4, c7_off)
+    // s = 1/120 - r² * s
+    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -16)   // xmm1 = r²
+    c.code = emit_mulsd_xmm0_xmm1(c.code)             // xmm0 = r²/5040
+    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -24)   // save
+    let sin_c5 = c.code.len
+    c.code = emit_movsd_xmm0_rip_disp32(c.code, 0)
+    c.relocs = add_rip_reloc(c.relocs, sin_c5 + 4, c5_off)
+    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -24)   // xmm1 = r²/5040
+    c.code = emit_subsd_xmm0_xmm1(c.code)             // xmm0 = 1/120 - r²/5040
+    // s = 1/6 - r² * s
+    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -16)   // xmm1 = r²
+    c.code = emit_mulsd_xmm0_xmm1(c.code)             // xmm0 = r²*(1/120 - r²/5040)
+    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -24)   // save
+    let sin_c3 = c.code.len
+    c.code = emit_movsd_xmm0_rip_disp32(c.code, 0)
+    c.relocs = add_rip_reloc(c.relocs, sin_c3 + 4, c3_off)
+    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -24)   // xmm1 = r²*(...)
+    c.code = emit_subsd_xmm0_xmm1(c.code)             // xmm0 = 1/6 - r²*(...)
+    // s = 1 - r² * s
+    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -16)   // xmm1 = r²
+    c.code = emit_mulsd_xmm0_xmm1(c.code)             // xmm0 = r²*(1/6 - ...)
+    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -24)   // save
+    let sin_one = c.code.len
+    c.code = emit_movsd_xmm0_rip_disp32(c.code, 0)
+    c.relocs = add_rip_reloc(c.relocs, sin_one + 4, one_off)
+    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -24)   // xmm1 = r²*(...)
+    c.code = emit_subsd_xmm0_xmm1(c.code)             // xmm0 = 1 - r²*(...)
+    // result = r * s
+    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -8)    // xmm1 = r
+    c.code = emit_mulsd_xmm0_xmm1(c.code)             // xmm0 = sin(x)
+
+    // Return as bit pattern in rax
+    c.code = emit_movq_rax_xmm0(c.code)
+    c.code = emit_add_rsp_imm32(c.code, 48)
+    c.code = emit_pop_rbp(c.code)
+    c.code = emit_ret(c.code)
+    c
+}
+
+// Sprint 121: cos builtin — range reduction + degree-6 minimax polynomial
+// Algorithm: cos(x) ≈ 1 - x²(1/2 - x²(1/24 - x²/720))
+// Same range reduction as sin, same stack layout
+fn emit_builtin_cos(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
+    var c = nc
+
+    // .rodata constants
+    c.rodata = data_section_add_f64(c.rodata, 0x401921FB54442D18)   // 2π
+    let cos_two_pi_off = c.rodata.last_offset
+    c.rodata = data_section_add_f64(c.rodata, 0x3FC45F306DC9C883)   // 1/(2π)
+    let cos_inv_two_pi_off = c.rodata.last_offset
+    c.rodata = data_section_add_f64(c.rodata, 0x3FF0000000000000)   // 1.0
+    let cos_one_off = c.rodata.last_offset
+    c.rodata = data_section_add_f64(c.rodata, 0x3FE0000000000000)   // 1/2
+    let cos_c2_off = c.rodata.last_offset
+    c.rodata = data_section_add_f64(c.rodata, 0x3FA5555555555555)   // 1/24
+    let cos_c4_off = c.rodata.last_offset
+    c.rodata = data_section_add_f64(c.rodata, 0x3F56C16C16C16C17)   // 1/720
+    let cos_c6_off = c.rodata.last_offset
+
+    c.code = emit_push_rbp(c.code)
+    c.code = emit_mov_rbp_rsp(c.code)
+    c.code = emit_sub_rsp_imm32(c.code, 48)
+
+    // rdi = f64 bit pattern of x
+    c.code = emit_mov_reg_reg(c.code, 0, 7)           // mov rax, rdi
+    c.code = emit_movq_xmm0_rax(c.code)               // xmm0 = x
+
+    // Step 1: Range reduction (same as sin)
+    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -24)   // [rbp-24] = x
+    let cos_inv2pi = c.code.len
+    c.code = emit_movsd_xmm1_rip_disp32(c.code, 0)
+    c.relocs = add_rip_reloc(c.relocs, cos_inv2pi + 4, cos_inv_two_pi_off)
+    c.code = emit_mulsd_xmm0_xmm1(c.code)             // xmm0 = x/(2π)
+    c.code = emit_cvtsd2si_rax_xmm0(c.code)           // rax = round(x/(2π))
+    c.code = emit_cvtsi2sd_xmm0_rax(c.code)           // xmm0 = n
+    let cos_2pi = c.code.len
+    c.code = emit_movsd_xmm1_rip_disp32(c.code, 0)
+    c.relocs = add_rip_reloc(c.relocs, cos_2pi + 4, cos_two_pi_off)
+    c.code = emit_mulsd_xmm0_xmm1(c.code)             // xmm0 = n*2π
+    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -32)   // [rbp-32] = n*2π
+    c.code = emit_movsd_xmm0_rbp_disp8(c.code, -24)   // xmm0 = x
+    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -32)   // xmm1 = n*2π
+    c.code = emit_subsd_xmm0_xmm1(c.code)             // xmm0 = r
+
+    // Compute r²
+    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -8)    // [rbp-8] = r
+    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -24)   // copy for mul
+    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -24)   // xmm1 = r
+    c.code = emit_mulsd_xmm0_xmm1(c.code)             // xmm0 = r²
+    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -16)   // [rbp-16] = r²
+
+    // Step 2: Horner — cos(x) = 1 - r²(1/2 - r²(1/24 - r²/720))
+    // Innermost: s = 1/720
+    let cos_c6 = c.code.len
+    c.code = emit_movsd_xmm0_rip_disp32(c.code, 0)
+    c.relocs = add_rip_reloc(c.relocs, cos_c6 + 4, cos_c6_off)
+    // s = 1/24 - r² * s
+    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -16)   // xmm1 = r²
+    c.code = emit_mulsd_xmm0_xmm1(c.code)             // xmm0 = r²/720
+    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -24)   // save
+    let cos_c4 = c.code.len
+    c.code = emit_movsd_xmm0_rip_disp32(c.code, 0)
+    c.relocs = add_rip_reloc(c.relocs, cos_c4 + 4, cos_c4_off)
+    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -24)
+    c.code = emit_subsd_xmm0_xmm1(c.code)             // xmm0 = 1/24 - r²/720
+    // s = 1/2 - r² * s
+    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -16)   // xmm1 = r²
+    c.code = emit_mulsd_xmm0_xmm1(c.code)             // xmm0 = r²*(1/24 - r²/720)
+    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -24)   // save
+    let cos_c2 = c.code.len
+    c.code = emit_movsd_xmm0_rip_disp32(c.code, 0)
+    c.relocs = add_rip_reloc(c.relocs, cos_c2 + 4, cos_c2_off)
+    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -24)
+    c.code = emit_subsd_xmm0_xmm1(c.code)             // xmm0 = 1/2 - r²*(...)
+    // result = 1 - r² * s
+    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -16)   // xmm1 = r²
+    c.code = emit_mulsd_xmm0_xmm1(c.code)             // xmm0 = r²*(1/2 - ...)
+    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -24)   // save
+    let cos_one = c.code.len
+    c.code = emit_movsd_xmm0_rip_disp32(c.code, 0)
+    c.relocs = add_rip_reloc(c.relocs, cos_one + 4, cos_one_off)
+    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -24)
+    c.code = emit_subsd_xmm0_xmm1(c.code)             // xmm0 = cos(x)
+
+    // Return as bit pattern in rax
+    c.code = emit_movq_rax_xmm0(c.code)
+    c.code = emit_add_rsp_imm32(c.code, 48)
+    c.code = emit_pop_rbp(c.code)
+    c.code = emit_ret(c.code)
+    c
+}
+
 // Sprint 118: print_f64 builtin — multiply-and-truncate f64 → stdout
 fn emit_builtin_print_f64(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
     var c = nc
@@ -2627,6 +2836,8 @@ fn compile_ir_function(nc: NativeCompiler, func: IrFunction, fn_index: i64) -> N
     if name_is_print_f64(func.name) { return emit_builtin_print_f64(c) }
     if name_is_exp(func.name) { return emit_builtin_exp(c) }
     if name_is_log(func.name) { return emit_builtin_log(c) }
+    if name_is_sin(func.name) { return emit_builtin_sin(c) }
+    if name_is_cos(func.name) { return emit_builtin_cos(c) }
 
     // Sprint 38: Set compile strategy from IR function metadata
     c.current_strategy = func.compile_strategy
@@ -3280,6 +3491,8 @@ fn compile_ir_function_v2(nc: NativeCompiler, func: IrFunction, machine_func: Ma
     if name_is_print_f64(func.name) { return emit_builtin_print_f64(c) }
     if name_is_exp(func.name) { return emit_builtin_exp(c) }
     if name_is_log(func.name) { return emit_builtin_log(c) }
+    if name_is_sin(func.name) { return emit_builtin_sin(c) }
+    if name_is_cos(func.name) { return emit_builtin_cos(c) }
 
     c.current_strategy = func.compile_strategy
 
@@ -3388,6 +3601,8 @@ fn compile_ir_function_v2_mut(nc: &! NativeCompiler, func: IrFunction, machine_f
     if name_is_print_f64(func.name) { (*nc) = emit_builtin_print_f64((*nc)); return }
     if name_is_exp(func.name) { (*nc) = emit_builtin_exp((*nc)); return }
     if name_is_log(func.name) { (*nc) = emit_builtin_log((*nc)); return }
+    if name_is_sin(func.name) { (*nc) = emit_builtin_sin((*nc)); return }
+    if name_is_cos(func.name) { (*nc) = emit_builtin_cos((*nc)); return }
 
     (*nc).current_strategy = func.compile_strategy
     native_v2_run_machine_regalloc_mut(nc, machine_func)
