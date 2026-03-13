@@ -1010,6 +1010,85 @@ fn ast_compile_expr(code: CodeBuffer, expr: &Expr,
             c = emit_byte(c, 0x48); c = emit_byte(c, 0x31); c = emit_byte(c, 0xc0)
         }
         c
+    } else if expr.kind == ExprKind::ExprBinary && expr.bin_op == BinaryOp::OpAnd {
+        // Short-circuit &&: eval left; if 0, result=0; else eval right
+        let la_ref: &Option<Box<Expr>> = &expr.left
+        match *la_ref {
+            Some(le) => { c = ast_compile_expr(c, &(*le), local_names, local_slots, local_types, local_count) }
+            _ => {}
+        }
+        // test rax, rax; jz short_false
+        c = emit_byte(c, 0x48); c = emit_byte(c, 0x85); c = emit_byte(c, 0xc0)
+        let and_jz = c.len
+        c = emit_byte(c, 0x0f); c = emit_byte(c, 0x84)
+        c = emit_byte(c, 0); c = emit_byte(c, 0); c = emit_byte(c, 0); c = emit_byte(c, 0)
+        // Eval right
+        let ra_ref: &Option<Box<Expr>> = &expr.right
+        match *ra_ref {
+            Some(re) => { c = ast_compile_expr(c, &(*re), local_names, local_slots, local_types, local_count) }
+            _ => {}
+        }
+        // jmp end
+        let and_jmp = c.len
+        c = emit_byte(c, 0xe9)
+        c = emit_byte(c, 0); c = emit_byte(c, 0); c = emit_byte(c, 0); c = emit_byte(c, 0)
+        // short_false: xor eax, eax (result = 0)
+        let and_false = c.len
+        c = emit_byte(c, 0x48); c = emit_byte(c, 0x31); c = emit_byte(c, 0xc0)
+        let and_end = c.len
+        // Patch jz → short_false
+        let jz_d = and_false - (and_jz + 6)
+        c.bytes[(and_jz + 2) as usize] = (jz_d & 0xFF) as i8
+        c.bytes[(and_jz + 3) as usize] = ((jz_d >> 8) & 0xFF) as i8
+        c.bytes[(and_jz + 4) as usize] = ((jz_d >> 16) & 0xFF) as i8
+        c.bytes[(and_jz + 5) as usize] = ((jz_d >> 24) & 0xFF) as i8
+        // Patch jmp → end
+        let jmp_d = and_end - (and_jmp + 5)
+        c.bytes[(and_jmp + 1) as usize] = (jmp_d & 0xFF) as i8
+        c.bytes[(and_jmp + 2) as usize] = ((jmp_d >> 8) & 0xFF) as i8
+        c.bytes[(and_jmp + 3) as usize] = ((jmp_d >> 16) & 0xFF) as i8
+        c.bytes[(and_jmp + 4) as usize] = ((jmp_d >> 24) & 0xFF) as i8
+        c
+    } else if expr.kind == ExprKind::ExprBinary && expr.bin_op == BinaryOp::OpOr {
+        // Short-circuit ||: eval left; if non-zero, result=1; else eval right
+        let lo_ref: &Option<Box<Expr>> = &expr.left
+        match *lo_ref {
+            Some(le) => { c = ast_compile_expr(c, &(*le), local_names, local_slots, local_types, local_count) }
+            _ => {}
+        }
+        // test rax, rax; jnz short_true
+        c = emit_byte(c, 0x48); c = emit_byte(c, 0x85); c = emit_byte(c, 0xc0)
+        let or_jnz = c.len
+        c = emit_byte(c, 0x0f); c = emit_byte(c, 0x85)
+        c = emit_byte(c, 0); c = emit_byte(c, 0); c = emit_byte(c, 0); c = emit_byte(c, 0)
+        // Eval right
+        let ro_ref: &Option<Box<Expr>> = &expr.right
+        match *ro_ref {
+            Some(re) => { c = ast_compile_expr(c, &(*re), local_names, local_slots, local_types, local_count) }
+            _ => {}
+        }
+        // jmp end
+        let or_jmp = c.len
+        c = emit_byte(c, 0xe9)
+        c = emit_byte(c, 0); c = emit_byte(c, 0); c = emit_byte(c, 0); c = emit_byte(c, 0)
+        // short_true: mov rax, 1
+        let or_true = c.len
+        c = emit_byte(c, 0x48); c = emit_byte(c, 0xc7); c = emit_byte(c, 0xc0)
+        c = emit_byte(c, 0x01); c = emit_byte(c, 0x00); c = emit_byte(c, 0x00); c = emit_byte(c, 0x00)
+        let or_end = c.len
+        // Patch jnz → short_true
+        let jnz_d = or_true - (or_jnz + 6)
+        c.bytes[(or_jnz + 2) as usize] = (jnz_d & 0xFF) as i8
+        c.bytes[(or_jnz + 3) as usize] = ((jnz_d >> 8) & 0xFF) as i8
+        c.bytes[(or_jnz + 4) as usize] = ((jnz_d >> 16) & 0xFF) as i8
+        c.bytes[(or_jnz + 5) as usize] = ((jnz_d >> 24) & 0xFF) as i8
+        // Patch jmp → end
+        let jmpd = or_end - (or_jmp + 5)
+        c.bytes[(or_jmp + 1) as usize] = (jmpd & 0xFF) as i8
+        c.bytes[(or_jmp + 2) as usize] = ((jmpd >> 8) & 0xFF) as i8
+        c.bytes[(or_jmp + 3) as usize] = ((jmpd >> 16) & 0xFF) as i8
+        c.bytes[(or_jmp + 4) as usize] = ((jmpd >> 24) & 0xFF) as i8
+        c
     } else if expr.kind == ExprKind::ExprBinary {
         // Check if this is a float operation
         var is_float_binop = false
