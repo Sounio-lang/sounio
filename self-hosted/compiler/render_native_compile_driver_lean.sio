@@ -1044,9 +1044,48 @@ fn ast_compile_expr(code: CodeBuffer, expr: &Expr,
         }
         c
     } else if expr.kind == ExprKind::ExprIndex {
-        // Array index: requires struct-aware stack allocation (not yet implemented)
-        // Return 0 safely to avoid crash
-        c = emit_byte(c, 0x48); c = emit_byte(c, 0x31); c = emit_byte(c, 0xc0)
+        // Array index: base[index] → load from stack slot (base_slot + index)
+        var idx_base_slot: i64 = -1
+        let idx_base_ref: &Option<Box<Expr>> = &expr.left
+        match *idx_base_ref {
+            Some(be) => {
+                if (*be).kind == ExprKind::ExprIdent {
+                    var li = local_count - 1
+                    while li >= 0 {
+                        if ir_name_eq(local_names[li as usize], (*be).name) {
+                            idx_base_slot = local_slots[li as usize]
+                            li = -1
+                        } else { li = li - 1 }
+                    }
+                }
+            }
+            _ => {}
+        }
+        if idx_base_slot >= 0 {
+            // Compile index → rax
+            let idx_expr_ref: &Option<Box<Expr>> = &expr.right
+            match *idx_expr_ref {
+                Some(ie) => {
+                    c = ast_compile_expr(c, &(*ie), local_names, local_slots, local_count)
+                }
+                _ => { c = emit_byte(c, 0x48); c = emit_byte(c, 0x31); c = emit_byte(c, 0xc0) }
+            }
+            // mov rcx, rax  (index in rcx)
+            c = emit_byte(c, 0x48); c = emit_byte(c, 0x89); c = emit_byte(c, 0xc1)
+            // lea rax, [rbp - 8*(idx_base_slot+1)]  (address of array[0])
+            let idx_disp = 0 - ((idx_base_slot + 1) * 8)
+            c = emit_byte(c, 0x48); c = emit_byte(c, 0x8d); c = emit_byte(c, 0x85)
+            c = emit_byte(c, idx_disp & 0xFF); c = emit_byte(c, (idx_disp >> 8) & 0xFF)
+            c = emit_byte(c, (idx_disp >> 16) & 0xFF); c = emit_byte(c, (idx_disp >> 24) & 0xFF)
+            // neg rcx   (so that rax + (-index)*8 = rax - index*8)
+            c = emit_byte(c, 0x48); c = emit_byte(c, 0xf7); c = emit_byte(c, 0xd9)
+            // lea rax, [rax + rcx*8]  = address of array[index]
+            c = emit_byte(c, 0x48); c = emit_byte(c, 0x8d); c = emit_byte(c, 0x04); c = emit_byte(c, 0xc8)
+            // mov rax, [rax]
+            c = emit_byte(c, 0x48); c = emit_byte(c, 0x8b); c = emit_byte(c, 0x00)
+        } else {
+            c = emit_byte(c, 0x48); c = emit_byte(c, 0x31); c = emit_byte(c, 0xc0)
+        }
         c
     } else if expr.kind == ExprKind::ExprBreak {
         // break — emit jump to nearest loop end (placeholder: NOP for now)
@@ -1086,21 +1125,80 @@ fn ast_compile_block(code: CodeBuffer, blk: &Block,
             Some(sl) => {
                 let s: &Stmt = &(*sl).head
                 if s.kind == StmtKind::StmtLet || s.kind == StmtKind::StmtVar {
-                    let init_ref: &Option<Box<Expr>> = &s.expr
-                    match *init_ref {
-                        Some(ie) => {
-                            c = ast_compile_expr(c, &(*ie), ln, ls, lc)
+                    // Check for array type annotation
+                    var blk_arr_size: i64 = 0
+                    let blk_ty_ref: &Option<Box<TypeExpr>> = &s.ty
+                    match *blk_ty_ref {
+                        Some(te) => {
+                            if (*te).kind == TypeExprKind::TypeArray {
+                                let blk_sz_ref: &Option<Box<Expr>> = &(*te).array_size
+                                match *blk_sz_ref {
+                                    Some(se) => { blk_arr_size = (*se).int_val }
+                                    _ => {}
+                                }
+                            }
                         }
-                        _ => {
-                            c = emit_byte(c, 0x48); c = emit_byte(c, 0x31); c = emit_byte(c, 0xc0)
-                        }
+                        _ => {}
                     }
-                    let slot = next_slot
-                    next_slot = next_slot + 1
-                    c = micro_store_rax(c, slot)
-                    ln[lc as usize] = s.name
-                    ls[lc as usize] = slot
-                    lc = lc + 1
+                    if blk_arr_size > 1 {
+                        // Array variable: allocate blk_arr_size consecutive slots
+                        let blk_arr_base = next_slot
+                        next_slot = next_slot + blk_arr_size
+                        // Determine init value from [val; N] repeat literal
+                        var blk_init_val: i64 = 0
+                        let blk_init_ref: &Option<Box<Expr>> = &s.expr
+                        match *blk_init_ref {
+                            Some(ie) => {
+                                if (*ie).kind == ExprKind::ExprArrayLit {
+                                    let blk_val_ref: &Option<Box<Expr>> = &(*ie).left
+                                    match *blk_val_ref {
+                                        Some(ve) => {
+                                            if (*ve).kind == ExprKind::ExprIntLit {
+                                                blk_init_val = (*ve).int_val
+                                            }
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
+                        // Emit: mov rax, init_val
+                        c = emit_byte(c, 0x48); c = emit_byte(c, 0xb8)
+                        c = emit_byte(c, blk_init_val & 0xFF)
+                        c = emit_byte(c, (blk_init_val >> 8) & 0xFF)
+                        c = emit_byte(c, (blk_init_val >> 16) & 0xFF)
+                        c = emit_byte(c, (blk_init_val >> 24) & 0xFF)
+                        c = emit_byte(c, (blk_init_val >> 32) & 0xFF)
+                        c = emit_byte(c, (blk_init_val >> 40) & 0xFF)
+                        c = emit_byte(c, (blk_init_val >> 48) & 0xFF)
+                        c = emit_byte(c, (blk_init_val >> 56) & 0xFF)
+                        // Fill each slot
+                        var blk_si: i64 = 0
+                        while blk_si < blk_arr_size {
+                            c = micro_store_rax(c, blk_arr_base + blk_si)
+                            blk_si = blk_si + 1
+                        }
+                        ln[lc as usize] = s.name
+                        ls[lc as usize] = blk_arr_base
+                        lc = lc + 1
+                    } else {
+                        let init_ref: &Option<Box<Expr>> = &s.expr
+                        match *init_ref {
+                            Some(ie) => {
+                                c = ast_compile_expr(c, &(*ie), ln, ls, lc)
+                            }
+                            _ => {
+                                c = emit_byte(c, 0x48); c = emit_byte(c, 0x31); c = emit_byte(c, 0xc0)
+                            }
+                        }
+                        let slot = next_slot
+                        next_slot = next_slot + 1
+                        c = micro_store_rax(c, slot)
+                        ln[lc as usize] = s.name
+                        ls[lc as usize] = slot
+                        lc = lc + 1
+                    }
                 } else if s.kind == StmtKind::StmtExpr {
                     let expr_ref: &Option<Box<Expr>> = &s.expr
                     match *expr_ref {
@@ -1131,6 +1229,50 @@ fn ast_compile_block(code: CodeBuffer, blk: &Block,
                                 }
                                 if slot >= 0 {
                                     c = micro_store_rax(c, slot)
+                                }
+                            } else if (*te).kind == ExprKind::ExprIndex {
+                                // arr[i] = val — val already in rax
+                                c = emit_byte(c, 0x50)  // push rax (value)
+                                var blk_asgn_base: i64 = -1
+                                let blk_asgn_arr_ref: &Option<Box<Expr>> = &(*te).left
+                                match *blk_asgn_arr_ref {
+                                    Some(abe) => {
+                                        if (*abe).kind == ExprKind::ExprIdent {
+                                            var li2 = lc - 1
+                                            while li2 >= 0 {
+                                                if ir_name_eq(ln[li2 as usize], (*abe).name) {
+                                                    blk_asgn_base = ls[li2 as usize]
+                                                    li2 = -1
+                                                } else { li2 = li2 - 1 }
+                                            }
+                                        }
+                                    }
+                                    _ => {}
+                                }
+                                if blk_asgn_base >= 0 {
+                                    let blk_idx_ref: &Option<Box<Expr>> = &(*te).right
+                                    match *blk_idx_ref {
+                                        Some(aie) => {
+                                            c = ast_compile_expr(c, &(*aie), ln, ls, lc)
+                                        }
+                                        _ => { c = emit_byte(c, 0x48); c = emit_byte(c, 0x31); c = emit_byte(c, 0xc0) }
+                                    }
+                                    // mov rcx, rax
+                                    c = emit_byte(c, 0x48); c = emit_byte(c, 0x89); c = emit_byte(c, 0xc1)
+                                    // lea rax, [rbp - 8*(blk_asgn_base+1)]
+                                    let blk_asgn_disp = 0 - ((blk_asgn_base + 1) * 8)
+                                    c = emit_byte(c, 0x48); c = emit_byte(c, 0x8d); c = emit_byte(c, 0x85)
+                                    c = emit_byte(c, blk_asgn_disp & 0xFF); c = emit_byte(c, (blk_asgn_disp >> 8) & 0xFF)
+                                    c = emit_byte(c, (blk_asgn_disp >> 16) & 0xFF); c = emit_byte(c, (blk_asgn_disp >> 24) & 0xFF)
+                                    // neg rcx
+                                    c = emit_byte(c, 0x48); c = emit_byte(c, 0xf7); c = emit_byte(c, 0xd9)
+                                    // lea rax, [rax + rcx*8]
+                                    c = emit_byte(c, 0x48); c = emit_byte(c, 0x8d); c = emit_byte(c, 0x04); c = emit_byte(c, 0xc8)
+                                    // pop rdx; mov [rax], rdx
+                                    c = emit_byte(c, 0x5a)
+                                    c = emit_byte(c, 0x48); c = emit_byte(c, 0x89); c = emit_byte(c, 0x10)
+                                } else {
+                                    c = emit_byte(c, 0x58)  // pop and discard
                                 }
                             }
                         }
@@ -1204,25 +1346,85 @@ fn ast_compile_fn_body(code: CodeBuffer, fd: &FnDef,
             Some(sl) => {
                 let s: &Stmt = &(*sl).head
                 if s.kind == StmtKind::StmtLet || s.kind == StmtKind::StmtVar {
-                    // Compile init expression → rax
-                    let init_ref: &Option<Box<Expr>> = &s.expr
-                    match *init_ref {
-                        Some(ie) => {
-                            c = ast_compile_expr(c, &(*ie), local_names, local_slots, local_count)
+                    // Check for array type annotation
+                    var fn_arr_size: i64 = 0
+                    let fn_ty_ref: &Option<Box<TypeExpr>> = &s.ty
+                    match *fn_ty_ref {
+                        Some(te) => {
+                            if (*te).kind == TypeExprKind::TypeArray {
+                                let fn_sz_ref: &Option<Box<Expr>> = &(*te).array_size
+                                match *fn_sz_ref {
+                                    Some(se) => { fn_arr_size = (*se).int_val }
+                                    _ => {}
+                                }
+                            }
                         }
-                        _ => {
-                            // No init — load 0
-                            c = emit_byte(c, 0x48); c = emit_byte(c, 0x31); c = emit_byte(c, 0xc0)
-                        }
+                        _ => {}
                     }
-                    // Bind local
-                    let slot = next_slot
-                    next_slot = next_slot + 1
-                    c = micro_store_rax(c, slot)
-                    local_names[local_count as usize] = s.name
-                    local_slots[local_count as usize] = slot
-                    local_count = local_count + 1
-                    last_expr_emitted = false
+                    if fn_arr_size > 1 {
+                        // Array variable: allocate fn_arr_size consecutive slots
+                        let fn_arr_base = next_slot
+                        next_slot = next_slot + fn_arr_size
+                        // Determine init value from [val; N] repeat literal
+                        var fn_init_val: i64 = 0
+                        let fn_init_ref: &Option<Box<Expr>> = &s.expr
+                        match *fn_init_ref {
+                            Some(ie) => {
+                                if (*ie).kind == ExprKind::ExprArrayLit {
+                                    let fn_val_ref: &Option<Box<Expr>> = &(*ie).left
+                                    match *fn_val_ref {
+                                        Some(ve) => {
+                                            if (*ve).kind == ExprKind::ExprIntLit {
+                                                fn_init_val = (*ve).int_val
+                                            }
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
+                        // Emit: mov rax, init_val
+                        c = emit_byte(c, 0x48); c = emit_byte(c, 0xb8)
+                        c = emit_byte(c, fn_init_val & 0xFF)
+                        c = emit_byte(c, (fn_init_val >> 8) & 0xFF)
+                        c = emit_byte(c, (fn_init_val >> 16) & 0xFF)
+                        c = emit_byte(c, (fn_init_val >> 24) & 0xFF)
+                        c = emit_byte(c, (fn_init_val >> 32) & 0xFF)
+                        c = emit_byte(c, (fn_init_val >> 40) & 0xFF)
+                        c = emit_byte(c, (fn_init_val >> 48) & 0xFF)
+                        c = emit_byte(c, (fn_init_val >> 56) & 0xFF)
+                        // Fill each slot
+                        var fn_si: i64 = 0
+                        while fn_si < fn_arr_size {
+                            c = micro_store_rax(c, fn_arr_base + fn_si)
+                            fn_si = fn_si + 1
+                        }
+                        local_names[local_count as usize] = s.name
+                        local_slots[local_count as usize] = fn_arr_base
+                        local_count = local_count + 1
+                        last_expr_emitted = false
+                    } else {
+                        // Scalar — compile init expression → rax
+                        let init_ref: &Option<Box<Expr>> = &s.expr
+                        match *init_ref {
+                            Some(ie) => {
+                                c = ast_compile_expr(c, &(*ie), local_names, local_slots, local_count)
+                            }
+                            _ => {
+                                // No init — load 0
+                                c = emit_byte(c, 0x48); c = emit_byte(c, 0x31); c = emit_byte(c, 0xc0)
+                            }
+                        }
+                        // Bind local
+                        let slot = next_slot
+                        next_slot = next_slot + 1
+                        c = micro_store_rax(c, slot)
+                        local_names[local_count as usize] = s.name
+                        local_slots[local_count as usize] = slot
+                        local_count = local_count + 1
+                        last_expr_emitted = false
+                    }
                 } else if s.kind == StmtKind::StmtExpr {
                     // Compile expression → rax
                     let expr_ref: &Option<Box<Expr>> = &s.expr
@@ -1257,6 +1459,50 @@ fn ast_compile_fn_body(code: CodeBuffer, fd: &FnDef,
                                 }
                                 if slot >= 0 {
                                     c = micro_store_rax(c, slot)
+                                }
+                            } else if (*te).kind == ExprKind::ExprIndex {
+                                // arr[i] = val — val already in rax
+                                c = emit_byte(c, 0x50)  // push rax (value)
+                                var fn_asgn_base: i64 = -1
+                                let fn_asgn_arr_ref: &Option<Box<Expr>> = &(*te).left
+                                match *fn_asgn_arr_ref {
+                                    Some(abe) => {
+                                        if (*abe).kind == ExprKind::ExprIdent {
+                                            var li2 = local_count - 1
+                                            while li2 >= 0 {
+                                                if ir_name_eq(local_names[li2 as usize], (*abe).name) {
+                                                    fn_asgn_base = local_slots[li2 as usize]
+                                                    li2 = -1
+                                                } else { li2 = li2 - 1 }
+                                            }
+                                        }
+                                    }
+                                    _ => {}
+                                }
+                                if fn_asgn_base >= 0 {
+                                    let fn_idx_ref: &Option<Box<Expr>> = &(*te).right
+                                    match *fn_idx_ref {
+                                        Some(aie) => {
+                                            c = ast_compile_expr(c, &(*aie), local_names, local_slots, local_count)
+                                        }
+                                        _ => { c = emit_byte(c, 0x48); c = emit_byte(c, 0x31); c = emit_byte(c, 0xc0) }
+                                    }
+                                    // mov rcx, rax
+                                    c = emit_byte(c, 0x48); c = emit_byte(c, 0x89); c = emit_byte(c, 0xc1)
+                                    // lea rax, [rbp - 8*(fn_asgn_base+1)]
+                                    let fn_asgn_disp = 0 - ((fn_asgn_base + 1) * 8)
+                                    c = emit_byte(c, 0x48); c = emit_byte(c, 0x8d); c = emit_byte(c, 0x85)
+                                    c = emit_byte(c, fn_asgn_disp & 0xFF); c = emit_byte(c, (fn_asgn_disp >> 8) & 0xFF)
+                                    c = emit_byte(c, (fn_asgn_disp >> 16) & 0xFF); c = emit_byte(c, (fn_asgn_disp >> 24) & 0xFF)
+                                    // neg rcx
+                                    c = emit_byte(c, 0x48); c = emit_byte(c, 0xf7); c = emit_byte(c, 0xd9)
+                                    // lea rax, [rax + rcx*8]
+                                    c = emit_byte(c, 0x48); c = emit_byte(c, 0x8d); c = emit_byte(c, 0x04); c = emit_byte(c, 0xc8)
+                                    // pop rdx; mov [rax], rdx
+                                    c = emit_byte(c, 0x5a)
+                                    c = emit_byte(c, 0x48); c = emit_byte(c, 0x89); c = emit_byte(c, 0x10)
+                                } else {
+                                    c = emit_byte(c, 0x58)  // pop and discard
                                 }
                             }
                         }
@@ -1390,8 +1636,8 @@ fn main() -> i64 with IO, Mut, Panic, Div, Alloc {
                             print("render_compile: fn=")
                             print(ns)
 
-                            // Prologue: push rbp; mov rbp, rsp; sub rsp, 512
-                            let frame_size: i64 = 512
+                            // Prologue: push rbp; mov rbp, rsp; sub rsp, 8192
+                            let frame_size: i64 = 8192
                             code = emit_byte(code, 0x55)
                             code = emit_byte(code, 0x48)
                             code = emit_byte(code, 0x89)
