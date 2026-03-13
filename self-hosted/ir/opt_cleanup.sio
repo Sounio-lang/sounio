@@ -1128,6 +1128,45 @@ fn ocp_const_fold(func: IrFunction) -> IrFunction with Mut, Div, Panic {
             }
         }
 
+
+        // ====================================================================
+        // Sprint 133 Block AU: XOR operand cancellation.
+        // (a ^ b) ^ (a ^ c) → b ^ c  — common XOR factor cancels via associativity.
+        // All four lhs/rhs pairings handled: lhs-lhs, lhs-rhs, rhs-lhs, rhs-rhs.
+        // Uses as_xor_rr_valid tracking from Block AS (linter Sprint 131).
+        // SOTA: LLVM InstCombineAndOrXor.cpp; Hacker's Delight §2-1 (XOR group law).
+        // ====================================================================
+        if ocp_is_binop(result.instrs[i as usize].op) {
+            let au_instr = result.instrs[i as usize]
+            let au_s1 = au_instr.src1
+            let au_s2 = au_instr.src2
+            let au_s1_ok = au_s1 >= 0 && au_s1 < 256
+            let au_s2_ok = au_s2 >= 0 && au_s2 < 256
+            if au_instr.bin_op == BinaryOp::OpBitXor && au_s1_ok && au_s2_ok
+                    && as_xor_rr_valid[au_s1 as usize] && as_xor_rr_valid[au_s2 as usize] {
+                let au_l1 = as_xor_rr_lhs[au_s1 as usize]
+                let au_r1 = as_xor_rr_rhs[au_s1 as usize]
+                let au_l2 = as_xor_rr_lhs[au_s2 as usize]
+                let au_r2 = as_xor_rr_rhs[au_s2 as usize]
+                // lhs[s1] == lhs[s2]: (a^b)^(a^c) → b^c
+                if au_l1 == au_l2 && au_l1 >= 0 {
+                    result.instrs[i as usize] = ir_binop(au_instr.dst, au_r1, BinaryOp::OpBitXor, au_r2)
+                }
+                // lhs[s1] == rhs[s2]: (a^b)^(c^a) → b^c
+                if au_l1 == au_r2 && au_l1 >= 0 {
+                    result.instrs[i as usize] = ir_binop(au_instr.dst, au_r1, BinaryOp::OpBitXor, au_l2)
+                }
+                // rhs[s1] == lhs[s2]: (b^a)^(a^c) → b^c
+                if au_r1 == au_l2 && au_r1 >= 0 {
+                    result.instrs[i as usize] = ir_binop(au_instr.dst, au_l1, BinaryOp::OpBitXor, au_r2)
+                }
+                // rhs[s1] == rhs[s2]: (b^a)^(c^a) → b^c
+                if au_r1 == au_r2 && au_r1 >= 0 {
+                    result.instrs[i as usize] = ir_binop(au_instr.dst, au_l1, BinaryOp::OpBitXor, au_l2)
+                }
+            }
+        }
+
         // Sprint 82 Block J: Unary operation constant folding.
         // Folds IrUnaryOp when the source operand is a known constant.
         // Only OpNeg and OpNot are foldable (Ref/RefMut/Deref are memory ops).
@@ -1849,7 +1888,7 @@ fn ocp_const_fold(func: IrFunction) -> IrFunction with Mut, Div, Panic {
 // ============================================================================
 
 // Mark which registers are used as source operands across the function.
-fn ocp_mark_used(func: &IrFunction) -> [bool; 256] with Mut {
+fn ocp_mark_used(func: &IrFunction) -> [bool; 256] with Mut, Div, Panic {
     var used: [bool; 256] = [false; 256]
     var i: i64 = 0
     while i < func.instr_count {
@@ -1866,7 +1905,7 @@ fn ocp_mark_used(func: &IrFunction) -> [bool; 256] with Mut {
 }
 
 // Sweep: remove instructions whose dst is unused and have no side effects.
-fn ocp_sweep(func: IrFunction, used: &[bool; 256]) -> (IrFunction, i64) with Mut {
+fn ocp_sweep(func: IrFunction, used: &[bool; 256]) -> (IrFunction, i64) with Mut, Div, Panic {
     var result = func
     var removed: i64 = 0
     var i: i64 = 0
@@ -1886,13 +1925,13 @@ fn ocp_sweep(func: IrFunction, used: &[bool; 256]) -> (IrFunction, i64) with Mut
 }
 
 // Run one DCE sweep on a single function.
-fn ocp_dce_once(func: IrFunction) -> (IrFunction, i64) with Mut {
+fn ocp_dce_once(func: IrFunction) -> (IrFunction, i64) with Mut, Div, Panic {
     let used = ocp_mark_used(&func)
     ocp_sweep(func, &used)
 }
 
 // Run DCE on a single function.
-fn ocp_dce(func: IrFunction) -> IrFunction with Mut {
+fn ocp_dce(func: IrFunction) -> IrFunction with Mut, Div, Panic {
     let swept = ocp_dce_once(func)
     swept.0
 }
@@ -1940,7 +1979,7 @@ fn ocp_cse_invalidate_reg(
     cse_dst: [i64; 128],
     cse_len: i64,
     reg: i64
-) -> ([i64; 128], [i64; 128], [i64; 128], [i64; 128], i64) with Mut, Div {
+) -> ([i64; 128], [i64; 128], [i64; 128], [i64; 128], i64) with Mut, Div, Panic {
     var next_op = cse_op
     var next_src1 = cse_src1
     var next_src2 = cse_src2
@@ -1971,7 +2010,7 @@ fn ocp_is_commutative_op(bin_op: BinaryOp) -> bool {
     || bin_op == BinaryOp::OpBitXor
 }
 
-fn ocp_cse(func: IrFunction) -> IrFunction with Mut {
+fn ocp_cse(func: IrFunction) -> IrFunction with Mut, Div, Panic {
     var result  = func
     var cse_op:   [i64; 128] = [0; 128]
     var cse_src1: [i64; 128] = [0; 128]
@@ -2092,7 +2131,7 @@ struct OptCleanupResult {
 // with IrCopy(dst, prior_reg). Reduces register pressure; downstream copy
 // propagation in ocp_const_fold eliminates the redundant load.
 // SOTA: Cooper & Torczon §8.4 LVN; Click PLDI 1995 §2 value numbering.
-fn ocp_dedup_imm(func: IrFunction) -> IrFunction with Mut, Panic {
+fn ocp_dedup_imm(func: IrFunction) -> IrFunction with Mut, Div, Panic {
     var result = func
     var seen_const: [bool; 256] = [false; 256]
     var seen_val:   [i64;  256] = [0;     256]
@@ -2130,7 +2169,7 @@ fn ocp_dedup_imm(func: IrFunction) -> IrFunction with Mut, Panic {
 // Chains collapse: r1=IrCopy(r0), r2=IrCopy(r1) → r2 references r0.
 // After rewriting, the original IrCopy becomes dead and is removed by DCE.
 // SOTA: Cytron et al. TOPLAS 1991 §5; Cooper & Torczon §8.5.
-fn ocp_copy_prop(func: IrFunction) -> IrFunction with Mut {
+fn ocp_copy_prop(func: IrFunction) -> IrFunction with Mut, Div, Panic {
     var result = func
     // copy_target[r] = the ultimate source register for r, or -1 if not a copy.
     var copy_target: [i64; 256] = [-1; 256]
@@ -2180,7 +2219,7 @@ fn ocp_copy_prop(func: IrFunction) -> IrFunction with Mut {
 // again and last_write is still set, the earlier write is a dead store — NOP it.
 // Skips side-effecting instructions (calls, stores, branches, labels, returns).
 // SOTA: Cooper & Torczon §8.4; Bodik, Gupta & Soffa PLDI 1998.
-fn ocp_dse(func: IrFunction) -> IrFunction with Mut {
+fn ocp_dse(func: IrFunction) -> IrFunction with Mut, Div, Panic {
     var result = func
     // last_write[r] = instruction index of most recent write to r, or -1.
     var last_write: [i64; 256] = [-1; 256]
@@ -2232,7 +2271,7 @@ fn ocp_dse(func: IrFunction) -> IrFunction with Mut {
 // is redundant regardless of condition (it either falls through or jumps to
 // the very next instruction).
 // SOTA: Muchnick §13.1 (peephole optimization); Cooper & Torczon §8.7.
-fn ocp_redundant_jump(func: IrFunction) -> IrFunction with Mut {
+fn ocp_redundant_jump(func: IrFunction) -> IrFunction with Mut, Div, Panic {
     var result = func
     var i: i64 = 0
     while i < result.instr_count - 1 {
@@ -2264,7 +2303,7 @@ fn ocp_redundant_jump(func: IrFunction) -> IrFunction with Mut {
 // After an unconditional IrJump or IrReturn, any code before the next IrLabel
 // is unreachable.  NOP it out so DCE can reclaim the dead registers.
 // SOTA: Muchnick §7.2 (unreachable code elimination); Cooper & Torczon §10.1.
-fn ocp_dead_after_jump(func: IrFunction) -> IrFunction with Mut {
+fn ocp_dead_after_jump(func: IrFunction) -> IrFunction with Mut, Div, Panic {
     var result = func
     var dead = false
     var i: i64 = 0
@@ -2292,7 +2331,7 @@ fn ocp_dead_after_jump(func: IrFunction) -> IrFunction with Mut {
 // Then NOP any IrLabel whose label_id is not in the set.  This enables
 // ocp_dead_after_jump to see through removed labels on a subsequent pass.
 // SOTA: Muchnick §7.3 (dead label elimination); Appel §8.1.
-fn ocp_dead_label(func: IrFunction) -> IrFunction with Mut {
+fn ocp_dead_label(func: IrFunction) -> IrFunction with Mut, Div, Panic {
     var result = func
     // Pass 1: collect referenced label_ids (max 256 labels).
     var referenced: [bool; 256] = [false; 256]
@@ -2330,7 +2369,7 @@ fn ocp_dead_label(func: IrFunction) -> IrFunction with Mut {
 // Only handles constant 3; pow-2 cases handled by existing strength reduction.
 // Two-pass: build constant lattice, then rewrite x*3 patterns.
 // SOTA: LLVM InstCombine; Cooper & Torczon §8.4.
-fn ocp_mul3_sr(func: IrFunction) -> IrFunction with Mut {
+fn ocp_mul3_sr(func: IrFunction) -> IrFunction with Mut, Div, Panic {
     var result = func
     // Pass 1: build constant lattice
     var is_const: [bool; 256] = [false; 256]
@@ -2393,7 +2432,7 @@ fn ocp_mul3_sr(func: IrFunction) -> IrFunction with Mut {
 // instructions whose dst is not written elsewhere in the loop body.
 // Only hoists IrLoadImm (safe: no side effects, no data dependencies).
 // SOTA: Muchnick §13.2; Cooper & Torczon §10.3.
-fn ocp_licm(func: IrFunction) -> IrFunction with Mut {
+fn ocp_licm(func: IrFunction) -> IrFunction with Mut, Div, Panic {
     var result = func
     // Pass 1: record label positions
     var label_pos: [i64; 256] = [-1; 256]
@@ -2459,7 +2498,7 @@ fn ocp_licm(func: IrFunction) -> IrFunction with Mut {
 // Hash table: 128 entries, linear probe, key = op*10000 + vn1*100 + vn2.
 // Labels invalidate the entire table (conservative).
 // SOTA: Click PLDI 1995 §2; Cooper & Torczon §8.4.
-fn ocp_gvn(func: IrFunction) -> IrFunction with Mut {
+fn ocp_gvn(func: IrFunction) -> IrFunction with Mut, Div, Panic {
     var result = func
     var vn: [i64; 256] = [-1; 256]
     var next_vn: i64 = 0
@@ -2564,7 +2603,7 @@ fn ocp_gvn(func: IrFunction) -> IrFunction with Mut {
 // to reduce register pressure (closer to use). Up to 4 passes.
 // Only swaps if next instruction doesn't use/write dst, isn't control flow.
 // SOTA: Hennessy & Patterson §A.2; Muchnick §17.
-fn ocp_sink_loads(func: IrFunction) -> IrFunction with Mut {
+fn ocp_sink_loads(func: IrFunction) -> IrFunction with Mut, Div, Panic {
     var result = func
     var pass: i64 = 0
     while pass < 4 {
@@ -2604,7 +2643,7 @@ fn ocp_sink_loads(func: IrFunction) -> IrFunction with Mut {
 // replace the IrJump with IrReturn(v). Eliminates one branch per tail return.
 // Only unconditional jumps; conditional branches excluded.
 // SOTA: Muchnick §13.1 (branch optimization); Cooper & Torczon §8.7.
-fn ocp_jump_to_return(func: IrFunction) -> IrFunction with Mut {
+fn ocp_jump_to_return(func: IrFunction) -> IrFunction with Mut, Div, Panic {
     var result = func
     // Pass 1: find label positions
     var label_pos: [i64; 256] = [-1; 256]
@@ -2676,7 +2715,7 @@ fn opt_cleanup_function(func: IrFunction) -> IrFunction with Mut, Div, Panic {
 // Label references (label_id) are symbolic, not positional, so no remapping.
 // Reduces instr_count, improving downstream codegen and pass performance.
 // SOTA: standard peephole post-pass; Muchnick §13.1.
-fn ocp_compact_nops(func: IrFunction) -> IrFunction with Mut {
+fn ocp_compact_nops(func: IrFunction) -> IrFunction with Mut, Div, Panic {
     var result = func
     var write: i64 = 0
     var read: i64 = 0
