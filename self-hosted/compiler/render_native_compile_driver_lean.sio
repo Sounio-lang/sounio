@@ -1,10 +1,10 @@
 // self-hosted::compiler::render_native_compile_driver_lean
 //
 // Ultra-lean native compile driver with micro-emitter.
-// Avoids NativeCompiler by-value returns (broken under Cranelift JIT).
+// AST-direct compilation — bypasses IR lowering and NativeCompiler entirely.
 // Uses ONLY CodeBuffer by-value returns (65KB, proven JIT-safe).
 //
-// Pipeline: parse → flat IR summary → per-body lower → micro-emit x86-64 → inline ELF → write
+// Pipeline: parse → AST-direct x86-64 emit → inline ELF → write
 //
 // Usage:
 //   souc run self-hosted/compiler/render_native_compile_driver_lean.sio -- <source> <output>
@@ -12,39 +12,11 @@
 use lexer::mod::*
 use parser::ast::*
 use ir::ir::*
-use check::dependent::*
-use check::types::*
-use check::mod::{check_program, check_program_epistemic_into}
-use check::ownership::*
-use check::lint::*
-use check::layout::*
+use native::encode::*
 use io::file_write::*
 use interop::contract::*
-use native::aarch64::*
-use native::encode::*
-use native::elf::*
-use native::macho::*
-use native::reloc::*
-use native::frame::*
-use native::lower_ir::*
-use native::machine_ir::*
-use native::gc::*
-use native::runtime_context::*
-use native::stack_maps::*
-use native::target_policy::*
-use native::codegen::*
-use native::regalloc::*
-use native::peephole::*
-use resolve::resolve::*
-use resolve::imports::*
-use resolve::symbol::*
-use resolve::scope::*
-use resolve::mod::{resolve_modules, resolve_program, ResolveBatchResult}
 use parser::mod::{parse_program_preloaded, count_items}
 use parser::parser::{parser_last_error_count}
-use ir::opt_strategy::{ir_opt_apply_strategy, ir_opt_find_return_vreg, ir_opt_max_label, ir_opt_max_vreg}
-use ir::lower::{lower_program_to_ir_summary_flat_owned_with_epistemic_ref, lower_program_function_body_from_summary_flat_with_epistemic_ref, lower_program_bodies_from_summary_flat_with_epistemic_ref}
-
 // Helpers required by codegen dependency chain (flat-namespace resolution).
 fn char_from_i64(n: i64) -> string with Mut, Panic {
     if n == 0 { "0" }
@@ -535,6 +507,179 @@ fn micro_compile_function(code: CodeBuffer, func: IrFunction, fn_offsets: [i64; 
 
     c
 }
+// ============================================================================
+// Builtin name constructors
+// ============================================================================
+fn make_name_print_int() -> Name {
+    var n = ir_empty_name()
+    // "print_int" = 9 chars
+    n.buf[0 as usize] = 112 as i8  // p
+    n.buf[1 as usize] = 114 as i8  // r
+    n.buf[2 as usize] = 105 as i8  // i
+    n.buf[3 as usize] = 110 as i8  // n
+    n.buf[4 as usize] = 116 as i8  // t
+    n.buf[5 as usize] = 95 as i8   // _
+    n.buf[6 as usize] = 105 as i8  // i
+    n.buf[7 as usize] = 110 as i8  // n
+    n.buf[8 as usize] = 116 as i8  // t
+    n.len = 9
+    n
+}
+
+fn make_name_print() -> Name {
+    var n = ir_empty_name()
+    // "print" = 5 chars
+    n.buf[0 as usize] = 112 as i8  // p
+    n.buf[1 as usize] = 114 as i8  // r
+    n.buf[2 as usize] = 105 as i8  // i
+    n.buf[3 as usize] = 110 as i8  // n
+    n.buf[4 as usize] = 116 as i8  // t
+    n.len = 5
+    n
+}
+
+fn make_name_println() -> Name {
+    var n = ir_empty_name()
+    // "println" = 7 chars
+    n.buf[0 as usize] = 112 as i8  // p
+    n.buf[1 as usize] = 114 as i8  // r
+    n.buf[2 as usize] = 105 as i8  // i
+    n.buf[3 as usize] = 110 as i8  // n
+    n.buf[4 as usize] = 116 as i8  // t
+    n.buf[5 as usize] = 108 as i8  // l
+    n.buf[6 as usize] = 110 as i8  // n
+    n.len = 7
+    n
+}
+
+// Emit __print_int runtime helper (130 bytes of precompiled x86-64)
+fn emit_runtime_print_int(code: CodeBuffer) -> CodeBuffer with Mut, Panic {
+    var c = code
+    // x86-64 print_int: rdi=value, writes decimal to stdout via syscall
+    c = emit_byte(c, 0x55); c = emit_byte(c, 0x48); c = emit_byte(c, 0x89); c = emit_byte(c, 0xe5)
+    c = emit_byte(c, 0x48); c = emit_byte(c, 0x83); c = emit_byte(c, 0xec); c = emit_byte(c, 0x30)
+    c = emit_byte(c, 0x48); c = emit_byte(c, 0x89); c = emit_byte(c, 0xf8)
+    // test rax,rax; jns positive
+    c = emit_byte(c, 0x48); c = emit_byte(c, 0x85); c = emit_byte(c, 0xc0); c = emit_byte(c, 0x79); c = emit_byte(c, 0x1e)
+    // neg rax; mov byte [rbp-0x30], '-'; push rax; write '-'
+    c = emit_byte(c, 0x48); c = emit_byte(c, 0xf7); c = emit_byte(c, 0xd8)
+    c = emit_byte(c, 0xc6); c = emit_byte(c, 0x45); c = emit_byte(c, 0xd0); c = emit_byte(c, 0x2d)
+    c = emit_byte(c, 0x50)
+    c = emit_byte(c, 0xbf); c = emit_byte(c, 0x01); c = emit_byte(c, 0x00); c = emit_byte(c, 0x00); c = emit_byte(c, 0x00)
+    c = emit_byte(c, 0x48); c = emit_byte(c, 0x8d); c = emit_byte(c, 0x75); c = emit_byte(c, 0xd0)
+    c = emit_byte(c, 0xba); c = emit_byte(c, 0x01); c = emit_byte(c, 0x00); c = emit_byte(c, 0x00); c = emit_byte(c, 0x00)
+    c = emit_byte(c, 0xb8); c = emit_byte(c, 0x01); c = emit_byte(c, 0x00); c = emit_byte(c, 0x00); c = emit_byte(c, 0x00)
+    c = emit_byte(c, 0x0f); c = emit_byte(c, 0x05)
+    c = emit_byte(c, 0x58)
+    // test rax,rax; jnz convert
+    c = emit_byte(c, 0x48); c = emit_byte(c, 0x85); c = emit_byte(c, 0xc0); c = emit_byte(c, 0x75); c = emit_byte(c, 0x1b)
+    // zero case: write '0'
+    c = emit_byte(c, 0xc6); c = emit_byte(c, 0x45); c = emit_byte(c, 0xff); c = emit_byte(c, 0x30)
+    c = emit_byte(c, 0xbf); c = emit_byte(c, 0x01); c = emit_byte(c, 0x00); c = emit_byte(c, 0x00); c = emit_byte(c, 0x00)
+    c = emit_byte(c, 0x48); c = emit_byte(c, 0x8d); c = emit_byte(c, 0x75); c = emit_byte(c, 0xff)
+    c = emit_byte(c, 0xba); c = emit_byte(c, 0x01); c = emit_byte(c, 0x00); c = emit_byte(c, 0x00); c = emit_byte(c, 0x00)
+    c = emit_byte(c, 0xb8); c = emit_byte(c, 0x01); c = emit_byte(c, 0x00); c = emit_byte(c, 0x00); c = emit_byte(c, 0x00)
+    c = emit_byte(c, 0x0f); c = emit_byte(c, 0x05)
+    c = emit_byte(c, 0xeb); c = emit_byte(c, 0x32)
+    // convert loop: lea rdi,[rbp-1]; xor ecx,ecx; mov r8,10
+    c = emit_byte(c, 0x48); c = emit_byte(c, 0x8d); c = emit_byte(c, 0x7d); c = emit_byte(c, 0xff)
+    c = emit_byte(c, 0x31); c = emit_byte(c, 0xc9)
+    c = emit_byte(c, 0x49); c = emit_byte(c, 0xc7); c = emit_byte(c, 0xc0); c = emit_byte(c, 0x0a); c = emit_byte(c, 0x00); c = emit_byte(c, 0x00); c = emit_byte(c, 0x00)
+    // div r8; add dl,'0'; dec rdi; mov [rdi],dl; inc ecx; test rax,rax; jnz loop
+    c = emit_byte(c, 0x31); c = emit_byte(c, 0xd2)
+    c = emit_byte(c, 0x49); c = emit_byte(c, 0xf7); c = emit_byte(c, 0xf0)
+    c = emit_byte(c, 0x80); c = emit_byte(c, 0xc2); c = emit_byte(c, 0x30)
+    c = emit_byte(c, 0x48); c = emit_byte(c, 0xff); c = emit_byte(c, 0xcf)
+    c = emit_byte(c, 0x88); c = emit_byte(c, 0x17)
+    c = emit_byte(c, 0xff); c = emit_byte(c, 0xc1)
+    c = emit_byte(c, 0x48); c = emit_byte(c, 0x85); c = emit_byte(c, 0xc0)
+    c = emit_byte(c, 0x75); c = emit_byte(c, 0xec)
+    // write(1, rdi, ecx)
+    c = emit_byte(c, 0x48); c = emit_byte(c, 0x89); c = emit_byte(c, 0xfe)
+    c = emit_byte(c, 0x89); c = emit_byte(c, 0xca)
+    c = emit_byte(c, 0xbf); c = emit_byte(c, 0x01); c = emit_byte(c, 0x00); c = emit_byte(c, 0x00); c = emit_byte(c, 0x00)
+    c = emit_byte(c, 0xb8); c = emit_byte(c, 0x01); c = emit_byte(c, 0x00); c = emit_byte(c, 0x00); c = emit_byte(c, 0x00)
+    c = emit_byte(c, 0x0f); c = emit_byte(c, 0x05)
+    // leave; ret
+    c = emit_byte(c, 0xc9); c = emit_byte(c, 0xc3)
+    c
+}
+
+// Emit __print_newline runtime helper (35 bytes)
+fn emit_runtime_print_newline(code: CodeBuffer) -> CodeBuffer with Mut, Panic {
+    var c = code
+    // push rbp; mov rbp,rsp; sub rsp,16
+    c = emit_byte(c, 0x55)
+    c = emit_byte(c, 0x48); c = emit_byte(c, 0x89); c = emit_byte(c, 0xe5)
+    c = emit_byte(c, 0x48); c = emit_byte(c, 0x83); c = emit_byte(c, 0xec); c = emit_byte(c, 0x10)
+    // mov byte [rbp-1], 0x0a
+    c = emit_byte(c, 0xc6); c = emit_byte(c, 0x45); c = emit_byte(c, 0xff); c = emit_byte(c, 0x0a)
+    // mov edi,1; lea rsi,[rbp-1]; mov edx,1; mov eax,1; syscall
+    c = emit_byte(c, 0xbf); c = emit_byte(c, 0x01); c = emit_byte(c, 0x00); c = emit_byte(c, 0x00); c = emit_byte(c, 0x00)
+    c = emit_byte(c, 0x48); c = emit_byte(c, 0x8d); c = emit_byte(c, 0x75); c = emit_byte(c, 0xff)
+    c = emit_byte(c, 0xba); c = emit_byte(c, 0x01); c = emit_byte(c, 0x00); c = emit_byte(c, 0x00); c = emit_byte(c, 0x00)
+    c = emit_byte(c, 0xb8); c = emit_byte(c, 0x01); c = emit_byte(c, 0x00); c = emit_byte(c, 0x00); c = emit_byte(c, 0x00)
+    c = emit_byte(c, 0x0f); c = emit_byte(c, 0x05)
+    // leave; ret
+    c = emit_byte(c, 0xc9); c = emit_byte(c, 0xc3)
+    c
+}
+// Emit inline print(string_literal): jump over data, then sys_write
+fn emit_inline_print_string(code: CodeBuffer, str_name: Name) -> CodeBuffer with Mut, Panic, Div {
+    var c = code
+    let slen = str_name.len
+
+    // jmp near (e9 + disp32) to skip over string data
+    let jmp_site = c.len
+    c = emit_byte(c, 0xe9)
+    c = emit_byte(c, 0); c = emit_byte(c, 0); c = emit_byte(c, 0); c = emit_byte(c, 0)
+
+    // String data starts here
+    let str_data_off = c.len
+    var si: i64 = 0
+    while si < slen {
+        c = emit_byte(c, str_name.buf[si as usize] as i64)
+        si = si + 1
+    }
+
+    // Patch jmp displacement
+    let after_str = c.len
+    let jmp_disp = after_str - (jmp_site + 5)
+    c.bytes[(jmp_site + 1) as usize] = (jmp_disp & 0xFF) as i8
+    c.bytes[(jmp_site + 2) as usize] = ((jmp_disp >> 8) & 0xFF) as i8
+    c.bytes[(jmp_site + 3) as usize] = ((jmp_disp >> 16) & 0xFF) as i8
+    c.bytes[(jmp_site + 4) as usize] = ((jmp_disp >> 24) & 0xFF) as i8
+
+    // mov eax, 1 (sys_write)
+    c = emit_byte(c, 0xb8); c = emit_byte(c, 1); c = emit_byte(c, 0); c = emit_byte(c, 0); c = emit_byte(c, 0)
+
+    // mov edi, 1 (stdout)
+    c = emit_byte(c, 0xbf); c = emit_byte(c, 1); c = emit_byte(c, 0); c = emit_byte(c, 0); c = emit_byte(c, 0)
+
+    // lea rsi, [rip + disp32] — point to string data
+    let lea_site = c.len
+    c = emit_byte(c, 0x48); c = emit_byte(c, 0x8d); c = emit_byte(c, 0x35)
+    // disp32 = str_data_off - (lea_site + 7)
+    let lea_disp = str_data_off - (lea_site + 7)
+    c = emit_byte(c, lea_disp & 0xFF)
+    c = emit_byte(c, (lea_disp >> 8) & 0xFF)
+    c = emit_byte(c, (lea_disp >> 16) & 0xFF)
+    c = emit_byte(c, (lea_disp >> 24) & 0xFF)
+
+    // mov edx, slen (string length)
+    c = emit_byte(c, 0xba)
+    c = emit_byte(c, slen & 0xFF)
+    c = emit_byte(c, (slen >> 8) & 0xFF)
+    c = emit_byte(c, (slen >> 16) & 0xFF)
+    c = emit_byte(c, (slen >> 24) & 0xFF)
+
+    // syscall
+    c = emit_byte(c, 0x0f); c = emit_byte(c, 0x05)
+
+    // Result in rax = number of bytes written (or error)
+    c
+}
+
 
 // ============================================================================
 // Direct AST to x86-64 compiler (bypasses IR lowering entirely)
@@ -649,41 +794,71 @@ fn ast_compile_expr(code: CodeBuffer, expr: &Expr,
             Some(ce) => { callee_name = (*ce).name }
             _ => {}
         }
-        var fn_slot: i64 = -1
-        var li = local_count - 1
-        while li >= 0 {
-            if ir_name_eq(local_names[li as usize], callee_name) {
-                fn_slot = local_slots[li as usize]
-                li = -1
-            } else {
-                li = li - 1
-            }
-        }
-        var arg_count: i64 = 0
-        let args_ref: &Option<Box<ExprList>> = &expr.args
-        var current_arg = args_ref
-        while true {
-            match *current_arg {
+
+        // Special case: print(string_literal) → inline sys_write
+        let is_print = ir_name_eq(callee_name, make_name_print())
+        let is_println = ir_name_eq(callee_name, make_name_println())
+        var handled_inline = false
+        if is_print || is_println {
+            let args_check: &Option<Box<ExprList>> = &expr.args
+            match *args_check {
                 Some(al) => {
-                    c = ast_compile_expr(c, &(*al).head, local_names, local_slots, local_count)
-                    c = emit_byte(c, 0x50)
-                    arg_count = arg_count + 1
-                    current_arg = &(*al).tail
+                    if (*al).head.kind == ExprKind::ExprStringLit {
+                        // Inline print of string literal
+                        c = emit_inline_print_string(c, (*al).head.name)
+                        if is_println {
+                            // Also emit newline: mov byte [rsp-1], 0x0a; write(1, rsp-1, 1)
+                            c = emit_byte(c, 0xc6); c = emit_byte(c, 0x44); c = emit_byte(c, 0x24); c = emit_byte(c, 0xff); c = emit_byte(c, 0x0a)
+                            c = emit_byte(c, 0xb8); c = emit_byte(c, 1); c = emit_byte(c, 0); c = emit_byte(c, 0); c = emit_byte(c, 0)
+                            c = emit_byte(c, 0xbf); c = emit_byte(c, 1); c = emit_byte(c, 0); c = emit_byte(c, 0); c = emit_byte(c, 0)
+                            c = emit_byte(c, 0x48); c = emit_byte(c, 0x8d); c = emit_byte(c, 0x74); c = emit_byte(c, 0x24); c = emit_byte(c, 0xff)
+                            c = emit_byte(c, 0xba); c = emit_byte(c, 1); c = emit_byte(c, 0); c = emit_byte(c, 0); c = emit_byte(c, 0)
+                            c = emit_byte(c, 0x0f); c = emit_byte(c, 0x05)
+                        }
+                        handled_inline = true
+                    }
                 }
-                _ => break
+                _ => {}
             }
         }
-        if arg_count >= 4 { c = emit_byte(c, 0x59) }
-        if arg_count >= 3 { c = emit_byte(c, 0x5a) }
-        if arg_count >= 2 { c = emit_byte(c, 0x5e) }
-        if arg_count >= 1 { c = emit_byte(c, 0x5f) }
-        if fn_slot <= -1000 {
-            let target_idx = 0 - (fn_slot + 1000)
-            c = emit_byte(c, 0xe8)
-            c = emit_byte(c, target_idx & 0xFF)
-            c = emit_byte(c, (target_idx >> 8) & 0xFF)
-            c = emit_byte(c, 0xCA as i64)
-            c = emit_byte(c, 0xFE as i64)
+
+        if !handled_inline {
+            var fn_slot: i64 = -1
+            var li = local_count - 1
+            while li >= 0 {
+                if ir_name_eq(local_names[li as usize], callee_name) {
+                    fn_slot = local_slots[li as usize]
+                    li = -1
+                } else {
+                    li = li - 1
+                }
+            }
+            var arg_count: i64 = 0
+            let args_ref: &Option<Box<ExprList>> = &expr.args
+            var current_arg = args_ref
+            while true {
+                match *current_arg {
+                    Some(al) => {
+                        c = ast_compile_expr(c, &(*al).head, local_names, local_slots, local_count)
+                        c = emit_byte(c, 0x50)
+                        arg_count = arg_count + 1
+                        current_arg = &(*al).tail
+                    }
+                    _ => break
+                }
+            }
+            if arg_count >= 4 { c = emit_byte(c, 0x59) }
+            if arg_count >= 3 { c = emit_byte(c, 0x5a) }
+            if arg_count >= 2 { c = emit_byte(c, 0x5e) }
+            if arg_count >= 1 { c = emit_byte(c, 0x5f) }
+            if fn_slot <= -1000 {
+                let target_idx = 0 - (fn_slot + 1000)
+                c = emit_byte(c, 0xe8)
+                c = emit_byte(c, target_idx & 0xFF)
+                c = emit_byte(c, (target_idx >> 8) & 0xFF)
+                c = emit_byte(c, 0xCA as i64)
+                c = emit_byte(c, 0xFE as i64)
+            }
         }
         c
     } else if expr.kind == ExprKind::ExprIf {
@@ -789,6 +964,22 @@ fn ast_compile_expr(code: CodeBuffer, expr: &Expr,
             _ => {
                 c = emit_byte(c, 0x48); c = emit_byte(c, 0x31); c = emit_byte(c, 0xc0)
             }
+        }
+        c
+    } else if expr.kind == ExprKind::ExprUnary {
+        let uop_ref: &Option<Box<Expr>> = &expr.left
+        match *uop_ref {
+            Some(ue) => {
+                c = ast_compile_expr(c, &(*ue), local_names, local_slots, local_count)
+            }
+            _ => {}
+        }
+        if expr.un_op == UnaryOp::OpNeg {
+            // neg rax
+            c = emit_byte(c, 0x48); c = emit_byte(c, 0xf7); c = emit_byte(c, 0xd8)
+        } else if expr.un_op == UnaryOp::OpNot {
+            // xor rax, 1
+            c = emit_byte(c, 0x48); c = emit_byte(c, 0x83); c = emit_byte(c, 0xf0); c = emit_byte(c, 0x01)
         }
         c
     } else {
@@ -1008,6 +1199,7 @@ fn ast_compile_fn_body(code: CodeBuffer, fd: &FnDef,
     c
 }
 
+
 fn main() -> i64 with IO, Mut, Panic, Div, Alloc {
     let argc = arg_count()
     if argc < 2 {
@@ -1029,14 +1221,51 @@ fn main() -> i64 with IO, Mut, Panic, Div, Alloc {
         return 1
     }
 
-    // ---- AST-direct compilation (bypasses IR lowering + JIT Box bugs) ----
+    // ---- AST-direct compilation with builtin support ----
 
-    // Collect function names and FnDef pointers from AST
+    // Step 1: Emit runtime helpers at the start of the code buffer
+    var code = code_buffer_new()
+
+    // __print_int at offset 0 (130 bytes)
+    let print_int_off: i64 = 0
+    code = emit_runtime_print_int(code)
+    let print_int_end = code.len
+    print("render_compile: builtin print_int off=0 sz=")
+    print_int(print_int_end)
+    print("\n")
+
+    // __print_newline right after (35 bytes)
+    let print_nl_off = code.len
+    code = emit_runtime_print_newline(code)
+    let print_nl_end = code.len
+    print("render_compile: builtin print_nl off=")
+    print_int(print_nl_off)
+    print(" sz=")
+    print_int(print_nl_end - print_nl_off)
+    print("\n")
+
+    // Step 2: Register builtins in fn_names FIRST (indices 0, 1, 2)
     var fn_names: [Name; 64] = [ir_empty_name(); 64]
+    var fn_offsets: [i64; 256] = [-1; 256]
     var fn_count: i64 = 0
     var main_fn_idx: i64 = -1
 
-    // First pass: collect function names
+    // Builtin 0: print_int
+    fn_names[0 as usize] = make_name_print_int()
+    fn_offsets[0 as usize] = print_int_off
+    fn_count = 1
+
+    // Builtin 1: println (maps to print_newline)
+    fn_names[1 as usize] = make_name_println()
+    fn_offsets[1 as usize] = print_nl_off
+    fn_count = 2
+
+    // Builtin 2: print (also maps to print_newline for now — string printing not supported)
+    fn_names[2 as usize] = make_name_print()
+    fn_offsets[2 as usize] = print_nl_off
+    fn_count = 3
+
+    // Step 3: Collect user function names from AST
     let items_ref: &Option<Box<ItemList>> = &prog.items
     var item_cur = items_ref
     while true {
@@ -1056,22 +1285,24 @@ fn main() -> i64 with IO, Mut, Panic, Div, Alloc {
     }
     print("render_compile: fn_count=")
     print_int(fn_count)
-    print("\n")
+    print(" (")
+    print_int(3)
+    print(" builtins + ")
+    print_int(fn_count - 3)
+    print(" user)\n")
 
     if main_fn_idx < 0 {
         print("render_compile: no_main\n")
         return 4
     }
 
-    // Second pass: compile each function body from AST
-    var code = code_buffer_new()
-    var fn_offsets: [i64; 256] = [-1; 256]
-    var call_patches: [i64; 256] = [0; 256]  // code offset of each call rel32
-    var call_targets: [i64; 256] = [0; 256]  // target fn index for each call
+    // Step 4: Compile each user function body from AST
+    var call_patches: [i64; 256] = [0; 256]
+    var call_targets: [i64; 256] = [0; 256]
     var call_patch_count: i64 = 0
 
     item_cur = items_ref
-    var fn_idx: i64 = 0
+    var fn_idx: i64 = 3  // start after builtins
     while true {
         match *item_cur {
             Some(il) => {
@@ -1085,9 +1316,8 @@ fn main() -> i64 with IO, Mut, Panic, Div, Alloc {
                             print("render_compile: fn=")
                             print(ns)
 
-                            // Estimate frame size (conservative: 64 slots)
+                            // Prologue: push rbp; mov rbp, rsp; sub rsp, 512
                             let frame_size: i64 = 512
-                            // Prologue: push rbp; mov rbp, rsp; sub rsp, frame_size
                             code = emit_byte(code, 0x55)
                             code = emit_byte(code, 0x48)
                             code = emit_byte(code, 0x89)
@@ -1101,7 +1331,6 @@ fn main() -> i64 with IO, Mut, Panic, Div, Alloc {
                             code = emit_byte(code, (frame_size >> 24) & 0xFF)
 
                             // Compile body
-                            let code_before = code.len
                             code = ast_compile_fn_body(code, &(*fd), fn_names, fn_count)
 
                             // Epilogue: leave; ret
@@ -1127,11 +1356,7 @@ fn main() -> i64 with IO, Mut, Panic, Div, Alloc {
         }
     }
 
-    // Patch call instructions: scan for call rel32 placeholders
-    // In ast_compile_expr ExprCall, we emit call rel32 with 0 displacement
-    // We need to find these and patch them with the correct relative offset
-    // For now, we'll do a post-pass scan for 0xe8 0x00 0x00 0x00 0x00 patterns
-    // Post-pass: patch call rel32 instructions
+    // Step 5: Patch call instructions
     // Scan for pattern: 0xe8 <fn_idx_lo> <fn_idx_hi> 0xCA 0xFE
     var pi: i64 = 0
     while pi < code.len - 4 {
@@ -1143,18 +1368,20 @@ fn main() -> i64 with IO, Mut, Panic, Div, Alloc {
             let target_idx = (lo_byte & 0xFF) + ((hi_byte & 0xFF) << 8)
             if target_idx >= 0 && target_idx < fn_count {
                 let target_off = fn_offsets[target_idx as usize]
-                let call_site = pi
-                let disp = target_off - (call_site + 5)
-                code.bytes[(pi + 1) as usize] = (disp & 0xFF) as i8
-                code.bytes[(pi + 2) as usize] = ((disp >> 8) & 0xFF) as i8
-                code.bytes[(pi + 3) as usize] = ((disp >> 16) & 0xFF) as i8
-                code.bytes[(pi + 4) as usize] = ((disp >> 24) & 0xFF) as i8
+                if target_off >= 0 {
+                    let call_site = pi
+                    let disp = target_off - (call_site + 5)
+                    code.bytes[(pi + 1) as usize] = (disp & 0xFF) as i8
+                    code.bytes[(pi + 2) as usize] = ((disp >> 8) & 0xFF) as i8
+                    code.bytes[(pi + 3) as usize] = ((disp >> 16) & 0xFF) as i8
+                    code.bytes[(pi + 4) as usize] = ((disp >> 24) & 0xFF) as i8
+                }
             }
         }
         pi = pi + 1
     }
 
-    // Inline trampoline: call main; mov edi,eax; mov eax,60; syscall
+    // Step 6: Trampoline — call main; mov edi,eax; mov eax,60; syscall
     let tramp_off = code.len
     let cs = code.len
     let moff = fn_offsets[main_fn_idx as usize]
@@ -1181,7 +1408,7 @@ fn main() -> i64 with IO, Mut, Panic, Div, Alloc {
     print_int(tramp_off)
     print("\n")
 
-    // Inline ELF writer
+    // Step 7: Inline ELF writer
     let base_addr: i64 = 4194304
     let text_off: i64 = 4096
     let entry_va = base_addr + text_off + tramp_off
