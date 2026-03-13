@@ -62,6 +62,7 @@ use native::peephole::*
 use interop::protocol::*
 use interop::server::*
 use interop::contract::*
+use interop::artifact::*
 use interop::session::*
 use interop::kernel::*
 use interop::serialize::*
@@ -1872,10 +1873,6 @@ fn run_emit_obj_mode(args: ArgList, flag_index: i64) with IO, Mut, Panic, Div, A
         return
     }
     panic("emit-obj: write failed")
-}
-
-fn compile_to_shared(module: &IrModule) -> Elf64Binary with Mut, Panic, Div, Alloc {
-    compile_to_obj(module)
 }
 
 fn run_emit_so_mode(args: ArgList, flag_index: i64) with IO, Mut, Panic, Div, Alloc {
@@ -9223,9 +9220,91 @@ fn compiler_main_test_and_no_track_no_fold() -> bool with Mut, Div, Panic {
         && result.instrs[2].bin_op == BinaryOp::OpBitAnd
 }
 
+// Sprint 115 Block AL: Subtract reversal through negation (T394-T399).
+// SOTA: LLVM InstCombineAddSub.cpp; Cooper & Torczon §8.4.
+
+// T394: neg(a - b) → b - a.
+fn compiler_main_test_neg_sub_reversal() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_binop(2, 0, BinaryOp::OpSub, 1)
+    instrs[1] = ir_unaryop(3, UnaryOp::OpNeg, 2)
+    let func   = cp_make_test_func(instrs, 2)
+    let result = ocp_const_fold(func)
+    result.instrs[1].op == IrOpcode::IrBinOp
+        && result.instrs[1].bin_op == BinaryOp::OpSub
+        && result.instrs[1].src1 == 1
+        && result.instrs[1].src2 == 0
+}
+
+// T395: 0 - (a - b) → b - a.
+fn compiler_main_test_zero_minus_sub_reversal() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_binop(2, 0, BinaryOp::OpSub, 1)
+    instrs[1] = ir_load_imm(3, 0)
+    instrs[2] = ir_binop(4, 3, BinaryOp::OpSub, 2)
+    let func   = cp_make_test_func(instrs, 3)
+    let result = ocp_const_fold(func)
+    result.instrs[2].op == IrOpcode::IrBinOp
+        && result.instrs[2].bin_op == BinaryOp::OpSub
+        && result.instrs[2].src1 == 1
+        && result.instrs[2].src2 == 0
+}
+
+// T396: neg(a + b) → no fold (only reverses subtraction, not addition).
+fn compiler_main_test_neg_add_no_fold() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_binop(2, 0, BinaryOp::OpAdd, 1)
+    instrs[1] = ir_unaryop(3, UnaryOp::OpNeg, 2)
+    let func   = cp_make_test_func(instrs, 2)
+    let result = ocp_const_fold(func)
+    result.instrs[1].op == IrOpcode::IrUnaryOp
+        && result.instrs[1].un_op == UnaryOp::OpNeg
+}
+
+// T397: neg(neg(a - b)) — double-neg fires on instrs[2], Block AL fires on instrs[1].
+fn compiler_main_test_neg_neg_sub_double() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_binop(2, 0, BinaryOp::OpSub, 1)
+    instrs[1] = ir_unaryop(3, UnaryOp::OpNeg, 2)
+    instrs[2] = ir_unaryop(4, UnaryOp::OpNeg, 3)
+    let func   = cp_make_test_func(instrs, 3)
+    let result = ocp_const_fold(func)
+    // instrs[1]: neg(a-b) → b-a (Block AL)
+    result.instrs[1].op == IrOpcode::IrBinOp
+        && result.instrs[1].src1 == 1
+}
+
+// T398: 0 - x where x is NOT a sub → no reversal fold.
+fn compiler_main_test_zero_minus_non_sub() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_binop(2, 0, BinaryOp::OpAdd, 1)
+    instrs[1] = ir_load_imm(3, 0)
+    instrs[2] = ir_binop(4, 3, BinaryOp::OpSub, 2)
+    let func   = cp_make_test_func(instrs, 3)
+    let result = ocp_const_fold(func)
+    result.instrs[2].op == IrOpcode::IrBinOp
+        && result.instrs[2].bin_op == BinaryOp::OpSub
+        && result.instrs[2].src1 == 3
+}
+
+// T399: neg(a - b) where (a-b) is also used → original preserved.
+fn compiler_main_test_neg_sub_result_used() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_binop(2, 0, BinaryOp::OpSub, 1)
+    instrs[1] = ir_unaryop(3, UnaryOp::OpNeg, 2)
+    instrs[2] = ir_binop(4, 2, BinaryOp::OpAdd, 3)
+    let func   = cp_make_test_func(instrs, 3)
+    let result = ocp_const_fold(func)
+    result.instrs[0].op == IrOpcode::IrBinOp
+        && result.instrs[0].src1 == 0
+        && result.instrs[1].op == IrOpcode::IrBinOp
+        && result.instrs[1].src1 == 1
+        && result.instrs[1].src2 == 0
+}
+
 fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
     var passed: i64 = 0
-    let total: i64 = 391
+    let total: i64 = 397
 
     println("=== compiler/main.sio self-tests ===")
 
@@ -11760,6 +11839,31 @@ fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
         println("  T393 OK: Sprint 114 Block AK: no AND track no fold")
         passed = passed + 1
     } else { println("  FAIL: T393") }
+
+    if compiler_main_test_neg_sub_reversal() {
+        println("  T394 OK: Sprint 115 Block AL: neg(a-b) → b-a")
+        passed = passed + 1
+    } else { println("  FAIL: T394") }
+    if compiler_main_test_zero_minus_sub_reversal() {
+        println("  T395 OK: Sprint 115 Block AL: 0-(a-b) → b-a")
+        passed = passed + 1
+    } else { println("  FAIL: T395") }
+    if compiler_main_test_neg_add_no_fold() {
+        println("  T396 OK: Sprint 115 Block AL: neg(a+b) no fold")
+        passed = passed + 1
+    } else { println("  FAIL: T396") }
+    if compiler_main_test_neg_neg_sub_double() {
+        println("  T397 OK: Sprint 115 Block AL: neg(neg(a-b)) chain")
+        passed = passed + 1
+    } else { println("  FAIL: T397") }
+    if compiler_main_test_zero_minus_non_sub() {
+        println("  T398 OK: Sprint 115 Block AL: 0-(a+b) no reversal")
+        passed = passed + 1
+    } else { println("  FAIL: T398") }
+    if compiler_main_test_neg_sub_result_used() {
+        println("  T399 OK: Sprint 115 Block AL: neg(a-b) original preserved")
+        passed = passed + 1
+    } else { println("  FAIL: T399") }
 
     println("")
     println("compiler/main tests: " + int_to_string(passed) + "/" + int_to_string(total) + " passed")
