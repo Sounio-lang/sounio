@@ -702,6 +702,19 @@ fn micro_compile_function(code: CodeBuffer, func: IrFunction, fn_offsets: [i64; 
 // Uses inline arrays for locals (no Box) to avoid JIT by-value corruption.
 // ============================================================================
 
+// Helper: check if a TypeExpr refers to "f64"
+fn ast_type_is_f64(ty: &TypeExpr) -> bool with Mut, Panic {
+    if ty.kind != TypeExprKind::TypeNamed { return false }
+    let seg: &StringList = &ty.path.segments
+    if seg.head_len != 3 { return false }
+    if seg.head_buf[0 as usize] == (102 as i8) &&
+       seg.head_buf[1 as usize] == (54 as i8) &&
+       seg.head_buf[2 as usize] == (52 as i8) {
+        return true
+    }
+    false
+}
+
 // Helper: determine if an expression produces an f64 value
 fn ast_expr_is_float(expr: &Expr, local_names: [Name; 64], local_types: [i64; 64], local_count: i64) -> bool with Mut, Panic, Div {
     if expr.kind == ExprKind::ExprFloatLit { return true }
@@ -731,6 +744,23 @@ fn ast_expr_is_float(expr: &Expr, local_names: [Name; 64], local_types: [i64; 64
             }
             _ => { return false }
         }
+    }
+    // ExprCall: look up callee name, check its return type from local_types
+    if expr.kind == ExprKind::ExprCall {
+        let callee_opt: &Option<Box<Expr>> = &expr.left
+        match *callee_opt {
+            Some(ce) => {
+                var li = local_count - 1
+                while li >= 0 {
+                    if ir_name_eq(local_names[li as usize], (*ce).name) {
+                        return local_types[li as usize] == 1
+                    }
+                    li = li - 1
+                }
+            }
+            _ => {}
+        }
+        return false
     }
     false
 }
@@ -1203,7 +1233,7 @@ fn ast_compile_block(code: CodeBuffer, blk: &Block,
 }
 
 fn ast_compile_fn_body(code: CodeBuffer, fd: &FnDef,
-    fn_names: [Name; 64], fn_count: i64
+    fn_names: [Name; 64], fn_return_types: [i64; 64], fn_count: i64
 ) -> CodeBuffer with Mut, Panic, Div, IO {
     var c = code
     var local_names: [Name; 64] = [ir_empty_name(); 64]
@@ -1213,16 +1243,18 @@ fn ast_compile_fn_body(code: CodeBuffer, fd: &FnDef,
     var next_slot: i64 = 0
 
     // Register function names as locals with negative slots (for call resolution)
-    // This is a simple approach — function calls will be patched by the caller
+    // local_types for these entries = return type (0=i64, 1=f64)
     var fi: i64 = 0
     while fi < fn_count {
         local_names[local_count as usize] = fn_names[fi as usize]
         local_slots[local_count as usize] = 0 - 1000 - fi
+        local_types[local_count as usize] = fn_return_types[fi as usize]
         local_count = local_count + 1
         fi = fi + 1
     }
 
     // Register params: rdi=p0, rsi=p1, rdx=p2, rcx=p3
+    // Detect f64 params from FnDef type annotations
     var param_ref: &Option<Box<ParamList>> = &fd.params
     var param_idx: i64 = 0
     while true {
@@ -1231,8 +1263,13 @@ fn ast_compile_fn_body(code: CodeBuffer, fd: &FnDef,
                 let p_name = (*pl).head.name
                 let p_slot = next_slot
                 next_slot = next_slot + 1
+                // Detect param type from annotation
+                var p_is_float: i64 = 0
+                let p_ty: &TypeExpr = &(*pl).head.ty
+                if ast_type_is_f64(p_ty) { p_is_float = 1 }
                 local_names[local_count as usize] = p_name
                 local_slots[local_count as usize] = p_slot
+                local_types[local_count as usize] = p_is_float
                 local_count = local_count + 1
                 // Spill param register to stack slot
                 if param_idx == 0 {
@@ -1365,12 +1402,13 @@ fn main() -> i64 with IO, Mut, Panic, Div, Alloc {
 
     // ---- AST-direct compilation (bypasses IR lowering + JIT Box bugs) ----
 
-    // Collect function names and FnDef pointers from AST
+    // Collect function names, return types from AST
     var fn_names: [Name; 64] = [ir_empty_name(); 64]
+    var fn_return_types: [i64; 64] = [0; 64]  // 0=i64, 1=f64
     var fn_count: i64 = 0
     var main_fn_idx: i64 = -1
 
-    // First pass: collect function names
+    // First pass: collect function names + return types
     let items_ref: &Option<Box<ItemList>> = &prog.items
     var item_cur = items_ref
     while true {
@@ -1379,6 +1417,22 @@ fn main() -> i64 with IO, Mut, Panic, Div, Alloc {
                 let itm: &Item = &(*il).head
                 if itm.kind == ItemKind::ItemFn {
                     fn_names[fn_count as usize] = itm.name
+                    // Detect return type
+                    let fdef_r: &Option<Box<FnDef>> = &itm.fn_def
+                    match *fdef_r {
+                        Some(fdr) => {
+                            let rt_ref: &Option<Box<TypeExpr>> = &(*fdr).return_type
+                            match *rt_ref {
+                                Some(rte) => {
+                                    if ast_type_is_f64(&(*rte)) {
+                                        fn_return_types[fn_count as usize] = 1
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                        _ => {}
+                    }
                     let ns = str_from_bytes(itm.name.buf, itm.name.len)
                     if str_eq(ns, "main") { main_fn_idx = fn_count }
                     fn_count = fn_count + 1
@@ -1436,7 +1490,7 @@ fn main() -> i64 with IO, Mut, Panic, Div, Alloc {
 
                             // Compile body
                             let code_before = code.len
-                            code = ast_compile_fn_body(code, &(*fd), fn_names, fn_count)
+                            code = ast_compile_fn_body(code, &(*fd), fn_names, fn_return_types, fn_count)
 
                             // Epilogue: leave; ret
                             code = emit_byte(code, 0xc9)
