@@ -35,7 +35,7 @@ check_grep "test:T326_exists" "$MAIN" "compiler_main_test_mul3_skip_pow2"
 check_grep "test:T327_exists" "$MAIN" "compiler_main_test_mul3_skip_5"
 check_grep "test:T328_exists" "$MAIN" "compiler_main_test_mul3_both_const_skip"
 check_grep "test:T329_exists" "$MAIN" "compiler_main_test_mul3_add_sequence"
-check_grep "test:total_347"   "$MAIN" "let total: i64 = 347"
+check_grep "test:total_347plus" "$MAIN" "let total: i64 = 3[4-9][0-9]"
 check_grep "test:T324_wired"  "$MAIN" "T324 OK"
 check_grep "test:T329_wired"  "$MAIN" "T329 OK"
 

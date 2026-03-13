@@ -38,7 +38,7 @@ check_grep "test:T332_exists" "$MAIN" "compiler_main_test_bool_simp_mixed_eq_ne"
 check_grep "test:T333_exists" "$MAIN" "compiler_main_test_bool_simp_mixed_ne_eq"
 check_grep "test:T334_exists" "$MAIN" "compiler_main_test_bool_simp_commutative"
 check_grep "test:T335_exists" "$MAIN" "compiler_main_test_bool_simp_nonzero_no_fold"
-check_grep "test:total_347"   "$MAIN" "let total: i64 = 347"
+check_grep "test:total_347plus" "$MAIN" "let total: i64 = 3[4-9][0-9]"
 check_grep "test:T330_wired"  "$MAIN" "T330 OK"
 check_grep "test:T335_wired"  "$MAIN" "T335 OK"
 

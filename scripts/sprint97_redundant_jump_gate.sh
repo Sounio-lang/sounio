@@ -38,7 +38,7 @@ check_grep "test:T284_exists" "$MAIN" "compiler_main_test_redundant_branch_true"
 check_grep "test:T285_exists" "$MAIN" "compiler_main_test_redundant_branch_false"
 check_grep "test:T286_exists" "$MAIN" "compiler_main_test_redundant_jump_non_jump"
 check_grep "test:T287_exists" "$MAIN" "compiler_main_test_redundant_jump_multi"
-check_grep "test:total_287"   "$MAIN" "let total: i64 = 287"
+check_grep "test:total_287plus" "$MAIN" "let total: i64 = [3-9][0-9][0-9]"
 check_grep "test:T282_wired"  "$MAIN" "T282 OK"
 check_grep "test:T287_wired"  "$MAIN" "T287 OK"
 

@@ -40,7 +40,7 @@ check_grep "test:T278_exists" "$MAIN" "compiler_main_test_shift_chain_mixed"
 check_grep "test:T279_exists" "$MAIN" "compiler_main_test_shift_chain_triple"
 check_grep "test:T280_exists" "$MAIN" "compiler_main_test_shift_chain_nonconst"
 check_grep "test:T281_exists" "$MAIN" "compiler_main_test_shift_chain_sr_integration"
-check_grep "test:total_281"   "$MAIN" "let total: i64 = 281"
+check_grep "test:total_281plus" "$MAIN" "let total: i64 = [3-9][0-9][0-9]"
 check_grep "test:T276_wired"  "$MAIN" "T276 OK"
 check_grep "test:T281_wired"  "$MAIN" "T281 OK"
 

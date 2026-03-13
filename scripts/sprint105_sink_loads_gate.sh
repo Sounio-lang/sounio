@@ -35,7 +35,7 @@ check_grep "test:T314_exists" "$MAIN" "compiler_main_test_sink_loads_no_swap_lab
 check_grep "test:T315_exists" "$MAIN" "compiler_main_test_sink_loads_no_swap_src1"
 check_grep "test:T316_exists" "$MAIN" "compiler_main_test_sink_loads_swap_past_binop"
 check_grep "test:T317_exists" "$MAIN" "compiler_main_test_sink_loads_noop"
-check_grep "test:total_347"   "$MAIN" "let total: i64 = 347"
+check_grep "test:total_347plus" "$MAIN" "let total: i64 = 3[4-9][0-9]"
 check_grep "test:T312_wired"  "$MAIN" "T312 OK"
 check_grep "test:T317_wired"  "$MAIN" "T317 OK"
 

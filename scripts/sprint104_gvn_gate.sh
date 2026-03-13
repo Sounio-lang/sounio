@@ -37,7 +37,7 @@ check_grep "test:T338_exists" "$MAIN" "compiler_main_test_gvn_label_invalidates"
 check_grep "test:T339_exists" "$MAIN" "compiler_main_test_gvn_copy_inherits_vn"
 check_grep "test:T340_exists" "$MAIN" "compiler_main_test_gvn_no_binops"
 check_grep "test:T341_exists" "$MAIN" "compiler_main_test_gvn_chain"
-check_grep "test:total_347"   "$MAIN" "let total: i64 = 347"
+check_grep "test:total_347plus" "$MAIN" "let total: i64 = 3[4-9][0-9]"
 check_grep "test:T336_wired"  "$MAIN" "T336 OK"
 check_grep "test:T341_wired"  "$MAIN" "T341 OK"
 

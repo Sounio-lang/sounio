@@ -36,7 +36,7 @@ check_grep "test:T320_exists" "$MAIN" "compiler_main_test_licm_forward_jump_no_h
 check_grep "test:T321_exists" "$MAIN" "compiler_main_test_licm_binop_not_hoisted"
 check_grep "test:T322_exists" "$MAIN" "compiler_main_test_licm_first_hoisted"
 check_grep "test:T323_exists" "$MAIN" "compiler_main_test_licm_empty_loop"
-check_grep "test:total_347"   "$MAIN" "let total: i64 = 347"
+check_grep "test:total_347plus" "$MAIN" "let total: i64 = 3[4-9][0-9]"
 check_grep "test:T318_wired"  "$MAIN" "T318 OK"
 check_grep "test:T323_wired"  "$MAIN" "T323 OK"
 

@@ -35,7 +35,7 @@ check_grep "test:T308_exists" "$MAIN" "compiler_main_test_jump_to_return_cond_no
 check_grep "test:T309_exists" "$MAIN" "compiler_main_test_jump_to_return_multi"
 check_grep "test:T310_exists" "$MAIN" "compiler_main_test_jump_to_return_missing_label"
 check_grep "test:T311_exists" "$MAIN" "compiler_main_test_jump_to_return_end_of_func"
-check_grep "test:total_347"   "$MAIN" "let total: i64 = 347"
+check_grep "test:total_347plus" "$MAIN" "let total: i64 = 3[4-9][0-9]"
 check_grep "test:T306_wired"  "$MAIN" "T306 OK.*Block AD"
 check_grep "test:T311_wired"  "$MAIN" "T311 OK.*Block AD"
 

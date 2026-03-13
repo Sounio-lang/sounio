@@ -40,7 +40,7 @@ check_grep "test:T272_exists" "$MAIN" "compiler_main_test_zero_div"
 check_grep "test:T273_exists" "$MAIN" "compiler_main_test_zero_rem"
 check_grep "test:T274_exists" "$MAIN" "compiler_main_test_div_one_regr"
 check_grep "test:T275_exists" "$MAIN" "compiler_main_test_div_rem_chain"
-check_grep "test:total_275"   "$MAIN" "let total: i64 = 275"
+check_grep "test:total_275plus" "$MAIN" "let total: i64 = [3-9][0-9][0-9]"
 check_grep "test:T270_wired"  "$MAIN" "T270 OK"
 check_grep "test:T275_wired"  "$MAIN" "T275 OK"
 

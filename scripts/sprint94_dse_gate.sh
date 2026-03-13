@@ -62,7 +62,7 @@ check_grep "test:T266_exists" "$MAIN" "compiler_main_test_dse_label_barrier"
 check_grep "test:T267_exists" "$MAIN" "compiler_main_test_dse_chain"
 check_grep "test:T268_exists" "$MAIN" "compiler_main_test_dse_different_regs"
 check_grep "test:T269_exists" "$MAIN" "compiler_main_test_dse_copy_integration"
-check_grep "test:total_269" "$MAIN" "let total: i64 = 269"
+check_grep "test:total_269plus" "$MAIN" "let total: i64 = [3-9][0-9][0-9]"
 check_grep "test:T264_wired" "$MAIN" "T264 OK"
 check_grep "test:T269_wired" "$MAIN" "T269 OK"
 

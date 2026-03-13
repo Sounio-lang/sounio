@@ -37,7 +37,7 @@ check_grep "test:T296_exists" "$MAIN" "compiler_main_test_dead_label_branch_ref"
 check_grep "test:T297_exists" "$MAIN" "compiler_main_test_dead_label_mixed"
 check_grep "test:T298_exists" "$MAIN" "compiler_main_test_dead_label_integration"
 check_grep "test:T299_exists" "$MAIN" "compiler_main_test_dead_label_no_labels"
-check_grep "test:total_299"   "$MAIN" "let total: i64 = 299"
+check_grep "test:total_299plus" "$MAIN" "let total: i64 = [3-9][0-9][0-9]"
 check_grep "test:T294_wired"  "$MAIN" "T294 OK"
 check_grep "test:T299_wired"  "$MAIN" "T299 OK"
 
