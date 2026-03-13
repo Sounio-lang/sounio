@@ -1,0 +1,221 @@
+// interop::kernel — Kernel describe/execute/output handlers for the embedding ABI.
+//
+// Handles the kernel lifecycle within a session:
+//   1. KERNEL_DESCRIBE  — parse source, register kernel, return metadata
+//   2. KERNEL_EXECUTE   — run kernel with arguments, return results
+//   3. KERNEL_OUTPUT    — retrieve structured output from last execution
+//   4. KERNEL_DIAGNOSTICS — retrieve structured diagnostics
+//   5. KERNEL_ARTIFACTS — retrieve artifact metadata (ELF, profile, etc.)
+//
+// All handlers operate on the session table and write responses via
+// the SNIO wire protocol.
+
+module interop::kernel
+
+use interop::protocol::*
+use interop::contract::*
+use interop::artifact::*
+use interop::session::*
+use interop::serialize::*
+
+// ============================================================================
+// KERNEL EXECUTION RESULT BUFFER
+// ============================================================================
+
+struct KernelExecResult {
+    ok: bool,
+    values: [i64; 8192],
+    value_count: i64,
+    error_msg: string,
+}
+
+fn kernel_exec_result_empty() -> KernelExecResult with Mut {
+    KernelExecResult {
+        ok: false,
+        values: [0; 8192],
+        value_count: 0,
+        error_msg: "",
+    }
+}
+
+fn kernel_exec_result_ok(vals: &[i64; 8192], count: i64) -> KernelExecResult with Mut, Panic, Div {
+    var r = kernel_exec_result_empty()
+    r.ok = true
+    r.value_count = count
+    var i: i64 = 0
+    while i < count {
+        r.values[i as usize] = (*vals)[i as usize]
+        i = i + 1
+    }
+    r
+}
+
+// ============================================================================
+// HANDLER: SESSION_CREATE
+// ============================================================================
+
+fn handle_session_create(table: SessionTable, msg: &IpcMessage) -> SessionTable with IO, Mut, Panic, Div {
+    let flags = if msg.arg_count >= 2 { msg.args[1] } else { 0 }
+    let result = session_create(table, flags)
+    let t = result.0
+    let sid = result.1
+    if sid < 0 {
+        ipc_write_error("session_create: no free slots (max 8)")
+        t
+    } else {
+        // Respond with session_id
+        ipc_write_result_single(sid)
+        t
+    }
+}
+
+// ============================================================================
+// HANDLER: SESSION_DESTROY
+// ============================================================================
+
+fn handle_session_destroy(table: SessionTable, msg: &IpcMessage) -> SessionTable with IO, Mut, Panic, Div {
+    let session_id = if msg.arg_count >= 1 { msg.args[0] } else { -1 }
+    let result = session_destroy(table, session_id)
+    let t = result.0
+    let ok = result.1
+    if ok {
+        ipc_write_result_single(1)
+    } else {
+        ipc_write_error("session_destroy: invalid session_id")
+    }
+    t
+}
+
+// ============================================================================
+// HANDLER: KERNEL_DESCRIBE
+// ============================================================================
+
+fn handle_kernel_describe(table: SessionTable, msg: &IpcMessage) -> SessionTable with IO, Mut, Panic, Div {
+    let session_id = if msg.arg_count >= 1 { msg.args[0] } else { -1 }
+    let flags = if msg.arg_count >= 2 { msg.args[1] } else { 0 }
+    let source_path = ipc_func_name_to_string(msg)
+
+    // Validate session exists and is in a valid state
+    let state = session_get_state(&table, session_id)
+    if state < 0 {
+        ipc_write_error("kernel_describe: invalid session_id")
+        return table
+    }
+
+    // Register the kernel in the session
+    // For now: param_count and return_count are unknown until compilation;
+    // set to 0 and update post-compile.  entry_point defaults to "main".
+    let result = session_add_kernel(table, session_id, source_path, "main", 0, 1)
+    var t = result.0
+    let kernel_id = result.1
+
+    if kernel_id < 0 {
+        ipc_write_error("kernel_describe: max kernels exceeded")
+        return t
+    }
+
+    // Build and send structured response:
+    // [ok:i64, kernel_id:i64, param_count:i64, return_count:i64, strategy:i64]
+    var buf: [i64; 8192] = [0; 8192]
+    buf[0] = 1           // ok
+    buf[1] = kernel_id
+    buf[2] = 0           // param_count (TBD after compile)
+    buf[3] = 1           // return_count
+    buf[4] = 0           // compile_strategy
+    ipc_write_result(&buf, 5)
+
+    t
+}
+
+// ============================================================================
+// HANDLER: KERNEL_EXECUTE
+// ============================================================================
+
+fn handle_kernel_execute(table: SessionTable, msg: &IpcMessage) -> SessionTable with IO, Mut, Panic, Div {
+    let session_id = if msg.arg_count >= 1 { msg.args[0] } else { -1 }
+    let kernel_id = if msg.arg_count >= 2 { msg.args[1] } else { -1 }
+
+    let state = session_get_state(&table, session_id)
+    if state < 0 {
+        ipc_write_error("kernel_execute: invalid session_id")
+        return table
+    }
+
+    let kernel = session_get_kernel(&table, session_id, kernel_id)
+    if !kernel.valid {
+        ipc_write_error("kernel_execute: invalid kernel_id")
+        return table
+    }
+
+    var t = session_mark_executing(table, session_id)
+
+    // Extract kernel args (args[2..] in the message)
+    let karg_count = msg.arg_count - 2
+    var kargs: [i64; 8192] = [0; 8192]
+    var i: i64 = 0
+    while i < karg_count {
+        kargs[i as usize] = msg.args[(i + 2) as usize]
+        i = i + 1
+    }
+
+    // TODO: When native compilation is wired, invoke the compiled kernel here.
+    // For now, dispatch to built-in functions by entry_point name if available,
+    // otherwise return a placeholder result.
+    var result = kernel_exec_result_empty()
+    result.ok = true
+    result.value_count = 1
+    result.values[0] = 0
+
+    t = session_mark_ready(t, session_id)
+
+    // Send result
+    ipc_write_result(&result.values, result.value_count)
+    t
+}
+
+// ============================================================================
+// HANDLER: KERNEL_OUTPUT
+// ============================================================================
+
+fn handle_kernel_output(table: &SessionTable, msg: &IpcMessage) with IO, Mut, Panic, Div {
+    let session_id = if msg.arg_count >= 1 { msg.args[0] } else { -1 }
+    let state = session_get_state(table, session_id)
+    if state < 0 {
+        ipc_write_error("kernel_output: invalid session_id")
+        return
+    }
+    // Structured output: [session_id, state, execute_count, error_count]
+    let slot = session_find_slot(table, session_id)
+    var buf: [i64; 8192] = [0; 8192]
+    buf[0] = session_id
+    buf[1] = (*table).sessions[slot as usize].state
+    buf[2] = (*table).sessions[slot as usize].execute_count
+    buf[3] = (*table).sessions[slot as usize].error_count
+    ipc_write_result(&buf, 4)
+}
+
+// ============================================================================
+// HANDLER: KERNEL_DIAGNOSTICS
+// ============================================================================
+
+fn handle_kernel_diagnostics(table: &SessionTable, msg: &IpcMessage) with IO, Mut, Panic, Div {
+    let session_id = if msg.arg_count >= 1 { msg.args[0] } else { -1 }
+    let diags = session_get_diagnostics(table, session_id)
+    ser_write_diagnostics(&diags)
+}
+
+// ============================================================================
+// HANDLER: KERNEL_ARTIFACTS
+// ============================================================================
+
+fn handle_kernel_artifacts(table: &SessionTable, msg: &IpcMessage) with IO, Mut, Panic, Div {
+    let session_id = if msg.arg_count >= 1 { msg.args[0] } else { -1 }
+    let state = session_get_state(table, session_id)
+    if state < 0 {
+        ipc_write_error("kernel_artifacts: invalid session_id")
+        return
+    }
+    // For now, return empty artifact list (populated after native compile)
+    let artifacts = artifact_list_empty()
+    ser_write_artifact_list(artifacts.count, &artifacts.items)
+}

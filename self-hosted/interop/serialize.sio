@@ -1,0 +1,200 @@
+// interop::serialize — Wire serialization for contract types over SNIO.
+//
+// Converts KernelDiagnostics, ArtifactList, KernelResponse, and
+// KernelProvenance into SNIO RESULT messages with a fixed field layout
+// that hosts can decode without schema negotiation.
+//
+// Wire layout convention: each struct is serialized as a RESULT message
+// where values[] follows a documented field order.  Strings are encoded
+// as (length, char0, char1, ...) sequences within the i64 array.
+
+module interop::serialize
+
+use interop::protocol::*
+use interop::contract::*
+use interop::artifact::*
+
+// ============================================================================
+// STRING ENCODING HELPERS
+// ============================================================================
+
+// Encode a string into buf starting at offset.  Single-borrow variant:
+// takes &! once, writes all chars, returns new offset.
+fn ser_encode_string(s: string, buf: &![i64; 8192], offset: i64) -> i64 with Mut, Panic, Div {
+    let len = str_len(s)
+    let capped = if len > 255 { 255 } else { len }
+    (*buf)[offset as usize] = capped
+    var i: i64 = 0
+    while i < capped {
+        (*buf)[(offset + 1 + i) as usize] = str_char_at(s, i)
+        i = i + 1
+    }
+    offset + 1 + capped
+}
+
+// Inline string encoder that writes directly into a local var buf.
+// Returns the new position.  Caller must pass buf by name (no &!).
+// This avoids the double-mutable-borrow issue.
+fn ser_string_len_capped(s: string) -> i64 with Mut, Panic, Div {
+    let len = str_len(s)
+    if len > 255 { 255 } else { len }
+}
+
+// ============================================================================
+// DIAGNOSTICS SERIALIZATION
+// ============================================================================
+
+// Wire layout for KernelDiagnostics:
+//   [count, then for each diagnostic:
+//     severity, line, col, code,
+//     msg_len, msg_chars...,
+//     fix_len, fix_chars...]
+fn ser_write_diagnostics(diags: &KernelDiagnostics) with IO, Mut, Panic, Div {
+    var buf: [i64; 8192] = [0; 8192]
+    var pos: i64 = 0
+
+    buf[pos as usize] = diags.count
+    pos = pos + 1
+
+    var i: i64 = 0
+    while i < diags.count && i < 64 {
+        let d = (*diags).items[i as usize]
+        buf[pos as usize] = d.severity
+        pos = pos + 1
+        buf[pos as usize] = d.line
+        pos = pos + 1
+        buf[pos as usize] = d.col
+        pos = pos + 1
+        buf[pos as usize] = d.code
+        pos = pos + 1
+
+        // Inline encode d.message
+        let msg_len = ser_string_len_capped(d.message)
+        buf[pos as usize] = msg_len
+        pos = pos + 1
+        var mi: i64 = 0
+        while mi < msg_len {
+            buf[pos as usize] = str_char_at(d.message, mi)
+            pos = pos + 1
+            mi = mi + 1
+        }
+
+        // Inline encode d.fix_suggestion
+        let fix_len = ser_string_len_capped(d.fix_suggestion)
+        buf[pos as usize] = fix_len
+        pos = pos + 1
+        var fi: i64 = 0
+        while fi < fix_len {
+            buf[pos as usize] = str_char_at(d.fix_suggestion, fi)
+            pos = pos + 1
+            fi = fi + 1
+        }
+
+        i = i + 1
+    }
+
+    ipc_write_result(&buf, pos)
+}
+
+// ============================================================================
+// KERNEL RESPONSE SERIALIZATION
+// ============================================================================
+
+// Wire layout for KernelResponse:
+//   [ok, artifact_size, diagnostics_count, error_code, abi_version, function_count,
+//    artifact_path_len, artifact_path_chars...,
+//    error_msg_len, error_msg_chars...]
+fn ser_write_kernel_response(resp: &KernelResponse) with IO, Mut, Panic, Div {
+    var buf: [i64; 8192] = [0; 8192]
+    var pos: i64 = 0
+
+    buf[0] = if resp.ok { 1 } else { 0 }
+    buf[1] = resp.artifact_size
+    buf[2] = resp.diagnostics_count
+    buf[3] = resp.error_code
+    buf[4] = resp.abi_version
+    buf[5] = resp.function_count
+    pos = 6
+
+    // Inline encode artifact_path
+    let ap_len = ser_string_len_capped(resp.artifact_path)
+    buf[pos as usize] = ap_len
+    pos = pos + 1
+    var ai: i64 = 0
+    while ai < ap_len {
+        buf[pos as usize] = str_char_at(resp.artifact_path, ai)
+        pos = pos + 1
+        ai = ai + 1
+    }
+
+    // Inline encode error_msg
+    let em_len = ser_string_len_capped(resp.error_msg)
+    buf[pos as usize] = em_len
+    pos = pos + 1
+    var ei: i64 = 0
+    while ei < em_len {
+        buf[pos as usize] = str_char_at(resp.error_msg, ei)
+        pos = pos + 1
+        ei = ei + 1
+    }
+
+    ipc_write_result(&buf, pos)
+}
+
+// ============================================================================
+// PROVENANCE SERIALIZATION
+// ============================================================================
+
+// Wire layout: [source_hash, abi_version, optimize, function_count,
+//               ir_instruction_count, stdlib_hash]
+fn ser_write_provenance(prov: &KernelProvenance) with IO, Mut, Panic, Div {
+    var buf: [i64; 8192] = [0; 8192]
+    buf[0] = prov.source_hash
+    buf[1] = prov.abi_version
+    buf[2] = if prov.optimize { 1 } else { 0 }
+    buf[3] = prov.function_count
+    buf[4] = prov.ir_instruction_count
+    buf[5] = prov.stdlib_hash
+    ipc_write_result(&buf, 6)
+}
+
+// ============================================================================
+// ARTIFACT LIST SERIALIZATION
+// ============================================================================
+
+// Wire layout: [count, then for each artifact:
+//   kind, size_bytes, hash,
+//   path_len, path_chars...]
+fn ser_write_artifact_list(count: i64, items: &[ArtifactDescriptor; 16]) with IO, Mut, Panic, Div {
+    var buf: [i64; 8192] = [0; 8192]
+    var pos: i64 = 0
+
+    buf[0] = count
+    pos = 1
+
+    var i: i64 = 0
+    while i < count && i < 16 {
+        buf[pos as usize] = (*items)[i as usize].kind
+        pos = pos + 1
+        buf[pos as usize] = (*items)[i as usize].size_bytes
+        pos = pos + 1
+        buf[pos as usize] = (*items)[i as usize].hash
+        pos = pos + 1
+
+        // Inline encode path
+        let path = (*items)[i as usize].path
+        let p_len = ser_string_len_capped(path)
+        buf[pos as usize] = p_len
+        pos = pos + 1
+        var pi: i64 = 0
+        while pi < p_len {
+            buf[pos as usize] = str_char_at(path, pi)
+            pos = pos + 1
+            pi = pi + 1
+        }
+
+        i = i + 1
+    }
+
+    ipc_write_result(&buf, pos)
+}

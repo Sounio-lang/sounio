@@ -48,27 +48,27 @@ module Protocol =
     [<Literal>]
     let MsgStats = 13uy
 
-    // Kernel/session embedding ABI (matches protocol.sio msg types 20-34)
+    // Kernel/session embedding ABI (matches protocol.sio msg types 14-20)
     [<Literal>]
-    let MsgSessionCreate = 20uy
+    let MsgSessionCreate = 14uy
 
     [<Literal>]
-    let MsgSessionDestroy = 21uy
+    let MsgSessionDestroy = 15uy
 
     [<Literal>]
-    let MsgKernelDescribe = 30uy
+    let MsgKernelDescribe = 16uy
 
     [<Literal>]
-    let MsgKernelExecute = 31uy
+    let MsgKernelExecute = 17uy
 
     [<Literal>]
-    let MsgKernelOutput = 32uy
+    let MsgKernelOutput = 18uy
 
     [<Literal>]
-    let MsgKernelDiagnostics = 33uy
+    let MsgKernelDiagnostics = 19uy
 
     [<Literal>]
-    let MsgKernelArtifacts = 34uy
+    let MsgKernelArtifacts = 20uy
 
     // ---- Writing ----
 

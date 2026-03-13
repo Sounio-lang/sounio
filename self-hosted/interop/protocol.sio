@@ -245,6 +245,69 @@ fn ipc_read_call_func_body(msg: IpcMessage, body_len: i64) -> IpcMessage with IO
     out
 }
 
+// Read body for session messages that carry N i64 args (SESSION_CREATE,
+// SESSION_DESTROY, KERNEL_OUTPUT, KERNEL_DIAGNOSTICS, KERNEL_ARTIFACTS).
+fn ipc_read_session_body(msg: IpcMessage, body_len: i64) -> IpcMessage with IO, Mut, Div, Panic {
+    var out = msg
+    let count = body_len / 8
+    var i: i64 = 0
+    while i < count && i < IPC_MAX_ARGS() {
+        out.args[i as usize] = ipc_read_i64_le()
+        i = i + 1
+    }
+    out.arg_count = count
+    out.valid = true
+    out
+}
+
+// Read body for KERNEL_DESCRIBE: session_id(i64) + path_len(u16) + path + flags(i64).
+// Stores session_id in args[0], flags in args[1], path in func_name/func_name_len.
+fn ipc_read_kernel_describe_body(msg: IpcMessage, body_len: i64) -> IpcMessage with IO, Mut, Div, Panic {
+    var out = msg
+    let session_id = ipc_read_i64_le()
+    out.args[0] = session_id
+
+    let path_len = ipc_read_u16_le()
+    if path_len < 0 || path_len > IPC_MAX_NAME_LEN() {
+        return out
+    }
+    out.func_name_len = path_len
+    var ni: i64 = 0
+    while ni < path_len {
+        let ch = read_byte()
+        if ch < 0 { return out }
+        out.func_name[ni as usize] = ch
+        ni = ni + 1
+    }
+
+    let flags = ipc_read_i64_le()
+    out.args[1] = flags
+    out.arg_count = 2
+    out.valid = true
+    out
+}
+
+// Read body for KERNEL_EXECUTE: session_id(i64) + kernel_id(i64) + arg_count(i64) + args.
+// Stores session_id in args[0], kernel_id in args[1], kernel args in args[2..].
+fn ipc_read_kernel_execute_body(msg: IpcMessage, body_len: i64) -> IpcMessage with IO, Mut, Div, Panic {
+    var out = msg
+    let session_id = ipc_read_i64_le()
+    out.args[0] = session_id
+
+    let kernel_id = ipc_read_i64_le()
+    out.args[1] = kernel_id
+
+    let karg_count = ipc_read_i64_le()
+    var i: i64 = 0
+    while i < karg_count && (i + 2) < IPC_MAX_ARGS() {
+        out.args[(i + 2) as usize] = ipc_read_i64_le()
+        i = i + 1
+    }
+    out.arg_count = 2 + karg_count
+    out.valid = true
+    out
+}
+
 fn ipc_read_message() -> IpcMessage with IO, Mut, Div, Panic {
     var msg = ipc_message_empty()
 
@@ -271,6 +334,12 @@ fn ipc_read_message() -> IpcMessage with IO, Mut, Div, Panic {
         msg.valid = true
     } else if msg_type == IPC_MSG_CAPABILITIES() || msg_type == IPC_MSG_GPU_CAPS() || msg_type == IPC_MSG_COMPILE() || msg_type == IPC_MSG_DIAGNOSTICS() || msg_type == IPC_MSG_HEALTH() || msg_type == IPC_MSG_INIT() || msg_type == IPC_MSG_STATS() {
         msg.valid = true
+    } else if msg_type == IPC_MSG_SESSION_CREATE() || msg_type == IPC_MSG_SESSION_DESTROY() || msg_type == IPC_MSG_KERNEL_OUTPUT() || msg_type == IPC_MSG_KERNEL_DIAGNOSTICS() || msg_type == IPC_MSG_KERNEL_ARTIFACTS() {
+        msg = ipc_read_session_body(msg, body_len)
+    } else if msg_type == IPC_MSG_KERNEL_DESCRIBE() {
+        msg = ipc_read_kernel_describe_body(msg, body_len)
+    } else if msg_type == IPC_MSG_KERNEL_EXECUTE() {
+        msg = ipc_read_kernel_execute_body(msg, body_len)
     } else {
         var i: i64 = 0
         while i < body_len {
