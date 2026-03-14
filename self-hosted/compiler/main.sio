@@ -14550,9 +14550,76 @@ fn compiler_main_test_cy_no_fold_sub() -> bool with Mut, Div, Panic {
     opt.instrs[4 as usize].op != IrOpcode::IrCopy
 }
 
+// Sprint 190 Block CZ: XOR-AND mask clear (T806-T811)
+fn compiler_main_test_cz_xor_and_clear_basic() -> bool with Mut, Div, Panic {
+    // r0 ^ (r0 & 7) → r0 & ~7
+    var instrs: [IrInstr; 128] = cp_empty_instrs()
+    instrs[0 as usize] = ir_load_imm(1, 7)
+    instrs[1 as usize] = ir_binop(2, 0, BinaryOp::OpBitAnd, 1)   // r2 = r0 & 7
+    instrs[2 as usize] = ir_binop(3, 0, BinaryOp::OpBitXor, 2)   // r3 = r0 ^ (r0&7)
+    let func = cp_make_test_func(instrs, 3)
+    let opt = opt_cleanup_function(func)
+    opt.instrs[2 as usize].op == IrOpcode::IrBinOp
+        && opt.instrs[2 as usize].bin_op == BinaryOp::OpBitAnd
+        && opt.instrs[2 as usize].src1 == 0
+}
+fn compiler_main_test_cz_xor_and_clear_comm() -> bool with Mut, Div, Panic {
+    // (r0 & 7) ^ r0 → r0 & ~7 commutative
+    var instrs: [IrInstr; 128] = cp_empty_instrs()
+    instrs[0 as usize] = ir_load_imm(1, 7)
+    instrs[1 as usize] = ir_binop(2, 0, BinaryOp::OpBitAnd, 1)
+    instrs[2 as usize] = ir_binop(3, 2, BinaryOp::OpBitXor, 0)   // (r0&7) ^ r0
+    let func = cp_make_test_func(instrs, 3)
+    let opt = opt_cleanup_function(func)
+    opt.instrs[2 as usize].op == IrOpcode::IrBinOp
+        && opt.instrs[2 as usize].bin_op == BinaryOp::OpBitAnd
+        && opt.instrs[2 as usize].src1 == 0
+}
+fn compiler_main_test_cz_xor_and_clear_val() -> bool with Mut, Div, Panic {
+    // r0 ^ (r0 & 0xFF) → r0 & ~0xFF
+    var instrs: [IrInstr; 128] = cp_empty_instrs()
+    instrs[0 as usize] = ir_load_imm(1, 255)
+    instrs[1 as usize] = ir_binop(2, 0, BinaryOp::OpBitAnd, 1)
+    instrs[2 as usize] = ir_binop(3, 0, BinaryOp::OpBitXor, 2)
+    let func = cp_make_test_func(instrs, 3)
+    let opt = opt_cleanup_function(func)
+    opt.instrs[2 as usize].op == IrOpcode::IrBinOp
+        && opt.instrs[2 as usize].bin_op == BinaryOp::OpBitAnd
+        && opt.instrs[2 as usize].src1 == 0
+}
+fn compiler_main_test_cz_no_fold_diff_base() -> bool with Mut, Div, Panic {
+    // r0 ^ (r1 & 7) → no fold (r1 != r0)
+    var instrs: [IrInstr; 128] = cp_empty_instrs()
+    instrs[0 as usize] = ir_load_imm(2, 7)
+    instrs[1 as usize] = ir_binop(3, 1, BinaryOp::OpBitAnd, 2)   // r3 = r1 & 7
+    instrs[2 as usize] = ir_binop(4, 0, BinaryOp::OpBitXor, 3)   // r0 ^ (r1&7)
+    let func = cp_make_test_func(instrs, 3)
+    let opt = opt_cleanup_function(func)
+    opt.instrs[2 as usize].bin_op != BinaryOp::OpBitAnd
+}
+fn compiler_main_test_cz_no_fold_rr_and() -> bool with Mut, Div, Panic {
+    // r0 ^ (r0 & r1) → no fold (and is rr)
+    var instrs: [IrInstr; 128] = cp_empty_instrs()
+    instrs[0 as usize] = ir_binop(2, 0, BinaryOp::OpBitAnd, 1)   // r2 = r0 & r1
+    instrs[1 as usize] = ir_binop(3, 0, BinaryOp::OpBitXor, 2)
+    let func = cp_make_test_func(instrs, 2)
+    let opt = opt_cleanup_function(func)
+    opt.instrs[1 as usize].bin_op != BinaryOp::OpBitAnd
+}
+fn compiler_main_test_cz_no_fold_or() -> bool with Mut, Div, Panic {
+    // r0 | (r0 & 7) → no fold by CZ (OR not XOR; handled by Block AO)
+    var instrs: [IrInstr; 128] = cp_empty_instrs()
+    instrs[0 as usize] = ir_load_imm(1, 7)
+    instrs[1 as usize] = ir_binop(2, 0, BinaryOp::OpBitAnd, 1)
+    instrs[2 as usize] = ir_binop(3, 0, BinaryOp::OpBitOr, 2)
+    let func = cp_make_test_func(instrs, 3)
+    let opt = opt_cleanup_function(func)
+    opt.instrs[2 as usize].bin_op != BinaryOp::OpBitXor
+}
+
 fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
     var passed: i64 = 0
-    let total: i64 = 805
+    let total: i64 = 811
 
     println("=== compiler/main.sio self-tests ===")
 
@@ -18804,6 +18871,32 @@ fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
         passed = passed + 1
         println("  T805 OK: Sprint 189 Block CY: sub not add no fold")
     } else { println("  FAIL: T805") }
+
+    // Sprint 190 Block CZ: XOR-AND mask clear (T806-T811)
+    if compiler_main_test_cz_xor_and_clear_basic() {
+        passed = passed + 1
+        println("  T806 OK: Sprint 190 Block CZ: r0^(r0&7) -> r0&~7")
+    } else { println("  FAIL: T806") }
+    if compiler_main_test_cz_xor_and_clear_comm() {
+        passed = passed + 1
+        println("  T807 OK: Sprint 190 Block CZ: (r0&7)^r0 -> r0&~7 commutative")
+    } else { println("  FAIL: T807") }
+    if compiler_main_test_cz_xor_and_clear_val() {
+        passed = passed + 1
+        println("  T808 OK: Sprint 190 Block CZ: r0^(r0&0xFF) -> r0&~0xFF")
+    } else { println("  FAIL: T808") }
+    if compiler_main_test_cz_no_fold_diff_base() {
+        passed = passed + 1
+        println("  T809 OK: Sprint 190 Block CZ: r0^(r1&7) no fold diff base")
+    } else { println("  FAIL: T809") }
+    if compiler_main_test_cz_no_fold_rr_and() {
+        passed = passed + 1
+        println("  T810 OK: Sprint 190 Block CZ: r0^(r0&r1) no fold rr-and")
+    } else { println("  FAIL: T810") }
+    if compiler_main_test_cz_no_fold_or() {
+        passed = passed + 1
+        println("  T811 OK: Sprint 190 Block CZ: r0|(r0&7) no fold by CZ")
+    } else { println("  FAIL: T811") }
 
     println("")
     println("compiler/main tests: " + int_to_string(passed) + "/" + int_to_string(total) + " passed")
