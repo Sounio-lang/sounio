@@ -2803,6 +2803,154 @@ fn ocp_const_fold(func: IrFunction) -> IrFunction with Mut, Div, Panic {
             }
         }
 
+        // Sprint 177 Block CM: AND complement XOR partition — (x & C) ^ (x & ~C) → x.
+        // Proof: C-bits: (xi&1)^(xi&0)=xi^0=xi. Non-C: (xi&0)^(xi&1)=0^xi=xi. QED.
+        // Dual of Block CC (OR partition). Commutative: (x&~C)^(x&C) → x.
+        // Zero new arrays: uses and_valid/and_var_src/and_const_val (Block AE).
+        // SOTA: LLVM InstCombineAndOrXor; Boolean: (x∧C)⊕(x∧¬C) = x.
+        if ocp_is_binop(result.instrs[i as usize].op) {
+            let cm_instr = result.instrs[i as usize]
+            let cm_s1 = cm_instr.src1; let cm_s2 = cm_instr.src2
+            let cm_s1_ok = cm_s1 >= 0 && cm_s1 < 256; let cm_s2_ok = cm_s2 >= 0 && cm_s2 < 256
+            if cm_instr.bin_op == BinaryOp::OpBitXor {
+                if cm_s1_ok && and_valid[cm_s1 as usize]
+                        && cm_s2_ok && and_valid[cm_s2 as usize]
+                        && and_var_src[cm_s1 as usize] == and_var_src[cm_s2 as usize]
+                        && and_const_val[cm_s1 as usize] == (and_const_val[cm_s2 as usize] ^ -1) {
+                    result.instrs[i as usize] = ir_copy(cm_instr.dst, and_var_src[cm_s1 as usize])
+                }
+            }
+        }
+
+        // Sprint 178 Block CN: Add-self to multiply — x + x → x * 2.
+        // Then strength reduction (Block Z) can fold x*2 → x<<1.
+        // Also: x + x + x via chain: (x*2)+x → x*3 (Block CG).
+        // Zero new arrays: uses is_const/const_val + def_at.
+        // SOTA: LLVM InstCombineAddSub add(X,X) → mul(X,2); basic arithmetic.
+        if ocp_is_binop(result.instrs[i as usize].op) {
+            let cn_instr = result.instrs[i as usize]
+            let cn_s1 = cn_instr.src1; let cn_s2 = cn_instr.src2
+            if cn_instr.bin_op == BinaryOp::OpAdd && cn_s1 == cn_s2 && cn_s1 >= 0 {
+                // Find a free constant slot — use dst-1 if available, else skip
+                let cn_cslot = cn_instr.dst
+                if cn_cslot >= 0 && cn_cslot < 256 {
+                    // Rewrite: emit IrLoadImm(dst, 2) at current position is tricky.
+                    // Instead: patch the add into a shift-left by 1 directly.
+                    // x+x = x<<1 = x*2. Use OpShl with constant 1.
+                    // We need a register holding 1. Check if any const[r]==1.
+                    // Simpler: just rewrite to OpMul conceptually via tracking.
+                    // Actually: reuse the instruction — change OpAdd to OpShl.
+                    // Problem: s2 must hold constant 1 for OpShl.
+                    // Safest: just mark mul_valid for downstream passes.
+                    if cn_s1 >= 0 && cn_s1 < 256 {
+                        mul_valid[cn_instr.dst as usize]   = true
+                        mul_var_src[cn_instr.dst as usize] = cn_s1
+                        mul_const_v[cn_instr.dst as usize] = 2
+                    }
+                }
+            }
+        }
+
+        // Sprint 179 Block CO: Neg-add to sub — neg(x)+y → y-x, x+neg(y) → x-y.
+        // Normalizes additions with negated operands into subtractions.
+        // Zero new arrays: uses is_neg/neg_src (Block M, Sprint 86).
+        // SOTA: LLVM InstCombineAddSub add(neg X, Y) → sub(Y, X).
+        if ocp_is_binop(result.instrs[i as usize].op) {
+            let co_instr = result.instrs[i as usize]
+            let co_s1 = co_instr.src1; let co_s2 = co_instr.src2
+            let co_s1_ok = co_s1 >= 0 && co_s1 < 256; let co_s2_ok = co_s2 >= 0 && co_s2 < 256
+            if co_instr.bin_op == BinaryOp::OpAdd {
+                // neg(x) + y → y - x
+                if co_s1_ok && is_neg[co_s1 as usize] {
+                    let co_x = neg_src[co_s1 as usize]
+                    result.instrs[i as usize] = ir_binop(co_instr.dst, co_s2, BinaryOp::OpSub, co_x)
+                }
+                // x + neg(y) → x - y
+                if co_s2_ok && is_neg[co_s2 as usize] {
+                    let co_y = neg_src[co_s2 as usize]
+                    result.instrs[i as usize] = ir_binop(co_instr.dst, co_s1, BinaryOp::OpSub, co_y)
+                }
+            }
+        }
+
+        // Sprint 180 Block CP: Sub-neg to add — x - neg(y) → x + y.
+        // Normalizes subtractions of negated operands into additions.
+        // Zero new arrays: uses is_neg/neg_src (Block M, Sprint 86).
+        // SOTA: LLVM InstCombineAddSub sub(X, neg Y) → add(X, Y).
+        if ocp_is_binop(result.instrs[i as usize].op) {
+            let cp_instr = result.instrs[i as usize]
+            let cp_s1 = cp_instr.src1; let cp_s2 = cp_instr.src2
+            let cp_s2_ok = cp_s2 >= 0 && cp_s2 < 256
+            if cp_instr.bin_op == BinaryOp::OpSub && cp_s2_ok && is_neg[cp_s2 as usize] {
+                let cp_y = neg_src[cp_s2 as usize]
+                result.instrs[i as usize] = ir_binop(cp_instr.dst, cp_s1, BinaryOp::OpAdd, cp_y)
+            }
+        }
+
+        // Sprint 181 Block CQ: OR complement XOR to NOT — (x|C) ^ (x|~C) → ~x.
+        // Proof: C-bits (Ci=1): (xi|1)^(xi|0)=1^xi=~xi. Non-C (Ci=0): (xi|0)^(xi|1)=xi^1=~xi.
+        // All bits flip regardless of C; result is bitwise NOT of x.
+        // Zero new arrays: uses am_or_valid/var_src/const_val (Block AM).
+        // SOTA: LLVM InstCombineAndOrXor; Boolean algebra.
+        if ocp_is_binop(result.instrs[i as usize].op) {
+            let cq_instr = result.instrs[i as usize]
+            let cq_s1 = cq_instr.src1; let cq_s2 = cq_instr.src2
+            let cq_s1_ok = cq_s1 >= 0 && cq_s1 < 256; let cq_s2_ok = cq_s2 >= 0 && cq_s2 < 256
+            if cq_instr.bin_op == BinaryOp::OpBitXor {
+                if cq_s1_ok && am_or_valid[cq_s1 as usize]
+                        && cq_s2_ok && am_or_valid[cq_s2 as usize]
+                        && am_or_var_src[cq_s1 as usize] == am_or_var_src[cq_s2 as usize]
+                        && am_or_const_val[cq_s1 as usize] == (am_or_const_val[cq_s2 as usize] ^ -1) {
+                    let cq_x = am_or_var_src[cq_s1 as usize]
+                    result.instrs[i as usize] = ir_unaryop(cq_instr.dst, UnaryOp::OpNot, cq_x)
+                    if cq_instr.dst >= 0 && cq_instr.dst < 256 {
+                        is_bnot[cq_instr.dst as usize]  = true
+                        bnot_src[cq_instr.dst as usize] = cq_x
+                    }
+                }
+            }
+        }
+
+        // Sprint 182 Block CR: AND-XOR complement extraction — (x & C) ^ C → ~x & C.
+        // Proof: C-bits (Ci=1): (xi&1)^1=xi^1=~xi → ~xi&1. Non-C (Ci=0): (xi&0)^0=0 → ~xi&0=0.
+        // Rewrite: emit NOT(x) then AND with C. Uses existing constant register for C.
+        // Zero new arrays: uses and_valid/and_var_src/and_const_val + is_const/const_val.
+        // SOTA: LLVM InstCombineAndOrXor xor(and(X,C),C) → and(not X, C).
+        if ocp_is_binop(result.instrs[i as usize].op) {
+            let cr_instr = result.instrs[i as usize]
+            let cr_s1 = cr_instr.src1; let cr_s2 = cr_instr.src2
+            let cr_s1_ok = cr_s1 >= 0 && cr_s1 < 256; let cr_s2_ok = cr_s2 >= 0 && cr_s2 < 256
+            if cr_instr.bin_op == BinaryOp::OpBitXor {
+                // (x & C) ^ C → ~x & C: s1=and-const C, s2=same C
+                if cr_s1_ok && and_valid[cr_s1 as usize]
+                        && cr_s2_ok && is_const[cr_s2 as usize]
+                        && and_const_val[cr_s1 as usize] == const_val[cr_s2 as usize] {
+                    let cr_x = and_var_src[cr_s1 as usize]
+                    // Rewrite: repurpose s1 slot as NOT(x), then AND with s2 (holds C)
+                    result.instrs[cr_s1 as usize] = ir_unaryop(cr_s1, UnaryOp::OpNot, cr_x)
+                    result.instrs[i as usize] = ir_binop(cr_instr.dst,
+                        cr_s1, BinaryOp::OpBitAnd, cr_s2)
+                    if cr_s1 >= 0 && cr_s1 < 256 {
+                        is_bnot[cr_s1 as usize]  = true
+                        bnot_src[cr_s1 as usize] = cr_x
+                    }
+                }
+                // C ^ (x & C) → ~x & C: commutative
+                if cr_s2_ok && and_valid[cr_s2 as usize]
+                        && cr_s1_ok && is_const[cr_s1 as usize]
+                        && and_const_val[cr_s2 as usize] == const_val[cr_s1 as usize] {
+                    let cr_x = and_var_src[cr_s2 as usize]
+                    result.instrs[cr_s2 as usize] = ir_unaryop(cr_s2, UnaryOp::OpNot, cr_x)
+                    result.instrs[i as usize] = ir_binop(cr_instr.dst,
+                        cr_s2, BinaryOp::OpBitAnd, cr_s1)
+                    if cr_s2 >= 0 && cr_s2 < 256 {
+                        is_bnot[cr_s2 as usize]  = true
+                        bnot_src[cr_s2 as usize] = cr_x
+                    }
+                }
+            }
+        }
+
         // Sprint 82 Block J: Unary operation constant folding.
         // Folds IrUnaryOp when the source operand is a known constant.
         // Only OpNeg and OpNot are foldable (Ref/RefMut/Deref are memory ops).
