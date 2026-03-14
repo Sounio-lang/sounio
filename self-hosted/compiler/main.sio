@@ -10884,9 +10884,90 @@ fn compiler_main_test_mask_merge_used() -> bool with Mut, Div, Panic {
     opt.instrs[4].op == IrOpcode::IrCopy && opt.instrs[4].src1 == 3
 }
 
+
+// Sprint 141: Block BC — Negation subtraction simplification (T512-T517)
+
+// T512: neg(a) - neg(b) → b - a  [basic]
+fn compiler_main_test_neg_sub_neg_basic() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_unaryop(2, UnaryOp::OpNeg, 0)    // r2 = neg(r0)
+    instrs[1] = ir_unaryop(3, UnaryOp::OpNeg, 1)    // r3 = neg(r1)
+    instrs[2] = ir_binop(4, 2, BinaryOp::OpSub, 3)  // r4 = r2 - r3 -> r1 - r0
+    instrs[3] = ir_return(4)
+    let func = cp_make_test_func(instrs, 4)
+    let opt = opt_cleanup_function(func)
+    opt.instrs[2].op == IrOpcode::IrBinOp
+        && opt.instrs[2].bin_op == BinaryOp::OpSub
+        && opt.instrs[2].src1 == 1 && opt.instrs[2].src2 == 0
+}
+
+// T513: neg(b) - neg(a) → a - b  [swapped operands]
+fn compiler_main_test_neg_sub_neg_swapped() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_unaryop(2, UnaryOp::OpNeg, 1)    // r2 = neg(r1)
+    instrs[1] = ir_unaryop(3, UnaryOp::OpNeg, 0)    // r3 = neg(r0)
+    instrs[2] = ir_binop(4, 2, BinaryOp::OpSub, 3)  // r4 = r2 - r3 -> r0 - r1
+    instrs[3] = ir_return(4)
+    let func = cp_make_test_func(instrs, 4)
+    let opt = opt_cleanup_function(func)
+    opt.instrs[2].op == IrOpcode::IrBinOp
+        && opt.instrs[2].bin_op == BinaryOp::OpSub
+        && opt.instrs[2].src1 == 0 && opt.instrs[2].src2 == 1
+}
+
+// T514: neg(a) - neg(a) → 0  [same operand chains with Block A: a-a→0]
+fn compiler_main_test_neg_sub_neg_same() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_unaryop(2, UnaryOp::OpNeg, 0)    // r2 = neg(r0)
+    instrs[1] = ir_unaryop(3, UnaryOp::OpNeg, 0)    // r3 = neg(r0)
+    instrs[2] = ir_binop(4, 2, BinaryOp::OpSub, 3)  // r4 = r2 - r3 -> r0 - r0 -> 0
+    instrs[3] = ir_return(4)
+    let func = cp_make_test_func(instrs, 4)
+    let opt = opt_cleanup_function(func)
+    opt.instrs[2].op == IrOpcode::IrLoadImm && opt.instrs[2].imm_i64 == 0
+}
+
+// T515: neg(a) - b — only s1 negated, no Block BC fold
+fn compiler_main_test_neg_sub_pos_no_fold() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_unaryop(2, UnaryOp::OpNeg, 0)    // r2 = neg(r0)
+    instrs[1] = ir_binop(3, 2, BinaryOp::OpSub, 1)  // r3 = r2 - r1 [s2 not neg]
+    instrs[2] = ir_return(3)
+    let func = cp_make_test_func(instrs, 3)
+    let opt = opt_cleanup_function(func)
+    opt.instrs[1].op == IrOpcode::IrBinOp && opt.instrs[1].src1 == 2
+}
+
+// T516: a - neg(b) -> Block AG fires: a + b; Block BC must NOT fire
+fn compiler_main_test_pos_sub_neg_no_bc() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_unaryop(2, UnaryOp::OpNeg, 1)    // r2 = neg(r1)
+    instrs[1] = ir_binop(3, 0, BinaryOp::OpSub, 2)  // r3 = r0 - neg(r1) -> Block AG: r0 + r1
+    instrs[2] = ir_return(3)
+    let func = cp_make_test_func(instrs, 3)
+    let opt = opt_cleanup_function(func)
+    opt.instrs[1].op == IrOpcode::IrBinOp
+        && opt.instrs[1].bin_op == BinaryOp::OpAdd
+        && opt.instrs[1].src1 == 0 && opt.instrs[1].src2 == 1
+}
+
+// T517: neg(a) * neg(b) -> Block AW fires: a * b; Block BC does not apply
+fn compiler_main_test_neg_mul_neg_aw() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_unaryop(2, UnaryOp::OpNeg, 0)    // r2 = neg(r0)
+    instrs[1] = ir_unaryop(3, UnaryOp::OpNeg, 1)    // r3 = neg(r1)
+    instrs[2] = ir_binop(4, 2, BinaryOp::OpMul, 3)  // r4 = r2 * r3 -> Block AW: r0 * r1
+    instrs[3] = ir_return(4)
+    let func = cp_make_test_func(instrs, 4)
+    let opt = opt_cleanup_function(func)
+    opt.instrs[2].op == IrOpcode::IrBinOp
+        && opt.instrs[2].bin_op == BinaryOp::OpMul
+        && opt.instrs[2].src1 == 0 && opt.instrs[2].src2 == 1
+}
+
 fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
     var passed: i64 = 0
-    let total: i64 = 511
+    let total: i64 = 517
 
     println("=== compiler/main.sio self-tests ===")
 
@@ -13918,6 +13999,32 @@ fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
         println("  T511 OK: Sprint 140 Block BB: mask merge result used downstream")
         passed = passed + 1
     } else { println("  FAIL: T511") }
+
+    // Sprint 141 Block BC: Negation subtraction simplification (T512-T517)
+    if compiler_main_test_neg_sub_neg_basic() {
+        println("  T512 OK: Sprint 141 Block BC: neg(a)-neg(b) -> b-a [basic]")
+        passed = passed + 1
+    } else { println("  FAIL: T512") }
+    if compiler_main_test_neg_sub_neg_swapped() {
+        println("  T513 OK: Sprint 141 Block BC: neg(b)-neg(a) -> a-b [swapped]")
+        passed = passed + 1
+    } else { println("  FAIL: T513") }
+    if compiler_main_test_neg_sub_neg_same() {
+        println("  T514 OK: Sprint 141 Block BC: neg(a)-neg(a) -> 0 [same->Block A]")
+        passed = passed + 1
+    } else { println("  FAIL: T514") }
+    if compiler_main_test_neg_sub_pos_no_fold() {
+        println("  T515 OK: Sprint 141 Block BC: neg(a)-b no fold [negative]")
+        passed = passed + 1
+    } else { println("  FAIL: T515") }
+    if compiler_main_test_pos_sub_neg_no_bc() {
+        println("  T516 OK: Sprint 141 Block BC: a-neg(b)->a+b via Block AG")
+        passed = passed + 1
+    } else { println("  FAIL: T516") }
+    if compiler_main_test_neg_mul_neg_aw() {
+        println("  T517 OK: Sprint 141 Block BC: neg(a)*neg(b)->a*b via Block AW")
+        passed = passed + 1
+    } else { println("  FAIL: T517") }
 
     println("")
     println("compiler/main tests: " + int_to_string(passed) + "/" + int_to_string(total) + " passed")
