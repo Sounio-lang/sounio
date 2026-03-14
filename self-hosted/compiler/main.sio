@@ -14896,9 +14896,77 @@ fn compiler_main_test_dd_no_fold_or_outer() -> bool with Mut, Div, Panic {
     opt.instrs[3 as usize].bin_op != BinaryOp::OpBitXor
 }
 
+// Sprint 195 Block DE: XOR self-complement (T836-T841)
+fn compiler_main_test_de_xor_self_comp_basic() -> bool with Mut, Div, Panic {
+    // r2 = r0 ^ r1; r3 = ~r2; r4 = r2 ^ r3 → IrLoadImm(-1)
+    var instrs: [IrInstr; 128] = cp_empty_instrs()
+    instrs[0 as usize] = ir_binop(2, 0, BinaryOp::OpBitXor, 1)
+    instrs[1 as usize] = ir_unaryop(3, UnaryOp::OpNot, 2)
+    instrs[2 as usize] = ir_binop(4, 2, BinaryOp::OpBitXor, 3)
+    let func = cp_make_test_func(instrs, 3)
+    let opt = opt_cleanup_function(func)
+    opt.instrs[2 as usize].op == IrOpcode::IrLoadImm
+        && opt.instrs[2 as usize].imm == -1
+}
+
+fn compiler_main_test_de_xor_self_comp_comm() -> bool with Mut, Div, Panic {
+    // ~r0 ^ r0 → IrLoadImm(-1) (commutative: NOT on left)
+    var instrs: [IrInstr; 128] = cp_empty_instrs()
+    instrs[0 as usize] = ir_unaryop(2, UnaryOp::OpNot, 0)
+    instrs[1 as usize] = ir_binop(3, 2, BinaryOp::OpBitXor, 0)
+    let func = cp_make_test_func(instrs, 2)
+    let opt = opt_cleanup_function(func)
+    opt.instrs[1 as usize].op == IrOpcode::IrLoadImm
+        && opt.instrs[1 as usize].imm == -1
+}
+
+fn compiler_main_test_de_xor_self_comp_val() -> bool with Mut, Div, Panic {
+    // r2 = ~r0; r3 = r0^r2 → -1; then r4 = r3+1 → const 0
+    var instrs: [IrInstr; 128] = cp_empty_instrs()
+    instrs[0 as usize] = ir_unaryop(2, UnaryOp::OpNot, 0)
+    instrs[1 as usize] = ir_binop(3, 0, BinaryOp::OpBitXor, 2)
+    instrs[2 as usize] = ir_load_imm(4, 1)
+    instrs[3 as usize] = ir_binop(5, 3, BinaryOp::OpAdd, 4)
+    let func = cp_make_test_func(instrs, 4)
+    let opt = opt_cleanup_function(func)
+    // r3 folded to -1, r5 = r3+1 = -1+1 = 0 via const prop
+    opt.instrs[1 as usize].op == IrOpcode::IrLoadImm
+        && opt.instrs[1 as usize].imm == -1
+}
+
+fn compiler_main_test_de_no_fold_diff_regs() -> bool with Mut, Div, Panic {
+    // r2 = ~r0; r3 = r1^r2 → no fold (r1 != r0)
+    var instrs: [IrInstr; 128] = cp_empty_instrs()
+    instrs[0 as usize] = ir_unaryop(2, UnaryOp::OpNot, 0)
+    instrs[1 as usize] = ir_binop(3, 1, BinaryOp::OpBitXor, 2)
+    let func = cp_make_test_func(instrs, 2)
+    let opt = opt_cleanup_function(func)
+    opt.instrs[1 as usize].op != IrOpcode::IrLoadImm
+}
+
+fn compiler_main_test_de_no_fold_and_op() -> bool with Mut, Div, Panic {
+    // r2 = ~r0; r3 = r0 & r2 → no fold by DE (AND not XOR)
+    var instrs: [IrInstr; 128] = cp_empty_instrs()
+    instrs[0 as usize] = ir_unaryop(2, UnaryOp::OpNot, 0)
+    instrs[1 as usize] = ir_binop(3, 0, BinaryOp::OpBitAnd, 2)
+    let func = cp_make_test_func(instrs, 2)
+    let opt = opt_cleanup_function(func)
+    opt.instrs[1 as usize].op != IrOpcode::IrLoadImm
+}
+
+fn compiler_main_test_de_no_fold_or_op() -> bool with Mut, Div, Panic {
+    // r2 = ~r0; r3 = r0 | r2 → no fold by DE (OR not XOR)
+    var instrs: [IrInstr; 128] = cp_empty_instrs()
+    instrs[0 as usize] = ir_unaryop(2, UnaryOp::OpNot, 0)
+    instrs[1 as usize] = ir_binop(3, 0, BinaryOp::OpBitOr, 2)
+    let func = cp_make_test_func(instrs, 2)
+    let opt = opt_cleanup_function(func)
+    opt.instrs[1 as usize].op != IrOpcode::IrLoadImm
+}
+
 fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
     var passed: i64 = 0
-    let total: i64 = 835
+    let total: i64 = 841
 
     println("=== compiler/main.sio self-tests ===")
 
@@ -19280,6 +19348,32 @@ fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
         passed = passed + 1
         println("  T835 OK: Sprint 194 Block DD: (r0|r1)|~(r0&r1) no fold OR outer")
     } else { println("  FAIL: T835") }
+
+    // Sprint 195 Block DE: XOR self-complement (T836-T841)
+    if compiler_main_test_de_xor_self_comp_basic() {
+        passed = passed + 1
+        println("  T836 OK: Sprint 195 Block DE: r0^~r0 -> -1")
+    } else { println("  FAIL: T836") }
+    if compiler_main_test_de_xor_self_comp_comm() {
+        passed = passed + 1
+        println("  T837 OK: Sprint 195 Block DE: ~r0^r0 -> -1 comm")
+    } else { println("  FAIL: T837") }
+    if compiler_main_test_de_xor_self_comp_val() {
+        passed = passed + 1
+        println("  T838 OK: Sprint 195 Block DE: r0^~r0 yields -1 const")
+    } else { println("  FAIL: T838") }
+    if compiler_main_test_de_no_fold_diff_regs() {
+        passed = passed + 1
+        println("  T839 OK: Sprint 195 Block DE: r1^~r0 no fold diff regs")
+    } else { println("  FAIL: T839") }
+    if compiler_main_test_de_no_fold_and_op() {
+        passed = passed + 1
+        println("  T840 OK: Sprint 195 Block DE: r0&~r0 no fold by DE")
+    } else { println("  FAIL: T840") }
+    if compiler_main_test_de_no_fold_or_op() {
+        passed = passed + 1
+        println("  T841 OK: Sprint 195 Block DE: r0|~r0 no fold by DE")
+    } else { println("  FAIL: T841") }
 
     println("")
     println("compiler/main tests: " + int_to_string(passed) + "/" + int_to_string(total) + " passed")
