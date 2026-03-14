@@ -2666,6 +2666,61 @@ fn ocp_const_fold(func: IrFunction) -> IrFunction with Mut, Div, Panic {
             }
         }
 
+        // Sprint 174 Block CJ: Shift-sub to multiply — (x<<A)-x → x*(2^A-1).
+        // Also: x-(x<<A) → x*(1-2^A) (x subtracted from left shift).
+        // Proof: x<<A - x = x*2^A - x = x*(2^A-1). Mersenne multiplier canonical form.
+        // Guard: A<63 to avoid overflow. 2^A-1 ≥ 1 for A≥1; A=0 → x*0=0 handled by DCE.
+        // Zero new arrays: reuses bk_shl_valid/src/amt (Block BK) + def_at + mul_valid.
+        // SOTA: LLVM InstCombineAddSub; Hacker's Delight §8-2 (Mersenne multiplier).
+        if ocp_is_binop(result.instrs[i as usize].op) {
+            let cj_instr = result.instrs[i as usize]
+            let cj_s1 = cj_instr.src1; let cj_s2 = cj_instr.src2
+            let cj_s1_ok = cj_s1 >= 0 && cj_s1 < 256
+            let cj_s2_ok = cj_s2 >= 0 && cj_s2 < 256
+            if cj_instr.bin_op == BinaryOp::OpSub {
+                // (x<<A) - x → x*(2^A-1): s1=shl-const, s2==base of s1
+                if cj_s1_ok && bk_shl_valid[cj_s1 as usize]
+                        && bk_shl_src[cj_s1 as usize] == cj_s2 {
+                    let cj_amt = bk_shl_amt[cj_s1 as usize]
+                    if cj_amt >= 0 && cj_amt < 63 {
+                        let cj_pow2 = 1 << (cj_amt as i32)
+                        let cj_merged = cj_pow2 - 1
+                        let cj_def = def_at[cj_s1 as usize]
+                        if cj_def >= 0 {
+                            result.instrs[cj_def as usize] = ir_load_imm(cj_s1, cj_merged as i64)
+                            const_val[cj_s1 as usize] = cj_merged as i64
+                        }
+                        result.instrs[i as usize] = ir_binop(cj_instr.dst, cj_s2, BinaryOp::OpMul, cj_s1)
+                        if cj_instr.dst >= 0 && cj_instr.dst < 256 {
+                            mul_valid[cj_instr.dst as usize]   = true
+                            mul_var_src[cj_instr.dst as usize] = cj_s2
+                            mul_const_v[cj_instr.dst as usize] = cj_merged as i64
+                        }
+                    }
+                }
+                // x - (x<<A) → x*(1-2^A): s1==base of s2, s2=shl-const
+                if cj_s2_ok && bk_shl_valid[cj_s2 as usize]
+                        && bk_shl_src[cj_s2 as usize] == cj_s1 {
+                    let cj_amt = bk_shl_amt[cj_s2 as usize]
+                    if cj_amt >= 0 && cj_amt < 63 {
+                        let cj_pow2 = 1 << (cj_amt as i32)
+                        let cj_merged = 1 - cj_pow2
+                        let cj_def = def_at[cj_s2 as usize]
+                        if cj_def >= 0 {
+                            result.instrs[cj_def as usize] = ir_load_imm(cj_s2, cj_merged as i64)
+                            const_val[cj_s2 as usize] = cj_merged as i64
+                        }
+                        result.instrs[i as usize] = ir_binop(cj_instr.dst, cj_s1, BinaryOp::OpMul, cj_s2)
+                        if cj_instr.dst >= 0 && cj_instr.dst < 256 {
+                            mul_valid[cj_instr.dst as usize]   = true
+                            mul_var_src[cj_instr.dst as usize] = cj_s1
+                            mul_const_v[cj_instr.dst as usize] = cj_merged as i64
+                        }
+                    }
+                }
+            }
+        }
+
         // Sprint 82 Block J: Unary operation constant folding.
         // Folds IrUnaryOp when the source operand is a known constant.
         // Only OpNeg and OpNot are foldable (Ref/RefMut/Deref are memory ops).
@@ -2794,28 +2849,6 @@ fn ocp_const_fold(func: IrFunction) -> IrFunction with Mut, Div, Panic {
                 result.instrs[i as usize] = ir_copy(nn_instr.dst, neg_src[nn_s as usize])
                 if nn_instr.dst >= 0 && nn_instr.dst < 256 {
                     is_neg[nn_instr.dst as usize] = false
-                }
-            }
-        }
-
-        // Sprint 173 Block CI: AND complement XOR partition — (x&C)^(x&~C) → x.
-        // Proof: XOR of complementary AND partitions reconstructs x.
-        //   Bit k: if C_k=1 → (x_k)^0 = x_k; if C_k=0 → 0^(x_k) = x_k.
-        // Dual of Block CC ((x&C)|(x&~C)→x, Sprint 167) with XOR instead of OR.
-        // Zero new arrays: reuses and_valid/and_var_src/and_const_val (Block AE, Sprint 108).
-        // SOTA: Boolean algebra XOR partition; GF(2) identity; LLVM InstCombineAndOrXor.
-        if ocp_is_binop(result.instrs[i as usize].op) {
-            let ci_instr = result.instrs[i as usize]
-            let ci_s1 = ci_instr.src1; let ci_s2 = ci_instr.src2
-            let ci_s1_ok = ci_s1 >= 0 && ci_s1 < 256
-            let ci_s2_ok = ci_s2 >= 0 && ci_s2 < 256
-            if ci_instr.bin_op == BinaryOp::OpBitXor {
-                if ci_s1_ok && and_valid[ci_s1 as usize]
-                        && ci_s2_ok && and_valid[ci_s2 as usize]
-                        && and_var_src[ci_s1 as usize] == and_var_src[ci_s2 as usize]
-                        && and_const_val[ci_s1 as usize] == (and_const_val[ci_s2 as usize] ^ -1) {
-                    let ci_x = and_var_src[ci_s1 as usize]
-                    result.instrs[i as usize] = ir_copy(ci_instr.dst, ci_x)
                 }
             }
         }
