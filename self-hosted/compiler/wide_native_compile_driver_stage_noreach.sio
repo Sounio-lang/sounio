@@ -1,0 +1,142 @@
+// self-hosted::compiler::wide_native_compile_driver_stage_noreach
+//
+// Even thinner bootstrap entrypoint for staging a native wide-driver ELF.
+// It skips the streaming-reach pass entirely during bootstrap and lowers all
+// functions directly into a full IrModule before calling wide_compile_and_emit.
+
+use lexer::mod::*
+use parser::ast::*
+use parser::mod::{parse_program_preloaded}
+use parser::parser::{parser_last_error_count}
+use ir::ir::*
+use ir::lower::{
+    IrProgramSummaryFlat,
+    lower_program_to_ir_summary_flat_owned_with_epistemic_ref,
+    lower_program_function_body_from_summary_flat_with_epistemic_ref
+}
+use native::wide_driver::*
+
+fn stage_lower_full_function(
+    prog: &Program,
+    summary: &IrProgramSummaryFlat,
+    epistemic: IrEpistemicSection,
+    fi: i64
+) -> IrFunction with IO, Mut, Panic, Div, Alloc {
+    let fn_name = summary.module.functions[fi as usize].name
+    let body_result = lower_program_function_body_from_summary_flat_with_epistemic_ref(
+        prog, summary, epistemic, fn_name
+    )
+    body_result.func
+}
+
+fn stage_store_full_function(
+    full_module: &! IrModule,
+    func: IrFunction,
+    fi: i64
+) -> () with Mut, Panic, Div {
+    if func.instr_count > 0 && fi >= 0 && fi < (*full_module).fn_count {
+        (*full_module).functions[fi as usize] = func
+    }
+}
+
+fn stage_build_full_module(
+    prog: &Program,
+    summary: &IrProgramSummaryFlat,
+    epistemic: IrEpistemicSection,
+    fn_count: i64
+) -> IrModule with IO, Mut, Panic, Div, Alloc {
+    var full_module = summary.module
+    var fi: i64 = 0
+    while fi < fn_count {
+        let func = stage_lower_full_function(prog, summary, epistemic, fi)
+        stage_store_full_function(&! full_module, func, fi)
+        fi = fi + 1
+    }
+    full_module
+}
+
+fn main() -> i64 with IO, Mut, Panic, Div, Alloc {
+    let argc = arg_count()
+    if argc < 1 {
+        print("wide_native_compile: usage: wide_native_compile_driver_stage_noreach.sio <source.sio> [-o <output>]\n")
+        print("wide_native_compile: usage: wide_native_compile_driver_stage_noreach.sio <source.sio> <output>\n")
+        return 1
+    }
+    let source_path = get_arg(0)
+
+    var output_path = "a.out"
+    if argc >= 3 {
+        let flag = get_arg(1)
+        if flag == "-o" {
+            output_path = get_arg(2)
+        }
+    }
+    if argc == 2 {
+        let arg1 = get_arg(1)
+        if arg1 != "-o" {
+            output_path = arg1
+        }
+    }
+
+    print("wide_native_compile: source=")
+    print(source_path)
+    print(" output=")
+    print(output_path)
+    print("\n")
+
+    let size = file_size(source_path)
+    let data: [i8; 1048576] = read_file(source_path)
+    let state = lex(data, size, 0)
+    let prog = parse_program_preloaded(state.token_count)
+    if parser_last_error_count() > 0 {
+        print("wide_native_compile: parse_error\n")
+        return 1
+    }
+    print("wide_native_compile: parse_ok\n")
+
+    let epistemic = ir_empty_epistemic_section()
+    let summary_result = lower_program_to_ir_summary_flat_owned_with_epistemic_ref(&prog, epistemic)
+    if summary_result.had_error {
+        print("wide_native_compile: summary_lower_error\n")
+        return 2
+    }
+
+    let fn_count = summary_result.summary.module.fn_count
+    print("wide_native_compile: fn_count=")
+    print_int(fn_count)
+    print("\n")
+
+    if fn_count <= 0 {
+        print("wide_native_compile: empty_module\n")
+        return 2
+    }
+
+    if fn_count > 1024 {
+        print("wide_native_compile: too_many_functions (max=1024)\n")
+        return 2
+    }
+
+    let full_module = stage_build_full_module(&prog, &summary_result.summary, epistemic, fn_count)
+    print("wide_native_compile: full_fn_count=")
+    print_int(full_module.fn_count)
+    print("\n")
+
+    print("wide_native_compile: compiling (batch_size=200)\n")
+    let result = wide_compile_and_emit(&full_module, output_path)
+
+    if !result.ok {
+        print("wide_native_compile: compile_error\n")
+        return 3
+    }
+
+    print("wide_native_compile: ok fn_count=")
+    print_int(result.fn_count)
+    print(" code_size=")
+    print_int(result.code_size)
+    print(" reloc_count=")
+    print_int(result.reloc_count)
+    print(" output=")
+    print(output_path)
+    print("\n")
+    0
+}

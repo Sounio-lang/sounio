@@ -1,0 +1,196 @@
+// self-hosted::compiler::wide_native_compile_driver_stage
+//
+// Bootstrap-lean entrypoint for prebuilding the wide native compile driver as
+// a staged ELF. Keeps the same two-pass reachability + wide codegen flow as
+// wide_native_compile_driver.sio, but trims the import surface so the
+// skip-checker native bootstrap path does less work during body lowering.
+
+use lexer::mod::*
+use parser::ast::*
+use parser::mod::{parse_program_preloaded}
+use parser::parser::{parser_last_error_count}
+use ir::ir::*
+use ir::lower::{
+    IrProgramSummaryFlat,
+    lower_program_to_ir_summary_flat_owned_with_epistemic_ref,
+    lower_program_function_body_from_summary_flat_with_epistemic_ref
+}
+use ir::reachability::*
+use ir::stream_reach::*
+use native::wide_driver::*
+
+fn stage_scan_graph_function(
+    prog: &Program,
+    summary: &IrProgramSummaryFlat,
+    epistemic: IrEpistemicSection,
+    graph: StreamCallGraph,
+    fi: i64
+) -> StreamCallGraph with IO, Mut, Panic, Div, Alloc {
+    let fn_name = summary.module.functions[fi as usize].name
+    let body_result = lower_program_function_body_from_summary_flat_with_epistemic_ref(
+        prog, summary, epistemic, fn_name
+    )
+    if body_result.func.instr_count > 0 {
+        scg_scan_function(graph, body_result.func, fi)
+    } else {
+        graph
+    }
+}
+
+fn stage_lower_thin_function(
+    prog: &Program,
+    summary: &IrProgramSummaryFlat,
+    epistemic: IrEpistemicSection,
+    fi: i64
+) -> IrFunction with IO, Mut, Panic, Div, Alloc {
+    let fn_name = summary.module.functions[fi as usize].name
+    let body_result = lower_program_function_body_from_summary_flat_with_epistemic_ref(
+        prog, summary, epistemic, fn_name
+    )
+    body_result.func
+}
+
+fn stage_build_reach_graph(
+    prog: &Program,
+    summary: &IrProgramSummaryFlat,
+    epistemic: IrEpistemicSection,
+    fn_count: i64
+) -> StreamCallGraph with IO, Mut, Panic, Div, Alloc {
+    var graph = scg_new(fn_count)
+    var fi: i64 = 0
+    while fi < fn_count {
+        graph = stage_scan_graph_function(prog, summary, epistemic, graph, fi)
+        fi = fi + 1
+    }
+    graph
+}
+
+fn stage_build_thin_module(
+    prog: &Program,
+    summary: &IrProgramSummaryFlat,
+    epistemic: IrEpistemicSection,
+    mark: &[bool; 1024],
+    remap: &[i64; 1024],
+    fn_count: i64
+) -> IrModule with IO, Mut, Panic, Div, Alloc {
+    var thin_module = summary.module
+    var thin_idx: i64 = 0
+    var fi: i64 = 0
+    while fi < fn_count {
+        if mark[fi as usize] {
+            let func = stage_lower_thin_function(prog, summary, epistemic, fi)
+            if func.instr_count > 0 {
+                thin_module.functions[thin_idx as usize] = func
+            }
+            thin_idx = thin_idx + 1
+        }
+        fi = fi + 1
+    }
+    thin_module.fn_count = thin_idx
+    reach_patch_calls(&!thin_module, remap)
+    thin_module
+}
+
+fn main() -> i64 with IO, Mut, Panic, Div, Alloc {
+    let argc = arg_count()
+    if argc < 1 {
+        print("wide_native_compile: usage: wide_native_compile_driver_stage.sio <source.sio> [-o <output>]\n")
+        print("wide_native_compile: usage: wide_native_compile_driver_stage.sio <source.sio> <output>\n")
+        return 1
+    }
+    let source_path = get_arg(0)
+
+    var output_path = "a.out"
+    if argc >= 3 {
+        let flag = get_arg(1)
+        if flag == "-o" {
+            output_path = get_arg(2)
+        }
+    }
+    if argc == 2 {
+        let arg1 = get_arg(1)
+        if arg1 != "-o" {
+            output_path = arg1
+        }
+    }
+
+    print("wide_native_compile: source=")
+    print(source_path)
+    print(" output=")
+    print(output_path)
+    print("\n")
+
+    let size = file_size(source_path)
+    let data: [i8; 1048576] = read_file(source_path)
+    let state = lex(data, size, 0)
+    let prog = parse_program_preloaded(state.token_count)
+    if parser_last_error_count() > 0 {
+        print("wide_native_compile: parse_error\n")
+        return 1
+    }
+    print("wide_native_compile: parse_ok\n")
+
+    let epistemic = ir_empty_epistemic_section()
+    let summary_result = lower_program_to_ir_summary_flat_owned_with_epistemic_ref(&prog, epistemic)
+    if summary_result.had_error {
+        print("wide_native_compile: summary_lower_error\n")
+        return 2
+    }
+
+    let fn_count = summary_result.summary.module.fn_count
+    print("wide_native_compile: fn_count=")
+    print_int(fn_count)
+    print("\n")
+
+    if fn_count <= 0 {
+        print("wide_native_compile: empty_module\n")
+        return 2
+    }
+
+    if fn_count > 1024 {
+        print("wide_native_compile: too_many_functions (max=1024)\n")
+        return 2
+    }
+
+    let main_idx = reach_find_main(&summary_result.summary.module)
+    let graph = stage_build_reach_graph(&prog, &summary_result.summary, epistemic, fn_count)
+    print("wide_native_compile: graph_edges=")
+    print_int(graph.edge_count)
+    print("\n")
+
+    let mark = scg_mark_reachable(&graph, main_idx)
+    let remap = reach_build_remap(mark, fn_count)
+    let reachable_count = scg_count_reachable(mark, fn_count)
+    let eliminated_count = fn_count - reachable_count
+    print("wide_native_compile: reachable=")
+    print_int(reachable_count)
+    print(" eliminated=")
+    print_int(eliminated_count)
+    print("\n")
+
+    let thin_module = stage_build_thin_module(
+        &prog, &summary_result.summary, epistemic, &mark, &remap, fn_count
+    )
+    print("wide_native_compile: thin_fn_count=")
+    print_int(thin_module.fn_count)
+    print("\n")
+
+    print("wide_native_compile: compiling (batch_size=200)\n")
+    let result = wide_compile_and_emit(&thin_module, output_path)
+
+    if !result.ok {
+        print("wide_native_compile: compile_error\n")
+        return 3
+    }
+
+    print("wide_native_compile: ok fn_count=")
+    print_int(result.fn_count)
+    print(" code_size=")
+    print_int(result.code_size)
+    print(" reloc_count=")
+    print_int(result.reloc_count)
+    print(" output=")
+    print(output_path)
+    print("\n")
+    0
+}
