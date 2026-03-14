@@ -508,6 +508,27 @@ fn micro_compile_function(code: CodeBuffer, func: IrFunction, fn_offsets: [i64; 
     c
 }
 // ============================================================================
+// Struct field key: var_name + "_" + field_name
+// ============================================================================
+fn make_field_key(var_name: Name, field_name: Name) -> Name {
+    var result: Name = ir_empty_name()
+    var i: i64 = 0
+    while i < var_name.len {
+        result.buf[i as usize] = var_name.buf[i as usize]
+        i = i + 1
+    }
+    result.buf[i as usize] = 95 as i8  // '_'
+    i = i + 1
+    var j: i64 = 0
+    while j < field_name.len {
+        result.buf[(i + j) as usize] = field_name.buf[j as usize]
+        j = j + 1
+    }
+    result.len = var_name.len + 1 + field_name.len
+    result
+}
+
+// ============================================================================
 // Builtin name constructors
 // ============================================================================
 fn make_name_print_int() -> Name {
@@ -1131,51 +1152,65 @@ fn ast_compile_expr(code: CodeBuffer, expr: &Expr,
         }
         c
     } else if expr.kind == ExprKind::ExprFieldAccess {
-        // Field access: expr.left = base (a reference/pointer), expr.name = field name
-        // Compile base → rax (a pointer to the struct)
-        let base_ref: &Option<Box<Expr>> = &expr.left
-        match *base_ref {
-            Some(be) => {
-                c = ast_compile_expr(c, &(*be), local_names, local_slots, local_count)
-            }
-            _ => {
-                c = emit_byte(c, 0x48); c = emit_byte(c, 0x31); c = emit_byte(c, 0xc0)
-            }
-        }
-        // Load field via [rax + offset], using known field offsets for common structs
-        // CodeBuffer: bytes@0 (65536 bytes), len@65536
-        // Name: buf@0 (128 bytes), len@128
+        // Field access: expr.left = base expr, expr.name = field name
         let fname = expr.name
-        let is_len = fname.len == 3 &&
-            fname.buf[0 as usize] == (108 as i8) &&  // l
-            fname.buf[1 as usize] == (101 as i8) &&  // e
-            fname.buf[2 as usize] == (110 as i8)     // n
-        let is_bytes = fname.len == 5 &&
-            fname.buf[0 as usize] == (98 as i8) &&   // b
-            fname.buf[1 as usize] == (121 as i8) &&  // y
-            fname.buf[2 as usize] == (116 as i8) &&  // t
-            fname.buf[3 as usize] == (101 as i8) &&  // e
-            fname.buf[4 as usize] == (115 as i8)     // s
-        let is_buf = fname.len == 3 &&
-            fname.buf[0 as usize] == (98 as i8) &&   // b
-            fname.buf[1 as usize] == (117 as i8) &&  // u
-            fname.buf[2 as usize] == (102 as i8)     // f
-        if is_len {
-            // CodeBuffer.len is at offset 65536; Name.len is at offset 128
-            // We detect by context: if base type known...
-            // Conservative: emit mov rax, [rax + 65536] (CodeBuffer)
-            // For now, must distinguish. Use a large disp32.
-            // TODO: type-aware dispatch. For now always CodeBuffer.len offset.
-            let off: i64 = 65536
-            c = emit_byte(c, 0x48); c = emit_byte(c, 0x8b); c = emit_byte(c, 0x80)
-            c = emit_byte(c, off & 0xFF); c = emit_byte(c, (off >> 8) & 0xFF)
-            c = emit_byte(c, (off >> 16) & 0xFF); c = emit_byte(c, (off >> 24) & 0xFF)
-        } else if is_bytes || is_buf {
-            // .bytes/.buf at offset 0 → rax is already the array start address
-            // leave rax as the base pointer (no load needed, it IS the array)
-        } else {
-            // Unknown field — load from [rax + 0] as fallback
-            c = emit_byte(c, 0x48); c = emit_byte(c, 0x8b); c = emit_byte(c, 0x00)
+        let fa_base_ref: &Option<Box<Expr>> = &expr.left
+        var fa_handled: i64 = 0
+        match *fa_base_ref {
+            Some(be) => {
+                if (*be).kind == ExprKind::ExprIdent {
+                    // Local struct variable: look up mangled key var_name_field_name
+                    let key = make_field_key((*be).name, fname)
+                    var fa_slot: i64 = -1
+                    var fli = local_count - 1
+                    while fli >= 0 {
+                        if ir_name_eq(local_names[fli as usize], key) {
+                            fa_slot = local_slots[fli as usize]
+                            fli = -1
+                        } else { fli = fli - 1 }
+                    }
+                    if fa_slot >= 0 {
+                        c = micro_load_rax(c, fa_slot)
+                        fa_handled = 1
+                    }
+                }
+            }
+            _ => {}
+        }
+        if fa_handled == 0 {
+            // Fallback: compile base → rax, then load via pointer with hardcoded offsets
+            match *fa_base_ref {
+                Some(be) => {
+                    c = ast_compile_expr(c, &(*be), local_names, local_slots, local_count)
+                }
+                _ => {
+                    c = emit_byte(c, 0x48); c = emit_byte(c, 0x31); c = emit_byte(c, 0xc0)
+                }
+            }
+            let is_len = fname.len == 3 &&
+                fname.buf[0 as usize] == (108 as i8) &&  // l
+                fname.buf[1 as usize] == (101 as i8) &&  // e
+                fname.buf[2 as usize] == (110 as i8)     // n
+            let is_bytes = fname.len == 5 &&
+                fname.buf[0 as usize] == (98 as i8) &&   // b
+                fname.buf[1 as usize] == (121 as i8) &&  // y
+                fname.buf[2 as usize] == (116 as i8) &&  // t
+                fname.buf[3 as usize] == (101 as i8) &&  // e
+                fname.buf[4 as usize] == (115 as i8)     // s
+            let is_buf = fname.len == 3 &&
+                fname.buf[0 as usize] == (98 as i8) &&   // b
+                fname.buf[1 as usize] == (117 as i8) &&  // u
+                fname.buf[2 as usize] == (102 as i8)     // f
+            if is_len {
+                let off: i64 = 65536
+                c = emit_byte(c, 0x48); c = emit_byte(c, 0x8b); c = emit_byte(c, 0x80)
+                c = emit_byte(c, off & 0xFF); c = emit_byte(c, (off >> 8) & 0xFF)
+                c = emit_byte(c, (off >> 16) & 0xFF); c = emit_byte(c, (off >> 24) & 0xFF)
+            } else if is_bytes || is_buf {
+                // .bytes/.buf at offset 0 — rax is already the address
+            } else {
+                c = emit_byte(c, 0x48); c = emit_byte(c, 0x8b); c = emit_byte(c, 0x00)
+            }
         }
         c
     } else if expr.kind == ExprKind::ExprIndex {
@@ -1343,20 +1378,57 @@ fn ast_compile_block(code: CodeBuffer, blk: &Block,
                         lc = lc + 1
                     } else {
                         let init_ref: &Option<Box<Expr>> = &s.expr
+                        var blk_is_struct: i64 = 0
                         match *init_ref {
                             Some(ie) => {
-                                c = ast_compile_expr(c, &(*ie), ln, ls, lc)
+                                if (*ie).kind == ExprKind::ExprStructLit {
+                                    blk_is_struct = 1
+                                }
                             }
-                            _ => {
-                                c = emit_byte(c, 0x48); c = emit_byte(c, 0x31); c = emit_byte(c, 0xc0)
-                            }
+                            _ => {}
                         }
-                        let slot = next_slot
-                        next_slot = next_slot + 1
-                        c = micro_store_rax(c, slot)
-                        ln[lc as usize] = s.name
-                        ls[lc as usize] = slot
-                        lc = lc + 1
+                        if blk_is_struct == 1 {
+                            // Struct literal: register each field as var_name_field_name
+                            match *init_ref {
+                                Some(ie) => {
+                                    let blk_sf_ref: &Option<Box<StructFieldList>> = &(*ie).fields
+                                    var blk_sf_cur = blk_sf_ref
+                                    while true {
+                                        match *blk_sf_cur {
+                                            Some(sfl) => {
+                                                let sfi: &StructFieldInit = &(*sfl).head
+                                                let field_slot = next_slot
+                                                next_slot = next_slot + 1
+                                                let val_ref: &Expr = &(*sfi).value
+                                                c = ast_compile_expr(c, val_ref, ln, ls, lc)
+                                                c = micro_store_rax(c, field_slot)
+                                                ln[lc as usize] = make_field_key(s.name, (*sfi).name)
+                                                ls[lc as usize] = field_slot
+                                                lc = lc + 1
+                                                blk_sf_cur = &(*sfl).tail
+                                            }
+                                            _ => break
+                                        }
+                                    }
+                                }
+                                _ => {}
+                            }
+                        } else {
+                            match *init_ref {
+                                Some(ie) => {
+                                    c = ast_compile_expr(c, &(*ie), ln, ls, lc)
+                                }
+                                _ => {
+                                    c = emit_byte(c, 0x48); c = emit_byte(c, 0x31); c = emit_byte(c, 0xc0)
+                                }
+                            }
+                            let slot = next_slot
+                            next_slot = next_slot + 1
+                            c = micro_store_rax(c, slot)
+                            ln[lc as usize] = s.name
+                            ls[lc as usize] = slot
+                            lc = lc + 1
+                        }
                     }
                 } else if s.kind == StmtKind::StmtExpr {
                     let expr_ref: &Option<Box<Expr>> = &s.expr
@@ -1388,6 +1460,29 @@ fn ast_compile_block(code: CodeBuffer, blk: &Block,
                                 }
                                 if slot >= 0 {
                                     c = micro_store_rax(c, slot)
+                                }
+                            } else if (*te).kind == ExprKind::ExprFieldAccess {
+                                // pt.field = val — store rax to mangled slot
+                                let fa_asgn_fname = (*te).name
+                                let fa_asgn_base_ref: &Option<Box<Expr>> = &(*te).left
+                                match *fa_asgn_base_ref {
+                                    Some(fab) => {
+                                        if (*fab).kind == ExprKind::ExprIdent {
+                                            let fa_asgn_key = make_field_key((*fab).name, fa_asgn_fname)
+                                            var fa_asgn_slot: i64 = -1
+                                            var fali = lc - 1
+                                            while fali >= 0 {
+                                                if ir_name_eq(ln[fali as usize], fa_asgn_key) {
+                                                    fa_asgn_slot = ls[fali as usize]
+                                                    fali = -1
+                                                } else { fali = fali - 1 }
+                                            }
+                                            if fa_asgn_slot >= 0 {
+                                                c = micro_store_rax(c, fa_asgn_slot)
+                                            }
+                                        }
+                                    }
+                                    _ => {}
                                 }
                             } else if (*te).kind == ExprKind::ExprIndex {
                                 // arr[i] = val or (*ptr)[i] = val — val in rax
@@ -1590,25 +1685,63 @@ fn ast_compile_fn_body(code: CodeBuffer, fd: &FnDef,
                         local_count = local_count + 1
                         last_expr_emitted = false
                     } else {
-                        // Scalar — compile init expression → rax
                         let init_ref: &Option<Box<Expr>> = &s.expr
+                        var fn_is_struct: i64 = 0
                         match *init_ref {
                             Some(ie) => {
-                                c = ast_compile_expr(c, &(*ie), local_names, local_slots, local_count)
+                                if (*ie).kind == ExprKind::ExprStructLit {
+                                    fn_is_struct = 1
+                                }
                             }
-                            _ => {
-                                // No init — load 0
-                                c = emit_byte(c, 0x48); c = emit_byte(c, 0x31); c = emit_byte(c, 0xc0)
-                            }
+                            _ => {}
                         }
-                        // Bind local
-                        let slot = next_slot
-                        next_slot = next_slot + 1
-                        c = micro_store_rax(c, slot)
-                        local_names[local_count as usize] = s.name
-                        local_slots[local_count as usize] = slot
-                        local_count = local_count + 1
-                        last_expr_emitted = false
+                        if fn_is_struct == 1 {
+                            // Struct literal: register each field as var_name_field_name
+                            match *init_ref {
+                                Some(ie) => {
+                                    let fn_sf_ref: &Option<Box<StructFieldList>> = &(*ie).fields
+                                    var fn_sf_cur = fn_sf_ref
+                                    while true {
+                                        match *fn_sf_cur {
+                                            Some(sfl) => {
+                                                let sfi: &StructFieldInit = &(*sfl).head
+                                                let fn_fslot = next_slot
+                                                next_slot = next_slot + 1
+                                                let fn_val_ref: &Expr = &(*sfi).value
+                                                c = ast_compile_expr(c, fn_val_ref, local_names, local_slots, local_count)
+                                                c = micro_store_rax(c, fn_fslot)
+                                                local_names[local_count as usize] = make_field_key(s.name, (*sfi).name)
+                                                local_slots[local_count as usize] = fn_fslot
+                                                local_count = local_count + 1
+                                                fn_sf_cur = &(*sfl).tail
+                                            }
+                                            _ => break
+                                        }
+                                    }
+                                }
+                                _ => {}
+                            }
+                            last_expr_emitted = false
+                        } else {
+                            // Scalar — compile init expression → rax
+                            match *init_ref {
+                                Some(ie) => {
+                                    c = ast_compile_expr(c, &(*ie), local_names, local_slots, local_count)
+                                }
+                                _ => {
+                                    // No init — load 0
+                                    c = emit_byte(c, 0x48); c = emit_byte(c, 0x31); c = emit_byte(c, 0xc0)
+                                }
+                            }
+                            // Bind local
+                            let slot = next_slot
+                            next_slot = next_slot + 1
+                            c = micro_store_rax(c, slot)
+                            local_names[local_count as usize] = s.name
+                            local_slots[local_count as usize] = slot
+                            local_count = local_count + 1
+                            last_expr_emitted = false
+                        }
                     }
                 } else if s.kind == StmtKind::StmtExpr {
                     // Compile expression → rax
@@ -1644,6 +1777,29 @@ fn ast_compile_fn_body(code: CodeBuffer, fd: &FnDef,
                                 }
                                 if slot >= 0 {
                                     c = micro_store_rax(c, slot)
+                                }
+                            } else if (*te).kind == ExprKind::ExprFieldAccess {
+                                // pt.field = val — store rax to mangled slot
+                                let fn_fa_fname = (*te).name
+                                let fn_fa_base_ref: &Option<Box<Expr>> = &(*te).left
+                                match *fn_fa_base_ref {
+                                    Some(fab) => {
+                                        if (*fab).kind == ExprKind::ExprIdent {
+                                            let fn_fa_key = make_field_key((*fab).name, fn_fa_fname)
+                                            var fn_fa_slot: i64 = -1
+                                            var fn_fali = local_count - 1
+                                            while fn_fali >= 0 {
+                                                if ir_name_eq(local_names[fn_fali as usize], fn_fa_key) {
+                                                    fn_fa_slot = local_slots[fn_fali as usize]
+                                                    fn_fali = -1
+                                                } else { fn_fali = fn_fali - 1 }
+                                            }
+                                            if fn_fa_slot >= 0 {
+                                                c = micro_store_rax(c, fn_fa_slot)
+                                            }
+                                        }
+                                    }
+                                    _ => {}
                                 }
                             } else if (*te).kind == ExprKind::ExprIndex {
                                 // arr[i] = val or (*ptr)[i] = val — val in rax
