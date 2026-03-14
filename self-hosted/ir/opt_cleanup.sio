@@ -2924,6 +2924,56 @@ fn ocp_const_fold(func: IrFunction) -> IrFunction with Mut, Div, Panic {
             }
         }
 
+        // Sprint 187 Block CW: OR-XOR mask extraction — (x|C)^C → x & ~C.
+        // Proof: For each bit i — if C_i=0: (x_i|0)^0 = x_i^0 = x_i.
+        //   If C_i=1: (x_i|1)^1 = 1^1 = 0. So result = x & ~C.
+        // Zero new arrays: uses am_or_valid/am_or_var_src/am_or_const_val (Block AM)
+        //   and and_valid/and_var_src/and_const_val (Block AE).
+        // SOTA: LLVM InstCombineAndOrXor; Hacker's Delight §2-12.
+        if ocp_is_binop(result.instrs[i as usize].op) {
+            let cw_instr = result.instrs[i as usize]
+            let cw_s1 = cw_instr.src1; let cw_s2 = cw_instr.src2
+            let cw_s1_ok = cw_s1 >= 0 && cw_s1 < 256; let cw_s2_ok = cw_s2 >= 0 && cw_s2 < 256
+            if cw_instr.bin_op == BinaryOp::OpBitXor {
+                // (x|C)^C → x & ~C: s1=or_valid, s2=const, s2_const==or_const
+                if cw_s1_ok && am_or_valid[cw_s1 as usize]
+                        && cw_s2_ok && is_const[cw_s2 as usize]
+                        && am_or_const_val[cw_s1 as usize] == const_val[cw_s2 as usize] {
+                    let cw_x = am_or_var_src[cw_s1 as usize]
+                    let cw_not_c = const_val[cw_s2 as usize] ^ -1
+                    let cw_cdef = def_at[cw_s2 as usize]
+                    if cw_cdef >= 0 {
+                        result.instrs[cw_cdef as usize] = ir_load_imm(cw_s2, cw_not_c)
+                        const_val[cw_s2 as usize] = cw_not_c
+                    }
+                    result.instrs[i as usize] = ir_binop(cw_instr.dst, cw_x, BinaryOp::OpBitAnd, cw_s2)
+                    if cw_instr.dst >= 0 && cw_instr.dst < 256 {
+                        and_valid[cw_instr.dst as usize]     = true
+                        and_var_src[cw_instr.dst as usize]   = cw_x
+                        and_const_val[cw_instr.dst as usize] = cw_not_c
+                    }
+                }
+                // C^(x|C) → x & ~C commutative
+                if cw_s2_ok && am_or_valid[cw_s2 as usize]
+                        && cw_s1_ok && is_const[cw_s1 as usize]
+                        && am_or_const_val[cw_s2 as usize] == const_val[cw_s1 as usize] {
+                    let cw_x = am_or_var_src[cw_s2 as usize]
+                    let cw_not_c = const_val[cw_s1 as usize] ^ -1
+                    let cw_cdef = def_at[cw_s1 as usize]
+                    if cw_cdef >= 0 {
+                        result.instrs[cw_cdef as usize] = ir_load_imm(cw_s1, cw_not_c)
+                        const_val[cw_s1 as usize] = cw_not_c
+                    }
+                    result.instrs[i as usize] = ir_binop(cw_instr.dst, cw_x, BinaryOp::OpBitAnd, cw_s1)
+                    if cw_instr.dst >= 0 && cw_instr.dst < 256 {
+                        and_valid[cw_instr.dst as usize]     = true
+                        and_var_src[cw_instr.dst as usize]   = cw_x
+                        and_const_val[cw_instr.dst as usize] = cw_not_c
+                    }
+                }
+            }
+        }
+
         // Sprint 177 Block CM: AND complement XOR partition — (x & C) ^ (x & ~C) → x.
         // Proof: C-bits: (xi&1)^(xi&0)=xi^0=xi. Non-C: (xi&0)^(xi&1)=0^xi=xi. QED.
         // Dual of Block CC (OR partition). Commutative: (x&~C)^(x&C) → x.
