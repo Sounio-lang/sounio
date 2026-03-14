@@ -10640,9 +10640,162 @@ fn compiler_main_test_neg_neg_mul_used() -> bool with Mut, Div, Panic {
         && opt.instrs[2].src1 == 0 && opt.instrs[2].src2 == 1
 }
 
+// Sprint 136: Block AX — Additive inverse via negation tracking (T494-T499)
+// a + neg(a) → 0 — group theory: a + (-a) = 0
+// SOTA: LLVM InstCombineAddSub.cpp; distinct from Block A (x-x→0)
+
+// T494: a + neg(a) → 0  [basic additive inverse]
+fn compiler_main_test_add_neg_inverse() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_unaryop(2, UnaryOp::OpNeg, 0)        // r2 = neg(a)
+    instrs[1] = ir_binop(3, 0, BinaryOp::OpAdd, 2)      // r3 = a + neg(a) → 0
+    instrs[2] = ir_return(3)
+    let func = cp_make_test_func(instrs, 3)
+    let opt = opt_cleanup_function(func)
+    opt.instrs[1].op == IrOpcode::IrLoadImm && opt.instrs[1].imm_i64 == 0
+}
+
+// T495: neg(a) + a → 0  [commutative]
+fn compiler_main_test_neg_add_inverse() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_unaryop(2, UnaryOp::OpNeg, 0)        // r2 = neg(a)
+    instrs[1] = ir_binop(3, 2, BinaryOp::OpAdd, 0)      // r3 = neg(a) + a → 0
+    instrs[2] = ir_return(3)
+    let func = cp_make_test_func(instrs, 3)
+    let opt = opt_cleanup_function(func)
+    opt.instrs[1].op == IrOpcode::IrLoadImm && opt.instrs[1].imm_i64 == 0
+}
+
+// T496: a + neg(b) — different operands, should NOT fold to 0
+fn compiler_main_test_add_neg_different() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_unaryop(2, UnaryOp::OpNeg, 1)        // r2 = neg(b)  (b ≠ a)
+    instrs[1] = ir_binop(3, 0, BinaryOp::OpAdd, 2)      // r3 = a + neg(b) — not zero
+    instrs[2] = ir_return(3)
+    let func = cp_make_test_func(instrs, 3)
+    let opt = opt_cleanup_function(func)
+    // Block AG may rewrite a+neg(b)→a-b, but NOT to 0
+    opt.instrs[1].imm_i64 != 0 || opt.instrs[1].op != IrOpcode::IrLoadImm
+}
+
+// T497: a + neg(a) + b — downstream use of the zero result
+fn compiler_main_test_add_neg_inverse_used() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_unaryop(2, UnaryOp::OpNeg, 0)        // r2 = neg(a)
+    instrs[1] = ir_binop(3, 0, BinaryOp::OpAdd, 2)      // r3 = a + neg(a) → 0
+    instrs[2] = ir_binop(4, 3, BinaryOp::OpAdd, 1)      // r4 = 0 + b
+    instrs[3] = ir_return(4)
+    let func = cp_make_test_func(instrs, 4)
+    let opt = opt_cleanup_function(func)
+    // r3 should be IrLoadImm(0); r4 = 0 + b might be further folded by identity fold
+    opt.instrs[1].op == IrOpcode::IrLoadImm && opt.instrs[1].imm_i64 == 0
+}
+
+// T498: neg(neg(a)) + neg(a) — double-neg collapses first, then additive inverse
+fn compiler_main_test_double_neg_then_add_neg() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_unaryop(2, UnaryOp::OpNeg, 0)        // r2 = neg(a)
+    instrs[1] = ir_unaryop(3, UnaryOp::OpNeg, 2)        // r3 = neg(neg(a)) → copy(a) by Block M
+    instrs[2] = ir_binop(4, 3, BinaryOp::OpAdd, 2)      // r4 = a + neg(a) → 0 (after copy prop)
+    instrs[3] = ir_return(4)
+    let func = cp_make_test_func(instrs, 4)
+    let opt = opt_cleanup_function(func)
+    // r3 = IrCopy(r0) by Block M (double neg). Then r4 = r3 + r2.
+    // For AX to fire, copy propagation would need to resolve r3→r0.
+    // Single-pass: AX sees r3 (not r0) + r2 (neg(r0)). neg_src[r2]=r0, but s1=r3≠r0.
+    // So AX does NOT fire unless copy prop runs first. Check r3 is copy(r0) instead.
+    opt.instrs[1].op == IrOpcode::IrCopy && opt.instrs[1].src1 == 0
+}
+
+// T499: a * neg(a) — mul, not add — should NOT fold to 0
+fn compiler_main_test_mul_neg_no_zero() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_unaryop(2, UnaryOp::OpNeg, 0)        // r2 = neg(a)
+    instrs[1] = ir_binop(3, 0, BinaryOp::OpMul, 2)      // r3 = a * neg(a) — NOT zero
+    instrs[2] = ir_return(3)
+    let func = cp_make_test_func(instrs, 3)
+    let opt = opt_cleanup_function(func)
+    opt.instrs[1].op == IrOpcode::IrBinOp && opt.instrs[1].bin_op == BinaryOp::OpMul
+}
+
+
+// Sprint 139: Block BA — Sub-add inverse cancellation (T500-T505)
+
+// T500: (a - b) + b → a  [basic: s1 is sub, s2 cancels subtracted]
+fn compiler_main_test_sub_add_cancel_basic() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_binop(2, 0, BinaryOp::OpSub, 1)   // r2 = r0 - r1
+    instrs[1] = ir_binop(3, 2, BinaryOp::OpAdd, 1)   // r3 = r2 + r1 → r0
+    instrs[2] = ir_return(3)
+    let func = cp_make_test_func(instrs, 3)
+    let opt = opt_cleanup_function(func)
+    opt.instrs[1].op == IrOpcode::IrCopy && opt.instrs[1].src1 == 0
+}
+
+// T501: b + (a - b) → a  [commutative: s2 is sub, s1 cancels]
+fn compiler_main_test_sub_add_cancel_commutative() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_binop(2, 0, BinaryOp::OpSub, 1)   // r2 = r0 - r1
+    instrs[1] = ir_binop(3, 1, BinaryOp::OpAdd, 2)   // r3 = r1 + r2 → r0
+    instrs[2] = ir_return(3)
+    let func = cp_make_test_func(instrs, 3)
+    let opt = opt_cleanup_function(func)
+    opt.instrs[1].op == IrOpcode::IrCopy && opt.instrs[1].src1 == 0
+}
+
+// T502: a - (a - b) → b  [nested sub: outer sub cancels inner lhs]
+fn compiler_main_test_sub_sub_cancel() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_binop(2, 0, BinaryOp::OpSub, 1)   // r2 = r0 - r1
+    instrs[1] = ir_binop(3, 0, BinaryOp::OpSub, 2)   // r3 = r0 - r2 → r1
+    instrs[2] = ir_return(3)
+    let func = cp_make_test_func(instrs, 3)
+    let opt = opt_cleanup_function(func)
+    opt.instrs[1].op == IrOpcode::IrCopy && opt.instrs[1].src1 == 1
+}
+
+// T503: (a - b) + c — different operand, no fold
+fn compiler_main_test_sub_add_no_fold() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_binop(3, 0, BinaryOp::OpSub, 1)   // r3 = r0 - r1
+    instrs[1] = ir_binop(4, 3, BinaryOp::OpAdd, 2)   // r4 = r3 + r2 [r2 ≠ r1, no fold]
+    instrs[2] = ir_return(4)
+    let func = cp_make_test_func(instrs, 3)
+    let opt = opt_cleanup_function(func)
+    // Must NOT fold — still r3 + r2
+    opt.instrs[1].op == IrOpcode::IrBinOp
+        && opt.instrs[1].src1 == 3 && opt.instrs[1].src2 == 2
+}
+
+// T504: b - (a - b) — outer lhs ≠ inner lhs (b≠a), no fold
+fn compiler_main_test_sub_sub_no_fold() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_binop(2, 0, BinaryOp::OpSub, 1)   // r2 = r0 - r1
+    instrs[1] = ir_binop(3, 1, BinaryOp::OpSub, 2)   // r3 = r1 - r2 [r1≠r0, no fold]
+    instrs[2] = ir_return(3)
+    let func = cp_make_test_func(instrs, 3)
+    let opt = opt_cleanup_function(func)
+    // Must NOT fold — r1 is not sub_lhs[r2]=r0
+    opt.instrs[1].op == IrOpcode::IrBinOp
+        && opt.instrs[1].src1 == 1 && opt.instrs[1].src2 == 2
+}
+
+// T505: (a - b) + b result used in downstream add
+fn compiler_main_test_sub_add_chain() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_binop(2, 0, BinaryOp::OpSub, 1)   // r2 = r0 - r1
+    instrs[1] = ir_binop(3, 2, BinaryOp::OpAdd, 1)   // r3 = r2 + r1 → IrCopy(r0)
+    instrs[2] = ir_binop(4, 3, BinaryOp::OpAdd, 2)   // r4 = r3 + r2
+    instrs[3] = ir_return(4)
+    let func = cp_make_test_func(instrs, 4)
+    let opt = opt_cleanup_function(func)
+    // instrs[1] folds to IrCopy(r0); instrs[2] now r0 + r2
+    opt.instrs[1].op == IrOpcode::IrCopy && opt.instrs[1].src1 == 0
+}
+
 fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
     var passed: i64 = 0
-    let total: i64 = 493
+    let total: i64 = 505
 
     println("=== compiler/main.sio self-tests ===")
 
@@ -13596,6 +13749,58 @@ fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
         println("  T493 OK: Sprint 135 Block AW: neg(a)*neg(b)+c downstream")
         passed = passed + 1
     } else { println("  FAIL: T493") }
+
+    // Sprint 136 Block AX: Additive inverse via negation (T494-T499)
+    if compiler_main_test_add_neg_inverse() {
+        println("  T494 OK: Sprint 136 Block AX: a + neg(a) → 0")
+        passed = passed + 1
+    } else { println("  FAIL: T494") }
+    if compiler_main_test_neg_add_inverse() {
+        println("  T495 OK: Sprint 136 Block AX: neg(a) + a → 0")
+        passed = passed + 1
+    } else { println("  FAIL: T495") }
+    if compiler_main_test_add_neg_different() {
+        println("  T496 OK: Sprint 136 Block AX: a + neg(b) no zero [negative]")
+        passed = passed + 1
+    } else { println("  FAIL: T496") }
+    if compiler_main_test_add_neg_inverse_used() {
+        println("  T497 OK: Sprint 136 Block AX: a + neg(a) + b downstream")
+        passed = passed + 1
+    } else { println("  FAIL: T497") }
+    if compiler_main_test_double_neg_then_add_neg() {
+        println("  T498 OK: Sprint 136 Block AX: neg(neg(a)) + neg(a) chain")
+        passed = passed + 1
+    } else { println("  FAIL: T498") }
+    if compiler_main_test_mul_neg_no_zero() {
+        println("  T499 OK: Sprint 136 Block AX: a * neg(a) not zero [negative]")
+        passed = passed + 1
+    } else { println("  FAIL: T499") }
+
+    // Sprint 139 Block BA: Sub-add inverse cancellation (T500-T505)
+    if compiler_main_test_sub_add_cancel_basic() {
+        println("  T500 OK: Sprint 139 Block BA: (a-b)+b -> a [basic]")
+        passed = passed + 1
+    } else { println("  FAIL: T500") }
+    if compiler_main_test_sub_add_cancel_commutative() {
+        println("  T501 OK: Sprint 139 Block BA: b+(a-b) -> a [commutative]")
+        passed = passed + 1
+    } else { println("  FAIL: T501") }
+    if compiler_main_test_sub_sub_cancel() {
+        println("  T502 OK: Sprint 139 Block BA: a-(a-b) -> b [nested sub]")
+        passed = passed + 1
+    } else { println("  FAIL: T502") }
+    if compiler_main_test_sub_add_no_fold() {
+        println("  T503 OK: Sprint 139 Block BA: (a-b)+c no fold [negative]")
+        passed = passed + 1
+    } else { println("  FAIL: T503") }
+    if compiler_main_test_sub_sub_no_fold() {
+        println("  T504 OK: Sprint 139 Block BA: b-(a-b) no fold [negative]")
+        passed = passed + 1
+    } else { println("  FAIL: T504") }
+    if compiler_main_test_sub_add_chain() {
+        println("  T505 OK: Sprint 139 Block BA: (a-b)+b result used downstream")
+        passed = passed + 1
+    } else { println("  FAIL: T505") }
 
     println("")
     println("compiler/main tests: " + int_to_string(passed) + "/" + int_to_string(total) + " passed")

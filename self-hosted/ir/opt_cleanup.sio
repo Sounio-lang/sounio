@@ -1236,7 +1236,93 @@ fn ocp_const_fold(func: IrFunction) -> IrFunction with Mut, Div, Panic {
             }
         }
 
-        // Sprint 82 Block J: Unary operation constant folding.
+        // Sprint 136 Block AX: Additive inverse via negation tracking.
+        // a + neg(a) → 0  ;  neg(a) + a → 0
+        // NOT the same as Block A (x - x → 0) — this catches the add-of-negation pattern.
+        // Uses is_neg/neg_src tracking from Block M.
+        // SOTA: LLVM InstCombineAddSub.cpp; group theory: a + (-a) = 0.
+        if ocp_is_binop(result.instrs[i as usize].op) {
+            let ax_instr = result.instrs[i as usize]
+            let ax_s1 = ax_instr.src1
+            let ax_s2 = ax_instr.src2
+            let ax_s1_ok = ax_s1 >= 0 && ax_s1 < 256
+            let ax_s2_ok = ax_s2 >= 0 && ax_s2 < 256
+            if ax_instr.bin_op == BinaryOp::OpAdd {
+                // a + neg(a) → 0
+                if ax_s2_ok && is_neg[ax_s2 as usize] && neg_src[ax_s2 as usize] == ax_s1 {
+                    result.instrs[i as usize] = ir_load_imm(ax_instr.dst, 0)
+                    if ax_instr.dst >= 0 && ax_instr.dst < 256 {
+                        is_const[ax_instr.dst as usize] = true
+                        const_val[ax_instr.dst as usize] = 0
+                    }
+                }
+                // neg(a) + a → 0
+                if ax_s1_ok && is_neg[ax_s1 as usize] && neg_src[ax_s1 as usize] == ax_s2 {
+                    result.instrs[i as usize] = ir_load_imm(ax_instr.dst, 0)
+                    if ax_instr.dst >= 0 && ax_instr.dst < 256 {
+                        is_const[ax_instr.dst as usize] = true
+                        const_val[ax_instr.dst as usize] = 0
+                    }
+                }
+            }
+        }
+
+        // Sprint 137 Block AY: Shift-mask fusion.
+        // (x >> n) & ((1 << k) - 1) → bitfield extract pattern.
+        // When a right-shifted value is ANDed with a low-bit mask, this is a single
+        // bitfield extraction: bits [n, n+k) of x.
+        // Implementation: detect (shr_result & const_mask) where mask = (1<<k)-1
+        // and rewrite as (x >> n) & mask (already minimal — no further reduction needed
+        // in this single-pass framework, but we can simplify the mask if n+k > 64).
+        // Deferred: actual BEXTR/UBFX codegen lowering belongs in native backend.
+        // For now, constant-fold: if shift amount is known AND mask is known,
+        // combine into a single mask: (x >> n) & m → (x & (m << n)) >> n.
+        // Single-pass limitation: this rewrite creates a new shifted mask, which may
+        // not be a net win without BEXTR. Mark as "tracked" for future backend.
+        // No-op in current pass — pattern tracked only.
+
+        // Sprint 138 Block AZ: Boolean NOT through comparison inversion.
+        // !(a < b) → a >= b  ;  !(a == b) → a != b  ;  etc.
+        // When a comparison result is negated (x == 0 where x = cmp(a, b)),
+        // invert the comparison operator instead.
+        // Uses is_const tracking to detect "cmp_result == 0" pattern.
+        // SOTA: LLVM InstCombineCompares.cpp; basic Boolean duality.
+        // NOTE: This extends Block Y (Sprint 101): (x==0)==0 → IrCopy(x).
+        // Block AZ specifically targets: (cmp_result == 0) → inverted_cmp(a, b).
+        // Implementation requires tracking which registers hold comparison results
+        // and their operand registers — heavy for single-pass. Deferred.
+
+        // Sprint 139 Block BA: Sub-add inverse cancellation.
+        // (a - b) + b → a  ;  b + (a - b) → a  ;  a - (a - b) → b
+        // Ring axiom: a - b + b = a. Distinct from Block AQ (a+b-b → a).
+        // Uses al_is_sub/al_sub_lhs/al_sub_rhs from Block AL (Sprint 115).
+        // Zero new arrays. SOTA: LLVM InstCombineAddSub.cpp.
+        if ocp_is_binop(result.instrs[i as usize].op) {
+            let ba_instr = result.instrs[i as usize]
+            let ba_s1 = ba_instr.src1
+            let ba_s2 = ba_instr.src2
+            let ba_s1_ok = ba_s1 >= 0 && ba_s1 < 256
+            let ba_s2_ok = ba_s2 >= 0 && ba_s2 < 256
+            if ba_instr.bin_op == BinaryOp::OpAdd {
+                // (a - b) + b → a  [s1 is sub(a,b), s2 == b]
+                if ba_s1_ok && al_is_sub[ba_s1 as usize]
+                        && ba_s2 == al_sub_rhs[ba_s1 as usize] {
+                    result.instrs[i as usize] = ir_copy(ba_instr.dst, al_sub_lhs[ba_s1 as usize])
+                }
+                // b + (a - b) → a  [s2 is sub(a,b), s1 == b]
+                if ba_s2_ok && al_is_sub[ba_s2 as usize]
+                        && ba_s1 == al_sub_rhs[ba_s2 as usize] {
+                    result.instrs[i as usize] = ir_copy(ba_instr.dst, al_sub_lhs[ba_s2 as usize])
+                }
+            }
+            // a - (a - b) → b  [s1 == sub_lhs of s2]
+            if ba_instr.bin_op == BinaryOp::OpSub && ba_s2_ok && al_is_sub[ba_s2 as usize]
+                    && ba_s1 == al_sub_lhs[ba_s2 as usize] {
+                result.instrs[i as usize] = ir_copy(ba_instr.dst, al_sub_rhs[ba_s2 as usize])
+            }
+        }
+
+                // Sprint 82 Block J: Unary operation constant folding.
         // Folds IrUnaryOp when the source operand is a known constant.
         // Only OpNeg and OpNot are foldable (Ref/RefMut/Deref are memory ops).
         // (Wegman & Zadeck TOPLAS 1991 §4: constant folding completeness
