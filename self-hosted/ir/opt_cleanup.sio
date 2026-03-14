@@ -3293,6 +3293,46 @@ fn ocp_const_fold(func: IrFunction) -> IrFunction with Mut, Div, Panic {
             }
         }
 
+        // Sprint 197 Block DG: NOT-XOR-operand unwrapping — ~(x^y)^y → ~x; y^~(x^y) → ~x.
+        // Proof: ~(x^y)^y = ((x^y)^-1)^y = x^y^-1^y = x^(y^y^-1) = x^-1 = ~x. QED.
+        // Zero new arrays: uses is_bnot/bnot_src + as_xor_rr_valid/lhs/rhs (Block AS).
+        // SOTA: LLVM InstCombineAndOrXor; Boolean algebra XOR complement unwrapping.
+        if ocp_is_binop(result.instrs[i as usize].op) {
+            let dg_instr = result.instrs[i as usize]
+            let dg_s1 = dg_instr.src1; let dg_s2 = dg_instr.src2
+            let dg_s1_ok = dg_s1 >= 0 && dg_s1 < 256; let dg_s2_ok = dg_s2 >= 0 && dg_s2 < 256
+            if dg_instr.bin_op == BinaryOp::OpBitXor {
+                // ~(x^y) ^ y → ~x: s1=NOT(XOR), s2=y (one XOR operand)
+                if dg_s1_ok && is_bnot[dg_s1 as usize] {
+                    let dg_xor = bnot_src[dg_s1 as usize]
+                    let dg_xor_ok = dg_xor >= 0 && dg_xor < 256
+                    if dg_xor_ok && as_xor_rr_valid[dg_xor as usize] && dg_s2_ok {
+                        let dg_xl = as_xor_rr_lhs[dg_xor as usize]
+                        let dg_xr = as_xor_rr_rhs[dg_xor as usize]
+                        if dg_s2 == dg_xl {
+                            result.instrs[i as usize] = ir_unaryop(dg_instr.dst, UnaryOp::OpNot, dg_xr)
+                        } else if dg_s2 == dg_xr {
+                            result.instrs[i as usize] = ir_unaryop(dg_instr.dst, UnaryOp::OpNot, dg_xl)
+                        }
+                    }
+                }
+                // y ^ ~(x^y) → ~x: s2=NOT(XOR), s1=y
+                if dg_s2_ok && is_bnot[dg_s2 as usize] {
+                    let dg_xor = bnot_src[dg_s2 as usize]
+                    let dg_xor_ok = dg_xor >= 0 && dg_xor < 256
+                    if dg_xor_ok && as_xor_rr_valid[dg_xor as usize] && dg_s1_ok {
+                        let dg_xl = as_xor_rr_lhs[dg_xor as usize]
+                        let dg_xr = as_xor_rr_rhs[dg_xor as usize]
+                        if dg_s1 == dg_xl {
+                            result.instrs[i as usize] = ir_unaryop(dg_instr.dst, UnaryOp::OpNot, dg_xr)
+                        } else if dg_s1 == dg_xr {
+                            result.instrs[i as usize] = ir_unaryop(dg_instr.dst, UnaryOp::OpNot, dg_xl)
+                        }
+                    }
+                }
+            }
+        }
+
         // Sprint 177 Block CM: AND complement XOR partition — (x & C) ^ (x & ~C) → x.
         // Proof: C-bits: (xi&1)^(xi&0)=xi^0=xi. Non-C: (xi&0)^(xi&1)=0^xi=xi. QED.
         // Dual of Block CC (OR partition). Commutative: (x&~C)^(x&C) → x.

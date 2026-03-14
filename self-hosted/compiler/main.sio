@@ -15033,9 +15033,76 @@ fn compiler_main_test_df_no_fold_and_op() -> bool with Mut, Div, Panic {
         || opt.instrs[1 as usize].op == IrOpcode::IrLoadImm
 }
 
+// Sprint 197 Block DG: NOT-XOR-operand unwrapping (T848-T853)
+fn compiler_main_test_dg_not_xor_unwrap_basic() -> bool with Mut, Div, Panic {
+    // ~(r0^r1)^r1 → ~r0
+    var instrs: [IrInstr; 128] = cp_empty_instrs()
+    instrs[0 as usize] = ir_binop(2, 0, BinaryOp::OpBitXor, 1)   // r2 = r0^r1
+    instrs[1 as usize] = ir_unaryop(3, UnaryOp::OpNot, 2)         // r3 = ~r2
+    instrs[2 as usize] = ir_binop(4, 3, BinaryOp::OpBitXor, 1)   // r4 = r3^r1
+    let func = cp_make_test_func(instrs, 3)
+    let opt = opt_cleanup_function(func)
+    opt.instrs[2 as usize].op == IrOpcode::IrUnaryOp
+        && opt.instrs[2 as usize].un_op == UnaryOp::OpNot
+        && opt.instrs[2 as usize].src1 == 0
+}
+fn compiler_main_test_dg_not_xor_unwrap_lhs() -> bool with Mut, Div, Panic {
+    // ~(r0^r1)^r0 → ~r1 (other operand)
+    var instrs: [IrInstr; 128] = cp_empty_instrs()
+    instrs[0 as usize] = ir_binop(2, 0, BinaryOp::OpBitXor, 1)
+    instrs[1 as usize] = ir_unaryop(3, UnaryOp::OpNot, 2)
+    instrs[2 as usize] = ir_binop(4, 3, BinaryOp::OpBitXor, 0)   // r3^r0 → ~r1
+    let func = cp_make_test_func(instrs, 3)
+    let opt = opt_cleanup_function(func)
+    opt.instrs[2 as usize].op == IrOpcode::IrUnaryOp
+        && opt.instrs[2 as usize].un_op == UnaryOp::OpNot
+        && opt.instrs[2 as usize].src1 == 1
+}
+fn compiler_main_test_dg_not_xor_unwrap_comm() -> bool with Mut, Div, Panic {
+    // r1^~(r0^r1) → ~r0 commutative
+    var instrs: [IrInstr; 128] = cp_empty_instrs()
+    instrs[0 as usize] = ir_binop(2, 0, BinaryOp::OpBitXor, 1)
+    instrs[1 as usize] = ir_unaryop(3, UnaryOp::OpNot, 2)
+    instrs[2 as usize] = ir_binop(4, 1, BinaryOp::OpBitXor, 3)   // r1^r3
+    let func = cp_make_test_func(instrs, 3)
+    let opt = opt_cleanup_function(func)
+    opt.instrs[2 as usize].op == IrOpcode::IrUnaryOp
+        && opt.instrs[2 as usize].un_op == UnaryOp::OpNot
+}
+fn compiler_main_test_dg_no_fold_diff_base() -> bool with Mut, Div, Panic {
+    // ~(r0^r1)^r2 → no fold (r2 not in {r0,r1})
+    var instrs: [IrInstr; 128] = cp_empty_instrs()
+    instrs[0 as usize] = ir_binop(3, 0, BinaryOp::OpBitXor, 1)
+    instrs[1 as usize] = ir_unaryop(4, UnaryOp::OpNot, 3)
+    instrs[2 as usize] = ir_binop(5, 4, BinaryOp::OpBitXor, 2)
+    let func = cp_make_test_func(instrs, 3)
+    let opt = opt_cleanup_function(func)
+    opt.instrs[2 as usize].op != IrOpcode::IrUnaryOp
+}
+fn compiler_main_test_dg_no_fold_not_xor_rr() -> bool with Mut, Div, Panic {
+    // ~r1^r1 → -1 (is Block DE, not DG; inner is NOT of scalar not xor-rr)
+    var instrs: [IrInstr; 128] = cp_empty_instrs()
+    instrs[0 as usize] = ir_unaryop(2, UnaryOp::OpNot, 1)
+    instrs[1 as usize] = ir_binop(3, 2, BinaryOp::OpBitXor, 1)
+    let func = cp_make_test_func(instrs, 2)
+    let opt = opt_cleanup_function(func)
+    // Should fold to -1 via Block DE (not DG), just confirming DG doesn't misfire
+    opt.instrs[1 as usize].op == IrOpcode::IrLoadImm
+}
+fn compiler_main_test_dg_no_fold_and_outer() -> bool with Mut, Div, Panic {
+    // ~(r0^r1)&r1 → no fold by DG (AND outer not XOR outer)
+    var instrs: [IrInstr; 128] = cp_empty_instrs()
+    instrs[0 as usize] = ir_binop(2, 0, BinaryOp::OpBitXor, 1)
+    instrs[1 as usize] = ir_unaryop(3, UnaryOp::OpNot, 2)
+    instrs[2 as usize] = ir_binop(4, 3, BinaryOp::OpBitAnd, 1)
+    let func = cp_make_test_func(instrs, 3)
+    let opt = opt_cleanup_function(func)
+    opt.instrs[2 as usize].op != IrOpcode::IrUnaryOp
+}
+
 fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
     var passed: i64 = 0
-    let total: i64 = 847
+    let total: i64 = 853
 
     println("=== compiler/main.sio self-tests ===")
 
@@ -19469,6 +19536,32 @@ fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
         passed = passed + 1
         println("  T847 OK: Sprint 196 Block DF: r0&~r0 not handled by DF")
     } else { println("  FAIL: T847") }
+
+    // Sprint 197 Block DG: NOT-XOR-operand unwrapping (T848-T853)
+    if compiler_main_test_dg_not_xor_unwrap_basic() {
+        passed = passed + 1
+        println("  T848 OK: Sprint 197 Block DG: ~(r0^r1)^r1 -> ~r0")
+    } else { println("  FAIL: T848") }
+    if compiler_main_test_dg_not_xor_unwrap_lhs() {
+        passed = passed + 1
+        println("  T849 OK: Sprint 197 Block DG: ~(r0^r1)^r0 -> ~r1")
+    } else { println("  FAIL: T849") }
+    if compiler_main_test_dg_not_xor_unwrap_comm() {
+        passed = passed + 1
+        println("  T850 OK: Sprint 197 Block DG: r1^~(r0^r1) -> ~r0 commutative")
+    } else { println("  FAIL: T850") }
+    if compiler_main_test_dg_no_fold_diff_base() {
+        passed = passed + 1
+        println("  T851 OK: Sprint 197 Block DG: ~(r0^r1)^r2 no fold diff base")
+    } else { println("  FAIL: T851") }
+    if compiler_main_test_dg_no_fold_not_xor_rr() {
+        passed = passed + 1
+        println("  T852 OK: Sprint 197 Block DG: ~r1^r1 -> -1 via DE not DG")
+    } else { println("  FAIL: T852") }
+    if compiler_main_test_dg_no_fold_and_outer() {
+        passed = passed + 1
+        println("  T853 OK: Sprint 197 Block DG: ~(r0^r1)&r1 no fold AND outer")
+    } else { println("  FAIL: T853") }
 
     println("")
     println("compiler/main tests: " + int_to_string(passed) + "/" + int_to_string(total) + " passed")
