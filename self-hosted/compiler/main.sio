@@ -11671,9 +11671,167 @@ fn compiler_main_test_shl_low_mask_no_fold_plain_and() -> bool with Mut, Div, Pa
     result.instrs[4 as usize].op != IrOpcode::IrLoadImm
 }
 
+// Sprint 151 Block BM: XOR constant-chain fold (T572-T577)
+// (x ^ C1) ^ C2 → x ^ (C1^C2). GF(2) field associativity.
+
+fn compiler_main_test_bm_xor_chain_basic() -> bool with Mut, Div, Panic {
+    // (r0 ^ 3) ^ 5 → r0 ^ 6  [3^5=6]
+    var instrs: [IrInstr; 128] = cp_empty_instrs()
+    instrs[0 as usize] = ir_load_imm(1, 3)
+    instrs[1 as usize] = ir_binop(2, 0, BinaryOp::OpBitXor, 1)
+    instrs[2 as usize] = ir_load_imm(3, 5)
+    instrs[3 as usize] = ir_binop(4, 2, BinaryOp::OpBitXor, 3)
+    let func = cp_make_test_func(instrs, 4)
+    let opt = opt_cleanup_function(func)
+    opt.instrs[3 as usize].op == IrOpcode::IrBinOp
+        && opt.instrs[3 as usize].bin_op == BinaryOp::OpBitXor
+        && opt.instrs[3 as usize].src1 == 0
+}
+
+fn compiler_main_test_bm_xor_chain_merged_val() -> bool with Mut, Div, Panic {
+    // (r0 ^ 0x0F) ^ 0xF0 → r0 ^ 0xFF; constant register holds 0xFF
+    var instrs: [IrInstr; 128] = cp_empty_instrs()
+    instrs[0 as usize] = ir_load_imm(1, 15)
+    instrs[1 as usize] = ir_binop(2, 0, BinaryOp::OpBitXor, 1)
+    instrs[2 as usize] = ir_load_imm(3, 240)
+    instrs[3 as usize] = ir_binop(4, 2, BinaryOp::OpBitXor, 3)
+    let func = cp_make_test_func(instrs, 4)
+    let opt = opt_cleanup_function(func)
+    // r3 (the const register) should be patched to 0x0F ^ 0xF0 = 0xFF = 255
+    opt.instrs[2 as usize].op == IrOpcode::IrLoadImm && opt.instrs[2 as usize].imm_i64 == 255
+}
+
+fn compiler_main_test_bm_xor_chain_cancel() -> bool with Mut, Div, Panic {
+    // (r0 ^ 7) ^ 7 → r0 ^ 0 = r0; const-fold then identity eliminates XOR
+    var instrs: [IrInstr; 128] = cp_empty_instrs()
+    instrs[0 as usize] = ir_load_imm(1, 7)
+    instrs[1 as usize] = ir_binop(2, 0, BinaryOp::OpBitXor, 1)
+    instrs[2 as usize] = ir_load_imm(3, 7)
+    instrs[3 as usize] = ir_binop(4, 2, BinaryOp::OpBitXor, 3)
+    let func = cp_make_test_func(instrs, 4)
+    let opt = opt_cleanup_function(func)
+    // 7^7=0; then x^0 = IrCopy(x) via Block C identity
+    opt.instrs[3 as usize].op == IrOpcode::IrCopy && opt.instrs[3 as usize].src1 == 0
+}
+
+fn compiler_main_test_bm_xor_chain_comm() -> bool with Mut, Div, Panic {
+    // 5 ^ (r0 ^ 3) → r0 ^ 6  [commutative outer form]
+    var instrs: [IrInstr; 128] = cp_empty_instrs()
+    instrs[0 as usize] = ir_load_imm(1, 3)
+    instrs[1 as usize] = ir_binop(2, 0, BinaryOp::OpBitXor, 1)
+    instrs[2 as usize] = ir_load_imm(3, 5)
+    instrs[3 as usize] = ir_binop(4, 3, BinaryOp::OpBitXor, 2)
+    let func = cp_make_test_func(instrs, 4)
+    let opt = opt_cleanup_function(func)
+    opt.instrs[3 as usize].op == IrOpcode::IrBinOp
+        && opt.instrs[3 as usize].bin_op == BinaryOp::OpBitXor
+        && opt.instrs[3 as usize].src1 == 0
+}
+
+fn compiler_main_test_bm_xor_no_fold_rr() -> bool with Mut, Div, Panic {
+    // (r0 ^ r1) ^ r2 — no fold (no const operands)
+    var instrs: [IrInstr; 128] = cp_empty_instrs()
+    instrs[0 as usize] = ir_binop(2, 0, BinaryOp::OpBitXor, 1)
+    instrs[1 as usize] = ir_binop(3, 2, BinaryOp::OpBitXor, 9)
+    let func = cp_make_test_func(instrs, 2)
+    let opt = opt_cleanup_function(func)
+    opt.instrs[1 as usize].op == IrOpcode::IrBinOp
+        && opt.instrs[1 as usize].bin_op == BinaryOp::OpBitXor
+}
+
+fn compiler_main_test_bm_xor_no_fold_different_op() -> bool with Mut, Div, Panic {
+    // (r0 | 3) ^ 5 — inner is OR not XOR, no bm_xor_valid
+    var instrs: [IrInstr; 128] = cp_empty_instrs()
+    instrs[0 as usize] = ir_load_imm(1, 3)
+    instrs[1 as usize] = ir_binop(2, 0, BinaryOp::OpBitOr, 1)
+    instrs[2 as usize] = ir_load_imm(3, 5)
+    instrs[3 as usize] = ir_binop(4, 2, BinaryOp::OpBitXor, 3)
+    let func = cp_make_test_func(instrs, 4)
+    let opt = opt_cleanup_function(func)
+    // r2 is OR, not tracked as xor_const → no chain fold
+    opt.instrs[3 as usize].src1 == 2
+}
+
+fn compiler_main_test_xor_self_recovery_basic() -> bool with Mut, Div, Panic {
+    // (x^5) ^ x → 5: XOR with original base recovers the constant
+    var instrs: [IrInstr; 16] = cp_empty_instrs()
+    instrs[0 as usize] = ir_load_imm(0, 42)
+    instrs[1 as usize] = ir_load_imm(1, 5)
+    instrs[2 as usize] = ir_binop(2, 0, BinaryOp::OpBitXor, 1)  // r2 = x^5
+    instrs[3 as usize] = ir_binop(3, 2, BinaryOp::OpBitXor, 0)  // r3 = (x^5)^x
+    let func = cp_make_test_func(instrs, 4)
+    let result = opt_cleanup_module(func)
+    result.instrs[3 as usize].op == IrOpcode::IrLoadImm && result.instrs[3 as usize].value == 5
+}
+
+fn compiler_main_test_xor_self_recovery_commutative() -> bool with Mut, Div, Panic {
+    // x ^ (x^5) → 5: commutative outer XOR
+    var instrs: [IrInstr; 16] = cp_empty_instrs()
+    instrs[0 as usize] = ir_load_imm(0, 42)
+    instrs[1 as usize] = ir_load_imm(1, 5)
+    instrs[2 as usize] = ir_binop(2, 0, BinaryOp::OpBitXor, 1)  // r2 = x^5
+    instrs[3 as usize] = ir_binop(3, 0, BinaryOp::OpBitXor, 2)  // r3 = x^(x^5)
+    let func = cp_make_test_func(instrs, 4)
+    let result = opt_cleanup_module(func)
+    result.instrs[3 as usize].op == IrOpcode::IrLoadImm && result.instrs[3 as usize].value == 5
+}
+
+fn compiler_main_test_xor_pair_cancel() -> bool with Mut, Div, Panic {
+    // (x^3) ^ (x^5) → 6 (= 3^5): shared base cancels, constants XOR
+    var instrs: [IrInstr; 16] = cp_empty_instrs()
+    instrs[0 as usize] = ir_load_imm(0, 42)
+    instrs[1 as usize] = ir_load_imm(1, 3)
+    instrs[2 as usize] = ir_binop(2, 0, BinaryOp::OpBitXor, 1)  // r2 = x^3
+    instrs[3 as usize] = ir_load_imm(3, 5)
+    instrs[4 as usize] = ir_binop(4, 0, BinaryOp::OpBitXor, 3)  // r4 = x^5
+    instrs[5 as usize] = ir_binop(5, 2, BinaryOp::OpBitXor, 4)  // r5 = (x^3)^(x^5)
+    let func = cp_make_test_func(instrs, 6)
+    let result = opt_cleanup_module(func)
+    result.instrs[5 as usize].op == IrOpcode::IrLoadImm && result.instrs[5 as usize].value == 6
+}
+
+fn compiler_main_test_xor_self_recovery_neg_const() -> bool with Mut, Div, Panic {
+    // (x^(-1)) ^ x → -1: negative constant recovered correctly
+    var instrs: [IrInstr; 16] = cp_empty_instrs()
+    instrs[0 as usize] = ir_load_imm(0, 42)
+    instrs[1 as usize] = ir_load_imm(1, -1)
+    instrs[2 as usize] = ir_binop(2, 0, BinaryOp::OpBitXor, 1)  // r2 = x^(-1)
+    instrs[3 as usize] = ir_binop(3, 2, BinaryOp::OpBitXor, 0)  // r3 = (x^-1)^x
+    let func = cp_make_test_func(instrs, 4)
+    let result = opt_cleanup_module(func)
+    result.instrs[3 as usize].op == IrOpcode::IrLoadImm && result.instrs[3 as usize].value == -1
+}
+
+fn compiler_main_test_xor_self_recovery_no_fold_diff_base() -> bool with Mut, Div, Panic {
+    // (x^3) ^ y → no fold (y != x)
+    var instrs: [IrInstr; 16] = cp_empty_instrs()
+    instrs[0 as usize] = ir_load_imm(0, 42)
+    instrs[1 as usize] = ir_load_imm(1, 99)
+    instrs[2 as usize] = ir_load_imm(2, 3)
+    instrs[3 as usize] = ir_binop(3, 0, BinaryOp::OpBitXor, 2)  // r3 = x^3
+    instrs[4 as usize] = ir_binop(4, 3, BinaryOp::OpBitXor, 1)  // r4 = (x^3)^y
+    let func = cp_make_test_func(instrs, 5)
+    let result = opt_cleanup_module(func)
+    result.instrs[4 as usize].op != IrOpcode::IrLoadImm
+}
+
+fn compiler_main_test_xor_self_recovery_no_fold_plain() -> bool with Mut, Div, Panic {
+    // a ^ b → no fold (neither tracked as xor-const)
+    var instrs: [IrInstr; 16] = cp_empty_instrs()
+    instrs[0 as usize] = ir_load_imm(0, 10)
+    instrs[1 as usize] = ir_load_imm(1, 20)
+    instrs[2 as usize] = ir_binop(2, 0, BinaryOp::OpAdd, 1)
+    instrs[3 as usize] = ir_load_imm(3, 5)
+    instrs[4 as usize] = ir_binop(4, 0, BinaryOp::OpMul, 3)
+    instrs[5 as usize] = ir_binop(5, 2, BinaryOp::OpBitXor, 4)
+    let func = cp_make_test_func(instrs, 6)
+    let result = opt_cleanup_module(func)
+    result.instrs[5 as usize].op != IrOpcode::IrLoadImm
+}
+
 fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
     var passed: i64 = 0
-    let total: i64 = 571
+    let total: i64 = 583
 
     println("=== compiler/main.sio self-tests ===")
 
@@ -14965,6 +15123,58 @@ fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
         passed = passed + 1
         println("  T571 OK: Sprint 150 Block BL: plain x&7 no fold")
     } else { println("  FAIL: T571") }
+
+    // Sprint 151 Block BM: XOR constant-chain fold (T572-T577)
+    if compiler_main_test_bm_xor_chain_basic() {
+        passed = passed + 1
+        println("  T572 OK: Sprint 151 Block BM: (x^3)^5 -> x^6")
+    } else { println("  FAIL: T572") }
+    if compiler_main_test_bm_xor_chain_merged_val() {
+        passed = passed + 1
+        println("  T573 OK: Sprint 151 Block BM: const patched to C1^C2")
+    } else { println("  FAIL: T573") }
+    if compiler_main_test_bm_xor_chain_cancel() {
+        passed = passed + 1
+        println("  T574 OK: Sprint 151 Block BM: (x^7)^7 -> IrCopy(x)")
+    } else { println("  FAIL: T574") }
+    if compiler_main_test_bm_xor_chain_comm() {
+        passed = passed + 1
+        println("  T575 OK: Sprint 151 Block BM: 5^(x^3) -> x^6 commutative")
+    } else { println("  FAIL: T575") }
+    if compiler_main_test_bm_xor_no_fold_rr() {
+        passed = passed + 1
+        println("  T576 OK: Sprint 151 Block BM: rr^rr no fold")
+    } else { println("  FAIL: T576") }
+    if compiler_main_test_bm_xor_no_fold_different_op() {
+        passed = passed + 1
+        println("  T577 OK: Sprint 151 Block BM: or-base no xor-chain fold")
+    } else { println("  FAIL: T577") }
+
+    // Sprint 152 Block BN: XOR self-recovery (T578-T583)
+    if compiler_main_test_xor_self_recovery_basic() {
+        passed = passed + 1
+        println("  T578 OK: Sprint 152 Block BN: (x^5)^x->5")
+    } else { println("  FAIL: T578") }
+    if compiler_main_test_xor_self_recovery_commutative() {
+        passed = passed + 1
+        println("  T579 OK: Sprint 152 Block BN: x^(x^5)->5 commutative")
+    } else { println("  FAIL: T579") }
+    if compiler_main_test_xor_pair_cancel() {
+        passed = passed + 1
+        println("  T580 OK: Sprint 152 Block BN: (x^3)^(x^5)->6")
+    } else { println("  FAIL: T580") }
+    if compiler_main_test_xor_self_recovery_neg_const() {
+        passed = passed + 1
+        println("  T581 OK: Sprint 152 Block BN: (x^-1)^x->-1")
+    } else { println("  FAIL: T581") }
+    if compiler_main_test_xor_self_recovery_no_fold_diff_base() {
+        passed = passed + 1
+        println("  T582 OK: Sprint 152 Block BN: diff base no fold")
+    } else { println("  FAIL: T582") }
+    if compiler_main_test_xor_self_recovery_no_fold_plain() {
+        passed = passed + 1
+        println("  T583 OK: Sprint 152 Block BN: plain xor no fold")
+    } else { println("  FAIL: T583") }
 
     println("")
     println("compiler/main tests: " + int_to_string(passed) + "/" + int_to_string(total) + " passed")

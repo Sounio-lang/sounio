@@ -299,6 +299,12 @@ fn ocp_const_fold(func: IrFunction) -> IrFunction with Mut, Div, Panic {
     var bk_shr_valid: [bool; 256] = [false; 256]
     var bk_shr_src:   [i64;  256] = [-1;    256]
     var bk_shr_amt:   [i64;  256] = [0;     256]
+    // Sprint 151 Block BM: XOR constant-chain fold — (x ^ C1) ^ C2 → x ^ (C1^C2).
+    // Mirrors Block BG (OR) and Block AE (AND) for the XOR operator.
+    // SOTA: LLVM InstCombineAndOrXor; GF(2) field associativity; Hacker's Delight §2-3.
+    var bm_xor_valid: [bool; 256] = [false; 256]
+    var bm_xor_src:   [i64;  256] = [-1;    256]
+    var bm_xor_cval:  [i64;  256] = [0;     256]
 
     var i: i64 = 0
     while i < result.instr_count {
@@ -1711,6 +1717,122 @@ fn ocp_const_fold(func: IrFunction) -> IrFunction with Mut, Div, Panic {
                             is_const[bl_instr.dst as usize] = true
                             const_val[bl_instr.dst as usize] = 0
                         }
+                    }
+                }
+            }
+        }
+
+        // Sprint 151 Block BM: XOR constant-chain fold — (x ^ C1) ^ C2 → x ^ (C1^C2).
+        // Associativity of XOR over constants: combine two sequential XOR-with-constant ops.
+        // Also handles commutative outer: C2 ^ (x ^ C1) → x ^ (C1^C2).
+        // SOTA: LLVM InstCombineAndOrXor; GF(2) field associativity; Hacker's Delight §2-3.
+        if ocp_is_binop(result.instrs[i as usize].op) {
+            let bm_instr = result.instrs[i as usize]
+            let bm_s1 = bm_instr.src1; let bm_s2 = bm_instr.src2
+            let bm_s1_ok = bm_s1 >= 0 && bm_s1 < 256; let bm_s2_ok = bm_s2 >= 0 && bm_s2 < 256
+            if bm_instr.bin_op == BinaryOp::OpBitXor {
+                // (x ^ C1) ^ C2 → x ^ (C1^C2)
+                if bm_s1_ok && bm_xor_valid[bm_s1 as usize]
+                        && bm_s2_ok && is_const[bm_s2 as usize] {
+                    let bm_c1 = bm_xor_cval[bm_s1 as usize]
+                    let bm_c2 = const_val[bm_s2 as usize]
+                    let bm_merged = bm_c1 ^ bm_c2
+                    let bm_def = def_at[bm_s2 as usize]
+                    if bm_def >= 0 {
+                        result.instrs[bm_def as usize] = ir_load_imm(bm_s2, bm_merged)
+                        const_val[bm_s2 as usize] = bm_merged
+                    }
+                    result.instrs[i as usize] = ir_binop(bm_instr.dst,
+                        bm_xor_src[bm_s1 as usize], BinaryOp::OpBitXor, bm_s2)
+                    if bm_instr.dst >= 0 && bm_instr.dst < 256 {
+                        bm_xor_valid[bm_instr.dst as usize] = true
+                        bm_xor_src[bm_instr.dst as usize]   = bm_xor_src[bm_s1 as usize]
+                        bm_xor_cval[bm_instr.dst as usize]  = bm_merged
+                    }
+                }
+                // C2 ^ (x ^ C1) → x ^ (C1^C2) (commutative outer)
+                if bm_s2_ok && bm_xor_valid[bm_s2 as usize]
+                        && bm_s1_ok && is_const[bm_s1 as usize] {
+                    let bm_c1 = bm_xor_cval[bm_s2 as usize]
+                    let bm_c2 = const_val[bm_s1 as usize]
+                    let bm_merged = bm_c1 ^ bm_c2
+                    let bm_def = def_at[bm_s1 as usize]
+                    if bm_def >= 0 {
+                        result.instrs[bm_def as usize] = ir_load_imm(bm_s1, bm_merged)
+                        const_val[bm_s1 as usize] = bm_merged
+                    }
+                    result.instrs[i as usize] = ir_binop(bm_instr.dst,
+                        bm_xor_src[bm_s2 as usize], BinaryOp::OpBitXor, bm_s1)
+                    if bm_instr.dst >= 0 && bm_instr.dst < 256 {
+                        bm_xor_valid[bm_instr.dst as usize] = true
+                        bm_xor_src[bm_instr.dst as usize]   = bm_xor_src[bm_s2 as usize]
+                        bm_xor_cval[bm_instr.dst as usize]  = bm_merged
+                    }
+                }
+            }
+        }
+        // Sprint 151 Block BM: XOR tracking — populate bm_xor arrays.
+        if ocp_is_binop(result.instrs[i as usize].op) {
+            let bm_t = result.instrs[i as usize]
+            let bm_ts1 = bm_t.src1; let bm_ts2 = bm_t.src2
+            let bm_ts2_ok = bm_ts2 >= 0 && bm_ts2 < 256
+            let bm_ts1_ok = bm_ts1 >= 0 && bm_ts1 < 256
+            if bm_t.bin_op == BinaryOp::OpBitXor {
+                // Track x ^ C (const on right)
+                if bm_ts2_ok && is_const[bm_ts2 as usize] && !bm_xor_valid[bm_ts1 as usize] {
+                    if bm_t.dst >= 0 && bm_t.dst < 256 {
+                        bm_xor_valid[bm_t.dst as usize] = true
+                        bm_xor_src[bm_t.dst as usize]   = bm_ts1
+                        bm_xor_cval[bm_t.dst as usize]  = const_val[bm_ts2 as usize]
+                    }
+                }
+                // Track C ^ x (const on left)
+                if bm_ts1_ok && is_const[bm_ts1 as usize] && !bm_xor_valid[bm_ts2 as usize] {
+                    if bm_t.dst >= 0 && bm_t.dst < 256 {
+                        bm_xor_valid[bm_t.dst as usize] = true
+                        bm_xor_src[bm_t.dst as usize]   = bm_ts2
+                        bm_xor_cval[bm_t.dst as usize]  = const_val[bm_ts1 as usize]
+                    }
+                }
+            }
+        }
+
+        // Sprint 152 Block BN: XOR self-recovery and XOR-const pair cancellation.
+        // (x ^ C) ^ x → C  ;  x ^ (x ^ C) → C  (XOR with original yields constant).
+        // (x ^ C1) ^ (x ^ C2) → C1 ^ C2  (shared base cancels, constants XOR).
+        // SOTA: LLVM InstCombineAndOrXor — XOR group law: (a^b)^a=b; GF(2) §2-3.
+        // Distinct from Block AU ((a^b)^(a^c)→b^c for RR-XOR): uses bm_xor tracking
+        // for the const-xor case where Block AS/AU don't track.
+        // Zero new arrays: uses bm_xor_valid/src/cval (Block BM) + is_const/const_val.
+        if ocp_is_binop(result.instrs[i as usize].op) {
+            let bn_instr = result.instrs[i as usize]
+            let bn_s1 = bn_instr.src1; let bn_s2 = bn_instr.src2
+            let bn_s1_ok = bn_s1 >= 0 && bn_s1 < 256; let bn_s2_ok = bn_s2 >= 0 && bn_s2 < 256
+            if bn_instr.bin_op == BinaryOp::OpBitXor && bn_s1_ok && bn_s2_ok {
+                // (x ^ C) ^ x → C: s1 is xor-const, s2 == base of s1
+                if bm_xor_valid[bn_s1 as usize] && bm_xor_src[bn_s1 as usize] == bn_s2 {
+                    result.instrs[i as usize] = ir_load_imm(bn_instr.dst, bm_xor_cval[bn_s1 as usize])
+                    if bn_instr.dst >= 0 && bn_instr.dst < 256 {
+                        is_const[bn_instr.dst as usize] = true
+                        const_val[bn_instr.dst as usize] = bm_xor_cval[bn_s1 as usize]
+                    }
+                }
+                // x ^ (x ^ C) → C: s2 is xor-const, s1 == base of s2
+                if bm_xor_valid[bn_s2 as usize] && bm_xor_src[bn_s2 as usize] == bn_s1 {
+                    result.instrs[i as usize] = ir_load_imm(bn_instr.dst, bm_xor_cval[bn_s2 as usize])
+                    if bn_instr.dst >= 0 && bn_instr.dst < 256 {
+                        is_const[bn_instr.dst as usize] = true
+                        const_val[bn_instr.dst as usize] = bm_xor_cval[bn_s2 as usize]
+                    }
+                }
+                // (x ^ C1) ^ (x ^ C2) → C1 ^ C2: both are xor-const with same base
+                if bm_xor_valid[bn_s1 as usize] && bm_xor_valid[bn_s2 as usize]
+                        && bm_xor_src[bn_s1 as usize] == bm_xor_src[bn_s2 as usize] {
+                    let bn_merged = bm_xor_cval[bn_s1 as usize] ^ bm_xor_cval[bn_s2 as usize]
+                    result.instrs[i as usize] = ir_load_imm(bn_instr.dst, bn_merged)
+                    if bn_instr.dst >= 0 && bn_instr.dst < 256 {
+                        is_const[bn_instr.dst as usize] = true
+                        const_val[bn_instr.dst as usize] = bn_merged
                     }
                 }
             }
