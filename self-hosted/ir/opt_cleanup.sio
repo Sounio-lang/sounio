@@ -1610,6 +1610,47 @@ fn ocp_const_fold(func: IrFunction) -> IrFunction with Mut, Div, Panic {
             }
         }
 
+        // Sprint 170 Block CF: OR-AND superset absorption — (x|C1)&C2 → C2 when C2 ⊆ C1.
+        // Proof: x|C1 has all bits of C1 set; since C2⊆C1, all bits of C2 are in x|C1;
+        //   so (x|C1)&C2 = C2. Complement of Block BI (disjoint case).
+        // Also commutative: C2&(x|C1) → C2 when C2 ⊆ C1.
+        // Zero new arrays: reuses am_or_valid/am_or_const_val (Block AM) + is_const/const_val.
+        // SOTA: LLVM InstCombineAndOrXor; known-bits analysis; Boolean algebra subset law.
+        if ocp_is_binop(result.instrs[i as usize].op) {
+            let cf_instr = result.instrs[i as usize]
+            let cf_s1 = cf_instr.src1; let cf_s2 = cf_instr.src2
+            let cf_s1_ok = cf_s1 >= 0 && cf_s1 < 256
+            let cf_s2_ok = cf_s2 >= 0 && cf_s2 < 256
+            if cf_instr.bin_op == BinaryOp::OpBitAnd {
+                // (x|C1)&C2 → C2 when C2 ⊆ C1 (i.e., C1&C2 == C2)
+                if cf_s1_ok && am_or_valid[cf_s1 as usize]
+                        && cf_s2_ok && is_const[cf_s2 as usize] {
+                    let cf_c1 = am_or_const_val[cf_s1 as usize]
+                    let cf_c2 = const_val[cf_s2 as usize]
+                    if (cf_c1 & cf_c2) == cf_c2 {
+                        result.instrs[i as usize] = ir_load_imm(cf_instr.dst, cf_c2)
+                        if cf_instr.dst >= 0 && cf_instr.dst < 256 {
+                            is_const[cf_instr.dst as usize] = true
+                            const_val[cf_instr.dst as usize] = cf_c2
+                        }
+                    }
+                }
+                // C2&(x|C1) → C2 when C2 ⊆ C1 (commutative)
+                if cf_s2_ok && am_or_valid[cf_s2 as usize]
+                        && cf_s1_ok && is_const[cf_s1 as usize] {
+                    let cf_c1 = am_or_const_val[cf_s2 as usize]
+                    let cf_c2 = const_val[cf_s1 as usize]
+                    if (cf_c1 & cf_c2) == cf_c2 {
+                        result.instrs[i as usize] = ir_load_imm(cf_instr.dst, cf_c2)
+                        if cf_instr.dst >= 0 && cf_instr.dst < 256 {
+                            is_const[cf_instr.dst as usize] = true
+                            const_val[cf_instr.dst as usize] = cf_c2
+                        }
+                    }
+                }
+            }
+        }
+
         // Sprint 149 Block BK: Consecutive same-direction shift fold.
         // (x << A) << B → x << (A+B)   when A+B < 64.
         // (x >> A) >> B → x >> (A+B)   when A+B < 64.
