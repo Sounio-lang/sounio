@@ -1,0 +1,193 @@
+// self-hosted::ir::stream_reach — Streaming call graph for two-pass reachability.
+//
+// Problem: reach_thin_module() accumulates ALL function bodies in one IrModule
+// before filtering. For main.sio this is ~24MB of IrFunctions simultaneously.
+//
+// Solution: two-pass streaming.
+//   Pass 1: lower one body at a time → scan IrCall.fn_id edges → discard body.
+//           Peak memory: 1 IrFunction (~24KB) instead of 1024 (~24MB).
+//   BFS:    scg_mark_reachable() on the collected edge list.
+//   Pass 2: lower only reachable bodies → feed directly to codegen.
+//
+// StreamCallGraph stores a flat edge list: (caller_idx, callee_idx).
+// BFS is fixed-point over this list, same O(F*E) as reach_mark_one_pass.
+//
+// References:
+//   Bacon & Sweeney: "Fast Static Analysis of C++ Virtual Function Calls" (1996)
+//   Grove & Chambers: "A Framework for Call Graph Construction" (TOPLAS 2001)
+//
+// Sprint 132: streaming two-pass reachability for self-hosted bootstrap.
+
+module ir::stream_reach
+
+use ir::ir::*
+use parser::ast::*
+
+// ============================================================================
+// StreamCallGraph — flat edge list (caller_idx → callee_idx)
+// ============================================================================
+
+fn STREAM_REACH_MAX_EDGES() -> i64 { 32768 }
+
+struct StreamCallGraph {
+    callers: [i64; 32768],
+    callees: [i64; 32768],
+    edge_count: i64,
+    fn_count: i64,
+}
+
+fn scg_new(fn_count: i64) -> StreamCallGraph with Mut {
+    StreamCallGraph {
+        callers: [0; 32768],
+        callees: [0; 32768],
+        edge_count: 0,
+        fn_count: fn_count,
+    }
+}
+
+fn scg_add_edge(graph: StreamCallGraph, caller: i64, callee: i64) -> StreamCallGraph with Mut, Panic {
+    var out = graph
+    if out.edge_count < 32768 && caller >= 0 && callee >= 0 {
+        out.callers[out.edge_count as usize] = caller
+        out.callees[out.edge_count as usize] = callee
+        out.edge_count = out.edge_count + 1
+    }
+    out
+}
+
+// Scan one function body for IrCall instructions and record outgoing edges.
+// Call this during pass 1; the body can be discarded immediately after.
+fn scg_scan_function(graph: StreamCallGraph, func: IrFunction, fn_idx: i64) -> StreamCallGraph with Mut, Panic, Div {
+    var out = graph
+    var ii: i64 = 0
+    while ii < func.instr_count {
+        let instr = func.instrs[ii as usize]
+        if instr.op == IrOpcode::IrCall {
+            let callee = instr.fn_id
+            if callee >= 0 && callee < 1024 && callee != fn_idx {
+                out = scg_add_edge(out, fn_idx, callee)
+            }
+        }
+        ii = ii + 1
+    }
+    out
+}
+
+// ============================================================================
+// BFS reachability over the edge list
+// ============================================================================
+
+// One pass: extend mark[] by scanning all edges where caller is already marked.
+fn scg_mark_one_pass(mark: [bool; 1024], graph: &StreamCallGraph) -> ([bool; 1024], bool) with Mut, Panic, Div {
+    var out = mark
+    var changed = false
+    var i: i64 = 0
+    while i < graph.edge_count {
+        let caller = graph.callers[i as usize]
+        let callee = graph.callees[i as usize]
+        if caller >= 0 && caller < 1024 && callee >= 0 && callee < 1024 {
+            if out[caller as usize] && !out[callee as usize] {
+                out[callee as usize] = true
+                changed = true
+            }
+        }
+        i = i + 1
+    }
+    (out, changed)
+}
+
+fn scg_mark_reachable(graph: &StreamCallGraph, start_idx: i64) -> [bool; 1024] with Mut, Panic, Div {
+    var mark: [bool; 1024] = [false; 1024]
+    if start_idx >= 0 && start_idx < 1024 {
+        mark[start_idx as usize] = true
+    }
+    var done = false
+    while !done {
+        let result = scg_mark_one_pass(mark, graph)
+        mark = result.0
+        let changed = result.1
+        if !changed { done = true }
+    }
+    mark
+}
+
+fn scg_count_reachable(mark: [bool; 1024], fn_count: i64) -> i64 with Mut, Panic, Div {
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < fn_count {
+        if mark[i as usize] { count = count + 1 }
+        i = i + 1
+    }
+    count
+}
+
+// ============================================================================
+// Self-tests
+// ============================================================================
+
+fn scg_self_test_add_edge() -> i64 with Mut, Panic, Div {
+    var g = scg_new(3)
+    g = scg_add_edge(g, 0, 1)
+    g = scg_add_edge(g, 0, 2)
+    if g.edge_count != 2 { return 1 }
+    if g.callers[0] != 0 { return 2 }
+    if g.callees[0] != 1 { return 3 }
+    if g.callers[1] != 0 { return 4 }
+    if g.callees[1] != 2 { return 5 }
+    0
+}
+
+fn scg_self_test_mark_reachable() -> i64 with Mut, Panic, Div {
+    // fn0=main → fn1=helper; fn2=dead (no incoming edge)
+    var g = scg_new(3)
+    g = scg_add_edge(g, 0, 1)
+    let mark = scg_mark_reachable(&g, 0)
+    if !mark[0] { return 1 }   // main reachable
+    if !mark[1] { return 2 }   // helper reachable
+    if mark[2] { return 3 }    // dead NOT reachable
+    0
+}
+
+fn scg_self_test_transitive() -> i64 with Mut, Panic, Div {
+    // fn0 → fn1 → fn2 (transitive); fn3=dead
+    var g = scg_new(4)
+    g = scg_add_edge(g, 0, 1)
+    g = scg_add_edge(g, 1, 2)
+    let mark = scg_mark_reachable(&g, 0)
+    if !mark[0] { return 1 }   // start
+    if !mark[1] { return 2 }   // direct
+    if !mark[2] { return 3 }   // transitive
+    if mark[3] { return 4 }    // dead
+    0
+}
+
+fn scg_self_test_count() -> i64 with Mut, Panic, Div {
+    // fn0 → fn1, fn0 → fn2; fn3,fn4=dead
+    var g = scg_new(5)
+    g = scg_add_edge(g, 0, 1)
+    g = scg_add_edge(g, 0, 2)
+    let mark = scg_mark_reachable(&g, 0)
+    let count = scg_count_reachable(mark, 5)
+    if count != 3 { return 1 }   // fn0+fn1+fn2
+    0
+}
+
+fn scg_self_test_no_start() -> i64 with Mut, Panic, Div {
+    // No start node: nothing reachable
+    var g = scg_new(3)
+    g = scg_add_edge(g, 0, 1)
+    let mark = scg_mark_reachable(&g, -1)  // -1 = no start
+    let count = scg_count_reachable(mark, 3)
+    if count != 0 { return 1 }
+    0
+}
+
+fn scg_run_self_tests() -> i64 with Mut, Panic, Div {
+    var failures: i64 = 0
+    failures = failures + scg_self_test_add_edge()
+    failures = failures + scg_self_test_mark_reachable()
+    failures = failures + scg_self_test_transitive()
+    failures = failures + scg_self_test_count()
+    failures = failures + scg_self_test_no_start()
+    failures
+}

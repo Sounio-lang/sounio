@@ -62,6 +62,7 @@ use ir::egraph::*
 use ir::loop_opt::*
 use ir::tailcall::*
 use ir::reachability::*
+use ir::stream_reach::*
 use native::regalloc::*
 use native::peephole::*
 
@@ -170,48 +171,65 @@ fn main() -> i64 with IO, Mut, Panic, Div, Alloc {
         return 2
     }
 
-    // Phase 2: Build full IrModule by lowering each function body
-    var module = summary_result.summary.module
+    // Phase 2: Streaming call graph extraction (pass 1 — one body at a time).
+    // Each body is lowered, scanned for IrCall edges, then discarded.
+    // Peak memory: 1 IrFunction (~24KB) instead of all fn_count (~24MB).
+    let main_idx = reach_find_main(&summary_result.summary.module)
+    var graph = scg_new(fn_count)
     var fi: i64 = 0
-    var body_errors: i64 = 0
     while fi < fn_count {
-        let fn_name = module.functions[fi as usize].name
+        let fn_name = summary_result.summary.module.functions[fi as usize].name
         let body_result = lower_program_function_body_from_summary_flat_with_epistemic_ref(
             &prog, &summary_result.summary, epistemic, fn_name
         )
-        if body_result.had_error {
-            body_errors = body_errors + 1
-            if body_result.func.instr_count <= 0 {
-                print("wide_native_compile: skip fn=")
-                print(str_from_bytes(fn_name.buf, fn_name.len))
-                print(" (no instrs)\n")
-                fi = fi + 1
-                continue
-            }
+        if body_result.func.instr_count > 0 {
+            graph = scg_scan_function(graph, body_result.func, fi)
         }
-        module.functions[fi as usize] = body_result.func
+        // body_result.func dropped here — not stored
         fi = fi + 1
     }
-    if body_errors > 0 {
-        print("wide_native_compile: body_errors=")
-        print_int(body_errors)
-        print(" (continuing)\n")
+    print("wide_native_compile: graph_edges=")
+    print_int(graph.edge_count)
+    print("\n")
+
+    // Phase 3: BFS reachability from main()
+    let mark = scg_mark_reachable(&graph, main_idx)
+    let remap = reach_build_remap(mark, fn_count)
+    let reachable_count = scg_count_reachable(mark, fn_count)
+    let eliminated_count = fn_count - reachable_count
+    print("wide_native_compile: reachable=")
+    print_int(reachable_count)
+    print(" eliminated=")
+    print_int(eliminated_count)
+    print("\n")
+
+    // Phase 4: Lower only reachable function bodies (pass 2).
+    // Builds a compacted IrModule containing only reachable functions.
+    var thin_module = summary_result.summary.module
+    var thin_idx: i64 = 0
+    var fi2: i64 = 0
+    while fi2 < fn_count {
+        if mark[fi2 as usize] {
+            let fn_name2 = summary_result.summary.module.functions[fi2 as usize].name
+            let body_result2 = lower_program_function_body_from_summary_flat_with_epistemic_ref(
+                &prog, &summary_result.summary, epistemic, fn_name2
+            )
+            if body_result2.func.instr_count > 0 {
+                thin_module.functions[thin_idx as usize] = body_result2.func
+            }
+            thin_idx = thin_idx + 1
+        }
+        fi2 = fi2 + 1
     }
-
-    // Phase 3: Dead function elimination (thin pass)
-    print("wide_native_compile: thin_pass fn_count=")
-    print_int(module.fn_count)
-    print("\n")
-    let reach = reach_thin_module(module)
-    print("wide_native_compile: eliminated=")
-    print_int(reach.eliminated_fn_count)
-    print(" reachable=")
-    print_int(reach.reachable_fn_count)
+    thin_module.fn_count = thin_idx
+    reach_patch_calls(&!thin_module, &remap)
+    print("wide_native_compile: thin_fn_count=")
+    print_int(thin_module.fn_count)
     print("\n")
 
-    // Phase 4: Wide batch compile + ELF emission
+    // Phase 5: Wide batch compile + ELF emission
     print("wide_native_compile: compiling (batch_size=200)\n")
-    let result = wide_compile_and_emit(&reach.module, output_path)
+    let result = wide_compile_and_emit(&thin_module, output_path)
 
     if !result.ok {
         print("wide_native_compile: compile_error\n")
