@@ -1838,6 +1838,31 @@ fn ocp_const_fold(func: IrFunction) -> IrFunction with Mut, Div, Panic {
             }
         }
 
+        // Sprint 153 Block BO: Two's-complement rewrite — ~x + 1 → -x.
+        // ~x + 1 = -x in two's complement (definition: -x = ~x + 1).
+        // Handles commutative outer: 1 + ~x → -x.
+        // Zero new arrays: reuses is_bnot/bnot_src (Block AI/BJ) + is_const/const_val.
+        // SOTA: LLVM InstCombineAddSub; Hacker's Delight §2-2; two's complement identity.
+        if ocp_is_binop(result.instrs[i as usize].op) {
+            let bo_instr = result.instrs[i as usize]
+            let bo_s1 = bo_instr.src1; let bo_s2 = bo_instr.src2
+            let bo_s1_ok = bo_s1 >= 0 && bo_s1 < 256; let bo_s2_ok = bo_s2 >= 0 && bo_s2 < 256
+            if bo_instr.bin_op == BinaryOp::OpAdd {
+                // ~x + 1 → -x  (s1 = ~x, s2 = const 1)
+                if bo_s1_ok && bo_s2_ok && is_bnot[bo_s1 as usize]
+                        && is_const[bo_s2 as usize] && const_val[bo_s2 as usize] == 1 {
+                    let bo_inner = bnot_src[bo_s1 as usize]
+                    result.instrs[i as usize] = ir_unaryop(bo_instr.dst, UnaryOp::OpNeg, bo_inner)
+                }
+                // 1 + ~x → -x  (s1 = const 1, s2 = ~x)
+                if bo_s1_ok && bo_s2_ok && is_const[bo_s1 as usize] && const_val[bo_s1 as usize] == 1
+                        && is_bnot[bo_s2 as usize] {
+                    let bo_inner = bnot_src[bo_s2 as usize]
+                    result.instrs[i as usize] = ir_unaryop(bo_instr.dst, UnaryOp::OpNeg, bo_inner)
+                }
+            }
+        }
+
                         // Sprint 82 Block J: Unary operation constant folding.
         // Folds IrUnaryOp when the source operand is a known constant.
         // Only OpNeg and OpNot are foldable (Ref/RefMut/Deref are memory ops).
