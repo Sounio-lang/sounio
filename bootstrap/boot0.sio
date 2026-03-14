@@ -3,12 +3,11 @@
 // SOUNIO STAGE-0 BOOTSTRAP COMPILER
 //
 // Standalone single-file compiler — NO external imports.
-// Uses index-based AST pools (no Box<T>, no heap allocator needed).
-// All functions take ≤2 args (SOIR v1 call encoding compatible).
+// Uses inline arrays for locals (no Box<T>, no heap allocator needed).
 // Target: compile a minimal Sounio subset to native x86-64 ELF.
 //
 // Architecture:
-//   Source → Token[] → AST pools → CodeBuf → ELF bytes → write
+//   Source → Token[] → first-pass scan → per-fn emit → ELF → write
 //
 // Usage:
 //   souc run bootstrap/boot0.sio -- <source.sio> <output.elf>
@@ -36,12 +35,14 @@ fn b0_name_eq(a: B0Name, b: B0Name) -> bool with Mut, Panic, Div {
     true
 }
 
-fn b0_name_from_lit4(c0: i64, c1: i64, c2: i64, c3: i64) -> B0Name {
-    var n = b0_name_empty()
-    n.buf[0] = c0 as i8; n.buf[1] = c1 as i8
-    n.buf[2] = c2 as i8; n.buf[3] = c3 as i8
-    n.len = 4
-    n
+fn b0_name_starts(a: B0Name, prefix: B0Name) -> bool with Mut, Panic, Div {
+    if a.len < prefix.len { return false }
+    var i: i64 = 0
+    while i < prefix.len {
+        if a.buf[i as usize] != prefix.buf[i as usize] { return false }
+        i = i + 1
+    }
+    true
 }
 
 fn b0_name_from_lit2(c0: i64, c1: i64) -> B0Name {
@@ -58,6 +59,22 @@ fn b0_name_from_lit3(c0: i64, c1: i64, c2: i64) -> B0Name {
     n
 }
 
+fn b0_name_from_lit4(c0: i64, c1: i64, c2: i64, c3: i64) -> B0Name {
+    var n = b0_name_empty()
+    n.buf[0] = c0 as i8; n.buf[1] = c1 as i8
+    n.buf[2] = c2 as i8; n.buf[3] = c3 as i8
+    n.len = 4
+    n
+}
+
+fn b0_name_from_lit5(c0: i64, c1: i64, c2: i64, c3: i64, c4: i64) -> B0Name {
+    var n = b0_name_empty()
+    n.buf[0] = c0 as i8; n.buf[1] = c1 as i8; n.buf[2] = c2 as i8
+    n.buf[3] = c3 as i8; n.buf[4] = c4 as i8
+    n.len = 5
+    n
+}
+
 fn b0_name_from_lit6(c0: i64, c1: i64, c2: i64, c3: i64, c4: i64, c5: i64) -> B0Name {
     var n = b0_name_empty()
     n.buf[0] = c0 as i8; n.buf[1] = c1 as i8; n.buf[2] = c2 as i8
@@ -70,7 +87,6 @@ fn b0_name_from_lit6(c0: i64, c1: i64, c2: i64, c3: i64, c4: i64, c5: i64) -> B0
 // SECTION 2: TOKEN TYPES
 // ============================================================
 
-// TokenKind constants (i64)
 fn TK_EOF() -> i64 { 0 }
 fn TK_IDENT() -> i64 { 1 }
 fn TK_INT() -> i64 { 2 }
@@ -135,6 +151,7 @@ fn TK_KW_LINEAR() -> i64 { 73 }
 fn TK_KW_BOX() -> i64 { 74 }
 fn TK_COLON_COLON() -> i64 { 80 }
 fn TK_TILDE() -> i64 { 81 }
+fn TK_KW_IMPL() -> i64 { 82 }
 
 struct B0Token {
     kind: i64,
@@ -151,7 +168,6 @@ fn b0_tok_new(kind: i64) -> B0Token {
 // SECTION 3: LEXER
 // ============================================================
 
-// Source buffer (flat array of bytes, up to 256KB)
 struct B0Src {
     bytes: [i8; 65536],
     len: i64,
@@ -194,135 +210,85 @@ fn b0_is_ws(c: i64) -> bool {
     c == 32 || c == 9 || c == 10 || c == 13
 }
 
-// Keyword detection
 fn b0_kw_check(n: B0Name) -> i64 {
-    // Returns TK_KW_* or -1
     if n.len == 2 {
-        let c0 = n.buf[0] as i64
-        let c1 = n.buf[1] as i64
-        if c0 == 102 && c1 == 110 { return TK_KW_FN() }     // fn
-        if c0 == 105 && c1 == 110 { return TK_KW_IN() }     // in
-        if c0 == 105 && c1 == 102 { return TK_KW_IF() }     // if
-        if c0 == 97 && c1 == 115 { return TK_KW_AS() }      // as
+        let c0 = n.buf[0] as i64; let c1 = n.buf[1] as i64
+        if c0 == 102 && c1 == 110 { return TK_KW_FN() }
+        if c0 == 105 && c1 == 110 { return TK_KW_IN() }
+        if c0 == 105 && c1 == 102 { return TK_KW_IF() }
+        if c0 == 97 && c1 == 115 { return TK_KW_AS() }
         return -1
     }
     if n.len == 3 {
-        let c0 = n.buf[0] as i64
-        let c1 = n.buf[1] as i64
-        let c2 = n.buf[2] as i64
-        if c0 == 108 && c1 == 101 && c2 == 116 { return TK_KW_LET() }  // let
-        if c0 == 118 && c1 == 97 && c2 == 114 { return TK_KW_VAR() }   // var
-        if c0 == 102 && c1 == 111 && c2 == 114 { return TK_KW_FOR() }  // for
-        if c0 == 117 && c1 == 115 && c2 == 101 { return TK_KW_USE() }  // use
-        if c0 == 109 && c1 == 111 && c2 == 100 { return TK_KW_MOD() }  // mod
+        let c0 = n.buf[0] as i64; let c1 = n.buf[1] as i64; let c2 = n.buf[2] as i64
+        if c0 == 108 && c1 == 101 && c2 == 116 { return TK_KW_LET() }
+        if c0 == 118 && c1 == 97 && c2 == 114 { return TK_KW_VAR() }
+        if c0 == 102 && c1 == 111 && c2 == 114 { return TK_KW_FOR() }
+        if c0 == 117 && c1 == 115 && c2 == 101 { return TK_KW_USE() }
+        if c0 == 109 && c1 == 111 && c2 == 100 { return TK_KW_MOD() }
         return -1
     }
     if n.len == 4 {
-        let c0 = n.buf[0] as i64
-        let c1 = n.buf[1] as i64
-        let c2 = n.buf[2] as i64
-        let c3 = n.buf[3] as i64
-        if c0 == 101 && c1 == 108 && c2 == 115 && c3 == 101 { return TK_KW_ELSE() }   // else
-        if c0 == 116 && c1 == 114 && c2 == 117 && c3 == 101 { return TK_KW_TRUE() }   // true
-        if c0 == 116 && c1 == 121 && c2 == 112 && c3 == 101 { return TK_KW_TYPE() }   // type
-        if c0 == 101 && c1 == 110 && c2 == 117 && c3 == 109 { return TK_KW_ENUM() }   // enum
-        if c0 == 115 && c1 == 111 && c2 == 109 && c3 == 101 { return TK_KW_SOME() }   // Some
-        if c0 == 78 && c1 == 111 && c2 == 110 && c3 == 101 { return TK_KW_NONE() }    // None
+        let c0 = n.buf[0] as i64; let c1 = n.buf[1] as i64
+        let c2 = n.buf[2] as i64; let c3 = n.buf[3] as i64
+        if c0 == 101 && c1 == 108 && c2 == 115 && c3 == 101 { return TK_KW_ELSE() }
+        if c0 == 116 && c1 == 114 && c2 == 117 && c3 == 101 { return TK_KW_TRUE() }
+        if c0 == 116 && c1 == 121 && c2 == 112 && c3 == 101 { return TK_KW_TYPE() }
+        if c0 == 101 && c1 == 110 && c2 == 117 && c3 == 109 { return TK_KW_ENUM() }
+        if c0 == 115 && c1 == 111 && c2 == 109 && c3 == 101 { return TK_KW_SOME() }
+        if c0 == 78 && c1 == 111 && c2 == 110 && c3 == 101 { return TK_KW_NONE() }
+        if c0 == 105 && c1 == 109 && c2 == 112 && c3 == 108 { return TK_KW_IMPL() }
         return -1
     }
     if n.len == 5 {
         let c0 = n.buf[0] as i64
         if c0 == 119 {
-            // while / with
-            let c1 = n.buf[1] as i64
-            let c2 = n.buf[2] as i64
-            let c3 = n.buf[3] as i64
-            let c4 = n.buf[4] as i64
-            if c1 == 104 && c2 == 105 && c3 == 108 && c4 == 101 { return TK_KW_WHILE() }  // while
-            if c1 == 105 && c2 == 116 && c3 == 104 { return TK_KW_WITH() }                  // with (4 chars covered above actually, 4 not 5)
+            let c1 = n.buf[1] as i64; let c2 = n.buf[2] as i64
+            let c3 = n.buf[3] as i64; let c4 = n.buf[4] as i64
+            if c1 == 104 && c2 == 105 && c3 == 108 && c4 == 101 { return TK_KW_WHILE() }
             return -1
         }
         if c0 == 98 {
-            let c1 = n.buf[1] as i64
-            let c2 = n.buf[2] as i64
-            let c3 = n.buf[3] as i64
-            let c4 = n.buf[4] as i64
-            if c1 == 114 && c2 == 101 && c3 == 97 && c4 == 107 { return TK_KW_BREAK() }  // break
+            let c1 = n.buf[1] as i64; let c2 = n.buf[2] as i64
+            let c3 = n.buf[3] as i64; let c4 = n.buf[4] as i64
+            if c1 == 114 && c2 == 101 && c3 == 97 && c4 == 107 { return TK_KW_BREAK() }
             return -1
         }
         if c0 == 102 {
-            let c1 = n.buf[1] as i64
-            let c2 = n.buf[2] as i64
-            let c3 = n.buf[3] as i64
-            let c4 = n.buf[4] as i64
-            if c1 == 97 && c2 == 108 && c3 == 115 && c4 == 101 { return TK_KW_FALSE() }  // false
+            let c1 = n.buf[1] as i64; let c2 = n.buf[2] as i64
+            let c3 = n.buf[3] as i64; let c4 = n.buf[4] as i64
+            if c1 == 97 && c2 == 108 && c3 == 115 && c4 == 101 { return TK_KW_FALSE() }
             return -1
         }
+        let c0b = n.buf[0] as i64
+        let c1b = n.buf[1] as i64; let c2b = n.buf[2] as i64
+        let c3b = n.buf[3] as i64; let c4b = n.buf[4] as i64
+        if c0b == 109 && c1b == 97 && c2b == 116 && c3b == 99 && c4b == 104 { return TK_KW_MATCH() }
+        return -1
+    }
+    if n.len == 4 {
+        let c0 = n.buf[0] as i64; let c1 = n.buf[1] as i64
+        let c2 = n.buf[2] as i64; let c3 = n.buf[3] as i64
+        if c0 == 119 && c1 == 105 && c2 == 116 && c3 == 104 { return TK_KW_WITH() }
         return -1
     }
     if n.len == 6 {
-        let c0 = n.buf[0] as i64
-        let c1 = n.buf[1] as i64
-        if c0 == 114 && c1 == 101 {
-            // return
-            let c2 = n.buf[2] as i64
-            let c3 = n.buf[3] as i64
-            let c4 = n.buf[4] as i64
-            let c5 = n.buf[5] as i64
-            if c2 == 116 && c3 == 117 && c4 == 114 && c5 == 110 { return TK_KW_RETURN() }
-            return -1
-        }
-        if c0 == 115 && c1 == 116 {
-            // struct
-            let c2 = n.buf[2] as i64
-            let c3 = n.buf[3] as i64
-            let c4 = n.buf[4] as i64
-            let c5 = n.buf[5] as i64
-            if c2 == 114 && c3 == 117 && c4 == 99 && c5 == 116 { return TK_KW_STRUCT() }
-            return -1
-        }
-        if c0 == 108 && c1 == 105 {
-            // linear
-            return -1  // 6 chars: l-i-n-e-a-r
-        }
-        return -1
-    }
-    if n.len == 5 {
-        let c0 = n.buf[0] as i64
-        let c1 = n.buf[1] as i64
-        let c2 = n.buf[2] as i64
-        let c3 = n.buf[3] as i64
-        let c4 = n.buf[4] as i64
-        if c0 == 109 && c1 == 97 && c2 == 116 && c3 == 99 && c4 == 104 { return TK_KW_MATCH() }  // match
+        let c0 = n.buf[0] as i64; let c1 = n.buf[1] as i64
+        let c2 = n.buf[2] as i64; let c3 = n.buf[3] as i64
+        let c4 = n.buf[4] as i64; let c5 = n.buf[5] as i64
+        if c0 == 114 && c1 == 101 && c2 == 116 && c3 == 117 && c4 == 114 && c5 == 110 { return TK_KW_RETURN() }
+        if c0 == 115 && c1 == 116 && c2 == 114 && c3 == 117 && c4 == 99 && c5 == 116 { return TK_KW_STRUCT() }
+        if c0 == 108 && c1 == 105 && c2 == 110 && c3 == 101 && c4 == 97 && c5 == 114 { return TK_KW_LINEAR() }
         return -1
     }
     if n.len == 8 {
-        let c0 = n.buf[0] as i64
-        let c1 = n.buf[1] as i64
-        if c0 == 99 && c1 == 111 {
-            // continue
-            return TK_KW_CONTINUE()
-        }
-        return -1
-    }
-    if n.len == 6 {
-        let c0 = n.buf[0] as i64
-        if c0 == 108 {
-            // linear
-            let c1 = n.buf[1] as i64
-            let c2 = n.buf[2] as i64
-            let c3 = n.buf[3] as i64
-            let c4 = n.buf[4] as i64
-            let c5 = n.buf[5] as i64
-            if c1 == 105 && c2 == 110 && c3 == 101 && c4 == 97 && c5 == 114 { return TK_KW_LINEAR() }
-            return -1
-        }
+        let c0 = n.buf[0] as i64; let c1 = n.buf[1] as i64
+        if c0 == 99 && c1 == 111 { return TK_KW_CONTINUE() }
         return -1
     }
     -1
 }
 
-// Token stream (flat array, up to 16384 tokens)
 struct B0TokenStream {
     tokens: [B0Token; 16384],
     count: i64,
@@ -331,22 +297,6 @@ struct B0TokenStream {
 
 fn b0_ts_new() -> B0TokenStream {
     B0TokenStream { tokens: [b0_tok_new(0); 16384], count: 0, pos: 0 }
-}
-
-fn b0_ts_peek(ts: B0TokenStream) -> B0Token {
-    if ts.pos >= ts.count { return b0_tok_new(TK_EOF()) }
-    ts.tokens[ts.pos as usize]
-}
-
-fn b0_ts_peek_kind(ts: B0TokenStream) -> i64 {
-    if ts.pos >= ts.count { return TK_EOF() }
-    ts.tokens[ts.pos as usize].kind
-}
-
-fn b0_ts_advance(ts: B0TokenStream) -> B0TokenStream {
-    var t = ts
-    if t.pos < t.count { t.pos = t.pos + 1 }
-    t
 }
 
 fn b0_ts_push(ts: B0TokenStream, tok: B0Token) -> B0TokenStream {
@@ -358,7 +308,6 @@ fn b0_ts_push(ts: B0TokenStream, tok: B0Token) -> B0TokenStream {
     t
 }
 
-// Lex integer literal: returns (new_src, int_val)
 fn b0_lex_int(src: B0Src) -> (B0Src, i64) {
     var s = src
     var val: i64 = 0
@@ -366,15 +315,13 @@ fn b0_lex_int(src: B0Src) -> (B0Src, i64) {
         val = val * 10 + (b0_src_peek(s) - 48)
         s = b0_src_advance(s)
     }
-    // Skip float suffix if present
-    if b0_src_peek(s) == 46 {  // '.'
+    if b0_src_peek(s) == 46 {
         s = b0_src_advance(s)
         while b0_is_digit(b0_src_peek(s)) { s = b0_src_advance(s) }
     }
     (s, val)
 }
 
-// Lex identifier/keyword
 fn b0_lex_ident(src: B0Src) -> (B0Src, B0Name) {
     var s = src
     var n = b0_name_empty()
@@ -386,72 +333,61 @@ fn b0_lex_ident(src: B0Src) -> (B0Src, B0Name) {
     (s, n)
 }
 
-// Lex string literal (returns new_src, discards content for bootstrap)
 fn b0_lex_string(src: B0Src) -> (B0Src, B0Name) {
-    var s = b0_src_advance(src)  // skip opening "
+    var s = b0_src_advance(src)
     var n = b0_name_empty()
     while b0_src_peek(s) != 34 && b0_src_peek(s) != 0 {
-        if b0_src_peek(s) == 92 {  // backslash
+        if b0_src_peek(s) == 92 {
+            s = b0_src_advance(s)
+            let ec = b0_src_peek(s)
+            var byte: i64 = ec
+            if ec == 110 { byte = 10 }
+            else if ec == 116 { byte = 9 }
+            else if ec == 114 { byte = 13 }
+            else if ec == 48 { byte = 0 }
+            if n.len < 127 { n.buf[n.len as usize] = byte as i8; n.len = n.len + 1 }
+            s = b0_src_advance(s)
+        } else {
+            if n.len < 127 { n.buf[n.len as usize] = b0_src_peek(s) as i8; n.len = n.len + 1 }
             s = b0_src_advance(s)
         }
-        if n.len < 127 {
-            n.buf[n.len as usize] = b0_src_peek(s) as i8
-            n.len = n.len + 1
-        }
-        s = b0_src_advance(s)
     }
-    if b0_src_peek(s) == 34 { s = b0_src_advance(s) }  // skip closing "
+    if b0_src_peek(s) == 34 { s = b0_src_advance(s) }
     (s, n)
 }
 
-// Skip line comment
 fn b0_skip_comment(src: B0Src) -> B0Src {
     var s = src
-    while b0_src_peek(s) != 10 && b0_src_peek(s) != 0 {
-        s = b0_src_advance(s)
-    }
+    while b0_src_peek(s) != 10 && b0_src_peek(s) != 0 { s = b0_src_advance(s) }
     s
 }
 
-// Main tokenize function: src bytes → token stream
 fn b0_tokenize(src: B0Src) -> B0TokenStream {
     var s = src
     var ts = b0_ts_new()
     while s.pos < s.len {
         let c = b0_src_peek(s)
-        // Whitespace
         if b0_is_ws(c) { s = b0_src_advance(s) }
-        // Line comment
-        else if c == 47 && b0_src_peek2(s) == 47 {
-            s = b0_skip_comment(s)
-        }
-        // Identifier / keyword
+        else if c == 47 && b0_src_peek2(s) == 47 { s = b0_skip_comment(s) }
         else if b0_is_alpha(c) {
-            let pair = b0_lex_ident(s)
-            s = pair.0
-            let ident_name = pair.1
-            let kw = b0_kw_check(ident_name)
+            let pair = b0_lex_ident(s); s = pair.0
+            let kw = b0_kw_check(pair.1)
             var tok = b0_tok_new(if kw >= 0 { kw } else { TK_IDENT() })
-            tok.name = ident_name
+            tok.name = pair.1
             ts = b0_ts_push(ts, tok)
         }
-        // Integer / float literal
         else if b0_is_digit(c) {
-            let pair2 = b0_lex_int(s)
-            s = pair2.0
+            let pair2 = b0_lex_int(s); s = pair2.0
             var tok2 = b0_tok_new(TK_INT())
             tok2.int_val = pair2.1
             ts = b0_ts_push(ts, tok2)
         }
-        // String literal
         else if c == 34 {
-            let pair3 = b0_lex_string(s)
-            s = pair3.0
+            let pair3 = b0_lex_string(s); s = pair3.0
             var tok3 = b0_tok_new(TK_STR())
             tok3.name = pair3.1
             ts = b0_ts_push(ts, tok3)
         }
-        // Punctuation
         else if c == 40 { ts = b0_ts_push(ts, b0_tok_new(TK_LPAREN())); s = b0_src_advance(s) }
         else if c == 41 { ts = b0_ts_push(ts, b0_tok_new(TK_RPAREN())); s = b0_src_advance(s) }
         else if c == 123 { ts = b0_ts_push(ts, b0_tok_new(TK_LBRACE())); s = b0_src_advance(s) }
@@ -465,37 +401,22 @@ fn b0_tokenize(src: B0Src) -> B0TokenStream {
             if b0_src_peek2(s) == 46 {
                 ts = b0_ts_push(ts, b0_tok_new(TK_DOTDOT()))
                 s = b0_src_advance(b0_src_advance(s))
-            } else {
-                ts = b0_ts_push(ts, b0_tok_new(TK_DOT()))
-                s = b0_src_advance(s)
-            }
+            } else { ts = b0_ts_push(ts, b0_tok_new(TK_DOT())); s = b0_src_advance(s) }
         }
         else if c == 58 {
             s = b0_src_advance(s)
-            if b0_src_peek(s) == 58 {
-                ts = b0_ts_push(ts, b0_tok_new(TK_COLON_COLON()))
-                s = b0_src_advance(s)
-            } else {
-                ts = b0_ts_push(ts, b0_tok_new(TK_COLON()))
-            }
+            if b0_src_peek(s) == 58 { ts = b0_ts_push(ts, b0_tok_new(TK_COLON_COLON())); s = b0_src_advance(s) }
+            else { ts = b0_ts_push(ts, b0_tok_new(TK_COLON())) }
         }
         else if c == 61 {
             s = b0_src_advance(s)
-            if b0_src_peek(s) == 61 {
-                ts = b0_ts_push(ts, b0_tok_new(TK_EQEQ()))
-                s = b0_src_advance(s)
-            } else {
-                ts = b0_ts_push(ts, b0_tok_new(TK_EQ()))
-            }
+            if b0_src_peek(s) == 61 { ts = b0_ts_push(ts, b0_tok_new(TK_EQEQ())); s = b0_src_advance(s) }
+            else { ts = b0_ts_push(ts, b0_tok_new(TK_EQ())) }
         }
         else if c == 33 {
             s = b0_src_advance(s)
-            if b0_src_peek(s) == 61 {
-                ts = b0_ts_push(ts, b0_tok_new(TK_BANGEQ()))
-                s = b0_src_advance(s)
-            } else {
-                ts = b0_ts_push(ts, b0_tok_new(TK_BANG()))
-            }
+            if b0_src_peek(s) == 61 { ts = b0_ts_push(ts, b0_tok_new(TK_BANGEQ())); s = b0_src_advance(s) }
+            else { ts = b0_ts_push(ts, b0_tok_new(TK_BANG())) }
         }
         else if c == 43 { ts = b0_ts_push(ts, b0_tok_new(TK_PLUS())); s = b0_src_advance(s) }
         else if c == 42 { ts = b0_ts_push(ts, b0_tok_new(TK_STAR())); s = b0_src_advance(s) }
@@ -503,74 +424,874 @@ fn b0_tokenize(src: B0Src) -> B0TokenStream {
         else if c == 94 { ts = b0_ts_push(ts, b0_tok_new(TK_CARET())); s = b0_src_advance(s) }
         else if c == 38 {
             s = b0_src_advance(s)
-            if b0_src_peek(s) == 38 {
-                ts = b0_ts_push(ts, b0_tok_new(TK_AMPAMP()))
-                s = b0_src_advance(s)
-            } else if b0_src_peek(s) == 33 {
-                // &! exclusive ref: treat as two tokens & !
-                ts = b0_ts_push(ts, b0_tok_new(TK_AMP()))
-            } else {
-                ts = b0_ts_push(ts, b0_tok_new(TK_AMP()))
-            }
+            if b0_src_peek(s) == 38 { ts = b0_ts_push(ts, b0_tok_new(TK_AMPAMP())); s = b0_src_advance(s) }
+            else { ts = b0_ts_push(ts, b0_tok_new(TK_AMP())) }
         }
         else if c == 124 {
             s = b0_src_advance(s)
-            if b0_src_peek(s) == 124 {
-                ts = b0_ts_push(ts, b0_tok_new(TK_PIPEPIPE()))
-                s = b0_src_advance(s)
-            } else {
-                ts = b0_ts_push(ts, b0_tok_new(TK_PIPE()))
-            }
+            if b0_src_peek(s) == 124 { ts = b0_ts_push(ts, b0_tok_new(TK_PIPEPIPE())); s = b0_src_advance(s) }
+            else { ts = b0_ts_push(ts, b0_tok_new(TK_PIPE())) }
         }
         else if c == 60 {
             s = b0_src_advance(s)
-            if b0_src_peek(s) == 60 {
-                ts = b0_ts_push(ts, b0_tok_new(TK_LSHIFT()))
-                s = b0_src_advance(s)
-            } else if b0_src_peek(s) == 61 {
-                ts = b0_ts_push(ts, b0_tok_new(TK_LTEQ()))
-                s = b0_src_advance(s)
-            } else {
-                ts = b0_ts_push(ts, b0_tok_new(TK_LT()))
-            }
+            if b0_src_peek(s) == 60 { ts = b0_ts_push(ts, b0_tok_new(TK_LSHIFT())); s = b0_src_advance(s) }
+            else if b0_src_peek(s) == 61 { ts = b0_ts_push(ts, b0_tok_new(TK_LTEQ())); s = b0_src_advance(s) }
+            else { ts = b0_ts_push(ts, b0_tok_new(TK_LT())) }
         }
         else if c == 62 {
             s = b0_src_advance(s)
-            if b0_src_peek(s) == 62 {
-                ts = b0_ts_push(ts, b0_tok_new(TK_RSHIFT()))
-                s = b0_src_advance(s)
-            } else if b0_src_peek(s) == 61 {
-                ts = b0_ts_push(ts, b0_tok_new(TK_GTEQ()))
-                s = b0_src_advance(s)
-            } else {
-                ts = b0_ts_push(ts, b0_tok_new(TK_GT()))
-            }
+            if b0_src_peek(s) == 62 { ts = b0_ts_push(ts, b0_tok_new(TK_RSHIFT())); s = b0_src_advance(s) }
+            else if b0_src_peek(s) == 61 { ts = b0_ts_push(ts, b0_tok_new(TK_GTEQ())); s = b0_src_advance(s) }
+            else { ts = b0_ts_push(ts, b0_tok_new(TK_GT())) }
         }
         else if c == 45 {
             s = b0_src_advance(s)
-            if b0_src_peek(s) == 62 {
-                ts = b0_ts_push(ts, b0_tok_new(TK_ARROW()))
-                s = b0_src_advance(s)
-            } else {
-                ts = b0_ts_push(ts, b0_tok_new(TK_MINUS()))
-            }
+            if b0_src_peek(s) == 62 { ts = b0_ts_push(ts, b0_tok_new(TK_ARROW())); s = b0_src_advance(s) }
+            else { ts = b0_ts_push(ts, b0_tok_new(TK_MINUS())) }
         }
-        else if c == 47 {
-            ts = b0_ts_push(ts, b0_tok_new(TK_SLASH()))
-            s = b0_src_advance(s)
-        }
-        else {
-            // Skip unknown chars
-            s = b0_src_advance(s)
-        }
+        else if c == 47 { ts = b0_ts_push(ts, b0_tok_new(TK_SLASH())); s = b0_src_advance(s) }
+        else { s = b0_src_advance(s) }
     }
     ts = b0_ts_push(ts, b0_tok_new(TK_EOF()))
     ts
 }
 
 // ============================================================
-// SECTION 4: MAIN (SCAFFOLD — lexer smoke test only)
+// SECTION 4: CODEBUFFER + EMIT HELPERS
 // ============================================================
+
+struct CodeBuffer {
+    bytes: [i8; 65536],
+    len: i64,
+}
+
+fn b0_code_new() -> CodeBuffer {
+    CodeBuffer { bytes: [0; 65536], len: 0 }
+}
+
+fn b0_low8(x: i64) -> i64 with Mut, Panic, Div {
+    var n = x - (x / 256) * 256
+    if n < 0 { n = n + 256 }
+    n
+}
+
+fn b0_emit(c: CodeBuffer, b: i64) -> CodeBuffer with Mut, Panic, Div {
+    var r = c
+    if r.len < 62000 {
+        r.bytes[r.len as usize] = b0_low8(b) as i8
+        r.len = r.len + 1
+    }
+    r
+}
+
+// High-byte storage helpers (4-byte LE at fixed offset)
+fn b0_hbg(c: CodeBuffer, off: i64) -> i64 {
+    let b0v = c.bytes[off as usize] as i64 & 0xFF
+    let b1 = c.bytes[(off+1) as usize] as i64 & 0xFF
+    let b2 = c.bytes[(off+2) as usize] as i64 & 0xFF
+    let b3 = c.bytes[(off+3) as usize] as i64 & 0xFF
+    b0v | (b1 << 8) | (b2 << 16) | (b3 << 24)
+}
+
+fn b0_hbs(c: CodeBuffer, off: i64, v: i64) -> CodeBuffer {
+    var r = c
+    r.bytes[off as usize] = (v & 0xFF) as i8
+    r.bytes[(off+1) as usize] = ((v >> 8) & 0xFF) as i8
+    r.bytes[(off+2) as usize] = ((v >> 16) & 0xFF) as i8
+    r.bytes[(off+3) as usize] = ((v >> 24) & 0xFF) as i8
+    r
+}
+
+// High-byte layout:
+//   62000 + i*136: local i (128-byte name buf + 4-byte len + 4-byte slot)
+//   64192: local_count (4b)
+//   64196: next_vreg (4b)
+//   64200: parse_pos (4b)
+//   64400+level*64: loop context (top:4, bcount:4, bpatches:56)
+//   64529: loop level (1 byte, 0xFF = none)
+
+fn b0_local_base(i: i64) -> i64 { 62000 + i * 136 }
+
+fn b0_local_get_name(c: CodeBuffer, i: i64) -> B0Name {
+    var n = b0_name_empty()
+    let base = b0_local_base(i)
+    var k: i64 = 0
+    while k < 128 { n.buf[k as usize] = c.bytes[(base + k) as usize]; k = k + 1 }
+    n.len = b0_hbg(c, base + 128)
+    n
+}
+
+fn b0_local_set_name(c: CodeBuffer, i: i64, n: B0Name) -> CodeBuffer {
+    var r = c
+    let base = b0_local_base(i)
+    var k: i64 = 0
+    while k < 128 { r.bytes[(base + k) as usize] = n.buf[k as usize]; k = k + 1 }
+    r = b0_hbs(r, base + 128, n.len)
+    r
+}
+
+fn b0_local_get_slot(c: CodeBuffer, i: i64) -> i64 { b0_hbg(c, b0_local_base(i) + 132) }
+fn b0_local_set_slot(c: CodeBuffer, i: i64, v: i64) -> CodeBuffer { b0_hbs(c, b0_local_base(i) + 132, v) }
+
+fn b0_get_local_count(c: CodeBuffer) -> i64 { b0_hbg(c, 64192) }
+fn b0_set_local_count(c: CodeBuffer, n: i64) -> CodeBuffer { b0_hbs(c, 64192, n) }
+fn b0_get_next_vreg(c: CodeBuffer) -> i64 { b0_hbg(c, 64196) }
+fn b0_set_next_vreg(c: CodeBuffer, n: i64) -> CodeBuffer { b0_hbs(c, 64196, n) }
+fn b0_get_pos(c: CodeBuffer) -> i64 { b0_hbg(c, 64200) }
+fn b0_set_pos(c: CodeBuffer, p: i64) -> CodeBuffer { b0_hbs(c, 64200, p) }
+
+fn b0_lookup_local(c: CodeBuffer, nm: B0Name) -> i64 {
+    let lc = b0_get_local_count(c)
+    var i = lc - 1
+    while i >= 0 {
+        if b0_name_eq(b0_local_get_name(c, i), nm) { return b0_local_get_slot(c, i) }
+        i = i - 1
+    }
+    -1
+}
+
+fn b0_lctx_base(level: i64) -> i64 { 64400 + level * 64 }
+fn b0_lctx_level(c: CodeBuffer) -> i64 {
+    let v = c.bytes[64529 as usize] as i64 & 0xFF
+    if v == 255 { return -1 }
+    v
+}
+fn b0_lctx_set_level(c: CodeBuffer, v: i64) -> CodeBuffer {
+    var r = c
+    if v < 0 { r.bytes[64529 as usize] = (0xFF as i8) } else { r.bytes[64529 as usize] = v as i8 }
+    r
+}
+fn b0_lctx_get_top(c: CodeBuffer, level: i64) -> i64 { b0_hbg(c, b0_lctx_base(level)) }
+fn b0_lctx_set_top(c: CodeBuffer, level: i64, v: i64) -> CodeBuffer { b0_hbs(c, b0_lctx_base(level), v) }
+fn b0_lctx_get_bcount(c: CodeBuffer, level: i64) -> i64 { b0_hbg(c, b0_lctx_base(level) + 8) }
+fn b0_lctx_set_bcount(c: CodeBuffer, level: i64, v: i64) -> CodeBuffer { b0_hbs(c, b0_lctx_base(level) + 8, v) }
+fn b0_lctx_get_bpatch(c: CodeBuffer, level: i64, i: i64) -> i64 { b0_hbg(c, b0_lctx_base(level) + 16 + i * 8) }
+fn b0_lctx_set_bpatch(c: CodeBuffer, level: i64, i: i64, v: i64) -> CodeBuffer { b0_hbs(c, b0_lctx_base(level) + 16 + i * 8, v) }
+
+fn b0_store_rax(c: CodeBuffer, vreg: i64) -> CodeBuffer with Mut, Panic, Div {
+    let disp = 0 - ((vreg + 1) * 8)
+    var r = b0_emit(c, 0x48); r = b0_emit(r, 0x89); r = b0_emit(r, 0x85)
+    r = b0_emit(r, disp & 0xFF); r = b0_emit(r, (disp >> 8) & 0xFF)
+    r = b0_emit(r, (disp >> 16) & 0xFF); r = b0_emit(r, (disp >> 24) & 0xFF)
+    r
+}
+fn b0_load_rax(c: CodeBuffer, vreg: i64) -> CodeBuffer with Mut, Panic, Div {
+    let disp = 0 - ((vreg + 1) * 8)
+    var r = b0_emit(c, 0x48); r = b0_emit(r, 0x8b); r = b0_emit(r, 0x85)
+    r = b0_emit(r, disp & 0xFF); r = b0_emit(r, (disp >> 8) & 0xFF)
+    r = b0_emit(r, (disp >> 16) & 0xFF); r = b0_emit(r, (disp >> 24) & 0xFF)
+    r
+}
+fn b0_load_rcx(c: CodeBuffer, vreg: i64) -> CodeBuffer with Mut, Panic, Div {
+    let disp = 0 - ((vreg + 1) * 8)
+    var r = b0_emit(c, 0x48); r = b0_emit(r, 0x8b); r = b0_emit(r, 0x8d)
+    r = b0_emit(r, disp & 0xFF); r = b0_emit(r, (disp >> 8) & 0xFF)
+    r = b0_emit(r, (disp >> 16) & 0xFF); r = b0_emit(r, (disp >> 24) & 0xFF)
+    r
+}
+fn b0_load_rdi(c: CodeBuffer, vreg: i64) -> CodeBuffer with Mut, Panic, Div {
+    let disp = 0 - ((vreg + 1) * 8)
+    var r = b0_emit(c, 0x48); r = b0_emit(r, 0x8b); r = b0_emit(r, 0xbd)
+    r = b0_emit(r, disp & 0xFF); r = b0_emit(r, (disp >> 8) & 0xFF)
+    r = b0_emit(r, (disp >> 16) & 0xFF); r = b0_emit(r, (disp >> 24) & 0xFF)
+    r
+}
+fn b0_load_rsi(c: CodeBuffer, vreg: i64) -> CodeBuffer with Mut, Panic, Div {
+    let disp = 0 - ((vreg + 1) * 8)
+    var r = b0_emit(c, 0x48); r = b0_emit(r, 0x8b); r = b0_emit(r, 0xb5)
+    r = b0_emit(r, disp & 0xFF); r = b0_emit(r, (disp >> 8) & 0xFF)
+    r = b0_emit(r, (disp >> 16) & 0xFF); r = b0_emit(r, (disp >> 24) & 0xFF)
+    r
+}
+fn b0_load_rdx(c: CodeBuffer, vreg: i64) -> CodeBuffer with Mut, Panic, Div {
+    let disp = 0 - ((vreg + 1) * 8)
+    var r = b0_emit(c, 0x48); r = b0_emit(r, 0x8b); r = b0_emit(r, 0x95)
+    r = b0_emit(r, disp & 0xFF); r = b0_emit(r, (disp >> 8) & 0xFF)
+    r = b0_emit(r, (disp >> 16) & 0xFF); r = b0_emit(r, (disp >> 24) & 0xFF)
+    r
+}
+
+fn b0_emit_imm64(c: CodeBuffer, v: i64) -> CodeBuffer with Mut, Panic, Div {
+    var r = b0_emit(c, 0x48); r = b0_emit(r, 0xb8)
+    r = b0_emit(r, v & 0xFF); r = b0_emit(r, (v >> 8) & 0xFF)
+    r = b0_emit(r, (v >> 16) & 0xFF); r = b0_emit(r, (v >> 24) & 0xFF)
+    r = b0_emit(r, (v >> 32) & 0xFF); r = b0_emit(r, (v >> 40) & 0xFF)
+    r = b0_emit(r, (v >> 48) & 0xFF); r = b0_emit(r, (v >> 56) & 0xFF)
+    r
+}
+
+fn b0_emit_print_str(c: CodeBuffer, name: B0Name) -> CodeBuffer with Mut, Panic, Div {
+    var r = c
+    let jmp_site = r.len
+    r = b0_emit(r, 0xeb); r = b0_emit(r, 0x00)
+    let str_start = r.len
+    var si: i64 = 0
+    while si < name.len { r = b0_emit(r, name.buf[si as usize] as i64); si = si + 1 }
+    r.bytes[(jmp_site + 1) as usize] = ((r.len - (jmp_site + 2)) & 0xFF) as i8
+    let lea_pos = r.len
+    r = b0_emit(r, 0x48); r = b0_emit(r, 0x8d); r = b0_emit(r, 0x35)
+    let lea_disp = str_start - (lea_pos + 7)
+    r = b0_emit(r, lea_disp & 0xFF); r = b0_emit(r, (lea_disp >> 8) & 0xFF)
+    r = b0_emit(r, (lea_disp >> 16) & 0xFF); r = b0_emit(r, (lea_disp >> 24) & 0xFF)
+    r = b0_emit(r, 0xba)
+    r = b0_emit(r, name.len & 0xFF); r = b0_emit(r, (name.len >> 8) & 0xFF)
+    r = b0_emit(r, (name.len >> 16) & 0xFF); r = b0_emit(r, (name.len >> 24) & 0xFF)
+    r = b0_emit(r, 0xbf); r = b0_emit(r, 0x01); r = b0_emit(r, 0x00); r = b0_emit(r, 0x00); r = b0_emit(r, 0x00)
+    r = b0_emit(r, 0xb8); r = b0_emit(r, 0x01); r = b0_emit(r, 0x00); r = b0_emit(r, 0x00); r = b0_emit(r, 0x00)
+    r = b0_emit(r, 0x0f); r = b0_emit(r, 0x05)
+    r
+}
+
+fn b0_emit_print_int_fn(c: CodeBuffer) -> CodeBuffer with Mut, Panic, Div {
+    var r = c
+    r = b0_emit(r, 0x55)
+    r = b0_emit(r, 0x48); r = b0_emit(r, 0x89); r = b0_emit(r, 0xe5)
+    r = b0_emit(r, 0x48); r = b0_emit(r, 0x83); r = b0_emit(r, 0xec); r = b0_emit(r, 0x30)
+    r = b0_emit(r, 0x48); r = b0_emit(r, 0x89); r = b0_emit(r, 0xf8)
+    r = b0_emit(r, 0x4c); r = b0_emit(r, 0x8d); r = b0_emit(r, 0x45); r = b0_emit(r, 0xFF)
+    r = b0_emit(r, 0x45); r = b0_emit(r, 0x31); r = b0_emit(r, 0xc9)
+    r = b0_emit(r, 0x48); r = b0_emit(r, 0x85); r = b0_emit(r, 0xc0)
+    r = b0_emit(r, 0x79); r = b0_emit(r, 0x06)
+    r = b0_emit(r, 0x48); r = b0_emit(r, 0xf7); r = b0_emit(r, 0xd8)
+    r = b0_emit(r, 0x41); r = b0_emit(r, 0xb1); r = b0_emit(r, 0x01)
+    r = b0_emit(r, 0x48); r = b0_emit(r, 0x85); r = b0_emit(r, 0xc0)
+    r = b0_emit(r, 0x75); r = b0_emit(r, 0x09)
+    r = b0_emit(r, 0x41); r = b0_emit(r, 0xc6); r = b0_emit(r, 0x00); r = b0_emit(r, 0x30)
+    r = b0_emit(r, 0x49); r = b0_emit(r, 0xff); r = b0_emit(r, 0xc8)
+    let jmp_zero = r.len
+    r = b0_emit(r, 0xeb); r = b0_emit(r, 0x00)
+    let itoa_loop = r.len
+    r = b0_emit(r, 0x31); r = b0_emit(r, 0xd2)
+    r = b0_emit(r, 0x48); r = b0_emit(r, 0xc7); r = b0_emit(r, 0xc1)
+    r = b0_emit(r, 0x0a); r = b0_emit(r, 0x00); r = b0_emit(r, 0x00); r = b0_emit(r, 0x00)
+    r = b0_emit(r, 0x48); r = b0_emit(r, 0xf7); r = b0_emit(r, 0xf1)
+    r = b0_emit(r, 0x80); r = b0_emit(r, 0xc2); r = b0_emit(r, 0x30)
+    r = b0_emit(r, 0x41); r = b0_emit(r, 0x88); r = b0_emit(r, 0x10)
+    r = b0_emit(r, 0x49); r = b0_emit(r, 0xff); r = b0_emit(r, 0xc8)
+    r = b0_emit(r, 0x48); r = b0_emit(r, 0x85); r = b0_emit(r, 0xc0)
+    let jnz_back = r.len
+    r = b0_emit(r, 0x75); r = b0_emit(r, (itoa_loop - (jnz_back + 2)) & 0xFF)
+    r = b0_emit(r, 0x45); r = b0_emit(r, 0x84); r = b0_emit(r, 0xc9)
+    r = b0_emit(r, 0x74); r = b0_emit(r, 0x07)
+    r = b0_emit(r, 0x41); r = b0_emit(r, 0xc6); r = b0_emit(r, 0x00); r = b0_emit(r, 0x2d)
+    r = b0_emit(r, 0x49); r = b0_emit(r, 0xff); r = b0_emit(r, 0xc8)
+    let do_write = r.len
+    r.bytes[(jmp_zero + 1) as usize] = ((do_write - (jmp_zero + 2)) & 0xFF) as i8
+    r = b0_emit(r, 0x49); r = b0_emit(r, 0xff); r = b0_emit(r, 0xc0)
+    r = b0_emit(r, 0x4c); r = b0_emit(r, 0x89); r = b0_emit(r, 0xc6)
+    r = b0_emit(r, 0x48); r = b0_emit(r, 0x89); r = b0_emit(r, 0xea)
+    r = b0_emit(r, 0x4c); r = b0_emit(r, 0x29); r = b0_emit(r, 0xc2)
+    r = b0_emit(r, 0xbf); r = b0_emit(r, 0x01); r = b0_emit(r, 0x00); r = b0_emit(r, 0x00); r = b0_emit(r, 0x00)
+    r = b0_emit(r, 0xb8); r = b0_emit(r, 0x01); r = b0_emit(r, 0x00); r = b0_emit(r, 0x00); r = b0_emit(r, 0x00)
+    r = b0_emit(r, 0x0f); r = b0_emit(r, 0x05)
+    r = b0_emit(r, 0xc9); r = b0_emit(r, 0xc3)
+    r
+}
+
+// ============================================================
+// SECTION 5: COMPILE CONTEXT
+// ============================================================
+
+struct B0Ctx {
+    struct_count: i64,
+    struct_names: [B0Name; 16],
+    struct_flat_size: [i64; 16],
+    struct_field_count: [i64; 16],
+    struct_field_base: [i64; 16],
+    sf_names: [B0Name; 128],
+    sf_flat_offset: [i64; 128],
+    fn_names: [B0Name; 64],
+    fn_count: i64,
+    fn_body_pos: [i64; 64],
+    fn_param_pos: [i64; 64],
+    fn_param_count: [i64; 64],
+}
+
+fn b0_ctx_new() -> B0Ctx {
+    B0Ctx {
+        struct_count: 0,
+        struct_names: [b0_name_empty(); 16],
+        struct_flat_size: [0; 16],
+        struct_field_count: [0; 16],
+        struct_field_base: [0; 16],
+        sf_names: [b0_name_empty(); 128],
+        sf_flat_offset: [0; 128],
+        fn_names: [b0_name_empty(); 64],
+        fn_count: 0,
+        fn_body_pos: [0; 64],
+        fn_param_pos: [0; 64],
+        fn_param_count: [0; 64],
+    }
+}
+
+fn b0_lookup_fn(ctx: &B0Ctx, nm: B0Name) -> i64 {
+    var i: i64 = 0
+    while i < (*ctx).fn_count {
+        if b0_name_eq((*ctx).fn_names[i as usize], nm) { return i }
+        i = i + 1
+    }
+    -1
+}
+
+// ============================================================
+// SECTION 6: FIRST-PASS SCANNER
+// ============================================================
+
+fn b0_skip_block(ts: &B0TokenStream, pos: i64) -> i64 {
+    var p = pos + 1; var depth: i64 = 1
+    while p < (*ts).count && depth > 0 {
+        let k = (*ts).tokens[p as usize].kind
+        if k == TK_LBRACE() { depth = depth + 1 }
+        else if k == TK_RBRACE() { depth = depth - 1 }
+        p = p + 1
+    }
+    p
+}
+
+fn b0_scan_all(ts: &B0TokenStream) -> B0Ctx {
+    var ctx = b0_ctx_new()
+    var p: i64 = 0
+    let ntoks = (*ts).count
+    while p < ntoks {
+        let k = (*ts).tokens[p as usize].kind
+        if k == TK_KW_STRUCT() {
+            p = p + 1
+            if p < ntoks && (*ts).tokens[p as usize].kind == TK_IDENT() {
+                let sname = (*ts).tokens[p as usize].name
+                p = p + 1
+                if p < ntoks && (*ts).tokens[p as usize].kind == TK_LBRACE() {
+                    p = p + 1
+                    let si = ctx.struct_count
+                    ctx.struct_names[si as usize] = sname
+                    let fb = if si == 0 { 0 } else { ctx.struct_field_base[(si-1) as usize] + ctx.struct_field_count[(si-1) as usize] }
+                    ctx.struct_field_base[si as usize] = fb
+                    var fc: i64 = 0; var flat_off: i64 = 0
+                    while p < ntoks && (*ts).tokens[p as usize].kind != TK_RBRACE() {
+                        if (*ts).tokens[p as usize].kind == TK_IDENT() &&
+                           (p+1) < ntoks && (*ts).tokens[(p+1) as usize].kind == TK_COLON() {
+                            ctx.sf_names[(fb + fc) as usize] = (*ts).tokens[p as usize].name
+                            ctx.sf_flat_offset[(fb + fc) as usize] = flat_off
+                            flat_off = flat_off + 1; fc = fc + 1
+                        }
+                        p = p + 1
+                    }
+                    ctx.struct_field_count[si as usize] = fc
+                    ctx.struct_flat_size[si as usize] = flat_off
+                    ctx.struct_count = si + 1
+                    p = p + 1
+                }
+            }
+        }
+        else if k == TK_KW_FN() {
+            p = p + 1
+            if p < ntoks && (*ts).tokens[p as usize].kind == TK_IDENT() {
+                let fname = (*ts).tokens[p as usize].name
+                p = p + 1
+                var pcount: i64 = 0; var paren_pos: i64 = p
+                if p < ntoks && (*ts).tokens[p as usize].kind == TK_LPAREN() {
+                    p = p + 1
+                    while p < ntoks && (*ts).tokens[p as usize].kind != TK_RPAREN() {
+                        if (*ts).tokens[p as usize].kind == TK_IDENT() &&
+                           (p+1) < ntoks && (*ts).tokens[(p+1) as usize].kind == TK_COLON() {
+                            pcount = pcount + 1
+                        }
+                        p = p + 1
+                    }
+                    p = p + 1
+                }
+                while p < ntoks && (*ts).tokens[p as usize].kind != TK_LBRACE() &&
+                                   (*ts).tokens[p as usize].kind != TK_KW_FN() &&
+                                   (*ts).tokens[p as usize].kind != TK_KW_STRUCT() {
+                    p = p + 1
+                }
+                if p < ntoks && (*ts).tokens[p as usize].kind == TK_LBRACE() {
+                    let fi = ctx.fn_count
+                    ctx.fn_names[fi as usize] = fname
+                    ctx.fn_body_pos[fi as usize] = p
+                    ctx.fn_param_pos[fi as usize] = paren_pos
+                    ctx.fn_param_count[fi as usize] = pcount
+                    ctx.fn_count = fi + 1
+                    p = b0_skip_block(ts, p)
+                }
+            }
+        }
+        else { p = p + 1 }
+    }
+    ctx
+}
+
+// ============================================================
+// SECTION 7: EXPRESSION + STATEMENT COMPILER
+// ============================================================
+
+fn b0_compile_expr(ts: &B0TokenStream, c: CodeBuffer, ctx: &B0Ctx) -> CodeBuffer with Mut, Panic, Div {
+    let pos = b0_get_pos(c)
+    if pos >= (*ts).count { return b0_set_pos(c, pos) }
+    let k = (*ts).tokens[pos as usize].kind
+
+    if k == TK_INT() {
+        let ival = (*ts).tokens[pos as usize].int_val
+        return b0_emit_imm64(b0_set_pos(c, pos + 1), ival)
+    }
+    if k == TK_KW_TRUE() { return b0_emit_imm64(b0_set_pos(c, pos + 1), 1) }
+    if k == TK_KW_FALSE() { return b0_emit_imm64(b0_set_pos(c, pos + 1), 0) }
+
+    if k == TK_MINUS() {
+        var r = b0_compile_expr(ts, b0_set_pos(c, pos + 1), ctx)
+        r = b0_emit(r, 0x48); r = b0_emit(r, 0xf7); r = b0_emit(r, 0xd8)
+        return r
+    }
+    if k == TK_BANG() {
+        var r = b0_compile_expr(ts, b0_set_pos(c, pos + 1), ctx)
+        r = b0_emit(r, 0x48); r = b0_emit(r, 0x85); r = b0_emit(r, 0xc0)
+        r = b0_emit(r, 0x0f); r = b0_emit(r, 0x94); r = b0_emit(r, 0xc0)
+        r = b0_emit(r, 0x48); r = b0_emit(r, 0x0f); r = b0_emit(r, 0xb6); r = b0_emit(r, 0xc0)
+        return r
+    }
+    if k == TK_TILDE() {
+        var r = b0_compile_expr(ts, b0_set_pos(c, pos + 1), ctx)
+        r = b0_emit(r, 0x48); r = b0_emit(r, 0xf7); r = b0_emit(r, 0xd0)
+        return r
+    }
+    if k == TK_LPAREN() {
+        var r = b0_compile_expr(ts, b0_set_pos(c, pos + 1), ctx)
+        let p2 = b0_get_pos(r)
+        if p2 < (*ts).count && (*ts).tokens[p2 as usize].kind == TK_RPAREN() {
+            r = b0_set_pos(r, p2 + 1)
+        }
+        return r
+    }
+
+    if k == TK_IDENT() {
+        let nm = (*ts).tokens[pos as usize].name
+        let p1 = pos + 1
+
+        if p1 < (*ts).count && (*ts).tokens[p1 as usize].kind == TK_LPAREN() {
+            // Function call
+            var r = b0_set_pos(c, p1 + 1)
+            let nm_print = b0_name_from_lit5(112,114,105,110,116)
+            if b0_name_eq(nm, nm_print) {
+                let ap = b0_get_pos(r)
+                if ap < (*ts).count && (*ts).tokens[ap as usize].kind == TK_STR() {
+                    let sname = (*ts).tokens[ap as usize].name
+                    r = b0_set_pos(r, ap + 1)
+                    r = b0_emit_print_str(r, sname)
+                    let rp = b0_get_pos(r)
+                    if rp < (*ts).count && (*ts).tokens[rp as usize].kind == TK_RPAREN() {
+                        r = b0_set_pos(r, rp + 1)
+                    }
+                    return b0_emit_imm64(r, 0)
+                }
+            }
+            // general call: compile args to temp vregs
+            var arg_slots: [i64; 8] = [0; 8]
+            var arg_count_v: i64 = 0
+            var rp2 = b0_get_pos(r)
+            while rp2 < (*ts).count && (*ts).tokens[rp2 as usize].kind != TK_RPAREN() {
+                if (*ts).tokens[rp2 as usize].kind == TK_COMMA() {
+                    rp2 = rp2 + 1; r = b0_set_pos(r, rp2)
+                } else {
+                    r = b0_compile_full_expr(ts, b0_set_pos(r, rp2), ctx)
+                    let nv = b0_get_next_vreg(r)
+                    r = b0_store_rax(r, nv); r = b0_set_next_vreg(r, nv + 1)
+                    arg_slots[arg_count_v as usize] = nv
+                    arg_count_v = arg_count_v + 1
+                    rp2 = b0_get_pos(r)
+                }
+            }
+            if rp2 < (*ts).count { r = b0_set_pos(r, rp2 + 1) }
+            if arg_count_v > 0 { r = b0_load_rdi(r, arg_slots[0 as usize]) }
+            if arg_count_v > 1 { r = b0_load_rsi(r, arg_slots[1 as usize]) }
+            if arg_count_v > 2 { r = b0_load_rdx(r, arg_slots[2 as usize]) }
+            let fi = b0_lookup_fn(ctx, nm)
+            // 0xFFFF = print_int builtin marker; 0xFFFE = print_str builtin marker
+            let nm_print_int = b0_name_from_lit5(112,114,105,110,116)
+            var fi_use: i64 = if fi < 0 { 0 } else { fi }
+            if fi < 0 {
+                // check if it's print_int (9 chars starting with "print")
+                if nm.len == 9 && b0_name_starts(nm, nm_print_int) { fi_use = 0xFFFF }
+            }
+            r = b0_emit(r, 0xe8)
+            r = b0_emit(r, fi_use & 0xFF); r = b0_emit(r, (fi_use >> 8) & 0xFF)
+            r = b0_emit(r, 0xCA as i64); r = b0_emit(r, 0xFE as i64)
+            return r
+        }
+
+        // Simple ident
+        let slot = b0_lookup_local(c, nm)
+        var r = b0_set_pos(c, p1)
+        if slot >= 0 { r = b0_load_rax(r, slot) }
+        else { r = b0_emit_imm64(r, 0) }
+        return r
+    }
+
+    b0_emit_imm64(b0_set_pos(c, pos + 1), 0)
+}
+
+fn b0_compile_binop(ts: &B0TokenStream, c: CodeBuffer, ctx: &B0Ctx, lhs_v: i64) -> CodeBuffer with Mut, Panic, Div {
+    let pos = b0_get_pos(c)
+    if pos >= (*ts).count { return c }
+    let k = (*ts).tokens[pos as usize].kind
+    var is_b = false
+    if k == TK_PLUS() { is_b = true } else if k == TK_MINUS() { is_b = true }
+    else if k == TK_STAR() { is_b = true } else if k == TK_SLASH() { is_b = true }
+    else if k == TK_PERCENT() { is_b = true } else if k == TK_AMP() { is_b = true }
+    else if k == TK_PIPE() { is_b = true } else if k == TK_CARET() { is_b = true }
+    else if k == TK_LSHIFT() { is_b = true } else if k == TK_RSHIFT() { is_b = true }
+    else if k == TK_EQEQ() { is_b = true } else if k == TK_BANGEQ() { is_b = true }
+    else if k == TK_LT() { is_b = true } else if k == TK_LTEQ() { is_b = true }
+    else if k == TK_GT() { is_b = true } else if k == TK_GTEQ() { is_b = true }
+    else if k == TK_AMPAMP() { is_b = true } else if k == TK_PIPEPIPE() { is_b = true }
+    if !is_b { return c }
+
+    var r = b0_compile_expr(ts, b0_set_pos(c, pos + 1), ctx)
+    let rhs_v = b0_get_next_vreg(r)
+    r = b0_store_rax(r, rhs_v); r = b0_set_next_vreg(r, rhs_v + 1)
+    r = b0_load_rax(r, lhs_v); r = b0_load_rcx(r, rhs_v)
+
+    if k == TK_PLUS() { r = b0_emit(r, 0x48); r = b0_emit(r, 0x01); r = b0_emit(r, 0xc8) }
+    else if k == TK_MINUS() { r = b0_emit(r, 0x48); r = b0_emit(r, 0x29); r = b0_emit(r, 0xc8) }
+    else if k == TK_STAR() { r = b0_emit(r, 0x48); r = b0_emit(r, 0x0f); r = b0_emit(r, 0xaf); r = b0_emit(r, 0xc1) }
+    else if k == TK_SLASH() { r = b0_emit(r, 0x48); r = b0_emit(r, 0x99); r = b0_emit(r, 0x48); r = b0_emit(r, 0xf7); r = b0_emit(r, 0xf9) }
+    else if k == TK_PERCENT() {
+        r = b0_emit(r, 0x48); r = b0_emit(r, 0x99)
+        r = b0_emit(r, 0x48); r = b0_emit(r, 0xf7); r = b0_emit(r, 0xf9)
+        r = b0_emit(r, 0x48); r = b0_emit(r, 0x89); r = b0_emit(r, 0xd0)
+    }
+    else if k == TK_AMP() { r = b0_emit(r, 0x48); r = b0_emit(r, 0x21); r = b0_emit(r, 0xc8) }
+    else if k == TK_PIPE() { r = b0_emit(r, 0x48); r = b0_emit(r, 0x09); r = b0_emit(r, 0xc8) }
+    else if k == TK_CARET() { r = b0_emit(r, 0x48); r = b0_emit(r, 0x31); r = b0_emit(r, 0xc8) }
+    else if k == TK_LSHIFT() { r = b0_emit(r, 0x48); r = b0_emit(r, 0xd3); r = b0_emit(r, 0xe0) }
+    else if k == TK_RSHIFT() { r = b0_emit(r, 0x48); r = b0_emit(r, 0xd3); r = b0_emit(r, 0xf8) }
+    else if k == TK_EQEQ() {
+        r = b0_emit(r, 0x48); r = b0_emit(r, 0x39); r = b0_emit(r, 0xc8)
+        r = b0_emit(r, 0x0f); r = b0_emit(r, 0x94); r = b0_emit(r, 0xc0)
+        r = b0_emit(r, 0x48); r = b0_emit(r, 0x0f); r = b0_emit(r, 0xb6); r = b0_emit(r, 0xc0)
+    }
+    else if k == TK_BANGEQ() {
+        r = b0_emit(r, 0x48); r = b0_emit(r, 0x39); r = b0_emit(r, 0xc8)
+        r = b0_emit(r, 0x0f); r = b0_emit(r, 0x95); r = b0_emit(r, 0xc0)
+        r = b0_emit(r, 0x48); r = b0_emit(r, 0x0f); r = b0_emit(r, 0xb6); r = b0_emit(r, 0xc0)
+    }
+    else if k == TK_LT() {
+        r = b0_emit(r, 0x48); r = b0_emit(r, 0x39); r = b0_emit(r, 0xc8)
+        r = b0_emit(r, 0x0f); r = b0_emit(r, 0x9c); r = b0_emit(r, 0xc0)
+        r = b0_emit(r, 0x48); r = b0_emit(r, 0x0f); r = b0_emit(r, 0xb6); r = b0_emit(r, 0xc0)
+    }
+    else if k == TK_LTEQ() {
+        r = b0_emit(r, 0x48); r = b0_emit(r, 0x39); r = b0_emit(r, 0xc8)
+        r = b0_emit(r, 0x0f); r = b0_emit(r, 0x9e); r = b0_emit(r, 0xc0)
+        r = b0_emit(r, 0x48); r = b0_emit(r, 0x0f); r = b0_emit(r, 0xb6); r = b0_emit(r, 0xc0)
+    }
+    else if k == TK_GT() {
+        r = b0_emit(r, 0x48); r = b0_emit(r, 0x39); r = b0_emit(r, 0xc8)
+        r = b0_emit(r, 0x0f); r = b0_emit(r, 0x9f); r = b0_emit(r, 0xc0)
+        r = b0_emit(r, 0x48); r = b0_emit(r, 0x0f); r = b0_emit(r, 0xb6); r = b0_emit(r, 0xc0)
+    }
+    else if k == TK_GTEQ() {
+        r = b0_emit(r, 0x48); r = b0_emit(r, 0x39); r = b0_emit(r, 0xc8)
+        r = b0_emit(r, 0x0f); r = b0_emit(r, 0x9d); r = b0_emit(r, 0xc0)
+        r = b0_emit(r, 0x48); r = b0_emit(r, 0x0f); r = b0_emit(r, 0xb6); r = b0_emit(r, 0xc0)
+    }
+    else if k == TK_AMPAMP() { r = b0_emit(r, 0x48); r = b0_emit(r, 0x21); r = b0_emit(r, 0xc8) }
+    else if k == TK_PIPEPIPE() { r = b0_emit(r, 0x48); r = b0_emit(r, 0x09); r = b0_emit(r, 0xc8) }
+
+    let nv2 = b0_get_next_vreg(r)
+    r = b0_store_rax(r, nv2); r = b0_set_next_vreg(r, nv2 + 1)
+    r = b0_compile_binop(ts, r, ctx, nv2)
+    r
+}
+
+fn b0_compile_full_expr(ts: &B0TokenStream, c: CodeBuffer, ctx: &B0Ctx) -> CodeBuffer with Mut, Panic, Div {
+    var r = b0_compile_expr(ts, c, ctx)
+    let nv = b0_get_next_vreg(r)
+    r = b0_store_rax(r, nv); r = b0_set_next_vreg(r, nv + 1)
+    r = b0_compile_binop(ts, r, ctx, nv)
+    r
+}
+
+fn b0_compile_block(ts: &B0TokenStream, c: CodeBuffer, ctx: &B0Ctx) -> CodeBuffer with Mut, Panic, Div {
+    let pos = b0_get_pos(c)
+    var r = c
+    if pos < (*ts).count && (*ts).tokens[pos as usize].kind == TK_LBRACE() {
+        r = b0_set_pos(r, pos + 1)
+    }
+    let saved_lc = b0_get_local_count(r)
+    var running = true
+    while running {
+        let cp = b0_get_pos(r)
+        if cp >= (*ts).count { running = false }
+        else {
+            let ck = (*ts).tokens[cp as usize].kind
+            if ck == TK_RBRACE() { r = b0_set_pos(r, cp + 1); running = false }
+            else { r = b0_compile_stmt(ts, r, ctx) }
+        }
+    }
+    r = b0_set_local_count(r, saved_lc)
+    r
+}
+
+fn b0_compile_stmt(ts: &B0TokenStream, c: CodeBuffer, ctx: &B0Ctx) -> CodeBuffer with Mut, Panic, Div {
+    let pos = b0_get_pos(c)
+    if pos >= (*ts).count { return c }
+    let k = (*ts).tokens[pos as usize].kind
+
+    if k == TK_KW_RETURN() {
+        var r = b0_set_pos(c, pos + 1)
+        let np = b0_get_pos(r)
+        if np < (*ts).count && (*ts).tokens[np as usize].kind != TK_RBRACE() {
+            r = b0_compile_full_expr(ts, r, ctx)
+        } else {
+            r = b0_emit_imm64(r, 0)
+        }
+        r = b0_emit(r, 0xc9); r = b0_emit(r, 0xc3)
+        return r
+    }
+
+    if k == TK_KW_LET() || k == TK_KW_VAR() {
+        var r = b0_set_pos(c, pos + 1)
+        let np = b0_get_pos(r)
+        if np < (*ts).count && (*ts).tokens[np as usize].kind == TK_IDENT() {
+            let vname = (*ts).tokens[np as usize].name
+            r = b0_set_pos(r, np + 1)
+            // skip type annotation
+            let np2 = b0_get_pos(r)
+            if np2 < (*ts).count && (*ts).tokens[np2 as usize].kind == TK_COLON() {
+                var tp = np2 + 1
+                while tp < (*ts).count && (*ts).tokens[tp as usize].kind != TK_EQ() &&
+                                          (*ts).tokens[tp as usize].kind != TK_LBRACE() {
+                    tp = tp + 1
+                }
+                r = b0_set_pos(r, tp)
+            }
+            let np3 = b0_get_pos(r)
+            if np3 < (*ts).count && (*ts).tokens[np3 as usize].kind == TK_EQ() {
+                r = b0_set_pos(r, np3 + 1)
+                r = b0_compile_full_expr(ts, r, ctx)
+                let nv = b0_get_next_vreg(r)
+                r = b0_store_rax(r, nv); r = b0_set_next_vreg(r, nv + 1)
+                let lc = b0_get_local_count(r)
+                r = b0_local_set_name(r, lc, vname)
+                r = b0_local_set_slot(r, lc, nv)
+                r = b0_set_local_count(r, lc + 1)
+            }
+        }
+        return r
+    }
+
+    if k == TK_IDENT() {
+        let vname = (*ts).tokens[pos as usize].name
+        let p1 = pos + 1
+        if p1 < (*ts).count && (*ts).tokens[p1 as usize].kind == TK_EQ() {
+            var r = b0_set_pos(c, p1 + 1)
+            r = b0_compile_full_expr(ts, r, ctx)
+            let slot = b0_lookup_local(r, vname)
+            if slot >= 0 { r = b0_store_rax(r, slot) }
+            return r
+        }
+        return b0_compile_full_expr(ts, c, ctx)
+    }
+
+    if k == TK_KW_IF() {
+        var r = b0_set_pos(c, pos + 1)
+        r = b0_compile_full_expr(ts, r, ctx)
+        r = b0_emit(r, 0x48); r = b0_emit(r, 0x85); r = b0_emit(r, 0xc0)
+        let jz_site = r.len
+        r = b0_emit(r, 0x0f); r = b0_emit(r, 0x84)
+        r = b0_emit(r, 0x00); r = b0_emit(r, 0x00); r = b0_emit(r, 0x00); r = b0_emit(r, 0x00)
+        r = b0_compile_block(ts, r, ctx)
+        let ap = b0_get_pos(r)
+        if ap < (*ts).count && (*ts).tokens[ap as usize].kind == TK_KW_ELSE() {
+            let ej = r.len
+            r = b0_emit(r, 0xe9)
+            r = b0_emit(r, 0x00); r = b0_emit(r, 0x00); r = b0_emit(r, 0x00); r = b0_emit(r, 0x00)
+            let el = r.len
+            let jzd = el - (jz_site + 6)
+            r.bytes[(jz_site+2) as usize] = (jzd & 0xFF) as i8
+            r.bytes[(jz_site+3) as usize] = ((jzd >> 8) & 0xFF) as i8
+            r.bytes[(jz_site+4) as usize] = ((jzd >> 16) & 0xFF) as i8
+            r.bytes[(jz_site+5) as usize] = ((jzd >> 24) & 0xFF) as i8
+            r = b0_set_pos(r, ap + 1)
+            r = b0_compile_block(ts, r, ctx)
+            let end = r.len; let ejd = end - (ej + 5)
+            r.bytes[(ej+1) as usize] = (ejd & 0xFF) as i8
+            r.bytes[(ej+2) as usize] = ((ejd >> 8) & 0xFF) as i8
+            r.bytes[(ej+3) as usize] = ((ejd >> 16) & 0xFF) as i8
+            r.bytes[(ej+4) as usize] = ((ejd >> 24) & 0xFF) as i8
+        } else {
+            let end = r.len; let jzd = end - (jz_site + 6)
+            r.bytes[(jz_site+2) as usize] = (jzd & 0xFF) as i8
+            r.bytes[(jz_site+3) as usize] = ((jzd >> 8) & 0xFF) as i8
+            r.bytes[(jz_site+4) as usize] = ((jzd >> 16) & 0xFF) as i8
+            r.bytes[(jz_site+5) as usize] = ((jzd >> 24) & 0xFF) as i8
+        }
+        return r
+    }
+
+    if k == TK_KW_WHILE() {
+        var r = b0_set_pos(c, pos + 1)
+        let loop_top = r.len
+        let level = b0_lctx_level(r) + 1
+        r = b0_lctx_set_level(r, level)
+        r = b0_lctx_set_top(r, level, loop_top)
+        r = b0_lctx_set_bcount(r, level, 0)
+        r = b0_compile_full_expr(ts, r, ctx)
+        r = b0_emit(r, 0x48); r = b0_emit(r, 0x85); r = b0_emit(r, 0xc0)
+        let jz_site = r.len
+        r = b0_emit(r, 0x0f); r = b0_emit(r, 0x84)
+        r = b0_emit(r, 0x00); r = b0_emit(r, 0x00); r = b0_emit(r, 0x00); r = b0_emit(r, 0x00)
+        r = b0_compile_block(ts, r, ctx)
+        let csite = r.len; let cdisp = loop_top - (csite + 5)
+        r = b0_emit(r, 0xe9)
+        r = b0_emit(r, cdisp & 0xFF); r = b0_emit(r, (cdisp >> 8) & 0xFF)
+        r = b0_emit(r, (cdisp >> 16) & 0xFF); r = b0_emit(r, (cdisp >> 24) & 0xFF)
+        let after = r.len; let jzd = after - (jz_site + 6)
+        r.bytes[(jz_site+2) as usize] = (jzd & 0xFF) as i8
+        r.bytes[(jz_site+3) as usize] = ((jzd >> 8) & 0xFF) as i8
+        r.bytes[(jz_site+4) as usize] = ((jzd >> 16) & 0xFF) as i8
+        r.bytes[(jz_site+5) as usize] = ((jzd >> 24) & 0xFF) as i8
+        let bc = b0_lctx_get_bcount(r, level)
+        var bi: i64 = 0
+        while bi < bc {
+            let bp = b0_lctx_get_bpatch(r, level, bi)
+            let bd = after - (bp + 5)
+            r.bytes[(bp+1) as usize] = (bd & 0xFF) as i8
+            r.bytes[(bp+2) as usize] = ((bd >> 8) & 0xFF) as i8
+            r.bytes[(bp+3) as usize] = ((bd >> 16) & 0xFF) as i8
+            r.bytes[(bp+4) as usize] = ((bd >> 24) & 0xFF) as i8
+            bi = bi + 1
+        }
+        r = b0_lctx_set_level(r, level - 1)
+        return r
+    }
+
+    if k == TK_KW_BREAK() {
+        let level = b0_lctx_level(c)
+        var r = b0_set_pos(c, pos + 1)
+        let bpatch = r.len + 1
+        r = b0_emit(r, 0xe9)
+        r = b0_emit(r, 0x00); r = b0_emit(r, 0x00); r = b0_emit(r, 0x00); r = b0_emit(r, 0x00)
+        let bcount = b0_lctx_get_bcount(r, level)
+        r = b0_lctx_set_bpatch(r, level, bcount, bpatch - 1)
+        r = b0_lctx_set_bcount(r, level, bcount + 1)
+        return r
+    }
+
+    if k == TK_KW_CONTINUE() {
+        let level = b0_lctx_level(c)
+        var r = b0_set_pos(c, pos + 1)
+        let ctop = b0_lctx_get_top(r, level)
+        let csite = r.len; let cdisp = ctop - (csite + 5)
+        r = b0_emit(r, 0xe9)
+        r = b0_emit(r, cdisp & 0xFF); r = b0_emit(r, (cdisp >> 8) & 0xFF)
+        r = b0_emit(r, (cdisp >> 16) & 0xFF); r = b0_emit(r, (cdisp >> 24) & 0xFF)
+        return r
+    }
+
+    b0_compile_full_expr(ts, c, ctx)
+}
+
+// ============================================================
+// SECTION 8: FUNCTION COMPILER
+// ============================================================
+
+// Parse parameter names from token stream starting at paren_pos
+fn b0_bind_params(ts: &B0TokenStream, c: CodeBuffer, paren_pos: i64, pcount: i64) -> CodeBuffer with Mut, Panic, Div {
+    if pcount == 0 { return c }
+    var r = c
+    var p = paren_pos + 1  // skip '('
+    var pi: i64 = 0
+    // arg registers: rdi, rsi, rdx, rcx, r8, r9
+    while pi < pcount && p < (*ts).count && (*ts).tokens[p as usize].kind != TK_RPAREN() {
+        if (*ts).tokens[p as usize].kind == TK_IDENT() &&
+           (p+1) < (*ts).count && (*ts).tokens[(p+1) as usize].kind == TK_COLON() {
+            let pname = (*ts).tokens[p as usize].name
+            let slot = b0_get_next_vreg(r)
+            // store arg register to slot
+            if pi == 0 { r = b0_emit(r, 0x48); r = b0_emit(r, 0x89); r = b0_emit(r, 0xf8) }  // mov rax, rdi
+            else if pi == 1 { r = b0_emit(r, 0x48); r = b0_emit(r, 0x89); r = b0_emit(r, 0xf0) }  // mov rax, rsi
+            else if pi == 2 { r = b0_emit(r, 0x48); r = b0_emit(r, 0x89); r = b0_emit(r, 0xd0) }  // mov rax, rdx
+            else if pi == 3 { r = b0_emit(r, 0x48); r = b0_emit(r, 0x89); r = b0_emit(r, 0xc8) }  // mov rax, rcx
+            r = b0_store_rax(r, slot)
+            r = b0_set_next_vreg(r, slot + 1)
+            let lc = b0_get_local_count(r)
+            r = b0_local_set_name(r, lc, pname)
+            r = b0_local_set_slot(r, lc, slot)
+            r = b0_set_local_count(r, lc + 1)
+            pi = pi + 1
+        }
+        p = p + 1
+    }
+    r
+}
+
+fn b0_compile_fn(ts: &B0TokenStream, c: CodeBuffer, ctx: &B0Ctx, fi: i64) -> CodeBuffer with Mut, Panic, Div {
+    let body_pos = (*ctx).fn_body_pos[fi as usize]
+    let paren_pos = (*ctx).fn_param_pos[fi as usize]
+    let pcount = (*ctx).fn_param_count[fi as usize]
+    var r = c
+    r = b0_emit(r, 0x55)
+    r = b0_emit(r, 0x48); r = b0_emit(r, 0x89); r = b0_emit(r, 0xe5)
+    let fsz: i64 = 32768
+    r = b0_emit(r, 0x48); r = b0_emit(r, 0x81); r = b0_emit(r, 0xec)
+    r = b0_emit(r, fsz & 0xFF); r = b0_emit(r, (fsz >> 8) & 0xFF)
+    r = b0_emit(r, (fsz >> 16) & 0xFF); r = b0_emit(r, (fsz >> 24) & 0xFF)
+    r = b0_set_local_count(r, 0)
+    r = b0_set_next_vreg(r, 0)
+    r = b0_lctx_set_level(r, -1)
+    r = b0_bind_params(ts, r, paren_pos, pcount)
+    r = b0_set_pos(r, body_pos)
+    r = b0_compile_block(ts, r, ctx)
+    r = b0_emit(r, 0xc9); r = b0_emit(r, 0xc3)
+    r
+}
+
+// ============================================================
+// SECTION 9: ELF WRITER + UTILITIES
+// ============================================================
+
+fn b0_write_elf(code: CodeBuffer, tramp_off: i64, out_path: string, fn_offs: [i64; 64]) -> bool with IO, Mut, Panic, Div {
+    let total_code = code.len
+    let base_addr: i64 = 4194304
+    let text_off: i64 = 4096
+    let entry_va = base_addr + text_off + tramp_off
+    var out: [i8; 65536] = [0; 65536]
+    out[0 as usize] = 0x7f as i8; out[1 as usize] = 69 as i8
+    out[2 as usize] = 76 as i8; out[3 as usize] = 70 as i8
+    out[4 as usize] = 2 as i8; out[5 as usize] = 1 as i8; out[6 as usize] = 1 as i8
+    out[16 as usize] = 2 as i8; out[18 as usize] = 0x3e as i8; out[20 as usize] = 1 as i8
+    out[24 as usize] = (entry_va & 0xFF) as i8
+    out[25 as usize] = ((entry_va >> 8) & 0xFF) as i8
+    out[26 as usize] = ((entry_va >> 16) & 0xFF) as i8
+    out[27 as usize] = ((entry_va >> 24) & 0xFF) as i8
+    out[28 as usize] = ((entry_va >> 32) & 0xFF) as i8
+    out[32 as usize] = 64 as i8; out[52 as usize] = 64 as i8; out[54 as usize] = 56 as i8
+    out[56 as usize] = 2 as i8; out[58 as usize] = 64 as i8
+    out[64 as usize] = 1 as i8; out[68 as usize] = 5 as i8
+    out[80 as usize] = (base_addr & 0xFF) as i8
+    out[81 as usize] = ((base_addr >> 8) & 0xFF) as i8
+    out[82 as usize] = ((base_addr >> 16) & 0xFF) as i8
+    out[83 as usize] = ((base_addr >> 24) & 0xFF) as i8
+    out[88 as usize] = (base_addr & 0xFF) as i8
+    out[89 as usize] = ((base_addr >> 8) & 0xFF) as i8
+    out[90 as usize] = ((base_addr >> 16) & 0xFF) as i8
+    out[91 as usize] = ((base_addr >> 24) & 0xFF) as i8
+    let fsz2 = text_off + total_code
+    out[96 as usize] = (fsz2 & 0xFF) as i8; out[97 as usize] = ((fsz2 >> 8) & 0xFF) as i8
+    out[98 as usize] = ((fsz2 >> 16) & 0xFF) as i8; out[99 as usize] = ((fsz2 >> 24) & 0xFF) as i8
+    out[104 as usize] = (fsz2 & 0xFF) as i8; out[105 as usize] = ((fsz2 >> 8) & 0xFF) as i8
+    out[106 as usize] = ((fsz2 >> 16) & 0xFF) as i8; out[107 as usize] = ((fsz2 >> 24) & 0xFF) as i8
+    out[112 as usize] = 0 as i8; out[113 as usize] = 16 as i8
+    out[120 as usize] = 0x51 as i8; out[121 as usize] = 0xe5 as i8
+    out[122 as usize] = 0x74 as i8; out[123 as usize] = 0x64 as i8; out[124 as usize] = 6 as i8
+    var ci: i64 = 0
+    while ci < total_code && (text_off + ci) < 65536 {
+        out[(text_off + ci) as usize] = code.bytes[ci as usize]
+        ci = ci + 1
+    }
+    let total_len = text_off + total_code
+    write_file(out_path, out, total_len) == 0
+}
 
 fn b0_print_int(n: i64) with IO, Mut, Panic, Div {
     if n == 0 { print("0"); return }
@@ -586,83 +1307,109 @@ fn b0_print_int(n: i64) with IO, Mut, Panic, Div {
     var j = len - 1
     while j >= 0 {
         let d = buf[j as usize]
-        if d == 0 { print("0") }
-        if d == 1 { print("1") }
-        if d == 2 { print("2") }
-        if d == 3 { print("3") }
-        if d == 4 { print("4") }
-        if d == 5 { print("5") }
-        if d == 6 { print("6") }
-        if d == 7 { print("7") }
-        if d == 8 { print("8") }
-        if d == 9 { print("9") }
+        if d == 0 { print("0") } else if d == 1 { print("1") } else if d == 2 { print("2") }
+        else if d == 3 { print("3") } else if d == 4 { print("4") } else if d == 5 { print("5") }
+        else if d == 6 { print("6") } else if d == 7 { print("7") } else if d == 8 { print("8") }
+        else if d == 9 { print("9") }
         j = j - 1
     }
 }
 
-// Count tokens without storing them (avoids huge stack)
-fn b0_count_tokens(src: B0Src) -> i64 {
-    var s = src
-    var count: i64 = 0
-    while s.pos < s.len {
-        let c = b0_src_peek(s)
-        if b0_is_ws(c) { s = b0_src_advance(s) }
-        else if c == 47 && b0_src_peek2(s) == 47 { s = b0_skip_comment(s) }
-        else if b0_is_alpha(c) {
-            let pair = b0_lex_ident(s)
-            s = pair.0
-            count = count + 1
-        }
-        else if b0_is_digit(c) {
-            let pair2 = b0_lex_int(s)
-            s = pair2.0
-            count = count + 1
-        }
-        else if c == 34 {
-            let pair3 = b0_lex_string(s)
-            s = pair3.0
-            count = count + 1
-        }
-        else {
-            s = b0_src_advance(s)
-            if c != 0 { count = count + 1 }
-        }
-    }
-    count
-}
+// ============================================================
+// SECTION 10: MAIN
+// ============================================================
 
 fn main() -> i64 with IO, Mut, Panic, Div, Alloc {
     let argc = arg_count()
-    if argc < 2 {
-        print("boot0: Usage: boot0 <source.sio> <output.elf>\n")
-        return 1
-    }
-
+    if argc < 2 { print("boot0: usage: boot0 <src> <out>\n"); return 1 }
     let source_path = get_arg(0)
     let output_path = get_arg(1)
+    print("boot0: source="); print(source_path); print("\n")
 
-    print("boot0: source=")
-    print(source_path)
-    print("\n")
-
-    // Load source (up to 64KB)
     let raw = read_file(source_path)
     let fsize = file_size(source_path)
     var src = b0_src_new()
     var ri: i64 = 0
-    while ri < fsize && ri < 65535 {
-        src.bytes[ri as usize] = raw[ri as usize]
-        ri = ri + 1
-    }
+    while ri < fsize && ri < 65535 { src.bytes[ri as usize] = raw[ri as usize]; ri = ri + 1 }
     src.len = ri
 
-    // Count tokens (streaming, no large array needed)
-    let ntoks = b0_count_tokens(src)
+    let ts = b0_tokenize(src)
+    print("boot0: tokens="); b0_print_int(ts.count); print("\n")
+    if ts.count == 0 { print("boot0: no tokens\n"); return 2 }
 
-    print("boot0: tokens=")
-    b0_print_int(ntoks)
-    print("\n")
-    print("boot0: OK (scaffold)\n")
+    let ctx = b0_scan_all(&ts)
+    print("boot0: fns="); b0_print_int(ctx.fn_count)
+    print(" structs="); b0_print_int(ctx.struct_count); print("\n")
+    if ctx.fn_count == 0 { print("boot0: no functions\n"); return 3 }
 
+    var fn_offs: [i64; 64] = [0; 64]
+    var code = b0_code_new()
+    code = b0_lctx_set_level(code, -1)
+
+    let print_int_idx = ctx.fn_count
+    fn_offs[print_int_idx as usize] = code.len
+    code = b0_emit_print_int_fn(code)
+    let print_stub_idx = ctx.fn_count + 1
+    fn_offs[print_stub_idx as usize] = code.len
+    code = b0_emit(code, 0xc3)
+
+    var fi: i64 = 0
+    while fi < ctx.fn_count {
+        fn_offs[fi as usize] = code.len
+        code = b0_compile_fn(&ts, code, &ctx, fi)
+        fi = fi + 1
+    }
+
+    // Patch call sites
+    var pi: i64 = 0
+    while pi < code.len - 4 {
+        if code.bytes[pi as usize] == (0xe8 as i8) &&
+           code.bytes[(pi + 3) as usize] == (0xCA as i8) &&
+           code.bytes[(pi + 4) as usize] == (0xFE as i8) {
+            let lo = code.bytes[(pi + 1) as usize] as i64 & 0xFF
+            let hi = code.bytes[(pi + 2) as usize] as i64 & 0xFF
+            var target_idx = lo + (hi << 8)
+            // 0xFFFF = print_int builtin marker
+            if target_idx == 0xFFFF { target_idx = print_int_idx }
+            if target_idx >= 0 && target_idx < 66 {
+                let toff = fn_offs[target_idx as usize]
+                let disp = toff - (pi + 5)
+                code.bytes[(pi + 1) as usize] = (disp & 0xFF) as i8
+                code.bytes[(pi + 2) as usize] = ((disp >> 8) & 0xFF) as i8
+                code.bytes[(pi + 3) as usize] = ((disp >> 16) & 0xFF) as i8
+                code.bytes[(pi + 4) as usize] = ((disp >> 24) & 0xFF) as i8
+            }
+        }
+        pi = pi + 1
+    }
+
+    // Find main
+    var main_idx: i64 = -1
+    var mi: i64 = 0
+    while mi < ctx.fn_count {
+        let mnm = ctx.fn_names[mi as usize]
+        if mnm.len == 4 && mnm.buf[0] == (109 as i8) && mnm.buf[1] == (97 as i8) &&
+           mnm.buf[2] == (105 as i8) && mnm.buf[3] == (110 as i8) { main_idx = mi }
+        mi = mi + 1
+    }
+    if main_idx < 0 { print("boot0: no main\n"); return 4 }
+
+    let tramp_off = code.len
+    let moff = fn_offs[main_idx as usize]
+    let tdisp = moff - (tramp_off + 5)
+    code = b0_emit(code, 0xe8)
+    code = b0_emit(code, tdisp & 0xFF); code = b0_emit(code, (tdisp >> 8) & 0xFF)
+    code = b0_emit(code, (tdisp >> 16) & 0xFF); code = b0_emit(code, (tdisp >> 24) & 0xFF)
+    code = b0_emit(code, 0x89); code = b0_emit(code, 0xc7)
+    code = b0_emit(code, 0xb8); code = b0_emit(code, 0x3c); code = b0_emit(code, 0x00)
+    code = b0_emit(code, 0x00); code = b0_emit(code, 0x00)
+    code = b0_emit(code, 0x0f); code = b0_emit(code, 0x05)
+
+    print("boot0: total_code="); b0_print_int(code.len)
+    print(" tramp="); b0_print_int(tramp_off); print("\n")
+
+    let ok = b0_write_elf(code, tramp_off, output_path, fn_offs)
+    if !ok { print("boot0: write_error\n"); return 5 }
+    print("boot0: ok written="); print(output_path); print("\n")
     0
 }
