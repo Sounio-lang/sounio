@@ -12334,9 +12334,95 @@ fn compiler_main_test_bu_chain_fold() -> bool with Mut, Div, Panic {
     result.instrs[7 as usize].op == IrOpcode::IrLoadImm && result.instrs[7 as usize].imm_i64 == 5
 }
 
+fn compiler_main_test_xor_or_merge_basic() -> bool with Mut, Div, Panic {
+    // (x^5) | 5 → x|5: XOR-OR merge; src1 should be x (not x^5)
+    var instrs: [IrInstr; 128] = cp_empty_instrs()
+    instrs[0 as usize] = ir_load_imm(0, 42)         // r0 = x
+    instrs[1 as usize] = ir_load_imm(1, 5)
+    instrs[2 as usize] = ir_binop(2, 0, BinaryOp::OpBitXor, 1)  // r2 = x^5
+    instrs[3 as usize] = ir_load_imm(3, 5)
+    instrs[4 as usize] = ir_binop(4, 2, BinaryOp::OpBitOr, 3)   // r4 = (x^5)|5
+    let func = cp_make_test_func(instrs, 5)
+    let result = opt_cleanup_function(func)
+    result.instrs[4 as usize].op == IrOpcode::IrBinOp
+        && result.instrs[4 as usize].bin_op == BinaryOp::OpBitOr
+        && result.instrs[4 as usize].src1 == 0
+}
+
+fn compiler_main_test_xor_or_merge_commutative() -> bool with Mut, Div, Panic {
+    // 5 | (x^5) → x|5: commutative outer OR
+    var instrs: [IrInstr; 128] = cp_empty_instrs()
+    instrs[0 as usize] = ir_load_imm(0, 42)
+    instrs[1 as usize] = ir_load_imm(1, 5)
+    instrs[2 as usize] = ir_binop(2, 0, BinaryOp::OpBitXor, 1)  // r2 = x^5
+    instrs[3 as usize] = ir_load_imm(3, 5)
+    instrs[4 as usize] = ir_binop(4, 3, BinaryOp::OpBitOr, 2)   // r4 = 5|(x^5)
+    let func = cp_make_test_func(instrs, 5)
+    let result = opt_cleanup_function(func)
+    result.instrs[4 as usize].op == IrOpcode::IrBinOp
+        && result.instrs[4 as usize].bin_op == BinaryOp::OpBitOr
+        && result.instrs[4 as usize].src1 == 0
+}
+
+fn compiler_main_test_xor_or_merge_diff_const() -> bool with Mut, Div, Panic {
+    // (x^12) | 12 → x|12: works with a different constant
+    var instrs: [IrInstr; 128] = cp_empty_instrs()
+    instrs[0 as usize] = ir_load_imm(0, 42)
+    instrs[1 as usize] = ir_load_imm(1, 12)
+    instrs[2 as usize] = ir_binop(2, 0, BinaryOp::OpBitXor, 1)  // r2 = x^12
+    instrs[3 as usize] = ir_load_imm(3, 12)
+    instrs[4 as usize] = ir_binop(4, 2, BinaryOp::OpBitOr, 3)   // r4 = (x^12)|12
+    let func = cp_make_test_func(instrs, 5)
+    let result = opt_cleanup_function(func)
+    result.instrs[4 as usize].op == IrOpcode::IrBinOp
+        && result.instrs[4 as usize].bin_op == BinaryOp::OpBitOr
+        && result.instrs[4 as usize].src1 == 0
+}
+
+fn compiler_main_test_xor_or_no_fold_const_mismatch() -> bool with Mut, Div, Panic {
+    // (x^5) | 3 → no fold: OR constant (3) differs from XOR constant (5)
+    var instrs: [IrInstr; 128] = cp_empty_instrs()
+    instrs[0 as usize] = ir_load_imm(0, 42)
+    instrs[1 as usize] = ir_load_imm(1, 5)
+    instrs[2 as usize] = ir_binop(2, 0, BinaryOp::OpBitXor, 1)  // r2 = x^5
+    instrs[3 as usize] = ir_load_imm(3, 3)           // 3 != 5
+    instrs[4 as usize] = ir_binop(4, 2, BinaryOp::OpBitOr, 3)
+    let func = cp_make_test_func(instrs, 5)
+    let result = opt_cleanup_function(func)
+    // No BV fold: result keeps x^5 as src1 (r2), not x (r0)
+    result.instrs[4 as usize].src1 != 0
+}
+
+fn compiler_main_test_xor_or_no_fold_and_op() -> bool with Mut, Div, Panic {
+    // (x^5) & 5 → no fold by BV (AND not OR)
+    var instrs: [IrInstr; 128] = cp_empty_instrs()
+    instrs[0 as usize] = ir_load_imm(0, 42)
+    instrs[1 as usize] = ir_load_imm(1, 5)
+    instrs[2 as usize] = ir_binop(2, 0, BinaryOp::OpBitXor, 1)  // r2 = x^5
+    instrs[3 as usize] = ir_load_imm(3, 5)
+    instrs[4 as usize] = ir_binop(4, 2, BinaryOp::OpBitAnd, 3)  // r4 = (x^5)&5
+    let func = cp_make_test_func(instrs, 5)
+    let result = opt_cleanup_function(func)
+    result.instrs[4 as usize].op != IrOpcode::IrBinOp
+        || result.instrs[4 as usize].bin_op != BinaryOp::OpBitOr
+}
+
+fn compiler_main_test_xor_or_no_fold_plain_or() -> bool with Mut, Div, Panic {
+    // y | 5 → no fold: y not tracked as xor-const
+    var instrs: [IrInstr; 128] = cp_empty_instrs()
+    instrs[0 as usize] = ir_load_imm(0, 42)
+    instrs[1 as usize] = ir_load_imm(1, 3)
+    instrs[2 as usize] = ir_binop(2, 0, BinaryOp::OpAdd, 1)     // r2 = x+3 (not xor)
+    instrs[3 as usize] = ir_load_imm(3, 5)
+    instrs[4 as usize] = ir_binop(4, 2, BinaryOp::OpBitOr, 3)   // r4 = y|5
+    let func = cp_make_test_func(instrs, 5)
+    let result = opt_cleanup_function(func)
+    result.instrs[4 as usize].src1 == 2
+}
+
 fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
     var passed: i64 = 0
-    let total: i64 = 625
+    let total: i64 = 631
 
     println("=== compiler/main.sio self-tests ===")
 
@@ -15862,6 +15948,32 @@ fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
         passed = passed + 1
         println("  T625 OK: Sprint 159 Block BU: chain (x-1)-1 then +3 fold")
     } else { println("  FAIL: T625") }
+
+    // Sprint 160 Block BV: XOR-OR constant merge (T626-T631)
+    if compiler_main_test_xor_or_merge_basic() {
+        passed = passed + 1
+        println("  T626 OK: Sprint 160 Block BV: (x^5)|5->x|5")
+    } else { println("  FAIL: T626") }
+    if compiler_main_test_xor_or_merge_commutative() {
+        passed = passed + 1
+        println("  T627 OK: Sprint 160 Block BV: 5|(x^5)->x|5 commutative")
+    } else { println("  FAIL: T627") }
+    if compiler_main_test_xor_or_merge_diff_const() {
+        passed = passed + 1
+        println("  T628 OK: Sprint 160 Block BV: (x^12)|12->x|12")
+    } else { println("  FAIL: T628") }
+    if compiler_main_test_xor_or_no_fold_const_mismatch() {
+        passed = passed + 1
+        println("  T629 OK: Sprint 160 Block BV: (x^5)|3 no fold")
+    } else { println("  FAIL: T629") }
+    if compiler_main_test_xor_or_no_fold_and_op() {
+        passed = passed + 1
+        println("  T630 OK: Sprint 160 Block BV: (x^5)&5 no BV fold")
+    } else { println("  FAIL: T630") }
+    if compiler_main_test_xor_or_no_fold_plain_or() {
+        passed = passed + 1
+        println("  T631 OK: Sprint 160 Block BV: plain y|5 no fold")
+    } else { println("  FAIL: T631") }
 
     println("")
     println("compiler/main tests: " + int_to_string(passed) + "/" + int_to_string(total) + " passed")

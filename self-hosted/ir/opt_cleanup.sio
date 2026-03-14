@@ -2141,6 +2141,43 @@ fn ocp_const_fold(func: IrFunction) -> IrFunction with Mut, Div, Panic {
             }
         }
 
+        // Sprint 160 Block BV: XOR-OR constant merge — (x ^ C) | C → x | C.
+        // Proof: C-bits: (x_i^1)|1=1=x_i|1; non-C-bits: (x_i^0)|0=x_i. QED.
+        // SOTA: LLVM InstCombineAndOrXor — or(xor X,C),C → or X,C; Boolean algebra.
+        // Distinct from Block AR/BF: those reduce to const; BV yields x|C (non-const).
+        // Zero new arrays: uses bm_xor_valid/src/cval (Block BM) + is_const/const_val.
+        if ocp_is_binop(result.instrs[i as usize].op) {
+            let bv_instr = result.instrs[i as usize]
+            let bv_s1 = bv_instr.src1; let bv_s2 = bv_instr.src2
+            let bv_s1_ok = bv_s1 >= 0 && bv_s1 < 256; let bv_s2_ok = bv_s2 >= 0 && bv_s2 < 256
+            if bv_instr.bin_op == BinaryOp::OpBitOr {
+                // (x ^ C) | C → x | C: s1 is xor-const, s2 is same const
+                if bv_s1_ok && bm_xor_valid[bv_s1 as usize]
+                        && bv_s2_ok && is_const[bv_s2 as usize]
+                        && bm_xor_cval[bv_s1 as usize] == const_val[bv_s2 as usize] {
+                    result.instrs[i as usize] = ir_binop(bv_instr.dst,
+                        bm_xor_src[bv_s1 as usize], BinaryOp::OpBitOr, bv_s2)
+                    if bv_instr.dst >= 0 && bv_instr.dst < 256 {
+                        am_or_valid[bv_instr.dst as usize]     = true
+                        am_or_var_src[bv_instr.dst as usize]   = bm_xor_src[bv_s1 as usize]
+                        am_or_const_val[bv_instr.dst as usize] = const_val[bv_s2 as usize]
+                    }
+                }
+                // C | (x ^ C) → x | C: commutative
+                if bv_s2_ok && bm_xor_valid[bv_s2 as usize]
+                        && bv_s1_ok && is_const[bv_s1 as usize]
+                        && bm_xor_cval[bv_s2 as usize] == const_val[bv_s1 as usize] {
+                    result.instrs[i as usize] = ir_binop(bv_instr.dst,
+                        bm_xor_src[bv_s2 as usize], BinaryOp::OpBitOr, bv_s1)
+                    if bv_instr.dst >= 0 && bv_instr.dst < 256 {
+                        am_or_valid[bv_instr.dst as usize]     = true
+                        am_or_var_src[bv_instr.dst as usize]   = bm_xor_src[bv_s2 as usize]
+                        am_or_const_val[bv_instr.dst as usize] = const_val[bv_s1 as usize]
+                    }
+                }
+            }
+        }
+
                         // Sprint 82 Block J: Unary operation constant folding.
         // Folds IrUnaryOp when the source operand is a known constant.
         // Only OpNeg and OpNot are foldable (Ref/RefMut/Deref are memory ops).
