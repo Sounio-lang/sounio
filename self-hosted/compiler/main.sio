@@ -13501,9 +13501,93 @@ fn compiler_main_test_cj_no_fold_add() -> bool with Mut, Div, Panic {
     opt.instrs[2 as usize].bin_op == BinaryOp::OpMul
 }
 
+// Sprint 175 Block CK: AND-complement OR (T716-T721)
+fn compiler_main_test_ck_and_comp_or_basic() -> bool with Mut, Div, Panic {
+    // (r0 & ~5) | 5 → r0 | 5: AND-complement OR fold
+    var instrs: [IrInstr; 128] = cp_empty_instrs()
+    instrs[0 as usize] = ir_load_imm(1, -6)                     // r1 = ~5 = -6
+    instrs[1 as usize] = ir_binop(2, 0, BinaryOp::OpBitAnd, 1)  // r2 = r0 & ~5
+    instrs[2 as usize] = ir_load_imm(3, 5)
+    instrs[3 as usize] = ir_binop(4, 2, BinaryOp::OpBitOr, 3)   // r4 = (r0&~5)|5
+    let func = cp_make_test_func(instrs, 4)
+    let opt = opt_cleanup_function(func)
+    opt.instrs[3 as usize].op == IrOpcode::IrBinOp
+        && opt.instrs[3 as usize].bin_op == BinaryOp::OpBitOr
+        && opt.instrs[3 as usize].src1 == 0
+}
+
+fn compiler_main_test_ck_and_comp_or_comm() -> bool with Mut, Div, Panic {
+    // 5 | (r0 & ~5) → r0 | 5: commutative outer
+    var instrs: [IrInstr; 128] = cp_empty_instrs()
+    instrs[0 as usize] = ir_load_imm(1, -6)                     // r1 = ~5 = -6
+    instrs[1 as usize] = ir_binop(2, 0, BinaryOp::OpBitAnd, 1)  // r2 = r0 & ~5
+    instrs[2 as usize] = ir_load_imm(3, 5)
+    instrs[3 as usize] = ir_binop(4, 3, BinaryOp::OpBitOr, 2)   // r4 = 5|(r0&~5)
+    let func = cp_make_test_func(instrs, 4)
+    let opt = opt_cleanup_function(func)
+    opt.instrs[3 as usize].op == IrOpcode::IrBinOp
+        && opt.instrs[3 as usize].bin_op == BinaryOp::OpBitOr
+        && opt.instrs[3 as usize].src1 == 0
+}
+
+fn compiler_main_test_ck_and_comp_or_val() -> bool with Mut, Div, Panic {
+    // (r0 & ~12) | 12 → r0 | 12: different constant C=12
+    var instrs: [IrInstr; 128] = cp_empty_instrs()
+    instrs[0 as usize] = ir_load_imm(1, -13)                    // r1 = ~12 = -13
+    instrs[1 as usize] = ir_binop(2, 0, BinaryOp::OpBitAnd, 1) // r2 = r0 & ~12
+    instrs[2 as usize] = ir_load_imm(3, 12)
+    instrs[3 as usize] = ir_binop(4, 2, BinaryOp::OpBitOr, 3)  // r4 = (r0&~12)|12
+    let func = cp_make_test_func(instrs, 4)
+    let opt = opt_cleanup_function(func)
+    opt.instrs[3 as usize].op == IrOpcode::IrBinOp
+        && opt.instrs[3 as usize].bin_op == BinaryOp::OpBitOr
+        && opt.instrs[3 as usize].src1 == 0
+}
+
+fn compiler_main_test_ck_no_fold_wrong_comp() -> bool with Mut, Div, Panic {
+    // (r0 & ~5) | 3 → no fold: 3 is not complement of ~5 (3 != 5)
+    var instrs: [IrInstr; 128] = cp_empty_instrs()
+    instrs[0 as usize] = ir_load_imm(1, -6)                    // r1 = ~5
+    instrs[1 as usize] = ir_binop(2, 0, BinaryOp::OpBitAnd, 1) // r2 = r0 & ~5
+    instrs[2 as usize] = ir_load_imm(3, 3)
+    instrs[3 as usize] = ir_binop(4, 2, BinaryOp::OpBitOr, 3)  // r4 = (r0&~5)|3
+    let func = cp_make_test_func(instrs, 4)
+    let opt = opt_cleanup_function(func)
+    opt.instrs[3 as usize].op != IrOpcode::IrBinOp
+        || opt.instrs[3 as usize].bin_op != BinaryOp::OpBitOr
+        || opt.instrs[3 as usize].src1 != 0
+}
+
+fn compiler_main_test_ck_no_fold_non_and() -> bool with Mut, Div, Panic {
+    // (r0 | ~5) | 5 → no fold by CK (OR not AND in s1)
+    var instrs: [IrInstr; 128] = cp_empty_instrs()
+    instrs[0 as usize] = ir_load_imm(1, -6)                    // r1 = ~5
+    instrs[1 as usize] = ir_binop(2, 0, BinaryOp::OpBitOr, 1)  // r2 = r0 | ~5 (OR not AND)
+    instrs[2 as usize] = ir_load_imm(3, 5)
+    instrs[3 as usize] = ir_binop(4, 2, BinaryOp::OpBitOr, 3)  // r4 = (r0|~5)|5
+    let func = cp_make_test_func(instrs, 4)
+    let opt = opt_cleanup_function(func)
+    // BG (OR chain): (r0|~5)|5 → r0|(~5|5)=r0|(-1)=-1; or just stays as OR chain
+    opt.instrs[3 as usize].src1 != 0
+}
+
+fn compiler_main_test_ck_no_fold_and_op() -> bool with Mut, Div, Panic {
+    // (r0 & ~5) & 5 → no fold by CK (AND outer not OR)
+    var instrs: [IrInstr; 128] = cp_empty_instrs()
+    instrs[0 as usize] = ir_load_imm(1, -6)                    // r1 = ~5
+    instrs[1 as usize] = ir_binop(2, 0, BinaryOp::OpBitAnd, 1) // r2 = r0 & ~5
+    instrs[2 as usize] = ir_load_imm(3, 5)
+    instrs[3 as usize] = ir_binop(4, 2, BinaryOp::OpBitAnd, 3) // r4 = (r0&~5)&5 = 0 (Block BP)
+    let func = cp_make_test_func(instrs, 4)
+    let opt = opt_cleanup_function(func)
+    // Block BP: x&~x→0, or general AND with complement → LoadImm(0)
+    opt.instrs[3 as usize].op != IrOpcode::IrBinOp
+        || opt.instrs[3 as usize].src1 != 0
+}
+
 fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
     var passed: i64 = 0
-    let total: i64 = 715
+    let total: i64 = 721
 
     println("=== compiler/main.sio self-tests ===")
 

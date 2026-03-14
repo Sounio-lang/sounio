@@ -2721,6 +2721,47 @@ fn ocp_const_fold(func: IrFunction) -> IrFunction with Mut, Div, Panic {
             }
         }
 
+        // Sprint 175 Block CK: AND-complement OR — (x & ~C) | C → x | C.
+        // Proof: C-bits: (x_k & 0)|1=1. Non-C: (x_k & 1)|0=x_k. Result=x|C.
+        // Dual: C|(x & ~C) → x|C (commutative outer).
+        // and_const_val holds C1 for x&C1; complement check: C1 == ~C2 iff C1^(-1)==C2.
+        // Zero new arrays: uses and_valid/and_var_src/and_const_val (Block AE) + is_const/const_val.
+        // SOTA: LLVM InstCombineAndOrXor; Boolean absorption with complement.
+        if ocp_is_binop(result.instrs[i as usize].op) {
+            let ck_instr = result.instrs[i as usize]
+            let ck_s1 = ck_instr.src1; let ck_s2 = ck_instr.src2
+            let ck_s1_ok = ck_s1 >= 0 && ck_s1 < 256
+            let ck_s2_ok = ck_s2 >= 0 && ck_s2 < 256
+            if ck_instr.bin_op == BinaryOp::OpBitOr {
+                // (x & ~C2) | C2 → x | C2: s1=and-~C2, s2=C2
+                if ck_s1_ok && and_valid[ck_s1 as usize]
+                        && ck_s2_ok && is_const[ck_s2 as usize]
+                        && (and_const_val[ck_s1 as usize] ^ -1) == const_val[ck_s2 as usize] {
+                    let ck_x = and_var_src[ck_s1 as usize]
+                    result.instrs[i as usize] = ir_binop(ck_instr.dst,
+                        ck_x, BinaryOp::OpBitOr, ck_s2)
+                    if ck_instr.dst >= 0 && ck_instr.dst < 256 {
+                        am_or_valid[ck_instr.dst as usize]     = true
+                        am_or_var_src[ck_instr.dst as usize]   = ck_x
+                        am_or_const_val[ck_instr.dst as usize] = const_val[ck_s2 as usize]
+                    }
+                }
+                // C2 | (x & ~C2) → x | C2: commutative outer
+                if ck_s2_ok && and_valid[ck_s2 as usize]
+                        && ck_s1_ok && is_const[ck_s1 as usize]
+                        && (and_const_val[ck_s2 as usize] ^ -1) == const_val[ck_s1 as usize] {
+                    let ck_x = and_var_src[ck_s2 as usize]
+                    result.instrs[i as usize] = ir_binop(ck_instr.dst,
+                        ck_x, BinaryOp::OpBitOr, ck_s1)
+                    if ck_instr.dst >= 0 && ck_instr.dst < 256 {
+                        am_or_valid[ck_instr.dst as usize]     = true
+                        am_or_var_src[ck_instr.dst as usize]   = ck_x
+                        am_or_const_val[ck_instr.dst as usize] = const_val[ck_s1 as usize]
+                    }
+                }
+            }
+        }
+
         // Sprint 82 Block J: Unary operation constant folding.
         // Folds IrUnaryOp when the source operand is a known constant.
         // Only OpNeg and OpNot are foldable (Ref/RefMut/Deref are memory ops).
