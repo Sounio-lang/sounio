@@ -15529,9 +15529,85 @@ fn compiler_main_test_dm_no_fold_add_outer() -> bool with Mut, Div, Panic {
     opt.instrs[2 as usize].bin_op != BinaryOp::OpBitXor
 }
 
+// Sprint 204 Block DN: Sub-sub identity (T890-T895)
+fn compiler_main_test_dn_sub_sub_basic() -> bool with Mut, Div, Panic {
+    // r2 = r0-r1; r3 = r0-r4; r5 = r2-r3 → r4-r1
+    var instrs: [IrInstr; 128] = cp_empty_instrs()
+    instrs[0 as usize] = ir_binop(2, 0, BinaryOp::OpSub, 1)
+    instrs[1 as usize] = ir_binop(3, 0, BinaryOp::OpSub, 4)
+    instrs[2 as usize] = ir_binop(5, 2, BinaryOp::OpSub, 3)
+    let func = cp_make_test_func(instrs, 3)
+    let opt = opt_cleanup_function(func)
+    opt.instrs[2 as usize].op == IrOpcode::IrBinOp
+        && opt.instrs[2 as usize].bin_op == BinaryOp::OpSub
+        && opt.instrs[2 as usize].src1 == 4
+        && opt.instrs[2 as usize].src2 == 1
+}
+
+fn compiler_main_test_dn_sub_sub_self() -> bool with Mut, Div, Panic {
+    // (r0-r1)-(r0-r1) → z=y, so z-y=0
+    var instrs: [IrInstr; 128] = cp_empty_instrs()
+    instrs[0 as usize] = ir_binop(2, 0, BinaryOp::OpSub, 1)
+    instrs[1 as usize] = ir_binop(3, 0, BinaryOp::OpSub, 1)
+    instrs[2 as usize] = ir_binop(5, 2, BinaryOp::OpSub, 3)
+    let func = cp_make_test_func(instrs, 3)
+    let opt = opt_cleanup_function(func)
+    opt.instrs[2 as usize].op == IrOpcode::IrLoadImm
+        && opt.instrs[2 as usize].imm == 0
+}
+
+fn compiler_main_test_dn_sub_sub_reverse() -> bool with Mut, Div, Panic {
+    // (r0-r4)-(r0-r1) → r1-r4
+    var instrs: [IrInstr; 128] = cp_empty_instrs()
+    instrs[0 as usize] = ir_binop(2, 0, BinaryOp::OpSub, 4)
+    instrs[1 as usize] = ir_binop(3, 0, BinaryOp::OpSub, 1)
+    instrs[2 as usize] = ir_binop(5, 2, BinaryOp::OpSub, 3)
+    let func = cp_make_test_func(instrs, 3)
+    let opt = opt_cleanup_function(func)
+    opt.instrs[2 as usize].op == IrOpcode::IrBinOp
+        && opt.instrs[2 as usize].bin_op == BinaryOp::OpSub
+        && opt.instrs[2 as usize].src1 == 1
+        && opt.instrs[2 as usize].src2 == 4
+}
+
+fn compiler_main_test_dn_no_fold_diff_lhs() -> bool with Mut, Div, Panic {
+    // (r0-r1)-(r2-r3) → no fold (different x in each sub)
+    var instrs: [IrInstr; 128] = cp_empty_instrs()
+    instrs[0 as usize] = ir_binop(2, 0, BinaryOp::OpSub, 1)
+    instrs[1 as usize] = ir_binop(3, 5, BinaryOp::OpSub, 4)
+    instrs[2 as usize] = ir_binop(6, 2, BinaryOp::OpSub, 3)
+    let func = cp_make_test_func(instrs, 3)
+    let opt = opt_cleanup_function(func)
+    opt.instrs[2 as usize].src1 == 2 && opt.instrs[2 as usize].src2 == 3
+}
+
+fn compiler_main_test_dn_no_fold_add_outer() -> bool with Mut, Div, Panic {
+    // (r0-r1)+(r0-r4) → DL handles, DN doesn't
+    var instrs: [IrInstr; 128] = cp_empty_instrs()
+    instrs[0 as usize] = ir_binop(2, 0, BinaryOp::OpSub, 1)
+    instrs[1 as usize] = ir_binop(3, 0, BinaryOp::OpSub, 4)
+    instrs[2 as usize] = ir_binop(5, 2, BinaryOp::OpAdd, 3)
+    let func = cp_make_test_func(instrs, 3)
+    let opt = opt_cleanup_function(func)
+    // DL fires → x-z (r0-r4), not DN
+    opt.instrs[2 as usize].bin_op != BinaryOp::OpSub
+        || opt.instrs[2 as usize].src1 == 0
+}
+
+fn compiler_main_test_dn_no_fold_not_sub() -> bool with Mut, Div, Panic {
+    // (r0+r1)-(r0-r4) → no fold by DN (first inner is ADD not SUB)
+    var instrs: [IrInstr; 128] = cp_empty_instrs()
+    instrs[0 as usize] = ir_binop(2, 0, BinaryOp::OpAdd, 1)
+    instrs[1 as usize] = ir_binop(3, 0, BinaryOp::OpSub, 4)
+    instrs[2 as usize] = ir_binop(5, 2, BinaryOp::OpSub, 3)
+    let func = cp_make_test_func(instrs, 3)
+    let opt = opt_cleanup_function(func)
+    opt.instrs[2 as usize].src1 == 2 && opt.instrs[2 as usize].src2 == 3
+}
+
 fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
     var passed: i64 = 0
-    let total: i64 = 889
+    let total: i64 = 895
 
     println("=== compiler/main.sio self-tests ===")
 
@@ -20147,6 +20223,32 @@ fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
         passed = passed + 1
         println("  T889 OK: Sprint 203 Block DM: (r0|r1)+(r0&r1) no fold ADD outer")
     } else { println("  FAIL: T889") }
+
+    // Sprint 204 Block DN: Sub-sub identity (T890-T895)
+    if compiler_main_test_dn_sub_sub_basic() {
+        passed = passed + 1
+        println("  T890 OK: Sprint 204 Block DN: (r0-r1)-(r0-r4) -> r4-r1")
+    } else { println("  FAIL: T890") }
+    if compiler_main_test_dn_sub_sub_self() {
+        passed = passed + 1
+        println("  T891 OK: Sprint 204 Block DN: (r0-r1)-(r0-r1) -> 0")
+    } else { println("  FAIL: T891") }
+    if compiler_main_test_dn_sub_sub_reverse() {
+        passed = passed + 1
+        println("  T892 OK: Sprint 204 Block DN: (r0-r4)-(r0-r1) -> r1-r4")
+    } else { println("  FAIL: T892") }
+    if compiler_main_test_dn_no_fold_diff_lhs() {
+        passed = passed + 1
+        println("  T893 OK: Sprint 204 Block DN: (r0-r1)-(r5-r4) no fold diff lhs")
+    } else { println("  FAIL: T893") }
+    if compiler_main_test_dn_no_fold_add_outer() {
+        passed = passed + 1
+        println("  T894 OK: Sprint 204 Block DN: (r0-r1)+(r0-r4) DL handles not DN")
+    } else { println("  FAIL: T894") }
+    if compiler_main_test_dn_no_fold_not_sub() {
+        passed = passed + 1
+        println("  T895 OK: Sprint 204 Block DN: (r0+r1)-(r0-r4) no fold not sub")
+    } else { println("  FAIL: T895") }
 
     println("")
     println("compiler/main tests: " + int_to_string(passed) + "/" + int_to_string(total) + " passed")
