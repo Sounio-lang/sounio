@@ -508,6 +508,109 @@ fn micro_compile_function(code: CodeBuffer, func: IrFunction, fn_offsets: [i64; 
     c
 }
 // ============================================================================
+// Struct helpers: field key, prefix check, struct def lookup
+// ============================================================================
+
+// Returns true if key == var_name + "_" + something
+fn name_has_prefix_of(key: Name, var_name: Name) -> bool {
+    if key.len <= var_name.len { return false }
+    if key.buf[var_name.len as usize] != (95 as i8) { return false }  // '_'
+    var i: i64 = 0
+    while i < var_name.len {
+        if key.buf[i as usize] != var_name.buf[i as usize] { return false }
+        i = i + 1
+    }
+    true
+}
+
+// Compare Name against the first segment of an AstPath
+fn name_matches_path(name: Name, path: AstPath) -> bool {
+    if name.len != path.segments.head_len { return false }
+    var i: i64 = 0
+    while i < name.len {
+        if name.buf[i as usize] != path.segments.head_buf[i as usize] { return false }
+        i = i + 1
+    }
+    true
+}
+
+// Count fields in a named struct from the program's item list
+fn struct_field_count(prog: &Program, type_name: Name) -> i64 {
+    let items_ref: &Option<Box<ItemList>> = &prog.items
+    var cur = items_ref
+    while true {
+        match *cur {
+            Some(il) => {
+                let itm: &Item = &(*il).head
+                if itm.kind == ItemKind::ItemStruct {
+                    let sdef_ref: &Option<Box<StructDef>> = &itm.struct_def
+                    match *sdef_ref {
+                        Some(sd) => {
+                            if ir_name_eq((*sd).name, type_name) {
+                                var count: i64 = 0
+                                let flist_ref: &Option<Box<FieldDefList>> = &(*sd).fields
+                                var fc = flist_ref
+                                while true {
+                                    match *fc {
+                                        Some(fl) => { count = count + 1; fc = &(*fl).tail }
+                                        _ => break
+                                    }
+                                }
+                                return count
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                cur = &(*il).tail
+            }
+            _ => break
+        }
+    }
+    0
+}
+
+// Return the name of field at index idx in a named struct
+fn struct_field_name_at(prog: &Program, type_name: Name, idx: i64) -> Name {
+    let items_ref: &Option<Box<ItemList>> = &prog.items
+    var cur = items_ref
+    while true {
+        match *cur {
+            Some(il) => {
+                let itm: &Item = &(*il).head
+                if itm.kind == ItemKind::ItemStruct {
+                    let sdef_ref: &Option<Box<StructDef>> = &itm.struct_def
+                    match *sdef_ref {
+                        Some(sd) => {
+                            if ir_name_eq((*sd).name, type_name) {
+                                var i: i64 = 0
+                                let flist_ref: &Option<Box<FieldDefList>> = &(*sd).fields
+                                var fc = flist_ref
+                                while true {
+                                    match *fc {
+                                        Some(fl) => {
+                                            if i == idx { return (*fl).head.name }
+                                            i = i + 1
+                                            fc = &(*fl).tail
+                                        }
+                                        _ => break
+                                    }
+                                }
+                                return ir_empty_name()
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                cur = &(*il).tail
+            }
+            _ => break
+        }
+    }
+    ir_empty_name()
+}
+
+// ============================================================================
 // Struct field key: var_name + "_" + field_name
 // ============================================================================
 fn make_field_key(var_name: Name, field_name: Name) -> Name {
@@ -948,26 +1051,56 @@ fn ast_compile_expr(code: CodeBuffer, expr: &Expr,
                     li = li - 1
                 }
             }
-            var arg_count: i64 = 0
+            // arg eval: struct idents expand to per-field pushes; track reg_count
+            var reg_count: i64 = 0
             let args_ref: &Option<Box<ExprList>> = &expr.args
             var current_arg = args_ref
             while true {
                 match *current_arg {
                     Some(al) => {
-                        c = ast_compile_expr(c, &(*al).head, local_names, local_slots, local_count)
-                        c = emit_byte(c, 0x50)
-                        arg_count = arg_count + 1
+                        let ah: &Expr = &(*al).head
+                        if (*ah).kind == ExprKind::ExprIdent {
+                            // Check if scalar (has exact name entry)
+                            let av = (*ah).name
+                            var is_scalar: i64 = 0
+                            var sli = local_count - 1
+                            while sli >= 0 {
+                                if ir_name_eq(local_names[sli as usize], av) {
+                                    is_scalar = 1; sli = -1
+                                } else { sli = sli - 1 }
+                            }
+                            if is_scalar == 1 {
+                                c = ast_compile_expr(c, ah, local_names, local_slots, local_count)
+                                c = emit_byte(c, 0x50)
+                                reg_count = reg_count + 1
+                            } else {
+                                // Struct: push fields in registration order
+                                var fsli: i64 = 0
+                                while fsli < local_count {
+                                    if name_has_prefix_of(local_names[fsli as usize], av) {
+                                        c = micro_load_rax(c, local_slots[fsli as usize])
+                                        c = emit_byte(c, 0x50)
+                                        reg_count = reg_count + 1
+                                    }
+                                    fsli = fsli + 1
+                                }
+                            }
+                        } else {
+                            c = ast_compile_expr(c, ah, local_names, local_slots, local_count)
+                            c = emit_byte(c, 0x50)
+                            reg_count = reg_count + 1
+                        }
                         current_arg = &(*al).tail
                     }
                     _ => break
                 }
             }
-            if arg_count >= 6 { c = emit_byte(c, 0x41); c = emit_byte(c, 0x59) }
-            if arg_count >= 5 { c = emit_byte(c, 0x41); c = emit_byte(c, 0x58) }
-            if arg_count >= 4 { c = emit_byte(c, 0x59) }
-            if arg_count >= 3 { c = emit_byte(c, 0x5a) }
-            if arg_count >= 2 { c = emit_byte(c, 0x5e) }
-            if arg_count >= 1 { c = emit_byte(c, 0x5f) }
+            if reg_count >= 6 { c = emit_byte(c, 0x41); c = emit_byte(c, 0x59) }
+            if reg_count >= 5 { c = emit_byte(c, 0x41); c = emit_byte(c, 0x58) }
+            if reg_count >= 4 { c = emit_byte(c, 0x59) }
+            if reg_count >= 3 { c = emit_byte(c, 0x5a) }
+            if reg_count >= 2 { c = emit_byte(c, 0x5e) }
+            if reg_count >= 1 { c = emit_byte(c, 0x5f) }
             if fn_slot <= -1000 {
                 let target_idx = 0 - (fn_slot + 1000)
                 c = emit_byte(c, 0xe8)
@@ -1562,7 +1695,7 @@ fn ast_compile_block(code: CodeBuffer, blk: &Block,
 }
 
 fn ast_compile_fn_body(code: CodeBuffer, fd: &FnDef,
-    fn_names: [Name; 64], fn_count: i64
+    fn_names: [Name; 64], fn_count: i64, prog_ref: &Program
 ) -> CodeBuffer with Mut, Panic, Div, IO {
     var c = code
     var local_names: [Name; 64] = [ir_empty_name(); 64]
@@ -1580,37 +1713,81 @@ fn ast_compile_fn_body(code: CodeBuffer, fd: &FnDef,
         fi = fi + 1
     }
 
-    // Register params: rdi=p0, rsi=p1, rdx=p2, rcx=p3
+    // Register params: rdi=p0, rsi=p1, rdx=p2, rcx=p3, r8=p4, r9=p5
+    // Struct params occupy multiple consecutive registers (one per field)
     var param_ref: &Option<Box<ParamList>> = &fd.params
     var param_idx: i64 = 0
     while true {
         match *param_ref {
             Some(pl) => {
                 let p_name = (*pl).head.name
-                let p_slot = next_slot
-                next_slot = next_slot + 1
-                local_names[local_count as usize] = p_name
-                local_slots[local_count as usize] = p_slot
-                local_count = local_count + 1
-                // Spill param register to stack slot
-                if param_idx == 0 {
-                    // mov rax, rdi
-                    c = emit_byte(c, 0x48); c = emit_byte(c, 0x89); c = emit_byte(c, 0xf8)
-                } else if param_idx == 1 {
-                    c = emit_byte(c, 0x48); c = emit_byte(c, 0x89); c = emit_byte(c, 0xf0)
-                } else if param_idx == 2 {
-                    c = emit_byte(c, 0x48); c = emit_byte(c, 0x89); c = emit_byte(c, 0xd0)
-                } else if param_idx == 3 {
-                    c = emit_byte(c, 0x48); c = emit_byte(c, 0x89); c = emit_byte(c, 0xc8)
-                } else if param_idx == 4 {
-                    // mov rax, r8: 4C 89 C0
-                    c = emit_byte(c, 0x4c); c = emit_byte(c, 0x89); c = emit_byte(c, 0xc0)
-                } else if param_idx == 5 {
-                    // mov rax, r9: 4C 89 C8
-                    c = emit_byte(c, 0x4c); c = emit_byte(c, 0x89); c = emit_byte(c, 0xc8)
+                let p_ty: &TypeExpr = &(*pl).head.ty
+                // Check if param is a named struct type
+                var p_fcount: i64 = 0
+                if (*p_ty).kind == TypeExprKind::TypeNamed {
+                    // Extract type name from path first segment
+                    var type_name: Name = ir_empty_name()
+                    type_name.len = (*p_ty).path.segments.head_len
+                    var tni: i64 = 0
+                    while tni < type_name.len {
+                        type_name.buf[tni as usize] = (*p_ty).path.segments.head_buf[tni as usize]
+                        tni = tni + 1
+                    }
+                    p_fcount = struct_field_count(prog_ref, type_name)
+                    if p_fcount > 0 {
+                        // Struct param: spill p_fcount registers, register mangled field names
+                        var fj: i64 = 0
+                        while fj < p_fcount {
+                            let fname: Name = struct_field_name_at(prog_ref, type_name, fj)
+                            let fkey = make_field_key(p_name, fname)
+                            let p_fslot = next_slot
+                            next_slot = next_slot + 1
+                            local_names[local_count as usize] = fkey
+                            local_slots[local_count as usize] = p_fslot
+                            local_count = local_count + 1
+                            let reg_idx = param_idx + fj
+                            if reg_idx == 0 {
+                                c = emit_byte(c, 0x48); c = emit_byte(c, 0x89); c = emit_byte(c, 0xf8)
+                            } else if reg_idx == 1 {
+                                c = emit_byte(c, 0x48); c = emit_byte(c, 0x89); c = emit_byte(c, 0xf0)
+                            } else if reg_idx == 2 {
+                                c = emit_byte(c, 0x48); c = emit_byte(c, 0x89); c = emit_byte(c, 0xd0)
+                            } else if reg_idx == 3 {
+                                c = emit_byte(c, 0x48); c = emit_byte(c, 0x89); c = emit_byte(c, 0xc8)
+                            } else if reg_idx == 4 {
+                                c = emit_byte(c, 0x4c); c = emit_byte(c, 0x89); c = emit_byte(c, 0xc0)
+                            } else if reg_idx == 5 {
+                                c = emit_byte(c, 0x4c); c = emit_byte(c, 0x89); c = emit_byte(c, 0xc8)
+                            }
+                            c = micro_store_rax(c, p_fslot)
+                            fj = fj + 1
+                        }
+                        param_idx = param_idx + p_fcount
+                    }
                 }
-                c = micro_store_rax(c, p_slot)
-                param_idx = param_idx + 1
+                if p_fcount == 0 {
+                    // Scalar param
+                    let p_slot = next_slot
+                    next_slot = next_slot + 1
+                    local_names[local_count as usize] = p_name
+                    local_slots[local_count as usize] = p_slot
+                    local_count = local_count + 1
+                    if param_idx == 0 {
+                        c = emit_byte(c, 0x48); c = emit_byte(c, 0x89); c = emit_byte(c, 0xf8)
+                    } else if param_idx == 1 {
+                        c = emit_byte(c, 0x48); c = emit_byte(c, 0x89); c = emit_byte(c, 0xf0)
+                    } else if param_idx == 2 {
+                        c = emit_byte(c, 0x48); c = emit_byte(c, 0x89); c = emit_byte(c, 0xd0)
+                    } else if param_idx == 3 {
+                        c = emit_byte(c, 0x48); c = emit_byte(c, 0x89); c = emit_byte(c, 0xc8)
+                    } else if param_idx == 4 {
+                        c = emit_byte(c, 0x4c); c = emit_byte(c, 0x89); c = emit_byte(c, 0xc0)
+                    } else if param_idx == 5 {
+                        c = emit_byte(c, 0x4c); c = emit_byte(c, 0x89); c = emit_byte(c, 0xc8)
+                    }
+                    c = micro_store_rax(c, p_slot)
+                    param_idx = param_idx + 1
+                }
                 param_ref = &(*pl).tail
             }
             _ => break
@@ -2012,7 +2189,7 @@ fn main() -> i64 with IO, Mut, Panic, Div, Alloc {
                             code = emit_byte(code, (frame_size >> 24) & 0xFF)
 
                             // Compile body
-                            code = ast_compile_fn_body(code, &(*fd), fn_names, fn_count)
+                            code = ast_compile_fn_body(code, &(*fd), fn_names, fn_count, &prog)
 
                             // Epilogue: leave; ret
                             code = emit_byte(code, 0xc9)
