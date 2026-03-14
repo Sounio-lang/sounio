@@ -3465,6 +3465,40 @@ fn ocp_const_fold(func: IrFunction) -> IrFunction with Mut, Div, Panic {
             }
         }
 
+        // Sprint 202 Block DL: Transitive subtraction — (x-y)+(y-z) → x-z.
+        // Proof: (x-y)+(y-z) = x-y+y-z = x-z. QED. Middle term cancels.
+        // Zero new arrays: uses al_is_sub/al_sub_lhs/al_sub_rhs (Block AL, Sprint 115).
+        // SOTA: LLVM InstCombineAddSub; group-theoretic cancellation; Cooper&Torczon §8.1.
+        if ocp_is_binop(result.instrs[i as usize].op) {
+            let dl_instr = result.instrs[i as usize]
+            let dl_s1 = dl_instr.src1; let dl_s2 = dl_instr.src2
+            let dl_s1_ok = dl_s1 >= 0 && dl_s1 < 256; let dl_s2_ok = dl_s2 >= 0 && dl_s2 < 256
+            if dl_instr.bin_op == BinaryOp::OpAdd {
+                // (x-y) + (y-z) → x-z: s1=sub(x,y), s2=sub(y,z), rhs of s1 = lhs of s2
+                if dl_s1_ok && al_is_sub[dl_s1 as usize]
+                        && dl_s2_ok && al_is_sub[dl_s2 as usize]
+                        && al_sub_rhs[dl_s1 as usize] == al_sub_lhs[dl_s2 as usize] {
+                    let dl_x = al_sub_lhs[dl_s1 as usize]
+                    let dl_z = al_sub_rhs[dl_s2 as usize]
+                    result.instrs[i as usize] = ir_binop(dl_instr.dst, dl_x, BinaryOp::OpSub, dl_z)
+                    al_is_sub[dl_instr.dst as usize] = true
+                    al_sub_lhs[dl_instr.dst as usize] = dl_x
+                    al_sub_rhs[dl_instr.dst as usize] = dl_z
+                }
+                // (y-z) + (x-y) → x-z: commutative (s1 and s2 swapped)
+                if dl_s1_ok && al_is_sub[dl_s1 as usize]
+                        && dl_s2_ok && al_is_sub[dl_s2 as usize]
+                        && al_sub_rhs[dl_s2 as usize] == al_sub_lhs[dl_s1 as usize] {
+                    let dl_x = al_sub_lhs[dl_s2 as usize]
+                    let dl_z = al_sub_rhs[dl_s1 as usize]
+                    result.instrs[i as usize] = ir_binop(dl_instr.dst, dl_x, BinaryOp::OpSub, dl_z)
+                    al_is_sub[dl_instr.dst as usize] = true
+                    al_sub_lhs[dl_instr.dst as usize] = dl_x
+                    al_sub_rhs[dl_instr.dst as usize] = dl_z
+                }
+            }
+        }
+
         // Sprint 177 Block CM: AND complement XOR partition — (x & C) ^ (x & ~C) → x.
         // Proof: C-bits: (xi&1)^(xi&0)=xi^0=xi. Non-C: (xi&0)^(xi&1)=0^xi=xi. QED.
         // Dual of Block CC (OR partition). Commutative: (x&~C)^(x&C) → x.
