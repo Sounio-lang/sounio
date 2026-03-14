@@ -1675,6 +1675,47 @@ fn ocp_const_fold(func: IrFunction) -> IrFunction with Mut, Div, Panic {
             }
         }
 
+        // Sprint 150 Block BL: Shift-low-mask annihilation.
+        // (x << A) & M → 0 when M >= 0 && A in [1,62] && M < (1 << A).
+        // Bottom A bits of x<<A are always zero; AND with mask below that position = 0.
+        // SOTA: LLVM InstCombineShifts.cpp known-bits: (X<<C)&M=0 when M<(1<<C);
+        // Hacker's Delight §5-1 "Shift-and-Mask" — known zero bits from shift.
+        // Distinct from Block BK (shift chain): this crosses shift+AND operations.
+        // Zero new arrays: uses bk_shl_valid/amt (Block BK) + is_const/const_val.
+        if ocp_is_binop(result.instrs[i as usize].op) {
+            let bl_instr = result.instrs[i as usize]
+            let bl_s1 = bl_instr.src1; let bl_s2 = bl_instr.src2
+            let bl_s1_ok = bl_s1 >= 0 && bl_s1 < 256; let bl_s2_ok = bl_s2 >= 0 && bl_s2 < 256
+            if bl_instr.bin_op == BinaryOp::OpBitAnd {
+                // (x << A) & M → 0 when M >= 0 && 1 <= A <= 62 && M < (1 << A)
+                if bl_s1_ok && bk_shl_valid[bl_s1 as usize]
+                        && bl_s2_ok && is_const[bl_s2 as usize] {
+                    let bl_a = bk_shl_amt[bl_s1 as usize]
+                    let bl_m = const_val[bl_s2 as usize]
+                    if bl_m >= 0 && bl_a >= 1 && bl_a <= 62 && bl_m < (1 << bl_a) {
+                        result.instrs[i as usize] = ir_load_imm(bl_instr.dst, 0)
+                        if bl_instr.dst >= 0 && bl_instr.dst < 256 {
+                            is_const[bl_instr.dst as usize] = true
+                            const_val[bl_instr.dst as usize] = 0
+                        }
+                    }
+                }
+                // Commutative: M & (x << A) → 0
+                if bl_s2_ok && bk_shl_valid[bl_s2 as usize]
+                        && bl_s1_ok && is_const[bl_s1 as usize] {
+                    let bl_a = bk_shl_amt[bl_s2 as usize]
+                    let bl_m = const_val[bl_s1 as usize]
+                    if bl_m >= 0 && bl_a >= 1 && bl_a <= 62 && bl_m < (1 << bl_a) {
+                        result.instrs[i as usize] = ir_load_imm(bl_instr.dst, 0)
+                        if bl_instr.dst >= 0 && bl_instr.dst < 256 {
+                            is_const[bl_instr.dst as usize] = true
+                            const_val[bl_instr.dst as usize] = 0
+                        }
+                    }
+                }
+            }
+        }
+
                         // Sprint 82 Block J: Unary operation constant folding.
         // Folds IrUnaryOp when the source operand is a known constant.
         // Only OpNeg and OpNot are foldable (Ref/RefMut/Deref are memory ops).
