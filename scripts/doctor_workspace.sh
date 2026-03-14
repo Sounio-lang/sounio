@@ -39,5 +39,11 @@ else
   exit 1
 fi
 
+if [[ -n "${SOUC_BIN:-}" && -x "${SOUC_BIN}" ]]; then
+  echo
+  echo "==> smoke check"
+  "${SOUC_BIN}" check examples/hello.sio
+fi
+
 echo
 echo "==> doctor_workspace: OK"
