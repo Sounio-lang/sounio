@@ -1064,6 +1064,17 @@ fn ast_expr_result_type(expr: &Expr, local_names: [Name; 64], local_types: [i64;
         }
         return 0
     }
+    if expr.kind == ExprKind::ExprMethodCall {
+        // Look up method return type by method name
+        var mli2 = local_count - 1
+        while mli2 >= 0 {
+            if ir_name_eq(local_names[mli2 as usize], expr.name) {
+                return local_types[mli2 as usize]
+            }
+            mli2 = mli2 - 1
+        }
+        return 0
+    }
     if expr.kind == ExprKind::ExprStructLit {
         let sn = ast_name_from_path(&expr.path)
         let si = ast_lookup_struct(ctx, sn)
@@ -1955,109 +1966,6 @@ fn ast_compile_expr(code: CodeBuffer, expr: &Expr,
         c = emit_byte(c, (cdisp >> 24) & 0xFF)
         c = emit_byte(c, 0x48); c = emit_byte(c, 0x31); c = emit_byte(c, 0xc0)
         c
-    } else if expr.kind == ExprKind::ExprForIn {
-        // Sprint 119: for x in lo..hi { body }
-        // AST: expr.name=binding, expr.left=ExprRange(left=start,right=end), expr.block=body
-        let fi_prev_level = lctx_level(c)
-        let fi_level = if fi_prev_level < 0 { 0 } else { fi_prev_level + 1 }
-        c = lctx_set_level(c, fi_level)
-        c = lctx_set_break_count(c, fi_level, 0)
-        // Allocate slots: x_slot=loop var, e_slot=end value
-        let fi_x_slot = code_get_ns(c)
-        let fi_e_slot = fi_x_slot + 1
-        c = code_set_ns(c, fi_x_slot + 2)
-        // Evaluate range: expr.left is ExprRange; .left=start, .right=end
-        let fi_range_ref: &Option<Box<Expr>> = &expr.left
-        match *fi_range_ref {
-            Some(fi_re) => {
-                // Evaluate end first (avoid clobbering rax with start)
-                let fi_end_ref: &Option<Box<Expr>> = &(*fi_re).right
-                match *fi_end_ref {
-                    Some(fi_ee) => {
-                        c = ast_compile_expr(c, &(*fi_ee), local_names, local_slots, local_types, local_count, ctx)
-                        c = micro_store_rax(c, fi_e_slot)
-                    }
-                    _ => {
-                        c = emit_byte(c, 0x48); c = emit_byte(c, 0x31); c = emit_byte(c, 0xc0)
-                        c = micro_store_rax(c, fi_e_slot)
-                    }
-                }
-                // Evaluate start
-                let fi_start_ref: &Option<Box<Expr>> = &(*fi_re).left
-                match *fi_start_ref {
-                    Some(fi_se) => {
-                        c = ast_compile_expr(c, &(*fi_se), local_names, local_slots, local_types, local_count, ctx)
-                        c = micro_store_rax(c, fi_x_slot)
-                    }
-                    _ => {
-                        c = emit_byte(c, 0x48); c = emit_byte(c, 0x31); c = emit_byte(c, 0xc0)
-                        c = micro_store_rax(c, fi_x_slot)
-                    }
-                }
-            }
-            _ => {}
-        }
-        // Register loop var in a local copy of name/slot tables for body compilation
-        var fi_ln = local_names
-        var fi_ls = local_slots
-        var fi_lt = local_types
-        fi_ln[local_count as usize] = expr.name
-        fi_ls[local_count as usize] = fi_x_slot
-        fi_lt[local_count as usize] = 0
-        let fi_lc = local_count + 1
-        // loop_top: compare x < end
-        let fi_loop_top = c.len
-        c = lctx_set_top(c, fi_level, fi_loop_top)
-        c = micro_load_rax(c, fi_x_slot)
-        c = micro_load_rcx(c, fi_e_slot)
-        // cmp rax, rcx: 48 39 C8
-        c = emit_byte(c, 0x48); c = emit_byte(c, 0x39); c = emit_byte(c, 0xc8)
-        // jge loop_end (0F 8D + disp32 placeholder)
-        let fi_jge_site = c.len
-        c = emit_byte(c, 0x0f); c = emit_byte(c, 0x8d)
-        c = emit_byte(c, 0); c = emit_byte(c, 0); c = emit_byte(c, 0); c = emit_byte(c, 0)
-        // Compile body (with loop var registered)
-        let fi_body_ref: &Option<Box<Block>> = &expr.block
-        match *fi_body_ref {
-            Some(fi_b) => {
-                c = ast_compile_block(c, &(*fi_b), fi_ln, fi_ls, fi_lt, fi_lc, ctx)
-            }
-            _ => {}
-        }
-        // Increment x_slot
-        c = micro_load_rax(c, fi_x_slot)
-        // add rax, 1: 48 83 C0 01
-        c = emit_byte(c, 0x48); c = emit_byte(c, 0x83); c = emit_byte(c, 0xc0); c = emit_byte(c, 0x01)
-        c = micro_store_rax(c, fi_x_slot)
-        // jmp back to loop_top
-        let fi_jback = c.len
-        let fi_jback_disp = fi_loop_top - (fi_jback + 5)
-        c = emit_byte(c, 0xe9)
-        c = emit_byte(c, fi_jback_disp & 0xFF)
-        c = emit_byte(c, (fi_jback_disp >> 8) & 0xFF)
-        c = emit_byte(c, (fi_jback_disp >> 16) & 0xFF)
-        c = emit_byte(c, (fi_jback_disp >> 24) & 0xFF)
-        // loop_end: patch jge and all break sites
-        let fi_end = c.len
-        let fi_jge_disp = fi_end - (fi_jge_site + 6)
-        c.bytes[(fi_jge_site + 2) as usize] = (fi_jge_disp & 0xFF) as i8
-        c.bytes[(fi_jge_site + 3) as usize] = ((fi_jge_disp >> 8) & 0xFF) as i8
-        c.bytes[(fi_jge_site + 4) as usize] = ((fi_jge_disp >> 16) & 0xFF) as i8
-        c.bytes[(fi_jge_site + 5) as usize] = ((fi_jge_disp >> 24) & 0xFF) as i8
-        var fi_bi: i64 = 0
-        let fi_bc = lctx_get_break_count(c, fi_level)
-        while fi_bi < fi_bc {
-            let fi_bp = lctx_get_break_patch(c, fi_level, fi_bi)
-            let fi_bd = fi_end - (fi_bp + 4)
-            c.bytes[(fi_bp) as usize] = (fi_bd & 0xFF) as i8
-            c.bytes[(fi_bp + 1) as usize] = ((fi_bd >> 8) & 0xFF) as i8
-            c.bytes[(fi_bp + 2) as usize] = ((fi_bd >> 16) & 0xFF) as i8
-            c.bytes[(fi_bp + 3) as usize] = ((fi_bd >> 24) & 0xFF) as i8
-            fi_bi = fi_bi + 1
-        }
-        c = lctx_set_level(c, fi_prev_level)
-        c = emit_byte(c, 0x48); c = emit_byte(c, 0x31); c = emit_byte(c, 0xc0)
-        c
     } else if expr.kind == ExprKind::ExprReturn {
         let ret_ref: &Option<Box<Expr>> = &expr.left
         match *ret_ref {
@@ -2080,6 +1988,156 @@ fn ast_compile_expr(code: CodeBuffer, expr: &Expr,
             _ => {
                 c = emit_byte(c, 0x48); c = emit_byte(c, 0x31); c = emit_byte(c, 0xc0)
             }
+        }
+        c
+    } else if expr.kind == ExprKind::ExprMethodCall {
+        // Method call: base.method(args) → call method(base, args)
+        // Look up method name in fn_names
+        let mc_name = expr.name
+        var mc_fn_slot: i64 = -1
+        var mc_ret_type: i64 = 0
+        var mli = local_count - 1
+        while mli >= 0 {
+            if ir_name_eq(local_names[mli as usize], mc_name) {
+                mc_fn_slot = local_slots[mli as usize]
+                mc_ret_type = local_types[mli as usize]
+                mli = -1
+            } else {
+                mli = mli - 1
+            }
+        }
+        // Determine sret
+        var mc_sret = false
+        var mc_sret_idx: i64 = -1
+        var mc_sret_flat: i64 = 0
+        if mc_ret_type >= 10 && mc_ret_type < 100 {
+            mc_sret = true
+            mc_sret_idx = mc_ret_type - 10
+            mc_sret_flat = ctx.struct_flat_size[mc_sret_idx as usize]
+        }
+        var mc_sret_base: i64 = 0
+        if mc_sret {
+            var mc_ns = code_get_ns(c)
+            mc_sret_base = mc_ns
+            mc_ns = mc_ns + mc_sret_flat
+            c = code_set_ns(c, mc_ns)
+        }
+        // Evaluate base expr (implicit self) + explicit args → temp slots
+        var mc_arg_slots: [i64; 16] = [0; 16]
+        var mc_arg_count: i64 = 0
+        // Arg0 = base expression
+        let mc_base: &Option<Box<Expr>> = &expr.left
+        match *mc_base {
+            Some(mcb) => {
+                c = ast_compile_expr(c, &(*mcb), local_names, local_slots, local_types, local_count, ctx)
+            }
+            _ => {
+                c = emit_byte(c, 0x48); c = emit_byte(c, 0x31); c = emit_byte(c, 0xc0)
+            }
+        }
+        var mc_ns2 = code_get_ns(c)
+        let mc_self_slot = mc_ns2
+        mc_ns2 = mc_ns2 + 1
+        c = code_set_ns(c, mc_ns2)
+        c = micro_store_rax(c, mc_self_slot)
+        mc_arg_slots[0] = mc_self_slot
+        mc_arg_count = 1
+        // Remaining args
+        let mc_args: &Option<Box<ExprList>> = &expr.args
+        var mc_ac = mc_args
+        while true {
+            match *mc_ac {
+                Some(mal) => {
+                    c = ast_compile_expr(c, &(*mal).head, local_names, local_slots, local_types, local_count, ctx)
+                    var mc_ns3 = code_get_ns(c)
+                    let mc_ts = mc_ns3
+                    mc_ns3 = mc_ns3 + 1
+                    c = code_set_ns(c, mc_ns3)
+                    c = micro_store_rax(c, mc_ts)
+                    mc_arg_slots[mc_arg_count as usize] = mc_ts
+                    mc_arg_count = mc_arg_count + 1
+                    mc_ac = &(*mal).tail
+                }
+                _ => break
+            }
+        }
+        // Load args into registers (same pattern as ExprCall)
+        var mc_reg_shift: i64 = 0
+        if mc_sret { mc_reg_shift = 1 }
+        let mc_stack_start = 6 - mc_reg_shift
+        var mc_stack_count: i64 = 0
+        if mc_arg_count > mc_stack_start {
+            var mc_sa = mc_arg_count - 1
+            while mc_sa >= mc_stack_start {
+                c = micro_load_rax(c, mc_arg_slots[mc_sa as usize])
+                c = emit_byte(c, 0x50) // push rax
+                mc_stack_count = mc_stack_count + 1
+                mc_sa = mc_sa - 1
+            }
+        }
+        var mc_max = mc_arg_count
+        if mc_max > mc_stack_start { mc_max = mc_stack_start }
+        if mc_reg_shift + mc_max > 5 {
+            let a5i = 5 - mc_reg_shift
+            if a5i >= 0 && a5i < mc_arg_count {
+                c = micro_load_rax(c, mc_arg_slots[a5i as usize])
+                c = emit_byte(c, 0x49); c = emit_byte(c, 0x89); c = emit_byte(c, 0xc1) // mov r9, rax
+            }
+        }
+        if mc_reg_shift + mc_max > 4 {
+            let a4i = 4 - mc_reg_shift
+            if a4i >= 0 && a4i < mc_arg_count {
+                c = micro_load_rax(c, mc_arg_slots[a4i as usize])
+                c = emit_byte(c, 0x49); c = emit_byte(c, 0x89); c = emit_byte(c, 0xc0) // mov r8, rax
+            }
+        }
+        if mc_reg_shift + mc_max > 3 {
+            let a3i = 3 - mc_reg_shift
+            if a3i >= 0 && a3i < mc_arg_count {
+                c = micro_load_rax(c, mc_arg_slots[a3i as usize])
+                c = emit_byte(c, 0x48); c = emit_byte(c, 0x89); c = emit_byte(c, 0xc1) // mov rcx, rax
+            }
+        }
+        if mc_reg_shift + mc_max > 2 {
+            let a2i = 2 - mc_reg_shift
+            if a2i >= 0 && a2i < mc_arg_count {
+                c = micro_load_rax(c, mc_arg_slots[a2i as usize])
+                c = emit_byte(c, 0x48); c = emit_byte(c, 0x89); c = emit_byte(c, 0xc2) // mov rdx, rax
+            }
+        }
+        if mc_reg_shift + mc_max > 1 {
+            let a1i = 1 - mc_reg_shift
+            if a1i >= 0 && a1i < mc_arg_count {
+                c = micro_load_rax(c, mc_arg_slots[a1i as usize])
+                c = emit_byte(c, 0x48); c = emit_byte(c, 0x89); c = emit_byte(c, 0xc6) // mov rsi, rax
+            }
+        }
+        if mc_sret {
+            c = micro_lea_rax_slot(c, mc_sret_base)
+            c = emit_byte(c, 0x48); c = emit_byte(c, 0x89); c = emit_byte(c, 0xc7) // mov rdi, rax (sret dest)
+        } else {
+            if mc_max > 0 {
+                c = micro_load_rax(c, mc_arg_slots[0])
+                c = emit_byte(c, 0x48); c = emit_byte(c, 0x89); c = emit_byte(c, 0xc7) // mov rdi, rax
+            }
+        }
+        // Emit call sentinel
+        if mc_fn_slot <= -1000 {
+            let mc_target = 0 - (mc_fn_slot + 1000)
+            c = emit_byte(c, 0xe8)
+            c = emit_byte(c, mc_target & 0xFF)
+            c = emit_byte(c, (mc_target >> 8) & 0xFF)
+            c = emit_byte(c, 0xCA as i64)
+            c = emit_byte(c, 0xFE as i64)
+        }
+        if mc_stack_count > 0 {
+            let mc_cleanup = mc_stack_count * 8
+            c = emit_byte(c, 0x48); c = emit_byte(c, 0x81); c = emit_byte(c, 0xc4)
+            c = emit_byte(c, mc_cleanup & 0xFF); c = emit_byte(c, (mc_cleanup >> 8) & 0xFF)
+            c = emit_byte(c, 0); c = emit_byte(c, 0)
+        }
+        if mc_sret {
+            c = micro_lea_rax_slot(c, mc_sret_base)
         }
         c
     } else if expr.kind == ExprKind::ExprStructLit {
@@ -2815,6 +2873,50 @@ fn main() -> i64 with IO, Mut, Panic, Div, Alloc {
                     let ns = str_from_bytes(itm.name.buf, itm.name.len)
                     if str_eq(ns, "main") { main_fn_idx = fn_count }
                     fn_count = fn_count + 1
+                } else if itm.kind == ItemKind::ItemImpl {
+                    // Collect methods from impl blocks
+                    let impl_r: &Option<Box<ImplDef>> = &itm.impl_def
+                    match *impl_r {
+                        Some(idef) => {
+                            let meth_ref: &Option<Box<ItemList>> = &(*idef).methods
+                            var meth_cur = meth_ref
+                            while true {
+                                match *meth_cur {
+                                    Some(ml) => {
+                                        let mitm: &Item = &(*ml).head
+                                        if mitm.kind == ItemKind::ItemFn {
+                                            fn_names[fn_count as usize] = mitm.name
+                                            let mfdef_r: &Option<Box<FnDef>> = &mitm.fn_def
+                                            match *mfdef_r {
+                                                Some(mfdr) => {
+                                                    let mrt_ref: &Option<Box<TypeExpr>> = &(*mfdr).return_type
+                                                    match *mrt_ref {
+                                                        Some(mrte) => {
+                                                            if ast_type_is_f64(&(*mrte)) {
+                                                                fn_return_types[fn_count as usize] = 1
+                                                            } else if (*mrte).kind == TypeExprKind::TypeNamed {
+                                                                let mrt_name = ast_name_from_path(&(*mrte).path)
+                                                                let mrt_si = ast_lookup_struct(&ctx, mrt_name)
+                                                                if mrt_si >= 0 {
+                                                                    fn_return_types[fn_count as usize] = 10 + mrt_si
+                                                                }
+                                                            }
+                                                        }
+                                                        _ => {}
+                                                    }
+                                                }
+                                                _ => {}
+                                            }
+                                            fn_count = fn_count + 1
+                                        }
+                                        meth_cur = &(*ml).tail
+                                    }
+                                    _ => break
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
                 }
                 item_cur = &(*il).tail
             }
@@ -2905,42 +3007,64 @@ fn main() -> i64 with IO, Mut, Panic, Div, Alloc {
                             let ns = str_from_bytes(itm.name.buf, itm.name.len)
                             print("render_compile: fn=")
                             print(ns)
-
-                            // Large frame for struct temporaries + arrays
                             let frame_size: i64 = 32768
-                            // Prologue: push rbp; mov rbp, rsp; sub rsp, frame_size
                             code = emit_byte(code, 0x55)
-                            code = emit_byte(code, 0x48)
-                            code = emit_byte(code, 0x89)
-                            code = emit_byte(code, 0xe5)
-                            code = emit_byte(code, 0x48)
-                            code = emit_byte(code, 0x81)
-                            code = emit_byte(code, 0xec)
-                            code = emit_byte(code, frame_size & 0xFF)
-                            code = emit_byte(code, (frame_size >> 8) & 0xFF)
-                            code = emit_byte(code, (frame_size >> 16) & 0xFF)
-                            code = emit_byte(code, (frame_size >> 24) & 0xFF)
-
-                            // Compile body
-                            let code_before = code.len
+                            code = emit_byte(code, 0x48); code = emit_byte(code, 0x89); code = emit_byte(code, 0xe5)
+                            code = emit_byte(code, 0x48); code = emit_byte(code, 0x81); code = emit_byte(code, 0xec)
+                            code = emit_byte(code, frame_size & 0xFF); code = emit_byte(code, (frame_size >> 8) & 0xFF)
+                            code = emit_byte(code, (frame_size >> 16) & 0xFF); code = emit_byte(code, (frame_size >> 24) & 0xFF)
                             code = ast_compile_fn_body(code, &(*fd), fn_names, fn_return_types, fn_count, &ctx)
-
-                            // Epilogue: leave; ret
-                            code = emit_byte(code, 0xc9)
-                            code = emit_byte(code, 0xc3)
-
+                            code = emit_byte(code, 0xc9); code = emit_byte(code, 0xc3)
                             let sz = code.len - fn_offsets[fn_idx as usize]
-                            print(" off=")
-                            print_int(fn_offsets[fn_idx as usize])
-                            print(" sz=")
-                            print_int(sz)
-                            print("\n")
+                            print(" off="); print_int(fn_offsets[fn_idx as usize])
+                            print(" sz="); print_int(sz); print("\n")
                         }
-                        _ => {
-                            fn_offsets[fn_idx as usize] = code.len
-                        }
+                        _ => { fn_offsets[fn_idx as usize] = code.len }
                     }
                     fn_idx = fn_idx + 1
+                } else if itm.kind == ItemKind::ItemImpl {
+                    // Compile method bodies from impl blocks
+                    let mci_r: &Option<Box<ImplDef>> = &itm.impl_def
+                    match *mci_r {
+                        Some(midef) => {
+                            let mc_ref: &Option<Box<ItemList>> = &(*midef).methods
+                            var mc_cur = mc_ref
+                            while true {
+                                match *mc_cur {
+                                    Some(mcl) => {
+                                        let mcitm: &Item = &(*mcl).head
+                                        if mcitm.kind == ItemKind::ItemFn {
+                                            let mcfd_r: &Option<Box<FnDef>> = &mcitm.fn_def
+                                            match *mcfd_r {
+                                                Some(mcfd) => {
+                                                    fn_offsets[fn_idx as usize] = code.len
+                                                    let mcns = str_from_bytes(mcitm.name.buf, mcitm.name.len)
+                                                    print("render_compile: method=")
+                                                    print(mcns)
+                                                    let mframe: i64 = 32768
+                                                    code = emit_byte(code, 0x55)
+                                                    code = emit_byte(code, 0x48); code = emit_byte(code, 0x89); code = emit_byte(code, 0xe5)
+                                                    code = emit_byte(code, 0x48); code = emit_byte(code, 0x81); code = emit_byte(code, 0xec)
+                                                    code = emit_byte(code, mframe & 0xFF); code = emit_byte(code, (mframe >> 8) & 0xFF)
+                                                    code = emit_byte(code, (mframe >> 16) & 0xFF); code = emit_byte(code, (mframe >> 24) & 0xFF)
+                                                    code = ast_compile_fn_body(code, &(*mcfd), fn_names, fn_return_types, fn_count, &ctx)
+                                                    code = emit_byte(code, 0xc9); code = emit_byte(code, 0xc3)
+                                                    let mcsz = code.len - fn_offsets[fn_idx as usize]
+                                                    print(" off="); print_int(fn_offsets[fn_idx as usize])
+                                                    print(" sz="); print_int(mcsz); print("\n")
+                                                }
+                                                _ => { fn_offsets[fn_idx as usize] = code.len }
+                                            }
+                                            fn_idx = fn_idx + 1
+                                        }
+                                        mc_cur = &(*mcl).tail
+                                    }
+                                    _ => break
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
                 }
                 item_cur = &(*il).tail
             }
