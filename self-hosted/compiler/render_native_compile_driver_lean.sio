@@ -1955,6 +1955,109 @@ fn ast_compile_expr(code: CodeBuffer, expr: &Expr,
         c = emit_byte(c, (cdisp >> 24) & 0xFF)
         c = emit_byte(c, 0x48); c = emit_byte(c, 0x31); c = emit_byte(c, 0xc0)
         c
+    } else if expr.kind == ExprKind::ExprForIn {
+        // Sprint 119: for x in lo..hi { body }
+        // AST: expr.name=binding, expr.left=ExprRange(left=start,right=end), expr.block=body
+        let fi_prev_level = lctx_level(c)
+        let fi_level = if fi_prev_level < 0 { 0 } else { fi_prev_level + 1 }
+        c = lctx_set_level(c, fi_level)
+        c = lctx_set_break_count(c, fi_level, 0)
+        // Allocate slots: x_slot=loop var, e_slot=end value
+        let fi_x_slot = code_get_ns(c)
+        let fi_e_slot = fi_x_slot + 1
+        c = code_set_ns(c, fi_x_slot + 2)
+        // Evaluate range: expr.left is ExprRange; .left=start, .right=end
+        let fi_range_ref: &Option<Box<Expr>> = &expr.left
+        match *fi_range_ref {
+            Some(fi_re) => {
+                // Evaluate end first (avoid clobbering rax with start)
+                let fi_end_ref: &Option<Box<Expr>> = &(*fi_re).right
+                match *fi_end_ref {
+                    Some(fi_ee) => {
+                        c = ast_compile_expr(c, &(*fi_ee), local_names, local_slots, local_types, local_count, ctx)
+                        c = micro_store_rax(c, fi_e_slot)
+                    }
+                    _ => {
+                        c = emit_byte(c, 0x48); c = emit_byte(c, 0x31); c = emit_byte(c, 0xc0)
+                        c = micro_store_rax(c, fi_e_slot)
+                    }
+                }
+                // Evaluate start
+                let fi_start_ref: &Option<Box<Expr>> = &(*fi_re).left
+                match *fi_start_ref {
+                    Some(fi_se) => {
+                        c = ast_compile_expr(c, &(*fi_se), local_names, local_slots, local_types, local_count, ctx)
+                        c = micro_store_rax(c, fi_x_slot)
+                    }
+                    _ => {
+                        c = emit_byte(c, 0x48); c = emit_byte(c, 0x31); c = emit_byte(c, 0xc0)
+                        c = micro_store_rax(c, fi_x_slot)
+                    }
+                }
+            }
+            _ => {}
+        }
+        // Register loop var in a local copy of name/slot tables for body compilation
+        var fi_ln = local_names
+        var fi_ls = local_slots
+        var fi_lt = local_types
+        fi_ln[local_count as usize] = expr.name
+        fi_ls[local_count as usize] = fi_x_slot
+        fi_lt[local_count as usize] = 0
+        let fi_lc = local_count + 1
+        // loop_top: compare x < end
+        let fi_loop_top = c.len
+        c = lctx_set_top(c, fi_level, fi_loop_top)
+        c = micro_load_rax(c, fi_x_slot)
+        c = micro_load_rcx(c, fi_e_slot)
+        // cmp rax, rcx: 48 39 C8
+        c = emit_byte(c, 0x48); c = emit_byte(c, 0x39); c = emit_byte(c, 0xc8)
+        // jge loop_end (0F 8D + disp32 placeholder)
+        let fi_jge_site = c.len
+        c = emit_byte(c, 0x0f); c = emit_byte(c, 0x8d)
+        c = emit_byte(c, 0); c = emit_byte(c, 0); c = emit_byte(c, 0); c = emit_byte(c, 0)
+        // Compile body (with loop var registered)
+        let fi_body_ref: &Option<Box<Block>> = &expr.block
+        match *fi_body_ref {
+            Some(fi_b) => {
+                c = ast_compile_block(c, &(*fi_b), fi_ln, fi_ls, fi_lt, fi_lc, ctx)
+            }
+            _ => {}
+        }
+        // Increment x_slot
+        c = micro_load_rax(c, fi_x_slot)
+        // add rax, 1: 48 83 C0 01
+        c = emit_byte(c, 0x48); c = emit_byte(c, 0x83); c = emit_byte(c, 0xc0); c = emit_byte(c, 0x01)
+        c = micro_store_rax(c, fi_x_slot)
+        // jmp back to loop_top
+        let fi_jback = c.len
+        let fi_jback_disp = fi_loop_top - (fi_jback + 5)
+        c = emit_byte(c, 0xe9)
+        c = emit_byte(c, fi_jback_disp & 0xFF)
+        c = emit_byte(c, (fi_jback_disp >> 8) & 0xFF)
+        c = emit_byte(c, (fi_jback_disp >> 16) & 0xFF)
+        c = emit_byte(c, (fi_jback_disp >> 24) & 0xFF)
+        // loop_end: patch jge and all break sites
+        let fi_end = c.len
+        let fi_jge_disp = fi_end - (fi_jge_site + 6)
+        c.bytes[(fi_jge_site + 2) as usize] = (fi_jge_disp & 0xFF) as i8
+        c.bytes[(fi_jge_site + 3) as usize] = ((fi_jge_disp >> 8) & 0xFF) as i8
+        c.bytes[(fi_jge_site + 4) as usize] = ((fi_jge_disp >> 16) & 0xFF) as i8
+        c.bytes[(fi_jge_site + 5) as usize] = ((fi_jge_disp >> 24) & 0xFF) as i8
+        var fi_bi: i64 = 0
+        let fi_bc = lctx_get_break_count(c, fi_level)
+        while fi_bi < fi_bc {
+            let fi_bp = lctx_get_break_patch(c, fi_level, fi_bi)
+            let fi_bd = fi_end - (fi_bp + 4)
+            c.bytes[(fi_bp) as usize] = (fi_bd & 0xFF) as i8
+            c.bytes[(fi_bp + 1) as usize] = ((fi_bd >> 8) & 0xFF) as i8
+            c.bytes[(fi_bp + 2) as usize] = ((fi_bd >> 16) & 0xFF) as i8
+            c.bytes[(fi_bp + 3) as usize] = ((fi_bd >> 24) & 0xFF) as i8
+            fi_bi = fi_bi + 1
+        }
+        c = lctx_set_level(c, fi_prev_level)
+        c = emit_byte(c, 0x48); c = emit_byte(c, 0x31); c = emit_byte(c, 0xc0)
+        c
     } else if expr.kind == ExprKind::ExprReturn {
         let ret_ref: &Option<Box<Expr>> = &expr.left
         match *ret_ref {
