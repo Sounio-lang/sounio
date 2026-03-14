@@ -15963,9 +15963,76 @@ fn compiler_main_test_ds_no_fold_plain_or() -> bool with Mut, Div, Panic {
         && opt.instrs[1 as usize].un_op == UnaryOp::OpNot
 }
 
+// Sprint 210 Block DT: OR-AND complement absorption (T926-T931)
+fn compiler_main_test_dt_or_and_comp_basic() -> bool with Mut, Div, Panic {
+    // r2=~r0; r3=r1&r2; r4=r0|r3 → r4=r0|r1
+    var instrs: [IrInstr; 128] = cp_empty_instrs()
+    instrs[0 as usize] = ir_unaryop(2, UnaryOp::OpNot, 0)
+    instrs[1 as usize] = ir_binop(3, 1, BinaryOp::OpBitAnd, 2)
+    instrs[2 as usize] = ir_binop(4, 0, BinaryOp::OpBitOr, 3)
+    let func = cp_make_test_func(instrs, 3)
+    let opt = opt_cleanup_function(func)
+    opt.instrs[2 as usize].op == IrOpcode::IrBinOp
+        && opt.instrs[2 as usize].bin_op == BinaryOp::OpBitOr
+        && opt.instrs[2 as usize].src1 == 0
+        && opt.instrs[2 as usize].src2 == 1
+}
+fn compiler_main_test_dt_or_and_comp_comm_and() -> bool with Mut, Div, Panic {
+    // r2=~r0; r3=r2&r1 (AND flipped) → r0|r1
+    var instrs: [IrInstr; 128] = cp_empty_instrs()
+    instrs[0 as usize] = ir_unaryop(2, UnaryOp::OpNot, 0)
+    instrs[1 as usize] = ir_binop(3, 2, BinaryOp::OpBitAnd, 1)
+    instrs[2 as usize] = ir_binop(4, 0, BinaryOp::OpBitOr, 3)
+    let func = cp_make_test_func(instrs, 3)
+    let opt = opt_cleanup_function(func)
+    opt.instrs[2 as usize].bin_op == BinaryOp::OpBitOr
+        && opt.instrs[2 as usize].src1 == 0
+}
+fn compiler_main_test_dt_or_and_comp_comm_or() -> bool with Mut, Div, Panic {
+    // (y&~x)|x → x|y (OR outer commutative)
+    var instrs: [IrInstr; 128] = cp_empty_instrs()
+    instrs[0 as usize] = ir_unaryop(2, UnaryOp::OpNot, 0)
+    instrs[1 as usize] = ir_binop(3, 1, BinaryOp::OpBitAnd, 2)
+    instrs[2 as usize] = ir_binop(4, 3, BinaryOp::OpBitOr, 0)
+    let func = cp_make_test_func(instrs, 3)
+    let opt = opt_cleanup_function(func)
+    opt.instrs[2 as usize].bin_op == BinaryOp::OpBitOr
+        && opt.instrs[2 as usize].src2 == 1
+}
+fn compiler_main_test_dt_no_fold_diff_var() -> bool with Mut, Div, Panic {
+    // r0|(r1&~r2) no fold (r2 not r0)
+    var instrs: [IrInstr; 128] = cp_empty_instrs()
+    instrs[0 as usize] = ir_unaryop(3, UnaryOp::OpNot, 2)
+    instrs[1 as usize] = ir_binop(4, 1, BinaryOp::OpBitAnd, 3)
+    instrs[2 as usize] = ir_binop(5, 0, BinaryOp::OpBitOr, 4)
+    let func = cp_make_test_func(instrs, 3)
+    let opt = opt_cleanup_function(func)
+    opt.instrs[2 as usize].src1 == 0 && opt.instrs[2 as usize].src2 == 4
+}
+fn compiler_main_test_dt_no_fold_no_not() -> bool with Mut, Div, Panic {
+    // r0|(r1&r2) no fold (r2 not NOT of r0)
+    var instrs: [IrInstr; 128] = cp_empty_instrs()
+    instrs[0 as usize] = ir_binop(3, 1, BinaryOp::OpBitAnd, 2)
+    instrs[1 as usize] = ir_binop(4, 0, BinaryOp::OpBitOr, 3)
+    let func = cp_make_test_func(instrs, 2)
+    let opt = opt_cleanup_function(func)
+    opt.instrs[1 as usize].src1 == 0 && opt.instrs[1 as usize].src2 == 3
+}
+fn compiler_main_test_dt_no_fold_and_outer() -> bool with Mut, Div, Panic {
+    // r0&(r1&~r0) no fold by DT (AND outer)
+    var instrs: [IrInstr; 128] = cp_empty_instrs()
+    instrs[0 as usize] = ir_unaryop(2, UnaryOp::OpNot, 0)
+    instrs[1 as usize] = ir_binop(3, 1, BinaryOp::OpBitAnd, 2)
+    instrs[2 as usize] = ir_binop(4, 0, BinaryOp::OpBitAnd, 3)
+    let func = cp_make_test_func(instrs, 3)
+    let opt = opt_cleanup_function(func)
+    // Block AO absorption: x&(x&y)→x&y. Not DT.
+    opt.instrs[2 as usize].bin_op != BinaryOp::OpBitOr
+}
+
 fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
     var passed: i64 = 0
-    let total: i64 = 925
+    let total: i64 = 931
 
     println("=== compiler/main.sio self-tests ===")
 
@@ -20737,6 +20804,32 @@ fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
         passed = passed + 1
         println("  T925 OK: Sprint 209 Block DS: ~(r0|r1) no fold plain OR")
     } else { println("  FAIL: T925") }
+
+    // Sprint 210 Block DT: OR-AND complement absorption (T926-T931)
+    if compiler_main_test_dt_or_and_comp_basic() {
+        passed = passed + 1
+        println("  T926 OK: Sprint 210 Block DT: r0|(r1&~r0) -> r0|r1")
+    } else { println("  FAIL: T926") }
+    if compiler_main_test_dt_or_and_comp_comm_and() {
+        passed = passed + 1
+        println("  T927 OK: Sprint 210 Block DT: r0|(~r0&r1) -> r0|r1 AND comm")
+    } else { println("  FAIL: T927") }
+    if compiler_main_test_dt_or_and_comp_comm_or() {
+        passed = passed + 1
+        println("  T928 OK: Sprint 210 Block DT: (r1&~r0)|r0 -> r0|r1 OR comm")
+    } else { println("  FAIL: T928") }
+    if compiler_main_test_dt_no_fold_diff_var() {
+        passed = passed + 1
+        println("  T929 OK: Sprint 210 Block DT: r0|(r1&~r2) no fold diff var")
+    } else { println("  FAIL: T929") }
+    if compiler_main_test_dt_no_fold_no_not() {
+        passed = passed + 1
+        println("  T930 OK: Sprint 210 Block DT: r0|(r1&r2) no fold no NOT")
+    } else { println("  FAIL: T930") }
+    if compiler_main_test_dt_no_fold_and_outer() {
+        passed = passed + 1
+        println("  T931 OK: Sprint 210 Block DT: r0&(r1&~r0) no fold AND outer")
+    } else { println("  FAIL: T931") }
 
     println("")
     println("compiler/main tests: " + int_to_string(passed) + "/" + int_to_string(total) + " passed")
