@@ -18,6 +18,19 @@ use native::encode::*
 use parser::mod::{parse_program_preloaded}
 use parser::parser::{parser_last_error_count}
 
+// Wide output buffer for programs exceeding 65KB code size
+var WIDE_OUT: [i8; 262144] = [0; 262144]
+var WIDE_LEN: i64 = 0
+
+fn wide_flush(code: CodeBuffer) with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < code.len && WIDE_LEN < 262144 {
+        WIDE_OUT[WIDE_LEN as usize] = code.bytes[i as usize]
+        WIDE_LEN = WIDE_LEN + 1
+        i = i + 1
+    }
+}
+
 // Helpers required by codegen dependency chain (flat-namespace resolution).
 fn char_from_i64(n: i64) -> string with Mut, Panic {
     if n == 0 { "0" }
@@ -222,7 +235,7 @@ fn micro_load_xmm1(code: CodeBuffer, vreg: i64) -> CodeBuffer with Mut, Panic, D
     c
 }
 
-fn micro_compile_function(code: CodeBuffer, func: IrFunction, fn_offsets: [i64; 256]) -> CodeBuffer with Mut, Panic, Div {
+fn micro_compile_function(code: CodeBuffer, func: IrFunction, fn_offsets: [i64; 512]) -> CodeBuffer with Mut, Panic, Div {
     let frame_raw = (func.reg_count + 2) * 8
     let frame_size = ((frame_raw + 15) / 16) * 16
 
@@ -835,16 +848,16 @@ fn ast_emit_inline_print_str(code: CodeBuffer, str_buf: [i8; 128], str_len: i64)
 
 struct AstCompileCtx {
     struct_count: i64,
-    struct_names: [Name; 32],
-    struct_flat_size: [i64; 32],
-    struct_field_count: [i64; 32],
-    struct_field_base: [i64; 32],
-    sf_names: [Name; 256],
-    sf_flat_offset: [i64; 256],
-    sf_type: [i64; 256],       // 0=i64, 1=f64, 10+=struct_idx+10
-    sf_flat_size: [i64; 256],  // 1 for scalars, N for sub-structs
-    fn_return_types: [i64; 64],
-    fn_names: [Name; 64],
+    struct_names: [Name; 128],
+    struct_flat_size: [i64; 128],
+    struct_field_count: [i64; 128],
+    struct_field_base: [i64; 128],
+    sf_names: [Name; 512],
+    sf_flat_offset: [i64; 512],
+    sf_type: [i64; 512],       // 0=i64, 1=f64, 10+=struct_idx+10
+    sf_flat_size: [i64; 512],  // 1 for scalars, N for sub-structs
+    fn_return_types: [i64; 512],
+    fn_names: [Name; 512],
     fn_count: i64,
 }
 
@@ -2989,7 +3002,7 @@ fn ast_compile_block(code: CodeBuffer, blk: &Block,
 }
 
 fn ast_compile_fn_body(code: CodeBuffer, fd: &FnDef,
-    fn_names: [Name; 64], fn_return_types: [i64; 64], fn_count: i64,
+    fn_count: i64,
     ctx: &AstCompileCtx
 ) -> CodeBuffer with Mut, Panic, Div, IO {
     var c = code
@@ -3040,9 +3053,9 @@ fn ast_compile_fn_body(code: CodeBuffer, fd: &FnDef,
     // Register function names as locals with negative slots (for call resolution)
     var fi: i64 = 0
     while fi < fn_count {
-        local_names[local_count as usize] = fn_names[fi as usize]
+        local_names[local_count as usize] = ctx.fn_names[fi as usize]
         local_slots[local_count as usize] = 0 - 1000 - fi
-        local_types[local_count as usize] = fn_return_types[fi as usize]
+        local_types[local_count as usize] = ctx.fn_return_types[fi as usize]
         local_count = local_count + 1
         fi = fi + 1
     }
@@ -3182,16 +3195,16 @@ fn main() -> i64 with IO, Mut, Panic, Div, Alloc {
     // === Phase 0: Build struct registry ===
     var ctx: AstCompileCtx = AstCompileCtx {
         struct_count: 0,
-        struct_names: [ir_empty_name(); 16],
-        struct_flat_size: [0; 16],
-        struct_field_count: [0; 16],
-        struct_field_base: [0; 16],
-        sf_names: [ir_empty_name(); 128],
-        sf_flat_offset: [0; 128],
-        sf_type: [0; 128],
-        sf_flat_size: [0; 128],
-        fn_return_types: [0; 64],
-        fn_names: [ir_empty_name(); 64],
+        struct_names: [ir_empty_name(); 128],
+        struct_flat_size: [0; 128],
+        struct_field_count: [0; 128],
+        struct_field_base: [0; 128],
+        sf_names: [ir_empty_name(); 512],
+        sf_flat_offset: [0; 512],
+        sf_type: [0; 512],
+        sf_flat_size: [0; 512],
+        fn_return_types: [0; 512],
+        fn_names: [ir_empty_name(); 512],
         fn_count: 0,
     }
     var sf_next: i64 = 0  // next index in sf_* arrays
@@ -3276,8 +3289,8 @@ fn main() -> i64 with IO, Mut, Panic, Div, Alloc {
     }
 
     // === Phase 1: Collect function names + return types ===
-    var fn_names: [Name; 64] = [ir_empty_name(); 64]
-    var fn_return_types: [i64; 64] = [0; 64]  // 0=i64, 1=f64, 10+=struct
+    var fn_names: [Name; 512] = [ir_empty_name(); 512]
+    var fn_return_types: [i64; 512] = [0; 512]  // 0=i64, 1=f64, 10+=struct
     var fn_count: i64 = 0
     var main_fn_idx: i64 = -1
 
@@ -3425,24 +3438,27 @@ fn main() -> i64 with IO, Mut, Panic, Div, Alloc {
     // Second pass: emit builtins + compile source functions
     var code = code_buffer_new()
     code = lctx_set_level(code, -1)  // No loop active
-    var fn_offsets: [i64; 256] = [-1; 256]
-    var call_patches: [i64; 256] = [0; 256]  // code offset of each call rel32
-    var call_targets: [i64; 256] = [0; 256]  // target fn index for each call
+    var fn_offsets: [i64; 512] = [-1; 512]
+    var call_patches: [i64; 512] = [0; 512]  // code offset of each call rel32
+    var call_targets: [i64; 512] = [0; 512]  // target fn index for each call
     var call_patch_count: i64 = 0
 
     // Emit print_int builtin
-    fn_offsets[print_int_idx as usize] = code.len
+    fn_offsets[print_int_idx as usize] = WIDE_LEN
     code = ast_emit_print_int_builtin(code)
+    wide_flush(code)
     print("render_compile: builtin=print_int off=")
     print_int(fn_offsets[print_int_idx as usize])
     print(" sz=")
-    print_int(code.len - fn_offsets[print_int_idx as usize])
+    print_int(WIDE_LEN - fn_offsets[print_int_idx as usize])
     print("\n")
 
     // print() is handled inline at call sites — emit a no-op stub
-    fn_offsets[print_idx as usize] = code.len
+    fn_offsets[print_idx as usize] = WIDE_LEN
+    code = code_buffer_new()
     // Minimal stub: ret (in case it's called without string literal arg)
     code = emit_byte(code, 0xc3)
+    wide_flush(code)
 
     item_cur = items_ref
     var fn_idx: i64 = 0
@@ -3454,23 +3470,27 @@ fn main() -> i64 with IO, Mut, Panic, Div, Alloc {
                     let fdef_ref: &Option<Box<FnDef>> = &itm.fn_def
                     match *fdef_ref {
                         Some(fd) => {
-                            fn_offsets[fn_idx as usize] = code.len
+                            fn_offsets[fn_idx as usize] = WIDE_LEN
                             let ns = str_from_bytes(itm.name.buf, itm.name.len)
                             print("render_compile: fn=")
                             print(ns)
                             let frame_size: i64 = 32768
+                            code = code_buffer_new()
+                            code = lctx_set_level(code, -1)
                             code = emit_byte(code, 0x55)
                             code = emit_byte(code, 0x48); code = emit_byte(code, 0x89); code = emit_byte(code, 0xe5)
                             code = emit_byte(code, 0x48); code = emit_byte(code, 0x81); code = emit_byte(code, 0xec)
                             code = emit_byte(code, frame_size & 0xFF); code = emit_byte(code, (frame_size >> 8) & 0xFF)
                             code = emit_byte(code, (frame_size >> 16) & 0xFF); code = emit_byte(code, (frame_size >> 24) & 0xFF)
-                            code = ast_compile_fn_body(code, &(*fd), fn_names, fn_return_types, fn_count, &ctx)
+                            code = ast_compile_fn_body(code, &(*fd), fn_count, &ctx)
                             code = emit_byte(code, 0xc9); code = emit_byte(code, 0xc3)
-                            let sz = code.len - fn_offsets[fn_idx as usize]
-                            print(" off="); print_int(fn_offsets[fn_idx as usize])
+                            let fn_start = fn_offsets[fn_idx as usize]
+                            wide_flush(code)
+                            let sz = WIDE_LEN - fn_start
+                            print(" off="); print_int(fn_start)
                             print(" sz="); print_int(sz); print("\n")
                         }
-                        _ => { fn_offsets[fn_idx as usize] = code.len }
+                        _ => { fn_offsets[fn_idx as usize] = WIDE_LEN }
                     }
                     fn_idx = fn_idx + 1
                 } else if itm.kind == ItemKind::ItemImpl {
@@ -3488,23 +3508,27 @@ fn main() -> i64 with IO, Mut, Panic, Div, Alloc {
                                             let mcfd_r: &Option<Box<FnDef>> = &mcitm.fn_def
                                             match *mcfd_r {
                                                 Some(mcfd) => {
-                                                    fn_offsets[fn_idx as usize] = code.len
+                                                    fn_offsets[fn_idx as usize] = WIDE_LEN
                                                     let mcns = str_from_bytes(mcitm.name.buf, mcitm.name.len)
                                                     print("render_compile: method=")
                                                     print(mcns)
                                                     let mframe: i64 = 32768
+                                                    code = code_buffer_new()
+                                                    code = lctx_set_level(code, -1)
                                                     code = emit_byte(code, 0x55)
                                                     code = emit_byte(code, 0x48); code = emit_byte(code, 0x89); code = emit_byte(code, 0xe5)
                                                     code = emit_byte(code, 0x48); code = emit_byte(code, 0x81); code = emit_byte(code, 0xec)
                                                     code = emit_byte(code, mframe & 0xFF); code = emit_byte(code, (mframe >> 8) & 0xFF)
                                                     code = emit_byte(code, (mframe >> 16) & 0xFF); code = emit_byte(code, (mframe >> 24) & 0xFF)
-                                                    code = ast_compile_fn_body(code, &(*mcfd), fn_names, fn_return_types, fn_count, &ctx)
+                                                    code = ast_compile_fn_body(code, &(*mcfd), fn_count, &ctx)
                                                     code = emit_byte(code, 0xc9); code = emit_byte(code, 0xc3)
-                                                    let mcsz = code.len - fn_offsets[fn_idx as usize]
-                                                    print(" off="); print_int(fn_offsets[fn_idx as usize])
+                                                    let mc_start = fn_offsets[fn_idx as usize]
+                                                    wide_flush(code)
+                                                    let mcsz = WIDE_LEN - mc_start
+                                                    print(" off="); print_int(mc_start)
                                                     print(" sz="); print_int(mcsz); print("\n")
                                                 }
-                                                _ => { fn_offsets[fn_idx as usize] = code.len }
+                                                _ => { fn_offsets[fn_idx as usize] = WIDE_LEN }
                                             }
                                             fn_idx = fn_idx + 1
                                         }
@@ -3523,38 +3547,35 @@ fn main() -> i64 with IO, Mut, Panic, Div, Alloc {
         }
     }
 
-    // Patch call instructions: scan for call rel32 placeholders
-    // In ast_compile_expr ExprCall, we emit call rel32 with 0 displacement
-    // We need to find these and patch them with the correct relative offset
-    // For now, we'll do a post-pass scan for 0xe8 0x00 0x00 0x00 0x00 patterns
-    // Post-pass: patch call rel32 instructions
+    // Patch call instructions in WIDE_OUT
     // Scan for pattern: 0xe8 <fn_idx_lo> <fn_idx_hi> 0xCA 0xFE
     var pi: i64 = 0
-    while pi < code.len - 4 {
-        if code.bytes[pi as usize] == (0xe8 as i8) &&
-           code.bytes[(pi + 3) as usize] == (0xCA as i8) &&
-           code.bytes[(pi + 4) as usize] == (0xFE as i8) {
-            let lo_byte = code.bytes[(pi + 1) as usize] as i64
-            let hi_byte = code.bytes[(pi + 2) as usize] as i64
+    while pi < WIDE_LEN - 4 {
+        if WIDE_OUT[pi as usize] == (0xe8 as i8) &&
+           WIDE_OUT[(pi + 3) as usize] == (0xCA as i8) &&
+           WIDE_OUT[(pi + 4) as usize] == (0xFE as i8) {
+            let lo_byte = WIDE_OUT[(pi + 1) as usize] as i64
+            let hi_byte = WIDE_OUT[(pi + 2) as usize] as i64
             let target_idx = (lo_byte & 0xFF) + ((hi_byte & 0xFF) << 8)
             if target_idx >= 0 && target_idx < fn_count {
                 let target_off = fn_offsets[target_idx as usize]
                 let call_site = pi
                 let disp = target_off - (call_site + 5)
-                code.bytes[(pi + 1) as usize] = (disp & 0xFF) as i8
-                code.bytes[(pi + 2) as usize] = ((disp >> 8) & 0xFF) as i8
-                code.bytes[(pi + 3) as usize] = ((disp >> 16) & 0xFF) as i8
-                code.bytes[(pi + 4) as usize] = ((disp >> 24) & 0xFF) as i8
+                WIDE_OUT[(pi + 1) as usize] = (disp & 0xFF) as i8
+                WIDE_OUT[(pi + 2) as usize] = ((disp >> 8) & 0xFF) as i8
+                WIDE_OUT[(pi + 3) as usize] = ((disp >> 16) & 0xFF) as i8
+                WIDE_OUT[(pi + 4) as usize] = ((disp >> 24) & 0xFF) as i8
             }
         }
         pi = pi + 1
     }
 
     // Inline trampoline: call main; mov edi,eax; mov eax,60; syscall
-    let tramp_off = code.len
-    let cs = code.len
+    let tramp_off = WIDE_LEN
+    let cs = WIDE_LEN
     let moff = fn_offsets[main_fn_idx as usize]
     let cd = moff - (cs + 5)
+    code = code_buffer_new()
     code = emit_byte(code, 0xe8)
     code = emit_byte(code, cd & 0xFF)
     code = emit_byte(code, (cd >> 8) & 0xFF)
@@ -3569,78 +3590,79 @@ fn main() -> i64 with IO, Mut, Panic, Div, Alloc {
     code = emit_byte(code, 0x00)
     code = emit_byte(code, 0x0f)
     code = emit_byte(code, 0x05)
+    wide_flush(code)
 
-    let total_code = code.len
+    let total_code = WIDE_LEN
     print("render_compile: total_code=")
     print_int(total_code)
     print(" tramp=")
     print_int(tramp_off)
     print("\n")
 
-    // Inline ELF writer
+    // Inline ELF writer — use wide buffer for output
     let base_addr: i64 = 4194304
     let text_off: i64 = 4096
     let entry_va = base_addr + text_off + tramp_off
 
-    var out: [i8; 65536] = [0; 65536]
-    out[0 as usize] = 0x7f as i8
-    out[1 as usize] = 69 as i8
-    out[2 as usize] = 76 as i8
-    out[3 as usize] = 70 as i8
-    out[4 as usize] = 2 as i8
-    out[5 as usize] = 1 as i8
-    out[6 as usize] = 1 as i8
-    out[16 as usize] = 2 as i8
-    out[18 as usize] = 0x3e as i8
-    out[20 as usize] = 1 as i8
-    out[24 as usize] = (entry_va & 0xFF) as i8
-    out[25 as usize] = ((entry_va >> 8) & 0xFF) as i8
-    out[26 as usize] = ((entry_va >> 16) & 0xFF) as i8
-    out[27 as usize] = ((entry_va >> 24) & 0xFF) as i8
-    out[28 as usize] = ((entry_va >> 32) & 0xFF) as i8
-    out[29 as usize] = ((entry_va >> 40) & 0xFF) as i8
-    out[30 as usize] = ((entry_va >> 48) & 0xFF) as i8
-    out[31 as usize] = ((entry_va >> 56) & 0xFF) as i8
-    out[32 as usize] = 64 as i8
-    out[52 as usize] = 64 as i8
-    out[54 as usize] = 56 as i8
-    out[56 as usize] = 2 as i8
-    out[58 as usize] = 64 as i8
-    out[64 as usize] = 1 as i8
-    out[68 as usize] = 5 as i8
-    out[80 as usize] = (base_addr & 0xFF) as i8
-    out[81 as usize] = ((base_addr >> 8) & 0xFF) as i8
-    out[82 as usize] = ((base_addr >> 16) & 0xFF) as i8
-    out[83 as usize] = ((base_addr >> 24) & 0xFF) as i8
-    out[88 as usize] = (base_addr & 0xFF) as i8
-    out[89 as usize] = ((base_addr >> 8) & 0xFF) as i8
-    out[90 as usize] = ((base_addr >> 16) & 0xFF) as i8
-    out[91 as usize] = ((base_addr >> 24) & 0xFF) as i8
+    var elf: [i8; 262144] = [0; 262144]
+    elf[0 as usize] = 0x7f as i8
+    elf[1 as usize] = 69 as i8
+    elf[2 as usize] = 76 as i8
+    elf[3 as usize] = 70 as i8
+    elf[4 as usize] = 2 as i8
+    elf[5 as usize] = 1 as i8
+    elf[6 as usize] = 1 as i8
+    elf[16 as usize] = 2 as i8
+    elf[18 as usize] = 0x3e as i8
+    elf[20 as usize] = 1 as i8
+    elf[24 as usize] = (entry_va & 0xFF) as i8
+    elf[25 as usize] = ((entry_va >> 8) & 0xFF) as i8
+    elf[26 as usize] = ((entry_va >> 16) & 0xFF) as i8
+    elf[27 as usize] = ((entry_va >> 24) & 0xFF) as i8
+    elf[28 as usize] = ((entry_va >> 32) & 0xFF) as i8
+    elf[29 as usize] = ((entry_va >> 40) & 0xFF) as i8
+    elf[30 as usize] = ((entry_va >> 48) & 0xFF) as i8
+    elf[31 as usize] = ((entry_va >> 56) & 0xFF) as i8
+    elf[32 as usize] = 64 as i8
+    elf[52 as usize] = 64 as i8
+    elf[54 as usize] = 56 as i8
+    elf[56 as usize] = 2 as i8
+    elf[58 as usize] = 64 as i8
+    elf[64 as usize] = 1 as i8
+    elf[68 as usize] = 5 as i8
+    elf[80 as usize] = (base_addr & 0xFF) as i8
+    elf[81 as usize] = ((base_addr >> 8) & 0xFF) as i8
+    elf[82 as usize] = ((base_addr >> 16) & 0xFF) as i8
+    elf[83 as usize] = ((base_addr >> 24) & 0xFF) as i8
+    elf[88 as usize] = (base_addr & 0xFF) as i8
+    elf[89 as usize] = ((base_addr >> 8) & 0xFF) as i8
+    elf[90 as usize] = ((base_addr >> 16) & 0xFF) as i8
+    elf[91 as usize] = ((base_addr >> 24) & 0xFF) as i8
     let fsz = text_off + total_code
-    out[96 as usize] = (fsz & 0xFF) as i8
-    out[97 as usize] = ((fsz >> 8) & 0xFF) as i8
-    out[98 as usize] = ((fsz >> 16) & 0xFF) as i8
-    out[99 as usize] = ((fsz >> 24) & 0xFF) as i8
-    out[104 as usize] = (fsz & 0xFF) as i8
-    out[105 as usize] = ((fsz >> 8) & 0xFF) as i8
-    out[106 as usize] = ((fsz >> 16) & 0xFF) as i8
-    out[107 as usize] = ((fsz >> 24) & 0xFF) as i8
-    out[112 as usize] = 0 as i8
-    out[113 as usize] = 16 as i8
-    out[120 as usize] = 0x51 as i8
-    out[121 as usize] = 0xe5 as i8
-    out[122 as usize] = 0x74 as i8
-    out[123 as usize] = 0x64 as i8
-    out[124 as usize] = 6 as i8
+    elf[96 as usize] = (fsz & 0xFF) as i8
+    elf[97 as usize] = ((fsz >> 8) & 0xFF) as i8
+    elf[98 as usize] = ((fsz >> 16) & 0xFF) as i8
+    elf[99 as usize] = ((fsz >> 24) & 0xFF) as i8
+    elf[104 as usize] = (fsz & 0xFF) as i8
+    elf[105 as usize] = ((fsz >> 8) & 0xFF) as i8
+    elf[106 as usize] = ((fsz >> 16) & 0xFF) as i8
+    elf[107 as usize] = ((fsz >> 24) & 0xFF) as i8
+    elf[112 as usize] = 0 as i8
+    elf[113 as usize] = 16 as i8
+    elf[120 as usize] = 0x51 as i8
+    elf[121 as usize] = 0xe5 as i8
+    elf[122 as usize] = 0x74 as i8
+    elf[123 as usize] = 0x64 as i8
+    elf[124 as usize] = 6 as i8
 
     var ci: i64 = 0
-    while ci < total_code && (text_off + ci) < 65536 {
-        out[(text_off + ci) as usize] = code.bytes[ci as usize]
+    while ci < total_code && (text_off + ci) < 262144 {
+        elf[(text_off + ci) as usize] = WIDE_OUT[ci as usize]
         ci = ci + 1
     }
 
     let total_len = text_off + total_code
-    let write_ok = io_write_native_binary(output_path, out, total_len)
+    let write_ok = io_write_wide_binary(output_path, elf, total_len)
     if !write_ok {
         print("render_compile: write_error\n")
         return 5

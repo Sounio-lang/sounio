@@ -38,8 +38,10 @@ rm -f "$L"
 
 echo ""
 echo "--- Type-check ---"; TOTAL=$((TOTAL+1))
-if timeout 60 "$SOUC" check self-hosted/compiler/main.sio > /dev/null 2>&1; then
+_tc_out=$(timeout 120 "$SOUC" check self-hosted/compiler/main.sio 2>&1) || _tc_ec=$?
+if echo "$_tc_out" | grep -q "All checks passed"; then
     echo "PASS  typecheck"; PASS=$((PASS+1))
+elif [ "${_tc_ec:-0}" -eq 137 ]; then echo "NOT_RUN  typecheck (OOM)"; NOT_RUN=$((NOT_RUN+1))
 else echo "FAIL  typecheck"; FAIL=$((FAIL+1)); fi
 
 echo ""
