@@ -12824,9 +12824,83 @@ fn compiler_main_test_ca_no_fold_outer_or() -> bool with Mut, Div, Panic {
     opt.instrs[4 as usize].op != IrOpcode::IrCopy
 }
 
+// Sprint 166 Block CB: Add/sub-const inverse (T662-T667)
+fn compiler_main_test_cb_add_sub_inverse_basic() -> bool with Mut, Div, Panic {
+    // (r0+5)-5 → r0: bt_add then sub same const
+    var instrs: [IrInstr; 128] = cp_empty_instrs()
+    instrs[0 as usize] = ir_load_imm(1, 5)
+    instrs[1 as usize] = ir_binop(2, 0, BinaryOp::OpAdd, 1)  // r2 = r0+5 (bt_add)
+    instrs[2 as usize] = ir_load_imm(3, 5)
+    instrs[3 as usize] = ir_binop(4, 2, BinaryOp::OpSub, 3)  // r4 = (r0+5)-5 → r0
+    let func = cp_make_test_func(instrs, 4)
+    let opt = opt_cleanup_function(func)
+    opt.instrs[3 as usize].op == IrOpcode::IrCopy && opt.instrs[3 as usize].src1 == 0
+}
+
+fn compiler_main_test_cb_sub_add_inverse_basic() -> bool with Mut, Div, Panic {
+    // (r0-3)+3 → r0: bs_sub then add same const
+    var instrs: [IrInstr; 128] = cp_empty_instrs()
+    instrs[0 as usize] = ir_load_imm(1, 3)
+    instrs[1 as usize] = ir_binop(2, 0, BinaryOp::OpSub, 1)  // r2 = r0-3 (bs_sub)
+    instrs[2 as usize] = ir_load_imm(3, 3)
+    instrs[3 as usize] = ir_binop(4, 2, BinaryOp::OpAdd, 3)  // r4 = (r0-3)+3 → r0
+    let func = cp_make_test_func(instrs, 4)
+    let opt = opt_cleanup_function(func)
+    opt.instrs[3 as usize].op == IrOpcode::IrCopy && opt.instrs[3 as usize].src1 == 0
+}
+
+fn compiler_main_test_cb_sub_add_comm() -> bool with Mut, Div, Panic {
+    // 3+(r0-3) → r0: commutative: const+(sub-const) same C
+    var instrs: [IrInstr; 128] = cp_empty_instrs()
+    instrs[0 as usize] = ir_load_imm(1, 3)
+    instrs[1 as usize] = ir_binop(2, 0, BinaryOp::OpSub, 1)  // r2 = r0-3 (bs_sub)
+    instrs[2 as usize] = ir_load_imm(3, 3)
+    instrs[3 as usize] = ir_binop(4, 3, BinaryOp::OpAdd, 2)  // r4 = 3+(r0-3) → r0
+    let func = cp_make_test_func(instrs, 4)
+    let opt = opt_cleanup_function(func)
+    opt.instrs[3 as usize].op == IrOpcode::IrCopy && opt.instrs[3 as usize].src1 == 0
+}
+
+fn compiler_main_test_cb_no_fold_diff_const() -> bool with Mut, Div, Panic {
+    // (r0+5)-3 → no fold: different constants
+    var instrs: [IrInstr; 128] = cp_empty_instrs()
+    instrs[0 as usize] = ir_load_imm(1, 5)
+    instrs[1 as usize] = ir_binop(2, 0, BinaryOp::OpAdd, 1)  // r2 = r0+5
+    instrs[2 as usize] = ir_load_imm(3, 3)
+    instrs[3 as usize] = ir_binop(4, 2, BinaryOp::OpSub, 3)  // r4 = (r0+5)-3 ≠ cancel
+    let func = cp_make_test_func(instrs, 4)
+    let opt = opt_cleanup_function(func)
+    opt.instrs[3 as usize].op != IrOpcode::IrCopy
+}
+
+fn compiler_main_test_cb_no_fold_same_op() -> bool with Mut, Div, Panic {
+    // (r0+5)+5 → no fold by CB (both adds — not inverse)
+    var instrs: [IrInstr; 128] = cp_empty_instrs()
+    instrs[0 as usize] = ir_load_imm(1, 5)
+    instrs[1 as usize] = ir_binop(2, 0, BinaryOp::OpAdd, 1)
+    instrs[2 as usize] = ir_load_imm(3, 5)
+    instrs[3 as usize] = ir_binop(4, 2, BinaryOp::OpAdd, 3)  // (r0+5)+5 = r0+10 (Block BT)
+    let func = cp_make_test_func(instrs, 4)
+    let opt = opt_cleanup_function(func)
+    // Block BT should fire (→r0+10), not Block CB
+    opt.instrs[3 as usize].op != IrOpcode::IrCopy
+}
+
+fn compiler_main_test_cb_no_fold_plain_sub() -> bool with Mut, Div, Panic {
+    // r0-5 → no fold: not a bt_add-tracked register
+    var instrs: [IrInstr; 128] = cp_empty_instrs()
+    instrs[0 as usize] = ir_load_imm(1, 5)
+    instrs[1 as usize] = ir_binop(2, 0, BinaryOp::OpSub, 1)  // r2 = r0-5 (plain sub, not add-const)
+    instrs[2 as usize] = ir_load_imm(3, 5)
+    instrs[3 as usize] = ir_binop(4, 0, BinaryOp::OpSub, 3)  // r4 = r0-5 directly (not via bt_add)
+    let func = cp_make_test_func(instrs, 4)
+    let opt = opt_cleanup_function(func)
+    opt.instrs[3 as usize].op != IrOpcode::IrCopy
+}
+
 fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
     var passed: i64 = 0
-    let total: i64 = 661
+    let total: i64 = 667
 
     println("=== compiler/main.sio self-tests ===")
 
@@ -16508,6 +16582,32 @@ fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
         passed = passed + 1
         println("  T661 OK: Sprint 165 Block CA: (r0|5)|(r0|~5) no fold outer OR")
     } else { println("  FAIL: T661") }
+
+    // Sprint 166 Block CB: Add/sub-const inverse (T662-T667)
+    if compiler_main_test_cb_add_sub_inverse_basic() {
+        passed = passed + 1
+        println("  T662 OK: Sprint 166 Block CB: (r0+5)-5->r0")
+    } else { println("  FAIL: T662") }
+    if compiler_main_test_cb_sub_add_inverse_basic() {
+        passed = passed + 1
+        println("  T663 OK: Sprint 166 Block CB: (r0-3)+3->r0")
+    } else { println("  FAIL: T663") }
+    if compiler_main_test_cb_sub_add_comm() {
+        passed = passed + 1
+        println("  T664 OK: Sprint 166 Block CB: 3+(r0-3)->r0 commutative")
+    } else { println("  FAIL: T664") }
+    if compiler_main_test_cb_no_fold_diff_const() {
+        passed = passed + 1
+        println("  T665 OK: Sprint 166 Block CB: (r0+5)-3 no fold diff const")
+    } else { println("  FAIL: T665") }
+    if compiler_main_test_cb_no_fold_same_op() {
+        passed = passed + 1
+        println("  T666 OK: Sprint 166 Block CB: (r0+5)+5 no IrCopy (Block BT fires)")
+    } else { println("  FAIL: T666") }
+    if compiler_main_test_cb_no_fold_plain_sub() {
+        passed = passed + 1
+        println("  T667 OK: Sprint 166 Block CB: plain r0-5 no fold")
+    } else { println("  FAIL: T667") }
 
     println("")
     println("compiler/main tests: " + int_to_string(passed) + "/" + int_to_string(total) + " passed")

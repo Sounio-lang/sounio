@@ -2334,7 +2334,60 @@ fn ocp_const_fold(func: IrFunction) -> IrFunction with Mut, Div, Panic {
             }
         }
 
-                        // Sprint 82 Block J: Unary operation constant folding.
+                        // Sprint 166 Block CB: Add/sub-const inverse — (x+C)-C → x, (x-C)+C → x.
+        // Group-theoretic inverse: a + (-a) = 0, so (x+C)-C = x and (x-C)+C = x.
+        // Also commutative add outer: C+(x-C) → x.
+        // Zero new arrays: uses bt_add_valid/src/cval (Block BT) + bs_sub_valid/src/cval (Block BS).
+        // SOTA: LLVM InstCombineAddSub — add/sub cancellation; group inverse law.
+        if ocp_is_binop(result.instrs[i as usize].op) {
+            let cb_instr = result.instrs[i as usize]
+            let cb_s1 = cb_instr.src1; let cb_s2 = cb_instr.src2
+            let cb_s1_ok = cb_s1 >= 0 && cb_s1 < 256; let cb_s2_ok = cb_s2 >= 0 && cb_s2 < 256
+            // (x+C)-C → x: sub with s1=add-const, s2=same const C
+            if cb_instr.bin_op == BinaryOp::OpSub
+                    && cb_s1_ok && bt_add_valid[cb_s1 as usize]
+                    && cb_s2_ok && is_const[cb_s2 as usize]
+                    && bt_add_cval[cb_s1 as usize] == const_val[cb_s2 as usize] {
+                result.instrs[i as usize] = ir_copy(cb_instr.dst, bt_add_src[cb_s1 as usize])
+                if cb_instr.dst >= 0 && cb_instr.dst < 256 {
+                    let cb_base = bt_add_src[cb_s1 as usize]
+                    if cb_base >= 0 && cb_base < 256 && is_const[cb_base as usize] {
+                        is_const[cb_instr.dst as usize] = true
+                        const_val[cb_instr.dst as usize] = const_val[cb_base as usize]
+                    }
+                }
+            }
+            // (x-C)+C → x (add outer): add with s1=sub-const, s2=same const C
+            if cb_instr.bin_op == BinaryOp::OpAdd
+                    && cb_s1_ok && bs_sub_valid[cb_s1 as usize]
+                    && cb_s2_ok && is_const[cb_s2 as usize]
+                    && bs_sub_cval[cb_s1 as usize] == const_val[cb_s2 as usize] {
+                result.instrs[i as usize] = ir_copy(cb_instr.dst, bs_sub_src[cb_s1 as usize])
+                if cb_instr.dst >= 0 && cb_instr.dst < 256 {
+                    let cb_base = bs_sub_src[cb_s1 as usize]
+                    if cb_base >= 0 && cb_base < 256 && is_const[cb_base as usize] {
+                        is_const[cb_instr.dst as usize] = true
+                        const_val[cb_instr.dst as usize] = const_val[cb_base as usize]
+                    }
+                }
+            }
+            // C+(x-C) → x (commutative add): add with s1=const, s2=sub-const same C
+            if cb_instr.bin_op == BinaryOp::OpAdd
+                    && cb_s1_ok && is_const[cb_s1 as usize]
+                    && cb_s2_ok && bs_sub_valid[cb_s2 as usize]
+                    && const_val[cb_s1 as usize] == bs_sub_cval[cb_s2 as usize] {
+                result.instrs[i as usize] = ir_copy(cb_instr.dst, bs_sub_src[cb_s2 as usize])
+                if cb_instr.dst >= 0 && cb_instr.dst < 256 {
+                    let cb_base = bs_sub_src[cb_s2 as usize]
+                    if cb_base >= 0 && cb_base < 256 && is_const[cb_base as usize] {
+                        is_const[cb_instr.dst as usize] = true
+                        const_val[cb_instr.dst as usize] = const_val[cb_base as usize]
+                    }
+                }
+            }
+        }
+
+        // Sprint 82 Block J: Unary operation constant folding.
         // Folds IrUnaryOp when the source operand is a known constant.
         // Only OpNeg and OpNot are foldable (Ref/RefMut/Deref are memory ops).
         // (Wegman & Zadeck TOPLAS 1991 §4: constant folding completeness
