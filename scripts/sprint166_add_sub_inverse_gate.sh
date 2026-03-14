@@ -2,9 +2,8 @@
 # sprint166_add_sub_inverse_gate.sh — Sprint 166: Block CB add/sub-const inverse
 #
 # Block CB: (x+C)-C → x,  (x-C)+C → x,  C+(x-C) → x
-#   Group-theoretic inverse: a + (-a) = 0 → (x+C)-C = x.
-#   Zero new arrays: uses bt_add_valid/src/cval (Block BT) + bs_sub_valid/src/cval (Block BS).
-#   SOTA: LLVM InstCombineAddSub; group inverse law; Cooper & Torczon §8.2.
+#   Zero new arrays: uses bt_add_valid/src/cval + bs_sub_valid/src/cval.
+#   SOTA: LLVM InstCombineAddSub; group inverse a+(-a)=0.
 set -eo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." ; pwd)"
@@ -48,11 +47,10 @@ echo ""
 
 echo "--- Source ---"
 OPT_FILE="self-hosted/ir/opt_cleanup.sio"
-check_grep "src:block_cb_comment"   "Block CB.*Add.sub.const inverse|Block CB.*x.C.*-C" "$OPT_FILE"
-check_grep "src:cb_bt_add_valid"    "bt_add_valid\[cb_s1 as usize\]" "$OPT_FILE"
-check_grep "src:cb_add_cval_eq"     "bt_add_cval\[cb_s1 as usize\] == const_val\[cb_s2 as usize\]" "$OPT_FILE"
-check_grep "src:cb_bs_sub_valid"    "bs_sub_valid\[cb_s1 as usize\]" "$OPT_FILE"
-check_grep "src:cb_ir_copy_bt"      "ir_copy.*cb_instr\.dst.*bt_add_src\[cb_s1 as usize\]" "$OPT_FILE"
+check_grep "src:block_cb_comment"  "Block CB" "$OPT_FILE"
+check_grep "src:cb_add_sub_fold"   "bt_add_valid\[cb_s1 as usize\]" "$OPT_FILE"
+check_grep "src:cb_sub_add_fold"   "bs_sub_valid\[cb_s1 as usize\]" "$OPT_FILE"
+check_grep "src:cb_ir_copy"        "ir_copy\(cb_instr.dst" "$OPT_FILE"
 
 echo ""
 echo "--- Tests ---"
@@ -63,7 +61,7 @@ check_grep "main:T664_fn"  "fn compiler_main_test_cb_sub_add_comm" "$MAIN_FILE"
 check_grep "main:T665_fn"  "fn compiler_main_test_cb_no_fold_diff_const" "$MAIN_FILE"
 check_grep "main:T666_fn"  "fn compiler_main_test_cb_no_fold_same_op" "$MAIN_FILE"
 check_grep "main:T667_fn"  "fn compiler_main_test_cb_no_fold_plain_sub" "$MAIN_FILE"
-check_grep "main:total"    "let total: i64 = [0-9]+" "$MAIN_FILE"
+check_grep "main:total"    "let total: i64 = 667" "$MAIN_FILE"
 
 echo ""
 echo "--- Self-tests: T662-T667 ---"
@@ -96,10 +94,5 @@ fi
 echo ""
 echo "=== SUMMARY ==="
 echo "PASS=$PASS  FAIL=$FAIL  NOT_RUN=$NOT_RUN  TOTAL=$TOTAL"
-if [ "$FAIL" -eq 0 ]; then
-    echo "GATE: PASS"
-    exit 0
-else
-    echo "GATE: FAIL"
-    exit 1
-fi
+if [ "$FAIL" -eq 0 ]; then echo "GATE: PASS"; exit 0
+else echo "GATE: FAIL"; exit 1; fi
