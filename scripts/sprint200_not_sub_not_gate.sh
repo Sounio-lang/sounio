@@ -1,5 +1,9 @@
 #!/usr/bin/env bash
 # sprint200_not_sub_not_gate.sh — Sprint 200: Block DJ NOT-sub-NOT to reverse-sub
+#
+# Block DJ: ~x - ~y → y - x.
+#   Zero new arrays: uses is_bnot/bnot_src (Block AI/BJ).
+#   SOTA: LLVM InstCombineAddSub; two's-complement arithmetic.
 set -eo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." ; pwd)"; cd "$ROOT_DIR"
 PASS=0; FAIL=0; NOT_RUN=0; TOTAL=0
@@ -11,7 +15,7 @@ echo ""; echo "--- Source ---"
 O="self-hosted/ir/opt_cleanup.sio"
 cg "src:block_dj"      "Block DJ" "$O"
 cg "src:dj_is_bnot"    "is_bnot\[dj_s[12] as usize\]" "$O"
-cg "src:dj_reverse"    "ir_binop.*dj_y.*OpSub.*dj_x" "$O"
+cg "src:dj_reverse"    "ir_binop.*dj_instr\.dst.*dj_y.*OpSub.*dj_x" "$O"
 echo ""; echo "--- Tests ---"
 M="self-hosted/compiler/main.sio"
 cg "main:T866_fn" "fn compiler_main_test_dj_not_sub_not_basic" "$M"
