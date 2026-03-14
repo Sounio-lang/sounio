@@ -1396,6 +1396,25 @@ fn ocp_const_fold(func: IrFunction) -> IrFunction with Mut, Div, Panic {
             }
         }
 
+        // Sprint 142 Block BD: Const-offset difference collapse.
+        // (x + C1) - (x + C2) → C1 - C2  (shared base cancels; any +/- combo).
+        // SOTA: LLVM InstCombineAddSub.cpp — sub(add X,C1),(add X,C2)→C1-C2;
+        // Cooper & Torczon §8.4 algebraic simplification.
+        // Distinct from Block P ((x+C)-C→x): BOTH operands are const-offset exprs.
+        // Zero new arrays: reuses as_valid/var_src/const_v/as_is_add from Block P (Sprint 89).
+        if ocp_is_binop(result.instrs[i as usize].op) {
+            let bd_instr = result.instrs[i as usize]
+            let bd_s1 = bd_instr.src1; let bd_s2 = bd_instr.src2
+            let bd_s1_ok = bd_s1 >= 0 && bd_s1 < 256; let bd_s2_ok = bd_s2 >= 0 && bd_s2 < 256
+            if bd_instr.bin_op == BinaryOp::OpSub && bd_s1_ok && bd_s2_ok
+                    && as_valid[bd_s1 as usize] && as_valid[bd_s2 as usize]
+                    && as_var_src[bd_s1 as usize] == as_var_src[bd_s2 as usize] {
+                let bd_v1 = if as_is_add[bd_s1 as usize] { as_const_v[bd_s1 as usize] } else { 0 - as_const_v[bd_s1 as usize] }
+                let bd_v2 = if as_is_add[bd_s2 as usize] { as_const_v[bd_s2 as usize] } else { 0 - as_const_v[bd_s2 as usize] }
+                result.instrs[i as usize] = ir_load_imm(bd_instr.dst, bd_v1 - bd_v2)
+            }
+        }
+
                         // Sprint 82 Block J: Unary operation constant folding.
         // Folds IrUnaryOp when the source operand is a known constant.
         // Only OpNeg and OpNot are foldable (Ref/RefMut/Deref are memory ops).
