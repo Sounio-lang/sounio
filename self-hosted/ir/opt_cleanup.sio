@@ -2612,6 +2612,60 @@ fn ocp_const_fold(func: IrFunction) -> IrFunction with Mut, Div, Panic {
             }
         }
 
+        // Sprint 173 Block CI: Shift-add to multiply — (x<<A)+x → x*(2^A+1).
+        // Also: x+(x<<A) → x*(2^A+1) (commutative).
+        // Proof: x<<A = x*2^A; x*2^A + x = x*(2^A+1). Canonical mul form for further SR.
+        // Zero new arrays: reuses bk_shl_valid/src/amt (Block BK) + def_at + mul_valid.
+        // Guard: 2^A+1 must fit in i64 (A<63). SOTA: LLVM InstCombineAddSub + MulSR.
+        if ocp_is_binop(result.instrs[i as usize].op) {
+            let ci_instr = result.instrs[i as usize]
+            let ci_s1 = ci_instr.src1; let ci_s2 = ci_instr.src2
+            let ci_s1_ok = ci_s1 >= 0 && ci_s1 < 256
+            let ci_s2_ok = ci_s2 >= 0 && ci_s2 < 256
+            if ci_instr.bin_op == BinaryOp::OpAdd {
+                // (x<<A) + x → x*(2^A+1): s1=shl-const, s2==base of s1
+                if ci_s1_ok && bk_shl_valid[ci_s1 as usize]
+                        && bk_shl_src[ci_s1 as usize] == ci_s2 {
+                    let ci_amt = bk_shl_amt[ci_s1 as usize]
+                    if ci_amt >= 0 && ci_amt < 63 {
+                        let ci_pow2 = 1 << (ci_amt as i32)
+                        let ci_merged = ci_pow2 + 1
+                        let ci_def = def_at[ci_s1 as usize]
+                        if ci_def >= 0 {
+                            result.instrs[ci_def as usize] = ir_load_imm(ci_s1, ci_merged as i64)
+                            const_val[ci_s1 as usize] = ci_merged as i64
+                        }
+                        result.instrs[i as usize] = ir_binop(ci_instr.dst, ci_s2, BinaryOp::OpMul, ci_s1)
+                        if ci_instr.dst >= 0 && ci_instr.dst < 256 {
+                            mul_valid[ci_instr.dst as usize]   = true
+                            mul_var_src[ci_instr.dst as usize] = ci_s2
+                            mul_const_v[ci_instr.dst as usize] = ci_merged as i64
+                        }
+                    }
+                }
+                // x + (x<<A) → x*(2^A+1): s2=shl-const, s1==base of s2
+                if ci_s2_ok && bk_shl_valid[ci_s2 as usize]
+                        && bk_shl_src[ci_s2 as usize] == ci_s1 {
+                    let ci_amt = bk_shl_amt[ci_s2 as usize]
+                    if ci_amt >= 0 && ci_amt < 63 {
+                        let ci_pow2 = 1 << (ci_amt as i32)
+                        let ci_merged = ci_pow2 + 1
+                        let ci_def = def_at[ci_s2 as usize]
+                        if ci_def >= 0 {
+                            result.instrs[ci_def as usize] = ir_load_imm(ci_s2, ci_merged as i64)
+                            const_val[ci_s2 as usize] = ci_merged as i64
+                        }
+                        result.instrs[i as usize] = ir_binop(ci_instr.dst, ci_s1, BinaryOp::OpMul, ci_s2)
+                        if ci_instr.dst >= 0 && ci_instr.dst < 256 {
+                            mul_valid[ci_instr.dst as usize]   = true
+                            mul_var_src[ci_instr.dst as usize] = ci_s1
+                            mul_const_v[ci_instr.dst as usize] = ci_merged as i64
+                        }
+                    }
+                }
+            }
+        }
+
         // Sprint 82 Block J: Unary operation constant folding.
         // Folds IrUnaryOp when the source operand is a known constant.
         // Only OpNeg and OpNot are foldable (Ref/RefMut/Deref are memory ops).
