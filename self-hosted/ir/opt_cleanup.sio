@@ -2241,6 +2241,34 @@ fn ocp_const_fold(func: IrFunction) -> IrFunction with Mut, Div, Panic {
             }
         }
 
+        // Sprint 163 Block BY: XOR-OR same-constant fold — (x ^ C) | C → x | C.
+        // Proof: C-bits (C_i=1): (xi^1)|1=1=xi|1. Non-C-bits (C_i=0): (xi^0)|0=xi=xi|0.
+        // The XOR on C-bits is annihilated by the subsequent OR; result is x | C.
+        // Handles commutative outer: C | (x ^ C) → x | C.
+        // Zero new arrays: uses bm_xor_valid/src/cval (Block BM) + is_const/const_val.
+        // SOTA: LLVM InstCombineAndOrXor or(xor(X,C),C) → or(X,C); Boolean absorption.
+        if ocp_is_binop(result.instrs[i as usize].op) {
+            let by_instr = result.instrs[i as usize]
+            let by_s1 = by_instr.src1; let by_s2 = by_instr.src2
+            let by_s1_ok = by_s1 >= 0 && by_s1 < 256; let by_s2_ok = by_s2 >= 0 && by_s2 < 256
+            if by_instr.bin_op == BinaryOp::OpBitOr {
+                // (x ^ C) | C → x | C: s1 is xor-const, s2 == same C
+                if by_s1_ok && bm_xor_valid[by_s1 as usize]
+                        && by_s2_ok && is_const[by_s2 as usize]
+                        && bm_xor_cval[by_s1 as usize] == const_val[by_s2 as usize] {
+                    result.instrs[i as usize] = ir_binop(by_instr.dst,
+                        bm_xor_src[by_s1 as usize], BinaryOp::OpBitOr, by_s2)
+                }
+                // C | (x ^ C) → x | C: commutative outer
+                if by_s2_ok && bm_xor_valid[by_s2 as usize]
+                        && by_s1_ok && is_const[by_s1 as usize]
+                        && bm_xor_cval[by_s2 as usize] == const_val[by_s1 as usize] {
+                    result.instrs[i as usize] = ir_binop(by_instr.dst,
+                        bm_xor_src[by_s2 as usize], BinaryOp::OpBitOr, by_s1)
+                }
+            }
+        }
+
                         // Sprint 82 Block J: Unary operation constant folding.
         // Folds IrUnaryOp when the source operand is a known constant.
         // Only OpNeg and OpNot are foldable (Ref/RefMut/Deref are memory ops).
