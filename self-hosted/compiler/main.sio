@@ -15100,9 +15100,81 @@ fn compiler_main_test_dg_no_fold_and_outer() -> bool with Mut, Div, Panic {
     opt.instrs[2 as usize].op != IrOpcode::IrUnaryOp
 }
 
+// Sprint 198 Block DH: AND-NOT-OR annihilation (T854-T859)
+fn compiler_main_test_dh_and_not_or_basic() -> bool with Mut, Div, Panic {
+    // r2 = r0|r1; r3 = ~r2; r4 = r0 & r3 → IrLoadImm(0)
+    var instrs: [IrInstr; 128] = cp_empty_instrs()
+    instrs[0 as usize] = ir_binop(2, 0, BinaryOp::OpBitOr, 1)
+    instrs[1 as usize] = ir_unaryop(3, UnaryOp::OpNot, 2)
+    instrs[2 as usize] = ir_binop(4, 0, BinaryOp::OpBitAnd, 3)
+    let func = cp_make_test_func(instrs, 3)
+    let opt = opt_cleanup_function(func)
+    opt.instrs[2 as usize].op == IrOpcode::IrLoadImm
+        && opt.instrs[2 as usize].imm == 0
+}
+
+fn compiler_main_test_dh_and_not_or_rhs() -> bool with Mut, Div, Panic {
+    // r2 = r0|r1; r3 = ~r2; r4 = r1 & r3 → 0 (other operand)
+    var instrs: [IrInstr; 128] = cp_empty_instrs()
+    instrs[0 as usize] = ir_binop(2, 0, BinaryOp::OpBitOr, 1)
+    instrs[1 as usize] = ir_unaryop(3, UnaryOp::OpNot, 2)
+    instrs[2 as usize] = ir_binop(4, 1, BinaryOp::OpBitAnd, 3)
+    let func = cp_make_test_func(instrs, 3)
+    let opt = opt_cleanup_function(func)
+    opt.instrs[2 as usize].op == IrOpcode::IrLoadImm
+        && opt.instrs[2 as usize].imm == 0
+}
+
+fn compiler_main_test_dh_and_not_or_comm() -> bool with Mut, Div, Panic {
+    // r2 = r0|r1; r3 = ~r2; r4 = r3 & r0 → 0 (NOT on left)
+    var instrs: [IrInstr; 128] = cp_empty_instrs()
+    instrs[0 as usize] = ir_binop(2, 0, BinaryOp::OpBitOr, 1)
+    instrs[1 as usize] = ir_unaryop(3, UnaryOp::OpNot, 2)
+    instrs[2 as usize] = ir_binop(4, 3, BinaryOp::OpBitAnd, 0)
+    let func = cp_make_test_func(instrs, 3)
+    let opt = opt_cleanup_function(func)
+    opt.instrs[2 as usize].op == IrOpcode::IrLoadImm
+        && opt.instrs[2 as usize].imm == 0
+}
+
+fn compiler_main_test_dh_no_fold_diff_reg() -> bool with Mut, Div, Panic {
+    // r2 = r0|r1; r3 = ~r2; r4 = r5 & r3 → no fold (r5 not in OR)
+    var instrs: [IrInstr; 128] = cp_empty_instrs()
+    instrs[0 as usize] = ir_binop(2, 0, BinaryOp::OpBitOr, 1)
+    instrs[1 as usize] = ir_unaryop(3, UnaryOp::OpNot, 2)
+    instrs[2 as usize] = ir_binop(4, 5, BinaryOp::OpBitAnd, 3)
+    let func = cp_make_test_func(instrs, 3)
+    let opt = opt_cleanup_function(func)
+    opt.instrs[2 as usize].op != IrOpcode::IrLoadImm
+}
+
+fn compiler_main_test_dh_no_fold_or_op() -> bool with Mut, Div, Panic {
+    // r2 = r0|r1; r3 = ~r2; r4 = r0 | r3 → no fold by DH (OR not AND)
+    var instrs: [IrInstr; 128] = cp_empty_instrs()
+    instrs[0 as usize] = ir_binop(2, 0, BinaryOp::OpBitOr, 1)
+    instrs[1 as usize] = ir_unaryop(3, UnaryOp::OpNot, 2)
+    instrs[2 as usize] = ir_binop(4, 0, BinaryOp::OpBitOr, 3)
+    let func = cp_make_test_func(instrs, 3)
+    let opt = opt_cleanup_function(func)
+    opt.instrs[2 as usize].op != IrOpcode::IrLoadImm
+}
+
+fn compiler_main_test_dh_no_fold_not_and() -> bool with Mut, Div, Panic {
+    // r2 = r0&r1; r3 = ~r2; r4 = r0 & r3 → no fold by DH (AND not OR inside NOT)
+    var instrs: [IrInstr; 128] = cp_empty_instrs()
+    instrs[0 as usize] = ir_binop(2, 0, BinaryOp::OpBitAnd, 1)
+    instrs[1 as usize] = ir_unaryop(3, UnaryOp::OpNot, 2)
+    instrs[2 as usize] = ir_binop(4, 0, BinaryOp::OpBitAnd, 3)
+    let func = cp_make_test_func(instrs, 3)
+    let opt = opt_cleanup_function(func)
+    // DH only fires when inner is OR; AND gives different semantic
+    opt.instrs[2 as usize].op != IrOpcode::IrLoadImm
+        || opt.instrs[2 as usize].imm != 0
+}
+
 fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
     var passed: i64 = 0
-    let total: i64 = 853
+    let total: i64 = 859
 
     println("=== compiler/main.sio self-tests ===")
 
@@ -19562,6 +19634,32 @@ fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
         passed = passed + 1
         println("  T853 OK: Sprint 197 Block DG: ~(r0^r1)&r1 no fold AND outer")
     } else { println("  FAIL: T853") }
+
+    // Sprint 198 Block DH: AND-NOT-OR annihilation (T854-T859)
+    if compiler_main_test_dh_and_not_or_basic() {
+        passed = passed + 1
+        println("  T854 OK: Sprint 198 Block DH: r0&~(r0|r1) -> 0")
+    } else { println("  FAIL: T854") }
+    if compiler_main_test_dh_and_not_or_rhs() {
+        passed = passed + 1
+        println("  T855 OK: Sprint 198 Block DH: r1&~(r0|r1) -> 0")
+    } else { println("  FAIL: T855") }
+    if compiler_main_test_dh_and_not_or_comm() {
+        passed = passed + 1
+        println("  T856 OK: Sprint 198 Block DH: ~(r0|r1)&r0 -> 0 comm")
+    } else { println("  FAIL: T856") }
+    if compiler_main_test_dh_no_fold_diff_reg() {
+        passed = passed + 1
+        println("  T857 OK: Sprint 198 Block DH: r5&~(r0|r1) no fold diff reg")
+    } else { println("  FAIL: T857") }
+    if compiler_main_test_dh_no_fold_or_op() {
+        passed = passed + 1
+        println("  T858 OK: Sprint 198 Block DH: r0|~(r0|r1) no fold OR outer")
+    } else { println("  FAIL: T858") }
+    if compiler_main_test_dh_no_fold_not_and() {
+        passed = passed + 1
+        println("  T859 OK: Sprint 198 Block DH: r0&~(r0&r1) no fold NOT-AND")
+    } else { println("  FAIL: T859") }
 
     println("")
     println("compiler/main tests: " + int_to_string(passed) + "/" + int_to_string(total) + " passed")
