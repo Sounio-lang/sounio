@@ -15605,9 +15605,83 @@ fn compiler_main_test_dn_no_fold_not_sub() -> bool with Mut, Div, Panic {
     opt.instrs[2 as usize].src1 == 2 && opt.instrs[2 as usize].src2 == 3
 }
 
+// Sprint 205 Block DO: Add-sub common-addend cancel (T896-T901)
+fn compiler_main_test_do_add_sub_cancel_basic() -> bool with Mut, Div, Panic {
+    // r2=r0+r1; r3=r1+r4; r5=r2-r3 → r0-r4
+    var instrs: [IrInstr; 128] = cp_empty_instrs()
+    instrs[0 as usize] = ir_binop(2, 0, BinaryOp::OpAdd, 1)
+    instrs[1 as usize] = ir_binop(3, 1, BinaryOp::OpAdd, 4)
+    instrs[2 as usize] = ir_binop(5, 2, BinaryOp::OpSub, 3)
+    let func = cp_make_test_func(instrs, 3)
+    let opt = opt_cleanup_function(func)
+    opt.instrs[2 as usize].op == IrOpcode::IrBinOp
+        && opt.instrs[2 as usize].bin_op == BinaryOp::OpSub
+        && opt.instrs[2 as usize].src1 == 0
+        && opt.instrs[2 as usize].src2 == 4
+}
+
+fn compiler_main_test_do_add_sub_cancel_shared_left() -> bool with Mut, Div, Panic {
+    // (r0+r1)-(r0+r4) → r1-r4  (shared left operand)
+    var instrs: [IrInstr; 128] = cp_empty_instrs()
+    instrs[0 as usize] = ir_binop(2, 0, BinaryOp::OpAdd, 1)
+    instrs[1 as usize] = ir_binop(3, 0, BinaryOp::OpAdd, 4)
+    instrs[2 as usize] = ir_binop(5, 2, BinaryOp::OpSub, 3)
+    let func = cp_make_test_func(instrs, 3)
+    let opt = opt_cleanup_function(func)
+    opt.instrs[2 as usize].op == IrOpcode::IrBinOp
+        && opt.instrs[2 as usize].bin_op == BinaryOp::OpSub
+        && opt.instrs[2 as usize].src1 == 1
+        && opt.instrs[2 as usize].src2 == 4
+}
+
+fn compiler_main_test_do_add_sub_cancel_self() -> bool with Mut, Div, Panic {
+    // (r0+r1)-(r0+r1) → 0
+    var instrs: [IrInstr; 128] = cp_empty_instrs()
+    instrs[0 as usize] = ir_binop(2, 0, BinaryOp::OpAdd, 1)
+    instrs[1 as usize] = ir_binop(3, 0, BinaryOp::OpAdd, 1)
+    instrs[2 as usize] = ir_binop(5, 2, BinaryOp::OpSub, 3)
+    let func = cp_make_test_func(instrs, 3)
+    let opt = opt_cleanup_function(func)
+    opt.instrs[2 as usize].op == IrOpcode::IrLoadImm
+        && opt.instrs[2 as usize].imm == 0
+}
+
+fn compiler_main_test_do_no_fold_no_common() -> bool with Mut, Div, Panic {
+    // (r0+r1)-(r2+r3) → no fold (no shared term)
+    var instrs: [IrInstr; 128] = cp_empty_instrs()
+    instrs[0 as usize] = ir_binop(2, 0, BinaryOp::OpAdd, 1)
+    instrs[1 as usize] = ir_binop(3, 5, BinaryOp::OpAdd, 4)
+    instrs[2 as usize] = ir_binop(6, 2, BinaryOp::OpSub, 3)
+    let func = cp_make_test_func(instrs, 3)
+    let opt = opt_cleanup_function(func)
+    opt.instrs[2 as usize].src1 == 2 && opt.instrs[2 as usize].src2 == 3
+}
+
+fn compiler_main_test_do_no_fold_add_outer() -> bool with Mut, Div, Panic {
+    // (r0+r1)+(r1+r4) → no fold by DO (ADD not SUB outer)
+    var instrs: [IrInstr; 128] = cp_empty_instrs()
+    instrs[0 as usize] = ir_binop(2, 0, BinaryOp::OpAdd, 1)
+    instrs[1 as usize] = ir_binop(3, 1, BinaryOp::OpAdd, 4)
+    instrs[2 as usize] = ir_binop(5, 2, BinaryOp::OpAdd, 3)
+    let func = cp_make_test_func(instrs, 3)
+    let opt = opt_cleanup_function(func)
+    opt.instrs[2 as usize].bin_op != BinaryOp::OpSub
+}
+
+fn compiler_main_test_do_no_fold_not_add() -> bool with Mut, Div, Panic {
+    // (r0-r1)-(r1+r4) → no fold by DO (s1 is SUB not ADD)
+    var instrs: [IrInstr; 128] = cp_empty_instrs()
+    instrs[0 as usize] = ir_binop(2, 0, BinaryOp::OpSub, 1)
+    instrs[1 as usize] = ir_binop(3, 1, BinaryOp::OpAdd, 4)
+    instrs[2 as usize] = ir_binop(5, 2, BinaryOp::OpSub, 3)
+    let func = cp_make_test_func(instrs, 3)
+    let opt = opt_cleanup_function(func)
+    opt.instrs[2 as usize].src1 == 2 && opt.instrs[2 as usize].src2 == 3
+}
+
 fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
     var passed: i64 = 0
-    let total: i64 = 895
+    let total: i64 = 901
 
     println("=== compiler/main.sio self-tests ===")
 
@@ -20249,6 +20323,32 @@ fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
         passed = passed + 1
         println("  T895 OK: Sprint 204 Block DN: (r0+r1)-(r0-r4) no fold not sub")
     } else { println("  FAIL: T895") }
+
+    // Sprint 205 Block DO: Add-sub common-addend cancel (T896-T901)
+    if compiler_main_test_do_add_sub_cancel_basic() {
+        passed = passed + 1
+        println("  T896 OK: Sprint 205 Block DO: (r0+r1)-(r1+r4) -> r0-r4")
+    } else { println("  FAIL: T896") }
+    if compiler_main_test_do_add_sub_cancel_shared_left() {
+        passed = passed + 1
+        println("  T897 OK: Sprint 205 Block DO: (r0+r1)-(r0+r4) -> r1-r4")
+    } else { println("  FAIL: T897") }
+    if compiler_main_test_do_add_sub_cancel_self() {
+        passed = passed + 1
+        println("  T898 OK: Sprint 205 Block DO: (r0+r1)-(r0+r1) -> 0")
+    } else { println("  FAIL: T898") }
+    if compiler_main_test_do_no_fold_no_common() {
+        passed = passed + 1
+        println("  T899 OK: Sprint 205 Block DO: (r0+r1)-(r2+r3) no fold no common")
+    } else { println("  FAIL: T899") }
+    if compiler_main_test_do_no_fold_add_outer() {
+        passed = passed + 1
+        println("  T900 OK: Sprint 205 Block DO: (r0+r1)+(r1+r4) no fold ADD outer")
+    } else { println("  FAIL: T900") }
+    if compiler_main_test_do_no_fold_not_add() {
+        passed = passed + 1
+        println("  T901 OK: Sprint 205 Block DO: (r0-r1)-(r1+r4) no fold not add")
+    } else { println("  FAIL: T901") }
 
     println("")
     println("compiler/main tests: " + int_to_string(passed) + "/" + int_to_string(total) + " passed")

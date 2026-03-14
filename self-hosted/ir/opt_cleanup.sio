@@ -3546,6 +3546,49 @@ fn ocp_const_fold(func: IrFunction) -> IrFunction with Mut, Div, Panic {
             }
         }
 
+        // Sprint 205 Block DO: Add-sub common-addend cancel — (x+y)-(y+z) → x-z.
+        // Proof: (x+y)-(y+z) = x+y-y-z = x-z. QED. Commutative in both sums.
+        // Zero new arrays: uses aq_add_rr_valid/lhs/rhs (Block AQ tracking, Sprint 129).
+        // SOTA: LLVM InstCombineAddSub; group-theoretic additive cancellation.
+        if ocp_is_binop(result.instrs[i as usize].op) {
+            let do_instr = result.instrs[i as usize]
+            let do_s1 = do_instr.src1; let do_s2 = do_instr.src2
+            let do_s1_ok = do_s1 >= 0 && do_s1 < 256; let do_s2_ok = do_s2 >= 0 && do_s2 < 256
+            if do_instr.bin_op == BinaryOp::OpSub {
+                if do_s1_ok && aq_add_rr_valid[do_s1 as usize]
+                        && do_s2_ok && aq_add_rr_valid[do_s2 as usize] {
+                    let do_al = aq_add_rr_lhs[do_s1 as usize]
+                    let do_ar = aq_add_rr_rhs[do_s1 as usize]
+                    let do_bl = aq_add_rr_lhs[do_s2 as usize]
+                    let do_br = aq_add_rr_rhs[do_s2 as usize]
+                    // shared right: do_ar == do_bl or do_ar == do_br → result = do_al - other
+                    if do_ar == do_bl {
+                        result.instrs[i as usize] = ir_binop(do_instr.dst, do_al, BinaryOp::OpSub, do_br)
+                        al_is_sub[do_instr.dst as usize] = true
+                        al_sub_lhs[do_instr.dst as usize] = do_al
+                        al_sub_rhs[do_instr.dst as usize] = do_br
+                    } else if do_ar == do_br {
+                        result.instrs[i as usize] = ir_binop(do_instr.dst, do_al, BinaryOp::OpSub, do_bl)
+                        al_is_sub[do_instr.dst as usize] = true
+                        al_sub_lhs[do_instr.dst as usize] = do_al
+                        al_sub_rhs[do_instr.dst as usize] = do_bl
+                    } else if do_al == do_bl {
+                        // shared left: (x+y)-(x+z) → y-z
+                        result.instrs[i as usize] = ir_binop(do_instr.dst, do_ar, BinaryOp::OpSub, do_br)
+                        al_is_sub[do_instr.dst as usize] = true
+                        al_sub_lhs[do_instr.dst as usize] = do_ar
+                        al_sub_rhs[do_instr.dst as usize] = do_br
+                    } else if do_al == do_br {
+                        // shared: (x+y)-(z+x) → y-z
+                        result.instrs[i as usize] = ir_binop(do_instr.dst, do_ar, BinaryOp::OpSub, do_bl)
+                        al_is_sub[do_instr.dst as usize] = true
+                        al_sub_lhs[do_instr.dst as usize] = do_ar
+                        al_sub_rhs[do_instr.dst as usize] = do_bl
+                    }
+                }
+            }
+        }
+
         // Sprint 177 Block CM: AND complement XOR partition — (x & C) ^ (x & ~C) → x.
         // Proof: C-bits: (xi&1)^(xi&0)=xi^0=xi. Non-C: (xi&0)^(xi&1)=0^xi=xi. QED.
         // Dual of Block CC (OR partition). Commutative: (x&~C)^(x&C) → x.
