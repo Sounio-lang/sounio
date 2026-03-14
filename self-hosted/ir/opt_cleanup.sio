@@ -2803,6 +2803,127 @@ fn ocp_const_fold(func: IrFunction) -> IrFunction with Mut, Div, Panic {
             }
         }
 
+        // Sprint 183 Block CS: Mul-const distributive add — x*C1 + x*C2 → x*(C1+C2).
+        // Proof: distributive law. Reduces two multiplies + add to one multiply.
+        // Zero new arrays: uses mul_valid/mul_var_src/mul_const_v.
+        // SOTA: LLVM Reassociate.cpp; ring theory distributive axiom.
+        if ocp_is_binop(result.instrs[i as usize].op) {
+            let cs_instr = result.instrs[i as usize]
+            let cs_s1 = cs_instr.src1; let cs_s2 = cs_instr.src2
+            let cs_s1_ok = cs_s1 >= 0 && cs_s1 < 256; let cs_s2_ok = cs_s2 >= 0 && cs_s2 < 256
+            if cs_instr.bin_op == BinaryOp::OpAdd
+                    && cs_s1_ok && mul_valid[cs_s1 as usize]
+                    && cs_s2_ok && mul_valid[cs_s2 as usize]
+                    && mul_var_src[cs_s1 as usize] == mul_var_src[cs_s2 as usize] {
+                let cs_x = mul_var_src[cs_s1 as usize]
+                let cs_merged = mul_const_v[cs_s1 as usize] + mul_const_v[cs_s2 as usize]
+                let cs_def = def_at[cs_s1 as usize]
+                if cs_def >= 0 {
+                    result.instrs[cs_def as usize] = ir_load_imm(cs_s1, cs_merged)
+                    const_val[cs_s1 as usize] = cs_merged
+                }
+                result.instrs[i as usize] = ir_binop(cs_instr.dst, cs_x, BinaryOp::OpMul, cs_s1)
+                if cs_instr.dst >= 0 && cs_instr.dst < 256 {
+                    mul_valid[cs_instr.dst as usize]   = true
+                    mul_var_src[cs_instr.dst as usize] = cs_x
+                    mul_const_v[cs_instr.dst as usize] = cs_merged
+                }
+            }
+        }
+
+        // Sprint 184 Block CT: Mul-const distributive sub — x*C1 - x*C2 → x*(C1-C2).
+        // Proof: distributive law. x*C1 - x*C2 = x*(C1-C2).
+        // Zero new arrays: uses mul_valid/mul_var_src/mul_const_v.
+        // SOTA: LLVM Reassociate.cpp; ring theory.
+        if ocp_is_binop(result.instrs[i as usize].op) {
+            let ct_instr = result.instrs[i as usize]
+            let ct_s1 = ct_instr.src1; let ct_s2 = ct_instr.src2
+            let ct_s1_ok = ct_s1 >= 0 && ct_s1 < 256; let ct_s2_ok = ct_s2 >= 0 && ct_s2 < 256
+            if ct_instr.bin_op == BinaryOp::OpSub
+                    && ct_s1_ok && mul_valid[ct_s1 as usize]
+                    && ct_s2_ok && mul_valid[ct_s2 as usize]
+                    && mul_var_src[ct_s1 as usize] == mul_var_src[ct_s2 as usize] {
+                let ct_x = mul_var_src[ct_s1 as usize]
+                let ct_merged = mul_const_v[ct_s1 as usize] - mul_const_v[ct_s2 as usize]
+                let ct_def = def_at[ct_s1 as usize]
+                if ct_def >= 0 {
+                    result.instrs[ct_def as usize] = ir_load_imm(ct_s1, ct_merged)
+                    const_val[ct_s1 as usize] = ct_merged
+                }
+                result.instrs[i as usize] = ir_binop(ct_instr.dst, ct_x, BinaryOp::OpMul, ct_s1)
+                if ct_instr.dst >= 0 && ct_instr.dst < 256 {
+                    mul_valid[ct_instr.dst as usize]   = true
+                    mul_var_src[ct_instr.dst as usize] = ct_x
+                    mul_const_v[ct_instr.dst as usize] = ct_merged
+                }
+            }
+        }
+
+        // Sprint 185 Block CU: Shift-add factoring — (x<<A) + (x<<B) → x*((1<<A)+(1<<B)).
+        // Proof: x*2^A + x*2^B = x*(2^A+2^B). Reduces two shifts + add to one multiply.
+        // Guard: A<63 && B<63 to avoid overflow.
+        // Zero new arrays: uses bk_shl_valid/bk_shl_src/bk_shl_amt.
+        // SOTA: LLVM Reassociate.cpp; Hacker's Delight §8 (multiply decomposition).
+        if ocp_is_binop(result.instrs[i as usize].op) {
+            let cu_instr = result.instrs[i as usize]
+            let cu_s1 = cu_instr.src1; let cu_s2 = cu_instr.src2
+            let cu_s1_ok = cu_s1 >= 0 && cu_s1 < 256; let cu_s2_ok = cu_s2 >= 0 && cu_s2 < 256
+            if cu_instr.bin_op == BinaryOp::OpAdd
+                    && cu_s1_ok && bk_shl_valid[cu_s1 as usize]
+                    && cu_s2_ok && bk_shl_valid[cu_s2 as usize]
+                    && bk_shl_src[cu_s1 as usize] == bk_shl_src[cu_s2 as usize] {
+                let cu_x = bk_shl_src[cu_s1 as usize]
+                let cu_a = bk_shl_amt[cu_s1 as usize]
+                let cu_b = bk_shl_amt[cu_s2 as usize]
+                if cu_a >= 0 && cu_a < 63 && cu_b >= 0 && cu_b < 63 {
+                    let cu_merged = (1 << (cu_a as i32)) + (1 << (cu_b as i32))
+                    let cu_def = def_at[cu_s1 as usize]
+                    if cu_def >= 0 {
+                        result.instrs[cu_def as usize] = ir_load_imm(cu_s1, cu_merged as i64)
+                        const_val[cu_s1 as usize] = cu_merged as i64
+                    }
+                    result.instrs[i as usize] = ir_binop(cu_instr.dst, cu_x, BinaryOp::OpMul, cu_s1)
+                    if cu_instr.dst >= 0 && cu_instr.dst < 256 {
+                        mul_valid[cu_instr.dst as usize]   = true
+                        mul_var_src[cu_instr.dst as usize] = cu_x
+                        mul_const_v[cu_instr.dst as usize] = cu_merged as i64
+                    }
+                }
+            }
+        }
+
+        // Sprint 186 Block CV: Shift-sub factoring — (x<<A) - (x<<B) → x*((1<<A)-(1<<B)).
+        // Proof: x*2^A - x*2^B = x*(2^A-2^B). Guard: A<63 && B<63.
+        // Zero new arrays: uses bk_shl_valid/bk_shl_src/bk_shl_amt.
+        // SOTA: LLVM Reassociate.cpp; Hacker's Delight §8.
+        if ocp_is_binop(result.instrs[i as usize].op) {
+            let cv_instr = result.instrs[i as usize]
+            let cv_s1 = cv_instr.src1; let cv_s2 = cv_instr.src2
+            let cv_s1_ok = cv_s1 >= 0 && cv_s1 < 256; let cv_s2_ok = cv_s2 >= 0 && cv_s2 < 256
+            if cv_instr.bin_op == BinaryOp::OpSub
+                    && cv_s1_ok && bk_shl_valid[cv_s1 as usize]
+                    && cv_s2_ok && bk_shl_valid[cv_s2 as usize]
+                    && bk_shl_src[cv_s1 as usize] == bk_shl_src[cv_s2 as usize] {
+                let cv_x = bk_shl_src[cv_s1 as usize]
+                let cv_a = bk_shl_amt[cv_s1 as usize]
+                let cv_b = bk_shl_amt[cv_s2 as usize]
+                if cv_a >= 0 && cv_a < 63 && cv_b >= 0 && cv_b < 63 {
+                    let cv_merged = (1 << (cv_a as i32)) - (1 << (cv_b as i32))
+                    let cv_def = def_at[cv_s1 as usize]
+                    if cv_def >= 0 {
+                        result.instrs[cv_def as usize] = ir_load_imm(cv_s1, cv_merged as i64)
+                        const_val[cv_s1 as usize] = cv_merged as i64
+                    }
+                    result.instrs[i as usize] = ir_binop(cv_instr.dst, cv_x, BinaryOp::OpMul, cv_s1)
+                    if cv_instr.dst >= 0 && cv_instr.dst < 256 {
+                        mul_valid[cv_instr.dst as usize]   = true
+                        mul_var_src[cv_instr.dst as usize] = cv_x
+                        mul_const_v[cv_instr.dst as usize] = cv_merged as i64
+                    }
+                }
+            }
+        }
+
         // Sprint 177 Block CM: AND complement XOR partition — (x & C) ^ (x & ~C) → x.
         // Proof: C-bits: (xi&1)^(xi&0)=xi^0=xi. Non-C: (xi&0)^(xi&1)=0^xi=xi. QED.
         // Dual of Block CC (OR partition). Commutative: (x&~C)^(x&C) → x.
@@ -2946,6 +3067,83 @@ fn ocp_const_fold(func: IrFunction) -> IrFunction with Mut, Div, Panic {
                     if cr_s2 >= 0 && cr_s2 < 256 {
                         is_bnot[cr_s2 as usize]  = true
                         bnot_src[cr_s2 as usize] = cr_x
+                    }
+                }
+            }
+        }
+
+        // Sprint 183 Block CS: Sub-add constant chain fold — (x-C1)+C2 → x+(C2-C1).
+        // If C2==C1 → IrCopy(x); if C2>C1 → x+(C2-C1); else → x-(C1-C2).
+        // Zero new arrays: uses bs_sub_valid/bs_sub_src/bs_sub_cval (Block BS)
+        //   and bt_add_valid/bt_add_src/bt_add_cval (Block BT).
+        // SOTA: LLVM InstCombineAddSub; associative constant folding for add/sub.
+        if instr.op == IrOpcode::IrBinOp && instr.bin_op == BinaryOp::OpAdd {
+            let cs_instr = instr
+            let cs_s1 = cs_instr.src1
+            let cs_s2 = cs_instr.src2
+            let cs_s1_ok = cs_s1 >= 0 && cs_s1 < 256
+            let cs_s2_ok = cs_s2 >= 0 && cs_s2 < 256
+            // (x-C1)+C2 → x+(C2-C1)
+            if cs_s1_ok && bs_sub_valid[cs_s1 as usize]
+                    && cs_s2_ok && is_const[cs_s2 as usize] {
+                let cs_c1 = bs_sub_cval[cs_s1 as usize]
+                let cs_c2 = const_val[cs_s2 as usize]
+                let cs_merged = cs_c2 - cs_c1
+                let cs_cdef = def_at[cs_s2 as usize]
+                if cs_merged == 0 {
+                    result.instrs[i as usize] = ir_copy(cs_instr.dst, bs_sub_src[cs_s1 as usize])
+                } else if cs_cdef >= 0 {
+                    result.instrs[cs_cdef as usize] = ir_load_imm(cs_s2, cs_merged)
+                    const_val[cs_s2 as usize] = cs_merged
+                    if cs_merged > 0 {
+                        result.instrs[i as usize] = ir_binop(cs_instr.dst, bs_sub_src[cs_s1 as usize], BinaryOp::OpAdd, cs_s2)
+                        if cs_instr.dst >= 0 && cs_instr.dst < 256 {
+                            bt_add_valid[cs_instr.dst as usize] = true
+                            bt_add_src[cs_instr.dst as usize]   = bs_sub_src[cs_s1 as usize]
+                            bt_add_cval[cs_instr.dst as usize]  = cs_merged
+                        }
+                    } else {
+                        let cs_neg = 0 - cs_merged
+                        result.instrs[cs_cdef as usize] = ir_load_imm(cs_s2, cs_neg)
+                        const_val[cs_s2 as usize] = cs_neg
+                        result.instrs[i as usize] = ir_binop(cs_instr.dst, bs_sub_src[cs_s1 as usize], BinaryOp::OpSub, cs_s2)
+                        if cs_instr.dst >= 0 && cs_instr.dst < 256 {
+                            bs_sub_valid[cs_instr.dst as usize] = true
+                            bs_sub_src[cs_instr.dst as usize]   = bs_sub_src[cs_s1 as usize]
+                            bs_sub_cval[cs_instr.dst as usize]  = cs_neg
+                        }
+                    }
+                }
+            }
+            // C2+(x-C1) → x+(C2-C1) commutative
+            if cs_s2_ok && bs_sub_valid[cs_s2 as usize]
+                    && cs_s1_ok && is_const[cs_s1 as usize] {
+                let cs_c1 = bs_sub_cval[cs_s2 as usize]
+                let cs_c2 = const_val[cs_s1 as usize]
+                let cs_merged = cs_c2 - cs_c1
+                let cs_cdef = def_at[cs_s1 as usize]
+                if cs_merged == 0 {
+                    result.instrs[i as usize] = ir_copy(cs_instr.dst, bs_sub_src[cs_s2 as usize])
+                } else if cs_cdef >= 0 {
+                    result.instrs[cs_cdef as usize] = ir_load_imm(cs_s1, cs_merged)
+                    const_val[cs_s1 as usize] = cs_merged
+                    if cs_merged > 0 {
+                        result.instrs[i as usize] = ir_binop(cs_instr.dst, bs_sub_src[cs_s2 as usize], BinaryOp::OpAdd, cs_s1)
+                        if cs_instr.dst >= 0 && cs_instr.dst < 256 {
+                            bt_add_valid[cs_instr.dst as usize] = true
+                            bt_add_src[cs_instr.dst as usize]   = bs_sub_src[cs_s2 as usize]
+                            bt_add_cval[cs_instr.dst as usize]  = cs_merged
+                        }
+                    } else {
+                        let cs_neg = 0 - cs_merged
+                        result.instrs[cs_cdef as usize] = ir_load_imm(cs_s1, cs_neg)
+                        const_val[cs_s1 as usize] = cs_neg
+                        result.instrs[i as usize] = ir_binop(cs_instr.dst, bs_sub_src[cs_s2 as usize], BinaryOp::OpSub, cs_s1)
+                        if cs_instr.dst >= 0 && cs_instr.dst < 256 {
+                            bs_sub_valid[cs_instr.dst as usize] = true
+                            bs_sub_src[cs_instr.dst as usize]   = bs_sub_src[cs_s2 as usize]
+                            bs_sub_cval[cs_instr.dst as usize]  = cs_neg
+                        }
                     }
                 }
             }
