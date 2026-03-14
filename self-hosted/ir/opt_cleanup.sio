@@ -2521,6 +2521,51 @@ fn ocp_const_fold(func: IrFunction) -> IrFunction with Mut, Div, Panic {
             }
         }
 
+        // Sprint 171 Block CG: Multiply-add normalization — (x*C)+x → x*(C+1).
+        // Also: x+(x*C) → x*(C+1) (commutative).
+        // Proof: x*C + x = x*(C+1) by distributivity.
+        // Zero new arrays: uses mul_valid/mul_var_src/mul_const_v + def_at + is_const.
+        // SOTA: LLVM InstCombineMulDivRem; distributive law x*C+x=x*(C+1).
+        if ocp_is_binop(result.instrs[i as usize].op) {
+            let cg_instr = result.instrs[i as usize]
+            let cg_s1 = cg_instr.src1; let cg_s2 = cg_instr.src2
+            let cg_s1_ok = cg_s1 >= 0 && cg_s1 < 256; let cg_s2_ok = cg_s2 >= 0 && cg_s2 < 256
+            if cg_instr.bin_op == BinaryOp::OpAdd {
+                // (x*C) + x → x*(C+1): s1=mul-const, s2==base of s1
+                if cg_s1_ok && mul_valid[cg_s1 as usize]
+                        && mul_var_src[cg_s1 as usize] == cg_s2 {
+                    let cg_merged = mul_const_v[cg_s1 as usize] + 1
+                    let cg_def = def_at[cg_s1 as usize]
+                    if cg_def >= 0 {
+                        result.instrs[cg_def as usize] = ir_load_imm(cg_s1, cg_merged)
+                        const_val[cg_s1 as usize] = cg_merged
+                    }
+                    result.instrs[i as usize] = ir_binop(cg_instr.dst, cg_s2, BinaryOp::OpMul, cg_s1)
+                    if cg_instr.dst >= 0 && cg_instr.dst < 256 {
+                        mul_valid[cg_instr.dst as usize]   = true
+                        mul_var_src[cg_instr.dst as usize] = cg_s2
+                        mul_const_v[cg_instr.dst as usize] = cg_merged
+                    }
+                }
+                // x + (x*C) → x*(C+1): s2=mul-const, s1==base of s2
+                if cg_s2_ok && mul_valid[cg_s2 as usize]
+                        && mul_var_src[cg_s2 as usize] == cg_s1 {
+                    let cg_merged = mul_const_v[cg_s2 as usize] + 1
+                    let cg_def = def_at[cg_s2 as usize]
+                    if cg_def >= 0 {
+                        result.instrs[cg_def as usize] = ir_load_imm(cg_s2, cg_merged)
+                        const_val[cg_s2 as usize] = cg_merged
+                    }
+                    result.instrs[i as usize] = ir_binop(cg_instr.dst, cg_s1, BinaryOp::OpMul, cg_s2)
+                    if cg_instr.dst >= 0 && cg_instr.dst < 256 {
+                        mul_valid[cg_instr.dst as usize]   = true
+                        mul_var_src[cg_instr.dst as usize] = cg_s1
+                        mul_const_v[cg_instr.dst as usize] = cg_merged
+                    }
+                }
+            }
+        }
+
         // Sprint 82 Block J: Unary operation constant folding.
         // Folds IrUnaryOp when the source operand is a known constant.
         // Only OpNeg and OpNot are foldable (Ref/RefMut/Deref are memory ops).
