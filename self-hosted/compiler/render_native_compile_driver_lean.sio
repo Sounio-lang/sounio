@@ -835,14 +835,14 @@ fn ast_emit_inline_print_str(code: CodeBuffer, str_buf: [i8; 128], str_len: i64)
 
 struct AstCompileCtx {
     struct_count: i64,
-    struct_names: [Name; 16],
-    struct_flat_size: [i64; 16],
-    struct_field_count: [i64; 16],
-    struct_field_base: [i64; 16],
-    sf_names: [Name; 128],
-    sf_flat_offset: [i64; 128],
-    sf_type: [i64; 128],       // 0=i64, 1=f64, 10+=struct_idx+10
-    sf_flat_size: [i64; 128],  // 1 for scalars, N for sub-structs
+    struct_names: [Name; 32],
+    struct_flat_size: [i64; 32],
+    struct_field_count: [i64; 32],
+    struct_field_base: [i64; 32],
+    sf_names: [Name; 256],
+    sf_flat_offset: [i64; 256],
+    sf_type: [i64; 256],       // 0=i64, 1=f64, 10+=struct_idx+10
+    sf_flat_size: [i64; 256],  // 1 for scalars, N for sub-structs
     fn_return_types: [i64; 64],
     fn_names: [Name; 64],
     fn_count: i64,
@@ -962,6 +962,194 @@ fn ast_struct_field_info(ctx: &AstCompileCtx, struct_idx: i64, field_name: Name)
     -1
 }
 
+// Returns flat_size of a TypeExpr given already-registered structs.
+// i64/bool/ref/string → 1 slot; f64 → 1 slot; array → 1 slot;
+// named struct → struct_flat_size; tuple → sum of elements; else → 1
+fn ast_type_flat_size(ty: &TypeExpr, ctx: &AstCompileCtx) -> i64 with Mut, Panic, Div {
+    if ty.kind == TypeExprKind::TypeTuple {
+        var total: i64 = 0
+        let targs: &Option<Box<TypeExprList>> = &ty.type_args
+        var tcur = targs
+        var tdone = false
+        while !tdone {
+            match *tcur {
+                Some(tl) => {
+                    let elem_sz = ast_type_flat_size(&(*tl).head, ctx)
+                    total = total + elem_sz
+                    tcur = &(*tl).tail
+                }
+                _ => { tdone = true }
+            }
+        }
+        if total == 0 { 1 } else { total }
+    } else if ty.kind == TypeExprKind::TypeNamed {
+        let nm = ast_name_from_path(&ty.path)
+        let si = ast_lookup_struct(ctx, nm)
+        if si >= 0 { ctx.struct_flat_size[si as usize] } else { 1 }
+    } else { 1 }
+}
+
+// Synthesize a tuple (T0, T1) as an anonymous struct in ctx.
+// Returns the struct index, or existing index if already registered.
+// Name is "__tN_M" where N = flat_size(T0), M = flat_size(T1).
+fn ast_ensure_tuple2(ctx: &!AstCompileCtx, te: &TypeExpr) -> i64 with Mut, Panic, Div {
+    // Only handle 2-element tuples for now (covers all (Parser, T) patterns)
+    let targs: &Option<Box<TypeExprList>> = &te.type_args
+    var e0_sz: i64 = 1
+    var e1_sz: i64 = 1
+    match *targs {
+        Some(tl0) => {
+            e0_sz = ast_type_flat_size(&(*tl0).head, ctx)
+            let targs1: &Option<Box<TypeExprList>> = &(*tl0).tail
+            match *targs1 {
+                Some(tl1) => {
+                    e1_sz = ast_type_flat_size(&(*tl1).head, ctx)
+                }
+                _ => {}
+            }
+        }
+        _ => {}
+    }
+    // Build name "__tN_M"
+    var tname = ir_empty_name()
+    tname.buf[0 as usize] = 95 as i8  // _
+    tname.buf[1 as usize] = 95 as i8  // _
+    tname.buf[2 as usize] = 116 as i8 // t
+    // encode e0_sz as decimal
+    var ni: i64 = 3
+    var v0 = e0_sz
+    if v0 == 0 { tname.buf[ni as usize] = 48 as i8; ni = ni + 1 }
+    else {
+        var tmp0: [i8; 8] = [0; 8]
+        var tc0: i64 = 0
+        while v0 > 0 {
+            tmp0[tc0 as usize] = (48 + (v0 - (v0 / 10) * 10)) as i8
+            v0 = v0 / 10
+            tc0 = tc0 + 1
+        }
+        var ri0 = tc0 - 1
+        while ri0 >= 0 {
+            tname.buf[ni as usize] = tmp0[ri0 as usize]
+            ni = ni + 1
+            ri0 = ri0 - 1
+        }
+    }
+    tname.buf[ni as usize] = 95 as i8  // _
+    ni = ni + 1
+    var v1 = e1_sz
+    if v1 == 0 { tname.buf[ni as usize] = 48 as i8; ni = ni + 1 }
+    else {
+        var tmp1: [i8; 8] = [0; 8]
+        var tc1: i64 = 0
+        while v1 > 0 {
+            tmp1[tc1 as usize] = (48 + (v1 - (v1 / 10) * 10)) as i8
+            v1 = v1 / 10
+            tc1 = tc1 + 1
+        }
+        var ri1 = tc1 - 1
+        while ri1 >= 0 {
+            tname.buf[ni as usize] = tmp1[ri1 as usize]
+            ni = ni + 1
+            ri1 = ri1 - 1
+        }
+    }
+    tname.len = ni
+    // Check if already registered
+    let existing = ast_lookup_struct(ctx, tname)
+    if existing >= 0 { return existing }
+    // Register new tuple struct
+    let si = ctx.struct_count
+    ctx.struct_names[si as usize] = tname
+    ctx.struct_flat_size[si as usize] = e0_sz + e1_sz
+    let fb = if si == 0 { 0 } else { ctx.struct_field_base[(si-1) as usize] + ctx.struct_field_count[(si-1) as usize] }
+    ctx.struct_field_base[si as usize] = fb
+    ctx.struct_field_count[si as usize] = 2
+    // Field "0" (first element)
+    var f0name = ir_empty_name()
+    f0name.buf[0 as usize] = 48 as i8  // '0'
+    f0name.len = 1
+    ctx.sf_names[fb as usize] = f0name
+    ctx.sf_flat_offset[fb as usize] = 0
+    ctx.sf_type[fb as usize] = if e0_sz == 1 { 0 } else { 0 }  // simplified: just size matters
+    ctx.sf_flat_size[fb as usize] = e0_sz
+    // Field "1" (second element)
+    var f1name = ir_empty_name()
+    f1name.buf[0 as usize] = 49 as i8  // '1'
+    f1name.len = 1
+    ctx.sf_names[(fb+1) as usize] = f1name
+    ctx.sf_flat_offset[(fb+1) as usize] = e0_sz
+    ctx.sf_type[(fb+1) as usize] = 0
+    ctx.sf_flat_size[(fb+1) as usize] = e1_sz
+    ctx.struct_count = si + 1
+    si
+}
+
+// Read-only lookup: find tuple struct by name without creating it.
+// Used in ast_compile_fn_body where ctx is &AstCompileCtx (not &!).
+// All tuples must already be registered by the first pass in main().
+fn ast_lookup_tuple2_struct(ctx: &AstCompileCtx, te: &TypeExpr) -> i64 with Mut, Panic, Div {
+    let targs: &Option<Box<TypeExprList>> = &te.type_args
+    var e0_sz: i64 = 1
+    var e1_sz: i64 = 1
+    match *targs {
+        Some(tl0) => {
+            e0_sz = ast_type_flat_size(&(*tl0).head, ctx)
+            let targs1: &Option<Box<TypeExprList>> = &(*tl0).tail
+            match *targs1 {
+                Some(tl1) => {
+                    e1_sz = ast_type_flat_size(&(*tl1).head, ctx)
+                }
+                _ => {}
+            }
+        }
+        _ => {}
+    }
+    // Build name "__tN_M"
+    var tname = ir_empty_name()
+    tname.buf[0 as usize] = 95 as i8  // _
+    tname.buf[1 as usize] = 95 as i8  // _
+    tname.buf[2 as usize] = 116 as i8 // t
+    var ni: i64 = 3
+    var v0 = e0_sz
+    if v0 == 0 { tname.buf[ni as usize] = 48 as i8; ni = ni + 1 }
+    else {
+        var tmp0: [i8; 8] = [0; 8]
+        var tc0: i64 = 0
+        while v0 > 0 {
+            tmp0[tc0 as usize] = (48 + (v0 - (v0 / 10) * 10)) as i8
+            v0 = v0 / 10
+            tc0 = tc0 + 1
+        }
+        var ri0 = tc0 - 1
+        while ri0 >= 0 {
+            tname.buf[ni as usize] = tmp0[ri0 as usize]
+            ni = ni + 1
+            ri0 = ri0 - 1
+        }
+    }
+    tname.buf[ni as usize] = 95 as i8  // _
+    ni = ni + 1
+    var v1 = e1_sz
+    if v1 == 0 { tname.buf[ni as usize] = 48 as i8; ni = ni + 1 }
+    else {
+        var tmp1: [i8; 8] = [0; 8]
+        var tc1: i64 = 0
+        while v1 > 0 {
+            tmp1[tc1 as usize] = (48 + (v1 - (v1 / 10) * 10)) as i8
+            v1 = v1 / 10
+            tc1 = tc1 + 1
+        }
+        var ri1 = tc1 - 1
+        while ri1 >= 0 {
+            tname.buf[ni as usize] = tmp1[ri1 as usize]
+            ni = ni + 1
+            ri1 = ri1 - 1
+        }
+    }
+    tname.len = ni
+    ast_lookup_struct(ctx, tname)
+}
+
 fn ast_name_from_path(path: &AstPath) -> Name with Mut, Panic, Div {
     let seg: &StringList = &path.segments
     var nm = ir_empty_name()
@@ -1052,6 +1240,58 @@ fn ast_expr_result_type(expr: &Expr, local_names: [Name; 64], local_types: [i64;
         let sn = ast_name_from_path(&expr.path)
         let si = ast_lookup_struct(ctx, sn)
         if si >= 0 { return si + 10 }
+        return 0
+    }
+    if expr.kind == ExprKind::ExprTupleLit {
+        // Look up the tuple type by reconstructing element sizes
+        let tlt: &Option<Box<ExprList>> = &expr.args
+        var e0: i64 = 0
+        var e1: i64 = 0
+        match *tlt {
+            Some(tel0) => {
+                let t0 = ast_expr_result_type(&(*tel0).head, local_names, local_types, local_count, ctx)
+                if t0 >= 10 && t0 < 100 { e0 = ctx.struct_flat_size[(t0-10) as usize] } else { e0 = 1 }
+                let tl1: &Option<Box<ExprList>> = &(*tel0).tail
+                match *tl1 {
+                    Some(tel1) => {
+                        let t1 = ast_expr_result_type(&(*tel1).head, local_names, local_types, local_count, ctx)
+                        if t1 >= 10 && t1 < 100 { e1 = ctx.struct_flat_size[(t1-10) as usize] } else { e1 = 1 }
+                    }
+                    _ => {}
+                }
+            }
+            _ => {}
+        }
+        // Build name and look up
+        var ttname = ir_empty_name()
+        ttname.buf[0 as usize] = 95 as i8; ttname.buf[1 as usize] = 95 as i8; ttname.buf[2 as usize] = 116 as i8
+        var tni: i64 = 3
+        if e0 == 0 { ttname.buf[tni as usize] = 48 as i8; tni = tni + 1 }
+        else {
+            var tv0 = e0
+            var tt0: [i8; 8] = [0; 8]; var ttc0: i64 = 0
+            while tv0 > 0 {
+                tt0[ttc0 as usize] = (48 + (tv0 - (tv0/10)*10)) as i8
+                tv0 = tv0 / 10; ttc0 = ttc0 + 1
+            }
+            var tri0 = ttc0 - 1
+            while tri0 >= 0 { ttname.buf[tni as usize] = tt0[tri0 as usize]; tni = tni + 1; tri0 = tri0 - 1 }
+        }
+        ttname.buf[tni as usize] = 95 as i8; tni = tni + 1
+        if e1 == 0 { ttname.buf[tni as usize] = 48 as i8; tni = tni + 1 }
+        else {
+            var tv1 = e1
+            var tt1: [i8; 8] = [0; 8]; var ttc1: i64 = 0
+            while tv1 > 0 {
+                tt1[ttc1 as usize] = (48 + (tv1 - (tv1/10)*10)) as i8
+                tv1 = tv1 / 10; ttc1 = ttc1 + 1
+            }
+            var tri1 = ttc1 - 1
+            while tri1 >= 0 { ttname.buf[tni as usize] = tt1[tri1 as usize]; tni = tni + 1; tri1 = tri1 - 1 }
+        }
+        ttname.len = tni
+        let tsi2 = ast_lookup_struct(ctx, ttname)
+        if tsi2 >= 0 { return tsi2 + 10 }
         return 0
     }
     if expr.kind == ExprKind::ExprFieldAccess {
@@ -2321,6 +2561,76 @@ fn ast_compile_expr(code: CodeBuffer, expr: &Expr,
             c = emit_byte(c, 0x48); c = emit_byte(c, 0x31); c = emit_byte(c, 0xc0)
         }
         c
+    } else if expr.kind == ExprKind::ExprTupleLit {
+        // Tuple literal (e0, e1): allocate consecutive stack slots, compile each element,
+        // store to slots, return LEA to base slot (highest addr = slot 0).
+        let tl_args: &Option<Box<ExprList>> = &expr.args
+        // Collect element sizes to allocate total space
+        var tl_ns = code_get_ns(c)
+        let tl_base = tl_ns
+        // First pass: count elements and determine total slots needed
+        var tl_total: i64 = 0
+        var tl_el_cur = tl_args
+        while true {
+            match *tl_el_cur {
+                Some(tel) => {
+                    let elem_type = ast_expr_result_type(&(*tel).head, local_names, local_types, local_count, ctx)
+                    var esz: i64 = 1
+                    if elem_type >= 10 && elem_type < 100 {
+                        let esi2 = elem_type - 10
+                        esz = ctx.struct_flat_size[esi2 as usize]
+                    } else if elem_type >= 100 {
+                        esz = 1  // pointer
+                    }
+                    tl_total = tl_total + esz
+                    tl_el_cur = &(*tel).tail
+                }
+                _ => break
+            }
+        }
+        tl_ns = tl_ns + tl_total
+        c = code_set_ns(c, tl_ns)
+        // Second pass: compile each element and store to its slot
+        var tl_offset: i64 = 0
+        var tl_el_cur2 = tl_args
+        while true {
+            match *tl_el_cur2 {
+                Some(tel2) => {
+                    let et2 = ast_expr_result_type(&(*tel2).head, local_names, local_types, local_count, ctx)
+                    c = ast_compile_expr(c, &(*tel2).head, local_names, local_slots, local_types, local_count, ctx)
+                    var esz2: i64 = 1
+                    if et2 >= 10 && et2 < 100 {
+                        let esi3 = et2 - 10
+                        esz2 = ctx.struct_flat_size[esi3 as usize]
+                    }
+                    if esz2 == 1 {
+                        c = micro_store_rax(c, tl_base + tl_offset)
+                    } else {
+                        // Sub-struct: rax = source base, memcpy esz2 qwords
+                        c = emit_byte(c, 0x56); c = emit_byte(c, 0x57); c = emit_byte(c, 0x51)
+                        if esz2 > 1 {
+                            let tadj = (esz2 - 1) * 8
+                            c = emit_byte(c, 0x48); c = emit_byte(c, 0x2d)
+                            c = emit_byte(c, tadj & 0xFF); c = emit_byte(c, (tadj >> 8) & 0xFF)
+                            c = emit_byte(c, (tadj >> 16) & 0xFF); c = emit_byte(c, (tadj >> 24) & 0xFF)
+                        }
+                        c = emit_byte(c, 0x48); c = emit_byte(c, 0x89); c = emit_byte(c, 0xc6) // mov rsi, rax
+                        c = micro_lea_rax_slot(c, tl_base + tl_offset + esz2 - 1)
+                        c = emit_byte(c, 0x48); c = emit_byte(c, 0x89); c = emit_byte(c, 0xc7) // mov rdi, rax
+                        c = emit_byte(c, 0x48); c = emit_byte(c, 0xc7); c = emit_byte(c, 0xc1)
+                        c = emit_byte(c, esz2 & 0xFF); c = emit_byte(c, 0); c = emit_byte(c, 0); c = emit_byte(c, 0)
+                        c = emit_byte(c, 0xf3); c = emit_byte(c, 0x48); c = emit_byte(c, 0xa5) // rep movsq
+                        c = emit_byte(c, 0x59); c = emit_byte(c, 0x5f); c = emit_byte(c, 0x5e)
+                    }
+                    tl_offset = tl_offset + esz2
+                    tl_el_cur2 = &(*tel2).tail
+                }
+                _ => break
+            }
+        }
+        // Return LEA to base slot (first element, highest addr in stack-down layout)
+        c = micro_lea_rax_slot(c, tl_base)
+        c
     } else if expr.kind == ExprKind::ExprMatch {
         // Compile match expression (Option pattern: Some(x) / _ only for now)
         // 1. Compile scrutinee → rax
@@ -2705,6 +3015,14 @@ fn ast_compile_fn_body(code: CodeBuffer, fd: &FnDef,
                     sret_struct_idx = rt_si
                     sret_flat_size = ctx.struct_flat_size[rt_si as usize]
                 }
+            } else if (*rte).kind == TypeExprKind::TypeTuple {
+                // Tuple return type — look up already-registered tuple struct
+                let tsi = ast_lookup_tuple2_struct(ctx, &(*rte))
+                if tsi >= 0 {
+                    is_sret = true
+                    sret_struct_idx = tsi
+                    sret_flat_size = ctx.struct_flat_size[tsi as usize]
+                }
             }
         }
         _ => {}
@@ -2986,6 +3304,11 @@ fn main() -> i64 with IO, Mut, Panic, Div, Alloc {
                                         if rt_si >= 0 {
                                             fn_return_types[fn_count as usize] = 10 + rt_si
                                         }
+                                    } else if (*rte).kind == TypeExprKind::TypeTuple {
+                                        let tsi = ast_ensure_tuple2(&ctx, &(*rte))
+                                        if tsi >= 0 {
+                                            fn_return_types[fn_count as usize] = 10 + tsi
+                                        }
                                     }
                                 }
                                 _ => {}
@@ -3022,6 +3345,11 @@ fn main() -> i64 with IO, Mut, Panic, Div, Alloc {
                                                                 let mrt_si = ast_lookup_struct(&ctx, mrt_name)
                                                                 if mrt_si >= 0 {
                                                                     fn_return_types[fn_count as usize] = 10 + mrt_si
+                                                                }
+                                                            } else if (*mrte).kind == TypeExprKind::TypeTuple {
+                                                                let mtsi = ast_ensure_tuple2(&ctx, &(*mrte))
+                                                                if mtsi >= 0 {
+                                                                    fn_return_types[fn_count as usize] = 10 + mtsi
                                                                 }
                                                             }
                                                         }
