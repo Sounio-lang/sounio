@@ -1,0 +1,442 @@
+// self-hosted::compiler::serialize_non_ep_smoke
+//
+// Focused SOIR smoke that bypasses main.sio --native-compile and validates
+// the non-ep serializer layout directly against a hand-built IR module.
+
+use parser::ast::*
+use ir::ir::*
+use check::types::*
+use ir::serialize::{serialize_ir_module_non_ep}
+
+fn smoke_fail(code: i64, detail: i64) -> i64 with IO {
+    print("serialize_non_ep_smoke: fail=")
+    print_int(code)
+    print(" detail=")
+    print_int(detail)
+    print("\n")
+    code
+}
+
+fn smoke_ep_count_sum(ep: IrEpistemicSection) -> i64 {
+    ep.model_family_count +
+    ep.policy_count +
+    ep.validation_count +
+    ep.mechanistic_report_count +
+    ep.posterior_weights_count +
+    ep.counterexample_count +
+    ep.audit_count +
+    ep.contest_count +
+    ep.contest_witness_count +
+    ep.robust_proof_count +
+    ep.validated_manifest_count +
+    ep.decision_policy_count +
+    ep.decision_certificate_count +
+    ep.deferral_policy_count +
+    ep.deferred_certificate_count +
+    ep.deferred_reason_witness_count +
+    ep.acquisition_policy_count +
+    ep.acquisition_plan_count +
+    ep.acquisition_reason_witness_count +
+    ep.recourse_policy_count +
+    ep.recourse_plan_count +
+    ep.recourse_reason_witness_count +
+    ep.alternative_policy_count +
+    ep.alternative_frontier_count +
+    ep.alternative_candidate_count +
+    ep.alternative_set_count +
+    ep.alternative_reason_witness_count +
+    ep.transition_policy_count +
+    ep.transition_protocol_count +
+    ep.transition_step_count +
+    ep.transition_plan_count +
+    ep.transition_reason_witness_count +
+    ep.monitoring_policy_count +
+    ep.observed_transition_count +
+    ep.rollback_certificate_count
+}
+
+fn local_write_i8(buf: [i8; 131072], pos: i64, val: i8) -> ([i8; 131072], i64) with Mut, Panic, Div {
+    var out = buf
+    if pos >= 0 && pos < 131072 {
+        out[pos as usize] = val
+    }
+    (out, pos + 1)
+}
+
+fn local_write_i64(buf: [i8; 131072], pos: i64, val: i64) -> ([i8; 131072], i64) with Mut, Panic, Div {
+    var out = buf
+    var p = pos
+    let p0 = local_write_i8(out, p, (val & 255) as i8)
+    out = p0.0
+    p = p0.1
+    let p1 = local_write_i8(out, p, ((val >> 8) & 255) as i8)
+    out = p1.0
+    p = p1.1
+    let p2 = local_write_i8(out, p, ((val >> 16) & 255) as i8)
+    out = p2.0
+    p = p2.1
+    let p3 = local_write_i8(out, p, ((val >> 24) & 255) as i8)
+    out = p3.0
+    p = p3.1
+    let p4 = local_write_i8(out, p, ((val >> 32) & 255) as i8)
+    out = p4.0
+    p = p4.1
+    let p5 = local_write_i8(out, p, ((val >> 40) & 255) as i8)
+    out = p5.0
+    p = p5.1
+    let p6 = local_write_i8(out, p, ((val >> 48) & 255) as i8)
+    out = p6.0
+    p = p6.1
+    let p7 = local_write_i8(out, p, ((val >> 56) & 255) as i8)
+    out = p7.0
+    p = p7.1
+    (out, p)
+}
+
+fn local_write_padding(buf: [i8; 131072], pos: i64, count: i64) -> ([i8; 131072], i64) with Mut, Panic, Div {
+    var out = buf
+    var p = pos
+    var i: i64 = 0
+    while i < count {
+        let pair = local_write_i8(out, p, 0 as i8)
+        out = pair.0
+        p = pair.1
+        i = i + 1
+    }
+    (out, p)
+}
+
+fn local_write_f64(buf: [i8; 131072], pos: i64, val: f64) -> ([i8; 131072], i64) with Mut, Panic, Div {
+    local_write_i64(buf, pos, f64_to_bits(val))
+}
+
+fn local_write_name(buf: [i8; 131072], pos: i64, n: Name) -> ([i8; 131072], i64) with Mut, Panic, Div {
+    var out = buf
+    let len_pair = local_write_i64(out, pos, n.len)
+    out = len_pair.0
+    var p = len_pair.1
+    var i: i64 = 0
+    while i < 128 {
+        let byte_pair = local_write_i8(out, p, n.buf[i as usize])
+        out = byte_pair.0
+        p = byte_pair.1
+        i = i + 1
+    }
+    (out, p)
+}
+
+fn local_opcode_tag(op: IrOpcode) -> i8 {
+    match op {
+        IrOpcode::IrLoadImm => 0,
+        IrOpcode::IrLoadFloat => 1,
+        IrOpcode::IrLoadBool => 2,
+        IrOpcode::IrLoadString => 3,
+        IrOpcode::IrCopy => 4,
+        IrOpcode::IrBinOp => 5,
+        IrOpcode::IrUnaryOp => 6,
+        IrOpcode::IrCall => 7,
+        IrOpcode::IrReturn => 8,
+        IrOpcode::IrJump => 9,
+        IrOpcode::IrBranchTrue => 10,
+        IrOpcode::IrBranchFalse => 11,
+        IrOpcode::IrFieldGet => 12,
+        IrOpcode::IrFieldSet => 13,
+        IrOpcode::IrIndexGet => 14,
+        IrOpcode::IrIndexSet => 15,
+        IrOpcode::IrAlloc => 16,
+        IrOpcode::IrLabel => 17,
+        IrOpcode::IrNop => 18,
+        IrOpcode::IrPhi => 19,
+        IrOpcode::IrContest => 20,
+        IrOpcode::IrProveRobust => 21,
+        IrOpcode::IrValidated => 22,
+        IrOpcode::IrLiftKnowledge => 23,
+        IrOpcode::IrMeasure => 24,
+        IrOpcode::IrAdmitAction => 25,
+        IrOpcode::IrDeferAction => 26,
+        IrOpcode::IrPlanAcquisition => 27,
+        IrOpcode::IrPlanRecourse => 28,
+        IrOpcode::IrProposeAlternatives => 29,
+        IrOpcode::IrCommitAlternative => 30,
+        IrOpcode::IrObserveTransition => 31,
+        IrOpcode::IrRollbackTransition => 32,
+        IrOpcode::IrDebugGuard => 33,
+        IrOpcode::IrProfCounter => 34,
+    }
+}
+
+fn local_binary_op_tag(op: BinaryOp) -> i8 {
+    match op {
+        BinaryOp::OpAdd => 0,
+        BinaryOp::OpSub => 1,
+        BinaryOp::OpMul => 2,
+        BinaryOp::OpDiv => 3,
+        BinaryOp::OpRem => 4,
+        BinaryOp::OpEq => 5,
+        BinaryOp::OpNe => 6,
+        BinaryOp::OpLt => 7,
+        BinaryOp::OpLe => 8,
+        BinaryOp::OpGt => 9,
+        BinaryOp::OpGe => 10,
+        BinaryOp::OpAnd => 11,
+        BinaryOp::OpOr => 12,
+        BinaryOp::OpBitAnd => 13,
+        BinaryOp::OpBitOr => 14,
+        BinaryOp::OpBitXor => 15,
+        BinaryOp::OpShl => 16,
+        BinaryOp::OpShr => 17,
+        BinaryOp::OpConcat => 18,
+        BinaryOp::OpRange => 19,
+        BinaryOp::OpRangeInclusive => 20,
+    }
+}
+
+fn local_unary_op_tag(op: UnaryOp) -> i8 {
+    match op {
+        UnaryOp::OpNeg => 0,
+        UnaryOp::OpNot => 1,
+        UnaryOp::OpRef => 2,
+        UnaryOp::OpRefMut => 3,
+        UnaryOp::OpDeref => 4,
+    }
+}
+
+fn local_write_instr(buf: [i8; 131072], pos: i64, instr: IrInstr) -> ([i8; 131072], i64) with Mut, Panic, Div {
+    var out = buf
+    var p = pos
+    let op_pair = local_write_i8(out, p, local_opcode_tag(instr.op))
+    out = op_pair.0
+    p = op_pair.1
+    let pad0 = local_write_padding(out, p, 7)
+    out = pad0.0
+    p = pad0.1
+    let dst_pair = local_write_i64(out, p, instr.dst)
+    out = dst_pair.0
+    p = dst_pair.1
+    let src1_pair = local_write_i64(out, p, instr.src1)
+    out = src1_pair.0
+    p = src1_pair.1
+    let src2_pair = local_write_i64(out, p, instr.src2)
+    out = src2_pair.0
+    p = src2_pair.1
+    let imm_i64_pair = local_write_i64(out, p, instr.imm_i64)
+    out = imm_i64_pair.0
+    p = imm_i64_pair.1
+    let imm_f64_pair = local_write_f64(out, p, instr.imm_f64)
+    out = imm_f64_pair.0
+    p = imm_f64_pair.1
+    let label_pair = local_write_i64(out, p, instr.label_id)
+    out = label_pair.0
+    p = label_pair.1
+    let fn_pair = local_write_i64(out, p, instr.fn_id)
+    out = fn_pair.0
+    p = fn_pair.1
+    let field_pair = local_write_i64(out, p, instr.field_idx)
+    out = field_pair.0
+    p = field_pair.1
+    let bin_pair = local_write_i8(out, p, local_binary_op_tag(instr.bin_op))
+    out = bin_pair.0
+    p = bin_pair.1
+    let pad1 = local_write_padding(out, p, 7)
+    out = pad1.0
+    p = pad1.1
+    let un_pair = local_write_i8(out, p, local_unary_op_tag(instr.un_op))
+    out = un_pair.0
+    p = un_pair.1
+    let pad2 = local_write_padding(out, p, 7)
+    out = pad2.0
+    p = pad2.1
+    let name_pair = local_write_name(out, p, instr.name)
+    out = name_pair.0
+    p = name_pair.1
+    let argc_pair = local_write_i64(out, p, instr.arg_count)
+    out = argc_pair.0
+    p = argc_pair.1
+    (out, p)
+}
+
+fn local_write_function(buf: [i8; 131072], pos: i64, func: IrFunction) -> ([i8; 131072], i64) with Mut, Panic, Div {
+    var out = buf
+    var p = pos
+    let name_pair = local_write_name(out, p, func.name)
+    out = name_pair.0
+    p = name_pair.1
+    let instr_count_pair = local_write_i64(out, p, func.instr_count)
+    out = instr_count_pair.0
+    p = instr_count_pair.1
+    let reg_count_pair = local_write_i64(out, p, func.reg_count)
+    out = reg_count_pair.0
+    p = reg_count_pair.1
+    let label_count_pair = local_write_i64(out, p, func.label_count)
+    out = label_count_pair.0
+    p = label_count_pair.1
+    let param_count_pair = local_write_i64(out, p, func.param_count)
+    out = param_count_pair.0
+    p = param_count_pair.1
+
+    var i: i64 = 0
+    while i < 64 {
+        let reg_pair = local_write_i64(out, p, func.param_regs[i as usize])
+        out = reg_pair.0
+        p = reg_pair.1
+        i = i + 1
+    }
+
+    let strategy_pair = local_write_i64(out, p, func.compile_strategy)
+    out = strategy_pair.0
+    p = strategy_pair.1
+    let prof_pair = local_write_i64(out, p, func.prof_counter_id)
+    out = prof_pair.0
+    p = prof_pair.1
+
+    var j: i64 = 0
+    while j < func.instr_count {
+        let instr_pair = local_write_instr(out, p, func.instrs[j as usize])
+        out = instr_pair.0
+        p = instr_pair.1
+        j = j + 1
+    }
+    (out, p)
+}
+
+fn local_serialize_ir_module_non_ep(module: IrModule) -> ([i8; 131072], i64) with Mut, Panic, Div {
+    var out_buf: [i8; 131072] = [0; 131072]
+    var pos: i64 = 0
+    out_buf[0] = 83 as i8
+    out_buf[1] = 79 as i8
+    out_buf[2] = 73 as i8
+    out_buf[3] = 82 as i8
+    out_buf[4] = 2 as i8
+    out_buf[5] = 0 as i8
+    out_buf[6] = 0 as i8
+    out_buf[7] = 0 as i8
+    pos = 8
+
+    let fn_count_pair = local_write_i64(out_buf, pos, module.fn_count)
+    out_buf = fn_count_pair.0
+    pos = fn_count_pair.1
+    var i: i64 = 0
+    while i < module.fn_count {
+        let func_pair = local_write_function(out_buf, pos, module.functions[i as usize])
+        out_buf = func_pair.0
+        pos = func_pair.1
+        i = i + 1
+    }
+
+    let string_count_pair = local_write_i64(out_buf, pos, module.string_count)
+    out_buf = string_count_pair.0
+    pos = string_count_pair.1
+    i = 0
+    while i < module.string_count {
+        let name_pair = local_write_name(out_buf, pos, module.string_table[i as usize])
+        out_buf = name_pair.0
+        pos = name_pair.1
+        i = i + 1
+    }
+
+    i = 0
+    while i < 35 {
+        let zero_pair = local_write_i64(out_buf, pos, 0)
+        out_buf = zero_pair.0
+        pos = zero_pair.1
+        i = i + 1
+    }
+
+    (out_buf, pos)
+}
+
+fn local_read_i64_at(buf: [i8; 131072], pos: i64) -> i64 with Mut, Panic, Div {
+    let raw0: i64 = buf[(pos + 0) as usize] as i64
+    let raw1: i64 = buf[(pos + 1) as usize] as i64
+    let raw2: i64 = buf[(pos + 2) as usize] as i64
+    let raw3: i64 = buf[(pos + 3) as usize] as i64
+    let raw4: i64 = buf[(pos + 4) as usize] as i64
+    let raw5: i64 = buf[(pos + 5) as usize] as i64
+    let raw6: i64 = buf[(pos + 6) as usize] as i64
+    let raw7: i64 = buf[(pos + 7) as usize] as i64
+    let b0 = raw0 & 255
+    let b1 = raw1 & 255
+    let b2 = raw2 & 255
+    let b3 = raw3 & 255
+    let b4 = raw4 & 255
+    let b5 = raw5 & 255
+    let b6 = raw6 & 255
+    let b7 = raw7 & 255
+    b0 | (b1 << 8) | (b2 << 16) | (b3 << 24) | (b4 << 32) | (b5 << 40) | (b6 << 48) | (b7 << 56)
+}
+
+fn main() -> i64 with IO, Mut, Panic, Div, Alloc {
+    var module = ir_empty_module()
+    module.fn_count = 1
+    module.string_count = 1
+    module.string_table[0] = ir_name_from_bytes(104 as i8, 101 as i8, 108 as i8, 112 as i8, 4)
+
+    var func = ir_empty_function()
+    func.name = ir_name_from_bytes(109 as i8, 97 as i8, 105 as i8, 110 as i8, 4)
+    func.instr_count = 2
+    func.reg_count = 1
+    func.compile_strategy = IR_STRATEGY_INSTRUMENTED
+    func.prof_counter_id = 7
+    func.instrs[0] = ir_load_imm(0, 42)
+    func.instrs[1] = ir_return(0)
+    module.functions[0] = func
+
+    let local_pair = local_serialize_ir_module_non_ep(module)
+    let local_buf = local_pair.0
+    let local_len = local_pair.1
+    let shared_pair = serialize_ir_module_non_ep(module)
+    let shared_buf = shared_pair.0
+    let shared_len = shared_pair.1
+
+    if local_len != 1600 { return smoke_fail(11, local_len) }
+    if local_buf[0] != (83 as i8) || local_buf[1] != (79 as i8) || local_buf[2] != (73 as i8) || local_buf[3] != (82 as i8) {
+        return smoke_fail(12, local_buf[0] as i64)
+    }
+    if shared_len != local_len { return smoke_fail(26, shared_len) }
+    if shared_buf[24] != local_buf[24] { return smoke_fail(27, shared_buf[24] as i64) }
+    if local_read_i64_at(shared_buf, 744) != 42 { return smoke_fail(28, local_read_i64_at(shared_buf, 744)) }
+
+    let fn_count = local_read_i64_at(local_buf, 8)
+    if fn_count != 1 { return smoke_fail(13, fn_count) }
+
+    let fn_name_len = local_read_i64_at(local_buf, 16)
+    if fn_name_len != 4 { return smoke_fail(14, fn_name_len) }
+
+    if local_buf[24] != (109 as i8) { return smoke_fail(15, local_buf[24] as i64) }
+
+    let instr_count = local_read_i64_at(local_buf, 152)
+    if instr_count != 2 { return smoke_fail(16, instr_count) }
+
+    let reg_count = local_read_i64_at(local_buf, 160)
+    if reg_count != 1 { return smoke_fail(17, reg_count) }
+
+    let compile_strategy = local_read_i64_at(local_buf, 696)
+    if compile_strategy != IR_STRATEGY_INSTRUMENTED { return smoke_fail(18, compile_strategy) }
+
+    let prof_counter_id = local_read_i64_at(local_buf, 704)
+    if prof_counter_id != 7 { return smoke_fail(19, prof_counter_id) }
+
+    if local_buf[712] != 0 as i8 { return smoke_fail(20, local_buf[712] as i64) }
+
+    let imm_i64 = local_read_i64_at(local_buf, 744)
+    if imm_i64 != 42 { return smoke_fail(21, imm_i64) }
+
+    if local_buf[944] != (8 as i8) { return smoke_fail(22, local_buf[944] as i64) }
+
+    let string_count = local_read_i64_at(local_buf, 1176)
+    if string_count != 1 { return smoke_fail(23, string_count) }
+
+    let string_name_len = local_read_i64_at(local_buf, 1184)
+    if string_name_len != 4 { return smoke_fail(24, string_name_len) }
+
+    if local_buf[1192] != (104 as i8) { return smoke_fail(25, local_buf[1192] as i64) }
+
+    print("serialize_non_ep_smoke: shared_len=")
+    print_int(shared_len)
+    print(" local_len=")
+    print_int(local_len)
+    print(" ep_sum=")
+    print_int(smoke_ep_count_sum(module.epistemic))
+    print("\n")
+    0
+}

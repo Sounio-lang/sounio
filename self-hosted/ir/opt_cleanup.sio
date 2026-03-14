@@ -313,6 +313,13 @@ fn ocp_const_fold(func: IrFunction) -> IrFunction with Mut, Div, Panic {
     var bs_sub_src:   [i64;  256] = [-1;    256]
     var bs_sub_cval:  [i64;  256] = [0;     256]
 
+    // Sprint 158 Block BT: Consecutive add-constant fold — (x + C1) + C2 → x + (C1+C2).
+    // Symmetric to Block BS (sub-chain) for addition. Reuses same merge pattern.
+    // SOTA: LLVM InstCombineAddSub.cpp; additive associativity; Cooper & Torczon §8.2.
+    var bt_add_valid: [bool; 256] = [false; 256]
+    var bt_add_src:   [i64;  256] = [-1;    256]
+    var bt_add_cval:  [i64;  256] = [0;     256]
+
     var i: i64 = 0
     while i < result.instr_count {
         let instr = result.instrs[i as usize]
@@ -2003,6 +2010,77 @@ fn ocp_const_fold(func: IrFunction) -> IrFunction with Mut, Div, Panic {
                     bs_sub_valid[bs_t.dst as usize] = true
                     bs_sub_src[bs_t.dst as usize]   = bs_ts1
                     bs_sub_cval[bs_t.dst as usize]  = const_val[bs_ts2 as usize]
+                }
+            }
+        }
+
+        // Sprint 158 Block BT: Consecutive add-constant fold — (x+C1)+C2 → x+(C1+C2).
+        // Symmetric to Block BS (sub-chain) for addition. Commutative both sides.
+        // Zero new arrays beyond bt_add_valid/src/cval; reuses is_const/const_val/def_at.
+        // SOTA: LLVM InstCombineAddSub.cpp; additive associativity; Hacker's Delight §2.
+        if ocp_is_binop(result.instrs[i as usize].op) {
+            let bt_instr = result.instrs[i as usize]
+            let bt_s1 = bt_instr.src1; let bt_s2 = bt_instr.src2
+            let bt_s1_ok = bt_s1 >= 0 && bt_s1 < 256; let bt_s2_ok = bt_s2 >= 0 && bt_s2 < 256
+            if bt_instr.bin_op == BinaryOp::OpAdd && bt_s1_ok && bt_s2_ok {
+                // (x + C1) + C2 → x + (C1+C2): s1 is x+C1 tracked, s2 is const C2
+                if bt_add_valid[bt_s1 as usize] && is_const[bt_s2 as usize] {
+                    let bt_c1 = bt_add_cval[bt_s1 as usize]
+                    let bt_c2 = const_val[bt_s2 as usize]
+                    let bt_merged = bt_c1 + bt_c2
+                    let bt_cdef = def_at[bt_s2 as usize]
+                    if bt_cdef >= 0 {
+                        result.instrs[bt_cdef as usize] = ir_load_imm(bt_s2, bt_merged)
+                        is_const[bt_s2 as usize] = true
+                        const_val[bt_s2 as usize] = bt_merged
+                    }
+                    result.instrs[i as usize] = ir_binop(
+                        bt_instr.dst, bt_add_src[bt_s1 as usize], BinaryOp::OpAdd, bt_s2)
+                    if bt_instr.dst >= 0 && bt_instr.dst < 256 {
+                        bt_add_valid[bt_instr.dst as usize] = true
+                        bt_add_src[bt_instr.dst as usize]   = bt_add_src[bt_s1 as usize]
+                        bt_add_cval[bt_instr.dst as usize]  = bt_merged
+                    }
+                }
+                // C2 + (x + C1) → x + (C1+C2): commutative outer, s1=const, s2=x+C1
+                if bt_add_valid[bt_s2 as usize] && is_const[bt_s1 as usize] {
+                    let bt_c1 = bt_add_cval[bt_s2 as usize]
+                    let bt_c2 = const_val[bt_s1 as usize]
+                    let bt_merged = bt_c1 + bt_c2
+                    let bt_cdef = def_at[bt_s1 as usize]
+                    if bt_cdef >= 0 {
+                        result.instrs[bt_cdef as usize] = ir_load_imm(bt_s1, bt_merged)
+                        is_const[bt_s1 as usize] = true
+                        const_val[bt_s1 as usize] = bt_merged
+                    }
+                    result.instrs[i as usize] = ir_binop(
+                        bt_instr.dst, bt_add_src[bt_s2 as usize], BinaryOp::OpAdd, bt_s1)
+                    if bt_instr.dst >= 0 && bt_instr.dst < 256 {
+                        bt_add_valid[bt_instr.dst as usize] = true
+                        bt_add_src[bt_instr.dst as usize]   = bt_add_src[bt_s2 as usize]
+                        bt_add_cval[bt_instr.dst as usize]  = bt_merged
+                    }
+                }
+            }
+        }
+        // Sprint 158 Block BT: Add tracking — populate bt_add arrays.
+        // Record when dst = src + C (src plus constant) for downstream folding.
+        if ocp_is_binop(instr.op) && instr.bin_op == BinaryOp::OpAdd {
+            let bt_t = result.instrs[i as usize]
+            let bt_ts1 = bt_t.src1; let bt_ts2 = bt_t.src2
+            let bt_ts1_ok = bt_ts1 >= 0 && bt_ts1 < 256; let bt_ts2_ok = bt_ts2 >= 0 && bt_ts2 < 256
+            if bt_ts1_ok && bt_ts2_ok && bt_t.dst >= 0 && bt_t.dst < 256 {
+                // x + C form: s2 is const, s1 is var
+                if is_const[bt_ts2 as usize] && !bt_add_valid[bt_ts1 as usize] {
+                    bt_add_valid[bt_t.dst as usize] = true
+                    bt_add_src[bt_t.dst as usize]   = bt_ts1
+                    bt_add_cval[bt_t.dst as usize]  = const_val[bt_ts2 as usize]
+                }
+                // C + x form: s1 is const, s2 is var
+                if is_const[bt_ts1 as usize] && !bt_add_valid[bt_ts2 as usize] {
+                    bt_add_valid[bt_t.dst as usize] = true
+                    bt_add_src[bt_t.dst as usize]   = bt_ts2
+                    bt_add_cval[bt_t.dst as usize]  = const_val[bt_ts1 as usize]
                 }
             }
         }

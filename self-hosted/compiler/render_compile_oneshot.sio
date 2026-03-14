@@ -1,0 +1,216 @@
+// Minimal native compile driver — boxed IR lowering + streaming compile.
+
+use lexer::mod::*
+use parser::ast::*
+use ir::ir::*
+use check::dependent::*
+use check::types::*
+use check::mod::{check_program, check_program_epistemic_into}
+use check::ownership::*
+use check::lint::*
+use check::layout::*
+use io::file_write::*
+use native::aarch64::*
+use native::encode::*
+use native::elf::*
+use native::macho::*
+use native::reloc::*
+use native::frame::*
+use native::lower_ir::*
+use native::machine_ir::*
+use native::gc::*
+use native::runtime_context::*
+use native::stack_maps::*
+use native::target_policy::*
+use wasm::core::*
+use wasm::encode::*
+use wasm::lower::*
+use native::codegen::*
+use parser::mod::{count_items}
+use module_loader::{load_module_file}
+use parser::parser::{parser_last_error_count}
+use ir::lower::{lower_program_to_ir_with_epistemic_boxed_trace_ref, IrLowerBoxResult}
+use ir::const_prop::{cp_check_load_imm, cp_empty_instrs, cp_make_test_func, cp_optimize_function}
+use ir::dce::{dce_check_nop, dce_empty_instrs, dce_make_test_func, dce_optimize_function}
+use ir::profile::*
+use ir::inline::*
+use ir::layout::*
+use ir::opt_cleanup::*
+use ir::egraph::*
+use ir::loop_opt::*
+use ir::tailcall::*
+use native::regalloc::*
+use native::peephole::*
+
+fn char_from_i64(n: i64) -> string with Mut, Panic {
+    if n == 0 { "0" }
+    else if n == 1 { "1" }
+    else if n == 2 { "2" }
+    else if n == 3 { "3" }
+    else if n == 4 { "4" }
+    else if n == 5 { "5" }
+    else if n == 6 { "6" }
+    else if n == 7 { "7" }
+    else if n == 8 { "8" }
+    else if n == 9 { "9" }
+    else { "?" }
+}
+
+fn pow10_idx(idx: i64) -> i64 {
+    if idx == 0 { 1000000000000000000 }
+    else if idx == 1 { 100000000000000000 }
+    else if idx == 2 { 10000000000000000 }
+    else if idx == 3 { 1000000000000000 }
+    else if idx == 4 { 100000000000000 }
+    else if idx == 5 { 10000000000000 }
+    else if idx == 6 { 1000000000000 }
+    else if idx == 7 { 100000000000 }
+    else if idx == 8 { 10000000000 }
+    else if idx == 9 { 1000000000 }
+    else if idx == 10 { 100000000 }
+    else if idx == 11 { 10000000 }
+    else if idx == 12 { 1000000 }
+    else if idx == 13 { 100000 }
+    else if idx == 14 { 10000 }
+    else if idx == 15 { 1000 }
+    else if idx == 16 { 100 }
+    else if idx == 17 { 10 }
+    else { 1 }
+}
+
+fn digit_for_power(rem: i64, power: i64) -> i64 {
+    if rem <= (0 - (9 * power)) { 9 }
+    else if rem <= (0 - (8 * power)) { 8 }
+    else if rem <= (0 - (7 * power)) { 7 }
+    else if rem <= (0 - (6 * power)) { 6 }
+    else if rem <= (0 - (5 * power)) { 5 }
+    else if rem <= (0 - (4 * power)) { 4 }
+    else if rem <= (0 - (3 * power)) { 3 }
+    else if rem <= (0 - (2 * power)) { 2 }
+    else if rem <= (0 - power) { 1 }
+    else { 0 }
+}
+
+fn i64_to_digits_no_div(rem: i64, idx: i64, started: bool) -> string with Mut, Panic {
+    if idx >= 19 { return "" }
+    let power = pow10_idx(idx)
+    let digit = digit_for_power(rem, power)
+    let rem_next = rem + (digit * power)
+    let emit = started || digit > 0 || idx == 18
+    let head = if emit { char_from_i64(digit) } else { "" }
+    head + i64_to_digits_no_div(rem_next, idx + 1, emit)
+}
+
+fn int_to_string(n: i64) -> string with Mut, Panic, Div {
+    if n == 0 { return "0" }
+    let negative = n < 0
+    let rem = if negative { n } else { 0 - n }
+    let digits = i64_to_digits_no_div(rem, 0, false)
+    if negative { "-" + digits } else { digits }
+}
+
+fn parse_i64_decimal(raw: string) -> (bool, i64) with Mut, Div {
+    if str_len(raw) == 0 { return (false, 0) }
+    var idx: i64 = 0
+    var negative = false
+    if str_char_at(raw, 0) == "-" {
+        negative = true
+        idx = 1
+        if idx >= str_len(raw) { return (false, 0) }
+    }
+    var value: i64 = 0
+    while idx < str_len(raw) {
+        let ch = str_char_at(raw, idx)
+        if ch < "0" || ch > "9" { return (false, 0) }
+        value = value * 10 + ((ch as i64) - ("0" as i64))
+        idx = idx + 1
+    }
+    if negative { (true, 0 - value) } else { (true, value) }
+}
+
+fn main() -> i64 with IO, Mut, Panic, Div, Alloc {
+    let argc = arg_count()
+    if argc < 2 {
+        print("Usage: render_compile_oneshot.sio <source.sio> <output>\n")
+        return 1
+    }
+    let source_path = get_arg(0)
+    let output_path = get_arg(1)
+
+    print("render_compile: source=")
+    print(source_path)
+    print(" output=")
+    print(output_path)
+    print("\n")
+
+    let prog = load_module_file(source_path)
+    if parser_last_error_count() > 0 {
+        print("render_compile: parse_error\n")
+        return 1
+    }
+
+    // Phase 1: boxed IR lowering (preseed + bodies, module stays heap-allocated)
+    print("render_compile: lowering...\n")
+    var patch_stats = ir_empty_validated_patch_stats()
+    let ir_result = lower_program_to_ir_with_epistemic_boxed_trace_ref(
+        &prog, ir_empty_epistemic_section(), &! patch_stats
+    )
+    if ir_result.had_error {
+        print("render_compile: lower_error count=")
+        print_int(ir_result.error_count)
+        print("\n")
+        return 2
+    }
+    let module_ref: &IrModule = &(*ir_result.module)
+    let fn_count = (*module_ref).fn_count
+    print("render_compile: fn_count=")
+    print_int(fn_count)
+    print("\n")
+    if fn_count <= 0 {
+        print("render_compile: empty_module\n")
+        return 2
+    }
+
+    // Phase 2: streaming native compile, per-function
+    print("render_compile: compiling...\n")
+    var nc = compile_module_streaming_begin(compiler_new(), module_ref)
+    var fi: i64 = 0
+    while fi < fn_count {
+        let func = (*module_ref).functions[fi as usize]
+        let fn_name = func.name
+        print("render_compile: fn=")
+        print(str_from_bytes(fn_name.buf, fn_name.len))
+        print(" instrs=")
+        print_int(func.instr_count)
+
+        let lowered = native_v2_lower_function_to_machine(func)
+        let legal = native_v2_legalize_function(lowered)
+        if !legal.supported {
+            print(" unsupported=")
+            print(legal.unsupported_detail)
+            print("\n")
+            return 4
+        }
+
+        nc = compile_ir_function_v2(nc, func, legal, fi)
+        print(" ok\n")
+        fi = fi + 1
+    }
+
+    nc = compile_module_streaming_finish(nc, module_ref)
+    print("render_compile: finalizing...\n")
+    let elf = finalize_compiled_elf(nc, 4194304)
+
+    let write_ok = write_file(output_path, elf.bytes, elf.len) == 0
+    if !write_ok {
+        print("render_compile: write_error\n")
+        return 5
+    }
+
+    print("render_compile: ok written=")
+    print(output_path)
+    print(" size=")
+    print_int(elf.len)
+    print("\n")
+    0
+}

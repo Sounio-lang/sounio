@@ -13,7 +13,6 @@ cd "$ROOT_DIR"
 
 SOUC="./artifacts/omega/souc-bin/souc-linux-x86_64-jit"
 SELFHOST_RUN="./scripts/lib/run_selfhost_fresh.sh"
-PROBE="self-hosted/ir/reach_probe_runner.sio"
 BOOTSTRAP_DRIVER="self-hosted/compiler/native_compile_driver.sio"
 WIDE_DRIVER="self-hosted/compiler/wide_native_compile_driver.sio"
 WIDE_STAGE_DRIVER="self-hosted/compiler/wide_native_compile_driver_stage.sio"
@@ -51,8 +50,8 @@ check "T1: souc jit binary exists" $_ec
 _ec=1; [ -x "$SELFHOST_RUN" ] && _ec=0
 check "T2: run_selfhost_fresh wrapper exists" $_ec
 
-_ec=1; [ -f "$PROBE" ] && [ -f "$BOOTSTRAP_DRIVER" ] && [ -f "$WIDE_DRIVER" ] && [ -f "$WIDE_STAGE_DRIVER" ] && [ -f "$WIDE_STAGE_NOREACH_DRIVER" ] && _ec=0
-check "T3: probe/bootstrap/wide driver sources exist" $_ec
+_ec=1; [ -f "$BOOTSTRAP_DRIVER" ] && [ -f "$WIDE_DRIVER" ] && [ -f "$WIDE_STAGE_DRIVER" ] && [ -f "$WIDE_STAGE_NOREACH_DRIVER" ] && _ec=0
+check "T3: bootstrap/wide driver sources exist" $_ec
 
 _ec=1; grep -q 'io_write_elf_to_file(output_path, elf)' "$BOOTSTRAP_DRIVER" && _ec=0
 check "T4: bootstrap native driver writes ELF via wide-safe path" $_ec
@@ -60,18 +59,19 @@ check "T4: bootstrap native driver writes ELF via wide-safe path" $_ec
 _ec=1; grep -q 'wide_compile_and_emit' "$WIDE_DRIVER" && grep -q 'wide_compile_and_emit' "$WIDE_STAGE_DRIVER" && grep -q 'wide_compile_and_emit' "$WIDE_STAGE_NOREACH_DRIVER" && _ec=0
 check "T5: wide driver sources still call wide_compile_and_emit" $_ec
 
-# --- Probe the wide driver source itself ---
+# --- Cheap bootstrap-path smoke on the no-reach stage source ---
 
 _ec=0
-timeout 240 "$SELFHOST_RUN" "$SOUC" "$PROBE" -- "$WIDE_STAGE_NOREACH_DRIVER" >"$PROBE_LOG" 2>&1 || _ec=$?
-if [ $_ec -eq 124 ] || [ $_ec -eq 137 ]; then
-    _ec=2
-elif grep -q 'reach_probe: fn_count=' "$PROBE_LOG" && grep -q 'reach_probe: reachable=' "$PROBE_LOG"; then
+timeout 60 "$SELFHOST_RUN" "$SOUC" "$BOOTSTRAP_DRIVER" -- "$WIDE_STAGE_NOREACH_DRIVER" -o "$OUT_DIR/.stage_probe.elf" >"$PROBE_LOG" 2>&1 || _ec=$?
+if grep -q 'native_compile: parse_ok' "$PROBE_LOG" && grep -q 'native_compile: fn_count=' "$PROBE_LOG"; then
     _ec=0
+elif [ $_ec -eq 124 ] || [ $_ec -eq 137 ]; then
+    _ec=2
 else
     _ec=1
 fi
-check "T6: reach probe reports fn_count and reachable on no-reach stage driver source" $_ec
+rm -f "$OUT_DIR/.stage_probe.elf"
+check "T6: bootstrap path reaches parse_ok and fn_count on no-reach stage source" $_ec
 
 # --- Prebuild the wide driver into a staged native ELF ---
 

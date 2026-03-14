@@ -1,0 +1,268 @@
+// self-hosted::compiler::render_native_compile_driver
+//
+// Minimal native compile driver for render fixtures.
+// Bypasses the full CLI parser in main.sio to keep JIT load time manageable.
+// Pipeline: parse -> full IR lower -> per-function native-v2 compile -> ELF -> write
+//
+// Usage:
+//   souc run self-hosted/compiler/render_native_compile_driver.sio -- <source> <output>
+
+// Import set mirrors render_streaming_body_smoke.sio (known to JIT-resolve).
+use lexer::mod::*
+use parser::ast::*
+use ir::ir::*
+use check::dependent::*
+use check::types::*
+use check::mod::{check_program, check_program_epistemic_into}
+use check::ownership::*
+use check::lint::*
+use check::layout::*
+use io::file_write::*
+use native::aarch64::*
+use native::encode::*
+use native::elf::*
+use native::macho::*
+use native::reloc::*
+use native::frame::*
+use native::lower_ir::*
+use native::machine_ir::*
+use native::gc::*
+use native::runtime_context::*
+use native::stack_maps::*
+use native::target_policy::*
+use wasm::core::*
+use wasm::encode::*
+use wasm::lower::*
+use native::codegen::*
+use parser::mod::{count_items, parse_program_preloaded}
+use parser::parser::{parser_last_error_count}
+use ir::lower::{IrProgramSummaryFlat, lower_program_to_ir_summary_flat_owned_with_epistemic_ref, lowerer_new_from_program_summary_flat}
+use ir::const_prop::{cp_check_load_imm, cp_empty_instrs, cp_make_test_func, cp_optimize_function}
+use ir::dce::{dce_check_nop, dce_empty_instrs, dce_make_test_func, dce_optimize_function}
+use ir::profile::*
+use ir::inline::*
+use ir::layout::*
+use ir::opt_cleanup::*
+use ir::egraph::*
+use ir::loop_opt::*
+use ir::tailcall::*
+use native::regalloc::*
+use native::peephole::*
+use interop::contract::*
+
+// Helpers required by codegen dependency chain (flat-namespace resolution).
+fn char_from_i64(n: i64) -> string with Mut, Panic {
+    if n == 0 { "0" }
+    else if n == 1 { "1" }
+    else if n == 2 { "2" }
+    else if n == 3 { "3" }
+    else if n == 4 { "4" }
+    else if n == 5 { "5" }
+    else if n == 6 { "6" }
+    else if n == 7 { "7" }
+    else if n == 8 { "8" }
+    else if n == 9 { "9" }
+    else { "?" }
+}
+
+fn pow10_idx(idx: i64) -> i64 {
+    if idx == 0 { 1000000000000000000 }
+    else if idx == 1 { 100000000000000000 }
+    else if idx == 2 { 10000000000000000 }
+    else if idx == 3 { 1000000000000000 }
+    else if idx == 4 { 100000000000000 }
+    else if idx == 5 { 10000000000000 }
+    else if idx == 6 { 1000000000000 }
+    else if idx == 7 { 100000000000 }
+    else if idx == 8 { 10000000000 }
+    else if idx == 9 { 1000000000 }
+    else if idx == 10 { 100000000 }
+    else if idx == 11 { 10000000 }
+    else if idx == 12 { 1000000 }
+    else if idx == 13 { 100000 }
+    else if idx == 14 { 10000 }
+    else if idx == 15 { 1000 }
+    else if idx == 16 { 100 }
+    else if idx == 17 { 10 }
+    else { 1 }
+}
+
+fn digit_for_power(rem: i64, power: i64) -> i64 {
+    if rem <= (0 - (9 * power)) { 9 }
+    else if rem <= (0 - (8 * power)) { 8 }
+    else if rem <= (0 - (7 * power)) { 7 }
+    else if rem <= (0 - (6 * power)) { 6 }
+    else if rem <= (0 - (5 * power)) { 5 }
+    else if rem <= (0 - (4 * power)) { 4 }
+    else if rem <= (0 - (3 * power)) { 3 }
+    else if rem <= (0 - (2 * power)) { 2 }
+    else if rem <= (0 - power) { 1 }
+    else { 0 }
+}
+
+fn i64_to_digits_no_div(rem: i64, idx: i64, started: bool) -> string with Mut, Panic {
+    if idx >= 19 { return "" }
+    let power = pow10_idx(idx)
+    let digit = digit_for_power(rem, power)
+    let rem_next = rem + (digit * power)
+    let emit = started || digit > 0 || idx == 18
+    let head = if emit { char_from_i64(digit) } else { "" }
+    head + i64_to_digits_no_div(rem_next, idx + 1, emit)
+}
+
+fn int_to_string(n: i64) -> string with Mut, Panic, Div {
+    if n == 0 { return "0" }
+    let negative = n < 0
+    let rem = if negative { n } else { 0 - n }
+    let digits = i64_to_digits_no_div(rem, 0, false)
+    if negative { "-" + digits } else { digits }
+}
+
+fn parse_i64_decimal(raw: string) -> (bool, i64) with Mut, Div {
+    if str_len(raw) == 0 { return (false, 0) }
+    var idx: i64 = 0
+    var negative = false
+    if str_char_at(raw, 0) == "-" {
+        negative = true
+        idx = 1
+        if idx >= str_len(raw) { return (false, 0) }
+    }
+    var value: i64 = 0
+    while idx < str_len(raw) {
+        let ch = str_char_at(raw, idx)
+        if ch < "0" || ch > "9" { return (false, 0) }
+        value = value * 10 + ((ch as i64) - ("0" as i64))
+        idx = idx + 1
+    }
+    if negative { (true, 0 - value) } else { (true, value) }
+}
+
+fn load_local_module_file(path: string) -> Program with IO, Mut, Div, Panic, Alloc {
+    let data = read_file(path)
+    let size = file_size(path)
+    var buf: [i8; 1048576] = [0; 1048576]
+    var i: i64 = 0
+    while i < size && i < 1048576 {
+        buf[i as usize] = data[i as usize]
+        i = i + 1
+    }
+    let state = lex(buf, size, 0)
+    parse_program_preloaded(state.token_count)
+}
+
+fn main() -> i64 with IO, Mut, Panic, Div, Alloc {
+    let argc = arg_count()
+    if argc < 2 {
+        print("Usage: render_native_compile_driver.sio <source.sio> <output>\n")
+        return 1
+    }
+    let source_path = get_arg(0)
+    let output_path = get_arg(1)
+
+    print("render_compile: source=")
+    print(source_path)
+    print(" output=")
+    print(output_path)
+    print("\n")
+
+    let prog = load_local_module_file(source_path)
+    if parser_last_error_count() > 0 {
+        print("render_compile: parse_error\n")
+        return 1
+    }
+
+    let epistemic = ir_empty_epistemic_section()
+
+    // Phase 1: summary seed only; function bodies stay ephemeral.
+    let summary_result = lower_program_to_ir_summary_flat_owned_with_epistemic_ref(&prog, epistemic)
+    if summary_result.had_error {
+        print("render_compile: summary_error count=")
+        print_int(summary_result.error_count)
+        print("\n")
+        return 2
+    }
+    let fn_count = summary_result.summary.module.fn_count
+    if fn_count <= 0 {
+        print("render_compile: empty_module\n")
+        return 2
+    }
+    print("render_compile: fn_count=")
+    print_int(fn_count)
+    print("\n")
+
+    // Phase 2: streaming native compile — reuse one summary-seeded lowerer.
+    var nc = compile_module_streaming_begin(compiler_new(), &summary_result.summary.module)
+    var lo = lowerer_new_from_program_summary_flat(&summary_result.summary, epistemic)
+    var fi: i64 = 0
+    while fi < fn_count {
+        let fn_name = summary_result.summary.module.functions[fi as usize].name
+        print("render_compile: body_begin fn=")
+        print(str_from_bytes(fn_name.buf, fn_name.len))
+        print("\n")
+
+        lo = lo.lower_program_bodies_filtered_ref(&prog.items, fn_name)
+        let func = lo.module.functions[fi as usize]
+        if lo.had_error {
+            print("render_compile: body_error fn=")
+            print(str_from_bytes(fn_name.buf, fn_name.len))
+            print(" count=")
+            print_int(lo.error_count)
+            print(" params=")
+            print_int(func.param_count)
+            print(" instrs=")
+            print_int(func.instr_count)
+            print(" regs=")
+            print_int(func.reg_count)
+            print(" labels=")
+            print_int(func.label_count)
+            print("\n")
+            return 3
+        }
+
+        print("render_compile: body_ok fn=")
+        print(str_from_bytes(fn_name.buf, fn_name.len))
+        print(" instrs=")
+        print_int(func.instr_count)
+        print(" regs=")
+        print_int(func.reg_count)
+        print("\n")
+
+        let lowered = native_v2_lower_function_to_machine(func)
+        print("render_compile: machine_ok fn=")
+        print(str_from_bytes(fn_name.buf, fn_name.len))
+        print("\n")
+        let legal = native_v2_legalize_function(lowered)
+        if !legal.supported {
+            print("render_compile: legal_unsupported fn=")
+            print(str_from_bytes(fn_name.buf, fn_name.len))
+            print(" detail=")
+            print(legal.unsupported_detail)
+            print("\n")
+            return 4
+        }
+        print("render_compile: legal_ok fn=")
+        print(str_from_bytes(fn_name.buf, fn_name.len))
+        print("\n")
+
+        nc = compile_ir_function_v2(nc, func, legal, fi)
+        print("render_compile: codegen_ok fn=")
+        print(str_from_bytes(fn_name.buf, fn_name.len))
+        print("\n")
+        fi = fi + 1
+    }
+    let nc = compile_module_streaming_finish(nc, &summary_result.summary.module)
+    let elf = finalize_compiled_elf(nc, 4194304)
+
+    let write_ok = io_write_elf_to_file(output_path, elf)
+    if !write_ok {
+        print("render_compile: write_error\n")
+        return 5
+    }
+
+    print("render_compile: ok written=")
+    print(output_path)
+    print(" size=")
+    print_int(elf.len)
+    print("\n")
+    0
+}
