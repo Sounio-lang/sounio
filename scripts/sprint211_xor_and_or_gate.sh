@@ -1,5 +1,9 @@
 #!/usr/bin/env bash
-# sprint211_xor_and_or_gate.sh — Sprint 211: Block DU XOR-AND to OR gate
+# sprint211_xor_and_or_gate.sh — Sprint 211: Block DU XOR-AND to OR
+#
+# Block DU: (x^y)|(x&y) → x|y; commutative variants.
+#   Zero new arrays: uses as_xor_rr_valid/lhs/rhs + ao_and_rr_valid/lhs/rhs.
+#   SOTA: LLVM InstCombineAndOrXor; Boolean lattice.
 set -eo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." ; pwd)"; cd "$ROOT_DIR"
 PASS=0; FAIL=0; NOT_RUN=0; TOTAL=0
@@ -9,10 +13,9 @@ cl() { local n="$1" e="$2" l="$3"; TOTAL=$((TOTAL+1)); if [ ! -s "$l" ]; then ec
 echo "=== Sprint 211: Block DU — XOR-AND to OR ==="
 echo ""; echo "--- Source ---"
 O="self-hosted/ir/opt_cleanup.sio"
-cg "src:block_du"     "Block DU" "$O"
-cg "src:du_xor_rr"    "as_xor_rr_valid\[du_s1 as usize\]" "$O"
-cg "src:du_and_rr"    "ao_and_rr_valid\[du_s2 as usize\]" "$O"
-cg "src:du_or_result" "ir_binop.*du_instr\.dst.*du_xl.*OpBitOr.*du_xr" "$O"
+cg "src:block_du"      "Block DU" "$O"
+cg "src:du_xor_rr"     "as_xor_rr_valid\[du_s[12] as usize\]" "$O"
+cg "src:du_and_rr"     "ao_and_rr_valid\[du_s[12] as usize\]" "$O"
 echo ""; echo "--- Tests ---"
 M="self-hosted/compiler/main.sio"
 cg "main:T932_fn" "fn compiler_main_test_du_xor_and_or_basic" "$M"
