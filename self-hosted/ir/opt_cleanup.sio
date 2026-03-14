@@ -2387,6 +2387,27 @@ fn ocp_const_fold(func: IrFunction) -> IrFunction with Mut, Div, Panic {
             }
         }
 
+        // Sprint 167 Block CC: AND complement partition — (x & C) | (x & ~C) → x.
+        // Proof: (x&C)|(x&~C) = x&(C|~C) = x&(-1) = x. Dual of Block CA.
+        // Handles commutative outer: (x & ~C) | (x & C) → x.
+        // Zero new arrays: uses and_valid/var_src/const_val (Block AE) + is_const/const_val.
+        // SOTA: LLVM InstCombineAndOrXor or(and X,C),and(X,~C) → X; Boolean algebra.
+        if ocp_is_binop(result.instrs[i as usize].op) {
+            let cc_instr = result.instrs[i as usize]
+            let cc_s1 = cc_instr.src1; let cc_s2 = cc_instr.src2
+            let cc_s1_ok = cc_s1 >= 0 && cc_s1 < 256; let cc_s2_ok = cc_s2 >= 0 && cc_s2 < 256
+            if cc_instr.bin_op == BinaryOp::OpBitOr {
+                // (x & C) | (x & ~C): both and-tracked, same base, complement constants
+                if cc_s1_ok && and_valid[cc_s1 as usize]
+                        && cc_s2_ok && and_valid[cc_s2 as usize]
+                        && and_var_src[cc_s1 as usize] == and_var_src[cc_s2 as usize]
+                        && and_const_val[cc_s1 as usize] == (and_const_val[cc_s2 as usize] ^ -1) {
+                    let cc_x = and_var_src[cc_s1 as usize]
+                    result.instrs[i as usize] = ir_copy(cc_instr.dst, cc_x)
+                }
+            }
+        }
+
         // Sprint 82 Block J: Unary operation constant folding.
         // Folds IrUnaryOp when the source operand is a known constant.
         // Only OpNeg and OpNot are foldable (Ref/RefMut/Deref are memory ops).
