@@ -15751,9 +15751,75 @@ fn compiler_main_test_dp_no_fold_sub_op() -> bool with Mut, Div, Panic {
     opt.instrs[2 as usize].bin_op != BinaryOp::OpBitXor
 }
 
+// Sprint 207 Block DQ: AND-XNOR to AND (T908-T913)
+fn compiler_main_test_dq_and_xnor_basic() -> bool with Mut, Div, Panic {
+    // r2=r0^r1; r3=~r2; r4=r0&r3 → r0&r1
+    var instrs: [IrInstr; 128] = cp_empty_instrs()
+    instrs[0 as usize] = ir_binop(2, 0, BinaryOp::OpBitXor, 1)
+    instrs[1 as usize] = ir_unaryop(3, UnaryOp::OpNot, 2)
+    instrs[2 as usize] = ir_binop(4, 0, BinaryOp::OpBitAnd, 3)
+    let func = cp_make_test_func(instrs, 3)
+    let opt = opt_cleanup_function(func)
+    opt.instrs[2 as usize].op == IrOpcode::IrBinOp
+        && opt.instrs[2 as usize].bin_op == BinaryOp::OpBitAnd
+        && opt.instrs[2 as usize].src1 == 0
+        && opt.instrs[2 as usize].src2 == 1
+}
+fn compiler_main_test_dq_and_xnor_rhs() -> bool with Mut, Div, Panic {
+    // r0&~(r0^r1) where r0 matches XOR RHS (swap)
+    var instrs: [IrInstr; 128] = cp_empty_instrs()
+    instrs[0 as usize] = ir_binop(2, 1, BinaryOp::OpBitXor, 0)
+    instrs[1 as usize] = ir_unaryop(3, UnaryOp::OpNot, 2)
+    instrs[2 as usize] = ir_binop(4, 0, BinaryOp::OpBitAnd, 3)
+    let func = cp_make_test_func(instrs, 3)
+    let opt = opt_cleanup_function(func)
+    opt.instrs[2 as usize].bin_op == BinaryOp::OpBitAnd
+        && opt.instrs[2 as usize].src1 == 0
+}
+fn compiler_main_test_dq_and_xnor_comm() -> bool with Mut, Div, Panic {
+    // ~(r0^r1) & r0 → r0&r1 (XNOR on left)
+    var instrs: [IrInstr; 128] = cp_empty_instrs()
+    instrs[0 as usize] = ir_binop(2, 0, BinaryOp::OpBitXor, 1)
+    instrs[1 as usize] = ir_unaryop(3, UnaryOp::OpNot, 2)
+    instrs[2 as usize] = ir_binop(4, 3, BinaryOp::OpBitAnd, 0)
+    let func = cp_make_test_func(instrs, 3)
+    let opt = opt_cleanup_function(func)
+    opt.instrs[2 as usize].bin_op == BinaryOp::OpBitAnd
+        && opt.instrs[2 as usize].src2 == 1
+}
+fn compiler_main_test_dq_no_fold_diff_reg() -> bool with Mut, Div, Panic {
+    // r2&~(r0^r1) where r2 not in XOR → no fold
+    var instrs: [IrInstr; 128] = cp_empty_instrs()
+    instrs[0 as usize] = ir_binop(2, 0, BinaryOp::OpBitXor, 1)
+    instrs[1 as usize] = ir_unaryop(3, UnaryOp::OpNot, 2)
+    instrs[2 as usize] = ir_binop(4, 4, BinaryOp::OpBitAnd, 3)
+    let func = cp_make_test_func(instrs, 3)
+    let opt = opt_cleanup_function(func)
+    opt.instrs[2 as usize].src1 == 4 && opt.instrs[2 as usize].src2 == 3
+}
+fn compiler_main_test_dq_no_fold_or_outer() -> bool with Mut, Div, Panic {
+    // r0|~(r0^r1) no fold by DQ (OR not AND)
+    var instrs: [IrInstr; 128] = cp_empty_instrs()
+    instrs[0 as usize] = ir_binop(2, 0, BinaryOp::OpBitXor, 1)
+    instrs[1 as usize] = ir_unaryop(3, UnaryOp::OpNot, 2)
+    instrs[2 as usize] = ir_binop(4, 0, BinaryOp::OpBitOr, 3)
+    let func = cp_make_test_func(instrs, 3)
+    let opt = opt_cleanup_function(func)
+    opt.instrs[2 as usize].bin_op != BinaryOp::OpBitAnd
+}
+fn compiler_main_test_dq_no_fold_not_xor() -> bool with Mut, Div, Panic {
+    // r0&~r1 — r1 is plain NOT (not NOT-of-XOR) → no fold by DQ
+    var instrs: [IrInstr; 128] = cp_empty_instrs()
+    instrs[0 as usize] = ir_unaryop(2, UnaryOp::OpNot, 1)
+    instrs[1 as usize] = ir_binop(3, 0, BinaryOp::OpBitAnd, 2)
+    let func = cp_make_test_func(instrs, 2)
+    let opt = opt_cleanup_function(func)
+    opt.instrs[1 as usize].src1 == 0 && opt.instrs[1 as usize].src2 == 2
+}
+
 fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
     var passed: i64 = 0
-    let total: i64 = 907
+    let total: i64 = 913
 
     println("=== compiler/main.sio self-tests ===")
 
@@ -20447,6 +20513,32 @@ fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
         passed = passed + 1
         println("  T907 OK: Sprint 206 Block DP: (r0&r1)-(r0|r1) no fold SUB")
     } else { println("  FAIL: T907") }
+
+    // Sprint 207 Block DQ: AND-XNOR to AND (T908-T913)
+    if compiler_main_test_dq_and_xnor_basic() {
+        passed = passed + 1
+        println("  T908 OK: Sprint 207 Block DQ: r0&~(r0^r1) -> r0&r1")
+    } else { println("  FAIL: T908") }
+    if compiler_main_test_dq_and_xnor_rhs() {
+        passed = passed + 1
+        println("  T909 OK: Sprint 207 Block DQ: r0&~(r1^r0) -> r0&r1 rhs")
+    } else { println("  FAIL: T909") }
+    if compiler_main_test_dq_and_xnor_comm() {
+        passed = passed + 1
+        println("  T910 OK: Sprint 207 Block DQ: ~(r0^r1)&r0 -> r0&r1 comm")
+    } else { println("  FAIL: T910") }
+    if compiler_main_test_dq_no_fold_diff_reg() {
+        passed = passed + 1
+        println("  T911 OK: Sprint 207 Block DQ: r2&~(r0^r1) no fold diff reg")
+    } else { println("  FAIL: T911") }
+    if compiler_main_test_dq_no_fold_or_outer() {
+        passed = passed + 1
+        println("  T912 OK: Sprint 207 Block DQ: r0|~(r0^r1) no fold OR outer")
+    } else { println("  FAIL: T912") }
+    if compiler_main_test_dq_no_fold_not_xor() {
+        passed = passed + 1
+        println("  T913 OK: Sprint 207 Block DQ: r0&~r1 no fold not XOR source")
+    } else { println("  FAIL: T913") }
 
     println("")
     println("compiler/main tests: " + int_to_string(passed) + "/" + int_to_string(total) + " passed")
