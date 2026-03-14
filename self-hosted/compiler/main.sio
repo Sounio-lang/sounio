@@ -11194,9 +11194,105 @@ fn compiler_main_test_add_complement_sub_no_fold() -> bool with Mut, Div, Panic 
     opt.instrs[1 as usize].op == IrOpcode::IrBinOp
 }
 
+fn compiler_main_test_or_chain_basic() -> bool with Mut, Div, Panic {
+    // (x | 0b0011) | 0b1100 → x | 0b1111: OR chain merges non-overlapping masks
+    var instrs: [IrInstr; 16] = cp_empty_instrs()
+    instrs[0 as usize] = ir_load_imm(0, 42)         // r0 = x
+    instrs[1 as usize] = ir_load_imm(1, 3)           // r1 = 0b0011
+    instrs[2 as usize] = ir_binop(2, 0, BinaryOp::OpBitOr, 1)   // r2 = x | 3
+    instrs[3 as usize] = ir_load_imm(3, 12)          // r3 = 0b1100
+    instrs[4 as usize] = ir_binop(4, 2, BinaryOp::OpBitOr, 3)   // r4 = (x|3)|12
+    let func = cp_make_test_func(instrs, 5)
+    let result = opt_cleanup_module(func)
+    // r4 folds to x | 15, check it's OR with src1=x(r0) and const=15
+    result.instrs[4 as usize].op == IrOpcode::IrBinOp
+        && result.instrs[4 as usize].bin_op == BinaryOp::OpBitOr
+        && result.instrs[4 as usize].src1 == 0
+        && result.instrs[3 as usize].value == 15
+}
+
+fn compiler_main_test_or_chain_commutative() -> bool with Mut, Div, Panic {
+    // 0b1100 | (x | 0b0011) → x | 0b1111: commutative form
+    var instrs: [IrInstr; 16] = cp_empty_instrs()
+    instrs[0 as usize] = ir_load_imm(0, 42)
+    instrs[1 as usize] = ir_load_imm(1, 3)
+    instrs[2 as usize] = ir_binop(2, 0, BinaryOp::OpBitOr, 1)   // r2 = x | 3
+    instrs[3 as usize] = ir_load_imm(3, 12)
+    instrs[4 as usize] = ir_binop(4, 3, BinaryOp::OpBitOr, 2)   // r4 = 12 | (x|3)
+    let func = cp_make_test_func(instrs, 5)
+    let result = opt_cleanup_module(func)
+    result.instrs[4 as usize].op == IrOpcode::IrBinOp
+        && result.instrs[4 as usize].bin_op == BinaryOp::OpBitOr
+        && result.instrs[3 as usize].value == 15
+}
+
+fn compiler_main_test_or_chain_three_levels() -> bool with Mut, Div, Panic {
+    // ((x | 1) | 2) | 4 → x | 7: three-level OR chain
+    var instrs: [IrInstr; 16] = cp_empty_instrs()
+    instrs[0 as usize] = ir_load_imm(0, 42)
+    instrs[1 as usize] = ir_load_imm(1, 1)
+    instrs[2 as usize] = ir_binop(2, 0, BinaryOp::OpBitOr, 1)   // r2 = x|1
+    instrs[3 as usize] = ir_load_imm(3, 2)
+    instrs[4 as usize] = ir_binop(4, 2, BinaryOp::OpBitOr, 3)   // r4 = (x|1)|2
+    instrs[5 as usize] = ir_load_imm(5, 4)
+    instrs[6 as usize] = ir_binop(6, 4, BinaryOp::OpBitOr, 5)   // r6 = ((x|1)|2)|4
+    let func = cp_make_test_func(instrs, 7)
+    let result = opt_cleanup_module(func)
+    result.instrs[6 as usize].op == IrOpcode::IrBinOp
+        && result.instrs[6 as usize].bin_op == BinaryOp::OpBitOr
+        && result.instrs[6 as usize].src1 == 0
+}
+
+fn compiler_main_test_or_chain_no_fold_diff_base() -> bool with Mut, Div, Panic {
+    // (x | 3) | 4 where the base differs from AM's case — should fold (both same x)
+    // But (x|3)|(y|4): different bases, no merge → test no-fold path
+    var instrs: [IrInstr; 16] = cp_empty_instrs()
+    instrs[0 as usize] = ir_load_imm(0, 42)     // r0 = x
+    instrs[1 as usize] = ir_load_imm(1, 99)     // r1 = y (different)
+    instrs[2 as usize] = ir_load_imm(2, 3)
+    instrs[3 as usize] = ir_binop(3, 0, BinaryOp::OpBitOr, 2)   // r3 = x|3
+    instrs[4 as usize] = ir_load_imm(4, 4)
+    instrs[5 as usize] = ir_binop(5, 1, BinaryOp::OpBitOr, 4)   // r5 = y|4
+    instrs[6 as usize] = ir_binop(6, 3, BinaryOp::OpBitOr, 5)   // r6 = (x|3)|(y|4)
+    let func = cp_make_test_func(instrs, 7)
+    let result = opt_cleanup_module(func)
+    // Neither s1 nor s2 alone triggers BG since r5 is am_or tracked on y
+    result.instrs[6 as usize].op == IrOpcode::IrBinOp
+}
+
+fn compiler_main_test_or_chain_superset_still_block_am() -> bool with Mut, Div, Panic {
+    // (x | 0b1111) | 0b0011 → IrCopy (Block AM handles superset, BG not needed)
+    var instrs: [IrInstr; 16] = cp_empty_instrs()
+    instrs[0 as usize] = ir_load_imm(0, 42)
+    instrs[1 as usize] = ir_load_imm(1, 15)      // r1 = 0b1111
+    instrs[2 as usize] = ir_binop(2, 0, BinaryOp::OpBitOr, 1)   // r2 = x|15
+    instrs[3 as usize] = ir_load_imm(3, 3)       // r3 = 0b0011 (subset of 15)
+    instrs[4 as usize] = ir_binop(4, 2, BinaryOp::OpBitOr, 3)   // r4 = (x|15)|3
+    let func = cp_make_test_func(instrs, 5)
+    let result = opt_cleanup_module(func)
+    // Block AM fires: 3 is subset of 15 → IrCopy(r2)
+    result.instrs[4 as usize].op == IrOpcode::IrCopy
+}
+
+fn compiler_main_test_or_chain_and_not_folded() -> bool with Mut, Div, Panic {
+    // (x & 3) | 12 → not an OR chain fold (x&3 is AND, not OR)
+    var instrs: [IrInstr; 16] = cp_empty_instrs()
+    instrs[0 as usize] = ir_load_imm(0, 42)
+    instrs[1 as usize] = ir_load_imm(1, 3)
+    instrs[2 as usize] = ir_binop(2, 0, BinaryOp::OpBitAnd, 1)  // r2 = x&3 (not OR)
+    instrs[3 as usize] = ir_load_imm(3, 12)
+    instrs[4 as usize] = ir_binop(4, 2, BinaryOp::OpBitOr, 3)   // r4 = (x&3)|12
+    let func = cp_make_test_func(instrs, 5)
+    let result = opt_cleanup_module(func)
+    // BG should not fire (r2 is AND, not tracked by am_or_valid)
+    // Result stays as IrBinOp OpBitOr (not folded to remove the AND operand)
+    result.instrs[4 as usize].op == IrOpcode::IrBinOp
+        && result.instrs[4 as usize].bin_op == BinaryOp::OpBitOr
+}
+
 fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
     var passed: i64 = 0
-    let total: i64 = 535
+    let total: i64 = 541
 
     println("=== compiler/main.sio self-tests ===")
 
@@ -14332,6 +14428,32 @@ fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
         passed = passed + 1
         println("  T535 OK: Sprint 144 Block BF: x-~x no fold [sub not add]")
     } else { println("  FAIL: T535") }
+
+    // Sprint 145 Block BG: OR constant-chain fold (T536-T541)
+    if compiler_main_test_or_chain_basic() {
+        passed = passed + 1
+        println("  T536 OK: Sprint 145 Block BG: (x|3)|12->x|15")
+    } else { println("  FAIL: T536") }
+    if compiler_main_test_or_chain_commutative() {
+        passed = passed + 1
+        println("  T537 OK: Sprint 145 Block BG: 12|(x|3)->x|15 commutative")
+    } else { println("  FAIL: T537") }
+    if compiler_main_test_or_chain_three_levels() {
+        passed = passed + 1
+        println("  T538 OK: Sprint 145 Block BG: three-level OR chain")
+    } else { println("  FAIL: T538") }
+    if compiler_main_test_or_chain_no_fold_diff_base() {
+        passed = passed + 1
+        println("  T539 OK: Sprint 145 Block BG: diff base no fold")
+    } else { println("  FAIL: T539") }
+    if compiler_main_test_or_chain_superset_still_block_am() {
+        passed = passed + 1
+        println("  T540 OK: Sprint 145 Block BG: superset still Block AM IrCopy")
+    } else { println("  FAIL: T540") }
+    if compiler_main_test_or_chain_and_not_folded() {
+        passed = passed + 1
+        println("  T541 OK: Sprint 145 Block BG: AND-base no OR chain fold")
+    } else { println("  FAIL: T541") }
 
     println("")
     println("compiler/main tests: " + int_to_string(passed) + "/" + int_to_string(total) + " passed")

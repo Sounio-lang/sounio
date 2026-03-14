@@ -1506,6 +1506,80 @@ fn ocp_const_fold(func: IrFunction) -> IrFunction with Mut, Div, Panic {
             }
         }
 
+        // Sprint 143 Block BE: AND-subset OR absorption.
+        // (x & C1) | C2 → C2  when C1 ⊆ C2  (i.e., (C1 & C2) == C1).
+        // Proof: x & C1 ⊆ C1 ⊆ C2, so every bit of (x & C1) is already in C2.
+        // C2 | (x & C1) → C2  (commutative form).
+        // Zero new arrays: reuses and_valid/and_const_val from Block AE (Sprint 108).
+        // SOTA: LLVM InstCombineAndOrXor.cpp; Boolean absorption law; Hacker's Delight §2-1.
+        if ocp_is_binop(result.instrs[i as usize].op) {
+            let be_instr = result.instrs[i as usize]
+            let be_s1 = be_instr.src1; let be_s2 = be_instr.src2
+            let be_s1_ok = be_s1 >= 0 && be_s1 < 256; let be_s2_ok = be_s2 >= 0 && be_s2 < 256
+            if be_instr.bin_op == BinaryOp::OpBitOr {
+                // (x & C1) | C2 → C2 when C1 ⊆ C2
+                if be_s1_ok && and_valid[be_s1 as usize]
+                        && be_s2_ok && is_const[be_s2 as usize] {
+                    let be_c1 = and_const_val[be_s1 as usize]
+                    let be_c2 = const_val[be_s2 as usize]
+                    if (be_c1 & be_c2) == be_c1 {
+                        result.instrs[i as usize] = ir_load_imm(be_instr.dst, be_c2)
+                        if be_instr.dst >= 0 && be_instr.dst < 256 {
+                            is_const[be_instr.dst as usize] = true
+                            const_val[be_instr.dst as usize] = be_c2
+                        }
+                    }
+                }
+                // C2 | (x & C1) → C2 (commutative)
+                if be_s2_ok && and_valid[be_s2 as usize]
+                        && be_s1_ok && is_const[be_s1 as usize] {
+                    let be_c1 = and_const_val[be_s2 as usize]
+                    let be_c2 = const_val[be_s1 as usize]
+                    if (be_c1 & be_c2) == be_c1 {
+                        result.instrs[i as usize] = ir_load_imm(be_instr.dst, be_c2)
+                        if be_instr.dst >= 0 && be_instr.dst < 256 {
+                            is_const[be_instr.dst as usize] = true
+                            const_val[be_instr.dst as usize] = be_c2
+                        }
+                    }
+                }
+            }
+        }
+
+        // Sprint 144 Block BF: OR-mask clearance via disjoint AND.
+        // (x | C1) & C2 → x & C2  when C1 & C2 == 0 (disjoint masks).
+        // Proof: (x | C1) & C2 = (x & C2) | (C1 & C2) = (x & C2) | 0 = x & C2.
+        // C2 & (x | C1) → x & C2  (commutative form).
+        // Zero new arrays: reuses am_or_valid/am_or_var_src/am_or_const_val from Block AM.
+        // SOTA: LLVM InstCombineAndOrXor.cpp; known-bits analysis; Hacker's Delight §2.
+        if ocp_is_binop(result.instrs[i as usize].op) {
+            let bf_instr = result.instrs[i as usize]
+            let bf_s1 = bf_instr.src1; let bf_s2 = bf_instr.src2
+            let bf_s1_ok = bf_s1 >= 0 && bf_s1 < 256; let bf_s2_ok = bf_s2 >= 0 && bf_s2 < 256
+            if bf_instr.bin_op == BinaryOp::OpBitAnd {
+                // (x | C1) & C2 → x & C2 when C1 & C2 == 0
+                if bf_s1_ok && am_or_valid[bf_s1 as usize]
+                        && bf_s2_ok && is_const[bf_s2 as usize] {
+                    let bf_c1 = am_or_const_val[bf_s1 as usize]
+                    let bf_c2 = const_val[bf_s2 as usize]
+                    if (bf_c1 & bf_c2) == 0 {
+                        result.instrs[i as usize] = ir_binop(bf_instr.dst,
+                            am_or_var_src[bf_s1 as usize], BinaryOp::OpBitAnd, bf_s2)
+                    }
+                }
+                // C2 & (x | C1) → x & C2 (commutative)
+                if bf_s2_ok && am_or_valid[bf_s2 as usize]
+                        && bf_s1_ok && is_const[bf_s1 as usize] {
+                    let bf_c1 = am_or_const_val[bf_s2 as usize]
+                    let bf_c2 = const_val[bf_s1 as usize]
+                    if (bf_c1 & bf_c2) == 0 {
+                        result.instrs[i as usize] = ir_binop(bf_instr.dst,
+                            am_or_var_src[bf_s2 as usize], BinaryOp::OpBitAnd, bf_s1)
+                    }
+                }
+            }
+        }
+
                         // Sprint 82 Block J: Unary operation constant folding.
         // Folds IrUnaryOp when the source operand is a known constant.
         // Only OpNeg and OpNot are foldable (Ref/RefMut/Deref are memory ops).
