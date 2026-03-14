@@ -52,7 +52,7 @@ OPT_FILE="self-hosted/ir/opt_cleanup.sio"
 check_grep "src:block_bw_comment"   "Block BW.*XOR.mask|Block BW.*x.*C.*~C" "$OPT_FILE"
 check_grep "src:bw_xor_valid_check" "bm_xor_valid\[bw_s1 as usize\]" "$OPT_FILE"
 check_grep "src:bw_not_c_check"     "bm_xor_cval\[bw_s[12] as usize\] \^ -1" "$OPT_FILE"
-check_grep "src:bw_and_rewrite"     "ir_binop.*bw_instr\.dst.*bm_xor_src.*OpBitAnd" "$OPT_FILE"
+check_grep "src:bw_and_rewrite"     "bm_xor_src\[bw_s[12] as usize\], BinaryOp::OpBitAnd" "$OPT_FILE"
 
 echo ""
 echo "--- Tests ---"
