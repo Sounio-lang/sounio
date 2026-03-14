@@ -12497,9 +12497,92 @@ fn compiler_main_test_bw_no_fold_plain_and() -> bool with Mut, Div, Panic {
     opt.instrs[3 as usize].src1 == 2
 }
 
+// Sprint 162 Block BX: OR-XOR complement fold (T638-T643)
+fn compiler_main_test_bx_or_xor_comp_basic() -> bool with Mut, Div, Panic {
+    // (r0 | 5) ^ 5 → r0 & ~5
+    var instrs: [IrInstr; 128] = cp_empty_instrs()
+    instrs[0 as usize] = ir_load_imm(1, 5)
+    instrs[1 as usize] = ir_binop(2, 0, BinaryOp::OpBitOr, 1)   // r2 = r0 | 5
+    instrs[2 as usize] = ir_load_imm(3, 5)
+    instrs[3 as usize] = ir_binop(4, 2, BinaryOp::OpBitXor, 3)  // r4 = (r0|5)^5
+    let func = cp_make_test_func(instrs, 4)
+    let opt = opt_cleanup_function(func)
+    opt.instrs[3 as usize].op == IrOpcode::IrBinOp
+        && opt.instrs[3 as usize].bin_op == BinaryOp::OpBitAnd
+        && opt.instrs[3 as usize].src1 == 0
+}
+
+fn compiler_main_test_bx_or_xor_comp_comm() -> bool with Mut, Div, Panic {
+    // 5 ^ (r0 | 5) → r0 & ~5 (commutative outer)
+    var instrs: [IrInstr; 128] = cp_empty_instrs()
+    instrs[0 as usize] = ir_load_imm(1, 5)
+    instrs[1 as usize] = ir_binop(2, 0, BinaryOp::OpBitOr, 1)   // r2 = r0 | 5
+    instrs[2 as usize] = ir_load_imm(3, 5)
+    instrs[3 as usize] = ir_binop(4, 3, BinaryOp::OpBitXor, 2)  // r4 = 5^(r0|5)
+    let func = cp_make_test_func(instrs, 4)
+    let opt = opt_cleanup_function(func)
+    opt.instrs[3 as usize].op == IrOpcode::IrBinOp
+        && opt.instrs[3 as usize].bin_op == BinaryOp::OpBitAnd
+        && opt.instrs[3 as usize].src1 == 0
+}
+
+fn compiler_main_test_bx_or_xor_comp_merged_const() -> bool with Mut, Div, Panic {
+    // (r0 | 0xFF) ^ 0xFF → r0 & ~0xFF; ~0xFF = -256
+    var instrs: [IrInstr; 128] = cp_empty_instrs()
+    instrs[0 as usize] = ir_load_imm(1, 255)
+    instrs[1 as usize] = ir_binop(2, 0, BinaryOp::OpBitOr, 1)
+    instrs[2 as usize] = ir_load_imm(3, 255)
+    instrs[3 as usize] = ir_binop(4, 2, BinaryOp::OpBitXor, 3)
+    let func = cp_make_test_func(instrs, 4)
+    let opt = opt_cleanup_function(func)
+    // should rewrite to AND with ~255 = -256
+    opt.instrs[3 as usize].op == IrOpcode::IrBinOp
+        && opt.instrs[3 as usize].bin_op == BinaryOp::OpBitAnd
+}
+
+fn compiler_main_test_bx_no_fold_diff_const() -> bool with Mut, Div, Panic {
+    // (r0 | 5) ^ 3 → no fold (outer C != inner C)
+    var instrs: [IrInstr; 128] = cp_empty_instrs()
+    instrs[0 as usize] = ir_load_imm(1, 5)
+    instrs[1 as usize] = ir_binop(2, 0, BinaryOp::OpBitOr, 1)
+    instrs[2 as usize] = ir_load_imm(3, 3)
+    instrs[3 as usize] = ir_binop(4, 2, BinaryOp::OpBitXor, 3)
+    let func = cp_make_test_func(instrs, 4)
+    let opt = opt_cleanup_function(func)
+    opt.instrs[3 as usize].src1 == 2
+}
+
+fn compiler_main_test_bx_no_fold_and_op() -> bool with Mut, Div, Panic {
+    // (r0 | 5) & 5 → no fold (outer is AND not XOR)
+    var instrs: [IrInstr; 128] = cp_empty_instrs()
+    instrs[0 as usize] = ir_load_imm(1, 5)
+    instrs[1 as usize] = ir_binop(2, 0, BinaryOp::OpBitOr, 1)
+    instrs[2 as usize] = ir_load_imm(3, 5)
+    instrs[3 as usize] = ir_binop(4, 2, BinaryOp::OpBitAnd, 3)
+    let func = cp_make_test_func(instrs, 4)
+    let opt = opt_cleanup_function(func)
+    opt.instrs[3 as usize].op == IrOpcode::IrBinOp
+        && opt.instrs[3 as usize].bin_op == BinaryOp::OpBitAnd
+        && opt.instrs[3 as usize].src1 == 2
+}
+
+fn compiler_main_test_bx_no_fold_inner_xor() -> bool with Mut, Div, Panic {
+    // (r0 ^ 5) ^ 5 → r0 (Block BM/BN territory, not BX)
+    var instrs: [IrInstr; 128] = cp_empty_instrs()
+    instrs[0 as usize] = ir_load_imm(1, 5)
+    instrs[1 as usize] = ir_binop(2, 0, BinaryOp::OpBitXor, 1)  // not OR
+    instrs[2 as usize] = ir_load_imm(3, 5)
+    instrs[3 as usize] = ir_binop(4, 2, BinaryOp::OpBitXor, 3)
+    let func = cp_make_test_func(instrs, 4)
+    let opt = opt_cleanup_function(func)
+    // BM/BN handles this; BX does NOT (inner is XOR not OR)
+    opt.instrs[3 as usize].op != IrOpcode::IrBinOp
+        || opt.instrs[3 as usize].bin_op != BinaryOp::OpBitAnd
+}
+
 fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
     var passed: i64 = 0
-    let total: i64 = 637
+    let total: i64 = 643
 
     println("=== compiler/main.sio self-tests ===")
 
@@ -16077,6 +16160,32 @@ fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
         passed = passed + 1
         println("  T637 OK: Sprint 161 Block BW: (x+5)&~5 no fold not xor")
     } else { println("  FAIL: T637") }
+
+    // Sprint 162 Block BX: OR-XOR complement fold (T638-T643)
+    if compiler_main_test_bx_or_xor_comp_basic() {
+        passed = passed + 1
+        println("  T638 OK: Sprint 162 Block BX: (r0|5)^5->r0&~5")
+    } else { println("  FAIL: T638") }
+    if compiler_main_test_bx_or_xor_comp_comm() {
+        passed = passed + 1
+        println("  T639 OK: Sprint 162 Block BX: 5^(r0|5)->r0&~5 commutative")
+    } else { println("  FAIL: T639") }
+    if compiler_main_test_bx_or_xor_comp_merged_const() {
+        passed = passed + 1
+        println("  T640 OK: Sprint 162 Block BX: (r0|0xFF)^0xFF->r0&-256")
+    } else { println("  FAIL: T640") }
+    if compiler_main_test_bx_no_fold_diff_const() {
+        passed = passed + 1
+        println("  T641 OK: Sprint 162 Block BX: (r0|5)^3 no fold diff const")
+    } else { println("  FAIL: T641") }
+    if compiler_main_test_bx_no_fold_and_op() {
+        passed = passed + 1
+        println("  T642 OK: Sprint 162 Block BX: (r0|5)&5 no fold AND not XOR")
+    } else { println("  FAIL: T642") }
+    if compiler_main_test_bx_no_fold_inner_xor() {
+        passed = passed + 1
+        println("  T643 OK: Sprint 162 Block BX: (r0^5)^5 not BX (Block BN handles)")
+    } else { println("  FAIL: T643") }
 
     println("")
     println("compiler/main tests: " + int_to_string(passed) + "/" + int_to_string(total) + " passed")

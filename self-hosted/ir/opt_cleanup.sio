@@ -2204,6 +2204,43 @@ fn ocp_const_fold(func: IrFunction) -> IrFunction with Mut, Div, Panic {
             }
         }
 
+        // Sprint 162 Block BX: OR-XOR complement fold — (x | C) ^ C → x & ~C.
+        // Proof: C-bits (C_i=1): (xi|1)^1=1^1=0=xi&0. Non-C-bits (C_i=0): (xi|0)^0=xi=xi&1.
+        // Handles commutative outer: C ^ (x | C) → x & ~C.
+        // Zero new arrays: uses am_or_valid/var_src/const_val (Block AM) + is_const/const_val + def_at.
+        // SOTA: LLVM InstCombineAndOrXor; Boolean algebra: (x|C)^C = x&~C.
+        if ocp_is_binop(result.instrs[i as usize].op) {
+            let bx_instr = result.instrs[i as usize]
+            let bx_s1 = bx_instr.src1; let bx_s2 = bx_instr.src2
+            let bx_s1_ok = bx_s1 >= 0 && bx_s1 < 256; let bx_s2_ok = bx_s2 >= 0 && bx_s2 < 256
+            if bx_instr.bin_op == BinaryOp::OpBitXor {
+                // (x | C) ^ C → x & ~C: s1 is or-const, s2 == same C
+                if bx_s1_ok && am_or_valid[bx_s1 as usize] && bx_s2_ok && is_const[bx_s2 as usize]
+                        && am_or_const_val[bx_s1 as usize] == const_val[bx_s2 as usize] {
+                    let bx_notc = am_or_const_val[bx_s1 as usize] ^ -1
+                    let bx_def = def_at[bx_s2 as usize]
+                    if bx_def >= 0 {
+                        result.instrs[bx_def as usize] = ir_load_imm(bx_s2, bx_notc)
+                        const_val[bx_s2 as usize] = bx_notc
+                    }
+                    result.instrs[i as usize] = ir_binop(bx_instr.dst,
+                        am_or_var_src[bx_s1 as usize], BinaryOp::OpBitAnd, bx_s2)
+                }
+                // C ^ (x | C) → x & ~C: commutative outer
+                if bx_s2_ok && am_or_valid[bx_s2 as usize] && bx_s1_ok && is_const[bx_s1 as usize]
+                        && am_or_const_val[bx_s2 as usize] == const_val[bx_s1 as usize] {
+                    let bx_notc = am_or_const_val[bx_s2 as usize] ^ -1
+                    let bx_def = def_at[bx_s1 as usize]
+                    if bx_def >= 0 {
+                        result.instrs[bx_def as usize] = ir_load_imm(bx_s1, bx_notc)
+                        const_val[bx_s1 as usize] = bx_notc
+                    }
+                    result.instrs[i as usize] = ir_binop(bx_instr.dst,
+                        am_or_var_src[bx_s2 as usize], BinaryOp::OpBitAnd, bx_s1)
+                }
+            }
+        }
+
                         // Sprint 82 Block J: Unary operation constant folding.
         // Folds IrUnaryOp when the source operand is a known constant.
         // Only OpNeg and OpNot are foldable (Ref/RefMut/Deref are memory ops).
