@@ -1923,6 +1923,37 @@ fn ocp_const_fold(func: IrFunction) -> IrFunction with Mut, Div, Panic {
             }
         }
 
+        // Sprint 156 Block BR: XOR-complement — x ^ ~x → -1, ~x ^ x → -1.
+        // Boolean algebra: a ⊕ ¬a = 1 (XOR with its complement is all-ones).
+        // Proof: x^~x = x^(x^-1) = (x^x)^-1 = 0^-1 = -1. (GF(2): 0⊕1=1 per bit)
+        // Zero new arrays: uses is_bnot/bnot_src (Block AI/BJ/BF) + is_const/const_val.
+        // SOTA: LLVM InstCombineAndOrXor; Hacker's Delight §2-1; GF(2) complement.
+        if ocp_is_binop(result.instrs[i as usize].op) {
+            let br_instr = result.instrs[i as usize]
+            let br_s1 = br_instr.src1; let br_s2 = br_instr.src2
+            let br_s1_ok = br_s1 >= 0 && br_s1 < 256; let br_s2_ok = br_s2 >= 0 && br_s2 < 256
+            if br_instr.bin_op == BinaryOp::OpBitXor && br_s1_ok && br_s2_ok {
+                // x ^ ~x → -1: s2 is ~s1
+                if is_bnot[br_s2 as usize] && bnot_src[br_s2 as usize] == br_s1 {
+                    result.instrs[i as usize] = ir_load_imm(br_instr.dst, -1)
+                    if br_instr.dst >= 0 && br_instr.dst < 256 {
+                        is_const[br_instr.dst as usize] = true
+                        const_val[br_instr.dst as usize] = -1
+                        def_at[br_instr.dst as usize] = i
+                    }
+                }
+                // ~x ^ x → -1: s1 is ~s2
+                if is_bnot[br_s1 as usize] && bnot_src[br_s1 as usize] == br_s2 {
+                    result.instrs[i as usize] = ir_load_imm(br_instr.dst, -1)
+                    if br_instr.dst >= 0 && br_instr.dst < 256 {
+                        is_const[br_instr.dst as usize] = true
+                        const_val[br_instr.dst as usize] = -1
+                        def_at[br_instr.dst as usize] = i
+                    }
+                }
+            }
+        }
+
                         // Sprint 82 Block J: Unary operation constant folding.
         // Folds IrUnaryOp when the source operand is a known constant.
         // Only OpNeg and OpNot are foldable (Ref/RefMut/Deref are memory ops).
