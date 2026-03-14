@@ -3147,6 +3147,45 @@ fn ocp_const_fold(func: IrFunction) -> IrFunction with Mut, Div, Panic {
                     }
                 }
             }
+            // (x+C1)-C2 → x+(C1-C2): handles add-sub chain
+            if instr.op == IrOpcode::IrBinOp && instr.bin_op == BinaryOp::OpSub {
+                let cs_instr = instr
+                let cs_s1 = cs_instr.src1
+                let cs_s2 = cs_instr.src2
+                let cs_s1_ok = cs_s1 >= 0 && cs_s1 < 256
+                let cs_s2_ok = cs_s2 >= 0 && cs_s2 < 256
+                if cs_s1_ok && bt_add_valid[cs_s1 as usize]
+                        && cs_s2_ok && is_const[cs_s2 as usize] {
+                    let cs_c1 = bt_add_cval[cs_s1 as usize]
+                    let cs_c2 = const_val[cs_s2 as usize]
+                    let cs_merged = cs_c1 - cs_c2
+                    let cs_cdef = def_at[cs_s2 as usize]
+                    if cs_merged == 0 {
+                        result.instrs[i as usize] = ir_copy(cs_instr.dst, bt_add_src[cs_s1 as usize])
+                    } else if cs_cdef >= 0 {
+                        if cs_merged > 0 {
+                            result.instrs[cs_cdef as usize] = ir_load_imm(cs_s2, cs_merged)
+                            const_val[cs_s2 as usize] = cs_merged
+                            result.instrs[i as usize] = ir_binop(cs_instr.dst, bt_add_src[cs_s1 as usize], BinaryOp::OpAdd, cs_s2)
+                            if cs_instr.dst >= 0 && cs_instr.dst < 256 {
+                                bt_add_valid[cs_instr.dst as usize] = true
+                                bt_add_src[cs_instr.dst as usize]   = bt_add_src[cs_s1 as usize]
+                                bt_add_cval[cs_instr.dst as usize]  = cs_merged
+                            }
+                        } else {
+                            let cs_neg = 0 - cs_merged
+                            result.instrs[cs_cdef as usize] = ir_load_imm(cs_s2, cs_neg)
+                            const_val[cs_s2 as usize] = cs_neg
+                            result.instrs[i as usize] = ir_binop(cs_instr.dst, bt_add_src[cs_s1 as usize], BinaryOp::OpSub, cs_s2)
+                            if cs_instr.dst >= 0 && cs_instr.dst < 256 {
+                                bs_sub_valid[cs_instr.dst as usize] = true
+                                bs_sub_src[cs_instr.dst as usize]   = bt_add_src[cs_s1 as usize]
+                                bs_sub_cval[cs_instr.dst as usize]  = cs_neg
+                            }
+                        }
+                    }
+                }
+            }
         }
 
         // Sprint 82 Block J: Unary operation constant folding.
