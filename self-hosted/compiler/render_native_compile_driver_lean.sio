@@ -1924,6 +1924,132 @@ fn ast_compile_expr(code: CodeBuffer, expr: &Expr,
             c = emit_byte(c, 0x48); c = emit_byte(c, 0x31); c = emit_byte(c, 0xc0)
         }
         c
+    } else if expr.kind == ExprKind::ExprMatch {
+        // Compile match expression (Option pattern: Some(x) / _ only for now)
+        // 1. Compile scrutinee → rax
+        let m_subj: &Option<Box<Expr>> = &expr.left
+        match *m_subj {
+            Some(ms) => {
+                c = ast_compile_expr(c, &(*ms), local_names, local_slots, local_types, local_count, ctx)
+            }
+            _ => {
+                c = emit_byte(c, 0x48); c = emit_byte(c, 0x31); c = emit_byte(c, 0xc0)
+            }
+        }
+        // Save scrutinee to a temp slot for bindings
+        var m_ns = code_get_ns(c)
+        let m_scrut_slot = m_ns
+        m_ns = m_ns + 1
+        c = code_set_ns(c, m_ns)
+        c = micro_store_rax(c, m_scrut_slot)
+        // Walk arms: linked list of MatchArmList
+        let m_arms: &Option<Box<MatchArmList>> = &expr.arms
+        var m_arm_cur = m_arms
+        // Reserve space for end-jump patches (up to 16 arms)
+        var m_end_patches: [i64; 16] = [0; 16]
+        var m_end_count: i64 = 0
+        var m_done = false
+        while !m_done {
+            match *m_arm_cur {
+                Some(arm_node) => {
+                    let arm: &MatchArm = &(*arm_node).head
+                    if arm.pattern.kind == PatternKind::PatWildcard || arm.pattern.kind == PatternKind::PatBinding {
+                        // Wildcard or binding: unconditional — compile body
+                        if arm.pattern.kind == PatternKind::PatBinding {
+                            var m_bln = local_names
+                            var m_bls = local_slots
+                            var m_blt = local_types
+                            var m_blc = local_count
+                            m_bln[m_blc as usize] = arm.pattern.name
+                            m_bls[m_blc as usize] = m_scrut_slot
+                            m_blt[m_blc as usize] = 0
+                            m_blc = m_blc + 1
+                            c = ast_compile_expr(c, &arm.body, m_bln, m_bls, m_blt, m_blc, ctx)
+                        } else {
+                            c = ast_compile_expr(c, &arm.body, local_names, local_slots, local_types, local_count, ctx)
+                        }
+                        // JMP to end
+                        c = emit_byte(c, 0xe9)
+                        m_end_patches[m_end_count as usize] = c.len
+                        m_end_count = m_end_count + 1
+                        c = emit_byte(c, 0); c = emit_byte(c, 0); c = emit_byte(c, 0); c = emit_byte(c, 0)
+                    } else if arm.pattern.kind == PatternKind::PatEnum {
+                        let pn = ast_name_from_path(&arm.pattern.path)
+                        if ir_name_is_some(pn) {
+                            // Some(binding): test scrutinee != 0
+                            c = micro_load_rax(c, m_scrut_slot)
+                            c = emit_byte(c, 0x48); c = emit_byte(c, 0x85); c = emit_byte(c, 0xc0) // TEST rax, rax
+                            c = emit_byte(c, 0x0f); c = emit_byte(c, 0x84) // JZ skip
+                            let m_jz_site = c.len
+                            c = emit_byte(c, 0); c = emit_byte(c, 0); c = emit_byte(c, 0); c = emit_byte(c, 0)
+                            // Bind inner pattern to scrutinee value
+                            var m_sln = local_names
+                            var m_sls = local_slots
+                            var m_slt = local_types
+                            var m_slc = local_count
+                            let sp_ref: &Option<Box<PatternList>> = &arm.pattern.sub_patterns
+                            match *sp_ref {
+                                Some(sp) => {
+                                    m_sln[m_slc as usize] = (*sp).head.name
+                                    m_sls[m_slc as usize] = m_scrut_slot
+                                    m_slt[m_slc as usize] = 0
+                                    m_slc = m_slc + 1
+                                }
+                                _ => {}
+                            }
+                            c = ast_compile_expr(c, &arm.body, m_sln, m_sls, m_slt, m_slc, ctx)
+                            c = emit_byte(c, 0xe9) // JMP end
+                            m_end_patches[m_end_count as usize] = c.len
+                            m_end_count = m_end_count + 1
+                            c = emit_byte(c, 0); c = emit_byte(c, 0); c = emit_byte(c, 0); c = emit_byte(c, 0)
+                            // Patch JZ to here
+                            let m_jz_target = c.len
+                            let m_jz_disp = m_jz_target - (m_jz_site + 4)
+                            c.bytes[(m_jz_site) as usize] = (m_jz_disp & 0xFF) as i8
+                            c.bytes[(m_jz_site + 1) as usize] = ((m_jz_disp >> 8) & 0xFF) as i8
+                            c.bytes[(m_jz_site + 2) as usize] = ((m_jz_disp >> 16) & 0xFF) as i8
+                            c.bytes[(m_jz_site + 3) as usize] = ((m_jz_disp >> 24) & 0xFF) as i8
+                        } else if ir_name_is_none(pn) {
+                            // None: test scrutinee == 0
+                            c = micro_load_rax(c, m_scrut_slot)
+                            c = emit_byte(c, 0x48); c = emit_byte(c, 0x85); c = emit_byte(c, 0xc0) // TEST rax, rax
+                            c = emit_byte(c, 0x0f); c = emit_byte(c, 0x85) // JNZ skip
+                            let m_jnz_site = c.len
+                            c = emit_byte(c, 0); c = emit_byte(c, 0); c = emit_byte(c, 0); c = emit_byte(c, 0)
+                            c = ast_compile_expr(c, &arm.body, local_names, local_slots, local_types, local_count, ctx)
+                            c = emit_byte(c, 0xe9) // JMP end
+                            m_end_patches[m_end_count as usize] = c.len
+                            m_end_count = m_end_count + 1
+                            c = emit_byte(c, 0); c = emit_byte(c, 0); c = emit_byte(c, 0); c = emit_byte(c, 0)
+                            // Patch JNZ to here
+                            let m_jnz_target = c.len
+                            let m_jnz_disp = m_jnz_target - (m_jnz_site + 4)
+                            c.bytes[(m_jnz_site) as usize] = (m_jnz_disp & 0xFF) as i8
+                            c.bytes[(m_jnz_site + 1) as usize] = ((m_jnz_disp >> 8) & 0xFF) as i8
+                            c.bytes[(m_jnz_site + 2) as usize] = ((m_jnz_disp >> 16) & 0xFF) as i8
+                            c.bytes[(m_jnz_site + 3) as usize] = ((m_jnz_disp >> 24) & 0xFF) as i8
+                        }
+                    }
+                    // Advance to next arm
+                    m_arm_cur = &(*arm_node).tail
+                }
+                _ => {
+                    m_done = true
+                }
+            }
+        }
+        // Patch all end-jumps to here
+        var m_pi: i64 = 0
+        while m_pi < m_end_count {
+            let m_ep = m_end_patches[m_pi as usize]
+            let m_end_disp = c.len - (m_ep + 4)
+            c.bytes[(m_ep) as usize] = (m_end_disp & 0xFF) as i8
+            c.bytes[(m_ep + 1) as usize] = ((m_end_disp >> 8) & 0xFF) as i8
+            c.bytes[(m_ep + 2) as usize] = ((m_end_disp >> 16) & 0xFF) as i8
+            c.bytes[(m_ep + 3) as usize] = ((m_end_disp >> 24) & 0xFF) as i8
+            m_pi = m_pi + 1
+        }
+        c
     } else {
         c = emit_byte(c, 0x48)
         c = emit_byte(c, 0x31)
