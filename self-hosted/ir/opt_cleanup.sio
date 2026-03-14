@@ -3111,6 +3111,42 @@ fn ocp_const_fold(func: IrFunction) -> IrFunction with Mut, Div, Panic {
             }
         }
 
+        // Sprint 192 Block DB: XOR-AND to OR — (x^y)|(x&y) → x|y.
+        // Proof: (A⊕B)|(A∧B) = ((A|B)∧¬(A∧B))|(A∧B) = (A|B)|(A∧B) = A|B. QED.
+        // Zero new arrays: uses as_xor_rr_valid/lhs/rhs (Block AS) + ao_and_rr_valid/lhs/rhs (Block AO).
+        // SOTA: LLVM InstCombineAndOrXor; Boolean: xor+and → or.
+        if ocp_is_binop(result.instrs[i as usize].op) {
+            let db_instr = result.instrs[i as usize]
+            let db_s1 = db_instr.src1; let db_s2 = db_instr.src2
+            let db_s1_ok = db_s1 >= 0 && db_s1 < 256; let db_s2_ok = db_s2 >= 0 && db_s2 < 256
+            if db_instr.bin_op == BinaryOp::OpBitOr {
+                // (x^y)|(x&y) → x|y: s1=xor_rr, s2=and_rr, same operands
+                if db_s1_ok && as_xor_rr_valid[db_s1 as usize]
+                        && db_s2_ok && ao_and_rr_valid[db_s2 as usize] {
+                    let db_xl = as_xor_rr_lhs[db_s1 as usize]
+                    let db_xr = as_xor_rr_rhs[db_s1 as usize]
+                    let db_al = ao_and_rr_lhs[db_s2 as usize]
+                    let db_ar = ao_and_rr_rhs[db_s2 as usize]
+                    if (db_xl == db_al && db_xr == db_ar)
+                            || (db_xl == db_ar && db_xr == db_al) {
+                        result.instrs[i as usize] = ir_binop(db_instr.dst, db_xl, BinaryOp::OpBitOr, db_xr)
+                    }
+                }
+                // (x&y)|(x^y) → x|y: commutative
+                if db_s1_ok && ao_and_rr_valid[db_s1 as usize]
+                        && db_s2_ok && as_xor_rr_valid[db_s2 as usize] {
+                    let db_al = ao_and_rr_lhs[db_s1 as usize]
+                    let db_ar = ao_and_rr_rhs[db_s1 as usize]
+                    let db_xl = as_xor_rr_lhs[db_s2 as usize]
+                    let db_xr = as_xor_rr_rhs[db_s2 as usize]
+                    if (db_al == db_xl && db_ar == db_xr)
+                            || (db_al == db_xr && db_ar == db_xl) {
+                        result.instrs[i as usize] = ir_binop(db_instr.dst, db_al, BinaryOp::OpBitOr, db_ar)
+                    }
+                }
+            }
+        }
+
         // Sprint 177 Block CM: AND complement XOR partition — (x & C) ^ (x & ~C) → x.
         // Proof: C-bits: (xi&1)^(xi&0)=xi^0=xi. Non-C: (xi&0)^(xi&1)=0^xi=xi. QED.
         // Dual of Block CC (OR partition). Commutative: (x&~C)^(x&C) → x.
