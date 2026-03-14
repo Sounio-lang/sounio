@@ -784,6 +784,44 @@ fn ocp_const_fold(func: IrFunction) -> IrFunction with Mut, Div, Panic {
                         am_or_const_val[instr.dst as usize] = v1
                     }
                 }
+                // Sprint 145 Block BG: OR constant-chain fold — (x | C1) | C2 → x | (C1 | C2).
+                // Analogue of Block AE (AND chain fold) for OR; fires when Block AM did not fold.
+                // SOTA: LLVM InstCombineAndOrXor.cpp — or(or X,C1),C2 → or X,(C1|C2);
+                // Boolean algebra associativity + idempotency (a|a=a).
+                // Distinct from Block AM ((x|C1)|C2→IrCopy when C2⊆C1): fires when C2 has new bits.
+                // Zero new arrays: reuses am_or_valid/var_src/const_val + def_at from Block AM.
+                if ocp_is_binop(result.instrs[i as usize].op) && result.instrs[i as usize].bin_op == BinaryOp::OpBitOr {
+                    if s2_known && s1 >= 0 && s1 < 256 && am_or_valid[s1 as usize] {
+                        let bg_c1 = am_or_const_val[s1 as usize]
+                        let bg_merged = bg_c1 | v2
+                        let bg_def = def_at[s2 as usize]
+                        if bg_def >= 0 {
+                            result.instrs[bg_def as usize] = ir_load_imm(s2, bg_merged)
+                            const_val[s2 as usize] = bg_merged
+                        }
+                        result.instrs[i as usize] = ir_binop(instr.dst, am_or_var_src[s1 as usize], BinaryOp::OpBitOr, s2)
+                        if instr.dst >= 0 && instr.dst < 256 {
+                            am_or_valid[instr.dst as usize]     = true
+                            am_or_var_src[instr.dst as usize]   = am_or_var_src[s1 as usize]
+                            am_or_const_val[instr.dst as usize] = bg_merged
+                        }
+                    }
+                    if s1_known && s2 >= 0 && s2 < 256 && am_or_valid[s2 as usize] {
+                        let bg_c2 = am_or_const_val[s2 as usize]
+                        let bg_merged = v1 | bg_c2
+                        let bg_def = def_at[s1 as usize]
+                        if bg_def >= 0 {
+                            result.instrs[bg_def as usize] = ir_load_imm(s1, bg_merged)
+                            const_val[s1 as usize] = bg_merged
+                        }
+                        result.instrs[i as usize] = ir_binop(instr.dst, am_or_var_src[s2 as usize], BinaryOp::OpBitOr, s1)
+                        if instr.dst >= 0 && instr.dst < 256 {
+                            am_or_valid[instr.dst as usize]     = true
+                            am_or_var_src[instr.dst as usize]   = am_or_var_src[s2 as usize]
+                            am_or_const_val[instr.dst as usize] = bg_merged
+                        }
+                    }
+                }
                 if instr.bin_op == BinaryOp::OpBitXor {
                     if s2_known && v2 == 0 {
                         result.instrs[i as usize] = ir_copy(instr.dst, s1)
@@ -1435,6 +1473,35 @@ fn ocp_const_fold(func: IrFunction) -> IrFunction with Mut, Div, Panic {
                 if be_s2_ok && is_bnot[be_s2 as usize]
                         && be_s1_ok && is_const[be_s1 as usize] && const_val[be_s1 as usize] == 1 {
                     result.instrs[i as usize] = ir_unaryop(be_instr.dst, UnaryOp::OpNeg, bnot_src[be_s2 as usize])
+                }
+            }
+        }
+
+        // Sprint 144 Block BF: Add-complement law — x + ~x → -1.
+        // Ring identity: x + ~x = x + (-x - 1) = -1. All-bits-set result.
+        // Extends Block AR (x | ~x → -1) to the additive domain.
+        // Zero new arrays: uses is_bnot/bnot_src (Block AI) + is_const/const_val.
+        // SOTA: LLVM InstCombineAddSub.cpp; two's complement ring law.
+        if ocp_is_binop(result.instrs[i as usize].op) {
+            let bf_instr = result.instrs[i as usize]
+            let bf_s1 = bf_instr.src1; let bf_s2 = bf_instr.src2
+            let bf_s1_ok = bf_s1 >= 0 && bf_s1 < 256; let bf_s2_ok = bf_s2 >= 0 && bf_s2 < 256
+            if bf_instr.bin_op == BinaryOp::OpAdd {
+                // x + ~x → -1  (s2 = NOT(s1))
+                if bf_s2_ok && is_bnot[bf_s2 as usize] && bnot_src[bf_s2 as usize] == bf_s1 {
+                    result.instrs[i as usize] = ir_load_imm(bf_instr.dst, -1)
+                    if bf_instr.dst >= 0 && bf_instr.dst < 256 {
+                        is_const[bf_instr.dst as usize] = true
+                        const_val[bf_instr.dst as usize] = -1
+                    }
+                }
+                // ~x + x → -1  (s1 = NOT(s2), commutative)
+                if bf_s1_ok && is_bnot[bf_s1 as usize] && bnot_src[bf_s1 as usize] == bf_s2 {
+                    result.instrs[i as usize] = ir_load_imm(bf_instr.dst, -1)
+                    if bf_instr.dst >= 0 && bf_instr.dst < 256 {
+                        is_const[bf_instr.dst as usize] = true
+                        const_val[bf_instr.dst as usize] = -1
+                    }
                 }
             }
         }
