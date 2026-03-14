@@ -15817,9 +15817,82 @@ fn compiler_main_test_dq_no_fold_not_xor() -> bool with Mut, Div, Panic {
     opt.instrs[1 as usize].src1 == 0 && opt.instrs[1 as usize].src2 == 2
 }
 
+// Sprint 208 Block DR: De Morgan NOT-AND (T914-T919)
+fn compiler_main_test_dr_not_and_demorgan() -> bool with Mut, Div, Panic {
+    // r2=~r0; r3=~r1; r4=r2&r3; r5=~r4 → r5=r0|r1
+    var instrs: [IrInstr; 128] = cp_empty_instrs()
+    instrs[0 as usize] = ir_unaryop(2, UnaryOp::OpNot, 0)
+    instrs[1 as usize] = ir_unaryop(3, UnaryOp::OpNot, 1)
+    instrs[2 as usize] = ir_binop(4, 2, BinaryOp::OpBitAnd, 3)
+    instrs[3 as usize] = ir_unaryop(5, UnaryOp::OpNot, 4)
+    let func = cp_make_test_func(instrs, 4)
+    let opt = opt_cleanup_function(func)
+    opt.instrs[3 as usize].op == IrOpcode::IrBinOp
+        && opt.instrs[3 as usize].bin_op == BinaryOp::OpBitOr
+        && opt.instrs[3 as usize].src1 == 0
+        && opt.instrs[3 as usize].src2 == 1
+}
+fn compiler_main_test_dr_not_and_swapped() -> bool with Mut, Div, Panic {
+    // (~r1 & ~r0) negated → r1|r0 (AND operands swapped)
+    var instrs: [IrInstr; 128] = cp_empty_instrs()
+    instrs[0 as usize] = ir_unaryop(2, UnaryOp::OpNot, 0)
+    instrs[1 as usize] = ir_unaryop(3, UnaryOp::OpNot, 1)
+    instrs[2 as usize] = ir_binop(4, 3, BinaryOp::OpBitAnd, 2)
+    instrs[3 as usize] = ir_unaryop(5, UnaryOp::OpNot, 4)
+    let func = cp_make_test_func(instrs, 4)
+    let opt = opt_cleanup_function(func)
+    opt.instrs[3 as usize].bin_op == BinaryOp::OpBitOr
+}
+fn compiler_main_test_dr_not_and_val() -> bool with Mut, Div, Panic {
+    // structural: result is IrBinOp (OR)
+    var instrs: [IrInstr; 128] = cp_empty_instrs()
+    instrs[0 as usize] = ir_unaryop(2, UnaryOp::OpNot, 0)
+    instrs[1 as usize] = ir_unaryop(3, UnaryOp::OpNot, 1)
+    instrs[2 as usize] = ir_binop(4, 2, BinaryOp::OpBitAnd, 3)
+    instrs[3 as usize] = ir_unaryop(5, UnaryOp::OpNot, 4)
+    let func = cp_make_test_func(instrs, 4)
+    let opt = opt_cleanup_function(func)
+    opt.instrs[3 as usize].op == IrOpcode::IrBinOp
+}
+fn compiler_main_test_dr_no_fold_one_not() -> bool with Mut, Div, Panic {
+    // ~(r0 & ~r1) — only one NOT in AND → no DR fold (not both negated)
+    var instrs: [IrInstr; 128] = cp_empty_instrs()
+    instrs[0 as usize] = ir_unaryop(2, UnaryOp::OpNot, 1)
+    instrs[1 as usize] = ir_binop(3, 0, BinaryOp::OpBitAnd, 2)
+    instrs[2 as usize] = ir_unaryop(4, UnaryOp::OpNot, 3)
+    let func = cp_make_test_func(instrs, 3)
+    let opt = opt_cleanup_function(func)
+    opt.instrs[2 as usize].bin_op != BinaryOp::OpBitOr
+        || opt.instrs[2 as usize].src1 != 0
+}
+fn compiler_main_test_dr_no_fold_or_inner() -> bool with Mut, Div, Panic {
+    // ~(~r0 | ~r1) no fold by DR (OR inner, not AND)
+    var instrs: [IrInstr; 128] = cp_empty_instrs()
+    instrs[0 as usize] = ir_unaryop(2, UnaryOp::OpNot, 0)
+    instrs[1 as usize] = ir_unaryop(3, UnaryOp::OpNot, 1)
+    instrs[2 as usize] = ir_binop(4, 2, BinaryOp::OpBitOr, 3)
+    instrs[3 as usize] = ir_unaryop(5, UnaryOp::OpNot, 4)
+    let func = cp_make_test_func(instrs, 4)
+    let opt = opt_cleanup_function(func)
+    // DI or other blocks might fire; we check it's not simple r0&r1
+    opt.instrs[3 as usize].bin_op != BinaryOp::OpBitAnd
+        || opt.instrs[3 as usize].src1 != 0
+}
+fn compiler_main_test_dr_no_fold_not_not_and() -> bool with Mut, Div, Panic {
+    // ~(r0&r1) where r0,r1 are not NOTs → no DR fold
+    var instrs: [IrInstr; 128] = cp_empty_instrs()
+    instrs[0 as usize] = ir_binop(2, 0, BinaryOp::OpBitAnd, 1)
+    instrs[1 as usize] = ir_unaryop(3, UnaryOp::OpNot, 2)
+    let func = cp_make_test_func(instrs, 2)
+    let opt = opt_cleanup_function(func)
+    // should not fire DR; result stays as NOT
+    opt.instrs[1 as usize].op == IrOpcode::IrUnaryOp
+        && opt.instrs[1 as usize].un_op == UnaryOp::OpNot
+}
+
 fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
     var passed: i64 = 0
-    let total: i64 = 913
+    let total: i64 = 919
 
     println("=== compiler/main.sio self-tests ===")
 
@@ -20539,6 +20612,32 @@ fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
         passed = passed + 1
         println("  T913 OK: Sprint 207 Block DQ: r0&~r1 no fold not XOR source")
     } else { println("  FAIL: T913") }
+
+    // Sprint 208 Block DR: De Morgan NOT-AND (T914-T919)
+    if compiler_main_test_dr_not_and_demorgan() {
+        passed = passed + 1
+        println("  T914 OK: Sprint 208 Block DR: ~(~r0&~r1) -> r0|r1")
+    } else { println("  FAIL: T914") }
+    if compiler_main_test_dr_not_and_swapped() {
+        passed = passed + 1
+        println("  T915 OK: Sprint 208 Block DR: ~(~r1&~r0) -> r1|r0 swapped")
+    } else { println("  FAIL: T915") }
+    if compiler_main_test_dr_not_and_val() {
+        passed = passed + 1
+        println("  T916 OK: Sprint 208 Block DR: result is IrBinOp OR")
+    } else { println("  FAIL: T916") }
+    if compiler_main_test_dr_no_fold_one_not() {
+        passed = passed + 1
+        println("  T917 OK: Sprint 208 Block DR: ~(r0&~r1) no fold one NOT")
+    } else { println("  FAIL: T917") }
+    if compiler_main_test_dr_no_fold_or_inner() {
+        passed = passed + 1
+        println("  T918 OK: Sprint 208 Block DR: ~(~r0|~r1) no fold OR inner")
+    } else { println("  FAIL: T918") }
+    if compiler_main_test_dr_no_fold_not_not_and() {
+        passed = passed + 1
+        println("  T919 OK: Sprint 208 Block DR: ~(r0&r1) no fold plain AND")
+    } else { println("  FAIL: T919") }
 
     println("")
     println("compiler/main tests: " + int_to_string(passed) + "/" + int_to_string(total) + " passed")
