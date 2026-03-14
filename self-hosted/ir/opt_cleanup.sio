@@ -3589,6 +3589,42 @@ fn ocp_const_fold(func: IrFunction) -> IrFunction with Mut, Div, Panic {
             }
         }
 
+        // Sprint 206 Block DP: AND-OR XOR identity — (x&y)^(x|y) → x^y.
+        // Proof: per bit, min(a,b)⊕max(a,b) = a⊕b. QED. Commutative: (x|y)^(x&y).
+        // Zero new arrays: uses ao_and_rr_valid/lhs/rhs + ao_or_rr_valid/lhs/rhs (Block AO).
+        // SOTA: LLVM InstCombineAndOrXor; Boolean lattice identity.
+        if ocp_is_binop(result.instrs[i as usize].op) {
+            let dp_instr = result.instrs[i as usize]
+            let dp_s1 = dp_instr.src1; let dp_s2 = dp_instr.src2
+            let dp_s1_ok = dp_s1 >= 0 && dp_s1 < 256; let dp_s2_ok = dp_s2 >= 0 && dp_s2 < 256
+            if dp_instr.bin_op == BinaryOp::OpBitXor {
+                // (x&y) ^ (x|y) → x^y
+                if dp_s1_ok && ao_and_rr_valid[dp_s1 as usize]
+                        && dp_s2_ok && ao_or_rr_valid[dp_s2 as usize] {
+                    let dp_al = ao_and_rr_lhs[dp_s1 as usize]
+                    let dp_ar = ao_and_rr_rhs[dp_s1 as usize]
+                    let dp_ol = ao_or_rr_lhs[dp_s2 as usize]
+                    let dp_or = ao_or_rr_rhs[dp_s2 as usize]
+                    if (dp_al == dp_ol && dp_ar == dp_or)
+                            || (dp_al == dp_or && dp_ar == dp_ol) {
+                        result.instrs[i as usize] = ir_binop(dp_instr.dst, dp_al, BinaryOp::OpBitXor, dp_ar)
+                    }
+                }
+                // (x|y) ^ (x&y) → x^y (commutative)
+                if dp_s1_ok && ao_or_rr_valid[dp_s1 as usize]
+                        && dp_s2_ok && ao_and_rr_valid[dp_s2 as usize] {
+                    let dp_ol = ao_or_rr_lhs[dp_s1 as usize]
+                    let dp_or = ao_or_rr_rhs[dp_s1 as usize]
+                    let dp_al = ao_and_rr_lhs[dp_s2 as usize]
+                    let dp_ar = ao_and_rr_rhs[dp_s2 as usize]
+                    if (dp_ol == dp_al && dp_or == dp_ar)
+                            || (dp_ol == dp_ar && dp_or == dp_al) {
+                        result.instrs[i as usize] = ir_binop(dp_instr.dst, dp_ol, BinaryOp::OpBitXor, dp_or)
+                    }
+                }
+            }
+        }
+
         // Sprint 177 Block CM: AND complement XOR partition — (x & C) ^ (x & ~C) → x.
         // Proof: C-bits: (xi&1)^(xi&0)=xi^0=xi. Non-C: (xi&0)^(xi&1)=0^xi=xi. QED.
         // Dual of Block CC (OR partition). Commutative: (x&~C)^(x&C) → x.
