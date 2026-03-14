@@ -731,6 +731,85 @@ fn ast_compile_expr(code: CodeBuffer, expr: &Expr,
         }
         c
     } else if expr.kind == ExprKind::ExprBinary {
+        // Short-circuit operators handled before the standard eval sequence
+        if expr.bin_op == BinaryOp::OpAnd {
+            // && : eval left; if false, skip right; result is right's value (or 0)
+            let sc_left_ref: &Option<Box<Expr>> = &expr.left
+            match *sc_left_ref {
+                Some(le) => { c = ast_compile_expr(c, &(*le), local_names, local_slots, local_count) }
+                _ => {}
+            }
+            // test rax,rax; jz sc_false (e9 disp32 placeholder)
+            c = emit_byte(c, 0x48); c = emit_byte(c, 0x85); c = emit_byte(c, 0xc0)
+            let sc_and_jz = c.len
+            c = emit_byte(c, 0x0f); c = emit_byte(c, 0x84)
+            c = emit_byte(c, 0); c = emit_byte(c, 0); c = emit_byte(c, 0); c = emit_byte(c, 0)
+            let sc_right_ref: &Option<Box<Expr>> = &expr.right
+            match *sc_right_ref {
+                Some(re) => { c = ast_compile_expr(c, &(*re), local_names, local_slots, local_count) }
+                _ => {}
+            }
+            let sc_and_jmp = c.len
+            c = emit_byte(c, 0xe9)
+            c = emit_byte(c, 0); c = emit_byte(c, 0); c = emit_byte(c, 0); c = emit_byte(c, 0)
+            // sc_false: xor rax,rax
+            let sc_and_false = c.len
+            c = emit_byte(c, 0x48); c = emit_byte(c, 0x31); c = emit_byte(c, 0xc0)
+            let sc_and_end = c.len
+            // Patch jz displacement
+            let jz_disp = sc_and_false - (sc_and_jz + 6)
+            c.bytes[(sc_and_jz + 2) as usize] = (jz_disp & 0xFF) as i8
+            c.bytes[(sc_and_jz + 3) as usize] = ((jz_disp >> 8) & 0xFF) as i8
+            c.bytes[(sc_and_jz + 4) as usize] = ((jz_disp >> 16) & 0xFF) as i8
+            c.bytes[(sc_and_jz + 5) as usize] = ((jz_disp >> 24) & 0xFF) as i8
+            // Patch jmp displacement
+            let jmp_disp = sc_and_end - (sc_and_jmp + 5)
+            c.bytes[(sc_and_jmp + 1) as usize] = (jmp_disp & 0xFF) as i8
+            c.bytes[(sc_and_jmp + 2) as usize] = ((jmp_disp >> 8) & 0xFF) as i8
+            c.bytes[(sc_and_jmp + 3) as usize] = ((jmp_disp >> 16) & 0xFF) as i8
+            c.bytes[(sc_and_jmp + 4) as usize] = ((jmp_disp >> 24) & 0xFF) as i8
+            return c
+        } else if expr.bin_op == BinaryOp::OpOr {
+            // || : eval left; if true, result is 1; else eval right
+            let sc_l_ref: &Option<Box<Expr>> = &expr.left
+            match *sc_l_ref {
+                Some(le) => { c = ast_compile_expr(c, &(*le), local_names, local_slots, local_count) }
+                _ => {}
+            }
+            // test rax,rax; jnz sc_true
+            c = emit_byte(c, 0x48); c = emit_byte(c, 0x85); c = emit_byte(c, 0xc0)
+            let sc_or_jnz = c.len
+            c = emit_byte(c, 0x0f); c = emit_byte(c, 0x85)
+            c = emit_byte(c, 0); c = emit_byte(c, 0); c = emit_byte(c, 0); c = emit_byte(c, 0)
+            let sc_r_ref: &Option<Box<Expr>> = &expr.right
+            match *sc_r_ref {
+                Some(re) => { c = ast_compile_expr(c, &(*re), local_names, local_slots, local_count) }
+                _ => {}
+            }
+            let sc_or_jmp = c.len
+            c = emit_byte(c, 0xe9)
+            c = emit_byte(c, 0); c = emit_byte(c, 0); c = emit_byte(c, 0); c = emit_byte(c, 0)
+            // sc_true: mov rax,1
+            let sc_or_true = c.len
+            c = emit_byte(c, 0x48); c = emit_byte(c, 0xb8)
+            c = emit_byte(c, 1); c = emit_byte(c, 0); c = emit_byte(c, 0); c = emit_byte(c, 0)
+            c = emit_byte(c, 0); c = emit_byte(c, 0); c = emit_byte(c, 0); c = emit_byte(c, 0)
+            let sc_or_end = c.len
+            // Patch jnz
+            let jnz_disp = sc_or_true - (sc_or_jnz + 6)
+            c.bytes[(sc_or_jnz + 2) as usize] = (jnz_disp & 0xFF) as i8
+            c.bytes[(sc_or_jnz + 3) as usize] = ((jnz_disp >> 8) & 0xFF) as i8
+            c.bytes[(sc_or_jnz + 4) as usize] = ((jnz_disp >> 16) & 0xFF) as i8
+            c.bytes[(sc_or_jnz + 5) as usize] = ((jnz_disp >> 24) & 0xFF) as i8
+            // Patch jmp
+            let or_jmp_disp = sc_or_end - (sc_or_jmp + 5)
+            c.bytes[(sc_or_jmp + 1) as usize] = (or_jmp_disp & 0xFF) as i8
+            c.bytes[(sc_or_jmp + 2) as usize] = ((or_jmp_disp >> 8) & 0xFF) as i8
+            c.bytes[(sc_or_jmp + 3) as usize] = ((or_jmp_disp >> 16) & 0xFF) as i8
+            c.bytes[(sc_or_jmp + 4) as usize] = ((or_jmp_disp >> 24) & 0xFF) as i8
+            return c
+        }
+        // Standard binary ops: left → stack, right → rax, then op
         let left_ref: &Option<Box<Expr>> = &expr.left
         match *left_ref {
             Some(le) => {
@@ -847,6 +926,8 @@ fn ast_compile_expr(code: CodeBuffer, expr: &Expr,
                     _ => break
                 }
             }
+            if arg_count >= 6 { c = emit_byte(c, 0x41); c = emit_byte(c, 0x59) }
+            if arg_count >= 5 { c = emit_byte(c, 0x41); c = emit_byte(c, 0x58) }
             if arg_count >= 4 { c = emit_byte(c, 0x59) }
             if arg_count >= 3 { c = emit_byte(c, 0x5a) }
             if arg_count >= 2 { c = emit_byte(c, 0x5e) }
@@ -1411,6 +1492,12 @@ fn ast_compile_fn_body(code: CodeBuffer, fd: &FnDef,
                     c = emit_byte(c, 0x48); c = emit_byte(c, 0x89); c = emit_byte(c, 0xd0)
                 } else if param_idx == 3 {
                     c = emit_byte(c, 0x48); c = emit_byte(c, 0x89); c = emit_byte(c, 0xc8)
+                } else if param_idx == 4 {
+                    // mov rax, r8: 4C 89 C0
+                    c = emit_byte(c, 0x4c); c = emit_byte(c, 0x89); c = emit_byte(c, 0xc0)
+                } else if param_idx == 5 {
+                    // mov rax, r9: 4C 89 C8
+                    c = emit_byte(c, 0x4c); c = emit_byte(c, 0x89); c = emit_byte(c, 0xc8)
                 }
                 c = micro_store_rax(c, p_slot)
                 param_idx = param_idx + 1
