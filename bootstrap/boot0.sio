@@ -1,0 +1,668 @@
+// bootstrap/boot0.sio
+//
+// SOUNIO STAGE-0 BOOTSTRAP COMPILER
+//
+// Standalone single-file compiler — NO external imports.
+// Uses index-based AST pools (no Box<T>, no heap allocator needed).
+// All functions take ≤2 args (SOIR v1 call encoding compatible).
+// Target: compile a minimal Sounio subset to native x86-64 ELF.
+//
+// Architecture:
+//   Source → Token[] → AST pools → CodeBuf → ELF bytes → write
+//
+// Usage:
+//   souc run bootstrap/boot0.sio -- <source.sio> <output.elf>
+
+// ============================================================
+// SECTION 1: PRIMITIVE TYPES AND CONSTANTS
+// ============================================================
+
+struct B0Name {
+    buf: [i8; 128],
+    len: i64,
+}
+
+fn b0_name_empty() -> B0Name {
+    B0Name { buf: [0; 128], len: 0 }
+}
+
+fn b0_name_eq(a: B0Name, b: B0Name) -> bool with Mut, Panic, Div {
+    if a.len != b.len { return false }
+    var i: i64 = 0
+    while i < a.len {
+        if a.buf[i as usize] != b.buf[i as usize] { return false }
+        i = i + 1
+    }
+    true
+}
+
+fn b0_name_from_lit4(c0: i64, c1: i64, c2: i64, c3: i64) -> B0Name {
+    var n = b0_name_empty()
+    n.buf[0] = c0 as i8; n.buf[1] = c1 as i8
+    n.buf[2] = c2 as i8; n.buf[3] = c3 as i8
+    n.len = 4
+    n
+}
+
+fn b0_name_from_lit2(c0: i64, c1: i64) -> B0Name {
+    var n = b0_name_empty()
+    n.buf[0] = c0 as i8; n.buf[1] = c1 as i8
+    n.len = 2
+    n
+}
+
+fn b0_name_from_lit3(c0: i64, c1: i64, c2: i64) -> B0Name {
+    var n = b0_name_empty()
+    n.buf[0] = c0 as i8; n.buf[1] = c1 as i8; n.buf[2] = c2 as i8
+    n.len = 3
+    n
+}
+
+fn b0_name_from_lit6(c0: i64, c1: i64, c2: i64, c3: i64, c4: i64, c5: i64) -> B0Name {
+    var n = b0_name_empty()
+    n.buf[0] = c0 as i8; n.buf[1] = c1 as i8; n.buf[2] = c2 as i8
+    n.buf[3] = c3 as i8; n.buf[4] = c4 as i8; n.buf[5] = c5 as i8
+    n.len = 6
+    n
+}
+
+// ============================================================
+// SECTION 2: TOKEN TYPES
+// ============================================================
+
+// TokenKind constants (i64)
+fn TK_EOF() -> i64 { 0 }
+fn TK_IDENT() -> i64 { 1 }
+fn TK_INT() -> i64 { 2 }
+fn TK_FLOAT() -> i64 { 3 }
+fn TK_STR() -> i64 { 4 }
+fn TK_LPAREN() -> i64 { 10 }
+fn TK_RPAREN() -> i64 { 11 }
+fn TK_LBRACE() -> i64 { 12 }
+fn TK_RBRACE() -> i64 { 13 }
+fn TK_LBRACKET() -> i64 { 14 }
+fn TK_RBRACKET() -> i64 { 15 }
+fn TK_COMMA() -> i64 { 16 }
+fn TK_DOT() -> i64 { 17 }
+fn TK_COLON() -> i64 { 18 }
+fn TK_SEMI() -> i64 { 19 }
+fn TK_EQ() -> i64 { 20 }
+fn TK_EQEQ() -> i64 { 21 }
+fn TK_BANGEQ() -> i64 { 22 }
+fn TK_PLUS() -> i64 { 23 }
+fn TK_MINUS() -> i64 { 24 }
+fn TK_STAR() -> i64 { 25 }
+fn TK_SLASH() -> i64 { 26 }
+fn TK_PERCENT() -> i64 { 27 }
+fn TK_AMP() -> i64 { 28 }
+fn TK_PIPE() -> i64 { 29 }
+fn TK_CARET() -> i64 { 30 }
+fn TK_LSHIFT() -> i64 { 31 }
+fn TK_RSHIFT() -> i64 { 32 }
+fn TK_LT() -> i64 { 33 }
+fn TK_LTEQ() -> i64 { 34 }
+fn TK_GT() -> i64 { 35 }
+fn TK_GTEQ() -> i64 { 36 }
+fn TK_AMPAMP() -> i64 { 37 }
+fn TK_PIPEPIPE() -> i64 { 38 }
+fn TK_BANG() -> i64 { 39 }
+fn TK_ARROW() -> i64 { 40 }
+fn TK_DOTDOT() -> i64 { 41 }
+fn TK_KW_FN() -> i64 { 50 }
+fn TK_KW_LET() -> i64 { 51 }
+fn TK_KW_VAR() -> i64 { 52 }
+fn TK_KW_IF() -> i64 { 53 }
+fn TK_KW_ELSE() -> i64 { 54 }
+fn TK_KW_WHILE() -> i64 { 55 }
+fn TK_KW_FOR() -> i64 { 56 }
+fn TK_KW_IN() -> i64 { 57 }
+fn TK_KW_RETURN() -> i64 { 58 }
+fn TK_KW_BREAK() -> i64 { 59 }
+fn TK_KW_CONTINUE() -> i64 { 60 }
+fn TK_KW_STRUCT() -> i64 { 61 }
+fn TK_KW_MATCH() -> i64 { 62 }
+fn TK_KW_TRUE() -> i64 { 63 }
+fn TK_KW_FALSE() -> i64 { 64 }
+fn TK_KW_AS() -> i64 { 65 }
+fn TK_KW_WITH() -> i64 { 66 }
+fn TK_KW_USE() -> i64 { 67 }
+fn TK_KW_MOD() -> i64 { 68 }
+fn TK_KW_ENUM() -> i64 { 69 }
+fn TK_KW_TYPE() -> i64 { 70 }
+fn TK_KW_SOME() -> i64 { 71 }
+fn TK_KW_NONE() -> i64 { 72 }
+fn TK_KW_LINEAR() -> i64 { 73 }
+fn TK_KW_BOX() -> i64 { 74 }
+fn TK_COLON_COLON() -> i64 { 80 }
+fn TK_TILDE() -> i64 { 81 }
+
+struct B0Token {
+    kind: i64,
+    int_val: i64,
+    float_val: f64,
+    name: B0Name,
+}
+
+fn b0_tok_new(kind: i64) -> B0Token {
+    B0Token { kind: kind, int_val: 0, float_val: 0.0, name: b0_name_empty() }
+}
+
+// ============================================================
+// SECTION 3: LEXER
+// ============================================================
+
+// Source buffer (flat array of bytes, up to 256KB)
+struct B0Src {
+    bytes: [i8; 65536],
+    len: i64,
+    pos: i64,
+}
+
+fn b0_src_new() -> B0Src {
+    B0Src { bytes: [0; 65536], len: 0, pos: 0 }
+}
+
+fn b0_src_peek(src: B0Src) -> i64 {
+    if src.pos >= src.len { return 0 }
+    src.bytes[src.pos as usize] as i64
+}
+
+fn b0_src_peek2(src: B0Src) -> i64 {
+    if src.pos + 1 >= src.len { return 0 }
+    src.bytes[(src.pos + 1) as usize] as i64
+}
+
+fn b0_src_advance(src: B0Src) -> B0Src {
+    var s = src
+    if s.pos < s.len { s.pos = s.pos + 1 }
+    s
+}
+
+fn b0_is_alpha(c: i64) -> bool {
+    (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || c == 95
+}
+
+fn b0_is_digit(c: i64) -> bool {
+    c >= 48 && c <= 57
+}
+
+fn b0_is_alnum(c: i64) -> bool {
+    b0_is_alpha(c) || b0_is_digit(c)
+}
+
+fn b0_is_ws(c: i64) -> bool {
+    c == 32 || c == 9 || c == 10 || c == 13
+}
+
+// Keyword detection
+fn b0_kw_check(n: B0Name) -> i64 {
+    // Returns TK_KW_* or -1
+    if n.len == 2 {
+        let c0 = n.buf[0] as i64
+        let c1 = n.buf[1] as i64
+        if c0 == 102 && c1 == 110 { return TK_KW_FN() }     // fn
+        if c0 == 105 && c1 == 110 { return TK_KW_IN() }     // in
+        if c0 == 105 && c1 == 102 { return TK_KW_IF() }     // if
+        if c0 == 97 && c1 == 115 { return TK_KW_AS() }      // as
+        return -1
+    }
+    if n.len == 3 {
+        let c0 = n.buf[0] as i64
+        let c1 = n.buf[1] as i64
+        let c2 = n.buf[2] as i64
+        if c0 == 108 && c1 == 101 && c2 == 116 { return TK_KW_LET() }  // let
+        if c0 == 118 && c1 == 97 && c2 == 114 { return TK_KW_VAR() }   // var
+        if c0 == 102 && c1 == 111 && c2 == 114 { return TK_KW_FOR() }  // for
+        if c0 == 117 && c1 == 115 && c2 == 101 { return TK_KW_USE() }  // use
+        if c0 == 109 && c1 == 111 && c2 == 100 { return TK_KW_MOD() }  // mod
+        return -1
+    }
+    if n.len == 4 {
+        let c0 = n.buf[0] as i64
+        let c1 = n.buf[1] as i64
+        let c2 = n.buf[2] as i64
+        let c3 = n.buf[3] as i64
+        if c0 == 101 && c1 == 108 && c2 == 115 && c3 == 101 { return TK_KW_ELSE() }   // else
+        if c0 == 116 && c1 == 114 && c2 == 117 && c3 == 101 { return TK_KW_TRUE() }   // true
+        if c0 == 116 && c1 == 121 && c2 == 112 && c3 == 101 { return TK_KW_TYPE() }   // type
+        if c0 == 101 && c1 == 110 && c2 == 117 && c3 == 109 { return TK_KW_ENUM() }   // enum
+        if c0 == 115 && c1 == 111 && c2 == 109 && c3 == 101 { return TK_KW_SOME() }   // Some
+        if c0 == 78 && c1 == 111 && c2 == 110 && c3 == 101 { return TK_KW_NONE() }    // None
+        return -1
+    }
+    if n.len == 5 {
+        let c0 = n.buf[0] as i64
+        if c0 == 119 {
+            // while / with
+            let c1 = n.buf[1] as i64
+            let c2 = n.buf[2] as i64
+            let c3 = n.buf[3] as i64
+            let c4 = n.buf[4] as i64
+            if c1 == 104 && c2 == 105 && c3 == 108 && c4 == 101 { return TK_KW_WHILE() }  // while
+            if c1 == 105 && c2 == 116 && c3 == 104 { return TK_KW_WITH() }                  // with (4 chars covered above actually, 4 not 5)
+            return -1
+        }
+        if c0 == 98 {
+            let c1 = n.buf[1] as i64
+            let c2 = n.buf[2] as i64
+            let c3 = n.buf[3] as i64
+            let c4 = n.buf[4] as i64
+            if c1 == 114 && c2 == 101 && c3 == 97 && c4 == 107 { return TK_KW_BREAK() }  // break
+            return -1
+        }
+        if c0 == 102 {
+            let c1 = n.buf[1] as i64
+            let c2 = n.buf[2] as i64
+            let c3 = n.buf[3] as i64
+            let c4 = n.buf[4] as i64
+            if c1 == 97 && c2 == 108 && c3 == 115 && c4 == 101 { return TK_KW_FALSE() }  // false
+            return -1
+        }
+        return -1
+    }
+    if n.len == 6 {
+        let c0 = n.buf[0] as i64
+        let c1 = n.buf[1] as i64
+        if c0 == 114 && c1 == 101 {
+            // return
+            let c2 = n.buf[2] as i64
+            let c3 = n.buf[3] as i64
+            let c4 = n.buf[4] as i64
+            let c5 = n.buf[5] as i64
+            if c2 == 116 && c3 == 117 && c4 == 114 && c5 == 110 { return TK_KW_RETURN() }
+            return -1
+        }
+        if c0 == 115 && c1 == 116 {
+            // struct
+            let c2 = n.buf[2] as i64
+            let c3 = n.buf[3] as i64
+            let c4 = n.buf[4] as i64
+            let c5 = n.buf[5] as i64
+            if c2 == 114 && c3 == 117 && c4 == 99 && c5 == 116 { return TK_KW_STRUCT() }
+            return -1
+        }
+        if c0 == 108 && c1 == 105 {
+            // linear
+            return -1  // 6 chars: l-i-n-e-a-r
+        }
+        return -1
+    }
+    if n.len == 5 {
+        let c0 = n.buf[0] as i64
+        let c1 = n.buf[1] as i64
+        let c2 = n.buf[2] as i64
+        let c3 = n.buf[3] as i64
+        let c4 = n.buf[4] as i64
+        if c0 == 109 && c1 == 97 && c2 == 116 && c3 == 99 && c4 == 104 { return TK_KW_MATCH() }  // match
+        return -1
+    }
+    if n.len == 8 {
+        let c0 = n.buf[0] as i64
+        let c1 = n.buf[1] as i64
+        if c0 == 99 && c1 == 111 {
+            // continue
+            return TK_KW_CONTINUE()
+        }
+        return -1
+    }
+    if n.len == 6 {
+        let c0 = n.buf[0] as i64
+        if c0 == 108 {
+            // linear
+            let c1 = n.buf[1] as i64
+            let c2 = n.buf[2] as i64
+            let c3 = n.buf[3] as i64
+            let c4 = n.buf[4] as i64
+            let c5 = n.buf[5] as i64
+            if c1 == 105 && c2 == 110 && c3 == 101 && c4 == 97 && c5 == 114 { return TK_KW_LINEAR() }
+            return -1
+        }
+        return -1
+    }
+    -1
+}
+
+// Token stream (flat array, up to 16384 tokens)
+struct B0TokenStream {
+    tokens: [B0Token; 16384],
+    count: i64,
+    pos: i64,
+}
+
+fn b0_ts_new() -> B0TokenStream {
+    B0TokenStream { tokens: [b0_tok_new(0); 16384], count: 0, pos: 0 }
+}
+
+fn b0_ts_peek(ts: B0TokenStream) -> B0Token {
+    if ts.pos >= ts.count { return b0_tok_new(TK_EOF()) }
+    ts.tokens[ts.pos as usize]
+}
+
+fn b0_ts_peek_kind(ts: B0TokenStream) -> i64 {
+    if ts.pos >= ts.count { return TK_EOF() }
+    ts.tokens[ts.pos as usize].kind
+}
+
+fn b0_ts_advance(ts: B0TokenStream) -> B0TokenStream {
+    var t = ts
+    if t.pos < t.count { t.pos = t.pos + 1 }
+    t
+}
+
+fn b0_ts_push(ts: B0TokenStream, tok: B0Token) -> B0TokenStream {
+    var t = ts
+    if t.count < 16383 {
+        t.tokens[t.count as usize] = tok
+        t.count = t.count + 1
+    }
+    t
+}
+
+// Lex integer literal: returns (new_src, int_val)
+fn b0_lex_int(src: B0Src) -> (B0Src, i64) {
+    var s = src
+    var val: i64 = 0
+    while b0_is_digit(b0_src_peek(s)) {
+        val = val * 10 + (b0_src_peek(s) - 48)
+        s = b0_src_advance(s)
+    }
+    // Skip float suffix if present
+    if b0_src_peek(s) == 46 {  // '.'
+        s = b0_src_advance(s)
+        while b0_is_digit(b0_src_peek(s)) { s = b0_src_advance(s) }
+    }
+    (s, val)
+}
+
+// Lex identifier/keyword
+fn b0_lex_ident(src: B0Src) -> (B0Src, B0Name) {
+    var s = src
+    var n = b0_name_empty()
+    while b0_is_alnum(b0_src_peek(s)) && n.len < 127 {
+        n.buf[n.len as usize] = b0_src_peek(s) as i8
+        n.len = n.len + 1
+        s = b0_src_advance(s)
+    }
+    (s, n)
+}
+
+// Lex string literal (returns new_src, discards content for bootstrap)
+fn b0_lex_string(src: B0Src) -> (B0Src, B0Name) {
+    var s = b0_src_advance(src)  // skip opening "
+    var n = b0_name_empty()
+    while b0_src_peek(s) != 34 && b0_src_peek(s) != 0 {
+        if b0_src_peek(s) == 92 {  // backslash
+            s = b0_src_advance(s)
+        }
+        if n.len < 127 {
+            n.buf[n.len as usize] = b0_src_peek(s) as i8
+            n.len = n.len + 1
+        }
+        s = b0_src_advance(s)
+    }
+    if b0_src_peek(s) == 34 { s = b0_src_advance(s) }  // skip closing "
+    (s, n)
+}
+
+// Skip line comment
+fn b0_skip_comment(src: B0Src) -> B0Src {
+    var s = src
+    while b0_src_peek(s) != 10 && b0_src_peek(s) != 0 {
+        s = b0_src_advance(s)
+    }
+    s
+}
+
+// Main tokenize function: src bytes → token stream
+fn b0_tokenize(src: B0Src) -> B0TokenStream {
+    var s = src
+    var ts = b0_ts_new()
+    while s.pos < s.len {
+        let c = b0_src_peek(s)
+        // Whitespace
+        if b0_is_ws(c) { s = b0_src_advance(s) }
+        // Line comment
+        else if c == 47 && b0_src_peek2(s) == 47 {
+            s = b0_skip_comment(s)
+        }
+        // Identifier / keyword
+        else if b0_is_alpha(c) {
+            let pair = b0_lex_ident(s)
+            s = pair.0
+            let ident_name = pair.1
+            let kw = b0_kw_check(ident_name)
+            var tok = b0_tok_new(if kw >= 0 { kw } else { TK_IDENT() })
+            tok.name = ident_name
+            ts = b0_ts_push(ts, tok)
+        }
+        // Integer / float literal
+        else if b0_is_digit(c) {
+            let pair2 = b0_lex_int(s)
+            s = pair2.0
+            var tok2 = b0_tok_new(TK_INT())
+            tok2.int_val = pair2.1
+            ts = b0_ts_push(ts, tok2)
+        }
+        // String literal
+        else if c == 34 {
+            let pair3 = b0_lex_string(s)
+            s = pair3.0
+            var tok3 = b0_tok_new(TK_STR())
+            tok3.name = pair3.1
+            ts = b0_ts_push(ts, tok3)
+        }
+        // Punctuation
+        else if c == 40 { ts = b0_ts_push(ts, b0_tok_new(TK_LPAREN())); s = b0_src_advance(s) }
+        else if c == 41 { ts = b0_ts_push(ts, b0_tok_new(TK_RPAREN())); s = b0_src_advance(s) }
+        else if c == 123 { ts = b0_ts_push(ts, b0_tok_new(TK_LBRACE())); s = b0_src_advance(s) }
+        else if c == 125 { ts = b0_ts_push(ts, b0_tok_new(TK_RBRACE())); s = b0_src_advance(s) }
+        else if c == 91 { ts = b0_ts_push(ts, b0_tok_new(TK_LBRACKET())); s = b0_src_advance(s) }
+        else if c == 93 { ts = b0_ts_push(ts, b0_tok_new(TK_RBRACKET())); s = b0_src_advance(s) }
+        else if c == 44 { ts = b0_ts_push(ts, b0_tok_new(TK_COMMA())); s = b0_src_advance(s) }
+        else if c == 59 { ts = b0_ts_push(ts, b0_tok_new(TK_SEMI())); s = b0_src_advance(s) }
+        else if c == 126 { ts = b0_ts_push(ts, b0_tok_new(TK_TILDE())); s = b0_src_advance(s) }
+        else if c == 46 {
+            if b0_src_peek2(s) == 46 {
+                ts = b0_ts_push(ts, b0_tok_new(TK_DOTDOT()))
+                s = b0_src_advance(b0_src_advance(s))
+            } else {
+                ts = b0_ts_push(ts, b0_tok_new(TK_DOT()))
+                s = b0_src_advance(s)
+            }
+        }
+        else if c == 58 {
+            s = b0_src_advance(s)
+            if b0_src_peek(s) == 58 {
+                ts = b0_ts_push(ts, b0_tok_new(TK_COLON_COLON()))
+                s = b0_src_advance(s)
+            } else {
+                ts = b0_ts_push(ts, b0_tok_new(TK_COLON()))
+            }
+        }
+        else if c == 61 {
+            s = b0_src_advance(s)
+            if b0_src_peek(s) == 61 {
+                ts = b0_ts_push(ts, b0_tok_new(TK_EQEQ()))
+                s = b0_src_advance(s)
+            } else {
+                ts = b0_ts_push(ts, b0_tok_new(TK_EQ()))
+            }
+        }
+        else if c == 33 {
+            s = b0_src_advance(s)
+            if b0_src_peek(s) == 61 {
+                ts = b0_ts_push(ts, b0_tok_new(TK_BANGEQ()))
+                s = b0_src_advance(s)
+            } else {
+                ts = b0_ts_push(ts, b0_tok_new(TK_BANG()))
+            }
+        }
+        else if c == 43 { ts = b0_ts_push(ts, b0_tok_new(TK_PLUS())); s = b0_src_advance(s) }
+        else if c == 42 { ts = b0_ts_push(ts, b0_tok_new(TK_STAR())); s = b0_src_advance(s) }
+        else if c == 37 { ts = b0_ts_push(ts, b0_tok_new(TK_PERCENT())); s = b0_src_advance(s) }
+        else if c == 94 { ts = b0_ts_push(ts, b0_tok_new(TK_CARET())); s = b0_src_advance(s) }
+        else if c == 38 {
+            s = b0_src_advance(s)
+            if b0_src_peek(s) == 38 {
+                ts = b0_ts_push(ts, b0_tok_new(TK_AMPAMP()))
+                s = b0_src_advance(s)
+            } else if b0_src_peek(s) == 33 {
+                // &! exclusive ref: treat as two tokens & !
+                ts = b0_ts_push(ts, b0_tok_new(TK_AMP()))
+            } else {
+                ts = b0_ts_push(ts, b0_tok_new(TK_AMP()))
+            }
+        }
+        else if c == 124 {
+            s = b0_src_advance(s)
+            if b0_src_peek(s) == 124 {
+                ts = b0_ts_push(ts, b0_tok_new(TK_PIPEPIPE()))
+                s = b0_src_advance(s)
+            } else {
+                ts = b0_ts_push(ts, b0_tok_new(TK_PIPE()))
+            }
+        }
+        else if c == 60 {
+            s = b0_src_advance(s)
+            if b0_src_peek(s) == 60 {
+                ts = b0_ts_push(ts, b0_tok_new(TK_LSHIFT()))
+                s = b0_src_advance(s)
+            } else if b0_src_peek(s) == 61 {
+                ts = b0_ts_push(ts, b0_tok_new(TK_LTEQ()))
+                s = b0_src_advance(s)
+            } else {
+                ts = b0_ts_push(ts, b0_tok_new(TK_LT()))
+            }
+        }
+        else if c == 62 {
+            s = b0_src_advance(s)
+            if b0_src_peek(s) == 62 {
+                ts = b0_ts_push(ts, b0_tok_new(TK_RSHIFT()))
+                s = b0_src_advance(s)
+            } else if b0_src_peek(s) == 61 {
+                ts = b0_ts_push(ts, b0_tok_new(TK_GTEQ()))
+                s = b0_src_advance(s)
+            } else {
+                ts = b0_ts_push(ts, b0_tok_new(TK_GT()))
+            }
+        }
+        else if c == 45 {
+            s = b0_src_advance(s)
+            if b0_src_peek(s) == 62 {
+                ts = b0_ts_push(ts, b0_tok_new(TK_ARROW()))
+                s = b0_src_advance(s)
+            } else {
+                ts = b0_ts_push(ts, b0_tok_new(TK_MINUS()))
+            }
+        }
+        else if c == 47 {
+            ts = b0_ts_push(ts, b0_tok_new(TK_SLASH()))
+            s = b0_src_advance(s)
+        }
+        else {
+            // Skip unknown chars
+            s = b0_src_advance(s)
+        }
+    }
+    ts = b0_ts_push(ts, b0_tok_new(TK_EOF()))
+    ts
+}
+
+// ============================================================
+// SECTION 4: MAIN (SCAFFOLD — lexer smoke test only)
+// ============================================================
+
+fn b0_print_int(n: i64) with IO, Mut, Panic, Div {
+    if n == 0 { print("0"); return }
+    var val = n
+    if val < 0 { print("-"); val = 0 - val }
+    var buf: [i64; 20] = [0; 20]
+    var len: i64 = 0
+    while val > 0 {
+        buf[len as usize] = val - (val / 10) * 10
+        val = val / 10
+        len = len + 1
+    }
+    var j = len - 1
+    while j >= 0 {
+        let d = buf[j as usize]
+        if d == 0 { print("0") }
+        if d == 1 { print("1") }
+        if d == 2 { print("2") }
+        if d == 3 { print("3") }
+        if d == 4 { print("4") }
+        if d == 5 { print("5") }
+        if d == 6 { print("6") }
+        if d == 7 { print("7") }
+        if d == 8 { print("8") }
+        if d == 9 { print("9") }
+        j = j - 1
+    }
+}
+
+// Count tokens without storing them (avoids huge stack)
+fn b0_count_tokens(src: B0Src) -> i64 {
+    var s = src
+    var count: i64 = 0
+    while s.pos < s.len {
+        let c = b0_src_peek(s)
+        if b0_is_ws(c) { s = b0_src_advance(s) }
+        else if c == 47 && b0_src_peek2(s) == 47 { s = b0_skip_comment(s) }
+        else if b0_is_alpha(c) {
+            let pair = b0_lex_ident(s)
+            s = pair.0
+            count = count + 1
+        }
+        else if b0_is_digit(c) {
+            let pair2 = b0_lex_int(s)
+            s = pair2.0
+            count = count + 1
+        }
+        else if c == 34 {
+            let pair3 = b0_lex_string(s)
+            s = pair3.0
+            count = count + 1
+        }
+        else {
+            s = b0_src_advance(s)
+            if c != 0 { count = count + 1 }
+        }
+    }
+    count
+}
+
+fn main() -> i64 with IO, Mut, Panic, Div, Alloc {
+    let argc = arg_count()
+    if argc < 2 {
+        print("boot0: Usage: boot0 <source.sio> <output.elf>\n")
+        return 1
+    }
+
+    let source_path = get_arg(0)
+    let output_path = get_arg(1)
+
+    print("boot0: source=")
+    print(source_path)
+    print("\n")
+
+    // Load source (up to 64KB)
+    let raw = read_file(source_path)
+    let fsize = file_size(source_path)
+    var src = b0_src_new()
+    var ri: i64 = 0
+    while ri < fsize && ri < 65535 {
+        src.bytes[ri as usize] = raw[ri as usize]
+        ri = ri + 1
+    }
+    src.len = ri
+
+    // Count tokens (streaming, no large array needed)
+    let ntoks = b0_count_tokens(src)
+
+    print("boot0: tokens=")
+    b0_print_int(ntoks)
+    print("\n")
+    print("boot0: OK (scaffold)\n")
+
+    0
+}
