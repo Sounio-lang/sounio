@@ -3499,6 +3499,53 @@ fn ocp_const_fold(func: IrFunction) -> IrFunction with Mut, Div, Panic {
             }
         }
 
+        // Sprint 203 Block DM: OR-AND difference — (x|y) - (x&y) → x ^ y.
+        // Proof: per bit, max(a,b)-min(a,b) = a⊕b. Dual of Block DK (sum). QED.
+        // Zero new arrays: uses ao_or_rr_valid/lhs/rhs + ao_and_rr_valid/lhs/rhs (Block AO).
+        // SOTA: LLVM InstCombineAddSub; Hacker's Delight §2-13.
+        if ocp_is_binop(result.instrs[i as usize].op) {
+            let dm_instr = result.instrs[i as usize]
+            let dm_s1 = dm_instr.src1; let dm_s2 = dm_instr.src2
+            let dm_s1_ok = dm_s1 >= 0 && dm_s1 < 256; let dm_s2_ok = dm_s2 >= 0 && dm_s2 < 256
+            if dm_instr.bin_op == BinaryOp::OpSub {
+                // (x|y) - (x&y) → x^y
+                if dm_s1_ok && ao_or_rr_valid[dm_s1 as usize]
+                        && dm_s2_ok && ao_and_rr_valid[dm_s2 as usize] {
+                    let dm_ol = ao_or_rr_lhs[dm_s1 as usize]
+                    let dm_or = ao_or_rr_rhs[dm_s1 as usize]
+                    let dm_al = ao_and_rr_lhs[dm_s2 as usize]
+                    let dm_ar = ao_and_rr_rhs[dm_s2 as usize]
+                    if (dm_ol == dm_al && dm_or == dm_ar)
+                            || (dm_ol == dm_ar && dm_or == dm_al) {
+                        result.instrs[i as usize] = ir_binop(dm_instr.dst, dm_ol, BinaryOp::OpBitXor, dm_or)
+                    }
+                }
+            }
+        }
+
+        // Sprint 204 Block DN: Sub-sub identity — (x-y)-(x-z) → z-y.
+        // Proof: (x-y)-(x-z) = x-y-x+z = z-y. QED. Outer x cancels.
+        // Zero new arrays: uses al_is_sub/al_sub_lhs/al_sub_rhs (Block AL, Sprint 115).
+        // SOTA: LLVM InstCombineAddSub; algebraic cancellation; symmetric to Block DL.
+        if ocp_is_binop(result.instrs[i as usize].op) {
+            let dn_instr = result.instrs[i as usize]
+            let dn_s1 = dn_instr.src1; let dn_s2 = dn_instr.src2
+            let dn_s1_ok = dn_s1 >= 0 && dn_s1 < 256; let dn_s2_ok = dn_s2 >= 0 && dn_s2 < 256
+            if dn_instr.bin_op == BinaryOp::OpSub {
+                // (x-y) - (x-z) → z-y: both are subs, same lhs (x)
+                if dn_s1_ok && al_is_sub[dn_s1 as usize]
+                        && dn_s2_ok && al_is_sub[dn_s2 as usize]
+                        && al_sub_lhs[dn_s1 as usize] == al_sub_lhs[dn_s2 as usize] {
+                    let dn_y = al_sub_rhs[dn_s1 as usize]
+                    let dn_z = al_sub_rhs[dn_s2 as usize]
+                    result.instrs[i as usize] = ir_binop(dn_instr.dst, dn_z, BinaryOp::OpSub, dn_y)
+                    al_is_sub[dn_instr.dst as usize] = true
+                    al_sub_lhs[dn_instr.dst as usize] = dn_z
+                    al_sub_rhs[dn_instr.dst as usize] = dn_y
+                }
+            }
+        }
+
         // Sprint 177 Block CM: AND complement XOR partition — (x & C) ^ (x & ~C) → x.
         // Proof: C-bits: (xi&1)^(xi&0)=xi^0=xi. Non-C: (xi&0)^(xi&1)=0^xi=xi. QED.
         // Dual of Block CC (OR partition). Commutative: (x&~C)^(x&C) → x.
