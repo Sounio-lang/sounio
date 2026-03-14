@@ -2974,6 +2974,41 @@ fn ocp_const_fold(func: IrFunction) -> IrFunction with Mut, Div, Panic {
             }
         }
 
+        // Sprint 188 Block CX: XOR-complement chain to NOT — (x^C)^~C → ~x.
+        // Proof: (x^C)^~C = x^(C^~C) = x^(-1) = ~x. (XOR associativity + C^~C=-1.)
+        // Zero new arrays: uses bm_xor_valid/bm_xor_src/bm_xor_cval (Block BM)
+        //   and is_const/const_val. Updates is_bnot/bnot_src.
+        // SOTA: LLVM InstCombineAndOrXor; Boolean: (x⊕C)⊕¬C = x⊕(C⊕¬C) = x⊕(-1) = ¬x.
+        if ocp_is_binop(result.instrs[i as usize].op) {
+            let cx_instr = result.instrs[i as usize]
+            let cx_s1 = cx_instr.src1; let cx_s2 = cx_instr.src2
+            let cx_s1_ok = cx_s1 >= 0 && cx_s1 < 256; let cx_s2_ok = cx_s2 >= 0 && cx_s2 < 256
+            if cx_instr.bin_op == BinaryOp::OpBitXor {
+                // (x^C)^~C → ~x: s1=xor_valid, s2=const, s2==~C
+                if cx_s1_ok && bm_xor_valid[cx_s1 as usize]
+                        && cx_s2_ok && is_const[cx_s2 as usize]
+                        && (bm_xor_cval[cx_s1 as usize] ^ -1) == const_val[cx_s2 as usize] {
+                    let cx_x = bm_xor_src[cx_s1 as usize]
+                    result.instrs[i as usize] = ir_unaryop(cx_instr.dst, UnaryOp::OpNot, cx_x)
+                    if cx_instr.dst >= 0 && cx_instr.dst < 256 {
+                        is_bnot[cx_instr.dst as usize]  = true
+                        bnot_src[cx_instr.dst as usize] = cx_x
+                    }
+                }
+                // ~C^(x^C) → ~x commutative
+                if cx_s2_ok && bm_xor_valid[cx_s2 as usize]
+                        && cx_s1_ok && is_const[cx_s1 as usize]
+                        && (bm_xor_cval[cx_s2 as usize] ^ -1) == const_val[cx_s1 as usize] {
+                    let cx_x = bm_xor_src[cx_s2 as usize]
+                    result.instrs[i as usize] = ir_unaryop(cx_instr.dst, UnaryOp::OpNot, cx_x)
+                    if cx_instr.dst >= 0 && cx_instr.dst < 256 {
+                        is_bnot[cx_instr.dst as usize]  = true
+                        bnot_src[cx_instr.dst as usize] = cx_x
+                    }
+                }
+            }
+        }
+
         // Sprint 177 Block CM: AND complement XOR partition — (x & C) ^ (x & ~C) → x.
         // Proof: C-bits: (xi&1)^(xi&0)=xi^0=xi. Non-C: (xi&0)^(xi&1)=0^xi=xi. QED.
         // Dual of Block CC (OR partition). Commutative: (x&~C)^(x&C) → x.
