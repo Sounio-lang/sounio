@@ -1,0 +1,1563 @@
+// micro_bootstrap.sio — Zero-import single-file Sounio→x86-64 ELF compiler
+// Flat-array AST, stack-slot codegen, inline ELF writer
+
+// ============================================================================
+// Global state
+// ============================================================================
+
+// Source text
+var SRC: [i8; 1048576] = [0; 1048576]
+var SRC_LEN: i64 = 0
+
+// Token storage
+var TK_KIND: [i64; 65536] = [0; 65536]
+var TK_START: [i64; 65536] = [0; 65536]
+var TK_END: [i64; 65536] = [0; 65536]
+var TK_IVAL: [i64; 65536] = [0; 65536]
+var TK_COUNT: i64 = 0
+
+// String pool for identifiers/strings
+var POOL: [i8; 262144] = [0; 262144]
+var POOL_POS: i64 = 0
+
+// AST nodes (flat array)
+var ND_KIND: [i64; 32768] = [0; 32768]
+var ND_IVAL: [i64; 32768] = [0; 32768]
+var ND_LEFT: [i64; 32768] = [-1; 32768]
+var ND_RIGHT: [i64; 32768] = [-1; 32768]
+var ND_EXTRA: [i64; 32768] = [-1; 32768]
+var ND_EXTRA2: [i64; 32768] = [-1; 32768]
+var ND_STR_OFF: [i64; 32768] = [0; 32768]
+var ND_STR_LEN: [i64; 32768] = [0; 32768]
+var ND_COUNT: i64 = 0
+
+// Function registry
+var FN_NAME_OFF: [i64; 512] = [0; 512]
+var FN_NAME_LEN: [i64; 512] = [0; 512]
+var FN_PARAM_COUNT: [i64; 512] = [0; 512]
+var FN_BODY_NODE: [i64; 512] = [-1; 512]
+var FN_COUNT: i64 = 0
+
+// Param registry: for each fn, up to 8 params
+var FN_PARAM_NAME_OFF: [i64; 4096] = [0; 4096]
+var FN_PARAM_NAME_LEN: [i64; 4096] = [0; 4096]
+var FN_PARAM_BASE: [i64; 512] = [0; 512]
+
+// Local variable slots
+var LOCAL_NAME_OFF: [i64; 4096] = [0; 4096]
+var LOCAL_NAME_LEN: [i64; 4096] = [0; 4096]
+var LOCAL_SLOT: [i64; 4096] = [0; 4096]
+var LOCAL_COUNT: i64 = 0
+var NEXT_SLOT: i64 = 0
+
+// Code output
+var CODE: [i8; 262144] = [0; 262144]
+var CODE_LEN: i64 = 0
+
+// Function offsets in code
+var FN_CODE_OFF: [i64; 512] = [0; 512]
+
+// Fixup table for call patches
+var FIX_OFF: [i64; 4096] = [0; 4096]
+var FIX_TARGET: [i64; 4096] = [0; 4096]
+var FIX_COUNT: i64 = 0
+
+// Parser position
+var POS: i64 = 0
+
+// ============================================================================
+// Constants
+// ============================================================================
+
+// Token kinds
+fn TK_EOF() -> i64 { 0 }
+fn TK_IDENT() -> i64 { 1 }
+fn TK_INT() -> i64 { 2 }
+fn TK_STR() -> i64 { 3 }
+fn TK_PLUS() -> i64 { 10 }
+fn TK_MINUS() -> i64 { 11 }
+fn TK_STAR() -> i64 { 12 }
+fn TK_SLASH() -> i64 { 13 }
+fn TK_PERCENT() -> i64 { 14 }
+fn TK_AMP() -> i64 { 15 }
+fn TK_PIPE() -> i64 { 16 }
+fn TK_CARET() -> i64 { 17 }
+fn TK_SHL() -> i64 { 18 }
+fn TK_SHR() -> i64 { 19 }
+fn TK_AMPAMP() -> i64 { 20 }
+fn TK_PIPEPIPE() -> i64 { 21 }
+fn TK_BANG() -> i64 { 22 }
+fn TK_EQ() -> i64 { 23 }
+fn TK_NE() -> i64 { 24 }
+fn TK_LT() -> i64 { 25 }
+fn TK_LE() -> i64 { 26 }
+fn TK_GT() -> i64 { 27 }
+fn TK_GE() -> i64 { 28 }
+fn TK_ASSIGN() -> i64 { 30 }
+fn TK_LPAREN() -> i64 { 31 }
+fn TK_RPAREN() -> i64 { 32 }
+fn TK_LBRACE() -> i64 { 33 }
+fn TK_RBRACE() -> i64 { 34 }
+fn TK_LBRACKET() -> i64 { 35 }
+fn TK_RBRACKET() -> i64 { 36 }
+fn TK_COMMA() -> i64 { 37 }
+fn TK_COLON() -> i64 { 38 }
+fn TK_SEMI() -> i64 { 39 }
+fn TK_DOT() -> i64 { 40 }
+fn TK_ARROW() -> i64 { 42 }
+fn TK_FN() -> i64 { 50 }
+fn TK_LET() -> i64 { 51 }
+fn TK_VAR() -> i64 { 52 }
+fn TK_IF() -> i64 { 53 }
+fn TK_ELSE() -> i64 { 54 }
+fn TK_WHILE() -> i64 { 55 }
+fn TK_RETURN() -> i64 { 56 }
+fn TK_TRUE() -> i64 { 61 }
+fn TK_FALSE() -> i64 { 62 }
+fn TK_BREAK() -> i64 { 63 }
+fn TK_CONTINUE() -> i64 { 64 }
+fn TK_AS() -> i64 { 65 }
+fn TK_WITH() -> i64 { 66 }
+fn TK_STRUCT() -> i64 { 58 }
+fn TK_AMPBANG() -> i64 { 70 }
+
+// AST node kinds
+fn NK_INT() -> i64 { 1 }
+fn NK_IDENT() -> i64 { 2 }
+fn NK_STR() -> i64 { 3 }
+fn NK_BOOL() -> i64 { 4 }
+fn NK_BINOP() -> i64 { 10 }
+fn NK_UNARY() -> i64 { 11 }
+fn NK_CALL() -> i64 { 12 }
+fn NK_INDEX() -> i64 { 13 }
+fn NK_FIELD() -> i64 { 14 }
+fn NK_CAST() -> i64 { 16 }
+fn NK_IF() -> i64 { 30 }
+fn NK_WHILE() -> i64 { 31 }
+fn NK_BLOCK() -> i64 { 33 }
+fn NK_RETURN() -> i64 { 34 }
+fn NK_BREAK() -> i64 { 35 }
+fn NK_LET() -> i64 { 40 }
+fn NK_VAR() -> i64 { 41 }
+fn NK_ASSIGN() -> i64 { 42 }
+fn NK_EXPR_STMT() -> i64 { 43 }
+
+// ============================================================================
+// Lexer helpers
+// ============================================================================
+
+fn src_byte(pos: i64) -> i64 with Panic {
+    if pos < 0 || pos >= SRC_LEN { return 0 }
+    SRC[pos as usize] as i64
+}
+
+fn is_ws(ch: i64) -> bool {
+    ch == 32 || ch == 9 || ch == 10 || ch == 13
+}
+
+fn is_digit(ch: i64) -> bool {
+    ch >= 48 && ch <= 57
+}
+
+fn is_alpha(ch: i64) -> bool {
+    (ch >= 65 && ch <= 90) || (ch >= 97 && ch <= 122) || ch == 95
+}
+
+fn is_alnum(ch: i64) -> bool {
+    is_alpha(ch) || is_digit(ch)
+}
+
+fn pool_add(b: i64) with Mut, Panic {
+    POOL[POOL_POS as usize] = b as i8
+    POOL_POS = POOL_POS + 1
+}
+
+fn pool_match(off: i64, len: i64, target: string) -> bool with Mut, Panic, Div {
+    if len != str_len(target) { return false }
+    var i: i64 = 0
+    while i < len {
+        let a = POOL[(off + i) as usize] as i64
+        let b = str_char_at(target, i) as i64
+        if a != b { return false }
+        i = i + 1
+    }
+    true
+}
+
+fn classify_keyword(off: i64, len: i64) -> i64 with Mut, Panic, Div {
+    if len == 2 {
+        if pool_match(off, len, "fn") { return 50 }
+        if pool_match(off, len, "if") { return 53 }
+        if pool_match(off, len, "as") { return 65 }
+    } else if len == 3 {
+        if pool_match(off, len, "let") { return 51 }
+        if pool_match(off, len, "var") { return 52 }
+        if pool_match(off, len, "for") { return 55 }
+    } else if len == 4 {
+        if pool_match(off, len, "else") { return 54 }
+        if pool_match(off, len, "true") { return 61 }
+        if pool_match(off, len, "with") { return 66 }
+        if pool_match(off, len, "None") { return 68 }
+        if pool_match(off, len, "Some") { return 67 }
+        if pool_match(off, len, "self") { return 1 }
+        if pool_match(off, len, "Self") { return 1 }
+        if pool_match(off, len, "type") { return 1 }
+        if pool_match(off, len, "impl") { return 60 }
+        if pool_match(off, len, "enum") { return 59 }
+        if pool_match(off, len, "loop") { return 55 }
+    } else if len == 5 {
+        if pool_match(off, len, "while") { return 55 }
+        if pool_match(off, len, "break") { return 63 }
+        if pool_match(off, len, "false") { return 62 }
+        if pool_match(off, len, "match") { return 57 }
+    } else if len == 6 {
+        if pool_match(off, len, "return") { return 56 }
+        if pool_match(off, len, "struct") { return 58 }
+        if pool_match(off, len, "module") { return 1 }
+        if pool_match(off, len, "linear") { return 1 }
+    } else if len == 8 {
+        if pool_match(off, len, "continue") { return 64 }
+    }
+    0
+}
+
+// ============================================================================
+// Lexer
+// ============================================================================
+
+fn add_token(kind: i64, start: i64, end: i64, ival: i64) with Mut, Panic {
+    let idx = TK_COUNT
+    TK_KIND[idx as usize] = kind
+    TK_START[idx as usize] = start
+    TK_END[idx as usize] = end
+    TK_IVAL[idx as usize] = ival
+    TK_COUNT = TK_COUNT + 1
+}
+
+fn lex() with Mut, Panic, Div {
+    var p: i64 = 0
+    while p < SRC_LEN {
+        let ch = src_byte(p)
+        // Skip whitespace
+        if is_ws(ch) {
+            p = p + 1
+            continue
+        }
+        // Skip line comments
+        if ch == 47 && src_byte(p + 1) == 47 {
+            p = p + 2
+            while p < SRC_LEN && src_byte(p) != 10 {
+                p = p + 1
+            }
+            continue
+        }
+        // Numbers
+        if is_digit(ch) {
+            let start = p
+            var val: i64 = 0
+            while p < SRC_LEN && is_digit(src_byte(p)) {
+                val = val * 10 + (src_byte(p) - 48)
+                p = p + 1
+            }
+            add_token(2, start, p, val)
+            continue
+        }
+        // Identifiers and keywords
+        if is_alpha(ch) {
+            let start = p
+            let pool_start = POOL_POS
+            while p < SRC_LEN && is_alnum(src_byte(p)) {
+                pool_add(src_byte(p))
+                p = p + 1
+            }
+            let ilen = p - start
+            let kw = classify_keyword(pool_start, ilen)
+            if kw != 0 {
+                add_token(kw, start, p, pool_start)
+            } else {
+                add_token(1, start, p, pool_start)
+            }
+            continue
+        }
+        // String literals
+        if ch == 34 {
+            p = p + 1
+            let start = p
+            let pool_start = POOL_POS
+            while p < SRC_LEN && src_byte(p) != 34 {
+                if src_byte(p) == 92 {
+                    p = p + 1
+                    let esc = src_byte(p)
+                    if esc == 110 { pool_add(10) }
+                    else if esc == 116 { pool_add(9) }
+                    else if esc == 92 { pool_add(92) }
+                    else if esc == 34 { pool_add(34) }
+                    else if esc == 48 { pool_add(0) }
+                    else { pool_add(esc) }
+                } else {
+                    pool_add(src_byte(p))
+                }
+                p = p + 1
+            }
+            let slen = POOL_POS - pool_start
+            p = p + 1
+            add_token(3, start, p, pool_start)
+            // Store string length in TK_END for strings (overload)
+            TK_END[(TK_COUNT - 1) as usize] = slen
+            continue
+        }
+        // Two-char operators
+        let ch2 = src_byte(p + 1)
+        if ch == 38 && ch2 == 38 { add_token(20, p, p + 2, 0); p = p + 2; continue }
+        if ch == 124 && ch2 == 124 { add_token(21, p, p + 2, 0); p = p + 2; continue }
+        if ch == 61 && ch2 == 61 { add_token(23, p, p + 2, 0); p = p + 2; continue }
+        if ch == 33 && ch2 == 61 { add_token(24, p, p + 2, 0); p = p + 2; continue }
+        if ch == 60 && ch2 == 61 { add_token(26, p, p + 2, 0); p = p + 2; continue }
+        if ch == 62 && ch2 == 61 { add_token(28, p, p + 2, 0); p = p + 2; continue }
+        if ch == 60 && ch2 == 60 { add_token(18, p, p + 2, 0); p = p + 2; continue }
+        if ch == 62 && ch2 == 62 { add_token(19, p, p + 2, 0); p = p + 2; continue }
+        if ch == 45 && ch2 == 62 { add_token(42, p, p + 2, 0); p = p + 2; continue }
+        if ch == 38 && ch2 == 33 { add_token(70, p, p + 2, 0); p = p + 2; continue }
+        if ch == 58 && ch2 == 58 { add_token(41, p, p + 2, 0); p = p + 2; continue }
+        if ch == 46 && ch2 == 46 { add_token(43, p, p + 2, 0); p = p + 2; continue }
+        // Single-char operators
+        if ch == 43 { add_token(10, p, p + 1, 0); p = p + 1; continue }
+        if ch == 45 { add_token(11, p, p + 1, 0); p = p + 1; continue }
+        if ch == 42 { add_token(12, p, p + 1, 0); p = p + 1; continue }
+        if ch == 47 { add_token(13, p, p + 1, 0); p = p + 1; continue }
+        if ch == 37 { add_token(14, p, p + 1, 0); p = p + 1; continue }
+        if ch == 38 { add_token(15, p, p + 1, 0); p = p + 1; continue }
+        if ch == 124 { add_token(16, p, p + 1, 0); p = p + 1; continue }
+        if ch == 94 { add_token(17, p, p + 1, 0); p = p + 1; continue }
+        if ch == 33 { add_token(22, p, p + 1, 0); p = p + 1; continue }
+        if ch == 61 { add_token(30, p, p + 1, 0); p = p + 1; continue }
+        if ch == 40 { add_token(31, p, p + 1, 0); p = p + 1; continue }
+        if ch == 41 { add_token(32, p, p + 1, 0); p = p + 1; continue }
+        if ch == 123 { add_token(33, p, p + 1, 0); p = p + 1; continue }
+        if ch == 125 { add_token(34, p, p + 1, 0); p = p + 1; continue }
+        if ch == 91 { add_token(35, p, p + 1, 0); p = p + 1; continue }
+        if ch == 93 { add_token(36, p, p + 1, 0); p = p + 1; continue }
+        if ch == 44 { add_token(37, p, p + 1, 0); p = p + 1; continue }
+        if ch == 58 { add_token(38, p, p + 1, 0); p = p + 1; continue }
+        if ch == 59 { add_token(39, p, p + 1, 0); p = p + 1; continue }
+        if ch == 46 { add_token(40, p, p + 1, 0); p = p + 1; continue }
+        if ch == 60 { add_token(25, p, p + 1, 0); p = p + 1; continue }
+        if ch == 62 { add_token(27, p, p + 1, 0); p = p + 1; continue }
+        // Skip unknown
+        p = p + 1
+    }
+    add_token(0, SRC_LEN, SRC_LEN, 0)
+}
+
+// ============================================================================
+// Parser helpers
+// ============================================================================
+
+fn cur_kind() -> i64 with Panic {
+    TK_KIND[POS as usize]
+}
+
+fn cur_ival() -> i64 with Panic {
+    TK_IVAL[POS as usize]
+}
+
+fn cur_start() -> i64 with Panic {
+    TK_START[POS as usize]
+}
+
+fn cur_end() -> i64 with Panic {
+    TK_END[POS as usize]
+}
+
+fn advance() with Mut, Panic {
+    POS = POS + 1
+}
+
+fn expect(kind: i64) with Mut, Panic {
+    if cur_kind() != kind {
+        print("parse error: unexpected token")
+    }
+    advance()
+}
+
+fn new_node(kind: i64, ival: i64) -> i64 with Mut, Panic {
+    let idx = ND_COUNT
+    ND_KIND[idx as usize] = kind
+    ND_IVAL[idx as usize] = ival
+    ND_LEFT[idx as usize] = -1
+    ND_RIGHT[idx as usize] = -1
+    ND_EXTRA[idx as usize] = -1
+    ND_EXTRA2[idx as usize] = -1
+    ND_STR_OFF[idx as usize] = 0
+    ND_STR_LEN[idx as usize] = 0
+    ND_COUNT = ND_COUNT + 1
+    idx
+}
+
+fn tok_pool_off() -> i64 with Panic {
+    TK_IVAL[POS as usize]
+}
+
+fn tok_ident_len() -> i64 with Panic {
+    TK_END[POS as usize] - TK_START[POS as usize]
+}
+
+// ============================================================================
+// Parser: expressions
+// ============================================================================
+
+// Forward-reference workaround: parse_expr calls parse_primary which calls parse_expr.
+// In Sounio, no forward refs. We use parse_block/parse_expr/parse_primary in mutual recursion.
+// Solution: combine into one big function is impractical. Instead use the flat-recurse approach
+// where parse_expr_bp calls itself. We'll structure carefully.
+
+// We need: parse_expr -> parse_expr_bp -> parse_primary -> parse_expr (for sub-expressions)
+// This is impossible without forward refs. Workaround: parse_atom and parse_expr in one function
+// using a "mode" parameter wouldn't work either.
+//
+// ACTUAL SOLUTION: Sounio supports recursion within a single function. So parse_expr can call
+// itself. The issue is parse_primary calling parse_expr. We define parse_primary AFTER parse_expr
+// but parse_expr calls parse_primary... That's a forward ref.
+//
+// TRUE SOLUTION: Use a single parse_expr function that handles both atom and infix parsing
+// via Pratt precedence. The "atom" part is inlined at the start.
+
+fn binop_prec(kind: i64) -> i64 {
+    if kind == 21 { 1 }       // ||
+    else if kind == 20 { 2 }  // &&
+    else if kind == 16 { 3 }  // |
+    else if kind == 17 { 4 }  // ^
+    else if kind == 15 { 5 }  // &
+    else if kind == 23 || kind == 24 { 6 }  // == !=
+    else if kind == 25 || kind == 26 || kind == 27 || kind == 28 { 7 }  // < <= > >=
+    else if kind == 18 || kind == 19 { 8 }  // << >>
+    else if kind == 10 || kind == 11 { 9 }  // + -
+    else if kind == 12 || kind == 13 || kind == 14 { 10 }  // * / %
+    else { 0 }
+}
+
+fn tok_to_binop(kind: i64) -> i64 {
+    if kind == 10 { 0 }       // + -> add
+    else if kind == 11 { 1 }  // - -> sub
+    else if kind == 12 { 2 }  // * -> mul
+    else if kind == 13 { 3 }  // / -> div
+    else if kind == 14 { 4 }  // % -> mod
+    else if kind == 23 { 5 }  // == -> eq
+    else if kind == 24 { 6 }  // != -> ne
+    else if kind == 25 { 7 }  // < -> lt
+    else if kind == 26 { 8 }  // <= -> le
+    else if kind == 27 { 9 }  // > -> gt
+    else if kind == 28 { 10 } // >= -> ge
+    else if kind == 20 { 11 } // && -> and
+    else if kind == 21 { 12 } // || -> or
+    else if kind == 15 { 13 } // & -> bitand
+    else if kind == 16 { 14 } // | -> bitor
+    else if kind == 17 { 15 } // ^ -> bitxor
+    else if kind == 18 { 16 } // << -> shl
+    else if kind == 19 { 17 } // >> -> shr
+    else { -1 }
+}
+
+fn parse_block() -> i64 with Mut, Panic, Div {
+    expect(33)  // {
+    // Build a linked list of statements via ND_RIGHT
+    let block_node = new_node(33, 0)  // NK_BLOCK
+    var first: i64 = -1
+    var last: i64 = -1
+    while cur_kind() != 34 && cur_kind() != 0 {
+        let stmt = parse_stmt()
+        if first == -1 {
+            first = stmt
+        } else {
+            ND_RIGHT[last as usize] = stmt
+        }
+        last = stmt
+        // optional semicolons
+        if cur_kind() == 39 { advance() }
+    }
+    expect(34)  // }
+    ND_LEFT[block_node as usize] = first
+    block_node
+}
+
+fn parse_args() -> i64 with Mut, Panic, Div {
+    // Parse comma-separated exprs, return first node (linked via ND_EXTRA)
+    var first: i64 = -1
+    var last: i64 = -1
+    while cur_kind() != 32 && cur_kind() != 0 {
+        let arg = parse_expr(0)
+        if first == -1 {
+            first = arg
+        } else {
+            ND_EXTRA[last as usize] = arg
+        }
+        last = arg
+        if cur_kind() == 37 { advance() }  // comma
+    }
+    first
+}
+
+fn parse_expr(min_prec: i64) -> i64 with Mut, Panic, Div {
+    // Parse atom (primary)
+    var left: i64 = -1
+    let k = cur_kind()
+
+    if k == 2 {
+        // Integer literal
+        left = new_node(1, cur_ival())
+        advance()
+    } else if k == 3 {
+        // String literal
+        left = new_node(3, 0)
+        ND_STR_OFF[left as usize] = cur_ival()
+        ND_STR_LEN[left as usize] = cur_end()  // overloaded: string length
+        advance()
+    } else if k == 61 {
+        // true
+        left = new_node(4, 1)
+        advance()
+    } else if k == 62 {
+        // false
+        left = new_node(4, 0)
+        advance()
+    } else if k == 1 {
+        // Identifier
+        let off = tok_pool_off()
+        let ilen = tok_ident_len()
+        left = new_node(2, 0)
+        ND_STR_OFF[left as usize] = off
+        ND_STR_LEN[left as usize] = ilen
+        advance()
+        // Check for function call
+        if cur_kind() == 31 {
+            advance()  // (
+            let args = parse_args()
+            expect(32)  // )
+            let call_node = new_node(12, 0)
+            ND_LEFT[call_node as usize] = left
+            ND_EXTRA[call_node as usize] = args
+            left = call_node
+        }
+    } else if k == 31 {
+        // Parenthesized expression
+        advance()  // (
+        left = parse_expr(0)
+        expect(32)  // )
+    } else if k == 11 {
+        // Unary minus
+        advance()
+        let operand = parse_expr(10)
+        left = new_node(11, 1)  // unary sub
+        ND_LEFT[left as usize] = operand
+    } else if k == 22 {
+        // Unary not
+        advance()
+        let operand = parse_expr(10)
+        left = new_node(11, 0)  // unary not
+        ND_LEFT[left as usize] = operand
+    } else if k == 33 {
+        // Block expression
+        left = parse_block()
+    } else if k == 53 {
+        // if expression
+        left = parse_if_expr()
+    } else if k == 55 {
+        // while expression
+        left = parse_while_expr()
+    } else {
+        // Unknown token, create a dummy
+        left = new_node(1, 0)
+        advance()
+    }
+
+    // Postfix: as cast
+    if cur_kind() == 65 {
+        advance()  // as
+        // skip the type name
+        if cur_kind() == 1 || cur_kind() >= 50 {
+            advance()
+        }
+        // 'as' is a no-op cast in our codegen (everything is i64)
+        // left stays the same
+    }
+
+    // Infix loop (Pratt precedence)
+    while true {
+        let op_kind = cur_kind()
+        let prec = binop_prec(op_kind)
+        if prec == 0 || prec < min_prec { break }
+        let binop_code = tok_to_binop(op_kind)
+        advance()
+        let right = parse_expr(prec + 1)
+        let bin_node = new_node(10, binop_code)  // NK_BINOP
+        ND_LEFT[bin_node as usize] = left
+        ND_RIGHT[bin_node as usize] = right
+        // Save right's next pointer
+        left = bin_node
+    }
+
+    left
+}
+
+fn parse_if_expr() -> i64 with Mut, Panic, Div {
+    expect(53)  // if
+    let cond = parse_expr(0)
+    let then_block = parse_block()
+    let if_node = new_node(30, 0)  // NK_IF
+    ND_LEFT[if_node as usize] = cond
+    ND_EXTRA[if_node as usize] = then_block
+    if cur_kind() == 54 {
+        advance()  // else
+        if cur_kind() == 53 {
+            let else_part = parse_if_expr()
+            ND_EXTRA2[if_node as usize] = else_part
+        } else {
+            let else_block = parse_block()
+            ND_EXTRA2[if_node as usize] = else_block
+        }
+    }
+    if_node
+}
+
+fn parse_while_expr() -> i64 with Mut, Panic, Div {
+    expect(55)  // while
+    let cond = parse_expr(0)
+    let body = parse_block()
+    let wh_node = new_node(31, 0)  // NK_WHILE
+    ND_LEFT[wh_node as usize] = cond
+    ND_EXTRA[wh_node as usize] = body
+    wh_node
+}
+
+// ============================================================================
+// Parser: statements
+// ============================================================================
+
+fn skip_type_annotation() with Mut, Panic, Div {
+    // Skip a type annotation after ':'
+    // Handles simple types, arrays, references, generics (roughly)
+    if cur_kind() == 38 {
+        advance()  // :
+        skip_type_expr()
+    }
+}
+
+fn skip_type_expr() with Mut, Panic, Div {
+    // Skip type expressions: ident, &T, &!T, [T; N], (T, T)
+    if cur_kind() == 15 {
+        advance()  // &
+        skip_type_expr()
+    } else if cur_kind() == 70 {
+        advance()  // &!
+        skip_type_expr()
+    } else if cur_kind() == 35 {
+        // Array type [T; N]
+        advance()  // [
+        skip_type_expr()
+        if cur_kind() == 39 { advance() }  // ;
+        if cur_kind() == 2 { advance() }   // size
+        if cur_kind() == 36 { advance() }  // ]
+    } else if cur_kind() == 31 {
+        // Tuple type (T, T)
+        advance()  // (
+        while cur_kind() != 32 && cur_kind() != 0 {
+            skip_type_expr()
+            if cur_kind() == 37 { advance() }
+        }
+        if cur_kind() == 32 { advance() }
+    } else if cur_kind() == 1 || cur_kind() >= 50 {
+        advance()  // type name
+        // Might have generic params <T>
+        if cur_kind() == 25 {
+            // < ... > but be careful not to confuse with comparison
+            // Simple heuristic: skip until matching >
+            advance()
+            var depth: i64 = 1
+            while depth > 0 && cur_kind() != 0 {
+                if cur_kind() == 25 { depth = depth + 1 }
+                else if cur_kind() == 27 { depth = depth - 1 }
+                if depth > 0 { advance() }
+            }
+            if cur_kind() == 27 { advance() }
+        }
+    } else if cur_kind() == 2 {
+        advance()  // numeric literal in type position (e.g., array size)
+    }
+}
+
+fn parse_stmt() -> i64 with Mut, Panic, Div {
+    let k = cur_kind()
+    if k == 51 || k == 52 {
+        // let / var
+        let is_var = k == 52
+        advance()
+        let name_off = tok_pool_off()
+        let name_len = tok_ident_len()
+        advance()  // ident
+        skip_type_annotation()
+        expect(30)  // =
+        let init = parse_expr(0)
+        let node = new_node(if is_var { 41 } else { 40 }, 0)
+        ND_STR_OFF[node as usize] = name_off
+        ND_STR_LEN[node as usize] = name_len
+        ND_LEFT[node as usize] = init
+        return node
+    }
+    if k == 56 {
+        // return
+        advance()
+        let val = if cur_kind() != 34 && cur_kind() != 39 { parse_expr(0) } else { -1 }
+        let node = new_node(34, 0)  // NK_RETURN
+        ND_LEFT[node as usize] = val
+        return node
+    }
+    if k == 63 {
+        // break
+        advance()
+        return new_node(35, 0)
+    }
+    if k == 64 {
+        // continue
+        advance()
+        return new_node(36, 0)
+    }
+    if k == 53 {
+        return parse_if_expr()
+    }
+    if k == 55 {
+        return parse_while_expr()
+    }
+    // Expression statement, possibly assignment
+    let expr = parse_expr(0)
+    if cur_kind() == 30 {
+        // Assignment
+        advance()
+        let rhs = parse_expr(0)
+        let asgn = new_node(42, 0)  // NK_ASSIGN
+        ND_LEFT[asgn as usize] = expr
+        ND_EXTRA[asgn as usize] = rhs
+        return asgn
+    }
+    // Wrap as expression statement
+    let es = new_node(43, 0)
+    ND_LEFT[es as usize] = expr
+    es
+}
+
+// ============================================================================
+// Parser: top-level
+// ============================================================================
+
+fn skip_effects() with Mut, Panic, Div {
+    // Skip 'with Effect, Effect, ...'
+    if cur_kind() == 66 {
+        advance()  // with
+        while cur_kind() == 1 || cur_kind() >= 50 {
+            advance()
+            if cur_kind() == 37 { advance() }  // comma
+        }
+    }
+}
+
+fn skip_return_type() with Mut, Panic, Div {
+    if cur_kind() == 42 {
+        advance()  // ->
+        skip_type_expr()
+    }
+}
+
+fn parse_fn_def() with Mut, Panic, Div {
+    expect(50)  // fn
+    let fn_idx = FN_COUNT
+    let name_off = tok_pool_off()
+    let name_len = tok_ident_len()
+    FN_NAME_OFF[fn_idx as usize] = name_off
+    FN_NAME_LEN[fn_idx as usize] = name_len
+    advance()  // name
+
+    // Parse params
+    expect(31)  // (
+    var pcount: i64 = 0
+    let pbase = fn_idx * 8
+    FN_PARAM_BASE[fn_idx as usize] = pbase
+    while cur_kind() != 32 && cur_kind() != 0 {
+        let poff = tok_pool_off()
+        let plen = tok_ident_len()
+        FN_PARAM_NAME_OFF[(pbase + pcount) as usize] = poff
+        FN_PARAM_NAME_LEN[(pbase + pcount) as usize] = plen
+        advance()  // param name
+        skip_type_annotation()
+        pcount = pcount + 1
+        if cur_kind() == 37 { advance() }  // comma
+    }
+    expect(32)  // )
+    FN_PARAM_COUNT[fn_idx as usize] = pcount
+
+    skip_return_type()
+    skip_effects()
+
+    let body = parse_block()
+    FN_BODY_NODE[fn_idx as usize] = body
+    FN_COUNT = FN_COUNT + 1
+}
+
+fn skip_braces() with Mut, Panic, Div {
+    if cur_kind() == 33 {
+        advance()
+        var depth: i64 = 1
+        while depth > 0 && cur_kind() != 0 {
+            if cur_kind() == 33 { depth = depth + 1 }
+            else if cur_kind() == 34 { depth = depth - 1 }
+            if depth > 0 { advance() }
+        }
+        if cur_kind() == 34 { advance() }
+    }
+}
+
+fn skip_to_next_top_level() with Mut, Panic, Div {
+    // Skip until we find fn/struct/let/var/EOF at top level
+    while cur_kind() != 0 && cur_kind() != 50 && cur_kind() != 58 && cur_kind() != 51 && cur_kind() != 52 && cur_kind() != 59 && cur_kind() != 60 {
+        if cur_kind() == 33 {
+            skip_braces()
+        } else {
+            advance()
+        }
+    }
+}
+
+fn parse_program() with Mut, Panic, Div {
+    while cur_kind() != 0 {
+        let k = cur_kind()
+        if k == 50 {
+            parse_fn_def()
+        } else if k == 58 || k == 59 || k == 60 {
+            // struct / enum / impl: skip for now
+            advance()
+            if cur_kind() == 1 { advance() }
+            skip_braces()
+        } else if k == 51 || k == 52 {
+            // top-level let/var: skip
+            while cur_kind() != 0 && cur_kind() != 50 && cur_kind() != 58 && cur_kind() != 59 && cur_kind() != 60 {
+                advance()
+            }
+        } else {
+            skip_to_next_top_level()
+        }
+    }
+}
+
+// ============================================================================
+// Codegen helpers
+// ============================================================================
+
+fn emit(b: i64) with Mut, Panic {
+    CODE[CODE_LEN as usize] = b as i8
+    CODE_LEN = CODE_LEN + 1
+}
+
+fn emit_u32(v: i64) with Mut, Panic {
+    emit(v & 0xFF)
+    emit((v >> 8) & 0xFF)
+    emit((v >> 16) & 0xFF)
+    emit((v >> 24) & 0xFF)
+}
+
+fn emit_u64(v: i64) with Mut, Panic {
+    emit_u32(v)
+    emit_u32(v >> 32)
+}
+
+fn emit_mov_rax_imm(val: i64) with Mut, Panic {
+    emit(0x48); emit(0xB8)
+    emit_u64(val)
+}
+
+fn emit_store_rax(slot: i64) with Mut, Panic {
+    let disp = 0 - ((slot + 1) * 8)
+    emit(0x48); emit(0x89); emit(0x85)
+    emit_u32(disp)
+}
+
+fn emit_load_rax(slot: i64) with Mut, Panic {
+    let disp = 0 - ((slot + 1) * 8)
+    emit(0x48); emit(0x8B); emit(0x85)
+    emit_u32(disp)
+}
+
+fn emit_load_rcx(slot: i64) with Mut, Panic {
+    let disp = 0 - ((slot + 1) * 8)
+    emit(0x48); emit(0x8B); emit(0x8D)
+    emit_u32(disp)
+}
+
+fn emit_prologue() with Mut, Panic {
+    // push rbp
+    emit(0x55)
+    // mov rbp, rsp
+    emit(0x48); emit(0x89); emit(0xE5)
+    // sub rsp, 32768 (0x8000)
+    emit(0x48); emit(0x81); emit(0xEC)
+    emit_u32(32768)
+}
+
+fn emit_epilogue() with Mut, Panic {
+    // mov rsp, rbp
+    emit(0x48); emit(0x89); emit(0xEC)
+    // pop rbp
+    emit(0x5D)
+    // ret
+    emit(0xC3)
+}
+
+// ============================================================================
+// Codegen: local variable management
+// ============================================================================
+
+fn locals_reset() with Mut {
+    LOCAL_COUNT = 0
+    NEXT_SLOT = 0
+}
+
+fn alloc_slot() -> i64 with Mut {
+    let s = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + 1
+    s
+}
+
+fn add_local(off: i64, len: i64) -> i64 with Mut, Panic {
+    let idx = LOCAL_COUNT
+    let slot = alloc_slot()
+    LOCAL_NAME_OFF[idx as usize] = off
+    LOCAL_NAME_LEN[idx as usize] = len
+    LOCAL_SLOT[idx as usize] = slot
+    LOCAL_COUNT = LOCAL_COUNT + 1
+    slot
+}
+
+fn find_local(off: i64, len: i64) -> i64 with Mut, Panic, Div {
+    var i: i64 = LOCAL_COUNT - 1
+    while i >= 0 {
+        let lo = LOCAL_NAME_OFF[i as usize]
+        let ll = LOCAL_NAME_LEN[i as usize]
+        if ll == len {
+            var match_ok: bool = true
+            var j: i64 = 0
+            while j < len {
+                if POOL[(lo + j) as usize] != POOL[(off + j) as usize] {
+                    match_ok = false
+                    break
+                }
+                j = j + 1
+            }
+            if match_ok {
+                return LOCAL_SLOT[i as usize]
+            }
+        }
+        i = i - 1
+    }
+    -1
+}
+
+fn find_fn_by_name(off: i64, len: i64) -> i64 with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < FN_COUNT {
+        let fo = FN_NAME_OFF[i as usize]
+        let fl = FN_NAME_LEN[i as usize]
+        if fl == len {
+            var match_ok: bool = true
+            var j: i64 = 0
+            while j < len {
+                if POOL[(fo + j) as usize] != POOL[(off + j) as usize] {
+                    match_ok = false
+                    break
+                }
+                j = j + 1
+            }
+            if match_ok { return i }
+        }
+        i = i + 1
+    }
+    -1
+}
+
+// ============================================================================
+// Codegen: compile AST nodes
+// ============================================================================
+
+fn compile_node(node: i64) -> i64 with Mut, Panic, Div {
+    if node == -1 {
+        emit_mov_rax_imm(0)
+        return 0
+    }
+    let kind = ND_KIND[node as usize]
+    let ival = ND_IVAL[node as usize]
+
+    if kind == 1 {
+        // NK_INT
+        emit_mov_rax_imm(ival)
+        return 0
+    }
+    if kind == 4 {
+        // NK_BOOL
+        emit_mov_rax_imm(ival)
+        return 0
+    }
+    if kind == 3 {
+        // NK_STR — emit string data inline, load address
+        let soff = ND_STR_OFF[node as usize]
+        let slen = ND_STR_LEN[node as usize]
+        // JMP over the string data
+        emit(0xEB)  // JMP rel8
+        let jmp_pos = CODE_LEN
+        emit(0x00)  // placeholder
+        let str_addr = CODE_LEN
+        // Emit string bytes
+        var si: i64 = 0
+        while si < slen {
+            emit(POOL[(soff + si) as usize] as i64)
+            si = si + 1
+        }
+        // Patch jump
+        let dist = CODE_LEN - jmp_pos - 1
+        CODE[jmp_pos as usize] = dist as i8
+        // LEA rax, [rip - (CODE_LEN - str_addr)]
+        emit(0x48); emit(0x8D); emit(0x05)
+        let rel = str_addr - (CODE_LEN + 4)
+        emit_u32(rel)
+        return 0
+    }
+    if kind == 2 {
+        // NK_IDENT — load variable
+        let voff = ND_STR_OFF[node as usize]
+        let vlen = ND_STR_LEN[node as usize]
+        let slot = find_local(voff, vlen)
+        if slot >= 0 {
+            emit_load_rax(slot)
+        } else {
+            emit_mov_rax_imm(0)
+        }
+        return 0
+    }
+    if kind == 10 {
+        // NK_BINOP
+        let left = ND_LEFT[node as usize]
+        let right = ND_RIGHT[node as usize]
+        compile_node(right)
+        let tmp = alloc_slot()
+        emit_store_rax(tmp)
+        compile_node(left)
+        emit_load_rcx(tmp)
+        // rax = left, rcx = right
+        if ival == 0 { emit(0x48); emit(0x01); emit(0xC8) }       // add rax, rcx
+        else if ival == 1 { emit(0x48); emit(0x29); emit(0xC8) }  // sub rax, rcx
+        else if ival == 2 { emit(0x48); emit(0x0F); emit(0xAF); emit(0xC1) }  // imul rax, rcx
+        else if ival == 3 {
+            // div: rax / rcx -> cqo; idiv rcx
+            emit(0x48); emit(0x99)  // cqo
+            emit(0x48); emit(0xF7); emit(0xF9)  // idiv rcx
+        }
+        else if ival == 4 {
+            // mod
+            emit(0x48); emit(0x99)  // cqo
+            emit(0x48); emit(0xF7); emit(0xF9)  // idiv rcx
+            // remainder in rdx -> mov rax, rdx
+            emit(0x48); emit(0x89); emit(0xD0)
+        }
+        else if ival == 5 {
+            // eq: cmp rax, rcx; sete al; movzx rax, al
+            emit(0x48); emit(0x39); emit(0xC8)
+            emit(0x0F); emit(0x94); emit(0xC0)
+            emit(0x48); emit(0x0F); emit(0xB6); emit(0xC0)
+        }
+        else if ival == 6 {
+            // ne
+            emit(0x48); emit(0x39); emit(0xC8)
+            emit(0x0F); emit(0x95); emit(0xC0)
+            emit(0x48); emit(0x0F); emit(0xB6); emit(0xC0)
+        }
+        else if ival == 7 {
+            // lt
+            emit(0x48); emit(0x39); emit(0xC8)
+            emit(0x0F); emit(0x9C); emit(0xC0)
+            emit(0x48); emit(0x0F); emit(0xB6); emit(0xC0)
+        }
+        else if ival == 8 {
+            // le
+            emit(0x48); emit(0x39); emit(0xC8)
+            emit(0x0F); emit(0x9E); emit(0xC0)
+            emit(0x48); emit(0x0F); emit(0xB6); emit(0xC0)
+        }
+        else if ival == 9 {
+            // gt
+            emit(0x48); emit(0x39); emit(0xC8)
+            emit(0x0F); emit(0x9F); emit(0xC0)
+            emit(0x48); emit(0x0F); emit(0xB6); emit(0xC0)
+        }
+        else if ival == 10 {
+            // ge
+            emit(0x48); emit(0x39); emit(0xC8)
+            emit(0x0F); emit(0x9D); emit(0xC0)
+            emit(0x48); emit(0x0F); emit(0xB6); emit(0xC0)
+        }
+        else if ival == 13 { emit(0x48); emit(0x21); emit(0xC8) }  // and rax, rcx
+        else if ival == 14 { emit(0x48); emit(0x09); emit(0xC8) }  // or rax, rcx
+        else if ival == 15 { emit(0x48); emit(0x31); emit(0xC8) }  // xor rax, rcx
+        else if ival == 16 {
+            // shl: mov cl byte already in rcx low
+            emit(0x48); emit(0xD3); emit(0xE0)  // shl rax, cl
+        }
+        else if ival == 17 {
+            // shr
+            emit(0x48); emit(0xD3); emit(0xF8)  // sar rax, cl
+        }
+        else if ival == 11 {
+            // logical and: both nonzero
+            emit(0x48); emit(0x85); emit(0xC0)  // test rax, rax
+            emit(0x0F); emit(0x95); emit(0xC0)  // setne al
+            emit(0x48); emit(0x85); emit(0xC9)  // test rcx, rcx
+            emit(0x0F); emit(0x95); emit(0xC1)  // setne cl
+            emit(0x20); emit(0xC8)               // and al, cl
+            emit(0x48); emit(0x0F); emit(0xB6); emit(0xC0)  // movzx rax, al
+        }
+        else if ival == 12 {
+            // logical or
+            emit(0x48); emit(0x09); emit(0xC8)  // or rax, rcx
+            emit(0x48); emit(0x85); emit(0xC0)  // test rax, rax
+            emit(0x0F); emit(0x95); emit(0xC0)  // setne al
+            emit(0x48); emit(0x0F); emit(0xB6); emit(0xC0)
+        }
+        return 0
+    }
+    if kind == 11 {
+        // NK_UNARY
+        let operand = ND_LEFT[node as usize]
+        compile_node(operand)
+        if ival == 1 {
+            // negate
+            emit(0x48); emit(0xF7); emit(0xD8)  // neg rax
+        } else {
+            // logical not: test rax; sete al; movzx
+            emit(0x48); emit(0x85); emit(0xC0)
+            emit(0x0F); emit(0x94); emit(0xC0)
+            emit(0x48); emit(0x0F); emit(0xB6); emit(0xC0)
+        }
+        return 0
+    }
+    if kind == 12 {
+        // NK_CALL
+        let callee = ND_LEFT[node as usize]
+        let c_off = ND_STR_OFF[callee as usize]
+        let c_len = ND_STR_LEN[callee as usize]
+
+        // Check for built-in print_int
+        if pool_match(c_off, c_len, "print_int") {
+            // Compile the argument
+            let arg = ND_EXTRA[node as usize]
+            if arg != -1 {
+                compile_node(arg)
+            }
+            // Call the print_int helper (fn index 0 reserved)
+            // For now, emit syscall write(1, "?", 1) as placeholder
+            emit_mov_rax_imm(0)
+            return 0
+        }
+
+        // Check for built-in exit
+        if pool_match(c_off, c_len, "exit") {
+            let arg = ND_EXTRA[node as usize]
+            if arg != -1 {
+                compile_node(arg)
+            }
+            // mov rdi, rax; mov rax, 60; syscall
+            emit(0x48); emit(0x89); emit(0xC7)
+            emit(0x48); emit(0xC7); emit(0xC0); emit_u32(60)
+            emit(0x0F); emit(0x05)
+            return 0
+        }
+
+        // Generic function call
+        // Push args to stack, then CALL
+        // Count args
+        var argc: i64 = 0
+        var arg_node = ND_EXTRA[node as usize]
+        // First compile all args and store to temp slots
+        var arg_slots: [i64; 16] = [0; 16]
+        while arg_node != -1 && argc < 16 {
+            compile_node(arg_node)
+            let s = alloc_slot()
+            emit_store_rax(s)
+            arg_slots[argc as usize] = s
+            argc = argc + 1
+            arg_node = ND_EXTRA[arg_node as usize]
+        }
+        // Load args into registers (System V: rdi, rsi, rdx, rcx, r8, r9)
+        if argc > 0 {
+            emit_load_rax(arg_slots[0 as usize])
+            emit(0x48); emit(0x89); emit(0xC7)  // mov rdi, rax
+        }
+        if argc > 1 {
+            emit_load_rax(arg_slots[1 as usize])
+            emit(0x48); emit(0x89); emit(0xC6)  // mov rsi, rax
+        }
+        if argc > 2 {
+            emit_load_rax(arg_slots[2 as usize])
+            emit(0x48); emit(0x89); emit(0xC2)  // mov rdx, rax
+        }
+        if argc > 3 {
+            emit_load_rax(arg_slots[3 as usize])
+            emit(0x48); emit(0x89); emit(0xC1)  // mov rcx, rax
+        }
+
+        // Emit CALL with fixup
+        let fn_idx = find_fn_by_name(c_off, c_len)
+        emit(0xE8)
+        let fix_pos = CODE_LEN
+        emit_u32(0)  // placeholder
+        if fn_idx >= 0 {
+            FIX_OFF[FIX_COUNT as usize] = fix_pos
+            FIX_TARGET[FIX_COUNT as usize] = fn_idx
+            FIX_COUNT = FIX_COUNT + 1
+        }
+        return 0
+    }
+    if kind == 33 {
+        // NK_BLOCK — compile all statements in the linked list
+        var stmt = ND_LEFT[node as usize]
+        while stmt != -1 {
+            let next = ND_RIGHT[stmt as usize]
+            compile_node(stmt)
+            stmt = next
+        }
+        return 0
+    }
+    if kind == 40 || kind == 41 {
+        // NK_LET / NK_VAR
+        let name_off = ND_STR_OFF[node as usize]
+        let name_len = ND_STR_LEN[node as usize]
+        let init = ND_LEFT[node as usize]
+        compile_node(init)
+        let slot = add_local(name_off, name_len)
+        emit_store_rax(slot)
+        return 0
+    }
+    if kind == 42 {
+        // NK_ASSIGN
+        let target = ND_LEFT[node as usize]
+        let rhs = ND_EXTRA[node as usize]
+        compile_node(rhs)
+        if ND_KIND[target as usize] == 2 {
+            // Assign to variable
+            let voff = ND_STR_OFF[target as usize]
+            let vlen = ND_STR_LEN[target as usize]
+            let slot = find_local(voff, vlen)
+            if slot >= 0 {
+                emit_store_rax(slot)
+            }
+        }
+        return 0
+    }
+    if kind == 43 {
+        // NK_EXPR_STMT
+        let expr = ND_LEFT[node as usize]
+        compile_node(expr)
+        return 0
+    }
+    if kind == 34 {
+        // NK_RETURN
+        let val = ND_LEFT[node as usize]
+        compile_node(val)
+        emit_epilogue()
+        return 0
+    }
+    if kind == 30 {
+        // NK_IF
+        let cond = ND_LEFT[node as usize]
+        let then_body = ND_EXTRA[node as usize]
+        let else_body = ND_EXTRA2[node as usize]
+        compile_node(cond)
+        // test rax, rax
+        emit(0x48); emit(0x85); emit(0xC0)
+        // je else_label (JE rel32)
+        emit(0x0F); emit(0x84)
+        let je_pos = CODE_LEN
+        emit_u32(0)
+        compile_node(then_body)
+        if else_body != -1 {
+            // jmp end_label
+            emit(0xE9)
+            let jmp_pos = CODE_LEN
+            emit_u32(0)
+            // Patch je to here
+            let else_off = CODE_LEN - je_pos - 4
+            CODE[je_pos as usize] = (else_off & 0xFF) as i8
+            CODE[(je_pos + 1) as usize] = ((else_off >> 8) & 0xFF) as i8
+            CODE[(je_pos + 2) as usize] = ((else_off >> 16) & 0xFF) as i8
+            CODE[(je_pos + 3) as usize] = ((else_off >> 24) & 0xFF) as i8
+            compile_node(else_body)
+            // Patch jmp to here
+            let end_off = CODE_LEN - jmp_pos - 4
+            CODE[jmp_pos as usize] = (end_off & 0xFF) as i8
+            CODE[(jmp_pos + 1) as usize] = ((end_off >> 8) & 0xFF) as i8
+            CODE[(jmp_pos + 2) as usize] = ((end_off >> 16) & 0xFF) as i8
+            CODE[(jmp_pos + 3) as usize] = ((end_off >> 24) & 0xFF) as i8
+        } else {
+            // Patch je to here
+            let skip_off = CODE_LEN - je_pos - 4
+            CODE[je_pos as usize] = (skip_off & 0xFF) as i8
+            CODE[(je_pos + 1) as usize] = ((skip_off >> 8) & 0xFF) as i8
+            CODE[(je_pos + 2) as usize] = ((skip_off >> 16) & 0xFF) as i8
+            CODE[(je_pos + 3) as usize] = ((skip_off >> 24) & 0xFF) as i8
+        }
+        return 0
+    }
+    if kind == 31 {
+        // NK_WHILE
+        let cond = ND_LEFT[node as usize]
+        let body = ND_EXTRA[node as usize]
+        let loop_top = CODE_LEN
+        compile_node(cond)
+        emit(0x48); emit(0x85); emit(0xC0)  // test rax, rax
+        emit(0x0F); emit(0x84)              // je exit
+        let je_pos = CODE_LEN
+        emit_u32(0)
+        compile_node(body)
+        // jmp loop_top
+        emit(0xE9)
+        let jmp_rel = loop_top - (CODE_LEN + 4)
+        emit_u32(jmp_rel)
+        // Patch je to here
+        let exit_off = CODE_LEN - je_pos - 4
+        CODE[je_pos as usize] = (exit_off & 0xFF) as i8
+        CODE[(je_pos + 1) as usize] = ((exit_off >> 8) & 0xFF) as i8
+        CODE[(je_pos + 2) as usize] = ((exit_off >> 16) & 0xFF) as i8
+        CODE[(je_pos + 3) as usize] = ((exit_off >> 24) & 0xFF) as i8
+        return 0
+    }
+    if kind == 35 || kind == 36 {
+        // NK_BREAK / NK_CONTINUE — nop for now
+        return 0
+    }
+    // Default: nop
+    0
+}
+
+fn compile_fn(fn_idx: i64) with Mut, Panic, Div {
+    FN_CODE_OFF[fn_idx as usize] = CODE_LEN
+    locals_reset()
+    emit_prologue()
+
+    // Set up params as locals (passed in rdi, rsi, rdx, rcx, r8, r9)
+    let pcount = FN_PARAM_COUNT[fn_idx as usize]
+    let pbase = FN_PARAM_BASE[fn_idx as usize]
+    if pcount > 0 {
+        // param 0 from rdi: mov [rbp-8], rdi
+        let s0 = add_local(FN_PARAM_NAME_OFF[pbase as usize], FN_PARAM_NAME_LEN[pbase as usize])
+        emit(0x48); emit(0x89); emit(0xBD)  // mov [rbp+disp32], rdi
+        emit_u32(0 - ((s0 + 1) * 8))
+    }
+    if pcount > 1 {
+        let s1 = add_local(FN_PARAM_NAME_OFF[(pbase + 1) as usize], FN_PARAM_NAME_LEN[(pbase + 1) as usize])
+        emit(0x48); emit(0x89); emit(0xB5)  // mov [rbp+disp32], rsi
+        emit_u32(0 - ((s1 + 1) * 8))
+    }
+    if pcount > 2 {
+        let s2 = add_local(FN_PARAM_NAME_OFF[(pbase + 2) as usize], FN_PARAM_NAME_LEN[(pbase + 2) as usize])
+        emit(0x48); emit(0x89); emit(0x95)  // mov [rbp+disp32], rdx
+        emit_u32(0 - ((s2 + 1) * 8))
+    }
+    if pcount > 3 {
+        let s3 = add_local(FN_PARAM_NAME_OFF[(pbase + 3) as usize], FN_PARAM_NAME_LEN[(pbase + 3) as usize])
+        emit(0x48); emit(0x89); emit(0x8D)  // mov [rbp+disp32], rcx
+        emit_u32(0 - ((s3 + 1) * 8))
+    }
+
+    let body = FN_BODY_NODE[fn_idx as usize]
+    compile_node(body)
+    emit_epilogue()
+}
+
+// ============================================================================
+// ELF writer
+// ============================================================================
+
+var ELF: [i8; 524288] = [0; 524288]
+var ELF_LEN: i64 = 0
+
+fn elf_emit(b: i64) with Mut, Panic {
+    ELF[ELF_LEN as usize] = b as i8
+    ELF_LEN = ELF_LEN + 1
+}
+
+fn elf_emit_u16(v: i64) with Mut, Panic {
+    elf_emit(v & 0xFF)
+    elf_emit((v >> 8) & 0xFF)
+}
+
+fn elf_emit_u32(v: i64) with Mut, Panic {
+    elf_emit(v & 0xFF)
+    elf_emit((v >> 8) & 0xFF)
+    elf_emit((v >> 16) & 0xFF)
+    elf_emit((v >> 24) & 0xFF)
+}
+
+fn elf_emit_u64(v: i64) with Mut, Panic {
+    elf_emit_u32(v)
+    elf_emit_u32(v >> 32)
+}
+
+fn write_elf(entry_fn: i64) with Mut, Panic, Div {
+    let base_addr: i64 = 0x400000
+    let text_off: i64 = 4096
+
+    // ELF header (64 bytes)
+    elf_emit(0x7F); elf_emit(0x45); elf_emit(0x4C); elf_emit(0x46)  // magic
+    elf_emit(2)   // 64-bit
+    elf_emit(1)   // little endian
+    elf_emit(1)   // ELF version
+    elf_emit(0)   // OS/ABI
+    // padding 8 bytes
+    var pi: i64 = 0
+    while pi < 8 { elf_emit(0); pi = pi + 1 }
+    elf_emit_u16(2)   // ET_EXEC
+    elf_emit_u16(0x3E) // x86_64
+    elf_emit_u32(1)    // version
+    // entry point: base_addr + text_off
+    elf_emit_u64(base_addr + text_off)
+    elf_emit_u64(64)   // phdr offset
+    elf_emit_u64(0)    // shdr offset
+    elf_emit_u32(0)    // flags
+    elf_emit_u16(64)   // ehdr size
+    elf_emit_u16(56)   // phdr entry size
+    elf_emit_u16(1)    // phdr count
+    elf_emit_u16(0)    // shdr entry size
+    elf_emit_u16(0)    // shdr count
+    elf_emit_u16(0)    // shstrndx
+
+    // Program header (56 bytes)
+    elf_emit_u32(1)    // PT_LOAD
+    elf_emit_u32(5)    // PF_R | PF_X
+    elf_emit_u64(0)    // offset
+    elf_emit_u64(base_addr)  // vaddr
+    elf_emit_u64(base_addr)  // paddr
+    let total_size = text_off + CODE_LEN
+    elf_emit_u64(total_size)  // filesz
+    elf_emit_u64(total_size)  // memsz
+    elf_emit_u64(0x1000)      // align
+
+    // Pad to text_off
+    while ELF_LEN < text_off {
+        elf_emit(0)
+    }
+
+    // Entry trampoline: call main, then exit with return value
+    // Find "main" function
+    let main_off = FN_CODE_OFF[entry_fn as usize]
+    // CALL main (relative)
+    let call_target = main_off - 5  // relative to after the call instruction
+    // Actually we emit the trampoline first, then copy code after
+    // Trampoline: call <main_rel>; mov rdi, rax; mov rax, 60; syscall
+    // call rel32
+    elf_emit(0xE8)
+    // The code will be appended right after the trampoline
+    // Trampoline is 19 bytes: E8 xx xx xx xx 48 89 C7 48 C7 C0 3C 00 00 00 0F 05 + 2 pad = 19
+    // Actually let's compute: after trampoline, code starts
+    let trampoline_size: i64 = 17
+    let code_start = trampoline_size
+    let main_abs = code_start + main_off
+    let call_rel = main_abs - 5
+    elf_emit_u32(call_rel)
+    // mov rdi, rax
+    elf_emit(0x48); elf_emit(0x89); elf_emit(0xC7)
+    // mov eax, 60
+    elf_emit(0x48); elf_emit(0xC7); elf_emit(0xC0)
+    elf_emit_u32(60)
+    // syscall
+    elf_emit(0x0F); elf_emit(0x05)
+
+    // Copy code
+    var ci: i64 = 0
+    while ci < CODE_LEN {
+        elf_emit(CODE[ci as usize] as i64)
+        ci = ci + 1
+    }
+}
+
+fn patch_calls(trampoline_size: i64) with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < FIX_COUNT {
+        let fix_off = FIX_OFF[i as usize]
+        let target_fn = FIX_TARGET[i as usize]
+        let target_off = FN_CODE_OFF[target_fn as usize]
+        let rel = target_off - (fix_off + 4)
+        CODE[fix_off as usize] = (rel & 0xFF) as i8
+        CODE[(fix_off + 1) as usize] = ((rel >> 8) & 0xFF) as i8
+        CODE[(fix_off + 2) as usize] = ((rel >> 16) & 0xFF) as i8
+        CODE[(fix_off + 3) as usize] = ((rel >> 24) & 0xFF) as i8
+        i = i + 1
+    }
+}
+
+// ============================================================================
+// Main
+// ============================================================================
+
+fn main() -> i64 with IO, Mut, Panic, Div {
+    let argc = arg_count()
+    if argc < 2 {
+        print("Usage: micro_bootstrap <source.sio> <output>")
+        return 1
+    }
+    let src_path = get_arg(0)
+    let out_path = get_arg(1)
+
+    // Read source
+    let data = read_file(src_path)
+    let size = file_size(src_path)
+    var ri: i64 = 0
+    while ri < size && ri < 1048576 {
+        SRC[ri as usize] = data[ri as usize]
+        ri = ri + 1
+    }
+    SRC_LEN = size
+
+    // Lex
+    lex()
+
+    // Parse
+    parse_program()
+
+    // Find main function
+    var main_fn: i64 = -1
+    var fi: i64 = 0
+    while fi < FN_COUNT {
+        let fo = FN_NAME_OFF[fi as usize]
+        let fl = FN_NAME_LEN[fi as usize]
+        if pool_match(fo, fl, "main") {
+            main_fn = fi
+        }
+        fi = fi + 1
+    }
+
+    if main_fn == -1 {
+        print("error: no main function found")
+        return 1
+    }
+
+    // Compile all functions
+    var ci: i64 = 0
+    while ci < FN_COUNT {
+        compile_fn(ci)
+        ci = ci + 1
+    }
+
+    // Patch calls
+    patch_calls(17)
+
+    // Write ELF
+    write_elf(main_fn)
+
+    // Output
+    let wr = write_file(out_path, ELF, ELF_LEN)
+    print("ok")
+    0
+}
