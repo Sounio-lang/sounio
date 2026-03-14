@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Sprint 154: Block BP — AND-complement annihilation x & ~x → 0
+# Sprint 158: Block BT — consecutive add-constant fold (x+C1)+C2 → x+(C1+C2)
 set -eo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." ; pwd)"; cd "$ROOT_DIR"
 PASS=0; FAIL=0; NOT_RUN=0; TOTAL=0
@@ -15,25 +15,25 @@ check_log_line() {
     TOTAL=$((TOTAL+1))
     if [ ! -s "$log" ]; then echo "NOT_RUN  $name (OOM/empty)"; NOT_RUN=$((NOT_RUN+1)); return; fi
     if grep -qF "$expected" "$log"; then echo "PASS  $name"; PASS=$((PASS+1))
-    elif ! grep -qF "T590" "$log" 2>/dev/null; then echo "NOT_RUN  $name (OOM before T590)"; NOT_RUN=$((NOT_RUN+1))
+    elif ! grep -qF "T614" "$log" 2>/dev/null; then echo "NOT_RUN  $name (OOM before T614)"; NOT_RUN=$((NOT_RUN+1))
     else echo "FAIL  $name (expected '$expected')"; FAIL=$((FAIL+1)); fi
 }
-echo "=== Sprint 154: Block BP — AND-complement annihilation ==="
+echo "=== Sprint 158: Block BT — consecutive add-constant fold ==="
 echo "--- Source ---"
 OPT="self-hosted/ir/opt_cleanup.sio"
-check_grep "src:block_bp_comment" "Block BP.*AND.complement|Block BP.*x.*~x" "$OPT"
-check_grep "src:bp_bnot_check"    "is_bnot\[bp_s2 as usize\]|is_bnot\[.*bp_s" "$OPT"
-check_grep "src:bp_base_eq"       "bnot_src\[bp_s2 as usize\] == bp_s1|bnot_src\[.*bp_s" "$OPT"
-check_grep "src:bp_load_zero"     "ir_load_imm.*bp_instr\.dst.*0" "$OPT"
+check_grep "src:block_bt_comment" "Block BT.*[Aa]dd.*const|Block BT.*x.*C1.*C2" "$OPT"
+check_grep "src:bt_valid_check"   "bt_add_valid\[bt_s1 as usize\]|bt.*add_valid" "$OPT"
+check_grep "src:bt_merged"        "bt_c1.*bt_c2|bt_merged.*bt_c" "$OPT"
+check_grep "src:bt_rewrite"       "ir_binop.*bt_instr\.dst.*OpAdd|ir_binop.*bt.*OpAdd" "$OPT"
 echo "--- Tests ---"
 MAIN="self-hosted/compiler/main.sio"
-check_grep "main:T590_fn"  "fn compiler_main_test_bp_and_complement_basic" "$MAIN"
-check_grep "main:T591_fn"  "fn compiler_main_test_bp_and_complement_comm" "$MAIN"
+check_grep "main:T614_fn"  "fn compiler_main_test_bt_add_chain_basic" "$MAIN"
+check_grep "main:T616_fn"  "fn compiler_main_test_bt_add_chain_merged" "$MAIN"
 check_grep "main:total"    "let total: i64 = [0-9]+" "$MAIN"
 echo "--- Self-tests ---"
 LOG="$(mktemp)"
 timeout 180 "$SOUC" run self-hosted/compiler/main.sio -- --self-test > "$LOG" 2>&1 || _ec=$?
-for t in T590 T591 T592 T593 T594 T595; do check_log_line "selftest:$t" "$t OK" "$LOG"; done
+for t in T614 T615 T616 T617 T618 T619; do check_log_line "selftest:$t" "$t OK" "$LOG"; done
 rm -f "$LOG"
 echo "--- Type-check ---"
 TOTAL=$((TOTAL+1))
