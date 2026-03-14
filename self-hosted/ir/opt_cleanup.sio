@@ -2313,6 +2313,27 @@ fn ocp_const_fold(func: IrFunction) -> IrFunction with Mut, Div, Panic {
             }
         }
 
+        // Sprint 165 Block CA: OR-complement AND elimination — (x|C)&(x|~C) → x.
+        // Proof: Boolean distribution (x|A)&(x|B)=x|(A&B); A=C, B=~C → A&B=C&~C=0 → x|0=x.
+        // Handles commutative outer: (x|~C)&(x|C) → x (constants swapped).
+        // Zero new arrays: uses am_or_valid/var_src/const_val (Block AM) + is_const/const_val.
+        // SOTA: LLVM InstCombineAndOrXor and(or X,C),or(X,~C) → X; Boolean distributive.
+        if ocp_is_binop(result.instrs[i as usize].op) {
+            let ca_instr = result.instrs[i as usize]
+            let ca_s1 = ca_instr.src1; let ca_s2 = ca_instr.src2
+            let ca_s1_ok = ca_s1 >= 0 && ca_s1 < 256; let ca_s2_ok = ca_s2 >= 0 && ca_s2 < 256
+            if ca_instr.bin_op == BinaryOp::OpBitAnd {
+                // (x|C)&(x|~C): both or-tracked, same base, constants are complements
+                if ca_s1_ok && am_or_valid[ca_s1 as usize]
+                        && ca_s2_ok && am_or_valid[ca_s2 as usize]
+                        && am_or_var_src[ca_s1 as usize] == am_or_var_src[ca_s2 as usize]
+                        && am_or_const_val[ca_s1 as usize] == (am_or_const_val[ca_s2 as usize] ^ -1) {
+                    let ca_x = am_or_var_src[ca_s1 as usize]
+                    result.instrs[i as usize] = ir_copy(ca_instr.dst, ca_x)
+                }
+            }
+        }
+
                         // Sprint 82 Block J: Unary operation constant folding.
         // Folds IrUnaryOp when the source operand is a known constant.
         // Only OpNeg and OpNot are foldable (Ref/RefMut/Deref are memory ops).
