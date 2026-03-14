@@ -1416,6 +1416,29 @@ fn ocp_const_fold(func: IrFunction) -> IrFunction with Mut, Div, Panic {
             }
         }
 
+        // Sprint 143 Block BE: Two's complement negation — ~x + 1 → neg(x).
+        // Ring identity: ~x = -x - 1, so ~x + 1 = -x. (Two's complement negation.)
+        // SOTA: LLVM InstCombineAddSub.cpp — not(X)+1 → neg(X); Patterson & Hennessy §B.1.
+        // Distinct from Block M (neg arithmetic): identifies bnot+1 as neg, not neg*neg.
+        // Zero new arrays: uses is_bnot/bnot_src (Block AI) + is_const/const_val.
+        if ocp_is_binop(result.instrs[i as usize].op) {
+            let be_instr = result.instrs[i as usize]
+            let be_s1 = be_instr.src1; let be_s2 = be_instr.src2
+            let be_s1_ok = be_s1 >= 0 && be_s1 < 256; let be_s2_ok = be_s2 >= 0 && be_s2 < 256
+            if be_instr.bin_op == BinaryOp::OpAdd {
+                // ~x + 1 → neg(x): s1 is bnot, s2 is const 1
+                if be_s1_ok && is_bnot[be_s1 as usize]
+                        && be_s2_ok && is_const[be_s2 as usize] && const_val[be_s2 as usize] == 1 {
+                    result.instrs[i as usize] = ir_unaryop(be_instr.dst, UnaryOp::OpNeg, bnot_src[be_s1 as usize])
+                }
+                // 1 + ~x → neg(x): s1 is const 1, s2 is bnot
+                if be_s2_ok && is_bnot[be_s2 as usize]
+                        && be_s1_ok && is_const[be_s1 as usize] && const_val[be_s1 as usize] == 1 {
+                    result.instrs[i as usize] = ir_unaryop(be_instr.dst, UnaryOp::OpNeg, bnot_src[be_s2 as usize])
+                }
+            }
+        }
+
                         // Sprint 82 Block J: Unary operation constant folding.
         // Folds IrUnaryOp when the source operand is a known constant.
         // Only OpNeg and OpNot are foldable (Ref/RefMut/Deref are memory ops).
