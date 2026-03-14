@@ -631,6 +631,46 @@ fn make_field_key(var_name: Name, field_name: Name) -> Name {
     result
 }
 
+// Returns the named type of a function's return type (empty name if scalar/void)
+fn fn_return_type_name(prog: &Program, fn_name: Name) -> Name {
+    let items_ref: &Option<Box<ItemList>> = &prog.items
+    var item_cur = items_ref
+    while true {
+        match *item_cur {
+            Some(il) => {
+                let itm: &Item = &(*il).head
+                if itm.kind == ItemKind::ItemFn && ir_name_eq(itm.name, fn_name) {
+                    let fdef_ref: &Option<Box<FnDef>> = &itm.fn_def
+                    match *fdef_ref {
+                        Some(fd) => {
+                            let ret_ref: &Option<Box<TypeExpr>> = &(*fd).return_type
+                            match *ret_ref {
+                                Some(te) => {
+                                    if (*te).kind == TypeExprKind::TypeNamed {
+                                        var type_name: Name = ir_empty_name()
+                                        type_name.len = (*te).path.segments.head_len
+                                        var tni: i64 = 0
+                                        while tni < type_name.len {
+                                            type_name.buf[tni as usize] = (*te).path.segments.head_buf[tni as usize]
+                                            tni = tni + 1
+                                        }
+                                        return type_name
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                item_cur = &(*il).tail
+            }
+            _ => break
+        }
+    }
+    ir_empty_name()
+}
+
 // ============================================================================
 // Builtin name constructors
 // ============================================================================
@@ -1213,6 +1253,42 @@ fn ast_compile_expr(code: CodeBuffer, expr: &Expr,
             }
             _ => {
                 c = emit_byte(c, 0x48); c = emit_byte(c, 0x31); c = emit_byte(c, 0xc0)
+            }
+        }
+        c
+    } else if expr.kind == ExprKind::ExprStructLit {
+        // Sprint 118: two-register struct return: field0→rax, field1→rdx
+        // Phase 1: count fields
+        var esf_nfields: i64 = 0
+        let esf_cnt_ref: &Option<Box<StructFieldList>> = &expr.fields
+        var esf_cnt = esf_cnt_ref
+        while true {
+            match *esf_cnt {
+                Some(sfl) => { esf_nfields = esf_nfields + 1; esf_cnt = &(*sfl).tail }
+                _ => break
+            }
+        }
+        // Phase 2: emit fields
+        let esf_ref: &Option<Box<StructFieldList>> = &expr.fields
+        var esf_cur = esf_ref
+        var esf_idx: i64 = 0
+        while true {
+            match *esf_cur {
+                Some(sfl) => {
+                    let sfi: &StructFieldInit = &(*sfl).head
+                    let esf_val: &Expr = &(*sfi).value
+                    c = ast_compile_expr(c, esf_val, local_names, local_slots, local_count)
+                    if esf_idx == 0 && esf_nfields > 1 {
+                        c = emit_byte(c, 0x50)  // push rax (save field0)
+                    } else if esf_idx == 1 {
+                        // mov rdx, rax: rdx=field1; pop rax: rax=field0
+                        c = emit_byte(c, 0x48); c = emit_byte(c, 0x89); c = emit_byte(c, 0xc2)
+                        c = emit_byte(c, 0x58)  // pop rax
+                    }
+                    esf_cur = &(*sfl).tail
+                    esf_idx = esf_idx + 1
+                }
+                _ => break
             }
         }
         c
@@ -1900,24 +1976,72 @@ fn ast_compile_fn_body(code: CodeBuffer, fd: &FnDef,
                             }
                             last_expr_emitted = false
                         } else {
-                            // Scalar — compile init expression → rax
+                            // Check if init is a call to a struct-returning function (Sprint 118)
+                            var s118_ret_nfields: i64 = 0
+                            var s118_ret_type: Name = ir_empty_name()
                             match *init_ref {
                                 Some(ie) => {
-                                    c = ast_compile_expr(c, &(*ie), local_names, local_slots, local_count)
+                                    if (*ie).kind == ExprKind::ExprCall {
+                                        let s118_callee_opt: &Option<Box<Expr>> = &(*ie).left
+                                        match *s118_callee_opt {
+                                            Some(ce) => {
+                                                s118_ret_type = fn_return_type_name(prog_ref, (*ce).name)
+                                                s118_ret_nfields = struct_field_count(prog_ref, s118_ret_type)
+                                            }
+                                            _ => {}
+                                        }
+                                    }
                                 }
-                                _ => {
-                                    // No init — load 0
-                                    c = emit_byte(c, 0x48); c = emit_byte(c, 0x31); c = emit_byte(c, 0xc0)
-                                }
+                                _ => {}
                             }
-                            // Bind local
-                            let slot = next_slot
-                            next_slot = next_slot + 1
-                            c = micro_store_rax(c, slot)
-                            local_names[local_count as usize] = s.name
-                            local_slots[local_count as usize] = slot
-                            local_count = local_count + 1
-                            last_expr_emitted = false
+                            if s118_ret_nfields > 0 {
+                                // Struct-returning call: rax=field0, rdx=field1
+                                match *init_ref {
+                                    Some(ie) => {
+                                        c = ast_compile_expr(c, &(*ie), local_names, local_slots, local_count)
+                                    }
+                                    _ => {}
+                                }
+                                // Bind s_field0 from rax, s_field1 from rdx, etc.
+                                var s118_fj: i64 = 0
+                                while s118_fj < s118_ret_nfields {
+                                    let s118_fname = struct_field_name_at(prog_ref, s118_ret_type, s118_fj)
+                                    let s118_fkey = make_field_key(s.name, s118_fname)
+                                    let s118_fslot = next_slot
+                                    next_slot = next_slot + 1
+                                    local_names[local_count as usize] = s118_fkey
+                                    local_slots[local_count as usize] = s118_fslot
+                                    local_count = local_count + 1
+                                    if s118_fj == 0 {
+                                        c = micro_store_rax(c, s118_fslot)
+                                    } else if s118_fj == 1 {
+                                        // mov rax, rdx: 48 89 D0 — store rdx into slot via rax
+                                        c = emit_byte(c, 0x48); c = emit_byte(c, 0x89); c = emit_byte(c, 0xd0)
+                                        c = micro_store_rax(c, s118_fslot)
+                                    }
+                                    s118_fj = s118_fj + 1
+                                }
+                                last_expr_emitted = false
+                            } else {
+                                // Scalar — compile init expression → rax
+                                match *init_ref {
+                                    Some(ie) => {
+                                        c = ast_compile_expr(c, &(*ie), local_names, local_slots, local_count)
+                                    }
+                                    _ => {
+                                        // No init — load 0
+                                        c = emit_byte(c, 0x48); c = emit_byte(c, 0x31); c = emit_byte(c, 0xc0)
+                                    }
+                                }
+                                // Bind local
+                                let slot = next_slot
+                                next_slot = next_slot + 1
+                                c = micro_store_rax(c, slot)
+                                local_names[local_count as usize] = s.name
+                                local_slots[local_count as usize] = slot
+                                local_count = local_count + 1
+                                last_expr_emitted = false
+                            }
                         }
                     }
                 } else if s.kind == StmtKind::StmtExpr {
