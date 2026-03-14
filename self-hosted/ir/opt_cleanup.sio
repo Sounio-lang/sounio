@@ -2178,6 +2178,32 @@ fn ocp_const_fold(func: IrFunction) -> IrFunction with Mut, Div, Panic {
             }
         }
 
+        // Sprint 161 Block BW: XOR-mask AND complement — (x ^ C) & ~C → x & ~C.
+        // Proof: C-bits (C_i=1, ~C_i=0): (xi^1)&0=0=xi&0. Non-C-bits: (xi^0)&1=xi=xi&1.
+        // SOTA: LLVM InstCombineAndOrXor and(xor X,C),~C → and X,~C; Boolean algebra.
+        // Zero new arrays: uses bm_xor_valid/src/cval (Block BM) + is_const/const_val.
+        if ocp_is_binop(result.instrs[i as usize].op) {
+            let bw_instr = result.instrs[i as usize]
+            let bw_s1 = bw_instr.src1; let bw_s2 = bw_instr.src2
+            let bw_s1_ok = bw_s1 >= 0 && bw_s1 < 256; let bw_s2_ok = bw_s2 >= 0 && bw_s2 < 256
+            if bw_instr.bin_op == BinaryOp::OpBitAnd {
+                // (x ^ C) & ~C → x & ~C: s1 is xor-const, s2 is bitwise NOT of same C
+                if bw_s1_ok && bm_xor_valid[bw_s1 as usize]
+                        && bw_s2_ok && is_const[bw_s2 as usize]
+                        && const_val[bw_s2 as usize] == (bm_xor_cval[bw_s1 as usize] ^ -1) {
+                    result.instrs[i as usize] = ir_binop(bw_instr.dst,
+                        bm_xor_src[bw_s1 as usize], BinaryOp::OpBitAnd, bw_s2)
+                }
+                // ~C & (x ^ C) → x & ~C: commutative
+                if bw_s2_ok && bm_xor_valid[bw_s2 as usize]
+                        && bw_s1_ok && is_const[bw_s1 as usize]
+                        && const_val[bw_s1 as usize] == (bm_xor_cval[bw_s2 as usize] ^ -1) {
+                    result.instrs[i as usize] = ir_binop(bw_instr.dst,
+                        bm_xor_src[bw_s2 as usize], BinaryOp::OpBitAnd, bw_s1)
+                }
+            }
+        }
+
                         // Sprint 82 Block J: Unary operation constant folding.
         // Folds IrUnaryOp when the source operand is a known constant.
         // Only OpNeg and OpNot are foldable (Ref/RefMut/Deref are memory ops).

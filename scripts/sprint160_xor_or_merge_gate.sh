@@ -53,7 +53,7 @@ check_grep "src:block_bv_comment"   "Block BV.*XOR.OR|Block BV.*x.*C.*OR" "$OPT_
 check_grep "src:bv_xor_valid_check" "bm_xor_valid\[bv_s1 as usize\]" "$OPT_FILE"
 check_grep "src:bv_const_check"     "is_const\[bv_s2 as usize\]" "$OPT_FILE"
 check_grep "src:bv_cval_match"      "bm_xor_cval\[bv_s1 as usize\] == const_val\[bv_s2 as usize\]" "$OPT_FILE"
-check_grep "src:bv_rewrite"         "ir_binop.*bv_instr\.dst.*bm_xor_src" "$OPT_FILE"
+check_grep "src:bv_rewrite"         "bm_xor_src\[bv_s[12] as usize\], BinaryOp::OpBitOr" "$OPT_FILE"
 
 echo ""
 echo "--- Tests ---"
