@@ -12980,9 +12980,76 @@ fn compiler_main_test_cc_no_fold_and_op() -> bool with Mut, Div, Panic {
     opt.instrs[4 as usize].op != IrOpcode::IrCopy
 }
 
+// Sprint 168 Block CD: Zero-minus normalization (T674-T679)
+fn compiler_main_test_cd_zero_minus_basic() -> bool with Mut, Div, Panic {
+    // 0 - r0 → neg(r0): zero-minus fold
+    var instrs: [IrInstr; 128] = cp_empty_instrs()
+    instrs[0 as usize] = ir_load_imm(1, 0)
+    instrs[1 as usize] = ir_binop(2, 1, BinaryOp::OpSub, 0)  // r2 = 0 - r0
+    let func = cp_make_test_func(instrs, 2)
+    let opt = opt_cleanup_function(func)
+    opt.instrs[1 as usize].op == IrOpcode::IrUnaryOp
+        && opt.instrs[1 as usize].un_op == UnaryOp::OpNeg
+        && opt.instrs[1 as usize].src1 == 0
+}
+
+fn compiler_main_test_cd_zero_minus_chain() -> bool with Mut, Div, Panic {
+    // neg(0 - r0) → double-neg elim → r0 (CD normalizes 0-r0 to neg, BJ elims double neg)
+    var instrs: [IrInstr; 128] = cp_empty_instrs()
+    instrs[0 as usize] = ir_load_imm(1, 0)
+    instrs[1 as usize] = ir_binop(2, 1, BinaryOp::OpSub, 0)  // r2 = 0 - r0 → neg(r0)
+    instrs[2 as usize] = ir_unaryop(3, UnaryOp::OpNeg, 2)    // r3 = neg(r2) → IrCopy(r0)
+    let func = cp_make_test_func(instrs, 3)
+    let opt = opt_cleanup_function(func)
+    opt.instrs[2 as usize].op == IrOpcode::IrCopy
+        && opt.instrs[2 as usize].src1 == 0
+}
+
+fn compiler_main_test_cd_zero_minus_val() -> bool with Mut, Div, Panic {
+    // 0 - r1 → neg(r1): fold on non-r0 register
+    var instrs: [IrInstr; 128] = cp_empty_instrs()
+    instrs[0 as usize] = ir_load_imm(1, 7)
+    instrs[1 as usize] = ir_load_imm(2, 0)
+    instrs[2 as usize] = ir_binop(3, 2, BinaryOp::OpSub, 1)  // r3 = 0 - r1 (r1=7)
+    let func = cp_make_test_func(instrs, 3)
+    let opt = opt_cleanup_function(func)
+    opt.instrs[2 as usize].op == IrOpcode::IrUnaryOp
+        && opt.instrs[2 as usize].un_op == UnaryOp::OpNeg
+}
+
+fn compiler_main_test_cd_no_fold_nonzero() -> bool with Mut, Div, Panic {
+    // 5 - r0 → no fold (non-zero constant)
+    var instrs: [IrInstr; 128] = cp_empty_instrs()
+    instrs[0 as usize] = ir_load_imm(1, 5)
+    instrs[1 as usize] = ir_binop(2, 1, BinaryOp::OpSub, 0)  // r2 = 5 - r0
+    let func = cp_make_test_func(instrs, 2)
+    let opt = opt_cleanup_function(func)
+    opt.instrs[1 as usize].op != IrOpcode::IrUnaryOp
+}
+
+fn compiler_main_test_cd_no_fold_rr_sub() -> bool with Mut, Div, Panic {
+    // r0 - r1 → no fold (no constant operand)
+    var instrs: [IrInstr; 128] = cp_empty_instrs()
+    instrs[0 as usize] = ir_binop(2, 0, BinaryOp::OpSub, 1)  // r2 = r0 - r1
+    let func = cp_make_test_func(instrs, 2)
+    let opt = opt_cleanup_function(func)
+    opt.instrs[0 as usize].op != IrOpcode::IrUnaryOp
+}
+
+fn compiler_main_test_cd_no_fold_sub_zero() -> bool with Mut, Div, Panic {
+    // r0 - 0 → IrCopy(r0) by const-identity (Block B/x-0), not CD
+    var instrs: [IrInstr; 128] = cp_empty_instrs()
+    instrs[0 as usize] = ir_load_imm(1, 0)
+    instrs[1 as usize] = ir_binop(2, 0, BinaryOp::OpSub, 1)  // r2 = r0 - 0
+    let func = cp_make_test_func(instrs, 2)
+    let opt = opt_cleanup_function(func)
+    // x-0 → IrCopy by const-identity (Sprint 67), not IrUnaryOp
+    opt.instrs[1 as usize].op == IrOpcode::IrCopy
+}
+
 fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
     var passed: i64 = 0
-    let total: i64 = 673
+    let total: i64 = 679
 
     println("=== compiler/main.sio self-tests ===")
 
@@ -16716,6 +16783,32 @@ fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
         passed = passed + 1
         println("  T673 OK: Sprint 167 Block CC: AND outer no fold")
     } else { println("  FAIL: T673") }
+
+    // Sprint 168 Block CD: Zero-minus normalization (T674-T679)
+    if compiler_main_test_cd_zero_minus_basic() {
+        passed = passed + 1
+        println("  T674 OK: Sprint 168 Block CD: 0-r0 → neg(r0)")
+    } else { println("  FAIL: T674") }
+    if compiler_main_test_cd_zero_minus_chain() {
+        passed = passed + 1
+        println("  T675 OK: Sprint 168 Block CD: neg(0-r0) → r0 via double-neg")
+    } else { println("  FAIL: T675") }
+    if compiler_main_test_cd_zero_minus_val() {
+        passed = passed + 1
+        println("  T676 OK: Sprint 168 Block CD: 0-r1 → neg(r1)")
+    } else { println("  FAIL: T676") }
+    if compiler_main_test_cd_no_fold_nonzero() {
+        passed = passed + 1
+        println("  T677 OK: Sprint 168 Block CD: 5-r0 no fold")
+    } else { println("  FAIL: T677") }
+    if compiler_main_test_cd_no_fold_rr_sub() {
+        passed = passed + 1
+        println("  T678 OK: Sprint 168 Block CD: r0-r1 no fold")
+    } else { println("  FAIL: T678") }
+    if compiler_main_test_cd_no_fold_sub_zero() {
+        passed = passed + 1
+        println("  T679 OK: Sprint 168 Block CD: r0-0 → IrCopy not neg")
+    } else { println("  FAIL: T679") }
 
     println("")
     println("compiler/main tests: " + int_to_string(passed) + "/" + int_to_string(total) + " passed")
