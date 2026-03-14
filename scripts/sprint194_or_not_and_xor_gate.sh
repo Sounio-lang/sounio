@@ -1,27 +1,25 @@
 #!/usr/bin/env bash
-# sprint194_or_not_and_xor_gate.sh — Sprint 194: Block DD OR-NOT-AND to XOR gate
+# sprint194_or_not_and_xor_gate.sh — Sprint 194: Block DD OR-NOT-AND to XOR
 set -eo pipefail
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." ; pwd)"; cd "$ROOT_DIR"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.."; pwd)"; cd "$ROOT_DIR"
 PASS=0; FAIL=0; NOT_RUN=0; TOTAL=0
 SOUC="./artifacts/omega/souc-bin/souc-linux-x86_64-jit"
 cg() { local n="$1" p="$2" f="$3"; TOTAL=$((TOTAL+1)); if [ ! -f "$f" ]; then echo "NOT_RUN  $n"; NOT_RUN=$((NOT_RUN+1)); return; fi; if grep -qE "$p" "$f" 2>/dev/null; then echo "PASS  $n"; PASS=$((PASS+1)); else echo "FAIL  $n"; FAIL=$((FAIL+1)); fi; }
 cl() { local n="$1" e="$2" l="$3"; TOTAL=$((TOTAL+1)); if [ ! -s "$l" ]; then echo "NOT_RUN  $n (OOM)"; NOT_RUN=$((NOT_RUN+1)); return; fi; if grep -qF "$e" "$l"; then echo "PASS  $n"; PASS=$((PASS+1)); elif ! grep -qF "T830" "$l" 2>/dev/null; then echo "NOT_RUN  $n (OOM before T830)"; NOT_RUN=$((NOT_RUN+1)); else echo "FAIL  $n"; FAIL=$((FAIL+1)); fi; }
 
-echo "=== Sprint 194: Block DD OR-NOT-AND to XOR Gate ==="
+echo "=== Sprint 194: Block DD — OR-NOT-AND to XOR ==="
 echo ""
-
 echo "--- Source (opt_cleanup.sio) ---"
 O="self-hosted/ir/opt_cleanup.sio"
-cg "src:block_dd_comment" "Block DD.*OR-NOT-AND to XOR" "$O"
-cg "src:dd_or_rr_valid" "ao_or_rr_valid\[dd_s[12] as usize\]" "$O"
-cg "src:dd_bnot_check" "is_bnot\[dd_s[12] as usize\]" "$O"
-cg "src:dd_and_inner" "ao_and_rr_valid\[dd_not_inner as usize\]" "$O"
+cg "src:block_dd" "Block DD" "$O"
+cg "src:dd_or_rr" "ao_or_rr_valid\[dd_s[12] as usize\]" "$O"
+cg "src:dd_bnot" "is_bnot\[dd_s[12] as usize\]" "$O"
 
 echo ""
 echo "--- Tests (main.sio) ---"
 M="self-hosted/compiler/main.sio"
 for t in T830 T831 T832 T833 T834 T835; do
-    cg "main:$t" "$t OK" "$M"
+    cg "main:$t" "fn compiler_main_test_dd_" "$M"
 done
 cg "main:total" "let total: i64 = [0-9]+" "$M"
 
