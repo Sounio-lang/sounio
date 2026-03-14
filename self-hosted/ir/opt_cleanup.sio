@@ -289,6 +289,16 @@ fn ocp_const_fold(func: IrFunction) -> IrFunction with Mut, Div, Panic {
     var as_xor_rr_valid: [bool; 256] = [false; 256]
     var as_xor_rr_lhs:   [i64;  256] = [-1;    256]
     var as_xor_rr_rhs:   [i64;  256] = [-1;    256]
+    // Sprint 149 Block BK: Consecutive same-direction shift folding.
+    // (x << A) << B → x << (A+B), (x >> A) >> B → x >> (A+B).
+    // Track when a register is the result of a shift by a known constant.
+    // SOTA: LLVM InstCombineShifts.cpp FoldShiftByConstant; Cooper & Torczon §8.1.
+    var bk_shl_valid: [bool; 256] = [false; 256]
+    var bk_shl_src:   [i64;  256] = [-1;    256]
+    var bk_shl_amt:   [i64;  256] = [0;     256]
+    var bk_shr_valid: [bool; 256] = [false; 256]
+    var bk_shr_src:   [i64;  256] = [-1;    256]
+    var bk_shr_amt:   [i64;  256] = [0;     256]
 
     var i: i64 = 0
     while i < result.instr_count {
@@ -1580,6 +1590,91 @@ fn ocp_const_fold(func: IrFunction) -> IrFunction with Mut, Div, Panic {
             }
         }
 
+        // Sprint 149 Block BK: Consecutive same-direction shift fold.
+        // (x << A) << B → x << (A+B)   when A+B < 64.
+        // (x >> A) >> B → x >> (A+B)   when A+B < 64.
+        // Tracks shifts-by-constant in bk_shl_valid/bk_shr_valid arrays.
+        // SOTA: LLVM InstCombineShifts.cpp FoldShiftByConstant; Cooper & Torczon §8.1.
+        if ocp_is_binop(result.instrs[i as usize].op) {
+            let bk_instr = result.instrs[i as usize]
+            let bk_s1 = bk_instr.src1; let bk_s2 = bk_instr.src2
+            let bk_s1_ok = bk_s1 >= 0 && bk_s1 < 256; let bk_s2_ok = bk_s2 >= 0 && bk_s2 < 256
+            if bk_instr.bin_op == BinaryOp::OpShl {
+                // (x << A) << B → x << (A+B)
+                if bk_s1_ok && bk_shl_valid[bk_s1 as usize]
+                        && bk_s2_ok && is_const[bk_s2 as usize] {
+                    let bk_a = bk_shl_amt[bk_s1 as usize]
+                    let bk_b = const_val[bk_s2 as usize]
+                    let bk_ab = bk_a + bk_b
+                    if bk_ab >= 0 && bk_ab < 64 {
+                        let bk_new_amt_reg = bk_instr.src2
+                        result.instrs[i as usize] = ir_binop(bk_instr.dst,
+                            bk_shl_src[bk_s1 as usize], BinaryOp::OpShl, bk_new_amt_reg)
+                        // Update the constant register to hold A+B
+                        // (we reuse bk_new_amt_reg but its const_val must reflect A+B)
+                        // Instead: emit via const_val override on a fresh load
+                        // Approach: load the combined amount into dst first via IrLoadImm on s2 slot
+                        // Since we can't emit new instrs, we fold the shift amount into the existing
+                        // load-imm instr at def_at[bk_s2] if it's in this function.
+                        // Simpler: just patch s2's const to A+B directly and update const_val.
+                        if bk_s2_ok && def_at[bk_s2 as usize] >= 0 {
+                            let def_idx = def_at[bk_s2 as usize] as usize
+                            result.instrs[def_idx] = ir_load_imm(bk_s2, bk_ab)
+                            const_val[bk_s2 as usize] = bk_ab
+                        }
+                        if bk_instr.dst >= 0 && bk_instr.dst < 256 {
+                            bk_shl_valid[bk_instr.dst as usize] = true
+                            bk_shl_src[bk_instr.dst as usize]   = bk_shl_src[bk_s1 as usize]
+                            bk_shl_amt[bk_instr.dst as usize]   = bk_ab
+                        }
+                    }
+                }
+            }
+            if bk_instr.bin_op == BinaryOp::OpShr {
+                // (x >> A) >> B → x >> (A+B)
+                if bk_s1_ok && bk_shr_valid[bk_s1 as usize]
+                        && bk_s2_ok && is_const[bk_s2 as usize] {
+                    let bk_a = bk_shr_amt[bk_s1 as usize]
+                    let bk_b = const_val[bk_s2 as usize]
+                    let bk_ab = bk_a + bk_b
+                    if bk_ab >= 0 && bk_ab < 64 {
+                        result.instrs[i as usize] = ir_binop(bk_instr.dst,
+                            bk_shr_src[bk_s1 as usize], BinaryOp::OpShr, bk_instr.src2)
+                        if bk_s2_ok && def_at[bk_s2 as usize] >= 0 {
+                            let def_idx = def_at[bk_s2 as usize] as usize
+                            result.instrs[def_idx] = ir_load_imm(bk_s2, bk_ab)
+                            const_val[bk_s2 as usize] = bk_ab
+                        }
+                        if bk_instr.dst >= 0 && bk_instr.dst < 256 {
+                            bk_shr_valid[bk_instr.dst as usize] = true
+                            bk_shr_src[bk_instr.dst as usize]   = bk_shr_src[bk_s1 as usize]
+                            bk_shr_amt[bk_instr.dst as usize]   = bk_ab
+                        }
+                    }
+                }
+            }
+        }
+        // Sprint 149 Block BK: Shift tracking — populate bk_shl/bk_shr arrays.
+        if ocp_is_binop(result.instrs[i as usize].op) {
+            let bk_t = result.instrs[i as usize]
+            let bk_ts1 = bk_t.src1; let bk_ts2 = bk_t.src2
+            let bk_ts2_ok = bk_ts2 >= 0 && bk_ts2 < 256
+            if bk_t.bin_op == BinaryOp::OpShl && bk_ts2_ok && is_const[bk_ts2 as usize] {
+                if bk_t.dst >= 0 && bk_t.dst < 256 {
+                    bk_shl_valid[bk_t.dst as usize] = true
+                    bk_shl_src[bk_t.dst as usize]   = bk_ts1
+                    bk_shl_amt[bk_t.dst as usize]   = const_val[bk_ts2 as usize]
+                }
+            }
+            if bk_t.bin_op == BinaryOp::OpShr && bk_ts2_ok && is_const[bk_ts2 as usize] {
+                if bk_t.dst >= 0 && bk_t.dst < 256 {
+                    bk_shr_valid[bk_t.dst as usize] = true
+                    bk_shr_src[bk_t.dst as usize]   = bk_ts1
+                    bk_shr_amt[bk_t.dst as usize]   = const_val[bk_ts2 as usize]
+                }
+            }
+        }
+
                         // Sprint 82 Block J: Unary operation constant folding.
         // Folds IrUnaryOp when the source operand is a known constant.
         // Only OpNeg and OpNot are foldable (Ref/RefMut/Deref are memory ops).
@@ -1608,6 +1703,20 @@ fn ocp_const_fold(func: IrFunction) -> IrFunction with Mut, Div, Panic {
                     def_at[instr.dst as usize] = i
                 }
             }
+            // Sprint 148 Block BJ: Double NOT cancel — ~(~x) → IrCopy(x).
+            // If src is itself a NOT (is_bnot), the two NOTs cancel: ~~x = x.
+            // Zero new arrays: reuses is_bnot/bnot_src from Block AI (Sprint 120) and Sprint 144.
+            // SOTA: LLVM InstCombineAndOrXor; Boolean double negation law; Hacker's Delight §2-2.
+            if us_ok && instr.un_op == UnaryOp::OpNot && is_bnot[us as usize] {
+                let bj_inner = bnot_src[us as usize]
+                result.instrs[i as usize] = ir_copy(instr.dst, bj_inner)
+                if instr.dst >= 0 && instr.dst < 256 {
+                    if bj_inner >= 0 && bj_inner < 256 && is_const[bj_inner as usize] {
+                        is_const[instr.dst as usize] = true
+                        const_val[instr.dst as usize] = const_val[bj_inner as usize]
+                    }
+                }
+            }
         }
 
         // Sprint 86 Block M: Negation tracking — populate.
@@ -1622,7 +1731,9 @@ fn ocp_const_fold(func: IrFunction) -> IrFunction with Mut, Div, Panic {
         // Sprint 144 Block BF: Track IrUnaryOp(OpNot) as bitwise NOT.
         // Extends is_bnot (Block AI, XOR-1 form) to the explicit OpNot opcode.
         // Allows Block BF (x + ~x → -1) and Block AR/AT to see explicit NOT instructions.
-        if instr.op == IrOpcode::IrUnaryOp && instr.un_op == UnaryOp::OpNot {
+        // Guard: check result (not snapshot) so Block BJ rewrites don't create stale entries.
+        if result.instrs[i as usize].op == IrOpcode::IrUnaryOp
+                && instr.un_op == UnaryOp::OpNot {
             if instr.dst >= 0 && instr.dst < 256 {
                 is_bnot[instr.dst as usize]  = true
                 bnot_src[instr.dst as usize] = instr.src1
