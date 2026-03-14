@@ -2085,6 +2085,62 @@ fn ocp_const_fold(func: IrFunction) -> IrFunction with Mut, Div, Panic {
             }
         }
 
+        // Sprint 159 Block BU: Add/sub-const cross-track difference collapse.
+        // (x+C1)-(x-C2) → C1+C2  ;  (x-C1)-(x+C2) → -(C1+C2).
+        // (x-C1)-(x-C2) → C2-C1  ;  (x+C1)-(x+C2) → C1-C2 (chained variant).
+        // Extends Block BD (as_valid): fires on chain-folded exprs tracked by bs/bt
+        // arrays but not by as_valid (which uses snapshot, not post-fold state).
+        // SOTA: LLVM InstCombineAddSub.cpp sub(add X,C1),(sub X,C2)→C1+C2 chain;
+        // Cooper & Torczon §8.4 — tracked known-constant arithmetic.
+        // Zero new arrays: uses bs_sub_valid/src/cval (Block BS) + bt_add_valid/src/cval (Block BT).
+        if ocp_is_binop(result.instrs[i as usize].op) {
+            let bu_instr = result.instrs[i as usize]
+            let bu_s1 = bu_instr.src1; let bu_s2 = bu_instr.src2
+            let bu_s1_ok = bu_s1 >= 0 && bu_s1 < 256; let bu_s2_ok = bu_s2 >= 0 && bu_s2 < 256
+            if bu_instr.bin_op == BinaryOp::OpSub && bu_s1_ok && bu_s2_ok {
+                // (x+C1) - (x-C2) → C1+C2
+                if bt_add_valid[bu_s1 as usize] && bs_sub_valid[bu_s2 as usize]
+                        && bt_add_src[bu_s1 as usize] == bs_sub_src[bu_s2 as usize] {
+                    let bu_result = bt_add_cval[bu_s1 as usize] + bs_sub_cval[bu_s2 as usize]
+                    result.instrs[i as usize] = ir_load_imm(bu_instr.dst, bu_result)
+                    if bu_instr.dst >= 0 && bu_instr.dst < 256 {
+                        is_const[bu_instr.dst as usize] = true
+                        const_val[bu_instr.dst as usize] = bu_result
+                    }
+                }
+                // (x-C1) - (x+C2) → -(C1+C2)
+                if bs_sub_valid[bu_s1 as usize] && bt_add_valid[bu_s2 as usize]
+                        && bs_sub_src[bu_s1 as usize] == bt_add_src[bu_s2 as usize] {
+                    let bu_result = 0 - (bs_sub_cval[bu_s1 as usize] + bt_add_cval[bu_s2 as usize])
+                    result.instrs[i as usize] = ir_load_imm(bu_instr.dst, bu_result)
+                    if bu_instr.dst >= 0 && bu_instr.dst < 256 {
+                        is_const[bu_instr.dst as usize] = true
+                        const_val[bu_instr.dst as usize] = bu_result
+                    }
+                }
+                // (x-C1) - (x-C2) → C2-C1 (both bs_sub, same base)
+                if bs_sub_valid[bu_s1 as usize] && bs_sub_valid[bu_s2 as usize]
+                        && bs_sub_src[bu_s1 as usize] == bs_sub_src[bu_s2 as usize] {
+                    let bu_result = bs_sub_cval[bu_s2 as usize] - bs_sub_cval[bu_s1 as usize]
+                    result.instrs[i as usize] = ir_load_imm(bu_instr.dst, bu_result)
+                    if bu_instr.dst >= 0 && bu_instr.dst < 256 {
+                        is_const[bu_instr.dst as usize] = true
+                        const_val[bu_instr.dst as usize] = bu_result
+                    }
+                }
+                // (x+C1) - (x+C2) → C1-C2 (both bt_add, same base)
+                if bt_add_valid[bu_s1 as usize] && bt_add_valid[bu_s2 as usize]
+                        && bt_add_src[bu_s1 as usize] == bt_add_src[bu_s2 as usize] {
+                    let bu_result = bt_add_cval[bu_s1 as usize] - bt_add_cval[bu_s2 as usize]
+                    result.instrs[i as usize] = ir_load_imm(bu_instr.dst, bu_result)
+                    if bu_instr.dst >= 0 && bu_instr.dst < 256 {
+                        is_const[bu_instr.dst as usize] = true
+                        const_val[bu_instr.dst as usize] = bu_result
+                    }
+                }
+            }
+        }
+
                         // Sprint 82 Block J: Unary operation constant folding.
         // Folds IrUnaryOp when the source operand is a known constant.
         // Only OpNeg and OpNot are foldable (Ref/RefMut/Deref are memory ops).
