@@ -133,7 +133,7 @@ fn parse_i64_decimal(raw: string) -> (bool, i64) with Mut, Div {
 }
 
 // Extract IEEE 754 bit pattern from f64 (runs at compile time in JIT)
-fn f64_bits(v: f64) -> i64 with Div {
+fn f64_bits(v: f64) -> i64 with Mut, Panic, Div {
     if v == 0.0 { return 0 }
     var sign: i64 = 0
     var abs_v = v
@@ -857,6 +857,204 @@ fn ast_emit_inline_print_str(code: CodeBuffer, str_buf: [i8; 128], str_len: i64)
 }
 
 // ============================================================================
+// Struct registry context for AST-direct compiler
+// ============================================================================
+
+struct AstCompileCtx {
+    struct_count: i64,
+    struct_names: [Name; 16],
+    struct_flat_size: [i64; 16],
+    struct_field_count: [i64; 16],
+    struct_field_base: [i64; 16],
+    sf_names: [Name; 128],
+    sf_flat_offset: [i64; 128],
+    sf_type: [i64; 128],       // 0=i64, 1=f64, 10+=struct_idx+10
+    sf_flat_size: [i64; 128],  // 1 for scalars, N for sub-structs
+    fn_return_types: [i64; 64],
+    fn_names: [Name; 64],
+    fn_count: i64,
+}
+
+fn code_get_ns(c: CodeBuffer) -> i64 with Mut, Panic {
+    let b0 = (c.bytes[65530 as usize] as i64) & 0xFF
+    let b1 = (c.bytes[65531 as usize] as i64) & 0xFF
+    b0 | (b1 << 8)
+}
+
+fn code_set_ns(c: CodeBuffer, ns: i64) -> CodeBuffer with Mut, Panic {
+    var r = c
+    r.bytes[65530 as usize] = (ns & 0xFF) as i8
+    r.bytes[65531 as usize] = ((ns >> 8) & 0xFF) as i8
+    r
+}
+
+fn micro_lea_rax_slot(code: CodeBuffer, slot: i64) -> CodeBuffer with Mut, Panic, Div {
+    // lea rax, [rbp - 8*(slot+1)]
+    var c = code
+    let disp = 0 - ((slot + 1) * 8)
+    c = emit_byte(c, 0x48)
+    c = emit_byte(c, 0x8d)
+    c = emit_byte(c, 0x85)
+    c = emit_byte(c, disp & 0xFF)
+    c = emit_byte(c, (disp >> 8) & 0xFF)
+    c = emit_byte(c, (disp >> 16) & 0xFF)
+    c = emit_byte(c, (disp >> 24) & 0xFF)
+    c
+}
+
+fn ast_lookup_struct(ctx: &AstCompileCtx, name: Name) -> i64 with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < ctx.struct_count {
+        if ir_name_eq(ctx.struct_names[i as usize], name) { return i }
+        i = i + 1
+    }
+    -1
+}
+
+fn ast_struct_field_info(ctx: &AstCompileCtx, struct_idx: i64, field_name: Name) -> i64 with Mut, Panic, Div {
+    let base = ctx.struct_field_base[struct_idx as usize]
+    let count = ctx.struct_field_count[struct_idx as usize]
+    var i: i64 = 0
+    while i < count {
+        if ir_name_eq(ctx.sf_names[(base + i) as usize], field_name) {
+            return base + i
+        }
+        i = i + 1
+    }
+    -1
+}
+
+fn ast_name_from_path(path: &AstPath) -> Name with Mut, Panic, Div {
+    let seg: &StringList = &path.segments
+    var nm = ir_empty_name()
+    var j: i64 = 0
+    while j < seg.head_len && j < 128 {
+        nm.buf[j as usize] = seg.head_buf[j as usize]
+        j = j + 1
+    }
+    nm.len = seg.head_len
+    nm
+}
+
+fn ast_emit_mmap(code: CodeBuffer, size_bytes: i64) -> CodeBuffer with Mut, Panic, Div {
+    var c = code
+    // mov rax, 9 (sys_mmap)
+    c = emit_byte(c, 0x48); c = emit_byte(c, 0xc7); c = emit_byte(c, 0xc0)
+    c = emit_byte(c, 0x09); c = emit_byte(c, 0x00); c = emit_byte(c, 0x00); c = emit_byte(c, 0x00)
+    // xor rdi, rdi
+    c = emit_byte(c, 0x48); c = emit_byte(c, 0x31); c = emit_byte(c, 0xff)
+    // mov rsi, size_bytes (imm64)
+    c = emit_byte(c, 0x48); c = emit_byte(c, 0xbe)
+    c = emit_byte(c, size_bytes & 0xFF)
+    c = emit_byte(c, (size_bytes >> 8) & 0xFF)
+    c = emit_byte(c, (size_bytes >> 16) & 0xFF)
+    c = emit_byte(c, (size_bytes >> 24) & 0xFF)
+    c = emit_byte(c, (size_bytes >> 32) & 0xFF)
+    c = emit_byte(c, (size_bytes >> 40) & 0xFF)
+    c = emit_byte(c, (size_bytes >> 48) & 0xFF)
+    c = emit_byte(c, (size_bytes >> 56) & 0xFF)
+    // mov rdx, 3 (PROT_READ|PROT_WRITE)
+    c = emit_byte(c, 0x48); c = emit_byte(c, 0xc7); c = emit_byte(c, 0xc2)
+    c = emit_byte(c, 0x03); c = emit_byte(c, 0x00); c = emit_byte(c, 0x00); c = emit_byte(c, 0x00)
+    // mov r10, 0x22 (MAP_PRIVATE|MAP_ANONYMOUS)
+    c = emit_byte(c, 0x49); c = emit_byte(c, 0xc7); c = emit_byte(c, 0xc2)
+    c = emit_byte(c, 0x22); c = emit_byte(c, 0x00); c = emit_byte(c, 0x00); c = emit_byte(c, 0x00)
+    // mov r8, -1
+    c = emit_byte(c, 0x49); c = emit_byte(c, 0xc7); c = emit_byte(c, 0xc0)
+    c = emit_byte(c, 0xff); c = emit_byte(c, 0xff); c = emit_byte(c, 0xff); c = emit_byte(c, 0xff)
+    // xor r9, r9
+    c = emit_byte(c, 0x4d); c = emit_byte(c, 0x31); c = emit_byte(c, 0xc9)
+    // syscall
+    c = emit_byte(c, 0x0f); c = emit_byte(c, 0x05)
+    c
+}
+
+// Determine result type: 0=i64, 1=f64, 10+=struct-on-stack, 100+=struct-pointer
+fn ast_expr_result_type(expr: &Expr, local_names: [Name; 64], local_types: [i64; 64], local_count: i64, ctx: &AstCompileCtx) -> i64 with Mut, Panic, Div {
+    if expr.kind == ExprKind::ExprFloatLit { return 1 }
+    if expr.kind == ExprKind::ExprIntLit || expr.kind == ExprKind::ExprBoolTrue || expr.kind == ExprKind::ExprBoolFalse { return 0 }
+    if expr.kind == ExprKind::ExprIdent {
+        var li = local_count - 1
+        while li >= 0 {
+            if ir_name_eq(local_names[li as usize], expr.name) {
+                return local_types[li as usize]
+            }
+            li = li - 1
+        }
+        return 0
+    }
+    if expr.kind == ExprKind::ExprCall {
+        let co: &Option<Box<Expr>> = &expr.left
+        match *co {
+            Some(ce) => {
+                var li = local_count - 1
+                while li >= 0 {
+                    if ir_name_eq(local_names[li as usize], (*ce).name) {
+                        return local_types[li as usize]
+                    }
+                    li = li - 1
+                }
+            }
+            _ => {}
+        }
+        return 0
+    }
+    if expr.kind == ExprKind::ExprStructLit {
+        let sn = ast_name_from_path(&expr.path)
+        let si = ast_lookup_struct(ctx, sn)
+        if si >= 0 { return si + 10 }
+        return 0
+    }
+    if expr.kind == ExprKind::ExprFieldAccess {
+        let br: &Option<Box<Expr>> = &expr.left
+        match *br {
+            Some(be) => {
+                let bt = ast_expr_result_type(&(*be), local_names, local_types, local_count, ctx)
+                var si: i64 = -1
+                if bt >= 100 { si = bt - 100 }
+                else if bt >= 10 { si = bt - 10 }
+                if si >= 0 {
+                    let fi = ast_struct_field_info(ctx, si, expr.name)
+                    if fi >= 0 { return ctx.sf_type[fi as usize] }
+                }
+            }
+            _ => {}
+        }
+        return 0
+    }
+    if expr.kind == ExprKind::ExprCast {
+        let sr: &Option<Box<Expr>> = &expr.left
+        match *sr {
+            Some(se) => {
+                let st = ast_expr_result_type(&(*se), local_names, local_types, local_count, ctx)
+                if st == 1 { return 0 }
+                return 1
+            }
+            _ => {}
+        }
+        return 0
+    }
+    if expr.kind == ExprKind::ExprBinary {
+        let lr: &Option<Box<Expr>> = &expr.left
+        match *lr {
+            Some(le) => {
+                let lt = ast_expr_result_type(&(*le), local_names, local_types, local_count, ctx)
+                if lt == 1 {
+                    if expr.bin_op == BinaryOp::OpAdd || expr.bin_op == BinaryOp::OpSub ||
+                       expr.bin_op == BinaryOp::OpMul || expr.bin_op == BinaryOp::OpDiv {
+                        return 1
+                    }
+                    return 0
+                }
+            }
+            _ => {}
+        }
+        return 0
+    }
+    0
+}
+
+// ============================================================================
 // Direct AST to x86-64 compiler (bypasses IR lowering entirely)
 // Uses inline arrays for locals (no Box) to avoid JIT by-value corruption.
 // ============================================================================
@@ -875,7 +1073,7 @@ fn ast_type_is_f64(ty: &TypeExpr) -> bool with Mut, Panic {
 }
 
 // Helper: determine if an expression produces an f64 value
-fn ast_expr_is_float(expr: &Expr, local_names: [Name; 64], local_types: [i64; 64], local_count: i64) -> bool with Mut, Panic, Div {
+fn ast_expr_is_float(expr: &Expr, local_names: [Name; 64], local_types: [i64; 64], local_count: i64, ctx: &AstCompileCtx) -> bool with Mut, Panic, Div {
     if expr.kind == ExprKind::ExprFloatLit { return true }
     if expr.kind == ExprKind::ExprIdent {
         var li = local_count - 1
@@ -890,7 +1088,7 @@ fn ast_expr_is_float(expr: &Expr, local_names: [Name; 64], local_types: [i64; 64
     if expr.kind == ExprKind::ExprBinary {
         let left_ref: &Option<Box<Expr>> = &expr.left
         match *left_ref {
-            Some(le) => { return ast_expr_is_float(&(*le), local_names, local_types, local_count) }
+            Some(le) => { return ast_expr_is_float(&(*le), local_names, local_types, local_count, ctx) }
             _ => { return false }
         }
     }
@@ -898,11 +1096,31 @@ fn ast_expr_is_float(expr: &Expr, local_names: [Name; 64], local_types: [i64; 64
         let sub_ref: &Option<Box<Expr>> = &expr.left
         match *sub_ref {
             Some(se) => {
-                let src_float = ast_expr_is_float(&(*se), local_names, local_types, local_count)
+                let src_float = ast_expr_is_float(&(*se), local_names, local_types, local_count, ctx)
                 return !src_float
             }
             _ => { return false }
         }
+    }
+    // ExprFieldAccess: check if the accessed field is f64
+    if expr.kind == ExprKind::ExprFieldAccess {
+        let fb_ref: &Option<Box<Expr>> = &expr.left
+        match *fb_ref {
+            Some(fbe) => {
+                let bt = ast_expr_result_type(&(*fbe), local_names, local_types, local_count, ctx)
+                var si: i64 = -1
+                if bt >= 100 { si = bt - 100 }
+                else if bt >= 10 { si = bt - 10 }
+                if si >= 0 {
+                    let fi = ast_struct_field_info(ctx, si, expr.name)
+                    if fi >= 0 {
+                        return ctx.sf_type[fi as usize] == 1
+                    }
+                }
+            }
+            _ => {}
+        }
+        return false
     }
     // ExprCall: look up callee name, check its return type from local_types
     if expr.kind == ExprKind::ExprCall {
@@ -925,7 +1143,8 @@ fn ast_expr_is_float(expr: &Expr, local_names: [Name; 64], local_types: [i64; 64
 }
 
 fn ast_compile_expr(code: CodeBuffer, expr: &Expr,
-    local_names: [Name; 64], local_slots: [i64; 64], local_types: [i64; 64], local_count: i64
+    local_names: [Name; 64], local_slots: [i64; 64], local_types: [i64; 64], local_count: i64,
+    ctx: &AstCompileCtx
 ) -> CodeBuffer with Mut, Panic, Div, IO {
     var c = code
     if expr.kind == ExprKind::ExprIntLit {
@@ -970,8 +1189,8 @@ fn ast_compile_expr(code: CodeBuffer, expr: &Expr,
         let sub_ref: &Option<Box<Expr>> = &expr.left
         match *sub_ref {
             Some(se) => {
-                c = ast_compile_expr(c, &(*se), local_names, local_slots, local_types, local_count)
-                let src_is_float = ast_expr_is_float(&(*se), local_names, local_types, local_count)
+                c = ast_compile_expr(c, &(*se), local_names, local_slots, local_types, local_count, ctx)
+                let src_is_float = ast_expr_is_float(&(*se), local_names, local_types, local_count, ctx)
                 if src_is_float {
                     // f64→i64: MOVQ xmm0, rax then CVTTSD2SI rax, xmm0
                     // MOVQ xmm0, rax: 66 48 0F 6E C0
@@ -995,26 +1214,149 @@ fn ast_compile_expr(code: CodeBuffer, expr: &Expr,
         c
     } else if expr.kind == ExprKind::ExprIdent {
         var slot: i64 = -1
+        var ltype: i64 = 0
         var li = local_count - 1
         while li >= 0 {
             if ir_name_eq(local_names[li as usize], expr.name) {
                 slot = local_slots[li as usize]
+                ltype = local_types[li as usize]
                 li = -1
             } else {
                 li = li - 1
             }
         }
         if slot >= 0 {
-            c = micro_load_rax(c, slot)
+            if ltype >= 10 && ltype < 100 {
+                // Struct on stack — return address via LEA
+                c = micro_lea_rax_slot(c, slot)
+            } else {
+                c = micro_load_rax(c, slot)
+            }
         } else {
             c = emit_byte(c, 0x48); c = emit_byte(c, 0x31); c = emit_byte(c, 0xc0)
         }
+        c
+    } else if expr.kind == ExprKind::ExprFieldAccess {
+        // Compile base → rax (address of struct)
+        let fa_base: &Option<Box<Expr>> = &expr.left
+        var base_type: i64 = 0
+        match *fa_base {
+            Some(be) => {
+                base_type = ast_expr_result_type(&(*be), local_names, local_types, local_count, ctx)
+                c = ast_compile_expr(c, &(*be), local_names, local_slots, local_types, local_count, ctx)
+            }
+            _ => {}
+        }
+        var si: i64 = -1
+        if base_type >= 100 { si = base_type - 100 }
+        else if base_type >= 10 { si = base_type - 10 }
+        if si >= 0 {
+            let fi = ast_struct_field_info(ctx, si, expr.name)
+            if fi >= 0 {
+                let foff = ctx.sf_flat_offset[fi as usize]
+                let fsz = ctx.sf_flat_size[fi as usize]
+                // Stack slots grow downward: field at flat_offset K is at [base - K*8]
+                let off = 0 - (foff * 8)
+                if fsz == 1 {
+                    // Scalar: mov rax, [rax + off] (off is negative)
+                    c = emit_byte(c, 0x48); c = emit_byte(c, 0x8b); c = emit_byte(c, 0x80)
+                    c = emit_byte(c, off & 0xFF); c = emit_byte(c, (off >> 8) & 0xFF)
+                    c = emit_byte(c, (off >> 16) & 0xFF); c = emit_byte(c, (off >> 24) & 0xFF)
+                } else {
+                    // Sub-struct: lea rax, [rax + off] (off is negative)
+                    c = emit_byte(c, 0x48); c = emit_byte(c, 0x8d); c = emit_byte(c, 0x80)
+                    c = emit_byte(c, off & 0xFF); c = emit_byte(c, (off >> 8) & 0xFF)
+                    c = emit_byte(c, (off >> 16) & 0xFF); c = emit_byte(c, (off >> 24) & 0xFF)
+                }
+            }
+        }
+        c
+    } else if expr.kind == ExprKind::ExprUnary {
+        let un_sub: &Option<Box<Expr>> = &expr.left
+        if expr.un_op == UnaryOp::OpRef || expr.un_op == UnaryOp::OpRefMut {
+            match *un_sub {
+                Some(ue) => {
+                    if (*ue).kind == ExprKind::ExprIdent {
+                        var slot: i64 = -1
+                        var ltype: i64 = 0
+                        var uli = local_count - 1
+                        while uli >= 0 {
+                            if ir_name_eq(local_names[uli as usize], (*ue).name) {
+                                slot = local_slots[uli as usize]
+                                ltype = local_types[uli as usize]
+                                uli = -1
+                            } else { uli = uli - 1 }
+                        }
+                        if ltype == 2 {
+                            // Array: variable holds data pointer, just load it
+                            c = micro_load_rax(c, slot)
+                        } else if ltype >= 10 && ltype < 100 {
+                            // Struct on stack: LEA
+                            c = micro_lea_rax_slot(c, slot)
+                        } else {
+                            // Scalar: LEA of slot
+                            c = micro_lea_rax_slot(c, slot)
+                        }
+                    } else {
+                        c = ast_compile_expr(c, &(*ue), local_names, local_slots, local_types, local_count, ctx)
+                    }
+                }
+                _ => {}
+            }
+        } else if expr.un_op == UnaryOp::OpDeref {
+            match *un_sub {
+                Some(ue) => {
+                    c = ast_compile_expr(c, &(*ue), local_names, local_slots, local_types, local_count, ctx)
+                    // For array refs, the value IS the data pointer — no extra deref
+                }
+                _ => {}
+            }
+        } else if expr.un_op == UnaryOp::OpNeg {
+            match *un_sub {
+                Some(ue) => {
+                    c = ast_compile_expr(c, &(*ue), local_names, local_slots, local_types, local_count, ctx)
+                }
+                _ => {}
+            }
+            // neg rax
+            c = emit_byte(c, 0x48); c = emit_byte(c, 0xf7); c = emit_byte(c, 0xd8)
+        } else if expr.un_op == UnaryOp::OpNot {
+            match *un_sub {
+                Some(ue) => {
+                    c = ast_compile_expr(c, &(*ue), local_names, local_slots, local_types, local_count, ctx)
+                }
+                _ => {}
+            }
+            // xor rax, 1
+            c = emit_byte(c, 0x48); c = emit_byte(c, 0x83); c = emit_byte(c, 0xf0); c = emit_byte(c, 0x01)
+        }
+        c
+    } else if expr.kind == ExprKind::ExprIndex {
+        // base[index]: compile base → rax (data pointer), then index
+        let idx_base: &Option<Box<Expr>> = &expr.left
+        match *idx_base {
+            Some(be) => {
+                c = ast_compile_expr(c, &(*be), local_names, local_slots, local_types, local_count, ctx)
+            }
+            _ => {}
+        }
+        c = emit_byte(c, 0x50) // push rax (base pointer)
+        let idx_expr: &Option<Box<Expr>> = &expr.right
+        match *idx_expr {
+            Some(ie) => {
+                c = ast_compile_expr(c, &(*ie), local_names, local_slots, local_types, local_count, ctx)
+            }
+            _ => {}
+        }
+        // rax=index, pop rcx=base; mov rax, [rcx + rax*8]
+        c = emit_byte(c, 0x59) // pop rcx
+        c = emit_byte(c, 0x48); c = emit_byte(c, 0x8b); c = emit_byte(c, 0x04); c = emit_byte(c, 0xc1)
         c
     } else if expr.kind == ExprKind::ExprBinary && expr.bin_op == BinaryOp::OpAnd {
         // Short-circuit &&: eval left; if 0, result=0; else eval right
         let la_ref: &Option<Box<Expr>> = &expr.left
         match *la_ref {
-            Some(le) => { c = ast_compile_expr(c, &(*le), local_names, local_slots, local_types, local_count) }
+            Some(le) => { c = ast_compile_expr(c, &(*le), local_names, local_slots, local_types, local_count, ctx) }
             _ => {}
         }
         // test rax, rax; jz short_false
@@ -1025,7 +1367,7 @@ fn ast_compile_expr(code: CodeBuffer, expr: &Expr,
         // Eval right
         let ra_ref: &Option<Box<Expr>> = &expr.right
         match *ra_ref {
-            Some(re) => { c = ast_compile_expr(c, &(*re), local_names, local_slots, local_types, local_count) }
+            Some(re) => { c = ast_compile_expr(c, &(*re), local_names, local_slots, local_types, local_count, ctx) }
             _ => {}
         }
         // jmp end
@@ -1053,7 +1395,7 @@ fn ast_compile_expr(code: CodeBuffer, expr: &Expr,
         // Short-circuit ||: eval left; if non-zero, result=1; else eval right
         let lo_ref: &Option<Box<Expr>> = &expr.left
         match *lo_ref {
-            Some(le) => { c = ast_compile_expr(c, &(*le), local_names, local_slots, local_types, local_count) }
+            Some(le) => { c = ast_compile_expr(c, &(*le), local_names, local_slots, local_types, local_count, ctx) }
             _ => {}
         }
         // test rax, rax; jnz short_true
@@ -1064,7 +1406,7 @@ fn ast_compile_expr(code: CodeBuffer, expr: &Expr,
         // Eval right
         let ro_ref: &Option<Box<Expr>> = &expr.right
         match *ro_ref {
-            Some(re) => { c = ast_compile_expr(c, &(*re), local_names, local_slots, local_types, local_count) }
+            Some(re) => { c = ast_compile_expr(c, &(*re), local_names, local_slots, local_types, local_count, ctx) }
             _ => {}
         }
         // jmp end
@@ -1095,14 +1437,14 @@ fn ast_compile_expr(code: CodeBuffer, expr: &Expr,
         let left_ref: &Option<Box<Expr>> = &expr.left
         match *left_ref {
             Some(le) => {
-                is_float_binop = ast_expr_is_float(&(*le), local_names, local_types, local_count)
+                is_float_binop = ast_expr_is_float(&(*le), local_names, local_types, local_count, ctx)
             }
             _ => {}
         }
         // Compile left → rax
         match *left_ref {
             Some(le) => {
-                c = ast_compile_expr(c, &(*le), local_names, local_slots, local_types, local_count)
+                c = ast_compile_expr(c, &(*le), local_names, local_slots, local_types, local_count, ctx)
             }
             _ => {}
         }
@@ -1110,7 +1452,7 @@ fn ast_compile_expr(code: CodeBuffer, expr: &Expr,
         let right_ref: &Option<Box<Expr>> = &expr.right
         match *right_ref {
             Some(re) => {
-                c = ast_compile_expr(c, &(*re), local_names, local_slots, local_types, local_count)
+                c = ast_compile_expr(c, &(*re), local_names, local_slots, local_types, local_count, ctx)
             }
             _ => {}
         }
@@ -1237,7 +1579,6 @@ fn ast_compile_expr(code: CodeBuffer, expr: &Expr,
            callee_name.buf[2 as usize] == (105 as i8) &&
            callee_name.buf[3 as usize] == (110 as i8) &&
            callee_name.buf[4 as usize] == (116 as i8) {
-            // Check if first arg is a string literal
             let pargs: &Option<Box<ExprList>> = &expr.args
             match *pargs {
                 Some(pal) => {
@@ -1251,34 +1592,137 @@ fn ast_compile_expr(code: CodeBuffer, expr: &Expr,
         }
 
         if !is_print_str {
+            // Look up callee fn_slot and return type
             var fn_slot: i64 = -1
+            var callee_ret_type: i64 = 0
             var li = local_count - 1
             while li >= 0 {
                 if ir_name_eq(local_names[li as usize], callee_name) {
                     fn_slot = local_slots[li as usize]
+                    callee_ret_type = local_types[li as usize]
                     li = -1
                 } else {
                     li = li - 1
                 }
             }
+            // Determine if callee returns a struct (sret convention)
+            var sret = false
+            var sret_struct_idx: i64 = -1
+            var sret_flat_size: i64 = 0
+            if callee_ret_type >= 10 && callee_ret_type < 100 {
+                sret = true
+                sret_struct_idx = callee_ret_type - 10
+                sret_flat_size = ctx.struct_flat_size[sret_struct_idx as usize]
+            }
+            // Allocate sret destination space if needed
+            var sret_base: i64 = 0
+            if sret {
+                var call_ns = code_get_ns(c)
+                sret_base = call_ns
+                call_ns = call_ns + sret_flat_size
+                c = code_set_ns(c, call_ns)
+            }
+            // Evaluate all args into temp slots
+            var arg_slots: [i64; 16] = [0; 16]
             var arg_count: i64 = 0
             let args_ref: &Option<Box<ExprList>> = &expr.args
             var current_arg = args_ref
             while true {
                 match *current_arg {
                     Some(al) => {
-                        c = ast_compile_expr(c, &(*al).head, local_names, local_slots, local_types, local_count)
-                        c = emit_byte(c, 0x50)
+                        c = ast_compile_expr(c, &(*al).head, local_names, local_slots, local_types, local_count, ctx)
+                        // Store to temp slot
+                        var call_ns2 = code_get_ns(c)
+                        let tmp_s = call_ns2
+                        call_ns2 = call_ns2 + 1
+                        c = code_set_ns(c, call_ns2)
+                        c = micro_store_rax(c, tmp_s)
+                        arg_slots[arg_count as usize] = tmp_s
                         arg_count = arg_count + 1
                         current_arg = &(*al).tail
                     }
                     _ => break
                 }
             }
-            if arg_count >= 4 { c = emit_byte(c, 0x59) }
-            if arg_count >= 3 { c = emit_byte(c, 0x5a) }
-            if arg_count >= 2 { c = emit_byte(c, 0x5e) }
-            if arg_count >= 1 { c = emit_byte(c, 0x5f) }
+            // Determine register mapping (with sret shift)
+            // sret: rdi=sret_addr, rsi=arg0, rdx=arg1, rcx=arg2, r8=arg3, r9=arg4, stack=arg5+
+            // no sret: rdi=arg0, rsi=arg1, rdx=arg2, rcx=arg3, r8=arg4, r9=arg5, stack=arg6+
+            var reg_shift: i64 = 0
+            if sret { reg_shift = 1 }
+            let stack_start = 6 - reg_shift  // args with index >= stack_start go on stack
+            // Push stack args in reverse order
+            var stack_count: i64 = 0
+            if arg_count > stack_start {
+                var sa = arg_count - 1
+                while sa >= stack_start {
+                    c = micro_load_rax(c, arg_slots[sa as usize])
+                    c = emit_byte(c, 0x50) // push rax
+                    stack_count = stack_count + 1
+                    sa = sa - 1
+                }
+            }
+            // Load register args in reverse order to avoid clobbering
+            // Slot in reg order: rdi(0), rsi(1), rdx(2), rcx(3), r8(4), r9(5)
+            // With sret: rdi=sret, rsi=arg0, rdx=arg1, rcx=arg2, r8=arg3, r9=arg4
+            var max_reg_arg = arg_count
+            if max_reg_arg > stack_start { max_reg_arg = stack_start }
+            // r9 (reg slot 5)
+            if reg_shift + max_reg_arg > 5 {
+                let a5i = 5 - reg_shift
+                if a5i >= 0 && a5i < arg_count {
+                    c = micro_load_rax(c, arg_slots[a5i as usize])
+                    // mov r9, rax: 49 89 C1
+                    c = emit_byte(c, 0x49); c = emit_byte(c, 0x89); c = emit_byte(c, 0xc1)
+                }
+            }
+            // r8 (reg slot 4)
+            if reg_shift + max_reg_arg > 4 {
+                let a4i = 4 - reg_shift
+                if a4i >= 0 && a4i < arg_count {
+                    c = micro_load_rax(c, arg_slots[a4i as usize])
+                    // mov r8, rax: 49 89 C0
+                    c = emit_byte(c, 0x49); c = emit_byte(c, 0x89); c = emit_byte(c, 0xc0)
+                }
+            }
+            // rcx (reg slot 3)
+            if reg_shift + max_reg_arg > 3 {
+                let a3i = 3 - reg_shift
+                if a3i >= 0 && a3i < arg_count {
+                    c = micro_load_rax(c, arg_slots[a3i as usize])
+                    // mov rcx, rax
+                    c = emit_byte(c, 0x48); c = emit_byte(c, 0x89); c = emit_byte(c, 0xc1)
+                }
+            }
+            // rdx (reg slot 2)
+            if reg_shift + max_reg_arg > 2 {
+                let a2i = 2 - reg_shift
+                if a2i >= 0 && a2i < arg_count {
+                    c = micro_load_rax(c, arg_slots[a2i as usize])
+                    // mov rdx, rax
+                    c = emit_byte(c, 0x48); c = emit_byte(c, 0x89); c = emit_byte(c, 0xc2)
+                }
+            }
+            // rsi (reg slot 1)
+            if reg_shift + max_reg_arg > 1 {
+                let a1i = 1 - reg_shift
+                if a1i >= 0 && a1i < arg_count {
+                    c = micro_load_rax(c, arg_slots[a1i as usize])
+                    // mov rsi, rax
+                    c = emit_byte(c, 0x48); c = emit_byte(c, 0x89); c = emit_byte(c, 0xc6)
+                }
+            }
+            // rdi (reg slot 0)
+            if sret {
+                // rdi = sret destination address
+                c = micro_lea_rax_slot(c, sret_base)
+                c = emit_byte(c, 0x48); c = emit_byte(c, 0x89); c = emit_byte(c, 0xc7) // mov rdi, rax
+            } else {
+                if max_reg_arg > 0 {
+                    c = micro_load_rax(c, arg_slots[0])
+                    c = emit_byte(c, 0x48); c = emit_byte(c, 0x89); c = emit_byte(c, 0xc7) // mov rdi, rax
+                }
+            }
+            // Emit call sentinel
             if fn_slot <= -1000 {
                 let target_idx = 0 - (fn_slot + 1000)
                 c = emit_byte(c, 0xe8)
@@ -1287,13 +1731,26 @@ fn ast_compile_expr(code: CodeBuffer, expr: &Expr,
                 c = emit_byte(c, 0xCA as i64)
                 c = emit_byte(c, 0xFE as i64)
             }
+            // Clean up stack args
+            if stack_count > 0 {
+                let cleanup = stack_count * 8
+                // add rsp, cleanup
+                c = emit_byte(c, 0x48); c = emit_byte(c, 0x81); c = emit_byte(c, 0xc4)
+                c = emit_byte(c, cleanup & 0xFF); c = emit_byte(c, (cleanup >> 8) & 0xFF)
+                c = emit_byte(c, 0); c = emit_byte(c, 0)
+            }
+            // For sret: rax already has return value (sret address) from callee convention
+            // But callee puts it in rdi and returns — we need to produce the address
+            if sret {
+                c = micro_lea_rax_slot(c, sret_base)
+            }
         }
         c
     } else if expr.kind == ExprKind::ExprIf {
         let cond_ref: &Option<Box<Expr>> = &expr.left
         match *cond_ref {
             Some(ce) => {
-                c = ast_compile_expr(c, &(*ce), local_names, local_slots, local_types, local_count)
+                c = ast_compile_expr(c, &(*ce), local_names, local_slots, local_types, local_count, ctx)
             }
             _ => {}
         }
@@ -1304,7 +1761,7 @@ fn ast_compile_expr(code: CodeBuffer, expr: &Expr,
         let then_ref: &Option<Box<Block>> = &expr.block
         match *then_ref {
             Some(tb) => {
-                c = ast_compile_block(c, &(*tb), local_names, local_slots, local_types, local_count)
+                c = ast_compile_block(c, &(*tb), local_names, local_slots, local_types, local_count, ctx)
             }
             _ => {
                 c = emit_byte(c, 0x48); c = emit_byte(c, 0x31); c = emit_byte(c, 0xc0)
@@ -1322,7 +1779,7 @@ fn ast_compile_expr(code: CodeBuffer, expr: &Expr,
         let else_expr_ref: &Option<Box<Expr>> = &expr.else_expr
         match *else_expr_ref {
             Some(ee) => {
-                c = ast_compile_expr(c, &(*ee), local_names, local_slots, local_types, local_count)
+                c = ast_compile_expr(c, &(*ee), local_names, local_slots, local_types, local_count, ctx)
             }
             _ => {
                 c = emit_byte(c, 0x48); c = emit_byte(c, 0x31); c = emit_byte(c, 0xc0)
@@ -1340,7 +1797,7 @@ fn ast_compile_expr(code: CodeBuffer, expr: &Expr,
         let wcond_ref: &Option<Box<Expr>> = &expr.left
         match *wcond_ref {
             Some(wce) => {
-                c = ast_compile_expr(c, &(*wce), local_names, local_slots, local_types, local_count)
+                c = ast_compile_expr(c, &(*wce), local_names, local_slots, local_types, local_count, ctx)
             }
             _ => {}
         }
@@ -1351,7 +1808,7 @@ fn ast_compile_expr(code: CodeBuffer, expr: &Expr,
         let wbody_ref: &Option<Box<Block>> = &expr.block
         match *wbody_ref {
             Some(wb) => {
-                c = ast_compile_block(c, &(*wb), local_names, local_slots, local_types, local_count)
+                c = ast_compile_block(c, &(*wb), local_names, local_slots, local_types, local_count, ctx)
             }
             _ => {}
         }
@@ -1374,7 +1831,7 @@ fn ast_compile_expr(code: CodeBuffer, expr: &Expr,
         let ret_ref: &Option<Box<Expr>> = &expr.left
         match *ret_ref {
             Some(re) => {
-                c = ast_compile_expr(c, &(*re), local_names, local_slots, local_types, local_count)
+                c = ast_compile_expr(c, &(*re), local_names, local_slots, local_types, local_count, ctx)
             }
             _ => {
                 c = emit_byte(c, 0x48); c = emit_byte(c, 0x31); c = emit_byte(c, 0xc0)
@@ -1387,11 +1844,69 @@ fn ast_compile_expr(code: CodeBuffer, expr: &Expr,
         let blk_ref: &Option<Box<Block>> = &expr.block
         match *blk_ref {
             Some(blk) => {
-                c = ast_compile_block(c, &(*blk), local_names, local_slots, local_types, local_count)
+                c = ast_compile_block(c, &(*blk), local_names, local_slots, local_types, local_count, ctx)
             }
             _ => {
                 c = emit_byte(c, 0x48); c = emit_byte(c, 0x31); c = emit_byte(c, 0xc0)
             }
+        }
+        c
+    } else if expr.kind == ExprKind::ExprStructLit {
+        // Look up struct type
+        let sl_name = ast_name_from_path(&expr.path)
+        let sl_idx = ast_lookup_struct(ctx, sl_name)
+        if sl_idx >= 0 {
+            let sl_flat = ctx.struct_flat_size[sl_idx as usize]
+            // Allocate temp slots for this struct
+            var sl_ns = code_get_ns(c)
+            let sl_base = sl_ns
+            sl_ns = sl_ns + sl_flat
+            c = code_set_ns(c, sl_ns)
+            // Fill fields from struct literal
+            let sl_fields: &Option<Box<StructFieldList>> = &expr.fields
+            var sl_cur = sl_fields
+            while true {
+                match *sl_cur {
+                    Some(sfl) => {
+                        let sf_fi = ast_struct_field_info(ctx, sl_idx, (*sfl).head.name)
+                        if sf_fi >= 0 {
+                            let sf_foff = ctx.sf_flat_offset[sf_fi as usize]
+                            let sf_fsz = ctx.sf_flat_size[sf_fi as usize]
+                            // Compile field value → rax
+                            c = ast_compile_expr(c, &(*sfl).head.value, local_names, local_slots, local_types, local_count, ctx)
+                            if sf_fsz == 1 {
+                                // Scalar: store rax → slot
+                                c = micro_store_rax(c, sl_base + sf_foff)
+                            } else {
+                                // Sub-struct: rax = source base (highest addr), memcpy N qwords
+                                // Adjust both to lowest address for rep movsq
+                                c = emit_byte(c, 0x56); c = emit_byte(c, 0x57); c = emit_byte(c, 0x51) // push rsi,rdi,rcx
+                                // Adjust source to lowest addr: sub rax, (N-1)*8
+                                if sf_fsz > 1 {
+                                    let adj = (sf_fsz - 1) * 8
+                                    c = emit_byte(c, 0x48); c = emit_byte(c, 0x2d) // sub rax, imm32
+                                    c = emit_byte(c, adj & 0xFF); c = emit_byte(c, (adj >> 8) & 0xFF)
+                                    c = emit_byte(c, (adj >> 16) & 0xFF); c = emit_byte(c, (adj >> 24) & 0xFF)
+                                }
+                                c = emit_byte(c, 0x48); c = emit_byte(c, 0x89); c = emit_byte(c, 0xc6) // mov rsi, rax
+                                // Dest lowest addr: slot (sl_base + sf_foff + sf_fsz - 1)
+                                c = micro_lea_rax_slot(c, sl_base + sf_foff + sf_fsz - 1)
+                                c = emit_byte(c, 0x48); c = emit_byte(c, 0x89); c = emit_byte(c, 0xc7) // mov rdi, rax
+                                c = emit_byte(c, 0x48); c = emit_byte(c, 0xc7); c = emit_byte(c, 0xc1) // mov rcx, imm32
+                                c = emit_byte(c, sf_fsz & 0xFF); c = emit_byte(c, 0); c = emit_byte(c, 0); c = emit_byte(c, 0)
+                                c = emit_byte(c, 0xf3); c = emit_byte(c, 0x48); c = emit_byte(c, 0xa5) // rep movsq
+                                c = emit_byte(c, 0x59); c = emit_byte(c, 0x5f); c = emit_byte(c, 0x5e) // pop rcx,rdi,rsi
+                            }
+                        }
+                        sl_cur = &(*sfl).tail
+                    }
+                    _ => break
+                }
+            }
+            // Return address of struct in rax
+            c = micro_lea_rax_slot(c, sl_base)
+        } else {
+            c = emit_byte(c, 0x48); c = emit_byte(c, 0x31); c = emit_byte(c, 0xc0)
         }
         c
     } else {
@@ -1402,7 +1917,8 @@ fn ast_compile_expr(code: CodeBuffer, expr: &Expr,
     }
 }
 fn ast_compile_block(code: CodeBuffer, blk: &Block,
-    local_names: [Name; 64], local_slots: [i64; 64], local_types: [i64; 64], local_count: i64
+    local_names: [Name; 64], local_slots: [i64; 64], local_types: [i64; 64], local_count: i64,
+    ctx: &AstCompileCtx
 ) -> CodeBuffer with Mut, Panic, Div, IO {
     var c = code
     var ln = local_names
@@ -1418,6 +1934,10 @@ fn ast_compile_block(code: CodeBuffer, blk: &Block,
         }
         si = si + 1
     }
+    // Also check next_slot from code_get_ns (temp allocations from struct literals etc)
+    let ns_check = code_get_ns(c)
+    if ns_check > next_slot { next_slot = ns_check }
+    c = code_set_ns(c, next_slot)
     let stmts_ref: &Option<Box<StmtList>> = &blk.stmts
     var stmt_cur = stmts_ref
     while true {
@@ -1425,65 +1945,188 @@ fn ast_compile_block(code: CodeBuffer, blk: &Block,
             Some(sl) => {
                 let s: &Stmt = &(*sl).head
                 if s.kind == StmtKind::StmtLet || s.kind == StmtKind::StmtVar {
-                    let init_ref: &Option<Box<Expr>> = &s.expr
-                    match *init_ref {
-                        Some(ie) => {
-                            c = ast_compile_expr(c, &(*ie), ln, ls, lt, lc)
-                        }
-                        _ => {
-                            c = emit_byte(c, 0x48); c = emit_byte(c, 0x31); c = emit_byte(c, 0xc0)
-                        }
-                    }
-                    let slot = next_slot
-                    next_slot = next_slot + 1
-                    c = micro_store_rax(c, slot)
-                    var blk_init_float: i64 = 0
-                    match *init_ref {
-                        Some(ie2) => {
-                            if ast_expr_is_float(&(*ie2), ln, lt, lc) {
-                                blk_init_float = 1
+                    // Check for array type annotation: [T; N]
+                    var is_array = false
+                    let ty_ref: &Option<Box<TypeExpr>> = &s.ty
+                    match *ty_ref {
+                        Some(tye) => {
+                            if (*tye).kind == TypeExprKind::TypeArray {
+                                is_array = true
                             }
                         }
                         _ => {}
                     }
-                    ln[lc as usize] = s.name
-                    ls[lc as usize] = slot
-                    lt[lc as usize] = blk_init_float
-                    lc = lc + 1
+                    if is_array {
+                        // Array: mmap 512KB (65536 * 8), store pointer
+                        c = ast_emit_mmap(c, 524288)
+                        let slot = next_slot
+                        next_slot = next_slot + 1
+                        c = code_set_ns(c, next_slot)
+                        c = micro_store_rax(c, slot)
+                        ln[lc as usize] = s.name
+                        ls[lc as usize] = slot
+                        lt[lc as usize] = 2  // array_ptr
+                        lc = lc + 1
+                    } else {
+                        // Compile init expression
+                        let init_ref: &Option<Box<Expr>> = &s.expr
+                        match *init_ref {
+                            Some(ie) => {
+                                c = ast_compile_expr(c, &(*ie), ln, ls, lt, lc, ctx)
+                            }
+                            _ => {
+                                c = emit_byte(c, 0x48); c = emit_byte(c, 0x31); c = emit_byte(c, 0xc0)
+                            }
+                        }
+                        // Detect init result type
+                        var init_type: i64 = 0
+                        match *init_ref {
+                            Some(ie2) => {
+                                init_type = ast_expr_result_type(&(*ie2), ln, lt, lc, ctx)
+                            }
+                            _ => {}
+                        }
+                        if init_type >= 10 && init_type < 100 {
+                            // Struct result: rax = base addr (highest), copy to local slots
+                            let s_idx = init_type - 10
+                            let s_flat = ctx.struct_flat_size[s_idx as usize]
+                            let slot = next_slot
+                            next_slot = next_slot + s_flat
+                            c = code_set_ns(c, next_slot)
+                            // Adjust source to lowest addr for rep movsq
+                            c = emit_byte(c, 0x56); c = emit_byte(c, 0x57); c = emit_byte(c, 0x51) // push rsi,rdi,rcx
+                            if s_flat > 1 {
+                                let adj2 = (s_flat - 1) * 8
+                                c = emit_byte(c, 0x48); c = emit_byte(c, 0x2d) // sub rax, imm32
+                                c = emit_byte(c, adj2 & 0xFF); c = emit_byte(c, (adj2 >> 8) & 0xFF)
+                                c = emit_byte(c, (adj2 >> 16) & 0xFF); c = emit_byte(c, (adj2 >> 24) & 0xFF)
+                            }
+                            c = emit_byte(c, 0x48); c = emit_byte(c, 0x89); c = emit_byte(c, 0xc6) // mov rsi, rax
+                            // Dest lowest addr: slot (slot + s_flat - 1)
+                            c = micro_lea_rax_slot(c, slot + s_flat - 1)
+                            c = emit_byte(c, 0x48); c = emit_byte(c, 0x89); c = emit_byte(c, 0xc7) // mov rdi, rax
+                            c = emit_byte(c, 0x48); c = emit_byte(c, 0xc7); c = emit_byte(c, 0xc1) // mov rcx, imm32
+                            c = emit_byte(c, s_flat & 0xFF); c = emit_byte(c, 0); c = emit_byte(c, 0); c = emit_byte(c, 0)
+                            c = emit_byte(c, 0xf3); c = emit_byte(c, 0x48); c = emit_byte(c, 0xa5) // rep movsq
+                            c = emit_byte(c, 0x59); c = emit_byte(c, 0x5f); c = emit_byte(c, 0x5e) // pop rcx,rdi,rsi
+                            ln[lc as usize] = s.name
+                            ls[lc as usize] = slot
+                            lt[lc as usize] = init_type  // 10+struct_idx
+                            lc = lc + 1
+                        } else {
+                            // Scalar (i64, f64, pointer)
+                            let slot = next_slot
+                            next_slot = next_slot + 1
+                            c = code_set_ns(c, next_slot)
+                            c = micro_store_rax(c, slot)
+                            ln[lc as usize] = s.name
+                            ls[lc as usize] = slot
+                            lt[lc as usize] = init_type
+                            lc = lc + 1
+                        }
+                    }
                 } else if s.kind == StmtKind::StmtExpr {
                     let expr_ref: &Option<Box<Expr>> = &s.expr
                     match *expr_ref {
                         Some(ee) => {
-                            c = ast_compile_expr(c, &(*ee), ln, ls, lt, lc)
+                            c = ast_compile_expr(c, &(*ee), ln, ls, lt, lc, ctx)
                         }
                         _ => {}
                     }
                 } else if s.kind == StmtKind::StmtAssign {
-                    let rhs_ref: &Option<Box<Expr>> = &s.expr
-                    match *rhs_ref {
-                        Some(re) => {
-                            c = ast_compile_expr(c, &(*re), ln, ls, lt, lc)
-                        }
-                        _ => {}
-                    }
+                    // Check for deref-index assignment: (*ref)[idx] = value
                     let tgt_ref: &Option<Box<Expr>> = &s.target
+                    var is_deref_idx = false
                     match *tgt_ref {
                         Some(te) => {
-                            if (*te).kind == ExprKind::ExprIdent {
-                                var slot: i64 = -1
-                                var li = lc - 1
-                                while li >= 0 {
-                                    if ir_name_eq(ln[li as usize], (*te).name) {
-                                        slot = ls[li as usize]
-                                        li = -1
-                                    } else { li = li - 1 }
-                                }
-                                if slot >= 0 {
-                                    c = micro_store_rax(c, slot)
+                            if (*te).kind == ExprKind::ExprIndex {
+                                // Target is indexing — check if base is a deref
+                                let idx_base2: &Option<Box<Expr>> = &(*te).left
+                                match *idx_base2 {
+                                    Some(ib) => {
+                                        if (*ib).kind == ExprKind::ExprUnary && (*ib).un_op == UnaryOp::OpDeref {
+                                            is_deref_idx = true
+                                        }
+                                    }
+                                    _ => {}
                                 }
                             }
                         }
                         _ => {}
+                    }
+                    if is_deref_idx {
+                        // (*ref)[idx] = value
+                        // Compile RHS → temp slot
+                        let rhs_ref: &Option<Box<Expr>> = &s.expr
+                        match *rhs_ref {
+                            Some(re) => {
+                                c = ast_compile_expr(c, &(*re), ln, ls, lt, lc, ctx)
+                            }
+                            _ => {}
+                        }
+                        c = emit_byte(c, 0x50) // push rax (value)
+                        // Compile target: get base pointer
+                        match *tgt_ref {
+                            Some(te) => {
+                                // te is ExprIndex; te.left is ExprUnary(OpDeref, inner)
+                                let di_base: &Option<Box<Expr>> = &(*te).left
+                                match *di_base {
+                                    Some(dib) => {
+                                        // Deref: compile inner → rax (pointer)
+                                        let di_inner: &Option<Box<Expr>> = &(*dib).left
+                                        match *di_inner {
+                                            Some(dii) => {
+                                                c = ast_compile_expr(c, &(*dii), ln, ls, lt, lc, ctx)
+                                            }
+                                            _ => {}
+                                        }
+                                    }
+                                    _ => {}
+                                }
+                                c = emit_byte(c, 0x50) // push rax (base pointer)
+                                // Compile index
+                                let di_idx: &Option<Box<Expr>> = &(*te).right
+                                match *di_idx {
+                                    Some(die) => {
+                                        c = ast_compile_expr(c, &(*die), ln, ls, lt, lc, ctx)
+                                    }
+                                    _ => {}
+                                }
+                                // rax=index, pop rcx=base, pop rdx=value
+                                c = emit_byte(c, 0x59) // pop rcx (base)
+                                c = emit_byte(c, 0x5a) // pop rdx (value)
+                                // mov [rcx + rax*8], rdx
+                                c = emit_byte(c, 0x48); c = emit_byte(c, 0x89); c = emit_byte(c, 0x14); c = emit_byte(c, 0xc1)
+                            }
+                            _ => {}
+                        }
+                    } else {
+                        // Normal assignment: var = value
+                        let rhs_ref: &Option<Box<Expr>> = &s.expr
+                        match *rhs_ref {
+                            Some(re) => {
+                                c = ast_compile_expr(c, &(*re), ln, ls, lt, lc, ctx)
+                            }
+                            _ => {}
+                        }
+                        match *tgt_ref {
+                            Some(te) => {
+                                if (*te).kind == ExprKind::ExprIdent {
+                                    var slot: i64 = -1
+                                    var bli = lc - 1
+                                    while bli >= 0 {
+                                        if ir_name_eq(ln[bli as usize], (*te).name) {
+                                            slot = ls[bli as usize]
+                                            bli = -1
+                                        } else { bli = bli - 1 }
+                                    }
+                                    if slot >= 0 {
+                                        c = micro_store_rax(c, slot)
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
                     }
                 }
                 stmt_cur = &(*sl).tail
@@ -1495,7 +2138,8 @@ fn ast_compile_block(code: CodeBuffer, blk: &Block,
 }
 
 fn ast_compile_fn_body(code: CodeBuffer, fd: &FnDef,
-    fn_names: [Name; 64], fn_return_types: [i64; 64], fn_count: i64
+    fn_names: [Name; 64], fn_return_types: [i64; 64], fn_count: i64,
+    ctx: &AstCompileCtx
 ) -> CodeBuffer with Mut, Panic, Div, IO {
     var c = code
     var local_names: [Name; 64] = [ir_empty_name(); 64]
@@ -1504,8 +2148,37 @@ fn ast_compile_fn_body(code: CodeBuffer, fd: &FnDef,
     var local_count: i64 = 0
     var next_slot: i64 = 0
 
+    // Detect if this function returns a struct (sret convention)
+    var is_sret = false
+    var sret_struct_idx: i64 = -1
+    var sret_flat_size: i64 = 0
+    var sret_dest_slot: i64 = -1
+    let rt_ref: &Option<Box<TypeExpr>> = &fd.return_type
+    match *rt_ref {
+        Some(rte) => {
+            if (*rte).kind == TypeExprKind::TypeNamed && !ast_type_is_f64(&(*rte)) {
+                let rt_name = ast_name_from_path(&(*rte).path)
+                let rt_si = ast_lookup_struct(ctx, rt_name)
+                if rt_si >= 0 {
+                    is_sret = true
+                    sret_struct_idx = rt_si
+                    sret_flat_size = ctx.struct_flat_size[rt_si as usize]
+                }
+            }
+        }
+        _ => {}
+    }
+
+    // If sret, save the hidden first param (rdi = sret destination pointer)
+    if is_sret {
+        sret_dest_slot = next_slot
+        next_slot = next_slot + 1
+        // mov rax, rdi
+        c = emit_byte(c, 0x48); c = emit_byte(c, 0x89); c = emit_byte(c, 0xf8)
+        c = micro_store_rax(c, sret_dest_slot)
+    }
+
     // Register function names as locals with negative slots (for call resolution)
-    // local_types for these entries = return type (0=i64, 1=f64)
     var fi: i64 = 0
     while fi < fn_count {
         local_names[local_count as usize] = fn_names[fi as usize]
@@ -1515,34 +2188,59 @@ fn ast_compile_fn_body(code: CodeBuffer, fd: &FnDef,
         fi = fi + 1
     }
 
-    // Register params: rdi=p0, rsi=p1, rdx=p2, rcx=p3
-    // Detect f64 params from FnDef type annotations
+    // Register params with extended calling convention
+    // Without sret: rdi=p0, rsi=p1, rdx=p2, rcx=p3, r8=p4, r9=p5, stack=p6+
+    // With sret: rdi=sret, rsi=p0, rdx=p1, rcx=p2, r8=p3, r9=p4, stack=p5+
     var param_ref: &Option<Box<ParamList>> = &fd.params
     var param_idx: i64 = 0
     while true {
         match *param_ref {
             Some(pl) => {
                 let p_name = (*pl).head.name
+                let p_ty: &TypeExpr = &(*pl).head.ty
+                // Detect param type
+                var p_type: i64 = 0
+                if ast_type_is_f64(p_ty) {
+                    p_type = 1
+                } else if p_ty.kind == TypeExprKind::TypeReference || p_ty.kind == TypeExprKind::TypeRefMut {
+                    p_type = 3
+                } else if p_ty.kind == TypeExprKind::TypeArray {
+                    p_type = 2
+                } else if p_ty.kind == TypeExprKind::TypeNamed {
+                    let pt_name = ast_name_from_path(&p_ty.path)
+                    let pt_si = ast_lookup_struct(ctx, pt_name)
+                    if pt_si >= 0 {
+                        p_type = 100 + pt_si  // struct param = pointer to struct data
+                    }
+                }
                 let p_slot = next_slot
                 next_slot = next_slot + 1
-                // Detect param type from annotation
-                var p_is_float: i64 = 0
-                let p_ty: &TypeExpr = &(*pl).head.ty
-                if ast_type_is_f64(p_ty) { p_is_float = 1 }
                 local_names[local_count as usize] = p_name
                 local_slots[local_count as usize] = p_slot
-                local_types[local_count as usize] = p_is_float
+                local_types[local_count as usize] = p_type
                 local_count = local_count + 1
-                // Spill param register to stack slot
-                if param_idx == 0 {
-                    // mov rax, rdi
-                    c = emit_byte(c, 0x48); c = emit_byte(c, 0x89); c = emit_byte(c, 0xf8)
-                } else if param_idx == 1 {
-                    c = emit_byte(c, 0x48); c = emit_byte(c, 0x89); c = emit_byte(c, 0xf0)
-                } else if param_idx == 2 {
-                    c = emit_byte(c, 0x48); c = emit_byte(c, 0x89); c = emit_byte(c, 0xd0)
-                } else if param_idx == 3 {
-                    c = emit_byte(c, 0x48); c = emit_byte(c, 0x89); c = emit_byte(c, 0xc8)
+                // Compute register index with sret shift
+                var reg_idx = param_idx
+                if is_sret { reg_idx = param_idx + 1 }
+                // Spill register or load from stack → rax
+                if reg_idx == 0 {
+                    c = emit_byte(c, 0x48); c = emit_byte(c, 0x89); c = emit_byte(c, 0xf8) // mov rax, rdi
+                } else if reg_idx == 1 {
+                    c = emit_byte(c, 0x48); c = emit_byte(c, 0x89); c = emit_byte(c, 0xf0) // mov rax, rsi
+                } else if reg_idx == 2 {
+                    c = emit_byte(c, 0x48); c = emit_byte(c, 0x89); c = emit_byte(c, 0xd0) // mov rax, rdx
+                } else if reg_idx == 3 {
+                    c = emit_byte(c, 0x48); c = emit_byte(c, 0x89); c = emit_byte(c, 0xc8) // mov rax, rcx
+                } else if reg_idx == 4 {
+                    c = emit_byte(c, 0x4c); c = emit_byte(c, 0x89); c = emit_byte(c, 0xc0) // mov rax, r8
+                } else if reg_idx == 5 {
+                    c = emit_byte(c, 0x4c); c = emit_byte(c, 0x89); c = emit_byte(c, 0xc8) // mov rax, r9
+                } else {
+                    // Stack param: mov rax, [rbp + 16 + 8*(reg_idx - 6)]
+                    let stk_disp = 16 + 8 * (reg_idx - 6)
+                    c = emit_byte(c, 0x48); c = emit_byte(c, 0x8b); c = emit_byte(c, 0x85)
+                    c = emit_byte(c, stk_disp & 0xFF); c = emit_byte(c, (stk_disp >> 8) & 0xFF)
+                    c = emit_byte(c, (stk_disp >> 16) & 0xFF); c = emit_byte(c, (stk_disp >> 24) & 0xFF)
                 }
                 c = micro_store_rax(c, p_slot)
                 param_idx = param_idx + 1
@@ -1552,92 +2250,50 @@ fn ast_compile_fn_body(code: CodeBuffer, fd: &FnDef,
         }
     }
 
-    // Walk body stmts
-    let stmts_ref: &Option<Box<StmtList>> = &fd.body.stmts
-    var stmt_cur = stmts_ref
-    var last_expr_emitted = false
-    while true {
-        match *stmt_cur {
-            Some(sl) => {
-                let s: &Stmt = &(*sl).head
-                if s.kind == StmtKind::StmtLet || s.kind == StmtKind::StmtVar {
-                    // Compile init expression → rax
-                    let init_ref: &Option<Box<Expr>> = &s.expr
-                    match *init_ref {
-                        Some(ie) => {
-                            c = ast_compile_expr(c, &(*ie), local_names, local_slots, local_types, local_count)
-                        }
-                        _ => {
-                            // No init — load 0
-                            c = emit_byte(c, 0x48); c = emit_byte(c, 0x31); c = emit_byte(c, 0xc0)
-                        }
-                    }
-                    // Bind local
-                    let slot = next_slot
-                    next_slot = next_slot + 1
-                    c = micro_store_rax(c, slot)
-                    // Determine type from init expression
-                    var init_is_float: i64 = 0
-                    match *init_ref {
-                        Some(ie2) => {
-                            if ast_expr_is_float(&(*ie2), local_names, local_types, local_count) {
-                                init_is_float = 1
-                            }
-                        }
-                        _ => {}
-                    }
-                    local_names[local_count as usize] = s.name
-                    local_slots[local_count as usize] = slot
-                    local_types[local_count as usize] = init_is_float
-                    local_count = local_count + 1
-                    last_expr_emitted = false
-                } else if s.kind == StmtKind::StmtExpr {
-                    // Compile expression → rax
-                    let expr_ref: &Option<Box<Expr>> = &s.expr
-                    match *expr_ref {
-                        Some(ee) => {
-                            c = ast_compile_expr(c, &(*ee), local_names, local_slots, local_types, local_count)
-                            last_expr_emitted = true
-                        }
-                        _ => { last_expr_emitted = false }
-                    }
-                } else if s.kind == StmtKind::StmtAssign {
-                    // Compile RHS → rax
-                    let rhs_ref: &Option<Box<Expr>> = &s.expr
-                    match *rhs_ref {
-                        Some(re) => {
-                            c = ast_compile_expr(c, &(*re), local_names, local_slots, local_types, local_count)
-                        }
-                        _ => {}
-                    }
-                    // Store to target
-                    let tgt_ref: &Option<Box<Expr>> = &s.target
-                    match *tgt_ref {
-                        Some(te) => {
-                            if (*te).kind == ExprKind::ExprIdent {
-                                var slot: i64 = -1
-                                var li = local_count - 1
-                                while li >= 0 {
-                                    if ir_name_eq(local_names[li as usize], (*te).name) {
-                                        slot = local_slots[li as usize]
-                                        li = -1
-                                    } else { li = li - 1 }
-                                }
-                                if slot >= 0 {
-                                    c = micro_store_rax(c, slot)
-                                }
-                            }
-                        }
-                        _ => {}
-                    }
-                    last_expr_emitted = false
-                }
-                stmt_cur = &(*sl).tail
-            }
-            _ => break
+    // Initialize next_slot tracker in code buffer
+    c = code_set_ns(c, next_slot)
+
+    // Compile body using ast_compile_block
+    c = ast_compile_block(c, &fd.body, local_names, local_slots, local_types, local_count, ctx)
+
+    // If sret: copy result struct to sret destination
+    if is_sret {
+        // rax = source base (highest addr). Adjust to lowest for rep movsq.
+        c = emit_byte(c, 0x56); c = emit_byte(c, 0x57); c = emit_byte(c, 0x51) // push rsi,rdi,rcx
+        if sret_flat_size > 1 {
+            let sadj = (sret_flat_size - 1) * 8
+            c = emit_byte(c, 0x48); c = emit_byte(c, 0x2d) // sub rax, imm32
+            c = emit_byte(c, sadj & 0xFF); c = emit_byte(c, (sadj >> 8) & 0xFF)
+            c = emit_byte(c, (sadj >> 16) & 0xFF); c = emit_byte(c, (sadj >> 24) & 0xFF)
         }
+        c = emit_byte(c, 0x48); c = emit_byte(c, 0x89); c = emit_byte(c, 0xc6) // mov rsi, rax
+        // Load sret dest (highest addr), adjust to lowest
+        c = micro_load_rax(c, sret_dest_slot)
+        if sret_flat_size > 1 {
+            let dadj = (sret_flat_size - 1) * 8
+            c = emit_byte(c, 0x48); c = emit_byte(c, 0x2d) // sub rax, imm32
+            c = emit_byte(c, dadj & 0xFF); c = emit_byte(c, (dadj >> 8) & 0xFF)
+            c = emit_byte(c, (dadj >> 16) & 0xFF); c = emit_byte(c, (dadj >> 24) & 0xFF)
+        }
+        c = emit_byte(c, 0x48); c = emit_byte(c, 0x89); c = emit_byte(c, 0xc7) // mov rdi, rax
+        c = emit_byte(c, 0x48); c = emit_byte(c, 0xc7); c = emit_byte(c, 0xc1) // mov rcx, imm32
+        c = emit_byte(c, sret_flat_size & 0xFF); c = emit_byte(c, 0); c = emit_byte(c, 0); c = emit_byte(c, 0)
+        c = emit_byte(c, 0xf3); c = emit_byte(c, 0x48); c = emit_byte(c, 0xa5) // rep movsq
+        c = emit_byte(c, 0x59); c = emit_byte(c, 0x5f); c = emit_byte(c, 0x5e) // pop rcx,rdi,rsi
+        // Return sret dest address in rax (highest addr)
+        c = micro_load_rax(c, sret_dest_slot)
     }
-    // rax already has the result of the last expression
+
+    // If function has no return type, ensure rax=0
+    var has_return_type = false
+    match *rt_ref {
+        Some(rt2) => { has_return_type = true }
+        _ => {}
+    }
+    if !has_return_type {
+        c = emit_byte(c, 0x48); c = emit_byte(c, 0x31); c = emit_byte(c, 0xc0) // xor rax, rax
+    }
+
     c
 }
 
@@ -1664,13 +2320,108 @@ fn main() -> i64 with IO, Mut, Panic, Div, Alloc {
 
     // ---- AST-direct compilation (bypasses IR lowering + JIT Box bugs) ----
 
-    // Collect function names, return types from AST
+    // === Phase 0: Build struct registry ===
+    var ctx: AstCompileCtx = AstCompileCtx {
+        struct_count: 0,
+        struct_names: [ir_empty_name(); 16],
+        struct_flat_size: [0; 16],
+        struct_field_count: [0; 16],
+        struct_field_base: [0; 16],
+        sf_names: [ir_empty_name(); 128],
+        sf_flat_offset: [0; 128],
+        sf_type: [0; 128],
+        sf_flat_size: [0; 128],
+        fn_return_types: [0; 64],
+        fn_names: [ir_empty_name(); 64],
+        fn_count: 0,
+    }
+    var sf_next: i64 = 0  // next index in sf_* arrays
+
+    let items_ref0: &Option<Box<ItemList>> = &prog.items
+    var item_cur0 = items_ref0
+    while true {
+        match *item_cur0 {
+            Some(il) => {
+                let itm: &Item = &(*il).head
+                if itm.kind == ItemKind::ItemStruct {
+                    let sd_ref: &Option<Box<StructDef>> = &itm.struct_def
+                    match *sd_ref {
+                        Some(sd) => {
+                            let si = ctx.struct_count
+                            ctx.struct_names[si as usize] = (*sd).name
+                            ctx.struct_field_base[si as usize] = sf_next
+                            var field_count: i64 = 0
+                            var flat_off: i64 = 0
+                            let fld_ref: &Option<Box<FieldDefList>> = &(*sd).fields
+                            var fld_cur = fld_ref
+                            while true {
+                                match *fld_cur {
+                                    Some(fl) => {
+                                        let fld: &FieldDef = &(*fl).head
+                                        ctx.sf_names[sf_next as usize] = fld.name
+                                        ctx.sf_flat_offset[sf_next as usize] = flat_off
+                                        // Determine field type
+                                        let fty: &TypeExpr = &fld.ty
+                                        if fty.kind == TypeExprKind::TypeNamed {
+                                            if ast_type_is_f64(fty) {
+                                                ctx.sf_type[sf_next as usize] = 1
+                                                ctx.sf_flat_size[sf_next as usize] = 1
+                                                flat_off = flat_off + 1
+                                            } else {
+                                                // Check if it's another struct
+                                                let fty_name = ast_name_from_path(&fty.path)
+                                                let fty_si = ast_lookup_struct(&ctx, fty_name)
+                                                if fty_si >= 0 {
+                                                    ctx.sf_type[sf_next as usize] = 10 + fty_si
+                                                    let sub_sz = ctx.struct_flat_size[fty_si as usize]
+                                                    ctx.sf_flat_size[sf_next as usize] = sub_sz
+                                                    flat_off = flat_off + sub_sz
+                                                } else {
+                                                    // i64 or other scalar
+                                                    ctx.sf_type[sf_next as usize] = 0
+                                                    ctx.sf_flat_size[sf_next as usize] = 1
+                                                    flat_off = flat_off + 1
+                                                }
+                                            }
+                                        } else {
+                                            ctx.sf_type[sf_next as usize] = 0
+                                            ctx.sf_flat_size[sf_next as usize] = 1
+                                            flat_off = flat_off + 1
+                                        }
+                                        sf_next = sf_next + 1
+                                        field_count = field_count + 1
+                                        fld_cur = &(*fl).tail
+                                    }
+                                    _ => break
+                                }
+                            }
+                            ctx.struct_field_count[si as usize] = field_count
+                            ctx.struct_flat_size[si as usize] = flat_off
+                            print("render_compile: struct=")
+                            let sn = str_from_bytes((*sd).name.buf, (*sd).name.len)
+                            print(sn)
+                            print(" flat_size=")
+                            print_int(flat_off)
+                            print(" fields=")
+                            print_int(field_count)
+                            print("\n")
+                            ctx.struct_count = ctx.struct_count + 1
+                        }
+                        _ => {}
+                    }
+                }
+                item_cur0 = &(*il).tail
+            }
+            _ => break
+        }
+    }
+
+    // === Phase 1: Collect function names + return types ===
     var fn_names: [Name; 64] = [ir_empty_name(); 64]
-    var fn_return_types: [i64; 64] = [0; 64]  // 0=i64, 1=f64
+    var fn_return_types: [i64; 64] = [0; 64]  // 0=i64, 1=f64, 10+=struct
     var fn_count: i64 = 0
     var main_fn_idx: i64 = -1
 
-    // First pass: collect function names + return types
     let items_ref: &Option<Box<ItemList>> = &prog.items
     var item_cur = items_ref
     while true {
@@ -1679,7 +2430,7 @@ fn main() -> i64 with IO, Mut, Panic, Div, Alloc {
                 let itm: &Item = &(*il).head
                 if itm.kind == ItemKind::ItemFn {
                     fn_names[fn_count as usize] = itm.name
-                    // Detect return type
+                    // Detect return type: f64 → 1, struct → 10+idx, else → 0
                     let fdef_r: &Option<Box<FnDef>> = &itm.fn_def
                     match *fdef_r {
                         Some(fdr) => {
@@ -1688,6 +2439,12 @@ fn main() -> i64 with IO, Mut, Panic, Div, Alloc {
                                 Some(rte) => {
                                     if ast_type_is_f64(&(*rte)) {
                                         fn_return_types[fn_count as usize] = 1
+                                    } else if (*rte).kind == TypeExprKind::TypeNamed {
+                                        let rt_name = ast_name_from_path(&(*rte).path)
+                                        let rt_si = ast_lookup_struct(&ctx, rt_name)
+                                        if rt_si >= 0 {
+                                            fn_return_types[fn_count as usize] = 10 + rt_si
+                                        }
                                     }
                                 }
                                 _ => {}
@@ -1734,6 +2491,15 @@ fn main() -> i64 with IO, Mut, Panic, Div, Alloc {
     fn_return_types[fn_count as usize] = 0
     fn_count = fn_count + 1
 
+    // Populate ctx with function info
+    var cfi: i64 = 0
+    while cfi < fn_count {
+        ctx.fn_names[cfi as usize] = fn_names[cfi as usize]
+        ctx.fn_return_types[cfi as usize] = fn_return_types[cfi as usize]
+        cfi = cfi + 1
+    }
+    ctx.fn_count = fn_count
+
     print("render_compile: fn_count=")
     print_int(fn_count)
     print(" (incl builtins)\n")
@@ -1779,8 +2545,8 @@ fn main() -> i64 with IO, Mut, Panic, Div, Alloc {
                             print("render_compile: fn=")
                             print(ns)
 
-                            // Estimate frame size (conservative: 64 slots)
-                            let frame_size: i64 = 512
+                            // Large frame for struct temporaries + arrays
+                            let frame_size: i64 = 32768
                             // Prologue: push rbp; mov rbp, rsp; sub rsp, frame_size
                             code = emit_byte(code, 0x55)
                             code = emit_byte(code, 0x48)
@@ -1796,7 +2562,7 @@ fn main() -> i64 with IO, Mut, Panic, Div, Alloc {
 
                             // Compile body
                             let code_before = code.len
-                            code = ast_compile_fn_body(code, &(*fd), fn_names, fn_return_types, fn_count)
+                            code = ast_compile_fn_body(code, &(*fd), fn_names, fn_return_types, fn_count, &ctx)
 
                             // Epilogue: leave; ret
                             code = emit_byte(code, 0xc9)
