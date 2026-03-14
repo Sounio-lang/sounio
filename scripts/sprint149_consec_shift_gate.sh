@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# sprint148_double_not_gate.sh — Sprint 148: Block BJ double NOT cancel
+# sprint149_consec_shift_gate.sh — Sprint 149: Block BK consecutive shift fold
 #
-# Block BJ: ~(~x) → IrCopy(x)
-#   SOTA: LLVM InstCombineAndOrXor; Boolean double negation law; Hacker's Delight §2-2.
-#   Zero new arrays: reuses is_bnot/bnot_src from Block AI and Sprint 144.
+# Block BK: (x << A) << B → x << (A+B), (x >> A) >> B → x >> (A+B)  [A+B < 64]
+#   SOTA: LLVM InstCombineShifts.cpp FoldShiftByConstant; Cooper & Torczon §8.1.
+#   New arrays: bk_shl_valid/src/amt, bk_shr_valid/src/amt (6 arrays).
 set -eo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." ; pwd)"
@@ -36,48 +36,51 @@ check_log_line() {
     if grep -qF "$expected_line" "$log_file"; then
         echo "PASS  $name"; PASS=$((PASS+1))
     else
-        if ! grep -qF "T554" "$log_file" 2>/dev/null; then
-            echo "NOT_RUN  $name (OOM before T554)"; NOT_RUN=$((NOT_RUN+1))
+        if ! grep -qF "T560" "$log_file" 2>/dev/null; then
+            echo "NOT_RUN  $name (OOM before T560)"; NOT_RUN=$((NOT_RUN+1))
         else
             echo "FAIL  $name (expected '$expected_line')"; FAIL=$((FAIL+1))
         fi
     fi
 }
 
-echo "=== Sprint 148: Block BJ — Double NOT Cancel ==="
+echo "=== Sprint 149: Block BK — Consecutive Shift Fold ==="
 echo ""
 echo "--- Source ---"
 OPT_FILE="self-hosted/ir/opt_cleanup.sio"
-check_grep "src:block_bj_comment" "Block BJ.*[Dd]ouble NOT|Block BJ.*~~x" "$OPT_FILE"
-check_grep "src:bj_is_bnot_check" "is_bnot\[us as usize\]" "$OPT_FILE"
-check_grep "src:bj_ir_copy" "ir_copy.*bj_inner" "$OPT_FILE"
-check_grep "src:bj_opnot_guard" "OpNot.*is_bnot\[us as usize\]|is_bnot\[us as usize\].*OpNot" "$OPT_FILE"
+check_grep "src:block_bk_comment" "Block BK.*[Cc]onsecutive shift|Block BK.*shift.*fold" "$OPT_FILE"
+check_grep "src:bk_shl_valid_decl" "bk_shl_valid" "$OPT_FILE"
+check_grep "src:bk_shr_valid_decl" "bk_shr_valid" "$OPT_FILE"
+check_grep "src:bk_fold_shl" "bk_shl_valid\[bk_s1 as usize\]" "$OPT_FILE"
+check_grep "src:bk_fold_shr" "bk_shr_valid\[bk_s1 as usize\]" "$OPT_FILE"
+check_grep "src:bk_overflow_guard" "bk_ab.*< 64|bk_ab >= 0" "$OPT_FILE"
 
 echo ""
 echo "--- Tests ---"
 MAIN_FILE="self-hosted/compiler/main.sio"
-check_grep "main:T554_fn" "fn compiler_main_test_double_not_basic" "$MAIN_FILE"
-check_grep "main:T559_fn" "fn compiler_main_test_double_not_no_fold_diff_reg" "$MAIN_FILE"
+check_grep "main:T560_fn" "fn compiler_main_test_bk_shl_chain" "$MAIN_FILE"
+check_grep "main:T561_fn" "fn compiler_main_test_bk_shr_chain" "$MAIN_FILE"
+check_grep "main:T565_fn" "fn compiler_main_test_bk_no_fold_var_amount" "$MAIN_FILE"
 check_grep "main:total" "let total: i64 = [0-9]+" "$MAIN_FILE"
 
 echo ""
-echo "--- Self-tests: T554-T559 ---"
+echo "--- Self-tests: T560-T565 ---"
 SELF_TEST_LOG="$(mktemp)"
 if [ ! -x "$SOUC" ]; then
-    for name in "selftest:T554" "selftest:T555" "selftest:T556" \
-                "selftest:T557" "selftest:T558" "selftest:T559"; do
+    for name in "selftest:T560" "selftest:T561" "selftest:T562" \
+                "selftest:T563" "selftest:T564" "selftest:T565"; do
         TOTAL=$((TOTAL+1))
         echo "NOT_RUN  $name (souc not found)"; NOT_RUN=$((NOT_RUN+1))
     done
 else
     timeout 180 "$SOUC" run self-hosted/compiler/main.sio -- --self-test \
         > "$SELF_TEST_LOG" 2>&1 || _ec=$?
-    check_log_line "selftest:T554" "T554 OK" "$SELF_TEST_LOG"
-    check_log_line "selftest:T555" "T555 OK" "$SELF_TEST_LOG"
-    check_log_line "selftest:T556" "T556 OK" "$SELF_TEST_LOG"
-    check_log_line "selftest:T557" "T557 OK" "$SELF_TEST_LOG"
-    check_log_line "selftest:T558" "T558 OK" "$SELF_TEST_LOG"
-    check_log_line "selftest:T559" "T559 OK" "$SELF_TEST_LOG"
+    check_log_line "selftest:T560" "T560 OK" "$SELF_TEST_LOG"
+    check_log_line "selftest:T561" "T561 OK" "$SELF_TEST_LOG"
+    check_log_line "selftest:T562" "T562 OK" "$SELF_TEST_LOG"
+    check_log_line "selftest:T563" "T563 OK" "$SELF_TEST_LOG"
+    check_log_line "selftest:T564" "T564 OK" "$SELF_TEST_LOG"
+    check_log_line "selftest:T565" "T565 OK" "$SELF_TEST_LOG"
 fi
 rm -f "$SELF_TEST_LOG"
 
