@@ -10793,9 +10793,100 @@ fn compiler_main_test_sub_add_chain() -> bool with Mut, Div, Panic {
     opt.instrs[1].op == IrOpcode::IrCopy && opt.instrs[1].src1 == 0
 }
 
+// Sprint 140: Block BB — Constant mask merge (T506-T511)
+// (x & C1) | (x & C2) → IrCopy(x & C1) when C2 ⊆ C1
+// SOTA: LLVM InstCombineAndOrXor.cpp; Boolean algebra distributive axiom
+
+// T506: (x & 0xFF) | (x & 0x0F) → IrCopy(x & 0xFF)  [0x0F ⊆ 0xFF]
+fn compiler_main_test_mask_merge_subset() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    // r0 = x (implicit param)
+    instrs[0] = ir_load_imm(2, 255)                       // r2 = 0xFF
+    instrs[1] = ir_binop(3, 0, BinaryOp::OpBitAnd, 2)    // r3 = x & 0xFF
+    instrs[2] = ir_load_imm(4, 15)                        // r4 = 0x0F
+    instrs[3] = ir_binop(5, 0, BinaryOp::OpBitAnd, 4)    // r5 = x & 0x0F
+    instrs[4] = ir_binop(6, 3, BinaryOp::OpBitOr, 5)     // r6 = (x&0xFF) | (x&0x0F) → copy(r3)
+    instrs[5] = ir_return(6)
+    let func = cp_make_test_func(instrs, 6)
+    let opt = opt_cleanup_function(func)
+    opt.instrs[4].op == IrOpcode::IrCopy && opt.instrs[4].src1 == 3
+}
+
+// T507: (x & 0x0F) | (x & 0xFF) → IrCopy(x & 0xFF)  [C1 ⊆ C2, choose s2]
+fn compiler_main_test_mask_merge_subset_rev() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(2, 15)                        // r2 = 0x0F
+    instrs[1] = ir_binop(3, 0, BinaryOp::OpBitAnd, 2)    // r3 = x & 0x0F
+    instrs[2] = ir_load_imm(4, 255)                       // r4 = 0xFF
+    instrs[3] = ir_binop(5, 0, BinaryOp::OpBitAnd, 4)    // r5 = x & 0xFF
+    instrs[4] = ir_binop(6, 3, BinaryOp::OpBitOr, 5)     // r6 = (x&0x0F) | (x&0xFF) → copy(r5)
+    instrs[5] = ir_return(6)
+    let func = cp_make_test_func(instrs, 6)
+    let opt = opt_cleanup_function(func)
+    opt.instrs[4].op == IrOpcode::IrCopy && opt.instrs[4].src1 == 5
+}
+
+// T508: (x & 0xFF) | (x & 0xFF) → IrCopy(x & 0xFF)  [identical masks]
+fn compiler_main_test_mask_merge_identical() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(2, 255)
+    instrs[1] = ir_binop(3, 0, BinaryOp::OpBitAnd, 2)    // r3 = x & 0xFF
+    instrs[2] = ir_load_imm(4, 255)
+    instrs[3] = ir_binop(5, 0, BinaryOp::OpBitAnd, 4)    // r5 = x & 0xFF
+    instrs[4] = ir_binop(6, 3, BinaryOp::OpBitOr, 5)     // r6 = same | same → copy(r3)
+    instrs[5] = ir_return(6)
+    let func = cp_make_test_func(instrs, 6)
+    let opt = opt_cleanup_function(func)
+    opt.instrs[4].op == IrOpcode::IrCopy && opt.instrs[4].src1 == 3
+}
+
+// T509: (x & 0xF0) | (x & 0x0F) — non-overlapping masks, no subset → no fold
+fn compiler_main_test_mask_merge_no_subset() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(2, 240)                       // r2 = 0xF0
+    instrs[1] = ir_binop(3, 0, BinaryOp::OpBitAnd, 2)    // r3 = x & 0xF0
+    instrs[2] = ir_load_imm(4, 15)                        // r4 = 0x0F
+    instrs[3] = ir_binop(5, 0, BinaryOp::OpBitAnd, 4)    // r5 = x & 0x0F
+    instrs[4] = ir_binop(6, 3, BinaryOp::OpBitOr, 5)     // r6 = (x&0xF0) | (x&0x0F) — no subset
+    instrs[5] = ir_return(6)
+    let func = cp_make_test_func(instrs, 6)
+    let opt = opt_cleanup_function(func)
+    // Should remain as OR — neither mask is a subset of the other
+    opt.instrs[4].op == IrOpcode::IrBinOp && opt.instrs[4].bin_op == BinaryOp::OpBitOr
+}
+
+// T510: (x & C1) | (y & C2) — different base vars, no fold
+fn compiler_main_test_mask_merge_diff_base() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(2, 255)
+    instrs[1] = ir_binop(3, 0, BinaryOp::OpBitAnd, 2)    // r3 = x & 0xFF
+    instrs[2] = ir_load_imm(4, 15)
+    instrs[3] = ir_binop(5, 1, BinaryOp::OpBitAnd, 4)    // r5 = y & 0x0F  (different base r1≠r0)
+    instrs[4] = ir_binop(6, 3, BinaryOp::OpBitOr, 5)     // r6 = (x&0xFF) | (y&0x0F) — no fold
+    instrs[5] = ir_return(6)
+    let func = cp_make_test_func(instrs, 6)
+    let opt = opt_cleanup_function(func)
+    opt.instrs[4].op == IrOpcode::IrBinOp && opt.instrs[4].bin_op == BinaryOp::OpBitOr
+}
+
+// T511: (x & 0xFF) | (x & 0x07) result used downstream
+fn compiler_main_test_mask_merge_used() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(2, 255)
+    instrs[1] = ir_binop(3, 0, BinaryOp::OpBitAnd, 2)    // r3 = x & 0xFF
+    instrs[2] = ir_load_imm(4, 7)
+    instrs[3] = ir_binop(5, 0, BinaryOp::OpBitAnd, 4)    // r5 = x & 0x07
+    instrs[4] = ir_binop(6, 3, BinaryOp::OpBitOr, 5)     // r6 → copy(r3)
+    instrs[5] = ir_binop(7, 6, BinaryOp::OpAdd, 1)       // r7 = result + y
+    instrs[6] = ir_return(7)
+    let func = cp_make_test_func(instrs, 7)
+    let opt = opt_cleanup_function(func)
+    opt.instrs[4].op == IrOpcode::IrCopy && opt.instrs[4].src1 == 3
+}
+
 fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
     var passed: i64 = 0
-    let total: i64 = 505
+    let total: i64 = 511
 
     println("=== compiler/main.sio self-tests ===")
 
@@ -13801,6 +13892,32 @@ fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
         println("  T505 OK: Sprint 139 Block BA: (a-b)+b result used downstream")
         passed = passed + 1
     } else { println("  FAIL: T505") }
+
+    // Sprint 140 Block BB: Constant mask merge (T506-T511)
+    if compiler_main_test_mask_merge_subset() {
+        println("  T506 OK: Sprint 140 Block BB: (x&0xFF)|(x&0x0F) → copy [subset]")
+        passed = passed + 1
+    } else { println("  FAIL: T506") }
+    if compiler_main_test_mask_merge_subset_rev() {
+        println("  T507 OK: Sprint 140 Block BB: (x&0x0F)|(x&0xFF) → copy [rev subset]")
+        passed = passed + 1
+    } else { println("  FAIL: T507") }
+    if compiler_main_test_mask_merge_identical() {
+        println("  T508 OK: Sprint 140 Block BB: (x&0xFF)|(x&0xFF) → copy [identical]")
+        passed = passed + 1
+    } else { println("  FAIL: T508") }
+    if compiler_main_test_mask_merge_no_subset() {
+        println("  T509 OK: Sprint 140 Block BB: (x&0xF0)|(x&0x0F) no fold [negative]")
+        passed = passed + 1
+    } else { println("  FAIL: T509") }
+    if compiler_main_test_mask_merge_diff_base() {
+        println("  T510 OK: Sprint 140 Block BB: (x&C)|(y&C) diff base [negative]")
+        passed = passed + 1
+    } else { println("  FAIL: T510") }
+    if compiler_main_test_mask_merge_used() {
+        println("  T511 OK: Sprint 140 Block BB: mask merge result used downstream")
+        passed = passed + 1
+    } else { println("  FAIL: T511") }
 
     println("")
     println("compiler/main tests: " + int_to_string(passed) + "/" + int_to_string(total) + " passed")

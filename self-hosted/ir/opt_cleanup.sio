@@ -1322,6 +1322,59 @@ fn ocp_const_fold(func: IrFunction) -> IrFunction with Mut, Div, Panic {
             }
         }
 
+        // Sprint 140 Block BB: Constant mask merge via distributive law.
+        // (x & C1) | (x & C2) → IrCopy(x & C1) when C2 is a subset of C1.
+        // Full merge to x & (C1|C2) deferred (needs instruction allocation).
+        // Uses and_valid/and_var_src/and_const_val tracking from Block AE.
+        // Dual: (x | C1) & (x | C2) → IrCopy(x | C1) when C2 is superset of C1.
+        // SOTA: LLVM InstCombineAndOrXor.cpp; Boolean algebra distributive axiom.
+        if ocp_is_binop(result.instrs[i as usize].op) {
+            let bb_instr = result.instrs[i as usize]
+            let bb_s1 = bb_instr.src1
+            let bb_s2 = bb_instr.src2
+            let bb_s1_ok = bb_s1 >= 0 && bb_s1 < 256
+            let bb_s2_ok = bb_s2 >= 0 && bb_s2 < 256
+            // (x & C1) | (x & C2) where C2 subset of C1 → IrCopy(s1)
+            // Proof: C2 ⊆ C1 means (C1 | C2) = C1, so x&C1 | x&C2 = x&C1.
+            if bb_instr.bin_op == BinaryOp::OpBitOr
+                    && bb_s1_ok && and_valid[bb_s1 as usize]
+                    && bb_s2_ok && and_valid[bb_s2 as usize]
+                    && and_var_src[bb_s1 as usize] == and_var_src[bb_s2 as usize] {
+                let bb_c1 = and_const_val[bb_s1 as usize]
+                let bb_c2 = and_const_val[bb_s2 as usize]
+                // C2 ⊆ C1: (C2 & C1) == C2
+                if (bb_c2 & bb_c1) == bb_c2 {
+                    result.instrs[i as usize] = ir_copy(bb_instr.dst, bb_s1)
+                }
+                // C1 ⊆ C2: (C1 & C2) == C1
+                if (bb_c1 & bb_c2) == bb_c1 {
+                    result.instrs[i as usize] = ir_copy(bb_instr.dst, bb_s2)
+                }
+                // C1 == C2: identical masks → IrCopy (same result, either operand)
+                if bb_c1 == bb_c2 {
+                    result.instrs[i as usize] = ir_copy(bb_instr.dst, bb_s1)
+                }
+            }
+            // Dual: (x | C1) & (x | C2) where C1 subset of C2 → IrCopy(s1)
+            // Proof: C1 ⊆ C2 means (C1 & C2) = C1, so (x|C1) & (x|C2) = x|C1.
+            if bb_instr.bin_op == BinaryOp::OpBitAnd
+                    && bb_s1_ok && am_or_valid[bb_s1 as usize]
+                    && bb_s2_ok && am_or_valid[bb_s2 as usize]
+                    && am_or_var_src[bb_s1 as usize] == am_or_var_src[bb_s2 as usize] {
+                let bb_c1 = am_or_const_val[bb_s1 as usize]
+                let bb_c2 = am_or_const_val[bb_s2 as usize]
+                if (bb_c1 & bb_c2) == bb_c1 {
+                    result.instrs[i as usize] = ir_copy(bb_instr.dst, bb_s1)
+                }
+                if (bb_c2 & bb_c1) == bb_c2 {
+                    result.instrs[i as usize] = ir_copy(bb_instr.dst, bb_s2)
+                }
+                if bb_c1 == bb_c2 {
+                    result.instrs[i as usize] = ir_copy(bb_instr.dst, bb_s1)
+                }
+            }
+        }
+
                 // Sprint 82 Block J: Unary operation constant folding.
         // Folds IrUnaryOp when the source operand is a known constant.
         // Only OpNeg and OpNot are foldable (Ref/RefMut/Deref are memory ops).
