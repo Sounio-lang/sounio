@@ -79,6 +79,11 @@ fn io_write_native_binary(path: string, bytes: [i8; 65536], len: i64) -> bool wi
     io_write_bytes_to_file(path, bytes, len)
 }
 
+fn io_write_wide_binary(path: string, bytes: [i8; 262144], len: i64) -> bool with IO {
+    let result = write_file(path, bytes, len)
+    result == 0
+}
+
 SECTION_SEPARATOR
 
 echo "--- Appending lean driver (stripped of use/module lines)"
