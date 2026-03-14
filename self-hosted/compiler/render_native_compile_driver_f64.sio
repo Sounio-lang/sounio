@@ -888,6 +888,71 @@ fn code_set_ns(c: CodeBuffer, ns: i64) -> CodeBuffer with Mut, Panic {
     r
 }
 
+// Loop context stack in high bytes [65400..65529]
+// bytes[65529] = current loop level (-1=none, 0,1,2 = nesting)
+// Per level, 64 bytes starting at base = 65400 + level*64 (but only 3 levels: 0,1,2)
+//   +0..3 = loop_top (continue target, i32)
+//   +4..5 = break_count (u16)
+//   +8..n = break_patches[i] (i32 each, up to 13 patches)
+// Returns -1 when no loop is active (0xFF byte = 255 = -1 when sign-extended)
+fn lctx_level(c: CodeBuffer) -> i64 with Mut, Panic {
+    let raw = (c.bytes[65529 as usize] as i64) & 0xFF
+    if raw == 255 { -1 } else { raw }
+}
+fn lctx_set_level(c: CodeBuffer, v: i64) -> CodeBuffer with Mut, Panic {
+    var r = c
+    // -1 stored as 0xFF
+    if v < 0 { r.bytes[65529 as usize] = (0xFF as i8) } else { r.bytes[65529 as usize] = v as i8 }
+    r
+}
+fn lctx_base(level: i64) -> i64 {
+    65400 + level * 64
+}
+fn lctx_get_top(c: CodeBuffer, level: i64) -> i64 with Mut, Panic {
+    let b = lctx_base(level)
+    ((c.bytes[b as usize] as i64) & 0xFF) |
+    (((c.bytes[(b+1) as usize] as i64) & 0xFF) << 8) |
+    (((c.bytes[(b+2) as usize] as i64) & 0xFF) << 16) |
+    (((c.bytes[(b+3) as usize] as i64) & 0xFF) << 24)
+}
+fn lctx_set_top(c: CodeBuffer, level: i64, v: i64) -> CodeBuffer with Mut, Panic {
+    var r = c
+    let b = lctx_base(level)
+    r.bytes[b as usize] = (v & 0xFF) as i8
+    r.bytes[(b+1) as usize] = ((v >> 8) & 0xFF) as i8
+    r.bytes[(b+2) as usize] = ((v >> 16) & 0xFF) as i8
+    r.bytes[(b+3) as usize] = ((v >> 24) & 0xFF) as i8
+    r
+}
+fn lctx_get_break_count(c: CodeBuffer, level: i64) -> i64 with Mut, Panic {
+    let b = lctx_base(level) + 4
+    ((c.bytes[b as usize] as i64) & 0xFF) |
+    (((c.bytes[(b+1) as usize] as i64) & 0xFF) << 8)
+}
+fn lctx_set_break_count(c: CodeBuffer, level: i64, v: i64) -> CodeBuffer with Mut, Panic {
+    var r = c
+    let b = lctx_base(level) + 4
+    r.bytes[b as usize] = (v & 0xFF) as i8
+    r.bytes[(b+1) as usize] = ((v >> 8) & 0xFF) as i8
+    r
+}
+fn lctx_get_break_patch(c: CodeBuffer, level: i64, i: i64) -> i64 with Mut, Panic {
+    let b = lctx_base(level) + 8 + (i * 4)
+    ((c.bytes[b as usize] as i64) & 0xFF) |
+    (((c.bytes[(b+1) as usize] as i64) & 0xFF) << 8) |
+    (((c.bytes[(b+2) as usize] as i64) & 0xFF) << 16) |
+    (((c.bytes[(b+3) as usize] as i64) & 0xFF) << 24)
+}
+fn lctx_set_break_patch(c: CodeBuffer, level: i64, i: i64, v: i64) -> CodeBuffer with Mut, Panic {
+    var r = c
+    let b = lctx_base(level) + 8 + (i * 4)
+    r.bytes[b as usize] = (v & 0xFF) as i8
+    r.bytes[(b+1) as usize] = ((v >> 8) & 0xFF) as i8
+    r.bytes[(b+2) as usize] = ((v >> 16) & 0xFF) as i8
+    r.bytes[(b+3) as usize] = ((v >> 24) & 0xFF) as i8
+    r
+}
+
 fn micro_lea_rax_slot(code: CodeBuffer, slot: i64) -> CodeBuffer with Mut, Panic, Div {
     // lea rax, [rbp - 8*(slot+1)]
     var c = code
@@ -1808,7 +1873,14 @@ fn ast_compile_expr(code: CodeBuffer, expr: &Expr,
         c.bytes[(jmp_site + 4) as usize] = ((jmp_disp >> 24) & 0xFF) as i8
         c
     } else if expr.kind == ExprKind::ExprWhile {
+        // Push loop level (-1 = no loop → 0; 0 → 1; etc.)
+        let prev_level = lctx_level(c)
+        let level = if prev_level < 0 { 0 } else { prev_level + 1 }
+        c = lctx_set_level(c, level)
         let loop_top = c.len
+        c = lctx_set_top(c, level, loop_top)
+        c = lctx_set_break_count(c, level, 0)
+        // Compile condition
         let wcond_ref: &Option<Box<Expr>> = &expr.left
         match *wcond_ref {
             Some(wce) => {
@@ -1820,6 +1892,7 @@ fn ast_compile_expr(code: CodeBuffer, expr: &Expr,
         let wjz_site = c.len
         c = emit_byte(c, 0x0f); c = emit_byte(c, 0x84)
         c = emit_byte(c, 0); c = emit_byte(c, 0); c = emit_byte(c, 0); c = emit_byte(c, 0)
+        // Compile body
         let wbody_ref: &Option<Box<Block>> = &expr.block
         match *wbody_ref {
             Some(wb) => {
@@ -1827,6 +1900,7 @@ fn ast_compile_expr(code: CodeBuffer, expr: &Expr,
             }
             _ => {}
         }
+        // JMP back to loop top
         let jback_site = c.len
         let jback_disp = loop_top - (jback_site + 5)
         c = emit_byte(c, 0xe9)
@@ -1835,11 +1909,50 @@ fn ast_compile_expr(code: CodeBuffer, expr: &Expr,
         c = emit_byte(c, (jback_disp >> 16) & 0xFF)
         c = emit_byte(c, (jback_disp >> 24) & 0xFF)
         let wend_off = c.len
+        // Patch JZ (condition exit) to wend_off
         let wjz_disp = wend_off - (wjz_site + 6)
         c.bytes[(wjz_site + 2) as usize] = (wjz_disp & 0xFF) as i8
         c.bytes[(wjz_site + 3) as usize] = ((wjz_disp >> 8) & 0xFF) as i8
         c.bytes[(wjz_site + 4) as usize] = ((wjz_disp >> 16) & 0xFF) as i8
         c.bytes[(wjz_site + 5) as usize] = ((wjz_disp >> 24) & 0xFF) as i8
+        // Patch all break jumps to wend_off
+        var wbi: i64 = 0
+        let wbc = lctx_get_break_count(c, level)
+        while wbi < wbc {
+            let wbp = lctx_get_break_patch(c, level, wbi)
+            let wbd = wend_off - (wbp + 4)
+            c.bytes[(wbp) as usize] = (wbd & 0xFF) as i8
+            c.bytes[(wbp + 1) as usize] = ((wbd >> 8) & 0xFF) as i8
+            c.bytes[(wbp + 2) as usize] = ((wbd >> 16) & 0xFF) as i8
+            c.bytes[(wbp + 3) as usize] = ((wbd >> 24) & 0xFF) as i8
+            wbi = wbi + 1
+        }
+        // Pop loop level
+        c = lctx_set_level(c, prev_level)
+        c = emit_byte(c, 0x48); c = emit_byte(c, 0x31); c = emit_byte(c, 0xc0)
+        c
+    } else if expr.kind == ExprKind::ExprBreak {
+        // Emit JMP rel32 placeholder; record patch site for enclosing while
+        let blevel = lctx_level(c)
+        c = emit_byte(c, 0xe9)
+        let bpatch = c.len
+        c = emit_byte(c, 0); c = emit_byte(c, 0); c = emit_byte(c, 0); c = emit_byte(c, 0)
+        let bcount = lctx_get_break_count(c, blevel)
+        c = lctx_set_break_patch(c, blevel, bcount, bpatch)
+        c = lctx_set_break_count(c, blevel, bcount + 1)
+        c = emit_byte(c, 0x48); c = emit_byte(c, 0x31); c = emit_byte(c, 0xc0)
+        c
+    } else if expr.kind == ExprKind::ExprContinue {
+        // JMP back to loop top
+        let clevel = lctx_level(c)
+        let ctop = lctx_get_top(c, clevel)
+        let csite = c.len
+        let cdisp = ctop - (csite + 5)
+        c = emit_byte(c, 0xe9)
+        c = emit_byte(c, cdisp & 0xFF)
+        c = emit_byte(c, (cdisp >> 8) & 0xFF)
+        c = emit_byte(c, (cdisp >> 16) & 0xFF)
+        c = emit_byte(c, (cdisp >> 24) & 0xFF)
         c = emit_byte(c, 0x48); c = emit_byte(c, 0x31); c = emit_byte(c, 0xc0)
         c
     } else if expr.kind == ExprKind::ExprReturn {
@@ -2655,6 +2768,7 @@ fn main() -> i64 with IO, Mut, Panic, Div, Alloc {
 
     // Second pass: emit builtins + compile source functions
     var code = code_buffer_new()
+    code = lctx_set_level(code, -1)  // No loop active
     var fn_offsets: [i64; 256] = [-1; 256]
     var call_patches: [i64; 256] = [0; 256]  // code offset of each call rel32
     var call_targets: [i64; 256] = [0; 256]  // target fn index for each call
