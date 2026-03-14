@@ -3264,6 +3264,35 @@ fn ocp_const_fold(func: IrFunction) -> IrFunction with Mut, Div, Panic {
             }
         }
 
+        // Sprint 196 Block DF: OR self-complement — x | ~x → -1, ~x | x → -1.
+        // Proof: x|~x: for each bit, xi|(1-xi)=1. All bits 1 → -1. QED.
+        // Complement law / law of excluded middle in Boolean algebra.
+        // Zero new arrays: uses is_bnot/bnot_src (Block BF) + def_at.
+        // SOTA: LLVM InstCombineAndOrXor; Boolean algebra complementation; Hacker's Delight §2-1.
+        if ocp_is_binop(result.instrs[i as usize].op) {
+            let df_instr = result.instrs[i as usize]
+            let df_s1 = df_instr.src1; let df_s2 = df_instr.src2
+            let df_s1_ok = df_s1 >= 0 && df_s1 < 256; let df_s2_ok = df_s2 >= 0 && df_s2 < 256
+            if df_instr.bin_op == BinaryOp::OpBitOr {
+                // x | ~x → -1: s2 is NOT and its source is s1
+                if df_s1_ok && df_s2_ok && is_bnot[df_s2 as usize]
+                        && bnot_src[df_s2 as usize] == df_s1 {
+                    result.instrs[i as usize] = ir_load_imm(df_instr.dst, -1)
+                    is_const[df_instr.dst as usize] = true
+                    const_val[df_instr.dst as usize] = -1
+                    def_at[df_instr.dst as usize] = i
+                }
+                // ~x | x → -1: s1 is NOT and its source is s2
+                if df_s1_ok && df_s2_ok && is_bnot[df_s1 as usize]
+                        && bnot_src[df_s1 as usize] == df_s2 {
+                    result.instrs[i as usize] = ir_load_imm(df_instr.dst, -1)
+                    is_const[df_instr.dst as usize] = true
+                    const_val[df_instr.dst as usize] = -1
+                    def_at[df_instr.dst as usize] = i
+                }
+            }
+        }
+
         // Sprint 177 Block CM: AND complement XOR partition — (x & C) ^ (x & ~C) → x.
         // Proof: C-bits: (xi&1)^(xi&0)=xi^0=xi. Non-C: (xi&0)^(xi&1)=0^xi=xi. QED.
         // Dual of Block CC (OR partition). Commutative: (x&~C)^(x&C) → x.
