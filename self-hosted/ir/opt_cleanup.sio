@@ -3708,6 +3708,49 @@ fn ocp_const_fold(func: IrFunction) -> IrFunction with Mut, Div, Panic {
             }
         }
 
+        // Sprint 210 Block DT: OR-AND complement absorption — x | (y & ~x) → x | y.
+        // Proof: x|(y&~x) = (x|y)&(x|~x) = (x|y)&1 = x|y. Distributive+complement law.
+        // Commutative: (y & ~x) | x → x | y.
+        // Zero new arrays: uses ao_and_rr_valid/lhs/rhs (Block AO) + is_bnot/bnot_src (Block AI/BJ).
+        // SOTA: LLVM InstCombineAndOrXor; Boolean absorption; Huntington 1904.
+        if ocp_is_binop(result.instrs[i as usize].op) {
+            let dt_instr = result.instrs[i as usize]
+            let dt_s1 = dt_instr.src1; let dt_s2 = dt_instr.src2
+            let dt_s1_ok = dt_s1 >= 0 && dt_s1 < 256; let dt_s2_ok = dt_s2 >= 0 && dt_s2 < 256
+            if dt_instr.bin_op == BinaryOp::OpBitOr && dt_s1_ok && dt_s2_ok {
+                // Case 1: s2 = y & ~s1
+                if ao_and_rr_valid[dt_s2 as usize] {
+                    let dt_al = ao_and_rr_lhs[dt_s2 as usize]
+                    let dt_ar = ao_and_rr_rhs[dt_s2 as usize]
+                    let dt_al_ok = dt_al >= 0 && dt_al < 256; let dt_ar_ok = dt_ar >= 0 && dt_ar < 256
+                    // Check ~s1 on rhs: ar is NOT(s1)
+                    if dt_ar_ok && is_bnot[dt_ar as usize] && bnot_src[dt_ar as usize] == dt_s1 && dt_al_ok {
+                        result.instrs[i as usize] = ir_binop(dt_instr.dst, dt_s1, BinaryOp::OpBitOr, dt_al)
+                    }
+                    // Check ~s1 on lhs: al is NOT(s1)
+                    if dt_al_ok && is_bnot[dt_al as usize] && bnot_src[dt_al as usize] == dt_s1 && dt_ar_ok {
+                        if result.instrs[i as usize].src1 == dt_s1 && result.instrs[i as usize].src2 == dt_al {
+                            result.instrs[i as usize] = ir_binop(dt_instr.dst, dt_s1, BinaryOp::OpBitOr, dt_ar)
+                        }
+                    }
+                }
+                // Case 2: s1 = y & ~s2 (commutative outer OR)
+                if ao_and_rr_valid[dt_s1 as usize] {
+                    let dt_bl = ao_and_rr_lhs[dt_s1 as usize]
+                    let dt_br = ao_and_rr_rhs[dt_s1 as usize]
+                    let dt_bl_ok = dt_bl >= 0 && dt_bl < 256; let dt_br_ok = dt_br >= 0 && dt_br < 256
+                    if dt_br_ok && is_bnot[dt_br as usize] && bnot_src[dt_br as usize] == dt_s2 && dt_bl_ok {
+                        result.instrs[i as usize] = ir_binop(dt_instr.dst, dt_s2, BinaryOp::OpBitOr, dt_bl)
+                    }
+                    if dt_bl_ok && is_bnot[dt_bl as usize] && bnot_src[dt_bl as usize] == dt_s2 && dt_br_ok {
+                        if result.instrs[i as usize].src1 == dt_s1 && result.instrs[i as usize].src2 == dt_s2 {
+                            result.instrs[i as usize] = ir_binop(dt_instr.dst, dt_s2, BinaryOp::OpBitOr, dt_br)
+                        }
+                    }
+                }
+            }
+        }
+
         // Sprint 177 Block CM: AND complement XOR partition — (x & C) ^ (x & ~C) → x.
         // Proof: C-bits: (xi&1)^(xi&0)=xi^0=xi. Non-C: (xi&0)^(xi&1)=0^xi=xi. QED.
         // Dual of Block CC (OR partition). Commutative: (x&~C)^(x&C) → x.
