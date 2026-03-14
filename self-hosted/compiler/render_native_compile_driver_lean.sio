@@ -1654,6 +1654,156 @@ fn ast_compile_expr(code: CodeBuffer, expr: &Expr,
             }
         }
         c
+    } else if expr.kind == ExprKind::ExprMethodCall {
+        // receiver.method(args) — look up method by name, prepend receiver as arg 0
+        let mc_method_name = expr.name
+        // Find method in local_names (functions registered as negative-slot locals)
+        var mc_fn_slot: i64 = -1
+        var mc_ret_type: i64 = 0
+        var mfi: i64 = local_count - 1
+        while mfi >= 0 {
+            if ir_name_eq(local_names[mfi as usize], mc_method_name) {
+                mc_fn_slot = local_slots[mfi as usize]
+                mc_ret_type = local_types[mfi as usize]
+                mfi = -1  // break
+            } else {
+                mfi = mfi - 1
+            }
+        }
+        // Determine sret
+        var mc_sret = false
+        var mc_sret_idx: i64 = -1
+        var mc_sret_flat: i64 = 0
+        if mc_ret_type >= 10 && mc_ret_type < 100 {
+            mc_sret = true
+            mc_sret_idx = mc_ret_type - 10
+            mc_sret_flat = ctx.struct_flat_size[mc_sret_idx as usize]
+        }
+        var mc_sret_base: i64 = 0
+        if mc_sret {
+            var mc_sns = code_get_ns(c)
+            mc_sret_base = mc_sns
+            mc_sns = mc_sns + mc_sret_flat
+            c = code_set_ns(c, mc_sns)
+        }
+        // Arg 0 = receiver (expr.left)
+        var mc_arg_slots: [i64; 16] = [0; 16]
+        var mc_arg_count: i64 = 0
+        let mc_recv_ref: &Option<Box<Expr>> = &expr.left
+        match *mc_recv_ref {
+            Some(mc_re) => {
+                c = ast_compile_expr(c, &(*mc_re), local_names, local_slots, local_types, local_count, ctx)
+            }
+            _ => {
+                c = emit_byte(c, 0x48); c = emit_byte(c, 0x31); c = emit_byte(c, 0xc0)
+            }
+        }
+        var mc_ns0 = code_get_ns(c)
+        let mc_r_slot = mc_ns0
+        mc_ns0 = mc_ns0 + 1
+        c = code_set_ns(c, mc_ns0)
+        c = micro_store_rax(c, mc_r_slot)
+        mc_arg_slots[0] = mc_r_slot
+        mc_arg_count = 1
+        // Remaining args
+        let mc_args_ref: &Option<Box<ExprList>> = &expr.args
+        var mc_arg_cur = mc_args_ref
+        while true {
+            match *mc_arg_cur {
+                Some(mc_al) => {
+                    c = ast_compile_expr(c, &(*mc_al).head, local_names, local_slots, local_types, local_count, ctx)
+                    var mc_ns1 = code_get_ns(c)
+                    let mc_as = mc_ns1
+                    mc_ns1 = mc_ns1 + 1
+                    c = code_set_ns(c, mc_ns1)
+                    c = micro_store_rax(c, mc_as)
+                    mc_arg_slots[mc_arg_count as usize] = mc_as
+                    mc_arg_count = mc_arg_count + 1
+                    mc_arg_cur = &(*mc_al).tail
+                }
+                _ => break
+            }
+        }
+        // Register setup — same convention as ExprCall
+        var mc_reg_shift: i64 = 0
+        if mc_sret { mc_reg_shift = 1 }
+        let mc_stack_start = 6 - mc_reg_shift
+        var mc_stack_count: i64 = 0
+        if mc_arg_count > mc_stack_start {
+            var mc_sa = mc_arg_count - 1
+            while mc_sa >= mc_stack_start {
+                c = micro_load_rax(c, mc_arg_slots[mc_sa as usize])
+                c = emit_byte(c, 0x50)
+                mc_stack_count = mc_stack_count + 1
+                mc_sa = mc_sa - 1
+            }
+        }
+        var mc_max_reg = mc_arg_count
+        if mc_max_reg > mc_stack_start { mc_max_reg = mc_stack_start }
+        if mc_reg_shift + mc_max_reg > 5 {
+            let mc_a5 = 5 - mc_reg_shift
+            if mc_a5 >= 0 && mc_a5 < mc_arg_count {
+                c = micro_load_rax(c, mc_arg_slots[mc_a5 as usize])
+                c = emit_byte(c, 0x49); c = emit_byte(c, 0x89); c = emit_byte(c, 0xc1) // mov r9, rax
+            }
+        }
+        if mc_reg_shift + mc_max_reg > 4 {
+            let mc_a4 = 4 - mc_reg_shift
+            if mc_a4 >= 0 && mc_a4 < mc_arg_count {
+                c = micro_load_rax(c, mc_arg_slots[mc_a4 as usize])
+                c = emit_byte(c, 0x49); c = emit_byte(c, 0x89); c = emit_byte(c, 0xc0) // mov r8, rax
+            }
+        }
+        if mc_reg_shift + mc_max_reg > 3 {
+            let mc_a3 = 3 - mc_reg_shift
+            if mc_a3 >= 0 && mc_a3 < mc_arg_count {
+                c = micro_load_rax(c, mc_arg_slots[mc_a3 as usize])
+                c = emit_byte(c, 0x48); c = emit_byte(c, 0x89); c = emit_byte(c, 0xc1) // mov rcx, rax
+            }
+        }
+        if mc_reg_shift + mc_max_reg > 2 {
+            let mc_a2 = 2 - mc_reg_shift
+            if mc_a2 >= 0 && mc_a2 < mc_arg_count {
+                c = micro_load_rax(c, mc_arg_slots[mc_a2 as usize])
+                c = emit_byte(c, 0x48); c = emit_byte(c, 0x89); c = emit_byte(c, 0xc2) // mov rdx, rax
+            }
+        }
+        if mc_reg_shift + mc_max_reg > 1 {
+            let mc_a1 = 1 - mc_reg_shift
+            if mc_a1 >= 0 && mc_a1 < mc_arg_count {
+                c = micro_load_rax(c, mc_arg_slots[mc_a1 as usize])
+                c = emit_byte(c, 0x48); c = emit_byte(c, 0x89); c = emit_byte(c, 0xc6) // mov rsi, rax
+            }
+        }
+        if mc_sret {
+            c = micro_lea_rax_slot(c, mc_sret_base)
+            c = emit_byte(c, 0x48); c = emit_byte(c, 0x89); c = emit_byte(c, 0xc7) // mov rdi, rax
+        } else {
+            if mc_max_reg > 0 {
+                c = micro_load_rax(c, mc_arg_slots[0])
+                c = emit_byte(c, 0x48); c = emit_byte(c, 0x89); c = emit_byte(c, 0xc7) // mov rdi, rax
+            }
+        }
+        // Emit call sentinel
+        if mc_fn_slot <= -1000 {
+            let mc_ti = 0 - (mc_fn_slot + 1000)
+            c = emit_byte(c, 0xe8)
+            c = emit_byte(c, mc_ti & 0xFF)
+            c = emit_byte(c, (mc_ti >> 8) & 0xFF)
+            c = emit_byte(c, 0xCA as i64)
+            c = emit_byte(c, 0xFE as i64)
+        }
+        // Clean stack
+        if mc_stack_count > 0 {
+            let mc_cleanup = mc_stack_count * 8
+            c = emit_byte(c, 0x48); c = emit_byte(c, 0x81); c = emit_byte(c, 0xc4)
+            c = emit_byte(c, mc_cleanup & 0xFF); c = emit_byte(c, (mc_cleanup >> 8) & 0xFF)
+            c = emit_byte(c, 0); c = emit_byte(c, 0)
+        }
+        if mc_sret {
+            c = micro_lea_rax_slot(c, mc_sret_base)
+        }
+        c
     } else if expr.kind == ExprKind::ExprCall {
         let callee_opt: &Option<Box<Expr>> = &expr.left
         var callee_name = ir_empty_name()
