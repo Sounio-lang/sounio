@@ -306,6 +306,13 @@ fn ocp_const_fold(func: IrFunction) -> IrFunction with Mut, Div, Panic {
     var bm_xor_src:   [i64;  256] = [-1;    256]
     var bm_xor_cval:  [i64;  256] = [0;     256]
 
+    // Sprint 157 Block BS: Consecutive subtract-constant fold — (x - C1) - C2 → x - (C1+C2).
+    // Mirrors Block BG (OR-chain) and Block BM (XOR-chain) for subtraction.
+    // SOTA: LLVM InstCombineAddSub; Cooper & Torczon §8.2; associative arithmetic.
+    var bs_sub_valid: [bool; 256] = [false; 256]
+    var bs_sub_src:   [i64;  256] = [-1;    256]
+    var bs_sub_cval:  [i64;  256] = [0;     256]
+
     var i: i64 = 0
     while i < result.instr_count {
         let instr = result.instrs[i as usize]
@@ -1950,6 +1957,52 @@ fn ocp_const_fold(func: IrFunction) -> IrFunction with Mut, Div, Panic {
                         const_val[br_instr.dst as usize] = -1
                         def_at[br_instr.dst as usize] = i
                     }
+                }
+            }
+        }
+
+        // Sprint 157 Block BS: Consecutive subtract-constant fold — (x-C1)-C2 → x-(C1+C2).
+        // Mirrors Block BG (OR) and Block BM (XOR-chain) for subtraction.
+        // Zero new arrays beyond bs_sub_valid/src/cval; reuses is_const/const_val/def_at.
+        // SOTA: LLVM InstCombineAddSub.cpp; Cooper & Torczon §8.2; arithmetic associativity.
+        if ocp_is_binop(result.instrs[i as usize].op) {
+            let bs_instr = result.instrs[i as usize]
+            let bs_s1 = bs_instr.src1; let bs_s2 = bs_instr.src2
+            let bs_s1_ok = bs_s1 >= 0 && bs_s1 < 256; let bs_s2_ok = bs_s2 >= 0 && bs_s2 < 256
+            if bs_instr.bin_op == BinaryOp::OpSub && bs_s1_ok && bs_s2_ok {
+                // (x - C1) - C2 → x - (C1+C2): s1 is x-C1 tracked, s2 is const C2
+                if bs_sub_valid[bs_s1 as usize] && is_const[bs_s2 as usize] {
+                    let bs_c1 = bs_sub_cval[bs_s1 as usize]
+                    let bs_c2 = const_val[bs_s2 as usize]
+                    let bs_merged = bs_c1 + bs_c2
+                    let bs_cdef = def_at[bs_s2 as usize]
+                    if bs_cdef >= 0 {
+                        result.instrs[bs_cdef as usize] = ir_load_imm(bs_s2, bs_merged)
+                        is_const[bs_s2 as usize] = true
+                        const_val[bs_s2 as usize] = bs_merged
+                    }
+                    result.instrs[i as usize] = ir_binop(
+                        bs_instr.dst, bs_sub_src[bs_s1 as usize], BinaryOp::OpSub, bs_s2)
+                    if bs_instr.dst >= 0 && bs_instr.dst < 256 {
+                        bs_sub_valid[bs_instr.dst as usize] = true
+                        bs_sub_src[bs_instr.dst as usize]   = bs_sub_src[bs_s1 as usize]
+                        bs_sub_cval[bs_instr.dst as usize]  = bs_merged
+                    }
+                }
+            }
+        }
+        // Sprint 157 Block BS: Subtract tracking — populate bs_sub arrays.
+        // Record when dst = src - C (src minus constant) for downstream folding.
+        if ocp_is_binop(instr.op) && instr.bin_op == BinaryOp::OpSub {
+            let bs_t = result.instrs[i as usize]
+            let bs_ts1 = bs_t.src1; let bs_ts2 = bs_t.src2
+            let bs_ts1_ok = bs_ts1 >= 0 && bs_ts1 < 256; let bs_ts2_ok = bs_ts2 >= 0 && bs_ts2 < 256
+            if bs_ts1_ok && bs_ts2_ok && is_const[bs_ts2 as usize]
+                    && !bs_sub_valid[bs_ts1 as usize] {
+                if bs_t.dst >= 0 && bs_t.dst < 256 {
+                    bs_sub_valid[bs_t.dst as usize] = true
+                    bs_sub_src[bs_t.dst as usize]   = bs_ts1
+                    bs_sub_cval[bs_t.dst as usize]  = const_val[bs_ts2 as usize]
                 }
             }
         }
