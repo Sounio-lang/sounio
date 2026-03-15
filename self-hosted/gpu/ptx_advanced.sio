@@ -167,6 +167,64 @@ fn ptx_value_map_get_name(vm: PtxValueMap, op_idx: i64) -> string with Mut, Pani
     "UNKNOWN"
 }
 
+// Retrieve stored type for a value (returns 0=unknown if not found)
+// Type codes: 1=U32, 2=U64, 3=F32, 4=F64, 5=I32, 6=I64, 7=Ptr
+fn ptx_value_map_get_type(vm: PtxValueMap, op_idx: i64) -> i64 {
+    var i: i64 = 0
+    while i < vm.count {
+        if vm.op_ids[i as usize] == op_idx {
+            return vm.types[i as usize]
+        }
+        i = i + 1
+    }
+    // Not found — default to 0 (unknown)
+    0
+}
+
+// Result type for ptx_coerce_to_f32: carries state + coerced register name
+struct PtxCoerceResult {
+    buf: PtxBuf,
+    regs: PtxRegCounters,
+    name: string,
+}
+
+// If src operand is not f32, emit cvt.rn.f32.{src_type} tmp, src and return tmp.
+// If already f32 (ty_code==3), return src unchanged.
+fn ptx_coerce_to_f32(
+    buf: PtxBuf,
+    regs: PtxRegCounters,
+    src_name: string,
+    src_ty_code: i64
+) -> PtxCoerceResult with Mut, Panic, Div, Alloc {
+    if src_ty_code == 3 {
+        // Already f32 — no conversion needed
+        return PtxCoerceResult { buf: buf, regs: regs, name: src_name }
+    }
+    // Allocate a temporary f32 register
+    let alloc_result = ptx_alloc_f32(regs)
+    let new_regs = alloc_result.0
+    let tmp = alloc_result.1
+    var new_buf = buf
+    new_buf = ptx_push_str(new_buf, "    cvt.rn.f32.")
+    if src_ty_code == 2 || src_ty_code == 7 {
+        new_buf = ptx_push_str(new_buf, "u64")
+    } else if src_ty_code == 6 {
+        new_buf = ptx_push_str(new_buf, "s64")
+    } else if src_ty_code == 1 {
+        new_buf = ptx_push_str(new_buf, "u32")
+    } else if src_ty_code == 5 {
+        new_buf = ptx_push_str(new_buf, "s32")
+    } else {
+        new_buf = ptx_push_str(new_buf, "u64")  // safe default
+    }
+    new_buf = ptx_push_str(new_buf, " ")
+    new_buf = ptx_push_str(new_buf, tmp)
+    new_buf = ptx_push_str(new_buf, ", ")
+    new_buf = ptx_push_str(new_buf, src_name)
+    new_buf = ptx_push_str(new_buf, ";\n")
+    PtxCoerceResult { buf: new_buf, regs: new_regs, name: tmp }
+}
+
 // ── Architecture Capabilities ───────────────────────────────────────
 
 struct PtxArch {
@@ -1119,13 +1177,22 @@ fn ptx_emit_op(
         out.regs = alloc_result.0
         let reg = alloc_result.1
         out.values = ptx_value_map_insert(out.values, op_idx, reg, dst_type)
-        let lhs = ptx_value_map_get_name(out.values, src0)
-        let rhs = ptx_value_map_get_name(out.values, src1)
+        var lhs = ptx_value_map_get_name(out.values, src0)
+        var rhs = ptx_value_map_get_name(out.values, src1)
         if ptx_is_float(dst_type) {
-            out.buf = ptx_push_str(out.buf, "    add.")
-        } else {
-            out.buf = ptx_push_str(out.buf, "    add.")
+            // Coerce operands to f32 if they are integer registers
+            let lhs_ty = ptx_value_map_get_type(out.values, src0)
+            let cvt_lhs = ptx_coerce_to_f32(out.buf, out.regs, lhs, lhs_ty)
+            out.buf = cvt_lhs.buf
+            out.regs = cvt_lhs.regs
+            lhs = cvt_lhs.name
+            let rhs_ty = ptx_value_map_get_type(out.values, src1)
+            let cvt_rhs = ptx_coerce_to_f32(out.buf, out.regs, rhs, rhs_ty)
+            out.buf = cvt_rhs.buf
+            out.regs = cvt_rhs.regs
+            rhs = cvt_rhs.name
         }
+        out.buf = ptx_push_str(out.buf, "    add.")
         out.buf = ptx_push_str(out.buf, ptx_type_suffix(dst_type))
         out.buf = ptx_push_str(out.buf, " ")
         out.buf = ptx_push_str(out.buf, reg)
@@ -1161,9 +1228,20 @@ fn ptx_emit_op(
         out.regs = alloc_result.0
         let reg = alloc_result.1
         out.values = ptx_value_map_insert(out.values, op_idx, reg, dst_type)
-        let lhs = ptx_value_map_get_name(out.values, src0)
-        let rhs = ptx_value_map_get_name(out.values, src1)
+        var lhs = ptx_value_map_get_name(out.values, src0)
+        var rhs = ptx_value_map_get_name(out.values, src1)
         if ptx_is_float(dst_type) {
+            // Coerce operands to f32 if they are integer registers
+            let lhs_ty = ptx_value_map_get_type(out.values, src0)
+            let cvt_lhs = ptx_coerce_to_f32(out.buf, out.regs, lhs, lhs_ty)
+            out.buf = cvt_lhs.buf
+            out.regs = cvt_lhs.regs
+            lhs = cvt_lhs.name
+            let rhs_ty = ptx_value_map_get_type(out.values, src1)
+            let cvt_rhs = ptx_coerce_to_f32(out.buf, out.regs, rhs, rhs_ty)
+            out.buf = cvt_rhs.buf
+            out.regs = cvt_rhs.regs
+            rhs = cvt_rhs.name
             out.buf = ptx_push_str(out.buf, "    mul.rn.")
         } else {
             out.buf = ptx_push_str(out.buf, "    mul.lo.")
@@ -1314,7 +1392,15 @@ fn ptx_emit_op(
         out.regs = alloc_result.0
         let reg = alloc_result.1
         out.values = ptx_value_map_insert(out.values, op_idx, reg, dst_type)
-        let src = ptx_value_map_get_name(out.values, src0)
+        var src = ptx_value_map_get_name(out.values, src0)
+        if ptx_is_float(dst_type) {
+            // Coerce src to f32 if it is an integer register
+            let src_ty = ptx_value_map_get_type(out.values, src0)
+            let cvt_src = ptx_coerce_to_f32(out.buf, out.regs, src, src_ty)
+            out.buf = cvt_src.buf
+            out.regs = cvt_src.regs
+            src = cvt_src.name
+        }
         out.buf = ptx_push_str(out.buf, "    sqrt.approx.")
         out.buf = ptx_push_str(out.buf, ptx_type_suffix(dst_type))
         out.buf = ptx_push_str(out.buf, " ")
