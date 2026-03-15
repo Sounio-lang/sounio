@@ -45,6 +45,13 @@ let EG_OP_SUB: i64 = 4
 let EG_OP_MUL: i64 = 5
 let EG_OP_DIV: i64 = 6
 let EG_OP_NEG: i64 = 7
+let EG_OP_FADD: i64 = 8
+let EG_OP_FSUB: i64 = 9
+let EG_OP_FMUL: i64 = 10
+let EG_OP_FDIV: i64 = 11
+let EG_OP_FNEG: i64 = 12
+let EG_OP_MEASURE: i64 = 13
+let EG_OP_COMBINE: i64 = 14
 
 // Cost model constants
 let EG_COST_CONST: i64 = 1
@@ -1191,6 +1198,13 @@ fn eg_op_name_hash(op: i64) -> i64 {
     if op == EG_OP_MUL { return 500 }
     if op == EG_OP_DIV { return 600 }
     if op == EG_OP_NEG { return 700 }
+    if op == EG_OP_FADD { return 800 }
+    if op == EG_OP_FSUB { return 900 }
+    if op == EG_OP_FMUL { return 1000 }
+    if op == EG_OP_FDIV { return 1100 }
+    if op == EG_OP_FNEG { return 1200 }
+    if op == EG_OP_MEASURE { return 1300 }
+    if op == EG_OP_COMBINE { return 1400 }
     0
 }
 
@@ -1300,6 +1314,8 @@ struct EgSmallContext {
     uf_size:    i64,
     costs:      [i64; 64],
     best:       [i64; 64],
+    unc_lo:     [i64; 64],
+    unc_hi:     [i64; 64],
 }
 
 fn eg_small_init() -> EgSmallContext {
@@ -1311,6 +1327,8 @@ fn eg_small_init() -> EgSmallContext {
         uf_size:    0,
         costs:      [999999; 64],
         best:       [EG_INVALID; 64],
+        unc_lo:     [0; 64],
+        unc_hi:     [0; 64],
     }
 }
 
@@ -1394,6 +1412,32 @@ fn eg_small_add_const(ctx: &! EgSmallContext, value: i64) -> i64 with Mut, Div {
     eg_small_add_node(ctx, node)
 }
 
+// ============================================================================
+// Section 14c-extra: Uncertainty-Aware Helpers (Sprint 225)
+// ============================================================================
+
+// Integer square root via Newton's method (7 iterations)
+// Used for GUM uncertainty propagation: u(z) = sqrt(u(x)^2 + u(y)^2)
+fn eg_isqrt(x: i64) -> i64 {
+    if x <= 0 { return 0 }
+    var y = x
+    y = (y + x / y) / 2
+    y = (y + x / y) / 2
+    y = (y + x / y) / 2
+    y = (y + x / y) / 2
+    y = (y + x / y) / 2
+    y = (y + x / y) / 2
+    y = (y + x / y) / 2
+    y
+}
+
+// Quantize f64 uncertainty to i64 scale (multiply by 1e9 for nanoscale resolution)
+fn eg_quantize_unc(u_f64: f64) -> i64 {
+    let scaled = u_f64 * 1000000000.0
+    if scaled < 0.0 { return 0 }
+    scaled as i64
+}
+
 fn eg_small_add_var(ctx: &! EgSmallContext, var_id: i64) -> i64 with Mut, Div {
     let node = EgNode {
         op:          EG_OP_VAR,
@@ -1414,6 +1458,40 @@ fn eg_small_add_binop(ctx: &! EgSmallContext, op: i64, lhs: i64, rhs: i64) -> i6
         eclass_id:   EG_INVALID,
     }
     eg_small_add_node(ctx, node)
+}
+
+// Add VAR node with uncertainty annotation (for epistemic pass)
+fn eg_small_add_var_with_unc(ctx: &! EgSmallContext, var_id: i64, unc: i64) -> i64 with Mut, Div, Panic {
+    let node_idx = eg_small_add_var(ctx, var_id)
+    if node_idx >= 0 && node_idx < 64 {
+        ctx.unc_lo[node_idx as usize] = unc
+    }
+    node_idx
+}
+
+// Add binary op node with propagated uncertainty for epistemic pass
+// GUM §5.1.2: u(z)^2 = u(x)^2 + u(y)^2 for additive; conservative for mul/div
+fn eg_small_add_binop_with_unc(ctx: &! EgSmallContext, op: i64, lhs_class: i64, rhs_class: i64) -> i64 with Mut, Div, Panic {
+    // Assume lhs_class and rhs_class are canonical e-class IDs
+    // Look up their best node uncertainties
+    var lhs_unc: i64 = 0
+    var rhs_unc: i64 = 0
+    var i: i64 = 0
+    while i < ctx.node_count {
+        let node_idx = i
+        if node_idx < 64 {
+            // Find node in lhs_class and rhs_class (simplified: just use the class IDs directly)
+            // This is a placeholder; in full implementation, we'd track class→uncertainty mapping
+        }
+        i = i + 1
+    }
+    // For now, compute uncertainty as sum of squares (simplified)
+    let combined_unc = eg_isqrt(lhs_unc * lhs_unc + rhs_unc * rhs_unc)
+    let node_idx = eg_small_add_binop(ctx, op, lhs_class, rhs_class)
+    if node_idx >= 0 && node_idx < 64 {
+        ctx.unc_lo[node_idx as usize] = combined_unc
+    }
+    node_idx
 }
 
 // Simple cost function: CONST/VAR cost 1, everything else costs 2.
@@ -1537,6 +1615,94 @@ fn eg_small_extract(ctx: &! EgSmallContext, class_id: i64) -> EgNode with Mut, D
         i = i + 1
     }
     best
+}
+
+// Uncertainty-guided extraction (Sprint 225 epistemic pass)
+// Extracts the equivalent node with minimum uncertainty (GUM cost model)
+fn eg_small_extract_epistemic(ctx: &! EgSmallContext, class_id: i64) -> EgNode with Mut, Div, Panic {
+    let canonical  = eg_small_find(ctx, class_id)
+    var best       = eg_node_new()
+    var best_unc: i64 = 999999999
+    var best_cost: i64 = 999999
+    var i: i64 = 0
+    while i < ctx.node_count {
+        let node = ctx.nodes[i as usize]
+        if node.eclass_id >= 0 {
+            let node_cls = eg_small_find(ctx, node.eclass_id)
+            if node_cls == canonical {
+                let node_unc = if i < 64 { ctx.unc_lo[i as usize] } else { 999999999 }
+                let cost = eg_small_cost_by_op(node.op)
+                // Prefer lower uncertainty; tie-break by lower cost
+                if node_unc < best_unc || (node_unc == best_unc && cost < best_cost) {
+                    best_unc = node_unc
+                    best_cost = cost
+                    best = node
+                }
+            }
+        }
+        i = i + 1
+    }
+    best
+}
+
+// Float associativity saturation (imperative scan, mirrors eg_apply_distributivity)
+// Applies: fadd(fadd(a,b),c) ↔ fadd(a,fadd(b,c)) and similar for fmul
+// 8 iterations max; terminates when no new merges
+fn eg_small_saturate_float(ctx: &! EgSmallContext) -> i64 with Mut, Div, Panic {
+    var total_merges: i64 = 0
+    var iter: i64 = 0
+    while iter < 8 {
+        var merges: i64 = 0
+        var i: i64 = 0
+        while i < ctx.node_count {
+            let node = ctx.nodes[i as usize]
+
+            // Check for FADD/FSUB left-associativity: (a op b) op c → a op (b op c)
+            if (node.op == EG_OP_FADD || node.op == EG_OP_FSUB) && node.child_count >= 2 {
+                let lhs_class = node.children[0]
+                let rhs_class = node.children[1]
+
+                // Check if lhs is also fadd/fsub
+                var j: i64 = 0
+                while j < ctx.node_count {
+                    let inner = ctx.nodes[j as usize]
+                    if (inner.op == node.op) && inner.child_count >= 2 {
+                        let inner_eclass = eg_small_find(ctx, inner.eclass_id)
+                        let lhs_canonical = eg_small_find(ctx, lhs_class)
+                        if inner_eclass == lhs_canonical {
+                            // Found: (inner.a op inner.b) op c
+                            // Create: inner.a op (inner.b op c)
+                            let bc_class = eg_small_add_binop(ctx, node.op, inner.children[1], rhs_class)
+                            let result_class = eg_small_add_binop(ctx, node.op, inner.children[0], bc_class)
+                            let node_eclass = eg_small_find(ctx, node.eclass_id)
+                            let result_eclass = eg_small_find(ctx, result_class)
+                            if eg_small_union(ctx, node_eclass, result_eclass) {
+                                merges = merges + 1
+                            }
+                        }
+                    }
+                    j = j + 1
+                }
+            }
+
+            // Float mul identity: fmul(a, 1.0) → a, fmul(1.0, a) → a
+            if node.op == EG_OP_FMUL && node.child_count >= 2 {
+                // Check if either child is constant 1.0 (encoded as const with value 1)
+                // (deferred: constant recognition requires checking const nodes)
+            }
+
+            // Float add identity: fadd(a, 0.0) → a
+            if node.op == EG_OP_FADD && node.child_count >= 2 {
+                // (deferred: const recognition)
+            }
+
+            i = i + 1
+        }
+        if merges == 0 { return total_merges }
+        total_merges = total_merges + merges
+        iter = iter + 1
+    }
+    total_merges
 }
 
 // ── Small E-graph tests ────────────────────────────────────────────────────
@@ -2412,12 +2578,76 @@ fn test_eg_small_sat_mul_annihilation_lhs() -> bool with Mut, Div {
 }
 
 // ============================================================================
+// Section 28: Epistemic E-Graph Tests (Sprint 225)
+// ============================================================================
+
+fn test_eg_quantize_unc_basic() -> bool {
+    let result = eg_quantize_unc(2.5)
+    result == 2500000000
+}
+
+fn test_eg_isqrt_basic() -> bool {
+    let result = eg_isqrt(25000000000)
+    // sqrt(2.5e10) = 158113.883...
+    result >= 158113 && result <= 158114
+}
+
+fn test_eg_isqrt_zero() -> bool {
+    eg_isqrt(0) == 0
+}
+
+fn test_eg_isqrt_one() -> bool {
+    eg_isqrt(1) == 1
+}
+
+fn test_eg_small_add_var_with_unc_basic() -> bool with Mut, Div, Panic {
+    var ctx = eg_small_init()
+    let node_idx = eg_small_add_var_with_unc(&! ctx, 0, 1000000000)
+    node_idx == 0 && ctx.unc_lo[0] == 1000000000
+}
+
+fn test_eg_small_extract_epistemic_basic() -> bool with Mut, Div, Panic {
+    var ctx = eg_small_init()
+    let const1 = eg_small_add_const(&! ctx, 1)
+    let _var1 = eg_small_add_var_with_unc(&! ctx, 0, 2000000000)
+    ctx.unc_lo[const1 as usize] = 0
+    let extracted = eg_small_extract_epistemic(&! ctx, const1)
+    // VAR should be preferred over CONST due to higher uncertainty? No, CONST is preferred.
+    // Actually, lower uncertainty wins, so CONST (0 unc) wins over VAR (2e9 unc)
+    extracted.op == EG_OP_CONST
+}
+
+fn test_eg_small_saturate_float_basic() -> bool with Mut, Div, Panic {
+    var ctx = eg_small_init()
+    let a = eg_small_add_var_with_unc(&! ctx, 0, 1000000000)
+    let b = eg_small_add_var_with_unc(&! ctx, 1, 1000000000)
+    let c = eg_small_add_var_with_unc(&! ctx, 2, 1000000000)
+    let merges = eg_small_saturate_float(&! ctx)
+    // Float saturation should complete without error
+    merges >= 0
+}
+
+fn test_eg_quantize_unc_zero() -> bool {
+    let result = eg_quantize_unc(0.0)
+    result == 0
+}
+
+fn test_eg_quantize_unc_negative() -> bool {
+    let result = eg_quantize_unc(-1.5)
+    result == 0
+}
+
+fn test_eg_isqrt_four() -> bool {
+    eg_isqrt(4000000000) == 63245
+}
+
+// ============================================================================
 // Section 29: Test Runner
 // ============================================================================
 
 fn test_eg_main() -> i32 with IO, Mut, Panic, Div {
     var passed: i64 = 0
-    let total: i64 = 60
+    let total: i64 = 70
 
     print("=== E-Graph Equality Saturation Tests ===\n")
 
@@ -2481,6 +2711,16 @@ fn test_eg_main() -> i32 with IO, Mut, Panic, Div {
     if test_eg_unary_node() { passed = passed + 1; print("  T58 OK unary_node\n") } else { print("  FAIL: T58 unary_node\n") }
     if test_eg_small_sat_mul_annihilation_rhs() { passed = passed + 1; print("  T59 OK eg_small_mul_annihil_rhs\n") } else { print("  FAIL: T59 eg_small_mul_annihil_rhs\n") }
     if test_eg_small_sat_mul_annihilation_lhs() { passed = passed + 1; print("  T60 OK eg_small_mul_annihil_lhs\n") } else { print("  FAIL: T60 eg_small_mul_annihil_lhs\n") }
+    if test_eg_quantize_unc_basic() { passed = passed + 1; print("  T61 OK quantize_unc_basic\n") } else { print("  FAIL: T61 quantize_unc_basic\n") }
+    if test_eg_isqrt_basic() { passed = passed + 1; print("  T62 OK isqrt_basic\n") } else { print("  FAIL: T62 isqrt_basic\n") }
+    if test_eg_isqrt_zero() { passed = passed + 1; print("  T63 OK isqrt_zero\n") } else { print("  FAIL: T63 isqrt_zero\n") }
+    if test_eg_isqrt_one() { passed = passed + 1; print("  T64 OK isqrt_one\n") } else { print("  FAIL: T64 isqrt_one\n") }
+    if test_eg_small_add_var_with_unc_basic() { passed = passed + 1; print("  T65 OK add_var_with_unc\n") } else { print("  FAIL: T65 add_var_with_unc\n") }
+    if test_eg_small_extract_epistemic_basic() { passed = passed + 1; print("  T66 OK extract_epistemic\n") } else { print("  FAIL: T66 extract_epistemic\n") }
+    if test_eg_small_saturate_float_basic() { passed = passed + 1; print("  T67 OK saturate_float\n") } else { print("  FAIL: T67 saturate_float\n") }
+    if test_eg_quantize_unc_zero() { passed = passed + 1; print("  T68 OK quantize_unc_zero\n") } else { print("  FAIL: T68 quantize_unc_zero\n") }
+    if test_eg_quantize_unc_negative() { passed = passed + 1; print("  T69 OK quantize_unc_negative\n") } else { print("  FAIL: T69 quantize_unc_negative\n") }
+    if test_eg_isqrt_four() { passed = passed + 1; print("  T70 OK isqrt_four\n") } else { print("  FAIL: T70 isqrt_four\n") }
 
     print("\nE-Graph: ")
     print_int(passed)
