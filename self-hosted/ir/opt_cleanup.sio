@@ -4414,6 +4414,53 @@ fn ocp_const_fold(func: IrFunction) -> IrFunction with Mut, Div, Panic {
             }
         }
 
+        // Sprint 246 Block FD: XOR decomposition fold — (~x&y)^(x&~y) → x^y.
+        // Proof: (~x&y) and (x&~y) are disjoint, so XOR=OR; (~x&y)|(x&~y)=x^y. QED.
+        // Commutative: (x&~y)^(~x&y) → x^y.
+        // Zero new arrays: uses ao_and_rr_valid/lhs/rhs + is_bnot/bnot_src (existing).
+        // Updates as_xor_rr tracking for downstream chains.
+        // SOTA: XOR canonical decomposition; Hacker's Delight §2-1.
+        if ocp_is_binop(result.instrs[i as usize].op) {
+            let fd_instr = result.instrs[i as usize]
+            let fd_s1 = fd_instr.src1; let fd_s2 = fd_instr.src2
+            let fd_s1_ok = fd_s1 >= 0 && fd_s1 < 256; let fd_s2_ok = fd_s2 >= 0 && fd_s2 < 256
+            if fd_instr.bin_op == BinaryOp::OpBitXor && fd_s1_ok && fd_s2_ok {
+                var fd_x: i64 = -1; var fd_y: i64 = -1
+                // Case 1: s1=AND-rr(~x, y), s2=AND-rr(x, ~y) → result x^y
+                if ao_and_rr_valid[fd_s1 as usize] && ao_and_rr_valid[fd_s2 as usize] {
+                    let fd_al1 = ao_and_rr_lhs[fd_s1 as usize]; let fd_ar1 = ao_and_rr_rhs[fd_s1 as usize]
+                    let fd_al2 = ao_and_rr_lhs[fd_s2 as usize]; let fd_ar2 = ao_and_rr_rhs[fd_s2 as usize]
+                    // subcase: s1=(~x, y), s2=(x, ~y): al1 is ~x, ar1=y, al2=x, ar2=~y
+                    if fd_al1 >= 0 && fd_al1 < 256 && is_bnot[fd_al1 as usize] {
+                        let fd_px = bnot_src[fd_al1 as usize]  // x from ~x
+                        // s2 should be (x, ~y) or (~y, x)
+                        if fd_al2 == fd_px && fd_ar2 >= 0 && fd_ar2 < 256 && is_bnot[fd_ar2 as usize] && bnot_src[fd_ar2 as usize] == fd_ar1 {
+                            fd_x = fd_px; fd_y = fd_ar1
+                        } else if fd_ar2 == fd_px && fd_al2 >= 0 && fd_al2 < 256 && is_bnot[fd_al2 as usize] && bnot_src[fd_al2 as usize] == fd_ar1 {
+                            fd_x = fd_px; fd_y = fd_ar1
+                        }
+                    }
+                    // subcase: s1=(y, ~x): ar1 is ~x, al1=y
+                    if fd_x < 0 && fd_ar1 >= 0 && fd_ar1 < 256 && is_bnot[fd_ar1 as usize] {
+                        let fd_px2 = bnot_src[fd_ar1 as usize]
+                        if fd_al2 == fd_px2 && fd_ar2 >= 0 && fd_ar2 < 256 && is_bnot[fd_ar2 as usize] && bnot_src[fd_ar2 as usize] == fd_al1 {
+                            fd_x = fd_px2; fd_y = fd_al1
+                        } else if fd_ar2 == fd_px2 && fd_al2 >= 0 && fd_al2 < 256 && is_bnot[fd_al2 as usize] && bnot_src[fd_al2 as usize] == fd_al1 {
+                            fd_x = fd_px2; fd_y = fd_al1
+                        }
+                    }
+                }
+                if fd_x >= 0 && fd_y >= 0 {
+                    result.instrs[i as usize] = ir_binop(fd_instr.dst, fd_x, BinaryOp::OpBitXor, fd_y)
+                    if fd_instr.dst >= 0 && fd_instr.dst < 256 {
+                        as_xor_rr_valid[fd_instr.dst as usize] = true
+                        as_xor_rr_lhs[fd_instr.dst as usize] = fd_x
+                        as_xor_rr_rhs[fd_instr.dst as usize] = fd_y
+                    }
+                }
+            }
+        }
+
         // Sprint 245 Block FC: NOT-XOR-NOT recovery — (~x^y)^~y → x.
         // Proof: (~x^y)^~y = ~x^(y^~y) = ~x^(-1) = ~(~x) = x. QED.
         // Commutative XOR outer: ~y^(~x^y) → x; inner: (~x^y)^~y → x; (y^~x)^~y → x.
