@@ -4414,6 +4414,35 @@ fn ocp_const_fold(func: IrFunction) -> IrFunction with Mut, Div, Panic {
             }
         }
 
+        // Sprint 243 Block FA: OR-XOR AND subsumption — (x|y)&(x^y) → x^y.
+        // Proof: x^y ⊆ x|y (XOR bits are a subset of OR bits), so (x|y)&(x^y) = x^y. QED.
+        // Commutative AND: (x^y)&(x|y) → x^y.
+        // Zero new arrays: uses ao_or_rr_valid/lhs/rhs (Block AO) + as_xor_rr_valid/lhs/rhs (Block AS).
+        // SOTA: Boolean lattice x^y≤x|y; LLVM InstCombineAndOrXor.
+        if ocp_is_binop(result.instrs[i as usize].op) {
+            let fa_instr = result.instrs[i as usize]
+            let fa_s1 = fa_instr.src1; let fa_s2 = fa_instr.src2
+            let fa_s1_ok = fa_s1 >= 0 && fa_s1 < 256; let fa_s2_ok = fa_s2 >= 0 && fa_s2 < 256
+            if fa_instr.bin_op == BinaryOp::OpBitAnd && fa_s1_ok && fa_s2_ok {
+                // Case 1: s1=OR-rr(x,y), s2=XOR-rr(x,y) → IrCopy(s2)
+                if ao_or_rr_valid[fa_s1 as usize] && as_xor_rr_valid[fa_s2 as usize] {
+                    let fa_ol = ao_or_rr_lhs[fa_s1 as usize]; let fa_or2 = ao_or_rr_rhs[fa_s1 as usize]
+                    let fa_xl = as_xor_rr_lhs[fa_s2 as usize]; let fa_xr = as_xor_rr_rhs[fa_s2 as usize]
+                    if (fa_ol == fa_xl && fa_or2 == fa_xr) || (fa_ol == fa_xr && fa_or2 == fa_xl) {
+                        result.instrs[i as usize] = ir_copy(fa_instr.dst, fa_s2)
+                    }
+                }
+                // Case 2: s1=XOR-rr(x,y), s2=OR-rr(x,y) → IrCopy(s1)
+                if as_xor_rr_valid[fa_s1 as usize] && ao_or_rr_valid[fa_s2 as usize] {
+                    let fa_xl2 = as_xor_rr_lhs[fa_s1 as usize]; let fa_xr2 = as_xor_rr_rhs[fa_s1 as usize]
+                    let fa_ol2 = ao_or_rr_lhs[fa_s2 as usize]; let fa_or22 = ao_or_rr_rhs[fa_s2 as usize]
+                    if (fa_xl2 == fa_ol2 && fa_xr2 == fa_or22) || (fa_xl2 == fa_or22 && fa_xr2 == fa_ol2) {
+                        result.instrs[i as usize] = ir_copy(fa_instr.dst, fa_s1)
+                    }
+                }
+            }
+        }
+
         // Sprint 242 Block EZ: AND-XOR to OR — (x&y)|(x^y) → x|y.
         // Proof: (x&y)|(x^y) = (x&y)|(x|y)^(x&y) = x|y (since a|(a^b)=a|b when a=x&y). QED.
         // Equivalently: x|y = (x&y)|(x⊕y) is the canonical OR decomposition.
