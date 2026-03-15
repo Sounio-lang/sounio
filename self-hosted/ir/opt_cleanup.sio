@@ -4131,6 +4131,40 @@ fn ocp_const_fold(func: IrFunction) -> IrFunction with Mut, Div, Panic {
             }
         }
 
+        // Sprint 222 Block EF: OR-AND subsumption — (x|y)|(x&y) → x|y; (x&y)|(x|y) → x|y.
+        // Proof: x&y ⊆ x|y, so (x|y)|(x&y) = x|y. QED. Boolean lattice: join with a lower element = same.
+        // Zero new arrays: uses ao_or_rr_valid/lhs/rhs + ao_and_rr_valid/lhs/rhs (Block AO).
+        // SOTA: LLVM InstCombineAndOrXor; Boolean absorption axiom; Huntington 1904.
+        if ocp_is_binop(result.instrs[i as usize].op) {
+            let ef_instr = result.instrs[i as usize]
+            let ef_s1 = ef_instr.src1; let ef_s2 = ef_instr.src2
+            let ef_s1_ok = ef_s1 >= 0 && ef_s1 < 256; let ef_s2_ok = ef_s2 >= 0 && ef_s2 < 256
+            if ef_instr.bin_op == BinaryOp::OpBitOr && ef_s1_ok && ef_s2_ok {
+                // Case 1: (x|y)|(x&y): s1=OR-rr, s2=AND-rr with same operands → IrCopy(s1)
+                if ao_or_rr_valid[ef_s1 as usize] && ao_and_rr_valid[ef_s2 as usize] {
+                    let ef_ol = ao_or_rr_lhs[ef_s1 as usize]
+                    let ef_or = ao_or_rr_rhs[ef_s1 as usize]
+                    let ef_al = ao_and_rr_lhs[ef_s2 as usize]
+                    let ef_ar = ao_and_rr_rhs[ef_s2 as usize]
+                    if (ef_ol == ef_al && ef_or == ef_ar)
+                            || (ef_ol == ef_ar && ef_or == ef_al) {
+                        result.instrs[i as usize] = ir_copy(ef_instr.dst, ef_s1)
+                    }
+                }
+                // Case 2: (x&y)|(x|y): s1=AND-rr, s2=OR-rr with same operands → IrCopy(s2)
+                if ao_and_rr_valid[ef_s1 as usize] && ao_or_rr_valid[ef_s2 as usize] {
+                    let ef_al2 = ao_and_rr_lhs[ef_s1 as usize]
+                    let ef_ar2 = ao_and_rr_rhs[ef_s1 as usize]
+                    let ef_ol2 = ao_or_rr_lhs[ef_s2 as usize]
+                    let ef_or2 = ao_or_rr_rhs[ef_s2 as usize]
+                    if (ef_al2 == ef_ol2 && ef_ar2 == ef_or2)
+                            || (ef_al2 == ef_or2 && ef_ar2 == ef_ol2) {
+                        result.instrs[i as usize] = ir_copy(ef_instr.dst, ef_s2)
+                    }
+                }
+            }
+        }
+
         // Sprint 177 Block CM: AND complement XOR partition — (x & C) ^ (x & ~C) → x.
         // Proof: C-bits: (xi&1)^(xi&0)=xi^0=xi. Non-C: (xi&0)^(xi&1)=0^xi=xi. QED.
         // Dual of Block CC (OR partition). Commutative: (x&~C)^(x&C) → x.
