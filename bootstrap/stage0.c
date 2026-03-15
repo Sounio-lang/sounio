@@ -37,7 +37,7 @@
 #define MAX_FWD       256
 #define MAX_BREAKS    64
 #define MAX_MATCH_ARMS 256
-#define MAX_CALL_ARGS 16
+#define MAX_CALL_ARGS 24
 
 /* Global data offsets (at code offset 0) */
 #define GLOBAL_SAVED_RSP 0   /* offset 0: saved initial rsp (8 bytes) */
@@ -1536,7 +1536,7 @@ static void compile_expr(Expr *e, Locals *loc) {
             /* Large array: use mmap(NULL, count, PROT_R|W=3, MAP_PRIVATE|ANON=0x22, -1, 0)
              * Returns pointer in rax — already zero-filled by kernel */
             emit(0x48); emit(0x31); emit(0xFF); /* xor rdi, rdi */
-            emit(0x48); emit(0xBE); emit64(count); /* mov rsi, count */
+            emit(0x48); emit(0xBE); emit64(count * 8); /* mov rsi, count*8 (bytes, not elements) */
             emit(0xBA); emit32(3); /* mov edx, PROT_R|W */
             emit(0x41); emit(0xBA); emit32(0x22); /* mov r10d, MAP_PRIVATE|ANON */
             emit(0x49); emit(0xC7); emit(0xC0); emit32(-1); /* mov r8, -1 */

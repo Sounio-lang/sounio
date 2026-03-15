@@ -64,7 +64,7 @@ fn kw_match(src: [i8; 1048576], s: i64, len: i64) -> i64 with Panic {
     1
 }
 
-fn tokenize(src: [i8; 1048576], src_size: i64, tk: [i64; 16384], ts: [i64; 16384], te: [i64; 16384], tv: [i64; 16384]) -> i64 with Panic, Mut, Div {
+fn tokenize(src: [i8; 1048576], src_size: i64, tk: [i64; 65536], ts: [i64; 65536], te: [i64; 65536], tv: [i64; 65536]) -> i64 with Panic, Mut, Div {
     var pos: i64 = 0
     var nt: i64 = 0
     while pos < src_size {
@@ -142,7 +142,7 @@ fn op_prec(kind: i64) -> i64 {
 }
 
 // Find local variable index. Returns index or -1.
-fn find_local(src: [i8; 1048576], tk: [i64; 16384], ts: [i64; 16384], te: [i64; 16384], t: i64, loc_ns: [i64; 8192], loc_ne: [i64; 8192], loc_count: i64) -> i64 with Panic, Mut, Div {
+fn find_local(src: [i8; 1048576], tk: [i64; 65536], ts: [i64; 65536], te: [i64; 65536], t: i64, loc_ns: [i64; 8192], loc_ne: [i64; 8192], loc_count: i64) -> i64 with Panic, Mut, Div {
     var li: i64 = loc_count - 1
     while li >= 0 {
         if name_eq(src, loc_ns[li], loc_ne[li] - loc_ns[li], ts[t], te[t] - ts[t]) == 1 { return li }
@@ -152,7 +152,7 @@ fn find_local(src: [i8; 1048576], tk: [i64; 16384], ts: [i64; 16384], te: [i64; 
 }
 
 // Find function index by name at token t
-fn find_fn(src: [i8; 1048576], ts: [i64; 16384], te: [i64; 16384], t: i64, fn_ns: [i64; 8192], fn_ne: [i64; 8192], fn_count: i64) -> i64 with Panic, Mut, Div {
+fn find_fn(src: [i8; 1048576], ts: [i64; 65536], te: [i64; 65536], t: i64, fn_ns: [i64; 8192], fn_ne: [i64; 8192], fn_count: i64) -> i64 with Panic, Mut, Div {
     var fi: i64 = 0
     while fi < fn_count {
         if name_eq(src, fn_ns[fi], fn_ne[fi] - fn_ns[fi], ts[t], te[t] - ts[t]) == 1 { return fi }
@@ -254,7 +254,7 @@ fn em_print_str(code: [i8; 262144], cp: i64, buf: [i8; 8192], slen: i64) -> i64 
 // Forward declarations not possible in Sounio — compile_primary must come before compile_expr.
 
 // compile_primary: atom or unary prefix. Result in rax.
-fn compile_primary(code: [i8; 262144], st: [i64; 8192], src: [i8; 1048576], tk: [i64; 16384], ts: [i64; 16384], te: [i64; 16384], tv: [i64; 16384], loc_ns: [i64; 8192], loc_ne: [i64; 8192], loc_slot: [i64; 8192], loc_is_arr: [i64; 8192], fn_ns: [i64; 8192], fn_ne: [i64; 8192], fn_off: [i64; 8192], strbuf: [i8; 8192]) -> i64 with Mut, Panic, Div {
+fn compile_primary(code: [i8; 262144], st: [i64; 8192], src: [i8; 1048576], tk: [i64; 65536], ts: [i64; 65536], te: [i64; 65536], tv: [i64; 65536], loc_ns: [i64; 8192], loc_ne: [i64; 8192], loc_slot: [i64; 8192], loc_is_arr: [i64; 8192], fn_ns: [i64; 8192], fn_ne: [i64; 8192], fn_off: [i64; 8192], strbuf: [i8; 8192]) -> i64 with Mut, Panic, Div {
     var cp = st[0]
     var t = st[1]
     let loc_count = st[3]
@@ -459,43 +459,72 @@ fn compile_primary(code: [i8; 262144], st: [i64; 8192], src: [i8; 1048576], tk: 
                 cp = ei32(code, cp, print_int_off - (cp + 4))
                 if tk[t] == 21 { t = t + 1 }
             } else {
-                // General function call — compile up to 6 args
+                // General function call — supports >6 args + CAFE forward-call patching
                 var argc: i64 = 0
+                let save_ns = st[2]
+                // Use high slots (st[2]+1000) for temp arg storage to not conflict with locals
+                let temp_base = st[2] + 1024
                 while tk[t] != 21 && tk[t] != 0 {
-                    // Compile arg expression
                     st[0] = cp; st[1] = t
                     compile_expr_prec(code, st, src, tk, ts, te, tv, loc_ns, loc_ne, loc_slot, loc_is_arr, fn_ns, fn_ne, fn_off, strbuf, 0)
                     cp = st[0]; t = st[1]
-                    // push rax (save arg)
-                    cp = e1(code, cp, 0x50)
+                    // Store arg in temp frame slot (high area, won't conflict with locals)
+                    let arg_s = temp_base + argc * 8
+                    cp = e3(code, cp, 0x48, 0x89, 0x85); cp = ei32(code, cp, 0 - arg_s)
+                    st[200 + argc] = arg_s
                     argc = argc + 1
-                    if tk[t] == 26 { t = t + 1 }  // skip ,
+                    if tk[t] == 26 { t = t + 1 }
                 }
-                if tk[t] == 21 { t = t + 1 }  // skip )
+                if tk[t] == 21 { t = t + 1 }
 
-                // Pop args into registers (reverse order)
-                var ai = argc - 1
-                while ai >= 0 {
-                    cp = e1(code, cp, 0x58)  // pop rax
-                    if ai == 0 { cp = e3(code, cp, 0x48, 0x89, 0xC7) }       // mov rdi, rax
-                    else if ai == 1 { cp = e3(code, cp, 0x48, 0x89, 0xC6) }   // mov rsi, rax
-                    else if ai == 2 { cp = e3(code, cp, 0x48, 0x89, 0xC2) }   // mov rdx, rax
-                    else if ai == 3 { cp = e3(code, cp, 0x48, 0x89, 0xC1) }   // mov rcx, rax
-                    else if ai == 4 { cp = e3(code, cp, 0x49, 0x89, 0xC0) }   // mov r8, rax
-                    else if ai == 5 { cp = e3(code, cp, 0x49, 0x89, 0xC1) }   // mov r9, rax
-                    ai = ai - 1
+                // Push stack args (6+) in reverse order
+                var si = argc - 1
+                while si >= 6 {
+                    let ss2 = st[200 + si]
+                    cp = e3(code, cp, 0x48, 0x8B, 0x85); cp = ei32(code, cp, 0 - ss2)
+                    cp = e1(code, cp, 0x50)
+                    si = si - 1
                 }
 
-                // Find function
+                // Load register args 0-5
+                var ri: i64 = 0
+                while ri < argc && ri < 6 {
+                    let rs = st[200 + ri]
+                    cp = e3(code, cp, 0x48, 0x8B, 0x85); cp = ei32(code, cp, 0 - rs)
+                    if ri == 0 { cp = e3(code, cp, 0x48, 0x89, 0xC7) }
+                    else if ri == 1 { cp = e3(code, cp, 0x48, 0x89, 0xC6) }
+                    else if ri == 2 { cp = e3(code, cp, 0x48, 0x89, 0xC2) }
+                    else if ri == 3 { cp = e3(code, cp, 0x48, 0x89, 0xC1) }
+                    else if ri == 4 { cp = e3(code, cp, 0x49, 0x89, 0xC0) }
+                    else if ri == 5 { cp = e3(code, cp, 0x49, 0x89, 0xC1) }
+                    ri = ri + 1
+                }
+
+                // Call with CAFE sentinel OR direct offset
                 let fidx = find_fn(src, ts, te, fn_t, fn_ns, fn_ne, fn_count)
                 if fidx >= 0 {
-                    // call with CAFE sentinel for patching
-                    cp = e1(code, cp, 0xE8)
-                    let target = fn_off[fidx]
-                    cp = ei32(code, cp, target - (cp + 4))
+                    // Use CAFE for forward calls, direct for backward
+                    let tgt = fn_off[fidx]
+                    if tgt > 0 {
+                        // Backward call: direct offset
+                        cp = e1(code, cp, 0xE8)
+                        cp = ei32(code, cp, tgt - (cp + 4))
+                    } else {
+                        // Forward call: CAFE sentinel
+                        cp = e1(code, cp, 0xE8)
+                        cp = e1(code, cp, fidx & 255)
+                        cp = e1(code, cp, (fidx >> 8) & 255)
+                        cp = e1(code, cp, 0xCA)
+                        cp = e1(code, cp, 0xFE)
+                    }
                 } else {
-                    // Unknown function — emit call 0 (will be patched or fail)
                     cp = e1(code, cp, 0xE8); cp = ei32(code, cp, 0)
+                }
+
+                // Clean up stack args
+                if argc > 6 {
+                    let cleanup = (argc - 6) * 8
+                    cp = e3(code, cp, 0x48, 0x81, 0xC4); cp = ei32(code, cp, cleanup)
                 }
             }
         } else {
@@ -550,7 +579,7 @@ fn compile_primary(code: [i8; 262144], st: [i64; 8192], src: [i8; 1048576], tk: 
 }
 
 // Compile expression with precedence climbing. min_prec = minimum precedence to bind.
-fn compile_expr_prec(code: [i8; 262144], st: [i64; 8192], src: [i8; 1048576], tk: [i64; 16384], ts: [i64; 16384], te: [i64; 16384], tv: [i64; 16384], loc_ns: [i64; 8192], loc_ne: [i64; 8192], loc_slot: [i64; 8192], loc_is_arr: [i64; 8192], fn_ns: [i64; 8192], fn_ne: [i64; 8192], fn_off: [i64; 8192], strbuf: [i8; 8192], min_prec: i64) -> i64 with Mut, Panic, Div {
+fn compile_expr_prec(code: [i8; 262144], st: [i64; 8192], src: [i8; 1048576], tk: [i64; 65536], ts: [i64; 65536], te: [i64; 65536], tv: [i64; 65536], loc_ns: [i64; 8192], loc_ne: [i64; 8192], loc_slot: [i64; 8192], loc_is_arr: [i64; 8192], fn_ns: [i64; 8192], fn_ne: [i64; 8192], fn_off: [i64; 8192], strbuf: [i8; 8192], min_prec: i64) -> i64 with Mut, Panic, Div {
     // Compile LHS (primary)
     compile_primary(code, st, src, tk, ts, te, tv, loc_ns, loc_ne, loc_slot, loc_is_arr, fn_ns, fn_ne, fn_off, strbuf)
     var cp = st[0]
@@ -608,7 +637,7 @@ fn compile_expr_prec(code: [i8; 262144], st: [i64; 8192], src: [i8; 1048576], tk
 // Compile a block of statements until } (brace_depth reaches 0)
 // st[0]=cp, st[1]=t, st[2]=next_slot, st[3]=loc_count
 // brk_patches/brk_count for while/break
-fn compile_block(code: [i8; 262144], st: [i64; 8192], src: [i8; 1048576], tk: [i64; 16384], ts: [i64; 16384], te: [i64; 16384], tv: [i64; 16384], loc_ns: [i64; 8192], loc_ne: [i64; 8192], loc_slot: [i64; 8192], loc_is_arr: [i64; 8192], fn_ns: [i64; 8192], fn_ne: [i64; 8192], fn_off: [i64; 8192], strbuf: [i8; 8192], brk: [i64; 8192]) -> i64 with Mut, Panic, Div {
+fn compile_block(code: [i8; 262144], st: [i64; 8192], src: [i8; 1048576], tk: [i64; 65536], ts: [i64; 65536], te: [i64; 65536], tv: [i64; 65536], loc_ns: [i64; 8192], loc_ne: [i64; 8192], loc_slot: [i64; 8192], loc_is_arr: [i64; 8192], fn_ns: [i64; 8192], fn_ne: [i64; 8192], fn_off: [i64; 8192], strbuf: [i8; 8192], brk: [i64; 8192]) -> i64 with Mut, Panic, Div {
     var cp = st[0]
     var t = st[1]
     var next_slot = st[2]
@@ -1007,7 +1036,7 @@ fn em_print_int_fn(c: [i8; 262144], p: i64) -> i64 with Mut, Panic, Div {
 // ============================================================
 // Pass 1: collect function names (avoids byte-index bug in main)
 // ============================================================
-fn collect_fns(tk: [i64; 16384], ts: [i64; 16384], te: [i64; 16384], ntok: i64, fn_ns: [i64; 8192], fn_ne: [i64; 8192], fn_tok: [i64; 8192], st: [i64; 8192]) -> i64 with Mut, Panic, Div {
+fn collect_fns(tk: [i64; 65536], ts: [i64; 65536], te: [i64; 65536], ntok: i64, fn_ns: [i64; 8192], fn_ne: [i64; 8192], fn_tok: [i64; 8192], st: [i64; 8192]) -> i64 with Mut, Panic, Div {
     var fn_count: i64 = 0
     var ti: i64 = 0
     while ti < ntok {
@@ -1021,8 +1050,14 @@ fn collect_fns(tk: [i64; 16384], ts: [i64; 16384], te: [i64; 16384], ntok: i64, 
     fn_count
 }
 
+fn rd_code(buf: [i8; 262144], off: i64) -> i64 with Panic {
+    let v = buf[off as usize]
+    if v < 0 { return v + 256 }
+    v
+}
+
 // Pass 2: compile all functions
-fn compile_all(code: [i8; 262144], src: [i8; 1048576], tk: [i64; 16384], ts: [i64; 16384], te: [i64; 16384], tv: [i64; 16384], fn_ns: [i64; 8192], fn_ne: [i64; 8192], fn_tok: [i64; 8192], fn_off: [i64; 8192], st: [i64; 8192], loc_ns: [i64; 8192], loc_ne: [i64; 8192], loc_slot: [i64; 8192], loc_is_arr: [i64; 8192], strbuf: [i8; 8192]) -> i64 with Mut, Panic, Div {
+fn compile_all(code: [i8; 262144], src: [i8; 1048576], tk: [i64; 65536], ts: [i64; 65536], te: [i64; 65536], tv: [i64; 65536], fn_ns: [i64; 8192], fn_ne: [i64; 8192], fn_tok: [i64; 8192], fn_off: [i64; 8192], st: [i64; 8192], loc_ns: [i64; 8192], loc_ne: [i64; 8192], loc_slot: [i64; 8192], loc_is_arr: [i64; 8192], strbuf: [i8; 8192]) -> i64 with Mut, Panic, Div {
     var cp = st[0]
     let fn_count = st[7]
     let print_int_off = st[6]
@@ -1079,6 +1114,12 @@ fn compile_all(code: [i8; 262144], src: [i8; 1048576], tk: [i64; 16384], ts: [i6
             else if pi==3 { cp=e3(code,cp,0x48,0x89,0x8D); cp=ei32(code,cp,0-slot) }
             else if pi==4 { cp=e3(code,cp,0x4C,0x89,0x85); cp=ei32(code,cp,0-slot) }
             else if pi==5 { cp=e3(code,cp,0x4C,0x89,0x8D); cp=ei32(code,cp,0-slot) }
+            else {
+                // Stack param pi>=6: load from [rbp + 16 + (pi-6)*8], store to [rbp - slot]
+                let stack_disp = 16 + (pi - 6) * 8
+                cp = e3(code, cp, 0x48, 0x8B, 0x85); cp = ei32(code, cp, stack_disp)
+                cp = e3(code, cp, 0x48, 0x89, 0x85); cp = ei32(code, cp, 0 - slot)
+            }
             pi = pi + 1
         }
 
@@ -1091,12 +1132,36 @@ fn compile_all(code: [i8; 262144], src: [i8; 1048576], tk: [i64; 16384], ts: [i6
         // leave; ret (rax has last expression value)
         cp = e2(code, cp, 0xC9, 0xC3)
 
-        // Patch frame
-        let frame_size = ((next_slot + 15) / 16) * 16
+        // Patch frame — include temp arg area (next_slot + 1024 + 16*8 = max possible)
+        let frame_min = next_slot + 1024 + 128
+        let frame_size = ((frame_min + 15) / 16) * 16
         ei32(code, frame_patch, frame_size)
 
         fi = fi + 1
     }
+
+    // CAFE patching pass: resolve forward calls
+    var pi2: i64 = 0
+    while pi2 < cp - 4 {
+        if rd_code(code, pi2) == 0xE8 {
+            if rd_code(code, pi2 + 3) == 0xCA {
+                if rd_code(code, pi2 + 4) == 0xFE {
+                    let lo2 = rd_code(code, pi2 + 1)
+                    let hi2 = rd_code(code, pi2 + 2)
+                    let tidx = lo2 + hi2 * 256
+                    if tidx >= 0 {
+                        if tidx < fn_count {
+                            let toff = fn_off[tidx]
+                            let disp2 = toff - (pi2 + 5)
+                            ei32(code, pi2 + 1, disp2)
+                        }
+                    }
+                }
+            }
+        }
+        pi2 = pi2 + 1
+    }
+
     st[0] = cp
     cp
 }
@@ -1167,10 +1232,10 @@ fn main() -> i64 with IO, Mut, Panic, Div {
     let src: [i8; 1048576] = read_file(source_path)
     print("boot2: compiling\n")
 
-    var tk: [i64; 16384] = [0; 16384]
-    var ts: [i64; 16384] = [0; 16384]
-    var te: [i64; 16384] = [0; 16384]
-    var tv: [i64; 16384] = [0; 16384]
+    var tk: [i64; 65536] = [0; 65536]
+    var ts: [i64; 65536] = [0; 65536]
+    var te: [i64; 65536] = [0; 65536]
+    var tv: [i64; 65536] = [0; 65536]
     let ntok = tokenize(src, src_size, tk, ts, te, tv)
 
     var fn_ns: [i64; 8192] = [0; 8192]
