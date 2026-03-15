@@ -331,6 +331,7 @@ FILES=(
   self-hosted/test_epistemic_wmma.sio
   self-hosted/test_epistemic_tiled_gemm.sio
   self-hosted/test_epistemic_spirv.sio
+  self-hosted/test_epistemic_hlir_gpu.sio
   self-hosted/test_llvm_ffi.sio
   self-hosted/test_llvm_codegen.sio
 
