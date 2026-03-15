@@ -4414,6 +4414,76 @@ fn ocp_const_fold(func: IrFunction) -> IrFunction with Mut, Div, Panic {
             }
         }
 
+        // Sprint 240 Block EX: OR-complement-AND XOR to copy — (x|y)^(~x&y) → x.
+        // Proof (per bit): 00→0^0=0; 01→1^1=0? Wait: (0|1)=1, (~0&1)=1, 1^1=0≠x=0. Hmm.
+        // Recheck: (0,1): x=0,y=1: (0|1)=1, ~0=1, ~0&1=1, 1^1=0. x=0. So 0=0 ✓
+        // (0,0): 0^0=0=x=0 ✓; (1,0): 1^0=1=x=1 ✓; (1,1): 1^0=1=x=1 ✓. QED.
+        // Commutative XOR outer: (~x&y)^(x|y)→x; inner OR/AND: (y|x)^(~x&y)→x; etc.
+        // Zero new arrays: uses ao_or_rr_valid/lhs/rhs + ao_and_rr_valid/lhs/rhs + is_bnot/bnot_src.
+        // SOTA: Boolean algebra; LLVM InstCombineAndOrXor.
+        if ocp_is_binop(result.instrs[i as usize].op) {
+            let ex_instr = result.instrs[i as usize]
+            let ex_s1 = ex_instr.src1; let ex_s2 = ex_instr.src2
+            let ex_s1_ok = ex_s1 >= 0 && ex_s1 < 256; let ex_s2_ok = ex_s2 >= 0 && ex_s2 < 256
+            if ex_instr.bin_op == BinaryOp::OpBitXor && ex_s1_ok && ex_s2_ok {
+                // Case 1: s1=OR-rr(x,y), s2=AND-rr(~x,y): ~x is bnot of one OR operand, y same
+                if ao_or_rr_valid[ex_s1 as usize] && ao_and_rr_valid[ex_s2 as usize] {
+                    let ex_ol = ao_or_rr_lhs[ex_s1 as usize]; let ex_or2 = ao_or_rr_rhs[ex_s1 as usize]
+                    let ex_al = ao_and_rr_lhs[ex_s2 as usize]; let ex_ar = ao_and_rr_rhs[ex_s2 as usize]
+                    let ex_ol_ok = ex_ol >= 0 && ex_ol < 256; let ex_or2_ok = ex_or2 >= 0 && ex_or2 < 256
+                    let ex_al_ok = ex_al >= 0 && ex_al < 256; let ex_ar_ok = ex_ar >= 0 && ex_ar < 256
+                    // ~x=al, y=ar, x=ol or x=or2: al is NOT(x), ar==y
+                    if ex_al_ok && is_bnot[ex_al as usize] && ex_ar_ok {
+                        let ex_x = bnot_src[ex_al as usize]
+                        // x=ol, y=or2, ar==or2
+                        if ex_x == ex_ol && ex_ar == ex_or2 && ex_ol_ok {
+                            result.instrs[i as usize] = ir_copy(ex_instr.dst, ex_ol)
+                        }
+                        // x=or2, y=ol, ar==ol
+                        if ex_x == ex_or2 && ex_ar == ex_ol && ex_or2_ok {
+                            result.instrs[i as usize] = ir_copy(ex_instr.dst, ex_or2)
+                        }
+                    }
+                    // ~x=ar, y=al: ar is NOT(x)
+                    if ex_ar_ok && is_bnot[ex_ar as usize] && ex_al_ok {
+                        let ex_x2 = bnot_src[ex_ar as usize]
+                        // x=ol, y=or2, al==or2
+                        if ex_x2 == ex_ol && ex_al == ex_or2 && ex_ol_ok {
+                            if result.instrs[i as usize].src1 == ex_s1 {
+                                result.instrs[i as usize] = ir_copy(ex_instr.dst, ex_ol)
+                            }
+                        }
+                        // x=or2, y=ol, al==ol
+                        if ex_x2 == ex_or2 && ex_al == ex_ol && ex_or2_ok {
+                            if result.instrs[i as usize].src1 == ex_s1 {
+                                result.instrs[i as usize] = ir_copy(ex_instr.dst, ex_or2)
+                            }
+                        }
+                    }
+                }
+                // Case 2: s1=AND-rr(~x,y), s2=OR-rr(x,y): commutative outer XOR
+                if ao_and_rr_valid[ex_s1 as usize] && ao_or_rr_valid[ex_s2 as usize] {
+                    let ex_al2 = ao_and_rr_lhs[ex_s1 as usize]; let ex_ar2 = ao_and_rr_rhs[ex_s1 as usize]
+                    let ex_ol2 = ao_or_rr_lhs[ex_s2 as usize]; let ex_or22 = ao_or_rr_rhs[ex_s2 as usize]
+                    let ex_al2_ok = ex_al2 >= 0 && ex_al2 < 256; let ex_ar2_ok = ex_ar2 >= 0 && ex_ar2 < 256
+                    let ex_ol2_ok = ex_ol2 >= 0 && ex_ol2 < 256; let ex_or22_ok = ex_or22 >= 0 && ex_or22 < 256
+                    if ex_al2_ok && is_bnot[ex_al2 as usize] && ex_ar2_ok {
+                        let ex_x3 = bnot_src[ex_al2 as usize]
+                        if ex_x3 == ex_ol2 && ex_ar2 == ex_or22 && ex_ol2_ok {
+                            if result.instrs[i as usize].src1 == ex_s1 {
+                                result.instrs[i as usize] = ir_copy(ex_instr.dst, ex_ol2)
+                            }
+                        }
+                        if ex_x3 == ex_or22 && ex_ar2 == ex_ol2 && ex_or22_ok {
+                            if result.instrs[i as usize].src1 == ex_s1 {
+                                result.instrs[i as usize] = ir_copy(ex_instr.dst, ex_or22)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         // Sprint 239 Block EW: AND-complement XOR to copy — (x&y)^(~x&y) → y.
         // Proof (per bit): 00→0^0=0=0; 01→0^1=1=1; 10→0^0=0=0; 11→1^0=1=1. Result=y. QED.
         // Commutative outer XOR: (~x&y)^(x&y) → y; inner AND: (y&x)^(y&~x) → y; etc.
