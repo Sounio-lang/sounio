@@ -395,7 +395,7 @@ struct Block {
 };
 
 typedef struct Param { Name name; Name type_name; bool is_ref; bool is_mut_ref; bool is_byte_array; struct Param *next; } Param;
-typedef struct FieldDef { Name name; Name type_name; struct FieldDef *next; } FieldDef;
+typedef struct FieldDef { Name name; Name type_name; bool is_byte_array; struct FieldDef *next; } FieldDef;
 
 struct FnDef {
     Name name;
@@ -891,6 +891,28 @@ static StructDef *parse_struct(void) {
         FieldDef *f = NEW(FieldDef);
         f->name = cur()->name; next();
         expect(TK_COLON);
+        /* Detect [i8; N] or [u8; N] byte array field type */
+        if (tk()==TK_LBRACKET) {
+            int save = g_tp;
+            next(); /* [ */
+            if (tk()==TK_IDENT && (name_is(cur()->name,"i8")||name_is(cur()->name,"u8"))) {
+                f->is_byte_array = true;
+            }
+            g_tp = save;
+        }
+        /* Also detect &[i8; N] or &![i8; N] */
+        if (tk()==TK_AMP) {
+            int save = g_tp;
+            next(); /* & */
+            if (tk()==TK_BANG) next(); /* ! */
+            if (tk()==TK_LBRACKET) {
+                next(); /* [ */
+                if (tk()==TK_IDENT && (name_is(cur()->name,"i8")||name_is(cur()->name,"u8"))) {
+                    f->is_byte_array = true;
+                }
+            }
+            g_tp = save;
+        }
         f->type_name = cur()->name;
         skip_type();
         eat(TK_COMMA);
@@ -1003,6 +1025,7 @@ static void emit_mov_rax_imm64(int64_t v) {
 static Name g_struct_names[MAX_STRUCTS];
 static int g_struct_field_count[MAX_STRUCTS];
 static Name g_struct_field_names[MAX_FIELDS];
+static bool g_struct_field_is_byte[MAX_FIELDS]; /* true if field is [i8;N] or [u8;N] */
 static int g_struct_field_base[MAX_STRUCTS]; /* index into g_struct_field_names */
 static int g_struct_count;
 
@@ -1117,6 +1140,45 @@ static void emit_inline_print(const char *str, int len) {
  * ================================================================ */
 static void compile_expr(Expr *e, Locals *loc);
 static void compile_block(Block *b, Locals *loc);
+
+/* Check if an index base expression should use byte (1-byte) indexing.
+ * Heuristics:
+ *  1. Base is a local variable with type==3 (byte array)
+ *  2. Base is a field access on a struct field that is [i8;N] or [u8;N]
+ *  3. Index expression is an `as usize` cast (common pattern in bootstrap_v0)
+ */
+static int is_byte_index(Expr *base, Expr *index, Locals *loc) {
+    /* Check local variable type */
+    if (base && base->kind == EX_IDENT) {
+        for (int i = loc->count-1; i >= 0; i--) {
+            if (name_eq(loc->names[i], base->name)) {
+                if (loc->types[i] == 3) return 1;
+                break;
+            }
+        }
+    }
+    /* Check struct field: base is EX_FIELD with a known byte-array field */
+    if (base && base->kind == EX_FIELD) {
+        /* Search all structs for this field name and check is_byte */
+        for (int si = 0; si < g_struct_count; si++) {
+            int fb = g_struct_field_base[si];
+            for (int fi = 0; fi < g_struct_field_count[si]; fi++) {
+                if (name_eq(g_struct_field_names[fb + fi], base->name)) {
+                    if (g_struct_field_is_byte[fb + fi]) return 1;
+                }
+            }
+        }
+    }
+    /* Check deref-then-field: base is EX_FIELD on EX_DEREF */
+    if (base && base->kind == EX_FIELD && base->left && base->left->kind == EX_DEREF) {
+        /* Already handled above by field name check */
+    }
+    /* Heuristic: if index is `expr as usize`, assume byte indexing */
+    if (index && index->kind == EX_CAST && name_is(index->cast_type, "usize")) {
+        return 1;
+    }
+    return 0;
+}
 
 /* Loop context for break */
 static int g_loop_top[16];
@@ -1360,16 +1422,8 @@ static void compile_expr(Expr *e, Locals *loc) {
         emit_push_rax();
         compile_expr(e->right, loc);
         emit_pop_rcx();
-        /* Check if base is a byte array (type == 3) */
-        int is_byte = 0;
-        if (e->left && e->left->kind == EX_IDENT) {
-            for (int i = loc->count-1; i >= 0; i--) {
-                if (name_eq(loc->names[i], e->left->name)) {
-                    if (loc->types[i] == 3) is_byte = 1; /* byte array */
-                    break;
-                }
-            }
-        }
+        /* Check if base is a byte array (type == 3, struct field, or as usize heuristic) */
+        int is_byte = is_byte_index(e->left, e->right, loc);
         if (is_byte) {
             /* movsx rax, byte [rcx + rax] — byte-indexed */
             emit(0x48); emit(0x0F); emit(0xBE); emit(0x04); emit(0x01);
@@ -1478,14 +1532,28 @@ static void compile_expr(Expr *e, Locals *loc) {
         /* [value; count] — allocate count slots, fill with value */
         int64_t count = 0;
         if (e->right && e->right->kind == EX_INT) count = e->right->int_val;
-        if (count > 64) count = 64; /* cap to prevent stack overflow */
-        int base_slot = loc->next_slot;
-        loc->next_slot += (int)count;
-        compile_expr(e->left, loc);
-        for (int i = 0; i < (int)count; i++) emit_store_rax(base_slot + i);
-        /* LEA rax, base */
-        int32_t disp = -(base_slot+1)*8;
-        emit(0x48); emit(0x8D); emit(0x85); emit32(disp);
+        if (count > 4096) {
+            /* Large array: use mmap(NULL, count, PROT_R|W=3, MAP_PRIVATE|ANON=0x22, -1, 0)
+             * Returns pointer in rax — already zero-filled by kernel */
+            emit(0x48); emit(0x31); emit(0xFF); /* xor rdi, rdi */
+            emit(0x48); emit(0xBE); emit64(count); /* mov rsi, count */
+            emit(0xBA); emit32(3); /* mov edx, PROT_R|W */
+            emit(0x41); emit(0xBA); emit32(0x22); /* mov r10d, MAP_PRIVATE|ANON */
+            emit(0x49); emit(0xC7); emit(0xC0); emit32(-1); /* mov r8, -1 */
+            emit(0x4D); emit(0x31); emit(0xC9); /* xor r9, r9 */
+            emit(0xB8); emit32(9); /* sys_mmap */
+            emit(0x0F); emit(0x05); /* syscall */
+            /* rax = pointer to zero-filled buffer */
+        } else {
+            if (count > 512) count = 512; /* cap for stack arrays */
+            int base_slot = loc->next_slot;
+            loc->next_slot += (int)count;
+            compile_expr(e->left, loc);
+            for (int i = 0; i < (int)count; i++) emit_store_rax(base_slot + i);
+            /* LEA rax, base */
+            int32_t disp = -(base_slot+1)*8;
+            emit(0x48); emit(0x8D); emit(0x85); emit32(disp);
+        }
         break;
     }
     case EX_CAST:
@@ -1567,16 +1635,8 @@ static void compile_block(Block *b, Locals *loc) {
                 emit_load_rax(base_slot);
                 emit(0x48); emit(0x89); emit(0xC1); /* mov rcx, rax (base) */
                 emit(0x58); /* pop rax (value) */
-                /* Check if base is a byte array */
-                int is_byte = 0;
-                if (s->expr->left && s->expr->left->kind == EX_IDENT) {
-                    for (int i = loc->count-1; i >= 0; i--) {
-                        if (name_eq(loc->names[i], s->expr->left->name)) {
-                            if (loc->types[i] == 3) is_byte = 1;
-                            break;
-                        }
-                    }
-                }
+                /* Check if base is a byte array (local, struct field, or as usize) */
+                int is_byte = is_byte_index(s->expr->left, s->expr->right, loc);
                 if (is_byte) {
                     /* mov byte [rcx + rdx], al */
                     emit(0x88); emit(0x04); emit(0x11);
@@ -1618,7 +1678,7 @@ static void compile_function(FnDef *fn) {
     memset(&loc, 0, sizeof(loc));
     /* Prologue */
     emit_push_rbp(); emit_mov_rbp_rsp();
-    int frame_raw = (fn->param_count + 64 + 2) * 8; /* generous frame */
+    int frame_raw = (fn->param_count + 1024 + 2) * 8; /* generous frame for large local arrays */
     int frame_size = (frame_raw + 15) & ~15;
     emit_sub_rsp(frame_size);
     /* Spill params */
@@ -1763,8 +1823,11 @@ int main(int argc, char **argv) {
             g_struct_field_base[si] = total_fields;
             int fc = 0;
             for (FieldDef *fd = it->st->fields; fd; fd = fd->next) {
-                if (total_fields < MAX_FIELDS)
-                    g_struct_field_names[total_fields++] = fd->name;
+                if (total_fields < MAX_FIELDS) {
+                    g_struct_field_names[total_fields] = fd->name;
+                    g_struct_field_is_byte[total_fields] = fd->is_byte_array;
+                    total_fields++;
+                }
                 fc++;
             }
             g_struct_field_count[si] = fc;
