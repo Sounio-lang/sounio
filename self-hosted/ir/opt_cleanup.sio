@@ -4414,6 +4414,61 @@ fn ocp_const_fold(func: IrFunction) -> IrFunction with Mut, Div, Panic {
             }
         }
 
+        // Sprint 234 Block ER: Complement-AND add to OR — x+(~x&y) → x|y.
+        // Proof (per bit): x=0: 0+(1&y)=y=0|y; x=1: 1+(0&y)=1=1|y. Since bits disjoint, + = |. QED.
+        // Commutative outer: (~x&y)+x → x|y; inner: x+(y&~x) → x|y; (~x&y) → (y&~x).
+        // Zero new arrays: uses is_bnot/bnot_src (Block BJ) + ao_and_rr_valid/lhs/rhs (Block AO).
+        // SOTA: Hacker's Delight §2-2; LLVM InstCombine disjoint-bits add→or.
+        if ocp_is_binop(result.instrs[i as usize].op) {
+            let er_instr = result.instrs[i as usize]
+            let er_s1 = er_instr.src1; let er_s2 = er_instr.src2
+            let er_s1_ok = er_s1 >= 0 && er_s1 < 256; let er_s2_ok = er_s2 >= 0 && er_s2 < 256
+            if er_instr.bin_op == BinaryOp::OpAdd && er_s1_ok && er_s2_ok {
+                // Case 1: x+(~x&y): s2=AND-rr where one operand is NOT(s1)
+                if ao_and_rr_valid[er_s2 as usize] {
+                    let er_al = ao_and_rr_lhs[er_s2 as usize]
+                    let er_ar = ao_and_rr_rhs[er_s2 as usize]
+                    let er_al_ok = er_al >= 0 && er_al < 256; let er_ar_ok = er_ar >= 0 && er_ar < 256
+                    // lhs of AND is NOT(s1)
+                    if er_al_ok && is_bnot[er_al as usize] && bnot_src[er_al as usize] == er_s1 && er_ar_ok {
+                        result.instrs[i as usize] = ir_binop(er_instr.dst, er_s1, BinaryOp::OpBitOr, er_ar)
+                        ao_or_rr_valid[er_instr.dst as usize] = true
+                        ao_or_rr_lhs[er_instr.dst as usize] = er_s1
+                        ao_or_rr_rhs[er_instr.dst as usize] = er_ar
+                    }
+                    // rhs of AND is NOT(s1)
+                    if er_ar_ok && is_bnot[er_ar as usize] && bnot_src[er_ar as usize] == er_s1 && er_al_ok {
+                        if result.instrs[i as usize].src1 == er_s1 && result.instrs[i as usize].src2 == er_s2 {
+                            result.instrs[i as usize] = ir_binop(er_instr.dst, er_s1, BinaryOp::OpBitOr, er_al)
+                            ao_or_rr_valid[er_instr.dst as usize] = true
+                            ao_or_rr_lhs[er_instr.dst as usize] = er_s1
+                            ao_or_rr_rhs[er_instr.dst as usize] = er_al
+                        }
+                    }
+                }
+                // Case 2: (~x&y)+x: s1=AND-rr where one operand is NOT(s2)
+                if ao_and_rr_valid[er_s1 as usize] {
+                    let er_bl = ao_and_rr_lhs[er_s1 as usize]
+                    let er_br = ao_and_rr_rhs[er_s1 as usize]
+                    let er_bl_ok = er_bl >= 0 && er_bl < 256; let er_br_ok = er_br >= 0 && er_br < 256
+                    if er_bl_ok && is_bnot[er_bl as usize] && bnot_src[er_bl as usize] == er_s2 && er_br_ok {
+                        result.instrs[i as usize] = ir_binop(er_instr.dst, er_s2, BinaryOp::OpBitOr, er_br)
+                        ao_or_rr_valid[er_instr.dst as usize] = true
+                        ao_or_rr_lhs[er_instr.dst as usize] = er_s2
+                        ao_or_rr_rhs[er_instr.dst as usize] = er_br
+                    }
+                    if er_br_ok && is_bnot[er_br as usize] && bnot_src[er_br as usize] == er_s2 && er_bl_ok {
+                        if result.instrs[i as usize].src1 == er_s1 {
+                            result.instrs[i as usize] = ir_binop(er_instr.dst, er_s2, BinaryOp::OpBitOr, er_bl)
+                            ao_or_rr_valid[er_instr.dst as usize] = true
+                            ao_or_rr_lhs[er_instr.dst as usize] = er_s2
+                            ao_or_rr_rhs[er_instr.dst as usize] = er_bl
+                        }
+                    }
+                }
+            }
+        }
+
         // Sprint 233 Block EQ: XOR-AND XOR to OR — (x^y)^(x&y) → x|y.
         // Proof (truth table): 00→0^0=0=0|0; 01→1^0=1=0|1; 10→1^0=1=1|0; 11→0^1=1=1|1. QED.
         // Commutative: (x&y)^(x^y) → x|y.
