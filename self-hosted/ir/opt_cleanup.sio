@@ -3951,6 +3951,41 @@ fn ocp_const_fold(func: IrFunction) -> IrFunction with Mut, Div, Panic {
             }
         }
 
+        // Sprint 217 Block EA: XOR-OR to AND — (x^y) ^ (x|y) → x&y.
+        // Proof: x^y = (x|y)^(x&y), so (x^y)^(x|y) = (x|y)^(x&y)^(x|y) = x&y. QED.
+        // Commutative: (x|y) ^ (x^y) → x&y.
+        // Zero new arrays: uses as_xor_rr_valid/lhs/rhs (Block AS) + ao_or_rr_valid/lhs/rhs (Block AO).
+        // SOTA: LLVM InstCombineAndOrXor; Boolean algebra XOR decomposition.
+        if ocp_is_binop(result.instrs[i as usize].op) {
+            let ea_instr = result.instrs[i as usize]
+            let ea_s1 = ea_instr.src1; let ea_s2 = ea_instr.src2
+            let ea_s1_ok = ea_s1 >= 0 && ea_s1 < 256; let ea_s2_ok = ea_s2 >= 0 && ea_s2 < 256
+            if ea_instr.bin_op == BinaryOp::OpBitXor && ea_s1_ok && ea_s2_ok {
+                // Case 1: (x^y) ^ (x|y) → x&y: s1=XOR-rr, s2=OR-rr with same operands
+                if as_xor_rr_valid[ea_s1 as usize] && ao_or_rr_valid[ea_s2 as usize] {
+                    let ea_xl = as_xor_rr_lhs[ea_s1 as usize]
+                    let ea_xr = as_xor_rr_rhs[ea_s1 as usize]
+                    let ea_ol = ao_or_rr_lhs[ea_s2 as usize]
+                    let ea_or = ao_or_rr_rhs[ea_s2 as usize]
+                    if (ea_xl == ea_ol && ea_xr == ea_or)
+                            || (ea_xl == ea_or && ea_xr == ea_ol) {
+                        result.instrs[i as usize] = ir_binop(ea_instr.dst, ea_xl, BinaryOp::OpBitAnd, ea_xr)
+                    }
+                }
+                // Case 2: (x|y) ^ (x^y) → x&y: s1=OR-rr, s2=XOR-rr with same operands
+                if ao_or_rr_valid[ea_s1 as usize] && as_xor_rr_valid[ea_s2 as usize] {
+                    let ea_ol2 = ao_or_rr_lhs[ea_s1 as usize]
+                    let ea_or2 = ao_or_rr_rhs[ea_s1 as usize]
+                    let ea_xl2 = as_xor_rr_lhs[ea_s2 as usize]
+                    let ea_xr2 = as_xor_rr_rhs[ea_s2 as usize]
+                    if (ea_ol2 == ea_xl2 && ea_or2 == ea_xr2)
+                            || (ea_ol2 == ea_xr2 && ea_or2 == ea_xl2) {
+                        result.instrs[i as usize] = ir_binop(ea_instr.dst, ea_ol2, BinaryOp::OpBitAnd, ea_or2)
+                    }
+                }
+            }
+        }
+
         // Sprint 177 Block CM: AND complement XOR partition — (x & C) ^ (x & ~C) → x.
         // Proof: C-bits: (xi&1)^(xi&0)=xi^0=xi. Non-C: (xi&0)^(xi&1)=0^xi=xi. QED.
         // Dual of Block CC (OR partition). Commutative: (x&~C)^(x&C) → x.
