@@ -4414,6 +4414,47 @@ fn ocp_const_fold(func: IrFunction) -> IrFunction with Mut, Div, Panic {
             }
         }
 
+        // Sprint 233 Block EQ: XOR-AND XOR to OR — (x^y)^(x&y) → x|y.
+        // Proof (truth table): 00→0^0=0=0|0; 01→1^0=1=0|1; 10→1^0=1=1|0; 11→0^1=1=1|1. QED.
+        // Commutative: (x&y)^(x^y) → x|y.
+        // Zero new arrays: uses as_xor_rr_valid/lhs/rhs (Block AS) + ao_and_rr_valid/lhs/rhs (Block AO).
+        // SOTA: LLVM InstCombineAndOrXor; GF(2): (x⊕y)⊕(x∧y) = x∨y.
+        if ocp_is_binop(result.instrs[i as usize].op) {
+            let eq_instr = result.instrs[i as usize]
+            let eq_s1 = eq_instr.src1; let eq_s2 = eq_instr.src2
+            let eq_s1_ok = eq_s1 >= 0 && eq_s1 < 256; let eq_s2_ok = eq_s2 >= 0 && eq_s2 < 256
+            if eq_instr.bin_op == BinaryOp::OpBitXor && eq_s1_ok && eq_s2_ok {
+                // Case 1: s1=xor_rr(x,y), s2=and_rr(x,y) same operands
+                if as_xor_rr_valid[eq_s1 as usize] && ao_and_rr_valid[eq_s2 as usize] {
+                    let eq_xl = as_xor_rr_lhs[eq_s1 as usize]; let eq_xr = as_xor_rr_rhs[eq_s1 as usize]
+                    let eq_al = ao_and_rr_lhs[eq_s2 as usize]; let eq_ar = ao_and_rr_rhs[eq_s2 as usize]
+                    if (eq_xl == eq_al && eq_xr == eq_ar) || (eq_xl == eq_ar && eq_xr == eq_al) {
+                        let eq_xl_ok = eq_xl >= 0 && eq_xl < 256; let eq_xr_ok = eq_xr >= 0 && eq_xr < 256
+                        if eq_xl_ok && eq_xr_ok {
+                            result.instrs[i as usize] = ir_binop(eq_instr.dst, eq_xl, BinaryOp::OpBitOr, eq_xr)
+                            ao_or_rr_valid[eq_instr.dst as usize] = true
+                            ao_or_rr_lhs[eq_instr.dst as usize] = eq_xl
+                            ao_or_rr_rhs[eq_instr.dst as usize] = eq_xr
+                        }
+                    }
+                }
+                // Case 2: s1=and_rr(x,y), s2=xor_rr(x,y) commutative
+                if ao_and_rr_valid[eq_s1 as usize] && as_xor_rr_valid[eq_s2 as usize] {
+                    let eq_al2 = ao_and_rr_lhs[eq_s1 as usize]; let eq_ar2 = ao_and_rr_rhs[eq_s1 as usize]
+                    let eq_xl2 = as_xor_rr_lhs[eq_s2 as usize]; let eq_xr2 = as_xor_rr_rhs[eq_s2 as usize]
+                    if (eq_al2 == eq_xl2 && eq_ar2 == eq_xr2) || (eq_al2 == eq_xr2 && eq_ar2 == eq_xl2) {
+                        let eq_xl2_ok = eq_xl2 >= 0 && eq_xl2 < 256; let eq_xr2_ok = eq_xr2 >= 0 && eq_xr2 < 256
+                        if eq_xl2_ok && eq_xr2_ok && result.instrs[i as usize].src1 == eq_s1 {
+                            result.instrs[i as usize] = ir_binop(eq_instr.dst, eq_xl2, BinaryOp::OpBitOr, eq_xr2)
+                            ao_or_rr_valid[eq_instr.dst as usize] = true
+                            ao_or_rr_lhs[eq_instr.dst as usize] = eq_xl2
+                            ao_or_rr_rhs[eq_instr.dst as usize] = eq_xr2
+                        }
+                    }
+                }
+            }
+        }
+
         // Sprint 232 Block EP: Sub-swap double — (x-y)-(y-x) → (x-y)+(x-y).
         // Proof: (x-y)-(y-x) = (x-y)+(x-y) = 2*(x-y). QED. Commutative: (y-x)-(x-y) negates.
         // Zero new arrays: uses al_is_sub/lhs/rhs (Block AL).
