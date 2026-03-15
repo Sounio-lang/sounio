@@ -29,8 +29,7 @@
 //! // Returns drug_a - higher variance means more to learn
 //! ```
 
-use core::{Option};
-use epistemic::knowledge::{Knowledge, BetaConfidence, Source, Provenance};
+use epistemic::knowledge::{Epistemic, BetaConfidence};
 
 // ============================================================================
 // PRECISION AND INFORMATION METRICS
@@ -38,13 +37,13 @@ use epistemic::knowledge::{Knowledge, BetaConfidence, Source, Provenance};
 
 // Precision: inverse of variance (how confident are we?)
 // Higher precision = more confident = less need to explore
-pub fn precision(k: &Knowledge<f64>) -> f64 {
+pub fn precision(k: &Epistemic) -> f64 {
     1.0 / max_f64(k.variance, 0.0000001)
 }
 
 // Entropy of a Knowledge value (assuming Gaussian)
 // H = 0.5 * ln(2πe * variance)
-pub fn entropy(k: &Knowledge<f64>) -> f64 {
+pub fn entropy(k: &Epistemic) -> f64 {
     let two_pi_e = 17.0794684453  // 2 * π * e
     0.5 * ln_f64(two_pi_e * max_f64(k.variance, 0.0000001))
 }
@@ -54,18 +53,18 @@ pub fn entropy(k: &Knowledge<f64>) -> f64 {
 //
 // If we expect posterior variance to be reduced by factor r:
 // IG = 0.5 * ln(1 / r) = -0.5 * ln(r)
-pub fn expected_info_gain(k: &Knowledge<f64>, expected_reduction: f64) -> f64 {
+pub fn expected_info_gain(k: &Epistemic, expected_reduction: f64) -> f64 {
     0.0 - 0.5 * ln_f64(max_f64(min_f64(expected_reduction, 1.0), 0.01))
 }
 
 // Relative uncertainty: variance / value²
 // Useful for comparing uncertainties across different scales
-pub fn relative_uncertainty(k: &Knowledge<f64>) -> f64 {
+pub fn relative_uncertainty(k: &Epistemic) -> f64 {
     k.variance / max_f64(k.value * k.value, 0.0000001)
 }
 
 // Coefficient of variation: std / |mean|
-pub fn coefficient_of_variation(k: &Knowledge<f64>) -> f64 {
+pub fn coefficient_of_variation(k: &Epistemic) -> f64 {
     sqrt_f64(k.variance) / max_f64(abs_f64(k.value), 0.0000001)
 }
 
@@ -80,7 +79,7 @@ pub fn coefficient_of_variation(k: &Knowledge<f64>) -> f64 {
 // - Variance contribution: high variance → high score
 // - Confidence penalty: low confidence → high score
 // - Value bonus: important values get priority
-pub fn exploration_score(k: &Knowledge<f64>, importance: f64) -> f64 {
+pub fn exploration_score(k: &Epistemic, importance: f64) -> f64 {
     let variance_term = ln_f64(1.0 + k.variance)
     let confidence_term = 1.0 - k.confidence.mean()
     let importance_term = importance
@@ -88,51 +87,35 @@ pub fn exploration_score(k: &Knowledge<f64>, importance: f64) -> f64 {
     variance_term + confidence_term + importance_term
 }
 
-// Rank Knowledge values by exploration priority
-// Returns indices sorted by priority (highest first)
-pub fn exploration_priority(values: &[Knowledge<f64>]) -> Vec<usize> {
+// Find the index with highest exploration priority (highest score = explore first)
+pub fn exploration_priority(values: &[Epistemic]) -> usize {
     let n = values.len()
-    var scores = Vec::new()
-    var indices = Vec::new()
+    if n == 0 { return 0 }
 
-    var i = 0
+    var best_idx = 0
+    var best_score = exploration_score(&values[0], 1.0)
+
+    var i = 1
     while i < n {
-        scores.push(exploration_score(&values[i], 1.0))
-        indices.push(i)
-        i = i + 1
-    }
-
-    // Simple bubble sort by score (descending)
-    i = 0
-    while i < n {
-        var j = i + 1
-        while j < n {
-            if scores[j] > scores[i] {
-                // Swap
-                let tmp_score = scores[i]
-                scores[i] = scores[j]
-                scores[j] = tmp_score
-
-                let tmp_idx = indices[i]
-                indices[i] = indices[j]
-                indices[j] = tmp_idx
-            }
-            j = j + 1
+        let s = exploration_score(&values[i], 1.0)
+        if s > best_score {
+            best_score = s
+            best_idx = i
         }
         i = i + 1
     }
 
-    indices
+    best_idx
 }
 
 // Get the Knowledge value most worth exploring
-pub fn most_uncertain<'a>(values: &'a [Knowledge<f64>]) -> Option<&'a Knowledge<f64>> {
+pub fn most_uncertain<'a>(values: &'a [Epistemic]) -> Option<&'a Epistemic> {
     if values.is_empty() {
-        return Option::None
+        return None
     }
 
     let priority = exploration_priority(values)
-    Option::Some(&values[priority[0]])
+    Some(&values[priority])
 }
 
 // ============================================================================
@@ -158,7 +141,7 @@ pub struct EFEComponents {
 //
 // We want to MINIMIZE EFE (maximize epistemic + pragmatic value)
 pub fn expected_free_energy(
-    current: &Knowledge<f64>,
+    current: &Epistemic,
     expected_posterior_var: f64,
     expected_reward: f64,
     reward_weight: f64,
@@ -180,30 +163,35 @@ pub fn expected_free_energy(
     }
 }
 
-// Select action that minimizes EFE
-pub fn select_action<A: Clone>(
-    actions: &[(A, f64, f64)],  // (action, expected_var_reduction, expected_reward)
-    current: &Knowledge<f64>,
+// Select action index that minimizes EFE
+// Returns the index of the best action in the actions slice.
+pub fn select_action_idx(
+    actions: &[(f64, f64)],  // (expected_var_reduction, expected_reward) pairs
+    current: &Epistemic,
     reward_weight: f64,
-) -> Option<A> {
+) -> Option<usize> {
     if actions.is_empty() {
-        return Option::None
+        return None
     }
 
-    var best_action = actions[0].0.clone()
+    var best_idx = 0
     var best_efe = 1.0e308  // f64::MAX equivalent
 
-    for (action, var_reduction, reward) in actions {
+    var i = 0
+    while i < actions.len() {
+        let var_reduction = actions[i].0
+        let reward = actions[i].1
         let posterior_var = current.variance * var_reduction
-        let efe = expected_free_energy(current, posterior_var, *reward, reward_weight)
+        let efe = expected_free_energy(current, posterior_var, reward, reward_weight)
 
         if efe.total < best_efe {
             best_efe = efe.total
-            best_action = action.clone()
+            best_idx = i
         }
+        i = i + 1
     }
 
-    Option::Some(best_action)
+    Some(best_idx)
 }
 
 // ============================================================================
@@ -211,13 +199,13 @@ pub fn select_action<A: Clone>(
 // ============================================================================
 
 // Prediction error: difference between observation and belief
-pub fn prediction_error(belief: &Knowledge<f64>, observation: f64) -> f64 {
+pub fn prediction_error(belief: &Epistemic, observation: f64) -> f64 {
     observation - belief.value
 }
 
 // Precision-weighted prediction error
 // This is the key quantity in predictive processing
-pub fn precision_weighted_error(belief: &Knowledge<f64>, observation: f64) -> f64 {
+pub fn precision_weighted_error(belief: &Epistemic, observation: f64) -> f64 {
     let error = observation - belief.value
     let prec = precision(belief)
     prec * error
@@ -228,10 +216,10 @@ pub fn precision_weighted_error(belief: &Knowledge<f64>, observation: f64) -> f6
 // posterior_mean = (prior_precision * prior_mean + obs_precision * obs)
 //                / (prior_precision + obs_precision)
 pub fn update_belief(
-    prior: &Knowledge<f64>,
+    prior: &Epistemic,
     observation: f64,
     observation_variance: f64,
-) -> Knowledge<f64> {
+) -> Epistemic {
     let prior_prec = precision(prior)
     let obs_prec = 1.0 / max_f64(observation_variance, 0.0000001)
     let total_prec = prior_prec + obs_prec
@@ -246,7 +234,7 @@ pub fn update_belief(
         1,                                // Pseudo-failures
     )
 
-    Knowledge {
+    Epistemic {
         value: posterior_mean,
         variance: posterior_var,
         confidence: new_conf,
@@ -256,13 +244,15 @@ pub fn update_belief(
 
 // Sequential belief updating with multiple observations
 pub fn update_sequential(
-    prior: Knowledge<f64>,
+    prior: Epistemic,
     observations: &[(f64, f64)],  // (value, variance) pairs
-) -> Knowledge<f64> {
+) -> Epistemic {
     var current = prior
 
-    for (obs, var) in observations {
-        current = update_belief(&current, *obs, *var)
+    var i = 0
+    while i < observations.len() {
+        current = update_belief(&current, observations[i].0, observations[i].1)
+        i = i + 1
     }
 
     current
@@ -276,18 +266,18 @@ pub fn update_sequential(
 // With probability epsilon, explore (pick most uncertain)
 // Otherwise exploit (pick highest value)
 pub fn epsilon_greedy(
-    values: &[Knowledge<f64>],
+    values: &[Epistemic],
     epsilon: f64,
     random_value: f64,  // Should be in [0, 1]
 ) -> Option<usize> {
     if values.is_empty() {
-        return Option::None
+        return None
     }
 
     if random_value < epsilon {
         // Explore: pick most uncertain
         let priority = exploration_priority(values)
-        Option::Some(priority[0])
+        Some(priority)
     } else {
         // Exploit: pick highest value
         var best_idx = 0
@@ -302,7 +292,7 @@ pub fn epsilon_greedy(
             i = i + 1
         }
 
-        Option::Some(best_idx)
+        Some(best_idx)
     }
 }
 
@@ -310,9 +300,9 @@ pub fn epsilon_greedy(
 // Balances exploitation (high value) with exploration (high uncertainty)
 //
 // UCB = value + c * sqrt(variance)
-pub fn ucb_select(values: &[Knowledge<f64>], exploration_constant: f64) -> Option<usize> {
+pub fn ucb_select(values: &[Epistemic], exploration_constant: f64) -> Option<usize> {
     if values.is_empty() {
-        return Option::None
+        return None
     }
 
     var best_idx = 0
@@ -328,14 +318,14 @@ pub fn ucb_select(values: &[Knowledge<f64>], exploration_constant: f64) -> Optio
         i = i + 1
     }
 
-    Option::Some(best_idx)
+    Some(best_idx)
 }
 
 // Thompson Sampling: sample from posterior and pick highest
 // Approximation: sample from N(value, variance)
-pub fn thompson_select(values: &[Knowledge<f64>], random_normals: &[f64]) -> Option<usize> {
+pub fn thompson_select(values: &[Epistemic], random_normals: &[f64]) -> Option<usize> {
     if values.is_empty() || random_normals.len() < values.len() {
-        return Option::None
+        return None
     }
 
     var best_idx = 0
@@ -351,7 +341,7 @@ pub fn thompson_select(values: &[Knowledge<f64>], random_normals: &[f64]) -> Opt
         i = i + 1
     }
 
-    Option::Some(best_idx)
+    Some(best_idx)
 }
 
 // ============================================================================
