@@ -4414,6 +4414,55 @@ fn ocp_const_fold(func: IrFunction) -> IrFunction with Mut, Div, Panic {
             }
         }
 
+        // Sprint 231 Block EO: Add-sub symmetric collapse — (x+y)+(x-y) → x+x.
+        // Proof: (x+y)+(x-y) = x+y+x-y = 2x = x+x. QED.
+        // Commutative variants: (x-y)+(x+y) → x+x; (y+x)+(x-y) → x+x; (x-y)+(y+x) → x+x.
+        // Zero new arrays: uses aq_add_rr_valid/lhs/rhs (Block AQ) + al_is_sub/lhs/rhs (Block AL).
+        // SOTA: LLVM InstCombineAddSub; algebraic simplification.
+        if ocp_is_binop(result.instrs[i as usize].op) {
+            let eo_instr = result.instrs[i as usize]
+            let eo_s1 = eo_instr.src1; let eo_s2 = eo_instr.src2
+            let eo_s1_ok = eo_s1 >= 0 && eo_s1 < 256; let eo_s2_ok = eo_s2 >= 0 && eo_s2 < 256
+            if eo_instr.bin_op == BinaryOp::OpAdd && eo_s1_ok && eo_s2_ok {
+                // Case 1: s1=ADD-rr(x,y), s2=SUB(x,y): same x and y
+                if aq_add_rr_valid[eo_s1 as usize] && al_is_sub[eo_s2 as usize] {
+                    let eo_ax = aq_add_rr_lhs[eo_s1 as usize]
+                    let eo_ay = aq_add_rr_rhs[eo_s1 as usize]
+                    let eo_sx = al_sub_lhs[eo_s2 as usize]
+                    let eo_sy = al_sub_rhs[eo_s2 as usize]
+                    let eo_ax_ok = eo_ax >= 0 && eo_ax < 256; let eo_ay_ok = eo_ay >= 0 && eo_ay < 256
+                    // (x+y)+(x-y): ax==sx, ay==sy
+                    if eo_ax_ok && eo_ax == eo_sx && eo_ay == eo_sy {
+                        result.instrs[i as usize] = ir_binop(eo_instr.dst, eo_ax, BinaryOp::OpAdd, eo_ax)
+                    }
+                    // (y+x)+(x-y): ay==sx, ax==sy
+                    if eo_ax_ok && eo_ay_ok && eo_ay == eo_sx && eo_ax == eo_sy {
+                        if result.instrs[i as usize].src1 == eo_s1 {
+                            result.instrs[i as usize] = ir_binop(eo_instr.dst, eo_sx, BinaryOp::OpAdd, eo_sx)
+                        }
+                    }
+                }
+                // Case 2: s1=SUB(x,y), s2=ADD-rr(x,y): commutative outer add
+                if al_is_sub[eo_s1 as usize] && aq_add_rr_valid[eo_s2 as usize] {
+                    let eo_sx2 = al_sub_lhs[eo_s1 as usize]
+                    let eo_sy2 = al_sub_rhs[eo_s1 as usize]
+                    let eo_ax2 = aq_add_rr_lhs[eo_s2 as usize]
+                    let eo_ay2 = aq_add_rr_rhs[eo_s2 as usize]
+                    let eo_sx2_ok = eo_sx2 >= 0 && eo_sx2 < 256
+                    // (x-y)+(x+y): sx==ax, sy==ay
+                    if eo_sx2_ok && eo_sx2 == eo_ax2 && eo_sy2 == eo_ay2 {
+                        result.instrs[i as usize] = ir_binop(eo_instr.dst, eo_sx2, BinaryOp::OpAdd, eo_sx2)
+                    }
+                    // (x-y)+(y+x): sx==ay, sy==ax
+                    if eo_sx2_ok && eo_ax2 >= 0 && eo_ax2 < 256 && eo_sx2 == eo_ay2 && eo_sy2 == eo_ax2 {
+                        if result.instrs[i as usize].src1 == eo_s1 {
+                            result.instrs[i as usize] = ir_binop(eo_instr.dst, eo_sx2, BinaryOp::OpAdd, eo_sx2)
+                        }
+                    }
+                }
+            }
+        }
+
         // Sprint 230 Block EN: Double-complement XOR — ~x^~y → x^y.
         // Proof: ~x^~y = (x^1)^(y^1) = x^y^(1^1) = x^y^0 = x^y. QED.
         // Commutative: already handled since XOR is commutative.

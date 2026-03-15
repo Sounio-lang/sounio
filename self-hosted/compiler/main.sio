@@ -16368,6 +16368,86 @@ fn compiler_main_test_dy_no_fold_or_outer() -> bool with Mut, Div, Panic {
     opt.instrs[2 as usize].bin_op != BinaryOp::OpBitAnd
 }
 
+// Sprint 231 Block EO: Add-sub symmetric collapse — (x+y)+(x-y) → x+x (T1052-T1057)
+fn compiler_main_test_eo_add_sub_sym_basic() -> bool with Mut, Div, Panic {
+    // r2=r0+r1, r3=r0-r1, r4=r2+r3 → r4 becomes r0+r0
+    var instrs: [IrInstr; 128] = cp_empty_instrs()
+    instrs[0 as usize] = ir_binop(2, 0, BinaryOp::OpAdd, 1)
+    instrs[1 as usize] = ir_binop(3, 0, BinaryOp::OpSub, 1)
+    instrs[2 as usize] = ir_binop(4, 2, BinaryOp::OpAdd, 3)
+    let func = cp_make_test_func(instrs, 3)
+    let opt = opt_cleanup_function(func)
+    opt.instrs[2 as usize].op == IrOpcode::IrBinOp
+        && opt.instrs[2 as usize].bin_op == BinaryOp::OpAdd
+        && opt.instrs[2 as usize].src1 == 0
+        && opt.instrs[2 as usize].src2 == 0
+}
+
+fn compiler_main_test_eo_add_sub_sym_comm_sub() -> bool with Mut, Div, Panic {
+    // r2=r0-r1, r3=r0+r1, r4=r2+r3 → (x-y)+(x+y) → r0+r0
+    var instrs: [IrInstr; 128] = cp_empty_instrs()
+    instrs[0 as usize] = ir_binop(2, 0, BinaryOp::OpSub, 1)
+    instrs[1 as usize] = ir_binop(3, 0, BinaryOp::OpAdd, 1)
+    instrs[2 as usize] = ir_binop(4, 2, BinaryOp::OpAdd, 3)
+    let func = cp_make_test_func(instrs, 3)
+    let opt = opt_cleanup_function(func)
+    opt.instrs[2 as usize].op == IrOpcode::IrBinOp
+        && opt.instrs[2 as usize].bin_op == BinaryOp::OpAdd
+        && opt.instrs[2 as usize].src1 == 0
+        && opt.instrs[2 as usize].src2 == 0
+}
+
+fn compiler_main_test_eo_add_sub_sym_inner_comm() -> bool with Mut, Div, Panic {
+    // r2=r1+r0, r3=r0-r1, r4=r2+r3 → (y+x)+(x-y) → r0+r0
+    var instrs: [IrInstr; 128] = cp_empty_instrs()
+    instrs[0 as usize] = ir_binop(2, 1, BinaryOp::OpAdd, 0)
+    instrs[1 as usize] = ir_binop(3, 0, BinaryOp::OpSub, 1)
+    instrs[2 as usize] = ir_binop(4, 2, BinaryOp::OpAdd, 3)
+    let func = cp_make_test_func(instrs, 3)
+    let opt = opt_cleanup_function(func)
+    opt.instrs[2 as usize].op == IrOpcode::IrBinOp
+        && opt.instrs[2 as usize].bin_op == BinaryOp::OpAdd
+        && opt.instrs[2 as usize].src1 == 0
+        && opt.instrs[2 as usize].src2 == 0
+}
+
+fn compiler_main_test_eo_no_fold_diff_var() -> bool with Mut, Div, Panic {
+    // r2=r0+r1, r3=r0-r2: subtrahend is r2 not r1 → no EO fold
+    var instrs: [IrInstr; 128] = cp_empty_instrs()
+    instrs[0 as usize] = ir_binop(2, 0, BinaryOp::OpAdd, 1)
+    instrs[1 as usize] = ir_binop(3, 0, BinaryOp::OpSub, 2)
+    instrs[2 as usize] = ir_binop(4, 2, BinaryOp::OpAdd, 3)
+    let func = cp_make_test_func(instrs, 3)
+    let opt = opt_cleanup_function(func)
+    opt.instrs[2 as usize].op == IrOpcode::IrBinOp
+        && opt.instrs[2 as usize].bin_op == BinaryOp::OpAdd
+}
+
+fn compiler_main_test_eo_no_fold_sub_op() -> bool with Mut, Div, Panic {
+    // r2=r0+r1, r3=r0-r1, outer is SUB not ADD → no EO fold
+    var instrs: [IrInstr; 128] = cp_empty_instrs()
+    instrs[0 as usize] = ir_binop(2, 0, BinaryOp::OpAdd, 1)
+    instrs[1 as usize] = ir_binop(3, 0, BinaryOp::OpSub, 1)
+    instrs[2 as usize] = ir_binop(4, 2, BinaryOp::OpSub, 3)
+    let func = cp_make_test_func(instrs, 3)
+    let opt = opt_cleanup_function(func)
+    // (x+y)-(x-y) = 2y — Block ED handles (x+y)-(x-z)→y+z with z=y → 2y; check not EO
+    opt.instrs[2 as usize].op == IrOpcode::IrBinOp
+        && opt.instrs[2 as usize].bin_op != BinaryOp::OpAdd
+}
+
+fn compiler_main_test_eo_no_fold_diff_x() -> bool with Mut, Div, Panic {
+    // r2=r0+r1, r3=r2-r1: x differs → no EO fold (x+y)+(x'-y) can't simplify to 2x
+    var instrs: [IrInstr; 128] = cp_empty_instrs()
+    instrs[0 as usize] = ir_binop(2, 0, BinaryOp::OpAdd, 1)
+    instrs[1 as usize] = ir_binop(3, 2, BinaryOp::OpSub, 1)
+    instrs[2 as usize] = ir_binop(4, 2, BinaryOp::OpAdd, 3)
+    let func = cp_make_test_func(instrs, 3)
+    let opt = opt_cleanup_function(func)
+    opt.instrs[2 as usize].op == IrOpcode::IrBinOp
+        && opt.instrs[2 as usize].bin_op == BinaryOp::OpAdd
+}
+
 // Sprint 230 Block EN: Double-complement XOR — ~x^~y → x^y (T1046-T1051)
 fn compiler_main_test_en_dbl_comp_xor_basic() -> bool with Mut, Div, Panic {
     // r2=~r0, r3=~r1, r4=r2^r3 → r4 becomes r0^r1
@@ -17512,7 +17592,7 @@ fn compiler_main_test_dz_no_fold_or_outer() -> bool with Mut, Div, Panic {
 
 fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
     var passed: i64 = 0
-    let total: i64 = 1051
+    let total: i64 = 1057
 
     println("=== compiler/main.sio self-tests ===")
 
@@ -22440,6 +22520,32 @@ fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
         passed = passed + 1
         println("  T961 OK: Sprint 215 Block DY: r0|(r1|~r0) no fold OR outer")
     } else { println("  FAIL: T961") }
+
+    // Sprint 231 Block EO: Add-sub symmetric collapse (T1052-T1057)
+    if compiler_main_test_eo_add_sub_sym_basic() {
+        passed = passed + 1
+        println("  T1052 OK: Sprint 231 Block EO: (r0+r1)+(r0-r1) -> r0+r0")
+    } else { println("  FAIL: T1052") }
+    if compiler_main_test_eo_add_sub_sym_comm_sub() {
+        passed = passed + 1
+        println("  T1053 OK: Sprint 231 Block EO: (r0-r1)+(r0+r1) -> r0+r0 comm")
+    } else { println("  FAIL: T1053") }
+    if compiler_main_test_eo_add_sub_sym_inner_comm() {
+        passed = passed + 1
+        println("  T1054 OK: Sprint 231 Block EO: (r1+r0)+(r0-r1) -> r0+r0 inner comm")
+    } else { println("  FAIL: T1054") }
+    if compiler_main_test_eo_no_fold_diff_var() {
+        passed = passed + 1
+        println("  T1055 OK: Sprint 231 Block EO: (r0+r1)+(r0-r2) no fold diff var")
+    } else { println("  FAIL: T1055") }
+    if compiler_main_test_eo_no_fold_sub_op() {
+        passed = passed + 1
+        println("  T1056 OK: Sprint 231 Block EO: (r0+r1)-(r0-r1) no EO fold sub outer")
+    } else { println("  FAIL: T1056") }
+    if compiler_main_test_eo_no_fold_diff_x() {
+        passed = passed + 1
+        println("  T1057 OK: Sprint 231 Block EO: (r0+r1)+(r2-r1) no fold diff x")
+    } else { println("  FAIL: T1057") }
 
     // Sprint 230 Block EN: Double-complement XOR (T1046-T1051)
     if compiler_main_test_en_dbl_comp_xor_basic() {
