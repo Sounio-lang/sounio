@@ -873,6 +873,10 @@ struct AstCompileCtx {
     cur_sret: i64,           // 1 if current function uses sret, 0 otherwise
     cur_sret_dest_slot: i64, // slot holding the sret destination pointer
     cur_sret_flat_size: i64, // flat size of the return struct
+    // Enum variant registry (Phase 0 scanned)
+    enum_variant_names: [Name; 512],
+    enum_variant_disc: [i64; 512],
+    enum_variant_count: i64,
 }
 
 // Sret dest slot stored in CodeBuffer metadata at bytes [65526..65527]
@@ -1194,6 +1198,44 @@ fn ast_lookup_struct(ctx: &AstCompileCtx, name: Name) -> i64 with Mut, Panic, Di
         i = i + 1
     }
     -1
+}
+
+fn ast_lookup_variant(ctx: &AstCompileCtx, variant_name: Name) -> i64 with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < ctx.enum_variant_count {
+        if ir_name_eq(ctx.enum_variant_names[i as usize], variant_name) {
+            return ctx.enum_variant_disc[i as usize]
+        }
+        i = i + 1
+    }
+    -1
+}
+
+// Walk AstPath to extract the last segment name (for Color::Red → Red)
+fn ast_path_last_name_ref(path: &AstPath) -> Name with Mut, Panic, Div {
+    let seg: &StringList = &path.segments
+    var cur_buf = seg.head_buf
+    var cur_len = seg.head_len
+    var tail_ref: &Option<Box<StringList>> = &seg.tail
+    var done = false
+    while !done {
+        match *tail_ref {
+            Some(rest) => {
+                cur_buf = (*rest).head_buf
+                cur_len = (*rest).head_len
+                tail_ref = &(*rest).tail
+            }
+            _ => { done = true }
+        }
+    }
+    var nm = ir_empty_name()
+    var j: i64 = 0
+    while j < cur_len && j < 128 {
+        nm.buf[j as usize] = cur_buf[j as usize]
+        j = j + 1
+    }
+    nm.len = cur_len
+    nm
 }
 
 fn ast_struct_field_info(ctx: &AstCompileCtx, struct_idx: i64, field_name: Name) -> i64 with Mut, Panic, Div {
@@ -1834,6 +1876,34 @@ fn ast_compile_expr(code: CodeBuffer, expr: &Expr,
             }
         } else {
             c = emit_byte(c, 0x48); c = emit_byte(c, 0x31); c = emit_byte(c, 0xc0)
+        }
+        c
+    } else if expr.kind == ExprKind::ExprPath {
+        // Enum variant expression: Color::Red → discriminant i64
+        let pln = ast_path_last_name_ref(&expr.path)
+        if ir_name_is_none(pln) {
+            c = emit_mov_rax_imm64(c, 0)
+        } else {
+            let disc = ast_lookup_variant(ctx, pln)
+            if disc >= 0 {
+                c = emit_mov_rax_imm64(c, disc)
+            } else {
+                // Not a variant — try local variable lookup (single-segment path)
+                let pfn = ast_name_from_path(&expr.path)
+                var pslot: i64 = -1
+                var pli = local_count - 1
+                while pli >= 0 {
+                    if ir_name_eq(local_names[pli as usize], pfn) {
+                        pslot = local_slots[pli as usize]
+                        pli = -1
+                    } else { pli = pli - 1 }
+                }
+                if pslot >= 0 {
+                    c = micro_load_rax(c, pslot)
+                } else {
+                    c = emit_byte(c, 0x48); c = emit_byte(c, 0x31); c = emit_byte(c, 0xc0)
+                }
+            }
         }
         c
     } else if expr.kind == ExprKind::ExprFieldAccess {
@@ -3087,7 +3157,59 @@ fn ast_compile_expr(code: CodeBuffer, expr: &Expr,
                             c.bytes[(m_jnz_site + 1) as usize] = ((m_jnz_disp >> 8) & 0xFF) as i8
                             c.bytes[(m_jnz_site + 2) as usize] = ((m_jnz_disp >> 16) & 0xFF) as i8
                             c.bytes[(m_jnz_site + 3) as usize] = ((m_jnz_disp >> 24) & 0xFF) as i8
+                        } else {
+                            // General enum variant: compare scrutinee to discriminant
+                            let ev_name = ast_path_last_name_ref(&arm.pattern.path)
+                            let ev_disc = ast_lookup_variant(ctx, ev_name)
+                            if ev_disc >= 0 {
+                                c = micro_load_rax(c, m_scrut_slot)
+                                // CMP rax, imm32: 48 3D <4 bytes>
+                                c = emit_byte(c, 0x48); c = emit_byte(c, 0x3d)
+                                c = emit_byte(c, ev_disc & 0xFF)
+                                c = emit_byte(c, (ev_disc >> 8) & 0xFF)
+                                c = emit_byte(c, (ev_disc >> 16) & 0xFF)
+                                c = emit_byte(c, (ev_disc >> 24) & 0xFF)
+                                // JNE skip
+                                c = emit_byte(c, 0x0f); c = emit_byte(c, 0x85)
+                                let ev_jne = c.len
+                                c = emit_byte(c, 0); c = emit_byte(c, 0); c = emit_byte(c, 0); c = emit_byte(c, 0)
+                                c = ast_compile_expr(c, &arm.body, local_names, local_slots, local_types, local_count, ctx)
+                                c = emit_byte(c, 0xe9) // JMP end
+                                m_end_patches[m_end_count as usize] = c.len
+                                m_end_count = m_end_count + 1
+                                c = emit_byte(c, 0); c = emit_byte(c, 0); c = emit_byte(c, 0); c = emit_byte(c, 0)
+                                // Patch JNE
+                                let ev_tgt = c.len
+                                let ev_d = ev_tgt - (ev_jne + 4)
+                                c.bytes[(ev_jne) as usize] = (ev_d & 0xFF) as i8
+                                c.bytes[(ev_jne + 1) as usize] = ((ev_d >> 8) & 0xFF) as i8
+                                c.bytes[(ev_jne + 2) as usize] = ((ev_d >> 16) & 0xFF) as i8
+                                c.bytes[(ev_jne + 3) as usize] = ((ev_d >> 24) & 0xFF) as i8
+                            }
                         }
+                    } else if arm.pattern.kind == PatternKind::PatIntLit {
+                        // Integer literal match: CMP scrutinee, imm32
+                        let il_val = arm.pattern.int_val
+                        c = micro_load_rax(c, m_scrut_slot)
+                        c = emit_byte(c, 0x48); c = emit_byte(c, 0x3d)
+                        c = emit_byte(c, il_val & 0xFF)
+                        c = emit_byte(c, (il_val >> 8) & 0xFF)
+                        c = emit_byte(c, (il_val >> 16) & 0xFF)
+                        c = emit_byte(c, (il_val >> 24) & 0xFF)
+                        c = emit_byte(c, 0x0f); c = emit_byte(c, 0x85) // JNE skip
+                        let il_jne = c.len
+                        c = emit_byte(c, 0); c = emit_byte(c, 0); c = emit_byte(c, 0); c = emit_byte(c, 0)
+                        c = ast_compile_expr(c, &arm.body, local_names, local_slots, local_types, local_count, ctx)
+                        c = emit_byte(c, 0xe9) // JMP end
+                        m_end_patches[m_end_count as usize] = c.len
+                        m_end_count = m_end_count + 1
+                        c = emit_byte(c, 0); c = emit_byte(c, 0); c = emit_byte(c, 0); c = emit_byte(c, 0)
+                        let il_tgt = c.len
+                        let il_d = il_tgt - (il_jne + 4)
+                        c.bytes[(il_jne) as usize] = (il_d & 0xFF) as i8
+                        c.bytes[(il_jne + 1) as usize] = ((il_d >> 8) & 0xFF) as i8
+                        c.bytes[(il_jne + 2) as usize] = ((il_d >> 16) & 0xFF) as i8
+                        c.bytes[(il_jne + 3) as usize] = ((il_d >> 24) & 0xFF) as i8
                     }
                     // Advance to next arm
                     m_arm_cur = &(*arm_node).tail
@@ -3715,6 +3837,9 @@ fn main() -> i64 with IO, Mut, Panic, Div, Alloc {
         cur_sret: 0,
         cur_sret_dest_slot: 0,
         cur_sret_flat_size: 0,
+        enum_variant_names: [ir_empty_name(); 512],
+        enum_variant_disc: [0; 512],
+        enum_variant_count: 0,
     }
     var sf_next: i64 = 0  // next index in sf_* arrays
 
@@ -3787,6 +3912,38 @@ fn main() -> i64 with IO, Mut, Panic, Div, Alloc {
                             print_int(field_count)
                             print("\n")
                             ctx.struct_count = ctx.struct_count + 1
+                        }
+                        _ => {}
+                    }
+                } else if itm.kind == ItemKind::ItemEnum {
+                    let ed_ref: &Option<Box<EnumDef>> = &itm.enum_def
+                    match *ed_ref {
+                        Some(ed) => {
+                            let enum_name: Name = (*ed).name
+                            let vl_ref: &Option<Box<VariantDefList>> = &(*ed).variants
+                            var vl_cur = vl_ref
+                            var disc: i64 = 0
+                            while true {
+                                match *vl_cur {
+                                    Some(vl) => {
+                                        if ctx.enum_variant_count < 512 {
+                                            let vi = ctx.enum_variant_count
+                                            ctx.enum_variant_names[vi as usize] = (*vl).head.name
+                                            ctx.enum_variant_disc[vi as usize] = disc
+                                            ctx.enum_variant_count = ctx.enum_variant_count + 1
+                                        }
+                                        disc = disc + 1
+                                        vl_cur = &(*vl).tail
+                                    }
+                                    _ => break
+                                }
+                            }
+                            let en = str_from_bytes(enum_name.buf, enum_name.len)
+                            print("render_compile: enum=")
+                            print(en)
+                            print(" variants=")
+                            print_int(disc)
+                            print("\n")
                         }
                         _ => {}
                     }
