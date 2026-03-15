@@ -4795,3 +4795,577 @@ fn gpu_build_epistemic_tiled_gemm_ir() -> GpuKernelIr with Mut, Panic, Div {
 
     k
 }
+
+// ═══════════════════════════════════════════════════════════════════════
+// Epistemic WMMA Backward Kernel — GUM Gradient Pass (Track C)
+//
+// Computes gradients through the GUM epistemic WMMA operation:
+//
+//   Forward:  C = A·B,  ε_C = sqrt(K)·(|A|·ε_B + |B|·ε_A)
+//
+//   Backward data gradients:
+//     grad_A = grad_C · B^T
+//     grad_B = A^T · grad_C
+//
+//   Backward uncertainty gradients (GUM sensitivity coefficients):
+//     ∂ε_C/∂ε_A = sqrt(K) · |B_norm|
+//     ∂ε_C/∂ε_B = sqrt(K) · |A_norm|
+//
+// Parameters (8 total, all .u64 pointers):
+//   0: p_grad_c_val  — upstream gradient values
+//   1: p_grad_c_eps  — upstream gradient uncertainties
+//   2: p_a_val       — stored A values (for B^T mult)
+//   3: p_a_eps       — stored A uncertainties
+//   4: p_b_val       — stored B values (for A^T mult)
+//   5: p_b_eps       — stored B uncertainties
+//   6: p_grad_a_out  — output: gradient w.r.t. A
+//   7: p_grad_b_out  — output: gradient w.r.t. B
+//
+// Register layout:
+//   u32: %r0=tid.x, %r1=ctaid.x, %r2=ntid.x
+//   u64: %rd0..%rd1 (tid/offset), %rd2..%rd9 (param ptrs),
+//        %rd10..%rd13 (addr: grad_c_val, b_val, a_val, grad_c_eps),
+//        %rd14..%rd19 (u64-stride, xor_prov, out addrs, eps addrs)
+//   f32: %f0..%f7  (grad_C frags),
+//        %f8..%f15 (B frags, for grad_A = grad_C · B^T),
+//        %f16..%f23 (A frags, for grad_B = A^T · grad_C),
+//        %f24..%f31 (grad_A WMMA result),
+//        %f32..%f39 (grad_B WMMA result),
+//        %f40 (grad_c_eps),
+//        %f41=|B_norm|, %f42=|A_norm|,
+//        %f43=eps_grad_A (∂ε_C/∂ε_A · grad_c_eps),
+//        %f44=eps_grad_B (∂ε_C/∂ε_B · grad_c_eps),
+//        %f45..%f49 (doubling chain scratch),
+//        %f50 (sqrt(K)·|norm| factor)
+//   pred: %p0 (grad_c_eps valid), %p1 (eps_grad_A non-negative)
+// ═══════════════════════════════════════════════════════════════════════
+
+fn gpu_build_epistemic_wmma_backward_ir() -> GpuKernelIr with Mut, Panic, Div {
+    var k = gpu_kernel_new()
+
+    // Kernel name: "epi_wmma_bwd" (12 chars)
+    k.kernel_name = ir_name_from_bytes(101, 112, 105, 95, 12)  // "epi_"
+    k.kernel_name.buf[4] = 119   // 'w'
+    k.kernel_name.buf[5] = 109   // 'm'
+    k.kernel_name.buf[6] = 109   // 'm'
+    k.kernel_name.buf[7] = 97    // 'a'
+    k.kernel_name.buf[8] = 95    // '_'
+    k.kernel_name.buf[9] = 98    // 'b'
+    k.kernel_name.buf[10] = 119  // 'w'
+    k.kernel_name.buf[11] = 100  // 'd'
+
+    // ── 8 Parameters (all .u64 pointers) ────────────────────────
+    // 0: p_grad_c_val  1: p_grad_c_eps  2: p_a_val  3: p_a_eps
+    // 4: p_b_val       5: p_b_eps       6: p_grad_a_out  7: p_grad_b_out
+
+    let param_names_b: [i8; 8]  = [103, 103, 97, 97, 98, 98, 103, 103]   // g,g,a,a,b,b,g,g
+    let param_names_b2: [i8; 8] = [99, 99, 118, 118, 118, 118, 97, 98]   // c,c,v,v,v,v,a,b
+    let param_suffix_b: [i8; 8] = [118, 101, 108, 101, 108, 101, 111, 111] // v,e,l,e,l,e,o,o
+
+    var pi: i64 = 0
+    while pi < 8 {
+        var pname = ir_name_from_bytes(112, 95, 0, 0, 7) // "p_????" (7 chars)
+        pname.buf[2] = param_names_b[pi as usize]
+        pname.buf[3] = param_names_b2[pi as usize]
+        pname.buf[4] = 95  // '_'
+        pname.buf[5] = param_suffix_b[pi as usize]
+        pname.buf[6] = 116  // 't' (suffix pad)
+        k.params[pi as usize] = GpuParam { name: pname, ty: GpuType::GpuPtr }
+        pi = pi + 1
+    }
+    k.param_count = 8
+
+    var idx: i64 = 0
+
+    // ─── Thread / block identification ──────────────────────────
+
+    // %r0 = tid.x
+    var op = gpu_op_default()
+    op.opcode = GpuOpcode::GpuGetTid
+    op.dst_reg = 0
+    op.axis = 0
+    op.ty = GpuType::GpuU32
+    op.dst_ty = GpuType::GpuU32
+    k.ops[idx] = op
+    idx = idx + 1
+
+    // %r1 = ctaid.x
+    op = gpu_op_default()
+    op.opcode = GpuOpcode::GpuGetBid
+    op.dst_reg = 1
+    op.axis = 0
+    op.ty = GpuType::GpuU32
+    op.dst_ty = GpuType::GpuU32
+    k.ops[idx] = op
+    idx = idx + 1
+
+    // %r2 = ntid.x
+    op = gpu_op_default()
+    op.opcode = GpuOpcode::GpuGetNtid
+    op.dst_reg = 2
+    op.axis = 0
+    op.ty = GpuType::GpuU32
+    op.dst_ty = GpuType::GpuU32
+    k.ops[idx] = op
+    idx = idx + 1
+
+    // %rd0 = cvt.u64.u32 %r0 (widen tid)
+    op = gpu_op_default()
+    op.opcode = GpuOpcode::GpuCvt
+    op.dst_reg = 0
+    op.src_reg = 0
+    op.dst_ty = GpuType::GpuU64
+    op.src_ty = GpuType::GpuU32
+    op.ty = GpuType::GpuU64
+    k.ops[idx] = op
+    idx = idx + 1
+
+    // %rd1 = %rd0 * 4 (byte offset for f32 elements)
+    op = gpu_op_default()
+    op.opcode = GpuOpcode::GpuMulImm
+    op.dst_reg = 1
+    op.lhs_reg = 0
+    op.rhs_imm = 4
+    op.ty = GpuType::GpuU64
+    k.ops[idx] = op
+    idx = idx + 1
+
+    // ─── Load all 8 param pointers (%rd2..%rd9) ────────────────
+
+    var pp: i64 = 0
+    while pp < 8 {
+        op = gpu_op_default()
+        op.opcode = GpuOpcode::GpuLoadParam
+        op.dst_reg = pp + 2   // %rd2..%rd9
+        op.param_idx = pp
+        op.ty = GpuType::GpuU64
+        op.dst_ty = GpuType::GpuU64
+        k.ops[idx] = op
+        idx = idx + 1
+        pp = pp + 1
+    }
+
+    // ─── Address computation ─────────────────────────────────────
+    // %rd10 = rd2 + rd1 (grad_c_val addr)
+    op = gpu_op_default()
+    op.opcode = GpuOpcode::GpuAdd
+    op.dst_reg = 10
+    op.lhs_reg = 2
+    op.rhs_reg = 1
+    op.ty = GpuType::GpuU64
+    k.ops[idx] = op
+    idx = idx + 1
+
+    // %rd11 = rd4 + rd1 (b_val addr — for grad_A = grad_C · B^T)
+    op = gpu_op_default()
+    op.opcode = GpuOpcode::GpuAdd
+    op.dst_reg = 11
+    op.lhs_reg = 4
+    op.rhs_reg = 1
+    op.ty = GpuType::GpuU64
+    k.ops[idx] = op
+    idx = idx + 1
+
+    // %rd12 = rd6 + rd1 (a_val addr — for grad_B = A^T · grad_C)
+    op = gpu_op_default()
+    op.opcode = GpuOpcode::GpuAdd
+    op.dst_reg = 12
+    op.lhs_reg = 6
+    op.rhs_reg = 1
+    op.ty = GpuType::GpuU64
+    k.ops[idx] = op
+    idx = idx + 1
+
+    // %rd13 = rd3 + rd1 (grad_c_eps addr)
+    op = gpu_op_default()
+    op.opcode = GpuOpcode::GpuAdd
+    op.dst_reg = 13
+    op.lhs_reg = 3
+    op.rhs_reg = 1
+    op.ty = GpuType::GpuU64
+    k.ops[idx] = op
+    idx = idx + 1
+
+    // ─── Load grad_C value fragments into %f0..%f7 ──────────────
+    var li: i64 = 0
+    while li < 8 {
+        op = gpu_op_default()
+        op.opcode = GpuOpcode::GpuLoadGlobal
+        op.dst_reg = li         // %f0..%f7
+        op.addr_reg = 10        // grad_c_val base
+        op.ty = GpuType::GpuF32
+        op.dst_ty = GpuType::GpuF32
+        k.ops[idx] = op
+        idx = idx + 1
+        li = li + 1
+    }
+
+    // ─── Load B fragments into %f8..%f15 (for grad_A = grad_C · B^T) ──
+    li = 0
+    while li < 8 {
+        op = gpu_op_default()
+        op.opcode = GpuOpcode::GpuLoadGlobal
+        op.dst_reg = 8 + li     // %f8..%f15
+        op.addr_reg = 11        // b_val base
+        op.ty = GpuType::GpuF32
+        op.dst_ty = GpuType::GpuF32
+        k.ops[idx] = op
+        idx = idx + 1
+        li = li + 1
+    }
+
+    // ─── Load A fragments into %f16..%f23 (for grad_B = A^T · grad_C) ─
+    li = 0
+    while li < 8 {
+        op = gpu_op_default()
+        op.opcode = GpuOpcode::GpuLoadGlobal
+        op.dst_reg = 16 + li    // %f16..%f23
+        op.addr_reg = 12        // a_val base
+        op.ty = GpuType::GpuF32
+        op.dst_ty = GpuType::GpuF32
+        k.ops[idx] = op
+        idx = idx + 1
+        li = li + 1
+    }
+
+    // ─── Load grad_c_eps scalar (%f40) ──────────────────────────
+    op = gpu_op_default()
+    op.opcode = GpuOpcode::GpuLoadGlobal
+    op.dst_reg = 40
+    op.addr_reg = 13  // grad_c_eps addr
+    op.ty = GpuType::GpuF32
+    op.dst_ty = GpuType::GpuF32
+    k.ops[idx] = op
+    idx = idx + 1
+
+    // ─── Barrier before WMMA ───────────────────────────────────
+    op = gpu_op_default()
+    op.opcode = GpuOpcode::GpuBarrierSync
+    op.rhs_imm = 0
+    k.ops[idx] = op
+    idx = idx + 1
+
+    // ═══ DATA BACKWARD: grad_A = grad_C · B^T ══════════════════
+    // wmma.mma.sync: {%f24..%f31} = {%f0..%f7} · {%f8..%f15} + 0
+    op = gpu_op_default()
+    op.opcode = GpuOpcode::GpuWmma
+    op.dst_reg = 24     // D output: %f24..%f31 (grad_A result)
+    op.lhs_reg = 0      // grad_C frags: %f0..%f7
+    op.rhs_reg = 8      // B frags (B^T approx): %f8..%f15
+    op.src_reg = 24     // C accum (zero-initialized): %f24..%f31
+    op.num_regs = 8
+    op.ty = GpuType::GpuF32
+    op.dst_ty = GpuType::GpuF32
+    k.ops[idx] = op
+    idx = idx + 1
+
+    // ═══ DATA BACKWARD: grad_B = A^T · grad_C ══════════════════
+    // wmma.mma.sync: {%f32..%f39} = {%f16..%f23} · {%f0..%f7} + 0
+    op = gpu_op_default()
+    op.opcode = GpuOpcode::GpuWmma
+    op.dst_reg = 32     // D output: %f32..%f39 (grad_B result)
+    op.lhs_reg = 16     // A frags (A^T approx): %f16..%f23
+    op.rhs_reg = 0      // grad_C frags: %f0..%f7
+    op.src_reg = 32     // C accum (zero-initialized): %f32..%f39
+    op.num_regs = 8
+    op.ty = GpuType::GpuF32
+    op.dst_ty = GpuType::GpuF32
+    k.ops[idx] = op
+    idx = idx + 1
+
+    // ═══ UNCERTAINTY BACKWARD (GUM sensitivity coefficients) ═══
+    //
+    // ∂ε_C/∂ε_A = sqrt(K) · |B_norm|   (K=16 → sqrt(K)=4)
+    // ∂ε_C/∂ε_B = sqrt(K) · |A_norm|
+    //
+    // Implemented via doubling chain (same as forward kernel):
+    //   |norm|² → 2·sq → 4·sq → 8·sq → 16·sq → sqrt → 4·|norm|
+
+    // %f41 = abs(%f8)  — |B_norm| (first B fragment)
+    op = gpu_op_default()
+    op.opcode = GpuOpcode::GpuAbs
+    op.dst_reg = 41
+    op.src_reg = 8
+    op.ty = GpuType::GpuF32
+    op.dst_ty = GpuType::GpuF32
+    k.ops[idx] = op
+    idx = idx + 1
+
+    // %f42 = abs(%f16)  — |A_norm| (first A fragment)
+    op = gpu_op_default()
+    op.opcode = GpuOpcode::GpuAbs
+    op.dst_reg = 42
+    op.src_reg = 16
+    op.ty = GpuType::GpuF32
+    op.dst_ty = GpuType::GpuF32
+    k.ops[idx] = op
+    idx = idx + 1
+
+    // ── Doubling chain for sqrt(K)·|B_norm| ─────────────────
+    // %f45 = |B_norm|²
+    op = gpu_op_default()
+    op.opcode = GpuOpcode::GpuMul
+    op.dst_reg = 45
+    op.lhs_reg = 41
+    op.rhs_reg = 41
+    op.ty = GpuType::GpuF32
+    k.ops[idx] = op
+    idx = idx + 1
+
+    // %f46 = 2·|B_norm|²
+    op = gpu_op_default()
+    op.opcode = GpuOpcode::GpuAdd
+    op.dst_reg = 46
+    op.lhs_reg = 45
+    op.rhs_reg = 45
+    op.ty = GpuType::GpuF32
+    k.ops[idx] = op
+    idx = idx + 1
+
+    // %f47 = 4·|B_norm|²
+    op = gpu_op_default()
+    op.opcode = GpuOpcode::GpuAdd
+    op.dst_reg = 47
+    op.lhs_reg = 46
+    op.rhs_reg = 46
+    op.ty = GpuType::GpuF32
+    k.ops[idx] = op
+    idx = idx + 1
+
+    // %f48 = 8·|B_norm|²
+    op = gpu_op_default()
+    op.opcode = GpuOpcode::GpuAdd
+    op.dst_reg = 48
+    op.lhs_reg = 47
+    op.rhs_reg = 47
+    op.ty = GpuType::GpuF32
+    k.ops[idx] = op
+    idx = idx + 1
+
+    // %f49 = 16·|B_norm|²
+    op = gpu_op_default()
+    op.opcode = GpuOpcode::GpuAdd
+    op.dst_reg = 49
+    op.lhs_reg = 48
+    op.rhs_reg = 48
+    op.ty = GpuType::GpuF32
+    k.ops[idx] = op
+    idx = idx + 1
+
+    // %f50 = sqrt(16·|B_norm|²) = 4·|B_norm| = sqrt(K)·|B_norm|
+    // = ∂ε_C/∂ε_A sensitivity coefficient
+    op = gpu_op_default()
+    op.opcode = GpuOpcode::GpuSqrt
+    op.dst_reg = 50
+    op.src_reg = 49
+    op.ty = GpuType::GpuF32
+    op.dst_ty = GpuType::GpuF32
+    k.ops[idx] = op
+    idx = idx + 1
+
+    // %f43 = sqrt(K)·|B_norm| * grad_c_eps  = eps_grad_A
+    op = gpu_op_default()
+    op.opcode = GpuOpcode::GpuMul
+    op.dst_reg = 43
+    op.lhs_reg = 50     // sqrt(K)·|B_norm|
+    op.rhs_reg = 40     // grad_c_eps
+    op.ty = GpuType::GpuF32
+    k.ops[idx] = op
+    idx = idx + 1
+
+    // ── Doubling chain for sqrt(K)·|A_norm| ─────────────────
+    // (reuse scratch %f45..%f49 and %f50)
+    // %f45 = |A_norm|²
+    op = gpu_op_default()
+    op.opcode = GpuOpcode::GpuMul
+    op.dst_reg = 45
+    op.lhs_reg = 42
+    op.rhs_reg = 42
+    op.ty = GpuType::GpuF32
+    k.ops[idx] = op
+    idx = idx + 1
+
+    // %f46 = 2·|A_norm|²
+    op = gpu_op_default()
+    op.opcode = GpuOpcode::GpuAdd
+    op.dst_reg = 46
+    op.lhs_reg = 45
+    op.rhs_reg = 45
+    op.ty = GpuType::GpuF32
+    k.ops[idx] = op
+    idx = idx + 1
+
+    // %f47 = 4·|A_norm|²
+    op = gpu_op_default()
+    op.opcode = GpuOpcode::GpuAdd
+    op.dst_reg = 47
+    op.lhs_reg = 46
+    op.rhs_reg = 46
+    op.ty = GpuType::GpuF32
+    k.ops[idx] = op
+    idx = idx + 1
+
+    // %f48 = 8·|A_norm|²
+    op = gpu_op_default()
+    op.opcode = GpuOpcode::GpuAdd
+    op.dst_reg = 48
+    op.lhs_reg = 47
+    op.rhs_reg = 47
+    op.ty = GpuType::GpuF32
+    k.ops[idx] = op
+    idx = idx + 1
+
+    // %f49 = 16·|A_norm|²
+    op = gpu_op_default()
+    op.opcode = GpuOpcode::GpuAdd
+    op.dst_reg = 49
+    op.lhs_reg = 48
+    op.rhs_reg = 48
+    op.ty = GpuType::GpuF32
+    k.ops[idx] = op
+    idx = idx + 1
+
+    // %f50 = sqrt(16·|A_norm|²) = 4·|A_norm| = sqrt(K)·|A_norm|
+    // = ∂ε_C/∂ε_B sensitivity coefficient
+    op = gpu_op_default()
+    op.opcode = GpuOpcode::GpuSqrt
+    op.dst_reg = 50
+    op.src_reg = 49
+    op.ty = GpuType::GpuF32
+    op.dst_ty = GpuType::GpuF32
+    k.ops[idx] = op
+    idx = idx + 1
+
+    // %f44 = sqrt(K)·|A_norm| * grad_c_eps  = eps_grad_B
+    op = gpu_op_default()
+    op.opcode = GpuOpcode::GpuMul
+    op.dst_reg = 44
+    op.lhs_reg = 50     // sqrt(K)·|A_norm|
+    op.rhs_reg = 40     // grad_c_eps
+    op.ty = GpuType::GpuF32
+    k.ops[idx] = op
+    idx = idx + 1
+
+    // ═══ VALIDITY CHECK ════════════════════════════════════════
+    // %p0 = (grad_c_eps >= combined²)  — upstream gradient valid
+    op = gpu_op_default()
+    op.opcode = GpuOpcode::GpuSetpGe
+    op.dst_reg = 0      // %p0
+    op.lhs_reg = 40     // grad_c_eps
+    op.rhs_reg = 45     // |A_norm|² (always >= 0)
+    op.ty = GpuType::GpuF32
+    k.ops[idx] = op
+    idx = idx + 1
+
+    // %p1 = (eps_grad_A >= |A_norm|²)  — output uncertainty non-negative
+    op = gpu_op_default()
+    op.opcode = GpuOpcode::GpuSetpGe
+    op.dst_reg = 1      // %p1
+    op.lhs_reg = 43     // eps_grad_A
+    op.rhs_reg = 45     // |A_norm|² (always >= 0)
+    op.ty = GpuType::GpuF32
+    k.ops[idx] = op
+    idx = idx + 1
+
+    // ─── Output address computation ───────────────────────────
+    // %rd14 = tid * 8  (u64-stride byte offset)
+    op = gpu_op_default()
+    op.opcode = GpuOpcode::GpuMulImm
+    op.dst_reg = 14
+    op.lhs_reg = 0      // tid as u64
+    op.rhs_imm = 8
+    op.ty = GpuType::GpuU64
+    k.ops[idx] = op
+    idx = idx + 1
+
+    // %rd15 = rd2 XOR rd4  (provenance: grad_c_val_ptr XOR b_val_ptr)
+    op = gpu_op_default()
+    op.opcode = GpuOpcode::GpuXor
+    op.dst_reg = 15
+    op.lhs_reg = 2      // grad_c_val ptr
+    op.rhs_reg = 4      // b_val ptr
+    op.ty = GpuType::GpuU64
+    op.dst_ty = GpuType::GpuU64
+    k.ops[idx] = op
+    idx = idx + 1
+
+    // %rd16 = rd8 + rd1  (grad_a_out addr — param 6)
+    op = gpu_op_default()
+    op.opcode = GpuOpcode::GpuAdd
+    op.dst_reg = 16
+    op.lhs_reg = 8      // p_grad_a_out ptr (param 6 = rd8)
+    op.rhs_reg = 1
+    op.ty = GpuType::GpuU64
+    k.ops[idx] = op
+    idx = idx + 1
+
+    // %rd17 = rd9 + rd1  (grad_b_out addr — param 7)
+    op = gpu_op_default()
+    op.opcode = GpuOpcode::GpuAdd
+    op.dst_reg = 17
+    op.lhs_reg = 9      // p_grad_b_out ptr (param 7 = rd9)
+    op.rhs_reg = 1
+    op.ty = GpuType::GpuU64
+    k.ops[idx] = op
+    idx = idx + 1
+
+    // %rd18 = rd5 + rd1  (a_eps addr — param 3)
+    op = gpu_op_default()
+    op.opcode = GpuOpcode::GpuAdd
+    op.dst_reg = 18
+    op.lhs_reg = 5      // p_a_eps ptr (param 3 = rd5)
+    op.rhs_reg = 1
+    op.ty = GpuType::GpuU64
+    k.ops[idx] = op
+    idx = idx + 1
+
+    // %rd19 = rd7 + rd1  (b_eps addr — param 5)
+    op = gpu_op_default()
+    op.opcode = GpuOpcode::GpuAdd
+    op.dst_reg = 19
+    op.lhs_reg = 7      // p_b_eps ptr (param 5 = rd7)
+    op.rhs_reg = 1
+    op.ty = GpuType::GpuU64
+    k.ops[idx] = op
+    idx = idx + 1
+
+    // ─── Store grad_A (first fragment %f24) ────────────────────
+    op = gpu_op_default()
+    op.opcode = GpuOpcode::GpuStoreGlobal
+    op.addr_reg = 16    // grad_a_out addr
+    op.src_reg = 24     // %f24 (first grad_A WMMA output fragment)
+    op.ty = GpuType::GpuF32
+    op.dst_ty = GpuType::GpuF32
+    k.ops[idx] = op
+    idx = idx + 1
+
+    // ─── Store grad_B (first fragment %f32) ────────────────────
+    op = gpu_op_default()
+    op.opcode = GpuOpcode::GpuStoreGlobal
+    op.addr_reg = 17    // grad_b_out addr
+    op.src_reg = 32     // %f32 (first grad_B WMMA output fragment)
+    op.ty = GpuType::GpuF32
+    op.dst_ty = GpuType::GpuF32
+    k.ops[idx] = op
+    idx = idx + 1
+
+    // ─── Return ────────────────────────────────────────────────
+    op = gpu_op_default()
+    op.opcode = GpuOpcode::GpuRet
+    k.ops[idx] = op
+    idx = idx + 1
+
+    // ── Finalize ───────────────────────────────────────────────
+    k.op_count = idx
+
+    // Register allocation counts
+    k.max_reg_u32 = 3    // %r<3>: r0=tid, r1=ctaid, r2=ntid
+    k.max_reg_u64 = 20   // %rd<20>: rd0..rd19
+    k.max_reg_f32 = 51   // %f<51>: f0..f50
+    k.max_reg_pred = 2   // %p<2>: p0, p1
+    k.max_reg_f64 = 0
+    k.max_reg_i32 = 0
+    k.max_reg_i64 = 0
+
+    k
+}
