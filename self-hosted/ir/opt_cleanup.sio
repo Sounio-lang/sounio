@@ -4414,6 +4414,47 @@ fn ocp_const_fold(func: IrFunction) -> IrFunction with Mut, Div, Panic {
             }
         }
 
+        // Sprint 245 Block FC: NOT-XOR-NOT recovery — (~x^y)^~y → x.
+        // Proof: (~x^y)^~y = ~x^(y^~y) = ~x^(-1) = ~(~x) = x. QED.
+        // Commutative XOR outer: ~y^(~x^y) → x; inner: (~x^y)^~y → x; (y^~x)^~y → x.
+        // Zero new arrays: uses is_bnot/bnot_src (Block BE) + as_xor_rr_valid/lhs/rhs (Block AS).
+        // SOTA: XOR self-inverse + NOT involution; Hacker's Delight §2-3.
+        if ocp_is_binop(result.instrs[i as usize].op) {
+            let fc_instr = result.instrs[i as usize]
+            let fc_s1 = fc_instr.src1; let fc_s2 = fc_instr.src2
+            let fc_s1_ok = fc_s1 >= 0 && fc_s1 < 256; let fc_s2_ok = fc_s2 >= 0 && fc_s2 < 256
+            if fc_instr.bin_op == BinaryOp::OpBitXor && fc_s1_ok && fc_s2_ok {
+                var fc_result: i64 = -1
+                // Case 1: s1=XOR-rr(~x, y), s2=~y → result = bnot_src[~x] = x
+                if as_xor_rr_valid[fc_s1 as usize] && fc_s2 >= 0 && fc_s2 < 256 && is_bnot[fc_s2 as usize] {
+                    let fc_xl = as_xor_rr_lhs[fc_s1 as usize]; let fc_xr = as_xor_rr_rhs[fc_s1 as usize]
+                    let fc_ny = bnot_src[fc_s2 as usize]  // y from ~y
+                    // subcase: lhs=~x, rhs=y  → check lhs is bnot with bnot_src=x, rhs==fc_ny
+                    if fc_xl >= 0 && fc_xl < 256 && is_bnot[fc_xl as usize] && fc_xr == fc_ny {
+                        fc_result = bnot_src[fc_xl as usize]
+                    }
+                    // subcase: lhs=y, rhs=~x  → check rhs is bnot with bnot_src=x, lhs==fc_ny
+                    if fc_result < 0 && fc_xr >= 0 && fc_xr < 256 && is_bnot[fc_xr as usize] && fc_xl == fc_ny {
+                        fc_result = bnot_src[fc_xr as usize]
+                    }
+                }
+                // Case 2: s1=~y, s2=XOR-rr(~x, y): commutative outer XOR
+                if fc_result < 0 && as_xor_rr_valid[fc_s2 as usize] && fc_s1 >= 0 && fc_s1 < 256 && is_bnot[fc_s1 as usize] {
+                    let fc_xl2 = as_xor_rr_lhs[fc_s2 as usize]; let fc_xr2 = as_xor_rr_rhs[fc_s2 as usize]
+                    let fc_ny2 = bnot_src[fc_s1 as usize]
+                    if fc_xl2 >= 0 && fc_xl2 < 256 && is_bnot[fc_xl2 as usize] && fc_xr2 == fc_ny2 {
+                        fc_result = bnot_src[fc_xl2 as usize]
+                    }
+                    if fc_result < 0 && fc_xr2 >= 0 && fc_xr2 < 256 && is_bnot[fc_xr2 as usize] && fc_xl2 == fc_ny2 {
+                        fc_result = bnot_src[fc_xr2 as usize]
+                    }
+                }
+                if fc_result >= 0 {
+                    result.instrs[i as usize] = ir_copy(fc_instr.dst, fc_result)
+                }
+            }
+        }
+
         // Sprint 244 Block FB: AND-XOR AND annihilation — (x&y)&(x^y) → 0.
         // Proof: x^y has 1s where x≠y; x&y has 1s where both=1; disjoint → AND=0. QED.
         // Commutative: (x^y)&(x&y) → 0.
