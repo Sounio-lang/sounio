@@ -507,32 +507,26 @@ fn compile_primary(code: [i8; 262144], st: [i64; 32768], src: [i8; 1048576], td:
                 cp = e3(code, cp, 0x48, 0x83, 0xC4); cp = e1(code, cp, 16)
                 cp = e2(code, cp, 0x31, 0xC0)
             } else {
-                // General function call (≤6 args) — slot-based arg passing
+                // General function call (≤6 args) — push/pop arg passing
                 var argc: i64 = 0
-                let arg_base = st[2] + 512  // temp slots above locals
                 while tk(td, t) != 21 && tk(td, t) != 0 {
                     st[0] = cp; st[1] = t
                     st[10] = 0; compile_expr(code, st, src, td, sb); cp = st[0]; t = st[1]
-                    // Store arg to temp slot [rbp - (arg_base + argc*8)]
-                    let aslot = arg_base + argc * 8
-                    cp = e3(code, cp, 0x48, 0x89, 0x85); cp = ei32(code, cp, 0 - aslot)
+                    cp = e1(code, cp, 0x50)  // push rax
                     argc = argc + 1
                     if tk(td, t) == 26 { t = t + 1 }
                 }
                 if tk(td, t) == 21 { t = t + 1 }
-                // Load args from temp slots into registers
-                var ai: i64 = 0
-                while ai < argc {
-                    let aslot = arg_base + ai * 8
-                    cp = e3(code, cp, 0x48, 0x8B, 0x85); cp = ei32(code, cp, 0 - aslot)  // mov rax, [rbp-aslot]
-                    if ai == 0 { cp = e3(code, cp, 0x48, 0x89, 0xC7) }
-                    else if ai == 1 { cp = e3(code, cp, 0x48, 0x89, 0xC6) }
-                    else if ai == 2 { cp = e3(code, cp, 0x48, 0x89, 0xC2) }
-                    else if ai == 3 { cp = e3(code, cp, 0x48, 0x89, 0xC1) }
-                    else if ai == 4 { cp = e3(code, cp, 0x49, 0x89, 0xC0) }
-                    else if ai == 5 { cp = e3(code, cp, 0x49, 0x89, 0xC1) }
-                    ai = ai + 1
-                }
+                // Pop args in reverse into target registers
+                // Stack: [argN-1] ... [arg1] [arg0] (top=last pushed=argN-1)
+                // We need: rdi=arg0, rsi=arg1, rdx=arg2, rcx=arg3, r8=arg4, r9=arg5
+                // Pop order: argN-1 first, arg0 last
+                if argc == 1 { cp = e1(code, cp, 0x5F) }  // pop rdi
+                else if argc == 2 { cp = e1(code, cp, 0x5E); cp = e1(code, cp, 0x5F) }  // pop rsi; pop rdi
+                else if argc == 3 { cp = e1(code, cp, 0x5A); cp = e1(code, cp, 0x5E); cp = e1(code, cp, 0x5F) }  // pop rdx,rsi,rdi
+                else if argc == 4 { cp = e1(code, cp, 0x59); cp = e1(code, cp, 0x5A); cp = e1(code, cp, 0x5E); cp = e1(code, cp, 0x5F) }
+                else if argc == 5 { cp = e3(code, cp, 0x41, 0x58, 0x59); cp = e1(code, cp, 0x5A); cp = e1(code, cp, 0x5E); cp = e1(code, cp, 0x5F) }  // pop r8,rcx,rdx,rsi,rdi
+                else if argc >= 6 { cp = e3(code, cp, 0x41, 0x59, 0x41); cp = e1(code, cp, 0x58); cp = e1(code, cp, 0x59); cp = e1(code, cp, 0x5A); cp = e1(code, cp, 0x5E); cp = e1(code, cp, 0x5F) }
                 // Call: CAFE sentinel for forward, direct for backward
                 let fidx = find_fn_at(src, st, td, fn_t)
                 if fidx >= 0 {
