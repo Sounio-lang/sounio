@@ -4021,6 +4021,31 @@ fn ocp_const_fold(func: IrFunction) -> IrFunction with Mut, Div, Panic {
             }
         }
 
+        // Sprint 219 Block EC: Sub same-RHS cancel — (x-y)-(z-y) → x-z.
+        // Proof: (x-y)-(z-y) = x-y-z+y = x-z. QED. Symmetric to Block DN (same-LHS).
+        // Zero new arrays: uses al_is_sub/al_sub_lhs/al_sub_rhs (Block AL, Sprint 115).
+        // SOTA: LLVM InstCombineAddSub; algebraic cancellation.
+        if ocp_is_binop(result.instrs[i as usize].op) {
+            let ec_instr = result.instrs[i as usize]
+            let ec_s1 = ec_instr.src1; let ec_s2 = ec_instr.src2
+            let ec_s1_ok = ec_s1 >= 0 && ec_s1 < 256; let ec_s2_ok = ec_s2 >= 0 && ec_s2 < 256
+            if ec_instr.bin_op == BinaryOp::OpSub {
+                // (x-y) - (z-y) → x-z: both are subs, same rhs (y)
+                if ec_s1_ok && al_is_sub[ec_s1 as usize]
+                        && ec_s2_ok && al_is_sub[ec_s2 as usize]
+                        && al_sub_rhs[ec_s1 as usize] == al_sub_rhs[ec_s2 as usize] {
+                    let ec_x = al_sub_lhs[ec_s1 as usize]
+                    let ec_z = al_sub_lhs[ec_s2 as usize]
+                    if ec_x != ec_z {
+                        result.instrs[i as usize] = ir_binop(ec_instr.dst, ec_x, BinaryOp::OpSub, ec_z)
+                        al_is_sub[ec_instr.dst as usize] = true
+                        al_sub_lhs[ec_instr.dst as usize] = ec_x
+                        al_sub_rhs[ec_instr.dst as usize] = ec_z
+                    }
+                }
+            }
+        }
+
         // Sprint 177 Block CM: AND complement XOR partition — (x & C) ^ (x & ~C) → x.
         // Proof: C-bits: (xi&1)^(xi&0)=xi^0=xi. Non-C: (xi&0)^(xi&1)=0^xi=xi. QED.
         // Dual of Block CC (OR partition). Commutative: (x&~C)^(x&C) → x.

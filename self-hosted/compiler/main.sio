@@ -16368,6 +16368,85 @@ fn compiler_main_test_dy_no_fold_or_outer() -> bool with Mut, Div, Panic {
     opt.instrs[2 as usize].bin_op != BinaryOp::OpBitAnd
 }
 
+// Sprint 219 Block EC: Sub same-RHS cancel — (x-y)-(z-y) → x-z (T980-T985)
+fn compiler_main_test_ec_sub_same_rhs_basic() -> bool with Mut, Div, Panic {
+    // r3=(r0-r2), r4=(r1-r2), r5=r3-r4 → r5 becomes r0-r1
+    var instrs: [IrInstr; 128] = cp_empty_instrs()
+    instrs[0 as usize] = ir_binop(3, 0, BinaryOp::OpSub, 2)
+    instrs[1 as usize] = ir_binop(4, 1, BinaryOp::OpSub, 2)
+    instrs[2 as usize] = ir_binop(5, 3, BinaryOp::OpSub, 4)
+    let func = cp_make_test_func(instrs, 3)
+    let opt = opt_cleanup_function(func)
+    opt.instrs[2 as usize].op == IrOpcode::IrBinOp
+        && opt.instrs[2 as usize].bin_op == BinaryOp::OpSub
+        && opt.instrs[2 as usize].src1 == 0
+        && opt.instrs[2 as usize].src2 == 1
+}
+
+fn compiler_main_test_ec_sub_same_rhs_chain() -> bool with Mut, Div, Panic {
+    // r3=(r0-r1), r4=(r2-r1), r5=r3-r4 → r5 becomes r0-r2
+    var instrs: [IrInstr; 128] = cp_empty_instrs()
+    instrs[0 as usize] = ir_binop(3, 0, BinaryOp::OpSub, 1)
+    instrs[1 as usize] = ir_binop(4, 2, BinaryOp::OpSub, 1)
+    instrs[2 as usize] = ir_binop(5, 3, BinaryOp::OpSub, 4)
+    let func = cp_make_test_func(instrs, 3)
+    let opt = opt_cleanup_function(func)
+    opt.instrs[2 as usize].op == IrOpcode::IrBinOp
+        && opt.instrs[2 as usize].bin_op == BinaryOp::OpSub
+        && opt.instrs[2 as usize].src1 == 0
+        && opt.instrs[2 as usize].src2 == 2
+}
+
+fn compiler_main_test_ec_sub_same_rhs_self_zero() -> bool with Mut, Div, Panic {
+    // (r0-r1)-(r0-r1) → IrCopy(0) or IrLoadImm(0) via x-x→0 (Block A after EC)
+    // EC only fires when x != z, so same sub: r3=r0-r1, r4=r0-r1 → x==z, no fold by EC
+    var instrs: [IrInstr; 128] = cp_empty_instrs()
+    instrs[0 as usize] = ir_binop(3, 0, BinaryOp::OpSub, 1)
+    instrs[1 as usize] = ir_binop(4, 0, BinaryOp::OpSub, 1)
+    instrs[2 as usize] = ir_binop(5, 3, BinaryOp::OpSub, 4)
+    let func = cp_make_test_func(instrs, 3)
+    let opt = opt_cleanup_function(func)
+    // Block A (x-x→0) fires: r3==r4 after CSE
+    opt.instrs[2 as usize].op == IrOpcode::IrLoadImm
+        && opt.instrs[2 as usize].imm == 0
+}
+
+fn compiler_main_test_ec_no_fold_diff_rhs() -> bool with Mut, Div, Panic {
+    // (r0-r1)-(r0-r2) → Block DN fires (same lhs), not EC
+    var instrs: [IrInstr; 128] = cp_empty_instrs()
+    instrs[0 as usize] = ir_binop(3, 0, BinaryOp::OpSub, 1)
+    instrs[1 as usize] = ir_binop(4, 0, BinaryOp::OpSub, 2)
+    instrs[2 as usize] = ir_binop(5, 3, BinaryOp::OpSub, 4)
+    let func = cp_make_test_func(instrs, 3)
+    let opt = opt_cleanup_function(func)
+    // Block DN fires: (x-y)-(x-z)→z-y: src1=2, src2=1
+    opt.instrs[2 as usize].op == IrOpcode::IrBinOp
+        && opt.instrs[2 as usize].bin_op == BinaryOp::OpSub
+}
+
+fn compiler_main_test_ec_no_fold_not_sub() -> bool with Mut, Div, Panic {
+    // r3=(r0+r2), r4=(r1-r2): s1 is ADD not SUB, no fold
+    var instrs: [IrInstr; 128] = cp_empty_instrs()
+    instrs[0 as usize] = ir_binop(3, 0, BinaryOp::OpAdd, 2)
+    instrs[1 as usize] = ir_binop(4, 1, BinaryOp::OpSub, 2)
+    instrs[2 as usize] = ir_binop(5, 3, BinaryOp::OpSub, 4)
+    let func = cp_make_test_func(instrs, 3)
+    let opt = opt_cleanup_function(func)
+    opt.instrs[2 as usize].bin_op == BinaryOp::OpSub
+        && opt.instrs[2 as usize].src1 == 3
+}
+
+fn compiler_main_test_ec_no_fold_add_outer() -> bool with Mut, Div, Panic {
+    // (r0-r2)+(r1-r2) → Block DK territory if OR/AND; here ADD outer: no EC fold
+    var instrs: [IrInstr; 128] = cp_empty_instrs()
+    instrs[0 as usize] = ir_binop(3, 0, BinaryOp::OpSub, 2)
+    instrs[1 as usize] = ir_binop(4, 1, BinaryOp::OpSub, 2)
+    instrs[2 as usize] = ir_binop(5, 3, BinaryOp::OpAdd, 4)
+    let func = cp_make_test_func(instrs, 3)
+    let opt = opt_cleanup_function(func)
+    opt.instrs[2 as usize].bin_op == BinaryOp::OpAdd
+}
+
 // Sprint 218 Block EB: AND-XOR to OR — (x&y) ^ (x^y) → x|y (T974-T979)
 fn compiler_main_test_eb_and_xor_or_basic() -> bool with Mut, Div, Panic {
     // r2=(r0&r1), r3=(r0^r1), r4=r2^r3 → r4 becomes r0|r1
@@ -16586,7 +16665,7 @@ fn compiler_main_test_dz_no_fold_or_outer() -> bool with Mut, Div, Panic {
 
 fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
     var passed: i64 = 0
-    let total: i64 = 979
+    let total: i64 = 985
 
     println("=== compiler/main.sio self-tests ===")
 
@@ -21514,6 +21593,32 @@ fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
         passed = passed + 1
         println("  T961 OK: Sprint 215 Block DY: r0|(r1|~r0) no fold OR outer")
     } else { println("  FAIL: T961") }
+
+    // Sprint 219 Block EC: Sub same-RHS cancel (T980-T985)
+    if compiler_main_test_ec_sub_same_rhs_basic() {
+        passed = passed + 1
+        println("  T980 OK: Sprint 219 Block EC: (r0-r2)-(r1-r2) -> r0-r1")
+    } else { println("  FAIL: T980") }
+    if compiler_main_test_ec_sub_same_rhs_chain() {
+        passed = passed + 1
+        println("  T981 OK: Sprint 219 Block EC: (r0-r1)-(r2-r1) -> r0-r2")
+    } else { println("  FAIL: T981") }
+    if compiler_main_test_ec_sub_same_rhs_self_zero() {
+        passed = passed + 1
+        println("  T982 OK: Sprint 219 Block EC: (r0-r1)-(r0-r1) -> 0 via Block A")
+    } else { println("  FAIL: T982") }
+    if compiler_main_test_ec_no_fold_diff_rhs() {
+        passed = passed + 1
+        println("  T983 OK: Sprint 219 Block EC: (r0-r1)-(r0-r2) Block DN fires")
+    } else { println("  FAIL: T983") }
+    if compiler_main_test_ec_no_fold_not_sub() {
+        passed = passed + 1
+        println("  T984 OK: Sprint 219 Block EC: (r0+r2)-(r1-r2) no EC fold")
+    } else { println("  FAIL: T984") }
+    if compiler_main_test_ec_no_fold_add_outer() {
+        passed = passed + 1
+        println("  T985 OK: Sprint 219 Block EC: (r0-r2)+(r1-r2) no EC fold ADD outer")
+    } else { println("  FAIL: T985") }
 
     // Sprint 218 Block EB: AND-XOR to OR (T974-T979)
     if compiler_main_test_eb_and_xor_or_basic() {
