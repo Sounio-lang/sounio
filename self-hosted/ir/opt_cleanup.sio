@@ -3839,6 +3839,34 @@ fn ocp_const_fold(func: IrFunction) -> IrFunction with Mut, Div, Panic {
             }
         }
 
+        // Sprint 214 Block DX: OR complement saturation — (x|y) | ~x → -1; (x|y) | ~y → -1.
+        // Proof: (x|y)|~x = (x|~x)|y = -1|y = -1. QED. Commutative variants included.
+        // Zero new arrays: uses ao_or_rr_valid/lhs/rhs (Block AO) + is_bnot/bnot_src (Block AI/BJ).
+        // SOTA: LLVM InstCombineAndOrXor; complement law x|~x=-1.
+        if ocp_is_binop(result.instrs[i as usize].op) {
+            let dx_instr = result.instrs[i as usize]
+            let dx_s1 = dx_instr.src1; let dx_s2 = dx_instr.src2
+            let dx_s1_ok = dx_s1 >= 0 && dx_s1 < 256; let dx_s2_ok = dx_s2 >= 0 && dx_s2 < 256
+            if dx_instr.bin_op == BinaryOp::OpBitOr && dx_s1_ok && dx_s2_ok {
+                // (x|y) | ~x → -1: s1 is OR-rr, s2 is NOT(one of s1's operands)
+                if ao_or_rr_valid[dx_s1 as usize] && is_bnot[dx_s2 as usize] {
+                    let dx_bnot = bnot_src[dx_s2 as usize]
+                    if dx_bnot == ao_or_rr_lhs[dx_s1 as usize]
+                            || dx_bnot == ao_or_rr_rhs[dx_s1 as usize] {
+                        result.instrs[i as usize] = ir_load_imm(dx_instr.dst, -1)
+                    }
+                }
+                // ~x | (x|y) → -1: commutative (NOT on left)
+                if is_bnot[dx_s1 as usize] && ao_or_rr_valid[dx_s2 as usize] {
+                    let dx_bnot2 = bnot_src[dx_s1 as usize]
+                    if dx_bnot2 == ao_or_rr_lhs[dx_s2 as usize]
+                            || dx_bnot2 == ao_or_rr_rhs[dx_s2 as usize] {
+                        result.instrs[i as usize] = ir_load_imm(dx_instr.dst, -1)
+                    }
+                }
+            }
+        }
+
         // Sprint 177 Block CM: AND complement XOR partition — (x & C) ^ (x & ~C) → x.
         // Proof: C-bits: (xi&1)^(xi&0)=xi^0=xi. Non-C: (xi&0)^(xi&1)=0^xi=xi. QED.
         // Dual of Block CC (OR partition). Commutative: (x&~C)^(x&C) → x.
