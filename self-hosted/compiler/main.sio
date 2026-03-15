@@ -16368,6 +16368,85 @@ fn compiler_main_test_dy_no_fold_or_outer() -> bool with Mut, Div, Panic {
     opt.instrs[2 as usize].bin_op != BinaryOp::OpBitAnd
 }
 
+// Sprint 236 Block ET: OR-XOR diff to AND — (x|y)-(x^y) → x&y (T1082-T1087)
+fn compiler_main_test_et_or_xor_sub_and_basic() -> bool with Mut, Div, Panic {
+    // r2=r0|r1, r3=r0^r1, r4=r2-r3 → r4 becomes r0&r1
+    var instrs: [IrInstr; 128] = cp_empty_instrs()
+    instrs[0 as usize] = ir_binop(2, 0, BinaryOp::OpBitOr, 1)
+    instrs[1 as usize] = ir_binop(3, 0, BinaryOp::OpBitXor, 1)
+    instrs[2 as usize] = ir_binop(4, 2, BinaryOp::OpSub, 3)
+    let func = cp_make_test_func(instrs, 3)
+    let opt = opt_cleanup_function(func)
+    opt.instrs[2 as usize].op == IrOpcode::IrBinOp
+        && opt.instrs[2 as usize].bin_op == BinaryOp::OpBitAnd
+        && opt.instrs[2 as usize].src1 == 0
+        && opt.instrs[2 as usize].src2 == 1
+}
+
+fn compiler_main_test_et_or_xor_sub_and_inner_comm() -> bool with Mut, Div, Panic {
+    // (x|y)-(y^x) → x&y (inner XOR commutative)
+    var instrs: [IrInstr; 128] = cp_empty_instrs()
+    instrs[0 as usize] = ir_binop(2, 0, BinaryOp::OpBitOr, 1)
+    instrs[1 as usize] = ir_binop(3, 1, BinaryOp::OpBitXor, 0)
+    instrs[2 as usize] = ir_binop(4, 2, BinaryOp::OpSub, 3)
+    let func = cp_make_test_func(instrs, 3)
+    let opt = opt_cleanup_function(func)
+    opt.instrs[2 as usize].op == IrOpcode::IrBinOp
+        && opt.instrs[2 as usize].bin_op == BinaryOp::OpBitAnd
+}
+
+fn compiler_main_test_et_or_xor_sub_and_tracked() -> bool with Mut, Div, Panic {
+    // Result of ET is tracked as and_rr for downstream Block AO: (x&y)|(x&y)→IrCopy
+    var instrs: [IrInstr; 128] = cp_empty_instrs()
+    instrs[0 as usize] = ir_binop(2, 0, BinaryOp::OpBitOr, 1)
+    instrs[1 as usize] = ir_binop(3, 0, BinaryOp::OpBitXor, 1)
+    instrs[2 as usize] = ir_binop(4, 2, BinaryOp::OpSub, 3)
+    instrs[3 as usize] = ir_binop(5, 4, BinaryOp::OpBitOr, 4)
+    let func = cp_make_test_func(instrs, 4)
+    let opt = opt_cleanup_function(func)
+    // r4=r0&r1; r5=r4|r4 → IrCopy(r4) via idempotent or Block AP
+    opt.instrs[3 as usize].op == IrOpcode::IrCopy
+        && opt.instrs[3 as usize].src1 == 4
+}
+
+fn compiler_main_test_et_no_fold_diff_var() -> bool with Mut, Div, Panic {
+    // (r0|r1)-(r0^r2): different vars → no fold
+    var instrs: [IrInstr; 128] = cp_empty_instrs()
+    instrs[0 as usize] = ir_binop(3, 0, BinaryOp::OpBitOr, 1)
+    instrs[1 as usize] = ir_binop(4, 0, BinaryOp::OpBitXor, 2)
+    instrs[2 as usize] = ir_binop(5, 3, BinaryOp::OpSub, 4)
+    let func = cp_make_test_func(instrs, 3)
+    let opt = opt_cleanup_function(func)
+    opt.instrs[2 as usize].op == IrOpcode::IrBinOp
+        && opt.instrs[2 as usize].bin_op == BinaryOp::OpSub
+}
+
+fn compiler_main_test_et_no_fold_add_outer() -> bool with Mut, Div, Panic {
+    // (x|y)+(x^y): outer ADD → Block ES fires not ET
+    var instrs: [IrInstr; 128] = cp_empty_instrs()
+    instrs[0 as usize] = ir_binop(2, 0, BinaryOp::OpBitOr, 1)
+    instrs[1 as usize] = ir_binop(3, 0, BinaryOp::OpBitXor, 1)
+    instrs[2 as usize] = ir_binop(4, 2, BinaryOp::OpAdd, 3)
+    let func = cp_make_test_func(instrs, 3)
+    let opt = opt_cleanup_function(func)
+    // Block DK: (x|y)+(x&y)→x+y won't fire (s2=xor not and); result stays ADD
+    opt.instrs[2 as usize].op == IrOpcode::IrBinOp
+        && opt.instrs[2 as usize].bin_op == BinaryOp::OpAdd
+}
+
+fn compiler_main_test_et_no_fold_and_inner() -> bool with Mut, Div, Panic {
+    // (x|y)-(x&y): inner AND not XOR → Block DM fires (→x^y), not ET
+    var instrs: [IrInstr; 128] = cp_empty_instrs()
+    instrs[0 as usize] = ir_binop(2, 0, BinaryOp::OpBitOr, 1)
+    instrs[1 as usize] = ir_binop(3, 0, BinaryOp::OpBitAnd, 1)
+    instrs[2 as usize] = ir_binop(4, 2, BinaryOp::OpSub, 3)
+    let func = cp_make_test_func(instrs, 3)
+    let opt = opt_cleanup_function(func)
+    // Block DM: (x|y)-(x&y)→x^y
+    opt.instrs[2 as usize].op == IrOpcode::IrBinOp
+        && opt.instrs[2 as usize].bin_op == BinaryOp::OpBitXor
+}
+
 // Sprint 235 Block ES: AND-XOR add to OR — (x&y)+(x^y) → x|y (T1076-T1081)
 fn compiler_main_test_es_and_xor_add_or_basic() -> bool with Mut, Div, Panic {
     // r2=r0&r1, r3=r0^r1, r4=r2+r3 → r4 becomes r0|r1
@@ -17912,7 +17991,7 @@ fn compiler_main_test_dz_no_fold_or_outer() -> bool with Mut, Div, Panic {
 
 fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
     var passed: i64 = 0
-    let total: i64 = 1081
+    let total: i64 = 1087
 
     println("=== compiler/main.sio self-tests ===")
 
@@ -22840,6 +22919,32 @@ fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
         passed = passed + 1
         println("  T961 OK: Sprint 215 Block DY: r0|(r1|~r0) no fold OR outer")
     } else { println("  FAIL: T961") }
+
+    // Sprint 236 Block ET: OR-XOR diff to AND (T1082-T1087)
+    if compiler_main_test_et_or_xor_sub_and_basic() {
+        passed = passed + 1
+        println("  T1082 OK: Sprint 236 Block ET: (r0|r1)-(r0^r1) -> r0&r1")
+    } else { println("  FAIL: T1082") }
+    if compiler_main_test_et_or_xor_sub_and_inner_comm() {
+        passed = passed + 1
+        println("  T1083 OK: Sprint 236 Block ET: (r0|r1)-(r1^r0) -> r0&r1 inner comm")
+    } else { println("  FAIL: T1083") }
+    if compiler_main_test_et_or_xor_sub_and_tracked() {
+        passed = passed + 1
+        println("  T1084 OK: Sprint 236 Block ET: result tracked as and_rr downstream")
+    } else { println("  FAIL: T1084") }
+    if compiler_main_test_et_no_fold_diff_var() {
+        passed = passed + 1
+        println("  T1085 OK: Sprint 236 Block ET: (r0|r1)-(r0^r2) no fold diff var")
+    } else { println("  FAIL: T1085") }
+    if compiler_main_test_et_no_fold_add_outer() {
+        passed = passed + 1
+        println("  T1086 OK: Sprint 236 Block ET: (r0|r1)+(r0^r1) no ET fold add outer")
+    } else { println("  FAIL: T1086") }
+    if compiler_main_test_et_no_fold_and_inner() {
+        passed = passed + 1
+        println("  T1087 OK: Sprint 236 Block ET: (r0|r1)-(r0&r1) fires Block DM not ET")
+    } else { println("  FAIL: T1087") }
 
     // Sprint 235 Block ES: AND-XOR add to OR (T1076-T1081)
     if compiler_main_test_es_and_xor_add_or_basic() {
