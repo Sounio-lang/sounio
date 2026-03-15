@@ -16368,6 +16368,91 @@ fn compiler_main_test_dy_no_fold_or_outer() -> bool with Mut, Div, Panic {
     opt.instrs[2 as usize].bin_op != BinaryOp::OpBitAnd
 }
 
+// Sprint 230 Block EN: Double-complement XOR — ~x^~y → x^y (T1046-T1051)
+fn compiler_main_test_en_dbl_comp_xor_basic() -> bool with Mut, Div, Panic {
+    // r2=~r0, r3=~r1, r4=r2^r3 → r4 becomes r0^r1
+    var instrs: [IrInstr; 128] = cp_empty_instrs()
+    instrs[0 as usize] = ir_unaryop(2, UnaryOp::OpNot, 0)
+    instrs[1 as usize] = ir_unaryop(3, UnaryOp::OpNot, 1)
+    instrs[2 as usize] = ir_binop(4, 2, BinaryOp::OpBitXor, 3)
+    let func = cp_make_test_func(instrs, 3)
+    let opt = opt_cleanup_function(func)
+    opt.instrs[2 as usize].op == IrOpcode::IrBinOp
+        && opt.instrs[2 as usize].bin_op == BinaryOp::OpBitXor
+        && opt.instrs[2 as usize].src1 == 0
+        && opt.instrs[2 as usize].src2 == 1
+}
+
+fn compiler_main_test_en_dbl_comp_xor_same() -> bool with Mut, Div, Panic {
+    // r2=~r0, r3=~r0, r4=r2^r3 → r4 becomes r0^r0 = 0 (via const fold)
+    var instrs: [IrInstr; 128] = cp_empty_instrs()
+    instrs[0 as usize] = ir_unaryop(2, UnaryOp::OpNot, 0)
+    instrs[1 as usize] = ir_unaryop(3, UnaryOp::OpNot, 0)
+    instrs[2 as usize] = ir_binop(4, 2, BinaryOp::OpBitXor, 3)
+    let func = cp_make_test_func(instrs, 3)
+    let opt = opt_cleanup_function(func)
+    // ~r0^~r0 → r0^r0 → 0 (Block A: x^x→0)
+    opt.instrs[2 as usize].op == IrOpcode::IrLoadImm
+        && opt.instrs[2 as usize].imm_i64 == 0
+}
+
+fn compiler_main_test_en_dbl_comp_xor_chain() -> bool with Mut, Div, Panic {
+    // r2=~r0, r3=~r1, r4=r2^r3 → xor-rr valid for downstream use
+    // e.g. Block EK: r4|(r0^r1) → r4|(r0^r1) is just OR since r4=r0^r1
+    var instrs: [IrInstr; 128] = cp_empty_instrs()
+    instrs[0 as usize] = ir_unaryop(2, UnaryOp::OpNot, 0)
+    instrs[1 as usize] = ir_unaryop(3, UnaryOp::OpNot, 1)
+    instrs[2 as usize] = ir_binop(4, 2, BinaryOp::OpBitXor, 3)
+    instrs[3 as usize] = ir_binop(5, 0, BinaryOp::OpBitOr, 4)
+    let func = cp_make_test_func(instrs, 4)
+    let opt = opt_cleanup_function(func)
+    // Block EN: r4 = r0^r1; then r5=r0|r4 → Block EK: r0|(r0^r1)→r0|r1
+    opt.instrs[3 as usize].op == IrOpcode::IrBinOp
+        && opt.instrs[3 as usize].bin_op == BinaryOp::OpBitOr
+        && opt.instrs[3 as usize].src1 == 0
+        && opt.instrs[3 as usize].src2 == 1
+}
+
+fn compiler_main_test_en_no_fold_one_not() -> bool with Mut, Div, Panic {
+    // r2=~r0, r3=r2^r1: only one operand is NOT → no EN fold
+    var instrs: [IrInstr; 128] = cp_empty_instrs()
+    instrs[0 as usize] = ir_unaryop(2, UnaryOp::OpNot, 0)
+    instrs[1 as usize] = ir_binop(3, 2, BinaryOp::OpBitXor, 1)
+    let func = cp_make_test_func(instrs, 2)
+    let opt = opt_cleanup_function(func)
+    // DG: ~(x^y)^y→~x fires differently; here s2=r1 not NOT → result stays XOR
+    opt.instrs[1 as usize].bin_op == BinaryOp::OpBitXor
+        || opt.instrs[1 as usize].op == IrOpcode::IrUnaryOp
+}
+
+fn compiler_main_test_en_no_fold_and_op() -> bool with Mut, Div, Panic {
+    // r2=~r0, r3=~r1, r4=r2&r3: AND not XOR → no EN fold
+    var instrs: [IrInstr; 128] = cp_empty_instrs()
+    instrs[0 as usize] = ir_unaryop(2, UnaryOp::OpNot, 0)
+    instrs[1 as usize] = ir_unaryop(3, UnaryOp::OpNot, 1)
+    instrs[2 as usize] = ir_binop(4, 2, BinaryOp::OpBitAnd, 3)
+    let func = cp_make_test_func(instrs, 3)
+    let opt = opt_cleanup_function(func)
+    // ~r0&~r1 → ~(r0|r1) by De Morgan (Block DS). Check that it does NOT become r0&r1.
+    opt.instrs[2 as usize].op != IrOpcode::IrBinOp
+        || opt.instrs[2 as usize].bin_op != BinaryOp::OpBitAnd
+        || opt.instrs[2 as usize].src1 != 0
+}
+
+fn compiler_main_test_en_no_fold_neg_op() -> bool with Mut, Div, Panic {
+    // r2=neg(r0), r3=neg(r1), r4=r2^r3: neg not NOT → no EN fold
+    var instrs: [IrInstr; 128] = cp_empty_instrs()
+    instrs[0 as usize] = ir_unaryop(2, UnaryOp::OpNeg, 0)
+    instrs[1 as usize] = ir_unaryop(3, UnaryOp::OpNeg, 1)
+    instrs[2 as usize] = ir_binop(4, 2, BinaryOp::OpBitXor, 3)
+    let func = cp_make_test_func(instrs, 3)
+    let opt = opt_cleanup_function(func)
+    // Neg not tracked by is_bnot → XOR stays unchanged
+    opt.instrs[2 as usize].op == IrOpcode::IrBinOp
+        && opt.instrs[2 as usize].bin_op == BinaryOp::OpBitXor
+        && opt.instrs[2 as usize].src1 == 2
+}
+
 // Sprint 229 Block EM: Complement-OR AND — (~x|y)&(x|y) → y (T1040-T1045)
 fn compiler_main_test_em_comp_or_and_basic() -> bool with Mut, Div, Panic {
     // r2=~r0, r3=r2|r1, r4=r0|r1, r5=r3&r4 → r5 becomes IrCopy(r1)
@@ -17427,7 +17512,7 @@ fn compiler_main_test_dz_no_fold_or_outer() -> bool with Mut, Div, Panic {
 
 fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
     var passed: i64 = 0
-    let total: i64 = 1045
+    let total: i64 = 1051
 
     println("=== compiler/main.sio self-tests ===")
 
@@ -22355,6 +22440,32 @@ fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
         passed = passed + 1
         println("  T961 OK: Sprint 215 Block DY: r0|(r1|~r0) no fold OR outer")
     } else { println("  FAIL: T961") }
+
+    // Sprint 230 Block EN: Double-complement XOR (T1046-T1051)
+    if compiler_main_test_en_dbl_comp_xor_basic() {
+        passed = passed + 1
+        println("  T1046 OK: Sprint 230 Block EN: ~r0^~r1 -> r0^r1")
+    } else { println("  FAIL: T1046") }
+    if compiler_main_test_en_dbl_comp_xor_same() {
+        passed = passed + 1
+        println("  T1047 OK: Sprint 230 Block EN: ~r0^~r0 -> 0 (via x^x)")
+    } else { println("  FAIL: T1047") }
+    if compiler_main_test_en_dbl_comp_xor_chain() {
+        passed = passed + 1
+        println("  T1048 OK: Sprint 230 Block EN: ~r0^~r1 xor-rr tracked for Block EK chain")
+    } else { println("  FAIL: T1048") }
+    if compiler_main_test_en_no_fold_one_not() {
+        passed = passed + 1
+        println("  T1049 OK: Sprint 230 Block EN: ~r0^r1 no fold one NOT")
+    } else { println("  FAIL: T1049") }
+    if compiler_main_test_en_no_fold_and_op() {
+        passed = passed + 1
+        println("  T1050 OK: Sprint 230 Block EN: ~r0&~r1 no EN fold AND op")
+    } else { println("  FAIL: T1050") }
+    if compiler_main_test_en_no_fold_neg_op() {
+        passed = passed + 1
+        println("  T1051 OK: Sprint 230 Block EN: neg(r0)^neg(r1) no fold neg not NOT")
+    } else { println("  FAIL: T1051") }
 
     // Sprint 229 Block EM: Complement-OR AND (T1040-T1045)
     if compiler_main_test_em_comp_or_and_basic() {
