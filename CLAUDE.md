@@ -43,20 +43,27 @@ type Pos = { x: i32 | x > 0 }          // refinement
 let m: Knowledge<mg> = measure(500.0, uncertainty: 2.5)  // epistemic
 ```
 
-## Build Commands
+## Build & Run
+
+The compiler is **self-hosted** (written in Sounio). Use the checked JIT binary:
 
 ```bash
-cd compiler && cargo build [--release]
-cargo test [test_name] [-- --nocapture]
-cargo run -- check examples/file.sio [--show-ast --show-types]
-cargo run --features jit -- run examples/file.sio
-cargo run -- repl
-cargo clippy && cargo fmt
+SOUC=./artifacts/omega/souc-bin/souc-linux-x86_64-jit
 
-# Features: jit, llvm, lsp, smt, gpu, ontology, pkg, full
+$SOUC check examples/file.sio          # type-check
+$SOUC check file.sio --show-ast        # dump AST
+$SOUC check file.sio --show-types      # dump types
+$SOUC run examples/file.sio            # JIT execute
+$SOUC repl                             # interactive
+
+# Native compilation (via self-hosted lean driver)
+$SOUC run self-hosted/compiler/render_native_compile_driver_lean.sio -- input.sio output.elf
+
+# Bootstrap chain
+bootstrap/stage0 bootstrap/boot2g.sio output.elf   # C bootstrap → native ELF
 ```
 
-**Stdlib path** (when outside repo): `export SOUNIO_STDLIB_PATH=/home/demetrios/sounio-1/stdlib`
+**Stdlib path** (when outside repo): `export SOUNIO_STDLIB_PATH=$(pwd)/stdlib`
 
 ## Architecture
 
@@ -64,34 +71,25 @@ cargo clippy && cargo fmt
 
 | Module | Purpose |
 |--------|---------|
-| `lexer/`, `parser/`, `ast/` | Frontend |
-| `check/`, `types/` | Bidirectional inference |
-| `effects/` | Algebraic effects (IO, Mut, Alloc, Panic, Async, GPU, Prob, Div) |
-| `linear/`, `ownership/` | Linear/affine checking |
-| `units/` | Dimensional analysis |
-| `refinement/`, `smt/` | Z3 refinement types |
-| `epistemic/` | Knowledge<T>, uncertainty |
-| `ontology/` | 15M+ scientific terms |
-| `sir/` | Domain-specific IR (ODEs, tensors, autodiff) |
-| `backend/` | Native ELF/Mach-O |
-| `codegen/` | LLVM, Cranelift, GPU |
+| `self-hosted/lexer/`, `parser/` | Frontend (tokenizer, recursive descent) |
+| `self-hosted/check/`, `types/` | Bidirectional inference + effects |
+| `self-hosted/ir/` | IR lowering, optimization, e-graph |
+| `self-hosted/native/` | x86-64 ELF emission |
+| `self-hosted/compiler/` | Codegen drivers (lean, IR, GPU) |
+| `stdlib/epistemic/` | Knowledge<T>, uncertainty (GUM) |
+| `stdlib/units/` | Dimensional analysis |
+| `bootstrap/` | stage0 (C) → boot2g → boot1 chain |
 
-See: [compiler/docs/KNOWN_LIMITATIONS.md](compiler/docs/KNOWN_LIMITATIONS.md)
+See: [docs/compiler/KNOWN_LIMITATIONS.md](docs/compiler/KNOWN_LIMITATIONS.md)
 
 ## Tests
 
-- `compiler/tests/` — Integration (Rust)
-- `tests/ui/` — Error messages
-- `tests/run-pass/` — Should run
-- `tests/compile-fail/` — Should fail
+- `tests/run-pass/` — Should compile and run
+- `tests/compile-fail/` — Should fail to compile
+- `tests/ui/` — Error message snapshots
+- `tests/stdlib/` — Standard library validation
 
 Annotations: `//@ run-pass`, `//@ compile-fail`, `//@ error-pattern: <text>`, `//@ ignore`
-
-## Standards
-
-- `thiserror` for errors, `miette` for diagnostics
-- No `unwrap()` in library code
-- Doc comments on public items
 
 ## Commits
 
