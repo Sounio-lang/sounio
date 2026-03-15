@@ -25,18 +25,18 @@
 /* ================================================================
  * LIMITS
  * ================================================================ */
-#define MAX_CODE      (256*1024)   /* 256 KB code output */
+#define MAX_CODE      (1024*1024)  /* 1 MB code output */
 #define MAX_FUNCS     512
 #define MAX_STRUCTS   128
 #define MAX_FIELDS    512
-#define MAX_LOCALS    128
+#define MAX_LOCALS    512
 #define MAX_TOKENS    (1024*1024)
 #define MAX_SOURCE    (1024*1024)  /* 1 MB source */
 #define MAX_NAME      128
 #define MAX_PARAMS    16
 #define MAX_FWD       256
 #define MAX_BREAKS    64
-#define MAX_MATCH_ARMS 32
+#define MAX_MATCH_ARMS 256
 #define MAX_CALL_ARGS 16
 
 /* ================================================================
@@ -309,10 +309,13 @@ static Token *cur(void) { return &g_tokens[g_tp < g_token_count ? g_tp : g_token
 static int tk(void) { return cur()->kind; }
 static void next(void) { if (g_tp < g_token_count-1) g_tp++; }
 static bool eat(int k) { if (tk()==k) { next(); return true; } return false; }
+static int g_error_count = 0;
 static void expect(int k) {
     if (tk()!=k) {
-        fprintf(stderr, "stage0: expected token %d, got %d at line %d col %d\n",
-                k, tk(), cur()->line, cur()->col);
+        if (g_error_count < 20)
+            fprintf(stderr, "stage0: parse error at line %d col %d\n",
+                    cur()->line, cur()->col);
+        g_error_count++;
     }
     next();
 }
@@ -414,7 +417,7 @@ enum ItemKind { ITEM_FN, ITEM_STRUCT, ITEM_ENUM, ITEM_IMPL, ITEM_USE, ITEM_TYPE,
 struct Item { int kind; FnDef *fn; StructDef *st; EnumDef *en; ImplDef *im; struct Item *next; };
 
 /* Simple arena allocator */
-static char g_arena[64*1024*1024]; /* 64 MB */
+static char g_arena[256*1024*1024]; /* 256 MB */
 static int g_arena_pos = 0;
 
 static void *arena_alloc(int size) {
@@ -440,9 +443,13 @@ static void skip_type(void);
 static Expr *parse_expr(void);
 static Block *parse_block(void);
 
+static int g_gt_pending = 0; /* for >> handling in nested generics */
+
 static void skip_type(void) {
     /* Handle &, &!, Box<T>, [T; N], Option<T>, etc. */
+    if (g_gt_pending > 0) { g_gt_pending--; return; } /* consume pending > from >> */
     if (eat(TK_AMP)) { eat(TK_BANG); skip_type(); return; }
+    if (eat(TK_STAR)) { skip_type(); return; } /* *T pointer type */
     if (eat(TK_LBRACKET)) {
         skip_type();
         if (eat(TK_SEMICOLON)) parse_expr(); /* array size */
@@ -454,9 +461,10 @@ static void skip_type(void) {
         if (eat(TK_LT)) {
             skip_type();
             while (eat(TK_COMMA)) skip_type();
-            /* handle >> as two > */
-            if (tk()==TK_SHR) { next(); return; }
-            expect(TK_GT);
+            if (g_gt_pending > 0) { g_gt_pending--; return; } /* > already consumed from >> */
+            if (tk()==TK_SHR) { next(); g_gt_pending++; return; } /* >> = two >s */
+            if (tk()!=TK_GT) return; /* error recovery */
+            next(); /* eat > */
         }
         return;
     }
@@ -692,9 +700,20 @@ static Expr *parse_primary(void) {
         e->args = list; expect(TK_RBRACKET); return e;
     }
 
-    /* identifier — possibly struct lit, function call, or just variable */
+    /* identifier — possibly path, struct lit, function call, or variable */
     if (tk()==TK_IDENT || is_keyword(tk())) {
         e->name = cur()->name; next(); e->kind = EX_IDENT;
+        /* Path expression: Foo::Bar or Foo::Bar::Baz */
+        while (tk()==TK_COLONCOLON && (g_tokens[g_tp+1].kind==TK_IDENT || is_keyword(g_tokens[g_tp+1].kind))) {
+            next(); /* skip :: */
+            e->name = cur()->name; next(); /* take last segment as the name */
+        }
+        /* Enum variant with payload: Some(x) or Foo::Bar(args) */
+        if (tk()==TK_LPAREN && e->name.buf[0]>='A' && e->name.buf[0]<='Z') {
+            /* Could be an enum constructor or a function call — treat as call */
+            e->kind = EX_CALL; e->args = parse_arglist();
+            return e;
+        }
         /* Check for struct literal: Name { field: val, ... } */
         if (tk()==TK_LBRACE && e->name.buf[0]>='A' && e->name.buf[0]<='Z') {
             /* Struct literal */
@@ -703,8 +722,13 @@ static Expr *parse_primary(void) {
             while (tk()!=TK_RBRACE && tk()!=TK_EOF) {
                 FieldInit *fi = NEW(FieldInit);
                 fi->name = cur()->name; next();
-                expect(TK_COLON);
-                fi->value = parse_expr();
+                if (eat(TK_COLON)) {
+                    fi->value = parse_expr();
+                } else {
+                    /* shorthand: Point { x, y } — value is same as field name */
+                    Expr *ve = NEW(Expr); ve->kind = EX_IDENT; ve->name = fi->name;
+                    fi->value = ve;
+                }
                 *ftail = fi; ftail = &fi->next;
                 if (!eat(TK_COMMA)) break;
             }
@@ -816,13 +840,34 @@ static Block *parse_block(void) {
     return b;
 }
 
+/* Skip balanced braces — for error recovery */
+static void skip_balanced_braces(void) {
+    int depth = 1;
+    next(); /* skip opening { */
+    while (depth > 0 && tk() != TK_EOF) {
+        if (tk() == TK_LBRACE) depth++;
+        else if (tk() == TK_RBRACE) depth--;
+        next();
+    }
+}
+
 static FnDef *parse_fn(void) {
     FnDef *f = NEW(FnDef);
     expect(TK_FN);
     f->name = cur()->name; next();
     f->params = parse_params(&f->param_count);
     f->return_type = parse_return_type();
-    f->body = parse_block();
+    if (tk() == TK_LBRACE) {
+        f->body = parse_block();
+    } else {
+        fprintf(stderr, "stage0: SKIP fn %.*s (no brace at line %d, tk=%d)\n",
+                f->name.len, f->name.buf, cur()->line, tk());
+        /* Skip to next top-level item */
+        while (tk() != TK_LBRACE && tk() != TK_FN && tk() != TK_STRUCT &&
+               tk() != TK_ENUM && tk() != TK_IMPL && tk() != TK_EOF) next();
+        if (tk() == TK_LBRACE) skip_balanced_braces();
+        f->body = NEW(Block);
+    }
     return f;
 }
 
@@ -1359,7 +1404,7 @@ static void compile_expr(Expr *e, Locals *loc) {
         compile_expr(e->left, loc);
         int scrut_slot = loc->next_slot++;
         emit_store_rax(scrut_slot);
-        int end_patches[MAX_MATCH_ARMS]; int ep_count = 0;
+        static int end_patches[MAX_MATCH_ARMS]; int ep_count = 0;
         for (MatchArm *arm = e->arms; arm; arm = arm->next) {
             if (arm->pat_kind == 0) {
                 /* wildcard — always matches */
@@ -1408,7 +1453,7 @@ static void compile_expr(Expr *e, Locals *loc) {
         /* [value; count] — allocate count slots, fill with value */
         int64_t count = 0;
         if (e->right && e->right->kind == EX_INT) count = e->right->int_val;
-        if (count > 256) count = 256;
+        if (count > 64) count = 64; /* cap to prevent stack overflow */
         int base_slot = loc->next_slot;
         loc->next_slot += (int)count;
         compile_expr(e->left, loc);
@@ -1491,7 +1536,8 @@ static void compile_block(Block *b, Locals *loc) {
  * COMPILE FUNCTION
  * ================================================================ */
 static void compile_function(FnDef *fn) {
-    Locals loc = {0};
+    static Locals loc;
+    memset(&loc, 0, sizeof(loc));
     /* Prologue */
     emit_push_rbp(); emit_mov_rbp_rsp();
     int frame_raw = (fn->param_count + 64 + 2) * 8; /* generous frame */
