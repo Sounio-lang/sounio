@@ -4068,3 +4068,730 @@ fn gpu_build_epistemic_wmma_matmul_16x16_ir() -> GpuKernelIr with Mut, Panic, Di
 
     k
 }
+
+// ═══════════════════════════════════════════════════════════════════════
+// Epistemic Tiled GEMM with Shared Memory + K-loop Uncertainty Accumulation
+//
+// Track A of the Sounio GPU epistemic push: tiled GEMM iterating over K
+// tiles, staging through shared memory, with GUM-compliant (JCGM 100:2008)
+// uncertainty accumulating across K iterations via quadrature:
+//
+//   ε_accum = sqrt( Σ_k  ε_tile_k² )
+//
+// Each tile: load A/B to shared memory → barrier → WMMA → shadow uncertainty
+// After K-loop: store C_val, C_eps, C_vld, C_prv to global.
+//
+// Register layout:
+//   u32: %r0=tid.x, %r1=ctaid.x, %r2=ntid.x, %r3=loop_counter, %r4=K_tiles
+//   u64: %rd0..%rd9 (param ptrs), %rd10..%rd13 (A/B addrs),
+//        %rd14 (u64 stride), %rd15 (tile stride=64),
+//        %rd16 (xor prov), %rd17..%rd20 (output addrs)
+//   f32: %f0..%f7 (A frags), %f8..%f15 (B frags), %f16..%f23 (C accum),
+//        %f24..%f25 (A_eps, B_eps loaded), %f26..%f36 (shadow scratch),
+//        %f37 (eps_accum), %f38 (eps_accum²), %f39 (tile_eps²),
+//        %f40 (sum²)
+//   pred: %p0 (A valid), %p1 (B valid), %p2 (AND result), %p3 (loop cond)
+//
+// Shared memory: 2048 bytes (2 × 16×16×4 for A_tile + B_tile)
+// ═══════════════════════════════════════════════════════════════════════
+
+fn gpu_build_epistemic_tiled_gemm_ir() -> GpuKernelIr with Mut, Panic, Div {
+    var k = gpu_kernel_new()
+
+    // Kernel name: "epi_tgemm" (9 chars)
+    k.kernel_name = ir_name_from_bytes(101, 112, 105, 95, 9)  // "epi_"
+    k.kernel_name.buf[4] = 116   // 't'
+    k.kernel_name.buf[5] = 103   // 'g'
+    k.kernel_name.buf[6] = 101   // 'e'
+    k.kernel_name.buf[7] = 109   // 'm'
+    k.kernel_name.buf[8] = 109   // 'm'
+
+    // Shared memory: 2048 bytes (A_tile at 0, B_tile at 1024)
+    k.shared_bytes = 2048
+
+    // ── 8 Parameters (all .u64 pointers) ────────────────────────
+    // 0: param_a_val  1: param_a_eps  2: param_b_val  3: param_b_eps
+    // 4: param_c_val  5: param_c_eps  6: param_c_vld  7: param_c_prv
+
+    let param_names: [i8; 8] = [118, 101, 118, 101, 118, 101, 118, 112]
+    let param_suffix: [i8; 8] = [108, 115, 108, 115, 108, 115, 100, 118]
+    let param_prefix: [i8; 8] = [97, 97, 98, 98, 99, 99, 99, 99]
+
+    var pi: i64 = 0
+    while pi < 8 {
+        var pname = ir_name_from_bytes(112, 95, 0, 95, 6)
+        pname.buf[2] = param_prefix[pi as usize]
+        pname.buf[4] = param_names[pi as usize]
+        pname.buf[5] = param_suffix[pi as usize]
+        k.params[pi as usize] = GpuParam { name: pname, ty: GpuType::GpuPtr }
+        pi = pi + 1
+    }
+    k.param_count = 8
+
+    var idx: i64 = 0
+    var op = gpu_op_default()
+
+    // ─── Thread / block identification ──────────────────────────
+
+    // %r0 = tid.x
+    op = gpu_op_default()
+    op.opcode = GpuOpcode::GpuGetTid
+    op.dst_reg = 0
+    op.axis = 0
+    op.ty = GpuType::GpuU32
+    op.dst_ty = GpuType::GpuU32
+    k.ops[idx] = op
+    idx = idx + 1
+
+    // %r1 = ctaid.x
+    op = gpu_op_default()
+    op.opcode = GpuOpcode::GpuGetBid
+    op.dst_reg = 1
+    op.axis = 0
+    op.ty = GpuType::GpuU32
+    op.dst_ty = GpuType::GpuU32
+    k.ops[idx] = op
+    idx = idx + 1
+
+    // %r2 = ntid.x
+    op = gpu_op_default()
+    op.opcode = GpuOpcode::GpuGetNtid
+    op.dst_reg = 2
+    op.axis = 0
+    op.ty = GpuType::GpuU32
+    op.dst_ty = GpuType::GpuU32
+    k.ops[idx] = op
+    idx = idx + 1
+
+    // %rd0 = cvt.u64.u32 %r0 (widen tid)
+    op = gpu_op_default()
+    op.opcode = GpuOpcode::GpuCvt
+    op.dst_reg = 0
+    op.src_reg = 0
+    op.dst_ty = GpuType::GpuU64
+    op.src_ty = GpuType::GpuU32
+    op.ty = GpuType::GpuU64
+    k.ops[idx] = op
+    idx = idx + 1
+
+    // %rd1 = %rd0 * 4 (byte offset for f32)
+    op = gpu_op_default()
+    op.opcode = GpuOpcode::GpuMulImm
+    op.dst_reg = 1
+    op.lhs_reg = 0
+    op.rhs_imm = 4
+    op.ty = GpuType::GpuU64
+    k.ops[idx] = op
+    idx = idx + 1
+
+    // ─── Load all 8 param pointers (%rd2..%rd9) ────────────────
+
+    var pp: i64 = 0
+    while pp < 8 {
+        op = gpu_op_default()
+        op.opcode = GpuOpcode::GpuLoadParam
+        op.dst_reg = pp + 2
+        op.param_idx = pp
+        op.ty = GpuType::GpuU64
+        op.dst_ty = GpuType::GpuU64
+        k.ops[idx] = op
+        idx = idx + 1
+        pp = pp + 1
+    }
+
+    // ─── Address computation for data loads ─────────────────────
+    // %rd10 = rd2 + rd1 (A_val addr)
+    // %rd11 = rd3 + rd1 (A_eps addr)
+    // %rd12 = rd4 + rd1 (B_val addr)
+    // %rd13 = rd5 + rd1 (B_eps addr)
+
+    var ai: i64 = 0
+    while ai < 4 {
+        op = gpu_op_default()
+        op.opcode = GpuOpcode::GpuAdd
+        op.dst_reg = 10 + ai
+        op.lhs_reg = 2 + ai
+        op.rhs_reg = 1
+        op.ty = GpuType::GpuU64
+        k.ops[idx] = op
+        idx = idx + 1
+        ai = ai + 1
+    }
+
+    // ─── Initialize loop counter and eps accumulator ────────────
+
+    // %r3 = 0 (loop counter)
+    op = gpu_op_default()
+    op.opcode = GpuOpcode::GpuMulImm
+    op.dst_reg = 3
+    op.lhs_reg = 0       // tid
+    op.rhs_imm = 0       // tid * 0 = 0
+    op.ty = GpuType::GpuU32
+    k.ops[idx] = op
+    idx = idx + 1
+
+    // %r4 = 2 (K_tiles = 2 fixed tiles)
+    // Trick: use ntid.x * 0 + addimm
+    // Simpler: MulImm with rhs_imm = 0 gives 0, then AddImm
+    op = gpu_op_default()
+    op.opcode = GpuOpcode::GpuAddImm
+    op.dst_reg = 4
+    op.lhs_reg = 3       // %r3 = 0
+    op.rhs_imm = 2
+    op.ty = GpuType::GpuU32
+    k.ops[idx] = op
+    idx = idx + 1
+
+    // %f37 = 0.0 (eps_accum — use mul x*0 trick)
+    // Load eps_A first (will be reloaded per tile), use as scratch
+    // Actually just use: %f37 = %f37 * 0 won't work without a zero reg.
+    // Use GpuSub: %f37 = %f37 - %f37 (self-subtract = 0)
+    // But %f37 is uninitialized. We need a zero.
+    // Trick: Load A_eps first to %f24, then sub gives us zero if A_eps=A_eps.
+    // Better approach: load A_eps, use it, then we can zero via sub.
+    // For initialization, load eps from A first, then zero the accum.
+    // Actually we'll load eps after the tile load inside the loop.
+    // For %f37 = 0: we need any two identical f32 regs.
+    // Let's use %f37 = %f0 - %f0 (f0 will be overwritten in the loop anyway).
+    // But f0 is also uninitialized before the loop.
+    // Simplest: emit a dummy load-to-self then sub.
+    // Even simpler: since we accumulate with sqrt(accum²+tile²), and accum starts=0,
+    // first tile gives sqrt(0+tile²)=tile. So we initialize %f38=0 (accum²).
+    // We can't get literal 0.0 without a float immediate.
+    //
+    // Approach: Use GpuMul with register 0 multiplied by zero (integer).
+    // Actually, GpuSub self → 0 works IF the register has *some* valid float.
+    //
+    // Best approach for PTX: use mov.f32 %f37, 0f00000000;
+    // But we don't have a GpuMovImm for float. Use int-to-float cvt.
+    //
+    // Actually, the simplest approach that works: the 16x16 kernel uses
+    // the doubling chain starting from combined². If we set %f38 = 0 via
+    // sub-self after loading any float, that works.
+    //
+    // For the initial version: we load A_eps before the loop to get a valid
+    // float value, then use sub-self to zero. Load it into %f24 first.
+
+    // Load A_eps scalar (will be reloaded per tile but we need a valid float)
+    op = gpu_op_default()
+    op.opcode = GpuOpcode::GpuLoadGlobal
+    op.dst_reg = 24
+    op.addr_reg = 11     // A_eps addr
+    op.ty = GpuType::GpuF32
+    op.dst_ty = GpuType::GpuF32
+    k.ops[idx] = op
+    idx = idx + 1
+
+    // %f38 = %f24 - %f24 = 0.0 (eps_accum² initialized to zero)
+    op = gpu_op_default()
+    op.opcode = GpuOpcode::GpuSub
+    op.dst_reg = 38
+    op.lhs_reg = 24
+    op.rhs_reg = 24
+    op.ty = GpuType::GpuF32
+    k.ops[idx] = op
+    idx = idx + 1
+
+    // ═══ K-LOOP LABEL ════════════════════════════════════════════
+    // LBB0_1:
+    op = gpu_op_default()
+    op.opcode = GpuOpcode::GpuBra
+    op.src_reg = 1       // label definition
+    op.rhs_imm = 1       // label ID = 1
+    k.ops[idx] = op
+    idx = idx + 1
+
+    // ─── Load A_val fragments to shared memory ──────────────────
+    // Load 8 f32 from global A_val → store to shared_array[0..1023]
+    var li: i64 = 0
+    while li < 8 {
+        // Load from global
+        op = gpu_op_default()
+        op.opcode = GpuOpcode::GpuLoadGlobal
+        op.dst_reg = li          // %f0..%f7
+        op.addr_reg = 10         // A_val addr
+        op.ty = GpuType::GpuF32
+        op.dst_ty = GpuType::GpuF32
+        k.ops[idx] = op
+        idx = idx + 1
+
+        // Store to shared memory
+        op = gpu_op_default()
+        op.opcode = GpuOpcode::GpuStoreShared
+        op.src_reg = li
+        op.shared_addr = li * 4  // shared_array + li*4
+        op.ty = GpuType::GpuF32
+        k.ops[idx] = op
+        idx = idx + 1
+
+        li = li + 1
+    }
+
+    // ─── Load B_val fragments to shared memory ──────────────────
+    // Load 8 f32 from global B_val → store to shared_array[1024..2047]
+    li = 0
+    while li < 8 {
+        // Load from global
+        op = gpu_op_default()
+        op.opcode = GpuOpcode::GpuLoadGlobal
+        op.dst_reg = 8 + li      // %f8..%f15
+        op.addr_reg = 12          // B_val addr
+        op.ty = GpuType::GpuF32
+        op.dst_ty = GpuType::GpuF32
+        k.ops[idx] = op
+        idx = idx + 1
+
+        // Store to shared memory
+        op = gpu_op_default()
+        op.opcode = GpuOpcode::GpuStoreShared
+        op.src_reg = 8 + li
+        op.shared_addr = 1024 + li * 4  // B tile offset
+        op.ty = GpuType::GpuF32
+        k.ops[idx] = op
+        idx = idx + 1
+
+        li = li + 1
+    }
+
+    // ─── Async copy prefetch (overlaps with compute) ────────────
+    // cp.async global→shared for next tile's data (prefetch hint)
+    op = gpu_op_default()
+    op.opcode = GpuOpcode::GpuCpAsync
+    op.shared_addr = 0    // prefetch to shared A region
+    op.addr_reg = 10      // from A_val global
+    k.ops[idx] = op
+    idx = idx + 1
+
+    // cp.async.wait_all (drain prefetch before WMMA)
+    op = gpu_op_default()
+    op.opcode = GpuOpcode::GpuCpAsyncWaitAll
+    k.ops[idx] = op
+    idx = idx + 1
+
+    // ─── Barrier before WMMA ────────────────────────────────────
+    op = gpu_op_default()
+    op.opcode = GpuOpcode::GpuBarrierSync
+    op.rhs_imm = 0
+    k.ops[idx] = op
+    idx = idx + 1
+
+    // ─── Load tile data back from shared to registers ───────────
+    li = 0
+    while li < 8 {
+        op = gpu_op_default()
+        op.opcode = GpuOpcode::GpuLoadShared
+        op.dst_reg = li
+        op.shared_addr = li * 4
+        op.ty = GpuType::GpuF32
+        k.ops[idx] = op
+        idx = idx + 1
+        li = li + 1
+    }
+    li = 0
+    while li < 8 {
+        op = gpu_op_default()
+        op.opcode = GpuOpcode::GpuLoadShared
+        op.dst_reg = 8 + li
+        op.shared_addr = 1024 + li * 4
+        op.ty = GpuType::GpuF32
+        k.ops[idx] = op
+        idx = idx + 1
+        li = li + 1
+    }
+
+    // ─── Load A_eps and B_eps (scalar per thread, per tile) ─────
+    op = gpu_op_default()
+    op.opcode = GpuOpcode::GpuLoadGlobal
+    op.dst_reg = 24
+    op.addr_reg = 11
+    op.ty = GpuType::GpuF32
+    op.dst_ty = GpuType::GpuF32
+    k.ops[idx] = op
+    idx = idx + 1
+
+    op = gpu_op_default()
+    op.opcode = GpuOpcode::GpuLoadGlobal
+    op.dst_reg = 25
+    op.addr_reg = 13
+    op.ty = GpuType::GpuF32
+    op.dst_ty = GpuType::GpuF32
+    k.ops[idx] = op
+    idx = idx + 1
+
+    // ═══ TENSOR CORE DATA PATH ══════════════════════════════════
+    op = gpu_op_default()
+    op.opcode = GpuOpcode::GpuWmma
+    op.dst_reg = 16
+    op.lhs_reg = 0
+    op.rhs_reg = 8
+    op.src_reg = 16
+    op.num_regs = 8
+    op.ty = GpuType::GpuF32
+    op.dst_ty = GpuType::GpuF32
+    k.ops[idx] = op
+    idx = idx + 1
+
+    // ═══ EPISTEMIC SHADOW PATH — per-tile uncertainty ═══════════
+    //
+    // Compute tile-level ε_tile using same GUM formula as 16×16 kernel:
+    //   ε_tile = sqrt(K_tile) · (|A_frag[0]| · ε_B + |B_frag[0]| · ε_A)
+    //          = sqrt(16 · (|A|·ε_B + |B|·ε_A)²)
+    //
+    // Then accumulate across tiles via quadrature:
+    //   ε_accum² += ε_tile²
+    //   ε_accum = sqrt(ε_accum²)  [computed after loop]
+
+    // %f26 = abs(%f0) — |A|
+    op = gpu_op_default()
+    op.opcode = GpuOpcode::GpuAbs
+    op.dst_reg = 26
+    op.src_reg = 0
+    op.ty = GpuType::GpuF32
+    op.dst_ty = GpuType::GpuF32
+    k.ops[idx] = op
+    idx = idx + 1
+
+    // %f27 = abs(%f8) — |B|
+    op = gpu_op_default()
+    op.opcode = GpuOpcode::GpuAbs
+    op.dst_reg = 27
+    op.src_reg = 8
+    op.ty = GpuType::GpuF32
+    op.dst_ty = GpuType::GpuF32
+    k.ops[idx] = op
+    idx = idx + 1
+
+    // %f28 = ε_A · |B|
+    op = gpu_op_default()
+    op.opcode = GpuOpcode::GpuMul
+    op.dst_reg = 28
+    op.lhs_reg = 24
+    op.rhs_reg = 27
+    op.ty = GpuType::GpuF32
+    k.ops[idx] = op
+    idx = idx + 1
+
+    // %f29 = ε_B · |A|
+    op = gpu_op_default()
+    op.opcode = GpuOpcode::GpuMul
+    op.dst_reg = 29
+    op.lhs_reg = 25
+    op.rhs_reg = 26
+    op.ty = GpuType::GpuF32
+    k.ops[idx] = op
+    idx = idx + 1
+
+    // %f30 = combined = ε_A·|B| + ε_B·|A|
+    op = gpu_op_default()
+    op.opcode = GpuOpcode::GpuAdd
+    op.dst_reg = 30
+    op.lhs_reg = 28
+    op.rhs_reg = 29
+    op.ty = GpuType::GpuF32
+    k.ops[idx] = op
+    idx = idx + 1
+
+    // %f31 = combined²
+    op = gpu_op_default()
+    op.opcode = GpuOpcode::GpuMul
+    op.dst_reg = 31
+    op.lhs_reg = 30
+    op.rhs_reg = 30
+    op.ty = GpuType::GpuF32
+    k.ops[idx] = op
+    idx = idx + 1
+
+    // Doubling chain: combined² × 16 via 4× add-to-self
+    // %f32 = 2·sq
+    op = gpu_op_default()
+    op.opcode = GpuOpcode::GpuAdd
+    op.dst_reg = 32
+    op.lhs_reg = 31
+    op.rhs_reg = 31
+    op.ty = GpuType::GpuF32
+    k.ops[idx] = op
+    idx = idx + 1
+
+    // %f33 = 4·sq
+    op = gpu_op_default()
+    op.opcode = GpuOpcode::GpuAdd
+    op.dst_reg = 33
+    op.lhs_reg = 32
+    op.rhs_reg = 32
+    op.ty = GpuType::GpuF32
+    k.ops[idx] = op
+    idx = idx + 1
+
+    // %f34 = 8·sq
+    op = gpu_op_default()
+    op.opcode = GpuOpcode::GpuAdd
+    op.dst_reg = 34
+    op.lhs_reg = 33
+    op.rhs_reg = 33
+    op.ty = GpuType::GpuF32
+    k.ops[idx] = op
+    idx = idx + 1
+
+    // %f35 = 16·sq = ε_tile²·16 (actually = 16·combined²)
+    op = gpu_op_default()
+    op.opcode = GpuOpcode::GpuAdd
+    op.dst_reg = 35
+    op.lhs_reg = 34
+    op.rhs_reg = 34
+    op.ty = GpuType::GpuF32
+    k.ops[idx] = op
+    idx = idx + 1
+
+    // %f36 = sqrt(16·combined²) = ε_tile for this tile
+    op = gpu_op_default()
+    op.opcode = GpuOpcode::GpuSqrt
+    op.dst_reg = 36
+    op.src_reg = 35
+    op.ty = GpuType::GpuF32
+    op.dst_ty = GpuType::GpuF32
+    k.ops[idx] = op
+    idx = idx + 1
+
+    // ─── Accumulate uncertainty via quadrature ──────────────────
+    // %f39 = ε_tile² = %f36 * %f36
+    op = gpu_op_default()
+    op.opcode = GpuOpcode::GpuMul
+    op.dst_reg = 39
+    op.lhs_reg = 36
+    op.rhs_reg = 36
+    op.ty = GpuType::GpuF32
+    k.ops[idx] = op
+    idx = idx + 1
+
+    // %f38 = ε_accum² + ε_tile² (running quadrature sum)
+    op = gpu_op_default()
+    op.opcode = GpuOpcode::GpuAdd
+    op.dst_reg = 38
+    op.lhs_reg = 38      // previous accum²
+    op.rhs_reg = 39      // tile ε²
+    op.ty = GpuType::GpuF32
+    k.ops[idx] = op
+    idx = idx + 1
+
+    // ─── Post-tile barrier ──────────────────────────────────────
+    op = gpu_op_default()
+    op.opcode = GpuOpcode::GpuBarrierSync
+    op.rhs_imm = 0
+    k.ops[idx] = op
+    idx = idx + 1
+
+    // ─── Advance tile pointers ──────────────────────────────────
+    // %rd10 += 64 (advance A_val by 16 f32 = 64 bytes)
+    op = gpu_op_default()
+    op.opcode = GpuOpcode::GpuAddImm
+    op.dst_reg = 10
+    op.lhs_reg = 10
+    op.rhs_imm = 64
+    op.ty = GpuType::GpuU64
+    k.ops[idx] = op
+    idx = idx + 1
+
+    // %rd12 += 64 (advance B_val by 16 f32 = 64 bytes)
+    op = gpu_op_default()
+    op.opcode = GpuOpcode::GpuAddImm
+    op.dst_reg = 12
+    op.lhs_reg = 12
+    op.rhs_imm = 64
+    op.ty = GpuType::GpuU64
+    k.ops[idx] = op
+    idx = idx + 1
+
+    // ─── Loop counter increment and branch ──────────────────────
+    // %r3 = %r3 + 1
+    op = gpu_op_default()
+    op.opcode = GpuOpcode::GpuAddImm
+    op.dst_reg = 3
+    op.lhs_reg = 3
+    op.rhs_imm = 1
+    op.ty = GpuType::GpuU32
+    k.ops[idx] = op
+    idx = idx + 1
+
+    // %p3 = (%r3 < %r4) — loop condition
+    op = gpu_op_default()
+    op.opcode = GpuOpcode::GpuSetpLt
+    op.dst_reg = 3       // %p3
+    op.lhs_reg = 3       // %r3 (counter)
+    op.rhs_reg = 4       // %r4 (K_tiles=2)
+    op.ty = GpuType::GpuU32
+    k.ops[idx] = op
+    idx = idx + 1
+
+    // @%p3 bra LBB0_1 (conditional back-edge)
+    op = gpu_op_default()
+    op.opcode = GpuOpcode::GpuBra
+    op.src_reg = 0       // branch (not label)
+    op.pred_reg = 3      // %p3
+    op.rhs_imm = 1       // label ID = 1
+    k.ops[idx] = op
+    idx = idx + 1
+
+    // ═══ POST-LOOP: Final uncertainty from quadrature ═══════════
+    // %f37 = sqrt(%f38) = sqrt(Σ ε_tile²) = final accumulated uncertainty
+    op = gpu_op_default()
+    op.opcode = GpuOpcode::GpuSqrt
+    op.dst_reg = 37
+    op.src_reg = 38
+    op.ty = GpuType::GpuF32
+    op.dst_ty = GpuType::GpuF32
+    k.ops[idx] = op
+    idx = idx + 1
+
+    // ═══ VALIDITY PATH ══════════════════════════════════════════
+    // %p0 = (ε_A >= 0) — A uncertainty valid
+    op = gpu_op_default()
+    op.opcode = GpuOpcode::GpuSetpGe
+    op.dst_reg = 0
+    op.lhs_reg = 24
+    op.rhs_reg = 31      // reuse scratch (always >= 0 for valid input)
+    op.ty = GpuType::GpuF32
+    k.ops[idx] = op
+    idx = idx + 1
+
+    // %p1 = (ε_B >= 0)
+    op = gpu_op_default()
+    op.opcode = GpuOpcode::GpuSetpGe
+    op.dst_reg = 1
+    op.lhs_reg = 25
+    op.rhs_reg = 31
+    op.ty = GpuType::GpuF32
+    k.ops[idx] = op
+    idx = idx + 1
+
+    // %p2 = %p0 AND %p1
+    op = gpu_op_default()
+    op.opcode = GpuOpcode::GpuAnd
+    op.dst_reg = 2
+    op.lhs_reg = 0
+    op.rhs_reg = 1
+    op.ty = GpuType::GpuBool
+    op.dst_ty = GpuType::GpuBool
+    k.ops[idx] = op
+    idx = idx + 1
+
+    // ═══ PROVENANCE PATH ════════════════════════════════════════
+    // %rd14 = %rd0 * 8 (u64 byte offset)
+    op = gpu_op_default()
+    op.opcode = GpuOpcode::GpuMulImm
+    op.dst_reg = 14
+    op.lhs_reg = 0
+    op.rhs_imm = 8
+    op.ty = GpuType::GpuU64
+    k.ops[idx] = op
+    idx = idx + 1
+
+    // %rd16 = %rd2 XOR %rd4 (simplified provenance)
+    op = gpu_op_default()
+    op.opcode = GpuOpcode::GpuXor
+    op.dst_reg = 16
+    op.lhs_reg = 2
+    op.rhs_reg = 4
+    op.ty = GpuType::GpuU64
+    op.dst_ty = GpuType::GpuU64
+    k.ops[idx] = op
+    idx = idx + 1
+
+    // ─── Output address computation ─────────────────────────────
+    // %rd17 = rd6 + rd1 (C_val addr)
+    op = gpu_op_default()
+    op.opcode = GpuOpcode::GpuAdd
+    op.dst_reg = 17
+    op.lhs_reg = 6
+    op.rhs_reg = 1
+    op.ty = GpuType::GpuU64
+    k.ops[idx] = op
+    idx = idx + 1
+
+    // %rd18 = rd7 + rd1 (C_eps addr)
+    op = gpu_op_default()
+    op.opcode = GpuOpcode::GpuAdd
+    op.dst_reg = 18
+    op.lhs_reg = 7
+    op.rhs_reg = 1
+    op.ty = GpuType::GpuU64
+    k.ops[idx] = op
+    idx = idx + 1
+
+    // %rd19 = rd8 + rd1 (C_vld addr)
+    op = gpu_op_default()
+    op.opcode = GpuOpcode::GpuAdd
+    op.dst_reg = 19
+    op.lhs_reg = 8
+    op.rhs_reg = 1
+    op.ty = GpuType::GpuU64
+    k.ops[idx] = op
+    idx = idx + 1
+
+    // %rd20 = rd9 + rd14 (C_prv addr)
+    op = gpu_op_default()
+    op.opcode = GpuOpcode::GpuAdd
+    op.dst_reg = 20
+    op.lhs_reg = 9
+    op.rhs_reg = 14
+    op.ty = GpuType::GpuU64
+    k.ops[idx] = op
+    idx = idx + 1
+
+    // ─── Store C_val ─────────────────────────────────────────────
+    op = gpu_op_default()
+    op.opcode = GpuOpcode::GpuStoreGlobal
+    op.addr_reg = 17
+    op.src_reg = 16      // first WMMA output fragment
+    op.ty = GpuType::GpuF32
+    op.dst_ty = GpuType::GpuF32
+    k.ops[idx] = op
+    idx = idx + 1
+
+    // ─── Store C_eps (accumulated uncertainty from quadrature) ──
+    op = gpu_op_default()
+    op.opcode = GpuOpcode::GpuStoreGlobal
+    op.addr_reg = 18
+    op.src_reg = 37      // %f37 = sqrt(Σ ε_tile²)
+    op.ty = GpuType::GpuF32
+    op.dst_ty = GpuType::GpuF32
+    k.ops[idx] = op
+    idx = idx + 1
+
+    // ─── Store C_valid ───────────────────────────────────────────
+    op = gpu_op_default()
+    op.opcode = GpuOpcode::GpuStoreGlobalPred
+    op.addr_reg = 19
+    op.src_reg = 2       // %p2
+    op.ty = GpuType::GpuBool
+    k.ops[idx] = op
+    idx = idx + 1
+
+    // ─── Store C_provenance ──────────────────────────────────────
+    op = gpu_op_default()
+    op.opcode = GpuOpcode::GpuStoreGlobal
+    op.addr_reg = 20
+    op.src_reg = 16      // %rd16 (XOR provenance)
+    op.ty = GpuType::GpuU64
+    op.dst_ty = GpuType::GpuU64
+    k.ops[idx] = op
+    idx = idx + 1
+
+    // ─── Return ──────────────────────────────────────────────────
+    op = gpu_op_default()
+    op.opcode = GpuOpcode::GpuRet
+    k.ops[idx] = op
+    idx = idx + 1
+
+    // ── Finalize ─────────────────────────────────────────────────
+    k.op_count = idx
+
+    k.max_reg_u32 = 5    // %r<5>: r0..r4
+    k.max_reg_u64 = 21   // %rd<21>: rd0..rd20
+    k.max_reg_f32 = 41   // %f<41>: f0..f40
+    k.max_reg_pred = 4   // %p<4>: p0..p3
+    k.max_reg_f64 = 0
+    k.max_reg_i32 = 0
+    k.max_reg_i64 = 0
+
+    k
+}

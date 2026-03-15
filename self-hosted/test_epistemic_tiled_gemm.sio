@@ -1,0 +1,118 @@
+// self-hosted::test_epistemic_tiled_gemm — Epistemic Tiled GEMM Oracle Tests
+//
+// Validates the tiled GEMM with shared memory staging and K-loop uncertainty
+// accumulation via quadrature (JCGM 100:2008).
+//
+// The tiled kernel iterates over K tiles, stages through shared memory,
+// runs WMMA per tile, and accumulates uncertainty:
+//   eps_accum = sqrt( sum_k eps_tile_k^2 )
+//
+// Test categories:
+//   T1-T5: PTX structural validation (substring checks on emitted PTX)
+//   T6-T7: GUM oracle (zero identity, quadrature monotonicity)
+
+// ============================================================================
+// Section 0 — Arithmetic helpers
+// ============================================================================
+
+fn etg_sqrt_f64(x: f64) -> f64 with Mut, Panic, Div {
+    if x <= 0.0 { return 0.0 }
+    var g = x / 2.0
+    var i: i64 = 0
+    while i < 30 {
+        g = (g + x / g) / 2.0
+        i = i + 1
+    }
+    g
+}
+
+fn etg_abs_f64(x: f64) -> f64 {
+    if x < 0.0 { -x } else { x }
+}
+
+fn etg_near_f64(a: f64, b: f64, tol: f64) -> bool {
+    let diff = a - b
+    let abs_diff = if diff < 0.0 { -diff } else { diff }
+    abs_diff <= tol
+}
+
+// GUM tile-level uncertainty formula (conservative):
+//   eps_tile = sqrt(K_tile) * (|A_norm| * eps_B + |B_norm| * eps_A)
+// where K_tile = 16 for m16n16k16 WMMA tile.
+fn etg_gum_tile_uncertainty(eps_a: f64, norm_a: f64, eps_b: f64, norm_b: f64) -> f64 with Mut, Panic, Div {
+    let combined = etg_abs_f64(norm_a) * eps_b + etg_abs_f64(norm_b) * eps_a
+    let sqrt_k = etg_sqrt_f64(16.0)
+    sqrt_k * combined
+}
+
+// Quadrature accumulation over N_tiles tiles:
+//   eps_accum = sqrt( sum_k eps_tile_k^2 )
+// For identical tiles: eps_accum = sqrt(N) * eps_tile
+fn etg_gum_tiled_uncertainty(eps_a: f64, norm_a: f64, eps_b: f64, norm_b: f64, n_tiles: i64) -> f64 with Mut, Panic, Div {
+    let tile_eps = etg_gum_tile_uncertainty(eps_a, norm_a, eps_b, norm_b)
+    let tile_eps_sq = tile_eps * tile_eps
+    let sum_sq = tile_eps_sq * (n_tiles as f64)
+    etg_sqrt_f64(sum_sq)
+}
+
+// ============================================================================
+// Section 1 — PTX structural validation
+// ============================================================================
+
+// T1: PTX contains .shared declaration (shared memory staging)
+fn test_tgemm_ptx_has_shared() -> bool with Mut, Panic, Div, Alloc {
+    let ir = gpu_build_epistemic_tiled_gemm_ir()
+    let ptx = gpu_lower_to_ptx(ir)
+    let s = ptx_to_string(ptx)
+    ptx_str_contains(s, ".shared")
+}
+
+// T2: PTX contains bar.sync (barrier synchronization)
+fn test_tgemm_ptx_has_barrier() -> bool with Mut, Panic, Div, Alloc {
+    let ir = gpu_build_epistemic_tiled_gemm_ir()
+    let ptx = gpu_lower_to_ptx(ir)
+    let s = ptx_to_string(ptx)
+    ptx_str_contains(s, "bar.sync")
+}
+
+// T3: PTX contains wmma.mma.sync (tensor core data path)
+fn test_tgemm_ptx_has_wmma() -> bool with Mut, Panic, Div, Alloc {
+    let ir = gpu_build_epistemic_tiled_gemm_ir()
+    let ptx = gpu_lower_to_ptx(ir)
+    let s = ptx_to_string(ptx)
+    ptx_str_contains(s, "wmma.mma.sync")
+}
+
+// T4: PTX contains sqrt.approx.f32 (shadow uncertainty path)
+fn test_tgemm_ptx_has_sqrt() -> bool with Mut, Panic, Div, Alloc {
+    let ir = gpu_build_epistemic_tiled_gemm_ir()
+    let ptx = gpu_lower_to_ptx(ir)
+    let s = ptx_to_string(ptx)
+    ptx_str_contains(s, "sqrt.approx.f32")
+}
+
+// T5: PTX contains xor.b64 (provenance Merkle merge)
+fn test_tgemm_ptx_has_xor() -> bool with Mut, Panic, Div, Alloc {
+    let ir = gpu_build_epistemic_tiled_gemm_ir()
+    let ptx = gpu_lower_to_ptx(ir)
+    let s = ptx_to_string(ptx)
+    ptx_str_contains(s, "xor.b64")
+}
+
+// ============================================================================
+// Section 2 — GUM Oracle
+// ============================================================================
+
+// T6: Zero-uncertainty input produces zero output (identity law)
+fn test_tgemm_eps_zero_identity() -> bool with Mut, Panic, Div {
+    let eps_out = etg_gum_tiled_uncertainty(0.0, 1.0, 0.0, 1.0, 2)
+    etg_near_f64(eps_out, 0.0, 1.0e-12)
+}
+
+// T7: Tiled uncertainty (2 tiles) >= single-tile uncertainty (monotone accumulation)
+//     sqrt(2) * eps_tile >= eps_tile
+fn test_tgemm_eps_quadrature_monotone() -> bool with Mut, Panic, Div {
+    let single = etg_gum_tiled_uncertainty(0.1, 2.0, 0.2, 3.0, 1)
+    let tiled = etg_gum_tiled_uncertainty(0.1, 2.0, 0.2, 3.0, 2)
+    tiled >= single
+}

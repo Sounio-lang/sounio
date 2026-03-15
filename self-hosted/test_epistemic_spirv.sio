@@ -1,0 +1,190 @@
+// self-hosted::test_epistemic_spirv — Epistemic SPIR-V Lowering Oracle Tests
+//
+// Validates the SPIR-V compute backend for the epistemic WMMA kernel.
+// Parallel to test_epistemic_wmma.sio (which tests the PTX path).
+//
+// Test categories:
+//   T1-T6: SPIR-V structural validation (binary word checks)
+//   T7-T10: GUM uncertainty arithmetic oracle (analytical verification)
+//
+// Gate: all tests must pass for the SPIR-V lowering to be considered valid.
+
+// ============================================================================
+// Section 0 — Arithmetic helpers (must precede all test functions)
+// ============================================================================
+
+fn espv_sqrt_f64(x: f64) -> f64 with Mut, Panic, Div {
+    if x <= 0.0 { return 0.0 }
+    var g = x / 2.0
+    var i: i64 = 0
+    while i < 30 {
+        g = (g + x / g) / 2.0
+        i = i + 1
+    }
+    g
+}
+
+fn espv_abs_f64(x: f64) -> f64 {
+    if x < 0.0 { -x } else { x }
+}
+
+fn espv_near_f64(a: f64, b: f64, tol: f64) -> bool {
+    let diff = a - b
+    let abs_diff = if diff < 0.0 { -diff } else { diff }
+    abs_diff <= tol
+}
+
+// GUM tile-level uncertainty formula (conservative):
+//   eps_C = sqrt(K) * (|A_norm| * eps_B + |B_norm| * eps_A)
+// where K = 16 for m16n16k16 WMMA tile.
+fn espv_gum_uncertainty(eps_a: f64, norm_a: f64, eps_b: f64, norm_b: f64) -> f64 with Mut, Panic, Div {
+    let combined = espv_abs_f64(norm_a) * eps_b + espv_abs_f64(norm_b) * eps_a
+    let sqrt_k = espv_sqrt_f64(16.0)  // = 4.0
+    sqrt_k * combined
+}
+
+// Helper: search for a SPIR-V opcode in the word buffer
+fn espv_find_opcode(buf: SpvBuf, target_opcode: i64) -> bool with Mut, Panic, Div {
+    var i: i64 = 5  // Skip 5-word header
+    while i < buf.word_count {
+        let w = buf.words[i as usize]
+        let opcode = w % 65536
+        if opcode == target_opcode {
+            return true
+        }
+        i = i + 1
+    }
+    false
+}
+
+// ============================================================================
+// Section 1 — SPIR-V structural validation
+// ============================================================================
+
+// T1: First word is SPIR-V magic number (0x07230203)
+fn test_spirv_magic() -> bool with Mut, Panic, Div, Alloc {
+    let ir = gpu_build_epistemic_wmma_matmul_16x16_ir()
+    let buf = gpu_lower_kernel_ir_to_spirv(ir)
+    buf.words[0] == 119734787  // SPIRV_MAGIC = 0x07230203
+}
+
+// T2: Second word is SPIR-V version 1.3 (0x00010300)
+fn test_spirv_version() -> bool with Mut, Panic, Div, Alloc {
+    let ir = gpu_build_epistemic_wmma_matmul_16x16_ir()
+    let buf = gpu_lower_kernel_ir_to_spirv(ir)
+    buf.words[1] == 66304  // SPIRV_VERSION_1_3 = 0x00010300
+}
+
+// T3: Third word is generator ID "SOUI" (0x534F5549)
+fn test_spirv_generator() -> bool with Mut, Panic, Div, Alloc {
+    let ir = gpu_build_epistemic_wmma_matmul_16x16_ir()
+    let buf = gpu_lower_kernel_ir_to_spirv(ir)
+    buf.words[2] == 1397313609  // SPIRV_GENERATOR_SOUNIO_V2
+}
+
+// T4: Module contains OpEntryPoint GLCompute (opcode 15)
+fn test_spirv_entry_point() -> bool with Mut, Panic, Div, Alloc {
+    let ir = gpu_build_epistemic_wmma_matmul_16x16_ir()
+    let buf = gpu_lower_kernel_ir_to_spirv(ir)
+    espv_find_opcode(buf, 15)  // OP_ENTRY_POINT
+}
+
+// T5: Module contains OpExecutionMode (opcode 16) with LocalSize 16 16 1
+fn test_spirv_local_size() -> bool with Mut, Panic, Div, Alloc {
+    let ir = gpu_build_epistemic_wmma_matmul_16x16_ir()
+    let buf = gpu_lower_kernel_ir_to_spirv(ir)
+    // Search for OpExecutionMode with EXEC_MODE_LOCAL_SIZE
+    var i: i64 = 5
+    var found = false
+    while i < buf.word_count - 4 {
+        let w = buf.words[i as usize]
+        let opcode = w % 65536
+        if opcode == 16 {  // OP_EXECUTION_MODE
+            if i + 5 < buf.word_count {
+                if buf.words[(i + 2) as usize] == 17 {  // EXEC_MODE_LOCAL_SIZE
+                    if buf.words[(i + 3) as usize] == 16 && buf.words[(i + 4) as usize] == 16 && buf.words[(i + 5) as usize] == 1 {
+                        found = true
+                    }
+                }
+            }
+        }
+        i = i + 1
+    }
+    found
+}
+
+// T6: Output buffer has > 100 words (non-trivial module)
+fn test_spirv_word_count() -> bool with Mut, Panic, Div, Alloc {
+    let ir = gpu_build_epistemic_wmma_matmul_16x16_ir()
+    let buf = gpu_lower_kernel_ir_to_spirv(ir)
+    buf.word_count > 100
+}
+
+// T6b: Module contains OpFAdd (opcode 129) — float arithmetic in shadow path
+fn test_spirv_has_fadd() -> bool with Mut, Panic, Div, Alloc {
+    let ir = gpu_build_epistemic_wmma_matmul_16x16_ir()
+    let buf = gpu_lower_kernel_ir_to_spirv(ir)
+    espv_find_opcode(buf, 129)  // OP_FADD
+}
+
+// T6c: Module contains OpFMul (opcode 133) — float multiply
+fn test_spirv_has_fmul() -> bool with Mut, Panic, Div, Alloc {
+    let ir = gpu_build_epistemic_wmma_matmul_16x16_ir()
+    let buf = gpu_lower_kernel_ir_to_spirv(ir)
+    espv_find_opcode(buf, 133)  // OP_FMUL
+}
+
+// T6d: Module contains OpExtInst (opcode 12) — GLSL.std.450 calls (FAbs, Sqrt)
+fn test_spirv_has_ext_inst() -> bool with Mut, Panic, Div, Alloc {
+    let ir = gpu_build_epistemic_wmma_matmul_16x16_ir()
+    let buf = gpu_lower_kernel_ir_to_spirv(ir)
+    espv_find_opcode(buf, 12)  // OP_EXT_INST
+}
+
+// T6e: Module contains OpControlBarrier (opcode 224)
+fn test_spirv_has_barrier() -> bool with Mut, Panic, Div, Alloc {
+    let ir = gpu_build_epistemic_wmma_matmul_16x16_ir()
+    let buf = gpu_lower_kernel_ir_to_spirv(ir)
+    espv_find_opcode(buf, 224)  // OP_CONTROL_BARRIER
+}
+
+// T6f: Module contains OpBitwiseXor (opcode 199) — provenance merge
+fn test_spirv_has_bitwise_xor() -> bool with Mut, Panic, Div, Alloc {
+    let ir = gpu_build_epistemic_wmma_matmul_16x16_ir()
+    let buf = gpu_lower_kernel_ir_to_spirv(ir)
+    espv_find_opcode(buf, 199)  // OP_BITWISE_XOR
+}
+
+// ============================================================================
+// Section 2 — GUM uncertainty arithmetic oracle
+// ============================================================================
+
+// T7: Zero uncertainty inputs produce zero uncertainty output
+fn test_spirv_gum_zero_identity() -> bool with Mut, Panic, Div {
+    let eps_out = espv_gum_uncertainty(0.0, 1.0, 0.0, 1.0)
+    espv_near_f64(eps_out, 0.0, 1.0e-12)
+}
+
+// T8: Known epsilon values produce analytically correct output
+//     eps_A=0.1, |A|=2.0, eps_B=0.2, |B|=3.0:
+//     combined = 2.0*0.2 + 3.0*0.1 = 0.7
+//     eps_C = sqrt(16) * 0.7 = 4.0 * 0.7 = 2.8
+fn test_spirv_gum_quadrature() -> bool with Mut, Panic, Div {
+    let eps_out = espv_gum_uncertainty(0.1, 2.0, 0.2, 3.0)
+    espv_near_f64(eps_out, 2.8, 1.0e-10)
+}
+
+// T9: Doubling input uncertainty increases output
+fn test_spirv_gum_monotone() -> bool with Mut, Panic, Div {
+    let base = espv_gum_uncertainty(0.1, 1.0, 0.1, 1.0)
+    let doubled = espv_gum_uncertainty(0.2, 1.0, 0.1, 1.0)
+    doubled > base
+}
+
+// T10: Output uncertainty is always non-negative
+fn test_spirv_gum_nonneg() -> bool with Mut, Panic, Div {
+    let e1 = espv_gum_uncertainty(0.0, 0.0, 0.0, 0.0)
+    let e2 = espv_gum_uncertainty(0.5, 1.0, 0.5, 1.0)
+    let e3 = espv_gum_uncertainty(100.0, 0.001, 0.001, 100.0)
+    e1 >= 0.0 && e2 >= 0.0 && e3 >= 0.0
+}

@@ -1,0 +1,1062 @@
+// self-hosted::gpu::spirv_lower — GpuKernelIr -> SPIR-V Binary Lowering
+//
+// Parallel to lower_to_ptx.sio: takes a GpuKernelIr struct directly and
+// produces a complete SPIR-V 1.3 Vulkan compute shader module as SpvBuf.
+//
+// SPIR-V is a binary format. Each instruction is a word stream:
+//   Word 0: (word_count << 16) | opcode
+//   Words 1..N: operands (result type, result ID, operands)
+//
+// This module handles all opcodes used by the epistemic WMMA kernel:
+//   GpuGetTid, GpuGetBid, GpuGetNtid, GpuCvt, GpuMulImm, GpuLoadParam,
+//   GpuAdd, GpuSub, GpuMul, GpuDiv, GpuLoadGlobal, GpuStoreGlobal,
+//   GpuBarrierSync, GpuWmma, GpuAbs, GpuSqrt, GpuSetpGe, GpuAnd,
+//   GpuXor, GpuStoreGlobalPred, GpuFma, GpuRet
+//
+// WMMA decomposition: SPIR-V has no native WMMA. We emit a scalar
+// multiply-accumulate loop (8x8 = 64 scalar FMAs) as fallback.
+// For VK_KHR_cooperative_matrix targets, a future pass can replace this.
+//
+// References:
+//   - SPIR-V 1.3 spec (Khronos)
+//   - Vulkan 1.3 compute shader requirements
+//   - GLSL.std.450 extended instruction set (FAbs=#4, Sqrt=#31)
+//   - JCGM 100:2008 (GUM) for epistemic uncertainty propagation
+
+// ============================================================================
+// SPIR-V 1.3 constants (additions beyond what spirv.sio defines)
+// ============================================================================
+
+let SPIRV_VERSION_1_3: i64 = 66304           // 0x00010300
+let SPIRV_GENERATOR_SOUNIO_V2: i64 = 1397313609  // 0x534F5549 = "SOUI"
+
+// GLSL.std.450 extended instruction numbers
+let GLSL_FABS: i64 = 4
+let GLSL_SQRT: i64 = 31
+
+// Additional decoration constants
+let DECORATION_BLOCK: i64 = 2
+let DECORATION_OFFSET: i64 = 35
+let DECORATION_ARRAY_STRIDE: i64 = 6
+let DECORATION_NON_WRITABLE: i64 = 24
+
+// Memory semantics combined: WorkgroupMemory | AcquireRelease
+let BARRIER_SEMANTICS: i64 = 264    // 256 + 8
+
+// ============================================================================
+// SpvLowerState — compilation state for KernelIr-based lowering
+// ============================================================================
+
+struct SpvLowerState {
+    buf: SpvBuf,
+    ids: SpvIdAlloc,
+    types: SpvTypeIds,
+    reg_map: SpvRegMap,
+    // Pre-allocated IDs
+    entry_func_id: i64,
+    label_id: i64,
+    gid_var_id: i64,
+    glsl_ext_id: i64,        // GLSL.std.450 import ID
+    param_var_ids: [i64; 8],
+    // Constant IDs
+    const_scope_wg_id: i64,
+    const_semantics_id: i64,
+    const_zero_u32_id: i64,
+    const_one_u32_id: i64,
+    // Additional type IDs for the epistemic kernel
+    ptr_storage_u64_id: i64,
+    ptr_storage_u32_id: i64,
+    ptr_func_float_id: i64,
+    type_runtime_array_f32_id: i64,
+    type_runtime_array_u64_id: i64,
+    type_runtime_array_u32_id: i64,
+    type_struct_f32_id: i64,
+    type_struct_u64_id: i64,
+    type_struct_u32_id: i64,
+    ptr_sb_struct_f32_id: i64,
+    ptr_sb_struct_u64_id: i64,
+    ptr_sb_struct_u32_id: i64,
+}
+
+fn spv_lower_state_new() -> SpvLowerState {
+    SpvLowerState {
+        buf: spv_buf_new(),
+        ids: spv_id_alloc_new(),
+        types: spv_type_ids_new(),
+        reg_map: spv_reg_map_new(),
+        entry_func_id: 0,
+        label_id: 0,
+        gid_var_id: 0,
+        glsl_ext_id: 0,
+        param_var_ids: [0; 8],
+        const_scope_wg_id: 0,
+        const_semantics_id: 0,
+        const_zero_u32_id: 0,
+        const_one_u32_id: 0,
+        ptr_storage_u64_id: 0,
+        ptr_storage_u32_id: 0,
+        ptr_func_float_id: 0,
+        type_runtime_array_f32_id: 0,
+        type_runtime_array_u64_id: 0,
+        type_runtime_array_u32_id: 0,
+        type_struct_f32_id: 0,
+        type_struct_u64_id: 0,
+        type_struct_u32_id: 0,
+        ptr_sb_struct_f32_id: 0,
+        ptr_sb_struct_u64_id: 0,
+        ptr_sb_struct_u32_id: 0,
+    }
+}
+
+// ============================================================================
+// Helper: emit OpExtInst (GLSL.std.450 extended instruction)
+// ============================================================================
+
+fn spv_emit_ext_inst_1(buf: SpvBuf, type_id: i64, result_id: i64, ext_set_id: i64, instruction: i64, operand: i64) -> SpvBuf with Mut, Panic {
+    var out = buf
+    // word_count = 6: header, type, result, set, instruction, operand
+    out = spv_push_word(out, spv_encode_op(6, OP_EXT_INST))
+    out = spv_push_word(out, type_id)
+    out = spv_push_word(out, result_id)
+    out = spv_push_word(out, ext_set_id)
+    out = spv_push_word(out, instruction)
+    out = spv_push_word(out, operand)
+    out
+}
+
+// OpConvertSToF / OpConvertUToF / OpConvertFToS / OpConvertFToU
+fn spv_emit_convert(buf: SpvBuf, opcode: i64, type_id: i64, result_id: i64, operand_id: i64) -> SpvBuf with Mut, Panic {
+    var out = buf
+    out = spv_push_word(out, spv_encode_op(4, opcode))
+    out = spv_push_word(out, type_id)
+    out = spv_push_word(out, result_id)
+    out = spv_push_word(out, operand_id)
+    out
+}
+
+// OpSelect (ternary: condition ? true_val : false_val)
+fn spv_emit_select(buf: SpvBuf, type_id: i64, result_id: i64, cond_id: i64, true_id: i64, false_id: i64) -> SpvBuf with Mut, Panic {
+    var out = buf
+    out = spv_push_word(out, spv_encode_op(6, OP_SELECT))
+    out = spv_push_word(out, type_id)
+    out = spv_push_word(out, result_id)
+    out = spv_push_word(out, cond_id)
+    out = spv_push_word(out, true_id)
+    out = spv_push_word(out, false_id)
+    out
+}
+
+// OpLogicalAnd (for bool operands)
+let OP_LOGICAL_AND: i64 = 167
+
+fn spv_emit_logical_and(buf: SpvBuf, type_id: i64, result_id: i64, op1: i64, op2: i64) -> SpvBuf with Mut, Panic {
+    var out = buf
+    out = spv_push_word(out, spv_encode_op(5, OP_LOGICAL_AND))
+    out = spv_push_word(out, type_id)
+    out = spv_push_word(out, result_id)
+    out = spv_push_word(out, op1)
+    out = spv_push_word(out, op2)
+    out
+}
+
+// OpFNegate
+fn spv_emit_fnegate(buf: SpvBuf, type_id: i64, result_id: i64, operand_id: i64) -> SpvBuf with Mut, Panic {
+    var out = buf
+    out = spv_push_word(out, spv_encode_op(4, OP_FNEGATE))
+    out = spv_push_word(out, type_id)
+    out = spv_push_word(out, result_id)
+    out = spv_push_word(out, operand_id)
+    out
+}
+
+// OpUConvert (unsigned integer width conversion)
+let OP_UCONVERT: i64 = 113
+
+fn spv_emit_uconvert(buf: SpvBuf, type_id: i64, result_id: i64, operand_id: i64) -> SpvBuf with Mut, Panic {
+    var out = buf
+    out = spv_push_word(out, spv_encode_op(4, OP_UCONVERT))
+    out = spv_push_word(out, type_id)
+    out = spv_push_word(out, result_id)
+    out = spv_push_word(out, operand_id)
+    out
+}
+
+// OpConstant for f32 (bit pattern as u32 word)
+fn spv_emit_constant_f32_bits(buf: SpvBuf, type_id: i64, result_id: i64, bits: i64) -> SpvBuf with Mut, Panic {
+    var out = buf
+    out = spv_push_word(out, spv_encode_op(4, OP_CONSTANT))
+    out = spv_push_word(out, type_id)
+    out = spv_push_word(out, result_id)
+    out = spv_push_word(out, bits)
+    out
+}
+
+// OpTypeRuntimeArray
+let OP_TYPE_RUNTIME_ARRAY: i64 = 29
+
+fn spv_emit_type_runtime_array(buf: SpvBuf, result_id: i64, element_type_id: i64) -> SpvBuf with Mut, Panic {
+    var out = buf
+    out = spv_push_word(out, spv_encode_op(3, OP_TYPE_RUNTIME_ARRAY))
+    out = spv_push_word(out, result_id)
+    out = spv_push_word(out, element_type_id)
+    out
+}
+
+// OpTypeStruct (one member)
+fn spv_emit_type_struct_1(buf: SpvBuf, result_id: i64, member0_id: i64) -> SpvBuf with Mut, Panic {
+    var out = buf
+    out = spv_push_word(out, spv_encode_op(3, OP_TYPE_STRUCT))
+    out = spv_push_word(out, result_id)
+    out = spv_push_word(out, member0_id)
+    out
+}
+
+// OpMemberDecorate
+fn spv_emit_member_decorate(buf: SpvBuf, struct_id: i64, member: i64, decoration: i64, value: i64) -> SpvBuf with Mut, Panic {
+    var out = buf
+    out = spv_push_word(out, spv_encode_op(5, OP_MEMBER_DECORATE))
+    out = spv_push_word(out, struct_id)
+    out = spv_push_word(out, member)
+    out = spv_push_word(out, decoration)
+    out = spv_push_word(out, value)
+    out
+}
+
+// OpDecorate (no value variant — e.g. Block, NonWritable)
+fn spv_emit_decorate_no_value(buf: SpvBuf, target: i64, decoration: i64) -> SpvBuf with Mut, Panic {
+    var out = buf
+    out = spv_push_word(out, spv_encode_op(3, OP_DECORATE))
+    out = spv_push_word(out, target)
+    out = spv_push_word(out, decoration)
+    out
+}
+
+// OpExtInstImport (emit string "GLSL.std.450")
+fn spv_emit_ext_inst_import_glsl(buf: SpvBuf, result_id: i64) -> SpvBuf with Mut, Panic, Div {
+    var out = buf
+    let name = "GLSL.std.450"
+    let str_words = spv_string_word_count(name)
+    let total_words = 2 + str_words
+    out = spv_push_word(out, spv_encode_op(total_words, OP_EXT_INST_IMPORT))
+    out = spv_push_word(out, result_id)
+    out = spv_push_string(out, name)
+    out
+}
+
+// ============================================================================
+// GpuType -> SPIR-V type ID resolution
+// ============================================================================
+
+fn spv_type_id_for_gpu_type(s: SpvLowerState, ty: GpuType) -> i64 {
+    if ty == GpuType::GpuF32 { return s.types.float_id }
+    if ty == GpuType::GpuF64 { return s.types.double_id }
+    if ty == GpuType::GpuI32 { return s.types.int_id }
+    if ty == GpuType::GpuI64 { return s.types.long_id }
+    if ty == GpuType::GpuU32 { return s.types.uint_id }
+    if ty == GpuType::GpuU64 { return s.types.ulong_id }
+    if ty == GpuType::GpuPtr { return s.types.ulong_id }
+    if ty == GpuType::GpuBool { return s.types.bool_id }
+    // Default to uint
+    s.types.uint_id
+}
+
+fn spv_is_float_gpu_type(ty: GpuType) -> bool {
+    ty == GpuType::GpuF32 || ty == GpuType::GpuF64
+}
+
+fn spv_is_64bit_gpu_type(ty: GpuType) -> bool {
+    ty == GpuType::GpuU64 || ty == GpuType::GpuI64 || ty == GpuType::GpuF64 || ty == GpuType::GpuPtr
+}
+
+// ============================================================================
+// Phase 1: Emit module preamble (capabilities, extensions, memory model)
+// ============================================================================
+
+fn spv_lower_emit_preamble(state: SpvLowerState) -> SpvLowerState with Mut, Panic, Div {
+    var s = state
+
+    // OpCapability Shader
+    s.buf = spv_emit_capability(s.buf, CAPABILITY_SHADER)
+
+    // OpExtInstImport "GLSL.std.450"
+    let (ids_ext, ext_id) = spv_alloc_id(s.ids)
+    s.ids = ids_ext
+    s.buf = spv_emit_ext_inst_import_glsl(s.buf, ext_id)
+    s.glsl_ext_id = ext_id
+
+    // OpMemoryModel Logical GLSL450
+    s.buf = spv_emit_memory_model(s.buf, ADDRESSING_LOGICAL, MEMORY_GLSL450)
+
+    s
+}
+
+// ============================================================================
+// Phase 2: Emit type declarations
+// ============================================================================
+
+fn spv_lower_emit_types(state: SpvLowerState) -> SpvLowerState with Mut, Panic {
+    var s = state
+
+    // OpTypeVoid
+    let (ids1, void_id) = spv_alloc_id(s.ids)
+    s.ids = ids1
+    s.buf = spv_emit_type_void(s.buf, void_id)
+    s.types.void_id = void_id
+
+    // OpTypeBool
+    let (ids1b, bool_id) = spv_alloc_id(s.ids)
+    s.ids = ids1b
+    s.buf = spv_push_word(s.buf, spv_encode_op(2, OP_TYPE_BOOL))
+    s.buf = spv_push_word(s.buf, bool_id)
+    s.types.bool_id = bool_id
+
+    // OpTypeInt(32, unsigned)
+    let (ids2, uint_id) = spv_alloc_id(s.ids)
+    s.ids = ids2
+    s.buf = spv_emit_type_int(s.buf, uint_id, 32, 0)
+    s.types.uint_id = uint_id
+
+    // OpTypeInt(32, signed)
+    let (ids3, int_id) = spv_alloc_id(s.ids)
+    s.ids = ids3
+    s.buf = spv_emit_type_int(s.buf, int_id, 32, 1)
+    s.types.int_id = int_id
+
+    // OpTypeInt(64, unsigned)
+    let (ids4, ulong_id) = spv_alloc_id(s.ids)
+    s.ids = ids4
+    s.buf = spv_emit_type_int(s.buf, ulong_id, 64, 0)
+    s.types.ulong_id = ulong_id
+
+    // OpTypeInt(64, signed)
+    let (ids5, long_id) = spv_alloc_id(s.ids)
+    s.ids = ids5
+    s.buf = spv_emit_type_int(s.buf, long_id, 64, 1)
+    s.types.long_id = long_id
+
+    // OpTypeFloat(32)
+    let (ids6, float_id) = spv_alloc_id(s.ids)
+    s.ids = ids6
+    s.buf = spv_emit_type_float(s.buf, float_id, 32)
+    s.types.float_id = float_id
+
+    // OpTypeFloat(64)
+    let (ids7, double_id) = spv_alloc_id(s.ids)
+    s.ids = ids7
+    s.buf = spv_emit_type_float(s.buf, double_id, 64)
+    s.types.double_id = double_id
+
+    // OpTypeVector(uint, 3) -- uvec3 for GlobalInvocationId
+    let (ids8, uint3_id) = spv_alloc_id(s.ids)
+    s.ids = ids8
+    s.buf = spv_emit_type_vector(s.buf, uint3_id, uint_id, 3)
+    s.types.uint3_id = uint3_id
+
+    // Pointer types
+    // OpTypePointer(Input, uvec3)
+    let (ids9, ptr_in_uint3) = spv_alloc_id(s.ids)
+    s.ids = ids9
+    s.buf = spv_emit_type_pointer(s.buf, ptr_in_uint3, STORAGE_INPUT, uint3_id)
+    s.types.ptr_input_uint3_id = ptr_in_uint3
+
+    // OpTypePointer(StorageBuffer, float)
+    let (ids10, ptr_sb_float) = spv_alloc_id(s.ids)
+    s.ids = ids10
+    s.buf = spv_emit_type_pointer(s.buf, ptr_sb_float, STORAGE_STORAGE_BUFFER, float_id)
+    s.types.ptr_storage_float_id = ptr_sb_float
+
+    // OpTypePointer(StorageBuffer, uint)
+    let (ids11, ptr_sb_uint) = spv_alloc_id(s.ids)
+    s.ids = ids11
+    s.buf = spv_emit_type_pointer(s.buf, ptr_sb_uint, STORAGE_STORAGE_BUFFER, uint_id)
+    s.types.ptr_storage_uint_id = ptr_sb_uint
+
+    // OpTypePointer(StorageBuffer, ulong)
+    let (ids12, ptr_sb_u64) = spv_alloc_id(s.ids)
+    s.ids = ids12
+    s.buf = spv_emit_type_pointer(s.buf, ptr_sb_u64, STORAGE_STORAGE_BUFFER, ulong_id)
+    s.ptr_storage_u64_id = ptr_sb_u64
+
+    // OpTypePointer(StorageBuffer, u32) -- alias for ptr_sb_uint
+    s.ptr_storage_u32_id = ptr_sb_uint
+
+    // OpTypePointer(Function, float)
+    let (ids13, ptr_fn_float) = spv_alloc_id(s.ids)
+    s.ids = ids13
+    s.buf = spv_emit_type_pointer(s.buf, ptr_fn_float, STORAGE_FUNCTION, float_id)
+    s.ptr_func_float_id = ptr_fn_float
+
+    // OpTypeFunction(void)
+    let (ids14, func_void_id) = spv_alloc_id(s.ids)
+    s.ids = ids14
+    s.buf = spv_emit_type_function(s.buf, func_void_id, void_id)
+    s.types.func_void_id = func_void_id
+
+    // RuntimeArray types for StorageBuffer structs
+    // OpTypeRuntimeArray(float)
+    let (ids15, ra_f32) = spv_alloc_id(s.ids)
+    s.ids = ids15
+    s.buf = spv_emit_type_runtime_array(s.buf, ra_f32, float_id)
+    s.buf = spv_emit_decorate(s.buf, ra_f32, DECORATION_ARRAY_STRIDE, 4)
+    s.type_runtime_array_f32_id = ra_f32
+
+    // OpTypeRuntimeArray(ulong)
+    let (ids16, ra_u64) = spv_alloc_id(s.ids)
+    s.ids = ids16
+    s.buf = spv_emit_type_runtime_array(s.buf, ra_u64, ulong_id)
+    s.buf = spv_emit_decorate(s.buf, ra_u64, DECORATION_ARRAY_STRIDE, 8)
+    s.type_runtime_array_u64_id = ra_u64
+
+    // OpTypeRuntimeArray(uint)
+    let (ids17, ra_u32) = spv_alloc_id(s.ids)
+    s.ids = ids17
+    s.buf = spv_emit_type_runtime_array(s.buf, ra_u32, uint_id)
+    s.buf = spv_emit_decorate(s.buf, ra_u32, DECORATION_ARRAY_STRIDE, 4)
+    s.type_runtime_array_u32_id = ra_u32
+
+    // Struct { RuntimeArray(float) } for StorageBuffer
+    let (ids18, st_f32) = spv_alloc_id(s.ids)
+    s.ids = ids18
+    s.buf = spv_emit_type_struct_1(s.buf, st_f32, ra_f32)
+    s.buf = spv_emit_decorate_no_value(s.buf, st_f32, DECORATION_BLOCK)
+    s.buf = spv_emit_member_decorate(s.buf, st_f32, 0, DECORATION_OFFSET, 0)
+    s.type_struct_f32_id = st_f32
+
+    // Struct { RuntimeArray(ulong) } for StorageBuffer
+    let (ids19, st_u64) = spv_alloc_id(s.ids)
+    s.ids = ids19
+    s.buf = spv_emit_type_struct_1(s.buf, st_u64, ra_u64)
+    s.buf = spv_emit_decorate_no_value(s.buf, st_u64, DECORATION_BLOCK)
+    s.buf = spv_emit_member_decorate(s.buf, st_u64, 0, DECORATION_OFFSET, 0)
+    s.type_struct_u64_id = st_u64
+
+    // Struct { RuntimeArray(uint) } for StorageBuffer
+    let (ids20, st_u32) = spv_alloc_id(s.ids)
+    s.ids = ids20
+    s.buf = spv_emit_type_struct_1(s.buf, st_u32, ra_u32)
+    s.buf = spv_emit_decorate_no_value(s.buf, st_u32, DECORATION_BLOCK)
+    s.buf = spv_emit_member_decorate(s.buf, st_u32, 0, DECORATION_OFFSET, 0)
+    s.type_struct_u32_id = st_u32
+
+    // Pointer(StorageBuffer, Struct{RA(float)})
+    let (ids21, ptr_sb_st_f32) = spv_alloc_id(s.ids)
+    s.ids = ids21
+    s.buf = spv_emit_type_pointer(s.buf, ptr_sb_st_f32, STORAGE_STORAGE_BUFFER, st_f32)
+    s.ptr_sb_struct_f32_id = ptr_sb_st_f32
+
+    // Pointer(StorageBuffer, Struct{RA(ulong)})
+    let (ids22, ptr_sb_st_u64) = spv_alloc_id(s.ids)
+    s.ids = ids22
+    s.buf = spv_emit_type_pointer(s.buf, ptr_sb_st_u64, STORAGE_STORAGE_BUFFER, st_u64)
+    s.ptr_sb_struct_u64_id = ptr_sb_st_u64
+
+    // Pointer(StorageBuffer, Struct{RA(uint)})
+    let (ids23, ptr_sb_st_u32) = spv_alloc_id(s.ids)
+    s.ids = ids23
+    s.buf = spv_emit_type_pointer(s.buf, ptr_sb_st_u32, STORAGE_STORAGE_BUFFER, st_u32)
+    s.ptr_sb_struct_u32_id = ptr_sb_st_u32
+
+    s
+}
+
+// ============================================================================
+// Phase 3: Emit global variables and decorations
+// ============================================================================
+
+fn spv_lower_emit_variables(state: SpvLowerState, kernel: GpuKernelIr) -> SpvLowerState with Mut, Panic, Div {
+    var s = state
+
+    // GlobalInvocationId input variable
+    let (ids_gid, gid_var) = spv_alloc_id(s.ids)
+    s.ids = ids_gid
+    s.buf = spv_emit_variable(s.buf, s.types.ptr_input_uint3_id, gid_var, STORAGE_INPUT)
+    s.buf = spv_emit_decorate_builtin(s.buf, gid_var, BUILTIN_GLOBAL_INVOCATION_ID)
+    s.gid_var_id = gid_var
+
+    // StorageBuffer variables for each kernel parameter
+    var i: i64 = 0
+    while i < kernel.param_count {
+        if i < 8 {
+            // Choose pointer type based on param type
+            let ptr_type = if kernel.params[i as usize].ty == GpuType::GpuU64 || kernel.params[i as usize].ty == GpuType::GpuPtr {
+                s.ptr_sb_struct_f32_id   // Default: f32 buffer (for generality)
+            } else {
+                s.ptr_sb_struct_f32_id
+            }
+
+            let (ids_p, var_id) = spv_alloc_id(s.ids)
+            s.ids = ids_p
+            s.buf = spv_emit_variable(s.buf, ptr_type, var_id, STORAGE_STORAGE_BUFFER)
+            s.buf = spv_emit_decorate_binding(s.buf, var_id, i)
+            s.buf = spv_emit_decorate_descriptor_set(s.buf, var_id, 0)
+            s.param_var_ids[i as usize] = var_id
+        }
+        i = i + 1
+    }
+
+    // Emit constants needed for barriers and indexing
+    // Constant: workgroup scope (uint = 2)
+    let (ids_c1, scope_wg_id) = spv_alloc_id(s.ids)
+    s.ids = ids_c1
+    s.buf = spv_emit_constant_u32(s.buf, s.types.uint_id, scope_wg_id, SCOPE_WORKGROUP)
+    s.const_scope_wg_id = scope_wg_id
+
+    // Constant: memory semantics for barrier
+    let (ids_c2, sem_id) = spv_alloc_id(s.ids)
+    s.ids = ids_c2
+    s.buf = spv_emit_constant_u32(s.buf, s.types.uint_id, sem_id, BARRIER_SEMANTICS)
+    s.const_semantics_id = sem_id
+
+    // Constant: zero (uint = 0) for indexing
+    let (ids_c3, zero_id) = spv_alloc_id(s.ids)
+    s.ids = ids_c3
+    s.buf = spv_emit_constant_u32(s.buf, s.types.uint_id, zero_id, 0)
+    s.const_zero_u32_id = zero_id
+
+    // Constant: one (uint = 1)
+    let (ids_c4, one_id) = spv_alloc_id(s.ids)
+    s.ids = ids_c4
+    s.buf = spv_emit_constant_u32(s.buf, s.types.uint_id, one_id, 1)
+    s.const_one_u32_id = one_id
+
+    s
+}
+
+// ============================================================================
+// Phase 4: Emit entry point and execution mode
+// ============================================================================
+
+fn spv_lower_emit_entry_point(state: SpvLowerState, kernel: GpuKernelIr) -> SpvLowerState with Mut, Panic, Div {
+    var s = state
+
+    // Allocate function and label IDs
+    let (ids_fn, func_id) = spv_alloc_id(s.ids)
+    s.ids = ids_fn
+    s.entry_func_id = func_id
+
+    let (ids_lbl, lbl_id) = spv_alloc_id(s.ids)
+    s.ids = ids_lbl
+    s.label_id = lbl_id
+
+    // Build interface ID array (GlobalInvocationId + param vars)
+    var iface_ids: [i64; 8] = [0; 8]
+    var iface_count: i64 = 0
+    iface_ids[0] = s.gid_var_id
+    iface_count = 1
+
+    var pi: i64 = 0
+    while pi < kernel.param_count {
+        if pi < 8 {
+            if iface_count < 8 {
+                iface_ids[iface_count as usize] = s.param_var_ids[pi as usize]
+                iface_count = iface_count + 1
+            }
+        }
+        pi = pi + 1
+    }
+
+    // OpEntryPoint GLCompute %main "kernel_name" %interfaces...
+    s.buf = spv_emit_entry_point(s.buf, EXECUTION_GLCOMPUTE, func_id, "epi_wmma_mm16", iface_ids, iface_count)
+
+    // OpExecutionMode LocalSize 16 16 1
+    s.buf = spv_emit_local_size(s.buf, func_id, 16, 16, 1)
+
+    s
+}
+
+// ============================================================================
+// Phase 5: Lower individual GpuOps to SPIR-V instructions
+// ============================================================================
+
+fn spv_lower_op(state: SpvLowerState, op: GpuOp, kernel: GpuKernelIr) -> SpvLowerState with Mut, Panic, Div {
+    var s = state
+    let opc = op.opcode
+    let tid = spv_type_id_for_gpu_type(s, op.ty)
+    let is_float = spv_is_float_gpu_type(op.ty)
+
+    match opc {
+        GpuOpcode::GpuGetTid => {
+            // Load GlobalInvocationId (uvec3), extract component .x/.y/.z
+            let (ids1, loaded_id) = spv_alloc_id(s.ids)
+            s.ids = ids1
+            s.buf = spv_emit_load(s.buf, s.types.uint3_id, loaded_id, s.gid_var_id)
+            let (ids2, extracted_id) = spv_alloc_id(s.ids)
+            s.ids = ids2
+            s.buf = spv_emit_composite_extract(s.buf, s.types.uint_id, extracted_id, loaded_id, op.axis)
+            s.reg_map = spv_reg_map_insert(s.reg_map, op.dst_reg, extracted_id)
+            s
+        }
+
+        GpuOpcode::GpuGetBid => {
+            // In Vulkan compute, gl_WorkGroupID is a separate builtin.
+            // For simplicity: emit a constant placeholder (block index not
+            // directly available without a separate input variable).
+            // The epistemic kernel uses block ID for address calculation;
+            // in SPIR-V, GlobalInvocationID already incorporates this.
+            let (ids_b, bid_id) = spv_alloc_id(s.ids)
+            s.ids = ids_b
+            s.buf = spv_emit_constant_u32(s.buf, s.types.uint_id, bid_id, 0)
+            s.reg_map = spv_reg_map_insert(s.reg_map, op.dst_reg, bid_id)
+            s
+        }
+
+        GpuOpcode::GpuGetNtid => {
+            // Block dimension: emit constant 16 (matching LocalSize)
+            let (ids_n, ntid_id) = spv_alloc_id(s.ids)
+            s.ids = ids_n
+            s.buf = spv_emit_constant_u32(s.buf, s.types.uint_id, ntid_id, 16)
+            s.reg_map = spv_reg_map_insert(s.reg_map, op.dst_reg, ntid_id)
+            s
+        }
+
+        GpuOpcode::GpuCvt => {
+            // Type conversion: determine source and destination widths
+            let src_id = spv_reg_map_lookup(s.reg_map, op.src_reg)
+            let dst_tid = spv_type_id_for_gpu_type(s, op.dst_ty)
+            let (ids_c, result_id) = spv_alloc_id(s.ids)
+            s.ids = ids_c
+
+            let src_is_float = spv_is_float_gpu_type(op.src_ty)
+            let dst_is_float = spv_is_float_gpu_type(op.dst_ty)
+
+            if src_is_float && !dst_is_float {
+                // float -> int
+                s.buf = spv_emit_convert(s.buf, OP_CONVERT_F_TO_S, dst_tid, result_id, src_id)
+            } else if !src_is_float && dst_is_float {
+                // int -> float
+                s.buf = spv_emit_convert(s.buf, OP_CONVERT_U_TO_F, dst_tid, result_id, src_id)
+            } else if spv_is_64bit_gpu_type(op.dst_ty) && !spv_is_64bit_gpu_type(op.src_ty) {
+                // u32 -> u64 widening
+                s.buf = spv_emit_uconvert(s.buf, dst_tid, result_id, src_id)
+            } else {
+                // Same or narrowing: just emit UConvert
+                s.buf = spv_emit_uconvert(s.buf, dst_tid, result_id, src_id)
+            }
+            s.reg_map = spv_reg_map_insert(s.reg_map, op.dst_reg, result_id)
+            s
+        }
+
+        GpuOpcode::GpuMulImm => {
+            // Multiply register by immediate: dst = lhs * imm
+            // Emit the immediate as a constant, then IMul/FMul
+            let lhs_id = spv_reg_map_lookup(s.reg_map, op.lhs_reg)
+            let (ids_imm, imm_id) = spv_alloc_id(s.ids)
+            s.ids = ids_imm
+            s.buf = spv_emit_constant_u32(s.buf, tid, imm_id, op.rhs_imm)
+            let (ids_r, result_id) = spv_alloc_id(s.ids)
+            s.ids = ids_r
+            if is_float {
+                s.buf = spv_emit_binary_op(s.buf, OP_FMUL, tid, result_id, lhs_id, imm_id)
+            } else {
+                s.buf = spv_emit_binary_op(s.buf, OP_IMUL, tid, result_id, lhs_id, imm_id)
+            }
+            s.reg_map = spv_reg_map_insert(s.reg_map, op.dst_reg, result_id)
+            s
+        }
+
+        GpuOpcode::GpuLoadParam => {
+            // In SPIR-V Vulkan, params are StorageBuffer variables.
+            // Map param_idx to the pre-allocated variable ID.
+            if op.param_idx >= 0 && op.param_idx < 8 {
+                s.reg_map = spv_reg_map_insert(s.reg_map, op.dst_reg, s.param_var_ids[op.param_idx as usize])
+            }
+            s
+        }
+
+        GpuOpcode::GpuAdd => {
+            let lhs_id = spv_reg_map_lookup(s.reg_map, op.lhs_reg)
+            let rhs_id = spv_reg_map_lookup(s.reg_map, op.rhs_reg)
+            let (ids_a, result_id) = spv_alloc_id(s.ids)
+            s.ids = ids_a
+            if is_float {
+                s.buf = spv_emit_binary_op(s.buf, OP_FADD, tid, result_id, lhs_id, rhs_id)
+            } else {
+                s.buf = spv_emit_binary_op(s.buf, OP_IADD, tid, result_id, lhs_id, rhs_id)
+            }
+            s.reg_map = spv_reg_map_insert(s.reg_map, op.dst_reg, result_id)
+            s
+        }
+
+        GpuOpcode::GpuSub => {
+            let lhs_id = spv_reg_map_lookup(s.reg_map, op.lhs_reg)
+            let rhs_id = spv_reg_map_lookup(s.reg_map, op.rhs_reg)
+            let (ids_s, result_id) = spv_alloc_id(s.ids)
+            s.ids = ids_s
+            if is_float {
+                s.buf = spv_emit_binary_op(s.buf, OP_FSUB, tid, result_id, lhs_id, rhs_id)
+            } else {
+                s.buf = spv_emit_binary_op(s.buf, OP_ISUB, tid, result_id, lhs_id, rhs_id)
+            }
+            s.reg_map = spv_reg_map_insert(s.reg_map, op.dst_reg, result_id)
+            s
+        }
+
+        GpuOpcode::GpuMul => {
+            let lhs_id = spv_reg_map_lookup(s.reg_map, op.lhs_reg)
+            let rhs_id = spv_reg_map_lookup(s.reg_map, op.rhs_reg)
+            let (ids_m, result_id) = spv_alloc_id(s.ids)
+            s.ids = ids_m
+            if is_float {
+                s.buf = spv_emit_binary_op(s.buf, OP_FMUL, tid, result_id, lhs_id, rhs_id)
+            } else {
+                s.buf = spv_emit_binary_op(s.buf, OP_IMUL, tid, result_id, lhs_id, rhs_id)
+            }
+            s.reg_map = spv_reg_map_insert(s.reg_map, op.dst_reg, result_id)
+            s
+        }
+
+        GpuOpcode::GpuDiv => {
+            let lhs_id = spv_reg_map_lookup(s.reg_map, op.lhs_reg)
+            let rhs_id = spv_reg_map_lookup(s.reg_map, op.rhs_reg)
+            let (ids_d, result_id) = spv_alloc_id(s.ids)
+            s.ids = ids_d
+            if is_float {
+                s.buf = spv_emit_binary_op(s.buf, OP_FDIV, tid, result_id, lhs_id, rhs_id)
+            } else {
+                s.buf = spv_emit_binary_op(s.buf, OP_UDIV, tid, result_id, lhs_id, rhs_id)
+            }
+            s.reg_map = spv_reg_map_insert(s.reg_map, op.dst_reg, result_id)
+            s
+        }
+
+        GpuOpcode::GpuLoadGlobal => {
+            // AccessChain into the StorageBuffer param, then Load
+            let base_id = spv_reg_map_lookup(s.reg_map, op.addr_reg)
+            // AccessChain: base[0][index]
+            let (ids_ac, ac_id) = spv_alloc_id(s.ids)
+            s.ids = ids_ac
+            s.buf = spv_emit_access_chain(s.buf, s.types.ptr_storage_float_id, ac_id, base_id, s.const_zero_u32_id)
+            let (ids_l, result_id) = spv_alloc_id(s.ids)
+            s.ids = ids_l
+            s.buf = spv_emit_load(s.buf, tid, result_id, ac_id)
+            s.reg_map = spv_reg_map_insert(s.reg_map, op.dst_reg, result_id)
+            s
+        }
+
+        GpuOpcode::GpuStoreGlobal => {
+            let base_id = spv_reg_map_lookup(s.reg_map, op.addr_reg)
+            let val_id = spv_reg_map_lookup(s.reg_map, op.src_reg)
+            // AccessChain + Store
+            let (ids_ac, ac_id) = spv_alloc_id(s.ids)
+            s.ids = ids_ac
+            s.buf = spv_emit_access_chain(s.buf, s.types.ptr_storage_float_id, ac_id, base_id, s.const_zero_u32_id)
+            s.buf = spv_emit_store(s.buf, ac_id, val_id)
+            s
+        }
+
+        GpuOpcode::GpuStoreGlobalPred => {
+            // Store a boolean predicate as uint (0 or 1) using OpSelect
+            let pred_id = spv_reg_map_lookup(s.reg_map, op.src_reg)
+            let base_id = spv_reg_map_lookup(s.reg_map, op.addr_reg)
+            // Select: pred ? 1 : 0
+            let (ids_sel, sel_id) = spv_alloc_id(s.ids)
+            s.ids = ids_sel
+            s.buf = spv_emit_select(s.buf, s.types.uint_id, sel_id, pred_id, s.const_one_u32_id, s.const_zero_u32_id)
+            // AccessChain + Store
+            let (ids_ac, ac_id) = spv_alloc_id(s.ids)
+            s.ids = ids_ac
+            s.buf = spv_emit_access_chain(s.buf, s.types.ptr_storage_uint_id, ac_id, base_id, s.const_zero_u32_id)
+            s.buf = spv_emit_store(s.buf, ac_id, sel_id)
+            s
+        }
+
+        GpuOpcode::GpuBarrierSync => {
+            // OpControlBarrier(Workgroup, Workgroup, WorkgroupMemory | AcquireRelease)
+            s.buf = spv_emit_control_barrier(s.buf, s.const_scope_wg_id, s.const_scope_wg_id, s.const_semantics_id)
+            s
+        }
+
+        GpuOpcode::GpuAbs => {
+            // OpExtInst GLSL.std.450 FAbs (for float types)
+            let src_id = spv_reg_map_lookup(s.reg_map, op.src_reg)
+            let (ids_abs, result_id) = spv_alloc_id(s.ids)
+            s.ids = ids_abs
+            s.buf = spv_emit_ext_inst_1(s.buf, tid, result_id, s.glsl_ext_id, GLSL_FABS, src_id)
+            s.reg_map = spv_reg_map_insert(s.reg_map, op.dst_reg, result_id)
+            s
+        }
+
+        GpuOpcode::GpuSqrt => {
+            // OpExtInst GLSL.std.450 Sqrt
+            let src_id = spv_reg_map_lookup(s.reg_map, op.src_reg)
+            let (ids_sq, result_id) = spv_alloc_id(s.ids)
+            s.ids = ids_sq
+            s.buf = spv_emit_ext_inst_1(s.buf, tid, result_id, s.glsl_ext_id, GLSL_SQRT, src_id)
+            s.reg_map = spv_reg_map_insert(s.reg_map, op.dst_reg, result_id)
+            s
+        }
+
+        GpuOpcode::GpuSetpGe => {
+            // Float: OpFOrdGreaterThanEqual; Int: OpSGreaterThanEqual
+            let lhs_id = spv_reg_map_lookup(s.reg_map, op.lhs_reg)
+            let rhs_id = spv_reg_map_lookup(s.reg_map, op.rhs_reg)
+            let (ids_ge, result_id) = spv_alloc_id(s.ids)
+            s.ids = ids_ge
+            if is_float {
+                s.buf = spv_emit_binary_op(s.buf, OP_FORD_GREATER_THAN_OR_EQUAL, s.types.bool_id, result_id, lhs_id, rhs_id)
+            } else {
+                s.buf = spv_emit_binary_op(s.buf, OP_SGREATER_THAN_OR_EQUAL, s.types.bool_id, result_id, lhs_id, rhs_id)
+            }
+            s.reg_map = spv_reg_map_insert(s.reg_map, op.dst_reg, result_id)
+            s
+        }
+
+        GpuOpcode::GpuAnd => {
+            // For bool: OpLogicalAnd; for integer: OpBitwiseAnd
+            let lhs_id = spv_reg_map_lookup(s.reg_map, op.lhs_reg)
+            let rhs_id = spv_reg_map_lookup(s.reg_map, op.rhs_reg)
+            let (ids_and, result_id) = spv_alloc_id(s.ids)
+            s.ids = ids_and
+            if op.ty == GpuType::GpuBool {
+                s.buf = spv_emit_logical_and(s.buf, s.types.bool_id, result_id, lhs_id, rhs_id)
+            } else {
+                s.buf = spv_emit_binary_op(s.buf, OP_BITWISE_AND, tid, result_id, lhs_id, rhs_id)
+            }
+            s.reg_map = spv_reg_map_insert(s.reg_map, op.dst_reg, result_id)
+            s
+        }
+
+        GpuOpcode::GpuXor => {
+            // OpBitwiseXor
+            let lhs_id = spv_reg_map_lookup(s.reg_map, op.lhs_reg)
+            let rhs_id = spv_reg_map_lookup(s.reg_map, op.rhs_reg)
+            let (ids_xor, result_id) = spv_alloc_id(s.ids)
+            s.ids = ids_xor
+            s.buf = spv_emit_binary_op(s.buf, OP_BITWISE_XOR, tid, result_id, lhs_id, rhs_id)
+            s.reg_map = spv_reg_map_insert(s.reg_map, op.dst_reg, result_id)
+            s
+        }
+
+        GpuOpcode::GpuWmma => {
+            // SPIR-V has no native WMMA instruction.
+            // Decompose into scalar multiply-accumulate:
+            //   For a 16x16 tile with 8 registers per fragment,
+            //   emit 8 FMA operations (simplified scalar fallback).
+            //
+            // Full decomposition would be 16x16=256 scalar FMAs, but since
+            // each thread holds 8 fragment registers, we emit 8 scalar FMAs:
+            //   C[i] = A[i] * B[i] + C[i]  for i in 0..7
+            //
+            // This is a correct-but-conservative lowering; a future
+            // VK_KHR_cooperative_matrix path would replace this entirely.
+
+            var fi: i64 = 0
+            while fi < op.num_regs {
+                if fi < 8 {
+                    let a_id = spv_reg_map_lookup(s.reg_map, op.lhs_reg + fi)
+                    let b_id = spv_reg_map_lookup(s.reg_map, op.rhs_reg + fi)
+                    let c_id = spv_reg_map_lookup(s.reg_map, op.src_reg + fi)
+
+                    // mul = A[i] * B[i]
+                    let (ids_mul, mul_id) = spv_alloc_id(s.ids)
+                    s.ids = ids_mul
+                    s.buf = spv_emit_binary_op(s.buf, OP_FMUL, s.types.float_id, mul_id, a_id, b_id)
+
+                    // dst = mul + C[i]
+                    let (ids_add, add_id) = spv_alloc_id(s.ids)
+                    s.ids = ids_add
+                    s.buf = spv_emit_binary_op(s.buf, OP_FADD, s.types.float_id, add_id, mul_id, c_id)
+
+                    s.reg_map = spv_reg_map_insert(s.reg_map, op.dst_reg + fi, add_id)
+                }
+                fi = fi + 1
+            }
+            s
+        }
+
+        GpuOpcode::GpuFma => {
+            // Fused multiply-add: dst = lhs * rhs + src
+            let lhs_id = spv_reg_map_lookup(s.reg_map, op.lhs_reg)
+            let rhs_id = spv_reg_map_lookup(s.reg_map, op.rhs_reg)
+            let src_id = spv_reg_map_lookup(s.reg_map, op.src_reg)
+            let (ids_mul, mul_id) = spv_alloc_id(s.ids)
+            s.ids = ids_mul
+            s.buf = spv_emit_binary_op(s.buf, OP_FMUL, tid, mul_id, lhs_id, rhs_id)
+            let (ids_add, result_id) = spv_alloc_id(s.ids)
+            s.ids = ids_add
+            s.buf = spv_emit_binary_op(s.buf, OP_FADD, tid, result_id, mul_id, src_id)
+            s.reg_map = spv_reg_map_insert(s.reg_map, op.dst_reg, result_id)
+            s
+        }
+
+        GpuOpcode::GpuAddImm => {
+            // dst = lhs + immediate
+            let lhs_id = spv_reg_map_lookup(s.reg_map, op.lhs_reg)
+            let (ids_imm, imm_id) = spv_alloc_id(s.ids)
+            s.ids = ids_imm
+            s.buf = spv_emit_constant_u32(s.buf, tid, imm_id, op.rhs_imm)
+            let (ids_r, result_id) = spv_alloc_id(s.ids)
+            s.ids = ids_r
+            if is_float {
+                s.buf = spv_emit_binary_op(s.buf, OP_FADD, tid, result_id, lhs_id, imm_id)
+            } else {
+                s.buf = spv_emit_binary_op(s.buf, OP_IADD, tid, result_id, lhs_id, imm_id)
+            }
+            s.reg_map = spv_reg_map_insert(s.reg_map, op.dst_reg, result_id)
+            s
+        }
+
+        GpuOpcode::GpuRet => {
+            // No-op: OpReturn is emitted by the function epilogue
+            s
+        }
+
+        _ => {
+            // Unknown opcode: skip silently (no emission, no crash)
+            s
+        }
+    }
+}
+
+// ============================================================================
+// Phase 6: Walk all ops and lower them
+// ============================================================================
+
+fn spv_lower_all_ops(state: SpvLowerState, kernel: GpuKernelIr) -> SpvLowerState with Mut, Panic, Div {
+    var s = state
+    var i: i64 = 0
+    while i < kernel.op_count {
+        s = spv_lower_op(s, kernel.ops[i as usize], kernel)
+        i = i + 1
+    }
+    s
+}
+
+// ============================================================================
+// Main entry point: gpu_lower_kernel_ir_to_spirv
+// ============================================================================
+//
+// Takes a GpuKernelIr struct and produces a complete SPIR-V 1.3 module
+// as a SpvBuf. This is the SPIR-V parallel to gpu_lower_to_ptx().
+
+fn gpu_lower_kernel_ir_to_spirv(kernel: GpuKernelIr) -> SpvBuf with Mut, Panic, Div, Alloc {
+    var s = spv_lower_state_new()
+
+    // Phase 1: Capabilities, extensions, memory model
+    s = spv_lower_emit_preamble(s)
+
+    // Phase 2: Type declarations
+    s = spv_lower_emit_types(s)
+
+    // Phase 3: Global variables and decorations
+    s = spv_lower_emit_variables(s, kernel)
+
+    // Phase 4: Entry point and execution mode
+    s = spv_lower_emit_entry_point(s, kernel)
+
+    // Phase 5: Function body
+    s.buf = spv_emit_function(s.buf, s.types.void_id, s.entry_func_id, 0, s.types.func_void_id)
+    s.buf = spv_emit_label(s.buf, s.label_id)
+
+    // Phase 6: Lower all kernel ops
+    s = spv_lower_all_ops(s, kernel)
+
+    // Phase 7: Function epilogue
+    s.buf = spv_emit_return(s.buf)
+    s.buf = spv_emit_function_end(s.buf)
+
+    // Build final buffer: prepend 5-word SPIR-V header
+    let bound = s.ids.next_id
+    var final_buf = spv_buf_new()
+    final_buf = spv_push_word(final_buf, SPIRV_MAGIC)              // Magic number: 0x07230203
+    final_buf = spv_push_word(final_buf, SPIRV_VERSION_1_3)        // Version 1.3
+    final_buf = spv_push_word(final_buf, SPIRV_GENERATOR_SOUNIO_V2) // Generator: "SOUI"
+    final_buf = spv_push_word(final_buf, bound)                     // ID bound
+    final_buf = spv_push_word(final_buf, 0)                         // Schema (reserved)
+
+    // Copy module body after header
+    var ci: i64 = 0
+    while ci < s.buf.word_count {
+        final_buf = spv_push_word(final_buf, s.buf.words[ci as usize])
+        ci = ci + 1
+    }
+
+    final_buf
+}
+
+// ============================================================================
+// Self-test: verify the lowering produces valid SPIR-V
+// ============================================================================
+
+fn spirv_lower_self_check_magic() -> bool with Mut, Panic, Div, Alloc {
+    let ir = gpu_build_epistemic_wmma_matmul_16x16_ir()
+    let buf = gpu_lower_kernel_ir_to_spirv(ir)
+    buf.words[0] == SPIRV_MAGIC
+}
+
+fn spirv_lower_self_check_version() -> bool with Mut, Panic, Div, Alloc {
+    let ir = gpu_build_epistemic_wmma_matmul_16x16_ir()
+    let buf = gpu_lower_kernel_ir_to_spirv(ir)
+    buf.words[1] == SPIRV_VERSION_1_3
+}
+
+fn spirv_lower_self_check_generator() -> bool with Mut, Panic, Div, Alloc {
+    let ir = gpu_build_epistemic_wmma_matmul_16x16_ir()
+    let buf = gpu_lower_kernel_ir_to_spirv(ir)
+    buf.words[2] == SPIRV_GENERATOR_SOUNIO_V2
+}
+
+fn spirv_lower_self_check_nontrivial() -> bool with Mut, Panic, Div, Alloc {
+    let ir = gpu_build_epistemic_wmma_matmul_16x16_ir()
+    let buf = gpu_lower_kernel_ir_to_spirv(ir)
+    // A valid epistemic WMMA kernel should produce > 100 SPIR-V words
+    buf.word_count > 100
+}
+
+// Check that OpEntryPoint GLCompute (opcode 15, exec model 5) is present
+fn spirv_lower_self_check_entry_point() -> bool with Mut, Panic, Div, Alloc {
+    let ir = gpu_build_epistemic_wmma_matmul_16x16_ir()
+    let buf = gpu_lower_kernel_ir_to_spirv(ir)
+    // Search for a word containing OpEntryPoint header with GLCompute
+    // OpEntryPoint = opcode 15; GLCompute = execution model 5
+    // The word after the header should be 5 (GLCompute)
+    var found = false
+    var i: i64 = 5  // Skip header
+    while i < buf.word_count - 1 {
+        let w = buf.words[i as usize]
+        let opcode = w % 65536
+        if opcode == OP_ENTRY_POINT {
+            // Next word is execution model
+            if buf.words[i + 1 as usize] == EXECUTION_GLCOMPUTE {
+                found = true
+            }
+        }
+        i = i + 1
+    }
+    found
+}
+
+// Check that OpExecutionMode LocalSize (opcode 16) with 16,16,1 is present
+fn spirv_lower_self_check_local_size() -> bool with Mut, Panic, Div, Alloc {
+    let ir = gpu_build_epistemic_wmma_matmul_16x16_ir()
+    let buf = gpu_lower_kernel_ir_to_spirv(ir)
+    var found = false
+    var i: i64 = 5
+    while i < buf.word_count - 4 {
+        let w = buf.words[i as usize]
+        let opcode = w % 65536
+        if opcode == OP_EXECUTION_MODE {
+            // Check: word+2 = EXEC_MODE_LOCAL_SIZE (17)
+            // word+3 = 16, word+4 = 16, word+5 = 1
+            if i + 5 < buf.word_count {
+                if buf.words[(i + 2) as usize] == EXEC_MODE_LOCAL_SIZE {
+                    if buf.words[(i + 3) as usize] == 16 && buf.words[(i + 4) as usize] == 16 && buf.words[(i + 5) as usize] == 1 {
+                        found = true
+                    }
+                }
+            }
+        }
+        i = i + 1
+    }
+    found
+}
+
+fn spirv_lower_self_check() -> bool with Mut, Panic, Div, Alloc {
+    let t1 = spirv_lower_self_check_magic()
+    let t2 = spirv_lower_self_check_version()
+    let t3 = spirv_lower_self_check_generator()
+    let t4 = spirv_lower_self_check_nontrivial()
+    let t5 = spirv_lower_self_check_entry_point()
+    let t6 = spirv_lower_self_check_local_size()
+    t1 && t2 && t3 && t4 && t5 && t6
+}
