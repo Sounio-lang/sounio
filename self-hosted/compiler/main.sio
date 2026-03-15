@@ -16368,6 +16368,85 @@ fn compiler_main_test_dy_no_fold_or_outer() -> bool with Mut, Div, Panic {
     opt.instrs[2 as usize].bin_op != BinaryOp::OpBitAnd
 }
 
+// Sprint 225 Block EI: XNOR-AND subsumption — ~(x^y)|(x&y) → ~(x^y) (T1016-T1021)
+fn compiler_main_test_ei_xnor_and_subsume_basic() -> bool with Mut, Div, Panic {
+    // r2=(r0^r1), r3=~r2, r4=(r0&r1), r5=r3|r4 → r5 becomes IrCopy(r3)
+    var instrs: [IrInstr; 128] = cp_empty_instrs()
+    instrs[0 as usize] = ir_binop(2, 0, BinaryOp::OpBitXor, 1)
+    instrs[1 as usize] = ir_unaryop(3, UnaryOp::OpNot, 2)
+    instrs[2 as usize] = ir_binop(4, 0, BinaryOp::OpBitAnd, 1)
+    instrs[3 as usize] = ir_binop(5, 3, BinaryOp::OpBitOr, 4)
+    let func = cp_make_test_func(instrs, 4)
+    let opt = opt_cleanup_function(func)
+    opt.instrs[3 as usize].op == IrOpcode::IrCopy
+        && opt.instrs[3 as usize].src1 == 3
+}
+
+fn compiler_main_test_ei_xnor_and_subsume_comm() -> bool with Mut, Div, Panic {
+    // (r0&r1) | ~(r0^r1) → IrCopy(~(r0^r1)) (comm)
+    var instrs: [IrInstr; 128] = cp_empty_instrs()
+    instrs[0 as usize] = ir_binop(2, 0, BinaryOp::OpBitXor, 1)
+    instrs[1 as usize] = ir_unaryop(3, UnaryOp::OpNot, 2)
+    instrs[2 as usize] = ir_binop(4, 0, BinaryOp::OpBitAnd, 1)
+    instrs[3 as usize] = ir_binop(5, 4, BinaryOp::OpBitOr, 3)
+    let func = cp_make_test_func(instrs, 4)
+    let opt = opt_cleanup_function(func)
+    opt.instrs[3 as usize].op == IrOpcode::IrCopy
+        && opt.instrs[3 as usize].src1 == 3
+}
+
+fn compiler_main_test_ei_xnor_and_subsume_inner_comm() -> bool with Mut, Div, Panic {
+    // ~(r0^r1) | (r1&r0) → IrCopy(~(r0^r1)) (inner comm AND)
+    var instrs: [IrInstr; 128] = cp_empty_instrs()
+    instrs[0 as usize] = ir_binop(2, 0, BinaryOp::OpBitXor, 1)
+    instrs[1 as usize] = ir_unaryop(3, UnaryOp::OpNot, 2)
+    instrs[2 as usize] = ir_binop(4, 1, BinaryOp::OpBitAnd, 0)
+    instrs[3 as usize] = ir_binop(5, 3, BinaryOp::OpBitOr, 4)
+    let func = cp_make_test_func(instrs, 4)
+    let opt = opt_cleanup_function(func)
+    opt.instrs[3 as usize].op == IrOpcode::IrCopy
+        && opt.instrs[3 as usize].src1 == 3
+}
+
+fn compiler_main_test_ei_no_fold_diff_vars() -> bool with Mut, Div, Panic {
+    // ~(r0^r1) | (r0&r2): different vars → no fold
+    var instrs: [IrInstr; 128] = cp_empty_instrs()
+    instrs[0 as usize] = ir_binop(3, 0, BinaryOp::OpBitXor, 1)
+    instrs[1 as usize] = ir_unaryop(4, UnaryOp::OpNot, 3)
+    instrs[2 as usize] = ir_binop(5, 0, BinaryOp::OpBitAnd, 2)
+    instrs[3 as usize] = ir_binop(6, 4, BinaryOp::OpBitOr, 5)
+    let func = cp_make_test_func(instrs, 4)
+    let opt = opt_cleanup_function(func)
+    opt.instrs[3 as usize].op != IrOpcode::IrCopy
+}
+
+fn compiler_main_test_ei_no_fold_and_outer() -> bool with Mut, Div, Panic {
+    // ~(r0^r1) & (r0&r1): AND outer → no EI fold
+    var instrs: [IrInstr; 128] = cp_empty_instrs()
+    instrs[0 as usize] = ir_binop(2, 0, BinaryOp::OpBitXor, 1)
+    instrs[1 as usize] = ir_unaryop(3, UnaryOp::OpNot, 2)
+    instrs[2 as usize] = ir_binop(4, 0, BinaryOp::OpBitAnd, 1)
+    instrs[3 as usize] = ir_binop(5, 3, BinaryOp::OpBitAnd, 4)
+    let func = cp_make_test_func(instrs, 4)
+    let opt = opt_cleanup_function(func)
+    opt.instrs[3 as usize].op != IrOpcode::IrCopy
+}
+
+fn compiler_main_test_ei_no_fold_or_inner() -> bool with Mut, Div, Panic {
+    // ~(r0^r1) | (r0|r1): s2=OR not AND → no EI fold (EG may fire instead)
+    var instrs: [IrInstr; 128] = cp_empty_instrs()
+    instrs[0 as usize] = ir_binop(2, 0, BinaryOp::OpBitXor, 1)
+    instrs[1 as usize] = ir_unaryop(3, UnaryOp::OpNot, 2)
+    instrs[2 as usize] = ir_binop(4, 0, BinaryOp::OpBitOr, 1)
+    instrs[3 as usize] = ir_binop(5, 3, BinaryOp::OpBitOr, 4)
+    let func = cp_make_test_func(instrs, 4)
+    let opt = opt_cleanup_function(func)
+    // EI should not fire (s2 is OR not AND)
+    // Result could be -1 (if DI/DX fires) — just verify no IrCopy of register 3 from EI
+    opt.instrs[3 as usize].op != IrOpcode::IrCopy
+        || opt.instrs[3 as usize].src1 != 3
+}
+
 // Sprint 224 Block EH: XOR-NOR annihilation — (x^y)&~(x|y) → 0 (T1010-T1015)
 fn compiler_main_test_eh_xor_nor_zero_basic() -> bool with Mut, Div, Panic {
     // r2=(r0^r1), r3=(r0|r1), r4=~r3, r5=r2&r4 → r5 becomes 0
@@ -17039,7 +17118,7 @@ fn compiler_main_test_dz_no_fold_or_outer() -> bool with Mut, Div, Panic {
 
 fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
     var passed: i64 = 0
-    let total: i64 = 1015
+    let total: i64 = 1021
 
     println("=== compiler/main.sio self-tests ===")
 
@@ -21967,6 +22046,32 @@ fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
         passed = passed + 1
         println("  T961 OK: Sprint 215 Block DY: r0|(r1|~r0) no fold OR outer")
     } else { println("  FAIL: T961") }
+
+    // Sprint 225 Block EI: XNOR-AND subsumption (T1016-T1021)
+    if compiler_main_test_ei_xnor_and_subsume_basic() {
+        passed = passed + 1
+        println("  T1016 OK: Sprint 225 Block EI: ~(r0^r1)|(r0&r1) -> IrCopy(~(r0^r1))")
+    } else { println("  FAIL: T1016") }
+    if compiler_main_test_ei_xnor_and_subsume_comm() {
+        passed = passed + 1
+        println("  T1017 OK: Sprint 225 Block EI: (r0&r1)|~(r0^r1) -> IrCopy(~(r0^r1)) comm")
+    } else { println("  FAIL: T1017") }
+    if compiler_main_test_ei_xnor_and_subsume_inner_comm() {
+        passed = passed + 1
+        println("  T1018 OK: Sprint 225 Block EI: ~(r0^r1)|(r1&r0) -> IrCopy inner comm")
+    } else { println("  FAIL: T1018") }
+    if compiler_main_test_ei_no_fold_diff_vars() {
+        passed = passed + 1
+        println("  T1019 OK: Sprint 225 Block EI: ~(r0^r1)|(r0&r2) no fold diff vars")
+    } else { println("  FAIL: T1019") }
+    if compiler_main_test_ei_no_fold_and_outer() {
+        passed = passed + 1
+        println("  T1020 OK: Sprint 225 Block EI: ~(r0^r1)&(r0&r1) no fold AND outer")
+    } else { println("  FAIL: T1020") }
+    if compiler_main_test_ei_no_fold_or_inner() {
+        passed = passed + 1
+        println("  T1021 OK: Sprint 225 Block EI: ~(r0^r1)|(r0|r1) no EI fold")
+    } else { println("  FAIL: T1021") }
 
     // Sprint 224 Block EH: XOR-NOR annihilation (T1010-T1015)
     if compiler_main_test_eh_xor_nor_zero_basic() {

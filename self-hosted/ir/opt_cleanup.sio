@@ -4242,6 +4242,49 @@ fn ocp_const_fold(func: IrFunction) -> IrFunction with Mut, Div, Panic {
             }
         }
 
+        // Sprint 225 Block EI: XNOR-AND subsumption — ~(x^y) | (x&y) → ~(x^y).
+        // Proof: x&y ⊆ ~(x^y) (both-1 bits are same-value bits), so OR with subset = identity.
+        // Commutative: (x&y) | ~(x^y) → ~(x^y).
+        // Zero new arrays: uses is_bnot/bnot_src + as_xor_rr_valid/lhs/rhs + ao_and_rr_valid/lhs/rhs.
+        // SOTA: LLVM InstCombineAndOrXor; Boolean lattice: a|b=a when b⊆a.
+        if ocp_is_binop(result.instrs[i as usize].op) {
+            let ei_instr = result.instrs[i as usize]
+            let ei_s1 = ei_instr.src1; let ei_s2 = ei_instr.src2
+            let ei_s1_ok = ei_s1 >= 0 && ei_s1 < 256; let ei_s2_ok = ei_s2 >= 0 && ei_s2 < 256
+            if ei_instr.bin_op == BinaryOp::OpBitOr && ei_s1_ok && ei_s2_ok {
+                // Case 1: ~(x^y) | (x&y): s1=NOT(XOR-rr), s2=AND-rr with same operands → IrCopy(s1)
+                if is_bnot[ei_s1 as usize] && ao_and_rr_valid[ei_s2 as usize] {
+                    let ei_xor = bnot_src[ei_s1 as usize]
+                    let ei_xor_ok = ei_xor >= 0 && ei_xor < 256
+                    if ei_xor_ok && as_xor_rr_valid[ei_xor as usize] {
+                        let ei_xl = as_xor_rr_lhs[ei_xor as usize]
+                        let ei_xr = as_xor_rr_rhs[ei_xor as usize]
+                        let ei_al = ao_and_rr_lhs[ei_s2 as usize]
+                        let ei_ar = ao_and_rr_rhs[ei_s2 as usize]
+                        if (ei_xl == ei_al && ei_xr == ei_ar)
+                                || (ei_xl == ei_ar && ei_xr == ei_al) {
+                            result.instrs[i as usize] = ir_copy(ei_instr.dst, ei_s1)
+                        }
+                    }
+                }
+                // Case 2: (x&y) | ~(x^y): s1=AND-rr, s2=NOT(XOR-rr) → IrCopy(s2)
+                if ao_and_rr_valid[ei_s1 as usize] && is_bnot[ei_s2 as usize] {
+                    let ei_xor2 = bnot_src[ei_s2 as usize]
+                    let ei_xor2_ok = ei_xor2 >= 0 && ei_xor2 < 256
+                    if ei_xor2_ok && as_xor_rr_valid[ei_xor2 as usize] {
+                        let ei_al2 = ao_and_rr_lhs[ei_s1 as usize]
+                        let ei_ar2 = ao_and_rr_rhs[ei_s1 as usize]
+                        let ei_xl2 = as_xor_rr_lhs[ei_xor2 as usize]
+                        let ei_xr2 = as_xor_rr_rhs[ei_xor2 as usize]
+                        if (ei_al2 == ei_xl2 && ei_ar2 == ei_xr2)
+                                || (ei_al2 == ei_xr2 && ei_ar2 == ei_xl2) {
+                            result.instrs[i as usize] = ir_copy(ei_instr.dst, ei_s2)
+                        }
+                    }
+                }
+            }
+        }
+
         // Sprint 177 Block CM: AND complement XOR partition — (x & C) ^ (x & ~C) → x.
         // Proof: C-bits: (xi&1)^(xi&0)=xi^0=xi. Non-C: (xi&0)^(xi&1)=0^xi=xi. QED.
         // Dual of Block CC (OR partition). Commutative: (x&~C)^(x&C) → x.
