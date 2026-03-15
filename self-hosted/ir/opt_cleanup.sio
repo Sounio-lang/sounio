@@ -4079,6 +4079,58 @@ fn ocp_const_fold(func: IrFunction) -> IrFunction with Mut, Div, Panic {
             }
         }
 
+        // Sprint 221 Block EE: Sub-add collapse — (x-y)+(z+y) → x+z.
+        // Proof: (x-y)+(z+y) = x-y+z+y = x+z. QED. Commutative add: (z+y)+(x-y) → x+z; (y+z)+(x-y) → x+z.
+        // Zero new arrays: uses al_is_sub/lhs/rhs (Block AL) + aq_add_rr_valid/lhs/rhs (Block AQ).
+        // SOTA: LLVM InstCombineAddSub; algebraic simplification.
+        if ocp_is_binop(result.instrs[i as usize].op) {
+            let ee_instr = result.instrs[i as usize]
+            let ee_s1 = ee_instr.src1; let ee_s2 = ee_instr.src2
+            let ee_s1_ok = ee_s1 >= 0 && ee_s1 < 256; let ee_s2_ok = ee_s2 >= 0 && ee_s2 < 256
+            if ee_instr.bin_op == BinaryOp::OpAdd && ee_s1_ok && ee_s2_ok {
+                // Case 1: (x-y)+(z+y): s1=SUB, s2=ADD-rr where one of s2's operands == sub_rhs
+                if al_is_sub[ee_s1 as usize] && aq_add_rr_valid[ee_s2 as usize] {
+                    let ee_x = al_sub_lhs[ee_s1 as usize]
+                    let ee_y = al_sub_rhs[ee_s1 as usize]
+                    let ee_al = aq_add_rr_lhs[ee_s2 as usize]
+                    let ee_ar = aq_add_rr_rhs[ee_s2 as usize]
+                    // z+y case: rhs of ADD == y → result = x+lhs
+                    if ee_ar == ee_y {
+                        result.instrs[i as usize] = ir_binop(ee_instr.dst, ee_x, BinaryOp::OpAdd, ee_al)
+                        aq_add_rr_valid[ee_instr.dst as usize] = true
+                        aq_add_rr_lhs[ee_instr.dst as usize] = ee_x
+                        aq_add_rr_rhs[ee_instr.dst as usize] = ee_al
+                    }
+                    // y+z case: lhs of ADD == y → result = x+rhs
+                    if ee_al == ee_y {
+                        result.instrs[i as usize] = ir_binop(ee_instr.dst, ee_x, BinaryOp::OpAdd, ee_ar)
+                        aq_add_rr_valid[ee_instr.dst as usize] = true
+                        aq_add_rr_lhs[ee_instr.dst as usize] = ee_x
+                        aq_add_rr_rhs[ee_instr.dst as usize] = ee_ar
+                    }
+                }
+                // Case 2: (z+y)+(x-y): s1=ADD-rr, s2=SUB where sub_rhs matches one of s1's operands
+                if aq_add_rr_valid[ee_s1 as usize] && al_is_sub[ee_s2 as usize] {
+                    let ee_x2 = al_sub_lhs[ee_s2 as usize]
+                    let ee_y2 = al_sub_rhs[ee_s2 as usize]
+                    let ee_al2 = aq_add_rr_lhs[ee_s1 as usize]
+                    let ee_ar2 = aq_add_rr_rhs[ee_s1 as usize]
+                    if ee_ar2 == ee_y2 {
+                        result.instrs[i as usize] = ir_binop(ee_instr.dst, ee_x2, BinaryOp::OpAdd, ee_al2)
+                        aq_add_rr_valid[ee_instr.dst as usize] = true
+                        aq_add_rr_lhs[ee_instr.dst as usize] = ee_x2
+                        aq_add_rr_rhs[ee_instr.dst as usize] = ee_al2
+                    }
+                    if ee_al2 == ee_y2 {
+                        result.instrs[i as usize] = ir_binop(ee_instr.dst, ee_x2, BinaryOp::OpAdd, ee_ar2)
+                        aq_add_rr_valid[ee_instr.dst as usize] = true
+                        aq_add_rr_lhs[ee_instr.dst as usize] = ee_x2
+                        aq_add_rr_rhs[ee_instr.dst as usize] = ee_ar2
+                    }
+                }
+            }
+        }
+
         // Sprint 177 Block CM: AND complement XOR partition — (x & C) ^ (x & ~C) → x.
         // Proof: C-bits: (xi&1)^(xi&0)=xi^0=xi. Non-C: (xi&0)^(xi&1)=0^xi=xi. QED.
         // Dual of Block CC (OR partition). Commutative: (x&~C)^(x&C) → x.
