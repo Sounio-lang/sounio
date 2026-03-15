@@ -1,186 +1,27 @@
-// boot1.sio — Minimal stage 1 bootstrap compiler
-// Compiles: fn main() -> i64 { print("...") N }
-// Uses mmap'd arrays (>4096 count) to avoid stack layout bugs in stage0
-
-fn rd(buf: [i8; 1048576], off: i64) -> i64 with Panic {
-    let v = buf[off as usize]
-    if v < 0 { return v + 256 }
-    v
-}
-
-fn is_alpha(c: i64) -> i64 {
-    if c >= 97 && c <= 122 { return 1 }
-    if c >= 65 && c <= 90 { return 1 }
-    if c == 95 { return 1 }
-    0
-}
-
-fn is_digit(c: i64) -> i64 {
-    if c >= 48 && c <= 57 { return 1 }
-    0
-}
-
-fn is_alnum(c: i64) -> i64 {
-    if is_alpha(c) == 1 { return 1 }
-    is_digit(c)
-}
-
-fn e1(c: [i8; 262144], p: i64, b: i64) -> i64 with Mut, Panic { c[p as usize] = b as i8; p + 1 }
-fn e2(c: [i8; 262144], p: i64, a: i64, b: i64) -> i64 with Mut, Panic { c[p as usize] = a as i8; c[(p+1) as usize] = b as i8; p + 2 }
-fn e3(c: [i8; 262144], p: i64, a: i64, b: i64, d: i64) -> i64 with Mut, Panic { c[p as usize] = a as i8; c[(p+1) as usize] = b as i8; c[(p+2) as usize] = d as i8; p + 3 }
-fn ei32(c: [i8; 262144], p: i64, v: i64) -> i64 with Mut, Panic, Div { c[p as usize] = (v&255) as i8; c[(p+1) as usize] = ((v>>8)&255) as i8; c[(p+2) as usize] = ((v>>16)&255) as i8; c[(p+3) as usize] = ((v>>24)&255) as i8; p + 4 }
-fn ei64(c: [i8; 262144], p: i64, v: i64) -> i64 with Mut, Panic, Div { var i: i64 = 0; var q = p; while i < 8 { c[q as usize] = ((v >> (i*8))&255) as i8; q=q+1; i=i+1 }; q }
-fn em_imm64(c: [i8; 262144], p: i64, v: i64) -> i64 with Mut, Panic, Div { var q = e2(c, p, 0x48, 0xB8); ei64(c, q, v) }
-
-// Emit inline print: string data embedded in code stream
-fn em_print(c: [i8; 262144], cp: i64, src: [i8; 1048576], so: i64, sl: i64) -> i64 with Panic, Mut, Div {
-    var p = cp
-    // Count decoded length
-    var dlen: i64 = 0; var si: i64 = 0
-    while si < sl { if rd(src,so+si)==92 { si=si+2 } else { si=si+1 }; dlen=dlen+1 }
-    // JMP over string
-    p = e2(c,p,0xEB,dlen); let ss = p
-    // Emit decoded bytes
-    si = 0
-    while si < sl {
-        let ch = rd(src,so+si)
-        if ch==92 && si+1<sl {
-            let ec = rd(src,so+si+1)
-            if ec==110 { c[p as usize]=10 as i8 } else if ec==116 { c[p as usize]=9 as i8 }
-            else if ec==92 { c[p as usize]=92 as i8 } else if ec==34 { c[p as usize]=34 as i8 }
-            else if ec==48 { c[p as usize]=0 as i8 } else { c[p as usize]=ec as i8 }
-            p=p+1; si=si+2
-        } else { c[p as usize]=ch as i8; p=p+1; si=si+1 }
-    }
-    // lea rsi,[rip-offset]; mov edx,len; mov edi,1; mov eax,1; syscall
-    let ro = 0-(p+7-ss)
-    p=e3(c,p,0x48,0x8D,0x35); p=ei32(c,p,ro)
-    p=e1(c,p,0xBA); p=ei32(c,p,dlen)
-    p=e1(c,p,0xBF); p=ei32(c,p,1)
-    p=e1(c,p,0xB8); p=ei32(c,p,1)
-    e2(c,p,0x0F,0x05)
-}
-
-fn write_ehdr(out: [i8; 262144], entry: i64, fsz: i64, base: i64) -> i64 with Mut, Panic, Div {
-    out[0 as usize]=0x7F as i8; out[1 as usize]=69 as i8; out[2 as usize]=76 as i8; out[3 as usize]=70 as i8
-    out[4 as usize]=2 as i8; out[5 as usize]=1 as i8; out[6 as usize]=1 as i8
-    out[16 as usize]=2 as i8; out[18 as usize]=0x3E as i8; out[20 as usize]=1 as i8
-    var i: i64 = 0
-    while i<8 { out[(24+i) as usize]=((entry>>(i*8))&255) as i8; i=i+1 }
-    out[32 as usize]=64 as i8; out[52 as usize]=64 as i8; out[54 as usize]=56 as i8; out[56 as usize]=1 as i8
-    out[64 as usize]=1 as i8; out[68 as usize]=7 as i8
-    i=0; while i<8 { out[(80+i) as usize]=((base>>(i*8))&255) as i8; i=i+1 }
-    i=0; while i<8 { out[(88+i) as usize]=((base>>(i*8))&255) as i8; i=i+1 }
-    i=0; while i<8 { out[(96+i) as usize]=((fsz>>(i*8))&255) as i8; i=i+1 }
-    let msz=fsz+4194304
-    i=0; while i<8 { out[(104+i) as usize]=((msz>>(i*8))&255) as i8; i=i+1 }
-    out[113 as usize]=0x10 as i8; 0
-}
-
+// boot1.sio — Stage 1: compiles fn main()->i64{print("...")N}
+fn rd(b: [i8; 1048576], o: i64) -> i64 with Panic { let v=b[o as usize]; if v<0 { return v+256 }; v }
+fn id(c: i64) -> i64 { if c>=48&&c<=57 { return 1 }; 0 }
+fn e1(c: [i8; 262144], p: i64, b: i64) -> i64 with Mut, Panic { c[p as usize]=b as i8; p+1 }
+fn e2(c: [i8; 262144], p: i64, a: i64, b: i64) -> i64 with Mut, Panic { c[p as usize]=a as i8; c[(p+1) as usize]=b as i8; p+2 }
+fn e3(c: [i8; 262144], p: i64, a: i64, b: i64, d: i64) -> i64 with Mut, Panic { c[p as usize]=a as i8; c[(p+1) as usize]=b as i8; c[(p+2) as usize]=d as i8; p+3 }
+fn w4(c: [i8; 262144], p: i64, v: i64) -> i64 with Mut, Panic, Div { c[p as usize]=(v&255) as i8; c[(p+1) as usize]=((v>>8)&255) as i8; c[(p+2) as usize]=((v>>16)&255) as i8; c[(p+3) as usize]=((v>>24)&255) as i8; p+4 }
+fn w8(c: [i8; 262144], p: i64, v: i64) -> i64 with Mut, Panic, Div { var i: i64=0; var q=p; while i<8 { c[q as usize]=((v>>(i*8))&255) as i8; q=q+1; i=i+1 }; q }
+fn mi(c: [i8; 262144], p: i64, v: i64) -> i64 with Mut, Panic, Div { var q=e2(c,p,0x48,0xB8); w8(c,q,v) }
+fn wh(o: [i8; 262144], en: i64, fs: i64, ba: i64) -> i64 with Mut, Panic, Div { o[0 as usize]=0x7F as i8; o[1 as usize]=69 as i8; o[2 as usize]=76 as i8; o[3 as usize]=70 as i8; o[4 as usize]=2 as i8; o[5 as usize]=1 as i8; o[6 as usize]=1 as i8; o[16 as usize]=2 as i8; o[18 as usize]=0x3E as i8; o[20 as usize]=1 as i8; var i: i64=0; while i<8 { o[(24+i) as usize]=((en>>(i*8))&255) as i8; i=i+1 }; o[32 as usize]=64 as i8; o[52 as usize]=64 as i8; o[54 as usize]=56 as i8; o[56 as usize]=1 as i8; o[64 as usize]=1 as i8; o[68 as usize]=7 as i8; i=0; while i<8 { o[(80+i) as usize]=((ba>>(i*8))&255) as i8; i=i+1 }; i=0; while i<8 { o[(88+i) as usize]=((ba>>(i*8))&255) as i8; i=i+1 }; i=0; while i<8 { o[(96+i) as usize]=((fs>>(i*8))&255) as i8; i=i+1 }; let ms=fs+4194304; i=0; while i<8 { o[(104+i) as usize]=((ms>>(i*8))&255) as i8; i=i+1 }; o[113 as usize]=0x10 as i8; 0 }
+fn ep(c: [i8; 262144], cp: i64, s: [i8; 1048576], so: i64, sl: i64) -> i64 with Panic, Mut, Div {
+    var p=cp; var dl: i64=0; var si: i64=0
+    while si<sl { let ch=rd(s,so+si); if ch==92 { si=si+2 } else { si=si+1 }; dl=dl+1 }
+    p=e2(c,p,0xEB,dl); let ss=p; si=0
+    while si<sl { let ch=rd(s,so+si); if ch==92&&si+1<sl { let ec=rd(s,so+si+1); if ec==110 { c[p as usize]=10 as i8 } else { c[p as usize]=ec as i8 }; p=p+1; si=si+2 } else { c[p as usize]=ch as i8; p=p+1; si=si+1 } }
+    let ro=0-(p+7-ss); p=e3(c,p,0x48,0x8D,0x35); p=w4(c,p,ro); p=e1(c,p,0xBA); p=w4(c,p,dl); p=e1(c,p,0xBF); p=w4(c,p,1); p=e1(c,p,0xB8); p=w4(c,p,1); e2(c,p,0x0F,0x05) }
 fn main() -> i64 with IO, Mut, Panic, Div {
-    let argc = arg_count()
-    if argc < 2 { print("Usage: boot1 <source.sio> <output.elf>\n"); return 1 }
-    let source_path = get_arg(0)
-    let output_path = get_arg(1)
-    let src_size = file_size(source_path)
-    let src: [i8; 1048576] = read_file(source_path)
-    print("boot1: source="); print_int(src_size); print(" bytes\n")
-
-    // Simple single-pass compilation for: fn main() -> i64 { print("...") N }
-    var code: [i8; 262144] = [0; 262144]
-    var cp: i64 = 16  // Reserve global data area
-
-    // Emit main function
-    let fn_off = cp
-    // Prologue: push rbp; mov rbp,rsp; sub rsp,frame
-    cp = e1(code, cp, 0x55)
-    cp = e3(code, cp, 0x48, 0x89, 0xE5)
-    cp = e3(code, cp, 0x48, 0x81, 0xEC)
-    cp = ei32(code, cp, 2048)
-
-    // Scan source for print("...") and integer return value
-    var pos: i64 = 0
-    // Skip to opening {
-    while pos < src_size && rd(src, pos) != 123 { pos = pos + 1 }
-    if pos < src_size { pos = pos + 1 }
-
-    // Now scan body
-    while pos < src_size && rd(src, pos) != 125 {
-        // Skip whitespace
-        while pos < src_size { let c=rd(src,pos); if c==32||c==9||c==13||c==10 { pos=pos+1 } else { break } }
-        if pos >= src_size || rd(src, pos) == 125 { break }
-
-        // Check for print("...")
-        if rd(src,pos)==112 && pos+5<src_size && rd(src,pos+1)==114 && rd(src,pos+2)==105 && rd(src,pos+3)==110 && rd(src,pos+4)==116 && rd(src,pos+5)==40 {
-            pos = pos + 6  // skip print(
-            // Skip whitespace
-            while pos < src_size && (rd(src,pos)==32||rd(src,pos)==9) { pos=pos+1 }
-            if pos < src_size && rd(src, pos) == 34 {
-                // String literal
-                pos = pos + 1
-                let str_start = pos
-                while pos < src_size && rd(src, pos) != 34 {
-                    if rd(src, pos) == 92 { pos = pos + 2 } else { pos = pos + 1 }
-                }
-                let str_end = pos
-                if pos < src_size { pos = pos + 1 }  // skip closing "
-                // Emit inline print
-                cp = em_print(code, cp, src, str_start, str_end - str_start)
-                // Skip to closing )
-                while pos < src_size && rd(src, pos) != 41 { pos = pos + 1 }
-                if pos < src_size { pos = pos + 1 }
-            }
-        } else if is_digit(rd(src, pos)) == 1 {
-            // Integer literal — this is the return value
-            var val: i64 = 0
-            while pos < src_size && is_digit(rd(src, pos)) == 1 {
-                val = val * 10 + rd(src, pos) - 48
-                pos = pos + 1
-            }
-            // mov rax, val
-            cp = em_imm64(code, cp, val)
-        } else {
-            // Skip other tokens
-            if is_alpha(rd(src, pos)) == 1 {
-                while pos < src_size && is_alnum(rd(src, pos)) == 1 { pos = pos + 1 }
-            } else {
-                pos = pos + 1
-            }
-        }
-    }
-
-    // Epilogue: leave; ret
-    cp = e2(code, cp, 0xC9, 0xC3)
-
-    print("boot1: fn code="); print_int(cp - fn_off); print(" bytes\n")
-
-    // Emit entry trampoline
-    let tramp = cp
-    // mov [rip+disp], rsp
-    cp = e3(code, cp, 0x48, 0x89, 0x25)
-    cp = ei32(code, cp, 0 - (cp + 4))
-    // call main
-    cp = e1(code, cp, 0xE8)
-    cp = ei32(code, cp, fn_off - (cp + 4))
-    // mov edi, eax; mov eax, 60; syscall
-    cp = e2(code, cp, 0x89, 0xC7)
-    cp = e1(code, cp, 0xB8)
-    cp = ei32(code, cp, 60)
-    cp = e2(code, cp, 0x0F, 0x05)
-
-    // Build ELF
-    var elf: [i8; 262144] = [0; 262144]
-    let text_off: i64 = 4096
-    let base: i64 = 0x400000
-    let entry = base + text_off + tramp
-    let fsz = text_off + cp
-    write_ehdr(elf, entry, fsz, base)
-
-    // Copy code
-    var ci: i64 = 0
-    while ci < cp { elf[(text_off + ci) as usize] = code[ci as usize]; ci = ci + 1 }
-
-    write_file(output_path, elf, fsz)
-    print("boot1: wrote ELF "); print_int(fsz); print(" bytes\n")
-    0
+    if arg_count()<2 { print("Usage: boot1 <src> <out>\n"); return 1 }
+    let sp=get_arg(0); let op=get_arg(1); let ss=file_size(sp); let s: [i8; 1048576]=read_file(sp)
+    var c: [i8; 262144]=[0; 262144]; var cp: i64=16
+    cp=e1(c,cp,0x55); cp=e3(c,cp,0x48,0x89,0xE5); cp=e3(c,cp,0x48,0x81,0xEC); cp=w4(c,cp,2048)
+    var p: i64=0; while p<ss&&rd(s,p)!=123 { p=p+1 }; if p<ss { p=p+1 }
+    while p<ss&&rd(s,p)!=125 { while p<ss { let x=rd(s,p); if x==32||x==9||x==13||x==10 { p=p+1 } else { break } }; if p>=ss||rd(s,p)==125 { break }; if rd(s,p)==112&&p+5<ss&&rd(s,p+5)==40 { p=p+6; while p<ss&&rd(s,p)!=34 { p=p+1 }; if p<ss { p=p+1; let st=p; while p<ss&&rd(s,p)!=34 { if rd(s,p)==92 { p=p+2 } else { p=p+1 } }; let se=p; if p<ss { p=p+1 }; cp=ep(c,cp,s,st,se-st); while p<ss&&rd(s,p)!=41 { p=p+1 }; if p<ss { p=p+1 } }
+    } else if id(rd(s,p))==1 { var v: i64=0; while p<ss&&id(rd(s,p))==1 { v=v*10+rd(s,p)-48; p=p+1 }; cp=mi(c,cp,v) } else { p=p+1 } }
+    cp=e2(c,cp,0xC9,0xC3); let tr=cp; cp=e3(c,cp,0x48,0x89,0x25); cp=w4(c,cp,0-(cp+4)); cp=e1(c,cp,0xE8); cp=w4(c,cp,16-(cp+4)); cp=e2(c,cp,0x89,0xC7); cp=e1(c,cp,0xB8); cp=w4(c,cp,60); cp=e2(c,cp,0x0F,0x05)
+    var ef: [i8; 262144]=[0; 262144]; let ba: i64=0x400000; let fs=4096+cp; wh(ef,ba+4096+tr,fs,ba); var ci: i64=0; while ci<cp { ef[(4096+ci) as usize]=c[ci as usize]; ci=ci+1 }; write_file(op,ef,fs); 0
 }

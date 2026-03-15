@@ -303,7 +303,146 @@ fn compile_primary(code: [i8; 262144], st: [i64; 8192], src: [i8; 1048576], tk: 
             var is_print_int: i64 = 0
             if nlen == 9 && rd(src,nstart)==112 && rd(src,nstart+1)==114 && rd(src,nstart+2)==105 && rd(src,nstart+3)==110 && rd(src,nstart+4)==116 && rd(src,nstart+5)==95 && rd(src,nstart+6)==105 && rd(src,nstart+7)==110 && rd(src,nstart+8)==116 { is_print_int = 1 }
 
-            if is_print == 1 && tk[t] == 3 {
+            // Check runtime builtins
+            var is_arg_count: i64 = 0
+            if nlen==9 && rd(src,nstart)==97 && rd(src,nstart+1)==114 && rd(src,nstart+2)==103 && rd(src,nstart+3)==95 && rd(src,nstart+4)==99 && rd(src,nstart+5)==111 && rd(src,nstart+6)==117 && rd(src,nstart+7)==110 && rd(src,nstart+8)==116 { is_arg_count=1 }
+            var is_get_arg: i64 = 0
+            if nlen==7 && rd(src,nstart)==103 && rd(src,nstart+1)==101 && rd(src,nstart+2)==116 && rd(src,nstart+3)==95 && rd(src,nstart+4)==97 && rd(src,nstart+5)==114 && rd(src,nstart+6)==103 { is_get_arg=1 }
+            var is_file_size: i64 = 0
+            if nlen==9 && rd(src,nstart)==102 && rd(src,nstart+1)==105 && rd(src,nstart+2)==108 && rd(src,nstart+3)==101 && rd(src,nstart+4)==95 && rd(src,nstart+5)==115 && rd(src,nstart+6)==105 && rd(src,nstart+7)==122 && rd(src,nstart+8)==101 { is_file_size=1 }
+            var is_read_file: i64 = 0
+            if nlen==9 && rd(src,nstart)==114 && rd(src,nstart+1)==101 && rd(src,nstart+2)==97 && rd(src,nstart+3)==100 && rd(src,nstart+4)==95 && rd(src,nstart+5)==102 && rd(src,nstart+6)==105 && rd(src,nstart+7)==108 && rd(src,nstart+8)==101 { is_read_file=1 }
+            var is_write_file: i64 = 0
+            if nlen==10 && rd(src,nstart)==119 && rd(src,nstart+1)==114 && rd(src,nstart+2)==105 && rd(src,nstart+3)==116 && rd(src,nstart+4)==101 && rd(src,nstart+5)==95 && rd(src,nstart+6)==102 && rd(src,nstart+7)==105 && rd(src,nstart+8)==108 && rd(src,nstart+9)==101 { is_write_file=1 }
+
+            if is_arg_count == 1 {
+                // arg_count(): load saved_rsp, deref to argc, subtract 1
+                if tk[t] == 21 { t = t + 1 }
+                // code[0..7] at runtime address 0x401000 holds saved RSP
+                cp = em_imm64(code, cp, 0x401000)
+                cp = e3(code, cp, 0x48, 0x8B, 0x00)  // mov rax, [rax] — saved_rsp
+                cp = e3(code, cp, 0x48, 0x8B, 0x00)  // mov rax, [rax] — argc
+                cp = e3(code, cp, 0x48, 0xFF, 0xC8)   // dec rax
+            } else if is_get_arg == 1 {
+                // get_arg(n): argv[n+1] = [saved_rsp + 8*(n+2)]
+                st[0] = cp; st[1] = t
+                compile_expr_prec(code, st, src, tk, ts, te, tv, loc_ns, loc_ne, loc_slot, loc_is_arr, fn_ns, fn_ne, fn_off, strbuf, 0)
+                cp = st[0]; t = st[1]
+                if tk[t] == 21 { t = t + 1 }
+                // rax = n
+                cp = e3(code, cp, 0x48, 0x83, 0xC0); cp = e1(code, cp, 2)  // add rax, 2
+                cp = e1(code, cp, 0x50)  // push rax
+                cp = em_imm64(code, cp, 0x401000)
+                cp = e3(code, cp, 0x48, 0x8B, 0x00)  // mov rax, [rax] — saved_rsp
+                cp = e1(code, cp, 0x59)  // pop rcx
+                // mov rax, [rax + rcx*8]  — ModRM=04, SIB=C8
+                cp = e3(code, cp, 0x48, 0x8B, 0x04); cp = e1(code, cp, 0xC8)
+            } else if is_file_size == 1 {
+                // file_size(path): open, fstat, read st_size, close, return size
+                st[0] = cp; st[1] = t
+                compile_expr_prec(code, st, src, tk, ts, te, tv, loc_ns, loc_ne, loc_slot, loc_is_arr, fn_ns, fn_ne, fn_off, strbuf, 0)
+                cp = st[0]; t = st[1]
+                if tk[t] == 21 { t = t + 1 }
+                // rax = path. open(path, O_RDONLY)
+                cp = e3(code, cp, 0x48, 0x89, 0xC7)  // mov rdi, rax
+                cp = e3(code, cp, 0x48, 0x31, 0xF6)  // xor rsi, rsi
+                cp = e3(code, cp, 0x48, 0x31, 0xD2)  // xor rdx, rdx
+                cp = e1(code, cp, 0xB8); cp = ei32(code, cp, 2)  // mov eax, 2
+                cp = e2(code, cp, 0x0F, 0x05)  // syscall -> fd in rax
+                // rax=fd. sub rsp,176 for stat buf, then fstat
+                cp = e3(code, cp, 0x48, 0x89, 0xC7)  // mov rdi, rax (fd)
+                cp = e3(code, cp, 0x48, 0x81, 0xEC); cp = ei32(code, cp, 176)  // sub rsp, 176
+                cp = e3(code, cp, 0x48, 0x89, 0xE6)  // mov rsi, rsp (stat buf)
+                cp = e1(code, cp, 0x57)  // push rdi (save fd below stat)
+                cp = e1(code, cp, 0xB8); cp = ei32(code, cp, 5)  // mov eax, 5 (fstat)
+                cp = e2(code, cp, 0x0F, 0x05)
+                // stack: [fd(8)] then stat_buf starts at rsp+8. st_size at offset 48 = rsp+56
+                cp = e3(code, cp, 0x48, 0x8B, 0x44); cp = e2(code, cp, 0x24, 56)  // mov rax, [rsp+56]
+                cp = e1(code, cp, 0x50)  // push rax (size)
+                // close(fd): fd at [rsp+8+8]=rsp+16... no. stack: [size][fd][stat176]
+                // fd at [rsp+8]
+                cp = e3(code, cp, 0x48, 0x8B, 0x7C); cp = e2(code, cp, 0x24, 8)  // mov rdi, [rsp+8]
+                cp = e1(code, cp, 0xB8); cp = ei32(code, cp, 3)
+                cp = e2(code, cp, 0x0F, 0x05)
+                cp = e1(code, cp, 0x58)  // pop rax (size)
+                cp = e3(code, cp, 0x48, 0x81, 0xC4); cp = ei32(code, cp, 184)  // add rsp, 8+176
+            } else if is_read_file == 1 {
+                // read_file(path): mmap 1MB, open, read, close, return buf
+                st[0] = cp; st[1] = t
+                compile_expr_prec(code, st, src, tk, ts, te, tv, loc_ns, loc_ne, loc_slot, loc_is_arr, fn_ns, fn_ne, fn_off, strbuf, 0)
+                cp = st[0]; t = st[1]
+                if tk[t] == 21 { t = t + 1 }
+                // rax = path
+                cp = e1(code, cp, 0x50)  // push rax (path)
+                // mmap(NULL, 1048576, 3, 0x22, -1, 0)
+                cp = e3(code, cp, 0x48, 0x31, 0xFF)
+                cp = e2(code, cp, 0x48, 0xBE); cp = ei64(code, cp, 1048576)
+                cp = e1(code, cp, 0xBA); cp = ei32(code, cp, 3)
+                cp = e2(code, cp, 0x41, 0xBA); cp = ei32(code, cp, 0x22)
+                cp = e3(code, cp, 0x49, 0xC7, 0xC0); cp = ei32(code, cp, 0-1)
+                cp = e3(code, cp, 0x4D, 0x31, 0xC9)
+                cp = e1(code, cp, 0xB8); cp = ei32(code, cp, 9)
+                cp = e2(code, cp, 0x0F, 0x05)
+                // stack: [path]. rax=buf
+                cp = e1(code, cp, 0x50)  // push rax (buf). stack: [buf][path]
+                // open(path, O_RDONLY)
+                cp = e3(code, cp, 0x48, 0x8B, 0x7C); cp = e2(code, cp, 0x24, 8)  // mov rdi, [rsp+8] (path)
+                cp = e3(code, cp, 0x48, 0x31, 0xF6)
+                cp = e3(code, cp, 0x48, 0x31, 0xD2)
+                cp = e1(code, cp, 0xB8); cp = ei32(code, cp, 2)
+                cp = e2(code, cp, 0x0F, 0x05)
+                // rax=fd. read(fd, buf, 1048576)
+                cp = e3(code, cp, 0x48, 0x89, 0xC7)  // mov rdi, rax
+                cp = e1(code, cp, 0x50)  // push rdi (fd). stack: [fd][buf][path]
+                cp = e3(code, cp, 0x48, 0x8B, 0x74); cp = e2(code, cp, 0x24, 8)  // mov rsi, [rsp+8] (buf)
+                cp = e2(code, cp, 0x48, 0xBA); cp = ei64(code, cp, 1048576)
+                cp = e1(code, cp, 0xB8); cp = ei32(code, cp, 0)
+                cp = e2(code, cp, 0x0F, 0x05)
+                // close(fd)
+                cp = e1(code, cp, 0x5F)  // pop rdi (fd)
+                cp = e1(code, cp, 0xB8); cp = ei32(code, cp, 3)
+                cp = e2(code, cp, 0x0F, 0x05)
+                // return buf
+                cp = e1(code, cp, 0x58)  // pop rax (buf)
+                cp = e3(code, cp, 0x48, 0x83, 0xC4); cp = e1(code, cp, 8)  // add rsp, 8 (path)
+            } else if is_write_file == 1 {
+                // write_file(path, data, len): compile 3 args
+                var wf_argc: i64 = 0
+                while tk[t] != 21 && tk[t] != 0 {
+                    st[0] = cp; st[1] = t
+                    compile_expr_prec(code, st, src, tk, ts, te, tv, loc_ns, loc_ne, loc_slot, loc_is_arr, fn_ns, fn_ne, fn_off, strbuf, 0)
+                    cp = st[0]; t = st[1]
+                    cp = e1(code, cp, 0x50)
+                    wf_argc = wf_argc + 1
+                    if tk[t] == 26 { t = t + 1 }
+                }
+                if tk[t] == 21 { t = t + 1 }
+                // stack: [len][data][path]
+                cp = e1(code, cp, 0x59)  // pop rcx (len)
+                cp = e1(code, cp, 0x5E)  // pop rsi (data)
+                cp = e1(code, cp, 0x5F)  // pop rdi (path)
+                // save data+len for write
+                cp = e1(code, cp, 0x51)  // push rcx (len)
+                cp = e1(code, cp, 0x56)  // push rsi (data)
+                // open(path, 0x241, 0644)
+                cp = e2(code, cp, 0x48, 0xBE); cp = ei64(code, cp, 0x241)
+                cp = e1(code, cp, 0xBA); cp = ei32(code, cp, 420)
+                cp = e1(code, cp, 0xB8); cp = ei32(code, cp, 2)
+                cp = e2(code, cp, 0x0F, 0x05)
+                // rax=fd. write(fd, data, len). stack: [data][len]
+                cp = e3(code, cp, 0x48, 0x89, 0xC7)  // mov rdi, rax
+                cp = e1(code, cp, 0x57)  // push rdi (fd). stack: [fd][data][len]
+                cp = e3(code, cp, 0x48, 0x8B, 0x74); cp = e2(code, cp, 0x24, 8)  // mov rsi, [rsp+8] (data)
+                cp = e3(code, cp, 0x48, 0x8B, 0x54); cp = e2(code, cp, 0x24, 16)  // mov rdx, [rsp+16] (len)
+                cp = e1(code, cp, 0xB8); cp = ei32(code, cp, 1)
+                cp = e2(code, cp, 0x0F, 0x05)
+                // close(fd)
+                cp = e1(code, cp, 0x5F)  // pop rdi (fd)
+                cp = e1(code, cp, 0xB8); cp = ei32(code, cp, 3)
+                cp = e2(code, cp, 0x0F, 0x05)
+                cp = e3(code, cp, 0x48, 0x83, 0xC4); cp = e1(code, cp, 16)  // add rsp, 16
+                cp = e2(code, cp, 0x31, 0xC0)  // xor eax, eax
+            } else if is_print == 1 && tk[t] == 3 {
                 // print("literal") — inline
                 let slen = decode_str(src, ts[t], te[t], strbuf)
                 cp = em_print_str(code, cp, strbuf, slen)
@@ -365,9 +504,9 @@ fn compile_primary(code: [i8; 262144], st: [i64; 8192], src: [i8; 1048576], tk: 
             let li = find_local(src, tk, ts, te, t, loc_ns, loc_ne, loc_count)
             if li >= 0 {
                 if loc_is_arr[li] > 0 {
-                    // Array — load address (lea rax, [rbp - slot])
+                    // Array — load pointer from slot (mov rax, [rbp - slot])
                     let slot = loc_slot[li]
-                    cp = e3(code, cp, 0x48, 0x8D, 0x85)
+                    cp = e3(code, cp, 0x48, 0x8B, 0x85)
                     cp = ei32(code, cp, 0 - slot)
                 } else {
                     cp = e3(code, cp, 0x48, 0x8B, 0x85)  // mov rax, [rbp-off]
@@ -402,8 +541,8 @@ fn compile_primary(code: [i8; 262144], st: [i64; 8192], src: [i8; 1048576], tk: 
         if tk[t] == 13 {  // as — skip type cast (no-op)
             post = 1
             t = t + 1
-            // Skip type name
-            while tk[t] == 1 || tk[t] == 2 { t = t + 1 }
+            // Skip type name (single ident like i8, i64, usize)
+            if tk[t] == 1 || tk[t] == 2 { t = t + 1 }
         }
     }
 
@@ -480,6 +619,7 @@ fn compile_block(code: [i8; 262144], st: [i64; 8192], src: [i8; 1048576], tk: [i
     var brk_count = st[4]
 
     while tk[t] != 23 && tk[t] != 0 {
+        st[3] = loc_count
         let kind = tk[t]
         if kind == 27 { t = t + 1 }  // skip ;
         else if kind == 5 || kind == 6 {  // let / var
@@ -498,7 +638,7 @@ fn compile_block(code: [i8; 262144], st: [i64; 8192], src: [i8; 1048576], tk: [i
                     if tk[t] == 27 { t = t + 1 }
                     if tk[t] == 2 { arr_size = tv[t]; t = t + 1 }
                     if tk[t] == 25 { t = t + 1 }
-                    is_arr = arr_size
+                    is_arr = 1
                 } else {
                     // Skip type tokens until = or { or statement boundary
                     while tk[t] != 30 && tk[t] != 22 && tk[t] != 23 && tk[t] != 0 {
@@ -512,7 +652,7 @@ fn compile_block(code: [i8; 262144], st: [i64; 8192], src: [i8; 1048576], tk: [i
                 loc_ns[loc_count] = vns
                 loc_ne[loc_count] = vne
                 loc_slot[loc_count] = next_slot
-                loc_is_arr[loc_count] = arr_size
+                loc_is_arr[loc_count] = 1
                 loc_count = loc_count + 1
                 next_slot = next_slot + 8
             } else {
@@ -768,9 +908,9 @@ fn compile_block(code: [i8; 262144], st: [i64; 8192], src: [i8; 1048576], tk: [i
                     // rax = value, pop rcx = index
                     cp = e1(code, cp, 0x59)  // pop rcx
                     if li >= 0 {
-                        // lea rdx, [rbp - slot]
+                        // mov rdx, [rbp - slot] (load array pointer)
                         let slot = loc_slot[li]
-                        cp = e3(code, cp, 0x48, 0x8D, 0x95)
+                        cp = e3(code, cp, 0x48, 0x8B, 0x95)
                         cp = ei32(code, cp, 0 - slot)
                         // mov [rdx + rcx], al   (byte store for i8 arrays)
                         cp = e3(code, cp, 0x88, 0x04, 0x0A)
@@ -906,12 +1046,18 @@ fn compile_all(code: [i8; 262144], src: [i8; 1048576], tk: [i64; 16384], ts: [i6
                 loc_ns[loc_count] = ts[t]
                 loc_ne[loc_count] = te[t]
                 loc_slot[loc_count] = next_slot
-                loc_is_arr[loc_count] = 0
-                loc_count = loc_count + 1
-                next_slot = next_slot + 8
+                var p_is_arr: i64 = 0
+                let pt_save = t
                 param_count = param_count + 1
                 t = t + 1
-                if tk[t] == 28 { t=t+1; var d: i64 = 0; while tk[t]!=0 { if tk[t]==24 { d=d+1 }; if tk[t]==25 { d=d-1 }; if d==0 && (tk[t]==26||tk[t]==21) { break }; t=t+1 } }
+                if tk[t] == 28 {
+                    t = t + 1
+                    if tk[t] == 24 { p_is_arr = 1 }
+                    var d: i64 = 0; while tk[t]!=0 { if tk[t]==24 { d=d+1 }; if tk[t]==25 { d=d-1 }; if d==0 && (tk[t]==26||tk[t]==21) { break }; t=t+1 }
+                }
+                loc_is_arr[loc_count] = p_is_arr
+                loc_count = loc_count + 1
+                next_slot = next_slot + 8
             }
             if tk[t] == 26 { t = t + 1 }
         }
