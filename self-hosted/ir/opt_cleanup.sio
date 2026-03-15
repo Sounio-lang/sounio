@@ -4046,6 +4046,39 @@ fn ocp_const_fold(func: IrFunction) -> IrFunction with Mut, Div, Panic {
             }
         }
 
+        // Sprint 220 Block ED: Add-sub expand — (x+y)-(x-z) → y+z.
+        // Proof: (x+y)-(x-z) = x+y-x+z = y+z. QED. Commutative: (y+x)-(x-z) → y+z.
+        // Zero new arrays: uses aq_add_rr_valid/lhs/rhs (Block AQ) + al_is_sub/lhs/rhs (Block AL).
+        // SOTA: LLVM InstCombineAddSub; algebraic simplification.
+        if ocp_is_binop(result.instrs[i as usize].op) {
+            let ed_instr = result.instrs[i as usize]
+            let ed_s1 = ed_instr.src1; let ed_s2 = ed_instr.src2
+            let ed_s1_ok = ed_s1 >= 0 && ed_s1 < 256; let ed_s2_ok = ed_s2 >= 0 && ed_s2 < 256
+            if ed_instr.bin_op == BinaryOp::OpSub && ed_s1_ok && ed_s2_ok {
+                // (x+y)-(x-z): s1=ADD-rr, s2=SUB where al_sub_lhs==add lhs or rhs
+                if aq_add_rr_valid[ed_s1 as usize] && al_is_sub[ed_s2 as usize] {
+                    let ed_al = aq_add_rr_lhs[ed_s1 as usize]
+                    let ed_ar = aq_add_rr_rhs[ed_s1 as usize]
+                    let ed_sl = al_sub_lhs[ed_s2 as usize]
+                    let ed_sr = al_sub_rhs[ed_s2 as usize]
+                    // x is the shared: ed_al==ed_sl → y=ed_ar, z=ed_sr
+                    if ed_al == ed_sl {
+                        result.instrs[i as usize] = ir_binop(ed_instr.dst, ed_ar, BinaryOp::OpAdd, ed_sr)
+                        aq_add_rr_valid[ed_instr.dst as usize] = true
+                        aq_add_rr_lhs[ed_instr.dst as usize] = ed_ar
+                        aq_add_rr_rhs[ed_instr.dst as usize] = ed_sr
+                    }
+                    // ed_ar==ed_sl → y=ed_al, z=ed_sr (commutative add)
+                    if ed_ar == ed_sl {
+                        result.instrs[i as usize] = ir_binop(ed_instr.dst, ed_al, BinaryOp::OpAdd, ed_sr)
+                        aq_add_rr_valid[ed_instr.dst as usize] = true
+                        aq_add_rr_lhs[ed_instr.dst as usize] = ed_al
+                        aq_add_rr_rhs[ed_instr.dst as usize] = ed_sr
+                    }
+                }
+            }
+        }
+
         // Sprint 177 Block CM: AND complement XOR partition — (x & C) ^ (x & ~C) → x.
         // Proof: C-bits: (xi&1)^(xi&0)=xi^0=xi. Non-C: (xi&0)^(xi&1)=0^xi=xi. QED.
         // Dual of Block CC (OR partition). Commutative: (x&~C)^(x&C) → x.
