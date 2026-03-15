@@ -16368,6 +16368,85 @@ fn compiler_main_test_dy_no_fold_or_outer() -> bool with Mut, Div, Panic {
     opt.instrs[2 as usize].bin_op != BinaryOp::OpBitAnd
 }
 
+// Sprint 238 Block EV: Cross-sub add collapse — (x-y)+(z-x) → z-y (T1094-T1099)
+fn compiler_main_test_ev_cross_sub_add_basic() -> bool with Mut, Div, Panic {
+    // r3=r0-r1, r4=r2-r0, r5=r3+r4 → r5 becomes r2-r1
+    var instrs: [IrInstr; 128] = cp_empty_instrs()
+    instrs[0 as usize] = ir_binop(3, 0, BinaryOp::OpSub, 1)
+    instrs[1 as usize] = ir_binop(4, 2, BinaryOp::OpSub, 0)
+    instrs[2 as usize] = ir_binop(5, 3, BinaryOp::OpAdd, 4)
+    let func = cp_make_test_func(instrs, 3)
+    let opt = opt_cleanup_function(func)
+    opt.instrs[2 as usize].op == IrOpcode::IrBinOp
+        && opt.instrs[2 as usize].bin_op == BinaryOp::OpSub
+        && opt.instrs[2 as usize].src1 == 2
+        && opt.instrs[2 as usize].src2 == 1
+}
+
+fn compiler_main_test_ev_cross_sub_add_comm() -> bool with Mut, Div, Panic {
+    // (z-x)+(x-y) → z-y (commutative outer ADD)
+    var instrs: [IrInstr; 128] = cp_empty_instrs()
+    instrs[0 as usize] = ir_binop(3, 2, BinaryOp::OpSub, 0)
+    instrs[1 as usize] = ir_binop(4, 0, BinaryOp::OpSub, 1)
+    instrs[2 as usize] = ir_binop(5, 3, BinaryOp::OpAdd, 4)
+    let func = cp_make_test_func(instrs, 3)
+    let opt = opt_cleanup_function(func)
+    opt.instrs[2 as usize].op == IrOpcode::IrBinOp
+        && opt.instrs[2 as usize].bin_op == BinaryOp::OpSub
+        && opt.instrs[2 as usize].src1 == 2
+        && opt.instrs[2 as usize].src2 == 1
+}
+
+fn compiler_main_test_ev_cross_sub_add_self_cancel() -> bool with Mut, Div, Panic {
+    // (x-y)+(y-x) = 0 → via Block A (x-x→0) after EV fires: z=y,y=y → y-y→0
+    var instrs: [IrInstr; 128] = cp_empty_instrs()
+    instrs[0 as usize] = ir_binop(2, 0, BinaryOp::OpSub, 1)
+    instrs[1 as usize] = ir_binop(3, 1, BinaryOp::OpSub, 0)
+    instrs[2 as usize] = ir_binop(4, 2, BinaryOp::OpAdd, 3)
+    let func = cp_make_test_func(instrs, 3)
+    let opt = opt_cleanup_function(func)
+    // EV: (x-y)+(y-x)→y-y=0 via Block A x-x→IrLoadImm(0)
+    opt.instrs[2 as usize].op == IrOpcode::IrLoadImm
+        && opt.instrs[2 as usize].imm_i64 == 0
+}
+
+fn compiler_main_test_ev_no_fold_diff_x() -> bool with Mut, Div, Panic {
+    // (r0-r1)+(r2-r3): no shared x → no EV fold
+    var instrs: [IrInstr; 128] = cp_empty_instrs()
+    instrs[0 as usize] = ir_binop(4, 0, BinaryOp::OpSub, 1)
+    instrs[1 as usize] = ir_binop(5, 2, BinaryOp::OpSub, 3)
+    instrs[2 as usize] = ir_binop(6, 4, BinaryOp::OpAdd, 5)
+    let func = cp_make_test_func(instrs, 3)
+    let opt = opt_cleanup_function(func)
+    opt.instrs[2 as usize].op == IrOpcode::IrBinOp
+        && opt.instrs[2 as usize].bin_op == BinaryOp::OpAdd
+}
+
+fn compiler_main_test_ev_no_fold_sub_outer() -> bool with Mut, Div, Panic {
+    // (x-y)-(z-x): outer SUB not ADD → no EV fold
+    var instrs: [IrInstr; 128] = cp_empty_instrs()
+    instrs[0 as usize] = ir_binop(3, 0, BinaryOp::OpSub, 1)
+    instrs[1 as usize] = ir_binop(4, 2, BinaryOp::OpSub, 0)
+    instrs[2 as usize] = ir_binop(5, 3, BinaryOp::OpSub, 4)
+    let func = cp_make_test_func(instrs, 3)
+    let opt = opt_cleanup_function(func)
+    // Block EP: (x-y)-(y-x)→(x-y)+(x-y) won't fire here (z≠y unless z==y)
+    opt.instrs[2 as usize].op == IrOpcode::IrBinOp
+        && opt.instrs[2 as usize].bin_op == BinaryOp::OpSub
+}
+
+fn compiler_main_test_ev_no_fold_one_not_sub() -> bool with Mut, Div, Panic {
+    // (x-y)+(x+z): s2 is ADD not SUB → no EV fold
+    var instrs: [IrInstr; 128] = cp_empty_instrs()
+    instrs[0 as usize] = ir_binop(3, 0, BinaryOp::OpSub, 1)
+    instrs[1 as usize] = ir_binop(4, 2, BinaryOp::OpAdd, 0)
+    instrs[2 as usize] = ir_binop(5, 3, BinaryOp::OpAdd, 4)
+    let func = cp_make_test_func(instrs, 3)
+    let opt = opt_cleanup_function(func)
+    opt.instrs[2 as usize].op == IrOpcode::IrBinOp
+        && opt.instrs[2 as usize].bin_op == BinaryOp::OpAdd
+}
+
 // Sprint 237 Block EU: Add-OR diff to AND — (x+y)-(x|y) → x&y (T1088-T1093)
 fn compiler_main_test_eu_add_or_sub_and_basic() -> bool with Mut, Div, Panic {
     // r2=r0+r1, r3=r0|r1, r4=r2-r3 → r4 becomes r0&r1
@@ -18066,7 +18145,7 @@ fn compiler_main_test_dz_no_fold_or_outer() -> bool with Mut, Div, Panic {
 
 fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
     var passed: i64 = 0
-    let total: i64 = 1093
+    let total: i64 = 1099
 
     println("=== compiler/main.sio self-tests ===")
 
@@ -22994,6 +23073,32 @@ fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
         passed = passed + 1
         println("  T961 OK: Sprint 215 Block DY: r0|(r1|~r0) no fold OR outer")
     } else { println("  FAIL: T961") }
+
+    // Sprint 238 Block EV: Cross-sub add collapse (T1094-T1099)
+    if compiler_main_test_ev_cross_sub_add_basic() {
+        passed = passed + 1
+        println("  T1094 OK: Sprint 238 Block EV: (r0-r1)+(r2-r0) -> r2-r1")
+    } else { println("  FAIL: T1094") }
+    if compiler_main_test_ev_cross_sub_add_comm() {
+        passed = passed + 1
+        println("  T1095 OK: Sprint 238 Block EV: (r2-r0)+(r0-r1) -> r2-r1 comm")
+    } else { println("  FAIL: T1095") }
+    if compiler_main_test_ev_cross_sub_add_self_cancel() {
+        passed = passed + 1
+        println("  T1096 OK: Sprint 238 Block EV: (r0-r1)+(r1-r0) -> 0 self-cancel")
+    } else { println("  FAIL: T1096") }
+    if compiler_main_test_ev_no_fold_diff_x() {
+        passed = passed + 1
+        println("  T1097 OK: Sprint 238 Block EV: (r0-r1)+(r2-r3) no fold diff x")
+    } else { println("  FAIL: T1097") }
+    if compiler_main_test_ev_no_fold_sub_outer() {
+        passed = passed + 1
+        println("  T1098 OK: Sprint 238 Block EV: (r0-r1)-(r2-r0) no EV fold sub outer")
+    } else { println("  FAIL: T1098") }
+    if compiler_main_test_ev_no_fold_one_not_sub() {
+        passed = passed + 1
+        println("  T1099 OK: Sprint 238 Block EV: (r0-r1)+(r2+r0) no fold one not sub")
+    } else { println("  FAIL: T1099") }
 
     // Sprint 237 Block EU: Add-OR diff to AND (T1088-T1093)
     if compiler_main_test_eu_add_or_sub_and_basic() {

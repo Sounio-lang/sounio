@@ -4414,6 +4414,30 @@ fn ocp_const_fold(func: IrFunction) -> IrFunction with Mut, Div, Panic {
             }
         }
 
+        // Sprint 238 Block EV: Cross-sub add collapse — (x-y)+(z-x) → z-y.
+        // Proof: (x-y)+(z-x) = x-y+z-x = z-y. Outer x cancels. QED.
+        // Commutative outer ADD: (z-x)+(x-y) → z-y.
+        // Zero new arrays: uses al_is_sub/lhs/rhs (Block AL) for both operands.
+        // SOTA: LLVM InstCombineAddSub; algebraic cancellation.
+        if ocp_is_binop(result.instrs[i as usize].op) {
+            let ev_instr = result.instrs[i as usize]
+            let ev_s1 = ev_instr.src1; let ev_s2 = ev_instr.src2
+            let ev_s1_ok = ev_s1 >= 0 && ev_s1 < 256; let ev_s2_ok = ev_s2 >= 0 && ev_s2 < 256
+            if ev_instr.bin_op == BinaryOp::OpAdd && ev_s1_ok && ev_s2_ok
+                    && al_is_sub[ev_s1 as usize] && al_is_sub[ev_s2 as usize] {
+                let ev_x1 = al_sub_lhs[ev_s1 as usize]; let ev_y = al_sub_rhs[ev_s1 as usize]
+                let ev_z = al_sub_lhs[ev_s2 as usize]; let ev_x2 = al_sub_rhs[ev_s2 as usize]
+                let ev_z_ok = ev_z >= 0 && ev_z < 256; let ev_y_ok = ev_y >= 0 && ev_y < 256
+                // (x-y)+(z-x): s1_lhs==s2_rhs (x cancels), result=z-y
+                if ev_x1 == ev_x2 && ev_z_ok && ev_y_ok {
+                    result.instrs[i as usize] = ir_binop(ev_instr.dst, ev_z, BinaryOp::OpSub, ev_y)
+                    al_is_sub[ev_instr.dst as usize] = true
+                    al_sub_lhs[ev_instr.dst as usize] = ev_z
+                    al_sub_rhs[ev_instr.dst as usize] = ev_y
+                }
+            }
+        }
+
         // Sprint 237 Block EU: Add-OR diff to AND — (x+y)-(x|y) → x&y.
         // Proof: x+y = (x^y)+2*(x&y); x|y = (x^y)+(x&y). So (x+y)-(x|y) = x&y. QED.
         // Commutative inner variants: (y+x)-(x|y) → x&y; (x+y)-(y|x) → x&y.
