@@ -39,6 +39,11 @@
 #define MAX_MATCH_ARMS 256
 #define MAX_CALL_ARGS 16
 
+/* Global data offsets (at code offset 0) */
+#define GLOBAL_SAVED_RSP 0   /* offset 0: saved initial rsp (8 bytes) */
+#define GLOBAL_HEAP_PTR  8   /* offset 8: heap bump pointer (8 bytes) */
+#define GLOBAL_DATA_SIZE 16
+
 /* ================================================================
  * NAME (fixed-size identifier)
  * ================================================================ */
@@ -1578,10 +1583,14 @@ static void write_elf(const char *path) {
     int total_code = g_code_len;
 
     /*
-     * Trampoline: call main, exit.
-     * Simple — no arg passing for now (arg_count/get_arg are stubs).
+     * Trampoline entry: save rsp to GLOBAL_SAVED_RSP, call main, exit.
      */
-    int tramp_off = total_code;
+    int tramp_off = g_code_len;
+
+    /* mov [rip + disp32], rsp — save initial stack pointer to offset 0 */
+    emit(0x48); emit(0x89); emit(0x25);
+    int32_t save_disp = GLOBAL_SAVED_RSP - (g_code_len + 4);
+    emit32(save_disp);
 
     /* call main */
     int moff = (g_main_fn_idx >= 0) ? g_fn_offsets[g_main_fn_idx] : 0;
@@ -1623,12 +1632,12 @@ static void write_elf(const char *path) {
 
     /* Program header at offset 64 (56 bytes) */
     W32(64, 1);    /* p_type = PT_LOAD */
-    W32(68, 5);    /* p_flags = R|X */
+    W32(68, 7);    /* p_flags = R|W|X (needed for global data like saved_rsp) */
     W64(72, 0);    /* p_offset */
     W64(80, (int64_t)base_addr); /* p_vaddr */
     W64(88, (int64_t)base_addr); /* p_paddr */
     W64(96, fsz);  /* p_filesz */
-    W64(104, fsz); /* p_memsz */
+    W64(104, fsz + 4*1024*1024); /* p_memsz = filesz + 4MB for heap/bss */
     W64(112, 0x1000); /* p_align */
 
     /* Copy code to text offset */
@@ -1751,22 +1760,166 @@ int main(int argc, char **argv) {
     /* Phase 2: Emit code */
     g_code_len = 0;
 
+    /*
+     * Global data at code offset 0 (before all functions).
+     * Writable because PT_LOAD has RWX flags.
+     */
+    for (int i = 0; i < GLOBAL_DATA_SIZE; i++) emit(0);
+
     /* Emit builtin stubs — return 0 for unimplemented */
     #define EMIT_STUB(idx, name) do { \
         g_fn_offsets[idx] = g_code_len; \
         emit_mov_rax_imm64(0); emit_ret(); \
-        fprintf(stderr, "stage0: builtin=%s off=%d (stub)\n", name, g_fn_offsets[idx]); \
     } while(0)
 
-    EMIT_STUB(print_idx, "print");
-    EMIT_STUB(arg_count_idx, "arg_count");
-    EMIT_STUB(get_arg_idx, "get_arg");
-    EMIT_STUB(read_file_idx, "read_file");
-    EMIT_STUB(file_size_idx, "file_size");
-    EMIT_STUB(write_file_idx, "write_file");
+    /*
+     * print(s: string) — write null-terminated string to stdout
+     * rdi = pointer to null-terminated string
+     */
+    g_fn_offsets[print_idx] = g_code_len;
+    emit_push_rbp(); emit_mov_rbp_rsp(); emit_sub_rsp(16);
+    /* Save string ptr */
+    emit(0x48); emit(0x89); emit(0x7D); emit(0xF8); /* mov [rbp-8], rdi */
+    /* Compute length: scan for null byte */
+    emit(0x48); emit(0x89); emit(0xF8); /* mov rax, rdi */
+    /* strlen loop: */
+    int strlen_top = g_code_len;
+    emit(0x80); emit(0x38); emit(0x00); /* cmp byte [rax], 0 */
+    emit(0x74); emit(0x04); /* je done */
+    emit(0x48); emit(0xFF); emit(0xC0); /* inc rax */
+    int8_t sback = (int8_t)(strlen_top - (g_code_len + 2));
+    emit(0xEB); emit((uint8_t)sback); /* jmp strlen_top */
+    /* done: rax = pointer to null byte; length = rax - rdi */
+    emit(0x48); emit(0x8B); emit(0x7D); emit(0xF8); /* mov rdi, [rbp-8] (restore ptr) */
+    emit(0x48); emit(0x89); emit(0xC2); /* mov rdx, rax (end) */
+    emit(0x48); emit(0x29); emit(0xFA); /* sub rdx, rdi (length) */
+    emit(0x48); emit(0x89); emit(0xFE); /* mov rsi, rdi (buf) */
+    emit(0xBF); emit32(1); /* mov edi, 1 (stdout) */
+    emit(0xB8); emit32(1); /* mov eax, 1 (sys_write) */
+    emit(0x0F); emit(0x05); /* syscall */
+    emit_leave(); emit_ret();
     EMIT_STUB(read_byte_idx, "read_byte");
     EMIT_STUB(str_len_idx, "str_len");
     EMIT_STUB(str_char_at_idx, "str_char_at");
+
+    /*
+     * arg_count() -> i64: return [saved_rsp] (argc from Linux ELF entry)
+     */
+    g_fn_offsets[arg_count_idx] = g_code_len;
+    /* mov rax, [rip + disp32] — load saved_rsp */
+    emit(0x48); emit(0x8B); emit(0x05);
+    emit32(GLOBAL_SAVED_RSP - (g_code_len + 4)); /* RIP-relative to saved_rsp */
+    /* mov rax, [rax] — deref to get argc */
+    emit(0x48); emit(0x8B); emit(0x00);
+    /* sub rax, 1 — don't count program name */
+    emit(0x48); emit(0xFF); emit(0xC8); /* dec rax */
+    emit_ret();
+
+    /*
+     * get_arg(n: i64) -> i64: return argv[n] as pointer
+     * argv[n] = [saved_rsp + 8 + 8*n]
+     * Returns the char* pointer (Sounio treats strings as i64 pointers)
+     */
+    g_fn_offsets[get_arg_idx] = g_code_len;
+    emit_push_rbp(); emit_mov_rbp_rsp();
+    /* rdi = n */
+    /* load saved_rsp into rax */
+    emit(0x48); emit(0x8B); emit(0x05);
+    emit32(GLOBAL_SAVED_RSP - (g_code_len + 4));
+    /* rax = saved_rsp value; argv[n+1] = [rax + 16 + 8*rdi] (skip argc and argv[0]) */
+    emit(0x48); emit(0x8B); emit(0x44); emit(0xF8); emit(0x10); /* mov rax, [rax + rdi*8 + 16] */
+    emit_leave(); emit_ret();
+
+    /*
+     * file_size(path: i64) -> i64: use stat syscall
+     * syscall 4 = stat; struct stat has st_size at offset 48
+     */
+    g_fn_offsets[file_size_idx] = g_code_len;
+    emit_push_rbp(); emit_mov_rbp_rsp(); emit_sub_rsp(256);
+    /* rdi = path (already set) */
+    /* rsi = stat buffer at [rbp-256] */
+    emit(0x48); emit(0x8D); emit(0xB5); emit32(-256); /* lea rsi, [rbp-256] */
+    /* mov eax, 4 (sys_stat) */
+    emit(0xB8); emit32(4);
+    emit(0x0F); emit(0x05); /* syscall */
+    /* mov rax, [rbp-256+48] = [rbp-208] — st_size */
+    emit(0x48); emit(0x8B); emit(0x85); emit32(-208);
+    emit_leave(); emit_ret();
+
+    /*
+     * read_file(path: i64) -> i64: open + read + close, return buffer address
+     * For bootstrap: allocate from heap, read file contents
+     * Returns pointer to buffer (caller provides buf via array)
+     * Actually in bootstrap_v0: read_file is called with path, returns [i8; N] array
+     * For simplicity: mmap a buffer, read into it, return pointer
+     */
+    g_fn_offsets[read_file_idx] = g_code_len;
+    emit_push_rbp(); emit_mov_rbp_rsp(); emit_sub_rsp(48);
+    /* Save path in [rbp-8] */
+    emit(0x48); emit(0x89); emit(0x7D); emit(0xF8); /* mov [rbp-8], rdi */
+    /* open(path, O_RDONLY=0) → fd in rax */
+    /* rdi already = path */
+    emit(0x48); emit(0x31); emit(0xF6); /* xor rsi, rsi (O_RDONLY) */
+    emit(0xB8); emit32(2); /* sys_open */
+    emit(0x0F); emit(0x05);
+    emit(0x48); emit(0x89); emit(0x45); emit(0xF0); /* mov [rbp-16], rax (fd) */
+    /* mmap(NULL, 2MB, PROT_READ|WRITE=3, MAP_PRIVATE|ANON=0x22, -1, 0) */
+    emit(0x48); emit(0x31); emit(0xFF); /* xor rdi, rdi (addr=NULL) */
+    emit(0x48); emit(0xBE); emit64(2*1024*1024); /* mov rsi, 2MB */
+    emit(0xBA); emit32(3); /* mov edx, PROT_R|W */
+    emit(0x41); emit(0xBA); emit32(0x22); /* mov r10d, MAP_PRIVATE|ANON */
+    emit(0x49); emit(0xC7); emit(0xC0); emit32(-1); /* mov r8, -1 */
+    emit(0x4D); emit(0x31); emit(0xC9); /* xor r9, r9 */
+    emit(0xB8); emit32(9); /* sys_mmap */
+    emit(0x0F); emit(0x05);
+    emit(0x48); emit(0x89); emit(0x45); emit(0xE8); /* mov [rbp-24], rax (buf) */
+    /* read(fd, buf, 2MB) */
+    emit(0x48); emit(0x8B); emit(0x7D); emit(0xF0); /* mov rdi, [rbp-16] (fd) */
+    emit(0x48); emit(0x8B); emit(0x75); emit(0xE8); /* mov rsi, [rbp-24] (buf) */
+    emit(0x48); emit(0xBA); emit64(2*1024*1024); /* mov rdx, 2MB */
+    emit(0xB8); emit32(0); /* sys_read */
+    emit(0x0F); emit(0x05);
+    /* close(fd) */
+    emit(0x48); emit(0x8B); emit(0x7D); emit(0xF0); /* mov rdi, [rbp-16] */
+    emit(0xB8); emit32(3); /* sys_close */
+    emit(0x0F); emit(0x05);
+    /* return buf pointer */
+    emit(0x48); emit(0x8B); emit(0x45); emit(0xE8); /* mov rax, [rbp-24] */
+    emit_leave(); emit_ret();
+
+    /*
+     * write_file(path: i64, data: i64, len: i64) -> i64
+     * open(path, O_WRONLY|O_CREAT|O_TRUNC=0x241, 0755) → fd
+     * write(fd, data, len)
+     * close(fd)
+     * return 0 on success
+     */
+    g_fn_offsets[write_file_idx] = g_code_len;
+    emit_push_rbp(); emit_mov_rbp_rsp(); emit_sub_rsp(48);
+    /* Save args: rdi=path, rsi=data, rdx=len */
+    emit(0x48); emit(0x89); emit(0x7D); emit(0xF8); /* mov [rbp-8], rdi */
+    emit(0x48); emit(0x89); emit(0x75); emit(0xF0); /* mov [rbp-16], rsi */
+    emit(0x48); emit(0x89); emit(0x55); emit(0xE8); /* mov [rbp-24], rdx */
+    /* open(path, O_WRONLY|O_CREAT|O_TRUNC=0x241, 0755) */
+    /* rdi already = path */
+    emit(0x48); emit(0xBE); emit64(0x241); /* mov rsi, O_WRONLY|O_CREAT|O_TRUNC */
+    emit(0xBA); emit32(0x1ED); /* mov edx, 0755 */
+    emit(0xB8); emit32(2); /* sys_open */
+    emit(0x0F); emit(0x05);
+    emit(0x48); emit(0x89); emit(0x45); emit(0xE0); /* mov [rbp-32], rax (fd) */
+    /* write(fd, data, len) */
+    emit(0x48); emit(0x8B); emit(0x7D); emit(0xE0); /* mov rdi, [rbp-32] */
+    emit(0x48); emit(0x8B); emit(0x75); emit(0xF0); /* mov rsi, [rbp-16] */
+    emit(0x48); emit(0x8B); emit(0x55); emit(0xE8); /* mov rdx, [rbp-24] */
+    emit(0xB8); emit32(1); /* sys_write */
+    emit(0x0F); emit(0x05);
+    /* close(fd) */
+    emit(0x48); emit(0x8B); emit(0x7D); emit(0xE0); /* mov rdi, [rbp-32] */
+    emit(0xB8); emit32(3); /* sys_close */
+    emit(0x0F); emit(0x05);
+    /* return 0 */
+    emit(0x48); emit(0x31); emit(0xC0); /* xor rax, rax */
+    emit_leave(); emit_ret();
 
     /* Emit print_int builtin */
     g_fn_offsets[print_int_idx] = g_code_len;
