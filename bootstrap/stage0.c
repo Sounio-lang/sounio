@@ -42,7 +42,9 @@
 /* Global data offsets (at code offset 0) */
 #define GLOBAL_SAVED_RSP 0   /* offset 0: saved initial rsp (8 bytes) */
 #define GLOBAL_HEAP_PTR  8   /* offset 8: heap bump pointer (8 bytes) */
-#define GLOBAL_DATA_SIZE 16
+#define GLOBAL_FIXED_DATA 16 /* first 16 bytes are fixed */
+#define MAX_GLOBALS      256
+static int GLOBAL_DATA_SIZE = 16; /* extended by scan_globals */
 
 /* ================================================================
  * NAME (fixed-size identifier)
@@ -922,6 +924,88 @@ static StructDef *parse_struct(void) {
     return s;
 }
 
+/* Global variable registry — forward declarations (used by scan_globals) */
+static Name g_global_names[MAX_GLOBALS];
+static int g_global_offsets[MAX_GLOBALS];
+static int g_global_is_array[MAX_GLOBALS];
+static int g_global_array_size[MAX_GLOBALS];
+static int g_global_count;
+
+static int find_global(Name n) {
+    for (int i = 0; i < g_global_count; i++)
+        if (name_eq(g_global_names[i], n)) return i;
+    return -1;
+}
+
+/* Prepass: scan for module-level var declarations and register globals */
+static void scan_globals(void) {
+    int saved_tp = g_tp;
+    g_tp = 0;
+    g_global_count = 0;
+    int data_off = GLOBAL_FIXED_DATA;
+    int brace_depth = 0;
+
+    while (tk() != TK_EOF) {
+        if (tk() == TK_LBRACE) { brace_depth++; next(); continue; }
+        if (tk() == TK_RBRACE) { if (brace_depth > 0) brace_depth--; next(); continue; }
+        if (tk() == TK_VAR && brace_depth == 0) {
+            next(); /* eat var */
+            if (tk() == TK_IDENT) {
+                Name gname = cur()->name;
+                next(); /* eat name */
+                int is_arr = 0, elem_sz = 8, arr_cnt = 0;
+                if (eat(TK_COLON)) {
+                    if (tk() == TK_LBRACKET) {
+                        next(); /* eat [ */
+                        if (tk() == TK_IDENT) {
+                            if (name_is(cur()->name, "i8") || name_is(cur()->name, "u8"))
+                                elem_sz = 1;
+                            else
+                                elem_sz = 8;
+                            next(); /* eat type */
+                        }
+                        if (eat(TK_SEMICOLON)) {
+                            if (tk() == TK_INT) {
+                                arr_cnt = (int)cur()->int_val;
+                                next(); /* eat count */
+                            }
+                        }
+                        eat(TK_RBRACKET); /* eat ] */
+                        is_arr = 1;
+                    }
+                    /* Skip remaining type tokens and initializer */
+                }
+                if (g_global_count < MAX_GLOBALS) {
+                    g_global_names[g_global_count] = gname;
+                    g_global_offsets[g_global_count] = data_off;
+                    if (is_arr) {
+                        g_global_is_array[g_global_count] = (elem_sz == 1) ? 1 : 2;
+                        g_global_array_size[g_global_count] = arr_cnt * elem_sz;
+                    } else {
+                        g_global_is_array[g_global_count] = 0;
+                        g_global_array_size[g_global_count] = 0;
+                    }
+                    data_off += 8; /* 8 bytes per global (pointer or scalar) */
+                    g_global_count++;
+                    fprintf(stderr, "stage0: global=%.*s off=%d is_arr=%d sz=%d\n",
+                            gname.len, gname.buf, g_global_offsets[g_global_count-1],
+                            g_global_is_array[g_global_count-1],
+                            g_global_array_size[g_global_count-1]);
+                }
+            }
+            /* Skip to next top-level item */
+            while (tk() != TK_EOF && tk() != TK_FN && tk() != TK_VAR &&
+                   tk() != TK_STRUCT && tk() != TK_ENUM && tk() != TK_IMPL)
+                next();
+        } else {
+            next();
+        }
+    }
+
+    GLOBAL_DATA_SIZE = data_off;
+    g_tp = saved_tp;
+}
+
 static Item *parse_program(void) {
     Item *head = NULL, **tail = &head;
     g_tp = 0;
@@ -1087,7 +1171,7 @@ static void emit_print_int_builtin(void) {
         /* zero: dec r10; mov byte [r10], '0'; jmp after */
         0x49, 0xff, 0xca,
         0x41, 0xc6, 0x02, 0x30,
-        0xeb, 0x19,
+        0xeb, 0x1a,
         /* digit_loop: */
         0x31, 0xd2,                         /* xor edx,edx */
         0x48, 0xc7, 0xc1, 0x0a, 0x00, 0x00, 0x00, /* mov rcx,10 */
@@ -1173,7 +1257,14 @@ static int is_byte_index(Expr *base, Expr *index, Locals *loc) {
     if (base && base->kind == EX_FIELD && base->left && base->left->kind == EX_DEREF) {
         /* Already handled above by field name check */
     }
-    /* Heuristic: if index is `expr as usize`, assume byte indexing */
+    /* Check global variable type */
+    if (base && base->kind == EX_IDENT) {
+        int gi = find_global(base->name);
+        if (gi >= 0) {
+            return (g_global_is_array[gi] == 1) ? 1 : 0; /* 1=i8, 2=i64 */
+        }
+    }
+    /* Heuristic: if index is `expr as usize`, assume byte indexing (only if no global match) */
     if (index && index->kind == EX_CAST && name_is(index->cast_type, "usize")) {
         return 1;
     }
@@ -1210,6 +1301,15 @@ static void compile_expr(Expr *e, Locals *loc) {
                 emit_load_rax(loc->slots[i]);
                 return;
             }
+        }
+        /* Check globals */
+        { int gi = find_global(e->name);
+          if (gi >= 0) {
+            /* Load from data section via RIP-relative */
+            emit(0x48); emit(0x8B); emit(0x05); /* mov rax, [rip+disp32] */
+            emit32(g_global_offsets[gi] - (g_code_len + 4));
+            return;
+          }
         }
         /* might be a function name or enum variant — emit 0 */
         emit_mov_rax_imm64(0);
@@ -1610,10 +1710,21 @@ static void compile_block(Block *b, Locals *loc) {
             if (s->expr && s->expr->kind == EX_IDENT && s->right) {
                 /* Simple variable assignment: x = rhs */
                 compile_expr(s->right, loc);
+                int found_local = 0;
                 for (int i = loc->count-1; i >= 0; i--) {
                     if (name_eq(loc->names[i], s->expr->name)) {
                         emit_store_rax(loc->slots[i]);
+                        found_local = 1;
                         break;
+                    }
+                }
+                if (!found_local) {
+                    /* Check globals */
+                    int gi = find_global(s->expr->name);
+                    if (gi >= 0) {
+                        /* Store to data section via RIP-relative */
+                        emit(0x48); emit(0x89); emit(0x05); /* mov [rip+disp32], rax */
+                        emit32(g_global_offsets[gi] - (g_code_len + 4));
                     }
                 }
             } else if (s->expr && s->expr->kind == EX_INDEX && s->right) {
@@ -1678,7 +1789,7 @@ static void compile_function(FnDef *fn) {
     memset(&loc, 0, sizeof(loc));
     /* Prologue */
     emit_push_rbp(); emit_mov_rbp_rsp();
-    int frame_raw = (fn->param_count + 1024 + 2) * 8; /* generous frame for large local arrays */
+    int frame_raw = (fn->param_count + 2048 + 2) * 8; /* generous frame for large local arrays */
     int frame_size = (frame_raw + 15) & ~15;
     emit_sub_rsp(frame_size);
     /* Spill params */
@@ -1728,6 +1839,24 @@ static void write_elf(const char *path) {
     emit(0x48); emit(0x89); emit(0x25);
     int32_t save_disp = GLOBAL_SAVED_RSP - (g_code_len + 4);
     emit32(save_disp);
+
+    /* Allocate global arrays via mmap, store pointers in data section */
+    for (int gi = 0; gi < g_global_count; gi++) {
+        if (g_global_is_array[gi] > 0 && g_global_array_size[gi] > 0) {
+            /* mmap(NULL, size, PROT_RW=3, MAP_PRIVATE|ANON=0x22, -1, 0) */
+            emit(0x48); emit(0x31); emit(0xFF); /* xor rdi, rdi */
+            emit(0x48); emit(0xBE); emit64((int64_t)g_global_array_size[gi]); /* mov rsi, size */
+            emit(0xBA); emit32(3); /* mov edx, 3 */
+            emit(0x41); emit(0xBA); emit32(0x22); /* mov r10d, 0x22 */
+            emit(0x49); emit(0xC7); emit(0xC0); emit32(-1); /* mov r8, -1 */
+            emit(0x4D); emit(0x31); emit(0xC9); /* xor r9, r9 */
+            emit(0xB8); emit32(9); /* mov eax, 9 (sys_mmap) */
+            emit(0x0F); emit(0x05); /* syscall */
+            /* Store mmap'd pointer in data section: mov [rip+disp32], rax */
+            emit(0x48); emit(0x89); emit(0x05);
+            emit32(g_global_offsets[gi] - (g_code_len + 4));
+        }
+    }
 
     /* call main */
     int moff = (g_main_fn_idx >= 0) ? g_fn_offsets[g_main_fn_idx] : 0;
@@ -1810,7 +1939,12 @@ int main(int argc, char **argv) {
     lex_all();
     fprintf(stderr, "stage0: tokens=%d\n", g_token_count);
 
+    /* Scan globals (prepass over tokens) */
+    scan_globals();
+    fprintf(stderr, "stage0: globals=%d data_size=%d\n", g_global_count, GLOBAL_DATA_SIZE);
+
     /* Parse */
+    g_tp = 0;
     Item *program = parse_program();
     fprintf(stderr, "stage0: arena=%d bytes\n", g_arena_pos);
 
