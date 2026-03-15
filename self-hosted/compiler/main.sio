@@ -16368,6 +16368,77 @@ fn compiler_main_test_dy_no_fold_or_outer() -> bool with Mut, Div, Panic {
     opt.instrs[2 as usize].bin_op != BinaryOp::OpBitAnd
 }
 
+// Sprint 223 Block EG: AND-OR superset absorption — (x&y)&(x|y) → x&y (T1004-T1009)
+fn compiler_main_test_eg_and_or_absorb_basic() -> bool with Mut, Div, Panic {
+    // r2=(r0&r1), r3=(r0|r1), r4=r2&r3 → r4 becomes IrCopy(r2)
+    var instrs: [IrInstr; 128] = cp_empty_instrs()
+    instrs[0 as usize] = ir_binop(2, 0, BinaryOp::OpBitAnd, 1)
+    instrs[1 as usize] = ir_binop(3, 0, BinaryOp::OpBitOr, 1)
+    instrs[2 as usize] = ir_binop(4, 2, BinaryOp::OpBitAnd, 3)
+    let func = cp_make_test_func(instrs, 3)
+    let opt = opt_cleanup_function(func)
+    opt.instrs[2 as usize].op == IrOpcode::IrCopy
+        && opt.instrs[2 as usize].src1 == 2
+}
+
+fn compiler_main_test_eg_and_or_absorb_comm() -> bool with Mut, Div, Panic {
+    // r2=(r0|r1), r3=(r0&r1), r4=r2&r3 → r4 becomes IrCopy(r3) (comm)
+    var instrs: [IrInstr; 128] = cp_empty_instrs()
+    instrs[0 as usize] = ir_binop(2, 0, BinaryOp::OpBitOr, 1)
+    instrs[1 as usize] = ir_binop(3, 0, BinaryOp::OpBitAnd, 1)
+    instrs[2 as usize] = ir_binop(4, 2, BinaryOp::OpBitAnd, 3)
+    let func = cp_make_test_func(instrs, 3)
+    let opt = opt_cleanup_function(func)
+    opt.instrs[2 as usize].op == IrOpcode::IrCopy
+        && opt.instrs[2 as usize].src1 == 3
+}
+
+fn compiler_main_test_eg_and_or_absorb_inner_comm() -> bool with Mut, Div, Panic {
+    // r2=(r0&r1), r3=(r1|r0), r4=r2&r3 → r4 becomes IrCopy(r2) (inner comm OR)
+    var instrs: [IrInstr; 128] = cp_empty_instrs()
+    instrs[0 as usize] = ir_binop(2, 0, BinaryOp::OpBitAnd, 1)
+    instrs[1 as usize] = ir_binop(3, 1, BinaryOp::OpBitOr, 0)
+    instrs[2 as usize] = ir_binop(4, 2, BinaryOp::OpBitAnd, 3)
+    let func = cp_make_test_func(instrs, 3)
+    let opt = opt_cleanup_function(func)
+    opt.instrs[2 as usize].op == IrOpcode::IrCopy
+        && opt.instrs[2 as usize].src1 == 2
+}
+
+fn compiler_main_test_eg_no_fold_diff_vars() -> bool with Mut, Div, Panic {
+    // (r0&r1)&(r0|r2): different vars → no fold
+    var instrs: [IrInstr; 128] = cp_empty_instrs()
+    instrs[0 as usize] = ir_binop(3, 0, BinaryOp::OpBitAnd, 1)
+    instrs[1 as usize] = ir_binop(4, 0, BinaryOp::OpBitOr, 2)
+    instrs[2 as usize] = ir_binop(5, 3, BinaryOp::OpBitAnd, 4)
+    let func = cp_make_test_func(instrs, 3)
+    let opt = opt_cleanup_function(func)
+    opt.instrs[2 as usize].op != IrOpcode::IrCopy
+}
+
+fn compiler_main_test_eg_no_fold_or_outer() -> bool with Mut, Div, Panic {
+    // (r0&r1)|(r0|r1): OR outer → Block EF fires, not EG
+    var instrs: [IrInstr; 128] = cp_empty_instrs()
+    instrs[0 as usize] = ir_binop(2, 0, BinaryOp::OpBitAnd, 1)
+    instrs[1 as usize] = ir_binop(3, 0, BinaryOp::OpBitOr, 1)
+    instrs[2 as usize] = ir_binop(4, 2, BinaryOp::OpBitOr, 3)
+    let func = cp_make_test_func(instrs, 3)
+    let opt = opt_cleanup_function(func)
+    // EF fires: IrCopy of the OR operand
+    opt.instrs[2 as usize].op == IrOpcode::IrCopy
+}
+
+fn compiler_main_test_eg_no_fold_and_both() -> bool with Mut, Div, Panic {
+    // (r0&r1)&(r0&r2): both AND, no OR superset → no EG fold
+    var instrs: [IrInstr; 128] = cp_empty_instrs()
+    instrs[0 as usize] = ir_binop(3, 0, BinaryOp::OpBitAnd, 1)
+    instrs[1 as usize] = ir_binop(4, 0, BinaryOp::OpBitAnd, 2)
+    instrs[2 as usize] = ir_binop(5, 3, BinaryOp::OpBitAnd, 4)
+    let func = cp_make_test_func(instrs, 3)
+    let opt = opt_cleanup_function(func)
+    opt.instrs[2 as usize].op != IrOpcode::IrCopy
+}
+
 // Sprint 222 Block EF: OR-AND subsumption — (x|y)|(x&y) → x|y (T998-T1003)
 fn compiler_main_test_ef_or_and_subsume_basic() -> bool with Mut, Div, Panic {
     // r2=(r0|r1), r3=(r0&r1), r4=r2|r3 → r4 becomes IrCopy(r2)
@@ -16892,7 +16963,7 @@ fn compiler_main_test_dz_no_fold_or_outer() -> bool with Mut, Div, Panic {
 
 fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
     var passed: i64 = 0
-    let total: i64 = 1003
+    let total: i64 = 1009
 
     println("=== compiler/main.sio self-tests ===")
 
@@ -21820,6 +21891,32 @@ fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
         passed = passed + 1
         println("  T961 OK: Sprint 215 Block DY: r0|(r1|~r0) no fold OR outer")
     } else { println("  FAIL: T961") }
+
+    // Sprint 223 Block EG: AND-OR superset absorption (T1004-T1009)
+    if compiler_main_test_eg_and_or_absorb_basic() {
+        passed = passed + 1
+        println("  T1004 OK: Sprint 223 Block EG: (r0&r1)&(r0|r1) -> IrCopy(r0&r1)")
+    } else { println("  FAIL: T1004") }
+    if compiler_main_test_eg_and_or_absorb_comm() {
+        passed = passed + 1
+        println("  T1005 OK: Sprint 223 Block EG: (r0|r1)&(r0&r1) -> IrCopy(r0&r1) comm")
+    } else { println("  FAIL: T1005") }
+    if compiler_main_test_eg_and_or_absorb_inner_comm() {
+        passed = passed + 1
+        println("  T1006 OK: Sprint 223 Block EG: (r0&r1)&(r1|r0) -> IrCopy(r0&r1) inner comm")
+    } else { println("  FAIL: T1006") }
+    if compiler_main_test_eg_no_fold_diff_vars() {
+        passed = passed + 1
+        println("  T1007 OK: Sprint 223 Block EG: (r0&r1)&(r0|r2) no fold diff vars")
+    } else { println("  FAIL: T1007") }
+    if compiler_main_test_eg_no_fold_or_outer() {
+        passed = passed + 1
+        println("  T1008 OK: Sprint 223 Block EG: (r0&r1)|(r0|r1) Block EF fires")
+    } else { println("  FAIL: T1008") }
+    if compiler_main_test_eg_no_fold_and_both() {
+        passed = passed + 1
+        println("  T1009 OK: Sprint 223 Block EG: (r0&r1)&(r0&r2) no EG fold both AND")
+    } else { println("  FAIL: T1009") }
 
     // Sprint 222 Block EF: OR-AND subsumption (T998-T1003)
     if compiler_main_test_ef_or_and_subsume_basic() {

@@ -4165,6 +4165,40 @@ fn ocp_const_fold(func: IrFunction) -> IrFunction with Mut, Div, Panic {
             }
         }
 
+        // Sprint 223 Block EG: AND-OR superset absorption — (x&y)&(x|y) → x&y; (x|y)&(x&y) → x&y.
+        // Proof: x&y ⊆ x|y, so (x&y)&(x|y) = x&y. QED. Dual of Block EF (OR case).
+        // Zero new arrays: uses ao_and_rr_valid/lhs/rhs + ao_or_rr_valid/lhs/rhs (Block AO).
+        // SOTA: LLVM InstCombineAndOrXor; Boolean lattice absorption; Huntington 1904.
+        if ocp_is_binop(result.instrs[i as usize].op) {
+            let eg_instr = result.instrs[i as usize]
+            let eg_s1 = eg_instr.src1; let eg_s2 = eg_instr.src2
+            let eg_s1_ok = eg_s1 >= 0 && eg_s1 < 256; let eg_s2_ok = eg_s2 >= 0 && eg_s2 < 256
+            if eg_instr.bin_op == BinaryOp::OpBitAnd && eg_s1_ok && eg_s2_ok {
+                // Case 1: (x&y)&(x|y): s1=AND-rr, s2=OR-rr with same operands → IrCopy(s1)
+                if ao_and_rr_valid[eg_s1 as usize] && ao_or_rr_valid[eg_s2 as usize] {
+                    let eg_al = ao_and_rr_lhs[eg_s1 as usize]
+                    let eg_ar = ao_and_rr_rhs[eg_s1 as usize]
+                    let eg_ol = ao_or_rr_lhs[eg_s2 as usize]
+                    let eg_or = ao_or_rr_rhs[eg_s2 as usize]
+                    if (eg_al == eg_ol && eg_ar == eg_or)
+                            || (eg_al == eg_or && eg_ar == eg_ol) {
+                        result.instrs[i as usize] = ir_copy(eg_instr.dst, eg_s1)
+                    }
+                }
+                // Case 2: (x|y)&(x&y): s1=OR-rr, s2=AND-rr with same operands → IrCopy(s2)
+                if ao_or_rr_valid[eg_s1 as usize] && ao_and_rr_valid[eg_s2 as usize] {
+                    let eg_ol2 = ao_or_rr_lhs[eg_s1 as usize]
+                    let eg_or2 = ao_or_rr_rhs[eg_s1 as usize]
+                    let eg_al2 = ao_and_rr_lhs[eg_s2 as usize]
+                    let eg_ar2 = ao_and_rr_rhs[eg_s2 as usize]
+                    if (eg_ol2 == eg_al2 && eg_or2 == eg_ar2)
+                            || (eg_ol2 == eg_ar2 && eg_or2 == eg_al2) {
+                        result.instrs[i as usize] = ir_copy(eg_instr.dst, eg_s2)
+                    }
+                }
+            }
+        }
+
         // Sprint 177 Block CM: AND complement XOR partition — (x & C) ^ (x & ~C) → x.
         // Proof: C-bits: (xi&1)^(xi&0)=xi^0=xi. Non-C: (xi&0)^(xi&1)=0^xi=xi. QED.
         // Dual of Block CC (OR partition). Commutative: (x&~C)^(x&C) → x.
