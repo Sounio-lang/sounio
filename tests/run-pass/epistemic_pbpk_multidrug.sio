@@ -1,0 +1,791 @@
+//@ run-pass
+// ============================================================================
+// SOUNIO MULTI-DRUG EPISTEMIC PBPK — Native ELF Demo
+// ============================================================================
+// 3 drugs × GUM uncertainty × ASCII concentration curves × 10 validations
+// Compiles to native ELF via lean driver — NO runtime, NO libc, NO JIT.
+//
+// Drugs:
+//   R = Rapamycin (Sirolimus) — 5mg IV, 3-compartment, CYP3A4/P-gp
+//   C = Caffeine — 200mg oral, 1-compartment, CYP1A2
+//   M = Metformin — 500mg oral, 1-compartment, renal clearance
+//
+// JCGM 100:2008 (GUM) via finite differences
+// SOTA: Ferron 1997, Lampen 1998, Schreiber 1991, Lelo 1986, Graham 2011
+// ============================================================================
+
+// ---- Global concentration arrays (48 timepoints each) ----
+var conc_r: [f64; 64] = [0.0; 64]
+var conc_c: [f64; 64] = [0.0; 64]
+var conc_m: [f64; 64] = [0.0; 64]
+var conc_r_hi: [f64; 64] = [0.0; 64]
+var conc_c_hi: [f64; 64] = [0.0; 64]
+var conc_m_hi: [f64; 64] = [0.0; 64]
+var conc_r_lo: [f64; 64] = [0.0; 64]
+var conc_c_lo: [f64; 64] = [0.0; 64]
+var conc_m_lo: [f64; 64] = [0.0; 64]
+
+// ============================================================================
+// LAYER 0: MATH HELPERS
+// ============================================================================
+
+fn ep_abs(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+fn ep_sqrt(x: f64) -> f64 {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i = 0
+    while i < 20 {
+        y = (y + x / y) * 0.5
+        i = i + 1
+    }
+    return y
+}
+
+fn ep_max(a: f64, b: f64) -> f64 {
+    if a > b { return a }
+    return b
+}
+
+fn ep_min(a: f64, b: f64) -> f64 {
+    if a < b { return a }
+    return b
+}
+
+fn ep_ln2() -> f64 { return 0.693147180559945 }
+
+// ============================================================================
+// LAYER 1: PRINT HELPERS
+// ============================================================================
+
+fn print_f64_3(v: f64) -> i64 {
+    if v < 0.0 {
+        print("-")
+        let nv = 0.0 - v
+        let ip = nv as i64
+        let frac = ((nv - (ip as f64)) * 1000.0) as i64
+        print_int(ip)
+        print(".")
+        if frac < 100 { print("0") }
+        if frac < 10 { print("0") }
+        print_int(frac)
+        return 0
+    }
+    let ip = v as i64
+    let frac = ((v - (ip as f64)) * 1000.0) as i64
+    print_int(ip)
+    print(".")
+    if frac < 100 { print("0") }
+    if frac < 10 { print("0") }
+    print_int(frac)
+    return 0
+}
+
+fn print_f64_1(v: f64) -> i64 {
+    if v < 0.0 {
+        print("-")
+        let nv = 0.0 - v
+        let ip = nv as i64
+        let frac = ((nv - (ip as f64)) * 10.0) as i64
+        print_int(ip)
+        print(".")
+        print_int(frac)
+        return 0
+    }
+    let ip = v as i64
+    let frac = ((v - (ip as f64)) * 10.0) as i64
+    print_int(ip)
+    print(".")
+    print_int(frac)
+    return 0
+}
+
+fn print_spaces(n: i64) -> i64 {
+    var i = 0
+    while i < n {
+        print(" ")
+        i = i + 1
+    }
+    return 0
+}
+
+// ============================================================================
+// LAYER 2: RAPAMYCIN 3-COMPARTMENT MODEL
+// ============================================================================
+
+struct Rp3St {
+    blood: f64,
+    brain: f64,
+    periph: f64,
+}
+
+struct Rp3Prm {
+    v_blood: f64,
+    v_brain: f64,
+    v_periph: f64,
+    q_brain: f64,
+    q_periph: f64,
+    kp_brain: f64,
+    kp_periph: f64,
+    cl_hepatic: f64,
+    fu_plasma: f64,
+}
+
+fn rp3_zero() -> Rp3St {
+    return Rp3St { blood: 0.0, brain: 0.0, periph: 0.0 }
+}
+
+fn rp3_add(a: Rp3St, b: Rp3St) -> Rp3St {
+    return Rp3St { blood: a.blood + b.blood, brain: a.brain + b.brain, periph: a.periph + b.periph }
+}
+
+fn rp3_scale(s: Rp3St, f: f64) -> Rp3St {
+    return Rp3St { blood: s.blood * f, brain: s.brain * f, periph: s.periph * f }
+}
+
+fn rp3_ode(st: Rp3St, p: Rp3Prm) -> Rp3St {
+    let cl_eff = p.cl_hepatic * p.fu_plasma
+    let inflow_br = p.q_brain / p.v_blood * st.brain / p.kp_brain
+    let inflow_pr = p.q_periph / p.v_blood * st.periph / p.kp_periph
+    let outflow = (p.q_brain + p.q_periph) / p.v_blood * st.blood
+    let clear = cl_eff / p.v_blood * st.blood
+    let d_blood = inflow_br + inflow_pr - outflow - clear
+    let d_brain = (p.q_brain / p.v_brain) * (st.blood - st.brain / p.kp_brain)
+    let d_periph = (p.q_periph / p.v_periph) * (st.blood - st.periph / p.kp_periph)
+    return Rp3St { blood: d_blood, brain: d_brain, periph: d_periph }
+}
+
+fn rk4_rp3(st: Rp3St, p: Rp3Prm, dt: f64) -> Rp3St {
+    let k1 = rp3_ode(st, p)
+    let s2 = rp3_add(st, rp3_scale(k1, dt * 0.5))
+    let k2 = rp3_ode(s2, p)
+    let s3 = rp3_add(st, rp3_scale(k2, dt * 0.5))
+    let k3 = rp3_ode(s3, p)
+    let s4 = rp3_add(st, rp3_scale(k3, dt))
+    let k4 = rp3_ode(s4, p)
+    let w = rp3_add(k1, rp3_add(rp3_scale(k2, 2.0), rp3_add(rp3_scale(k3, 2.0), k4)))
+    return rp3_add(st, rp3_scale(w, dt / 6.0))
+}
+
+fn rp3_mean_params() -> Rp3Prm {
+    return Rp3Prm {
+        v_blood: 5.0, v_brain: 1.4, v_periph: 50.0,
+        q_brain: 0.05, q_periph: 87.0,
+        kp_brain: 0.08, kp_periph: 0.5,
+        cl_hepatic: 12.4, fu_plasma: 0.08,
+    }
+}
+
+// ============================================================================
+// LAYER 3: CAFFEINE 1-COMPARTMENT MODEL
+// ============================================================================
+
+struct Oc1St {
+    gut: f64,
+    plasma: f64,
+}
+
+struct CafPrm {
+    ka: f64,
+    cl: f64,
+    v: f64,
+    f_oral: f64,
+}
+
+fn oc1_ode_caf(st: Oc1St, p: CafPrm) -> Oc1St {
+    let ke = p.cl / p.v
+    let d_gut = (0.0 - p.ka) * st.gut
+    let d_plasma = p.ka * st.gut / p.v - ke * st.plasma
+    return Oc1St { gut: d_gut, plasma: d_plasma }
+}
+
+fn rk4_caf(st: Oc1St, p: CafPrm, dt: f64) -> Oc1St {
+    let k1 = oc1_ode_caf(st, p)
+    let s2 = Oc1St { gut: st.gut + k1.gut * dt * 0.5, plasma: st.plasma + k1.plasma * dt * 0.5 }
+    let k2 = oc1_ode_caf(s2, p)
+    let s3 = Oc1St { gut: st.gut + k2.gut * dt * 0.5, plasma: st.plasma + k2.plasma * dt * 0.5 }
+    let k3 = oc1_ode_caf(s3, p)
+    let s4 = Oc1St { gut: st.gut + k3.gut * dt, plasma: st.plasma + k3.plasma * dt }
+    let k4 = oc1_ode_caf(s4, p)
+    let dg = (k1.gut + 2.0 * k2.gut + 2.0 * k3.gut + k4.gut) / 6.0
+    let dp = (k1.plasma + 2.0 * k2.plasma + 2.0 * k3.plasma + k4.plasma) / 6.0
+    return Oc1St { gut: st.gut + dg * dt, plasma: st.plasma + dp * dt }
+}
+
+fn caf_mean_params() -> CafPrm {
+    return CafPrm { ka: 4.4, cl: 5.46, v: 42.0, f_oral: 0.99 }
+}
+
+// ============================================================================
+// LAYER 4: METFORMIN 1-COMPARTMENT MODEL
+// ============================================================================
+
+struct MetPrm {
+    ka: f64,
+    cl: f64,
+    v: f64,
+    f_oral: f64,
+}
+
+fn oc1_ode_met(st: Oc1St, p: MetPrm) -> Oc1St {
+    let ke = p.cl / p.v
+    let d_gut = (0.0 - p.ka) * st.gut
+    let d_plasma = p.ka * st.gut / p.v - ke * st.plasma
+    return Oc1St { gut: d_gut, plasma: d_plasma }
+}
+
+fn rk4_met(st: Oc1St, p: MetPrm, dt: f64) -> Oc1St {
+    let k1 = oc1_ode_met(st, p)
+    let s2 = Oc1St { gut: st.gut + k1.gut * dt * 0.5, plasma: st.plasma + k1.plasma * dt * 0.5 }
+    let k2 = oc1_ode_met(s2, p)
+    let s3 = Oc1St { gut: st.gut + k2.gut * dt * 0.5, plasma: st.plasma + k2.plasma * dt * 0.5 }
+    let k3 = oc1_ode_met(s3, p)
+    let s4 = Oc1St { gut: st.gut + k3.gut * dt, plasma: st.plasma + k3.plasma * dt }
+    let k4 = oc1_ode_met(s4, p)
+    let dg = (k1.gut + 2.0 * k2.gut + 2.0 * k3.gut + k4.gut) / 6.0
+    let dp = (k1.plasma + 2.0 * k2.plasma + 2.0 * k3.plasma + k4.plasma) / 6.0
+    return Oc1St { gut: st.gut + dg * dt, plasma: st.plasma + dp * dt }
+}
+
+fn met_mean_params() -> MetPrm {
+    return MetPrm { ka: 0.9, cl: 21.0, v: 400.0, f_oral: 0.5 }
+}
+
+// ============================================================================
+// LAYER 5: SIMULATION COLLECTORS (store hourly into global arrays)
+// ============================================================================
+
+struct DrugResult {
+    cmax: f64,
+    auc: f64,
+    bpr: f64,
+    thalf: f64,
+}
+
+fn sim_rp3(prm: Rp3Prm, dose: f64) -> DrugResult {
+    let c0 = dose / prm.v_blood
+    var st = Rp3St { blood: c0, brain: 0.0, periph: 0.0 }
+    var t = 0.0
+    let dt = 0.1
+    var cmax = c0
+    var auc = 0.0
+    var c_prev = c0
+    var hour = 0
+
+    conc_r[0 as usize] = c0
+
+    while t < 48.0 {
+        var dt_use = dt
+        if t + dt > 48.0 { dt_use = 48.0 - t }
+        st = rk4_rp3(st, prm, dt_use)
+        if st.blood > cmax { cmax = st.blood }
+        auc = auc + (c_prev + st.blood) * 0.5 * dt_use
+        c_prev = st.blood
+        t = t + dt_use
+        // Store hourly snapshots
+        let next_hour = (t as i64)
+        if next_hour > hour {
+            hour = next_hour
+            if hour < 48 {
+                conc_r[hour as usize] = st.blood
+            }
+        }
+    }
+
+    var bpr = 0.0
+    if st.blood > 0.000000000001 { bpr = st.brain / st.blood }
+
+    // Estimate t1/2 from concentration decay
+    var thalf = 0.0
+    let half_c = cmax * 0.5
+    var hi = 1
+    while hi < 48 {
+        if conc_r[hi as usize] < half_c {
+            thalf = hi as f64
+            hi = 48
+        }
+        hi = hi + 1
+    }
+
+    return DrugResult { cmax: cmax, auc: auc, bpr: bpr, thalf: thalf }
+}
+
+fn sim_caf(prm: CafPrm, dose: f64) -> DrugResult {
+    var st = Oc1St { gut: prm.f_oral * dose, plasma: 0.0 }
+    var t = 0.0
+    let dt = 0.05
+    var cmax = 0.0
+    var auc = 0.0
+    var c_prev = 0.0
+    var hour = 0
+
+    conc_c[0 as usize] = 0.0
+
+    while t < 48.0 {
+        var dt_use = dt
+        if t + dt > 48.0 { dt_use = 48.0 - t }
+        st = rk4_caf(st, prm, dt_use)
+        if st.plasma > cmax { cmax = st.plasma }
+        auc = auc + (c_prev + st.plasma) * 0.5 * dt_use
+        c_prev = st.plasma
+        t = t + dt_use
+        let next_hour = (t as i64)
+        if next_hour > hour {
+            hour = next_hour
+            if hour < 48 {
+                conc_c[hour as usize] = st.plasma
+            }
+        }
+    }
+
+    let ke = prm.cl / prm.v
+    let thalf = ep_ln2() / ke
+
+    return DrugResult { cmax: cmax, auc: auc, bpr: 0.0, thalf: thalf }
+}
+
+fn sim_met(prm: MetPrm, dose: f64) -> DrugResult {
+    var st = Oc1St { gut: prm.f_oral * dose, plasma: 0.0 }
+    var t = 0.0
+    let dt = 0.05
+    var cmax = 0.0
+    var auc = 0.0
+    var c_prev = 0.0
+    var hour = 0
+
+    conc_m[0 as usize] = 0.0
+
+    while t < 48.0 {
+        var dt_use = dt
+        if t + dt > 48.0 { dt_use = 48.0 - t }
+        st = rk4_met(st, prm, dt_use)
+        if st.plasma > cmax { cmax = st.plasma }
+        auc = auc + (c_prev + st.plasma) * 0.5 * dt_use
+        c_prev = st.plasma
+        t = t + dt_use
+        let next_hour = (t as i64)
+        if next_hour > hour {
+            hour = next_hour
+            if hour < 48 {
+                conc_m[hour as usize] = st.plasma
+            }
+        }
+    }
+
+    let ke = prm.cl / prm.v
+    let thalf = ep_ln2() / ke
+
+    return DrugResult { cmax: cmax, auc: auc, bpr: 0.0, thalf: thalf }
+}
+
+// ============================================================================
+// LAYER 6: GUM EPISTEMIC PROPAGATION
+// ============================================================================
+
+fn fdiff_h(mean: f64, variance: f64) -> f64 {
+    let h_rel = 0.000001 * ep_abs(mean)
+    let h_abs = 0.01 * ep_sqrt(variance)
+    return ep_max(h_rel, h_abs)
+}
+
+struct EpDrug {
+    cmax: f64,
+    auc: f64,
+    auc_var: f64,
+    cv_auc: f64,
+    bpr: f64,
+    thalf: f64,
+    conf: f64,
+    s_p1: f64,
+    s_p2: f64,
+    s_p3: f64,
+}
+
+fn ep_rapamycin() -> EpDrug {
+    let prm = rp3_mean_params()
+    let ref_m = sim_rp3(prm, 5.0)
+
+    // CL perturbation
+    let h_cl = fdiff_h(12.4, 54.76)
+    var prm_cl = rp3_mean_params()
+    prm_cl.cl_hepatic = 12.4 + h_cl
+    let m_cl = sim_rp3(prm_cl, 5.0)
+    let da_cl = (m_cl.auc - ref_m.auc) / h_cl
+
+    // kp_brain perturbation
+    let h_kp = fdiff_h(0.08, 0.000625)
+    var prm_kp = rp3_mean_params()
+    prm_kp.kp_brain = 0.08 + h_kp
+    let m_kp = sim_rp3(prm_kp, 5.0)
+    let da_kp = (m_kp.auc - ref_m.auc) / h_kp
+
+    // fu perturbation
+    let h_fu = fdiff_h(0.08, 0.0004)
+    var prm_fu = rp3_mean_params()
+    prm_fu.fu_plasma = 0.08 + h_fu
+    let m_fu = sim_rp3(prm_fu, 5.0)
+    let da_fu = (m_fu.auc - ref_m.auc) / h_fu
+
+    let var_auc = da_cl * da_cl * 54.76 + da_kp * da_kp * 0.000625 + da_fu * da_fu * 0.0004
+    let sd_auc = ep_sqrt(var_auc)
+    var cv = 0.0
+    if ref_m.auc > 0.0 { cv = sd_auc / ref_m.auc }
+
+    var s1 = 0.0
+    var s2 = 0.0
+    var s3 = 0.0
+    if var_auc > 0.0 {
+        s1 = da_cl * da_cl * 54.76 / var_auc
+        s2 = da_kp * da_kp * 0.000625 / var_auc
+        s3 = da_fu * da_fu * 0.0004 / var_auc
+    }
+    let conf = 0.65 * s1 + 0.55 * s2 + 0.72 * s3
+
+    // Fill confidence bands using CV scaling
+    var bi = 0
+    while bi < 48 {
+        let cv_scale = cv * conc_r[bi as usize]
+        conc_r_hi[bi as usize] = conc_r[bi as usize] + cv_scale
+        conc_r_lo[bi as usize] = conc_r[bi as usize] - cv_scale
+        if conc_r_lo[bi as usize] < 0.0 { conc_r_lo[bi as usize] = 0.0 }
+        bi = bi + 1
+    }
+
+    return EpDrug { cmax: ref_m.cmax, auc: ref_m.auc, auc_var: var_auc, cv_auc: cv,
+                    bpr: ref_m.bpr, thalf: ref_m.thalf, conf: conf,
+                    s_p1: s1, s_p2: s2, s_p3: s3 }
+}
+
+fn ep_caffeine() -> EpDrug {
+    let prm = caf_mean_params()
+    let ref_m = sim_caf(prm, 200.0)
+
+    let h_ka = fdiff_h(4.4, 0.7744)
+    var prm_ka = caf_mean_params()
+    prm_ka.ka = 4.4 + h_ka
+    let m_ka = sim_caf(prm_ka, 200.0)
+    let da_ka = (m_ka.auc - ref_m.auc) / h_ka
+
+    let h_cl = fdiff_h(5.46, 3.651)
+    var prm_cl = caf_mean_params()
+    prm_cl.cl = 5.46 + h_cl
+    let m_cl = sim_caf(prm_cl, 200.0)
+    let da_cl = (m_cl.auc - ref_m.auc) / h_cl
+
+    let h_v = fdiff_h(42.0, 39.69)
+    var prm_v = caf_mean_params()
+    prm_v.v = 42.0 + h_v
+    let m_v = sim_caf(prm_v, 200.0)
+    let da_v = (m_v.auc - ref_m.auc) / h_v
+
+    let var_auc = da_ka * da_ka * 0.7744 + da_cl * da_cl * 3.651 + da_v * da_v * 39.69
+    let sd = ep_sqrt(var_auc)
+    var cv = 0.0
+    if ref_m.auc > 0.0 { cv = sd / ref_m.auc }
+
+    var s1 = 0.0
+    var s2 = 0.0
+    var s3 = 0.0
+    if var_auc > 0.0 {
+        s1 = da_ka * da_ka * 0.7744 / var_auc
+        s2 = da_cl * da_cl * 3.651 / var_auc
+        s3 = da_v * da_v * 39.69 / var_auc
+    }
+    let conf = 0.70 * s1 + 0.75 * s2 + 0.68 * s3
+
+    var bi = 0
+    while bi < 48 {
+        let cv_s = cv * conc_c[bi as usize]
+        conc_c_hi[bi as usize] = conc_c[bi as usize] + cv_s
+        conc_c_lo[bi as usize] = conc_c[bi as usize] - cv_s
+        if conc_c_lo[bi as usize] < 0.0 { conc_c_lo[bi as usize] = 0.0 }
+        bi = bi + 1
+    }
+
+    return EpDrug { cmax: ref_m.cmax, auc: ref_m.auc, auc_var: var_auc, cv_auc: cv,
+                    bpr: 0.0, thalf: ref_m.thalf, conf: conf,
+                    s_p1: s1, s_p2: s2, s_p3: s3 }
+}
+
+fn ep_metformin() -> EpDrug {
+    let prm = met_mean_params()
+    let ref_m = sim_met(prm, 500.0)
+
+    let h_ka = fdiff_h(0.9, 0.050625)
+    var prm_ka = met_mean_params()
+    prm_ka.ka = 0.9 + h_ka
+    let m_ka = sim_met(prm_ka, 500.0)
+    let da_ka = (m_ka.auc - ref_m.auc) / h_ka
+
+    let h_cl = fdiff_h(21.0, 39.69)
+    var prm_cl = met_mean_params()
+    prm_cl.cl = 21.0 + h_cl
+    let m_cl = sim_met(prm_cl, 500.0)
+    let da_cl = (m_cl.auc - ref_m.auc) / h_cl
+
+    let h_v = fdiff_h(400.0, 6400.0)
+    var prm_v = met_mean_params()
+    prm_v.v = 400.0 + h_v
+    let m_v = sim_met(prm_v, 500.0)
+    let da_v = (m_v.auc - ref_m.auc) / h_v
+
+    let var_auc = da_ka * da_ka * 0.050625 + da_cl * da_cl * 39.69 + da_v * da_v * 6400.0
+    let sd = ep_sqrt(var_auc)
+    var cv = 0.0
+    if ref_m.auc > 0.0 { cv = sd / ref_m.auc }
+
+    var s1 = 0.0
+    var s2 = 0.0
+    var s3 = 0.0
+    if var_auc > 0.0 {
+        s1 = da_ka * da_ka * 0.050625 / var_auc
+        s2 = da_cl * da_cl * 39.69 / var_auc
+        s3 = da_v * da_v * 6400.0 / var_auc
+    }
+    let conf = 0.60 * s1 + 0.70 * s2 + 0.65 * s3
+
+    var bi = 0
+    while bi < 48 {
+        let cv_s = cv * conc_m[bi as usize]
+        conc_m_hi[bi as usize] = conc_m[bi as usize] + cv_s
+        conc_m_lo[bi as usize] = conc_m[bi as usize] - cv_s
+        if conc_m_lo[bi as usize] < 0.0 { conc_m_lo[bi as usize] = 0.0 }
+        bi = bi + 1
+    }
+
+    return EpDrug { cmax: ref_m.cmax, auc: ref_m.auc, auc_var: var_auc, cv_auc: cv,
+                    bpr: 0.0, thalf: ref_m.thalf, conf: conf,
+                    s_p1: s1, s_p2: s2, s_p3: s3 }
+}
+
+// ============================================================================
+// LAYER 7: ASCII PLOT
+// ============================================================================
+
+fn plot_find_max() -> f64 {
+    var mx = 0.0
+    var i = 0
+    while i < 48 {
+        if conc_r_hi[i as usize] > mx { mx = conc_r_hi[i as usize] }
+        if conc_c_hi[i as usize] > mx { mx = conc_c_hi[i as usize] }
+        if conc_m_hi[i as usize] > mx { mx = conc_m_hi[i as usize] }
+        i = i + 1
+    }
+    return mx
+}
+
+fn plot_render(y_max: f64) -> i64 {
+    let rows = 20
+    var row = rows
+    while row >= 0 {
+        // Y-axis label
+        let y_val = y_max * (row as f64) / 20.0
+        if y_val < 10.0 { print(" ") }
+        print_f64_1(y_val)
+        print("|")
+
+        var col = 0
+        while col < 48 {
+            let threshold = y_max * (row as f64) / 20.0
+            let rv = conc_r[col as usize]
+            let cv = conc_c[col as usize]
+            let mv = conc_m[col as usize]
+            let rh = conc_r_hi[col as usize]
+            let ch = conc_c_hi[col as usize]
+            let mh = conc_m_hi[col as usize]
+
+            var printed = 0
+            // Mean curves (uppercase)
+            if cv >= threshold { if printed == 0 { print("C"); printed = 1 } }
+            if rv >= threshold { if printed == 0 { print("R"); printed = 1 } }
+            if mv >= threshold { if printed == 0 { print("M"); printed = 1 } }
+            // Confidence bands (lowercase)
+            if printed == 0 {
+                if ch >= threshold { if conc_c_lo[col as usize] < threshold { print("c"); printed = 1 } }
+            }
+            if printed == 0 {
+                if rh >= threshold { if conc_r_lo[col as usize] < threshold { print("r"); printed = 1 } }
+            }
+            if printed == 0 {
+                if mh >= threshold { if conc_m_lo[col as usize] < threshold { print("m"); printed = 1 } }
+            }
+            if printed == 0 { print(" ") }
+            col = col + 1
+        }
+        print("\n")
+        row = row - 1
+    }
+    // X-axis
+    print("     +")
+    var xi = 0
+    while xi < 48 { print("-"); xi = xi + 1 }
+    print("\n")
+    print("      0    6   12   18   24   30   36   42  48h\n")
+    print("      R=Rapamycin  C=Caffeine  M=Metformin  (lower=+/-1s)\n")
+    return 0
+}
+
+// ============================================================================
+// LAYER 8: COMPARISON TABLE
+// ============================================================================
+
+fn print_drug_summary(name_tag: i64, d: EpDrug) -> i64 {
+    if name_tag == 0 {
+        print("  Rapamycin  5mg IV   ")
+    }
+    if name_tag == 1 {
+        print("  Caffeine   200mg PO ")
+    }
+    if name_tag == 2 {
+        print("  Metformin  500mg PO ")
+    }
+    print_f64_3(d.cmax)
+    print("     ")
+    print_f64_3(d.auc)
+    print("+/-")
+    print_f64_3(ep_sqrt(d.auc_var))
+    print("  ")
+    print_f64_1(d.thalf)
+    print("h  ")
+    print_f64_3(d.cv_auc * 100.0)
+    print("%  ")
+    print_f64_3(d.conf)
+    print("\n")
+    return 0
+}
+
+// ============================================================================
+// LAYER 9: VALIDATION
+// ============================================================================
+
+fn run_tests(r: EpDrug, c: EpDrug, m: EpDrug) -> i64 {
+    var passed = 0
+    var failed = 0
+
+    // T1: Rapamycin brain/plasma < 0.15
+    if r.bpr > 0.0 { if r.bpr < 0.15 {
+        print("  PASS T1: brain/plasma < 0.15 (P-gp)\n"); passed = passed + 1
+    } else { print("  FAIL T1\n"); failed = failed + 1 }
+    } else { print("  FAIL T1: bpr=0\n"); failed = failed + 1 }
+
+    // T2: Rapamycin CV(AUC) > 30%
+    if r.cv_auc > 0.30 {
+        print("  PASS T2: rapa CV(AUC) > 30%\n"); passed = passed + 1
+    } else { print("  FAIL T2\n"); failed = failed + 1 }
+
+    // T3: Caffeine Cmax reasonable (3-6 mg/L for 200mg oral)
+    if c.cmax > 2.0 { if c.cmax < 8.0 {
+        print("  PASS T3: caffeine Cmax in [2,8] mg/L\n"); passed = passed + 1
+    } else { print("  FAIL T3: Cmax too high\n"); failed = failed + 1 }
+    } else { print("  FAIL T3: Cmax too low\n"); failed = failed + 1 }
+
+    // T4: Caffeine t1/2 within 20% of 5.33h
+    let t_err = ep_abs(c.thalf - 5.33) / 5.33
+    if t_err < 0.20 {
+        print("  PASS T4: caffeine t1/2 ~ 5.3h\n"); passed = passed + 1
+    } else { print("  FAIL T4: t1/2 error > 20%\n"); failed = failed + 1 }
+
+    // T5: Metformin Cmax < Caffeine Cmax (V=400L >> 42L)
+    if m.cmax < c.cmax {
+        print("  PASS T5: met Cmax < caf Cmax (V=400 >> 42)\n"); passed = passed + 1
+    } else { print("  FAIL T5\n"); failed = failed + 1 }
+
+    // T6: All AUC variances > 0
+    if r.auc_var > 0.0 { if c.auc_var > 0.0 { if m.auc_var > 0.0 {
+        print("  PASS T6: all AUC variances > 0\n"); passed = passed + 1
+    } else { print("  FAIL T6\n"); failed = failed + 1 }
+    } else { print("  FAIL T6\n"); failed = failed + 1 }
+    } else { print("  FAIL T6\n"); failed = failed + 1 }
+
+    // T7: CL dominates rapamycin AUC uncertainty
+    if r.s_p1 > 0.5 {
+        print("  PASS T7: CL dominates rapa AUC (s_cl > 0.5)\n"); passed = passed + 1
+    } else { print("  FAIL T7\n"); failed = failed + 1 }
+
+    // T8: Causal monotonicity — caffeine AUC(CL/2) > AUC(CL)
+    var prm_lo = caf_mean_params()
+    prm_lo.cl = 2.73
+    let m_lo = sim_caf(prm_lo, 200.0)
+    if m_lo.auc > c.auc {
+        print("  PASS T8: caf AUC(CL/2) > AUC(CL)\n"); passed = passed + 1
+    } else { print("  FAIL T8\n"); failed = failed + 1 }
+
+    // T9: All confidences in (0,1)
+    if r.conf > 0.0 { if r.conf < 1.0 { if c.conf > 0.0 { if c.conf < 1.0 { if m.conf > 0.0 { if m.conf < 1.0 {
+        print("  PASS T9: all confidences in (0,1)\n"); passed = passed + 1
+    } else { print("  FAIL T9\n"); failed = failed + 1 }
+    } else { print("  FAIL T9\n"); failed = failed + 1 }
+    } else { print("  FAIL T9\n"); failed = failed + 1 }
+    } else { print("  FAIL T9\n"); failed = failed + 1 }
+    } else { print("  FAIL T9\n"); failed = failed + 1 }
+    } else { print("  FAIL T9\n"); failed = failed + 1 }
+
+    // T10: Metformin AUC > Rapamycin AUC (500mg vs 5mg, similar ke)
+    if m.auc > r.auc {
+        print("  PASS T10: met AUC > rapa AUC\n"); passed = passed + 1
+    } else { print("  FAIL T10\n"); failed = failed + 1 }
+
+    print("\n  RESULT: ")
+    print_int(passed)
+    print("/10 PASS, ")
+    print_int(failed)
+    print(" FAIL\n")
+
+    return failed
+}
+
+// ============================================================================
+// MAIN
+// ============================================================================
+
+fn main() -> i64 {
+    print("======================================================================\n")
+    print("  SOUNIO MULTI-DRUG EPISTEMIC PBPK — Native ELF Demo\n")
+    print("  3 Drugs | GUM Uncertainty | ASCII Concentration Curves\n")
+    print("  JCGM 100:2008 | 12 simulations | 10 validation tests\n")
+    print("======================================================================\n\n")
+
+    // Run epistemic simulations
+    let r = ep_rapamycin()
+    let c = ep_caffeine()
+    let m = ep_metformin()
+
+    // Drug summaries
+    print("  Drug         Dose        Cmax       AUC(0-48h)+/-SD       t1/2   CV     Conf\n")
+    print("  ------------ ----------  ---------  -------------------   -----  ------  -----\n")
+    print_drug_summary(0, r)
+    print_drug_summary(1, c)
+    print_drug_summary(2, m)
+
+    // Sensitivity highlights
+    print("\n  Dominant uncertainty sources:\n")
+    print("    Rapamycin: CL_hepatic (CYP3A4) = ")
+    print_f64_1(r.s_p1 * 100.0)
+    print("%\n")
+    print("    Caffeine:  CL (CYP1A2) = ")
+    print_f64_1(c.s_p2 * 100.0)
+    print("%\n")
+    print("    Metformin: CL (renal) = ")
+    print_f64_1(m.s_p2 * 100.0)
+    print("%\n")
+
+    // ASCII plot
+    print("\n  -- Plasma Concentration vs Time (48h) --\n\n")
+    let y_max = plot_find_max()
+    plot_render(y_max)
+
+    // Validation
+    print("\n  -- Validation --\n\n")
+    let fails = run_tests(r, c, m)
+
+    if fails == 0 {
+        print("\n  3 drugs, 12 simulations, 10 tests, 1 native binary.\n")
+        print("  No other language compiles epistemic pharmacokinetics to bare metal.\n")
+    }
+    print("======================================================================\n")
+
+    return fails
+}
