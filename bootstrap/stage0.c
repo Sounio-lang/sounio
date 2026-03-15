@@ -1577,18 +1577,23 @@ static void write_elf(const char *path) {
     int text_off = 4096;
     int total_code = g_code_len;
 
-    /* Build trampoline: call main; mov edi,eax; mov eax,60; syscall */
+    /*
+     * Trampoline: call main, exit.
+     * Simple — no arg passing for now (arg_count/get_arg are stubs).
+     */
     int tramp_off = total_code;
-    int cs = g_code_len;
+
+    /* call main */
     int moff = (g_main_fn_idx >= 0) ? g_fn_offsets[g_main_fn_idx] : 0;
-    int32_t cd = moff - (cs + 5);
+    int32_t cd = moff - (g_code_len + 5);
     emit(0xE8); emit32(cd);
     /* mov edi, eax */
     emit(0x89); emit(0xC7);
-    /* mov eax, 60 */
+    /* mov eax, 60 (sys_exit) */
     emit(0xB8); emit32(60);
     /* syscall */
     emit(0x0F); emit(0x05);
+
     total_code = g_code_len;
 
     int64_t entry_va = (int64_t)base_addr + text_off + tramp_off;
@@ -1689,7 +1694,39 @@ int main(int argc, char **argv) {
 
     g_fn_names[g_fn_count] = name_from("print");
     g_fn_ret_type[g_fn_count] = 0;
-    g_fn_count++; /* print is handled inline */
+    int print_idx = g_fn_count++;
+
+    g_fn_names[g_fn_count] = name_from("arg_count");
+    g_fn_ret_type[g_fn_count] = 0;
+    int arg_count_idx = g_fn_count++;
+
+    g_fn_names[g_fn_count] = name_from("get_arg");
+    g_fn_ret_type[g_fn_count] = 0;
+    int get_arg_idx = g_fn_count++;
+
+    g_fn_names[g_fn_count] = name_from("read_file");
+    g_fn_ret_type[g_fn_count] = 0;
+    int read_file_idx = g_fn_count++;
+
+    g_fn_names[g_fn_count] = name_from("file_size");
+    g_fn_ret_type[g_fn_count] = 0;
+    int file_size_idx = g_fn_count++;
+
+    g_fn_names[g_fn_count] = name_from("write_file");
+    g_fn_ret_type[g_fn_count] = 0;
+    int write_file_idx = g_fn_count++;
+
+    g_fn_names[g_fn_count] = name_from("read_byte");
+    g_fn_ret_type[g_fn_count] = 0;
+    int read_byte_idx = g_fn_count++;
+
+    g_fn_names[g_fn_count] = name_from("str_len");
+    g_fn_ret_type[g_fn_count] = 0;
+    int str_len_idx = g_fn_count++;
+
+    g_fn_names[g_fn_count] = name_from("str_char_at");
+    g_fn_ret_type[g_fn_count] = 0;
+    int str_char_at_idx = g_fn_count++;
 
     /* Collect user functions */
     for (Item *it = program; it; it = it->next) {
@@ -1714,6 +1751,23 @@ int main(int argc, char **argv) {
     /* Phase 2: Emit code */
     g_code_len = 0;
 
+    /* Emit builtin stubs — return 0 for unimplemented */
+    #define EMIT_STUB(idx, name) do { \
+        g_fn_offsets[idx] = g_code_len; \
+        emit_mov_rax_imm64(0); emit_ret(); \
+        fprintf(stderr, "stage0: builtin=%s off=%d (stub)\n", name, g_fn_offsets[idx]); \
+    } while(0)
+
+    EMIT_STUB(print_idx, "print");
+    EMIT_STUB(arg_count_idx, "arg_count");
+    EMIT_STUB(get_arg_idx, "get_arg");
+    EMIT_STUB(read_file_idx, "read_file");
+    EMIT_STUB(file_size_idx, "file_size");
+    EMIT_STUB(write_file_idx, "write_file");
+    EMIT_STUB(read_byte_idx, "read_byte");
+    EMIT_STUB(str_len_idx, "str_len");
+    EMIT_STUB(str_char_at_idx, "str_char_at");
+
     /* Emit print_int builtin */
     g_fn_offsets[print_int_idx] = g_code_len;
     emit_print_int_builtin();
@@ -1721,7 +1775,7 @@ int main(int argc, char **argv) {
             g_fn_offsets[print_int_idx], g_code_len - g_fn_offsets[print_int_idx]);
 
     /* Compile user functions */
-    int fi = 2; /* skip print_int and print builtins */
+    int fi = 10; /* skip all builtin slots (print_int, print, arg_count, get_arg, read_file, file_size, write_file, read_byte, str_len, str_char_at) */
     for (Item *it = program; it; it = it->next) {
         if (it->kind == ITEM_FN && it->fn && fi < MAX_FUNCS) {
             g_fn_offsets[fi] = g_code_len;
