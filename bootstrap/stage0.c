@@ -394,7 +394,7 @@ struct Block {
     Stmt *stmts;
 };
 
-typedef struct Param { Name name; Name type_name; bool is_ref; bool is_mut_ref; struct Param *next; } Param;
+typedef struct Param { Name name; Name type_name; bool is_ref; bool is_mut_ref; bool is_byte_array; struct Param *next; } Param;
 typedef struct FieldDef { Name name; Name type_name; struct FieldDef *next; } FieldDef;
 
 struct FnDef {
@@ -500,6 +500,15 @@ static Param *parse_params(int *count) {
         else { p->name = cur()->name; next(); }
         if (eat(TK_COLON)) {
             if (tk()==TK_AMP) { p->is_ref = true; next(); if (eat(TK_BANG)) p->is_mut_ref = true; }
+            /* Detect [i8; N] byte array type */
+            if (tk()==TK_LBRACKET) {
+                int save = g_tp;
+                next(); /* [ */
+                if (tk()==TK_IDENT && (name_is(cur()->name,"i8")||name_is(cur()->name,"u8"))) {
+                    p->is_byte_array = true;
+                }
+                g_tp = save; /* restore — let skip_type handle it */
+            }
             p->type_name = cur()->name;
             skip_type();
         }
@@ -1632,7 +1641,7 @@ static void compile_function(FnDef *fn) {
         emit_store_rax(slot);
         loc.names[loc.count] = p->name;
         loc.slots[loc.count] = slot;
-        loc.types[loc.count] = 0;
+        loc.types[loc.count] = p->is_byte_array ? 3 : 0;
         loc.count++;
     }
     /* Body */
