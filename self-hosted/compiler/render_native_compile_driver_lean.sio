@@ -868,6 +868,24 @@ struct AstCompileCtx {
     fn_return_types: [i64; 512],
     fn_names: [Name; 512],
     fn_count: i64,
+    // Per-function sret state (set before compiling each function body)
+    cur_sret: i64,           // 1 if current function uses sret, 0 otherwise
+    cur_sret_dest_slot: i64, // slot holding the sret destination pointer
+    cur_sret_flat_size: i64, // flat size of the return struct
+}
+
+// Sret dest slot stored in CodeBuffer metadata at bytes [65526..65527]
+fn code_get_sret_slot(c: CodeBuffer) -> i64 with Mut, Panic {
+    let b0 = (c.bytes[65526 as usize] as i64) & 0xFF
+    let b1 = (c.bytes[65527 as usize] as i64) & 0xFF
+    b0 | (b1 << 8)
+}
+
+fn code_set_sret_slot(c: CodeBuffer, slot: i64) -> CodeBuffer with Mut, Panic {
+    var r = c
+    r.bytes[65526 as usize] = (slot & 0xFF) as i8
+    r.bytes[65527 as usize] = ((slot >> 8) & 0xFF) as i8
+    r
 }
 
 fn code_get_ns(c: CodeBuffer) -> i64 with Mut, Panic {
@@ -2582,6 +2600,33 @@ fn ast_compile_expr(code: CodeBuffer, expr: &Expr,
                 c = emit_byte(c, 0x48); c = emit_byte(c, 0x31); c = emit_byte(c, 0xc0)
             }
         }
+        // If current function uses sret, copy return struct to sret destination
+        if ctx.cur_sret == 1 {
+            let sr_flat = ctx.cur_sret_flat_size
+            let sr_dest = code_get_sret_slot(c)
+            // rax = source base (highest addr). Copy to sret dest.
+            c = emit_byte(c, 0x56); c = emit_byte(c, 0x57); c = emit_byte(c, 0x51) // push rsi,rdi,rcx
+            if sr_flat > 1 {
+                let sr_adj = (sr_flat - 1) * 8
+                c = emit_byte(c, 0x48); c = emit_byte(c, 0x2d) // sub rax, imm32
+                c = emit_byte(c, sr_adj & 0xFF); c = emit_byte(c, (sr_adj >> 8) & 0xFF)
+                c = emit_byte(c, (sr_adj >> 16) & 0xFF); c = emit_byte(c, (sr_adj >> 24) & 0xFF)
+            }
+            c = emit_byte(c, 0x48); c = emit_byte(c, 0x89); c = emit_byte(c, 0xc6) // mov rsi, rax
+            // Load sret dest pointer, adjust to lowest addr
+            c = micro_load_rax(c, sr_dest)
+            if sr_flat > 1 {
+                let sr_dadj = (sr_flat - 1) * 8
+                c = emit_byte(c, 0x48); c = emit_byte(c, 0x2d) // sub rax, imm32
+                c = emit_byte(c, sr_dadj & 0xFF); c = emit_byte(c, (sr_dadj >> 8) & 0xFF)
+                c = emit_byte(c, (sr_dadj >> 16) & 0xFF); c = emit_byte(c, (sr_dadj >> 24) & 0xFF)
+            }
+            c = emit_byte(c, 0x48); c = emit_byte(c, 0x89); c = emit_byte(c, 0xc7) // mov rdi, rax
+            c = emit_byte(c, 0x48); c = emit_byte(c, 0xc7); c = emit_byte(c, 0xc1) // mov rcx, imm32
+            c = emit_byte(c, sr_flat & 0xFF); c = emit_byte(c, 0); c = emit_byte(c, 0); c = emit_byte(c, 0)
+            c = emit_byte(c, 0xf3); c = emit_byte(c, 0x48); c = emit_byte(c, 0xa5) // rep movsq
+            c = emit_byte(c, 0x59); c = emit_byte(c, 0x5f); c = emit_byte(c, 0x5e) // pop rcx,rdi,rsi
+        }
         c = emit_byte(c, 0xc9)
         c = emit_byte(c, 0xc3)
         c
@@ -3207,19 +3252,71 @@ fn ast_compile_block(code: CodeBuffer, blk: &Block,
                             Some(te) => {
                                 if (*te).kind == ExprKind::ExprIdent {
                                     var slot: i64 = -1
+                                    var asgn_type: i64 = 0
                                     var bli = lc - 1
                                     while bli >= 0 {
                                         if ir_name_eq(ln[bli as usize], (*te).name) {
                                             slot = ls[bli as usize]
+                                            asgn_type = lt[bli as usize]
                                             bli = -1
                                         } else { bli = bli - 1 }
                                     }
-                                    if slot >= 0 {
+                                    if slot >= 0 && asgn_type >= 10 && asgn_type < 100 {
+                                        // Struct assignment: copy struct data from rax (source base) to slot
+                                        let sa_idx = asgn_type - 10
+                                        let sa_flat = ctx.struct_flat_size[sa_idx as usize]
+                                        c = emit_byte(c, 0x56); c = emit_byte(c, 0x57); c = emit_byte(c, 0x51) // push rsi,rdi,rcx
+                                        if sa_flat > 1 {
+                                            let sa_adj = (sa_flat - 1) * 8
+                                            c = emit_byte(c, 0x48); c = emit_byte(c, 0x2d) // sub rax, imm32
+                                            c = emit_byte(c, sa_adj & 0xFF); c = emit_byte(c, (sa_adj >> 8) & 0xFF)
+                                            c = emit_byte(c, (sa_adj >> 16) & 0xFF); c = emit_byte(c, (sa_adj >> 24) & 0xFF)
+                                        }
+                                        c = emit_byte(c, 0x48); c = emit_byte(c, 0x89); c = emit_byte(c, 0xc6) // mov rsi, rax
+                                        c = micro_lea_rax_slot(c, slot + sa_flat - 1)
+                                        c = emit_byte(c, 0x48); c = emit_byte(c, 0x89); c = emit_byte(c, 0xc7) // mov rdi, rax
+                                        c = emit_byte(c, 0x48); c = emit_byte(c, 0xc7); c = emit_byte(c, 0xc1) // mov rcx, imm32
+                                        c = emit_byte(c, sa_flat & 0xFF); c = emit_byte(c, 0); c = emit_byte(c, 0); c = emit_byte(c, 0)
+                                        c = emit_byte(c, 0xf3); c = emit_byte(c, 0x48); c = emit_byte(c, 0xa5) // rep movsq
+                                        c = emit_byte(c, 0x59); c = emit_byte(c, 0x5f); c = emit_byte(c, 0x5e) // pop rcx,rdi,rsi
+                                    } else if slot >= 0 {
                                         c = micro_store_rax(c, slot)
                                     } else if slot <= -2000 {
                                         // Global scalar write
                                         let gwi = 0 - (slot + 2000)
                                         c = emit_global_scalar_write(c, gwi)
+                                    }
+                                } else if (*te).kind == ExprKind::ExprFieldAccess {
+                                    // Struct field assignment: s.field = value
+                                    // rax = RHS value (already compiled above)
+                                    c = emit_byte(c, 0x50) // push rax (value)
+                                    // Determine base type to find struct index
+                                    let fa_base2: &Option<Box<Expr>> = &(*te).left
+                                    var fa_base_type: i64 = 0
+                                    match *fa_base2 {
+                                        Some(fab) => {
+                                            fa_base_type = ast_expr_result_type(&(*fab), ln, lt, lc, ctx)
+                                            // Compile base → rax (address of struct via LEA)
+                                            c = ast_compile_expr(c, &(*fab), ln, ls, lt, lc, ctx)
+                                        }
+                                        _ => {}
+                                    }
+                                    var fa_si: i64 = -1
+                                    if fa_base_type >= 100 { fa_si = fa_base_type - 100 }
+                                    else if fa_base_type >= 10 { fa_si = fa_base_type - 10 }
+                                    if fa_si >= 0 {
+                                        let fa_fi = ast_struct_field_info(ctx, fa_si, (*te).name)
+                                        if fa_fi >= 0 {
+                                            let fa_foff = ctx.sf_flat_offset[fa_fi as usize]
+                                            let fa_off = 0 - (fa_foff * 8)
+                                            // rax = struct base address
+                                            // pop rdx = value
+                                            c = emit_byte(c, 0x5a) // pop rdx
+                                            // mov [rax + off], rdx: 48 89 90 <disp32>
+                                            c = emit_byte(c, 0x48); c = emit_byte(c, 0x89); c = emit_byte(c, 0x90)
+                                            c = emit_byte(c, fa_off & 0xFF); c = emit_byte(c, (fa_off >> 8) & 0xFF)
+                                            c = emit_byte(c, (fa_off >> 16) & 0xFF); c = emit_byte(c, (fa_off >> 24) & 0xFF)
+                                        }
                                     }
                                 } else if (*te).kind == ExprKind::ExprIndex {
                                     // Array index assignment: ARR[idx] = value
@@ -3354,6 +3451,8 @@ fn ast_compile_fn_body(code: CodeBuffer, fd: &FnDef,
         // mov rax, rdi
         c = emit_byte(c, 0x48); c = emit_byte(c, 0x89); c = emit_byte(c, 0xf8)
         c = micro_store_rax(c, sret_dest_slot)
+        // Store sret_dest_slot in CodeBuffer metadata for ExprReturn to use
+        c = code_set_sret_slot(c, sret_dest_slot)
     }
 
     // Register function names as locals with negative slots (for call resolution)
@@ -3549,6 +3648,9 @@ fn main() -> i64 with IO, Mut, Panic, Div, Alloc {
         fn_return_types: [0; 512],
         fn_names: [ir_empty_name(); 512],
         fn_count: 0,
+        cur_sret: 0,
+        cur_sret_dest_slot: 0,
+        cur_sret_flat_size: 0,
     }
     var sf_next: i64 = 0  // next index in sf_* arrays
 
@@ -4437,6 +4539,16 @@ fn main() -> i64 with IO, Mut, Panic, Div, Alloc {
                                 code = emit_byte(code, frame_size & 0xFF); code = emit_byte(code, (frame_size >> 8) & 0xFF)
                                 code = emit_byte(code, (frame_size >> 16) & 0xFF); code = emit_byte(code, (frame_size >> 24) & 0xFF)
                                 print(" pre="); print_int(code.len)
+                                // Set per-function sret state in ctx before compiling body
+                                let fn_rt2 = ctx.fn_return_types[fn_idx as usize]
+                                if fn_rt2 >= 10 && fn_rt2 < 100 {
+                                    ctx.cur_sret = 1
+                                    ctx.cur_sret_flat_size = ctx.struct_flat_size[(fn_rt2 - 10) as usize]
+                                    // cur_sret_dest_slot will be set inside ast_compile_fn_body
+                                } else {
+                                    ctx.cur_sret = 0
+                                    ctx.cur_sret_flat_size = 0
+                                }
                                 code = ast_compile_fn_body(code, &(*fd), fn_count, &ctx)
                                 code = emit_byte(code, 0xc9); code = emit_byte(code, 0xc3)
                                 let fn_start = fn_offsets[fn_idx as usize]
@@ -4478,6 +4590,15 @@ fn main() -> i64 with IO, Mut, Panic, Div, Alloc {
                                                     code = emit_byte(code, 0x48); code = emit_byte(code, 0x81); code = emit_byte(code, 0xec)
                                                     code = emit_byte(code, mframe & 0xFF); code = emit_byte(code, (mframe >> 8) & 0xFF)
                                                     code = emit_byte(code, (mframe >> 16) & 0xFF); code = emit_byte(code, (mframe >> 24) & 0xFF)
+                                                    // Set sret state for method
+                                                    let mrt2 = ctx.fn_return_types[fn_idx as usize]
+                                                    if mrt2 >= 10 && mrt2 < 100 {
+                                                        ctx.cur_sret = 1
+                                                        ctx.cur_sret_flat_size = ctx.struct_flat_size[(mrt2 - 10) as usize]
+                                                    } else {
+                                                        ctx.cur_sret = 0
+                                                        ctx.cur_sret_flat_size = 0
+                                                    }
                                                     code = ast_compile_fn_body(code, &(*mcfd), fn_count, &ctx)
                                                     code = emit_byte(code, 0xc9); code = emit_byte(code, 0xc3)
                                                     let mc_start = fn_offsets[fn_idx as usize]
