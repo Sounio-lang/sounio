@@ -4199,6 +4199,49 @@ fn ocp_const_fold(func: IrFunction) -> IrFunction with Mut, Div, Panic {
             }
         }
 
+        // Sprint 224 Block EH: XOR-NOR annihilation — (x^y) & ~(x|y) → 0.
+        // Proof: x^y has 1s where exactly one of x,y is 1; ~(x|y) has 1s where both are 0. Disjoint → AND=0.
+        // Commutative: ~(x|y) & (x^y) → 0.
+        // Zero new arrays: uses as_xor_rr_valid/lhs/rhs + ao_or_rr_valid/lhs/rhs + is_bnot/bnot_src.
+        // SOTA: LLVM InstCombineAndOrXor; Boolean lattice disjointness.
+        if ocp_is_binop(result.instrs[i as usize].op) {
+            let eh_instr = result.instrs[i as usize]
+            let eh_s1 = eh_instr.src1; let eh_s2 = eh_instr.src2
+            let eh_s1_ok = eh_s1 >= 0 && eh_s1 < 256; let eh_s2_ok = eh_s2 >= 0 && eh_s2 < 256
+            if eh_instr.bin_op == BinaryOp::OpBitAnd && eh_s1_ok && eh_s2_ok {
+                // Case 1: (x^y) & ~(x|y): s1=XOR-rr, s2=NOT(OR-rr) with same operands
+                if as_xor_rr_valid[eh_s1 as usize] && is_bnot[eh_s2 as usize] {
+                    let eh_nor = bnot_src[eh_s2 as usize]
+                    let eh_nor_ok = eh_nor >= 0 && eh_nor < 256
+                    if eh_nor_ok && ao_or_rr_valid[eh_nor as usize] {
+                        let eh_xl = as_xor_rr_lhs[eh_s1 as usize]
+                        let eh_xr = as_xor_rr_rhs[eh_s1 as usize]
+                        let eh_ol = ao_or_rr_lhs[eh_nor as usize]
+                        let eh_or = ao_or_rr_rhs[eh_nor as usize]
+                        if (eh_xl == eh_ol && eh_xr == eh_or)
+                                || (eh_xl == eh_or && eh_xr == eh_ol) {
+                            result.instrs[i as usize] = ir_load_imm(eh_instr.dst, 0)
+                        }
+                    }
+                }
+                // Case 2: ~(x|y) & (x^y): s1=NOT(OR-rr), s2=XOR-rr
+                if is_bnot[eh_s1 as usize] && as_xor_rr_valid[eh_s2 as usize] {
+                    let eh_nor2 = bnot_src[eh_s1 as usize]
+                    let eh_nor2_ok = eh_nor2 >= 0 && eh_nor2 < 256
+                    if eh_nor2_ok && ao_or_rr_valid[eh_nor2 as usize] {
+                        let eh_xl2 = as_xor_rr_lhs[eh_s2 as usize]
+                        let eh_xr2 = as_xor_rr_rhs[eh_s2 as usize]
+                        let eh_ol2 = ao_or_rr_lhs[eh_nor2 as usize]
+                        let eh_or2 = ao_or_rr_rhs[eh_nor2 as usize]
+                        if (eh_xl2 == eh_ol2 && eh_xr2 == eh_or2)
+                                || (eh_xl2 == eh_or2 && eh_xr2 == eh_ol2) {
+                            result.instrs[i as usize] = ir_load_imm(eh_instr.dst, 0)
+                        }
+                    }
+                }
+            }
+        }
+
         // Sprint 177 Block CM: AND complement XOR partition — (x & C) ^ (x & ~C) → x.
         // Proof: C-bits: (xi&1)^(xi&0)=xi^0=xi. Non-C: (xi&0)^(xi&1)=0^xi=xi. QED.
         // Dual of Block CC (OR partition). Commutative: (x&~C)^(x&C) → x.
