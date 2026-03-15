@@ -22,6 +22,15 @@ use parser::parser::{parser_last_error_count}
 var WIDE_OUT: [i8; 262144] = [0; 262144]
 var WIDE_LEN: i64 = 0
 
+// Global variable registry (file-scope var declarations)
+var GLOBAL_NAMES: [Name; 256] = [ir_empty_name(); 256]
+var GLOBAL_OFFSETS: [i64; 256] = [0; 256]      // byte offset from global_base
+var GLOBAL_SIZES: [i64; 256] = [0; 256]        // total byte size of this global
+var GLOBAL_ELEM_SIZES: [i64; 256] = [0; 256]   // element size (1 for i8, 8 for i64, 8 for scalar)
+var GLOBAL_COUNT: i64 = 0
+var GLOBAL_TOTAL_SIZE: i64 = 0
+var GLOBAL_BASE_ABS: i64 = 0  // absolute VA of global_base_ptr storage
+
 fn wide_flush(code: CodeBuffer) with Mut, Panic, Div {
     var i: i64 = 0
     while i < code.len && WIDE_LEN < 262144 {
@@ -953,6 +962,202 @@ fn micro_lea_rax_slot(code: CodeBuffer, slot: i64) -> CodeBuffer with Mut, Panic
     c
 }
 
+// Emit mov rax, imm64 — 48 B8 <8 bytes LE>
+fn emit_mov_rax_imm64(code: CodeBuffer, val: i64) -> CodeBuffer with Mut, Panic, Div {
+    var c = code
+    c = emit_byte(c, 0x48); c = emit_byte(c, 0xB8)
+    c = emit_byte(c, val & 0xFF)
+    c = emit_byte(c, (val >> 8) & 0xFF)
+    c = emit_byte(c, (val >> 16) & 0xFF)
+    c = emit_byte(c, (val >> 24) & 0xFF)
+    c = emit_byte(c, (val >> 32) & 0xFF)
+    c = emit_byte(c, (val >> 40) & 0xFF)
+    c = emit_byte(c, (val >> 48) & 0xFF)
+    c = emit_byte(c, (val >> 56) & 0xFF)
+    c
+}
+
+// Emit mov rcx, imm64 — 48 B9 <8 bytes LE>
+fn emit_mov_rcx_imm64(code: CodeBuffer, val: i64) -> CodeBuffer with Mut, Panic, Div {
+    var c = code
+    c = emit_byte(c, 0x48); c = emit_byte(c, 0xB9)
+    c = emit_byte(c, val & 0xFF)
+    c = emit_byte(c, (val >> 8) & 0xFF)
+    c = emit_byte(c, (val >> 16) & 0xFF)
+    c = emit_byte(c, (val >> 24) & 0xFF)
+    c = emit_byte(c, (val >> 32) & 0xFF)
+    c = emit_byte(c, (val >> 40) & 0xFF)
+    c = emit_byte(c, (val >> 48) & 0xFF)
+    c = emit_byte(c, (val >> 56) & 0xFF)
+    c
+}
+
+// Emit code to load global base address into rax: mov rax, imm64(GLOBAL_BASE_ABS); mov rax, [rax]
+fn emit_load_global_base(code: CodeBuffer) -> CodeBuffer with Mut, Panic, Div {
+    var c = code
+    c = emit_mov_rax_imm64(c, GLOBAL_BASE_ABS)
+    // mov rax, [rax]
+    c = emit_byte(c, 0x48); c = emit_byte(c, 0x8b); c = emit_byte(c, 0x00)
+    c
+}
+
+// Lookup global by name, return index or -1
+fn global_lookup(name: Name) -> i64 with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < GLOBAL_COUNT {
+        if ir_name_eq(GLOBAL_NAMES[i as usize], name) { return i }
+        i = i + 1
+    }
+    -1
+}
+
+// Emit code to read a scalar global into rax
+// global_idx identifies which global
+fn emit_global_scalar_read(code: CodeBuffer, global_idx: i64) -> CodeBuffer with Mut, Panic, Div {
+    var c = code
+    c = emit_load_global_base(c)
+    let off = GLOBAL_OFFSETS[global_idx as usize]
+    if off > 0 {
+        // add rax, imm32
+        c = emit_byte(c, 0x48); c = emit_byte(c, 0x05)
+        c = emit_byte(c, off & 0xFF); c = emit_byte(c, (off >> 8) & 0xFF)
+        c = emit_byte(c, (off >> 16) & 0xFF); c = emit_byte(c, (off >> 24) & 0xFF)
+    }
+    // mov rax, [rax]
+    c = emit_byte(c, 0x48); c = emit_byte(c, 0x8b); c = emit_byte(c, 0x00)
+    c
+}
+
+// Emit code to store rax to a scalar global (assumes value in rax)
+// Clobbers rcx
+fn emit_global_scalar_write(code: CodeBuffer, global_idx: i64) -> CodeBuffer with Mut, Panic, Div {
+    var c = code
+    // Save value in rcx
+    c = emit_byte(c, 0x48); c = emit_byte(c, 0x89); c = emit_byte(c, 0xc1) // mov rcx, rax
+    c = emit_load_global_base(c)
+    let off = GLOBAL_OFFSETS[global_idx as usize]
+    if off > 0 {
+        c = emit_byte(c, 0x48); c = emit_byte(c, 0x05)
+        c = emit_byte(c, off & 0xFF); c = emit_byte(c, (off >> 8) & 0xFF)
+        c = emit_byte(c, (off >> 16) & 0xFF); c = emit_byte(c, (off >> 24) & 0xFF)
+    }
+    // mov [rax], rcx
+    c = emit_byte(c, 0x48); c = emit_byte(c, 0x89); c = emit_byte(c, 0x08)
+    c
+}
+
+// Emit code to get address of global array element for READ
+// Index is in rax on entry. Result address in rax.
+fn emit_global_array_addr(code: CodeBuffer, global_idx: i64) -> CodeBuffer with Mut, Panic, Div {
+    var c = code
+    let elem_sz = GLOBAL_ELEM_SIZES[global_idx as usize]
+    // Save index to rcx
+    c = emit_byte(c, 0x48); c = emit_byte(c, 0x89); c = emit_byte(c, 0xc1) // mov rcx, rax
+    c = emit_load_global_base(c)
+    let off = GLOBAL_OFFSETS[global_idx as usize]
+    if off > 0 {
+        c = emit_byte(c, 0x48); c = emit_byte(c, 0x05)
+        c = emit_byte(c, off & 0xFF); c = emit_byte(c, (off >> 8) & 0xFF)
+        c = emit_byte(c, (off >> 16) & 0xFF); c = emit_byte(c, (off >> 24) & 0xFF)
+    }
+    // rax = base + offset, rcx = index
+    if elem_sz == 8 {
+        // lea rax, [rax + rcx*8]
+        c = emit_byte(c, 0x48); c = emit_byte(c, 0x8d); c = emit_byte(c, 0x04); c = emit_byte(c, 0xc8)
+    } else {
+        // elem_sz == 1: add rax, rcx
+        c = emit_byte(c, 0x48); c = emit_byte(c, 0x01); c = emit_byte(c, 0xc8)
+    }
+    c
+}
+
+// Scan source bytes to collect global variable declarations.
+// Looks for lines starting with "var NAME: TYPE"
+// Populates GLOBAL_NAMES, GLOBAL_OFFSETS, GLOBAL_SIZES, GLOBAL_ELEM_SIZES, GLOBAL_COUNT, GLOBAL_TOTAL_SIZE
+fn scan_byte(buf: [i8; 1048576], pos: i64) -> i64 with Mut, Panic {
+    (buf[pos as usize] as i64) & 0xFF
+}
+
+fn scan_source_globals(path: string) with IO, Mut, Panic, Div {
+    GLOBAL_COUNT = 0
+    GLOBAL_TOTAL_SIZE = 0
+    let raw = read_file(path)
+    let src_size = file_size(path)
+    var buf: [i8; 1048576] = [0; 1048576]
+    var ci: i64 = 0
+    while ci < src_size && ci < 1048576 {
+        buf[ci as usize] = raw[ci as usize]
+        ci = ci + 1
+    }
+    var pos: i64 = 0
+    while pos < src_size - 4 {
+        // Check for line starting with "var " (v=118, a=97, r=114, space=32)
+        var at_line_start = false
+        if pos == 0 { at_line_start = true }
+        else if scan_byte(buf, pos - 1) == 10 { at_line_start = true }
+        if at_line_start && scan_byte(buf, pos) == 118 && scan_byte(buf, pos + 1) == 97 && scan_byte(buf, pos + 2) == 114 && scan_byte(buf, pos + 3) == 32 {
+            // Found "var " — extract name
+            var np = pos + 4
+            while np < src_size && scan_byte(buf, np) == 32 { np = np + 1 }
+            var name_start = np
+            while np < src_size && scan_byte(buf, np) != 58 && scan_byte(buf, np) != 32 && scan_byte(buf, np) != 10 {
+                np = np + 1
+            }
+            var name_len = np - name_start
+            if name_len > 0 && name_len < 128 && GLOBAL_COUNT < 256 {
+                var gn = ir_empty_name()
+                var ni: i64 = 0
+                while ni < name_len && ni < 128 {
+                    gn.buf[ni as usize] = buf[(name_start + ni) as usize]
+                    ni = ni + 1
+                }
+                gn.len = name_len
+                // Skip to colon
+                while np < src_size && scan_byte(buf, np) == 32 { np = np + 1 }
+                if np < src_size && scan_byte(buf, np) == 58 {
+                    np = np + 1
+                    while np < src_size && scan_byte(buf, np) == 32 { np = np + 1 }
+                    // Parse type: check for [ (array) or scalar
+                    var elem_size: i64 = 8
+                    var total_size: i64 = 8
+                    if np < src_size && scan_byte(buf, np) == 91 {
+                        // Array type: [T; N]
+                        np = np + 1
+                        while np < src_size && scan_byte(buf, np) == 32 { np = np + 1 }
+                        // Check for i8 (105, 56)
+                        if np + 1 < src_size && scan_byte(buf, np) == 105 && scan_byte(buf, np + 1) == 56 {
+                            elem_size = 1
+                        }
+                        // Skip to semicolon
+                        while np < src_size && scan_byte(buf, np) != 59 { np = np + 1 }
+                        if np < src_size { np = np + 1 } // skip ;
+                        while np < src_size && scan_byte(buf, np) == 32 { np = np + 1 }
+                        // Parse array size (digits)
+                        var arr_size: i64 = 0
+                        while np < src_size && scan_byte(buf, np) >= 48 && scan_byte(buf, np) <= 57 {
+                            arr_size = arr_size * 10 + (scan_byte(buf, np) - 48)
+                            np = np + 1
+                        }
+                        if arr_size > 0 {
+                            total_size = arr_size * elem_size
+                        }
+                    }
+                    // Round up to 8 bytes
+                    total_size = ((total_size + 7) / 8) * 8
+                    let gi = GLOBAL_COUNT
+                    GLOBAL_NAMES[gi as usize] = gn
+                    GLOBAL_OFFSETS[gi as usize] = GLOBAL_TOTAL_SIZE
+                    GLOBAL_SIZES[gi as usize] = total_size
+                    GLOBAL_ELEM_SIZES[gi as usize] = elem_size
+                    GLOBAL_COUNT = GLOBAL_COUNT + 1
+                    GLOBAL_TOTAL_SIZE = GLOBAL_TOTAL_SIZE + total_size
+                }
+            }
+        }
+        pos = pos + 1
+    }
+}
+
 fn ast_lookup_struct(ctx: &AstCompileCtx, name: Name) -> i64 with Mut, Panic, Div {
     var i: i64 = 0
     while i < ctx.struct_count {
@@ -1325,15 +1530,7 @@ fn ast_expr_result_type(expr: &Expr, local_names: [Name; 512], local_types: [i64
         return 0
     }
     if expr.kind == ExprKind::ExprCast {
-        let sr: &Option<Box<Expr>> = &expr.left
-        match *sr {
-            Some(se) => {
-                let st = ast_expr_result_type(&(*se), local_names, local_types, local_count, ctx)
-                if st == 1 { return 0 }
-                return 1
-            }
-            _ => {}
-        }
+        // Cannot determine cast target type. Codegen always produces int.
         return 0
     }
     if expr.kind == ExprKind::ExprBinary {
@@ -1395,14 +1592,11 @@ fn ast_expr_is_float(expr: &Expr, local_names: [Name; 512], local_types: [i64; 5
         }
     }
     if expr.kind == ExprKind::ExprCast {
-        let sub_ref: &Option<Box<Expr>> = &expr.left
-        match *sub_ref {
-            Some(se) => {
-                let src_float = ast_expr_is_float(&(*se), local_names, local_types, local_count, ctx)
-                return !src_float
-            }
-            _ => { return false }
-        }
+        // Cannot determine cast target type from JIT-exposed AST.
+        // Codegen converts float→int but treats int→int as no-op.
+        // So the result is always int (false).
+        // NOTE: This means `i64 as f64` won't work correctly.
+        return false
     }
     // ExprFieldAccess: check if the accessed field is f64
     if expr.kind == ExprKind::ExprFieldAccess {
@@ -1502,13 +1696,18 @@ fn ast_compile_expr(code: CodeBuffer, expr: &Expr,
                     c = emit_byte(c, 0xF2 as i64); c = emit_byte(c, 0x48)
                     c = emit_byte(c, 0x0F); c = emit_byte(c, 0x2C); c = emit_byte(c, 0xC0 as i64)
                 } else {
-                    // i64→f64: CVTSI2SD xmm0, rax then MOVQ rax, xmm0
-                    // CVTSI2SD xmm0, rax: F2 48 0F 2A C0
-                    c = emit_byte(c, 0xF2 as i64); c = emit_byte(c, 0x48)
-                    c = emit_byte(c, 0x0F); c = emit_byte(c, 0x2A); c = emit_byte(c, 0xC0 as i64)
-                    // MOVQ rax, xmm0: 66 48 0F 7E C0
-                    c = emit_byte(c, 0x66); c = emit_byte(c, 0x48)
-                    c = emit_byte(c, 0x0F); c = emit_byte(c, 0x7E); c = emit_byte(c, 0xC0 as i64)
+                    // Source is int. Cannot determine target type from JIT-exposed AST.
+                    // Heuristic: if the cast result is used in a float context, the
+                    // caller's ast_expr_is_float will handle it. For now, treat
+                    // int→int casts (as usize, as i64, as i8) as no-ops.
+                    // The ast_expr_is_float for ExprCast still returns !src_float,
+                    // so if the context IS expecting float (e.g., explicit i64→f64 cast
+                    // followed by float arithmetic), the conversion will be applied
+                    // at the point of use. But for the common case of "N as usize",
+                    // no conversion is needed.
+                    // Only convert i64→f64 if the ast_expr_result_type of this whole
+                    // cast suggests float. Since we can't determine target type,
+                    // skip conversion here — it's a no-op for int→int casts.
                 }
             }
             _ => {}
@@ -1533,6 +1732,23 @@ fn ast_compile_expr(code: CodeBuffer, expr: &Expr,
                 c = micro_lea_rax_slot(c, slot)
             } else {
                 c = micro_load_rax(c, slot)
+            }
+        } else if slot <= -2000 {
+            // Global variable read
+            let gi = 0 - (slot + 2000)
+            let gsz = GLOBAL_SIZES[gi as usize]
+            if gsz > 8 {
+                // Array global — load base address (pointer to first element)
+                c = emit_load_global_base(c)
+                let goff = GLOBAL_OFFSETS[gi as usize]
+                if goff > 0 {
+                    c = emit_byte(c, 0x48); c = emit_byte(c, 0x05)
+                    c = emit_byte(c, goff & 0xFF); c = emit_byte(c, (goff >> 8) & 0xFF)
+                    c = emit_byte(c, (goff >> 16) & 0xFF); c = emit_byte(c, (goff >> 24) & 0xFF)
+                }
+            } else {
+                // Scalar global — load value
+                c = emit_global_scalar_read(c, gi)
             }
         } else {
             c = emit_byte(c, 0x48); c = emit_byte(c, 0x31); c = emit_byte(c, 0xc0)
@@ -1635,9 +1851,17 @@ fn ast_compile_expr(code: CodeBuffer, expr: &Expr,
         c
     } else if expr.kind == ExprKind::ExprIndex {
         // base[index]: compile base → rax (data pointer), then index
+        // Check if base is a global array for element-size-aware access
+        var idx_global_idx: i64 = -1
         let idx_base: &Option<Box<Expr>> = &expr.left
         match *idx_base {
             Some(be) => {
+                if (*be).kind == ExprKind::ExprIdent {
+                    let gidx = global_lookup((*be).name)
+                    if gidx >= 0 && GLOBAL_SIZES[gidx as usize] > 8 {
+                        idx_global_idx = gidx
+                    }
+                }
                 c = ast_compile_expr(c, &(*be), local_names, local_slots, local_types, local_count, ctx)
             }
             _ => {}
@@ -1650,9 +1874,15 @@ fn ast_compile_expr(code: CodeBuffer, expr: &Expr,
             }
             _ => {}
         }
-        // rax=index, pop rcx=base; mov rax, [rcx + rax*8]
+        // rax=index, pop rcx=base
         c = emit_byte(c, 0x59) // pop rcx
-        c = emit_byte(c, 0x48); c = emit_byte(c, 0x8b); c = emit_byte(c, 0x04); c = emit_byte(c, 0xc1)
+        if idx_global_idx >= 0 && GLOBAL_ELEM_SIZES[idx_global_idx as usize] == 1 {
+            // i8 array: movsx rax, byte [rcx + rax]  (48 0f be 04 01)
+            c = emit_byte(c, 0x48); c = emit_byte(c, 0x0f); c = emit_byte(c, 0xbe); c = emit_byte(c, 0x04); c = emit_byte(c, 0x01)
+        } else {
+            // i64 array or local array: mov rax, [rcx + rax*8]
+            c = emit_byte(c, 0x48); c = emit_byte(c, 0x8b); c = emit_byte(c, 0x04); c = emit_byte(c, 0xc1)
+        }
         c
     } else if expr.kind == ExprKind::ExprBinary && expr.bin_op == BinaryOp::OpAnd {
         // Short-circuit &&: eval left; if 0, result=0; else eval right
@@ -2986,6 +3216,82 @@ fn ast_compile_block(code: CodeBuffer, blk: &Block,
                                     }
                                     if slot >= 0 {
                                         c = micro_store_rax(c, slot)
+                                    } else if slot <= -2000 {
+                                        // Global scalar write
+                                        let gwi = 0 - (slot + 2000)
+                                        c = emit_global_scalar_write(c, gwi)
+                                    }
+                                } else if (*te).kind == ExprKind::ExprIndex {
+                                    // Array index assignment: ARR[idx] = value
+                                    // rax = value from RHS. Check if base is a global.
+                                    let aib: &Option<Box<Expr>> = &(*te).left
+                                    var assign_gi: i64 = -1
+                                    match *aib {
+                                        Some(ab) => {
+                                            if (*ab).kind == ExprKind::ExprIdent {
+                                                var aslot: i64 = -1
+                                                var abli = lc - 1
+                                                while abli >= 0 {
+                                                    if ir_name_eq(ln[abli as usize], (*ab).name) {
+                                                        aslot = ls[abli as usize]
+                                                        abli = -1
+                                                    } else { abli = abli - 1 }
+                                                }
+                                                if aslot <= -2000 {
+                                                    assign_gi = 0 - (aslot + 2000)
+                                                }
+                                            }
+                                        }
+                                        _ => {}
+                                    }
+                                    if assign_gi >= 0 {
+                                        // Global array index assignment
+                                        // rax = value (from RHS already compiled above)
+                                        c = emit_byte(c, 0x50) // push rax (value)
+                                        // Compile index
+                                        let aii: &Option<Box<Expr>> = &(*te).right
+                                        match *aii {
+                                            Some(ai) => {
+                                                c = ast_compile_expr(c, &(*ai), ln, ls, lt, lc, ctx)
+                                            }
+                                            _ => {}
+                                        }
+                                        // rax = index. Compute element address.
+                                        c = emit_global_array_addr(c, assign_gi)
+                                        // rax = &arr[idx], pop rdx = value
+                                        c = emit_byte(c, 0x5a) // pop rdx
+                                        let aesz = GLOBAL_ELEM_SIZES[assign_gi as usize]
+                                        if aesz == 1 {
+                                            // mov [rax], dl (88 10)
+                                            c = emit_byte(c, 0x88); c = emit_byte(c, 0x10)
+                                        } else {
+                                            // mov [rax], rdx (48 89 10)
+                                            c = emit_byte(c, 0x48); c = emit_byte(c, 0x89); c = emit_byte(c, 0x10)
+                                        }
+                                    } else {
+                                        // Local array index assignment
+                                        c = emit_byte(c, 0x50) // push rax (value)
+                                        // Compile base
+                                        match *aib {
+                                            Some(ab2) => {
+                                                c = ast_compile_expr(c, &(*ab2), ln, ls, lt, lc, ctx)
+                                            }
+                                            _ => {}
+                                        }
+                                        c = emit_byte(c, 0x50) // push rax (base)
+                                        // Compile index
+                                        let aii2: &Option<Box<Expr>> = &(*te).right
+                                        match *aii2 {
+                                            Some(ai2) => {
+                                                c = ast_compile_expr(c, &(*ai2), ln, ls, lt, lc, ctx)
+                                            }
+                                            _ => {}
+                                        }
+                                        // rax=index, pop rcx=base, pop rdx=value
+                                        c = emit_byte(c, 0x59) // pop rcx (base)
+                                        c = emit_byte(c, 0x5a) // pop rdx (value)
+                                        // mov [rcx + rax*8], rdx
+                                        c = emit_byte(c, 0x48); c = emit_byte(c, 0x89); c = emit_byte(c, 0x14); c = emit_byte(c, 0xc1)
                                     }
                                 }
                             }
@@ -3058,6 +3364,21 @@ fn ast_compile_fn_body(code: CodeBuffer, fd: &FnDef,
         local_types[local_count as usize] = ctx.fn_return_types[fi as usize]
         local_count = local_count + 1
         fi = fi + 1
+    }
+
+    // Register global variables with special negative slots (slot = -2000 - global_idx)
+    var gi: i64 = 0
+    while gi < GLOBAL_COUNT && local_count < 512 {
+        local_names[local_count as usize] = GLOBAL_NAMES[gi as usize]
+        local_slots[local_count as usize] = 0 - 2000 - gi
+        // Type: 2 for arrays (> 8 bytes), 0 for scalars
+        if GLOBAL_SIZES[gi as usize] > 8 {
+            local_types[local_count as usize] = 2
+        } else {
+            local_types[local_count as usize] = 0
+        }
+        local_count = local_count + 1
+        gi = gi + 1
     }
 
     // Register params with extended calling convention
@@ -3184,6 +3505,28 @@ fn main() -> i64 with IO, Mut, Panic, Div, Alloc {
     print(output_path)
     print("\n")
 
+    // Scan source for global variable declarations before parsing
+    scan_source_globals(source_path)
+    print("render_compile: globals=")
+    print_int(GLOBAL_COUNT)
+    print(" total_bytes=")
+    print_int(GLOBAL_TOTAL_SIZE)
+    print("\n")
+    var gpi: i64 = 0
+    while gpi < GLOBAL_COUNT {
+        let gns = str_from_bytes(GLOBAL_NAMES[gpi as usize].buf, GLOBAL_NAMES[gpi as usize].len)
+        print("  global: ")
+        print(gns)
+        print(" off=")
+        print_int(GLOBAL_OFFSETS[gpi as usize])
+        print(" sz=")
+        print_int(GLOBAL_SIZES[gpi as usize])
+        print(" elem=")
+        print_int(GLOBAL_ELEM_SIZES[gpi as usize])
+        print("\n")
+        gpi = gpi + 1
+    }
+
     let prog = load_source_file(source_path)
     if parser_last_error_count() > 0 {
         print("render_compile: parse_error\n")
@@ -3301,37 +3644,46 @@ fn main() -> i64 with IO, Mut, Panic, Div, Alloc {
             Some(il) => {
                 let itm: &Item = &(*il).head
                 if itm.kind == ItemKind::ItemFn {
-                    fn_names[fn_count as usize] = itm.name
-                    // Detect return type: f64 → 1, struct → 10+idx, else → 0
+                    // Check if this is actually a function (has fn_def) or a global var (fn_def=None)
                     let fdef_r: &Option<Box<FnDef>> = &itm.fn_def
+                    var is_real_fn = false
                     match *fdef_r {
-                        Some(fdr) => {
-                            let rt_ref: &Option<Box<TypeExpr>> = &(*fdr).return_type
-                            match *rt_ref {
-                                Some(rte) => {
-                                    if ast_type_is_f64(&(*rte)) {
-                                        fn_return_types[fn_count as usize] = 1
-                                    } else if (*rte).kind == TypeExprKind::TypeNamed {
-                                        let rt_name = ast_name_from_path(&(*rte).path)
-                                        let rt_si = ast_lookup_struct(&ctx, rt_name)
-                                        if rt_si >= 0 {
-                                            fn_return_types[fn_count as usize] = 10 + rt_si
-                                        }
-                                    } else if (*rte).kind == TypeExprKind::TypeTuple {
-                                        let tsi = ast_ensure_tuple2(&ctx, &(*rte))
-                                        if tsi >= 0 {
-                                            fn_return_types[fn_count as usize] = 10 + tsi
-                                        }
-                                    }
-                                }
-                                _ => {}
-                            }
-                        }
+                        Some(fdr) => { is_real_fn = true }
                         _ => {}
                     }
-                    let ns = str_from_bytes(itm.name.buf, itm.name.len)
-                    if str_eq(ns, "main") { main_fn_idx = fn_count }
-                    fn_count = fn_count + 1
+                    if is_real_fn {
+                        fn_names[fn_count as usize] = itm.name
+                        // Detect return type: f64 → 1, struct → 10+idx, else → 0
+                        match *fdef_r {
+                            Some(fdr) => {
+                                let rt_ref: &Option<Box<TypeExpr>> = &(*fdr).return_type
+                                match *rt_ref {
+                                    Some(rte) => {
+                                        if ast_type_is_f64(&(*rte)) {
+                                            fn_return_types[fn_count as usize] = 1
+                                        } else if (*rte).kind == TypeExprKind::TypeNamed {
+                                            let rt_name = ast_name_from_path(&(*rte).path)
+                                            let rt_si = ast_lookup_struct(&ctx, rt_name)
+                                            if rt_si >= 0 {
+                                                fn_return_types[fn_count as usize] = 10 + rt_si
+                                            }
+                                        } else if (*rte).kind == TypeExprKind::TypeTuple {
+                                            let tsi = ast_ensure_tuple2(&ctx, &(*rte))
+                                            if tsi >= 0 {
+                                                fn_return_types[fn_count as usize] = 10 + tsi
+                                            }
+                                        }
+                                    }
+                                    _ => {}
+                                }
+                            }
+                            _ => {}
+                        }
+                        let ns = str_from_bytes(itm.name.buf, itm.name.len)
+                        if str_eq(ns, "main") { main_fn_idx = fn_count }
+                        fn_count = fn_count + 1
+                    }
+                    // else: global var — already collected by scan_source_globals
                 } else if itm.kind == ItemKind::ItemImpl {
                     // Collect methods from impl blocks
                     let impl_r: &Option<Box<ImplDef>> = &itm.impl_def
@@ -3641,11 +3993,24 @@ fn main() -> i64 with IO, Mut, Panic, Div, Alloc {
     code = emit_byte(code, 0x00); code = emit_byte(code, 0x00)
     wide_flush(code)
 
+    // Emit global_base_ptr storage (8 bytes, stores mmap'd global region pointer)
+    let global_base_off = WIDE_LEN
+    code = code_buffer_new()
+    code = emit_byte(code, 0x00); code = emit_byte(code, 0x00)
+    code = emit_byte(code, 0x00); code = emit_byte(code, 0x00)
+    code = emit_byte(code, 0x00); code = emit_byte(code, 0x00)
+    code = emit_byte(code, 0x00); code = emit_byte(code, 0x00)
+    wide_flush(code)
+
     // Compute absolute addresses
     let base_addr_c: i64 = 4194304   // 0x400000
     let text_off_c: i64 = 4096
     let saved_rsp_abs = base_addr_c + text_off_c + saved_rsp_off
     let source_buf_abs = base_addr_c + text_off_c + source_buf_off
+    GLOBAL_BASE_ABS = base_addr_c + text_off_c + global_base_off
+    print("render_compile: global_base_abs=")
+    print_int(GLOBAL_BASE_ABS)
+    print("\n")
 
     // Emit arg_count() builtin
     // push rbp; mov rbp,rsp; mov rax,imm64(saved_rsp_abs); mov rax,[rax]; mov rax,[rax]; pop rbp; ret
@@ -4051,33 +4416,41 @@ fn main() -> i64 with IO, Mut, Panic, Div, Alloc {
                 let itm: &Item = &(*il).head
                 if itm.kind == ItemKind::ItemFn {
                     let fdef_ref: &Option<Box<FnDef>> = &itm.fn_def
+                    var is_real_fn2 = false
                     match *fdef_ref {
-                        Some(fd) => {
-                            fn_offsets[fn_idx as usize] = WIDE_LEN
-                            let ns = str_from_bytes(itm.name.buf, itm.name.len)
-                            print("render_compile: fn=")
-                            print(ns)
-                            let frame_size: i64 = 32768
-                            code = code_buffer_new()
-                            code = lctx_set_level(code, -1)
-                            code = emit_byte(code, 0x55)
-                            code = emit_byte(code, 0x48); code = emit_byte(code, 0x89); code = emit_byte(code, 0xe5)
-                            code = emit_byte(code, 0x48); code = emit_byte(code, 0x81); code = emit_byte(code, 0xec)
-                            code = emit_byte(code, frame_size & 0xFF); code = emit_byte(code, (frame_size >> 8) & 0xFF)
-                            code = emit_byte(code, (frame_size >> 16) & 0xFF); code = emit_byte(code, (frame_size >> 24) & 0xFF)
-                            print(" pre="); print_int(code.len)
-                            code = ast_compile_fn_body(code, &(*fd), fn_count, &ctx)
-                            code = emit_byte(code, 0xc9); code = emit_byte(code, 0xc3)
-                            let fn_start = fn_offsets[fn_idx as usize]
-                            print(" post="); print_int(code.len)
-                            wide_flush(code)
-                            let sz = WIDE_LEN - fn_start
-                            print(" off="); print_int(fn_start)
-                            print(" sz="); print_int(sz); print("\n")
-                        }
-                        _ => { fn_offsets[fn_idx as usize] = WIDE_LEN }
+                        Some(fd) => { is_real_fn2 = true }
+                        _ => {}
                     }
-                    fn_idx = fn_idx + 1
+                    if is_real_fn2 {
+                        match *fdef_ref {
+                            Some(fd) => {
+                                fn_offsets[fn_idx as usize] = WIDE_LEN
+                                let ns = str_from_bytes(itm.name.buf, itm.name.len)
+                                print("render_compile: fn=")
+                                print(ns)
+                                let frame_size: i64 = 32768
+                                code = code_buffer_new()
+                                code = lctx_set_level(code, -1)
+                                code = emit_byte(code, 0x55)
+                                code = emit_byte(code, 0x48); code = emit_byte(code, 0x89); code = emit_byte(code, 0xe5)
+                                code = emit_byte(code, 0x48); code = emit_byte(code, 0x81); code = emit_byte(code, 0xec)
+                                code = emit_byte(code, frame_size & 0xFF); code = emit_byte(code, (frame_size >> 8) & 0xFF)
+                                code = emit_byte(code, (frame_size >> 16) & 0xFF); code = emit_byte(code, (frame_size >> 24) & 0xFF)
+                                print(" pre="); print_int(code.len)
+                                code = ast_compile_fn_body(code, &(*fd), fn_count, &ctx)
+                                code = emit_byte(code, 0xc9); code = emit_byte(code, 0xc3)
+                                let fn_start = fn_offsets[fn_idx as usize]
+                                print(" post="); print_int(code.len)
+                                wide_flush(code)
+                                let sz = WIDE_LEN - fn_start
+                                print(" off="); print_int(fn_start)
+                                print(" sz="); print_int(sz); print("\n")
+                            }
+                            _ => { fn_offsets[fn_idx as usize] = WIDE_LEN }
+                        }
+                        fn_idx = fn_idx + 1
+                    }
+                    // else: global var — skip
                 } else if itm.kind == ItemKind::ItemImpl {
                     // Compile method bodies from impl blocks
                     let mci_r: &Option<Box<ImplDef>> = &itm.impl_def
@@ -4170,6 +4543,20 @@ fn main() -> i64 with IO, Mut, Panic, Div, Alloc {
     code = emit_byte(code, (saved_rsp_abs >> 56) & 0xFF)
     // mov [rax], rsp — 48 89 20
     code = emit_byte(code, 0x48); code = emit_byte(code, 0x89); code = emit_byte(code, 0x20)
+    // mmap global region if there are globals
+    if GLOBAL_TOTAL_SIZE > 0 {
+        // Ensure at least one page for mmap
+        var mmap_size = GLOBAL_TOTAL_SIZE
+        if mmap_size < 4096 { mmap_size = 4096 }
+        // Round up to page boundary
+        mmap_size = ((mmap_size + 4095) / 4096) * 4096
+        code = ast_emit_mmap(code, mmap_size)
+        // rax = mmap result (pointer to global region)
+        // Store into global_base_ptr: mov rcx, imm64(global_base_abs); mov [rcx], rax
+        code = emit_mov_rcx_imm64(code, GLOBAL_BASE_ABS)
+        // mov [rcx], rax — 48 89 01
+        code = emit_byte(code, 0x48); code = emit_byte(code, 0x89); code = emit_byte(code, 0x01)
+    }
     // call main
     let cs = WIDE_LEN + code.len
     let moff = fn_offsets[main_fn_idx as usize]

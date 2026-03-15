@@ -4414,6 +4414,32 @@ fn ocp_const_fold(func: IrFunction) -> IrFunction with Mut, Div, Panic {
             }
         }
 
+        // Sprint 237 Block EU: Add-OR diff to AND — (x+y)-(x|y) → x&y.
+        // Proof: x+y = (x^y)+2*(x&y); x|y = (x^y)+(x&y). So (x+y)-(x|y) = x&y. QED.
+        // Commutative inner variants: (y+x)-(x|y) → x&y; (x+y)-(y|x) → x&y.
+        // Zero new arrays: uses aq_add_rr_valid/lhs/rhs (Block AQ) + ao_or_rr_valid/lhs/rhs (Block AO).
+        // SOTA: Hacker's Delight §2-2; LLVM InstCombineAddSub.
+        if ocp_is_binop(result.instrs[i as usize].op) {
+            let eu_instr = result.instrs[i as usize]
+            let eu_s1 = eu_instr.src1; let eu_s2 = eu_instr.src2
+            let eu_s1_ok = eu_s1 >= 0 && eu_s1 < 256; let eu_s2_ok = eu_s2 >= 0 && eu_s2 < 256
+            if eu_instr.bin_op == BinaryOp::OpSub && eu_s1_ok && eu_s2_ok {
+                if aq_add_rr_valid[eu_s1 as usize] && ao_or_rr_valid[eu_s2 as usize] {
+                    let eu_al = aq_add_rr_lhs[eu_s1 as usize]; let eu_ar = aq_add_rr_rhs[eu_s1 as usize]
+                    let eu_ol = ao_or_rr_lhs[eu_s2 as usize]; let eu_or2 = ao_or_rr_rhs[eu_s2 as usize]
+                    if (eu_al == eu_ol && eu_ar == eu_or2) || (eu_al == eu_or2 && eu_ar == eu_ol) {
+                        let eu_al_ok = eu_al >= 0 && eu_al < 256; let eu_ar_ok = eu_ar >= 0 && eu_ar < 256
+                        if eu_al_ok && eu_ar_ok {
+                            result.instrs[i as usize] = ir_binop(eu_instr.dst, eu_al, BinaryOp::OpBitAnd, eu_ar)
+                            ao_and_rr_valid[eu_instr.dst as usize] = true
+                            ao_and_rr_lhs[eu_instr.dst as usize] = eu_al
+                            ao_and_rr_rhs[eu_instr.dst as usize] = eu_ar
+                        }
+                    }
+                }
+            }
+        }
+
         // Sprint 236 Block ET: OR-XOR diff to AND — (x|y)-(x^y) → x&y.
         // Proof: x|y = (x^y)+(x&y), so (x|y)-(x^y) = x&y. QED.
         // Commutative inner XOR: (x|y)-(y^x) → x&y.
