@@ -921,49 +921,48 @@ fn gpu_lower_op(buf: PtxBuf, op: GpuOp, kernel: GpuKernelIr) -> PtxBuf with Mut,
             ptx_push_binary3(buf, opcode, dst_str, src_str, imm_str)
         }
 
-        // ── Phase 5: Tensor Core (WMMA) ────────────────────────────
-        // wmma.mma.sync.aligned.m16n16k16.row.col.f32.f16.f16.f32
-        //   {d0..d7}, {a0..a3}, {b0..b3}, {c0..c7}
-        // Uses consecutive registers: dst_reg..dst_reg+num_regs-1 for D/C,
-        //   lhs_reg..lhs_reg+num_regs-1 for A, rhs_reg..rhs_reg+num_regs-1 for B,
-        //   src_reg..src_reg+num_regs-1 for C accumulator.
+        // ── Phase 5: Tensor Core (mma.sync) ────────────────────────
+        // mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32
+        //   {d0..d3}, {a0..a3}, {b0..b1}, {c0..c3}
+        // A/B: .b32 registers (packed f16 pairs, u32 pool)
+        // C/D: .f32 registers (accumulator/output)
+        // Uses: dst_reg (D, 4 f32), lhs_reg (A, 4 u32),
+        //       rhs_reg (B, 2 u32), src_reg (C, 4 f32)
         GpuOpcode::GpuWmma => {
             var out = buf
-            let nf = if op.num_regs > 0 { op.num_regs } else { 8 }
 
-            // wmma.mma.sync instruction with fragment register lists
-            out = ptx_push_str(out, "    wmma.mma.sync.aligned.m16n16k16.row.col.f32.f16.f16.f32 {")
+            out = ptx_push_str(out, "    mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 {")
 
-            // D fragments (output): dst_reg..dst_reg+nf-1
+            // D fragments (output f32): dst_reg..dst_reg+3
             var fi: i64 = 0
-            while fi < nf {
+            while fi < 4 {
                 if fi > 0 { out = ptx_push_str(out, ", ") }
                 out = ptx_push_str(out, gpu_reg_f32(op.dst_reg + fi))
                 fi = fi + 1
             }
             out = ptx_push_str(out, "}, {")
 
-            // A fragments: lhs_reg..lhs_reg+nf-1
+            // A fragments (b32 u32): lhs_reg..lhs_reg+3
             fi = 0
-            while fi < nf {
+            while fi < 4 {
                 if fi > 0 { out = ptx_push_str(out, ", ") }
-                out = ptx_push_str(out, gpu_reg_f32(op.lhs_reg + fi))
+                out = ptx_push_str(out, gpu_reg_u32(op.lhs_reg + fi))
                 fi = fi + 1
             }
             out = ptx_push_str(out, "}, {")
 
-            // B fragments: rhs_reg..rhs_reg+nf-1
+            // B fragments (b32 u32): rhs_reg..rhs_reg+1
             fi = 0
-            while fi < nf {
+            while fi < 2 {
                 if fi > 0 { out = ptx_push_str(out, ", ") }
-                out = ptx_push_str(out, gpu_reg_f32(op.rhs_reg + fi))
+                out = ptx_push_str(out, gpu_reg_u32(op.rhs_reg + fi))
                 fi = fi + 1
             }
             out = ptx_push_str(out, "}, {")
 
-            // C accumulator fragments: src_reg..src_reg+nf-1
+            // C accumulator (f32): src_reg..src_reg+3
             fi = 0
-            while fi < nf {
+            while fi < 4 {
                 if fi > 0 { out = ptx_push_str(out, ", ") }
                 out = ptx_push_str(out, gpu_reg_f32(op.src_reg + fi))
                 fi = fi + 1
