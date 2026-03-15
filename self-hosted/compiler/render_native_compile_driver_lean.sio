@@ -27,6 +27,7 @@ var GLOBAL_NAMES: [Name; 256] = [ir_empty_name(); 256]
 var GLOBAL_OFFSETS: [i64; 256] = [0; 256]      // byte offset from global_base
 var GLOBAL_SIZES: [i64; 256] = [0; 256]        // total byte size of this global
 var GLOBAL_ELEM_SIZES: [i64; 256] = [0; 256]   // element size (1 for i8, 8 for i64, 8 for scalar)
+var GLOBAL_IS_FLOAT: [i64; 256] = [0; 256]     // 1 if element type is f64, 0 otherwise
 var GLOBAL_COUNT: i64 = 0
 var GLOBAL_TOTAL_SIZE: i64 = 0
 var GLOBAL_BASE_ABS: i64 = 0  // absolute VA of global_base_ptr storage
@@ -1138,6 +1139,11 @@ fn scan_source_globals(path: string) with IO, Mut, Panic, Div {
                     // Parse type: check for [ (array) or scalar
                     var elem_size: i64 = 8
                     var total_size: i64 = 8
+                    var is_f64_elem: i64 = 0
+                    // Check for scalar f64 type
+                    if np + 2 < src_size && scan_byte(buf, np) == 102 && scan_byte(buf, np + 1) == 54 && scan_byte(buf, np + 2) == 52 {
+                        is_f64_elem = 1
+                    }
                     if np < src_size && scan_byte(buf, np) == 91 {
                         // Array type: [T; N]
                         np = np + 1
@@ -1145,6 +1151,10 @@ fn scan_source_globals(path: string) with IO, Mut, Panic, Div {
                         // Check for i8 (105, 56)
                         if np + 1 < src_size && scan_byte(buf, np) == 105 && scan_byte(buf, np + 1) == 56 {
                             elem_size = 1
+                        }
+                        // Check for f64 (102, 54, 52)
+                        if np + 2 < src_size && scan_byte(buf, np) == 102 && scan_byte(buf, np + 1) == 54 && scan_byte(buf, np + 2) == 52 {
+                            is_f64_elem = 1
                         }
                         // Skip to semicolon
                         while np < src_size && scan_byte(buf, np) != 59 { np = np + 1 }
@@ -1167,6 +1177,7 @@ fn scan_source_globals(path: string) with IO, Mut, Panic, Div {
                     GLOBAL_OFFSETS[gi as usize] = GLOBAL_TOTAL_SIZE
                     GLOBAL_SIZES[gi as usize] = total_size
                     GLOBAL_ELEM_SIZES[gi as usize] = elem_size
+                    GLOBAL_IS_FLOAT[gi as usize] = is_f64_elem
                     GLOBAL_COUNT = GLOBAL_COUNT + 1
                     GLOBAL_TOTAL_SIZE = GLOBAL_TOTAL_SIZE + total_size
                 }
@@ -1461,6 +1472,22 @@ fn ast_expr_result_type(expr: &Expr, local_names: [Name; 512], local_types: [i64
         }
         return 0
     }
+    if expr.kind == ExprKind::ExprIndex {
+        // Check if base is a global f64 array
+        let ib2: &Option<Box<Expr>> = &expr.left
+        match *ib2 {
+            Some(ibe) => {
+                if (*ibe).kind == ExprKind::ExprIdent {
+                    let gidx2 = global_lookup((*ibe).name)
+                    if gidx2 >= 0 && GLOBAL_IS_FLOAT[gidx2 as usize] == 1 {
+                        return 1  // f64
+                    }
+                }
+            }
+            _ => {}
+        }
+        return 0
+    }
     if expr.kind == ExprKind::ExprMethodCall {
         // Look up method return type by method name
         var mli2 = local_count - 1
@@ -1610,10 +1637,40 @@ fn ast_expr_is_float(expr: &Expr, local_names: [Name; 512], local_types: [i64; 5
         }
     }
     if expr.kind == ExprKind::ExprCast {
-        // Cannot determine cast target type from JIT-exposed AST.
-        // Codegen converts float→int but treats int→int as no-op.
-        // So the result is always int (false).
-        // NOTE: This means `i64 as f64` won't work correctly.
+        // Check source: f64→i64 = int result; i64→f64 = float result
+        let cast_sub: &Option<Box<Expr>> = &expr.left
+        match *cast_sub {
+            Some(cse) => {
+                if ast_expr_is_float(&(*cse), local_names, local_types, local_count, ctx) {
+                    return false  // f64→i64 produces int
+                }
+            }
+            _ => {}
+        }
+        // Check target type
+        let ct_r: &Option<Box<TypeExpr>> = &expr.cast_type
+        match *ct_r {
+            Some(ctr) => {
+                if ast_type_is_f64(&(*ctr)) { return true }
+            }
+            _ => {}
+        }
+        return false
+    }
+    // ExprIndex: check if base is a global f64 array
+    if expr.kind == ExprKind::ExprIndex {
+        let idx_b: &Option<Box<Expr>> = &expr.left
+        match *idx_b {
+            Some(ib) => {
+                if (*ib).kind == ExprKind::ExprIdent {
+                    let gidx = global_lookup((*ib).name)
+                    if gidx >= 0 && GLOBAL_IS_FLOAT[gidx as usize] == 1 {
+                        return true
+                    }
+                }
+            }
+            _ => {}
+        }
         return false
     }
     // ExprFieldAccess: check if the accessed field is f64
@@ -1714,18 +1771,25 @@ fn ast_compile_expr(code: CodeBuffer, expr: &Expr,
                     c = emit_byte(c, 0xF2 as i64); c = emit_byte(c, 0x48)
                     c = emit_byte(c, 0x0F); c = emit_byte(c, 0x2C); c = emit_byte(c, 0xC0 as i64)
                 } else {
-                    // Source is int. Cannot determine target type from JIT-exposed AST.
-                    // Heuristic: if the cast result is used in a float context, the
-                    // caller's ast_expr_is_float will handle it. For now, treat
-                    // int→int casts (as usize, as i64, as i8) as no-ops.
-                    // The ast_expr_is_float for ExprCast still returns !src_float,
-                    // so if the context IS expecting float (e.g., explicit i64→f64 cast
-                    // followed by float arithmetic), the conversion will be applied
-                    // at the point of use. But for the common case of "N as usize",
-                    // no conversion is needed.
-                    // Only convert i64→f64 if the ast_expr_result_type of this whole
-                    // cast suggests float. Since we can't determine target type,
-                    // skip conversion here — it's a no-op for int→int casts.
+                    // Source is int. Check if target type is f64.
+                    let ct_ref: &Option<Box<TypeExpr>> = &expr.cast_type
+                    var target_is_f64 = false
+                    match *ct_ref {
+                        Some(cte) => {
+                            target_is_f64 = ast_type_is_f64(&(*cte))
+                        }
+                        _ => {}
+                    }
+                    if target_is_f64 {
+                        // i64→f64: CVTSI2SD xmm0, rax then MOVQ rax, xmm0
+                        // CVTSI2SD xmm0, rax: F2 48 0F 2A C0
+                        c = emit_byte(c, 0xF2 as i64); c = emit_byte(c, 0x48)
+                        c = emit_byte(c, 0x0F); c = emit_byte(c, 0x2A); c = emit_byte(c, 0xC0 as i64)
+                        // MOVQ rax, xmm0: 66 48 0F 7E C0
+                        c = emit_byte(c, 0x66); c = emit_byte(c, 0x48)
+                        c = emit_byte(c, 0x0F); c = emit_byte(c, 0x7E); c = emit_byte(c, 0xC0 as i64)
+                    }
+                    // else: int→int cast (as usize, as i64) — no-op
                 }
             }
             _ => {}
