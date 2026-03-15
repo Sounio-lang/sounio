@@ -4414,6 +4414,47 @@ fn ocp_const_fold(func: IrFunction) -> IrFunction with Mut, Div, Panic {
             }
         }
 
+        // Sprint 242 Block EZ: AND-XOR to OR — (x&y)|(x^y) → x|y.
+        // Proof: (x&y)|(x^y) = (x&y)|(x|y)^(x&y) = x|y (since a|(a^b)=a|b when a=x&y). QED.
+        // Equivalently: x|y = (x&y)|(x⊕y) is the canonical OR decomposition.
+        // Commutative: (x^y)|(x&y) → x|y.
+        // Zero new arrays: uses ao_and_rr_valid/lhs/rhs (Block AO) + as_xor_rr_valid/lhs/rhs (Block AS).
+        // Updates ao_or_rr tracking so downstream blocks see the folded OR.
+        // SOTA: Boolean algebra canonical OR decomposition; LLVM InstCombineAndOrXor.
+        if ocp_is_binop(result.instrs[i as usize].op) {
+            let ez_instr = result.instrs[i as usize]
+            let ez_s1 = ez_instr.src1; let ez_s2 = ez_instr.src2
+            let ez_s1_ok = ez_s1 >= 0 && ez_s1 < 256; let ez_s2_ok = ez_s2 >= 0 && ez_s2 < 256
+            if ez_instr.bin_op == BinaryOp::OpBitOr && ez_s1_ok && ez_s2_ok {
+                var ez_folded = false
+                var ez_new_lhs: i64 = -1; var ez_new_rhs: i64 = -1
+                // Case 1: s1=AND-rr(x,y), s2=XOR-rr(x,y)
+                if ao_and_rr_valid[ez_s1 as usize] && as_xor_rr_valid[ez_s2 as usize] {
+                    let ez_al = ao_and_rr_lhs[ez_s1 as usize]; let ez_ar = ao_and_rr_rhs[ez_s1 as usize]
+                    let ez_xl = as_xor_rr_lhs[ez_s2 as usize]; let ez_xr = as_xor_rr_rhs[ez_s2 as usize]
+                    if (ez_al == ez_xl && ez_ar == ez_xr) || (ez_al == ez_xr && ez_ar == ez_xl) {
+                        ez_folded = true; ez_new_lhs = ez_al; ez_new_rhs = ez_ar
+                    }
+                }
+                // Case 2: s1=XOR-rr(x,y), s2=AND-rr(x,y): commutative outer OR
+                if !ez_folded && as_xor_rr_valid[ez_s1 as usize] && ao_and_rr_valid[ez_s2 as usize] {
+                    let ez_xl2 = as_xor_rr_lhs[ez_s1 as usize]; let ez_xr2 = as_xor_rr_rhs[ez_s1 as usize]
+                    let ez_al2 = ao_and_rr_lhs[ez_s2 as usize]; let ez_ar2 = ao_and_rr_rhs[ez_s2 as usize]
+                    if (ez_xl2 == ez_al2 && ez_xr2 == ez_ar2) || (ez_xl2 == ez_ar2 && ez_xr2 == ez_al2) {
+                        ez_folded = true; ez_new_lhs = ez_xl2; ez_new_rhs = ez_xr2
+                    }
+                }
+                if ez_folded {
+                    result.instrs[i as usize] = ir_binop(ez_instr.dst, ez_new_lhs, BinaryOp::OpBitOr, ez_new_rhs)
+                    if ez_instr.dst >= 0 && ez_instr.dst < 256 {
+                        ao_or_rr_valid[ez_instr.dst as usize] = true
+                        ao_or_rr_lhs[ez_instr.dst as usize] = ez_new_lhs
+                        ao_or_rr_rhs[ez_instr.dst as usize] = ez_new_rhs
+                    }
+                }
+            }
+        }
+
         // Sprint 241 Block EY: OR-XOR subsumption — (x|y)|(x^y) → x|y.
         // Proof: x^y ⊆ x|y (XOR bits are a subset of OR bits), so OR with subset = identity. QED.
         // Commutative: (x^y)|(x|y) → x|y.
