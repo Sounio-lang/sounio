@@ -327,6 +327,7 @@ FILES=(
   self-hosted/test_gpu_metal.sio
   self-hosted/test_gpu_spirv.sio
   self-hosted/test_gpu_autodiff.sio
+  self-hosted/test_epistemic_wmma.sio
   self-hosted/test_llvm_ffi.sio
   self-hosted/test_llvm_codegen.sio
 

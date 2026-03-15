@@ -920,6 +920,134 @@ fn gpu_lower_op(buf: PtxBuf, op: GpuOp, kernel: GpuKernelIr) -> PtxBuf with Mut,
             let imm_str = i64_to_string(op.rhs_imm)
             ptx_push_binary3(buf, opcode, dst_str, src_str, imm_str)
         }
+
+        // ── Phase 5: Tensor Core (WMMA) ────────────────────────────
+        // wmma.mma.sync.aligned.m16n16k16.row.col.f32.f16.f16.f32
+        //   {d0..d7}, {a0..a3}, {b0..b3}, {c0..c7}
+        // Uses consecutive registers: dst_reg..dst_reg+num_regs-1 for D/C,
+        //   lhs_reg..lhs_reg+num_regs-1 for A, rhs_reg..rhs_reg+num_regs-1 for B,
+        //   src_reg..src_reg+num_regs-1 for C accumulator.
+        GpuOpcode::GpuWmma => {
+            var out = buf
+            let nf = if op.num_regs > 0 { op.num_regs } else { 8 }
+
+            // wmma.mma.sync instruction with fragment register lists
+            out = ptx_push_str(out, "    wmma.mma.sync.aligned.m16n16k16.row.col.f32.f16.f16.f32 {")
+
+            // D fragments (output): dst_reg..dst_reg+nf-1
+            var fi: i64 = 0
+            while fi < nf {
+                if fi > 0 { out = ptx_push_str(out, ", ") }
+                out = ptx_push_str(out, gpu_reg_f32(op.dst_reg + fi))
+                fi = fi + 1
+            }
+            out = ptx_push_str(out, "}, {")
+
+            // A fragments: lhs_reg..lhs_reg+nf-1
+            fi = 0
+            while fi < nf {
+                if fi > 0 { out = ptx_push_str(out, ", ") }
+                out = ptx_push_str(out, gpu_reg_f32(op.lhs_reg + fi))
+                fi = fi + 1
+            }
+            out = ptx_push_str(out, "}, {")
+
+            // B fragments: rhs_reg..rhs_reg+nf-1
+            fi = 0
+            while fi < nf {
+                if fi > 0 { out = ptx_push_str(out, ", ") }
+                out = ptx_push_str(out, gpu_reg_f32(op.rhs_reg + fi))
+                fi = fi + 1
+            }
+            out = ptx_push_str(out, "}, {")
+
+            // C accumulator fragments: src_reg..src_reg+nf-1
+            fi = 0
+            while fi < nf {
+                if fi > 0 { out = ptx_push_str(out, ", ") }
+                out = ptx_push_str(out, gpu_reg_f32(op.src_reg + fi))
+                fi = fi + 1
+            }
+            out = ptx_push_str(out, "};\n")
+            out
+        }
+
+        // ── Phase 5: Math Intrinsics ───────────────────────────────
+
+        // abs.f32 %fN, %fM
+        GpuOpcode::GpuAbs => {
+            var out = buf
+            out = ptx_push_str(out, "    abs.f32 ")
+            out = ptx_push_str(out, gpu_reg_f32(op.dst_reg))
+            out = ptx_push_str(out, ", ")
+            out = ptx_push_str(out, gpu_reg_f32(op.src_reg))
+            out = ptx_push_str(out, ";\n")
+            out
+        }
+
+        // sqrt.approx.f32 %fN, %fM
+        GpuOpcode::GpuSqrt => {
+            var out = buf
+            out = ptx_push_str(out, "    sqrt.approx.f32 ")
+            out = ptx_push_str(out, gpu_reg_f32(op.dst_reg))
+            out = ptx_push_str(out, ", ")
+            out = ptx_push_str(out, gpu_reg_f32(op.src_reg))
+            out = ptx_push_str(out, ";\n")
+            out
+        }
+
+        // ── Phase 6: Bitwise Operations ────────────────────────────
+
+        // xor.b64 %rdN, %rdM, %rdK  (or xor.b32 for u32)
+        GpuOpcode::GpuXor => {
+            var out = buf
+            if op.ty == GpuType::GpuU64 || op.ty == GpuType::GpuB64 || op.ty == GpuType::GpuI64 {
+                out = ptx_push_str(out, "    xor.b64 ")
+                out = ptx_push_str(out, gpu_reg_u64(op.dst_reg))
+                out = ptx_push_str(out, ", ")
+                out = ptx_push_str(out, gpu_reg_u64(op.lhs_reg))
+                out = ptx_push_str(out, ", ")
+                out = ptx_push_str(out, gpu_reg_u64(op.rhs_reg))
+            } else {
+                out = ptx_push_str(out, "    xor.b32 ")
+                out = ptx_push_str(out, gpu_reg_u32(op.dst_reg))
+                out = ptx_push_str(out, ", ")
+                out = ptx_push_str(out, gpu_reg_u32(op.lhs_reg))
+                out = ptx_push_str(out, ", ")
+                out = ptx_push_str(out, gpu_reg_u32(op.rhs_reg))
+            }
+            out = ptx_push_str(out, ";\n")
+            out
+        }
+
+        // and.pred %pN, %pM, %pK  (for bool/pred) or and.b32/b64 (for integers)
+        GpuOpcode::GpuAnd => {
+            var out = buf
+            if op.ty == GpuType::GpuBool {
+                out = ptx_push_str(out, "    and.pred ")
+                out = ptx_push_str(out, gpu_pred_reg(op.dst_reg))
+                out = ptx_push_str(out, ", ")
+                out = ptx_push_str(out, gpu_pred_reg(op.lhs_reg))
+                out = ptx_push_str(out, ", ")
+                out = ptx_push_str(out, gpu_pred_reg(op.rhs_reg))
+            } else if op.ty == GpuType::GpuU64 || op.ty == GpuType::GpuB64 || op.ty == GpuType::GpuI64 {
+                out = ptx_push_str(out, "    and.b64 ")
+                out = ptx_push_str(out, gpu_reg_u64(op.dst_reg))
+                out = ptx_push_str(out, ", ")
+                out = ptx_push_str(out, gpu_reg_u64(op.lhs_reg))
+                out = ptx_push_str(out, ", ")
+                out = ptx_push_str(out, gpu_reg_u64(op.rhs_reg))
+            } else {
+                out = ptx_push_str(out, "    and.b32 ")
+                out = ptx_push_str(out, gpu_reg_u32(op.dst_reg))
+                out = ptx_push_str(out, ", ")
+                out = ptx_push_str(out, gpu_reg_u32(op.lhs_reg))
+                out = ptx_push_str(out, ", ")
+                out = ptx_push_str(out, gpu_reg_u32(op.rhs_reg))
+            }
+            out = ptx_push_str(out, ";\n")
+            out
+        }
     }
 }
 

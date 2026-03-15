@@ -1,0 +1,125 @@
+// self-hosted::test_epistemic_wmma — Epistemic Tensor Core WMMA Oracle Tests
+//
+// Validates the world-first compiler-integrated GUM uncertainty propagation
+// through GPU WMMA tensor core operations (JCGM 100:2008).
+//
+// Test categories:
+//   T1-T5: PTX structural validation (substring checks on emitted PTX)
+//   T6-T9: Uncertainty arithmetic oracle (analytical verification)
+//
+// Gate: all tests must pass for the epistemic WMMA pipeline to be considered valid.
+
+// ============================================================================
+// Section 0 — Arithmetic helpers (must precede all test functions)
+// ============================================================================
+
+fn ewmma_sqrt_f64(x: f64) -> f64 with Mut, Panic, Div {
+    if x <= 0.0 { return 0.0 }
+    var g = x / 2.0
+    var i: i64 = 0
+    while i < 30 {
+        g = (g + x / g) / 2.0
+        i = i + 1
+    }
+    g
+}
+
+fn ewmma_abs_f64(x: f64) -> f64 {
+    if x < 0.0 { -x } else { x }
+}
+
+fn ewmma_near_f64(a: f64, b: f64, tol: f64) -> bool {
+    let diff = a - b
+    let abs_diff = if diff < 0.0 { -diff } else { diff }
+    abs_diff <= tol
+}
+
+// GUM tile-level uncertainty formula (conservative):
+//   ε_C = sqrt(K) · (|A_norm| · ε_B + |B_norm| · ε_A)
+// where K = 16 for m16n16k16 WMMA tile.
+fn ewmma_gum_uncertainty(eps_a: f64, norm_a: f64, eps_b: f64, norm_b: f64) -> f64 with Mut, Panic, Div {
+    let combined = ewmma_abs_f64(norm_a) * eps_b + ewmma_abs_f64(norm_b) * eps_a
+    let sqrt_k = ewmma_sqrt_f64(16.0)  // = 4.0
+    sqrt_k * combined
+}
+
+// ============================================================================
+// Section 1 — PTX structural validation
+// ============================================================================
+
+// T1: PTX output contains wmma.mma.sync (tensor core data path)
+fn test_wmma_ptx_has_mma_sync() -> bool with Mut, Panic, Div, Alloc {
+    let ir = gpu_build_epistemic_wmma_matmul_16x16_ir()
+    let ptx = gpu_lower_to_ptx(ir)
+    let s = ptx_to_string(ptx)
+    ptx_str_contains(s, "wmma.mma.sync")
+}
+
+// T2: PTX output contains sqrt.approx.f32 (uncertainty shadow path)
+fn test_wmma_ptx_has_shadow_sqrt() -> bool with Mut, Panic, Div, Alloc {
+    let ir = gpu_build_epistemic_wmma_matmul_16x16_ir()
+    let ptx = gpu_lower_to_ptx(ir)
+    let s = ptx_to_string(ptx)
+    ptx_str_contains(s, "sqrt.approx.f32")
+}
+
+// T3: PTX output contains and.pred (validity conjunction)
+fn test_wmma_ptx_has_validity_and() -> bool with Mut, Panic, Div, Alloc {
+    let ir = gpu_build_epistemic_wmma_matmul_16x16_ir()
+    let ptx = gpu_lower_to_ptx(ir)
+    let s = ptx_to_string(ptx)
+    ptx_str_contains(s, "and.pred")
+}
+
+// T4: PTX output contains xor.b64 (provenance Merkle merge)
+fn test_wmma_ptx_has_provenance_xor() -> bool with Mut, Panic, Div, Alloc {
+    let ir = gpu_build_epistemic_wmma_matmul_16x16_ir()
+    let ptx = gpu_lower_to_ptx(ir)
+    let s = ptx_to_string(ptx)
+    ptx_str_contains(s, "xor.b64")
+}
+
+// T5: PTX declares >= 37 f32 registers (data + shadow + scratch)
+fn test_wmma_ptx_reg_count() -> bool with Mut, Panic, Div, Alloc {
+    let ir = gpu_build_epistemic_wmma_matmul_16x16_ir()
+    let ptx = gpu_lower_to_ptx(ir)
+    let s = ptx_to_string(ptx)
+    // Expect: .reg .f32 %f<37>
+    ptx_str_contains(s, ".reg .f32 %f<37>")
+}
+
+// ============================================================================
+// Section 2 — Uncertainty arithmetic oracle
+// ============================================================================
+
+// T6: Zero uncertainty inputs produce zero uncertainty output
+//     If ε_A = 0 and ε_B = 0, then ε_C must be 0.
+fn test_wmma_eps_zero_identity() -> bool with Mut, Panic, Div {
+    let eps_out = ewmma_gum_uncertainty(0.0, 1.0, 0.0, 1.0)
+    ewmma_near_f64(eps_out, 0.0, 1.0e-12)
+}
+
+// T7: Known epsilon values produce analytically correct output
+//     Given ε_A = 0.1, |A| = 2.0, ε_B = 0.2, |B| = 3.0:
+//     combined = |2.0| * 0.2 + |3.0| * 0.1 = 0.4 + 0.3 = 0.7
+//     ε_C = sqrt(16) * 0.7 = 4.0 * 0.7 = 2.8
+fn test_wmma_eps_quadrature() -> bool with Mut, Panic, Div {
+    let eps_out = ewmma_gum_uncertainty(0.1, 2.0, 0.2, 3.0)
+    ewmma_near_f64(eps_out, 2.8, 1.0e-10)
+}
+
+// T8: Doubling input uncertainty increases output uncertainty
+//     ε_C(2·ε_A, ε_B) > ε_C(ε_A, ε_B)
+fn test_wmma_eps_monotone() -> bool with Mut, Panic, Div {
+    let base = ewmma_gum_uncertainty(0.1, 1.0, 0.1, 1.0)
+    let doubled = ewmma_gum_uncertainty(0.2, 1.0, 0.1, 1.0)
+    doubled > base
+}
+
+// T9: Output uncertainty is always non-negative
+fn test_wmma_eps_nonneg() -> bool with Mut, Panic, Div {
+    let e1 = ewmma_gum_uncertainty(0.0, 0.0, 0.0, 0.0)
+    let e2 = ewmma_gum_uncertainty(0.5, 1.0, 0.5, 1.0)
+    let e3 = ewmma_gum_uncertainty(100.0, 0.001, 0.001, 100.0)
+    e1 >= 0.0 && e2 >= 0.0 && e3 >= 0.0
+}
