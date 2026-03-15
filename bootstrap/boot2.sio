@@ -531,6 +531,7 @@ fn compile_primary(code: [i8; 262144], st: [i64; 8192], src: [i8; 1048576], tk: 
             // Variable reference
             let li = find_local(src, tk, ts, te, t, loc_ns, loc_ne, loc_count)
             if li >= 0 {
+                st[8] = loc_is_arr[li]  // track array elem type for postfix [idx]
                 if loc_is_arr[li] > 0 {
                     // Array — load pointer from slot (mov rax, [rbp - slot])
                     let slot = loc_slot[li]
@@ -554,6 +555,7 @@ fn compile_primary(code: [i8; 262144], st: [i64; 8192], src: [i8; 1048576], tk: 
         post = 0
         if tk[t] == 24 {  // [ array index
             post = 1
+            let arr_elem_type = st[8]  // 1=i8, 2=i64 (set by variable reference)
             // rax has array base address
             cp = e1(code, cp, 0x50) // push rax (save base)
             t = t + 1
@@ -563,8 +565,13 @@ fn compile_primary(code: [i8; 262144], st: [i64; 8192], src: [i8; 1048576], tk: 
             if tk[t] == 25 { t = t + 1 }  // skip ]
             // rax = index, [rsp] = base
             cp = e1(code, cp, 0x59)  // pop rcx (base)
-            // movsx rax, byte [rcx + rax]  — for i8 arrays
-            cp = e3(code, cp, 0x48, 0x0F, 0xBE); cp = e2(code, cp, 0x04, 0x01) // movsx rax, byte [rcx+rax]
+            if arr_elem_type == 2 {
+                // mov rax, [rcx + rax*8]  — for i64 arrays (SIB: scale=8, idx=rax, base=rcx)
+                cp = e3(code, cp, 0x48, 0x8B, 0x04); cp = e1(code, cp, 0xC1)
+            } else {
+                // movsx rax, byte [rcx + rax]  — for i8 arrays
+                cp = e3(code, cp, 0x48, 0x0F, 0xBE); cp = e2(code, cp, 0x04, 0x01)
+            }
         }
         if tk[t] == 13 {  // as — skip type cast (no-op)
             post = 1
@@ -660,11 +667,16 @@ fn compile_block(code: [i8; 262144], st: [i64; 8192], src: [i8; 1048576], tk: [i
                 t = t + 1
                 if tk[t] == 24 {  // [ array type
                     t = t + 1
+                    // Check element type: i64 → is_arr=2, i8 → is_arr=1
+                    if tk[t] == 1 && te[t] - ts[t] == 3 && rd(src, ts[t]) == 105 && rd(src, ts[t]+1) == 54 && rd(src, ts[t]+2) == 52 {
+                        is_arr = 2
+                    } else {
+                        is_arr = 1
+                    }
                     while tk[t] != 27 && tk[t] != 25 && tk[t] != 0 { t = t + 1 }
                     if tk[t] == 27 { t = t + 1 }
                     if tk[t] == 2 { arr_size = tv[t]; t = t + 1 }
                     if tk[t] == 25 { t = t + 1 }
-                    is_arr = 1
                 } else {
                     // Skip type tokens until = or { or statement boundary
                     while tk[t] != 30 && tk[t] != 22 && tk[t] != 23 && tk[t] != 0 {
@@ -678,7 +690,7 @@ fn compile_block(code: [i8; 262144], st: [i64; 8192], src: [i8; 1048576], tk: [i
                 loc_ns[loc_count] = vns
                 loc_ne[loc_count] = vne
                 loc_slot[loc_count] = next_slot
-                loc_is_arr[loc_count] = 1
+                loc_is_arr[loc_count] = is_arr
                 loc_count = loc_count + 1
                 next_slot = next_slot + 8
             } else {
@@ -894,14 +906,15 @@ fn compile_block(code: [i8; 262144], st: [i64; 8192], src: [i8; 1048576], tk: [i
         } else if kind == 1 {  // IDENT — assignment, array write, or expression statement
             let id_t = t
             // Check for: ident = expr
-            if tk[(t+1)] == 30 {  // ident = expr
+            let tk_next = tk[(t+1)]
+            if tk_next == 30 {  // ident = expr
                 let li = find_local(src, tk, ts, te, t, loc_ns, loc_ne, loc_count)
                 t = t + 2
                 st[0] = cp; st[1] = t
                 compile_expr_prec(code, st, src, tk, ts, te, tv, loc_ns, loc_ne, loc_slot, loc_is_arr, fn_ns, fn_ne, fn_off, strbuf, 0)
                 cp = st[0]; t = st[1]
                 if li >= 0 { cp = e3(code, cp, 0x48, 0x89, 0x85); cp = ei32(code, cp, 0 - loc_slot[li]) }
-            } else if tk[(t+1)] == 24 {  // ident[ — array write or array read expression
+            } else if tk_next == 24 {  // ident[ — array write or array read expression
                 // Could be: arr[idx] = expr (write) or arr[idx] (read as expr statement)
                 // We need to look ahead past the [...] to see if there's =
                 // Find matching ]
@@ -938,8 +951,13 @@ fn compile_block(code: [i8; 262144], st: [i64; 8192], src: [i8; 1048576], tk: [i
                         let slot = loc_slot[li]
                         cp = e3(code, cp, 0x48, 0x8B, 0x95)
                         cp = ei32(code, cp, 0 - slot)
-                        // mov [rdx + rcx], al   (byte store for i8 arrays)
-                        cp = e3(code, cp, 0x88, 0x04, 0x0A)
+                        if loc_is_arr[li] == 2 {
+                            // mov [rdx + rcx*8], rax  — qword store for i64 arrays
+                            cp = e3(code, cp, 0x48, 0x89, 0x04); cp = e1(code, cp, 0xCA)
+                        } else {
+                            // mov [rdx + rcx], al   (byte store for i8 arrays)
+                            cp = e3(code, cp, 0x88, 0x04, 0x0A)
+                        }
                     }
                 } else {
                     // Expression statement starting with ident[
@@ -1084,7 +1102,14 @@ fn compile_all(code: [i8; 262144], src: [i8; 1048576], tk: [i64; 65536], ts: [i6
                 t = t + 1
                 if tk[t] == 28 {
                     t = t + 1
-                    if tk[t] == 24 { p_is_arr = 1 }
+                    if tk[t] == 24 {
+                        // Check element type after [: i64 → 2, i8 → 1
+                        if t+1 < 65536 && tk[(t+1)] == 1 && te[(t+1)] - ts[(t+1)] == 3 && rd(src, ts[(t+1)]) == 105 && rd(src, ts[(t+1)]+1) == 54 && rd(src, ts[(t+1)]+2) == 52 {
+                            p_is_arr = 2
+                        } else {
+                            p_is_arr = 1
+                        }
+                    }
                     var d: i64 = 0; while tk[t]!=0 { if tk[t]==24 { d=d+1 }; if tk[t]==25 { d=d-1 }; if d==0 && (tk[t]==26||tk[t]==21) { break }; t=t+1 }
                 }
                 loc_is_arr[loc_count] = p_is_arr
@@ -1132,8 +1157,8 @@ fn compile_all(code: [i8; 262144], src: [i8; 1048576], tk: [i64; 65536], ts: [i6
         // leave; ret (rax has last expression value)
         cp = e2(code, cp, 0xC9, 0xC3)
 
-        // Patch frame — include temp arg area (next_slot + 1024 + 16*8 = max possible)
-        let frame_min = next_slot + 1024 + 128
+        // Patch frame — include temp arg area (generous: next_slot + 4096)
+        let frame_min = next_slot + 4096
         let frame_size = ((frame_min + 15) / 16) * 16
         ei32(code, frame_patch, frame_size)
 
