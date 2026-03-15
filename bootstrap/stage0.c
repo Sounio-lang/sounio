@@ -1351,8 +1351,23 @@ static void compile_expr(Expr *e, Locals *loc) {
         emit_push_rax();
         compile_expr(e->right, loc);
         emit_pop_rcx();
-        /* mov rax, [rcx + rax*8] */
-        emit(0x48); emit(0x8B); emit(0x04); emit(0xC1);
+        /* Check if base is a byte array (type == 3) */
+        int is_byte = 0;
+        if (e->left && e->left->kind == EX_IDENT) {
+            for (int i = loc->count-1; i >= 0; i--) {
+                if (name_eq(loc->names[i], e->left->name)) {
+                    if (loc->types[i] == 3) is_byte = 1; /* byte array */
+                    break;
+                }
+            }
+        }
+        if (is_byte) {
+            /* movsx rax, byte [rcx + rax] — byte-indexed */
+            emit(0x48); emit(0x0F); emit(0xBE); emit(0x04); emit(0x01);
+        } else {
+            /* mov rax, [rcx + rax*8] — qword-indexed */
+            emit(0x48); emit(0x8B); emit(0x04); emit(0xC1);
+        }
         break;
     }
     case EX_IF: {
@@ -1498,29 +1513,82 @@ static void compile_block(Block *b, Locals *loc) {
             emit_store_rax(slot);
             loc->names[loc->count] = s->name;
             loc->slots[loc->count] = slot;
-            /* Detect struct type from RHS */
+            /* Detect type from RHS expression or type annotation */
             int vtype = 0;
             if (s->expr && s->expr->kind == EX_STRUCT_LIT) {
                 int si = find_struct(s->expr->name);
-                if (si >= 0) {
-                    vtype = 10 + si;
-                    /* Struct is stored starting at base_slot (allocated in EX_STRUCT_LIT) */
-                    /* The slot we just stored is the LEA address — keep that */
-                }
+                if (si >= 0) vtype = 10 + si;
+            }
+            if (s->expr && s->expr->kind == EX_ARRAY_REPEAT) {
+                vtype = 3; /* byte array */
+            }
+            /* read_file returns a byte buffer pointer */
+            if (s->expr && s->expr->kind == EX_CALL && name_is(s->expr->name, "read_file")) {
+                vtype = 3;
             }
             loc->types[loc->count] = vtype;
             loc->count++;
         } else if (s->kind == 3) {
-            /* assignment: s->expr = LHS (ident), s->right = RHS */
+            /* assignment */
             if (s->expr && s->expr->kind == EX_IDENT && s->right) {
+                /* Simple variable assignment: x = rhs */
                 compile_expr(s->right, loc);
-                /* store to variable slot */
                 for (int i = loc->count-1; i >= 0; i--) {
                     if (name_eq(loc->names[i], s->expr->name)) {
                         emit_store_rax(loc->slots[i]);
                         break;
                     }
                 }
+            } else if (s->expr && s->expr->kind == EX_INDEX && s->right) {
+                /* Indexed assignment: arr[idx] = val */
+                /* Compile base address */
+                compile_expr(s->expr->left, loc);
+                int base_slot = loc->next_slot++;
+                emit_store_rax(base_slot);
+                /* Compile index */
+                compile_expr(s->expr->right, loc);
+                int idx_slot = loc->next_slot++;
+                emit_store_rax(idx_slot);
+                /* Compile value */
+                compile_expr(s->right, loc);
+                /* rax = value, load base → rcx, idx → rdx */
+                emit_push_rax(); /* save value */
+                emit_load_rax(idx_slot);
+                emit(0x48); emit(0x89); emit(0xC2); /* mov rdx, rax (index) */
+                emit_load_rax(base_slot);
+                emit(0x48); emit(0x89); emit(0xC1); /* mov rcx, rax (base) */
+                emit(0x58); /* pop rax (value) */
+                /* Check if base is a byte array */
+                int is_byte = 0;
+                if (s->expr->left && s->expr->left->kind == EX_IDENT) {
+                    for (int i = loc->count-1; i >= 0; i--) {
+                        if (name_eq(loc->names[i], s->expr->left->name)) {
+                            if (loc->types[i] == 3) is_byte = 1;
+                            break;
+                        }
+                    }
+                }
+                if (is_byte) {
+                    /* mov byte [rcx + rdx], al */
+                    emit(0x88); emit(0x04); emit(0x11);
+                } else {
+                    /* mov [rcx + rdx*8], rax */
+                    emit(0x48); emit(0x89); emit(0x04); emit(0xD1);
+                }
+                loc->next_slot -= 2;
+            } else if (s->expr && s->expr->kind == EX_FIELD && s->right) {
+                /* Field assignment: obj.field = val */
+                compile_expr(s->expr->left, loc); /* base address */
+                int base_slot = loc->next_slot++;
+                emit_store_rax(base_slot);
+                compile_expr(s->right, loc); /* value */
+                emit_push_rax();
+                emit_load_rax(base_slot);
+                emit(0x48); emit(0x89); emit(0xC1); /* mov rcx, rax (base addr) */
+                emit(0x58); /* pop rax (value) */
+                /* For now: store at [rcx] (field 0) — TODO: compute field offset */
+                emit(0x48); emit(0x89); emit(0x01); /* mov [rcx], rax */
+                loc->next_slot -= 1;
             } else if (s->right) {
                 compile_expr(s->right, loc);
             } else {
