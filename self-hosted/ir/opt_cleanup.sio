@@ -4373,6 +4373,47 @@ fn ocp_const_fold(func: IrFunction) -> IrFunction with Mut, Div, Panic {
             }
         }
 
+        // Sprint 228 Block EL: Complement-AND OR — (~x&y) | (x&y) → y.
+        // Proof: (~x&y)|(x&y) = y&(~x|x) = y&(-1) = y. QED. Dual of Block CC/EL.
+        // Commutative variants: (x&y)|(~x&y) → y; (y&~x)|(y&x) → y; (y&x)|(y&~x) → y.
+        // Zero new arrays: uses is_bnot/bnot_src + ao_and_rr_valid/lhs/rhs (Block AO/AQ).
+        // SOTA: LLVM InstCombineAndOrXor; Boolean: (¬x∧y)∨(x∧y) = y.
+        if ocp_is_binop(result.instrs[i as usize].op) {
+            let el_instr = result.instrs[i as usize]
+            let el_s1 = el_instr.src1; let el_s2 = el_instr.src2
+            let el_s1_ok = el_s1 >= 0 && el_s1 < 256; let el_s2_ok = el_s2 >= 0 && el_s2 < 256
+            if el_instr.bin_op == BinaryOp::OpBitOr && el_s1_ok && el_s2_ok {
+                // Both s1 and s2 must be AND-rr
+                if ao_and_rr_valid[el_s1 as usize] && ao_and_rr_valid[el_s2 as usize] {
+                    let el_al1 = ao_and_rr_lhs[el_s1 as usize]
+                    let el_ar1 = ao_and_rr_rhs[el_s1 as usize]
+                    let el_al2 = ao_and_rr_lhs[el_s2 as usize]
+                    let el_ar2 = ao_and_rr_rhs[el_s2 as usize]
+                    let el_al1_ok = el_al1 >= 0 && el_al1 < 256
+                    let el_ar1_ok = el_ar1 >= 0 && el_ar1 < 256
+                    // Case: (~x&y)|(x&y): s1 has ~x on lhs, s2 has x on lhs, same rhs (y)
+                    if el_ar1 == el_ar2 && el_ar1_ok && el_al1_ok
+                            && is_bnot[el_al1 as usize] && bnot_src[el_al1 as usize] == el_al2 {
+                        result.instrs[i as usize] = ir_copy(el_instr.dst, el_ar1)
+                    }
+                    // Case: (x&y)|(~x&y): s1 has x on lhs, s2 has ~x on lhs, same rhs
+                    if el_ar1 == el_ar2 && el_ar1_ok && el_al2 >= 0 && el_al2 < 256
+                            && is_bnot[el_al2 as usize] && bnot_src[el_al2 as usize] == el_al1 {
+                        result.instrs[i as usize] = ir_copy(el_instr.dst, el_ar1)
+                    }
+                    // Case: (y&~x)|(y&x): same lhs (y), rhs are ~x and x
+                    if el_al1 == el_al2 && el_al1_ok && el_ar1_ok && el_ar2 >= 0 && el_ar2 < 256 {
+                        if is_bnot[el_ar1 as usize] && bnot_src[el_ar1 as usize] == el_ar2 {
+                            result.instrs[i as usize] = ir_copy(el_instr.dst, el_al1)
+                        }
+                        if is_bnot[el_ar2 as usize] && bnot_src[el_ar2 as usize] == el_ar1 {
+                            result.instrs[i as usize] = ir_copy(el_instr.dst, el_al1)
+                        }
+                    }
+                }
+            }
+        }
+
         // Sprint 177 Block CM: AND complement XOR partition — (x & C) ^ (x & ~C) → x.
         // Proof: C-bits: (xi&1)^(xi&0)=xi^0=xi. Non-C: (xi&0)^(xi&1)=0^xi=xi. QED.
         // Dual of Block CC (OR partition). Commutative: (x&~C)^(x&C) → x.
