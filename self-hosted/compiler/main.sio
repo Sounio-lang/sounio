@@ -16368,6 +16368,85 @@ fn compiler_main_test_dy_no_fold_or_outer() -> bool with Mut, Div, Panic {
     opt.instrs[2 as usize].bin_op != BinaryOp::OpBitAnd
 }
 
+// Sprint 239 Block EW: AND-complement XOR to copy — (x&y)^(~x&y) → y (T1100-T1105)
+fn compiler_main_test_ew_and_comp_xor_copy_basic() -> bool with Mut, Div, Panic {
+    // r2=r0&r1, r3=~r0, r4=r3&r1, r5=r2^r4 → r5 becomes IrCopy(r1)
+    var instrs: [IrInstr; 128] = cp_empty_instrs()
+    instrs[0 as usize] = ir_binop(2, 0, BinaryOp::OpBitAnd, 1)
+    instrs[1 as usize] = ir_unaryop(3, UnaryOp::OpNot, 0)
+    instrs[2 as usize] = ir_binop(4, 3, BinaryOp::OpBitAnd, 1)
+    instrs[3 as usize] = ir_binop(5, 2, BinaryOp::OpBitXor, 4)
+    let func = cp_make_test_func(instrs, 4)
+    let opt = opt_cleanup_function(func)
+    opt.instrs[3 as usize].op == IrOpcode::IrCopy
+        && opt.instrs[3 as usize].src1 == 1
+}
+
+fn compiler_main_test_ew_and_comp_xor_copy_comm() -> bool with Mut, Div, Panic {
+    // (~x&y)^(x&y) → y (commutative outer XOR: s1=~x&y, s2=x&y)
+    var instrs: [IrInstr; 128] = cp_empty_instrs()
+    instrs[0 as usize] = ir_binop(2, 0, BinaryOp::OpBitAnd, 1)
+    instrs[1 as usize] = ir_unaryop(3, UnaryOp::OpNot, 0)
+    instrs[2 as usize] = ir_binop(4, 3, BinaryOp::OpBitAnd, 1)
+    instrs[3 as usize] = ir_binop(5, 4, BinaryOp::OpBitXor, 2)
+    let func = cp_make_test_func(instrs, 4)
+    let opt = opt_cleanup_function(func)
+    opt.instrs[3 as usize].op == IrOpcode::IrCopy
+        && opt.instrs[3 as usize].src1 == 1
+}
+
+fn compiler_main_test_ew_and_comp_xor_copy_lhs_shared() -> bool with Mut, Div, Panic {
+    // (y&x)^(y&~x) → y (same lhs y, rhs x vs ~x)
+    var instrs: [IrInstr; 128] = cp_empty_instrs()
+    instrs[0 as usize] = ir_binop(2, 1, BinaryOp::OpBitAnd, 0)
+    instrs[1 as usize] = ir_unaryop(3, UnaryOp::OpNot, 0)
+    instrs[2 as usize] = ir_binop(4, 1, BinaryOp::OpBitAnd, 3)
+    instrs[3 as usize] = ir_binop(5, 2, BinaryOp::OpBitXor, 4)
+    let func = cp_make_test_func(instrs, 4)
+    let opt = opt_cleanup_function(func)
+    opt.instrs[3 as usize].op == IrOpcode::IrCopy
+        && opt.instrs[3 as usize].src1 == 1
+}
+
+fn compiler_main_test_ew_no_fold_diff_y() -> bool with Mut, Div, Panic {
+    // (r0&r1)^(~r0&r2): different rhs (y1≠y2) → no fold
+    var instrs: [IrInstr; 128] = cp_empty_instrs()
+    instrs[0 as usize] = ir_binop(3, 0, BinaryOp::OpBitAnd, 1)
+    instrs[1 as usize] = ir_unaryop(4, UnaryOp::OpNot, 0)
+    instrs[2 as usize] = ir_binop(5, 4, BinaryOp::OpBitAnd, 2)
+    instrs[3 as usize] = ir_binop(6, 3, BinaryOp::OpBitXor, 5)
+    let func = cp_make_test_func(instrs, 4)
+    let opt = opt_cleanup_function(func)
+    opt.instrs[3 as usize].op == IrOpcode::IrBinOp
+        && opt.instrs[3 as usize].bin_op == BinaryOp::OpBitXor
+}
+
+fn compiler_main_test_ew_no_fold_no_not() -> bool with Mut, Div, Panic {
+    // (r0&r1)^(r2&r1): no NOT involved → no EW fold
+    var instrs: [IrInstr; 128] = cp_empty_instrs()
+    instrs[0 as usize] = ir_binop(3, 0, BinaryOp::OpBitAnd, 1)
+    instrs[1 as usize] = ir_binop(4, 2, BinaryOp::OpBitAnd, 1)
+    instrs[2 as usize] = ir_binop(5, 3, BinaryOp::OpBitXor, 4)
+    let func = cp_make_test_func(instrs, 3)
+    let opt = opt_cleanup_function(func)
+    opt.instrs[2 as usize].op == IrOpcode::IrBinOp
+        && opt.instrs[2 as usize].bin_op == BinaryOp::OpBitXor
+}
+
+fn compiler_main_test_ew_no_fold_or_outer() -> bool with Mut, Div, Panic {
+    // (r0&r1)|(~r0&r1): outer is OR not XOR → Block EL fires (→r1), not EW
+    var instrs: [IrInstr; 128] = cp_empty_instrs()
+    instrs[0 as usize] = ir_binop(2, 0, BinaryOp::OpBitAnd, 1)
+    instrs[1 as usize] = ir_unaryop(3, UnaryOp::OpNot, 0)
+    instrs[2 as usize] = ir_binop(4, 3, BinaryOp::OpBitAnd, 1)
+    instrs[3 as usize] = ir_binop(5, 2, BinaryOp::OpBitOr, 4)
+    let func = cp_make_test_func(instrs, 4)
+    let opt = opt_cleanup_function(func)
+    // Block EL: (~x&y)|(x&y)→y — fires as IrCopy not XOR
+    opt.instrs[3 as usize].op == IrOpcode::IrCopy
+        && opt.instrs[3 as usize].src1 == 1
+}
+
 // Sprint 238 Block EV: Cross-sub add collapse — (x-y)+(z-x) → z-y (T1094-T1099)
 fn compiler_main_test_ev_cross_sub_add_basic() -> bool with Mut, Div, Panic {
     // r3=r0-r1, r4=r2-r0, r5=r3+r4 → r5 becomes r2-r1
@@ -18145,7 +18224,7 @@ fn compiler_main_test_dz_no_fold_or_outer() -> bool with Mut, Div, Panic {
 
 fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
     var passed: i64 = 0
-    let total: i64 = 1099
+    let total: i64 = 1105
 
     println("=== compiler/main.sio self-tests ===")
 
@@ -23073,6 +23152,32 @@ fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
         passed = passed + 1
         println("  T961 OK: Sprint 215 Block DY: r0|(r1|~r0) no fold OR outer")
     } else { println("  FAIL: T961") }
+
+    // Sprint 239 Block EW: AND-complement XOR to copy (T1100-T1105)
+    if compiler_main_test_ew_and_comp_xor_copy_basic() {
+        passed = passed + 1
+        println("  T1100 OK: Sprint 239 Block EW: (r0&r1)^(~r0&r1) -> IrCopy(r1)")
+    } else { println("  FAIL: T1100") }
+    if compiler_main_test_ew_and_comp_xor_copy_comm() {
+        passed = passed + 1
+        println("  T1101 OK: Sprint 239 Block EW: (~r0&r1)^(r0&r1) -> IrCopy(r1) comm")
+    } else { println("  FAIL: T1101") }
+    if compiler_main_test_ew_and_comp_xor_copy_lhs_shared() {
+        passed = passed + 1
+        println("  T1102 OK: Sprint 239 Block EW: (r1&r0)^(r1&~r0) -> IrCopy(r1) lhs-shared")
+    } else { println("  FAIL: T1102") }
+    if compiler_main_test_ew_no_fold_diff_y() {
+        passed = passed + 1
+        println("  T1103 OK: Sprint 239 Block EW: (r0&r1)^(~r0&r2) no fold diff y")
+    } else { println("  FAIL: T1103") }
+    if compiler_main_test_ew_no_fold_no_not() {
+        passed = passed + 1
+        println("  T1104 OK: Sprint 239 Block EW: (r0&r1)^(r2&r1) no fold no NOT")
+    } else { println("  FAIL: T1104") }
+    if compiler_main_test_ew_no_fold_or_outer() {
+        passed = passed + 1
+        println("  T1105 OK: Sprint 239 Block EW: (r0&r1)|(~r0&r1) fires Block EL IrCopy")
+    } else { println("  FAIL: T1105") }
 
     // Sprint 238 Block EV: Cross-sub add collapse (T1094-T1099)
     if compiler_main_test_ev_cross_sub_add_basic() {

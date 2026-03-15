@@ -4414,6 +4414,49 @@ fn ocp_const_fold(func: IrFunction) -> IrFunction with Mut, Div, Panic {
             }
         }
 
+        // Sprint 239 Block EW: AND-complement XOR to copy — (x&y)^(~x&y) → y.
+        // Proof (per bit): 00→0^0=0=0; 01→0^1=1=1; 10→0^0=0=0; 11→1^0=1=1. Result=y. QED.
+        // Commutative outer XOR: (~x&y)^(x&y) → y; inner AND: (y&x)^(y&~x) → y; etc.
+        // Zero new arrays: uses ao_and_rr_valid/lhs/rhs (Block AO) + is_bnot/bnot_src (Block BJ).
+        // SOTA: Boolean algebra; LLVM InstCombineAndOrXor.
+        if ocp_is_binop(result.instrs[i as usize].op) {
+            let ew_instr = result.instrs[i as usize]
+            let ew_s1 = ew_instr.src1; let ew_s2 = ew_instr.src2
+            let ew_s1_ok = ew_s1 >= 0 && ew_s1 < 256; let ew_s2_ok = ew_s2 >= 0 && ew_s2 < 256
+            if ew_instr.bin_op == BinaryOp::OpBitXor && ew_s1_ok && ew_s2_ok {
+                if ao_and_rr_valid[ew_s1 as usize] && ao_and_rr_valid[ew_s2 as usize] {
+                    let ew_al1 = ao_and_rr_lhs[ew_s1 as usize]; let ew_ar1 = ao_and_rr_rhs[ew_s1 as usize]
+                    let ew_al2 = ao_and_rr_lhs[ew_s2 as usize]; let ew_ar2 = ao_and_rr_rhs[ew_s2 as usize]
+                    let ew_al1_ok = ew_al1 >= 0 && ew_al1 < 256; let ew_ar1_ok = ew_ar1 >= 0 && ew_ar1 < 256
+                    // Case: (x&y)^(~x&y): same rhs (y), lhs s1=x s2=~x
+                    if ew_ar1 == ew_ar2 && ew_ar1_ok && ew_al1_ok && ew_al2 >= 0 && ew_al2 < 256
+                            && is_bnot[ew_al2 as usize] && bnot_src[ew_al2 as usize] == ew_al1 {
+                        result.instrs[i as usize] = ir_copy(ew_instr.dst, ew_ar1)
+                    }
+                    // Case: (~x&y)^(x&y): lhs s1=~x s2=x
+                    if ew_ar1 == ew_ar2 && ew_ar1_ok && ew_al1_ok
+                            && is_bnot[ew_al1 as usize] && bnot_src[ew_al1 as usize] == ew_al2 {
+                        if result.instrs[i as usize].src1 == ew_s1 {
+                            result.instrs[i as usize] = ir_copy(ew_instr.dst, ew_ar1)
+                        }
+                    }
+                    // Case: (y&x)^(y&~x): same lhs (y), rhs s1=x s2=~x
+                    if ew_al1 == ew_al2 && ew_al1_ok && ew_ar1_ok && ew_ar2 >= 0 && ew_ar2 < 256 {
+                        if is_bnot[ew_ar2 as usize] && bnot_src[ew_ar2 as usize] == ew_ar1 {
+                            if result.instrs[i as usize].src1 == ew_s1 {
+                                result.instrs[i as usize] = ir_copy(ew_instr.dst, ew_al1)
+                            }
+                        }
+                        if is_bnot[ew_ar1 as usize] && bnot_src[ew_ar1 as usize] == ew_ar2 {
+                            if result.instrs[i as usize].src1 == ew_s1 {
+                                result.instrs[i as usize] = ir_copy(ew_instr.dst, ew_al1)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         // Sprint 238 Block EV: Cross-sub add collapse — (x-y)+(z-x) → z-y.
         // Proof: (x-y)+(z-x) = x-y+z-x = z-y. Outer x cancels. QED.
         // Commutative outer ADD: (z-x)+(x-y) → z-y.
