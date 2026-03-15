@@ -507,30 +507,23 @@ fn compile_primary(code: [i8; 262144], st: [i64; 32768], src: [i8; 1048576], td:
                 cp = e3(code, cp, 0x48, 0x83, 0xC4); cp = e1(code, cp, 16)
                 cp = e2(code, cp, 0x31, 0xC0)
             } else {
-                // General function call (≤5 args) — callee-saved r12-r15 cascade
-                // Each arg evaluates to rax, then saved to r12/r13/r14/r15.
-                // No push/pop during arg eval — immune to nested calls.
+                // General function call (≤6 args) — push/pop arg passing
                 var argc: i64 = 0
                 while tk(td, t) != 21 && tk(td, t) != 0 {
                     st[0] = cp; st[1] = t
                     st[10] = 0; compile_expr(code, st, src, td, sb); cp = st[0]; t = st[1]
-                    // Save arg result from rax to callee-saved register
-                    if argc == 0 { cp = e3(code, cp, 0x49, 0x89, 0xC4) }       // mov r12, rax
-                    else if argc == 1 { cp = e3(code, cp, 0x49, 0x89, 0xC5) }  // mov r13, rax
-                    else if argc == 2 { cp = e3(code, cp, 0x49, 0x89, 0xC6) }  // mov r14, rax
-                    else if argc == 3 { cp = e3(code, cp, 0x49, 0x89, 0xC7) }  // mov r15, rax
-                    else if argc == 4 { cp = e3(code, cp, 0x49, 0x89, 0xC0) }  // mov r8, rax
-                    else if argc == 5 { cp = e3(code, cp, 0x49, 0x89, 0xC1) }  // mov r9, rax
+                    cp = e1(code, cp, 0x50)  // push rax
                     argc = argc + 1
                     if tk(td, t) == 26 { t = t + 1 }
                 }
                 if tk(td, t) == 21 { t = t + 1 }
-                // Move callee-saved regs to ABI parameter registers
-                if argc >= 1 { cp = e3(code, cp, 0x4C, 0x89, 0xE7) }  // mov rdi, r12
-                if argc >= 2 { cp = e3(code, cp, 0x4C, 0x89, 0xEE) }  // mov rsi, r13
-                if argc >= 3 { cp = e3(code, cp, 0x4C, 0x89, 0xF2) }  // mov rdx, r14
-                if argc >= 4 { cp = e3(code, cp, 0x4C, 0x89, 0xF9) }  // mov rcx, r15
-                // r8 and r9 already in place for args 4-5
+                // Pop args in reverse into target registers
+                if argc == 1 { cp = e1(code, cp, 0x5F) }
+                else if argc == 2 { cp = e1(code, cp, 0x5E); cp = e1(code, cp, 0x5F) }
+                else if argc == 3 { cp = e1(code, cp, 0x5A); cp = e1(code, cp, 0x5E); cp = e1(code, cp, 0x5F) }
+                else if argc == 4 { cp = e1(code, cp, 0x59); cp = e1(code, cp, 0x5A); cp = e1(code, cp, 0x5E); cp = e1(code, cp, 0x5F) }
+                else if argc == 5 { cp = e3(code, cp, 0x41, 0x58, 0x59); cp = e1(code, cp, 0x5A); cp = e1(code, cp, 0x5E); cp = e1(code, cp, 0x5F) }
+                else if argc >= 6 { cp = e3(code, cp, 0x41, 0x59, 0x41); cp = e1(code, cp, 0x58); cp = e1(code, cp, 0x59); cp = e1(code, cp, 0x5A); cp = e1(code, cp, 0x5E); cp = e1(code, cp, 0x5F) }
                 // Call: CAFE sentinel for forward, direct for backward
                 let fidx = find_fn_at(src, st, td, fn_t)
                 if fidx >= 0 {
@@ -827,10 +820,8 @@ fn compile_all(code: [i8; 262144], st: [i64; 32768], src: [i8; 1048576], td: [i6
         let param_count = loc_count
         while tk(td, t) != 22 && tk(td, t) != 0 { t = t + 1 }
         if tk(td, t) == 22 { t = t + 1 }
-        // Prologue: push rbp, save r12-r15, then allocate frame
+        // Prologue
         cp = e1(code, cp, 0x55); cp = e3(code, cp, 0x48, 0x89, 0xE5)
-        cp = e2(code, cp, 0x41, 0x54); cp = e2(code, cp, 0x41, 0x55)  // push r12, r13
-        cp = e2(code, cp, 0x41, 0x56); cp = e2(code, cp, 0x41, 0x57)  // push r14, r15
         cp = e3(code, cp, 0x48, 0x81, 0xEC); let frame_patch = cp; cp = ei32(code, cp, 0)
         // Store params 0-5
         var pi: i64 = 0
@@ -848,16 +839,9 @@ fn compile_all(code: [i8; 262144], st: [i64; 32768], src: [i8; 1048576], td: [i6
         st[0] = cp; st[1] = t; st[2] = next_slot; st[3] = loc_count; st[4] = 0
         compile_block(code, st, src, td, sb)
         cp = st[0]; next_slot = st[2]
-        // Epilogue: add rsp (undo frame), pop r15-r12, pop rbp, ret
-        cp = e3(code, cp, 0x48, 0x81, 0xC4); cp = ei32(code, cp, 0)  // add rsp, frame (patched)
-        let epilogue_frame_patch = cp - 4
-        cp = e2(code, cp, 0x41, 0x5F); cp = e2(code, cp, 0x41, 0x5E)  // pop r15, r14
-        cp = e2(code, cp, 0x41, 0x5D); cp = e2(code, cp, 0x41, 0x5C)  // pop r13, r12
-        cp = e1(code, cp, 0x5D)  // pop rbp
-        cp = e1(code, cp, 0xC3)  // ret
+        cp = e2(code, cp, 0xC9, 0xC3)  // leave; ret
         let frame_size = ((next_slot + 1024 + 15) / 16) * 16
         ei32(code, frame_patch, frame_size)
-        ei32(code, epilogue_frame_patch, frame_size)
         fi = fi + 1
     }
     // CAFE patching
