@@ -1,0 +1,928 @@
+// boot3.sio — Self-hosting bootstrap compiler
+// ALL functions ≤ 5 params. State threaded via st: [i64; 32768].
+// Compiles: fn, let/var, if/else/else-if, while/break, calls ≤6 args,
+// arrays (i8/i64), arithmetic, comparisons, &&/||, shifts, bitwise,
+// return, print("..."), print_int(n), arg_count, get_arg, file_size,
+// read_file, write_file. Sufficient to compile itself.
+//
+// Params: code=[i8;262144], st=[i64;32768], src=[i8;1048576],
+//         td=[i64;262144] (tokens), sb=[i8;8192] (string buf)
+//
+// st layout:
+//   [0]=cp [1]=t [2]=next_slot [3]=loc_count [4]=brk_count
+//   [5]=fn_count [6]=print_int_off [7]=ntok [8]=arr_elem_type [9]=src_size
+//   fn table: [100..355]=fn_ns [356..611]=fn_ne [612..867]=fn_tok [868..1123]=fn_off
+//   locals:   [1200..1455]=loc_ns [1456..1711]=loc_ne [1712..1967]=loc_slot [1968..2223]=loc_is_arr
+//   break:    [2300..2363]
+//   if-end:   [2400..2431]
+//   temp:     [2500..2515]
+
+// ==================== Byte read ====================
+fn rd(buf: [i8; 1048576], off: i64) -> i64 with Panic {
+    let v = buf[off as usize]
+    if v < 0 { return v + 256 }
+    v
+}
+fn rdc(buf: [i8; 262144], off: i64) -> i64 with Panic {
+    let v = buf[off as usize]
+    if v < 0 { return v + 256 }
+    v
+}
+fn rds(buf: [i8; 8192], off: i64) -> i64 with Panic {
+    let v = buf[off as usize]
+    if v < 0 { return v + 256 }
+    v
+}
+
+// ==================== Char classification ====================
+fn is_alpha(c: i64) -> i64 {
+    if c >= 97 && c <= 122 { return 1 }
+    if c >= 65 && c <= 90 { return 1 }
+    if c == 95 { return 1 }
+    0
+}
+fn is_digit(c: i64) -> i64 { if c >= 48 && c <= 57 { return 1 }; 0 }
+fn is_alnum(c: i64) -> i64 { if is_alpha(c) == 1 { return 1 }; is_digit(c) }
+
+// ==================== Code emitters ====================
+fn e1(c: [i8; 262144], p: i64, b: i64) -> i64 with Mut, Panic {
+    c[p as usize] = b as i8; p + 1
+}
+fn e2(c: [i8; 262144], p: i64, a: i64, b: i64) -> i64 with Mut, Panic {
+    c[p as usize] = a as i8; c[(p+1) as usize] = b as i8; p + 2
+}
+fn e3(c: [i8; 262144], p: i64, a: i64, b: i64, d: i64) -> i64 with Mut, Panic {
+    c[p as usize] = a as i8; c[(p+1) as usize] = b as i8; c[(p+2) as usize] = d as i8; p + 3
+}
+fn ei32(c: [i8; 262144], p: i64, v: i64) -> i64 with Mut, Panic, Div {
+    c[p as usize] = (v & 255) as i8
+    c[(p+1) as usize] = ((v >> 8) & 255) as i8
+    c[(p+2) as usize] = ((v >> 16) & 255) as i8
+    c[(p+3) as usize] = ((v >> 24) & 255) as i8
+    p + 4
+}
+fn ei64(c: [i8; 262144], p: i64, v: i64) -> i64 with Mut, Panic, Div {
+    var i: i64 = 0
+    var q = p
+    while i < 8 { c[q as usize] = ((v >> (i * 8)) & 255) as i8; q = q + 1; i = i + 1 }
+    q
+}
+fn em_imm64(c: [i8; 262144], p: i64, v: i64) -> i64 with Mut, Panic, Div {
+    var q = e2(c, p, 0x48, 0xB8)
+    ei64(c, q, v)
+}
+
+// ==================== ELF header ====================
+fn write_ehdr(out: [i8; 262144], entry: i64, fsz: i64, base: i64) -> i64 with Mut, Panic, Div {
+    out[0 as usize] = 0x7F as i8; out[1 as usize] = 69 as i8; out[2 as usize] = 76 as i8; out[3 as usize] = 70 as i8
+    out[4 as usize] = 2 as i8; out[5 as usize] = 1 as i8; out[6 as usize] = 1 as i8
+    out[16 as usize] = 2 as i8; out[18 as usize] = 0x3E as i8; out[20 as usize] = 1 as i8
+    var i: i64 = 0
+    while i < 8 { out[(24+i) as usize] = ((entry >> (i*8)) & 255) as i8; i = i + 1 }
+    out[32 as usize] = 64 as i8; out[52 as usize] = 64 as i8; out[54 as usize] = 56 as i8; out[56 as usize] = 1 as i8
+    out[64 as usize] = 1 as i8; out[68 as usize] = 7 as i8
+    i = 0; while i < 8 { out[(80+i) as usize] = ((base >> (i*8)) & 255) as i8; i = i + 1 }
+    i = 0; while i < 8 { out[(88+i) as usize] = ((base >> (i*8)) & 255) as i8; i = i + 1 }
+    i = 0; while i < 8 { out[(96+i) as usize] = ((fsz >> (i*8)) & 255) as i8; i = i + 1 }
+    let msz = fsz + 4194304
+    i = 0; while i < 8 { out[(104+i) as usize] = ((msz >> (i*8)) & 255) as i8; i = i + 1 }
+    out[113 as usize] = 0x10 as i8
+    0
+}
+
+// ==================== Keyword matching ====================
+fn kw_match(src: [i8; 1048576], s: i64, len: i64) -> i64 with Panic {
+    if len == 2 && rd(src,s) == 102 && rd(src,s+1) == 110 { return 4 }
+    if len == 3 && rd(src,s) == 108 && rd(src,s+1) == 101 && rd(src,s+2) == 116 { return 5 }
+    if len == 3 && rd(src,s) == 118 && rd(src,s+1) == 97 && rd(src,s+2) == 114 { return 6 }
+    if len == 2 && rd(src,s) == 105 && rd(src,s+1) == 102 { return 7 }
+    if len == 4 && rd(src,s) == 101 && rd(src,s+1) == 108 && rd(src,s+2) == 115 && rd(src,s+3) == 101 { return 8 }
+    if len == 5 && rd(src,s) == 119 && rd(src,s+1) == 104 && rd(src,s+2) == 105 && rd(src,s+3) == 108 && rd(src,s+4) == 101 { return 9 }
+    if len == 6 && rd(src,s) == 114 && rd(src,s+1) == 101 && rd(src,s+2) == 116 && rd(src,s+3) == 117 && rd(src,s+4) == 114 && rd(src,s+5) == 110 { return 10 }
+    if len == 5 && rd(src,s) == 98 && rd(src,s+1) == 114 && rd(src,s+2) == 101 && rd(src,s+3) == 97 && rd(src,s+4) == 107 { return 11 }
+    if len == 4 && rd(src,s) == 119 && rd(src,s+1) == 105 && rd(src,s+2) == 116 && rd(src,s+3) == 104 { return 12 }
+    if len == 2 && rd(src,s) == 97 && rd(src,s+1) == 115 { return 13 }
+    if len == 4 && rd(src,s) == 116 && rd(src,s+1) == 114 && rd(src,s+2) == 117 && rd(src,s+3) == 101 { return 14 }
+    if len == 5 && rd(src,s) == 102 && rd(src,s+1) == 97 && rd(src,s+2) == 108 && rd(src,s+3) == 115 && rd(src,s+4) == 101 { return 15 }
+    if len == 8 && rd(src,s)==99 && rd(src,s+1)==111 && rd(src,s+2)==110 && rd(src,s+3)==116 && rd(src,s+4)==105 && rd(src,s+5)==110 && rd(src,s+6)==117 && rd(src,s+7)==101 { return 16 }
+    1
+}
+
+// Token kinds: 0=EOF 1=IDENT 2=INT 3=STRING 4=fn 5=let 6=var 7=if 8=else
+// 9=while 10=return 11=break 12=with 13=as 14=true 15=false 16=continue
+// 20=( 21=) 22={ 23=} 24=[ 25=] 26=, 27=; 28=: 29=-> 30==
+// 40=+ 41=- 42=* 43=/ 44=% 45=& 46=| 47=^ 48=<< 49=>>
+// 50=== 51=!= 52=< 53=> 54=<= 55=>= 56=&& 57=||
+// 58=. 59=!
+
+// ==================== Tokenizer ====================
+fn is_ws(c: i64) -> i64 { if c == 32 || c == 9 || c == 13 || c == 10 { return 1 }; 0 }
+fn skip1(src: [i8; 1048576], pos: i64, src_size: i64) -> i64 with Panic, Mut, Div {
+    var p = pos
+    while p < src_size && is_ws(rd(src, p)) == 1 { p = p + 1 }
+    p
+}
+fn skip_ws(src: [i8; 1048576], pos_in: i64, src_size: i64) -> i64 with Panic, Mut, Div {
+    var pos = skip1(src, pos_in, src_size)
+    if pos + 1 < src_size && rd(src, pos) == 47 && rd(src, pos + 1) == 47 {
+        while pos < src_size && rd(src, pos) != 10 { pos = pos + 1 }
+        pos = skip1(src, pos, src_size)
+    }
+    pos
+}
+fn tokenize(src: [i8; 1048576], td: [i64; 262144], src_size: i64) -> i64 with Panic, Mut, Div {
+    var pos: i64 = 0
+    var nt: i64 = 0
+    while pos < src_size {
+        pos = skip_ws(src, pos, src_size)
+        if pos >= src_size { return nt }
+        let c = rd(src, pos)
+        let b = nt * 4
+        if c == 34 {
+            pos = pos + 1; let s0 = pos
+            while pos < src_size && rd(src,pos) != 34 { if rd(src,pos) == 92 { pos = pos + 2 } else { pos = pos + 1 } }
+            td[b] = 3; td[b+1] = s0; td[b+2] = pos; td[b+3] = 0
+            if pos < src_size { pos = pos + 1 }
+            nt = nt + 1
+        } else if is_digit(c) == 1 {
+            let s0 = pos; var val: i64 = 0
+            if c == 48 && pos + 1 < src_size && rd(src,pos+1) == 120 {
+                pos = pos + 2
+                var hx: i64 = 1
+                while pos < src_size && hx == 1 { let h = rd(src,pos); if is_digit(h) == 1 { val = val * 16 + h - 48; pos = pos + 1 } else if h >= 97 && h <= 102 { val = val * 16 + h - 87; pos = pos + 1 } else if h >= 65 && h <= 70 { val = val * 16 + h - 55; pos = pos + 1 } else { hx = 0 } }
+            } else { while pos < src_size && is_digit(rd(src,pos)) == 1 { val = val * 10 + rd(src,pos) - 48; pos = pos + 1 } }
+            td[b] = 2; td[b+1] = s0; td[b+2] = pos; td[b+3] = val; nt = nt + 1
+        } else if is_alpha(c) == 1 {
+            let s0 = pos
+            while pos < src_size && is_alnum(rd(src,pos)) == 1 { pos = pos + 1 }
+            let kind = kw_match(src, s0, pos - s0)
+            td[b] = kind; td[b+1] = s0; td[b+2] = pos; td[b+3] = 0; nt = nt + 1
+        } else if c == 40 { td[b] = 20; td[b+1] = pos; td[b+2] = pos+1; td[b+3] = 0; nt = nt + 1; pos = pos + 1
+        } else if c == 41 { td[b] = 21; td[b+1] = pos; td[b+2] = pos+1; td[b+3] = 0; nt = nt + 1; pos = pos + 1
+        } else if c == 123 { td[b] = 22; td[b+1] = pos; td[b+2] = pos+1; td[b+3] = 0; nt = nt + 1; pos = pos + 1
+        } else if c == 125 { td[b] = 23; td[b+1] = pos; td[b+2] = pos+1; td[b+3] = 0; nt = nt + 1; pos = pos + 1
+        } else if c == 91 { td[b] = 24; td[b+1] = pos; td[b+2] = pos+1; td[b+3] = 0; nt = nt + 1; pos = pos + 1
+        } else if c == 93 { td[b] = 25; td[b+1] = pos; td[b+2] = pos+1; td[b+3] = 0; nt = nt + 1; pos = pos + 1
+        } else if c == 44 { td[b] = 26; td[b+1] = pos; td[b+2] = pos+1; td[b+3] = 0; nt = nt + 1; pos = pos + 1
+        } else if c == 59 { td[b] = 27; td[b+1] = pos; td[b+2] = pos+1; td[b+3] = 0; nt = nt + 1; pos = pos + 1
+        } else if c == 58 { td[b] = 28; td[b+1] = pos; td[b+2] = pos+1; td[b+3] = 0; nt = nt + 1; pos = pos + 1
+        } else if c == 46 { td[b] = 58; td[b+1] = pos; td[b+2] = pos+1; td[b+3] = 0; nt = nt + 1; pos = pos + 1
+        } else if c == 45 && pos + 1 < src_size && rd(src,pos+1) == 62 { td[b] = 29; td[b+1] = pos; td[b+2] = pos+2; td[b+3] = 0; nt = nt + 1; pos = pos + 2
+        } else if c == 61 && pos + 1 < src_size && rd(src,pos+1) == 61 { td[b] = 50; td[b+1] = pos; td[b+2] = pos+2; td[b+3] = 0; nt = nt + 1; pos = pos + 2
+        } else if c == 33 && pos + 1 < src_size && rd(src,pos+1) == 61 { td[b] = 51; td[b+1] = pos; td[b+2] = pos+2; td[b+3] = 0; nt = nt + 1; pos = pos + 2
+        } else if c == 60 && pos + 1 < src_size && rd(src,pos+1) == 61 { td[b] = 54; td[b+1] = pos; td[b+2] = pos+2; td[b+3] = 0; nt = nt + 1; pos = pos + 2
+        } else if c == 62 && pos + 1 < src_size && rd(src,pos+1) == 61 { td[b] = 55; td[b+1] = pos; td[b+2] = pos+2; td[b+3] = 0; nt = nt + 1; pos = pos + 2
+        } else if c == 60 && pos + 1 < src_size && rd(src,pos+1) == 60 { td[b] = 48; td[b+1] = pos; td[b+2] = pos+2; td[b+3] = 0; nt = nt + 1; pos = pos + 2
+        } else if c == 62 && pos + 1 < src_size && rd(src,pos+1) == 62 { td[b] = 49; td[b+1] = pos; td[b+2] = pos+2; td[b+3] = 0; nt = nt + 1; pos = pos + 2
+        } else if c == 38 && pos + 1 < src_size && rd(src,pos+1) == 38 { td[b] = 56; td[b+1] = pos; td[b+2] = pos+2; td[b+3] = 0; nt = nt + 1; pos = pos + 2
+        } else if c == 124 && pos + 1 < src_size && rd(src,pos+1) == 124 { td[b] = 57; td[b+1] = pos; td[b+2] = pos+2; td[b+3] = 0; nt = nt + 1; pos = pos + 2
+        } else if c == 61 { td[b] = 30; td[b+1] = pos; td[b+2] = pos+1; td[b+3] = 0; nt = nt + 1; pos = pos + 1
+        } else if c == 43 { td[b] = 40; td[b+1] = pos; td[b+2] = pos+1; td[b+3] = 0; nt = nt + 1; pos = pos + 1
+        } else if c == 45 { td[b] = 41; td[b+1] = pos; td[b+2] = pos+1; td[b+3] = 0; nt = nt + 1; pos = pos + 1
+        } else if c == 42 { td[b] = 42; td[b+1] = pos; td[b+2] = pos+1; td[b+3] = 0; nt = nt + 1; pos = pos + 1
+        } else if c == 47 { td[b] = 43; td[b+1] = pos; td[b+2] = pos+1; td[b+3] = 0; nt = nt + 1; pos = pos + 1
+        } else if c == 37 { td[b] = 44; td[b+1] = pos; td[b+2] = pos+1; td[b+3] = 0; nt = nt + 1; pos = pos + 1
+        } else if c == 38 { td[b] = 45; td[b+1] = pos; td[b+2] = pos+1; td[b+3] = 0; nt = nt + 1; pos = pos + 1
+        } else if c == 124 { td[b] = 46; td[b+1] = pos; td[b+2] = pos+1; td[b+3] = 0; nt = nt + 1; pos = pos + 1
+        } else if c == 94 { td[b] = 47; td[b+1] = pos; td[b+2] = pos+1; td[b+3] = 0; nt = nt + 1; pos = pos + 1
+        } else if c == 60 { td[b] = 52; td[b+1] = pos; td[b+2] = pos+1; td[b+3] = 0; nt = nt + 1; pos = pos + 1
+        } else if c == 62 { td[b] = 53; td[b+1] = pos; td[b+2] = pos+1; td[b+3] = 0; nt = nt + 1; pos = pos + 1
+        } else if c == 33 { td[b] = 59; td[b+1] = pos; td[b+2] = pos+1; td[b+3] = 0; nt = nt + 1; pos = pos + 1
+        } else { pos = pos + 1 }
+    }
+    let b = nt * 4; td[b] = 0; td[b+1] = pos; td[b+2] = pos; td[b+3] = 0
+    nt
+}
+
+// ==================== Token accessors ====================
+fn tk(td: [i64; 262144], i: i64) -> i64 with Panic { td[i * 4] }
+fn tks(td: [i64; 262144], i: i64) -> i64 with Panic { td[i * 4 + 1] }
+fn tke(td: [i64; 262144], i: i64) -> i64 with Panic { td[i * 4 + 2] }
+fn tkv(td: [i64; 262144], i: i64) -> i64 with Panic { td[i * 4 + 3] }
+
+// ==================== Name comparison ====================
+fn name_eq(src: [i8; 1048576], a: i64, alen: i64, b: i64, blen: i64) -> i64 with Panic, Mut, Div {
+    if alen != blen { return 0 }
+    var i: i64 = 0
+    while i < alen { if rd(src, a + i) != rd(src, b + i) { return 0 }; i = i + 1 }
+    1
+}
+
+fn find_local(src: [i8; 1048576], st: [i64; 32768], td: [i64; 262144]) -> i64 with Panic, Mut, Div {
+    let t = st[1]
+    let loc_count = st[3]
+    let ns = tks(td, t)
+    let ne = tke(td, t)
+    var li = loc_count - 1
+    while li >= 0 {
+        if name_eq(src, st[1200 + li], st[1456 + li] - st[1200 + li], ns, ne - ns) == 1 { return li }
+        li = li - 1
+    }
+    0 - 1
+}
+
+fn find_fn(src: [i8; 1048576], st: [i64; 32768], td: [i64; 262144]) -> i64 with Panic, Mut, Div {
+    let t = st[1]
+    let fn_count = st[5]
+    let ns = tks(td, t)
+    let ne = tke(td, t)
+    var fi: i64 = 0
+    while fi < fn_count {
+        if name_eq(src, st[100 + fi], st[356 + fi] - st[100 + fi], ns, ne - ns) == 1 { return fi }
+        fi = fi + 1
+    }
+    0 - 1
+}
+
+fn find_fn_at(src: [i8; 1048576], st: [i64; 32768], td: [i64; 262144], ft: i64) -> i64 with Panic, Mut, Div {
+    let fn_count = st[5]
+    let ns = tks(td, ft)
+    let ne = tke(td, ft)
+    var fi: i64 = 0
+    while fi < fn_count {
+        if name_eq(src, st[100 + fi], st[356 + fi] - st[100 + fi], ns, ne - ns) == 1 { return fi }
+        fi = fi + 1
+    }
+    0 - 1
+}
+
+// ==================== Operator precedence ====================
+fn op_prec(kind: i64) -> i64 {
+    if kind == 57 { return 1 }
+    if kind == 56 { return 2 }
+    if kind == 46 { return 3 }
+    if kind == 47 { return 4 }
+    if kind == 45 { return 5 }
+    if kind == 50 || kind == 51 { return 6 }
+    if kind == 52 || kind == 53 || kind == 54 || kind == 55 { return 7 }
+    if kind == 48 || kind == 49 { return 8 }
+    if kind == 40 || kind == 41 { return 9 }
+    if kind == 42 || kind == 43 || kind == 44 { return 10 }
+    0
+}
+
+// ==================== Binary op emission ====================
+fn emit_binop(code: [i8; 262144], cp: i64, op: i64) -> i64 with Mut, Panic, Div {
+    var p = cp
+    if op == 40 { p = e3(code, p, 0x48, 0x01, 0xC8); return p }
+    if op == 41 { p = e3(code, p, 0x48, 0x87, 0xC1); p = e3(code, p, 0x48, 0x29, 0xC8); return p }
+    if op == 42 { p = e3(code, p, 0x48, 0x0F, 0xAF); p = e1(code, p, 0xC1); return p }
+    if op == 43 { p = e3(code, p, 0x48, 0x87, 0xC1); p = e2(code, p, 0x48, 0x99); p = e3(code, p, 0x48, 0xF7, 0xF9); return p }
+    if op == 44 { p = e3(code, p, 0x48, 0x87, 0xC1); p = e2(code, p, 0x48, 0x99); p = e3(code, p, 0x48, 0xF7, 0xF9); p = e3(code, p, 0x48, 0x89, 0xD0); return p }
+    if op == 45 { p = e3(code, p, 0x48, 0x21, 0xC8); return p }
+    if op == 46 { p = e3(code, p, 0x48, 0x09, 0xC8); return p }
+    if op == 47 { p = e3(code, p, 0x48, 0x31, 0xC8); return p }
+    if op == 48 { p = e3(code, p, 0x48, 0x87, 0xC1); p = e3(code, p, 0x48, 0xD3, 0xE0); return p }
+    if op == 49 { p = e3(code, p, 0x48, 0x87, 0xC1); p = e3(code, p, 0x48, 0xD3, 0xF8); return p }
+    if op == 50 { p = e3(code, p, 0x48, 0x39, 0xC1); p = e3(code, p, 0x0F, 0x94, 0xC0); p = e3(code, p, 0x0F, 0xB6, 0xC0); return p }
+    if op == 51 { p = e3(code, p, 0x48, 0x39, 0xC1); p = e3(code, p, 0x0F, 0x95, 0xC0); p = e3(code, p, 0x0F, 0xB6, 0xC0); return p }
+    if op == 52 { p = e3(code, p, 0x48, 0x39, 0xC1); p = e3(code, p, 0x0F, 0x9C, 0xC0); p = e3(code, p, 0x0F, 0xB6, 0xC0); return p }
+    if op == 53 { p = e3(code, p, 0x48, 0x39, 0xC1); p = e3(code, p, 0x0F, 0x9F, 0xC0); p = e3(code, p, 0x0F, 0xB6, 0xC0); return p }
+    if op == 54 { p = e3(code, p, 0x48, 0x39, 0xC1); p = e3(code, p, 0x0F, 0x9E, 0xC0); p = e3(code, p, 0x0F, 0xB6, 0xC0); return p }
+    if op == 55 { p = e3(code, p, 0x48, 0x39, 0xC1); p = e3(code, p, 0x0F, 0x9D, 0xC0); p = e3(code, p, 0x0F, 0xB6, 0xC0); return p }
+    p
+}
+
+// ==================== String decode + print ====================
+fn decode_str(src: [i8; 1048576], sb: [i8; 8192], start: i64, end: i64) -> i64 with Panic, Mut, Div {
+    var si = start; var di: i64 = 0
+    while si < end {
+        let ch = rd(src, si)
+        if ch == 92 && si + 1 < end {
+            let ec = rd(src, si + 1)
+            if ec == 110 { sb[di as usize] = 10 as i8 }
+            else if ec == 116 { sb[di as usize] = 9 as i8 }
+            else if ec == 92 { sb[di as usize] = 92 as i8 }
+            else if ec == 34 { sb[di as usize] = 34 as i8 }
+            else if ec == 48 { sb[di as usize] = 0 as i8 }
+            else { sb[di as usize] = ec as i8 }
+            si = si + 2; di = di + 1
+        } else { sb[di as usize] = ch as i8; si = si + 1; di = di + 1 }
+    }
+    di
+}
+
+fn em_print_str(code: [i8; 262144], sb: [i8; 8192], cp: i64, slen: i64) -> i64 with Panic, Mut, Div {
+    var p = cp
+    if slen < 128 { p = e2(code, p, 0xEB, slen) } else { p = e1(code, p, 0xE9); p = ei32(code, p, slen) }
+    let ss = p; var si: i64 = 0
+    while si < slen { code[p as usize] = sb[si as usize]; p = p + 1; si = si + 1 }
+    let ro = 0 - (p + 7 - ss)
+    p = e3(code, p, 0x48, 0x8D, 0x35); p = ei32(code, p, ro)
+    p = e1(code, p, 0xBA); p = ei32(code, p, slen)
+    p = e1(code, p, 0xBF); p = ei32(code, p, 1)
+    p = e1(code, p, 0xB8); p = ei32(code, p, 1)
+    e2(code, p, 0x0F, 0x05)
+}
+
+// ==================== print_int runtime ====================
+fn em_print_int_fn(c: [i8; 262144], p: i64) -> i64 with Mut, Panic, Div {
+    var q = p
+    q = e1(c, q, 0x55); q = e3(c, q, 0x48, 0x89, 0xE5)
+    q = e3(c, q, 0x48, 0x83, 0xEC); q = e1(c, q, 64)
+    q = e3(c, q, 0x48, 0x89, 0xF8)
+    q = e3(c, q, 0x48, 0x85, 0xC0)
+    q = e2(c, q, 0x79, 0x00)
+    let ns = q - 1
+    q = e3(c, q, 0x48, 0xF7, 0xD8); q = e1(c, q, 0x50)
+    q = e3(c, q, 0xC6, 0x45, 0xFF); q = e1(c, q, 45)
+    q = e3(c, q, 0x48, 0x8D, 0x75); q = e1(c, q, 0xFF)
+    q = e1(c, q, 0xBA); q = ei32(c, q, 1)
+    q = e1(c, q, 0xBF); q = ei32(c, q, 1)
+    q = e1(c, q, 0xB8); q = ei32(c, q, 1)
+    q = e2(c, q, 0x0F, 0x05); q = e1(c, q, 0x58)
+    c[ns as usize] = (q - ns - 1) as i8
+    q = e3(c, q, 0x4D, 0x31, 0xC0)
+    q = e3(c, q, 0x48, 0x85, 0xC0); q = e2(c, q, 0x75, 7)
+    q = e2(c, q, 0x6A, 48); q = e3(c, q, 0x49, 0xFF, 0xC0); q = e2(c, q, 0xEB, 0x00)
+    let jp = q - 1
+    let dl = q
+    q = e2(c, q, 0x31, 0xD2)
+    q = e3(c, q, 0x48, 0xC7, 0xC1); q = ei32(c, q, 10)
+    q = e3(c, q, 0x48, 0xF7, 0xF1)
+    q = e3(c, q, 0x48, 0x83, 0xC2); q = e1(c, q, 48)
+    q = e1(c, q, 0x52); q = e3(c, q, 0x49, 0xFF, 0xC0)
+    q = e3(c, q, 0x48, 0x85, 0xC0); q = e2(c, q, 0x75, 0 - (q + 2 - dl))
+    c[jp as usize] = (q - jp - 1) as i8
+    let pl = q
+    q = e3(c, q, 0x4D, 0x85, 0xC0); q = e2(c, q, 0x74, 0x00)
+    let jd = q - 1
+    q = e1(c, q, 0x58); q = e3(c, q, 0x88, 0x45, 0xC0)
+    q = e3(c, q, 0x48, 0x8D, 0x75); q = e1(c, q, 0xC0)
+    q = e1(c, q, 0xBA); q = ei32(c, q, 1)
+    q = e1(c, q, 0xBF); q = ei32(c, q, 1)
+    q = e1(c, q, 0xB8); q = ei32(c, q, 1)
+    q = e2(c, q, 0x0F, 0x05)
+    q = e3(c, q, 0x49, 0xFF, 0xC8); q = e2(c, q, 0xEB, 0 - (q + 2 - pl))
+    c[jd as usize] = (q - jd - 1) as i8
+    q = e2(c, q, 0xC9, 0xC3)
+    q
+}
+
+// ==================== Builtin name check ====================
+fn is_builtin(src: [i8; 1048576], ns: i64, ne: i64) -> i64 with Panic {
+    let n = ne - ns
+    if n == 5 && rd(src,ns)==112 && rd(src,ns+1)==114 && rd(src,ns+2)==105 && rd(src,ns+3)==110 && rd(src,ns+4)==116 { return 1 }
+    if n == 9 && rd(src,ns)==112 && rd(src,ns+1)==114 && rd(src,ns+2)==105 && rd(src,ns+3)==110 && rd(src,ns+4)==116 && rd(src,ns+5)==95 && rd(src,ns+6)==105 && rd(src,ns+7)==110 && rd(src,ns+8)==116 { return 2 }
+    if n == 9 && rd(src,ns)==97 && rd(src,ns+1)==114 && rd(src,ns+2)==103 && rd(src,ns+3)==95 && rd(src,ns+4)==99 && rd(src,ns+5)==111 && rd(src,ns+6)==117 && rd(src,ns+7)==110 && rd(src,ns+8)==116 { return 3 }
+    if n == 7 && rd(src,ns)==103 && rd(src,ns+1)==101 && rd(src,ns+2)==116 && rd(src,ns+3)==95 && rd(src,ns+4)==97 && rd(src,ns+5)==114 && rd(src,ns+6)==103 { return 4 }
+    if n == 9 && rd(src,ns)==102 && rd(src,ns+1)==105 && rd(src,ns+2)==108 && rd(src,ns+3)==101 && rd(src,ns+4)==95 && rd(src,ns+5)==115 && rd(src,ns+6)==105 && rd(src,ns+7)==122 && rd(src,ns+8)==101 { return 5 }
+    if n == 9 && rd(src,ns)==114 && rd(src,ns+1)==101 && rd(src,ns+2)==97 && rd(src,ns+3)==100 && rd(src,ns+4)==95 && rd(src,ns+5)==102 && rd(src,ns+6)==105 && rd(src,ns+7)==108 && rd(src,ns+8)==101 { return 6 }
+    if n == 10 && rd(src,ns)==119 && rd(src,ns+1)==114 && rd(src,ns+2)==105 && rd(src,ns+3)==116 && rd(src,ns+4)==101 && rd(src,ns+5)==95 && rd(src,ns+6)==102 && rd(src,ns+7)==105 && rd(src,ns+8)==108 && rd(src,ns+9)==101 { return 7 }
+    0
+}
+
+// ==================== compile_primary ====================
+fn compile_primary(code: [i8; 262144], st: [i64; 32768], src: [i8; 1048576], td: [i64; 262144], sb: [i8; 8192]) -> i64 with Mut, Panic, Div {
+    var cp = st[0]; var t = st[1]
+    let kind = tk(td, t)
+
+    if kind == 2 { cp = em_imm64(code, cp, tkv(td, t)); t = t + 1
+    } else if kind == 14 { cp = em_imm64(code, cp, 1); t = t + 1
+    } else if kind == 15 { cp = em_imm64(code, cp, 0); t = t + 1
+    } else if kind == 3 {
+        let slen = decode_str(src, sb, tks(td, t), tke(td, t))
+        cp = em_print_str(code, sb, cp, slen)
+        cp = e2(code, cp, 0x31, 0xC0); t = t + 1
+    } else if kind == 41 {
+        t = t + 1; st[0] = cp; st[1] = t
+        compile_primary(code, st, src, td, sb); cp = st[0]; t = st[1]
+        cp = e3(code, cp, 0x48, 0xF7, 0xD8)
+    } else if kind == 59 {
+        t = t + 1; st[0] = cp; st[1] = t
+        compile_primary(code, st, src, td, sb); cp = st[0]; t = st[1]
+        cp = e3(code, cp, 0x48, 0x85, 0xC0)
+        cp = e3(code, cp, 0x0F, 0x94, 0xC0)
+        cp = e3(code, cp, 0x0F, 0xB6, 0xC0)
+    } else if kind == 20 {
+        t = t + 1; st[0] = cp; st[1] = t
+        compile_expr(code, st, src, td, sb); cp = st[0]; t = st[1]
+        if tk(td, t) == 21 { t = t + 1 }
+    } else if kind == 1 {
+        if tk(td, t + 1) == 20 {
+            // Function call
+            let fn_t = t; t = t + 2
+            let bi = is_builtin(src, tks(td, fn_t), tke(td, fn_t))
+            if bi == 1 && tk(td, t) == 3 {
+                // print("literal")
+                let slen = decode_str(src, sb, tks(td, t), tke(td, t))
+                cp = em_print_str(code, sb, cp, slen); t = t + 1
+                if tk(td, t) == 21 { t = t + 1 }
+            } else if bi == 2 {
+                // print_int(expr)
+                st[0] = cp; st[1] = t
+                compile_expr(code, st, src, td, sb); cp = st[0]; t = st[1]
+                cp = e3(code, cp, 0x48, 0x89, 0xC7)
+                cp = e1(code, cp, 0xE8); cp = ei32(code, cp, st[6] - (cp + 4))
+                if tk(td, t) == 21 { t = t + 1 }
+            } else if bi == 3 {
+                // arg_count()
+                if tk(td, t) == 21 { t = t + 1 }
+                cp = em_imm64(code, cp, 0x401000)
+                cp = e3(code, cp, 0x48, 0x8B, 0x00); cp = e3(code, cp, 0x48, 0x8B, 0x00)
+                cp = e3(code, cp, 0x48, 0xFF, 0xC8)
+            } else if bi == 4 {
+                // get_arg(n)
+                st[0] = cp; st[1] = t
+                compile_expr(code, st, src, td, sb); cp = st[0]; t = st[1]
+                if tk(td, t) == 21 { t = t + 1 }
+                cp = e3(code, cp, 0x48, 0x83, 0xC0); cp = e1(code, cp, 2)
+                cp = e1(code, cp, 0x50)
+                cp = em_imm64(code, cp, 0x401000)
+                cp = e3(code, cp, 0x48, 0x8B, 0x00)
+                cp = e1(code, cp, 0x59)
+                cp = e3(code, cp, 0x48, 0x8B, 0x04); cp = e1(code, cp, 0xC8)
+            } else if bi == 5 {
+                // file_size(path)
+                st[0] = cp; st[1] = t
+                compile_expr(code, st, src, td, sb); cp = st[0]; t = st[1]
+                if tk(td, t) == 21 { t = t + 1 }
+                cp = e3(code, cp, 0x48, 0x89, 0xC7); cp = e3(code, cp, 0x48, 0x31, 0xF6)
+                cp = e3(code, cp, 0x48, 0x31, 0xD2); cp = e1(code, cp, 0xB8); cp = ei32(code, cp, 2)
+                cp = e2(code, cp, 0x0F, 0x05)
+                cp = e3(code, cp, 0x48, 0x89, 0xC7)
+                cp = e3(code, cp, 0x48, 0x81, 0xEC); cp = ei32(code, cp, 176)
+                cp = e3(code, cp, 0x48, 0x89, 0xE6); cp = e1(code, cp, 0x57)
+                cp = e1(code, cp, 0xB8); cp = ei32(code, cp, 5); cp = e2(code, cp, 0x0F, 0x05)
+                cp = e3(code, cp, 0x48, 0x8B, 0x44); cp = e2(code, cp, 0x24, 56)
+                cp = e1(code, cp, 0x50)
+                cp = e3(code, cp, 0x48, 0x8B, 0x7C); cp = e2(code, cp, 0x24, 8)
+                cp = e1(code, cp, 0xB8); cp = ei32(code, cp, 3); cp = e2(code, cp, 0x0F, 0x05)
+                cp = e1(code, cp, 0x58)
+                cp = e3(code, cp, 0x48, 0x81, 0xC4); cp = ei32(code, cp, 184)
+            } else if bi == 6 {
+                // read_file(path)
+                st[0] = cp; st[1] = t
+                compile_expr(code, st, src, td, sb); cp = st[0]; t = st[1]
+                if tk(td, t) == 21 { t = t + 1 }
+                cp = e1(code, cp, 0x50)
+                cp = e3(code, cp, 0x48, 0x31, 0xFF)
+                cp = e2(code, cp, 0x48, 0xBE); cp = ei64(code, cp, 1048576)
+                cp = e1(code, cp, 0xBA); cp = ei32(code, cp, 3)
+                cp = e2(code, cp, 0x41, 0xBA); cp = ei32(code, cp, 0x22)
+                cp = e3(code, cp, 0x49, 0xC7, 0xC0); cp = ei32(code, cp, 0 - 1)
+                cp = e3(code, cp, 0x4D, 0x31, 0xC9)
+                cp = e1(code, cp, 0xB8); cp = ei32(code, cp, 9); cp = e2(code, cp, 0x0F, 0x05)
+                cp = e1(code, cp, 0x50)
+                cp = e3(code, cp, 0x48, 0x8B, 0x7C); cp = e2(code, cp, 0x24, 8)
+                cp = e3(code, cp, 0x48, 0x31, 0xF6); cp = e3(code, cp, 0x48, 0x31, 0xD2)
+                cp = e1(code, cp, 0xB8); cp = ei32(code, cp, 2); cp = e2(code, cp, 0x0F, 0x05)
+                cp = e3(code, cp, 0x48, 0x89, 0xC7); cp = e1(code, cp, 0x50)
+                cp = e3(code, cp, 0x48, 0x8B, 0x74); cp = e2(code, cp, 0x24, 8)
+                cp = e2(code, cp, 0x48, 0xBA); cp = ei64(code, cp, 1048576)
+                cp = e1(code, cp, 0xB8); cp = ei32(code, cp, 0); cp = e2(code, cp, 0x0F, 0x05)
+                cp = e1(code, cp, 0x5F); cp = e1(code, cp, 0xB8); cp = ei32(code, cp, 3); cp = e2(code, cp, 0x0F, 0x05)
+                cp = e1(code, cp, 0x58)
+                cp = e3(code, cp, 0x48, 0x83, 0xC4); cp = e1(code, cp, 8)
+            } else if bi == 7 {
+                // write_file(path, data, len)
+                var wf_argc: i64 = 0
+                while tk(td, t) != 21 && tk(td, t) != 0 {
+                    st[0] = cp; st[1] = t
+                    compile_expr(code, st, src, td, sb); cp = st[0]; t = st[1]
+                    cp = e1(code, cp, 0x50); wf_argc = wf_argc + 1
+                    if tk(td, t) == 26 { t = t + 1 }
+                }
+                if tk(td, t) == 21 { t = t + 1 }
+                cp = e1(code, cp, 0x59); cp = e1(code, cp, 0x5E); cp = e1(code, cp, 0x5F)
+                cp = e1(code, cp, 0x51); cp = e1(code, cp, 0x56)
+                cp = e2(code, cp, 0x48, 0xBE); cp = ei64(code, cp, 0x241)
+                cp = e1(code, cp, 0xBA); cp = ei32(code, cp, 420)
+                cp = e1(code, cp, 0xB8); cp = ei32(code, cp, 2); cp = e2(code, cp, 0x0F, 0x05)
+                cp = e3(code, cp, 0x48, 0x89, 0xC7); cp = e1(code, cp, 0x57)
+                cp = e3(code, cp, 0x48, 0x8B, 0x74); cp = e2(code, cp, 0x24, 8)
+                cp = e3(code, cp, 0x48, 0x8B, 0x54); cp = e2(code, cp, 0x24, 16)
+                cp = e1(code, cp, 0xB8); cp = ei32(code, cp, 1); cp = e2(code, cp, 0x0F, 0x05)
+                cp = e1(code, cp, 0x5F); cp = e1(code, cp, 0xB8); cp = ei32(code, cp, 3); cp = e2(code, cp, 0x0F, 0x05)
+                cp = e3(code, cp, 0x48, 0x83, 0xC4); cp = e1(code, cp, 16)
+                cp = e2(code, cp, 0x31, 0xC0)
+            } else {
+                // General function call (≤6 args) — slot-based arg passing
+                var argc: i64 = 0
+                let arg_base = st[2] + 512  // temp slots above locals
+                while tk(td, t) != 21 && tk(td, t) != 0 {
+                    st[0] = cp; st[1] = t
+                    compile_expr(code, st, src, td, sb); cp = st[0]; t = st[1]
+                    // Store arg to temp slot [rbp - (arg_base + argc*8)]
+                    let aslot = arg_base + argc * 8
+                    cp = e3(code, cp, 0x48, 0x89, 0x85); cp = ei32(code, cp, 0 - aslot)
+                    argc = argc + 1
+                    if tk(td, t) == 26 { t = t + 1 }
+                }
+                if tk(td, t) == 21 { t = t + 1 }
+                // Load args from temp slots into registers
+                var ai: i64 = 0
+                while ai < argc {
+                    let aslot = arg_base + ai * 8
+                    cp = e3(code, cp, 0x48, 0x8B, 0x85); cp = ei32(code, cp, 0 - aslot)  // mov rax, [rbp-aslot]
+                    if ai == 0 { cp = e3(code, cp, 0x48, 0x89, 0xC7) }
+                    else if ai == 1 { cp = e3(code, cp, 0x48, 0x89, 0xC6) }
+                    else if ai == 2 { cp = e3(code, cp, 0x48, 0x89, 0xC2) }
+                    else if ai == 3 { cp = e3(code, cp, 0x48, 0x89, 0xC1) }
+                    else if ai == 4 { cp = e3(code, cp, 0x49, 0x89, 0xC0) }
+                    else if ai == 5 { cp = e3(code, cp, 0x49, 0x89, 0xC1) }
+                    ai = ai + 1
+                }
+                // Call: CAFE sentinel for forward, direct for backward
+                let fidx = find_fn_at(src, st, td, fn_t)
+                if fidx >= 0 {
+                    let tgt = st[868 + fidx]
+                    if tgt > 0 { cp = e1(code, cp, 0xE8); cp = ei32(code, cp, tgt - (cp + 4))
+                    } else { cp = e1(code, cp, 0xE8); cp = e1(code, cp, fidx & 255); cp = e1(code, cp, (fidx >> 8) & 255); cp = e1(code, cp, 0xCA); cp = e1(code, cp, 0xFE) }
+                } else { cp = e1(code, cp, 0xE8); cp = ei32(code, cp, 0) }
+            }
+        } else {
+            // Variable reference
+            let li = find_local(src, st, td)
+            if li >= 0 {
+                st[8] = st[1968 + li]
+                let slot = st[1712 + li]
+                cp = e3(code, cp, 0x48, 0x8B, 0x85); cp = ei32(code, cp, 0 - slot)
+            }
+            t = t + 1
+        }
+    } else { t = t + 1 }
+
+    // Postfix: [index], as type
+    var post: i64 = 1
+    while post == 1 {
+        post = 0
+        if tk(td, t) == 24 {
+            post = 1
+            let ael = st[8]
+            cp = e1(code, cp, 0x50); t = t + 1
+            st[0] = cp; st[1] = t
+            compile_expr(code, st, src, td, sb); cp = st[0]; t = st[1]
+            if tk(td, t) == 25 { t = t + 1 }
+            cp = e1(code, cp, 0x59)
+            if ael == 2 { cp = e3(code, cp, 0x48, 0x8B, 0x04); cp = e1(code, cp, 0xC1)
+            } else { cp = e3(code, cp, 0x48, 0x0F, 0xBE); cp = e2(code, cp, 0x04, 0x01) }
+        }
+        if tk(td, t) == 13 { post = 1; t = t + 1; if tk(td, t) == 1 || tk(td, t) == 2 { t = t + 1 } }
+    }
+    st[0] = cp; st[1] = t; 0
+}
+
+// ==================== compile_expr ====================
+fn compile_expr(code: [i8; 262144], st: [i64; 32768], src: [i8; 1048576], td: [i64; 262144], sb: [i8; 8192]) -> i64 with Mut, Panic, Div {
+    compile_primary(code, st, src, td, sb)
+    var cp = st[0]; var t = st[1]
+    var cont: i64 = 1
+    while cont == 1 {
+        let op = tk(td, t); let prec = op_prec(op)
+        if prec == 0 { cont = 0 }
+        else if op == 56 {
+            t = t + 1; cp = e3(code, cp, 0x48, 0x85, 0xC0)
+            cp = e1(code, cp, 0x0F); cp = e1(code, cp, 0x84)
+            let patch = cp; cp = ei32(code, cp, 0)
+            st[0] = cp; st[1] = t
+            compile_expr(code, st, src, td, sb); cp = st[0]; t = st[1]
+            ei32(code, patch, cp - patch - 4)
+        } else if op == 57 {
+            t = t + 1; cp = e3(code, cp, 0x48, 0x85, 0xC0)
+            cp = e1(code, cp, 0x0F); cp = e1(code, cp, 0x85)
+            let patch = cp; cp = ei32(code, cp, 0)
+            st[0] = cp; st[1] = t
+            compile_expr(code, st, src, td, sb); cp = st[0]; t = st[1]
+            ei32(code, patch, cp - patch - 4)
+        } else {
+            t = t + 1; cp = e1(code, cp, 0x50)
+            st[0] = cp; st[1] = t
+            compile_primary(code, st, src, td, sb); cp = st[0]; t = st[1]
+            cp = e1(code, cp, 0x59)
+            cp = emit_binop(code, cp, op)
+        }
+    }
+    st[0] = cp; st[1] = t; 0
+}
+
+// ==================== compile_block ====================
+fn compile_block(code: [i8; 262144], st: [i64; 32768], src: [i8; 1048576], td: [i64; 262144], sb: [i8; 8192]) -> i64 with Mut, Panic, Div {
+    var cp = st[0]; var t = st[1]; var next_slot = st[2]
+    var loc_count = st[3]; var brk_count = st[4]
+
+    while tk(td, t) != 23 && tk(td, t) != 0 {
+        st[3] = loc_count
+        let kind = tk(td, t)
+        if kind == 27 { t = t + 1
+        } else if kind == 16 { t = t + 1  // continue — skip (simplified)
+        } else if kind == 5 || kind == 6 {
+            // let / var
+            t = t + 1
+            let vns = tks(td, t); let vne = tke(td, t); t = t + 1
+            var is_arr: i64 = 0; var arr_size: i64 = 0
+            if tk(td, t) == 28 {
+                t = t + 1
+                if tk(td, t) == 24 {
+                    if t + 1 < 65536 && tk(td, t+1) == 1 && tke(td, t+1) - tks(td, t+1) == 3 && rd(src, tks(td, t+1)) == 105 && rd(src, tks(td, t+1)+1) == 54 && rd(src, tks(td, t+1)+2) == 52 { is_arr = 2 } else { is_arr = 1 }
+                    while tk(td, t) != 27 && tk(td, t) != 25 && tk(td, t) != 0 { t = t + 1 }
+                    if tk(td, t) == 27 { t = t + 1 }
+                    if tk(td, t) == 2 { arr_size = tkv(td, t); t = t + 1 }
+                    if tk(td, t) == 25 { t = t + 1 }
+                } else { while tk(td, t) != 30 && tk(td, t) != 22 && tk(td, t) != 23 && tk(td, t) != 0 { if tk(td, t) == 5 || tk(td, t) == 6 || tk(td, t) == 7 || tk(td, t) == 9 || tk(td, t) == 10 { break }; t = t + 1 } }
+            }
+            st[1200 + loc_count] = vns; st[1456 + loc_count] = vne
+            st[1712 + loc_count] = next_slot; st[1968 + loc_count] = is_arr
+            loc_count = loc_count + 1; next_slot = next_slot + 8
+            if tk(td, t) == 30 {
+                t = t + 1
+                if is_arr > 0 && tk(td, t) == 24 {
+                    var adepth: i64 = 1; t = t + 1
+                    while adepth > 0 && tk(td, t) != 0 { if tk(td, t) == 24 { adepth = adepth + 1 }; if tk(td, t) == 25 { adepth = adepth - 1 }; t = t + 1 }
+                    cp = e3(code, cp, 0x48, 0x31, 0xFF)
+                    cp = e2(code, cp, 0x48, 0xBE); cp = ei64(code, cp, arr_size)
+                    cp = e1(code, cp, 0xBA); cp = ei32(code, cp, 3)
+                    cp = e2(code, cp, 0x41, 0xBA); cp = ei32(code, cp, 0x22)
+                    cp = e3(code, cp, 0x49, 0xC7, 0xC0); cp = ei32(code, cp, 0 - 1)
+                    cp = e3(code, cp, 0x4D, 0x31, 0xC9)
+                    cp = e1(code, cp, 0xB8); cp = ei32(code, cp, 9); cp = e2(code, cp, 0x0F, 0x05)
+                    cp = e3(code, cp, 0x48, 0x89, 0x85); cp = ei32(code, cp, 0 - st[1712 + loc_count - 1])
+                } else {
+                    st[0] = cp; st[1] = t
+                    compile_expr(code, st, src, td, sb); cp = st[0]; t = st[1]
+                    cp = e3(code, cp, 0x48, 0x89, 0x85); cp = ei32(code, cp, 0 - st[1712 + loc_count - 1])
+                }
+            }
+        } else if kind == 10 {
+            t = t + 1; st[0] = cp; st[1] = t
+            compile_expr(code, st, src, td, sb); cp = st[0]; t = st[1]
+            cp = e2(code, cp, 0xC9, 0xC3)
+        } else if kind == 11 {
+            t = t + 1; cp = e1(code, cp, 0xE9)
+            st[2300 + brk_count] = cp; brk_count = brk_count + 1
+            cp = ei32(code, cp, 0)
+        } else if kind == 9 {
+            t = t + 1; let loop_top = cp; let old_brk = brk_count
+            st[0] = cp; st[1] = t
+            compile_expr(code, st, src, td, sb); cp = st[0]; t = st[1]
+            cp = e3(code, cp, 0x48, 0x85, 0xC0)
+            cp = e1(code, cp, 0x0F); cp = e1(code, cp, 0x84)
+            let je_patch = cp; cp = ei32(code, cp, 0)
+            if tk(td, t) == 22 { t = t + 1 }
+            st[0] = cp; st[1] = t; st[2] = next_slot; st[3] = loc_count; st[4] = brk_count
+            compile_block(code, st, src, td, sb)
+            cp = st[0]; t = st[1]; next_slot = st[2]; loc_count = st[3]; brk_count = st[4]
+            if tk(td, t) == 23 { t = t + 1 }
+            cp = e1(code, cp, 0xE9); cp = ei32(code, cp, loop_top - (cp + 4))
+            let loop_end = cp
+            ei32(code, je_patch, loop_end - je_patch - 4)
+            var bi = old_brk
+            while bi < brk_count { ei32(code, st[2300 + bi], loop_end - st[2300 + bi] - 4); bi = bi + 1 }
+            brk_count = old_brk
+        } else if kind == 7 {
+            // if
+            t = t + 1; st[0] = cp; st[1] = t
+            compile_expr(code, st, src, td, sb); cp = st[0]; t = st[1]
+            cp = e3(code, cp, 0x48, 0x85, 0xC0)
+            cp = e1(code, cp, 0x0F); cp = e1(code, cp, 0x84)
+            let je_else = cp; cp = ei32(code, cp, 0)
+            if tk(td, t) == 22 { t = t + 1 }
+            st[0] = cp; st[1] = t; st[2] = next_slot; st[3] = loc_count; st[4] = brk_count
+            compile_block(code, st, src, td, sb)
+            cp = st[0]; t = st[1]; next_slot = st[2]; loc_count = st[3]; brk_count = st[4]
+            if tk(td, t) == 23 { t = t + 1 }
+            if tk(td, t) == 8 {
+                t = t + 1; cp = e1(code, cp, 0xE9)
+                let jmp_end = cp; cp = ei32(code, cp, 0)
+                ei32(code, je_else, cp - je_else - 4)
+                if tk(td, t) == 7 {
+                    // else if chain
+                    var end_count: i64 = 0
+                    st[2400] = jmp_end; end_count = 1
+                    var more_else: i64 = 1
+                    while more_else == 1 && tk(td, t) == 7 {
+                        t = t + 1; st[0] = cp; st[1] = t
+                        compile_expr(code, st, src, td, sb); cp = st[0]; t = st[1]
+                        cp = e3(code, cp, 0x48, 0x85, 0xC0)
+                        cp = e1(code, cp, 0x0F); cp = e1(code, cp, 0x84)
+                        let je2 = cp; cp = ei32(code, cp, 0)
+                        if tk(td, t) == 22 { t = t + 1 }
+                        st[0] = cp; st[1] = t; st[2] = next_slot; st[3] = loc_count; st[4] = brk_count
+                        compile_block(code, st, src, td, sb)
+                        cp = st[0]; t = st[1]; next_slot = st[2]; loc_count = st[3]; brk_count = st[4]
+                        if tk(td, t) == 23 { t = t + 1 }
+                        if tk(td, t) == 8 {
+                            t = t + 1; cp = e1(code, cp, 0xE9)
+                            st[2400 + end_count] = cp; end_count = end_count + 1; cp = ei32(code, cp, 0)
+                            ei32(code, je2, cp - je2 - 4)
+                            if tk(td, t) != 7 {
+                                if tk(td, t) == 22 { t = t + 1 }
+                                st[0] = cp; st[1] = t; st[2] = next_slot; st[3] = loc_count; st[4] = brk_count
+                                compile_block(code, st, src, td, sb)
+                                cp = st[0]; t = st[1]; next_slot = st[2]; loc_count = st[3]; brk_count = st[4]
+                                if tk(td, t) == 23 { t = t + 1 }
+                                more_else = 0
+                            }
+                        } else { ei32(code, je2, cp - je2 - 4); more_else = 0 }
+                    }
+                    var ei2: i64 = 0
+                    while ei2 < end_count { ei32(code, st[2400 + ei2], cp - st[2400 + ei2] - 4); ei2 = ei2 + 1 }
+                } else if tk(td, t) == 22 {
+                    t = t + 1
+                    st[0] = cp; st[1] = t; st[2] = next_slot; st[3] = loc_count; st[4] = brk_count
+                    compile_block(code, st, src, td, sb)
+                    cp = st[0]; t = st[1]; next_slot = st[2]; loc_count = st[3]; brk_count = st[4]
+                    if tk(td, t) == 23 { t = t + 1 }
+                    ei32(code, jmp_end, cp - jmp_end - 4)
+                } else { ei32(code, jmp_end, cp - jmp_end - 4) }
+            } else { ei32(code, je_else, cp - je_else - 4) }
+        } else if kind == 1 {
+            // IDENT: assignment / array write / expr stmt
+            if tk(td, t + 1) == 30 {
+                let li = find_local(src, st, td); t = t + 2
+                st[0] = cp; st[1] = t
+                compile_expr(code, st, src, td, sb); cp = st[0]; t = st[1]
+                if li >= 0 { cp = e3(code, cp, 0x48, 0x89, 0x85); cp = ei32(code, cp, 0 - st[1712 + li]) }
+            } else if tk(td, t + 1) == 24 {
+                // Peek past [...] for =
+                var peek_t = t + 2; var depth: i64 = 1
+                while depth > 0 && tk(td, peek_t) != 0 { if tk(td, peek_t) == 24 { depth = depth + 1 }; if tk(td, peek_t) == 25 { depth = depth - 1 }; peek_t = peek_t + 1 }
+                if tk(td, peek_t) == 13 { peek_t = peek_t + 1; while tk(td, peek_t) == 1 || tk(td, peek_t) == 2 { peek_t = peek_t + 1 } }
+                if tk(td, peek_t) == 30 {
+                    let li = find_local(src, st, td); t = t + 2
+                    st[0] = cp; st[1] = t
+                    compile_expr(code, st, src, td, sb); cp = st[0]; t = st[1]
+                    if tk(td, t) == 25 { t = t + 1 }
+                    if tk(td, t) == 13 { t = t + 1; while tk(td, t) == 1 || tk(td, t) == 2 { t = t + 1 } }
+                    t = t + 1; cp = e1(code, cp, 0x50)
+                    st[0] = cp; st[1] = t
+                    compile_expr(code, st, src, td, sb); cp = st[0]; t = st[1]
+                    cp = e1(code, cp, 0x59)
+                    if li >= 0 {
+                        let slot = st[1712 + li]
+                        cp = e3(code, cp, 0x48, 0x8B, 0x95); cp = ei32(code, cp, 0 - slot)
+                        if st[1968 + li] == 2 { cp = e3(code, cp, 0x48, 0x89, 0x04); cp = e1(code, cp, 0xCA)
+                        } else { cp = e3(code, cp, 0x88, 0x04, 0x0A) }
+                    }
+                } else { st[0] = cp; st[1] = t; compile_expr(code, st, src, td, sb); cp = st[0]; t = st[1] }
+            } else { st[0] = cp; st[1] = t; compile_expr(code, st, src, td, sb); cp = st[0]; t = st[1] }
+        } else if kind == 3 || kind == 2 || kind == 41 {
+            st[0] = cp; st[1] = t; compile_expr(code, st, src, td, sb); cp = st[0]; t = st[1]
+        } else { t = t + 1 }
+    }
+    st[0] = cp; st[1] = t; st[2] = next_slot; st[3] = loc_count; st[4] = brk_count; 0
+}
+
+// ==================== Function collection ====================
+fn collect_fns(st: [i64; 32768], td: [i64; 262144]) -> i64 with Mut, Panic, Div {
+    var fn_count: i64 = 0
+    let ntok = st[7]
+    var ti: i64 = 0
+    while ti < ntok {
+        if tk(td, ti) == 4 && ti + 1 < ntok && tk(td, ti + 1) == 1 {
+            st[100 + fn_count] = tks(td, ti + 1)
+            st[356 + fn_count] = tke(td, ti + 1)
+            st[612 + fn_count] = ti
+            fn_count = fn_count + 1
+        }
+        ti = ti + 1
+    }
+    st[5] = fn_count
+    fn_count
+}
+
+// ==================== Compile all functions ====================
+fn compile_all(code: [i8; 262144], st: [i64; 32768], src: [i8; 1048576], td: [i64; 262144], sb: [i8; 8192]) -> i64 with Mut, Panic, Div {
+    var cp = st[0]
+    let fn_count = st[5]
+    var fi: i64 = 0
+    while fi < fn_count {
+        st[868 + fi] = cp
+        var loc_count: i64 = 0; var next_slot: i64 = 8
+        var t = st[612 + fi] + 2
+        if tk(td, t) != 20 { return 0 - 1 }
+        t = t + 1
+        while tk(td, t) != 21 && tk(td, t) != 0 {
+            if tk(td, t) == 1 {
+                st[1200 + loc_count] = tks(td, t)
+                st[1456 + loc_count] = tke(td, t)
+                st[1712 + loc_count] = next_slot
+                var p_is_arr: i64 = 0; t = t + 1
+                if tk(td, t) == 28 {
+                    t = t + 1
+                    if tk(td, t) == 24 {
+                        if t + 1 < 65536 && tk(td, t+1) == 1 && tke(td, t+1) - tks(td, t+1) == 3 && rd(src, tks(td, t+1)) == 105 && rd(src, tks(td, t+1)+1) == 54 && rd(src, tks(td, t+1)+2) == 52 { p_is_arr = 2 } else { p_is_arr = 1 }
+                    }
+                    var d: i64 = 0; while tk(td, t) != 0 { if tk(td, t) == 24 { d = d + 1 }; if tk(td, t) == 25 { d = d - 1 }; if d == 0 && (tk(td, t) == 26 || tk(td, t) == 21) { break }; t = t + 1 }
+                }
+                st[1968 + loc_count] = p_is_arr
+                loc_count = loc_count + 1; next_slot = next_slot + 8
+            }
+            if tk(td, t) == 26 { t = t + 1 }
+        }
+        if tk(td, t) == 21 { t = t + 1 }
+        let param_count = loc_count
+        while tk(td, t) != 22 && tk(td, t) != 0 { t = t + 1 }
+        if tk(td, t) == 22 { t = t + 1 }
+        // Prologue
+        cp = e1(code, cp, 0x55); cp = e3(code, cp, 0x48, 0x89, 0xE5)
+        cp = e3(code, cp, 0x48, 0x81, 0xEC); let frame_patch = cp; cp = ei32(code, cp, 0)
+        // Store params 0-5
+        var pi: i64 = 0
+        while pi < param_count && pi < 6 {
+            let slot = st[1712 + pi]
+            if pi == 0 { cp = e3(code, cp, 0x48, 0x89, 0xBD); cp = ei32(code, cp, 0 - slot)
+            } else if pi == 1 { cp = e3(code, cp, 0x48, 0x89, 0xB5); cp = ei32(code, cp, 0 - slot)
+            } else if pi == 2 { cp = e3(code, cp, 0x48, 0x89, 0x95); cp = ei32(code, cp, 0 - slot)
+            } else if pi == 3 { cp = e3(code, cp, 0x48, 0x89, 0x8D); cp = ei32(code, cp, 0 - slot)
+            } else if pi == 4 { cp = e3(code, cp, 0x4C, 0x89, 0x85); cp = ei32(code, cp, 0 - slot)
+            } else if pi == 5 { cp = e3(code, cp, 0x4C, 0x89, 0x8D); cp = ei32(code, cp, 0 - slot) }
+            pi = pi + 1
+        }
+        // Body
+        st[0] = cp; st[1] = t; st[2] = next_slot; st[3] = loc_count; st[4] = 0
+        compile_block(code, st, src, td, sb)
+        cp = st[0]; next_slot = st[2]
+        cp = e2(code, cp, 0xC9, 0xC3)
+        let frame_size = ((next_slot + 1024 + 15) / 16) * 16
+        ei32(code, frame_patch, frame_size)
+        fi = fi + 1
+    }
+    // CAFE patching
+    var pi2: i64 = 0
+    while pi2 < cp - 4 {
+        if rdc(code, pi2) == 0xE8 && rdc(code, pi2+3) == 0xCA && rdc(code, pi2+4) == 0xFE {
+            let tidx = rdc(code, pi2+1) + rdc(code, pi2+2) * 256
+            if tidx >= 0 && tidx < fn_count { ei32(code, pi2+1, st[868 + tidx] - (pi2 + 5)) }
+        }
+        pi2 = pi2 + 1
+    }
+    st[0] = cp; cp
+}
+
+// ==================== Find main ====================
+fn find_main(src: [i8; 1048576], st: [i64; 32768]) -> i64 with Panic, Mut, Div {
+    let fn_count = st[5]; var mi: i64 = 0
+    while mi < fn_count {
+        let ns = st[100 + mi]; let ne = st[356 + mi]
+        if ne - ns == 4 && rd(src,ns) == 109 && rd(src,ns+1) == 97 && rd(src,ns+2) == 105 && rd(src,ns+3) == 110 { return st[868 + mi] }
+        mi = mi + 1
+    }
+    0
+}
+
+// ==================== Entry trampoline ====================
+fn build_tramp(code: [i8; 262144], cp: i64, main_off: i64) -> i64 with Mut, Panic, Div {
+    var p = cp
+    p = e3(code, p, 0x48, 0x89, 0x25); p = ei32(code, p, 0 - (p + 4))
+    p = e1(code, p, 0xE8); p = ei32(code, p, main_off - (p + 4))
+    p = e2(code, p, 0x89, 0xC7); p = e1(code, p, 0xB8); p = ei32(code, p, 60); p = e2(code, p, 0x0F, 0x05)
+    p
+}
+
+// ==================== Array helpers (workaround stage0 byte-index bug) ====================
+fn st_set(st: [i64; 32768], idx: i64, val: i64) -> i64 with Mut, Panic { st[idx] = val; 0 }
+fn st_get(st: [i64; 32768], idx: i64) -> i64 with Panic { st[idx] }
+fn td_set(td: [i64; 262144], idx: i64, val: i64) -> i64 with Mut, Panic { td[idx] = val; 0 }
+fn copy_code_to_elf(elf: [i8; 262144], code: [i8; 262144], off: i64, len: i64) -> i64 with Mut, Panic, Div {
+    var ci: i64 = 0
+    while ci < len { elf[(off + ci) as usize] = code[ci as usize]; ci = ci + 1 }
+    0
+}
+
+// ==================== Main ====================
+fn main() -> i64 with IO, Mut, Panic, Div {
+    let argc = arg_count()
+    if argc < 2 { print("Usage: boot3 <source.sio> <output.elf>\n"); return 1 }
+    let source_path = get_arg(0)
+    let output_path = get_arg(1)
+    let src_size = file_size(source_path)
+    let src: [i8; 1048576] = read_file(source_path)
+
+    var td: [i64; 262144] = [0; 262144]
+    print("T\n")
+    let ntok = tokenize(src, td, src_size)
+    print("N\n")
+
+    var st: [i64; 32768] = [0; 32768]
+    st_set(st, 7, ntok); st_set(st, 9, src_size)
+    print("C\n")
+    let fn_count = collect_fns(st, td)
+    print("F="); print_int(fn_count); print("\n")
+
+    var code: [i8; 262144] = [0; 262144]
+    var sb: [i8; 8192] = [0; 8192]
+
+    // Emit print_int at offset 16
+    st_set(st, 6, 16); st_set(st, 0, 16)
+    let pi_end = em_print_int_fn(code, 16)
+    st_set(st, 0, pi_end)
+    print("A\n")
+
+    compile_all(code, st, src, td, sb)
+    print("D\n")
+    let cp = st_get(st, 0)
+    let main_off = find_main(src, st)
+    let tramp = cp
+    let cp_final = build_tramp(code, cp, main_off)
+
+    // Write ELF
+    var elf: [i8; 262144] = [0; 262144]
+    let base: i64 = 0x400000; let text_off: i64 = 4096
+    let entry = base + text_off + tramp; let fsz = text_off + cp_final
+    write_ehdr(elf, entry, fsz, base)
+    copy_code_to_elf(elf, code, text_off, cp_final)
+    write_file(output_path, elf, fsz)
+    print("ok\n")
+    0
+}
