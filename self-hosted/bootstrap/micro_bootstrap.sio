@@ -1,6 +1,26 @@
 // micro_bootstrap.sio — Zero-import single-file Sounio→x86-64 ELF compiler
 // Flat-array AST, stack-slot codegen, inline ELF writer
 
+// Native runtime helpers for file reading without [i8; 1048576] arrays.
+// In native ELF: load_source mmaps + reads file, source_byte reads from buffer.
+// Under JIT: implemented as wrappers around read_file/file_size.
+// load_source: Under JIT, reads file and copies to SRC.
+// Under native, this is overridden by a builtin (mmap + read → native buffer).
+fn load_source(path: string) -> i64 with IO, Mut, Panic, Div {
+    let data = read_file(path)
+    let sz = file_size(path)
+    var i: i64 = 0
+    while i < sz && i < 1048576 {
+        SRC[i as usize] = data[i as usize]
+        i = i + 1
+    }
+    SRC_LEN = sz
+    sz
+}
+// source_byte: Under JIT, reads from SRC global array.
+// Under native, overridden by builtin that reads from mmap'd buffer.
+fn source_byte(idx: i64) -> i64 { SRC[idx as usize] as i64 }
+
 // ============================================================================
 // Global state
 // ============================================================================
@@ -148,7 +168,7 @@ fn NK_EXPR_STMT() -> i64 { 43 }
 
 fn src_byte(pos: i64) -> i64 with Panic {
     if pos < 0 || pos >= SRC_LEN { return 0 }
-    SRC[pos as usize] as i64
+    source_byte(pos)
 }
 
 fn is_ws(ch: i64) -> bool {
@@ -1510,15 +1530,8 @@ fn main() -> i64 with IO, Mut, Panic, Div {
     let src_path = get_arg(0)
     let out_path = get_arg(1)
 
-    // Read source
-    let data = read_file(src_path)
-    let size = file_size(src_path)
-    var ri: i64 = 0
-    while ri < size && ri < 1048576 {
-        SRC[ri as usize] = data[ri as usize]
-        ri = ri + 1
-    }
-    SRC_LEN = size
+    // Read source — load_source handles file reading and populates SRC
+    let size = load_source(src_path)
 
     // Lex
     lex()
