@@ -122,10 +122,20 @@ fn skip1(src: [i8; 1048576], pos: i64, src_size: i64) -> i64 with Panic, Mut, Di
     while p < src_size && is_ws(rd(src, p)) == 1 { p = p + 1 }
     p
 }
+fn is_comment(src: [i8; 1048576], pos: i64, src_size: i64) -> i64 with Panic {
+    if pos + 1 < src_size && rd(src, pos) == 47 && rd(src, pos + 1) == 47 { return 1 }
+    0
+}
+fn skip_comment(src: [i8; 1048576], pos: i64, src_size: i64) -> i64 with Panic {
+    var p = pos
+    while p < src_size && rd(src, p) != 10 { p = p + 1 }
+    if p < src_size { p = p + 1 }
+    p
+}
 fn skip_ws(src: [i8; 1048576], pos_in: i64, src_size: i64) -> i64 with Panic, Mut, Div {
     var pos = skip1(src, pos_in, src_size)
-    if pos + 1 < src_size && rd(src, pos) == 47 && rd(src, pos + 1) == 47 {
-        while pos < src_size && rd(src, pos) != 10 { pos = pos + 1 }
+    while is_comment(src, pos, src_size) == 1 {
+        pos = skip_comment(src, pos, src_size)
         pos = skip1(src, pos, src_size)
     }
     pos
@@ -630,7 +640,9 @@ fn compile_block(code: [i8; 262144], st: [i64; 32768], src: [i8; 1048576], td: [
                     var adepth: i64 = 1; t = t + 1
                     while adepth > 0 && tk(td, t) != 0 { if tk(td, t) == 24 { adepth = adepth + 1 }; if tk(td, t) == 25 { adepth = adepth - 1 }; t = t + 1 }
                     cp = e3(code, cp, 0x48, 0x31, 0xFF)
-                    cp = e2(code, cp, 0x48, 0xBE); cp = ei64(code, cp, arr_size)
+                    var mmap_size = arr_size
+                    if is_arr == 2 { mmap_size = arr_size * 8 }
+                    cp = e2(code, cp, 0x48, 0xBE); cp = ei64(code, cp, mmap_size)
                     cp = e1(code, cp, 0xBA); cp = ei32(code, cp, 3)
                     cp = e2(code, cp, 0x41, 0xBA); cp = ei32(code, cp, 0x22)
                     cp = e3(code, cp, 0x49, 0xC7, 0xC0); cp = ei32(code, cp, 0 - 1)
@@ -729,7 +741,7 @@ fn compile_block(code: [i8; 262144], st: [i64; 32768], src: [i8; 1048576], td: [
         } else if kind == 1 {
             // IDENT: assignment / array write / expr stmt
             if tk(td, t + 1) == 30 {
-                let li = find_local(src, st, td); t = t + 2
+                st[1] = t; let li = find_local(src, st, td); t = t + 2
                 st[0] = cp; st[1] = t
                 compile_expr(code, st, src, td, sb); cp = st[0]; t = st[1]
                 if li >= 0 { cp = e3(code, cp, 0x48, 0x89, 0x85); cp = ei32(code, cp, 0 - st[1712 + li]) }
@@ -739,7 +751,7 @@ fn compile_block(code: [i8; 262144], st: [i64; 32768], src: [i8; 1048576], td: [
                 while depth > 0 && tk(td, peek_t) != 0 { if tk(td, peek_t) == 24 { depth = depth + 1 }; if tk(td, peek_t) == 25 { depth = depth - 1 }; peek_t = peek_t + 1 }
                 if tk(td, peek_t) == 13 { peek_t = peek_t + 1; while tk(td, peek_t) == 1 || tk(td, peek_t) == 2 { peek_t = peek_t + 1 } }
                 if tk(td, peek_t) == 30 {
-                    let li = find_local(src, st, td); t = t + 2
+                    st[1] = t; let li = find_local(src, st, td); t = t + 2
                     st[0] = cp; st[1] = t
                     compile_expr(code, st, src, td, sb); cp = st[0]; t = st[1]
                     if tk(td, t) == 25 { t = t + 1 }
@@ -890,15 +902,12 @@ fn main() -> i64 with IO, Mut, Panic, Div {
     let src: [i8; 1048576] = read_file(source_path)
 
     var td: [i64; 262144] = [0; 262144]
-    print("T\n")
     let ntok = tokenize(src, td, src_size)
-    print("N\n")
 
     var st: [i64; 32768] = [0; 32768]
     st_set(st, 7, ntok); st_set(st, 9, src_size)
-    print("C\n")
     let fn_count = collect_fns(st, td)
-    print("F="); print_int(fn_count); print("\n")
+    
 
     var code: [i8; 262144] = [0; 262144]
     var sb: [i8; 8192] = [0; 8192]
@@ -907,10 +916,8 @@ fn main() -> i64 with IO, Mut, Panic, Div {
     st_set(st, 6, 16); st_set(st, 0, 16)
     let pi_end = em_print_int_fn(code, 16)
     st_set(st, 0, pi_end)
-    print("A\n")
 
     compile_all(code, st, src, td, sb)
-    print("D\n")
     let cp = st_get(st, 0)
     let main_off = find_main(src, st)
     let tramp = cp
