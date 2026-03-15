@@ -4414,6 +4414,47 @@ fn ocp_const_fold(func: IrFunction) -> IrFunction with Mut, Div, Panic {
             }
         }
 
+        // Sprint 235 Block ES: AND-XOR add to OR — (x&y)+(x^y) → x|y.
+        // Proof (per bit): 00→0+0=0; 01→0+1=1; 10→0+1=1; 11→1+0=1. QED.
+        // Commutative: (x^y)+(x&y) → x|y.
+        // Zero new arrays: uses ao_and_rr_valid/lhs/rhs (Block AO) + as_xor_rr_valid/lhs/rhs (Block AS).
+        // SOTA: Hacker's Delight §2-2; LLVM InstCombineAddSub; (x&y)+(x^y)=x|y.
+        if ocp_is_binop(result.instrs[i as usize].op) {
+            let es_instr = result.instrs[i as usize]
+            let es_s1 = es_instr.src1; let es_s2 = es_instr.src2
+            let es_s1_ok = es_s1 >= 0 && es_s1 < 256; let es_s2_ok = es_s2 >= 0 && es_s2 < 256
+            if es_instr.bin_op == BinaryOp::OpAdd && es_s1_ok && es_s2_ok {
+                // Case 1: s1=AND-rr(x,y), s2=XOR-rr(x,y) same operands
+                if ao_and_rr_valid[es_s1 as usize] && as_xor_rr_valid[es_s2 as usize] {
+                    let es_al = ao_and_rr_lhs[es_s1 as usize]; let es_ar = ao_and_rr_rhs[es_s1 as usize]
+                    let es_xl = as_xor_rr_lhs[es_s2 as usize]; let es_xr = as_xor_rr_rhs[es_s2 as usize]
+                    if (es_al == es_xl && es_ar == es_xr) || (es_al == es_xr && es_ar == es_xl) {
+                        let es_xl_ok = es_xl >= 0 && es_xl < 256; let es_xr_ok = es_xr >= 0 && es_xr < 256
+                        if es_xl_ok && es_xr_ok {
+                            result.instrs[i as usize] = ir_binop(es_instr.dst, es_xl, BinaryOp::OpBitOr, es_xr)
+                            ao_or_rr_valid[es_instr.dst as usize] = true
+                            ao_or_rr_lhs[es_instr.dst as usize] = es_xl
+                            ao_or_rr_rhs[es_instr.dst as usize] = es_xr
+                        }
+                    }
+                }
+                // Case 2: s1=XOR-rr(x,y), s2=AND-rr(x,y) commutative
+                if as_xor_rr_valid[es_s1 as usize] && ao_and_rr_valid[es_s2 as usize] {
+                    let es_xl2 = as_xor_rr_lhs[es_s1 as usize]; let es_xr2 = as_xor_rr_rhs[es_s1 as usize]
+                    let es_al2 = ao_and_rr_lhs[es_s2 as usize]; let es_ar2 = ao_and_rr_rhs[es_s2 as usize]
+                    if (es_xl2 == es_al2 && es_xr2 == es_ar2) || (es_xl2 == es_ar2 && es_xr2 == es_al2) {
+                        let es_xl2_ok = es_xl2 >= 0 && es_xl2 < 256; let es_xr2_ok = es_xr2 >= 0 && es_xr2 < 256
+                        if es_xl2_ok && es_xr2_ok && result.instrs[i as usize].src1 == es_s1 {
+                            result.instrs[i as usize] = ir_binop(es_instr.dst, es_xl2, BinaryOp::OpBitOr, es_xr2)
+                            ao_or_rr_valid[es_instr.dst as usize] = true
+                            ao_or_rr_lhs[es_instr.dst as usize] = es_xl2
+                            ao_or_rr_rhs[es_instr.dst as usize] = es_xr2
+                        }
+                    }
+                }
+            }
+        }
+
         // Sprint 234 Block ER: Complement-AND add to OR — x+(~x&y) → x|y.
         // Proof (per bit): x=0: 0+(1&y)=y=0|y; x=1: 1+(0&y)=1=1|y. Since bits disjoint, + = |. QED.
         // Commutative outer: (~x&y)+x → x|y; inner: x+(y&~x) → x|y; (~x&y) → (y&~x).

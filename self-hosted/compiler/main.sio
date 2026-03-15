@@ -16368,6 +16368,84 @@ fn compiler_main_test_dy_no_fold_or_outer() -> bool with Mut, Div, Panic {
     opt.instrs[2 as usize].bin_op != BinaryOp::OpBitAnd
 }
 
+// Sprint 235 Block ES: AND-XOR add to OR — (x&y)+(x^y) → x|y (T1076-T1081)
+fn compiler_main_test_es_and_xor_add_or_basic() -> bool with Mut, Div, Panic {
+    // r2=r0&r1, r3=r0^r1, r4=r2+r3 → r4 becomes r0|r1
+    var instrs: [IrInstr; 128] = cp_empty_instrs()
+    instrs[0 as usize] = ir_binop(2, 0, BinaryOp::OpBitAnd, 1)
+    instrs[1 as usize] = ir_binop(3, 0, BinaryOp::OpBitXor, 1)
+    instrs[2 as usize] = ir_binop(4, 2, BinaryOp::OpAdd, 3)
+    let func = cp_make_test_func(instrs, 3)
+    let opt = opt_cleanup_function(func)
+    opt.instrs[2 as usize].op == IrOpcode::IrBinOp
+        && opt.instrs[2 as usize].bin_op == BinaryOp::OpBitOr
+        && opt.instrs[2 as usize].src1 == 0
+        && opt.instrs[2 as usize].src2 == 1
+}
+
+fn compiler_main_test_es_and_xor_add_or_comm() -> bool with Mut, Div, Panic {
+    // (x^y)+(x&y) → x|y (commutative outer ADD)
+    var instrs: [IrInstr; 128] = cp_empty_instrs()
+    instrs[0 as usize] = ir_binop(2, 0, BinaryOp::OpBitAnd, 1)
+    instrs[1 as usize] = ir_binop(3, 0, BinaryOp::OpBitXor, 1)
+    instrs[2 as usize] = ir_binop(4, 3, BinaryOp::OpAdd, 2)
+    let func = cp_make_test_func(instrs, 3)
+    let opt = opt_cleanup_function(func)
+    opt.instrs[2 as usize].op == IrOpcode::IrBinOp
+        && opt.instrs[2 as usize].bin_op == BinaryOp::OpBitOr
+        && opt.instrs[2 as usize].src1 == 0
+        && opt.instrs[2 as usize].src2 == 1
+}
+
+fn compiler_main_test_es_and_xor_add_or_inner_comm() -> bool with Mut, Div, Panic {
+    // (y&x)+(x^y) → x|y (inner AND commutative)
+    var instrs: [IrInstr; 128] = cp_empty_instrs()
+    instrs[0 as usize] = ir_binop(2, 1, BinaryOp::OpBitAnd, 0)
+    instrs[1 as usize] = ir_binop(3, 0, BinaryOp::OpBitXor, 1)
+    instrs[2 as usize] = ir_binop(4, 2, BinaryOp::OpAdd, 3)
+    let func = cp_make_test_func(instrs, 3)
+    let opt = opt_cleanup_function(func)
+    opt.instrs[2 as usize].op == IrOpcode::IrBinOp
+        && opt.instrs[2 as usize].bin_op == BinaryOp::OpBitOr
+}
+
+fn compiler_main_test_es_no_fold_diff_var() -> bool with Mut, Div, Panic {
+    // (r0&r1)+(r0^r2): different vars → no fold
+    var instrs: [IrInstr; 128] = cp_empty_instrs()
+    instrs[0 as usize] = ir_binop(3, 0, BinaryOp::OpBitAnd, 1)
+    instrs[1 as usize] = ir_binop(4, 0, BinaryOp::OpBitXor, 2)
+    instrs[2 as usize] = ir_binop(5, 3, BinaryOp::OpAdd, 4)
+    let func = cp_make_test_func(instrs, 3)
+    let opt = opt_cleanup_function(func)
+    opt.instrs[2 as usize].op == IrOpcode::IrBinOp
+        && opt.instrs[2 as usize].bin_op == BinaryOp::OpAdd
+}
+
+fn compiler_main_test_es_no_fold_sub_outer() -> bool with Mut, Div, Panic {
+    // (r0&r1)-(r0^r1): outer SUB not ADD → no ES fold
+    var instrs: [IrInstr; 128] = cp_empty_instrs()
+    instrs[0 as usize] = ir_binop(2, 0, BinaryOp::OpBitAnd, 1)
+    instrs[1 as usize] = ir_binop(3, 0, BinaryOp::OpBitXor, 1)
+    instrs[2 as usize] = ir_binop(4, 2, BinaryOp::OpSub, 3)
+    let func = cp_make_test_func(instrs, 3)
+    let opt = opt_cleanup_function(func)
+    opt.instrs[2 as usize].op == IrOpcode::IrBinOp
+        && opt.instrs[2 as usize].bin_op == BinaryOp::OpSub
+}
+
+fn compiler_main_test_es_no_fold_or_inner() -> bool with Mut, Div, Panic {
+    // (r0|r1)+(r0^r1): inner is OR not AND → no ES fold
+    var instrs: [IrInstr; 128] = cp_empty_instrs()
+    instrs[0 as usize] = ir_binop(2, 0, BinaryOp::OpBitOr, 1)
+    instrs[1 as usize] = ir_binop(3, 0, BinaryOp::OpBitXor, 1)
+    instrs[2 as usize] = ir_binop(4, 2, BinaryOp::OpAdd, 3)
+    let func = cp_make_test_func(instrs, 3)
+    let opt = opt_cleanup_function(func)
+    // Block DK: (x|y)+(x&y)→x+y won't fire (s1 is OR not AND). Result stays ADD.
+    opt.instrs[2 as usize].op == IrOpcode::IrBinOp
+        && opt.instrs[2 as usize].bin_op == BinaryOp::OpAdd
+}
+
 // Sprint 234 Block ER: Complement-AND add to OR — x+(~x&y) → x|y (T1070-T1075)
 fn compiler_main_test_er_comp_and_add_or_basic() -> bool with Mut, Div, Panic {
     // r2=~r0, r3=r2&r1, r4=r0+r3 → r4 becomes r0|r1
@@ -17834,7 +17912,7 @@ fn compiler_main_test_dz_no_fold_or_outer() -> bool with Mut, Div, Panic {
 
 fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
     var passed: i64 = 0
-    let total: i64 = 1075
+    let total: i64 = 1081
 
     println("=== compiler/main.sio self-tests ===")
 
@@ -22762,6 +22840,32 @@ fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
         passed = passed + 1
         println("  T961 OK: Sprint 215 Block DY: r0|(r1|~r0) no fold OR outer")
     } else { println("  FAIL: T961") }
+
+    // Sprint 235 Block ES: AND-XOR add to OR (T1076-T1081)
+    if compiler_main_test_es_and_xor_add_or_basic() {
+        passed = passed + 1
+        println("  T1076 OK: Sprint 235 Block ES: (r0&r1)+(r0^r1) -> r0|r1")
+    } else { println("  FAIL: T1076") }
+    if compiler_main_test_es_and_xor_add_or_comm() {
+        passed = passed + 1
+        println("  T1077 OK: Sprint 235 Block ES: (r0^r1)+(r0&r1) -> r0|r1 comm")
+    } else { println("  FAIL: T1077") }
+    if compiler_main_test_es_and_xor_add_or_inner_comm() {
+        passed = passed + 1
+        println("  T1078 OK: Sprint 235 Block ES: (r1&r0)+(r0^r1) -> r0|r1 inner comm")
+    } else { println("  FAIL: T1078") }
+    if compiler_main_test_es_no_fold_diff_var() {
+        passed = passed + 1
+        println("  T1079 OK: Sprint 235 Block ES: (r0&r1)+(r0^r2) no fold diff var")
+    } else { println("  FAIL: T1079") }
+    if compiler_main_test_es_no_fold_sub_outer() {
+        passed = passed + 1
+        println("  T1080 OK: Sprint 235 Block ES: (r0&r1)-(r0^r1) no fold sub outer")
+    } else { println("  FAIL: T1080") }
+    if compiler_main_test_es_no_fold_or_inner() {
+        passed = passed + 1
+        println("  T1081 OK: Sprint 235 Block ES: (r0|r1)+(r0^r1) no ES fold or inner")
+    } else { println("  FAIL: T1081") }
 
     // Sprint 234 Block ER: Complement-AND add to OR (T1070-T1075)
     if compiler_main_test_er_comp_and_add_or_basic() {
