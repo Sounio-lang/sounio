@@ -4414,6 +4414,35 @@ fn ocp_const_fold(func: IrFunction) -> IrFunction with Mut, Div, Panic {
             }
         }
 
+        // Sprint 241 Block EY: OR-XOR subsumption — (x|y)|(x^y) → x|y.
+        // Proof: x^y ⊆ x|y (XOR bits are a subset of OR bits), so OR with subset = identity. QED.
+        // Commutative: (x^y)|(x|y) → x|y.
+        // Zero new arrays: uses ao_or_rr_valid/lhs/rhs (Block AO) + as_xor_rr_valid/lhs/rhs (Block AS).
+        // SOTA: Boolean lattice absorption; LLVM InstCombineAndOrXor.
+        if ocp_is_binop(result.instrs[i as usize].op) {
+            let ey_instr = result.instrs[i as usize]
+            let ey_s1 = ey_instr.src1; let ey_s2 = ey_instr.src2
+            let ey_s1_ok = ey_s1 >= 0 && ey_s1 < 256; let ey_s2_ok = ey_s2 >= 0 && ey_s2 < 256
+            if ey_instr.bin_op == BinaryOp::OpBitOr && ey_s1_ok && ey_s2_ok {
+                // Case 1: s1=OR-rr(x,y), s2=XOR-rr(x,y): same operands
+                if ao_or_rr_valid[ey_s1 as usize] && as_xor_rr_valid[ey_s2 as usize] {
+                    let ey_ol = ao_or_rr_lhs[ey_s1 as usize]; let ey_or2 = ao_or_rr_rhs[ey_s1 as usize]
+                    let ey_xl = as_xor_rr_lhs[ey_s2 as usize]; let ey_xr = as_xor_rr_rhs[ey_s2 as usize]
+                    if (ey_ol == ey_xl && ey_or2 == ey_xr) || (ey_ol == ey_xr && ey_or2 == ey_xl) {
+                        result.instrs[i as usize] = ir_copy(ey_instr.dst, ey_s1)
+                    }
+                }
+                // Case 2: s1=XOR-rr(x,y), s2=OR-rr(x,y): commutative
+                if as_xor_rr_valid[ey_s1 as usize] && ao_or_rr_valid[ey_s2 as usize] {
+                    let ey_xl2 = as_xor_rr_lhs[ey_s1 as usize]; let ey_xr2 = as_xor_rr_rhs[ey_s1 as usize]
+                    let ey_ol2 = ao_or_rr_lhs[ey_s2 as usize]; let ey_or22 = ao_or_rr_rhs[ey_s2 as usize]
+                    if (ey_xl2 == ey_ol2 && ey_xr2 == ey_or22) || (ey_xl2 == ey_or22 && ey_xr2 == ey_ol2) {
+                        result.instrs[i as usize] = ir_copy(ey_instr.dst, ey_s2)
+                    }
+                }
+            }
+        }
+
         // Sprint 240 Block EX: OR-complement-AND XOR to copy — (x|y)^(~x&y) → x.
         // Proof (per bit): 00→0^0=0; 01→1^1=0? Wait: (0|1)=1, (~0&1)=1, 1^1=0≠x=0. Hmm.
         // Recheck: (0,1): x=0,y=1: (0|1)=1, ~0=1, ~0&1=1, 1^1=0. x=0. So 0=0 ✓

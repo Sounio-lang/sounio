@@ -16368,6 +16368,81 @@ fn compiler_main_test_dy_no_fold_or_outer() -> bool with Mut, Div, Panic {
     opt.instrs[2 as usize].bin_op != BinaryOp::OpBitAnd
 }
 
+// Sprint 241 Block EY: OR-XOR subsumption — (x|y)|(x^y) → x|y (T1112-T1117)
+fn compiler_main_test_ey_or_xor_subsume_basic() -> bool with Mut, Div, Panic {
+    // r2=r0|r1, r3=r0^r1, r4=r2|r3 → r4 becomes IrCopy(r2)
+    var instrs: [IrInstr; 128] = cp_empty_instrs()
+    instrs[0 as usize] = ir_binop(2, 0, BinaryOp::OpBitOr, 1)
+    instrs[1 as usize] = ir_binop(3, 0, BinaryOp::OpBitXor, 1)
+    instrs[2 as usize] = ir_binop(4, 2, BinaryOp::OpBitOr, 3)
+    let func = cp_make_test_func(instrs, 3)
+    let opt = opt_cleanup_function(func)
+    opt.instrs[2 as usize].op == IrOpcode::IrCopy
+        && opt.instrs[2 as usize].src1 == 2
+}
+
+fn compiler_main_test_ey_or_xor_subsume_comm() -> bool with Mut, Div, Panic {
+    // (x^y)|(x|y) → x|y: commutative outer OR (s1=xor, s2=or)
+    var instrs: [IrInstr; 128] = cp_empty_instrs()
+    instrs[0 as usize] = ir_binop(2, 0, BinaryOp::OpBitOr, 1)
+    instrs[1 as usize] = ir_binop(3, 0, BinaryOp::OpBitXor, 1)
+    instrs[2 as usize] = ir_binop(4, 3, BinaryOp::OpBitOr, 2)
+    let func = cp_make_test_func(instrs, 3)
+    let opt = opt_cleanup_function(func)
+    opt.instrs[2 as usize].op == IrOpcode::IrCopy
+        && opt.instrs[2 as usize].src1 == 2
+}
+
+fn compiler_main_test_ey_or_xor_subsume_inner_comm() -> bool with Mut, Div, Panic {
+    // (x|y)|(y^x) → x|y: inner XOR operands commuted
+    var instrs: [IrInstr; 128] = cp_empty_instrs()
+    instrs[0 as usize] = ir_binop(2, 0, BinaryOp::OpBitOr, 1)
+    instrs[1 as usize] = ir_binop(3, 1, BinaryOp::OpBitXor, 0)
+    instrs[2 as usize] = ir_binop(4, 2, BinaryOp::OpBitOr, 3)
+    let func = cp_make_test_func(instrs, 3)
+    let opt = opt_cleanup_function(func)
+    opt.instrs[2 as usize].op == IrOpcode::IrCopy
+        && opt.instrs[2 as usize].src1 == 2
+}
+
+fn compiler_main_test_ey_no_fold_diff_var() -> bool with Mut, Div, Panic {
+    // (r0|r1)|(r0^r2): different vars → no fold
+    var instrs: [IrInstr; 128] = cp_empty_instrs()
+    instrs[0 as usize] = ir_binop(3, 0, BinaryOp::OpBitOr, 1)
+    instrs[1 as usize] = ir_binop(4, 0, BinaryOp::OpBitXor, 2)
+    instrs[2 as usize] = ir_binop(5, 3, BinaryOp::OpBitOr, 4)
+    let func = cp_make_test_func(instrs, 3)
+    let opt = opt_cleanup_function(func)
+    opt.instrs[2 as usize].op == IrOpcode::IrBinOp
+        && opt.instrs[2 as usize].bin_op == BinaryOp::OpBitOr
+}
+
+fn compiler_main_test_ey_no_fold_and_inner() -> bool with Mut, Div, Panic {
+    // (x|y)|(x&y): inner AND not XOR → Block EF fires (IrCopy(s1)), not EY
+    var instrs: [IrInstr; 128] = cp_empty_instrs()
+    instrs[0 as usize] = ir_binop(2, 0, BinaryOp::OpBitOr, 1)
+    instrs[1 as usize] = ir_binop(3, 0, BinaryOp::OpBitAnd, 1)
+    instrs[2 as usize] = ir_binop(4, 2, BinaryOp::OpBitOr, 3)
+    let func = cp_make_test_func(instrs, 3)
+    let opt = opt_cleanup_function(func)
+    // Block EF: (x|y)|(x&y)→IrCopy(x|y). EY not needed but result same.
+    opt.instrs[2 as usize].op == IrOpcode::IrCopy
+        && opt.instrs[2 as usize].src1 == 2
+}
+
+fn compiler_main_test_ey_no_fold_and_outer() -> bool with Mut, Div, Panic {
+    // (x|y)&(x^y): outer AND not OR → no EY fold (Block DD may fire →x^y)
+    var instrs: [IrInstr; 128] = cp_empty_instrs()
+    instrs[0 as usize] = ir_binop(2, 0, BinaryOp::OpBitOr, 1)
+    instrs[1 as usize] = ir_binop(3, 0, BinaryOp::OpBitXor, 1)
+    instrs[2 as usize] = ir_binop(4, 2, BinaryOp::OpBitAnd, 3)
+    let func = cp_make_test_func(instrs, 3)
+    let opt = opt_cleanup_function(func)
+    // Block DD: (x|y)&~(x&y)→x^y; here s2 is XOR not NOT-AND. Result stays AND or folds via DZ.
+    opt.instrs[2 as usize].op == IrOpcode::IrBinOp
+        && opt.instrs[2 as usize].bin_op == BinaryOp::OpBitAnd
+}
+
 // Sprint 240 Block EX: OR-complement-AND XOR to copy — (x|y)^(~x&y) → x (T1106-T1111)
 fn compiler_main_test_ex_or_comp_and_xor_copy_basic() -> bool with Mut, Div, Panic {
     // r2=r0|r1, r3=~r0, r4=r3&r1, r5=r2^r4 → r5 becomes IrCopy(r0)
@@ -23230,6 +23305,32 @@ fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
         passed = passed + 1
         println("  T961 OK: Sprint 215 Block DY: r0|(r1|~r0) no fold OR outer")
     } else { println("  FAIL: T961") }
+
+    // Sprint 241 Block EY: OR-XOR subsumption (T1112-T1117)
+    if compiler_main_test_ey_or_xor_subsume_basic() {
+        passed = passed + 1
+        println("  T1112 OK: Sprint 241 Block EY: (r0|r1)|(r0^r1) -> IrCopy(r2)")
+    } else { println("  FAIL: T1112") }
+    if compiler_main_test_ey_or_xor_subsume_comm() {
+        passed = passed + 1
+        println("  T1113 OK: Sprint 241 Block EY: (r0^r1)|(r0|r1) -> IrCopy(r2) comm")
+    } else { println("  FAIL: T1113") }
+    if compiler_main_test_ey_or_xor_subsume_inner_comm() {
+        passed = passed + 1
+        println("  T1114 OK: Sprint 241 Block EY: (r0|r1)|(r1^r0) -> IrCopy(r2) inner comm")
+    } else { println("  FAIL: T1114") }
+    if compiler_main_test_ey_no_fold_diff_var() {
+        passed = passed + 1
+        println("  T1115 OK: Sprint 241 Block EY: (r0|r1)|(r0^r2) no fold diff var")
+    } else { println("  FAIL: T1115") }
+    if compiler_main_test_ey_no_fold_and_inner() {
+        passed = passed + 1
+        println("  T1116 OK: Sprint 241 Block EY: (r0|r1)|(r0&r1) no EY fold")
+    } else { println("  FAIL: T1116") }
+    if compiler_main_test_ey_no_fold_and_outer() {
+        passed = passed + 1
+        println("  T1117 OK: Sprint 241 Block EY: (r0|r1)&(r0^r1) AND outer no EY fold")
+    } else { println("  FAIL: T1117") }
 
     // Sprint 240 Block EX: OR-complement-AND XOR to copy (T1106-T1111)
     if compiler_main_test_ex_or_comp_and_xor_copy_basic() {
