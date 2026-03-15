@@ -312,9 +312,9 @@ static bool eat(int k) { if (tk()==k) { next(); return true; } return false; }
 static int g_error_count = 0;
 static void expect(int k) {
     if (tk()!=k) {
-        if (g_error_count < 20)
-            fprintf(stderr, "stage0: parse error at line %d col %d\n",
-                    cur()->line, cur()->col);
+        if (g_error_count < 10)
+            fprintf(stderr, "stage0: expect %d got %d at line %d col %d\n",
+                    k, tk(), cur()->line, cur()->col);
         g_error_count++;
     }
     next();
@@ -788,12 +788,8 @@ static Expr *parse_binop(int min_prec) {
         int p = prec_of(tk());
         if (p < min_prec) break;
         int op_tk = tk(); next();
-        Expr *right = parse_postfix(parse_primary());
-        /* right-recurse for same or higher precedence */
-        while (prec_of(tk()) > p) {
-            right = parse_binop(prec_of(tk()));
-            right = parse_postfix(right);
-        }
+        /* Parse right operand with higher precedence (left-associative) */
+        Expr *right = parse_binop(p + 1);
         Expr *bin = NEW(Expr); bin->kind = EX_BINARY; bin->line = left->line;
         bin->op = tk_to_binop(op_tk); bin->left = left; bin->right = right;
         left = bin;
