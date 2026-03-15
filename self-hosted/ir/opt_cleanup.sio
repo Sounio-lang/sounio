@@ -4414,6 +4414,39 @@ fn ocp_const_fold(func: IrFunction) -> IrFunction with Mut, Div, Panic {
             }
         }
 
+        // Sprint 244 Block FB: AND-XOR AND annihilation — (x&y)&(x^y) → 0.
+        // Proof: x^y has 1s where x≠y; x&y has 1s where both=1; disjoint → AND=0. QED.
+        // Commutative: (x^y)&(x&y) → 0.
+        // Zero new arrays: uses ao_and_rr_valid/lhs/rhs (Block AO) + as_xor_rr_valid/lhs/rhs (Block AS).
+        // SOTA: Boolean algebra complement partition; LLVM InstCombineAndOrXor.
+        if ocp_is_binop(result.instrs[i as usize].op) {
+            let fb_instr = result.instrs[i as usize]
+            let fb_s1 = fb_instr.src1; let fb_s2 = fb_instr.src2
+            let fb_s1_ok = fb_s1 >= 0 && fb_s1 < 256; let fb_s2_ok = fb_s2 >= 0 && fb_s2 < 256
+            if fb_instr.bin_op == BinaryOp::OpBitAnd && fb_s1_ok && fb_s2_ok {
+                var fb_match = false
+                // Case 1: s1=AND-rr(x,y), s2=XOR-rr(x,y)
+                if ao_and_rr_valid[fb_s1 as usize] && as_xor_rr_valid[fb_s2 as usize] {
+                    let fb_al = ao_and_rr_lhs[fb_s1 as usize]; let fb_ar = ao_and_rr_rhs[fb_s1 as usize]
+                    let fb_xl = as_xor_rr_lhs[fb_s2 as usize]; let fb_xr = as_xor_rr_rhs[fb_s2 as usize]
+                    if (fb_al == fb_xl && fb_ar == fb_xr) || (fb_al == fb_xr && fb_ar == fb_xl) {
+                        fb_match = true
+                    }
+                }
+                // Case 2: s1=XOR-rr(x,y), s2=AND-rr(x,y): commutative outer AND
+                if !fb_match && as_xor_rr_valid[fb_s1 as usize] && ao_and_rr_valid[fb_s2 as usize] {
+                    let fb_xl2 = as_xor_rr_lhs[fb_s1 as usize]; let fb_xr2 = as_xor_rr_rhs[fb_s1 as usize]
+                    let fb_al2 = ao_and_rr_lhs[fb_s2 as usize]; let fb_ar2 = ao_and_rr_rhs[fb_s2 as usize]
+                    if (fb_xl2 == fb_al2 && fb_xr2 == fb_ar2) || (fb_xl2 == fb_ar2 && fb_xr2 == fb_al2) {
+                        fb_match = true
+                    }
+                }
+                if fb_match {
+                    result.instrs[i as usize] = ir_load_imm(fb_instr.dst, 0)
+                }
+            }
+        }
+
         // Sprint 243 Block FA: OR-XOR AND subsumption — (x|y)&(x^y) → x^y.
         // Proof: x^y ⊆ x|y (XOR bits are a subset of OR bits), so (x|y)&(x^y) = x^y. QED.
         // Commutative AND: (x^y)&(x|y) → x^y.
