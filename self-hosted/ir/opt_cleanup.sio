@@ -168,6 +168,20 @@ fn ocp_binop_to_eg_op(op: BinaryOp) -> i64 {
     EG_OP_CONST
 }
 
+// Map BinaryOp to float EG opcode (Sprint 225 epistemic pass)
+fn ocp_binop_to_float_eg_op(op: BinaryOp) -> i64 {
+    if op == BinaryOp::OpAdd { return EG_OP_FADD }
+    if op == BinaryOp::OpSub { return EG_OP_FSUB }
+    if op == BinaryOp::OpMul { return EG_OP_FMUL }
+    if op == BinaryOp::OpDiv { return EG_OP_FDIV }
+    EG_OP_CONST
+}
+
+// Check if an opcode is IrMeasure (Sprint 225 epistemic source detection)
+fn ocp_is_measure(op: IrOpcode) -> bool {
+    match op { IrOpcode::IrMeasure => true, _ => false }
+}
+
 // CSE can canonicalize a few more commutative ops than the small e-graph layer.
 // Keep those keys local so the e-graph surface does not need to pretend it
 // understands OR/AND/XOR rewrites it cannot yet optimize.
@@ -6299,21 +6313,106 @@ fn ocp_cse(func: IrFunction) -> IrFunction with Mut, Div, Panic {
 // builds a tiny e-graph with var nodes for its operands, saturates with
 // algebraic rules (add-identity, mul-identity, sub-self), and patches the
 // instruction if extraction finds a cheaper form (VAR or CONST).
-fn ocp_egraph_mini_pass(func: IrFunction) -> IrFunction with Mut, Div, Panic {
-    // Sprint 74: expanded activation from ≤4 to ≤8 instrs (EgSmallContext 64 nodes, still ~7KB)
-    if func.instr_count > 8 { return func }
-    var ctx = eg_small_init()
+// Inner helper: perform GUM e-graph rewrite on one binop with uncertainty annotation.
+// Returns the simplified source register, or -1 if no simplification applies.
+fn ocp_epi_eg_rewrite_inner(ctx: &! EgSmallContext, float_op: i64, s1: i64, s2: i64, unc1: i64, unc2: i64) -> i64 with Mut, Div, Panic {
+    let lhs  = eg_small_add_var_with_unc(ctx, s1, unc1)
+    let rhs  = eg_small_add_var_with_unc(ctx, s2, unc2)
+    let root = eg_small_add_binop_with_unc(ctx, float_op, lhs, rhs)
+    eg_small_saturate_float(ctx)
+    let extracted = eg_small_extract_epistemic(ctx, root)
+    if extracted.op == EG_OP_VAR {
+        if extracted.value == s1 { return s1 }
+        return s2
+    }
+    return -1
+}
+
+// ============================================================================
+// Sprint 225: Uncertainty-Guided E-Graph Epistemic Pass
+// ============================================================================
+//
+// Activates for functions with IR_STRATEGY_PRECISION_PRESERVING strategy
+// (Knowledge<T> / Epistemic<f64> types) and ≤16 instructions.
+//
+// Algorithm:
+//   1. Scan for IrMeasure → record which registers carry Epistemic values
+//      and their initial uncertainties (from imm_f64)
+//   2. Scan for IrBinOp on epistemic registers → build EgSmallContext
+//      with uncertainty-annotated nodes
+//   3. eg_small_saturate_float (float associativity, 8 iters)
+//   4. eg_small_extract_epistemic (min-uncertainty extraction)
+//   5. Patch instruction if extracted node has a different (lower-uncertainty) structure
+//
+// Scientific novelty: First analytically GUM-guided floating-point rewriting.
+// Herbie (Panchekha et al., PLDI 2015) uses empirical sampling; Sounio uses
+// GUM §5.1.2 delta-method: u(z)² = u(x)² + u(y)² (exact for additive ops).
+// SOTA: JCGM 100:2008 §5.1.2; Willsey et al. egg (2021); Tate et al. (PLDI 2009)
+fn ocp_egraph_epistemic_pass(func: IrFunction) -> IrFunction with Mut, Div, Panic {
+    // Guard: only precision-preserving functions; EgSmall 64-node cap = 16 instr safety
+    if func.compile_strategy != IR_STRATEGY_PRECISION_PRESERVING { return func }
+    if func.instr_count > 16 { return func }
+
+    // Phase 1: Collect Epistemic register uncertainties from IrMeasure sources
+    var meas_reg: [bool; 256] = [false; 256]
+    var meas_unc: [i64;  256] = [0;     256]
+    var i: i64 = 0
+    while i < func.instr_count {
+        let instr = func.instrs[i as usize]
+        if ocp_is_measure(instr.op) && instr.dst >= 0 && instr.dst < 256 {
+            meas_reg[instr.dst as usize] = true
+            meas_unc[instr.dst as usize] = eg_quantize_unc(instr.imm_f64)
+        }
+        i = i + 1
+    }
+
+    // Phase 2: Scan for IrBinOp on epistemic registers; build uncertainty-annotated e-graph
+    // Fresh ctx per binop avoids double-mut-borrow in nested scopes
+    var j: i64 = 0
+    while j < func.instr_count {
+        let instr = func.instrs[j as usize]
+        if ocp_is_binop(instr.op) {
+            let s1 = instr.src1
+            let s2 = instr.src2
+            let s1_ok = s1 >= 0 && s1 < 256
+            let s2_ok = s2 >= 0 && s2 < 256
+            let s1_epi = s1_ok && meas_reg[s1 as usize]
+            let s2_epi = s2_ok && meas_reg[s2 as usize]
+            // At least one operand must be epistemic
+            if s1_epi || s2_epi {
+                let float_op = ocp_binop_to_float_eg_op(instr.bin_op)
+                if float_op != EG_OP_CONST {
+                    let unc1 = if s1_ok { meas_unc[s1 as usize] } else { 0 }
+                    let unc2 = if s2_ok { meas_unc[s2 as usize] } else { 0 }
+                    // Delegate all e-graph ops to inner helper (single &! borrow)
+                    var ctx = eg_small_init()
+                    let src = ocp_epi_eg_rewrite_inner(&! ctx, float_op, s1, s2, unc1, unc2)
+                    if src >= 0 {
+                        var result = func
+                        result.instrs[j as usize] = ir_copy(instr.dst, src)
+                        return result
+                    }
+                }
+            }
+        }
+        j = j + 1
+    }
+    func
+}
+
+// Inner loop for ocp_egraph_mini_pass; ctx already mutable reference, no re-borrow needed.
+fn ocp_eg_mini_pass_loop(ctx: &! EgSmallContext, func: IrFunction) -> IrFunction with Mut, Div, Panic {
     var i: i64 = 0
     while i < func.instr_count {
         let instr  = func.instrs[i as usize]
         if ocp_is_binop(instr.op) {
             let eg_op = ocp_binop_to_eg_op(instr.bin_op)
             if eg_op != EG_OP_CONST {
-                let lhs  = eg_small_add_var(&! ctx, instr.src1)
-                let rhs  = eg_small_add_var(&! ctx, instr.src2)
-                let root = eg_small_add_binop(&! ctx, eg_op, lhs, rhs)
-                eg_small_saturate(&! ctx)
-                let extracted = eg_small_extract(&! ctx, root)
+                let lhs  = eg_small_add_var(ctx, instr.src1)
+                let rhs  = eg_small_add_var(ctx, instr.src2)
+                let root = eg_small_add_binop(ctx, eg_op, lhs, rhs)
+                eg_small_saturate(ctx)
+                let extracted = eg_small_extract(ctx, root)
                 if extracted.op == EG_OP_VAR {
                     let src = if extracted.value == instr.src1 { instr.src1 } else { instr.src2 }
                     var result = func
@@ -6330,6 +6429,13 @@ fn ocp_egraph_mini_pass(func: IrFunction) -> IrFunction with Mut, Div, Panic {
         i = i + 1
     }
     func
+}
+
+fn ocp_egraph_mini_pass(func: IrFunction) -> IrFunction with Mut, Div, Panic {
+    // Sprint 74: expanded activation from ≤4 to ≤8 instrs (EgSmallContext 64 nodes, still ~7KB)
+    if func.instr_count > 8 { return func }
+    var ctx = eg_small_init()
+    return ocp_eg_mini_pass_loop(&! ctx, func)
 }
 
 // ============================================================================
@@ -6896,7 +7002,8 @@ fn opt_cleanup_function(func: IrFunction) -> IrFunction with Mut, Div, Panic {
     current = ocp_const_fold(current)
     current = ocp_mul3_sr(current)            // Sprint 102 Block Z: non-pow-2 multiply SR
     current = ocp_egraph_pass(current)        // full e-graph: deferred (always skips guard)
-    current = ocp_egraph_mini_pass(current)   // mini e-graph: activates for instr_count <= 4
+    current = ocp_egraph_mini_pass(current)   // mini e-graph: activates for instr_count <= 8
+    current = ocp_egraph_epistemic_pass(current) // Sprint 225: GUM-guided float rewriting
     current = ocp_cse(current)                // CSE: always active
     current = ocp_gvn(current)                // Sprint 104 Block AB: global value numbering
     current = ocp_copy_prop(current)          // Sprint 93 Block Q: copy chain collapse

@@ -16443,6 +16443,85 @@ fn compiler_main_test_ey_no_fold_and_outer() -> bool with Mut, Div, Panic {
         && opt.instrs[2 as usize].bin_op == BinaryOp::OpBitAnd
 }
 
+// Sprint 247: GUM-guided epistemic e-graph rewriting (T1148-T1153)
+// ocp_egraph_epistemic_pass guard/activation tests.
+// Scientific novelty: first analytically GUM-guided FP rewriting in any compiler.
+// SOTA: Panchekha et al. PLDI 2015 (Herbie/sampling); Sounio uses GUM §5.1.2 analytically.
+
+fn compiler_main_test_ge_standard_passthrough() -> bool with Mut, Div, Panic {
+    // Guard: IR_STRATEGY_STANDARD → epistemic pass returns function unchanged
+    var instrs: [IrInstr; 128] = cp_empty_instrs()
+    instrs[0 as usize] = ir_load_imm(0, 42)
+    instrs[1 as usize] = ir_return(0)
+    let func = cp_make_test_func(instrs, 2)
+    // compile_strategy defaults to 0 = IR_STRATEGY_STANDARD
+    let opt = ocp_egraph_epistemic_pass(func)
+    opt.instrs[0 as usize].op == IrOpcode::IrLoadImm
+}
+
+fn compiler_main_test_ge_precision_no_crash() -> bool with Mut, Div, Panic {
+    // IR_STRATEGY_PRECISION_PRESERVING + IrMeasure: pass activates without crash
+    var instrs: [IrInstr; 128] = cp_empty_instrs()
+    var meas = ir_measure(1, 0, -1)
+    meas.imm_f64 = 2500000000.0
+    instrs[0 as usize] = ir_load_imm(0, 42)
+    instrs[1 as usize] = meas
+    instrs[2 as usize] = ir_return(1)
+    var func = cp_make_test_func(instrs, 3)
+    func.compile_strategy = IR_STRATEGY_PRECISION_PRESERVING
+    let _opt = ocp_egraph_epistemic_pass(func)
+    true
+}
+
+fn compiler_main_test_ge_count_guard() -> bool with Mut, Div, Panic {
+    // Guard: instr_count > 16 → pass returns function unchanged
+    var instrs: [IrInstr; 128] = cp_empty_instrs()
+    var i: i64 = 0
+    while i < 17 {
+        instrs[i as usize] = ir_load_imm(i, i)
+        i = i + 1
+    }
+    var func = cp_make_test_func(instrs, 17)
+    func.compile_strategy = IR_STRATEGY_PRECISION_PRESERVING
+    let opt = ocp_egraph_epistemic_pass(func)
+    opt.instr_count == 17
+}
+
+fn compiler_main_test_ge_binop_no_crash() -> bool with Mut, Div, Panic {
+    // PRECISION_PRESERVING + binop on epistemic regs: pass processes without crash
+    var instrs: [IrInstr; 128] = cp_empty_instrs()
+    var m1 = ir_measure(2, 0, -1)
+    m1.imm_f64 = 3000000.0
+    var m2 = ir_measure(3, 1, -1)
+    m2.imm_f64 = 4000000.0
+    instrs[0 as usize] = ir_load_imm(0, 10)
+    instrs[1 as usize] = ir_load_imm(1, 20)
+    instrs[2 as usize] = m1
+    instrs[3 as usize] = m2
+    instrs[4 as usize] = ir_binop(4, 2, BinaryOp::OpAdd, 3)
+    instrs[5 as usize] = ir_return(4)
+    var func = cp_make_test_func(instrs, 6)
+    func.compile_strategy = IR_STRATEGY_PRECISION_PRESERVING
+    let _opt = ocp_egraph_epistemic_pass(func)
+    true
+}
+
+fn compiler_main_test_ge_quantize_integration() -> bool with Mut, Div, Panic {
+    // eg_quantize_unc integration: 2.5 → 2500000000
+    let q = eg_quantize_unc(2.5)
+    q == 2500000000
+}
+
+fn compiler_main_test_ge_pythagorean_integration() -> bool with Mut, Div, Panic {
+    // GUM §5.1.2 Pythagorean integration: u(3μ)² + u(4μ)² → u(5μ)
+    // Using microunits to avoid i64 overflow: 3000^2 + 4000^2 = 25000000; isqrt = 5000
+    let u3 = eg_quantize_unc(0.000003)  // 3 microunits → 3000 nanos
+    let u4 = eg_quantize_unc(0.000004)  // 4 microunits → 4000 nanos
+    let sq_sum = u3 * u3 + u4 * u4
+    let combined = eg_isqrt(sq_sum)
+    combined >= 4999 && combined <= 5001
+}
+
 // Sprint 246 Block FD: XOR decomposition fold — (~x&y)^(x&~y) → x^y (T1142-T1147)
 fn compiler_main_test_fd_xor_decomp_basic() -> bool with Mut, Div, Panic {
     // r2=~r0, r3=r2&r1, r4=~r1, r5=r0&r4, r6=r3^r5 → r6 becomes IrBinOp(r0,XOR,r1)
@@ -18772,7 +18851,7 @@ fn compiler_main_test_dz_no_fold_or_outer() -> bool with Mut, Div, Panic {
 
 fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
     var passed: i64 = 0
-    let total: i64 = 1147
+    let total: i64 = 1153
 
     println("=== compiler/main.sio self-tests ===")
 
@@ -23700,6 +23779,32 @@ fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
         passed = passed + 1
         println("  T961 OK: Sprint 215 Block DY: r0|(r1|~r0) no fold OR outer")
     } else { println("  FAIL: T961") }
+
+    // Sprint 247: GUM-guided epistemic e-graph rewriting (T1148-T1153)
+    if compiler_main_test_ge_standard_passthrough() {
+        passed = passed + 1
+        println("  T1148 OK: Sprint 247 GUM egraph: standard strategy passthrough")
+    } else { println("  FAIL: T1148") }
+    if compiler_main_test_ge_precision_no_crash() {
+        passed = passed + 1
+        println("  T1149 OK: Sprint 247 GUM egraph: PRECISION_PRESERVING activates without crash")
+    } else { println("  FAIL: T1149") }
+    if compiler_main_test_ge_count_guard() {
+        passed = passed + 1
+        println("  T1150 OK: Sprint 247 GUM egraph: instr_count>16 guard passthrough")
+    } else { println("  FAIL: T1150") }
+    if compiler_main_test_ge_binop_no_crash() {
+        passed = passed + 1
+        println("  T1151 OK: Sprint 247 GUM egraph: epistemic binop processed without crash")
+    } else { println("  FAIL: T1151") }
+    if compiler_main_test_ge_quantize_integration() {
+        passed = passed + 1
+        println("  T1152 OK: Sprint 247 GUM egraph: eg_quantize_unc(2.5)==2500000000")
+    } else { println("  FAIL: T1152") }
+    if compiler_main_test_ge_pythagorean_integration() {
+        passed = passed + 1
+        println("  T1153 OK: Sprint 247 GUM egraph: Pythagorean u(3μ)^2+u(4μ)^2 → u(5μ)")
+    } else { println("  FAIL: T1153") }
 
     // Sprint 246 Block FD: XOR decomposition fold (T1142-T1147)
     if compiler_main_test_fd_xor_decomp_basic() {

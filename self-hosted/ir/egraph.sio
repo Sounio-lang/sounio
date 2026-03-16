@@ -1343,7 +1343,7 @@ fn eg_small_make_set(ctx: &! EgSmallContext) -> i64 with Mut, Div, Panic {
 }
 
 // Path-compressing find on the small union-find.
-fn eg_small_find(ctx: &! EgSmallContext, x: i64) -> i64 with Mut, Div {
+fn eg_small_find(ctx: &! EgSmallContext, x: i64) -> i64 with Mut, Div, Panic {
     if x < 0 || x >= 128 { return x }
     var root = x
     while ctx.parent[root as usize] != root {
@@ -1359,7 +1359,7 @@ fn eg_small_find(ctx: &! EgSmallContext, x: i64) -> i64 with Mut, Div {
 }
 
 // Rank-based union.  Returns true if a real merge happened (classes were distinct).
-fn eg_small_union(ctx: &! EgSmallContext, a: i64, b: i64) -> bool with Mut, Div {
+fn eg_small_union(ctx: &! EgSmallContext, a: i64, b: i64) -> bool with Mut, Div, Panic {
     let ra = eg_small_find(ctx, a)
     let rb = eg_small_find(ctx, b)
     if ra == rb { return false }
@@ -1378,7 +1378,7 @@ fn eg_small_union(ctx: &! EgSmallContext, a: i64, b: i64) -> bool with Mut, Div 
 
 // Hash-consing node add: linear-scan dedup over node_count (≤64) entries.
 // Returns the equivalence class of the (possibly existing) node.
-fn eg_small_add_node(ctx: &! EgSmallContext, node: EgNode) -> i64 with Mut, Div {
+fn eg_small_add_node(ctx: &! EgSmallContext, node: EgNode) -> i64 with Mut, Div, Panic {
     var i: i64 = 0
     while i < ctx.node_count {
         let ex = ctx.nodes[i as usize]
@@ -1401,7 +1401,7 @@ fn eg_small_add_node(ctx: &! EgSmallContext, node: EgNode) -> i64 with Mut, Div 
     id
 }
 
-fn eg_small_add_const(ctx: &! EgSmallContext, value: i64) -> i64 with Mut, Div {
+fn eg_small_add_const(ctx: &! EgSmallContext, value: i64) -> i64 with Mut, Div, Panic {
     let node = EgNode {
         op:          EG_OP_CONST,
         children:    [EG_INVALID, EG_INVALID, EG_INVALID, EG_INVALID],
@@ -1438,7 +1438,7 @@ fn eg_quantize_unc(u_f64: f64) -> i64 {
     scaled as i64
 }
 
-fn eg_small_add_var(ctx: &! EgSmallContext, var_id: i64) -> i64 with Mut, Div {
+fn eg_small_add_var(ctx: &! EgSmallContext, var_id: i64) -> i64 with Mut, Div, Panic {
     let node = EgNode {
         op:          EG_OP_VAR,
         children:    [var_id, EG_INVALID, EG_INVALID, EG_INVALID],
@@ -1449,7 +1449,7 @@ fn eg_small_add_var(ctx: &! EgSmallContext, var_id: i64) -> i64 with Mut, Div {
     eg_small_add_node(ctx, node)
 }
 
-fn eg_small_add_binop(ctx: &! EgSmallContext, op: i64, lhs: i64, rhs: i64) -> i64 with Mut, Div {
+fn eg_small_add_binop(ctx: &! EgSmallContext, op: i64, lhs: i64, rhs: i64) -> i64 with Mut, Div, Panic {
     let node = EgNode {
         op:          op,
         children:    [lhs, rhs, EG_INVALID, EG_INVALID],
@@ -1470,23 +1470,16 @@ fn eg_small_add_var_with_unc(ctx: &! EgSmallContext, var_id: i64, unc: i64) -> i
 }
 
 // Add binary op node with propagated uncertainty for epistemic pass
-// GUM §5.1.2: u(z)^2 = u(x)^2 + u(y)^2 for additive; conservative for mul/div
+// GUM §5.1.2: u(z)^2 = u(x)^2 + u(y)^2 for additive ops; conservative for mul/div.
+// lhs_class/rhs_class are node indices (same as e-class IDs for leaf nodes) into unc_lo.
 fn eg_small_add_binop_with_unc(ctx: &! EgSmallContext, op: i64, lhs_class: i64, rhs_class: i64) -> i64 with Mut, Div, Panic {
-    // Assume lhs_class and rhs_class are canonical e-class IDs
-    // Look up their best node uncertainties
-    var lhs_unc: i64 = 0
-    var rhs_unc: i64 = 0
-    var i: i64 = 0
-    while i < ctx.node_count {
-        let node_idx = i
-        if node_idx < 64 {
-            // Find node in lhs_class and rhs_class (simplified: just use the class IDs directly)
-            // This is a placeholder; in full implementation, we'd track class→uncertainty mapping
-        }
-        i = i + 1
-    }
-    // For now, compute uncertainty as sum of squares (simplified)
-    let combined_unc = eg_isqrt(lhs_unc * lhs_unc + rhs_unc * rhs_unc)
+    let lhs_unc = if lhs_class >= 0 && lhs_class < 64 { ctx.unc_lo[lhs_class as usize] } else { 0 }
+    let rhs_unc = if rhs_class >= 0 && rhs_class < 64 { ctx.unc_lo[rhs_class as usize] } else { 0 }
+    // Clamp to avoid i64 overflow in the square (safe up to ~3.03e9 per operand)
+    let max_safe: i64 = 3000000000
+    let l = if lhs_unc > max_safe { max_safe } else { lhs_unc }
+    let r = if rhs_unc > max_safe { max_safe } else { rhs_unc }
+    let combined_unc = eg_isqrt(l * l + r * r)
     let node_idx = eg_small_add_binop(ctx, op, lhs_class, rhs_class)
     if node_idx >= 0 && node_idx < 64 {
         ctx.unc_lo[node_idx as usize] = combined_unc
@@ -1504,7 +1497,7 @@ fn eg_small_cost_by_op(op: i64) -> i64 {
 // Apply algebraic saturation rules on the small graph.
 // Rules: add(x,0)→x, add(0,x)→x, mul(x,1)→x, mul(1,x)→x, sub(x,x)→0.
 // Returns total merge count; 0 indicates already saturated.
-fn eg_small_saturate(ctx: &! EgSmallContext) -> i64 with Mut, Div {
+fn eg_small_saturate(ctx: &! EgSmallContext) -> i64 with Mut, Div, Panic {
     var total_merges: i64 = 0
     var iter: i64 = 0
     while iter < 8 {
@@ -1595,7 +1588,7 @@ fn eg_small_saturate(ctx: &! EgSmallContext) -> i64 with Mut, Div {
 
 // Cost-based extraction: return the cheapest EgNode in the equivalence class
 // of class_id (using path-compression-aware find).
-fn eg_small_extract(ctx: &! EgSmallContext, class_id: i64) -> EgNode with Mut, Div {
+fn eg_small_extract(ctx: &! EgSmallContext, class_id: i64) -> EgNode with Mut, Div, Panic {
     let canonical  = eg_small_find(ctx, class_id)
     var best       = eg_node_new()
     var best_cost: i64 = 999999
@@ -1712,63 +1705,81 @@ fn test_eg_small_init() -> bool {
     ctx.node_count == 0 && ctx.uf_size == 0
 }
 
-fn test_eg_small_add_node() -> bool with Mut, Div {
+fn test_eg_small_add_node() -> bool with Mut, Div, Panic {
     var ctx = eg_small_init()
     let id = eg_small_add_const(&! ctx, 42)
     ctx.node_count == 1 && id == 0
 }
 
-fn test_eg_small_dedup() -> bool with Mut, Div {
-    var ctx = eg_small_init()
-    let id1 = eg_small_add_const(&! ctx, 42)
-    let id2 = eg_small_add_const(&! ctx, 42)
+fn test_eg_small_dedup_inner(ctx: &! EgSmallContext) -> bool with Mut, Div, Panic {
+    let id1 = eg_small_add_const(ctx, 42)
+    let id2 = eg_small_add_const(ctx, 42)
     id1 == id2 && ctx.node_count == 1
 }
-
-fn test_eg_small_find_self() -> bool with Mut, Div {
+fn test_eg_small_dedup() -> bool with Mut, Div, Panic {
     var ctx = eg_small_init()
-    let id = eg_small_add_const(&! ctx, 0)
-    let found = eg_small_find(&! ctx, id)
+    return test_eg_small_dedup_inner(&! ctx)
+}
+
+fn test_eg_small_find_self_inner(ctx: &! EgSmallContext) -> bool with Mut, Div, Panic {
+    let id = eg_small_add_const(ctx, 0)
+    let found = eg_small_find(ctx, id)
     found == id
 }
-
-fn test_eg_small_union_basic() -> bool with Mut, Div {
+fn test_eg_small_find_self() -> bool with Mut, Div, Panic {
     var ctx = eg_small_init()
-    let id0 = eg_small_add_const(&! ctx, 10)
-    let id1 = eg_small_add_const(&! ctx, 20)
-    eg_small_union(&! ctx, id0, id1)
-    let r0 = eg_small_find(&! ctx, id0)
-    let r1 = eg_small_find(&! ctx, id1)
+    return test_eg_small_find_self_inner(&! ctx)
+}
+
+fn test_eg_small_union_basic_inner(ctx: &! EgSmallContext) -> bool with Mut, Div, Panic {
+    let id0 = eg_small_add_const(ctx, 10)
+    let id1 = eg_small_add_const(ctx, 20)
+    eg_small_union(ctx, id0, id1)
+    let r0 = eg_small_find(ctx, id0)
+    let r1 = eg_small_find(ctx, id1)
     r0 == r1
 }
-
-fn test_eg_small_sat_add_identity() -> bool with Mut, Div {
-    var ctx  = eg_small_init()
-    let zero = eg_small_add_const(&! ctx, 0)
-    let x    = eg_small_add_var(&! ctx, 1)
-    let root = eg_small_add_binop(&! ctx, EG_OP_ADD, x, zero)
-    eg_small_saturate(&! ctx)
-    let extracted = eg_small_extract(&! ctx, root)
-    extracted.op == EG_OP_VAR
+fn test_eg_small_union_basic() -> bool with Mut, Div, Panic {
+    var ctx = eg_small_init()
+    return test_eg_small_union_basic_inner(&! ctx)
 }
 
-fn test_eg_small_sat_mul_identity() -> bool with Mut, Div {
-    var ctx = eg_small_init()
-    let one  = eg_small_add_const(&! ctx, 1)
-    let x    = eg_small_add_var(&! ctx, 2)
-    let root = eg_small_add_binop(&! ctx, EG_OP_MUL, x, one)
-    eg_small_saturate(&! ctx)
-    let extracted = eg_small_extract(&! ctx, root)
+fn test_eg_small_sat_add_identity_inner(ctx: &! EgSmallContext) -> bool with Mut, Div, Panic {
+    let zero = eg_small_add_const(ctx, 0)
+    let x    = eg_small_add_var(ctx, 1)
+    let root = eg_small_add_binop(ctx, EG_OP_ADD, x, zero)
+    eg_small_saturate(ctx)
+    let extracted = eg_small_extract(ctx, root)
     extracted.op == EG_OP_VAR
 }
-
-fn test_eg_small_sat_sub_self() -> bool with Mut, Div {
+fn test_eg_small_sat_add_identity() -> bool with Mut, Div, Panic {
     var ctx = eg_small_init()
-    let x    = eg_small_add_var(&! ctx, 3)
-    let root = eg_small_add_binop(&! ctx, EG_OP_SUB, x, x)
-    eg_small_saturate(&! ctx)
-    let extracted = eg_small_extract(&! ctx, root)
+    return test_eg_small_sat_add_identity_inner(&! ctx)
+}
+
+fn test_eg_small_sat_mul_identity_inner(ctx: &! EgSmallContext) -> bool with Mut, Div, Panic {
+    let one  = eg_small_add_const(ctx, 1)
+    let x    = eg_small_add_var(ctx, 2)
+    let root = eg_small_add_binop(ctx, EG_OP_MUL, x, one)
+    eg_small_saturate(ctx)
+    let extracted = eg_small_extract(ctx, root)
+    extracted.op == EG_OP_VAR
+}
+fn test_eg_small_sat_mul_identity() -> bool with Mut, Div, Panic {
+    var ctx = eg_small_init()
+    return test_eg_small_sat_mul_identity_inner(&! ctx)
+}
+
+fn test_eg_small_sat_sub_self_inner(ctx: &! EgSmallContext) -> bool with Mut, Div, Panic {
+    let x    = eg_small_add_var(ctx, 3)
+    let root = eg_small_add_binop(ctx, EG_OP_SUB, x, x)
+    eg_small_saturate(ctx)
+    let extracted = eg_small_extract(ctx, root)
     extracted.op == EG_OP_CONST && extracted.value == 0
+}
+fn test_eg_small_sat_sub_self() -> bool with Mut, Div, Panic {
+    var ctx = eg_small_init()
+    return test_eg_small_sat_sub_self_inner(&! ctx)
 }
 
 // ============================================================================
@@ -2555,26 +2566,32 @@ fn test_eg_unary_node() -> bool with Mut, Div, Panic {
 }
 
 // Sprint 74: EgSmall mul-annihilation tests
-fn test_eg_small_sat_mul_annihilation_rhs() -> bool with Mut, Div {
-    // mul(var_x, 0) → should extract EG_OP_CONST with value 0
-    var ctx = eg_small_init()
-    let x   = eg_small_add_var(&! ctx, 10)
-    let z   = eg_small_add_const(&! ctx, 0)
-    let mul = eg_small_add_binop(&! ctx, EG_OP_MUL, x, z)
-    eg_small_saturate(&! ctx)
-    let ex  = eg_small_extract(&! ctx, mul)
+fn test_eg_small_sat_mul_annihilation_rhs_inner(ctx: &! EgSmallContext) -> bool with Mut, Div, Panic {
+    let x   = eg_small_add_var(ctx, 10)
+    let z   = eg_small_add_const(ctx, 0)
+    let mul = eg_small_add_binop(ctx, EG_OP_MUL, x, z)
+    eg_small_saturate(ctx)
+    let ex  = eg_small_extract(ctx, mul)
     ex.op == EG_OP_CONST && ex.value == 0
 }
+fn test_eg_small_sat_mul_annihilation_rhs() -> bool with Mut, Div, Panic {
+    // mul(var_x, 0) → should extract EG_OP_CONST with value 0
+    var ctx = eg_small_init()
+    return test_eg_small_sat_mul_annihilation_rhs_inner(&! ctx)
+}
 
-fn test_eg_small_sat_mul_annihilation_lhs() -> bool with Mut, Div {
+fn test_eg_small_sat_mul_annihilation_lhs_inner(ctx: &! EgSmallContext) -> bool with Mut, Div, Panic {
+    let z   = eg_small_add_const(ctx, 0)
+    let x   = eg_small_add_var(ctx, 10)
+    let mul = eg_small_add_binop(ctx, EG_OP_MUL, z, x)
+    eg_small_saturate(ctx)
+    let ex  = eg_small_extract(ctx, mul)
+    ex.op == EG_OP_CONST && ex.value == 0
+}
+fn test_eg_small_sat_mul_annihilation_lhs() -> bool with Mut, Div, Panic {
     // mul(0, var_x) → should extract EG_OP_CONST with value 0
     var ctx = eg_small_init()
-    let z   = eg_small_add_const(&! ctx, 0)
-    let x   = eg_small_add_var(&! ctx, 10)
-    let mul = eg_small_add_binop(&! ctx, EG_OP_MUL, z, x)
-    eg_small_saturate(&! ctx)
-    let ex  = eg_small_extract(&! ctx, mul)
-    ex.op == EG_OP_CONST && ex.value == 0
+    return test_eg_small_sat_mul_annihilation_lhs_inner(&! ctx)
 }
 
 // ============================================================================
@@ -2606,25 +2623,30 @@ fn test_eg_small_add_var_with_unc_basic() -> bool with Mut, Div, Panic {
     node_idx == 0 && ctx.unc_lo[0] == 1000000000
 }
 
-fn test_eg_small_extract_epistemic_basic() -> bool with Mut, Div, Panic {
-    var ctx = eg_small_init()
-    let const1 = eg_small_add_const(&! ctx, 1)
-    let _var1 = eg_small_add_var_with_unc(&! ctx, 0, 2000000000)
+fn test_eg_small_extract_epistemic_basic_inner(ctx: &! EgSmallContext) -> bool with Mut, Div, Panic {
+    let const1 = eg_small_add_const(ctx, 1)
+    let _var1 = eg_small_add_var_with_unc(ctx, 0, 2000000000)
     ctx.unc_lo[const1 as usize] = 0
-    let extracted = eg_small_extract_epistemic(&! ctx, const1)
-    // VAR should be preferred over CONST due to higher uncertainty? No, CONST is preferred.
-    // Actually, lower uncertainty wins, so CONST (0 unc) wins over VAR (2e9 unc)
+    let extracted = eg_small_extract_epistemic(ctx, const1)
     extracted.op == EG_OP_CONST
 }
-
-fn test_eg_small_saturate_float_basic() -> bool with Mut, Div, Panic {
+fn test_eg_small_extract_epistemic_basic() -> bool with Mut, Div, Panic {
+    // lower uncertainty wins: CONST (0 unc) wins over VAR (2e9 unc)
     var ctx = eg_small_init()
-    let a = eg_small_add_var_with_unc(&! ctx, 0, 1000000000)
-    let b = eg_small_add_var_with_unc(&! ctx, 1, 1000000000)
-    let c = eg_small_add_var_with_unc(&! ctx, 2, 1000000000)
-    let merges = eg_small_saturate_float(&! ctx)
-    // Float saturation should complete without error
+    return test_eg_small_extract_epistemic_basic_inner(&! ctx)
+}
+
+fn test_eg_small_saturate_float_basic_inner(ctx: &! EgSmallContext) -> bool with Mut, Div, Panic {
+    let _a = eg_small_add_var_with_unc(ctx, 0, 1000000000)
+    let _b = eg_small_add_var_with_unc(ctx, 1, 1000000000)
+    let _c = eg_small_add_var_with_unc(ctx, 2, 1000000000)
+    let merges = eg_small_saturate_float(ctx)
     merges >= 0
+}
+fn test_eg_small_saturate_float_basic() -> bool with Mut, Div, Panic {
+    // Float saturation should complete without error
+    var ctx = eg_small_init()
+    return test_eg_small_saturate_float_basic_inner(&! ctx)
 }
 
 fn test_eg_quantize_unc_zero() -> bool {
