@@ -48,6 +48,7 @@ Start with these current-state maps before diving into older deep reports:
 - [Async Runtime](architecture/ASYNC_RUNTIME.md)
 - [Roadmap](architecture/COMPILER_ROADMAP.md)
 - [Paper Artifact Packaging Spec](implementation/PAPER_ARTIFACT_PACKAGING_SPEC.md)
+- [Website Design System & UI Components](../website/README.md)
 
 ### Governance
 - [Docs Authority Matrix](governance/DOCS_AUTHORITY_MATRIX.md)
