@@ -51,6 +51,22 @@ Updated February 2026 after full-project audit.
 
 **Effect checker `Div` propagation**: The effect checker requires `Div` for any operation involving division. It also requires `Panic` alongside `Div` (divide-by-zero potential), and for array access (out-of-bounds potential) and `as` casts. These are strict but correct.
 
+**`&![T; N]` mutable ref mutation in interpreter**: When passing a bare array variable by `&!` reference to a function (`fn f(arr: &![i64; 10000], ...) with Mut`), mutations inside the function are not visible to the caller in the runtime interpreter. Workaround: wrap the array in a struct and pass `&! StructWithArray`. Struct mutable refs propagate mutations correctly.
+
+```sio
+// Works — struct wrapper pattern
+struct SortBuf { data: [i64; 10000] }
+fn sort(b: &! SortBuf) with Mut { b.data[0] = 99 }
+
+// Broken — bare array mut ref
+fn sort_broken(arr: &![i64; 10000]) with Mut { arr[0] = 99 }
+```
+
+**`extern "C"` FFI limited to math functions**: Only these `extern "C"` functions are supported in `$SOUC run`:
+- Single-arg (f64→f64): `sqrt`, `sin`, `cos`, `tan`, `exp`, `log`, `floor`, `ceil`, `atan`, `sinh`, `cosh`, `tanh`, `asin`, `acos`, `cbrt`, `round`, `log2`, `log10`
+- Two-arg (f64,f64→f64): `pow`, `atan2`
+- Integer FFI (`malloc`, `getpid`, etc.) silently terminates the program. Workaround: use large fixed-size struct arrays instead of dynamic allocation.
+
 ### Pruned/Experimental Modules
 
 The following stdlib modules exist but are stubs or incomplete. They are not part of the default experience:
