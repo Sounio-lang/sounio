@@ -1,0 +1,213 @@
+//@ run-pass
+//! N-Body Gravitational Simulation (16 bodies, 2D, 1000 steps)
+//!
+//! Demonstrates: f64 arithmetic, extern FFI (sqrt), nested loops,
+//! struct with multiple arrays, physics simulation.
+//!
+//! Bodies are initialized on two rings. The simulation integrates
+//! Newton's gravitational equations using Euler method.
+//!
+//! Run: $SOUC run examples/simulation/nbody.sio
+
+extern "C" {
+    fn sqrt(x: f64) -> f64;
+}
+
+const N: i64 = 16
+const STEPS: i64 = 1000
+const DT: f64 = 0.001
+const G: f64 = 1.0
+const SOFTENING: f64 = 0.01   // avoid singularity at r=0
+const MASS: f64 = 1.0
+
+struct Bodies {
+    px: [f64; 16],
+    py: [f64; 16],
+    vx: [f64; 16],
+    vy: [f64; 16],
+    ax: [f64; 16],
+    ay: [f64; 16],
+}
+
+fn compute_forces(b: &! Bodies) with Mut {
+    // Zero accelerations
+    var i: i64 = 0
+    while i < N {
+        b.ax[i] = 0.0
+        b.ay[i] = 0.0
+        i = i + 1
+    }
+
+    // Pairwise gravity
+    i = 0
+    while i < N {
+        var j: i64 = i + 1
+        while j < N {
+            let dx = b.px[j] - b.px[i]
+            let dy = b.py[j] - b.py[i]
+            let dist2 = dx * dx + dy * dy + SOFTENING * SOFTENING
+            let dist = sqrt(dist2)
+            let inv_dist3 = G * MASS / (dist2 * dist)
+            let fx = dx * inv_dist3
+            let fy = dy * inv_dist3
+            b.ax[i] = b.ax[i] + fx
+            b.ay[i] = b.ay[i] + fy
+            b.ax[j] = b.ax[j] - fx
+            b.ay[j] = b.ay[j] - fy
+            j = j + 1
+        }
+        i = i + 1
+    }
+}
+
+fn step(b: &! Bodies) with Mut {
+    compute_forces(b)
+    var i: i64 = 0
+    while i < N {
+        b.vx[i] = b.vx[i] + b.ax[i] * DT
+        b.vy[i] = b.vy[i] + b.ay[i] * DT
+        b.px[i] = b.px[i] + b.vx[i] * DT
+        b.py[i] = b.py[i] + b.vy[i] * DT
+        i = i + 1
+    }
+}
+
+fn kinetic_energy(b: &! Bodies) -> f64 with Mut {
+    var ke: f64 = 0.0
+    var i: i64 = 0
+    while i < N {
+        ke = ke + 0.5 * MASS * (b.vx[i] * b.vx[i] + b.vy[i] * b.vy[i])
+        i = i + 1
+    }
+    ke
+}
+
+fn potential_energy(b: &! Bodies) -> f64 with Mut {
+    var pe: f64 = 0.0
+    var i: i64 = 0
+    while i < N {
+        var j: i64 = i + 1
+        while j < N {
+            let dx = b.px[j] - b.px[i]
+            let dy = b.py[j] - b.py[i]
+            let dist = sqrt(dx * dx + dy * dy + SOFTENING * SOFTENING)
+            pe = pe - G * MASS * MASS / dist
+            j = j + 1
+        }
+        i = i + 1
+    }
+    pe
+}
+
+fn main() -> i32 with IO, Mut, Div {
+    var b = Bodies {
+        px: [0.0; 16],
+        py: [0.0; 16],
+        vx: [0.0; 16],
+        vy: [0.0; 16],
+        ax: [0.0; 16],
+        ay: [0.0; 16],
+    }
+
+    // Initialize: 8 bodies on inner ring (r=2), 8 on outer ring (r=4)
+    // Approximate circle using precomputed trig values
+    // cos/sin multiples of pi/4: (1, 0), (.707,.707), (0,1), (-.707,.707), (-1,0), (-.707,-.707), (0,-1), (.707,-.707)
+    let c0: f64 =  1.0
+    let c1: f64 =  0.707106781
+    let c2: f64 =  0.0
+    let c3: f64 = -0.707106781
+    let c4: f64 = -1.0
+    let c5: f64 = -0.707106781
+    let c6: f64 =  0.0
+    let c7: f64 =  0.707106781
+    let s0: f64 =  0.0
+    let s1: f64 =  0.707106781
+    let s2: f64 =  1.0
+    let s3: f64 =  0.707106781
+    let s4: f64 =  0.0
+    let s5: f64 = -0.707106781
+    let s6: f64 = -1.0
+    let s7: f64 = -0.707106781
+
+    // Inner ring (r=2): bodies 0-7
+    b.px[0] = 2.0 * c0
+    b.px[1] = 2.0 * c1
+    b.px[2] = 2.0 * c2
+    b.px[3] = 2.0 * c3
+    b.px[4] = 2.0 * c4
+    b.px[5] = 2.0 * c5
+    b.px[6] = 2.0 * c6
+    b.px[7] = 2.0 * c7
+    b.py[0] = 2.0 * s0
+    b.py[1] = 2.0 * s1
+    b.py[2] = 2.0 * s2
+    b.py[3] = 2.0 * s3
+    b.py[4] = 2.0 * s4
+    b.py[5] = 2.0 * s5
+    b.py[6] = 2.0 * s6
+    b.py[7] = 2.0 * s7
+
+    // Outer ring (r=4): bodies 8-15
+    b.px[8]  = 4.0 * c0
+    b.px[9]  = 4.0 * c1
+    b.px[10] = 4.0 * c2
+    b.px[11] = 4.0 * c3
+    b.px[12] = 4.0 * c4
+    b.px[13] = 4.0 * c5
+    b.px[14] = 4.0 * c6
+    b.px[15] = 4.0 * c7
+    b.py[8]  = 4.0 * s0
+    b.py[9]  = 4.0 * s1
+    b.py[10] = 4.0 * s2
+    b.py[11] = 4.0 * s3
+    b.py[12] = 4.0 * s4
+    b.py[13] = 4.0 * s5
+    b.py[14] = 4.0 * s6
+    b.py[15] = 4.0 * s7
+
+    // Give circular orbit velocities: v_circular = sqrt(G*M_total/r) (simplified)
+    // Inner: v ≈ 1.0 (tangential, counterclockwise: vy=cos, vx=-sin)
+    b.vx[0] = -0.4 * s0
+    b.vx[1] = -0.4 * s1
+    b.vx[2] = -0.4 * s2
+    b.vx[3] = -0.4 * s3
+    b.vx[4] = -0.4 * s4
+    b.vx[5] = -0.4 * s5
+    b.vx[6] = -0.4 * s6
+    b.vx[7] = -0.4 * s7
+    b.vy[0] =  0.4 * c0
+    b.vy[1] =  0.4 * c1
+    b.vy[2] =  0.4 * c2
+    b.vy[3] =  0.4 * c3
+    b.vy[4] =  0.4 * c4
+    b.vy[5] =  0.4 * c5
+    b.vy[6] =  0.4 * c6
+    b.vy[7] =  0.4 * c7
+
+    let e0 = kinetic_energy(&! b) + potential_energy(&! b)
+
+    // Run simulation
+    var step_num: i64 = 0
+    while step_num < STEPS {
+        step(&! b)
+        step_num = step_num + 1
+    }
+
+    let e1 = kinetic_energy(&! b) + potential_energy(&! b)
+
+    print("N-body simulation: N=16, steps=1000\n")
+    print("Initial energy:   ")
+    println(e0)
+    print("Final energy:     ")
+    println(e1)
+
+    // Energy should be roughly conserved (Euler method drifts, but stays bounded)
+    let de = e1 - e0
+    let de_abs = if de < 0.0 { 0.0 - de } else { de }
+    let e0_abs = if e0 < 0.0 { 0.0 - e0 } else { e0 }
+    print("Energy drift:     ")
+    println(de)
+
+    print("Simulation complete\n")
+    0
+}

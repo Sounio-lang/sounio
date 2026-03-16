@@ -1,0 +1,133 @@
+//@ run-pass
+//! Radix Sort (LSD, base-256) on 100,000 integers
+//!
+//! Demonstrates: O(kn) linear sorting, large buffers (1.6MB struct),
+//! multi-pass counting sort, data structure manipulation at scale.
+//!
+//! Run: $SOUC run examples/algorithms/radix_sort.sio
+
+const N: i64 = 100000
+
+struct RadixBufs {
+    data:   [i64; 100000],
+    output: [i64; 100000],
+    count:  [i64; 256],
+}
+
+// Counting sort on one byte extracted by dividing by `divisor`
+// divisor: 1 (byte0), 256 (byte1), 65536 (byte2), 16777216 (byte3)
+fn counting_sort(b: &! RadixBufs, divisor: i64, n: i64) with Mut, Div {
+    // Clear counts
+    var k: i64 = 0
+    while k < 256 {
+        b.count[k] = 0
+        k = k + 1
+    }
+
+    // Count occurrences of each byte value
+    var i: i64 = 0
+    while i < n {
+        let byte_val = (b.data[i] / divisor) & 255
+        b.count[byte_val] = b.count[byte_val] + 1
+        i = i + 1
+    }
+
+    // Prefix sums (cumulative counts → starting positions)
+    var prev: i64 = 0
+    k = 0
+    while k < 256 {
+        let c = b.count[k]
+        b.count[k] = prev
+        prev = prev + c
+        k = k + 1
+    }
+
+    // Place elements in output
+    i = 0
+    while i < n {
+        let byte_val = (b.data[i] / divisor) & 255
+        let pos = b.count[byte_val]
+        b.output[pos] = b.data[i]
+        b.count[byte_val] = pos + 1
+        i = i + 1
+    }
+
+    // Copy output back to data
+    i = 0
+    while i < n {
+        b.data[i] = b.output[i]
+        i = i + 1
+    }
+}
+
+fn radix_sort(b: &! RadixBufs, n: i64) with Mut, Div {
+    // 4 passes: bytes 0,1,2,3 of the lower 32 bits
+    counting_sort(b, 1,        n)   // byte 0: value & 255
+    counting_sort(b, 256,      n)   // byte 1: (value / 256) & 255
+    counting_sort(b, 65536,    n)   // byte 2: (value / 65536) & 255
+    counting_sort(b, 16777216, n)   // byte 3: (value / 16777216) & 255
+}
+
+fn main() -> i32 with IO, Mut, Div {
+    var bufs = RadixBufs {
+        data:   [0; 100000],
+        output: [0; 100000],
+        count:  [0; 256],
+    }
+
+    // Fill with positive pseudo-random values in [0, 2^31 - 1]
+    var seed: i64 = 987654321
+    var i: i64 = 0
+    var checksum_before: i64 = 0
+    while i < N {
+        seed = seed * 6364136223846793005 + 1442695040888963407
+        // Keep positive: take abs and mask to 31 bits
+        var v = seed
+        if v < 0 { v = 0 - v }
+        v = v & 2147483647   // mask to [0, 2^31-1]
+        bufs.data[i] = v
+        checksum_before = checksum_before + v
+        i = i + 1
+    }
+
+    let first_unsorted = bufs.data[0]
+    let second_unsorted = bufs.data[1]
+
+    radix_sort(&! bufs, N)
+
+    // Verify sorted
+    var ok = true
+    i = 1
+    while i < N {
+        if bufs.data[i] < bufs.data[i - 1] { ok = false }
+        i = i + 1
+    }
+
+    // Verify checksum preserved
+    var checksum_after: i64 = 0
+    i = 0
+    while i < N {
+        checksum_after = checksum_after + bufs.data[i]
+        i = i + 1
+    }
+
+    if ok && checksum_before == checksum_after {
+        print("Radix sort (100,000 integers): PASS\n")
+        print("  Input[0,1]: ")
+        println(first_unsorted)
+        println(second_unsorted)
+        print("  Sorted min: ")
+        println(bufs.data[0])
+        print("  Sorted max: ")
+        println(bufs.data[N - 1])
+        print("  Checksum:   ")
+        println(checksum_after)
+        0
+    } else if ok == false {
+        print("FAIL: sort order wrong\n")
+        1
+    } else {
+        print("FAIL: checksum mismatch\n")
+        2
+    }
+}

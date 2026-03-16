@@ -1,0 +1,127 @@
+//@ run-pass
+//! Dense Matrix Multiplication: 64×64 matrices (262,144 multiply-add ops)
+//!
+//! Demonstrates: high-throughput f64 computation, struct arrays, O(n³) loop,
+//! numerical verification — zero external dependencies.
+//!
+//! Run: $SOUC run examples/algorithms/matrix_mul.sio
+
+const DIM: i64 = 64   // matrix dimension (DIM × DIM)
+
+struct Matrix {
+    m: [f64; 4096],    // DIM * DIM = 64 * 64 = 4096
+}
+
+fn mat_get(mat: &! Matrix, row: i64, col: i64) -> f64 with Mut {
+    mat.m[row * DIM + col]
+}
+
+fn mat_set(mat: &! Matrix, row: i64, col: i64, val: f64) with Mut {
+    mat.m[row * DIM + col] = val
+}
+
+// Initialize: A[i][j] = (i + j + 1) as f64 / DIM
+fn mat_init_a(mat: &! Matrix) with Mut, Div {
+    var i: i64 = 0
+    while i < DIM {
+        var j: i64 = 0
+        while j < DIM {
+            let v = (i + j + 1) as f64 / (DIM as f64)
+            mat_set(mat, i, j, v)
+            j = j + 1
+        }
+        i = i + 1
+    }
+}
+
+// Initialize: B[i][j] = (i * j + 1) as f64 / (DIM * DIM)
+fn mat_init_b(mat: &! Matrix) with Mut, Div {
+    var i: i64 = 0
+    while i < DIM {
+        var j: i64 = 0
+        while j < DIM {
+            let v = (i * j + 1) as f64 / (DIM * DIM) as f64
+            mat_set(mat, i, j, v)
+            j = j + 1
+        }
+        i = i + 1
+    }
+}
+
+// C = A × B  (standard O(n³) multiply)
+fn mat_mul(a: &! Matrix, b: &! Matrix, c: &! Matrix) with Mut {
+    var i: i64 = 0
+    while i < DIM {
+        var j: i64 = 0
+        while j < DIM {
+            var sum: f64 = 0.0
+            var k: i64 = 0
+            while k < DIM {
+                sum = sum + mat_get(a, i, k) * mat_get(b, k, j)
+                k = k + 1
+            }
+            mat_set(c, i, j, sum)
+            j = j + 1
+        }
+        i = i + 1
+    }
+}
+
+// Frobenius norm: sqrt(sum of squares) — we return sum-of-squares to avoid FFI
+fn frobenius_sq(mat: &! Matrix) -> f64 with Mut {
+    var s: f64 = 0.0
+    var i: i64 = 0
+    while i < DIM * DIM {
+        s = s + mat.m[i] * mat.m[i]
+        i = i + 1
+    }
+    s
+}
+
+fn main() -> i32 with IO, Mut, Div {
+    var a = Matrix { m: [0.0; 4096] }
+    var b = Matrix { m: [0.0; 4096] }
+    var c = Matrix { m: [0.0; 4096] }
+
+    mat_init_a(&! a)
+    mat_init_b(&! b)
+    mat_mul(&! a, &! b, &! c)
+
+    // Spot-check: C[0][0] = sum_k A[0][k] * B[k][0]
+    //   A[0][k] = (0 + k + 1) / 64 = (k+1)/64
+    //   B[k][0] = (k * 0 + 1) / 4096 = 1/4096
+    //   C[0][0] = sum_{k=0}^{63} (k+1)/64 * 1/4096
+    //           = (1/64)(1/4096) * sum_{k=0}^{63}(k+1)
+    //           = (1/262144) * (64*65/2) = 2080/262144 = 0.007934570...
+    let c00 = mat_get(&! c, 0, 0)
+
+    // C[1][1] spot-check
+    let c11 = mat_get(&! c, 1, 1)
+
+    // Frobenius norm squared
+    let fnorm_sq = frobenius_sq(&! c)
+
+    print("Matrix multiplication ")
+    print_int(DIM)
+    print("x")
+    print_int(DIM)
+    print(": done\n")
+    print("  Operations: ")
+    println(DIM * DIM * DIM)
+    print("  C[0][0] = ")
+    println(c00)
+    print("  C[1][1] = ")
+    println(c11)
+    print("  ||C||^2 = ")
+    println(fnorm_sq)
+
+    // Verify C[0][0] ≈ 0.007934 (check it's positive and reasonable)
+    let ok = c00 > 0.007 && c00 < 0.009 && c11 > 0.0 && fnorm_sq > 0.0
+    if ok {
+        print("Verification: PASS\n")
+        0
+    } else {
+        print("Verification: FAIL\n")
+        1
+    }
+}
