@@ -1,0 +1,232 @@
+//@ run-pass
+// ============================================================================
+// SOUNIO EPISTEMIC NUCLEAR DECAY — Mo-99/Tc-99m Generator
+// ============================================================================
+// The world's most important medical isotope system:
+// >30 million SPECT diagnostic scans/year depend on this physics.
+//
+// Bateman equations + NUBASE2020 half-life uncertainties + GUM propagation
+// Compiled to bare-metal x86-64 ELF — NO runtime, NO libc, NO JIT.
+//
+// References:
+//   Bateman 1910: "Solution of a System of Differential Equations"
+//   NUBASE2020: Kondev et al., Chinese Physics C 45, 030001 (2021)
+//   JCGM 100:2008 (GUM): Guide to Uncertainty in Measurement
+// ============================================================================
+
+var act_mo: [f64; 256] = [0.0; 256]
+var act_tc: [f64; 256] = [0.0; 256]
+var sig_mo: [f64; 256] = [0.0; 256]
+var sig_tc: [f64; 256] = [0.0; 256]
+var times:  [f64; 256] = [0.0; 256]
+var rk4_out: [f64; 4] = [0.0; 4]
+
+fn abs_f(x: f64) -> f64 { if x < 0.0 { return 0.0 - x }; return x }
+fn sqrt_f(x: f64) -> f64 {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i = 0
+    while i < 25 { y = (y + x / y) * 0.5; i = i + 1 }
+    return y
+}
+fn ln2() -> f64 { return 0.693147180559945 }
+
+fn print_f64_3(v: f64) -> i64 {
+    if v < 0.0 { print("-"); return print_f64_3(0.0 - v) }
+    let ip = v as i64
+    var frac = ((v - (ip as f64)) * 1000.0 + 0.5) as i64
+    if frac >= 1000 { frac = 999 }
+    print_int(ip); print(".")
+    if frac < 100 { print("0") }
+    if frac < 10 { print("0") }
+    print_int(frac); return 0
+}
+fn print_f64_1(v: f64) -> i64 {
+    if v < 0.0 { print("-"); return print_f64_1(0.0 - v) }
+    let ip = v as i64
+    let frac = ((v - (ip as f64)) * 10.0 + 0.5) as i64
+    print_int(ip); print("."); print_int(frac); return 0
+}
+fn print_sci(v: f64) -> i64 {
+    if v < 0.0 { print("-"); return print_sci(0.0 - v) }
+    if v == 0.0 { print("0.00e+00"); return 0 }
+    var e = 0
+    var m = v
+    while m >= 10.0 { m = m / 10.0; e = e + 1 }
+    while m < 1.0 { m = m * 10.0; e = e - 1 }
+    let ip = m as i64
+    let frac = ((m - (ip as f64)) * 100.0 + 0.5) as i64
+    print_int(ip); print(".")
+    if frac < 10 { print("0") }
+    print_int(frac)
+    if e >= 0 { print("e+") } else { print("e-"); e = 0 - e }
+    if e < 10 { print("0") }
+    print_int(e); return 0
+}
+
+// Bateman: Mo-99 -> Tc-99m -> Tc-99(stable)
+// dN_Mo/dt = -lam_Mo * N_Mo
+// dN_Tc/dt = lam_Mo * N_Mo * BR - lam_Tc * N_Tc
+
+fn rk4_step(nm: f64, nt: f64, lm: f64, lt: f64, br: f64, dt: f64) -> i64 {
+    let k1m = 0.0 - lm * nm
+    let k1t = lm * nm * br - lt * nt
+    let m2 = nm + 0.5 * dt * k1m
+    let t2 = nt + 0.5 * dt * k1t
+    let k2m = 0.0 - lm * m2
+    let k2t = lm * m2 * br - lt * t2
+    let m3 = nm + 0.5 * dt * k2m
+    let t3 = nt + 0.5 * dt * k2t
+    let k3m = 0.0 - lm * m3
+    let k3t = lm * m3 * br - lt * t3
+    let m4 = nm + dt * k3m
+    let t4 = nt + dt * k3t
+    let k4m = 0.0 - lm * m4
+    let k4t = lm * m4 * br - lt * t4
+    rk4_out[0 as usize] = nm + dt / 6.0 * (k1m + 2.0 * k2m + 2.0 * k3m + k4m)
+    rk4_out[1 as usize] = nt + dt / 6.0 * (k1t + 2.0 * k2t + 2.0 * k3t + k4t)
+    return 0
+}
+
+fn run_sim(thm: f64, tht: f64, br: f64, ns: i64, dt: f64) -> i64 {
+    let lm = ln2() / thm
+    let lt = ln2() / tht
+    var nm = 1000000.0
+    var nt = 0.0
+    var s = 0
+    while s < ns {
+        act_mo[s as usize] = lm * nm
+        act_tc[s as usize] = lt * nt
+        times[s as usize] = (s as f64) * dt
+        rk4_step(nm, nt, lm, lt, br, dt)
+        nm = rk4_out[0 as usize]
+        nt = rk4_out[1 as usize]
+        if nm < 0.0 { nm = 0.0 }
+        if nt < 0.0 { nt = 0.0 }
+        s = s + 1
+    }
+    return ns
+}
+
+fn propagate_unc(thm: f64, stm: f64, tht: f64, stt: f64, br: f64, ns: i64, dt: f64) -> i64 {
+    let delta = 0.001
+    run_sim(thm * (1.0 + delta), tht, br, ns, dt)
+    var s = 0
+    while s < ns { sig_mo[s as usize] = act_mo[s as usize]; sig_tc[s as usize] = act_tc[s as usize]; s = s + 1 }
+    run_sim(thm, tht, br, ns, dt)
+    s = 0
+    while s < ns {
+        let dAm = (sig_mo[s as usize] - act_mo[s as usize]) / (thm * delta)
+        let dAt_mo = (sig_tc[s as usize] - act_tc[s as usize]) / (thm * delta)
+        let lt = ln2() / tht
+        let lt_hi = ln2() / (tht * (1.0 + delta))
+        let dAt_tc = act_tc[s as usize] * (lt_hi - lt) / lt / (tht * delta)
+        sig_mo[s as usize] = sqrt_f(dAm * dAm * stm * stm)
+        sig_tc[s as usize] = sqrt_f(dAt_mo * dAt_mo * stm * stm + dAt_tc * dAt_tc * stt * stt)
+        s = s + 1
+    }
+    return 0
+}
+
+fn main() -> i64 {
+    print("==========================================================\n")
+    print("  EPISTEMIC NUCLEAR DECAY: Mo-99/Tc-99m Generator\n")
+    print("  Bateman eqs + GUM uncertainty | NUBASE2020\n")
+    print("==========================================================\n\n")
+    let thm = 65.924
+    let stm = 0.006
+    let tht = 6.0058
+    let stt = 0.0012
+    let br = 0.876
+    let dt = 0.5
+    let ns = 240
+    print("  Mo-99  t1/2 = "); print_f64_3(thm); print(" +/- "); print_f64_3(stm); print(" h\n")
+    print("  Tc-99m t1/2 = "); print_f64_3(tht); print(" +/- "); print_f64_3(stt); print(" h\n")
+    print("  BR = "); print_f64_3(br); print("\n\n")
+    propagate_unc(thm, stm, tht, stt, br, ns, dt)
+    print("  Time  A(Mo-99)      sigma       A(Tc-99m)     sigma       Tc/Mo\n")
+    print("  ----  --------      -----       ---------     -----       -----\n")
+    var max_tc = 0.0
+    var max_t = 0.0
+    var eq_t = 0.0
+    var eq_found = 0
+    var tp = 0
+    var i = 0
+    while i < ns {
+        let t = times[i as usize]
+        let am = act_mo[i as usize]
+        let at = act_tc[i as usize]
+        if at > max_tc { max_tc = at; max_t = t }
+        if am > 0.0 && at > 0.0 && eq_found == 0 && t > 30.0 && i > 1 {
+            let r = at / am
+            let rp = act_tc[((i - 1) as usize)] / act_mo[((i - 1) as usize)]
+            if abs_f(r - rp) / r < 0.0001 { eq_t = t; eq_found = 1 }
+        }
+        let h = t as i64
+        if h == 0 || h == 6 || h == 12 || h == 24 || h == 48 || h == 72 || h == 96 {
+            if abs_f(t - (h as f64)) < 0.01 {
+                print("  ")
+                if h < 10 { print(" ") }
+                print_int(h); print("h   ")
+                print_sci(am); print("  "); print_sci(sig_mo[i as usize])
+                print("  "); print_sci(at); print("  "); print_sci(sig_tc[i as usize])
+                if am > 0.0 { print("  "); print_f64_3(at / am) }
+                print("\n")
+            }
+        }
+        i = i + 1
+    }
+    print("\n  Activity (M=Mo-99, T=Tc-99m):\n")
+    let cmax = act_mo[0 as usize]
+    i = 0
+    while i < ns {
+        let h = (times[i as usize]) as i64
+        if h == 0 || h == 12 || h == 24 || h == 48 || h == 72 || h == 96 {
+            if abs_f(times[i as usize] - (h as f64)) < 0.01 {
+                print("  ")
+                if h < 10 { print(" ") }
+                print_int(h); print("h |")
+                let wm = (act_mo[i as usize] / cmax * 40.0) as i64
+                let wt = (act_tc[i as usize] / cmax * 40.0) as i64
+                var j = 0
+                while j < 40 {
+                    if j < wm && j < wt { print("X") }
+                    else if j < wm { print("M") }
+                    else if j < wt { print("T") }
+                    else { print(" ") }
+                    j = j + 1
+                }
+                print("|\n")
+            }
+        }
+        i = i + 1
+    }
+    print("\n  === RESULTS ===\n")
+    print("  Tc-99m peak at t="); print_f64_1(max_t); print("h\n")
+    if eq_found == 1 {
+        let ei = (eq_t / dt) as i64
+        print("  Transient equilibrium at t="); print_f64_1(eq_t); print("h\n")
+        print("  Eq ratio = "); print_f64_3(act_tc[ei as usize] / act_mo[ei as usize])
+        print(" +/- "); print_f64_3(sig_tc[ei as usize] / act_mo[ei as usize]); print("\n")
+    }
+    print("\n  === VALIDATION ===\n")
+    let mo0 = act_mo[0 as usize]
+    let moF = act_mo[((ns - 1) as usize)]
+    if moF < mo0 { print("  PASS: Mo-99 decays\n"); tp = tp + 1 } else { print("  FAIL\n") }
+    if max_tc > 0.0 && max_t > 5.0 && max_t < 30.0 { print("  PASS: Tc-99m peak at "); print_f64_1(max_t); print("h\n"); tp = tp + 1 } else { print("  FAIL\n") }
+    if eq_found == 1 { print("  PASS: Transient equilibrium\n"); tp = tp + 1 } else { print("  FAIL\n") }
+    let hi = (thm / dt) as i64
+    let moh = act_mo[hi as usize]
+    if abs_f(moh / mo0 - 0.5) < 0.01 { print("  PASS: Mo at t1/2 = "); print_f64_1(moh / mo0 * 100.0); print("%\n"); tp = tp + 1 } else { print("  FAIL\n") }
+    if sig_tc[((ns - 10) as usize)] > 0.0 { print("  PASS: GUM uncertainty propagating\n"); tp = tp + 1 } else { print("  FAIL\n") }
+    let lm = ln2() / thm
+    let lt = ln2() / tht
+    let th_r = br * lt / (lt - lm)
+    if eq_found == 1 {
+        let ei2 = (eq_t / dt) as i64
+        let mr = act_tc[ei2 as usize] / act_mo[ei2 as usize]
+        if abs_f(mr - th_r) / th_r < 0.05 { print("  PASS: Eq ratio "); print_f64_3(mr); print(" vs theory "); print_f64_3(th_r); print("\n"); tp = tp + 1 } else { print("  FAIL: "); print_f64_3(mr); print(" vs "); print_f64_3(th_r); print("\n") }
+    } else { print("  SKIP\n") }
+    print("\n  "); print_int(tp); print("/6 PASS\n")
+    if tp >= 5 { return 0 } else { return 1 }
+}
