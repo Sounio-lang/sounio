@@ -11,11 +11,14 @@
 // st layout:
 //   [0]=cp [1]=t [2]=next_slot [3]=loc_count [4]=brk_count
 //   [5]=fn_count [6]=print_int_off [7]=ntok [8]=arr_elem_type [9]=src_size
+//   [13]=gl_count [14]=bss_total
 //   fn table: [100..355]=fn_ns [356..611]=fn_ne [612..867]=fn_tok [868..1123]=fn_off
 //   locals:   [1200..1455]=loc_ns [1456..1711]=loc_ne [1712..1967]=loc_slot [1968..2223]=loc_is_arr
 //   break:    [2300..2363]
 //   if-end:   [2400..2431]
 //   temp:     [2500..2515]
+//   globals:  [3000..3255]=gl_ns [3256..3511]=gl_ne [3512..3767]=gl_bss_off
+//             [3768..4023]=gl_is_arr [4024..4279]=gl_init_val
 
 // ==================== Byte read ====================
 fn rd(buf: [i8; 1048576], off: i64) -> i64 with Panic {
@@ -73,7 +76,7 @@ fn em_imm64(c: [i8; 262144], p: i64, v: i64) -> i64 with Mut, Panic, Div {
 }
 
 // ==================== ELF header ====================
-fn write_ehdr(out: [i8; 262144], entry: i64, fsz: i64, base: i64) -> i64 with Mut, Panic, Div {
+fn write_ehdr(out: [i8; 262144], entry: i64, fsz: i64, base: i64, bss_total: i64) -> i64 with Mut, Panic, Div {
     out[0 as usize] = 0x7F as i8; out[1 as usize] = 69 as i8; out[2 as usize] = 76 as i8; out[3 as usize] = 70 as i8
     out[4 as usize] = 2 as i8; out[5 as usize] = 1 as i8; out[6 as usize] = 1 as i8
     out[16 as usize] = 2 as i8; out[18 as usize] = 0x3E as i8; out[20 as usize] = 1 as i8
@@ -84,7 +87,8 @@ fn write_ehdr(out: [i8; 262144], entry: i64, fsz: i64, base: i64) -> i64 with Mu
     i = 0; while i < 8 { out[(80+i) as usize] = ((base >> (i*8)) & 255) as i8; i = i + 1 }
     i = 0; while i < 8 { out[(88+i) as usize] = ((base >> (i*8)) & 255) as i8; i = i + 1 }
     i = 0; while i < 8 { out[(96+i) as usize] = ((fsz >> (i*8)) & 255) as i8; i = i + 1 }
-    let msz = fsz + 4194304
+    // memsz covers code+data up to BSS_BASE (0x600000) plus BSS
+    let msz = (0x600000 - base) + bss_total + 4096
     i = 0; while i < 8 { out[(104+i) as usize] = ((msz >> (i*8)) & 255) as i8; i = i + 1 }
     out[113 as usize] = 0x10 as i8
     0
@@ -254,6 +258,156 @@ fn find_fn_at(src: [i8; 1048576], st: [i64; 32768], td: [i64; 262144], ft: i64) 
         fi = fi + 1
     }
     0 - 1
+}
+
+// ==================== Global variable support ====================
+// BSS_BASE: fixed virtual address for global data, well above max code (~0x441000)
+// collect_globals scans file-scope `var` declarations, records in st[]
+fn collect_globals(st: [i64; 32768], td: [i64; 262144], src: [i8; 1048576]) -> i64 with Mut, Panic, Div {
+    let ntok = st[7]
+    var ti: i64 = 0
+    var gl_count: i64 = 0
+    var bss_off: i64 = 0
+    var brace_depth: i64 = 0
+    while ti < ntok {
+        let k = tk(td, ti)
+        if k == 22 { brace_depth = brace_depth + 1 }
+        if k == 23 { brace_depth = brace_depth - 1 }
+        if brace_depth == 0 && k == 6 && ti + 1 < ntok && tk(td, ti + 1) == 1 {
+            // file-scope var <name>
+            let vns = tks(td, ti + 1)
+            let vne = tke(td, ti + 1)
+            var is_arr: i64 = 0
+            var arr_size: i64 = 0
+            var init_val: i64 = 0
+            var scan = ti + 2
+            // Parse : <type>
+            if tk(td, scan) == 28 {
+                scan = scan + 1
+                if tk(td, scan) == 24 {
+                    // Array type: [i8; N] or [i64; N]
+                    is_arr = 1
+                    if is_i64_type(src, td, scan) { is_arr = 2 }
+                    // Skip to ';' inside brackets to get array size
+                    while tk(td, scan) != 27 && tk(td, scan) != 25 && tk(td, scan) != 0 { scan = scan + 1 }
+                    if tk(td, scan) == 27 { scan = scan + 1 }
+                    if tk(td, scan) == 2 { arr_size = tkv(td, scan); scan = scan + 1 }
+                    if tk(td, scan) == 25 { scan = scan + 1 }
+                } else {
+                    // Scalar type — skip until '='
+                    while tk(td, scan) != 30 && tk(td, scan) != 0 { scan = scan + 1 }
+                }
+            }
+            // Parse = <init>
+            if tk(td, scan) == 30 {
+                scan = scan + 1
+                if tk(td, scan) == 24 {
+                    // Array init: [0; N] or [-1; N]
+                    scan = scan + 1
+                    if tk(td, scan) == 41 {
+                        // negative init value
+                        scan = scan + 1
+                        if tk(td, scan) == 2 { init_val = 0 - tkv(td, scan) }
+                    } else if tk(td, scan) == 2 {
+                        init_val = tkv(td, scan)
+                    }
+                } else if tk(td, scan) == 41 {
+                    // Scalar negative init
+                    scan = scan + 1
+                    if tk(td, scan) == 2 { init_val = 0 - tkv(td, scan) }
+                } else if tk(td, scan) == 2 {
+                    init_val = tkv(td, scan)
+                }
+            }
+            // Record global
+            st[3000 + gl_count] = vns
+            st[3256 + gl_count] = vne
+            st[3512 + gl_count] = bss_off
+            st[3768 + gl_count] = is_arr
+            st[4024 + gl_count] = init_val
+            // Advance BSS offset
+            if is_arr == 2 { bss_off = bss_off + arr_size * 8
+            } else if is_arr == 1 { bss_off = bss_off + arr_size
+            } else { bss_off = bss_off + 8 }
+            gl_count = gl_count + 1
+        }
+        ti = ti + 1
+    }
+    st[13] = gl_count
+    st[14] = bss_off
+    gl_count
+}
+
+// find_global: given current token st[1], check all globals for name match
+fn find_global(src: [i8; 1048576], st: [i64; 32768], td: [i64; 262144]) -> i64 with Panic, Mut, Div {
+    let t = st[1]
+    let gl_count = st[13]
+    let ns = tks(td, t)
+    let ne = tke(td, t)
+    var gi: i64 = 0
+    while gi < gl_count {
+        if name_eq(src, st[3000 + gi], st[3256 + gi] - st[3000 + gi], ns, ne - ns) == 1 { return gi }
+        gi = gi + 1
+    }
+    0 - 1
+}
+
+// emit_global_inits: emit code to initialize non-zero globals at program start
+// BSS_BASE = 0x600000
+fn emit_global_inits(code: [i8; 262144], st: [i64; 32768]) -> i64 with Mut, Panic, Div {
+    var cp = st[0]
+    let gl_count = st[13]
+    var gi: i64 = 0
+    while gi < gl_count {
+        let init_val = st[4024 + gi]
+        if init_val != 0 {
+            let is_arr = st[3768 + gi]
+            let bss_off = st[3512 + gi]
+            let addr = 0x600000 + bss_off
+            if is_arr == 2 {
+                // i64 array: compute count from next global's offset or bss_total
+                var byte_size: i64 = 0
+                if gi + 1 < gl_count {
+                    byte_size = st[3512 + gi + 1] - bss_off
+                } else { byte_size = st[14] - bss_off }
+                let count = byte_size / 8
+                // movabs rdi, addr
+                cp = e2(code, cp, 0x48, 0xBF); cp = ei64(code, cp, addr)
+                // movabs rcx, count
+                cp = e2(code, cp, 0x48, 0xB9); cp = ei64(code, cp, count)
+                // movabs rax, init_val
+                cp = e2(code, cp, 0x48, 0xB8); cp = ei64(code, cp, init_val)
+                // loop: mov [rdi], rax; add rdi, 8; dec rcx; jnz loop
+                let loop_top = cp
+                cp = e3(code, cp, 0x48, 0x89, 0x07)
+                cp = e3(code, cp, 0x48, 0x83, 0xC7); cp = e1(code, cp, 8)
+                cp = e3(code, cp, 0x48, 0xFF, 0xC9)
+                cp = e2(code, cp, 0x75, 0 - (cp + 2 - loop_top))
+            } else if is_arr == 1 {
+                // i8 array: rep stosb
+                var byte_size2: i64 = 0
+                if gi + 1 < gl_count {
+                    byte_size2 = st[3512 + gi + 1] - bss_off
+                } else { byte_size2 = st[14] - bss_off }
+                // movabs rdi, addr
+                cp = e2(code, cp, 0x48, 0xBF); cp = ei64(code, cp, addr)
+                // movabs rcx, byte_size
+                cp = e2(code, cp, 0x48, 0xB9); cp = ei64(code, cp, byte_size2)
+                // mov al, init_val & 0xFF
+                cp = e1(code, cp, 0xB0); cp = e1(code, cp, init_val & 255)
+                // rep stosb
+                cp = e2(code, cp, 0xF3, 0xAA)
+            } else {
+                // Scalar: movabs rcx, addr; movabs rax, val; mov [rcx], rax
+                cp = e2(code, cp, 0x48, 0xB9); cp = ei64(code, cp, addr)
+                cp = e2(code, cp, 0x48, 0xB8); cp = ei64(code, cp, init_val)
+                cp = e3(code, cp, 0x48, 0x89, 0x01)
+            }
+        }
+        gi = gi + 1
+    }
+    st[0] = cp
+    0
 }
 
 // ==================== Operator precedence ====================
@@ -557,12 +711,29 @@ fn compile_primary(code: [i8; 262144], st: [i64; 32768], src: [i8; 1048576], td:
                 } else { cp = e1(code, cp, 0xE8); cp = ei32(code, cp, 0) }
             }
         } else {
-            // Variable reference
+            // Variable reference — try local first, then global
             let li = find_local(src, st, td)
             if li >= 0 {
                 st[8] = st[1968 + li]
                 let slot = st[1712 + li]
                 cp = e3(code, cp, 0x48, 0x8B, 0x85); cp = ei32(code, cp, 0 - slot)
+            } else {
+                let gi = find_global(src, st, td)
+                if gi >= 0 {
+                    let g_is_arr = st[3768 + gi]
+                    let g_addr = 0x600000 + st[3512 + gi]
+                    st[8] = g_is_arr
+                    if g_is_arr > 0 {
+                        // Array global: load base address into rax
+                        // movabs rax, addr
+                        cp = e2(code, cp, 0x48, 0xB8); cp = ei64(code, cp, g_addr)
+                    } else {
+                        // Scalar global: load value from memory
+                        // movabs rcx, addr; mov rax, [rcx]
+                        cp = e2(code, cp, 0x48, 0xB9); cp = ei64(code, cp, g_addr)
+                        cp = e3(code, cp, 0x48, 0x8B, 0x01)
+                    }
+                }
             }
             t = t + 1
         }
@@ -717,7 +888,11 @@ fn compile_block(code: [i8; 262144], st: [i64; 32768], src: [i8; 1048576], td: [
             let loop_end = cp
             ei32(code, je_patch, loop_end - je_patch - 4)
             var bi = old_brk
-            while bi < brk_count { ei32(code, st[2300 + bi], loop_end - st[2300 + bi] - 4); bi = bi + 1 }
+            while bi < brk_count {
+                let ba = st[2300 + bi]
+                ei32(code, ba, loop_end - ba - 4)
+                bi = bi + 1
+            }
             brk_count = old_brk
         } else if kind == 7 {
             // if
@@ -736,9 +911,11 @@ fn compile_block(code: [i8; 262144], st: [i64; 32768], src: [i8; 1048576], td: [
                 let jmp_end = cp; cp = ei32(code, cp, 0)
                 ei32(code, je_else, cp - je_else - 4)
                 if tk(td, t) == 7 {
-                    // else if chain
+                    // else if chain — depth-indexed to survive recursive compile_block calls
+                    let eif_depth = st[2399]; st[2399] = eif_depth + 1
+                    let eif_base = 2400 + eif_depth * 32
                     var end_count: i64 = 0
-                    st[2400] = jmp_end; end_count = 1
+                    st[eif_base] = jmp_end; end_count = 1
                     var more_else: i64 = 1
                     while more_else == 1 && tk(td, t) == 7 {
                         t = t + 1; st[0] = cp; st[1] = t
@@ -753,7 +930,7 @@ fn compile_block(code: [i8; 262144], st: [i64; 32768], src: [i8; 1048576], td: [
                         if tk(td, t) == 23 { t = t + 1 }
                         if tk(td, t) == 8 {
                             t = t + 1; cp = e1(code, cp, 0xE9)
-                            st[2400 + end_count] = cp; end_count = end_count + 1; cp = ei32(code, cp, 0)
+                            st[eif_base + end_count] = cp; end_count = end_count + 1; cp = ei32(code, cp, 0)
                             ei32(code, je2, cp - je2 - 4)
                             if tk(td, t) != 7 {
                                 if tk(td, t) == 22 { t = t + 1 }
@@ -765,8 +942,13 @@ fn compile_block(code: [i8; 262144], st: [i64; 32768], src: [i8; 1048576], td: [
                             }
                         } else { ei32(code, je2, cp - je2 - 4); more_else = 0 }
                     }
+                    st[2399] = eif_depth
                     var ei2: i64 = 0
-                    while ei2 < end_count { ei32(code, st[2400 + ei2], cp - st[2400 + ei2] - 4); ei2 = ei2 + 1 }
+                    while ei2 < end_count {
+                        let pa = st[eif_base + ei2]
+                        ei32(code, pa, cp - pa - 4)
+                        ei2 = ei2 + 1
+                    }
                 } else if tk(td, t) == 22 {
                     t = t + 1
                     st[0] = cp; st[1] = t; st[2] = next_slot; st[3] = loc_count; st[4] = brk_count
@@ -779,17 +961,25 @@ fn compile_block(code: [i8; 262144], st: [i64; 32768], src: [i8; 1048576], td: [
         } else if kind == 1 {
             // IDENT: assignment / array write / expr stmt
             if tk(td, t + 1) == 30 {
-                st[1] = t; let li = find_local(src, st, td); t = t + 2
+                st[1] = t; let li = find_local(src, st, td)
+                let sgi = find_global(src, st, td); t = t + 2
                 st[0] = cp; st[1] = t
                 st[10] = 0; compile_expr(code, st, src, td, sb); cp = st[0]; t = st[1]
-                if li >= 0 { cp = e3(code, cp, 0x48, 0x89, 0x85); cp = ei32(code, cp, 0 - st[1712 + li]) }
+                if li >= 0 { cp = e3(code, cp, 0x48, 0x89, 0x85); cp = ei32(code, cp, 0 - st[1712 + li])
+                } else if sgi >= 0 {
+                    // Global scalar assignment: movabs rcx, addr; mov [rcx], rax
+                    let sa = 0x600000 + st[3512 + sgi]
+                    cp = e2(code, cp, 0x48, 0xB9); cp = ei64(code, cp, sa)
+                    cp = e3(code, cp, 0x48, 0x89, 0x01)
+                }
             } else if tk(td, t + 1) == 24 {
                 // Peek past [...] for =
                 var peek_t = t + 2; var depth: i64 = 1
                 while depth > 0 && tk(td, peek_t) != 0 { if tk(td, peek_t) == 24 { depth = depth + 1 }; if tk(td, peek_t) == 25 { depth = depth - 1 }; peek_t = peek_t + 1 }
                 if tk(td, peek_t) == 13 { peek_t = peek_t + 1; while tk(td, peek_t) == 1 || tk(td, peek_t) == 2 { peek_t = peek_t + 1 } }
                 if tk(td, peek_t) == 30 {
-                    st[1] = t; let li = find_local(src, st, td); t = t + 2
+                    st[1] = t; let li = find_local(src, st, td)
+                    let agi = find_global(src, st, td); t = t + 2
                     st[0] = cp; st[1] = t
                     st[10] = 0; compile_expr(code, st, src, td, sb); cp = st[0]; t = st[1]
                     if tk(td, t) == 25 { t = t + 1 }
@@ -802,6 +992,13 @@ fn compile_block(code: [i8; 262144], st: [i64; 32768], src: [i8; 1048576], td: [
                         let slot = st[1712 + li]
                         cp = e3(code, cp, 0x48, 0x8B, 0x95); cp = ei32(code, cp, 0 - slot)
                         if st[1968 + li] == 2 { cp = e3(code, cp, 0x48, 0x89, 0x04); cp = e1(code, cp, 0xCA)
+                        } else { cp = e3(code, cp, 0x88, 0x04, 0x0A) }
+                    } else if agi >= 0 {
+                        // Global array element assignment
+                        // movabs rdx, BSS_BASE + offset
+                        let ga = 0x600000 + st[3512 + agi]
+                        cp = e2(code, cp, 0x48, 0xBA); cp = ei64(code, cp, ga)
+                        if st[3768 + agi] == 2 { cp = e3(code, cp, 0x48, 0x89, 0x04); cp = e1(code, cp, 0xCA)
                         } else { cp = e3(code, cp, 0x88, 0x04, 0x0A) }
                     }
                 } else { st[0] = cp; st[1] = t; st[10] = 0; compile_expr(code, st, src, td, sb); cp = st[0]; t = st[1] }
@@ -946,6 +1143,7 @@ fn main() -> i64 with IO, Mut, Panic, Div {
     var st: [i64; 32768] = [0; 32768]
     st_set(st, 7, ntok); st_set(st, 9, src_size)
     let fn_count = collect_fns(st, td)
+    collect_globals(st, td, src)
 
     var code: [i8; 262144] = [0; 262144]
     var sb: [i8; 8192] = [0; 8192]
@@ -956,16 +1154,19 @@ fn main() -> i64 with IO, Mut, Panic, Div {
     st_set(st, 0, pi_end)
 
     compile_all(code, st, src, td, sb)
-    let cp = st_get(st, 0)
     let main_off = find_main(src, st)
-    let tramp = cp
+    // Entry: global inits fall through to trampoline
+    let tramp = st_get(st, 0)
+    emit_global_inits(code, st)
+    let cp = st_get(st, 0)
     let cp_final = build_tramp(code, cp, main_off)
 
     // Write ELF
     var elf: [i8; 262144] = [0; 262144]
     let base: i64 = 0x400000; let text_off: i64 = 4096
+    let bss_total = st_get(st, 14)
     let entry = base + text_off + tramp; let fsz = text_off + cp_final
-    write_ehdr(elf, entry, fsz, base)
+    write_ehdr(elf, entry, fsz, base, bss_total)
     copy_code_to_elf(elf, code, text_off, cp_final)
     write_file(output_path, elf, fsz)
     print("ok\n")
