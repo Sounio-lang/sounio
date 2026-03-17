@@ -18,9 +18,12 @@ use native::encode::*
 use parser::mod::{parse_program_preloaded}
 use parser::parser::{parser_last_error_count}
 
-// Wide output buffer for programs exceeding 65KB code size
-var WIDE_OUT: [i8; 262144] = [0; 262144]
+// Wide output buffer for programs exceeding 65KB code size (16MB — supports ~1MB+ x86-64)
+var WIDE_OUT: [i8; 16777216] = [0; 16777216]
 var WIDE_LEN: i64 = 0
+
+// Global ELF assembly buffer — must be global (not stack) to avoid stack overflow for large binaries
+var GLOBAL_ELF: [i8; 16777216] = [0; 16777216]
 
 // Global variable registry (file-scope var declarations)
 var GLOBAL_NAMES: [Name; 256] = [ir_empty_name(); 256]
@@ -34,7 +37,7 @@ var GLOBAL_BASE_ABS: i64 = 0  // absolute VA of global_base_ptr storage
 
 fn wide_flush(code: CodeBuffer) with Mut, Panic, Div {
     var i: i64 = 0
-    while i < code.len && WIDE_LEN < 262144 {
+    while i < code.len && WIDE_LEN < 16777216 {
         WIDE_OUT[WIDE_LEN as usize] = code.bytes[i as usize]
         WIDE_LEN = WIDE_LEN + 1
         i = i + 1
@@ -4936,65 +4939,67 @@ fn main() -> i64 with IO, Mut, Panic, Div, Alloc {
     let text_off: i64 = 4096
     let entry_va = base_addr + text_off + tramp_off
 
-    var elf: [i8; 262144] = [0; 262144]
-    elf[0 as usize] = 0x7f as i8
-    elf[1 as usize] = 69 as i8
-    elf[2 as usize] = 76 as i8
-    elf[3 as usize] = 70 as i8
-    elf[4 as usize] = 2 as i8
-    elf[5 as usize] = 1 as i8
-    elf[6 as usize] = 1 as i8
-    elf[16 as usize] = 2 as i8
-    elf[18 as usize] = 0x3e as i8
-    elf[20 as usize] = 1 as i8
-    elf[24 as usize] = (entry_va & 0xFF) as i8
-    elf[25 as usize] = ((entry_va >> 8) & 0xFF) as i8
-    elf[26 as usize] = ((entry_va >> 16) & 0xFF) as i8
-    elf[27 as usize] = ((entry_va >> 24) & 0xFF) as i8
-    elf[28 as usize] = ((entry_va >> 32) & 0xFF) as i8
-    elf[29 as usize] = ((entry_va >> 40) & 0xFF) as i8
-    elf[30 as usize] = ((entry_va >> 48) & 0xFF) as i8
-    elf[31 as usize] = ((entry_va >> 56) & 0xFF) as i8
-    elf[32 as usize] = 64 as i8
-    elf[52 as usize] = 64 as i8
-    elf[54 as usize] = 56 as i8
-    elf[56 as usize] = 2 as i8
-    elf[58 as usize] = 64 as i8
-    elf[64 as usize] = 1 as i8
-    elf[68 as usize] = 7 as i8  // PF_R|PF_W|PF_X — needed for saved_rsp write
-    elf[80 as usize] = (base_addr & 0xFF) as i8
-    elf[81 as usize] = ((base_addr >> 8) & 0xFF) as i8
-    elf[82 as usize] = ((base_addr >> 16) & 0xFF) as i8
-    elf[83 as usize] = ((base_addr >> 24) & 0xFF) as i8
-    elf[88 as usize] = (base_addr & 0xFF) as i8
-    elf[89 as usize] = ((base_addr >> 8) & 0xFF) as i8
-    elf[90 as usize] = ((base_addr >> 16) & 0xFF) as i8
-    elf[91 as usize] = ((base_addr >> 24) & 0xFF) as i8
+    // Use global ELF buffer (not stack-allocated) to support 16MB output
+    var ei: i64 = 0
+    while ei < 16777216 { GLOBAL_ELF[ei as usize] = 0; ei = ei + 1 }
+    GLOBAL_ELF[0 as usize] = 0x7f as i8
+    GLOBAL_ELF[1 as usize] = 69 as i8
+    GLOBAL_ELF[2 as usize] = 76 as i8
+    GLOBAL_ELF[3 as usize] = 70 as i8
+    GLOBAL_ELF[4 as usize] = 2 as i8
+    GLOBAL_ELF[5 as usize] = 1 as i8
+    GLOBAL_ELF[6 as usize] = 1 as i8
+    GLOBAL_ELF[16 as usize] = 2 as i8
+    GLOBAL_ELF[18 as usize] = 0x3e as i8
+    GLOBAL_ELF[20 as usize] = 1 as i8
+    GLOBAL_ELF[24 as usize] = (entry_va & 0xFF) as i8
+    GLOBAL_ELF[25 as usize] = ((entry_va >> 8) & 0xFF) as i8
+    GLOBAL_ELF[26 as usize] = ((entry_va >> 16) & 0xFF) as i8
+    GLOBAL_ELF[27 as usize] = ((entry_va >> 24) & 0xFF) as i8
+    GLOBAL_ELF[28 as usize] = ((entry_va >> 32) & 0xFF) as i8
+    GLOBAL_ELF[29 as usize] = ((entry_va >> 40) & 0xFF) as i8
+    GLOBAL_ELF[30 as usize] = ((entry_va >> 48) & 0xFF) as i8
+    GLOBAL_ELF[31 as usize] = ((entry_va >> 56) & 0xFF) as i8
+    GLOBAL_ELF[32 as usize] = 64 as i8
+    GLOBAL_ELF[52 as usize] = 64 as i8
+    GLOBAL_ELF[54 as usize] = 56 as i8
+    GLOBAL_ELF[56 as usize] = 2 as i8
+    GLOBAL_ELF[58 as usize] = 64 as i8
+    GLOBAL_ELF[64 as usize] = 1 as i8
+    GLOBAL_ELF[68 as usize] = 7 as i8  // PF_R|PF_W|PF_X — needed for saved_rsp write
+    GLOBAL_ELF[80 as usize] = (base_addr & 0xFF) as i8
+    GLOBAL_ELF[81 as usize] = ((base_addr >> 8) & 0xFF) as i8
+    GLOBAL_ELF[82 as usize] = ((base_addr >> 16) & 0xFF) as i8
+    GLOBAL_ELF[83 as usize] = ((base_addr >> 24) & 0xFF) as i8
+    GLOBAL_ELF[88 as usize] = (base_addr & 0xFF) as i8
+    GLOBAL_ELF[89 as usize] = ((base_addr >> 8) & 0xFF) as i8
+    GLOBAL_ELF[90 as usize] = ((base_addr >> 16) & 0xFF) as i8
+    GLOBAL_ELF[91 as usize] = ((base_addr >> 24) & 0xFF) as i8
     let fsz = text_off + total_code
-    elf[96 as usize] = (fsz & 0xFF) as i8
-    elf[97 as usize] = ((fsz >> 8) & 0xFF) as i8
-    elf[98 as usize] = ((fsz >> 16) & 0xFF) as i8
-    elf[99 as usize] = ((fsz >> 24) & 0xFF) as i8
-    elf[104 as usize] = (fsz & 0xFF) as i8
-    elf[105 as usize] = ((fsz >> 8) & 0xFF) as i8
-    elf[106 as usize] = ((fsz >> 16) & 0xFF) as i8
-    elf[107 as usize] = ((fsz >> 24) & 0xFF) as i8
-    elf[112 as usize] = 0 as i8
-    elf[113 as usize] = 16 as i8
-    elf[120 as usize] = 0x51 as i8
-    elf[121 as usize] = 0xe5 as i8
-    elf[122 as usize] = 0x74 as i8
-    elf[123 as usize] = 0x64 as i8
-    elf[124 as usize] = 6 as i8
+    GLOBAL_ELF[96 as usize] = (fsz & 0xFF) as i8
+    GLOBAL_ELF[97 as usize] = ((fsz >> 8) & 0xFF) as i8
+    GLOBAL_ELF[98 as usize] = ((fsz >> 16) & 0xFF) as i8
+    GLOBAL_ELF[99 as usize] = ((fsz >> 24) & 0xFF) as i8
+    GLOBAL_ELF[104 as usize] = (fsz & 0xFF) as i8
+    GLOBAL_ELF[105 as usize] = ((fsz >> 8) & 0xFF) as i8
+    GLOBAL_ELF[106 as usize] = ((fsz >> 16) & 0xFF) as i8
+    GLOBAL_ELF[107 as usize] = ((fsz >> 24) & 0xFF) as i8
+    GLOBAL_ELF[112 as usize] = 0 as i8
+    GLOBAL_ELF[113 as usize] = 16 as i8
+    GLOBAL_ELF[120 as usize] = 0x51 as i8
+    GLOBAL_ELF[121 as usize] = 0xe5 as i8
+    GLOBAL_ELF[122 as usize] = 0x74 as i8
+    GLOBAL_ELF[123 as usize] = 0x64 as i8
+    GLOBAL_ELF[124 as usize] = 6 as i8
 
     var ci: i64 = 0
-    while ci < total_code && (text_off + ci) < 262144 {
-        elf[(text_off + ci) as usize] = WIDE_OUT[ci as usize]
+    while ci < total_code && (text_off + ci) < 16777216 {
+        GLOBAL_ELF[(text_off + ci) as usize] = WIDE_OUT[ci as usize]
         ci = ci + 1
     }
 
     let total_len = text_off + total_code
-    let write_ok = io_write_wide_binary(output_path, elf, total_len)
+    let write_ok = io_write_huge_binary(output_path, GLOBAL_ELF, total_len)
     if !write_ok {
         print("render_compile: write_error\n")
         return 5
