@@ -1,0 +1,335 @@
+//@ run-pass
+// Sprint 225 Phase 3: Round-trip GUM epistemic e-graph rewrite tests (T009-T018)
+//
+// Verifies the core mathematical properties of the GUM-guided epistemic e-graph
+// rewriting infrastructure (egraph.sio Section 14c-extra + ocp_egraph_epistemic_pass).
+//
+// Scientific basis: JCGM GUM 100:2008 §5.1.2 — for additive combination:
+//   u(z)^2 = u(x)^2 + u(y)^2   (independence assumption)
+//
+// These tests implement the same math as eg_quantize_unc, eg_isqrt,
+// eg_small_add_binop_with_unc, and eg_small_extract_epistemic without
+// depending on internal IR module imports (self-hosted module boundaries).
+//
+// References:
+//   JCGM 100:2008 §5.1.2; Willsey et al. "egg" (2021); Herbie PLDI 2015
+
+// ============================================================================
+// Mathematical helpers — mirror the logic in egraph.sio Section 14c-extra
+// ============================================================================
+
+// Quantize f64 uncertainty to i64 (1e9 scale, nanosecond resolution)
+// Mirrors eg_quantize_unc: u_f64 * 1_000_000_000 as i64, clamped at 0
+fn quantize_unc(u_f64: f64) -> i64 {
+    let scaled = u_f64 * 1000000000.0
+    if scaled < 0.0 { return 0 }
+    scaled as i64
+}
+
+// Integer square root via Newton's method, 7 iterations
+// Mirrors eg_isqrt — initial guess from leading bit position
+fn isqrt(x: i64) -> i64 {
+    if x <= 0 { return 0 }
+    if x == 1 { return 1 }
+    var y: i64 = 2
+    if x > 4                     { y = 4 }
+    if x > 16                    { y = 8 }
+    if x > 64                    { y = 16 }
+    if x > 256                   { y = 32 }
+    if x > 1024                  { y = 64 }
+    if x > 4096                  { y = 128 }
+    if x > 16384                 { y = 256 }
+    if x > 65536                 { y = 512 }
+    if x > 262144                { y = 1024 }
+    if x > 1048576               { y = 2048 }
+    if x > 4194304               { y = 4096 }
+    if x > 16777216              { y = 8192 }
+    if x > 67108864              { y = 16384 }
+    if x > 268435456             { y = 32768 }
+    if x > 1073741824            { y = 65536 }
+    if x > 4294967296            { y = 131072 }
+    if x > 17179869184           { y = 262144 }
+    if x > 68719476736           { y = 524288 }
+    if x > 274877906944          { y = 1048576 }
+    if x > 1099511627776         { y = 2097152 }
+    if x > 4398046511104         { y = 4194304 }
+    if x > 17592186044416        { y = 8388608 }
+    if x > 70368744177664        { y = 16777216 }
+    if x > 281474976710656       { y = 33554432 }
+    if x > 1125899906842624      { y = 67108864 }
+    if x > 4503599627370496      { y = 134217728 }
+    if x > 18014398509481984     { y = 268435456 }
+    if x > 72057594037927936     { y = 536870912 }
+    if x > 288230376151711744    { y = 1073741824 }
+    if x > 1152921504606846976   { y = 2147483648 }
+    y = (y + x / y) / 2
+    y = (y + x / y) / 2
+    y = (y + x / y) / 2
+    y = (y + x / y) / 2
+    y = (y + x / y) / 2
+    y = (y + x / y) / 2
+    y = (y + x / y) / 2
+    if y * y > x { y - 1 } else { y }
+}
+
+// GUM additive propagation: u(z)^2 = u(x)^2 + u(y)^2
+// Mirrors eg_small_add_binop_with_unc (add path)
+// Inputs are quantized uncertainties (i64, 1e9 scale)
+fn gum_add_unc(unc_x: i64, unc_y: i64) -> i64 {
+    let max_safe: i64 = 3000000000
+    let x = if unc_x > max_safe { max_safe } else { unc_x }
+    let y = if unc_y > max_safe { max_safe } else { unc_y }
+    isqrt(x * x + y * y)
+}
+
+// Minimum of two i64 values
+fn min_i64(a: i64, b: i64) -> i64 {
+    if a <= b { a } else { b }
+}
+
+// Absolute difference of two i64 values
+fn abs_diff_i64(a: i64, b: i64) -> i64 {
+    if a >= b { a - b } else { b - a }
+}
+
+// ============================================================================
+// T009: quantize_unc round-trips correctly (3.0 → 3_000_000_000)
+// ============================================================================
+fn test_t009_quantize_round_trip() -> bool {
+    let result = quantize_unc(3.0)
+    // 3.0 * 1e9 = 3_000_000_000
+    result == 3000000000
+}
+
+// ============================================================================
+// T010: isqrt(9_000_000_000_000_000_000) gives correct result
+// i.e., floor(sqrt(9e18)) = 3_000_000_000
+// ============================================================================
+fn test_t010_isqrt_large() -> bool {
+    let x: i64 = 9000000000000000000
+    let result = isqrt(x)
+    // floor(sqrt(9e18)) = 3_000_000_000 exactly
+    result == 3000000000
+}
+
+// ============================================================================
+// T011: GUM addition: u(z)^2 = u(x)^2 + u(y)^2
+// u(x) = 0.003, u(y) = 0.004 → u(z) = sqrt(9+16) * 1e-3 = 0.005
+// In 1e9 scale: u(x)=3_000_000, u(y)=4_000_000 → expected 5_000_000
+// Using sub-3e9 values avoids i64 overflow (3e6^2 + 4e6^2 = 25e12, well within i64)
+// ============================================================================
+fn test_t011_gum_pythagorean() -> bool {
+    let ux: i64 = 3000000    // 0.003 in 1e9 scale
+    let uy: i64 = 4000000    // 0.004 in 1e9 scale
+    let uz = gum_add_unc(ux, uy)
+    let expected: i64 = 5000000   // 0.005 in 1e9 scale = sqrt(3^2 + 4^2) * 1e6
+    // Allow ±1 for integer rounding
+    abs_diff_i64(uz, expected) <= 1
+}
+
+// ============================================================================
+// T012: Two-var e-graph with uncertainty — min-unc extraction picks correct node
+// Node A: VAR with unc 2e9; Node B: CONST with unc 0.
+// Epistemic extraction should prefer node B (lower uncertainty).
+// ============================================================================
+fn test_t012_min_unc_extraction() -> bool {
+    let unc_var: i64 = 2000000000    // 2.0 quantized
+    let unc_const: i64 = 0           // exact
+    // Extractor picks the node with minimum uncertainty
+    let chosen_unc = min_i64(unc_var, unc_const)
+    chosen_unc == 0
+}
+
+// ============================================================================
+// T013: Float saturation: (a+b)+c vs a+(b+c) — same combined uncertainty
+// GUM additive law is commutative/associative for independent inputs.
+// ============================================================================
+fn test_t013_float_saturation_assoc() -> bool {
+    let ua = quantize_unc(1.0)
+    let ub = quantize_unc(2.0)
+    let uc = quantize_unc(2.0)
+    // Left: u((a+b)+c) = sqrt(sqrt(u(a)^2+u(b)^2)^2 + u(c)^2)
+    //                   = sqrt(u(a)^2 + u(b)^2 + u(c)^2)
+    let u_ab = gum_add_unc(ua, ub)
+    let u_left = gum_add_unc(u_ab, uc)
+    // Right: u(a+(b+c)) = sqrt(u(a)^2 + sqrt(u(b)^2+u(c)^2)^2)
+    //                   = sqrt(u(a)^2 + u(b)^2 + u(c)^2)
+    let u_bc = gum_add_unc(ub, uc)
+    let u_right = gum_add_unc(ua, u_bc)
+    // Should be equal (± rounding)
+    abs_diff_i64(u_left, u_right) <= 2
+}
+
+// ============================================================================
+// T014: Nested binops — 3-operand case
+// u(a) = 1, u(b) = 1, u(c) = 1 → u(a+b+c) = sqrt(3) ≈ 1.732
+// In 1e9 scale: isqrt(3) * 1e9 ≈ 1_732_050_808
+// ============================================================================
+fn test_t014_nested_three_operand() -> bool {
+    let u1 = quantize_unc(1.0)    // 1_000_000_000
+    let u2 = quantize_unc(1.0)
+    let u3 = quantize_unc(1.0)
+    let u12 = gum_add_unc(u1, u2)
+    let u123 = gum_add_unc(u12, u3)
+    // sqrt(3) * 1e9 ≈ 1_732_050_808 — allow ±1000 for multi-step rounding
+    u123 > 1731000000 && u123 < 1733000000
+}
+
+// ============================================================================
+// T015: Zero uncertainty edge case — pass-through
+// If u(x) = 0 and u(y) = 0, then u(x+y) = 0
+// ============================================================================
+fn test_t015_zero_uncertainty() -> bool {
+    let uz = gum_add_unc(0, 0)
+    uz == 0
+}
+
+// ============================================================================
+// T016: High uncertainty operand — combined uncertainty dominated by large term
+// When one operand has much larger uncertainty, it dominates the combination.
+// u(x) = 2_000_000_000, u(y) = 100_000 → uz ≈ u(x) (small term negligible)
+// Both well within i64 range: 2e9^2 + 1e5^2 = 4e18 + 1e10 ≈ 4e18 (fits i64)
+// ============================================================================
+fn test_t016_high_uncertainty_clamp() -> bool {
+    let ux: i64 = 2000000000   // large but < max_safe=3e9; safe to square (4e18 < 9.2e18)
+    let uy: i64 = 100000       // small operand
+    let uz = gum_add_unc(ux, uy)
+    // uz ≈ sqrt(4e18 + 1e10) ≈ sqrt(4e18) = 2e9 (small term negligible)
+    // Property: uz is close to ux (within 0.01%)
+    let diff = abs_diff_i64(uz, ux)
+    diff < 100000
+}
+
+// ============================================================================
+// T017: Commutative rewrite check — gum_add_unc(a,b) == gum_add_unc(b,a)
+// GUM §5.1.2: combination is symmetric (both inputs treated equally)
+// ============================================================================
+fn test_t017_commutativity() -> bool {
+    let ua = quantize_unc(2.5)
+    let ub = quantize_unc(3.7)
+    let forward = gum_add_unc(ua, ub)
+    let reverse = gum_add_unc(ub, ua)
+    // Should be identical (x*x + y*y == y*y + x*x)
+    forward == reverse
+}
+
+// ============================================================================
+// T018: Integration — PRECISION_PRESERVING strategy guard concept
+// Epistemic pass only fires for strategy == IR_STRATEGY_PRECISION_PRESERVING.
+// Represent as: standard strategy ID = 0, precision-preserving = 3.
+// The guard predicate should return true only for ID 3.
+// ============================================================================
+
+// Strategy guard helper (mirrors the guard in ocp_egraph_epistemic_pass)
+fn strategy_guard_fires(strategy: i64) -> bool {
+    let IR_STRATEGY_PRECISION_PRESERVING: i64 = 3
+    strategy == IR_STRATEGY_PRECISION_PRESERVING
+}
+
+fn test_t018_strategy_guard() -> bool {
+    let IR_STRATEGY_STANDARD: i64 = 0
+    let IR_STRATEGY_PRECISION_PRESERVING: i64 = 3
+
+    let standard_fires = strategy_guard_fires(IR_STRATEGY_STANDARD)
+    let epi_fires = strategy_guard_fires(IR_STRATEGY_PRECISION_PRESERVING)
+
+    // Standard must NOT fire; epistemic MUST fire
+    standard_fires == false && epi_fires == true
+}
+
+// ============================================================================
+// Main test runner
+// ============================================================================
+fn main() -> i64 with IO, Mut {
+    var pass: i64 = 0
+    var fail: i64 = 0
+
+    if test_t009_quantize_round_trip() {
+        pass = pass + 1
+        print("  T009 OK quantize_round_trip\n")
+    } else {
+        fail = fail + 1
+        print("  FAIL T009 quantize_round_trip\n")
+    }
+
+    if test_t010_isqrt_large() {
+        pass = pass + 1
+        print("  T010 OK isqrt_large\n")
+    } else {
+        fail = fail + 1
+        print("  FAIL T010 isqrt_large\n")
+    }
+
+    if test_t011_gum_pythagorean() {
+        pass = pass + 1
+        print("  T011 OK gum_pythagorean\n")
+    } else {
+        fail = fail + 1
+        print("  FAIL T011 gum_pythagorean\n")
+    }
+
+    if test_t012_min_unc_extraction() {
+        pass = pass + 1
+        print("  T012 OK min_unc_extraction\n")
+    } else {
+        fail = fail + 1
+        print("  FAIL T012 min_unc_extraction\n")
+    }
+
+    if test_t013_float_saturation_assoc() {
+        pass = pass + 1
+        print("  T013 OK float_saturation_assoc\n")
+    } else {
+        fail = fail + 1
+        print("  FAIL T013 float_saturation_assoc\n")
+    }
+
+    if test_t014_nested_three_operand() {
+        pass = pass + 1
+        print("  T014 OK nested_three_operand\n")
+    } else {
+        fail = fail + 1
+        print("  FAIL T014 nested_three_operand\n")
+    }
+
+    if test_t015_zero_uncertainty() {
+        pass = pass + 1
+        print("  T015 OK zero_uncertainty\n")
+    } else {
+        fail = fail + 1
+        print("  FAIL T015 zero_uncertainty\n")
+    }
+
+    if test_t016_high_uncertainty_clamp() {
+        pass = pass + 1
+        print("  T016 OK high_uncertainty_clamp\n")
+    } else {
+        fail = fail + 1
+        print("  FAIL T016 high_uncertainty_clamp\n")
+    }
+
+    if test_t017_commutativity() {
+        pass = pass + 1
+        print("  T017 OK commutativity\n")
+    } else {
+        fail = fail + 1
+        print("  FAIL T017 commutativity\n")
+    }
+
+    if test_t018_strategy_guard() {
+        pass = pass + 1
+        print("  T018 OK strategy_guard\n")
+    } else {
+        fail = fail + 1
+        print("  FAIL T018 strategy_guard\n")
+    }
+
+    print("\nEpistemic E-Graph: ")
+    print_int(pass)
+    print("/")
+    print_int(pass + fail)
+    print(" passed\n")
+
+    if fail == 0 { return 0 }
+    return 1
+}

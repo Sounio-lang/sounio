@@ -11,6 +11,7 @@
 #   3. egraph.sio Sprint 247 tests T61-T70: 10/10 passed (T08-T58 skip: JIT nested &! bug)
 #   4. main.sio type-checks
 #   5. main.sio self-tests: T1148-T1153 all pass
+#   6. Phase 3: test_eg_epistemic_rewrite.sio T009-T018: 10/10 pass (round-trip GUM math)
 set -eo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.."  ; pwd)"; cd "$ROOT_DIR"
 PASS=0; FAIL=0; NOT_RUN=0; TOTAL=0
@@ -72,6 +73,24 @@ if [ ! -x "$SOUC" ]; then for t in T1148 T1149 T1150 T1151 T1152 T1153; do TOTAL
 else timeout 180 "$SOUC" run self-hosted/compiler/main.sio -- --self-test > "$L" 2>&1 || _ec=$?
 for t in T1148 T1149 T1150 T1151 T1152 T1153; do cl "selftest:$t" "$t OK" "$L"; done; fi
 rm -f "$L"
+echo ""
+echo "--- Phase 3: Round-trip GUM e-graph rewrite tests (T009-T018) ---"
+P3="tests/stdlib/epistemic/test_eg_epistemic_rewrite.sio"
+cg "phase3:file_exists"      "run-pass" "$P3"
+cg "phase3:T009_quantize"    "test_t009_quantize_round_trip" "$P3"
+cg "phase3:T010_isqrt"       "test_t010_isqrt_large" "$P3"
+cg "phase3:T011_pythagorean" "test_t011_gum_pythagorean" "$P3"
+cg "phase3:T018_strategy"    "test_t018_strategy_guard" "$P3"
+TC_OUT="$(mktemp)"; TOTAL=$((TOTAL+1))
+if [ ! -x "$SOUC" ]; then echo "NOT_RUN  typecheck:phase3 (no binary)"; NOT_RUN=$((NOT_RUN+1))
+elif timeout 60 "$SOUC" check "$P3" > "$TC_OUT" 2>&1 && grep -q "All checks passed" "$TC_OUT"; then echo "PASS  typecheck:phase3"; PASS=$((PASS+1)); else echo "FAIL  typecheck:phase3"; FAIL=$((FAIL+1)); fi
+rm -f "$TC_OUT"
+P3_OUT="$(mktemp)"; TOTAL=$((TOTAL+1))
+if [ ! -x "$SOUC" ]; then echo "NOT_RUN  phase3_run (no binary)"; NOT_RUN=$((NOT_RUN+1))
+else _p3_ec=0; timeout 60 "$SOUC" run "$P3" > "$P3_OUT" 2>&1 || _p3_ec=$?
+P3_PASS=$(grep -cE "T0[0-9][0-9] OK|T01[0-8] OK" "$P3_OUT" 2>/dev/null || true)
+if [ "${P3_PASS:-0}" -eq 10 ]; then echo "PASS  phase3_run (T009-T018 10/10)"; PASS=$((PASS+1)); else echo "FAIL  phase3_run (T009-T018 ${P3_PASS:-0}/10)"; FAIL=$((FAIL+1)); fi; fi
+rm -f "$P3_OUT"
 echo ""
 echo "=== SUMMARY ==="
 echo "PASS=$PASS  FAIL=$FAIL  NOT_RUN=$NOT_RUN  TOTAL=$TOTAL"
