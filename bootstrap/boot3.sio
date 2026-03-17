@@ -533,6 +533,10 @@ fn is_builtin(src: [i8; 1048576], ns: i64, ne: i64) -> i64 with Panic {
     if n == 9 && rd(src,ns)==102 && rd(src,ns+1)==105 && rd(src,ns+2)==108 && rd(src,ns+3)==101 && rd(src,ns+4)==95 && rd(src,ns+5)==115 && rd(src,ns+6)==105 && rd(src,ns+7)==122 && rd(src,ns+8)==101 { return 5 }
     if n == 9 && rd(src,ns)==114 && rd(src,ns+1)==101 && rd(src,ns+2)==97 && rd(src,ns+3)==100 && rd(src,ns+4)==95 && rd(src,ns+5)==102 && rd(src,ns+6)==105 && rd(src,ns+7)==108 && rd(src,ns+8)==101 { return 6 }
     if n == 10 && rd(src,ns)==119 && rd(src,ns+1)==114 && rd(src,ns+2)==105 && rd(src,ns+3)==116 && rd(src,ns+4)==101 && rd(src,ns+5)==95 && rd(src,ns+6)==102 && rd(src,ns+7)==105 && rd(src,ns+8)==108 && rd(src,ns+9)==101 { return 7 }
+    // str_len: s=115 t=116 r=114 _=95 l=108 e=101 n=110
+    if n == 7 && rd(src,ns)==115 && rd(src,ns+1)==116 && rd(src,ns+2)==114 && rd(src,ns+3)==95 && rd(src,ns+4)==108 && rd(src,ns+5)==101 && rd(src,ns+6)==110 { return 8 }
+    // str_char_at: s=115 t=116 r=114 _=95 c=99 h=104 a=97 r=114 _=95 a=97 t=116
+    if n == 11 && rd(src,ns)==115 && rd(src,ns+1)==116 && rd(src,ns+2)==114 && rd(src,ns+3)==95 && rd(src,ns+4)==99 && rd(src,ns+5)==104 && rd(src,ns+6)==97 && rd(src,ns+7)==114 && rd(src,ns+8)==95 && rd(src,ns+9)==97 && rd(src,ns+10)==116 { return 9 }
     0
 }
 
@@ -570,8 +574,16 @@ fn compile_primary(code: [i8; 262144], st: [i64; 32768], src: [i8; 1048576], td:
     } else if kind == 15 { cp = em_imm64(code, cp, 0); t = t + 1
     } else if kind == 3 {
         let slen = decode_str(src, sb, tks(td, t), tke(td, t))
-        cp = em_print_str(code, sb, cp, slen)
-        cp = e2(code, cp, 0x31, 0xC0); t = t + 1
+        // String literal as expression: jmp over data, then LEA to produce pointer
+        let total_data = slen + 1  // string bytes + null terminator
+        cp = e1(code, cp, 0xEB); cp = e1(code, cp, total_data)  // jmp past data
+        var si3: i64 = 0
+        while si3 < slen { cp = e1(code, cp, rds(sb, si3)); si3 = si3 + 1 }
+        cp = e1(code, cp, 0)  // null terminator
+        // lea rax, [rip - (total_data + 7)]
+        cp = e3(code, cp, 0x48, 0x8D, 0x05)
+        cp = ei32(code, cp, 0 - (total_data + 7))
+        t = t + 1
     } else if kind == 41 {
         t = t + 1; st[0] = cp; st[1] = t
         compile_primary(code, st, src, td, sb); cp = st[0]; t = st[1]
@@ -684,6 +696,31 @@ fn compile_primary(code: [i8; 262144], st: [i64; 32768], src: [i8; 1048576], td:
                 cp = e1(code, cp, 0x5F); cp = e1(code, cp, 0xB8); cp = ei32(code, cp, 3); cp = e2(code, cp, 0x0F, 0x05)
                 cp = e3(code, cp, 0x48, 0x83, 0xC4); cp = e1(code, cp, 16)
                 cp = e2(code, cp, 0x31, 0xC0)
+            } else if bi == 8 {
+                // str_len(s) — inline strlen: count bytes until null
+                st[0] = cp; st[1] = t
+                st[10] = 0; compile_expr(code, st, src, td, sb); cp = st[0]; t = st[1]
+                if tk(td, t) == 21 { t = t + 1 }
+                cp = e3(code, cp, 0x48, 0x89, 0xC7)  // mov rdi, rax
+                cp = e3(code, cp, 0x48, 0x31, 0xC0)  // xor rax, rax
+                // .loop: cmp byte [rdi+rax], 0
+                cp = e2(code, cp, 0x80, 0x3C); cp = e2(code, cp, 0x07, 0x00)
+                cp = e2(code, cp, 0x74, 0x05)  // je +5 (to done)
+                cp = e3(code, cp, 0x48, 0xFF, 0xC0)  // inc rax
+                cp = e1(code, cp, 0xEB); cp = e1(code, cp, 245)  // jmp -11 (0xF5)
+            } else if bi == 9 {
+                // str_char_at(s, i) — read byte at string[i]
+                st[0] = cp; st[1] = t
+                st[10] = 0; compile_expr(code, st, src, td, sb); cp = st[0]; t = st[1]
+                cp = e1(code, cp, 0x50)  // push rax (s)
+                if tk(td, t) == 26 { t = t + 1 }
+                st[0] = cp; st[1] = t
+                st[10] = 0; compile_expr(code, st, src, td, sb); cp = st[0]; t = st[1]
+                if tk(td, t) == 21 { t = t + 1 }
+                cp = e3(code, cp, 0x48, 0x89, 0xC6)  // mov rsi, rax (index)
+                cp = e1(code, cp, 0x5F)  // pop rdi (string ptr)
+                // movzx eax, byte [rdi+rsi]
+                cp = e2(code, cp, 0x0F, 0xB6); cp = e2(code, cp, 0x04, 0x37)
             } else {
                 // General function call (≤6 args) — push/pop arg passing
                 var argc: i64 = 0
@@ -822,7 +859,11 @@ fn compile_block(code: [i8; 262144], st: [i64; 32768], src: [i8; 1048576], td: [
         st[3] = loc_count
         let kind = tk(td, t)
         if kind == 27 { t = t + 1
-        } else if kind == 16 { t = t + 1  // continue — skip (simplified)
+        } else if kind == 16 {
+            // continue — jump back to loop top (stored in st[15])
+            let ct_addr = st[15]
+            if ct_addr > 0 { cp = e1(code, cp, 0xE9); cp = ei32(code, cp, ct_addr - (cp + 4)) }
+            t = t + 1
         } else if kind == 5 || kind == 6 {
             // let / var
             t = t + 1
@@ -874,6 +915,7 @@ fn compile_block(code: [i8; 262144], st: [i64; 32768], src: [i8; 1048576], td: [
             cp = ei32(code, cp, 0)
         } else if kind == 9 {
             t = t + 1; let loop_top = cp; let old_brk = brk_count
+            let old_cont = st[15]; st[15] = loop_top  // save continue target
             st[0] = cp; st[1] = t
             st[10] = 0; compile_expr(code, st, src, td, sb); cp = st[0]; t = st[1]
             cp = e3(code, cp, 0x48, 0x85, 0xC0)
@@ -883,6 +925,7 @@ fn compile_block(code: [i8; 262144], st: [i64; 32768], src: [i8; 1048576], td: [
             st[0] = cp; st[1] = t; st[2] = next_slot; st[3] = loc_count; st[4] = brk_count
             compile_block(code, st, src, td, sb)
             cp = st[0]; t = st[1]; next_slot = st[2]; loc_count = st[3]; brk_count = st[4]
+            st[15] = old_cont  // restore continue target for outer loop
             if tk(td, t) == 23 { t = t + 1 }
             cp = e1(code, cp, 0xE9); cp = ei32(code, cp, loop_top - (cp + 4))
             let loop_end = cp
@@ -1003,7 +1046,7 @@ fn compile_block(code: [i8; 262144], st: [i64; 32768], src: [i8; 1048576], td: [
                     }
                 } else { st[0] = cp; st[1] = t; st[10] = 0; compile_expr(code, st, src, td, sb); cp = st[0]; t = st[1] }
             } else { st[0] = cp; st[1] = t; st[10] = 0; compile_expr(code, st, src, td, sb); cp = st[0]; t = st[1] }
-        } else if kind == 3 || kind == 2 || kind == 41 {
+        } else if kind == 3 || kind == 2 || kind == 41 || kind == 14 || kind == 15 || kind == 20 {
             st[0] = cp; st[1] = t; st[10] = 0; compile_expr(code, st, src, td, sb); cp = st[0]; t = st[1]
         } else { t = t + 1 }
     }
