@@ -3,7 +3,7 @@
 // Compiles: fn, let/var, if/else/else-if, while/break, calls ≤6 args,
 // arrays (i8/i64), arithmetic, comparisons, &&/||, shifts, bitwise,
 // return, print("..."), print_int(n), arg_count, get_arg, file_size,
-// read_file, write_file. Sufficient to compile itself.
+// read_file, write_file, structs with field access. Sufficient to compile itself.
 //
 // Params: code=[i8;262144], st=[i64;32768], src=[i8;1048576],
 //         td=[i64;262144] (tokens), sb=[i8;8192] (string buf)
@@ -11,14 +11,19 @@
 // st layout:
 //   [0]=cp [1]=t [2]=next_slot [3]=loc_count [4]=brk_count
 //   [5]=fn_count [6]=print_int_off [7]=ntok [8]=arr_elem_type [9]=src_size
-//   [13]=gl_count [14]=bss_total
+//   [13]=gl_count [14]=bss_total [15]=continue_addr
 //   fn table: [100..355]=fn_ns [356..611]=fn_ne [612..867]=fn_tok [868..1123]=fn_off
 //   locals:   [1200..1455]=loc_ns [1456..1711]=loc_ne [1712..1967]=loc_slot [1968..2223]=loc_is_arr
+//             [2224..2479]=loc_si (struct index, -1=scalar) [2480..2735]=loc_fslots (num slots)
 //   break:    [2300..2363]
 //   if-end:   [2400..2431]
 //   temp:     [2500..2515]
 //   globals:  [3000..3255]=gl_ns [3256..3511]=gl_ne [3512..3767]=gl_bss_off
 //             [3768..4023]=gl_is_arr [4024..4279]=gl_init_val
+//   structs:  [4280]=struct_count
+//             [4281..4536]=struct_ns [4537..4792]=struct_ne [4793..5048]=struct_fc
+//             [5049..5304]=struct_fi (first field index)
+//             [5305]=field_total [5306..5817]=field_ns [5818..6329]=field_ne
 
 // ==================== Byte read ====================
 fn rd(buf: [i8; 1048576], off: i64) -> i64 with Panic {
@@ -109,11 +114,13 @@ fn kw_match(src: [i8; 1048576], s: i64, len: i64) -> i64 with Panic {
     if len == 4 && rd(src,s) == 116 && rd(src,s+1) == 114 && rd(src,s+2) == 117 && rd(src,s+3) == 101 { return 14 }
     if len == 5 && rd(src,s) == 102 && rd(src,s+1) == 97 && rd(src,s+2) == 108 && rd(src,s+3) == 115 && rd(src,s+4) == 101 { return 15 }
     if len == 8 && rd(src,s)==99 && rd(src,s+1)==111 && rd(src,s+2)==110 && rd(src,s+3)==116 && rd(src,s+4)==105 && rd(src,s+5)==110 && rd(src,s+6)==117 && rd(src,s+7)==101 { return 16 }
+    // struct: s=115 t=116 r=114 u=117 c=99 t=116
+    if len == 6 && rd(src,s)==115 && rd(src,s+1)==116 && rd(src,s+2)==114 && rd(src,s+3)==117 && rd(src,s+4)==99 && rd(src,s+5)==116 { return 17 }
     1
 }
 
 // Token kinds: 0=EOF 1=IDENT 2=INT 3=STRING 4=fn 5=let 6=var 7=if 8=else
-// 9=while 10=return 11=break 12=with 13=as 14=true 15=false 16=continue
+// 9=while 10=return 11=break 12=with 13=as 14=true 15=false 16=continue 17=struct
 // 20=( 21=) 22={ 23=} 24=[ 25=] 26=, 27=; 28=: 29=-> 30==
 // 40=+ 41=- 42=* 43=/ 44=% 45=& 46=| 47=^ 48=<< 49=>>
 // 50=== 51=!= 52=< 53=> 54=<= 55=>= 56=&& 57=||
@@ -348,6 +355,91 @@ fn find_global(src: [i8; 1048576], st: [i64; 32768], td: [i64; 262144]) -> i64 w
     while gi < gl_count {
         if name_eq(src, st[3000 + gi], st[3256 + gi] - st[3000 + gi], ns, ne - ns) == 1 { return gi }
         gi = gi + 1
+    }
+    0 - 1
+}
+
+// ==================== Struct collection ====================
+// Scans tokens for `struct Name { field: type, ... }` at brace-depth 0.
+// Records in st[4280..6329] (see header comment).
+fn collect_structs(src: [i8; 1048576], st: [i64; 32768], td: [i64; 262144]) -> i64 with Mut, Panic, Div {
+    let ntok = st[7]
+    var ti: i64 = 0
+    var sc: i64 = 0   // struct count
+    var ft: i64 = 0   // total fields
+    var depth: i64 = 0
+    while ti < ntok {
+        let k = tk(td, ti)
+        if k == 22 { depth = depth + 1 }
+        else if k == 23 { depth = depth - 1 }
+        else if k == 17 && depth == 0 {
+            // struct keyword at top level
+            ti = ti + 1  // skip 'struct'
+            st[4281 + sc] = tks(td, ti)
+            st[4537 + sc] = tke(td, ti)
+            ti = ti + 1  // skip Name
+            // skip { already tracked by depth
+            ti = ti + 1  // skip {
+            let fi_base = ft
+            st[5049 + sc] = fi_base
+            var fc: i64 = 0
+            // Parse fields until }
+            while tk(td, ti) != 23 && tk(td, ti) != 0 {
+                if tk(td, ti) == 1 {
+                    // field name
+                    st[5306 + ft] = tks(td, ti)
+                    st[5818 + ft] = tke(td, ti)
+                    ft = ft + 1
+                    fc = fc + 1
+                    ti = ti + 1  // skip field name
+                    // skip : type until , or }
+                    if tk(td, ti) == 28 {
+                        ti = ti + 1  // skip :
+                        var idepth: i64 = 0
+                        var done: i64 = 0
+                        while done == 0 && tk(td, ti) != 0 {
+                            if tk(td, ti) == 24 { idepth = idepth + 1 }
+                            else if tk(td, ti) == 25 { idepth = idepth - 1 }
+                            if idepth == 0 && (tk(td, ti) == 26 || tk(td, ti) == 23) { done = 1 }
+                            else { ti = ti + 1 }
+                        }
+                    }
+                    if tk(td, ti) == 26 { ti = ti + 1 }  // skip ,
+                } else { ti = ti + 1 }
+            }
+            st[4793 + sc] = fc
+            sc = sc + 1
+            // don't increment ti here; the outer loop will, but } is at ti now
+        }
+        ti = ti + 1
+    }
+    st[4280] = sc
+    st[5305] = ft
+    sc
+}
+
+// find_struct: search struct table for name (ns..ns+len) in src
+fn find_struct(src: [i8; 1048576], st: [i64; 32768], ns: i64, len: i64) -> i64 with Panic, Mut, Div {
+    let sc = st[4280]
+    var si: i64 = 0
+    while si < sc {
+        let slen = st[4537 + si] - st[4281 + si]
+        if name_eq(src, st[4281 + si], slen, ns, len) == 1 { return si }
+        si = si + 1
+    }
+    0 - 1
+}
+
+// find_field: search fields of struct si for name (fns..fns+flen) in src
+fn find_field(src: [i8; 1048576], st: [i64; 32768], si: i64, fns: i64, flen: i64) -> i64 with Panic, Mut, Div {
+    let fi_base = st[5049 + si]
+    let fc = st[4793 + si]
+    var j: i64 = 0
+    while j < fc {
+        let fj_ns = st[5306 + fi_base + j]
+        let fj_len = st[5818 + fi_base + j] - fj_ns
+        if name_eq(src, fj_ns, fj_len, fns, flen) == 1 { return j }
+        j = j + 1
     }
     0 - 1
 }
@@ -798,6 +890,20 @@ fn compile_primary(code: [i8; 262144], st: [i64; 32768], src: [i8; 1048576], td:
                 }
             }
             t = t + 1
+            // Postfix dot: struct field access (e.g. p.x)
+            if tk(td, t) == 58 && li >= 0 {
+                let lsi = st[2224 + li]  // struct index for this local
+                if lsi >= 0 {
+                    t = t + 1  // skip .
+                    let fns2 = tks(td, t); let fne2 = tke(td, t); t = t + 1
+                    let sfi2 = find_field(src, st, lsi, fns2, fne2 - fns2)
+                    if sfi2 >= 0 {
+                        let base_slot = st[1712 + li]
+                        let fslot2 = base_slot + sfi2 * 8
+                        cp = e3(code, cp, 0x48, 0x8B, 0x85); cp = ei32(code, cp, 0 - fslot2)
+                    }
+                }
+            }
         }
     } else { t = t + 1 }
 
@@ -894,6 +1000,7 @@ fn compile_block(code: [i8; 262144], st: [i64; 32768], src: [i8; 1048576], td: [
             t = t + 1
             let vns = tks(td, t); let vne = tke(td, t); t = t + 1
             var is_arr: i64 = 0; var arr_size: i64 = 0
+            var struct_si: i64 = 0 - 1  // -1 = not a struct
             if tk(td, t) == 28 {
                 t = t + 1
                 if tk(td, t) == 24 {
@@ -903,11 +1010,54 @@ fn compile_block(code: [i8; 262144], st: [i64; 32768], src: [i8; 1048576], td: [
                     if tk(td, t) == 27 { t = t + 1 }
                     if tk(td, t) == 2 { arr_size = tkv(td, t); t = t + 1 }
                     if tk(td, t) == 25 { t = t + 1 }
+                } else if tk(td, t) == 1 {
+                    // Check if IDENT type is a struct name
+                    let type_ns = tks(td, t); let type_len = tke(td, t) - type_ns
+                    let ssi = find_struct(src, st, type_ns, type_len)
+                    if ssi >= 0 {
+                        struct_si = ssi
+                        t = t + 1  // skip TypeName
+                    } else {
+                        // Non-struct scalar type: skip until =
+                        while tk(td, t) != 30 && tk(td, t) != 22 && tk(td, t) != 23 && tk(td, t) != 0 { if tk(td, t) == 5 || tk(td, t) == 6 || tk(td, t) == 7 || tk(td, t) == 9 || tk(td, t) == 10 { break }; t = t + 1 }
+                    }
                 } else { while tk(td, t) != 30 && tk(td, t) != 22 && tk(td, t) != 23 && tk(td, t) != 0 { if tk(td, t) == 5 || tk(td, t) == 6 || tk(td, t) == 7 || tk(td, t) == 9 || tk(td, t) == 10 { break }; t = t + 1 } }
             }
+            if struct_si >= 0 {
+                // Struct local variable
+                let sfc = st[4793 + struct_si]   // number of fields
+                let slot_base = next_slot
+                st[1200 + loc_count] = vns; st[1456 + loc_count] = vne
+                st[1712 + loc_count] = slot_base; st[1968 + loc_count] = 0
+                st[2224 + loc_count] = struct_si; st[2480 + loc_count] = sfc
+                loc_count = loc_count + 1; next_slot = next_slot + sfc * 8
+                // Parse = StructName { field: expr, ... }
+                if tk(td, t) == 30 {
+                    t = t + 1  // skip =
+                    if tk(td, t) == 1 { t = t + 1 }  // skip StructName
+                    if tk(td, t) == 22 { t = t + 1 }  // skip {
+                    while tk(td, t) != 23 && tk(td, t) != 0 {
+                        if tk(td, t) == 1 {
+                            let fn_s = tks(td, t); let fn_e = tke(td, t); t = t + 1
+                            if tk(td, t) == 28 { t = t + 1 }  // skip :
+                            st[0] = cp; st[1] = t; st[10] = 0
+                            compile_expr(code, st, src, td, sb); cp = st[0]; t = st[1]
+                            // rax = field value; store to slot_base + fi*8
+                            let sfi = find_field(src, st, struct_si, fn_s, fn_e - fn_s)
+                            if sfi >= 0 {
+                                let fslot = slot_base + sfi * 8
+                                cp = e3(code, cp, 0x48, 0x89, 0x85); cp = ei32(code, cp, 0 - fslot)
+                            }
+                            if tk(td, t) == 26 { t = t + 1 }  // skip ,
+                        } else { t = t + 1 }
+                    }
+                    if tk(td, t) == 23 { t = t + 1 }  // skip }
+                }
+            } else {
             let new_slot = next_slot
             st[1200 + loc_count] = vns; st[1456 + loc_count] = vne
             st[1712 + loc_count] = new_slot; st[1968 + loc_count] = is_arr
+            st[2224 + loc_count] = 0 - 1; st[2480 + loc_count] = 1
             loc_count = loc_count + 1; next_slot = next_slot + 8
             if tk(td, t) == 30 {
                 t = t + 1
@@ -929,6 +1079,7 @@ fn compile_block(code: [i8; 262144], st: [i64; 32768], src: [i8; 1048576], td: [
                     st[10] = 0; compile_expr(code, st, src, td, sb); cp = st[0]; t = st[1]
                     cp = e3(code, cp, 0x48, 0x89, 0x85); cp = ei32(code, cp, 0 - new_slot)
                 }
+            }
             }
         } else if kind == 10 {
             t = t + 1; st[0] = cp; st[1] = t
@@ -1212,6 +1363,7 @@ fn main() -> i64 with IO, Mut, Panic, Div {
     st_set(st, 7, ntok); st_set(st, 9, src_size)
     let fn_count = collect_fns(st, td)
     collect_globals(st, td, src)
+    collect_structs(src, st, td)
 
     var code: [i8; 262144] = [0; 262144]
     var sb: [i8; 8192] = [0; 8192]
