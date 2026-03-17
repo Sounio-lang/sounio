@@ -73,6 +73,7 @@ var NEXT_SLOT: i64 = 0
 // Code output
 var CODE: [i8; 262144] = [0; 262144]
 var CODE_LEN: i64 = 0
+var PRINT_INT_OFF: i64 = 0  // CODE offset of print_int helper (emitted first)
 
 // Function offsets in code
 var FN_CODE_OFF: [i64; 512] = [0; 512]
@@ -929,6 +930,55 @@ fn emit_epilogue() with Mut, Panic {
     emit(0xC3)
 }
 
+// Emit precompiled print_int helper into CODE (107 bytes)
+// Call convention: rdi = integer to print (decimal + no newline)
+// Must be emitted before any user functions (called first in main)
+fn emit_print_int_helper() with Mut, Panic {
+    PRINT_INT_OFF = CODE_LEN
+    // prologue
+    emit(0x55)                                                      // push rbp
+    emit(0x48); emit(0x89); emit(0xE5)                              // mov rbp, rsp
+    emit(0x48); emit(0x83); emit(0xEC); emit(0x30)                  // sub rsp, 48
+    emit(0x48); emit(0x89); emit(0xF8)                              // mov rax, rdi
+    emit(0x4C); emit(0x8D); emit(0x45); emit(0xFF)                  // lea r8, [rbp-1]
+    // sign handling
+    emit(0x45); emit(0x31); emit(0xC9)                              // xor r9d, r9d
+    emit(0x48); emit(0x85); emit(0xC0)                              // test rax, rax
+    emit(0x79); emit(0x06)                                          // jns +6 (skip neg+sign_set)
+    emit(0x48); emit(0xF7); emit(0xD8)                              // neg rax
+    emit(0x41); emit(0xB1); emit(0x01)                              // mov r9b, 1
+    // zero check: jnz +9 skips zero-special to itoa_loop
+    emit(0x48); emit(0x85); emit(0xC0)                              // test rax, rax
+    emit(0x75); emit(0x09)                                          // jnz +9
+    emit(0x41); emit(0xC6); emit(0x00); emit(0x30)                  // mov byte [r8], '0'
+    emit(0x49); emit(0xFF); emit(0xC8)                              // dec r8
+    emit(0xEB); emit(0x26)                                          // jmp do_write (+38)
+    // itoa_loop (offset 43 from PRINT_INT_OFF):
+    emit(0x31); emit(0xD2)                                          // xor edx, edx
+    emit(0x48); emit(0xC7); emit(0xC1); emit(0x0A); emit(0x00); emit(0x00); emit(0x00)  // mov rcx, 10
+    emit(0x48); emit(0xF7); emit(0xF1)                              // div rcx
+    emit(0x80); emit(0xC2); emit(0x30)                              // add dl, '0'
+    emit(0x41); emit(0x88); emit(0x10)                              // mov [r8], dl
+    emit(0x49); emit(0xFF); emit(0xC8)                              // dec r8
+    emit(0x48); emit(0x85); emit(0xC0)                              // test rax, rax
+    emit(0x75); emit(0xE6)                                          // jnz itoa_loop (-26)
+    // sign append
+    emit(0x45); emit(0x84); emit(0xC9)                              // test r9b, r9b
+    emit(0x74); emit(0x07)                                          // jz do_write (+7)
+    emit(0x41); emit(0xC6); emit(0x00); emit(0x2D)                  // mov byte [r8], '-'
+    emit(0x49); emit(0xFF); emit(0xC8)                              // dec r8
+    // do_write (offset 81 from PRINT_INT_OFF):
+    emit(0x49); emit(0xFF); emit(0xC0)                              // inc r8
+    emit(0x4C); emit(0x89); emit(0xC6)                              // mov rsi, r8
+    emit(0x48); emit(0x89); emit(0xEA)                              // mov rdx, rbp
+    emit(0x4C); emit(0x29); emit(0xC2)                              // sub rdx, r8
+    emit(0xBF); emit(0x01); emit(0x00); emit(0x00); emit(0x00)      // mov edi, 1
+    emit(0xB8); emit(0x01); emit(0x00); emit(0x00); emit(0x00)      // mov eax, 1
+    emit(0x0F); emit(0x05)                                          // syscall
+    emit(0xC9)                                                      // leave
+    emit(0xC3)                                                      // ret
+}
+
 // ============================================================================
 // Codegen: local variable management
 // ============================================================================
@@ -1169,16 +1219,39 @@ fn compile_node(node: i64) -> i64 with Mut, Panic, Div {
         let c_off = ND_STR_OFF[callee as usize]
         let c_len = ND_STR_LEN[callee as usize]
 
-        // Check for built-in print_int
-        if pool_match(c_off, c_len, "print_int") {
-            // Compile the argument
+        // Check for built-in print(str_lit)
+        if pool_match(c_off, c_len, "print") {
             let arg = ND_EXTRA[node as usize]
             if arg != -1 {
-                compile_node(arg)
+                let slen = ND_STR_LEN[arg as usize]
+                compile_node(arg)           // rax = string pointer (from LEA)
+                // mov rsi, rax  (buf)
+                emit(0x48); emit(0x89); emit(0xC6)
+                // mov edx, slen  (count; zero-extends to rdx)
+                emit(0xBA); emit_u32(slen)
+                // mov edi, 1  (fd = stdout; zero-extends to rdi)
+                emit(0xBF); emit_u32(1)
+                // mov eax, 1  (SYS_write; zero-extends to rax)
+                emit(0xB8); emit_u32(1)
+                // syscall
+                emit(0x0F); emit(0x05)
             }
-            // Call the print_int helper (fn index 0 reserved)
-            // For now, emit syscall write(1, "?", 1) as placeholder
             emit_mov_rax_imm(0)
+            return 0
+        }
+
+        // Check for built-in print_int
+        if pool_match(c_off, c_len, "print_int") {
+            let arg = ND_EXTRA[node as usize]
+            if arg != -1 {
+                compile_node(arg)           // rax = integer value
+            }
+            // mov rdi, rax  (pass arg in rdi per System V ABI)
+            emit(0x48); emit(0x89); emit(0xC7)
+            // call print_int helper (rel32 backward to PRINT_INT_OFF)
+            emit(0xE8)
+            let rel = PRINT_INT_OFF - (CODE_LEN + 4)
+            emit_u32(rel)
             return 0
         }
 
@@ -1567,6 +1640,9 @@ fn main() -> i64 with IO, Mut, Panic, Div {
         print("error: no main function found")
         return 1
     }
+
+    // Emit print_int helper first (at CODE offset 0, before user functions)
+    emit_print_int_helper()
 
     // Compile all functions
     var ci: i64 = 0
