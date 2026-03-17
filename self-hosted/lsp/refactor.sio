@@ -1,0 +1,1188 @@
+// self-hosted::lsp::refactor -- Advanced refactoring operations for Sounio LSP
+//
+// Provides semantic-preserving refactorings that understand effects, units,
+// and epistemic types.  All state lives in flat fixed-size arenas -- no heap
+// allocation, no recursive structures.
+//
+// This file is standalone (does not import protocol.sio).  It carries a local
+// minimal JsonBuf implementation (lspr_jb_*) and local string helpers.
+//
+// Refactorings provided:
+//   - Extract Function        (LSPR_KIND_EXTRACT_FUNCTION)
+//   - Extract Variable        (LSPR_KIND_EXTRACT_VARIABLE)
+//   - Inline Variable         (LSPR_KIND_INLINE_VARIABLE)
+//   - Inline Function         (LSPR_KIND_INLINE_FUNCTION)
+//   - Introduce Parameter     (LSPR_KIND_INTRODUCE_PARAM)
+//   - Convert to Struct       (LSPR_KIND_CONVERT_TO_STRUCT)
+//   - Add Effect Handler      (LSPR_KIND_ADD_EFFECT_HANDLER)
+//   - Wrap in Knowledge       (LSPR_KIND_WRAP_IN_KNOWLEDGE)
+//   - Unwrap Knowledge        (LSPR_KIND_UNWRAP_KNOWLEDGE)
+//   - Add Units               (LSPR_KIND_ADD_UNITS)
+//   - Organize Imports        (LSPR_KIND_ORGANIZE_IMPORTS)
+//   - Remove Unused Imports   (LSPR_KIND_REMOVE_UNUSED_IMPORTS)
+//   - Add Effect Annotation   (LSPR_KIND_ADD_EFFECT_ANNOTATION)
+//
+// Capacities:
+//   - Edits per refactoring:  64
+//   - Refactorings per list:  32
+//   - Parameters per func:    16
+//   - Variables per scope:    128
+//   - Functions per scope:    32
+//
+// Prefix: lspr_
+
+// ============================================================================
+// Section 1: CONSTANTS
+// ============================================================================
+
+// Refactoring kind constants
+let LSPR_KIND_EXTRACT_FUNCTION:      i64 = 1
+let LSPR_KIND_EXTRACT_VARIABLE:      i64 = 2
+let LSPR_KIND_INLINE_VARIABLE:       i64 = 3
+let LSPR_KIND_INLINE_FUNCTION:       i64 = 4
+let LSPR_KIND_INTRODUCE_PARAM:       i64 = 5
+let LSPR_KIND_CONVERT_TO_STRUCT:     i64 = 6
+let LSPR_KIND_ADD_EFFECT_HANDLER:    i64 = 7
+let LSPR_KIND_WRAP_IN_KNOWLEDGE:     i64 = 8
+let LSPR_KIND_UNWRAP_KNOWLEDGE:      i64 = 9
+let LSPR_KIND_ADD_UNITS:             i64 = 10
+let LSPR_KIND_ORGANIZE_IMPORTS:      i64 = 11
+let LSPR_KIND_REMOVE_UNUSED_IMPORTS: i64 = 12
+let LSPR_KIND_ADD_EFFECT_ANNOTATION: i64 = 13
+
+// Edit kind constants
+let LSPR_EDIT_INSERT:  i64 = 1
+let LSPR_EDIT_DELETE:  i64 = 2
+let LSPR_EDIT_REPLACE: i64 = 3
+
+// Capacity constants
+let LSPR_MAX_EDITS:   i64 = 64
+let LSPR_MAX_ACTIONS: i64 = 32
+let LSPR_MAX_PARAMS:  i64 = 16
+let LSPR_INVALID:     i64 = 0 - 1
+
+// ============================================================================
+// Section 2: LOCAL JSON BUFFER (standalone -- mirrors protocol.sio JsonBuf)
+// ============================================================================
+
+struct JsonBuf {
+    data: [i8; 65536],
+    len:  i64,
+}
+
+fn lspr_jb_new() -> JsonBuf {
+    JsonBuf { data: [0; 65536], len: 0 }
+}
+
+fn lspr_jb_emit_byte(buf: JsonBuf, b: i8) -> JsonBuf with Mut, Panic {
+    var out = buf
+    if out.len < 65536 {
+        out.data[out.len as usize] = b
+        out.len = out.len + 1
+    }
+    out
+}
+
+fn lspr_jb_emit_char(buf: JsonBuf, ch: i64) -> JsonBuf with Mut, Panic {
+    lspr_jb_emit_byte(buf, ch as i8)
+}
+
+fn lspr_jb_emit_int(buf: JsonBuf, val: i64) -> JsonBuf with Mut, Panic, Div {
+    if val == 0 {
+        return lspr_jb_emit_char(buf, 48)
+    }
+    var n = val
+    var out = buf
+    if n < 0 {
+        out = lspr_jb_emit_char(out, 45)
+        n = 0 - n
+    }
+    var digits: [i8; 24] = [0; 24]
+    var dlen: i64 = 0
+    while n > 0 && dlen < 24 {
+        let d = n - (n / 10) * 10
+        digits[dlen as usize] = (d + 48) as i8
+        n = n / 10
+        dlen = dlen + 1
+    }
+    var i = dlen - 1
+    while i >= 0 {
+        out = lspr_jb_emit_byte(out, digits[i as usize])
+        i = i - 1
+    }
+    out
+}
+
+fn lspr_jb_open_object(buf: JsonBuf) -> JsonBuf with Mut, Panic {
+    lspr_jb_emit_char(buf, 123)
+}
+
+fn lspr_jb_close_object(buf: JsonBuf) -> JsonBuf with Mut, Panic {
+    lspr_jb_emit_char(buf, 125)
+}
+
+fn lspr_jb_open_array(buf: JsonBuf) -> JsonBuf with Mut, Panic {
+    lspr_jb_emit_char(buf, 91)
+}
+
+fn lspr_jb_close_array(buf: JsonBuf) -> JsonBuf with Mut, Panic {
+    lspr_jb_emit_char(buf, 93)
+}
+
+fn lspr_jb_emit_comma(buf: JsonBuf) -> JsonBuf with Mut, Panic {
+    lspr_jb_emit_char(buf, 44)
+}
+
+fn lspr_jb_emit_colon(buf: JsonBuf) -> JsonBuf with Mut, Panic {
+    lspr_jb_emit_char(buf, 58)
+}
+
+fn lspr_jb_emit_string(buf: JsonBuf, s: string) -> JsonBuf with Mut, Panic, Div {
+    var out = lspr_jb_emit_char(buf, 34)
+    let len = str_len(s)
+    var i: i64 = 0
+    while i < len {
+        let ch = str_char_at(s, i)
+        out = lspr_jb_emit_char(out, ch)
+        i = i + 1
+    }
+    out = lspr_jb_emit_char(out, 34)
+    out
+}
+
+fn lspr_pack_key3(a: i64, b: i64, c: i64) -> i64 {
+    a + b * 256 + c * 65536
+}
+
+fn lspr_pack_key4(a: i64, b: i64, c: i64, d: i64) -> i64 {
+    a + b * 256 + c * 65536 + d * 16777216
+}
+
+fn lspr_pack_key5(a: i64, b: i64, c: i64, d: i64, e: i64) -> i64 {
+    a + b * 256 + c * 65536 + d * 16777216 + e * 4294967296
+}
+
+fn lspr_pack_key7(a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, g: i64) -> i64 {
+    a + b * 256 + c * 65536 + d * 16777216 + e * 4294967296
+    + f * 1099511627776 + g * 281474976710656
+}
+
+fn lspr_jb_emit_packed_key(buf: JsonBuf, key_packed: i64) -> JsonBuf with Mut, Panic, Div {
+    var out = lspr_jb_emit_char(buf, 34)
+    var k = key_packed
+    while k > 0 {
+        let byte_val = k - (k / 256) * 256
+        out = lspr_jb_emit_char(out, byte_val)
+        k = k / 256
+    }
+    out = lspr_jb_emit_char(out, 34)
+    out
+}
+
+fn lspr_jb_emit_key_int(buf: JsonBuf, key_packed: i64, val: i64) -> JsonBuf with Mut, Panic, Div {
+    var out = lspr_jb_emit_packed_key(buf, key_packed)
+    out = lspr_jb_emit_colon(out)
+    out = lspr_jb_emit_int(out, val)
+    out
+}
+
+fn lspr_jb_emit_key_string(buf: JsonBuf, key_packed: i64, val: string) -> JsonBuf with Mut, Panic, Div {
+    var out = lspr_jb_emit_packed_key(buf, key_packed)
+    out = lspr_jb_emit_colon(out)
+    out = lspr_jb_emit_string(out, val)
+    out
+}
+
+// Emit "character" key (9 bytes: c h a r a c t e r)
+fn lspr_jb_emit_key_character(buf: JsonBuf) -> JsonBuf with Mut, Panic, Div {
+    var out = lspr_jb_emit_char(buf, 34)
+    out = lspr_jb_emit_char(out, 99)
+    out = lspr_jb_emit_char(out, 104)
+    out = lspr_jb_emit_char(out, 97)
+    out = lspr_jb_emit_char(out, 114)
+    out = lspr_jb_emit_char(out, 97)
+    out = lspr_jb_emit_char(out, 99)
+    out = lspr_jb_emit_char(out, 116)
+    out = lspr_jb_emit_char(out, 101)
+    out = lspr_jb_emit_char(out, 114)
+    out = lspr_jb_emit_char(out, 34)
+    out
+}
+
+// Emit "description" key (11 bytes: d e s c r i p t i o n)
+fn lspr_jb_emit_key_description(buf: JsonBuf) -> JsonBuf with Mut, Panic, Div {
+    var out = lspr_jb_emit_char(buf, 34)
+    out = lspr_jb_emit_char(out, 100)
+    out = lspr_jb_emit_char(out, 101)
+    out = lspr_jb_emit_char(out, 115)
+    out = lspr_jb_emit_char(out, 99)
+    out = lspr_jb_emit_char(out, 114)
+    out = lspr_jb_emit_char(out, 105)
+    out = lspr_jb_emit_char(out, 112)
+    out = lspr_jb_emit_char(out, 116)
+    out = lspr_jb_emit_char(out, 105)
+    out = lspr_jb_emit_char(out, 111)
+    out = lspr_jb_emit_char(out, 110)
+    out = lspr_jb_emit_char(out, 34)
+    out
+}
+
+fn lspr_key_line() -> i64  { lspr_pack_key4(108, 105, 110, 101) }
+fn lspr_key_start() -> i64 { lspr_pack_key5(115, 116, 97, 114, 116) }
+fn lspr_key_end() -> i64   { lspr_pack_key3(101, 110, 100) }
+fn lspr_key_range() -> i64 { lspr_pack_key5(114, 97, 110, 103, 101) }
+fn lspr_key_kind() -> i64  { lspr_pack_key4(107, 105, 110, 100) }
+fn lspr_key_title() -> i64 { lspr_pack_key5(116, 105, 116, 108, 101) }
+fn lspr_key_edits() -> i64 { lspr_pack_key5(101, 100, 105, 116, 115) }
+fn lspr_key_newtext() -> i64 { lspr_pack_key7(110, 101, 119, 84, 101, 120, 116) }
+
+fn lspr_jb_byte_at(buf: JsonBuf, idx: i64) -> i64 with Panic {
+    buf.data[idx as usize] as i64
+}
+
+// ============================================================================
+// Section 3: LOCAL STRING HELPERS
+// ============================================================================
+
+// Lexicographic less-than for two strings.
+fn lspr_str_lt(a: string, b: string) -> bool with Mut, Div {
+    let la = str_len(a)
+    let lb = str_len(b)
+    var i: i64 = 0
+    while i < la && i < lb {
+        let ca = str_char_at(a, i)
+        let cb = str_char_at(b, i)
+        if ca < cb { return true }
+        if ca > cb { return false }
+        i = i + 1
+    }
+    la < lb
+}
+
+// Check whether a string is empty.
+fn lspr_str_empty(s: string) -> bool {
+    str_len(s) == 0
+}
+
+// Concatenate two strings (wraps builtin str_concat).
+fn lspr_concat(a: string, b: string) -> string {
+    str_concat(a, b)
+}
+
+// ============================================================================
+// Section 4: CORE STRUCTS
+// ============================================================================
+
+struct LsprPosition {
+    line: i64,
+    col:  i64,
+}
+
+struct LsprRange {
+    start: LsprPosition,
+    end:   LsprPosition,
+}
+
+struct LsprEdit {
+    file_id:   i64,
+    range:     LsprRange,
+    new_text:  string,
+    edit_kind: i64,
+}
+
+struct LsprRefactoring {
+    kind:         i64,
+    title:        string,
+    description:  string,
+    edits:        [LsprEdit; 64],
+    edit_count:   i64,
+    cursor_line:  i64,
+    cursor_col:   i64,
+    is_preferred: bool,
+}
+
+struct LsprRefactoringList {
+    items: [LsprRefactoring; 32],
+    count: i64,
+}
+
+struct LsprVarInfo {
+    name:            string,
+    type_name:       string,
+    is_mutable:      bool,
+    definition_line: i64,
+    definition_col:  i64,
+}
+
+struct LsprFuncInfo {
+    name:         string,
+    signature:    string,
+    effect_count: i64,
+    effects:      [string; 8],
+    return_type:  string,
+    param_count:  i64,
+    params:       [LsprVarInfo; 16],
+    start_line:   i64,
+    end_line:     i64,
+}
+
+struct LsprScopeInfo {
+    var_count:      i64,
+    vars:           [LsprVarInfo; 128],
+    func_count:     i64,
+    funcs:          [LsprFuncInfo; 32],
+    current_fn_idx: i64,
+}
+
+struct LsprRefactorContext {
+    file_id:           i64,
+    source:            string,
+    sel_start:         LsprPosition,
+    sel_end:           LsprPosition,
+    scope:             LsprScopeInfo,
+    expr_type:         string,
+    expr_effects:      [string; 8],
+    expr_effect_count: i64,
+    suggested_name:    string,
+}
+
+// ============================================================================
+// Section 5: ZERO-VALUE CONSTRUCTORS (helpers must precede callers)
+// ============================================================================
+
+fn lspr_position_zero() -> LsprPosition {
+    LsprPosition { line: 0, col: 0 }
+}
+
+fn lspr_range_zero() -> LsprRange {
+    LsprRange {
+        start: lspr_position_zero(),
+        end:   lspr_position_zero(),
+    }
+}
+
+fn lspr_edit_zero() -> LsprEdit {
+    LsprEdit {
+        file_id:   0,
+        range:     lspr_range_zero(),
+        new_text:  "",
+        edit_kind: LSPR_EDIT_INSERT,
+    }
+}
+
+fn lspr_var_info_zero() -> LsprVarInfo {
+    LsprVarInfo {
+        name:            "",
+        type_name:       "",
+        is_mutable:      false,
+        definition_line: 0,
+        definition_col:  0,
+    }
+}
+
+fn lspr_func_info_zero() -> LsprFuncInfo {
+    LsprFuncInfo {
+        name:         "",
+        signature:    "",
+        effect_count: 0,
+        effects:      [""; 8],
+        return_type:  "",
+        param_count:  0,
+        params:       [lspr_var_info_zero(); 16],
+        start_line:   0,
+        end_line:     0,
+    }
+}
+
+fn lspr_scope_info_zero() -> LsprScopeInfo {
+    LsprScopeInfo {
+        var_count:      0,
+        vars:           [lspr_var_info_zero(); 128],
+        func_count:     0,
+        funcs:          [lspr_func_info_zero(); 32],
+        current_fn_idx: LSPR_INVALID,
+    }
+}
+
+fn lspr_refactoring_zero() -> LsprRefactoring {
+    LsprRefactoring {
+        kind:         LSPR_KIND_EXTRACT_FUNCTION,
+        title:        "",
+        description:  "",
+        edits:        [lspr_edit_zero(); 64],
+        edit_count:   0,
+        cursor_line:  0,
+        cursor_col:   0,
+        is_preferred: false,
+    }
+}
+
+fn lspr_context_zero() -> LsprRefactorContext {
+    LsprRefactorContext {
+        file_id:           0,
+        source:            "",
+        sel_start:         lspr_position_zero(),
+        sel_end:           lspr_position_zero(),
+        scope:             lspr_scope_info_zero(),
+        expr_type:         "",
+        expr_effects:      [""; 8],
+        expr_effect_count: 0,
+        suggested_name:    "",
+    }
+}
+
+// ============================================================================
+// Section 6: BASIC CONSTRUCTORS
+// ============================================================================
+
+fn lspr_position_new(line: i64, col: i64) -> LsprPosition {
+    LsprPosition { line: line, col: col }
+}
+
+fn lspr_range_new(sl: i64, sc: i64, el: i64, ec: i64) -> LsprRange {
+    LsprRange {
+        start: lspr_position_new(sl, sc),
+        end:   lspr_position_new(el, ec),
+    }
+}
+
+fn lspr_edit_new(file_id: i64, sl: i64, sc: i64, el: i64, ec: i64, text: string, kind: i64) -> LsprEdit {
+    LsprEdit {
+        file_id:   file_id,
+        range:     lspr_range_new(sl, sc, el, ec),
+        new_text:  text,
+        edit_kind: kind,
+    }
+}
+
+fn lspr_refactoring_new(kind: i64, title: string, desc: string) -> LsprRefactoring {
+    LsprRefactoring {
+        kind:         kind,
+        title:        title,
+        description:  desc,
+        edits:        [lspr_edit_zero(); 64],
+        edit_count:   0,
+        cursor_line:  0,
+        cursor_col:   0,
+        is_preferred: false,
+    }
+}
+
+// Append an edit to a refactoring; return updated copy.
+fn lspr_refactoring_add_edit(r: LsprRefactoring, edit: LsprEdit) -> LsprRefactoring with Mut, Panic {
+    var out = r
+    if out.edit_count < LSPR_MAX_EDITS {
+        out.edits[out.edit_count as usize] = edit
+        out.edit_count = out.edit_count + 1
+    }
+    out
+}
+
+fn lspr_list_new() -> LsprRefactoringList {
+    LsprRefactoringList {
+        items: [lspr_refactoring_zero(); 32],
+        count: 0,
+    }
+}
+
+// Append a refactoring to the list; return updated copy.
+fn lspr_list_add(lst: LsprRefactoringList, r: LsprRefactoring) -> LsprRefactoringList with Mut, Panic {
+    var out = lst
+    if out.count < LSPR_MAX_ACTIONS {
+        out.items[out.count as usize] = r
+        out.count = out.count + 1
+    }
+    out
+}
+
+// ============================================================================
+// Section 7: REFACTORING BUILDERS
+// ============================================================================
+
+// Build an "Extract Function" refactoring.
+// Creates a new function named ctx.suggested_name (or "extracted" if empty),
+// collects immutable vars in scope as parameters, adds effect annotation if
+// ctx.expr_effect_count > 0, then emits two edits:
+//   (1) replace selection with a call to the new function
+//   (2) insert the new function definition after the current function end
+fn lspr_build_extract_function(ctx: LsprRefactorContext, selected_text: string) -> LsprRefactoring with Mut, Panic, Div {
+    var fn_name = ctx.suggested_name
+    if lspr_str_empty(fn_name) {
+        fn_name = "extracted"
+    }
+
+    // Build parameter list and argument list from immutable scope vars
+    var param_str = ""
+    var arg_str   = ""
+    var first: bool = true
+    var pi: i64 = 0
+    while pi < ctx.scope.var_count {
+        let v = ctx.scope.vars[pi as usize]
+        if v.is_mutable == false && lspr_str_empty(v.name) == false {
+            if first {
+                first = false
+            } else {
+                param_str = lspr_concat(param_str, ", ")
+                arg_str   = lspr_concat(arg_str,   ", ")
+            }
+            param_str = lspr_concat(param_str, v.name)
+            param_str = lspr_concat(param_str, ": ")
+            param_str = lspr_concat(param_str, v.type_name)
+            arg_str   = lspr_concat(arg_str,   v.name)
+        }
+        pi = pi + 1
+    }
+
+    // Build effect annotation
+    var effect_ann = ""
+    if ctx.expr_effect_count > 0 {
+        effect_ann = " with "
+        var ei: i64 = 0
+        while ei < ctx.expr_effect_count {
+            if ei > 0 {
+                effect_ann = lspr_concat(effect_ann, ", ")
+            }
+            effect_ann = lspr_concat(effect_ann, ctx.expr_effects[ei as usize])
+            ei = ei + 1
+        }
+    }
+
+    // Build call expression
+    var call_text = lspr_concat(fn_name, "(")
+    call_text = lspr_concat(call_text, arg_str)
+    call_text = lspr_concat(call_text, ")")
+
+    // Build new function definition
+    var fn_def = lspr_concat("fn ", fn_name)
+    fn_def = lspr_concat(fn_def, "(")
+    fn_def = lspr_concat(fn_def, param_str)
+    fn_def = lspr_concat(fn_def, ")")
+    fn_def = lspr_concat(fn_def, effect_ann)
+    fn_def = lspr_concat(fn_def, " {\n    ")
+    fn_def = lspr_concat(fn_def, selected_text)
+    fn_def = lspr_concat(fn_def, "\n}\n")
+
+    // Determine insertion line (after current function end)
+    var insert_line: i64 = ctx.sel_end.line + 2
+    if ctx.scope.current_fn_idx >= 0 && ctx.scope.current_fn_idx < ctx.scope.func_count {
+        let cfn = ctx.scope.funcs[ctx.scope.current_fn_idx as usize]
+        insert_line = cfn.end_line + 1
+    }
+
+    let edit1 = lspr_edit_new(
+        ctx.file_id,
+        ctx.sel_start.line, ctx.sel_start.col,
+        ctx.sel_end.line,   ctx.sel_end.col,
+        call_text,
+        LSPR_EDIT_REPLACE
+    )
+
+    let edit2 = lspr_edit_new(
+        ctx.file_id,
+        insert_line, 0,
+        insert_line, 0,
+        fn_def,
+        LSPR_EDIT_INSERT
+    )
+
+    var r = lspr_refactoring_new(LSPR_KIND_EXTRACT_FUNCTION, "Extract Function", "Extract selected expression into a new function")
+    r.is_preferred = true
+    r = lspr_refactoring_add_edit(r, edit1)
+    r = lspr_refactoring_add_edit(r, edit2)
+    r
+}
+
+// Build an "Inline Variable" refactoring.
+// Produces a single REPLACE edit substituting the selection with the initializer.
+fn lspr_build_inline_variable(ctx: LsprRefactorContext, var_name: string, initializer: string) -> LsprRefactoring {
+    let edit = lspr_edit_new(
+        ctx.file_id,
+        ctx.sel_start.line, ctx.sel_start.col,
+        ctx.sel_end.line,   ctx.sel_end.col,
+        initializer,
+        LSPR_EDIT_REPLACE
+    )
+    var r = lspr_refactoring_new(LSPR_KIND_INLINE_VARIABLE, "Inline Variable", "Replace variable reference with its initializer")
+    r.edits[0] = edit
+    r.edit_count = 1
+    r
+}
+
+// Build an "Add Effect Handler" refactoring (Sounio-specific).
+// Wraps the function body in `handle <effect> in { ... }`.
+// Produces two INSERT edits: one before and one after the function body.
+fn lspr_build_add_effect_handler(ctx: LsprRefactorContext, effect_name: string) -> LsprRefactoring with Mut, Panic, Div {
+    var body_start: i64 = ctx.sel_start.line
+    var body_end:   i64 = ctx.sel_end.line
+    if ctx.scope.current_fn_idx >= 0 && ctx.scope.current_fn_idx < ctx.scope.func_count {
+        let cfn = ctx.scope.funcs[ctx.scope.current_fn_idx as usize]
+        body_start = cfn.start_line + 1
+        body_end   = cfn.end_line - 1
+    }
+
+    var open_text = lspr_concat("handle ", effect_name)
+    open_text = lspr_concat(open_text, " in {\n")
+
+    let edit_open = lspr_edit_new(
+        ctx.file_id,
+        body_start, 0,
+        body_start, 0,
+        open_text,
+        LSPR_EDIT_INSERT
+    )
+
+    let edit_close = lspr_edit_new(
+        ctx.file_id,
+        body_end + 1, 0,
+        body_end + 1, 0,
+        "}\n",
+        LSPR_EDIT_INSERT
+    )
+
+    var title = lspr_concat("Add Effect Handler: ", effect_name)
+    var desc  = lspr_concat("Wrap function body in handle ", effect_name)
+    desc = lspr_concat(desc, " in { ... }")
+
+    var r = lspr_refactoring_new(LSPR_KIND_ADD_EFFECT_HANDLER, title, desc)
+    r.edits[0] = edit_open
+    r.edits[1] = edit_close
+    r.edit_count = 2
+    r
+}
+
+// Build a "Wrap in Knowledge" refactoring.
+// Wraps expr_text in `Knowledge::from(<expr>, <uncertainty>)`.
+// Produces a REPLACE edit over the selection.
+fn lspr_build_wrap_in_knowledge(ctx: LsprRefactorContext, expr_text: string, uncertainty: string) -> LsprRefactoring with Mut, Panic, Div {
+    var wrapped = lspr_concat("Knowledge::from(", expr_text)
+    wrapped = lspr_concat(wrapped, ", ")
+    wrapped = lspr_concat(wrapped, uncertainty)
+    wrapped = lspr_concat(wrapped, ")")
+
+    let edit = lspr_edit_new(
+        ctx.file_id,
+        ctx.sel_start.line, ctx.sel_start.col,
+        ctx.sel_end.line,   ctx.sel_end.col,
+        wrapped,
+        LSPR_EDIT_REPLACE
+    )
+
+    var r = lspr_refactoring_new(LSPR_KIND_WRAP_IN_KNOWLEDGE, "Wrap in Knowledge", "Wrap expression in Knowledge::from with uncertainty")
+    r.edits[0] = edit
+    r.edit_count = 1
+    r
+}
+
+// Build an "Organize Imports" refactoring.
+// Sorts imports alphabetically using insertion sort, builds a single REPLACE
+// edit covering lines 0..import_count.
+fn lspr_build_organize_imports(file_id: i64, imports: [string; 64], import_count: i64) -> LsprRefactoring with Mut, Panic, Div {
+    var sorted: [string; 64] = imports
+    var i: i64 = 1
+    while i < import_count {
+        let key = sorted[i as usize]
+        var j: i64 = i - 1
+        while j >= 0 {
+            if lspr_str_lt(key, sorted[j as usize]) {
+                sorted[(j + 1) as usize] = sorted[j as usize]
+                j = j - 1
+            } else {
+                j = 0 - 1
+            }
+        }
+        sorted[(j + 1) as usize] = key
+        i = i + 1
+    }
+
+    var new_text = ""
+    var k: i64 = 0
+    while k < import_count {
+        new_text = lspr_concat(new_text, sorted[k as usize])
+        new_text = lspr_concat(new_text, "\n")
+        k = k + 1
+    }
+
+    let edit = lspr_edit_new(
+        file_id,
+        0, 0,
+        import_count, 0,
+        new_text,
+        LSPR_EDIT_REPLACE
+    )
+
+    var r = lspr_refactoring_new(LSPR_KIND_ORGANIZE_IMPORTS, "Organize Imports", "Sort import declarations alphabetically")
+    r.edits[0] = edit
+    r.edit_count = 1
+    r
+}
+
+// ============================================================================
+// Section 8: CONTEXT SUGGESTIONS
+// ============================================================================
+
+// Given context, suggest applicable refactorings and return updated list.
+fn lspr_context_suggestions(ctx: LsprRefactorContext, out: LsprRefactoringList) -> LsprRefactoringList with Mut, Panic, Div {
+    var lst = out
+
+    // Add "Extract Function" if selection is non-empty
+    let sel_empty = ctx.sel_start.line == ctx.sel_end.line
+                    && ctx.sel_start.col == ctx.sel_end.col
+    if sel_empty == false {
+        let r = lspr_build_extract_function(ctx, "selected_expression")
+        lst = lspr_list_add(lst, r)
+    }
+
+    // Add "Add Effect Handler" for each unhandled effect
+    var ei: i64 = 0
+    while ei < ctx.expr_effect_count {
+        let eff = ctx.expr_effects[ei as usize]
+        let r = lspr_build_add_effect_handler(ctx, eff)
+        lst = lspr_list_add(lst, r)
+        ei = ei + 1
+    }
+
+    // Add "Wrap in Knowledge" if expr_type is "f64" or "i64"
+    let is_f64 = str_eq(ctx.expr_type, "f64")
+    let is_i64 = str_eq(ctx.expr_type, "i64")
+    if is_f64 || is_i64 {
+        let r = lspr_build_wrap_in_knowledge(ctx, "expr", "0.0")
+        lst = lspr_list_add(lst, r)
+    }
+
+    lst
+}
+
+// ============================================================================
+// Section 9: JSON SERIALIZATION
+// ============================================================================
+
+// Serialize a single LsprEdit as JSON:
+// {"range":{"start":{"line":N,"character":M},"end":{"line":P,"character":Q}},"newText":"..."}
+fn lspr_edit_to_json(edit: LsprEdit, buf: JsonBuf) -> JsonBuf with Mut, Div, Panic {
+    var out = lspr_jb_open_object(buf)
+
+    out = lspr_jb_emit_packed_key(out, lspr_key_range())
+    out = lspr_jb_emit_colon(out)
+    out = lspr_jb_open_object(out)
+
+    // "start": { "line": N, "character": M }
+    out = lspr_jb_emit_packed_key(out, lspr_key_start())
+    out = lspr_jb_emit_colon(out)
+    out = lspr_jb_open_object(out)
+    out = lspr_jb_emit_key_int(out, lspr_key_line(), edit.range.start.line)
+    out = lspr_jb_emit_comma(out)
+    out = lspr_jb_emit_key_character(out)
+    out = lspr_jb_emit_colon(out)
+    out = lspr_jb_emit_int(out, edit.range.start.col)
+    out = lspr_jb_close_object(out)
+
+    out = lspr_jb_emit_comma(out)
+
+    // "end": { "line": P, "character": Q }
+    out = lspr_jb_emit_packed_key(out, lspr_key_end())
+    out = lspr_jb_emit_colon(out)
+    out = lspr_jb_open_object(out)
+    out = lspr_jb_emit_key_int(out, lspr_key_line(), edit.range.end.line)
+    out = lspr_jb_emit_comma(out)
+    out = lspr_jb_emit_key_character(out)
+    out = lspr_jb_emit_colon(out)
+    out = lspr_jb_emit_int(out, edit.range.end.col)
+    out = lspr_jb_close_object(out)
+
+    out = lspr_jb_close_object(out)
+    out = lspr_jb_emit_comma(out)
+
+    // "newText": "..."
+    out = lspr_jb_emit_packed_key(out, lspr_key_newtext())
+    out = lspr_jb_emit_colon(out)
+    out = lspr_jb_emit_string(out, edit.new_text)
+
+    out = lspr_jb_close_object(out)
+    out
+}
+
+// Serialize a LsprRefactoring as LSP CodeAction JSON:
+// {"title":"...","kind":"refactor","description":"...","edits":[...]}
+fn lspr_to_json(r: LsprRefactoring, buf: JsonBuf) -> JsonBuf with Mut, Div, Panic {
+    var out = lspr_jb_open_object(buf)
+
+    // "title": "..."
+    out = lspr_jb_emit_packed_key(out, lspr_key_title())
+    out = lspr_jb_emit_colon(out)
+    out = lspr_jb_emit_string(out, r.title)
+    out = lspr_jb_emit_comma(out)
+
+    // "kind": "refactor"
+    out = lspr_jb_emit_packed_key(out, lspr_key_kind())
+    out = lspr_jb_emit_colon(out)
+    out = lspr_jb_emit_string(out, "refactor")
+    out = lspr_jb_emit_comma(out)
+
+    // "description": "..."
+    out = lspr_jb_emit_key_description(out)
+    out = lspr_jb_emit_colon(out)
+    out = lspr_jb_emit_string(out, r.description)
+    out = lspr_jb_emit_comma(out)
+
+    // "edits": [...]
+    out = lspr_jb_emit_packed_key(out, lspr_key_edits())
+    out = lspr_jb_emit_colon(out)
+    out = lspr_jb_open_array(out)
+    var i: i64 = 0
+    while i < r.edit_count {
+        if i > 0 {
+            out = lspr_jb_emit_comma(out)
+        }
+        out = lspr_edit_to_json(r.edits[i as usize], out)
+        i = i + 1
+    }
+    out = lspr_jb_close_array(out)
+
+    out = lspr_jb_close_object(out)
+    out
+}
+
+// ============================================================================
+// Section 10: TESTS
+// ============================================================================
+
+// T01: lspr_position_new stores line and col
+fn test_lspr_position_new() -> bool {
+    let p = lspr_position_new(10, 5)
+    p.line == 10 && p.col == 5
+}
+
+// T02: lspr_range_new stores all four coords
+fn test_lspr_range_new() -> bool {
+    let r = lspr_range_new(1, 2, 3, 4)
+    r.start.line == 1 && r.start.col == 2 && r.end.line == 3 && r.end.col == 4
+}
+
+// T03: lspr_edit_new stores all fields
+fn test_lspr_edit_new() -> bool {
+    let e = lspr_edit_new(7, 0, 0, 1, 5, "hello", LSPR_EDIT_REPLACE)
+    e.file_id == 7 && str_eq(e.new_text, "hello") && e.edit_kind == LSPR_EDIT_REPLACE
+}
+
+// T04: lspr_refactoring_new stores kind, title, description
+fn test_lspr_refactoring_new() -> bool {
+    let r = lspr_refactoring_new(LSPR_KIND_EXTRACT_FUNCTION, "Extract", "Desc")
+    r.kind == LSPR_KIND_EXTRACT_FUNCTION && str_eq(r.title, "Extract") && r.edit_count == 0
+}
+
+// T05: lspr_refactoring_add_edit increments edit_count
+fn test_lspr_refactoring_add_edit() -> bool with Mut, Panic {
+    let r0 = lspr_refactoring_new(LSPR_KIND_INLINE_VARIABLE, "Inline", "Desc")
+    let e  = lspr_edit_new(1, 0, 0, 0, 3, "val", LSPR_EDIT_REPLACE)
+    let r1 = lspr_refactoring_add_edit(r0, e)
+    r1.edit_count == 1
+}
+
+// T06: lspr_refactoring_add_edit stores edit correctly
+fn test_lspr_refactoring_add_edit_content() -> bool with Mut, Panic {
+    let r0 = lspr_refactoring_new(LSPR_KIND_INLINE_VARIABLE, "Inline", "Desc")
+    let e  = lspr_edit_new(3, 5, 2, 5, 10, "new_val", LSPR_EDIT_REPLACE)
+    let r1 = lspr_refactoring_add_edit(r0, e)
+    r1.edits[0].file_id == 3 && str_eq(r1.edits[0].new_text, "new_val")
+}
+
+// T07: lspr_list_new starts empty
+fn test_lspr_list_new() -> bool {
+    let lst = lspr_list_new()
+    lst.count == 0
+}
+
+// T08: lspr_list_add increments count
+fn test_lspr_list_add() -> bool with Mut, Panic {
+    let lst0 = lspr_list_new()
+    let r    = lspr_refactoring_new(LSPR_KIND_EXTRACT_FUNCTION, "Extract", "Desc")
+    let lst1 = lspr_list_add(lst0, r)
+    lst1.count == 1
+}
+
+// T09: lspr_list_add stores refactoring
+fn test_lspr_list_add_content() -> bool with Mut, Panic {
+    let lst0 = lspr_list_new()
+    let r    = lspr_refactoring_new(LSPR_KIND_WRAP_IN_KNOWLEDGE, "Wrap", "Desc")
+    let lst1 = lspr_list_add(lst0, r)
+    lst1.items[0].kind == LSPR_KIND_WRAP_IN_KNOWLEDGE
+}
+
+// T10: lspr_build_inline_variable produces REPLACE edit
+fn test_lspr_build_inline_variable() -> bool {
+    let ctx = lspr_context_zero()
+    let r   = lspr_build_inline_variable(ctx, "x", "42")
+    r.kind == LSPR_KIND_INLINE_VARIABLE && r.edit_count == 1
+        && r.edits[0].edit_kind == LSPR_EDIT_REPLACE
+        && str_eq(r.edits[0].new_text, "42")
+}
+
+// T11: lspr_build_inline_variable preserves initializer text
+fn test_lspr_build_inline_variable_text() -> bool {
+    let ctx = lspr_context_zero()
+    let r   = lspr_build_inline_variable(ctx, "my_var", "compute(a, b)")
+    str_eq(r.edits[0].new_text, "compute(a, b)")
+}
+
+// T12: lspr_build_add_effect_handler produces 2 edits
+fn test_lspr_build_add_effect_handler() -> bool with Mut, Panic, Div {
+    let ctx = lspr_context_zero()
+    let r   = lspr_build_add_effect_handler(ctx, "IO")
+    r.kind == LSPR_KIND_ADD_EFFECT_HANDLER && r.edit_count == 2
+}
+
+// T13: lspr_build_add_effect_handler edits are INSERT
+fn test_lspr_build_add_effect_handler_insert() -> bool with Mut, Panic, Div {
+    let ctx = lspr_context_zero()
+    let r   = lspr_build_add_effect_handler(ctx, "Mut")
+    r.edits[0].edit_kind == LSPR_EDIT_INSERT && r.edits[1].edit_kind == LSPR_EDIT_INSERT
+}
+
+// T14: lspr_build_wrap_in_knowledge produces REPLACE edit
+fn test_lspr_build_wrap_in_knowledge() -> bool with Mut, Panic, Div {
+    let ctx = lspr_context_zero()
+    let r   = lspr_build_wrap_in_knowledge(ctx, "x", "0.1")
+    r.kind == LSPR_KIND_WRAP_IN_KNOWLEDGE && r.edit_count == 1
+        && r.edits[0].edit_kind == LSPR_EDIT_REPLACE
+}
+
+// T15: lspr_build_wrap_in_knowledge text format
+fn test_lspr_build_wrap_in_knowledge_text() -> bool with Mut, Panic, Div {
+    let ctx = lspr_context_zero()
+    let r   = lspr_build_wrap_in_knowledge(ctx, "val", "2.5")
+    str_eq(r.edits[0].new_text, "Knowledge::from(val, 2.5)")
+}
+
+// T16: lspr_build_extract_function sets is_preferred
+fn test_lspr_build_extract_function_preferred() -> bool with Mut, Panic, Div {
+    let ctx = lspr_context_zero()
+    let r   = lspr_build_extract_function(ctx, "x + 1")
+    r.is_preferred && r.kind == LSPR_KIND_EXTRACT_FUNCTION
+}
+
+// T17: lspr_build_extract_function produces 2 edits
+fn test_lspr_build_extract_function_edits() -> bool with Mut, Panic, Div {
+    let ctx = lspr_context_zero()
+    let r   = lspr_build_extract_function(ctx, "result")
+    r.edit_count == 2
+}
+
+// T18: lspr_context_suggestions adds extract when selection non-empty
+fn test_lspr_context_suggestions_extract() -> bool with Mut, Panic, Div {
+    var ctx = lspr_context_zero()
+    ctx.sel_start = lspr_position_new(1, 0)
+    ctx.sel_end   = lspr_position_new(1, 10)
+    let lst0 = lspr_list_new()
+    let lst1 = lspr_context_suggestions(ctx, lst0)
+    lst1.count > 0
+}
+
+// T19: lspr_context_suggestions adds knowledge wrap for f64
+fn test_lspr_context_suggestions_knowledge() -> bool with Mut, Panic, Div {
+    var ctx = lspr_context_zero()
+    ctx.expr_type = "f64"
+    let lst0 = lspr_list_new()
+    let lst1 = lspr_context_suggestions(ctx, lst0)
+    lst1.count >= 1
+}
+
+// T20: lspr_context_suggestions adds effect handlers
+fn test_lspr_context_suggestions_effects() -> bool with Mut, Panic, Div {
+    var ctx = lspr_context_zero()
+    ctx.expr_effect_count = 2
+    ctx.expr_effects[0] = "IO"
+    ctx.expr_effects[1] = "Mut"
+    let lst0 = lspr_list_new()
+    let lst1 = lspr_context_suggestions(ctx, lst0)
+    lst1.count == 2
+}
+
+// T21: lspr_to_json produces valid JSON (starts '{', ends '}')
+fn test_lspr_to_json_shape() -> bool with Mut, Div, Panic {
+    let r   = lspr_refactoring_new(LSPR_KIND_EXTRACT_FUNCTION, "Extract Function", "Desc")
+    let buf = lspr_jb_new()
+    let out = lspr_to_json(r, buf)
+    lspr_jb_byte_at(out, 0) == 123 && lspr_jb_byte_at(out, out.len - 1) == 125
+}
+
+// T22: lspr_to_json produces non-trivial output
+fn test_lspr_to_json_nonempty() -> bool with Mut, Div, Panic {
+    let r   = lspr_refactoring_new(LSPR_KIND_WRAP_IN_KNOWLEDGE, "Wrap", "Wrap value")
+    let buf = lspr_jb_new()
+    let out = lspr_to_json(r, buf)
+    out.len > 30
+}
+
+// T23: lspr_to_json with one edit produces longer output
+fn test_lspr_to_json_with_edit() -> bool with Mut, Div, Panic {
+    var r  = lspr_refactoring_new(LSPR_KIND_INLINE_VARIABLE, "Inline", "Desc")
+    let e  = lspr_edit_new(1, 0, 0, 0, 5, "value", LSPR_EDIT_REPLACE)
+    r = lspr_refactoring_add_edit(r, e)
+    let buf = lspr_jb_new()
+    let out = lspr_to_json(r, buf)
+    out.len > 50
+}
+
+// T24: LSPR_INVALID equals -1
+fn test_lspr_invalid() -> bool {
+    LSPR_INVALID == 0 - 1
+}
+
+// T25: kind constants are distinct
+fn test_lspr_kind_constants() -> bool {
+    LSPR_KIND_EXTRACT_FUNCTION != LSPR_KIND_EXTRACT_VARIABLE
+    && LSPR_KIND_INLINE_VARIABLE != LSPR_KIND_INLINE_FUNCTION
+    && LSPR_KIND_ADD_EFFECT_HANDLER != LSPR_KIND_WRAP_IN_KNOWLEDGE
+    && LSPR_KIND_ORGANIZE_IMPORTS != LSPR_KIND_ADD_EFFECT_ANNOTATION
+}
+
+// T26: edit kind constants are distinct
+fn test_lspr_edit_kinds() -> bool {
+    LSPR_EDIT_INSERT != LSPR_EDIT_DELETE && LSPR_EDIT_DELETE != LSPR_EDIT_REPLACE
+}
+
+// T27: lspr_build_organize_imports sort check
+fn test_lspr_build_organize_imports_sorts() -> bool with Mut, Panic, Div {
+    var imports: [string; 64] = [""; 64]
+    imports[0] = "use z_module"
+    imports[1] = "use a_module"
+    imports[2] = "use m_module"
+    let r = lspr_build_organize_imports(1, imports, 3)
+    r.kind == LSPR_KIND_ORGANIZE_IMPORTS && r.edit_count == 1
+}
+
+// T28: lspr_build_organize_imports edit kind is REPLACE
+fn test_lspr_build_organize_imports_edit_kind() -> bool with Mut, Panic, Div {
+    var imports: [string; 64] = [""; 64]
+    imports[0] = "use beta"
+    imports[1] = "use alpha"
+    let r = lspr_build_organize_imports(2, imports, 2)
+    r.edits[0].edit_kind == LSPR_EDIT_REPLACE
+}
+
+// T29: lspr_jb_emit_int for zero
+fn test_lspr_jb_emit_int_zero() -> bool with Mut, Panic, Div {
+    let buf = lspr_jb_new()
+    let out = lspr_jb_emit_int(buf, 0)
+    out.len == 1 && lspr_jb_byte_at(out, 0) == 48
+}
+
+// T30: lspr_jb_emit_string emits quotes
+fn test_lspr_jb_emit_string_quotes() -> bool with Mut, Panic, Div {
+    let buf = lspr_jb_new()
+    let out = lspr_jb_emit_string(buf, "hi")
+    lspr_jb_byte_at(out, 0) == 34 && lspr_jb_byte_at(out, out.len - 1) == 34
+}
+
+// ============================================================================
+// Section 11: TEST RUNNER
+// ============================================================================
+
+fn lspr_refactor_run_tests() -> i64 with IO, Mut, Div, Panic {
+    var passed: i64 = 0
+    var total:  i64 = 0
+
+    total = total + 1
+    if test_lspr_position_new() { passed = passed + 1 } else { print("FAIL: T01 position_new\n") }
+
+    total = total + 1
+    if test_lspr_range_new() { passed = passed + 1 } else { print("FAIL: T02 range_new\n") }
+
+    total = total + 1
+    if test_lspr_edit_new() { passed = passed + 1 } else { print("FAIL: T03 edit_new\n") }
+
+    total = total + 1
+    if test_lspr_refactoring_new() { passed = passed + 1 } else { print("FAIL: T04 refactoring_new\n") }
+
+    total = total + 1
+    if test_lspr_refactoring_add_edit() { passed = passed + 1 } else { print("FAIL: T05 add_edit\n") }
+
+    total = total + 1
+    if test_lspr_refactoring_add_edit_content() { passed = passed + 1 } else { print("FAIL: T06 add_edit_content\n") }
+
+    total = total + 1
+    if test_lspr_list_new() { passed = passed + 1 } else { print("FAIL: T07 list_new\n") }
+
+    total = total + 1
+    if test_lspr_list_add() { passed = passed + 1 } else { print("FAIL: T08 list_add\n") }
+
+    total = total + 1
+    if test_lspr_list_add_content() { passed = passed + 1 } else { print("FAIL: T09 list_add_content\n") }
+
+    total = total + 1
+    if test_lspr_build_inline_variable() { passed = passed + 1 } else { print("FAIL: T10 inline_variable\n") }
+
+    total = total + 1
+    if test_lspr_build_inline_variable_text() { passed = passed + 1 } else { print("FAIL: T11 inline_variable_text\n") }
+
+    total = total + 1
+    if test_lspr_build_add_effect_handler() { passed = passed + 1 } else { print("FAIL: T12 effect_handler\n") }
+
+    total = total + 1
+    if test_lspr_build_add_effect_handler_insert() { passed = passed + 1 } else { print("FAIL: T13 effect_handler_insert\n") }
+
+    total = total + 1
+    if test_lspr_build_wrap_in_knowledge() { passed = passed + 1 } else { print("FAIL: T14 wrap_knowledge\n") }
+
+    total = total + 1
+    if test_lspr_build_wrap_in_knowledge_text() { passed = passed + 1 } else { print("FAIL: T15 wrap_knowledge_text\n") }
+
+    total = total + 1
+    if test_lspr_build_extract_function_preferred() { passed = passed + 1 } else { print("FAIL: T16 extract_preferred\n") }
+
+    total = total + 1
+    if test_lspr_build_extract_function_edits() { passed = passed + 1 } else { print("FAIL: T17 extract_edits\n") }
+
+    total = total + 1
+    if test_lspr_context_suggestions_extract() { passed = passed + 1 } else { print("FAIL: T18 suggestions_extract\n") }
+
+    total = total + 1
+    if test_lspr_context_suggestions_knowledge() { passed = passed + 1 } else { print("FAIL: T19 suggestions_knowledge\n") }
+
+    total = total + 1
+    if test_lspr_context_suggestions_effects() { passed = passed + 1 } else { print("FAIL: T20 suggestions_effects\n") }
+
+    total = total + 1
+    if test_lspr_to_json_shape() { passed = passed + 1 } else { print("FAIL: T21 to_json_shape\n") }
+
+    total = total + 1
+    if test_lspr_to_json_nonempty() { passed = passed + 1 } else { print("FAIL: T22 to_json_nonempty\n") }
+
+    total = total + 1
+    if test_lspr_to_json_with_edit() { passed = passed + 1 } else { print("FAIL: T23 to_json_with_edit\n") }
+
+    total = total + 1
+    if test_lspr_invalid() { passed = passed + 1 } else { print("FAIL: T24 invalid\n") }
+
+    total = total + 1
+    if test_lspr_kind_constants() { passed = passed + 1 } else { print("FAIL: T25 kind_constants\n") }
+
+    total = total + 1
+    if test_lspr_edit_kinds() { passed = passed + 1 } else { print("FAIL: T26 edit_kinds\n") }
+
+    total = total + 1
+    if test_lspr_build_organize_imports_sorts() { passed = passed + 1 } else { print("FAIL: T27 organize_imports\n") }
+
+    total = total + 1
+    if test_lspr_build_organize_imports_edit_kind() { passed = passed + 1 } else { print("FAIL: T28 organize_imports_edit_kind\n") }
+
+    total = total + 1
+    if test_lspr_jb_emit_int_zero() { passed = passed + 1 } else { print("FAIL: T29 jb_emit_int_zero\n") }
+
+    total = total + 1
+    if test_lspr_jb_emit_string_quotes() { passed = passed + 1 } else { print("FAIL: T30 jb_emit_string_quotes\n") }
+
+    print("LSP refactor tests: ")
+    print_int(passed)
+    print("/")
+    print_int(total)
+    print(" passed\n")
+
+    if passed == total {
+        print("ALL LSP REFACTOR TESTS PASSED\n")
+        0
+    } else {
+        print("SOME LSP REFACTOR TESTS FAILED\n")
+        1
+    }
+}

@@ -1,0 +1,515 @@
+// self-hosted::lsp::templates -- Code template/snippet engine for Sounio LSP
+//
+// Provides templates for common Sounio patterns and serialises them as
+// LSP CompletionItem JSON objects (insertTextFormat: 2 = snippet).
+//
+// Templates are identified by a trigger string (e.g. "fnw") and belong to
+// a category (function, struct, effect, ...) and scope (top-level, function,
+// expression, type).
+//
+// NOTE: JsonBuf and its minimal helpers are declared inline so this file
+//       can be checked standalone.  In the full build the canonical
+//       definitions from lsp/protocol.sio take precedence.
+//
+// All state lives in flat fixed-size arenas -- no heap allocation.
+//
+// Capacity:
+//   - Templates per registry: 64
+//
+// Prefix: lspt_
+
+// ============================================================================
+// Section 1: TEMPLATE CATEGORY CONSTANTS
+// ============================================================================
+
+let LSPT_CAT_FUNCTION:  i64 = 0
+let LSPT_CAT_STRUCT:    i64 = 1
+let LSPT_CAT_EFFECT:    i64 = 2
+let LSPT_CAT_HANDLER:   i64 = 3
+let LSPT_CAT_KNOWLEDGE: i64 = 4
+let LSPT_CAT_UNITS:     i64 = 5
+let LSPT_CAT_MATCH:     i64 = 6
+let LSPT_CAT_GPU:       i64 = 7
+let LSPT_CAT_LOOP:      i64 = 8
+let LSPT_CAT_TEST:      i64 = 9
+
+// ============================================================================
+// Section 2: TEMPLATE SCOPE CONSTANTS
+// ============================================================================
+
+let LSPT_SCOPE_TOP_LEVEL:  i64 = 0
+let LSPT_SCOPE_FUNCTION:   i64 = 1
+let LSPT_SCOPE_EXPRESSION: i64 = 2
+let LSPT_SCOPE_TYPE:       i64 = 3
+
+// ============================================================================
+// Section 3: CAPACITY CONSTANTS
+// ============================================================================
+
+let LSPT_MAX_TEMPLATES: i64 = 64
+let LSPT_INVALID:       i64 = 0 - 1
+
+// ============================================================================
+// Section 4: JSON BUFFER (inline for standalone checkability)
+// ============================================================================
+
+struct JsonBuf {
+    data: [i8; 65536],
+    len:  i64,
+}
+
+fn lspt_jb_new() -> JsonBuf {
+    JsonBuf {
+        data: [0; 65536],
+        len:  0,
+    }
+}
+
+fn lspt_jb_byte(buf: JsonBuf, b: i8) -> JsonBuf with Mut, Panic {
+    var out = buf
+    if out.len < 65536 {
+        out.data[out.len as usize] = b
+        out.len = out.len + 1
+    }
+    out
+}
+
+fn lspt_jb_ch(buf: JsonBuf, ch: i64) -> JsonBuf with Mut, Panic {
+    lspt_jb_byte(buf, ch as i8)
+}
+
+fn lspt_jb_colon(buf: JsonBuf) -> JsonBuf with Mut, Panic {
+    lspt_jb_ch(buf, 58)   // ':'
+}
+
+fn lspt_jb_comma(buf: JsonBuf) -> JsonBuf with Mut, Panic {
+    lspt_jb_ch(buf, 44)   // ','
+}
+
+fn lspt_jb_open_obj(buf: JsonBuf) -> JsonBuf with Mut, Panic {
+    lspt_jb_ch(buf, 123)  // '{'
+}
+
+fn lspt_jb_close_obj(buf: JsonBuf) -> JsonBuf with Mut, Panic {
+    lspt_jb_ch(buf, 125)  // '}'
+}
+
+fn lspt_jb_int(buf: JsonBuf, val: i64) -> JsonBuf with Mut, Panic, Div {
+    if val == 0 {
+        return lspt_jb_ch(buf, 48)   // '0'
+    }
+    var n = val
+    var out = buf
+    if n < 0 {
+        out = lspt_jb_ch(out, 45)   // '-'
+        n = 0 - n
+    }
+    var digits: [i8; 24] = [0; 24]
+    var dlen: i64 = 0
+    while n > 0 && dlen < 24 {
+        let d = n - (n / 10) * 10
+        digits[dlen as usize] = (d + 48) as i8
+        n = n / 10
+        dlen = dlen + 1
+    }
+    var i = dlen - 1
+    while i >= 0 {
+        out = lspt_jb_byte(out, digits[i as usize])
+        i = i - 1
+    }
+    out
+}
+
+// Emit a JSON-quoted string value.
+fn lspt_emit_string(buf: JsonBuf, s: string) -> JsonBuf with Mut, Panic, Div {
+    var out = lspt_jb_ch(buf, 34)    // '"'
+    let len = str_len(s)
+    var i: i64 = 0
+    while i < len {
+        let ch = str_char_at(s, i)
+        out = lspt_jb_ch(out, ch)
+        i = i + 1
+    }
+    out = lspt_jb_ch(out, 34)        // '"'
+    out
+}
+
+// Emit "key": — key is a string literal passed as a string.
+fn lspt_jb_key(buf: JsonBuf, key: string) -> JsonBuf with Mut, Panic, Div {
+    var out = lspt_emit_string(buf, key)
+    out = lspt_jb_colon(out)
+    out
+}
+
+// Read a byte at position idx from the buffer (for tests).
+fn lspt_jb_byte_at(buf: JsonBuf, idx: i64) -> i64 with Panic {
+    buf.data[idx as usize] as i64
+}
+
+// ============================================================================
+// Section 5: CORE STRUCTS
+// ============================================================================
+
+struct LsptTemplate {
+    id:          i64,
+    name:        string,
+    description: string,
+    category:    i64,
+    trigger:     string,
+    body:        string,
+    scope:       i64,
+}
+
+struct LsptRegistry {
+    templates: [LsptTemplate; 64],
+    count:     i64,
+}
+
+// ============================================================================
+// Section 6: ZERO-VALUE CONSTRUCTORS
+// ============================================================================
+
+fn lspt_template_zero() -> LsptTemplate {
+    LsptTemplate {
+        id:          0,
+        name:        "",
+        description: "",
+        category:    LSPT_CAT_FUNCTION,
+        trigger:     "",
+        body:        "",
+        scope:       LSPT_SCOPE_TOP_LEVEL,
+    }
+}
+
+// ============================================================================
+// Section 7: REGISTRY OPERATIONS
+// ============================================================================
+
+// Create an empty template registry.
+fn lspt_registry_new() -> LsptRegistry {
+    LsptRegistry {
+        templates: [lspt_template_zero(); 64],
+        count:     0,
+    }
+}
+
+// Append a template to the registry.  Returns the updated registry.
+fn lspt_registry_add(reg: LsptRegistry, tmpl: LsptTemplate) -> LsptRegistry with Mut, Panic {
+    var out = reg
+    if out.count < LSPT_MAX_TEMPLATES {
+        out.templates[out.count as usize] = tmpl
+        out.count = out.count + 1
+    }
+    out
+}
+
+// Find a template by trigger string.  Returns the index or LSPT_INVALID.
+fn lspt_registry_find_by_trigger(reg: LsptRegistry, trigger: string) -> i64 with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < reg.count {
+        if str_eq(reg.templates[i as usize].trigger, trigger) {
+            return i
+        }
+        i = i + 1
+    }
+    LSPT_INVALID
+}
+
+// Filter templates by category.  Returns a new registry containing only
+// matching templates.
+fn lspt_registry_find_by_category(reg: LsptRegistry, cat: i64, out: LsptRegistry) -> LsptRegistry with Mut, Panic, Div {
+    var result = out
+    var i: i64 = 0
+    while i < reg.count {
+        if reg.templates[i as usize].category == cat {
+            if result.count < LSPT_MAX_TEMPLATES {
+                result.templates[result.count as usize] = reg.templates[i as usize]
+                result.count = result.count + 1
+            }
+        }
+        i = i + 1
+    }
+    result
+}
+
+// ============================================================================
+// Section 8: BUILT-IN TEMPLATE REGISTRY
+// ============================================================================
+
+// Returns a registry pre-populated with built-in Sounio snippet templates.
+fn lspt_builtin_registry() -> LsptRegistry with Mut, Panic {
+    var reg = lspt_registry_new()
+
+    // fnw -- function with effects (top-level)
+    var t0 = lspt_template_zero()
+    t0.id          = 0
+    t0.name        = "fn-with-effects"
+    t0.description = "Function with effects clause"
+    t0.category    = LSPT_CAT_FUNCTION
+    t0.trigger     = "fnw"
+    t0.body        = "fn $1($2) -> $3 with $4 {\n    $5\n}"
+    t0.scope       = LSPT_SCOPE_TOP_LEVEL
+    reg = lspt_registry_add(reg, t0)
+
+    // fnpure -- pure function (top-level)
+    var t1 = lspt_template_zero()
+    t1.id          = 1
+    t1.name        = "fn-pure"
+    t1.description = "Pure function (no effects)"
+    t1.category    = LSPT_CAT_FUNCTION
+    t1.trigger     = "fnpure"
+    t1.body        = "fn $1($2) -> $3 {\n    $4\n}"
+    t1.scope       = LSPT_SCOPE_TOP_LEVEL
+    reg = lspt_registry_add(reg, t1)
+
+    // letk -- epistemic Knowledge variable (function scope)
+    var t2 = lspt_template_zero()
+    t2.id          = 2
+    t2.name        = "let-knowledge"
+    t2.description = "Epistemic Knowledge variable"
+    t2.category    = LSPT_CAT_KNOWLEDGE
+    t2.trigger     = "letk"
+    t2.body        = "let $1: Knowledge<$2> = measure($3, uncertainty: $4)"
+    t2.scope       = LSPT_SCOPE_FUNCTION
+    reg = lspt_registry_add(reg, t2)
+
+    // mkmatch -- match expression
+    var t3 = lspt_template_zero()
+    t3.id          = 3
+    t3.name        = "match-expression"
+    t3.description = "Match expression with wildcard arm"
+    t3.category    = LSPT_CAT_MATCH
+    t3.trigger     = "mkmatch"
+    t3.body        = "match $1 {\n    $2 => $3,\n    _ => $4,\n}"
+    t3.scope       = LSPT_SCOPE_EXPRESSION
+    reg = lspt_registry_add(reg, t3)
+
+    // mkstruct -- struct definition (top-level)
+    var t4 = lspt_template_zero()
+    t4.id          = 4
+    t4.name        = "struct-definition"
+    t4.description = "Struct type definition"
+    t4.category    = LSPT_CAT_STRUCT
+    t4.trigger     = "mkstruct"
+    t4.body        = "struct $1 {\n    $2: $3,\n}"
+    t4.scope       = LSPT_SCOPE_TOP_LEVEL
+    reg = lspt_registry_add(reg, t4)
+
+    // mkeffect -- effect definition (top-level)
+    var t5 = lspt_template_zero()
+    t5.id          = 5
+    t5.name        = "effect-definition"
+    t5.description = "Effect type definition"
+    t5.category    = LSPT_CAT_EFFECT
+    t5.trigger     = "mkeffect"
+    t5.body        = "effect $1 {\n    fn $2($3) -> $4\n}"
+    t5.scope       = LSPT_SCOPE_TOP_LEVEL
+    reg = lspt_registry_add(reg, t5)
+
+    // mkhandle -- effect handler (expression scope)
+    var t6 = lspt_template_zero()
+    t6.id          = 6
+    t6.name        = "effect-handler"
+    t6.description = "Effect handler expression"
+    t6.category    = LSPT_CAT_HANDLER
+    t6.trigger     = "mkhandle"
+    t6.body        = "handle $1 in $2 {\n    $3($4) => $5,\n}"
+    t6.scope       = LSPT_SCOPE_EXPRESSION
+    reg = lspt_registry_add(reg, t6)
+
+    // mkgpu -- GPU kernel function (top-level)
+    var t7 = lspt_template_zero()
+    t7.id          = 7
+    t7.name        = "gpu-kernel"
+    t7.description = "GPU kernel function with launch"
+    t7.category    = LSPT_CAT_GPU
+    t7.trigger     = "mkgpu"
+    t7.body        = "fn $1($2) -> $3 with GPU {\n    gpu::launch($4, $5, || {\n        $6\n    })\n}"
+    t7.scope       = LSPT_SCOPE_TOP_LEVEL
+    reg = lspt_registry_add(reg, t7)
+
+    // mktest -- test function (top-level)
+    var t8 = lspt_template_zero()
+    t8.id          = 8
+    t8.name        = "test-function"
+    t8.description = "Test function with assert"
+    t8.category    = LSPT_CAT_TEST
+    t8.trigger     = "mktest"
+    t8.body        = "fn test_$1() with Mut, Div, Panic {\n    $2\n    assert($3)\n}"
+    t8.scope       = LSPT_SCOPE_TOP_LEVEL
+    reg = lspt_registry_add(reg, t8)
+
+    // mkwhile -- while loop with counter (function scope)
+    var t9 = lspt_template_zero()
+    t9.id          = 9
+    t9.name        = "while-loop"
+    t9.description = "While loop with integer counter"
+    t9.category    = LSPT_CAT_LOOP
+    t9.trigger     = "mkwhile"
+    t9.body        = "var $1: i32 = 0\nwhile $1 < $2 {\n    $3\n    $1 = $1 + 1\n}"
+    t9.scope       = LSPT_SCOPE_FUNCTION
+    reg = lspt_registry_add(reg, t9)
+
+    reg
+}
+
+// ============================================================================
+// Section 9: JSON SERIALIZATION
+// ============================================================================
+
+// Serialise a single LsptTemplate as an LSP CompletionItem JSON object.
+// Output: {"label":"<trigger>","kind":15,"detail":"<description>","insertText":"<body>","insertTextFormat":2}
+fn lspt_template_to_completion_json(tmpl: LsptTemplate, buf: JsonBuf) -> JsonBuf with Mut, Div, Panic {
+    var out = lspt_jb_open_obj(buf)
+
+    out = lspt_jb_key(out, "label")
+    out = lspt_emit_string(out, tmpl.trigger)
+    out = lspt_jb_comma(out)
+
+    out = lspt_jb_key(out, "kind")
+    out = lspt_jb_int(out, 15)
+    out = lspt_jb_comma(out)
+
+    out = lspt_jb_key(out, "detail")
+    out = lspt_emit_string(out, tmpl.description)
+    out = lspt_jb_comma(out)
+
+    out = lspt_jb_key(out, "insertText")
+    out = lspt_emit_string(out, tmpl.body)
+    out = lspt_jb_comma(out)
+
+    out = lspt_jb_key(out, "insertTextFormat")
+    out = lspt_jb_int(out, 2)
+
+    out = lspt_jb_close_obj(out)
+    out
+}
+
+// ============================================================================
+// Section 10: TESTS
+// ============================================================================
+
+// T01: lspt_registry_new creates an empty registry.
+fn test_lspt_registry_new() -> bool {
+    let reg = lspt_registry_new()
+    reg.count == 0
+}
+
+// T02: lspt_registry_add increments count.
+fn test_lspt_registry_add() -> bool with Mut, Panic {
+    let reg0 = lspt_registry_new()
+    let tmpl = lspt_template_zero()
+    let reg1 = lspt_registry_add(reg0, tmpl)
+    reg1.count == 1
+}
+
+// T03: lspt_builtin_registry has 10 templates.
+fn test_lspt_builtin_registry_count() -> bool with Mut, Panic {
+    let reg = lspt_builtin_registry()
+    reg.count == 10
+}
+
+// T04: lspt_registry_find_by_trigger finds "fnw" at index 0.
+fn test_lspt_find_by_trigger_hit() -> bool with Mut, Panic, Div {
+    let reg = lspt_builtin_registry()
+    let idx = lspt_registry_find_by_trigger(reg, "fnw")
+    idx == 0
+}
+
+// T05: lspt_registry_find_by_trigger returns LSPT_INVALID for unknown trigger.
+fn test_lspt_find_by_trigger_miss() -> bool with Mut, Panic, Div {
+    let reg = lspt_builtin_registry()
+    let idx = lspt_registry_find_by_trigger(reg, "zzzmissing")
+    idx == LSPT_INVALID
+}
+
+// T06: lspt_registry_find_by_category returns 2 entries for LSPT_CAT_FUNCTION.
+fn test_lspt_find_by_category() -> bool with Mut, Panic, Div {
+    let reg = lspt_builtin_registry()
+    let empty = lspt_registry_new()
+    let fns = lspt_registry_find_by_category(reg, LSPT_CAT_FUNCTION, empty)
+    fns.count == 2
+}
+
+// T07: lspt_template_to_completion_json produces a valid JSON object.
+fn test_lspt_completion_json() -> bool with Mut, Div, Panic {
+    let reg = lspt_builtin_registry()
+    let tmpl = reg.templates[0]
+    let buf = lspt_jb_new()
+    let out = lspt_template_to_completion_json(tmpl, buf)
+    let ok_open  = lspt_jb_byte_at(out, 0) == 123            // '{'
+    let ok_close = lspt_jb_byte_at(out, out.len - 1) == 125  // '}'
+    let ok_len   = out.len > 20
+    ok_open && ok_close && ok_len
+}
+
+// T08: category constants are distinct and correct.
+fn test_lspt_category_constants() -> bool {
+    let ok0 = LSPT_CAT_FUNCTION  == 0
+    let ok1 = LSPT_CAT_STRUCT    == 1
+    let ok2 = LSPT_CAT_EFFECT    == 2
+    let ok3 = LSPT_CAT_HANDLER   == 3
+    let ok4 = LSPT_CAT_KNOWLEDGE == 4
+    let ok5 = LSPT_CAT_GPU       == 7
+    let ok6 = LSPT_CAT_TEST      == 9
+    ok0 && ok1 && ok2 && ok3 && ok4 && ok5 && ok6
+}
+
+// T09: scope constants are distinct and correct.
+fn test_lspt_scope_constants() -> bool {
+    let ok0 = LSPT_SCOPE_TOP_LEVEL  == 0
+    let ok1 = LSPT_SCOPE_FUNCTION   == 1
+    let ok2 = LSPT_SCOPE_EXPRESSION == 2
+    let ok3 = LSPT_SCOPE_TYPE       == 3
+    ok0 && ok1 && ok2 && ok3
+}
+
+// ============================================================================
+// Section 11: TEST RUNNER
+// ============================================================================
+
+fn lspt_run_tests() -> i64 with IO, Mut, Div, Panic {
+    var passed: i64 = 0
+    var total:  i64 = 0
+
+    total = total + 1
+    if test_lspt_registry_new()           { passed = passed + 1 } else { print("FAIL: T01 registry_new\n") }
+
+    total = total + 1
+    if test_lspt_registry_add()           { passed = passed + 1 } else { print("FAIL: T02 registry_add\n") }
+
+    total = total + 1
+    if test_lspt_builtin_registry_count() { passed = passed + 1 } else { print("FAIL: T03 builtin_count\n") }
+
+    total = total + 1
+    if test_lspt_find_by_trigger_hit()    { passed = passed + 1 } else { print("FAIL: T04 find_trigger_hit\n") }
+
+    total = total + 1
+    if test_lspt_find_by_trigger_miss()   { passed = passed + 1 } else { print("FAIL: T05 find_trigger_miss\n") }
+
+    total = total + 1
+    if test_lspt_find_by_category()       { passed = passed + 1 } else { print("FAIL: T06 find_by_category\n") }
+
+    total = total + 1
+    if test_lspt_completion_json()        { passed = passed + 1 } else { print("FAIL: T07 completion_json\n") }
+
+    total = total + 1
+    if test_lspt_category_constants()     { passed = passed + 1 } else { print("FAIL: T08 category_constants\n") }
+
+    total = total + 1
+    if test_lspt_scope_constants()        { passed = passed + 1 } else { print("FAIL: T09 scope_constants\n") }
+
+    print("lspt tests: ")
+    print_int(passed)
+    print("/")
+    print_int(total)
+    print(" passed\n")
+
+    if passed == total {
+        print("ALL LSPT TESTS PASSED\n")
+        0
+    } else {
+        print("SOME LSPT TESTS FAILED\n")
+        1
+    }
+}

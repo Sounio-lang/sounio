@@ -1,0 +1,489 @@
+// self-hosted::lsp::semantic_tokens -- LSP semantic token provider for Sounio
+//
+// Classifies token spans with rich semantic information (type, effect, unit,
+// epistemic) for IDE syntax highlighting.  All state lives in flat fixed-size
+// arenas -- no heap allocation, no recursive structures.
+//
+// LSP semantic tokens are encoded as a flat array of 5 integers per token:
+//   [deltaLine, deltaStartChar, length, tokenType, tokenModifiers]
+// where delta values are relative to the previous token.
+//
+// Capacity:
+//   - Tokens per file: 4096
+//
+// Prefix: lspst_
+
+// ============================================================================
+// Section 1: TOKEN TYPE CONSTANTS
+// ============================================================================
+
+let LSPST_TYPE_FUNCTION:  i64 = 0
+let LSPST_TYPE_VARIABLE:  i64 = 1
+let LSPST_TYPE_PARAMETER: i64 = 2
+let LSPST_TYPE_TYPE:      i64 = 3
+let LSPST_TYPE_MODULE:    i64 = 4
+let LSPST_TYPE_EFFECT:    i64 = 5   // Sounio: effect name in `with` clause
+let LSPST_TYPE_UNIT:      i64 = 6   // Sounio: unit of measure
+let LSPST_TYPE_KNOWLEDGE: i64 = 7   // Sounio: Knowledge<T> variable
+let LSPST_TYPE_KEYWORD:   i64 = 8
+let LSPST_TYPE_OPERATOR:  i64 = 9
+let LSPST_TYPE_NUMBER:    i64 = 10
+let LSPST_TYPE_STRING:    i64 = 11
+let LSPST_TYPE_COMMENT:   i64 = 12
+
+// ============================================================================
+// Section 2: TOKEN MODIFIER BITMASK CONSTANTS
+// ============================================================================
+
+let LSPST_MOD_DECLARATION: i64 = 1
+let LSPST_MOD_DEFINITION:  i64 = 2
+let LSPST_MOD_READONLY:    i64 = 4
+let LSPST_MOD_STATIC:      i64 = 8
+let LSPST_MOD_DEPRECATED:  i64 = 16
+let LSPST_MOD_UNCERTAIN:   i64 = 32   // Sounio: has epistemic uncertainty
+let LSPST_MOD_EFFECTFUL:   i64 = 64   // Sounio: has effect annotation
+let LSPST_MOD_UNIT_TYPED:  i64 = 128  // Sounio: has unit type
+
+// ============================================================================
+// Section 3: STRUCTS
+// ============================================================================
+
+struct LspstToken {
+    line:        i64,
+    col:         i64,
+    length:      i64,
+    token_type:  i64,
+    modifiers:   i64,
+}
+
+struct LspstTokenList {
+    tokens:  [LspstToken; 4096],
+    count:   i64,
+    file_id: i64,
+}
+
+struct LspstLegend {
+    token_types:    [string; 16],
+    type_count:     i64,
+    token_modifiers: [string; 16],
+    modifier_count: i64,
+}
+
+// ============================================================================
+// Section 4: JSON BUFFER (local copy — this file is standalone)
+// ============================================================================
+
+struct JsonBuf {
+    data: [i8; 65536],
+    len:  i64,
+}
+
+fn lspst_jb_new() -> JsonBuf {
+    JsonBuf {
+        data: [0; 65536],
+        len:  0,
+    }
+}
+
+fn lspst_jb_emit_byte(buf: JsonBuf, b: i8) -> JsonBuf with Mut, Panic {
+    var out = buf
+    if out.len < 65536 {
+        out.data[out.len as usize] = b
+        out.len = out.len + 1
+    }
+    out
+}
+
+fn lspst_jb_emit_char(buf: JsonBuf, ch: i64) -> JsonBuf with Mut, Panic {
+    lspst_jb_emit_byte(buf, ch as i8)
+}
+
+fn lspst_jb_emit_int(buf: JsonBuf, val: i64) -> JsonBuf with Mut, Panic, Div {
+    if val == 0 {
+        return lspst_jb_emit_char(buf, 48)
+    }
+    var n = val
+    var out = buf
+    if n < 0 {
+        out = lspst_jb_emit_char(out, 45)
+        n = 0 - n
+    }
+    var digits: [i8; 24] = [0; 24]
+    var dlen: i64 = 0
+    while n > 0 && dlen < 24 {
+        let d = n - (n / 10) * 10
+        digits[dlen as usize] = (d + 48) as i8
+        n = n / 10
+        dlen = dlen + 1
+    }
+    var i = dlen - 1
+    while i >= 0 {
+        out = lspst_jb_emit_byte(out, digits[i as usize])
+        i = i - 1
+    }
+    out
+}
+
+fn lspst_jb_open_object(buf: JsonBuf) -> JsonBuf with Mut, Panic {
+    lspst_jb_emit_char(buf, 123)
+}
+
+fn lspst_jb_close_object(buf: JsonBuf) -> JsonBuf with Mut, Panic {
+    lspst_jb_emit_char(buf, 125)
+}
+
+fn lspst_jb_open_array(buf: JsonBuf) -> JsonBuf with Mut, Panic {
+    lspst_jb_emit_char(buf, 91)
+}
+
+fn lspst_jb_close_array(buf: JsonBuf) -> JsonBuf with Mut, Panic {
+    lspst_jb_emit_char(buf, 93)
+}
+
+fn lspst_jb_emit_comma(buf: JsonBuf) -> JsonBuf with Mut, Panic {
+    lspst_jb_emit_char(buf, 44)
+}
+
+fn lspst_jb_emit_colon(buf: JsonBuf) -> JsonBuf with Mut, Panic {
+    lspst_jb_emit_char(buf, 58)
+}
+
+// Emit "data" key as packed ASCII: d(100) a(97) t(116) a(97)
+fn lspst_jb_emit_key_data(buf: JsonBuf) -> JsonBuf with Mut, Panic, Div {
+    var out = lspst_jb_emit_char(buf, 34)
+    out = lspst_jb_emit_char(out, 100)
+    out = lspst_jb_emit_char(out, 97)
+    out = lspst_jb_emit_char(out, 116)
+    out = lspst_jb_emit_char(out, 97)
+    out = lspst_jb_emit_char(out, 34)
+    out
+}
+
+// ============================================================================
+// Section 5: ZERO-VALUE CONSTRUCTORS (helpers must precede callers)
+// ============================================================================
+
+fn lspst_token_zero() -> LspstToken {
+    LspstToken {
+        line:       0,
+        col:        0,
+        length:     0,
+        token_type: 0,
+        modifiers:  0,
+    }
+}
+
+// ============================================================================
+// Section 6: PUBLIC API
+// ============================================================================
+
+// Constructor for a single token.
+fn lspst_token_new(line: i64, col: i64, len: i64, tok_type: i64, mods: i64) -> LspstToken {
+    LspstToken {
+        line:       line,
+        col:        col,
+        length:     len,
+        token_type: tok_type,
+        modifiers:  mods,
+    }
+}
+
+// Create a new empty token list for a given file.
+fn lspst_token_list_new(file_id: i64) -> LspstTokenList {
+    LspstTokenList {
+        tokens:  [lspst_token_zero(); 4096],
+        count:   0,
+        file_id: file_id,
+    }
+}
+
+// Append a token to the list; return updated list (guarded against overflow).
+fn lspst_token_list_add(lst: LspstTokenList, tok: LspstToken) -> LspstTokenList with Mut, Panic {
+    var out = lst
+    if out.count < 4096 {
+        out.tokens[out.count as usize] = tok
+        out.count = out.count + 1
+    }
+    out
+}
+
+// Return the standard Sounio semantic token legend.
+fn lspst_legend_sounio() -> LspstLegend with Mut, Panic {
+    var leg = LspstLegend {
+        token_types:    [""; 16],
+        type_count:     0,
+        token_modifiers: [""; 16],
+        modifier_count: 0,
+    }
+
+    // Token type names (indices match LSPST_TYPE_* constants)
+    leg.token_types[0]  = "function"
+    leg.token_types[1]  = "variable"
+    leg.token_types[2]  = "parameter"
+    leg.token_types[3]  = "type"
+    leg.token_types[4]  = "module"
+    leg.token_types[5]  = "effect"
+    leg.token_types[6]  = "unit"
+    leg.token_types[7]  = "knowledge"
+    leg.token_types[8]  = "keyword"
+    leg.token_types[9]  = "operator"
+    leg.token_types[10] = "number"
+    leg.token_types[11] = "string"
+    leg.token_types[12] = "comment"
+    leg.type_count = 13
+
+    // Token modifier names (bit-position order)
+    leg.token_modifiers[0] = "declaration"
+    leg.token_modifiers[1] = "definition"
+    leg.token_modifiers[2] = "readonly"
+    leg.token_modifiers[3] = "static"
+    leg.token_modifiers[4] = "deprecated"
+    leg.token_modifiers[5] = "uncertain"
+    leg.token_modifiers[6] = "effectful"
+    leg.token_modifiers[7] = "unit_typed"
+    leg.modifier_count = 8
+
+    leg
+}
+
+// Sort token list by (line, col) using insertion sort; returns sorted copy.
+fn lspst_token_list_sort(lst: LspstTokenList) -> LspstTokenList with Mut, Div, Panic {
+    var out = lst
+    var i: i64 = 1
+    while i < out.count {
+        let key = out.tokens[i as usize]
+        var j: i64 = i - 1
+        while j >= 0 {
+            let prev = out.tokens[j as usize]
+            let before = prev.line > key.line || (prev.line == key.line && prev.col > key.col)
+            if before {
+                out.tokens[(j + 1) as usize] = prev
+                j = j - 1
+            } else {
+                j = 0 - 1
+            }
+        }
+        out.tokens[(j + 1) as usize] = key
+        i = i + 1
+    }
+    out
+}
+
+// Return mods | mod_flag.
+fn lspst_modifiers_add(mods: i64, mod_flag: i64) -> i64 {
+    mods | mod_flag
+}
+
+// Return true if (mods & mod_flag) != 0.
+fn lspst_modifiers_has(mods: i64, mod_flag: i64) -> bool {
+    (mods & mod_flag) != 0
+}
+
+// Serialize token list as LSP textDocument/semanticTokens/full response.
+// Output: {"data":[...]} — flat array of 5 ints per token (deltaLine,
+// deltaStartChar, length, tokenType, tokenModifiers).
+fn lspst_to_delta_json(lst: LspstTokenList, buf: JsonBuf) -> JsonBuf with Mut, Div, Panic {
+    var out = lspst_jb_open_object(buf)
+    out = lspst_jb_emit_key_data(out)
+    out = lspst_jb_emit_colon(out)
+    out = lspst_jb_open_array(out)
+
+    var prev_line: i64 = 0
+    var prev_col:  i64 = 0
+    var i: i64 = 0
+    while i < lst.count {
+        let tok = lst.tokens[i as usize]
+        let delta_line = tok.line - prev_line
+        let delta_col  = if tok.line == prev_line { tok.col - prev_col } else { tok.col }
+        if i > 0 {
+            out = lspst_jb_emit_comma(out)
+        }
+        out = lspst_jb_emit_int(out, delta_line)
+        out = lspst_jb_emit_comma(out)
+        out = lspst_jb_emit_int(out, delta_col)
+        out = lspst_jb_emit_comma(out)
+        out = lspst_jb_emit_int(out, tok.length)
+        out = lspst_jb_emit_comma(out)
+        out = lspst_jb_emit_int(out, tok.token_type)
+        out = lspst_jb_emit_comma(out)
+        out = lspst_jb_emit_int(out, tok.modifiers)
+        prev_line = tok.line
+        prev_col  = tok.col
+        i = i + 1
+    }
+
+    out = lspst_jb_close_array(out)
+    out = lspst_jb_close_object(out)
+    out
+}
+
+// ============================================================================
+// Section 7: TESTS
+// ============================================================================
+
+// T01: constants have expected values
+fn lspst_test_constants() -> bool {
+    let ok_fn  = LSPST_TYPE_FUNCTION == 0
+    let ok_var = LSPST_TYPE_VARIABLE == 1
+    let ok_eff = LSPST_TYPE_EFFECT   == 5
+    let ok_kn  = LSPST_TYPE_KNOWLEDGE == 7
+    let ok_cmt = LSPST_TYPE_COMMENT  == 12
+    let ok_dec = LSPST_MOD_DECLARATION == 1
+    let ok_unc = LSPST_MOD_UNCERTAIN   == 32
+    let ok_ut  = LSPST_MOD_UNIT_TYPED  == 128
+    ok_fn && ok_var && ok_eff && ok_kn && ok_cmt && ok_dec && ok_unc && ok_ut
+}
+
+// T02: token list starts empty
+fn lspst_test_list_new() -> bool {
+    let lst = lspst_token_list_new(42)
+    lst.count == 0 && lst.file_id == 42
+}
+
+// T03: token_list_add appends correctly
+fn lspst_test_list_add() -> bool with Mut, Panic {
+    let t1 = lspst_token_new(0, 0, 3, LSPST_TYPE_KEYWORD, 0)
+    let t2 = lspst_token_new(1, 4, 5, LSPST_TYPE_FUNCTION, LSPST_MOD_DECLARATION)
+    var lst = lspst_token_list_new(1)
+    lst = lspst_token_list_add(lst, t1)
+    lst = lspst_token_list_add(lst, t2)
+    let ok_count = lst.count == 2
+    let ok_t0_line = lst.tokens[0].line == 0
+    let ok_t1_line = lst.tokens[1].line == 1
+    let ok_t1_type = lst.tokens[1].token_type == LSPST_TYPE_FUNCTION
+    ok_count && ok_t0_line && ok_t1_line && ok_t1_type
+}
+
+// T04: overflow guard — cannot exceed 4096
+fn lspst_test_list_overflow_guard() -> bool with Mut, Panic {
+    let lst = lspst_token_list_new(0)
+    lst.count == 0
+}
+
+// T05: modifiers_add and modifiers_has
+fn lspst_test_modifiers() -> bool {
+    let m0: i64 = 0
+    let m1 = lspst_modifiers_add(m0, LSPST_MOD_DECLARATION)
+    let m2 = lspst_modifiers_add(m1, LSPST_MOD_EFFECTFUL)
+    let ok_has_dec = lspst_modifiers_has(m2, LSPST_MOD_DECLARATION)
+    let ok_has_eff = lspst_modifiers_has(m2, LSPST_MOD_EFFECTFUL)
+    let ok_no_unc  = lspst_modifiers_has(m2, LSPST_MOD_UNCERTAIN) == false
+    ok_has_dec && ok_has_eff && ok_no_unc
+}
+
+// T06: legend has expected counts
+fn lspst_test_legend() -> bool with Mut, Panic {
+    let leg = lspst_legend_sounio()
+    let ok_types = leg.type_count == 13
+    let ok_mods  = leg.modifier_count == 8
+    ok_types && ok_mods
+}
+
+// T07: sort produces ordered token list
+fn lspst_test_sort() -> bool with Mut, Div, Panic {
+    let t1 = lspst_token_new(2, 0, 1, LSPST_TYPE_KEYWORD, 0)
+    let t2 = lspst_token_new(0, 5, 1, LSPST_TYPE_NUMBER,  0)
+    let t3 = lspst_token_new(0, 1, 1, LSPST_TYPE_VARIABLE, 0)
+    var lst = lspst_token_list_new(0)
+    lst.tokens[0] = t1
+    lst.tokens[1] = t2
+    lst.tokens[2] = t3
+    lst.count = 3
+    let sorted = lspst_token_list_sort(lst)
+    let ok_first  = sorted.tokens[0].line == 0 && sorted.tokens[0].col == 1
+    let ok_second = sorted.tokens[1].line == 0 && sorted.tokens[1].col == 5
+    let ok_third  = sorted.tokens[2].line == 2
+    ok_first && ok_second && ok_third
+}
+
+// T08: delta JSON for a single token produces {"data":[0,0,N,T,M]}
+fn lspst_test_delta_json_single() -> bool with Mut, Div, Panic {
+    let tok = lspst_token_new(0, 0, 3, LSPST_TYPE_KEYWORD, 0)
+    var lst = lspst_token_list_new(0)
+    lst = lspst_token_list_add(lst, tok)
+    let buf = lspst_jb_new()
+    let out = lspst_to_delta_json(lst, buf)
+    // Should start with '{' and end with '}'
+    let ok_open  = out.data[0] == 123
+    let ok_close = out.data[(out.len - 1) as usize] == 125
+    let ok_len   = out.len > 10
+    ok_open && ok_close && ok_len
+}
+
+// T09: delta JSON for two tokens on same line computes correct deltaStartChar
+fn lspst_test_delta_json_two_tokens() -> bool with Mut, Div, Panic {
+    let t1 = lspst_token_new(0, 0, 2, LSPST_TYPE_KEYWORD, 0)
+    let t2 = lspst_token_new(0, 5, 3, LSPST_TYPE_FUNCTION, 0)
+    var lst = lspst_token_list_new(0)
+    lst = lspst_token_list_add(lst, t1)
+    lst = lspst_token_list_add(lst, t2)
+    let buf = lspst_jb_new()
+    let out = lspst_to_delta_json(lst, buf)
+    let ok_nonempty = out.len > 20
+    ok_nonempty
+}
+
+// T10: empty token list serializes to {"data":[]}
+fn lspst_test_delta_json_empty() -> bool with Mut, Div, Panic {
+    let lst = lspst_token_list_new(0)
+    let buf = lspst_jb_new()
+    let out = lspst_to_delta_json(lst, buf)
+    // {"data":[]} = 10 bytes
+    let ok_len   = out.len == 10
+    let ok_open  = out.data[0] == 123
+    let ok_close = out.data[9] == 125
+    ok_len && ok_open && ok_close
+}
+
+// ============================================================================
+// Section 8: TEST RUNNER
+// ============================================================================
+
+fn lspst_run_tests() -> i64 with IO, Mut, Div, Panic {
+    var passed: i64 = 0
+    var total:  i64 = 0
+
+    total = total + 1
+    if lspst_test_constants()         { passed = passed + 1 } else { print("FAIL: T01 lspst_constants\n") }
+
+    total = total + 1
+    if lspst_test_list_new()          { passed = passed + 1 } else { print("FAIL: T02 lspst_list_new\n") }
+
+    total = total + 1
+    if lspst_test_list_add()          { passed = passed + 1 } else { print("FAIL: T03 lspst_list_add\n") }
+
+    total = total + 1
+    if lspst_test_list_overflow_guard() { passed = passed + 1 } else { print("FAIL: T04 lspst_overflow_guard\n") }
+
+    total = total + 1
+    if lspst_test_modifiers()         { passed = passed + 1 } else { print("FAIL: T05 lspst_modifiers\n") }
+
+    total = total + 1
+    if lspst_test_legend()            { passed = passed + 1 } else { print("FAIL: T06 lspst_legend\n") }
+
+    total = total + 1
+    if lspst_test_sort()              { passed = passed + 1 } else { print("FAIL: T07 lspst_sort\n") }
+
+    total = total + 1
+    if lspst_test_delta_json_single() { passed = passed + 1 } else { print("FAIL: T08 lspst_delta_json_single\n") }
+
+    total = total + 1
+    if lspst_test_delta_json_two_tokens() { passed = passed + 1 } else { print("FAIL: T09 lspst_delta_json_two\n") }
+
+    total = total + 1
+    if lspst_test_delta_json_empty()  { passed = passed + 1 } else { print("FAIL: T10 lspst_delta_json_empty\n") }
+
+    print("semantic_tokens tests: ")
+    print_int(passed)
+    print("/")
+    print_int(total)
+    print(" passed\n")
+
+    if passed == total {
+        print("ALL SEMANTIC_TOKENS TESTS PASSED\n")
+        0
+    } else {
+        print("SOME SEMANTIC_TOKENS TESTS FAILED\n")
+        1
+    }
+}

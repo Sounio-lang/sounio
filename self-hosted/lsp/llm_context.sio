@@ -1,0 +1,814 @@
+// self-hosted::lsp::llm_context -- LLM context aggregator for Sounio LSP
+//
+// Aggregates semantic information from the current file/cursor position and
+// formats it for LLM consumption via a custom LSP endpoint sounio/llm/context.
+//
+// The aggregator collects symbols, types, effects, units, epistemic variables,
+// scope chain, imports, and suggestions from the type-checker and resolver,
+// then serialises them to a flat JSON payload suitable for LLM tools.
+//
+// All state lives in flat fixed-size arenas -- no heap allocation, no
+// recursive structures.
+//
+// NOTE: JsonBuf and its helpers are redeclared here so this file can be
+//       checked standalone.  In the full build the canonical definitions
+//       in lsp/protocol.sio take precedence.
+//
+// Capacities:
+//   - Symbols per context:    256
+//   - Types per context:       64
+//   - Effects per context:     32
+//   - Units per context:       16
+//   - Epistemic vars:          16
+//   - Scope chain depth:        8
+//   - Imports:                 32
+//   - Suggestions:             16
+//
+// Prefix: lsplc_
+
+// ============================================================================
+// Section 1: LSP METHOD IDs (Sounio custom endpoints)
+// ============================================================================
+
+let LSP_SOUNIO_LLM_CONTEXT:  i64 = 100
+let LSP_SOUNIO_LLM_VALIDATE: i64 = 101
+
+// ============================================================================
+// Section 2: SYMBOL KIND CONSTANTS
+// ============================================================================
+
+let LSPLC_SYM_FUNCTION:  i64 = 0
+let LSPLC_SYM_VARIABLE:  i64 = 1
+let LSPLC_SYM_TYPE:      i64 = 2
+let LSPLC_SYM_MODULE:    i64 = 3
+let LSPLC_SYM_FIELD:     i64 = 4
+let LSPLC_SYM_EFFECT:    i64 = 5
+let LSPLC_SYM_UNIT:      i64 = 6
+let LSPLC_SYM_KNOWLEDGE: i64 = 7
+
+// ============================================================================
+// Section 3: UNCERTAINTY KIND CONSTANTS
+// ============================================================================
+
+let LSPLC_UNCERTAINTY_GAUSSIAN: i64 = 0
+let LSPLC_UNCERTAINTY_POISSON:  i64 = 1
+let LSPLC_UNCERTAINTY_UNIFORM:  i64 = 2
+let LSPLC_UNCERTAINTY_UNKNOWN:  i64 = 3
+
+// ============================================================================
+// Section 4: CAPACITY CONSTANTS
+// ============================================================================
+
+let LSPLC_MAX_SYMBOLS:     i64 = 256
+let LSPLC_MAX_TYPES:       i64 = 64
+let LSPLC_MAX_EFFECTS:     i64 = 32
+let LSPLC_MAX_UNITS:       i64 = 16
+let LSPLC_MAX_EPISTEMIC:   i64 = 16
+let LSPLC_MAX_SCOPE:       i64 = 8
+let LSPLC_MAX_IMPORTS:     i64 = 32
+let LSPLC_MAX_SUGGESTIONS: i64 = 16
+
+// ============================================================================
+// Section 5: JSON BUFFER (inline for standalone checkability)
+// ============================================================================
+
+struct JsonBuf {
+    data: [i8; 65536],
+    len:  i64,
+}
+
+fn lsplc_jb_new() -> JsonBuf {
+    JsonBuf {
+        data: [0; 65536],
+        len:  0,
+    }
+}
+
+fn lsplc_jb_byte(buf: JsonBuf, b: i8) -> JsonBuf with Mut, Panic {
+    var out = buf
+    if out.len < 65536 {
+        out.data[out.len as usize] = b
+        out.len = out.len + 1
+    }
+    out
+}
+
+fn lsplc_jb_ch(buf: JsonBuf, ch: i64) -> JsonBuf with Mut, Panic {
+    lsplc_jb_byte(buf, ch as i8)
+}
+
+fn lsplc_jb_colon(buf: JsonBuf) -> JsonBuf with Mut, Panic {
+    lsplc_jb_ch(buf, 58)   // ':'
+}
+
+fn lsplc_jb_comma(buf: JsonBuf) -> JsonBuf with Mut, Panic {
+    lsplc_jb_ch(buf, 44)   // ','
+}
+
+fn lsplc_jb_open_obj(buf: JsonBuf) -> JsonBuf with Mut, Panic {
+    lsplc_jb_ch(buf, 123)  // '{'
+}
+
+fn lsplc_jb_close_obj(buf: JsonBuf) -> JsonBuf with Mut, Panic {
+    lsplc_jb_ch(buf, 125)  // '}'
+}
+
+fn lsplc_jb_open_arr(buf: JsonBuf) -> JsonBuf with Mut, Panic {
+    lsplc_jb_ch(buf, 91)   // '['
+}
+
+fn lsplc_jb_close_arr(buf: JsonBuf) -> JsonBuf with Mut, Panic {
+    lsplc_jb_ch(buf, 93)   // ']'
+}
+
+fn lsplc_jb_bool(buf: JsonBuf, val: bool) -> JsonBuf with Mut, Panic {
+    var out = buf
+    if val {
+        out = lsplc_jb_ch(out, 116)  // 't'
+        out = lsplc_jb_ch(out, 114)  // 'r'
+        out = lsplc_jb_ch(out, 117)  // 'u'
+        out = lsplc_jb_ch(out, 101)  // 'e'
+    } else {
+        out = lsplc_jb_ch(out, 102)  // 'f'
+        out = lsplc_jb_ch(out, 97)   // 'a'
+        out = lsplc_jb_ch(out, 108)  // 'l'
+        out = lsplc_jb_ch(out, 115)  // 's'
+        out = lsplc_jb_ch(out, 101)  // 'e'
+    }
+    out
+}
+
+fn lsplc_jb_int(buf: JsonBuf, val: i64) -> JsonBuf with Mut, Panic, Div {
+    if val == 0 {
+        return lsplc_jb_ch(buf, 48)   // '0'
+    }
+    var n = val
+    var out = buf
+    if n < 0 {
+        out = lsplc_jb_ch(out, 45)   // '-'
+        n = 0 - n
+    }
+    var digits: [i8; 24] = [0; 24]
+    var dlen: i64 = 0
+    while n > 0 && dlen < 24 {
+        let d = n - (n / 10) * 10
+        digits[dlen as usize] = (d + 48) as i8
+        n = n / 10
+        dlen = dlen + 1
+    }
+    var i = dlen - 1
+    while i >= 0 {
+        out = lsplc_jb_byte(out, digits[i as usize])
+        i = i - 1
+    }
+    out
+}
+
+// Emit a JSON-quoted string value.
+fn lsplc_emit_string(buf: JsonBuf, s: string) -> JsonBuf with Mut, Panic, Div {
+    var out = lsplc_jb_ch(buf, 34)    // '"'
+    let len = str_len(s)
+    var i: i64 = 0
+    while i < len {
+        let ch = str_char_at(s, i)
+        out = lsplc_jb_ch(out, ch)
+        i = i + 1
+    }
+    out = lsplc_jb_ch(out, 34)        // '"'
+    out
+}
+
+// Emit "key": with key given as a literal string.
+fn lsplc_jb_key(buf: JsonBuf, key: string) -> JsonBuf with Mut, Panic, Div {
+    var out = lsplc_emit_string(buf, key)
+    out = lsplc_jb_colon(out)
+    out
+}
+
+// Read a byte at position idx from the buffer (for tests).
+fn lsplc_jb_byte_at(buf: JsonBuf, idx: i64) -> i64 with Panic {
+    buf.data[idx as usize] as i64
+}
+
+// ============================================================================
+// Section 6: STRING ARRAY HELPERS
+// ============================================================================
+
+fn lsplc_emit_str_arr8(buf: JsonBuf, arr: [string; 8], count: i64) -> JsonBuf with Mut, Panic, Div {
+    var out = lsplc_jb_open_arr(buf)
+    var i: i64 = 0
+    while i < count {
+        if i > 0 { out = lsplc_jb_comma(out) }
+        out = lsplc_emit_string(out, arr[i as usize])
+        i = i + 1
+    }
+    out = lsplc_jb_close_arr(out)
+    out
+}
+
+fn lsplc_emit_str_arr16(buf: JsonBuf, arr: [string; 16], count: i64) -> JsonBuf with Mut, Panic, Div {
+    var out = lsplc_jb_open_arr(buf)
+    var i: i64 = 0
+    while i < count {
+        if i > 0 { out = lsplc_jb_comma(out) }
+        out = lsplc_emit_string(out, arr[i as usize])
+        i = i + 1
+    }
+    out = lsplc_jb_close_arr(out)
+    out
+}
+
+fn lsplc_emit_str_arr32(buf: JsonBuf, arr: [string; 32], count: i64) -> JsonBuf with Mut, Panic, Div {
+    var out = lsplc_jb_open_arr(buf)
+    var i: i64 = 0
+    while i < count {
+        if i > 0 { out = lsplc_jb_comma(out) }
+        out = lsplc_emit_string(out, arr[i as usize])
+        i = i + 1
+    }
+    out = lsplc_jb_close_arr(out)
+    out
+}
+
+fn lsplc_emit_str_arr4(buf: JsonBuf, arr: [string; 4], count: i64) -> JsonBuf with Mut, Panic, Div {
+    var out = lsplc_jb_open_arr(buf)
+    var i: i64 = 0
+    while i < count {
+        if i > 0 { out = lsplc_jb_comma(out) }
+        out = lsplc_emit_string(out, arr[i as usize])
+        i = i + 1
+    }
+    out = lsplc_jb_close_arr(out)
+    out
+}
+
+// ============================================================================
+// Section 7: CORE STRUCTS
+// ============================================================================
+
+struct LsplcSymbol {
+    name:         string,
+    kind:         i64,
+    type_sig:     string,
+    doc_summary:  string,
+    effect_count: i64,
+    effects:      [string; 8],
+    unit:         string,
+    confidence:   f64,
+    line:         i64,
+    col:          i64,
+}
+
+struct LsplcType {
+    name:         string,
+    kind:         i64,
+    field_count:  i64,
+    fields:       [string; 32],
+    method_count: i64,
+    methods:      [string; 16],
+    doc:          string,
+}
+
+struct LsplcEffect {
+    name:              string,
+    op_count:          i64,
+    operations:        [string; 8],
+    handler_available: bool,
+    doc:               string,
+}
+
+struct LsplcUnit {
+    name:       string,
+    base_count: i64,
+    base_units: [string; 4],
+    exponents:  [i64; 4],
+    doc:        string,
+}
+
+struct LsplcEpistemic {
+    var_name:         string,
+    inner_type:       string,
+    confidence:       f64,
+    provenance:       string,
+    uncertainty_kind: i64,
+}
+
+struct LsplcContext {
+    file_id:          i64,
+    cursor_line:      i64,
+    cursor_col:       i64,
+    symbol_count:     i64,
+    symbols:          [LsplcSymbol; 256],
+    type_count:       i64,
+    types:            [LsplcType; 64],
+    effect_count:     i64,
+    effects:          [LsplcEffect; 32],
+    unit_count:       i64,
+    units:            [LsplcUnit; 16],
+    epistemic_count:  i64,
+    epistemic:        [LsplcEpistemic; 16],
+    scope_depth:      i64,
+    scope_chain:      [string; 8],
+    import_count:     i64,
+    imports:          [string; 32],
+    suggestion_count: i64,
+    suggestions:      [string; 16],
+}
+
+// ============================================================================
+// Section 8: ZERO-VALUE CONSTRUCTORS (helpers must precede callers)
+// ============================================================================
+
+fn lsplc_symbol_zero() -> LsplcSymbol {
+    LsplcSymbol {
+        name:         "",
+        kind:         LSPLC_SYM_VARIABLE,
+        type_sig:     "",
+        doc_summary:  "",
+        effect_count: 0,
+        effects:      [""; 8],
+        unit:         "",
+        confidence:   0.0,
+        line:         0,
+        col:          0,
+    }
+}
+
+fn lsplc_type_zero() -> LsplcType {
+    LsplcType {
+        name:         "",
+        kind:         0,
+        field_count:  0,
+        fields:       [""; 32],
+        method_count: 0,
+        methods:      [""; 16],
+        doc:          "",
+    }
+}
+
+fn lsplc_effect_zero() -> LsplcEffect {
+    LsplcEffect {
+        name:              "",
+        op_count:          0,
+        operations:        [""; 8],
+        handler_available: false,
+        doc:               "",
+    }
+}
+
+fn lsplc_unit_zero() -> LsplcUnit {
+    LsplcUnit {
+        name:       "",
+        base_count: 0,
+        base_units: [""; 4],
+        exponents:  [0; 4],
+        doc:        "",
+    }
+}
+
+fn lsplc_epistemic_zero() -> LsplcEpistemic {
+    LsplcEpistemic {
+        var_name:         "",
+        inner_type:       "",
+        confidence:       0.0,
+        provenance:       "",
+        uncertainty_kind: LSPLC_UNCERTAINTY_UNKNOWN,
+    }
+}
+
+// ============================================================================
+// Section 9: CONSTRUCTORS
+// ============================================================================
+
+// Create a zero-initialised context.
+fn lsplc_context_new() -> LsplcContext {
+    LsplcContext {
+        file_id:          0,
+        cursor_line:      0,
+        cursor_col:       0,
+        symbol_count:     0,
+        symbols:          [lsplc_symbol_zero(); 256],
+        type_count:       0,
+        types:            [lsplc_type_zero(); 64],
+        effect_count:     0,
+        effects:          [lsplc_effect_zero(); 32],
+        unit_count:       0,
+        units:            [lsplc_unit_zero(); 16],
+        epistemic_count:  0,
+        epistemic:        [lsplc_epistemic_zero(); 16],
+        scope_depth:      0,
+        scope_chain:      [""; 8],
+        import_count:     0,
+        imports:          [""; 32],
+        suggestion_count: 0,
+        suggestions:      [""; 16],
+    }
+}
+
+// Minimal symbol constructor.
+fn lsplc_symbol_new(name: string, kind: i64, type_sig: string) -> LsplcSymbol {
+    LsplcSymbol {
+        name:         name,
+        kind:         kind,
+        type_sig:     type_sig,
+        doc_summary:  "",
+        effect_count: 0,
+        effects:      [""; 8],
+        unit:         "",
+        confidence:   1.0,
+        line:         0,
+        col:          0,
+    }
+}
+
+// Minimal effect constructor.
+fn lsplc_effect_new(name: string, doc: string) -> LsplcEffect {
+    LsplcEffect {
+        name:              name,
+        op_count:          0,
+        operations:        [""; 8],
+        handler_available: false,
+        doc:               doc,
+    }
+}
+
+// ============================================================================
+// Section 10: CONTEXT MUTATION (by-value, return updated copy)
+// ============================================================================
+
+// Append a symbol to the context.  Returns the updated context.
+fn lsplc_add_symbol(ctx: LsplcContext, sym: LsplcSymbol) -> LsplcContext with Mut, Panic {
+    var out = ctx
+    if out.symbol_count < LSPLC_MAX_SYMBOLS {
+        out.symbols[out.symbol_count as usize] = sym
+        out.symbol_count = out.symbol_count + 1
+    }
+    out
+}
+
+// Append a type to the context.  Returns the updated context.
+fn lsplc_add_type(ctx: LsplcContext, t: LsplcType) -> LsplcContext with Mut, Panic {
+    var out = ctx
+    if out.type_count < LSPLC_MAX_TYPES {
+        out.types[out.type_count as usize] = t
+        out.type_count = out.type_count + 1
+    }
+    out
+}
+
+// Append an effect to the context.  Returns the updated context.
+fn lsplc_add_effect(ctx: LsplcContext, eff: LsplcEffect) -> LsplcContext with Mut, Panic {
+    var out = ctx
+    if out.effect_count < LSPLC_MAX_EFFECTS {
+        out.effects[out.effect_count as usize] = eff
+        out.effect_count = out.effect_count + 1
+    }
+    out
+}
+
+// Append a unit to the context.  Returns the updated context.
+fn lsplc_add_unit(ctx: LsplcContext, unit: LsplcUnit) -> LsplcContext with Mut, Panic {
+    var out = ctx
+    if out.unit_count < LSPLC_MAX_UNITS {
+        out.units[out.unit_count as usize] = unit
+        out.unit_count = out.unit_count + 1
+    }
+    out
+}
+
+// Append an epistemic variable to the context.  Returns the updated context.
+fn lsplc_add_epistemic(ctx: LsplcContext, ep: LsplcEpistemic) -> LsplcContext with Mut, Panic {
+    var out = ctx
+    if out.epistemic_count < LSPLC_MAX_EPISTEMIC {
+        out.epistemic[out.epistemic_count as usize] = ep
+        out.epistemic_count = out.epistemic_count + 1
+    }
+    out
+}
+
+// Append a suggestion string to the context.  Returns the updated context.
+fn lsplc_add_suggestion(ctx: LsplcContext, s: string) -> LsplcContext with Mut, Panic {
+    var out = ctx
+    if out.suggestion_count < LSPLC_MAX_SUGGESTIONS {
+        out.suggestions[out.suggestion_count as usize] = s
+        out.suggestion_count = out.suggestion_count + 1
+    }
+    out
+}
+
+// ============================================================================
+// Section 11: QUERY HELPERS
+// ============================================================================
+
+// Return true if the symbol's effects array contains the given effect name.
+fn lsplc_symbol_has_effect(sym: LsplcSymbol, effect_name: string) -> bool with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < sym.effect_count {
+        if str_eq(sym.effects[i as usize], effect_name) {
+            return true
+        }
+        i = i + 1
+    }
+    false
+}
+
+// ============================================================================
+// Section 12: JSON SERIALIZATION -- INDIVIDUAL STRUCTS
+// ============================================================================
+
+// Emit a single LsplcSymbol as a JSON object.
+fn lsplc_emit_symbol(buf: JsonBuf, sym: LsplcSymbol) -> JsonBuf with Mut, Panic, Div {
+    var out = lsplc_jb_open_obj(buf)
+    out = lsplc_jb_key(out, "name")
+    out = lsplc_emit_string(out, sym.name)
+    out = lsplc_jb_comma(out)
+    out = lsplc_jb_key(out, "kind")
+    out = lsplc_jb_int(out, sym.kind)
+    out = lsplc_jb_comma(out)
+    out = lsplc_jb_key(out, "type_sig")
+    out = lsplc_emit_string(out, sym.type_sig)
+    out = lsplc_jb_comma(out)
+    out = lsplc_jb_key(out, "doc")
+    out = lsplc_emit_string(out, sym.doc_summary)
+    out = lsplc_jb_comma(out)
+    out = lsplc_jb_key(out, "effects")
+    out = lsplc_emit_str_arr8(out, sym.effects, sym.effect_count)
+    out = lsplc_jb_comma(out)
+    out = lsplc_jb_key(out, "unit")
+    out = lsplc_emit_string(out, sym.unit)
+    out = lsplc_jb_comma(out)
+    out = lsplc_jb_key(out, "line")
+    out = lsplc_jb_int(out, sym.line)
+    out = lsplc_jb_comma(out)
+    out = lsplc_jb_key(out, "col")
+    out = lsplc_jb_int(out, sym.col)
+    out = lsplc_jb_close_obj(out)
+    out
+}
+
+// Emit a single LsplcType as a JSON object.
+fn lsplc_emit_type(buf: JsonBuf, t: LsplcType) -> JsonBuf with Mut, Panic, Div {
+    var out = lsplc_jb_open_obj(buf)
+    out = lsplc_jb_key(out, "name")
+    out = lsplc_emit_string(out, t.name)
+    out = lsplc_jb_comma(out)
+    out = lsplc_jb_key(out, "kind")
+    out = lsplc_jb_int(out, t.kind)
+    out = lsplc_jb_comma(out)
+    out = lsplc_jb_key(out, "fields")
+    out = lsplc_emit_str_arr32(out, t.fields, t.field_count)
+    out = lsplc_jb_comma(out)
+    out = lsplc_jb_key(out, "methods")
+    out = lsplc_emit_str_arr16(out, t.methods, t.method_count)
+    out = lsplc_jb_comma(out)
+    out = lsplc_jb_key(out, "doc")
+    out = lsplc_emit_string(out, t.doc)
+    out = lsplc_jb_close_obj(out)
+    out
+}
+
+// Emit a single LsplcEffect as a JSON object.
+fn lsplc_emit_effect(buf: JsonBuf, eff: LsplcEffect) -> JsonBuf with Mut, Panic, Div {
+    var out = lsplc_jb_open_obj(buf)
+    out = lsplc_jb_key(out, "name")
+    out = lsplc_emit_string(out, eff.name)
+    out = lsplc_jb_comma(out)
+    out = lsplc_jb_key(out, "ops")
+    out = lsplc_emit_str_arr8(out, eff.operations, eff.op_count)
+    out = lsplc_jb_comma(out)
+    out = lsplc_jb_key(out, "hdlr")
+    out = lsplc_jb_bool(out, eff.handler_available)
+    out = lsplc_jb_comma(out)
+    out = lsplc_jb_key(out, "doc")
+    out = lsplc_emit_string(out, eff.doc)
+    out = lsplc_jb_close_obj(out)
+    out
+}
+
+// Emit a single LsplcUnit as a JSON object.
+fn lsplc_emit_unit(buf: JsonBuf, unit: LsplcUnit) -> JsonBuf with Mut, Panic, Div {
+    var out = lsplc_jb_open_obj(buf)
+    out = lsplc_jb_key(out, "name")
+    out = lsplc_emit_string(out, unit.name)
+    out = lsplc_jb_comma(out)
+    out = lsplc_jb_key(out, "bases")
+    out = lsplc_emit_str_arr4(out, unit.base_units, unit.base_count)
+    out = lsplc_jb_comma(out)
+    out = lsplc_jb_key(out, "doc")
+    out = lsplc_emit_string(out, unit.doc)
+    out = lsplc_jb_close_obj(out)
+    out
+}
+
+// Emit a single LsplcEpistemic as a JSON object.
+fn lsplc_emit_epistemic(buf: JsonBuf, ep: LsplcEpistemic) -> JsonBuf with Mut, Panic, Div {
+    var out = lsplc_jb_open_obj(buf)
+    out = lsplc_jb_key(out, "var")
+    out = lsplc_emit_string(out, ep.var_name)
+    out = lsplc_jb_comma(out)
+    out = lsplc_jb_key(out, "type")
+    out = lsplc_emit_string(out, ep.inner_type)
+    out = lsplc_jb_comma(out)
+    out = lsplc_jb_key(out, "prov")
+    out = lsplc_emit_string(out, ep.provenance)
+    out = lsplc_jb_comma(out)
+    out = lsplc_jb_key(out, "ukind")
+    out = lsplc_jb_int(out, ep.uncertainty_kind)
+    out = lsplc_jb_close_obj(out)
+    out
+}
+
+// ============================================================================
+// Section 13: FULL CONTEXT SERIALIZATION
+// ============================================================================
+
+// Serialise the full LsplcContext to JSON.
+// Output structure:
+// {
+//   "symbols": [...],
+//   "types": [...],
+//   "effects": [...],
+//   "units": [...],
+//   "epistemic": [...],
+//   "scope_chain": [...],
+//   "imports": [...],
+//   "suggestions": [...]
+// }
+fn lsplc_to_json(ctx: LsplcContext) -> JsonBuf with Mut, Div, Panic {
+    var out = lsplc_jb_new()
+    out = lsplc_jb_open_obj(out)
+
+    out = lsplc_jb_key(out, "symbols")
+    out = lsplc_jb_open_arr(out)
+    var i: i64 = 0
+    while i < ctx.symbol_count {
+        if i > 0 { out = lsplc_jb_comma(out) }
+        out = lsplc_emit_symbol(out, ctx.symbols[i as usize])
+        i = i + 1
+    }
+    out = lsplc_jb_close_arr(out)
+    out = lsplc_jb_comma(out)
+
+    out = lsplc_jb_key(out, "types")
+    out = lsplc_jb_open_arr(out)
+    i = 0
+    while i < ctx.type_count {
+        if i > 0 { out = lsplc_jb_comma(out) }
+        out = lsplc_emit_type(out, ctx.types[i as usize])
+        i = i + 1
+    }
+    out = lsplc_jb_close_arr(out)
+    out = lsplc_jb_comma(out)
+
+    out = lsplc_jb_key(out, "effects")
+    out = lsplc_jb_open_arr(out)
+    i = 0
+    while i < ctx.effect_count {
+        if i > 0 { out = lsplc_jb_comma(out) }
+        out = lsplc_emit_effect(out, ctx.effects[i as usize])
+        i = i + 1
+    }
+    out = lsplc_jb_close_arr(out)
+    out = lsplc_jb_comma(out)
+
+    out = lsplc_jb_key(out, "units")
+    out = lsplc_jb_open_arr(out)
+    i = 0
+    while i < ctx.unit_count {
+        if i > 0 { out = lsplc_jb_comma(out) }
+        out = lsplc_emit_unit(out, ctx.units[i as usize])
+        i = i + 1
+    }
+    out = lsplc_jb_close_arr(out)
+    out = lsplc_jb_comma(out)
+
+    out = lsplc_jb_key(out, "epistemic")
+    out = lsplc_jb_open_arr(out)
+    i = 0
+    while i < ctx.epistemic_count {
+        if i > 0 { out = lsplc_jb_comma(out) }
+        out = lsplc_emit_epistemic(out, ctx.epistemic[i as usize])
+        i = i + 1
+    }
+    out = lsplc_jb_close_arr(out)
+    out = lsplc_jb_comma(out)
+
+    out = lsplc_jb_key(out, "scope_chain")
+    out = lsplc_emit_str_arr8(out, ctx.scope_chain, ctx.scope_depth)
+    out = lsplc_jb_comma(out)
+
+    out = lsplc_jb_key(out, "imports")
+    out = lsplc_emit_str_arr32(out, ctx.imports, ctx.import_count)
+    out = lsplc_jb_comma(out)
+
+    out = lsplc_jb_key(out, "suggestions")
+    out = lsplc_emit_str_arr16(out, ctx.suggestions, ctx.suggestion_count)
+
+    out = lsplc_jb_close_obj(out)
+    out
+}
+
+// ============================================================================
+// Section 14: TESTS
+// ============================================================================
+
+// T01: lsplc_context_new produces a zero-initialised context.
+fn test_lsplc_context_new() -> bool {
+    let ctx = lsplc_context_new()
+    ctx.symbol_count == 0 && ctx.type_count == 0 && ctx.effect_count == 0
+}
+
+// T02: lsplc_add_symbol increments count.
+fn test_lsplc_add_symbol() -> bool with Mut, Panic {
+    let ctx0 = lsplc_context_new()
+    let sym = lsplc_symbol_new("foo", LSPLC_SYM_FUNCTION, "() -> i64")
+    let ctx1 = lsplc_add_symbol(ctx0, sym)
+    ctx1.symbol_count == 1
+}
+
+// T03: lsplc_add_type increments count.
+fn test_lsplc_add_type() -> bool with Mut, Panic {
+    let ctx0 = lsplc_context_new()
+    let t = lsplc_type_zero()
+    let ctx1 = lsplc_add_type(ctx0, t)
+    ctx1.type_count == 1
+}
+
+// T04: lsplc_add_effect increments count.
+fn test_lsplc_add_effect() -> bool with Mut, Panic {
+    let ctx0 = lsplc_context_new()
+    let eff = lsplc_effect_new("IO", "I/O operations")
+    let ctx1 = lsplc_add_effect(ctx0, eff)
+    ctx1.effect_count == 1
+}
+
+// T05: lsplc_symbol_has_effect returns false for empty effects.
+fn test_lsplc_symbol_has_effect_empty() -> bool with Mut, Panic, Div {
+    let sym = lsplc_symbol_new("bar", LSPLC_SYM_VARIABLE, "i64")
+    lsplc_symbol_has_effect(sym, "IO") == false
+}
+
+// T06: lsplc_to_json on empty context produces valid JSON object.
+fn test_lsplc_to_json_empty() -> bool with Mut, Div, Panic {
+    let ctx = lsplc_context_new()
+    let buf = lsplc_to_json(ctx)
+    let ok_open  = lsplc_jb_byte_at(buf, 0) == 123           // '{'
+    let ok_close = lsplc_jb_byte_at(buf, buf.len - 1) == 125 // '}'
+    let ok_len   = buf.len > 10
+    ok_open && ok_close && ok_len
+}
+
+// T07: constant values are correct.
+fn test_lsplc_constants() -> bool {
+    let ok_fn  = LSPLC_SYM_FUNCTION == 0
+    let ok_var = LSPLC_SYM_VARIABLE == 1
+    let ok_g   = LSPLC_UNCERTAINTY_GAUSSIAN == 0
+    let ok_u   = LSPLC_UNCERTAINTY_UNKNOWN == 3
+    let ok_m1  = LSP_SOUNIO_LLM_CONTEXT == 100
+    let ok_m2  = LSP_SOUNIO_LLM_VALIDATE == 101
+    ok_fn && ok_var && ok_g && ok_u && ok_m1 && ok_m2
+}
+
+// ============================================================================
+// Section 15: TEST RUNNER
+// ============================================================================
+
+fn lsplc_run_tests() -> i64 with IO, Mut, Div, Panic {
+    var passed: i64 = 0
+    var total:  i64 = 0
+
+    total = total + 1
+    if test_lsplc_context_new()             { passed = passed + 1 } else { print("FAIL: T01 context_new\n") }
+
+    total = total + 1
+    if test_lsplc_add_symbol()              { passed = passed + 1 } else { print("FAIL: T02 add_symbol\n") }
+
+    total = total + 1
+    if test_lsplc_add_type()                { passed = passed + 1 } else { print("FAIL: T03 add_type\n") }
+
+    total = total + 1
+    if test_lsplc_add_effect()              { passed = passed + 1 } else { print("FAIL: T04 add_effect\n") }
+
+    total = total + 1
+    if test_lsplc_symbol_has_effect_empty() { passed = passed + 1 } else { print("FAIL: T05 sym_has_effect_empty\n") }
+
+    total = total + 1
+    if test_lsplc_to_json_empty()           { passed = passed + 1 } else { print("FAIL: T06 to_json_empty\n") }
+
+    total = total + 1
+    if test_lsplc_constants()               { passed = passed + 1 } else { print("FAIL: T07 constants\n") }
+
+    print("lsplc tests: ")
+    print_int(passed)
+    print("/")
+    print_int(total)
+    print(" passed\n")
+
+    if passed == total {
+        print("ALL LSPLC TESTS PASSED\n")
+        0
+    } else {
+        print("SOME LSPLC TESTS FAILED\n")
+        1
+    }
+}

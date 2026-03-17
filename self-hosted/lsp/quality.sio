@@ -1,0 +1,912 @@
+// self-hosted::lsp::quality -- LSP code quality analyzer for Sounio
+//
+// Computes complexity metrics, detects code smells, and tracks technical debt.
+// Works on pre-computed AST metrics passed in (does not directly parse source).
+// All state lives in flat fixed-size arenas -- no heap allocation, no
+// recursive structures.
+//
+// Capacities:
+//   - Smells per context: 256
+//
+// Sounio-specific smells:
+//   - UNHANDLED_EFFECT    — effect declared but not handled
+//   - EFFECT_OVERLOAD     — too many effects on one function
+//   - KNOWLEDGE_LOSS      — Knowledge<T> value unwrapped unsafely
+//   - MISSING_PROVENANCE  — Knowledge without source documentation
+//
+// Prefix: lspq_
+
+// ============================================================================
+// Section 1: CODE SMELL KIND CONSTANTS
+// ============================================================================
+
+let LSPQ_SMELL_LONG_FUNCTION:      i64 = 1
+let LSPQ_SMELL_LARGE_MODULE:       i64 = 2
+let LSPQ_SMELL_DEEP_NESTING:       i64 = 3
+let LSPQ_SMELL_MANY_PARAMS:        i64 = 4
+let LSPQ_SMELL_DEAD_CODE:          i64 = 5
+let LSPQ_SMELL_UNUSED_IMPORT:      i64 = 6
+let LSPQ_SMELL_MAGIC_NUMBER:       i64 = 7
+let LSPQ_SMELL_EMPTY_BLOCK:        i64 = 8
+let LSPQ_SMELL_UNHANDLED_EFFECT:   i64 = 9
+let LSPQ_SMELL_EFFECT_OVERLOAD:    i64 = 10
+let LSPQ_SMELL_KNOWLEDGE_LOSS:     i64 = 11
+let LSPQ_SMELL_MISSING_PROVENANCE: i64 = 12
+
+// ============================================================================
+// Section 2: SEVERITY CONSTANTS
+// ============================================================================
+
+let LSPQ_SEV_INFO:    i64 = 1
+let LSPQ_SEV_WARNING: i64 = 2
+let LSPQ_SEV_ERROR:   i64 = 3
+
+// ============================================================================
+// Section 3: QUALITY RATING CONSTANTS
+// ============================================================================
+
+let LSPQ_RATING_A: i64 = 1
+let LSPQ_RATING_B: i64 = 2
+let LSPQ_RATING_C: i64 = 3
+let LSPQ_RATING_D: i64 = 4
+let LSPQ_RATING_E: i64 = 5
+
+// ============================================================================
+// Section 4: THRESHOLD CONSTANTS
+// ============================================================================
+
+let LSPQ_MAX_FN_LENGTH:  i64 = 50
+let LSPQ_MAX_FN_PARAMS:  i64 = 5
+let LSPQ_MAX_NESTING:    i64 = 4
+let LSPQ_MAX_CYCLOMATIC: i64 = 10
+let LSPQ_MAX_COGNITIVE:  i64 = 15
+let LSPQ_MAX_MODULE_LOC: i64 = 500
+let LSPQ_MAX_EFFECTS:    i64 = 4
+
+// ============================================================================
+// Section 5: STRUCTS
+// ============================================================================
+
+struct LspqRange {
+    start_line: i64,
+    start_col:  i64,
+    end_line:   i64,
+    end_col:    i64,
+}
+
+struct LspqSmell {
+    kind:         i64,
+    severity:     i64,
+    range:        LspqRange,
+    message:      string,
+    suggestion:   string,
+    debt_minutes: i64,
+}
+
+struct LspqMetrics {
+    cyclomatic:            i64,
+    cognitive:             i64,
+    max_nesting:           i64,
+    loc_total:             i64,
+    loc_code:              i64,
+    loc_comment:           i64,
+    fn_count:              i64,
+    fn_avg_length:         i64,
+    fn_max_length:         i64,
+    fn_avg_params:         i64,
+    fn_max_params:         i64,
+    effect_count_total:    i64,
+    knowledge_count:       i64,
+    maintainability_index: f64,
+}
+
+struct LspqDebt {
+    total_debt_minutes: i64,
+    smell_count:        i64,
+    critical_count:     i64,
+    major_count:        i64,
+    minor_count:        i64,
+    quality_rating:     i64,
+    rating_letter:      string,
+}
+
+struct LspqContext {
+    file_id:     i64,
+    file_path:   string,
+    metrics:     LspqMetrics,
+    smells:      [LspqSmell; 256],
+    smell_count: i64,
+    debt:        LspqDebt,
+}
+
+// ============================================================================
+// Section 6: JSON BUFFER (local copy -- this file is standalone)
+// ============================================================================
+
+struct JsonBuf {
+    data: [i8; 65536],
+    len:  i64,
+}
+
+fn lspq_jb_new() -> JsonBuf {
+    JsonBuf {
+        data: [0; 65536],
+        len:  0,
+    }
+}
+
+fn lspq_jb_emit_byte(buf: JsonBuf, b: i8) -> JsonBuf with Mut, Panic {
+    var out = buf
+    if out.len < 65536 {
+        out.data[out.len as usize] = b
+        out.len = out.len + 1
+    }
+    out
+}
+
+fn lspq_jb_emit_char(buf: JsonBuf, ch: i64) -> JsonBuf with Mut, Panic {
+    lspq_jb_emit_byte(buf, ch as i8)
+}
+
+fn lspq_jb_emit_int(buf: JsonBuf, val: i64) -> JsonBuf with Mut, Panic, Div {
+    if val == 0 {
+        return lspq_jb_emit_char(buf, 48)
+    }
+    var n = val
+    var out = buf
+    if n < 0 {
+        out = lspq_jb_emit_char(out, 45)
+        n = 0 - n
+    }
+    var digits: [i8; 24] = [0; 24]
+    var dlen: i64 = 0
+    while n > 0 && dlen < 24 {
+        let d = n - (n / 10) * 10
+        digits[dlen as usize] = (d + 48) as i8
+        n = n / 10
+        dlen = dlen + 1
+    }
+    var i = dlen - 1
+    while i >= 0 {
+        out = lspq_jb_emit_byte(out, digits[i as usize])
+        i = i - 1
+    }
+    out
+}
+
+fn lspq_jb_open_object(buf: JsonBuf) -> JsonBuf with Mut, Panic {
+    lspq_jb_emit_char(buf, 123)
+}
+
+fn lspq_jb_close_object(buf: JsonBuf) -> JsonBuf with Mut, Panic {
+    lspq_jb_emit_char(buf, 125)
+}
+
+fn lspq_jb_open_array(buf: JsonBuf) -> JsonBuf with Mut, Panic {
+    lspq_jb_emit_char(buf, 91)
+}
+
+fn lspq_jb_close_array(buf: JsonBuf) -> JsonBuf with Mut, Panic {
+    lspq_jb_emit_char(buf, 93)
+}
+
+fn lspq_jb_emit_comma(buf: JsonBuf) -> JsonBuf with Mut, Panic {
+    lspq_jb_emit_char(buf, 44)
+}
+
+fn lspq_jb_emit_colon(buf: JsonBuf) -> JsonBuf with Mut, Panic {
+    lspq_jb_emit_char(buf, 58)
+}
+
+fn lspq_jb_emit_string(buf: JsonBuf, s: string) -> JsonBuf with Mut, Panic, Div {
+    var out = lspq_jb_emit_char(buf, 34)
+    let len = str_len(s)
+    var i: i64 = 0
+    while i < len {
+        let ch = str_char_at(s, i)
+        out = lspq_jb_emit_char(out, ch)
+        i = i + 1
+    }
+    out = lspq_jb_emit_char(out, 34)
+    out
+}
+
+fn lspq_jb_emit_packed_key(buf: JsonBuf, key: i64) -> JsonBuf with Mut, Panic, Div {
+    var out = lspq_jb_emit_char(buf, 34)
+    var k = key
+    while k > 0 {
+        let bv = k - (k / 256) * 256
+        out = lspq_jb_emit_char(out, bv)
+        k = k / 256
+    }
+    out = lspq_jb_emit_char(out, 34)
+    out
+}
+
+// Pre-computed packed keys for JSON field names.
+// Encoding: char_0 + char_1*256 + char_2*65536 + ...
+
+// "kind"    k(107) i(105) n(110) d(100)
+fn lspq_key_kind() -> i64 {
+    107 + 105 * 256 + 110 * 65536 + 100 * 16777216
+}
+
+// "severity" s(115) e(101) v(118) e(101) r(114) i(105) t(116) y(121)
+fn lspq_key_severity() -> i64 {
+    115 + 101 * 256 + 118 * 65536 + 101 * 16777216
+    + 114 * 4294967296 + 105 * 1099511627776
+    + 116 * 281474976710656 + 121 * 72057594037927936
+}
+
+// "message"  m(109) e(101) s(115) s(115) a(97) g(103) e(101)
+fn lspq_key_message() -> i64 {
+    109 + 101 * 256 + 115 * 65536 + 115 * 16777216
+    + 97 * 4294967296 + 103 * 1099511627776
+    + 101 * 281474976710656
+}
+
+// "debt"     d(100) e(101) b(98) t(116)
+fn lspq_key_debt() -> i64 {
+    100 + 101 * 256 + 98 * 65536 + 116 * 16777216
+}
+
+// "smells"   s(115) m(109) e(101) l(108) l(108) s(115)
+fn lspq_key_smells() -> i64 {
+    115 + 109 * 256 + 101 * 65536 + 108 * 16777216
+    + 108 * 4294967296 + 115 * 1099511627776
+}
+
+// "metrics"  m(109) e(101) t(116) r(114) i(105) c(99) s(115)
+fn lspq_key_metrics() -> i64 {
+    109 + 101 * 256 + 116 * 65536 + 114 * 16777216
+    + 105 * 4294967296 + 99 * 1099511627776
+    + 115 * 281474976710656
+}
+
+// "rating"   r(114) a(97) t(116) i(105) n(110) g(103)
+fn lspq_key_rating() -> i64 {
+    114 + 97 * 256 + 116 * 65536 + 105 * 16777216
+    + 110 * 4294967296 + 103 * 1099511627776
+}
+
+// Long keys emitted character by character.
+
+fn lspq_jb_emit_key_cyclomatic(buf: JsonBuf) -> JsonBuf with Mut, Panic, Div {
+    var out = lspq_jb_emit_char(buf, 34)
+    out = lspq_jb_emit_char(out, 99)
+    out = lspq_jb_emit_char(out, 121)
+    out = lspq_jb_emit_char(out, 99)
+    out = lspq_jb_emit_char(out, 108)
+    out = lspq_jb_emit_char(out, 111)
+    out = lspq_jb_emit_char(out, 109)
+    out = lspq_jb_emit_char(out, 97)
+    out = lspq_jb_emit_char(out, 116)
+    out = lspq_jb_emit_char(out, 105)
+    out = lspq_jb_emit_char(out, 99)
+    out = lspq_jb_emit_char(out, 34)
+    out
+}
+
+fn lspq_jb_emit_key_cognitive(buf: JsonBuf) -> JsonBuf with Mut, Panic, Div {
+    var out = lspq_jb_emit_char(buf, 34)
+    out = lspq_jb_emit_char(out, 99)
+    out = lspq_jb_emit_char(out, 111)
+    out = lspq_jb_emit_char(out, 103)
+    out = lspq_jb_emit_char(out, 110)
+    out = lspq_jb_emit_char(out, 105)
+    out = lspq_jb_emit_char(out, 116)
+    out = lspq_jb_emit_char(out, 105)
+    out = lspq_jb_emit_char(out, 118)
+    out = lspq_jb_emit_char(out, 101)
+    out = lspq_jb_emit_char(out, 34)
+    out
+}
+
+fn lspq_jb_emit_key_loc_total(buf: JsonBuf) -> JsonBuf with Mut, Panic, Div {
+    var out = lspq_jb_emit_char(buf, 34)
+    out = lspq_jb_emit_char(out, 108)
+    out = lspq_jb_emit_char(out, 111)
+    out = lspq_jb_emit_char(out, 99)
+    out = lspq_jb_emit_char(out, 95)
+    out = lspq_jb_emit_char(out, 116)
+    out = lspq_jb_emit_char(out, 111)
+    out = lspq_jb_emit_char(out, 116)
+    out = lspq_jb_emit_char(out, 97)
+    out = lspq_jb_emit_char(out, 108)
+    out = lspq_jb_emit_char(out, 34)
+    out
+}
+
+fn lspq_jb_emit_key_suggestion(buf: JsonBuf) -> JsonBuf with Mut, Panic, Div {
+    var out = lspq_jb_emit_char(buf, 34)
+    out = lspq_jb_emit_char(out, 115)
+    out = lspq_jb_emit_char(out, 117)
+    out = lspq_jb_emit_char(out, 103)
+    out = lspq_jb_emit_char(out, 103)
+    out = lspq_jb_emit_char(out, 101)
+    out = lspq_jb_emit_char(out, 115)
+    out = lspq_jb_emit_char(out, 116)
+    out = lspq_jb_emit_char(out, 105)
+    out = lspq_jb_emit_char(out, 111)
+    out = lspq_jb_emit_char(out, 110)
+    out = lspq_jb_emit_char(out, 34)
+    out
+}
+
+fn lspq_jb_emit_key_total_debt(buf: JsonBuf) -> JsonBuf with Mut, Panic, Div {
+    var out = lspq_jb_emit_char(buf, 34)
+    out = lspq_jb_emit_char(out, 116)
+    out = lspq_jb_emit_char(out, 111)
+    out = lspq_jb_emit_char(out, 116)
+    out = lspq_jb_emit_char(out, 97)
+    out = lspq_jb_emit_char(out, 108)
+    out = lspq_jb_emit_char(out, 95)
+    out = lspq_jb_emit_char(out, 100)
+    out = lspq_jb_emit_char(out, 101)
+    out = lspq_jb_emit_char(out, 98)
+    out = lspq_jb_emit_char(out, 116)
+    out = lspq_jb_emit_char(out, 34)
+    out
+}
+
+fn lspq_jb_emit_key_smell_count(buf: JsonBuf) -> JsonBuf with Mut, Panic, Div {
+    var out = lspq_jb_emit_char(buf, 34)
+    out = lspq_jb_emit_char(out, 115)
+    out = lspq_jb_emit_char(out, 109)
+    out = lspq_jb_emit_char(out, 101)
+    out = lspq_jb_emit_char(out, 108)
+    out = lspq_jb_emit_char(out, 108)
+    out = lspq_jb_emit_char(out, 95)
+    out = lspq_jb_emit_char(out, 99)
+    out = lspq_jb_emit_char(out, 111)
+    out = lspq_jb_emit_char(out, 117)
+    out = lspq_jb_emit_char(out, 110)
+    out = lspq_jb_emit_char(out, 116)
+    out = lspq_jb_emit_char(out, 34)
+    out
+}
+
+fn lspq_jb_emit_key_debt_minutes(buf: JsonBuf) -> JsonBuf with Mut, Panic, Div {
+    var out = lspq_jb_emit_char(buf, 34)
+    out = lspq_jb_emit_char(out, 100)
+    out = lspq_jb_emit_char(out, 101)
+    out = lspq_jb_emit_char(out, 98)
+    out = lspq_jb_emit_char(out, 116)
+    out = lspq_jb_emit_char(out, 95)
+    out = lspq_jb_emit_char(out, 109)
+    out = lspq_jb_emit_char(out, 105)
+    out = lspq_jb_emit_char(out, 110)
+    out = lspq_jb_emit_char(out, 117)
+    out = lspq_jb_emit_char(out, 116)
+    out = lspq_jb_emit_char(out, 101)
+    out = lspq_jb_emit_char(out, 115)
+    out = lspq_jb_emit_char(out, 34)
+    out
+}
+
+// Emit "packed_key": int_value
+fn lspq_jb_key_int(buf: JsonBuf, key: i64, val: i64) -> JsonBuf with Mut, Panic, Div {
+    var out = lspq_jb_emit_packed_key(buf, key)
+    out = lspq_jb_emit_colon(out)
+    out = lspq_jb_emit_int(out, val)
+    out
+}
+
+// Emit "packed_key": "string_value"
+fn lspq_jb_key_string(buf: JsonBuf, key: i64, val: string) -> JsonBuf with Mut, Panic, Div {
+    var out = lspq_jb_emit_packed_key(buf, key)
+    out = lspq_jb_emit_colon(out)
+    out = lspq_jb_emit_string(out, val)
+    out
+}
+
+// ============================================================================
+// Section 7: NATURAL LOG (inline -- no stdlib import)
+// ============================================================================
+// ln(x) = ln(m * 2^e) = ln(m) + e*ln2
+// m reduced to [0.5, 2); artanh series gives ln(m).
+
+fn lspq_ln2() -> f64 { 0.6931471805599453 }
+
+fn lspq_ln(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 - 1.0e30 }
+    if x == 1.0 { return 0.0 }
+    var m = x
+    var e_val: i64 = 0
+    while m >= 2.0 {
+        m = m / 2.0
+        e_val = e_val + 1
+    }
+    while m < 0.5 {
+        m = m * 2.0
+        e_val = e_val - 1
+    }
+    let t = (m - 1.0) / (m + 1.0)
+    let t2 = t * t
+    var sum = t
+    var term = t
+    var k: i64 = 1
+    while k < 30 {
+        term = term * t2
+        let denom = (2 * k + 1) as f64
+        sum = sum + term / denom
+        k = k + 1
+    }
+    let ln_m = 2.0 * sum
+    ln_m + (e_val as f64) * lspq_ln2()
+}
+
+// ============================================================================
+// Section 8: ZERO-VALUE CONSTRUCTORS (helpers must precede callers)
+// ============================================================================
+
+fn lspq_range_zero() -> LspqRange {
+    LspqRange {
+        start_line: 0,
+        start_col:  0,
+        end_line:   0,
+        end_col:    0,
+    }
+}
+
+fn lspq_smell_zero() -> LspqSmell {
+    LspqSmell {
+        kind:         0,
+        severity:     LSPQ_SEV_INFO,
+        range:        lspq_range_zero(),
+        message:      "",
+        suggestion:   "",
+        debt_minutes: 0,
+    }
+}
+
+fn lspq_metrics_new() -> LspqMetrics {
+    LspqMetrics {
+        cyclomatic:            0,
+        cognitive:             0,
+        max_nesting:           0,
+        loc_total:             0,
+        loc_code:              0,
+        loc_comment:           0,
+        fn_count:              0,
+        fn_avg_length:         0,
+        fn_max_length:         0,
+        fn_avg_params:         0,
+        fn_max_params:         0,
+        effect_count_total:    0,
+        knowledge_count:       0,
+        maintainability_index: 0.0,
+    }
+}
+
+fn lspq_debt_zero() -> LspqDebt {
+    LspqDebt {
+        total_debt_minutes: 0,
+        smell_count:        0,
+        critical_count:     0,
+        major_count:        0,
+        minor_count:        0,
+        quality_rating:     LSPQ_RATING_A,
+        rating_letter:      "A",
+    }
+}
+
+fn lspq_context_new(file_id: i64) -> LspqContext {
+    LspqContext {
+        file_id:     file_id,
+        file_path:   "",
+        metrics:     lspq_metrics_new(),
+        smells:      [lspq_smell_zero(); 256],
+        smell_count: 0,
+        debt:        lspq_debt_zero(),
+    }
+}
+
+// ============================================================================
+// Section 9: PUBLIC API
+// ============================================================================
+
+// Create a new smell with a zero-filled range.
+fn lspq_smell_new(kind: i64, sev: i64, msg: string, suggestion: string, debt: i64) -> LspqSmell {
+    LspqSmell {
+        kind:         kind,
+        severity:     sev,
+        range:        lspq_range_zero(),
+        message:      msg,
+        suggestion:   suggestion,
+        debt_minutes: debt,
+    }
+}
+
+// Append a smell to the context; guard against overflow.  Returns updated ctx.
+fn lspq_add_smell(ctx: LspqContext, smell: LspqSmell) -> LspqContext with Mut, Panic {
+    var out = ctx
+    if out.smell_count < 256 {
+        out.smells[out.smell_count as usize] = smell
+        out.smell_count = out.smell_count + 1
+    }
+    out
+}
+
+// Map rating integer 1..5 to letter string.
+fn lspq_rating_letter(rating: i64) -> string {
+    if rating == LSPQ_RATING_A { return "A" }
+    if rating == LSPQ_RATING_B { return "B" }
+    if rating == LSPQ_RATING_C { return "C" }
+    if rating == LSPQ_RATING_D { return "D" }
+    "E"
+}
+
+// Map smell kind constant to a human-readable name string.
+fn lspq_smell_kind_name(kind: i64) -> string {
+    if kind == LSPQ_SMELL_LONG_FUNCTION      { return "long_function" }
+    if kind == LSPQ_SMELL_LARGE_MODULE       { return "large_module" }
+    if kind == LSPQ_SMELL_DEEP_NESTING       { return "deep_nesting" }
+    if kind == LSPQ_SMELL_MANY_PARAMS        { return "many_params" }
+    if kind == LSPQ_SMELL_DEAD_CODE          { return "dead_code" }
+    if kind == LSPQ_SMELL_UNUSED_IMPORT      { return "unused_import" }
+    if kind == LSPQ_SMELL_MAGIC_NUMBER       { return "magic_number" }
+    if kind == LSPQ_SMELL_EMPTY_BLOCK        { return "empty_block" }
+    if kind == LSPQ_SMELL_UNHANDLED_EFFECT   { return "unhandled_effect" }
+    if kind == LSPQ_SMELL_EFFECT_OVERLOAD    { return "effect_overload" }
+    if kind == LSPQ_SMELL_KNOWLEDGE_LOSS     { return "knowledge_loss" }
+    if kind == LSPQ_SMELL_MISSING_PROVENANCE { return "missing_provenance" }
+    "unknown"
+}
+
+// Compute technical debt summary from the smells in the context.
+fn lspq_compute_debt(ctx: LspqContext) -> LspqDebt with Mut, Div, Panic {
+    var total:    i64 = 0
+    var critical: i64 = 0
+    var major:    i64 = 0
+    var minor:    i64 = 0
+    var i: i64 = 0
+    while i < ctx.smell_count {
+        let s = ctx.smells[i as usize]
+        total = total + s.debt_minutes
+        if s.severity == LSPQ_SEV_ERROR   { critical = critical + 1 }
+        if s.severity == LSPQ_SEV_WARNING { major    = major    + 1 }
+        if s.severity == LSPQ_SEV_INFO    { minor    = minor    + 1 }
+        i = i + 1
+    }
+    var rating: i64 = LSPQ_RATING_E
+    if total < 30  { rating = LSPQ_RATING_A }
+    if total >= 30 && total < 60  { rating = LSPQ_RATING_B }
+    if total >= 60 && total < 120 { rating = LSPQ_RATING_C }
+    if total >= 120 && total < 240 { rating = LSPQ_RATING_D }
+    LspqDebt {
+        total_debt_minutes: total,
+        smell_count:        ctx.smell_count,
+        critical_count:     critical,
+        major_count:        major,
+        minor_count:        minor,
+        quality_rating:     rating,
+        rating_letter:      lspq_rating_letter(rating),
+    }
+}
+
+// Add smells to context based on threshold violations in metrics.
+fn lspq_check_metrics(ctx: LspqContext) -> LspqContext with Mut, Div, Panic {
+    var out = ctx
+
+    if out.metrics.cyclomatic > LSPQ_MAX_CYCLOMATIC {
+        let s = lspq_smell_new(
+            LSPQ_SMELL_LONG_FUNCTION,
+            LSPQ_SEV_WARNING,
+            "Cyclomatic complexity exceeds threshold",
+            "Refactor into smaller functions",
+            15
+        )
+        out = lspq_add_smell(out, s)
+    }
+
+    if out.metrics.cognitive > LSPQ_MAX_COGNITIVE {
+        let s = lspq_smell_new(
+            LSPQ_SMELL_LONG_FUNCTION,
+            LSPQ_SEV_WARNING,
+            "Cognitive complexity exceeds threshold",
+            "Simplify branching logic",
+            20
+        )
+        out = lspq_add_smell(out, s)
+    }
+
+    if out.metrics.max_nesting > LSPQ_MAX_NESTING {
+        let s = lspq_smell_new(
+            LSPQ_SMELL_DEEP_NESTING,
+            LSPQ_SEV_WARNING,
+            "Nesting depth exceeds threshold",
+            "Extract nested blocks into helper functions",
+            10
+        )
+        out = lspq_add_smell(out, s)
+    }
+
+    if out.metrics.fn_max_length > LSPQ_MAX_FN_LENGTH {
+        let s = lspq_smell_new(
+            LSPQ_SMELL_LONG_FUNCTION,
+            LSPQ_SEV_WARNING,
+            "Function length exceeds threshold",
+            "Split into smaller focused functions",
+            15
+        )
+        out = lspq_add_smell(out, s)
+    }
+
+    if out.metrics.fn_max_params > LSPQ_MAX_FN_PARAMS {
+        let s = lspq_smell_new(
+            LSPQ_SMELL_MANY_PARAMS,
+            LSPQ_SEV_INFO,
+            "Function parameter count exceeds threshold",
+            "Group related parameters into a struct",
+            5
+        )
+        out = lspq_add_smell(out, s)
+    }
+
+    if out.metrics.loc_total > LSPQ_MAX_MODULE_LOC {
+        let s = lspq_smell_new(
+            LSPQ_SMELL_LARGE_MODULE,
+            LSPQ_SEV_INFO,
+            "Module line count exceeds threshold",
+            "Split module into focused sub-modules",
+            30
+        )
+        out = lspq_add_smell(out, s)
+    }
+
+    out
+}
+
+// Compute the Maintainability Index.
+// MI = max(0, (171 - 5.2*ln(V) - 0.23*CC - 16.2*ln(LOC)) * 100/171)
+// V = halstead_volume approximated as loc_code * 10.0
+// Returns 100.0 when loc_code == 0.
+fn lspq_compute_maintainability(ctx: LspqContext) -> f64 with Mut, Div, Panic {
+    if ctx.metrics.loc_code == 0 {
+        return 100.0
+    }
+    let loc_f  = ctx.metrics.loc_code as f64
+    let cc_f   = ctx.metrics.cyclomatic as f64
+    let v      = loc_f * 10.0
+    let ln_v   = lspq_ln(v)
+    let ln_loc = lspq_ln(loc_f)
+    let mi_raw = 171.0 - 5.2 * ln_v - 0.23 * cc_f - 16.2 * ln_loc
+    let mi     = mi_raw * 100.0 / 171.0
+    if mi < 0.0 { 0.0 } else { mi }
+}
+
+// Serialize the quality context to JSON.
+// Output: {"metrics":{...},"smells":[...],"debt":{...}}
+fn lspq_context_to_json(ctx: LspqContext, buf: JsonBuf) -> JsonBuf with Mut, Div, Panic {
+    var out = lspq_jb_open_object(buf)
+
+    // "metrics": {...}
+    out = lspq_jb_emit_packed_key(out, lspq_key_metrics())
+    out = lspq_jb_emit_colon(out)
+    out = lspq_jb_open_object(out)
+    out = lspq_jb_emit_key_cyclomatic(out)
+    out = lspq_jb_emit_colon(out)
+    out = lspq_jb_emit_int(out, ctx.metrics.cyclomatic)
+    out = lspq_jb_emit_comma(out)
+    out = lspq_jb_emit_key_cognitive(out)
+    out = lspq_jb_emit_colon(out)
+    out = lspq_jb_emit_int(out, ctx.metrics.cognitive)
+    out = lspq_jb_emit_comma(out)
+    out = lspq_jb_emit_key_loc_total(out)
+    out = lspq_jb_emit_colon(out)
+    out = lspq_jb_emit_int(out, ctx.metrics.loc_total)
+    out = lspq_jb_close_object(out)
+    out = lspq_jb_emit_comma(out)
+
+    // "smells": [...]
+    out = lspq_jb_emit_packed_key(out, lspq_key_smells())
+    out = lspq_jb_emit_colon(out)
+    out = lspq_jb_open_array(out)
+    var i: i64 = 0
+    while i < ctx.smell_count {
+        if i > 0 {
+            out = lspq_jb_emit_comma(out)
+        }
+        let s = ctx.smells[i as usize]
+        out = lspq_jb_open_object(out)
+        out = lspq_jb_key_int(out, lspq_key_kind(), s.kind)
+        out = lspq_jb_emit_comma(out)
+        out = lspq_jb_key_int(out, lspq_key_severity(), s.severity)
+        out = lspq_jb_emit_comma(out)
+        out = lspq_jb_emit_key_debt_minutes(out)
+        out = lspq_jb_emit_colon(out)
+        out = lspq_jb_emit_int(out, s.debt_minutes)
+        out = lspq_jb_emit_comma(out)
+        out = lspq_jb_emit_packed_key(out, lspq_key_message())
+        out = lspq_jb_emit_colon(out)
+        out = lspq_jb_emit_string(out, s.message)
+        out = lspq_jb_emit_comma(out)
+        out = lspq_jb_emit_key_suggestion(out)
+        out = lspq_jb_emit_colon(out)
+        out = lspq_jb_emit_string(out, s.suggestion)
+        out = lspq_jb_close_object(out)
+        i = i + 1
+    }
+    out = lspq_jb_close_array(out)
+    out = lspq_jb_emit_comma(out)
+
+    // "debt": {...}
+    out = lspq_jb_emit_packed_key(out, lspq_key_debt())
+    out = lspq_jb_emit_colon(out)
+    out = lspq_jb_open_object(out)
+    out = lspq_jb_emit_key_total_debt(out)
+    out = lspq_jb_emit_colon(out)
+    out = lspq_jb_emit_int(out, ctx.debt.total_debt_minutes)
+    out = lspq_jb_emit_comma(out)
+    out = lspq_jb_emit_key_smell_count(out)
+    out = lspq_jb_emit_colon(out)
+    out = lspq_jb_emit_int(out, ctx.debt.smell_count)
+    out = lspq_jb_emit_comma(out)
+    out = lspq_jb_key_string(out, lspq_key_rating(), ctx.debt.rating_letter)
+    out = lspq_jb_close_object(out)
+
+    out = lspq_jb_close_object(out)
+    out
+}
+
+// ============================================================================
+// Section 10: TESTS
+// ============================================================================
+
+fn lspq_test_constants() -> bool {
+    let ok_long  = LSPQ_SMELL_LONG_FUNCTION == 1
+    let ok_ep    = LSPQ_SMELL_UNHANDLED_EFFECT == 9
+    let ok_kl    = LSPQ_SMELL_KNOWLEDGE_LOSS == 11
+    let ok_sev_w = LSPQ_SEV_WARNING == 2
+    let ok_ra    = LSPQ_RATING_A == 1
+    let ok_re    = LSPQ_RATING_E == 5
+    let ok_thresh = LSPQ_MAX_FN_LENGTH == 50
+    ok_long && ok_ep && ok_kl && ok_sev_w && ok_ra && ok_re && ok_thresh
+}
+
+fn lspq_test_context_new() -> bool {
+    let ctx = lspq_context_new(7)
+    ctx.file_id == 7 && ctx.smell_count == 0
+}
+
+fn lspq_test_add_smell() -> bool with Mut, Panic {
+    var ctx = lspq_context_new(1)
+    let s1 = lspq_smell_new(LSPQ_SMELL_LONG_FUNCTION, LSPQ_SEV_WARNING, "too long", "split it", 15)
+    ctx = lspq_add_smell(ctx, s1)
+    let ok_count = ctx.smell_count == 1
+    let ok_kind  = ctx.smells[0].kind == LSPQ_SMELL_LONG_FUNCTION
+    let ok_sev   = ctx.smells[0].severity == LSPQ_SEV_WARNING
+    let ok_debt  = ctx.smells[0].debt_minutes == 15
+    ok_count && ok_kind && ok_sev && ok_debt
+}
+
+fn lspq_test_debt_empty() -> bool with Mut, Div, Panic {
+    let ctx = lspq_context_new(0)
+    let d = lspq_compute_debt(ctx)
+    d.total_debt_minutes == 0 && d.quality_rating == LSPQ_RATING_A && str_eq(d.rating_letter, "A")
+}
+
+fn lspq_test_debt_accumulate() -> bool with Mut, Panic, Div {
+    var ctx = lspq_context_new(0)
+    // 3 smells * 25 min = 75 total => rating B (60..119)
+    let s = lspq_smell_new(LSPQ_SMELL_DEAD_CODE, LSPQ_SEV_INFO, "dead code", "remove it", 25)
+    ctx = lspq_add_smell(ctx, s)
+    ctx = lspq_add_smell(ctx, s)
+    ctx = lspq_add_smell(ctx, s)
+    let d = lspq_compute_debt(ctx)
+    let ok_total  = d.total_debt_minutes == 75
+    let ok_rating = d.quality_rating == LSPQ_RATING_B
+    let ok_letter = str_eq(d.rating_letter, "B")
+    let ok_minor  = d.minor_count == 3
+    ok_total && ok_rating && ok_letter && ok_minor
+}
+
+fn lspq_test_check_metrics() -> bool with Mut, Panic, Div {
+    var ctx = lspq_context_new(0)
+    ctx.metrics.cyclomatic    = 15
+    ctx.metrics.fn_max_params = 7
+    ctx = lspq_check_metrics(ctx)
+    ctx.smell_count >= 2
+}
+
+fn lspq_test_rating_letter() -> bool {
+    let ok_a = str_eq(lspq_rating_letter(LSPQ_RATING_A), "A")
+    let ok_b = str_eq(lspq_rating_letter(LSPQ_RATING_B), "B")
+    let ok_e = str_eq(lspq_rating_letter(LSPQ_RATING_E), "E")
+    ok_a && ok_b && ok_e
+}
+
+fn lspq_test_smell_kind_name() -> bool {
+    let ok_lf  = str_eq(lspq_smell_kind_name(LSPQ_SMELL_LONG_FUNCTION),      "long_function")
+    let ok_ep  = str_eq(lspq_smell_kind_name(LSPQ_SMELL_UNHANDLED_EFFECT),   "unhandled_effect")
+    let ok_kl  = str_eq(lspq_smell_kind_name(LSPQ_SMELL_KNOWLEDGE_LOSS),     "knowledge_loss")
+    let ok_mp  = str_eq(lspq_smell_kind_name(LSPQ_SMELL_MISSING_PROVENANCE), "missing_provenance")
+    let ok_unk = str_eq(lspq_smell_kind_name(0), "unknown")
+    ok_lf && ok_ep && ok_kl && ok_mp && ok_unk
+}
+
+fn lspq_test_maintainability_zero_loc() -> bool with Mut, Div, Panic {
+    let ctx = lspq_context_new(0)
+    let mi = lspq_compute_maintainability(ctx)
+    mi == 100.0
+}
+
+fn lspq_test_maintainability_realistic() -> bool with Mut, Div, Panic {
+    var ctx = lspq_context_new(0)
+    ctx.metrics.loc_code   = 200
+    ctx.metrics.cyclomatic = 8
+    let mi = lspq_compute_maintainability(ctx)
+    mi >= 0.0 && mi <= 100.0
+}
+
+fn lspq_test_context_to_json() -> bool with Mut, Div, Panic {
+    var ctx = lspq_context_new(1)
+    let s = lspq_smell_new(LSPQ_SMELL_DEEP_NESTING, LSPQ_SEV_WARNING, "too deep", "flatten", 10)
+    ctx = lspq_add_smell(ctx, s)
+    ctx.metrics.loc_total = 100
+    let d = lspq_compute_debt(ctx)
+    ctx.debt = d
+    let buf = lspq_jb_new()
+    let out = lspq_context_to_json(ctx, buf)
+    let ok_open  = out.data[0] == 123
+    let ok_close = out.data[(out.len - 1) as usize] == 125
+    let ok_len   = out.len > 50
+    ok_open && ok_close && ok_len
+}
+
+// ============================================================================
+// Section 11: TEST RUNNER
+// ============================================================================
+
+fn lspq_run_tests() -> i64 with IO, Mut, Div, Panic {
+    var passed: i64 = 0
+    var total:  i64 = 0
+
+    total = total + 1
+    if lspq_test_constants()               { passed = passed + 1 } else { print("FAIL: T01 lspq_constants\n") }
+
+    total = total + 1
+    if lspq_test_context_new()             { passed = passed + 1 } else { print("FAIL: T02 lspq_context_new\n") }
+
+    total = total + 1
+    if lspq_test_add_smell()               { passed = passed + 1 } else { print("FAIL: T03 lspq_add_smell\n") }
+
+    total = total + 1
+    if lspq_test_debt_empty()              { passed = passed + 1 } else { print("FAIL: T04 lspq_debt_empty\n") }
+
+    total = total + 1
+    if lspq_test_debt_accumulate()         { passed = passed + 1 } else { print("FAIL: T05 lspq_debt_accumulate\n") }
+
+    total = total + 1
+    if lspq_test_check_metrics()           { passed = passed + 1 } else { print("FAIL: T06 lspq_check_metrics\n") }
+
+    total = total + 1
+    if lspq_test_rating_letter()           { passed = passed + 1 } else { print("FAIL: T07 lspq_rating_letter\n") }
+
+    total = total + 1
+    if lspq_test_smell_kind_name()         { passed = passed + 1 } else { print("FAIL: T08 lspq_smell_kind_name\n") }
+
+    total = total + 1
+    if lspq_test_maintainability_zero_loc() { passed = passed + 1 } else { print("FAIL: T09 lspq_maintainability_zero\n") }
+
+    total = total + 1
+    if lspq_test_maintainability_realistic() { passed = passed + 1 } else { print("FAIL: T10 lspq_maintainability_realistic\n") }
+
+    total = total + 1
+    if lspq_test_context_to_json()         { passed = passed + 1 } else { print("FAIL: T11 lspq_context_to_json\n") }
+
+    print("quality tests: ")
+    print_int(passed)
+    print("/")
+    print_int(total)
+    print(" passed\n")
+
+    if passed == total {
+        print("ALL QUALITY TESTS PASSED\n")
+        0
+    } else {
+        print("SOME QUALITY TESTS FAILED\n")
+        1
+    }
+}
