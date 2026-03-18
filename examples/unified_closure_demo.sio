@@ -1,0 +1,131 @@
+// Sprint 232: Unified Closure Type Theory -- Working Demo
+//
+// This program exercises all three dimensions of the unified closure type:
+//   1. EFFECTS:    pure vs IO function dispatch (effect subtyping)
+//   2. LINEAR:     function references with resource semantics
+//   3. EPISTEMIC:  uncertainty propagation through higher-order functions
+//
+// Runs on current $SOUC via named function references (Sprint 228).
+
+// ============================================================================
+// Dimension 1: Effect-Tracked Higher-Order Functions
+// ============================================================================
+
+// Pure functions -- no effects
+fn pure_double(x: i64) -> i64 { x * 2 }
+fn pure_square(x: i64) -> i64 { x * x }
+fn pure_add(a: i64, b: i64) -> i64 { a + b }
+
+// Higher-order apply (pure context)
+fn apply_pure(f: fn(i64) -> i64, x: i64) -> i64 { f(x) }
+fn apply2_pure(f: fn(i64, i64) -> i64, a: i64, b: i64) -> i64 { f(a, b) }
+
+// Effect-polymorphic: select function dynamically
+fn select_transform(which: i64) -> fn(i64) -> i64 with Mut, Panic, Div {
+    if which == 0 { pure_double }
+    else { pure_square }
+}
+
+// ============================================================================
+// Dimension 2: Linear Resource Semantics
+// (Demonstrated via exactly-once function call pattern)
+// ============================================================================
+
+// A "resource handler" is a function that should be called exactly once.
+// With Sprint 231's linear closure tracking, the type checker enforces this.
+fn make_handler(resource_id: i64) -> fn(i64) -> i64 with Mut, Panic, Div {
+    // In the future (once linear closures are live), capturing a linear
+    // resource here would make this closure linear automatically.
+    // For now, we demonstrate the call-once pattern with named fn refs.
+    if resource_id > 0 { pure_double }
+    else { pure_square }
+}
+
+// ============================================================================
+// Dimension 3: Epistemic Propagation via Function References
+// (Demonstrates the pattern; full Knowledge<T> closures need $SOUC rebuild)
+// ============================================================================
+
+// Uncertainty-aware numerical computation using fn refs:
+// deriv(f, x) computes f'(x) numerically -- the output inherits
+// numerical differentiation error as a form of epistemic uncertainty.
+fn fc_abs(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+
+fn my_sin_f(x: f64) -> f64 with Mut, Panic, Div {
+    let x2 = x * x
+    let t1 = x
+    let t3 = 0.0 - x * x2 / 6.0
+    let t5 = 0.0 - t3 * x2 / 20.0
+    let t7 = 0.0 - t5 * x2 / 42.0
+    let t9 = 0.0 - t7 * x2 / 72.0
+    t1 + t3 + t5 + t7 + t9
+}
+
+fn deriv_f(f: fn(f64) -> f64, x: f64) -> f64 with Mut, Panic, Div {
+    let h = 0.00000001
+    (f(x + h) - f(x - h)) / (2.0 * h)
+}
+
+// ============================================================================
+// Main: Exercise all three dimensions, verify via assertions
+// ============================================================================
+
+fn main() -> i32 with IO, Mut, Panic, Div {
+    // --- Dimension 1: Effect-tracked dispatch ---
+
+    // Pure functions through pure higher-order apply
+    let r1 = apply_pure(pure_double, 5)
+    assert(r1 == 10)
+
+    let r2 = apply_pure(pure_square, 4)
+    assert(r2 == 16)
+
+    let r3 = apply2_pure(pure_add, 30, 12)
+    assert(r3 == 42)
+
+    // Dynamic function selection (effect-tracked return)
+    let op = select_transform(0)
+    assert(op(7) == 14)
+
+    let op2 = select_transform(1)
+    assert(op2(7) == 49)
+
+    // --- Dimension 2: Exactly-once handler pattern ---
+
+    let handler = make_handler(1)
+    let handled = handler(21)
+    assert(handled == 42)
+
+    // In Sprint 231's type system, calling handler again on a linear
+    // closure would produce error 39 (already consumed).
+
+    // --- Dimension 3: Epistemic-aware numerical computation ---
+
+    // deriv(sin, 0) should be cos(0) = 1.0
+    let d = deriv_f(my_sin_f, 0.0)
+    // d is approximately 1.0 (numerical error ~ 1e-8)
+    // In Sprint 231's type system, if my_sin_f captured a Knowledge<f64>,
+    // the closure would auto-inject the Epistemic effect and the return
+    // type would become Knowledge<f64, combined_epsilon>.
+
+    // --- Combined: functional fold via fn refs ---
+    // Sum 1+2+3+4+5 via repeated application
+    let s1 = apply2_pure(pure_add, 0, 1)
+    let s2 = apply2_pure(pure_add, s1, 2)
+    let s3 = apply2_pure(pure_add, s2, 3)
+    let s4 = apply2_pure(pure_add, s3, 4)
+    let s5 = apply2_pure(pure_add, s4, 5)
+    assert(s5 == 15)
+
+    // Sum of squares via dynamic dispatch
+    let sq = select_transform(1)
+    let sum_sq = apply2_pure(pure_add,
+                 apply2_pure(pure_add,
+                 apply2_pure(pure_add,
+                     sq(1), sq(2)), sq(3)), sq(4))
+    // 1 + 4 + 9 + 16 = 30
+    assert(sum_sq == 30)
+
+    print(0)
+    0
+}
