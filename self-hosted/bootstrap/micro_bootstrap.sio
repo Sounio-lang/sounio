@@ -102,6 +102,9 @@ var MB_BSS_TOTAL: i64 = 0
 // BSS addresses for SRC_BUF and SRC_LEN (populated after mb_collect_globals)
 var MB_SRC_BUF_GADDR: i64 = 0
 var MB_SRC_LEN_GADDR: i64 = 0
+// BSS addresses for IMP_FNAME_BUF and IMP_FNAME_PTR (for import file loading)
+var MB_IMP_FNAME_BUF_GADDR: i64 = 0
+var MB_IMP_FNAME_PTR_GADDR: i64 = 0
 
 // ============================================================================
 // Constants
@@ -1249,6 +1252,31 @@ fn mb_resolve_src_globals() with Mut, Panic, Div {
                 MB_SRC_LEN_GADDR = 0x700000 + MB_GL_OFF[gi as usize]
             }
         }
+        // IMP_FNAME_BUF (13 chars) = 73 77 80 95 70 78 65 77 69 95 66 85 70
+        // IMP_FNAME_PTR (13 chars) = 73 77 80 95 70 78 65 77 69 95 80 84 82
+        if ne - ns == 13 {
+            let c0 = source_byte(ns)
+            let c1 = source_byte(ns + 1)
+            let c2 = source_byte(ns + 2)
+            let c3 = source_byte(ns + 3)
+            let c4 = source_byte(ns + 4)
+            let c5 = source_byte(ns + 5)
+            let c6 = source_byte(ns + 6)
+            let c7 = source_byte(ns + 7)
+            let c8 = source_byte(ns + 8)
+            let c9 = source_byte(ns + 9)
+            if c0==73 && c1==77 && c2==80 && c3==95 && c4==70 && c5==78 && c6==65 && c7==77 && c8==69 && c9==95 {
+                let c10 = source_byte(ns + 10)
+                let c11 = source_byte(ns + 11)
+                let c12 = source_byte(ns + 12)
+                if c10==66 && c11==85 && c12==70 {
+                    MB_IMP_FNAME_BUF_GADDR = 0x700000 + MB_GL_OFF[gi as usize]
+                }
+                if c10==80 && c11==84 && c12==82 {
+                    MB_IMP_FNAME_PTR_GADDR = 0x700000 + MB_GL_OFF[gi as usize]
+                }
+            }
+        }
         gi = gi + 1
     }
 }
@@ -1787,6 +1815,65 @@ fn compile_node(node: i64) -> i64 with Mut, Panic, Div {
             // store sz to SRC_LEN global
             emit(0x48); emit(0xBA); emit_u64(MB_SRC_LEN_GADDR)       // movabs rdx, SRC_LEN_addr
             emit(0x48); emit(0x89); emit(0x02)                         // mov [rdx], rax
+            return 0
+        }
+
+        // append_source_file(path) — open+read, append to SRC_BUF at SRC_LEN, update SRC_LEN+1 ('\n')
+        // Stack during: [rsp]=fd [rsp+8]=path; then pushes bytes_read on top
+        if pool_match(c_off, c_len, "append_source_file") && MB_SRC_BUF_GADDR != 0 {
+            let arg0 = ND_EXTRA[node as usize]
+            if arg0 != -1 { compile_node(arg0) }   // rax = path ptr
+            emit(0x50)                              // push path
+            // open(path, O_RDONLY, 0) → fd
+            emit(0x48); emit(0x89); emit(0xC7)     // mov rdi, rax
+            emit(0x48); emit(0x31); emit(0xF6)     // xor rsi, rsi
+            emit(0x48); emit(0x31); emit(0xD2)     // xor rdx, rdx
+            emit(0xB8); emit_u32(2)                // mov eax, 2 SYS_open
+            emit(0x0F); emit(0x05)                 // syscall → fd
+            emit(0x50)                             // push fd  [rsp]=fd [rsp+8]=path
+            // guard: if fd < 0 (open failed), skip read/write block (102 bytes) → land at add rsp,16
+            emit(0x48); emit(0x85); emit(0xC0)   // test rax, rax
+            emit(0x78); emit(0x66)               // js +102 (0x66=102)
+            // r9 = SRC_LEN
+            emit(0x49); emit(0xB9); emit_u64(MB_SRC_LEN_GADDR)   // movabs r9, SRC_LEN_addr
+            emit(0x4D); emit(0x8B); emit(0x09)                    // mov r9, [r9]
+            // r10 = SRC_BUF + SRC_LEN
+            emit(0x4D); emit(0xBA); emit_u64(MB_SRC_BUF_GADDR)   // movabs r10, SRC_BUF_addr
+            emit(0x4D); emit(0x8B); emit(0x12)                    // mov r10, [r10]
+            emit(0x4D); emit(0x01); emit(0xCA)                    // add r10, r9
+            // read(fd, r10, 1MB-r9) → rax = bytes_read
+            emit(0x48); emit(0x8B); emit(0x3C); emit(0x24)        // mov rdi, [rsp] (fd)
+            emit(0x4C); emit(0x89); emit(0xD6)                    // mov rsi, r10
+            emit(0x48); emit(0xBA); emit_u64(1048576)             // movabs rdx, 1048576
+            emit(0x4C); emit(0x29); emit(0xCA)                    // sub rdx, r9
+            emit(0xB8); emit_u32(0)                               // mov eax, 0 SYS_read
+            emit(0x0F); emit(0x05)                                // syscall → bytes_read
+            emit(0x50)                                            // push bytes_read
+            // write '\n' separator at r10+bytes_read
+            emit(0x4D); emit(0x89); emit(0xD3)                    // mov r11, r10
+            emit(0x4C); emit(0x03); emit(0x1C); emit(0x24)        // add r11, [rsp]
+            emit(0x41); emit(0xC6); emit(0x03); emit(0x0A)        // mov byte [r11], '\n'
+            // SRC_LEN = r9 + bytes_read + 1
+            emit(0x4C); emit(0x03); emit(0x0C); emit(0x24)        // add r9, [rsp]
+            emit(0x49); emit(0xFF); emit(0xC1)                    // inc r9
+            emit(0x48); emit(0xB9); emit_u64(MB_SRC_LEN_GADDR)   // movabs rcx, SRC_LEN_addr
+            emit(0x4C); emit(0x89); emit(0x09)                    // mov [rcx], r9
+            // close(fd), preserve bytes_read
+            emit(0x58)                                            // pop rax (bytes_read)
+            emit(0x48); emit(0x8B); emit(0x3C); emit(0x24)        // mov rdi, [rsp] (fd)
+            emit(0x50)                                            // push rax (re-push bytes_read)
+            emit(0xB8); emit_u32(3)                               // mov eax, 3 SYS_close
+            emit(0x0F); emit(0x05)                                // syscall
+            emit(0x58)                                            // pop rax (bytes_read)
+            emit(0x48); emit(0x83); emit(0xC4); emit(16)          // add rsp, 16 (discard fd,path)
+            return 0
+        }
+
+        // init_imp_fname_ptr() — sets IMP_FNAME_PTR = BSS address of IMP_FNAME_BUF
+        if pool_match(c_off, c_len, "init_imp_fname_ptr") && MB_IMP_FNAME_BUF_GADDR != 0 && MB_IMP_FNAME_PTR_GADDR != 0 {
+            emit(0x48); emit(0xB8); emit_u64(MB_IMP_FNAME_BUF_GADDR)  // movabs rax, IMP_FNAME_BUF_addr
+            emit(0x48); emit(0xB9); emit_u64(MB_IMP_FNAME_PTR_GADDR)  // movabs rcx, IMP_FNAME_PTR_addr
+            emit(0x48); emit(0x89); emit(0x01)                         // mov [rcx], rax
             return 0
         }
 
