@@ -1,0 +1,111 @@
+//@ run-pass
+// sb_001: GUM uncertainty propagation through arithmetic
+//
+// Given measured values with uncertainties, compute a derived quantity
+// with propagated uncertainty using the Guide to Uncertainty in Measurement.
+//
+// Formula: z = (a * b) / c
+// u(z) = z * sqrt((u(a)/a)^2 + (u(b)/b)^2 + (u(c)/c)^2)
+
+struct Measurement {
+    value: f64,
+    uncertainty: f64
+}
+
+fn my_sqrt(x: f64) -> f64 with Mut, Panic, Div {
+    if x <= 0.0 { return 0.0 }
+    var guess = x
+    if x > 1.0 { guess = x * 0.5 }
+    var i: i64 = 0
+    while i < 60 {
+        guess = 0.5 * (guess + x / guess)
+        i = i + 1
+    }
+    guess
+}
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+// Multiply two measurements: z = a * b
+// u(z)/z = sqrt((u(a)/a)^2 + (u(b)/b)^2)
+fn mul_measurement(a: Measurement, b: Measurement) -> Measurement with Mut, Panic, Div {
+    let z = a.value * b.value
+    let ra = a.uncertainty / a.value
+    let rb = b.uncertainty / b.value
+    let rz = my_sqrt(ra * ra + rb * rb)
+    Measurement { value: z, uncertainty: abs_f64(z) * rz }
+}
+
+// Divide two measurements: z = a / b
+// u(z)/z = sqrt((u(a)/a)^2 + (u(b)/b)^2)
+fn div_measurement(a: Measurement, b: Measurement) -> Measurement with Mut, Panic, Div {
+    let z = a.value / b.value
+    let ra = a.uncertainty / a.value
+    let rb = b.uncertainty / b.value
+    let rz = my_sqrt(ra * ra + rb * rb)
+    Measurement { value: z, uncertainty: abs_f64(z) * rz }
+}
+
+// Add two measurements: z = a + b
+// u(z) = sqrt(u(a)^2 + u(b)^2)
+fn add_measurement(a: Measurement, b: Measurement) -> Measurement with Mut, Panic, Div {
+    let z = a.value + b.value
+    let uz = my_sqrt(a.uncertainty * a.uncertainty + b.uncertainty * b.uncertainty)
+    Measurement { value: z, uncertainty: uz }
+}
+
+fn check_near(a: f64, b: f64, tol: f64) -> bool {
+    let d = a - b
+    let ad = if d < 0.0 { 0.0 - d } else { d }
+    ad < tol
+}
+
+fn main() -> i64 with IO, Mut, Panic, Div {
+    // Test 1: Multiplication uncertainty propagation
+    // a = 10.0 +/- 0.5  (5% relative)
+    // b = 20.0 +/- 1.0  (5% relative)
+    // z = a * b = 200.0
+    // u(z) = 200 * sqrt(0.05^2 + 0.05^2) = 200 * sqrt(0.005) ~ 14.14
+    let a = Measurement { value: 10.0, uncertainty: 0.5 }
+    let b = Measurement { value: 20.0, uncertainty: 1.0 }
+    let z = mul_measurement(a, b)
+    assert(check_near(z.value, 200.0, 0.01))
+    assert(check_near(z.uncertainty, 14.142135, 0.01))
+
+    // Test 2: Division uncertainty propagation
+    // a = 100.0 +/- 2.0
+    // b = 50.0 +/- 1.0
+    // z = a / b = 2.0
+    // u(z) = 2 * sqrt((2/100)^2 + (1/50)^2) = 2 * sqrt(0.0004 + 0.0004) = 2 * sqrt(0.0008) ~ 0.0566
+    let c = Measurement { value: 100.0, uncertainty: 2.0 }
+    let d = Measurement { value: 50.0, uncertainty: 1.0 }
+    let w = div_measurement(c, d)
+    assert(check_near(w.value, 2.0, 0.001))
+    assert(check_near(w.uncertainty, 0.05657, 0.001))
+
+    // Test 3: Addition uncertainty propagation
+    // a = 5.0 +/- 0.3
+    // b = 3.0 +/- 0.4
+    // z = 8.0, u(z) = sqrt(0.09 + 0.16) = sqrt(0.25) = 0.5
+    let e = Measurement { value: 5.0, uncertainty: 0.3 }
+    let f = Measurement { value: 3.0, uncertainty: 0.4 }
+    let v = add_measurement(e, f)
+    assert(check_near(v.value, 8.0, 0.001))
+    assert(check_near(v.uncertainty, 0.5, 0.001))
+
+    // Test 4: Chained operation  z = (a * b) / c
+    let m1 = Measurement { value: 10.0, uncertainty: 0.1 }
+    let m2 = Measurement { value: 5.0, uncertainty: 0.05 }
+    let m3 = Measurement { value: 2.0, uncertainty: 0.02 }
+    let prod = mul_measurement(m1, m2)
+    let result = div_measurement(prod, m3)
+    assert(check_near(result.value, 25.0, 0.001))
+    // Relative uncertainties: 1%, 1%, 1% => combined ~1.73%
+    // u(result) ~ 25 * 0.01732 ~ 0.433
+    assert(check_near(result.uncertainty, 0.433, 0.01))
+
+    println("sb_001: All uncertainty propagation tests passed")
+    0
+}

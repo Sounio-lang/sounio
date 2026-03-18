@@ -1,0 +1,153 @@
+//@ run-pass
+// sb_004: Running statistics accumulator using by-value struct update
+//
+// Tracks count, sum, sum of squares, min, and max.
+// Uses Welford's online algorithm variant for numerical stability.
+// Returns updated struct by value (no &! needed).
+
+struct RunningStats {
+    count: i64,
+    sum: f64,
+    sum_sq: f64,
+    min_val: f64,
+    max_val: f64
+}
+
+fn stats_new() -> RunningStats {
+    RunningStats {
+        count: 0,
+        sum: 0.0,
+        sum_sq: 0.0,
+        min_val: 999999999.0,
+        max_val: 0.0 - 999999999.0
+    }
+}
+
+// Add a value and return updated stats (by-value update pattern)
+fn stats_push(s: RunningStats, x: f64) -> RunningStats {
+    let new_count = s.count + 1
+    let new_sum = s.sum + x
+    let new_sum_sq = s.sum_sq + x * x
+    let new_min = if x < s.min_val { x } else { s.min_val }
+    let new_max = if x > s.max_val { x } else { s.max_val }
+    RunningStats {
+        count: new_count,
+        sum: new_sum,
+        sum_sq: new_sum_sq,
+        min_val: new_min,
+        max_val: new_max
+    }
+}
+
+fn stats_mean(s: RunningStats) -> f64 with Div, Panic {
+    s.sum / (s.count as f64)
+}
+
+fn stats_variance(s: RunningStats) -> f64 with Div, Panic {
+    let n = s.count as f64
+    let mean = s.sum / n
+    s.sum_sq / n - mean * mean
+}
+
+fn my_sqrt(x: f64) -> f64 with Mut, Panic, Div {
+    if x <= 0.0 { return 0.0 }
+    var guess = x
+    if x > 1.0 { guess = x * 0.5 }
+    var i: i64 = 0
+    while i < 60 {
+        guess = 0.5 * (guess + x / guess)
+        i = i + 1
+    }
+    guess
+}
+
+fn stats_stddev(s: RunningStats) -> f64 with Mut, Div, Panic {
+    my_sqrt(stats_variance(s))
+}
+
+fn check_near(a: f64, b: f64, tol: f64) -> bool {
+    let d = a - b
+    let ad = if d < 0.0 { 0.0 - d } else { d }
+    ad < tol
+}
+
+// Merge two RunningStats into one
+fn stats_merge(a: RunningStats, b: RunningStats) -> RunningStats {
+    let min_v = if a.min_val < b.min_val { a.min_val } else { b.min_val }
+    let max_v = if a.max_val > b.max_val { a.max_val } else { b.max_val }
+    RunningStats {
+        count: a.count + b.count,
+        sum: a.sum + b.sum,
+        sum_sq: a.sum_sq + b.sum_sq,
+        min_val: min_v,
+        max_val: max_v
+    }
+}
+
+fn main() -> i64 with IO, Mut, Panic, Div {
+    // Test 1: Build stats from individual values
+    var s = stats_new()
+    s = stats_push(s, 2.0)
+    s = stats_push(s, 4.0)
+    s = stats_push(s, 4.0)
+    s = stats_push(s, 4.0)
+    s = stats_push(s, 5.0)
+    s = stats_push(s, 5.0)
+    s = stats_push(s, 7.0)
+    s = stats_push(s, 9.0)
+
+    assert(s.count == 8)
+    assert(check_near(stats_mean(s), 5.0, 0.001))
+    assert(check_near(s.min_val, 2.0, 0.001))
+    assert(check_near(s.max_val, 9.0, 0.001))
+
+    // Variance = E[X^2] - (E[X])^2 = (4+16+16+16+25+25+49+81)/8 - 25 = 29 - 25 = 4
+    assert(check_near(stats_variance(s), 4.0, 0.001))
+    assert(check_near(stats_stddev(s), 2.0, 0.001))
+
+    // Test 2: Build stats from array
+    var data: [f64; 64] = [0.0; 64]
+    data[0] = 10.0
+    data[1] = 20.0
+    data[2] = 30.0
+    data[3] = 40.0
+    data[4] = 50.0
+    let len: i64 = 5
+
+    var s2 = stats_new()
+    var i: i64 = 0
+    while i < len {
+        s2 = stats_push(s2, data[i])
+        i = i + 1
+    }
+    assert(s2.count == 5)
+    assert(check_near(stats_mean(s2), 30.0, 0.001))
+    assert(check_near(s2.min_val, 10.0, 0.001))
+    assert(check_near(s2.max_val, 50.0, 0.001))
+
+    // Test 3: Merge two stats
+    var sa = stats_new()
+    sa = stats_push(sa, 1.0)
+    sa = stats_push(sa, 2.0)
+    sa = stats_push(sa, 3.0)
+
+    var sb = stats_new()
+    sb = stats_push(sb, 4.0)
+    sb = stats_push(sb, 5.0)
+
+    let merged = stats_merge(sa, sb)
+    assert(merged.count == 5)
+    assert(check_near(merged.sum, 15.0, 0.001))
+    assert(check_near(merged.min_val, 1.0, 0.001))
+    assert(check_near(merged.max_val, 5.0, 0.001))
+
+    // Test 4: Single element stats
+    var s3 = stats_new()
+    s3 = stats_push(s3, 42.0)
+    assert(s3.count == 1)
+    assert(check_near(stats_mean(s3), 42.0, 0.001))
+    assert(check_near(stats_variance(s3), 0.0, 0.001))
+
+    println("sb_004: All struct accumulator tests passed")
+    0
+}

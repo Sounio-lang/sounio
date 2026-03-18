@@ -1,6 +1,8 @@
 # Sounio Gotchas & Common Mistakes
 
-These are the mistakes LLMs (and I) have made writing Sounio. Learn them.
+These are the mistakes LLMs (and humans) make writing Sounio. Learn them.
+
+**Full syntax ref**: [docs/LLM_PROGRAMMING_GUIDE.md](docs/LLM_PROGRAMMING_GUIDE.md)
 
 ## 1. SEMICOLONS - The #1 Mistake
 
@@ -33,36 +35,7 @@ fn foo() -> i32 {
 
 ---
 
-## 2. DYNAMIC ARRAYS / VECTORS
-
-### The Mistake
-```sio
-// ❌ WRONG - Rust-ism
-var data: Vec<u8> = vec![0, 1, 2, 3]
-let slice: &[u8] = &data[..]
-let len = data.len()
-```
-
-### Why It's Wrong
-- Sounio has NO heap allocation in core language
-- No `Vec<T>`, no slices `&[T]`, no `.len()` methods
-- Only fixed-size arrays: `[Type; Size]`
-
-### The Fix
-```sio
-// ✅ CORRECT - fixed array with explicit size and length variable
-var data: [u8; 256] = [0; 256]  // Fixed capacity
-var len: i32 = 4  // Track actual length yourself
-data[0] = 0
-data[1] = 1
-data[2] = 2
-data[3] = 3
-// Now len = 4, data[0..4] is valid
-```
-
----
-
-## 3. MUTABLE REFERENCES: `&!` vs `&mut`
+## 2. `&mut` vs `&!`
 
 ### The Mistake
 ```sio
@@ -70,29 +43,23 @@ data[3] = 3
 fn increment(x: &mut i32) with Mut {
     *x = *x + 1
 }
-
 var counter: i32 = 0
 increment(&mut counter)
 ```
 
-### Why It's Wrong
-- Sounio uses `&!` (two tokens: `&` then `!`), not `&mut`
-- This signals Sounio's different borrowing system
-
 ### The Fix
 ```sio
-// ✅ CORRECT
+// ✅ CORRECT - Sounio uses &! (two tokens: & then !)
 fn increment(x: &!i32) with Mut {
     *x = *x + 1
 }
-
 var counter: i32 = 0
 increment(&!counter)
 ```
 
 ---
 
-## 4. MISSING EFFECTS
+## 3. MISSING EFFECTS
 
 ### The Mistake
 ```sio
@@ -108,93 +75,56 @@ fn divide(a: f64, b: f64) -> f64 {
 
 // ❌ WRONG - missing IO effect
 fn say_hello() {
-    print("Hello")  // ERROR: IO without 'with IO'
+    println("Hello")  // ERROR: IO without 'with IO'
 }
 ```
-
-### Why It's Wrong
-- Sounio tracks effects explicitly
-- Division REQUIRES `with Div` (can panic on infinity)
-- Mutation REQUIRES `with Mut`
-- All I/O REQUIRES `with IO`
 
 ### The Fix
 ```sio
 // ✅ CORRECT
-fn set_value(x: &!i32) with Mut {
-    *x = 42
-}
-
-fn divide(a: f64, b: f64) -> f64 with Div, Panic {
-    a / b
-}
-
-fn say_hello() with IO {
-    print("Hello")
-}
+fn set_value(x: &!i32) with Mut { *x = 42 }
+fn divide(a: f64, b: f64) -> f64 with Div, Panic { a / b }
+fn say_hello() with IO { println("Hello") }
 ```
+
+### Effect Reference
+| Effect | Required for |
+|--------|-------------|
+| `Mut` | `&!` mutation, array assignment |
+| `Div, Panic` | Division `/`, modulo `%` |
+| `Panic` | Array access, `assert()`, `as` casts |
+| `IO` | `print()`, `println()`, file ops |
 
 ---
 
-## 5. RUST METHODS DON'T EXIST
+## 4. RUST MACROS DON'T EXIST
 
 ### The Mistake
 ```sio
-// ❌ WRONG - no methods
-let text = "hello"
-let len = text.len()          // No .len() method!
-let upper = text.to_uppercase() // No .to_uppercase()!
-
-let arr = [1, 2, 3]
-let first = arr.first()       // No .first()!
-let doubled = arr.iter().map(|x| x * 2).collect()  // No .iter()!
+// ❌ WRONG - Rust macros
+assert!(x == 5)
+println!("hello {}", name)
+vec![1, 2, 3]
 ```
-
-### Why It's Wrong
-- Sounio is NOT object-oriented
-- No method dispatch (no `.` operator for methods)
-- Arrays have no built-in methods
-- Strings are just `[i8; N]` arrays
 
 ### The Fix
 ```sio
-// ✅ CORRECT - manual loops and functions
-fn count_bytes(s: &[i8; 64]) -> i32 {
-    var len = 0
-    var i = 0
-    while i < 64 {
-        if s[i] == 0i8 { break }
-        len = len + 1
-        i = i + 1
-    }
-    len
-}
-
-// Process array
-var arr: [i32; 10] = [1, 2, 3, 4, 5, 0, 0, 0, 0, 0]
-var sum = 0
-var i = 0
-while i < 5 {
-    sum = sum + arr[i]
-    i = i + 1
-}
+// ✅ CORRECT - Sounio functions (no !)
+assert(x == 5)
+println("hello")
+print(name)
 ```
 
 ---
 
-## 6. NEGATIVE NUMBERS & UNARY MINUS
+## 5. NEGATIVE NUMBERS & UNARY MINUS
 
 ### The Mistake
 ```sio
 // ❌ WRONG - unary minus doesn't exist
 let neg = -42
 let result = -x
-let value = a - -b
 ```
-
-### Why It's Wrong
-- Sounio has no unary minus operator
-- Must use `0 - x` instead
 
 ### The Fix
 ```sio
@@ -206,90 +136,103 @@ let value = a - (0 - b)  // = a + b
 
 ---
 
-## 7. BIT SHIFT REQUIRES u8 OPERAND
+## 6. BIT SHIFT REQUIRES u8 OPERAND
 
 ### The Mistake
 ```sio
 // ❌ WRONG - shift amount must be u8
 let shifted = byte >> 4       // ERROR: 4 is i32!
-let masked = byte & 255       // ERROR: 255 is i32!
 ```
-
-### Why It's Wrong
-- Shift operators require `u8` for the shift amount
-- Bitwise AND requires both operands to match type
 
 ### The Fix
 ```sio
 // ✅ CORRECT
 let shifted = byte >> 4u8
-let masked = byte & 255u8
+let masked = byte & 15u8
 let high = (byte >> 4u8) & 15u8
 ```
 
 ---
 
-## 8. ARRAY SIZE MISMATCHES
+## 7. ARRAY SIZE MISMATCHES
 
 ### The Mistake
 ```sio
 // ❌ WRONG - initialization size doesn't match type
 var small_buffer: [u8; 10] = [0; 256]  // ERROR: 256 != 10!
-
-// ❌ WRONG - accessing past bounds
-var arr: [i32; 5] = [1, 2, 3, 4, 5]
-let x = arr[100]  // ERROR: bounds check fails!
 ```
-
-### Why It's Wrong
-- Array type and initialization must match exactly
-- Index must be statically provable to be in bounds (mostly)
 
 ### The Fix
 ```sio
 // ✅ CORRECT
 var buffer: [u8; 256] = [0; 256]
-
-var arr: [i32; 100] = [0; 100]  // Safe to access 0..99
-var i: i32 = 5
-if i >= 0 && i < 100 {
-    let x = arr[i as usize]  // Safe
-}
 ```
 
 ---
 
-## 9. TYPE MISMATCHES IN TUPLES/RETURNS
+## 8. CLOSURE LITERALS vs FUNCTION REFERENCES
 
 ### The Mistake
 ```sio
-// ❌ WRONG - missing return statement
-fn compute(x: i32) -> i32 {
-    let result = x * 2
-    // Oops, forgot to return result!
-}
-
-// ❌ WRONG - wrong tuple type
-fn divide_safe(a: f64, b: f64) -> (f64, i32) with Div, Panic {
-    if b == 0.0 { return 0.0 }  // ERROR: should return (f64, i32) not f64!
-}
+// ❌ WRONG - closure literals are BLOCKED
+let doubled = numbers.iter().map(|x| x * 2).collect()
+let callback = |x| { x + 1 }
 ```
 
 ### Why It's Wrong
-- Function must return declared type
-- Tuple returns require all elements
+- Sounio has NO closure literals (`|x| expr`)
+- But **named function references DO work** as first-class values
 
 ### The Fix
 ```sio
-// ✅ CORRECT
-fn compute(x: i32) -> i32 {
-    let result = x * 2
-    result
+// ✅ CORRECT - named function references (verified: closure_fn_ref.sio)
+fn double(x: i64) -> i64 { x * 2 }
+fn apply(f: fn(i64) -> i64, x: i64) -> i64 { f(x) }
+
+let f = double            // store fn ref in variable
+let r = f(7)              // call through variable: 14
+let r2 = apply(double, 5) // pass as argument: 10
+
+// Higher-order patterns work (verified: closure_higher_order.sio)
+fn map4(arr: [i64; 4], f: fn(i64) -> i64) -> [i64; 4] with Mut, Panic, Div {
+    var out: [i64; 4] = [0; 4]
+    var i: i64 = 0
+    while i < 4 { out[i] = f(arr[i]); i = i + 1 }
+    out
+}
+let doubled = map4(data, double)
+```
+
+---
+
+## 9. METHODS ON CORE TYPES
+
+### The Mistake
+```sio
+// ❌ WRONG - core types have no methods
+let text = "hello"
+let len = text.len()
+let upper = text.to_uppercase()
+let first = arr.first()
+```
+
+### Why It's Wrong
+- Core types (`i32`, `[T;N]`, string literals) have no methods
+- But **stdlib types DO have methods** via `impl` blocks
+
+### The Fix
+```sio
+// For core types: manual loops and functions
+var i = 0
+while i < len {
+    process(array[i as usize])
+    i = i + 1
 }
 
-fn divide_safe(a: f64, b: f64) -> (f64, i32) with Div, Panic {
-    if b == 0.0 { return (0.0, 1) }  // Error code
-    (a / b, 0)  // Success
+// For stdlib types: impl methods work (verified: stdlib/collections/vec.sio)
+impl IntVec {
+    fn len(self: &IntVec) -> i64 { self.len }
+    fn push(self: &! IntVec, val: i64) { /* ... */ }
 }
 ```
 
@@ -301,99 +244,70 @@ fn divide_safe(a: f64, b: f64) -> (f64, i32) with Div, Panic {
 ```sio
 // ❌ WRONG - missing casts
 let i: i32 = 5
-let u: u8 = i        // ERROR: type mismatch!
-let idx = 5          // Is it i32 or what?
 let arr: [u8; 256] = [0; 256]
-let val = arr[i]     // ERROR: arr[i32] but needs [usize]
+let val = arr[i]     // ERROR: needs [usize] not [i32]
 ```
-
-### Why It's Wrong
-- Type conversions require explicit `as` casts
-- Array indexing requires `usize` (usually)
 
 ### The Fix
 ```sio
 // ✅ CORRECT
-let i: i32 = 5
-let u: u8 = i as u8
-let idx: usize = 5
-let arr: [u8; 256] = [0; 256]
 let val = arr[i as usize]
+let u: u8 = i as u8
 ```
 
 ---
 
-## 11. CLOSURES & HIGHER-ORDER FUNCTIONS
+## 11. EXCEPTION HANDLING DOESN'T EXIST
 
 ### The Mistake
 ```sio
-// ❌ WRONG - Rust style, doesn't exist in Sounio
-let numbers = [1, 2, 3, 4, 5]
-let doubled = numbers.iter().map(|x| x * 2).collect()
-
-let callback = |x| { x + 1 }
-apply_callback(numbers, callback)
-```
-
-### Why It's Wrong
-- Sounio has NO closures
-- No lambda/anonymous functions
-- No higher-order function dispatch
-
-### The Fix
-```sio
-// ✅ CORRECT - named functions only
-fn double(x: i32) -> i32 { x * 2 }
-
-var numbers: [i32; 10] = [1, 2, 3, 4, 5, 0, 0, 0, 0, 0]
-var result: [i32; 10] = [0; 10]
-var i = 0
-while i < 5 {
-    result[i] = double(numbers[i])
-    i = i + 1
-}
-```
-
----
-
-## 12. EXCEPTION HANDLING DOESN'T EXIST
-
-### The Mistake
-```sio
-// ❌ WRONG - Rust/Python style, doesn't exist
+// ❌ WRONG
 try {
     let x = risky_operation()
 } catch (error) {
     print("Error!")
 }
-
-fn divide(a: f64, b: f64) -> f64 {
-    if b == 0.0 { panic!("divide by zero") }
-    a / b
-}
 ```
-
-### Why It's Wrong
-- Sounio has no try/catch
-- No exceptions (only effects + error codes)
 
 ### The Fix
 ```sio
 // ✅ CORRECT - return error codes
-fn divide(a: f64, b: f64) -> (f64, i32) with Div {
-    if b == 0.0 {
-        (0.0, 1)  // Error code 1 = divide by zero
-    } else {
-        (a / b, 0)  // Error code 0 = success
-    }
+fn divide(a: f64, b: f64) -> (f64, i32) with Div, Panic {
+    if b == 0.0 { (0.0, 1) }
+    else { (a / b, 0) }
+}
+let (result, err) = divide(10.0, 0.0)
+if err != 0 { println("division error") }
+```
+
+---
+
+## 12. BARE ARRAY `&!` MUTATION BUG
+
+### The Mistake
+```sio
+// ❌ BUG - interpreter doesn't propagate bare array mutations
+fn sort_broken(arr: &![i64; 10000]) with Mut {
+    arr[0] = 99  // mutation invisible to caller!
+}
+```
+
+### Why It's Wrong
+- Known interpreter bug: bare `&![T; N]` mutations don't propagate
+- Struct wrapper pattern propagates correctly
+
+### The Fix
+```sio
+// ✅ CORRECT - wrap in struct
+struct SortBuf { data: [i64; 10000] }
+fn sort(b: &! SortBuf) with Mut {
+    b.data[0] = 99  // works correctly
 }
 
-// Caller:
-let (result, err) = divide(10.0, 0.0)
-if err != 0 {
-    print("Error in division\n")
-} else {
-    print(result)
+// Also correct - explicit deref (works in JIT)
+// Source: tests/run-pass/array_mut_ref.sio
+fn fill(arr: &![i64; 8]) with Mut, Panic {
+    (*arr)[0] = 99   // explicit deref
 }
 ```
 
@@ -403,112 +317,48 @@ if err != 0 {
 
 ### The Mistake
 ```sio
-// ❌ WRONG - strings are not dynamic
+// ❌ WRONG - strings are not dynamic objects
 let greeting = "Hello"
-greeting.push_str(" World")   // No method!
-let upper = greeting.to_uppercase()  // No method!
-let split = greeting.split(' ')  // No method!
+greeting.push_str(" World")
+let upper = greeting.to_uppercase()
 ```
-
-### Why It's Wrong
-- Strings in Sounio are fixed-size char arrays `[i8; N]`
-- No `.push_str()`, `.to_uppercase()`, etc.
 
 ### The Fix
 ```sio
-// ✅ CORRECT - manual array manipulation
+// ✅ CORRECT - string literals for output
+println("Hello, World!")
+
+// For mutable string data: fixed-size byte arrays
 var greeting: [i8; 64] = [0; 64]
-var len = 5
 greeting[0] = 72i8   // 'H'
 greeting[1] = 101i8  // 'e'
-greeting[2] = 108i8  // 'l'
-greeting[3] = 108i8  // 'l'
-greeting[4] = 111i8  // 'o'
-
-// To append: track length and add
-if len + 6 <= 64 {
-    greeting[len] = 32i8      // ' '
-    greeting[len + 1] = 87i8  // 'W'
-    greeting[len + 2] = 111i8 // 'o'
-    greeting[len + 3] = 114i8 // 'r'
-    greeting[len + 4] = 108i8 // 'l'
-    greeting[len + 5] = 100i8 // 'd'
-    len = len + 6
-}
 ```
 
 ---
 
-## 14. FOR LOOPS WITH RANGES
+## 14. FFI LIMITED TO MATH FUNCTIONS
 
 ### The Mistake
 ```sio
-// ❌ WRONG - syntax might work, but loop var is i64?
-for i in 0..10 {
-    print(i)
-}
-
-// ❌ WRONG - no step/stride syntax
-for i in 0..100 by 2 {  // Doesn't exist!
-    process(i)
-}
+// ❌ WRONG - integer FFI silently terminates
+extern "C" { fn malloc(size: i64) -> i64 }
+extern "C" { fn getpid() -> i32 }
 ```
 
 ### Why It's Wrong
-- For-range loop var type might not be what you expect
-- No built-in stride syntax
+- Only `f64→f64` and `(f64,f64)→f64` FFI works in JIT
+- Integer FFI (`malloc`, `getpid`, etc.) **silently terminates** the program
 
 ### The Fix
 ```sio
-// ✅ CORRECT - while loop for control
-var i: i32 = 0
-while i < 10 {
-    print(i)
-    i = i + 1
+// ✅ CORRECT - supported FFI functions
+extern "C" {
+    fn sqrt(x: f64) -> f64
+    fn sin(x: f64) -> f64
+    fn pow(x: f64, y: f64) -> f64
 }
-
-// For stride:
-var j: i32 = 0
-while j < 100 {
-    process(j)
-    j = j + 2
-}
-```
-
----
-
-## 15. STRUCT MUTATION PATTERN (JIT BUG WORKAROUND)
-
-### The Mistake
-```sio
-// ❌ WRONG - JIT &! bug causes invisible mutations
-struct Counter { value: i32 }
-
-fn increment(c: &!Counter) with Mut {
-    c.value = c.value + 1
-}
-
-var c = Counter { value: 0 }
-increment(&!c)
-print(c.value)  // Still 0! (JIT bug)
-```
-
-### Why It's Wrong
-- Sounio JIT has a bug: `&!` mutations don't propagate to caller
-- Affects mutable reference patterns
-
-### The Fix
-```sio
-// ✅ CORRECT - by-value return pattern
-struct Counter { value: i32 }
-
-fn increment(c: Counter) -> Counter {
-    Counter { value: c.value + 1 }
-}
-
-var c = Counter { value: 0 }
-c = increment(c)  // Reassign to propagate change
-print(c.value)  // Now 1! ✓
+// Full list: sqrt sin cos tan exp log floor ceil atan sinh cosh tanh
+//            asin acos cbrt round log2 log10 pow atan2
 ```
 
 ---
@@ -516,21 +366,18 @@ print(c.value)  // Now 1! ✓
 ## Checklist Before Submitting
 
 - [ ] No semicolons in function bodies
-- [ ] All arrays are fixed-size `[Type; Size]`
-- [ ] Mutable refs use `&!` not `&mut`
+- [ ] `&!` not `&mut`, `var` not `let mut`
 - [ ] All effects declared (`with Mut, Div, Panic, IO`)
-- [ ] No Rust methods (`.len()`, `.push()`, `.iter()`)
-- [ ] No unary minus (use `0 - x`)
-- [ ] Bit shifts use `u8`: `x >> 4u8`
-- [ ] Array sizes match in init: `[u8; 256] = [0; 256]`
-- [ ] All functions return declared type
-- [ ] Casts explicit: `i as u8`
-- [ ] No closures, just named functions
+- [ ] No Rust macros — `assert()` not `assert!()`, `println()` not `println!()`
+- [ ] No unary minus — use `0 - x`
+- [ ] Bit shifts use `u8` — `x >> 4u8`
+- [ ] Array sizes match — `[u8; 256] = [0; 256]`
+- [ ] Type casts explicit — `i as usize`
+- [ ] Named fn refs, not closure literals
 - [ ] Error codes not exceptions
-- [ ] String manipulation is manual array work
-- [ ] No methods on built-in types
-- [ ] Struct mutations use by-value return pattern
+- [ ] Bare array `&!` mutations: use struct wrapper or explicit `(*arr)[i]`
+- [ ] FFI: only math functions (`sqrt`, `sin`, `pow`, etc.)
 
 ---
 
-**TL;DR**: Sounio ≠ Rust. Study the existing code. When you're tempted to write Rust, **Stop. Check actual `.sio` files instead.**
+**TL;DR**: Sounio ≠ Rust. Study `tests/run-pass/` for verified examples. Read [docs/LLM_PROGRAMMING_GUIDE.md](docs/LLM_PROGRAMMING_GUIDE.md) for full syntax reference.

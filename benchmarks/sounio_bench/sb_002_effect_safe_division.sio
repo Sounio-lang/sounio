@@ -1,0 +1,103 @@
+//@ run-pass
+// sb_002: Effect-tracked safe division
+//
+// Demonstrates Sounio's effect system for tracking division safety.
+// Functions that divide must declare `with Div, Panic`.
+// Pure functions have no effect annotations.
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+fn check_near(a: f64, b: f64, tol: f64) -> bool {
+    let d = a - b
+    let ad = if d < 0.0 { 0.0 - d } else { d }
+    ad < tol
+}
+
+// Pure function: no effects needed
+fn add(a: f64, b: f64) -> f64 {
+    a + b
+}
+
+// Requires Div + Panic effects
+fn divide(a: f64, b: f64) -> f64 with Div, Panic {
+    a / b
+}
+
+// Safe division returns a tuple (result, error_code)
+// error_code: 0 = success, 1 = division by zero
+fn safe_divide(a: f64, b: f64) -> (f64, i32) with Div, Panic {
+    if abs_f64(b) < 0.0000000001 {
+        return (0.0, 1)
+    }
+    (a / b, 0)
+}
+
+// Compute harmonic mean: n / (1/x1 + 1/x2 + ... + 1/xn)
+// Must declare Div, Panic because it calls divide
+fn harmonic_mean(data: &[f64; 64], len: i64) -> (f64, i32) with Mut, Div, Panic {
+    var sum_reciprocals = 0.0
+    var i: i64 = 0
+    while i < len {
+        let (recip, err) = safe_divide(1.0, data[i])
+        if err != 0 { return (0.0, 1) }
+        sum_reciprocals = sum_reciprocals + recip
+        i = i + 1
+    }
+    let (result, err2) = safe_divide(len as f64, sum_reciprocals)
+    (result, err2)
+}
+
+// Compute percentage: (part / whole) * 100
+fn percentage(part: f64, whole: f64) -> (f64, i32) with Div, Panic {
+    let (ratio, err) = safe_divide(part, whole)
+    if err != 0 { return (0.0, 1) }
+    (ratio * 100.0, 0)
+}
+
+fn main() -> i64 with IO, Mut, Panic, Div {
+    // Test 1: Normal division
+    let r1 = divide(10.0, 3.0)
+    assert(check_near(r1, 3.33333, 0.001))
+
+    // Test 2: Safe division success
+    let (r2, e2) = safe_divide(22.0, 7.0)
+    assert(e2 == 0)
+    assert(check_near(r2, 3.14285, 0.001))
+
+    // Test 3: Safe division by zero
+    let (r3, e3) = safe_divide(1.0, 0.0)
+    assert(e3 == 1)
+    assert(r3 == 0.0)
+
+    // Test 4: Harmonic mean
+    var data: [f64; 64] = [0.0; 64]
+    data[0] = 1.0
+    data[1] = 2.0
+    data[2] = 4.0
+    let (hm, hm_err) = harmonic_mean(&data, 3)
+    assert(hm_err == 0)
+    // Harmonic mean of 1,2,4 = 3 / (1 + 0.5 + 0.25) = 3 / 1.75 ~ 1.714
+    assert(check_near(hm, 1.71428, 0.001))
+
+    // Test 5: Harmonic mean with zero element (should error)
+    var data2: [f64; 64] = [0.0; 64]
+    data2[0] = 1.0
+    data2[1] = 0.0
+    data2[2] = 4.0
+    let (hm2, hm2_err) = harmonic_mean(&data2, 3)
+    assert(hm2_err == 1)
+
+    // Test 6: Percentage
+    let (p, pe) = percentage(3.0, 4.0)
+    assert(pe == 0)
+    assert(check_near(p, 75.0, 0.001))
+
+    // Test 7: Pure function needs no effects
+    let sum = add(2.5, 3.5)
+    assert(sum == 6.0)
+
+    println("sb_002: All effect-safe division tests passed")
+    0
+}

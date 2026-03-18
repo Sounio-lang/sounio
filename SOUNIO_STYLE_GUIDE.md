@@ -1,218 +1,268 @@
 # Sounio Style Guide for LLMs
 
-## 🚨 CRITICAL: Sounio is NOT Rust
+Sounio looks like Rust but has DIFFERENT syntax and semantics. This guide covers style, patterns, and conventions.
 
-**Sounio looks like Rust but has DIFFERENT syntax and semantics.**
+**Full syntax ref**: [docs/LLM_PROGRAMMING_GUIDE.md](docs/LLM_PROGRAMMING_GUIDE.md)
 
-## 1. Basic Syntax Rules
+## 1. Basic Syntax
 
-### ✅ CORRECT Sounio
 ```sio
-// Function with effects
-fn read_file(path: &str) -> string with IO, Panic {
-    // ...
-}
-
-// Variables
+// Variables (NO semicolons)
 let x = 42
 var y: i32 = 10
 
-// Arrays (FIXED SIZE ONLY)
-var buffer: [u8; 256] = [0; 256]
+// Functions with effects
+fn divide(a: f64, b: f64) -> f64 with Div, Panic { a / b }
 
 // Structs
 struct Point { x: f64, y: f64 }
+
+// Arrays (fixed size)
+var buffer: [u8; 256] = [0; 256]
 ```
 
-### ❌ WRONG (Rust-isms)
-```rust
-// Rust - WRONG for Sounio
-fn read_file(path: &str) -> String { // No 'with' effects
-    // ...
-}
-
-let x = 42;  // Semicolon!
-let y: Vec<u8> = vec![];  // No heap allocation!
+### What NOT to Write (Rust-isms)
+```
+let x = 42;              // ❌ semicolons
+let mut x = 5;            // ❌ use 'var'
+fn foo(x: &mut i32) {}    // ❌ use '&!'
+assert!(x == 5);          // ❌ use 'assert()'
+println!("hi");           // ❌ use 'println()'
+let neg = -42;            // ❌ use '0 - 42'
 ```
 
-## 2. Unique Sounio Features
+## 2. Effects System
 
-### Effects System
+Effects track what a function can do. Missing = compile error.
+
 ```sio
-// Effects are REQUIRED for certain operations
-fn divide(a: f64, b: f64) -> f64 with Div, Panic {
-    a / b  // Division requires BOTH Div and Panic effects
-}
-
-fn mutate(arr: &![u8; 256]) -> () with Mut {
-    arr[0] = 42u8
-}
-
-fn print_hello() -> () with IO {
-    print("Hello")
-}
+fn pure_add(a: i64, b: i64) -> i64 { a + b }                    // pure
+fn mutate(x: &!i32) with Mut { *x = 42 }                         // mutation
+fn divide(a: f64, b: f64) -> f64 with Div, Panic { a / b }       // division
+fn hello() with IO { println("hi") }                              // I/O
+fn process(arr: &![u8; 256]) with IO, Mut, Panic, Div { /* */ }  // multiple
 ```
 
-### Mutable References
-```sio
-// &! means mutable reference (TWO tokens: & then !)
-fn increment(x: &!i32) with Mut {
-    *x = *x + 1
-}
-
-// Usage
-var counter: i32 = 0
-increment(&!counter)
-```
-
-### Unit Literals
-```sio
-// Built-in unit support
-let dose = 500_mg
-let volume = 10.5_mL
-let time = 2.3_sec
-```
+| Effect | When required |
+|--------|---------------|
+| `IO` | `print()`, `println()`, file/env |
+| `Mut` | `&!` mutation, array assignment |
+| `Div, Panic` | Division `/`, modulo `%` |
+| `Panic` | Array access, `assert()`, `as` casts |
+| `Alloc` | Heap allocation (rare) |
 
 ## 3. Type System
 
-### Primitive Types
-- Integers: `i8`, `i16`, `i32`, `i64`, `u8`, `u16`, `u32`, `u64`
-- Floats: `f32`, `f64`
-- Boolean: `bool`
-- Character: `char` (actually `i8` in arrays)
+### Primitives
+`i8` `i16` `i32` `i64` `u8` `u16` `u32` `u64` `f32` `f64` `bool` `char`
 
-### Arrays (FIXED SIZE ONLY)
+### Fixed-Size Arrays
 ```sio
-// Correct
 var data: [u8; 256] = [0; 256]
-let matrix: [f64; 16] = [0.0; 16]
+let matrix: [f64; 9] = [0.0; 9]
+let arr = [10, 20, 30]
+```
 
-// WRONG - No dynamic arrays
-// var vec = Vec::new()  // Doesn't exist!
-// let slice: &[u8]      // No slices!
+### Vec (stdlib)
+```sio
+// Source: tests/run-pass/for_in_loops.sio
+let vec: Vec<i32> = [1, 2, 3, 4]
+
+// Monomorphic stdlib vecs: IntVec, FloatVec (stdlib/collections/vec.sio)
+```
+
+### Tuples
+```sio
+let pair = (1, 2)
+let (a, b) = (1, 2)                   // destructuring works
+let (x, (y, z)) = (10, (20, 30))      // nested
+```
+
+### Structs
+```sio
+struct Point { x: f64, y: f64 }
+let p = Point { x: 1.0, y: 2.0 }
+
+linear struct Handle { fd: i32 }       // linear types
+```
+
+### Enums
+```sio
+// Source: tests/run-pass/native_enum_basic.sio
+enum Color { Red, Green, Blue }
+let r = Color::Red
+```
+
+### Refinement Types
+```sio
+type Probability = { p: f64 | p >= 0 }
+```
+
+### Units
+```sio
+unit kg;
+unit mg = 0.001 * kg;
+let dose: mg = 500.0
 ```
 
 ### Strings
 ```sio
-// Strings are fixed-size char arrays
-var name: [i8; 64] = [0; 64]
-name[0] = 'A' as i8
-name[1] = 'B' as i8
-
-// Or use string literals (compile-time)
-let greeting = "Hello"  // Type depends on context
+println("Hello")                     // string literals for output
+var name: [i8; 64] = [0; 64]        // mutable: fixed byte array
 ```
 
 ## 4. Control Flow
 
-### No Semicolons
+### if/else
 ```sio
-// Correct
-if x > 0 {
-    let y = x * 2
-    print(y)
-}
+if x > 0 { println("positive") }
+else if x < 0 { println("negative") }
+else { println("zero") }
 
-// Wrong
-if x > 0; {  // NO semicolon!
-    let y = x * 2;
-}
+let result = if flag { 1 } else { 0 }   // expression
 ```
 
-### Loops
+### while
 ```sio
-// While loop
 var i = 0
-while i < 10 {
-    print(i)
-    i = i + 1
-}
+while i < 10 { process(i); i = i + 1 }
+```
 
-// For loop with range
-for i in 0..10 {
-    print(i)
+### for-in
+```sio
+// Source: tests/run-pass/for_in_loops.sio
+for i in 0..5 { /* 0..4 */ }
+for i in 0..=5 { /* 0..5 inclusive */ }
+for x in arr { sum = sum + x }
+for x in vec { sum = sum + x }
+// break and continue work
+```
+
+### match
+```sio
+// Source: tests/run-pass/native_enum_basic.sio
+match c {
+    Color::Red => 10
+    Color::Green => 20
+    _ => 0
 }
 ```
 
 ## 5. Functions
 
-### Signature
+### Signatures
 ```sio
-// Full signature
-pub fn process(data: &[u8; 256], len: i32) -> i32 with Mut, Div, Panic {
-    // ...
+fn add(a: i32, b: i32) -> i32 { a + b }
+pub fn process(data: &[u8; 256], len: i32) -> i32 with Mut, Div, Panic { /* */ }
+```
+
+### Function References
+```sio
+// Source: tests/run-pass/closure_fn_ref.sio
+fn square(x: i64) -> i64 { x * x }
+fn apply(f: fn(i64) -> i64, x: i64) -> i64 { f(x) }
+
+let f = square
+let r = apply(square, 5)    // 25
+
+fn select_op(which: i64) -> fn(i64) -> i64 with Mut, Panic, Div {
+    if which == 0 { add_one } else { negate }
 }
 ```
 
-### Effects Required For:
-- `with Mut`: Mutating references (`&!`), array assignment
-- `with Div`: Division (`/`), modulo (`%`)
-- `with Panic`: Array bounds checks, overflow
-- `with IO`: Printing, file operations
-- `with Alloc`: Heap allocation (rare)
+**No closure literals** (`|x| x+1` is blocked). Only named fn refs.
 
-## 6. Common Patterns
-
-### Array Processing
+### impl Blocks
 ```sio
-fn sum_array(arr: &[i32; 100]) -> i32 {
-    var total = 0
-    var i = 0
-    while i < 100 {
-        total = total + arr[i]
-        i = i + 1
-    }
-    total
+// Source: stdlib/collections/vec.sio
+impl IntVec {
+    fn new() -> IntVec { IntVec { data: [0; 4096], len: 0 } }
+    fn push(self: &! IntVec, val: i64) { /* ... */ }
+    fn len(self: &IntVec) -> i64 { self.len }
 }
+```
+
+Methods use explicit `self: &Type` or `self: &! Type`.
+
+## 6. References
+
+```sio
+// Shared
+fn read(r: &i64) -> i64 { *r }
+
+// Exclusive (&! not &mut)
+fn write(x: &!i32) with Mut { *x = 42 }
+
+// Bare array mutation — use explicit deref
+fn fill(arr: &![i64; 8]) with Mut, Panic {
+    (*arr)[0] = 99     // (*arr)[i] NOT arr[i]
+}
+```
+
+## 7. Modules & Imports
+
+```sio
+use encoding::hex::{hex_encode}
+pub fn my_function() -> i32 { /* ... */ }
+```
+
+## 8. Common Patterns
+
+### Higher-Order Functions
+```sio
+// Source: tests/run-pass/closure_higher_order.sio
+fn map4(arr: [i64; 4], f: fn(i64) -> i64) -> [i64; 4] with Mut, Panic, Div {
+    var out: [i64; 4] = [0; 4]
+    var i: i64 = 0
+    while i < 4 { out[i] = f(arr[i]); i = i + 1 }
+    out
+}
+let doubled = map4(data, dbl)
 ```
 
 ### Error Handling
 ```sio
-// Return error codes, not exceptions
-fn safe_divide(a: f64, b: f64) -> (f64, i32) with Div {
-    if b == 0.0 {
-        (0.0, 1)  // Error code 1
-    } else {
-        (a / b, 0)  // Success
-    }
+fn safe_divide(a: f64, b: f64) -> (f64, i32) with Div, Panic {
+    if b == 0.0 { (0.0, 1) } else { (a / b, 0) }
 }
+let (result, err) = safe_divide(10.0, 0.0)
+```
+
+### Struct By-Value Update (JIT workaround)
+```sio
+struct Counter { value: i32 }
+fn increment(c: Counter) -> Counter {
+    Counter { value: c.value + 1 }
+}
+var c = Counter { value: 0 }
+c = increment(c)
 ```
 
 ### Bit Operations
 ```sio
-// Common in encoding/decoding
-fn byte_to_hex(b: u8) -> (u8, u8) {
-    let high = (b >> 4u8) & 15u8
-    let low = b & 15u8
-    (high, low)
-}
+let high = (b >> 4u8) & 15u8    // shift amount MUST be u8
+let low = b & 15u8
 ```
 
-## 7. FFI Integration
+## 9. FFI
 
 ```sio
 extern "C" {
-    fn time(tloc: &!i64) -> i64
-    fn print(s: &str) -> ()
-}
-
-fn get_timestamp() -> i64 with IO {
-    var ts: i64 = 0
-    time(&!ts)
-    ts
+    fn sqrt(x: f64) -> f64
+    fn pow(x: f64, y: f64) -> f64
 }
 ```
 
-## 8. Testing
+Only math functions work. Integer FFI (`malloc`, `getpid`) silently terminates.
+
+## 10. Testing
 
 ```sio
-// Inline tests (per CONVENTIONS.md)
 fn test_addition() {
     let result = add(2, 3)
     assert(result == 5)
 }
 
-// Test helpers
 fn check_near(a: f64, b: f64, tol: f64) -> bool {
     let d = a - b
     let ad = if d < 0.0 { 0.0 - d } else { d }
@@ -220,75 +270,30 @@ fn check_near(a: f64, b: f64, tol: f64) -> bool {
 }
 ```
 
-## 9. Common Mistakes
+Annotations: `//@ run-pass`, `//@ compile-fail`, `//@ error-pattern: <text>`, `//@ ignore`
 
-### ❌ Array size mismatch
-```sio
-// Wrong
-var small: [u8; 10] = [0; 256]  // Size mismatch!
+## 11. Checklist
 
-// Correct
-var correct: [u8; 256] = [0; 256]
-```
+1. No semicolons
+2. `&!` not `&mut`, `var` not `let mut`
+3. Effects: `with IO, Mut, Div, Panic` as needed
+4. No Rust macros: `assert()` not `assert!()`, `println()` not `println!()`
+5. No unary minus: `0 - x`
+6. Bit shifts: `u8` operand (`x >> 4u8`)
+7. Array index cast: `arr[i as usize]`
+8. Named fn refs, not closure literals
+9. Bare `&![T;N]`: use `(*arr)[i]` or struct wrapper
 
-### ❌ Missing effects
-```sio
-// Wrong - missing Mut effect
-fn set_value(x: &!i32) {  // ERROR: Needs 'with Mut'
-    *x = 42
-}
+## 12. Real Code to Study
 
-// Correct
-fn set_value(x: &!i32) with Mut {
-    *x = 42
-}
-```
+| File | Demonstrates |
+|------|-------------|
+| `tests/run-pass/hello.sio` | Hello world |
+| `tests/run-pass/for_in_loops.sio` | All for-in variants |
+| `tests/run-pass/closure_fn_ref.sio` | Function references |
+| `tests/run-pass/closure_higher_order.sio` | map, fold, any, all |
+| `tests/run-pass/native_enum_basic.sio` | Enums + match |
+| `stdlib/encoding/hex.sio` | Real stdlib code |
+| `stdlib/collections/vec.sio` | impl blocks |
 
-### ❌ Rust string methods
-```sio
-// Wrong - Rust methods
-let s = "hello"
-let len = s.len()  // No .len() method!
-
-// Correct - fixed array
-var s: [i8; 64] = [0; 64]
-// Manually track length
-```
-
-## 10. Quick Reference
-
-| Feature | Sounio Syntax | Notes |
-|---------|--------------|-------|
-| Function | `fn name() -> Type with Effects { }` | Effects required |
-| Variable | `let x = val` or `var x: Type = val` | No semicolon |
-| Array | `[Type; Size] = [init; Size]` | Fixed size only |
-| Mutable ref | `&!x` | Two tokens: `&` then `!` |
-| Division | `a / b` with Div effect | |
-| Print | `print(x)` with IO effect | |
-| Assert | `assert(condition)` | Panics if false |
-| Loop | `while cond { }` or `for i in 0..n { }` | |
-
-## 11. Verification Checklist
-
-Before submitting Sounio code, check:
-1. [ ] No semicolons (except array initializers)
-2. [ ] Fixed-size arrays only
-3. [ ] Effects specified (`with Mut, Div, Panic, IO`)
-4. [ ] `&!` for mutable references
-5. [ ] No Rust methods (`.len()`, `.push()`, etc.)
-6. [ ] Unit literals supported (`500_mg`)
-7. [ ] Error codes instead of exceptions
-8. [ ] Inline tests present
-9. [ ] Documentation per `CONVENTIONS.md`
-
-## 12. Examples from Stdlib
-
-See real Sounio in:
-- `stdlib/encoding/hex.sio` - Hex encoding
-- `stdlib/compiler/lexer/tokens.sio` - Token definitions
-- `stdlib/test/helpers.sio` - Test utilities
-
-## Remember: Sounio ≠ Rust
-
-**When in doubt, look at existing Sounio code in the repository.**
-The compiler is self-hosted, so all `.sio` files are REAL Sounio.
+**Sounio ≠ Rust. When in doubt, check `tests/run-pass/` for verified examples.**
