@@ -32,14 +32,14 @@ var TK_COUNT: i64 = 0
 var POOL: [i8; 524288] = [0; 524288]
 var POOL_POS: i64 = 0
 
-var ND_KIND: [i64; 65536] = [0; 65536]
-var ND_IVAL: [i64; 65536] = [0; 65536]
-var ND_LEFT: [i64; 65536] = [-1; 65536]
-var ND_RIGHT: [i64; 65536] = [-1; 65536]
-var ND_EXTRA: [i64; 65536] = [-1; 65536]
-var ND_EXTRA2: [i64; 65536] = [-1; 65536]
-var ND_STR_OFF: [i64; 65536] = [0; 65536]
-var ND_STR_LEN: [i64; 65536] = [0; 65536]
+var ND_KIND: [i64; 131072] = [0; 131072]
+var ND_IVAL: [i64; 131072] = [0; 131072]
+var ND_LEFT: [i64; 131072] = [-1; 131072]
+var ND_RIGHT: [i64; 131072] = [-1; 131072]
+var ND_EXTRA: [i64; 131072] = [-1; 131072]
+var ND_EXTRA2: [i64; 131072] = [-1; 131072]
+var ND_STR_OFF: [i64; 131072] = [0; 131072]
+var ND_STR_LEN: [i64; 131072] = [0; 131072]
 var ND_COUNT: i64 = 0
 
 var FN_NAME_OFF: [i64; 2048] = [0; 2048]
@@ -70,6 +70,7 @@ var CODE_LEN: i64 = 0
 var PRINT_INT_OFF: i64 = 0
 
 var FN_CODE_OFF: [i64; 2048] = [0; 2048]
+var FN_IMPL_SI: [i64; 2048] = [-1; 2048]
 
 var FIX_OFF: [i64; 8192] = [0; 8192]
 var FIX_TARGET: [i64; 8192] = [0; 8192]
@@ -452,7 +453,7 @@ fn expect(kind: i64) with Mut, Panic {
 
 fn new_node(kind: i64, ival: i64) -> i64 with Mut, Panic {
     let idx = ND_COUNT
-    if idx >= 65536 {
+    if idx >= 131072 {
         print("NODE OVERFLOW idx=")
         print_int(idx)
         print("\n")
@@ -554,9 +555,11 @@ fn skip_type_expr() with Mut, Panic, Div {
             while depth > 0 && cur_kind() != 0 {
                 if cur_kind() == 25 { depth = depth + 1 }
                 else if cur_kind() == 27 { depth = depth - 1 }
+                else if cur_kind() == 19 { depth = depth - 2 }  // '>>' lexed as SHR = two closing >
                 if depth > 0 { advance() }
             }
             if cur_kind() == 27 { advance() }
+            else if cur_kind() == 19 { advance() }  // consume '>>' as closing outer >
         }
     } else if cur_kind() == 2 {
         advance()
@@ -1106,6 +1109,47 @@ fn skip_braces() with Mut, Panic, Div {
     }
 }
 
+fn parse_impl_body() with Mut, Panic, Div {
+    // Get struct name from first identifier token
+    var si: i64 = -1
+    if cur_kind() == 1 {
+        let noff = tok_pool_off()
+        let nlen = tok_ident_len()
+        si = find_struct_b4(noff, nlen)
+        advance()
+    }
+    // Skip generics and 'for Type' clauses until we reach '{'
+    while cur_kind() != 33 && cur_kind() != 0 {
+        if cur_kind() == 25 {
+            advance()
+            var d: i64 = 1
+            while d > 0 && cur_kind() != 0 {
+                if cur_kind() == 25 { d = d + 1 }
+                else if cur_kind() == 27 { d = d - 1 }
+                else if cur_kind() == 19 { d = d - 2 }  // '>>' = two closing >
+                if d > 0 { advance() }
+            }
+            if cur_kind() == 27 { advance() }
+            else if cur_kind() == 19 { advance() }
+        } else {
+            advance()
+        }
+    }
+    if cur_kind() == 33 { advance() }
+    // Parse function definitions inside the impl block
+    while cur_kind() != 34 && cur_kind() != 0 {
+        if cur_kind() == 50 {
+            FN_IMPL_SI[FN_COUNT as usize] = si
+            parse_fn_def()
+        } else if cur_kind() == 33 {
+            skip_braces()
+        } else {
+            advance()
+        }
+    }
+    if cur_kind() == 34 { advance() }
+}
+
 fn skip_to_next_top_level() with Mut, Panic, Div {
     while cur_kind() != 0 && cur_kind() != 50 && cur_kind() != 58 && cur_kind() != 51 && cur_kind() != 52 && cur_kind() != 59 && cur_kind() != 60 {
         if cur_kind() == 33 {
@@ -1123,10 +1167,15 @@ fn parse_program() with Mut, Panic, Div {
             parse_fn_def()
         } else if k == 58 {
             parse_struct_decl()
-        } else if k == 59 || k == 60 {
+        } else if k == 59 {
+            // enum: skip entire declaration
             advance()
             if cur_kind() == 1 { advance() }
             skip_braces()
+        } else if k == 60 {
+            // impl: collect fn definitions inside
+            advance()
+            parse_impl_body()
         } else if k == 51 || k == 52 {
             while cur_kind() != 0 && cur_kind() != 50 && cur_kind() != 58 && cur_kind() != 59 && cur_kind() != 60 {
                 advance()
@@ -1455,7 +1504,7 @@ fn compile_node(node: i64) -> i64 with Mut, Panic, Div {
         emit_mov_rax_imm(0)
         return 0
     }
-    if node < 0 || node >= 65536 {
+    if node < 0 || node >= 131072 {
         print("BAD NODE node=")
         print_int(node)
         print("\n")
