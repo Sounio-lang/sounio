@@ -78,6 +78,11 @@ var FIX_OFF: [i64; 8192] = [0; 8192]
 var FIX_TARGET: [i64; 8192] = [0; 8192]
 var FIX_COUNT: i64 = 0
 
+// Sprint 229: LEA fixups for function references (fn as first-class value)
+var FN_LEA_FIX_OFF: [i64; 256] = [0; 256]
+var FN_LEA_FIX_TARGET: [i64; 256] = [0; 256]
+var FN_LEA_FIX_COUNT: i64 = 0
+
 var POS: i64 = 0
 var LOOP_TOP: i64 = 0
 var BREAK_FIXUP_OFF: [i64; 64] = [0; 64]
@@ -101,6 +106,7 @@ var ST_COUNT: i64 = 0
 var FLD_NAME_OFF: [i64; 8192] = [0; 8192]
 var FLD_NAME_LEN: [i64; 8192] = [0; 8192]
 var FLD_TYPE_SI: [i64; 8192] = [-1; 8192]       // struct type index for each field (-1 if scalar)
+var FLD_SLOT_COUNT: [i64; 8192] = [1; 8192]     // number of 8-byte slots per field (default 1)
 var FLD_COUNT: i64 = 0
 
 var FN_PARAM_TYPE_SI: [i64; 16384] = [-1; 16384] // struct type index for each fn param
@@ -570,12 +576,7 @@ fn struct_total_slots(si: i64) -> i64 with Mut, Panic, Div {
     var total: i64 = 0
     var i: i64 = 0
     while i < fc {
-        let ftype = FLD_TYPE_SI[(fi_base + i) as usize]
-        if ftype >= 0 {
-            total = total + struct_total_slots(ftype)
-        } else {
-            total = total + 1
-        }
+        total = total + FLD_SLOT_COUNT[(fi_base + i) as usize]
         i = i + 1
     }
     total
@@ -600,12 +601,7 @@ fn find_field_slot_offset(si: i64, fname_off: i64, fname_len: i64) -> i64 with M
                 return slot_off
             }
         }
-        let ftype = FLD_TYPE_SI[fj as usize]
-        if ftype >= 0 {
-            slot_off = slot_off + struct_total_slots(ftype)
-        } else {
-            slot_off = slot_off + 1
-        }
+        slot_off = slot_off + FLD_SLOT_COUNT[fj as usize]
         i = i + 1
     }
     LAST_FIELD_TYPE_SI = -1
@@ -636,6 +632,19 @@ fn skip_type_expr() with Mut, Panic, Div {
             if cur_kind() == 37 { advance() }
         }
         if cur_kind() == 32 { advance() }
+    } else if cur_kind() == 50 {
+        // Sprint 229: fn(T1, T2, ...) -> U  function type
+        advance()
+        if cur_kind() == 31 {
+            advance()
+            while cur_kind() != 32 && cur_kind() != 0 {
+                skip_type_expr()
+                if cur_kind() == 37 { advance() }
+            }
+            if cur_kind() == 32 { advance() }
+        }
+        // -> ReturnType
+        if cur_kind() == 42 { advance(); skip_type_expr() }
     } else if cur_kind() == 1 || cur_kind() >= 50 {
         advance()
         // Consume :: path extensions (e.g. TokenKind::Eof, std::vec::Vec)
@@ -1226,16 +1235,60 @@ fn parse_struct_decl() with Mut, Panic, Div {
             fc = fc + 1
             advance()
             var fld_si: i64 = -1
+            var fld_slots: i64 = 1
             if cur_kind() == 38 {
                 advance()
-                if cur_kind() == 1 {
-                    let ftoff = tok_pool_off()
-                    let ftlen = tok_ident_len()
-                    fld_si = find_struct_b4(ftoff, ftlen)
+                if cur_kind() == 35 {
+                    // Array type: [elem; count]
+                    advance()
+                    // Read element type
+                    var elem_si: i64 = -1
+                    var elem_bytes: i64 = 8
+                    if cur_kind() == 1 {
+                        let etoff = tok_pool_off()
+                        let etlen = tok_ident_len()
+                        elem_si = find_struct_b4(etoff, etlen)
+                        if elem_si < 0 {
+                            // Check if i8/u8 (1 byte) or i16/u16 (2 bytes) etc.
+                            if etlen == 2 {
+                                let c0 = POOL[(etoff) as usize]
+                                let c1 = POOL[(etoff + 1) as usize]
+                                if c0 == 105 && c1 == 56 { elem_bytes = 1 }
+                                if c0 == 117 && c1 == 56 { elem_bytes = 1 }
+                            }
+                        }
+                    }
+                    skip_type_expr()
+                    // Now at ';'
+                    if cur_kind() == 39 { advance() }
+                    // Read array length
+                    var arr_len: i64 = 0
+                    if cur_kind() == 2 {
+                        arr_len = cur_ival()
+                        advance()
+                    }
+                    if cur_kind() == 36 { advance() }
+                    // Compute slot count
+                    if elem_si >= 0 {
+                        fld_slots = arr_len * struct_total_slots(elem_si)
+                    } else {
+                        fld_slots = (arr_len * elem_bytes + 7) / 8
+                    }
+                    if fld_slots < 1 { fld_slots = 1 }
+                } else {
+                    if cur_kind() == 1 {
+                        let ftoff = tok_pool_off()
+                        let ftlen = tok_ident_len()
+                        fld_si = find_struct_b4(ftoff, ftlen)
+                        if fld_si >= 0 {
+                            fld_slots = struct_total_slots(fld_si)
+                        }
+                    }
+                    skip_type_expr()
                 }
-                skip_type_expr()
             }
             FLD_TYPE_SI[(fi_base + fc - 1) as usize] = fld_si
+            FLD_SLOT_COUNT[(fi_base + fc - 1) as usize] = fld_slots
             if cur_kind() == 37 { advance() }
         } else {
             advance()
@@ -1864,7 +1917,19 @@ fn compile_node(node: i64) -> i64 with Mut, Panic, Div {
                     emit(0x48); emit(0x8B); emit(0x01)
                 }
             } else {
-                emit_mov_rax_imm(0)
+                // Sprint 229: Check if identifier is a function name (fn as first-class value)
+                let fn_idx = find_fn_by_name(voff, vlen)
+                if fn_idx >= 0 {
+                    // LEA rax, [RIP + disp32] — load function address
+                    emit(0x48); emit(0x8D); emit(0x05)
+                    let lea_fix_pos = CODE_LEN
+                    emit_u32(0)
+                    FN_LEA_FIX_OFF[FN_LEA_FIX_COUNT as usize] = lea_fix_pos
+                    FN_LEA_FIX_TARGET[FN_LEA_FIX_COUNT as usize] = fn_idx
+                    FN_LEA_FIX_COUNT = FN_LEA_FIX_COUNT + 1
+                } else {
+                    emit_mov_rax_imm(0)
+                }
             }
         }
         return 0
@@ -2387,13 +2452,25 @@ fn compile_node(node: i64) -> i64 with Mut, Panic, Div {
         }
 
         let fn_idx = find_fn_by_name(c_off, c_len)
-        emit(0xE8)
-        let fix_pos = CODE_LEN
-        emit_u32(0)
         if fn_idx >= 0 {
+            // Direct call — CALL rel32 with fixup
+            emit(0xE8)
+            let fix_pos = CODE_LEN
+            emit_u32(0)
             FIX_OFF[FIX_COUNT as usize] = fix_pos
             FIX_TARGET[FIX_COUNT as usize] = fn_idx
             FIX_COUNT = FIX_COUNT + 1
+        } else {
+            // Sprint 229: Indirect call — callee is a local variable holding fn pointer
+            let callee_slot = find_local(c_off, c_len)
+            if callee_slot >= 0 {
+                emit_load_rax(callee_slot)
+                emit(0xFF); emit(0xD0)  // CALL rax
+            } else {
+                // Unknown callee — emit NOP call
+                emit(0xE8)
+                emit_u32(0)
+            }
         }
         return 0
     }
@@ -2415,13 +2492,7 @@ fn compile_node(node: i64) -> i64 with Mut, Panic, Div {
                         let ssi = LAST_LOCAL_SI
                         if sslot >= 0 && ssi >= 0 {
                             let sfc = struct_total_slots(ssi)
-                            var srfi: i64 = 0
-                            while srfi < sfc {
-                                emit_load_rax(sslot + srfi)
-                                emit(0x48); emit(0xB9); emit_u64(0x700000 + srfi * 8)
-                                emit(0x48); emit(0x89); emit(0x01)
-                                srfi = srfi + 1
-                            }
+                            emit_stack_to_sret_copy(sslot, sfc)
                             emit_mov_rax_imm(0)
                             return 0
                         }
@@ -2446,7 +2517,23 @@ fn compile_node(node: i64) -> i64 with Mut, Panic, Div {
         let name_off = ND_STR_OFF[node as usize]
         let name_len = ND_STR_LEN[node as usize]
         let init = ND_LEFT[node as usize]
-        let struct_si = ND_IVAL[node as usize]
+        var struct_si = ND_IVAL[node as usize]
+        // Infer struct type from callee return type when no type annotation
+        if struct_si < 0 && init != -1 {
+            let init_nk_infer = ND_KIND[init as usize]
+            if init_nk_infer == 12 || init_nk_infer == 51 {
+                let callee_node = ND_LEFT[init as usize]
+                let call_off_infer = ND_STR_OFF[callee_node as usize]
+                let call_len_infer = ND_STR_LEN[callee_node as usize]
+                let call_fn_infer = find_fn_by_name(call_off_infer, call_len_infer)
+                if call_fn_infer >= 0 {
+                    let ret_si_infer = FN_RET_SI[call_fn_infer as usize]
+                    if ret_si_infer >= 0 {
+                        struct_si = ret_si_infer
+                    }
+                }
+            }
+        }
         if struct_si >= 0 && init != -1 && ND_KIND[init as usize] == 47 {
             let fc2 = struct_total_slots(struct_si)
             let bslot2 = add_local_struct(name_off, name_len, struct_si, fc2)
@@ -2536,13 +2623,7 @@ fn compile_node(node: i64) -> i64 with Mut, Panic, Div {
                     } else if init_nk3 == 12 || init_nk3 == 51 {
                         // Function call returning struct: callee writes to SRET_BUF; copy from there
                         compile_node(init)
-                        var sfi3: i64 = 0
-                        while sfi3 < fc3 {
-                            emit(0x48); emit(0xB9); emit_u64(0x700000 + sfi3 * 8)
-                            emit(0x48); emit(0x8B); emit(0x01)
-                            emit_store_rax(bslot3 + sfi3)
-                            sfi3 = sfi3 + 1
-                        }
+                        emit_sret_to_stack_copy(bslot3, fc3)
                     } else {
                         compile_node(init)
                         emit_store_rax(bslot3)
@@ -2570,13 +2651,7 @@ fn compile_node(node: i64) -> i64 with Mut, Panic, Div {
             if slot2 >= 0 && dst_si2 >= 0 && (rhs_nk2 == 12 || rhs_nk2 == 51) {
                 // Struct-returning call assigned to struct local — copy from SRET_BUF
                 let fc_asgn = struct_total_slots(dst_si2)
-                var afi2: i64 = 0
-                while afi2 < fc_asgn {
-                    emit(0x48); emit(0xB9); emit_u64(0x700000 + afi2 * 8)
-                    emit(0x48); emit(0x8B); emit(0x01)
-                    emit_store_rax(slot2 + afi2)
-                    afi2 = afi2 + 1
-                }
+                emit_sret_to_stack_copy(slot2, fc_asgn)
             } else if slot2 >= 0 {
                 emit_store_rax(slot2)
             } else {
@@ -2679,13 +2754,7 @@ fn compile_node(node: i64) -> i64 with Mut, Panic, Div {
                 let rv_si = LAST_LOCAL_SI
                 if rv_slot >= 0 && rv_si >= 0 {
                     let rv_fc = struct_total_slots(rv_si)
-                    var rfi: i64 = 0
-                    while rfi < rv_fc {
-                        emit_load_rax(rv_slot + rfi)
-                        emit(0x48); emit(0xB9); emit_u64(0x700000 + rfi * 8)
-                        emit(0x48); emit(0x89); emit(0x01)
-                        rfi = rfi + 1
-                    }
+                    emit_stack_to_sret_copy(rv_slot, rv_fc)
                     emit_mov_rax_imm(0)
                     emit_epilogue()
                     return 0
@@ -2922,6 +2991,44 @@ fn compile_node(node: i64) -> i64 with Mut, Panic, Div {
     0
 }
 
+// Emit a rep movsq copy from SRET_BUF (0x700000) to stack slot bslot, count qwords.
+fn emit_sret_to_stack_copy(bslot: i64, count: i64) with Mut, Panic, Div {
+    if count <= 64 {
+        var i: i64 = 0
+        while i < count {
+            emit(0x48); emit(0xB9); emit_u64(0x700000 + i * 8)
+            emit(0x48); emit(0x8B); emit(0x01)
+            emit_store_rax(bslot + i)
+            i = i + 1
+        }
+    } else {
+        emit(0x48); emit(0xBE); emit_u64(0x700000)
+        let dest_disp = 0 - ((bslot + 1) * 8)
+        emit(0x48); emit(0x8D); emit(0xBD); emit_u32(dest_disp)
+        emit(0x48); emit(0xB9); emit_u64(count)
+        emit(0xF3); emit(0x48); emit(0xA5)
+    }
+}
+
+// Emit a rep movsq copy from stack slot bslot to SRET_BUF (0x700000), count qwords.
+fn emit_stack_to_sret_copy(bslot: i64, count: i64) with Mut, Panic, Div {
+    if count <= 64 {
+        var i: i64 = 0
+        while i < count {
+            emit_load_rax(bslot + i)
+            emit(0x48); emit(0xB9); emit_u64(0x700000 + i * 8)
+            emit(0x48); emit(0x89); emit(0x01)
+            i = i + 1
+        }
+    } else {
+        let src_disp = 0 - ((bslot + 1) * 8)
+        emit(0x48); emit(0x8D); emit(0xB5); emit_u32(src_disp)
+        emit(0x48); emit(0xBF); emit_u64(0x700000)
+        emit(0x48); emit(0xB9); emit_u64(count)
+        emit(0xF3); emit(0x48); emit(0xA5)
+    }
+}
+
 // Emit SRET stores from a NK_STRUCT_LIT node directly to SRET_BUF (0x700000 + fi*8).
 // Used for trailing struct literal expressions in struct-returning functions.
 fn compile_sret_from_struct_lit(node: i64, base_fi: i64) with Mut, Panic, Div {
@@ -3128,6 +3235,19 @@ fn patch_calls(trampoline_size: i64) with Mut, Panic, Div {
         CODE[(fix_off + 2) as usize] = ((rel >> 16) & 0xFF) as i8
         CODE[(fix_off + 3) as usize] = ((rel >> 24) & 0xFF) as i8
         i = i + 1
+    }
+    // Sprint 229: Patch LEA fixups for function references
+    var j: i64 = 0
+    while j < FN_LEA_FIX_COUNT {
+        let lea_off = FN_LEA_FIX_OFF[j as usize]
+        let lea_target = FN_LEA_FIX_TARGET[j as usize]
+        let target_code_off = FN_CODE_OFF[lea_target as usize]
+        let lea_rel = target_code_off - (lea_off + 4)
+        CODE[lea_off as usize] = (lea_rel & 0xFF) as i8
+        CODE[(lea_off + 1) as usize] = ((lea_rel >> 8) & 0xFF) as i8
+        CODE[(lea_off + 2) as usize] = ((lea_rel >> 16) & 0xFF) as i8
+        CODE[(lea_off + 3) as usize] = ((lea_rel >> 24) & 0xFF) as i8
+        j = j + 1
     }
 }
 

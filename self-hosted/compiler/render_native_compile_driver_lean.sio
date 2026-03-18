@@ -1879,6 +1879,18 @@ fn ast_compile_expr(code: CodeBuffer, expr: &Expr,
                 // Scalar global — load value
                 c = emit_global_scalar_read(c, gi)
             }
+        } else if slot <= -1000 {
+            // Sprint 229: Function name used as first-class value — emit LEA sentinel
+            // Pattern: 48 8D 05 <fn_idx_lo> <fn_idx_hi> DA BE (7 bytes)
+            // Patched in post-pass to LEA rax, [RIP+disp32] pointing to function
+            let fn_idx = 0 - (slot + 1000)
+            c = emit_byte(c, 0x48)                       // REX.W
+            c = emit_byte(c, 0x8D)                       // LEA
+            c = emit_byte(c, 0x05)                       // ModR/M: rax, [RIP+disp32]
+            c = emit_byte(c, fn_idx & 0xFF)              // fn_idx lo
+            c = emit_byte(c, (fn_idx >> 8) & 0xFF)       // fn_idx hi
+            c = emit_byte(c, 0xDA as i64)                // sentinel marker lo
+            c = emit_byte(c, 0xBE as i64)                // sentinel marker hi
         } else {
             c = emit_byte(c, 0x48); c = emit_byte(c, 0x31); c = emit_byte(c, 0xc0)
         }
@@ -2576,7 +2588,7 @@ fn ast_compile_expr(code: CodeBuffer, expr: &Expr,
                     c = emit_byte(c, 0x48); c = emit_byte(c, 0x89); c = emit_byte(c, 0xc7) // mov rdi, rax
                 }
             }
-            // Emit call sentinel
+            // Emit call sentinel or indirect call
             if fn_slot <= -1000 {
                 let target_idx = 0 - (fn_slot + 1000)
                 c = emit_byte(c, 0xe8)
@@ -2584,6 +2596,14 @@ fn ast_compile_expr(code: CodeBuffer, expr: &Expr,
                 c = emit_byte(c, (target_idx >> 8) & 0xFF)
                 c = emit_byte(c, 0xCA as i64)
                 c = emit_byte(c, 0xFE as i64)
+            } else if fn_slot >= 0 {
+                // Sprint 229: Indirect call — callee is a local variable holding fn pointer
+                // All SysV argument registers are already loaded above.
+                // Load the function pointer from the callee's stack slot into rax
+                c = micro_load_rax(c, fn_slot)
+                // CALL rax: FF D0
+                c = emit_byte(c, 0xFF as i64)
+                c = emit_byte(c, 0xD0 as i64)
             }
             // Clean up stack args
             if stack_count > 0 {
@@ -4873,6 +4893,30 @@ fn main() -> i64 with IO, Mut, Panic, Div, Alloc {
             }
         }
         pi = pi + 1
+    }
+
+    // Sprint 229: Patch LEA fn-ref sentinels in WIDE_OUT
+    // Scan for pattern: 0x48 0x8D 0x05 <fn_idx_lo> <fn_idx_hi> 0xDA 0xBE
+    var li: i64 = 0
+    while li < WIDE_LEN - 6 {
+        if WIDE_OUT[li as usize] == (0x48 as i8) &&
+           WIDE_OUT[(li + 1) as usize] == (0x8D as i8) &&
+           WIDE_OUT[(li + 2) as usize] == (0x05 as i8) &&
+           WIDE_OUT[(li + 5) as usize] == (0xDA as i8) &&
+           WIDE_OUT[(li + 6) as usize] == (0xBE as i8) {
+            let lea_lo = WIDE_OUT[(li + 3) as usize] as i64
+            let lea_hi = WIDE_OUT[(li + 4) as usize] as i64
+            let lea_fn_idx = (lea_lo & 0xFF) + ((lea_hi & 0xFF) << 8)
+            if lea_fn_idx >= 0 && lea_fn_idx < fn_count {
+                let lea_target = fn_offsets[lea_fn_idx as usize]
+                let lea_disp = lea_target - (li + 7)
+                WIDE_OUT[(li + 3) as usize] = (lea_disp & 0xFF) as i8
+                WIDE_OUT[(li + 4) as usize] = ((lea_disp >> 8) & 0xFF) as i8
+                WIDE_OUT[(li + 5) as usize] = ((lea_disp >> 16) & 0xFF) as i8
+                WIDE_OUT[(li + 6) as usize] = ((lea_disp >> 24) & 0xFF) as i8
+            }
+        }
+        li = li + 1
     }
 
     // Inline trampoline: save RSP to saved_rsp; call main; mov edi,eax; mov eax,60; syscall
