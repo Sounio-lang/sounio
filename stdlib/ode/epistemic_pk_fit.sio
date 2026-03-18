@@ -1,0 +1,332 @@
+// stdlib/ode/epistemic_pk_fit.sio — Closed-Form PK Parameter Inference with GUM Uncertainty
+//
+// 1-compartment pharmacokinetic model with first-order absorption (closed form):
+//   C(t) = (dose * ka) / (Vd * (ka - ke)) * (exp(-ke*t) - exp(-ka*t))
+//
+// Fitting uses Gauss-Newton nonlinear least squares with forward-mode AD
+// (EpistemicDual) for exact Jacobians. Parameter uncertainties come from
+// the Fisher information matrix (Type A GUM §5.1).
+//
+// References:
+//   JCGM 100:2008: "Evaluation of measurement data" (GUM)
+//   Rowland & Tozer (2011) "Clinical Pharmacokinetics" 5th ed. §2
+//   Nocedal & Wright (2006) "Numerical Optimization" §10.3
+
+use autodiff::epistemic_dual::{
+    EpistemicDual,
+    edual_new, edual_const,
+    edual_add, edual_sub, edual_mul, edual_div,
+    edual_scale, edual_exp,
+}
+
+// =============================================================================
+// Math helpers
+// =============================================================================
+
+fn pk_abs(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+fn pk_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i = 0
+    while i < 20 {
+        y = 0.5 * (y + x / y)
+        i = i + 1
+    }
+    y
+}
+
+// =============================================================================
+// Data types
+// =============================================================================
+
+pub struct PKFitResult {
+    ka: f64,
+    u_ka: f64,
+    ka_lo95: f64,
+    ka_hi95: f64,
+    ke: f64,
+    u_ke: f64,
+    ke_lo95: f64,
+    ke_hi95: f64,
+    rms_residual: f64,
+    sens_ka_pct: f64,
+    sens_ke_pct: f64,
+    converged: i32,
+    iterations: i32,
+}
+
+// =============================================================================
+// 1-compartment PK model with EpistemicDual parameters
+// =============================================================================
+//
+// C(t) = (dose * ka) / (Vd * (ka - ke)) * (exp(-ke*t) - exp(-ka*t))
+//
+// To get dC/dka: seed ka.dot=1.0, ke.dot=0.0
+// To get dC/dke: seed ka.dot=0.0, ke.dot=1.0
+// Output .dot is the requested partial derivative
+
+fn pk_conc_dual(t: f64, ka: EpistemicDual, ke: EpistemicDual,
+                dose: f64, vd: f64) -> EpistemicDual with Div, Panic {
+    // num = dose * ka
+    let num = edual_scale(ka, dose)
+    // denom = Vd * (ka - ke)
+    let denom = edual_scale(edual_sub(ka, ke), vd)
+    // factor = dose*ka / (Vd*(ka-ke))
+    let factor = edual_div(num, denom)
+    // Compute exp(-ke*t) = 1/exp(ke*t) to avoid Taylor series for negative args
+    let one = edual_const(1.0)
+    let exp_ke_pos = edual_exp(edual_scale(ke, t))
+    let exp_ka_pos = edual_exp(edual_scale(ka, t))
+    let exp_ke = edual_div(one, exp_ke_pos)
+    let exp_ka = edual_div(one, exp_ka_pos)
+    // C = factor * (exp(-ke*t) - exp(-ka*t))
+    edual_mul(factor, edual_sub(exp_ke, exp_ka))
+}
+
+// =============================================================================
+// Gauss-Newton fitting (6 observations, 2 parameters: ka, ke)
+// =============================================================================
+//
+// Normal equations (2x2):
+//   [A  B] [Δka]   [g1]
+//   [B  D] [Δke] = [g2]
+//
+// where A = Σ Jka²/σ², B = Σ Jka*Jke/σ², D = Σ Jke²/σ²
+//       g1 = Σ Jka*r/σ²,  g2 = Σ Jke*r/σ²,  r = C_pred - C_obs
+//
+// Analytical 2x2 inversion: det = A*D - B*B
+
+pub fn epistemic_pk_gauss_newton(
+    obs_t: [f64; 6],
+    obs_c: [f64; 6],
+    obs_u: [f64; 6],
+    dose: f64,
+    vd: f64,
+    ka_init: f64,
+    ke_init: f64,
+) -> PKFitResult with Mut, Div, Panic {
+    let k95 = 1.96
+    let max_iter = 50
+    let tol = 1.0e-7
+
+    var ka = ka_init
+    var ke = ke_init
+    var iter = 0
+    var converged = 0
+
+    while iter < max_iter {
+        // --- build normal matrix ---
+        var big_a: f64 = 0.0
+        var big_b: f64 = 0.0
+        var big_d: f64 = 0.0
+        var g1: f64 = 0.0
+        var g2: f64 = 0.0
+
+        var i = 0
+        while i < 6 {
+            let t = obs_t[i]
+            let c_obs = obs_c[i]
+            let sigma = obs_u[i]
+            let w = 1.0 / (sigma * sigma)
+
+            // J_ka = dC/dka  (seed ka.dot=1, ke.dot=0)
+            let ka_d_ka = edual_new(ka, 1.0, 0.0, 0.0)
+            let ke_d_ka = edual_new(ke, 0.0, 0.0, 0.0)
+            let c_for_ka = pk_conc_dual(t, ka_d_ka, ke_d_ka, dose, vd)
+            let j_ka = c_for_ka.dot
+            let c_pred = c_for_ka.val
+
+            // J_ke = dC/dke  (seed ka.dot=0, ke.dot=1)
+            let ka_d_ke = edual_new(ka, 0.0, 0.0, 0.0)
+            let ke_d_ke = edual_new(ke, 1.0, 0.0, 0.0)
+            let c_for_ke = pk_conc_dual(t, ka_d_ke, ke_d_ke, dose, vd)
+            let j_ke = c_for_ke.dot
+
+            let r = c_pred - c_obs
+
+            big_a = big_a + j_ka * j_ka * w
+            big_b = big_b + j_ka * j_ke * w
+            big_d = big_d + j_ke * j_ke * w
+            g1 = g1 + j_ka * r * w
+            g2 = g2 + j_ke * r * w
+
+            i = i + 1
+        }
+
+        // --- invert 2x2 and compute step ---
+        let det = big_a * big_d - big_b * big_b
+        if pk_abs(det) < 1.0e-15 {
+            // singular — stop
+            iter = max_iter
+        } else {
+            var d_ka = (0.0 - (big_d * g1 - big_b * g2)) / det
+            var d_ke = (0.0 - (0.0 - big_b * g1 + big_a * g2)) / det
+
+            // Trust region: cap step size to prevent divergence when far from solution
+            let step_raw = pk_abs(d_ka) + pk_abs(d_ke)
+            let max_step = 0.5
+            if step_raw > max_step {
+                let scale = max_step / step_raw
+                d_ka = d_ka * scale
+                d_ke = d_ke * scale
+            }
+
+            ka = ka + d_ka
+            ke = ke + d_ke
+
+            // guard: rates must be positive
+            if ka < 1.0e-4 { ka = 1.0e-4 }
+            if ke < 1.0e-4 { ke = 1.0e-4 }
+            // prevent ka == ke (formula singular); nudge ke slightly
+            if pk_abs(ka - ke) < 1.0e-4 { ke = ke + 0.01 }
+
+            let step_norm = pk_abs(d_ka) + pk_abs(d_ke)
+            if step_norm < tol {
+                converged = 1
+                iter = max_iter
+            }
+        }
+
+        iter = iter + 1
+    }
+
+    // --- compute residual RMS and final Jacobian at converged params ---
+    var sum_r2: f64 = 0.0
+    var fin_a: f64 = 0.0
+    var fin_b: f64 = 0.0
+    var fin_d: f64 = 0.0
+    var last_j_ka: f64 = 0.0
+    var last_j_ke: f64 = 0.0
+    var last_c_pred: f64 = 0.0
+
+    var j = 0
+    while j < 6 {
+        let t = obs_t[j]
+        let c_obs = obs_c[j]
+        let sigma = obs_u[j]
+        let w = 1.0 / (sigma * sigma)
+
+        let ka_d = edual_new(ka, 1.0, 0.0, 0.0)
+        let ke_d = edual_new(ke, 0.0, 0.0, 0.0)
+        let out_ka = pk_conc_dual(t, ka_d, ke_d, dose, vd)
+        let jka = out_ka.dot
+        let cpred = out_ka.val
+
+        let ka_d2 = edual_new(ka, 0.0, 0.0, 0.0)
+        let ke_d2 = edual_new(ke, 1.0, 0.0, 0.0)
+        let out_ke = pk_conc_dual(t, ka_d2, ke_d2, dose, vd)
+        let jke = out_ke.dot
+
+        let r = cpred - c_obs
+        sum_r2 = sum_r2 + r * r
+        fin_a = fin_a + jka * jka * w
+        fin_b = fin_b + jka * jke * w
+        fin_d = fin_d + jke * jke * w
+
+        last_j_ka = jka
+        last_j_ke = jke
+        last_c_pred = cpred
+
+        j = j + 1
+    }
+
+    let rms = pk_sqrt(sum_r2 / 6.0)
+
+    // --- parameter uncertainties from Fisher information (GUM Type A) ---
+    // σ²_fit = rms² (already per observation)
+    let sigma2_fit = rms * rms
+    let det_fin = fin_a * fin_d - fin_b * fin_b
+    var u_ka: f64 = 0.0
+    var u_ke: f64 = 0.0
+    if pk_abs(det_fin) > 1.0e-15 {
+        let cov_ka = fin_d / det_fin * sigma2_fit
+        let cov_ke = fin_a / det_fin * sigma2_fit
+        u_ka = pk_sqrt(pk_abs(cov_ka))
+        u_ke = pk_sqrt(pk_abs(cov_ke))
+    }
+
+    // --- sensitivity at last time point (t=12h, index 5) ---
+    // u²(C_pred) = Jka² * u²(ka) + Jke² * u²(ke)
+    let u2_c = last_j_ka * last_j_ka * u_ka * u_ka + last_j_ke * last_j_ke * u_ke * u_ke
+    var sens_ka: f64 = 50.0
+    var sens_ke: f64 = 50.0
+    if u2_c > 1.0e-30 {
+        sens_ka = last_j_ka * last_j_ka * u_ka * u_ka / u2_c * 100.0
+        sens_ke = last_j_ke * last_j_ke * u_ke * u_ke / u2_c * 100.0
+    }
+
+    PKFitResult {
+        ka: ka,
+        u_ka: u_ka,
+        ka_lo95: ka - k95 * u_ka,
+        ka_hi95: ka + k95 * u_ka,
+        ke: ke,
+        u_ke: u_ke,
+        ke_lo95: ke - k95 * u_ke,
+        ke_hi95: ke + k95 * u_ke,
+        rms_residual: rms,
+        sens_ka_pct: sens_ka,
+        sens_ke_pct: sens_ke,
+        converged: converged,
+        iterations: max_iter,
+    }
+}
+
+// =============================================================================
+// Tests
+// =============================================================================
+
+fn test_pk_conc_dual() with Div, Panic {
+    // At t=2h, ka=0.5, ke=0.2, dose=100, Vd=10:
+    // C = (100*0.5)/(10*(0.5-0.2)) * (exp(-0.4) - exp(-1.0))
+    //   = 50/3 * (0.6703 - 0.3679) = 16.667 * 0.3024 ≈ 5.04 mg/L
+    let ka = edual_new(0.5, 1.0, 0.0, 0.0)
+    let ke = edual_new(0.2, 0.0, 0.0, 0.0)
+    let c = pk_conc_dual(2.0, ka, ke, 100.0, 10.0)
+    assert(c.val > 4.5 && c.val < 5.5)
+    // Jacobian dC/dka should be nonzero
+    assert(pk_abs(c.dot) > 0.1)
+}
+
+fn test_pk_gauss_newton_converges() with Mut, Div, Panic {
+    // True params: ka=0.5, ke=0.2, Vd=10, dose=100
+    // Exact formula values with alternating ±5% noise:
+    // C(0.5)=2.101 +5%→2.206  C(1.0)=3.537 -5%→3.360
+    // C(2.0)=5.041 +5%→5.293  C(4.0)=5.233 -5%→4.971
+    // C(8.0)=3.060 +5%→3.213  C(12.0)=1.465 -5%→1.392
+    let obs_t: [f64; 6] = [0.5, 1.0, 2.0, 4.0, 8.0, 12.0]
+    let obs_c: [f64; 6] = [2.206, 3.360, 5.293, 4.971, 3.213, 1.392]
+    let obs_u: [f64; 6] = [0.110, 0.177, 0.252, 0.261, 0.153, 0.073]
+
+    let result = epistemic_pk_gauss_newton(
+        obs_t, obs_c, obs_u,
+        100.0, 10.0,
+        0.6, 0.25,   // initial guesses (1.2x true values)
+    )
+
+    // Convergence
+    assert(result.converged == 1)
+
+    // Parameter recovery within 20% relative error
+    let ka_err = pk_abs(result.ka - 0.5) / 0.5
+    let ke_err = pk_abs(result.ke - 0.2) / 0.2
+    assert(ka_err < 0.20)
+    assert(ke_err < 0.20)
+
+    // Fitted params within 3σ of true values
+    assert(pk_abs(result.ka - 0.5) < 3.0 * result.u_ka + 0.01)
+    assert(pk_abs(result.ke - 0.2) < 3.0 * result.u_ke + 0.01)
+
+    // Sensitivities sum to ~100%
+    let sens_sum = result.sens_ka_pct + result.sens_ke_pct
+    assert(sens_sum > 95.0 && sens_sum < 105.0)
+}
+
+pub fn main() with IO, Mut, Div, Panic {
+    test_pk_conc_dual()
+    test_pk_gauss_newton_converges()
+    println("PASS: epistemic PK fitting")
+}

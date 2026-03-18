@@ -1,0 +1,120 @@
+//@ run-pass
+// tests/stdlib/ode/test_epistemic_pk_fit_e2e.sio
+//
+// End-to-end validation of epistemic pharmacokinetic parameter inference.
+// Synthetic data generated from true params (ka=0.5, ke=0.2, Vd=10, dose=100)
+// with 5% additive noise. Verifies:
+//   - Parameter recovery within 15% relative error
+//   - 95% CI covers true values
+//   - Sensitivities sum to ~100%
+//   - GUM-compliant uncertainty reported
+
+use ode::epistemic_pk_fit::{
+    PKFitResult,
+    epistemic_pk_gauss_newton,
+}
+
+fn abs_pk(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+fn test_parameter_recovery() with IO, Mut, Div, Panic {
+    // True: ka=0.500 h⁻¹, ke=0.200 h⁻¹, Vd=10 L, dose=100 mg
+    // Observed at t = {0.5, 1.0, 2.0, 4.0, 8.0, 12.0} h
+    // Exact formula values with ±5% noise applied alternately:
+    //   C(0.5) =2.101 +5%→2.206   C(1.0) =3.537 -5%→3.360
+    //   C(2.0) =5.041 +5%→5.293   C(4.0) =5.233 -5%→4.971
+    //   C(8.0) =3.060 +5%→3.213   C(12.0)=1.465 -5%→1.392
+    let obs_t: [f64; 6] = [0.5, 1.0, 2.0, 4.0, 8.0, 12.0]
+    let obs_c: [f64; 6] = [2.206, 3.360, 5.293, 4.971, 3.213, 1.392]
+    let obs_u: [f64; 6] = [0.110, 0.177, 0.252, 0.261, 0.153, 0.073]
+
+    println("=== Epistemic PK Parameter Inference ===")
+    println("Observations: 6 time points, 5% noise")
+    println("True params:  ka=0.500, ke=0.200")
+    println("")
+
+    let result = epistemic_pk_gauss_newton(
+        obs_t, obs_c, obs_u,
+        100.0, 10.0,
+        0.6, 0.25,    // initial guesses: 1.2x true values
+    )
+
+    println("Fitted results:")
+    println("  ka =")
+    println(result.ka)
+    println("  +/-")
+    println(result.u_ka)
+    println("  95% CI: [")
+    println(result.ka_lo95)
+    println(",")
+    println(result.ka_hi95)
+    println("]")
+    println("  ke =")
+    println(result.ke)
+    println("  +/-")
+    println(result.u_ke)
+    println("  95% CI: [")
+    println(result.ke_lo95)
+    println(",")
+    println(result.ke_hi95)
+    println("]")
+    println("")
+    println("Sensitivity at t=12h:")
+    println("  ka explains")
+    println(result.sens_ka_pct)
+    println("% of output uncertainty")
+    println("  ke explains")
+    println(result.sens_ke_pct)
+    println("% of output uncertainty")
+    println("")
+
+    // --- assertions ---
+    assert(result.converged == 1)
+
+    // Parameter recovery within 15% relative error
+    let ka_err = abs_pk(result.ka - 0.5) / 0.5
+    let ke_err = abs_pk(result.ke - 0.2) / 0.2
+    assert(ka_err < 0.15)
+    assert(ke_err < 0.15)
+
+    // Fitted params within 3σ of true values (GUM-compliant check)
+    assert(abs_pk(result.ka - 0.5) < 3.0 * result.u_ka + 0.01)
+    assert(abs_pk(result.ke - 0.2) < 3.0 * result.u_ke + 0.01)
+
+    // Sensitivities sum to ~100%
+    let sens_sum = result.sens_ka_pct + result.sens_ke_pct
+    assert(sens_sum > 95.0 && sens_sum < 105.0)
+
+    // Uncertainties are positive
+    assert(result.u_ka > 0.0)
+    assert(result.u_ke > 0.0)
+    assert(result.rms_residual > 0.0)
+
+    println("PASS: epistemic PK fitting e2e")
+}
+
+fn test_uncertainty_ordering() with IO, Mut, Div, Panic {
+    // More noise → larger uncertainty
+    let obs_t: [f64; 6] = [0.5, 1.0, 2.0, 4.0, 8.0, 12.0]
+    let obs_c: [f64; 6] = [2.101, 3.537, 5.041, 5.233, 3.060, 1.465]
+
+    // Low noise version
+    let obs_u_low: [f64; 6] = [0.03, 0.05, 0.05, 0.04, 0.02, 0.01]
+    let r_low = epistemic_pk_gauss_newton(obs_t, obs_c, obs_u_low, 100.0, 10.0, 0.5, 0.2)
+
+    // High noise version
+    let obs_u_high: [f64; 6] = [0.30, 0.50, 0.50, 0.40, 0.20, 0.10]
+    let r_high = epistemic_pk_gauss_newton(obs_t, obs_c, obs_u_high, 100.0, 10.0, 0.5, 0.2)
+
+    // Higher measurement noise → larger parameter uncertainty
+    assert(r_high.u_ka > r_low.u_ka)
+    assert(r_high.u_ke > r_low.u_ke)
+
+    println("PASS: uncertainty ordering")
+}
+
+pub fn main() with IO, Mut, Div, Panic {
+    test_parameter_recovery()
+    test_uncertainty_ordering()
+}
