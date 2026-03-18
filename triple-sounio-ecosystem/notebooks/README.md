@@ -1,0 +1,215 @@
+# Sounio Epistemic Computing Notebooks
+
+Jupyter notebooks demonstrating epistemic computing workflows with Sounio's Knowledge class and uncertainty propagation via GUM (Guide to the Expression of Uncertainty in Measurement).
+
+## Notebooks
+
+### 01_getting_started.ipynb
+**Foundations of epistemic computing**
+
+- Creating `Knowledge` objects with central value, standard uncertainty, and provenance
+- GUM arithmetic: uncertainty propagation through addition, subtraction, multiplication, division
+- Relative uncertainty calculation and confidence metrics
+- Reliability assessment with threshold-based filtering
+- Serialization to/from Sounio canonical format and JSON
+
+**Key concepts:**
+- Knowledge(value, epsilon, provenance)
+- relative_uncertainty = epsilon / |value|
+- is_reliable(threshold) for quality control
+- Provenance chains track calculation history
+
+---
+
+### 02_plotting_demo.ipynb
+**Visualization of epistemic data**
+
+- Bar charts with error bars for parameter comparison
+- Concentration-time profiles with uncertainty bands (fill_between)
+- Heatmaps showing measurement quality across conditions
+- Saving figures in publication-ready formats (PNG, PDF)
+
+**Requires:** matplotlib, numpy (gracefully skipped if unavailable)
+
+**Key visualization patterns:**
+- ax.bar() with yerr parameter
+- ax.fill_between() for 95% confidence intervals
+- Heatmaps with relative uncertainty values
+
+---
+
+### 03_drug_discovery_pipeline.ipynb
+**End-to-end pipeline: screening → fitting → simulation → reporting**
+
+**Part 1: Molecular Screening**
+- Lipinski's Rule of Five filtering
+- 4 candidate compounds evaluated
+
+**Part 2: Pharmacokinetic Fitting**
+- 1-compartment PK model with uncertainty
+- Clearance, Volume of Distribution, Half-life, Bioavailability
+- NCA (non-compartmental analysis) provenance
+
+**Part 3: Virtual Population Simulation**
+- N=5000 virtual patients
+- Efficacy rate, adverse rate, therapeutic index
+- Uncertainty propagation through PK/PD links
+
+**Part 4: Report Generation**
+- ReportBuilder integration
+- Markdown report with all tables and results
+- Provenance chain: screening → fitting → simulation → lead selection
+
+---
+
+### 04_clinical_data.ipynb
+**SDTM integration and real-world clinical data**
+
+**Part 1: SDTM Domain Overview**
+- DM (Demographics): subject characteristics
+- EX (Exposure): drug dosing
+- PC (Pharmacokinetics): concentration measurements
+- Standard clinical trial data structure
+
+**Part 2: Epistemic Enhancement**
+- Weight measurements with scale calibration uncertainty (5% CV)
+- Concentration measurements with HPLC assay uncertainty (8% CV)
+- Measurement metadata preserved in Knowledge provenance
+
+**Part 3: Derived Metrics**
+- BMI = weight / height² with full uncertainty propagation
+- Dose normalization (dose/kg) showing relative uncertainty reduction
+- GUM arithmetic through multi-step calculations
+
+**Part 4: Population Statistics**
+- Mean weight with proper error combination
+- Dose-normalized values per subject
+- Quality assessment: reliable vs. flagged measurements
+
+**Part 5: Measurement Quality**
+- Assessment thresholds (10% for concentrations, 8% for weights)
+- Flagging unreliable data for downstream review
+- Quality rate reporting
+
+---
+
+## Installation & Usage
+
+### Prerequisites
+```bash
+# Core requirements
+python3 -m pip install --user pandas
+
+# Optional visualization
+python3 -m pip install --user matplotlib numpy
+
+# Jupyter
+python3 -m pip install --user jupyter
+```
+
+### Run notebooks
+```bash
+cd /home/demetrios/RustroverProjects/sounio/triple-sounio-ecosystem
+jupyter notebook notebooks/
+```
+
+### Or run in VS Code
+- Install Jupyter extension
+- Open any `.ipynb` file
+- Cells execute with Python kernel
+
+---
+
+## Key Concepts
+
+### Knowledge Objects
+```python
+from sounio.knowledge import Knowledge
+
+# Create with uncertainty and provenance
+k = Knowledge(500.0, 2.5, "calibration_batch_2026")
+# value = 500.0
+# epsilon = 2.5 (standard deviation, k=1)
+# provenance = "calibration_batch_2026"
+
+# Derived properties
+k.relative_uncertainty  # 0.005 (0.5%)
+k.confidence            # 0.995 (99.5%)
+k.is_reliable(0.05)     # True if rel_unc < 5%
+```
+
+### GUM Arithmetic
+```python
+a = Knowledge(10.0, 0.5, "A")
+b = Knowledge(20.0, 1.0, "B")
+
+# Addition/subtraction: ε = sqrt(εa² + εb²)
+c = a + b  # 30.0 ± sqrt(0.5² + 1.0²) ≈ 30.0 ± 1.118
+
+# Multiplication/division: relative uncertainties combine
+d = a / b  # (10/20) = 0.5, ε_rel = sqrt((0.05)² + (0.05)²) ≈ 7%
+
+# Provenance preserved
+print(c.provenance)  # "(A)+(B)"
+```
+
+### ReportBuilder
+```python
+from sounio.report import ReportBuilder
+
+rb = ReportBuilder("My Report", author="Jane Doe", date="2026-03-18")
+
+# Add content
+rb.add_section("Methods", "Description of methods...")
+rb.add_knowledge_table("Parameters", {"Param1": k1, "Param2": k2})
+rb.add_figure("Profile", "path/to/figure.png", "Caption text")
+rb.add_pipeline_summary(pipeline_result)
+
+# Export
+rb.save("report.md", format="markdown")
+rb.save("report.tex", format="latex")
+```
+
+---
+
+## Files Generated by Notebooks
+
+- `drug_discovery_report.md` — Full pipeline report (notebook 03)
+- `measurement_comparison.png` — Bar chart example (notebook 02)
+
+---
+
+## References
+
+- **GUM**: [JCGM 100:2008](https://www.bipm.org/en/publications/guides/gum.html) — Guide to the Expression of Uncertainty in Measurement
+- **Sounio**: [CLAUDE.md](../CLAUDE.md) in repository root
+- **SDTM**: [FDA Guidance](https://www.fda.gov/regulatory-information/search-fda-guidance-documents/study-data-standardization-and-submission)
+
+---
+
+## Troubleshooting
+
+**ImportError: No module named 'sounio'**
+```bash
+cd /home/demetrios/RustroverProjects/sounio/triple-sounio-ecosystem
+# Notebooks add this automatically:
+# import sys
+# sys.path.insert(0, '../sounio-py/python')
+```
+
+**matplotlib not installed**
+- Notebooks handle this gracefully
+- Cell executes but shows code rather than plots
+- Install: `pip install matplotlib numpy`
+
+**Notebook cells frozen**
+- Restart kernel: Kernel → Restart Kernel
+- Or: Ctrl+M, then I twice (in command mode)
+
+---
+
+## Extended Reading
+
+See `../sounio-py/python/sounio/report.py` for complete ReportBuilder API documentation.
+
+See `../sounio-py/python/sounio/knowledge.py` for Knowledge class implementation.
