@@ -1,69 +1,173 @@
 //@ run-pass
-// E2E test for stdlib/nn/dense
-// Tests dense layer construction, forward pass, gradients, and loss.
+//! tests/stdlib/nn/test_dense_e2e.sio
+//!
+//! E2E tests for nn::dense — 1-input/1-output dense layer with autograd tape.
 
-use nn::dense::*
+use nn::dense::{
+    DenseLayer, Tape,
+    dense_new, dense_forward, dense_output,
+    dense_grad_w, dense_grad_b, dense_grad_x,
+    dense_update, mse_loss, mse_loss_grad,
+    backward,
+}
+use test::helpers::check_near
 
-fn check_near(a: f64, b: f64, tol: f64) -> bool {
-    let d = a - b
-    let ad = if d < 0.0 { 0.0 - d } else { d }
-    return ad < tol
+// ============================================================================
+// Forward pass
+// ============================================================================
+
+fn test_dense_zero_weights_sigmoid_half() with Mut, Div, Panic {
+    // w=0, b=0, x=1 → sigmoid(0) = 0.5
+    let layer = dense_new(0.0, 0.0)
+    let tape = dense_forward(layer, 1.0)
+    assert(check_near(dense_output(tape), 0.5, 1e-4))
 }
 
-fn run_tests() -> i32 {
-    var pass = 0
-    var fail = 0
+fn test_dense_zero_input_sigmoid_half() with Mut, Div, Panic {
+    // w=1, b=0, x=0 → sigmoid(0) = 0.5
+    let layer = dense_new(1.0, 0.0)
+    let tape = dense_forward(layer, 0.0)
+    assert(check_near(dense_output(tape), 0.5, 1e-4))
+}
 
-    let layer1 = dense_new(0.0, 0.0)
-    let tape1 = dense_forward(layer1, 1.0)
-    let out1 = dense_output(tape1)
-    if check_near(out1, 0.5, 0.001) {
-        pass = pass + 1
-    } else {
-        fail = fail + 1
-    }
+fn test_dense_large_input_near_one() with Mut, Div, Panic {
+    // w=1, b=0, x=10 → sigmoid(10) > 0.99
+    let layer = dense_new(1.0, 0.0)
+    let tape = dense_forward(layer, 10.0)
+    assert(dense_output(tape) > 0.99)
+}
 
-    let layer2 = dense_new(1.0, 0.0)
-    let tape2 = dense_forward(layer2, 0.0)
-    let out2 = dense_output(tape2)
-    if check_near(out2, 0.5, 0.001) {
-        pass = pass + 1
-    } else {
-        fail = fail + 1
-    }
+fn test_dense_large_neg_input_near_zero() with Mut, Div, Panic {
+    // w=1, b=0, x=-10 → sigmoid(-10) < 0.01
+    let layer = dense_new(1.0, 0.0)
+    let tape = dense_forward(layer, 0.0 - 10.0)
+    assert(dense_output(tape) < 0.01)
+}
 
-    let layer3 = dense_new(1.0, 0.0)
-    let tape3 = dense_forward(layer3, 10.0)
-    let out3 = dense_output(tape3)
-    if out3 > 0.99 {
-        pass = pass + 1
-    } else {
-        fail = fail + 1
-    }
+fn test_dense_output_in_unit_interval() with Mut, Div, Panic {
+    // sigmoid is always in (0, 1)
+    let layer = dense_new(0.5, 0.1)
+    let tape = dense_forward(layer, 2.0)
+    let out = dense_output(tape)
+    assert(out > 0.0)
+    assert(out < 1.0)
+}
 
-    let layer4 = dense_new(0.5, 0.1)
-    let tape4 = dense_forward(layer4, 2.0)
-    let tape4b = backward(tape4, 5)
-    let gw = dense_grad_w(tape4b)
-    let gb = dense_grad_b(tape4b)
+fn test_dense_bias_shifts_output() with Mut, Div, Panic {
+    // Positive bias shifts output above 0.5 for zero input
+    let layer_pos = dense_new(0.0, 1.0)
+    let tape_pos = dense_forward(layer_pos, 0.0)
+    assert(dense_output(tape_pos) > 0.5)
+    // Negative bias shifts output below 0.5 for zero input
+    let layer_neg = dense_new(0.0, 0.0 - 1.0)
+    let tape_neg = dense_forward(layer_neg, 0.0)
+    assert(dense_output(tape_neg) < 0.5)
+}
+
+// ============================================================================
+// Backward pass — gradients
+// ============================================================================
+
+fn test_dense_backward_grad_nonzero() with Mut, Div, Panic {
+    // After backward, dL/dw and dL/db should be nonzero
+    let layer = dense_new(0.5, 0.1)
+    let tape = dense_forward(layer, 2.0)
+    let tape_b = backward(tape, 5)
+    let gw = dense_grad_w(tape_b)
+    let gb = dense_grad_b(tape_b)
     let gw_abs = if gw < 0.0 { 0.0 - gw } else { gw }
     let gb_abs = if gb < 0.0 { 0.0 - gb } else { gb }
-    if gw_abs > 0.001 && gb_abs > 0.001 {
-        pass = pass + 1
-    } else {
-        fail = fail + 1
-    }
-
-    if check_near(mse_loss(0.5, 0.5), 0.0, 0.0001) {
-        pass = pass + 1
-    } else {
-        fail = fail + 1
-    }
-
-    if fail > 0 { return 1 }
-    return 0
+    assert(gw_abs > 0.001)
+    assert(gb_abs > 0.001)
 }
 
-fn main() -> i32 {
-    return run_tests()
+fn test_dense_backward_gw_gt_gb() with Mut, Div, Panic {
+    // For w=0.5, b=0.1, x=2: gw = x * d_sigmoid, gb = d_sigmoid
+    // gw = gb * x = gb * 2 => gw > gb
+    let layer = dense_new(0.5, 0.1)
+    let tape = dense_forward(layer, 2.0)
+    let tape_b = backward(tape, 5)
+    let gw = dense_grad_w(tape_b)
+    let gb = dense_grad_b(tape_b)
+    let gw_abs = if gw < 0.0 { 0.0 - gw } else { gw }
+    let gb_abs = if gb < 0.0 { 0.0 - gb } else { gb }
+    assert(gw_abs > gb_abs)
+}
+
+fn test_dense_backward_symmetry_zero_weight() with Mut, Div, Panic {
+    // At w=0, b=0: sigmoid'(0) = 0.25; gw = 0.25 * x, gb = 0.25
+    let layer = dense_new(0.0, 0.0)
+    let tape = dense_forward(layer, 4.0)
+    let tape_b = backward(tape, 5)
+    let gw = dense_grad_w(tape_b)
+    let gb = dense_grad_b(tape_b)
+    // gw = 0.25 * 4.0 = 1.0, gb = 0.25
+    assert(check_near(gw, 1.0, 0.01))
+    assert(check_near(gb, 0.25, 0.01))
+}
+
+// ============================================================================
+// Weight update
+// ============================================================================
+
+fn test_dense_update_decreases_weight() with Mut, Div, Panic {
+    // Positive gradient with positive lr → weight decreases
+    let layer = dense_new(1.0, 0.5)
+    let updated = dense_update(layer, 0.1, 0.05, 0.1)
+    // weight = 1.0 - 0.1*0.1 = 0.99
+    assert(check_near(updated.weight, 0.99, 1e-9))
+    // bias = 0.5 - 0.1*0.05 = 0.495
+    assert(check_near(updated.bias, 0.495, 1e-9))
+}
+
+fn test_dense_update_zero_grad() with Mut, Div, Panic {
+    // Zero gradient → no change
+    let layer = dense_new(2.0, 3.0)
+    let updated = dense_update(layer, 0.0, 0.0, 0.01)
+    assert(check_near(updated.weight, 2.0, 1e-9))
+    assert(check_near(updated.bias, 3.0, 1e-9))
+}
+
+// ============================================================================
+// Loss function
+// ============================================================================
+
+fn test_mse_loss_zero() with Mut, Div, Panic {
+    assert(check_near(mse_loss(0.5, 0.5), 0.0, 1e-9))
+}
+
+fn test_mse_loss_positive() with Mut, Div, Panic {
+    // (0.7 - 0.5)^2 = 0.04
+    assert(check_near(mse_loss(0.7, 0.5), 0.04, 1e-9))
+}
+
+fn test_mse_loss_grad() with Mut, Div, Panic {
+    // 2 * (0.7 - 0.5) = 0.4
+    assert(check_near(mse_loss_grad(0.7, 0.5), 0.4, 1e-9))
+}
+
+fn test_mse_loss_grad_zero() with Mut, Div, Panic {
+    assert(check_near(mse_loss_grad(0.5, 0.5), 0.0, 1e-9))
+}
+
+// ============================================================================
+// Main
+// ============================================================================
+
+pub fn main() with Mut, Div, Panic {
+    test_dense_zero_weights_sigmoid_half()
+    test_dense_zero_input_sigmoid_half()
+    test_dense_large_input_near_one()
+    test_dense_large_neg_input_near_zero()
+    test_dense_output_in_unit_interval()
+    test_dense_bias_shifts_output()
+    test_dense_backward_grad_nonzero()
+    test_dense_backward_gw_gt_gb()
+    test_dense_backward_symmetry_zero_weight()
+    test_dense_update_decreases_weight()
+    test_dense_update_zero_grad()
+    test_mse_loss_zero()
+    test_mse_loss_positive()
+    test_mse_loss_grad()
+    test_mse_loss_grad_zero()
 }

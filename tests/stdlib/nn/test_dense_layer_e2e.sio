@@ -1,0 +1,192 @@
+//@ run-pass
+//! tests/stdlib/nn/test_dense_layer_e2e.sio
+//!
+//! E2E tests for nn::dense_layer — 4x4 dense layer with Vec4/Mat4x4 types.
+
+use nn::dense_layer::{
+    Vec4, Mat4x4, DenseLayer4, MLP_4_4_4,
+    vec4_new, vec4_zero, vec4_ones, vec4_add, vec4_scale, vec4_dot,
+    vec4_apply_activation,
+    mat4x4_identity, mat4x4_zeros, mat4x4_mul_vec,
+    dense_layer4_new, dense_layer4_identity, dense_layer4_forward,
+    mlp_4_4_4_new, mlp_4_4_4_forward,
+}
+use test::helpers::check_near
+
+// ============================================================================
+// Vec4 operations
+// ============================================================================
+
+fn test_vec4_zero() with Mut, Div, Panic {
+    let v = vec4_zero()
+    assert(check_near(v.v0, 0.0, 1e-9))
+    assert(check_near(v.v1, 0.0, 1e-9))
+    assert(check_near(v.v2, 0.0, 1e-9))
+    assert(check_near(v.v3, 0.0, 1e-9))
+}
+
+fn test_vec4_ones() with Mut, Div, Panic {
+    let v = vec4_ones()
+    assert(check_near(v.v0, 1.0, 1e-9))
+    assert(check_near(v.v3, 1.0, 1e-9))
+}
+
+fn test_vec4_new() with Mut, Div, Panic {
+    let v = vec4_new(1.0, 2.0, 3.0, 4.0)
+    assert(check_near(v.v0, 1.0, 1e-9))
+    assert(check_near(v.v1, 2.0, 1e-9))
+    assert(check_near(v.v2, 3.0, 1e-9))
+    assert(check_near(v.v3, 4.0, 1e-9))
+}
+
+fn test_vec4_add() with Mut, Div, Panic {
+    let a = vec4_new(1.0, 2.0, 3.0, 4.0)
+    let b = vec4_new(5.0, 6.0, 7.0, 8.0)
+    let c = vec4_add(a, b)
+    assert(check_near(c.v0, 6.0, 1e-9))
+    assert(check_near(c.v1, 8.0, 1e-9))
+    assert(check_near(c.v2, 10.0, 1e-9))
+    assert(check_near(c.v3, 12.0, 1e-9))
+}
+
+fn test_vec4_scale() with Mut, Div, Panic {
+    let v = vec4_new(1.0, 2.0, 3.0, 4.0)
+    let s = vec4_scale(v, 2.0)
+    assert(check_near(s.v0, 2.0, 1e-9))
+    assert(check_near(s.v3, 8.0, 1e-9))
+}
+
+fn test_vec4_dot() with Mut, Div, Panic {
+    // [1,2,3,4] · [1,0,0,0] = 1
+    let a = vec4_new(1.0, 2.0, 3.0, 4.0)
+    let b = vec4_new(1.0, 0.0, 0.0, 0.0)
+    assert(check_near(vec4_dot(a, b), 1.0, 1e-9))
+    // [1,2,3,4] · [1,1,1,1] = 10
+    let ones = vec4_ones()
+    assert(check_near(vec4_dot(a, ones), 10.0, 1e-9))
+}
+
+// ============================================================================
+// Activation functions via vec4_apply_activation
+// ============================================================================
+
+fn test_relu_positive() with Mut, Div, Panic {
+    // ReLU(1) = 1
+    let v = vec4_new(1.0, 2.0, 0.0 - 1.0, 0.0)
+    let out = vec4_apply_activation(v, 1)
+    assert(check_near(out.v0, 1.0, 1e-9))
+    assert(check_near(out.v1, 2.0, 1e-9))
+    assert(check_near(out.v2, 0.0, 1e-9))   // ReLU(-1) = 0
+}
+
+fn test_sigmoid_activation() with Mut, Div, Panic {
+    // Sigmoid(0) = 0.5
+    let v = vec4_new(0.0, 0.0, 0.0, 0.0)
+    let out = vec4_apply_activation(v, 2)
+    assert(check_near(out.v0, 0.5, 1e-4))
+}
+
+fn test_identity_activation() with Mut, Div, Panic {
+    let v = vec4_new(1.5, 2.5, 3.5, 4.5)
+    let out = vec4_apply_activation(v, 4)
+    assert(check_near(out.v0, 1.5, 1e-9))
+    assert(check_near(out.v3, 4.5, 1e-9))
+}
+
+// ============================================================================
+// Mat4x4 operations
+// ============================================================================
+
+fn test_mat4x4_identity_times_vec() with Mut, Div, Panic {
+    // I * v = v
+    let ident = mat4x4_identity()
+    let v = vec4_new(1.0, 2.0, 3.0, 4.0)
+    let out = mat4x4_mul_vec(ident, v)
+    assert(check_near(out.v0, 1.0, 1e-9))
+    assert(check_near(out.v1, 2.0, 1e-9))
+    assert(check_near(out.v2, 3.0, 1e-9))
+    assert(check_near(out.v3, 4.0, 1e-9))
+}
+
+fn test_mat4x4_zeros_times_vec() with Mut, Div, Panic {
+    // 0 * v = 0
+    let zeros = mat4x4_zeros()
+    let v = vec4_new(1.0, 2.0, 3.0, 4.0)
+    let out = mat4x4_mul_vec(zeros, v)
+    assert(check_near(out.v0, 0.0, 1e-9))
+    assert(check_near(out.v3, 0.0, 1e-9))
+}
+
+// ============================================================================
+// DenseLayer4 forward pass
+// ============================================================================
+
+fn test_identity_layer_passthrough() with Mut, Div, Panic {
+    // Identity weights + zero bias + identity activation → output = input
+    let layer = dense_layer4_identity()
+    let v = vec4_new(1.0, 2.0, 3.0, 4.0)
+    let out = dense_layer4_forward(layer, v)
+    assert(check_near(out.v0, 1.0, 1e-9))
+    assert(check_near(out.v1, 2.0, 1e-9))
+    assert(check_near(out.v2, 3.0, 1e-9))
+    assert(check_near(out.v3, 4.0, 1e-9))
+}
+
+fn test_sigmoid_layer_zero_input() with Mut, Div, Panic {
+    // Zero weights + zero bias + sigmoid → output = [0.5, 0.5, 0.5, 0.5]
+    let layer = dense_layer4_new(mat4x4_zeros(), vec4_zero(), 2)
+    let v = vec4_new(5.0, 5.0, 5.0, 5.0)
+    let out = dense_layer4_forward(layer, v)
+    assert(check_near(out.v0, 0.5, 1e-4))
+    assert(check_near(out.v3, 0.5, 1e-4))
+}
+
+// ============================================================================
+// MLP_4_4_4 two-layer forward
+// ============================================================================
+
+fn test_mlp_identity_layers() with Mut, Div, Panic {
+    // Two identity layers: output = input
+    let layer1 = dense_layer4_identity()
+    let layer2 = dense_layer4_identity()
+    let model = mlp_4_4_4_new(layer1, layer2)
+    let v = vec4_new(1.0, 2.0, 3.0, 4.0)
+    let out = mlp_4_4_4_forward(model, v)
+    assert(check_near(out.v0, 1.0, 1e-9))
+    assert(check_near(out.v3, 4.0, 1e-9))
+}
+
+fn test_mlp_relu_clamps_negatives() with Mut, Div, Panic {
+    // Layer1: identity (pass through negatives), Layer2: ReLU (clamp to 0)
+    let layer1 = dense_layer4_identity()
+    let layer2 = dense_layer4_new(mat4x4_identity(), vec4_zero(), 1)
+    let model = mlp_4_4_4_new(layer1, layer2)
+    let v = vec4_new(0.0 - 1.0, 2.0, 0.0 - 3.0, 4.0)
+    let out = mlp_4_4_4_forward(model, v)
+    assert(check_near(out.v0, 0.0, 1e-9))   // ReLU(-1) = 0
+    assert(check_near(out.v1, 2.0, 1e-9))
+    assert(check_near(out.v2, 0.0, 1e-9))   // ReLU(-3) = 0
+    assert(check_near(out.v3, 4.0, 1e-9))
+}
+
+// ============================================================================
+// Main
+// ============================================================================
+
+pub fn main() with Mut, Div, Panic {
+    test_vec4_zero()
+    test_vec4_ones()
+    test_vec4_new()
+    test_vec4_add()
+    test_vec4_scale()
+    test_vec4_dot()
+    test_relu_positive()
+    test_sigmoid_activation()
+    test_identity_activation()
+    test_mat4x4_identity_times_vec()
+    test_mat4x4_zeros_times_vec()
+    test_identity_layer_passthrough()
+    test_sigmoid_layer_zero_input()
+    test_mlp_identity_layers()
+    test_mlp_relu_clamps_negatives()
+}
