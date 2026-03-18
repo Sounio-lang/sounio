@@ -1,0 +1,307 @@
+//@ run-pass
+// tests/stdlib/neuro/test_neuro.sio
+// Test suite for stdlib/neuro/connectome.sio — ROI embedding pipeline
+//
+// Uses `use neuro::connectome::*` which pulls in:
+//   ROIFeatures, roi_features_zero, roi_to_sedenion
+//   connectome_embed_mean, connectome_embed_interaction
+//   connectome_to_features, connectome_to_features_interaction
+//   (transitively: math::sedenion64::*, fractal::*, etc.)
+//
+// Covers:
+//   T01 — roi_features_zero() initialises all 16 components to 0
+//   T02 — roi_to_sedenion() maps ROI data[0..15] to sedenion components
+//   T03 — roi_to_sedenion preserves components on a non-trivial ROI
+//   T04 — connectome_embed_mean with n_rois=0 returns zero sedenion
+//   T05 — connectome_embed_mean with n_rois=1 returns the single ROI sedenion
+//   T06 — connectome_embed_mean: e0 of mean equals mean of ROI data[0]
+//   T07 — connectome_embed_mean: mean of identical ROIs equals one ROI
+//   T08 — connectome_embed_interaction with n_edges=0 returns zero sedenion
+//   T09 — connectome_embed_interaction: single edge has non-zero result for non-zero ROIs
+//   T10 — connectome_embed_mean with 4 ROIs: scaling verified
+//   T11 — roi_features_zero: all 16 entries individually zero
+//   T12 — connectome_embed_mean: e0 non-zero when data[0] != 0
+//   T13 — connectome_embed_interaction edge i==j (self-loop): result equals sed64_mul
+//   T14 — fsnn_stat_mean via embedded orbit yields finite features (escape_ratio >= 0)
+//   T15 — connectome_to_features: features struct fields are accessible and >= 0
+
+use neuro::connectome::*
+use fractal::mandelbrot::{orbit_config_default}
+use fractal::fsnn::{fsnn_stat_mean}
+
+// ============================================================================
+// Helpers
+// ============================================================================
+
+fn abs_f(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+
+fn close(a: f64, b: f64, tol: f64) -> bool {
+    abs_f(a - b) < tol
+}
+
+fn make_roi(v0: f64, v1: f64) -> ROIFeatures {
+    var r = roi_features_zero()
+    r.data[0] = v0
+    r.data[1] = v1
+    r
+}
+
+fn make_unit_roi() -> ROIFeatures {
+    var r = roi_features_zero()
+    r.data[0] = 1.0
+    r.data[1] = 0.0
+    r.data[2] = 0.0
+    r.data[3] = 0.0
+    r.data[4] = 0.0
+    r.data[5] = 0.0
+    r.data[6] = 0.0
+    r.data[7] = 0.0
+    r.data[8] = 0.0
+    r.data[9] = 0.0
+    r.data[10] = 0.0
+    r.data[11] = 0.0
+    r.data[12] = 0.0
+    r.data[13] = 0.0
+    r.data[14] = 0.0
+    r.data[15] = 0.0
+    r
+}
+
+// ============================================================================
+// MAIN — run all tests
+// ============================================================================
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    var passed: i64 = 0
+    var failed: i64 = 0
+
+    // ------------------------------------------------------------------
+    // T01 — roi_features_zero() returns all-zero ROI
+    // ------------------------------------------------------------------
+    let rf0 = roi_features_zero()
+    if rf0.data[0] == 0.0 && rf0.data[15] == 0.0 {
+        passed = passed + 1
+    } else { failed = failed + 1 }
+
+    // ------------------------------------------------------------------
+    // T02 — roi_to_sedenion maps data[0] -> e0
+    // ------------------------------------------------------------------
+    var roi_a = roi_features_zero()
+    roi_a.data[0] = 3.14
+    let s_a = roi_to_sedenion(roi_a)
+    if close(s_a.e0, 3.14, 0.0001) {
+        passed = passed + 1
+    } else { failed = failed + 1 }
+
+    // ------------------------------------------------------------------
+    // T03 — roi_to_sedenion preserves all 16 components
+    // ------------------------------------------------------------------
+    var roi_b = roi_features_zero()
+    roi_b.data[0]  = 1.0
+    roi_b.data[1]  = 2.0
+    roi_b.data[2]  = 3.0
+    roi_b.data[3]  = 4.0
+    roi_b.data[4]  = 5.0
+    roi_b.data[5]  = 6.0
+    roi_b.data[6]  = 7.0
+    roi_b.data[7]  = 8.0
+    roi_b.data[8]  = 9.0
+    roi_b.data[9]  = 10.0
+    roi_b.data[10] = 11.0
+    roi_b.data[11] = 12.0
+    roi_b.data[12] = 13.0
+    roi_b.data[13] = 14.0
+    roi_b.data[14] = 15.0
+    roi_b.data[15] = 16.0
+    let s_b = roi_to_sedenion(roi_b)
+    if close(s_b.e0, 1.0, 0.0001) &&
+       close(s_b.e7, 8.0, 0.0001) &&
+       close(s_b.e15, 16.0, 0.0001) {
+        passed = passed + 1
+    } else { failed = failed + 1 }
+
+    // ------------------------------------------------------------------
+    // T04 — connectome_embed_mean with 0 ROIs returns zero sedenion
+    // ------------------------------------------------------------------
+    var empty_features: [ROIFeatures; 256] = [roi_features_zero(); 256]
+    let mean0 = connectome_embed_mean(empty_features, 0)
+    if close(mean0.e0, 0.0, 0.0001) && close(mean0.e1, 0.0, 0.0001) {
+        passed = passed + 1
+    } else { failed = failed + 1 }
+
+    // ------------------------------------------------------------------
+    // T05 — connectome_embed_mean with 1 ROI returns that ROI as sedenion
+    // ------------------------------------------------------------------
+    var single_features: [ROIFeatures; 256] = [roi_features_zero(); 256]
+    single_features[0] = roi_b
+    let mean1 = connectome_embed_mean(single_features, 1)
+    // mean of 1 element = element itself; e0 should be 1.0
+    if close(mean1.e0, 1.0, 0.0001) {
+        passed = passed + 1
+    } else { failed = failed + 1 }
+
+    // ------------------------------------------------------------------
+    // T06 — connectome_embed_mean: e0 equals mean of ROI data[0]
+    // ------------------------------------------------------------------
+    var two_features: [ROIFeatures; 256] = [roi_features_zero(); 256]
+    var roi_c = roi_features_zero()
+    roi_c.data[0] = 2.0
+    var roi_d = roi_features_zero()
+    roi_d.data[0] = 4.0
+    two_features[0] = roi_c
+    two_features[1] = roi_d
+    let mean2 = connectome_embed_mean(two_features, 2)
+    // e0 = (2+4)/2 = 3
+    if close(mean2.e0, 3.0, 0.0001) {
+        passed = passed + 1
+    } else { failed = failed + 1 }
+
+    // ------------------------------------------------------------------
+    // T07 — connectome_embed_mean: mean of 3 identical ROIs = that ROI
+    // ------------------------------------------------------------------
+    var triple_features: [ROIFeatures; 256] = [roi_features_zero(); 256]
+    var roi_e = roi_features_zero()
+    roi_e.data[0] = 7.0
+    roi_e.data[1] = 3.0
+    triple_features[0] = roi_e
+    triple_features[1] = roi_e
+    triple_features[2] = roi_e
+    let mean3 = connectome_embed_mean(triple_features, 3)
+    if close(mean3.e0, 7.0, 0.001) && close(mean3.e1, 3.0, 0.001) {
+        passed = passed + 1
+    } else { failed = failed + 1 }
+
+    // ------------------------------------------------------------------
+    // T08 — connectome_embed_interaction with 0 edges returns zero
+    // ------------------------------------------------------------------
+    var edge_i_empty: [i32; 256] = [0; 256]
+    var edge_j_empty: [i32; 256] = [0; 256]
+    let inter0 = connectome_embed_interaction(empty_features, edge_i_empty, edge_j_empty, 0)
+    if close(inter0.e0, 0.0, 0.0001) {
+        passed = passed + 1
+    } else { failed = failed + 1 }
+
+    // ------------------------------------------------------------------
+    // T09 — connectome_embed_interaction: single non-zero edge
+    // ------------------------------------------------------------------
+    var feat_unit: [ROIFeatures; 256] = [roi_features_zero(); 256]
+    feat_unit[0] = make_unit_roi()   // sedenion = (1,0,...,0)
+    feat_unit[1] = make_unit_roi()
+
+    var ei: [i32; 256] = [0; 256]
+    var ej: [i32; 256] = [0; 256]
+    ei[0] = 0
+    ej[0] = 1
+    let inter1 = connectome_embed_interaction(feat_unit, ei, ej, 1)
+    // sed64_mul(1,1) = 1, so e0 should be 1
+    if close(inter1.e0, 1.0, 0.001) {
+        passed = passed + 1
+    } else { failed = failed + 1 }
+
+    // ------------------------------------------------------------------
+    // T10 — connectome_embed_mean with 4 ROIs: e0 = average of data[0]
+    // ------------------------------------------------------------------
+    var quad_features: [ROIFeatures; 256] = [roi_features_zero(); 256]
+    var ri0 = roi_features_zero()
+    ri0.data[0] = 1.0
+    var ri1 = roi_features_zero()
+    ri1.data[0] = 3.0
+    var ri2 = roi_features_zero()
+    ri2.data[0] = 5.0
+    var ri3 = roi_features_zero()
+    ri3.data[0] = 7.0
+    quad_features[0] = ri0
+    quad_features[1] = ri1
+    quad_features[2] = ri2
+    quad_features[3] = ri3
+    let mean4 = connectome_embed_mean(quad_features, 4)
+    // (1+3+5+7)/4 = 4
+    if close(mean4.e0, 4.0, 0.001) {
+        passed = passed + 1
+    } else { failed = failed + 1 }
+
+    // ------------------------------------------------------------------
+    // T11 — roi_features_zero: each of 16 entries is zero
+    // ------------------------------------------------------------------
+    let rfz = roi_features_zero()
+    var all_zero: bool = true
+    var k: i64 = 0
+    while k < 16 {
+        if rfz.data[k as usize] != 0.0 { all_zero = false }
+        k = k + 1
+    }
+    if all_zero {
+        passed = passed + 1
+    } else { failed = failed + 1 }
+
+    // ------------------------------------------------------------------
+    // T12 — connectome_embed_mean: e0 non-zero when data[0] != 0
+    // ------------------------------------------------------------------
+    var nonzero_feats: [ROIFeatures; 256] = [roi_features_zero(); 256]
+    var roi_nz = roi_features_zero()
+    roi_nz.data[0] = 42.0
+    nonzero_feats[0] = roi_nz
+    let mean_nz = connectome_embed_mean(nonzero_feats, 1)
+    if mean_nz.e0 != 0.0 {
+        passed = passed + 1
+    } else { failed = failed + 1 }
+
+    // ------------------------------------------------------------------
+    // T13 — connectome_embed_interaction with self-loop (i==j)
+    //        1*1 = 1 in sedenionic algebra for unit sedenion
+    // ------------------------------------------------------------------
+    var feat_self: [ROIFeatures; 256] = [roi_features_zero(); 256]
+    feat_self[0] = make_unit_roi()
+    var ei_self: [i32; 256] = [0; 256]
+    var ej_self: [i32; 256] = [0; 256]
+    ei_self[0] = 0
+    ej_self[0] = 0    // self-loop
+    let inter_self = connectome_embed_interaction(feat_self, ei_self, ej_self, 1)
+    // unit * unit = unit in sedenion algebra (e0=1, others=0)
+    if close(inter_self.e0, 1.0, 0.001) {
+        passed = passed + 1
+    } else { failed = failed + 1 }
+
+    // ------------------------------------------------------------------
+    // T14 — connectome_to_features: escape_ratio is in [0, 1]
+    // ------------------------------------------------------------------
+    var orbit_feats: [ROIFeatures; 256] = [roi_features_zero(); 256]
+    // Use a small non-zero value to avoid zero-divisor issues
+    var roi_small = roi_features_zero()
+    roi_small.data[0] = 0.1
+    orbit_feats[0] = roi_small
+    let config = orbit_config_default()
+    let fsnn_feats = connectome_to_features(orbit_feats, 1, config)
+    if fsnn_feats.escape_ratio >= 0.0 && fsnn_feats.escape_ratio <= 1.0 {
+        passed = passed + 1
+    } else { failed = failed + 1 }
+
+    // ------------------------------------------------------------------
+    // T15 — connectome_to_features: terminal_norm and other fields accessible
+    // ------------------------------------------------------------------
+    if fsnn_feats.terminal_norm >= 0.0 {
+        passed = passed + 1
+    } else { failed = failed + 1 }
+
+    // fsnn_stat_mean on a constant array
+    var arr_const: [f64; 256] = [0.0; 256]
+    arr_const[0] = 5.0
+    arr_const[1] = 5.0
+    arr_const[2] = 5.0
+    let stat_mean = fsnn_stat_mean(arr_const, 3)
+    if close(stat_mean, 5.0, 0.001) {
+        passed = passed + 1
+    } else { failed = failed + 1 }
+
+    // ------------------------------------------------------------------
+    // Summary
+    // ------------------------------------------------------------------
+    print("neuro tests passed=")
+    print_int(passed)
+    print(" failed=")
+    print_int(failed)
+    print("\n")
+
+    if failed > 0 { return 1 }
+    return 0
+}

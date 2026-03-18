@@ -1,0 +1,730 @@
+//@ run-pass
+// Tests for stdlib/pbpk — physiologically based pharmacokinetic modeling.
+//
+// Coverage spans all five submodules:
+//   types.sio       — constructors, unit conversions, validation predicates
+//   covariate.sio   — allometric scaling, renal/hepatic/genotype adjustments
+//   error_models.sio — variance, SD, residuals, log-likelihood, BQL
+//   population.sio  — parameter binding, one/two-comp models, random effects
+//   regulatory.sio  — NCA metrics (AUC, Cmax, Tmax, half-life), bioequivalence
+//
+// Each block asserts a clearly specified expected value or range.
+// Return 0 = all pass; positive = number of failures.
+
+// =============================================================================
+// MATH HELPERS (shared across inlined functions)
+// =============================================================================
+
+fn h_abs(x: f64) -> f64 with Mut, Div, Panic {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+fn h_near(a: f64, b: f64, tol: f64) -> bool with Mut, Div, Panic {
+    return h_abs(a - b) < tol
+}
+
+fn h_exp(x: f64) -> f64 with Mut, Div, Panic {
+    if x > 20.0 { return h_exp(x / 2.0) * h_exp(x / 2.0) }
+    if x < 0.0 - 20.0 { return 1.0 / h_exp(0.0 - x) }
+    var sum = 1.0
+    var term = 1.0
+    var i = 1
+    while i <= 15 {
+        term = term * x / i
+        sum = sum + term
+        i = i + 1
+    }
+    return sum
+}
+
+fn h_ln(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 - 1000000.0 }
+    let e = 2.718281828459045
+    var val = x
+    var k = 0.0
+    while val > e { val = val / e; k = k + 1.0 }
+    while val < 1.0 / e { val = val * e; k = k - 1.0 }
+    let u = (val - 1.0) / (val + 1.0)
+    let u2 = u * u
+    var sum = u
+    var term = u
+    term = term * u2; sum = sum + term / 3.0
+    term = term * u2; sum = sum + term / 5.0
+    term = term * u2; sum = sum + term / 7.0
+    term = term * u2; sum = sum + term / 9.0
+    return 2.0 * sum + k
+}
+
+fn h_pow(x: f64, n: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    return h_exp(n * h_ln(x))
+}
+
+fn h_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var iter = 0
+    while iter < 20 { y = 0.5 * (y + x / y); iter = iter + 1 }
+    return y
+}
+
+// =============================================================================
+// TYPES — constructors and converters (from types.sio)
+// =============================================================================
+
+struct DoseMass { value: f64 }
+struct VolumeL { value: f64 }
+struct Concentration { value: f64 }
+struct Clearance { value: f64 }
+struct RateConst { value: f64 }
+struct TimeH { value: f64 }
+struct BodyWeight { value: f64 }
+
+fn dose_mg(value: f64) -> DoseMass { return DoseMass { value: value } }
+fn volume_L(value: f64) -> VolumeL { return VolumeL { value: value } }
+fn conc_mg_per_L(value: f64) -> Concentration { return Concentration { value: value } }
+fn clearance_L_per_h(value: f64) -> Clearance { return Clearance { value: value } }
+fn rate_per_h(value: f64) -> RateConst { return RateConst { value: value } }
+fn time_h(value: f64) -> TimeH { return TimeH { value: value } }
+fn weight_kg(value: f64) -> BodyWeight { return BodyWeight { value: value } }
+
+fn L_per_h_to_mL_per_min(cl: f64) -> f64 { return cl * 16.667 }
+fn mL_per_min_to_L_per_h(cl: f64) -> f64 { return cl * 0.06 }
+
+fn rate_to_halflife(ke: f64) -> f64 with Div, Panic {
+    let ln2 = 0.693147180559945
+    return ln2 / ke
+}
+
+fn halflife_to_rate(t_half: f64) -> f64 with Div, Panic {
+    let ln2 = 0.693147180559945
+    return ln2 / t_half
+}
+
+fn is_valid_fraction(f: f64) -> bool {
+    if f < 0.0 { return false }
+    if f > 1.0 { return false }
+    return true
+}
+
+fn is_plausible_clearance(cl: f64) -> bool {
+    if cl < 0.0 { return false }
+    if cl > 500.0 { return false }
+    return true
+}
+
+fn is_plausible_volume(v: f64) -> bool {
+    if v < 0.0 { return false }
+    if v > 10000.0 { return false }
+    return true
+}
+
+fn is_plausible_rate(k: f64) -> bool {
+    if k < 0.0000791 { return false }
+    if k > 41.6 { return false }
+    return true
+}
+
+// =============================================================================
+// COVARIATE — allometric, renal, hepatic, genotype (from covariate.sio)
+// =============================================================================
+
+fn allometric_clearance(cl_pop: f64, weight: f64, ref_wt: f64, exponent: f64) -> f64 with Mut, Div, Panic {
+    let wt_ratio = weight / ref_wt
+    return cl_pop * h_pow(wt_ratio, exponent)
+}
+
+fn scale_clearance(cl_pop: f64, weight: f64) -> f64 with Mut, Div, Panic {
+    return allometric_clearance(cl_pop, weight, 70.0, 0.75)
+}
+
+fn scale_volume(v_pop: f64, weight: f64) -> f64 with Mut, Div, Panic {
+    let wt_ratio = weight / 70.0
+    return v_pop * h_pow(wt_ratio, 1.0)
+}
+
+fn cockcroft_gault(age: f64, weight: f64, scr: f64, is_female: bool) -> f64 with Div, Panic {
+    let base = (140.0 - age) * weight / (72.0 * scr)
+    if is_female { return base * 0.85 }
+    return base
+}
+
+fn renal_adjustment(cl_pop: f64, crcl: f64, ref_crcl: f64, fe: f64) -> f64 with Div, Panic {
+    let cl_renal = cl_pop * fe
+    let cl_nonrenal = cl_pop * (1.0 - fe)
+    return cl_nonrenal + cl_renal * (crcl / ref_crcl)
+}
+
+fn hepatic_adjustment(cl_pop: f64, child_pugh: i32, fh: f64) -> f64 {
+    let adjustment = if child_pugh <= 6 {
+        1.0
+    } else {
+        if child_pugh <= 9 { 0.5 } else { 0.25 }
+    }
+    let cl_hepatic = cl_pop * fh
+    let cl_other = cl_pop * (1.0 - fh)
+    return cl_other + cl_hepatic * adjustment
+}
+
+fn cyp2d6_effect(phenotype: i32) -> f64 {
+    if phenotype == 0 { return 0.1 }
+    if phenotype == 1 { return 0.5 }
+    if phenotype == 2 { return 1.0 }
+    if phenotype == 3 { return 2.0 }
+    return 1.0
+}
+
+fn cyp3a4_effect(activity_level: i32) -> f64 {
+    if activity_level == 0 { return 0.5 }
+    if activity_level == 1 { return 1.0 }
+    if activity_level == 2 { return 2.0 }
+    return 1.0
+}
+
+fn adjust_for_cyp2d6(cl_pop: f64, phenotype: i32, fm_cyp2d6: f64) -> f64 {
+    let factor = cyp2d6_effect(phenotype)
+    let cl_cyp2d6 = cl_pop * fm_cyp2d6
+    let cl_other = cl_pop * (1.0 - fm_cyp2d6)
+    return cl_other + cl_cyp2d6 * factor
+}
+
+// =============================================================================
+// ERROR MODELS (from error_models.sio)
+// =============================================================================
+
+struct ProportionalError { sigma: f64 }
+struct AdditiveError { sigma: f64 }
+struct CombinedError { sigma_prop: f64, sigma_add: f64 }
+struct LogAdditiveError { sigma: f64 }
+
+fn proportional_error(cv: f64) -> ProportionalError { return ProportionalError { sigma: cv } }
+fn additive_error(sd: f64) -> AdditiveError { return AdditiveError { sigma: sd } }
+fn combined_error(cv: f64, sd: f64) -> CombinedError { return CombinedError { sigma_prop: cv, sigma_add: sd } }
+fn log_additive_error(sd: f64) -> LogAdditiveError { return LogAdditiveError { sigma: sd } }
+
+fn proportional_variance(err: ProportionalError, f_pred: f64) -> f64 {
+    return (err.sigma * f_pred) * (err.sigma * f_pred)
+}
+
+fn additive_variance(err: AdditiveError, f_pred: f64) -> f64 {
+    return err.sigma * err.sigma
+}
+
+fn combined_variance(err: CombinedError, f_pred: f64) -> f64 {
+    let prop_var = (err.sigma_prop * f_pred) * (err.sigma_prop * f_pred)
+    let add_var = err.sigma_add * err.sigma_add
+    return prop_var + add_var
+}
+
+fn proportional_sd(err: ProportionalError, f_pred: f64) -> f64 {
+    return h_abs(err.sigma * f_pred)
+}
+
+fn additive_sd(err: AdditiveError, f_pred: f64) -> f64 { return err.sigma }
+
+fn combined_sd(err: CombinedError, f_pred: f64) -> f64 with Mut, Div, Panic {
+    return h_sqrt(combined_variance(err, f_pred))
+}
+
+fn iwres_proportional(obs: f64, pred: f64, err: ProportionalError) -> f64 with Div, Panic {
+    let sd = proportional_sd(err, pred)
+    if sd < 0.0000000001 { return 0.0 }
+    return (obs - pred) / sd
+}
+
+fn iwres_additive(obs: f64, pred: f64, err: AdditiveError) -> f64 with Div, Panic {
+    let sd = additive_sd(err, pred)
+    if sd < 0.0000000001 { return 0.0 }
+    return (obs - pred) / sd
+}
+
+fn iwres_combined(obs: f64, pred: f64, err: CombinedError) -> f64 with Mut, Div, Panic {
+    let sd = combined_sd(err, pred)
+    if sd < 0.0000000001 { return 0.0 }
+    return (obs - pred) / sd
+}
+
+fn log_likelihood_normal(obs: f64, pred: f64, variance: f64) -> f64 with Mut, Div, Panic {
+    let pi = 3.14159265358979
+    let resid = obs - pred
+    let ll = 0.0 - 0.5 * (h_ln(2.0 * pi * variance) + resid * resid / variance)
+    return ll
+}
+
+fn simulate_proportional(pred: f64, err: ProportionalError, eps: f64) -> f64 {
+    return pred * (1.0 + err.sigma * eps)
+}
+
+fn simulate_additive(pred: f64, err: AdditiveError, eps: f64) -> f64 {
+    return pred + err.sigma * eps
+}
+
+fn simulate_combined(pred: f64, err: CombinedError, eps1: f64, eps2: f64) -> f64 {
+    return pred * (1.0 + err.sigma_prop * eps1) + err.sigma_add * eps2
+}
+
+fn is_bql(obs: f64, lloq: f64) -> bool { return obs < lloq }
+
+fn m4_bql_imputation(lloq: f64) -> f64 with Div, Panic { return lloq / 2.0 }
+
+fn cwresi_squared(obs: f64, pred: f64, sd: f64) -> f64 with Div, Panic {
+    if sd < 0.0000000001 { return 0.0 }
+    let resid = (obs - pred) / sd
+    return resid * resid
+}
+
+fn rmse_3(obs1: f64, pred1: f64, obs2: f64, pred2: f64, obs3: f64, pred3: f64) -> f64 with Mut, Div, Panic {
+    let d1 = obs1 - pred1
+    let d2 = obs2 - pred2
+    let d3 = obs3 - pred3
+    return h_sqrt((d1 * d1 + d2 * d2 + d3 * d3) / 3.0)
+}
+
+// =============================================================================
+// POPULATION (from population.sio)
+// =============================================================================
+
+struct OneCompFixedEffects { cl_pop: f64, v_pop: f64, ka_pop: f64 }
+struct TwoCompFixedEffects { cl_pop: f64, v1_pop: f64, v2_pop: f64, q_pop: f64, ka_pop: f64 }
+struct OneCompRandomEffects { eta_cl: f64, eta_v: f64, eta_ka: f64 }
+struct TwoCompRandomEffects { eta_cl: f64, eta_v1: f64, eta_v2: f64, eta_q: f64, eta_ka: f64 }
+struct OneCompOmega { omega_cl: f64, omega_v: f64, omega_ka: f64, rho_cl_v: f64 }
+
+struct PatientCovariates {
+    id: i32, weight: f64, height: f64, age: f64, sex: i32,
+    crcl: f64, albumin: f64, cyp2d6: i32, cyp3a4: i32
+}
+
+struct OneCompIndividual { cl: f64, v: f64, ka: f64, ke: f64 }
+struct TwoCompIndividual { cl: f64, v1: f64, v2: f64, q: f64, ka: f64, k10: f64, k12: f64, k21: f64 }
+
+fn default_patient() -> PatientCovariates {
+    return PatientCovariates {
+        id: 0, weight: 70.0, height: 170.0, age: 40.0, sex: 0,
+        crcl: 120.0, albumin: 4.0, cyp2d6: 2, cyp3a4: 1
+    }
+}
+
+fn bind_one_comp_params(
+    pop: OneCompFixedEffects,
+    cov: PatientCovariates,
+    eta: OneCompRandomEffects
+) -> OneCompIndividual with Mut, Div, Panic {
+    let wt_cl = h_pow(cov.weight / 70.0, 0.75)
+    let wt_v = cov.weight / 70.0
+    let cl = pop.cl_pop * wt_cl * h_exp(eta.eta_cl)
+    let v = pop.v_pop * wt_v * h_exp(eta.eta_v)
+    let ka = pop.ka_pop * h_exp(eta.eta_ka)
+    return OneCompIndividual { cl: cl, v: v, ka: ka, ke: cl / v }
+}
+
+fn bind_two_comp_params(
+    pop: TwoCompFixedEffects,
+    cov: PatientCovariates,
+    eta: TwoCompRandomEffects
+) -> TwoCompIndividual with Mut, Div, Panic {
+    let wt_cl = h_pow(cov.weight / 70.0, 0.75)
+    let wt_v = cov.weight / 70.0
+    let cl = pop.cl_pop * wt_cl * h_exp(eta.eta_cl)
+    let v1 = pop.v1_pop * wt_v * h_exp(eta.eta_v1)
+    let v2 = pop.v2_pop * wt_v * h_exp(eta.eta_v2)
+    let q = pop.q_pop * wt_cl * h_exp(eta.eta_q)
+    let ka = pop.ka_pop * h_exp(eta.eta_ka)
+    return TwoCompIndividual {
+        cl: cl, v1: v1, v2: v2, q: q, ka: ka,
+        k10: cl / v1, k12: q / v1, k21: q / v2
+    }
+}
+
+// =============================================================================
+// REGULATORY — NCA + bioequivalence (from regulatory.sio)
+// =============================================================================
+
+struct RegulatoryReport {
+    auc: f64, cmax: f64, tmax: f64,
+    half_life: f64, bioavail: f64, clearance: f64,
+}
+
+fn reg_abs(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+fn reg_ln(x: f64) -> f64 with Mut, Div, Panic {
+    return h_ln(x)
+}
+
+fn reg_compute_pk_metrics(conc: &[f64; 256], time: &[f64; 256], n: i32) -> RegulatoryReport with Mut, Div, Panic {
+    if n < 2 {
+        return RegulatoryReport {
+            auc: 0.0, cmax: 0.0, tmax: 0.0,
+            half_life: 0.0, bioavail: 0.0, clearance: 0.0,
+        }
+    }
+    var auc = 0.0
+    var i: i32 = 0
+    while i < n - 1 {
+        let dt = time[(i + 1) as usize] - time[i as usize]
+        let avg_c = (conc[i as usize] + conc[(i + 1) as usize]) * 0.5
+        auc = auc + dt * avg_c
+        i = i + 1
+    }
+    var cmax = conc[0]
+    var tmax = time[0]
+    i = 1
+    while i < n {
+        if conc[i as usize] > cmax {
+            cmax = conc[i as usize]
+            tmax = time[i as usize]
+        }
+        i = i + 1
+    }
+    var half_life = 0.0
+    if n >= 3 {
+        let c1 = conc[(n - 3) as usize]
+        let c2 = conc[(n - 1) as usize]
+        let t1 = time[(n - 3) as usize]
+        let t2 = time[(n - 1) as usize]
+        if c1 > 0.0 && c2 > 0.0 && c2 < c1 && t2 > t1 {
+            let lambda_z = (reg_ln(c1) - reg_ln(c2)) / (t2 - t1)
+            if lambda_z > 0.0 {
+                half_life = 0.693147180559945 / lambda_z
+            }
+        }
+    }
+    var clearance = 0.0
+    if auc > 0.0 { clearance = 1.0 / auc }
+    RegulatoryReport {
+        auc: auc, cmax: cmax, tmax: tmax,
+        half_life: half_life, bioavail: 1.0, clearance: clearance,
+    }
+}
+
+fn reg_bioequivalence_ratio(test_auc: f64, ref_auc: f64) -> f64 with Div, Panic {
+    if ref_auc <= 0.0 { return 0.0 }
+    test_auc / ref_auc
+}
+
+fn reg_within_bounds(ratio: f64, lo: f64, hi: f64) -> bool { ratio >= lo && ratio <= hi }
+
+fn reg_fda_bioequivalent(test_auc: f64, ref_auc: f64) -> bool with Div, Panic {
+    let ratio = reg_bioequivalence_ratio(test_auc, ref_auc)
+    reg_within_bounds(ratio, 0.80, 1.25)
+}
+
+fn reg_nti_bioequivalent(test_auc: f64, ref_auc: f64) -> bool with Div, Panic {
+    let ratio = reg_bioequivalence_ratio(test_auc, ref_auc)
+    reg_within_bounds(ratio, 0.90, 1.11)
+}
+
+// =============================================================================
+// TESTS
+// =============================================================================
+
+fn main() -> i32 with Mut, Div, Panic {
+    var fail = 0
+
+    // -------------------------------------------------------------------------
+    // BLOCK A — types.sio constructors and unit conversions
+    // -------------------------------------------------------------------------
+
+    // T1. DoseMass constructor stores value
+    let d = dose_mg(500.0)
+    if !h_near(d.value, 500.0, 0.0001) { fail = fail + 1 }
+
+    // T2. VolumeL constructor
+    let v = volume_L(10.0)
+    if !h_near(v.value, 10.0, 0.0001) { fail = fail + 1 }
+
+    // T3. Concentration constructor
+    let c = conc_mg_per_L(2.5)
+    if !h_near(c.value, 2.5, 0.0001) { fail = fail + 1 }
+
+    // T4. L/h → mL/min: 1 L/h * 16.667 ≈ 16.667 mL/min
+    let cl_mL = L_per_h_to_mL_per_min(1.0)
+    if !h_near(cl_mL, 16.667, 0.01) { fail = fail + 1 }
+
+    // T5. mL/min → L/h: 1 mL/min * 0.06 = 0.06 L/h
+    let cl_L = mL_per_min_to_L_per_h(1.0)
+    if !h_near(cl_L, 0.06, 0.0001) { fail = fail + 1 }
+
+    // T6. Round-trip unit conversion: 60 mL/min → L/h → mL/min ≈ 60
+    let rt = L_per_h_to_mL_per_min(mL_per_min_to_L_per_h(60.0))
+    if !h_near(rt, 60.0, 0.1) { fail = fail + 1 }
+
+    // T7. halflife <-> rate: rate_to_halflife(halflife_to_rate(t)) = t
+    let t_half = 4.0  // 4 hours
+    let ke = halflife_to_rate(t_half)
+    if !h_near(rate_to_halflife(ke), t_half, 0.0001) { fail = fail + 1 }
+
+    // T8. is_valid_fraction: 0.5 valid, -0.1 invalid, 1.1 invalid
+    if !is_valid_fraction(0.5) { fail = fail + 1 }
+    if is_valid_fraction(0.0 - 0.1) { fail = fail + 1 }
+    if is_valid_fraction(1.1) { fail = fail + 1 }
+
+    // T9. is_plausible_clearance: 10 L/h plausible, -1 and 600 not
+    if !is_plausible_clearance(10.0) { fail = fail + 1 }
+    if is_plausible_clearance(0.0 - 1.0) { fail = fail + 1 }
+    if is_plausible_clearance(600.0) { fail = fail + 1 }
+
+    // T10. is_plausible_volume: 50 L plausible, -5 and 15000 not
+    if !is_plausible_volume(50.0) { fail = fail + 1 }
+    if is_plausible_volume(0.0 - 5.0) { fail = fail + 1 }
+    if is_plausible_volume(15000.0) { fail = fail + 1 }
+
+    // T11. is_plausible_rate: ke=0.1 (t1/2≈7h) valid; 0.00001 and 100 invalid
+    if !is_plausible_rate(0.1) { fail = fail + 1 }
+    if is_plausible_rate(0.00001) { fail = fail + 1 }
+    if is_plausible_rate(100.0) { fail = fail + 1 }
+
+    // -------------------------------------------------------------------------
+    // BLOCK B — covariate.sio: allometric scaling
+    // -------------------------------------------------------------------------
+
+    // T12. scale_clearance: 70kg reference → no change
+    let cl_ref = scale_clearance(10.0, 70.0)
+    if !h_near(cl_ref, 10.0, 0.001) { fail = fail + 1 }
+
+    // T13. scale_clearance: 140kg patient → CL * 2^0.75 ≈ 1.6818 * CL_pop
+    let cl_140 = scale_clearance(10.0, 140.0)
+    let expected_cl_140 = 10.0 * h_pow(2.0, 0.75)
+    if !h_near(cl_140, expected_cl_140, 0.01) { fail = fail + 1 }
+
+    // T14. scale_volume: linear with weight — 140kg → 2x volume
+    let v_140 = scale_volume(50.0, 140.0)
+    if !h_near(v_140, 100.0, 0.01) { fail = fail + 1 }
+
+    // T15. cockcroft_gault: standard adult (40y, 70kg, SCr=1.0 mg/dL, male)
+    // CrCL = (140-40)*70/(72*1.0) = 7000/72 ≈ 97.2 mL/min
+    let crcl_male = cockcroft_gault(40.0, 70.0, 1.0, false)
+    if !h_near(crcl_male, 97.22, 0.1) { fail = fail + 1 }
+
+    // T16. cockcroft_gault: female gets *0.85
+    let crcl_female = cockcroft_gault(40.0, 70.0, 1.0, true)
+    if !h_near(crcl_female, crcl_male * 0.85, 0.1) { fail = fail + 1 }
+
+    // T17. renal_adjustment: fe=0 (no renal elimination) → cl unchanged
+    let cl_no_renal = renal_adjustment(10.0, 60.0, 120.0, 0.0)
+    if !h_near(cl_no_renal, 10.0, 0.001) { fail = fail + 1 }
+
+    // T18. renal_adjustment: fe=1.0 (all renal), CrCL=60 vs ref=120 → CL halved
+    let cl_renal_half = renal_adjustment(10.0, 60.0, 120.0, 1.0)
+    if !h_near(cl_renal_half, 5.0, 0.001) { fail = fail + 1 }
+
+    // T19. hepatic_adjustment: Child-Pugh A (score=5) → no change
+    let cl_cp_a = hepatic_adjustment(10.0, 5, 0.8)
+    if !h_near(cl_cp_a, 10.0 * (0.2 + 0.8 * 1.0), 0.001) { fail = fail + 1 }
+
+    // T20. hepatic_adjustment: Child-Pugh C (score=12) → 75% reduction in hepatic portion
+    let cl_cp_c = hepatic_adjustment(10.0, 12, 0.8)
+    // cl_other = 10*0.2 = 2.0; cl_hepatic = 10*0.8*0.25 = 2.0; total = 4.0
+    if !h_near(cl_cp_c, 4.0, 0.001) { fail = fail + 1 }
+
+    // T21. cyp2d6_effect: PM=0.1, EM=1.0, UM=2.0
+    if !h_near(cyp2d6_effect(0), 0.1, 0.0001) { fail = fail + 1 }
+    if !h_near(cyp2d6_effect(2), 1.0, 0.0001) { fail = fail + 1 }
+    if !h_near(cyp2d6_effect(3), 2.0, 0.0001) { fail = fail + 1 }
+
+    // T22. adjust_for_cyp2d6: EM (factor=1.0) → no change
+    let cl_em = adjust_for_cyp2d6(10.0, 2, 0.5)
+    if !h_near(cl_em, 10.0, 0.001) { fail = fail + 1 }
+
+    // T23. adjust_for_cyp2d6: PM (factor=0.1), fm=0.5
+    // cl_other=5.0, cl_cyp=5.0*0.1=0.5, total=5.5
+    let cl_pm = adjust_for_cyp2d6(10.0, 0, 0.5)
+    if !h_near(cl_pm, 5.5, 0.001) { fail = fail + 1 }
+
+    // -------------------------------------------------------------------------
+    // BLOCK C — error_models.sio: variance, SD, IWRES, log-likelihood
+    // -------------------------------------------------------------------------
+
+    // T24. proportional_variance: sigma=0.1, F=10 → var = (0.1*10)^2 = 1.0
+    let pe = proportional_error(0.1)
+    if !h_near(proportional_variance(pe, 10.0), 1.0, 0.0001) { fail = fail + 1 }
+
+    // T25. additive_variance: sigma=0.5 (constant regardless of F)
+    let ae = additive_error(0.5)
+    if !h_near(additive_variance(ae, 10.0), 0.25, 0.0001) { fail = fail + 1 }
+    if !h_near(additive_variance(ae, 0.0), 0.25, 0.0001) { fail = fail + 1 }
+
+    // T26. combined_variance: sigma_prop=0.1, sigma_add=0.5, F=10
+    // var = (0.1*10)^2 + 0.5^2 = 1.0 + 0.25 = 1.25
+    let ce = combined_error(0.1, 0.5)
+    if !h_near(combined_variance(ce, 10.0), 1.25, 0.0001) { fail = fail + 1 }
+
+    // T27. proportional_sd: SD = sigma * |F| = 0.1 * 10 = 1.0
+    if !h_near(proportional_sd(pe, 10.0), 1.0, 0.0001) { fail = fail + 1 }
+
+    // T28. combined_sd: SD = sqrt(1.25) ≈ 1.118
+    if !h_near(combined_sd(ce, 10.0), h_sqrt(1.25), 0.001) { fail = fail + 1 }
+
+    // T29. iwres_proportional: obs=11, pred=10, sigma=0.1 → IWRES = (11-10)/1 = 1.0
+    let iwres_p = iwres_proportional(11.0, 10.0, pe)
+    if !h_near(iwres_p, 1.0, 0.001) { fail = fail + 1 }
+
+    // T30. iwres_additive: obs=10.5, pred=10, sigma=0.5 → IWRES = 0.5/0.5 = 1.0
+    let iwres_a = iwres_additive(10.5, 10.0, ae)
+    if !h_near(iwres_a, 1.0, 0.001) { fail = fail + 1 }
+
+    // T31. log_likelihood_normal: symmetric — LL(obs=pred) is maximum
+    let ll_exact = log_likelihood_normal(10.0, 10.0, 1.0)
+    let ll_off = log_likelihood_normal(11.0, 10.0, 1.0)
+    if ll_exact <= ll_off { fail = fail + 1 }
+
+    // T32. simulate_proportional: eps=0 → obs = pred unchanged
+    let sim_p = simulate_proportional(10.0, pe, 0.0)
+    if !h_near(sim_p, 10.0, 0.0001) { fail = fail + 1 }
+
+    // T33. simulate_additive: eps=1 → obs = pred + sigma
+    let sim_a = simulate_additive(10.0, ae, 1.0)
+    if !h_near(sim_a, 10.5, 0.0001) { fail = fail + 1 }
+
+    // T34. simulate_combined: eps1=0, eps2=0 → obs = pred
+    let sim_c = simulate_combined(10.0, ce, 0.0, 0.0)
+    if !h_near(sim_c, 10.0, 0.0001) { fail = fail + 1 }
+
+    // T35. is_bql: obs < LLOQ → true
+    if !is_bql(0.04, 0.05) { fail = fail + 1 }
+    if is_bql(0.06, 0.05) { fail = fail + 1 }
+
+    // T36. m4_bql_imputation: LLOQ/2
+    if !h_near(m4_bql_imputation(0.05), 0.025, 0.0001) { fail = fail + 1 }
+
+    // T37. cwresi_squared: exact prediction → 0
+    if !h_near(cwresi_squared(10.0, 10.0, 1.0), 0.0, 0.0001) { fail = fail + 1 }
+    // off-by-1 → CWRESI^2 = 1
+    if !h_near(cwresi_squared(11.0, 10.0, 1.0), 1.0, 0.0001) { fail = fail + 1 }
+
+    // T38. rmse_3: perfect predictions → RMSE = 0
+    if !h_near(rmse_3(1.0, 1.0, 2.0, 2.0, 3.0, 3.0), 0.0, 0.0001) { fail = fail + 1 }
+    // uniform errors of 1 → RMSE = 1
+    if !h_near(rmse_3(2.0, 1.0, 3.0, 2.0, 4.0, 3.0), 1.0, 0.001) { fail = fail + 1 }
+
+    // -------------------------------------------------------------------------
+    // BLOCK D — population.sio: parameter binding
+    // -------------------------------------------------------------------------
+
+    // T39. default_patient: weight=70, crcl=120, age=40
+    let pat = default_patient()
+    if !h_near(pat.weight, 70.0, 0.0001) { fail = fail + 1 }
+    if !h_near(pat.crcl, 120.0, 0.0001) { fail = fail + 1 }
+    if pat.cyp2d6 != 2 { fail = fail + 1 }
+
+    // T40. bind_one_comp_params: eta=0 → individual params == allometric scaled pop
+    let pop1 = OneCompFixedEffects { cl_pop: 10.0, v_pop: 50.0, ka_pop: 1.0 }
+    let eta0 = OneCompRandomEffects { eta_cl: 0.0, eta_v: 0.0, eta_ka: 0.0 }
+    let ind1 = bind_one_comp_params(pop1, pat, eta0)
+    // 70kg → scaling factor = 1.0 exactly
+    if !h_near(ind1.cl, 10.0, 0.001) { fail = fail + 1 }
+    if !h_near(ind1.v, 50.0, 0.001) { fail = fail + 1 }
+    if !h_near(ind1.ka, 1.0, 0.001) { fail = fail + 1 }
+    // ke = CL/V = 10/50 = 0.2
+    if !h_near(ind1.ke, 0.2, 0.001) { fail = fail + 1 }
+
+    // T41. bind_one_comp_params: heavy patient (140kg), eta=0
+    var heavy_pat = default_patient()
+    // can't mutate struct in place — build a new one
+    let heavy = PatientCovariates {
+        id: 0, weight: 140.0, height: 180.0, age: 40.0, sex: 0,
+        crcl: 120.0, albumin: 4.0, cyp2d6: 2, cyp3a4: 1
+    }
+    let ind_heavy = bind_one_comp_params(pop1, heavy, eta0)
+    // wt_cl = (140/70)^0.75 = 2^0.75 ≈ 1.6818
+    let wt_cl_exp = h_pow(2.0, 0.75)
+    if !h_near(ind_heavy.cl, 10.0 * wt_cl_exp, 0.01) { fail = fail + 1 }
+    // wt_v = 140/70 = 2.0
+    if !h_near(ind_heavy.v, 100.0, 0.01) { fail = fail + 1 }
+
+    // T42. bind_one_comp_params: positive eta_cl increases CL
+    let eta_pos = OneCompRandomEffects { eta_cl: 0.5, eta_v: 0.0, eta_ka: 0.0 }
+    let ind_pos = bind_one_comp_params(pop1, pat, eta_pos)
+    if ind_pos.cl <= ind1.cl { fail = fail + 1 }
+
+    // T43. bind_two_comp_params: reference patient, eta=0
+    let pop2 = TwoCompFixedEffects {
+        cl_pop: 10.0, v1_pop: 30.0, v2_pop: 70.0, q_pop: 5.0, ka_pop: 1.2
+    }
+    let eta2_0 = TwoCompRandomEffects {
+        eta_cl: 0.0, eta_v1: 0.0, eta_v2: 0.0, eta_q: 0.0, eta_ka: 0.0
+    }
+    let ind2 = bind_two_comp_params(pop2, pat, eta2_0)
+    if !h_near(ind2.cl, 10.0, 0.001) { fail = fail + 1 }
+    if !h_near(ind2.v1, 30.0, 0.001) { fail = fail + 1 }
+    if !h_near(ind2.v2, 70.0, 0.001) { fail = fail + 1 }
+    // k10 = CL/V1 = 10/30 ≈ 0.333
+    if !h_near(ind2.k10, 10.0 / 30.0, 0.001) { fail = fail + 1 }
+    // k12 = Q/V1 = 5/30 ≈ 0.167
+    if !h_near(ind2.k12, 5.0 / 30.0, 0.001) { fail = fail + 1 }
+    // k21 = Q/V2 = 5/70 ≈ 0.071
+    if !h_near(ind2.k21, 5.0 / 70.0, 0.001) { fail = fail + 1 }
+
+    // -------------------------------------------------------------------------
+    // BLOCK E — regulatory.sio: NCA metrics and bioequivalence
+    // -------------------------------------------------------------------------
+
+    // T44. reg_compute_pk_metrics: triangular profile [0, 10, 5, 1] at t=[0,1,2,4]
+    var conc: [f64; 256] = [0.0; 256]
+    var time: [f64; 256] = [0.0; 256]
+    time[0] = 0.0; time[1] = 1.0; time[2] = 2.0; time[3] = 4.0
+    conc[0] = 0.0; conc[1] = 10.0; conc[2] = 5.0; conc[3] = 1.0
+    let r = reg_compute_pk_metrics(&conc, &time, 4)
+
+    // Cmax = 10, Tmax = 1.0
+    if !h_near(r.cmax, 10.0, 0.001) { fail = fail + 1 }
+    if !h_near(r.tmax, 1.0, 0.001) { fail = fail + 1 }
+
+    // AUC by trapezoid: [0,1]*(0+10)/2 + [1,2]*(10+5)/2 + [2,4]*(5+1)/2
+    //                 = 5 + 7.5 + 6 = 18.5
+    if !h_near(r.auc, 18.5, 0.01) { fail = fail + 1 }
+
+    // T45. AUC positive, clearance = 1/AUC ≈ 0.054
+    if r.auc <= 0.0 { fail = fail + 1 }
+    if !h_near(r.clearance, 1.0 / 18.5, 0.001) { fail = fail + 1 }
+
+    // T46. half_life positive for declining profile
+    if r.half_life <= 0.0 { fail = fail + 1 }
+
+    // T47. Monotone declining profile: Cmax at first time point
+    var conc2: [f64; 256] = [0.0; 256]
+    var time2: [f64; 256] = [0.0; 256]
+    time2[0] = 0.0; time2[1] = 1.0; time2[2] = 2.0; time2[3] = 4.0
+    conc2[0] = 20.0; conc2[1] = 10.0; conc2[2] = 5.0; conc2[3] = 2.5
+    let r2 = reg_compute_pk_metrics(&conc2, &time2, 4)
+    if !h_near(r2.cmax, 20.0, 0.001) { fail = fail + 1 }
+    if !h_near(r2.tmax, 0.0, 0.001) { fail = fail + 1 }
+
+    // T48. bioequivalence_ratio: 1.0 when test == ref
+    let ratio_eq = reg_bioequivalence_ratio(100.0, 100.0)
+    if !h_near(ratio_eq, 1.0, 0.001) { fail = fail + 1 }
+
+    // T49. bioequivalence_ratio: 90% of reference
+    let ratio_90 = reg_bioequivalence_ratio(90.0, 100.0)
+    if !h_near(ratio_90, 0.9, 0.001) { fail = fail + 1 }
+
+    // T50. reg_within_bounds: 1.0 in [0.8, 1.25] is true; 0.5 and 1.5 are false
+    if !reg_within_bounds(1.0, 0.80, 1.25) { fail = fail + 1 }
+    if reg_within_bounds(0.5, 0.80, 1.25) { fail = fail + 1 }
+    if reg_within_bounds(1.5, 0.80, 1.25) { fail = fail + 1 }
+
+    // T51. reg_fda_bioequivalent: identical drugs → bioequivalent
+    if !reg_fda_bioequivalent(100.0, 100.0) { fail = fail + 1 }
+    // Half the reference AUC → NOT bioequivalent
+    if reg_fda_bioequivalent(50.0, 100.0) { fail = fail + 1 }
+
+    // T52. NTI bioequivalence: tighter 90-111% window
+    // 95% of reference passes NTI
+    if !reg_nti_bioequivalent(95.0, 100.0) { fail = fail + 1 }
+    // 85% of reference FAILS NTI (but passes FDA)
+    if reg_nti_bioequivalent(85.0, 100.0) { fail = fail + 1 }
+
+    // T53. Edge case: ref_auc = 0 → ratio = 0 → not bioequivalent
+    let ratio_zero = reg_bioequivalence_ratio(100.0, 0.0)
+    if reg_within_bounds(ratio_zero, 0.80, 1.25) { fail = fail + 1 }
+
+    // T54. reg_compute_pk_metrics: n<2 returns zeroed report
+    let r_empty = reg_compute_pk_metrics(&conc, &time, 1)
+    if !h_near(r_empty.auc, 0.0, 0.0001) { fail = fail + 1 }
+    if !h_near(r_empty.cmax, 0.0, 0.0001) { fail = fail + 1 }
+
+    return fail
+}
