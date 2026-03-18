@@ -5456,7 +5456,7 @@ impl Checker {
             TypeRefMut => c.lower_ref_mut_type(te.inner)
             TypeArray => c.lower_array_type(te.inner, te.array_size)
             TypeTuple => c.lower_tuple_type(te.type_args)
-            TypeFn => (c, ty_unknown())
+            TypeFn => c.lower_fn_type_expr(te)
             TypeKnowledge => c.lower_knowledge_type(te.knowledge_info)
             TypeModel => c.lower_model_type(te.type_args, te.span)
             TypePolicy => c.lower_policy_type(te.type_args, te.span)
@@ -5631,6 +5631,118 @@ impl Checker {
                 (c, TypeEntryList { head: head_ty, tail: Some(Box::new(rest_list)) })
             }
         }
+    }
+
+    // Sprint 231: Lower fn(T1, T2) -> U with E1, E2 into a proper TyFn
+    fn lower_fn_type_expr(self, te: TypeExpr) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+        var c = self
+        // 1. Lower parameter types from te.type_args (TypeExprList)
+        var params: Option<Box<FnParamList>> = None
+        var param_count: i64 = 0
+        match te.type_args {
+            Some(tel) => {
+                let pair = c.lower_fn_type_params(*tel, 0)
+                c = pair.0
+                params = pair.1
+                param_count = pair.2
+            }
+            _ => {}
+        }
+        // 2. Lower return type from te.inner
+        var ret_ty = ty_unit()
+        match te.inner {
+            Some(inner_te) => {
+                let pair = c.lower_type_expr(*inner_te)
+                c = pair.0
+                ret_ty = pair.1
+            }
+            _ => {}
+        }
+        // 3. Extract effects from te.effects (EffectList)
+        var effects: [i64; 8] = [0; 8]
+        var effect_count: i64 = 0
+        match te.effects {
+            Some(eff_list) => {
+                let ep = c.extract_effect_ids(*eff_list)
+                effects = ep.0
+                effect_count = ep.1
+            }
+            _ => {}
+        }
+        // 4. Create FnSig and add to table
+        let sig = FnSig {
+            name: Name { buf: [0; 128], len: 0 },
+            params: params,
+            param_count: param_count,
+            return_type: ret_ty,
+            is_method: false,
+            self_type_name: Name { buf: [0; 128], len: 0 },
+            effects: effects,
+            effect_count: effect_count,
+            is_kernel: false,
+            is_epistemic_kernel: false,
+            is_linear_closure: false,
+            linear_capture_count: 0,
+            epistemic_epsilon: 0.0 - 1.0,
+        }
+        let add_result = c.fn_sigs.add(sig)
+        c.fn_sigs = add_result.0
+        let sig_id = add_result.1
+        (c, ty_fn(sig_id))
+    }
+
+    // Sprint 231: Convert TypeExprList (fn type params) to FnParamList
+    fn lower_fn_type_params(self, tel: TypeExprList, idx: i64) -> (Checker, Option<Box<FnParamList>>, i64) with Mut, Panic, Div, Alloc, IO {
+        let pair = self.lower_type_expr(tel.head)
+        var c = pair.0
+        let param_ty = pair.1
+        // Synthesize parameter name: _p0, _p1, ...
+        var pname = Name { buf: [0; 128], len: 0 }
+        pname.buf[0] = 95   // '_'
+        pname.buf[1] = 112  // 'p'
+        pname.buf[2] = (48 + idx) as i8  // '0'+idx
+        pname.len = 3
+        let param_info = FnParamInfo { name: pname, ty: param_ty }
+        match tel.tail {
+            None => {
+                let pl = FnParamList { head: param_info, tail: None }
+                (c, Some(Box::new(pl)), idx + 1)
+            }
+            Some(rest) => {
+                let pair2 = c.lower_fn_type_params(*rest, idx + 1)
+                c = pair2.0
+                let rest_params = pair2.1
+                let total = pair2.2
+                let pl = FnParamList { head: param_info, tail: rest_params }
+                (c, Some(Box::new(pl)), total)
+            }
+        }
+    }
+
+    // Sprint 231: Extract effect IDs from EffectList
+    fn extract_effect_ids(self, eff_list: EffectList) -> ([i64; 8], i64) with Mut, Panic, Div {
+        var effects: [i64; 8] = [0; 8]
+        var count: i64 = 0
+        let eid = effect_name_to_id(eff_list.head.name_buf, eff_list.head.name_len)
+        if eid >= 0 && count < 8 {
+            effects[count] = eid
+            count = count + 1
+        }
+        var current = eff_list.tail
+        while true {
+            match current {
+                Some(rest) => {
+                    let rid = effect_name_to_id((*rest).head.name_buf, (*rest).head.name_len)
+                    if rid >= 0 && count < 8 {
+                        effects[count] = rid
+                        count = count + 1
+                    }
+                    current = (*rest).tail
+                }
+                _ => break
+            }
+        }
+        (effects, count)
     }
 
     fn lower_opt_type(self, opt: Option<Box<TypeExpr>>) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
@@ -7481,6 +7593,9 @@ impl Checker {
                     effect_count: kernel_effect_count,
                     is_kernel: is_kernel_fn,
                     is_epistemic_kernel: has_epistemic_param,
+                    is_linear_closure: false,
+                    linear_capture_count: 0,
+                    epistemic_epsilon: 0.0 - 1.0,
                 }
                 let add_result = c.fn_sigs.add(sig)
                 c.fn_sigs = add_result.0
@@ -7683,6 +7798,10 @@ impl Checker {
                     effects: fn_effects,
                     effect_count: fn_effect_count,
                     is_kernel: false,
+                    is_epistemic_kernel: false,
+                    is_linear_closure: false,
+                    linear_capture_count: 0,
+                    epistemic_epsilon: 0.0 - 1.0,
                 }
                 let add_result = c.fn_sigs.add(sig)
                 c.fn_sigs = add_result.0
@@ -11654,7 +11773,48 @@ impl Checker {
         c.current_effects = saved_effects
         c.current_effect_count = saved_effect_count
 
-        // Create FnSig with inferred effects
+        // Sprint 231: Capture analysis — scan outer scope for linear + epistemic
+        var capture_linear = false
+        var capture_linear_count: i64 = 0
+        var capture_epsilon: f64 = 0.0 - 1.0
+        // Conservative: scan all bindings in the outer scope (below closure params)
+        // The closure scope was pushed above; outer bindings are those with
+        // scope_depth < current closure scope depth.
+        var ci: i64 = 0
+        let env_count = c.env.count
+        while ci < env_count {
+            let binding = c.env.bindings[ci as usize]
+            let binding_ty = binding.ty
+            if c.is_linear_type(binding_ty) {
+                capture_linear = true
+                capture_linear_count = capture_linear_count + 1
+            }
+            if binding_ty.kind == TypeKind::TyKnowledge {
+                let eps = binding_ty.knowledge_epsilon
+                if eps >= 0.0 {
+                    if capture_epsilon < 0.0 {
+                        capture_epsilon = eps
+                    } else {
+                        capture_epsilon = capture_epsilon + eps
+                    }
+                }
+            }
+            ci = ci + 1
+        }
+        // Sprint 231: Auto-inject Epistemic effect if Knowledge values captured
+        if capture_epsilon >= 0.0 {
+            var has_epistemic = false
+            var ei: i64 = 0
+            while ei < inferred_effect_count {
+                if inferred_effects[ei] == 8 { has_epistemic = true }
+                ei = ei + 1
+            }
+            if !has_epistemic && inferred_effect_count < 8 {
+                inferred_effects[inferred_effect_count] = 8
+                inferred_effect_count = inferred_effect_count + 1
+            }
+        }
+        // Create FnSig with inferred effects + capture metadata
         let closure_sig = FnSig {
             name: Name { buf: [0; 128], len: 0 },  // Anonymous closure
             params: params,
@@ -11665,6 +11825,10 @@ impl Checker {
             effects: inferred_effects,
             effect_count: inferred_effect_count,
             is_kernel: false,
+            is_epistemic_kernel: false,
+            is_linear_closure: capture_linear,
+            linear_capture_count: capture_linear_count,
+            epistemic_epsilon: capture_epsilon,
         }
 
         // Add to fn_sigs table
