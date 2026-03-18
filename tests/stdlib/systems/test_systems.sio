@@ -1,0 +1,242 @@
+//@ run-pass
+// Tests for stdlib/systems/lib.sio
+// Validates dynamical systems: Lorenz, Rössler, Van der Pol, pendulum.
+//
+// Integration method: forward Euler (explicit).
+// Tests verify qualitative properties: boundedness, chaos, energy conservation.
+
+use systems::*
+use math::pure::*
+
+fn f_abs(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+fn check_near(got: f64, expected: f64, tol: f64) -> bool {
+    let d = got - expected
+    let ad = if d < 0.0 { 0.0 - d } else { d }
+    return ad < tol
+}
+
+fn run_tests() -> i32 with Mut, Div, Panic {
+    var fail = 0
+
+    // =========================================================================
+    // Test 1: system_state_new initializes correctly
+    // =========================================================================
+    let s0 = system_state_new(3)
+    if s0.n != 3 { fail = fail + 1 }
+    if s0.t != 0.0 { fail = fail + 1 }
+    if f_abs(s0.x[0]) > 1.0e-15 { fail = fail + 1 }
+    if f_abs(s0.x[1]) > 1.0e-15 { fail = fail + 1 }
+    if f_abs(s0.x[2]) > 1.0e-15 { fail = fail + 1 }
+
+    // =========================================================================
+    // Test 2: Lorenz step — time advances by dt
+    // =========================================================================
+    var ls = system_state_new(3)
+    ls.x[0] = 1.0
+    ls.x[1] = 1.0
+    ls.x[2] = 1.0
+    let ls1 = lorenz_step(ls, 0.01, 10.0, 28.0, 2.6666666666666665)
+    if !check_near(ls1.t, 0.01, 1.0e-14) { fail = fail + 1 }
+
+    // =========================================================================
+    // Test 3: Lorenz — trajectory divergence demonstrates chaos (positive λ)
+    //
+    // Two nearby trajectories with initial separation δx=1e-4 should diverge
+    // exponentially. After 500 steps (t=5.0), separation >> 1e-4.
+    // ==========================================================================
+    let lorenz1 = lorenz_simulate(1.0, 1.0, 1.0, 0.01, 500)
+    let lorenz2 = lorenz_simulate(1.0001, 1.0, 1.0, 0.01, 500)
+
+    let sep_x = f_abs(lorenz1.x[0] - lorenz2.x[0])
+    let sep_y = f_abs(lorenz1.x[1] - lorenz2.x[1])
+    let sep_z = f_abs(lorenz1.x[2] - lorenz2.x[2])
+    let total_sep = sep_x + sep_y + sep_z
+
+    // Initial separation was 1e-4; Lyapunov ~0.9 → growth e^(0.9*5)≈90x
+    // Even with Euler drift, separation should be >> 1e-3
+    if total_sep < 0.001 { fail = fail + 1 }
+
+    // =========================================================================
+    // Test 4: Lorenz — z stays bounded [0, ~60] for standard parameters
+    //
+    // The Lorenz attractor is bounded: all trajectories stay in a compact set.
+    // For σ=10, ρ=28, β=8/3 the z-coordinate stays in [0, ~60].
+    // ==========================================================================
+    var lz_min = lorenz1.x[2]
+    var lz_max = lorenz1.x[2]
+
+    // Simulate from several initial conditions and track z range
+    let test_a = lorenz_simulate(5.0, 5.0, 5.0, 0.005, 2000)
+    let test_b = lorenz_simulate(0.1, 0.1, 0.1, 0.005, 2000)
+    let test_c = lorenz_simulate(10.0, 0.0, 15.0, 0.005, 2000)
+
+    // All z values should be positive and below 65
+    let z_a = test_a.x[2]
+    let z_b = test_b.x[2]
+    let z_c = test_c.x[2]
+
+    if z_a < 0.0 || z_a > 65.0 { fail = fail + 1 }
+    if z_b < 0.0 || z_b > 65.0 { fail = fail + 1 }
+    if z_c < 0.0 || z_c > 65.0 { fail = fail + 1 }
+
+    // =========================================================================
+    // Test 5: Van der Pol — limit cycle, |x| stays bounded
+    //
+    // For μ=1, the limit cycle amplitude ≈ 2. Even with Euler integration
+    // (which adds numerical dissipation), |x| stays well below 5 after
+    // transient decay.
+    // ==========================================================================
+    var vdp = system_state_new(2)
+    vdp.x[0] = 2.0
+    vdp.x[1] = 0.0
+
+    var vdp_step = 0
+    while vdp_step < 3000 {
+        vdp = van_der_pol_step(vdp, 0.01, 1.0)
+        vdp_step = vdp_step + 1
+    }
+
+    let vdp_x = f_abs(vdp.x[0])
+    let vdp_y = f_abs(vdp.x[1])
+
+    // Limit cycle: bounded oscillations, not divergence
+    if vdp_x > 5.0 { fail = fail + 1 }
+    if vdp_y > 5.0 { fail = fail + 1 }
+
+    // =========================================================================
+    // Test 6: Van der Pol — system is not at rest (oscillating)
+    // ==========================================================================
+    var vdp2 = system_state_new(2)
+    vdp2.x[0] = 2.0
+    vdp2.x[1] = 0.0
+
+    // Run forward then sample — should not be zero (limit cycle is active)
+    var vi = 0
+    while vi < 500 {
+        vdp2 = van_der_pol_step(vdp2, 0.01, 1.0)
+        vi = vi + 1
+    }
+    let vdp2_energy = vdp2.x[0] * vdp2.x[0] + vdp2.x[1] * vdp2.x[1]
+    // Energy > 0: system is oscillating
+    if vdp2_energy < 0.1 { fail = fail + 1 }
+
+    // =========================================================================
+    // Test 7: Pendulum — energy conservation
+    //
+    // E = 0.5*ω² + (g/l)*(1 - cos θ)
+    // For small dt=0.001, small angle θ₀=0.1 rad, energy should be conserved
+    // to within 5% over 200 steps (t=0.2 s). Forward Euler adds small drift.
+    // ==========================================================================
+    var pend = system_state_new(2)
+    pend.x[0] = 0.1   // theta = 0.1 rad
+    pend.x[1] = 0.0   // omega = 0
+
+    let g_val = 9.81
+    let l_val = 1.0
+
+    let cos0 = cos(pend.x[0])
+    let e0 = 0.5 * pend.x[1] * pend.x[1] + g_val / l_val * (1.0 - cos0)
+
+    var pi_step = 0
+    while pi_step < 200 {
+        pend = pendulum_step(pend, 0.001, g_val, l_val)
+        pi_step = pi_step + 1
+    }
+
+    let cos1 = cos(pend.x[0])
+    let e1 = 0.5 * pend.x[1] * pend.x[1] + g_val / l_val * (1.0 - cos1)
+
+    // Relative energy error < 5% for dt=0.001, short integration
+    let de = f_abs(e1 - e0)
+    let rel_err = de / e0
+    if rel_err > 0.05 { fail = fail + 1 }
+
+    // =========================================================================
+    // Test 8: Pendulum — angle stays bounded for small oscillation
+    // ==========================================================================
+    var pend2 = system_state_new(2)
+    pend2.x[0] = 0.3   // theta = 0.3 rad (~17 degrees)
+    pend2.x[1] = 0.0
+
+    var p2i = 0
+    while p2i < 500 {
+        pend2 = pendulum_step(pend2, 0.001, 9.81, 1.0)
+        p2i = p2i + 1
+    }
+
+    // Angle should stay within ±1.0 rad for small initial angle + short time
+    let pend2_theta = f_abs(pend2.x[0])
+    if pend2_theta > 1.0 { fail = fail + 1 }
+
+    // =========================================================================
+    // Test 9: Rössler — stays finite for standard parameters
+    //
+    // Standard chaotic parameters: a=0.2, b=0.2, c=5.7
+    // Small dt=0.005 to maintain stability of Euler method.
+    // ==========================================================================
+    var ross = system_state_new(3)
+    ross.x[0] = 1.0
+    ross.x[1] = 0.0
+    ross.x[2] = 0.0
+
+    var ri = 0
+    while ri < 2000 {
+        ross = rossler_step(ross, 0.005, 0.2, 0.2, 5.7)
+        ri = ri + 1
+    }
+
+    let rx = f_abs(ross.x[0])
+    let ry = f_abs(ross.x[1])
+    let rz = f_abs(ross.x[2])
+
+    // Rössler attractor: bounded in a compact set
+    if rx > 25.0 { fail = fail + 1 }
+    if ry > 25.0 { fail = fail + 1 }
+    if rz > 25.0 { fail = fail + 1 }
+
+    // =========================================================================
+    // Test 10: lyapunov_estimate — positive for exponentially diverging signal
+    //
+    // Geometric sequence x[i] = 2^i has ratio 2 at each step → λ > 0.
+    // ==========================================================================
+    var exp_arr: [f64; 256]
+    exp_arr[0] = 1.0
+    exp_arr[1] = 2.0
+    exp_arr[2] = 4.0
+    exp_arr[3] = 8.0
+    exp_arr[4] = 16.0
+    exp_arr[5] = 32.0
+    exp_arr[6] = 64.0
+    exp_arr[7] = 128.0
+
+    let lam_pos = lyapunov_estimate(&exp_arr, 8, 0.01)
+    // Doubling → λ ≈ ln(2)/dt = 69.3; at minimum it should be positive
+    if lam_pos < 0.0 { fail = fail + 1 }
+
+    // =========================================================================
+    // Test 11: lyapunov_estimate — near-zero for constant signal
+    // ==========================================================================
+    var const_arr: [f64; 256]
+    const_arr[0] = 5.0
+    const_arr[1] = 5.0
+    const_arr[2] = 5.0
+    const_arr[3] = 5.0
+    const_arr[4] = 5.0
+    const_arr[5] = 5.0
+    const_arr[6] = 5.0
+    const_arr[7] = 5.0
+
+    let lam_const = lyapunov_estimate(&const_arr, 8, 0.01)
+    // Constant → zero (function returns 0.0 for identical consecutive values)
+    if lam_const != 0.0 { fail = fail + 1 }
+
+    if fail > 0 { return 1 }
+    return 0
+}
+
+fn main() -> i32 with Mut, Div, Panic {
+    return run_tests()
+}
