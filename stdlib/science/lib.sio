@@ -1,0 +1,264 @@
+// stdlib/science/lib.sio — Scientific measurement with GUM uncertainty propagation
+//
+// Implements the JCGM GUM (Guide to the Expression of Uncertainty in Measurement)
+// standard for uncertainty arithmetic.
+//
+// Unit codes:
+//   0 = dimensionless
+//   1 = meter
+//   2 = kg
+//   3 = second
+//   4 = kelvin
+//   5 = mole
+//   6 = ampere
+//   7 = candela
+//
+// References:
+//   - JCGM 100:2008 GUM — Evaluation of measurement data
+//   - Taylor & Kuyatt (1994): Guidelines for Evaluating and Expressing the
+//     Uncertainty of NIST Measurement Results
+//   - Bevington & Robinson (2003): Data Reduction and Error Analysis, 3rd ed.
+
+// ============================================================================
+// Math helpers (self-contained, no imports)
+// ============================================================================
+
+fn sci_abs(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+fn sci_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i = 0
+    while i < 30 { y = 0.5 * (y + x / y); i = i + 1 }
+    y
+}
+
+fn sci_ln(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 - 1.0e30 }
+    var m = x
+    var e = 0
+    while m >= 2.0 { m = m / 2.0; e = e + 1 }
+    while m < 0.5 { m = m * 2.0; e = e - 1 }
+    let t = (m - 1.0) / (m + 1.0)
+    let t2 = t * t
+    var sum = t
+    var term = t
+    var k = 1
+    while k < 40 {
+        term = term * t2
+        sum = sum + term / (2 * k + 1) as f64
+        k = k + 1
+    }
+    2.0 * sum + (e as f64) * 0.6931471805599453
+}
+
+fn sci_log10(x: f64) -> f64 with Mut, Div, Panic {
+    sci_ln(x) / 2.302585092994046
+}
+
+fn sci_floor_f64(x: f64) -> f64 {
+    let xi = x as i64
+    let fx = xi as f64
+    if x < 0.0 && fx != x { fx - 1.0 } else { fx }
+}
+
+fn sci_pow10(n: i32) -> f64 with Mut, Div, Panic {
+    var result = 1.0
+    var i = 0
+    if n >= 0 {
+        while i < n { result = result * 10.0; i = i + 1 }
+    } else {
+        let nn = 0 - n
+        while i < nn { result = result / 10.0; i = i + 1 }
+    }
+    result
+}
+
+// ============================================================================
+// Measurement struct
+// ============================================================================
+
+struct Measurement {
+    value: f64,
+    uncertainty: f64,
+    unit_code: i32,
+}
+
+// ============================================================================
+// Constructor
+// ============================================================================
+
+fn measurement_new(val: f64, unc: f64, unit: i32) -> Measurement {
+    let u = if unc < 0.0 { 0.0 - unc } else { unc }
+    Measurement { value: val, uncertainty: u, unit_code: unit }
+}
+
+// ============================================================================
+// GUM uncertainty propagation: sum rule
+// u_combined = sqrt(u1^2 + u2^2)   (independent sources, GUM §4.3.2)
+// ============================================================================
+
+fn propagate_sum(u1: f64, u2: f64) -> f64 with Mut, Div, Panic {
+    sci_sqrt(u1 * u1 + u2 * u2)
+}
+
+// ============================================================================
+// GUM uncertainty propagation: product rule
+// u_combined = |v1*v2| * sqrt((u1/v1)^2 + (u2/v2)^2)
+// (GUM §4.3.4 for multiplicative models)
+// ============================================================================
+
+fn propagate_product(v1: f64, u1: f64, v2: f64, u2: f64) -> f64 with Mut, Div, Panic {
+    let product = sci_abs(v1 * v2)
+    if product < 1.0e-300 { return 0.0 }
+    let rv1 = if sci_abs(v1) > 1.0e-300 { u1 / sci_abs(v1) } else { 0.0 }
+    let rv2 = if sci_abs(v2) > 1.0e-300 { u2 / sci_abs(v2) } else { 0.0 }
+    product * sci_sqrt(rv1 * rv1 + rv2 * rv2)
+}
+
+// ============================================================================
+// Arithmetic with uncertainty
+// ============================================================================
+
+fn measurement_add(a: &Measurement, b: &Measurement) -> Measurement with Mut, Div, Panic {
+    Measurement {
+        value: a.value + b.value,
+        uncertainty: propagate_sum(a.uncertainty, b.uncertainty),
+        unit_code: a.unit_code,
+    }
+}
+
+fn measurement_sub(a: &Measurement, b: &Measurement) -> Measurement with Mut, Div, Panic {
+    Measurement {
+        value: a.value - b.value,
+        uncertainty: propagate_sum(a.uncertainty, b.uncertainty),
+        unit_code: a.unit_code,
+    }
+}
+
+fn measurement_mul(a: &Measurement, b: &Measurement) -> Measurement with Mut, Div, Panic {
+    Measurement {
+        value: a.value * b.value,
+        uncertainty: propagate_product(a.value, a.uncertainty, b.value, b.uncertainty),
+        unit_code: a.unit_code,
+    }
+}
+
+fn measurement_div(a: &Measurement, b: &Measurement) -> Measurement with Mut, Div, Panic {
+    let val = if sci_abs(b.value) > 1.0e-300 { a.value / b.value } else { 0.0 }
+    // For division a/b: relative uncertainty same as multiplication
+    let u = propagate_product(a.value, a.uncertainty, b.value, b.uncertainty)
+    let abs_val = sci_abs(val)
+    // u_result = |a/b| * sqrt((ua/a)^2 + (ub/b)^2) already computed in propagate_product
+    // but we need to correct: propagate_product gives |a*b| * ...; we need |a/b| * ...
+    let rv_a = if sci_abs(a.value) > 1.0e-300 { a.uncertainty / sci_abs(a.value) } else { 0.0 }
+    let rv_b = if sci_abs(b.value) > 1.0e-300 { b.uncertainty / sci_abs(b.value) } else { 0.0 }
+    let u_div = abs_val * sci_sqrt(rv_a * rv_a + rv_b * rv_b)
+    Measurement {
+        value: val,
+        uncertainty: u_div,
+        unit_code: a.unit_code,
+    }
+}
+
+// ============================================================================
+// Relative error: (uncertainty / |value|) * 100 %
+// Returns 0 if value is zero
+// ============================================================================
+
+fn measurement_relative_error(m: &Measurement) -> f64 with Mut, Div, Panic {
+    let av = sci_abs(m.value)
+    if av < 1.0e-300 { return 0.0 }
+    (m.uncertainty / av) * 100.0
+}
+
+// ============================================================================
+// Significant figures of a float value
+// Count: floor(log10(|x|)) + 1 for the magnitude, then count non-zero digits.
+// Simplified implementation: count meaningful decimal digits.
+// Uses the rule: sig figs = number of digits from first non-zero to last.
+// For this implementation we return the order-of-magnitude digit count
+// using the standard definition: sig figs = floor(-log10(|x|/10^floor(log10(|x|)+1))) is 1,
+// more practically: we count how many digits from the leading digit until the
+// representation is consumed (up to 15 for f64).
+// ============================================================================
+
+fn significant_figures(x: f64) -> i32 with Mut, Div, Panic {
+    let ax = sci_abs(x)
+    if ax < 1.0e-300 { return 1 }
+    // exponent = floor(log10(ax))
+    let log_val = sci_log10(ax)
+    let exponent = sci_floor_f64(log_val) as i32
+    // Normalize to [1, 10)
+    var normalized = ax / sci_pow10(exponent)
+    // Count digits until < 1e-10 of normalized
+    var count = 0
+    var i = 0
+    while i < 15 {
+        let digit = normalized as i32
+        if digit > 0 { count = i + 1 }
+        normalized = (normalized - (digit as f64)) * 10.0
+        i = i + 1
+    }
+    if count < 1 { 1 } else { count }
+}
+
+// ============================================================================
+// Round value to match uncertainty precision
+// Round val to the same decimal place as unc's leading digit.
+// E.g., val=3.14159, unc=0.01 -> 3.14
+// ============================================================================
+
+fn round_to_uncertainty(val: f64, unc: f64) -> f64 with Mut, Div, Panic {
+    let au = sci_abs(unc)
+    if au < 1.0e-300 { return val }
+    // exponent of uncertainty leading digit
+    let log_val = sci_log10(au)
+    let exponent = sci_floor_f64(log_val) as i32
+    // scale so that unc leading digit is at units position
+    let scale = sci_pow10(0 - exponent)
+    // round val * scale to nearest integer
+    let scaled = val * scale
+    let rounded = if scaled >= 0.0 {
+        sci_floor_f64(scaled + 0.5)
+    } else {
+        0.0 - sci_floor_f64(0.0 - scaled + 0.5)
+    }
+    rounded / scale
+}
+
+// ============================================================================
+// Weighted mean: mean weighted by 1/u_i^2 (inverse-variance weighting)
+// GUM §4.3.3 / Bevington §4.4
+//
+// w_i = 1/u_i^2
+// mean = sum(w_i * v_i) / sum(w_i)
+// u_mean = 1 / sqrt(sum(w_i))
+// ============================================================================
+
+fn weighted_mean(
+    values: &[f64; 64],
+    uncertainties: &[f64; 64],
+    n: i32,
+) -> Measurement with Mut, Div, Panic {
+    var sum_w = 0.0
+    var sum_wv = 0.0
+    var i = 0
+    while i < n {
+        let u = uncertainties[i]
+        if u > 1.0e-300 {
+            let w = 1.0 / (u * u)
+            sum_w = sum_w + w
+            sum_wv = sum_wv + w * values[i]
+        }
+        i = i + 1
+    }
+    if sum_w < 1.0e-300 {
+        return Measurement { value: 0.0, uncertainty: 0.0, unit_code: 0 }
+    }
+    let mean = sum_wv / sum_w
+    let u_mean = 1.0 / sci_sqrt(sum_w)
+    Measurement { value: mean, uncertainty: u_mean, unit_code: 0 }
+}

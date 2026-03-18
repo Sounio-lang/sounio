@@ -1,0 +1,380 @@
+//@ run-pass
+// tests/stdlib/units/test_units.sio
+// Dimensional analysis + epistemic uncertainty validation for stdlib/units/lib.sio
+//
+// Tests:
+//   1. F = m*a  Newton's second law with GUM uncertainty
+//   2. Dimension check: velocity+velocity OK, velocity+mass must error
+//   3. E = mc²  verify dimensions are energy
+//   4. Unit conversions: 0°C = 273.15K, 1kg = 1000g
+//   5. GUM uncertainty propagation formulas
+//
+// References:
+//   JCGM 100:2008 §5.1  Uncertainty propagation laws
+
+// ============================================================================
+// Inline copy of stdlib/units/lib.sio (self-contained, no use imports needed)
+// ============================================================================
+
+struct UnitDim {
+    mass:        i32
+    length:      i32
+    time:        i32
+    temperature: i32
+    amount:      i32
+    current:     i32
+    luminosity:  i32
+}
+
+struct Quantity {
+    value:       f64
+    uncertainty: f64
+    dim:         UnitDim
+}
+
+fn sqrt_u(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i = 0
+    while i < 30 {
+        y = 0.5 * (y + x / y)
+        i = i + 1
+    }
+    y
+}
+
+fn abs_u(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+fn dim_eq(a: UnitDim, b: UnitDim) -> bool {
+    a.mass == b.mass &&
+    a.length == b.length &&
+    a.time == b.time &&
+    a.temperature == b.temperature &&
+    a.amount == b.amount &&
+    a.current == b.current &&
+    a.luminosity == b.luminosity
+}
+
+fn dim_add_exp(a: UnitDim, b: UnitDim) -> UnitDim {
+    UnitDim {
+        mass:        a.mass        + b.mass,
+        length:      a.length      + b.length,
+        time:        a.time        + b.time,
+        temperature: a.temperature + b.temperature,
+        amount:      a.amount      + b.amount,
+        current:     a.current     + b.current,
+        luminosity:  a.luminosity  + b.luminosity,
+    }
+}
+
+fn dim_sub_exp(a: UnitDim, b: UnitDim) -> UnitDim {
+    UnitDim {
+        mass:        a.mass        - b.mass,
+        length:      a.length      - b.length,
+        time:        a.time        - b.time,
+        temperature: a.temperature - b.temperature,
+        amount:      a.amount      - b.amount,
+        current:     a.current     - b.current,
+        luminosity:  a.luminosity  - b.luminosity,
+    }
+}
+
+fn dim_dimensionless() -> UnitDim {
+    UnitDim { mass: 0, length: 0, time: 0, temperature: 0, amount: 0, current: 0, luminosity: 0 }
+}
+
+fn dim_mass() -> UnitDim {
+    UnitDim { mass: 1, length: 0, time: 0, temperature: 0, amount: 0, current: 0, luminosity: 0 }
+}
+
+fn dim_length() -> UnitDim {
+    UnitDim { mass: 0, length: 1, time: 0, temperature: 0, amount: 0, current: 0, luminosity: 0 }
+}
+
+fn dim_time() -> UnitDim {
+    UnitDim { mass: 0, length: 0, time: 1, temperature: 0, amount: 0, current: 0, luminosity: 0 }
+}
+
+fn dim_temperature() -> UnitDim {
+    UnitDim { mass: 0, length: 0, time: 0, temperature: 1, amount: 0, current: 0, luminosity: 0 }
+}
+
+fn dim_velocity() -> UnitDim {
+    UnitDim { mass: 0, length: 1, time: 0 - 1, temperature: 0, amount: 0, current: 0, luminosity: 0 }
+}
+
+fn dim_acceleration() -> UnitDim {
+    UnitDim { mass: 0, length: 1, time: 0 - 2, temperature: 0, amount: 0, current: 0, luminosity: 0 }
+}
+
+fn dim_force() -> UnitDim {
+    UnitDim { mass: 1, length: 1, time: 0 - 2, temperature: 0, amount: 0, current: 0, luminosity: 0 }
+}
+
+fn dim_energy() -> UnitDim {
+    UnitDim { mass: 1, length: 2, time: 0 - 2, temperature: 0, amount: 0, current: 0, luminosity: 0 }
+}
+
+fn dim_power() -> UnitDim {
+    UnitDim { mass: 1, length: 2, time: 0 - 3, temperature: 0, amount: 0, current: 0, luminosity: 0 }
+}
+
+fn dim_pressure() -> UnitDim {
+    UnitDim { mass: 1, length: 0 - 1, time: 0 - 2, temperature: 0, amount: 0, current: 0, luminosity: 0 }
+}
+
+fn quantity_new(val: f64, unc: f64, dim: UnitDim) -> Quantity {
+    Quantity { value: val, uncertainty: unc, dim: dim }
+}
+
+fn quantity_is_compatible(a: Quantity, b: Quantity) -> bool {
+    dim_eq(a.dim, b.dim)
+}
+
+fn quantity_add(a: Quantity, b: Quantity) -> Quantity with Panic, Mut, Div {
+    assert(dim_eq(a.dim, b.dim))
+    let ua2 = a.uncertainty * a.uncertainty
+    let ub2 = b.uncertainty * b.uncertainty
+    let uc  = sqrt_u(ua2 + ub2)
+    Quantity { value: a.value + b.value, uncertainty: uc, dim: a.dim }
+}
+
+fn quantity_sub(a: Quantity, b: Quantity) -> Quantity with Panic, Mut, Div {
+    assert(dim_eq(a.dim, b.dim))
+    let ua2 = a.uncertainty * a.uncertainty
+    let ub2 = b.uncertainty * b.uncertainty
+    let uc  = sqrt_u(ua2 + ub2)
+    Quantity { value: a.value - b.value, uncertainty: uc, dim: a.dim }
+}
+
+fn quantity_mul(a: Quantity, b: Quantity) -> Quantity with Mut, Div, Panic {
+    let val    = a.value * b.value
+    let term_a = b.value * a.uncertainty
+    let term_b = a.value * b.uncertainty
+    let uc     = sqrt_u(term_a * term_a + term_b * term_b)
+    let dim    = dim_add_exp(a.dim, b.dim)
+    Quantity { value: val, uncertainty: uc, dim: dim }
+}
+
+fn quantity_div(a: Quantity, b: Quantity) -> Quantity with Mut, Div, Panic {
+    let val    = a.value / b.value
+    let term_a = a.uncertainty / b.value
+    let term_b = a.value * b.uncertainty / (b.value * b.value)
+    let uc     = sqrt_u(term_a * term_a + term_b * term_b)
+    let dim    = dim_sub_exp(a.dim, b.dim)
+    Quantity { value: val, uncertainty: uc, dim: dim }
+}
+
+fn quantity_scale(q: Quantity, s: f64) -> Quantity {
+    let unc = if s < 0.0 { 0.0 - s } else { s }
+    Quantity { value: q.value * s, uncertainty: unc * q.uncertainty, dim: q.dim }
+}
+
+fn convert_celsius_to_kelvin(c: f64) -> f64 { c + 273.15 }
+fn convert_kelvin_to_celsius(k: f64) -> f64 { k - 273.15 }
+fn convert_kg_to_g(kg: f64) -> f64           { kg * 1000.0 }
+fn convert_m_to_cm(m: f64) -> f64            { m * 100.0 }
+fn convert_joule_to_ev(j: f64) -> f64 with Div, Panic, Mut { j / 1.602176634e-19 }
+
+// ============================================================================
+// Assertion helpers
+// ============================================================================
+
+fn assert_close(got: f64, expected: f64, tol: f64) with Panic {
+    let diff = got - expected
+    let adiff = if diff < 0.0 { 0.0 - diff } else { diff }
+    assert(adiff < tol)
+}
+
+// ============================================================================
+// Test 1 — F = m * a  (Newton's second law)
+//   m = 2.0 kg ± 0.1 kg
+//   a = 9.81 m/s² ± 0.01 m/s²
+//   F = m*a = 19.62 N
+//   GUM: u_F = sqrt((a*u_m)² + (m*u_a)²)
+//           = sqrt((9.81*0.1)² + (2.0*0.01)²)
+//           = sqrt(0.9610² + 0.0200²)
+//           = sqrt(0.923761 + 0.000400)
+//           = sqrt(0.924161) ≈ 0.96134
+// ============================================================================
+
+fn test_newton_second_law() with Mut, Div, Panic {
+    let mass  = quantity_new(2.0,  0.1,  dim_mass())
+    let accel = quantity_new(9.81, 0.01, dim_acceleration())
+    let force = quantity_mul(mass, accel)
+
+    // value: 2.0 * 9.81 = 19.62
+    assert_close(force.value, 19.62, 1.0e-9)
+
+    // dimensions must equal Newton
+    assert(dim_eq(force.dim, dim_force()))
+
+    // GUM uncertainty: sqrt((9.81*0.1)^2 + (2.0*0.01)^2)
+    let expected_u = sqrt_u(9.81 * 0.1 * (9.81 * 0.1) + 2.0 * 0.01 * (2.0 * 0.01))
+    assert_close(force.uncertainty, expected_u, 1.0e-9)
+}
+
+// ============================================================================
+// Test 2 — Dimension compatibility
+//   velocity + velocity  → OK, same dimension
+//   velocity + mass      → incompatible (different dimensions)
+// ============================================================================
+
+fn test_dimension_compatibility() with Mut, Div, Panic {
+    let v1 = quantity_new(10.0, 0.1, dim_velocity())
+    let v2 = quantity_new(5.0,  0.2, dim_velocity())
+    let m1 = quantity_new(1.0,  0.05, dim_mass())
+
+    // velocity + velocity is compatible
+    assert(quantity_is_compatible(v1, v2))
+
+    // velocity + mass is incompatible
+    assert(!quantity_is_compatible(v1, m1))
+
+    // actual addition of same-dimension quantities works
+    let vsum = quantity_add(v1, v2)
+    assert_close(vsum.value, 15.0, 1.0e-9)
+    assert(dim_eq(vsum.dim, dim_velocity()))
+}
+
+// ============================================================================
+// Test 3 — E = mc²  (mass-energy equivalence, dimensions only)
+//   m has dimension [M]
+//   c has dimension [L T⁻¹]
+//   c² has dimension [L² T⁻²]
+//   E = m * c² has dimension [M L² T⁻²] = energy ✓
+// ============================================================================
+
+fn test_emc2_dimensions() with Mut, Div, Panic {
+    // c ≈ 3e8 m/s
+    let mass_q   = quantity_new(1.0e-3, 1.0e-6, dim_mass())
+    let c_q      = quantity_new(2.99792458e8, 0.0, dim_velocity())
+    let c2_q     = quantity_mul(c_q, c_q)
+    let energy_q = quantity_mul(mass_q, c2_q)
+
+    // Dimensions must equal energy: [M L² T⁻²]
+    assert(dim_eq(energy_q.dim, dim_energy()))
+
+    // value sanity: 1e-3 * (3e8)^2 ≈ 8.9875e13 J
+    // Just check it's in the right ballpark (> 8e13 and < 1e14)
+    assert(energy_q.value > 8.0e13)
+    assert(energy_q.value < 1.0e14)
+}
+
+// ============================================================================
+// Test 4 — Unit conversions
+//   0°C = 273.15 K
+//   100°C = 373.15 K
+//   273.15 K → 0°C
+//   1 kg = 1000 g
+//   1 m = 100 cm
+//   1 J = 1/1.602176634e-19 eV
+// ============================================================================
+
+fn test_unit_conversions() with Mut, Div, Panic {
+    // Celsius ↔ Kelvin
+    assert_close(convert_celsius_to_kelvin(0.0),   273.15, 1.0e-9)
+    assert_close(convert_celsius_to_kelvin(100.0), 373.15, 1.0e-9)
+    assert_close(convert_kelvin_to_celsius(273.15), 0.0,   1.0e-9)
+    assert_close(convert_kelvin_to_celsius(373.15), 100.0, 1.0e-9)
+
+    // kg → g
+    assert_close(convert_kg_to_g(1.0),  1000.0, 1.0e-9)
+    assert_close(convert_kg_to_g(0.5),   500.0, 1.0e-9)
+
+    // m → cm
+    assert_close(convert_m_to_cm(1.0), 100.0, 1.0e-9)
+    assert_close(convert_m_to_cm(2.5), 250.0, 1.0e-9)
+
+    // J → eV: 1 J = 6.241509074e18 eV  (reciprocal of 1.602176634e-19)
+    let ev_per_j = convert_joule_to_ev(1.0)
+    assert(ev_per_j > 6.241e18)
+    assert(ev_per_j < 6.242e18)
+}
+
+// ============================================================================
+// Test 5 — GUM uncertainty propagation formulas
+//
+//   Addition:      u_c = sqrt(u_a² + u_b²)
+//   Multiplication: u_c = sqrt((b*u_a)² + (a*u_b)²)
+//   Scaling:        u_c = |s| * u_a
+//   Subtraction:    u_c = sqrt(u_a² + u_b²)
+// ============================================================================
+
+fn test_gum_propagation() with Mut, Div, Panic {
+    // --- Addition ---
+    // x1 = (10.0, u=0.1), x2 = (20.0, u=0.2)
+    // u_sum = sqrt(0.01 + 0.04) = sqrt(0.05)
+    let x1 = quantity_new(10.0, 0.1, dim_length())
+    let x2 = quantity_new(20.0, 0.2, dim_length())
+    let sum = quantity_add(x1, x2)
+    assert_close(sum.value, 30.0, 1.0e-9)
+    assert_close(sum.uncertainty, sqrt_u(0.01 + 0.04), 1.0e-9)
+
+    // --- Subtraction ---
+    // u_diff = sqrt(0.01 + 0.04) = sqrt(0.05) same as addition
+    let diff = quantity_sub(x2, x1)
+    assert_close(diff.value, 10.0, 1.0e-9)
+    assert_close(diff.uncertainty, sqrt_u(0.01 + 0.04), 1.0e-9)
+
+    // --- Multiplication ---
+    // a = (3.0, u=0.1), b = (4.0, u=0.2)
+    // u_c = sqrt((4.0*0.1)^2 + (3.0*0.2)^2) = sqrt(0.16 + 0.36) = sqrt(0.52)
+    let a = quantity_new(3.0, 0.1, dim_length())
+    let b = quantity_new(4.0, 0.2, dim_time())
+    let prod = quantity_mul(a, b)
+    assert_close(prod.value, 12.0, 1.0e-9)
+    assert_close(prod.uncertainty, sqrt_u(0.16 + 0.36), 1.0e-9)
+
+    // --- Scaling ---
+    // q = (5.0, u=0.3), s = 2.0 → result = (10.0, u=0.6)
+    let q  = quantity_new(5.0, 0.3, dim_mass())
+    let qs = quantity_scale(q, 2.0)
+    assert_close(qs.value, 10.0, 1.0e-9)
+    assert_close(qs.uncertainty, 0.6, 1.0e-9)
+
+    // --- Division ---
+    // numerator: (100.0, u=0.5, dim_length)
+    // denominator: (10.0, u=0.1, dim_time)
+    // val = 10.0
+    // u_c = sqrt((0.5/10)^2 + (100*0.1/100)^2)
+    //      = sqrt(0.0025 + 0.01)
+    //      = sqrt(0.0125)
+    let num = quantity_new(100.0, 0.5, dim_length())
+    let den = quantity_new(10.0,  0.1, dim_time())
+    let quot = quantity_div(num, den)
+    assert_close(quot.value, 10.0, 1.0e-9)
+    assert(dim_eq(quot.dim, dim_velocity()))
+    let expected_u_div = sqrt_u(0.05 * 0.05 + (100.0 * 0.1 / 100.0) * (100.0 * 0.1 / 100.0))
+    assert_close(quot.uncertainty, expected_u_div, 1.0e-9)
+}
+
+// ============================================================================
+// Test 6 — Derived dimension chain: pressure = force / area
+//   force: [M L T⁻²]
+//   area:  [L²]  = length * length
+//   pressure: [M L⁻¹ T⁻²]
+// ============================================================================
+
+fn test_pressure_dimensions() with Mut, Div, Panic {
+    let force_q = quantity_new(100.0, 1.0, dim_force())
+    let len_q   = quantity_new(0.5,   0.01, dim_length())
+    let area_q  = quantity_mul(len_q, len_q)         // [L²]
+    let pres_q  = quantity_div(force_q, area_q)      // [M L⁻¹ T⁻²]
+    assert(dim_eq(pres_q.dim, dim_pressure()))
+}
+
+// ============================================================================
+// Entry point
+// ============================================================================
+
+pub fn main() with Mut, Div, Panic {
+    test_newton_second_law()
+    test_dimension_compatibility()
+    test_emc2_dimensions()
+    test_unit_conversions()
+    test_gum_propagation()
+    test_pressure_dimensions()
+}

@@ -1,0 +1,172 @@
+//@ run-pass
+// Tests for stdlib/science/lib — GUM uncertainty propagation and Measurement arithmetic
+
+use science::lib::*
+
+fn check_near(a: f64, b: f64, tol: f64) -> bool {
+    let d = a - b
+    let ad = if d < 0.0 { 0.0 - d } else { d }
+    ad < tol
+}
+
+fn run_tests() -> i32 with Mut, Div, Panic {
+    var pass = 0
+    var fail = 0
+
+    // -----------------------------------------------------------------------
+    // Test 1: measurement_new constructs correctly
+    // -----------------------------------------------------------------------
+    let m1 = measurement_new(10.0, 0.5, 1)
+    if check_near(m1.value, 10.0, 1.0e-12) { pass = pass + 1 } else { fail = fail + 1 }
+    if check_near(m1.uncertainty, 0.5, 1.0e-12) { pass = pass + 1 } else { fail = fail + 1 }
+    if m1.unit_code == 1 { pass = pass + 1 } else { fail = fail + 1 }
+
+    // Negative uncertainty should be made positive
+    let m2 = measurement_new(5.0, -0.2, 0)
+    if check_near(m2.uncertainty, 0.2, 1.0e-12) { pass = pass + 1 } else { fail = fail + 1 }
+
+    // -----------------------------------------------------------------------
+    // Test 2: propagate_sum (GUM quadrature rule)
+    // sqrt(3^2 + 4^2) = sqrt(9+16) = sqrt(25) = 5
+    // -----------------------------------------------------------------------
+    let ps = propagate_sum(3.0, 4.0)
+    if check_near(ps, 5.0, 1.0e-6) { pass = pass + 1 } else { fail = fail + 1 }
+
+    // sqrt(0.1^2 + 0.1^2) = 0.1 * sqrt(2) ≈ 0.14142
+    let ps2 = propagate_sum(0.1, 0.1)
+    if check_near(ps2, 0.14142135, 1.0e-5) { pass = pass + 1 } else { fail = fail + 1 }
+
+    // -----------------------------------------------------------------------
+    // Test 3: propagate_product
+    // |v1*v2| * sqrt((u1/v1)^2 + (u2/v2)^2)
+    // v1=2, u1=0.1, v2=3, u2=0.15
+    // |2*3| * sqrt((0.1/2)^2 + (0.15/3)^2)
+    //       = 6 * sqrt(0.0025 + 0.0025)
+    //       = 6 * sqrt(0.005)
+    //       = 6 * 0.070711 = 0.42426
+    // -----------------------------------------------------------------------
+    let pp = propagate_product(2.0, 0.1, 3.0, 0.15)
+    if check_near(pp, 0.42426, 1.0e-4) { pass = pass + 1 } else { fail = fail + 1 }
+
+    // -----------------------------------------------------------------------
+    // Test 4: measurement_add
+    // (10 ± 0.5) + (5 ± 0.3) = (15 ± sqrt(0.25+0.09)) = (15 ± sqrt(0.34))
+    // sqrt(0.34) ≈ 0.58310
+    // -----------------------------------------------------------------------
+    let ma = measurement_new(10.0, 0.5, 1)
+    let mb = measurement_new(5.0, 0.3, 1)
+    let madd = measurement_add(&ma, &mb)
+    if check_near(madd.value, 15.0, 1.0e-12) { pass = pass + 1 } else { fail = fail + 1 }
+    if check_near(madd.uncertainty, 0.58310, 1.0e-4) { pass = pass + 1 } else { fail = fail + 1 }
+
+    // -----------------------------------------------------------------------
+    // Test 5: measurement_sub
+    // (10 ± 0.5) - (3 ± 0.4) = (7 ± sqrt(0.25+0.16)) = (7 ± sqrt(0.41))
+    // sqrt(0.41) ≈ 0.64031
+    // -----------------------------------------------------------------------
+    let mc = measurement_new(3.0, 0.4, 1)
+    let msub = measurement_sub(&ma, &mc)
+    if check_near(msub.value, 7.0, 1.0e-12) { pass = pass + 1 } else { fail = fail + 1 }
+    if check_near(msub.uncertainty, 0.64031, 1.0e-4) { pass = pass + 1 } else { fail = fail + 1 }
+
+    // -----------------------------------------------------------------------
+    // Test 6: measurement_mul
+    // (4 ± 0.2) * (3 ± 0.3) = 12 ± |4*3|*sqrt((0.2/4)^2+(0.3/3)^2)
+    //   = 12 ± 12 * sqrt(0.0025 + 0.01)
+    //   = 12 ± 12 * sqrt(0.0125)
+    //   = 12 ± 12 * 0.11180 = 12 ± 1.34164
+    // -----------------------------------------------------------------------
+    let md = measurement_new(4.0, 0.2, 2)
+    let me = measurement_new(3.0, 0.3, 2)
+    let mmul = measurement_mul(&md, &me)
+    if check_near(mmul.value, 12.0, 1.0e-12) { pass = pass + 1 } else { fail = fail + 1 }
+    if check_near(mmul.uncertainty, 1.34164, 1.0e-4) { pass = pass + 1 } else { fail = fail + 1 }
+
+    // -----------------------------------------------------------------------
+    // Test 7: measurement_div
+    // (12 ± 0.6) / (4 ± 0.2) = 3 ± |3|*sqrt((0.6/12)^2+(0.2/4)^2)
+    //   = 3 ± 3 * sqrt(0.0025 + 0.0025)
+    //   = 3 ± 3 * sqrt(0.005)
+    //   = 3 ± 3 * 0.07071 = 3 ± 0.21213
+    // -----------------------------------------------------------------------
+    let mf = measurement_new(12.0, 0.6, 0)
+    let mg = measurement_new(4.0, 0.2, 0)
+    let mdiv = measurement_div(&mf, &mg)
+    if check_near(mdiv.value, 3.0, 1.0e-12) { pass = pass + 1 } else { fail = fail + 1 }
+    if check_near(mdiv.uncertainty, 0.21213, 1.0e-4) { pass = pass + 1 } else { fail = fail + 1 }
+
+    // -----------------------------------------------------------------------
+    // Test 8: measurement_relative_error
+    // (100 ± 2) -> relative error = 2/100 * 100 = 2.0%
+    // -----------------------------------------------------------------------
+    let mh = measurement_new(100.0, 2.0, 0)
+    let re = measurement_relative_error(&mh)
+    if check_near(re, 2.0, 1.0e-9) { pass = pass + 1 } else { fail = fail + 1 }
+
+    // (0.5 ± 0.05) -> 0.05/0.5 * 100 = 10%
+    let mi = measurement_new(0.5, 0.05, 0)
+    let re2 = measurement_relative_error(&mi)
+    if check_near(re2, 10.0, 1.0e-9) { pass = pass + 1 } else { fail = fail + 1 }
+
+    // -----------------------------------------------------------------------
+    // Test 9: round_to_uncertainty
+    // val=3.14159, unc=0.01 -> round to 2 decimal places = 3.14
+    // val=123.456, unc=1.0  -> round to units = 123.0
+    // val=0.00789, unc=0.001 -> round to 0.008
+    // -----------------------------------------------------------------------
+    let r1 = round_to_uncertainty(3.14159, 0.01)
+    if check_near(r1, 3.14, 1.0e-9) { pass = pass + 1 } else { fail = fail + 1 }
+
+    let r2 = round_to_uncertainty(123.456, 1.0)
+    if check_near(r2, 123.0, 1.0e-9) { pass = pass + 1 } else { fail = fail + 1 }
+
+    // -----------------------------------------------------------------------
+    // Test 10: weighted_mean of 3 measurements
+    // values = [10, 20, 30], uncertainties = [1, 2, 3]
+    // weights: w1=1/1=1, w2=1/4=0.25, w3=1/9≈0.1111
+    // sum_w = 1.3611, sum_wv = 1*10 + 0.25*20 + 0.1111*30 = 10 + 5 + 3.333 = 18.333
+    // mean = 18.333 / 1.3611 ≈ 13.47
+    // u = 1/sqrt(1.3611) ≈ 0.857
+    // -----------------------------------------------------------------------
+    var vals: [f64; 64] = [0.0; 64]
+    var uncs: [f64; 64] = [0.0; 64]
+    vals[0] = 10.0; vals[1] = 20.0; vals[2] = 30.0
+    uncs[0] = 1.0;  uncs[1] = 2.0;  uncs[2] = 3.0
+
+    let wm = weighted_mean(&vals, &uncs, 3)
+    // Expected mean ≈ 13.47
+    if check_near(wm.value, 13.47, 0.01) { pass = pass + 1 } else { fail = fail + 1 }
+    // Expected uncertainty ≈ 0.857
+    if check_near(wm.uncertainty, 0.857, 0.01) { pass = pass + 1 } else { fail = fail + 1 }
+
+    // -----------------------------------------------------------------------
+    // Test 11: weighted_mean with equal uncertainties -> simple mean
+    // values=[1,2,3], unc=[1,1,1]
+    // w_i=1 for all, mean = (1+2+3)/3 = 2.0, u = 1/sqrt(3) ≈ 0.5774
+    // -----------------------------------------------------------------------
+    vals[0] = 1.0; vals[1] = 2.0; vals[2] = 3.0
+    uncs[0] = 1.0; uncs[1] = 1.0; uncs[2] = 1.0
+
+    let wm2 = weighted_mean(&vals, &uncs, 3)
+    if check_near(wm2.value, 2.0, 1.0e-9) { pass = pass + 1 } else { fail = fail + 1 }
+    if check_near(wm2.uncertainty, 0.5774, 1.0e-3) { pass = pass + 1 } else { fail = fail + 1 }
+
+    // -----------------------------------------------------------------------
+    // Test 12: GUM sum vs product rules give different results
+    // For addition: u_sum uses quadrature of absolute uncertainties
+    // For multiplication: u_prod uses relative uncertainties
+    // Verify they differ for the same numerical inputs
+    // -----------------------------------------------------------------------
+    let u_sum_rule = propagate_sum(1.0, 1.0)  // sqrt(2) ≈ 1.4142
+    let u_prod_rule = propagate_product(10.0, 1.0, 10.0, 1.0)  // 100 * sqrt(0.01+0.01) = 100*0.1414=14.14
+    // They should be different (different physical meaning)
+    let differ = if u_prod_rule > u_sum_rule { u_prod_rule > u_sum_rule } else { u_sum_rule > u_prod_rule }
+    if differ { pass = pass + 1 } else { fail = fail + 1 }
+
+    if fail > 0 { return fail }
+    return 0
+}
+
+fn main() -> i32 with Mut, Div, Panic {
+    return run_tests()
+}

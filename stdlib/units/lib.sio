@@ -1,3 +1,260 @@
-//! stdlib/units/lib.sio - Module entry point
+//! stdlib/units/lib.sio — Dimensional analysis with epistemic uncertainty
 //!
-//! This module contains units functionality.
+//! Provides SI unit dimensions, GUM-based uncertainty propagation, and
+//! unit conversion for physical quantities.
+//!
+//! References:
+//!   JCGM 100:2008 (GUM) — https://www.bipm.org/documents/20126/2071204/JCGM_100_2008_E.pdf
+//!   BIPM SI Brochure 9th edition — https://www.bipm.org/utils/common/pdf/si-brochure/SI-Brochure-9.pdf
+
+// ============================================================================
+// UnitDim — 7-dimensional SI exponent vector
+// ============================================================================
+
+pub struct UnitDim {
+    pub mass:        i32   // kg exponent
+    pub length:      i32   // m  exponent
+    pub time:        i32   // s  exponent
+    pub temperature: i32   // K  exponent
+    pub amount:      i32   // mol exponent
+    pub current:     i32   // A  exponent
+    pub luminosity:  i32   // cd exponent
+}
+
+// ============================================================================
+// Quantity — value + standard uncertainty + dimensions
+// ============================================================================
+
+pub struct Quantity {
+    pub value:       f64
+    pub uncertainty: f64   // standard uncertainty u(x) per GUM §3.3
+    pub dim:         UnitDim
+}
+
+// ============================================================================
+// Internal helpers (must precede callers)
+// ============================================================================
+
+fn sqrt_units(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i = 0
+    while i < 30 {
+        y = 0.5 * (y + x / y)
+        i = i + 1
+    }
+    y
+}
+
+fn abs_units(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+// ============================================================================
+// Base dimension constructors
+// ============================================================================
+
+pub fn dim_dimensionless() -> UnitDim {
+    UnitDim { mass: 0, length: 0, time: 0, temperature: 0, amount: 0, current: 0, luminosity: 0 }
+}
+
+pub fn dim_mass() -> UnitDim {
+    UnitDim { mass: 1, length: 0, time: 0, temperature: 0, amount: 0, current: 0, luminosity: 0 }
+}
+
+pub fn dim_length() -> UnitDim {
+    UnitDim { mass: 0, length: 1, time: 0, temperature: 0, amount: 0, current: 0, luminosity: 0 }
+}
+
+pub fn dim_time() -> UnitDim {
+    UnitDim { mass: 0, length: 0, time: 1, temperature: 0, amount: 0, current: 0, luminosity: 0 }
+}
+
+pub fn dim_temperature() -> UnitDim {
+    UnitDim { mass: 0, length: 0, time: 0, temperature: 1, amount: 0, current: 0, luminosity: 0 }
+}
+
+pub fn dim_amount() -> UnitDim {
+    UnitDim { mass: 0, length: 0, time: 0, temperature: 0, amount: 1, current: 0, luminosity: 0 }
+}
+
+pub fn dim_current() -> UnitDim {
+    UnitDim { mass: 0, length: 0, time: 0, temperature: 0, amount: 0, current: 1, luminosity: 0 }
+}
+
+// ============================================================================
+// Derived dimension constructors
+// ============================================================================
+
+// m s⁻¹
+pub fn dim_velocity() -> UnitDim {
+    UnitDim { mass: 0, length: 1, time: 0 - 1, temperature: 0, amount: 0, current: 0, luminosity: 0 }
+}
+
+// m s⁻²
+pub fn dim_acceleration() -> UnitDim {
+    UnitDim { mass: 0, length: 1, time: 0 - 2, temperature: 0, amount: 0, current: 0, luminosity: 0 }
+}
+
+// kg m s⁻² (Newton)
+pub fn dim_force() -> UnitDim {
+    UnitDim { mass: 1, length: 1, time: 0 - 2, temperature: 0, amount: 0, current: 0, luminosity: 0 }
+}
+
+// kg m² s⁻² (Joule)
+pub fn dim_energy() -> UnitDim {
+    UnitDim { mass: 1, length: 2, time: 0 - 2, temperature: 0, amount: 0, current: 0, luminosity: 0 }
+}
+
+// kg m² s⁻³ (Watt)
+pub fn dim_power() -> UnitDim {
+    UnitDim { mass: 1, length: 2, time: 0 - 3, temperature: 0, amount: 0, current: 0, luminosity: 0 }
+}
+
+// kg m⁻¹ s⁻² (Pascal)
+pub fn dim_pressure() -> UnitDim {
+    UnitDim { mass: 1, length: 0 - 1, time: 0 - 2, temperature: 0, amount: 0, current: 0, luminosity: 0 }
+}
+
+// ============================================================================
+// Dimension arithmetic
+// ============================================================================
+
+pub fn dim_eq(a: UnitDim, b: UnitDim) -> bool {
+    a.mass == b.mass &&
+    a.length == b.length &&
+    a.time == b.time &&
+    a.temperature == b.temperature &&
+    a.amount == b.amount &&
+    a.current == b.current &&
+    a.luminosity == b.luminosity
+}
+
+fn dim_add_exp(a: UnitDim, b: UnitDim) -> UnitDim {
+    UnitDim {
+        mass:        a.mass        + b.mass,
+        length:      a.length      + b.length,
+        time:        a.time        + b.time,
+        temperature: a.temperature + b.temperature,
+        amount:      a.amount      + b.amount,
+        current:     a.current     + b.current,
+        luminosity:  a.luminosity  + b.luminosity,
+    }
+}
+
+fn dim_sub_exp(a: UnitDim, b: UnitDim) -> UnitDim {
+    UnitDim {
+        mass:        a.mass        - b.mass,
+        length:      a.length      - b.length,
+        time:        a.time        - b.time,
+        temperature: a.temperature - b.temperature,
+        amount:      a.amount      - b.amount,
+        current:     a.current     - b.current,
+        luminosity:  a.luminosity  - b.luminosity,
+    }
+}
+
+// ============================================================================
+// Quantity constructors
+// ============================================================================
+
+pub fn quantity_new(val: f64, unc: f64, dim: UnitDim) -> Quantity {
+    Quantity { value: val, uncertainty: unc, dim: dim }
+}
+
+// ============================================================================
+// Quantity compatibility
+// ============================================================================
+
+pub fn quantity_is_compatible(a: Quantity, b: Quantity) -> bool {
+    dim_eq(a.dim, b.dim)
+}
+
+// ============================================================================
+// Quantity arithmetic with GUM uncertainty propagation
+// ============================================================================
+
+// Addition: result_u = sqrt(u_a² + u_b²), dimensions must match (GUM §5.1.3)
+pub fn quantity_add(a: Quantity, b: Quantity) -> Quantity with Panic, Mut, Div {
+    assert(dim_eq(a.dim, b.dim))
+    let ua2 = a.uncertainty * a.uncertainty
+    let ub2 = b.uncertainty * b.uncertainty
+    let uc  = sqrt_units(ua2 + ub2)
+    Quantity { value: a.value + b.value, uncertainty: uc, dim: a.dim }
+}
+
+// Subtraction: result_u = sqrt(u_a² + u_b²), dimensions must match
+pub fn quantity_sub(a: Quantity, b: Quantity) -> Quantity with Panic, Mut, Div {
+    assert(dim_eq(a.dim, b.dim))
+    let ua2 = a.uncertainty * a.uncertainty
+    let ub2 = b.uncertainty * b.uncertainty
+    let uc  = sqrt_units(ua2 + ub2)
+    Quantity { value: a.value - b.value, uncertainty: uc, dim: a.dim }
+}
+
+// Multiplication: GUM §5.1.5 — relative uncertainties combine in quadrature
+//   u_c/|c| = sqrt((u_a/|a|)² + (u_b/|b|)²)
+//   u_c = |c| * sqrt((u_a/a)² + (u_b/b)²)
+//       = sqrt((b*u_a)² + (a*u_b)²)   [equivalent form]
+pub fn quantity_mul(a: Quantity, b: Quantity) -> Quantity with Mut, Div, Panic {
+    let val = a.value * b.value
+    let term_a = b.value * a.uncertainty
+    let term_b = a.value * b.uncertainty
+    let uc = sqrt_units(term_a * term_a + term_b * term_b)
+    let dim = dim_add_exp(a.dim, b.dim)
+    Quantity { value: val, uncertainty: uc, dim: dim }
+}
+
+// Division: same relative-uncertainty law as multiplication
+//   u_c = |c| * sqrt((u_a/a)² + (u_b/b)²)
+//       = sqrt((u_a/b)² + (a*u_b/b²)²)
+pub fn quantity_div(a: Quantity, b: Quantity) -> Quantity with Mut, Div, Panic {
+    let val = a.value / b.value
+    let term_a = a.uncertainty / b.value
+    let term_b = a.value * b.uncertainty / (b.value * b.value)
+    let uc = sqrt_units(term_a * term_a + term_b * term_b)
+    let dim = dim_sub_exp(a.dim, b.dim)
+    Quantity { value: val, uncertainty: uc, dim: dim }
+}
+
+// Scale by a dimensionless scalar s (exact, so no added uncertainty)
+pub fn quantity_scale(q: Quantity, s: f64) -> Quantity {
+    Quantity { value: q.value * s, uncertainty: abs_units(s) * q.uncertainty, dim: q.dim }
+}
+
+// ============================================================================
+// Unit conversions (exact, no uncertainty added)
+// ============================================================================
+
+pub fn convert_celsius_to_kelvin(c: f64) -> f64 {
+    c + 273.15
+}
+
+pub fn convert_kelvin_to_celsius(k: f64) -> f64 {
+    k - 273.15
+}
+
+pub fn convert_kg_to_g(kg: f64) -> f64 {
+    kg * 1000.0
+}
+
+pub fn convert_g_to_kg(g: f64) -> f64 {
+    g / 1000.0
+}
+
+pub fn convert_m_to_cm(m: f64) -> f64 {
+    m * 100.0
+}
+
+pub fn convert_cm_to_m(cm: f64) -> f64 {
+    cm / 100.0
+}
+
+// 1 eV = 1.602176634e-19 J  (exact, 2019 SI redefinition)
+pub fn convert_joule_to_ev(j: f64) -> f64 with Div, Panic, Mut {
+    j / 1.602176634e-19
+}
+
+pub fn convert_ev_to_joule(ev: f64) -> f64 {
+    ev * 1.602176634e-19
+}

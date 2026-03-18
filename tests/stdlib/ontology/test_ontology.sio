@@ -1,0 +1,791 @@
+//@ run-pass
+//
+// tests/stdlib/ontology/test_ontology.sio
+//
+// Test suite for stdlib/ontology — exercises the triple cache, ontology model,
+// namespace registry, query engine, and RDFS reasoner.
+//
+// Each submodule is self-contained (structs are duplicated intentionally).
+// This suite covers cache.sio, model.sio, namespaces.sio, query.sio, and
+// reasoner.sio APIs by including their logic inline.
+
+// ============================================================================
+// SHARED TYPES (replicated as in each submodule)
+// ============================================================================
+
+struct Triple {
+    subj: i32,
+    pred: i32,
+    obj: i32
+}
+
+struct OntCache {
+    triples: [Triple; 512],
+    count: i32,
+    subj_idx: [i32; 512],
+    pred_idx: [i32; 512]
+}
+
+struct OntClass {
+    id: i32,
+    parent: i32,
+    name_hash: i64
+}
+
+struct OntProperty {
+    id: i32,
+    domain: i32,
+    range: i32,
+    name_hash: i64
+}
+
+struct OntModel {
+    classes: [OntClass; 128],
+    class_count: i32,
+    props: [OntProperty; 128],
+    prop_count: i32
+}
+
+struct QueryPattern {
+    subj: i32,
+    pred: i32,
+    obj: i32
+}
+
+struct NamespaceRegistry {
+    entries_id: [i64; 64],
+    entries_prefix_len: [i64; 64],
+    entries_is_standard: [i64; 64],
+    count: i64
+}
+
+// ============================================================================
+// NAMESPACE CONSTANTS (from namespaces.sio)
+// ============================================================================
+
+let NS_RDF: i64 = 1
+let NS_RDFS: i64 = 2
+let NS_OWL: i64 = 3
+let NS_XSD: i64 = 4
+let NS_SKOS: i64 = 7
+let NS_SNOMED: i64 = 100
+let NS_LOINC: i64 = 101
+let NS_GO: i64 = 102
+let NS_HPO: i64 = 103
+
+let IRI_RDF_TYPE: i64 = 1001
+let IRI_RDFS_SUBCLASS_OF: i64 = 2003
+let IRI_OWL_CLASS: i64 = 3001
+let IRI_SKOS_BROADER: i64 = 4004
+
+// Reasoner predicate IDs
+let PRED_SUBCLASS: i32 = 1
+let PRED_TYPE: i32 = 2
+
+// ============================================================================
+// CACHE OPERATIONS (from cache.sio)
+// ============================================================================
+
+fn cache_new() -> OntCache {
+    var triples = [Triple { subj: 0, pred: 0, obj: 0 }; 512]
+    var subj_idx = [0; 512]
+    var pred_idx = [0; 512]
+    OntCache { triples: triples, count: 0, subj_idx: subj_idx, pred_idx: pred_idx }
+}
+
+fn cache_add(c: OntCache, s: i32, p: i32, o: i32) -> OntCache {
+    var result = c
+    if result.count >= 512 {
+        return result
+    }
+    var i: i32 = 0
+    while i < result.count {
+        let t = result.triples[i]
+        if t.subj == s {
+            if t.pred == p {
+                if t.obj == o {
+                    return result
+                }
+            }
+        }
+        i = i + 1
+    }
+    let idx = result.count
+    result.triples[idx] = Triple { subj: s, pred: p, obj: o }
+    result.subj_idx[idx] = s
+    result.pred_idx[idx] = p
+    result.count = result.count + 1
+    result
+}
+
+fn cache_contains(c: OntCache, s: i32, p: i32, o: i32) -> bool {
+    var i: i32 = 0
+    while i < c.count {
+        let t = c.triples[i]
+        if t.subj == s {
+            if t.pred == p {
+                if t.obj == o {
+                    return true
+                }
+            }
+        }
+        i = i + 1
+    }
+    false
+}
+
+fn cache_count(c: OntCache) -> i32 {
+    c.count
+}
+
+// ============================================================================
+// MODEL OPERATIONS (from model.sio)
+// ============================================================================
+
+fn model_new() -> OntModel {
+    var classes = [OntClass { id: 0, parent: -1, name_hash: 0 }; 128]
+    var props = [OntProperty { id: 0, domain: 0, range: 0, name_hash: 0 }; 128]
+    OntModel { classes: classes, class_count: 0, props: props, prop_count: 0 }
+}
+
+fn model_add_class(m: OntModel, id: i32, parent: i32, name_hash: i64) -> OntModel {
+    var result = m
+    if result.class_count >= 128 {
+        return result
+    }
+    let idx = result.class_count
+    result.classes[idx] = OntClass { id: id, parent: parent, name_hash: name_hash }
+    result.class_count = result.class_count + 1
+    result
+}
+
+fn model_find_class(m: OntModel, id: i32) -> i32 {
+    var i: i32 = 0
+    while i < m.class_count {
+        if m.classes[i].id == id {
+            return i
+        }
+        i = i + 1
+    }
+    return -1
+}
+
+fn model_parent_of(m: OntModel, class_id: i32) -> i32 {
+    let idx = model_find_class(m, class_id)
+    if idx < 0 {
+        return -1
+    }
+    m.classes[idx].parent
+}
+
+fn model_is_subclass(m: OntModel, child: i32, parent: i32) -> bool {
+    if child == parent {
+        return true
+    }
+    var current = child
+    var depth: i32 = 0
+    while depth < 128 {
+        let p = model_parent_of(m, current)
+        if p < 0 {
+            return false
+        }
+        if p == parent {
+            return true
+        }
+        current = p
+        depth = depth + 1
+    }
+    false
+}
+
+fn model_add_property(m: OntModel, id: i32, domain: i32, range: i32, name_hash: i64) -> OntModel {
+    var result = m
+    if result.prop_count >= 128 {
+        return result
+    }
+    let idx = result.prop_count
+    result.props[idx] = OntProperty { id: id, domain: domain, range: range, name_hash: name_hash }
+    result.prop_count = result.prop_count + 1
+    result
+}
+
+fn model_find_property(m: OntModel, id: i32) -> i32 {
+    var i: i32 = 0
+    while i < m.prop_count {
+        if m.props[i].id == id {
+            return i
+        }
+        i = i + 1
+    }
+    return -1
+}
+
+fn model_property_domain(m: OntModel, prop_id: i32) -> i32 {
+    let idx = model_find_property(m, prop_id)
+    if idx < 0 {
+        return -1
+    }
+    m.props[idx].domain
+}
+
+fn model_property_range(m: OntModel, prop_id: i32) -> i32 {
+    let idx = model_find_property(m, prop_id)
+    if idx < 0 {
+        return -1
+    }
+    m.props[idx].range
+}
+
+// ============================================================================
+// NAMESPACE REGISTRY (from namespaces.sio)
+// ============================================================================
+
+fn namespace_registry_new() -> NamespaceRegistry {
+    NamespaceRegistry {
+        entries_id: [0; 64],
+        entries_prefix_len: [0; 64],
+        entries_is_standard: [0; 64],
+        count: 0
+    }
+}
+
+fn namespace_registry_add(reg: NamespaceRegistry, ns_id: i64, is_standard: i64) -> NamespaceRegistry {
+    var r = reg
+    let idx = r.count
+    r.entries_id[idx] = ns_id
+    r.entries_prefix_len[idx] = 0
+    r.entries_is_standard[idx] = is_standard
+    r.count = r.count + 1
+    return r
+}
+
+fn namespace_registry_has(reg: NamespaceRegistry, ns_id: i64) -> bool {
+    var i: i64 = 0
+    while i < reg.count {
+        if reg.entries_id[i] == ns_id {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+fn namespace_registry_with_defaults() -> NamespaceRegistry {
+    var reg = namespace_registry_new()
+    reg = namespace_registry_add(reg, NS_RDF, 1)
+    reg = namespace_registry_add(reg, NS_RDFS, 1)
+    reg = namespace_registry_add(reg, NS_OWL, 1)
+    reg = namespace_registry_add(reg, NS_XSD, 1)
+    reg = namespace_registry_add(reg, NS_SKOS, 1)
+    return reg
+}
+
+fn is_rdf_type(iri_id: i64) -> bool { iri_id == IRI_RDF_TYPE }
+fn is_rdfs_subclass_of(iri_id: i64) -> bool { iri_id == IRI_RDFS_SUBCLASS_OF }
+fn is_owl_class(iri_id: i64) -> bool { iri_id == IRI_OWL_CLASS }
+fn is_snomed_iri(namespace_id: i64) -> bool { namespace_id == NS_SNOMED }
+fn is_go_iri(namespace_id: i64) -> bool { namespace_id == NS_GO }
+
+// ============================================================================
+// QUERY ENGINE (from query.sio)
+// ============================================================================
+
+fn pattern_all_wild() -> QueryPattern {
+    QueryPattern { subj: -1, pred: -1, obj: -1 }
+}
+
+fn pattern_subj(s: i32) -> QueryPattern {
+    QueryPattern { subj: s, pred: -1, obj: -1 }
+}
+
+fn pattern_pred(p: i32) -> QueryPattern {
+    QueryPattern { subj: -1, pred: p, obj: -1 }
+}
+
+fn pattern_exact(s: i32, p: i32, o: i32) -> QueryPattern {
+    QueryPattern { subj: s, pred: p, obj: o }
+}
+
+fn query_count(cache: OntCache, pattern: QueryPattern) -> i32 {
+    var n: i32 = 0
+    var i: i32 = 0
+    while i < cache.count {
+        let t = cache.triples[i]
+        var subj_ok = false
+        if pattern.subj < 0 { subj_ok = true } else if pattern.subj == t.subj { subj_ok = true }
+        var pred_ok = false
+        if pattern.pred < 0 { pred_ok = true } else if pattern.pred == t.pred { pred_ok = true }
+        var obj_ok = false
+        if pattern.obj < 0 { obj_ok = true } else if pattern.obj == t.obj { obj_ok = true }
+        if subj_ok { if pred_ok { if obj_ok { n = n + 1 } } }
+        i = i + 1
+    }
+    n
+}
+
+// ============================================================================
+// REASONER (from reasoner.sio)
+// ============================================================================
+
+fn cache_try_add(c: OntCache, s: i32, p: i32, o: i32) -> OntCache {
+    if c.count >= 512 {
+        return c
+    }
+    var i: i32 = 0
+    while i < c.count {
+        let t = c.triples[i]
+        if t.subj == s { if t.pred == p { if t.obj == o { return c } } }
+        i = i + 1
+    }
+    var result = c
+    let idx = result.count
+    result.triples[idx] = Triple { subj: s, pred: p, obj: o }
+    result.subj_idx[idx] = s
+    result.pred_idx[idx] = p
+    result.count = result.count + 1
+    result
+}
+
+fn reasoner_rdfs_subclass(model: OntModel, cache: OntCache) -> OntCache {
+    var result = cache
+    var ci: i32 = 0
+    while ci < model.class_count {
+        let cls = model.classes[ci]
+        if cls.parent >= 0 {
+            result = cache_try_add(result, cls.id, PRED_SUBCLASS, cls.parent)
+        }
+        ci = ci + 1
+    }
+    var round: i32 = 0
+    while round < 64 {
+        var added: i32 = 0
+        let snap_count = result.count
+        var i: i32 = 0
+        while i < snap_count {
+            let t1 = result.triples[i]
+            if t1.pred == PRED_SUBCLASS {
+                var j: i32 = 0
+                while j < snap_count {
+                    let t2 = result.triples[j]
+                    if t2.pred == PRED_SUBCLASS {
+                        if t2.subj == t1.obj {
+                            let old_count = result.count
+                            result = cache_try_add(result, t1.subj, PRED_SUBCLASS, t2.obj)
+                            if result.count > old_count {
+                                added = added + 1
+                            }
+                        }
+                    }
+                    j = j + 1
+                }
+            }
+            i = i + 1
+        }
+        if added == 0 {
+            return result
+        }
+        round = round + 1
+    }
+    result
+}
+
+fn reasoner_domain_range(model: OntModel, cache: OntCache) -> OntCache {
+    var result = cache
+    var i: i32 = 0
+    while i < result.count {
+        let t = result.triples[i]
+        let pred_id = t.pred
+        var pi: i32 = 0
+        while pi < model.prop_count {
+            let prop = model.props[pi]
+            if prop.id == pred_id {
+                if prop.domain >= 0 {
+                    result = cache_try_add(result, t.subj, PRED_TYPE, prop.domain)
+                }
+                if prop.range >= 0 {
+                    result = cache_try_add(result, t.obj, PRED_TYPE, prop.range)
+                }
+            }
+            pi = pi + 1
+        }
+        i = i + 1
+    }
+    result
+}
+
+// ============================================================================
+// TEST HELPERS
+// ============================================================================
+
+fn make_animal_model() -> OntModel {
+    // Thing(1) <- Animal(2) <- Mammal(3) <- Dog(4)
+    let m = model_new()
+    let m2 = model_add_class(m, 1, -1, 1000)
+    let m3 = model_add_class(m2, 2, 1, 2000)
+    let m4 = model_add_class(m3, 3, 2, 3000)
+    model_add_class(m4, 4, 3, 4000)
+}
+
+fn make_test_cache() -> OntCache {
+    var c = cache_new()
+    c = cache_add(c, 1, 100, 10)
+    c = cache_add(c, 2, 100, 10)
+    c = cache_add(c, 1, 200, 20)
+    c
+}
+
+// ============================================================================
+// TESTS — CACHE
+// ============================================================================
+
+fn t01_cache_empty_count() -> bool {
+    let c = cache_new()
+    cache_count(c) == 0
+}
+
+fn t02_cache_add_single() -> bool {
+    let c = cache_new()
+    let c2 = cache_add(c, 1, 2, 3)
+    cache_count(c2) == 1
+}
+
+fn t03_cache_add_dedup() -> bool {
+    let c = cache_new()
+    let c2 = cache_add(c, 1, 2, 3)
+    let c3 = cache_add(c2, 1, 2, 3)
+    cache_count(c3) == 1
+}
+
+fn t04_cache_contains_present() -> bool {
+    let c = cache_new()
+    let c2 = cache_add(c, 10, 20, 30)
+    cache_contains(c2, 10, 20, 30)
+}
+
+fn t05_cache_contains_absent() -> bool {
+    let c = cache_new()
+    let c2 = cache_add(c, 10, 20, 30)
+    cache_contains(c2, 10, 20, 99) == false
+}
+
+fn t06_cache_multiple_triples() -> bool {
+    let c = cache_new()
+    let c2 = cache_add(c, 1, 2, 3)
+    let c3 = cache_add(c2, 4, 5, 6)
+    let c4 = cache_add(c3, 7, 8, 9)
+    cache_count(c4) == 3
+}
+
+// ============================================================================
+// TESTS — MODEL
+// ============================================================================
+
+fn t07_model_empty() -> bool {
+    let m = model_new()
+    m.class_count == 0
+}
+
+fn t08_model_add_class() -> bool {
+    let m = model_new()
+    let m2 = model_add_class(m, 1, -1, 100)
+    m2.class_count == 1
+}
+
+fn t09_model_find_class_present() -> bool {
+    let m = model_new()
+    let m2 = model_add_class(m, 42, -1, 999)
+    model_find_class(m2, 42) == 0
+}
+
+fn t10_model_find_class_absent() -> bool {
+    let m = model_new()
+    model_find_class(m, 99) == -1
+}
+
+fn t11_model_is_subclass_self() -> bool {
+    let m = model_new()
+    let m2 = model_add_class(m, 5, -1, 500)
+    model_is_subclass(m2, 5, 5)
+}
+
+fn t12_model_is_subclass_direct() -> bool {
+    let m = model_new()
+    let m2 = model_add_class(m, 1, -1, 100)
+    let m3 = model_add_class(m2, 2, 1, 200)
+    model_is_subclass(m3, 2, 1)
+}
+
+fn t13_model_is_subclass_transitive() -> bool {
+    let m = make_animal_model()
+    // Dog(4) subclass of Thing(1) via Dog->Mammal->Animal->Thing
+    model_is_subclass(m, 4, 1)
+}
+
+fn t14_model_not_subclass_sibling() -> bool {
+    let m = model_new()
+    let m2 = model_add_class(m, 1, -1, 100)
+    let m3 = model_add_class(m2, 2, -1, 200)
+    model_is_subclass(m3, 1, 2) == false
+}
+
+fn t15_model_parent_of_root() -> bool {
+    let m = model_new()
+    let m2 = model_add_class(m, 1, -1, 100)
+    model_parent_of(m2, 1) == -1
+}
+
+fn t16_model_parent_of_child() -> bool {
+    let m = model_new()
+    let m2 = model_add_class(m, 1, -1, 100)
+    let m3 = model_add_class(m2, 2, 1, 200)
+    model_parent_of(m3, 2) == 1
+}
+
+fn t17_model_property_domain_range() -> bool {
+    let m = model_new()
+    let m2 = model_add_class(m, 1, -1, 100)
+    let m3 = model_add_class(m2, 2, -1, 200)
+    let m4 = model_add_property(m3, 10, 1, 2, 1000)
+    model_property_domain(m4, 10) == 1 && model_property_range(m4, 10) == 2
+}
+
+fn t18_model_property_not_found() -> bool {
+    let m = model_new()
+    model_property_domain(m, 99) == -1
+}
+
+// ============================================================================
+// TESTS — NAMESPACES
+// ============================================================================
+
+fn t19_namespace_registry_empty() -> bool {
+    let reg = namespace_registry_new()
+    reg.count == 0
+}
+
+fn t20_namespace_registry_add_and_has() -> bool {
+    let reg = namespace_registry_new()
+    let reg2 = namespace_registry_add(reg, NS_RDF, 1)
+    namespace_registry_has(reg2, NS_RDF)
+}
+
+fn t21_namespace_registry_has_absent() -> bool {
+    let reg = namespace_registry_new()
+    namespace_registry_has(reg, NS_SNOMED) == false
+}
+
+fn t22_namespace_registry_with_defaults_has_owl() -> bool {
+    let reg = namespace_registry_with_defaults()
+    namespace_registry_has(reg, NS_OWL)
+}
+
+fn t23_namespace_registry_with_defaults_has_skos() -> bool {
+    let reg = namespace_registry_with_defaults()
+    namespace_registry_has(reg, NS_SKOS)
+}
+
+fn t24_iri_predicates_correct() -> bool {
+    is_rdf_type(IRI_RDF_TYPE) &&
+    is_rdfs_subclass_of(IRI_RDFS_SUBCLASS_OF) &&
+    is_owl_class(IRI_OWL_CLASS)
+}
+
+fn t25_namespace_biomedical_constants() -> bool {
+    is_snomed_iri(NS_SNOMED) && is_go_iri(NS_GO)
+}
+
+fn t26_iri_predicate_negative() -> bool {
+    is_rdf_type(9999) == false && is_owl_class(1001) == false
+}
+
+// ============================================================================
+// TESTS — QUERY ENGINE
+// ============================================================================
+
+fn t27_query_all_wild() -> bool {
+    let c = make_test_cache()
+    let p = pattern_all_wild()
+    query_count(c, p) == 3
+}
+
+fn t28_query_by_subj() -> bool {
+    let c = make_test_cache()
+    let p = pattern_subj(1)
+    query_count(c, p) == 2
+}
+
+fn t29_query_by_pred() -> bool {
+    let c = make_test_cache()
+    let p = pattern_pred(100)
+    query_count(c, p) == 2
+}
+
+fn t30_query_exact_match() -> bool {
+    let c = make_test_cache()
+    let p = pattern_exact(2, 100, 10)
+    query_count(c, p) == 1
+}
+
+fn t31_query_no_match() -> bool {
+    let c = make_test_cache()
+    let p = pattern_exact(99, 99, 99)
+    query_count(c, p) == 0
+}
+
+fn t32_query_wildcard_object() -> bool {
+    let c = make_test_cache()
+    // Subject=1, pred=wild, obj=wild
+    let p = pattern_subj(2)
+    query_count(c, p) == 1
+}
+
+// ============================================================================
+// TESTS — REASONER
+// ============================================================================
+
+fn t33_reasoner_subclass_direct_count() -> bool {
+    // Thing(1) <- Animal(2)
+    let m = model_new()
+    let m2 = model_add_class(m, 1, -1, 100)
+    let m3 = model_add_class(m2, 2, 1, 200)
+    let cache = cache_new()
+    let result = reasoner_rdfs_subclass(m3, cache)
+    result.count == 1
+}
+
+fn t34_reasoner_subclass_transitive_count() -> bool {
+    // Thing(1) <- Animal(2) <- Dog(3): should produce 3 triples
+    let m = model_new()
+    let m2 = model_add_class(m, 1, -1, 100)
+    let m3 = model_add_class(m2, 2, 1, 200)
+    let m4 = model_add_class(m3, 3, 2, 300)
+    let cache = cache_new()
+    let result = reasoner_rdfs_subclass(m4, cache)
+    result.count == 3
+}
+
+fn t35_reasoner_subclass_contains_transitive() -> bool {
+    let m = make_animal_model()
+    let cache = cache_new()
+    let result = reasoner_rdfs_subclass(m, cache)
+    // Dog(4) should be inferred as subclass of Thing(1)
+    cache_contains(result, 4, PRED_SUBCLASS, 1)
+}
+
+fn t36_reasoner_subclass_deep_chain() -> bool {
+    // A(1) <- B(2) <- C(3) <- D(4) <- E(5)
+    // Should produce 10 triples (5 choose 2 pairs in a chain)
+    let m = model_new()
+    let m1 = model_add_class(m, 1, -1, 100)
+    let m2 = model_add_class(m1, 2, 1, 200)
+    let m3 = model_add_class(m2, 3, 2, 300)
+    let m4 = model_add_class(m3, 4, 3, 400)
+    let m5 = model_add_class(m4, 5, 4, 500)
+    let cache = cache_new()
+    let result = reasoner_rdfs_subclass(m5, cache)
+    // E is subclass of A (4 hops)
+    cache_contains(result, 5, PRED_SUBCLASS, 1)
+}
+
+fn t37_reasoner_domain_range_inference() -> bool {
+    // Property livesIn: domain=Person(1), range=City(2)
+    // Triple: (Alice=10, livesIn=50, London=20)
+    // Should infer (10,TYPE,1) and (20,TYPE,2)
+    let m = model_new()
+    let m2 = model_add_class(m, 1, -1, 100)
+    let m3 = model_add_class(m2, 2, -1, 200)
+    let m4 = model_add_property(m3, 50, 1, 2, 500)
+    var cache = cache_new()
+    cache = cache_add(cache, 10, 50, 20)
+    let result = reasoner_domain_range(m4, cache)
+    // Should have original triple + 2 inferred type triples
+    result.count == 3
+}
+
+fn t38_reasoner_domain_inferred_type() -> bool {
+    let m = model_new()
+    let m2 = model_add_class(m, 1, -1, 100)
+    let m3 = model_add_class(m2, 2, -1, 200)
+    let m4 = model_add_property(m3, 50, 1, 2, 500)
+    var cache = cache_new()
+    cache = cache_add(cache, 10, 50, 20)
+    let result = reasoner_domain_range(m4, cache)
+    // Alice(10) should have type Person(1)
+    cache_contains(result, 10, PRED_TYPE, 1)
+}
+
+fn t39_reasoner_range_inferred_type() -> bool {
+    let m = model_new()
+    let m2 = model_add_class(m, 1, -1, 100)
+    let m3 = model_add_class(m2, 2, -1, 200)
+    let m4 = model_add_property(m3, 50, 1, 2, 500)
+    var cache = cache_new()
+    cache = cache_add(cache, 10, 50, 20)
+    let result = reasoner_domain_range(m4, cache)
+    // London(20) should have type City(2)
+    cache_contains(result, 20, PRED_TYPE, 2)
+}
+
+fn t40_model_add_multiple_classes_count() -> bool {
+    let m = model_new()
+    let m2 = model_add_class(m, 1, -1, 100)
+    let m3 = model_add_class(m2, 2, 1, 200)
+    let m4 = model_add_class(m3, 3, 2, 300)
+    let m5 = model_add_class(m4, 4, 3, 400)
+    m5.class_count == 4
+}
+
+// ============================================================================
+// MAIN — RUN ALL TESTS
+// ============================================================================
+
+fn main() -> i32 {
+    var failed: i32 = 0
+
+    if t01_cache_empty_count() == false { failed = failed + 1 }
+    if t02_cache_add_single() == false { failed = failed + 1 }
+    if t03_cache_add_dedup() == false { failed = failed + 1 }
+    if t04_cache_contains_present() == false { failed = failed + 1 }
+    if t05_cache_contains_absent() == false { failed = failed + 1 }
+    if t06_cache_multiple_triples() == false { failed = failed + 1 }
+
+    if t07_model_empty() == false { failed = failed + 1 }
+    if t08_model_add_class() == false { failed = failed + 1 }
+    if t09_model_find_class_present() == false { failed = failed + 1 }
+    if t10_model_find_class_absent() == false { failed = failed + 1 }
+    if t11_model_is_subclass_self() == false { failed = failed + 1 }
+    if t12_model_is_subclass_direct() == false { failed = failed + 1 }
+    if t13_model_is_subclass_transitive() == false { failed = failed + 1 }
+    if t14_model_not_subclass_sibling() == false { failed = failed + 1 }
+    if t15_model_parent_of_root() == false { failed = failed + 1 }
+    if t16_model_parent_of_child() == false { failed = failed + 1 }
+    if t17_model_property_domain_range() == false { failed = failed + 1 }
+    if t18_model_property_not_found() == false { failed = failed + 1 }
+
+    if t19_namespace_registry_empty() == false { failed = failed + 1 }
+    if t20_namespace_registry_add_and_has() == false { failed = failed + 1 }
+    if t21_namespace_registry_has_absent() == false { failed = failed + 1 }
+    if t22_namespace_registry_with_defaults_has_owl() == false { failed = failed + 1 }
+    if t23_namespace_registry_with_defaults_has_skos() == false { failed = failed + 1 }
+    if t24_iri_predicates_correct() == false { failed = failed + 1 }
+    if t25_namespace_biomedical_constants() == false { failed = failed + 1 }
+    if t26_iri_predicate_negative() == false { failed = failed + 1 }
+
+    if t27_query_all_wild() == false { failed = failed + 1 }
+    if t28_query_by_subj() == false { failed = failed + 1 }
+    if t29_query_by_pred() == false { failed = failed + 1 }
+    if t30_query_exact_match() == false { failed = failed + 1 }
+    if t31_query_no_match() == false { failed = failed + 1 }
+    if t32_query_wildcard_object() == false { failed = failed + 1 }
+
+    if t33_reasoner_subclass_direct_count() == false { failed = failed + 1 }
+    if t34_reasoner_subclass_transitive_count() == false { failed = failed + 1 }
+    if t35_reasoner_subclass_contains_transitive() == false { failed = failed + 1 }
+    if t36_reasoner_subclass_deep_chain() == false { failed = failed + 1 }
+    if t37_reasoner_domain_range_inference() == false { failed = failed + 1 }
+    if t38_reasoner_domain_inferred_type() == false { failed = failed + 1 }
+    if t39_reasoner_range_inferred_type() == false { failed = failed + 1 }
+    if t40_model_add_multiple_classes_count() == false { failed = failed + 1 }
+
+    failed
+}

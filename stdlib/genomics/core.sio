@@ -1,0 +1,347 @@
+// stdlib/genomics/core.sio — DNA sequence operations
+//
+// Base encoding: A=0, C=1, G=2, T=3 (GF(4) field elements)
+// Sequences stored as [i32; 256] arrays.
+//
+// NOTE: Uses return-by-value structs to work around the JIT &! reference
+// visibility limitation (mutations through exclusive refs not reflected
+// in caller in Cranelift JIT mode).
+//
+// API:
+//   dna_complement        — complement a single base
+//   dna_complement_seq    — complement a full sequence (returns Seq256)
+//   dna_reverse_complement — reverse complement (returns Seq256)
+//   dna_gc_content        — fraction of G+C bases
+//   dna_hamming           — Hamming distance between two sequences
+//   dna_align_score       — simple alignment score (match/mismatch)
+//   codon_to_aa           — translate a codon (3 bases) to amino acid index
+//   dna_translate         — translate a sequence to amino acids (returns AA64)
+//   dna_kmer_count        — count k-mers (k<=4, returns Kmer256)
+//   ascii_to_base         — convert ASCII character to base index
+//
+// References:
+//   - Lesk (2014): Introduction to Genomics, 3rd ed.
+//   - Needleman & Wunsch (1970): A general method applicable to the search
+//     for similarities in the amino acid sequence of two proteins.
+
+// ============================================================================
+// Return-value wrappers (avoids JIT &! bug)
+// ============================================================================
+
+struct Seq256 {
+    data: [i32; 256],
+    len: i32,
+}
+
+struct AA64 {
+    data: [i32; 64],
+    n: i32,
+}
+
+struct Kmer256 {
+    counts: [i32; 256],
+    k: i32,
+}
+
+// ============================================================================
+// Base constants
+// ============================================================================
+
+fn base_A() -> i32 { 0 }
+fn base_C() -> i32 { 1 }
+fn base_G() -> i32 { 2 }
+fn base_T() -> i32 { 3 }
+
+// ============================================================================
+// Math helpers
+// ============================================================================
+
+fn core_abs_f64(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+fn core_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i = 0
+    while i < 25 { y = 0.5 * (y + x / y); i = i + 1 }
+    y
+}
+
+// ============================================================================
+// Single-base complement
+// A<->T (0<->3), C<->G (1<->2)
+// ============================================================================
+
+fn dna_complement(base: i32) -> i32 {
+    if base == 0 { return 3 }  // A -> T
+    if base == 1 { return 2 }  // C -> G
+    if base == 2 { return 1 }  // G -> C
+    if base == 3 { return 0 }  // T -> A
+    base                        // unknown: identity
+}
+
+// ============================================================================
+// Complement of a full sequence — returns Seq256
+// ============================================================================
+
+fn dna_complement_seq(seq: &[i32; 256], seq_len: i32) -> Seq256 with Mut, Div, Panic {
+    var out = Seq256 { data: [0; 256], len: seq_len }
+    var i = 0
+    while i < seq_len {
+        out.data[i] = dna_complement(seq[i])
+        i = i + 1
+    }
+    out
+}
+
+// ============================================================================
+// Reverse complement — returns Seq256
+// ============================================================================
+
+fn dna_reverse_complement(seq: &[i32; 256], seq_len: i32) -> Seq256 with Mut, Div, Panic {
+    var out = Seq256 { data: [0; 256], len: seq_len }
+    var i = 0
+    while i < seq_len {
+        out.data[i] = dna_complement(seq[seq_len - 1 - i])
+        i = i + 1
+    }
+    out
+}
+
+// ============================================================================
+// GC content: fraction of bases that are G or C
+// Returns value in [0.0, 1.0]
+// ============================================================================
+
+fn dna_gc_content(seq: &[i32; 256], seq_len: i32) -> f64 with Mut, Div, Panic {
+    if seq_len <= 0 { return 0.0 }
+    var gc = 0
+    var i = 0
+    while i < seq_len {
+        let b = seq[i]
+        if b == base_C() { gc = gc + 1 }
+        if b == base_G() { gc = gc + 1 }
+        i = i + 1
+    }
+    (gc as f64) / (seq_len as f64)
+}
+
+// ============================================================================
+// Hamming distance (equal-length sequences)
+// Returns number of positions where bases differ.
+// ============================================================================
+
+fn dna_hamming(a: &[i32; 256], b: &[i32; 256], len: i32) -> i32 with Mut, Div, Panic {
+    var dist = 0
+    var i = 0
+    while i < len {
+        if a[i] != b[i] { dist = dist + 1 }
+        i = i + 1
+    }
+    dist
+}
+
+// ============================================================================
+// Alignment score — simple scoring without gaps
+// match_score: reward for identical bases
+// mismatch_penalty: penalty (positive number, subtracted) for differences
+// ============================================================================
+
+fn dna_align_score(
+    a: &[i32; 256],
+    b: &[i32; 256],
+    len: i32,
+    match_score: i32,
+    mismatch_penalty: i32,
+) -> i32 with Mut, Div, Panic {
+    var score = 0
+    var i = 0
+    while i < len {
+        if a[i] == b[i] {
+            score = score + match_score
+        } else {
+            score = score - mismatch_penalty
+        }
+        i = i + 1
+    }
+    score
+}
+
+// ============================================================================
+// Codon to amino acid
+//
+// Standard genetic code. Codon index = b0*16 + b1*4 + b2 where b0..b2 in 0-3.
+// Returns amino acid index (1-20), 0 = stop, -1 = unknown.
+//
+// AA indices:
+//  1=Phe 2=Leu 3=Ile 4=Met 5=Val 6=Ser 7=Pro 8=Thr 9=Ala 10=Tyr
+//  11=His 12=Gln 13=Asn 14=Lys 15=Asp 16=Glu 17=Cys 18=Trp 19=Arg 20=Gly
+//  0=Stop
+// ============================================================================
+
+// Direct lookup: codon_row(b0) returns the block of 16 entries starting at b0*16.
+// Each if-chain selects the right entry within the block.
+// This avoids any &! mutation pattern entirely.
+
+fn codon_aa_A_block(b1: i32, b2: i32) -> i32 {
+    // b0=0 (A): indices 0-15
+    // b1=0(A): AAA=Lys=14, AAC=Asn=13, AAG=Lys=14, AAT=Asn=13
+    // b1=1(C): ACA=Thr=8,  ACC=Thr=8,  ACG=Thr=8,  ACT=Thr=8
+    // b1=2(G): AGA=Arg=19, AGC=Ser=6,  AGG=Arg=19, AGT=Ser=6
+    // b1=3(T): ATA=Ile=3,  ATC=Ile=3,  ATG=Met=4,  ATT=Ile=3
+    if b1 == 0 {
+        if b2 == 0 { return 14 }
+        if b2 == 1 { return 13 }
+        if b2 == 2 { return 14 }
+        return 13
+    }
+    if b1 == 1 { return 8 }  // all Thr
+    if b1 == 2 {
+        if b2 == 0 { return 19 }
+        if b2 == 1 { return 6 }
+        if b2 == 2 { return 19 }
+        return 6
+    }
+    // b1==3
+    if b2 == 2 { return 4 }  // ATG = Met
+    return 3                  // ATA, ATC, ATT = Ile
+}
+
+fn codon_aa_C_block(b1: i32, b2: i32) -> i32 {
+    // b0=1 (C): indices 16-31
+    // b1=0(A): CAA=Gln=12, CAC=His=11, CAG=Gln=12, CAT=His=11
+    // b1=1(C): CCA=Pro=7,  CCC=Pro=7,  CCG=Pro=7,  CCT=Pro=7
+    // b1=2(G): CGA=Arg=19, CGC=Arg=19, CGG=Arg=19, CGT=Arg=19
+    // b1=3(T): CTA=Leu=2,  CTC=Leu=2,  CTG=Leu=2,  CTT=Leu=2
+    if b1 == 0 {
+        if b2 == 0 { return 12 }
+        if b2 == 1 { return 11 }
+        if b2 == 2 { return 12 }
+        return 11
+    }
+    if b1 == 1 { return 7 }   // all Pro
+    if b1 == 2 { return 19 }  // all Arg
+    return 2                   // all Leu
+}
+
+fn codon_aa_G_block(b1: i32, b2: i32) -> i32 {
+    // b0=2 (G): indices 32-47
+    // b1=0(A): GAA=Glu=16, GAC=Asp=15, GAG=Glu=16, GAT=Asp=15
+    // b1=1(C): GCA=Ala=9,  GCC=Ala=9,  GCG=Ala=9,  GCT=Ala=9
+    // b1=2(G): GGA=Gly=20, GGC=Gly=20, GGG=Gly=20, GGT=Gly=20
+    // b1=3(T): GTA=Val=5,  GTC=Val=5,  GTG=Val=5,  GTT=Val=5
+    if b1 == 0 {
+        if b2 == 0 { return 16 }
+        if b2 == 1 { return 15 }
+        if b2 == 2 { return 16 }
+        return 15
+    }
+    if b1 == 1 { return 9 }   // all Ala
+    if b1 == 2 { return 20 }  // all Gly
+    return 5                   // all Val
+}
+
+fn codon_aa_T_block(b1: i32, b2: i32) -> i32 {
+    // b0=3 (T): indices 48-63
+    // b1=0(A): TAA=Stop=0, TAC=Tyr=10, TAG=Stop=0, TAT=Tyr=10
+    // b1=1(C): TCA=Ser=6,  TCC=Ser=6,  TCG=Ser=6,  TCT=Ser=6
+    // b1=2(G): TGA=Stop=0, TGC=Cys=17, TGG=Trp=18, TGT=Cys=17
+    // b1=3(T): TTA=Leu=2,  TTC=Phe=1,  TTG=Leu=2,  TTT=Phe=1
+    if b1 == 0 {
+        if b2 == 0 { return 0 }   // TAA = Stop
+        if b2 == 1 { return 10 }  // TAC = Tyr
+        if b2 == 2 { return 0 }   // TAG = Stop
+        return 10                  // TAT = Tyr
+    }
+    if b1 == 1 { return 6 }  // all Ser
+    if b1 == 2 {
+        if b2 == 0 { return 0 }   // TGA = Stop
+        if b2 == 1 { return 17 }  // TGC = Cys
+        if b2 == 2 { return 18 }  // TGG = Trp
+        return 17                  // TGT = Cys
+    }
+    // b1==3
+    if b2 == 0 { return 2 }   // TTA = Leu
+    if b2 == 1 { return 1 }   // TTC = Phe
+    if b2 == 2 { return 2 }   // TTG = Leu
+    return 1                   // TTT = Phe
+}
+
+fn codon_to_aa(b0: i32, b1: i32, b2: i32) -> i32 {
+    if b0 < 0 { return -1 }
+    if b0 > 3 { return -1 }
+    if b1 < 0 { return -1 }
+    if b1 > 3 { return -1 }
+    if b2 < 0 { return -1 }
+    if b2 > 3 { return -1 }
+    if b0 == 0 { return codon_aa_A_block(b1, b2) }
+    if b0 == 1 { return codon_aa_C_block(b1, b2) }
+    if b0 == 2 { return codon_aa_G_block(b1, b2) }
+    codon_aa_T_block(b1, b2)
+}
+
+// Translate a sequence starting at `start`, producing `n_codons` amino acids
+// Returns AA64 (return-by-value to avoid JIT &! bug)
+fn dna_translate(seq: &[i32; 256], start: i32, n_codons: i32) -> AA64 with Mut, Div, Panic {
+    var out = AA64 { data: [0; 64], n: n_codons }
+    var i = 0
+    while i < n_codons {
+        let pos = start + i * 3
+        out.data[i] = codon_to_aa(seq[pos], seq[pos + 1], seq[pos + 2])
+        i = i + 1
+    }
+    out
+}
+
+// ============================================================================
+// K-mer counting (k <= 4, so max 256 distinct k-mers)
+// Returns Kmer256 (return-by-value to avoid JIT &! bug)
+// ============================================================================
+
+fn dna_kmer_count(seq: &[i32; 256], seq_len: i32, k: i32) -> Kmer256 with Mut, Div, Panic {
+    var out = Kmer256 { counts: [0; 256], k: k }
+
+    var pos = 0
+    while pos <= seq_len - k {
+        var idx = 0
+        var j = 0
+        var valid = true
+        while j < k {
+            let b = seq[pos + j]
+            if b < 0 { valid = false }
+            if b > 3 { valid = false }
+            idx = idx * 4 + b
+            j = j + 1
+        }
+        if valid {
+            if idx >= 0 {
+                if idx < 256 {
+                    out.counts[idx] = out.counts[idx] + 1
+                }
+            }
+        }
+        pos = pos + 1
+    }
+
+    out
+}
+
+// ============================================================================
+// Utility: encode an ASCII byte to base index
+// 'A'=65->0, 'C'=67->1, 'G'=71->2, 'T'=84->3
+// lowercase: 'a'=97->0, 'c'=99->1, 'g'=103->2, 't'=116->3
+// Returns -1 for unknown
+// ============================================================================
+
+fn ascii_to_base(c: i32) -> i32 {
+    if c == 65 { return 0 }   // 'A'
+    if c == 67 { return 1 }   // 'C'
+    if c == 71 { return 2 }   // 'G'
+    if c == 84 { return 3 }   // 'T'
+    if c == 97 { return 0 }   // 'a'
+    if c == 99 { return 1 }   // 'c'
+    if c == 103 { return 2 }  // 'g'
+    if c == 116 { return 3 }  // 't'
+    -1
+}
