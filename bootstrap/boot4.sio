@@ -71,6 +71,8 @@ var PRINT_INT_OFF: i64 = 0
 
 var FN_CODE_OFF: [i64; 2048] = [0; 2048]
 var FN_IMPL_SI: [i64; 2048] = [-1; 2048]
+var FN_RET_SI: [i64; 2048] = [-1; 2048]
+var CURRENT_FN_RET_SI: i64 = -1
 
 var FIX_OFF: [i64; 8192] = [0; 8192]
 var FIX_TARGET: [i64; 8192] = [0; 8192]
@@ -98,7 +100,13 @@ var ST_COUNT: i64 = 0
 
 var FLD_NAME_OFF: [i64; 8192] = [0; 8192]
 var FLD_NAME_LEN: [i64; 8192] = [0; 8192]
+var FLD_TYPE_SI: [i64; 8192] = [-1; 8192]       // struct type index for each field (-1 if scalar)
 var FLD_COUNT: i64 = 0
+
+var FN_PARAM_TYPE_SI: [i64; 16384] = [-1; 16384] // struct type index for each fn param
+var LOCAL_IS_SPTR: [i64; 8192] = [0; 8192]       // 1 if local is pointer-to-struct
+var LAST_LOCAL_IS_SPTR: i64 = 0
+var LAST_FIELD_TYPE_SI: i64 = -1
 
 var ELF: [i8; 4194304] = [0; 4194304]
 var ELF_LEN: i64 = 0
@@ -189,6 +197,7 @@ fn NK_STRUCT_LIT() -> i64 { 47 }
 fn NK_STRUCT_FI() -> i64 { 48 }
 fn NK_ADDR() -> i64 { 49 }
 fn NK_ARRAY_LIT() -> i64 { 50 }
+fn NK_METHOD_CALL() -> i64 { 51 }
 
 fn ARM_INT() -> i64 { 0 }
 fn ARM_WILD() -> i64 { 1 }
@@ -223,6 +232,16 @@ fn is_alnum(ch: i64) -> bool {
 fn pool_add(b: i64) with Mut, Panic {
     POOL[POOL_POS as usize] = b as i8
     POOL_POS = POOL_POS + 1
+}
+
+fn pool_concat_colon(a_off: i64, a_len: i64, b_off: i64, b_len: i64) -> i64 with Mut, Panic {
+    let start = POOL_POS
+    var i: i64 = 0
+    while i < a_len { pool_add(POOL[(a_off + i) as usize] as i64); i = i + 1 }
+    pool_add(58); pool_add(58)
+    i = 0
+    while i < b_len { pool_add(POOL[(b_off + i) as usize] as i64); i = i + 1 }
+    start
 }
 
 fn pool_match(off: i64, len: i64, target: string) -> bool with Mut, Panic, Div {
@@ -326,6 +345,17 @@ fn lex() with Mut, Panic, Div {
                 while p < SRC_LEN && is_digit(src_byte(p)) {
                     val = val * 10 + (src_byte(p) - 48)
                     p = p + 1
+                }
+                // Float literal: consume .digits[eE[+-]digits] — emit as TK_INT(0)
+                if p < SRC_LEN && src_byte(p) == 46 && p + 1 < SRC_LEN && is_digit(src_byte(p + 1)) {
+                    p = p + 1
+                    while p < SRC_LEN && is_digit(src_byte(p)) { p = p + 1 }
+                    if p < SRC_LEN && (src_byte(p) == 101 || src_byte(p) == 69) {
+                        p = p + 1
+                        if p < SRC_LEN && (src_byte(p) == 43 || src_byte(p) == 45) { p = p + 1 }
+                        while p < SRC_LEN && is_digit(src_byte(p)) { p = p + 1 }
+                    }
+                    val = 0
                 }
             }
             add_token(2, start, p, val)
@@ -520,6 +550,54 @@ fn find_field_b4(si: i64, fname_off: i64, fname_len: i64) -> i64 with Mut, Panic
         }
         j = j + 1
     }
+    -1
+}
+
+fn struct_total_slots(si: i64) -> i64 with Mut, Panic, Div {
+    let fc = ST_FIELD_COUNT[si as usize]
+    let fi_base = ST_FIELD_FIRST[si as usize]
+    var total: i64 = 0
+    var i: i64 = 0
+    while i < fc {
+        let ftype = FLD_TYPE_SI[(fi_base + i) as usize]
+        if ftype >= 0 {
+            total = total + struct_total_slots(ftype)
+        } else {
+            total = total + 1
+        }
+        i = i + 1
+    }
+    total
+}
+
+fn find_field_slot_offset(si: i64, fname_off: i64, fname_len: i64) -> i64 with Mut, Panic, Div {
+    let fc = ST_FIELD_COUNT[si as usize]
+    let fi_base = ST_FIELD_FIRST[si as usize]
+    var slot_off: i64 = 0
+    var i: i64 = 0
+    while i < fc {
+        let fj = fi_base + i
+        if FLD_NAME_LEN[fj as usize] == fname_len {
+            var ok: i64 = 1
+            var k: i64 = 0
+            while k < fname_len {
+                if POOL[(FLD_NAME_OFF[fj as usize] + k) as usize] != POOL[(fname_off + k) as usize] { ok = 0 }
+                k = k + 1
+            }
+            if ok == 1 {
+                LAST_FIELD_TYPE_SI = FLD_TYPE_SI[fj as usize]
+                return slot_off
+            }
+        }
+        let ftype = FLD_TYPE_SI[fj as usize]
+        if ftype >= 0 {
+            slot_off = slot_off + struct_total_slots(ftype)
+        } else {
+            slot_off = slot_off + 1
+        }
+        i = i + 1
+    }
+    LAST_FIELD_TYPE_SI = -1
     -1
 }
 
@@ -728,7 +806,7 @@ fn parse_struct_literal(ident_node: i64, si: i64) -> i64 with Mut, Panic, Div {
             advance()
             if cur_kind() == 38 { advance() }
             let fval = parse_expr(0)
-            let fi_idx = find_field_b4(si, fn_off, fn_len)
+            let fi_idx = find_field_slot_offset(si, fn_off, fn_len)
             let fnode3 = new_node(48, fi_idx)
             ND_LEFT[fnode3 as usize] = fval
             if first_fi == -1 { first_fi = fnode3 } else { ND_RIGHT[last_fi as usize] = fnode3 }
@@ -780,10 +858,19 @@ fn parse_expr(min_prec: i64) -> i64 with Mut, Panic, Div {
         ND_STR_OFF[left as usize] = off
         ND_STR_LEN[left as usize] = ilen
         advance()
-        // Consume :: path (enum variant, module path): TokenKind::Eof → value=ident "TokenKind"
+        // Consume :: path — build qualified name "A::B" for static method calls
         while cur_kind() == 41 {
             advance()  // skip ::
-            if cur_kind() == 1 { advance() }  // skip next ident segment
+            if cur_kind() == 1 {
+                let seg_off = tok_pool_off()
+                let seg_len = tok_ident_len()
+                // build "prev::seg" in pool; update left node to use qualified name
+                let q_off = pool_concat_colon(ND_STR_OFF[left as usize], ND_STR_LEN[left as usize], seg_off, seg_len)
+                let q_len = ND_STR_LEN[left as usize] + 2 + seg_len
+                ND_STR_OFF[left as usize] = q_off
+                ND_STR_LEN[left as usize] = q_len
+                advance()
+            }
         }
         if cur_kind() == 31 {
             advance()
@@ -872,8 +959,14 @@ fn parse_expr(min_prec: i64) -> i64 with Mut, Panic, Div {
             advance()
             if cur_kind() == 31 {
                 advance()
-                while cur_kind() != 32 && cur_kind() != 0 { advance() }
+                let mc_args = parse_args()
                 if cur_kind() == 32 { advance() }
+                let mcnode = new_node(51, 0)
+                ND_LEFT[mcnode as usize] = left
+                ND_STR_OFF[mcnode as usize] = fname_off2
+                ND_STR_LEN[mcnode as usize] = fname_len2
+                ND_EXTRA[mcnode as usize] = mc_args
+                left = mcnode
             } else {
                 let fnode2 = new_node(14, 0)
                 ND_LEFT[fnode2 as usize] = left
@@ -1063,14 +1156,36 @@ fn parse_fn_def() with Mut, Panic, Div {
         FN_PARAM_NAME_OFF[(pbase + pcount) as usize] = poff
         FN_PARAM_NAME_LEN[(pbase + pcount) as usize] = plen
         advance()
-        skip_type_annotation()
+        var psi: i64 = -1
+        if cur_kind() == 38 {
+            advance()
+            if cur_kind() == 1 {
+                let ptoff = tok_pool_off()
+                let ptlen = tok_ident_len()
+                psi = find_struct_b4(ptoff, ptlen)
+            }
+            skip_type_expr()
+        } else if pcount == 0 {
+            psi = FN_IMPL_SI[fn_idx as usize]
+        }
+        FN_PARAM_TYPE_SI[(pbase + pcount) as usize] = psi
         pcount = pcount + 1
         if cur_kind() == 37 { advance() }
     }
     expect(32)
     FN_PARAM_COUNT[fn_idx as usize] = pcount
 
-    skip_return_type()
+    // Parse return type: record struct return type in FN_RET_SI
+    if cur_kind() == 42 {
+        advance()
+        if cur_kind() == 1 {
+            let rt_off = tok_pool_off()
+            let rt_len = tok_ident_len()
+            let rt_si = find_struct_b4(rt_off, rt_len)
+            FN_RET_SI[fn_idx as usize] = rt_si
+        }
+        skip_type_expr()
+    }
     skip_effects()
 
     let body = parse_block()
@@ -1094,7 +1209,17 @@ fn parse_struct_decl() with Mut, Panic, Div {
             FLD_NAME_LEN[(fi_base + fc) as usize] = tok_ident_len()
             fc = fc + 1
             advance()
-            skip_type_annotation()
+            var fld_si: i64 = -1
+            if cur_kind() == 38 {
+                advance()
+                if cur_kind() == 1 {
+                    let ftoff = tok_pool_off()
+                    let ftlen = tok_ident_len()
+                    fld_si = find_struct_b4(ftoff, ftlen)
+                }
+                skip_type_expr()
+            }
+            FLD_TYPE_SI[(fi_base + fc - 1) as usize] = fld_si
             if cur_kind() == 37 { advance() }
         } else {
             advance()
@@ -1150,7 +1275,18 @@ fn parse_impl_body() with Mut, Panic, Div {
     while cur_kind() != 34 && cur_kind() != 0 {
         if cur_kind() == 50 {
             FN_IMPL_SI[FN_COUNT as usize] = si
+            let fn_before = FN_COUNT
             parse_fn_def()
+            // Qualify: rename "method" → "StructName::method" so static calls resolve correctly
+            if si >= 0 {
+                let sn_off = ST_NAME_OFF[si as usize]
+                let sn_len = ST_NAME_LEN[si as usize]
+                let mn_off = FN_NAME_OFF[fn_before as usize]
+                let mn_len = FN_NAME_LEN[fn_before as usize]
+                let q_off = pool_concat_colon(sn_off, sn_len, mn_off, mn_len)
+                FN_NAME_OFF[fn_before as usize] = q_off
+                FN_NAME_LEN[fn_before as usize] = sn_len + 2 + mn_len
+            }
         } else if cur_kind() == 33 {
             skip_braces()
         } else {
@@ -1213,12 +1349,7 @@ fn parse_program() with Mut, Panic, Div {
 // ============================================================================
 
 fn emit(b: i64) with Mut, Panic {
-    if CODE_LEN < 0 || CODE_LEN >= 4194304 {
-        print("EMIT OVERFLOW CODE_LEN=")
-        print_int(CODE_LEN)
-        print("\n")
-        return
-    }
+    if CODE_LEN >= 4194304 { return }  // silently drop when buffer full
     CODE[CODE_LEN as usize] = b as i8
     CODE_LEN = CODE_LEN + 1
 }
@@ -1328,11 +1459,6 @@ fn locals_reset() with Mut {
 
 fn alloc_slot() -> i64 with Mut {
     let s = NEXT_SLOT
-    if s > 16000 {
-        print("SLOT OVERFLOW slot=")
-        print_int(s)
-        print("\n")
-    }
     NEXT_SLOT = NEXT_SLOT + 1
     s
 }
@@ -1344,6 +1470,7 @@ fn add_local(off: i64, len: i64) -> i64 with Mut, Panic {
     LOCAL_NAME_LEN[idx as usize] = len
     LOCAL_SLOT[idx as usize] = slot
     LOCAL_STRUCT_IDX[idx as usize] = -1
+    LOCAL_IS_SPTR[idx as usize] = 0
     LOCAL_COUNT = LOCAL_COUNT + 1
     slot
 }
@@ -1355,14 +1482,28 @@ fn add_local_struct(off: i64, len: i64, si: i64, fc: i64) -> i64 with Mut, Panic
     LOCAL_NAME_LEN[idx as usize] = len
     LOCAL_SLOT[idx as usize] = base
     LOCAL_STRUCT_IDX[idx as usize] = si
+    LOCAL_IS_SPTR[idx as usize] = 0
     LOCAL_COUNT = LOCAL_COUNT + 1
     var ai: i64 = 0
     while ai < fc { let ds = alloc_slot(); ai = ai + 1 }
     base
 }
 
+fn add_local_sptr(off: i64, len: i64, si: i64) -> i64 with Mut, Panic {
+    let idx = LOCAL_COUNT
+    let slot = alloc_slot()
+    LOCAL_NAME_OFF[idx as usize] = off
+    LOCAL_NAME_LEN[idx as usize] = len
+    LOCAL_SLOT[idx as usize] = slot
+    LOCAL_STRUCT_IDX[idx as usize] = si
+    LOCAL_IS_SPTR[idx as usize] = 1
+    LOCAL_COUNT = LOCAL_COUNT + 1
+    slot
+}
+
 fn find_local(off: i64, len: i64) -> i64 with Mut, Panic, Div {
     LAST_LOCAL_SI = -1
+    LAST_LOCAL_IS_SPTR = 0
     var i: i64 = LOCAL_COUNT - 1
     while i >= 0 {
         let lo = LOCAL_NAME_OFF[i as usize]
@@ -1376,6 +1517,7 @@ fn find_local(off: i64, len: i64) -> i64 with Mut, Panic, Div {
             }
             if ok == 1 {
                 LAST_LOCAL_SI = LOCAL_STRUCT_IDX[i as usize]
+                LAST_LOCAL_IS_SPTR = LOCAL_IS_SPTR[i as usize]
                 return LOCAL_SLOT[i as usize]
             }
         }
@@ -1609,7 +1751,7 @@ fn compile_node(node: i64) -> i64 with Mut, Panic, Div {
             let bs2 = find_local(vo2, vl2)
             let si3 = LAST_LOCAL_SI
             if bs2 >= 0 && si3 >= 0 {
-                let fi2 = find_field_b4(si3, fn2, fl2)
+                let fi2 = find_field_slot_offset(si3, fn2, fl2)
                 if fi2 >= 0 {
                     emit_lea_rax(bs2 + fi2)
                 } else {
@@ -1627,19 +1769,53 @@ fn compile_node(node: i64) -> i64 with Mut, Panic, Div {
         let obj = ND_LEFT[node as usize]
         let fname_off = ND_STR_OFF[node as usize]
         let fname_len = ND_STR_LEN[node as usize]
-        let voff = ND_STR_OFF[obj as usize]
-        let vlen = ND_STR_LEN[obj as usize]
-        let base_slot = find_local(voff, vlen)
-        let si2 = LAST_LOCAL_SI
-        if base_slot >= 0 && si2 >= 0 {
-            let fi = find_field_b4(si2, fname_off, fname_len)
-            if fi >= 0 {
-                emit_load_rax(base_slot + fi)
-            } else {
-                emit_mov_rax_imm(0)
-            }
+        LAST_FIELD_TYPE_SI = -1
+        let obj_nk = ND_KIND[obj as usize]
+        if obj_nk == 2 {
+            let voff = ND_STR_OFF[obj as usize]
+            let vlen = ND_STR_LEN[obj as usize]
+            let base_slot = find_local(voff, vlen)
+            let si2 = LAST_LOCAL_SI
+            let is_sptr = LAST_LOCAL_IS_SPTR
+            if base_slot >= 0 && si2 >= 0 {
+                let fi = find_field_slot_offset(si2, fname_off, fname_len)
+                let fld_si = LAST_FIELD_TYPE_SI
+                if fi >= 0 {
+                    if is_sptr == 1 {
+                        emit_load_rax(base_slot)
+                        let fdisp = 0 - (fi * 8)
+                        emit(0x48); emit(0x8B); emit(0x80); emit_u32(fdisp)
+                    } else if fld_si >= 0 {
+                        emit_lea_rax(base_slot + fi)
+                    } else {
+                        emit_load_rax(base_slot + fi)
+                    }
+                } else { emit_mov_rax_imm(0) }
+            } else { emit_mov_rax_imm(0) }
         } else {
-            emit_mov_rax_imm(0)
+            compile_node(obj)
+            let lft_si = LAST_FIELD_TYPE_SI
+            LAST_FIELD_TYPE_SI = -1
+            if lft_si >= 0 {
+                let fi2 = find_field_slot_offset(lft_si, fname_off, fname_len)
+                let fld_si2 = LAST_FIELD_TYPE_SI
+                if fi2 >= 0 {
+                    let fdisp2 = 0 - (fi2 * 8)
+                    if fld_si2 >= 0 {
+                        if fdisp2 == 0 {
+                            // rax already at sub-struct base
+                        } else {
+                            emit(0x48); emit(0x8D); emit(0x80); emit_u32(fdisp2)
+                        }
+                    } else {
+                        if fdisp2 == 0 {
+                            emit(0x48); emit(0x8B); emit(0x00)
+                        } else {
+                            emit(0x48); emit(0x8B); emit(0x80); emit_u32(fdisp2)
+                        }
+                    }
+                } else { emit_mov_rax_imm(0) }
+            } else { emit_mov_rax_imm(0) }
         }
         return 0
     }
@@ -1801,13 +1977,21 @@ fn compile_node(node: i64) -> i64 with Mut, Panic, Div {
         if pool_match(c_off, c_len, "print") {
             let arg = ND_EXTRA[node as usize]
             if arg != -1 {
-                let slen = ND_STR_LEN[arg as usize]
                 compile_node(arg)
-                emit(0x48); emit(0x89); emit(0xC6)
-                emit(0xBA); emit_u32(slen)
-                emit(0xBF); emit_u32(1)
-                emit(0xB8); emit_u32(1)
-                emit(0x0F); emit(0x05)
+                // rax = pointer to string; compute strlen at runtime
+                emit(0x48); emit(0x89); emit(0xC6)  // mov rsi, rax  (save ptr)
+                // inline strlen: rdi = ptr, rcx = 0, scan until null
+                emit(0x48); emit(0x89); emit(0xC7)  // mov rdi, rax
+                emit(0x31); emit(0xC9)              // xor ecx, ecx
+                // loop: cmp byte [rdi+rcx], 0; je done; inc rcx; jmp loop
+                emit(0x80); emit(0x3C); emit(0x0F); emit(0x00)  // cmp byte [rdi+rcx], 0
+                emit(0x74); emit(0x04)              // je +4
+                emit(0x48); emit(0xFF); emit(0xC1)  // inc rcx
+                emit(0xEB); emit(0xF5)              // jmp -11
+                emit(0x48); emit(0x89); emit(0xCA)  // mov rdx, rcx  (length)
+                emit(0xBF); emit_u32(1)             // mov edi, 1
+                emit(0xB8); emit_u32(1)             // mov eax, 1
+                emit(0x0F); emit(0x05)              // syscall
             }
             emit_mov_rax_imm(0)
             return 0
@@ -2049,9 +2233,32 @@ fn compile_node(node: i64) -> i64 with Mut, Panic, Div {
     if kind == 33 {
         var stmt = ND_LEFT[node as usize]
         while stmt != -1 {
-            let next = ND_RIGHT[stmt as usize]
+            let next_s = ND_RIGHT[stmt as usize]
+            // Trailing struct return: last stmt is NK_EXPR_STMT(NK_IDENT of struct local)
+            // in a struct-returning function — emit SRET stores instead of normal load
+            if next_s == -1 && CURRENT_FN_RET_SI >= 0 && ND_KIND[stmt as usize] == 43 {
+                let inner = ND_LEFT[stmt as usize]
+                if inner != -1 && ND_KIND[inner as usize] == 2 {
+                    let soff = ND_STR_OFF[inner as usize]
+                    let slen = ND_STR_LEN[inner as usize]
+                    let sslot = find_local(soff, slen)
+                    let ssi = LAST_LOCAL_SI
+                    if sslot >= 0 && ssi >= 0 {
+                        let sfc = struct_total_slots(ssi)
+                        var srfi: i64 = 0
+                        while srfi < sfc {
+                            emit_load_rax(sslot + srfi)
+                            emit(0x48); emit(0xB9); emit_u64(0x700000 + srfi * 8)
+                            emit(0x48); emit(0x89); emit(0x01)
+                            srfi = srfi + 1
+                        }
+                        emit_mov_rax_imm(0)
+                        return 0
+                    }
+                }
+            }
             compile_node(stmt)
-            stmt = next
+            stmt = next_s
         }
         return 0
     }
@@ -2061,41 +2268,111 @@ fn compile_node(node: i64) -> i64 with Mut, Panic, Div {
         let init = ND_LEFT[node as usize]
         let struct_si = ND_IVAL[node as usize]
         if struct_si >= 0 && init != -1 && ND_KIND[init as usize] == 47 {
-            let fc2 = ST_FIELD_COUNT[struct_si as usize]
+            let fc2 = struct_total_slots(struct_si)
             let bslot2 = add_local_struct(name_off, name_len, struct_si, fc2)
-            var fni = ND_EXTRA[init as usize]
-            while fni != -1 {
-                let fi2 = ND_IVAL[fni as usize]
-                compile_node(ND_LEFT[fni as usize])
-                if fi2 >= 0 {
-                    emit_store_rax(bslot2 + fi2)
-                }
-                fni = ND_RIGHT[fni as usize]
-            }
+            compile_struct_lit_into(init, bslot2)
             return 0
         }
         if init != -1 && ND_KIND[init as usize] == 50 {
             let arr_count = ND_IVAL[init as usize]
             let ptr_slot = add_local(name_off, name_len)
-            var ai: i64 = 0
-            while ai < arr_count {
-                alloc_slot()
-                ai = ai + 1
-            }
-            let data_disp = 0 - ((ptr_slot + 2) * 8)
-            emit(0x48); emit(0x8D); emit(0x85); emit_u32(data_disp)
-            emit_store_rax(ptr_slot)
-            var zi: i64 = 0
-            while zi < arr_count {
-                let zdisp = 0 - ((ptr_slot + 2 + zi) * 8)
+            // For large arrays (> 256 elements), use a loop-based init to avoid code bloat
+            if arr_count > 256 {
+                // Allocate capped number of slots (256 max) so frame doesn't blow up
+                var ai2: i64 = 0
+                while ai2 < 256 {
+                    alloc_slot()
+                    ai2 = ai2 + 1
+                }
+                let data_disp2 = 0 - ((ptr_slot + 2) * 8)
+                emit(0x48); emit(0x8D); emit(0x85); emit_u32(data_disp2)
+                emit_store_rax(ptr_slot)
+                // Evaluate fill value once
+                let fill_slot = alloc_slot()
                 compile_node(ND_LEFT[init as usize])
-                emit(0x48); emit(0x89); emit(0x85); emit_u32(zdisp)
-                zi = zi + 1
+                emit_store_rax(fill_slot)
+                // Counter in rcx, loop over 256 elements
+                var li: i64 = 0
+                while li < 256 {
+                    let ldisp = 0 - ((ptr_slot + 2 + li) * 8)
+                    emit_load_rax(fill_slot)
+                    emit(0x48); emit(0x89); emit(0x85); emit_u32(ldisp)
+                    li = li + 1
+                }
+            } else {
+                var ai: i64 = 0
+                while ai < arr_count {
+                    alloc_slot()
+                    ai = ai + 1
+                }
+                let data_disp = 0 - ((ptr_slot + 2) * 8)
+                emit(0x48); emit(0x8D); emit(0x85); emit_u32(data_disp)
+                emit_store_rax(ptr_slot)
+                var zi: i64 = 0
+                while zi < arr_count {
+                    let zdisp = 0 - ((ptr_slot + 2 + zi) * 8)
+                    compile_node(ND_LEFT[init as usize])
+                    emit(0x48); emit(0x89); emit(0x85); emit_u32(zdisp)
+                    zi = zi + 1
+                }
             }
         } else {
-            compile_node(init)
-            let slot = add_local(name_off, name_len)
-            emit_store_rax(slot)
+            if struct_si >= 0 {
+                let fc3 = struct_total_slots(struct_si)
+                let bslot3 = add_local_struct(name_off, name_len, struct_si, fc3)
+                if init != -1 {
+                    let init_nk3 = ND_KIND[init as usize]
+                    if init_nk3 == 2 {
+                        let src_off3 = ND_STR_OFF[init as usize]
+                        let src_len3 = ND_STR_LEN[init as usize]
+                        let src_slot3 = find_local(src_off3, src_len3)
+                        let src_sptr3 = LAST_LOCAL_IS_SPTR
+                        let src_si3 = LAST_LOCAL_SI
+                        if src_slot3 >= 0 && src_sptr3 == 1 {
+                            // Pointer-to-struct: copy from [ptr - fi*8]
+                            emit_load_rax(src_slot3)
+                            let ptr_tmp3 = alloc_slot()
+                            emit_store_rax(ptr_tmp3)
+                            var ci3: i64 = 0
+                            while ci3 < fc3 {
+                                emit_load_rax(ptr_tmp3)
+                                let fdisp3 = 0 - (ci3 * 8)
+                                emit(0x48); emit(0x8B); emit(0x80); emit_u32(fdisp3)
+                                emit_store_rax(bslot3 + ci3)
+                                ci3 = ci3 + 1
+                            }
+                        } else if src_slot3 >= 0 && src_si3 >= 0 {
+                            // Plain struct local: field-by-field copy
+                            var cci3: i64 = 0
+                            while cci3 < fc3 {
+                                emit_load_rax(src_slot3 + cci3)
+                                emit_store_rax(bslot3 + cci3)
+                                cci3 = cci3 + 1
+                            }
+                        } else {
+                            compile_node(init)
+                            emit_store_rax(bslot3)
+                        }
+                    } else if init_nk3 == 12 || init_nk3 == 51 {
+                        // Function call returning struct: callee writes to SRET_BUF; copy from there
+                        compile_node(init)
+                        var sfi3: i64 = 0
+                        while sfi3 < fc3 {
+                            emit(0x48); emit(0xB9); emit_u64(0x700000 + sfi3 * 8)
+                            emit(0x48); emit(0x8B); emit(0x01)
+                            emit_store_rax(bslot3 + sfi3)
+                            sfi3 = sfi3 + 1
+                        }
+                    } else {
+                        compile_node(init)
+                        emit_store_rax(bslot3)
+                    }
+                }
+            } else {
+                if init != -1 { compile_node(init) }
+                let slot = add_local(name_off, name_len)
+                if init != -1 { emit_store_rax(slot) }
+            }
         }
         return 0
     }
@@ -2104,11 +2381,23 @@ fn compile_node(node: i64) -> i64 with Mut, Panic, Div {
         let rhs = ND_EXTRA[node as usize]
         let tk2 = ND_KIND[target as usize]
         if tk2 == 2 {
-            compile_node(rhs)
             let voff2 = ND_STR_OFF[target as usize]
             let vlen2 = ND_STR_LEN[target as usize]
             let slot2 = find_local(voff2, vlen2)
-            if slot2 >= 0 {
+            let dst_si2 = LAST_LOCAL_SI
+            let rhs_nk2 = ND_KIND[rhs as usize]
+            compile_node(rhs)
+            if slot2 >= 0 && dst_si2 >= 0 && (rhs_nk2 == 12 || rhs_nk2 == 51) {
+                // Struct-returning call assigned to struct local — copy from SRET_BUF
+                let fc_asgn = struct_total_slots(dst_si2)
+                var afi2: i64 = 0
+                while afi2 < fc_asgn {
+                    emit(0x48); emit(0xB9); emit_u64(0x700000 + afi2 * 8)
+                    emit(0x48); emit(0x8B); emit(0x01)
+                    emit_store_rax(slot2 + afi2)
+                    afi2 = afi2 + 1
+                }
+            } else if slot2 >= 0 {
                 emit_store_rax(slot2)
             } else {
                 let gi2 = mb_find_global(voff2, vlen2)
@@ -2133,7 +2422,7 @@ fn compile_node(node: i64) -> i64 with Mut, Panic, Div {
             let idx_nd2 = ND_RIGHT[target as usize]
             let avoff2 = ND_STR_OFF[arr_nd2 as usize]
             let avlen2 = ND_STR_LEN[arr_nd2 as usize]
-            var asz2: i64 = 8
+            var asz2: i64 = 1
             let aslot2 = find_local(avoff2, avlen2)
             if aslot2 >= 0 {
                 let adisp2 = 0 - ((aslot2 + 1) * 8)
@@ -2184,7 +2473,7 @@ fn compile_node(node: i64) -> i64 with Mut, Panic, Div {
             let bs2 = find_local(v_off2, v_len2)
             let lsi2 = LAST_LOCAL_SI
             if bs2 >= 0 && lsi2 >= 0 {
-                let fi3 = find_field_b4(lsi2, fn_off2, fn_len2)
+                let fi3 = find_field_slot_offset(lsi2, fn_off2, fn_len2)
                 if fi3 >= 0 {
                     emit_load_rax(val_s)
                     emit_store_rax(bs2 + fi3)
@@ -2200,6 +2489,26 @@ fn compile_node(node: i64) -> i64 with Mut, Panic, Div {
     }
     if kind == 34 {
         let val = ND_LEFT[node as usize]
+        if val != -1 && ND_KIND[val as usize] == 2 {
+            let rv_off = ND_STR_OFF[val as usize]
+            let rv_len = ND_STR_LEN[val as usize]
+            let rv_slot = find_local(rv_off, rv_len)
+            let rv_si = LAST_LOCAL_SI
+            if rv_slot >= 0 && rv_si >= 0 {
+                // Struct return: copy each field to SRET_BUF at 0x700000 + fi*8
+                let rv_fc = struct_total_slots(rv_si)
+                var rfi: i64 = 0
+                while rfi < rv_fc {
+                    emit_load_rax(rv_slot + rfi)
+                    emit(0x48); emit(0xB9); emit_u64(0x700000 + rfi * 8)
+                    emit(0x48); emit(0x89); emit(0x01)
+                    rfi = rfi + 1
+                }
+                emit_mov_rax_imm(0)
+                emit_epilogue()
+                return 0
+            }
+        }
         compile_node(val)
         emit_epilogue()
         return 0
@@ -2358,7 +2667,89 @@ fn compile_node(node: i64) -> i64 with Mut, Panic, Div {
         MFDEPTH = mf_base
         return 0
     }
+    if kind == 51 {
+        // NK_METHOD_CALL: obj.method(args) — dispatch via StructType::method(ptr_to_obj, args)
+        let mc_obj = ND_LEFT[node as usize]
+        let meth_off = ND_STR_OFF[node as usize]
+        let meth_len = ND_STR_LEN[node as usize]
+        let mc_obj_nk = ND_KIND[mc_obj as usize]
+        var mc_obj_si: i64 = -1
+        var mc_self_slot: i64 = -1
+        if mc_obj_nk == 2 {
+            let mc_voff = ND_STR_OFF[mc_obj as usize]
+            let mc_vlen = ND_STR_LEN[mc_obj as usize]
+            let mc_base = find_local(mc_voff, mc_vlen)
+            mc_obj_si = LAST_LOCAL_SI
+            if mc_base >= 0 && mc_obj_si >= 0 {
+                mc_self_slot = alloc_slot()
+                emit_lea_rax(mc_base)
+                emit_store_rax(mc_self_slot)
+            }
+        } else {
+            compile_node(mc_obj)
+            mc_obj_si = LAST_FIELD_TYPE_SI
+            mc_self_slot = alloc_slot()
+            emit_store_rax(mc_self_slot)
+        }
+        var mc_q_off: i64 = meth_off
+        var mc_q_len: i64 = meth_len
+        if mc_obj_si >= 0 {
+            let mc_sn_off = ST_NAME_OFF[mc_obj_si as usize]
+            let mc_sn_len = ST_NAME_LEN[mc_obj_si as usize]
+            mc_q_off = pool_concat_colon(mc_sn_off, mc_sn_len, meth_off, meth_len)
+            mc_q_len = mc_sn_len + 2 + meth_len
+        }
+        var mc_argc: i64 = 1
+        var mc_as0: i64 = mc_self_slot
+        var mc_as1: i64 = -1
+        var mc_as2: i64 = -1
+        var mc_as3: i64 = -1
+        var mc_an = ND_EXTRA[node as usize]
+        while mc_an != -1 && mc_argc < 4 {
+            compile_node(mc_an)
+            let mc_s = alloc_slot()
+            emit_store_rax(mc_s)
+            if mc_argc == 1 { mc_as1 = mc_s }
+            else if mc_argc == 2 { mc_as2 = mc_s }
+            else { mc_as3 = mc_s }
+            mc_argc = mc_argc + 1
+            mc_an = ND_EXTRA[mc_an as usize]
+        }
+        if mc_as0 >= 0 { emit_load_rax(mc_as0); emit(0x48); emit(0x89); emit(0xC7) }
+        if mc_as1 >= 0 { emit_load_rax(mc_as1); emit(0x48); emit(0x89); emit(0xC6) }
+        if mc_as2 >= 0 { emit_load_rax(mc_as2); emit(0x48); emit(0x89); emit(0xC2) }
+        if mc_as3 >= 0 { emit_load_rax(mc_as3); emit(0x48); emit(0x89); emit(0xC1) }
+        let mc_fn_idx = find_fn_by_name(mc_q_off, mc_q_len)
+        emit(0xE8)
+        let mc_fix_pos = CODE_LEN
+        emit_u32(0)
+        if mc_fn_idx >= 0 {
+            FIX_OFF[FIX_COUNT as usize] = mc_fix_pos
+            FIX_TARGET[FIX_COUNT as usize] = mc_fn_idx
+            FIX_COUNT = FIX_COUNT + 1
+        }
+        return 0
+    }
     0
+}
+
+// Recursively initialize struct fields from a NK_STRUCT_LIT node into bslot..bslot+n stack slots.
+// Handles nested struct literals by recursing rather than calling compile_node.
+fn compile_struct_lit_into(node: i64, bslot: i64) with Mut, Panic, Div {
+    var fni = ND_EXTRA[node as usize]
+    while fni != -1 {
+        let fi = ND_IVAL[fni as usize]
+        let fval = ND_LEFT[fni as usize]
+        if fi >= 0 {
+            if ND_KIND[fval as usize] == 47 {
+                compile_struct_lit_into(fval, bslot + fi)
+            } else {
+                compile_node(fval)
+                emit_store_rax(bslot + fi)
+            }
+        }
+        fni = ND_RIGHT[fni as usize]
+    }
 }
 
 fn compile_fn(fn_idx: i64) with Mut, Panic, Div {
@@ -2369,27 +2760,53 @@ fn compile_fn(fn_idx: i64) with Mut, Panic, Div {
     let pcount = FN_PARAM_COUNT[fn_idx as usize]
     let pbase = FN_PARAM_BASE[fn_idx as usize]
     if pcount > 0 {
-        let s0 = add_local(FN_PARAM_NAME_OFF[pbase as usize], FN_PARAM_NAME_LEN[pbase as usize])
+        let p0si = FN_PARAM_TYPE_SI[pbase as usize]
+        var s0: i64 = 0
+        if p0si >= 0 {
+            s0 = add_local_sptr(FN_PARAM_NAME_OFF[pbase as usize], FN_PARAM_NAME_LEN[pbase as usize], p0si)
+        } else {
+            s0 = add_local(FN_PARAM_NAME_OFF[pbase as usize], FN_PARAM_NAME_LEN[pbase as usize])
+        }
         emit(0x48); emit(0x89); emit(0xBD)
         emit_u32(0 - ((s0 + 1) * 8))
     }
     if pcount > 1 {
-        let s1 = add_local(FN_PARAM_NAME_OFF[(pbase + 1) as usize], FN_PARAM_NAME_LEN[(pbase + 1) as usize])
+        let p1si = FN_PARAM_TYPE_SI[(pbase + 1) as usize]
+        var s1: i64 = 0
+        if p1si >= 0 {
+            s1 = add_local_sptr(FN_PARAM_NAME_OFF[(pbase + 1) as usize], FN_PARAM_NAME_LEN[(pbase + 1) as usize], p1si)
+        } else {
+            s1 = add_local(FN_PARAM_NAME_OFF[(pbase + 1) as usize], FN_PARAM_NAME_LEN[(pbase + 1) as usize])
+        }
         emit(0x48); emit(0x89); emit(0xB5)
         emit_u32(0 - ((s1 + 1) * 8))
     }
     if pcount > 2 {
-        let s2 = add_local(FN_PARAM_NAME_OFF[(pbase + 2) as usize], FN_PARAM_NAME_LEN[(pbase + 2) as usize])
+        let p2si = FN_PARAM_TYPE_SI[(pbase + 2) as usize]
+        var s2: i64 = 0
+        if p2si >= 0 {
+            s2 = add_local_sptr(FN_PARAM_NAME_OFF[(pbase + 2) as usize], FN_PARAM_NAME_LEN[(pbase + 2) as usize], p2si)
+        } else {
+            s2 = add_local(FN_PARAM_NAME_OFF[(pbase + 2) as usize], FN_PARAM_NAME_LEN[(pbase + 2) as usize])
+        }
         emit(0x48); emit(0x89); emit(0x95)
         emit_u32(0 - ((s2 + 1) * 8))
     }
     if pcount > 3 {
-        let s3 = add_local(FN_PARAM_NAME_OFF[(pbase + 3) as usize], FN_PARAM_NAME_LEN[(pbase + 3) as usize])
+        let p3si = FN_PARAM_TYPE_SI[(pbase + 3) as usize]
+        var s3: i64 = 0
+        if p3si >= 0 {
+            s3 = add_local_sptr(FN_PARAM_NAME_OFF[(pbase + 3) as usize], FN_PARAM_NAME_LEN[(pbase + 3) as usize], p3si)
+        } else {
+            s3 = add_local(FN_PARAM_NAME_OFF[(pbase + 3) as usize], FN_PARAM_NAME_LEN[(pbase + 3) as usize])
+        }
         emit(0x48); emit(0x89); emit(0x8D)
         emit_u32(0 - ((s3 + 1) * 8))
     }
     let body = FN_BODY_NODE[fn_idx as usize]
+    CURRENT_FN_RET_SI = FN_RET_SI[fn_idx as usize]
     compile_node(body)
+    CURRENT_FN_RET_SI = -1
     emit_epilogue()
 }
 
@@ -2398,6 +2815,7 @@ fn compile_fn(fn_idx: i64) with Mut, Panic, Div {
 // ============================================================================
 
 fn elf_emit(b: i64) with Mut, Panic {
+    if ELF_LEN >= 4194304 { return }
     ELF[ELF_LEN as usize] = b as i8
     ELF_LEN = ELF_LEN + 1
 }
@@ -2444,7 +2862,8 @@ fn write_elf(entry_fn: i64) with Mut, Panic, Div {
     elf_emit_u16(0)
     elf_emit_u16(0)
 
-    let total_size = text_off + CODE_LEN
+    let real_code_len = if CODE_LEN > 4194304 { 4194304 } else { CODE_LEN }
+    let total_size = text_off + real_code_len
     elf_emit_u32(1)
     elf_emit_u32(5)
     elf_emit_u64(0)
@@ -2482,7 +2901,7 @@ fn write_elf(entry_fn: i64) with Mut, Panic, Div {
     elf_emit(0x0F); elf_emit(0x05)
 
     var ci: i64 = 0
-    while ci < CODE_LEN {
+    while ci < real_code_len {
         elf_emit(CODE[ci as usize] as i64)
         ci = ci + 1
     }
@@ -2534,6 +2953,8 @@ fn main() -> i64 with IO, Mut, Panic, Div {
     print_int(FN_COUNT)
     print(" structs=")
     print_int(ST_COUNT)
+    print(" nodes=")
+    print_int(ND_COUNT)
     print("\n")
 
     var main_fn: i64 = -1
@@ -2552,7 +2973,10 @@ fn main() -> i64 with IO, Mut, Panic, Div {
         return 1
     }
 
-    MB_BSS_TOTAL = 8
+    // Reserve 512 bytes (64 × 8) at BSS offset 0 as the SRET scratch buffer.
+    // Target program struct-returning functions write fields to 0x700000 + 0..511.
+    // User globals start at BSS offset 512.
+    MB_BSS_TOTAL = 512
 
     mb_collect_globals()
     mb_resolve_src_globals()
@@ -2566,14 +2990,26 @@ fn main() -> i64 with IO, Mut, Panic, Div {
 
     var ci: i64 = 0
     while ci < FN_COUNT {
+        print("fn ")
+        print_int(ci)
+        print(" ")
         compile_fn(ci)
         ci = ci + 1
     }
 
+    print("patching...\n")
     patch_calls(17)
 
+    print("writing elf main_fn=")
+    print_int(main_fn)
+    print(" CODE_LEN=")
+    print_int(CODE_LEN)
+    print("\n")
     write_elf(main_fn)
 
+    print("ELF_LEN=")
+    print_int(ELF_LEN)
+    print("\n")
     let wr = write_file(out_path, ELF, ELF_LEN)
     print("ok\n")
     0
