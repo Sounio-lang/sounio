@@ -1,0 +1,298 @@
+//@ run-pass
+// Tests for stdlib/polynomial — polynomial operations.
+// All functions use by-value structs to avoid the JIT &! mutation limitation.
+
+// ---- Polynomial struct (self-contained, matching lib.sio layout) ----
+
+struct Polynomial {
+    coeffs: [f64; 64],
+    degree: i32,
+}
+
+struct PolyRoots {
+    roots: [f64; 32],
+    count: i32,
+}
+
+fn poly_zero() -> Polynomial {
+    var c: [f64; 64] = [0.0; 64]
+    Polynomial { coeffs: c, degree: -1 }
+}
+
+fn poly_constant(val: f64) -> Polynomial with Panic, Mut {
+    var c: [f64; 64] = [0.0; 64]
+    c[0] = val
+    let d = if val == 0.0 { -1 } else { 0 }
+    Polynomial { coeffs: c, degree: d }
+}
+
+fn fabs_p(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+fn check_near(a: f64, b: f64, tol: f64) -> bool {
+    fabs_p(a - b) < tol
+}
+
+// Horner eval (by value)
+fn poly_eval(p: Polynomial, x: f64) -> f64 with Div, Panic, Mut {
+    if p.degree < 0 { return 0.0 }
+    var result = p.coeffs[p.degree]
+    var i = p.degree - 1
+    while i >= 0 {
+        result = result * x + p.coeffs[i]
+        i = i - 1
+    }
+    result
+}
+
+fn poly_add(a: Polynomial, b: Polynomial) -> Polynomial with Div, Panic, Mut {
+    let max_deg = if a.degree > b.degree { a.degree } else { b.degree }
+    if max_deg < 0 { return poly_zero() }
+    var c: [f64; 64] = [0.0; 64]
+    var i = 0
+    while i <= max_deg {
+        let ca = if i <= a.degree { a.coeffs[i] } else { 0.0 }
+        let cb = if i <= b.degree { b.coeffs[i] } else { 0.0 }
+        c[i] = ca + cb
+        i = i + 1
+    }
+    var deg = max_deg
+    while deg > 0 && c[deg] == 0.0 { deg = deg - 1 }
+    if deg == 0 && c[0] == 0.0 { deg = -1 }
+    Polynomial { coeffs: c, degree: deg }
+}
+
+fn poly_mul(a: Polynomial, b: Polynomial) -> Polynomial with Div, Panic, Mut {
+    if a.degree < 0 || b.degree < 0 { return poly_zero() }
+    let result_deg = a.degree + b.degree
+    let max_deg = if result_deg > 63 { 63 } else { result_deg }
+    var c: [f64; 64] = [0.0; 64]
+    var i = 0
+    while i <= a.degree {
+        var j = 0
+        while j <= b.degree {
+            let k = i + j
+            if k <= max_deg { c[k] = c[k] + a.coeffs[i] * b.coeffs[j] }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    var deg = max_deg
+    while deg > 0 && c[deg] == 0.0 { deg = deg - 1 }
+    if deg == 0 && c[0] == 0.0 { deg = -1 }
+    Polynomial { coeffs: c, degree: deg }
+}
+
+fn poly_deriv(p: Polynomial) -> Polynomial with Div, Panic, Mut {
+    if p.degree <= 0 { return poly_zero() }
+    let new_deg = p.degree - 1
+    var c: [f64; 64] = [0.0; 64]
+    var i = 0
+    while i <= new_deg {
+        c[i] = (i + 1) as f64 * p.coeffs[i + 1]
+        i = i + 1
+    }
+    var deg = new_deg
+    while deg > 0 && c[deg] == 0.0 { deg = deg - 1 }
+    if deg == 0 && c[0] == 0.0 { deg = -1 }
+    Polynomial { coeffs: c, degree: deg }
+}
+
+fn poly_deflate(p: Polynomial, root: f64) -> Polynomial with Div, Panic, Mut {
+    if p.degree <= 0 { return poly_zero() }
+    let n = p.degree
+    var c: [f64; 64] = [0.0; 64]
+    c[n - 1] = p.coeffs[n]
+    var i = n - 2
+    while i >= 0 {
+        c[i] = p.coeffs[i + 1] + root * c[i + 1]
+        i = i - 1
+    }
+    var deg = n - 1
+    while deg > 0 && c[deg] == 0.0 { deg = deg - 1 }
+    if deg == 0 && c[0] == 0.0 { deg = -1 }
+    Polynomial { coeffs: c, degree: deg }
+}
+
+fn poly_from_roots(roots: [f64; 32], n: i32) -> Polynomial with Div, Panic, Mut {
+    var c: [f64; 64] = [0.0; 64]
+    c[0] = 1.0
+    var p = Polynomial { coeffs: c, degree: 0 }
+    var k = 0
+    while k < n {
+        var lc: [f64; 64] = [0.0; 64]
+        lc[0] = 0.0 - roots[k]
+        lc[1] = 1.0
+        let factor = Polynomial { coeffs: lc, degree: 1 }
+        p = poly_mul(p, factor)
+        k = k + 1
+    }
+    p
+}
+
+// Newton iterate (by value)
+fn pf_newton_iter(p: Polynomial, x: f64) -> f64 with Div, Panic, Mut {
+    var result = p.coeffs[p.degree]
+    var i = p.degree - 1
+    while i >= 0 { result = result * x + p.coeffs[i]; i = i - 1 }
+    let fx = result
+    var dresult = (p.degree as f64) * p.coeffs[p.degree]
+    var j = p.degree - 1
+    while j >= 1 { dresult = dresult * x + (j as f64) * p.coeffs[j]; j = j - 1 }
+    let dfx = dresult
+    if fabs_p(dfx) < 1.0e-30 { return x }
+    x - fx / dfx
+}
+
+fn pf_eval(p: Polynomial, x: f64) -> f64 with Div, Panic, Mut {
+    if p.degree < 0 { return 0.0 }
+    var result = p.coeffs[p.degree]
+    var i = p.degree - 1
+    while i >= 0 { result = result * x + p.coeffs[i]; i = i - 1 }
+    result
+}
+
+// Returns roots by value (avoids JIT &! mutation bug)
+fn poly_find_real_roots(p: Polynomial) -> PolyRoots with Div, Panic, Mut {
+    var out_roots: [f64; 32] = [0.0; 32]
+    var count = 0
+
+    var work_coeffs: [f64; 64] = [0.0; 64]
+    var i = 0
+    while i <= p.degree { work_coeffs[i] = p.coeffs[i]; i = i + 1 }
+    var work = Polynomial { coeffs: work_coeffs, degree: p.degree }
+
+    var starts: [f64; 32] = [0.0; 32]
+    starts[0] = -9.0; starts[1] = -7.0; starts[2] = -5.0; starts[3] = -3.0
+    starts[4] = -1.5; starts[5] = 0.0;  starts[6] = 0.5;  starts[7] = 1.5
+    starts[8] = 3.0;  starts[9] = 5.0;  starts[10] = 7.0; starts[11] = 9.0
+
+    var attempts = 0
+    while work.degree >= 1 && count < 32 {
+        let x0 = starts[attempts % 12]
+        var x = x0
+        var iter = 0
+        while iter < 80 {
+            let xn = pf_newton_iter(work, x)
+            if fabs_p(xn - x) < 1.0e-12 {
+                x = xn
+                iter = 80
+            } else {
+                x = xn
+                iter = iter + 1
+            }
+        }
+
+        let res = pf_eval(work, x)
+        if fabs_p(res) < 1.0e-8 {
+            out_roots[count] = x
+            count = count + 1
+            work = poly_deflate(work, x)
+        }
+        attempts = attempts + 1
+        if attempts > 200 { work = poly_zero() }
+    }
+
+    PolyRoots { roots: out_roots, count: count }
+}
+
+// ---- test runner ----
+fn run_tests() -> i32 with Div, Panic, Mut {
+    var fail = 0
+
+    // T1: Horner eval — 3x²+2x+1 at x=2 → 3*4+2*2+1 = 17
+    var c1: [f64; 64] = [0.0; 64]
+    c1[0] = 1.0; c1[1] = 2.0; c1[2] = 3.0
+    let p1 = Polynomial { coeffs: c1, degree: 2 }
+    let v1 = poly_eval(p1, 2.0)
+    if !check_near(v1, 17.0, 1.0e-10) { fail = fail + 1 }
+
+    // T2: poly_add — (x²+1) + (2x+3) = x²+2x+4
+    var ca: [f64; 64] = [0.0; 64]
+    ca[0] = 1.0; ca[2] = 1.0
+    let pa = Polynomial { coeffs: ca, degree: 2 }    // x²+1
+    var cb: [f64; 64] = [0.0; 64]
+    cb[0] = 3.0; cb[1] = 2.0
+    let pb = Polynomial { coeffs: cb, degree: 1 }    // 2x+3
+    let sum = poly_add(pa, pb)
+    if !check_near(sum.coeffs[0], 4.0, 1.0e-10) { fail = fail + 2 }
+    if !check_near(sum.coeffs[1], 2.0, 1.0e-10) { fail = fail + 4 }
+    if !check_near(sum.coeffs[2], 1.0, 1.0e-10) { fail = fail + 8 }
+    if sum.degree != 2 { fail = fail + 16 }
+
+    // T3: poly_mul — (x+1)(x-1) = x²-1
+    var cm1: [f64; 64] = [0.0; 64]
+    cm1[0] = 1.0; cm1[1] = 1.0
+    let pm1 = Polynomial { coeffs: cm1, degree: 1 }  // x+1
+    var cm2: [f64; 64] = [0.0; 64]
+    cm2[0] = -1.0; cm2[1] = 1.0
+    let pm2 = Polynomial { coeffs: cm2, degree: 1 }  // x-1
+    let prod = poly_mul(pm1, pm2)
+    if !check_near(prod.coeffs[0], -1.0, 1.0e-10) { fail = fail + 32 }
+    if !check_near(prod.coeffs[1], 0.0, 1.0e-10) { fail = fail + 64 }
+    if !check_near(prod.coeffs[2], 1.0, 1.0e-10) { fail = fail + 128 }
+    if prod.degree != 2 { fail = fail + 256 }
+
+    // T4: poly_deriv — d/dx(3x²+2x+1) = 6x+2
+    var cd: [f64; 64] = [0.0; 64]
+    cd[0] = 1.0; cd[1] = 2.0; cd[2] = 3.0
+    let pd = Polynomial { coeffs: cd, degree: 2 }
+    let dpd = poly_deriv(pd)
+    if !check_near(dpd.coeffs[0], 2.0, 1.0e-10) { fail = fail + 512 }
+    if !check_near(dpd.coeffs[1], 6.0, 1.0e-10) { fail = fail + 1024 }
+    if dpd.degree != 1 { fail = fail + 2048 }
+
+    // T5: poly_from_roots — roots [1,2,3] → (x-1)(x-2)(x-3), p(0) = -6
+    var froots: [f64; 32] = [0.0; 32]
+    froots[0] = 1.0; froots[1] = 2.0; froots[2] = 3.0
+    let pfr = poly_from_roots(froots, 3)
+    let pfr_at_0 = poly_eval(pfr, 0.0)
+    if !check_near(pfr_at_0, -6.0, 1.0e-8) { fail = fail + 4096 }
+    // Check roots themselves
+    var froots2: [f64; 32] = [0.0; 32]
+    froots2[0] = 1.0; froots2[1] = 2.0; froots2[2] = 3.0
+    let pfr2 = poly_from_roots(froots2, 3)
+    if !check_near(poly_eval(pfr2, 1.0), 0.0, 1.0e-8) { fail = fail + 8192 }
+    var froots3: [f64; 32] = [0.0; 32]
+    froots3[0] = 1.0; froots3[1] = 2.0; froots3[2] = 3.0
+    let pfr3 = poly_from_roots(froots3, 3)
+    if !check_near(poly_eval(pfr3, 2.0), 0.0, 1.0e-8) { fail = fail + 16384 }
+    var froots4: [f64; 32] = [0.0; 32]
+    froots4[0] = 1.0; froots4[1] = 2.0; froots4[2] = 3.0
+    let pfr4 = poly_from_roots(froots4, 3)
+    if !check_near(poly_eval(pfr4, 3.0), 0.0, 1.0e-8) { fail = fail + 32768 }
+
+    // T6: poly_find_real_roots — x²-5x+6 = (x-2)(x-3), roots {2,3}
+    var cq: [f64; 64] = [0.0; 64]
+    cq[0] = 6.0; cq[1] = -5.0; cq[2] = 1.0
+    let pq = Polynomial { coeffs: cq, degree: 2 }
+    let pr = poly_find_real_roots(pq)
+    if pr.count != 2 { fail = fail + 65536 }
+    var found2 = 0
+    var found3 = 0
+    var ri = 0
+    while ri < pr.count {
+        if check_near(pr.roots[ri], 2.0, 1.0e-5) { found2 = 1 }
+        if check_near(pr.roots[ri], 3.0, 1.0e-5) { found3 = 1 }
+        ri = ri + 1
+    }
+    if found2 == 0 { fail = fail + 131072 }
+    if found3 == 0 { fail = fail + 262144 }
+
+    // T7: poly_deflate — (x²-5x+6) / (x-2) = x-3
+    var cq2: [f64; 64] = [0.0; 64]
+    cq2[0] = 6.0; cq2[1] = -5.0; cq2[2] = 1.0
+    let pq2 = Polynomial { coeffs: cq2, degree: 2 }
+    let deflated = poly_deflate(pq2, 2.0)
+    if deflated.degree != 1 { fail = fail + 524288 }
+    if !check_near(deflated.coeffs[0], -3.0, 1.0e-8) { fail = fail + 1048576 }
+    if !check_near(deflated.coeffs[1], 1.0, 1.0e-8) { fail = fail + 2097152 }
+
+    if fail > 0 { return fail }
+    return 0
+}
+
+fn main() -> i32 with Div, Panic, Mut {
+    return run_tests()
+}

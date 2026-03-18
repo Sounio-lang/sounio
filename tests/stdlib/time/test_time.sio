@@ -1,0 +1,355 @@
+//@ run-pass
+// tests/stdlib/time/test_time.sio
+//
+// Self-contained tests for stdlib/time/lib.sio.
+// All helpers inlined (no `use` imports) to work with the JIT runner.
+
+// =============================================================================
+// Inline copy of stdlib/time/lib.sio
+// =============================================================================
+
+struct Duration {
+    seconds: i64,
+    nanos: i64,
+}
+
+struct DateTime {
+    year:          i32,
+    month:         i32,
+    day:           i32,
+    hour:          i32,
+    minute:        i32,
+    second:        i32,
+    epoch_seconds: i64,
+}
+
+fn duration_normalise(secs: i64, ns: i64) -> Duration with Div, Panic, Mut {
+    var s = secs
+    var n = ns
+    if n < 0 {
+        let borrow = (0 - n - 1) / 1000000000 + 1
+        s = s - borrow
+        n = n + borrow * 1000000000
+    }
+    if n >= 1000000000 {
+        let carry = n / 1000000000
+        s = s + carry
+        n = n - carry * 1000000000
+    }
+    Duration { seconds: s, nanos: n }
+}
+
+fn duration_new(secs: i64, nanos: i64) -> Duration with Div, Panic, Mut {
+    duration_normalise(secs, nanos)
+}
+
+fn duration_from_secs(secs: i64) -> Duration {
+    Duration { seconds: secs, nanos: 0 }
+}
+
+fn duration_from_millis(ms: i64) -> Duration with Div, Panic, Mut {
+    let secs = ms / 1000
+    let nanos = (ms - secs * 1000) * 1000000
+    duration_normalise(secs, nanos)
+}
+
+fn duration_add(a: Duration, b: Duration) -> Duration with Div, Panic, Mut {
+    duration_normalise(a.seconds + b.seconds, a.nanos + b.nanos)
+}
+
+fn duration_sub(a: Duration, b: Duration) -> Duration with Div, Panic, Mut {
+    duration_normalise(a.seconds - b.seconds, a.nanos - b.nanos)
+}
+
+fn duration_to_secs_f64(d: &Duration) -> f64 with Div, Panic {
+    let sf: f64 = d.seconds as f64
+    let nf: f64 = d.nanos as f64
+    sf + nf / 1000000000.0
+}
+
+fn is_leap_year(y: i32) -> bool with Div, Panic {
+    if y % 400 == 0 { return true }
+    if y % 100 == 0 { return false }
+    if y % 4 == 0   { return true }
+    false
+}
+
+fn days_in_month(y: i32, m: i32) -> i32 with Div, Panic {
+    if m == 1  { return 31 }
+    if m == 2  {
+        if is_leap_year(y) { return 29 }
+        return 28
+    }
+    if m == 3  { return 31 }
+    if m == 4  { return 30 }
+    if m == 5  { return 31 }
+    if m == 6  { return 30 }
+    if m == 7  { return 31 }
+    if m == 8  { return 31 }
+    if m == 9  { return 30 }
+    if m == 10 { return 31 }
+    if m == 11 { return 30 }
+    31
+}
+
+fn day_of_year(y: i32, m: i32, d: i32) -> i32 with Div, Panic, Mut {
+    var doy = 0
+    var mo = 1
+    while mo < m {
+        doy = doy + days_in_month(y, mo)
+        mo = mo + 1
+    }
+    doy + d
+}
+
+fn days_from_epoch_to_year(y: i32) -> i64 with Div, Panic {
+    let y0: i64 = y as i64 - 1
+    let base: i64 = (y as i64 - 1970) * 365
+    let leaps: i64 = y0 / 4 - y0 / 100 + y0 / 400
+    let epoch_base: i64 = 1969 / 4 - 1969 / 100 + 1969 / 400
+    base + leaps - epoch_base
+}
+
+fn datetime_new(y: i32, m: i32, d: i32, h: i32, min: i32, s: i32) -> DateTime with Div, Panic, Mut {
+    let year_days: i64 = days_from_epoch_to_year(y)
+    let month_days: i64 = day_of_year(y, m, d) as i64 - 1
+    let total_days: i64 = year_days + month_days
+    let epoch: i64 = total_days * 86400 + h as i64 * 3600 + min as i64 * 60 + s as i64
+    DateTime {
+        year: y, month: m, day: d,
+        hour: h, minute: min, second: s,
+        epoch_seconds: epoch,
+    }
+}
+
+fn datetime_from_epoch(epoch: i64) -> DateTime with Div, Panic, Mut {
+    var day_secs: i64 = epoch % 86400
+    var day_count: i64 = epoch / 86400
+    if day_secs < 0 {
+        day_secs = day_secs + 86400
+        day_count = day_count - 1
+    }
+    let h: i32   = (day_secs / 3600) as i32
+    let mn: i32  = ((day_secs % 3600) / 60) as i32
+    let sec: i32 = (day_secs % 60) as i32
+
+    var y: i32 = 1970
+    if day_count >= 0 {
+        while true {
+            let dy: i64 = if is_leap_year(y) { 366 } else { 365 }
+            if day_count < dy { break }
+            day_count = day_count - dy
+            y = y + 1
+        }
+    } else {
+        while day_count < 0 {
+            y = y - 1
+            let dy: i64 = if is_leap_year(y) { 366 } else { 365 }
+            day_count = day_count + dy
+        }
+    }
+
+    var mo: i32 = 1
+    while mo <= 12 {
+        let dm: i64 = days_in_month(y, mo) as i64
+        if day_count < dm { break }
+        day_count = day_count - dm
+        mo = mo + 1
+    }
+    let d: i32 = day_count as i32 + 1
+
+    DateTime {
+        year: y, month: mo, day: d,
+        hour: h, minute: mn, second: sec,
+        epoch_seconds: epoch,
+    }
+}
+
+fn datetime_add_duration(dt: DateTime, d: Duration) -> DateTime with Div, Panic, Mut {
+    datetime_from_epoch(dt.epoch_seconds + d.seconds)
+}
+
+fn datetime_diff(a: &DateTime, b: &DateTime) -> Duration with Div, Panic {
+    let diff_secs: i64 = a.epoch_seconds - b.epoch_seconds
+    Duration { seconds: diff_secs, nanos: 0 }
+}
+
+// =============================================================================
+// Test helpers
+// =============================================================================
+
+fn check_near_f64(a: f64, b: f64, tol: f64) -> bool {
+    let d = a - b
+    let ad = if d < 0.0 { 0.0 - d } else { d }
+    ad < tol
+}
+
+// =============================================================================
+// Tests
+// =============================================================================
+
+fn test_duration_arithmetic() -> i32 with Div, Panic, Mut {
+    var fail = 0
+
+    // 1.5s + 2.3s = 3.8s
+    let a = duration_new(1, 500000000)   // 1.5 s
+    let b = duration_new(2, 300000000)   // 2.3 s
+    let c = duration_add(a, b)
+    let cf = duration_to_secs_f64(&c)
+    if !check_near_f64(cf, 3.8, 1e-6) { fail = fail + 1 }
+
+    // duration_from_millis: 1500 ms = 1s 500ms
+    let d = duration_from_millis(1500)
+    if d.seconds != 1 { fail = fail + 1 }
+    if d.nanos != 500000000 { fail = fail + 1 }
+
+    // duration_sub: 3s - 1s = 2s
+    let e = duration_from_secs(3)
+    let f = duration_from_secs(1)
+    let g = duration_sub(e, f)
+    if g.seconds != 2 { fail = fail + 1 }
+    if g.nanos != 0 { fail = fail + 1 }
+
+    // nanos normalisation: 0s + 1_200_000_000 ns = 1s 200ms
+    let h = duration_new(0, 1200000000)
+    if h.seconds != 1 { fail = fail + 1 }
+    if h.nanos != 200000000 { fail = fail + 1 }
+
+    return fail
+}
+
+fn test_leap_year() -> i32 {
+    var fail = 0
+    if !is_leap_year(2000) { fail = fail + 1 }   // div by 400 → yes
+    if is_leap_year(1900)  { fail = fail + 1 }   // div by 100, not 400 → no
+    if !is_leap_year(2024) { fail = fail + 1 }   // div by 4, not 100 → yes
+    if is_leap_year(2023)  { fail = fail + 1 }   // not div by 4 → no
+    if !is_leap_year(2004) { fail = fail + 1 }   // div by 4 → yes
+    return fail
+}
+
+fn test_days_in_month() -> i32 with Div, Panic, Mut {
+    var fail = 0
+    // February leap year = 29
+    if days_in_month(2000, 2) != 29 { fail = fail + 1 }
+    // February non-leap = 28
+    if days_in_month(1900, 2) != 28 { fail = fail + 1 }
+    if days_in_month(2023, 2) != 28 { fail = fail + 1 }
+    // January always 31
+    if days_in_month(2024, 1) != 31 { fail = fail + 1 }
+    // April always 30
+    if days_in_month(2024, 4) != 30 { fail = fail + 1 }
+    return fail
+}
+
+fn test_datetime_epoch() -> i32 with Div, Panic, Mut {
+    var fail = 0
+
+    // 1970-01-01 00:00:00 → epoch = 0
+    let t0 = datetime_new(1970, 1, 1, 0, 0, 0)
+    if t0.epoch_seconds != 0 { fail = fail + 1 }
+
+    // 2024-01-01 00:00:00
+    // Python: calendar.timegm((2024,1,1,0,0,0,0,0,0)) = 1704067200
+    // 1704067200 / 86400 = 19723 days since epoch
+    let expected: i64 = 1704067200
+    let t2024 = datetime_new(2024, 1, 1, 0, 0, 0)
+    if t2024.epoch_seconds != expected { fail = fail + 1 }
+
+    // 2024-01-01 12:30:45
+    let t2 = datetime_new(2024, 1, 1, 12, 30, 45)
+    let expected2: i64 = expected + 12 * 3600 + 30 * 60 + 45
+    if t2.epoch_seconds != expected2 { fail = fail + 1 }
+
+    return fail
+}
+
+fn test_datetime_roundtrip() -> i32 with Div, Panic, Mut {
+    var fail = 0
+
+    // Round-trip: datetime_new → epoch → datetime_from_epoch
+    let original = datetime_new(2024, 3, 15, 10, 45, 30)
+    let recovered = datetime_from_epoch(original.epoch_seconds)
+
+    if recovered.year   != 2024 { fail = fail + 1 }
+    if recovered.month  != 3    { fail = fail + 1 }
+    if recovered.day    != 15   { fail = fail + 1 }
+    if recovered.hour   != 10   { fail = fail + 1 }
+    if recovered.minute != 45   { fail = fail + 1 }
+    if recovered.second != 30   { fail = fail + 1 }
+
+    // Round-trip for epoch = 0 (1970-01-01 00:00:00)
+    let epoch0 = datetime_from_epoch(0)
+    if epoch0.year   != 1970 { fail = fail + 1 }
+    if epoch0.month  != 1    { fail = fail + 1 }
+    if epoch0.day    != 1    { fail = fail + 1 }
+    if epoch0.hour   != 0    { fail = fail + 1 }
+    if epoch0.minute != 0    { fail = fail + 1 }
+    if epoch0.second != 0    { fail = fail + 1 }
+
+    // Round-trip for a leap-day: 2000-02-29
+    let leap_day = datetime_new(2000, 2, 29, 0, 0, 0)
+    let leap_rec = datetime_from_epoch(leap_day.epoch_seconds)
+    if leap_rec.year  != 2000 { fail = fail + 1 }
+    if leap_rec.month != 2    { fail = fail + 1 }
+    if leap_rec.day   != 29   { fail = fail + 1 }
+
+    return fail
+}
+
+fn test_datetime_diff() -> i32 with Div, Panic, Mut {
+    var fail = 0
+
+    let a = datetime_new(2024, 1, 2, 0, 0, 0)
+    let b = datetime_new(2024, 1, 1, 0, 0, 0)
+    let diff = datetime_diff(&a, &b)
+    // a - b = 1 day = 86400 seconds
+    if diff.seconds != 86400 { fail = fail + 1 }
+
+    return fail
+}
+
+fn test_datetime_add() -> i32 with Div, Panic, Mut {
+    var fail = 0
+
+    let base = datetime_new(2024, 1, 1, 0, 0, 0)
+    let one_day = duration_from_secs(86400)
+    let next = datetime_add_duration(base, one_day)
+    if next.year  != 2024 { fail = fail + 1 }
+    if next.month != 1    { fail = fail + 1 }
+    if next.day   != 2    { fail = fail + 1 }
+
+    return fail
+}
+
+fn test_day_of_year() -> i32 with Div, Panic, Mut {
+    var fail = 0
+    // Jan 1 → doy = 1
+    if day_of_year(2024, 1, 1) != 1   { fail = fail + 1 }
+    // Feb 1 → doy = 32
+    if day_of_year(2024, 2, 1) != 32  { fail = fail + 1 }
+    // Dec 31 in leap year → 366
+    if day_of_year(2024, 12, 31) != 366 { fail = fail + 1 }
+    // Dec 31 in non-leap year → 365
+    if day_of_year(2023, 12, 31) != 365 { fail = fail + 1 }
+    return fail
+}
+
+// =============================================================================
+// Main
+// =============================================================================
+
+fn main() -> i32 with Div, Panic, Mut {
+    var fail = 0
+
+    fail = fail + test_duration_arithmetic()
+    fail = fail + test_leap_year()
+    fail = fail + test_days_in_month()
+    fail = fail + test_datetime_epoch()
+    fail = fail + test_datetime_roundtrip()
+    fail = fail + test_datetime_diff()
+    fail = fail + test_datetime_add()
+    fail = fail + test_day_of_year()
+
+    return fail
+}

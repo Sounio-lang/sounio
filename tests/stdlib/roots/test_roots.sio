@@ -1,0 +1,316 @@
+//@ run-pass
+// Tests for stdlib/roots — function-index dispatch root-finding methods.
+//
+// f_id=0: f(x) = x²-2  (root = √2 ≈ 1.41421)
+// f_id=1: f(x) = x³-x-1 (root ≈ 1.32472)
+// f_id=2: f(x) = cos(x)-x (root ≈ 0.73909)
+// f_id=3: f(x) = exp(x)-3 (root = ln(3) ≈ 1.09861)
+
+// ---- inline math helpers (same as in roots/lib.sio) ----
+
+fn t_abs(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+fn t_sqrt(v: f64) -> f64 with Div, Panic, Mut {
+    if v <= 0.0 { return 0.0 }
+    var y = v
+    var i = 0
+    while i < 20 { y = 0.5 * (y + v / y); i = i + 1 }
+    y
+}
+
+fn t_cos(x: f64) -> f64 with Div, Panic, Mut {
+    let pi_v = 3.14159265358979323846
+    let twopi = 6.28318530717958647692
+    var a = x
+    while a >= twopi { a = a - twopi }
+    while a < 0.0 { a = a + twopi }
+    if a > pi_v { a = a - twopi }
+    let a2 = a * a
+    var sum = 1.0
+    var term = 1.0
+    var n = 1
+    while n < 15 {
+        term = 0.0 - term * a2 / ((2 * n - 1) * 2 * n) as f64
+        sum = sum + term
+        n = n + 1
+    }
+    sum
+}
+
+fn t_exp(x: f64) -> f64 with Div, Panic, Mut {
+    if x > 500.0 { return 1.0e200 }
+    if x < -500.0 { return 0.0 }
+    let ln2v = 0.6931471805599453
+    var kf = x / ln2v
+    var k: i32 = 0
+    if kf >= 0.0 { k = kf as i32 } else { k = (kf as i32) - 1 }
+    let r = x - (k as f64) * ln2v
+    var s = 1.0
+    var t = 1.0
+    var n = 1
+    while n < 25 { t = t * r / (n as f64); s = s + t; n = n + 1 }
+    var result = s
+    if k >= 0 {
+        var i = 0
+        while i < k { result = result * 2.0; i = i + 1 }
+    } else {
+        var i = 0
+        while i < (0 - k) { result = result / 2.0; i = i + 1 }
+    }
+    result
+}
+
+// ---- eval_f for test verification ----
+fn test_eval_f(f_id: i32, x: f64) -> f64 with Div, Panic, Mut {
+    if f_id == 0 { return x * x - 2.0 }
+    if f_id == 1 { return x * x * x - x - 1.0 }
+    if f_id == 2 { return t_cos(x) - x }
+    if f_id == 3 { return t_exp(x) - 3.0 }
+    x * x - 2.0
+}
+
+fn check_near(a: f64, b: f64, tol: f64) -> bool {
+    let d = a - b
+    let ad = if d < 0.0 { 0.0 - d } else { d }
+    ad < tol
+}
+
+// ---- bisection_id implementation (copy from roots/lib.sio, self-contained) ----
+
+struct RootResult2 {
+    root: f64,
+    root_unc: f64,
+    iterations: i32,
+    converged: i32,
+    f_at_root: f64,
+}
+
+fn rr2_ok(root: f64, unc: f64, iter: i32, fval: f64) -> RootResult2 {
+    RootResult2 { root: root, root_unc: unc, iterations: iter, converged: 1, f_at_root: fval }
+}
+
+fn rr2_fail(root: f64, unc: f64, iter: i32, fval: f64) -> RootResult2 {
+    RootResult2 { root: root, root_unc: unc, iterations: iter, converged: 0, f_at_root: fval }
+}
+
+fn rt_sin(x: f64) -> f64 with Div, Panic, Mut {
+    let half_pi = 1.5707963267948966
+    t_cos(x - half_pi)
+}
+
+fn eval_f_local(f_id: i32, x: f64) -> f64 with Div, Panic, Mut {
+    test_eval_f(f_id, x)
+}
+
+fn eval_df_local(f_id: i32, x: f64) -> f64 with Div, Panic, Mut {
+    if f_id == 0 { return 2.0 * x }
+    if f_id == 1 { return 3.0 * x * x - 1.0 }
+    if f_id == 2 { return 0.0 - rt_sin(x) - 1.0 }
+    if f_id == 3 { return t_exp(x) }
+    2.0 * x
+}
+
+fn fabs_local(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+fn bisect_id(f_id: i32, a: f64, b: f64, tol: f64, max_iter: i32) -> RootResult2 with Div, Panic, Mut {
+    var lo = a
+    var hi = b
+    var f_lo = eval_f_local(f_id, lo)
+    var f_hi = eval_f_local(f_id, hi)
+
+    if f_lo * f_hi > 0.0 {
+        let mid = (lo + hi) / 2.0
+        return rr2_fail(mid, fabs_local(hi - lo) / 2.0, 0, eval_f_local(f_id, mid))
+    }
+    if f_lo == 0.0 { return rr2_ok(lo, 0.0, 0, 0.0) }
+    if f_hi == 0.0 { return rr2_ok(hi, 0.0, 0, 0.0) }
+
+    var iter = 0
+    var mid = (lo + hi) / 2.0
+    var f_mid = eval_f_local(f_id, mid)
+
+    while iter < max_iter {
+        if fabs_local(hi - lo) < tol {
+            return rr2_ok(mid, fabs_local(hi - lo) / 2.0, iter, f_mid)
+        }
+        mid = (lo + hi) / 2.0
+        f_mid = eval_f_local(f_id, mid)
+        if fabs_local(f_mid) < tol {
+            return rr2_ok(mid, tol / 2.0, iter + 1, f_mid)
+        }
+        if f_lo * f_mid < 0.0 {
+            hi = mid; f_hi = f_mid
+        } else {
+            lo = mid; f_lo = f_mid
+        }
+        iter = iter + 1
+    }
+    rr2_fail(mid, fabs_local(hi - lo) / 2.0, iter, f_mid)
+}
+
+fn newton_id_local(f_id: i32, x0: f64, tol: f64, max_iter: i32) -> RootResult2 with Div, Panic, Mut {
+    var x = x0
+    var iter = 0
+    while iter < max_iter {
+        let fx = eval_f_local(f_id, x)
+        if fabs_local(fx) < tol {
+            let dfx = eval_df_local(f_id, x)
+            let unc = if fabs_local(dfx) > 1.0e-30 { fabs_local(fx) / fabs_local(dfx) } else { tol }
+            return rr2_ok(x, unc, iter, fx)
+        }
+        let dfx = eval_df_local(f_id, x)
+        if dfx == 0.0 { return rr2_fail(x, tol, iter, fx) }
+        x = x - fx / dfx
+        iter = iter + 1
+    }
+    let final_fx = eval_f_local(f_id, x)
+    rr2_fail(x, tol, iter, final_fx)
+}
+
+fn secant_id_local(f_id: i32, x0: f64, x1: f64, tol: f64, max_iter: i32) -> RootResult2 with Div, Panic, Mut {
+    var x_prev = x0
+    var x_curr = x1
+    var f_prev = eval_f_local(f_id, x_prev)
+    var f_curr = eval_f_local(f_id, x_curr)
+    var iter = 0
+    while iter < max_iter {
+        if fabs_local(f_curr) < tol {
+            return rr2_ok(x_curr, fabs_local(x_curr - x_prev), iter, f_curr)
+        }
+        let denom = f_curr - f_prev
+        if denom == 0.0 { return rr2_fail(x_curr, tol, iter, f_curr) }
+        let x_next = x_curr - f_curr * (x_curr - x_prev) / denom
+        x_prev = x_curr
+        f_prev = f_curr
+        x_curr = x_next
+        f_curr = eval_f_local(f_id, x_curr)
+        iter = iter + 1
+    }
+    rr2_fail(x_curr, fabs_local(x_curr - x_prev), iter, f_curr)
+}
+
+fn brent_id_local(f_id: i32, a: f64, b: f64, tol: f64, max_iter: i32) -> RootResult2 with Div, Panic, Mut {
+    var lo = a
+    var hi = b
+    var f_lo = eval_f_local(f_id, lo)
+    var f_hi = eval_f_local(f_id, hi)
+
+    if f_lo * f_hi > 0.0 {
+        let mid = (lo + hi) / 2.0
+        return rr2_fail(mid, fabs_local(hi - lo) / 2.0, 0, eval_f_local(f_id, mid))
+    }
+
+    if fabs_local(f_lo) < fabs_local(f_hi) {
+        var tmp = lo; lo = hi; hi = tmp
+        var tf = f_lo; f_lo = f_hi; f_hi = tf
+    }
+
+    var c = lo
+    var f_c = f_lo
+    var d = hi - lo
+    var e = d
+    var iter = 0
+
+    while iter < max_iter {
+        if fabs_local(f_hi) < tol {
+            return rr2_ok(hi, fabs_local(hi - lo) / 2.0, iter, f_hi)
+        }
+        if fabs_local(hi - lo) < tol {
+            return rr2_ok(hi, fabs_local(hi - lo) / 2.0, iter, f_hi)
+        }
+
+        var use_bisect = true
+        var s = 0.0
+
+        if f_lo != f_c && f_hi != f_c {
+            let r = f_hi / f_c
+            let q = f_lo / f_c
+            let p = f_hi / f_lo
+            s = p * (q * (r - q) * (c - hi) - (1.0 - r) * (hi - lo)) / ((q - 1.0) * (r - 1.0) * (p - 1.0))
+            s = hi + s
+            use_bisect = false
+        } else if f_lo != f_hi {
+            s = hi - f_hi * (hi - lo) / (f_hi - f_lo)
+            use_bisect = false
+        }
+
+        if !use_bisect {
+            let cond1 = if lo < hi { s < lo || s > hi } else { s < hi || s > lo }
+            let cond2 = fabs_local(s - hi) >= fabs_local(e) / 2.0
+            if cond1 || cond2 { use_bisect = true }
+        }
+
+        if use_bisect {
+            s = (lo + hi) / 2.0; e = hi - lo; d = e
+        } else {
+            e = d; d = s - hi
+        }
+
+        c = hi; f_c = f_hi
+        let f_s = eval_f_local(f_id, s)
+
+        if f_lo * f_s < 0.0 { hi = s; f_hi = f_s } else { lo = s; f_lo = f_s }
+
+        if fabs_local(f_lo) < fabs_local(f_hi) {
+            var tmp = lo; lo = hi; hi = tmp
+            var tf = f_lo; f_lo = f_hi; f_hi = tf
+        }
+        iter = iter + 1
+    }
+    rr2_fail(hi, fabs_local(hi - lo) / 2.0, iter, f_hi)
+}
+
+// ---- test runner ----
+
+fn run_tests() -> i32 with Div, Panic, Mut {
+    var fail = 0
+    let tol = 1.0e-8
+    let max_iter = 200
+
+    // T1: bisection — x²-2=0 on [1,2] → root ≈ √2 ≈ 1.41421356
+    let r1 = bisect_id(0, 1.0, 2.0, tol, max_iter)
+    if r1.converged != 1 { fail = fail + 1 }
+    if !check_near(r1.root, 1.41421356237, 1.0e-6) { fail = fail + 1 }
+    if !check_near(fabs_local(r1.f_at_root), 0.0, tol * 10.0) { fail = fail + 1 }
+
+    // T2: newton — x²-2=0, x0=1.5 → faster convergence, same root
+    let r2 = newton_id_local(0, 1.5, tol, max_iter)
+    if r2.converged != 1 { fail = fail + 1 }
+    if !check_near(r2.root, 1.41421356237, 1.0e-8) { fail = fail + 1 }
+    if !check_near(fabs_local(r2.f_at_root), 0.0, tol * 10.0) { fail = fail + 1 }
+    // Newton should converge faster than bisection (fewer iterations)
+    if r2.iterations >= r1.iterations && r1.iterations > 5 { fail = fail + 1 }
+
+    // T3: secant — x³-x-1=0, x0=1.0, x1=2.0 → root ≈ 1.32472
+    let r3 = secant_id_local(1, 1.0, 2.0, tol, max_iter)
+    if r3.converged != 1 { fail = fail + 1 }
+    if !check_near(r3.root, 1.3247179572, 1.0e-6) { fail = fail + 1 }
+    if !check_near(fabs_local(r3.f_at_root), 0.0, tol * 10.0) { fail = fail + 1 }
+
+    // T4: brent — cos(x)-x=0 on [0,1] → root ≈ 0.73909
+    let r4 = brent_id_local(2, 0.0, 1.0, tol, max_iter)
+    if r4.converged != 1 { fail = fail + 1 }
+    if !check_near(r4.root, 0.73908513321, 1.0e-6) { fail = fail + 1 }
+    if !check_near(fabs_local(r4.f_at_root), 0.0, tol * 10.0) { fail = fail + 1 }
+
+    // T5: brent — exp(x)-3=0 on [0,2] → root = ln(3) ≈ 1.09861
+    let r5 = brent_id_local(3, 0.0, 2.0, tol, max_iter)
+    if r5.converged != 1 { fail = fail + 1 }
+    if !check_near(r5.root, 1.09861228867, 1.0e-6) { fail = fail + 1 }
+    if !check_near(fabs_local(r5.f_at_root), 0.0, tol * 10.0) { fail = fail + 1 }
+
+    // T6: invalid bracket → converged=0
+    let r6 = bisect_id(0, 2.0, 3.0, tol, max_iter)
+    if r6.converged != 0 { fail = fail + 1 }
+
+    if fail > 0 { return 1 }
+    return 0
+}
+
+fn main() -> i32 with Div, Panic, Mut {
+    return run_tests()
+}

@@ -1,0 +1,247 @@
+// stdlib/regex/lib.sio — Minimal pattern matching
+//
+// Supported pattern syntax:
+//   .    matches any single byte
+//   *    matches zero-or-more of the immediately preceding char/dot
+//   ?    matches zero-or-one of the immediately preceding char/dot
+//   ^    anchor to start of text (must be first character in pattern)
+//   $    anchor to end of text   (must be last  character in pattern)
+//   otherwise: literal byte match
+//
+// Fixed-size buffer API (no dynamic allocation):
+//   pattern: &[u8; 64]   max pattern length 64 bytes
+//   text:    &[u8; 256]  max text length 256 bytes
+
+// =============================================================================
+// Result type
+// =============================================================================
+
+struct MatchResult {
+    matched: i32,   // 1 = match found, 0 = no match
+    start:   i32,   // inclusive start position in text
+    end:     i32,   // exclusive end position in text
+}
+
+// =============================================================================
+// Internal helpers — must precede callers
+// =============================================================================
+
+// Returns 1 if pattern byte at pi matches text byte at ti
+fn byte_matches(pat: &[u8; 64], pi: i32, txt: &[u8; 256], ti: i32) -> i32 {
+    let p: u8 = pat[pi as usize]
+    if p == 46 { return 1 }    // '.' matches anything
+    let t: u8 = txt[ti as usize]
+    if p == t { return 1 }
+    0
+}
+
+// Try to match pattern[pi..pat_len) against text[ti..text_len).
+// Returns end position (exclusive) on success, -1 on failure.
+// Handles . * ? ^ $ anchoring.
+fn match_here(pat: &[u8; 64], pi: i32, pat_len: i32,
+              txt: &[u8; 256], ti: i32, text_len: i32) -> i32 with Div, Panic, Mut {
+    // Base case: pattern exhausted → match succeeds at current ti
+    if pi >= pat_len { return ti }
+
+    // $ anchor: pattern ends here, text must also end here
+    let pc: u8 = pat[pi as usize]
+    if pc == 36 {       // '$'
+        if pi + 1 == pat_len {
+            if ti == text_len { return ti }
+            return -1
+        }
+    }
+
+    // Look-ahead for * or ?
+    let next_pi = pi + 1
+    let has_next: i32 = if next_pi < pat_len { 1 } else { 0 }
+    let next_pc: u8 = if has_next == 1 { pat[next_pi as usize] } else { 0 }
+
+    // '*' quantifier: zero or more
+    if has_next == 1 && next_pc == 42 {     // '*'
+        // Try zero repetitions first (skip both pattern char and '*')
+        let zero_result = match_here(pat, pi + 2, pat_len, txt, ti, text_len)
+        if zero_result >= 0 { return zero_result }
+        // Try one-or-more repetitions
+        var cur = ti
+        while cur < text_len && byte_matches(pat, pi, txt, cur) == 1 {
+            cur = cur + 1
+            let r = match_here(pat, pi + 2, pat_len, txt, cur, text_len)
+            if r >= 0 { return r }
+        }
+        return -1
+    }
+
+    // '?' quantifier: zero or one
+    if has_next == 1 && next_pc == 63 {     // '?'
+        // Try one match
+        if ti < text_len && byte_matches(pat, pi, txt, ti) == 1 {
+            let r = match_here(pat, pi + 2, pat_len, txt, ti + 1, text_len)
+            if r >= 0 { return r }
+        }
+        // Try zero match
+        return match_here(pat, pi + 2, pat_len, txt, ti, text_len)
+    }
+
+    // Literal or dot (no quantifier)
+    if ti < text_len && byte_matches(pat, pi, txt, ti) == 1 {
+        return match_here(pat, pi + 1, pat_len, txt, ti + 1, text_len)
+    }
+    -1
+}
+
+// =============================================================================
+// Public API
+// =============================================================================
+
+// regex_match — find first (leftmost) match of pattern in text.
+fn regex_match(pattern: &[u8; 64], pat_len: i32,
+               text: &[u8; 256], text_len: i32) -> MatchResult with Div, Panic, Mut {
+    var pi_start = 0
+    var anchored = 0
+
+    // Check for ^ anchor
+    if pat_len > 0 {
+        let first: u8 = pattern[0]
+        if first == 94 {    // '^'
+            anchored = 1
+            pi_start = 1
+        }
+    }
+
+    if anchored == 1 {
+        let end = match_here(pattern, pi_start, pat_len, text, 0, text_len)
+        if end >= 0 {
+            return MatchResult { matched: 1, start: 0, end: end }
+        }
+        return MatchResult { matched: 0, start: 0, end: 0 }
+    }
+
+    // Unanchored: try each start position
+    var start = 0
+    while start <= text_len {
+        let end = match_here(pattern, 0, pat_len, text, start, text_len)
+        if end >= 0 {
+            return MatchResult { matched: 1, start: start, end: end }
+        }
+        start = start + 1
+    }
+    MatchResult { matched: 0, start: 0, end: 0 }
+}
+
+// regex_match_full — entire text must match pattern (implicitly anchored ^ and $).
+fn regex_match_full(pattern: &[u8; 64], pat_len: i32,
+                    text: &[u8; 256], text_len: i32) -> bool with Div, Panic, Mut {
+    // Build anchored pattern: ^ + original + $
+    var anchpat: [u8; 64] = [0; 64]
+    anchpat[0] = 94    // '^'
+    var i = 0
+    while i < pat_len && i < 62 {
+        anchpat[i + 1] = pattern[i]
+        i = i + 1
+    }
+    let dol_pos = i + 1
+    anchpat[dol_pos] = 36    // '$'
+    let anchlen = dol_pos + 1
+
+    let r = regex_match(&anchpat, anchlen, text, text_len)
+    r.matched == 1
+}
+
+// regex_count — count non-overlapping matches.
+fn regex_count(pattern: &[u8; 64], pat_len: i32,
+               text: &[u8; 256], text_len: i32) -> i32 with Div, Panic, Mut {
+    var count = 0
+    var pos = 0
+    while pos <= text_len {
+        // Try matching at pos by building a sub-view via offset
+        // We use a scratch buffer for the remaining text slice
+        var sub: [u8; 256] = [0; 256]
+        var j = 0
+        let sublen = text_len - pos
+        while j < sublen {
+            sub[j] = text[(pos + j) as usize]
+            j = j + 1
+        }
+        let r = regex_match(pattern, pat_len, &sub, sublen)
+        if r.matched == 1 {
+            count = count + 1
+            // Advance past this match (avoid infinite loop on zero-length match)
+            let advance = if r.end > r.start { r.end } else { 1 }
+            pos = pos + advance
+        } else {
+            pos = pos + 1
+        }
+    }
+    count
+}
+
+// glob_match — shell-style glob: '*' matches any sequence, '?' matches any single char.
+// Returns true if the entire text is covered by the pattern.
+fn glob_match(pattern: &[u8; 64], pat_len: i32,
+              text: &[u8; 256], text_len: i32) -> bool with Div, Panic, Mut {
+    // dp table: dp[ti] = 1 if text[0..ti] can be matched by pattern[0..current_pi]
+    var dp: [i32; 257] = [0; 257]
+    dp[0] = 1
+
+    // Handle leading '*' patterns that can match empty text prefix
+    var pi = 0
+    while pi < pat_len {
+        let pc: u8 = pattern[pi]
+        if pc != 42 { break }    // '*'
+        dp[0] = 1
+        pi = pi + 1
+    }
+
+    // Reset pi to 0 and do full DP
+    // Standard DP for glob matching
+    var dp2: [i32; 257] = [0; 257]
+    dp2[0] = 1
+
+    var p = 0
+    while p < pat_len {
+        var next_dp: [i32; 257] = [0; 257]
+        let pc: u8 = pattern[p]
+
+        if pc == 42 {    // '*' matches any sequence (including empty)
+            // next_dp[t] = dp2[t] (match empty) OR next_dp[t-1] (extend match)
+            var t = 0
+            while t <= text_len {
+                if dp2[t] == 1 { next_dp[t] = 1 }
+                t = t + 1
+            }
+            // propagate forward: if next_dp[t] then next_dp[t+1]
+            t = 0
+            while t < text_len {
+                if next_dp[t] == 1 { next_dp[t + 1] = 1 }
+                t = t + 1
+            }
+        } else {
+            // '?' or literal
+            var t = 1
+            while t <= text_len {
+                if dp2[t - 1] == 1 {
+                    let matches: i32 = if pc == 63 {
+                        1    // '?' matches anything
+                    } else {
+                        let tc: u8 = text[(t - 1) as usize]
+                        if pc == tc { 1 } else { 0 }
+                    }
+                    if matches == 1 { next_dp[t] = 1 }
+                }
+                t = t + 1
+            }
+        }
+
+        // Copy next_dp → dp2
+        var t = 0
+        while t <= text_len {
+            dp2[t] = next_dp[t]
+            t = t + 1
+        }
+
+        p = p + 1
+    }
+
+    dp2[text_len] == 1
+}

@@ -1,0 +1,419 @@
+//@ run-pass
+// tests/stdlib/regex/test_regex.sio
+//
+// Self-contained tests for stdlib/regex/lib.sio.
+// All helpers inlined (no `use` imports) to work with the JIT runner.
+//
+// NOTE: The JIT has a known limitation where &![T;N] mutations to bare arrays
+// are invisible to the caller. We therefore initialise all buffers by direct
+// element assignment in the caller, not via helper functions.
+
+// =============================================================================
+// Inline copy of stdlib/regex/lib.sio
+// =============================================================================
+
+struct MatchResult {
+    matched: i32,
+    start:   i32,
+    end:     i32,
+}
+
+fn byte_matches(pat: &[u8; 64], pi: i32, txt: &[u8; 256], ti: i32) -> i32 {
+    let p: u8 = pat[pi as usize]
+    if p == 46 { return 1 }    // '.' matches anything
+    let t: u8 = txt[ti as usize]
+    if p == t { return 1 }
+    0
+}
+
+fn match_here(pat: &[u8; 64], pi: i32, pat_len: i32,
+              txt: &[u8; 256], ti: i32, text_len: i32) -> i32 with Div, Panic, Mut {
+    if pi >= pat_len { return ti }
+
+    let pc: u8 = pat[pi as usize]
+    if pc == 36 {       // '$'
+        if pi + 1 == pat_len {
+            if ti == text_len { return ti }
+            return -1
+        }
+    }
+
+    let next_pi = pi + 1
+    let has_next: i32 = if next_pi < pat_len { 1 } else { 0 }
+    let next_pc: u8 = if has_next == 1 { pat[next_pi as usize] } else { 0 }
+
+    if has_next == 1 && next_pc == 42 {     // '*'
+        let zero_result = match_here(pat, pi + 2, pat_len, txt, ti, text_len)
+        if zero_result >= 0 { return zero_result }
+        var cur = ti
+        while cur < text_len && byte_matches(pat, pi, txt, cur) == 1 {
+            cur = cur + 1
+            let r = match_here(pat, pi + 2, pat_len, txt, cur, text_len)
+            if r >= 0 { return r }
+        }
+        return -1
+    }
+
+    if has_next == 1 && next_pc == 63 {     // '?'
+        if ti < text_len && byte_matches(pat, pi, txt, ti) == 1 {
+            let r = match_here(pat, pi + 2, pat_len, txt, ti + 1, text_len)
+            if r >= 0 { return r }
+        }
+        return match_here(pat, pi + 2, pat_len, txt, ti, text_len)
+    }
+
+    if ti < text_len && byte_matches(pat, pi, txt, ti) == 1 {
+        return match_here(pat, pi + 1, pat_len, txt, ti + 1, text_len)
+    }
+    -1
+}
+
+fn regex_match(pattern: &[u8; 64], pat_len: i32,
+               text: &[u8; 256], text_len: i32) -> MatchResult with Div, Panic, Mut {
+    var pi_start = 0
+    var anchored = 0
+
+    if pat_len > 0 {
+        let first: u8 = pattern[0]
+        if first == 94 {    // '^'
+            anchored = 1
+            pi_start = 1
+        }
+    }
+
+    if anchored == 1 {
+        let end = match_here(pattern, pi_start, pat_len, text, 0, text_len)
+        if end >= 0 {
+            return MatchResult { matched: 1, start: 0, end: end }
+        }
+        return MatchResult { matched: 0, start: 0, end: 0 }
+    }
+
+    var start = 0
+    while start <= text_len {
+        let end = match_here(pattern, 0, pat_len, text, start, text_len)
+        if end >= 0 {
+            return MatchResult { matched: 1, start: start, end: end }
+        }
+        start = start + 1
+    }
+    MatchResult { matched: 0, start: 0, end: 0 }
+}
+
+fn regex_match_full(pattern: &[u8; 64], pat_len: i32,
+                    text: &[u8; 256], text_len: i32) -> bool with Div, Panic, Mut {
+    var anchpat: [u8; 64] = [0; 64]
+    anchpat[0] = 94    // '^'
+    var i = 0
+    while i < pat_len && i < 62 {
+        anchpat[i + 1] = pattern[i]
+        i = i + 1
+    }
+    let dol_pos = i + 1
+    anchpat[dol_pos] = 36    // '$'
+    let anchlen = dol_pos + 1
+
+    let r = regex_match(&anchpat, anchlen, text, text_len)
+    r.matched == 1
+}
+
+fn regex_count(pattern: &[u8; 64], pat_len: i32,
+               text: &[u8; 256], text_len: i32) -> i32 with Div, Panic, Mut {
+    var count = 0
+    var pos = 0
+    while pos <= text_len {
+        var sub: [u8; 256] = [0; 256]
+        var j = 0
+        let sublen = text_len - pos
+        while j < sublen {
+            sub[j] = text[(pos + j) as usize]
+            j = j + 1
+        }
+        let r = regex_match(pattern, pat_len, &sub, sublen)
+        if r.matched == 1 {
+            count = count + 1
+            let advance = if r.end > r.start { r.end } else { 1 }
+            pos = pos + advance
+        } else {
+            pos = pos + 1
+        }
+    }
+    return count
+}
+
+fn glob_match(pattern: &[u8; 64], pat_len: i32,
+              text: &[u8; 256], text_len: i32) -> bool with Div, Panic, Mut {
+    var dp2: [i32; 257] = [0; 257]
+    dp2[0] = 1
+
+    var p = 0
+    while p < pat_len {
+        var next_dp: [i32; 257] = [0; 257]
+        let pc: u8 = pattern[p]
+
+        if pc == 42 {    // '*' matches any sequence
+            var t = 0
+            while t <= text_len {
+                if dp2[t] == 1 { next_dp[t] = 1 }
+                t = t + 1
+            }
+            t = 0
+            while t < text_len {
+                if next_dp[t] == 1 { next_dp[t + 1] = 1 }
+                t = t + 1
+            }
+        } else {
+            var t = 1
+            while t <= text_len {
+                if dp2[t - 1] == 1 {
+                    let matches: i32 = if pc == 63 {
+                        1    // '?' matches anything
+                    } else {
+                        let tc: u8 = text[(t - 1) as usize]
+                        if pc == tc { 1 } else { 0 }
+                    }
+                    if matches == 1 { next_dp[t] = 1 }
+                }
+                t = t + 1
+            }
+        }
+
+        var t = 0
+        while t <= text_len {
+            dp2[t] = next_dp[t]
+            t = t + 1
+        }
+
+        p = p + 1
+    }
+
+    dp2[text_len] == 1
+}
+
+// =============================================================================
+// Tests — all buffers initialised by direct element assignment in each caller
+// =============================================================================
+
+// Literal match: pattern "abc" found in "xabcy" at start=1, end=4
+fn test_literal_match() -> i32 with Div, Panic, Mut {
+    var fail = 0
+
+    // pattern = "abc" = [97, 98, 99]
+    var pat: [u8; 64] = [0; 64]
+    pat[0] = 97; pat[1] = 98; pat[2] = 99
+
+    // text = "xabcy" = [120,97,98,99,121]
+    var txt: [u8; 256] = [0; 256]
+    txt[0] = 120; txt[1] = 97; txt[2] = 98; txt[3] = 99; txt[4] = 121
+
+    let r = regex_match(&pat, 3, &txt, 5)
+    if r.matched != 1 { fail = fail + 1 }
+    if r.start != 1   { fail = fail + 1 }
+    if r.end != 4     { fail = fail + 1 }
+
+    // pattern NOT found in "xyz"
+    var txt2: [u8; 256] = [0; 256]
+    txt2[0] = 120; txt2[1] = 121; txt2[2] = 122
+    let r2 = regex_match(&pat, 3, &txt2, 3)
+    if r2.matched != 0 { fail = fail + 1 }
+
+    return fail
+}
+
+// Dot match: pattern "a.c" matches "abc" and "axc" but not "ac"
+fn test_dot_match() -> i32 with Div, Panic, Mut {
+    var fail = 0
+
+    // pattern = "a.c" = [97, 46, 99]
+    var pat: [u8; 64] = [0; 64]
+    pat[0] = 97; pat[1] = 46; pat[2] = 99
+
+    // "abc" = [97,98,99]
+    var txt1: [u8; 256] = [0; 256]
+    txt1[0] = 97; txt1[1] = 98; txt1[2] = 99
+    let r1 = regex_match(&pat, 3, &txt1, 3)
+    if r1.matched != 1 { fail = fail + 1 }
+
+    // "axc" = [97,120,99]
+    var txt2: [u8; 256] = [0; 256]
+    txt2[0] = 97; txt2[1] = 120; txt2[2] = 99
+    let r2 = regex_match(&pat, 3, &txt2, 3)
+    if r2.matched != 1 { fail = fail + 1 }
+
+    // "ac" (len=2) should not match (dot requires exactly one char)
+    var txt3: [u8; 256] = [0; 256]
+    txt3[0] = 97; txt3[1] = 99
+    let r3 = regex_match_full(&pat, 3, &txt3, 2)
+    if r3 { fail = fail + 1 }
+
+    return fail
+}
+
+// Star: "ab*c" matches "ac", "abc", "abbc"; does not match "adc"
+fn test_star_match() -> i32 with Div, Panic, Mut {
+    var fail = 0
+
+    // pattern = "ab*c" = [97, 98, 42, 99]
+    var pat: [u8; 64] = [0; 64]
+    pat[0] = 97; pat[1] = 98; pat[2] = 42; pat[3] = 99
+
+    // "ac"
+    var t1: [u8; 256] = [0; 256]
+    t1[0] = 97; t1[1] = 99
+    let r1 = regex_match(&pat, 4, &t1, 2)
+    if r1.matched != 1 { fail = fail + 1 }
+
+    // "abc"
+    var t2: [u8; 256] = [0; 256]
+    t2[0] = 97; t2[1] = 98; t2[2] = 99
+    let r2 = regex_match(&pat, 4, &t2, 3)
+    if r2.matched != 1 { fail = fail + 1 }
+
+    // "abbc"
+    var t3: [u8; 256] = [0; 256]
+    t3[0] = 97; t3[1] = 98; t3[2] = 98; t3[3] = 99
+    let r3 = regex_match(&pat, 4, &t3, 4)
+    if r3.matched != 1 { fail = fail + 1 }
+
+    // "adc" should not fully match ab*c
+    var t4: [u8; 256] = [0; 256]
+    t4[0] = 97; t4[1] = 100; t4[2] = 99
+    let r4 = regex_match_full(&pat, 4, &t4, 3)
+    if r4 { fail = fail + 1 }
+
+    return fail
+}
+
+// Full match: regex_match_full anchors start and end
+fn test_full_match() -> i32 with Div, Panic, Mut {
+    var fail = 0
+
+    // pattern "abc"
+    var pat: [u8; 64] = [0; 64]
+    pat[0] = 97; pat[1] = 98; pat[2] = 99
+
+    // "abc" should fully match
+    var t1: [u8; 256] = [0; 256]
+    t1[0] = 97; t1[1] = 98; t1[2] = 99
+    let r1 = regex_match_full(&pat, 3, &t1, 3)
+    if !r1 { fail = fail + 1 }
+
+    // "xabc" should not fully match
+    var t2: [u8; 256] = [0; 256]
+    t2[0] = 120; t2[1] = 97; t2[2] = 98; t2[3] = 99
+    let r2 = regex_match_full(&pat, 3, &t2, 4)
+    if r2 { fail = fail + 1 }
+
+    // "abcx" should not fully match
+    var t3: [u8; 256] = [0; 256]
+    t3[0] = 97; t3[1] = 98; t3[2] = 99; t3[3] = 120
+    let r3 = regex_match_full(&pat, 3, &t3, 4)
+    if r3 { fail = fail + 1 }
+
+    return fail
+}
+
+// Count: "ab" in "ababab" → 3
+fn test_count() -> i32 with Div, Panic, Mut {
+    var fail = 0
+
+    // pattern "ab" = [97, 98]
+    var pat: [u8; 64] = [0; 64]
+    pat[0] = 97; pat[1] = 98
+
+    // text "ababab" = [97,98,97,98,97,98]
+    var txt: [u8; 256] = [0; 256]
+    txt[0] = 97; txt[1] = 98; txt[2] = 97; txt[3] = 98; txt[4] = 97; txt[5] = 98
+
+    let c = regex_count(&pat, 2, &txt, 6)
+    if c != 3 { fail = fail + 1 }
+
+    return fail
+}
+
+// Glob: "*.sio" matches "test.sio" but not "Makefile"
+fn test_glob() -> i32 with Div, Panic, Mut {
+    var fail = 0
+
+    // pattern "*.sio" = [42, 46, 115, 105, 111]
+    var pat: [u8; 64] = [0; 64]
+    pat[0] = 42; pat[1] = 46; pat[2] = 115; pat[3] = 105; pat[4] = 111
+
+    // text "test.sio" = [116,101,115,116,46,115,105,111]
+    var txt: [u8; 256] = [0; 256]
+    txt[0] = 116; txt[1] = 101; txt[2] = 115; txt[3] = 116
+    txt[4] = 46; txt[5] = 115; txt[6] = 105; txt[7] = 111
+
+    let r1 = glob_match(&pat, 5, &txt, 8)
+    if !r1 { fail = fail + 1 }
+
+    // "Makefile" should NOT match "*.sio"
+    var txt2: [u8; 256] = [0; 256]
+    txt2[0] = 77; txt2[1] = 97; txt2[2] = 107; txt2[3] = 101
+    txt2[4] = 102; txt2[5] = 105; txt2[6] = 108; txt2[7] = 101
+    let r2 = glob_match(&pat, 5, &txt2, 8)
+    if r2 { fail = fail + 1 }
+
+    // Glob "?" matches any single char: pattern [63] matches "a" [97]
+    var qpat: [u8; 64] = [0; 64]
+    qpat[0] = 63    // '?'
+    var qtxt: [u8; 256] = [0; 256]
+    qtxt[0] = 97    // 'a'
+    let rq = glob_match(&qpat, 1, &qtxt, 1)
+    if !rq { fail = fail + 1 }
+
+    // Glob "?" should not match two chars
+    var qtxt2: [u8; 256] = [0; 256]
+    qtxt2[0] = 97; qtxt2[1] = 98
+    let rq2 = glob_match(&qpat, 1, &qtxt2, 2)
+    if rq2 { fail = fail + 1 }
+
+    return fail
+}
+
+// Question mark: "ab?c" matches "abc" and "ac" (full), not "abbc" (full)
+fn test_question() -> i32 with Div, Panic, Mut {
+    var fail = 0
+
+    // pattern "ab?c" = [97, 98, 63, 99]
+    var pat: [u8; 64] = [0; 64]
+    pat[0] = 97; pat[1] = 98; pat[2] = 63; pat[3] = 99
+
+    // "abc" = [97,98,99]
+    var t1: [u8; 256] = [0; 256]
+    t1[0] = 97; t1[1] = 98; t1[2] = 99
+    let r1 = regex_match(&pat, 4, &t1, 3)
+    if r1.matched != 1 { fail = fail + 1 }
+
+    // "ac" = [97,99]
+    var t2: [u8; 256] = [0; 256]
+    t2[0] = 97; t2[1] = 99
+    let r2 = regex_match(&pat, 4, &t2, 2)
+    if r2.matched != 1 { fail = fail + 1 }
+
+    // "abbc" full match should fail
+    var t3: [u8; 256] = [0; 256]
+    t3[0] = 97; t3[1] = 98; t3[2] = 98; t3[3] = 99
+    let r3 = regex_match_full(&pat, 4, &t3, 4)
+    if r3 { fail = fail + 1 }
+
+    return fail
+}
+
+// =============================================================================
+// Main
+// =============================================================================
+
+fn main() -> i32 with Div, Panic, Mut {
+    var fail = 0
+
+    fail = fail + test_literal_match()
+    fail = fail + test_dot_match()
+    fail = fail + test_star_match()
+    fail = fail + test_full_match()
+    fail = fail + test_count()
+    fail = fail + test_glob()
+    fail = fail + test_question()
+
+    return fail
+}

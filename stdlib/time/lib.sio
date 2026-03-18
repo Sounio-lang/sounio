@@ -1,32 +1,210 @@
-//! stdlib/time - Time and Date Utilities
-//!
-//! This module provides types and functions for working with time:
-//! - `Duration` - A span of time
-//! - `Instant` - A monotonic point in time for measuring elapsed time
-//! - `DateTime` - Calendar date and time
-//!
-//! # Examples
-//!
-//! ```sio
-//! // Measure elapsed time
-//! let start = instant_now()
-//! // ... do work ...
-//! let elapsed = instant_elapsed(&start)
-//! println("Took {} ms", duration_as_millis(&elapsed))
-//!
-//! // Work with durations
-//! let timeout = duration_from_secs(30)
-//! let total = duration_add(&d1, &d2)
-//!
-//! // Get current date/time
-//! let now = datetime_now()
-//! let formatted = datetime_format(&now, "%Y-%m-%d %H:%M:%S")
-//! ```
+// stdlib/time/lib.sio — Epoch-based time arithmetic
+//
+// Provides Duration and DateTime types with full calendar arithmetic.
+// No OS clock access — pure epoch-based computation.
+//
+// References:
+//   RFC 3339 / ISO 8601 calendar conventions
+//   POSIX epoch: 1970-01-01 00:00:00 UTC
 
-pub mod duration;
-pub mod instant;
-pub mod datetime;
+// =============================================================================
+// Duration
+// =============================================================================
 
-pub use duration::*;
-pub use instant::*;
-pub use datetime::*;
+struct Duration {
+    seconds: i64,
+    nanos: i64,    // 0..999_999_999
+}
+
+// Normalise: ensure 0 <= nanos < 1_000_000_000 and carry into seconds.
+fn duration_normalise(secs: i64, ns: i64) -> Duration with Div, Panic, Mut {
+    var s = secs
+    var n = ns
+    if n < 0 {
+        let borrow = (0 - n - 1) / 1000000000 + 1
+        s = s - borrow
+        n = n + borrow * 1000000000
+    }
+    if n >= 1000000000 {
+        let carry = n / 1000000000
+        s = s + carry
+        n = n - carry * 1000000000
+    }
+    Duration { seconds: s, nanos: n }
+}
+
+fn duration_new(secs: i64, nanos: i64) -> Duration with Div, Panic, Mut {
+    duration_normalise(secs, nanos)
+}
+
+fn duration_from_secs(secs: i64) -> Duration {
+    Duration { seconds: secs, nanos: 0 }
+}
+
+fn duration_from_millis(ms: i64) -> Duration with Div, Panic, Mut {
+    let secs = ms / 1000
+    let nanos = (ms - secs * 1000) * 1000000
+    duration_normalise(secs, nanos)
+}
+
+fn duration_add(a: Duration, b: Duration) -> Duration with Div, Panic, Mut {
+    duration_normalise(a.seconds + b.seconds, a.nanos + b.nanos)
+}
+
+fn duration_sub(a: Duration, b: Duration) -> Duration with Div, Panic, Mut {
+    duration_normalise(a.seconds - b.seconds, a.nanos - b.nanos)
+}
+
+fn duration_to_secs_f64(d: &Duration) -> f64 with Div, Panic {
+    let sf: f64 = d.seconds as f64
+    let nf: f64 = d.nanos as f64
+    sf + nf / 1000000000.0
+}
+
+// =============================================================================
+// DateTime
+// =============================================================================
+
+struct DateTime {
+    year:          i32,
+    month:         i32,   // 1-12
+    day:           i32,   // 1-31
+    hour:          i32,   // 0-23
+    minute:        i32,   // 0-59
+    second:        i32,   // 0-59
+    epoch_seconds: i64,   // seconds since 1970-01-01 00:00:00 UTC
+}
+
+// =============================================================================
+// Calendar helpers — must precede callers
+// =============================================================================
+
+fn is_leap_year(y: i32) -> bool with Div, Panic {
+    if y % 400 == 0 { return true }
+    if y % 100 == 0 { return false }
+    if y % 4 == 0   { return true }
+    false
+}
+
+fn days_in_month(y: i32, m: i32) -> i32 with Div, Panic {
+    if m == 1  { return 31 }
+    if m == 2  {
+        if is_leap_year(y) { return 29 }
+        return 28
+    }
+    if m == 3  { return 31 }
+    if m == 4  { return 30 }
+    if m == 5  { return 31 }
+    if m == 6  { return 30 }
+    if m == 7  { return 31 }
+    if m == 8  { return 31 }
+    if m == 9  { return 30 }
+    if m == 10 { return 31 }
+    if m == 11 { return 30 }
+    31
+}
+
+fn day_of_year(y: i32, m: i32, d: i32) -> i32 with Div, Panic, Mut {
+    var doy = 0
+    var mo = 1
+    while mo < m {
+        doy = doy + days_in_month(y, mo)
+        mo = mo + 1
+    }
+    doy + d
+}
+
+// Days from the POSIX epoch (1970-01-01) to the start of year y.
+// Uses the Gregorian formula: every 4 years +1 leap, every 100 -1, every 400 +1.
+fn days_from_epoch_to_year(y: i32) -> i64 with Div, Panic {
+    let y0: i64 = y as i64 - 1
+    let base: i64 = (y as i64 - 1970) * 365
+    let leaps: i64 = y0 / 4 - y0 / 100 + y0 / 400
+    let epoch_base: i64 = 1969 / 4 - 1969 / 100 + 1969 / 400
+    base + leaps - epoch_base
+}
+
+// =============================================================================
+// datetime_new — compute epoch_seconds from calendar components
+// =============================================================================
+
+fn datetime_new(y: i32, m: i32, d: i32, h: i32, min: i32, s: i32) -> DateTime with Div, Panic, Mut {
+    let year_days: i64 = days_from_epoch_to_year(y)
+    let month_days: i64 = day_of_year(y, m, d) as i64 - 1
+    let total_days: i64 = year_days + month_days
+    let epoch: i64 = total_days * 86400 + h as i64 * 3600 + min as i64 * 60 + s as i64
+    DateTime {
+        year: y, month: m, day: d,
+        hour: h, minute: min, second: s,
+        epoch_seconds: epoch,
+    }
+}
+
+// =============================================================================
+// datetime_from_epoch — reverse: epoch → calendar fields
+// =============================================================================
+
+fn datetime_from_epoch(epoch: i64) -> DateTime with Div, Panic, Mut {
+    var remaining: i64 = epoch
+
+    // Extract time-of-day
+    var day_secs: i64 = remaining % 86400
+    var day_count: i64 = remaining / 86400
+    if day_secs < 0 {
+        day_secs = day_secs + 86400
+        day_count = day_count - 1
+    }
+    let h: i32   = (day_secs / 3600) as i32
+    let mn: i32  = ((day_secs % 3600) / 60) as i32
+    let sec: i32 = (day_secs % 60) as i32
+
+    // Walk forward/backward from 1970 to find the year
+    var y: i32 = 1970
+    if day_count >= 0 {
+        while true {
+            let dy: i64 = if is_leap_year(y) { 366 } else { 365 }
+            if day_count < dy { break }
+            day_count = day_count - dy
+            y = y + 1
+        }
+    } else {
+        while day_count < 0 {
+            y = y - 1
+            let dy: i64 = if is_leap_year(y) { 366 } else { 365 }
+            day_count = day_count + dy
+        }
+    }
+
+    // Walk months within the year
+    var mo: i32 = 1
+    while mo <= 12 {
+        let dm: i64 = days_in_month(y, mo) as i64
+        if day_count < dm { break }
+        day_count = day_count - dm
+        mo = mo + 1
+    }
+    let d: i32 = day_count as i32 + 1
+
+    DateTime {
+        year: y, month: mo, day: d,
+        hour: h, minute: mn, second: sec,
+        epoch_seconds: epoch,
+    }
+}
+
+// =============================================================================
+// datetime_add_duration
+// =============================================================================
+
+fn datetime_add_duration(dt: DateTime, d: Duration) -> DateTime with Div, Panic, Mut {
+    datetime_from_epoch(dt.epoch_seconds + d.seconds)
+}
+
+// =============================================================================
+// datetime_diff — returns Duration representing a - b (may be negative seconds)
+// =============================================================================
+
+fn datetime_diff(a: &DateTime, b: &DateTime) -> Duration with Div, Panic {
+    let diff_secs: i64 = a.epoch_seconds - b.epoch_seconds
+    Duration { seconds: diff_secs, nanos: 0 }
+}

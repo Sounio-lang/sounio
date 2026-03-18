@@ -1,0 +1,565 @@
+// stdlib/str/lib.sio — Byte-array string utilities for Sounio
+//
+// Strings are represented as `Str { data: [i8; 256], len: i32 }`.
+// No heap allocation — all operations use fixed-size stack buffers.
+//
+// # Key types
+//   Str        — string value (data + length, max 256 bytes)
+//   StrSplit   — result of str_split_char (up to 16 parts)
+//
+// # JIT interpreter notes
+//   - str_to_string takes Str by VALUE (not &Str) to work around a JIT
+//     limitation where &elem of a struct-array does not propagate reads.
+//   - str_split_char uses a StrSplit struct wrapper so mutations via &!
+//     are visible to callers (bare &![T;N] mutations are not visible).
+//   - str_len, str_eq, str_char_at shadow same-named builtins that take
+//     `string`.  str_from_literal uses str_char_at(string, i64) == -1
+//     as a sentinel for end-of-string to avoid calling the builtin str_len.
+
+// ============================================================================
+// Core types
+// ============================================================================
+
+pub struct Str {
+    pub data: [i8; 256],
+    pub len:  i32,
+}
+
+// Wrapper for str_split_char results (struct wrapping needed for &! mutation).
+pub struct StrSplit {
+    pub parts: [Str; 16],
+    pub count: i32,
+}
+
+// ============================================================================
+// Construction — these MUST precede any function that calls them
+// ============================================================================
+
+// Return an empty Str.
+pub fn str_new() -> Str {
+    Str { data: [0; 256], len: 0 }
+}
+
+// Return an empty StrSplit.
+pub fn str_split_new() -> StrSplit {
+    StrSplit { parts: [str_new(); 16], count: 0 }
+}
+
+// ============================================================================
+// str_from_buf — copy i8 buffer into a Str (private helper, precedes callers)
+// ============================================================================
+
+fn str_from_buf_i64(data: &[i8; 64], len: i32) -> Str with Mut, Div, Panic {
+    var result = str_new()
+    let cap = if len < 256 { len } else { 256 }
+    var i = 0
+    while i < cap {
+        result.data[i as usize] = data[i as usize]
+        i = i + 1
+    }
+    result.len = cap
+    result
+}
+
+// ============================================================================
+// Conversion to builtin string (for print/comparison).
+// Takes Str BY VALUE to avoid JIT reference-to-array-element limitation.
+// ============================================================================
+
+pub fn str_to_string(s: Str) -> string with Mut, Div, Panic {
+    str_from_bytes(s.data, s.len as i64)
+}
+
+// ============================================================================
+// str_from_literal — copy builtin string literal into a Str.
+//
+// Uses `str_char_at(s, i) < 0` as end-of-string sentinel instead of the
+// builtin `str_len`, because our exported `str_len` shadows the builtin once
+// defined later in this file.
+// ============================================================================
+
+pub fn str_from_literal(s: string) -> Str with Mut, Div, Panic {
+    var result = str_new()
+    var i: i64 = 0
+    while i < 256 {
+        let ch = str_char_at(s, i)  // builtin: returns -1 past end
+        if ch < 0 { return result }
+        result.data[i as usize] = ch as i8
+        result.len = result.len + 1
+        i = i + 1
+    }
+    result
+}
+
+// Copy from a fixed [i8; 256] buffer with explicit byte count.
+pub fn str_from_bytes_buf(data: &[i8; 256], len: i32) -> Str with Mut, Div, Panic {
+    var result = str_new()
+    let cap = if len < 256 { len } else { 256 }
+    var i = 0
+    while i < cap {
+        result.data[i as usize] = data[i as usize]
+        i = i + 1
+    }
+    result.len = cap
+    result
+}
+
+// ============================================================================
+// str_len — returns byte count of a Str.
+// NOTE: shadows builtin str_len(string).  Use str_from_literal before this
+//       point in the file to avoid the shadow affecting that call.
+// ============================================================================
+
+pub fn str_len(s: &Str) -> i32 {
+    s.len
+}
+
+// ============================================================================
+// Equality — byte-by-byte comparison.
+// NOTE: shadows builtin str_eq(string, string).
+// ============================================================================
+
+pub fn str_eq(a: &Str, b: &Str) -> bool {
+    if a.len != b.len { return false }
+    var i = 0
+    while i < a.len {
+        if a.data[i as usize] != b.data[i as usize] { return false }
+        i = i + 1
+    }
+    true
+}
+
+// ============================================================================
+// Concatenation — a ++ b, truncated at 256 bytes.
+// ============================================================================
+
+pub fn str_concat(a: &Str, b: &Str) -> Str with Mut, Div, Panic {
+    var result = str_new()
+    var i = 0
+    while i < a.len && result.len < 256 {
+        result.data[result.len as usize] = a.data[i as usize]
+        result.len = result.len + 1
+        i = i + 1
+    }
+    var j = 0
+    while j < b.len && result.len < 256 {
+        result.data[result.len as usize] = b.data[j as usize]
+        result.len = result.len + 1
+        j = j + 1
+    }
+    result
+}
+
+// ============================================================================
+// Match helper — internal only; precedes contains/starts_with/index_of.
+// Returns true if needle matches haystack starting at byte offset pos.
+// ============================================================================
+
+fn str_match_at(haystack: &Str, needle: &Str, pos: i32) -> bool {
+    if needle.len == 0 { return true }
+    if pos < 0 { return false }
+    if pos + needle.len > haystack.len { return false }
+    var k = 0
+    while k < needle.len {
+        if haystack.data[(pos + k) as usize] != needle.data[k as usize] {
+            return false
+        }
+        k = k + 1
+    }
+    true
+}
+
+// ============================================================================
+// Contains / starts_with / ends_with / index_of
+// ============================================================================
+
+pub fn str_contains(haystack: &Str, needle: &Str) -> bool {
+    if needle.len == 0 { return true }
+    if needle.len > haystack.len { return false }
+    var i = 0
+    while i <= haystack.len - needle.len {
+        if str_match_at(haystack, needle, i) { return true }
+        i = i + 1
+    }
+    false
+}
+
+pub fn str_starts_with(s: &Str, prefix: &Str) -> bool {
+    str_match_at(s, prefix, 0)
+}
+
+pub fn str_ends_with(s: &Str, suffix: &Str) -> bool {
+    if suffix.len == 0 { return true }
+    if suffix.len > s.len { return false }
+    str_match_at(s, suffix, s.len - suffix.len)
+}
+
+// Returns the byte index of the first occurrence of needle, or -1.
+pub fn str_index_of(haystack: &Str, needle: &Str) -> i32 {
+    if needle.len == 0 { return 0 }
+    if needle.len > haystack.len { return 0 - 1 }
+    var i = 0
+    while i <= haystack.len - needle.len {
+        if str_match_at(haystack, needle, i) { return i }
+        i = i + 1
+    }
+    0 - 1
+}
+
+// ============================================================================
+// Slice — substring [start, end) (clamped to valid range)
+// ============================================================================
+
+pub fn str_slice(s: &Str, start: i32, end: i32) -> Str with Mut, Div, Panic {
+    var result = str_new()
+    let lo = if start < 0 { 0 } else { start }
+    let hi = if end > s.len { s.len } else { end }
+    var i = lo
+    while i < hi && result.len < 256 {
+        result.data[result.len as usize] = s.data[i as usize]
+        result.len = result.len + 1
+        i = i + 1
+    }
+    result
+}
+
+// ============================================================================
+// Trim — remove leading and trailing ASCII spaces (0x20) and tabs (0x09)
+// ============================================================================
+
+pub fn str_trim(s: &Str) -> Str with Mut, Div, Panic {
+    if s.len == 0 { return str_new() }
+
+    // Find lo: first non-whitespace from the left
+    var lo = 0
+    while lo < s.len {
+        let ch = s.data[lo as usize]
+        if ch != 32 as i8 && ch != 9 as i8 { return str_trim_end_from(s, lo) }
+        lo = lo + 1
+    }
+    str_new()  // all whitespace
+}
+
+// Internal: trim trailing whitespace from s[start..s.len] and return result.
+fn str_trim_end_from(s: &Str, start: i32) -> Str with Mut, Div, Panic {
+    // Find hi: last non-whitespace from the right
+    var hi = s.len
+    while hi > start {
+        let ch = s.data[(hi - 1) as usize]
+        if ch != 32 as i8 && ch != 9 as i8 { return str_slice(s, start, hi) }
+        hi = hi - 1
+    }
+    str_new()
+}
+
+// ============================================================================
+// Case conversion — ASCII only (a-z ↔ A-Z)
+// ============================================================================
+
+pub fn str_to_upper(s: &Str) -> Str with Mut, Div, Panic {
+    var result = str_new()
+    result.len = s.len
+    var i = 0
+    while i < s.len {
+        let ch = s.data[i as usize]
+        result.data[i as usize] = if ch >= 97 as i8 && ch <= 122 as i8 {
+            ch - 32 as i8
+        } else {
+            ch
+        }
+        i = i + 1
+    }
+    result
+}
+
+pub fn str_to_lower(s: &Str) -> Str with Mut, Div, Panic {
+    var result = str_new()
+    result.len = s.len
+    var i = 0
+    while i < s.len {
+        let ch = s.data[i as usize]
+        result.data[i as usize] = if ch >= 65 as i8 && ch <= 90 as i8 {
+            ch + 32 as i8
+        } else {
+            ch
+        }
+        i = i + 1
+    }
+    result
+}
+
+// ============================================================================
+// str_split_char — split on a single byte delimiter into a StrSplit wrapper.
+//
+// Writes results directly into out.parts[i].data/len fields (not via a local
+// Str copy) to work around the JIT bare-array &! mutation limitation.
+// Returns the number of parts found.
+// ============================================================================
+
+pub fn str_split_char(s: &Str, delim: i8, out: &!StrSplit) -> i32 with Mut, Div, Panic {
+    out.count = 0
+    var start: i32 = 0
+    var i: i32 = 0
+    while i <= s.len && out.count < 16 {
+        let at_end   = i == s.len
+        let at_delim = i < s.len && s.data[i as usize] == delim
+        if at_end || at_delim {
+            let ci = out.count
+            out.parts[ci as usize].len = 0
+            var j = start
+            while j < i {
+                let plen = out.parts[ci as usize].len
+                out.parts[ci as usize].data[plen as usize] = s.data[j as usize]
+                out.parts[ci as usize].len = plen + 1
+                j = j + 1
+            }
+            out.count = ci + 1
+            start = i + 1
+        }
+        i = i + 1
+    }
+    out.count
+}
+
+// ============================================================================
+// Character access — bounds-checked; returns 0 on out-of-bounds.
+// Named str_char_at_s to avoid shadowing builtin str_char_at(string, i64).
+// ============================================================================
+
+pub fn str_char_at_s(s: &Str, idx: i32) -> i8 {
+    if idx < 0 || idx >= s.len { return 0 as i8 }
+    s.data[idx as usize]
+}
+
+// ============================================================================
+// Replace all occurrences of one byte with another
+// ============================================================================
+
+pub fn str_replace_char(s: &Str, old: i8, new: i8) -> Str with Mut, Div, Panic {
+    var result = str_new()
+    result.len = s.len
+    var i = 0
+    while i < s.len {
+        let ch = s.data[i as usize]
+        result.data[i as usize] = if ch == old { new } else { ch }
+        i = i + 1
+    }
+    result
+}
+
+// ============================================================================
+// Reverse
+// ============================================================================
+
+pub fn str_reverse(s: &Str) -> Str with Mut, Div, Panic {
+    var result = str_new()
+    result.len = s.len
+    var i = 0
+    while i < s.len {
+        result.data[i as usize] = s.data[(s.len - 1 - i) as usize]
+        i = i + 1
+    }
+    result
+}
+
+// ============================================================================
+// Repeat n times (truncated at 256 bytes)
+// ============================================================================
+
+pub fn str_repeat(s: &Str, n: i32) -> Str with Mut, Div, Panic {
+    var result = str_new()
+    if s.len == 0 || n <= 0 { return result }
+    var rep = 0
+    while rep < n && result.len < 256 {
+        var i = 0
+        while i < s.len && result.len < 256 {
+            result.data[result.len as usize] = s.data[i as usize]
+            result.len = result.len + 1
+            i = i + 1
+        }
+        rep = rep + 1
+    }
+    result
+}
+
+// ============================================================================
+// Number formatting helpers (private; must precede callers)
+// ============================================================================
+
+// Write decimal digits of |n| (n >= 0) into buf[pos..] in reverse order.
+fn str_i64_to_buf(n: i64, buf: [i8; 64], pos: i32) -> ([i8; 64], i32) with Mut, Div, Panic {
+    var b = buf
+    var p = pos
+    var m = n
+    while m > 0 {
+        b[p as usize] = (48 + m % 10) as i8
+        p = p + 1
+        m = m / 10
+    }
+    (b, p)
+}
+
+// Reverse buf[lo..hi) in place.
+fn str_buf64_rev(buf: [i8; 64], lo: i32, hi: i32) -> [i8; 64] with Mut, Div, Panic {
+    var b = buf
+    var l = lo
+    var h = hi - 1
+    while l < h {
+        let tmp = b[l as usize]
+        b[l as usize] = b[h as usize]
+        b[h as usize] = tmp
+        l = l + 1
+        h = h - 1
+    }
+    b
+}
+
+// ============================================================================
+// str_from_i64 — integer to decimal Str
+// ============================================================================
+
+pub fn str_from_i64(val: i64) -> Str with Mut, Div, Panic {
+    var buf: [i8; 64] = [0; 64]
+    var pos: i32 = 0
+
+    if val == 0 {
+        buf[0] = 48 as i8
+        return str_from_buf_i64(&buf, 1)
+    }
+
+    let neg = val < 0
+    let m   = if neg { 0 - val } else { val }
+
+    let (buf2, digit_end) = str_i64_to_buf(m, buf, 0)
+    var b  = buf2
+    var de = digit_end
+
+    if neg {
+        b[de as usize] = 45 as i8  // '-'
+        de = de + 1
+    }
+
+    let b2 = str_buf64_rev(b, 0, de)
+    str_from_buf_i64(&b2, de)
+}
+
+// ============================================================================
+// str_from_f64 — float to decimal Str with `decimals` fractional digits.
+//                Uses round-half-up to avoid floating-point drift.
+// ============================================================================
+
+pub fn str_from_f64(val: f64, decimals: i32) -> Str with Mut, Div, Panic {
+    var buf: [i8; 64] = [0; 64]
+    var pos: i32 = 0
+
+    let neg = val < 0.0
+    let ax  = if neg { 0.0 - val } else { val }
+
+    if neg {
+        buf[0] = 45 as i8  // '-'
+        pos = 1
+    }
+
+    // Integer part
+    let int_part  = ax as i64
+    let int_start = pos
+
+    if int_part == 0 {
+        buf[pos as usize] = 48 as i8
+        pos = pos + 1
+    } else {
+        let (buf2, digit_end) = str_i64_to_buf(int_part, buf, pos)
+        buf = buf2
+        pos = digit_end
+        buf = str_buf64_rev(buf, int_start, pos)
+    }
+
+    // Fractional part
+    if decimals > 0 {
+        buf[pos as usize] = 46 as i8  // '.'
+        pos = pos + 1
+
+        // Scale and round
+        var scale = 1.0
+        var d = 0
+        while d < decimals {
+            scale = scale * 10.0
+            d = d + 1
+        }
+        let frac_i = ((ax - int_part as f64) * scale + 0.5) as i64
+
+        // Write digits right-to-left into temp buffer, then forward into buf
+        var frac_tmp: [i8; 32] = [0; 32]
+        var ft: i32 = 0
+        var f  = frac_i
+        var dc = 0
+        while dc < decimals {
+            frac_tmp[ft as usize] = (48 + f % 10) as i8
+            f  = f / 10
+            ft = ft + 1
+            dc = dc + 1
+        }
+        var fi = ft - 1
+        while fi >= 0 {
+            buf[pos as usize] = frac_tmp[fi as usize]
+            pos = pos + 1
+            fi  = fi - 1
+        }
+    }
+
+    str_from_buf_i64(&buf, pos)
+}
+
+// ============================================================================
+// str_to_i64 — parse decimal integer.  Returns 0 on error.
+// ============================================================================
+
+pub fn str_to_i64(s: &Str) -> i64 with Mut, Div, Panic {
+    if s.len == 0 { return 0 }
+    var result: i64 = 0
+    var i = 0
+    let neg = s.data[0] == 45 as i8  // '-'
+    if neg { i = 1 }
+    while i < s.len {
+        let ch = s.data[i as usize]
+        if ch < 48 as i8 || ch > 57 as i8 { return 0 }
+        result = result * 10 + (ch as i64 - 48)
+        i = i + 1
+    }
+    if neg { 0 - result } else { result }
+}
+
+// ============================================================================
+// str_to_f64 — parse decimal float.  Returns 0.0 on error.
+// ============================================================================
+
+pub fn str_to_f64(s: &Str) -> f64 with Mut, Div, Panic {
+    if s.len == 0 { return 0.0 }
+    var i = 0
+    let neg = s.data[0] == 45 as i8  // '-'
+    if neg { i = 1 }
+
+    var int_part: f64 = 0.0
+    while i < s.len && s.data[i as usize] != 46 as i8 {  // stop at '.'
+        let ch = s.data[i as usize]
+        if ch < 48 as i8 || ch > 57 as i8 { return 0.0 }
+        int_part = int_part * 10.0 + (ch as i64 - 48) as f64
+        i = i + 1
+    }
+
+    var frac_part: f64 = 0.0
+    if i < s.len && s.data[i as usize] == 46 as i8 {
+        i = i + 1  // skip '.'
+        var scale = 0.1
+        while i < s.len {
+            let ch = s.data[i as usize]
+            if ch < 48 as i8 || ch > 57 as i8 { return 0.0 }
+            frac_part = frac_part + (ch as i64 - 48) as f64 * scale
+            scale = scale * 0.1
+            i = i + 1
+        }
+    }
+
+    let result = int_part + frac_part
+    if neg { 0.0 - result } else { result }
+}

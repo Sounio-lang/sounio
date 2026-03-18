@@ -325,3 +325,185 @@ pub fn poly_eval_with_error(p: Polynomial, x: f64) -> (f64, f64) with Div, Panic
     let eps = 2.220446049250313e-16
     (result, error * eps)
 }
+
+// =============================================================================
+// EXTENDED API — poly_new, poly_deriv, poly_integrate, poly_from_roots,
+//               poly_deflate, poly_find_real_roots
+// =============================================================================
+
+// Create a zero polynomial of a given degree (all coefficients zero).
+// Caller sets coefficients after creation.
+pub fn poly_new(degree: i32) -> Polynomial with Panic, Mut {
+    var coeffs: [f64; 64] = [0.0; 64]
+    let d = if degree < 0 { -1 } else { if degree > 63 { 63 } else { degree } }
+    Polynomial { coeffs: coeffs, degree: d }
+}
+
+// Alias: poly_deriv = poly_derivative (formal derivative)
+pub fn poly_deriv(p: Polynomial) -> Polynomial with Div, Panic, Mut {
+    if p.degree <= 0 {
+        return poly_zero()
+    }
+    let new_deg = p.degree - 1
+    var coeffs: [f64; 64] = [0.0; 64]
+    var i = 0
+    while i <= new_deg {
+        coeffs[i] = (i + 1) as f64 * p.coeffs[i + 1]
+        i = i + 1
+    }
+    var deg = new_deg
+    while deg > 0 && coeffs[deg] == 0.0 { deg = deg - 1 }
+    if deg == 0 && coeffs[0] == 0.0 { deg = -1 }
+    Polynomial { coeffs: coeffs, degree: deg }
+}
+
+// Alias: poly_integrate = poly_integral (antiderivative with constant c)
+pub fn poly_integrate(p: Polynomial, c: f64) -> Polynomial with Div, Panic, Mut {
+    if p.degree < 0 {
+        return poly_constant(c)
+    }
+    let new_deg = if p.degree < 63 { p.degree + 1 } else { 63 }
+    var coeffs: [f64; 64] = [0.0; 64]
+    coeffs[0] = c
+    var i = 0
+    while i <= p.degree && i < 63 {
+        coeffs[i + 1] = p.coeffs[i] / ((i + 1) as f64)
+        i = i + 1
+    }
+    Polynomial { coeffs: coeffs, degree: new_deg }
+}
+
+// Build polynomial from n roots: (x - r[0])*(x - r[1])*...*(x - r[n-1])
+// Uses repeated multiplication by the linear factor (x - r[i]).
+// NOTE: roots passed by value (fixed array). Uses by-value poly_mul.
+pub fn poly_from_roots(roots: [f64; 32], n: i32) -> Polynomial with Div, Panic, Mut {
+    // Start with p(x) = 1
+    var coeffs: [f64; 64] = [0.0; 64]
+    coeffs[0] = 1.0
+    var p = Polynomial { coeffs: coeffs, degree: 0 }
+
+    var k = 0
+    while k < n {
+        // Multiply p by (x - roots[k]): linear factor coeffs[0]=-r, coeffs[1]=1
+        var lcoeffs: [f64; 64] = [0.0; 64]
+        lcoeffs[0] = 0.0 - roots[k]
+        lcoeffs[1] = 1.0
+        let factor = Polynomial { coeffs: lcoeffs, degree: 1 }
+        p = poly_mul(p, factor)
+        k = k + 1
+    }
+    p
+}
+
+// Synthetic division: divide p(x) by (x - root), return quotient.
+// If root is truly a root of p, the remainder is zero (or near-zero).
+pub fn poly_deflate(p: Polynomial, root: f64) -> Polynomial with Div, Panic, Mut {
+    if p.degree <= 0 {
+        return poly_zero()
+    }
+    let n = p.degree
+    var coeffs: [f64; 64] = [0.0; 64]
+    // Synthetic division: b[n-1] = a[n], b[k] = a[k+1] + root*b[k+1]
+    coeffs[n - 1] = p.coeffs[n]
+    var i = n - 2
+    while i >= 0 {
+        coeffs[i] = p.coeffs[i + 1] + root * coeffs[i + 1]
+        i = i - 1
+    }
+    // Trim leading zeros
+    var deg = n - 1
+    while deg > 0 && coeffs[deg] == 0.0 { deg = deg - 1 }
+    if deg == 0 && coeffs[0] == 0.0 { deg = -1 }
+    Polynomial { coeffs: coeffs, degree: deg }
+}
+
+// Result of poly_find_real_roots — returned by value to avoid JIT &! mutation bug.
+pub struct PolyRoots {
+    roots: [f64; 32],
+    count: i32,
+}
+
+// Inline Newton iterate: one step of Newton's method on polynomial p at x.
+fn pf_newton_iter(p: Polynomial, x: f64) -> f64 with Div, Panic, Mut {
+    var result = p.coeffs[p.degree]
+    var i = p.degree - 1
+    while i >= 0 {
+        result = result * x + p.coeffs[i]
+        i = i - 1
+    }
+    let fx = result
+    // Derivative via Horner
+    var dresult = (p.degree as f64) * p.coeffs[p.degree]
+    var j = p.degree - 1
+    while j >= 1 {
+        dresult = dresult * x + (j as f64) * p.coeffs[j]
+        j = j - 1
+    }
+    let dfx = dresult
+    if fabs(dfx) < 1.0e-30 { return x }
+    x - fx / dfx
+}
+
+// Evaluate polynomial at x (inline, by value).
+fn pf_eval(p: Polynomial, x: f64) -> f64 with Div, Panic, Mut {
+    if p.degree < 0 { return 0.0 }
+    var result = p.coeffs[p.degree]
+    var i = p.degree - 1
+    while i >= 0 { result = result * x + p.coeffs[i]; i = i - 1 }
+    result
+}
+
+// Find all real roots of polynomial p by repeated Newton + deflation.
+// Returns PolyRoots (by value) to avoid the JIT &! mutation limitation.
+// Works for polynomials up to degree 31.
+pub fn poly_find_real_roots(p: Polynomial) -> PolyRoots with Div, Panic, Mut {
+    var out_roots: [f64; 32] = [0.0; 32]
+    var count = 0
+
+    // Work on a local copy so we can deflate
+    var work_coeffs: [f64; 64] = [0.0; 64]
+    var i = 0
+    while i <= p.degree {
+        work_coeffs[i] = p.coeffs[i]
+        i = i + 1
+    }
+    var work = Polynomial { coeffs: work_coeffs, degree: p.degree }
+
+    // Starting guesses spread across [-10, 10]
+    var starts: [f64; 32] = [0.0; 32]
+    starts[0] = -9.0; starts[1] = -7.0; starts[2] = -5.0; starts[3] = -3.0
+    starts[4] = -1.5; starts[5] = 0.0;  starts[6] = 0.5;  starts[7] = 1.5
+    starts[8] = 3.0;  starts[9] = 5.0;  starts[10] = 7.0; starts[11] = 9.0
+
+    var attempts = 0
+    while work.degree >= 1 && count < 32 {
+        let x0 = starts[attempts % 12]
+        var x = x0
+        var iter = 0
+        while iter < 80 {
+            let xn = pf_newton_iter(work, x)
+            if fabs(xn - x) < 1.0e-12 {
+                x = xn
+                iter = 80
+            } else {
+                x = xn
+                iter = iter + 1
+            }
+        }
+
+        // Accept root if residual is small
+        let res = pf_eval(work, x)
+
+        if fabs(res) < 1.0e-8 {
+            out_roots[count] = x
+            count = count + 1
+            // Deflate work by (x - root)
+            work = poly_deflate(work, x)
+        }
+
+        attempts = attempts + 1
+        if attempts > 200 { work = poly_zero() }
+    }
+
+    PolyRoots { roots: out_roots, count: count }
+}
