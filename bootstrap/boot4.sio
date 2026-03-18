@@ -2238,21 +2238,34 @@ fn compile_node(node: i64) -> i64 with Mut, Panic, Div {
             // in a struct-returning function — emit SRET stores instead of normal load
             if next_s == -1 && CURRENT_FN_RET_SI >= 0 && ND_KIND[stmt as usize] == 43 {
                 let inner = ND_LEFT[stmt as usize]
-                if inner != -1 && ND_KIND[inner as usize] == 2 {
-                    let soff = ND_STR_OFF[inner as usize]
-                    let slen = ND_STR_LEN[inner as usize]
-                    let sslot = find_local(soff, slen)
-                    let ssi = LAST_LOCAL_SI
-                    if sslot >= 0 && ssi >= 0 {
-                        let sfc = struct_total_slots(ssi)
-                        var srfi: i64 = 0
-                        while srfi < sfc {
-                            emit_load_rax(sslot + srfi)
-                            emit(0x48); emit(0xB9); emit_u64(0x700000 + srfi * 8)
-                            emit(0x48); emit(0x89); emit(0x01)
-                            srfi = srfi + 1
+                if inner != -1 {
+                    let ink = ND_KIND[inner as usize]
+                    if ink == 2 {
+                        // Trailing NK_IDENT of struct local → SRET stores
+                        let soff = ND_STR_OFF[inner as usize]
+                        let slen = ND_STR_LEN[inner as usize]
+                        let sslot = find_local(soff, slen)
+                        let ssi = LAST_LOCAL_SI
+                        if sslot >= 0 && ssi >= 0 {
+                            let sfc = struct_total_slots(ssi)
+                            var srfi: i64 = 0
+                            while srfi < sfc {
+                                emit_load_rax(sslot + srfi)
+                                emit(0x48); emit(0xB9); emit_u64(0x700000 + srfi * 8)
+                                emit(0x48); emit(0x89); emit(0x01)
+                                srfi = srfi + 1
+                            }
+                            emit_mov_rax_imm(0)
+                            return 0
                         }
+                    } else if ink == 47 {
+                        // Trailing NK_STRUCT_LIT → SRET stores directly
+                        compile_sret_from_struct_lit(inner, 0)
                         emit_mov_rax_imm(0)
+                        return 0
+                    } else if ink == 12 || ink == 51 {
+                        // Trailing function call returning struct — callee writes SRET_BUF
+                        compile_node(stmt)
                         return 0
                     }
                 }
@@ -2489,21 +2502,30 @@ fn compile_node(node: i64) -> i64 with Mut, Panic, Div {
     }
     if kind == 34 {
         let val = ND_LEFT[node as usize]
-        if val != -1 && ND_KIND[val as usize] == 2 {
-            let rv_off = ND_STR_OFF[val as usize]
-            let rv_len = ND_STR_LEN[val as usize]
-            let rv_slot = find_local(rv_off, rv_len)
-            let rv_si = LAST_LOCAL_SI
-            if rv_slot >= 0 && rv_si >= 0 {
-                // Struct return: copy each field to SRET_BUF at 0x700000 + fi*8
-                let rv_fc = struct_total_slots(rv_si)
-                var rfi: i64 = 0
-                while rfi < rv_fc {
-                    emit_load_rax(rv_slot + rfi)
-                    emit(0x48); emit(0xB9); emit_u64(0x700000 + rfi * 8)
-                    emit(0x48); emit(0x89); emit(0x01)
-                    rfi = rfi + 1
+        if val != -1 {
+            let val_nk = ND_KIND[val as usize]
+            if val_nk == 2 {
+                // NK_IDENT: check if struct local → SRET stores
+                let rv_off = ND_STR_OFF[val as usize]
+                let rv_len = ND_STR_LEN[val as usize]
+                let rv_slot = find_local(rv_off, rv_len)
+                let rv_si = LAST_LOCAL_SI
+                if rv_slot >= 0 && rv_si >= 0 {
+                    let rv_fc = struct_total_slots(rv_si)
+                    var rfi: i64 = 0
+                    while rfi < rv_fc {
+                        emit_load_rax(rv_slot + rfi)
+                        emit(0x48); emit(0xB9); emit_u64(0x700000 + rfi * 8)
+                        emit(0x48); emit(0x89); emit(0x01)
+                        rfi = rfi + 1
+                    }
+                    emit_mov_rax_imm(0)
+                    emit_epilogue()
+                    return 0
                 }
+            } else if val_nk == 47 && CURRENT_FN_RET_SI >= 0 {
+                // NK_STRUCT_LIT: write fields directly to SRET_BUF
+                compile_sret_from_struct_lit(val, 0)
                 emit_mov_rax_imm(0)
                 emit_epilogue()
                 return 0
@@ -2731,6 +2753,26 @@ fn compile_node(node: i64) -> i64 with Mut, Panic, Div {
         return 0
     }
     0
+}
+
+// Emit SRET stores from a NK_STRUCT_LIT node directly to SRET_BUF (0x700000 + fi*8).
+// Used for trailing struct literal expressions in struct-returning functions.
+fn compile_sret_from_struct_lit(node: i64, base_fi: i64) with Mut, Panic, Div {
+    var fni = ND_EXTRA[node as usize]
+    while fni != -1 {
+        let fi = ND_IVAL[fni as usize]
+        let fval = ND_LEFT[fni as usize]
+        if fi >= 0 {
+            if ND_KIND[fval as usize] == 47 {
+                compile_sret_from_struct_lit(fval, base_fi + fi)
+            } else {
+                compile_node(fval)
+                emit(0x48); emit(0xB9); emit_u64(0x700000 + (base_fi + fi) * 8)
+                emit(0x48); emit(0x89); emit(0x01)
+            }
+        }
+        fni = ND_RIGHT[fni as usize]
+    }
 }
 
 // Recursively initialize struct fields from a NK_STRUCT_LIT node into bslot..bslot+n stack slots.
