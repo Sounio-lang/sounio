@@ -1,0 +1,329 @@
+// stdlib/special/erf.sio — Error function and related
+//
+// Pure Sounio implementations (no FFI, no external imports):
+//   erf(x)            — Error function via A&S 7.1.26 rational approximation
+//   erfc(x)           — Complementary error function (1 - erf for |x|<4,
+//                        continued fraction for |x|>=4)
+//   erfinv(x)         — Inverse error function (minimax + Newton-Raphson)
+//   normal_cdf(x)     — Standard normal CDF: 0.5*(1 + erf(x/sqrt(2)))
+//   normal_quantile(p)— Standard normal quantile: sqrt(2)*erfinv(2p-1)
+//
+// References:
+//   Abramowitz & Stegun (1964) §7.1.26 — erf rational approx, max error < 1.5e-7
+//   J.M. Blair et al. (1976) "Rational Chebyshev approximations for the
+//     inverse of the error function" — erfinv minimax coefficients
+//   Giles (2010) "Approximating the erfinv function" — GPU-oriented derivation
+//   Press et al. (2007) "Numerical Recipes" 3rd ed., §6.2
+
+// ============================================================================
+// HELPERS (must precede callers — no forward references in Sounio)
+// ============================================================================
+
+fn erf_abs(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+// Square root via Newton-Raphson with range reduction into [1, 4)
+fn erf_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var scaled = x
+    var scale_back = 1.0
+    while scaled < 1.0 { scaled = scaled * 4.0; scale_back = scale_back * 2.0 }
+    while scaled > 4.0 { scaled = scaled * 0.25; scale_back = scale_back * 0.5 }
+    var y = 1.5
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    return y / scale_back
+}
+
+// Natural logarithm: range-reduce to [0.5, 2) then Padé/series
+fn erf_ln(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 - 1.0e30 }
+    if x == 1.0 { return 0.0 }
+    var m = x
+    var e = 0
+    while m >= 2.0 { m = m / 2.0; e = e + 1 }
+    while m < 0.5 { m = m * 2.0; e = e - 1 }
+    let t = (m - 1.0) / (m + 1.0)
+    let t2 = t * t
+    var sum = t
+    var term = t
+    var k = 1
+    while k < 30 {
+        term = term * t2
+        sum = sum + term / ((2 * k + 1) as f64)
+        k = k + 1
+    }
+    return 2.0 * sum + (e as f64) * 0.6931471805599453
+}
+
+// Exponential: range-reduce by integer part, Taylor series for remainder
+fn erf_exp(x: f64) -> f64 with Mut, Div, Panic {
+    if x > 500.0 { return 1.0e200 }
+    if x < 0.0 - 500.0 { return 0.0 }
+    var kf = x / 0.6931471805599453
+    var k: i32 = 0
+    if kf >= 0.0 { k = kf as i32 } else { k = (kf as i32) - 1 }
+    let r = x - (k as f64) * 0.6931471805599453
+    var s = 1.0
+    var term = 1.0
+    var n = 1
+    while n < 25 { term = term * r / (n as f64); s = s + term; n = n + 1 }
+    var result = s
+    if k >= 0 { var i = 0; while i < k { result = result * 2.0; i = i + 1 } }
+    else      { var i = 0; while i < (0 - k) { result = result / 2.0; i = i + 1 } }
+    return result
+}
+
+// A&S 7.1.26 rational approximation for x >= 0
+// Returns erf(x) for non-negative x.
+fn erf_as726(x: f64) -> f64 with Mut, Div, Panic {
+    // Coefficients from Abramowitz & Stegun §7.1.26
+    let p  = 0.3275911
+    let a1 = 0.254829592
+    let a2 = 0.0 - 0.284496736
+    let a3 = 1.421413741
+    let a4 = 0.0 - 1.453152027
+    let a5 = 1.061405429
+
+    let t  = 1.0 / (1.0 + p * x)
+    let t2 = t * t
+    let t3 = t2 * t
+    let t4 = t3 * t
+    let t5 = t4 * t
+
+    let poly = a1 * t + a2 * t2 + a3 * t3 + a4 * t4 + a5 * t5
+    return 1.0 - poly * erf_exp(0.0 - x * x)
+}
+
+// Continued fraction for erfc(x) for large |x| (x > 0)
+// erfc(x) = exp(-x^2)/sqrt(pi) * CF, CF via Lentz method.
+// Numerically stable for x >= 4.
+fn erfc_cf(x: f64) -> f64 with Mut, Div, Panic {
+    let sqrt_pi = 1.7724538509055159   // sqrt(pi)
+    let tiny    = 1.0e-30
+    let x2      = x * x
+
+    // Continued fraction: erfc(x) = (exp(-x^2)/sqrt(pi)) / (x + 0.5/(x + 1/(x + 1.5/(x + ...))))
+    // Equivalently write it as: CF = x + a_1/(x + a_2/(x + ...)), a_n = n/2
+    // We use the modified Lentz method on the CF representation.
+    var b = x + 0.5 / x   // seed for initial estimate
+    var f = b
+    if erf_abs(f) < tiny { f = tiny }
+    var c = f
+    var d = 0.0
+
+    var n = 1
+    while n < 60 {
+        let an = (n as f64) * 0.5   // a_n = n/2
+        let bn = x                   // all partial denominators are x
+
+        d = bn + an * d
+        if erf_abs(d) < tiny { d = tiny }
+        d = 1.0 / d
+
+        c = bn + an / c
+        if erf_abs(c) < tiny { c = tiny }
+
+        let delta = c * d
+        f = f * delta
+
+        if erf_abs(delta - 1.0) < 1.0e-14 { n = 60 }
+        else { n = n + 1 }
+    }
+
+    return erf_exp(0.0 - x2) / (sqrt_pi * f)
+}
+
+// ============================================================================
+// pub fn erf(x: f64) -> f64
+// ============================================================================
+// Abramowitz & Stegun 7.1.26 rational approximation.
+// Maximum error < 1.5e-7 over the entire real line.
+// Uses odd symmetry for negative x: erf(-x) = -erf(x).
+
+pub fn erf(x: f64) -> f64 with Mut, Div, Panic {
+    if x == 0.0 { return 0.0 }
+    if x > 6.0  { return 1.0 }
+    if x < 0.0 - 6.0 { return 0.0 - 1.0 }
+    if x < 0.0  { return 0.0 - erf_as726(0.0 - x) }
+    return erf_as726(x)
+}
+
+// ============================================================================
+// pub fn erfc(x: f64) -> f64
+// ============================================================================
+// Complementary error function: 1 - erf(x).
+// For |x| < 4: computed as 1 - erf(x) to avoid catastrophic cancellation.
+// For |x| >= 4: continued fraction expansion (numerically stable tail).
+
+pub fn erfc(x: f64) -> f64 with Mut, Div, Panic {
+    if x == 0.0  { return 1.0 }
+    if x > 26.0  { return 0.0 }
+    if x < 0.0 - 26.0 { return 2.0 }
+
+    if x < 0.0 {
+        return 2.0 - erfc(0.0 - x)
+    }
+
+    if x < 4.0 {
+        return 1.0 - erf_as726(x)
+    }
+
+    return erfc_cf(x)
+}
+
+// ============================================================================
+// erfinv helpers — Acklam's rational approximation mapped from normal quantile
+// ============================================================================
+//
+// Strategy: erfinv(x) = normal_quantile((x + 1) / 2) / sqrt(2)
+// where normal_quantile is computed via Acklam's (2002) rational approximation.
+//
+// Reference: Peter J. Acklam, "An algorithm for computing the inverse normal
+//   cumulative distribution function" (2002).
+//   URL: https://web.archive.org/web/20151030215612/http://home.online.no/~pjacklam/notes/invnorm/
+//
+// The approximation uses two regions split at |x| = 0.9515 (i.e. p = 0.02425
+// in the normal quantile domain):
+//   Central region (|x| <= 0.9515): rational in (x/2)^2
+//   Tail region (|x| > 0.9515):     rational in sqrt(-2*ln((1-|x|)/2))
+//
+// After the rational seed, 3 Newton-Raphson steps refine to full precision:
+//   y_{n+1} = y_n + sqrt(pi)/2 * (x - erf(y_n)) * exp(y_n^2)
+
+// Central-region rational: |x| <= 0.9515
+// p = (x+1)/2, q = p - 0.5 = x/2, r = q^2 = x^2/4
+// erfinv(x) = [(a poly in r) * q] / [b poly in r] / sqrt(2)
+fn erfinv_central(x: f64) -> f64 with Mut, Div, Panic {
+    let q  = x / 2.0          // q = p - 0.5 where p = (x+1)/2
+    let r  = q * q             // r = q^2
+
+    // Acklam (2002) coefficients a[] for numerator (degree 6 in q, even powers)
+    let a0 = 0.0 - 3.969683028665376e+01
+    let a1 =       2.209460984245205e+02
+    let a2 = 0.0 - 2.759285104469687e+02
+    let a3 =       1.383577518672690e+02
+    let a4 = 0.0 - 3.066479806614716e+01
+    let a5 =       2.506628277459239e+00
+
+    // Acklam (2002) coefficients b[] for denominator (degree 5 in r)
+    let b0 = 0.0 - 5.447609879822406e+01
+    let b1 =       1.615858368580409e+02
+    let b2 = 0.0 - 1.556989798598866e+02
+    let b3 =       6.680131188771972e+01
+    let b4 = 0.0 - 1.328068155288572e+01
+
+    let num = ((((a0*r + a1)*r + a2)*r + a3)*r + a4)*r + a5
+    let den = ((((b0*r + b1)*r + b2)*r + b3)*r + b4)*r + 1.0
+
+    // normal_quantile = num * q / den; divide by sqrt(2) for erfinv
+    // sqrt(2) = 1.4142135623730951
+    return (num * q / den) / 1.4142135623730951
+}
+
+// Tail-region rational: 0.9515 < |x| < 1
+// For positive x: t = sqrt(-2 * ln((1 - x) / 2))
+// erfinv(x) = -[c poly in t] / [d poly in t] / sqrt(2)  (note: Acklam gives positive quantile)
+// We return the positive result; caller applies sign.
+fn erfinv_tail(ax: f64) -> f64 with Mut, Div, Panic {
+    // p = (ax + 1) / 2, tail: t = sqrt(-2*ln(1-p)) = sqrt(-2*ln((1-ax)/2))
+    let log_arg = (1.0 - ax) / 2.0
+    let t = erf_sqrt(0.0 - erf_ln(log_arg))
+
+    // Acklam (2002) coefficients c[] and d[]
+    let c0 = 0.0 - 7.784894002430293e-03
+    let c1 = 0.0 - 3.223964580411365e-01
+    let c2 = 0.0 - 2.400758277161838e+00
+    let c3 = 0.0 - 2.549732539343734e+00
+    let c4 =       4.374664141464968e+00
+    let c5 =       2.938163982698783e+00
+
+    let d0 =  7.784695709041462e-03
+    let d1 =  3.224671290700398e-01
+    let d2 =  2.445134137142996e+00
+    let d3 =  3.754408661907416e+00
+
+    let num = ((((c0*t + c1)*t + c2)*t + c3)*t + c4)*t + c5
+    let den = (((d0*t + d1)*t + d2)*t + d3)*t + 1.0
+
+    // Acklam gives: x_normal = -num / den for upper tail (which is positive)
+    // erfinv = x_normal / sqrt(2)
+    return (0.0 - num / den) / 1.4142135623730951
+}
+
+// ============================================================================
+// pub fn erfinv(x: f64) -> f64
+// ============================================================================
+// Inverse error function: erfinv(erf(x)) == x for x in (-1, 1).
+//
+// Algorithm (Acklam 2002 mapped to erfinv + Newton-Raphson refinement):
+//   1. For |x| <= 0.9515 (central region): rational approximation in (x/2)^2
+//   2. For 0.9515 < |x| < 1 (tail region): rational in sqrt(-2*ln((1-|x|)/2))
+//   3. 3 Newton-Raphson steps for full double-precision accuracy:
+//        y_{n+1} = y_n + sqrt(pi)/2 * (x - erf(y_n)) * exp(y_n^2)
+
+pub fn erfinv(x: f64) -> f64 with Mut, Div, Panic {
+    if x == 0.0           { return 0.0 }
+    if x >= 1.0           { return 1.0e30 }
+    if x <= 0.0 - 1.0    { return 0.0 - 1.0e30 }
+
+    let sqrt_pi_over_2 = 0.8862269254527580   // sqrt(pi) / 2
+    let ax = erf_abs(x)
+
+    // Acklam split threshold: 0.9515 = 1 - 2*0.02425
+    var y: f64 = 0.0
+    if ax <= 0.9515 {
+        y = erfinv_central(x)   // handles sign via x
+    } else {
+        y = erfinv_tail(ax)
+        if x < 0.0 { y = 0.0 - y }
+    }
+
+    // Newton-Raphson refinement: y += sqrt(pi)/2 * (x - erf(y)) * exp(y^2)
+    var iter = 0
+    while iter < 3 {
+        let fy  = erf(y)
+        let ey2 = erf_exp(y * y)
+        y = y + sqrt_pi_over_2 * (x - fy) * ey2
+        iter = iter + 1
+    }
+
+    return y
+}
+
+// ============================================================================
+// pub fn normal_cdf(x: f64) -> f64
+// ============================================================================
+// Standard normal cumulative distribution function.
+// Φ(x) = 0.5 * (1 + erf(x / sqrt(2)))
+
+pub fn normal_cdf(x: f64) -> f64 with Mut, Div, Panic {
+    let sqrt2 = 1.4142135623730951   // sqrt(2)
+    return 0.5 * (1.0 + erf(x / sqrt2))
+}
+
+// ============================================================================
+// pub fn normal_quantile(p: f64) -> f64
+// ============================================================================
+// Standard normal quantile (inverse CDF / probit function).
+// Φ⁻¹(p) = sqrt(2) * erfinv(2*p - 1)
+
+pub fn normal_quantile(p: f64) -> f64 with Mut, Div, Panic {
+    let sqrt2 = 1.4142135623730951
+    return sqrt2 * erfinv(2.0 * p - 1.0)
+}

@@ -1,329 +1,415 @@
-// bayes::mcmc — Markov Chain Monte Carlo Sampling
+// stdlib/bayes/mcmc.sio — Metropolis-Hastings MCMC Sampler
 //
-// Metropolis-Hastings and related MCMC algorithms for posterior sampling.
-// Foundation for Bayesian inference in Sounio.
+// Bayesian posterior sampling with epistemic uncertainty tracking.
+// Bridges posterior distributions to GUM-compliant measurement uncertainty.
 //
 // References:
-// - Metropolis et al. (1953): "Equation of state calculations..."
-// - Hastings (1970): "Monte Carlo sampling methods using Markov chains"
-// - Gelman & Rubin (1992): "Inference from iterative simulation"
+// - Metropolis et al. (1953): "Equation of state calculations by fast computing machines"
+// - Hastings (1970): "Monte Carlo sampling methods using Markov chains and their applications"
+// - Gelman et al. (2013): "Bayesian Data Analysis", 3rd ed.
+// - JCGM 100:2008 (GUM): Guide to the Expression of Uncertainty in Measurement
+
+use epistemic::gum::{GUMResult, gum_simple}
 
 extern "C" {
-    fn sqrt(x: f64) -> f64;
     fn log(x: f64) -> f64;
     fn exp(x: f64) -> f64;
+    fn sqrt(x: f64) -> f64;
     fn fabs(x: f64) -> f64;
 }
 
-fn pi() -> f64 { 3.14159265358979323846 }
+// ============================================================================
+// Math helpers
+// ============================================================================
+
+fn mcmc_pi() -> f64 { 3.14159265358979323846 }
+
+fn mcmc_sqrt(x: f64) -> f64 {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y
+}
+
+fn mcmc_abs(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+// Cosine approximation — maps x to [0, 2π] then applies a Chebyshev-style approx
+// by folding to [-π, π] and computing cos via higher-order Taylor or section.
+// Accurate enough for Box-Muller (we only need |cos| ≤ 1).
+fn mcmc_cos(x: f64) -> f64 {
+    // Reduce to [0, 2π]
+    var t = x
+    let two_pi = 2.0 * mcmc_pi()
+    let pi = mcmc_pi()
+    while t < 0.0 { t = t + two_pi }
+    while t >= two_pi { t = t - two_pi }
+    // Fold to [0, π], flip sign for second half
+    var sign = 1.0
+    if t > pi {
+        t = two_pi - t
+        // cos(2π - t) = cos(t), so no sign change here
+    }
+    // Further fold to [0, π/2], cos is even around π/2
+    let half_pi = pi * 0.5
+    if t > half_pi {
+        t = pi - t
+        sign = 0.0 - sign
+    }
+    // Now t in [0, π/2], use higher-order Taylor for accuracy
+    // cos(t) = 1 - t²/2! + t⁴/4! - t⁶/6! + t⁸/8! - t¹⁰/10!
+    let t2 = t * t
+    let t4 = t2 * t2
+    let t6 = t4 * t2
+    let t8 = t4 * t4
+    let t10 = t8 * t2
+    let c = 1.0 - t2 / 2.0 + t4 / 24.0 - t6 / 720.0 + t8 / 40320.0 - t10 / 3628800.0
+    sign * c
+}
 
 // ============================================================================
 // MCMC CONFIGURATION
 // ============================================================================
 
-// MCMC sampler configuration
-struct MCMCConfig {
-    n_samples: i64,     // Number of posterior samples
-    n_warmup: i64,      // Warmup/burn-in samples
-    n_thin: i64,        // Thinning interval
-    proposal_sd: f64,   // Proposal distribution std dev
-    adapt_proposal: bool, // Adapt proposal during warmup
-    seed: i64,          // Random seed
+pub struct MCMCConfig {
+    pub n_samples: i32,     // Number of posterior samples to collect
+    pub n_burnin: i32,      // Burn-in (warmup) samples to discard
+    pub step_size: f64,     // Proposal step size (std dev of normal proposal)
+    pub model_id: i32,      // 0=normal_mean, 1=normal_variance, 2=linear_slope
 }
 
-fn mcmc_config_default() -> MCMCConfig {
+pub fn mcmc_config_default(model_id: i32) -> MCMCConfig {
     MCMCConfig {
         n_samples: 1000,
-        n_warmup: 500,
-        n_thin: 1,
-        proposal_sd: 1.0,
-        adapt_proposal: true,
-        seed: 12345,
-    }
-}
-
-// MCMC chain result
-struct MCMCChain {
-    samples: [f64; 100],    // Posterior samples
-    n_samples: i64,         // Number of samples stored
-    acceptance_rate: f64,   // Proportion accepted
-    mean: f64,              // Posterior mean
-    std: f64,               // Posterior std dev
-    median: f64,            // Posterior median
-    ci_lower: f64,          // 95% credible interval lower
-    ci_upper: f64,          // 95% credible interval upper
-}
-
-fn mcmc_chain_new() -> MCMCChain {
-    MCMCChain {
-        samples: [0.0; 100],
-        n_samples: 0,
-        acceptance_rate: 0.0,
-        mean: 0.0,
-        std: 0.0,
-        median: 0.0,
-        ci_lower: 0.0,
-        ci_upper: 0.0,
+        n_burnin: 200,
+        step_size: 0.1,
+        model_id: model_id,
     }
 }
 
 // ============================================================================
-// RANDOM NUMBER GENERATION
+// MCMC RESULT
 // ============================================================================
 
-// LCG random state
-struct RNG {
-    seed: i64,
-    last: f64,
-}
-
-fn rng_new(seed: i64) -> RNG {
-    RNG { seed: seed, last: 0.0 }
-}
-
-// Generate uniform random in [0, 1)
-fn rng_uniform(rng: RNG) -> RNG {
-    let a: i64 = 1103515245
-    let c: i64 = 12345
-    let m: i64 = 2147483648
-
-    let new_seed = (a * rng.seed + c) % m
-    let u = (new_seed as f64) / (m as f64)
-    RNG { seed: new_seed, last: u }
-}
-
-// Generate standard normal using Box-Muller
-fn rng_normal(rng: RNG) -> RNG {
-    var r = rng
-
-    // Generate two uniforms
-    r = rng_uniform(r)
-    var u1 = r.last
-    if u1 < 1e-10 { u1 = 1e-10 }
-
-    r = rng_uniform(r)
-    let u2 = r.last
-
-    // Box-Muller transform
-    let z = sqrt(-2.0 * log(u1)) * cos_approx(2.0 * pi() * u2)
-    RNG { seed: r.seed, last: z }
-}
-
-// Cosine approximation
-fn cos_approx(x: f64) -> f64 {
-    // Reduce to [0, 2*pi]
-    var t = x
-    let two_pi = 2.0 * pi()
-    while t < 0.0 { t = t + two_pi }
-    while t >= two_pi { t = t - two_pi }
-
-    // Taylor series approximation
-    let x2 = t * t
-    let x4 = x2 * x2
-    let x6 = x4 * x2
-    1.0 - x2 / 2.0 + x4 / 24.0 - x6 / 720.0
+pub struct MCMCResult {
+    pub samples: [f64; 1024],   // Posterior samples (up to 1024)
+    pub n_samples: i32,          // Actual number of samples collected
+    pub acceptance_rate: f64,    // Fraction of proposals accepted
+    pub mean: f64,               // Posterior mean
+    pub std_dev: f64,            // Posterior standard deviation
+    pub as_gum: GUMResult,       // Epistemic bridge: posterior -> GUMResult
 }
 
 // ============================================================================
-// LOG-POSTERIOR FUNCTION TYPE
+// PSEUDO-RANDOM NUMBER GENERATION (LCG)
 // ============================================================================
+// LCG parameters from Numerical Recipes: a=1664525, c=1013904223, m=2^32
+// Returns updated state for pure functional threading of random state.
 
-// Simple log-posterior for single parameter models
-// Takes parameter value, returns log-posterior (up to constant)
-struct LogPosterior {
-    // For demonstration: Normal likelihood with Normal prior
-    // Data mean and variance
-    data_mean: f64,
-    data_var: f64,
-    data_n: i64,
-    // Prior parameters
-    prior_mean: f64,
-    prior_var: f64,
+fn lcg_next(state: i64) -> i64 {
+    let a: i64 = 1664525
+    let c: i64 = 1013904223
+    let m: i64 = 4294967296
+    (a * state + c) % m
 }
 
-fn log_posterior_new(data_mean: f64, data_var: f64, data_n: i64, prior_mean: f64, prior_var: f64) -> LogPosterior {
-    LogPosterior {
-        data_mean: data_mean,
-        data_var: data_var,
-        data_n: data_n,
-        prior_mean: prior_mean,
-        prior_var: prior_var,
+// Returns (uniform[0,1], new_state)
+fn lcg_uniform(state: i64) -> (f64, i64) {
+    let next = lcg_next(state)
+    let m: i64 = 4294967296
+    let u = (next as f64) / (m as f64)
+    (u, next)
+}
+
+// Returns (standard_normal, new_state) via Box-Muller transform
+fn lcg_normal(state: i64) -> (f64, i64) {
+    let r1 = lcg_uniform(state)
+    var u1 = r1.0
+    let s1 = r1.1
+    if u1 < 1.0e-10 { u1 = 1.0e-10 }
+    let r2 = lcg_uniform(s1)
+    let u2 = r2.0
+    let s2 = r2.1
+    let z = mcmc_sqrt(0.0 - 2.0 * log(u1)) * mcmc_cos(2.0 * mcmc_pi() * u2)
+    (z, s2)
+}
+
+// ============================================================================
+// LOG-LIKELIHOOD FUNCTIONS
+// ============================================================================
+
+// model_id=0: Normal mean inference, known variance=1
+// log p(data | theta) = -0.5 * sum((x_i - theta)^2) (omitting constants)
+fn log_lik_normal_mean(theta: f64, data: &[f64; 256], n_data: i32) -> f64 {
+    var lsum = 0.0
+    var i: i32 = 0
+    while i < n_data {
+        let d = data[i as usize] - theta
+        lsum = lsum - 0.5 * d * d
+        i = i + 1
     }
+    lsum
 }
 
-// Compute log-posterior at theta
-fn log_posterior_compute(lp: LogPosterior, theta: f64) -> f64 {
-    // Log-likelihood: sum of log N(x_i | theta, sigma^2)
-    // = -n/2 * log(2*pi*sigma^2) - sum((x_i - theta)^2) / (2*sigma^2)
-    // Sufficient statistic form: -n * (theta - x_bar)^2 / (2*sigma^2)
-    let ll = -(lp.data_n as f64) * (theta - lp.data_mean) * (theta - lp.data_mean) / (2.0 * lp.data_var)
+// model_id=1: Normal variance inference, known mean=0
+// log p(data | theta) = -n/2*log(theta) - sum(x_i^2)/(2*theta), theta>0
+fn log_lik_normal_var(theta: f64, data: &[f64; 256], n_data: i32) -> f64 {
+    if theta <= 0.0 { return 0.0 - 1.0e30 }
+    var lsum = 0.0 - (n_data as f64) * 0.5 * log(theta)
+    var i: i32 = 0
+    while i < n_data {
+        lsum = lsum - data[i as usize] * data[i as usize] / (2.0 * theta)
+        i = i + 1
+    }
+    lsum
+}
 
-    // Log-prior: log N(theta | prior_mean, prior_var)
-    let lpr = -(theta - lp.prior_mean) * (theta - lp.prior_mean) / (2.0 * lp.prior_var)
+// model_id=2: Linear slope inference, y = theta*x + noise (variance=1)
+// log p(y | theta, x) = -0.5 * sum((y_i - theta*x_i)^2)
+fn log_lik_linear_slope(theta: f64, x_data: &[f64; 256], y_data: &[f64; 256], n_data: i32) -> f64 {
+    var lsum = 0.0
+    var i: i32 = 0
+    while i < n_data {
+        let resid = y_data[i as usize] - theta * x_data[i as usize]
+        lsum = lsum - 0.5 * resid * resid
+        i = i + 1
+    }
+    lsum
+}
 
-    ll + lpr
+// Compute log-likelihood for normal_mean or normal_var models (single data array)
+fn dispatch_log_lik(model_id: i32, theta: f64, data: &[f64; 256], n_data: i32) -> f64 {
+    if model_id == 0 {
+        return log_lik_normal_mean(theta, data, n_data)
+    }
+    if model_id == 1 {
+        return log_lik_normal_var(theta, data, n_data)
+    }
+    // model_id=2 handled separately (needs x_data and y_data)
+    log_lik_normal_mean(theta, data, n_data)
 }
 
 // ============================================================================
-// METROPOLIS-HASTINGS SAMPLER
+// POSTERIOR SUMMARY COMPUTATION
 // ============================================================================
 
-// Run Metropolis-Hastings sampler
-fn metropolis_hastings(lp: LogPosterior, config: MCMCConfig) -> MCMCChain {
-    var chain = mcmc_chain_new()
-    var rng = rng_new(config.seed)
+fn compute_posterior_mean(samples: &[f64; 1024], n: i32) -> f64 {
+    if n == 0 { return 0.0 }
+    var s = 0.0
+    var i: i32 = 0
+    while i < n {
+        s = s + samples[i as usize]
+        i = i + 1
+    }
+    s / (n as f64)
+}
 
-    // Initialize at prior mean
-    var theta = lp.prior_mean
-    var log_p_current = log_posterior_compute(lp, theta)
+fn compute_posterior_std(samples: &[f64; 1024], n: i32, mean: f64) -> f64 {
+    if n <= 1 { return 0.0 }
+    var ss = 0.0
+    var i: i32 = 0
+    while i < n {
+        let d = samples[i as usize] - mean
+        ss = ss + d * d
+        i = i + 1
+    }
+    mcmc_sqrt(ss / ((n - 1) as f64))
+}
 
-    var n_accepted: i64 = 0
-    var n_total: i64 = 0
-    var proposal_sd = config.proposal_sd
+// ============================================================================
+// METROPOLIS-HASTINGS SAMPLER — single data array (model 0 or 1)
+// ============================================================================
 
-    // Total iterations
-    let total_iter = config.n_warmup + config.n_samples * config.n_thin
-    var sample_idx: i64 = 0
+pub fn mcmc_run(config: MCMCConfig, data: &[f64; 256], n_data: i32, seed: i64) -> MCMCResult {
+    var samples: [f64; 1024] = [0.0; 1024]
 
-    var iter: i64 = 0
-    while iter < total_iter {
-        // Propose new value
-        rng = rng_normal(rng)
-        let theta_proposed = theta + proposal_sd * rng.last
+    // Initialize theta at data mean (faster convergence than starting at 0)
+    var init_sum = 0.0
+    var ii: i32 = 0
+    while ii < n_data {
+        init_sum = init_sum + data[ii as usize]
+        ii = ii + 1
+    }
+    var rng_state = seed
+    var theta = if n_data > 0 { init_sum / (n_data as f64) } else { 0.0 }
+    var log_lik_cur = dispatch_log_lik(config.model_id, theta, data, n_data)
 
-        // Compute acceptance probability
-        let log_p_proposed = log_posterior_compute(lp, theta_proposed)
-        let log_alpha = log_p_proposed - log_p_current
+    var n_accepted: i32 = 0
+    var n_total: i32 = 0
 
-        // Accept/reject
-        rng = rng_uniform(rng)
-        let u = rng.last
+    // Burn-in phase
+    var bi: i32 = 0
+    while bi < config.n_burnin {
+        let prop_r = lcg_normal(rng_state)
+        let z = prop_r.0
+        rng_state = prop_r.1
 
-        if log(u) < log_alpha {
-            theta = theta_proposed
-            log_p_current = log_p_proposed
+        let theta_new = theta + config.step_size * z
+        let log_lik_new = dispatch_log_lik(config.model_id, theta_new, data, n_data)
+        let log_alpha = log_lik_new - log_lik_cur
+
+        let u_r = lcg_uniform(rng_state)
+        let u = u_r.0
+        rng_state = u_r.1
+
+        let log_u = log(if u < 1.0e-30 { 1.0e-30 } else { u })
+        if log_u < log_alpha {
+            theta = theta_new
+            log_lik_cur = log_lik_new
+        }
+        bi = bi + 1
+    }
+
+    // Collection phase
+    let max_store: i32 = 1024
+    var sample_idx: i32 = 0
+    let to_collect = if config.n_samples < max_store { config.n_samples } else { max_store }
+
+    var si: i32 = 0
+    while si < to_collect {
+        let prop_r = lcg_normal(rng_state)
+        let z = prop_r.0
+        rng_state = prop_r.1
+
+        let theta_new = theta + config.step_size * z
+        let log_lik_new = dispatch_log_lik(config.model_id, theta_new, data, n_data)
+        let log_alpha = log_lik_new - log_lik_cur
+
+        let u_r = lcg_uniform(rng_state)
+        let u = u_r.0
+        rng_state = u_r.1
+
+        let log_u = log(if u < 1.0e-30 { 1.0e-30 } else { u })
+        if log_u < log_alpha {
+            theta = theta_new
+            log_lik_cur = log_lik_new
             n_accepted = n_accepted + 1
         }
         n_total = n_total + 1
 
-        // Adapt proposal during warmup
-        if iter < config.n_warmup && config.adapt_proposal && iter > 0 && iter % 50 == 0 {
-            let accept_rate = (n_accepted as f64) / (n_total as f64)
-            if accept_rate < 0.2 {
-                proposal_sd = proposal_sd * 0.8
-            } else if accept_rate > 0.5 {
-                proposal_sd = proposal_sd * 1.2
-            }
+        samples[sample_idx as usize] = theta
+        sample_idx = sample_idx + 1
+        si = si + 1
+    }
+
+    let n_collected = sample_idx
+    let acc_rate = if n_total > 0 { (n_accepted as f64) / (n_total as f64) } else { 0.0 }
+    let post_mean = compute_posterior_mean(&samples, n_collected)
+    let post_std = compute_posterior_std(&samples, n_collected, post_mean)
+    let gum = gum_simple(post_mean, post_std)
+
+    MCMCResult {
+        samples: samples,
+        n_samples: n_collected,
+        acceptance_rate: acc_rate,
+        mean: post_mean,
+        std_dev: post_std,
+        as_gum: gum,
+    }
+}
+
+// ============================================================================
+// METROPOLIS-HASTINGS SAMPLER — linear slope model (model 2)
+// ============================================================================
+
+pub fn mcmc_run_linear(config: MCMCConfig, x_data: &[f64; 256], y_data: &[f64; 256], n_data: i32, seed: i64) -> MCMCResult {
+    var samples: [f64; 1024] = [0.0; 1024]
+
+    // Initialize theta at OLS slope estimate: sum(x*y) / sum(x^2)
+    var sum_xy = 0.0
+    var sum_xx = 0.0
+    var li: i32 = 0
+    while li < n_data {
+        sum_xy = sum_xy + x_data[li as usize] * y_data[li as usize]
+        sum_xx = sum_xx + x_data[li as usize] * x_data[li as usize]
+        li = li + 1
+    }
+    var rng_state = seed
+    var theta = if sum_xx > 1.0e-15 { sum_xy / sum_xx } else { 0.0 }
+    var log_lik_cur = log_lik_linear_slope(theta, x_data, y_data, n_data)
+
+    var n_accepted: i32 = 0
+    var n_total: i32 = 0
+
+    // Burn-in phase
+    var bi: i32 = 0
+    while bi < config.n_burnin {
+        let prop_r = lcg_normal(rng_state)
+        let z = prop_r.0
+        rng_state = prop_r.1
+
+        let theta_new = theta + config.step_size * z
+        let log_lik_new = log_lik_linear_slope(theta_new, x_data, y_data, n_data)
+        let log_alpha = log_lik_new - log_lik_cur
+
+        let u_r = lcg_uniform(rng_state)
+        let u = u_r.0
+        rng_state = u_r.1
+
+        let log_u = log(if u < 1.0e-30 { 1.0e-30 } else { u })
+        if log_u < log_alpha {
+            theta = theta_new
+            log_lik_cur = log_lik_new
         }
+        bi = bi + 1
+    }
 
-        // Store sample after warmup
-        if iter >= config.n_warmup && (iter - config.n_warmup) % config.n_thin == 0 {
-            if sample_idx < 100 {
-                chain.samples[sample_idx as usize] = theta
-                sample_idx = sample_idx + 1
-            }
+    // Collection phase
+    let max_store: i32 = 1024
+    var sample_idx: i32 = 0
+    let to_collect = if config.n_samples < max_store { config.n_samples } else { max_store }
+
+    var si: i32 = 0
+    while si < to_collect {
+        let prop_r = lcg_normal(rng_state)
+        let z = prop_r.0
+        rng_state = prop_r.1
+
+        let theta_new = theta + config.step_size * z
+        let log_lik_new = log_lik_linear_slope(theta_new, x_data, y_data, n_data)
+        let log_alpha = log_lik_new - log_lik_cur
+
+        let u_r = lcg_uniform(rng_state)
+        let u = u_r.0
+        rng_state = u_r.1
+
+        let log_u = log(if u < 1.0e-30 { 1.0e-30 } else { u })
+        if log_u < log_alpha {
+            theta = theta_new
+            log_lik_cur = log_lik_new
+            n_accepted = n_accepted + 1
         }
+        n_total = n_total + 1
 
-        iter = iter + 1
+        samples[sample_idx as usize] = theta
+        sample_idx = sample_idx + 1
+        si = si + 1
     }
 
-    chain.n_samples = sample_idx
-    chain.acceptance_rate = (n_accepted as f64) / (n_total as f64)
+    let n_collected = sample_idx
+    let acc_rate = if n_total > 0 { (n_accepted as f64) / (n_total as f64) } else { 0.0 }
+    let post_mean = compute_posterior_mean(&samples, n_collected)
+    let post_std = compute_posterior_std(&samples, n_collected, post_mean)
+    let gum = gum_simple(post_mean, post_std)
 
-    // Compute posterior summaries
-    chain = compute_chain_summaries(chain)
-
-    chain
+    MCMCResult {
+        samples: samples,
+        n_samples: n_collected,
+        acceptance_rate: acc_rate,
+        mean: post_mean,
+        std_dev: post_std,
+        as_gum: gum,
+    }
 }
-
-// ============================================================================
-// CHAIN SUMMARIES
-// ============================================================================
-
-// Compute summary statistics for MCMC chain
-fn compute_chain_summaries(chain: MCMCChain) -> MCMCChain {
-    var result = chain
-    let n = chain.n_samples
-
-    if n == 0 {
-        return result
-    }
-
-    // Mean
-    var sum = 0.0
-    var i: i64 = 0
-    while i < n {
-        sum = sum + chain.samples[i as usize]
-        i = i + 1
-    }
-    result.mean = sum / (n as f64)
-
-    // Std dev
-    var sum_sq = 0.0
-    i = 0
-    while i < n {
-        let diff = chain.samples[i as usize] - result.mean
-        sum_sq = sum_sq + diff * diff
-        i = i + 1
-    }
-    result.std = sqrt(sum_sq / ((n - 1) as f64))
-
-    // Sort for quantiles
-    var sorted: [f64; 100] = chain.samples
-    i = 0
-    while i < n - 1 {
-        var j: i64 = 0
-        while j < n - 1 - i {
-            if sorted[j as usize] > sorted[(j + 1) as usize] {
-                let temp = sorted[j as usize]
-                sorted[j as usize] = sorted[(j + 1) as usize]
-                sorted[(j + 1) as usize] = temp
-            }
-            j = j + 1
-        }
-        i = i + 1
-    }
-
-    // Median
-    if n % 2 == 1 {
-        result.median = sorted[(n / 2) as usize]
-    } else {
-        result.median = (sorted[(n / 2 - 1) as usize] + sorted[(n / 2) as usize]) / 2.0
-    }
-
-    // 95% credible interval (2.5% and 97.5% quantiles)
-    let lower_idx = ((n as f64) * 0.025) as i64
-    let upper_idx = ((n as f64) * 0.975) as i64
-    result.ci_lower = sorted[lower_idx as usize]
-    result.ci_upper = sorted[upper_idx as usize]
-
-    result
-}
-
-// ============================================================================
-// ANALYTICAL POSTERIOR (FOR COMPARISON)
-// ============================================================================
-
-// Compute analytical posterior for normal-normal model
-// Prior: theta ~ N(mu0, sigma0^2)
-// Likelihood: x_bar ~ N(theta, sigma^2/n)
-// Posterior: theta | data ~ N(mu_post, sigma_post^2)
-struct AnalyticalPosterior {
-    mean: f64,
-    variance: f64,
-}
-
-fn normal_normal_posterior(prior_mean: f64, prior_var: f64,
-                           data_mean: f64, data_var: f64, data_n: i64) -> AnalyticalPosterior {
-    let prior_prec = 1.0 / prior_var
-    let lik_prec = (data_n as f64) / data_var
-
-    let post_prec = prior_prec + lik_prec
-    let post_var = 1.0 / post_prec
-    let post_mean = post_var * (prior_prec * prior_mean + lik_prec * data_mean)
-
-    AnalyticalPosterior { mean: post_mean, variance: post_var }
-}
-
-// ============================================================================
-// TESTS

@@ -1,0 +1,816 @@
+// stdlib/json/parser.sio — Minimal JSON parser and serializer
+//
+// Represents JSON as a flat key-value document (up to 32 entries).
+// No heap allocation — all storage is fixed-size arrays.
+// Supports: null, bool, number, string at the top-level object.
+//
+// JIT note: only &!Struct field mutations propagate to callers.
+// Standalone &!array and &!scalar do NOT propagate in JIT mode.
+// All helpers use struct-wrapping or by-value returns for correctness.
+//
+// # Limits
+//   - Up to 32 key-value pairs per document
+//   - Keys up to 63 bytes (UTF-8, null-terminated in 64-byte slot)
+//   - String values up to 127 bytes (UTF-8, null-terminated in 128-byte slot)
+//   - Serialize output up to 4095 bytes
+//   - Parse input up to 4095 bytes
+
+// ============================================================================
+// JSON VALUE TYPES
+// ============================================================================
+
+pub fn JSON_NULL() -> i32 { 0 }
+pub fn JSON_BOOL() -> i32 { 1 }
+pub fn JSON_NUMBER() -> i32 { 2 }
+pub fn JSON_STRING() -> i32 { 3 }
+pub fn JSON_ARRAY() -> i32 { 4 }
+pub fn JSON_OBJECT() -> i32 { 5 }
+
+// ============================================================================
+// JsonValue — holds one JSON value of any scalar type
+// ============================================================================
+
+pub struct JsonValue {
+    pub kind: i32,
+    pub num_val: f64,
+    pub bool_val: i32,
+    pub str_val: [u8; 128],
+    pub str_len: i32,
+}
+
+// ============================================================================
+// JsonDoc — flat key→value store, up to 32 entries
+// ============================================================================
+
+pub struct JsonDoc {
+    pub keys: [[u8; 64]; 32],
+    pub key_lens: [i32; 32],
+    pub values: [JsonValue; 32],
+    pub count: i32,
+}
+
+// ============================================================================
+// JsonBuf — serialization output buffer (used by serialize, avoids &!array bug)
+// ============================================================================
+
+pub struct JsonBuf {
+    pub data: [u8; 4096],
+    pub len: i32,
+}
+
+// Internal parse state for string body parsing.
+struct StrResult {
+    data: [u8; 128],
+    str_len: i32,
+    new_pos: i32,  // -1 on error
+}
+
+// Internal parse state for number parsing.
+struct NumResult {
+    value: f64,
+    new_pos: i32,
+}
+
+// ============================================================================
+// JsonValue constructors
+// ============================================================================
+
+pub fn json_value_null() -> JsonValue {
+    JsonValue {
+        kind: 0,
+        num_val: 0.0,
+        bool_val: 0,
+        str_val: [0; 128],
+        str_len: 0,
+    }
+}
+
+pub fn json_value_bool(b: i32) -> JsonValue {
+    JsonValue {
+        kind: 1,
+        num_val: 0.0,
+        bool_val: b,
+        str_val: [0; 128],
+        str_len: 0,
+    }
+}
+
+pub fn json_value_number(n: f64) -> JsonValue {
+    JsonValue {
+        kind: 2,
+        num_val: n,
+        bool_val: 0,
+        str_val: [0; 128],
+        str_len: 0,
+    }
+}
+
+pub fn json_value_string(s: &[u8; 128], len: i32) -> JsonValue {
+    var v = JsonValue {
+        kind: 3,
+        num_val: 0.0,
+        bool_val: 0,
+        str_val: [0; 128],
+        str_len: 0,
+    }
+    var cap = len
+    if cap > 127 { cap = 127 }
+    var i: i32 = 0
+    while i < cap {
+        v.str_val[i as usize] = s[i as usize]
+        i = i + 1
+    }
+    v.str_len = cap
+    v
+}
+
+// ============================================================================
+// JsonDoc constructor
+// ============================================================================
+
+pub fn json_doc_new() -> JsonDoc {
+    JsonDoc {
+        keys: [[0; 64]; 32],
+        key_lens: [0; 32],
+        values: [JsonValue {
+            kind: 0,
+            num_val: 0.0,
+            bool_val: 0,
+            str_val: [0; 128],
+            str_len: 0,
+        }; 32],
+        count: 0,
+    }
+}
+
+// ============================================================================
+// Internal helpers
+// ============================================================================
+
+// Compare two key slots up to their lengths. Returns 1 if equal.
+fn jkeys_equal(doc: &JsonDoc, slot: i32, key: &[u8; 64], key_len: i32) -> i32 with Mut, Div, Panic {
+    if doc.key_lens[slot as usize] != key_len { return 0 }
+    var i: i32 = 0
+    while i < key_len {
+        if doc.keys[slot as usize][i as usize] != key[i as usize] { return 0 }
+        i = i + 1
+    }
+    1
+}
+
+// Find index of key in doc. Returns index or -1.
+fn jdoc_find(doc: &JsonDoc, key: &[u8; 64], key_len: i32) -> i32 with Mut, Div, Panic {
+    var i: i32 = 0
+    while i < doc.count {
+        if jkeys_equal(doc, i, key, key_len) == 1 {
+            return i
+        }
+        i = i + 1
+    }
+    0 - 1
+}
+
+// ============================================================================
+// Document mutation — set (using &!JsonDoc struct field mutation — works in JIT)
+// ============================================================================
+
+pub fn json_doc_set_number(doc: &!JsonDoc, key: &[u8; 64], key_len: i32, value: f64) with Mut, Div, Panic {
+    let idx = jdoc_find(doc, key, key_len)
+    if idx >= 0 {
+        doc.values[idx as usize].kind = 2
+        doc.values[idx as usize].num_val = value
+    } else {
+        if doc.count < 32 {
+            let slot = doc.count
+            // Copy key bytes directly.
+            var ki: i32 = 0
+            while ki < key_len {
+                doc.keys[slot as usize][ki as usize] = key[ki as usize]
+                ki = ki + 1
+            }
+            doc.key_lens[slot as usize] = key_len
+            doc.values[slot as usize].kind = 2
+            doc.values[slot as usize].num_val = value
+            doc.values[slot as usize].bool_val = 0
+            doc.values[slot as usize].str_len = 0
+            doc.count = doc.count + 1
+        }
+    }
+}
+
+pub fn json_doc_set_bool(doc: &!JsonDoc, key: &[u8; 64], key_len: i32, value: i32) with Mut, Div, Panic {
+    let idx = jdoc_find(doc, key, key_len)
+    if idx >= 0 {
+        doc.values[idx as usize].kind = 1
+        doc.values[idx as usize].bool_val = value
+    } else {
+        if doc.count < 32 {
+            let slot = doc.count
+            var ki: i32 = 0
+            while ki < key_len {
+                doc.keys[slot as usize][ki as usize] = key[ki as usize]
+                ki = ki + 1
+            }
+            doc.key_lens[slot as usize] = key_len
+            doc.values[slot as usize].kind = 1
+            doc.values[slot as usize].num_val = 0.0
+            doc.values[slot as usize].bool_val = value
+            doc.values[slot as usize].str_len = 0
+            doc.count = doc.count + 1
+        }
+    }
+}
+
+pub fn json_doc_set_string(doc: &!JsonDoc, key: &[u8; 64], key_len: i32, s: &[u8; 128], s_len: i32) with Mut, Div, Panic {
+    var cap = s_len
+    if cap > 127 { cap = 127 }
+    let idx = jdoc_find(doc, key, key_len)
+    if idx >= 0 {
+        doc.values[idx as usize].kind = 3
+        doc.values[idx as usize].str_len = cap
+        var si: i32 = 0
+        while si < cap {
+            doc.values[idx as usize].str_val[si as usize] = s[si as usize]
+            si = si + 1
+        }
+    } else {
+        if doc.count < 32 {
+            let slot = doc.count
+            var ki: i32 = 0
+            while ki < key_len {
+                doc.keys[slot as usize][ki as usize] = key[ki as usize]
+                ki = ki + 1
+            }
+            doc.key_lens[slot as usize] = key_len
+            doc.values[slot as usize].kind = 3
+            doc.values[slot as usize].num_val = 0.0
+            doc.values[slot as usize].bool_val = 0
+            doc.values[slot as usize].str_len = cap
+            var si: i32 = 0
+            while si < cap {
+                doc.values[slot as usize].str_val[si as usize] = s[si as usize]
+                si = si + 1
+            }
+            doc.count = doc.count + 1
+        }
+    }
+}
+
+// ============================================================================
+// Document access — get
+// ============================================================================
+
+pub fn json_doc_get_number(doc: &JsonDoc, key: &[u8; 64], key_len: i32) -> f64 with Mut, Div, Panic {
+    let idx = jdoc_find(doc, key, key_len)
+    if idx >= 0 {
+        if doc.values[idx as usize].kind == 2 {
+            return doc.values[idx as usize].num_val
+        }
+    }
+    0.0
+}
+
+pub fn json_doc_get_bool(doc: &JsonDoc, key: &[u8; 64], key_len: i32) -> i32 with Mut, Div, Panic {
+    let idx = jdoc_find(doc, key, key_len)
+    if idx >= 0 {
+        if doc.values[idx as usize].kind == 1 {
+            return doc.values[idx as usize].bool_val
+        }
+    }
+    0
+}
+
+pub fn json_doc_get_string(doc: &JsonDoc, key: &[u8; 64], key_len: i32, out: &!JsonDoc) -> i32 with Mut, Div, Panic {
+    // NOTE: `out` parameter is unused — this signature exists only for API compatibility.
+    // Use doc.values[idx].str_val and doc.values[idx].str_len directly.
+    let idx = jdoc_find(doc, key, key_len)
+    if idx >= 0 {
+        if doc.values[idx as usize].kind == 3 {
+            return doc.values[idx as usize].str_len
+        }
+    }
+    0
+}
+
+pub fn json_doc_contains(doc: &JsonDoc, key: &[u8; 64], key_len: i32) -> bool with Mut, Div, Panic {
+    let idx = jdoc_find(doc, key, key_len)
+    idx >= 0
+}
+
+pub fn json_doc_count(doc: &JsonDoc) -> i32 {
+    doc.count
+}
+
+// ============================================================================
+// Serialization — JsonBuf helpers (by-value: structs work in JIT)
+// ============================================================================
+
+fn jbuf_new() -> JsonBuf {
+    JsonBuf { data: [0; 4096], len: 0 }
+}
+
+// Write a single byte. Returns updated buf.
+fn jbuf_byte(buf: JsonBuf, b: u8) -> JsonBuf {
+    var nb = buf
+    if nb.len < 4095 {
+        nb.data[nb.len as usize] = b
+        nb.len = nb.len + 1
+    }
+    nb
+}
+
+// Write decimal digits of non-negative i64. Returns updated buf.
+fn jbuf_u64(buf: JsonBuf, n: i64) -> JsonBuf with Mut, Div, Panic {
+    if n == 0 {
+        return jbuf_byte(buf, 48u8)
+    }
+    var digits: [u8; 20] = [0; 20]
+    var count: i32 = 0
+    var rem = n
+    while rem > 0 {
+        let d = rem - (rem / 10) * 10
+        digits[count as usize] = (48 + d) as u8
+        rem = rem / 10
+        count = count + 1
+    }
+    var nb = buf
+    var i: i32 = count - 1
+    while i >= 0 {
+        nb = jbuf_byte(nb, digits[i as usize])
+        i = i - 1
+    }
+    nb
+}
+
+// Write f64 as JSON number (integer if whole, 6dp otherwise). Returns updated buf.
+fn jbuf_number(buf: JsonBuf, n: f64) -> JsonBuf with Mut, Div, Panic {
+    var nb = buf
+    var absn = n
+    if n < 0.0 {
+        nb = jbuf_byte(nb, 45u8)  // '-'
+        absn = 0.0 - n
+    }
+    let int_part = absn as i64
+    let frac = absn - int_part as f64
+    nb = jbuf_u64(nb, int_part)
+    if frac >= 0.000001 {
+        nb = jbuf_byte(nb, 46u8)  // '.'
+        var remaining = frac
+        var d: i32 = 0
+        while d < 6 {
+            remaining = remaining * 10.0
+            let digit = remaining as i64
+            nb = jbuf_byte(nb, (48 + digit) as u8)
+            remaining = remaining - digit as f64
+            d = d + 1
+        }
+    }
+    nb
+}
+
+// Write a key string (quoted, basic escaping). Returns updated buf.
+fn jbuf_key(buf: JsonBuf, doc: &JsonDoc, slot: i32) -> JsonBuf with Mut, Div, Panic {
+    var nb = jbuf_byte(buf, 34u8)  // '"'
+    let klen = doc.key_lens[slot as usize]
+    var i: i32 = 0
+    while i < klen {
+        let b = doc.keys[slot as usize][i as usize]
+        if b == 34u8 {
+            nb = jbuf_byte(nb, 92u8)
+            nb = jbuf_byte(nb, 34u8)
+        } else if b == 92u8 {
+            nb = jbuf_byte(nb, 92u8)
+            nb = jbuf_byte(nb, 92u8)
+        } else {
+            nb = jbuf_byte(nb, b)
+        }
+        i = i + 1
+    }
+    nb = jbuf_byte(nb, 34u8)  // '"'
+    nb
+}
+
+// Write a string value (quoted, basic escaping). Returns updated buf.
+fn jbuf_str_val(buf: JsonBuf, doc: &JsonDoc, slot: i32) -> JsonBuf with Mut, Div, Panic {
+    var nb = jbuf_byte(buf, 34u8)  // '"'
+    let slen = doc.values[slot as usize].str_len
+    var i: i32 = 0
+    while i < slen {
+        let b = doc.values[slot as usize].str_val[i as usize]
+        if b == 34u8 {
+            nb = jbuf_byte(nb, 92u8)
+            nb = jbuf_byte(nb, 34u8)
+        } else if b == 92u8 {
+            nb = jbuf_byte(nb, 92u8)
+            nb = jbuf_byte(nb, 92u8)
+        } else if b == 10u8 {
+            nb = jbuf_byte(nb, 92u8)
+            nb = jbuf_byte(nb, 110u8)
+        } else {
+            nb = jbuf_byte(nb, b)
+        }
+        i = i + 1
+    }
+    nb = jbuf_byte(nb, 34u8)  // '"'
+    nb
+}
+
+// ============================================================================
+// Serialization — json_serialize_to_buf (returns JsonBuf)
+// ============================================================================
+
+pub fn json_serialize_to_buf(doc: &JsonDoc) -> JsonBuf with Mut, Div, Panic {
+    var buf = jbuf_new()
+    buf = jbuf_byte(buf, 123u8)  // '{'
+    var i: i32 = 0
+    while i < doc.count {
+        if i > 0 {
+            buf = jbuf_byte(buf, 44u8)  // ','
+        }
+        buf = jbuf_key(buf, doc, i)
+        buf = jbuf_byte(buf, 58u8)  // ':'
+        let kind = doc.values[i as usize].kind
+        if kind == 0 {
+            buf = jbuf_byte(buf, 110u8)  // 'n'
+            buf = jbuf_byte(buf, 117u8)  // 'u'
+            buf = jbuf_byte(buf, 108u8)  // 'l'
+            buf = jbuf_byte(buf, 108u8)  // 'l'
+        } else if kind == 1 {
+            if doc.values[i as usize].bool_val != 0 {
+                buf = jbuf_byte(buf, 116u8)  // 't'
+                buf = jbuf_byte(buf, 114u8)  // 'r'
+                buf = jbuf_byte(buf, 117u8)  // 'u'
+                buf = jbuf_byte(buf, 101u8)  // 'e'
+            } else {
+                buf = jbuf_byte(buf, 102u8)  // 'f'
+                buf = jbuf_byte(buf, 97u8)   // 'a'
+                buf = jbuf_byte(buf, 108u8)  // 'l'
+                buf = jbuf_byte(buf, 115u8)  // 's'
+                buf = jbuf_byte(buf, 101u8)  // 'e'
+            }
+        } else if kind == 2 {
+            buf = jbuf_number(buf, doc.values[i as usize].num_val)
+        } else if kind == 3 {
+            buf = jbuf_str_val(buf, doc, i)
+        }
+        i = i + 1
+    }
+    buf = jbuf_byte(buf, 125u8)  // '}'
+    buf
+}
+
+// ============================================================================
+// Serialization — json_serialize (writes to &!JsonBuf for API compatibility)
+// ============================================================================
+
+// Serialize doc to a JsonBuf struct (mutations through &!JsonBuf work in JIT).
+// Returns bytes written (also stored in out.len).
+pub fn json_serialize(doc: &JsonDoc, out: &!JsonBuf) -> i32 with Mut, Div, Panic {
+    let result = json_serialize_to_buf(doc)
+    // Copy result fields into out (struct field mutation works in JIT).
+    out.len = result.len
+    var i: i32 = 0
+    while i < result.len {
+        out.data[i as usize] = result.data[i as usize]
+        i = i + 1
+    }
+    out.len
+}
+
+// ============================================================================
+// Parsing helpers
+// ============================================================================
+
+// Skip whitespace in input array. Returns new position.
+fn jskip_ws(input: &[u8; 4096], pos: i32, input_len: i32) -> i32 with Mut, Div, Panic {
+    var p = pos
+    while p < input_len {
+        let c = input[p as usize]
+        if c == 32u8 || c == 9u8 || c == 10u8 || c == 13u8 {
+            p = p + 1
+        } else {
+            return p
+        }
+    }
+    p
+}
+
+// Parse string body (after opening '"'). Returns StrResult with new_pos=-1 on error.
+fn jparse_str(input: &[u8; 4096], start: i32, input_len: i32) -> StrResult with Mut, Div, Panic {
+    var r = StrResult {
+        data: [0; 128],
+        str_len: 0,
+        new_pos: 0 - 1,
+    }
+    var p = start
+    var wpos: i32 = 0
+    var done: i32 = 0
+    while p < input_len && done == 0 {
+        let c = input[p as usize]
+        if c == 34u8 {
+            p = p + 1
+            done = 1
+        } else if c == 92u8 {
+            p = p + 1
+            if p >= input_len { return r }
+            let esc = input[p as usize]
+            if esc == 34u8 {
+                if wpos < 127 { r.data[wpos as usize] = 34u8; wpos = wpos + 1 }
+            } else if esc == 92u8 {
+                if wpos < 127 { r.data[wpos as usize] = 92u8; wpos = wpos + 1 }
+            } else if esc == 110u8 {
+                if wpos < 127 { r.data[wpos as usize] = 10u8; wpos = wpos + 1 }
+            } else if esc == 114u8 {
+                if wpos < 127 { r.data[wpos as usize] = 13u8; wpos = wpos + 1 }
+            } else if esc == 116u8 {
+                if wpos < 127 { r.data[wpos as usize] = 9u8; wpos = wpos + 1 }
+            } else {
+                if wpos < 127 { r.data[wpos as usize] = esc; wpos = wpos + 1 }
+            }
+            p = p + 1
+        } else {
+            if wpos < 127 { r.data[wpos as usize] = c; wpos = wpos + 1 }
+            p = p + 1
+        }
+    }
+    if done == 0 { return r }
+    r.str_len = wpos
+    r.new_pos = p
+    r
+}
+
+// Parse a JSON number starting at pos. Returns NumResult.
+fn jparse_num(input: &[u8; 4096], start: i32, input_len: i32) -> NumResult with Mut, Div, Panic {
+    var p = start
+    var negative: i32 = 0
+    if p < input_len && input[p as usize] == 45u8 {
+        negative = 1
+        p = p + 1
+    }
+    var int_part: f64 = 0.0
+    // Parse integer digits (stop at non-digit).
+    var int_done: i32 = 0
+    while p < input_len && int_done == 0 {
+        let c = input[p as usize]
+        if c >= 48u8 && c <= 57u8 {
+            int_part = int_part * 10.0 + (c - 48u8) as f64
+            p = p + 1
+        } else {
+            int_done = 1
+        }
+    }
+    var frac: f64 = 0.0
+    var frac_div: f64 = 1.0
+    if p < input_len && input[p as usize] == 46u8 {
+        p = p + 1
+        var frac_done: i32 = 0
+        while p < input_len && frac_done == 0 {
+            let c = input[p as usize]
+            if c >= 48u8 && c <= 57u8 {
+                frac = frac * 10.0 + (c - 48u8) as f64
+                frac_div = frac_div * 10.0
+                p = p + 1
+            } else {
+                frac_done = 1
+            }
+        }
+    }
+    var result = int_part + frac / frac_div
+    if negative == 1 {
+        result = 0.0 - result
+    }
+    NumResult { value: result, new_pos: p }
+}
+
+// ============================================================================
+// Parsing — json_parse
+// ============================================================================
+
+// Parse a JSON object from input byte array (shared ref — read-only works in JIT).
+// Populates doc via &!JsonDoc (struct field mutations work in JIT).
+// Returns 0 on success, -1 on error.
+pub fn json_parse(input: &[u8; 4096], input_len: i32, doc: &!JsonDoc) -> i32 with Mut, Div, Panic {
+    var p = jskip_ws(input, 0, input_len)
+    if p >= input_len { return 0 - 1 }
+    if input[p as usize] != 123u8 { return 0 - 1 }  // '{'
+    p = p + 1
+
+    p = jskip_ws(input, p, input_len)
+    if p >= input_len { return 0 - 1 }
+    if input[p as usize] == 125u8 { return 0 }  // empty object
+
+    var done: i32 = 0
+    while done == 0 {
+        p = jskip_ws(input, p, input_len)
+        if p >= input_len { return 0 - 1 }
+
+        // Parse key string.
+        if input[p as usize] != 34u8 { return 0 - 1 }
+        p = p + 1
+        let kres = jparse_str(input, p, input_len)
+        if kres.new_pos < 0 { return 0 - 1 }
+        p = kres.new_pos
+
+        // Truncate key to 63 bytes.
+        var key64: [u8; 64] = [0; 64]
+        var klen = kres.str_len
+        if klen > 63 { klen = 63 }
+        var ki: i32 = 0
+        while ki < klen {
+            key64[ki as usize] = kres.data[ki as usize]
+            ki = ki + 1
+        }
+
+        p = jskip_ws(input, p, input_len)
+        if p >= input_len { return 0 - 1 }
+        if input[p as usize] != 58u8 { return 0 - 1 }  // ':'
+        p = p + 1
+
+        p = jskip_ws(input, p, input_len)
+        if p >= input_len { return 0 - 1 }
+
+        let c0 = input[p as usize]
+
+        if doc.count < 32 {
+            let slot = doc.count
+
+            // Copy key.
+            var kki: i32 = 0
+            while kki < klen {
+                doc.keys[slot as usize][kki as usize] = key64[kki as usize]
+                kki = kki + 1
+            }
+            doc.key_lens[slot as usize] = klen
+
+            if c0 == 34u8 {
+                // String value.
+                p = p + 1
+                let sres = jparse_str(input, p, input_len)
+                if sres.new_pos < 0 { return 0 - 1 }
+                p = sres.new_pos
+                doc.values[slot as usize].kind = 3
+                doc.values[slot as usize].num_val = 0.0
+                doc.values[slot as usize].bool_val = 0
+                doc.values[slot as usize].str_len = sres.str_len
+                var svi: i32 = 0
+                while svi < sres.str_len {
+                    doc.values[slot as usize].str_val[svi as usize] = sres.data[svi as usize]
+                    svi = svi + 1
+                }
+
+            } else if c0 == 116u8 {
+                // "true"
+                if p + 3 >= input_len { return 0 - 1 }
+                if input[(p + 1) as usize] == 114u8 &&
+                   input[(p + 2) as usize] == 117u8 &&
+                   input[(p + 3) as usize] == 101u8 {
+                    doc.values[slot as usize].kind = 1
+                    doc.values[slot as usize].num_val = 0.0
+                    doc.values[slot as usize].bool_val = 1
+                    doc.values[slot as usize].str_len = 0
+                    p = p + 4
+                } else {
+                    return 0 - 1
+                }
+
+            } else if c0 == 102u8 {
+                // "false"
+                if p + 4 >= input_len { return 0 - 1 }
+                if input[(p + 1) as usize] == 97u8 &&
+                   input[(p + 2) as usize] == 108u8 &&
+                   input[(p + 3) as usize] == 115u8 &&
+                   input[(p + 4) as usize] == 101u8 {
+                    doc.values[slot as usize].kind = 1
+                    doc.values[slot as usize].num_val = 0.0
+                    doc.values[slot as usize].bool_val = 0
+                    doc.values[slot as usize].str_len = 0
+                    p = p + 5
+                } else {
+                    return 0 - 1
+                }
+
+            } else if c0 == 110u8 {
+                // "null"
+                if p + 3 >= input_len { return 0 - 1 }
+                if input[(p + 1) as usize] == 117u8 &&
+                   input[(p + 2) as usize] == 108u8 &&
+                   input[(p + 3) as usize] == 108u8 {
+                    doc.values[slot as usize].kind = 0
+                    doc.values[slot as usize].num_val = 0.0
+                    doc.values[slot as usize].bool_val = 0
+                    doc.values[slot as usize].str_len = 0
+                    p = p + 4
+                } else {
+                    return 0 - 1
+                }
+
+            } else if (c0 >= 48u8 && c0 <= 57u8) || c0 == 45u8 {
+                // Number.
+                let nres = jparse_num(input, p, input_len)
+                if nres.new_pos <= p { return 0 - 1 }
+                p = nres.new_pos
+                doc.values[slot as usize].kind = 2
+                doc.values[slot as usize].num_val = nres.value
+                doc.values[slot as usize].bool_val = 0
+                doc.values[slot as usize].str_len = 0
+
+            } else {
+                return 0 - 1
+            }
+
+            doc.count = doc.count + 1
+        }
+
+        p = jskip_ws(input, p, input_len)
+        if p >= input_len { return 0 - 1 }
+
+        let sep = input[p as usize]
+        if sep == 44u8 {
+            p = p + 1
+        } else if sep == 125u8 {
+            done = 1
+        } else {
+            return 0 - 1
+        }
+    }
+
+    0
+}
+
+// ============================================================================
+// Self-tests
+// ============================================================================
+
+pub fn json_self_test() -> i32 with Mut, Div, Panic {
+    var fail: i32 = 0
+
+    // T1: null value
+    let vn = json_value_null()
+    if vn.kind != 0 { fail = fail + 1 }
+
+    // T2: bool value
+    let vb = json_value_bool(1)
+    if vb.kind != 1 { fail = fail + 1 }
+    if vb.bool_val != 1 { fail = fail + 1 }
+
+    // T3: number value
+    let vnum = json_value_number(3.14)
+    if vnum.kind != 2 { fail = fail + 1 }
+
+    // T4: doc set number (use direct field access)
+    var k_age: [u8; 64] = [0; 64]
+    k_age[0] = 97u8   // 'a'
+    k_age[1] = 103u8  // 'g'
+    k_age[2] = 101u8  // 'e'
+    var doc = json_doc_new()
+    json_doc_set_number(&!doc, &k_age, 3, 42.0)
+    if doc.count != 1 { fail = fail + 1 }
+    let diff = doc.values[0].num_val - 42.0
+    let adiff = if diff < 0.0 { 0.0 - diff } else { diff }
+    if adiff > 0.0001 { fail = fail + 1 }
+
+    // T5: doc set bool
+    var k_ok: [u8; 64] = [0; 64]
+    k_ok[0] = 111u8  // 'o'
+    k_ok[1] = 107u8  // 'k'
+    json_doc_set_bool(&!doc, &k_ok, 2, 1)
+    if doc.count != 2 { fail = fail + 1 }
+    if doc.values[1].bool_val != 1 { fail = fail + 1 }
+
+    // T6: serialize_to_buf
+    let jb = json_serialize_to_buf(&doc)
+    if jb.len < 3 { fail = fail + 1 }
+    if jb.data[0] != 123u8 { fail = fail + 1 }  // '{'
+    if jb.data[(jb.len - 1) as usize] != 125u8 { fail = fail + 1 }  // '}'
+
+    // T7: parse
+    var raw: [u8; 4096] = [0; 4096]
+    raw[0]  = 123u8  // '{'
+    raw[1]  = 34u8   // '"'
+    raw[2]  = 120u8  // 'x'
+    raw[3]  = 34u8   // '"'
+    raw[4]  = 58u8   // ':'
+    raw[5]  = 55u8   // '7'
+    raw[6]  = 44u8   // ','
+    raw[7]  = 34u8   // '"'
+    raw[8]  = 121u8  // 'y'
+    raw[9]  = 34u8   // '"'
+    raw[10] = 58u8   // ':'
+    raw[11] = 102u8  // 'f'
+    raw[12] = 97u8   // 'a'
+    raw[13] = 108u8  // 'l'
+    raw[14] = 115u8  // 's'
+    raw[15] = 101u8  // 'e'
+    raw[16] = 125u8  // '}'
+    let raw_len: i32 = 17
+    var parsed = json_doc_new()
+    let pres = json_parse(&raw, raw_len, &!parsed)
+    if pres != 0 { fail = fail + 1 }
+    if parsed.count != 2 { fail = fail + 1 }
+    let xdiff = parsed.values[0].num_val - 7.0
+    let axdiff = if xdiff < 0.0 { 0.0 - xdiff } else { xdiff }
+    if axdiff > 0.0001 { fail = fail + 1 }
+    if parsed.values[1].bool_val != 0 { fail = fail + 1 }
+
+    fail
+}

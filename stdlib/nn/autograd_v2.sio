@@ -1,0 +1,431 @@
+// stdlib/nn/autograd_v2.sio — Reverse-Mode Automatic Differentiation Tape (v2)
+//
+// Clean reimplementation of the Wengert tape for gradient computation.
+// No symbol conflicts with nn::activation or other nn modules.
+//
+// All names use the ad2_ prefix for helpers to avoid clashes.
+//
+// Design:
+//   - Fixed-size tape: 512 nodes (stack-allocated, no heap)
+//   - Each node: value, gradient, op code, two operand indices, aux scalar
+//   - Forward pass: construct tape node-by-node via tape_* functions
+//   - Backward pass: tape_backward propagates gradients via chain rule
+//
+// References:
+//   Wengert (1964): A simple automatic derivative evaluation program
+//   Baydin et al. (2018): Automatic Differentiation in Machine Learning: a Survey
+//   Griewank & Walther (2008): Evaluating Derivatives, Ch. 3 (reverse mode)
+
+// =============================================================================
+// Operation codes — zero-argument fns avoid constant-naming conflicts
+// =============================================================================
+
+pub fn AD2_VAR() -> i32 { 0 }
+pub fn AD2_ADD() -> i32 { 1 }
+pub fn AD2_MUL() -> i32 { 2 }
+pub fn AD2_SUB() -> i32 { 3 }
+pub fn AD2_DIV() -> i32 { 4 }
+pub fn AD2_NEG() -> i32 { 5 }
+pub fn AD2_EXP() -> i32 { 6 }
+pub fn AD2_LOG() -> i32 { 7 }
+pub fn AD2_SIN() -> i32 { 8 }
+pub fn AD2_COS() -> i32 { 9 }
+pub fn AD2_RELU() -> i32 { 10 }
+pub fn AD2_SIGMOID() -> i32 { 11 }
+pub fn AD2_TANH() -> i32 { 12 }
+pub fn AD2_POW() -> i32 { 13 }
+pub fn AD2_MUL_CONST() -> i32 { 14 }
+pub fn AD2_ADD_CONST() -> i32 { 15 }
+
+// =============================================================================
+// Math helpers — all prefixed ad2_ to avoid global symbol conflicts
+// =============================================================================
+
+fn ad2_abs(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+fn ad2_exp(x: f64) -> f64 with Mut, Div, Panic {
+    // Clamp to avoid overflow; beyond ±700 the IEEE result is ±inf anyway
+    if x > 700.0 { return ad2_exp(350.0) * ad2_exp(x - 350.0) }
+    if x < 0.0 - 700.0 { return 1.0 / ad2_exp(0.0 - x) }
+    // Halving trick to keep |x| ≤ 1 for Taylor accuracy
+    if x > 1.0 {
+        let h = ad2_exp(x / 2.0)
+        return h * h
+    }
+    if x < 0.0 - 1.0 {
+        return 1.0 / ad2_exp(0.0 - x)
+    }
+    var result = 1.0
+    var term = 1.0
+    var i = 1
+    while i <= 25 {
+        term = term * x / (i as f64)
+        result = result + term
+        i = i + 1
+    }
+    result
+}
+
+fn ad2_ln(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 - 999999.0 }
+    if x == 1.0 { return 0.0 }
+    // Reduce to [0.5, 2.0] range via ln(x) = ln(x/2) + ln(2)
+    // ln(2) ≈ 0.6931471805599453
+    if x > 2.0 { return 0.6931471805599453 + ad2_ln(x / 2.0) }
+    if x < 0.5 { return 0.0 - 0.6931471805599453 + ad2_ln(x * 2.0) }
+    // Taylor: ln(x) = ln(1 + y) = y - y^2/2 + y^3/3 - ... where y = x - 1
+    let y = x - 1.0
+    var sum = 0.0
+    var term = y
+    var i = 1
+    while i <= 30 {
+        if i % 2 == 1 {
+            sum = sum + term / (i as f64)
+        } else {
+            sum = sum - term / (i as f64)
+        }
+        term = term * y
+        i = i + 1
+    }
+    sum
+}
+
+fn ad2_sin(x: f64) -> f64 with Mut, Div, Panic {
+    // Reduce x mod 2π
+    let two_pi = 6.283185307179586
+    var y = x
+    while y > two_pi { y = y - two_pi }
+    while y < 0.0 { y = y + two_pi }
+    // Taylor: sin(y) = y - y^3/6 + y^5/120 - ...
+    var sum = 0.0
+    var term = y
+    var i = 1
+    while i <= 15 {
+        if i % 2 == 1 {
+            sum = sum + term
+        } else {
+            sum = sum - term
+        }
+        let denom = (2 * i) * (2 * i + 1)
+        term = term * y * y / (denom as f64)
+        i = i + 1
+    }
+    sum
+}
+
+fn ad2_cos(x: f64) -> f64 with Mut, Div, Panic {
+    // cos(x) = sin(x + π/2)
+    return ad2_sin(x + 1.5707963267948966)
+}
+
+fn ad2_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i = 0
+    while i < 25 {
+        y = 0.5 * (y + x / y)
+        i = i + 1
+    }
+    y
+}
+
+// pow(base, exp) for real-valued constant exponent
+// Uses: base^c = exp(c * ln(base))
+fn ad2_pow(base: f64, c: f64) -> f64 with Mut, Div, Panic {
+    if base <= 0.0 {
+        if c == 0.0 { return 1.0 }
+        return 0.0
+    }
+    return ad2_exp(c * ad2_ln(base))
+}
+
+// sigmoid: σ(x) = 1 / (1 + e^(-x))
+fn ad2_sigmoid(x: f64) -> f64 with Mut, Div, Panic {
+    if x >= 0.0 {
+        return 1.0 / (1.0 + ad2_exp(0.0 - x))
+    }
+    let ex = ad2_exp(x)
+    return ex / (1.0 + ex)
+}
+
+// tanh via exp identity: tanh(x) = (e^(2x) - 1)/(e^(2x) + 1)
+fn ad2_tanh(x: f64) -> f64 with Mut, Div, Panic {
+    if x > 20.0 { return 1.0 }
+    if x < 0.0 - 20.0 { return 0.0 - 1.0 }
+    if x >= 0.0 {
+        let e2x = ad2_exp(2.0 * x)
+        return (e2x - 1.0) / (e2x + 1.0)
+    }
+    return 0.0 - ad2_tanh(0.0 - x)
+}
+
+// =============================================================================
+// Tape structure
+// =============================================================================
+
+pub struct Tape {
+    pub values: [f64; 512],
+    pub grads: [f64; 512],
+    pub ops: [i32; 512],
+    pub arg1: [i32; 512],
+    pub arg2: [i32; 512],
+    pub aux: [f64; 512],
+    pub len: i32,
+}
+
+// =============================================================================
+// Tape construction
+// =============================================================================
+
+pub fn tape_new() -> Tape {
+    Tape {
+        values: [0.0; 512],
+        grads: [0.0; 512],
+        ops: [0; 512],
+        arg1: [-1; 512],
+        arg2: [-1; 512],
+        aux: [0.0; 512],
+        len: 0,
+    }
+}
+
+// Internal: append a node and return its index
+fn ad2_push(t: Tape, op: i32, val: f64, a: i32, b: i32, aux: f64) -> (i32, Tape) with Mut, Panic {
+    var t2 = t
+    let idx = t2.len
+    t2.ops[idx] = op
+    t2.values[idx] = val
+    t2.grads[idx] = 0.0
+    t2.arg1[idx] = a
+    t2.arg2[idx] = b
+    t2.aux[idx] = aux
+    t2.len = t2.len + 1
+    return (idx, t2)
+}
+
+// Create an input variable node (grad will be filled during backward)
+pub fn tape_var(t: Tape, value: f64) -> (i32, Tape) with Mut, Panic {
+    return ad2_push(t, AD2_VAR(), value, -1, -1, 0.0)
+}
+
+// Create a constant node (gradient will remain zero; arg1 = -2 signals "const")
+pub fn tape_const(t: Tape, value: f64) -> (i32, Tape) with Mut, Panic {
+    return ad2_push(t, AD2_VAR(), value, -2, -1, 0.0)
+}
+
+// =============================================================================
+// Binary operations
+// =============================================================================
+
+pub fn tape_add(t: Tape, a: i32, b: i32) -> (i32, Tape) with Mut, Div, Panic {
+    let val = t.values[a] + t.values[b]
+    return ad2_push(t, AD2_ADD(), val, a, b, 0.0)
+}
+
+pub fn tape_sub(t: Tape, a: i32, b: i32) -> (i32, Tape) with Mut, Div, Panic {
+    let val = t.values[a] - t.values[b]
+    return ad2_push(t, AD2_SUB(), val, a, b, 0.0)
+}
+
+pub fn tape_mul(t: Tape, a: i32, b: i32) -> (i32, Tape) with Mut, Div, Panic {
+    let val = t.values[a] * t.values[b]
+    return ad2_push(t, AD2_MUL(), val, a, b, 0.0)
+}
+
+pub fn tape_div(t: Tape, a: i32, b: i32) -> (i32, Tape) with Mut, Div, Panic {
+    let val = t.values[a] / t.values[b]
+    return ad2_push(t, AD2_DIV(), val, a, b, 0.0)
+}
+
+// =============================================================================
+// Unary operations
+// =============================================================================
+
+pub fn tape_neg(t: Tape, a: i32) -> (i32, Tape) with Mut, Div, Panic {
+    let val = 0.0 - t.values[a]
+    return ad2_push(t, AD2_NEG(), val, a, -1, 0.0)
+}
+
+pub fn tape_exp(t: Tape, a: i32) -> (i32, Tape) with Mut, Div, Panic {
+    let val = ad2_exp(t.values[a])
+    return ad2_push(t, AD2_EXP(), val, a, -1, 0.0)
+}
+
+pub fn tape_log(t: Tape, a: i32) -> (i32, Tape) with Mut, Div, Panic {
+    let val = ad2_ln(t.values[a])
+    return ad2_push(t, AD2_LOG(), val, a, -1, 0.0)
+}
+
+pub fn tape_sin(t: Tape, a: i32) -> (i32, Tape) with Mut, Div, Panic {
+    let val = ad2_sin(t.values[a])
+    return ad2_push(t, AD2_SIN(), val, a, -1, 0.0)
+}
+
+pub fn tape_cos(t: Tape, a: i32) -> (i32, Tape) with Mut, Div, Panic {
+    let val = ad2_cos(t.values[a])
+    return ad2_push(t, AD2_COS(), val, a, -1, 0.0)
+}
+
+pub fn tape_relu(t: Tape, a: i32) -> (i32, Tape) with Mut, Div, Panic {
+    let x = t.values[a]
+    let val = if x > 0.0 { x } else { 0.0 }
+    return ad2_push(t, AD2_RELU(), val, a, -1, 0.0)
+}
+
+pub fn tape_sigmoid(t: Tape, a: i32) -> (i32, Tape) with Mut, Div, Panic {
+    let val = ad2_sigmoid(t.values[a])
+    return ad2_push(t, AD2_SIGMOID(), val, a, -1, 0.0)
+}
+
+pub fn tape_tanh(t: Tape, a: i32) -> (i32, Tape) with Mut, Div, Panic {
+    let val = ad2_tanh(t.values[a])
+    return ad2_push(t, AD2_TANH(), val, a, -1, 0.0)
+}
+
+// =============================================================================
+// Scalar ops
+// =============================================================================
+
+// Multiply node a by scalar constant c; grad[a] += grad[out] * c
+pub fn tape_mul_const(t: Tape, a: i32, c: f64) -> (i32, Tape) with Mut, Div, Panic {
+    let val = t.values[a] * c
+    return ad2_push(t, AD2_MUL_CONST(), val, a, -1, c)
+}
+
+// Raise node a to constant power c; grad[a] += grad[out] * c * a^(c-1)
+pub fn tape_pow_const(t: Tape, a: i32, c: f64) -> (i32, Tape) with Mut, Div, Panic {
+    let val = ad2_pow(t.values[a], c)
+    return ad2_push(t, AD2_POW(), val, a, -1, c)
+}
+
+// Add scalar constant c to node a; grad[a] += grad[out] (constant contributes 0)
+pub fn tape_add_const(t: Tape, a: i32, c: f64) -> (i32, Tape) with Mut, Div, Panic {
+    let val = t.values[a] + c
+    return ad2_push(t, AD2_ADD_CONST(), val, a, -1, c)
+}
+
+// =============================================================================
+// Backward pass — reverse-mode gradient accumulation
+// =============================================================================
+
+pub fn tape_backward(t: Tape, output: i32) -> Tape with Mut, Div, Panic {
+    var t2 = t
+    // Seed the output gradient
+    t2.grads[output] = 1.0
+    // Walk tape in reverse order
+    var i = output
+    while i >= 0 {
+        let op = t2.ops[i]
+        let g = t2.grads[i]
+        let a = t2.arg1[i]
+        let b = t2.arg2[i]
+        let c = t2.aux[i]
+        let va = if a >= 0 { t2.values[a] } else { 0.0 }
+        let vb = if b >= 0 { t2.values[b] } else { 0.0 }
+        let vout = t2.values[i]
+
+        // AD2_VAR (0) — leaf node, arg1 == -2 means constant (no grad)
+        // No propagation needed for leaves
+
+        // ADD: d/da = 1, d/db = 1
+        if op == AD2_ADD() {
+            if a >= 0 { t2.grads[a] = t2.grads[a] + g }
+            if b >= 0 { t2.grads[b] = t2.grads[b] + g }
+        }
+
+        // MUL: d/da = val[b], d/db = val[a]
+        if op == AD2_MUL() {
+            if a >= 0 { t2.grads[a] = t2.grads[a] + g * vb }
+            if b >= 0 { t2.grads[b] = t2.grads[b] + g * va }
+        }
+
+        // SUB: d/da = 1, d/db = -1
+        if op == AD2_SUB() {
+            if a >= 0 { t2.grads[a] = t2.grads[a] + g }
+            if b >= 0 { t2.grads[b] = t2.grads[b] - g }
+        }
+
+        // DIV: d/da = 1/b, d/db = -a/b^2
+        if op == AD2_DIV() {
+            if a >= 0 { t2.grads[a] = t2.grads[a] + g / vb }
+            if b >= 0 { t2.grads[b] = t2.grads[b] - g * va / (vb * vb) }
+        }
+
+        // NEG: d/da = -1
+        if op == AD2_NEG() {
+            if a >= 0 { t2.grads[a] = t2.grads[a] - g }
+        }
+
+        // EXP: d/da = exp(val[a]) = val[out]
+        if op == AD2_EXP() {
+            if a >= 0 { t2.grads[a] = t2.grads[a] + g * vout }
+        }
+
+        // LOG: d/da = 1/val[a]
+        if op == AD2_LOG() {
+            if a >= 0 { t2.grads[a] = t2.grads[a] + g / va }
+        }
+
+        // SIN: d/da = cos(val[a])
+        if op == AD2_SIN() {
+            if a >= 0 { t2.grads[a] = t2.grads[a] + g * ad2_cos(va) }
+        }
+
+        // COS: d/da = -sin(val[a])
+        if op == AD2_COS() {
+            if a >= 0 { t2.grads[a] = t2.grads[a] - g * ad2_sin(va) }
+        }
+
+        // RELU: d/da = 1 if val[a] > 0 else 0
+        if op == AD2_RELU() {
+            if a >= 0 {
+                if va > 0.0 { t2.grads[a] = t2.grads[a] + g }
+            }
+        }
+
+        // SIGMOID: d/da = val[out] * (1 - val[out])
+        if op == AD2_SIGMOID() {
+            if a >= 0 { t2.grads[a] = t2.grads[a] + g * vout * (1.0 - vout) }
+        }
+
+        // TANH: d/da = 1 - val[out]^2
+        if op == AD2_TANH() {
+            if a >= 0 { t2.grads[a] = t2.grads[a] + g * (1.0 - vout * vout) }
+        }
+
+        // POW (x^c): d/da = c * val[a]^(c-1)
+        if op == AD2_POW() {
+            if a >= 0 {
+                let dpow = c * ad2_pow(va, c - 1.0)
+                t2.grads[a] = t2.grads[a] + g * dpow
+            }
+        }
+
+        // MUL_CONST (x * c): d/da = c
+        if op == AD2_MUL_CONST() {
+            if a >= 0 { t2.grads[a] = t2.grads[a] + g * c }
+        }
+
+        // ADD_CONST (x + c): d/da = 1
+        if op == AD2_ADD_CONST() {
+            if a >= 0 { t2.grads[a] = t2.grads[a] + g }
+        }
+
+        i = i - 1
+    }
+    t2
+}
+
+// =============================================================================
+// Accessors
+// =============================================================================
+
+pub fn tape_value(t: &Tape, idx: i32) -> f64 with Panic {
+    t.values[idx]
+}
+
+pub fn tape_grad(t: &Tape, idx: i32) -> f64 with Panic {
+    t.grads[idx]
+}

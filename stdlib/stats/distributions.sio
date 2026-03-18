@@ -1,223 +1,214 @@
-//! Epistemic-aware Probability Distributions
-//! Normal and Beta distributions with Knowledge<f64> parameters.
-//! Automatic GUM-compliant uncertainty propagation through arithmetic.
-//!
-//! Knowledge = [`epistemic::Epistemic`](stdlib/epistemic/knowledge.sio)
+// Probability Distributions
+//
+// Normal and Beta distributions with basic PDF/CDF/sampling.
+// Self-contained math helpers (no extern dependencies).
 
-use epistemic::Epistemic;
+// =============================================================================
+// Math Helpers
+// =============================================================================
 
-type Knowledge = Epistemic;
+fn dist_abs(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
 
-extern "C" {
-    fn fabs(x: f64) -> f64;
-    fn sin(x: f64) -> f64;
-    fn cos(x: f64) -> f64;
-    fn log(x: f64) -> f64;
-    fn exp(x: f64) -> f64;
+fn dist_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i = 0
+    while i < 25 { y = 0.5 * (y + x / y); i = i + 1 }
+    y
 }
 
-const PI: f64 = 3.141592653589793;
-const SQRT_2PI: f64 = 2.5066282746310002;
-const LN_SQRT_2PI: f64 = 0.9189385332046727;
-
-// Helper to map f64 function preserving approximate variance (GUM delta method approximation)
-fn map_f64(k: Knowledge, f: fn(f64) -> f64, op: string) -> Knowledge {
-    k.map(f, op)
+fn dist_exp(x: f64) -> f64 with Mut, Div, Panic {
+    if x > 500.0 { return 1.0e200 }
+    if x < -500.0 { return 0.0 }
+    let ln2 = 0.6931471805599453
+    var k_f = x / ln2
+    var k: i32 = 0
+    if k_f >= 0.0 { k = k_f as i32 } else { k = (k_f as i32) - 1 }
+    let r = x - (k as f64) * ln2
+    var sum = 1.0
+    var term = 1.0
+    var n = 1
+    while n < 25 { term = term * r / (n as f64); sum = sum + term; n = n + 1 }
+    var result = sum
+    if k >= 0 { var i = 0; while i < k { result = result * 2.0; i = i + 1 } }
+    else { var i = 0; while i < (0 - k) { result = result / 2.0; i = i + 1 } }
+    result
 }
 
-// Abs for Knowledge (linear propagation)
-fn k_abs(k: Knowledge) -> Knowledge {
-    if k.get() >= 0.0 {
-        k
-    } else {
-        Knowledge::constant(-1.0) * k
+fn dist_ln(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 - 1.0e30 }
+    var m = x
+    var e = 0
+    while m >= 2.0 { m = m / 2.0; e = e + 1 }
+    while m < 0.5 { m = m * 2.0; e = e - 1 }
+    let t = (m - 1.0) / (m + 1.0)
+    let t2 = t * t
+    var sum = t
+    var term = t
+    var k = 1
+    while k < 30 { term = term * t2; sum = sum + term / (2 * k + 1) as f64; k = k + 1 }
+    2.0 * sum + (e as f64) * 0.6931471805599453
+}
+
+fn dist_cos(x: f64) -> f64 with Mut, Div, Panic {
+    // Taylor series for cos(x)
+    var sum = 1.0
+    var term = 1.0
+    var n = 1
+    while n < 20 {
+        term = 0.0 - term * x * x / ((2 * n - 1) * (2 * n)) as f64
+        sum = sum + term
+        n = n + 1
     }
+    sum
 }
+
+let PI: f64 = 3.141592653589793
+let SQRT_2PI: f64 = 2.5066282746310002
+let LN_SQRT_2PI: f64 = 0.9189385332046727
 
 // =============================================================================
 // Normal Distribution
 // =============================================================================
 
-pub struct NormalDist {
-    mu: Knowledge,
-    sigma: Knowledge,
+struct NormalDist {
+    mu: f64,
+    sigma: f64
 }
 
-impl NormalDist {
-    pub fn new(mu: Knowledge, sigma: Knowledge) -> NormalDist with Panic {
-        if sigma.get() <= 0.0 {
-            panic("Normal sigma must be positive")
-        }
-        NormalDist { mu, sigma }
-    }
-
-    pub fn standard() -> NormalDist {
-        NormalDist::new(Knowledge::constant(0.0), Knowledge::constant(1.0))
-    }
-
-    pub fn mean(&self) -> Knowledge {
-        self.mu.clone()
-    }
-
-    pub fn std_dev(&self) -> Knowledge {
-        self.sigma.clone()
-    }
-
-    pub fn variance(&self) -> Knowledge {
-        self.sigma.square()
-    }
+fn normal_new(mu: f64, sigma: f64) -> NormalDist {
+    NormalDist { mu: mu, sigma: sigma }
 }
 
-pub fn normal_pdf(dist: &NormalDist, x: Knowledge) -> Knowledge {
-    let z = (x - dist.mu.clone()) / dist.sigma.clone();
-    let arg = Knowledge::constant(-0.5) * z.square();
-    let gauss = arg.exp();
-    let denom = dist.sigma.clone() * Knowledge::constant(SQRT_2PI);
-    gauss / denom
+fn normal_standard() -> NormalDist {
+    NormalDist { mu: 0.0, sigma: 1.0 }
 }
 
-pub fn normal_cdf(dist: &NormalDist, x: Knowledge) -> Knowledge {
-    let z = (x - dist.mu.clone()) / dist.sigma.clone();
+fn standard_normal_cdf(z: f64) -> f64 with Mut, Div, Panic {
+    let p = 0.3275911
+    let a1 = 0.254829592
+    let a2 = -0.284496736
+    let a3 = 1.421413741
+    let a4 = -1.453152027
+    let a5 = 1.061405429
+
+    let abs_z = dist_abs(z)
+    let t = 1.0 / (1.0 + p * abs_z)
+    let t2 = t * t
+    let t3 = t2 * t
+    let t4 = t3 * t
+    let t5 = t4 * t
+
+    let exp_term = dist_exp(0.0 - abs_z * abs_z)
+    let poly = a1 * t + a2 * t2 + a3 * t3 + a4 * t4 + a5 * t5
+    let y = 1.0 - poly * exp_term
+
+    let sign = if z < 0.0 { -1.0 } else { 1.0 }
+    0.5 * (1.0 + sign * y)
+}
+
+fn normal_pdf(dist: NormalDist, x: f64) -> f64 with Mut, Div, Panic {
+    let z = (x - dist.mu) / dist.sigma
+    let arg = -0.5 * z * z
+    let gauss = dist_exp(arg)
+    gauss / (dist.sigma * SQRT_2PI)
+}
+
+fn normal_cdf(dist: NormalDist, x: f64) -> f64 with Mut, Div, Panic {
+    let z = (x - dist.mu) / dist.sigma
     standard_normal_cdf(z)
 }
 
-fn standard_normal_cdf(z: Knowledge) -> Knowledge {
-    let p = Knowledge::constant(0.3275911);
-    let a1 = Knowledge::constant(0.254829592);
-    let a2 = Knowledge::constant(-0.284496736);
-    let a3 = Knowledge::constant(1.421413741);
-    let a4 = Knowledge::constant(-1.453152027);
-    let a5 = Knowledge::constant(1.061405429);
-
-    let abs_z = k_abs(z.clone());
-    let t = Knowledge::constant(1.0) / (Knowledge::constant(1.0) + p * abs_z);
-    let t2 = t.square();
-    let t3 = t2 * t;
-    let t4 = t3 * t;
-    let t5 = t4 * t;
-
-    let exp_arg = abs_z.square() * Knowledge::constant(-1.0);
-    let exp_term = exp_arg.exp();
-
-    let poly = a1 * t + a2 * t2 + a3 * t3 + a4 * t4 + a5 * t5;
-    let y = Knowledge::constant(1.0) - poly * exp_term;
-
-    let sign = if z.get() < 0.0 {
-        Knowledge::constant(-1.0)
-    } else {
-        Knowledge::constant(1.0)
-    };
-
-    Knowledge::constant(0.5) * (Knowledge::constant(1.0) + sign * y)
-}
-
-pub fn normal_sample(dist: &NormalDist, u1: Knowledge, u2: Knowledge) -> Knowledge {
-    let ln_term = u1.ln();
-    let r = (Knowledge::constant(-2.0) * ln_term).sqrt();
-    let theta = Knowledge::constant(2.0 * PI) * u2;
-    let phase = map_f64(theta, cos, "cos");
-    dist.mu.clone() + dist.sigma.clone() * (r * phase)
+fn normal_sample(dist: NormalDist, u1: f64, u2: f64) -> f64 with Mut, Div, Panic {
+    // Box-Muller transform
+    let r = dist_sqrt(-2.0 * dist_ln(u1))
+    let theta = 2.0 * PI * u2
+    let phase = dist_cos(theta)
+    dist.mu + dist.sigma * r * phase
 }
 
 // =============================================================================
 // Beta Distribution
 // =============================================================================
 
-pub struct BetaDist {
-    alpha: Knowledge,
-    beta: Knowledge,
+struct BetaDist {
+    alpha: f64,
+    beta_param: f64
 }
 
-impl BetaDist {
-    pub fn new(alpha: Knowledge, beta: Knowledge) -> BetaDist with Panic {
-        if alpha.get() <= 0.0 || beta.get() <= 0.0 {
-            panic("Beta alpha, beta must be positive")
-        }
-        BetaDist { alpha, beta }
-    }
-
-    pub fn mean(&self) -> Knowledge {
-        self.alpha.clone() / (self.alpha.clone() + self.beta.clone())
-    }
-
-    pub fn variance(&self) -> Knowledge {
-        let sum_ab = self.alpha.clone() + self.beta.clone();
-        let num = self.alpha.clone() * self.beta.clone();
-        num / (sum_ab.square() * (sum_ab + Knowledge::constant(1.0)))
-    }
+fn beta_dist_new(alpha: f64, beta_param: f64) -> BetaDist {
+    BetaDist { alpha: alpha, beta_param: beta_param }
 }
 
-fn lgamma_stirling(g: Knowledge) -> Knowledge {
-    let nf = g;
-    let ln_sqrt_2pi = Knowledge::constant(LN_SQRT_2PI);
-    let term1 = ln_sqrt_2pi + (nf + Knowledge::constant(0.5)) * nf.ln();
-    let term2 = Knowledge::constant(1.0) / (Knowledge::constant(12.0) * nf);
+fn beta_dist_mean(d: BetaDist) -> f64 with Div, Panic {
+    d.alpha / (d.alpha + d.beta_param)
+}
+
+fn beta_dist_variance(d: BetaDist) -> f64 with Div, Panic {
+    let sum_ab = d.alpha + d.beta_param
+    let num = d.alpha * d.beta_param
+    num / (sum_ab * sum_ab * (sum_ab + 1.0))
+}
+
+fn lgamma_stirling(nf: f64) -> f64 with Mut, Div, Panic {
+    let ln_sqrt_2pi = LN_SQRT_2PI
+    let term1 = ln_sqrt_2pi + (nf + 0.5) * dist_ln(nf)
+    let term2 = 1.0 / (12.0 * nf)
     term1 - nf + term2
 }
 
-fn betaln(a: Knowledge, b: Knowledge) -> Knowledge {
-    lgamma_stirling(a.clone()) + lgamma_stirling(b.clone()) - lgamma_stirling(a + b)
+fn betaln(a: f64, b: f64) -> f64 with Mut, Div, Panic {
+    lgamma_stirling(a) + lgamma_stirling(b) - lgamma_stirling(a + b)
 }
 
-pub fn beta_pdf(dist: &BetaDist, x: Knowledge) -> Knowledge {
-    if x.get() <= 0.0 || x.get() >= 1.0 {
-        Knowledge::constant(0.0)
+fn beta_pdf(dist: BetaDist, x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 || x >= 1.0 {
+        0.0
     } else {
-        let ln_x = x.ln();
-        let one_minus_x = Knowledge::constant(1.0) - x;
-        let ln_1mx = one_minus_x.ln();
-        let alpha_m1 = dist.alpha.clone() - Knowledge::constant(1.0);
-        let beta_m1 = dist.beta.clone() - Knowledge::constant(1.0);
-        let lnum = alpha_m1 * ln_x + beta_m1 * ln_1mx;
-        let lden = betaln(dist.alpha.clone(), dist.beta.clone());
-        (lnum - lden).exp()
+        let ln_x = dist_ln(x)
+        let ln_1mx = dist_ln(1.0 - x)
+        let alpha_m1 = dist.alpha - 1.0
+        let beta_m1 = dist.beta_param - 1.0
+        let lnum = alpha_m1 * ln_x + beta_m1 * ln_1mx
+        let lden = betaln(dist.alpha, dist.beta_param)
+        dist_exp(lnum - lden)
     }
 }
 
-pub fn beta_cdf(dist: &BetaDist, x: Knowledge) -> Knowledge {
-    // Normal approximation for CDF (basic implementation)
-    let m = dist.mean();
-    let s = dist.variance().sqrt();
-    let z = (x - m) / s;
+fn beta_cdf(dist: BetaDist, x: f64) -> f64 with Mut, Div, Panic {
+    // Normal approximation for CDF
+    let m = beta_dist_mean(dist)
+    let s = dist_sqrt(beta_dist_variance(dist))
+    let z = (x - m) / s
     standard_normal_cdf(z)
-}
-
-pub fn beta_sample(dist: &BetaDist, z: Knowledge) -> Knowledge {
-    // Normal approximation sample (basic)
-    let m = dist.mean();
-    let s = dist.variance().sqrt();
-    m + s * z
 }
 
 // =============================================================================
 // Tests
 // =============================================================================
 
-fn approx_eq(a: f64, b: f64) -> bool {
-    fabs(a - b) < 0.001
+fn approx_eq(a: f64, b: f64) -> f64 {
+    dist_abs(a - b)
 }
 
-fn test_normal_pdf() -> bool {
-    let dist = NormalDist::standard();
-    let x0 = Knowledge::constant(0.0);
-    let pdf0 = normal_pdf(&dist, x0);
-    approx_eq(pdf0.get(), 0.3989)
+fn test_normal_pdf() -> bool with Mut, Div, Panic {
+    let dist = normal_standard()
+    let pdf0 = normal_pdf(dist, 0.0)
+    approx_eq(pdf0, 0.3989) < 0.001
 }
 
-fn test_normal_cdf() -> bool {
-    let dist = NormalDist::standard();
-    let x0 = Knowledge::constant(0.0);
-    let cdf0 = normal_cdf(&dist, x0);
-    approx_eq(cdf0.get(), 0.5)
+fn test_normal_cdf() -> bool with Mut, Div, Panic {
+    let dist = normal_standard()
+    let cdf0 = normal_cdf(dist, 0.0)
+    approx_eq(cdf0, 0.5) < 0.001
 }
 
-fn test_beta_pdf() -> bool {
-    let dist = BetaDist::new(Knowledge::constant(2.0), Knowledge::constant(2.0));
-    let x05 = Knowledge::constant(0.5);
-    let pdf05 = beta_pdf(&dist, x05);
-    approx_eq(pdf05.get(), 1.5)
+fn test_beta_pdf() -> bool with Mut, Div, Panic {
+    let dist = beta_dist_new(2.0, 2.0)
+    let pdf05 = beta_pdf(dist, 0.5)
+    approx_eq(pdf05, 1.5) < 0.01
 }
 
-pub fn run_tests() -> bool {
+fn run_distribution_tests() -> bool with Mut, Div, Panic {
     test_normal_pdf() && test_normal_cdf() && test_beta_pdf()
 }

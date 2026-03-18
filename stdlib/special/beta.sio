@@ -1,0 +1,306 @@
+// stdlib/special/beta.sio — Beta function and regularized incomplete beta
+//
+// Pure Sounio implementations (no FFI, no imports from other modules):
+//   lbeta(a, b)        — log-beta: lgamma(a) + lgamma(b) - lgamma(a+b)
+//   beta(a, b)         — exp(lbeta(a, b))
+//   ibeta(a, b, x)     — regularized incomplete beta I_x(a,b)
+//   ibeta_inv(a, b, p) — inverse of ibeta via Newton's method
+//
+// Algorithms:
+//   lgamma: Lanczos approximation g=7, 9 coefficients (Godfrey 2001)
+//   ibeta:  Lentz continued fraction (DLMF 8.17.22, Numerical Recipes §6.4)
+//   ibeta_inv: Newton-Raphson with normal-approximation initial guess
+//
+// References:
+//   Lanczos (1964) "A Precision Approximation of the Gamma Function"
+//   Press et al. (2007) "Numerical Recipes" 3rd ed., Ch. 6
+//   DLMF Ch. 8 (https://dlmf.nist.gov/8)
+//   Abramowitz & Stegun (1964), Ch. 6 and 26
+
+// ============================================================================
+// INTERNAL HELPERS — must precede all callers
+// ============================================================================
+
+fn bt_abs(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+// Natural logarithm via range reduction to [0.5, 2) then Maclaurin series
+// ln(m) = 2*(t + t^3/3 + t^5/5 + ...) where t = (m-1)/(m+1)
+// plus integer exponent * ln(2)
+fn bt_ln(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 - 1.0e300 }
+    if x == 1.0 { return 0.0 }
+    var m = x
+    var e = 0
+    while m >= 2.0 { m = m / 2.0; e = e + 1 }
+    while m < 0.5 { m = m * 2.0; e = e - 1 }
+    let t = (m - 1.0) / (m + 1.0)
+    let t2 = t * t
+    var sum = t
+    var term = t
+    var k = 1
+    while k < 32 {
+        term = term * t2
+        sum = sum + term / ((2 * k + 1) as f64)
+        k = k + 1
+    }
+    return 2.0 * sum + (e as f64) * 0.6931471805599453
+}
+
+// Exponential via Taylor series with range reduction
+fn bt_exp(x: f64) -> f64 with Mut, Div, Panic {
+    if x > 709.0  { return 1.0e300 }
+    if x < 0.0 - 709.0 { return 0.0 }
+    if x > 20.0 { return bt_exp(x / 2.0) * bt_exp(x / 2.0) }
+    if x < 0.0 - 20.0 { return 1.0 / bt_exp(0.0 - x) }
+    var sum = 1.0
+    var term = 1.0
+    var i = 1
+    while i <= 28 {
+        term = term * x / (i as f64)
+        sum = sum + term
+        i = i + 1
+    }
+    return sum
+}
+
+// Square root via Newton-Raphson (range-reduced into [1, 4))
+fn bt_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var scaled = x
+    var scale_back = 1.0
+    while scaled < 1.0 { scaled = scaled * 4.0; scale_back = scale_back * 2.0 }
+    while scaled > 4.0 { scaled = scaled * 0.25; scale_back = scale_back * 0.5 }
+    var y = 1.5
+    var iter = 0
+    while iter < 16 {
+        y = 0.5 * (y + scaled / y)
+        iter = iter + 1
+    }
+    return y / scale_back
+}
+
+// Sine via Taylor series (range-reduced to [-pi, pi])
+fn bt_sin(x: f64) -> f64 with Mut, Div, Panic {
+    let tp = 6.28318530717958647692
+    var a = x
+    while a > 3.14159265358979323846  { a = a - tp }
+    while a < 0.0 - 3.14159265358979323846 { a = a + tp }
+    let a2 = a * a
+    var s = a
+    var term = a
+    var n = 1
+    while n < 18 {
+        term = 0.0 - term * a2 / ((2 * n) * (2 * n + 1)) as f64
+        s = s + term
+        n = n + 1
+    }
+    return s
+}
+
+// ============================================================================
+// LOG-GAMMA — Lanczos g=7, 9 coefficients (Godfrey 2001)
+// ============================================================================
+// For z >= 0.5: direct Lanczos formula
+// For z <  0.5: reflection: ln|Gamma(z)| = ln(pi/|sin(pi*z)|) - lgamma(1-z)
+
+fn bt_lgamma(z: f64) -> f64 with Mut, Div, Panic {
+    if z <= 0.0 { return 1.0e300 }
+
+    if z < 0.5 {
+        let sin_pz = bt_sin(3.14159265358979323846 * z)
+        let abs_sin = bt_abs(sin_pz)
+        if abs_sin < 1.0e-300 { return 1.0e300 }
+        return bt_ln(3.14159265358979323846 / abs_sin) - bt_lgamma(1.0 - z)
+    }
+
+    // Lanczos coefficients g=7, n=9 (Godfrey)
+    var p: [f64; 9] = [0.0; 9]
+    p[0] = 0.99999999999980993
+    p[1] = 676.5203681218851
+    p[2] = 0.0 - 1259.1392167224028
+    p[3] = 771.32342877765313
+    p[4] = 0.0 - 176.61502916214059
+    p[5] = 12.507343278686905
+    p[6] = 0.0 - 0.13857109526572012
+    p[7] = 9.9843695780195716e-6
+    p[8] = 1.5056327351493116e-7
+
+    let w = z - 1.0
+    var ag = p[0]
+    var i = 1
+    while i < 9 {
+        ag = ag + p[i] / (w + (i as f64))
+        i = i + 1
+    }
+
+    // ln(Gamma(z)) = ln(sqrt(2*pi)) + (w+0.5)*ln(t) - t + ln(ag)
+    // where t = w + g + 0.5 = w + 7.5
+    let t = w + 7.5
+    let ln_sqrt_2pi = 0.9189385332046728  // 0.5*ln(2*pi)
+    return ln_sqrt_2pi + (w + 0.5) * bt_ln(t) - t + bt_ln(ag)
+}
+
+// ============================================================================
+// PUBLIC API
+// ============================================================================
+
+// lbeta(a, b) = lgamma(a) + lgamma(b) - lgamma(a+b)
+pub fn lbeta(a: f64, b: f64) -> f64 with Mut, Div, Panic {
+    return bt_lgamma(a) + bt_lgamma(b) - bt_lgamma(a + b)
+}
+
+// beta(a, b) = Gamma(a)*Gamma(b)/Gamma(a+b) = exp(lbeta(a,b))
+pub fn beta(a: f64, b: f64) -> f64 with Mut, Div, Panic {
+    return bt_exp(lbeta(a, b))
+}
+
+// ============================================================================
+// REGULARIZED INCOMPLETE BETA — Lentz continued fraction
+// ============================================================================
+// Evaluates the CF for I_x(a,b) directly (assumes x < (a+1)/(a+b+2)).
+// The CF (DLMF 8.17.22, Numerical Recipes §6.4):
+//   CF = 1/(1 + d1/(1 + d2/(1+...)))
+// with modified Lentz method.
+// d_{2m}   =  m*(b-m)*x / ((a+2m-1)*(a+2m))
+// d_{2m+1} = -(a+m)*(a+b+m)*x / ((a+2m)*(a+2m+1))
+
+fn bt_ibeta_cf(a: f64, b: f64, x: f64) -> f64 with Mut, Div, Panic {
+    let tiny = 1.0e-300
+    let eps  = 1.0e-14
+
+    // Initialise Lentz
+    var f = 1.0
+    var c = 1.0
+    var d = 1.0 - (a + b) * x / (a + 1.0)
+    if bt_abs(d) < tiny { d = tiny }
+    d = 1.0 / d
+    f = d
+
+    var m = 1
+    while m <= 200 {
+        let mf = m as f64
+
+        // even step: d_{2m}
+        let num_e = mf * (b - mf) * x / ((a + 2.0 * mf - 1.0) * (a + 2.0 * mf))
+        d = 1.0 + num_e * d
+        if bt_abs(d) < tiny { d = tiny }
+        d = 1.0 / d
+        c = 1.0 + num_e / c
+        if bt_abs(c) < tiny { c = tiny }
+        f = f * d * c
+
+        // odd step: d_{2m+1}
+        let num_o = 0.0 - (a + mf) * (a + b + mf) * x / ((a + 2.0 * mf) * (a + 2.0 * mf + 1.0))
+        d = 1.0 + num_o * d
+        if bt_abs(d) < tiny { d = tiny }
+        d = 1.0 / d
+        c = 1.0 + num_o / c
+        if bt_abs(c) < tiny { c = tiny }
+        let delta = d * c
+        f = f * delta
+
+        if bt_abs(delta - 1.0) < eps {
+            m = 201
+        } else {
+            m = m + 1
+        }
+    }
+    return f
+}
+
+// ibeta(a, b, x) = I_x(a,b) — regularized incomplete beta function
+pub fn ibeta(a: f64, b: f64, x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    if x >= 1.0 { return 1.0 }
+
+    let pivot = (a + 1.0) / (a + b + 2.0)
+    if x > pivot {
+        return 1.0 - ibeta(b, a, 1.0 - x)
+    }
+
+    // prefix = x^a * (1-x)^b / (a * B(a,b))
+    // in log-space: a*ln(x) + b*ln(1-x) - ln(a) - lbeta(a,b)
+    let log_prefix = a * bt_ln(x) + b * bt_ln(1.0 - x) - bt_ln(a) - lbeta(a, b)
+    let prefix = bt_exp(log_prefix)
+
+    let cf = bt_ibeta_cf(a, b, x)
+    return prefix * cf
+}
+
+// ============================================================================
+// INVERSE REGULARIZED INCOMPLETE BETA — Newton's method
+// ============================================================================
+// ibeta_inv(a, b, p) finds x such that ibeta(a, b, x) = p.
+//
+// Initial guess: normal approximation to the beta quantile
+//   (Wilson-Hilferty via mean/variance of Beta(a,b))
+// Refinement: x_{n+1} = x_n + (p - ibeta(a,b,x_n)) * B(a,b)
+//                                / (x_n^(a-1) * (1-x_n)^(b-1))
+// Clamped to [1e-15, 1-1e-15].  Max 50 iterations.
+
+pub fn ibeta_inv(a: f64, b: f64, p: f64) -> f64 with Mut, Div, Panic {
+    if p <= 0.0 { return 0.0 }
+    if p >= 1.0 { return 1.0 }
+
+    let lo = 1.0e-15
+    let hi = 1.0 - 1.0e-15
+
+    // Initial guess: mean of Beta(a,b)
+    // Refine with the Wilson-Hilferty normal approximation
+    let mean = a / (a + b)
+    let var_ab = a * b / ((a + b) * (a + b) * (a + b + 1.0))
+    let std_ab = bt_sqrt(var_ab)
+
+    // approximate normal quantile for p (rational approx; A&S 26.2.17)
+    var t = 0.0
+    if p < 0.5 {
+        let s = bt_sqrt(0.0 - 2.0 * bt_ln(p))
+        t = s - (2.515517 + 0.802853 * s + 0.010328 * s * s) /
+                (1.0 + 1.432788 * s + 0.189269 * s * s + 0.001308 * s * s * s)
+        t = 0.0 - t
+    } else {
+        let s = bt_sqrt(0.0 - 2.0 * bt_ln(1.0 - p))
+        t = s - (2.515517 + 0.802853 * s + 0.010328 * s * s) /
+                (1.0 + 1.432788 * s + 0.189269 * s * s + 0.001308 * s * s * s)
+    }
+
+    var x = mean + std_ab * t
+    if x < lo { x = lo }
+    if x > hi { x = hi }
+
+    // Pre-compute B(a,b) for the Newton update denominator
+    let bab = bt_exp(lbeta(a, b))
+
+    // Newton-Raphson
+    var iter = 0
+    while iter < 50 {
+        let fx = ibeta(a, b, x)
+        let diff = p - fx
+
+        // derivative of ibeta w.r.t. x = x^(a-1)*(1-x)^(b-1) / B(a,b)
+        // so Newton step = diff / (x^(a-1)*(1-x)^(b-1)/B(a,b))
+        //                = diff * B(a,b) / (x^(a-1)*(1-x)^(b-1))
+        let log_deriv = (a - 1.0) * bt_ln(x) + (b - 1.0) * bt_ln(1.0 - x)
+        let deriv = bt_exp(log_deriv)
+
+        var step = 0.0
+        if deriv > 1.0e-300 {
+            step = diff * bab / deriv
+        }
+
+        x = x + step
+        if x < lo { x = lo }
+        if x > hi { x = hi }
+
+        if bt_abs(step) < 1.0e-13 {
+            iter = 50
+        } else {
+            iter = iter + 1
+        }
+    }
+
+    return x
+}

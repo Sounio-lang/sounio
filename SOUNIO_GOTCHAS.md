@@ -103,7 +103,7 @@ fn set_value(x: &!i32) {
 
 // ❌ WRONG - missing Div effect
 fn divide(a: f64, b: f64) -> f64 {
-    a / b  // ERROR: division without 'with Div'
+    a / b  // ERROR: division without 'with Div, Panic'
 }
 
 // ❌ WRONG - missing IO effect
@@ -125,7 +125,7 @@ fn set_value(x: &!i32) with Mut {
     *x = 42
 }
 
-fn divide(a: f64, b: f64) -> f64 with Div {
+fn divide(a: f64, b: f64) -> f64 with Div, Panic {
     a / b
 }
 
@@ -270,7 +270,7 @@ fn compute(x: i32) -> i32 {
 }
 
 // ❌ WRONG - wrong tuple type
-fn divide_safe(a: f64, b: f64) -> (f64, i32) with Div {
+fn divide_safe(a: f64, b: f64) -> (f64, i32) with Div, Panic {
     if b == 0.0 { return 0.0 }  // ERROR: should return (f64, i32) not f64!
 }
 ```
@@ -287,7 +287,7 @@ fn compute(x: i32) -> i32 {
     result
 }
 
-fn divide_safe(a: f64, b: f64) -> (f64, i32) with Div {
+fn divide_safe(a: f64, b: f64) -> (f64, i32) with Div, Panic {
     if b == 0.0 { return (0.0, 1) }  // Error code
     (a / b, 0)  // Success
 }

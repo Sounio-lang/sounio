@@ -1,0 +1,675 @@
+// stdlib/csv/parser.sio — CSV parser and writer for Sounio
+//
+// Numeric-only CSV (f64 values) backed by fixed-size arrays.
+// No heap, no dynamic allocation — all capacities are compile-time constants.
+//
+// Capacity:
+//   - max 256 rows × 16 columns  → data[4096]
+//   - input / output buffer: 4096 bytes
+//   - column header: up to 16 names of 32 bytes each
+//
+// Usage:
+//   var t = csv_table_new()
+//   let rc = csv_parse(&input, input_len, &!t, 44u8)   // 44 = ','
+//   assert(rc == 0)
+//   let m = csv_col_mean(&t, 0)
+
+// =============================================================================
+// Constants
+// =============================================================================
+
+let CSV_MAX_ROWS: i32 = 256
+let CSV_MAX_COLS: i32 = 16
+let CSV_DATA_CAP: i32 = 4096   // 256 * 16
+let CSV_BUF_CAP:  i32 = 4096
+let CSV_HDR_LEN:  i32 = 32     // bytes per column name
+
+// =============================================================================
+// CsvBuf — byte buffer for serialized CSV output
+//
+// Wraps [u8; 4096] in a struct so that &!CsvBuf mutations propagate
+// correctly through the JIT (raw &![u8; 4096] has a known JIT limitation).
+// =============================================================================
+
+pub struct CsvBuf {
+    pub bytes: [u8; 4096],
+    pub len:   i32,
+}
+
+/// Return an empty CsvBuf.
+pub fn csv_buf_new() -> CsvBuf {
+    CsvBuf { bytes: [0u8; 4096], len: 0 }
+}
+
+// =============================================================================
+// CsvTable — primary data structure
+// =============================================================================
+
+pub struct CsvTable {
+    pub data:        [f64; 4096],       // row-major: data[row * n_cols + col]
+    pub n_rows:      i32,
+    pub n_cols:      i32,
+    pub max_rows:    i32,               // fixed: CSV_MAX_ROWS
+    pub max_cols:    i32,               // fixed: CSV_MAX_COLS
+    pub has_header:  i32,               // 0 = no, 1 = yes
+    pub header_bytes: [[u8; 32]; 16],  // column names
+    pub header_lens: [i32; 16],         // byte length of each name
+}
+
+// =============================================================================
+// Construction helpers
+// =============================================================================
+
+/// Return an empty CsvTable.
+pub fn csv_table_new() -> CsvTable {
+    CsvTable {
+        data:         [0.0; 4096],
+        n_rows:       0,
+        n_cols:       0,
+        max_rows:     256,
+        max_cols:     16,
+        has_header:   0,
+        header_bytes: [[0u8; 32]; 16],
+        header_lens:  [0; 16],
+    }
+}
+
+/// Set the value at (row, col). Out-of-bounds writes are silently ignored.
+pub fn csv_table_set(t: &!CsvTable, row: i32, col: i32, val: f64) with Mut, Panic {
+    if row < 0 || row >= t.n_rows { return }
+    if col < 0 || col >= t.n_cols { return }
+    let idx = row * t.n_cols + col
+    t.data[idx as usize] = val
+}
+
+/// Read the value at (row, col). Out-of-bounds reads return 0.0.
+pub fn csv_table_get(t: &CsvTable, row: i32, col: i32) -> f64 {
+    if row < 0 || row >= t.n_rows { return 0.0 }
+    if col < 0 || col >= t.n_cols { return 0.0 }
+    let idx = row * t.n_cols + col
+    t.data[idx as usize]
+}
+
+/// Append a row from values[0..n_cols-1].  n_cols must match t.n_cols (or set
+/// it on the first call when the table is still empty).
+pub fn csv_table_add_row(t: &!CsvTable, values: &[f64; 16], n_cols: i32) with Mut, Div, Panic {
+    if t.n_rows >= 256 { return }
+    if n_cols <= 0 || n_cols > 16 { return }
+
+    // First row: establish column count
+    if t.n_rows == 0 && t.n_cols == 0 {
+        t.n_cols = n_cols
+    }
+
+    // Column count mismatch — silently skip
+    if n_cols != t.n_cols { return }
+
+    let base = t.n_rows * t.n_cols
+    var c: i32 = 0
+    while c < n_cols {
+        t.data[(base + c) as usize] = values[c as usize]
+        c = c + 1
+    }
+    t.n_rows = t.n_rows + 1
+}
+
+// =============================================================================
+// Parsing helpers
+// =============================================================================
+
+// True when c is ASCII alphabetic (header-detection heuristic).
+fn is_alpha(c: u8) -> bool {
+    (c >= 65u8 && c <= 90u8) || (c >= 97u8 && c <= 122u8)
+}
+
+// True when c is a decimal digit.
+fn is_digit(c: u8) -> bool {
+    c >= 48u8 && c <= 57u8
+}
+
+// Raise 10.0 to integer power n  (n >= 0).
+fn pow10(n: i32) -> f64 {
+    var r: f64 = 1.0
+    var i: i32 = 0
+    while i < n {
+        r = r * 10.0
+        i = i + 1
+    }
+    r
+}
+
+/// Parse an f64 from bytes[start..end) (exclusive end).
+/// Handles optional leading '-', integer part, optional '.' + fraction.
+/// Returns 0.0 for an empty range.
+fn parse_f64(bytes: &[u8; 4096], start: i32, end: i32) -> f64 with Mut, Div, Panic {
+    if start >= end { return 0.0 }
+
+    var pos: i32 = start
+    var neg: i32 = 0
+
+    // Sign
+    if bytes[pos as usize] == 45u8 {   // '-'
+        neg = 1
+        pos = pos + 1
+    }
+
+    // Integer part
+    var int_part: f64 = 0.0
+    while pos < end && is_digit(bytes[pos as usize]) {
+        int_part = int_part * 10.0 + ((bytes[pos as usize] as i32) - 48) as f64
+        pos = pos + 1
+    }
+
+    // Fractional part
+    var frac: f64 = 0.0
+    if pos < end && bytes[pos as usize] == 46u8 {   // '.'
+        pos = pos + 1
+        var denom: f64 = 10.0
+        while pos < end && is_digit(bytes[pos as usize]) {
+            frac = frac + ((bytes[pos as usize] as i32) - 48) as f64 / denom
+            denom = denom * 10.0
+            pos = pos + 1
+        }
+    }
+
+    let result = int_part + frac
+    if neg == 1 { return 0.0 - result }
+    result
+}
+
+// =============================================================================
+// CSV parser
+// =============================================================================
+
+/// Parse CSV bytes into table.
+///
+/// - Delimiter is typically 44u8 (','). CR (\r) before \n is skipped.
+/// - If the first non-whitespace character is alphabetic the entire first line
+///   is treated as a header row (column names stored in table.header_bytes).
+/// - Only numeric rows are stored in table.data.
+///
+/// Returns 0 on success, -1 on overflow / error.
+pub fn csv_parse(input: &[u8; 4096], input_len: i32, table: &!CsvTable, delimiter: u8) -> i32
+    with Mut, Div, Panic
+{
+    if input_len <= 0 || input_len > 4096 { return 0 - 1 }
+
+    // Detect header: peek at first byte
+    var scan_hdr: i32 = 0
+    while scan_hdr < input_len && (input[scan_hdr as usize] == 32u8 || input[scan_hdr as usize] == 9u8) {
+        scan_hdr = scan_hdr + 1
+    }
+    let first_is_alpha: i32 = if scan_hdr < input_len && is_alpha(input[scan_hdr as usize]) { 1 } else { 0 }
+
+    var pos: i32 = 0
+
+    // --- Header row ---
+    if first_is_alpha == 1 {
+        table.has_header = 1
+        var col: i32 = 0
+        var field_start: i32 = pos
+        while pos < input_len {
+            let c = input[pos as usize]
+            if c == 10u8 || c == 13u8 {
+                // end of header line — store last field
+                if col < 16 {
+                    var fs: i32 = field_start
+                    var fe: i32 = pos
+                    // trim trailing CR
+                    if fe > fs && input[(fe - 1) as usize] == 13u8 { fe = fe - 1 }
+                    let flen = fe - fs
+                    let copy_len = if flen < 32 { flen } else { 31 }
+                    var hc: i32 = 0
+                    while hc < copy_len {
+                        table.header_bytes[col as usize][hc as usize] = input[(fs + hc) as usize]
+                        hc = hc + 1
+                    }
+                    table.header_lens[col as usize] = copy_len
+                    col = col + 1
+                }
+                // skip \r\n
+                if c == 13u8 && (pos + 1) < input_len && input[(pos + 1) as usize] == 10u8 {
+                    pos = pos + 2
+                } else {
+                    pos = pos + 1
+                }
+                break
+            } else if c == delimiter {
+                // store field
+                if col < 16 {
+                    var fs: i32 = field_start
+                    var fe: i32 = pos
+                    let flen = fe - fs
+                    let copy_len = if flen < 32 { flen } else { 31 }
+                    var hc: i32 = 0
+                    while hc < copy_len {
+                        table.header_bytes[col as usize][hc as usize] = input[(fs + hc) as usize]
+                        hc = hc + 1
+                    }
+                    table.header_lens[col as usize] = copy_len
+                    col = col + 1
+                }
+                field_start = pos + 1
+                pos = pos + 1
+            } else {
+                pos = pos + 1
+            }
+        }
+    }
+
+    // --- Data rows ---
+    var row_count: i32 = 0
+    var col_count: i32 = 0      // columns seen in current row
+    var n_cols_expected: i32 = 0  // established from first data row
+    var row_vals: [f64; 16] = [0.0; 16]
+    var field_start: i32 = pos
+
+    while pos <= input_len {
+        // Use input_len as sentinel: treat end-of-buffer like newline
+        let c: u8 = if pos < input_len { input[pos as usize] } else { 10u8 }
+
+        if c == 10u8 || c == 13u8 {
+            // end of field and end of row
+            var fe: i32 = pos
+            if c == 13u8 && (pos + 1) < input_len && input[(pos + 1) as usize] == 10u8 {
+                // \r\n  — fe points before \r
+                fe = pos
+            }
+            // skip empty lines
+            let field_len = fe - field_start
+            if field_len > 0 || col_count > 0 {
+                if col_count < 16 {
+                    row_vals[col_count as usize] = parse_f64(input, field_start, fe)
+                    col_count = col_count + 1
+                }
+                // store row
+                if col_count > 0 {
+                    if row_count >= 256 { return 0 - 1 }
+                    // establish or verify column count
+                    if n_cols_expected == 0 {
+                        n_cols_expected = col_count
+                    }
+                    if col_count != n_cols_expected { return 0 - 1 }
+                    // write row into table
+                    if table.n_cols == 0 {
+                        table.n_cols = col_count
+                    }
+                    let base = row_count * table.n_cols
+                    var wc: i32 = 0
+                    while wc < col_count {
+                        table.data[(base + wc) as usize] = row_vals[wc as usize]
+                        wc = wc + 1
+                    }
+                    row_count = row_count + 1
+                }
+                col_count = 0
+            }
+            // advance past \r\n or \n
+            if pos < input_len && c == 13u8 && (pos + 1) < input_len && input[(pos + 1) as usize] == 10u8 {
+                pos = pos + 2
+            } else {
+                pos = pos + 1
+            }
+            field_start = pos
+        } else if c == delimiter {
+            // end of field, not end of row
+            if col_count < 16 {
+                row_vals[col_count as usize] = parse_f64(input, field_start, pos)
+                col_count = col_count + 1
+            }
+            pos = pos + 1
+            field_start = pos
+        } else {
+            pos = pos + 1
+        }
+
+        // sentinel consumed
+        if pos > input_len { break }
+    }
+
+    table.n_rows = row_count
+    0
+}
+
+// =============================================================================
+// Serialization helpers
+// =============================================================================
+
+// Write the decimal digits of a non-negative integer n into out starting at
+// pos.  Returns the new pos.
+fn write_i32_digits(n: i32, out: &![u8; 4096], pos: i32) -> i32 with Mut, Div, Panic {
+    if n == 0 {
+        out[pos as usize] = 48u8   // '0'
+        return pos + 1
+    }
+    // Collect digits in reverse, then flip
+    var tmp: [u8; 12] = [0u8; 12]
+    var k: i32 = 0
+    var v: i32 = n
+    while v > 0 {
+        tmp[k as usize] = (48 + v % 10) as u8
+        v = v / 10
+        k = k + 1
+    }
+    // Write reversed
+    var i: i32 = k - 1
+    var p: i32 = pos
+    while i >= 0 {
+        out[p as usize] = tmp[i as usize]
+        p = p + 1
+        i = i - 1
+    }
+    p
+}
+
+/// Write an f64 value as decimal text into out[pos..].
+/// Format: [-]integer[.fraction] with up to 6 fractional digits (trailing
+/// zeros stripped).  Returns updated pos.
+fn write_f64(val: f64, out: &![u8; 4096], pos: i32) -> i32 with Mut, Div, Panic {
+    var p: i32 = pos
+    var v: f64 = val
+
+    // Sign
+    if v < 0.0 {
+        out[p as usize] = 45u8   // '-'
+        p = p + 1
+        v = 0.0 - v
+    }
+
+    // Integer part
+    let int_part: i32 = v as i32
+    p = write_i32_digits(int_part, out, p)
+
+    // Fractional part — 6 digits max
+    let frac = v - (int_part as f64)
+    if frac > 0.000001 {
+        out[p as usize] = 46u8   // '.'
+        p = p + 1
+
+        // Scale up to 6 decimal places
+        var frac6: i32 = (frac * 1000000.0) as i32
+        // Trim trailing zeros
+        while frac6 > 0 && frac6 % 10 == 0 {
+            frac6 = frac6 / 10
+        }
+        // Count digits in frac6 to determine leading zeros needed
+        // We need to figure out how many digits frac6 has vs how many we need
+        // to represent 6 decimal places.
+        // Re-derive: original fraction scaled to 6 decimal digits
+        var full6: i32 = (frac * 1000000.0) as i32
+        // Count significant decimal positions
+        var digits6: [u8; 6] = [0u8; 6]
+        var d: i32 = 5
+        var rem: i32 = full6
+        while d >= 0 {
+            digits6[d as usize] = (48 + rem % 10) as u8
+            rem = rem / 10
+            d = d - 1
+        }
+        // Find last non-zero digit
+        var last: i32 = 5
+        while last > 0 && digits6[last as usize] == 48u8 {
+            last = last - 1
+        }
+        var di: i32 = 0
+        while di <= last {
+            out[p as usize] = digits6[di as usize]
+            p = p + 1
+            di = di + 1
+        }
+    }
+
+    p
+}
+
+// =============================================================================
+// CSV serializer
+// =============================================================================
+
+/// Serialize table to CSV bytes in out[0..].
+///
+/// - delimiter is written between fields (typically 44u8 = ',')
+/// - header row is written first when table.has_header == 1
+/// - Returns the total number of bytes written, or -1 on overflow.
+pub fn csv_serialize(table: &CsvTable, out: &![u8; 4096], delimiter: u8) -> i32 with Mut, Div, Panic {
+    var p: i32 = 0
+
+    // Header row
+    if table.has_header == 1 {
+        var c: i32 = 0
+        while c < table.n_cols {
+            if c > 0 {
+                if p >= 4096 { return 0 - 1 }
+                out[p as usize] = delimiter
+                p = p + 1
+            }
+            let hlen = table.header_lens[c as usize]
+            var hc: i32 = 0
+            while hc < hlen {
+                if p >= 4096 { return 0 - 1 }
+                out[p as usize] = table.header_bytes[c as usize][hc as usize]
+                p = p + 1
+                hc = hc + 1
+            }
+            c = c + 1
+        }
+        if p >= 4096 { return 0 - 1 }
+        out[p as usize] = 10u8   // '\n'
+        p = p + 1
+    }
+
+    // Data rows
+    var r: i32 = 0
+    while r < table.n_rows {
+        var c: i32 = 0
+        while c < table.n_cols {
+            if c > 0 {
+                if p >= 4096 { return 0 - 1 }
+                out[p as usize] = delimiter
+                p = p + 1
+            }
+            let v = table.data[(r * table.n_cols + c) as usize]
+            p = write_f64(v, out, p)
+            if p >= 4096 { return 0 - 1 }
+            c = c + 1
+        }
+        if p >= 4096 { return 0 - 1 }
+        out[p as usize] = 10u8   // '\n'
+        p = p + 1
+        r = r + 1
+    }
+
+    p
+}
+
+// =============================================================================
+// CsvBuf-based serialize / parse
+//
+// Use these variants instead of csv_serialize / csv_parse when doing
+// round-trip serialize→parse in the JIT, because &!CsvBuf struct
+// mutations are visible to callers (raw &![u8;4096] parameter mutations
+// have a known JIT limitation).
+// =============================================================================
+
+// Write-f64 variant that targets CsvBuf.bytes
+fn write_f64_buf(val: f64, b: &!CsvBuf, pos: i32) -> i32 with Mut, Div, Panic {
+    var p: i32 = pos
+    var v: f64 = val
+
+    if v < 0.0 {
+        b.bytes[p as usize] = 45u8
+        p = p + 1
+        v = 0.0 - v
+    }
+
+    let int_part: i32 = v as i32
+    // write integer digits into a temp buf then copy
+    var tmp: [u8; 12] = [0u8; 12]
+    var k: i32 = 0
+    if int_part == 0 {
+        b.bytes[p as usize] = 48u8
+        p = p + 1
+    } else {
+        var vi: i32 = int_part
+        while vi > 0 {
+            tmp[k as usize] = (48 + vi % 10) as u8
+            vi = vi / 10
+            k = k + 1
+        }
+        var ii: i32 = k - 1
+        while ii >= 0 {
+            b.bytes[p as usize] = tmp[ii as usize]
+            p = p + 1
+            ii = ii - 1
+        }
+    }
+
+    let frac = v - (int_part as f64)
+    if frac > 0.000001 {
+        b.bytes[p as usize] = 46u8
+        p = p + 1
+        var full6: i32 = (frac * 1000000.0) as i32
+        var digits6: [u8; 6] = [0u8; 6]
+        var d: i32 = 5
+        var rem: i32 = full6
+        while d >= 0 {
+            digits6[d as usize] = (48 + rem % 10) as u8
+            rem = rem / 10
+            d = d - 1
+        }
+        var last: i32 = 5
+        while last > 0 && digits6[last as usize] == 48u8 {
+            last = last - 1
+        }
+        var di: i32 = 0
+        while di <= last {
+            b.bytes[p as usize] = digits6[di as usize]
+            p = p + 1
+            di = di + 1
+        }
+    }
+    p
+}
+
+/// Serialize table into a CsvBuf. Sets b.len to bytes written.
+/// Returns bytes written, or -1 on overflow.
+pub fn csv_serialize_buf(table: &CsvTable, b: &!CsvBuf, delimiter: u8) -> i32 with Mut, Div, Panic {
+    var p: i32 = 0
+
+    if table.has_header == 1 {
+        var c: i32 = 0
+        while c < table.n_cols {
+            if c > 0 {
+                if p >= 4096 { return 0 - 1 }
+                b.bytes[p as usize] = delimiter
+                p = p + 1
+            }
+            let hlen = table.header_lens[c as usize]
+            var hc: i32 = 0
+            while hc < hlen {
+                if p >= 4096 { return 0 - 1 }
+                b.bytes[p as usize] = table.header_bytes[c as usize][hc as usize]
+                p = p + 1
+                hc = hc + 1
+            }
+            c = c + 1
+        }
+        if p >= 4096 { return 0 - 1 }
+        b.bytes[p as usize] = 10u8
+        p = p + 1
+    }
+
+    var r: i32 = 0
+    while r < table.n_rows {
+        var c: i32 = 0
+        while c < table.n_cols {
+            if c > 0 {
+                if p >= 4096 { return 0 - 1 }
+                b.bytes[p as usize] = delimiter
+                p = p + 1
+            }
+            let v = table.data[(r * table.n_cols + c) as usize]
+            p = write_f64_buf(v, b, p)
+            if p >= 4096 { return 0 - 1 }
+            c = c + 1
+        }
+        if p >= 4096 { return 0 - 1 }
+        b.bytes[p as usize] = 10u8
+        p = p + 1
+        r = r + 1
+    }
+
+    b.len = p
+    p
+}
+
+/// Parse CSV from a CsvBuf into table. Convenience wrapper over csv_parse.
+pub fn csv_parse_buf(b: &CsvBuf, table: &!CsvTable, delimiter: u8) -> i32 with Mut, Div, Panic {
+    csv_parse(&b.bytes, b.len, table, delimiter)
+}
+
+// =============================================================================
+// Column statistics
+// =============================================================================
+
+/// Sum of column col. Returns 0.0 for invalid col or empty table.
+pub fn csv_col_sum(t: &CsvTable, col: i32) -> f64 {
+    if col < 0 || col >= t.n_cols { return 0.0 }
+    var s: f64 = 0.0
+    var r: i32 = 0
+    while r < t.n_rows {
+        s = s + t.data[(r * t.n_cols + col) as usize]
+        r = r + 1
+    }
+    s
+}
+
+/// Arithmetic mean of column col. Returns 0.0 for invalid col or empty table.
+pub fn csv_col_mean(t: &CsvTable, col: i32) -> f64 with Div, Panic {
+    if col < 0 || col >= t.n_cols { return 0.0 }
+    if t.n_rows == 0 { return 0.0 }
+    csv_col_sum(t, col) / (t.n_rows as f64)
+}
+
+/// Population variance of column col.
+pub fn csv_col_variance(t: &CsvTable, col: i32) -> f64 with Mut, Div, Panic {
+    if col < 0 || col >= t.n_cols { return 0.0 }
+    if t.n_rows == 0 { return 0.0 }
+    let mean = csv_col_mean(t, col)
+    var acc: f64 = 0.0
+    var r: i32 = 0
+    while r < t.n_rows {
+        let d = t.data[(r * t.n_cols + col) as usize] - mean
+        acc = acc + d * d
+        r = r + 1
+    }
+    acc / (t.n_rows as f64)
+}
+
+/// Minimum value in column col.
+pub fn csv_col_min(t: &CsvTable, col: i32) -> f64 {
+    if col < 0 || col >= t.n_cols { return 0.0 }
+    if t.n_rows == 0 { return 0.0 }
+    var m: f64 = t.data[col as usize]
+    var r: i32 = 1
+    while r < t.n_rows {
+        let v = t.data[(r * t.n_cols + col) as usize]
+        if v < m { m = v }
+        r = r + 1
+    }
+    m
+}
+
+/// Maximum value in column col.
+pub fn csv_col_max(t: &CsvTable, col: i32) -> f64 {
+    if col < 0 || col >= t.n_cols { return 0.0 }
+    if t.n_rows == 0 { return 0.0 }
+    var m: f64 = t.data[col as usize]
+    var r: i32 = 1
+    while r < t.n_rows {
+        let v = t.data[(r * t.n_cols + col) as usize]
+        if v > m { m = v }
+        r = r + 1
+    }
+    m
+}

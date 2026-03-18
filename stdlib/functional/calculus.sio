@@ -1,0 +1,265 @@
+// stdlib/functional/calculus.sio — Higher-Order Numerical Calculus
+//
+// Sprint 230: Every algorithm takes fn(f64) -> f64 as argument.
+// Differentiate, integrate, find roots of, and optimize ANY function.
+// Pure Sounio — no extern "C", no libc, no runtime.
+//
+// Usage:
+//   use functional::calculus::{deriv, newton, bisect, integrate, minimize}
+//
+//   fn my_sin(x: f64) -> f64 { ... }
+//   let slope = deriv(my_sin, 0.0)        // ≈ cos(0) = 1.0
+//   let root  = newton(my_sin, 3.0)       // ≈ π
+//   let area  = integrate(my_sin, 0.0, root) // ≈ 2.0
+
+module functional::calculus
+
+// ============================================================================
+// Math primitives (pure Sounio, no extern C)
+// ============================================================================
+
+pub fn fc_abs(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+pub fn fc_sqrt(x: f64) -> f64 with Mut, Panic, Div {
+    if x <= 0.0 { return 0.0 }
+    var guess = x
+    if x > 1.0 { guess = x * 0.5 }
+    var i: i64 = 0
+    while i < 60 {
+        guess = 0.5 * (guess + x / guess)
+        i = i + 1
+    }
+    guess
+}
+
+// ============================================================================
+// Numerical Differentiation
+// ============================================================================
+
+// Central difference: f'(x) ≈ (f(x+h) - f(x-h)) / 2h
+// Default step h = 1e-8 (optimal for f64 machine epsilon ~1e-16)
+pub fn deriv(f: fn(f64) -> f64, x: f64) -> f64 with Mut, Panic, Div {
+    let h = 0.00000001
+    let fph = f(x + h)
+    let fmh = f(x - h)
+    (fph - fmh) / (2.0 * h)
+}
+
+// Central difference with explicit step size
+pub fn deriv_h(f: fn(f64) -> f64, x: f64, h: f64) -> f64 with Mut, Panic, Div {
+    (f(x + h) - f(x - h)) / (2.0 * h)
+}
+
+// Second derivative: f''(x) ≈ (f(x+h) - 2f(x) + f(x-h)) / h²
+pub fn deriv2(f: fn(f64) -> f64, x: f64) -> f64 with Mut, Panic, Div {
+    let h = 0.0001
+    (f(x + h) - 2.0 * f(x) + f(x - h)) / (h * h)
+}
+
+// Fourth-order accurate first derivative (5-point stencil)
+pub fn deriv4(f: fn(f64) -> f64, x: f64) -> f64 with Mut, Panic, Div {
+    let h = 0.0001
+    let fm2 = f(x - 2.0 * h)
+    let fm1 = f(x - h)
+    let fp1 = f(x + h)
+    let fp2 = f(x + 2.0 * h)
+    (fm2 - 8.0 * fm1 + 8.0 * fp1 - fp2) / (12.0 * h)
+}
+
+// ============================================================================
+// Root Finding
+// ============================================================================
+
+// Newton-Raphson: find x where f(x) = 0
+// Uses numerical derivative. Max 100 iterations, tol 1e-12.
+pub fn newton(f: fn(f64) -> f64, x0: f64) -> f64 with Mut, Panic, Div {
+    var x = x0
+    var i: i64 = 0
+    while i < 100 {
+        let fx = f(x)
+        if fc_abs(fx) < 0.000000000001 { return x }
+        let dfx = deriv(f, x)
+        if fc_abs(dfx) < 0.0000000000000001 { return x }
+        let step = fx / dfx
+        // Trust region: limit step to ±1.0
+        if step > 1.0 { x = x - 1.0 }
+        else if step < 0.0 - 1.0 { x = x + 1.0 }
+        else { x = x - step }
+        i = i + 1
+    }
+    x
+}
+
+// Bisection: find root in [a, b] where f(a) and f(b) have opposite signs.
+// Guaranteed convergence. Max 100 iterations, tol 1e-12.
+pub fn bisect(f: fn(f64) -> f64, a: f64, b: f64) -> f64 with Mut, Panic, Div {
+    var lo = a
+    var hi = b
+    var flo = f(lo)
+    var i: i64 = 0
+    while i < 100 {
+        let mid = 0.5 * (lo + hi)
+        if (hi - lo) < 0.000000000001 { return mid }
+        let fmid = f(mid)
+        if fc_abs(fmid) < 0.000000000001 { return mid }
+        // If flo and fmid have same sign, root is in [mid, hi]
+        if (flo > 0.0 && fmid > 0.0) || (flo < 0.0 && fmid < 0.0) {
+            lo = mid
+            flo = fmid
+        } else {
+            hi = mid
+        }
+        i = i + 1
+    }
+    0.5 * (lo + hi)
+}
+
+// Secant method: like Newton but avoids explicit derivative evaluation.
+// Superlinear convergence (order ≈ 1.618).
+pub fn secant(f: fn(f64) -> f64, x0: f64, x1: f64) -> f64 with Mut, Panic, Div {
+    var xp = x0
+    var xc = x1
+    var fp = f(xp)
+    var i: i64 = 0
+    while i < 100 {
+        let fc = f(xc)
+        if fc_abs(fc) < 0.000000000001 { return xc }
+        let denom = fc - fp
+        if fc_abs(denom) < 0.0000000000000001 { return xc }
+        let x_new = xc - fc * (xc - xp) / denom
+        xp = xc
+        fp = fc
+        xc = x_new
+        i = i + 1
+    }
+    xc
+}
+
+// ============================================================================
+// Integration
+// ============================================================================
+
+// Composite Simpson's 1/3 rule: ∫[a,b] f(x) dx ≈ (h/3)[f(a) + 4f(x1) + 2f(x2) + ... + f(b)]
+// n = number of subintervals (must be even; forced even if odd)
+pub fn integrate_n(f: fn(f64) -> f64, a: f64, b: f64, n: i64) -> f64 with Mut, Panic, Div {
+    var nn = n
+    if nn < 2 { nn = 2 }
+    if nn % 2 != 0 { nn = nn + 1 }
+    let h = (b - a) / (nn as f64)
+    var sum = f(a) + f(b)
+    var i: i64 = 1
+    while i < nn {
+        let x = a + (i as f64) * h
+        if i % 2 == 0 {
+            sum = sum + 2.0 * f(x)
+        } else {
+            sum = sum + 4.0 * f(x)
+        }
+        i = i + 1
+    }
+    sum * h / 3.0
+}
+
+// Composite Simpson with 1000 subintervals (good default for smooth functions)
+pub fn integrate(f: fn(f64) -> f64, a: f64, b: f64) -> f64 with Mut, Panic, Div {
+    integrate_n(f, a, b, 1000)
+}
+
+// Trapezoidal rule (simpler, lower order)
+pub fn trapezoid(f: fn(f64) -> f64, a: f64, b: f64, n: i64) -> f64 with Mut, Panic, Div {
+    let h = (b - a) / (n as f64)
+    var sum = 0.5 * (f(a) + f(b))
+    var i: i64 = 1
+    while i < n {
+        sum = sum + f(a + (i as f64) * h)
+        i = i + 1
+    }
+    sum * h
+}
+
+// ============================================================================
+// Optimization
+// ============================================================================
+
+// Golden-section search: find x ∈ [a,b] that minimizes f(x).
+// Requires f unimodal on [a,b]. Max 100 iterations, tol 1e-10.
+pub fn minimize(f: fn(f64) -> f64, a: f64, b: f64) -> f64 with Mut, Panic, Div {
+    let phi = 1.6180339887  // golden ratio
+    let resphi = 2.0 - phi  // = 1 - 1/phi ≈ 0.382
+    var lo = a
+    var hi = b
+    var x1 = lo + resphi * (hi - lo)
+    var x2 = hi - resphi * (hi - lo)
+    var f1 = f(x1)
+    var f2 = f(x2)
+    var i: i64 = 0
+    while i < 100 {
+        if fc_abs(hi - lo) < 0.0000000001 { return 0.5 * (lo + hi) }
+        if f1 < f2 {
+            hi = x2
+            x2 = x1
+            f2 = f1
+            x1 = lo + resphi * (hi - lo)
+            f1 = f(x1)
+        } else {
+            lo = x1
+            x1 = x2
+            f1 = f2
+            x2 = hi - resphi * (hi - lo)
+            f2 = f(x2)
+        }
+        i = i + 1
+    }
+    0.5 * (lo + hi)
+}
+
+// Maximize f on [a,b] — negate and minimize
+pub fn maximize(f: fn(f64) -> f64, a: f64, b: f64) -> f64 with Mut, Panic, Div {
+    // Can't negate f directly without closures, so inline the logic
+    let phi = 1.6180339887
+    let resphi = 2.0 - phi
+    var lo = a
+    var hi = b
+    var x1 = lo + resphi * (hi - lo)
+    var x2 = hi - resphi * (hi - lo)
+    var f1 = 0.0 - f(x1)
+    var f2 = 0.0 - f(x2)
+    var i: i64 = 0
+    while i < 100 {
+        if fc_abs(hi - lo) < 0.0000000001 { return 0.5 * (lo + hi) }
+        if f1 < f2 {
+            hi = x2
+            x2 = x1
+            f2 = f1
+            x1 = lo + resphi * (hi - lo)
+            f1 = 0.0 - f(x1)
+        } else {
+            lo = x1
+            x1 = x2
+            f1 = f2
+            x2 = hi - resphi * (hi - lo)
+            f2 = 0.0 - f(x2)
+        }
+        i = i + 1
+    }
+    0.5 * (lo + hi)
+}
+
+// ============================================================================
+// Fixed-point iteration
+// ============================================================================
+
+// Find x = g(x) by iterating x_{n+1} = g(x_n)
+pub fn fixed_point(g: fn(f64) -> f64, x0: f64) -> f64 with Mut, Panic, Div {
+    var x = x0
+    var i: i64 = 0
+    while i < 200 {
+        let x_new = g(x)
+        if fc_abs(x_new - x) < 0.000000000001 { return x_new }
+        x = x_new
+        i = i + 1
+    }
+    x
+}

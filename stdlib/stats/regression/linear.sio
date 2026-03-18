@@ -20,6 +20,7 @@ extern "C" {
 }
 
 pub use stats::shared::*
+use special::beta::{ibeta}
 
 // ============================================================================
 // CORE TYPES
@@ -434,24 +435,21 @@ pub fn fit_simple_linear_regression(
     }
 }
 
-// Approximate p-value from t-distribution
-fn t_to_p_approx(t: f64, df: f64) -> f64 {
-    let abs_t = abs_f64(t)
-    let z = abs_t
-
-    // Abramowitz & Stegun approximation
-    let a1 = 0.254829592
-    let a2 = -0.284496736
-    let a3 = 1.421413741
-    let a4 = -1.453152027
-    let a5 = 1.061405429
-    let p = 0.3275911
-
-    let x = abs_f64(z)
-    let t_erf = 1.0 / (1.0 + p * x)
-    let erf = 1.0 - (((((a5 * t_erf + a4) * t_erf) + a3) * t_erf + a2) * t_erf + a1) * t_erf * exp(-x * x)
-
-    1.0 - erf
+// p-value from t-distribution using regularized incomplete beta
+// Two-tailed: p = 2 * I_{df/(df+t²)}(df/2, 1/2)
+// References: Abramowitz & Stegun §26.7.1; Press et al. §6.4
+fn t_to_p_approx(t: f64, df: f64) -> f64 with Mut, Div, Panic {
+    if df <= 0.0 { return 1.0 }
+    let t2 = t * t
+    let x = df / (df + t2)
+    let p_one_tail = ibeta(df / 2.0, 0.5, x)
+    // two-tailed: 2 * (1 - p_one_tail) but ibeta gives lower tail
+    // For t-dist: p_two_tail = ibeta(df/2, 0.5, df/(df+t^2))
+    // since p_one_tail here is already P(T >= |t|) = I_x(df/2, 0.5)
+    let p = p_one_tail
+    if p > 1.0 { return 1.0 }
+    if p < 0.0 { return 0.0 }
+    p
 }
 
 // ============================================================================
@@ -688,7 +686,7 @@ pub fn fit_linear_regression_epistemic(
     let coef_variance = model.std_errors[1] * model.std_errors[1]
 
     let prov = RegressionProvenance {
-        method: "OLS",
+        method_code: 0,
         n_obs: n,
         n_predictors: 1,
         timestamp: 0,

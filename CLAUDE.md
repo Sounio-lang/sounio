@@ -23,11 +23,10 @@
 **CRITICAL — What doesn't work:**
 
 - `&mut` → use `&!`
-- `assert!()`, `println!()` → no Rust macros
+- `assert!()`, `println!()` → no Rust macros (use `assert()`, `println()`)
 - `#[test]`, `#[derive()]` → no attributes
-- `let (a, b) = tuple` → no destructuring
-- `pub` → not implemented
-- Forward refs → helpers must precede callers
+- `|x| x + 1` → no closure literals (named fn refs work: `let f = square`)
+- Bare `&![T; N]` array mutation → wrap in struct (see KNOWN_LIMITATIONS.md)
 
 **Quick reference:**
 

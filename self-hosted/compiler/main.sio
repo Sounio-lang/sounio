@@ -67,6 +67,7 @@ use interop::artifact::*
 use interop::session::*
 use interop::kernel::*
 use interop::serialize::*
+use compiler::ontology::mod::{ontology_resolve_curie, ontology_search_text, ontology_ancestor_terms, ontology_is_subclass_of, ontology_map_to, ontology_print_term, ontology_print_search_results, ontology_print_mappings}
 
 // ============================================================================
 // STRING UTILITIES
@@ -1139,6 +1140,27 @@ fn compiler_mode_option_string(args: ArgList, short_flag: string, long_flag: str
     fallback
 }
 
+fn compiler_mode_positional_arg(args: ArgList, flag_index: i64, position: i64, mode_name: string) -> string with Mut, Panic, Div {
+    var found: i64 = 0
+    var i: i64 = flag_index + 1
+    while i < args.len {
+        let arg = arg_list_get(args, i)
+        if arg == "--to" {
+            i = i + 2
+        } else if str_len(arg) > 0 && str_char_at(arg, 0) != 45 {
+            if found == position {
+                return arg
+            }
+            found = found + 1
+            i = i + 1
+        } else {
+            i = i + 1
+        }
+    }
+    panic(mode_name + ": missing positional argument")
+    return ""
+}
+
 fn compiler_check_ok_message() -> string {
     return "check: OK"
 }
@@ -1887,6 +1909,93 @@ fn run_emit_so_mode(args: ArgList, flag_index: i64) with IO, Mut, Panic, Div, Al
     panic("emit-so: write failed")
 }
 
+fn run_ontology_resolve_mode(args: ArgList, flag_index: i64) with IO, Mut, Panic, Div, Alloc {
+    let curie = compiler_mode_positional_arg(args, flag_index, 0, "--ontology-resolve")
+    let term = ontology_resolve_curie(curie)
+    ontology_print_term(term)
+}
+
+fn run_ontology_search_mode(args: ArgList, flag_index: i64) with IO, Mut, Panic, Div, Alloc {
+    let query = compiler_mode_positional_arg(args, flag_index, 0, "--ontology-search")
+    let results = ontology_search_text(query)
+    ontology_print_search_results(results)
+}
+
+fn run_ontology_ancestors_mode(args: ArgList, flag_index: i64) with IO, Mut, Panic, Div, Alloc {
+    let curie = compiler_mode_positional_arg(args, flag_index, 0, "--ontology-ancestors")
+    let results = ontology_ancestor_terms(curie)
+    ontology_print_search_results(results)
+}
+
+fn run_ontology_is_subclass_mode(args: ArgList, flag_index: i64) with IO, Mut, Panic, Div, Alloc {
+    let child = compiler_mode_positional_arg(args, flag_index, 0, "--ontology-is-subclass")
+    let parent = compiler_mode_positional_arg(args, flag_index, 1, "--ontology-is-subclass")
+    if ontology_is_subclass_of(child, parent) {
+        println("true")
+    } else {
+        println("false")
+    }
+}
+
+fn run_ontology_map_mode(args: ArgList, flag_index: i64) with IO, Mut, Panic, Div, Alloc {
+    let source_curie = compiler_mode_positional_arg(args, flag_index, 0, "--ontology-map")
+    let target_ontology = compiler_mode_option_string(args, "", "--to", "")
+    if str_len(target_ontology) <= 0 {
+        panic("--ontology-map: missing --to <ontology>")
+    }
+    let mappings = ontology_map_to(source_curie, target_ontology)
+    ontology_print_mappings(mappings)
+}
+
+fn run_ontology_cli(args: ArgList, command_index: i64) with IO, Mut, Panic, Div, Alloc {
+    if command_index + 1 >= args.len {
+        println("ontology subcommands: resolve | search | ancestors | is-subclass | map")
+        return
+    }
+
+    let subcommand = arg_list_get(args, command_index + 1)
+    if subcommand == "resolve" {
+        let curie = compiler_mode_positional_arg(args, command_index + 1, 0, "ontology resolve")
+        let term = ontology_resolve_curie(curie)
+        ontology_print_term(term)
+        return
+    }
+    if subcommand == "search" {
+        let query = compiler_mode_positional_arg(args, command_index + 1, 0, "ontology search")
+        let results = ontology_search_text(query)
+        ontology_print_search_results(results)
+        return
+    }
+    if subcommand == "ancestors" {
+        let curie = compiler_mode_positional_arg(args, command_index + 1, 0, "ontology ancestors")
+        let results = ontology_ancestor_terms(curie)
+        ontology_print_search_results(results)
+        return
+    }
+    if subcommand == "is-subclass" {
+        let child = compiler_mode_positional_arg(args, command_index + 1, 0, "ontology is-subclass")
+        let parent = compiler_mode_positional_arg(args, command_index + 1, 1, "ontology is-subclass")
+        if ontology_is_subclass_of(child, parent) {
+            println("true")
+        } else {
+            println("false")
+        }
+        return
+    }
+    if subcommand == "map" {
+        let source_curie = compiler_mode_positional_arg(args, command_index + 1, 0, "ontology map")
+        let target_ontology = compiler_mode_option_string(args, "", "--to", "")
+        if str_len(target_ontology) <= 0 {
+            panic("ontology map: missing --to <ontology>")
+        }
+        let mappings = ontology_map_to(source_curie, target_ontology)
+        ontology_print_mappings(mappings)
+        return
+    }
+
+    println("unknown ontology subcommand: " + subcommand)
+}
+
 fn run_native_v2_preview_smoke() with IO, Mut, Panic, Div, Alloc {
     if !compiler_main_test_native_v2_compile_preview_scalar() {
         panic("native-v2 preview scalar smoke failed")
@@ -1935,6 +2044,16 @@ fn print_help() with IO {
     println("  --native-compile <source.sio>  Compile to native output (use -o/--output to choose path)")
     println("  --emit-obj <source.sio>  Emit relocatable .o object file (use -o to choose path)")
     println("  --emit-so <source.sio>   Emit ET_DYN shared library .so (use -o to choose path)")
+    println("  ontology resolve <CURIE>          Resolve ontology CURIE from the local biomedical slice")
+    println("  ontology search <text>            Search ontology labels/synonyms in the local biomedical slice")
+    println("  ontology ancestors <CURIE>        Show ancestor chain for the ontology term")
+    println("  ontology is-subclass <child> <parent>  Check subclass relationship in the ontology slice")
+    println("  ontology map <source-curie> --to <ontology>  Map a term across ontologies with confidence")
+    println("  --ontology-resolve <CURIE>        Flag alias for ontology resolve")
+    println("  --ontology-search <text>          Flag alias for ontology search")
+    println("  --ontology-ancestors <CURIE>      Flag alias for ontology ancestors")
+    println("  --ontology-is-subclass <child> <parent>  Flag alias for ontology is-subclass")
+    println("  --ontology-map <source-curie> --to <ontology>  Flag alias for ontology map")
     println("  --native-v2-preview-smoke  Run dedicated native-v2 scalar/call/control/fail-closed smoke")
     println("  --native-v2-gc-retry-smoke Run dedicated native-v2 alloc-retry smoke")
     println("  --serve                Start IPC server (binary protocol on stdin/stdout)")
@@ -24679,7 +24798,10 @@ fn main() with IO, Mut, Panic, Div, Alloc {
     var arg_idx: i64 = 0
     while arg_idx < args.len {
         let mode = arg_list_get(args, arg_idx)
-        if mode == "--check" {
+        if mode == "ontology" {
+            run_ontology_cli(args, arg_idx)
+            return
+        } else if mode == "--check" {
             run_check_mode(args, arg_idx)
             return
         } else if mode == "--ir-dump" {
@@ -24696,6 +24818,21 @@ fn main() with IO, Mut, Panic, Div, Alloc {
             return
         } else if mode == "--emit-so" {
             run_emit_so_mode(args, arg_idx)
+            return
+        } else if mode == "--ontology-resolve" {
+            run_ontology_resolve_mode(args, arg_idx)
+            return
+        } else if mode == "--ontology-search" {
+            run_ontology_search_mode(args, arg_idx)
+            return
+        } else if mode == "--ontology-ancestors" {
+            run_ontology_ancestors_mode(args, arg_idx)
+            return
+        } else if mode == "--ontology-is-subclass" {
+            run_ontology_is_subclass_mode(args, arg_idx)
+            return
+        } else if mode == "--ontology-map" {
+            run_ontology_map_mode(args, arg_idx)
             return
         } else if mode == "--serve" {
             ipc_serve()

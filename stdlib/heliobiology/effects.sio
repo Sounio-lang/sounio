@@ -1,0 +1,187 @@
+// heliobiology/effects.sio - Biological effects of space weather
+//
+// Models for heliobiological effects: geomagnetic storm impacts on
+// cardiovascular, neurological, and other biological systems.
+//
+// NOTE: These models are research-grade and based on epidemiological
+// correlations. Causation mechanisms are still under investigation.
+//
+// References:
+// - Cornelissen et al. (2002) Chronobiology International
+// - Palmer et al. (2006) International Journal of Biometeorology
+// - Vencloviene et al. (2014) BMC Public Health
+
+extern "C" {
+    fn exp(x: f64) -> f64;
+    fn sqrt(x: f64) -> f64;
+    fn log(x: f64) -> f64;
+}
+
+// Cardiovascular risk model parameters
+struct CardiovascularRiskModel {
+    baseline: f64,
+    kp_coeff: f64,
+    dst_coeff: f64,
+    lag_hours: f64
+}
+
+fn cv_model_default() -> CardiovascularRiskModel {
+    return CardiovascularRiskModel {
+        baseline: 1.0,
+        kp_coeff: 0.03,
+        dst_coeff: 0.01,
+        lag_hours: 24.0
+    }
+}
+
+// Risk result with uncertainty
+struct RiskResult {
+    value: f64,
+    uncertainty: f64
+}
+
+// Calculate relative risk for myocardial infarction
+fn cv_mi_risk(model: CardiovascularRiskModel, kp: f64, dst: f64) -> RiskResult {
+    var kp_effect = 1.0
+    if kp >= 5.0 {
+        kp_effect = 1.0 + model.kp_coeff * (kp - 4.0)
+    }
+
+    var dst_effect = 1.0
+    if dst < 0.0 - 30.0 {
+        dst_effect = 1.0 + model.dst_coeff * ((0.0 - dst - 30.0) / 10.0)
+    }
+
+    let rr = model.baseline * kp_effect * dst_effect
+    return RiskResult { value: rr, uncertainty: rr * 0.15 }
+}
+
+// Risk for stroke (similar but weaker association)
+fn cv_stroke_risk(model: CardiovascularRiskModel, kp: f64, dst: f64) -> RiskResult {
+    let mi = cv_mi_risk(model, kp, dst)
+    let val = mi.value * 0.6 + 0.4
+    return RiskResult { value: val, uncertainty: mi.uncertainty * 0.6 }
+}
+
+// HRV model
+struct HRVModel {
+    baseline_sdnn: f64,
+    reduction_per_kp: f64
+}
+
+fn hrv_model_default() -> HRVModel {
+    return HRVModel { baseline_sdnn: 140.0, reduction_per_kp: 3.0 }
+}
+
+fn hrv_estimated_sdnn(model: HRVModel, kp: f64) -> RiskResult {
+    var reduction = 0.0
+    if kp > 3.0 {
+        reduction = model.reduction_per_kp * (kp - 3.0)
+    }
+    let sdnn = model.baseline_sdnn - reduction
+    return RiskResult { value: sdnn, uncertainty: 15.0 }
+}
+
+// Migraine trigger model
+struct MigraineModel {
+    baseline_prob: f64,
+    dkp_sensitivity: f64
+}
+
+fn migraine_model_default() -> MigraineModel {
+    return MigraineModel { baseline_prob: 0.05, dkp_sensitivity: 0.02 }
+}
+
+fn migraine_trigger_prob(model: MigraineModel, kp_current: f64, kp_previous: f64) -> RiskResult {
+    let dkp = kp_current - kp_previous
+    var multiplier = 1.0
+    if dkp > 2.0 {
+        multiplier = 1.0 + model.dkp_sensitivity * dkp * 10.0
+    }
+    var prob = model.baseline_prob * multiplier
+    if prob > 0.5 { prob = 0.5 }
+    return RiskResult { value: prob, uncertainty: prob * 0.3 }
+}
+
+// Melatonin suppression during geomagnetic storm
+fn melatonin_suppression(kp: f64) -> RiskResult {
+    var suppression = 0.0
+    if kp >= 7.0 {
+        suppression = 0.15
+    } else if kp >= 5.0 {
+        suppression = 0.08
+    }
+    return RiskResult { value: suppression, uncertainty: suppression * 0.5 }
+}
+
+// Sleep quality estimate (0-100 scale)
+fn sleep_quality_estimate(kp: f64, dst: f64) -> RiskResult {
+    let baseline = 75.0
+    var kp_penalty = 0.0
+    if kp >= 5.0 { kp_penalty = (kp - 4.0) * 3.0 }
+    var dst_penalty = 0.0
+    if dst < 0.0 - 50.0 { dst_penalty = (0.0 - dst - 50.0) * 0.05 }
+    var quality = baseline - kp_penalty - dst_penalty
+    if quality < 30.0 { quality = 30.0 }
+    return RiskResult { value: quality, uncertainty: 10.0 }
+}
+
+// Aviation radiation dose rate (simplified CARI-7 approximation)
+fn aviation_baseline_dose_rate(altitude_km: f64, latitude: f64) -> f64 {
+    let pi = 3.14159265358979
+    let alt_factor = exp((altitude_km - 10.0) * 0.2)
+    // Simplified sin approximation for latitude factor
+    let lat_rad = latitude * pi / 180.0
+    // Use Taylor approx for sin: x - x^3/6
+    let s = lat_rad - lat_rad * lat_rad * lat_rad / 6.0
+    let lat_factor = 1.0 + 0.5 * s
+    let base_rate = 3.0  // ~3 uSv/h at 10km equator
+    return base_rate * alt_factor * lat_factor
+}
+
+// Dose rate during solar particle event
+fn spe_dose_rate(baseline: f64, proton_flux: f64) -> RiskResult {
+    var enhancement = 1.0
+    if proton_flux > 10.0 {
+        enhancement = 1.0 + log(proton_flux / 10.0) * 2.0
+    }
+    let rate = baseline * enhancement
+    return RiskResult { value: rate, uncertainty: rate * 0.3 }
+}
+
+// Schumann resonance parameters
+struct SchumannResonance {
+    f1: f64,
+    amplitude: f64,
+    q_factor: f64
+}
+
+fn schumann_quiet_baseline() -> SchumannResonance {
+    return SchumannResonance { f1: 7.83, amplitude: 1.0, q_factor: 5.0 }
+}
+
+fn schumann_storm_deviation(kp: f64) -> SchumannResonance {
+    var f_shift = 0.0
+    var amp_mult = 1.0
+    if kp >= 5.0 {
+        f_shift = 0.0 - 0.1 * (kp - 4.0)
+        amp_mult = 1.0 + 0.2 * (kp - 4.0)
+    }
+    return SchumannResonance {
+        f1: 7.83 + f_shift,
+        amplitude: 1.0 * amp_mult,
+        q_factor: 5.0
+    }
+}
+
+fn main() {
+    let model = cv_model_default()
+    let risk = cv_mi_risk(model, 7.0, 0.0 - 100.0)
+    println("MI risk at Kp=7, Dst=-100: ", risk.value, " +/- ", risk.uncertainty)
+
+    let sleep = sleep_quality_estimate(7.0, 0.0 - 100.0)
+    println("Sleep quality: ", sleep.value, " +/- ", sleep.uncertainty)
+
+    let dose = aviation_baseline_dose_rate(11.0, 60.0)
+    println("Aviation dose rate at 11km, 60N: ", dose, " uSv/h")
+}

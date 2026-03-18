@@ -1,476 +1,286 @@
-//! stdlib/epistemic/merkle.d
-//!
-//! Merkle Provenance: Cryptographic Audit Trails
-//!
-//! Every computation leaves a hash. Every result can be verified.
-//! The provenance DAG is tamper-evident.
-//!
-//! # Why Merkle Trees for Science?
-//!
-//! Scientific reproducibility requires:
-//! 1. Knowing exactly what data went into a result
-//! 2. Knowing exactly what transformations were applied
-//! 3. Detecting if anything was modified post-hoc
-//!
-//! Merkle trees provide cryptographic guarantees for all three.
-//!
-//! # Example
-//!
-//! ```sounio
-//! use epistemic::merkle::{MerkleNode, MerkleDAG}
-//!
-//! // Create provenance-tracked values
-//! let dag = MerkleDAG::new()
-//! let raw_data = dag.leaf("measurement", [1.0, 2.0, 3.0])
-//! let normalized = dag.transform("normalize", [raw_data], normalize_fn)
-//! let result = dag.transform("analyze", [normalized], analyze_fn)
-//!
-//! // Verify the chain
-//! assert(dag.verify(result))
-//!
-//! // Export audit trail
-//! let audit = dag.audit_trail(result)
-//! ```
-
-use core::{Option, Result};
+// stdlib/epistemic/merkle.sio
+//
+// Merkle Provenance: Cryptographic Audit Trails for Epistemic Computing
+//
+// Every computation leaves a hash. Every result can be verified.
+// The provenance DAG is tamper-evident.
+//
+// Uses fixed-size arrays (no heap). Max 256 nodes, max 8 parents per node.
 
 // ============================================================================
 // HASH TYPE
 // ============================================================================
 
-// 256-bit hash (represented as 4 u64s)
-pub struct Hash256 {
-    h0: u64,
-    h1: u64,
-    h2: u64,
-    h3: u64,
+// 256-bit hash (represented as 4 i64s for simplicity)
+struct Hash256 {
+    h0: i64,
+    h1: i64,
+    h2: i64,
+    h3: i64,
 }
 
-impl Hash256 {
-    /// Zero hash (null)
-    pub fn zero() -> Hash256 {
-        Hash256 { h0: 0, h1: 0, h2: 0, h3: 0 }
+fn hash256_zero() -> Hash256 {
+    Hash256 { h0: 0, h1: 0, h2: 0, h3: 0 }
+}
+
+fn hash256_is_zero(h: Hash256) -> bool {
+    h.h0 == 0 && h.h1 == 0 && h.h2 == 0 && h.h3 == 0
+}
+
+fn hash256_eq(a: Hash256, b: Hash256) -> bool {
+    a.h0 == b.h0 && a.h1 == b.h1 && a.h2 == b.h2 && a.h3 == b.h3
+}
+
+// Simple hash combine via XOR with shifts
+fn hash256_combine(a: Hash256, b: Hash256) -> Hash256 {
+    Hash256 {
+        h0: a.h0 ^ ((b.h1 * 31) + 17),
+        h1: a.h1 ^ ((b.h2 * 37) + 19),
+        h2: a.h2 ^ ((b.h3 * 41) + 23),
+        h3: a.h3 ^ ((b.h0 * 43) + 29),
     }
+}
 
-    /// Check if zero
-    pub fn is_zero(self: &Hash256) -> bool {
-        self.h0 == 0 && self.h1 == 0 && self.h2 == 0 && self.h3 == 0
+// Hash from an f64 value (approximate bit-level hash)
+fn hash256_from_f64(v: f64) -> Hash256 {
+    // Use multiplication to spread bits
+    let iv = (v * 1000000.0) as i64
+    Hash256 {
+        h0: iv ^ 6364136223846793005,
+        h1: (iv * 31) ^ 1442695040888963407,
+        h2: (iv * 37) ^ 3141592653589793238,
+        h3: (iv * 41) ^ 2718281828459045235,
     }
+}
 
-    /// Simple hash combination (XOR + rotation)
-    /// NOTE: This is NOT cryptographically secure - use proper SHA256 in production
-    pub fn combine(self: &Hash256, other: &Hash256) -> Hash256 {
-        Hash256 {
-            h0: self.h0 ^ rotate_left_u64(other.h1, 13),
-            h1: self.h1 ^ rotate_left_u64(other.h2, 17),
-            h2: self.h2 ^ rotate_left_u64(other.h3, 19),
-            h3: self.h3 ^ rotate_left_u64(other.h0, 23),
-        }
-    }
-
-    /// Hash from string (simplified - use proper hash in production)
-    pub fn from_string(s: &str) -> Hash256 {
-        var h0 = 0x6a09e667_u64
-        var h1 = 0xbb67ae85_u64
-        var h2 = 0x3c6ef372_u64
-        var h3 = 0xa54ff53a_u64
-
-        var i = 0
-        for byte in s.bytes() {
-            let v = byte as u64
-            let idx = i % 4
-            if idx == 0 { h0 = rotate_left_u64(wrapping_add_u64(h0, v), 5) }
-            if idx == 1 { h1 = rotate_left_u64(wrapping_add_u64(h1, v), 7) }
-            if idx == 2 { h2 = rotate_left_u64(wrapping_add_u64(h2, v), 11) }
-            if idx == 3 { h3 = rotate_left_u64(wrapping_add_u64(h3, v), 13) }
-            i = i + 1
-        }
-
-        Hash256 { h0: h0, h1: h1, h2: h2, h3: h3 }
-    }
-
-    /// Hash from f64 value
-    pub fn from_f64(v: f64) -> Hash256 {
-        let bits = f64_to_bits(v)
-        Hash256 {
-            h0: bits ^ 0x6a09e667bb67ae85_u64,
-            h1: rotate_left_u64(bits, 16) ^ 0x3c6ef372a54ff53a_u64,
-            h2: rotate_left_u64(bits, 32) ^ 0x510e527f9b05688c_u64,
-            h3: rotate_left_u64(bits, 48) ^ 0x1f83d9ab5be0cd19_u64,
-        }
-    }
-
-    /// To hex string (first 16 chars)
-    pub fn to_hex_short(self: &Hash256) -> string {
-        u64_to_hex(self.h0)
-    }
-
-    /// Equality check
-    pub fn eq(self: &Hash256, other: &Hash256) -> bool {
-        self.h0 == other.h0 && self.h1 == other.h1
-        && self.h2 == other.h2 && self.h3 == other.h3
-    }
-
-    /// Clone
-    pub fn clone(self: &Hash256) -> Hash256 {
-        Hash256 {
-            h0: self.h0,
-            h1: self.h1,
-            h2: self.h2,
-            h3: self.h3,
-        }
+// Hash from an integer tag (used for operation type hashing)
+fn hash256_from_tag(tag: i64) -> Hash256 {
+    Hash256 {
+        h0: tag ^ 6364136223846793005,
+        h1: (tag * 2654435761) ^ 1442695040888963407,
+        h2: (tag * 40503) ^ 3141592653589793238,
+        h3: (tag * 12345) ^ 2718281828459045235,
     }
 }
 
 // ============================================================================
-// MERKLE NODE
+// OPERATION TYPES (as i64 constants)
 // ============================================================================
 
-// Type of operation that produced this node
-pub enum OperationType {
-    /// Raw data input (leaf)
-    Leaf,
+fn OP_LEAF() -> i64 { 0 }
+fn OP_TRANSFORM() -> i64 { 1 }
+fn OP_AGGREGATE() -> i64 { 2 }
+fn OP_IMPORT() -> i64 { 3 }
 
-    /// Transformation of parent nodes
-    Transform { name: string },
-
-    /// Aggregation of multiple nodes
-    Aggregate { method: string },
-
-    /// External import
-    Import { source: string },
-}
-
-// Metadata for a provenance node
-pub struct NodeMetadata {
-    /// Human-readable description
-    description: string,
-
-    /// Unix timestamp of creation
-    timestamp: i64,
-
-    /// Author/system that created this
-    author: string,
-}
-
-impl NodeMetadata {
-    pub fn new(description: string) -> NodeMetadata {
-        NodeMetadata {
-            description: description,
-            timestamp: 0,
-            author: "system",
-        }
-    }
-
-    pub fn with_author(self: NodeMetadata, author: string) -> NodeMetadata {
-        NodeMetadata {
-            description: self.description,
-            timestamp: self.timestamp,
-            author: author,
-        }
-    }
-}
+// ============================================================================
+// MERKLE NODE (fixed-size, no heap)
+// ============================================================================
 
 // A node in the Merkle provenance DAG
-pub struct MerkleNode {
-    /// Hash of this node (computed from content + parents)
+// Max 8 parents per node
+struct MerkleNode {
     hash: Hash256,
-
-    /// Type of operation
-    operation: OperationType,
-
-    /// Hashes of parent nodes (empty for leaves)
-    parents: Vec<Hash256>,
-
-    /// Content hash (hash of the actual data)
     content_hash: Hash256,
-
-    /// Metadata
-    metadata: NodeMetadata,
+    operation: i64,
+    op_tag: i64,
+    parent_hashes: [Hash256; 8],
+    parent_count: i64,
+    valid: bool,
 }
 
-impl MerkleNode {
-    /// Create a leaf node (raw data)
-    pub fn leaf(content_hash: Hash256, metadata: NodeMetadata) -> MerkleNode {
-        let hash = content_hash.combine(&Hash256::from_string("leaf"))
-
-        MerkleNode {
-            hash: hash,
-            operation: OperationType::Leaf,
-            parents: Vec::new(),
-            content_hash: content_hash,
-            metadata: metadata,
-        }
-    }
-
-    /// Create a transformation node
-    pub fn transform(
-        transform_name: string,
-        parents: Vec<Hash256>,
-        content_hash: Hash256,
-        metadata: NodeMetadata,
-    ) -> MerkleNode {
-        // Hash = hash(transform_name || parent_hashes || content_hash)
-        var combined = Hash256::from_string(&transform_name)
-        for parent in &parents {
-            combined = combined.combine(parent)
-        }
-        combined = combined.combine(&content_hash)
-
-        MerkleNode {
-            hash: combined,
-            operation: OperationType::Transform { name: transform_name },
-            parents: parents,
-            content_hash: content_hash,
-            metadata: metadata,
-        }
-    }
-
-    /// Verify that hash matches content
-    pub fn verify(self: &MerkleNode) -> bool {
-        // Recompute hash and compare
-        let expected = match &self.operation {
-            OperationType::Leaf => {
-                self.content_hash.combine(&Hash256::from_string("leaf"))
-            },
-            OperationType::Transform { name } => {
-                var combined = Hash256::from_string(name)
-                for parent in &self.parents {
-                    combined = combined.combine(parent)
-                }
-                combined.combine(&self.content_hash)
-            },
-            OperationType::Aggregate { method } => {
-                var combined = Hash256::from_string(method)
-                for parent in &self.parents {
-                    combined = combined.combine(parent)
-                }
-                combined.combine(&self.content_hash)
-            },
-            OperationType::Import { source } => {
-                Hash256::from_string(source).combine(&self.content_hash)
-            },
-        }
-
-        self.hash.eq(&expected)
+fn merkle_node_empty() -> MerkleNode {
+    MerkleNode {
+        hash: hash256_zero(),
+        content_hash: hash256_zero(),
+        operation: OP_LEAF(),
+        op_tag: 0,
+        parent_hashes: [hash256_zero(); 8],
+        parent_count: 0,
+        valid: false,
     }
 }
 
-// ============================================================================
-// MERKLE DAG
-// ============================================================================
-
-// Merkle Directed Acyclic Graph for provenance tracking
-pub struct MerkleDAG {
-    /// All nodes indexed by hash
-    nodes: Vec<MerkleNode>,
-}
-
-impl MerkleDAG {
-    /// Create empty DAG
-    pub fn new() -> MerkleDAG {
-        MerkleDAG { nodes: Vec::new() }
-    }
-
-    /// Add a leaf node
-    pub fn add_leaf(
-        self: &!MerkleDAG,
-        data: f64,
-        description: string,
-    ) -> Hash256 {
-        let content_hash = Hash256::from_f64(data)
-        let metadata = NodeMetadata::new(description)
-        let node = MerkleNode::leaf(content_hash, metadata)
-        let hash = node.hash.clone()
-        self.nodes.push(node)
-        hash
-    }
-
-    /// Add a leaf from multiple values
-    pub fn add_leaf_array(
-        self: &!MerkleDAG,
-        data: &[f64],
-        description: string,
-    ) -> Hash256 {
-        // Hash all values together
-        var content_hash = Hash256::zero()
-        for v in data {
-            content_hash = content_hash.combine(&Hash256::from_f64(*v))
-        }
-
-        let metadata = NodeMetadata::new(description)
-        let node = MerkleNode::leaf(content_hash, metadata)
-        let hash = node.hash.clone()
-        self.nodes.push(node)
-        hash
-    }
-
-    /// Add a transformation node
-    pub fn add_transform(
-        self: &!MerkleDAG,
-        name: string,
-        parents: Vec<Hash256>,
-        result: f64,
-        description: string,
-    ) -> Hash256 {
-        let content_hash = Hash256::from_f64(result)
-        let metadata = NodeMetadata::new(description)
-        let node = MerkleNode::transform(name, parents, content_hash, metadata)
-        let hash = node.hash.clone()
-        self.nodes.push(node)
-        hash
-    }
-
-    /// Find node by hash
-    pub fn find(self: &MerkleDAG, hash: &Hash256) -> Option<&MerkleNode> {
-        for node in &self.nodes {
-            if node.hash.eq(hash) {
-                return Option::Some(node)
-            }
-        }
-        Option::None
-    }
-
-    /// Verify entire chain from a node back to leaves
-    pub fn verify_chain(self: &MerkleDAG, hash: &Hash256) -> bool {
-        match self.find(hash) {
-            Option::None => false,
-            Option::Some(node) => {
-                // Verify this node
-                if !node.verify() {
-                    return false
-                }
-
-                // Verify all parents recursively
-                for parent_hash in &node.parents {
-                    if !self.verify_chain(parent_hash) {
-                        return false
-                    }
-                }
-
-                true
-            }
-        }
-    }
-
-    /// Get complete audit trail from a node
-    pub fn audit_trail(self: &MerkleDAG, hash: &Hash256) -> Vec<AuditEntry> {
-        var trail = Vec::new()
-        self.collect_audit(hash, &! trail, 0)
-        trail
-    }
-
-    fn collect_audit(
-        self: &MerkleDAG,
-        hash: &Hash256,
-        trail: &!Vec<AuditEntry>,
-        depth: i64,
-    ) {
-        match self.find(hash) {
-            Option::None => {},
-            Option::Some(node) => {
-                let op_name = match &node.operation {
-                    OperationType::Leaf => "leaf",
-                    OperationType::Transform { name } => name,
-                    OperationType::Aggregate { method } => method,
-                    OperationType::Import { source } => source,
-                }
-
-                let entry = AuditEntry {
-                    hash: node.hash.to_hex_short(),
-                    operation: op_name.to_string(),
-                    description: node.metadata.description.clone(),
-                    depth: depth,
-                    verified: node.verify(),
-                }
-                trail.push(entry)
-
-                // Recurse to parents
-                for parent_hash in &node.parents {
-                    self.collect_audit(parent_hash, trail, depth + 1)
-                }
-            }
-        }
-    }
-
-    /// Get number of nodes
-    pub fn len(self: &MerkleDAG) -> i64 {
-        self.nodes.len() as i64
+// Create a leaf node from a data hash
+fn merkle_leaf(content_hash: Hash256) -> MerkleNode {
+    let leaf_tag = hash256_from_tag(OP_LEAF())
+    let h = hash256_combine(content_hash, leaf_tag)
+    MerkleNode {
+        hash: h,
+        content_hash: content_hash,
+        operation: OP_LEAF(),
+        op_tag: 0,
+        parent_hashes: [hash256_zero(); 8],
+        parent_count: 0,
+        valid: true,
     }
 }
 
-// Entry in an audit trail
-pub struct AuditEntry {
-    /// Short hash identifier
-    hash: string,
-
-    /// Operation name
-    operation: string,
-
-    /// Description
-    description: string,
-
-    /// Depth in provenance tree
-    depth: i64,
-
-    /// Verification status
-    verified: bool,
-}
-
-impl AuditEntry {
-    /// Format as string with indentation
-    pub fn to_string(self: &AuditEntry) -> string {
-        var indent = ""
-        var i = 0
-        while i < self.depth {
-            indent = indent + "  "
-            i = i + 1
-        }
-
-        let status = if self.verified { "ok" } else { "FAIL" }
-        indent + "[" + &self.hash + "] " + &self.operation + " - " + &self.description + " (" + status + ")"
-    }
-}
-
-// ============================================================================
-// HELPER FUNCTIONS
-// ============================================================================
-
-fn rotate_left_u64(x: u64, n: u64) -> u64 {
-    (x << n) | (x >> (64 - n))
-}
-
-fn wrapping_add_u64(a: u64, b: u64) -> u64 {
-    // Simple wrapping add
-    a + b
-}
-
-fn f64_to_bits(v: f64) -> u64 {
-    // Simplified bit conversion - in real impl use transmute
-    if v == 0.0 { return 0 }
-    let sign: u64 = if v < 0.0 { 1 << 63 } else { 0 }
-    let abs_v = if v < 0.0 { 0.0 - v } else { v }
-
-    // Approximate mantissa/exponent extraction
-    var exp: i64 = 1023
-    var mantissa = abs_v
-    while mantissa >= 2.0 { mantissa = mantissa / 2.0; exp = exp + 1 }
-    while mantissa < 1.0 { mantissa = mantissa * 2.0; exp = exp - 1 }
-
-    let exp_bits = (exp as u64) << 52
-    let mant_bits = ((mantissa - 1.0) * 4503599627370496.0) as u64
-
-    sign | exp_bits | mant_bits
-}
-
-fn u64_to_hex(v: u64) -> string {
-    let hex_chars = "0123456789abcdef"
-    var result = ""
+// Create a transform node from parent hashes and result hash
+// parents_arr: array of parent hashes, n_parents: how many are valid
+fn merkle_transform(
+    op_tag: i64,
+    parents_arr: [Hash256; 8],
+    n_parents: i64,
+    content_hash: Hash256
+) -> MerkleNode {
+    var combined = hash256_from_tag(op_tag)
     var i = 0
-    while i < 16 {
-        let nibble = ((v >> (60 - i * 4)) & 0xF) as usize
-        result = result + hex_chars.char_at(nibble)
+    while i < n_parents {
+        if i < 8 {
+            combined = hash256_combine(combined, parents_arr[i])
+        }
         i = i + 1
     }
-    result
+    combined = hash256_combine(combined, content_hash)
+
+    MerkleNode {
+        hash: combined,
+        content_hash: content_hash,
+        operation: OP_TRANSFORM(),
+        op_tag: op_tag,
+        parent_hashes: parents_arr,
+        parent_count: n_parents,
+        valid: true,
+    }
+}
+
+// Verify a node by recomputing its hash
+fn merkle_node_verify(node: MerkleNode) -> bool {
+    if !node.valid { return false }
+
+    if node.operation == OP_LEAF() {
+        let expected = hash256_combine(node.content_hash, hash256_from_tag(OP_LEAF()))
+        return hash256_eq(node.hash, expected)
+    }
+
+    // Transform/Aggregate/Import: recompute from op_tag + parents + content
+    var combined = hash256_from_tag(node.op_tag)
+    var i = 0
+    while i < node.parent_count {
+        if i < 8 {
+            combined = hash256_combine(combined, node.parent_hashes[i])
+        }
+        i = i + 1
+    }
+    combined = hash256_combine(combined, node.content_hash)
+    hash256_eq(node.hash, combined)
+}
+
+// ============================================================================
+// MERKLE DAG (fixed-size, max 256 nodes)
+// ============================================================================
+
+struct MerkleDAG {
+    nodes: [MerkleNode; 256],
+    count: i64,
+}
+
+fn merkle_dag_new() -> MerkleDAG {
+    MerkleDAG {
+        nodes: [merkle_node_empty(); 256],
+        count: 0,
+    }
+}
+
+// Add a leaf node for a single f64 value, return its hash
+fn merkle_dag_add_leaf(dag: &!MerkleDAG, value: f64) -> Hash256 {
+    if dag.count >= 256 { return hash256_zero() }
+    let content_hash = hash256_from_f64(value)
+    let node = merkle_leaf(content_hash)
+    let h = node.hash
+    dag.nodes[dag.count] = node
+    dag.count = dag.count + 1
+    h
+}
+
+// Add a transform node with one parent
+fn merkle_dag_add_transform_1(
+    dag: &!MerkleDAG,
+    op_tag: i64,
+    parent: Hash256,
+    result_value: f64
+) -> Hash256 {
+    if dag.count >= 256 { return hash256_zero() }
+    var parents = [hash256_zero(); 8]
+    parents[0] = parent
+    let content_hash = hash256_from_f64(result_value)
+    let node = merkle_transform(op_tag, parents, 1, content_hash)
+    let h = node.hash
+    dag.nodes[dag.count] = node
+    dag.count = dag.count + 1
+    h
+}
+
+// Add a transform node with two parents
+fn merkle_dag_add_transform_2(
+    dag: &!MerkleDAG,
+    op_tag: i64,
+    parent1: Hash256,
+    parent2: Hash256,
+    result_value: f64
+) -> Hash256 {
+    if dag.count >= 256 { return hash256_zero() }
+    var parents = [hash256_zero(); 8]
+    parents[0] = parent1
+    parents[1] = parent2
+    let content_hash = hash256_from_f64(result_value)
+    let node = merkle_transform(op_tag, parents, 2, content_hash)
+    let h = node.hash
+    dag.nodes[dag.count] = node
+    dag.count = dag.count + 1
+    h
+}
+
+// Find node index by hash, returns -1 if not found
+fn merkle_dag_find(dag: &MerkleDAG, hash: Hash256) -> i64 {
+    var i = 0
+    while i < dag.count {
+        if dag.nodes[i].valid && hash256_eq(dag.nodes[i].hash, hash) {
+            return i
+        }
+        i = i + 1
+    }
+    0 - 1
+}
+
+// Verify a single node by hash
+fn merkle_dag_verify_node(dag: &MerkleDAG, hash: Hash256) -> bool {
+    let idx = merkle_dag_find(dag, hash)
+    if idx < 0 { return false }
+    merkle_node_verify(dag.nodes[idx])
+}
+
+// Verify entire chain from a node back to leaves (iterative with stack)
+fn merkle_dag_verify_chain(dag: &MerkleDAG, hash: Hash256) -> bool {
+    // Use a fixed stack for traversal
+    var stack: [Hash256; 64] = [hash256_zero(); 64]
+    stack[0] = hash
+    var sp = 1
+
+    while sp > 0 {
+        sp = sp - 1
+        let current = stack[sp]
+
+        let idx = merkle_dag_find(dag, current)
+        if idx < 0 { return false }
+
+        let node = dag.nodes[idx]
+        if !merkle_node_verify(node) { return false }
+
+        // Push parents onto stack
+        var j = 0
+        while j < node.parent_count {
+            if j < 8 && sp < 64 {
+                stack[sp] = node.parent_hashes[j]
+                sp = sp + 1
+            }
+            j = j + 1
+        }
+    }
+    true
+}
+
+// Get the count of nodes in the DAG
+fn merkle_dag_len(dag: &MerkleDAG) -> i64 {
+    dag.count
 }

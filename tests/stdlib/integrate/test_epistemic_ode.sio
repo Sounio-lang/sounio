@@ -1,0 +1,183 @@
+//@ run-pass
+// tests/stdlib/integrate/test_epistemic_ode.sio
+// End-to-end tests for the epistemic ODE solver with GUM uncertainty propagation.
+//
+// Scenarios:
+//   1. Exponential decay with uncertain rate — uncertainty should grow over time
+//   2. Harmonic oscillator — half-period brings y1 close to -1
+//   3. Logistic growth     — approaches carrying capacity K=100
+//
+// Reference: JCGM 100:2008 (GUM) §5.1.6 (propagation through ODE)
+
+use integrate::epistemic_ode::{
+    EpistemicState,
+    epistemic_state_new,
+    epistemic_rk4_step,
+    epistemic_euler_solve,
+    epistemic_solve_decay,
+}
+
+// ============================================================================
+// Helpers
+// ============================================================================
+
+fn abs_e(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+fn check(cond: bool, label: i32) with Panic {
+    assert(cond)
+}
+
+// ============================================================================
+// Test 1: Exponential Decay — uncertainty grows
+//
+// y(0) = 100 ± 1,  k = 0.1 ± 0.01
+// Analytical: y(10) = 100 * exp(-1) ≈ 36.788
+// After 10 time units the uncertainty u(y) should exceed u(y0) = 1.0
+// because both the initial state uncertainty and the rate uncertainty
+// contribute forward through each Euler step.
+// ============================================================================
+
+fn test_decay_uncertainty_grows() with Mut, Div, Panic {
+    let sol = epistemic_solve_decay(100.0, 1.0, 0.1, 0.01, 10.0, 1000)
+
+    // Value should be near the analytical solution y(10) ≈ 36.788
+    // Euler method with 1000 steps is accurate to ~1%
+    let y_final = sol.values[0]
+    check(y_final > 34.0 && y_final < 39.0, 0)
+
+    // Uncertainty must have grown beyond the initial u(y0) = 1.0
+    let u_final = sol.uncertainties[0]
+    check(u_final > 1.0, 1)
+
+    // Sanity: active component count preserved
+    check(sol.n == 1, 2)
+}
+
+// ============================================================================
+// Test 2: Exponential Decay — Euler solver via index
+//
+// Validate that epistemic_euler_solve(idx=0) produces the same qualitative
+// behaviour as the dedicated wrapper.
+// ============================================================================
+
+fn test_euler_solve_decay() with Mut, Div, Panic {
+    var y0 = epistemic_state_new(1)
+    y0.values[0]        = 50.0
+    y0.uncertainties[0] = 0.5
+
+    let sol = epistemic_euler_solve(y0, 0.0, 10.0, 500, 0)
+
+    // y(10) ≈ 50 * exp(-1) ≈ 18.4
+    let y_final = sol.values[0]
+    check(y_final > 16.0 && y_final < 21.0, 3)
+
+    // Uncertainty should exceed initial 0.5
+    check(sol.uncertainties[0] > 0.5, 4)
+}
+
+// ============================================================================
+// Test 3: Harmonic Oscillator — half-period
+//
+// y1(0)=1 ± 0.01,  y2(0)=0 ± 0.01
+// Exact half-period T/2 = π ≈ 3.14159
+// y1(π) = -1,  y2(π) = 0
+// Euler is O(h) so we use 3000 steps; expect y1 in [-1.15, -0.85]
+// Uncertainty in both components must be non-negative.
+// ============================================================================
+
+fn test_harmonic_oscillator_half_period() with Mut, Div, Panic {
+    var y0 = epistemic_state_new(2)
+    y0.values[0]        = 1.0
+    y0.uncertainties[0] = 0.01
+    y0.values[1]        = 0.0
+    y0.uncertainties[1] = 0.01
+
+    // π ≈ 3.14159265
+    let pi = 3.14159265
+    let sol = epistemic_euler_solve(y0, 0.0, pi, 3000, 2)
+
+    // y1(π) should be near -1
+    let y1_final = sol.values[0]
+    check(y1_final > 0.0 - 1.15 && y1_final < 0.0 - 0.85, 5)
+
+    // Both uncertainties must be non-negative (propagated, not collapsed)
+    check(sol.uncertainties[0] >= 0.0, 6)
+    check(sol.uncertainties[1] >= 0.0, 7)
+
+    // Uncertainty should propagate: harmonic coupling cross-feeds uncertainties
+    // so final u should be at least as large as initial
+    check(sol.uncertainties[0] >= 0.01, 8)
+}
+
+// ============================================================================
+// Test 4: Logistic Growth — approaches carrying capacity
+//
+// y(0) = 10 ± 0.5,  r=0.5, K=100
+// At t=20 the solution should be approaching K=100 but below it.
+// ============================================================================
+
+fn test_logistic_growth() with Mut, Div, Panic {
+    var y0 = epistemic_state_new(1)
+    y0.values[0]        = 10.0
+    y0.uncertainties[0] = 0.5
+
+    let sol = epistemic_euler_solve(y0, 0.0, 20.0, 2000, 1)
+
+    // Should be well above initial value and approaching K=100
+    let y_final = sol.values[0]
+    check(y_final > 60.0 && y_final < 100.0, 9)
+
+    // Uncertainty must remain non-negative
+    check(sol.uncertainties[0] >= 0.0, 10)
+}
+
+// ============================================================================
+// Test 5: epistemic_rk4_step direct — single step correctness
+//
+// Supply explicit derivatives and verify that value and uncertainty advance.
+// ============================================================================
+
+fn test_rk4_step_direct() with Mut, Div, Panic {
+    var state = epistemic_state_new(2)
+    state.values[0]        = 1.0
+    state.uncertainties[0] = 0.1
+    state.values[1]        = 2.0
+    state.uncertainties[1] = 0.2
+
+    var dv: [f64; 16] = [0.0; 16]
+    var du: [f64; 16] = [0.0; 16]
+    dv[0] = 0.5
+    du[0] = 0.05
+    dv[1] = 1.0
+    du[1] = 0.10
+
+    let dt = 0.1
+    let next = epistemic_rk4_step(state, 0.0, dt, &dv, &du)
+
+    // y[0]: 1.0 + 0.1 * 0.5 = 1.05
+    check(abs_e(next.values[0] - 1.05) < 1.0e-12, 11)
+
+    // y[1]: 2.0 + 0.1 * 1.0 = 2.10
+    check(abs_e(next.values[1] - 2.10) < 1.0e-12, 12)
+
+    // u[0]: sqrt(0.1^2 + (0.1*0.05)^2) = sqrt(0.01 + 0.000025) > 0.1
+    check(next.uncertainties[0] > 0.1, 13)
+
+    // u[1]: sqrt(0.2^2 + (0.1*0.10)^2) > 0.2
+    check(next.uncertainties[1] > 0.2, 14)
+}
+
+// ============================================================================
+// Main
+// ============================================================================
+
+pub fn main() with Mut, Div, Panic {
+    test_decay_uncertainty_grows()
+    test_euler_solve_decay()
+    test_harmonic_oscillator_half_period()
+    test_logistic_growth()
+    test_rk4_step_direct()
+}

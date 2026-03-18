@@ -1,9 +1,13 @@
 """Jupyter magic commands for Sounio kernel."""
 
+import importlib
+import json
 import os
 import re
+import sys
 import time
 import tempfile
+from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
 
@@ -37,6 +41,9 @@ class SounioMagics:
             "%check": self.magic_check,
             "%ast": self.magic_ast,
             "%types": self.magic_types,
+            "%ontology_search": self.magic_ontology_search,
+            "%ontology_resolve": self.magic_ontology_resolve,
+            "%clinical_normalize": self.magic_clinical_normalize,
         }
 
         if magic_name not in handlers:
@@ -171,6 +178,72 @@ Features: Epistemic programming, uncertainty quantification, provenance tracking
   %sounio info    - Show kernel version and config
   %sounio stdlib  - Show stdlib path
   %sounio souc    - Show souc binary path"""
+
+    def _ontology_module(self):
+        """Import ontology helpers from sounio-py, adding the repo path when needed."""
+        try:
+            return importlib.import_module("sounio.ontology")
+        except ImportError:
+            repo_root = Path(__file__).resolve().parents[3]
+            py_pkg = repo_root / "triple-sounio-ecosystem" / "sounio-py" / "python"
+            if str(py_pkg) not in sys.path:
+                sys.path.insert(0, str(py_pkg))
+            return importlib.import_module("sounio.ontology")
+
+    def magic_ontology_search(self, line: str) -> str:
+        """Search ontology bundles by text.
+
+        Usage:
+            %ontology_search glucose
+            %ontology_search diabetes
+        """
+        query = line.strip()
+        if not query:
+            return "Usage: %ontology_search <text>"
+        ontology = self._ontology_module()
+        results = ontology.search(query)
+        if not results:
+            return f"No ontology hits for: {query}"
+        return json.dumps([item.to_dict() for item in results], indent=2)
+
+    def magic_ontology_resolve(self, line: str) -> str:
+        """Resolve a CURIE to the canonical ontology term object.
+
+        Usage:
+            %ontology_resolve SNOMED:44054006
+        """
+        curie = line.strip()
+        if not curie:
+            return "Usage: %ontology_resolve <CURIE>"
+        ontology = self._ontology_module()
+        term = ontology.resolve(curie)
+        if term is None:
+            return f"Unresolved ontology term: {curie}"
+        return json.dumps(term.to_dict(), indent=2)
+
+    def magic_clinical_normalize(self, line: str) -> str:
+        """Normalize a small clinical payload using the compiler-backed ontology bundle model.
+
+        Usage:
+            %clinical_normalize {"patient_id":"pt-1","diagnoses":["SNOMED:44054006"],"labs":["LOINC:4548-4"],"phenotypes":["HPO:0003074"]}
+            %clinical_normalize fixtures/patient.json
+        """
+        raw = line.strip()
+        if not raw:
+            return "Usage: %clinical_normalize <json-payload-or-path>"
+
+        payload: Dict[str, Any]
+        if raw.startswith("{"):
+            payload = json.loads(raw)
+        else:
+            path = Path(raw)
+            if not path.exists():
+                return f"Input not found: {raw}"
+            payload = json.loads(path.read_text())
+
+        ontology = self._ontology_module()
+        normalized = ontology.clinical_normalize(payload)
+        return json.dumps(normalized, indent=2)
 
     def magic_check(self, line: str) -> str:
         """

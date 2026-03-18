@@ -1,0 +1,274 @@
+// stdlib/special/gamma.sio — Gamma, log-gamma, and digamma functions
+//
+// Pure Sounio implementations using:
+//   - Lanczos approximation (g=7, n=9) for lgamma/gamma
+//   - Reflection formula for x < 0.5
+//   - Asymptotic expansion + recurrence for digamma
+//
+// References:
+//   Lanczos (1964) "A Precision Approximation of the Gamma Function"
+//   Numerical Recipes 3rd ed., Ch. 6.1 (Press et al. 2007)
+//   Abramowitz & Stegun (1964) §6.1, §6.3
+//   DLMF §5.9 (https://dlmf.nist.gov/5.9)
+
+// ============================================================================
+// Helper: absolute value
+// ============================================================================
+
+fn gm_abs(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+// ============================================================================
+// Helper: natural logarithm via range reduction + series
+// ln(x) = 2 * (t + t^3/3 + t^5/5 + ...) where t = (m-1)/(m+1)
+// ============================================================================
+
+fn gm_ln(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 - 1.0e300 }
+    if x == 1.0 { return 0.0 }
+    let ln2 = 0.6931471805599453
+    var m = x
+    var e = 0
+    while m >= 2.0 { m = m / 2.0; e = e + 1 }
+    while m < 0.5 { m = m * 2.0; e = e - 1 }
+    let t = (m - 1.0) / (m + 1.0)
+    let t2 = t * t
+    var sum = t
+    var term = t
+    var k = 1
+    while k < 32 {
+        term = term * t2
+        sum = sum + term / ((2 * k + 1) as f64)
+        k = k + 1
+    }
+    return 2.0 * sum + (e as f64) * ln2
+}
+
+// ============================================================================
+// Helper: exponential via Taylor series with range reduction
+// ============================================================================
+
+fn gm_exp(x: f64) -> f64 with Mut, Div, Panic {
+    if x > 709.0 { return 1.0e300 }
+    if x < 0.0 - 709.0 { return 0.0 }
+    let ln2 = 0.6931471805599453
+    var k_f = x / ln2
+    var k: i32 = 0
+    if k_f >= 0.0 { k = k_f as i32 } else { k = (k_f as i32) - 1 }
+    let r = x - (k as f64) * ln2
+    var sum = 1.0
+    var term = 1.0
+    var n = 1
+    while n < 28 {
+        term = term * r / (n as f64)
+        sum = sum + term
+        n = n + 1
+    }
+    var result = sum
+    if k >= 0 {
+        var i = 0
+        while i < k { result = result * 2.0; i = i + 1 }
+    } else {
+        var i = 0
+        while i < (0 - k) { result = result / 2.0; i = i + 1 }
+    }
+    return result
+}
+
+// ============================================================================
+// Helper: sine via range reduction + Taylor series
+// ============================================================================
+
+fn gm_sin(x: f64) -> f64 with Mut, Div, Panic {
+    let pi = 3.14159265358979323846
+    let two_pi = 6.28318530717958647692
+    var a = x
+    // Range reduce to [-pi, pi]
+    if a > two_pi || a < 0.0 - two_pi {
+        // Integer division by 2*pi
+        var q = a / two_pi
+        if q < 0.0 { q = 0.0 - q; q = (q as i32) as f64; q = 0.0 - q }
+        else { q = (q as i32) as f64 }
+        a = a - q * two_pi
+    }
+    while a > pi { a = a - two_pi }
+    while a < 0.0 - pi { a = a + two_pi }
+    let a2 = a * a
+    var sum = a
+    var term = a
+    var n = 1
+    while n < 20 {
+        term = 0.0 - term * a2 / ((2 * n) * (2 * n + 1)) as f64
+        sum = sum + term
+        n = n + 1
+    }
+    return sum
+}
+
+// ============================================================================
+// Helper: cosine via sin shift
+// ============================================================================
+
+fn gm_cos(x: f64) -> f64 with Mut, Div, Panic {
+    let half_pi = 1.5707963267948966
+    return gm_sin(x + half_pi)
+}
+
+// ============================================================================
+// Helper: square root via Newton-Raphson
+// ============================================================================
+
+fn gm_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var scaled = x
+    var scale_back = 1.0
+    while scaled < 1.0 { scaled = scaled * 4.0; scale_back = scale_back * 2.0 }
+    while scaled > 4.0 { scaled = scaled * 0.25; scale_back = scale_back * 0.5 }
+    var y = 1.5
+    var i = 0
+    while i < 15 {
+        y = 0.5 * (y + scaled / y)
+        i = i + 1
+    }
+    return y / scale_back
+}
+
+// ============================================================================
+// lgamma(x) — log of the absolute gamma function
+//
+// For x >= 0.5: Lanczos approximation with g=7, n=9 coefficients
+//   ln Γ(z) = (z-0.5)*ln(z+g-0.5) - (z+g-0.5) + ln(sqrt(2π)) + ln(Ag(z))
+//   where Ag(z) = c0 + c1/(z) + c2/(z+1) + ... + c8/(z+7)
+//   and z = x (using Numerical Recipes convention, z is shifted by 1 internally)
+//
+// For x < 0.5: reflection formula
+//   ln|Γ(x)| = ln(π/|sin(πx)|) - lgamma(1-x)
+//
+// Coefficients: Paul Godfrey's table (g=7, n=9, reproduced in Numerical Recipes §6.1)
+// ============================================================================
+
+pub fn lgamma(x: f64) -> f64 with Mut, Div, Panic {
+    let pi = 3.14159265358979323846
+    let ln_sqrt_2pi = 0.9189385332046727417803297
+    let lanczos_g = 7.0
+
+    if x < 0.5 {
+        let sin_pi_x = gm_sin(pi * x)
+        let abs_sin = gm_abs(sin_pi_x)
+        if abs_sin < 1.0e-15 {
+            // x is a non-positive integer: pole
+            return 1.0e300
+        }
+        return gm_ln(pi / abs_sin) - lgamma(1.0 - x)
+    }
+
+    // Lanczos approximation: work with z = x (Gamma(z) for z >= 0.5)
+    // Using the shifted variable w = z - 1 to sum c[k]/(w+k+1)
+    let c0 = 0.99999999999980993
+    let c1 = 676.5203681218851
+    let c2 = 0.0 - 1259.1392167224028
+    let c3 = 771.32342877765313
+    let c4 = 0.0 - 176.61502916214059
+    let c5 = 12.507343278686905
+    let c6 = 0.0 - 0.13857109526572012
+    let c7 = 9.9843695780195716e-6
+    let c8 = 1.5056327351493116e-7
+
+    // w = x - 1  (so Gamma(x) = Gamma(w+1))
+    let w = x - 1.0
+    let ag = c0
+            + c1 / (w + 1.0)
+            + c2 / (w + 2.0)
+            + c3 / (w + 3.0)
+            + c4 / (w + 4.0)
+            + c5 / (w + 5.0)
+            + c6 / (w + 6.0)
+            + c7 / (w + 7.0)
+            + c8 / (w + 8.0)
+
+    // t = w + g + 0.5 = x + g - 0.5  (g=7, so t = x + 6.5)
+    let t = w + lanczos_g + 0.5
+
+    return ln_sqrt_2pi + (w + 0.5) * gm_ln(t) - t + gm_ln(ag)
+}
+
+// ============================================================================
+// gamma(x) — Gamma function
+//
+// Returns exp(lgamma(x)) with sign correction:
+//   Gamma(x) is negative for x in (-1,0), (-3,-2), (-5,-4), ...
+//   i.e., when floor(x) is odd and x is not an integer.
+// ============================================================================
+
+pub fn gamma(x: f64) -> f64 with Mut, Div, Panic {
+    let pi = 3.14159265358979323846
+
+    // For positive x, result is always positive
+    if x > 0.5 {
+        return gm_exp(lgamma(x))
+    }
+
+    // x < 0.5: use reflection to determine sign
+    let sin_pi_x = gm_sin(pi * x)
+    let abs_sin = gm_abs(sin_pi_x)
+    if abs_sin < 1.0e-15 {
+        // x is a non-positive integer: pole → large value
+        return 1.0e300
+    }
+
+    // |Gamma(x)| = pi / (|sin(pi*x)| * Gamma(1-x))
+    let abs_result = pi / (abs_sin * gm_exp(lgamma(1.0 - x)))
+    if sin_pi_x < 0.0 { return 0.0 - abs_result }
+    return abs_result
+}
+
+// ============================================================================
+// digamma(x) — psi function ψ(x) = d/dx ln Γ(x)
+//
+// Algorithm (Abramowitz & Stegun §6.3.5, 6.3.18):
+//   1. x < 0: reflection ψ(x) = ψ(1-x) - π·cot(π·x)
+//   2. Recurrence: ψ(x) = ψ(x+1) - 1/x, shift until x >= 7
+//   3. Asymptotic: ψ(x) ≈ ln(x) - 1/(2x) - 1/(12x²) + 1/(120x⁴) - 1/(252x⁶)
+//      (Bernoulli-number series: B_2/(2x²) - B_4/(4x⁴) + B_6/(6x⁶) - ...)
+// ============================================================================
+
+pub fn digamma(x: f64) -> f64 with Mut, Div, Panic {
+    let pi = 3.14159265358979323846
+
+    if x <= 0.0 {
+        // Pole at non-positive integers
+        let sin_pi_x = gm_sin(pi * x)
+        let abs_sin = gm_abs(sin_pi_x)
+        if abs_sin < 1.0e-15 { return 1.0e300 }
+        // Reflection: ψ(1-x) - ψ(x) = π·cot(π·x)
+        // → ψ(x) = ψ(1-x) - π·cos(π·x)/sin(π·x)
+        let cos_pi_x = gm_cos(pi * x)
+        return digamma(1.0 - x) - pi * cos_pi_x / sin_pi_x
+    }
+
+    // Recurrence: shift x up to >= 7
+    var val = x
+    var shift = 0.0
+    while val < 7.0 {
+        shift = shift - 1.0 / val
+        val = val + 1.0
+    }
+
+    // Asymptotic expansion at val >= 7
+    let inv_v = 1.0 / val
+    let inv_v2 = inv_v * inv_v
+
+    // ψ(val) ≈ ln(val) - 1/(2·val) - sum_{k=1}^{N} B_{2k} / (2k · val^{2k})
+    // B_2=1/6, B_4=-1/30, B_6=1/42, B_8=-1/30, B_10=5/66
+    // Coefficients of 1/val^{2k}: 1/12, -1/120, 1/252, -1/240, 1/132, ...
+    var result = gm_ln(val) - 0.5 * inv_v
+    result = result - inv_v2 / 12.0
+    result = result + inv_v2 * inv_v2 / 120.0
+    result = result - inv_v2 * inv_v2 * inv_v2 / 252.0
+    result = result + inv_v2 * inv_v2 * inv_v2 * inv_v2 / 240.0
+    result = result - inv_v2 * inv_v2 * inv_v2 * inv_v2 * inv_v2 / 132.0
+
+    return result + shift
+}

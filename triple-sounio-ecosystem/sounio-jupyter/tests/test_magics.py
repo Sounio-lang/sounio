@@ -1,5 +1,6 @@
 """Tests for magic commands."""
 
+import json
 import sys
 import os
 import importlib.util
@@ -238,6 +239,69 @@ def test_handle_magic_time():
 
     assert handled is True
     assert "CPU time:" in result
+
+
+def test_ontology_search_magic():
+    """Test %ontology_search uses ontology API and formats JSON."""
+    mock_kernel = Mock()
+    mock_kernel.executor = Mock()
+    magics = SounioMagics(mock_kernel)
+
+    fake_term = Mock()
+    fake_term.to_dict.return_value = {"curie": "HPO:0003074", "label": "Hyperglycemia"}
+    fake_ontology = Mock()
+    fake_ontology.search.return_value = [fake_term]
+
+    with patch.object(magics, "_ontology_module", return_value=fake_ontology):
+        result = magics.magic_ontology_search("hyperglycemia")
+
+    payload = json.loads(result)
+    assert payload[0]["curie"] == "HPO:0003074"
+    fake_ontology.search.assert_called_once_with("hyperglycemia")
+
+
+def test_ontology_resolve_magic():
+    """Test %ontology_resolve renders canonical term JSON."""
+    mock_kernel = Mock()
+    mock_kernel.executor = Mock()
+    magics = SounioMagics(mock_kernel)
+
+    fake_term = Mock()
+    fake_term.to_dict.return_value = {
+        "curie": "SNOMED:44054006",
+        "label": "Type 2 diabetes mellitus",
+        "provenance": "local:snomed",
+    }
+    fake_ontology = Mock()
+    fake_ontology.resolve.return_value = fake_term
+
+    with patch.object(magics, "_ontology_module", return_value=fake_ontology):
+        result = magics.magic_ontology_resolve("SNOMED:44054006")
+
+    payload = json.loads(result)
+    assert payload["curie"] == "SNOMED:44054006"
+    assert payload["provenance"] == "local:snomed"
+
+
+def test_clinical_normalize_magic_inline_json():
+    """Test %clinical_normalize accepts inline JSON payloads."""
+    mock_kernel = Mock()
+    mock_kernel.executor = Mock()
+    magics = SounioMagics(mock_kernel)
+
+    fake_ontology = Mock()
+    fake_ontology.clinical_normalize.return_value = {
+        "patient_id": "pt-001",
+        "provenance": "clinical_normalize[test]",
+    }
+
+    line = '{"patient_id":"pt-001","diagnoses":["SNOMED:44054006"]}'
+    with patch.object(magics, "_ontology_module", return_value=fake_ontology):
+        result = magics.magic_clinical_normalize(line)
+
+    payload = json.loads(result)
+    assert payload["patient_id"] == "pt-001"
+    fake_ontology.clinical_normalize.assert_called_once()
 
 
 if __name__ == "__main__":

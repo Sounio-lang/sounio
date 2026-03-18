@@ -59,6 +59,23 @@ from .types import (  # noqa: F401
 )
 
 # ---------------------------------------------------------------------------
+# Ontology integration
+# ---------------------------------------------------------------------------
+
+from . import ontology  # noqa: F401
+from .ontology import (  # noqa: F401
+    OntologyMapping,
+    OntologyResolver,
+    ResolvedOntologyTerm,
+    ancestors,
+    clinical_normalize,
+    is_subclass,
+    map_term,
+    resolve,
+    search,
+)
+
+# ---------------------------------------------------------------------------
 # Module-level convenience functions (use a shared default executor)
 # ---------------------------------------------------------------------------
 
@@ -130,6 +147,17 @@ __all__ = [
     "SimulationResult",
     "ScreeningResult",
     "PipelineResult",
+    # Ontology
+    "ontology",
+    "ResolvedOntologyTerm",
+    "OntologyMapping",
+    "OntologyResolver",
+    "resolve",
+    "search",
+    "ancestors",
+    "is_subclass",
+    "map_term",
+    "clinical_normalize",
     # Convenience
     "get_executor",
     "reset_executor",

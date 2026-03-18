@@ -1,1 +1,154 @@
-//! multiple_testing (disabled)
+// stats::multiple_testing — P-value correction for multiple comparisons
+//
+// Bonferroni and Benjamini-Hochberg (FDR) corrections.
+// Fixed-array implementations, max 100 tests.
+//
+// References:
+// - Bonferroni (1936): correction for familywise error rate
+// - Benjamini & Hochberg (1995): "Controlling the false discovery rate"
+
+// =============================================================================
+// Bonferroni correction
+// =============================================================================
+
+// Multiply each p-value by the number of tests, cap at 1.0
+fn bonferroni(
+    p_values: [f64; 100],
+    n: i64,
+    adjusted: &![f64; 100]
+) with Mut, Div, Panic {
+    var i: i64 = 0
+    while i < n {
+        let adj = p_values[i as usize] * (n as f64)
+        adjusted[i as usize] = if adj > 1.0 { 1.0 } else { adj }
+        i = i + 1
+    }
+}
+
+// =============================================================================
+// Benjamini-Hochberg (FDR) correction
+// =============================================================================
+
+// Sort indices by p-value (selection sort, small n)
+fn sort_indices_by_pval(
+    p_values: [f64; 100],
+    n: i64,
+    indices: &![i64; 100]
+) with Mut, Div, Panic {
+    // Initialize indices
+    var i: i64 = 0
+    while i < n {
+        indices[i as usize] = i
+        i = i + 1
+    }
+    // Selection sort
+    i = 0
+    while i < n - 1 {
+        var min_idx = i
+        var j: i64 = i + 1
+        while j < n {
+            if p_values[indices[j as usize] as usize] < p_values[indices[min_idx as usize] as usize] {
+                min_idx = j
+            }
+            j = j + 1
+        }
+        if min_idx != i {
+            let tmp = indices[i as usize]
+            indices[i as usize] = indices[min_idx as usize]
+            indices[min_idx as usize] = tmp
+        }
+        i = i + 1
+    }
+}
+
+fn benjamini_hochberg(
+    p_values: [f64; 100],
+    n: i64,
+    adjusted: &![f64; 100]
+) with Mut, Div, Panic {
+    // Step 1: Sort p-values
+    var indices: [i64; 100] = [0; 100]
+    sort_indices_by_pval(p_values, n, &indices)
+
+    // Step 2: Compute adjusted p-values
+    // adjusted[rank] = p * n / rank, then enforce monotonicity from bottom up
+    var temp: [f64; 100] = [0.0; 100]
+    var i: i64 = 0
+    while i < n {
+        let rank = i + 1
+        let adj = p_values[indices[i as usize] as usize] * (n as f64) / (rank as f64)
+        temp[i as usize] = if adj > 1.0 { 1.0 } else { adj }
+        i = i + 1
+    }
+
+    // Step 3: Enforce monotonicity (cumulative min from end)
+    i = n - 2
+    while i >= 0 {
+        if temp[(i + 1) as usize] < temp[i as usize] {
+            temp[i as usize] = temp[(i + 1) as usize]
+        }
+        i = i - 1
+    }
+
+    // Step 4: Map back to original order
+    i = 0
+    while i < n {
+        adjusted[indices[i as usize] as usize] = temp[i as usize]
+        i = i + 1
+    }
+}
+
+// =============================================================================
+// Significance counting
+// =============================================================================
+
+fn count_significant(adjusted: [f64; 100], n: i64, alpha: f64) -> i64 with Mut, Div, Panic {
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < n {
+        if adjusted[i as usize] < alpha {
+            count = count + 1
+        }
+        i = i + 1
+    }
+    count
+}
+
+// =============================================================================
+// Tests
+// =============================================================================
+
+fn mt_abs(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+
+fn test_bonferroni() -> bool with Mut, Div, Panic {
+    var pvals: [f64; 100] = [0.0; 100]
+    pvals[0] = 0.01
+    pvals[1] = 0.04
+    pvals[2] = 0.03
+    pvals[3] = 0.20
+
+    var adj: [f64; 100] = [0.0; 100]
+    bonferroni(pvals, 4, &adj)
+
+    // 0.01 * 4 = 0.04, 0.04 * 4 = 0.16, 0.03 * 4 = 0.12, 0.20 * 4 = 0.80
+    let ok1 = mt_abs(adj[0] - 0.04) < 0.001
+    let ok2 = mt_abs(adj[1] - 0.16) < 0.001
+    ok1 && ok2
+}
+
+fn test_bh() -> bool with Mut, Div, Panic {
+    var pvals: [f64; 100] = [0.0; 100]
+    pvals[0] = 0.01
+    pvals[1] = 0.04
+    pvals[2] = 0.03
+    pvals[3] = 0.20
+
+    var adj: [f64; 100] = [0.0; 100]
+    benjamini_hochberg(pvals, 4, &adj)
+
+    // Smallest p (0.01) adjusted = 0.01*4/1 = 0.04
+    let ok1 = mt_abs(adj[0] - 0.04) < 0.001
+    // All adjusted p-values should be <= 1.0
+    let ok2 = adj[3] <= 1.0
+    ok1 && ok2
+}

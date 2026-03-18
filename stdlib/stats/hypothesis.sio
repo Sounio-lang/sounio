@@ -1,0 +1,346 @@
+// stdlib/stats/hypothesis.sio — Complete hypothesis testing suite
+//
+// Implements:
+//   z_test_one_sample      — one-sample z-test (known σ)
+//   z_test_two_sample      — two-sample z-test (known σx, σy)
+//   t_test_one_sample      — one-sample t-test (unknown σ)
+//   t_test_two_sample      — Welch's two-sample t-test
+//   t_test_paired          — paired t-test
+//   chi2_goodness_of_fit   — chi-squared goodness-of-fit test
+//   f_test                 — F-test for equality of variances
+//   mann_whitney_u         — Mann-Whitney U (non-parametric)
+//
+// All tests return TestResult with epistemic bridge to GUMResult.
+//
+// References:
+//   Student (1908) "The probable error of a mean"
+//   Welch (1947) "The generalization of Student's problem"
+//   Mann & Whitney (1947) "On a test of whether one of two random variables
+//     is stochastically larger than the other"
+//   Abramowitz & Stegun (1964) §26 — normal and t distributions
+//   Press et al. (2007) "Numerical Recipes" 3rd ed., §14
+
+use special::erf::{normal_cdf}
+use special::beta::{ibeta}
+use special::igamma::{chi2_cdf}
+use epistemic::gum::{GUMResult, gum_simple}
+
+// ============================================================================
+// RESULT TYPE
+// ============================================================================
+
+pub struct TestResult {
+    pub statistic: f64,     // test statistic value
+    pub p_value: f64,       // two-tailed p-value
+    pub reject: i32,        // 1 if reject H0 at alpha=0.05
+    pub df: f64,            // degrees of freedom
+    pub effect_size: f64,   // Cohen's d or equivalent
+    pub as_gum: GUMResult,  // epistemic bridge: statistic ± standard error
+}
+
+// ============================================================================
+// INTERNAL HELPERS — must precede all callers
+// ============================================================================
+
+fn ht_abs(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+// Newton-Raphson square root with range reduction into [1, 4)
+fn ht_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var scaled = x
+    var scale_back = 1.0
+    while scaled < 1.0 { scaled = scaled * 4.0; scale_back = scale_back * 2.0 }
+    while scaled > 4.0 { scaled = scaled * 0.25; scale_back = scale_back * 0.5 }
+    var y = 1.5
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    return y / scale_back
+}
+
+// Sample mean over first n elements
+fn ht_mean(data: &[f64; 256], n: i32) -> f64 with Mut, Div, Panic {
+    var sum = 0.0
+    var i = 0
+    while i < n {
+        sum = sum + data[i as usize]
+        i = i + 1
+    }
+    return sum / (n as f64)
+}
+
+// Sample variance (unbiased, divide by n-1)
+fn ht_variance(data: &[f64; 256], n: i32) -> f64 with Mut, Div, Panic {
+    let m = ht_mean(data, n)
+    var ss = 0.0
+    var i = 0
+    while i < n {
+        let d = data[i as usize] - m
+        ss = ss + d * d
+        i = i + 1
+    }
+    return ss / ((n - 1) as f64)
+}
+
+// t-distribution CDF via regularized incomplete beta:
+//   P(T <= t | df) = 1 - 0.5 * I_{df/(df+t^2)}(df/2, 1/2)
+// Two-tailed: p = I_{df/(df+t^2)}(df/2, 1/2)
+fn t_cdf(t: f64, df: f64) -> f64 with Mut, Div, Panic {
+    let t2 = t * t
+    let x = df / (df + t2)
+    return ibeta(df / 2.0, 0.5, x)
+}
+
+// F-distribution CDF via regularized incomplete beta:
+//   P(F <= f | df1, df2) = I_{df1*f/(df1*f+df2)}(df1/2, df2/2)
+fn f_cdf(f: f64, df1: f64, df2: f64) -> f64 with Mut, Div, Panic {
+    if f <= 0.0 { return 0.0 }
+    let x = df1 * f / (df1 * f + df2)
+    return ibeta(df1 / 2.0, df2 / 2.0, x)
+}
+
+// Build a TestResult from components
+fn ht_make_result(stat: f64, p: f64, df: f64, effect: f64, se: f64) -> TestResult {
+    let reject_h0 = if p < 0.05 { 1 } else { 0 }
+    let gum = gum_simple(stat, se)
+    return TestResult {
+        statistic: stat,
+        p_value: p,
+        reject: reject_h0,
+        df: df,
+        effect_size: effect,
+        as_gum: gum,
+    }
+}
+
+// ============================================================================
+// 1. ONE-SAMPLE Z-TEST
+// ============================================================================
+// z = (x̄ - μ₀) / (σ/√n)
+// p = 2 * (1 - Φ(|z|))
+// Cohen's d = (x̄ - μ₀) / σ
+
+pub fn z_test_one_sample(data: &[f64; 256], n: i32, mu0: f64, sigma: f64) -> TestResult
+    with Mut, Div, Panic
+{
+    let xbar = ht_mean(data, n)
+    let se = sigma / ht_sqrt(n as f64)
+    let z = (xbar - mu0) / se
+    let p = 2.0 * (1.0 - normal_cdf(ht_abs(z)))
+    let d = (xbar - mu0) / sigma
+    return ht_make_result(z, p, 1.0e9, d, se)
+}
+
+// ============================================================================
+// 2. TWO-SAMPLE Z-TEST
+// ============================================================================
+// z = (x̄ - ȳ) / √(σx²/nx + σy²/ny)
+
+pub fn z_test_two_sample(
+    x: &[f64; 256], nx: i32,
+    y: &[f64; 256], ny: i32,
+    sigma_x: f64, sigma_y: f64
+) -> TestResult with Mut, Div, Panic
+{
+    let xbar = ht_mean(x, nx)
+    let ybar = ht_mean(y, ny)
+    let se = ht_sqrt(sigma_x * sigma_x / (nx as f64) + sigma_y * sigma_y / (ny as f64))
+    let z = (xbar - ybar) / se
+    let p = 2.0 * (1.0 - normal_cdf(ht_abs(z)))
+    let pooled_sd = ht_sqrt((sigma_x * sigma_x + sigma_y * sigma_y) * 0.5)
+    let d = (xbar - ybar) / pooled_sd
+    return ht_make_result(z, p, 1.0e9, d, se)
+}
+
+// ============================================================================
+// 3. ONE-SAMPLE T-TEST
+// ============================================================================
+// t = (x̄ - μ₀) / (s/√n),  df = n-1
+// p via t_cdf (ibeta)
+
+pub fn t_test_one_sample(data: &[f64; 256], n: i32, mu0: f64) -> TestResult
+    with Mut, Div, Panic
+{
+    let xbar = ht_mean(data, n)
+    let s2 = ht_variance(data, n)
+    let s = ht_sqrt(s2)
+    let se = s / ht_sqrt(n as f64)
+    let df = (n - 1) as f64
+    let t = (xbar - mu0) / se
+    let p = t_cdf(ht_abs(t), df)
+    let d = (xbar - mu0) / s
+    return ht_make_result(t, p, df, d, se)
+}
+
+// ============================================================================
+// 4. TWO-SAMPLE T-TEST (WELCH'S)
+// ============================================================================
+// t = (x̄ - ȳ) / √(sx²/nx + sy²/ny)
+// Welch-Satterthwaite: df = (sx²/nx + sy²/ny)² / (sx⁴/(nx²*(nx-1)) + sy⁴/(ny²*(ny-1)))
+
+pub fn t_test_two_sample(
+    x: &[f64; 256], nx: i32,
+    y: &[f64; 256], ny: i32
+) -> TestResult with Mut, Div, Panic
+{
+    let xbar = ht_mean(x, nx)
+    let ybar = ht_mean(y, ny)
+    let s2x = ht_variance(x, nx)
+    let s2y = ht_variance(y, ny)
+    let se2x = s2x / (nx as f64)
+    let se2y = s2y / (ny as f64)
+    let se = ht_sqrt(se2x + se2y)
+    let t = (xbar - ybar) / se
+    // Welch-Satterthwaite df
+    let num = (se2x + se2y) * (se2x + se2y)
+    let denom = se2x * se2x / ((nx - 1) as f64) + se2y * se2y / ((ny - 1) as f64)
+    let df = num / denom
+    let p = t_cdf(ht_abs(t), df)
+    // Pooled SD for Cohen's d approximation
+    let sp = ht_sqrt((s2x + s2y) * 0.5)
+    let d = (xbar - ybar) / sp
+    return ht_make_result(t, p, df, d, se)
+}
+
+// ============================================================================
+// 5. PAIRED T-TEST
+// ============================================================================
+// Differences: d_i = x_i - y_i; then one-sample t on differences
+
+pub fn t_test_paired(x: &[f64; 256], y: &[f64; 256], n: i32) -> TestResult
+    with Mut, Div, Panic
+{
+    var diffs: [f64; 256] = [0.0; 256]
+    var i = 0
+    while i < n {
+        diffs[i as usize] = x[i as usize] - y[i as usize]
+        i = i + 1
+    }
+    let dbar = ht_mean(&diffs, n)
+    let s2d = ht_variance(&diffs, n)
+    let sd = ht_sqrt(s2d)
+    let se = sd / ht_sqrt(n as f64)
+    let df = (n - 1) as f64
+    let t = dbar / se
+    let p = t_cdf(ht_abs(t), df)
+    let d = dbar / sd
+    return ht_make_result(t, p, df, d, se)
+}
+
+// ============================================================================
+// 6. CHI-SQUARED GOODNESS OF FIT
+// ============================================================================
+// χ² = Σ (O_i - E_i)² / E_i,  df = n_bins - 1
+// p = 1 - chi2_cdf(χ², df)
+
+pub fn chi2_goodness_of_fit(
+    observed: &[f64; 256],
+    expected: &[f64; 256],
+    n_bins: i32
+) -> TestResult with Mut, Div, Panic
+{
+    var chi2 = 0.0
+    var i = 0
+    while i < n_bins {
+        let o = observed[i as usize]
+        let e = expected[i as usize]
+        if e > 1.0e-15 {
+            let diff = o - e
+            chi2 = chi2 + diff * diff / e
+        }
+        i = i + 1
+    }
+    let df = (n_bins - 1) as f64
+    // p-value: P(χ² > chi2 | df) = 1 - chi2_cdf(chi2, df)
+    let p = 1.0 - chi2_cdf(chi2, df)
+    // Effect size: Cramér's V not easily defined for goodness of fit;
+    // use standardised residual / sqrt(n_bins) as proxy
+    let effect = ht_sqrt(chi2 / df)
+    return ht_make_result(chi2, p, df, effect, ht_sqrt(2.0 * df))
+}
+
+// ============================================================================
+// 7. F-TEST FOR EQUAL VARIANCES
+// ============================================================================
+// F = s₁²/s₂²,  df1 = nx-1,  df2 = ny-1
+// Two-tailed p via F-distribution CDF
+
+pub fn f_test(
+    x: &[f64; 256], nx: i32,
+    y: &[f64; 256], ny: i32
+) -> TestResult with Mut, Div, Panic
+{
+    let s2x = ht_variance(x, nx)
+    let s2y = ht_variance(y, ny)
+    let df1 = (nx - 1) as f64
+    let df2 = (ny - 1) as f64
+    let f = s2x / s2y
+    // Two-tailed: p = 2 * min(P(F <= f), P(F >= f))
+    let cdf_val = f_cdf(f, df1, df2)
+    let p_lower = cdf_val
+    let p_upper = 1.0 - cdf_val
+    let p_one = if p_lower < p_upper { p_lower } else { p_upper }
+    let p = 2.0 * p_one
+    // Effect size: ratio of SDs
+    let effect = ht_sqrt(f)
+    let se_f = f * ht_sqrt(2.0 / df1 + 2.0 / df2)
+    return ht_make_result(f, p, df1, effect, se_f)
+}
+
+// ============================================================================
+// 8. MANN-WHITNEY U (NON-PARAMETRIC)
+// ============================================================================
+// U1 = nx*ny + nx*(nx+1)/2 - R1   where R1 = rank sum of x in combined sample
+// Normal approximation: z = (U - mu_U) / sigma_U
+// mu_U = nx*ny/2,  sigma_U = sqrt(nx*ny*(nx+ny+1)/12)
+
+pub fn mann_whitney_u(
+    x: &[f64; 256], nx: i32,
+    y: &[f64; 256], ny: i32
+) -> TestResult with Mut, Div, Panic
+{
+    // Count U1 directly: U1 = #{(i,j): x_i > y_j} + 0.5*#{x_i == y_j}
+    var u1 = 0.0
+    var i = 0
+    while i < nx {
+        var j = 0
+        while j < ny {
+            let xi = x[i as usize]
+            let yj = y[j as usize]
+            if xi > yj {
+                u1 = u1 + 1.0
+            } else {
+                if ht_abs(xi - yj) < 1.0e-12 {
+                    u1 = u1 + 0.5
+                }
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    let nxf = nx as f64
+    let nyf = ny as f64
+    let mu_u = nxf * nyf * 0.5
+    let sigma_u = ht_sqrt(nxf * nyf * (nxf + nyf + 1.0) / 12.0)
+    let z = (u1 - mu_u) / sigma_u
+    let p = 2.0 * (1.0 - normal_cdf(ht_abs(z)))
+    // Effect size: rank-biserial correlation r = 1 - 2*U / (nx*ny)
+    let r = 1.0 - 2.0 * u1 / (nxf * nyf)
+    let df_mw = nxf + nyf - 2.0
+    return ht_make_result(u1, p, df_mw, ht_abs(r), sigma_u)
+}

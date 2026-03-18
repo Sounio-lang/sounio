@@ -1,0 +1,188 @@
+//@ run-pass
+// E2E tests for stdlib/stats/hypothesis.sio
+//
+// Coverage:
+//   z_test_one_sample      — μ=5 (no reject), μ=0 (reject)
+//   z_test_two_sample      — equal means (no reject), shifted means (reject)
+//   t_test_one_sample      — μ=5 (no reject), μ=0 (reject)
+//   t_test_two_sample      — Welch: groups with different means (reject)
+//   t_test_paired          — before/after with shift (reject)
+//   chi2_goodness_of_fit   — uniform vs uniform (no reject), biased (reject)
+//   f_test                 — equal variances (no reject)
+//   mann_whitney_u         — groups with separation (reject)
+
+use stats::hypothesis::{
+    TestResult,
+    z_test_one_sample,
+    z_test_two_sample,
+    t_test_one_sample,
+    t_test_two_sample,
+    t_test_paired,
+    chi2_goodness_of_fit,
+    f_test,
+    mann_whitney_u
+}
+
+fn near(a: f64, b: f64, tol: f64) -> bool {
+    let d = a - b
+    let ad = if d < 0.0 { 0.0 - d } else { d }
+    return ad < tol
+}
+
+fn run_tests() -> i32 with Mut, Div, Panic {
+    var pass = 0
+    var fail = 0
+
+    // -------------------------------------------------------------------------
+    // data_a: 20 values centred on 5.0
+    // -------------------------------------------------------------------------
+    var data_a: [f64; 256] = [0.0; 256]
+    data_a[0]  = 4.8; data_a[1]  = 5.1; data_a[2]  = 4.9; data_a[3]  = 5.2
+    data_a[4]  = 4.7; data_a[5]  = 5.3; data_a[6]  = 5.0; data_a[7]  = 4.8
+    data_a[8]  = 5.1; data_a[9]  = 5.0; data_a[10] = 4.9; data_a[11] = 5.2
+    data_a[12] = 4.8; data_a[13] = 5.1; data_a[14] = 5.0; data_a[15] = 4.9
+    data_a[16] = 5.0; data_a[17] = 4.8; data_a[18] = 5.2; data_a[19] = 4.9
+    let n_a = 20
+    let sigma_a = 1.0
+
+    // data_b: 20 values also centred on 5.0 (for equal-means tests)
+    var data_b: [f64; 256] = [0.0; 256]
+    data_b[0]  = 5.1; data_b[1]  = 4.9; data_b[2]  = 5.0; data_b[3]  = 5.2
+    data_b[4]  = 4.8; data_b[5]  = 5.0; data_b[6]  = 4.9; data_b[7]  = 5.1
+    data_b[8]  = 5.0; data_b[9]  = 4.8; data_b[10] = 5.1; data_b[11] = 4.9
+    data_b[12] = 5.0; data_b[13] = 5.2; data_b[14] = 4.8; data_b[15] = 5.0
+    data_b[16] = 5.1; data_b[17] = 4.9; data_b[18] = 5.0; data_b[19] = 4.9
+    let n_b = 20
+
+    // data_c: 20 values centred on 9.0 (clearly separated from data_a)
+    var data_c: [f64; 256] = [0.0; 256]
+    data_c[0]  = 8.8; data_c[1]  = 9.1; data_c[2]  = 8.9; data_c[3]  = 9.2
+    data_c[4]  = 8.7; data_c[5]  = 9.3; data_c[6]  = 9.0; data_c[7]  = 8.8
+    data_c[8]  = 9.1; data_c[9]  = 9.0; data_c[10] = 8.9; data_c[11] = 9.2
+    data_c[12] = 8.8; data_c[13] = 9.1; data_c[14] = 9.0; data_c[15] = 8.9
+    data_c[16] = 9.0; data_c[17] = 8.8; data_c[18] = 9.2; data_c[19] = 8.9
+    let n_c = 20
+
+    // =========================================================================
+    // T1-T2: z_test_one_sample — H0: μ=5 — should NOT reject
+    // =========================================================================
+    let z1 = z_test_one_sample(&data_a, n_a, 5.0, sigma_a)
+    if z1.reject == 0 { pass = pass + 1 } else { fail = fail + 1 }
+    if z1.p_value > 0.05 { pass = pass + 1 } else { fail = fail + 1 }
+
+    // =========================================================================
+    // T3-T4: z_test_one_sample — H0: μ=0 — should reject
+    // =========================================================================
+    let z2 = z_test_one_sample(&data_a, n_a, 0.0, sigma_a)
+    if z2.reject == 1 { pass = pass + 1 } else { fail = fail + 1 }
+    if z2.p_value < 0.001 { pass = pass + 1 } else { fail = fail + 1 }
+
+    // =========================================================================
+    // T5: z_test_two_sample — equal means → NOT reject
+    // =========================================================================
+    let z3 = z_test_two_sample(&data_a, n_a, &data_b, n_b, sigma_a, sigma_a)
+    if z3.reject == 0 { pass = pass + 1 } else { fail = fail + 1 }
+
+    // =========================================================================
+    // T6-T7: z_test_two_sample — data_a(5) vs data_c(9) → reject
+    // =========================================================================
+    let z4 = z_test_two_sample(&data_a, n_a, &data_c, n_c, sigma_a, sigma_a)
+    if z4.reject == 1 { pass = pass + 1 } else { fail = fail + 1 }
+    if z4.p_value < 0.001 { pass = pass + 1 } else { fail = fail + 1 }
+
+    // =========================================================================
+    // T8-T9: t_test_one_sample — H0: μ=5 — should NOT reject; df = n-1
+    // =========================================================================
+    let t1 = t_test_one_sample(&data_a, n_a, 5.0)
+    if t1.reject == 0 { pass = pass + 1 } else { fail = fail + 1 }
+    if near(t1.df, 19.0, 0.01) { pass = pass + 1 } else { fail = fail + 1 }
+
+    // =========================================================================
+    // T10-T11: t_test_one_sample — H0: μ=0 — should reject
+    // =========================================================================
+    let t2 = t_test_one_sample(&data_a, n_a, 0.0)
+    if t2.reject == 1 { pass = pass + 1 } else { fail = fail + 1 }
+    if t2.p_value < 0.001 { pass = pass + 1 } else { fail = fail + 1 }
+
+    // =========================================================================
+    // T12-T14: t_test_two_sample (Welch) — data_a(5) vs data_c(9) → reject
+    // =========================================================================
+    let w1 = t_test_two_sample(&data_a, n_a, &data_c, n_c)
+    if w1.reject == 1 { pass = pass + 1 } else { fail = fail + 1 }
+    if w1.p_value < 0.001 { pass = pass + 1 } else { fail = fail + 1 }
+    // Welch-Satterthwaite df should be reasonable for n=20+20
+    if w1.df > 10.0 { pass = pass + 1 } else { fail = fail + 1 }
+
+    // =========================================================================
+    // T15-T17: t_test_paired — shift of 4 → reject; statistic < 0 (before < after)
+    // =========================================================================
+    var before: [f64; 256] = [0.0; 256]
+    var after: [f64; 256] = [0.0; 256]
+    var k = 0
+    while k < 20 {
+        before[k as usize] = data_a[k as usize]
+        after[k as usize]  = data_a[k as usize] + 4.0
+        k = k + 1
+    }
+    let pt1 = t_test_paired(&before, &after, 20)
+    if pt1.reject == 1 { pass = pass + 1 } else { fail = fail + 1 }
+    if pt1.p_value < 0.001 { pass = pass + 1 } else { fail = fail + 1 }
+    if pt1.statistic < 0.0 { pass = pass + 1 } else { fail = fail + 1 }
+
+    // =========================================================================
+    // T18-T19: chi2_goodness_of_fit — uniform observed = expected → NOT reject
+    // =========================================================================
+    var obs_uniform: [f64; 256] = [0.0; 256]
+    var exp_uniform: [f64; 256] = [0.0; 256]
+    var b = 0
+    while b < 5 {
+        obs_uniform[b as usize] = 20.0
+        exp_uniform[b as usize] = 20.0
+        b = b + 1
+    }
+    let chi1 = chi2_goodness_of_fit(&obs_uniform, &exp_uniform, 5)
+    if chi1.statistic < 1.0e-10 { pass = pass + 1 } else { fail = fail + 1 }
+    if chi1.reject == 0 { pass = pass + 1 } else { fail = fail + 1 }
+
+    // =========================================================================
+    // T20-T21: chi2_goodness_of_fit — biased observed → reject
+    // =========================================================================
+    var obs_biased: [f64; 256] = [0.0; 256]
+    var exp_even: [f64; 256] = [0.0; 256]
+    obs_biased[0] = 80.0; obs_biased[1] = 5.0; obs_biased[2] = 5.0
+    obs_biased[3] = 5.0;  obs_biased[4] = 5.0
+    exp_even[0] = 20.0; exp_even[1] = 20.0; exp_even[2] = 20.0
+    exp_even[3] = 20.0; exp_even[4] = 20.0
+    let chi2 = chi2_goodness_of_fit(&obs_biased, &exp_even, 5)
+    if chi2.reject == 1 { pass = pass + 1 } else { fail = fail + 1 }
+    if chi2.p_value < 0.001 { pass = pass + 1 } else { fail = fail + 1 }
+
+    // =========================================================================
+    // T22-T23: f_test — equal variance groups → NOT reject; F near 1
+    // =========================================================================
+    let ft1 = f_test(&data_a, n_a, &data_b, n_b)
+    if ft1.reject == 0 { pass = pass + 1 } else { fail = fail + 1 }
+    if near(ft1.statistic, 1.0, 5.0) { pass = pass + 1 } else { fail = fail + 1 }
+
+    // =========================================================================
+    // T24-T26: mann_whitney_u — data_a(5) vs data_c(9) → reject; U small
+    // =========================================================================
+    let mw1 = mann_whitney_u(&data_a, n_a, &data_c, n_c)
+    if mw1.reject == 1 { pass = pass + 1 } else { fail = fail + 1 }
+    if mw1.p_value < 0.001 { pass = pass + 1 } else { fail = fail + 1 }
+    if mw1.statistic < 10.0 { pass = pass + 1 } else { fail = fail + 1 }
+
+    // =========================================================================
+    // T27-T28: GUM bridge — as_gum.value == statistic; std_uncertainty > 0
+    // =========================================================================
+    let gum_z = z_test_one_sample(&data_a, n_a, 5.0, sigma_a)
+    if near(gum_z.as_gum.value, gum_z.statistic, 1.0e-10) { pass = pass + 1 } else { fail = fail + 1 }
+    if gum_z.as_gum.std_uncertainty > 0.0 { pass = pass + 1 } else { fail = fail + 1 }
+
+    if fail > 0 { return 1 }
+    return pass
+}
+
+fn main() -> i32 with Mut, Div, Panic {
+    return run_tests()
+}

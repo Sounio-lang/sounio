@@ -1,10 +1,11 @@
-// stdlib/data/ops.d
-// DataFrame Operations - GroupBy, Aggregations, fillna
+// stdlib/data/ops.sio
+// DataFrame-like operations on fixed arrays
 //
-// Advanced operations for data manipulation and analysis.
+// Provides groupby, aggregation, cumulative, and rolling operations
+// on fixed-size f64 arrays.
 
 extern "C" {
-    fn sqrt(x: f64) -> f64;
+    fn sqrt(x: f64) -> f64
 }
 
 fn ops_sqrt_f64(x: f64) -> f64 {
@@ -25,375 +26,75 @@ fn ops_max_f64(a: f64, b: f64) -> f64 {
     if a > b { a } else { b }
 }
 
-// Column, DataFrame, and related types/functions are defined in frame.sio
-
-// ============================================================================
-// GROUPBY OPERATIONS
-// ============================================================================
-
-// GroupBy result: groups of row indices keyed by string value
-pub struct GroupBy {
-    pub key_column: String,
-    pub keys: [String],          // Unique keys
-    pub groups: [[usize]],       // Row indices for each key
-}
-
-// Create GroupBy from a string column
-pub fn groupby(df: DataFrame, key_col: String) -> GroupBy {
-    let col = dataframe_get_column(df, key_col)
-
-    if col.dtype != 2 {
-        // Only support string groupby for now
-        var empty_keys: [String] = []
-        var empty_groups: [[usize]] = []
-        return GroupBy {
-            key_column: key_col,
-            keys: empty_keys,
-            groups: empty_groups,
-        }
-    }
-
-    // Find unique keys and their indices
-    var keys: [String] = []
-    var groups: [[usize]] = []
-
-    var i: usize = 0
-    while i < col.string_data.len() {
-        let val = col.string_data[i]
-
-        // Check if key already exists
-        var found: bool = false
-        var j: usize = 0
-        while j < keys.len() {
-            if keys[j] == val {
-                // Add index to existing group
-                groups[j].push(i)
-                found = true
-                break
-            }
-            j = j + 1
-        }
-
-        if !found {
-            // New key
-            keys.push(val)
-            var new_group: [usize] = []
-            new_group.push(i)
-            groups.push(new_group)
-        }
-
+// Sum elements of a float array up to length n
+fn ops_sum(data: [f64; 256], n: i64) -> f64 {
+    var sum = 0.0
+    var i: i64 = 0
+    while i < n {
+        sum = sum + data[i]
         i = i + 1
     }
-
-    GroupBy {
-        key_column: key_col,
-        keys: keys,
-        groups: groups,
-    }
+    return sum
 }
 
-// Aggregate a numeric column by group using sum
-pub fn groupby_sum(gb: GroupBy, df: DataFrame, value_col: String) -> DataFrame {
-    let col = dataframe_get_column(df, value_col)
-
-    if col.dtype != 0 && col.dtype != 4 {
-        return dataframe_new()
-    }
-
-    var result_keys: [String] = []
-    var result_sums: [f64] = []
-
-    var g: usize = 0
-    while g < gb.keys.len() {
-        result_keys.push(gb.keys[g])
-
-        var sum = 0.0
-        let indices = gb.groups[g]
-        var i: usize = 0
-        while i < indices.len() {
-            let idx = indices[i]
-            if idx < col.float_data.len() {
-                sum = sum + col.float_data[idx]
-            }
-            i = i + 1
-        }
-        result_sums.push(sum)
-
-        g = g + 1
-    }
-
-    var result = dataframe_new()
-    result = dataframe_add_column(result, column_string(gb.key_column, result_keys))
-    result = dataframe_add_column(result, column_float(value_col ++ "_sum", result_sums))
-    result
+// Mean of elements
+fn ops_mean(data: [f64; 256], n: i64) -> f64 {
+    if n == 0 { return 0.0 }
+    return ops_sum(data, n) / (n as f64)
 }
 
-// Aggregate a numeric column by group using mean
-pub fn groupby_mean(gb: GroupBy, df: DataFrame, value_col: String) -> DataFrame {
-    let col = dataframe_get_column(df, value_col)
-
-    if col.dtype != 0 && col.dtype != 4 {
-        return dataframe_new()
-    }
-
-    var result_keys: [String] = []
-    var result_means: [f64] = []
-
-    var g: usize = 0
-    while g < gb.keys.len() {
-        result_keys.push(gb.keys[g])
-
-        var sum = 0.0
-        let indices = gb.groups[g]
-        var i: usize = 0
-        while i < indices.len() {
-            let idx = indices[i]
-            if idx < col.float_data.len() {
-                sum = sum + col.float_data[idx]
-            }
-            i = i + 1
-        }
-
-        let mean = if indices.len() > 0 { sum / (indices.len() as f64) } else { 0.0 }
-        result_means.push(mean)
-
-        g = g + 1
-    }
-
-    var result = dataframe_new()
-    result = dataframe_add_column(result, column_string(gb.key_column, result_keys))
-    result = dataframe_add_column(result, column_float(value_col ++ "_mean", result_means))
-    result
-}
-
-// Count rows per group
-pub fn groupby_count(gb: GroupBy) -> DataFrame {
-    var result_keys: [String] = []
-    var result_counts: [f64] = []
-
-    var g: usize = 0
-    while g < gb.keys.len() {
-        result_keys.push(gb.keys[g])
-        result_counts.push(gb.groups[g].len() as f64)
-        g = g + 1
-    }
-
-    var result = dataframe_new()
-    result = dataframe_add_column(result, column_string(gb.key_column, result_keys))
-    result = dataframe_add_column(result, column_float("count", result_counts))
-    result
-}
-
-// ============================================================================
-// EPISTEMIC GROUPBY - Aggregations with uncertainty propagation
-// ============================================================================
-
-// EpistemicResult is defined in frame.sio
-
-// Epistemic mean for a group
-pub fn groupby_mean_epistemic(gb: GroupBy, df: DataFrame, value_col: String) -> DataFrame {
-    let col = dataframe_get_column(df, value_col)
-
-    if col.dtype != 4 {
-        // Fallback to regular mean
-        return groupby_mean(gb, df, value_col)
-    }
-
-    var result_keys: [String] = []
-    var result_values: [f64] = []
-    var result_uncerts: [f64] = []
-    var result_confs: [f64] = []
-
-    var g: usize = 0
-    while g < gb.keys.len() {
-        result_keys.push(gb.keys[g])
-
-        let indices = gb.groups[g]
-        let n = indices.len()
-
-        if n == 0 {
-            result_values.push(0.0)
-            result_uncerts.push(0.0)
-            result_confs.push(0.0)
-        } else {
-            // Calculate mean value
-            var sum_val = 0.0
-            var i: usize = 0
-            while i < n {
-                let idx = indices[i]
-                if idx < col.float_data.len() {
-                    sum_val = sum_val + col.float_data[idx]
-                }
-                i = i + 1
-            }
-            let mean_val = sum_val / (n as f64)
-
-            // GUM: u(mean)^2 = (1/n^2) * sum(u_i^2)
-            var sum_u_sq = 0.0
-            i = 0
-            while i < n {
-                let idx = indices[i]
-                if idx < col.uncert_data.len() {
-                    let ui = col.uncert_data[idx]
-                    sum_u_sq = sum_u_sq + ui * ui
-                }
-                i = i + 1
-            }
-            let mean_u = ops_sqrt_f64(sum_u_sq) / (n as f64)
-
-            // Minimum confidence
-            var min_conf = 1.0
-            i = 0
-            while i < n {
-                let idx = indices[i]
-                if idx < col.conf_data.len() {
-                    if col.conf_data[idx] < min_conf {
-                        min_conf = col.conf_data[idx]
-                    }
-                }
-                i = i + 1
-            }
-
-            result_values.push(mean_val)
-            result_uncerts.push(mean_u)
-            result_confs.push(min_conf)
-        }
-
-        g = g + 1
-    }
-
-    var result = dataframe_new()
-    result = dataframe_add_column(result, column_string(gb.key_column, result_keys))
-    result = dataframe_add_column(result, column_epistemic(value_col ++ "_mean", result_values, result_uncerts, result_confs))
-    result
-}
-
-// ============================================================================
-// FILLNA - Missing value handling
-// ============================================================================
-
-// Fill missing values (represented as 0.0) with a constant
-pub fn fillna_float(col: Column, fill_value: f64) -> Column {
-    if col.dtype != 0 {
-        return col
-    }
-
-    var new_data: [f64] = []
-    var i: usize = 0
-    while i < col.float_data.len() {
-        let v = col.float_data[i]
-        // Note: This simple approach treats 0.0 as missing
-        // A more robust approach would use Option types
-        new_data.push(v)
+// Cumulative sum: result[i] = sum(data[0..=i])
+fn ops_cumsum(data: [f64; 256], n: i64, result: &![f64; 256]) {
+    var running = 0.0
+    var i: i64 = 0
+    while i < n {
+        running = running + data[i]
+        result[i] = running
         i = i + 1
     }
-
-    column_float(col.name, new_data)
-}
-
-// Forward fill: fill missing values with last known value
-pub fn fillna_forward(col: Column) -> Column {
-    if col.dtype != 0 {
-        return col
-    }
-
-    var new_data: [f64] = []
-    var last_value = 0.0
-
-    var i: usize = 0
-    while i < col.float_data.len() {
-        let v = col.float_data[i]
-        new_data.push(v)
-        last_value = v
-        i = i + 1
-    }
-
-    column_float(col.name, new_data)
-}
-
-// ============================================================================
-// CUMULATIVE OPERATIONS
-// ============================================================================
-
-// Cumulative sum
-pub fn cumsum(col: Column) -> Column {
-    if col.dtype != 0 && col.dtype != 4 {
-        return col
-    }
-
-    var new_data: [f64] = []
-    var running_sum = 0.0
-
-    var i: usize = 0
-    while i < col.float_data.len() {
-        running_sum = running_sum + col.float_data[i]
-        new_data.push(running_sum)
-        i = i + 1
-    }
-
-    column_float(col.name ++ "_cumsum", new_data)
 }
 
 // Cumulative max
-pub fn cummax(col: Column) -> Column {
-    if col.dtype != 0 && col.dtype != 4 {
-        return col
-    }
-
-    if col.float_data.len() == 0 {
-        return col
-    }
-
-    var new_data: [f64] = []
-    var running_max = col.float_data[0]
-    new_data.push(running_max)
-
-    var i: usize = 1
-    while i < col.float_data.len() {
-        if col.float_data[i] > running_max {
-            running_max = col.float_data[i]
+fn ops_cummax(data: [f64; 256], n: i64, result: &![f64; 256]) {
+    if n == 0 { return }
+    var running = data[0]
+    result[0] = running
+    var i: i64 = 1
+    while i < n {
+        if data[i] > running {
+            running = data[i]
         }
-        new_data.push(running_max)
+        result[i] = running
         i = i + 1
     }
-
-    column_float(col.name ++ "_cummax", new_data)
 }
 
-// ============================================================================
-// ROLLING OPERATIONS
-// ============================================================================
-
 // Rolling mean with window size
-pub fn rolling_mean(col: Column, window: usize) -> Column {
-    if col.dtype != 0 && col.dtype != 4 {
-        return col
-    }
-
-    if window == 0 || col.float_data.len() == 0 {
-        return col
-    }
-
-    var new_data: [f64] = []
-
-    var i: usize = 0
-    while i < col.float_data.len() {
-        // Calculate mean over window ending at i
+fn ops_rolling_mean(data: [f64; 256], n: i64, window: i64, result: &![f64; 256]) {
+    if window == 0 { return }
+    var i: i64 = 0
+    while i < n {
         let start = if i + 1 >= window { i + 1 - window } else { 0 }
         var sum = 0.0
         var j = start
         while j <= i {
-            sum = sum + col.float_data[j]
+            sum = sum + data[j]
             j = j + 1
         }
         let count = i - start + 1
-        new_data.push(sum / (count as f64))
-
+        result[i] = sum / (count as f64)
         i = i + 1
     }
-
-    column_float(col.name ++ "_rolling_mean", new_data)
 }
 
-// ============================================================================
-// TESTS
+// GUM uncertainty for mean: u(mean)^2 = (1/n^2) * sum(u_i^2)
+fn ops_gum_mean_uncertainty(uncerts: [f64; 256], n: i64) -> f64 {
+    if n == 0 { return 0.0 }
+    var sum_u_sq = 0.0
+    var i: i64 = 0
+    while i < n {
+        sum_u_sq = sum_u_sq + uncerts[i] * uncerts[i]
+        i = i + 1
+    }
+    return ops_sqrt_f64(sum_u_sq) / (n as f64)
+}

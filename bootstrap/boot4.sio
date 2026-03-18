@@ -106,7 +106,7 @@ var ST_COUNT: i64 = 0
 var FLD_NAME_OFF: [i64; 8192] = [0; 8192]
 var FLD_NAME_LEN: [i64; 8192] = [0; 8192]
 var FLD_TYPE_SI: [i64; 8192] = [-1; 8192]       // struct type index for each field (-1 if scalar)
-var FLD_SLOT_COUNT: [i64; 8192] = [1; 8192]     // number of 8-byte slots per field (default 1)
+var FLD_SLOT_COUNT: [i64; 8192] = [0; 8192]     // number of 8-byte slots per field (set during parsing)
 var FLD_COUNT: i64 = 0
 
 var FN_PARAM_TYPE_SI: [i64; 16384] = [-1; 16384] // struct type index for each fn param
@@ -1600,11 +1600,14 @@ fn emit_load_rcx(slot: i64) with Mut, Panic {
     emit_u32(disp)
 }
 
+var PROLOGUE_PATCH_OFF: i64 = 0  // CODE offset of frame size placeholder
+
 fn emit_prologue() with Mut, Panic {
     emit(0x55)
     emit(0x48); emit(0x89); emit(0xE5)
     emit(0x48); emit(0x81); emit(0xEC)
-    emit_u32(4194304)  // 4MB frame for large structs (CodeBuffer=2MB, AstCompileCtx=250KB)
+    PROLOGUE_PATCH_OFF = CODE_LEN
+    emit_u32(0)  // placeholder — patched after function body is compiled
 }
 
 fn emit_epilogue() with Mut, Panic {
@@ -1935,8 +1938,19 @@ fn compile_node(node: i64) -> i64 with Mut, Panic, Div {
         return 0
     }
     if kind == 46 {
-        compile_node(ND_LEFT[node as usize])
-        emit(0x48); emit(0x8B); emit(0x00)
+        let deref_inner = ND_LEFT[node as usize]
+        // Propagate struct type for chained field access: (*ptr).field
+        if ND_KIND[deref_inner as usize] == 2 {
+            let d_off = ND_STR_OFF[deref_inner as usize]
+            let d_len = ND_STR_LEN[deref_inner as usize]
+            find_local(d_off, d_len)
+            let inner_si = LAST_LOCAL_SI
+            if inner_si >= 0 {
+                LAST_FIELD_TYPE_SI = inner_si
+            }
+        }
+        compile_node(deref_inner)
+        emit(0x48); emit(0x8B); emit(0x00)   // mov rax, [rax]
         return 0
     }
     // NK_ADDR: &expr — emit address of inner expression
@@ -2163,6 +2177,56 @@ fn compile_node(node: i64) -> i64 with Mut, Panic, Div {
         let callee = ND_LEFT[node as usize]
         let c_off = ND_STR_OFF[callee as usize]
         let c_len = ND_STR_LEN[callee as usize]
+
+        // Box::new(struct_lit_or_value) — bump-allocate and store
+        if c_len >= 8 && POOL[(c_off) as usize] == 66 && POOL[(c_off + 1) as usize] == 111 && POOL[(c_off + 2) as usize] == 120 && POOL[(c_off + 3) as usize] == 58 && POOL[(c_off + 4) as usize] == 58 && POOL[(c_off + 5) as usize] == 110 && POOL[(c_off + 6) as usize] == 101 && POOL[(c_off + 7) as usize] == 119 {
+            // "Box::new"
+            let arg0 = ND_EXTRA[node as usize]
+            if arg0 != -1 {
+                let a_nk = ND_KIND[arg0 as usize]
+                if a_nk == 47 {
+                    // Struct literal: compile into temp slots, then bump-alloc + copy
+                    let slit_si = ND_IVAL[arg0 as usize]
+                    var alloc_size: i64 = 8
+                    if slit_si >= 0 { alloc_size = struct_total_slots(slit_si) * 8 }
+                    let tmp_slot = NEXT_SLOT
+                    compile_struct_lit_into(arg0, tmp_slot)
+                    let fc_box = if slit_si >= 0 { struct_total_slots(slit_si) } else { 1 }
+                    var dummy_i: i64 = 0
+                    while dummy_i < fc_box { alloc_slot(); dummy_i = dummy_i + 1 }
+                    // Bump allocate: rax = HEAP_PTR; HEAP_PTR += alloc_size
+                    emit(0x48); emit(0xB9); emit_u64(0x700200)      // movabs rcx, HEAP_PTR_addr
+                    emit(0x48); emit(0x8B); emit(0x01)               // mov rax, [rcx]
+                    emit(0x48); emit(0x8D); emit(0x90); emit_u32(alloc_size) // lea rdx, [rax + alloc_size]
+                    emit(0x48); emit(0x89); emit(0x11)               // mov [rcx], rdx (update HEAP_PTR)
+                    // rax = allocated address. Copy struct from stack to heap.
+                    let ptr_save = alloc_slot()
+                    emit_store_rax(ptr_save)
+                    var ci_box: i64 = 0
+                    while ci_box < fc_box {
+                        emit_load_rax(tmp_slot + ci_box)
+                        emit(0x48); emit(0x8B); emit(0x8D); emit_u32(0 - ((ptr_save + 1) * 8)) // mov rcx, [rbp-ptr_save]
+                        emit(0x48); emit(0x89); emit(0x81); emit_u32(ci_box * 8) // mov [rcx + ci_box*8], rax
+                        ci_box = ci_box + 1
+                    }
+                    emit_load_rax(ptr_save) // return pointer
+                } else {
+                    // Non-struct: just allocate 8 bytes and store
+                    compile_node(arg0)
+                    let val_save = alloc_slot()
+                    emit_store_rax(val_save)
+                    emit(0x48); emit(0xB9); emit_u64(0x700200)
+                    emit(0x48); emit(0x8B); emit(0x01)
+                    emit(0x48); emit(0x8D); emit(0x50); emit(0x08)   // lea rdx, [rax+8]
+                    emit(0x48); emit(0x89); emit(0x11)
+                    emit_load_rcx(val_save)
+                    emit(0x48); emit(0x89); emit(0x08)               // mov [rax], rcx
+                }
+            } else {
+                emit_mov_rax_imm(0)
+            }
+            return 0
+        }
 
         if pool_match(c_off, c_len, "str_len") {
             let arg0 = ND_EXTRA[node as usize]
@@ -2880,22 +2944,25 @@ fn compile_node(node: i64) -> i64 with Mut, Panic, Div {
                 emit(0x0F); emit(0x85)
                 skip_pos = CODE_LEN; emit_u32(0)
             } else if arm_type == 2 {
+                // Some(binding): skip arm if scrutinee == 0 (None)
                 emit_load_rax(scr_slot)
-                emit(0x48); emit(0x85); emit(0xC0)
-                emit(0x0F); emit(0x85)
+                emit(0x48); emit(0x85); emit(0xC0)   // test rax, rax
+                emit(0x0F); emit(0x84)                // JE skip (skip if zero/None)
                 skip_pos = CODE_LEN; emit_u32(0)
-            } else if arm_type == 3 {
-                emit_load_rax(scr_slot)
-                emit(0x48); emit(0x85); emit(0xC0)
-                emit(0x0F); emit(0x84)
-                skip_pos = CODE_LEN; emit_u32(0)
-                let boff = ND_STR_OFF[arm as usize]
-                let blen = ND_STR_LEN[arm as usize]
-                if blen > 0 {
+                // Extract Some binding: scrutinee IS the Box pointer
+                let boff2 = ND_STR_OFF[arm as usize]
+                let blen2 = ND_STR_LEN[arm as usize]
+                if blen2 > 0 {
                     emit_load_rax(scr_slot)
-                    let bslot = add_local(boff, blen)
-                    emit_store_rax(bslot)
+                    let bslot2 = add_local(boff2, blen2)
+                    emit_store_rax(bslot2)
                 }
+            } else if arm_type == 3 {
+                // None: skip arm if scrutinee != 0 (Some)
+                emit_load_rax(scr_slot)
+                emit(0x48); emit(0x85); emit(0xC0)   // test rax, rax
+                emit(0x0F); emit(0x85)                // JNE skip (skip if non-zero/Some)
+                skip_pos = CODE_LEN; emit_u32(0)
             }
             compile_node(body)
             emit(0xE9)
@@ -3124,6 +3191,14 @@ fn compile_fn(fn_idx: i64) with Mut, Panic, Div {
     compile_node(body)
     CURRENT_FN_RET_SI = -1
     emit_epilogue()
+    // Patch prologue frame size: NEXT_SLOT * 8, rounded up to 16-byte alignment
+    let frame_bytes = ((NEXT_SLOT + 1) / 2) * 16
+    let frame_min = if frame_bytes < 256 { 256 } else { frame_bytes }
+    let pp = PROLOGUE_PATCH_OFF
+    CODE[pp as usize] = (frame_min & 0xFF) as i8
+    CODE[(pp + 1) as usize] = ((frame_min >> 8) & 0xFF) as i8
+    CODE[(pp + 2) as usize] = ((frame_min >> 16) & 0xFF) as i8
+    CODE[(pp + 3) as usize] = ((frame_min >> 24) & 0xFF) as i8
 }
 
 // ============================================================================
@@ -3204,12 +3279,28 @@ fn write_elf(entry_fn: i64) with Mut, Panic, Div {
     }
 
     let main_off = FN_CODE_OFF[entry_fn as usize]
-    let trampoline_size: i64 = 30
+    // Trampoline: save rsp, mmap heap, store HEAP_PTR, call main, exit
+    // save rsp to [0x700000]
+    elf_emit(0x48); elf_emit(0xBA); elf_emit_u64(0x700000)    // movabs rdx, 0x700000
+    elf_emit(0x48); elf_emit(0x89); elf_emit(0x22)            // mov [rdx], rsp
+    // mmap(NULL, 16MB, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0)
+    elf_emit(0x48); elf_emit(0x31); elf_emit(0xFF)            // xor rdi, rdi
+    elf_emit(0x48); elf_emit(0xBE); elf_emit_u64(16777216)    // movabs rsi, 16MB
+    elf_emit(0xBA); elf_emit_u32(3)                            // mov edx, 3
+    elf_emit(0x49); elf_emit(0xC7); elf_emit(0xC2); elf_emit_u32(0x22) // mov r10d, 0x22
+    elf_emit(0x49); elf_emit(0xC7); elf_emit(0xC0); elf_emit_u32(0xFFFFFFFF) // mov r8d, -1
+    elf_emit(0x4D); elf_emit(0x31); elf_emit(0xC9)            // xor r9, r9
+    elf_emit(0xB8); elf_emit_u32(9)                            // mov eax, SYS_mmap
+    elf_emit(0x0F); elf_emit(0x05)                             // syscall
+    // store result in HEAP_PTR at BSS offset 512 (0x700000 + 512 = 0x700200)
+    elf_emit(0x48); elf_emit(0xB9); elf_emit_u64(0x700200)    // movabs rcx, 0x700200
+    elf_emit(0x48); elf_emit(0x89); elf_emit(0x01)            // mov [rcx], rax
+    // call main
+    let trampoline_pre = 13 + 13 + 5 + 7 + 7 + 3 + 5 + 2 + 10 + 3  // bytes before call
+    let trampoline_size = trampoline_pre + 5 + 3 + 7 + 2
     let code_start = trampoline_size
     let main_abs = code_start + main_off
-    let actual_call_rel = main_abs - 18
-    elf_emit(0x48); elf_emit(0xBA); elf_emit_u64(0x700000)
-    elf_emit(0x48); elf_emit(0x89); elf_emit(0x22)
+    let actual_call_rel = main_abs - (trampoline_pre + 5)
     elf_emit(0xE8); elf_emit_u32(actual_call_rel)
     elf_emit(0x48); elf_emit(0x89); elf_emit(0xC7)
     elf_emit(0x48); elf_emit(0xC7); elf_emit(0xC0)
@@ -3310,8 +3401,9 @@ fn main() -> i64 with IO, Mut, Panic, Div {
 
     // Reserve 512 bytes (64 × 8) at BSS offset 0 as the SRET scratch buffer.
     // Target program struct-returning functions write fields to 0x700000 + 0..511.
-    // User globals start at BSS offset 512.
-    MB_BSS_TOTAL = 512
+    // HEAP_PTR at BSS offset 512, HEAP_END at 520.
+    // User globals start at BSS offset 528.
+    MB_BSS_TOTAL = 528
 
     mb_collect_globals()
     mb_resolve_src_globals()

@@ -1,1 +1,256 @@
-//! sedenion_pbpk (disabled)
+// medical/sedenion_pbpk.sio - 16-Compartment PBPK Modeling
+//
+// Physiologically-based pharmacokinetic (PBPK) modeling for a 16-compartment
+// mammalian body. Drug amounts in each compartment encoded as a 16-element array.
+//
+// Compartment Mapping:
+//   0  = Plasma (central)     8  = Skin
+//   1  = Heart                9  = Bone
+//   2  = Lung                 10 = Gut (GI tract)
+//   3  = Brain                11 = Spleen
+//   4  = Liver                12 = Pancreas
+//   5  = Kidney               13 = Thyroid
+//   6  = Muscle               14 = Adrenal
+//   7  = Fat (adipose)        15 = Gonads
+
+extern "C" {
+    fn sqrt(x: f64) -> f64;
+}
+
+// Compartment index constants
+fn PLASMA() -> i32 { 0 }
+fn HEART() -> i32 { 1 }
+fn LUNG() -> i32 { 2 }
+fn BRAIN() -> i32 { 3 }
+fn LIVER() -> i32 { 4 }
+fn KIDNEY() -> i32 { 5 }
+fn MUSCLE() -> i32 { 6 }
+fn FAT() -> i32 { 7 }
+fn SKIN() -> i32 { 8 }
+fn BONE() -> i32 { 9 }
+fn GUT() -> i32 { 10 }
+fn SPLEEN() -> i32 { 11 }
+fn PANCREAS() -> i32 { 12 }
+fn THYROID() -> i32 { 13 }
+fn ADRENAL() -> i32 { 14 }
+fn GONADS() -> i32 { 15 }
+
+// Physiological parameters
+struct PhysParams {
+    volumes: [f64; 16],
+    flow_fractions: [f64; 16],
+    partition_coeffs: [f64; 16],
+    cardiac_output: f64,
+    liver_cl_int: f64,
+    kidney_cl_int: f64,
+    fu: f64
+}
+
+// PBPK state
+struct PBPKState16 {
+    amounts: [f64; 16],
+    time: f64
+}
+
+// Create default human physiological parameters (70 kg adult male)
+fn default_human_params() -> PhysParams {
+    var vols: [f64; 16] = [0.0; 16]
+    vols[0] = 3.0
+    vols[1] = 0.31
+    vols[2] = 0.5
+    vols[3] = 1.45
+    vols[4] = 1.8
+    vols[5] = 0.31
+    vols[6] = 29.0
+    vols[7] = 18.2
+    vols[8] = 3.3
+    vols[9] = 10.5
+    vols[10] = 1.65
+    vols[11] = 0.18
+    vols[12] = 0.14
+    vols[13] = 0.02
+    vols[14] = 0.014
+    vols[15] = 0.035
+
+    var flows: [f64; 16] = [0.0; 16]
+    flows[0] = 0.0
+    flows[1] = 0.04
+    flows[2] = 1.0
+    flows[3] = 0.12
+    flows[4] = 0.255
+    flows[5] = 0.19
+    flows[6] = 0.17
+    flows[7] = 0.052
+    flows[8] = 0.05
+    flows[9] = 0.05
+    flows[10] = 0.15
+    flows[11] = 0.03
+    flows[12] = 0.01
+    flows[13] = 0.016
+    flows[14] = 0.003
+    flows[15] = 0.0005
+
+    var kps: [f64; 16] = [0.0; 16]
+    kps[0] = 1.0
+    kps[1] = 1.2
+    kps[2] = 0.8
+    kps[3] = 2.0
+    kps[4] = 3.5
+    kps[5] = 2.1
+    kps[6] = 0.6
+    kps[7] = 15.0
+    kps[8] = 1.1
+    kps[9] = 0.4
+    kps[10] = 2.5
+    kps[11] = 1.8
+    kps[12] = 2.2
+    kps[13] = 1.5
+    kps[14] = 1.9
+    kps[15] = 2.0
+
+    return PhysParams {
+        volumes: vols,
+        flow_fractions: flows,
+        partition_coeffs: kps,
+        cardiac_output: 348.0,
+        liver_cl_int: 15.0,
+        kidney_cl_int: 8.0,
+        fu: 0.1
+    }
+}
+
+// Create initial state with IV bolus dose to plasma
+fn initial_state_iv_bolus(dose_mg: f64) -> PBPKState16 {
+    var amounts: [f64; 16] = [0.0; 16]
+    amounts[0] = dose_mg
+    return PBPKState16 { amounts: amounts, time: 0.0 }
+}
+
+// Get concentration in compartment (mg/L)
+fn get_concentration(state: PBPKState16, params: PhysParams, comp: i32) -> f64 {
+    let vol = params.volumes[comp as usize]
+    if vol > 0.0 {
+        return state.amounts[comp as usize] / vol
+    }
+    return 0.0
+}
+
+// Get venous concentration (normalized by partition coefficient)
+fn get_venous_conc(state: PBPKState16, params: PhysParams, comp: i32) -> f64 {
+    let conc = get_concentration(state, params, comp)
+    let kp = params.partition_coeffs[comp as usize]
+    if kp > 0.0 {
+        return conc / kp
+    }
+    return conc
+}
+
+// Compute derivative dA/dt for all compartments
+fn compute_derivative(state: PBPKState16, params: PhysParams, dose_rate: f64) -> [f64; 16] {
+    let q_card = params.cardiac_output
+    let c_arterial = get_concentration(state, params, 0)
+    var dadt: [f64; 16] = [0.0; 16]
+
+    // Sum venous returns from tissues
+    var venous_return = 0.0
+    var i: i32 = 1
+    while i < 16 {
+        let q_i = q_card * params.flow_fractions[i as usize]
+        let c_ven_i = get_venous_conc(state, params, i)
+        venous_return = venous_return + q_i * c_ven_i
+        i = i + 1
+    }
+
+    // Plasma derivative
+    dadt[0] = dose_rate + venous_return - q_card * c_arterial
+
+    // Tissue compartments
+    i = 1
+    while i < 16 {
+        let q_i = q_card * params.flow_fractions[i as usize]
+        let c_ven_i = get_venous_conc(state, params, i)
+        var rate = q_i * (c_arterial - c_ven_i)
+
+        // Hepatic clearance
+        if i == LIVER() {
+            let cl_hep = params.liver_cl_int * params.fu
+            rate = rate - cl_hep * c_ven_i
+        }
+
+        // Renal clearance
+        if i == KIDNEY() {
+            let cl_ren = params.kidney_cl_int * params.fu
+            rate = rate - cl_ren * c_ven_i
+        }
+
+        dadt[i as usize] = rate
+        i = i + 1
+    }
+
+    return dadt
+}
+
+// Forward Euler step
+fn pbpk_step(state: PBPKState16, params: PhysParams, dt: f64, dose_rate: f64) -> PBPKState16 {
+    let dadt = compute_derivative(state, params, dose_rate)
+    var new_amounts: [f64; 16] = [0.0; 16]
+
+    var i: i32 = 0
+    while i < 16 {
+        var amt = state.amounts[i as usize] + dt * dadt[i as usize]
+        if amt < 0.0 { amt = 0.0 }
+        new_amounts[i as usize] = amt
+        i = i + 1
+    }
+
+    return PBPKState16 { amounts: new_amounts, time: state.time + dt }
+}
+
+// Calculate volume of distribution at steady state
+fn calculate_vss(params: PhysParams) -> f64 {
+    var vss = 0.0
+    var i: i32 = 0
+    while i < 16 {
+        vss = vss + params.volumes[i as usize] * params.partition_coeffs[i as usize]
+        i = i + 1
+    }
+    return vss
+}
+
+// Calculate terminal half-life from clearance and Vss
+fn calculate_half_life(clearance: f64, vss: f64) -> f64 {
+    if clearance > 0.0 {
+        return 0.693 * vss / clearance
+    }
+    return 0.0
+}
+
+// Export concentrations to array
+fn export_concentrations(state: PBPKState16, params: PhysParams) -> [f64; 16] {
+    var concs: [f64; 16] = [0.0; 16]
+    var i: i32 = 0
+    while i < 16 {
+        concs[i as usize] = get_concentration(state, params, i)
+        i = i + 1
+    }
+    return concs
+}
+
+fn main() {
+    let params = default_human_params()
+    var state = initial_state_iv_bolus(100.0)
+    let dt = 0.01
+
+    // Simulate 1 hour
+    var step: i32 = 0
+    while step < 100 {
+        state = pbpk_step(state, params, dt, 0.0)
+        step = step + 1
+    }
+
+    let plasma_conc = get_concentration(state, params, 0)
+    println("After 1h, plasma conc: ", plasma_conc, " mg/L")
+
+    let vss = calculate_vss(params)
+    println("Vss: ", vss, " L")
+}

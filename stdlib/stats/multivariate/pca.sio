@@ -40,6 +40,11 @@ fn pca_sqrt(x: f64) -> f64 with Mut, Div, Panic {
 
 fn pca_max(a: f64, b: f64) -> f64 { if a > b { a } else { b } }
 
+struct EigenResult {
+    eigenvalue: f64,
+    eigenvector: [f64; 10]
+}
+
 // =============================================================================
 // Types
 // =============================================================================
@@ -67,10 +72,10 @@ struct PCADiagnostics {
 }
 
 struct PCAProvenance {
-    method: String,
+    method_id: i64,
     n_obs: i64,
     n_vars: i64,
-    standardized: bool,
+    standardized: i64,
     diagnostics: PCADiagnostics
 }
 
@@ -90,7 +95,7 @@ fn col_means(
     data: [[f64; 10]; 100],
     n: i64,
     p: i64
-) -> [f64; 10] with Mut, Div {
+) -> [f64; 10] with Mut, Div, Panic {
     var means: [f64; 10] = [0.0; 10]
     var j: i64 = 0
     while j < p {
@@ -112,7 +117,7 @@ fn center_data(
     means: [f64; 10],
     n: i64,
     p: i64
-) with Mut {
+) with Mut, Div, Panic {
     var i: i64 = 0
     while i < n {
         var j: i64 = 0
@@ -165,7 +170,7 @@ fn covariance_matrix(
     data: [[f64; 10]; 100],
     n: i64,
     p: i64
-) -> [[f64; 10]; 10] with Mut, Div {
+) -> [[f64; 10]; 10] with Mut, Div, Panic {
     var cov: [[f64; 10]; 10] = [[0.0; 10]; 10]
 
     var j1: i64 = 0
@@ -198,7 +203,7 @@ fn power_iteration(
     mat: [[f64; 10]; 10],
     p: i64,
     max_iter: i64
-) -> (f64, [f64; 10]) with Mut, Div, Panic {
+) -> EigenResult with Mut, Div, Panic {
     // Initial vector
     var v: [f64; 10] = [0.0; 10]
     var j: i64 = 0
@@ -246,7 +251,7 @@ fn power_iteration(
         iter = iter + 1
     }
 
-    (eigenvalue, v)
+    EigenResult { eigenvalue: eigenvalue, eigenvector: v }
 }
 
 // Deflate matrix: A' = A - λ·v·v'
@@ -255,7 +260,7 @@ fn deflate_matrix(
     eigenvalue: f64,
     eigenvector: [f64; 10],
     p: i64
-) with Mut {
+) with Mut, Div, Panic {
     var i: i64 = 0
     while i < p {
         var j: i64 = 0
@@ -272,7 +277,7 @@ fn deflate_matrix(
 // Broken-Stick Model (for optimal component selection)
 // =============================================================================
 
-fn broken_stick_expected(k: i64, p: i64) -> f64 with Mut, Div {
+fn broken_stick_expected(k: i64, p: i64) -> f64 with Mut, Div, Panic {
     // Expected proportion for k-th component under broken-stick:
     // b_k = (1/p) * Σ_{j=k}^{p} 1/j
     var sum = 0.0
@@ -292,12 +297,12 @@ fn fit_pca(
     data: [[f64; 10]; 100],
     n: i64,
     p: i64,
-    standardize: bool
+    standardize: i64
 ) -> PCAResult with Mut, Div, Panic {
     // Step 1: Center (and optionally standardize)
     var work_data: [[f64; 10]; 100] = data
 
-    if standardize {
+    if standardize != 0 {
         standardize_data(&work_data, n, p)
     } else {
         let means = col_means(work_data, n, p)
@@ -324,7 +329,9 @@ fn fit_pca(
     var cum = 0.0
     var k: i64 = 0
     while k < p {
-        let (ev, evec) = power_iteration(cov, p, 100)
+        let eig = power_iteration(cov, p, 100)
+        let ev = eig.eigenvalue
+        let evec = eig.eigenvector
         eigenvalues[k as usize] = ev
 
         // Store loadings
@@ -416,7 +423,7 @@ fn fit_pca_epistemic(
     data: [[f64; 10]; 100],
     n: i64,
     p: i64,
-    standardize: bool
+    standardize: i64
 ) -> KnowledgePCA with Mut, Div, Panic {
     let result = fit_pca(data, n, p, standardize)
 
@@ -460,7 +467,7 @@ fn fit_pca_epistemic(
     }
 
     let prov = PCAProvenance {
-        method: "PowerIteration_SVD",
+        method_id: 1,
         n_obs: n,
         n_vars: p,
         standardized: standardize,
@@ -494,7 +501,7 @@ fn test_pca_basic() -> bool with Mut, Div, Panic {
     data[3][0] = 4.0; data[3][1] = 7.0
     data[4][0] = 5.0; data[4][1] = 8.0
 
-    let result = fit_pca_epistemic(data, 5, 2, true)
+    let result = fit_pca_epistemic(data, 5, 2, 1)
 
     // First component should explain most variance (highly correlated)
     let pc1_ok = result.value.variance_explained[0] > 0.80

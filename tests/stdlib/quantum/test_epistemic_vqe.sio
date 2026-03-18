@@ -1,0 +1,106 @@
+//@ run-pass
+// Tests for stdlib/quantum/epistemic_vqe — VQE with epistemic uncertainty
+//
+// Coverage:
+//   T1  |0⟩ state: ⟨Z⟩ = 1.0
+//   T2  Hadamard |0⟩ → |+⟩: ⟨Z⟩ ≈ 0.0
+//   T3  Ry(π)|0⟩ = |1⟩: ⟨Z⟩ ≈ -1.0
+//   T4  CNOT|10⟩ = |11⟩: amplitude check
+//   T5  H₂ VQE: energy < -1.0 Ha
+//   T6  Epistemic VQE: energy_unc > 0 when gate_unc > 0
+//   T7  Gate uncertainty propagation: larger gate_unc → larger energy_unc
+
+use quantum::epistemic_vqe::{
+    sv_zero,
+    sv_apply_ry,
+    sv_apply_h,
+    sv_apply_cx,
+    sv_measure_z,
+    expectation_pauli_z,
+    expectation_zz,
+    h2_hamiltonian,
+    vqe_ansatz,
+    vqe_cost,
+    vqe_optimize,
+    vqe_epistemic,
+    esv_zero,
+    esv_apply_ry,
+    Statevector,
+    EpistemicStatevector,
+    VQEResult,
+}
+
+// =============================================================================
+// Local helpers
+// =============================================================================
+
+fn near(a: f64, b: f64, tol: f64) -> bool {
+    let d = a - b
+    let ad = if d < 0.0 { 0.0 - d } else { d }
+    return ad < tol
+}
+
+fn check(name: string, ok: bool) -> i32 with IO {
+    if ok {
+        print(name)
+        print(": PASS\n")
+        return 0
+    }
+    print(name)
+    print(": FAIL\n")
+    return 1
+}
+
+// =============================================================================
+// Tests
+// =============================================================================
+
+fn main() -> i32 with Mut, Div, Panic, IO {
+    var fail = 0
+
+    // T1: |0⟩ state — ⟨Z⟩ = 1.0 (qubit in |0⟩ has Z eigenvalue +1)
+    let sv0 = sv_zero(2)
+    let z0 = sv_measure_z(&sv0, 0)
+    fail = fail + check("T1_z0_state", near(z0, 1.0, 0.0001))
+
+    // T2: Hadamard |0⟩ → |+⟩ = (|0⟩+|1⟩)/√2, ⟨Z⟩ = 0
+    let svh = sv_apply_h(sv_zero(2), 0)
+    let zh = sv_measure_z(&svh, 0)
+    fail = fail + check("T2_hadamard_z", near(zh, 0.0, 0.001))
+
+    // T3: Ry(π)|0⟩ = |1⟩, ⟨Z⟩ = -1
+    let pi = 3.141592653589793
+    let sv1 = sv_apply_ry(sv_zero(2), 0, pi)
+    let z1 = sv_measure_z(&sv1, 0)
+    fail = fail + check("T3_ry_pi_z", near(z1, 0.0 - 1.0, 0.001))
+
+    // T4: CNOT|10⟩ = |11⟩
+    // Prepare |10⟩: apply Ry(π) to qubit 0 (LSB qubit), qubit 1 stays |0⟩
+    // Wait — index 0 = qubit 0 (LSB). |10⟩ means qubit 1 = 1, qubit 0 = 0.
+    // So apply Ry(π) to qubit 1 to get |10⟩.
+    let sv10 = sv_apply_ry(sv_zero(2), 1, pi)
+    // CNOT with control=qubit 1, target=qubit 0 should flip qubit 0
+    let sv11 = sv_apply_cx(sv10, 1, 0)
+    // In |11⟩, both qubits are 1. Index = 3 (binary 11). |α_3|² ≈ 1.
+    let prob11 = sv11.re[3] * sv11.re[3] + sv11.im[3] * sv11.im[3]
+    fail = fail + check("T4_cnot_state", near(prob11, 1.0, 0.001))
+
+    // T5: H₂ VQE — energy should approach -1.137 Ha, at minimum < -1.0 Ha
+    let vqe_result = vqe_optimize(200, 0.1)
+    fail = fail + check("T5_vqe_energy_bound", vqe_result.energy < 0.0 - 1.0)
+
+    // T6: Epistemic VQE — with gate_unc > 0, energy_unc > 0
+    let epist_result = vqe_epistemic(100, 0.05)
+    fail = fail + check("T6_epistemic_unc_positive", epist_result.energy_unc > 0.0)
+
+    // T7: Larger gate_unc → larger energy_unc
+    let epist_small = vqe_epistemic(50, 0.01)
+    let epist_large = vqe_epistemic(50, 0.1)
+    fail = fail + check("T7_unc_monotone", epist_large.energy_unc > epist_small.energy_unc)
+
+    if fail == 0 {
+        print("ALL_PASS\n")
+        return 0
+    }
+    return 1
+}

@@ -1,0 +1,237 @@
+// stdlib/special/igamma.sio — Regularized incomplete gamma functions
+//
+// Functions:
+//   igamma_lower(a, x)  — P(a,x) = γ(a,x)/Γ(a)  regularized lower incomplete gamma
+//   igamma_upper(a, x)  — Q(a,x) = 1 - P(a,x)   regularized upper incomplete gamma
+//   chi2_cdf(x, k)      — Chi-squared CDF = P(k/2, x/2)
+//
+// Algorithms:
+//   P(a,x) for x < a+1 : series expansion  (Numerical Recipes §6.2)
+//   Q(a,x) for x >= a+1: modified Lentz continued fraction
+//
+// References:
+//   Abramowitz & Stegun (1964) §6.5
+//   Press et al. (2007) "Numerical Recipes" 3rd ed. §6.2
+//   DLMF Ch. 8 (https://dlmf.nist.gov/8)
+//   Lanczos (1964) "A Precision Approximation of the Gamma Function"
+
+// ============================================================================
+// Helpers — self-contained, no imports
+// ============================================================================
+
+fn ig_abs(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+// Natural logarithm via range reduction + Maclaurin series
+// ln(x) = 2*(t + t^3/3 + t^5/5 + ...) where t = (m-1)/(m+1), m in [0.5, 2)
+fn ig_ln(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 - 1.0e300 }
+    if x == 1.0 { return 0.0 }
+    let ln2 = 0.6931471805599453
+    var m = x
+    var e = 0
+    while m >= 2.0 { m = m / 2.0; e = e + 1 }
+    while m < 0.5  { m = m * 2.0; e = e - 1 }
+    let t = (m - 1.0) / (m + 1.0)
+    let t2 = t * t
+    var sum = t
+    var term = t
+    var k = 1
+    while k < 32 {
+        term = term * t2
+        sum = sum + term / ((2 * k + 1) as f64)
+        k = k + 1
+    }
+    return 2.0 * sum + (e as f64) * ln2
+}
+
+// Exponential via Taylor series with binary range reduction
+fn ig_exp(x: f64) -> f64 with Mut, Div, Panic {
+    if x > 709.0 { return 1.0e300 }
+    if x < 0.0 - 709.0 { return 0.0 }
+    let ln2 = 0.6931471805599453
+    var k_f = x / ln2
+    var k: i32 = 0
+    if k_f >= 0.0 { k = k_f as i32 } else { k = (k_f as i32) - 1 }
+    let r = x - (k as f64) * ln2
+    var sum = 1.0
+    var term = 1.0
+    var n = 1
+    while n < 28 {
+        term = term * r / (n as f64)
+        sum = sum + term
+        n = n + 1
+    }
+    var result = sum
+    if k >= 0 {
+        var i = 0
+        while i < k { result = result * 2.0; i = i + 1 }
+    } else {
+        var i = 0
+        while i < (0 - k) { result = result / 2.0; i = i + 1 }
+    }
+    return result
+}
+
+// Sine via Taylor series with range reduction to [-pi, pi]
+fn ig_sin(x: f64) -> f64 with Mut, Div, Panic {
+    let tp = 6.28318530717958647692
+    let pi = 3.14159265358979323846
+    var a = x
+    while a >  pi { a = a - tp }
+    while a < 0.0 - pi { a = a + tp }
+    let a2 = a * a
+    var s = a
+    var term = a
+    var n = 1
+    while n < 18 {
+        term = 0.0 - term * a2 / ((2 * n) * (2 * n + 1)) as f64
+        s = s + term
+        n = n + 1
+    }
+    return s
+}
+
+// ============================================================================
+// Log-gamma via Lanczos approximation (g=7, n=9) + Stirling recurrence
+// For x < 10 use recurrence: lgamma(x) = lgamma(x+1) - ln(x)
+// For x >= 10 use Stirling asymptotic series
+// ============================================================================
+
+fn ig_lgamma(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 1.0e300 }
+
+    // Reflection for x < 0.5: Gamma(x)*Gamma(1-x) = pi/sin(pi*x)
+    // => lgamma(x) = ln(pi) - ln|sin(pi*x)| - lgamma(1-x)
+    if x < 0.5 {
+        let s = ig_sin(3.14159265358979323846 * x)
+        let abs_s = if s < 0.0 { 0.0 - s } else { s }
+        if abs_s < 1.0e-15 { return 1.0e300 }
+        return 1.1447298858494002 - ig_ln(abs_s) - ig_lgamma(1.0 - x)
+    }
+
+    // Recurrence to shift x >= 10
+    var val = x
+    var shift = 0.0
+    while val < 10.0 {
+        shift = shift + ig_ln(val)
+        val = val + 1.0
+    }
+
+    // Stirling asymptotic
+    let ln_2pi = 1.8378770664093453
+    var result = (val - 0.5) * ig_ln(val) - val + 0.5 * ln_2pi
+    let inv_v  = 1.0 / val
+    let inv_v2 = inv_v * inv_v
+    result = result + inv_v / 12.0
+    result = result - inv_v * inv_v2 / 360.0
+    result = result + inv_v * inv_v2 * inv_v2 / 1260.0
+    result = result - inv_v * inv_v2 * inv_v2 * inv_v2 / 1680.0
+
+    return result - shift
+}
+
+// ============================================================================
+// Series expansion for P(a,x) — valid when x < a+1
+// P(a,x) = e^{-x} * x^a / Gamma(a) * sum_{n=0}^inf x^n / (a*(a+1)*...*(a+n))
+//         = e^{-x+a*ln(x)-lgamma(a)} * sum_{n=0}^inf x^n / falling_poch(a, n+1)
+// ============================================================================
+
+fn ig_series(a: f64, x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    let log_prefix = 0.0 - x + a * ig_ln(x) - ig_lgamma(a)
+    let prefix = ig_exp(log_prefix)
+
+    var ap   = a
+    var term = 1.0 / a
+    var sum  = term
+    var n = 0
+    while n < 200 {
+        ap   = ap + 1.0
+        term = term * x / ap
+        sum  = sum + term
+        if ig_abs(term) < ig_abs(sum) * 1.0e-14 {
+            n = 200
+        } else {
+            n = n + 1
+        }
+    }
+    return prefix * sum
+}
+
+// ============================================================================
+// Modified Lentz continued fraction for Q(a,x) — valid when x >= a+1
+// Uses the NR3 §6.2 "gcf" algorithm:
+//   Gamma(a,x) = e^{-x+a*ln(x)-lgamma(a)} * h
+// where h is built by the recurrence:
+//   b_0 = x+1-a,  c_0 = 1/FPMIN,  d_0 = 1/b_0,  h_0 = d_0
+//   a_n = -n*(n-a),  b_n += 2,  d_n = 1/(a_n*d_{n-1} + b_n)
+//   c_n = b_n + a_n/c_{n-1},  delta_n = c_n*d_n,  h_n = h_{n-1}*delta_n
+// ============================================================================
+
+fn ig_cf(a: f64, x: f64) -> f64 with Mut, Div, Panic {
+    let log_prefix = 0.0 - x + a * ig_ln(x) - ig_lgamma(a)
+    let prefix = ig_exp(log_prefix)
+
+    let fpmin = 1.0e-300
+    var b = x + 1.0 - a
+    var c = 1.0 / fpmin
+    var d = 1.0 / b
+    var h = d
+
+    var n = 1
+    while n < 200 {
+        let nf = n as f64
+        let an = 0.0 - nf * (nf - a)   // = -n*(n-a) = n*(a-n)
+        b = b + 2.0
+        d = an * d + b
+        if ig_abs(d) < fpmin { d = fpmin }
+        c = b + an / c
+        if ig_abs(c) < fpmin { c = fpmin }
+        d = 1.0 / d
+        let delta = d * c
+        h = h * delta
+        if ig_abs(delta - 1.0) < 1.0e-14 {
+            n = 200
+        } else {
+            n = n + 1
+        }
+    }
+
+    return prefix * h
+}
+
+// ============================================================================
+// Public API
+// ============================================================================
+
+// Regularized lower incomplete gamma P(a,x) = γ(a,x)/Γ(a)
+// Returns value in [0, 1].
+pub fn igamma_lower(a: f64, x: f64) -> f64 with Mut, Div, Panic {
+    if a <= 0.0 { return 1.0 }
+    if x <= 0.0 { return 0.0 }
+    if x < a + 1.0 {
+        return ig_series(a, x)
+    }
+    return 1.0 - ig_cf(a, x)
+}
+
+// Regularized upper incomplete gamma Q(a,x) = Γ(a,x)/Γ(a) = 1 - P(a,x)
+// Returns value in [0, 1].
+pub fn igamma_upper(a: f64, x: f64) -> f64 with Mut, Div, Panic {
+    if a <= 0.0 { return 0.0 }
+    if x <= 0.0 { return 1.0 }
+    if x >= a + 1.0 {
+        return ig_cf(a, x)
+    }
+    return 1.0 - ig_series(a, x)
+}
+
+// Chi-squared CDF with k degrees of freedom, evaluated at x >= 0.
+// chi2_cdf(x, k) = P(k/2, x/2)
+pub fn chi2_cdf(x: f64, k: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    return igamma_lower(k / 2.0, x / 2.0)
+}

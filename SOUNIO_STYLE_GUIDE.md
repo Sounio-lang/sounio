@@ -41,7 +41,7 @@ let y: Vec<u8> = vec![];  // No heap allocation!
 ```sio
 // Effects are REQUIRED for certain operations
 fn divide(a: f64, b: f64) -> f64 with Div, Panic {
-    a / b  // Division requires Div effect
+    a / b  // Division requires BOTH Div and Panic effects
 }
 
 fn mutate(arr: &![u8; 256]) -> () with Mut {

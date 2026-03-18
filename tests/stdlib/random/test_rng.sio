@@ -1,0 +1,321 @@
+//@ run-pass
+// Tests for stdlib/random/rng.sio — xorshift128+ RngState API
+//
+// Covers: determinism, uniform distribution, normal distribution,
+// exponential distribution, Bernoulli trials, and shuffle.
+
+use random::rng::*
+
+fn check_near(a: f64, b: f64, tol: f64) -> bool {
+    let d = a - b
+    let ad = if d < 0.0 { 0.0 - d } else { d }
+    ad < tol
+}
+
+fn f64_abs(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+fn run_tests() -> i32 with Mut, Div, Panic {
+    var pass = 0
+    var fail = 0
+
+    // ------------------------------------------------------------------
+    // Test 1: Determinism — same seed produces same sequence
+    // ------------------------------------------------------------------
+    print("Test 1: determinism (same seed same sequence)... ")
+    let st1a = rng_new(42)
+    let r1a = rng_next(st1a)
+    let v1a = r1a.0
+    let r2a = rng_next(r1a.1)
+    let v2a = r2a.0
+    let r3a = rng_next(r2a.1)
+    let v3a = r3a.0
+
+    let st1b = rng_new(42)
+    let r1b = rng_next(st1b)
+    let v1b = r1b.0
+    let r2b = rng_next(r1b.1)
+    let v2b = r2b.0
+    let r3b = rng_next(r2b.1)
+    let v3b = r3b.0
+
+    if v1a == v1b && v2a == v2b && v3a == v3b {
+        print("PASS\n")
+        pass = pass + 1
+    } else {
+        print("FAIL\n")
+        fail = fail + 1
+    }
+
+    // ------------------------------------------------------------------
+    // Test 2: Different seeds produce different sequences
+    // ------------------------------------------------------------------
+    print("Test 2: different seeds differ... ")
+    let st2 = rng_new(999)
+    let r2d = rng_next(st2)
+    let v2d = r2d.0
+    if v1a != v2d {
+        print("PASS\n")
+        pass = pass + 1
+    } else {
+        print("FAIL\n")
+        fail = fail + 1
+    }
+
+    // ------------------------------------------------------------------
+    // Test 3: Successive rng_next calls produce different values
+    // ------------------------------------------------------------------
+    print("Test 3: successive rng_next differ... ")
+    let st3 = rng_new(7)
+    let ra = rng_next(st3)
+    let rb = rng_next(ra.1)
+    if ra.0 != rb.0 {
+        print("PASS\n")
+        pass = pass + 1
+    } else {
+        print("FAIL\n")
+        fail = fail + 1
+    }
+
+    // ------------------------------------------------------------------
+    // Test 4: Uniform [0,1) — 100 samples all in range, mean ≈ 0.5
+    // ------------------------------------------------------------------
+    print("Test 4: uniform in [0,1), mean near 0.5... ")
+    var cur4 = rng_new(123)
+    var sum4 = 0.0
+    var all_in_range = true
+    var i4 = 0
+    while i4 < 100 {
+        let ru = rng_uniform(cur4)
+        cur4 = ru.1
+        let u = ru.0
+        if u < 0.0 || u >= 1.0 { all_in_range = false }
+        sum4 = sum4 + u
+        i4 = i4 + 1
+    }
+    let mean4 = sum4 / 100.0
+    if all_in_range && check_near(mean4, 0.5, 0.15) {
+        print("PASS\n")
+        pass = pass + 1
+    } else {
+        print("FAIL\n")
+        fail = fail + 1
+    }
+
+    // ------------------------------------------------------------------
+    // Test 5: rng_uniform_range — values in [lo, hi)
+    // ------------------------------------------------------------------
+    print("Test 5: uniform_range in [2,8)... ")
+    var cur5 = rng_new(456)
+    var range_ok = true
+    var sum5 = 0.0
+    var i5 = 0
+    while i5 < 100 {
+        let rr = rng_uniform_range(cur5, 2.0, 8.0)
+        cur5 = rr.1
+        let v = rr.0
+        if v < 2.0 || v >= 8.0 { range_ok = false }
+        sum5 = sum5 + v
+        i5 = i5 + 1
+    }
+    let mean5 = sum5 / 100.0
+    if range_ok && check_near(mean5, 5.0, 0.9) {
+        print("PASS\n")
+        pass = pass + 1
+    } else {
+        print("FAIL\n")
+        fail = fail + 1
+    }
+
+    // ------------------------------------------------------------------
+    // Test 6: Normal N(0,1) — 100 samples, mean ≈ 0, std ≈ 1
+    // ------------------------------------------------------------------
+    print("Test 6: normal N(0,1), mean≈0, std≈1... ")
+    var cur6 = rng_new(789)
+    var sum6 = 0.0
+    var i6 = 0
+    while i6 < 100 {
+        let rn = rng_normal(cur6, 0.0, 1.0)
+        cur6 = rn.1
+        sum6 = sum6 + rn.0
+        i6 = i6 + 1
+    }
+    let mean6 = sum6 / 100.0
+
+    // Compute variance in a second pass — need to replay with same seed
+    var cur6b = rng_new(789)
+    var ss6 = 0.0
+    var j6 = 0
+    while j6 < 100 {
+        let rn2 = rng_normal(cur6b, 0.0, 1.0)
+        cur6b = rn2.1
+        let d = rn2.0 - mean6
+        ss6 = ss6 + d * d
+        j6 = j6 + 1
+    }
+    let var6 = ss6 / 99.0
+    let std6 = rng_sqrt(var6)
+
+    if check_near(mean6, 0.0, 0.3) && check_near(std6, 1.0, 0.3) {
+        print("PASS\n")
+        pass = pass + 1
+    } else {
+        print("FAIL\n")
+        fail = fail + 1
+    }
+
+    // ------------------------------------------------------------------
+    // Test 7: Exponential Exp(2) — all positive, mean ≈ 0.5
+    // ------------------------------------------------------------------
+    print("Test 7: exponential Exp(2), all>0, mean≈0.5... ")
+    var cur7 = rng_new(321)
+    var sum7 = 0.0
+    var all_pos = true
+    var i7 = 0
+    while i7 < 100 {
+        let re = rng_exponential(cur7, 2.0)
+        cur7 = re.1
+        let v = re.0
+        if v <= 0.0 { all_pos = false }
+        sum7 = sum7 + v
+        i7 = i7 + 1
+    }
+    let mean7 = sum7 / 100.0
+    if all_pos && check_near(mean7, 0.5, 0.3) {
+        print("PASS\n")
+        pass = pass + 1
+    } else {
+        print("FAIL\n")
+        fail = fail + 1
+    }
+
+    // ------------------------------------------------------------------
+    // Test 8: Bernoulli(0.5) — 100 trials, count in [30, 70]
+    // ------------------------------------------------------------------
+    print("Test 8: bernoulli(0.5), count in [30,70]... ")
+    var cur8 = rng_new(654)
+    var count8: i64 = 0
+    var i8 = 0
+    while i8 < 100 {
+        let rb = rng_bernoulli(cur8, 0.5)
+        cur8 = rb.1
+        if rb.0 == 1 { count8 = count8 + 1 }
+        i8 = i8 + 1
+    }
+    if count8 >= 30 && count8 <= 70 {
+        print("PASS\n")
+        pass = pass + 1
+    } else {
+        print("FAIL\n")
+        fail = fail + 1
+    }
+
+    // ------------------------------------------------------------------
+    // Test 9: Shuffle — elements are permuted, sum is preserved
+    // ------------------------------------------------------------------
+    print("Test 9: shuffle preserves sum... ")
+    var arr9: [f64; 256] = [0.0; 256]
+    var i9 = 0
+    while i9 < 8 {
+        arr9[i9] = (i9 + 1) as f64
+        i9 = i9 + 1
+    }
+    let orig_sum = 1.0 + 2.0 + 3.0 + 4.0 + 5.0 + 6.0 + 7.0 + 8.0
+    let st9 = rng_new(111)
+    let shuf_res = rng_shuffle(st9, arr9, 8)
+    let arr9s = shuf_res.1
+    var shuf_sum = 0.0
+    var k9 = 0
+    while k9 < 8 {
+        shuf_sum = shuf_sum + arr9s[k9]
+        k9 = k9 + 1
+    }
+    if check_near(shuf_sum, orig_sum, 0.001) {
+        print("PASS\n")
+        pass = pass + 1
+    } else {
+        print("FAIL\n")
+        fail = fail + 1
+    }
+
+    // ------------------------------------------------------------------
+    // Test 10: rng_fill_uniform — fills array with values in [0,1)
+    // ------------------------------------------------------------------
+    print("Test 10: rng_fill_uniform in [0,1)... ")
+    let st10 = rng_new(222)
+    let fill_res = rng_fill_uniform(st10, 50)
+    let arr10 = fill_res.1
+    var fill_ok = true
+    var i10 = 0
+    while i10 < 50 {
+        if arr10[i10] < 0.0 || arr10[i10] >= 1.0 { fill_ok = false }
+        i10 = i10 + 1
+    }
+    if fill_ok {
+        print("PASS\n")
+        pass = pass + 1
+    } else {
+        print("FAIL\n")
+        fail = fail + 1
+    }
+
+    // ------------------------------------------------------------------
+    // Test 11: rng_fill_normal — mean ≈ 5.0 for N(5, 1)
+    // ------------------------------------------------------------------
+    print("Test 11: rng_fill_normal N(5,1), mean≈5... ")
+    let st11 = rng_new(333)
+    let norm_res = rng_fill_normal(st11, 100, 5.0, 1.0)
+    let arr11 = norm_res.1
+    var sum11 = 0.0
+    var i11 = 0
+    while i11 < 100 {
+        sum11 = sum11 + arr11[i11]
+        i11 = i11 + 1
+    }
+    let mean11 = sum11 / 100.0
+    if check_near(mean11, 5.0, 0.5) {
+        print("PASS\n")
+        pass = pass + 1
+    } else {
+        print("FAIL\n")
+        fail = fail + 1
+    }
+
+    // ------------------------------------------------------------------
+    // Test 12: Geometric(0.5) — results >= 1
+    // ------------------------------------------------------------------
+    print("Test 12: geometric(0.5), all >= 1... ")
+    var cur12 = rng_new(444)
+    var geo_ok = true
+    var i12 = 0
+    while i12 < 20 {
+        let rg = rng_geometric(cur12, 0.5)
+        cur12 = rg.1
+        if rg.0 < 1 { geo_ok = false }
+        i12 = i12 + 1
+    }
+    if geo_ok {
+        print("PASS\n")
+        pass = pass + 1
+    } else {
+        print("FAIL\n")
+        fail = fail + 1
+    }
+
+    // ------------------------------------------------------------------
+    // Summary
+    // ------------------------------------------------------------------
+    print("\nPassed: ")
+    print(pass)
+    print(" Failed: ")
+    print(fail)
+    print("\n")
+
+    if fail > 0 { return 1 }
+    return 0
+}
+
+fn main() -> i32 with Mut, Div, Panic {
+    return run_tests()
+}

@@ -56,7 +56,7 @@ increment(&!counter)
 ### 4. Effects Are Required and Explicit
 ```sio
 // ✅ CORRECT - effects listed
-fn divide(a: f64, b: f64) -> f64 with Div {
+fn divide(a: f64, b: f64) -> f64 with Div, Panic {
     a / b
 }
 
@@ -129,7 +129,7 @@ fn hex_encode(input: &[u8; 256], in_len: i32, out: &![u8; 512]) -> i32 with Mut,
 
 ### Pattern 3: Error Code (Not Exception)
 ```sio
-fn safe_divide(a: f64, b: f64) -> (f64, i32) with Div {
+fn safe_divide(a: f64, b: f64) -> (f64, i32) with Div, Panic {
     if b == 0.0 {
         (0.0, 1)  // Error: return (bad_value, error_code)
     } else {
@@ -187,7 +187,7 @@ When do you need `with`?
 | Effect | When | Example |
 |--------|------|---------|
 | `with Mut` | Mutate `&!` refs or arrays | `arr[i] = 42` |
-| `with Div` | Division `/` or modulo `%` | `a / b` |
+| `with Div, Panic` | Division `/` or modulo `%` | `a / b` (always needs Panic too) |
 | `with Panic` | Array bounds or asserts | `arr[i]`, `assert(x == y)` |
 | `with IO` | Print, file, env | `print(x)` |
 | `with Alloc` | Heap (rare) | Avoid |

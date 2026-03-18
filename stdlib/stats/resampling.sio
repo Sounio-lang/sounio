@@ -1,1 +1,173 @@
-//! resampling (disabled)
+// stats::resampling — Bootstrap and permutation resampling
+//
+// Fixed-array bootstrap for confidence intervals and hypothesis testing.
+// Uses a simple LCG PRNG (no heap allocation).
+//
+// References:
+// - Efron (1979): "Bootstrap methods: another look at the jackknife"
+// - Efron & Tibshirani (1993): "An Introduction to the Bootstrap"
+
+// =============================================================================
+// LCG Pseudo-Random Number Generator
+// =============================================================================
+
+struct LCGState {
+    seed: i64
+}
+
+fn lcg_new(seed: i64) -> LCGState {
+    LCGState { seed: seed }
+}
+
+fn lcg_next(state: &!LCGState) -> i64 with Mut {
+    // LCG: x_{n+1} = (a*x_n + c) mod m
+    // Using Numerical Recipes constants
+    let a: i64 = 1664525
+    let c: i64 = 1013904223
+    // Mask to 31 bits (positive)
+    state.seed = (a * state.seed + c) & 2147483647
+    state.seed
+}
+
+// Random index in [0, n)
+fn lcg_rand_index(state: &!LCGState, n: i64) -> i64 with Mut, Div, Panic {
+    let r = lcg_next(state)
+    // Use modulo (biased but sufficient for bootstrap)
+    let idx = r - (r / n) * n
+    if idx < 0 { idx + n } else { idx }
+}
+
+// =============================================================================
+// Bootstrap Mean
+// =============================================================================
+
+fn resample_mean(data: [f64; 100], n: i64) -> f64 with Mut, Div, Panic {
+    var sum = 0.0
+    var i: i64 = 0
+    while i < n {
+        sum = sum + data[i as usize]
+        i = i + 1
+    }
+    sum / (n as f64)
+}
+
+struct BootstrapResult {
+    estimate: f64,
+    se: f64,
+    ci_lower: f64,
+    ci_upper: f64,
+    n_resamples: i64
+}
+
+fn bootstrap_mean(
+    data: [f64; 100],
+    n: i64,
+    n_boot: i64,
+    seed: i64
+) -> BootstrapResult with Mut, Div, Panic {
+    // Cap bootstrap resamples
+    let max_boot: i64 = 500
+    let actual_boot = if n_boot > max_boot { max_boot } else { n_boot }
+
+    var rng = lcg_new(seed)
+    var boot_means: [f64; 500] = [0.0; 500]
+
+    // Generate bootstrap samples and compute means
+    var b: i64 = 0
+    while b < actual_boot {
+        var sum = 0.0
+        var i: i64 = 0
+        while i < n {
+            let idx = lcg_rand_index(&rng, n)
+            sum = sum + data[idx as usize]
+            i = i + 1
+        }
+        boot_means[b as usize] = sum / (n as f64)
+        b = b + 1
+    }
+
+    // Compute mean of bootstrap means
+    let point_est = resample_mean(data, n)
+
+    // Compute SE (standard deviation of bootstrap means)
+    var ss = 0.0
+    b = 0
+    while b < actual_boot {
+        let d = boot_means[b as usize] - point_est
+        ss = ss + d * d
+        b = b + 1
+    }
+    let se = boot_se_sqrt(ss / ((actual_boot - 1) as f64))
+
+    // Sort bootstrap means for percentile CI
+    sort_f64(boot_means, actual_boot)
+
+    // 2.5th and 97.5th percentiles
+    let lo_idx = (actual_boot as f64 * 0.025) as i64
+    let hi_idx = (actual_boot as f64 * 0.975) as i64
+    let ci_lo = boot_means[lo_idx as usize]
+    let ci_hi = boot_means[hi_idx as usize]
+
+    BootstrapResult {
+        estimate: point_est,
+        se: se,
+        ci_lower: ci_lo,
+        ci_upper: ci_hi,
+        n_resamples: actual_boot
+    }
+}
+
+// =============================================================================
+// Helpers
+// =============================================================================
+
+fn boot_se_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i = 0
+    while i < 25 { y = 0.5 * (y + x / y); i = i + 1 }
+    y
+}
+
+fn sort_f64(data: [f64; 500], n: i64) with Mut, Div, Panic {
+    // Bubble sort (sufficient for n <= 500)
+    var i: i64 = 0
+    while i < n - 1 {
+        var j: i64 = 0
+        while j < n - i - 1 {
+            if data[j as usize] > data[(j + 1) as usize] {
+                let tmp = data[j as usize]
+                data[j as usize] = data[(j + 1) as usize]
+                data[(j + 1) as usize] = tmp
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+}
+
+fn boot_abs(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+
+// =============================================================================
+// Tests
+// =============================================================================
+
+fn test_bootstrap_mean() -> bool with Mut, Div, Panic {
+    var data: [f64; 100] = [0.0; 100]
+    data[0] = 10.0
+    data[1] = 12.0
+    data[2] = 11.0
+    data[3] = 13.0
+    data[4] = 11.0
+
+    let result = bootstrap_mean(data, 5, 200, 42)
+
+    // Mean should be close to 11.4
+    let mean_ok = boot_abs(result.estimate - 11.4) < 0.001
+    // SE should be positive
+    let se_ok = result.se > 0.0
+    // CI should bracket the mean
+    let ci_ok = result.ci_lower <= result.estimate && result.estimate <= result.ci_upper
+
+    mean_ok && se_ok && ci_ok
+}

@@ -221,32 +221,331 @@ fn xoshiro256_next_f64(rng: RngXoshiro256) -> (RngXoshiro256, f64) {
 // Since global mutable state isn't supported, we use a functional approach
 // where the RNG state is passed through and returned
 
-struct RngState {
+struct RngPcgWrapper {
     rng: Pcg64,
 }
 
-fn rng_new(seed: i64) -> RngState {
-    RngState { rng: pcg64_new(seed) }
+fn rng_pcg_new(seed: i64) -> RngPcgWrapper {
+    RngPcgWrapper { rng: pcg64_new(seed) }
 }
 
-fn rng_next_f64(state: RngState) -> (RngState, f64) {
+fn rng_pcg_next_f64(state: RngPcgWrapper) -> (RngPcgWrapper, f64) {
     let result = pcg64_next_f64(state.rng)
-    (RngState { rng: result.0 }, result.1)
+    (RngPcgWrapper { rng: result.0 }, result.1)
 }
 
-fn rng_next_i64(state: RngState) -> (RngState, i64) {
+fn rng_pcg_next_i64(state: RngPcgWrapper) -> (RngPcgWrapper, i64) {
     let result = pcg64_next_i64(state.rng)
-    (RngState { rng: result.0 }, result.1)
+    (RngPcgWrapper { rng: result.0 }, result.1)
 }
 
-fn rng_next_bool(state: RngState, p: f64) -> (RngState, bool) {
+fn rng_pcg_next_bool(state: RngPcgWrapper, p: f64) -> (RngPcgWrapper, bool) {
     let result = pcg64_next_bool(state.rng, p)
-    (RngState { rng: result.0 }, result.1)
+    (RngPcgWrapper { rng: result.0 }, result.1)
 }
 
-fn rng_bounded(state: RngState, n: i64) -> (RngState, i64) {
+fn rng_pcg_bounded(state: RngPcgWrapper, n: i64) -> (RngPcgWrapper, i64) {
     let result = pcg64_bounded(state.rng, n)
-    (RngState { rng: result.0 }, result.1)
+    (RngPcgWrapper { rng: result.0 }, result.1)
+}
+
+// ============================================================================
+// XORSHIFT128+ RNG WITH FUNCTIONAL (VALUE-PASSING) API
+// ============================================================================
+//
+// Design: Explicit state threading — no global mutable state.
+// Algorithm: xorshift128+ (Vigna 2014) with splitmix64 seeding.
+// Each function returns (value, new_state) so callers chain state.
+
+// ----------------------------------------------------------------------------
+// Inline math helpers — no imports required
+// ----------------------------------------------------------------------------
+
+fn rng_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i = 0
+    while i < 20 {
+        y = 0.5 * (y + x / y)
+        i = i + 1
+    }
+    y
+}
+
+fn rng_ln(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 - 1.0e30 }
+    if x == 1.0 { return 0.0 }
+    var m = x
+    var e_val = 0
+    while m >= 2.0 { m = m / 2.0; e_val = e_val + 1 }
+    while m < 0.5 { m = m * 2.0; e_val = e_val - 1 }
+    let t = (m - 1.0) / (m + 1.0)
+    let t2 = t * t
+    var sum = t
+    var term = t
+    var k = 1
+    while k < 30 {
+        term = term * t2
+        sum = sum + term / (2 * k + 1) as f64
+        k = k + 1
+    }
+    2.0 * sum + (e_val as f64) * 0.6931471805599453
+}
+
+fn rng_cos(x: f64) -> f64 with Mut, Div, Panic {
+    let twopi = 6.28318530717958647692
+    var a = x
+    while a >= twopi { a = a - twopi }
+    while a < 0.0 { a = a + twopi }
+    if a > 3.14159265358979323846 { a = a - twopi }
+    let a2 = a * a
+    var sum = 1.0
+    var term = 1.0
+    var n = 1
+    while n < 15 {
+        term = 0.0 - term * a2 / ((2 * n - 1) * 2 * n) as f64
+        sum = sum + term
+        n = n + 1
+    }
+    sum
+}
+
+fn rng_sin(x: f64) -> f64 with Mut, Div, Panic {
+    let twopi = 6.28318530717958647692
+    var a = x
+    while a >= twopi { a = a - twopi }
+    while a < 0.0 { a = a + twopi }
+    if a > 3.14159265358979323846 { a = a - twopi }
+    let a2 = a * a
+    var sum = a
+    var term = a
+    var n = 1
+    while n < 15 {
+        term = 0.0 - term * a2 / ((2 * n) * (2 * n + 1)) as f64
+        sum = sum + term
+        n = n + 1
+    }
+    sum
+}
+
+// ----------------------------------------------------------------------------
+// RngState — xorshift128+ state (two 64-bit words)
+// ----------------------------------------------------------------------------
+
+struct RngState {
+    s0: i64,
+    s1: i64,
+}
+
+// splitmix64 step: expand a single seed word into well-mixed output
+fn rng_splitmix_step(s: i64) -> (i64, i64) with Mut {
+    let next = s + 0x9e3779b97f4a7c15
+    var z = next
+    z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9
+    z = (z ^ (z >> 27)) * 0x94d049bb133111eb
+    let out = z ^ (z >> 31)
+    (next, out)
+}
+
+// Initialize RngState from a seed using splitmix64
+fn rng_new(seed: i64) -> RngState with Mut {
+    let step1 = rng_splitmix_step(seed)
+    let s = step1.0
+    let s0 = step1.1
+    let step2 = rng_splitmix_step(s)
+    let s1 = step2.1
+    RngState { s0: s0, s1: s1 }
+}
+
+// xorshift128+: returns (random i64, new state)
+fn rng_next(state: RngState) -> (i64, RngState) with Mut {
+    var x = state.s0
+    let y = state.s1
+    x = x ^ (x << 23)
+    x = x ^ (x >> 17)
+    x = x ^ y
+    x = x ^ (y >> 26)
+    let out = state.s0 + y
+    (out, RngState { s0: y, s1: x })
+}
+
+// Uniform [0, 1) — clears sign bit via AND, maps to [0, 1) by dividing by 2^63-1
+fn rng_uniform(state: RngState) -> (f64, RngState) with Mut, Div, Panic {
+    let r = rng_next(state)
+    let bits = r.0
+    // Clear sign bit: AND with 0x7fffffffffffffff gives value in [0, 2^63-1]
+    let pos = bits & 0x7fffffffffffffff
+    let f = (pos as f64) / 9223372036854775807.0
+    (f, r.1)
+}
+
+// Uniform [lo, hi)
+fn rng_uniform_range(state: RngState, lo: f64, hi: f64) -> (f64, RngState) with Mut, Div, Panic {
+    let r = rng_uniform(state)
+    (lo + r.0 * (hi - lo), r.1)
+}
+
+// ----------------------------------------------------------------------------
+// Distributions
+// ----------------------------------------------------------------------------
+
+// Normal N(mu, sigma) — Box-Muller transform
+fn rng_normal(state: RngState, mu: f64, sigma: f64) -> (f64, RngState) with Mut, Div, Panic {
+    // Need u1 > 0 for log; retry up to 10 times
+    var cur = state
+    var u1 = 0.0
+    var attempts = 0
+    while attempts < 10 {
+        let r = rng_uniform(cur)
+        cur = r.1
+        if r.0 > 0.0 {
+            u1 = r.0
+            attempts = 100  // break
+        } else {
+            attempts = attempts + 1
+        }
+    }
+    if u1 <= 0.0 { u1 = 1.0e-10 }
+    let r2 = rng_uniform(cur)
+    let u2 = r2.0
+    let new_state = r2.1
+    let mag = rng_sqrt(0.0 - 2.0 * rng_ln(u1))
+    let z = mag * rng_cos(2.0 * 3.14159265358979323846 * u2)
+    (mu + sigma * z, new_state)
+}
+
+// Exponential Exp(lambda) — inverse CDF: -ln(u)/lambda
+fn rng_exponential(state: RngState, lambda: f64) -> (f64, RngState) with Mut, Div, Panic {
+    var cur = state
+    var u = 0.0
+    var attempts = 0
+    while attempts < 10 {
+        let r = rng_uniform(cur)
+        cur = r.1
+        if r.0 > 0.0 {
+            u = r.0
+            attempts = 100
+        } else {
+            attempts = attempts + 1
+        }
+    }
+    if u <= 0.0 { u = 1.0e-10 }
+    ((0.0 - rng_ln(u)) / lambda, cur)
+}
+
+// Poisson Pois(lambda) — Knuth's algorithm (good for lambda < 30)
+fn rng_poisson(state: RngState, lambda: f64) -> (i64, RngState) with Mut, Div, Panic {
+    let l = rng_ln(1.0)  // just 0 — used as a warmup call
+    // e^-lambda as a product threshold
+    // We compute exp(-lambda) via repeated multiply on ln comparison
+    // Using Knuth: generate uniform products until < e^-lambda
+    // e^-lambda: approximate via rng_ln(p) < -lambda
+    var cur = state
+    var k: i64 = 0
+    var log_p = 0.0
+    var done = false
+    while !done {
+        let r = rng_uniform(cur)
+        cur = r.1
+        var u = r.0
+        if u <= 0.0 { u = 1.0e-10 }
+        log_p = log_p + rng_ln(u)
+        if log_p < (0.0 - lambda) {
+            done = true
+        } else {
+            k = k + 1
+        }
+    }
+    (k, cur)
+}
+
+// Bernoulli(p) — 1 with probability p, 0 otherwise
+fn rng_bernoulli(state: RngState, p: f64) -> (i32, RngState) with Mut, Div, Panic {
+    let r = rng_uniform(state)
+    let v: i32 = if r.0 < p { 1 } else { 0 }
+    (v, r.1)
+}
+
+// Geometric(p) — number of trials until first success (1-indexed)
+fn rng_geometric(state: RngState, p: f64) -> (i64, RngState) with Mut, Div, Panic {
+    var cur = state
+    var u = 0.0
+    var attempts = 0
+    while attempts < 10 {
+        let r = rng_uniform(cur)
+        cur = r.1
+        if r.0 > 0.0 {
+            u = r.0
+            attempts = 100
+        } else {
+            attempts = attempts + 1
+        }
+    }
+    if u <= 0.0 { u = 1.0e-10 }
+    // ceiling(ln(u) / ln(1-p))
+    let log_u = rng_ln(u)
+    let log_1mp = rng_ln(1.0 - p)
+    var k = log_u / log_1mp
+    // ceiling: if k is not already integer
+    let ki = k as i64
+    let result: i64 = if (ki as f64) < k { ki + 1 } else { ki }
+    let final_k: i64 = if result < 1 { 1 } else { result }
+    (final_k, cur)
+}
+
+// ----------------------------------------------------------------------------
+// Sampling utilities — fixed-size array operations
+// ----------------------------------------------------------------------------
+
+// Fisher-Yates shuffle of first n elements in arr (max 256)
+// Returns (new_state, shuffled_array) — by-value for JIT compatibility
+fn rng_shuffle(state: RngState, arr: [f64; 256], n: i32) -> (RngState, [f64; 256]) with Mut, Div, Panic {
+    var cur = state
+    var out = arr
+    var i = n - 1
+    while i > 0 {
+        // Get random j in [0, i]
+        let r = rng_next(cur)
+        cur = r.1
+        let bits = r.0
+        let positive = if bits < 0 { 0 - bits } else { bits }
+        let j = (positive % ((i + 1) as i64)) as i32
+        let tmp = out[i]
+        out[i] = out[j]
+        out[j] = tmp
+        i = i - 1
+    }
+    (cur, out)
+}
+
+// Fill first n elements with uniform [0, 1) samples
+// Returns (new_state, filled_array) — by-value for JIT compatibility
+fn rng_fill_uniform(state: RngState, n: i32) -> (RngState, [f64; 256]) with Mut, Div, Panic {
+    var cur = state
+    var arr: [f64; 256] = [0.0; 256]
+    var i = 0
+    while i < n {
+        let r = rng_uniform(cur)
+        arr[i] = r.0
+        cur = r.1
+        i = i + 1
+    }
+    (cur, arr)
+}
+
+// Fill first n elements with normal samples N(mu, sigma)
+// Returns (new_state, filled_array) — by-value for JIT compatibility
+fn rng_fill_normal(state: RngState, n: i32, mu: f64, sigma: f64) -> (RngState, [f64; 256]) with Mut, Div, Panic {
+    var cur = state
+    var arr: [f64; 256] = [0.0; 256]
+    var i = 0
+    while i < n {
+        let r = rng_normal(cur, mu, sigma)
+        arr[i] = r.0
+        cur = r.1
+        i = i + 1
+    }
+    (cur, arr)
 }
 
 // ============================================================================

@@ -75,8 +75,9 @@ struct RobustDiagnostics {
     outlier_impact_conf: BetaConfidence
 }
 
+// Method IDs: 1 = Huber, 2 = TukeyBisquare
 struct RobustProvenance {
-    method: String,  // "Huber", "TukeyBisquare"
+    method_id: i64,
     tuning_constant: f64,
     n_obs: i64,
     n_outliers: i64,
@@ -95,7 +96,7 @@ struct KnowledgeRobust {
 // Robust Scale Estimation: MAD (Median Absolute Deviation)
 // =============================================================================
 
-fn median(data: [f64; 100], n: i64) -> f64 with Mut {
+fn median(data: [f64; 100], n: i64) -> f64 with Mut, Div, Panic {
     // Copy and sort
     var sorted: [f64; 100] = [0.0; 100]
     var i: i64 = 0
@@ -126,7 +127,7 @@ fn median(data: [f64; 100], n: i64) -> f64 with Mut {
     }
 }
 
-fn mad(data: [f64; 100], n: i64) -> f64 with Mut {
+fn mad(data: [f64; 100], n: i64) -> f64 with Mut, Div, Panic {
     // MAD = median(|xᵢ - median(x)|) * 1.4826
     // Factor 1.4826 makes MAD consistent estimator for σ at normal
 
@@ -153,7 +154,7 @@ fn huber_psi(r: f64, k: f64) -> f64 {
 }
 
 // Huber weight: w(r) = min(1, k/|r|)
-fn huber_weight(r: f64, k: f64) -> f64 with Div {
+fn huber_weight(r: f64, k: f64) -> f64 with Div, Panic {
     let abs_r = rob_abs(r)
     if abs_r < 1.0e-10 { return 1.0 }
     rob_min(1.0, k / abs_r)
@@ -177,7 +178,7 @@ fn tukey_weight(r: f64, c: f64) -> f64 {
 // IRLS for Robust Regression
 // =============================================================================
 
-fn mean_arr(data: [f64; 100], n: i64) -> f64 with Mut, Div {
+fn mean_arr(data: [f64; 100], n: i64) -> f64 with Mut, Div, Panic {
     var sum = 0.0
     var i: i64 = 0
     while i < n { sum = sum + data[i as usize]; i = i + 1 }
@@ -188,7 +189,7 @@ fn fit_robust_simple(
     x: [f64; 100],
     y: [f64; 100],
     n: i64,
-    method: String,    // "huber" or "tukey"
+    method: i64,       // 1 = huber, 2 = tukey
     tuning: f64        // k=1.345 for Huber, c=4.685 for Tukey
 ) -> RobustModel with Mut, Div, Panic {
     let max_iter = 50
@@ -234,7 +235,7 @@ fn fit_robust_simple(
         i = 0
         while i < n {
             let r_std = residuals[i as usize] / scale
-            if method == "huber" {
+            if method == 1 {
                 weights[i as usize] = huber_weight(r_std, tuning)
             } else {
                 weights[i as usize] = tukey_weight(r_std, tuning)
@@ -320,7 +321,7 @@ fn fit_robust_simple(
     } else { 0.0 }
 
     // Breakdown point
-    let breakdown = if method == "tukey" { 0.50 } else { 0.0 }  // Huber: 0, Tukey: up to 50%
+    let breakdown = if method == 2 { 0.50 } else { 0.0 }  // Huber: 0, Tukey: up to 50%
 
     var coefficients: [f64; 10] = [0.0; 10]
     coefficients[0] = beta0
@@ -354,7 +355,7 @@ fn fit_huber_epistemic(
     n: i64
 ) -> KnowledgeRobust with Mut, Div, Panic {
     // Huber with k = 1.345 (95% efficiency at normal)
-    fit_robust_epistemic(x, y, n, "huber", 1.345)
+    fit_robust_epistemic(x, y, n, 1, 1.345)
 }
 
 fn fit_tukey_epistemic(
@@ -363,21 +364,21 @@ fn fit_tukey_epistemic(
     n: i64
 ) -> KnowledgeRobust with Mut, Div, Panic {
     // Tukey bisquare with c = 4.685 (95% efficiency at normal)
-    fit_robust_epistemic(x, y, n, "tukey", 4.685)
+    fit_robust_epistemic(x, y, n, 2, 4.685)
 }
 
 fn fit_robust_epistemic(
     x: [f64; 100],
     y: [f64; 100],
     n: i64,
-    method: String,
+    method: i64,
     tuning: f64
 ) -> KnowledgeRobust with Mut, Div, Panic {
     let model = fit_robust_simple(x, y, n, method, tuning)
 
     // Compute diagnostics
     let outlier_frac = (model.n_outliers as f64) / (n as f64)
-    let efficiency = if method == "huber" { 0.95 } else { 0.95 }
+    let efficiency = if method == 1 { 0.95 } else { 0.95 }
 
     // Confidence: higher if few outliers, converged, enough data
     let conv_conf = if model.converged { 0.90 } else { 0.50 }
@@ -400,7 +401,7 @@ fn fit_robust_epistemic(
     }
 
     let prov = RobustProvenance {
-        method: method,
+        method_id: method,
         tuning_constant: tuning,
         n_obs: n,
         n_outliers: model.n_outliers,
@@ -478,7 +479,7 @@ fn test_tukey_with_outliers() -> bool with Mut, Div, Panic {
     slope_ok && outliers_zero_weight
 }
 
-fn test_mad() -> bool with Mut {
+fn test_mad() -> bool with Mut, Div, Panic {
     var data: [f64; 100] = [0.0; 100]
     data[0] = 1.0
     data[1] = 2.0

@@ -1,0 +1,278 @@
+// stdlib/integrate/epistemic_ode.sio
+// Epistemic ODE Solver with GUM Uncertainty Propagation
+//
+// Integrates ordinary differential equations while tracking measurement
+// uncertainty through each integration step via the Guide to the Expression
+// of Uncertainty in Measurement (GUM, JCGM 100:2008).
+//
+// Uncertainty propagation model (linear, first-order GUM):
+//   u(y_{n+1}) = sqrt(u(y_n)^2 + (dt * u(f))^2)
+//
+// This conservative linear bound is valid when the sensitivity of the
+// numerical flux to initial uncertainty is close to unity — an assumption
+// that holds for smooth, non-chaotic systems over short integration intervals.
+//
+// References:
+//   JCGM 100:2008 (GUM) — https://www.bipm.org/documents/20126/2071204/JCGM_100_2008_E.pdf
+//   Hairer, Norsett, Wanner — "Solving ODEs I" (2nd ed., 1993)
+//   Kutta, M. (1901) — Beitrag zur näherungsweisen Integration totaler DGL
+
+// ============================================================================
+// HELPERS
+// ============================================================================
+
+fn ode_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    return y
+}
+
+fn ode_abs(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+// GUM combined uncertainty for independent additive contributions:
+//   u_combined = sqrt(u1^2 + (scale * u2)^2)
+fn gum_combine(u1: f64, scale: f64, u2: f64) -> f64 with Mut, Div, Panic {
+    let a = u1 * u1
+    let b = scale * u2
+    return ode_sqrt(a + b * b)
+}
+
+// ============================================================================
+// EPISTEMIC STATE — state vector with per-component GUM uncertainty
+// ============================================================================
+
+pub struct EpistemicState {
+    pub values: [f64; 16],         // state values y_i
+    pub uncertainties: [f64; 16],  // standard uncertainties u(y_i)
+    pub n: i32,                    // number of active components
+}
+
+// Zero-initialise an EpistemicState for n active components.
+pub fn epistemic_state_new(n: i32) -> EpistemicState with Mut, Panic {
+    var s = EpistemicState {
+        values:        [0.0; 16],
+        uncertainties: [0.0; 16],
+        n:             n,
+    }
+    return s
+}
+
+// ============================================================================
+// SINGLE RK4-LIKE STEP WITH GUM UNCERTAINTY PROPAGATION
+//
+// The derivative is supplied by the caller as two arrays:
+//   deriv_values[i]  — best-estimate of dy_i/dt at current state
+//   deriv_unc[i]     — standard uncertainty of the derivative
+//
+// Value update  : y_{n+1} = y_n + dt * f
+// Uncertainty   : u(y_{n+1}) = sqrt(u(y_n)^2 + (dt * u(f))^2)
+//
+// Note: This is a single Euler-style propagation in uncertainty space.
+// The value step uses a provided derivative directly (no internal RK stages),
+// which is consistent with the caller computing k-stages externally or using
+// Euler forward integration as the deterministic method.
+// ============================================================================
+
+pub fn epistemic_rk4_step(
+    state:       EpistemicState,
+    t:           f64,
+    dt:          f64,
+    deriv_values: &[f64; 16],
+    deriv_unc:   &[f64; 16]
+) -> EpistemicState with Mut, Div, Panic {
+    var next = epistemic_state_new(state.n)
+    var i: i32 = 0
+    while i < state.n {
+        let y_i   = state.values[i]
+        let u_y   = state.uncertainties[i]
+        let f_i   = deriv_values[i]
+        let u_f   = deriv_unc[i]
+        // Value step: standard forward Euler using provided derivative
+        next.values[i] = y_i + dt * f_i
+        // GUM propagation: u(y_{n+1}) = sqrt(u(y_n)^2 + (dt * u(f))^2)
+        next.uncertainties[i] = gum_combine(u_y, dt, u_f)
+        i = i + 1
+    }
+    return next
+}
+
+// ============================================================================
+// DERIVATIVE FUNCTIONS
+//
+// Each function returns values and uncertainties into two caller-supplied
+// mutable arrays.  Derivative uncertainty is estimated from state uncertainty
+// using first-order GUM sensitivity analysis.
+//
+// idx=0  exponential decay  : dy/dt = -k*y,  k=0.1
+//        u(f) = k * u(y)   (sensitivity ∂f/∂y = -k)
+//
+// idx=1  logistic growth    : dy/dt = r*y*(1 - y/K), r=0.5, K=100
+//        u(f) ≈ |r*(1 - 2*y/K)| * u(y)  (linearised sensitivity)
+//
+// idx=2  harmonic oscillator: y = [y1, y2], dy1/dt=y2, dy2/dt=-y1
+//        u(dy1/dt) = u(y2),  u(dy2/dt) = u(y1)
+// ============================================================================
+
+fn deriv_decay(
+    state:  EpistemicState,
+    out_v:  &![f64; 16],
+    out_u:  &![f64; 16]
+) with Mut, Div, Panic {
+    let k = 0.1
+    var i: i32 = 0
+    while i < state.n {
+        let y_i = state.values[i]
+        let u_i = state.uncertainties[i]
+        out_v[i] = 0.0 - k * y_i
+        out_u[i] = k * u_i
+        i = i + 1
+    }
+}
+
+fn deriv_logistic(
+    state:  EpistemicState,
+    out_v:  &![f64; 16],
+    out_u:  &![f64; 16]
+) with Mut, Div, Panic {
+    let r   = 0.5
+    let cap = 100.0
+    var i: i32 = 0
+    while i < state.n {
+        let y_i  = state.values[i]
+        let u_i  = state.uncertainties[i]
+        // Clamp y to [0, K] to keep derivative bounded
+        var y_safe = y_i
+        if y_safe < 0.0  { y_safe = 0.0 }
+        if y_safe > cap  { y_safe = cap }
+        let growth = r * y_safe * (1.0 - y_safe / cap)
+        out_v[i] = growth
+        // Linearised sensitivity |∂f/∂y| = |r*(1 - 2*y/K)|
+        var sens = r * (1.0 - 2.0 * y_safe / cap)
+        if sens < 0.0 { sens = 0.0 - sens }
+        out_u[i] = sens * u_i
+        i = i + 1
+    }
+}
+
+fn deriv_harmonic(
+    state:  EpistemicState,
+    out_v:  &![f64; 16],
+    out_u:  &![f64; 16]
+) with Mut, Div, Panic {
+    // Requires at least 2 components: y[0]=position, y[1]=velocity
+    // dy[0]/dt = y[1]   u = u(y[1])
+    // dy[1]/dt = -y[0]  u = u(y[0])
+    if state.n >= 2 {
+        out_v[0] = state.values[1]
+        out_u[0] = state.uncertainties[1]
+        out_v[1] = 0.0 - state.values[0]
+        out_u[1] = state.uncertainties[0]
+    }
+    // Any remaining components set to zero derivatives
+    var i: i32 = 2
+    while i < state.n {
+        out_v[i] = 0.0
+        out_u[i] = 0.0
+        i = i + 1
+    }
+}
+
+// ============================================================================
+// EULER INTEGRATION WITH UNCERTAINTY PROPAGATION
+//
+// deriv_fn_idx selects the ODE:
+//   0 — exponential decay   dy/dt = -0.1*y
+//   1 — logistic growth     dy/dt = 0.5*y*(1 - y/100)
+//   2 — harmonic oscillator dy/dt = [y2, -y1]
+// ============================================================================
+
+pub fn epistemic_euler_solve(
+    y0:          EpistemicState,
+    t0:          f64,
+    t1:          f64,
+    n_steps:     i32,
+    deriv_fn_idx: i32
+) -> EpistemicState with Mut, Div, Panic {
+    var n_safe = n_steps
+    if n_safe < 1 { n_safe = 1 }
+    let dt = (t1 - t0) / (n_safe as f64)
+    var state = y0
+    var dv: [f64; 16] = [0.0; 16]
+    var du: [f64; 16] = [0.0; 16]
+    var step: i32 = 0
+    while step < n_safe {
+        // Evaluate derivative
+        if deriv_fn_idx == 0 {
+            deriv_decay(state, &!dv, &!du)
+        } else if deriv_fn_idx == 1 {
+            deriv_logistic(state, &!dv, &!du)
+        } else {
+            deriv_harmonic(state, &!dv, &!du)
+        }
+        // Advance state with uncertainty propagation
+        state = epistemic_rk4_step(state, t0 + (step as f64) * dt, dt, &dv, &du)
+        step = step + 1
+    }
+    return state
+}
+
+// ============================================================================
+// CONVENIENCE WRAPPER — Exponential Decay with Uncertain Rate
+//
+// Solves  dy/dt = -k*y,  y(0) = y0
+// where both y0 and k carry standard uncertainties u_y0 and u_k.
+//
+// GUM sensitivity for the rate constant:
+//   u(f) = sqrt((k * u_y)^2 + (y * u_k)^2)
+//
+// This is a first-order Taylor expansion of f(y, k) = -k*y.
+// ============================================================================
+
+pub fn epistemic_solve_decay(
+    y0:      f64,
+    u_y0:    f64,
+    k:       f64,
+    u_k:     f64,
+    t_end:   f64,
+    n_steps: i32
+) -> EpistemicState with Mut, Div, Panic {
+    var n_safe = n_steps
+    if n_safe < 1 { n_safe = 1 }
+    let dt = t_end / (n_safe as f64)
+
+    // Set up initial state: single-component decay
+    var state = epistemic_state_new(1)
+    state.values[0]        = y0
+    state.uncertainties[0] = u_y0
+
+    var dv: [f64; 16] = [0.0; 16]
+    var du: [f64; 16] = [0.0; 16]
+
+    var step: i32 = 0
+    while step < n_safe {
+        let y_i = state.values[0]
+        let u_y = state.uncertainties[0]
+        // Best-estimate derivative
+        dv[0] = 0.0 - k * y_i
+        // GUM uncertainty: u(f)^2 = (k * u_y)^2 + (y * u_k)^2
+        let a = k * u_y
+        let b = y_i * u_k
+        du[0] = ode_sqrt(a * a + b * b)
+        state = epistemic_rk4_step(state, (step as f64) * dt, dt, &dv, &du)
+        step = step + 1
+    }
+    return state
+}
