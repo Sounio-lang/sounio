@@ -1,0 +1,186 @@
+// stdlib/profile/profiler.sio — Synchronous Wall-Clock Profiler
+//
+// Provides named timing slots using POSIX clock_gettime(CLOCK_MONOTONIC).
+// Up to 64 named slots. Linear search for slot lookup (no hash map).
+//
+// Usage:
+//   var p = profiler_new()
+//   profiler_begin(&!p, "phase1")
+//   // ... work ...
+//   profiler_end(&!p, "phase1")
+//   profiler_report(p)
+//
+// References:
+//   POSIX.1-2008: clock_gettime(3)
+//   CLOCK_MONOTONIC (clockid=1) — monotonic wall clock, unaffected by NTP
+
+// ============================================================================
+// FFI Declarations
+// ============================================================================
+
+extern "C" {
+    fn clock_gettime(clockid: i32, tp: *mut i64) -> i32;
+}
+
+// ============================================================================
+// Types
+// ============================================================================
+
+struct ProfileSlot {
+    name: string,
+    total_ns: i64,
+    call_count: i64,
+    active: bool,
+    start_ns: i64
+}
+
+struct Profiler {
+    slots: [ProfileSlot; 64],
+    slot_count: i64
+}
+
+// ============================================================================
+// Internal helpers (must precede callers)
+// ============================================================================
+
+// Read current monotonic time in nanoseconds via clock_gettime(CLOCK_MONOTONIC).
+// The timespec struct is represented as [seconds, nanoseconds] in a 2-element i64 array.
+fn profiler_now_ns() -> i64 {
+    var ts: [i64; 2] = [0; 2]
+    clock_gettime(1, &!ts as *mut i64)
+    ts[0] * 1000000000 + ts[1]
+}
+
+// Find a slot index by name. Returns -1 if not found.
+fn profiler_find_slot(p: &Profiler, name: string) -> i64 {
+    var i: i64 = 0
+    while i < p.slot_count {
+        if p.slots[i as usize].name == name {
+            return i
+        }
+        i = i + 1
+    }
+    -1
+}
+
+// ============================================================================
+// Public API
+// ============================================================================
+
+/// Create a new empty Profiler with all slots zeroed.
+pub fn profiler_new() -> Profiler {
+    Profiler {
+        slots: [ProfileSlot { name: "", total_ns: 0, call_count: 0, active: false, start_ns: 0 }; 64],
+        slot_count: 0
+    }
+}
+
+/// Begin timing a named slot. Creates the slot if it does not exist.
+/// Records the current monotonic timestamp as start_ns.
+pub fn profiler_begin(p: &!Profiler, name: string) with Mut, IO, Panic {
+    let idx = profiler_find_slot(p as &Profiler, name)
+    if idx >= 0 {
+        p.slots[idx as usize].start_ns = profiler_now_ns()
+        p.slots[idx as usize].active = true
+        return
+    }
+    // Allocate a new slot
+    if p.slot_count >= 64 {
+        println("profiler_begin: slot limit (64) reached, ignoring: ", name)
+        return
+    }
+    let new_idx = p.slot_count
+    p.slots[new_idx as usize].name = name
+    p.slots[new_idx as usize].total_ns = 0
+    p.slots[new_idx as usize].call_count = 0
+    p.slots[new_idx as usize].start_ns = profiler_now_ns()
+    p.slots[new_idx as usize].active = true
+    p.slot_count = p.slot_count + 1
+}
+
+/// End timing a named slot. Adds elapsed nanoseconds to total_ns, increments call_count.
+pub fn profiler_end(p: &!Profiler, name: string) with Mut, IO, Panic {
+    let now = profiler_now_ns()
+    let idx = profiler_find_slot(p as &Profiler, name)
+    if idx < 0 {
+        println("profiler_end: slot not found: ", name)
+        return
+    }
+    let elapsed = now - p.slots[idx as usize].start_ns
+    p.slots[idx as usize].total_ns = p.slots[idx as usize].total_ns + elapsed
+    p.slots[idx as usize].call_count = p.slots[idx as usize].call_count + 1
+    p.slots[idx as usize].active = false
+}
+
+/// Reset all timing data (zero totals and counts, keep slot names).
+pub fn profiler_reset(p: &!Profiler) with Mut, Div, Panic {
+    var i: i64 = 0
+    while i < p.slot_count {
+        p.slots[i as usize].total_ns = 0
+        p.slots[i as usize].call_count = 0
+        p.slots[i as usize].active = false
+        p.slots[i as usize].start_ns = 0
+        i = i + 1
+    }
+}
+
+/// Print a report of all slots: name, total_ms, call_count, avg_us.
+pub fn profiler_report(p: Profiler) with IO, Mut, Div, Panic {
+    println("=== Profiler Report ===")
+    var i: i64 = 0
+    while i < p.slot_count {
+        let slot = p.slots[i as usize]
+        let total_ms = (slot.total_ns as f64) / 1000000.0
+        let avg_us: f64 = if slot.call_count > 0 {
+            (slot.total_ns as f64) / (slot.call_count as f64) / 1000.0
+        } else {
+            0.0
+        }
+        println("  ", slot.name, ": total=", total_ms, "ms  calls=", slot.call_count, "  avg=", avg_us, "us")
+        i = i + 1
+    }
+    println("=======================")
+}
+
+/// Get total time in milliseconds for the named slot. Returns 0.0 if not found.
+pub fn profiler_slot_total_ms(p: Profiler, name: string) -> f64 {
+    var i: i64 = 0
+    while i < p.slot_count {
+        if p.slots[i as usize].name == name {
+            return (p.slots[i as usize].total_ns as f64) / 1000000.0
+        }
+        i = i + 1
+    }
+    0.0
+}
+
+/// Get call count for the named slot. Returns 0 if not found.
+pub fn profiler_slot_calls(p: Profiler, name: string) -> i64 {
+    var i: i64 = 0
+    while i < p.slot_count {
+        if p.slots[i as usize].name == name {
+            return p.slots[i as usize].call_count
+        }
+        i = i + 1
+    }
+    0
+}
+
+/// Get average time per call in microseconds for the named slot. Returns 0.0 if not found or no calls.
+pub fn profiler_slot_avg_us(p: Profiler, name: string) -> f64 {
+    var i: i64 = 0
+    while i < p.slot_count {
+        if p.slots[i as usize].name == name {
+            let calls = p.slots[i as usize].call_count
+            if calls == 0 { return 0.0 }
+            return (p.slots[i as usize].total_ns as f64) / (calls as f64) / 1000.0
+        }
+        i = i + 1
+    }
+    0.0
+}
+
+/// Get the number of registered slots.
+pub fn profiler_slot_count(p: Profiler) -> i64 {
+    p.slot_count
+}
