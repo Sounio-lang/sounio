@@ -304,6 +304,24 @@ def test_clinical_normalize_magic_inline_json():
     fake_ontology.clinical_normalize.assert_called_once()
 
 
+def test_drug_pipeline_magic_format_output():
+    """Test drug pipeline output formatting with HTML."""
+    mock_kernel = Mock()
+    mock_executor = Mock()
+    mock_kernel.executor = mock_executor
+    magics = SounioMagics(mock_kernel)
+
+    # Test the output formatting helper
+    stdout = "Test output\n"
+    knowledge_values = []
+
+    result = magics._format_drug_pipeline_output(stdout, knowledge_values)
+
+    assert "drug-pipeline-output" in result
+    assert "Test output" in result
+    assert "div" in result
+
+
 if __name__ == "__main__":
     import pytest
 

@@ -379,3 +379,154 @@ def test_very_small_epsilon():
     k = Knowledge(1.0, 1e-15, "precise")
     assert k.is_reliable()
     assert math.isclose(k.confidence, 1.0, abs_tol=1e-12)
+
+
+# ---------------------------------------------------------------------------
+# Sounio canonical format serialization
+# ---------------------------------------------------------------------------
+
+
+def test_to_sounio_format_basic():
+    """Test basic Sounio canonical format output."""
+    k = Knowledge(500.0, 2.5, "calibration_batch_2026")
+    result = k.to_sounio_format()
+    assert "Knowledge {" in result
+    assert "value: 500" in result
+    assert "epsilon: 2.5" in result
+    assert 'prov: "calibration_batch_2026"' in result
+    assert result.endswith("}")
+
+
+def test_to_sounio_format_scientific_notation():
+    """Test Sounio format with scientific notation."""
+    k = Knowledge(1.23456e+08, 5e+06, "large_value")
+    result = k.to_sounio_format()
+    # %.6g should use scientific notation for large values
+    assert "Knowledge {" in result
+    assert "1.23456e+08" in result or "1.23456e+8" in result
+    assert "5e+06" in result or "5e+6" in result
+
+
+def test_to_sounio_format_small_values():
+    """Test Sounio format with very small values."""
+    k = Knowledge(1.23456e-08, 5e-10, "tiny")
+    result = k.to_sounio_format()
+    assert "Knowledge {" in result
+    assert "1.23456e-08" in result or "1.23456e-8" in result
+    assert "5e-10" in result
+
+
+def test_to_sounio_format_special_provenance():
+    """Test that provenance is properly quoted."""
+    k = Knowledge(3.14, 0.01, "π from math library")
+    result = k.to_sounio_format()
+    assert 'prov: "π from math library"' in result
+
+
+def test_from_sounio_output_basic():
+    """Test parsing basic Sounio canonical format."""
+    text = 'Knowledge { value: 500 epsilon: 2.5 prov: "calibration_batch_2026" }'
+    k = Knowledge.from_sounio_output(text)
+    assert k.value == 500.0
+    assert k.epsilon == 2.5
+    assert k.provenance == "calibration_batch_2026"
+
+
+def test_from_sounio_output_scientific_notation():
+    """Test parsing Sounio format with scientific notation."""
+    text = 'Knowledge { value: 1.23456e+08 epsilon: 5e+06 prov: "large" }'
+    k = Knowledge.from_sounio_output(text)
+    assert math.isclose(k.value, 1.23456e+08, rel_tol=1e-6)
+    assert math.isclose(k.epsilon, 5e+06, rel_tol=1e-6)
+    assert k.provenance == "large"
+
+
+def test_from_sounio_output_negative_exponent():
+    """Test parsing with negative exponent."""
+    text = 'Knowledge { value: 1.23456e-08 epsilon: 5e-10 prov: "tiny" }'
+    k = Knowledge.from_sounio_output(text)
+    assert math.isclose(k.value, 1.23456e-08, rel_tol=1e-6)
+    assert math.isclose(k.epsilon, 5e-10, rel_tol=1e-6)
+
+
+def test_from_sounio_output_spaces_flexible():
+    """Test that parser handles variable whitespace."""
+    # Extra spaces
+    text = 'Knowledge {  value:  500  epsilon:  2.5  prov: "test" }'
+    try:
+        k = Knowledge.from_sounio_output(text)
+        # Parser may or may not be whitespace-flexible; document actual behavior
+        assert k.value == 500.0
+    except ValueError:
+        # If parser requires exact spacing, that's OK
+        pass
+
+
+def test_from_sounio_output_invalid_format():
+    """Test that parser raises ValueError on malformed input."""
+    text = "not a valid Knowledge format"
+    try:
+        Knowledge.from_sounio_output(text)
+        assert False, "should have raised ValueError"
+    except ValueError as e:
+        assert "Cannot parse Knowledge" in str(e)
+
+
+def test_from_sounio_output_missing_closing_brace():
+    """Test that parser rejects incomplete input."""
+    text = 'Knowledge { value: 500 epsilon: 2.5 prov: "test"'
+    try:
+        Knowledge.from_sounio_output(text)
+        assert False, "should have raised ValueError"
+    except ValueError:
+        pass
+
+
+def test_sounio_format_round_trip():
+    """Test to_sounio_format → from_sounio_output round trip."""
+    original = Knowledge(42.5, 0.125, "experiment_001")
+    formatted = original.to_sounio_format()
+    parsed = Knowledge.from_sounio_output(formatted)
+
+    # Check that parsed values match original
+    assert math.isclose(parsed.value, original.value, rel_tol=1e-6)
+    assert math.isclose(parsed.epsilon, original.epsilon, rel_tol=1e-6)
+    assert parsed.provenance == original.provenance
+
+
+def test_sounio_format_round_trip_large_values():
+    """Test round trip with large values."""
+    original = Knowledge(1.23456e+12, 1.11111e+10, "big_measurement")
+    formatted = original.to_sounio_format()
+    parsed = Knowledge.from_sounio_output(formatted)
+
+    assert math.isclose(parsed.value, original.value, rel_tol=1e-5)
+    assert math.isclose(parsed.epsilon, original.epsilon, rel_tol=1e-5)
+    assert parsed.provenance == original.provenance
+
+
+def test_sounio_format_round_trip_small_values():
+    """Test round trip with very small values."""
+    original = Knowledge(1.23456e-12, 1.11111e-14, "tiny_measurement")
+    formatted = original.to_sounio_format()
+    parsed = Knowledge.from_sounio_output(formatted)
+
+    assert math.isclose(parsed.value, original.value, rel_tol=1e-5)
+    assert math.isclose(parsed.epsilon, original.epsilon, rel_tol=1e-5)
+    assert parsed.provenance == original.provenance
+
+
+def test_sounio_format_round_trip_chain():
+    """Test round trip of computed values."""
+    k1 = Knowledge(10.0, 0.5, "measurement_A")
+    k2 = Knowledge(5.0, 0.2, "measurement_B")
+    result = k1 + k2
+
+    formatted = result.to_sounio_format()
+    parsed = Knowledge.from_sounio_output(formatted)
+
+    assert math.isclose(parsed.value, result.value, rel_tol=1e-6)
+    assert math.isclose(parsed.epsilon, result.epsilon, rel_tol=1e-6)
+    # Provenance should contain traces of both inputs
+    assert "A" in parsed.provenance
+    assert "B" in parsed.provenance

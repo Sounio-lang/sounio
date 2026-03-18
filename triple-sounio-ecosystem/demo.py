@@ -7,12 +7,16 @@ work together correctly. Designed to run on Day 12 after all tracks complete.
 Test 1: sounio-py Knowledge class instantiation and basic operations
 Test 2: drug-discovery pipeline runs end-to-end via sounio.run_file()
 Test 3: Jupyter kernel is installed and discoverable
+Test 4: Knowledge round-trip (repr → parse → verify)
+Test 5: Pipeline Knowledge parsing (verify all 9 values are parseable)
+Test 6: Knowledge arithmetic (GUM propagation correctness)
 """
 
 import sys
 import subprocess
 import os
 import re
+import math
 from pathlib import Path
 
 
@@ -159,6 +163,174 @@ def test_knowledge_parsing():
         return False
 
 
+def test_knowledge_round_trip():
+    """Test 4: Knowledge → repr → parse → verify round-trip"""
+    try:
+        import sounio
+
+        # Create a Knowledge object
+        original = sounio.Knowledge(42.0, 0.1, "test")
+        repr_str = repr(original)
+
+        # Parse using the canonical regex
+        pattern = r'Knowledge\s*\{\s*value:\s*([0-9eE+\-.]+)\s+epsilon:\s*([0-9eE+\-.]+)\s+prov:\s*"([^"]*)"\s*\}'
+        match = re.search(pattern, repr_str)
+
+        assert match is not None, f"Regex failed to match: {repr_str}"
+        value, epsilon, prov = match.groups()
+
+        # Reconstruct
+        parsed = sounio.Knowledge(float(value), float(epsilon), prov)
+
+        # Verify
+        assert abs(parsed.value - original.value) < 1e-6
+        assert abs(parsed.epsilon - original.epsilon) < 1e-6
+        assert parsed.provenance == original.provenance
+
+        print("✅ Test 4 PASS: Knowledge round-trip works")
+        return True
+    except ImportError:
+        print("⚠️  Test 4 SKIP: sounio not installed")
+        return None
+    except Exception as e:
+        print(f"❌ Test 4 FAIL: {e}")
+        return False
+
+
+def test_pipeline_knowledge_parsing():
+    """Test 5: Run pipeline and verify all 9 Knowledge values are parseable"""
+    try:
+        import sounio
+
+        souc_path = os.environ.get('SOUC')
+        if not souc_path:
+            souc_path = "/home/demetrios/RustroverProjects/sounio/artifacts/omega/souc-bin/souc-linux-x86_64-jit"
+
+        if not os.path.exists(souc_path):
+            print(f"⚠️  Test 5 SKIP: souc binary not found at {souc_path}")
+            return None
+
+        pipeline_path = os.path.join(
+            os.path.dirname(__file__),
+            "drug-discovery/examples/full_pipeline.sio"
+        )
+
+        if not os.path.exists(pipeline_path):
+            print(f"⚠️  Test 5 SKIP: pipeline file not found at {pipeline_path}")
+            return None
+
+        # Set up environment
+        env = os.environ.copy()
+        env['SOUC'] = souc_path
+        stdlib_path = os.environ.get('SOUNIO_STDLIB_PATH')
+        if not stdlib_path:
+            stdlib_path = os.path.join(
+                os.path.dirname(__file__),
+                "../stdlib"
+            )
+        env['SOUNIO_STDLIB_PATH'] = stdlib_path
+
+        # Run pipeline
+        result = subprocess.run(
+            [souc_path, 'run', pipeline_path],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            env=env
+        )
+
+        assert result.returncode == 0, f"Pipeline failed: {result.stderr}"
+
+        # Parse Knowledge values
+        executor = sounio.SounioExecutor(souc_path=souc_path, stdlib_path=stdlib_path)
+        knowledge_values = executor._parse_knowledge(result.stdout)
+
+        assert len(knowledge_values) == 9, \
+            f"Expected 9 Knowledge values, got {len(knowledge_values)}"
+
+        # Verify each value is valid
+        for i, k in enumerate(knowledge_values):
+            assert isinstance(k, sounio.Knowledge), f"Value {i} is not Knowledge"
+            assert isinstance(k.value, float), f"Value {i} value is not float"
+            assert isinstance(k.epsilon, float), f"Value {i} epsilon is not float"
+            assert isinstance(k.provenance, str), f"Value {i} provenance is not str"
+
+        # Verify expected provenances
+        expected_provs = [
+            "lipinski_screen", "pk_half_life", "pk_tmax", "pk_cmax", "pk_auc",
+            "trial_efficacy", "trial_adverse", "therapeutic_index", "pipeline_decision"
+        ]
+        actual_provs = [k.provenance for k in knowledge_values]
+        assert actual_provs == expected_provs, \
+            f"Provenance mismatch: {actual_provs}"
+
+        print("✅ Test 5 PASS: Pipeline Knowledge parsing works (9 values)")
+        return True
+    except ImportError:
+        print("⚠️  Test 5 SKIP: sounio not installed")
+        return None
+    except subprocess.TimeoutExpired:
+        print("❌ Test 5 FAIL: Pipeline timeout (60s)")
+        return False
+    except Exception as e:
+        print(f"❌ Test 5 FAIL: {e}")
+        return False
+
+
+def test_knowledge_arithmetic():
+    """Test 6: Knowledge arithmetic GUM propagation correctness"""
+    try:
+        import sounio
+
+        # Test addition: ε = sqrt(ε1² + ε2²)
+        k1 = sounio.Knowledge(10.0, 0.5, "source1")
+        k2 = sounio.Knowledge(20.0, 0.3, "source2")
+        result = k1 + k2
+
+        expected_eps = math.sqrt(0.5**2 + 0.3**2)
+        assert result.value == 30.0
+        assert abs(result.epsilon - expected_eps) < 1e-10, \
+            f"Addition epsilon mismatch: {result.epsilon} vs {expected_eps}"
+
+        # Test multiplication with relative uncertainty
+        k1 = sounio.Knowledge(2.0, 0.1, "measure1")
+        k2 = sounio.Knowledge(3.0, 0.15, "measure2")
+        result = k1 * k2
+
+        rel_eps_squared = (0.1/2.0)**2 + (0.15/3.0)**2
+        expected_eps = 6.0 * math.sqrt(rel_eps_squared)
+        assert result.value == 6.0
+        assert abs(result.epsilon - expected_eps) < 1e-10, \
+            f"Multiplication epsilon mismatch: {result.epsilon} vs {expected_eps}"
+
+        # Test scalar multiplication: ε = |factor| * εa
+        k = sounio.Knowledge(7.0, 0.2, "source")
+        result = k * 3.0
+
+        assert result.value == 21.0
+        assert result.epsilon == 0.6
+        assert result.provenance == "source"
+
+        # Test division
+        k1 = sounio.Knowledge(10.0, 0.5, "numerator")
+        k2 = sounio.Knowledge(2.0, 0.1, "denominator")
+        result = k1 / k2
+
+        rel_eps_squared = (0.5/10.0)**2 + (0.1/2.0)**2
+        expected_eps = 5.0 * math.sqrt(rel_eps_squared)
+        assert result.value == 5.0
+        assert abs(result.epsilon - expected_eps) < 1e-10
+
+        print("✅ Test 6 PASS: Knowledge arithmetic GUM propagation correct")
+        return True
+    except ImportError:
+        print("⚠️  Test 6 SKIP: sounio not installed")
+        return None
+    except Exception as e:
+        print(f"❌ Test 6 FAIL: {e}")
+        return False
+
+
 def main():
     """Run all integration tests"""
     print("=" * 70)
@@ -170,7 +342,9 @@ def main():
         ("Knowledge class", test_sounio_py_knowledge),
         ("Pipeline execution", test_drug_discovery_pipeline),
         ("Jupyter kernel", test_jupyter_kernel_installed),
-        ("Bonus: Knowledge parsing", test_knowledge_parsing),
+        ("Test 4: Knowledge round-trip", test_knowledge_round_trip),
+        ("Test 5: Pipeline Knowledge parsing", test_pipeline_knowledge_parsing),
+        ("Test 6: Knowledge arithmetic", test_knowledge_arithmetic),
     ]
 
     results = []

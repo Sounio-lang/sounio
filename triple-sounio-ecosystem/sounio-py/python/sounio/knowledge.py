@@ -193,6 +193,67 @@ class Knowledge:
     def from_dict(cls, d: dict) -> "Knowledge":
         return cls(d["value"], d.get("epsilon", 0.0), d.get("provenance", ""))
 
+    def to_sounio_format(self) -> str:
+        """Serialize to canonical Sounio output format.
+
+        Returns
+        -------
+        str
+            Canonical format: Knowledge { value: X epsilon: Y prov: "Z" }
+            where X and Y are formatted with 6 significant digits.
+
+        Examples
+        --------
+        >>> k = Knowledge(500.0, 2.5, "calibration_batch_2026")
+        >>> k.to_sounio_format()
+        'Knowledge { value: 500 epsilon: 2.5 prov: "calibration_batch_2026" }'
+        """
+        return (
+            f'Knowledge {{ value: {self.value:.6g} epsilon: {self.epsilon:.6g} '
+            f'prov: "{self.provenance}" }}'
+        )
+
+    @classmethod
+    def from_sounio_output(cls, text: str) -> "Knowledge":
+        """Parse a single Knowledge value from Sounio output format.
+
+        Parameters
+        ----------
+        text : str
+            Text containing a Knowledge value in the canonical format.
+
+        Returns
+        -------
+        Knowledge
+            Parsed Knowledge instance.
+
+        Raises
+        ------
+        ValueError
+            If the text does not match the expected pattern.
+
+        Examples
+        --------
+        >>> text = 'Knowledge { value: 500 epsilon: 2.5 prov: "calibration_batch_2026" }'
+        >>> k = Knowledge.from_sounio_output(text)
+        >>> k.value
+        500.0
+        >>> k.epsilon
+        2.5
+        >>> k.provenance
+        'calibration_batch_2026'
+        """
+        import re
+
+        pattern = (
+            r'Knowledge \{ value: ([\d.e+-]+) epsilon: ([\d.e+-]+) '
+            r'prov: "([^"]*)" \}'
+        )
+        match = re.search(pattern, text)
+        if not match:
+            raise ValueError(f"Cannot parse Knowledge from: {text}")
+        return cls(float(match.group(1)), float(match.group(2)), match.group(3))
+
     # ---- Representation ---------------------------------------------------
 
     def __repr__(self) -> str:

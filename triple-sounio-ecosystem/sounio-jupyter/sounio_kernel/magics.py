@@ -44,6 +44,7 @@ class SounioMagics:
             "%ontology_search": self.magic_ontology_search,
             "%ontology_resolve": self.magic_ontology_resolve,
             "%clinical_normalize": self.magic_clinical_normalize,
+            "%drug_pipeline": self.magic_drug_pipeline,
         }
 
         if magic_name not in handlers:
@@ -374,3 +375,105 @@ Features: Epistemic programming, uncertainty quantification, provenance tracking
         finally:
             if os.path.exists(temp_file):
                 os.remove(temp_file)
+
+    def magic_drug_pipeline(self, line: str) -> str:
+        """
+        Execute the drug discovery pipeline.
+
+        Uses sounio.run_file() to execute the pipeline and returns rich HTML output
+        with epistemic uncertainty visualization.
+
+        Usage:
+            %drug_pipeline                     # Use default pipeline
+            %drug_pipeline path/to/pipeline.sio  # Use custom pipeline file
+        """
+        # Get pipeline path from args, or use default
+        pipeline_path = line.strip() if line.strip() else "drug-discovery/examples/full_pipeline.sio"
+
+        # Try to use sounio-py if available
+        try:
+            from sounio import run_file
+        except ImportError:
+            return """Error: sounio-py not installed.
+Install it with: pip install sounio
+Or use the souc binary directly."""
+
+        try:
+            # Check if file exists
+            if not os.path.exists(pipeline_path):
+                return f"Error: Pipeline file not found: {pipeline_path}"
+
+            # Execute the pipeline via sounio.run_file()
+            result = run_file(pipeline_path)
+
+            if not result.ok:
+                return f"Pipeline execution failed:\n{result.stderr}"
+
+            # Format output with epistemic values
+            output_html = self._format_drug_pipeline_output(
+                result.stdout,
+                result.knowledge_values,
+            )
+
+            return output_html
+
+        except Exception as e:
+            return f"Error executing drug pipeline: {str(e)}"
+
+    def _format_drug_pipeline_output(
+        self,
+        stdout: str,
+        knowledge_values: Optional[list] = None,
+    ) -> str:
+        """
+        Format drug pipeline output with epistemic value visualization.
+
+        Args:
+            stdout: Raw stdout from the pipeline
+            knowledge_values: List of Knowledge values parsed from output
+
+        Returns:
+            HTML string for Jupyter display
+        """
+        # Import display utilities
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "display",
+            os.path.join(os.path.dirname(__file__), "display.py")
+        )
+        display_module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(display_module)
+        format_knowledge_html = display_module.format_knowledge_html
+
+        # Build HTML header
+        html_parts = [
+            '<div class="drug-pipeline-output" style="'
+            '    font-family: monospace; '
+            '    background-color: #f8f9fa; '
+            '    border: 1px solid #ddd; '
+            '    border-radius: 4px; '
+            '    padding: 12px; '
+            '    margin: 8px 0; '
+            '">'
+        ]
+
+        # Add raw output section
+        if stdout:
+            html_parts.append("<h4>Pipeline Output:</h4>")
+            html_parts.append(
+                f"<pre style='background-color: white; "
+                f"padding: 8px; border-radius: 3px; overflow-x: auto;'>"
+                f"{stdout}</pre>"
+            )
+
+        # Add epistemic values section if present
+        if knowledge_values:
+            html_parts.append("<h4>Epistemic Values:</h4>")
+            for kv in knowledge_values:
+                # Use display format function for each knowledge value
+                epistemic_html = format_knowledge_html(kv.value, kv.epsilon, kv.prov)
+                html_parts.append(epistemic_html)
+
+        html_parts.append("</div>")
+
+        return "\n".join(html_parts)
