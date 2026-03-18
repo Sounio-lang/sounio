@@ -1,1 +1,111 @@
-//! gzip (disabled)
+// stdlib/compress/gzip.sio — Gzip Compression via zlib FFI
+//
+// Provides compress/decompress and CRC32 using the system zlib library.
+// All FFI calls go through the one-shot compress2/uncompress/crc32 API.
+//
+// References:
+//   RFC 1952 — GZIP file format specification
+//   zlib manual — https://zlib.net/manual.html
+//   Gailly & Adler (1995) — zlib design
+
+// ============================================================================
+// FFI Declarations
+// ============================================================================
+
+extern "C" {
+    fn compress2(dest: *mut u8, dest_len: *mut i64, src: *const u8, src_len: i64, level: i32) -> i32;
+    fn uncompress(dest: *mut u8, dest_len: *mut i64, src: *const u8, src_len: i64) -> i32;
+    fn crc32(crc: i64, buf: *const u8, len: i64) -> i64;
+}
+
+// ============================================================================
+// Types
+// ============================================================================
+
+struct GzipError { code: i32 }
+struct GzipResult { ok: bool, size: i64, error: GzipError }
+
+// ============================================================================
+// Compress
+// ============================================================================
+
+/// Compress src into dest using zlib compress2 at level 6.
+/// Returns GzipResult with ok=true and size of compressed data on success.
+pub fn gzip_compress(src: *const u8, src_len: i64, dest: *mut u8, dest_cap: i64) -> GzipResult {
+    gzip_compress_level(src, src_len, dest, dest_cap, 6)
+}
+
+/// Compress src into dest using zlib compress2 at the given level (1-9).
+pub fn gzip_compress_level(src: *const u8, src_len: i64, dest: *mut u8, dest_cap: i64, level: i32) -> GzipResult {
+    var out_len: i64 = dest_cap
+    let rc = compress2(dest, &!out_len as *mut i64, src, src_len, level)
+    if rc == 0 {
+        return GzipResult { ok: true, size: out_len, error: GzipError { code: 0 } }
+    }
+    GzipResult { ok: false, size: 0, error: GzipError { code: rc } }
+}
+
+// ============================================================================
+// Decompress
+// ============================================================================
+
+/// Decompress src into dest using zlib uncompress.
+/// Returns GzipResult with ok=true and size of decompressed data on success.
+pub fn gzip_decompress(src: *const u8, src_len: i64, dest: *mut u8, dest_cap: i64) -> GzipResult {
+    var out_len: i64 = dest_cap
+    let rc = uncompress(dest, &!out_len as *mut i64, src, src_len)
+    if rc == 0 {
+        return GzipResult { ok: true, size: out_len, error: GzipError { code: 0 } }
+    }
+    GzipResult { ok: false, size: 0, error: GzipError { code: rc } }
+}
+
+// ============================================================================
+// CRC32
+// ============================================================================
+
+/// Compute CRC32 of data using the zlib crc32 function.
+/// Uses initial CRC value of 0 (standard CRC32/ISO-HDLC).
+pub fn gzip_crc32(data: *const u8, len: i64) -> i64 {
+    crc32(0, data, len)
+}
+
+/// Compute CRC32 via the FFI crc32 function (delegates to gzip_crc32).
+pub fn crc32_compute(data: *const u8, len: i64) -> i64 {
+    crc32(0, data, len)
+}
+
+// ============================================================================
+// Predicates and metadata
+// ============================================================================
+
+/// Returns true if GzipResult indicates success.
+pub fn gzip_is_ok(r: GzipResult) -> bool {
+    r.ok
+}
+
+/// Returns a human-readable string for a GzipError.
+/// zlib return codes: 0=ok, -2=stream error, -3=data error, -4=mem error, -5=buf error.
+pub fn gzip_error_message(e: GzipError) -> string {
+    if e.code == 0  { return "ok" }
+    if e.code == -2 { return "stream error" }
+    if e.code == -3 { return "data error" }
+    if e.code == -4 { return "mem error" }
+    if e.code == -5 { return "buf error" }
+    "unknown error"
+}
+
+/// Default compression level (zlib Z_DEFAULT_COMPRESSION = 6).
+pub fn gzip_default_level() -> i32 {
+    6
+}
+
+/// Best speed compression level (zlib Z_BEST_SPEED = 1).
+pub fn gzip_best_speed() -> i32 {
+    1
+}
+
+/// Best compression level (zlib Z_BEST_COMPRESSION = 9).
+pub fn gzip_best_compression() -> i32 {
+    9
+}
