@@ -1,1 +1,150 @@
-//! hex (disabled)
+// stdlib/encoding/hex.sio — Hexadecimal Encoding / Decoding
+//
+// Encode bytes to lowercase or uppercase hex strings, and decode back.
+// Operates on fixed-size arrays (no heap allocation).
+//
+// # Capacity
+//   - Encode: up to 256 input bytes → 512 output hex chars
+//   - Decode: up to 512 hex chars → 256 output bytes
+//
+// # Example
+//   var out: [u8; 512] = [0; 512]
+//   let len = hex_encode(&input, n, &!out)
+//   // out[0..len] is the hex string (lowercase, no prefix)
+
+// =============================================================================
+// Nibble helpers
+// =============================================================================
+
+// Low nibble of byte → lowercase hex digit
+fn nibble_to_hex_lo(b: u8) -> u8 {
+    let n = b & 15u8
+    if n < 10u8 { 48u8 + n } else { 87u8 + n }  // '0'+n or 'a'-10+n
+}
+
+// Low nibble of byte → uppercase hex digit
+fn nibble_to_hex_up(b: u8) -> u8 {
+    let n = b & 15u8
+    if n < 10u8 { 48u8 + n } else { 55u8 + n }  // '0'+n or 'A'-10+n
+}
+
+// Hex digit (ASCII) → nibble value. Returns 255 on invalid.
+fn hex_digit_val(c: u8) -> u8 {
+    if c >= 48u8 && c <= 57u8  { return c - 48u8 }         // 0-9
+    if c >= 97u8 && c <= 102u8 { return c - 97u8 + 10u8 }  // a-f
+    if c >= 65u8 && c <= 70u8  { return c - 65u8 + 10u8 }  // A-F
+    255u8   // invalid
+}
+
+// =============================================================================
+// Encode — Lowercase hex
+// =============================================================================
+
+/// Encode bytes to lowercase hex (e.g. 0xDE → "de").
+///
+/// # Parameters
+/// - `data`: Input bytes (max 256)
+/// - `data_len`: Number of valid bytes
+/// - `out`: Output array for hex ASCII (needs 2*data_len bytes)
+///
+/// # Return
+/// Number of hex characters written (= 2*data_len), or -1 on error.
+pub fn hex_encode(data: &[u8; 256], data_len: i32, out: &![u8; 512]) -> i32 with Mut, Div, Panic {
+    if data_len < 0 || data_len > 256 { return 0 - 1 }
+
+    var i: i32 = 0
+    while i < data_len {
+        let b = data[i as usize]
+        out[(i * 2) as usize]       = nibble_to_hex_lo(b >> 4u8)
+        out[(i * 2 + 1) as usize]   = nibble_to_hex_lo(b)
+        i = i + 1
+    }
+
+    data_len * 2
+}
+
+// =============================================================================
+// Encode — Uppercase hex
+// =============================================================================
+
+/// Encode bytes to uppercase hex (e.g. 0xDE → "DE").
+///
+/// # Return
+/// Number of hex characters written, or -1 on error.
+pub fn hex_encode_upper(data: &[u8; 256], data_len: i32, out: &![u8; 512]) -> i32 with Mut, Div, Panic {
+    if data_len < 0 || data_len > 256 { return 0 - 1 }
+
+    var i: i32 = 0
+    while i < data_len {
+        let b = data[i as usize]
+        out[(i * 2) as usize]       = nibble_to_hex_up(b >> 4u8)
+        out[(i * 2 + 1) as usize]   = nibble_to_hex_up(b)
+        i = i + 1
+    }
+
+    data_len * 2
+}
+
+// =============================================================================
+// Encode with 0x prefix
+// =============================================================================
+
+/// Encode bytes to lowercase hex with "0x" prefix.
+///
+/// # Return
+/// Number of characters written (2 + 2*data_len), or -1 on error.
+pub fn hex_encode_with_prefix(data: &[u8; 256], data_len: i32, out: &![u8; 512]) -> i32 with Mut, Div, Panic {
+    if data_len < 0 || data_len > 255 { return 0 - 1 }
+
+    out[0] = 48u8   // '0'
+    out[1] = 120u8  // 'x'
+
+    var i: i32 = 0
+    while i < data_len {
+        let b = data[i as usize]
+        out[(2 + i * 2) as usize]       = nibble_to_hex_lo(b >> 4u8)
+        out[(2 + i * 2 + 1) as usize]   = nibble_to_hex_lo(b)
+        i = i + 1
+    }
+
+    2 + data_len * 2
+}
+
+// =============================================================================
+// Decode
+// =============================================================================
+
+/// Decode lowercase or uppercase hex string to bytes.
+///
+/// # Parameters
+/// - `hex`: ASCII hex characters (max 512; must be even length)
+/// - `hex_len`: Number of valid hex characters (must be even)
+/// - `out`: Output bytes (max 256)
+///
+/// # Return
+/// Number of bytes decoded, or -1 on invalid input / odd length.
+pub fn hex_decode(hex: &[u8; 512], hex_len: i32, out: &![u8; 256]) -> i32 with Mut, Div, Panic {
+    if hex_len < 0 || hex_len > 512 { return 0 - 1 }
+    // Skip optional "0x" prefix
+    var start: i32 = 0
+    if hex_len >= 2 && hex[0] == 48u8 && (hex[1] == 120u8 || hex[1] == 88u8) {
+        start = 2
+    }
+    let effective_len = hex_len - start
+    if effective_len < 0 { return 0 - 1 }
+    // Must be even number of hex digits
+    if effective_len % 2 != 0 { return 0 - 1 }
+
+    let n_bytes = effective_len / 2
+
+    var i: i32 = 0
+    while i < n_bytes {
+        let hi = hex_digit_val(hex[(start + i * 2) as usize])
+        let lo = hex_digit_val(hex[(start + i * 2 + 1) as usize])
+        if hi == 255u8 || lo == 255u8 { return 0 - 1 }
+        out[i as usize] = (hi << 4u8) | lo
+        i = i + 1
+    }
+
+    n_bytes
+}
