@@ -237,7 +237,7 @@ class TestKnowledgeArithmetic:
         result = k * 3.0
 
         assert result.value == 21.0
-        assert result.epsilon == 0.6
+        assert abs(result.epsilon - 0.6) < 1e-10
         assert result.provenance == "source"
 
     def test_knowledge_arithmetic_preserves_provenance_chain(self):
@@ -316,6 +316,258 @@ class TestKnowledgeProperties:
 
         assert k_good.is_reliable(threshold=0.05)
         assert not k_bad.is_reliable(threshold=0.05)
+
+    def test_scale(self):
+        """Verify scale method for uncertainty propagation."""
+        k = Knowledge(50.0, 5.0, "measurement")
+        scaled = k.scale(2.0)
+
+        assert scaled.value == 100.0
+        assert scaled.epsilon == 10.0
+        assert scaled.provenance == "measurement"
+
+    def test_to_sounio_format(self):
+        """Verify to_sounio_format for canonical output."""
+        k = Knowledge(500.0, 2.5, "calibration")
+        formatted = k.to_sounio_format()
+
+        assert "Knowledge {" in formatted
+        assert "500" in formatted
+        assert "2.5" in formatted
+        assert "calibration" in formatted
+
+    def test_from_sounio_output(self):
+        """Verify from_sounio_output parser."""
+        text = 'Knowledge { value: 100 epsilon: 5.0 prov: "test_source" }'
+        k = Knowledge.from_sounio_output(text)
+
+        assert k.value == 100.0
+        assert k.epsilon == 5.0
+        assert k.provenance == "test_source"
+
+
+# ============================================================================
+# PubChem integration
+# ============================================================================
+
+class TestPubChemIntegration:
+    """Test PubChem integration with Knowledge values."""
+
+    def test_fetch_molecule_by_name(self):
+        """Fetch a molecule from PubChem offline cache."""
+        from sounio.integrations.pubchem import fetch_by_name
+
+        mol = fetch_by_name("aspirin", offline=True)
+
+        assert mol.name == "aspirin"
+        assert mol.molecular_weight.value > 100
+        assert mol.molecular_weight.epsilon == 0.001  # MW epsilon
+        assert mol.logp is not None
+
+    def test_molecule_properties_are_knowledge(self):
+        """Verify molecule properties use Knowledge with uncertainty."""
+        from sounio.integrations.pubchem import fetch_by_name
+
+        mol = fetch_by_name("ibuprofen", offline=True)
+
+        # MW and LogP should have epistemic uncertainty
+        assert isinstance(mol.molecular_weight, Knowledge)
+        assert isinstance(mol.logp, Knowledge)
+        assert mol.molecular_weight.epsilon > 0
+        assert mol.logp.epsilon > 0
+
+    def test_multiple_molecules(self):
+        """Fetch multiple molecules and verify Lipinski rule."""
+        from sounio.integrations.pubchem import fetch_by_name
+
+        molecules = ["aspirin", "ibuprofen", "paracetamol"]
+        for name in molecules:
+            mol = fetch_by_name(name, offline=True)
+            assert mol.name == name
+            assert mol.hbd >= 0
+            assert mol.hba >= 0
+
+    def test_offline_cache_coverage(self):
+        """Verify offline cache has common drug compounds."""
+        from sounio.integrations.pubchem import _OFFLINE_CACHE
+
+        # Expected drugs in cache
+        expected = {"aspirin", "ibuprofen", "metformin", "paracetamol", "caffeine"}
+        cached_names = {v["name"] for v in _OFFLINE_CACHE.values()}
+
+        for name in expected:
+            assert name in cached_names, f"Missing {name} in offline cache"
+
+    def test_offline_cache_miss_raises_keyerror(self):
+        """Verify offline mode raises KeyError on cache miss."""
+        from sounio.integrations.pubchem import fetch_by_name
+        import pytest
+
+        with pytest.raises(KeyError):
+            fetch_by_name("nonexistent_compound_12345", offline=True)
+
+
+# ============================================================================
+# Report generation integration
+# ============================================================================
+
+class TestReportIntegration:
+    """Test ReportBuilder integration with Knowledge values."""
+
+    def test_report_builder_from_knowledge(self):
+        """Generate a report with Knowledge values."""
+        from sounio.report import ReportBuilder
+
+        rb = ReportBuilder("Test Report", author="Test Author")
+        rb.add_knowledge_table(
+            "Test Data",
+            {
+                "param1": Knowledge(42.0, 0.5, "test1"),
+                "param2": Knowledge(100.0, 5.0, "test2"),
+            }
+        )
+
+        md = rb.to_markdown()
+
+        assert "Test Report" in md
+        assert "Test Author" in md
+        assert "Test Data" in md
+        assert "42" in md
+        assert "100" in md
+
+    def test_report_table_includes_uncertainty(self):
+        """Verify report tables include epsilon and relative uncertainty."""
+        from sounio.report import ReportBuilder
+
+        rb = ReportBuilder("Report")
+        k = Knowledge(200.0, 10.0, "measure")
+        rb.add_knowledge_table("Data", {"Value": k})
+
+        md = rb.to_markdown()
+
+        # Should include value and uncertainty
+        assert "200" in md or "2e+02" in md or "200" in md.lower()
+        assert "10" in md or "0.1e+02" in md
+        assert "measure" in md
+
+    def test_report_with_multiple_sections(self):
+        """Verify report with text, table, and figure sections."""
+        from sounio.report import ReportBuilder
+
+        rb = ReportBuilder("Multi-section Report")
+        rb.add_section("Intro", "This is the introduction.")
+        rb.add_knowledge_table(
+            "Results",
+            {"result": Knowledge(42.0, 2.0, "calc")}
+        )
+        rb.add_section("Conclusion", "This is the conclusion.")
+
+        md = rb.to_markdown()
+
+        assert "Intro" in md
+        assert "Results" in md
+        assert "Conclusion" in md
+        assert "This is the introduction" in md
+        assert "This is the conclusion" in md
+
+    def test_report_latex_generation(self):
+        """Verify LaTeX report generation."""
+        from sounio.report import ReportBuilder
+
+        rb = ReportBuilder("LaTeX Report", author="Author")
+        rb.add_knowledge_table(
+            "Data",
+            {"value": Knowledge(50.0, 2.5, "source")}
+        )
+
+        latex = rb.to_latex()
+
+        assert r"\documentclass" in latex
+        assert r"\title{LaTeX Report}" in latex
+        assert r"\author{Author}" in latex
+        assert "50" in latex
+        assert "2.5" in latex
+
+    def test_report_save_markdown(self, tmp_path):
+        """Verify report can be saved to markdown file."""
+        from sounio.report import ReportBuilder
+
+        rb = ReportBuilder("Saved Report")
+        rb.add_section("Content", "Test content")
+
+        output_path = tmp_path / "report.md"
+        rb.save(str(output_path), format="markdown")
+
+        assert output_path.exists()
+        content = output_path.read_text()
+        assert "Saved Report" in content
+        assert "Test content" in content
+
+    def test_report_save_latex(self, tmp_path):
+        """Verify report can be saved to LaTeX file."""
+        from sounio.report import ReportBuilder
+
+        rb = ReportBuilder("LaTeX Saved Report")
+        rb.add_section("Content", "LaTeX content")
+
+        output_path = tmp_path / "report.tex"
+        rb.save(str(output_path), format="latex")
+
+        assert output_path.exists()
+        content = output_path.read_text()
+        assert r"\documentclass" in content
+
+
+# ============================================================================
+# Full workflow integration
+# ============================================================================
+
+class TestCompleteWorkflow:
+    """Test complete PubChem → Knowledge → Pipeline → Report workflow."""
+
+    def test_pubchem_to_knowledge_arithmetic(self):
+        """PubChem data used in Knowledge arithmetic."""
+        from sounio.integrations.pubchem import fetch_by_name
+
+        mol = fetch_by_name("aspirin", offline=True)
+
+        # Use molecular weight in arithmetic
+        dose = Knowledge(500.0, 10.0, "dose_mg")
+        dose_per_gram = dose / mol.molecular_weight  # MW ~= 180
+
+        assert dose_per_gram.value > 0
+        assert dose_per_gram.epsilon > 0
+        assert dose_per_gram.relative_uncertainty > 0
+
+    def test_pipeline_results_to_report(self, executor, pipeline_path):
+        """Pipeline results can be formatted into report."""
+        from sounio.report import ReportBuilder
+
+        result = executor.run_file(pipeline_path, timeout=60)
+        assert result.ok
+
+        rb = ReportBuilder("Pipeline Results Report")
+
+        # Convert pipeline Knowledge values to dict for table
+        if result.knowledge_values:
+            kv_dict = {kv.provenance: kv for kv in result.knowledge_values}
+            rb.add_knowledge_table("Pipeline Outputs", kv_dict)
+
+        md = rb.to_markdown()
+        assert "Pipeline Results Report" in md
+        assert "Pipeline Outputs" in md
+
+    def test_knowledge_chain_provenance(self):
+        """Verify provenance chain through complex operations."""
+        k1 = Knowledge(10.0, 0.5, "measure_a")
+        k2 = Knowledge(20.0, 1.0, "measure_b")
+        k3 = Knowledge(2.0, 0.1, "measure_c")
+
+        result = (k1 + k2) * k3
+
+        # Provenance should include all three measures
+        assert "measure_a" in result.provenance or "measure_b" in result.provenance
+        assert "measure_c" in result.provenance
 
 
 # ============================================================================

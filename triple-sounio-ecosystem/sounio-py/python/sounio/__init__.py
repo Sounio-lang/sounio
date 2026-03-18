@@ -127,6 +127,16 @@ try:
 except ImportError:
     _HAS_PANDAS_EXT = False
 
+# Integrations module
+from . import integrations  # noqa: F401
+
+# High-level modules
+try:
+    from . import report  # noqa: F401
+    from .report import ReportBuilder  # noqa: F401
+except ImportError:
+    pass
+
 
 # ---------------------------------------------------------------------------
 # Public API surface
@@ -158,6 +168,11 @@ __all__ = [
     "is_subclass",
     "map_term",
     "clinical_normalize",
+    # Integrations
+    "integrations",
+    # Report generation
+    "report",
+    "ReportBuilder",
     # Convenience
     "get_executor",
     "reset_executor",
