@@ -28,6 +28,7 @@ fn source_byte(idx: i64) -> i64 { SRC[idx as usize] as i64 }
 // Source text
 var SRC: [i8; 1048576] = [0; 1048576]
 var SRC_LEN: i64 = 0
+var SRC_BUF: i64 = 0  // native: mmap'd source buffer pointer
 
 // Token storage
 var TK_KIND: [i64; 65536] = [0; 65536]
@@ -85,6 +86,22 @@ var FIX_COUNT: i64 = 0
 
 // Parser position
 var POS: i64 = 0
+// Loop context: current while-loop top (for continue); 0 = no active loop
+var LOOP_TOP: i64 = 0
+// Break fixup: forward JMP offsets emitted by NK_BREAK, patched after loop
+var BREAK_FIXUP_OFF: [i64; 64] = [0; 64]
+var BREAK_FIXUP_COUNT: i64 = 0
+
+// Global variable tracking for compiler output
+var MB_GL_NS: [i64; 256] = [0; 256]
+var MB_GL_NE: [i64; 256] = [0; 256]
+var MB_GL_OFF: [i64; 256] = [0; 256]
+var MB_GL_SZ: [i64; 256] = [0; 256]
+var MB_GL_COUNT: i64 = 0
+var MB_BSS_TOTAL: i64 = 0
+// BSS addresses for SRC_BUF and SRC_LEN (populated after mb_collect_globals)
+var MB_SRC_BUF_GADDR: i64 = 0
+var MB_SRC_LEN_GADDR: i64 = 0
 
 // ============================================================================
 // Constants
@@ -272,13 +289,34 @@ fn lex() with Mut, Panic, Div {
             }
             continue
         }
-        // Numbers
+        // Numbers (decimal and hex 0x...)
         if is_digit(ch) {
             let start = p
             var val: i64 = 0
-            while p < SRC_LEN && is_digit(src_byte(p)) {
-                val = val * 10 + (src_byte(p) - 48)
-                p = p + 1
+            // Check for 0x hex prefix
+            if ch == 48 && p + 1 < SRC_LEN && src_byte(p + 1) == 120 {
+                // hex literal
+                p = p + 2  // skip 0x
+                while p < SRC_LEN {
+                    let hc = src_byte(p)
+                    if hc >= 48 && hc <= 57 {
+                        val = val * 16 + (hc - 48)
+                        p = p + 1
+                    } else if hc >= 65 && hc <= 70 {
+                        val = val * 16 + (hc - 55)
+                        p = p + 1
+                    } else if hc >= 97 && hc <= 102 {
+                        val = val * 16 + (hc - 87)
+                        p = p + 1
+                    } else {
+                        break
+                    }
+                }
+            } else {
+                while p < SRC_LEN && is_digit(src_byte(p)) {
+                    val = val * 10 + (src_byte(p) - 48)
+                    p = p + 1
+                }
             }
             add_token(2, start, p, val)
             continue
@@ -396,13 +434,24 @@ fn advance() with Mut, Panic {
 
 fn expect(kind: i64) with Mut, Panic {
     if cur_kind() != kind {
-        print("parse error: unexpected token")
+        print("parse error: expected ")
+        print_int(kind)
+        print(" got ")
+        print_int(cur_kind())
+        print(" at ")
+        print_int(POS)
+        print("\n")
     }
     advance()
 }
 
 fn new_node(kind: i64, ival: i64) -> i64 with Mut, Panic {
     let idx = ND_COUNT
+    if idx >= 32768 {
+        print("NODE OVERFLOW idx=")
+        print_int(idx)
+        print("\n")
+    }
     ND_KIND[idx as usize] = kind
     ND_IVAL[idx as usize] = ival
     ND_LEFT[idx as usize] = -1
@@ -585,21 +634,50 @@ fn parse_expr(min_prec: i64) -> i64 with Mut, Panic, Div {
     } else if k == 55 {
         // while expression
         left = parse_while_expr()
+    } else if k == 35 {
+        // Array literal [expr; N] or [expr, expr, ...]
+        advance()  // [
+        let fill_val = parse_expr(0)
+        var arr_count: i64 = 1
+        if cur_kind() == 39 {  // ;
+            advance()  // ;
+            if cur_kind() == 2 {
+                arr_count = cur_ival()
+                advance()  // N
+            }
+        }
+        if cur_kind() == 36 { advance() }  // ]
+        // NK_ARRAY_LIT (kind 50): ND_LEFT = fill value, ND_IVAL = count
+        left = new_node(50, arr_count)
+        ND_LEFT[left as usize] = fill_val
     } else {
         // Unknown token, create a dummy
         left = new_node(1, 0)
         advance()
     }
 
-    // Postfix: as cast
-    if cur_kind() == 65 {
-        advance()  // as
-        // skip the type name
-        if cur_kind() == 1 || cur_kind() >= 50 {
-            advance()
+    // Postfix: as cast and array indexing
+    var postfix_done: i64 = 0
+    while postfix_done == 0 {
+        if cur_kind() == 65 {
+            advance()  // as
+            // skip the type name
+            if cur_kind() == 1 || cur_kind() >= 50 {
+                advance()
+            }
+            // 'as' is a no-op cast in our codegen (everything is i64)
+        } else if cur_kind() == 35 {
+            // postfix array indexing: left[idx]
+            advance()  // [
+            let idx_expr = parse_expr(0)
+            if cur_kind() == 36 { advance() }  // ]
+            let inode = new_node(13, 0)  // NK_INDEX
+            ND_LEFT[inode as usize] = left
+            ND_RIGHT[inode as usize] = idx_expr
+            left = inode
+        } else {
+            postfix_done = 1
         }
-        // 'as' is a no-op cast in our codegen (everything is i64)
-        // left stays the same
     }
 
     // Infix loop (Pratt precedence)
@@ -718,7 +796,9 @@ fn parse_stmt() -> i64 with Mut, Panic, Div {
         skip_type_annotation()
         expect(30)  // =
         let init = parse_expr(0)
-        let node = new_node(if is_var { 41 } else { 40 }, 0)
+        var node_kind: i64 = 40
+        if is_var { node_kind = 41 }
+        let node = new_node(node_kind, 0)
         ND_STR_OFF[node as usize] = name_off
         ND_STR_LEN[node as usize] = name_len
         ND_LEFT[node as usize] = init
@@ -872,6 +952,12 @@ fn parse_program() with Mut, Panic, Div {
 // ============================================================================
 
 fn emit(b: i64) with Mut, Panic {
+    if CODE_LEN < 0 || CODE_LEN >= 262144 {
+        print("EMIT OVERFLOW CODE_LEN=")
+        print_int(CODE_LEN)
+        print("\n")
+        return
+    }
     CODE[CODE_LEN as usize] = b as i8
     CODE_LEN = CODE_LEN + 1
 }
@@ -990,6 +1076,11 @@ fn locals_reset() with Mut {
 
 fn alloc_slot() -> i64 with Mut {
     let s = NEXT_SLOT
+    if s > 4000 {
+        print("SLOT OVERFLOW slot=")
+        print_int(s)
+        print("\n")
+    }
     NEXT_SLOT = NEXT_SLOT + 1
     s
 }
@@ -1051,12 +1142,130 @@ fn find_fn_by_name(off: i64, len: i64) -> i64 with Mut, Panic, Div {
 }
 
 // ============================================================================
+// Global variable collection (scans tokens for file-scope var declarations)
+// ============================================================================
+
+fn mb_collect_globals() with Mut, Panic, Div {
+    var ti: i64 = 0
+    var depth: i64 = 0
+    while ti < TK_COUNT {
+        let k = TK_KIND[ti as usize]
+        if k == 0 { break }
+        if k == 33 { depth = depth + 1 }
+        else if k == 34 { depth = depth - 1 }
+        else if k == 52 && depth == 0 {
+            // TK_VAR at top level: var NAME : TYPE = INIT
+            ti = ti + 1
+            let ns = TK_START[ti as usize]
+            let ne = TK_END[ti as usize]
+            let gi = MB_GL_COUNT
+            MB_GL_NS[gi as usize] = ns
+            MB_GL_NE[gi as usize] = ne
+            MB_GL_OFF[gi as usize] = MB_BSS_TOTAL
+            ti = ti + 1  // skip name
+            var sz: i64 = 8
+            var count: i64 = 1
+            // check for : type annotation
+            if TK_KIND[ti as usize] == 38 {
+                ti = ti + 1  // skip :
+                // check for [T; N] array type
+                if TK_KIND[ti as usize] == 35 {
+                    ti = ti + 1  // skip [
+                    // type name (ident)
+                    if TK_KIND[ti as usize] == 1 {
+                        let tns = TK_START[ti as usize]
+                        let tne = TK_END[ti as usize]
+                        // check if type is "i8" (bytes 105, 56)
+                        if tne - tns == 2 {
+                            let b0 = source_byte(tns)
+                            let b1 = source_byte(tns + 1)
+                            if b0 == 105 && b1 == 56 { sz = 1 }
+                        }
+                        ti = ti + 1  // skip type name
+                    }
+                    // skip ; size ]
+                    if TK_KIND[ti as usize] == 39 { ti = ti + 1 }  // ;
+                    if TK_KIND[ti as usize] == 2 {
+                        count = TK_IVAL[ti as usize]
+                        ti = ti + 1
+                    }
+                    if TK_KIND[ti as usize] == 36 { ti = ti + 1 }  // ]
+                } else {
+                    // scalar type: skip type name token
+                    if TK_KIND[ti as usize] == 1 || TK_KIND[ti as usize] >= 50 { ti = ti + 1 }
+                }
+            }
+            MB_GL_SZ[gi as usize] = sz
+            MB_BSS_TOTAL = MB_BSS_TOTAL + count * sz
+            let rem = MB_BSS_TOTAL - (MB_BSS_TOTAL / 8) * 8
+            if rem != 0 { MB_BSS_TOTAL = MB_BSS_TOTAL + (8 - rem) }
+            MB_GL_COUNT = MB_GL_COUNT + 1
+        }
+        ti = ti + 1
+    }
+}
+
+fn mb_find_global(pool_off: i64, pool_len: i64) -> i64 with Mut, Panic, Div {
+    var gi: i64 = 0
+    while gi < MB_GL_COUNT {
+        let ns = MB_GL_NS[gi as usize]
+        let ne = MB_GL_NE[gi as usize]
+        if pool_len == ne - ns {
+            var match_ok: i64 = 1
+            var ci: i64 = 0
+            while ci < pool_len {
+                let pb = POOL[(pool_off + ci) as usize] as i64
+                let sb = source_byte(ns + ci)
+                if pb != sb { match_ok = 0 }
+                ci = ci + 1
+            }
+            if match_ok == 1 { return gi }
+        }
+        gi = gi + 1
+    }
+    0 - 1
+}
+
+// Scan MB_GL_* for "SRC_BUF" and "SRC_LEN" by source bytes, set MB_SRC_BUF_GADDR / MB_SRC_LEN_GADDR
+// SRC_BUF = bytes 83,82,67,95,66,85,70 (7 chars)
+// SRC_LEN = bytes 83,82,67,95,76,69,78 (7 chars)
+fn mb_resolve_src_globals() with Mut, Panic, Div {
+    var gi: i64 = 0
+    while gi < MB_GL_COUNT {
+        let ns = MB_GL_NS[gi as usize]
+        let ne = MB_GL_NE[gi as usize]
+        if ne - ns == 7 {
+            let b0 = source_byte(ns)
+            let b1 = source_byte(ns + 1)
+            let b2 = source_byte(ns + 2)
+            let b3 = source_byte(ns + 3)
+            let b4 = source_byte(ns + 4)
+            let b5 = source_byte(ns + 5)
+            let b6 = source_byte(ns + 6)
+            if b0 == 83 && b1 == 82 && b2 == 67 && b3 == 95 && b4 == 66 && b5 == 85 && b6 == 70 {
+                MB_SRC_BUF_GADDR = 0x700000 + MB_GL_OFF[gi as usize]
+            }
+            if b0 == 83 && b1 == 82 && b2 == 67 && b3 == 95 && b4 == 76 && b5 == 69 && b6 == 78 {
+                MB_SRC_LEN_GADDR = 0x700000 + MB_GL_OFF[gi as usize]
+            }
+        }
+        gi = gi + 1
+    }
+}
+
+// ============================================================================
 // Codegen: compile AST nodes
 // ============================================================================
 
 fn compile_node(node: i64) -> i64 with Mut, Panic, Div {
     if node == -1 {
         emit_mov_rax_imm(0)
+        return 0
+    }
+    if node < 0 || node >= 32768 {
+        print("BAD NODE node=")
+        print_int(node)
+        print("\n")
         return 0
     }
     let kind = ND_KIND[node as usize]
@@ -1073,7 +1282,7 @@ fn compile_node(node: i64) -> i64 with Mut, Panic, Div {
         return 0
     }
     if kind == 3 {
-        // NK_STR — emit string data inline, load address
+        // NK_STR — emit string data inline (null-terminated), load address
         let soff = ND_STR_OFF[node as usize]
         let slen = ND_STR_LEN[node as usize]
         // JMP over the string data
@@ -1081,16 +1290,18 @@ fn compile_node(node: i64) -> i64 with Mut, Panic, Div {
         let jmp_pos = CODE_LEN
         emit(0x00)  // placeholder
         let str_addr = CODE_LEN
-        // Emit string bytes
+        // Emit string bytes + null terminator
         var si: i64 = 0
         while si < slen {
+            let pool_idx = soff + si
             emit(POOL[(soff + si) as usize] as i64)
             si = si + 1
         }
+        emit(0)  // null terminator for str_len compatibility
         // Patch jump
         let dist = CODE_LEN - jmp_pos - 1
         CODE[jmp_pos as usize] = dist as i8
-        // LEA rax, [rip - (CODE_LEN - str_addr)]
+        // LEA rax, [rip + offset_to_string]
         emit(0x48); emit(0x8D); emit(0x05)
         let rel = str_addr - (CODE_LEN + 4)
         emit_u32(rel)
@@ -1104,7 +1315,21 @@ fn compile_node(node: i64) -> i64 with Mut, Panic, Div {
         if slot >= 0 {
             emit_load_rax(slot)
         } else {
-            emit_mov_rax_imm(0)
+            let gi = mb_find_global(voff, vlen)
+            if gi >= 0 {
+                let gaddr = 0x700000 + MB_GL_OFF[gi as usize]
+                // movabs rcx, gaddr
+                emit(0x48); emit(0xB9); emit_u64(gaddr)
+                if MB_GL_SZ[gi as usize] == 1 {
+                    // movzx rax, byte [rcx]
+                    emit(0x48); emit(0x0F); emit(0xB6); emit(0x01)
+                } else {
+                    // mov rax, [rcx]
+                    emit(0x48); emit(0x8B); emit(0x01)
+                }
+            } else {
+                emit_mov_rax_imm(0)
+            }
         }
         return 0
     }
@@ -1213,6 +1438,46 @@ fn compile_node(node: i64) -> i64 with Mut, Panic, Div {
         }
         return 0
     }
+    if kind == 13 {
+        // NK_INDEX: arr[idx] — read
+        let arr_nd = ND_LEFT[node as usize]
+        let idx_nd = ND_RIGHT[node as usize]
+        let avoff = ND_STR_OFF[arr_nd as usize]
+        let avlen = ND_STR_LEN[arr_nd as usize]
+        var asz: i64 = 1
+        let aslot = find_local(avoff, avlen)
+        if aslot >= 0 {
+            let adisp = 0 - ((aslot + 1) * 8)
+            // local holds a pointer — load it into rcx (byte access: asz=1)
+            emit(0x48); emit(0x8B); emit(0x8D); emit_u32(adisp)  // mov rcx, [rbp+disp]
+        } else {
+            let agi = mb_find_global(avoff, avlen)
+            if agi >= 0 {
+                let gaaddr = 0x700000 + MB_GL_OFF[agi as usize]
+                emit(0x48); emit(0xB9); emit_u64(gaaddr)  // movabs rcx, gaaddr
+                asz = MB_GL_SZ[agi as usize]
+            } else {
+                emit(0x48); emit(0x31); emit(0xC9)  // xor rcx, rcx
+            }
+        }
+        // save rcx (base) to a temp slot
+        let idx_save = alloc_slot()
+        emit(0x48); emit(0x89); emit(0x8D); emit_u32(0 - ((idx_save + 1) * 8))  // mov [rbp+disp], rcx
+        // compile index → rax
+        compile_node(idx_nd)
+        // restore base into rcx
+        emit(0x48); emit(0x8B); emit(0x8D); emit_u32(0 - ((idx_save + 1) * 8))  // mov rcx, [rbp+disp]
+        // compute effective address
+        if asz == 1 {
+            emit(0x48); emit(0x01); emit(0xC1)               // add rcx, rax
+            emit(0x48); emit(0x0F); emit(0xB6); emit(0x01)   // movzx rax, byte [rcx]
+        } else {
+            emit(0x48); emit(0xC1); emit(0xE0); emit(0x03)   // shl rax, 3
+            emit(0x48); emit(0x01); emit(0xC1)               // add rcx, rax
+            emit(0x48); emit(0x8B); emit(0x01)               // mov rax, [rcx]
+        }
+        return 0
+    }
     if kind == 12 {
         // NK_CALL
         let callee = ND_LEFT[node as usize]
@@ -1220,6 +1485,51 @@ fn compile_node(node: i64) -> i64 with Mut, Panic, Div {
         let c_len = ND_STR_LEN[callee as usize]
 
         // Check for built-in print(str_lit)
+        // str_len(s) — inline strlen: count bytes until null
+        // Structure:
+        //   mov rdi, rax           ; 3 bytes [A]
+        //   xor rcx, rcx           ; 3 bytes [B]
+        //   cmp byte [rdi+rcx], 0  ; 4 bytes [C] ← loop_start
+        //   jz +5                  ; 2 bytes [D] → [H]
+        //   inc rcx                ; 3 bytes [E]
+        //   jmp -11                ; 2 bytes [F] → [C]
+        //   mov rax, rcx           ; 3 bytes [H]
+        // jz offset: skips [E](3) + [F](2) = 5 bytes ✓
+        // jmp offset: from after [F] to [C] = -(4+2+3+2) = -11 ✓
+        if pool_match(c_off, c_len, "str_len") {
+            let arg0 = ND_EXTRA[node as usize]
+            if arg0 != -1 { compile_node(arg0) }  // rax = str ptr
+            emit(0x48); emit(0x89); emit(0xC7)  // [A] mov rdi, rax (3)
+            emit(0x48); emit(0x31); emit(0xC9)  // [B] xor rcx, rcx (3)
+            // [C] loop_start:
+            emit(0x80); emit(0x3C); emit(0x0F); emit(0x00)  // [C] cmp byte [rdi+rcx], 0 (4)
+            emit(0x74); emit(0x05)               // [D] jz +5 (2)
+            emit(0x48); emit(0xFF); emit(0xC1)   // [E] inc rcx (3)
+            emit(0xEB); emit(0 - 11)             // [F] jmp -11 → [C] (2)
+            // [H] done:
+            emit(0x48); emit(0x89); emit(0xC8)   // [H] mov rax, rcx (3)
+            return 0
+        }
+
+        // str_char_at(s, i) — return byte at position i in string s
+        if pool_match(c_off, c_len, "str_char_at") {
+            let arg0 = ND_EXTRA[node as usize]
+            var arg1: i64 = -1
+            if arg0 != -1 { arg1 = ND_EXTRA[arg0 as usize] }
+            // compile both args using temp slots
+            let s0 = alloc_slot()
+            let s1 = alloc_slot()
+            if arg0 != -1 { compile_node(arg0); emit_store_rax(s0) }
+            if arg1 != -1 { compile_node(arg1); emit_store_rax(s1) }
+            emit_load_rax(s0)
+            emit(0x48); emit(0x89); emit(0xC7)  // mov rdi, rax (str ptr)
+            emit_load_rax(s1)
+            emit(0x48); emit(0x89); emit(0xC6)  // mov rsi, rax (index)
+            // movzx rax, byte [rdi + rsi]
+            emit(0x48); emit(0x0F); emit(0xB6); emit(0x04); emit(0x37)
+            return 0
+        }
+
         if pool_match(c_off, c_len, "print") {
             let arg = ND_EXTRA[node as usize]
             if arg != -1 {
@@ -1268,36 +1578,269 @@ fn compile_node(node: i64) -> i64 with Mut, Panic, Div {
             return 0
         }
 
+        // arg_count() — reads from saved rsp at BSS base 0x700000
+        // [0x700000] = rsp at entry = &argc; *rsp = argc; return argc - 1 (skip argv[0])
+        if pool_match(c_off, c_len, "arg_count") {
+            // movabs rax, 0x700000
+            emit(0x48); emit(0xB8); emit_u64(0x700000)
+            // mov rax, [rax]    ; rax = saved rsp
+            emit(0x48); emit(0x8B); emit(0x00)
+            // mov rax, [rax]    ; rax = argc
+            emit(0x48); emit(0x8B); emit(0x00)
+            // dec rax           ; argc - 1 (exclude argv[0] = program name)
+            emit(0x48); emit(0xFF); emit(0xC8)
+            return 0
+        }
+
+        // get_arg(n) — returns argv[n+1] (0-indexed, skipping program name)
+        if pool_match(c_off, c_len, "get_arg") {
+            let arg0 = ND_EXTRA[node as usize]
+            if arg0 != -1 { compile_node(arg0) }  // rax = n
+            // add rax, 2  (n+2 to get to argv[n+1] as qword index from &argc)
+            emit(0x48); emit(0x83); emit(0xC0); emit(2)
+            // mov rdx, rax   (save n+2 in rdx, no push/pop needed)
+            emit(0x48); emit(0x89); emit(0xC2)
+            // movabs rcx, 0x700000
+            emit(0x48); emit(0xB9); emit_u64(0x700000)
+            // mov rcx, [rcx]    ; rcx = saved rsp = &argc
+            emit(0x48); emit(0x8B); emit(0x09)
+            // mov rax, [rcx + rdx*8]  ; argv[n+1]
+            emit(0x48); emit(0x8B); emit(0x04); emit(0xD1)
+            return 0
+        }
+
+        // file_size(path) — open + fstat + close; returns file size in rax
+        // Mirrors boot2 file_size: open→mov rdi,rax(fd)→sub rsp,176→mov rsi,rsp→push rdi→fstat→read st_size→close
+        if pool_match(c_off, c_len, "file_size") {
+            let arg0 = ND_EXTRA[node as usize]
+            if arg0 != -1 { compile_node(arg0) }  // rax = path ptr
+            // open(path, 0, 0) → rax = fd
+            emit(0x48); emit(0x89); emit(0xC7)    // mov rdi, rax (path)
+            emit(0x48); emit(0x31); emit(0xF6)    // xor rsi, rsi
+            emit(0x48); emit(0x31); emit(0xD2)    // xor rdx, rdx
+            emit(0xB8); emit_u32(2)               // mov eax, 2 (SYS_open)
+            emit(0x0F); emit(0x05)                // syscall → rax = fd
+            // mov rdi, rax  (fd into rdi for fstat)
+            emit(0x48); emit(0x89); emit(0xC7)
+            // sub rsp, 176  (allocate stat buffer)
+            emit(0x48); emit(0x81); emit(0xEC); emit_u32(176)
+            // mov rsi, rsp  (rsi = &stat_buf)
+            emit(0x48); emit(0x89); emit(0xE6)
+            // push rdi  (save fd)
+            emit(0x57)
+            // fstat(fd, &stat_buf) → rax = 0 on success
+            emit(0xB8); emit_u32(5)               // mov eax, 5 (SYS_fstat)
+            emit(0x0F); emit(0x05)
+            // st_size is at stat+48 bytes; after push rdi, rsp is at (buf_base - 8)
+            // so stat_buf starts at [rsp+8], and st_size is at [rsp+8+48] = [rsp+56]
+            emit(0x48); emit(0x8B); emit(0x44); emit(0x24); emit(56)  // mov rax, [rsp+56]
+            // push rax  (save file size)
+            emit(0x50)
+            // mov rdi, [rsp+8]  (fd is at [rsp+8] now: top=size, next=old_rdi(=fd))
+            emit(0x48); emit(0x8B); emit(0x7C); emit(0x24); emit(8)
+            // close(fd)
+            emit(0xB8); emit_u32(3)               // mov eax, 3 (SYS_close)
+            emit(0x0F); emit(0x05)
+            // pop rax  (file size)
+            emit(0x58)
+            // cleanup: add rsp, 184 (176 + 8 for push rdi)
+            emit(0x48); emit(0x81); emit(0xC4); emit_u32(184)
+            return 0
+        }
+
+        // read_file(path) — mmap anonymous, open, read, close; returns ptr in rax
+        if pool_match(c_off, c_len, "read_file") {
+            let arg0 = ND_EXTRA[node as usize]
+            if arg0 != -1 { compile_node(arg0) }  // rax = path ptr
+            // push rax (save path)
+            emit(0x50)
+            // mmap(NULL, 1MB, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0)
+            emit(0x48); emit(0x31); emit(0xFF)    // xor rdi, rdi
+            emit(0x48); emit(0xBE); emit_u64(1048576)  // mov rsi, 1048576
+            emit(0xBA); emit_u32(3)               // mov edx, 3 (PROT_R|W)
+            emit(0x41); emit(0xBA); emit_u32(0x22) // mov r10d, MAP_PRIVATE|MAP_ANON
+            emit(0x49); emit(0xC7); emit(0xC0); emit_u32(0 - 1)  // mov r8, -1
+            emit(0x4D); emit(0x31); emit(0xC9)    // xor r9, r9
+            emit(0xB8); emit_u32(9)               // mov eax, 9 (SYS_mmap)
+            emit(0x0F); emit(0x05)
+            // push mmap ptr (buf)
+            emit(0x50)
+            // open path
+            emit(0x48); emit(0x8B); emit(0x7C); emit(0x24); emit(8)  // mov rdi, [rsp+8] (path)
+            emit(0x48); emit(0x31); emit(0xF6)    // xor rsi, rsi
+            emit(0x48); emit(0x31); emit(0xD2)    // xor rdx, rdx
+            emit(0xB8); emit_u32(2)               // mov eax, 2 (SYS_open)
+            emit(0x0F); emit(0x05)
+            // rax = fd; push fd
+            emit(0x50)
+            // read(fd, buf, 1MB) — stack: [rsp]=fd, [rsp+8]=buf, [rsp+16]=path
+            emit(0x48); emit(0x8B); emit(0x3C); emit(0x24)            // mov rdi, [rsp] (fd)
+            emit(0x48); emit(0x8B); emit(0x74); emit(0x24); emit(8)  // mov rsi, [rsp+8] (buf)
+            emit(0x48); emit(0xBA); emit_u64(1048576)  // mov rdx, 1048576
+            emit(0xB8); emit_u32(0)               // mov eax, 0 (SYS_read)
+            emit(0x0F); emit(0x05)
+            // close(fd)
+            emit(0x5F)                            // pop rdi (fd)
+            emit(0xB8); emit_u32(3)               // mov eax, 3 (SYS_close)
+            emit(0x0F); emit(0x05)
+            // pop buf ptr into rax
+            emit(0x58)                             // pop rax (buf)
+            // cleanup: add rsp, 8 (path push)
+            emit(0x48); emit(0x83); emit(0xC4); emit(8)
+            return 0
+        }
+
+        // write_file(path, data, len) — open create+trunc, write, close
+        if pool_match(c_off, c_len, "write_file") {
+            // compile 3 args and push them (path, data, len)
+            // arg1 (data) must be the BASE ADDRESS of an array global — emit movabs rax, gaddr
+            var wf_argc: i64 = 0
+            var wf_node = ND_EXTRA[node as usize]
+            while wf_node != -1 && wf_argc < 3 {
+                if wf_argc == 1 && ND_KIND[wf_node as usize] == 2 {
+                    // arg1 is array pointer: emit address of global, not byte load
+                    let wf_voff = ND_STR_OFF[wf_node as usize]
+                    let wf_vlen = ND_STR_LEN[wf_node as usize]
+                    let wf_gi = mb_find_global(wf_voff, wf_vlen)
+                    if wf_gi >= 0 {
+                        let wf_gaddr = 0x700000 + MB_GL_OFF[wf_gi as usize]
+                        emit_mov_rax_imm(wf_gaddr)  // rax = base address of array
+                    } else {
+                        compile_node(wf_node)
+                    }
+                } else {
+                    compile_node(wf_node)
+                }
+                emit(0x50)  // push rax
+                wf_argc = wf_argc + 1
+                wf_node = ND_EXTRA[wf_node as usize]
+            }
+            // stack: [rsp]=len [rsp+8]=data [rsp+16]=path
+            // pop len→rcx, pop data→rsi, pop path→rdi
+            emit(0x59)  // pop rcx (len)
+            emit(0x5E)  // pop rsi (data)
+            emit(0x5F)  // pop rdi (path)
+            // push rcx (len), push rsi (data) for later
+            emit(0x51); emit(0x56)
+            // open(path, O_WRONLY|O_CREAT|O_TRUNC, 0644)
+            emit(0x48); emit(0xBE); emit_u64(0x241)  // mov rsi, O_WRONLY|O_CREAT|O_TRUNC
+            emit(0xBA); emit_u32(420)                  // mov edx, 0644
+            emit(0xB8); emit_u32(2)                    // mov eax, SYS_open
+            emit(0x0F); emit(0x05)
+            // rax = fd; write(fd, data, len)
+            emit(0x48); emit(0x89); emit(0xC7)         // mov rdi, rax (fd)
+            emit(0x57)                                  // push rdi (save fd)
+            emit(0x48); emit(0x8B); emit(0x74); emit(0x24); emit(8)  // mov rsi, [rsp+8] (data)
+            emit(0x48); emit(0x8B); emit(0x54); emit(0x24); emit(16) // mov rdx, [rsp+16] (len)
+            emit(0xB8); emit_u32(1)                    // mov eax, SYS_write
+            emit(0x0F); emit(0x05)
+            // close(fd)
+            emit(0x5F)                                  // pop rdi (fd)
+            emit(0xB8); emit_u32(3)                    // mov eax, SYS_close
+            emit(0x0F); emit(0x05)
+            // cleanup: add rsp, 16 (data+len pushes)
+            emit(0x48); emit(0x83); emit(0xC4); emit(16)
+            emit_mov_rax_imm(0)
+            return 0
+        }
+
+        // load_source(path) — native builtin: open+mmap+read, store buf to SRC_BUF global, size to SRC_LEN
+        // Only active when compiling source that has SRC_BUF/SRC_LEN globals (e.g. micro_bootstrap itself)
+        if pool_match(c_off, c_len, "load_source") && MB_SRC_BUF_GADDR != 0 {
+            let arg0 = ND_EXTRA[node as usize]
+            if arg0 != -1 { compile_node(arg0) }  // rax = path ptr
+            // open(path, O_RDONLY, 0) → fd in rax
+            emit(0x48); emit(0x89); emit(0xC7)    // mov rdi, rax (path)
+            emit(0x48); emit(0x31); emit(0xF6)    // xor rsi, rsi
+            emit(0x48); emit(0x31); emit(0xD2)    // xor rdx, rdx
+            emit(0xB8); emit_u32(2)               // mov eax, 2 (SYS_open)
+            emit(0x0F); emit(0x05)                // syscall → rax = fd
+            emit(0x50)                            // push rax (save fd)
+            // mmap(NULL, 1MB, PROT_RW, MAP_PRIV|MAP_ANON, -1, 0) → buf
+            emit(0x48); emit(0x31); emit(0xFF)    // xor rdi, rdi
+            emit(0x48); emit(0xBE); emit_u64(1048576)  // mov rsi, 1MB
+            emit(0xBA); emit_u32(3)               // mov edx, 3 PROT_RW
+            emit(0x41); emit(0xBA); emit_u32(0x22) // mov r10d, MAP_PRIV|MAP_ANON
+            emit(0x49); emit(0xC7); emit(0xC0); emit_u32(0 - 1)  // mov r8, -1
+            emit(0x4D); emit(0x31); emit(0xC9)    // xor r9, r9
+            emit(0xB8); emit_u32(9)               // mov eax, 9 SYS_mmap
+            emit(0x0F); emit(0x05)                // syscall → rax = buf
+            emit(0x50)                            // push rax (save buf)
+            // read(fd, buf, 1MB) → bytes read in rax
+            emit(0x48); emit(0x8B); emit(0x7C); emit(0x24); emit(8)   // mov rdi, [rsp+8] (fd)
+            emit(0x48); emit(0x8B); emit(0x74); emit(0x24); emit(0)   // mov rsi, [rsp] (buf)
+            emit(0x48); emit(0xBA); emit_u64(1048576)                  // mov rdx, 1MB
+            emit(0xB8); emit_u32(0)               // mov eax, 0 SYS_read
+            emit(0x0F); emit(0x05)                // syscall → rax = bytes read
+            emit(0x50)                            // push rax (save sz)
+            // close(fd)
+            emit(0x48); emit(0x8B); emit(0x7C); emit(0x24); emit(16)  // mov rdi, [rsp+16] (fd)
+            emit(0xB8); emit_u32(3)               // mov eax, 3 SYS_close
+            emit(0x0F); emit(0x05)
+            // pop sz, pop buf, pop fd
+            emit(0x58)                            // pop rax (sz)
+            emit(0x59)                            // pop rcx (buf)
+            emit(0x5A)                            // pop rdx (fd, discard)
+            // store buf to SRC_BUF global
+            emit(0x48); emit(0xBA); emit_u64(MB_SRC_BUF_GADDR)       // movabs rdx, SRC_BUF_addr
+            emit(0x48); emit(0x89); emit(0x0A)                         // mov [rdx], rcx
+            // store sz to SRC_LEN global
+            emit(0x48); emit(0xBA); emit_u64(MB_SRC_LEN_GADDR)       // movabs rdx, SRC_LEN_addr
+            emit(0x48); emit(0x89); emit(0x02)                         // mov [rdx], rax
+            return 0
+        }
+
+        // source_byte(idx) — native builtin: read byte from SRC_BUF[idx]
+        if pool_match(c_off, c_len, "source_byte") && MB_SRC_BUF_GADDR != 0 {
+            let arg0 = ND_EXTRA[node as usize]
+            if arg0 != -1 { compile_node(arg0) }  // rax = idx
+            // movabs rcx, SRC_BUF_addr
+            emit(0x48); emit(0xB9); emit_u64(MB_SRC_BUF_GADDR)
+            // mov rcx, [rcx]   (rcx = buf ptr)
+            emit(0x48); emit(0x8B); emit(0x09)
+            // add rcx, rax     (ptr + idx)
+            emit(0x48); emit(0x01); emit(0xC1)
+            // movzx rax, byte [rcx]
+            emit(0x48); emit(0x0F); emit(0xB6); emit(0x01)
+            return 0
+        }
+
         // Generic function call
         // Push args to stack, then CALL
         // Count args
         var argc: i64 = 0
         var arg_node = ND_EXTRA[node as usize]
-        // First compile all args and store to temp slots
-        var arg_slots: [i64; 16] = [0; 16]
-        while arg_node != -1 && argc < 16 {
+        // First compile all args and store to temp slots (up to 4 args)
+        var arg_slot0: i64 = 0
+        var arg_slot1: i64 = 0
+        var arg_slot2: i64 = 0
+        var arg_slot3: i64 = 0
+        while arg_node != -1 && argc < 4 {
             compile_node(arg_node)
             let s = alloc_slot()
             emit_store_rax(s)
-            arg_slots[argc as usize] = s
+            if argc == 0 { arg_slot0 = s }
+            else if argc == 1 { arg_slot1 = s }
+            else if argc == 2 { arg_slot2 = s }
+            else { arg_slot3 = s }
             argc = argc + 1
             arg_node = ND_EXTRA[arg_node as usize]
         }
         // Load args into registers (System V: rdi, rsi, rdx, rcx, r8, r9)
         if argc > 0 {
-            emit_load_rax(arg_slots[0 as usize])
+            emit_load_rax(arg_slot0)
             emit(0x48); emit(0x89); emit(0xC7)  // mov rdi, rax
         }
         if argc > 1 {
-            emit_load_rax(arg_slots[1 as usize])
+            emit_load_rax(arg_slot1)
             emit(0x48); emit(0x89); emit(0xC6)  // mov rsi, rax
         }
         if argc > 2 {
-            emit_load_rax(arg_slots[2 as usize])
+            emit_load_rax(arg_slot2)
             emit(0x48); emit(0x89); emit(0xC2)  // mov rdx, rax
         }
         if argc > 3 {
-            emit_load_rax(arg_slots[3 as usize])
+            emit_load_rax(arg_slot3)
             emit(0x48); emit(0x89); emit(0xC1)  // mov rcx, rax
         }
 
@@ -1328,23 +1871,115 @@ fn compile_node(node: i64) -> i64 with Mut, Panic, Div {
         let name_off = ND_STR_OFF[node as usize]
         let name_len = ND_STR_LEN[node as usize]
         let init = ND_LEFT[node as usize]
-        compile_node(init)
-        let slot = add_local(name_off, name_len)
-        emit_store_rax(slot)
+        if init != -1 && ND_KIND[init as usize] == 50 {
+            // NK_ARRAY_LIT: allocate N consecutive slots, store base address in name slot
+            let arr_count = ND_IVAL[init as usize]
+            // allocate the name slot first (holds pointer)
+            let ptr_slot = add_local(name_off, name_len)
+            // allocate N data slots (consecutive)
+            var ai: i64 = 0
+            while ai < arr_count {
+                alloc_slot()
+                ai = ai + 1
+            }
+            // compute address of first data slot = rbp - (ptr_slot + 2)*8
+            let data_disp = 0 - ((ptr_slot + 2) * 8)
+            // lea rax, [rbp + data_disp]
+            emit(0x48); emit(0x8D); emit(0x85); emit_u32(data_disp)
+            emit_store_rax(ptr_slot)
+            // zero-initialize: fill N slots with 0
+            // fill_val from ND_LEFT[init] — compile it for each slot
+            // (simpler: just zero the slots since fill_val is usually 0)
+            var zi: i64 = 0
+            while zi < arr_count {
+                let zdisp = 0 - ((ptr_slot + 2 + zi) * 8)
+                compile_node(ND_LEFT[init as usize])  // fill value
+                emit(0x48); emit(0x89); emit(0x85); emit_u32(zdisp)  // mov [rbp+disp], rax
+                zi = zi + 1
+            }
+        } else {
+            compile_node(init)
+            let slot = add_local(name_off, name_len)
+            emit_store_rax(slot)
+        }
         return 0
     }
     if kind == 42 {
         // NK_ASSIGN
         let target = ND_LEFT[node as usize]
         let rhs = ND_EXTRA[node as usize]
-        compile_node(rhs)
-        if ND_KIND[target as usize] == 2 {
-            // Assign to variable
-            let voff = ND_STR_OFF[target as usize]
-            let vlen = ND_STR_LEN[target as usize]
-            let slot = find_local(voff, vlen)
-            if slot >= 0 {
-                emit_store_rax(slot)
+        let tk2 = ND_KIND[target as usize]
+        if tk2 == 2 {
+            // Assign to scalar variable (local or global)
+            compile_node(rhs)
+            let voff2 = ND_STR_OFF[target as usize]
+            let vlen2 = ND_STR_LEN[target as usize]
+            let slot2 = find_local(voff2, vlen2)
+            if slot2 >= 0 {
+                emit_store_rax(slot2)
+            } else {
+                let gi2 = mb_find_global(voff2, vlen2)
+                if gi2 >= 0 {
+                    let gaddr2 = 0x700000 + MB_GL_OFF[gi2 as usize]
+                    let gsave2 = alloc_slot()
+                    emit_store_rax(gsave2)                        // mov [rbp-(gsave2+1)*8], rax
+                    emit(0x48); emit(0xB9); emit_u64(gaddr2)      // movabs rcx, addr
+                    emit_load_rax(gsave2)                         // mov rax, [rbp-(gsave2+1)*8]
+                    if MB_GL_SZ[gi2 as usize] == 1 {
+                        emit(0x88); emit(0x01)                    // mov [rcx], al
+                    } else {
+                        emit(0x48); emit(0x89); emit(0x01)        // mov [rcx], rax
+                    }
+                }
+            }
+        } else if tk2 == 13 {
+            // Assign to arr[idx] — compile rhs first
+            compile_node(rhs)
+            // save value in temp slot
+            let val_save = alloc_slot()
+            emit_store_rax(val_save)
+            // get array base address into rcx
+            let arr_nd2 = ND_LEFT[target as usize]
+            let idx_nd2 = ND_RIGHT[target as usize]
+            let avoff2 = ND_STR_OFF[arr_nd2 as usize]
+            let avlen2 = ND_STR_LEN[arr_nd2 as usize]
+            var asz2: i64 = 8
+            let aslot2 = find_local(avoff2, avlen2)
+            if aslot2 >= 0 {
+                let adisp2 = 0 - ((aslot2 + 1) * 8)
+                // local holds a pointer — load it into rcx
+                emit(0x48); emit(0x8B); emit(0x8D); emit_u32(adisp2)  // mov rcx, [rbp+disp]
+            } else {
+                let agi2 = mb_find_global(avoff2, avlen2)
+                if agi2 >= 0 {
+                    let gaaddr2 = 0x700000 + MB_GL_OFF[agi2 as usize]
+                    emit(0x48); emit(0xB9); emit_u64(gaaddr2)           // movabs rcx, base
+                    asz2 = MB_GL_SZ[agi2 as usize]
+                } else {
+                    emit(0x48); emit(0x31); emit(0xC9)                  // xor rcx, rcx
+                }
+            }
+            // save base into another temp slot
+            let base_save = alloc_slot()
+            emit(0x48); emit(0x89); emit(0x8D); emit_u32(0 - ((base_save + 1) * 8))  // mov [rbp+disp], rcx
+            // compile index → rax
+            compile_node(idx_nd2)
+            // restore base into rcx
+            emit(0x48); emit(0x8B); emit(0x8D); emit_u32(0 - ((base_save + 1) * 8))  // mov rcx, [rbp+disp]
+            // compute effective address in rcx
+            if asz2 == 1 {
+                emit(0x48); emit(0x01); emit(0xC1)                      // add rcx, rax
+            } else {
+                emit(0x48); emit(0xC1); emit(0xE0); emit(0x03)          // shl rax, 3
+                emit(0x48); emit(0x01); emit(0xC1)                      // add rcx, rax
+            }
+            // load value → rdx
+            emit(0x48); emit(0x8B); emit(0x95); emit_u32(0 - ((val_save + 1) * 8))  // mov rdx, [rbp+disp]
+            // store
+            if asz2 == 1 {
+                emit(0x88); emit(0x11)                                   // mov [rcx], dl
+            } else {
+                emit(0x48); emit(0x89); emit(0x11)                       // mov [rcx], rdx
             }
         }
         return 0
@@ -1404,10 +2039,13 @@ fn compile_node(node: i64) -> i64 with Mut, Panic, Div {
         return 0
     }
     if kind == 31 {
-        // NK_WHILE
+        // NK_WHILE — save/restore LOOP_TOP for nested loops; handle break fixups
         let cond = ND_LEFT[node as usize]
         let body = ND_EXTRA[node as usize]
+        let prev_loop_top = LOOP_TOP
+        let prev_break_count = BREAK_FIXUP_COUNT
         let loop_top = CODE_LEN
+        LOOP_TOP = loop_top
         compile_node(cond)
         emit(0x48); emit(0x85); emit(0xC0)  // test rax, rax
         emit(0x0F); emit(0x84)              // je exit
@@ -1418,16 +2056,46 @@ fn compile_node(node: i64) -> i64 with Mut, Panic, Div {
         emit(0xE9)
         let jmp_rel = loop_top - (CODE_LEN + 4)
         emit_u32(jmp_rel)
+        // loop exit point
+        let loop_exit = CODE_LEN
         // Patch je to here
-        let exit_off = CODE_LEN - je_pos - 4
+        let exit_off = loop_exit - je_pos - 4
         CODE[je_pos as usize] = (exit_off & 0xFF) as i8
         CODE[(je_pos + 1) as usize] = ((exit_off >> 8) & 0xFF) as i8
         CODE[(je_pos + 2) as usize] = ((exit_off >> 16) & 0xFF) as i8
         CODE[(je_pos + 3) as usize] = ((exit_off >> 24) & 0xFF) as i8
+        // Patch all break fixups emitted inside this loop
+        var bfi: i64 = prev_break_count
+        while bfi < BREAK_FIXUP_COUNT {
+            let bpos = BREAK_FIXUP_OFF[bfi as usize]
+            let brel = loop_exit - bpos - 4
+            CODE[bpos as usize] = (brel & 0xFF) as i8
+            CODE[(bpos + 1) as usize] = ((brel >> 8) & 0xFF) as i8
+            CODE[(bpos + 2) as usize] = ((brel >> 16) & 0xFF) as i8
+            CODE[(bpos + 3) as usize] = ((brel >> 24) & 0xFF) as i8
+            bfi = bfi + 1
+        }
+        BREAK_FIXUP_COUNT = prev_break_count  // restore for outer loops
+        LOOP_TOP = prev_loop_top
         return 0
     }
-    if kind == 35 || kind == 36 {
-        // NK_BREAK / NK_CONTINUE — nop for now
+    if kind == 35 {
+        // NK_BREAK — emit forward JMP, record for patch after loop exit
+        emit(0xE9)
+        let brk_pos = CODE_LEN
+        emit_u32(0)  // placeholder, patched after loop
+        let bfi = BREAK_FIXUP_COUNT
+        BREAK_FIXUP_OFF[bfi as usize] = brk_pos
+        BREAK_FIXUP_COUNT = BREAK_FIXUP_COUNT + 1
+        return 0
+    }
+    if kind == 36 {
+        // NK_CONTINUE — jump back to current loop top
+        if LOOP_TOP > 0 {
+            emit(0xE9)
+            let cont_rel = LOOP_TOP - (CODE_LEN + 4)
+            emit_u32(cont_rel)
+        }
         return 0
     }
     // Default: nop
@@ -1463,7 +2131,6 @@ fn compile_fn(fn_idx: i64) with Mut, Panic, Div {
         emit(0x48); emit(0x89); emit(0x8D)  // mov [rbp+disp32], rcx
         emit_u32(0 - ((s3 + 1) * 8))
     }
-
     let body = FN_BODY_NODE[fn_idx as usize]
     compile_node(body)
     emit_epilogue()
@@ -1521,47 +2188,68 @@ fn write_elf(entry_fn: i64) with Mut, Panic, Div {
     elf_emit_u32(0)    // flags
     elf_emit_u16(64)   // ehdr size
     elf_emit_u16(56)   // phdr entry size
-    elf_emit_u16(1)    // phdr count
+    // Always emit 2 PHDRs: code (RX) + BSS (RW)
+    // BSS at 0x700000 always has at least 8 bytes for saved-rsp slot
+    elf_emit_u16(2)
     elf_emit_u16(0)    // shdr entry size
     elf_emit_u16(0)    // shdr count
     elf_emit_u16(0)    // shstrndx
 
-    // Program header (56 bytes)
+    // Program header 0: PT_LOAD RX (code)
+    let total_size = text_off + CODE_LEN
     elf_emit_u32(1)    // PT_LOAD
     elf_emit_u32(5)    // PF_R | PF_X
     elf_emit_u64(0)    // offset
     elf_emit_u64(base_addr)  // vaddr
     elf_emit_u64(base_addr)  // paddr
-    let total_size = text_off + CODE_LEN
     elf_emit_u64(total_size)  // filesz
     elf_emit_u64(total_size)  // memsz
     elf_emit_u64(0x1000)      // align
+
+    // Program header 1: PT_LOAD RW (BSS at 0x700000)
+    // BSS size = user globals + 8 bytes for saved-rsp slot (always >= 8)
+    let bss_size = if MB_BSS_TOTAL > 0 { MB_BSS_TOTAL + 4096 } else { 4096 }
+    elf_emit_u32(1)             // PT_LOAD
+    elf_emit_u32(6)             // PF_R | PF_W
+    elf_emit_u64(total_size)    // file offset (past code, filesz=0)
+    elf_emit_u64(0x700000)      // vaddr
+    elf_emit_u64(0x700000)      // paddr
+    elf_emit_u64(0)             // filesz (BSS: no file data)
+    elf_emit_u64(bss_size)      // memsz (zero-initialized by loader)
+    elf_emit_u64(0x1000)        // align
 
     // Pad to text_off
     while ELF_LEN < text_off {
         elf_emit(0)
     }
 
-    // Entry trampoline: call main, then exit with return value
+    // Entry trampoline: save rsp for arg builtins, call main, then exit
     // Find "main" function
     let main_off = FN_CODE_OFF[entry_fn as usize]
-    // CALL main (relative)
-    let call_target = main_off - 5  // relative to after the call instruction
-    // Actually we emit the trampoline first, then copy code after
-    // Trampoline: call <main_rel>; mov rdi, rax; mov rax, 60; syscall
-    // call rel32
-    elf_emit(0xE8)
-    // The code will be appended right after the trampoline
-    // Trampoline is 19 bytes: E8 xx xx xx xx 48 89 C7 48 C7 C0 3C 00 00 00 0F 05 + 2 pad = 19
-    // Actually let's compute: after trampoline, code starts
-    let trampoline_size: i64 = 17
+    // Trampoline layout:
+    //   movabs rdx, 0x700000  (10 bytes: 48 BA + 8 bytes addr)
+    //   mov [rdx], rsp         (3 bytes: 48 89 22)
+    //   call <main_rel>        (5 bytes: E8 + rel32)
+    //   mov rdi, rax           (3 bytes: 48 89 C7)
+    //   mov rax, 60            (7 bytes: 48 C7 C0 3C 00 00 00)
+    //   syscall                (2 bytes: 0F 05)
+    //   total = 30 bytes
+    let trampoline_size: i64 = 30
     let code_start = trampoline_size
     let main_abs = code_start + main_off
-    let call_rel = main_abs - 5
-    elf_emit_u32(call_rel)
+    let call_rel = main_abs - (trampoline_size - 5 + 5)
+    // Actually: call instruction is at offset 13 in trampoline (after movabs+mov[rdx])
+    // call_rel = main_abs - (13 + 5) = main_abs - 18
+    let actual_call_rel = main_abs - 18
+    // movabs rdx, 0x700000
+    elf_emit(0x48); elf_emit(0xBA); elf_emit_u64(0x700000)
+    // mov [rdx], rsp
+    elf_emit(0x48); elf_emit(0x89); elf_emit(0x22)
+    // call rel32
+    elf_emit(0xE8); elf_emit_u32(actual_call_rel)
     // mov rdi, rax
     elf_emit(0x48); elf_emit(0x89); elf_emit(0xC7)
-    // mov eax, 60
+    // mov rax, 60
     elf_emit(0x48); elf_emit(0xC7); elf_emit(0xC0)
     elf_emit_u32(60)
     // syscall
@@ -1640,6 +2328,19 @@ fn main() -> i64 with IO, Mut, Panic, Div {
         print("error: no main function found")
         return 1
     }
+
+    // Reserve first 8 bytes of BSS for saved-rsp (arg_count/get_arg builtins)
+    MB_BSS_TOTAL = 8
+
+    // Collect global variable declarations for BSS layout
+    mb_collect_globals()
+    // Resolve BSS addresses for SRC_BUF and SRC_LEN (needed by load_source/source_byte builtins)
+    mb_resolve_src_globals()
+    print("globals=")
+    print_int(MB_GL_COUNT)
+    print(" bss=")
+    print_int(MB_BSS_TOTAL)
+    print("\n")
 
     // Emit print_int helper first (at CODE offset 0, before user functions)
     emit_print_int_helper()
