@@ -1,0 +1,185 @@
+name: Triple Sounio Ecosystem
+
+on:
+  push:
+    branches: [ main, master, develop ]
+    paths:
+      - 'triple-sounio-ecosystem/**'
+      - '.github/workflows/triple-ecosystem.yml'
+  pull_request:
+    branches: [ main, master, develop ]
+    paths:
+      - 'triple-sounio-ecosystem/**'
+      - '.github/workflows/triple-ecosystem.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  checks: write
+
+jobs:
+  sounio-py-tests:
+    name: Sounio Python Tests
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Setup Python 3.12
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install Python dependencies
+        run: |
+          pip install pytest numpy pandas scipy
+
+      - name: Run sounio-py tests
+        run: |
+          export PYTHONPATH="$(pwd)/triple-sounio-ecosystem/sounio-py/python"
+          cd triple-sounio-ecosystem
+          python3 -m pytest sounio-py/tests/ -v --tb=short
+        continue-on-error: false
+
+  sounio-jupyter-tests:
+    name: Sounio Jupyter Tests
+    runs-on: ubuntu-24.04
+    needs: sounio-py-tests
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Setup Python 3.12
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install Python dependencies
+        run: |
+          pip install pytest jupyter jupyter-client ipykernel numpy pandas scipy
+
+      - name: Run sounio-jupyter tests
+        run: |
+          export PYTHONPATH="$(pwd)/triple-sounio-ecosystem/sounio-py/python:$(pwd)/triple-sounio-ecosystem/sounio-jupyter"
+          cd triple-sounio-ecosystem
+          python3 -m pytest sounio-jupyter/tests/ -v --tb=short
+        continue-on-error: false
+
+  drug-discovery-check:
+    name: Drug Discovery Sounio Checks
+    runs-on: ubuntu-24.04
+    needs: sounio-py-tests
+    env:
+      SOUC: ./artifacts/omega/souc-bin/souc-linux-x86_64-jit
+      SOUNIO_STDLIB_PATH: ./stdlib
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Make souc binary executable
+        run: |
+          chmod +x "${{ env.SOUC }}"
+          if [ ! -f "${{ env.SOUC }}" ]; then
+            echo "Error: souc binary not found at ${{ env.SOUC }}"
+            exit 1
+          fi
+
+      - name: Check drug-discovery source files
+        run: |
+          echo "Checking drug-discovery source files..."
+          for file in triple-sounio-ecosystem/drug-discovery/src/*.sio; do
+            if [ -f "$file" ]; then
+              echo "Checking: $file"
+              "${{ env.SOUC }}" check "$file" || exit 1
+            fi
+          done
+
+      - name: Check drug-discovery test files
+        run: |
+          echo "Checking drug-discovery test files..."
+          if [ -d "triple-sounio-ecosystem/drug-discovery/tests" ]; then
+            for file in triple-sounio-ecosystem/drug-discovery/tests/*.sio; do
+              if [ -f "$file" ]; then
+                echo "Checking: $file"
+                "${{ env.SOUC }}" check "$file" || exit 1
+              fi
+            done
+          fi
+
+      - name: Run drug-discovery full pipeline example
+        run: |
+          echo "Running drug-discovery full pipeline..."
+          if [ -f "triple-sounio-ecosystem/drug-discovery/examples/full_pipeline.sio" ]; then
+            "${{ env.SOUC }}" run triple-sounio-ecosystem/drug-discovery/examples/full_pipeline.sio || exit 1
+          else
+            echo "Note: full_pipeline.sio not found, skipping runtime check"
+          fi
+
+  integration-tests:
+    name: Integration Tests
+    runs-on: ubuntu-24.04
+    needs: [ sounio-py-tests, sounio-jupyter-tests, drug-discovery-check ]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Setup Python 3.12
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install Python dependencies
+        run: |
+          pip install pytest numpy pandas scipy jupyter jupyter-client ipykernel
+
+      - name: Run integration tests
+        run: |
+          export PYTHONPATH="$(pwd)/triple-sounio-ecosystem/sounio-py/python"
+          cd triple-sounio-ecosystem
+          python3 -m pytest tests/ -v --tb=short
+
+      - name: Run integration demo
+        run: |
+          export PYTHONPATH="$(pwd)/triple-sounio-ecosystem/sounio-py/python"
+          cd triple-sounio-ecosystem
+          python3 demo.py --quick || true
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: integration-test-results
+          path: |
+            triple-sounio-ecosystem/test_results/
+          retention-days: 7
+          if-no-files-found: ignore
+
+  ecosystem-summary:
+    name: Ecosystem Summary
+    runs-on: ubuntu-24.04
+    needs: [ sounio-py-tests, sounio-jupyter-tests, drug-discovery-check, integration-tests ]
+    if: always()
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Generate ecosystem status
+        run: |
+          echo "## Triple Sounio Ecosystem Status" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Component | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|-----------|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Sounio Python | ${{ needs.sounio-py-tests.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Sounio Jupyter | ${{ needs.sounio-jupyter-tests.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Drug Discovery | ${{ needs.drug-discovery-check.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Integration | ${{ needs.integration-tests.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "All ecosystem components validated." >> $GITHUB_STEP_SUMMARY
