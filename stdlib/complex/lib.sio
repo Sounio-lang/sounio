@@ -246,3 +246,115 @@ pub fn complex_tanh(z: Complex) -> Complex with Div, Panic {
     let c = complex_cosh(z)
     complex_div(s, c)
 }
+
+// =============================================================================
+// POLYNOMIAL ROOTS
+// =============================================================================
+
+// Quadratic formula for ax² + bx + c = 0 over the complex numbers.
+// Returns (root1, root2) using the principal branch of sqrt.
+// Discriminant D = b² - 4ac; roots = (-b ± sqrt(D)) / (2a)
+pub fn complex_quadratic_roots(a: f64, b: f64, c: f64) -> (Complex, Complex) with Div, Panic {
+    // discriminant as complex number (may be negative → imaginary sqrt)
+    let disc_re = b * b - 4.0 * a * c
+    let disc_c = complex_new(disc_re, 0.0)
+    let sq = complex_sqrt(disc_c)
+    let neg_b = complex_new(0.0 - b, 0.0)
+    let two_a = 2.0 * a
+    let r1 = complex_scale(complex_add(neg_b, sq), 1.0 / two_a)
+    let r2 = complex_scale(complex_sub(neg_b, sq), 1.0 / two_a)
+    (r1, r2)
+}
+
+// =============================================================================
+// EPISTEMIC COMPLEX — GUM uncertainty propagation
+// =============================================================================
+
+// A complex number with independent GUM standard uncertainties on re and im.
+// re_unc and im_unc are standard (k=1) uncertainties.
+pub struct EpistemicComplex {
+    value: Complex,
+    re_unc: f64,
+    im_unc: f64,
+}
+
+// Construct an EpistemicComplex
+pub fn ecomplex_new(re: f64, im: f64, re_unc: f64, im_unc: f64) -> EpistemicComplex {
+    EpistemicComplex {
+        value: complex_new(re, im),
+        re_unc: re_unc,
+        im_unc: im_unc,
+    }
+}
+
+// Addition: (a + b), uncertainties add in quadrature (GUM §5.1)
+// u²(re) = u²(a.re) + u²(b.re), same for im
+pub fn ecomplex_add(a: EpistemicComplex, b: EpistemicComplex) -> EpistemicComplex {
+    let val = complex_add(a.value, b.value)
+    let ru = sqrt(a.re_unc * a.re_unc + b.re_unc * b.re_unc)
+    let iu = sqrt(a.im_unc * a.im_unc + b.im_unc * b.im_unc)
+    EpistemicComplex { value: val, re_unc: ru, im_unc: iu }
+}
+
+// Subtraction: (a - b), uncertainties add in quadrature (GUM §5.1)
+pub fn ecomplex_sub(a: EpistemicComplex, b: EpistemicComplex) -> EpistemicComplex {
+    let val = complex_sub(a.value, b.value)
+    let ru = sqrt(a.re_unc * a.re_unc + b.re_unc * b.re_unc)
+    let iu = sqrt(a.im_unc * a.im_unc + b.im_unc * b.im_unc)
+    EpistemicComplex { value: val, re_unc: ru, im_unc: iu }
+}
+
+// Multiplication: (a * b), GUM first-order propagation.
+// z = (ar + i·ai)(br + i·bi) = (ar·br - ai·bi) + i(ar·bi + ai·br)
+// ∂re/∂ar = br,  ∂re/∂ai = -bi,  ∂re/∂br = ar,  ∂re/∂bi = -ai
+// ∂im/∂ar = bi,  ∂im/∂ai =  br,  ∂im/∂br = ai,  ∂im/∂bi =  ar
+pub fn ecomplex_mul(a: EpistemicComplex, b: EpistemicComplex) -> EpistemicComplex {
+    let val = complex_mul(a.value, b.value)
+    let ar = a.value.re
+    let ai = a.value.im
+    let br = b.value.re
+    let bi = b.value.im
+    // u²(re) = (br·u_ar)² + (bi·u_ai)² + (ar·u_br)² + (ai·u_bi)²
+    let ru_sq = br * br * a.re_unc * a.re_unc
+              + bi * bi * a.im_unc * a.im_unc
+              + ar * ar * b.re_unc * b.re_unc
+              + ai * ai * b.im_unc * b.im_unc
+    // u²(im) = (bi·u_ar)² + (br·u_ai)² + (ai·u_br)² + (ar·u_bi)²
+    let iu_sq = bi * bi * a.re_unc * a.re_unc
+              + br * br * a.im_unc * a.im_unc
+              + ai * ai * b.re_unc * b.re_unc
+              + ar * ar * b.im_unc * b.im_unc
+    EpistemicComplex { value: val, re_unc: sqrt(ru_sq), im_unc: sqrt(iu_sq) }
+}
+
+// Magnitude with GUM uncertainty: |z| = sqrt(re² + im²)
+// ∂|z|/∂re = re/|z|,  ∂|z|/∂im = im/|z|
+// Returns (|z|, u(|z|))
+pub fn ecomplex_abs(z: EpistemicComplex) -> (f64, f64) with Div, Panic {
+    let r = complex_abs(z.value)
+    if r == 0.0 {
+        return (0.0, sqrt(z.re_unc * z.re_unc + z.im_unc * z.im_unc))
+    }
+    let d_re = z.value.re / r
+    let d_im = z.value.im / r
+    let u = sqrt(d_re * d_re * z.re_unc * z.re_unc + d_im * d_im * z.im_unc * z.im_unc)
+    (r, u)
+}
+
+// Complex exponential with GUM uncertainty: e^z = e^re · (cos(im) + i·sin(im))
+// ∂re(e^z)/∂re = e^re · cos(im),  ∂re(e^z)/∂im = -e^re · sin(im)
+// ∂im(e^z)/∂re = e^re · sin(im),  ∂im(e^z)/∂im =  e^re · cos(im)
+pub fn ecomplex_exp(z: EpistemicComplex) -> EpistemicComplex {
+    let val = complex_exp(z.value)
+    let e_re = exp(z.value.re)
+    let c_im = cos(z.value.im)
+    let s_im = sin(z.value.im)
+    // Jacobian rows
+    let j_rr = e_re * c_im
+    let j_ri = 0.0 - e_re * s_im
+    let j_ir = e_re * s_im
+    let j_ii = e_re * c_im
+    let ru = sqrt(j_rr * j_rr * z.re_unc * z.re_unc + j_ri * j_ri * z.im_unc * z.im_unc)
+    let iu = sqrt(j_ir * j_ir * z.re_unc * z.re_unc + j_ii * j_ii * z.im_unc * z.im_unc)
+    EpistemicComplex { value: val, re_unc: ru, im_unc: iu }
+}

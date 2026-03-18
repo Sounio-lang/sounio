@@ -1,0 +1,439 @@
+// stdlib/stochastic/sde.sio — Stochastic Differential Equation Solvers
+//
+// Implements Euler-Maruyama and Milstein discretizations with epistemic
+// uncertainty propagation (GUM JCGM 100:2008).
+//
+// Brownian increments are generated via an inline xorshift64 PRNG + Box-Muller
+// transform — no external dependencies.
+//
+// Supported models:
+//   Euler-Maruyama  :  X_{t+dt} = X_t + μ·dt + σ·√dt·Z
+//   Milstein        :  adds ½σσ'(ΔW²-dt) correction
+//   GBM             :  dS = μS·dt + σS·dW  (Black-Scholes)
+//   OU              :  dX = θ(μ-X)dt + σdW  (mean-reversion)
+//   Epistemic GBM   :  GBM with uncertain μ, σ, S₀
+//
+// References:
+//   Kloeden & Platen (1992): "Numerical Solution of SDEs"
+//   Milstein (1974): "Approximate Integration of SDEs"
+//   Black & Scholes (1973): "The Pricing of Options"
+//   Uhlenbeck & Ornstein (1930): "On the Theory of Brownian Motion"
+//   JCGM 100:2008: "Evaluation of measurement data (GUM)"
+
+// =============================================================================
+// Math helpers — all helpers before callers
+// =============================================================================
+
+fn sde_abs(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+fn sde_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i = 0
+    while i < 25 {
+        y = 0.5 * (y + x / y)
+        i = i + 1
+    }
+    y
+}
+
+fn sde_log(x: f64) -> f64 with Mut, Div, Panic {
+    // Natural log via Newton's method on exp.
+    // Uses identity: ln(x) = 2*atanh((x-1)/(x+1))
+    // atanh(z) = z + z^3/3 + z^5/5 + ... converges for |z|<1
+    // Range-reduce: write x = 2^k * m, m in [0.5,1), ln(x)=k*ln2 + ln(m)
+    if x <= 0.0 { return 0.0 - 1.0e300 }
+    var k: f64 = 0.0
+    var m = x
+    while m >= 2.0 { m = m / 2.0; k = k + 1.0 }
+    while m < 0.5  { m = m * 2.0; k = k - 1.0 }
+    // ln(m) for m in [0.5, 1): shift to u = m - 1, |u| <= 0.5
+    // ln(1+u) = u - u^2/2 + u^3/3 - u^4/4 + u^5/5 - u^6/6 + u^7/7 - u^8/8
+    let u = m - 1.0
+    let u2 = u * u
+    let u3 = u2 * u
+    let u4 = u3 * u
+    let u5 = u4 * u
+    let u6 = u5 * u
+    let u7 = u6 * u
+    let u8 = u7 * u
+    let ln_m = u - u2/2.0 + u3/3.0 - u4/4.0 + u5/5.0 - u6/6.0 + u7/7.0 - u8/8.0
+    let ln2 = 0.6931471805599453
+    k * ln2 + ln_m
+}
+
+fn sde_exp(x: f64) -> f64 with Mut, Div, Panic {
+    // Range-reduce: e^x = e^k * e^r, k = round(x/ln2), |r| <= ln(2)/2
+    let ln2 = 0.6931471805599453
+    var k: f64 = 0.0
+    var r = x
+    if x > 0.0 { while r > 0.5 * ln2 { r = r - ln2; k = k + 1.0 } }
+    if x < 0.0 { while r < 0.0 - 0.5 * ln2 { r = r + ln2; k = k + 1.0; k = k - 2.0 } }
+    // e^r via Taylor, |r| <= 0.35
+    let r2 = r * r
+    let r3 = r2 * r
+    let r4 = r3 * r
+    let r5 = r4 * r
+    let r6 = r5 * r
+    let r7 = r6 * r
+    let r8 = r7 * r
+    let er = 1.0 + r + r2/2.0 + r3/6.0 + r4/24.0 + r5/120.0 + r6/720.0 + r7/5040.0 + r8/40320.0
+    // multiply by 2^k
+    var result = er
+    var ki = k
+    if ki > 0.0 { while ki > 0.5 { result = result * 2.0; ki = ki - 1.0 } }
+    if ki < 0.0 { while ki < 0.0 - 0.5 { result = result / 2.0; ki = ki + 1.0 } }
+    result
+}
+
+// =============================================================================
+// xorshift64 PRNG — inline, no state struct needed in helpers
+// =============================================================================
+
+// Advance xorshift64 state and return next pseudo-random i64
+fn xorshift64_next(state: i64) -> i64 with Mut {
+    var s = state
+    s = s ^ (s << 13)
+    s = s ^ (s >> 7)
+    s = s ^ (s << 17)
+    s
+}
+
+// Map i64 to f64 in (0, 1) — avoid exact 0 which breaks log
+fn xorshift64_f64(s: i64) -> f64 with Mut, Div, Panic {
+    // Use upper 53 bits; i64 may be negative so mask to positive
+    var v = s
+    if v < 0 { v = 0 - v }
+    // v in [0, 2^63); divide by 2^53
+    let denom: f64 = 9007199254740992.0   // 2^53
+    var fv = (v as f64) / denom
+    // clamp strictly into (0,1) to keep log defined
+    if fv <= 0.0 { fv = 1.0e-15 }
+    if fv >= 1.0 { fv = 1.0 - 1.0e-15 }
+    fv
+}
+
+// Box-Muller: given two uniform samples u1, u2 in (0,1), return standard normal
+// Returns only the first variate (cosine branch) for simplicity.
+fn box_muller_z(u1: f64, u2: f64) -> f64 with Mut, Div, Panic {
+    let two_pi = 6.283185307179586
+    let mag = sde_sqrt(0.0 - 2.0 * sde_log(u1))
+    // cos approximation via Taylor: cos(t) = 1 - t^2/2 + t^4/24 - t^6/720
+    let t = two_pi * u2
+    let t2 = t * t
+    let t4 = t2 * t2
+    let t6 = t4 * t2
+    let cos_t = 1.0 - t2/2.0 + t4/24.0 - t6/720.0
+    mag * cos_t
+}
+
+// =============================================================================
+// SDEState — core type
+// =============================================================================
+
+pub struct SDEState {
+    x:         [f64; 16],   // state vector
+    x_unc:     [f64; 16],   // epistemic uncertainty (std dev) on each component
+    n:         i32,          // active dimensions
+    t:         f64,          // current time
+    rng_state: i64,          // xorshift64 seed/state
+}
+
+// =============================================================================
+// sde_state_new
+// =============================================================================
+
+pub fn sde_state_new(n: i32, seed: i64) -> SDEState {
+    SDEState {
+        x:         [0.0; 16],
+        x_unc:     [0.0; 16],
+        n:         n,
+        t:         0.0,
+        rng_state: seed,
+    }
+}
+
+// =============================================================================
+// Helper: draw one standard normal, advance rng embedded in a state
+// Returns (z, new_rng_state)
+// =============================================================================
+
+struct NormalDraw {
+    z:         f64,
+    new_state: i64,
+}
+
+fn draw_normal(rng: i64) -> NormalDraw with Mut, Div, Panic {
+    let s1 = xorshift64_next(rng)
+    let s2 = xorshift64_next(s1)
+    let u1 = xorshift64_f64(s1)
+    let u2 = xorshift64_f64(s2)
+    let z  = box_muller_z(u1, u2)
+    NormalDraw { z: z, new_state: s2 }
+}
+
+// =============================================================================
+// Euler-Maruyama step
+// =============================================================================
+//
+// X_{t+dt} = X_t + μ_i·dt + σ_i·√dt·Z_i
+// u²(X_{t+dt}) = u²(X_t) + σ²_i·dt   (diffusion adds variance, GUM §5.2)
+//
+// drift[i]     — μ_i  (additive drift coefficient)
+// diffusion[i] — σ_i  (diffusion coefficient)
+
+pub fn euler_maruyama(
+    state:     SDEState,
+    dt:        f64,
+    drift:     &[f64; 16],
+    diffusion: &[f64; 16],
+) -> SDEState with Mut, Div, Panic {
+    var s = state
+    let sqrt_dt = sde_sqrt(dt)
+    var i = 0
+    while i < s.n {
+        let d = draw_normal(s.rng_state)
+        s.rng_state = d.new_state
+        let z  = d.z
+        let mu = drift[i]
+        let sg = diffusion[i]
+        s.x[i]     = s.x[i] + mu * dt + sg * sqrt_dt * z
+        // GUM uncertainty propagation: u²_new = u²_old + σ²·dt
+        let u_sq_new = s.x_unc[i] * s.x_unc[i] + sg * sg * dt
+        s.x_unc[i] = sde_sqrt(u_sq_new)
+        i = i + 1
+    }
+    s.t = s.t + dt
+    s
+}
+
+// =============================================================================
+// Milstein step
+// =============================================================================
+//
+// Adds the Itô correction term (order-1 strong convergence):
+//   X_{t+dt} = X_t + μ·dt + σ·ΔW + ½·σ·σ'·(ΔW² - dt)
+//
+// where ΔW = √dt·Z.
+//
+// diff_deriv[i] — σ'_i = dσ/dX evaluated at X_t
+
+pub fn milstein_step(
+    state:      SDEState,
+    dt:         f64,
+    drift:      &[f64; 16],
+    diffusion:  &[f64; 16],
+    diff_deriv: &[f64; 16],
+) -> SDEState with Mut, Div, Panic {
+    var s = state
+    let sqrt_dt = sde_sqrt(dt)
+    var i = 0
+    while i < s.n {
+        let d = draw_normal(s.rng_state)
+        s.rng_state = d.new_state
+        let z  = d.z
+        let dw = sqrt_dt * z
+        let mu = drift[i]
+        let sg = diffusion[i]
+        let sg_prime = diff_deriv[i]
+        // Euler-Maruyama term + Milstein correction
+        let correction = 0.5 * sg * sg_prime * (dw * dw - dt)
+        s.x[i]    = s.x[i] + mu * dt + sg * dw + correction
+        // Uncertainty: Milstein adds ½σσ'·dt as additional variance term
+        let u_sq_new = s.x_unc[i] * s.x_unc[i] + sg * sg * dt + 0.5 * sg * sg_prime * dt
+        let u_sq_clamp = if u_sq_new < 0.0 { 0.0 } else { u_sq_new }
+        s.x_unc[i] = sde_sqrt(u_sq_clamp)
+        i = i + 1
+    }
+    s.t = s.t + dt
+    s
+}
+
+// =============================================================================
+// Geometric Brownian Motion
+// =============================================================================
+//
+// dS = μS·dt + σS·dW
+//
+// Discretized: S_{t+dt} = S_t · exp((μ - σ²/2)·dt + σ·√dt·Z)
+// (log-Euler scheme — exact for GBM)
+//
+// The output SDEState stores the trajectory in x[0..n_steps-1] (clamped to 16),
+// x_unc carries propagated uncertainty, n = min(n_steps, 16).
+// The *final* value is x[n-1], x_unc[n-1].
+
+pub fn gbm_simulate(
+    s0:      f64,
+    mu:      f64,
+    sigma:   f64,
+    t_end:   f64,
+    n_steps: i32,
+    seed:    i64,
+) -> SDEState with Mut, Div, Panic {
+    var state = sde_state_new(1, seed)
+    state.x[0]     = s0
+    state.x_unc[0] = 0.0
+    let dt = t_end / (n_steps as f64)
+    let sqrt_dt = sde_sqrt(dt)
+    let drift_adj = mu - 0.5 * sigma * sigma  // log-space drift
+
+    // We record every step but only have 16 slots.
+    // Store final value trajectory in slot 0; track at each step.
+    var cur_s   = s0
+    var cur_unc = 0.0
+    var step = 0
+    var rng = seed
+    while step < n_steps {
+        let d = draw_normal(rng)
+        rng = d.new_state
+        let z  = d.z
+        // Log-Euler: S_{t+dt} = S_t * exp(drift_adj*dt + sigma*sqrt_dt*z)
+        let exponent = drift_adj * dt + sigma * sqrt_dt * z
+        cur_s = cur_s * sde_exp(exponent)
+        // Uncertainty: relative uncertainty grows as σ²·dt per step
+        let u_rel_sq_old = if cur_s > 1.0e-300 {
+            (cur_unc / cur_s) * (cur_unc / cur_s)
+        } else {
+            0.0
+        }
+        let u_rel_sq_new = u_rel_sq_old + sigma * sigma * dt
+        cur_unc = cur_s * sde_sqrt(u_rel_sq_new)
+        step = step + 1
+    }
+
+    state.x[0]     = cur_s
+    state.x_unc[0] = cur_unc
+    state.t        = t_end
+    state.n        = 1
+    state.rng_state = rng
+    state
+}
+
+// =============================================================================
+// Ornstein-Uhlenbeck process
+// =============================================================================
+//
+// dX = θ(μ-X)dt + σdW   (mean-reverting)
+//
+// Euler-Maruyama: X_{t+dt} = X_t + θ(μ-X_t)dt + σ·√dt·Z
+// Uncertainty:    u²_new = u²_old·(1 - θ·dt)² + σ²·dt
+
+pub fn ou_simulate(
+    x0:      f64,
+    theta:   f64,
+    mu:      f64,
+    sigma:   f64,
+    t_end:   f64,
+    n_steps: i32,
+    seed:    i64,
+) -> SDEState with Mut, Div, Panic {
+    var state = sde_state_new(1, seed)
+    state.x[0]     = x0
+    state.x_unc[0] = 0.0
+    let dt = t_end / (n_steps as f64)
+    let sqrt_dt = sde_sqrt(dt)
+
+    var cur_x   = x0
+    var cur_unc = 0.0
+    var rng = seed
+    var step = 0
+    while step < n_steps {
+        let d = draw_normal(rng)
+        rng = d.new_state
+        let z = d.z
+        // Euler-Maruyama for OU
+        cur_x = cur_x + theta * (mu - cur_x) * dt + sigma * sqrt_dt * z
+        // Uncertainty: mean-reversion damps existing uncertainty
+        let damping = 1.0 - theta * dt
+        let u_prop = cur_unc * damping
+        let u_sq_new = u_prop * u_prop + sigma * sigma * dt
+        cur_unc = sde_sqrt(u_sq_new)
+        step = step + 1
+    }
+
+    state.x[0]     = cur_x
+    state.x_unc[0] = cur_unc
+    state.t        = t_end
+    state.n        = 1
+    state.rng_state = rng
+    state
+}
+
+// =============================================================================
+// Epistemic GBM — uncertain parameters
+// =============================================================================
+//
+// Parameters μ, σ, S₀ carry epistemic uncertainty (standard deviations
+// mu_unc, sigma_unc, s0_unc).  Per-step GUM propagation via first-order
+// sensitivity analysis:
+//
+//   ∂S_{t+dt}/∂μ   ≈ S_t·dt           (sensitivity to drift)
+//   ∂S_{t+dt}/∂σ   ≈ S_t·(√dt·Z - σ·dt)   (sensitivity to diffusion)
+//   ∂S_{t+dt}/∂S₀  ≈ S_{t+dt}/S₀      (ratio propagation)
+//
+// Combined uncertainty (GUM §5.1.2 — independent sources):
+//   u²(S) = (∂S/∂μ)²·u²(μ) + (∂S/∂σ)²·u²(σ) + (∂S/∂S₀)²·u²(S₀)
+//           + σ²·S²·dt   (diffusion noise term)
+
+pub fn sde_epistemic_gbm(
+    s0:        f64,
+    s0_unc:    f64,
+    mu:        f64,
+    mu_unc:    f64,
+    sigma:     f64,
+    sigma_unc: f64,
+    t_end:     f64,
+    n_steps:   i32,
+    seed:      i64,
+) -> SDEState with Mut, Div, Panic {
+    var state = sde_state_new(1, seed)
+    state.x[0]     = s0
+    state.x_unc[0] = s0_unc
+    let dt = t_end / (n_steps as f64)
+    let sqrt_dt = sde_sqrt(dt)
+    let drift_adj = mu - 0.5 * sigma * sigma
+
+    var cur_s   = s0
+    var cur_unc = s0_unc
+    var rng = seed
+    var step = 0
+    while step < n_steps {
+        let d = draw_normal(rng)
+        rng = d.new_state
+        let z  = d.z
+        let dw = sqrt_dt * z
+
+        // Log-Euler step
+        let exponent = drift_adj * dt + sigma * dw
+        let s_new = cur_s * sde_exp(exponent)
+
+        // Sensitivities at current step
+        let sens_mu    = cur_s * dt                         // ∂S/∂μ
+        let sens_sigma = cur_s * (dw - sigma * dt)         // ∂S/∂σ
+        // ∂S/∂S₀ = s_new / s0  (chain rule across all steps)
+        let ratio_s0 = if s0 > 1.0e-300 { s_new / s0 } else { 1.0 }
+
+        // GUM combination: state uncertainty grows from parameter uncertainty
+        let u_param_sq = sens_mu    * sens_mu    * mu_unc    * mu_unc
+                       + sens_sigma * sens_sigma * sigma_unc * sigma_unc
+                       + ratio_s0  * ratio_s0   * s0_unc    * s0_unc
+        // Propagate existing uncertainty through the multiplicative step
+        let u_prop_sq  = cur_unc * cur_unc * (s_new / (cur_s + 1.0e-300)) * (s_new / (cur_s + 1.0e-300))
+        // Diffusion noise adds σ²·S²·dt
+        let u_diff_sq  = sigma * sigma * s_new * s_new * dt
+
+        let u_total_sq = u_param_sq + u_prop_sq + u_diff_sq
+        cur_unc = sde_sqrt(u_total_sq)
+        cur_s   = s_new
+        step = step + 1
+    }
+
+    state.x[0]     = cur_s
+    state.x_unc[0] = cur_unc
+    state.t        = t_end
+    state.n        = 1
+    state.rng_state = rng
+    state
+}

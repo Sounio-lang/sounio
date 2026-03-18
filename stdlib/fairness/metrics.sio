@@ -167,6 +167,350 @@ fn cf_satisfied(score_a0: f64, score_a1: f64, epsilon: f64) -> bool with IO {
 }
 
 // ============================================================
+// Aggregate fairness report from raw prediction arrays
+// ============================================================
+
+// FairnessReport — comprehensive fairness metrics computed from prediction arrays
+struct FairnessReport {
+    demographic_parity_diff: f64,       // |P(Ŷ=1|A=0) - P(Ŷ=1|A=1)|
+    equalized_odds_diff: f64,           // max(|ΔTPR|, |ΔFPR|)
+    predictive_parity_diff: f64,        // |PPV(A=0) - PPV(A=1)|
+    calibration_diff: f64,              // |P(Y=1|Ŷ=1,A=0) - P(Y=1|Ŷ=1,A=1)|
+    disparate_impact_ratio: f64,        // min(P₀/P₁, P₁/P₀)
+    individual_fairness_lipschitz: f64, // placeholder (requires distance metric)
+    chouldechova_impossible: i32,       // 1 if impossibility theorem triggered
+}
+
+// Helper: integer absolute value
+fn abs_i32(x: i32) -> i32 {
+    if x < 0 { 0 - x } else { x }
+}
+
+// Helper: f64 absolute value
+fn abs_f64_local(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+// Helper: safe f64 division (returns 0 if denominator is 0)
+fn safe_div(num: f64, denom: f64) -> f64 with Div, Panic {
+    if denom == 0.0 { return 0.0 }
+    num / denom
+}
+
+// demographic_parity: |P(Ŷ=1|A=0) - P(Ŷ=1|A=1)|
+// Ref: Dwork et al. 2012 "Fairness Through Awareness"
+fn demographic_parity(predictions: [i32; 256], protected: [i32; 256], n: i32) -> f64 with Mut, Div, Panic {
+    var count0: f64 = 0.0
+    var pos0: f64 = 0.0
+    var count1: f64 = 0.0
+    var pos1: f64 = 0.0
+    var i: i32 = 0
+    while i < n {
+        let idx = i as usize
+        let p = predictions[idx]
+        let g = protected[idx]
+        if g == 0 {
+            count0 = count0 + 1.0
+            if p == 1 { pos0 = pos0 + 1.0 }
+        } else {
+            count1 = count1 + 1.0
+            if p == 1 { pos1 = pos1 + 1.0 }
+        }
+        i = i + 1
+    }
+    let rate0 = safe_div(pos0, count0)
+    let rate1 = safe_div(pos1, count1)
+    abs_f64_local(rate0 - rate1)
+}
+
+// equalized_odds: max(|ΔTPR|, |ΔFPR|)
+// Ref: Hardt et al. 2016 "Equality of Opportunity in Supervised Learning"
+fn equalized_odds(predictions: [i32; 256], true_labels: [i32; 256], protected: [i32; 256], n: i32) -> f64 with Mut, Div, Panic {
+    // Group 0
+    var tp0: f64 = 0.0
+    var fp0: f64 = 0.0
+    var fn0: f64 = 0.0
+    var tn0: f64 = 0.0
+    // Group 1
+    var tp1: f64 = 0.0
+    var fp1: f64 = 0.0
+    var fn1: f64 = 0.0
+    var tn1: f64 = 0.0
+    var i: i32 = 0
+    while i < n {
+        let idx = i as usize
+        let y_hat = predictions[idx]
+        let y = true_labels[idx]
+        let g = protected[idx]
+        if g == 0 {
+            if y == 1 && y_hat == 1 { tp0 = tp0 + 1.0 }
+            if y == 0 && y_hat == 1 { fp0 = fp0 + 1.0 }
+            if y == 1 && y_hat == 0 { fn0 = fn0 + 1.0 }
+            if y == 0 && y_hat == 0 { tn0 = tn0 + 1.0 }
+        } else {
+            if y == 1 && y_hat == 1 { tp1 = tp1 + 1.0 }
+            if y == 0 && y_hat == 1 { fp1 = fp1 + 1.0 }
+            if y == 1 && y_hat == 0 { fn1 = fn1 + 1.0 }
+            if y == 0 && y_hat == 0 { tn1 = tn1 + 1.0 }
+        }
+        i = i + 1
+    }
+    let tpr0 = safe_div(tp0, tp0 + fn0)
+    let tpr1 = safe_div(tp1, tp1 + fn1)
+    let fpr0 = safe_div(fp0, fp0 + tn0)
+    let fpr1 = safe_div(fp1, fp1 + tn1)
+    let d_tpr = abs_f64_local(tpr0 - tpr1)
+    let d_fpr = abs_f64_local(fpr0 - fpr1)
+    if d_tpr > d_fpr { d_tpr } else { d_fpr }
+}
+
+// disparate_impact: min(P₀/P₁, P₁/P₀)
+// 4/5 rule (EEOC 1978): value < 0.8 signals adverse impact.
+fn disparate_impact(predictions: [i32; 256], protected: [i32; 256], n: i32) -> f64 with Mut, Div, Panic {
+    var count0: f64 = 0.0
+    var pos0: f64 = 0.0
+    var count1: f64 = 0.0
+    var pos1: f64 = 0.0
+    var i: i32 = 0
+    while i < n {
+        let idx = i as usize
+        let p = predictions[idx]
+        let g = protected[idx]
+        if g == 0 {
+            count0 = count0 + 1.0
+            if p == 1 { pos0 = pos0 + 1.0 }
+        } else {
+            count1 = count1 + 1.0
+            if p == 1 { pos1 = pos1 + 1.0 }
+        }
+        i = i + 1
+    }
+    let rate0 = safe_div(pos0, count0)
+    let rate1 = safe_div(pos1, count1)
+    if rate0 == 0.0 && rate1 == 0.0 { return 1.0 }
+    if rate0 == 0.0 || rate1 == 0.0 { return 0.0 }
+    let r01 = safe_div(rate0, rate1)
+    let r10 = safe_div(rate1, rate0)
+    if r01 < r10 { r01 } else { r10 }
+}
+
+// chouldechova_check: returns 1 if the impossibility theorem applies.
+// Chouldechova 2017: when base rates differ (base0 ≠ base1), you cannot
+// simultaneously equalize FPR, FNR, and PPV.
+// Inputs: tp0, fp0, tp1, fp1 are rates; base0, base1 are prevalences P(Y=1|A=g).
+fn chouldechova_check(tp0: f64, fp0: f64, tp1: f64, fp1: f64, base0: f64, base1: f64) -> i32 with Div, Panic {
+    // Impossibility requires: base rates differ
+    let rate_diff = abs_f64_local(base0 - base1)
+    if rate_diff < 0.001 {
+        return 0  // base rates equal → all criteria can hold simultaneously
+    }
+    // PPV = TPR * P / (TPR * P + FPR * (1 - P))
+    let ppv0 = safe_div(tp0 * base0, tp0 * base0 + fp0 * (1.0 - base0))
+    let ppv1 = safe_div(tp1 * base1, tp1 * base1 + fp1 * (1.0 - base1))
+    // Equalized FPR and FNR (TPR) imply unequal PPV when base rates differ
+    let fpr_diff = abs_f64_local(fp0 - fp1)
+    let tpr_diff = abs_f64_local(tp0 - tp1)
+    let ppv_diff = abs_f64_local(ppv0 - ppv1)
+    // If FPR and TPR are roughly equal but PPV is not (base rate effect):
+    // impossibility is demonstrated
+    if fpr_diff < 0.05 && tpr_diff < 0.05 && ppv_diff > 0.05 {
+        return 1
+    }
+    // Also flag if base rates differ significantly: Chouldechova's theorem
+    // guarantees impossibility in principle even if not yet realized
+    if rate_diff > 0.1 {
+        return 1
+    }
+    0
+}
+
+// predictive_parity: |PPV(A=0) - PPV(A=1)|
+// PPV = P(Y=1 | Ŷ=1); equal across groups means equal precision.
+fn predictive_parity_diff_from_arrays(predictions: [i32; 256], true_labels: [i32; 256], protected: [i32; 256], n: i32) -> f64 with Mut, Div, Panic {
+    var tp0: f64 = 0.0
+    var fp0: f64 = 0.0
+    var tp1: f64 = 0.0
+    var fp1: f64 = 0.0
+    var i: i32 = 0
+    while i < n {
+        let idx = i as usize
+        let y_hat = predictions[idx]
+        let y = true_labels[idx]
+        let g = protected[idx]
+        if g == 0 {
+            if y == 1 && y_hat == 1 { tp0 = tp0 + 1.0 }
+            if y == 0 && y_hat == 1 { fp0 = fp0 + 1.0 }
+        } else {
+            if y == 1 && y_hat == 1 { tp1 = tp1 + 1.0 }
+            if y == 0 && y_hat == 1 { fp1 = fp1 + 1.0 }
+        }
+        i = i + 1
+    }
+    let ppv0 = safe_div(tp0, tp0 + fp0)
+    let ppv1 = safe_div(tp1, tp1 + fp1)
+    abs_f64_local(ppv0 - ppv1)
+}
+
+// fairness_report: compute all metrics from raw arrays in one pass
+fn fairness_report(predictions: [i32; 256], true_labels: [i32; 256], protected: [i32; 256], n: i32) -> FairnessReport with Mut, Div, Panic {
+    // Group 0 and 1 counts
+    var count0: f64 = 0.0
+    var pos0: f64 = 0.0
+    var count1: f64 = 0.0
+    var pos1: f64 = 0.0
+    var tp0: f64 = 0.0
+    var fp0: f64 = 0.0
+    var fn0: f64 = 0.0
+    var tn0: f64 = 0.0
+    var tp1: f64 = 0.0
+    var fp1: f64 = 0.0
+    var fn1: f64 = 0.0
+    var tn1: f64 = 0.0
+    var i: i32 = 0
+    while i < n {
+        let idx = i as usize
+        let y_hat = predictions[idx]
+        let y = true_labels[idx]
+        let g = protected[idx]
+        if g == 0 {
+            count0 = count0 + 1.0
+            if y_hat == 1 { pos0 = pos0 + 1.0 }
+            if y == 1 && y_hat == 1 { tp0 = tp0 + 1.0 }
+            if y == 0 && y_hat == 1 { fp0 = fp0 + 1.0 }
+            if y == 1 && y_hat == 0 { fn0 = fn0 + 1.0 }
+            if y == 0 && y_hat == 0 { tn0 = tn0 + 1.0 }
+        } else {
+            count1 = count1 + 1.0
+            if y_hat == 1 { pos1 = pos1 + 1.0 }
+            if y == 1 && y_hat == 1 { tp1 = tp1 + 1.0 }
+            if y == 0 && y_hat == 1 { fp1 = fp1 + 1.0 }
+            if y == 1 && y_hat == 0 { fn1 = fn1 + 1.0 }
+            if y == 0 && y_hat == 0 { tn1 = tn1 + 1.0 }
+        }
+        i = i + 1
+    }
+    let rate0 = safe_div(pos0, count0)
+    let rate1 = safe_div(pos1, count1)
+    let dp_diff = abs_f64_local(rate0 - rate1)
+    let tpr0 = safe_div(tp0, tp0 + fn0)
+    let tpr1 = safe_div(tp1, tp1 + fn1)
+    let fpr0 = safe_div(fp0, fp0 + tn0)
+    let fpr1 = safe_div(fp1, fp1 + tn1)
+    let d_tpr = abs_f64_local(tpr0 - tpr1)
+    let d_fpr = abs_f64_local(fpr0 - fpr1)
+    let eo_diff = if d_tpr > d_fpr { d_tpr } else { d_fpr }
+    let ppv0 = safe_div(tp0, tp0 + fp0)
+    let ppv1 = safe_div(tp1, tp1 + fp1)
+    let pp_diff = abs_f64_local(ppv0 - ppv1)
+    // Calibration diff: same as predictive parity here (PPV-based)
+    let cal_diff = pp_diff
+    // Disparate impact ratio
+    let di = if rate0 == 0.0 && rate1 == 0.0 {
+        1.0
+    } else if rate0 == 0.0 || rate1 == 0.0 {
+        0.0
+    } else {
+        let r01 = safe_div(rate0, rate1)
+        let r10 = safe_div(rate1, rate0)
+        if r01 < r10 { r01 } else { r10 }
+    }
+    // Chouldechova impossibility (with base rates estimated from true_labels)
+    var pos_true0: f64 = 0.0
+    var pos_true1: f64 = 0.0
+    var j: i32 = 0
+    while j < n {
+        let jdx = j as usize
+        let y = true_labels[jdx]
+        let g = protected[jdx]
+        if g == 0 && y == 1 { pos_true0 = pos_true0 + 1.0 }
+        if g == 1 && y == 1 { pos_true1 = pos_true1 + 1.0 }
+        j = j + 1
+    }
+    let base0 = safe_div(pos_true0, count0)
+    let base1 = safe_div(pos_true1, count1)
+    let chould = chouldechova_check(tpr0, fpr0, tpr1, fpr1, base0, base1)
+    FairnessReport {
+        demographic_parity_diff: dp_diff,
+        equalized_odds_diff: eo_diff,
+        predictive_parity_diff: pp_diff,
+        calibration_diff: cal_diff,
+        disparate_impact_ratio: di,
+        individual_fairness_lipschitz: 0.0,  // requires distance metric
+        chouldechova_impossible: chould,
+    }
+}
+
+// ============================================================
+// Epistemic confidence tracking for fairness metrics
+// ============================================================
+
+// EpistemicFairnessValue — a fairness metric with uncertainty from finite sample size.
+// Uses Wilson score interval (Brown, Cai, DasGupta 2001) for binomial proportions.
+struct EpistemicFairnessValue {
+    point_estimate: f64,    // the raw metric
+    lower_95: f64,          // 95% CI lower bound
+    upper_95: f64,          // 95% CI upper bound
+    n_samples: i32,         // effective sample size
+}
+
+// sqrt helper for epistemic CI (Newton, 5 iterations)
+fn ep_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var y = x / 2.0
+    var k = 0
+    while k < 8 {
+        y = (y + x / y) / 2.0
+        k = k + 1
+    }
+    y
+}
+
+// Wilson interval half-width for a proportion p over n trials at z=1.96 (95%)
+// half = z * sqrt(p*(1-p)/n + z²/(4n²)) / (1 + z²/n)
+fn wilson_half(p: f64, n: i32) -> f64 with Mut, Div, Panic {
+    let z = 1.96
+    let nf: f64 = n as f64
+    let z2 = z * z
+    let inner = p * (1.0 - p) / nf + z2 / (4.0 * nf * nf)
+    z * ep_sqrt(inner) / (1.0 + z2 / nf)
+}
+
+// epistemic_dp_metric — wrap demographic parity with Wilson-style CI
+// Uses normal approximation for the difference of two proportions.
+fn epistemic_demographic_parity(predictions: [i32; 256], protected: [i32; 256], n: i32) -> EpistemicFairnessValue with Mut, Div, Panic {
+    var count0: f64 = 0.0
+    var pos0: f64 = 0.0
+    var count1: f64 = 0.0
+    var pos1: f64 = 0.0
+    var i: i32 = 0
+    while i < n {
+        let idx = i as usize
+        let p = predictions[idx]
+        let g = protected[idx]
+        if g == 0 {
+            count0 = count0 + 1.0
+            if p == 1 { pos0 = pos0 + 1.0 }
+        } else {
+            count1 = count1 + 1.0
+            if p == 1 { pos1 = pos1 + 1.0 }
+        }
+        i = i + 1
+    }
+    let rate0 = safe_div(pos0, count0)
+    let rate1 = safe_div(pos1, count1)
+    let diff = abs_f64_local(rate0 - rate1)
+    // SE of difference of proportions: sqrt(p0(1-p0)/n0 + p1(1-p1)/n1)
+    let se = ep_sqrt(safe_div(rate0 * (1.0 - rate0), count0) + safe_div(rate1 * (1.0 - rate1), count1))
+    let half = 1.96 * se
+    EpistemicFairnessValue {
+        point_estimate: diff,
+        lower_95: if diff - half < 0.0 { 0.0 } else { diff - half },
+        upper_95: diff + half,
+        n_samples: n,
+    }
+}
+
+// ============================================================
 // Fairness audit summary
 // ============================================================
 

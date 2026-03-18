@@ -1,7 +1,10 @@
-// Graph Algorithms Module - BFS, shortest paths, connected components
+// Graph Algorithms Module - BFS, shortest paths, connected components,
+// weighted shortest paths (Dijkstra), PageRank, MST (Kruskal), topo sort.
 //
-// Core graph algorithms for network geometry analysis.
-// Uses adjacency list representation directly.
+// Epistemic edge weights: uncertainty propagated via GUM (quadrature) along paths.
+// WeightedGraph uses a 32x32 adjacency matrix (max 32 nodes, 1024 entries).
+//
+// Ref: GUM (JCGM 100:2008) §5.1 — combined standard uncertainty by quadrature.
 
 module graph::algorithms
 
@@ -9,10 +12,14 @@ module graph::algorithms
 // Constants
 // =============================================================================
 
-let INF_DIST: i64 = -1  // Use -1 for unreachable (cleaner than large number)
+let INF_DIST: i64 = -1  // -1 = unreachable in unweighted results
+let WGRAPH_MAX: i32 = 32
+let WGRAPH_MAT: i32 = 1024  // 32*32
+
+let F64_INF: f64 = 1.0e300  // sentinel "infinite" distance
 
 // =============================================================================
-// BFS Result
+// Unweighted BFS result (kept for backward compat with test_algorithms_e2e.sio)
 // =============================================================================
 
 pub struct BfsResult {
@@ -36,14 +43,11 @@ impl BfsResult {
 }
 
 // =============================================================================
-// Breadth-First Search
+// Breadth-First Search (unweighted, adjacency-list)
 // =============================================================================
 
-// Perform BFS from a source node on an adjacency list
 pub fn bfs(adj: &[[usize]], source: usize) -> BfsResult {
     let n = adj.len()
-
-    // Initialize distances to -1 (unreachable)
     var distances: [i64] = []
     var parents: [i64] = []
     var i: usize = 0
@@ -57,7 +61,6 @@ pub fn bfs(adj: &[[usize]], source: usize) -> BfsResult {
         return BfsResult { distances, parents, source }
     }
 
-    // BFS using array-based queue
     var queue: [usize] = []
     queue.push(source)
     distances[source] = 0
@@ -66,7 +69,6 @@ pub fn bfs(adj: &[[usize]], source: usize) -> BfsResult {
     while head < queue.len() {
         let u = queue[head]
         head = head + 1
-
         let neighbors = &adj[u]
         var j: usize = 0
         while j < neighbors.len() {
@@ -83,77 +85,14 @@ pub fn bfs(adj: &[[usize]], source: usize) -> BfsResult {
     BfsResult { distances, parents, source }
 }
 
-// =============================================================================
-// Shortest Paths
-// =============================================================================
-
-// Compute shortest path distance between two nodes
 pub fn shortest_path_distance(adj: &[[usize]], u: usize, v: usize) -> i64 {
     let result = bfs(adj, u)
     result.distance_to(v)
 }
 
-// Reconstruct path from BFS result
-pub fn reconstruct_path(result: &BfsResult, target: usize) -> [usize] {
-    var path: [usize] = []
-
-    if target >= result.distances.len() || result.distances[target] < 0 {
-        return path
-    }
-
-    // Build path backwards
-    var current = target as i64
-    while current >= 0 {
-        path.push(current as usize)
-        if (current as usize) == result.source {
-            break
-        }
-        current = result.parents[current as usize]
-    }
-
-    // Reverse the path
-    reverse_array(&! path)
-    path
-}
-
-fn reverse_array(arr: &! [usize]) {
-    let n = arr.len()
-    if n <= 1 { return }
-
-    var i: usize = 0
-    var j: usize = n - 1
-    while i < j {
-        let tmp = arr[i]
-        arr[i] = arr[j]
-        arr[j] = tmp
-        i = i + 1
-        j = j - 1
-    }
-}
-
-// Compute all-pairs shortest paths
-pub fn all_pairs_shortest_paths(adj: &[[usize]]) -> [[i64]] {
+pub fn num_components(adj: &[[usize]]) -> usize {
     let n = adj.len()
-    var distances: [[i64]] = []
-
-    var u: usize = 0
-    while u < n {
-        let bfs_result = bfs(adj, u)
-        distances.push(bfs_result.distances)
-        u = u + 1
-    }
-    distances
-}
-
-// =============================================================================
-// Connected Components
-// =============================================================================
-
-// Find connected components using BFS
-// Returns array mapping each node to its component ID
-pub fn connected_components(adj: &[[usize]]) -> [usize] {
-    let n = adj.len()
-    let unvisited: usize = n  // Use n as "unvisited" marker
+    let unvisited: usize = n
 
     var labels: [usize] = []
     var i: usize = 0
@@ -167,7 +106,6 @@ pub fn connected_components(adj: &[[usize]]) -> [usize] {
 
     while node < n {
         if labels[node] == unvisited {
-            // BFS from this node
             var queue: [usize] = []
             queue.push(node)
             labels[node] = current_label
@@ -176,7 +114,6 @@ pub fn connected_components(adj: &[[usize]]) -> [usize] {
             while head < queue.len() {
                 let u = queue[head]
                 head = head + 1
-
                 let neighbors = &adj[u]
                 var j: usize = 0
                 while j < neighbors.len() {
@@ -193,14 +130,8 @@ pub fn connected_components(adj: &[[usize]]) -> [usize] {
         node = node + 1
     }
 
-    labels
-}
-
-// Count number of connected components
-pub fn num_components(adj: &[[usize]]) -> usize {
-    let labels = connected_components(adj)
     var max_label: usize = 0
-    var i: usize = 0
+    i = 0
     while i < labels.len() {
         if labels[i] < labels.len() && labels[i] > max_label {
             max_label = labels[i]
@@ -210,234 +141,628 @@ pub fn num_components(adj: &[[usize]]) -> usize {
     if labels.len() == 0 { 0 } else { max_label + 1 }
 }
 
-// Check if graph is connected
 pub fn is_connected(adj: &[[usize]]) -> bool {
     let n = adj.len()
     if n <= 1 { return true }
-
-    let bfs_result = bfs(adj, 0)
+    let result = bfs(adj, 0)
     var i: usize = 0
     while i < n {
-        if bfs_result.distances[i] < 0 { return false }
+        if result.distances[i] < 0 { return false }
         i = i + 1
     }
     true
 }
 
-// Get size of largest connected component
-pub fn largest_component_size(adj: &[[usize]]) -> usize {
-    let labels = connected_components(adj)
-    let n = labels.len()
-    if n == 0 { return 0 }
+// =============================================================================
+// WeightedGraph — 32×32 adjacency matrix with GUM uncertainty
+// =============================================================================
 
-    // Count nodes in each component
-    var counts: [usize] = []
-    var i: usize = 0
+pub struct WeightedGraph {
+    pub weights: [f64; 1024],     // weights[i*32+j] = edge weight (0.0 = no edge)
+    pub weight_unc: [f64; 1024],  // uncertainty on each edge weight
+    pub n_nodes: i32,
+    pub directed: i32,            // 0=undirected, 1=directed
+}
+
+// =============================================================================
+// ShortestPathResult — Dijkstra output with GUM uncertainty on distances
+// =============================================================================
+
+pub struct ShortestPathResult {
+    pub distances: [f64; 32],
+    pub dist_unc: [f64; 32],      // GUM-propagated path uncertainty
+    pub predecessors: [i32; 32],
+    pub reachable: [i32; 32],     // 1=reachable, 0=not
+}
+
+// =============================================================================
+// PageRankResult
+// =============================================================================
+
+pub struct PageRankResult {
+    pub scores: [f64; 32],
+    pub scores_unc: [f64; 32],
+    pub n_iterations: i32,
+    pub converged: i32,
+}
+
+// =============================================================================
+// TopoSortResult
+// =============================================================================
+
+pub struct TopoSortResult {
+    pub order: [i32; 32],     // topological order
+    pub count: i32,           // nodes sorted (-1 = cycle detected)
+}
+
+// =============================================================================
+// Helpers (must precede callers)
+// =============================================================================
+
+// Newton-Raphson sqrt (20 iterations)
+fn w_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i = 0
+    while i < 20 {
+        y = 0.5 * (y + x / y)
+        i = i + 1
+    }
+    y
+}
+
+fn w_abs(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+// Union-Find for Kruskal — flat arrays, max 32 nodes
+fn uf_find(parent: &[i32; 32], x: i32) -> i32 with Mut, Div, Panic {
+    var cur = x
+    var steps = 0
+    while steps < 32 {
+        let p = parent[cur as usize]
+        if p == cur { return cur }
+        cur = p
+        steps = steps + 1
+    }
+    cur
+}
+
+fn uf_union(parent: &![i32; 32], rank: &![i32; 32], a: i32, b: i32) with Mut, Div, Panic {
+    let ra = uf_find(parent, a)
+    let rb = uf_find(parent, b)
+    if ra == rb { return }
+    if rank[ra as usize] < rank[rb as usize] {
+        parent[ra as usize] = rb
+    } else if rank[ra as usize] > rank[rb as usize] {
+        parent[rb as usize] = ra
+    } else {
+        parent[rb as usize] = ra
+        rank[ra as usize] = rank[ra as usize] + 1
+    }
+}
+
+// =============================================================================
+// Graph Construction
+// =============================================================================
+
+pub fn wgraph_new(n: i32, directed: i32) -> WeightedGraph with Mut {
+    WeightedGraph {
+        weights:    [0.0; 1024],
+        weight_unc: [0.0; 1024],
+        n_nodes:    n,
+        directed:   directed,
+    }
+}
+
+pub fn wgraph_add_edge(g: WeightedGraph, from: i32, to: i32, weight: f64, unc: f64) -> WeightedGraph with Mut, Div, Panic {
+    var g2 = g
+    let idx = (from * WGRAPH_MAX + to) as usize
+    g2.weights[idx]    = weight
+    g2.weight_unc[idx] = unc
+    if g2.directed == 0 {
+        let idx2 = (to * WGRAPH_MAX + from) as usize
+        g2.weights[idx2]    = weight
+        g2.weight_unc[idx2] = unc
+    }
+    g2
+}
+
+// =============================================================================
+// BFS on WeightedGraph — hop-count distances, no uncertainty on hops
+// =============================================================================
+
+pub fn graph_bfs(g: &WeightedGraph, source: i32) -> ShortestPathResult with Mut, Div, Panic {
+    var dist:  [f64; 32] = [0.0; 32]
+    var dunc:  [f64; 32] = [0.0; 32]
+    var pred:  [i32; 32] = [0; 32]
+    var reach: [i32; 32] = [0; 32]
+
+    let n = g.n_nodes
+    // initialise to "unreachable"
+    var i: i32 = 0
     while i < n {
-        counts.push(0)
+        dist[i as usize]  = F64_INF
+        dunc[i as usize]  = 0.0
+        pred[i as usize]  = -1
+        reach[i as usize] = 0
         i = i + 1
     }
 
-    i = 0
-    while i < n {
-        if labels[i] < n {
-            counts[labels[i]] = counts[labels[i]] + 1
+    if source < 0 || source >= n {
+        return ShortestPathResult {
+            distances: dist, dist_unc: dunc,
+            predecessors: pred, reachable: reach,
         }
-        i = i + 1
     }
 
-    var max_size: usize = 0
-    i = 0
-    while i < n {
-        if counts[i] > max_size { max_size = counts[i] }
-        i = i + 1
-    }
-    max_size
-}
+    // BFS queue — fixed array, max 32 entries
+    var queue: [i32; 32] = [0; 32]
+    var qhead: i32 = 0
+    var qtail: i32 = 0
 
-// =============================================================================
-// Neighborhood Operations (for Ollivier-Ricci curvature)
-// =============================================================================
+    dist[source as usize]  = 0.0
+    reach[source as usize] = 1
+    queue[qtail as usize] = source
+    qtail = qtail + 1
 
-// Get k-hop neighborhood of a node (excluding the node itself)
-pub fn k_hop_neighborhood(adj: &[[usize]], source: usize, k: usize) -> [usize] {
-    let result = bfs(adj, source)
-
-    var neighbors: [usize] = []
-    var i: usize = 0
-    while i < result.distances.len() {
-        let d = result.distances[i]
-        if d > 0 && d <= (k as i64) {
-            neighbors.push(i)
+    while qhead < qtail {
+        let u = queue[qhead as usize]
+        qhead = qhead + 1
+        var v: i32 = 0
+        while v < n {
+            let idx = (u * WGRAPH_MAX + v) as usize
+            if g.weights[idx] > 0.0 && reach[v as usize] == 0 {
+                dist[v as usize]  = dist[u as usize] + 1.0
+                reach[v as usize] = 1
+                pred[v as usize]  = u
+                if qtail < WGRAPH_MAX {
+                    queue[qtail as usize] = v
+                    qtail = qtail + 1
+                }
+            }
+            v = v + 1
         }
-        i = i + 1
-    }
-    neighbors
-}
-
-// Get 1-hop neighbors (direct neighbors)
-pub fn direct_neighbors(adj: &[[usize]], node: usize) -> [usize] {
-    if node >= adj.len() {
-        return []
     }
 
-    var result: [usize] = []
-    let neighbors = &adj[node]
-    var i: usize = 0
-    while i < neighbors.len() {
-        result.push(neighbors[i])
-        i = i + 1
+    ShortestPathResult {
+        distances: dist, dist_unc: dunc,
+        predecessors: pred, reachable: reach,
     }
-    result
 }
 
 // =============================================================================
-// Graph Statistics
+// Connected components on WeightedGraph (undirected)
 // =============================================================================
 
-// Compute degree distribution (index = degree, value = count)
-pub fn degree_distribution(adj: &[[usize]]) -> [usize] {
-    let n = adj.len()
-    if n == 0 { return [] }
+pub fn graph_dfs_connected(g: &WeightedGraph) -> i32 with Mut, Div, Panic {
+    let n = g.n_nodes
+    var visited: [i32; 32] = [0; 32]
+    var components: i32 = 0
 
-    // Find max degree
-    var max_degree: usize = 0
-    var i: usize = 0
-    while i < n {
-        let deg = adj[i].len()
-        if deg > max_degree { max_degree = deg }
-        i = i + 1
+    var start: i32 = 0
+    while start < n {
+        if visited[start as usize] == 0 {
+            components = components + 1
+            // iterative DFS via stack (fixed array)
+            var stack: [i32; 32] = [0; 32]
+            var stop: i32 = 0
+            stack[stop as usize] = start
+            stop = stop + 1
+            while stop > 0 {
+                stop = stop - 1
+                let u = stack[stop as usize]
+                if visited[u as usize] == 0 {
+                    visited[u as usize] = 1
+                    var v: i32 = 0
+                    while v < n {
+                        let idx = (u * WGRAPH_MAX + v) as usize
+                        if g.weights[idx] > 0.0 && visited[v as usize] == 0 {
+                            if stop < WGRAPH_MAX {
+                                stack[stop as usize] = v
+                                stop = stop + 1
+                            }
+                        }
+                        v = v + 1
+                    }
+                }
+            }
+        }
+        start = start + 1
     }
-
-    // Count nodes with each degree
-    var counts: [usize] = []
-    i = 0
-    while i <= max_degree {
-        counts.push(0)
-        i = i + 1
-    }
-
-    i = 0
-    while i < n {
-        let deg = adj[i].len()
-        counts[deg] = counts[deg] + 1
-        i = i + 1
-    }
-    counts
+    components
 }
 
-// Compute average path length (only considers reachable pairs)
-pub fn average_path_length(adj: &[[usize]]) -> f64 {
-    let n = adj.len()
-    if n <= 1 { return 0.0 }
+// =============================================================================
+// Dijkstra — O(V²) scan, GUM uncertainty propagation along path
+//
+// GUM rule (§5.1): combined uncertainty along a path is
+//   u(d(v)) = sqrt( u(d(u))² + u(w(u,v))² )
+// =============================================================================
 
-    let distances = all_pairs_shortest_paths(adj)
+pub fn dijkstra(g: &WeightedGraph, source: i32) -> ShortestPathResult with Mut, Div, Panic {
+    let n = g.n_nodes
+    var dist:    [f64; 32] = [0.0; 32]
+    var dunc:    [f64; 32] = [0.0; 32]
+    var pred:    [i32; 32] = [0; 32]
+    var reach:   [i32; 32] = [0; 32]
+    var visited: [i32; 32] = [0; 32]
 
-    var sum: f64 = 0.0
-    var count: usize = 0
-
-    var i: usize = 0
+    var i: i32 = 0
     while i < n {
-        var j: usize = i + 1
+        dist[i as usize]    = F64_INF
+        dunc[i as usize]    = 0.0
+        pred[i as usize]    = -1
+        reach[i as usize]   = 0
+        visited[i as usize] = 0
+        i = i + 1
+    }
+
+    if source < 0 || source >= n {
+        return ShortestPathResult {
+            distances: dist, dist_unc: dunc,
+            predecessors: pred, reachable: reach,
+        }
+    }
+
+    dist[source as usize]  = 0.0
+    reach[source as usize] = 1
+
+    var processed: i32 = 0
+    while processed < n {
+        // find unvisited node with minimum distance
+        var u: i32 = -1
+        var best_d: f64 = F64_INF
+        var k: i32 = 0
+        while k < n {
+            if visited[k as usize] == 0 && dist[k as usize] < best_d {
+                best_d = dist[k as usize]
+                u = k
+            }
+            k = k + 1
+        }
+
+        if u == -1 { break }   // all remaining nodes unreachable
+        visited[u as usize] = 1
+
+        // relax edges from u
+        var v: i32 = 0
+        while v < n {
+            let idx = (u * WGRAPH_MAX + v) as usize
+            let w = g.weights[idx]
+            if w > 0.0 {
+                let nd = dist[u as usize] + w
+                if nd < dist[v as usize] {
+                    dist[v as usize]  = nd
+                    reach[v as usize] = 1
+                    pred[v as usize]  = u
+                    // GUM quadrature: u(d(v)) = sqrt(u(d(u))^2 + u(w)^2)
+                    let uw = g.weight_unc[idx]
+                    let ud = dunc[u as usize]
+                    dunc[v as usize] = w_sqrt(ud * ud + uw * uw)
+                }
+            }
+            v = v + 1
+        }
+
+        processed = processed + 1
+    }
+
+    ShortestPathResult {
+        distances: dist, dist_unc: dunc,
+        predecessors: pred, reachable: reach,
+    }
+}
+
+// =============================================================================
+// PageRank — power iteration with weight-uncertainty propagation
+//
+// PR(i) = (1-d)/N + d * Σ_{j→i} PR(j) * w(j,i) / out_strength(j)
+// Rank uncertainty: u_PR(i) ≈ d * Σ_{j→i} (PR(j)/out_strength(j)) * u_w(j,i)
+//
+// Uses by-value struct passing to avoid the JIT &! mutation visibility bug.
+// =============================================================================
+
+// Internal state carrier for one power-iteration step.
+struct PrState {
+    scores:     [f64; 32],
+    scores_unc: [f64; 32],
+    delta:      f64,
+}
+
+// Build out-strength array by scanning the graph.
+fn pr_make_out_strength(g: &WeightedGraph) -> [f64; 32] with Mut, Div, Panic {
+    var out_str: [f64; 32] = [0.0; 32]
+    let n = g.n_nodes
+    var i: i32 = 0
+    while i < n {
+        var s: f64 = 0.0
+        var j: i32 = 0
         while j < n {
-            let d = distances[i][j]
-            if d > 0 {
-                sum = sum + (d as f64)
-                count = count + 1
+            s = s + g.weights[(i * WGRAPH_MAX + j) as usize]
+            j = j + 1
+        }
+        out_str[i as usize] = s
+        i = i + 1
+    }
+    out_str
+}
+
+// One power-iteration step (by-value in/out via PrState).
+fn pr_step(g: &WeightedGraph, st: PrState, out_str: [f64; 32], damping: f64, teleport: f64) -> PrState
+    with Mut, Div, Panic
+{
+    let n = g.n_nodes
+    var new_scores: [f64; 32] = [0.0; 32]
+    var new_unc:    [f64; 32] = [0.0; 32]
+
+    // seed with teleport term
+    var k: i32 = 0
+    while k < n {
+        new_scores[k as usize] = teleport
+        k = k + 1
+    }
+
+    // accumulate contributions from each source j
+    var j: i32 = 0
+    while j < n {
+        let os = out_str[j as usize]
+        if os > 0.0 {
+            var vi: i32 = 0
+            while vi < n {
+                let idx = (j * WGRAPH_MAX + vi) as usize
+                let w = g.weights[idx]
+                if w > 0.0 {
+                    let contrib = damping * st.scores[j as usize] * w / os
+                    new_scores[vi as usize] = new_scores[vi as usize] + contrib
+                    let uc = damping * st.scores[j as usize] * g.weight_unc[idx] / os
+                    new_unc[vi as usize] = new_unc[vi as usize] + uc * uc
+                }
+                vi = vi + 1
+            }
+        }
+        j = j + 1
+    }
+
+    // sqrt the squared uncertainty accumulators
+    k = 0
+    while k < n {
+        new_unc[k as usize] = w_sqrt(new_unc[k as usize])
+        k = k + 1
+    }
+
+    // L1 delta vs previous scores
+    var delta: f64 = 0.0
+    k = 0
+    while k < n {
+        let d = new_scores[k as usize] - st.scores[k as usize]
+        if d < 0.0 { delta = delta + (0.0 - d) } else { delta = delta + d }
+        k = k + 1
+    }
+
+    PrState { scores: new_scores, scores_unc: new_unc, delta: delta }
+}
+
+pub fn pagerank(g: &WeightedGraph, damping: f64, max_iter: i32, tol: f64) -> PageRankResult
+    with Mut, Div, Panic
+{
+    let n = g.n_nodes
+    var scores: [f64; 32] = [0.0; 32]
+    let init = 1.0 / (n as f64)
+    var i: i32 = 0
+    while i < n {
+        scores[i as usize] = init
+        i = i + 1
+    }
+
+    let out_str = pr_make_out_strength(g)
+    let teleport = (1.0 - damping) / (n as f64)
+
+    var st = PrState { scores: scores, scores_unc: [0.0; 32], delta: 1.0e30 }
+    var iter: i32 = 0
+    var converged: i32 = 0
+
+    while iter < max_iter {
+        st = pr_step(g, st, out_str, damping, teleport)
+        iter = iter + 1
+        if st.delta < tol {
+            converged = 1
+            break
+        }
+    }
+
+    PageRankResult {
+        scores:       st.scores,
+        scores_unc:   st.scores_unc,
+        n_iterations: iter,
+        converged:    converged,
+    }
+}
+
+// =============================================================================
+// Kruskal MST — union-find, insertion-sort edges by weight
+//
+// Collects all directed edges (or upper-triangle for undirected) into a
+// fixed-size edge list, sorts by weight (insertion sort, O(E²) fine for E≤1024),
+// then greedily adds non-cycle edges.
+// =============================================================================
+
+pub fn kruskal_mst(g: &WeightedGraph) -> WeightedGraph with Mut, Div, Panic {
+    let n = g.n_nodes
+
+    // collect edges into fixed-size arrays (max E = n*(n-1)/2 ≤ 496 for n=32)
+    var e_from:  [i32; 512]  = [0; 512]
+    var e_to:    [i32; 512]  = [0; 512]
+    var e_w:     [f64; 512]  = [0.0; 512]
+    var e_unc:   [f64; 512]  = [0.0; 512]
+    var ne: i32 = 0
+
+    var i: i32 = 0
+    while i < n {
+        var j: i32 = 0
+        while j < n {
+            if g.directed == 1 {
+                // directed: every non-zero entry
+                let idx = (i * WGRAPH_MAX + j) as usize
+                if g.weights[idx] > 0.0 && ne < 512 {
+                    e_from[ne as usize] = i
+                    e_to[ne as usize]   = j
+                    e_w[ne as usize]    = g.weights[idx]
+                    e_unc[ne as usize]  = g.weight_unc[idx]
+                    ne = ne + 1
+                }
+            } else {
+                // undirected: upper triangle only
+                if j > i {
+                    let idx = (i * WGRAPH_MAX + j) as usize
+                    if g.weights[idx] > 0.0 && ne < 512 {
+                        e_from[ne as usize] = i
+                        e_to[ne as usize]   = j
+                        e_w[ne as usize]    = g.weights[idx]
+                        e_unc[ne as usize]  = g.weight_unc[idx]
+                        ne = ne + 1
+                    }
+                }
             }
             j = j + 1
         }
         i = i + 1
     }
 
-    if count == 0 { 0.0 } else { sum / (count as f64) }
+    // insertion sort by weight ascending
+    var s: i32 = 1
+    while s < ne {
+        let kw   = e_w[s as usize]
+        let ku   = e_unc[s as usize]
+        let kf   = e_from[s as usize]
+        let kt   = e_to[s as usize]
+        var p: i32 = s - 1
+        while p >= 0 && e_w[p as usize] > kw {
+            e_w[(p + 1) as usize]    = e_w[p as usize]
+            e_unc[(p + 1) as usize]  = e_unc[p as usize]
+            e_from[(p + 1) as usize] = e_from[p as usize]
+            e_to[(p + 1) as usize]   = e_to[p as usize]
+            p = p - 1
+        }
+        e_w[(p + 1) as usize]    = kw
+        e_unc[(p + 1) as usize]  = ku
+        e_from[(p + 1) as usize] = kf
+        e_to[(p + 1) as usize]   = kt
+        s = s + 1
+    }
+
+    // union-find
+    var uf_parent: [i32; 32] = [0; 32]
+    var uf_rank:   [i32; 32] = [0; 32]
+    var init_k: i32 = 0
+    while init_k < n {
+        uf_parent[init_k as usize] = init_k
+        uf_rank[init_k as usize]   = 0
+        init_k = init_k + 1
+    }
+
+    var mst = wgraph_new(n, g.directed)
+    var ei: i32 = 0
+    while ei < ne {
+        let u = e_from[ei as usize]
+        let v = e_to[ei as usize]
+
+        // inline find-root for u (avoids shared-borrow overlap with mutable union)
+        var ru: i32 = u
+        var ru_steps: i32 = 0
+        while ru_steps < 32 {
+            let rp = uf_parent[ru as usize]
+            if rp == ru { break }
+            ru = rp
+            ru_steps = ru_steps + 1
+        }
+
+        // inline find-root for v
+        var rv: i32 = v
+        var rv_steps: i32 = 0
+        while rv_steps < 32 {
+            let rp = uf_parent[rv as usize]
+            if rp == rv { break }
+            rv = rp
+            rv_steps = rv_steps + 1
+        }
+
+        if ru != rv {
+            mst = wgraph_add_edge(mst, u, v, e_w[ei as usize], e_unc[ei as usize])
+            // inline union-by-rank (avoids &! caller visibility bug)
+            if uf_rank[ru as usize] < uf_rank[rv as usize] {
+                uf_parent[ru as usize] = rv
+            } else if uf_rank[ru as usize] > uf_rank[rv as usize] {
+                uf_parent[rv as usize] = ru
+            } else {
+                uf_parent[rv as usize] = ru
+                uf_rank[ru as usize] = uf_rank[ru as usize] + 1
+            }
+        }
+        ei = ei + 1
+    }
+
+    mst
 }
 
-// Compute graph diameter (longest shortest path)
-pub fn diameter(adj: &[[usize]]) -> i64 {
-    let n = adj.len()
-    if n == 0 { return 0 }
+// =============================================================================
+// Topological Sort — Kahn's algorithm (BFS-based)
+// Returns TopoSortResult: order array + count (-1 = cycle detected).
+// By-value return avoids the JIT &! mutation visibility bug.
+// =============================================================================
 
-    let distances = all_pairs_shortest_paths(adj)
+pub fn topo_sort(g: &WeightedGraph) -> TopoSortResult with Mut, Div, Panic {
+    let n = g.n_nodes
+    var order: [i32; 32] = [0; 32]
 
-    var max_dist: i64 = 0
-    var i: usize = 0
+    // compute in-degree for each node
+    var indeg: [i32; 32] = [0; 32]
+    var i: i32 = 0
     while i < n {
-        var j: usize = 0
+        var j: i32 = 0
         while j < n {
-            let d = distances[i][j]
-            if d > max_dist { max_dist = d }
+            if g.weights[(j * WGRAPH_MAX + i) as usize] > 0.0 {
+                indeg[i as usize] = indeg[i as usize] + 1
+            }
             j = j + 1
         }
         i = i + 1
     }
-    max_dist
-}
 
-// =============================================================================
-// Tests
-// =============================================================================
+    // enqueue zero-indegree nodes
+    var queue: [i32; 32] = [0; 32]
+    var qhead: i32 = 0
+    var qtail: i32 = 0
 
-pub fn test_bfs_path() -> bool {
-    // Path graph: 0 - 1 - 2 - 3
-    var adj: [[usize]] = [[], [], [], []]
-    adj[0].push(1)
-    adj[1].push(0)
-    adj[1].push(2)
-    adj[2].push(1)
-    adj[2].push(3)
-    adj[3].push(2)
+    i = 0
+    while i < n {
+        if indeg[i as usize] == 0 {
+            queue[qtail as usize] = i
+            qtail = qtail + 1
+        }
+        i = i + 1
+    }
 
-    let result = bfs(&adj, 0)
-    result.distances[0] == 0 &&
-    result.distances[1] == 1 &&
-    result.distances[2] == 2 &&
-    result.distances[3] == 3
-}
+    var cnt: i32 = 0
+    while qhead < qtail {
+        let u = queue[qhead as usize]
+        qhead = qhead + 1
+        order[cnt as usize] = u
+        cnt = cnt + 1
 
-pub fn test_bfs_triangle() -> bool {
-    // Triangle: 0 - 1 - 2 - 0
-    var adj: [[usize]] = [[], [], []]
-    adj[0].push(1)
-    adj[0].push(2)
-    adj[1].push(0)
-    adj[1].push(2)
-    adj[2].push(0)
-    adj[2].push(1)
+        var v: i32 = 0
+        while v < n {
+            if g.weights[(u * WGRAPH_MAX + v) as usize] > 0.0 {
+                indeg[v as usize] = indeg[v as usize] - 1
+                if indeg[v as usize] == 0 {
+                    queue[qtail as usize] = v
+                    qtail = qtail + 1
+                }
+            }
+            v = v + 1
+        }
+    }
 
-    shortest_path_distance(&adj, 0, 2) == 1
-}
-
-pub fn test_components() -> bool {
-    // Two disconnected edges: 0-1 and 2-3
-    var adj: [[usize]] = [[], [], [], []]
-    adj[0].push(1)
-    adj[1].push(0)
-    adj[2].push(3)
-    adj[3].push(2)
-
-    num_components(&adj) == 2
-}
-
-pub fn test_connectivity() -> bool {
-    // Connected path: 0 - 1 - 2
-    var adj1: [[usize]] = [[], [], []]
-    adj1[0].push(1)
-    adj1[1].push(0)
-    adj1[1].push(2)
-    adj1[2].push(1)
-
-    // Disconnected: 0 - 1, 2 isolated
-    var adj2: [[usize]] = [[], [], []]
-    adj2[0].push(1)
-    adj2[1].push(0)
-
-    is_connected(&adj1) && !is_connected(&adj2)
-}
-
-pub fn run_algorithm_tests() -> bool {
-    test_bfs_path() &&
-    test_bfs_triangle() &&
-    test_components() &&
-    test_connectivity()
+    let count = if cnt < n { -1 } else { cnt }
+    TopoSortResult { order: order, count: count }
 }

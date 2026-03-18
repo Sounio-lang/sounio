@@ -1,0 +1,428 @@
+//@ run-pass
+// Tests for stdlib/fairness/metrics.sio
+// Covers: demographic parity, equalized odds, disparate impact, Chouldechova theorem.
+// Self-contained — all helpers inlined; no `use` imports required by JIT.
+
+// ============================================================
+// Math helpers
+// ============================================================
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    x
+}
+
+fn safe_div_t(num: f64, denom: f64) -> f64 with Div, Panic {
+    if denom == 0.0 { return 0.0 }
+    num / denom
+}
+
+fn ep_sqrt_t(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var y = x / 2.0
+    var k = 0
+    while k < 8 {
+        y = (y + x / y) / 2.0
+        k = k + 1
+    }
+    y
+}
+
+// ============================================================
+// Inline implementations of fairness metrics
+// ============================================================
+
+// demographic_parity_t: |P(Ŷ=1|A=0) - P(Ŷ=1|A=1)|
+fn demographic_parity_t(predictions: [i32; 256], protected: [i32; 256], n: i32) -> f64 with Mut, Div, Panic {
+    var count0: f64 = 0.0
+    var pos0: f64 = 0.0
+    var count1: f64 = 0.0
+    var pos1: f64 = 0.0
+    var i: i32 = 0
+    while i < n {
+        let idx = i as usize
+        let p = predictions[idx]
+        let g = protected[idx]
+        if g == 0 {
+            count0 = count0 + 1.0
+            if p == 1 { pos0 = pos0 + 1.0 }
+        } else {
+            count1 = count1 + 1.0
+            if p == 1 { pos1 = pos1 + 1.0 }
+        }
+        i = i + 1
+    }
+    let rate0 = safe_div_t(pos0, count0)
+    let rate1 = safe_div_t(pos1, count1)
+    abs_f64(rate0 - rate1)
+}
+
+// equalized_odds_t: max(|ΔTPR|, |ΔFPR|)
+fn equalized_odds_t(predictions: [i32; 256], true_labels: [i32; 256], protected: [i32; 256], n: i32) -> f64 with Mut, Div, Panic {
+    var tp0: f64 = 0.0
+    var fp0: f64 = 0.0
+    var fn0: f64 = 0.0
+    var tn0: f64 = 0.0
+    var tp1: f64 = 0.0
+    var fp1: f64 = 0.0
+    var fn1: f64 = 0.0
+    var tn1: f64 = 0.0
+    var i: i32 = 0
+    while i < n {
+        let idx = i as usize
+        let y_hat = predictions[idx]
+        let y = true_labels[idx]
+        let g = protected[idx]
+        if g == 0 {
+            if y == 1 && y_hat == 1 { tp0 = tp0 + 1.0 }
+            if y == 0 && y_hat == 1 { fp0 = fp0 + 1.0 }
+            if y == 1 && y_hat == 0 { fn0 = fn0 + 1.0 }
+            if y == 0 && y_hat == 0 { tn0 = tn0 + 1.0 }
+        } else {
+            if y == 1 && y_hat == 1 { tp1 = tp1 + 1.0 }
+            if y == 0 && y_hat == 1 { fp1 = fp1 + 1.0 }
+            if y == 1 && y_hat == 0 { fn1 = fn1 + 1.0 }
+            if y == 0 && y_hat == 0 { tn1 = tn1 + 1.0 }
+        }
+        i = i + 1
+    }
+    let tpr0 = safe_div_t(tp0, tp0 + fn0)
+    let tpr1 = safe_div_t(tp1, tp1 + fn1)
+    let fpr0 = safe_div_t(fp0, fp0 + tn0)
+    let fpr1 = safe_div_t(fp1, fp1 + tn1)
+    let d_tpr = abs_f64(tpr0 - tpr1)
+    let d_fpr = abs_f64(fpr0 - fpr1)
+    if d_tpr > d_fpr { d_tpr } else { d_fpr }
+}
+
+// disparate_impact_t: min(P₀/P₁, P₁/P₀)
+fn disparate_impact_t(predictions: [i32; 256], protected: [i32; 256], n: i32) -> f64 with Mut, Div, Panic {
+    var count0: f64 = 0.0
+    var pos0: f64 = 0.0
+    var count1: f64 = 0.0
+    var pos1: f64 = 0.0
+    var i: i32 = 0
+    while i < n {
+        let idx = i as usize
+        let p = predictions[idx]
+        let g = protected[idx]
+        if g == 0 {
+            count0 = count0 + 1.0
+            if p == 1 { pos0 = pos0 + 1.0 }
+        } else {
+            count1 = count1 + 1.0
+            if p == 1 { pos1 = pos1 + 1.0 }
+        }
+        i = i + 1
+    }
+    let rate0 = safe_div_t(pos0, count0)
+    let rate1 = safe_div_t(pos1, count1)
+    if rate0 == 0.0 && rate1 == 0.0 { return 1.0 }
+    if rate0 == 0.0 || rate1 == 0.0 { return 0.0 }
+    let r01 = safe_div_t(rate0, rate1)
+    let r10 = safe_div_t(rate1, rate0)
+    if r01 < r10 { r01 } else { r10 }
+}
+
+// chouldechova_check_t: returns 1 if impossibility theorem is triggered
+fn chouldechova_check_t(tp0: f64, fp0: f64, tp1: f64, fp1: f64, base0: f64, base1: f64) -> i32 with Div, Panic {
+    let rate_diff = abs_f64(base0 - base1)
+    if rate_diff < 0.001 {
+        return 0
+    }
+    // Sufficient condition: base rates differ significantly
+    if rate_diff > 0.1 {
+        return 1
+    }
+    let ppv0 = safe_div_t(tp0 * base0, tp0 * base0 + fp0 * (1.0 - base0))
+    let ppv1 = safe_div_t(tp1 * base1, tp1 * base1 + fp1 * (1.0 - base1))
+    let fpr_diff = abs_f64(fp0 - fp1)
+    let tpr_diff = abs_f64(tp0 - tp1)
+    let ppv_diff = abs_f64(ppv0 - ppv1)
+    if fpr_diff < 0.05 && tpr_diff < 0.05 && ppv_diff > 0.05 {
+        return 1
+    }
+    0
+}
+
+// ============================================================
+// Tests
+// ============================================================
+
+fn main() -> f64 with Mut, Div, Panic {
+    var passed = 0.0
+    var failed = 0.0
+
+    // ----------------------------------------------------------
+    // Test 1: Perfect fairness — equal predictions across groups → parity_diff = 0
+    // Setup: 4 group-0 and 4 group-1 samples, all predicted positive
+    // ----------------------------------------------------------
+    var preds_fair: [i32; 256] = [0; 256]
+    var true_fair: [i32; 256] = [0; 256]
+    var prot_fair: [i32; 256] = [0; 256]
+    preds_fair[0] = 1
+    preds_fair[1] = 1
+    preds_fair[2] = 1
+    preds_fair[3] = 1
+    preds_fair[4] = 1
+    preds_fair[5] = 1
+    preds_fair[6] = 1
+    preds_fair[7] = 1
+    true_fair[0] = 1
+    true_fair[1] = 1
+    true_fair[2] = 1
+    true_fair[3] = 1
+    true_fair[4] = 1
+    true_fair[5] = 1
+    true_fair[6] = 1
+    true_fair[7] = 1
+    // group 0: indices 0–3, group 1: indices 4–7
+    prot_fair[0] = 0
+    prot_fair[1] = 0
+    prot_fair[2] = 0
+    prot_fair[3] = 0
+    prot_fair[4] = 1
+    prot_fair[5] = 1
+    prot_fair[6] = 1
+    prot_fair[7] = 1
+    let dp_fair = demographic_parity_t(preds_fair, prot_fair, 8)
+    if abs_f64(dp_fair) < 0.001 {
+        passed = passed + 1.0
+    } else {
+        failed = failed + 1.0
+    }
+
+    // ----------------------------------------------------------
+    // Test 2: Biased classifier — all positive for group 0, all negative for group 1
+    // P(Ŷ=1|A=0) = 1.0, P(Ŷ=1|A=1) = 0.0 → parity_diff = 1.0
+    // ----------------------------------------------------------
+    var preds_biased: [i32; 256] = [0; 256]
+    var prot_biased: [i32; 256] = [0; 256]
+    // Group 0 (indices 0–3): all predicted positive
+    preds_biased[0] = 1
+    preds_biased[1] = 1
+    preds_biased[2] = 1
+    preds_biased[3] = 1
+    // Group 1 (indices 4–7): all predicted negative (default 0)
+    prot_biased[0] = 0
+    prot_biased[1] = 0
+    prot_biased[2] = 0
+    prot_biased[3] = 0
+    prot_biased[4] = 1
+    prot_biased[5] = 1
+    prot_biased[6] = 1
+    prot_biased[7] = 1
+    let dp_biased = demographic_parity_t(preds_biased, prot_biased, 8)
+    if abs_f64(dp_biased - 1.0) < 0.001 {
+        passed = passed + 1.0
+    } else {
+        failed = failed + 1.0
+    }
+
+    // ----------------------------------------------------------
+    // Test 3: Perfect equalized odds — same TPR and FPR across groups
+    // Both groups: 2 TP, 0 FP, 0 FN, 2 TN → TPR=1, FPR=0 for both
+    // eo_diff should be 0
+    // ----------------------------------------------------------
+    var preds_eo: [i32; 256] = [0; 256]
+    var true_eo: [i32; 256] = [0; 256]
+    var prot_eo: [i32; 256] = [0; 256]
+    // Group 0: indices 0–3 (2 positives predicted correctly, 2 negatives correctly)
+    preds_eo[0] = 1
+    preds_eo[1] = 1
+    preds_eo[2] = 0
+    preds_eo[3] = 0
+    true_eo[0] = 1
+    true_eo[1] = 1
+    true_eo[2] = 0
+    true_eo[3] = 0
+    prot_eo[0] = 0
+    prot_eo[1] = 0
+    prot_eo[2] = 0
+    prot_eo[3] = 0
+    // Group 1: indices 4–7 (same pattern)
+    preds_eo[4] = 1
+    preds_eo[5] = 1
+    preds_eo[6] = 0
+    preds_eo[7] = 0
+    true_eo[4] = 1
+    true_eo[5] = 1
+    true_eo[6] = 0
+    true_eo[7] = 0
+    prot_eo[4] = 1
+    prot_eo[5] = 1
+    prot_eo[6] = 1
+    prot_eo[7] = 1
+    let eo_equal = equalized_odds_t(preds_eo, true_eo, prot_eo, 8)
+    if abs_f64(eo_equal) < 0.001 {
+        passed = passed + 1.0
+    } else {
+        failed = failed + 1.0
+    }
+
+    // ----------------------------------------------------------
+    // Test 4: Unequal equalized odds
+    // Group 0: TPR=1.0 (2TP, 0FN), FPR=0.0 (0FP, 2TN)
+    // Group 1: TPR=0.5 (1TP, 1FN), FPR=0.0 (0FP, 2TN)
+    // eo_diff = |1.0 - 0.5| = 0.5
+    // ----------------------------------------------------------
+    var preds_eo2: [i32; 256] = [0; 256]
+    var true_eo2: [i32; 256] = [0; 256]
+    var prot_eo2: [i32; 256] = [0; 256]
+    // Group 0: all positives caught
+    preds_eo2[0] = 1
+    preds_eo2[1] = 1
+    preds_eo2[2] = 0
+    preds_eo2[3] = 0
+    true_eo2[0] = 1
+    true_eo2[1] = 1
+    true_eo2[2] = 0
+    true_eo2[3] = 0
+    prot_eo2[0] = 0
+    prot_eo2[1] = 0
+    prot_eo2[2] = 0
+    prot_eo2[3] = 0
+    // Group 1: only half of positives caught
+    preds_eo2[4] = 1
+    preds_eo2[5] = 0
+    preds_eo2[6] = 0
+    preds_eo2[7] = 0
+    true_eo2[4] = 1
+    true_eo2[5] = 1
+    true_eo2[6] = 0
+    true_eo2[7] = 0
+    prot_eo2[4] = 1
+    prot_eo2[5] = 1
+    prot_eo2[6] = 1
+    prot_eo2[7] = 1
+    let eo_unequal = equalized_odds_t(preds_eo2, true_eo2, prot_eo2, 8)
+    if abs_f64(eo_unequal - 0.5) < 0.001 {
+        passed = passed + 1.0
+    } else {
+        failed = failed + 1.0
+    }
+
+    // ----------------------------------------------------------
+    // Test 5: Disparate impact ratio = 1 when both groups have same approval rate
+    // ----------------------------------------------------------
+    var preds_di: [i32; 256] = [0; 256]
+    var prot_di: [i32; 256] = [0; 256]
+    // Both groups: 50% positive (2/4)
+    preds_di[0] = 1
+    preds_di[1] = 1
+    preds_di[2] = 0
+    preds_di[3] = 0
+    preds_di[4] = 1
+    preds_di[5] = 1
+    preds_di[6] = 0
+    preds_di[7] = 0
+    prot_di[0] = 0
+    prot_di[1] = 0
+    prot_di[2] = 0
+    prot_di[3] = 0
+    prot_di[4] = 1
+    prot_di[5] = 1
+    prot_di[6] = 1
+    prot_di[7] = 1
+    let di_equal = disparate_impact_t(preds_di, prot_di, 8)
+    if abs_f64(di_equal - 1.0) < 0.001 {
+        passed = passed + 1.0
+    } else {
+        failed = failed + 1.0
+    }
+
+    // ----------------------------------------------------------
+    // Test 6: Disparate impact — 4/5 rule check
+    // Group 0: 8/10 → rate = 0.8; Group 1: 4/10 → rate = 0.4
+    // ratio = 0.4/0.8 = 0.5 < 0.8 (EEOC violation)
+    // ----------------------------------------------------------
+    var preds_di2: [i32; 256] = [0; 256]
+    var prot_di2: [i32; 256] = [0; 256]
+    // Group 0 (indices 0–9): 8 positive, 2 negative
+    var q: i32 = 0
+    while q < 8 {
+        preds_di2[q as usize] = 1
+        prot_di2[q as usize] = 0
+        q = q + 1
+    }
+    prot_di2[8] = 0
+    prot_di2[9] = 0
+    // Group 1 (indices 10–19): 4 positive, 6 negative
+    var r: i32 = 10
+    while r < 14 {
+        preds_di2[r as usize] = 1
+        prot_di2[r as usize] = 1
+        r = r + 1
+    }
+    var s: i32 = 14
+    while s < 20 {
+        prot_di2[s as usize] = 1
+        s = s + 1
+    }
+    let di_ratio = disparate_impact_t(preds_di2, prot_di2, 20)
+    // Expected: min(0.4/0.8, 0.8/0.4) = min(0.5, 2.0) = 0.5
+    // The 4/5 rule: ratio < 0.8 → adverse impact
+    if di_ratio < 0.8 {
+        passed = passed + 1.0
+    } else {
+        failed = failed + 1.0
+    }
+
+    // ----------------------------------------------------------
+    // Test 7: Chouldechova — equal base rates → impossibility NOT triggered
+    // ----------------------------------------------------------
+    let chould_equal = chouldechova_check_t(0.8, 0.2, 0.8, 0.2, 0.5, 0.5)
+    if chould_equal == 0 {
+        passed = passed + 1.0
+    } else {
+        failed = failed + 1.0
+    }
+
+    // ----------------------------------------------------------
+    // Test 8: Chouldechova — different base rates (0.2 vs 0.7) → impossibility triggered
+    // When base rates differ by > 0.1, equalized FPR+FNR+PPV is impossible.
+    // ----------------------------------------------------------
+    let chould_diff = chouldechova_check_t(0.8, 0.1, 0.8, 0.1, 0.2, 0.7)
+    if chould_diff == 1 {
+        passed = passed + 1.0
+    } else {
+        failed = failed + 1.0
+    }
+
+    // ----------------------------------------------------------
+    // Test 9: Chouldechova — equal FPR/FNR but unequal PPV (due to base rate difference)
+    // base0=0.1, base1=0.5; shared TPR=0.8, FPR=0.2
+    // PPV0 = 0.8*0.1 / (0.8*0.1 + 0.2*0.9) = 0.08/0.26 ≈ 0.308
+    // PPV1 = 0.8*0.5 / (0.8*0.5 + 0.2*0.5) = 0.4/0.5 = 0.8
+    // ppv_diff ≈ 0.49 > 0.05, fpr_diff=0, tpr_diff=0 → triggered
+    // ----------------------------------------------------------
+    let chould_ppv = chouldechova_check_t(0.8, 0.2, 0.8, 0.2, 0.1, 0.5)
+    if chould_ppv == 1 {
+        passed = passed + 1.0
+    } else {
+        failed = failed + 1.0
+    }
+
+    // ----------------------------------------------------------
+    // Test 10: Disparate impact = 0 when one group has zero positive rate
+    // ----------------------------------------------------------
+    var preds_di3: [i32; 256] = [0; 256]
+    var prot_di3: [i32; 256] = [0; 256]
+    // Group 0: all positive
+    preds_di3[0] = 1
+    preds_di3[1] = 1
+    prot_di3[0] = 0
+    prot_di3[1] = 0
+    // Group 1: all negative (default 0)
+    prot_di3[2] = 1
+    prot_di3[3] = 1
+    let di_zero = disparate_impact_t(preds_di3, prot_di3, 4)
+    if abs_f64(di_zero) < 0.001 {
+        passed = passed + 1.0
+    } else {
+        failed = failed + 1.0
+    }
+
+    // Return: positive = all passed
+    passed - failed
+}

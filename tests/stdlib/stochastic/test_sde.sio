@@ -1,0 +1,190 @@
+//@ run-pass
+// E2E tests for stdlib/stochastic/sde.sio
+//
+// Validates:
+//   T1  GBM positivity          — S(t) > 0 for S₀=100, μ=0.05, σ=0.2, t=1
+//   T2  GBM uncertainty grows   — x_unc[0] > 0 after simulation
+//   T3  OU state is finite       — |X(t)| < 1e10
+//   T4  OU uncertainty grows    — x_unc > 0 after steps
+//   T5  Milstein finite result  — x[0] is finite after one step
+//   T6  Milstein uncertainty    — x_unc[0] >= 0
+//   T7  Euler-Maruyama finite   — x[0] finite after one step
+//   T8  Euler-Maruyama unc      — x_unc[0] >= 0
+//   T9  Epistemic unc > base    — parameter uncertainty → larger x_unc
+//   T10 Determinism             — same seed → same result (two runs match)
+//   T11 EM vs Milstein differ   — with σ'≠0 the trajectories diverge
+
+use stochastic::sde::{
+    SDEState,
+    sde_state_new,
+    euler_maruyama,
+    milstein_step,
+    gbm_simulate,
+    ou_simulate,
+    sde_epistemic_gbm,
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+fn is_finite(x: f64) -> bool {
+    x > 0.0 - 1.0e200 && x < 1.0e200
+}
+
+// ---------------------------------------------------------------------------
+// Test runner
+// ---------------------------------------------------------------------------
+
+fn run_tests() -> i32 {
+    var pass = 0
+    var fail = 0
+
+    // ------------------------------------------------------------------
+    // T1  GBM positivity
+    // ------------------------------------------------------------------
+    let gbm = gbm_simulate(100.0, 0.05, 0.2, 1.0, 100, 42)
+    if gbm.x[0] > 0.0 {
+        pass = pass + 1
+    } else {
+        fail = fail + 1
+    }
+
+    // ------------------------------------------------------------------
+    // T2  GBM uncertainty grows
+    // ------------------------------------------------------------------
+    if gbm.x_unc[0] > 0.0 {
+        pass = pass + 1
+    } else {
+        fail = fail + 1
+    }
+
+    // ------------------------------------------------------------------
+    // T3  OU state finite
+    // ------------------------------------------------------------------
+    let ou = ou_simulate(5.0, 1.0, 0.0, 0.5, 1.0, 200, 99)
+    if is_finite(ou.x[0]) {
+        pass = pass + 1
+    } else {
+        fail = fail + 1
+    }
+
+    // ------------------------------------------------------------------
+    // T4  OU uncertainty grows
+    // ------------------------------------------------------------------
+    if ou.x_unc[0] > 0.0 {
+        pass = pass + 1
+    } else {
+        fail = fail + 1
+    }
+
+    // ------------------------------------------------------------------
+    // T5  Milstein finite result
+    // ------------------------------------------------------------------
+    var ms_state = sde_state_new(1, 7)
+    ms_state.x[0]     = 10.0
+    ms_state.x_unc[0] = 0.1
+    let drift_ms:    [f64; 16] = [0.1; 16]
+    let diffusion_ms:[f64; 16] = [0.3; 16]
+    let diff_drv_ms: [f64; 16] = [0.1; 16]
+    let ms_out = milstein_step(ms_state, 0.01, &drift_ms, &diffusion_ms, &diff_drv_ms)
+    if is_finite(ms_out.x[0]) {
+        pass = pass + 1
+    } else {
+        fail = fail + 1
+    }
+
+    // ------------------------------------------------------------------
+    // T6  Milstein uncertainty non-negative
+    // ------------------------------------------------------------------
+    if ms_out.x_unc[0] >= 0.0 {
+        pass = pass + 1
+    } else {
+        fail = fail + 1
+    }
+
+    // ------------------------------------------------------------------
+    // T7  Euler-Maruyama finite
+    // ------------------------------------------------------------------
+    var em_state = sde_state_new(1, 13)
+    em_state.x[0]     = 10.0
+    em_state.x_unc[0] = 0.1
+    let drift_em:    [f64; 16] = [0.1; 16]
+    let diffusion_em:[f64; 16] = [0.3; 16]
+    let em_out = euler_maruyama(em_state, 0.01, &drift_em, &diffusion_em)
+    if is_finite(em_out.x[0]) {
+        pass = pass + 1
+    } else {
+        fail = fail + 1
+    }
+
+    // ------------------------------------------------------------------
+    // T8  Euler-Maruyama uncertainty non-negative
+    // ------------------------------------------------------------------
+    if em_out.x_unc[0] >= 0.0 {
+        pass = pass + 1
+    } else {
+        fail = fail + 1
+    }
+
+    // ------------------------------------------------------------------
+    // T9  Epistemic GBM: parameter uncertainty → larger state uncertainty
+    //     Compare no-param-uncertainty vs with param uncertainty
+    // ------------------------------------------------------------------
+    let ep_zero = sde_epistemic_gbm(100.0, 0.0, 0.05, 0.0, 0.2, 0.0, 1.0, 100, 42)
+    let ep_unc  = sde_epistemic_gbm(100.0, 5.0, 0.05, 0.01, 0.2, 0.02, 1.0, 100, 42)
+    if ep_unc.x_unc[0] > ep_zero.x_unc[0] {
+        pass = pass + 1
+    } else {
+        fail = fail + 1
+    }
+
+    // ------------------------------------------------------------------
+    // T10 Determinism: same seed → same x[0]
+    // ------------------------------------------------------------------
+    let gbm_a = gbm_simulate(100.0, 0.05, 0.2, 1.0, 100, 42)
+    let gbm_b = gbm_simulate(100.0, 0.05, 0.2, 1.0, 100, 42)
+    let diff10 = abs_f64(gbm_a.x[0] - gbm_b.x[0])
+    if diff10 < 1.0e-10 {
+        pass = pass + 1
+    } else {
+        fail = fail + 1
+    }
+
+    // ------------------------------------------------------------------
+    // T11 EM vs Milstein differ when σ' ≠ 0
+    //     With the same RNG seed and σ'=1.0 the Milstein correction adds
+    //     ½σσ'(ΔW²-dt) which shifts the result relative to pure EM.
+    // ------------------------------------------------------------------
+    var em2_state = sde_state_new(1, 7)
+    em2_state.x[0] = 10.0
+    let drift2:    [f64; 16] = [0.0; 16]
+    let diff2:     [f64; 16] = [1.0; 16]
+    let diff_drv2: [f64; 16] = [1.0; 16]
+    let em2_out  = euler_maruyama(em2_state, 0.1, &drift2, &diff2)
+
+    var ms2_state = sde_state_new(1, 7)
+    ms2_state.x[0] = 10.0
+    let ms2_out  = milstein_step(ms2_state, 0.1, &drift2, &diff2, &diff_drv2)
+    // They must differ (Milstein correction is non-trivial)
+    let diff11 = abs_f64(em2_out.x[0] - ms2_out.x[0])
+    if diff11 > 1.0e-10 {
+        pass = pass + 1
+    } else {
+        fail = fail + 1
+    }
+
+    // ------------------------------------------------------------------
+    // Summary
+    // ------------------------------------------------------------------
+    if fail > 0 { return 1 }
+    return 0
+}
+
+fn main() -> i32 {
+    return run_tests()
+}

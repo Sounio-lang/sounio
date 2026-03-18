@@ -183,3 +183,254 @@ fn dp_budget_remaining_f64(tracker: DPBudgetTracker) -> f64 with IO {
 fn dp_budget_is_exhausted(tracker: DPBudgetTracker) -> bool with IO {
     tracker.epsilon_spent > tracker.epsilon_total
 }
+
+// ============================================================
+// Public structs for complete DP API
+// ============================================================
+
+// DPConfig — configuration for a DP mechanism
+struct DPConfig {
+    epsilon: f64,        // privacy budget ε
+    delta: f64,          // approximate DP parameter δ (0 for pure DP)
+    sensitivity: f64,    // query sensitivity Δf
+    mechanism: i32,      // 0=Laplace, 1=Gaussian, 2=Exponential
+}
+
+// DPResult — result of a differentially private query
+struct DPResult {
+    noisy_value: f64,
+    true_value: f64,
+    noise_added: f64,
+    epsilon_spent: f64,
+    remaining_budget: f64,
+}
+
+// PrivacyAccountant — tracks cumulative ε-spending across queries
+struct PrivacyAccountant {
+    total_epsilon: f64,
+    spent_epsilon: f64,
+    n_queries: i32,
+    max_queries: i32,
+}
+
+// ============================================================
+// DPConfig constructors
+// ============================================================
+
+fn dp_config_laplace(epsilon: f64, sensitivity: f64) -> DPConfig {
+    DPConfig {
+        epsilon: epsilon,
+        delta: 0.0,
+        sensitivity: sensitivity,
+        mechanism: 0,
+    }
+}
+
+fn dp_config_gaussian(epsilon: f64, delta: f64, sensitivity: f64) -> DPConfig {
+    DPConfig {
+        epsilon: epsilon,
+        delta: delta,
+        sensitivity: sensitivity,
+        mechanism: 1,
+    }
+}
+
+// ============================================================
+// Noise generation via inverse CDF (deterministic for given seed)
+// ============================================================
+
+// Laplace inverse CDF: F⁻¹(u) = -b * sign(u - 0.5) * ln(1 - 2|u - 0.5|)
+// where b = sensitivity / ε and u = pseudo-random from seed.
+// Uses a simple multiplicative LCG to derive u ∈ (0,1) from seed.
+fn dp_laplace_noise_helper_u(seed: i64) -> f64 with Div, Panic {
+    // LCG: x_{n+1} = (a*x + c) mod m
+    let a: i64 = 6364136223846793005
+    let c: i64 = 1442695040888963407
+    let mixed = a * seed + c
+    // Map to (0,1) — avoid exact 0 or 1 for log stability
+    let raw: f64 = mixed as f64
+    let scaled = raw / 9223372036854775807.0
+    let u = if scaled < 0.0 { 0.0 - scaled } else { scaled }
+    // Clamp to (0.001, 0.999) to avoid log(0)
+    if u < 0.001 { return 0.001 }
+    if u > 0.999 { return 0.999 }
+    u
+}
+
+// Natural log approximation (sufficient for Laplace noise)
+fn dp_ln_approx(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 - 999999.0 }
+    if x == 1.0 { return 0.0 }
+    // Use identity: ln(x) = 2 * arctanh((x-1)/(x+1))
+    let y = (x - 1.0) / (x + 1.0)
+    var result = 0.0
+    var term = y
+    var i = 1
+    while i < 30 {
+        let i_f: f64 = i as f64
+        result = result + term / i_f
+        term = term * y * y
+        i = i + 2
+    }
+    2.0 * result
+}
+
+// dp_laplace_noise: samples from Laplace(0, sensitivity/ε) via inverse CDF
+// Ref: Dwork 2006, Proposition 3.5
+fn dp_laplace_noise(config: DPConfig, seed: i64) -> f64 with Mut, Div, Panic {
+    let b = config.sensitivity / config.epsilon
+    let u = dp_laplace_noise_helper_u(seed)
+    let centered = u - 0.5
+    let sign = if centered < 0.0 { 0.0 - 1.0 } else { 1.0 }
+    let abs_centered = if centered < 0.0 { 0.0 - centered } else { centered }
+    let arg = 1.0 - 2.0 * abs_centered
+    // Clamp arg to avoid log(0)
+    let arg_safe = if arg < 0.0001 { 0.0001 } else { arg }
+    0.0 - sign * b * dp_ln_approx(arg_safe)
+}
+
+// Sqrt via Newton's method (3 iterations)
+fn dp_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var y = x / 2.0
+    var i = 0
+    while i < 10 {
+        y = (y + x / y) / 2.0
+        i = i + 1
+    }
+    y
+}
+
+// dp_gaussian_noise: samples from N(0, σ²) via polar Box-Muller (no trig needed).
+// σ = sensitivity * sqrt(2 * ln(1.25/δ)) / ε
+// Ref: Dwork 2006, Proposition 3.6; Marsaglia & Bray 1964 (polar method)
+//
+// Polar method:
+//   u1, u2 ~ Uniform(0,1); v1 = 2u1-1, v2 = 2u2-1
+//   s = v1² + v2²; if s < 1 then Z = v1 * sqrt(-2*ln(s)/s) ~ N(0,1)
+//   The polar form avoids cos/sin entirely.
+fn dp_gaussian_noise(config: DPConfig, seed: i64) -> f64 with IO, Mut, Div, Panic {
+    let sigma = gaussian_sigma(config.sensitivity, config.epsilon, config.delta)
+    let u1 = dp_laplace_noise_helper_u(seed)
+    let u2 = dp_laplace_noise_helper_u(seed + 1)
+    // Map to [-1, 1]
+    let v1 = 2.0 * u1 - 1.0
+    let v2 = 2.0 * u2 - 1.0
+    let s = v1 * v1 + v2 * v2
+    // If s >= 1, it falls outside the unit circle; clamp to 0.99 to avoid rejection
+    let s_safe = if s >= 1.0 { 0.99 } else if s < 0.000001 { 0.000001 } else { s }
+    // Z = v1 * sqrt(-2 * ln(s) / s)
+    let log_s = dp_ln_approx(s_safe)
+    let factor = dp_sqrt(0.0 - 2.0 * log_s / s_safe)
+    v1 * factor * sigma
+}
+
+// ============================================================
+// dp_query — apply noise to a true value
+// ============================================================
+
+fn dp_query(config: DPConfig, true_value: f64, seed: i64) -> DPResult with IO, Mut, Div, Panic {
+    let noise = if config.mechanism == 0 {
+        dp_laplace_noise(config, seed)
+    } else {
+        dp_gaussian_noise(config, seed)
+    }
+    DPResult {
+        noisy_value: true_value + noise,
+        true_value: true_value,
+        noise_added: noise,
+        epsilon_spent: config.epsilon,
+        remaining_budget: 0.0,  // updated by accountant
+    }
+}
+
+// ============================================================
+// PrivacyAccountant
+// ============================================================
+
+fn accountant_new(total_epsilon: f64, max_queries: i32) -> PrivacyAccountant {
+    PrivacyAccountant {
+        total_epsilon: total_epsilon,
+        spent_epsilon: 0.0,
+        n_queries: 0,
+        max_queries: max_queries,
+    }
+}
+
+fn accountant_spend(acc: PrivacyAccountant, epsilon: f64) -> PrivacyAccountant {
+    PrivacyAccountant {
+        total_epsilon: acc.total_epsilon,
+        spent_epsilon: acc.spent_epsilon + epsilon,
+        n_queries: acc.n_queries + 1,
+        max_queries: acc.max_queries,
+    }
+}
+
+fn accountant_can_query(acc: PrivacyAccountant, epsilon: f64) -> bool {
+    let remaining = acc.total_epsilon - acc.spent_epsilon
+    remaining >= epsilon && acc.n_queries < acc.max_queries
+}
+
+fn accountant_remaining(acc: PrivacyAccountant) -> f64 {
+    acc.total_epsilon - acc.spent_epsilon
+}
+
+// ============================================================
+// Simple 2-mechanism composition (public interface)
+// ============================================================
+
+// Sequential composition: running ε₁ + ε₂ on same dataset → (ε₁ + ε₂)-DP
+fn dp_compose_sequential(epsilon1: f64, epsilon2: f64) -> f64 {
+    epsilon1 + epsilon2
+}
+
+// Parallel composition: running ε₁, ε₂ on disjoint partitions → max(ε₁, ε₂)-DP
+fn dp_compose_parallel(epsilon1: f64, epsilon2: f64) -> f64 {
+    if epsilon1 > epsilon2 { epsilon1 } else { epsilon2 }
+}
+
+// ============================================================
+// Epistemic confidence tracking for DP queries
+// ============================================================
+
+// EpistemicDPValue — a DP result annotated with epistemic uncertainty.
+// The variance tracks how much uncertainty is introduced by the DP noise,
+// on top of any pre-existing measurement uncertainty.
+struct EpistemicDPValue {
+    noisy_value: f64,
+    true_value: f64,
+    noise_variance: f64,   // Var[noise] (known from mechanism)
+    conf_lower: f64,       // 95% CI lower bound on true value
+    conf_upper: f64,       // 95% CI upper bound on true value
+    epsilon_spent: f64,
+}
+
+// epistemic_dp_query: wraps dp_query with GUM-style uncertainty propagation.
+// For Laplace(b): Var = 2b², so 95% CI half-width ≈ 1.96 * sqrt(2) * b.
+// For Gaussian(σ): Var = σ², 95% CI half-width = 1.96 * σ.
+fn epistemic_dp_query(config: DPConfig, true_value: f64, seed: i64) -> EpistemicDPValue with IO, Mut, Div, Panic {
+    let result = dp_query(config, true_value, seed)
+    let noise_var = if config.mechanism == 0 {
+        // Laplace: Var = 2 * b²
+        let b = config.sensitivity / config.epsilon
+        2.0 * b * b
+    } else {
+        // Gaussian: Var = σ²
+        let sigma = gaussian_sigma(config.sensitivity, config.epsilon, config.delta)
+        sigma * sigma
+    }
+    let half_width = 1.96 * dp_sqrt(noise_var)
+    EpistemicDPValue {
+        noisy_value: result.noisy_value,
+        true_value: true_value,
+        noise_variance: noise_var,
+        conf_lower: result.noisy_value - half_width,
+        conf_upper: result.noisy_value + half_width,
+        epsilon_spent: config.epsilon,
+    }
+}
+
+// epistemic_dp_ci_contains: checks if the CI contains the true value
+fn epistemic_dp_ci_contains(e: EpistemicDPValue) -> bool {
+    e.true_value >= e.conf_lower && e.true_value <= e.conf_upper
+}

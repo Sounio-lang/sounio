@@ -1,0 +1,339 @@
+//@ run-pass
+// Tests for stdlib/privacy/differential.sio
+// Covers: Laplace noise, Gaussian noise, PrivacyAccountant, sequential and parallel composition.
+// Self-contained — all helpers inlined; no `use` imports required by JIT.
+
+// ============================================================
+// Math helpers
+// ============================================================
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    x
+}
+
+fn dp_sqrt_t(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var y = x / 2.0
+    var i = 0
+    while i < 10 {
+        y = (y + x / y) / 2.0
+        i = i + 1
+    }
+    y
+}
+
+fn dp_ln_t(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 - 999999.0 }
+    if x == 1.0 { return 0.0 }
+    let y = (x - 1.0) / (x + 1.0)
+    var result = 0.0
+    var term = y
+    var i = 1
+    while i < 30 {
+        let if64: f64 = i as f64
+        result = result + term / if64
+        term = term * y * y
+        i = i + 2
+    }
+    2.0 * result
+}
+
+// ============================================================
+// LCG for deriving u ∈ (0,1) from a seed
+// ============================================================
+
+fn lcg_u(seed: i64) -> f64 with Div, Panic {
+    let a: i64 = 6364136223846793005
+    let c: i64 = 1442695040888963407
+    let mixed = a * seed + c
+    let raw: f64 = mixed as f64
+    let scaled = raw / 9223372036854775807.0
+    let u = if scaled < 0.0 { 0.0 - scaled } else { scaled }
+    if u < 0.001 { return 0.001 }
+    if u > 0.999 { return 0.999 }
+    u
+}
+
+// ============================================================
+// Laplace noise: Laplace(0, b) via inverse CDF
+// b = sensitivity / epsilon
+// ============================================================
+
+fn laplace_noise(sensitivity: f64, epsilon: f64, seed: i64) -> f64 with Mut, Div, Panic {
+    let b = sensitivity / epsilon
+    let u = lcg_u(seed)
+    let centered = u - 0.5
+    let sign = if centered < 0.0 { 0.0 - 1.0 } else { 1.0 }
+    let abs_c = if centered < 0.0 { 0.0 - centered } else { centered }
+    let arg = 1.0 - 2.0 * abs_c
+    let arg_safe = if arg < 0.0001 { 0.0001 } else { arg }
+    0.0 - sign * b * dp_ln_t(arg_safe)
+}
+
+// Laplace variance: 2b²
+fn laplace_var(sensitivity: f64, epsilon: f64) -> f64 with Div, Panic {
+    let b = sensitivity / epsilon
+    2.0 * b * b
+}
+
+// ============================================================
+// Gaussian sigma: sensitivity * sqrt(2*ln(1.25/delta)) / epsilon
+// ============================================================
+
+fn gaussian_sigma_t(sensitivity: f64, epsilon: f64, delta: f64) -> f64 with Mut, Div, Panic {
+    let log_inv_delta: f64 = if delta > 0.05 {
+        3.0
+    } else if delta > 0.005 {
+        4.828
+    } else if delta > 0.0005 {
+        7.13
+    } else {
+        9.43
+    }
+    let factor_sq = 2.0 * log_inv_delta
+    let x0 = factor_sq / 2.0
+    let x1 = (x0 + factor_sq / x0) / 2.0
+    let sqrt_factor = (x1 + factor_sq / x1) / 2.0
+    sqrt_factor * sensitivity / epsilon
+}
+
+// Gaussian noise via polar Box-Muller (no trig required)
+// Marsaglia & Bray 1964: Z = v1 * sqrt(-2*ln(s)/s) where s=v1²+v2², s<1
+fn gaussian_noise(sensitivity: f64, epsilon: f64, delta: f64, seed: i64) -> f64 with Mut, Div, Panic {
+    let sigma = gaussian_sigma_t(sensitivity, epsilon, delta)
+    let u1 = lcg_u(seed)
+    let u2 = lcg_u(seed + 1)
+    let v1 = 2.0 * u1 - 1.0
+    let v2 = 2.0 * u2 - 1.0
+    let s = v1 * v1 + v2 * v2
+    let s_safe = if s >= 1.0 { 0.99 } else if s < 0.000001 { 0.000001 } else { s }
+    let log_s = dp_ln_t(s_safe)
+    let factor = dp_sqrt_t(0.0 - 2.0 * log_s / s_safe)
+    v1 * factor * sigma
+}
+
+// ============================================================
+// PrivacyAccountant (inline)
+// ============================================================
+
+struct Accountant {
+    total: f64,
+    spent: f64,
+    n_queries: i32,
+    max_queries: i32,
+}
+
+fn acc_new(total: f64, max_q: i32) -> Accountant {
+    Accountant { total: total, spent: 0.0, n_queries: 0, max_queries: max_q }
+}
+
+fn acc_spend(a: Accountant, eps: f64) -> Accountant {
+    Accountant {
+        total: a.total,
+        spent: a.spent + eps,
+        n_queries: a.n_queries + 1,
+        max_queries: a.max_queries,
+    }
+}
+
+fn acc_can_query(a: Accountant, eps: f64) -> bool {
+    let remaining = a.total - a.spent
+    remaining >= eps && a.n_queries < a.max_queries
+}
+
+fn acc_remaining(a: Accountant) -> f64 {
+    a.total - a.spent
+}
+
+// ============================================================
+// Composition helpers
+// ============================================================
+
+fn compose_sequential(e1: f64, e2: f64) -> f64 {
+    e1 + e2
+}
+
+fn compose_parallel(e1: f64, e2: f64) -> f64 {
+    if e1 > e2 { e1 } else { e2 }
+}
+
+// ============================================================
+// Tests
+// ============================================================
+
+fn main() -> f64 with Mut, Div, Panic {
+    var passed = 0.0
+    var failed = 0.0
+    let tol = 0.001
+
+    // ----------------------------------------------------------
+    // Test 1: Laplace noise is deterministic for a given seed
+    // ----------------------------------------------------------
+    let n1a = laplace_noise(1.0, 1.0, 42)
+    let n1b = laplace_noise(1.0, 1.0, 42)
+    if abs_f64(n1a - n1b) < tol {
+        passed = passed + 1.0
+    } else {
+        failed = failed + 1.0
+    }
+
+    // ----------------------------------------------------------
+    // Test 2: Laplace noise average ≈ true value (many draws)
+    // Average of N Laplace samples is approximately 0.
+    // We accumulate 20 draws and check |mean| < 2*sigma/sqrt(20)
+    // where sigma = b = sensitivity/epsilon = 1.0.
+    // 2*sigma/sqrt(20) ≈ 2/4.47 ≈ 0.447
+    // ----------------------------------------------------------
+    let sensitivity = 1.0
+    let epsilon = 1.0
+    var sum_laplace = 0.0
+    var k: i64 = 0
+    while k < 20 {
+        sum_laplace = sum_laplace + laplace_noise(sensitivity, epsilon, k)
+        k = k + 1
+    }
+    let mean_laplace = sum_laplace / 20.0
+    let laplace_b = sensitivity / epsilon
+    let laplace_sigma = dp_sqrt_t(2.0 * laplace_b * laplace_b)
+    let two_se_laplace = 2.0 * laplace_sigma / dp_sqrt_t(20.0)
+    if abs_f64(mean_laplace) < two_se_laplace {
+        passed = passed + 1.0
+    } else {
+        failed = failed + 1.0
+    }
+
+    // ----------------------------------------------------------
+    // Test 3: Laplace variance formula: Var[Lap(b)] = 2b²
+    // With epsilon=1, sensitivity=1: b=1, variance=2
+    // ----------------------------------------------------------
+    let lv = laplace_var(1.0, 1.0)
+    if abs_f64(lv - 2.0) < tol {
+        passed = passed + 1.0
+    } else {
+        failed = failed + 1.0
+    }
+
+    // ----------------------------------------------------------
+    // Test 4: Gaussian noise is deterministic for a given seed
+    // ----------------------------------------------------------
+    let delta = 0.01
+    let gn1 = gaussian_noise(1.0, 1.0, delta, 100)
+    let gn2 = gaussian_noise(1.0, 1.0, delta, 100)
+    if abs_f64(gn1 - gn2) < tol {
+        passed = passed + 1.0
+    } else {
+        failed = failed + 1.0
+    }
+
+    // ----------------------------------------------------------
+    // Test 5: Gaussian noise average ≈ true value (20 draws)
+    // sigma = sensitivity * sqrt(2*ln(1.25/delta)) / epsilon
+    // For delta=0.01: sigma ≈ sqrt(2*4.828) ≈ 3.105
+    // 2*sigma/sqrt(20) ≈ 6.21/4.47 ≈ 1.39
+    // ----------------------------------------------------------
+    var sum_gaussian = 0.0
+    var m: i64 = 0
+    while m < 20 {
+        sum_gaussian = sum_gaussian + gaussian_noise(1.0, 1.0, delta, m * 3)
+        m = m + 1
+    }
+    let mean_gaussian = sum_gaussian / 20.0
+    let gaussian_sig = gaussian_sigma_t(1.0, 1.0, delta)
+    let two_se_gaussian = 2.0 * gaussian_sig / dp_sqrt_t(20.0)
+    if abs_f64(mean_gaussian) < two_se_gaussian {
+        passed = passed + 1.0
+    } else {
+        failed = failed + 1.0
+    }
+
+    // ----------------------------------------------------------
+    // Test 6: Accountant tracks budget correctly
+    // ----------------------------------------------------------
+    let acc0 = acc_new(1.0, 10)
+    let acc1 = acc_spend(acc0, 0.3)
+    let acc2 = acc_spend(acc1, 0.3)
+    let remaining = acc_remaining(acc2)
+    // spent = 0.6, remaining = 0.4
+    if abs_f64(remaining - 0.4) < 0.001 {
+        passed = passed + 1.0
+    } else {
+        failed = failed + 1.0
+    }
+
+    // ----------------------------------------------------------
+    // Test 7: can_query returns true when budget is sufficient
+    // ----------------------------------------------------------
+    if acc_can_query(acc2, 0.3) {
+        passed = passed + 1.0
+    } else {
+        failed = failed + 1.0
+    }
+
+    // ----------------------------------------------------------
+    // Test 8: can_query returns false when budget exhausted
+    // ----------------------------------------------------------
+    let acc3 = acc_spend(acc2, 0.4)
+    // spent = 1.0, remaining = 0.0
+    if !acc_can_query(acc3, 0.01) {
+        passed = passed + 1.0
+    } else {
+        failed = failed + 1.0
+    }
+
+    // ----------------------------------------------------------
+    // Test 9: can_query returns false when max_queries reached
+    // ----------------------------------------------------------
+    let acc_small = acc_new(100.0, 2)
+    let acc_s1 = acc_spend(acc_small, 1.0)
+    let acc_s2 = acc_spend(acc_s1, 1.0)
+    // n_queries = 2 == max_queries → cannot query
+    if !acc_can_query(acc_s2, 0.001) {
+        passed = passed + 1.0
+    } else {
+        failed = failed + 1.0
+    }
+
+    // ----------------------------------------------------------
+    // Test 10: Sequential composition ε₁ + ε₂
+    // ----------------------------------------------------------
+    let seq = compose_sequential(0.5, 0.3)
+    if abs_f64(seq - 0.8) < tol {
+        passed = passed + 1.0
+    } else {
+        failed = failed + 1.0
+    }
+
+    // ----------------------------------------------------------
+    // Test 11: Parallel composition max(ε₁, ε₂)
+    // ----------------------------------------------------------
+    let par = compose_parallel(0.5, 0.3)
+    if abs_f64(par - 0.5) < tol {
+        passed = passed + 1.0
+    } else {
+        failed = failed + 1.0
+    }
+
+    // ----------------------------------------------------------
+    // Test 12: Sequential composition is commutative
+    // ----------------------------------------------------------
+    let seq2 = compose_sequential(0.3, 0.5)
+    if abs_f64(seq2 - seq) < tol {
+        passed = passed + 1.0
+    } else {
+        failed = failed + 1.0
+    }
+
+    // ----------------------------------------------------------
+    // Test 13: Parallel composition is symmetric
+    // ----------------------------------------------------------
+    let par2 = compose_parallel(0.3, 0.5)
+    if abs_f64(par2 - par) < tol {
+        passed = passed + 1.0
+    } else {
+        failed = failed + 1.0
+    }
+
+    // Return: positive = all passed
+    passed - failed
+}

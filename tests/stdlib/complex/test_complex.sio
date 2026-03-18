@@ -1,0 +1,134 @@
+//@ run-pass
+// E2E test for stdlib/complex/lib — 10 tests covering arithmetic, special functions,
+// epistemic uncertainty propagation, and polynomial roots.
+
+use complex::lib::*
+
+// Absolute-value helper for f64
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+fn check_near(a: f64, b: f64, tol: f64) -> bool {
+    abs_f64(a - b) < tol
+}
+
+fn run_tests() -> i32 with Mut, Div, Panic {
+    var fail = 0
+
+    // ------------------------------------------------------------------
+    // Test 1: Multiplication  (1+2i)*(3+4i) = (3-8) + (4+6)i = -5+10i
+    // ------------------------------------------------------------------
+    let z1 = complex_new(1.0, 2.0)
+    let z2 = complex_new(3.0, 4.0)
+    let p  = complex_mul(z1, z2)
+    if !check_near(p.re, 0.0 - 5.0, 1e-10) { fail = fail + 1 }
+    if !check_near(p.im, 10.0,       1e-10) { fail = fail + 1 }
+
+    // ------------------------------------------------------------------
+    // Test 2: Division  (1+2i)/(3+4i) = (3+8)/25 + (6-4)i/25 = 11/25 + 2/25·i
+    // ------------------------------------------------------------------
+    let d = complex_div(z1, z2)
+    if !check_near(d.re, 11.0 / 25.0, 1e-10) { fail = fail + 1 }
+    if !check_near(d.im,  2.0 / 25.0, 1e-10) { fail = fail + 1 }
+
+    // ------------------------------------------------------------------
+    // Test 3: Euler's identity  |e^(iπ) + 1| < 1e-10
+    // π approximated to 15 significant figures
+    // ------------------------------------------------------------------
+    let pi_val = 3.141592653589793
+    let z_i_pi = complex_new(0.0, pi_val)
+    let e_ipi  = complex_exp(z_i_pi)
+    let euler  = complex_add(e_ipi, complex_one())
+    let mag    = complex_abs(euler)
+    if !check_near(mag, 0.0, 1e-10) { fail = fail + 1 }
+
+    // ------------------------------------------------------------------
+    // Test 4: exp(0) = 1 + 0i
+    // ------------------------------------------------------------------
+    let exp0 = complex_exp(complex_zero())
+    if !check_near(exp0.re, 1.0, 1e-10) { fail = fail + 1 }
+    if !check_near(exp0.im, 0.0, 1e-10) { fail = fail + 1 }
+
+    // ------------------------------------------------------------------
+    // Test 5: log(e) = 1 + 0i  (e ≈ 2.718281828459045)
+    // ------------------------------------------------------------------
+    let e_val  = 2.718281828459045
+    let log_e  = complex_log(complex_new(e_val, 0.0))
+    if !check_near(log_e.re, 1.0, 1e-10) { fail = fail + 1 }
+    if !check_near(log_e.im, 0.0, 1e-10) { fail = fail + 1 }
+
+    // ------------------------------------------------------------------
+    // Test 6: sqrt(-1) = i  (principal branch)
+    // ------------------------------------------------------------------
+    let minus_one = complex_new(0.0 - 1.0, 0.0)
+    let sq_neg1   = complex_sqrt(minus_one)
+    if !check_near(sq_neg1.re, 0.0, 1e-10) { fail = fail + 1 }
+    if !check_near(sq_neg1.im, 1.0, 1e-10) { fail = fail + 1 }
+
+    // ------------------------------------------------------------------
+    // Test 7: Quadratic roots of x² + 1 = 0  →  ±i
+    // ------------------------------------------------------------------
+    let roots = complex_quadratic_roots(1.0, 0.0, 1.0)
+    let root1 = roots.0
+    let root2 = roots.1
+    // root1 should be +i (principal)
+    if !check_near(root1.re, 0.0,        1e-10) { fail = fail + 1 }
+    if !check_near(root1.im, 1.0,        1e-10) { fail = fail + 1 }
+    // root2 should be -i
+    if !check_near(root2.re, 0.0,        1e-10) { fail = fail + 1 }
+    if !check_near(root2.im, 0.0 - 1.0, 1e-10) { fail = fail + 1 }
+
+    // ------------------------------------------------------------------
+    // Test 8: Epistemic add — uncertainties combine in quadrature
+    // a = (1+0i, u_re=0.1, u_im=0.2)
+    // b = (0+1i, u_re=0.3, u_im=0.4)
+    // expected u_re = sqrt(0.01 + 0.09) = sqrt(0.1) ≈ 0.31623
+    // expected u_im = sqrt(0.04 + 0.16) = sqrt(0.2) ≈ 0.44721
+    // ------------------------------------------------------------------
+    let ea = ecomplex_new(1.0, 0.0, 0.1, 0.2)
+    let eb = ecomplex_new(0.0, 1.0, 0.3, 0.4)
+    let es = ecomplex_add(ea, eb)
+    let exp_ru = 0.31622776601683794   // sqrt(0.1)
+    let exp_iu = 0.4472135954999579    // sqrt(0.2)
+    if !check_near(es.value.re, 1.0,     1e-10) { fail = fail + 1 }
+    if !check_near(es.value.im, 1.0,     1e-10) { fail = fail + 1 }
+    if !check_near(es.re_unc,   exp_ru,  1e-10) { fail = fail + 1 }
+    if !check_near(es.im_unc,   exp_iu,  1e-10) { fail = fail + 1 }
+
+    // ------------------------------------------------------------------
+    // Test 9: Epistemic mul — GUM first-order propagation
+    // a = (2+0i, u_re=0.1, u_im=0.0)
+    // b = (3+0i, u_re=0.2, u_im=0.0)
+    // product = 6+0i
+    // ∂re/∂ar=3, ∂re/∂br=2  →  u²(re)=(3·0.1)²+(2·0.2)²=0.09+0.16=0.25  u=0.5
+    // ∂im/∂ai=3, ∂im/∂bi=2  →  same with zeros — u(im)=0
+    // ------------------------------------------------------------------
+    let ea2 = ecomplex_new(2.0, 0.0, 0.1, 0.0)
+    let eb2 = ecomplex_new(3.0, 0.0, 0.2, 0.0)
+    let em  = ecomplex_mul(ea2, eb2)
+    if !check_near(em.value.re, 6.0, 1e-10) { fail = fail + 1 }
+    if !check_near(em.value.im, 0.0, 1e-10) { fail = fail + 1 }
+    if !check_near(em.re_unc,   0.5, 1e-10) { fail = fail + 1 }
+    if !check_near(em.im_unc,   0.0, 1e-10) { fail = fail + 1 }
+
+    // ------------------------------------------------------------------
+    // Test 10: complex_sin(i) = i·sinh(1) ≈ 0 + 1.1752011936438014·i
+    // sin(0 + 1·i) = sin(0)·cosh(1) + i·cos(0)·sinh(1) = 0 + i·sinh(1)
+    // ------------------------------------------------------------------
+    let z_i      = complex_new(0.0, 1.0)
+    let sin_i    = complex_sin(z_i)
+    let sinh_1   = 1.1752011936438014
+    if !check_near(sin_i.re, 0.0,    1e-10) { fail = fail + 1 }
+    if !check_near(sin_i.im, sinh_1, 1e-10) { fail = fail + 1 }
+
+    // ------------------------------------------------------------------
+    // Report
+    // ------------------------------------------------------------------
+    if fail > 0 { return 1 }
+    return 0
+}
+
+fn main() -> i32 with Mut, Div, Panic {
+    return run_tests()
+}
