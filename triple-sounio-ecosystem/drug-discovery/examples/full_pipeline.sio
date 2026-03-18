@@ -1,0 +1,307 @@
+// Full Pipeline Demo — End-to-end drug discovery
+//
+// 1. Screen molecule (Lipinski)
+// 2. Fit PK parameters (one-compartment oral)
+// 3. Simulate clinical trial (Monte Carlo)
+// 4. Final go/no-go decision with epistemic confidence
+
+fn fp_abs(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+fn fp_exp(x: f64) -> f64 with Mut, Div, Panic {
+    if x < -20.0 { return 0.0 }
+    var result = 1.0
+    var term = 1.0
+    var i = 1
+    while i < 20 {
+        term = term * x / (i as f64)
+        result = result + term
+        i = i + 1
+    }
+    if result < 0.0 { return 0.0 }
+    return result
+}
+
+fn fp_log(x: f64) -> f64 with Div, Panic, Mut {
+    if x <= 0.0 { return 0.0 }
+    let z = (x - 1.0) / (x + 1.0)
+    var result = 0.0
+    var term = z
+    var i = 1
+    while i < 40 {
+        result = result + term / (i as f64)
+        term = term * z * z
+        i = i + 2
+    }
+    return 2.0 * result
+}
+
+fn print_f64_3(v: f64) -> i64 with IO, Panic, Div {
+    if v < 0.0 {
+        print("-")
+        let neg_v = 0.0 - v
+        let ip = neg_v as i64
+        let frac = ((neg_v - (ip as f64)) * 1000.0) as i64
+        print_int(ip)
+        print(".")
+        if frac < 100 { print("0") }
+        if frac < 10 { print("0") }
+        print_int(frac)
+        return 0
+    }
+    let ip = v as i64
+    let frac = ((v - (ip as f64)) * 1000.0) as i64
+    print_int(ip)
+    print(".")
+    if frac < 100 { print("0") }
+    if frac < 10 { print("0") }
+    print_int(frac)
+    return 0
+}
+
+fn print_k(v: f64, eps: f64, label: i64) with IO, Panic, Div {
+    print("  Knowledge { value: ")
+    let _ = print_f64_3(v)
+    print(" epsilon: ")
+    let _ = print_f64_3(eps)
+    if label == 1 { print(" prov: \"lipinski_screen\" }") }
+    if label == 2 { print(" prov: \"pk_half_life\" }") }
+    if label == 3 { print(" prov: \"pk_tmax\" }") }
+    if label == 4 { print(" prov: \"pk_cmax\" }") }
+    if label == 5 { print(" prov: \"pk_auc\" }") }
+    if label == 6 { print(" prov: \"trial_efficacy\" }") }
+    if label == 7 { print(" prov: \"trial_adverse\" }") }
+    if label == 8 { print(" prov: \"therapeutic_index\" }") }
+    if label == 9 { print(" prov: \"pipeline_decision\" }") }
+    println("")
+}
+
+struct FK {
+    value: f64,
+    epsilon: f64,
+    prov_id: i64
+}
+
+fn fk_mul(a: FK, b: FK) -> FK {
+    FK { value: a.value * b.value, epsilon: a.epsilon * b.epsilon, prov_id: 100 }
+}
+
+fn fk_div(a: FK, b: FK) -> FK with Div, Panic {
+    if fp_abs(b.value) < 1e-15 { return FK { value: 0.0, epsilon: 0.0, prov_id: 0 } }
+    FK { value: a.value / b.value, epsilon: a.epsilon * b.epsilon * 0.99, prov_id: 100 }
+}
+
+fn fk_sub(a: FK, b: FK) -> FK {
+    FK { value: a.value - b.value, epsilon: a.epsilon * b.epsilon, prov_id: 100 }
+}
+
+fn fk_scale(a: FK, s: f64) -> FK {
+    FK { value: a.value * s, epsilon: a.epsilon, prov_id: a.prov_id }
+}
+
+fn fk_exp(a: FK) -> FK with Mut, Div, Panic {
+    FK { value: fp_exp(a.value), epsilon: a.epsilon * 0.99, prov_id: 101 }
+}
+
+// PRNG
+struct FRng {
+    state: i64
+}
+
+fn frng_next(rng: FRng) -> FRng with Mut, Panic, Div {
+    var s = rng.state * 1103515245 + 12345
+    if s < 0 { s = 0 - s }
+    let m = 2147483647
+    s = s - (s / m) * m
+    FRng { state: s }
+}
+
+fn frng_range(rng: FRng, lo: f64, hi: f64) -> f64 with Div, Panic {
+    let u = (rng.state as f64) / 2147483647.0
+    return lo + u * (hi - lo)
+}
+
+fn main() -> i64 with IO, Div, Panic, Mut {
+    println("========================================")
+    println("  DRUG DISCOVERY PIPELINE")
+    println("  Full End-to-End Demo")
+    println("========================================")
+
+    // ---- STAGE 1: VIRTUAL SCREENING ----
+    println("")
+    println("STAGE 1: Virtual Screening")
+    println("--------------------------")
+
+    // Candidate: Metformin-like molecule
+    let mw_val = 129.16
+    let mw_eps = 0.99
+    let logp_val = -1.43
+    let logp_eps = 0.95
+    let hbd = 2
+    let hba = 5
+
+    var mw_pass = 0
+    if mw_val < 500.0 { mw_pass = 1 }
+    var lp_pass = 0
+    if logp_val < 5.0 { lp_pass = 1 }
+    var hbd_pass = 0
+    if hbd <= 5 { hbd_pass = 1 }
+    var hba_pass = 0
+    if hba <= 10 { hba_pass = 1 }
+
+    let scr_total = mw_pass + lp_pass + hbd_pass + hba_pass
+    var scr_pass = 0
+    if scr_total == 4 { scr_pass = 1 }
+    let scr_conf = mw_eps * logp_eps
+
+    print("  MW  = ")
+    let _ = print_f64_3(mw_val)
+    print(" Da, LogP = ")
+    let _ = print_f64_3(logp_val)
+    print(", HBD = ")
+    print_int(hbd)
+    print(", HBA = ")
+    print_int(hba)
+    println("")
+
+    if scr_pass == 1 {
+        print_k(1.0, scr_conf, 1)
+        println("  Result: PASS")
+    } else {
+        println("  Result: FAIL -- pipeline halted")
+        return 1
+    }
+
+    // ---- STAGE 2: PK/PD MODELING ----
+    println("")
+    println("STAGE 2: PK/PD Modeling")
+    println("-----------------------")
+
+    let bioavail = FK { value: 0.85, epsilon: 0.92, prov_id: 20 }
+    let ka = FK { value: 1.2, epsilon: 0.88, prov_id: 21 }
+    let cl = FK { value: 7.5, epsilon: 0.87, prov_id: 24 }
+    let vd = FK { value: 50.0, epsilon: 0.90, prov_id: 23 }
+    let ke = FK { value: cl.value / vd.value, epsilon: cl.epsilon * vd.epsilon * 0.99, prov_id: 25 }
+    let dose = FK { value: 500.0, epsilon: 0.98, prov_id: 30 }
+
+    // Half-life
+    let ln2 = FK { value: 0.693147, epsilon: 1.0, prov_id: 50 }
+    let hl = fk_div(ln2, ke)
+    print_k(hl.value, hl.epsilon, 2)
+
+    // Tmax
+    let ratio = fk_div(ka, ke)
+    let log_ratio = FK { value: fp_log(ratio.value), epsilon: ratio.epsilon * 0.98, prov_id: 51 }
+    let rate_diff = fk_sub(ka, ke)
+    let tmax = fk_div(log_ratio, rate_diff)
+    print_k(tmax.value, tmax.epsilon, 3)
+
+    // Cmax
+    let fd = fk_mul(bioavail, dose)
+    let numerator = fk_mul(fd, ka)
+    let denominator = fk_mul(vd, rate_diff)
+    let term1 = fk_div(numerator, denominator)
+    let neg_ke_t = fk_scale(ke, 0.0 - tmax.value)
+    let exp_elim = fk_exp(neg_ke_t)
+    let neg_ka_t = fk_scale(ka, 0.0 - tmax.value)
+    let exp_abs = fk_exp(neg_ka_t)
+    let ediff = fk_sub(exp_elim, exp_abs)
+    let cmax = fk_mul(term1, ediff)
+    print_k(cmax.value, cmax.epsilon, 4)
+
+    // AUC
+    let auc = fk_div(fd, cl)
+    print_k(auc.value, auc.epsilon, 5)
+
+    // ---- STAGE 3: CLINICAL TRIAL SIMULATION ----
+    println("")
+    println("STAGE 3: Clinical Trial Simulation")
+    println("-----------------------------------")
+
+    let mec = 5.0
+    let toxic = 20.0
+    let n_patients = 100
+    var rng = FRng { state: 42 }
+    var n_eff = 0
+    var n_adv = 0
+
+    var i = 0
+    while i < n_patients {
+        rng = frng_next(rng)
+        let p_ke = 0.15 * frng_range(rng, 0.7, 1.3)
+        rng = frng_next(rng)
+        let p_vd = 50.0 * frng_range(rng, 0.8, 1.2)
+        rng = frng_next(rng)
+        let p_f = 0.85 * frng_range(rng, 0.75, 1.0)
+        rng = frng_next(rng)
+        let p_ka = 1.2 * frng_range(rng, 0.8, 1.2)
+        rng = frng_next(rng)
+        let p_dose = 500.0 * frng_range(rng, 0.95, 1.05)
+
+        let rd = p_ka - p_ke
+        var den = p_vd * rd
+        if fp_abs(den) < 1e-10 { den = 1e-10 }
+        let coeff = (p_f * p_dose * p_ka) / den
+
+        var p_cmax = 0.0
+        var time_above = 0.0
+        var p_exceeds = 0
+        var t = 0
+        while t < 25 {
+            let tf = t as f64
+            let conc = coeff * (fp_exp(0.0 - p_ke * tf) - fp_exp(0.0 - p_ka * tf))
+            if conc > p_cmax { p_cmax = conc }
+            if conc > mec { time_above = time_above + 1.0 }
+            if conc > toxic { p_exceeds = 1 }
+            t = t + 1
+        }
+        if time_above >= 8.0 { n_eff = n_eff + 1 }
+        if p_exceeds == 1 { n_adv = n_adv + 1 }
+
+        rng = frng_next(rng)
+        i = i + 1
+    }
+
+    let nf = n_patients as f64
+    let eff_rate = (n_eff as f64) / nf
+    let adv_rate = (n_adv as f64) / nf
+    let ti = toxic / mec
+
+    print("  Patients: ")
+    print_int(n_patients)
+    println("")
+    print_k(eff_rate, 0.95, 6)
+    print_k(adv_rate, 0.95, 7)
+    print_k(ti, 0.90, 8)
+
+    // ---- FINAL DECISION ----
+    println("")
+    println("FINAL DECISION")
+    println("--------------")
+
+    let pk_conf = hl.epsilon * cmax.epsilon
+    let final_conf = scr_conf * pk_conf * 0.95
+
+    var decision = 0
+    if eff_rate > 0.6 {
+        if adv_rate < 0.10 {
+            if final_conf > 0.5 { decision = 1 }
+        }
+    }
+
+    if decision == 1 {
+        println("  PROCEED -- advance to Phase II")
+    } else {
+        println("  HALT -- insufficient evidence")
+    }
+    print_k(final_conf, final_conf, 9)
+
+    println("")
+    println("========================================")
+    println("  Pipeline complete.")
+    println("========================================")
+
+    return 0
+}

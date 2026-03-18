@@ -1,0 +1,136 @@
+//@ run-pass
+// Test: Monte Carlo trial simulation components
+
+fn ts_abs(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+fn ts_exp(x: f64) -> f64 with Panic, Mut, Div {
+    // For very negative x, exp(x) ~ 0
+    if x < -20.0 { return 0.0 }
+    var result = 1.0
+    var term = 1.0
+    var i = 1
+    while i < 20 {
+        term = term * x / (i as f64)
+        result = result + term
+        i = i + 1
+    }
+    if result < 0.0 { return 0.0 }
+    return result
+}
+
+fn print_f64_3(v: f64) -> i64 with IO, Panic, Div {
+    if v < 0.0 {
+        print("-")
+        let neg_v = 0.0 - v
+        let ip = neg_v as i64
+        let frac = ((neg_v - (ip as f64)) * 1000.0) as i64
+        print_int(ip)
+        print(".")
+        if frac < 100 { print("0") }
+        if frac < 10 { print("0") }
+        print_int(frac)
+        return 0
+    }
+    let ip = v as i64
+    let frac = ((v - (ip as f64)) * 1000.0) as i64
+    print_int(ip)
+    print(".")
+    if frac < 100 { print("0") }
+    if frac < 10 { print("0") }
+    print_int(frac)
+    return 0
+}
+
+struct TRng {
+    state: i64
+}
+
+fn trng_next(rng: TRng) -> TRng {
+    var s = rng.state * 1103515245 + 12345
+    if s < 0 { s = 0 - s }
+    let m = 2147483647
+    s = s - (s / m) * m
+    TRng { state: s }
+}
+
+fn trng_uniform(rng: TRng) -> f64 with Div, Panic {
+    let sf = rng.state as f64
+    return sf / 2147483647.0
+}
+
+fn main() -> i64 with IO, Div, Panic, Mut {
+    // Test 1: PRNG produces values in [0, 1)
+    var rng = TRng { state: 42 }
+    var i = 0
+    var all_valid = 1
+    while i < 20 {
+        rng = trng_next(rng)
+        let u = trng_uniform(rng)
+        if u < 0.0 { all_valid = 0 }
+        if u >= 1.0 { all_valid = 0 }
+        i = i + 1
+    }
+    if all_valid != 1 {
+        println("FAIL: PRNG out of range")
+        return 1
+    }
+    println("PASS: PRNG 20 values in [0, 1)")
+
+    // Test 2: PRNG deterministic
+    let rng_a = trng_next(TRng { state: 42 })
+    let rng_b = trng_next(TRng { state: 42 })
+    if rng_a.state != rng_b.state {
+        println("FAIL: PRNG not deterministic")
+        return 1
+    }
+    println("PASS: PRNG deterministic")
+
+    // Test 3: C(0) = 0 for oral model
+    let ke = 0.15
+    let vd = 50.0
+    let f_val = 0.85
+    let ka = 1.2
+    let dose = 500.0
+    let rd = ka - ke
+    var denom = vd * rd
+    if ts_abs(denom) < 1e-10 { denom = 1e-10 }
+    let coeff = (f_val * dose * ka) / denom
+    let c0 = coeff * (ts_exp(0.0) - ts_exp(0.0))
+    if ts_abs(c0) > 0.001 {
+        println("FAIL: C(0) != 0")
+        return 1
+    }
+    println("PASS: C(0) = 0")
+
+    // Test 4: C(2) > 0
+    let c2 = coeff * (ts_exp(0.0 - ke * 2.0) - ts_exp(0.0 - ka * 2.0))
+    if c2 <= 0.0 {
+        println("FAIL: C(2) <= 0")
+        return 1
+    }
+    print("PASS: C(2) = ")
+    let _ = print_f64_3(c2)
+    println("")
+
+    // Test 5: C(100) ~ 0
+    let c100 = coeff * (ts_exp(0.0 - ke * 100.0) - ts_exp(0.0 - ka * 100.0))
+    if ts_abs(c100) > 0.1 {
+        println("FAIL: C(100) not near 0")
+        return 1
+    }
+    println("PASS: C(100) ~ 0")
+
+    // Test 6: Therapeutic index
+    let ti = 20.0 / 5.0
+    if ts_abs(ti - 4.0) > 0.001 {
+        println("FAIL: TI != 4")
+        return 1
+    }
+    println("PASS: TI = 4.0")
+
+    println("All simulation tests passed")
+    return 0
+}

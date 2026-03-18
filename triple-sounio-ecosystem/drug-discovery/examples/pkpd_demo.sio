@@ -1,0 +1,185 @@
+// PK/PD Demo — One-compartment oral model with epistemic uncertainty
+
+fn pkd_abs(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+fn pkd_exp(x: f64) -> f64 with Mut, Div, Panic {
+    if x < -20.0 { return 0.0 }
+    var result = 1.0
+    var term = 1.0
+    var i = 1
+    while i < 20 {
+        term = term * x / (i as f64)
+        result = result + term
+        i = i + 1
+    }
+    if result < 0.0 { return 0.0 }
+    return result
+}
+
+fn pkd_log(x: f64) -> f64 with Div, Panic, Mut {
+    if x <= 0.0 { return 0.0 }
+    let z = (x - 1.0) / (x + 1.0)
+    var result = 0.0
+    var term = z
+    var i = 1
+    while i < 40 {
+        result = result + term / (i as f64)
+        term = term * z * z
+        i = i + 2
+    }
+    return 2.0 * result
+}
+
+fn print_f64_3(v: f64) -> i64 with IO, Panic, Div {
+    if v < 0.0 {
+        print("-")
+        let neg_v = 0.0 - v
+        let ip = neg_v as i64
+        let frac = ((neg_v - (ip as f64)) * 1000.0) as i64
+        print_int(ip)
+        print(".")
+        if frac < 100 { print("0") }
+        if frac < 10 { print("0") }
+        print_int(frac)
+        return 0
+    }
+    let ip = v as i64
+    let frac = ((v - (ip as f64)) * 1000.0) as i64
+    print_int(ip)
+    print(".")
+    if frac < 100 { print("0") }
+    if frac < 10 { print("0") }
+    print_int(frac)
+    return 0
+}
+
+fn print_knowledge(v: f64, eps: f64, prov: i64) with IO, Panic, Div {
+    print("  Knowledge { value: ")
+    let _ = print_f64_3(v)
+    print(" epsilon: ")
+    let _ = print_f64_3(eps)
+    // prov: 1=bioavail, 2=ka, 3=ke, 4=vd, 5=half_life, 6=tmax, 7=cmax, 8=auc
+    if prov == 1 { print(" prov: \"bioavailability\" }") }
+    if prov == 2 { print(" prov: \"absorption_rate\" }") }
+    if prov == 3 { print(" prov: \"elimination_rate\" }") }
+    if prov == 4 { print(" prov: \"volume_distribution\" }") }
+    if prov == 5 { print(" prov: \"pk_half_life\" }") }
+    if prov == 6 { print(" prov: \"pk_tmax\" }") }
+    if prov == 7 { print(" prov: \"pk_cmax\" }") }
+    if prov == 8 { print(" prov: \"pk_auc\" }") }
+    if prov == 9 { print(" prov: \"pk_conc\" }") }
+    println("")
+}
+
+struct PK {
+    value: f64,
+    epsilon: f64,
+    prov_id: i64
+}
+
+fn pk_mul(a: PK, b: PK) -> PK {
+    PK { value: a.value * b.value, epsilon: a.epsilon * b.epsilon, prov_id: 100 }
+}
+
+fn pk_div(a: PK, b: PK) -> PK with Div, Panic {
+    if pkd_abs(b.value) < 1e-15 { return PK { value: 0.0, epsilon: 0.0, prov_id: 0 } }
+    PK { value: a.value / b.value, epsilon: a.epsilon * b.epsilon * 0.99, prov_id: 100 }
+}
+
+fn pk_sub(a: PK, b: PK) -> PK {
+    PK { value: a.value - b.value, epsilon: a.epsilon * b.epsilon, prov_id: 100 }
+}
+
+fn pk_scale(a: PK, s: f64) -> PK {
+    PK { value: a.value * s, epsilon: a.epsilon, prov_id: a.prov_id }
+}
+
+fn pk_exp_k(a: PK) -> PK with Mut, Div, Panic {
+    PK { value: pkd_exp(a.value), epsilon: a.epsilon * 0.99, prov_id: 101 }
+}
+
+fn main() -> i64 with IO, Div, Panic, Mut {
+    println("========================================")
+    println("  PK/PD Modeling Demo")
+    println("  One-Compartment Oral Model")
+    println("========================================")
+    println("")
+
+    let bioavail = PK { value: 0.85, epsilon: 0.92, prov_id: 1 }
+    let ka = PK { value: 1.2, epsilon: 0.88, prov_id: 2 }
+    let cl = PK { value: 7.5, epsilon: 0.87, prov_id: 24 }
+    let vd = PK { value: 50.0, epsilon: 0.90, prov_id: 4 }
+    let ke = PK { value: cl.value / vd.value, epsilon: cl.epsilon * vd.epsilon * 0.99, prov_id: 3 }
+    let dose = PK { value: 500.0, epsilon: 0.98, prov_id: 30 }
+
+    println("Parameters:")
+    print_knowledge(bioavail.value, bioavail.epsilon, 1)
+    print_knowledge(ka.value, ka.epsilon, 2)
+    print_knowledge(ke.value, ke.epsilon, 3)
+    print_knowledge(vd.value, vd.epsilon, 4)
+    println("")
+
+    // Half-life = ln(2) / ke
+    let ln2 = PK { value: 0.693147, epsilon: 1.0, prov_id: 50 }
+    let hl = pk_div(ln2, ke)
+    println("Half-life:")
+    print_knowledge(hl.value, hl.epsilon, 5)
+
+    // Tmax = ln(ka/ke) / (ka - ke)
+    let ratio = pk_div(ka, ke)
+    let log_ratio = PK { value: pkd_log(ratio.value), epsilon: ratio.epsilon * 0.98, prov_id: 51 }
+    let rate_diff = pk_sub(ka, ke)
+    let tmax = pk_div(log_ratio, rate_diff)
+    println("Tmax:")
+    print_knowledge(tmax.value, tmax.epsilon, 6)
+
+    // Cmax
+    let fd = pk_mul(bioavail, dose)
+    let numerator = pk_mul(fd, ka)
+    let denominator = pk_mul(vd, rate_diff)
+    let term1 = pk_div(numerator, denominator)
+    let neg_ke_t = pk_scale(ke, 0.0 - tmax.value)
+    let exp_elim = pk_exp_k(neg_ke_t)
+    let neg_ka_t = pk_scale(ka, 0.0 - tmax.value)
+    let exp_abs = pk_exp_k(neg_ka_t)
+    let diff = pk_sub(exp_elim, exp_abs)
+    let cmax = pk_mul(term1, diff)
+    println("Cmax:")
+    print_knowledge(cmax.value, cmax.epsilon, 7)
+
+    // AUC = F * D / CL
+    let auc = pk_div(fd, cl)
+    println("AUC:")
+    print_knowledge(auc.value, auc.epsilon, 8)
+
+    // Concentration-time profile
+    println("")
+    println("Concentration-Time Profile (every 2h):")
+    println("  Time(h) | Conc(mg/L) | Epsilon")
+
+    var t = 0
+    while t < 24 {
+        let tf = t as f64
+        let neg_ke_ti = pk_scale(ke, 0.0 - tf)
+        let exp_e = pk_exp_k(neg_ke_ti)
+        let neg_ka_ti = pk_scale(ka, 0.0 - tf)
+        let exp_a = pk_exp_k(neg_ka_ti)
+        let d = pk_sub(exp_e, exp_a)
+        let conc = pk_mul(term1, d)
+        print("  ")
+        print_int(t)
+        print(" | ")
+        let _ = print_f64_3(conc.value)
+        print(" | ")
+        let _ = print_f64_3(conc.epsilon)
+        println("")
+        t = t + 2
+    }
+
+    println("")
+    println("========================================")
+    return 0
+}

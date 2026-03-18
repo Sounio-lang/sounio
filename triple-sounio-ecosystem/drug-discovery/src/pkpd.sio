@@ -1,0 +1,186 @@
+// Drug Discovery Pipeline — PK/PD Modeling
+//
+// One-compartment pharmacokinetic model with epistemic uncertainty.
+//   C(t) = (F * D / Vd) * exp(-ke * t)    [IV bolus]
+//   C(t) = (F*D*ka / (Vd*(ka-ke))) * (exp(-ke*t) - exp(-ka*t))  [oral]
+//
+// References:
+//   Rowland & Tozer, Clinical Pharmacokinetics (5th ed)
+//   JCGM 100:2008 (GUM)
+
+fn pk_abs(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+fn pk_exp(x: f64) -> f64 with Mut, Div, Panic {
+    if x < -20.0 { return 0.0 }
+    var result = 1.0
+    var term = 1.0
+    var i = 1
+    while i < 20 {
+        term = term * x / (i as f64)
+        result = result + term
+        i = i + 1
+    }
+    if result < 0.0 { return 0.0 }
+    return result
+}
+
+fn pk_log(x: f64) -> f64 with Div, Panic, Mut {
+    if x <= 0.0 { return 0.0 }
+    let z = (x - 1.0) / (x + 1.0)
+    var result = 0.0
+    var term = z
+    var i = 1
+    while i < 40 {
+        result = result + term / (i as f64)
+        term = term * z * z
+        i = i + 2
+    }
+    return 2.0 * result
+}
+
+struct PKKnowledge {
+    value: f64,
+    epsilon: f64,
+    prov_id: i64
+}
+
+fn pkk_mul(a: PKKnowledge, b: PKKnowledge) -> PKKnowledge {
+    PKKnowledge { value: a.value * b.value, epsilon: a.epsilon * b.epsilon, prov_id: 100 }
+}
+
+fn pkk_div(a: PKKnowledge, b: PKKnowledge) -> PKKnowledge with Div, Panic {
+    if pk_abs(b.value) < 1e-15 { return PKKnowledge { value: 0.0, epsilon: 0.0, prov_id: 0 } }
+    PKKnowledge { value: a.value / b.value, epsilon: a.epsilon * b.epsilon * 0.99, prov_id: 100 }
+}
+
+fn pkk_sub(a: PKKnowledge, b: PKKnowledge) -> PKKnowledge {
+    PKKnowledge { value: a.value - b.value, epsilon: a.epsilon * b.epsilon, prov_id: 100 }
+}
+
+fn pkk_add(a: PKKnowledge, b: PKKnowledge) -> PKKnowledge {
+    PKKnowledge { value: a.value + b.value, epsilon: a.epsilon * b.epsilon, prov_id: 100 }
+}
+
+fn pkk_scale(a: PKKnowledge, s: f64) -> PKKnowledge {
+    PKKnowledge { value: a.value * s, epsilon: a.epsilon, prov_id: a.prov_id }
+}
+
+fn pkk_exp(a: PKKnowledge) -> PKKnowledge with Mut, Div, Panic {
+    PKKnowledge { value: pk_exp(a.value), epsilon: a.epsilon * 0.99, prov_id: 101 }
+}
+
+struct PKParameters {
+    bioavail: PKKnowledge,
+    ka: PKKnowledge,
+    ke: PKKnowledge,
+    vd: PKKnowledge,
+    clearance: PKKnowledge
+}
+
+fn pk_params_default() -> PKParameters with Div, Panic {
+    let cl = PKKnowledge { value: 7.5, epsilon: 0.87, prov_id: 24 }
+    let vd = PKKnowledge { value: 50.0, epsilon: 0.90, prov_id: 23 }
+    let ke = PKKnowledge { value: cl.value / vd.value, epsilon: cl.epsilon * vd.epsilon * 0.99, prov_id: 25 }
+    PKParameters {
+        bioavail: PKKnowledge { value: 0.85, epsilon: 0.92, prov_id: 20 },
+        ka: PKKnowledge { value: 1.2, epsilon: 0.88, prov_id: 21 },
+        ke: ke,
+        vd: vd,
+        clearance: cl
+    }
+}
+
+// C(t) = (F * D / Vd) * exp(-ke * t) [IV bolus]
+fn concentration_iv(
+    params: PKParameters,
+    dose: PKKnowledge,
+    time: f64
+) -> PKKnowledge with Div, Panic, Mut {
+    let fd = pkk_mul(params.bioavail, dose)
+    let c0 = pkk_div(fd, params.vd)
+    let neg_ke_t = pkk_scale(params.ke, 0.0 - time)
+    let decay = pkk_exp(neg_ke_t)
+    return pkk_mul(c0, decay)
+}
+
+// C(t) = (F*D*ka / (Vd*(ka-ke))) * (exp(-ke*t) - exp(-ka*t)) [oral]
+fn concentration_oral(
+    params: PKParameters,
+    dose: PKKnowledge,
+    time: f64
+) -> PKKnowledge with Div, Panic, Mut {
+    let fd = pkk_mul(params.bioavail, dose)
+    let numerator = pkk_mul(fd, params.ka)
+    let rate_diff = pkk_sub(params.ka, params.ke)
+    let denominator = pkk_mul(params.vd, rate_diff)
+    let term1 = pkk_div(numerator, denominator)
+    let neg_ke_t = pkk_scale(params.ke, 0.0 - time)
+    let exp_elim = pkk_exp(neg_ke_t)
+    let neg_ka_t = pkk_scale(params.ka, 0.0 - time)
+    let exp_abs = pkk_exp(neg_ka_t)
+    let diff = pkk_sub(exp_elim, exp_abs)
+    return pkk_mul(term1, diff)
+}
+
+// t1/2 = ln(2) / ke
+fn half_life(params: PKParameters) -> PKKnowledge with Div, Panic {
+    let ln2 = PKKnowledge { value: 0.693147, epsilon: 1.0, prov_id: 50 }
+    return pkk_div(ln2, params.ke)
+}
+
+// AUC = F * D / CL
+fn auc_oral(params: PKParameters, dose: PKKnowledge) -> PKKnowledge with Div, Panic {
+    let fd = pkk_mul(params.bioavail, dose)
+    return pkk_div(fd, params.clearance)
+}
+
+// tmax = ln(ka/ke) / (ka - ke)
+fn tmax_oral(params: PKParameters) -> PKKnowledge with Div, Panic, Mut {
+    let ratio = pkk_div(params.ka, params.ke)
+    let log_ratio = PKKnowledge { value: pk_log(ratio.value), epsilon: ratio.epsilon * 0.98, prov_id: 51 }
+    let rate_diff = pkk_sub(params.ka, params.ke)
+    return pkk_div(log_ratio, rate_diff)
+}
+
+// Cmax = C(tmax)
+fn cmax_oral(params: PKParameters, dose: PKKnowledge) -> PKKnowledge with Div, Panic, Mut {
+    let tm = tmax_oral(params)
+    return concentration_oral(params, dose, tm.value)
+}
+
+// Concentration-time profile (up to 48 points)
+struct PKProfile {
+    times: [f64; 48],
+    concs: [f64; 48],
+    epsilons: [f64; 48],
+    n_points: i64
+}
+
+fn compute_profile(
+    params: PKParameters,
+    dose: PKKnowledge,
+    dt: f64,
+    n_points: i64
+) -> PKProfile with Div, Panic, Mut {
+    var profile = PKProfile {
+        times: [0.0; 48],
+        concs: [0.0; 48],
+        epsilons: [0.0; 48],
+        n_points: n_points
+    }
+    var i = 0
+    while i < n_points {
+        if i < 48 {
+            let t = (i as f64) * dt
+            let c = concentration_oral(params, dose, t)
+            profile.times[i] = t
+            profile.concs[i] = c.value
+            profile.epsilons[i] = c.epsilon
+        }
+        i = i + 1
+    }
+    return profile
+}

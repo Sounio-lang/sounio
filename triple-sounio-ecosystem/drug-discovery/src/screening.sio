@@ -1,0 +1,147 @@
+// Drug Discovery Pipeline — Virtual Screening
+//
+// Lipinski Rule of Five filter with epistemic uncertainty.
+// Each molecular property carries confidence; borderline cases
+// are flagged rather than hard-rejected.
+//
+// References:
+//   Lipinski CA et al. (1997) Adv Drug Deliv Rev 23:3-25
+
+fn scr_abs(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+struct ScrKnowledge {
+    value: f64,
+    epsilon: f64,
+    prov_id: i64
+}
+
+struct ScrMolecule {
+    mol_weight: ScrKnowledge,
+    log_p: ScrKnowledge,
+    hbd: i64,
+    hba: i64,
+    name_id: i64
+}
+
+struct ScrResult {
+    passes_mw: i64,
+    passes_logp: i64,
+    passes_hbd: i64,
+    passes_hba: i64,
+    confidence: f64,
+    overall_pass: i64
+}
+
+// Rule 1: MW < 500 Da with soft threshold
+fn check_molecular_weight(mw: ScrKnowledge) -> f64 with Div, Panic {
+    let threshold = 500.0
+    let diff = threshold - mw.value
+    let uncertainty = (1.0 - mw.epsilon) * mw.value * 0.1
+    if uncertainty < 0.001 {
+        if mw.value < threshold { return 1.0 }
+        return 0.0
+    }
+    if diff > uncertainty { return 1.0 }
+    if diff < (0.0 - uncertainty) { return 0.0 }
+    let conf = (diff + uncertainty) / (2.0 * uncertainty)
+    return conf * mw.epsilon
+}
+
+// Rule 2: LogP < 5
+fn check_logp(lp: ScrKnowledge) -> f64 with Div, Panic {
+    let threshold = 5.0
+    let diff = threshold - lp.value
+    let uncertainty = (1.0 - lp.epsilon) * scr_abs(lp.value) * 0.2
+    if uncertainty < 0.001 {
+        if lp.value < threshold { return 1.0 }
+        return 0.0
+    }
+    if diff > uncertainty { return 1.0 }
+    if diff < (0.0 - uncertainty) { return 0.0 }
+    let conf = (diff + uncertainty) / (2.0 * uncertainty)
+    return conf * lp.epsilon
+}
+
+// Rule 3: H-bond donors <= 5
+fn check_hbd(hbd: i64) -> f64 {
+    if hbd <= 5 { return 1.0 }
+    return 0.0
+}
+
+// Rule 4: H-bond acceptors <= 10
+fn check_hba(hba: i64) -> f64 {
+    if hba <= 10 { return 1.0 }
+    return 0.0
+}
+
+// Full Lipinski screen
+fn lipinski_screen(mol: ScrMolecule) -> ScrResult with Div, Panic, Mut {
+    let mw_conf = check_molecular_weight(mol.mol_weight)
+    let lp_conf = check_logp(mol.log_p)
+    let hbd_conf = check_hbd(mol.hbd)
+    let hba_conf = check_hba(mol.hba)
+
+    var p_mw = 0
+    if mw_conf > 0.5 { p_mw = 1 }
+    var p_lp = 0
+    if lp_conf > 0.5 { p_lp = 1 }
+    var p_hbd = 0
+    if hbd_conf > 0.5 { p_hbd = 1 }
+    var p_hba = 0
+    if hba_conf > 0.5 { p_hba = 1 }
+
+    let overall_conf = mw_conf * lp_conf * hbd_conf * hba_conf
+
+    var pass = 0
+    let total = p_mw + p_lp + p_hbd + p_hba
+    if total == 4 { pass = 1 }
+
+    ScrResult {
+        passes_mw: p_mw,
+        passes_logp: p_lp,
+        passes_hbd: p_hbd,
+        passes_hba: p_hba,
+        confidence: overall_conf,
+        overall_pass: pass
+    }
+}
+
+// Batch screening (up to 20 molecules)
+struct BatchScreenResult {
+    total: i64,
+    passed: i64,
+    best_idx: i64,
+    best_confidence: f64
+}
+
+fn screen_batch(
+    mols: [ScrMolecule; 20],
+    count: i64
+) -> BatchScreenResult with Div, Panic, Mut {
+    var passed = 0
+    var best_idx = 0
+    var best_conf = 0.0
+    var i = 0
+    while i < count {
+        if i < 20 {
+            let result = lipinski_screen(mols[i])
+            if result.overall_pass == 1 {
+                passed = passed + 1
+                if result.confidence > best_conf {
+                    best_conf = result.confidence
+                    best_idx = i
+                }
+            }
+        }
+        i = i + 1
+    }
+    BatchScreenResult {
+        total: count,
+        passed: passed,
+        best_idx: best_idx,
+        best_confidence: best_conf
+    }
+}

@@ -1,0 +1,183 @@
+// Drug Discovery Pipeline — Monte Carlo Clinical Trial Simulation
+//
+// Simulates a simple clinical trial with inter-individual PK variability.
+// Uses LCG PRNG for reproducibility.
+//
+// References:
+//   FDA Guidance: Population PK (1999)
+//   Sheiner LB. Clin Pharmacol Ther 1997;61:275-291
+
+fn sim_abs(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+fn sim_exp(x: f64) -> f64 with Mut, Div, Panic {
+    if x < -20.0 { return 0.0 }
+    var result = 1.0
+    var term = 1.0
+    var i = 1
+    while i < 20 {
+        term = term * x / (i as f64)
+        result = result + term
+        i = i + 1
+    }
+    if result < 0.0 { return 0.0 }
+    return result
+}
+
+struct SimKnowledge {
+    value: f64,
+    epsilon: f64,
+    prov_id: i64
+}
+
+// LCG PRNG
+struct SimRng {
+    state: i64
+}
+
+fn rng_next(rng: SimRng) -> SimRng with Mut, Div, Panic {
+    var s = rng.state * 1103515245 + 12345
+    if s < 0 { s = 0 - s }
+    let m = 2147483647
+    s = s - (s / m) * m
+    SimRng { state: s }
+}
+
+fn rng_uniform(rng: SimRng) -> f64 with Div, Panic {
+    let sf = rng.state as f64
+    return sf / 2147483647.0
+}
+
+fn rng_range(rng: SimRng, lo: f64, hi: f64) -> f64 with Div, Panic {
+    let u = rng_uniform(rng)
+    return lo + u * (hi - lo)
+}
+
+struct TrialConfig {
+    n_patients: i64,
+    dose_mg: f64,
+    mec: f64,
+    toxic_threshold: f64,
+    duration_hours: i64,
+    time_above_mec_required: f64,
+    seed: i64
+}
+
+fn trial_config_default() -> TrialConfig {
+    TrialConfig {
+        n_patients: 100,
+        dose_mg: 500.0,
+        mec: 5.0,
+        toxic_threshold: 20.0,
+        duration_hours: 24,
+        time_above_mec_required: 8.0,
+        seed: 42
+    }
+}
+
+struct PatientOutcome {
+    cmax: f64,
+    time_above_mec: f64,
+    exceeds_toxic: i64,
+    is_efficacious: i64
+}
+
+fn simulate_patient(
+    ke: f64,
+    vd: f64,
+    bioavail: f64,
+    ka: f64,
+    dose: f64,
+    config: TrialConfig
+) -> PatientOutcome with Div, Mut, Panic {
+    var cmax = 0.0
+    var time_above_mec = 0.0
+    var exceeds_toxic = 0
+
+    let rate_diff = ka - ke
+    var denom = vd * rate_diff
+    if sim_abs(denom) < 1e-10 { denom = 1e-10 }
+    let coeff = (bioavail * dose * ka) / denom
+
+    var t = 0
+    while t < config.duration_hours {
+        let tf = t as f64
+        let conc = coeff * (sim_exp(0.0 - ke * tf) - sim_exp(0.0 - ka * tf))
+        if conc > cmax { cmax = conc }
+        if conc > config.mec { time_above_mec = time_above_mec + 1.0 }
+        if conc > config.toxic_threshold { exceeds_toxic = 1 }
+        t = t + 1
+    }
+
+    var efficacious = 0
+    if time_above_mec >= config.time_above_mec_required { efficacious = 1 }
+
+    PatientOutcome {
+        cmax: cmax,
+        time_above_mec: time_above_mec,
+        exceeds_toxic: exceeds_toxic,
+        is_efficacious: efficacious
+    }
+}
+
+struct SimTrialResult {
+    n_patients: i64,
+    efficacy_rate: SimKnowledge,
+    adverse_rate: SimKnowledge,
+    therapeutic_index: SimKnowledge,
+    recommend_proceed: i64
+}
+
+fn run_trial(config: TrialConfig) -> SimTrialResult with Div, Mut, Panic {
+    var rng = SimRng { state: config.seed }
+    var n_efficacious = 0
+    var n_adverse = 0
+    var i = 0
+    var n = config.n_patients
+    if n > 100 { n = 100 }
+
+    while i < n {
+        rng = rng_next(rng)
+        let p_ke = 0.15 * rng_range(rng, 0.7, 1.3)
+        rng = rng_next(rng)
+        let p_vd = 50.0 * rng_range(rng, 0.8, 1.2)
+        rng = rng_next(rng)
+        let p_f = 0.85 * rng_range(rng, 0.75, 1.0)
+        rng = rng_next(rng)
+        let p_ka = 1.2 * rng_range(rng, 0.8, 1.2)
+        rng = rng_next(rng)
+        let p_dose = config.dose_mg * rng_range(rng, 0.95, 1.05)
+
+        let outcome = simulate_patient(p_ke, p_vd, p_f, p_ka, p_dose, config)
+        if outcome.is_efficacious == 1 { n_efficacious = n_efficacious + 1 }
+        if outcome.exceeds_toxic == 1 { n_adverse = n_adverse + 1 }
+
+        rng = rng_next(rng)
+        i = i + 1
+    }
+
+    let nf = n as f64
+    let eff_rate = (n_efficacious as f64) / nf
+    let adv_rate = (n_adverse as f64) / nf
+
+    var conf_base = 0.90
+    if n >= 50 { conf_base = 0.92 }
+    if n >= 100 { conf_base = 0.95 }
+
+    let ti = config.toxic_threshold / config.mec
+
+    var recommend = 0
+    if eff_rate > 0.6 {
+        if adv_rate < 0.10 { recommend = 1 }
+    }
+
+    SimTrialResult {
+        n_patients: n,
+        efficacy_rate: SimKnowledge { value: eff_rate, epsilon: conf_base, prov_id: 60 },
+        adverse_rate: SimKnowledge { value: adv_rate, epsilon: conf_base, prov_id: 61 },
+        therapeutic_index: SimKnowledge { value: ti, epsilon: 0.90, prov_id: 62 },
+        recommend_proceed: recommend
+    }
+}
