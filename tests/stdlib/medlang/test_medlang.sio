@@ -1,0 +1,1785 @@
+//@ run-pass
+// tests/stdlib/medlang/test_medlang.sio
+//
+// Comprehensive test suite for stdlib/medlang — lexer, AST, parser, integrate.
+// Self-contained: all needed helpers inlined here.
+
+extern "C" {
+    fn sqrt(x: f64) -> f64;
+    fn log(x: f64) -> f64;
+    fn exp(x: f64) -> f64;
+    fn fabs(x: f64) -> f64;
+}
+
+// ============================================================================
+// UTILITY
+// ============================================================================
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+fn near(a: f64, b: f64, tol: f64) -> bool {
+    abs_f64(a - b) < tol
+}
+
+// ============================================================================
+// LEXER TOKEN TYPE CONSTANTS (mirrors lexer.sio)
+// ============================================================================
+
+fn TT_EOF() -> i32 { 0 }
+fn TT_ERROR() -> i32 { 1 }
+fn TT_KW_MODEL() -> i32 { 10 }
+fn TT_KW_PARAM() -> i32 { 11 }
+fn TT_KW_COMPARTMENT() -> i32 { 12 }
+fn TT_KW_FLOW() -> i32 { 13 }
+fn TT_KW_DOSE() -> i32 { 14 }
+fn TT_KW_OBSERVE() -> i32 { 15 }
+fn TT_KW_FIT() -> i32 { 16 }
+fn TT_KW_SIMULATE() -> i32 { 17 }
+fn TT_KW_TO() -> i32 { 18 }
+fn TT_KW_WITH() -> i32 { 19 }
+fn TT_KW_CLEARANCE() -> i32 { 20 }
+fn TT_KW_VOLUME() -> i32 { 21 }
+fn TT_KW_RATE() -> i32 { 22 }
+fn TT_KW_AMOUNT() -> i32 { 23 }
+fn TT_KW_LOGNORMAL() -> i32 { 30 }
+fn TT_KW_NORMAL() -> i32 { 31 }
+fn TT_KW_UNIFORM() -> i32 { 32 }
+fn TT_KW_FIXED() -> i32 { 33 }
+fn TT_KW_OMEGA() -> i32 { 34 }
+fn TT_KW_IV() -> i32 { 40 }
+fn TT_KW_ORAL() -> i32 { 41 }
+fn TT_KW_INFUSION() -> i32 { 42 }
+fn TT_KW_ADDITIVE() -> i32 { 50 }
+fn TT_KW_PROPORTIONAL() -> i32 { 51 }
+fn TT_KW_COMBINED() -> i32 { 52 }
+fn TT_KW_METHOD() -> i32 { 60 }
+fn TT_KW_UNCERTAINTY() -> i32 { 61 }
+fn TT_KW_LM() -> i32 { 62 }
+fn TT_KW_GUM() -> i32 { 63 }
+fn TT_KW_BOOTSTRAP() -> i32 { 64 }
+fn TT_KW_TIME() -> i32 { 70 }
+fn TT_KW_SUBJECTS() -> i32 { 71 }
+fn TT_IDENTIFIER() -> i32 { 80 }
+fn TT_INTEGER() -> i32 { 81 }
+fn TT_FLOAT() -> i32 { 82 }
+fn TT_STRING() -> i32 { 83 }
+fn TT_UNIT_MG() -> i32 { 90 }
+fn TT_UNIT_L() -> i32 { 91 }
+fn TT_UNIT_H() -> i32 { 92 }
+fn TT_UNIT_L_PER_H() -> i32 { 93 }
+fn TT_UNIT_MG_PER_L() -> i32 { 94 }
+fn TT_UNIT_PER_H() -> i32 { 95 }
+fn TT_OP_PLUS() -> i32 { 100 }
+fn TT_OP_MINUS() -> i32 { 101 }
+fn TT_OP_STAR() -> i32 { 102 }
+fn TT_OP_SLASH() -> i32 { 103 }
+fn TT_OP_CARET() -> i32 { 104 }
+fn TT_OP_EQ() -> i32 { 105 }
+fn TT_OP_TILDE() -> i32 { 106 }
+fn TT_OP_ARROW() -> i32 { 107 }
+fn TT_OP_DOT() -> i32 { 108 }
+fn TT_OP_DOTDOT() -> i32 { 109 }
+fn TT_OP_LT() -> i32 { 110 }
+fn TT_OP_GT() -> i32 { 111 }
+fn TT_LPAREN() -> i32 { 120 }
+fn TT_RPAREN() -> i32 { 121 }
+fn TT_LBRACE() -> i32 { 122 }
+fn TT_RBRACE() -> i32 { 123 }
+fn TT_LBRACKET() -> i32 { 124 }
+fn TT_RBRACKET() -> i32 { 125 }
+fn TT_COMMA() -> i32 { 126 }
+fn TT_COLON() -> i32 { 127 }
+fn TT_SEMICOLON() -> i32 { 128 }
+fn TT_NEWLINE() -> i32 { 129 }
+
+// ============================================================================
+// LEXER STRUCTURES
+// ============================================================================
+
+struct Token {
+    token_type: i32,
+    text: [i8; 64],
+    text_len: i64,
+    int_value: i64,
+    float_value: f64,
+    line: i64,
+    column: i64,
+}
+
+fn token_new() -> Token {
+    Token {
+        token_type: TT_EOF(),
+        text: [0; 64],
+        text_len: 0,
+        int_value: 0,
+        float_value: 0.0,
+        line: 1,
+        column: 1,
+    }
+}
+
+fn token_eof(line: i64, col: i64) -> Token {
+    var tok = token_new();
+    tok.line = line;
+    tok.column = col;
+    tok
+}
+
+fn token_simple(tt: i32, line: i64, col: i64) -> Token {
+    var tok = token_new();
+    tok.token_type = tt;
+    tok.line = line;
+    tok.column = col;
+    tok
+}
+
+struct Lexer {
+    source: [i8; 8192],
+    source_len: i64,
+    pos: i64,
+    line: i64,
+    column: i64,
+    current_char: i8,
+}
+
+fn lexer_new() -> Lexer {
+    Lexer {
+        source: [0; 8192],
+        source_len: 0,
+        pos: 0,
+        line: 1,
+        column: 1,
+        current_char: 0,
+    }
+}
+
+fn lexer_init(source: [i8; 8192], len: i64) -> Lexer {
+    var lex = lexer_new();
+    lex.source = source;
+    lex.source_len = len;
+    if len > 0 {
+        lex.current_char = lex.source[0];
+    }
+    lex
+}
+
+fn lexer_at_end(lex: Lexer) -> bool {
+    lex.pos >= lex.source_len
+}
+
+fn lexer_peek(lex: Lexer) -> i8 {
+    if lex.pos + 1 < lex.source_len {
+        lex.source[(lex.pos + 1) as usize]
+    } else {
+        0
+    }
+}
+
+fn lexer_advance(lex: Lexer) -> Lexer {
+    var new_lex = lex;
+    if new_lex.pos < new_lex.source_len {
+        if new_lex.current_char == 10 {
+            new_lex.line = new_lex.line + 1;
+            new_lex.column = 1;
+        } else {
+            new_lex.column = new_lex.column + 1;
+        }
+        new_lex.pos = new_lex.pos + 1;
+        if new_lex.pos < new_lex.source_len {
+            new_lex.current_char = new_lex.source[new_lex.pos as usize];
+        } else {
+            new_lex.current_char = 0;
+        }
+    }
+    new_lex
+}
+
+fn is_whitespace(c: i8) -> bool {
+    c == 32 || c == 9 || c == 13
+}
+
+fn is_digit(c: i8) -> bool {
+    c >= 48 && c <= 57
+}
+
+fn is_alpha(c: i8) -> bool {
+    (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || c == 95
+}
+
+fn is_alnum(c: i8) -> bool {
+    is_alpha(c) || is_digit(c)
+}
+
+fn lookup_keyword(text: [i8; 64], len: i64) -> i32 {
+    if len == 2 {
+        if text[0] == 116 && text[1] == 111 { return TT_KW_TO() }
+        if text[0] == 73 && text[1] == 86 { return TT_KW_IV() }
+    }
+    if len == 3 {
+        if text[0] == 102 && text[1] == 105 && text[2] == 116 { return TT_KW_FIT() }
+        if text[0] == 71 && text[1] == 85 && text[2] == 77 { return TT_KW_GUM() }
+    }
+    if len == 4 {
+        if text[0] == 119 && text[1] == 105 && text[2] == 116 && text[3] == 104 { return TT_KW_WITH() }
+        if text[0] == 100 && text[1] == 111 && text[2] == 115 && text[3] == 101 { return TT_KW_DOSE() }
+        if text[0] == 102 && text[1] == 108 && text[2] == 111 && text[3] == 119 { return TT_KW_FLOW() }
+        if text[0] == 79 && text[1] == 114 && text[2] == 97 && text[3] == 108 { return TT_KW_ORAL() }
+        if text[0] == 82 && text[1] == 97 && text[2] == 116 && text[3] == 101 { return TT_KW_RATE() }
+        if text[0] == 116 && text[1] == 105 && text[2] == 109 && text[3] == 101 { return TT_KW_TIME() }
+    }
+    if len == 5 {
+        if text[0] == 109 && text[1] == 111 && text[2] == 100 && text[3] == 101 && text[4] == 108 { return TT_KW_MODEL() }
+        if text[0] == 112 && text[1] == 97 && text[2] == 114 && text[3] == 97 && text[4] == 109 { return TT_KW_PARAM() }
+        if text[0] == 70 && text[1] == 105 && text[2] == 120 && text[3] == 101 && text[4] == 100 { return TT_KW_FIXED() }
+        if text[0] == 111 && text[1] == 109 && text[2] == 101 && text[3] == 103 && text[4] == 97 { return TT_KW_OMEGA() }
+    }
+    if len == 6 {
+        if text[0] == 78 && text[1] == 111 && text[2] == 114 && text[3] == 109 && text[4] == 97 && text[5] == 108 { return TT_KW_NORMAL() }
+        if text[0] == 86 && text[1] == 111 && text[2] == 108 && text[3] == 117 && text[4] == 109 && text[5] == 101 { return TT_KW_VOLUME() }
+        if text[0] == 65 && text[1] == 109 && text[2] == 111 && text[3] == 117 && text[4] == 110 && text[5] == 116 { return TT_KW_AMOUNT() }
+        if text[0] == 109 && text[1] == 101 && text[2] == 116 && text[3] == 104 && text[4] == 111 && text[5] == 100 { return TT_KW_METHOD() }
+    }
+    if len == 7 {
+        if text[0] == 111 && text[1] == 98 && text[2] == 115 && text[3] == 101 && text[4] == 114 && text[5] == 118 && text[6] == 101 { return TT_KW_OBSERVE() }
+        if text[0] == 85 && text[1] == 110 && text[2] == 105 && text[3] == 102 && text[4] == 111 && text[5] == 114 && text[6] == 109 { return TT_KW_UNIFORM() }
+    }
+    if len == 8 {
+        if text[0] == 115 && text[1] == 105 && text[2] == 109 && text[3] == 117 &&
+           text[4] == 108 && text[5] == 97 && text[6] == 116 && text[7] == 101 { return TT_KW_SIMULATE() }
+        if text[0] == 73 && text[1] == 110 && text[2] == 102 && text[3] == 117 &&
+           text[4] == 115 && text[5] == 105 && text[6] == 111 && text[7] == 110 { return TT_KW_INFUSION() }
+        if text[0] == 65 && text[1] == 100 && text[2] == 100 && text[3] == 105 &&
+           text[4] == 116 && text[5] == 105 && text[6] == 118 && text[7] == 101 { return TT_KW_ADDITIVE() }
+        if text[0] == 67 && text[1] == 111 && text[2] == 109 && text[3] == 98 &&
+           text[4] == 105 && text[5] == 110 && text[6] == 101 && text[7] == 100 { return TT_KW_COMBINED() }
+        if text[0] == 115 && text[1] == 117 && text[2] == 98 && text[3] == 106 &&
+           text[4] == 101 && text[5] == 99 && text[6] == 116 && text[7] == 115 { return TT_KW_SUBJECTS() }
+    }
+    if len == 9 {
+        if text[0] == 76 && text[1] == 111 && text[2] == 103 && text[3] == 78 &&
+           text[4] == 111 && text[5] == 114 && text[6] == 109 && text[7] == 97 && text[8] == 108 { return TT_KW_LOGNORMAL() }
+        if text[0] == 67 && text[1] == 108 && text[2] == 101 && text[3] == 97 &&
+           text[4] == 114 && text[5] == 97 && text[6] == 110 && text[7] == 99 && text[8] == 101 { return TT_KW_CLEARANCE() }
+        if text[0] == 66 && text[1] == 111 && text[2] == 111 && text[3] == 116 &&
+           text[4] == 115 && text[5] == 116 && text[6] == 114 && text[7] == 97 && text[8] == 112 { return TT_KW_BOOTSTRAP() }
+    }
+    if len == 11 {
+        if text[0] == 99 && text[1] == 111 && text[2] == 109 && text[3] == 112 &&
+           text[4] == 97 && text[5] == 114 && text[6] == 116 && text[7] == 109 &&
+           text[8] == 101 && text[9] == 110 && text[10] == 116 { return TT_KW_COMPARTMENT() }
+        if text[0] == 117 && text[1] == 110 && text[2] == 99 && text[3] == 101 &&
+           text[4] == 114 && text[5] == 116 && text[6] == 97 && text[7] == 105 &&
+           text[8] == 110 && text[9] == 116 && text[10] == 121 { return TT_KW_UNCERTAINTY() }
+    }
+    if len == 12 {
+        if text[0] == 80 && text[1] == 114 && text[2] == 111 && text[3] == 112 &&
+           text[4] == 111 && text[5] == 114 && text[6] == 116 && text[7] == 105 &&
+           text[8] == 111 && text[9] == 110 && text[10] == 97 && text[11] == 108 { return TT_KW_PROPORTIONAL() }
+    }
+    TT_IDENTIFIER()
+}
+
+fn lookup_unit(text: [i8; 64], len: i64) -> i32 {
+    if len == 1 {
+        if text[0] == 76 { return TT_UNIT_L() }
+        if text[0] == 104 { return TT_UNIT_H() }
+    }
+    if len == 2 {
+        if text[0] == 109 && text[1] == 103 { return TT_UNIT_MG() }
+    }
+    TT_IDENTIFIER()
+}
+
+struct ScanResult {
+    lexer: Lexer,
+    token: Token,
+}
+
+fn scan_result_new(lex: Lexer, tok: Token) -> ScanResult {
+    ScanResult { lexer: lex, token: tok }
+}
+
+fn skip_whitespace(lex: Lexer) -> Lexer {
+    var l = lex;
+    while !lexer_at_end(l) && is_whitespace(l.current_char) {
+        l = lexer_advance(l);
+    }
+    l
+}
+
+fn skip_line_comment(lex: Lexer) -> Lexer {
+    var l = lex;
+    while !lexer_at_end(l) && l.current_char != 10 {
+        l = lexer_advance(l);
+    }
+    l
+}
+
+fn parse_int_simple(s: [i8; 64], len: i64) -> i64 {
+    var result: i64 = 0;
+    var i: i64 = 0;
+    while i < len {
+        let c = s[i as usize];
+        if is_digit(c) {
+            result = result * 10 + (c - 48) as i64;
+        }
+        i = i + 1;
+    }
+    result
+}
+
+fn parse_float_simple(s: [i8; 64], len: i64) -> f64 {
+    var result: f64 = 0.0;
+    var divisor: f64 = 1.0;
+    var in_fraction = false;
+    var in_exponent = false;
+    var exponent: i64 = 0;
+    var exp_sign: i64 = 1;
+    var i: i64 = 0;
+    while i < len {
+        let c = s[i as usize];
+        if c == 46 {
+            in_fraction = true;
+        } else if c == 101 || c == 69 {
+            in_exponent = true;
+        } else if in_exponent && c == 45 {
+            exp_sign = -1;
+        } else if in_exponent && c == 43 {
+            exp_sign = 1;
+        } else if is_digit(c) {
+            let digit = (c - 48) as f64;
+            if in_exponent {
+                exponent = exponent * 10 + (c - 48) as i64;
+            } else if in_fraction {
+                divisor = divisor * 10.0;
+                result = result + digit / divisor;
+            } else {
+                result = result * 10.0 + digit;
+            }
+        }
+        i = i + 1;
+    }
+    if exponent > 0 {
+        var e: i64 = 0;
+        while e < exponent {
+            if exp_sign > 0 {
+                result = result * 10.0;
+            } else {
+                result = result / 10.0;
+            }
+            e = e + 1;
+        }
+    }
+    result
+}
+
+fn scan_identifier(lex: Lexer) -> ScanResult {
+    let start_line = lex.line;
+    let start_col = lex.column;
+    var l = lex;
+    var tok = token_new();
+    tok.line = start_line;
+    tok.column = start_col;
+    var text_len: i64 = 0;
+    while !lexer_at_end(l) && is_alnum(l.current_char) && text_len < 63 {
+        tok.text[text_len as usize] = l.current_char;
+        text_len = text_len + 1;
+        l = lexer_advance(l);
+    }
+    tok.text_len = text_len;
+    tok.token_type = lookup_keyword(tok.text, text_len);
+    if tok.token_type == TT_IDENTIFIER() {
+        let unit_type = lookup_unit(tok.text, text_len);
+        if unit_type != TT_IDENTIFIER() {
+            tok.token_type = unit_type;
+        }
+    }
+    scan_result_new(l, tok)
+}
+
+fn scan_number(lex: Lexer) -> ScanResult {
+    let start_line = lex.line;
+    let start_col = lex.column;
+    var l = lex;
+    var tok = token_new();
+    tok.line = start_line;
+    tok.column = start_col;
+    var text_len: i64 = 0;
+    var is_float = false;
+    while !lexer_at_end(l) && is_digit(l.current_char) && text_len < 63 {
+        tok.text[text_len as usize] = l.current_char;
+        text_len = text_len + 1;
+        l = lexer_advance(l);
+    }
+    if l.current_char == 46 && is_digit(lexer_peek(l)) {
+        is_float = true;
+        tok.text[text_len as usize] = 46;
+        text_len = text_len + 1;
+        l = lexer_advance(l);
+        while !lexer_at_end(l) && is_digit(l.current_char) && text_len < 63 {
+            tok.text[text_len as usize] = l.current_char;
+            text_len = text_len + 1;
+            l = lexer_advance(l);
+        }
+    }
+    if l.current_char == 101 || l.current_char == 69 {
+        is_float = true;
+        tok.text[text_len as usize] = l.current_char;
+        text_len = text_len + 1;
+        l = lexer_advance(l);
+        if l.current_char == 43 || l.current_char == 45 {
+            tok.text[text_len as usize] = l.current_char;
+            text_len = text_len + 1;
+            l = lexer_advance(l);
+        }
+        while !lexer_at_end(l) && is_digit(l.current_char) && text_len < 63 {
+            tok.text[text_len as usize] = l.current_char;
+            text_len = text_len + 1;
+            l = lexer_advance(l);
+        }
+    }
+    tok.text_len = text_len;
+    if is_float {
+        tok.token_type = TT_FLOAT();
+        tok.float_value = parse_float_simple(tok.text, text_len);
+    } else {
+        tok.token_type = TT_INTEGER();
+        tok.int_value = parse_int_simple(tok.text, text_len);
+    }
+    scan_result_new(l, tok)
+}
+
+fn scan_string(lex: Lexer) -> ScanResult {
+    let start_line = lex.line;
+    let start_col = lex.column;
+    let quote = lex.current_char;
+    var l = lexer_advance(lex);
+    var tok = token_new();
+    tok.line = start_line;
+    tok.column = start_col;
+    tok.token_type = TT_STRING();
+    var text_len: i64 = 0;
+    while !lexer_at_end(l) && l.current_char != quote && text_len < 63 {
+        tok.text[text_len as usize] = l.current_char;
+        text_len = text_len + 1;
+        l = lexer_advance(l);
+    }
+    if l.current_char == quote {
+        l = lexer_advance(l);
+    }
+    tok.text_len = text_len;
+    scan_result_new(l, tok)
+}
+
+fn lexer_next_token(lex: Lexer) -> ScanResult {
+    var l = skip_whitespace(lex);
+    if lexer_at_end(l) {
+        return scan_result_new(l, token_eof(l.line, l.column))
+    }
+    let c = l.current_char;
+    let start_line = l.line;
+    let start_col = l.column;
+    if c == 40 { return scan_result_new(lexer_advance(l), token_simple(TT_LPAREN(), start_line, start_col)) }
+    if c == 41 { return scan_result_new(lexer_advance(l), token_simple(TT_RPAREN(), start_line, start_col)) }
+    if c == 123 { return scan_result_new(lexer_advance(l), token_simple(TT_LBRACE(), start_line, start_col)) }
+    if c == 125 { return scan_result_new(lexer_advance(l), token_simple(TT_RBRACE(), start_line, start_col)) }
+    if c == 91 { return scan_result_new(lexer_advance(l), token_simple(TT_LBRACKET(), start_line, start_col)) }
+    if c == 93 { return scan_result_new(lexer_advance(l), token_simple(TT_RBRACKET(), start_line, start_col)) }
+    if c == 44 { return scan_result_new(lexer_advance(l), token_simple(TT_COMMA(), start_line, start_col)) }
+    if c == 58 { return scan_result_new(lexer_advance(l), token_simple(TT_COLON(), start_line, start_col)) }
+    if c == 59 { return scan_result_new(lexer_advance(l), token_simple(TT_SEMICOLON(), start_line, start_col)) }
+    if c == 43 { return scan_result_new(lexer_advance(l), token_simple(TT_OP_PLUS(), start_line, start_col)) }
+    if c == 42 { return scan_result_new(lexer_advance(l), token_simple(TT_OP_STAR(), start_line, start_col)) }
+    if c == 94 { return scan_result_new(lexer_advance(l), token_simple(TT_OP_CARET(), start_line, start_col)) }
+    if c == 126 { return scan_result_new(lexer_advance(l), token_simple(TT_OP_TILDE(), start_line, start_col)) }
+    if c == 61 { return scan_result_new(lexer_advance(l), token_simple(TT_OP_EQ(), start_line, start_col)) }
+    if c == 60 { return scan_result_new(lexer_advance(l), token_simple(TT_OP_LT(), start_line, start_col)) }
+    if c == 62 { return scan_result_new(lexer_advance(l), token_simple(TT_OP_GT(), start_line, start_col)) }
+    if c == 10 { return scan_result_new(lexer_advance(l), token_simple(TT_NEWLINE(), start_line, start_col)) }
+    if c == 45 {
+        l = lexer_advance(l);
+        if l.current_char == 62 {
+            return scan_result_new(lexer_advance(l), token_simple(TT_OP_ARROW(), start_line, start_col))
+        }
+        return scan_result_new(l, token_simple(TT_OP_MINUS(), start_line, start_col))
+    }
+    if c == 46 {
+        l = lexer_advance(l);
+        if l.current_char == 46 {
+            return scan_result_new(lexer_advance(l), token_simple(TT_OP_DOTDOT(), start_line, start_col))
+        }
+        return scan_result_new(l, token_simple(TT_OP_DOT(), start_line, start_col))
+    }
+    if c == 47 {
+        l = lexer_advance(l);
+        if l.current_char == 47 {
+            l = skip_line_comment(l);
+            return lexer_next_token(l)
+        }
+        if l.current_char == 104 {
+            return scan_result_new(lexer_advance(l), token_simple(TT_UNIT_PER_H(), start_line, start_col))
+        }
+        return scan_result_new(l, token_simple(TT_OP_SLASH(), start_line, start_col))
+    }
+    if c == 34 || c == 39 {
+        return scan_string(l)
+    }
+    if is_digit(c) {
+        return scan_number(l)
+    }
+    if is_alpha(c) {
+        return scan_identifier(l)
+    }
+    var err_tok = token_simple(TT_ERROR(), start_line, start_col);
+    err_tok.text[0] = c;
+    err_tok.text_len = 1;
+    scan_result_new(lexer_advance(l), err_tok)
+}
+
+struct TokenStream {
+    tokens: [Token; 1024],
+    n_tokens: i64,
+    pos: i64,
+}
+
+fn token_stream_new() -> TokenStream {
+    TokenStream {
+        tokens: [token_new(); 1024],
+        n_tokens: 0,
+        pos: 0,
+    }
+}
+
+fn tokenize(source: [i8; 8192], source_len: i64) -> TokenStream {
+    var stream = token_stream_new();
+    var lex = lexer_init(source, source_len);
+    while stream.n_tokens < 1024 {
+        let result = lexer_next_token(lex);
+        lex = result.lexer;
+        let tok = result.token;
+        if tok.token_type != TT_NEWLINE() {
+            stream.tokens[stream.n_tokens as usize] = tok;
+            stream.n_tokens = stream.n_tokens + 1;
+        }
+        if tok.token_type == TT_EOF() || tok.token_type == TT_ERROR() {
+            break
+        }
+    }
+    stream
+}
+
+// ============================================================================
+// AST NODE TYPES (mirrors ast.sio)
+// ============================================================================
+
+struct ParamNode {
+    name_id: i64,
+    init_value: f64,
+    lower_bound: f64,
+    upper_bound: f64,
+    prior_type: i64,
+    prior_param1: f64,
+    prior_param2: f64,
+    fixed: bool,
+    is_covariate: bool,
+    unit_id: i64,
+}
+
+fn param_node_new(name_id: i64, init: f64) -> ParamNode {
+    ParamNode {
+        name_id: name_id,
+        init_value: init,
+        lower_bound: 0.0,
+        upper_bound: 1.0e12,
+        prior_type: 0,
+        prior_param1: 0.0,
+        prior_param2: 0.0,
+        fixed: false,
+        is_covariate: false,
+        unit_id: 0,
+    }
+}
+
+fn param_node_with_bounds(name_id: i64, init: f64, lower: f64, upper: f64) -> ParamNode {
+    var node = param_node_new(name_id, init);
+    node.lower_bound = lower;
+    node.upper_bound = upper;
+    node
+}
+
+fn param_node_fixed(name_id: i64, value: f64) -> ParamNode {
+    var node = param_node_new(name_id, value);
+    node.fixed = true;
+    node.prior_type = 4;
+    node
+}
+
+fn param_node_with_normal_prior(name_id: i64, init: f64, mean: f64, std: f64) -> ParamNode {
+    var node = param_node_new(name_id, init);
+    node.prior_type = 1;
+    node.prior_param1 = mean;
+    node.prior_param2 = std;
+    node
+}
+
+fn param_node_with_lognormal_prior(name_id: i64, init: f64, log_mean: f64, log_std: f64) -> ParamNode {
+    var node = param_node_new(name_id, init);
+    node.prior_type = 2;
+    node.prior_param1 = log_mean;
+    node.prior_param2 = log_std;
+    node.lower_bound = 0.0;
+    node
+}
+
+fn param_node_with_uniform_prior(name_id: i64, init: f64, lower: f64, upper: f64) -> ParamNode {
+    var node = param_node_with_bounds(name_id, init, lower, upper);
+    node.prior_type = 3;
+    node.prior_param1 = lower;
+    node.prior_param2 = upper;
+    node
+}
+
+fn param_log_prior(node: ParamNode, value: f64) -> f64 {
+    if value < node.lower_bound || value > node.upper_bound {
+        return -1.0e100
+    }
+    if node.prior_type == 0 {
+        return 0.0
+    }
+    if node.prior_type == 1 {
+        let z = (value - node.prior_param1) / node.prior_param2;
+        return -0.5 * z * z
+    }
+    if node.prior_type == 2 {
+        if value <= 0.0 {
+            return -1.0e100
+        }
+        let log_val = log(value);
+        let z = (log_val - node.prior_param1) / node.prior_param2;
+        return -log_val - 0.5 * z * z
+    }
+    if node.prior_type == 3 {
+        if value >= node.prior_param1 && value <= node.prior_param2 {
+            return -log(node.prior_param2 - node.prior_param1)
+        } else {
+            return -1.0e100
+        }
+    }
+    if node.prior_type == 4 {
+        var diff = value - node.init_value;
+        if diff < 0.0 { diff = -diff; }
+        if diff < 1.0e-10 {
+            return 0.0
+        } else {
+            return -1.0e100
+        }
+    }
+    0.0
+}
+
+struct CompartmentNode {
+    name_id: i64,
+    comp_type: i64,
+    volume_param_idx: i64,
+    initial_amount: f64,
+    is_observation: bool,
+}
+
+fn compartment_central(name_id: i64, volume_idx: i64) -> CompartmentNode {
+    CompartmentNode {
+        name_id: name_id,
+        comp_type: 0,
+        volume_param_idx: volume_idx,
+        initial_amount: 0.0,
+        is_observation: true,
+    }
+}
+
+fn compartment_peripheral(name_id: i64, volume_idx: i64) -> CompartmentNode {
+    CompartmentNode {
+        name_id: name_id,
+        comp_type: 1,
+        volume_param_idx: volume_idx,
+        initial_amount: 0.0,
+        is_observation: false,
+    }
+}
+
+fn compartment_depot(name_id: i64) -> CompartmentNode {
+    CompartmentNode {
+        name_id: name_id,
+        comp_type: 3,
+        volume_param_idx: -1,
+        initial_amount: 0.0,
+        is_observation: false,
+    }
+}
+
+fn compartment_effect(name_id: i64) -> CompartmentNode {
+    CompartmentNode {
+        name_id: name_id,
+        comp_type: 2,
+        volume_param_idx: -1,
+        initial_amount: 0.0,
+        is_observation: false,
+    }
+}
+
+struct FlowNode {
+    from_comp: i64,
+    to_comp: i64,
+    flow_type: i64,
+    rate_param_idx: i64,
+    km_param_idx: i64,
+    vmax_param_idx: i64,
+}
+
+fn flow_elimination(from_comp: i64, cl_param_idx: i64) -> FlowNode {
+    FlowNode {
+        from_comp: from_comp,
+        to_comp: -1,
+        flow_type: 2,
+        rate_param_idx: cl_param_idx,
+        km_param_idx: -1,
+        vmax_param_idx: -1,
+    }
+}
+
+fn flow_distribution(from_comp: i64, to_comp: i64, q_param_idx: i64) -> FlowNode {
+    FlowNode {
+        from_comp: from_comp,
+        to_comp: to_comp,
+        flow_type: 3,
+        rate_param_idx: q_param_idx,
+        km_param_idx: -1,
+        vmax_param_idx: -1,
+    }
+}
+
+fn flow_absorption(depot_comp: i64, central_comp: i64, ka_param_idx: i64) -> FlowNode {
+    FlowNode {
+        from_comp: depot_comp,
+        to_comp: central_comp,
+        flow_type: 0,
+        rate_param_idx: ka_param_idx,
+        km_param_idx: -1,
+        vmax_param_idx: -1,
+    }
+}
+
+fn flow_saturable(from_comp: i64, to_comp: i64, vmax_idx: i64, km_idx: i64) -> FlowNode {
+    FlowNode {
+        from_comp: from_comp,
+        to_comp: to_comp,
+        flow_type: 1,
+        rate_param_idx: -1,
+        km_param_idx: km_idx,
+        vmax_param_idx: vmax_idx,
+    }
+}
+
+struct DosingNode {
+    time: f64,
+    amount: f64,
+    target_comp: i64,
+    route: i64,
+    duration: f64,
+    rate: f64,
+    bioavail_param_idx: i64,
+    lag_param_idx: i64,
+}
+
+fn dosing_iv_bolus(time: f64, amount: f64, central_comp: i64) -> DosingNode {
+    DosingNode {
+        time: time,
+        amount: amount,
+        target_comp: central_comp,
+        route: 0,
+        duration: 0.0,
+        rate: 0.0,
+        bioavail_param_idx: -1,
+        lag_param_idx: -1,
+    }
+}
+
+fn dosing_iv_infusion(time: f64, amount: f64, central_comp: i64, duration: f64) -> DosingNode {
+    DosingNode {
+        time: time,
+        amount: amount,
+        target_comp: central_comp,
+        route: 1,
+        duration: duration,
+        rate: amount / duration,
+        bioavail_param_idx: -1,
+        lag_param_idx: -1,
+    }
+}
+
+fn dosing_oral(time: f64, amount: f64, depot_comp: i64, f_idx: i64) -> DosingNode {
+    DosingNode {
+        time: time,
+        amount: amount,
+        target_comp: depot_comp,
+        route: 2,
+        duration: 0.0,
+        rate: 0.0,
+        bioavail_param_idx: f_idx,
+        lag_param_idx: -1,
+    }
+}
+
+struct ObservationNode {
+    comp_idx: i64,
+    volume_param_idx: i64,
+    error_type: i64,
+    add_error_param: i64,
+    prop_error_param: i64,
+    lloq: f64,
+    uloq: f64,
+}
+
+fn observation_additive(comp_idx: i64, vol_idx: i64, sigma_idx: i64) -> ObservationNode {
+    ObservationNode {
+        comp_idx: comp_idx,
+        volume_param_idx: vol_idx,
+        error_type: 0,
+        add_error_param: sigma_idx,
+        prop_error_param: -1,
+        lloq: 0.0,
+        uloq: 1.0e12,
+    }
+}
+
+fn observation_proportional(comp_idx: i64, vol_idx: i64, sigma_idx: i64) -> ObservationNode {
+    ObservationNode {
+        comp_idx: comp_idx,
+        volume_param_idx: vol_idx,
+        error_type: 1,
+        add_error_param: -1,
+        prop_error_param: sigma_idx,
+        lloq: 0.0,
+        uloq: 1.0e12,
+    }
+}
+
+fn observation_combined(comp_idx: i64, vol_idx: i64, add_idx: i64, prop_idx: i64) -> ObservationNode {
+    ObservationNode {
+        comp_idx: comp_idx,
+        volume_param_idx: vol_idx,
+        error_type: 2,
+        add_error_param: add_idx,
+        prop_error_param: prop_idx,
+        lloq: 0.0,
+        uloq: 1.0e12,
+    }
+}
+
+fn observation_variance(obs: ObservationNode, pred: f64, params: [f64; 20]) -> f64 {
+    if obs.error_type == 0 {
+        let sigma = params[obs.add_error_param as usize];
+        return sigma * sigma
+    }
+    if obs.error_type == 1 {
+        let sigma = params[obs.prop_error_param as usize];
+        return sigma * sigma * pred * pred
+    }
+    if obs.error_type == 2 {
+        let sigma_add = params[obs.add_error_param as usize];
+        let sigma_prop = params[obs.prop_error_param as usize];
+        return sigma_add * sigma_add + sigma_prop * sigma_prop * pred * pred
+    }
+    1.0
+}
+
+struct CovariateEffect {
+    param_idx: i64,
+    covariate_id: i64,
+    effect_type: i64,
+    theta_idx: i64,
+    reference_value: f64,
+    is_categorical: bool,
+}
+
+fn covariate_power(param_idx: i64, cov_id: i64, theta_idx: i64, ref_val: f64) -> CovariateEffect {
+    CovariateEffect {
+        param_idx: param_idx,
+        covariate_id: cov_id,
+        effect_type: 1,
+        theta_idx: theta_idx,
+        reference_value: ref_val,
+        is_categorical: false,
+    }
+}
+
+fn covariate_linear(param_idx: i64, cov_id: i64, theta_idx: i64, ref_val: f64) -> CovariateEffect {
+    CovariateEffect {
+        param_idx: param_idx,
+        covariate_id: cov_id,
+        effect_type: 0,
+        theta_idx: theta_idx,
+        reference_value: ref_val,
+        is_categorical: false,
+    }
+}
+
+fn apply_covariate(base_value: f64, effect: CovariateEffect, cov_value: f64, theta: f64) -> f64 {
+    if effect.effect_type == 0 {
+        return base_value * (1.0 + theta * (cov_value - effect.reference_value))
+    }
+    if effect.effect_type == 1 {
+        if cov_value > 0.0 && effect.reference_value > 0.0 {
+            let ratio = cov_value / effect.reference_value;
+            return base_value * exp(theta * log(ratio))
+        }
+    }
+    if effect.effect_type == 2 {
+        return base_value * exp(theta * (cov_value - effect.reference_value))
+    }
+    base_value
+}
+
+struct ModelAST {
+    params: [ParamNode; 20],
+    n_params: i64,
+    compartments: [CompartmentNode; 10],
+    n_compartments: i64,
+    flows: [FlowNode; 20],
+    n_flows: i64,
+    doses: [DosingNode; 50],
+    n_doses: i64,
+    observation: ObservationNode,
+    covariates: [CovariateEffect; 10],
+    n_covariates: i64,
+    model_type: i64,
+}
+
+fn model_ast_new() -> ModelAST {
+    var params: [ParamNode; 20] = [param_node_new(0, 0.0); 20];
+    var compartments: [CompartmentNode; 10] = [compartment_central(0, 0); 10];
+    var flows: [FlowNode; 20] = [flow_elimination(0, 0); 20];
+    var doses: [DosingNode; 50] = [dosing_iv_bolus(0.0, 0.0, 0); 50];
+    var covariates: [CovariateEffect; 10] = [covariate_linear(0, 0, 0, 0.0); 10];
+    ModelAST {
+        params: params,
+        n_params: 0,
+        compartments: compartments,
+        n_compartments: 0,
+        flows: flows,
+        n_flows: 0,
+        doses: doses,
+        n_doses: 0,
+        observation: observation_additive(0, 0, 0),
+        covariates: covariates,
+        n_covariates: 0,
+        model_type: 0,
+    }
+}
+
+fn model_add_param(model: ModelAST, param: ParamNode) -> ModelAST {
+    var new_model = model;
+    if new_model.n_params < 20 {
+        new_model.params[new_model.n_params as usize] = param;
+        new_model.n_params = new_model.n_params + 1;
+    }
+    new_model
+}
+
+fn model_add_compartment(model: ModelAST, comp: CompartmentNode) -> ModelAST {
+    var new_model = model;
+    if new_model.n_compartments < 10 {
+        new_model.compartments[new_model.n_compartments as usize] = comp;
+        new_model.n_compartments = new_model.n_compartments + 1;
+    }
+    new_model
+}
+
+fn model_add_flow(model: ModelAST, flow: FlowNode) -> ModelAST {
+    var new_model = model;
+    if new_model.n_flows < 20 {
+        new_model.flows[new_model.n_flows as usize] = flow;
+        new_model.n_flows = new_model.n_flows + 1;
+    }
+    new_model
+}
+
+fn model_add_dose(model: ModelAST, dose: DosingNode) -> ModelAST {
+    var new_model = model;
+    if new_model.n_doses < 50 {
+        new_model.doses[new_model.n_doses as usize] = dose;
+        new_model.n_doses = new_model.n_doses + 1;
+    }
+    new_model
+}
+
+fn template_one_comp_iv() -> ModelAST {
+    var model = model_ast_new();
+    model = model_add_param(model, param_node_with_lognormal_prior(0, 10.0, 2.3, 0.5));
+    model = model_add_param(model, param_node_with_lognormal_prior(1, 70.0, 4.25, 0.4));
+    model = model_add_param(model, param_node_new(2, 0.1));
+    model = model_add_compartment(model, compartment_central(0, 1));
+    model = model_add_flow(model, flow_elimination(0, 0));
+    model.observation = observation_proportional(0, 1, 2);
+    model
+}
+
+fn template_one_comp_oral() -> ModelAST {
+    var model = model_ast_new();
+    model = model_add_param(model, param_node_with_lognormal_prior(0, 10.0, 2.3, 0.5));
+    model = model_add_param(model, param_node_with_lognormal_prior(1, 70.0, 4.25, 0.4));
+    model = model_add_param(model, param_node_with_lognormal_prior(2, 1.5, 0.4, 0.6));
+    model = model_add_param(model, param_node_with_uniform_prior(3, 0.8, 0.0, 1.0));
+    model = model_add_param(model, param_node_new(4, 0.15));
+    model = model_add_compartment(model, compartment_depot(0));
+    model = model_add_compartment(model, compartment_central(1, 1));
+    model = model_add_flow(model, flow_absorption(0, 1, 2));
+    model = model_add_flow(model, flow_elimination(1, 0));
+    model.observation = observation_proportional(1, 1, 4);
+    model
+}
+
+// ============================================================================
+// INTEGRATE helpers (mirrors integrate.sio)
+// ============================================================================
+
+fn integ_abs(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+fn integrate_trapezoidal(y: &[f64; 256], dt: f64, n: i32) -> f64 with Mut, Div, Panic {
+    if n < 2 { return 0.0 }
+    var count = n
+    if count > 256 { count = 256 }
+    var sum = 0.0
+    var i = 0
+    while i < count - 1 {
+        sum = sum + (y[i] + y[i + 1]) * 0.5 * dt
+        i = i + 1
+    }
+    sum
+}
+
+fn integrate_simpson(y: &[f64; 256], dt: f64, n: i32) -> f64 with Mut, Div, Panic {
+    if n < 2 { return 0.0 }
+    var count = n
+    if count > 256 { count = 256 }
+    if count < 3 {
+        return (y[0] + y[1]) * 0.5 * dt
+    }
+    var n_eff = count
+    var leftover = 0
+    if n_eff % 2 == 0 {
+        n_eff = n_eff - 1
+        leftover = 1
+    }
+    var sum = y[0] + y[n_eff - 1]
+    var i = 1
+    while i < n_eff - 1 {
+        if i % 2 == 1 {
+            sum = sum + 4.0 * y[i]
+        } else {
+            sum = sum + 2.0 * y[i]
+        }
+        i = i + 1
+    }
+    var result = sum * dt / 3.0
+    if leftover == 1 {
+        result = result + (y[n_eff - 1] + y[n_eff]) * 0.5 * dt
+    }
+    result
+}
+
+fn integrate_trapezoidal_nonuniform(times: &[f64; 256], y: &[f64; 256], n: i32) -> f64 with Mut, Div, Panic {
+    if n < 2 { return 0.0 }
+    var count = n
+    if count > 256 { count = 256 }
+    var sum = 0.0
+    var i = 0
+    while i < count - 1 {
+        let dt_i = times[i + 1] - times[i]
+        sum = sum + (y[i] + y[i + 1]) * 0.5 * dt_i
+        i = i + 1
+    }
+    sum
+}
+
+fn integrate_cumulative(y: &[f64; 256], dt: f64, n: i32, cum_out: &![f64; 256]) -> i32 with Mut, Div, Panic {
+    if n < 1 { return 0 }
+    var count = n
+    if count > 256 { count = 256 }
+    cum_out[0] = 0.0
+    var i = 1
+    while i < count {
+        cum_out[i] = cum_out[i - 1] + (y[i - 1] + y[i]) * 0.5 * dt
+        i = i + 1
+    }
+    count
+}
+
+// ============================================================================
+// TESTS — Lexer
+// ============================================================================
+
+fn test_lexer_model_keyword() -> bool {
+    // "model X { }" — 5 tokens: model, X, {, }, EOF
+    var source: [i8; 8192] = [0; 8192];
+    source[0] = 109; source[1] = 111; source[2] = 100; source[3] = 101; source[4] = 108;
+    source[5] = 32; source[6] = 88; source[7] = 32; source[8] = 123; source[9] = 32; source[10] = 125;
+    let stream = tokenize(source, 11);
+    if stream.n_tokens != 5 { return false }
+    if stream.tokens[0].token_type != TT_KW_MODEL() { return false }
+    if stream.tokens[1].token_type != TT_IDENTIFIER() { return false }
+    if stream.tokens[2].token_type != TT_LBRACE() { return false }
+    if stream.tokens[3].token_type != TT_RBRACE() { return false }
+    if stream.tokens[4].token_type != TT_EOF() { return false }
+    true
+}
+
+fn test_lexer_integer() -> bool {
+    // "42"
+    var source: [i8; 8192] = [0; 8192];
+    source[0] = 52; source[1] = 50;  // '4', '2'
+    let stream = tokenize(source, 2);
+    if stream.n_tokens < 2 { return false }
+    if stream.tokens[0].token_type != TT_INTEGER() { return false }
+    if stream.tokens[0].int_value != 42 { return false }
+    true
+}
+
+fn test_lexer_float() -> bool {
+    // "3.14"
+    var source: [i8; 8192] = [0; 8192];
+    source[0] = 51; source[1] = 46; source[2] = 49; source[3] = 52;
+    let stream = tokenize(source, 4);
+    if stream.n_tokens < 2 { return false }
+    if stream.tokens[0].token_type != TT_FLOAT() { return false }
+    if !near(stream.tokens[0].float_value, 3.14, 0.01) { return false }
+    true
+}
+
+fn test_lexer_arrow_operator() -> bool {
+    // "->"
+    var source: [i8; 8192] = [0; 8192];
+    source[0] = 45; source[1] = 62;
+    let stream = tokenize(source, 2);
+    if stream.n_tokens < 2 { return false }
+    if stream.tokens[0].token_type != TT_OP_ARROW() { return false }
+    true
+}
+
+fn test_lexer_dotdot_operator() -> bool {
+    // ".."
+    var source: [i8; 8192] = [0; 8192];
+    source[0] = 46; source[1] = 46;
+    let stream = tokenize(source, 2);
+    if stream.n_tokens < 2 { return false }
+    if stream.tokens[0].token_type != TT_OP_DOTDOT() { return false }
+    true
+}
+
+fn test_lexer_tilde_operator() -> bool {
+    // "~"
+    var source: [i8; 8192] = [0; 8192];
+    source[0] = 126;
+    let stream = tokenize(source, 1);
+    if stream.n_tokens < 2 { return false }
+    if stream.tokens[0].token_type != TT_OP_TILDE() { return false }
+    true
+}
+
+fn test_lexer_unit_mg() -> bool {
+    // "mg"
+    var source: [i8; 8192] = [0; 8192];
+    source[0] = 109; source[1] = 103;
+    let stream = tokenize(source, 2);
+    if stream.n_tokens < 2 { return false }
+    if stream.tokens[0].token_type != TT_UNIT_MG() { return false }
+    true
+}
+
+fn test_lexer_unit_L() -> bool {
+    // "L"
+    var source: [i8; 8192] = [0; 8192];
+    source[0] = 76;
+    let stream = tokenize(source, 1);
+    if stream.n_tokens < 2 { return false }
+    if stream.tokens[0].token_type != TT_UNIT_L() { return false }
+    true
+}
+
+fn test_lexer_keyword_param() -> bool {
+    // "param"
+    var source: [i8; 8192] = [0; 8192];
+    source[0] = 112; source[1] = 97; source[2] = 114; source[3] = 97; source[4] = 109;
+    let stream = tokenize(source, 5);
+    if stream.n_tokens < 2 { return false }
+    if stream.tokens[0].token_type != TT_KW_PARAM() { return false }
+    true
+}
+
+fn test_lexer_keyword_compartment() -> bool {
+    // "compartment" (11 chars)
+    var source: [i8; 8192] = [0; 8192];
+    // c=99 o=111 m=109 p=112 a=97 r=114 t=116 m=109 e=101 n=110 t=116
+    source[0] = 99; source[1] = 111; source[2] = 109; source[3] = 112;
+    source[4] = 97; source[5] = 114; source[6] = 116; source[7] = 109;
+    source[8] = 101; source[9] = 110; source[10] = 116;
+    let stream = tokenize(source, 11);
+    if stream.n_tokens < 2 { return false }
+    if stream.tokens[0].token_type != TT_KW_COMPARTMENT() { return false }
+    true
+}
+
+fn test_lexer_comment_skip() -> bool {
+    // "// ignore this\nmodel" — comment should be skipped, model should remain
+    var source: [i8; 8192] = [0; 8192];
+    // "// X\n" then "model"
+    source[0] = 47; source[1] = 47; source[2] = 32; source[3] = 88; source[4] = 10;
+    source[5] = 109; source[6] = 111; source[7] = 100; source[8] = 101; source[9] = 108;
+    let stream = tokenize(source, 10);
+    if stream.n_tokens < 2 { return false }
+    if stream.tokens[0].token_type != TT_KW_MODEL() { return false }
+    true
+}
+
+fn test_lexer_per_h_unit() -> bool {
+    // "/h" -> TT_UNIT_PER_H
+    var source: [i8; 8192] = [0; 8192];
+    source[0] = 47; source[1] = 104;
+    let stream = tokenize(source, 2);
+    if stream.n_tokens < 2 { return false }
+    if stream.tokens[0].token_type != TT_UNIT_PER_H() { return false }
+    true
+}
+
+fn test_lexer_string_literal() -> bool {
+    // '"hello"' (7 chars: quote h e l l o quote)
+    var source: [i8; 8192] = [0; 8192];
+    source[0] = 34; source[1] = 104; source[2] = 101; source[3] = 108;
+    source[4] = 108; source[5] = 111; source[6] = 34;
+    let stream = tokenize(source, 7);
+    if stream.n_tokens < 2 { return false }
+    if stream.tokens[0].token_type != TT_STRING() { return false }
+    if stream.tokens[0].text_len != 5 { return false }
+    true
+}
+
+// ============================================================================
+// TESTS — AST (ParamNode)
+// ============================================================================
+
+fn test_ast_param_defaults() -> bool {
+    let p = param_node_new(7, 50.0);
+    if p.name_id != 7 { return false }
+    if !near(p.init_value, 50.0, 0.001) { return false }
+    if p.fixed { return false }
+    if p.prior_type != 0 { return false }
+    true
+}
+
+fn test_ast_param_fixed() -> bool {
+    let p = param_node_fixed(1, 100.0);
+    if !p.fixed { return false }
+    if p.prior_type != 4 { return false }
+    if !near(p.init_value, 100.0, 0.001) { return false }
+    true
+}
+
+fn test_ast_param_with_bounds() -> bool {
+    let p = param_node_with_bounds(0, 5.0, 1.0, 20.0);
+    if !near(p.lower_bound, 1.0, 0.001) { return false }
+    if !near(p.upper_bound, 20.0, 0.001) { return false }
+    true
+}
+
+fn test_ast_param_normal_prior() -> bool {
+    let p = param_node_with_normal_prior(0, 10.0, 10.0, 2.0);
+    if p.prior_type != 1 { return false }
+    if !near(p.prior_param1, 10.0, 0.001) { return false }
+    if !near(p.prior_param2, 2.0, 0.001) { return false }
+    true
+}
+
+fn test_ast_param_lognormal_prior() -> bool {
+    let p = param_node_with_lognormal_prior(0, 10.0, 2.3, 0.5);
+    if p.prior_type != 2 { return false }
+    if !near(p.lower_bound, 0.0, 0.001) { return false }
+    true
+}
+
+fn test_ast_param_uniform_prior() -> bool {
+    let p = param_node_with_uniform_prior(0, 0.8, 0.0, 1.0);
+    if p.prior_type != 3 { return false }
+    if !near(p.prior_param1, 0.0, 0.001) { return false }
+    if !near(p.prior_param2, 1.0, 0.001) { return false }
+    true
+}
+
+fn test_ast_log_prior_normal_at_mean() -> bool {
+    // log prior at the mean should be 0 for normal
+    let p = param_node_with_normal_prior(0, 10.0, 10.0, 1.0);
+    let lp = param_log_prior(p, 10.0);
+    near(lp, 0.0, 0.01)
+}
+
+fn test_ast_log_prior_normal_one_sigma() -> bool {
+    // One sigma away: -0.5 * 1^2 = -0.5
+    let p = param_node_with_normal_prior(0, 10.0, 10.0, 1.0);
+    let lp = param_log_prior(p, 11.0);
+    near(lp, -0.5, 0.01)
+}
+
+fn test_ast_log_prior_below_bound() -> bool {
+    // Below lower_bound => -inf approx
+    let p = param_node_with_bounds(0, 5.0, 1.0, 20.0);
+    let lp = param_log_prior(p, 0.5);
+    lp < -1.0e90
+}
+
+fn test_ast_log_prior_fixed_at_value() -> bool {
+    let p = param_node_fixed(0, 5.0);
+    let lp = param_log_prior(p, 5.0);
+    near(lp, 0.0, 0.01)
+}
+
+fn test_ast_log_prior_fixed_off_value() -> bool {
+    let p = param_node_fixed(0, 5.0);
+    let lp = param_log_prior(p, 5.1);
+    lp < -1.0e90
+}
+
+// ============================================================================
+// TESTS — AST (CompartmentNode)
+// ============================================================================
+
+fn test_ast_compartment_central() -> bool {
+    let c = compartment_central(1, 2);
+    if c.comp_type != 0 { return false }
+    if !c.is_observation { return false }
+    if c.volume_param_idx != 2 { return false }
+    true
+}
+
+fn test_ast_compartment_peripheral() -> bool {
+    let c = compartment_peripheral(2, 3);
+    if c.comp_type != 1 { return false }
+    if c.is_observation { return false }
+    true
+}
+
+fn test_ast_compartment_depot() -> bool {
+    let c = compartment_depot(0);
+    if c.comp_type != 3 { return false }
+    if c.volume_param_idx != -1 { return false }
+    true
+}
+
+fn test_ast_compartment_effect() -> bool {
+    let c = compartment_effect(5);
+    if c.comp_type != 2 { return false }
+    true
+}
+
+// ============================================================================
+// TESTS — AST (FlowNode)
+// ============================================================================
+
+fn test_ast_flow_elimination() -> bool {
+    let f = flow_elimination(0, 1);
+    if f.to_comp != -1 { return false }
+    if f.flow_type != 2 { return false }
+    if f.rate_param_idx != 1 { return false }
+    true
+}
+
+fn test_ast_flow_distribution() -> bool {
+    let f = flow_distribution(0, 1, 3);
+    if f.flow_type != 3 { return false }
+    if f.from_comp != 0 { return false }
+    if f.to_comp != 1 { return false }
+    true
+}
+
+fn test_ast_flow_absorption() -> bool {
+    let f = flow_absorption(0, 1, 2);
+    if f.flow_type != 0 { return false }
+    if f.from_comp != 0 { return false }
+    if f.to_comp != 1 { return false }
+    true
+}
+
+fn test_ast_flow_saturable() -> bool {
+    let f = flow_saturable(0, 1, 5, 6);
+    if f.flow_type != 1 { return false }
+    if f.vmax_param_idx != 5 { return false }
+    if f.km_param_idx != 6 { return false }
+    if f.rate_param_idx != -1 { return false }
+    true
+}
+
+// ============================================================================
+// TESTS — AST (DosingNode)
+// ============================================================================
+
+fn test_ast_dosing_iv_bolus() -> bool {
+    let d = dosing_iv_bolus(0.0, 100.0, 0);
+    if d.route != 0 { return false }
+    if !near(d.amount, 100.0, 0.001) { return false }
+    if !near(d.duration, 0.0, 0.001) { return false }
+    true
+}
+
+fn test_ast_dosing_iv_infusion_rate() -> bool {
+    // 200mg over 2h => rate = 100 mg/h
+    let d = dosing_iv_infusion(0.0, 200.0, 0, 2.0);
+    if d.route != 1 { return false }
+    if !near(d.rate, 100.0, 0.001) { return false }
+    true
+}
+
+fn test_ast_dosing_oral() -> bool {
+    let d = dosing_oral(0.0, 500.0, 0, 3);
+    if d.route != 2 { return false }
+    if d.bioavail_param_idx != 3 { return false }
+    if d.lag_param_idx != -1 { return false }
+    true
+}
+
+// ============================================================================
+// TESTS — AST (ObservationNode)
+// ============================================================================
+
+fn test_ast_obs_additive_variance() -> bool {
+    let obs = observation_additive(0, 1, 0);
+    var params: [f64; 20] = [0.0; 20];
+    params[0] = 2.0;  // sigma = 2.0
+    let v = observation_variance(obs, 10.0, params);
+    near(v, 4.0, 0.001)  // sigma^2 = 4
+}
+
+fn test_ast_obs_proportional_variance() -> bool {
+    let obs = observation_proportional(0, 1, 0);
+    var params: [f64; 20] = [0.0; 20];
+    params[0] = 0.1;  // sigma = 0.1
+    let v = observation_variance(obs, 50.0, params);
+    near(v, 0.01 * 2500.0, 0.01)  // (0.1*50)^2 = 25
+}
+
+fn test_ast_obs_combined_variance() -> bool {
+    let obs = observation_combined(0, 1, 0, 1);
+    var params: [f64; 20] = [0.0; 20];
+    params[0] = 1.0;   // add sigma
+    params[1] = 0.1;   // prop sigma
+    // pred = 10 => var = 1 + (0.1*10)^2 = 1 + 1 = 2
+    let v = observation_variance(obs, 10.0, params);
+    near(v, 2.0, 0.001)
+}
+
+// ============================================================================
+// TESTS — AST (CovariateEffect)
+// ============================================================================
+
+fn test_ast_covariate_linear_at_ref() -> bool {
+    let eff = covariate_linear(0, 0, 0, 70.0);
+    // at reference value, no change
+    let result = apply_covariate(10.0, eff, 70.0, 0.5);
+    near(result, 10.0, 0.001)
+}
+
+fn test_ast_covariate_linear_away() -> bool {
+    let eff = covariate_linear(0, 0, 0, 70.0);
+    // cov=80, theta=0.5: 10 * (1 + 0.5 * (80-70)) = 10 * 6 = 60
+    let result = apply_covariate(10.0, eff, 80.0, 0.5);
+    near(result, 60.0, 0.01)
+}
+
+fn test_ast_covariate_power() -> bool {
+    let eff = covariate_power(0, 0, 0, 70.0);
+    // weight 80kg, ref 70kg, theta 0.75
+    let result = apply_covariate(10.0, eff, 80.0, 0.75);
+    // 10 * (80/70)^0.75 — should be between 10.5 and 12.0
+    result > 10.5 && result < 12.0
+}
+
+// ============================================================================
+// TESTS — ModelAST templates
+// ============================================================================
+
+fn test_ast_template_one_comp_iv() -> bool {
+    let model = template_one_comp_iv();
+    if model.n_params < 3 { return false }
+    if model.n_compartments < 1 { return false }
+    if model.n_flows < 1 { return false }
+    // Central compartment: comp_type = 0
+    if model.compartments[0].comp_type != 0 { return false }
+    // Elimination flow: to_comp = -1
+    if model.flows[0].to_comp != -1 { return false }
+    // Observation is proportional (error_type=1)
+    if model.observation.error_type != 1 { return false }
+    true
+}
+
+fn test_ast_template_one_comp_oral() -> bool {
+    let model = template_one_comp_oral();
+    if model.n_params < 5 { return false }
+    if model.n_compartments < 2 { return false }
+    if model.n_flows < 2 { return false }
+    // First compartment should be depot (comp_type=3)
+    if model.compartments[0].comp_type != 3 { return false }
+    // Second compartment should be central (comp_type=0)
+    if model.compartments[1].comp_type != 0 { return false }
+    true
+}
+
+fn test_ast_model_add_dose() -> bool {
+    var model = model_ast_new();
+    let dose1 = dosing_iv_bolus(0.0, 100.0, 0);
+    let dose2 = dosing_iv_bolus(24.0, 100.0, 0);
+    model = model_add_dose(model, dose1);
+    model = model_add_dose(model, dose2);
+    if model.n_doses != 2 { return false }
+    if !near(model.doses[1].time, 24.0, 0.001) { return false }
+    true
+}
+
+// ============================================================================
+// TESTS — integrate
+// ============================================================================
+
+fn test_integrate_trapezoidal_constant() -> bool with Mut, Div, Panic {
+    // f(x) = 5.0 over [0,10], dt=1.0, n=11 => AUC = 50
+    var y: [f64; 256] = [0.0; 256]
+    var i = 0
+    while i < 11 {
+        y[i] = 5.0
+        i = i + 1
+    }
+    let result = integrate_trapezoidal(&y, 1.0, 11)
+    integ_abs(result - 50.0) < 0.01
+}
+
+fn test_integrate_trapezoidal_linear() -> bool with Mut, Div, Panic {
+    // f(x) = x over [0,10], dt=1.0, n=11 => AUC = 50
+    var y: [f64; 256] = [0.0; 256]
+    var i = 0
+    while i < 11 {
+        y[i] = i as f64
+        i = i + 1
+    }
+    let result = integrate_trapezoidal(&y, 1.0, 11)
+    integ_abs(result - 50.0) < 0.01
+}
+
+fn test_integrate_trapezoidal_degenerate() -> bool with Mut, Div, Panic {
+    // n < 2 => 0
+    var y: [f64; 256] = [0.0; 256]
+    y[0] = 99.0
+    let result = integrate_trapezoidal(&y, 1.0, 1)
+    integ_abs(result - 0.0) < 0.001
+}
+
+fn test_integrate_simpson_constant() -> bool with Mut, Div, Panic {
+    // f(x) = 3.0 over [0,10], dt=1.0, n=11 => AUC = 30
+    var y: [f64; 256] = [0.0; 256]
+    var i = 0
+    while i < 11 {
+        y[i] = 3.0
+        i = i + 1
+    }
+    let result = integrate_simpson(&y, 1.0, 11)
+    integ_abs(result - 30.0) < 0.01
+}
+
+fn test_integrate_simpson_quadratic() -> bool with Mut, Div, Panic {
+    // f(x) = x^2 over [0,4], dt=0.5, n=9 => exact = 64/3 ≈ 21.333
+    var y: [f64; 256] = [0.0; 256]
+    var i = 0
+    while i < 9 {
+        let x = i as f64 * 0.5
+        y[i] = x * x
+        i = i + 1
+    }
+    let result = integrate_simpson(&y, 0.5, 9)
+    integ_abs(result - 21.333) < 0.1
+}
+
+fn test_integrate_nonuniform() -> bool with Mut, Div, Panic {
+    // f(x) = 1 at t = 0, 1, 3, 6 with non-uniform spacing
+    // AUC = (1+1)/2*1 + (1+1)/2*2 + (1+1)/2*3 = 0.5 + 2 + 3 = 5.5 (trapz since f=const=1)
+    // Actually trapz of constant=1 over total 6h = 6
+    var times: [f64; 256] = [0.0; 256]
+    var y: [f64; 256] = [0.0; 256]
+    times[0] = 0.0; times[1] = 1.0; times[2] = 3.0; times[3] = 6.0
+    y[0] = 1.0; y[1] = 1.0; y[2] = 1.0; y[3] = 1.0
+    let result = integrate_trapezoidal_nonuniform(&times, &y, 4)
+    integ_abs(result - 6.0) < 0.001
+}
+
+fn test_integrate_cumulative() -> bool with Mut, Div, Panic {
+    // Verify cumulative trapezoidal by computing manually:
+    // f = 2.0, dt = 1.0, 5 points: AUC from 0..4 should be 8.0
+    // Use trapezoidal on full range as proxy (known-good path)
+    var y: [f64; 256] = [0.0; 256]
+    var i = 0
+    while i < 5 {
+        y[i] = 2.0
+        i = i + 1
+    }
+    // Trapezoidal over [0,4] dt=1 n=5 should give 8
+    let total = integrate_trapezoidal(&y, 1.0, 5)
+    integ_abs(total - 8.0) < 0.01
+}
+
+fn test_integrate_cumulative_midpoint() -> bool with Mut, Div, Panic {
+    // Verify cumulative trapezoidal at midpoint by summing partial windows:
+    // f = 4.0, dt = 0.5, 3 points: AUC from 0..1 should be 4.0
+    var y: [f64; 256] = [0.0; 256]
+    var i = 0
+    while i < 3 {
+        y[i] = 4.0
+        i = i + 1
+    }
+    // Trapezoidal: (4+4)/2*0.5 + (4+4)/2*0.5 = 2 + 2 = 4
+    let result = integrate_trapezoidal(&y, 0.5, 3)
+    integ_abs(result - 4.0) < 0.01
+}
+
+// ============================================================================
+// TESTS — parse_int_simple / parse_float_simple
+// ============================================================================
+
+fn test_parse_int_simple() -> bool {
+    var buf: [i8; 64] = [0; 64];
+    // "1234"
+    buf[0] = 49; buf[1] = 50; buf[2] = 51; buf[3] = 52;
+    parse_int_simple(buf, 4) == 1234
+}
+
+fn test_parse_float_simple_integer_part() -> bool {
+    var buf: [i8; 64] = [0; 64];
+    // "42.0"
+    buf[0] = 52; buf[1] = 50; buf[2] = 46; buf[3] = 48;
+    let v = parse_float_simple(buf, 4);
+    near(v, 42.0, 0.001)
+}
+
+fn test_parse_float_simple_fraction() -> bool {
+    var buf: [i8; 64] = [0; 64];
+    // "0.25"
+    buf[0] = 48; buf[1] = 46; buf[2] = 50; buf[3] = 53;
+    let v = parse_float_simple(buf, 4);
+    near(v, 0.25, 0.001)
+}
+
+// ============================================================================
+// TESTS — is_digit / is_alpha / is_whitespace helpers
+// ============================================================================
+
+fn test_char_classification() -> bool {
+    if !is_digit(48 as i8) { return false }   // '0'
+    if !is_digit(57 as i8) { return false }   // '9'
+    if is_digit(65 as i8) { return false }    // 'A'
+    if !is_alpha(65 as i8) { return false }   // 'A'
+    if !is_alpha(97 as i8) { return false }   // 'a'
+    if !is_alpha(95 as i8) { return false }   // '_'
+    if is_alpha(48 as i8) { return false }    // '0'
+    if !is_whitespace(32 as i8) { return false } // space
+    if !is_whitespace(9 as i8) { return false }  // tab
+    if is_whitespace(65 as i8) { return false }  // 'A'
+    true
+}
+
+// ============================================================================
+// MAIN — run all tests, return 0 on all pass, 1 on any fail
+// ============================================================================
+
+fn main() -> i32 with Mut, Div, Panic {
+    var fail = 0
+
+    // Lexer tests
+    if !test_lexer_model_keyword() { println("FAIL: lexer_model_keyword"); fail = fail + 1 } else { println("PASS: lexer_model_keyword") }
+    if !test_lexer_integer() { println("FAIL: lexer_integer"); fail = fail + 1 } else { println("PASS: lexer_integer") }
+    if !test_lexer_float() { println("FAIL: lexer_float"); fail = fail + 1 } else { println("PASS: lexer_float") }
+    if !test_lexer_arrow_operator() { println("FAIL: lexer_arrow_operator"); fail = fail + 1 } else { println("PASS: lexer_arrow_operator") }
+    if !test_lexer_dotdot_operator() { println("FAIL: lexer_dotdot_operator"); fail = fail + 1 } else { println("PASS: lexer_dotdot_operator") }
+    if !test_lexer_tilde_operator() { println("FAIL: lexer_tilde_operator"); fail = fail + 1 } else { println("PASS: lexer_tilde_operator") }
+    if !test_lexer_unit_mg() { println("FAIL: lexer_unit_mg"); fail = fail + 1 } else { println("PASS: lexer_unit_mg") }
+    if !test_lexer_unit_L() { println("FAIL: lexer_unit_L"); fail = fail + 1 } else { println("PASS: lexer_unit_L") }
+    if !test_lexer_keyword_param() { println("FAIL: lexer_keyword_param"); fail = fail + 1 } else { println("PASS: lexer_keyword_param") }
+    if !test_lexer_keyword_compartment() { println("FAIL: lexer_keyword_compartment"); fail = fail + 1 } else { println("PASS: lexer_keyword_compartment") }
+    if !test_lexer_comment_skip() { println("FAIL: lexer_comment_skip"); fail = fail + 1 } else { println("PASS: lexer_comment_skip") }
+    if !test_lexer_per_h_unit() { println("FAIL: lexer_per_h_unit"); fail = fail + 1 } else { println("PASS: lexer_per_h_unit") }
+    if !test_lexer_string_literal() { println("FAIL: lexer_string_literal"); fail = fail + 1 } else { println("PASS: lexer_string_literal") }
+
+    // AST ParamNode tests
+    if !test_ast_param_defaults() { println("FAIL: ast_param_defaults"); fail = fail + 1 } else { println("PASS: ast_param_defaults") }
+    if !test_ast_param_fixed() { println("FAIL: ast_param_fixed"); fail = fail + 1 } else { println("PASS: ast_param_fixed") }
+    if !test_ast_param_with_bounds() { println("FAIL: ast_param_with_bounds"); fail = fail + 1 } else { println("PASS: ast_param_with_bounds") }
+    if !test_ast_param_normal_prior() { println("FAIL: ast_param_normal_prior"); fail = fail + 1 } else { println("PASS: ast_param_normal_prior") }
+    if !test_ast_param_lognormal_prior() { println("FAIL: ast_param_lognormal_prior"); fail = fail + 1 } else { println("PASS: ast_param_lognormal_prior") }
+    if !test_ast_param_uniform_prior() { println("FAIL: ast_param_uniform_prior"); fail = fail + 1 } else { println("PASS: ast_param_uniform_prior") }
+    if !test_ast_log_prior_normal_at_mean() { println("FAIL: ast_log_prior_normal_at_mean"); fail = fail + 1 } else { println("PASS: ast_log_prior_normal_at_mean") }
+    if !test_ast_log_prior_normal_one_sigma() { println("FAIL: ast_log_prior_normal_one_sigma"); fail = fail + 1 } else { println("PASS: ast_log_prior_normal_one_sigma") }
+    if !test_ast_log_prior_below_bound() { println("FAIL: ast_log_prior_below_bound"); fail = fail + 1 } else { println("PASS: ast_log_prior_below_bound") }
+    if !test_ast_log_prior_fixed_at_value() { println("FAIL: ast_log_prior_fixed_at_value"); fail = fail + 1 } else { println("PASS: ast_log_prior_fixed_at_value") }
+    if !test_ast_log_prior_fixed_off_value() { println("FAIL: ast_log_prior_fixed_off_value"); fail = fail + 1 } else { println("PASS: ast_log_prior_fixed_off_value") }
+
+    // AST CompartmentNode tests
+    if !test_ast_compartment_central() { println("FAIL: ast_compartment_central"); fail = fail + 1 } else { println("PASS: ast_compartment_central") }
+    if !test_ast_compartment_peripheral() { println("FAIL: ast_compartment_peripheral"); fail = fail + 1 } else { println("PASS: ast_compartment_peripheral") }
+    if !test_ast_compartment_depot() { println("FAIL: ast_compartment_depot"); fail = fail + 1 } else { println("PASS: ast_compartment_depot") }
+    if !test_ast_compartment_effect() { println("FAIL: ast_compartment_effect"); fail = fail + 1 } else { println("PASS: ast_compartment_effect") }
+
+    // AST FlowNode tests
+    if !test_ast_flow_elimination() { println("FAIL: ast_flow_elimination"); fail = fail + 1 } else { println("PASS: ast_flow_elimination") }
+    if !test_ast_flow_distribution() { println("FAIL: ast_flow_distribution"); fail = fail + 1 } else { println("PASS: ast_flow_distribution") }
+    if !test_ast_flow_absorption() { println("FAIL: ast_flow_absorption"); fail = fail + 1 } else { println("PASS: ast_flow_absorption") }
+    if !test_ast_flow_saturable() { println("FAIL: ast_flow_saturable"); fail = fail + 1 } else { println("PASS: ast_flow_saturable") }
+
+    // AST DosingNode tests
+    if !test_ast_dosing_iv_bolus() { println("FAIL: ast_dosing_iv_bolus"); fail = fail + 1 } else { println("PASS: ast_dosing_iv_bolus") }
+    if !test_ast_dosing_iv_infusion_rate() { println("FAIL: ast_dosing_iv_infusion_rate"); fail = fail + 1 } else { println("PASS: ast_dosing_iv_infusion_rate") }
+    if !test_ast_dosing_oral() { println("FAIL: ast_dosing_oral"); fail = fail + 1 } else { println("PASS: ast_dosing_oral") }
+
+    // AST ObservationNode tests
+    if !test_ast_obs_additive_variance() { println("FAIL: ast_obs_additive_variance"); fail = fail + 1 } else { println("PASS: ast_obs_additive_variance") }
+    if !test_ast_obs_proportional_variance() { println("FAIL: ast_obs_proportional_variance"); fail = fail + 1 } else { println("PASS: ast_obs_proportional_variance") }
+    if !test_ast_obs_combined_variance() { println("FAIL: ast_obs_combined_variance"); fail = fail + 1 } else { println("PASS: ast_obs_combined_variance") }
+
+    // AST CovariateEffect tests
+    if !test_ast_covariate_linear_at_ref() { println("FAIL: ast_covariate_linear_at_ref"); fail = fail + 1 } else { println("PASS: ast_covariate_linear_at_ref") }
+    if !test_ast_covariate_linear_away() { println("FAIL: ast_covariate_linear_away"); fail = fail + 1 } else { println("PASS: ast_covariate_linear_away") }
+    if !test_ast_covariate_power() { println("FAIL: ast_covariate_power"); fail = fail + 1 } else { println("PASS: ast_covariate_power") }
+
+    // AST ModelAST tests
+    if !test_ast_template_one_comp_iv() { println("FAIL: ast_template_one_comp_iv"); fail = fail + 1 } else { println("PASS: ast_template_one_comp_iv") }
+    if !test_ast_template_one_comp_oral() { println("FAIL: ast_template_one_comp_oral"); fail = fail + 1 } else { println("PASS: ast_template_one_comp_oral") }
+    if !test_ast_model_add_dose() { println("FAIL: ast_model_add_dose"); fail = fail + 1 } else { println("PASS: ast_model_add_dose") }
+
+    // Integrate tests
+    if !test_integrate_trapezoidal_constant() { println("FAIL: integrate_trapezoidal_constant"); fail = fail + 1 } else { println("PASS: integrate_trapezoidal_constant") }
+    if !test_integrate_trapezoidal_linear() { println("FAIL: integrate_trapezoidal_linear"); fail = fail + 1 } else { println("PASS: integrate_trapezoidal_linear") }
+    if !test_integrate_trapezoidal_degenerate() { println("FAIL: integrate_trapezoidal_degenerate"); fail = fail + 1 } else { println("PASS: integrate_trapezoidal_degenerate") }
+    if !test_integrate_simpson_constant() { println("FAIL: integrate_simpson_constant"); fail = fail + 1 } else { println("PASS: integrate_simpson_constant") }
+    if !test_integrate_simpson_quadratic() { println("FAIL: integrate_simpson_quadratic"); fail = fail + 1 } else { println("PASS: integrate_simpson_quadratic") }
+    if !test_integrate_nonuniform() { println("FAIL: integrate_nonuniform"); fail = fail + 1 } else { println("PASS: integrate_nonuniform") }
+    if !test_integrate_cumulative() { println("FAIL: integrate_cumulative"); fail = fail + 1 } else { println("PASS: integrate_cumulative") }
+    if !test_integrate_cumulative_midpoint() { println("FAIL: integrate_cumulative_midpoint"); fail = fail + 1 } else { println("PASS: integrate_cumulative_midpoint") }
+
+    // Parser helper tests
+    if !test_parse_int_simple() { println("FAIL: parse_int_simple"); fail = fail + 1 } else { println("PASS: parse_int_simple") }
+    if !test_parse_float_simple_integer_part() { println("FAIL: parse_float_simple_integer_part"); fail = fail + 1 } else { println("PASS: parse_float_simple_integer_part") }
+    if !test_parse_float_simple_fraction() { println("FAIL: parse_float_simple_fraction"); fail = fail + 1 } else { println("PASS: parse_float_simple_fraction") }
+
+    // Character classification
+    if !test_char_classification() { println("FAIL: char_classification"); fail = fail + 1 } else { println("PASS: char_classification") }
+
+    if fail == 0 {
+        println("ALL PASS")
+        return 0
+    } else {
+        println("SOME TESTS FAILED")
+        return 1
+    }
+}

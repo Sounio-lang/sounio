@@ -1,0 +1,105 @@
+//@ run-pass
+// Tests for stdlib/interop/medlang.sio — MedLang interoperability layer
+//
+// Covers: dose constructors, route encoding, subject builder,
+// one-compartment PK model, observation tracking, capacity bounds.
+
+use interop::medlang::{
+    MedLangDose, MedLangObservation, MedLangSubject,
+    medlang_dose_iv, medlang_dose_oral, medlang_dose_infusion,
+    medlang_obs_new, medlang_subject_new,
+    medlang_add_dose, medlang_add_obs,
+    medlang_onecomp_conc
+}
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+fn check_near(got: f64, expected: f64, tol: f64) -> bool {
+    return abs_f64(got - expected) < tol
+}
+
+fn run_tests() -> i32 with Mut, Div, Panic {
+    var pass = 0
+    var fail = 0
+
+    // --- Test 1: IV dose route is 0 ---
+    let d_iv = medlang_dose_iv(500.0, 0.0)
+    if d_iv.route == 0 { pass = pass + 1 } else { fail = fail + 1 }
+
+    // --- Test 2: Oral dose route is 1 ---
+    let d_oral = medlang_dose_oral(250.0, 1.0)
+    if d_oral.route == 1 { pass = pass + 1 } else { fail = fail + 1 }
+
+    // --- Test 3: Infusion route is 0 (IV), duration > 0 ---
+    let d_inf = medlang_dose_infusion(1000.0, 0.0, 2.0)
+    if d_inf.route == 0 { pass = pass + 1 } else { fail = fail + 1 }
+    if check_near(d_inf.duration, 2.0, 1.0e-12) { pass = pass + 1 } else { fail = fail + 1 }
+
+    // --- Test 4: dose amount is preserved ---
+    if check_near(d_iv.amount, 500.0, 1.0e-12) { pass = pass + 1 } else { fail = fail + 1 }
+    if check_near(d_oral.amount, 250.0, 1.0e-12) { pass = pass + 1 } else { fail = fail + 1 }
+
+    // --- Test 5: subject builder sets fields correctly ---
+    let subj0 = medlang_subject_new(42, 70.0, 30.0, 0)
+    if subj0.id == 42 { pass = pass + 1 } else { fail = fail + 1 }
+    if check_near(subj0.weight, 70.0, 1.0e-12) { pass = pass + 1 } else { fail = fail + 1 }
+    if subj0.n_doses == 0 { pass = pass + 1 } else { fail = fail + 1 }
+    if subj0.n_obs == 0 { pass = pass + 1 } else { fail = fail + 1 }
+
+    // --- Test 6: add_dose increments counter ---
+    var subj = medlang_subject_new(1, 70.0, 45.0, 0)
+    subj = medlang_add_dose(subj, medlang_dose_iv(500.0, 0.0))
+    if subj.n_doses == 1 { pass = pass + 1 } else { fail = fail + 1 }
+
+    // --- Test 7: add_dose preserves dose data ---
+    if check_near(subj.doses[0].amount, 500.0, 1.0e-12) { pass = pass + 1 } else { fail = fail + 1 }
+    if subj.doses[0].route == 0 { pass = pass + 1 } else { fail = fail + 1 }
+
+    // --- Test 8: add multiple doses, counter tracks correctly ---
+    subj = medlang_add_dose(subj, medlang_dose_oral(250.0, 24.0))
+    subj = medlang_add_dose(subj, medlang_dose_oral(250.0, 48.0))
+    if subj.n_doses == 3 { pass = pass + 1 } else { fail = fail + 1 }
+
+    // --- Test 9: add_obs increments observation counter ---
+    subj = medlang_add_obs(subj, medlang_obs_new(1.0, 8.5, 1))
+    subj = medlang_add_obs(subj, medlang_obs_new(2.0, 6.2, 1))
+    if subj.n_obs == 2 { pass = pass + 1 } else { fail = fail + 1 }
+
+    // --- Test 10: observation data preserved ---
+    if check_near(subj.observations[0].dv, 8.5, 1.0e-12) { pass = pass + 1 } else { fail = fail + 1 }
+    if check_near(subj.observations[1].time, 2.0, 1.0e-12) { pass = pass + 1 } else { fail = fail + 1 }
+
+    // --- Test 11: IV bolus PK — concentration immediately after dose is near Dose/V ---
+    // CL=10, V=50, t=0.001h → C ≈ (500/50)*exp(-0.2*0.001) ≈ 9.998
+    let c_iv = medlang_onecomp_conc(10.0, 50.0, 0.0, 500.0, 0.001, true)
+    if c_iv > 9.0 { pass = pass + 1 } else { fail = fail + 1 }
+    if c_iv < 11.0 { pass = pass + 1 } else { fail = fail + 1 }
+
+    // --- Test 12: PK before dose (t<=0) returns 0 ---
+    let c_zero = medlang_onecomp_conc(10.0, 50.0, 0.0, 500.0, 0.0, true)
+    if check_near(c_zero, 0.0, 1.0e-12) { pass = pass + 1 } else { fail = fail + 1 }
+
+    // --- Test 13: IV concentration declines with time ---
+    let c_early = medlang_onecomp_conc(10.0, 50.0, 0.0, 500.0, 1.0, true)
+    let c_late  = medlang_onecomp_conc(10.0, 50.0, 0.0, 500.0, 5.0, true)
+    if c_early > c_late { pass = pass + 1 } else { fail = fail + 1 }
+
+    // --- Test 14: dose capacity — adding beyond 16 does not crash, n_doses stays 16 ---
+    var subj2 = medlang_subject_new(99, 60.0, 50.0, 1)
+    var k = 0
+    while k < 20 {
+        subj2 = medlang_add_dose(subj2, medlang_dose_iv(100.0, (k as f64)))
+        k = k + 1
+    }
+    if subj2.n_doses == 16 { pass = pass + 1 } else { fail = fail + 1 }
+
+    // Summary: exit 0 only if all pass
+    if fail == 0 { 0 } else { fail }
+}
+
+fn main() -> i32 with Mut, Div, Panic {
+    run_tests()
+}

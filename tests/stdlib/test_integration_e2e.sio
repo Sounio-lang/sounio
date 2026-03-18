@@ -1,0 +1,153 @@
+//@ run-pass
+// Cross-module stdlib integration test
+//
+// Scenario: "Generate random data, run a t-test, verify GUM uncertainty chain"
+//
+//  1. Generate 20 data points from N(5.0, 1.0) with a fixed seed
+//  2. Run t_test_one_sample against μ₀=5.0 (should NOT reject H₀)
+//  3. Verify the GUM bridge on the test result has positive uncertainty
+//  4. Verify normal_cdf(0) == 0.5
+//  5. Verify lgamma(5) ≈ ln(24) ≈ 3.178...
+//  6. Chain gum_simple → gum_add → verify combined uncertainty ≥ each component
+//  7. Verify erf symmetry: erf(-1) == -erf(1)
+//  8. Verify rng_normal produces values in a reasonable range for N(5, 1)
+//  9. Verify t-statistic |t| is small when sample is near μ₀
+// 10. Verify GUM combined standard uncertainty satisfies Pythagorean law: u_c ≈ √(u1²+u2²)
+
+use special::gamma::{lgamma}
+use special::erf::{erf, normal_cdf}
+use epistemic::gum::{GUMResult, gum_simple, gum_add}
+use stats::hypothesis::{TestResult, t_test_one_sample}
+use random::rng::{RngState, rng_new, rng_normal, rng_fill_normal}
+
+// ============================================================================
+// Local helpers — no imports for these
+// ============================================================================
+
+fn abs64(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+fn near(a: f64, b: f64, tol: f64) -> bool {
+    return abs64(a - b) < tol
+}
+
+// Natural log via range reduction for checking lgamma output
+fn local_ln(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 - 1.0e300 }
+    if x == 1.0 { return 0.0 }
+    let ln2 = 0.6931471805599453
+    var m = x
+    var e = 0
+    while m >= 2.0 { m = m / 2.0; e = e + 1 }
+    while m < 0.5 { m = m * 2.0; e = e - 1 }
+    let t = (m - 1.0) / (m + 1.0)
+    let t2 = t * t
+    var sum = t
+    var term = t
+    var k = 1
+    while k < 32 {
+        term = term * t2
+        sum = sum + term / ((2 * k + 1) as f64)
+        k = k + 1
+    }
+    return 2.0 * sum + (e as f64) * ln2
+}
+
+// ============================================================================
+// MAIN TEST RUNNER
+// ============================================================================
+
+fn run_tests() -> i32 with Mut, Div, Panic {
+    var pass = 0
+    var fail = 0
+
+    // ------------------------------------------------------------------
+    // Step 1: Generate 20 normal samples N(5.0, 1.0) with fixed seed
+    // ------------------------------------------------------------------
+    var rng = rng_new(42 as i64)
+    let gen = rng_fill_normal(rng, 20, 5.0, 1.0)
+    rng = gen.0
+    let samples = gen.1
+
+    // Assertion 1: samples[0] is in plausible range (N(5,1) → ~99.7% in [2,8])
+    if samples[0] > 1.0 && samples[0] < 9.0 { pass = pass + 1 } else { fail = fail + 1 }
+
+    // Assertion 2: samples are not all identical (generator is live)
+    if abs64(samples[0] - samples[1]) > 1.0e-10 { pass = pass + 1 } else { fail = fail + 1 }
+
+    // ------------------------------------------------------------------
+    // Step 2: t-test on the 20 samples against μ₀=5.0
+    // ------------------------------------------------------------------
+    let result = t_test_one_sample(&samples, 20, 5.0)
+
+    // Assertion 3: should NOT reject H₀ at α=0.05 (data centred on 5.0)
+    if result.reject == 0 { pass = pass + 1 } else { fail = fail + 1 }
+
+    // Assertion 4: t-statistic is small in magnitude (|t| < 3.0 for near-mean data)
+    if abs64(result.statistic) < 3.0 { pass = pass + 1 } else { fail = fail + 1 }
+
+    // Assertion 5: p-value is in (0, 1]
+    if result.p_value > 0.0 && result.p_value <= 1.0 { pass = pass + 1 } else { fail = fail + 1 }
+
+    // ------------------------------------------------------------------
+    // Step 3: GUM bridge — as_gum has positive uncertainty
+    // ------------------------------------------------------------------
+    // Assertion 6: GUM uncertainty from test result bridge is non-negative
+    if result.as_gum.std_uncertainty >= 0.0 { pass = pass + 1 } else { fail = fail + 1 }
+
+    // Assertion 7: GUM value matches the test statistic
+    if near(result.as_gum.value, result.statistic, 1.0e-9) { pass = pass + 1 } else { fail = fail + 1 }
+
+    // ------------------------------------------------------------------
+    // Step 4: normal_cdf(0) == 0.5
+    // ------------------------------------------------------------------
+    let cdf0 = normal_cdf(0.0)
+    // Assertion 8: CDF at 0 is exactly 0.5 (by symmetry of normal)
+    if near(cdf0, 0.5, 1.0e-9) { pass = pass + 1 } else { fail = fail + 1 }
+
+    // ------------------------------------------------------------------
+    // Step 5: lgamma(5) ≈ ln(24)
+    // ------------------------------------------------------------------
+    let lg5 = lgamma(5.0)
+    let ln24 = local_ln(24.0)
+    // Assertion 9: lgamma(5) = ln(4!) = ln(24)
+    if near(lg5, ln24, 1.0e-9) { pass = pass + 1 } else { fail = fail + 1 }
+
+    // ------------------------------------------------------------------
+    // Step 6: gum_simple → gum_add → combined uncertainty ≥ components
+    // ------------------------------------------------------------------
+    let g1 = gum_simple(3.0, 0.1)
+    let g2 = gum_simple(5.0, 0.2)
+    let gc = gum_add(g1, g2)
+
+    // Assertion 10: combined value = 3.0 + 5.0 = 8.0
+    if near(gc.value, 8.0, 1.0e-12) { pass = pass + 1 } else { fail = fail + 1 }
+
+    // Assertion 11: combined uncertainty satisfies Pythagorean law u_c = sqrt(0.1²+0.2²)
+    // sqrt(0.01 + 0.04) = sqrt(0.05) ≈ 0.22360679...
+    if near(gc.std_uncertainty, 0.22360679774997896, 1.0e-9) { pass = pass + 1 } else { fail = fail + 1 }
+
+    // Assertion 12: combined uncertainty is larger than each component alone
+    if gc.std_uncertainty > g1.std_uncertainty { pass = pass + 1 } else { fail = fail + 1 }
+    if gc.std_uncertainty > g2.std_uncertainty { pass = pass + 1 } else { fail = fail + 1 }
+
+    // ------------------------------------------------------------------
+    // Step 7: erf symmetry: erf(-1) == -erf(1)
+    // ------------------------------------------------------------------
+    let erf_pos = erf(1.0)
+    let erf_neg = erf(0.0 - 1.0)
+    // Assertion 13: odd symmetry of erf
+    if near(erf_neg, 0.0 - erf_pos, 1.0e-9) { pass = pass + 1 } else { fail = fail + 1 }
+
+    // Assertion 14: erf(1) is the known reference value (A&S approx, 1e-6 tolerance)
+    if near(erf_pos, 0.8427007929497148, 1.0e-6) { pass = pass + 1 } else { fail = fail + 1 }
+
+    // Summary
+    if fail == 0 { 0 } else { fail }
+}
+
+fn main() -> i32 with Mut, Div, Panic {
+    run_tests()
+}

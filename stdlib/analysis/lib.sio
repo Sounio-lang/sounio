@@ -1,0 +1,272 @@
+// stdlib/analysis/lib.sio — Numerical Analysis
+//
+// Implements:
+//   numerical_derivative      — central-difference first derivative
+//   numerical_integral_trapezoid — composite trapezoidal rule
+//   numerical_integral_simpson   — composite Simpson's 1/3 rule
+//   richardson_extrapolation  — Richardson for higher-order derivative
+//   romberg_integration       — Romberg table for integral convergence
+//
+// Test-function dispatch (f_id):
+//   0 → x²      exact derivative: 2x,   exact integral on [a,b]: (b³-a³)/3
+//   1 → sin(x)  exact derivative: cos,  exact integral on [0,π]: 2
+//   2 → exp(x)  exact derivative: exp,  exact integral on [a,b]: exp(b)-exp(a)
+//   3 → 1/x     exact derivative: -1/x², exact integral on [1,2]: ln(2)
+//
+// References:
+//   Burden & Faires (2011) "Numerical Analysis" 9th ed., §4.1–4.5
+//   Press et al. (2007) "Numerical Recipes" 3rd ed., §4.2, §4.3
+
+// ============================================================================
+// RESULT TYPE
+// ============================================================================
+
+pub struct ConvergenceResult {
+    pub value: f64,
+    pub error_estimate: f64,
+    pub iterations: i32,
+    pub converged: i32,     // 1 if converged, 0 otherwise
+}
+
+// ============================================================================
+// INTERNAL MATH HELPERS
+// ============================================================================
+
+fn an_abs(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+// sin(x) via Taylor series — converges for all x
+fn an_sin(x: f64) -> f64 with Mut, Div, Panic {
+    // Reduce to [-π, π]
+    let two_pi = 6.28318530717958647692
+    var xr = x
+    if xr > two_pi || xr < 0.0 - two_pi {
+        let k = (xr / two_pi) as i32
+        xr = xr - (k as f64) * two_pi
+    }
+    var sum = xr
+    var term = xr
+    var n = 1
+    while n < 20 {
+        let denom = (2 * n) * (2 * n + 1)
+        term = 0.0 - term * xr * xr / (denom as f64)
+        sum = sum + term
+        n = n + 1
+    }
+    sum
+}
+
+// cos(x) via Taylor series
+fn an_cos(x: f64) -> f64 with Mut, Div, Panic {
+    let two_pi = 6.28318530717958647692
+    var xr = x
+    if xr > two_pi || xr < 0.0 - two_pi {
+        let k = (xr / two_pi) as i32
+        xr = xr - (k as f64) * two_pi
+    }
+    var sum = 1.0
+    var term = 1.0
+    var n = 1
+    while n < 20 {
+        let denom = (2 * n - 1) * (2 * n)
+        term = 0.0 - term * xr * xr / (denom as f64)
+        sum = sum + term
+        n = n + 1
+    }
+    sum
+}
+
+// exp(x) via range reduction + Taylor
+fn an_exp(x: f64) -> f64 with Mut, Div, Panic {
+    if x > 709.0 { return 1.0e300 }
+    if x < 0.0 - 709.0 { return 0.0 }
+    let ln2 = 0.6931471805599453
+    var kf = x / ln2
+    var k: i32 = 0
+    if kf >= 0.0 { k = kf as i32 } else { k = (kf as i32) - 1 }
+    let r = x - (k as f64) * ln2
+    var sum = 1.0
+    var term = 1.0
+    var n = 1
+    while n < 28 {
+        term = term * r / (n as f64)
+        sum = sum + term
+        n = n + 1
+    }
+    var result = sum
+    if k >= 0 {
+        var i = 0
+        while i < k { result = result * 2.0; i = i + 1 }
+    } else {
+        var i = 0
+        while i < (0 - k) { result = result / 2.0; i = i + 1 }
+    }
+    result
+}
+
+// ============================================================================
+// TEST-FUNCTION DISPATCH
+// f_id: 0=x², 1=sin(x), 2=exp(x), 3=1/x
+// ============================================================================
+
+fn an_eval(f_id: i32, x: f64) -> f64 with Div, Panic, Mut {
+    if f_id == 0 { return x * x }
+    if f_id == 1 { return an_sin(x) }
+    if f_id == 2 { return an_exp(x) }
+    if f_id == 3 {
+        if an_abs(x) < 1.0e-300 { return 1.0e300 }
+        return 1.0 / x
+    }
+    return 0.0
+}
+
+// ============================================================================
+// CENTRAL-DIFFERENCE DERIVATIVE
+// f'(x) ≈ (f(x+h) - f(x-h)) / (2h)   error O(h²)
+// ============================================================================
+
+pub fn numerical_derivative(f_id: i32, x: f64, h: f64) -> f64 with Div, Panic, Mut {
+    if h <= 0.0 { return 0.0 }
+    let fwd = an_eval(f_id, x + h)
+    let bwd = an_eval(f_id, x - h)
+    (fwd - bwd) / (2.0 * h)
+}
+
+// ============================================================================
+// COMPOSITE TRAPEZOIDAL RULE
+// ∫_a^b f(x) dx ≈ h/2 * [f(a) + 2·Σf(x_i) + f(b)]   error O(h²)
+// ============================================================================
+
+pub fn numerical_integral_trapezoid(f_id: i32, a: f64, b: f64, n: i32) -> f64
+    with Div, Panic, Mut
+{
+    if n <= 0 { return 0.0 }
+    let h = (b - a) / (n as f64)
+    var sum = an_eval(f_id, a) + an_eval(f_id, b)
+    var i = 1
+    while i < n {
+        let xi = a + (i as f64) * h
+        sum = sum + 2.0 * an_eval(f_id, xi)
+        i = i + 1
+    }
+    sum * h / 2.0
+}
+
+// ============================================================================
+// COMPOSITE SIMPSON'S 1/3 RULE  (n must be even — enforced by rounding up)
+// ∫_a^b ≈ h/3 * [f(a) + 4f(x1) + 2f(x2) + 4f(x3) + … + f(b)]   error O(h⁴)
+// ============================================================================
+
+pub fn numerical_integral_simpson(f_id: i32, a: f64, b: f64, n: i32) -> f64
+    with Div, Panic, Mut
+{
+    var m = n
+    if m < 2 { m = 2 }
+    // Force even
+    if m % 2 != 0 { m = m + 1 }
+    let h = (b - a) / (m as f64)
+    var sum = an_eval(f_id, a) + an_eval(f_id, b)
+    var i = 1
+    while i < m {
+        let xi = a + (i as f64) * h
+        let coeff = if i % 2 == 1 { 4.0 } else { 2.0 }
+        sum = sum + coeff * an_eval(f_id, xi)
+        i = i + 1
+    }
+    sum * h / 3.0
+}
+
+// ============================================================================
+// RICHARDSON EXTRAPOLATION FOR DERIVATIVES
+// Uses two step sizes h and h/2 to cancel O(h²) error:
+//   D_rich = (4·D(h/2) - D(h)) / 3          (Richardson, 4th-order accurate)
+// Returns ConvergenceResult with error estimate |D_rich - D(h)|
+// ============================================================================
+
+pub fn richardson_extrapolation(f_id: i32, x: f64, h: f64) -> ConvergenceResult
+    with Div, Panic, Mut
+{
+    let d1 = numerical_derivative(f_id, x, h)
+    let d2 = numerical_derivative(f_id, x, h / 2.0)
+    let rich = (4.0 * d2 - d1) / 3.0
+    let err = an_abs(rich - d1)
+    ConvergenceResult {
+        value: rich,
+        error_estimate: err,
+        iterations: 2,
+        converged: 1,
+    }
+}
+
+// ============================================================================
+// ROMBERG INTEGRATION
+// Builds a Richardson extrapolation table from composite trapezoidal estimates.
+// R[j] ← (4^j · R_fine[j-1] - R_coarse[j-1]) / (4^j - 1)
+// Iterates until |row[last] - prev_best| < 1e-9 or max_iter reached.
+// ============================================================================
+
+pub fn romberg_integration(f_id: i32, a: f64, b: f64, max_iter: i32) -> ConvergenceResult
+    with Div, Panic, Mut
+{
+    // cap iterations to fit in fixed-size arrays
+    var iters = max_iter
+    if iters > 8 { iters = 8 }
+    if iters < 2 { iters = 2 }
+
+    // R[i] holds the current Richardson row (up to 8 columns)
+    var r: [f64; 8] = [0.0; 8]
+    var r_prev: [f64; 8] = [0.0; 8]
+
+    var prev_best = 0.0
+    var best = 0.0
+    var it = 0
+    var converged = 0
+
+    while it < iters {
+        let n_trap = 1 << it   // 1, 2, 4, 8, …
+        // Build new trapezoidal estimate
+        r[0] = numerical_integral_trapezoid(f_id, a, b, n_trap)
+
+        // Richardson extrapolation across columns
+        var j = 1
+        var pow4: f64 = 4.0
+        while j <= it {
+            r[j] = (pow4 * r[j - 1] - r_prev[j - 1]) / (pow4 - 1.0)
+            pow4 = pow4 * 4.0
+            j = j + 1
+        }
+
+        best = r[it]
+        if it > 0 {
+            let err = an_abs(best - prev_best)
+            if err < 1.0e-9 {
+                converged = 1
+                // exit by forcing it to iters
+                let cr = ConvergenceResult {
+                    value: best,
+                    error_estimate: err,
+                    iterations: it + 1,
+                    converged: converged,
+                }
+                return cr
+            }
+        }
+
+        // Copy current row to prev
+        var jj = 0
+        while jj <= it { r_prev[jj] = r[jj]; jj = jj + 1 }
+
+        prev_best = best
+        it = it + 1
+    }
+
+    let final_err = an_abs(best - prev_best)
+    ConvergenceResult {
+        value: best,
+        error_estimate: final_err,
+        iterations: iters,
+        converged: converged,
+    }
+}
