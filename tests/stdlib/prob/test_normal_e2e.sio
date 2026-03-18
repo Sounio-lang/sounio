@@ -1,22 +1,194 @@
-//@ check-only
-//@ contract-adjustment: prob normal wrapper is unavailable; test now validates active multi-chain diagnostics API under prob::vmap_traces
+//@ run-pass
+//! tests/stdlib/prob/test_normal_e2e.sio
+//!
+//! E2E tests for prob::normal — Normal (Gaussian) distribution API.
 
-use prob::vmap_traces::*
+use prob::normal::{
+    Normal, NormalCI,
+    normal_new, normal_standard,
+    normal_mean, normal_variance, normal_std,
+    normal_pdf, normal_zscore, normal_from_zscore,
+    normal_ci, normal_risk_adjusted_mean,
+    normal_shift, normal_scale, normal_sum,
+}
+use test::helpers::check_near
 
-fn run_tests() -> i32 {
-    let cfg = vmap_config_default()
-    if cfg.base_seed < 0.0 { return 1 }
+// ============================================================================
+// Normal — Construction
+// ============================================================================
 
-    let bundle = trace_bundle_new(2)
-    if bundle.n_chains != 2 { return 2 }
-
-    let diag = multi_chain_diagnostics(&bundle)
-    if diag.n_chains != 2 { return 3 }
-    if diag.r_hat < 1.0 { return 4 }
-
-    return 0
+fn test_normal_new_basic() with Mut, Div, Panic {
+    let n = normal_new(5.0, 2.0)
+    assert(check_near(n.mu, 5.0, 1e-9))
+    assert(check_near(n.sigma, 2.0, 1e-9))
 }
 
-fn main() -> i32 {
-    return run_tests()
+fn test_normal_new_clamp_sigma() with Mut, Div, Panic {
+    // sigma near zero gets clamped to epsilon
+    let n = normal_new(0.0, 0.0)
+    assert(n.sigma > 0.0)
+}
+
+fn test_normal_standard() with Mut, Div, Panic {
+    let n = normal_standard()
+    assert(check_near(n.mu, 0.0, 1e-9))
+    assert(check_near(n.sigma, 1.0, 1e-9))
+}
+
+// ============================================================================
+// Normal — Moments
+// ============================================================================
+
+fn test_normal_mean() with Mut, Div, Panic {
+    let n = normal_new(3.5, 1.0)
+    assert(check_near(normal_mean(n), 3.5, 1e-9))
+}
+
+fn test_normal_variance() with Mut, Div, Panic {
+    // Var = sigma^2
+    let n = normal_new(0.0, 3.0)
+    assert(check_near(normal_variance(n), 9.0, 1e-9))
+}
+
+fn test_normal_std() with Mut, Div, Panic {
+    let n = normal_new(0.0, 2.5)
+    assert(check_near(normal_std(n), 2.5, 1e-9))
+}
+
+// ============================================================================
+// Normal — PDF
+// ============================================================================
+
+fn test_normal_pdf_at_mean() with Mut, Div, Panic {
+    // For N(0, 1): PDF(0) = 1/sqrt(2*pi) ≈ 0.39894
+    let n = normal_standard()
+    let p = normal_pdf(n, 0.0)
+    assert(check_near(p, 0.3989422804014327, 1e-4))
+}
+
+fn test_normal_pdf_positive() with Mut, Div, Panic {
+    let n = normal_new(5.0, 2.0)
+    let p = normal_pdf(n, 5.0)
+    assert(p > 0.0)
+}
+
+fn test_normal_pdf_symmetric() with Mut, Div, Panic {
+    // PDF is symmetric: PDF(mu - d) == PDF(mu + d)
+    let n = normal_new(0.0, 1.0)
+    let p_pos = normal_pdf(n, 1.0)
+    let p_neg = normal_pdf(n, 0.0 - 1.0)
+    assert(check_near(p_pos, p_neg, 1e-9))
+}
+
+// ============================================================================
+// Normal — Z-score
+// ============================================================================
+
+fn test_normal_zscore_at_mean() with Mut, Div, Panic {
+    // z-score at mean = 0
+    let n = normal_new(5.0, 2.0)
+    assert(check_near(normal_zscore(n, 5.0), 0.0, 1e-9))
+}
+
+fn test_normal_zscore_one_sigma() with Mut, Div, Panic {
+    // z-score at mu+sigma = 1.0
+    let n = normal_new(0.0, 2.0)
+    assert(check_near(normal_zscore(n, 2.0), 1.0, 1e-9))
+}
+
+fn test_normal_from_zscore_roundtrip() with Mut, Div, Panic {
+    // x → z → x should roundtrip
+    let n = normal_new(3.0, 1.5)
+    let x = 4.5
+    let z = normal_zscore(n, x)
+    let x2 = normal_from_zscore(n, z)
+    assert(check_near(x2, x, 1e-9))
+}
+
+// ============================================================================
+// Normal — Confidence interval
+// ============================================================================
+
+fn test_normal_ci_width() with Mut, Div, Panic {
+    // 95% CI for N(0, 1): [-1.96, 1.96]
+    let n = normal_standard()
+    let ci = normal_ci(n, 1.96)
+    assert(check_near(ci.lo, 0.0 - 1.96, 1e-9))
+    assert(check_near(ci.hi, 1.96, 1e-9))
+}
+
+fn test_normal_ci_contains_mean() with Mut, Div, Panic {
+    let n = normal_new(10.0, 2.0)
+    let ci = normal_ci(n, 1.96)
+    assert(ci.lo < 10.0)
+    assert(ci.hi > 10.0)
+}
+
+// ============================================================================
+// Normal — Transformations
+// ============================================================================
+
+fn test_normal_shift() with Mut, Div, Panic {
+    let n = normal_new(5.0, 2.0)
+    let shifted = normal_shift(n, 3.0)
+    assert(check_near(shifted.mu, 8.0, 1e-9))
+    assert(check_near(shifted.sigma, 2.0, 1e-9))
+}
+
+fn test_normal_scale_positive() with Mut, Div, Panic {
+    let n = normal_new(2.0, 1.0)
+    let scaled = normal_scale(n, 3.0)
+    assert(check_near(scaled.mu, 6.0, 1e-9))
+    assert(check_near(scaled.sigma, 3.0, 1e-9))
+}
+
+fn test_normal_scale_negative() with Mut, Div, Panic {
+    // Scaling by -2: mu=-4, sigma=2 (|c|*sigma)
+    let n = normal_new(2.0, 1.0)
+    let scaled = normal_scale(n, 0.0 - 2.0)
+    assert(check_near(scaled.mu, 0.0 - 4.0, 1e-9))
+    assert(check_near(scaled.sigma, 2.0, 1e-9))
+}
+
+fn test_normal_sum_means_add() with Mut, Div, Panic {
+    // X ~ N(2, 1), Y ~ N(3, 2) => X+Y ~ N(5, sqrt(5))
+    let n1 = normal_new(2.0, 1.0)
+    let n2 = normal_new(3.0, 2.0)
+    let s = normal_sum(n1, n2)
+    assert(check_near(s.mu, 5.0, 1e-9))
+    // sigma = sqrt(1^2 + 2^2) = sqrt(5) ≈ 2.2360679...
+    assert(check_near(s.sigma, 2.2360679774997896, 1e-6))
+}
+
+fn test_normal_risk_adjusted_mean() with Mut, Div, Panic {
+    // mu - lambda*sigma < mu
+    let n = normal_new(10.0, 2.0)
+    let r = normal_risk_adjusted_mean(n, 1.0)
+    assert(check_near(r, 8.0, 1e-9))
+}
+
+// ============================================================================
+// Main
+// ============================================================================
+
+pub fn main() with Mut, Div, Panic {
+    test_normal_new_basic()
+    test_normal_new_clamp_sigma()
+    test_normal_standard()
+    test_normal_mean()
+    test_normal_variance()
+    test_normal_std()
+    test_normal_pdf_at_mean()
+    test_normal_pdf_positive()
+    test_normal_pdf_symmetric()
+    test_normal_zscore_at_mean()
+    test_normal_zscore_one_sigma()
+    test_normal_from_zscore_roundtrip()
+    test_normal_ci_width()
+    test_normal_ci_contains_mean()
+    test_normal_shift()
+    test_normal_scale_positive()
+    test_normal_scale_negative()
+    test_normal_sum_means_add()
+    test_normal_risk_adjusted_mean()
 }

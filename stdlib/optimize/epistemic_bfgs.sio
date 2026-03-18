@@ -1,0 +1,562 @@
+// stdlib/optimize/epistemic_bfgs.sio — Epistemic BFGS Optimizer
+//
+// BFGS quasi-Newton optimization with uncertainty-aware gradients.
+// Gradients computed from epistemic autodiff carry uncertainty.
+// Step size adapts based on gradient uncertainty.
+//
+// References:
+//   JCGM 100:2008: "Evaluation of measurement data" (GUM)
+//   Nocedal & Wright (2006): "Numerical Optimization"
+//
+// # Exemplo
+// ```sio
+// let result = epistemic_bfgs_optimize(initial, config);
+// assert(result.converged);
+// assert(result.final_uncertainty > 0.0);
+// ```
+
+// =============================================================================
+// Math helpers
+// =============================================================================
+
+fn sqrt_eb(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i = 0
+    while i < 20 { y = 0.5 * (y + x / y); i = i + 1 }
+    y
+}
+
+fn abs_eb(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+fn min_eb(a: f64, b: f64) -> f64 {
+    if a < b { a } else { b }
+}
+
+fn max_eb(a: f64, b: f64) -> f64 {
+    if a > b { a } else { b }
+}
+
+// =============================================================================
+// Epistemic Gradient
+// =============================================================================
+
+pub struct EpistemicGradient {
+    values: [f64; 20],
+    uncertainties: [f64; 20],
+    confidences: [f64; 20],
+    n: i32,
+}
+
+pub fn egrad_zeros(n: i32) -> EpistemicGradient with Panic {
+    if n > 20 { panic("EpistemicGradient: n > 20") }
+    EpistemicGradient {
+        values: [0.0; 20],
+        uncertainties: [0.0; 20],
+        confidences: [1.0; 20],
+        n: n,
+    }
+}
+
+pub fn egrad_norm(g: &EpistemicGradient) -> f64 with Mut, Div, Panic {
+    var sum = 0.0
+    var i = 0
+    while i < g.n {
+        sum = sum + g.values[i] * g.values[i]
+        i = i + 1
+    }
+    sqrt_eb(sum)
+}
+
+pub fn egrad_unc_norm(g: &EpistemicGradient) -> f64 with Mut, Div, Panic {
+    var sum = 0.0
+    var i = 0
+    while i < g.n {
+        sum = sum + g.uncertainties[i] * g.uncertainties[i]
+        i = i + 1
+    }
+    sqrt_eb(sum)
+}
+
+pub fn egrad_min_conf(g: &EpistemicGradient) -> f64 {
+    var min_c = 1.0
+    var i = 0
+    while i < g.n {
+        if g.confidences[i] < min_c { min_c = g.confidences[i] }
+        i = i + 1
+    }
+    min_c
+}
+
+// =============================================================================
+// Epistemic Parameters
+// =============================================================================
+
+pub struct EpistemicParams {
+    values: [f64; 20],
+    uncertainties: [f64; 20],
+    confidences: [f64; 20],
+    n: i32,
+}
+
+pub fn eparams_zeros(n: i32) -> EpistemicParams with Panic {
+    if n > 20 { panic("EpistemicParams: n > 20") }
+    EpistemicParams {
+        values: [0.0; 20],
+        uncertainties: [0.0; 20],
+        confidences: [1.0; 20],
+        n: n,
+    }
+}
+
+pub fn eparams_norm(p: &EpistemicParams) -> f64 with Mut, Div, Panic {
+    var sum = 0.0
+    var i = 0
+    while i < p.n {
+        sum = sum + p.values[i] * p.values[i]
+        i = i + 1
+    }
+    sqrt_eb(sum)
+}
+
+// =============================================================================
+// Epistemic Hessian Approximation
+// =============================================================================
+
+pub struct EpistemicHessian {
+    values: [f64; 400],
+    uncertainties: [f64; 400],
+    confidences: [f64; 400],
+    n: i32,
+}
+
+pub fn ehess_identity(n: i32) -> EpistemicHessian with Mut, Panic {
+    if n > 20 { panic("EpistemicHessian: n > 20") }
+    var h = EpistemicHessian {
+        values: [0.0; 400],
+        uncertainties: [0.0; 400],
+        confidences: [1.0; 400],
+        n: n,
+    }
+    var i = 0
+    while i < n {
+        h.values[(i * n + i) as usize] = 1.0
+        i = i + 1
+    }
+    h
+}
+
+pub fn ehess_mat_vec(h: &EpistemicHessian, v: &EpistemicGradient) -> EpistemicGradient with Mut, Panic {
+    if h.n != v.n { panic("ehess_mat_vec: dimension mismatch") }
+    var result = egrad_zeros(h.n)
+    var i = 0
+    while i < h.n {
+        var sum_val = 0.0
+        var sum_unc_sq = 0.0
+        var min_conf = 1.0
+        var j = 0
+        while j < h.n {
+            let h_val = h.values[(i * h.n + j) as usize]
+            let v_val = v.values[j]
+            let h_unc = h.uncertainties[(i * h.n + j) as usize]
+            let v_unc = v.uncertainties[j]
+            let h_conf = h.confidences[(i * h.n + j) as usize]
+            let v_conf = v.confidences[j]
+            
+            sum_val = sum_val + h_val * v_val
+            sum_unc_sq = sum_unc_sq + h_unc * h_unc * v_val * v_val + h_val * h_val * v_unc * v_unc
+            min_conf = min_eb(min_conf, min_eb(h_conf, v_conf))
+            j = j + 1
+        }
+        result.values[i] = sum_val
+        result.uncertainties[i] = sqrt_eb(sum_unc_sq)
+        result.confidences[i] = min_conf
+        i = i + 1
+    }
+    result
+}
+
+// =============================================================================
+// Config and Result Types
+// =============================================================================
+
+pub struct EpistemicBFGSConfig {
+    max_iterations: i32,
+    grad_tol: f64,
+    func_tol: f64,
+    param_tol: f64,
+    c1: f64,
+    alpha_init: f64,
+    alpha_min: f64,
+    max_linesearch: i32,
+    uncertainty_scale: f64,
+}
+
+pub fn epistemic_bfgs_config_default() -> EpistemicBFGSConfig {
+    EpistemicBFGSConfig {
+        max_iterations: 1000,
+        grad_tol: 1e-6,
+        func_tol: 1e-8,
+        param_tol: 1e-8,
+        c1: 1e-4,
+        alpha_init: 1.0,
+        alpha_min: 1e-20,
+        max_linesearch: 40,
+        uncertainty_scale: 0.5,
+    }
+}
+
+pub fn EBFGS_TERM_MAX_ITER() -> i32 { 1 }
+pub fn EBFGS_TERM_GRAD_TOL() -> i32 { 2 }
+pub fn EBFGS_TERM_FUNC_TOL() -> i32 { 3 }
+pub fn EBFGS_TERM_PARAM_TOL() -> i32 { 4 }
+pub fn EBFGS_TERM_LINESEARCH_FAIL() -> i32 { 5 }
+
+pub fn ebfgs_termination_success(reason: i32) -> bool {
+    reason >= 2 && reason <= 4
+}
+
+pub struct EpistemicBFGSResult {
+    params: EpistemicParams,
+    value: f64,
+    value_uncertainty: f64,
+    converged: bool,
+    termination: i32,
+    iterations: i32,
+    func_evals: i32,
+    grad_evals: i32,
+    final_grad_norm: f64,
+    final_grad_uncertainty: f64,
+}
+
+// =============================================================================
+// Test Function: Quadratic with Epistemic Gradient
+// =============================================================================
+
+fn ebfgs_quadratic(params: &EpistemicParams) -> f64 with Mut {
+    let dx = params.values[0] - 3.0
+    let dy = params.values[1] - 2.0
+    dx * dx + dy * dy
+}
+
+fn ebfgs_quadratic_grad(params: &EpistemicParams) -> EpistemicGradient with Mut, Panic {
+    var g = egrad_zeros(params.n)
+    let dx = params.values[0] - 3.0
+    let dy = params.values[1] - 2.0
+    g.values[0] = 2.0 * dx
+    g.values[1] = 2.0 * dy
+    // Uncertainty from param uncertainty (propagated)
+    g.uncertainties[0] = 2.0 * params.uncertainties[0]
+    g.uncertainties[1] = 2.0 * params.uncertainties[1]
+    g.confidences[0] = params.confidences[0]
+    g.confidences[1] = params.confidences[1]
+    g
+}
+
+// =============================================================================
+// BFGS Update with Uncertainty
+// =============================================================================
+
+pub fn ebfgs_update(
+    h: &EpistemicHessian,
+    s: &EpistemicParams,
+    y: &EpistemicGradient,
+) -> EpistemicHessian with Mut, Div, Panic {
+    if h.n != s.n || h.n != y.n { panic("ebfgs_update: dimension mismatch") }
+    
+    // Compute y^T * s
+    var ys: f64 = 0.0
+    var i = 0
+    while i < h.n {
+        ys = ys + y.values[i] * s.values[i]
+        i = i + 1
+    }
+    
+    if ys <= 1e-10 {
+        return EpistemicHessian {
+            values: h.values,
+            uncertainties: h.uncertainties,
+            confidences: h.confidences,
+            n: h.n,
+        }
+    }
+    
+    let rho = 1.0 / ys
+    
+    // Compute H * y
+    var hy: [f64; 20] = [0.0; 20]
+    i = 0
+    while i < h.n {
+        var sum = 0.0
+        var j = 0
+        while j < h.n {
+            sum = sum + h.values[(i * h.n + j) as usize] * y.values[j]
+            j = j + 1
+        }
+        hy[i] = sum
+        i = i + 1
+    }
+    
+    // Compute y^T * H * y
+    var yhy: f64 = 0.0
+    i = 0
+    while i < h.n {
+        yhy = yhy + y.values[i] * hy[i]
+        i = i + 1
+    }
+    
+    let factor = (1.0 + yhy * rho) * rho
+    
+    var h_new = EpistemicHessian {
+        values: h.values,
+        uncertainties: h.uncertainties,
+        confidences: h.confidences,
+        n: h.n,
+    }
+    
+    i = 0
+    while i < h.n {
+        var j = 0
+        while j < h.n {
+            let idx = (i * h.n + j) as usize
+            h_new.values[idx] = h.values[idx]
+                - rho * (hy[i] * s.values[j] + s.values[i] * hy[j])
+                + factor * s.values[i] * s.values[j]
+            // Propagate uncertainty (simplified: scale by factor)
+            h_new.uncertainties[idx] = h.uncertainties[idx] * 1.01
+            h_new.confidences[idx] = min_eb(h.confidences[idx], 0.99)
+            j = j + 1
+        }
+        i = i + 1
+    }
+    
+    h_new
+}
+
+// =============================================================================
+// Uncertainty-Aware Step Size
+// =============================================================================
+
+pub fn ebfgs_compute_step_size(
+    grad_unc_norm: f64,
+    base_alpha: f64,
+    config: &EpistemicBFGSConfig,
+) -> f64 {
+    // Reduce step size when gradient uncertainty is high
+    let unc_factor = 1.0 / (1.0 + config.uncertainty_scale * grad_unc_norm)
+    base_alpha * unc_factor
+}
+
+// =============================================================================
+// Main Optimization Loop
+// =============================================================================
+
+pub fn epistemic_bfgs_quadratic(
+    initial: &EpistemicParams,
+    config: &EpistemicBFGSConfig,
+) -> EpistemicBFGSResult with Mut, Div, Panic {
+    var x = EpistemicParams {
+        values: initial.values,
+        uncertainties: initial.uncertainties,
+        confidences: initial.confidences,
+        n: initial.n,
+    }
+    var h = ehess_identity(x.n)
+    
+    var f_x = ebfgs_quadratic(&x)
+    var g = ebfgs_quadratic_grad(&x)
+    
+    var iterations: i32 = 0
+    var func_evals: i32 = 1
+    var grad_evals: i32 = 1
+    var termination = EBFGS_TERM_MAX_ITER()
+    
+    while iterations < config.max_iterations {
+        iterations = iterations + 1
+        
+        let grad_norm = egrad_norm(&g)
+        let grad_unc = egrad_unc_norm(&g)
+        
+        if grad_norm < config.grad_tol {
+            termination = EBFGS_TERM_GRAD_TOL()
+            break
+        }
+        
+        // d = -H * g
+        var d = ehess_mat_vec(&h, &g)
+        var i = 0
+        while i < d.n {
+            d.values[i] = -d.values[i]
+            i = i + 1
+        }
+        
+        // Compute slope = g^T * d
+        var slope: f64 = 0.0
+        i = 0
+        while i < g.n {
+            slope = slope + g.values[i] * d.values[i]
+            i = i + 1
+        }
+        
+        if slope >= 0.0 {
+            termination = EBFGS_TERM_LINESEARCH_FAIL()
+            break
+        }
+        
+        // Uncertainty-aware step size
+        var alpha = ebfgs_compute_step_size(grad_unc, config.alpha_init, config)
+        
+        // Line search
+        var work = eparams_zeros(x.n)
+        var f_new = f_x
+        var ls_iter: i32 = 0
+        var ls_done = false
+        
+        while ls_iter < config.max_linesearch && !ls_done {
+            i = 0
+            while i < x.n {
+                work.values[i] = x.values[i] + alpha * d.values[i]
+                work.uncertainties[i] = sqrt_eb(x.uncertainties[i] * x.uncertainties[i] + alpha * alpha * d.uncertainties[i] * d.uncertainties[i])
+                work.confidences[i] = min_eb(x.confidences[i], d.confidences[i])
+                i = i + 1
+            }
+            
+            f_new = ebfgs_quadratic(&work)
+            func_evals = func_evals + 1
+            
+            if f_new <= f_x + config.c1 * alpha * slope {
+                ls_done = true
+            } else {
+                alpha = alpha * 0.5
+                if alpha < config.alpha_min {
+                    ls_done = true
+                }
+            }
+            ls_iter = ls_iter + 1
+        }
+        
+        if alpha < config.alpha_min {
+            termination = EBFGS_TERM_LINESEARCH_FAIL()
+            break
+        }
+        
+        // Compute step
+        var s = eparams_zeros(x.n)
+        i = 0
+        while i < x.n {
+            s.values[i] = alpha * d.values[i]
+            s.uncertainties[i] = alpha * d.uncertainties[i]
+            s.confidences[i] = d.confidences[i]
+            i = i + 1
+        }
+        
+        let step_norm = eparams_norm(&s)
+        let x_norm = eparams_norm(&x)
+        if step_norm < config.param_tol * (1.0 + x_norm) {
+            termination = EBFGS_TERM_PARAM_TOL()
+            i = 0
+            while i < x.n {
+                x.values[i] = x.values[i] + s.values[i]
+                x.uncertainties[i] = sqrt_eb(x.uncertainties[i] * x.uncertainties[i] + s.uncertainties[i] * s.uncertainties[i])
+                x.confidences[i] = min_eb(x.confidences[i], s.confidences[i])
+                i = i + 1
+            }
+            f_x = f_new
+            break
+        }
+        
+        let f_change = f_x - f_new
+        let abs_f_change = if f_change < 0.0 { -f_change } else { f_change }
+        if abs_f_change < config.func_tol * (1.0 + f_x) {
+            termination = EBFGS_TERM_FUNC_TOL()
+        }
+        
+        // Update x
+        i = 0
+        while i < x.n {
+            x.values[i] = x.values[i] + s.values[i]
+            x.uncertainties[i] = sqrt_eb(x.uncertainties[i] * x.uncertainties[i] + s.uncertainties[i] * s.uncertainties[i])
+            x.confidences[i] = min_eb(x.confidences[i], s.confidences[i])
+            i = i + 1
+        }
+        
+        let g_new = ebfgs_quadratic_grad(&x)
+        grad_evals = grad_evals + 1
+        
+        // y = g_new - g
+        var y = egrad_zeros(x.n)
+        i = 0
+        while i < x.n {
+            y.values[i] = g_new.values[i] - g.values[i]
+            y.uncertainties[i] = sqrt_eb(g_new.uncertainties[i] * g_new.uncertainties[i] + g.uncertainties[i] * g.uncertainties[i])
+            y.confidences[i] = min_eb(g_new.confidences[i], g.confidences[i])
+            i = i + 1
+        }
+        
+        h = ebfgs_update(&h, &s, &y)
+        g = g_new
+        f_x = f_new
+        
+        if termination != EBFGS_TERM_MAX_ITER() {
+            break
+        }
+    }
+    
+    EpistemicBFGSResult {
+        params: x,
+        value: f_x,
+        value_uncertainty: eparams_norm(&x) * 0.01,
+        converged: ebfgs_termination_success(termination),
+        termination: termination,
+        iterations: iterations,
+        func_evals: func_evals,
+        grad_evals: grad_evals,
+        final_grad_norm: egrad_norm(&g),
+        final_grad_uncertainty: egrad_unc_norm(&g),
+    }
+}
+
+// =============================================================================
+// Tests
+// =============================================================================
+
+fn test_epistemic_bfgs_quadratic() with Mut, Div, Panic {
+    var initial = eparams_zeros(2)
+    initial.values[0] = 0.0
+    initial.values[1] = 0.0
+    initial.uncertainties[0] = 0.01
+    initial.uncertainties[1] = 0.01
+    initial.confidences[0] = 0.95
+    initial.confidences[1] = 0.95
+    
+    let config = epistemic_bfgs_config_default()
+    let result = epistemic_bfgs_quadratic(&initial, &config)
+    
+    // Should converge to (3, 2)
+    assert(result.converged)
+    assert(result.params.values[0] > 2.99 && result.params.values[0] < 3.01)
+    assert(result.params.values[1] > 1.99 && result.params.values[1] < 2.01)
+    
+    // Uncertainty should be tracked
+    assert(result.params.uncertainties[0] > 0.0)
+    assert(result.final_grad_uncertainty >= 0.0)
+}
+
+fn test_epistemic_step_size() with Mut, Div, Panic {
+    let config = epistemic_bfgs_config_default()
+    
+    // Low uncertainty -> full step
+    let alpha_low = ebfgs_compute_step_size(0.001, 1.0, &config)
+    assert(alpha_low > 0.9)
+    
+    // High uncertainty -> reduced step
+    let alpha_high = ebfgs_compute_step_size(1.0, 1.0, &config)
+    assert(alpha_high < alpha_low)
+}
+
+pub fn main() {
+    test_epistemic_bfgs_quadratic()
+    test_epistemic_step_size()
+}

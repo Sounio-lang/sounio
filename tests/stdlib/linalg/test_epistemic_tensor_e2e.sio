@@ -1,0 +1,198 @@
+// tests/stdlib/linalg/test_epistemic_tensor_e2e.sio — E2E Tests for EpistemicTensor
+//
+// Tests for GUM-compliant uncertainty propagation in tensor operations.
+
+use linalg::epistemic_tensor::{
+    EpistemicTensor, EpistemicScalar, TensorConfidenceSummary,
+    etensor_zeros, etensor_identity, etensor_constant,
+    etensor_get_val, etensor_get_unc, etensor_get_conf, etensor_set,
+    etensor_add, etensor_sub, etensor_scale, etensor_matmul,
+    etensor_transpose, etensor_frobenius, etensor_confidence_summary,
+    etensor_svd_approx,
+}
+
+// =============================================================================
+// Test: GUM Propagation in Addition
+// =============================================================================
+
+fn test_etensor_add_gum_propagation() with Mut, Div, Panic {
+    // Create two 1x2x2 tensors
+    var a = etensor_zeros(1, 2, 2)
+    var b = etensor_zeros(1, 2, 2)
+    
+    // Set a[0,0,0] = 1.0 ± 0.1, conf 0.95
+    etensor_set(&a, 0, 0, 0, 1.0, 0.1, 0.95)
+    // Set b[0,0,0] = 2.0 ± 0.2, conf 0.90
+    etensor_set(&b, 0, 0, 0, 2.0, 0.2, 0.90)
+    
+    let c = etensor_add(&a, &b)
+    
+    let val = etensor_get_val(&c, 0, 0, 0)
+    let unc = etensor_get_unc(&c, 0, 0, 0)
+    let conf = etensor_get_conf(&c, 0, 0, 0)
+    
+    // Value should be 3.0
+    assert(val > 2.99 && val < 3.01)
+    
+    // GUM: u = sqrt(0.1^2 + 0.2^2) = sqrt(0.05) ≈ 0.224
+    // Using inline sqrt approximation
+    var expected_unc_sq = 0.01 + 0.04  // 0.05
+    var y = expected_unc_sq
+    var i = 0
+    while i < 20 { y = 0.5 * (y + expected_unc_sq / y); i = i + 1 }
+    let expected_unc = y
+    
+    assert(unc > expected_unc - 0.01 && unc < expected_unc + 0.01)
+    
+    // Confidence should be min(0.95, 0.90) = 0.90
+    assert(conf > 0.89 && conf < 0.91)
+}
+
+// =============================================================================
+// Test: GUM Propagation in Matrix Multiplication
+// =============================================================================
+
+fn test_etensor_matmul_gum_propagation() with Mut, Div, Panic {
+    // Create two 1x2x2 tensors
+    var a = etensor_zeros(1, 2, 2)
+    var b = etensor_zeros(1, 2, 2)
+    
+    // A = [[1.0 ± 0.1, 0.0], [0.0, 1.0 ± 0.1]]
+    etensor_set(&a, 0, 0, 0, 1.0, 0.1, 0.95)
+    etensor_set(&a, 0, 0, 1, 0.0, 0.0, 1.0)
+    etensor_set(&a, 0, 1, 0, 0.0, 0.0, 1.0)
+    etensor_set(&a, 0, 1, 1, 1.0, 0.1, 0.95)
+    
+    // B = [[2.0 ± 0.2, 0.0], [0.0, 2.0 ± 0.2]]
+    etensor_set(&b, 0, 0, 0, 2.0, 0.2, 0.90)
+    etensor_set(&b, 0, 0, 1, 0.0, 0.0, 1.0)
+    etensor_set(&b, 0, 1, 0, 0.0, 0.0, 1.0)
+    etensor_set(&b, 0, 1, 1, 2.0, 0.2, 0.90)
+    
+    let c = etensor_matmul(&a, &b)
+    
+    // C[0,0] = 1*2 = 2.0
+    // u(C[0,0])^2 = u(a)^2 * b^2 + a^2 * u(b)^2 = 0.01 * 4 + 1 * 0.04 = 0.08
+    let val = etensor_get_val(&c, 0, 0, 0)
+    let unc = etensor_get_unc(&c, 0, 0, 0)
+    
+    assert(val > 1.99 && val < 2.01)
+    
+    // sqrt(0.08) ≈ 0.283
+    var expected_unc_sq = 0.08
+    var y = expected_unc_sq
+    var i = 0
+    while i < 20 { y = 0.5 * (y + expected_unc_sq / y); i = i + 1 }
+    let expected_unc = y
+    
+    assert(unc > expected_unc - 0.01 && unc < expected_unc + 0.01)
+}
+
+// =============================================================================
+// Test: Confidence Degradation in Chain Operations
+// =============================================================================
+
+fn test_etensor_chain_confidence_degradation() with Mut, Div, Panic {
+    var a = etensor_constant(1, 2, 2, 1.0)
+    etensor_set(&a, 0, 0, 0, 1.0, 0.1, 0.95)
+    etensor_set(&a, 0, 0, 1, 1.0, 0.1, 0.90)
+    etensor_set(&a, 0, 1, 0, 1.0, 0.1, 0.85)
+    etensor_set(&a, 0, 1, 1, 1.0, 0.1, 0.80)
+    
+    var b = etensor_constant(1, 2, 2, 1.0)
+    
+    // Chain: a -> b -> c
+    let ab = etensor_matmul(&a, &b)
+    let abc = etensor_matmul(&ab, &b)
+    
+    let summary_a = etensor_confidence_summary(&a)
+    let summary_abc = etensor_confidence_summary(&abc)
+    
+    // Confidence should degrade through chain
+    assert(summary_abc.min_confidence <= summary_a.min_confidence)
+}
+
+// =============================================================================
+// Test: SVD Approximation
+// =============================================================================
+
+fn test_etensor_svd_approx() with Mut, Div, Panic {
+    var a = etensor_zeros(1, 2, 2)
+    etensor_set(&a, 0, 0, 0, 2.0, 0.1, 0.95)
+    etensor_set(&a, 0, 0, 1, 0.0, 0.0, 1.0)
+    etensor_set(&a, 0, 1, 0, 0.0, 0.0, 1.0)
+    etensor_set(&a, 0, 1, 1, 1.0, 0.05, 0.90)
+    
+    let sigmas = etensor_svd_approx(&a, 0)
+    
+    // First singular value should be positive
+    assert(sigmas[0].value > 0.0)
+    
+    // Singular values should have uncertainty
+    assert(sigmas[0].uncertainty >= 0.0)
+    
+    // Confidence should be min of matrix confidences
+    assert(sigmas[0].confidence > 0.89 && sigmas[0].confidence < 0.96)
+}
+
+// =============================================================================
+// Test: Transpose Preserves Uncertainty
+// =============================================================================
+
+fn test_etensor_transpose_preserves_unc() with Mut, Div, Panic {
+    var a = etensor_zeros(1, 2, 3)
+    etensor_set(&a, 0, 0, 0, 1.0, 0.1, 0.95)
+    etensor_set(&a, 0, 1, 2, 2.0, 0.2, 0.90)
+    
+    let t = etensor_transpose(&a)
+    
+    // t should be 1x3x2
+    // a[0,0,0] -> t[0,0,0]
+    // a[0,1,2] -> t[0,2,1]
+    
+    let val = etensor_get_val(&t, 0, 2, 1)
+    let unc = etensor_get_unc(&t, 0, 2, 1)
+    let conf = etensor_get_conf(&t, 0, 2, 1)
+    
+    assert(val > 1.99 && val < 2.01)
+    assert(unc > 0.19 && unc < 0.21)
+    assert(conf > 0.89 && conf < 0.91)
+}
+
+// =============================================================================
+// Test: Frobenius Norm with Uncertainty
+// =============================================================================
+
+fn test_etensor_frobenius_norm() with Mut, Div, Panic {
+    var a = etensor_zeros(1, 2, 2)
+    etensor_set(&a, 0, 0, 0, 3.0, 0.1, 0.95)
+    etensor_set(&a, 0, 0, 1, 4.0, 0.1, 0.95)
+    etensor_set(&a, 0, 1, 0, 0.0, 0.0, 1.0)
+    etensor_set(&a, 0, 1, 1, 0.0, 0.0, 1.0)
+    
+    let frob = etensor_frobenius(&a)
+    
+    // ||A||_F = sqrt(9 + 16) = 5.0
+    assert(frob.value > 4.99 && frob.value < 5.01)
+    
+    // Uncertainty should be positive
+    assert(frob.uncertainty >= 0.0)
+    
+    // Confidence should be min of all elements
+    assert(frob.confidence > 0.94 && frob.confidence < 0.96)
+}
+
+// =============================================================================
+// Main Test Runner
+// =============================================================================
+
+pub fn main() {
+    test_etensor_add_gum_propagation()
+    test_etensor_matmul_gum_propagation()
+    test_etensor_chain_confidence_degradation()
+    test_etensor_svd_approx()
+    test_etensor_transpose_preserves_unc()
+    test_etensor_frobenius_norm()
+    
+    println("All EpistemicTensor E2E tests passed!")
+}

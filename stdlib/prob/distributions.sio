@@ -132,3 +132,241 @@ fn wasserstein_1d_sorted(p: [f64; 8], q: [f64; 8], n: i64) -> f64 with IO, Div, 
     }
     w
 }
+
+// ============================================================
+// Math helpers (self-contained — no import needed)
+// ============================================================
+
+// Natural log via range reduction to [0.5, 2) then series
+fn dist_ln(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 - 1.0e30 }
+    if x == 1.0 { return 0.0 }
+    var m = x
+    var e = 0
+    while m >= 2.0 { m = m / 2.0; e = e + 1 }
+    while m < 0.5 { m = m * 2.0; e = e - 1 }
+    let t = (m - 1.0) / (m + 1.0)
+    let t2 = t * t
+    var sum = t
+    var term = t
+    var k = 1
+    while k < 30 {
+        term = term * t2
+        sum = sum + term / ((2 * k + 1) as f64)
+        k = k + 1
+    }
+    return 2.0 * sum + (e as f64) * 0.6931471805599453
+}
+
+// Exponential via Taylor with range reduction
+fn dist_exp(x: f64) -> f64 with Mut, Div, Panic {
+    if x > 20.0 { return dist_exp(x / 2.0) * dist_exp(x / 2.0) }
+    if x < 0.0 - 20.0 { return 1.0 / dist_exp(0.0 - x) }
+    var sum = 1.0
+    var term = 1.0
+    var i = 1
+    while i <= 25 {
+        term = term * x / (i as f64)
+        sum = sum + term
+        i = i + 1
+    }
+    return sum
+}
+
+// Log-gamma via Lanczos (g=7)
+fn dist_lgamma(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 1.0e30 }
+    let g: f64 = 7.0
+    let c0: f64 = 0.99999999999980993
+    let c1: f64 = 676.5203681218851
+    let c2: f64 = 0.0 - 1259.1392167224028
+    let c3: f64 = 771.32342877765313
+    let c4: f64 = 0.0 - 176.61502916214059
+    let c5: f64 = 12.507343278686905
+    let c6: f64 = 0.0 - 0.13857109526572012
+    let c7: f64 = 9.9843695780195716e-6
+    let c8: f64 = 1.5056327351493116e-7
+    if x < 0.5 {
+        // Reflection: lgamma(x) = ln(pi) - ln(sin(pi*x)) - lgamma(1-x)
+        // Use: ln(pi) = 1.1447298858494002
+        // sin via Taylor: good enough for x in (0, 0.5)
+        let px = 3.14159265358979323846 * x
+        // sin(px) via Taylor
+        let a2 = px * px
+        var ss = px
+        var st = px
+        var nn = 1
+        while nn < 10 {
+            st = 0.0 - st * a2 / ((2 * nn) * (2 * nn + 1)) as f64
+            ss = ss + st
+            nn = nn + 1
+        }
+        let ls = dist_ln(if ss < 0.0 { 0.0 - ss } else { ss })
+        return 1.1447298858494002 - ls - dist_lgamma(1.0 - x)
+    }
+    let z = x - 1.0
+    let ag = c0 + c1 / (z + 1.0) + c2 / (z + 2.0) + c3 / (z + 3.0) +
+             c4 / (z + 4.0) + c5 / (z + 5.0) + c6 / (z + 6.0) +
+             c7 / (z + 7.0) + c8 / (z + 8.0)
+    let base = z + g + 0.5
+    // 0.9189385332046728 = 0.5 * ln(2*pi)
+    return 0.9189385332046728 + (z + 0.5) * dist_ln(base) - base + dist_ln(ag)
+}
+
+// Regularized incomplete gamma P(a, x) via series expansion
+fn dist_gamma_inc_p(a: f64, x: f64) -> f64 with Mut, Div, Panic {
+    if x < 0.0 { return 0.0 }
+    if x == 0.0 { return 0.0 }
+    // Series: P(a,x) = e^(-x) * x^a / Gamma(a) * sum_{n=0}^inf x^n / (a*(a+1)*...*(a+n))
+    let log_prefix = 0.0 - x + a * dist_ln(x) - dist_lgamma(a)
+    var sum = 1.0 / a
+    var term = 1.0 / a
+    var n = 1
+    while n < 200 {
+        term = term * x / (a + (n as f64))
+        sum = sum + term
+        if term < sum * 1.0e-14 { n = 200 }
+        n = n + 1
+    }
+    let result = dist_exp(log_prefix) * sum
+    if result > 1.0 { return 1.0 }
+    return result
+}
+
+// Square root via Newton-Raphson
+fn dist_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var scaled = x
+    var scale_back = 1.0
+    while scaled < 1.0 { scaled = scaled * 4.0; scale_back = scale_back * 2.0 }
+    while scaled > 4.0 { scaled = scaled * 0.25; scale_back = scale_back * 0.5 }
+    var y = 1.5
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    return y / scale_back
+}
+
+// ============================================================
+// Gamma distribution  Gamma(alpha, beta) — shape alpha, rate beta
+// ============================================================
+// Log-PDF: (alpha-1)*ln(x) - beta*x - lgamma(alpha) + alpha*ln(beta)
+pub fn gamma_log_pdf(x: f64, alpha: f64, beta: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 - 1.0e30 }
+    if alpha <= 0.0 || beta <= 0.0 { return 0.0 - 1.0e30 }
+    (alpha - 1.0) * dist_ln(x) - beta * x - dist_lgamma(alpha) + alpha * dist_ln(beta)
+}
+
+// CDF: regularized incomplete gamma P(alpha, beta*x)
+pub fn gamma_cdf(x: f64, alpha: f64, beta: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    dist_gamma_inc_p(alpha, beta * x)
+}
+
+// Mean: alpha / beta
+pub fn gamma_mean(alpha: f64, beta: f64) -> f64 with Div, Panic {
+    alpha / beta
+}
+
+// Variance: alpha / beta^2
+pub fn gamma_variance(alpha: f64, beta: f64) -> f64 with Div, Panic {
+    alpha / (beta * beta)
+}
+
+// ============================================================
+// Exponential distribution  Exp(lambda) — rate lambda
+// ============================================================
+
+// Log-PDF: ln(lambda) - lambda*x
+pub fn exponential_log_pdf(x: f64, lambda: f64) -> f64 with Mut, Div, Panic {
+    if x < 0.0 { return 0.0 - 1.0e30 }
+    if lambda <= 0.0 { return 0.0 - 1.0e30 }
+    dist_ln(lambda) - lambda * x
+}
+
+// CDF: 1 - exp(-lambda*x)
+pub fn exponential_cdf(x: f64, lambda: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    1.0 - dist_exp(0.0 - lambda * x)
+}
+
+// Mean: 1 / lambda
+pub fn exponential_mean(lambda: f64) -> f64 with Div, Panic {
+    1.0 / lambda
+}
+
+// Quantile (inverse CDF): -ln(1-p) / lambda
+pub fn exponential_quantile(p: f64, lambda: f64) -> f64 with Mut, Div, Panic {
+    if p <= 0.0 { return 0.0 }
+    if p >= 1.0 { return 1.0e30 }
+    if lambda <= 0.0 { return 1.0e30 }
+    (0.0 - dist_ln(1.0 - p)) / lambda
+}
+
+// ============================================================
+// Uniform distribution  Uniform(a, b)
+// ============================================================
+
+// Log-PDF: -ln(b-a) if a < x < b, else -inf
+pub fn uniform_log_pdf(x: f64, a: f64, b: f64) -> f64 with Mut, Div, Panic {
+    if b <= a { return 0.0 - 1.0e30 }
+    if x < a || x > b { return 0.0 - 1.0e30 }
+    0.0 - dist_ln(b - a)
+}
+
+// CDF: (x-a)/(b-a) clamped to [0,1]
+pub fn uniform_cdf(x: f64, a: f64, b: f64) -> f64 with Div, Panic {
+    if b <= a { return 0.0 }
+    if x <= a { return 0.0 }
+    if x >= b { return 1.0 }
+    (x - a) / (b - a)
+}
+
+// Mean: (a+b)/2
+pub fn uniform_mean(a: f64, b: f64) -> f64 {
+    (a + b) / 2.0
+}
+
+// Quantile: a + p*(b-a)
+pub fn uniform_quantile(p: f64, a: f64, b: f64) -> f64 with Div, Panic {
+    if p <= 0.0 { return a }
+    if p >= 1.0 { return b }
+    a + p * (b - a)
+}
+
+// ============================================================
+// Poisson distribution  Poisson(lambda)
+// ============================================================
+// Log-PMF: k*ln(lambda) - lambda - lgamma(k+1)
+pub fn poisson_log_pmf(k: i64, lambda: f64) -> f64 with Mut, Div, Panic {
+    if k < 0 { return 0.0 - 1.0e30 }
+    if lambda <= 0.0 { return 0.0 - 1.0e30 }
+    let k_f: f64 = k as f64
+    k_f * dist_ln(lambda) - lambda - dist_lgamma(k_f + 1.0)
+}
+
+pub fn poisson_mean(lambda: f64) -> f64 {
+    lambda
+}
+
+pub fn poisson_variance(lambda: f64) -> f64 {
+    lambda
+}
+
+// ============================================================
+// Dirichlet distribution  Dir(alpha) — K=2 specialization
+// ============================================================
+// Log-PDF for K=2: (a0-1)*ln(x0) + (a1-1)*ln(x1) - lgamma(a0) - lgamma(a1) + lgamma(a0+a1)
+pub fn dirichlet_log_pdf_2(x0: f64, x1: f64, a0: f64, a1: f64) -> f64 with Mut, Div, Panic {
+    if x0 <= 0.0 || x1 <= 0.0 { return 0.0 - 1.0e30 }
+    if a0 <= 0.0 || a1 <= 0.0 { return 0.0 - 1.0e30 }
+    let log_norm = dist_lgamma(a0 + a1) - dist_lgamma(a0) - dist_lgamma(a1)
+    (a0 - 1.0) * dist_ln(x0) + (a1 - 1.0) * dist_ln(x1) + log_norm
+}

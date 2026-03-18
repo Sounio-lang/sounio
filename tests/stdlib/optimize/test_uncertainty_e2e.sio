@@ -1,0 +1,217 @@
+//@ run-pass
+//! tests/stdlib/optimize/test_uncertainty_e2e.sio
+//!
+//! E2E tests for optimize::uncertainty — GUM covariance estimation and propagation.
+
+use optimize::uncertainty::{
+    ParamUncertainty,
+    uncertainty_new, t_quantile_95,
+    estimate_covariance_from_jacobian,
+    propagate_uncertainty_linear,
+    relative_se,
+}
+use test::helpers::check_near
+
+// ============================================================================
+// t-distribution quantiles
+// ============================================================================
+
+fn test_t_quantile_large_dof() with Mut, Div, Panic {
+    // Large dof → approaches 1.96
+    let t_100 = t_quantile_95(100)
+    assert(check_near(t_100, 1.984, 0.01))
+}
+
+fn test_t_quantile_small_dof() with Mut, Div, Panic {
+    // dof=1 → 12.706
+    let t_1 = t_quantile_95(1)
+    assert(check_near(t_1, 12.706, 0.01))
+}
+
+fn test_t_quantile_medium_dof() with Mut, Div, Panic {
+    let t_5 = t_quantile_95(5)
+    assert(check_near(t_5, 2.571, 0.01))
+}
+
+fn test_t_quantile_large_dof_approaches_196() with Mut, Div, Panic {
+    // > 100 → exactly 1.96
+    let t_inf = t_quantile_95(1000)
+    assert(check_near(t_inf, 1.96, 0.01))
+}
+
+// ============================================================================
+// uncertainty_new
+// ============================================================================
+
+fn test_uncertainty_new_n_params() with Mut, Div, Panic {
+    let unc = uncertainty_new(4)
+    assert(unc.n_params == 4)
+}
+
+fn test_uncertainty_new_confidence() with Mut, Div, Panic {
+    let unc = uncertainty_new(2)
+    assert(check_near(unc.confidence_level, 0.95, 1e-9))
+}
+
+fn test_uncertainty_new_dof_zero() with Mut, Div, Panic {
+    let unc = uncertainty_new(3)
+    assert(unc.dof == 0)
+}
+
+// ============================================================================
+// relative_se
+// ============================================================================
+
+fn test_relative_se_five_percent() with Mut, Div, Panic {
+    // SE=5 at estimate=100 → 5%
+    let rse = relative_se(100.0, 5.0)
+    assert(check_near(rse, 5.0, 0.01))
+}
+
+fn test_relative_se_ten_percent() with Mut, Div, Panic {
+    // SE=5 at estimate=50 → 10%
+    let rse = relative_se(50.0, 5.0)
+    assert(check_near(rse, 10.0, 0.01))
+}
+
+fn test_relative_se_zero_estimate() with Mut, Div, Panic {
+    // Zero estimate → returns 0
+    let rse = relative_se(0.0, 1.0)
+    assert(check_near(rse, 0.0, 1e-9))
+}
+
+fn test_relative_se_negative_estimate() with Mut, Div, Panic {
+    // Negative estimate uses absolute value
+    let rse = relative_se(0.0 - 100.0, 5.0)
+    assert(check_near(rse, 5.0, 0.01))
+}
+
+// ============================================================================
+// estimate_covariance_from_jacobian
+// ============================================================================
+
+fn test_covariance_from_jacobian_basic() with Mut, Div, Panic {
+    // Simple 2-param linear model: y = a + b*x
+    // x = [1,2,3,4], y = [2.1, 3.9, 6.1, 8.0], fitted a=0.05, b=1.97
+    var jac: [f64; 2000] = [0.0; 2000]
+    jac[0] = 1.0;  jac[1] = 1.0
+    jac[2] = 1.0;  jac[3] = 2.0
+    jac[4] = 1.0;  jac[5] = 3.0
+    jac[6] = 1.0;  jac[7] = 4.0
+    var residuals: [f64; 100] = [0.0; 100]
+    residuals[0] = 0.08
+    residuals[1] = 0.0 - 0.09
+    residuals[2] = 0.14
+    residuals[3] = 0.07
+    let unc = estimate_covariance_from_jacobian(jac, residuals, 4, 2)
+    assert(unc.n_params == 2)
+    assert(unc.dof == 2)  // m - n = 4 - 2
+}
+
+fn test_covariance_standard_errors_positive() with Mut, Div, Panic {
+    // Standard errors should be positive
+    var jac: [f64; 2000] = [0.0; 2000]
+    jac[0] = 1.0;  jac[1] = 1.0
+    jac[2] = 1.0;  jac[3] = 2.0
+    jac[4] = 1.0;  jac[5] = 3.0
+    jac[6] = 1.0;  jac[7] = 4.0
+    var residuals: [f64; 100] = [0.0; 100]
+    residuals[0] = 0.08
+    residuals[1] = 0.0 - 0.09
+    residuals[2] = 0.14
+    residuals[3] = 0.07
+    let unc = estimate_covariance_from_jacobian(jac, residuals, 4, 2)
+    assert(unc.std_error[0] > 0.0)
+    assert(unc.std_error[1] > 0.0)
+}
+
+fn test_covariance_se_small_for_good_fit() with Mut, Div, Panic {
+    // Standard errors should be small for well-conditioned problem
+    var jac: [f64; 2000] = [0.0; 2000]
+    jac[0] = 1.0;  jac[1] = 1.0
+    jac[2] = 1.0;  jac[3] = 2.0
+    jac[4] = 1.0;  jac[5] = 3.0
+    jac[6] = 1.0;  jac[7] = 4.0
+    var residuals: [f64; 100] = [0.0; 100]
+    residuals[0] = 0.08
+    residuals[1] = 0.0 - 0.09
+    residuals[2] = 0.14
+    residuals[3] = 0.07
+    let unc = estimate_covariance_from_jacobian(jac, residuals, 4, 2)
+    assert(unc.std_error[0] < 1.0)
+    assert(unc.std_error[1] < 1.0)
+}
+
+// ============================================================================
+// propagate_uncertainty_linear
+// ============================================================================
+
+fn test_propagate_independent_params() with Mut, Div, Panic {
+    // f = x0 + x1, Cov = diag(0.25, 0.04)
+    // Var(f) = 0.25 + 0.04 = 0.29
+    var unc = uncertainty_new(2)
+    unc.std_error[0] = 0.5
+    unc.std_error[1] = 0.2
+    unc.covariance[0] = 0.25   // Cov(x0, x0)
+    unc.covariance[1] = 0.0    // Cov(x0, x1)
+    unc.covariance[2] = 0.0    // Cov(x1, x0)
+    unc.covariance[3] = 0.04   // Cov(x1, x1)
+    var sens: [f64; 20] = [0.0; 20]
+    sens[0] = 1.0
+    sens[1] = 1.0
+    let result = propagate_uncertainty_linear(unc, sens, 2)
+    let var_f = result.0
+    let se_f = result.1
+    assert(check_near(var_f, 0.29, 0.001))
+    assert(check_near(se_f, 0.53851648, 0.001))
+}
+
+fn test_propagate_scale_sensitivity() with Mut, Div, Panic {
+    // f = 2*x0, sensitivity = [2.0, 0.0], Var(x0) = 0.25
+    // Var(f) = 4 * 0.25 = 1.0
+    var unc = uncertainty_new(2)
+    unc.covariance[0] = 0.25
+    unc.covariance[1] = 0.0
+    unc.covariance[2] = 0.0
+    unc.covariance[3] = 0.0
+    var sens: [f64; 20] = [0.0; 20]
+    sens[0] = 2.0
+    sens[1] = 0.0
+    let result = propagate_uncertainty_linear(unc, sens, 2)
+    assert(check_near(result.0, 1.0, 0.001))
+}
+
+fn test_propagate_zero_sensitivity() with Mut, Div, Panic {
+    // f = constant, sensitivity = [0, 0] → Var(f) = 0
+    var unc = uncertainty_new(2)
+    unc.covariance[0] = 1.0
+    unc.covariance[3] = 1.0
+    var sens: [f64; 20] = [0.0; 20]
+    let result = propagate_uncertainty_linear(unc, sens, 2)
+    assert(check_near(result.0, 0.0, 1e-9))
+    assert(check_near(result.1, 0.0, 1e-9))
+}
+
+// ============================================================================
+// Main
+// ============================================================================
+
+pub fn main() with Mut, Div, Panic {
+    test_t_quantile_large_dof()
+    test_t_quantile_small_dof()
+    test_t_quantile_medium_dof()
+    test_t_quantile_large_dof_approaches_196()
+    test_uncertainty_new_n_params()
+    test_uncertainty_new_confidence()
+    test_uncertainty_new_dof_zero()
+    test_relative_se_five_percent()
+    test_relative_se_ten_percent()
+    test_relative_se_zero_estimate()
+    test_relative_se_negative_estimate()
+    test_covariance_from_jacobian_basic()
+    test_covariance_standard_errors_positive()
+    test_covariance_se_small_for_good_fit()
+    test_propagate_independent_params()
+    test_propagate_scale_sensitivity()
+    test_propagate_zero_sensitivity()
+}

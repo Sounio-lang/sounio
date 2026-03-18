@@ -1,0 +1,200 @@
+// tests/stdlib/linalg/blas_benchmark.sio — BLAS Correctness and Timing Test
+//
+// Validates the pure-Sounio BLAS-compatible matrix operations (no FFI available).
+// Checks correctness for matrices up to 16x16 (256-element flat array limit).
+//
+// Usage: sounio run tests/stdlib/linalg/blas_benchmark.sio
+
+use linalg::blas_ffi::{blas_available, dgemm_available, blas_dgemm, blas_dgemm_rowmajor}
+use linalg::epistemic_matrix::{EpistemicMatrix, ematrix_zeros, ematrix_identity}
+
+fn abs_f(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+// =============================================================================
+// Correctness: 4x4 matrix multiply
+// =============================================================================
+
+fn test_4x4_dgemm() with Mut, Div, Panic {
+    // Fill A and B with known values, verify C = A*B
+    var a: [f64; 256] = [0.0; 256]
+    var b: [f64; 256] = [0.0; 256]
+    var c: [f64; 256] = [0.0; 256]
+
+    // A = diag(1, 2, 3, 4)
+    a[0]  = 1.0
+    a[5]  = 2.0
+    a[10] = 3.0
+    a[15] = 4.0
+
+    // B = diag(2, 3, 4, 5)
+    b[0]  = 2.0
+    b[5]  = 3.0
+    b[10] = 4.0
+    b[15] = 5.0
+
+    // C = A*B = diag(2, 6, 12, 20)
+    let rc = blas_dgemm(&a, &b, &!c, 4, 4, 4)
+    assert(rc == 0)
+
+    assert(abs_f(c[0]  - 2.0)  < 1e-10)
+    assert(abs_f(c[5]  - 6.0)  < 1e-10)
+    assert(abs_f(c[10] - 12.0) < 1e-10)
+    assert(abs_f(c[15] - 20.0) < 1e-10)
+
+    // Off-diagonal should be 0
+    assert(abs_f(c[1]) < 1e-10)
+    assert(abs_f(c[4]) < 1e-10)
+}
+
+// =============================================================================
+// Correctness: 3x3 known result
+// =============================================================================
+
+fn test_3x3_dgemm() with Mut, Div, Panic {
+    var a: [f64; 256] = [0.0; 256]
+    var b: [f64; 256] = [0.0; 256]
+    var c: [f64; 256] = [0.0; 256]
+
+    // A = [[1,2,3],[4,5,6],[7,8,9]]
+    a[0]=1.0  a[1]=2.0  a[2]=3.0
+    a[3]=4.0  a[4]=5.0  a[5]=6.0
+    a[6]=7.0  a[7]=8.0  a[8]=9.0
+
+    // B = I (identity)
+    b[0]=1.0  b[4]=1.0  b[8]=1.0
+
+    let rc = blas_dgemm(&a, &b, &!c, 3, 3, 3)
+    assert(rc == 0)
+
+    // A * I = A
+    var row = 0
+    while row < 3 {
+        var col = 0
+        while col < 3 {
+            assert(abs_f(c[row*3+col] - a[row*3+col]) < 1e-10)
+            col = col + 1
+        }
+        row = row + 1
+    }
+}
+
+// =============================================================================
+// Correctness: Non-square (2x3) * (3x2) = (2x2)
+// =============================================================================
+
+fn test_non_square_dgemm() with Mut, Div, Panic {
+    var a: [f64; 256] = [0.0; 256]  // 2x3 stored row-major
+    var b: [f64; 256] = [0.0; 256]  // 3x2 stored row-major
+    var c: [f64; 256] = [0.0; 256]  // 2x2 result
+
+    // A = [[1,0,2],[0,3,1]]
+    a[0]=1.0  a[1]=0.0  a[2]=2.0
+    a[3]=0.0  a[4]=3.0  a[5]=1.0
+
+    // B = [[0,1],[1,0],[2,1]]
+    b[0]=0.0  b[1]=1.0
+    b[2]=1.0  b[3]=0.0
+    b[4]=2.0  b[5]=1.0
+
+    // C = A*B = [[1*0+0*1+2*2, 1*1+0*0+2*1], [0*0+3*1+1*2, 0*1+3*0+1*1]]
+    //         = [[4, 3], [5, 1]]
+    let rc = blas_dgemm_rowmajor(2, 2, 3, 1.0, &a, &b, 0.0, &!c)
+    assert(rc == 0)
+
+    assert(abs_f(c[0] - 4.0) < 1e-10)
+    assert(abs_f(c[1] - 3.0) < 1e-10)
+    assert(abs_f(c[2] - 5.0) < 1e-10)
+    assert(abs_f(c[3] - 1.0) < 1e-10)
+}
+
+// =============================================================================
+// Throughput: 16x16 matmul repeated N times (pure correctness check)
+// =============================================================================
+
+fn test_16x16_correctness() with Mut, Div, Panic {
+    var a: [f64; 256] = [0.0; 256]
+    var b: [f64; 256] = [0.0; 256]
+    var c: [f64; 256] = [0.0; 256]
+
+    // Fill A and B with 1s → C should be all 16s
+    var idx = 0
+    while idx < 256 {
+        a[idx] = 1.0
+        b[idx] = 1.0
+        idx = idx + 1
+    }
+
+    let rc = blas_dgemm(&a, &b, &!c, 16, 16, 16)
+    assert(rc == 0)
+
+    // Each element of C = sum of 16 ones = 16
+    var i = 0
+    while i < 256 {
+        assert(abs_f(c[i] - 16.0) < 1e-10)
+        i = i + 1
+    }
+}
+
+// =============================================================================
+// EpistemicMatrix integration
+// =============================================================================
+
+fn test_ematrix_with_blas() with Mut, Div, Panic {
+    // Use ematrix_zeros and ematrix_identity (top-level functions)
+    let a = ematrix_zeros(3, 3)
+        .set_full(0, 0, 1.0, 0.01, 0.95)
+        .set_full(1, 1, 2.0, 0.02, 0.95)
+        .set_full(2, 2, 3.0, 0.03, 0.95)
+
+    let b = ematrix_identity(3)
+
+    // A * I = A
+    let c = a.matmul(&b)
+
+    assert(c.get_val(0, 0) == 1.0)
+    assert(c.get_val(1, 1) == 2.0)
+    assert(c.get_val(2, 2) == 3.0)
+}
+
+// =============================================================================
+// Repeated iteration (pseudo-benchmark: counts correct results)
+// =============================================================================
+
+fn test_repeated_2x2() with Mut, Div, Panic {
+    var a: [f64; 256] = [0.0; 256]
+    var b: [f64; 256] = [0.0; 256]
+    var c: [f64; 256] = [0.0; 256]
+
+    a[0]=1.0  a[1]=2.0  a[2]=3.0  a[3]=4.0
+    b[0]=1.0  b[1]=0.0  b[2]=0.0  b[3]=1.0  // identity
+
+    var n_correct: i64 = 0
+    var iter: i64 = 0
+    while iter < 100 {
+        var ci: [f64; 256] = [0.0; 256]
+        let rc = blas_dgemm(&a, &b, &!ci, 2, 2, 2)
+        if rc == 0 && ci[0] == a[0] && ci[3] == a[3] {
+            n_correct = n_correct + 1
+        }
+        iter = iter + 1
+    }
+    assert(n_correct == 100)
+}
+
+// =============================================================================
+// Main
+// =============================================================================
+
+pub fn main() with Mut, Div, Panic {
+    test_4x4_dgemm()
+    test_3x3_dgemm()
+    test_non_square_dgemm()
+    test_16x16_correctness()
+    test_ematrix_with_blas()
+    test_repeated_2x2()
+
+    var i: i64 = 0
+    while i < 3 { i = i + 1 }
+}

@@ -1,0 +1,232 @@
+// stdlib/linalg/blas_ffi.sio — BLAS-compatible Matrix Operations (Pure Sounio)
+//
+// Provides BLAS-compatible matrix multiplication interface in pure Sounio.
+// The ffi:: modules are not available in this build, so all operations are
+// implemented as optimised pure-Sounio loops.
+//
+// Matrices are stored in ROW-MAJOR order, max 16x16 = 256 elements.
+//
+// Interface matches what epistemic_matrix.sio expects.
+// blas_available() returns false — callers should use GUM propagation path.
+//
+// References:
+//   BLAS Technical Forum Standard (2001)
+//   Golub & Van Loan (2013) "Matrix Computations" 4th ed.
+
+// =============================================================================
+// Math helpers
+// =============================================================================
+
+fn abs_blas(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+// =============================================================================
+// Availability (always false — no FFI in this build)
+// =============================================================================
+
+/// Returns false: BLAS FFI is not compiled into this build.
+/// Callers should use the pure-Sounio GUM propagation path.
+pub fn blas_available() -> bool { false }
+
+/// Returns false: DGEMM via FFI is not available.
+pub fn dgemm_available() -> bool { false }
+
+/// Returns false: SVD via LAPACK FFI is not available.
+pub fn dgesvd_available() -> bool { false }
+
+// =============================================================================
+// DGEMM — C = alpha * A * B + beta * C  (row-major, general matrices)
+// =============================================================================
+
+/// Compute C = alpha * A * B + beta * C (row-major storage).
+///
+/// # Parameters
+/// - `m`: Rows of A and C
+/// - `n`: Columns of B and C
+/// - `k`: Columns of A = rows of B
+/// - `alpha`: Scalar multiplier for A*B
+/// - `a`: Input matrix A (m x k, row-major, 256 elements)
+/// - `b`: Input matrix B (k x n, row-major, 256 elements)
+/// - `beta`: Scalar multiplier for C
+/// - `c`: In/out matrix C (m x n, row-major, 256 elements)
+///
+/// # Return
+/// 0 on success, -1 on dimension error
+pub fn blas_dgemm_rowmajor(
+    m: i32, n: i32, k: i32,
+    alpha: f64,
+    a: &[f64; 256],
+    b: &[f64; 256],
+    beta: f64,
+    c: &![f64; 256],
+) -> i32 with Mut, Div, Panic {
+    // Bounds check
+    if m <= 0 || n <= 0 || k <= 0 { return 0 - 1 }
+    if m * k > 256 || k * n > 256 || m * n > 256 { return 0 - 1 }
+
+    var i = 0
+    while i < m {
+        var j = 0
+        while j < n {
+            // Scale existing C element
+            var acc: f64 = beta * c[i * n + j]
+
+            // Accumulate alpha * row_i(A) · col_j(B)
+            var l = 0
+            while l < k {
+                acc = acc + alpha * a[i * k + l] * b[l * n + j]
+                l = l + 1
+            }
+
+            c[i * n + j] = acc
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    0
+}
+
+/// Convenience wrapper: C = A * B (alpha=1, beta=0).
+pub fn blas_dgemm(
+    a: &[f64; 256], b: &[f64; 256], c: &![f64; 256],
+    m: i32, n: i32, k: i32,
+) -> i32 with Mut, Div, Panic {
+    blas_dgemm_rowmajor(m, n, k, 1.0, a, b, 0.0, c)
+}
+
+// =============================================================================
+// DGESVD — Approximate SVD via power iteration (rank-1 approximation)
+// =============================================================================
+
+/// Compute approximate singular values via power iteration.
+///
+/// For a matrix A (m x n, row-major), computes s[0] = largest singular value.
+/// Full SVD is not implemented — only the dominant singular value.
+///
+/// # Parameters
+/// - `a`: Input matrix A (m x n, 256 elements), overwritten
+/// - `m`: Rows
+/// - `n`: Columns
+/// - `s`: Output singular values (min(m,n) values)
+/// - `iters`: Power iteration steps (higher = more accurate)
+///
+/// # Return
+/// 0 on success, -1 on error
+pub fn blas_dgesvd_approx(
+    a: &[f64; 256],
+    m: i32, n: i32,
+    s: &![f64; 16],
+    iters: i32,
+) -> i32 with Mut, Div, Panic {
+    if m <= 0 || n <= 0 || m * n > 256 { return 0 - 1 }
+
+    let p = if m < n { m } else { n }
+
+    // Power iteration for dominant singular value
+    // v = initial vector (all ones, normalised)
+    var v: [f64; 16] = [0.0; 16]
+    var v_norm: f64 = 0.0
+    var vi = 0
+    while vi < n {
+        v[vi] = 1.0
+        v_norm = v_norm + 1.0
+        vi = vi + 1
+    }
+    // Normalise
+    let inv_norm = if v_norm > 1.0e-30 { 1.0 / v_norm } else { 0.0 }
+    var vi2 = 0
+    while vi2 < n {
+        v[vi2] = v[vi2] * inv_norm
+        vi2 = vi2 + 1
+    }
+
+    // Power iteration: v ← A'*A*v / ||A'*A*v||
+    var it = 0
+    while it < iters {
+        // u = A * v  (m-vector)
+        var u: [f64; 16] = [0.0; 16]
+        var ri = 0
+        while ri < m {
+            var ci = 0
+            while ci < n {
+                u[ri] = u[ri] + a[ri * n + ci] * v[ci]
+                ci = ci + 1
+            }
+            ri = ri + 1
+        }
+
+        // v = A' * u  (n-vector)
+        var v2: [f64; 16] = [0.0; 16]
+        var ci2 = 0
+        while ci2 < n {
+            var ri2 = 0
+            while ri2 < m {
+                v2[ci2] = v2[ci2] + a[ri2 * n + ci2] * u[ri2]
+                ri2 = ri2 + 1
+            }
+            ci2 = ci2 + 1
+        }
+
+        // Compute norm of v2
+        var norm: f64 = 0.0
+        var ni = 0
+        while ni < n {
+            norm = norm + v2[ni] * v2[ni]
+            ni = ni + 1
+        }
+        // sigma = sqrt(norm)
+        var sigma = norm
+        var sq_i = 0
+        while sq_i < 15 {
+            sigma = 0.5 * (sigma + norm / sigma)
+            sq_i = sq_i + 1
+        }
+
+        // Normalise v2 → v
+        let inv = if sigma > 1.0e-30 { 1.0 / sigma } else { 0.0 }
+        var ni2 = 0
+        while ni2 < n {
+            v[ni2] = v2[ni2] * inv
+            ni2 = ni2 + 1
+        }
+
+        it = it + 1
+    }
+
+    // Compute s[0] = ||A*v||
+    var u_final: [f64; 16] = [0.0; 16]
+    var rf = 0
+    while rf < m {
+        var cf = 0
+        while cf < n {
+            u_final[rf] = u_final[rf] + a[rf * n + cf] * v[cf]
+            cf = cf + 1
+        }
+        rf = rf + 1
+    }
+    var s0: f64 = 0.0
+    var si = 0
+    while si < m {
+        s0 = s0 + u_final[si] * u_final[si]
+        si = si + 1
+    }
+    // sqrt(s0)
+    var sq = s0
+    var sq_j = 0
+    while sq_j < 15 {
+        sq = 0.5 * (sq + s0 / sq)
+        sq_j = sq_j + 1
+    }
+    s[0] = sq
+
+    // Remaining singular values set to 0 (not computed)
+    var pi = 1
+    while pi < p {
+        s[pi] = 0.0
+        pi = pi + 1
+    }
+
+    0
+}

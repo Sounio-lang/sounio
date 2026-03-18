@@ -1,0 +1,395 @@
+// stdlib/nn/epistemic_layer.sio — Epistemic Neural Network Layers
+//
+// Neural network layers with Knowledge<f64> weights that propagate uncertainty.
+// Forward pass uses epistemic linear algebra for GUM-compliant propagation.
+// Confidence degrades through layer compositions.
+//
+// References:
+//   JCGM 100:2008: "Evaluation of measurement data" (GUM)
+//   Goodfellow et al. (2016) "Deep Learning" - Chapter 6-8
+
+// =============================================================================
+// Math helpers
+// =============================================================================
+
+fn sqrt_el(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i = 0
+    while i < 20 { y = 0.5 * (y + x / y); i = i + 1 }
+    y
+}
+
+fn abs_el(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+fn min_el(a: f64, b: f64) -> f64 {
+    if a < b { a } else { b }
+}
+
+fn exp_el(x: f64) -> f64 with Mut {
+    if x > 20.0 { return exp_el(10.0) * exp_el(x - 10.0) }
+    if x < -20.0 { return 1.0 / exp_el(0.0 - x) }
+    var sum = 1.0
+    var term = 1.0
+    var i = 1
+    while i <= 20 {
+        term = term * x / (i as f64)
+        sum = sum + term
+        i = i + 1
+    }
+    sum
+}
+
+// =============================================================================
+// Epistemic Vector (4-element with uncertainty)
+// =============================================================================
+
+pub struct EpistemicVec4 {
+    values: [f64; 4],
+    uncertainties: [f64; 4],
+    confidences: [f64; 4],
+}
+
+pub fn evec4_zeros() -> EpistemicVec4 {
+    EpistemicVec4 {
+        values: [0.0; 4],
+        uncertainties: [0.0; 4],
+        confidences: [1.0; 4],
+    }
+}
+
+pub fn evec4_from_values(v0: f64, v1: f64, v2: f64, v3: f64) -> EpistemicVec4 {
+    EpistemicVec4 {
+        values: [v0, v1, v2, v3],
+        uncertainties: [0.0; 4],
+        confidences: [1.0; 4],
+    }
+}
+
+pub fn evec4_from_epistemic(v0: f64, u0: f64, c0: f64,
+                            v1: f64, u1: f64, c1: f64,
+                            v2: f64, u2: f64, c2: f64,
+                            v3: f64, u3: f64, c3: f64) -> EpistemicVec4 {
+    EpistemicVec4 {
+        values: [v0, v1, v2, v3],
+        uncertainties: [u0, u1, u2, u3],
+        confidences: [c0, c1, c2, c3],
+    }
+}
+
+// =============================================================================
+// Epistemic Matrix 4x4 (for layer weights)
+// =============================================================================
+
+pub struct EpistemicMat4x4 {
+    values: [f64; 16],
+    uncertainties: [f64; 16],
+    confidences: [f64; 16],
+}
+
+pub fn emat4_zeros() -> EpistemicMat4x4 {
+    EpistemicMat4x4 {
+        values: [0.0; 16],
+        uncertainties: [0.0; 16],
+        confidences: [1.0; 16],
+    }
+}
+
+pub fn emat4_identity() -> EpistemicMat4x4 with Mut, Panic {
+    var m = emat4_zeros()
+    m.values[0] = 1.0
+    m.values[5] = 1.0
+    m.values[10] = 1.0
+    m.values[15] = 1.0
+    m
+}
+
+pub fn emat4_get_val(m: &EpistemicMat4x4, row: i32, col: i32) -> f64 {
+    m.values[(row * 4 + col) as usize]
+}
+
+pub fn emat4_get_unc(m: &EpistemicMat4x4, row: i32, col: i32) -> f64 {
+    m.uncertainties[(row * 4 + col) as usize]
+}
+
+pub fn emat4_get_conf(m: &EpistemicMat4x4, row: i32, col: i32) -> f64 {
+    m.confidences[(row * 4 + col) as usize]
+}
+
+pub fn emat4_set(m: &!EpistemicMat4x4, row: i32, col: i32, val: f64, unc: f64, conf: f64) with Mut {
+    let idx = (row * 4 + col) as usize
+    m.values[idx] = val
+    m.uncertainties[idx] = unc
+    m.confidences[idx] = conf
+}
+
+// =============================================================================
+// Activation Functions (with GUM propagation)
+// =============================================================================
+
+pub fn ACT_RELU() -> i32 { 1 }
+pub fn ACT_SIGMOID() -> i32 { 2 }
+pub fn ACT_TANH() -> i32 { 3 }
+pub fn ACT_IDENTITY() -> i32 { 4 }
+
+fn epistemic_relu(v: EpistemicVec4) -> EpistemicVec4 with Mut {
+    var result = evec4_zeros()
+    var i = 0
+    while i < 4 {
+        if v.values[i] > 0.0 {
+            result.values[i] = v.values[i]
+            result.uncertainties[i] = v.uncertainties[i]
+            result.confidences[i] = v.confidences[i]
+        } else {
+            result.values[i] = 0.0
+            result.uncertainties[i] = 0.0
+            result.confidences[i] = v.confidences[i]
+        }
+        i = i + 1
+    }
+    result
+}
+
+fn epistemic_sigmoid(v: EpistemicVec4) -> EpistemicVec4 with Mut, Div, Panic {
+    var result = evec4_zeros()
+    var i = 0
+    while i < 4 {
+        let x = v.values[i]
+        let sig = 1.0 / (1.0 + exp_el(0.0 - x))
+        let deriv = sig * (1.0 - sig)
+        result.values[i] = sig
+        result.uncertainties[i] = abs_el(deriv) * v.uncertainties[i]
+        result.confidences[i] = v.confidences[i] * 0.98
+        i = i + 1
+    }
+    result
+}
+
+fn epistemic_tanh(v: EpistemicVec4) -> EpistemicVec4 with Mut, Div, Panic {
+    var result = evec4_zeros()
+    var i = 0
+    while i < 4 {
+        let x = v.values[i]
+        let e2x = exp_el(2.0 * x)
+        let th = (e2x - 1.0) / (e2x + 1.0)
+        let deriv = 1.0 - th * th
+        result.values[i] = th
+        result.uncertainties[i] = abs_el(deriv) * v.uncertainties[i]
+        result.confidences[i] = v.confidences[i] * 0.98
+        i = i + 1
+    }
+    result
+}
+
+fn epistemic_identity(v: EpistemicVec4) -> EpistemicVec4 {
+    v
+}
+
+// =============================================================================
+// Epistemic Dense Layer
+// =============================================================================
+
+pub struct EpistemicDenseLayer4 {
+    weights: EpistemicMat4x4,
+    bias: EpistemicVec4,
+    activation: i32,
+}
+
+pub fn epistemic_dense_4x4(
+    weights: EpistemicMat4x4,
+    bias: EpistemicVec4,
+    activation: i32,
+) -> EpistemicDenseLayer4 {
+    EpistemicDenseLayer4 {
+        weights: weights,
+        bias: bias,
+        activation: activation,
+    }
+}
+
+pub fn epistemic_dense_identity() -> EpistemicDenseLayer4 with Mut, Panic {
+    EpistemicDenseLayer4 {
+        weights: emat4_identity(),
+        bias: evec4_zeros(),
+        activation: ACT_IDENTITY(),
+    }
+}
+
+pub fn epistemic_dense_forward(
+    layer: &EpistemicDenseLayer4,
+    input: &EpistemicVec4,
+) -> EpistemicVec4 with Mut, Div, Panic {
+    var z = evec4_zeros()
+    
+    var i = 0
+    while i < 4 {
+        var sum_val: f64 = 0.0
+        var sum_unc_sq: f64 = 0.0
+        var min_conf: f64 = 1.0
+        
+        var j = 0
+        while j < 4 {
+            let w_val = emat4_get_val(&layer.weights, i, j)
+            let x_val = input.values[j]
+            let w_unc = emat4_get_unc(&layer.weights, i, j)
+            let x_unc = input.uncertainties[j]
+            let w_conf = emat4_get_conf(&layer.weights, i, j)
+            let x_conf = input.confidences[j]
+            
+            sum_val = sum_val + w_val * x_val
+            sum_unc_sq = sum_unc_sq + w_unc * w_unc * x_val * x_val + w_val * w_val * x_unc * x_unc
+            min_conf = min_el(min_conf, min_el(w_conf, x_conf))
+            
+            j = j + 1
+        }
+        
+        sum_val = sum_val + layer.bias.values[i]
+        let b_unc = layer.bias.uncertainties[i]
+        let b_conf = layer.bias.confidences[i]
+        sum_unc_sq = sum_unc_sq + b_unc * b_unc
+        min_conf = min_el(min_conf, b_conf)
+        
+        z.values[i] = sum_val
+        z.uncertainties[i] = sqrt_el(sum_unc_sq)
+        z.confidences[i] = min_conf
+        
+        i = i + 1
+    }
+    
+    if layer.activation == ACT_RELU() {
+        epistemic_relu(z)
+    } else if layer.activation == ACT_SIGMOID() {
+        epistemic_sigmoid(z)
+    } else if layer.activation == ACT_TANH() {
+        epistemic_tanh(z)
+    } else {
+        epistemic_identity(z)
+    }
+}
+
+// =============================================================================
+// Epistemic MLP (2-layer)
+// =============================================================================
+
+pub struct EpistemicMLP_4_4_4 {
+    layer1: EpistemicDenseLayer4,
+    layer2: EpistemicDenseLayer4,
+}
+
+pub fn epistemic_mlp_4_4_4(
+    layer1: EpistemicDenseLayer4,
+    layer2: EpistemicDenseLayer4,
+) -> EpistemicMLP_4_4_4 {
+    EpistemicMLP_4_4_4 {
+        layer1: layer1,
+        layer2: layer2,
+    }
+}
+
+pub fn epistemic_mlp_forward(
+    model: &EpistemicMLP_4_4_4,
+    input: &EpistemicVec4,
+) -> EpistemicVec4 with Mut, Div, Panic {
+    let hidden = epistemic_dense_forward(&model.layer1, input)
+    let output = epistemic_dense_forward(&model.layer2, &hidden)
+    output
+}
+
+pub struct LayerConfidenceSummary {
+    min_confidence: f64,
+    max_confidence: f64,
+    mean_confidence: f64,
+    max_relative_uncertainty: f64,
+}
+
+pub fn epivec4_confidence_summary(v: &EpistemicVec4) -> LayerConfidenceSummary with Mut, Div, Panic {
+    var min_c: f64 = 1.0
+    var max_c: f64 = 0.0
+    var sum_c: f64 = 0.0
+    var max_rel: f64 = 0.0
+    
+    var i = 0
+    while i < 4 {
+        let c = v.confidences[i]
+        if c < min_c { min_c = c }
+        if c > max_c { max_c = c }
+        sum_c = sum_c + c
+        
+        let val = abs_el(v.values[i])
+        if val > 1.0e-30 {
+            let rel = v.uncertainties[i] / val
+            if rel > max_rel { max_rel = rel }
+        }
+        i = i + 1
+    }
+    
+    LayerConfidenceSummary {
+        min_confidence: min_c,
+        max_confidence: max_c,
+        mean_confidence: sum_c / 4.0,
+        max_relative_uncertainty: max_rel,
+    }
+}
+
+// =============================================================================
+// Tests
+// =============================================================================
+
+fn test_epistemic_dense_forward() with Mut, Div, Panic {
+    let layer = epistemic_dense_identity()
+    
+    let input = evec4_from_epistemic(
+        1.0, 0.1, 0.95,
+        0.0, 0.0, 1.0,
+        0.0, 0.0, 1.0,
+        0.0, 0.0, 1.0,
+    )
+    
+    let output = epistemic_dense_forward(&layer, &input)
+    
+    assert(output.values[0] > 0.99 && output.values[0] < 1.01)
+    assert(output.uncertainties[0] > 0.09 && output.uncertainties[0] < 0.11)
+    assert(output.confidences[0] > 0.94 && output.confidences[0] < 0.96)
+}
+
+fn test_epistemic_mlp_degradation() with Mut, Div, Panic {
+    let layer1 = epistemic_dense_identity()
+    let layer2 = epistemic_dense_identity()
+    let mlp = epistemic_mlp_4_4_4(layer1, layer2)
+    
+    let input = evec4_from_epistemic(
+        1.0, 0.1, 0.95,
+        0.0, 0.0, 1.0,
+        0.0, 0.0, 1.0,
+        0.0, 0.0, 1.0,
+    )
+    
+    let output = epistemic_mlp_forward(&mlp, &input)
+    let summary = epivec4_confidence_summary(&output)
+    
+    assert(summary.min_confidence > 0.94)
+}
+
+fn test_epistemic_relu() with Mut, Div, Panic {
+    let v = evec4_from_epistemic(
+        1.0, 0.1, 0.9,
+        -1.0, 0.1, 0.9,
+        0.5, 0.05, 0.95,
+        -0.5, 0.05, 0.95,
+    )
+    
+    let r = epistemic_relu(v)
+    
+    assert(r.values[0] > 0.99 && r.values[0] < 1.01)
+    assert(r.uncertainties[0] > 0.09 && r.uncertainties[0] < 0.11)
+    assert(r.values[1] == 0.0)
+    assert(r.uncertainties[1] == 0.0)
+}
+
+pub fn main() {
+    test_epistemic_dense_forward()
+    test_epistemic_mlp_degradation()
+    test_epistemic_relu()
+}

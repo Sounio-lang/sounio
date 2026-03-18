@@ -1,16 +1,202 @@
-//@ check-only
-//@ contract-adjustment: prob beta wrapper is unavailable; test now validates active conformal APIs under prob::conformal
+//@ run-pass
+//! tests/stdlib/prob/test_beta_e2e.sio
+//!
+//! E2E tests for prob::beta — Beta distribution API.
 
-use prob::conformal::*
+use prob::beta::{
+    Beta, CI,
+    beta_new, beta_uniform, beta_jeffreys, beta_weak,
+    beta_posterior, beta_mean, beta_variance, beta_std,
+    beta_sample_size, beta_mode, beta_risk_adjusted_mean,
+    beta_ci_normal,
+}
+use test::helpers::check_near
 
-fn run_tests() -> i32 {
-    let cal = conformal_calibration_new(0.05)
-    if cal.alpha <= 0.0 { return 1 }
-    if cal.alpha >= 1.0 { return 2 }
-    if cal.n_scores != 0 { return 3 }
-    return 0
+// ============================================================================
+// Beta — Construction
+// ============================================================================
+
+fn test_beta_new_basic() with Mut, Div, Panic {
+    let b = beta_new(2.0, 3.0)
+    assert(check_near(b.alpha, 2.0, 1e-9))
+    assert(check_near(b.beta, 3.0, 1e-9))
 }
 
-fn main() -> i32 {
-    return run_tests()
+fn test_beta_new_clamp_small() with Mut, Div, Panic {
+    // Params near zero get clamped to epsilon (0.0001)
+    let b = beta_new(0.0, 0.0)
+    assert(b.alpha > 0.0)
+    assert(b.beta > 0.0)
+}
+
+fn test_beta_uniform_prior() with Mut, Div, Panic {
+    let b = beta_uniform()
+    assert(check_near(b.alpha, 1.0, 1e-9))
+    assert(check_near(b.beta, 1.0, 1e-9))
+}
+
+fn test_beta_jeffreys_prior() with Mut, Div, Panic {
+    let b = beta_jeffreys()
+    assert(check_near(b.alpha, 0.5, 1e-9))
+    assert(check_near(b.beta, 0.5, 1e-9))
+}
+
+fn test_beta_weak_prior() with Mut, Div, Panic {
+    let b = beta_weak()
+    assert(check_near(b.alpha, 2.0, 1e-9))
+    assert(check_near(b.beta, 2.0, 1e-9))
+}
+
+// ============================================================================
+// Beta — Mean
+// ============================================================================
+
+fn test_beta_mean_uniform() with Mut, Div, Panic {
+    // Beta(1, 1) uniform: mean = 1/2
+    let b = beta_uniform()
+    assert(check_near(beta_mean(b), 0.5, 1e-9))
+}
+
+fn test_beta_mean_asymmetric() with Mut, Div, Panic {
+    // Beta(2, 3): mean = 2 / (2 + 3) = 0.4
+    let b = beta_new(2.0, 3.0)
+    assert(check_near(beta_mean(b), 0.4, 1e-9))
+}
+
+fn test_beta_mean_high_alpha() with Mut, Div, Panic {
+    // Beta(8, 2): mean = 8 / 10 = 0.8
+    let b = beta_new(8.0, 2.0)
+    assert(check_near(beta_mean(b), 0.8, 1e-9))
+}
+
+// ============================================================================
+// Beta — Variance
+// ============================================================================
+
+fn test_beta_variance_uniform() with Mut, Div, Panic {
+    // Beta(1, 1): Var = 1*1 / (4 * 3) = 1/12 ≈ 0.08333
+    let b = beta_uniform()
+    assert(check_near(beta_variance(b), 1.0 / 12.0, 1e-9))
+}
+
+fn test_beta_variance_decreases_with_data() with Mut, Div, Panic {
+    // More data → smaller variance
+    let b_small = beta_new(2.0, 2.0)
+    let b_large = beta_new(20.0, 20.0)
+    assert(beta_variance(b_large) < beta_variance(b_small))
+}
+
+// ============================================================================
+// Beta — Std
+// ============================================================================
+
+fn test_beta_std_basic() with Mut, Div, Panic {
+    // Beta(2, 3): Var = (2*3)/(25*6) = 6/150 = 0.04 → std = 0.2
+    let b = beta_new(2.0, 3.0)
+    assert(check_near(beta_std(b), 0.2, 1e-6))
+}
+
+fn test_beta_std_nonneg() with Mut, Div, Panic {
+    let b = beta_new(5.0, 5.0)
+    assert(beta_std(b) > 0.0)
+}
+
+// ============================================================================
+// Beta — Sample size
+// ============================================================================
+
+fn test_beta_sample_size() with Mut, Div, Panic {
+    let b = beta_new(3.0, 7.0)
+    assert(check_near(beta_sample_size(b), 10.0, 1e-9))
+}
+
+// ============================================================================
+// Beta — Posterior update
+// ============================================================================
+
+fn test_beta_posterior_basic() with Mut, Div, Panic {
+    // Prior Beta(1,1) + 3 successes + 1 failure → Beta(4, 2)
+    let prior = beta_uniform()
+    let post = beta_posterior(prior, 3, 1)
+    assert(check_near(post.alpha, 4.0, 1e-9))
+    assert(check_near(post.beta, 2.0, 1e-9))
+}
+
+fn test_beta_posterior_mean_shifts() with Mut, Div, Panic {
+    // More successes → mean shifts up
+    let prior = beta_uniform()
+    let post = beta_posterior(prior, 9, 1)
+    // mean = 10 / 12 ≈ 0.833
+    assert(check_near(beta_mean(post), 10.0 / 12.0, 1e-9))
+}
+
+// ============================================================================
+// Beta — Mode
+// ============================================================================
+
+fn test_beta_mode_symmetric() with Mut, Div, Panic {
+    // Beta(3, 3): mode = (3-1) / (6-2) = 0.5
+    let b = beta_new(3.0, 3.0)
+    assert(check_near(beta_mode(b), 0.5, 1e-9))
+}
+
+fn test_beta_mode_asymmetric() with Mut, Div, Panic {
+    // Beta(5, 2): mode = (5-1) / (7-2) = 4/5 = 0.8
+    let b = beta_new(5.0, 2.0)
+    assert(check_near(beta_mode(b), 0.8, 1e-9))
+}
+
+// ============================================================================
+// Beta — CI and risk-adjusted mean
+// ============================================================================
+
+fn test_beta_ci_contains_mean() with Mut, Div, Panic {
+    let b = beta_new(5.0, 5.0)
+    let ci = beta_ci_normal(b, 1.96)
+    let m = beta_mean(b)
+    assert(ci.lo < m)
+    assert(ci.hi > m)
+}
+
+fn test_beta_ci_clamped() with Mut, Div, Panic {
+    // CI bounds are clamped to [0, 1]
+    let b = beta_new(1.0, 100.0)  // very low probability
+    let ci = beta_ci_normal(b, 5.0)  // wide CI
+    assert(ci.lo >= 0.0)
+    assert(ci.hi <= 1.0)
+}
+
+fn test_beta_risk_adjusted_conservative() with Mut, Div, Panic {
+    // Risk-adjusted mean is below regular mean
+    let b = beta_new(3.0, 3.0)
+    let m = beta_mean(b)
+    let r = beta_risk_adjusted_mean(b, 1.0)
+    assert(r < m)
+}
+
+// ============================================================================
+// Main
+// ============================================================================
+
+pub fn main() with Mut, Div, Panic {
+    test_beta_new_basic()
+    test_beta_new_clamp_small()
+    test_beta_uniform_prior()
+    test_beta_jeffreys_prior()
+    test_beta_weak_prior()
+    test_beta_mean_uniform()
+    test_beta_mean_asymmetric()
+    test_beta_mean_high_alpha()
+    test_beta_variance_uniform()
+    test_beta_variance_decreases_with_data()
+    test_beta_std_basic()
+    test_beta_std_nonneg()
+    test_beta_sample_size()
+    test_beta_posterior_basic()
+    test_beta_posterior_mean_shifts()
+    test_beta_mode_symmetric()
+    test_beta_mode_asymmetric()
+    test_beta_ci_contains_mean()
+    test_beta_ci_clamped()
+    test_beta_risk_adjusted_conservative()
 }
