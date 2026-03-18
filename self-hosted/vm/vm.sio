@@ -2140,6 +2140,46 @@ fn vm_step(state: VmState, m: IrModule) -> VmState with Mut, Panic, Div, Alloc, 
         let pair = vm_try_extern_call(st, ins)
         st = pair.0
         st
+    } else if ins.op == IrOpcode::IrLoadFnRef {
+        // Sprint 228: Load function id as an integer value into a register
+        if ins.dst >= 0 && ins.dst < 1024 {
+            st.regs[ins.dst] = val_int(ins.fn_id)
+        }
+        st.pc = st.pc + 1
+        st
+    } else if ins.op == IrOpcode::IrCallIndirect {
+        // Sprint 228: Indirect function call — fn_id comes from register src1
+        let fn_ref_val = if ins.src1 >= 0 && ins.src1 < 1024 { st.regs[ins.src1] } else { val_int(-1) }
+        let target_fn_id = fn_ref_val.i
+
+        if target_fn_id < 0 || target_fn_id >= m.fn_count {
+            if ins.dst >= 0 && ins.dst < 1024 {
+                st.regs[ins.dst] = val_unit()
+            }
+            st.pc = st.pc + 1
+            return st
+        }
+
+        if st.call_depth >= 1024 {
+            st.halted = true
+            st.exit_code = 2
+            return st
+        }
+
+        let frame_i = CallFrame {
+            fn_id: st.current_fn,
+            return_pc: st.pc + 1,
+            return_reg: ins.dst,
+            base_reg: 0,
+        }
+        st.call_stack[st.call_depth] = frame_i
+        st.call_depth = st.call_depth + 1
+
+        let callee_i = m.functions[target_fn_id]
+        st = vm_write_call_args(st, ins, callee_i)
+        st.current_fn = target_fn_id
+        st.pc = 0
+        st
     } else if ins.op == IrOpcode::IrLabel {
         st.pc = st.pc + 1
         st

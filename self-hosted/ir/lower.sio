@@ -2465,6 +2465,19 @@ impl Lowerer {
         IR_INVALID_REG
     }
 
+    // Sprint 228: Look up a function by name in the module. Returns (Lowerer, fn_id) where
+    // fn_id >= 0 if found, -1 if not a known function.
+    fn lookup_fn_by_name(self, name: Name) -> (Lowerer, i64) with Mut, Panic, Div {
+        var i: i64 = 0
+        while i < self.module.fn_count {
+            if ir_name_eq(self.module.functions[i].name, name) {
+                return (self, i)
+            }
+            i = i + 1
+        }
+        (self, -1)
+    }
+
     fn fresh_reg(self) -> (Lowerer, i64) with Mut, Panic, Div {
         var lo = self
         if lo.current_fn < 0 || lo.current_fn >= lo.module.fn_count {
@@ -5345,17 +5358,29 @@ impl Lowerer {
             if src >= 0 {
                 (self, src)
             } else {
-                if self.probe_mode && lower_body_diag_enabled() {
-                    print("lower_probe: ident_miss name=")
-                    print(str_from_bytes(e.name.buf, e.name.len))
-                    print(" scope=")
-                    print_int(self.scope_depth)
-                    print(" local_count=")
-                    print_int(self.locals.count)
-                    print("\n")
+                // Sprint 228: Check if this is a function name used as a first-class value
+                let fn_lookup = self.lookup_fn_by_name(e.name)
+                let lo_fn = fn_lookup.0
+                let fn_id = fn_lookup.1
+                if fn_id >= 0 {
+                    let ref_pair = lo_fn.fresh_reg()
+                    let lo2 = ref_pair.0
+                    let ref_reg = ref_pair.1
+                    let lo3 = lo2.emit(ir_load_fn_ref(ref_reg, fn_id))
+                    (lo3, ref_reg)
+                } else {
+                    if lo_fn.probe_mode && lower_body_diag_enabled() {
+                        print("lower_probe: ident_miss name=")
+                        print(str_from_bytes(e.name.buf, e.name.len))
+                        print(" scope=")
+                        print_int(lo_fn.scope_depth)
+                        print(" local_count=")
+                        print_int(lo_fn.locals.count)
+                        print("\n")
+                    }
+                    let loe = lo_fn.report_error()
+                    loe.emit_unit()
                 }
-                let loe = self.report_error()
-                loe.emit_unit()
             }
         } else if e.kind == ExprKind::ExprPath {
             // Check if this is an enum variant reference (e.g., IrOpcode::IrLoadImm)
@@ -5395,9 +5420,20 @@ impl Lowerer {
             if src >= 0 {
                 (self, src)
             } else {
-                // Could be a function name used as a value — emit unit for now
-                let loe = self.report_error()
-                loe.emit_unit()
+                // Sprint 228: Check if this is a function name used as a first-class value
+                let fn_lookup = self.lookup_fn_by_name(n)
+                let lo_fn = fn_lookup.0
+                let fn_id = fn_lookup.1
+                if fn_id >= 0 {
+                    let ref_pair = lo_fn.fresh_reg()
+                    let lo2 = ref_pair.0
+                    let ref_reg = ref_pair.1
+                    let lo3 = lo2.emit(ir_load_fn_ref(ref_reg, fn_id))
+                    (lo3, ref_reg)
+                } else {
+                    let loe = lo_fn.report_error()
+                    loe.emit_unit()
+                }
             }
         } else if e.kind == ExprKind::ExprCall {
             let callee_opt: Option<Box<Expr>> = e.left
@@ -5488,6 +5524,19 @@ impl Lowerer {
             // Special case: contest witness builtins — lower to compile-time literals/structs.
             if self.contest_witness_kind_from_callee(callee_name) >= 0 {
                 return self.lower_contest_witness_call(e.span, callee_name)
+            }
+            // Sprint 228: If callee is a local variable (fn reference), emit indirect call
+            let callee_local_reg = self.lookup_local(callee_name)
+            if callee_local_reg >= 0 {
+                let pair_args_i: (Lowerer, IrRegList, i64) = self.lower_expr_args_ref(&e.args)
+                let lo_i = pair_args_i.0
+                let args_i: Option<Box<IrRegList>> = if pair_args_i.2 <= 0 { None } else { Some(Box::new(pair_args_i.1)) }
+                let argc_i = pair_args_i.2
+                let pair_d_i = lo_i.fresh_reg()
+                let lo2_i = pair_d_i.0
+                let dst_i = pair_d_i.1
+                let lo3_i = lo2_i.emit(ir_call_indirect(dst_i, callee_local_reg, args_i, argc_i))
+                return (lo3_i, dst_i)
             }
             let pair_fn = self.find_or_add_fn_id(callee_name)
             let lo1 = pair_fn.0
@@ -5801,10 +5850,132 @@ impl Lowerer {
         } else if e.kind == ExprKind::ExprAuditAttach {
             // Named audit attachment is compile-time metadata only; runtime lowering is transparent.
             self.lower_opt_expr_ref(&e.left)
+        } else if e.kind == ExprKind::ExprClosure {
+            // Sprint 228: Lambda-lift closure to a top-level synthetic function.
+            // Non-capturing closures become plain functions; captures are TBD (Phase 2).
+            self.lower_closure_expr_ref(e)
         } else {
             let loe = self.report_error()
             loe.emit_unit()
         }
+    }
+
+    // Sprint 228: Generate a unique closure function name: __closure_<N>
+    fn make_closure_name(self) -> Name with Mut, Panic, Div {
+        var n = ir_empty_name()
+        // "__closure_"
+        n.buf[0] = 95    // '_'
+        n.buf[1] = 95    // '_'
+        n.buf[2] = 99    // 'c'
+        n.buf[3] = 108   // 'l'
+        n.buf[4] = 111   // 'o'
+        n.buf[5] = 115   // 's'
+        n.buf[6] = 117   // 'u'
+        n.buf[7] = 114   // 'r'
+        n.buf[8] = 101   // 'e'
+        n.buf[9] = 95    // '_'
+        n.len = 10
+        // Append fn_count as suffix for uniqueness
+        let suffix = self.module.fn_count
+        if suffix < 10 {
+            n.buf[10] = (48 + suffix) as i8
+            n.len = 11
+        } else if suffix < 100 {
+            n.buf[10] = (48 + suffix / 10) as i8
+            n.buf[11] = (48 + suffix % 10) as i8
+            n.len = 12
+        } else {
+            n.buf[10] = (48 + suffix / 100) as i8
+            n.buf[11] = (48 + (suffix / 10) % 10) as i8
+            n.buf[12] = (48 + suffix % 10) as i8
+            n.len = 13
+        }
+        n
+    }
+
+    // Sprint 228: Lambda-lift a closure expression into a synthetic top-level function.
+    // Returns (Lowerer, fn_ref_reg) where fn_ref_reg holds the fn_id.
+    fn lower_closure_expr_ref(self, e: &Expr) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        // 1. Create a unique name and register the synthetic function
+        let closure_name = self.make_closure_name()
+        let pair_fn = self.find_or_add_fn_id(closure_name)
+        var lo = pair_fn.0
+        let closure_fn_id = pair_fn.1
+
+        if closure_fn_id < 0 {
+            return lo.emit_unit()
+        }
+
+        // 2. Save current function context
+        let saved_fn = lo.current_fn
+        let saved_func = lo.current_func
+        let saved_locals = lo.locals
+        let saved_scope = lo.scope_depth
+        let saved_loop = lo.loop_depth
+
+        // 3. Switch to the closure function context
+        lo.current_fn = closure_fn_id
+        lo.current_func = Box::new(ir_empty_function())
+        (*lo.current_func).name = closure_name
+        lo.locals = Box::new(empty_lower_local_stack())
+        lo.scope_depth = 0
+        lo.loop_depth = 0
+
+        // 4. Set up closure parameters from ClosureParamList
+        var params: &Option<Box<ClosureParamList>> = &e.closure_params
+        while true {
+            match *params {
+                Some(plist) => {
+                    let preg_pair = lo.fresh_reg()
+                    lo = preg_pair.0
+                    let preg = preg_pair.1
+                    if (*lo.current_func).param_count < IR_MAX_PARAMS {
+                        let pc = (*lo.current_func).param_count
+                        (*lo.current_func).param_regs[pc as usize] = preg
+                        (*lo.current_func).param_count = pc + 1
+                    }
+                    lo = lo.bind_local((*plist).head.name, preg, false)
+                    params = &(*plist).tail
+                }
+                _ => break
+            }
+        }
+
+        // 5. Lower the closure body
+        match e.closure_body {
+            Some(body_box) => {
+                let body_pair = lo.lower_expr_ref(&(*body_box))
+                lo = body_pair.0
+                let body_reg = body_pair.1
+                // 6. Emit return with the body's result
+                lo = lo.emit(ir_return(body_reg))
+            }
+            _ => {
+                // Empty body — return unit
+                let unit_pair = lo.emit_unit()
+                lo = unit_pair.0
+                lo = lo.emit(ir_return(unit_pair.1))
+            }
+        }
+
+        // 7. Flush the completed closure function back to the module
+        var module = *lo.module
+        module.functions[closure_fn_id as usize] = *lo.current_func
+        lo.module = Box::new(module)
+
+        // 8. Restore the original function context
+        lo.current_fn = saved_fn
+        lo.current_func = saved_func
+        lo.locals = saved_locals
+        lo.scope_depth = saved_scope
+        lo.loop_depth = saved_loop
+
+        // 9. In the original function, emit IrLoadFnRef to return the fn_id
+        let ref_pair = lo.fresh_reg()
+        lo = ref_pair.0
+        let ref_reg = ref_pair.1
+        lo = lo.emit(ir_load_fn_ref(ref_reg, closure_fn_id))
+        (lo, ref_reg)
     }
 
     fn lower_expr(self, e: Expr) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {

@@ -306,6 +306,49 @@ fn lower_instr(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut, P
         c.code = emit_u32_le(c.code, 0)    // placeholder disp32
         c.relocs = add_data_section_reloc(c.relocs, disp_offset, c.prof_counter_data_base + (counter_id * 8))
         c
+    } else if instr.op == IrOpcode::IrLoadFnRef {
+        // Sprint 228: Load function address via LEA rax, [RIP + disp32] with relocation
+        var c = nc
+        let fn_target = instr.fn_id
+        // LEA rax, [RIP + disp32]:  48 8D 05 <disp32>
+        c.code = emit_byte(c.code, 0x48)   // REX.W
+        c.code = emit_byte(c.code, 0x8D)   // LEA
+        c.code = emit_byte(c.code, 0x05)   // ModR/M: rax, [RIP+disp32]
+        let lea_disp_offset = c.code.len
+        c.code = emit_u32_le(c.code, 0)    // placeholder disp32
+        if fn_target >= 0 {
+            c.relocs = add_call_reloc(c.relocs, lea_disp_offset, fn_target)
+        }
+        // Store function address to destination slot
+        if instr.dst >= 0 {
+            c.code = emit_store_rax_rbp_disp32(c.code, ir_slot_offset(instr.dst))
+        }
+        c
+    } else if instr.op == IrOpcode::IrCallIndirect {
+        // Sprint 228: Indirect function call through register
+        var c = nc
+        let argc = instr.arg_count
+        // Push arguments (same as direct call)
+        c = push_arg_list(c, instr.call_args)
+        // Pop to SysV parameter registers
+        var i = argc - 1
+        if i >= 6 { i = 5 }
+        while i >= 0 {
+            c.code = emit_pop_arg_reg(c.code, i)
+            i = i - 1
+        }
+        // Load function pointer from src1 stack slot into rax
+        if instr.src1 >= 0 {
+            c.code = emit_load_rbp_disp32_rax(c.code, ir_slot_offset(instr.src1))
+        }
+        // CALL rax: FF D0
+        c.code = emit_byte(c.code, 0xFF)
+        c.code = emit_byte(c.code, 0xD0)
+        // Store return value (rax) to destination slot
+        if instr.dst >= 0 {
+            c.code = emit_store_rax_rbp_disp32(c.code, ir_slot_offset(instr.dst))
+        }
+        c
     } else {
         // Unsupported opcode — skip silently for bootstrap
         nc
