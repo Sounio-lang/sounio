@@ -1,0 +1,586 @@
+// stdlib/ml/classifier.sio
+// k-Nearest Neighbors and Gaussian Naive Bayes classifiers
+// with epistemic confidence for multi-class classification.
+//
+// Dataset: up to 256 samples, 8 features, 4 classes.
+// All arrays are fixed-size; shapes tracked via i32 fields.
+//
+// Compiler workaround: functions that accept &![i32; 256] mutable refs
+// must not declare local [f64; N] arrays in the same scope — a type-unifier
+// quirk causes Knowledge[f64] confusion. Use helpers that build float arrays
+// and return them by value instead.
+//
+// References:
+// - Cover & Hart (1967). Nearest Neighbor Pattern Classification. IEEE Trans IT.
+// - John & Langley (1995). Estimating Continuous Distributions in Bayesian
+//   Classifiers. UAI 1995.
+// - Duda, Hart & Stork (2001). Pattern Classification. Wiley.
+
+// ============================================================================
+// Math helpers (must precede callers)
+// ============================================================================
+
+fn clf_abs(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+fn clf_sqrt(x: f64) -> f64 with Panic, Mut, Div {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    y = (y + x / y) / 2.0
+    y = (y + x / y) / 2.0
+    y = (y + x / y) / 2.0
+    y = (y + x / y) / 2.0
+    y = (y + x / y) / 2.0
+    y = (y + x / y) / 2.0
+    y = (y + x / y) / 2.0
+    y = (y + x / y) / 2.0
+    return y
+}
+
+fn clf_exp(x: f64) -> f64 with Panic, Mut, Div {
+    if x > 20.0 {
+        let h = clf_exp(x / 2.0)
+        return h * h
+    }
+    if x < 0.0 - 20.0 { return 1.0 / clf_exp(0.0 - x) }
+    var sum = 1.0
+    var term = 1.0
+    var i: i32 = 1
+    while i < 20 {
+        term = term * x / (i as f64)
+        sum = sum + term
+        i = i + 1
+    }
+    return sum
+}
+
+fn clf_ln(x: f64) -> f64 with Panic, Mut, Div {
+    if x <= 0.0 { return 0.0 - 1000000.0 }
+    var val = x
+    var k = 0.0
+    let e = 2.718281828459045
+    while val > e { val = val / e; k = k + 1.0 }
+    while val < 1.0 / e { val = val * e; k = k - 1.0 }
+    let u = (val - 1.0) / (val + 1.0)
+    let u2 = u * u
+    var s = u
+    var t = u
+    t = t * u2; s = s + t / 3.0
+    t = t * u2; s = s + t / 5.0
+    t = t * u2; s = s + t / 7.0
+    t = t * u2; s = s + t / 9.0
+    t = t * u2; s = s + t / 11.0
+    t = t * u2; s = s + t / 13.0
+    t = t * u2; s = s + t / 15.0
+    return 2.0 * s + k
+}
+
+fn clf_max_f64(a: f64, b: f64) -> f64 {
+    if a > b { a } else { b }
+}
+
+fn clf_min_f64(a: f64, b: f64) -> f64 {
+    if a < b { a } else { b }
+}
+
+// ============================================================================
+// Core data types
+// ============================================================================
+
+// Dataset: up to 256 samples, 8 features, 4 classes.
+// features is row-major: features[i * n_features + j] = sample i, feature j.
+pub struct Dataset {
+    pub features: [f64; 2048],
+    pub labels: [i32; 256],
+    pub n_samples: i32,
+    pub n_features: i32,
+    pub n_classes: i32,
+}
+
+// Classification output: predicted class + epistemic confidence.
+pub struct Prediction {
+    pub class: i32,
+    pub confidence: f64,
+    pub probabilities: [f64; 4],
+}
+
+// Prediction buffer: wraps [i32; 256] so mutable-ref mutations propagate
+// correctly through the JIT interpreter (bare &![i32;256] mutations are
+// invisible to callers — see KNOWN_LIMITATIONS.md §JIT mutable ref bug).
+pub struct PredBuf {
+    pub data: [i32; 256],
+}
+
+// Per-class and aggregate evaluation metrics.
+pub struct ClassifierMetrics {
+    pub accuracy: f64,
+    pub precision: [f64; 4],
+    pub recall: [f64; 4],
+    pub f1: [f64; 4],
+    pub confusion: [i32; 16],
+    pub n_correct: i32,
+    pub n_total: i32,
+}
+
+// Gaussian Naive Bayes model parameters.
+pub struct GaussianNB {
+    pub means: [f64; 32],
+    pub variances: [f64; 32],
+    pub class_priors: [f64; 4],
+    pub n_classes: i32,
+    pub n_features: i32,
+    pub fitted: i32,
+}
+
+// ============================================================================
+// Array helpers (must precede callers)
+// ============================================================================
+
+// Extract row t from a flat [f64; 2048] feature matrix into a [f64; 8] query.
+// Kept as a separate function so that callers with &![i32; 256] mutable refs
+// can call this rather than declaring a local float array in the same scope.
+fn clf_build_query(feat: &[f64; 2048], t: i32, nf: i32) -> [f64; 8] with Panic, Mut, Div {
+    var q: [f64; 8] = [0.0; 8]
+    var j: i32 = 0
+    while j < nf {
+        q[j] = feat[t * nf + j]
+        j = j + 1
+    }
+    return q
+}
+
+// Extract row i from Dataset.features into a [f64; 8].
+fn clf_dataset_row(data: &Dataset, i: i32) -> [f64; 8] with Panic, Mut, Div {
+    var row: [f64; 8] = [0.0; 8]
+    let nf = data.n_features
+    var j: i32 = 0
+    while j < nf {
+        row[j] = data.features[i * nf + j]
+        j = j + 1
+    }
+    return row
+}
+
+// ============================================================================
+// Distance helper
+// ============================================================================
+
+// Euclidean distance between two feature vectors (up to 8 dimensions).
+fn euclidean_dist(a: &[f64; 8], b: &[f64; 8], n_features: i32) -> f64 with Panic, Mut, Div {
+    var sum = 0.0
+    var i: i32 = 0
+    while i < n_features {
+        let d = a[i] - b[i]
+        sum = sum + d * d
+        i = i + 1
+    }
+    return clf_sqrt(sum)
+}
+
+// ============================================================================
+// k-Nearest Neighbors
+// ============================================================================
+
+// knn_predict: find the k nearest training samples and vote by majority.
+// Confidence = fraction of votes cast for the winning class.
+// k is clamped to [1, n_samples]. Ties broken by smallest class index.
+pub fn knn_predict(train: &Dataset, feat_vec: &[f64; 8], k: i32) -> Prediction with Panic, Mut, Div {
+    let n = train.n_samples
+    let nf = train.n_features
+
+    // Clamp k
+    var kk = k
+    if kk < 1 { kk = 1 }
+    if kk > n { kk = n }
+
+    // Compute distances to all training samples
+    var dists: [f64; 256] = [0.0; 256]
+    var i: i32 = 0
+    while i < n {
+        let row = clf_dataset_row(train, i)
+        dists[i] = euclidean_dist(&row, feat_vec, nf)
+        i = i + 1
+    }
+
+    // Partial sort: bubble the k smallest distances to the front (selection sort).
+    var nn_idx: [i32; 256] = [0; 256]
+    i = 0
+    while i < n {
+        nn_idx[i] = i
+        i = i + 1
+    }
+
+    var outer: i32 = 0
+    while outer < kk {
+        var inner = outer + 1
+        while inner < n {
+            if dists[nn_idx[inner]] < dists[nn_idx[outer]] {
+                let tmp = nn_idx[outer]
+                nn_idx[outer] = nn_idx[inner]
+                nn_idx[inner] = tmp
+            }
+            inner = inner + 1
+        }
+        outer = outer + 1
+    }
+
+    // Count votes per class among the k nearest
+    var votes: [i32; 4] = [0; 4]
+    var vi: i32 = 0
+    while vi < kk {
+        let label = train.labels[nn_idx[vi]]
+        if label >= 0 {
+            if label < 4 {
+                votes[label] = votes[label] + 1
+            }
+        }
+        vi = vi + 1
+    }
+
+    // Find winning class (ties broken by smallest index)
+    var best_class: i32 = 0
+    var best_votes: i32 = votes[0]
+    var ci: i32 = 1
+    while ci < 4 {
+        if votes[ci] > best_votes {
+            best_votes = votes[ci]
+            best_class = ci
+        }
+        ci = ci + 1
+    }
+
+    // Confidence = fraction of k votes for winner; probabilities per class
+    let kk_f64 = kk as f64
+    var probs: [f64; 4] = [0.0; 4]
+    var pi: i32 = 0
+    while pi < 4 {
+        probs[pi] = (votes[pi] as f64) / kk_f64
+        pi = pi + 1
+    }
+    let conf = probs[best_class]
+
+    return Prediction {
+        class: best_class,
+        confidence: conf,
+        probabilities: probs,
+    }
+}
+
+// knn_predict_all: predict all n_test samples stored in test_features (row-major,
+// n_features columns). Writes predicted labels to predictions.
+// Returns mean confidence across all predictions as an epistemic quality signal.
+// Note: uses clf_build_query helper to avoid local float array + &![i32;256] clash.
+pub fn knn_predict_all(
+    train: &Dataset,
+    test_features: &[f64; 2048],
+    n_test: i32,
+    n_features: i32,
+    k: i32,
+    buf: &!PredBuf,
+) -> f64 with Panic, Mut, Div {
+    var sum_conf = 0.0
+    var t: i32 = 0
+    while t < n_test {
+        // Build feature vector via helper (avoids local float array in this scope)
+        let fv = clf_build_query(test_features, t, n_features)
+        let pred = knn_predict(train, &fv, k)
+        buf.data[t] = pred.class
+        sum_conf = sum_conf + pred.confidence
+        t = t + 1
+    }
+    if n_test == 0 { return 0.0 }
+    return sum_conf / (n_test as f64)
+}
+
+// ============================================================================
+// Gaussian Naive Bayes
+// ============================================================================
+
+// gnb_new: create an unfitted GaussianNB.
+pub fn gnb_new(n_classes: i32, n_features: i32) -> GaussianNB {
+    return GaussianNB {
+        means: [0.0; 32],
+        variances: [0.0; 32],
+        class_priors: [0.0; 4],
+        n_classes: n_classes,
+        n_features: n_features,
+        fitted: 0,
+    }
+}
+
+// gnb_fit: compute per-class, per-feature means and variances, plus log priors.
+// Returns a new fitted GaussianNB.
+pub fn gnb_fit(nb: GaussianNB, data: &Dataset) -> GaussianNB with Panic, Mut, Div {
+    let nc = nb.n_classes
+    let nf = nb.n_features
+    let n = data.n_samples
+
+    var means: [f64; 32] = [0.0; 32]
+    var variances: [f64; 32] = [0.0; 32]
+    var class_priors: [f64; 4] = [0.0; 4]
+    var counts: [i32; 4] = [0; 4]
+
+    // Pass 1: accumulate sums per class per feature
+    var i: i32 = 0
+    while i < n {
+        let c = data.labels[i]
+        if c >= 0 {
+            if c < nc {
+                counts[c] = counts[c] + 1
+                var j: i32 = 0
+                while j < nf {
+                    means[c * nf + j] = means[c * nf + j] + data.features[i * nf + j]
+                    j = j + 1
+                }
+            }
+        }
+        i = i + 1
+    }
+
+    // Compute means and log priors
+    var c: i32 = 0
+    while c < nc {
+        let cnt = counts[c]
+        if cnt > 0 {
+            class_priors[c] = clf_ln((cnt as f64) / (n as f64))
+            var j: i32 = 0
+            while j < nf {
+                means[c * nf + j] = means[c * nf + j] / (cnt as f64)
+                j = j + 1
+            }
+        } else {
+            class_priors[c] = clf_ln(1.0 / (nc as f64))
+        }
+        c = c + 1
+    }
+
+    // Pass 2: accumulate squared deviations for variance
+    i = 0
+    while i < n {
+        let c2 = data.labels[i]
+        if c2 >= 0 {
+            if c2 < nc {
+                var j: i32 = 0
+                while j < nf {
+                    let diff = data.features[i * nf + j] - means[c2 * nf + j]
+                    variances[c2 * nf + j] = variances[c2 * nf + j] + diff * diff
+                    j = j + 1
+                }
+            }
+        }
+        i = i + 1
+    }
+
+    // Finalise variance; clamp minimum to 1e-9 for numerical stability
+    c = 0
+    while c < nc {
+        let cnt = counts[c]
+        var j: i32 = 0
+        while j < nf {
+            if cnt > 1 {
+                variances[c * nf + j] = variances[c * nf + j] / (cnt as f64)
+            } else {
+                variances[c * nf + j] = 1.0
+            }
+            if variances[c * nf + j] < 0.000000001 {
+                variances[c * nf + j] = 0.000000001
+            }
+            j = j + 1
+        }
+        c = c + 1
+    }
+
+    return GaussianNB {
+        means: means,
+        variances: variances,
+        class_priors: class_priors,
+        n_classes: nc,
+        n_features: nf,
+        fitted: 1,
+    }
+}
+
+// gnb_log_likelihood: log P(x | class c) under Gaussian assumption.
+// Computes sum over features of log N(x_j; mu_cj, sigma^2_cj).
+fn gnb_log_likelihood(nb: &GaussianNB, feat_vec: &[f64; 8], c: i32) -> f64 with Panic, Mut, Div {
+    let nf = nb.n_features
+    var ll = 0.0
+    let pi_const = 3.141592653589793
+    var j: i32 = 0
+    while j < nf {
+        let mu = nb.means[c * nf + j]
+        let sig2 = nb.variances[c * nf + j]
+        let diff = feat_vec[j] - mu
+        // log N(x; mu, sig2) = -0.5*log(2*pi*sig2) - 0.5*(x-mu)^2/sig2
+        let log_norm = 0.0 - 0.5 * clf_ln(2.0 * pi_const * sig2)
+        let log_exp = 0.0 - 0.5 * (diff * diff) / sig2
+        ll = ll + log_norm + log_exp
+        j = j + 1
+    }
+    return ll
+}
+
+// gnb_predict: compute posterior log-probability for each class, convert to
+// softmax probabilities, return the argmax class and its probability.
+pub fn gnb_predict(nb: &GaussianNB, feat_vec: &[f64; 8]) -> Prediction with Panic, Mut, Div {
+    let nc = nb.n_classes
+
+    // Log posteriors: log P(c) + log P(x|c)
+    var log_post: [f64; 4] = [0.0; 4]
+    var c: i32 = 0
+    while c < nc {
+        log_post[c] = nb.class_priors[c] + gnb_log_likelihood(nb, feat_vec, c)
+        c = c + 1
+    }
+
+    // Subtract max for numerical stability before softmax
+    var max_lp = log_post[0]
+    c = 1
+    while c < nc {
+        if log_post[c] > max_lp { max_lp = log_post[c] }
+        c = c + 1
+    }
+
+    // Softmax: exp(log_post - max) / sum
+    var probs: [f64; 4] = [0.0; 4]
+    var sum_exp = 0.0
+    c = 0
+    while c < nc {
+        probs[c] = clf_exp(log_post[c] - max_lp)
+        sum_exp = sum_exp + probs[c]
+        c = c + 1
+    }
+    if sum_exp > 0.0 {
+        c = 0
+        while c < nc {
+            probs[c] = probs[c] / sum_exp
+            c = c + 1
+        }
+    }
+
+    // Argmax class
+    var best_class: i32 = 0
+    var best_prob = probs[0]
+    c = 1
+    while c < nc {
+        if probs[c] > best_prob {
+            best_prob = probs[c]
+            best_class = c
+        }
+        c = c + 1
+    }
+
+    return Prediction {
+        class: best_class,
+        confidence: best_prob,
+        probabilities: probs,
+    }
+}
+
+// gnb_predict_all: predict all n_test samples from a flat feature matrix.
+// Writes predicted labels to predictions. Returns mean confidence.
+// Note: uses clf_build_query helper to avoid float-array + mutable-ref bug.
+pub fn gnb_predict_all(
+    nb: &GaussianNB,
+    test_features: &[f64; 2048],
+    n_test: i32,
+    buf: &!PredBuf,
+) -> f64 with Panic, Mut, Div {
+    var sum_conf = 0.0
+    var t: i32 = 0
+    while t < n_test {
+        let fv = clf_build_query(test_features, t, nb.n_features)
+        let pred = gnb_predict(nb, &fv)
+        buf.data[t] = pred.class
+        sum_conf = sum_conf + pred.confidence
+        t = t + 1
+    }
+    if n_test == 0 { return 0.0 }
+    return sum_conf / (n_test as f64)
+}
+
+// ============================================================================
+// Evaluation
+// ============================================================================
+
+// classifier_evaluate: compute accuracy, confusion matrix, and per-class
+// precision / recall / F1 from two parallel label arrays of length n.
+pub fn classifier_evaluate(
+    true_labels: &[i32; 256],
+    pred_labels: &[i32; 256],
+    n: i32,
+    n_classes: i32,
+) -> ClassifierMetrics with Panic, Mut, Div {
+    // Build 4x4 confusion matrix (row = true class, col = predicted class)
+    var confusion: [i32; 16] = [0; 16]
+    var n_correct: i32 = 0
+
+    var i: i32 = 0
+    while i < n {
+        let t = true_labels[i]
+        let p = pred_labels[i]
+        if t >= 0 {
+            if t < n_classes {
+                if p >= 0 {
+                    if p < n_classes {
+                        confusion[t * n_classes + p] = confusion[t * n_classes + p] + 1
+                    }
+                }
+            }
+        }
+        if t == p { n_correct = n_correct + 1 }
+        i = i + 1
+    }
+
+    let accuracy = if n > 0 { (n_correct as f64) / (n as f64) } else { 0.0 }
+
+    // Per-class precision, recall, F1
+    var precision: [f64; 4] = [0.0; 4]
+    var recall: [f64; 4] = [0.0; 4]
+    var f1: [f64; 4] = [0.0; 4]
+
+    var c: i32 = 0
+    while c < n_classes {
+        // TP = confusion[c][c]
+        let tp = confusion[c * n_classes + c] as f64
+
+        // Column sum: all predicted as c (true positives + false positives)
+        var col_sum = 0.0
+        var r: i32 = 0
+        while r < n_classes {
+            col_sum = col_sum + (confusion[r * n_classes + c] as f64)
+            r = r + 1
+        }
+
+        // Row sum: all actually c (true positives + false negatives)
+        var row_sum = 0.0
+        var k: i32 = 0
+        while k < n_classes {
+            row_sum = row_sum + (confusion[c * n_classes + k] as f64)
+            k = k + 1
+        }
+
+        if col_sum > 0.0 { precision[c] = tp / col_sum } else { precision[c] = 0.0 }
+        if row_sum > 0.0 { recall[c] = tp / row_sum } else { recall[c] = 0.0 }
+
+        let pr = precision[c] + recall[c]
+        if pr > 0.0 {
+            f1[c] = 2.0 * precision[c] * recall[c] / pr
+        } else {
+            f1[c] = 0.0
+        }
+
+        c = c + 1
+    }
+
+    return ClassifierMetrics {
+        accuracy: accuracy,
+        precision: precision,
+        recall: recall,
+        f1: f1,
+        confusion: confusion,
+        n_correct: n_correct,
+        n_total: n,
+    }
+}

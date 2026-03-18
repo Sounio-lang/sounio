@@ -1,0 +1,264 @@
+//@ run-pass
+// Test suite for stdlib/interpolation/spline.sio
+// Tests: SplineCoeffs, EpistemicSpline, spline_fit, spline_eval,
+//        spline_eval_deriv, spline_eval_deriv2, lerp, espline_fit, espline_eval
+
+use interpolation::spline::*
+
+// Absolute value helper
+fn near(a: f64, b: f64, tol: f64) -> bool {
+    let d = a - b
+    let ad = if d < 0.0 { 0.0 - d } else { d }
+    ad < tol
+}
+
+// ============================================================================
+// TEST 1: Linear data y = 2x + 1 — spline must reproduce exactly
+// ============================================================================
+fn test_linear() -> bool with Mut, Div, Panic {
+    var xs: [f64; 64] = [0.0; 64]
+    var ys: [f64; 64] = [0.0; 64]
+    xs[0] = 0.0; ys[0] = 1.0
+    xs[1] = 1.0; ys[1] = 3.0
+    xs[2] = 2.0; ys[2] = 5.0
+    xs[3] = 3.0; ys[3] = 7.0
+    xs[4] = 4.0; ys[4] = 9.0
+
+    let s = spline_fit(&xs, &ys, 5)
+
+    // Evaluate at interior points: spline must match y = 2x+1 exactly
+    if near(spline_eval(&s, 0.5), 2.0, 0.001) == false { return false }
+    if near(spline_eval(&s, 1.5), 4.0, 0.001) == false { return false }
+    if near(spline_eval(&s, 2.5), 6.0, 0.001) == false { return false }
+    if near(spline_eval(&s, 3.5), 8.0, 0.001) == false { return false }
+
+    // Evaluate at knots
+    if near(spline_eval(&s, 0.0), 1.0, 0.001) == false { return false }
+    if near(spline_eval(&s, 4.0), 9.0, 0.001) == false { return false }
+
+    true
+}
+
+// ============================================================================
+// TEST 2: Quadratic y = x^2 — spline must exactly interpolate at knots,
+// and midpoint errors must be bounded (natural BCs cause deviation near edges).
+// ============================================================================
+fn test_quadratic() -> bool with Mut, Div, Panic {
+    var xs: [f64; 64] = [0.0; 64]
+    var ys: [f64; 64] = [0.0; 64]
+    xs[0] = 0.0; ys[0] = 0.0
+    xs[1] = 1.0; ys[1] = 1.0
+    xs[2] = 2.0; ys[2] = 4.0
+    xs[3] = 3.0; ys[3] = 9.0
+    xs[4] = 4.0; ys[4] = 16.0
+
+    let s = spline_fit(&xs, &ys, 5)
+
+    // Spline must interpolate exactly at all knot points.
+    if near(spline_eval(&s, 0.0), 0.0,  0.001) == false { return false }
+    if near(spline_eval(&s, 1.0), 1.0,  0.001) == false { return false }
+    if near(spline_eval(&s, 2.0), 4.0,  0.001) == false { return false }
+    if near(spline_eval(&s, 3.0), 9.0,  0.001) == false { return false }
+    if near(spline_eval(&s, 4.0), 16.0, 0.001) == false { return false }
+
+    // Natural BCs (S''=0 at endpoints) cause the spline to deviate from x^2
+    // (which has S''=2 everywhere). The error is O(h^2) and can be ~0.35 for
+    // h=1 on this dataset. We only verify the interpolation is monotonically
+    // increasing and bounded between neighboring knot values.
+    let v15 = spline_eval(&s, 1.5)
+    // Must be between y(1)=1 and y(2)=4
+    if v15 < 1.0 { return false }
+    if v15 > 4.0 { return false }
+
+    let v25 = spline_eval(&s, 2.5)
+    // Must be between y(2)=4 and y(3)=9
+    if v25 < 4.0 { return false }
+    if v25 > 9.0 { return false }
+
+    true
+}
+
+// ============================================================================
+// TEST 3: Sine data — spline at π/3 should be near sin(π/3) ≈ 0.8660
+// ============================================================================
+fn test_sine() -> bool with Mut, Div, Panic {
+    // sin values at [0, π/4, π/2, 3π/4, π]
+    // π/4 ≈ 0.7854, π/2 ≈ 1.5708, 3π/4 ≈ 2.3562, π ≈ 3.1416
+    var xs: [f64; 64] = [0.0; 64]
+    var ys: [f64; 64] = [0.0; 64]
+    xs[0] = 0.0;      ys[0] = 0.0
+    xs[1] = 0.785398; ys[1] = 0.707107   // sin(π/4)
+    xs[2] = 1.570796; ys[2] = 1.0        // sin(π/2)
+    xs[3] = 2.356194; ys[3] = 0.707107   // sin(3π/4)
+    xs[4] = 3.141593; ys[4] = 0.0        // sin(π)
+
+    let s = spline_fit(&xs, &ys, 5)
+
+    // Evaluate at π/3 ≈ 1.047198; sin(π/3) ≈ 0.866025
+    let v = spline_eval(&s, 1.047198)
+    // Spline through only 5 points is approximate. Natural BCs at endpoints
+    // introduce O(h^2) error; tolerance 0.08 is appropriate.
+    if near(v, 0.866025, 0.08) == false { return false }
+
+    true
+}
+
+// ============================================================================
+// TEST 4: Derivative — for y = 3x + 1 (linear), the first derivative is
+// exactly 3 everywhere and second derivative is 0. Linear data is the
+// sharpest test because the natural cubic spline reproduces affine functions.
+// ============================================================================
+fn test_derivative() -> bool with Mut, Div, Panic {
+    var xs: [f64; 64] = [0.0; 64]
+    var ys: [f64; 64] = [0.0; 64]
+    xs[0] = 0.0; ys[0] = 1.0
+    xs[1] = 1.0; ys[1] = 4.0
+    xs[2] = 2.0; ys[2] = 7.0
+    xs[3] = 3.0; ys[3] = 10.0
+    xs[4] = 4.0; ys[4] = 13.0
+
+    let s = spline_fit(&xs, &ys, 5)
+
+    // First derivative should be 3 everywhere for y = 3x + 1
+    let d1_mid = spline_eval_deriv(&s, 1.5)
+    if near(d1_mid, 3.0, 0.01) == false { return false }
+
+    let d1_at2 = spline_eval_deriv(&s, 2.0)
+    if near(d1_at2, 3.0, 0.01) == false { return false }
+
+    // Second derivative should be 0 everywhere for linear data
+    let d2 = spline_eval_deriv2(&s, 2.0)
+    if near(d2, 0.0, 0.01) == false { return false }
+
+    true
+}
+
+// ============================================================================
+// TEST 5: lerp — simple linear interpolation
+// ============================================================================
+fn test_lerp() -> bool with Mut, Div, Panic {
+    var xs: [f64; 64] = [0.0; 64]
+    var ys: [f64; 64] = [0.0; 64]
+    xs[0] = 0.0; ys[0] = 0.0
+    xs[1] = 2.0; ys[1] = 4.0
+    xs[2] = 4.0; ys[2] = 2.0
+
+    // At midpoint of first interval: x=1 → y should be 2.0
+    let v1 = lerp(&xs, &ys, 3, 1.0)
+    if near(v1, 2.0, 0.001) == false { return false }
+
+    // At midpoint of second interval: x=3 → y should be 3.0
+    let v2 = lerp(&xs, &ys, 3, 3.0)
+    if near(v2, 3.0, 0.001) == false { return false }
+
+    // Clamping: x < xs[0] → ys[0]
+    let vlo = lerp(&xs, &ys, 3, -1.0)
+    if near(vlo, 0.0, 0.001) == false { return false }
+
+    // Clamping: x > xs[2] → ys[2]
+    let vhi = lerp(&xs, &ys, 3, 10.0)
+    if near(vhi, 2.0, 0.001) == false { return false }
+
+    true
+}
+
+// ============================================================================
+// TEST 6: Epistemic — data with u=0.1 → interpolated uncertainty > 0
+// ============================================================================
+fn test_epistemic_nonzero_unc() -> bool with Mut, Div, Panic {
+    var xs: [f64; 64] = [0.0; 64]
+    var ys: [f64; 64] = [0.0; 64]
+    var us: [f64; 64] = [0.0; 64]
+
+    xs[0] = 0.0; ys[0] = 0.0; us[0] = 0.1
+    xs[1] = 1.0; ys[1] = 1.0; us[1] = 0.1
+    xs[2] = 2.0; ys[2] = 4.0; us[2] = 0.1
+    xs[3] = 3.0; ys[3] = 9.0; us[3] = 0.1
+
+    let es = espline_fit(&xs, &ys, &us, 4)
+
+    // Evaluate at midpoint x=1.5: uncertainty must be > 0
+    let r = espline_eval(&es, 1.5)
+    let val = r.0
+    let unc = r.1
+
+    // Value should be plausible (near x^2=2.25)
+    if near(val, 2.25, 0.5) == false { return false }
+
+    // Uncertainty must be positive
+    if unc <= 0.0 { return false }
+
+    true
+}
+
+// ============================================================================
+// TEST 7: Epistemic — larger u → larger interpolation uncertainty
+// ============================================================================
+fn test_epistemic_monotone_unc() -> bool with Mut, Div, Panic {
+    var xs: [f64; 64] = [0.0; 64]
+    var ys: [f64; 64] = [0.0; 64]
+    var us_small: [f64; 64] = [0.0; 64]
+    var us_large: [f64; 64] = [0.0; 64]
+
+    xs[0] = 0.0; ys[0] = 0.0
+    xs[1] = 1.0; ys[1] = 1.0
+    xs[2] = 2.0; ys[2] = 4.0
+    xs[3] = 3.0; ys[3] = 9.0
+
+    var k: i32 = 0
+    while k < 4 {
+        us_small[k] = 0.05
+        us_large[k] = 0.50
+        k = k + 1
+    }
+
+    let es_small = espline_fit(&xs, &ys, &us_small, 4)
+    let es_large = espline_fit(&xs, &ys, &us_large, 4)
+
+    let r_small = espline_eval(&es_small, 1.5)
+    let r_large = espline_eval(&es_large, 1.5)
+
+    // Larger data uncertainty must produce larger interpolation uncertainty
+    if r_large.1 <= r_small.1 { return false }
+
+    true
+}
+
+// ============================================================================
+// TEST 8: Endpoint clamping — outside-range queries use boundary interval
+// ============================================================================
+fn test_endpoint_clamping() -> bool with Mut, Div, Panic {
+    var xs: [f64; 64] = [0.0; 64]
+    var ys: [f64; 64] = [0.0; 64]
+    xs[0] = 0.0; ys[0] = 1.0
+    xs[1] = 1.0; ys[1] = 3.0
+    xs[2] = 2.0; ys[2] = 5.0
+
+    let s = spline_fit(&xs, &ys, 3)
+
+    // Below range: clamp to x=0 → 1.0
+    let vlo = spline_eval(&s, -5.0)
+    if near(vlo, 1.0, 0.001) == false { return false }
+
+    // Above range: clamp to x=2 → 5.0
+    let vhi = spline_eval(&s, 99.0)
+    if near(vhi, 5.0, 0.001) == false { return false }
+
+    true
+}
+
+// ============================================================================
+// MAIN
+// ============================================================================
+
+fn main() -> i32 with Mut, Div, Panic {
+    if test_linear() == false { return 1 }
+    if test_quadratic() == false { return 2 }
+    if test_sine() == false { return 3 }
+    if test_derivative() == false { return 4 }
+    if test_lerp() == false { return 5 }
+    if test_epistemic_nonzero_unc() == false { return 6 }
+    if test_epistemic_monotone_unc() == false { return 7 }
+    if test_endpoint_clamping() == false { return 8 }
+    return 0
+}

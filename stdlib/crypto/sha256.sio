@@ -1,0 +1,375 @@
+//! stdlib/crypto/sha256.sio — SHA-256 (FIPS 180-4) + HMAC-SHA256 (RFC 2104)
+//!
+//! Pure Sounio implementation. No external dependencies.
+//!
+//! References:
+//!   FIPS 180-4 — Secure Hash Standard (SHA-256), NIST, 2015
+//!   RFC 2104   — HMAC: Keyed-Hashing for Message Authentication, 1997
+//!
+//! NOTE: All hash state words are 32-bit unsigned values stored in i64.
+//!       Every arithmetic result is masked with 0xFFFFFFFF to enforce
+//!       32-bit wrap-around on Sounio's 64-bit signed i64.
+
+// ============================================================================
+// PUBLIC TYPES
+// ============================================================================
+
+pub struct SHA256State {
+    h: [i64; 8],         // hash chaining values (H0..H7), 32-bit each
+    buffer: [u8; 64],    // partial message block
+    buf_len: i32,        // bytes currently in buffer (0..63)
+    total_len: i64,      // total message bytes absorbed
+}
+
+pub struct SHA256Digest {
+    bytes: [u8; 32],     // 256-bit hash output
+}
+
+// ============================================================================
+// FIPS 180-4 §4.2.2 — K constants
+// First 32 bits of fractional parts of cube roots of first 64 primes.
+// ============================================================================
+
+fn sha256_k() -> [i64; 64] {
+    let k: [i64; 64] = [
+        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5,
+        0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+        0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3,
+        0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+        0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc,
+        0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+        0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
+        0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+        0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13,
+        0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+        0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3,
+        0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+        0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5,
+        0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+        0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208,
+        0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2
+    ]
+    return k
+}
+
+// ============================================================================
+// BIT OPERATION HELPERS
+// ============================================================================
+
+// Right-rotate 32-bit value stored in i64 by n positions.
+fn rotr32(x: i64, n: i32) -> i64 {
+    let xm = x & 0xFFFFFFFF
+    let right = (xm >> n) & 0xFFFFFFFF
+    let left  = (xm << (32 - n)) & 0xFFFFFFFF
+    return (left | right) & 0xFFFFFFFF
+}
+
+// Logical right shift (no sign extension) of 32-bit value.
+fn shr32(x: i64, n: i32) -> i64 {
+    return (x & 0xFFFFFFFF) >> n
+}
+
+// ============================================================================
+// FIPS 180-4 §4.1.2 — Boolean functions
+// ============================================================================
+
+fn ch(x: i64, y: i64, z: i64) -> i64 {
+    return ((x & y) ^ ((x ^ 0xFFFFFFFF) & 0xFFFFFFFF & z)) & 0xFFFFFFFF
+}
+
+fn maj(x: i64, y: i64, z: i64) -> i64 {
+    return ((x & y) ^ (x & z) ^ (y & z)) & 0xFFFFFFFF
+}
+
+// FIPS 180-4 §4.1.2 — Big-sigma functions (compression)
+fn sigma0(x: i64) -> i64 {
+    return (rotr32(x, 2) ^ rotr32(x, 13) ^ rotr32(x, 22)) & 0xFFFFFFFF
+}
+
+fn sigma1(x: i64) -> i64 {
+    return (rotr32(x, 6) ^ rotr32(x, 11) ^ rotr32(x, 25)) & 0xFFFFFFFF
+}
+
+// FIPS 180-4 §4.1.2 — Small-sigma functions (message schedule)
+fn gamma0(x: i64) -> i64 {
+    return (rotr32(x, 7) ^ rotr32(x, 18) ^ shr32(x, 3)) & 0xFFFFFFFF
+}
+
+fn gamma1(x: i64) -> i64 {
+    return (rotr32(x, 17) ^ rotr32(x, 19) ^ shr32(x, 10)) & 0xFFFFFFFF
+}
+
+// ============================================================================
+// BLOCK COMPRESSION — FIPS 180-4 §6.2.2
+// ============================================================================
+
+// Process one 512-bit block. Returns updated H0..H7.
+fn sha256_compress(h: [i64; 8], block: [u8; 64]) -> [i64; 8] with Mut, Panic, Div {
+    let k = sha256_k()
+
+    // Message schedule W[0..63]
+    var w: [i64; 64] = [0; 64]
+
+    // W[0..15]: big-endian 32-bit words from block bytes
+    var i: i32 = 0
+    while i < 16 {
+        let b0 = block[i * 4 + 0] as i64
+        let b1 = block[i * 4 + 1] as i64
+        let b2 = block[i * 4 + 2] as i64
+        let b3 = block[i * 4 + 3] as i64
+        w[i] = ((b0 << 24) | (b1 << 16) | (b2 << 8) | b3) & 0xFFFFFFFF
+        i = i + 1
+    }
+
+    // W[16..63]: σ1(W[t-2]) + W[t-7] + σ0(W[t-15]) + W[t-16]
+    var t: i32 = 16
+    while t < 64 {
+        let g1 = gamma1(w[t - 2])
+        let g0 = gamma0(w[t - 15])
+        w[t] = (g1 + w[t - 7] + g0 + w[t - 16]) & 0xFFFFFFFF
+        t = t + 1
+    }
+
+    // Working variables a..h
+    var a = h[0]
+    var b = h[1]
+    var c = h[2]
+    var d = h[3]
+    var e = h[4]
+    var f = h[5]
+    var g = h[6]
+    var hh = h[7]
+
+    // 64 rounds
+    var r: i32 = 0
+    while r < 64 {
+        let t1 = (hh + sigma1(e) + ch(e, f, g) + k[r] + w[r]) & 0xFFFFFFFF
+        let t2 = (sigma0(a) + maj(a, b, c)) & 0xFFFFFFFF
+        hh = g
+        g = f
+        f = e
+        e = (d + t1) & 0xFFFFFFFF
+        d = c
+        c = b
+        b = a
+        a = (t1 + t2) & 0xFFFFFFFF
+        r = r + 1
+    }
+
+    // Intermediate hash
+    var out: [i64; 8] = [0; 8]
+    out[0] = (h[0] + a) & 0xFFFFFFFF
+    out[1] = (h[1] + b) & 0xFFFFFFFF
+    out[2] = (h[2] + c) & 0xFFFFFFFF
+    out[3] = (h[3] + d) & 0xFFFFFFFF
+    out[4] = (h[4] + e) & 0xFFFFFFFF
+    out[5] = (h[5] + f) & 0xFFFFFFFF
+    out[6] = (h[6] + g) & 0xFFFFFFFF
+    out[7] = (h[7] + hh) & 0xFFFFFFFF
+    return out
+}
+
+// ============================================================================
+// PUBLIC API
+// ============================================================================
+
+// FIPS 180-4 §5.3.3 — Initial hash values (first 32 bits of sqrt of primes 2..19)
+pub fn sha256_init() -> SHA256State {
+    let h: [i64; 8] = [
+        0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
+        0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19
+    ]
+    let buf: [u8; 64] = [0; 64]
+    SHA256State {
+        h: h,
+        buffer: buf,
+        buf_len: 0,
+        total_len: 0,
+    }
+}
+
+// Absorb up to `len` bytes from `data` into the SHA-256 state.
+// data: fixed 256-byte window; len: actual byte count to consume.
+pub fn sha256_update(state: SHA256State, data: [u8; 256], len: i32) -> SHA256State with Mut, Panic, Div {
+    var s = state
+    var pos: i32 = 0
+
+    while pos < len {
+        // Fill the 64-byte buffer one byte at a time.
+        s.buffer[s.buf_len] = data[pos]
+        s.buf_len = s.buf_len + 1
+        s.total_len = s.total_len + 1
+        pos = pos + 1
+
+        // Compress when buffer is full.
+        if s.buf_len == 64 {
+            s.h = sha256_compress(s.h, s.buffer)
+            s.buf_len = 0
+            // Zero buffer for cleanliness
+            var bi: i32 = 0
+            while bi < 64 {
+                s.buffer[bi] = 0
+                bi = bi + 1
+            }
+        }
+    }
+
+    return s
+}
+
+// Produce the final SHA-256 digest (FIPS 180-4 §5.1.1 padding + §6.2.2).
+pub fn sha256_finalize(state: SHA256State) -> SHA256Digest with Mut, Panic, Div {
+    var s = state
+
+    // Total message length in bits for the length field.
+    let bit_len: i64 = s.total_len * 8
+
+    // Append the 0x80 byte.
+    s.buffer[s.buf_len] = 0x80 as u8
+    s.buf_len = s.buf_len + 1
+
+    // If not enough room for the 8-byte length field, compress and start new block.
+    if s.buf_len > 56 {
+        // Pad with zeros to end of block.
+        while s.buf_len < 64 {
+            s.buffer[s.buf_len] = 0
+            s.buf_len = s.buf_len + 1
+        }
+        s.h = sha256_compress(s.h, s.buffer)
+        s.buf_len = 0
+        var bi: i32 = 0
+        while bi < 64 {
+            s.buffer[bi] = 0
+            bi = bi + 1
+        }
+    }
+
+    // Pad to byte 56.
+    while s.buf_len < 56 {
+        s.buffer[s.buf_len] = 0
+        s.buf_len = s.buf_len + 1
+    }
+
+    // Append 64-bit big-endian message bit length (bytes 56..63).
+    s.buffer[56] = ((bit_len >> 56) & 0xFF) as u8
+    s.buffer[57] = ((bit_len >> 48) & 0xFF) as u8
+    s.buffer[58] = ((bit_len >> 40) & 0xFF) as u8
+    s.buffer[59] = ((bit_len >> 32) & 0xFF) as u8
+    s.buffer[60] = ((bit_len >> 24) & 0xFF) as u8
+    s.buffer[61] = ((bit_len >> 16) & 0xFF) as u8
+    s.buffer[62] = ((bit_len >>  8) & 0xFF) as u8
+    s.buffer[63] = ((bit_len      ) & 0xFF) as u8
+
+    // Final compression.
+    s.h = sha256_compress(s.h, s.buffer)
+
+    // Serialise H0..H7 as big-endian bytes.
+    var digest_bytes: [u8; 32] = [0; 32]
+    var wi: i32 = 0
+    while wi < 8 {
+        let word = s.h[wi]
+        digest_bytes[wi * 4 + 0] = ((word >> 24) & 0xFF) as u8
+        digest_bytes[wi * 4 + 1] = ((word >> 16) & 0xFF) as u8
+        digest_bytes[wi * 4 + 2] = ((word >>  8) & 0xFF) as u8
+        digest_bytes[wi * 4 + 3] = ((word      ) & 0xFF) as u8
+        wi = wi + 1
+    }
+
+    return SHA256Digest { bytes: digest_bytes }
+}
+
+// One-shot hash: init → update → finalize.
+pub fn sha256_hash(data: [u8; 256], len: i32) -> SHA256Digest with Mut, Panic, Div {
+    let s0 = sha256_init()
+    let s1 = sha256_update(s0, data, len)
+    return sha256_finalize(s1)
+}
+
+// ============================================================================
+// HMAC-SHA256 — RFC 2104
+// ============================================================================
+
+// HMAC-SHA256(key, msg).
+// key_len / msg_len: actual lengths (≤ 256 bytes each as stored in fixed arrays).
+pub fn hmac_sha256(key: [u8; 256], key_len: i32, msg: [u8; 256], msg_len: i32) -> SHA256Digest with Mut, Panic, Div {
+    // Step 1: If key > 64 bytes, hash it to get a 32-byte derived key.
+    var k: [u8; 64] = [0; 64]
+
+    if key_len > 64 {
+        // Hash key using sha256_hash (first key_len bytes of key).
+        var key_buf: [u8; 256] = [0; 256]
+        var ki: i32 = 0
+        while ki < key_len {
+            key_buf[ki] = key[ki]
+            ki = ki + 1
+        }
+        let key_digest = sha256_hash(key_buf, key_len)
+        // Use first 32 bytes of hash as key.
+        var di: i32 = 0
+        while di < 32 {
+            k[di] = key_digest.bytes[di]
+            di = di + 1
+        }
+    } else {
+        // Pad key with zeros to 64 bytes.
+        var ki: i32 = 0
+        while ki < key_len {
+            k[ki] = key[ki]
+            ki = ki + 1
+        }
+    }
+
+    // Step 2: Compute ipad = k XOR 0x36 and opad = k XOR 0x5c (both 64 bytes).
+    var ipad: [u8; 64] = [0; 64]
+    var opad: [u8; 64] = [0; 64]
+    var pi: i32 = 0
+    while pi < 64 {
+        ipad[pi] = ((k[pi] as i64) ^ 0x36) as u8
+        opad[pi] = ((k[pi] as i64) ^ 0x5c) as u8
+        pi = pi + 1
+    }
+
+    // Step 3: inner = SHA256(ipad || msg)
+    // We need to stream ipad (64 bytes) then msg into one SHA256 state.
+    var inner = sha256_init()
+
+    // Feed ipad as first 64 bytes.
+    var ipad_buf: [u8; 256] = [0; 256]
+    var ip: i32 = 0
+    while ip < 64 {
+        ipad_buf[ip] = ipad[ip]
+        ip = ip + 1
+    }
+    inner = sha256_update(inner, ipad_buf, 64)
+
+    // Feed message.
+    var msg_buf: [u8; 256] = [0; 256]
+    var mi: i32 = 0
+    while mi < msg_len {
+        msg_buf[mi] = msg[mi]
+        mi = mi + 1
+    }
+    inner = sha256_update(inner, msg_buf, msg_len)
+    let inner_digest = sha256_finalize(inner)
+
+    // Step 4: outer = SHA256(opad || inner_digest)
+    var outer = sha256_init()
+
+    var opad_buf: [u8; 256] = [0; 256]
+    var op: i32 = 0
+    while op < 64 {
+        opad_buf[op] = opad[op]
+        op = op + 1
+    }
+    outer = sha256_update(outer, opad_buf, 64)
+
+    // Feed 32-byte inner hash result.
+    var inner_buf: [u8; 256] = [0; 256]
+    var ii: i32 = 0
+    while ii < 32 {
+        inner_buf[ii] = inner_digest.bytes[ii]
+        ii = ii + 1
+    }
+    outer = sha256_update(outer, inner_buf, 32)
+    return sha256_finalize(outer)
+}

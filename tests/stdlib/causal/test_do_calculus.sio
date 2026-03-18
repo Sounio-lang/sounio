@@ -1,0 +1,664 @@
+//@ run-pass
+//@ description: Pearl's do-calculus — graph construction, backdoor criterion, ATE, IV, sensitivity
+
+// Tests for stdlib/causal/do_calculus.sio
+//
+// All functions are self-contained in do_calculus.sio; this file exercises
+// the public API via a standalone main.
+//
+// Expected outputs verified against:
+//   - Pearl (1993) backdoor criterion definition
+//   - Wald (1940) IV estimator
+//   - Rosenbaum (2002) sensitivity bounds
+
+// ============================================================================
+// COPY OF TYPES AND FUNCTIONS FROM do_calculus.sio
+// (Self-contained: no use/import supported for stdlib submodules in test runner)
+// ============================================================================
+
+// --- Math helpers ---
+
+fn dc_abs(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    x
+}
+
+fn dc_sqrt(x: f64) -> f64 {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i: i32 = 0
+    while i < 15 {
+        y = (y + x / y) / 2.0
+        i = i + 1
+    }
+    y
+}
+
+fn dc_ln(x: f64) -> f64 {
+    if x <= 0.0 { return 0.0 - 1000000.0 }
+    var g = 0.0
+    if x > 1.0 { g = 1.0 }
+    var i: i32 = 0
+    while i < 40 {
+        var eg = 1.0
+        var term = 1.0
+        var j: i32 = 1
+        while j < 25 {
+            term = term * g / (j as f64)
+            eg = eg + term
+            j = j + 1
+        }
+        g = g + (x - eg) / eg
+        i = i + 1
+    }
+    g
+}
+
+fn dc_tanh(x: f64) -> f64 {
+    var cx = x
+    if cx > 20.0 { cx = 20.0 }
+    if cx < 0.0 - 20.0 { cx = 0.0 - 20.0 }
+    let x2 = 2.0 * cx
+    var e2x = 1.0
+    var term = 1.0
+    var i: i32 = 1
+    while i < 30 {
+        term = term * x2 / (i as f64)
+        e2x = e2x + term
+        i = i + 1
+    }
+    (e2x - 1.0) / (e2x + 1.0)
+}
+
+// --- Types ---
+
+struct CausalGraph {
+    adj: [i32; 256],
+    n_nodes: i32,
+    max_nodes: i32,
+}
+
+struct CausalEffect {
+    ate: f64,
+    ate_unc: f64,
+    ci_lower: f64,
+    ci_upper: f64,
+    identified: i32,
+    method_code: i32,
+}
+
+struct AdjustmentSet {
+    nodes: [i32; 16],
+    n_nodes: i32,
+    valid: i32,
+}
+
+struct NodeBits {
+    bits: [i32; 16],
+}
+
+struct NodeList {
+    nodes: [i32; 16],
+    n: i32,
+}
+
+struct RosenBounds {
+    lower: f64,
+    upper: f64,
+}
+
+// --- Graph construction ---
+
+fn causal_graph_new(n_nodes: i32) -> CausalGraph with Mut, Panic {
+    var adj: [i32; 256] = [0; 256]
+    var nn = n_nodes
+    if nn > 16 { nn = 16 }
+    if nn < 0 { nn = 0 }
+    CausalGraph { adj: adj, n_nodes: nn, max_nodes: 16 }
+}
+
+fn causal_add_edge(g: CausalGraph, from: i32, to: i32) -> CausalGraph with Mut, Panic {
+    var adj = g.adj
+    if from >= 0 && from < g.n_nodes && to >= 0 && to < g.n_nodes {
+        adj[from * 16 + to] = 1
+    }
+    CausalGraph { adj: adj, n_nodes: g.n_nodes, max_nodes: g.max_nodes }
+}
+
+fn causal_has_edge(g: &CausalGraph, from: i32, to: i32) -> bool with Panic {
+    if from < 0 || from >= g.n_nodes { return false }
+    if to < 0 || to >= g.n_nodes { return false }
+    g.adj[from * 16 + to] == 1
+}
+
+// --- BFS reachability ---
+
+fn dc_bits_new() -> NodeBits {
+    NodeBits { bits: [0; 16] }
+}
+
+fn dc_bfs_reaches(g: &CausalGraph, start: i32, target: i32) -> bool with Mut, Div, Panic {
+    if start == target { return true }
+    var visited = dc_bits_new()
+    var queue: [i32; 16] = [0; 16]
+    var qhead: i32 = 0
+    var qtail: i32 = 0
+    queue[qtail] = start
+    qtail = qtail + 1
+    visited.bits[start] = 1
+    while qhead < qtail {
+        let cur = queue[qhead]
+        qhead = qhead + 1
+        var j: i32 = 0
+        while j < g.n_nodes {
+            if g.adj[cur * 16 + j] == 1 && visited.bits[j] == 0 {
+                if j == target { return true }
+                visited.bits[j] = 1
+                if qtail < 16 {
+                    queue[qtail] = j
+                    qtail = qtail + 1
+                }
+            }
+            j = j + 1
+        }
+    }
+    false
+}
+
+fn causal_is_ancestor(g: &CausalGraph, anc: i32, desc: i32) -> bool with Mut, Div, Panic {
+    dc_bfs_reaches(g, anc, desc)
+}
+
+fn causal_is_descendant(g: &CausalGraph, desc: i32, anc: i32) -> bool with Mut, Div, Panic {
+    dc_bfs_reaches(g, anc, desc)
+}
+
+fn dc_parents(g: &CausalGraph, node: i32) -> NodeList with Mut, Div, Panic {
+    var nodes: [i32; 16] = [0; 16]
+    var n: i32 = 0
+    var i: i32 = 0
+    while i < g.n_nodes {
+        if g.adj[i * 16 + node] == 1 {
+            if n < 16 { nodes[n] = i; n = n + 1 }
+        }
+        i = i + 1
+    }
+    NodeList { nodes: nodes, n: n }
+}
+
+fn dc_in_adj(adjustment: &AdjustmentSet, z: i32) -> bool with Mut, Div, Panic {
+    var i: i32 = 0
+    while i < adjustment.n_nodes {
+        if adjustment.nodes[i] == z { return true }
+        i = i + 1
+    }
+    false
+}
+
+// --- Backdoor ---
+
+fn causal_backdoor_valid(
+    g: &CausalGraph,
+    treatment: i32,
+    outcome: i32,
+    adjustment: &AdjustmentSet
+) -> bool with Mut, Div, Panic {
+    var i: i32 = 0
+    while i < adjustment.n_nodes {
+        let z = adjustment.nodes[i]
+        if causal_is_descendant(g, z, treatment) { return false }
+        i = i + 1
+    }
+    let pars = dc_parents(g, treatment)
+    var j: i32 = 0
+    while j < pars.n {
+        let p = pars.nodes[j]
+        if dc_in_adj(adjustment, p) == false { return false }
+        j = j + 1
+    }
+    true
+}
+
+fn causal_find_backdoor(
+    g: &CausalGraph,
+    treatment: i32,
+    outcome: i32
+) -> AdjustmentSet with Mut, Div, Panic {
+    var nodes: [i32; 16] = [0; 16]
+    var n: i32 = 0
+    let pars = dc_parents(g, treatment)
+    var i: i32 = 0
+    while i < pars.n {
+        let p = pars.nodes[i]
+        if causal_is_descendant(g, p, treatment) == false {
+            if n < 16 { nodes[n] = p; n = n + 1 }
+        }
+        i = i + 1
+    }
+    var valid: i32 = 1
+    if pars.n > 0 && n == 0 { valid = 0 }
+    AdjustmentSet { nodes: nodes, n_nodes: n, valid: valid }
+}
+
+// --- ATE estimation ---
+
+fn causal_ate_simple(
+    treatment_data: &[f64; 256],
+    outcome_data: &[f64; 256],
+    n: i32
+) -> CausalEffect with Mut, Div, Panic {
+    var t_sum: f64 = 0.0
+    var c_sum: f64 = 0.0
+    var t_n: i32 = 0
+    var c_n: i32 = 0
+    var t_sq: f64 = 0.0
+    var c_sq: f64 = 0.0
+    var i: i32 = 0
+    while i < n {
+        let xi = treatment_data[i]
+        let yi = outcome_data[i]
+        if xi > 0.5 {
+            t_sum = t_sum + yi
+            t_sq = t_sq + yi * yi
+            t_n = t_n + 1
+        } else {
+            c_sum = c_sum + yi
+            c_sq = c_sq + yi * yi
+            c_n = c_n + 1
+        }
+        i = i + 1
+    }
+    var t_mean: f64 = 0.0
+    var c_mean: f64 = 0.0
+    if t_n > 0 { t_mean = t_sum / (t_n as f64) }
+    if c_n > 0 { c_mean = c_sum / (c_n as f64) }
+    let ate = t_mean - c_mean
+    var t_var: f64 = 0.0
+    var c_var: f64 = 0.0
+    if t_n > 1 { t_var = (t_sq - t_sum * t_sum / (t_n as f64)) / ((t_n - 1) as f64) }
+    if c_n > 1 { c_var = (c_sq - c_sum * c_sum / (c_n as f64)) / ((c_n - 1) as f64) }
+    var se: f64 = 0.0
+    if t_n > 0 && c_n > 0 {
+        se = dc_sqrt(t_var / (t_n as f64) + c_var / (c_n as f64))
+    }
+    let ci_lo = ate - 1.96 * se
+    let ci_hi = ate + 1.96 * se
+    CausalEffect {
+        ate: ate, ate_unc: se,
+        ci_lower: ci_lo, ci_upper: ci_hi,
+        identified: 1, method_code: 0,
+    }
+}
+
+fn causal_ate_adjusted(
+    treatment_data: &[f64; 256],
+    outcome_data: &[f64; 256],
+    covariate_data: &[f64; 256],
+    n: i32
+) -> CausalEffect with Mut, Div, Panic {
+    var t0_sum: f64 = 0.0  var c0_sum: f64 = 0.0
+    var t0_n: i32 = 0      var c0_n: i32 = 0
+    var t0_sq: f64 = 0.0   var c0_sq: f64 = 0.0
+    var t1_sum: f64 = 0.0  var c1_sum: f64 = 0.0
+    var t1_n: i32 = 0      var c1_n: i32 = 0
+    var t1_sq: f64 = 0.0   var c1_sq: f64 = 0.0
+    var i: i32 = 0
+    while i < n {
+        let xi = treatment_data[i]
+        let yi = outcome_data[i]
+        let zi = covariate_data[i]
+        if zi < 0.5 {
+            if xi > 0.5 {
+                t0_sum = t0_sum + yi; t0_sq = t0_sq + yi * yi; t0_n = t0_n + 1
+            } else {
+                c0_sum = c0_sum + yi; c0_sq = c0_sq + yi * yi; c0_n = c0_n + 1
+            }
+        } else {
+            if xi > 0.5 {
+                t1_sum = t1_sum + yi; t1_sq = t1_sq + yi * yi; t1_n = t1_n + 1
+            } else {
+                c1_sum = c1_sum + yi; c1_sq = c1_sq + yi * yi; c1_n = c1_n + 1
+            }
+        }
+        i = i + 1
+    }
+    var ate0: f64 = 0.0  var se0: f64 = 0.0
+    var ate1: f64 = 0.0  var se1: f64 = 0.0
+    if t0_n > 0 && c0_n > 0 {
+        let tm0 = t0_sum / (t0_n as f64)
+        let cm0 = c0_sum / (c0_n as f64)
+        ate0 = tm0 - cm0
+        var tv0: f64 = 0.0  var cv0: f64 = 0.0
+        if t0_n > 1 { tv0 = (t0_sq - t0_sum * t0_sum / (t0_n as f64)) / ((t0_n - 1) as f64) }
+        if c0_n > 1 { cv0 = (c0_sq - c0_sum * c0_sum / (c0_n as f64)) / ((c0_n - 1) as f64) }
+        se0 = dc_sqrt(tv0 / (t0_n as f64) + cv0 / (c0_n as f64))
+    }
+    if t1_n > 0 && c1_n > 0 {
+        let tm1 = t1_sum / (t1_n as f64)
+        let cm1 = c1_sum / (c1_n as f64)
+        ate1 = tm1 - cm1
+        var tv1: f64 = 0.0  var cv1: f64 = 0.0
+        if t1_n > 1 { tv1 = (t1_sq - t1_sum * t1_sum / (t1_n as f64)) / ((t1_n - 1) as f64) }
+        if c1_n > 1 { cv1 = (c1_sq - c1_sum * c1_sum / (c1_n as f64)) / ((c1_n - 1) as f64) }
+        se1 = dc_sqrt(tv1 / (t1_n as f64) + cv1 / (c1_n as f64))
+    }
+    let n0 = (t0_n + c0_n) as f64
+    let n1 = (t1_n + c1_n) as f64
+    let total = n0 + n1
+    var w0: f64 = 0.5  var w1: f64 = 0.5
+    if total > 0.0 { w0 = n0 / total; w1 = n1 / total }
+    let ate = w0 * ate0 + w1 * ate1
+    let ate_unc = dc_sqrt(w0 * w0 * se0 * se0 + w1 * w1 * se1 * se1)
+    let ci_lo = ate - 1.96 * ate_unc
+    let ci_hi = ate + 1.96 * ate_unc
+    CausalEffect {
+        ate: ate, ate_unc: ate_unc,
+        ci_lower: ci_lo, ci_upper: ci_hi,
+        identified: 1, method_code: 0,
+    }
+}
+
+fn causal_iv_estimate(
+    z_data: &[f64; 256],
+    x_data: &[f64; 256],
+    y_data: &[f64; 256],
+    n: i32
+) -> CausalEffect with Mut, Div, Panic {
+    var z_sum: f64 = 0.0  var x_sum: f64 = 0.0  var y_sum: f64 = 0.0
+    var i: i32 = 0
+    while i < n {
+        z_sum = z_sum + z_data[i]
+        x_sum = x_sum + x_data[i]
+        y_sum = y_sum + y_data[i]
+        i = i + 1
+    }
+    let nf = n as f64
+    let z_mean = z_sum / nf
+    let x_mean = x_sum / nf
+    let y_mean = y_sum / nf
+    var cov_zx: f64 = 0.0  var cov_zy: f64 = 0.0  var var_z: f64 = 0.0
+    i = 0
+    while i < n {
+        let dz = z_data[i] - z_mean
+        cov_zx = cov_zx + dz * (x_data[i] - x_mean)
+        cov_zy = cov_zy + dz * (y_data[i] - y_mean)
+        var_z = var_z + dz * dz
+        i = i + 1
+    }
+    if n > 1 {
+        let df = (n - 1) as f64
+        cov_zx = cov_zx / df
+        cov_zy = cov_zy / df
+        var_z = var_z / df
+    }
+    if dc_abs(cov_zx) < 0.000001 {
+        return CausalEffect {
+            ate: 0.0, ate_unc: 9999.0,
+            ci_lower: 0.0 - 9999.0, ci_upper: 9999.0,
+            identified: 0, method_code: 2,
+        }
+    }
+    let ate = cov_zy / cov_zx
+    var resid_sq: f64 = 0.0
+    i = 0
+    while i < n {
+        let resid = y_data[i] - y_mean - (cov_zy / var_z) * (z_data[i] - z_mean)
+        resid_sq = resid_sq + resid * resid
+        i = i + 1
+    }
+    var sigma2: f64 = 0.0
+    if n > 2 { sigma2 = resid_sq / ((n - 2) as f64) }
+    let se_iv = dc_sqrt(sigma2 / (nf * cov_zx * cov_zx))
+    let ci_lo = ate - 1.96 * se_iv
+    let ci_hi = ate + 1.96 * se_iv
+    CausalEffect {
+        ate: ate, ate_unc: se_iv,
+        ci_lower: ci_lo, ci_upper: ci_hi,
+        identified: 1, method_code: 2,
+    }
+}
+
+fn causal_sensitivity_rosenbaum(
+    effect: &CausalEffect,
+    gamma: f64
+) -> RosenBounds with Mut, Div, Panic {
+    var g = gamma
+    if g < 1.0 { g = 1.0 }
+    let bias = dc_tanh(dc_ln(g) / 2.0)
+    let half_width = bias * effect.ate_unc * 1.96
+    RosenBounds {
+        lower: effect.ci_lower - half_width,
+        upper: effect.ci_upper + half_width,
+    }
+}
+
+// ============================================================================
+// TEST RUNNER
+// ============================================================================
+
+fn main() with IO, Mut, Div, Panic {
+    var pass: i32 = 0
+    var fail: i32 = 0
+
+    println("=== test_do_calculus.sio ===")
+    println("")
+
+    // -------------------------------------------------------------------
+    // Test 1: Graph construction — fork X←Z→Y plus X→Y
+    // -------------------------------------------------------------------
+    println("Test 1: Graph construction (fork X<-Z->Y, X->Y)")
+    var g = causal_graph_new(3)
+    g = causal_add_edge(g, 0, 1)
+    g = causal_add_edge(g, 0, 2)
+    g = causal_add_edge(g, 1, 2)
+
+    if causal_has_edge(&g, 0, 1) { pass = pass + 1; println("  PASS: Z->X") }
+    else { fail = fail + 1; println("  FAIL: Z->X missing") }
+
+    if causal_has_edge(&g, 0, 2) { pass = pass + 1; println("  PASS: Z->Y") }
+    else { fail = fail + 1; println("  FAIL: Z->Y missing") }
+
+    if causal_has_edge(&g, 1, 2) { pass = pass + 1; println("  PASS: X->Y") }
+    else { fail = fail + 1; println("  FAIL: X->Y missing") }
+
+    if causal_has_edge(&g, 2, 0) == false { pass = pass + 1; println("  PASS: no Y->Z (correct)") }
+    else { fail = fail + 1; println("  FAIL: spurious Y->Z") }
+    println("")
+
+    // -------------------------------------------------------------------
+    // Test 2: Backdoor criterion — {Z} valid for X->Y
+    // -------------------------------------------------------------------
+    println("Test 2: Backdoor criterion")
+    let adj_z = AdjustmentSet {
+        nodes: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        n_nodes: 1, valid: 1,
+    }
+    if causal_backdoor_valid(&g, 1, 2, &adj_z) {
+        pass = pass + 1; println("  PASS: {Z} satisfies backdoor for X->Y")
+    } else {
+        fail = fail + 1; println("  FAIL: {Z} should satisfy backdoor")
+    }
+
+    let adj_empty = AdjustmentSet {
+        nodes: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        n_nodes: 0, valid: 0,
+    }
+    if causal_backdoor_valid(&g, 1, 2, &adj_empty) == false {
+        pass = pass + 1; println("  PASS: empty set fails backdoor check")
+    } else {
+        fail = fail + 1; println("  FAIL: empty set should not satisfy backdoor")
+    }
+
+    let found = causal_find_backdoor(&g, 1, 2)
+    if found.n_nodes == 1 && found.nodes[0] == 0 {
+        pass = pass + 1; println("  PASS: find_backdoor = {Z=0}")
+    } else {
+        fail = fail + 1
+        print("  FAIL: expected {Z}, n_nodes=")
+        println(found.n_nodes)
+    }
+    println("")
+
+    // -------------------------------------------------------------------
+    // Test 3: Descendant check — mediator M in X→M→Y
+    // -------------------------------------------------------------------
+    println("Test 3: Descendant / mediator check")
+    var gm = causal_graph_new(3)
+    gm = causal_add_edge(gm, 0, 1)   // X->M
+    gm = causal_add_edge(gm, 1, 2)   // M->Y
+
+    if causal_is_descendant(&gm, 1, 0) {
+        pass = pass + 1; println("  PASS: M is descendant of X")
+    } else {
+        fail = fail + 1; println("  FAIL: M should be descendant of X")
+    }
+
+    let adj_m = AdjustmentSet {
+        nodes: [1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        n_nodes: 1, valid: 1,
+    }
+    if causal_backdoor_valid(&gm, 0, 2, &adj_m) == false {
+        pass = pass + 1; println("  PASS: {M} correctly rejected as backdoor adj")
+    } else {
+        fail = fail + 1; println("  FAIL: {M} should be invalid (mediator)")
+    }
+    println("")
+
+    // -------------------------------------------------------------------
+    // Test 4: Simple ATE — treatment=[0,0,0,1,1,1], outcome=[1,2,1,4,5,6]
+    // ATE = 5.0 - 4/3 ≈ 3.667
+    // -------------------------------------------------------------------
+    println("Test 4: Simple ATE (naive, no adjustment)")
+    var t_data: [f64; 256] = [0.0; 256]
+    var o_data: [f64; 256] = [0.0; 256]
+    t_data[0] = 0.0  t_data[1] = 0.0  t_data[2] = 0.0
+    t_data[3] = 1.0  t_data[4] = 1.0  t_data[5] = 1.0
+    o_data[0] = 1.0  o_data[1] = 2.0  o_data[2] = 1.0
+    o_data[3] = 4.0  o_data[4] = 5.0  o_data[5] = 6.0
+
+    let eff4 = causal_ate_simple(&t_data, &o_data, 6)
+    print("  ATE = ")
+    println(eff4.ate)
+    if eff4.ate > 3.5 && eff4.ate < 3.8 {
+        pass = pass + 1; println("  PASS: ATE ≈ 3.67")
+    } else {
+        fail = fail + 1; print("  FAIL: ATE out of range: "); println(eff4.ate)
+    }
+    if eff4.identified == 1 { pass = pass + 1; println("  PASS: identified=1") }
+    else { fail = fail + 1; println("  FAIL: identified should be 1") }
+    println("")
+
+    // -------------------------------------------------------------------
+    // Test 5: Adjusted ATE via stratification
+    // Stratum-level ATE ≈ 2.0 in both; combined ≈ 2.0
+    // -------------------------------------------------------------------
+    println("Test 5: Adjusted ATE (stratified by Z)")
+    var t5: [f64; 256] = [0.0; 256]
+    var o5: [f64; 256] = [0.0; 256]
+    var z5: [f64; 256] = [0.0; 256]
+    t5[0] = 0.0  o5[0] = 1.0  z5[0] = 0.0
+    t5[1] = 0.0  o5[1] = 2.0  z5[1] = 0.0
+    t5[2] = 0.0  o5[2] = 1.5  z5[2] = 0.0
+    t5[3] = 1.0  o5[3] = 3.0  z5[3] = 0.0
+    t5[4] = 1.0  o5[4] = 4.0  z5[4] = 0.0
+    t5[5] = 1.0  o5[5] = 3.5  z5[5] = 0.0
+    t5[6]  = 0.0  o5[6]  = 5.0  z5[6]  = 1.0
+    t5[7]  = 0.0  o5[7]  = 6.0  z5[7]  = 1.0
+    t5[8]  = 0.0  o5[8]  = 5.5  z5[8]  = 1.0
+    t5[9]  = 1.0  o5[9]  = 7.0  z5[9]  = 1.0
+    t5[10] = 1.0  o5[10] = 8.0  z5[10] = 1.0
+    t5[11] = 1.0  o5[11] = 7.5  z5[11] = 1.0
+
+    let eff5 = causal_ate_adjusted(&t5, &o5, &z5, 12)
+    print("  Adjusted ATE = ")
+    println(eff5.ate)
+    if eff5.ate > 1.5 && eff5.ate < 2.5 {
+        pass = pass + 1; println("  PASS: adjusted ATE ≈ 2.0")
+    } else {
+        fail = fail + 1; print("  FAIL: adjusted ATE out of range: "); println(eff5.ate)
+    }
+    print("  u_c = ")
+    println(eff5.ate_unc)
+    if eff5.ate_unc >= 0.0 {
+        pass = pass + 1; println("  PASS: uncertainty non-negative")
+    } else {
+        fail = fail + 1; println("  FAIL: negative uncertainty")
+    }
+    println("")
+
+    // -------------------------------------------------------------------
+    // Test 6: IV (Wald) estimator — X=0.8*Z, Y=2*X → IV ≈ 2.0
+    // -------------------------------------------------------------------
+    println("Test 6: IV estimate (Wald)")
+    var z6: [f64; 256] = [0.0; 256]
+    var x6: [f64; 256] = [0.0; 256]
+    var y6: [f64; 256] = [0.0; 256]
+    var i6: i32 = 0
+    while i6 < 20 {
+        var z_val: f64 = 0.0
+        if (i6 % 2) == 1 { z_val = 1.0 }
+        let x_val = 0.8 * z_val
+        let y_val = 2.0 * x_val
+        z6[i6] = z_val
+        x6[i6] = x_val
+        y6[i6] = y_val
+        i6 = i6 + 1
+    }
+    let eff6 = causal_iv_estimate(&z6, &x6, &y6, 20)
+    print("  IV ATE = ")
+    println(eff6.ate)
+    if dc_abs(eff6.ate - 2.0) < 0.01 {
+        pass = pass + 1; println("  PASS: IV ≈ 2.0")
+    } else {
+        fail = fail + 1; print("  FAIL: IV expected 2.0, got "); println(eff6.ate)
+    }
+    if eff6.identified == 1 {
+        pass = pass + 1; println("  PASS: instrument valid")
+    } else {
+        fail = fail + 1; println("  FAIL: identified should be 1")
+    }
+    println("")
+
+    // -------------------------------------------------------------------
+    // Test 7: Rosenbaum sensitivity bounds widen with Gamma
+    // -------------------------------------------------------------------
+    println("Test 7: Rosenbaum sensitivity bounds")
+    let eff7 = CausalEffect {
+        ate: 1.0, ate_unc: 0.2,
+        ci_lower: 1.0 - 1.96 * 0.2,
+        ci_upper: 1.0 + 1.96 * 0.2,
+        identified: 1, method_code: 0,
+    }
+    let b1 = causal_sensitivity_rosenbaum(&eff7, 1.0)
+    let b2 = causal_sensitivity_rosenbaum(&eff7, 2.0)
+    let b3 = causal_sensitivity_rosenbaum(&eff7, 4.0)
+
+    // Gamma=1 → bounds equal original CI
+    if dc_abs(b1.lower - eff7.ci_lower) < 0.001 && dc_abs(b1.upper - eff7.ci_upper) < 0.001 {
+        pass = pass + 1; println("  PASS: Gamma=1 → bounds = original CI")
+    } else {
+        fail = fail + 1
+        print("  FAIL: Gamma=1 bounds wrong: [")
+        print(b1.lower); print(", "); print(b1.upper); println("]")
+    }
+
+    let w1 = b1.upper - b1.lower
+    let w2 = b2.upper - b2.lower
+    let w3 = b3.upper - b3.lower
+    if w2 > w1 && w3 > w2 {
+        pass = pass + 1; println("  PASS: bounds widen monotonically with Gamma")
+    } else {
+        fail = fail + 1; println("  FAIL: bounds should widen with Gamma")
+    }
+    println("")
+
+    // -------------------------------------------------------------------
+    // Summary
+    // -------------------------------------------------------------------
+    println("===========================")
+    print("PASS: ")
+    println(pass)
+    print("FAIL: ")
+    println(fail)
+    println("===========================")
+}

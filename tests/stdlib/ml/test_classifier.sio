@@ -1,0 +1,277 @@
+//@ run-pass
+// Tests for stdlib/ml/classifier.sio
+//
+// Dataset: 10 points in 2D (using n_features=2 from an 8-feature buffer).
+//   Class 0: points near (1,1) — clearly separated from class 1
+//   Class 1: points near (5,5)
+//
+// Expected: k-NN and Gaussian NB both achieve perfect accuracy on this
+// linearly separable dataset.
+
+use ml::classifier::*;
+
+// ============================================================================
+// Tolerance helper
+// ============================================================================
+
+fn near(a: f64, b: f64, tol: f64) -> bool with Panic, Mut, Div {
+    let d = a - b
+    let ad = if d < 0.0 { 0.0 - d } else { d }
+    return ad < tol
+}
+
+// ============================================================================
+// Build the test dataset
+// ============================================================================
+
+// 10 samples, 2 features, 2 classes.
+// Features stored in [f64; 2048] row-major: features[i*2 + j].
+fn make_dataset() -> Dataset with Panic, Mut, Div {
+    var features: [f64; 2048] = [0.0; 2048]
+    var labels: [i32; 256] = [0; 256]
+
+    // Class 0: near (1, 1)
+    features[0] = 0.9; features[1] = 1.1; labels[0] = 0
+    features[2] = 1.1; features[3] = 0.9; labels[1] = 0
+    features[4] = 0.8; features[5] = 1.2; labels[2] = 0
+    features[6] = 1.0; features[7] = 1.0; labels[3] = 0
+    features[8] = 1.2; features[9] = 0.8; labels[4] = 0
+
+    // Class 1: near (5, 5)
+    features[10] = 4.9; features[11] = 5.1; labels[5] = 1
+    features[12] = 5.1; features[13] = 4.9; labels[6] = 1
+    features[14] = 4.8; features[15] = 5.2; labels[7] = 1
+    features[16] = 5.0; features[17] = 5.0; labels[8] = 1
+    features[18] = 5.2; features[19] = 4.8; labels[9] = 1
+
+    return Dataset {
+        features: features,
+        labels: labels,
+        n_samples: 10,
+        n_features: 2,
+        n_classes: 2,
+    }
+}
+
+// ============================================================================
+// Test 1: k-NN k=3 predicts (1,1) → class 0
+// ============================================================================
+
+fn test_knn_class0(train: &Dataset) -> bool with Panic, Mut, Div {
+    var fv: [f64; 8] = [0.0; 8]
+    fv[0] = 1.0; fv[1] = 1.0
+    let pred = knn_predict(train, &fv, 3)
+    return pred.class == 0
+}
+
+// ============================================================================
+// Test 2: k-NN k=3 predicts (5,5) → class 1
+// ============================================================================
+
+fn test_knn_class1(train: &Dataset) -> bool with Panic, Mut, Div {
+    var fv: [f64; 8] = [0.0; 8]
+    fv[0] = 5.0; fv[1] = 5.0
+    let pred = knn_predict(train, &fv, 3)
+    return pred.class == 1
+}
+
+// ============================================================================
+// Test 3: k-NN confidence > 0.9 for clear separations
+// ============================================================================
+
+fn test_knn_confidence(train: &Dataset) -> bool with Panic, Mut, Div {
+    var fv0: [f64; 8] = [0.0; 8]
+    fv0[0] = 1.0; fv0[1] = 1.0
+    let p0 = knn_predict(train, &fv0, 3)
+
+    var fv1: [f64; 8] = [0.0; 8]
+    fv1[0] = 5.0; fv1[1] = 5.0
+    let p1 = knn_predict(train, &fv1, 3)
+
+    return p0.confidence > 0.9 && p1.confidence > 0.9
+}
+
+// ============================================================================
+// Test 4: k-NN accuracy on training data = 1.0
+// Note: uses PredBuf struct wrapper so mutations propagate via JIT.
+// ============================================================================
+
+fn test_knn_accuracy(train: &Dataset) -> bool with Panic, Mut, Div {
+    // Copy training features into a test feature buffer
+    var test_feat: [f64; 2048] = [0.0; 2048]
+    var i: i32 = 0
+    while i < 10 {
+        test_feat[i * 2] = train.features[i * 2]
+        test_feat[i * 2 + 1] = train.features[i * 2 + 1]
+        i = i + 1
+    }
+    var buf = PredBuf { data: [0; 256] }
+    let _conf = knn_predict_all(train, &test_feat, 10, 2, 3, &!buf)
+    var correct: i32 = 0
+    var j: i32 = 0
+    while j < 10 {
+        if buf.data[j] == train.labels[j] { correct = correct + 1 }
+        j = j + 1
+    }
+    return correct == 10
+}
+
+// ============================================================================
+// Test 5: Gaussian NB fit + predict (1,1) → class 0
+// ============================================================================
+
+fn test_gnb_class0(train: &Dataset) -> bool with Panic, Mut, Div {
+    let nb0 = gnb_new(2, 2)
+    let nb = gnb_fit(nb0, train)
+    var fv: [f64; 8] = [0.0; 8]
+    fv[0] = 1.0; fv[1] = 1.0
+    let pred = gnb_predict(&nb, &fv)
+    return pred.class == 0
+}
+
+// ============================================================================
+// Test 6: Gaussian NB predict (5,5) → class 1
+// ============================================================================
+
+fn test_gnb_class1(train: &Dataset) -> bool with Panic, Mut, Div {
+    let nb0 = gnb_new(2, 2)
+    let nb = gnb_fit(nb0, train)
+    var fv: [f64; 8] = [0.0; 8]
+    fv[0] = 5.0; fv[1] = 5.0
+    let pred = gnb_predict(&nb, &fv)
+    return pred.class == 1
+}
+
+// ============================================================================
+// Test 7: GNB accuracy on training data = 1.0
+// ============================================================================
+
+fn test_gnb_accuracy(train: &Dataset) -> bool with Panic, Mut, Div {
+    let nb0 = gnb_new(2, 2)
+    let nb = gnb_fit(nb0, train)
+    var test_feat: [f64; 2048] = [0.0; 2048]
+    var i: i32 = 0
+    while i < 10 {
+        test_feat[i * 2] = train.features[i * 2]
+        test_feat[i * 2 + 1] = train.features[i * 2 + 1]
+        i = i + 1
+    }
+    var buf = PredBuf { data: [0; 256] }
+    let _conf = gnb_predict_all(&nb, &test_feat, 10, &!buf)
+    var correct: i32 = 0
+    var j: i32 = 0
+    while j < 10 {
+        if buf.data[j] == train.labels[j] { correct = correct + 1 }
+        j = j + 1
+    }
+    return correct == 10
+}
+
+// ============================================================================
+// Test 8: ClassifierMetrics — precision/recall/F1 all ≈ 1.0
+// ============================================================================
+
+fn test_metrics(train: &Dataset) -> bool with Panic, Mut, Div {
+    // Perfect predictions: pred_lbl[i] = true_lbl[i] for all i
+    var true_lbl: [i32; 256] = [0; 256]
+    var pred_lbl: [i32; 256] = [0; 256]
+    var i: i32 = 0
+    while i < 10 {
+        true_lbl[i] = train.labels[i]
+        pred_lbl[i] = train.labels[i]
+        i = i + 1
+    }
+    let m = classifier_evaluate(&true_lbl, &pred_lbl, 10, 2)
+    if m.accuracy < 0.999 { return false }
+    if m.precision[0] < 0.999 { return false }
+    if m.recall[0] < 0.999 { return false }
+    if m.f1[0] < 0.999 { return false }
+    if m.precision[1] < 0.999 { return false }
+    if m.recall[1] < 0.999 { return false }
+    if m.f1[1] < 0.999 { return false }
+    return true
+}
+
+// ============================================================================
+// Test 9: Confusion matrix — only diagonal entries non-zero
+// ============================================================================
+
+fn test_confusion_diagonal(train: &Dataset) -> bool with Panic, Mut, Div {
+    var true_lbl: [i32; 256] = [0; 256]
+    var pred_lbl: [i32; 256] = [0; 256]
+    var i: i32 = 0
+    while i < 10 {
+        true_lbl[i] = train.labels[i]
+        pred_lbl[i] = train.labels[i]
+        i = i + 1
+    }
+    let m = classifier_evaluate(&true_lbl, &pred_lbl, 10, 2)
+    // 2-class confusion layout: row=true, col=pred
+    // confusion[0] = TP0, confusion[1] = FP(0→1),
+    // confusion[2] = FP(1→0), confusion[3] = TP1
+    if m.confusion[1] != 0 { return false }
+    if m.confusion[2] != 0 { return false }
+    if m.confusion[0] != 5 { return false }
+    if m.confusion[3] != 5 { return false }
+    return true
+}
+
+// ============================================================================
+// Test 10: Edge case — midpoint (3,3) — k-NN returns a valid class
+// ============================================================================
+
+fn test_knn_midpoint(train: &Dataset) -> bool with Panic, Mut, Div {
+    var fv: [f64; 8] = [0.0; 8]
+    fv[0] = 3.0; fv[1] = 3.0
+    let pred = knn_predict(train, &fv, 3)
+    return pred.class >= 0 && pred.class < 2
+}
+
+// ============================================================================
+// Test 11: GNB probability sum ≈ 1.0
+// ============================================================================
+
+fn test_gnb_prob_sum(train: &Dataset) -> bool with Panic, Mut, Div {
+    let nb0 = gnb_new(2, 2)
+    let nb = gnb_fit(nb0, train)
+    var fv: [f64; 8] = [0.0; 8]
+    fv[0] = 1.0; fv[1] = 1.0
+    let pred = gnb_predict(&nb, &fv)
+    let total = pred.probabilities[0] + pred.probabilities[1]
+    return near(total, 1.0, 0.001)
+}
+
+// ============================================================================
+// Test 12: k-NN probability sum ≈ 1.0
+// ============================================================================
+
+fn test_knn_prob_sum(train: &Dataset) -> bool with Panic, Mut, Div {
+    var fv: [f64; 8] = [0.0; 8]
+    fv[0] = 1.0; fv[1] = 1.0
+    let pred = knn_predict(train, &fv, 3)
+    let total = pred.probabilities[0] + pred.probabilities[1]
+    return near(total, 1.0, 0.001)
+}
+
+// ============================================================================
+// Main: return 0 on all pass, test-number on first failure
+// ============================================================================
+
+fn main() -> i32 with Panic, Mut, Div {
+    let train = make_dataset()
+
+    if !test_knn_class0(&train) { return 1 }
+    if !test_knn_class1(&train) { return 2 }
+    if !test_knn_confidence(&train) { return 3 }
+    if !test_knn_accuracy(&train) { return 4 }
+    if !test_gnb_class0(&train) { return 5 }
+    if !test_gnb_class1(&train) { return 6 }
+    if !test_gnb_accuracy(&train) { return 7 }
+    if !test_metrics(&train) { return 8 }
+    if !test_confusion_diagonal(&train) { return 9 }
+    if !test_knn_midpoint(&train) { return 10 }
+    if !test_gnb_prob_sum(&train) { return 11 }
+    if !test_knn_prob_sum(&train) { return 12 }
+
+    return 0
+}
