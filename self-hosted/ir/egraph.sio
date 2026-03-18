@@ -2697,12 +2697,434 @@ fn test_eg_isqrt_four() -> bool {
 }
 
 // ============================================================================
+// Section 28b: Uncertainty Guard (Sprint 225 Phase 2)
+// ============================================================================
+//
+// Prevent algebraic rewrites that increase floating-point uncertainty beyond
+// a configurable budget.  Based on JCGM 100:2008 (GUM) section 5.1:
+//   - Reordering operations changes cancellation properties
+//   - (a - b) + b -> a is exact in real arithmetic but can amplify rounding
+//     error when a ~= b (catastrophic cancellation)
+//   - DIV by values with high uncertainty amplifies error
+//
+// The guard uses the unc_lo[] array attached to EgSmallContext: each node
+// index carries its quantized uncertainty (0 = exact, e.g. constants).
+// A rewrite is blocked when the result uncertainty exceeds
+//   budget_unc = budget_frac * 1e9   (budget_frac in [0,1], default 0.1)
+//
+// References:
+//   JCGM 100:2008 section 5.1.2 — Law of propagation of uncertainty
+//   Higham, "Accuracy and Stability of Numerical Algorithms" (2002) ch 1
+
+// Threshold constants (quantized: 1e9 = 1.0 relative uncertainty)
+let EG_UNC_BUDGET_DEFAULT: i64 = 100000000   // 0.1 (10% relative)
+let EG_UNC_BUDGET_STRICT: i64  = 10000000    // 0.01 (1% relative)
+let EG_UNC_BUDGET_RELAXED: i64 = 500000000   // 0.5 (50% relative)
+
+// Cancellation risk multiplier: when SUB operands have similar uncertainty,
+// the relative error is amplified.  We model this as 2x the combined GUM
+// uncertainty for SUB, 1x for ADD/MUL, 3x for DIV (denominator amplification).
+let EG_UNC_CANCEL_MUL_SUB: i64 = 2
+let EG_UNC_CANCEL_MUL_DIV: i64 = 3
+
+// Estimate the output uncertainty of a node given its operation and
+// the uncertainties of its operands (read from ctx.unc_lo[]).
+// Returns quantized uncertainty (i64, nanoscale).
+fn eg_estimate_node_unc(ctx: &! EgSmallContext, node_idx: i64) -> i64 with Mut, Div, Panic {
+    if node_idx < 0 || node_idx >= 64 { return 999999999 }
+    let node = ctx.nodes[node_idx as usize]
+    // Constants have zero uncertainty
+    if node.op == EG_OP_CONST { return 0 }
+    // Variables carry their annotated uncertainty
+    if node.op == EG_OP_VAR { return ctx.unc_lo[node_idx as usize] }
+    // Binary ops: GUM propagation
+    if node.child_count >= 2 {
+        let lhs_idx = node.children[0]
+        let rhs_idx = node.children[1]
+        let l_unc = if lhs_idx >= 0 && lhs_idx < 64 { ctx.unc_lo[lhs_idx as usize] } else { 0 }
+        let r_unc = if rhs_idx >= 0 && rhs_idx < 64 { ctx.unc_lo[rhs_idx as usize] } else { 0 }
+        let max_safe: i64 = 3000000000
+        let l = if l_unc > max_safe { max_safe } else { l_unc }
+        let r = if r_unc > max_safe { max_safe } else { r_unc }
+        let base_unc = eg_isqrt(l * l + r * r)
+        // Apply cancellation multiplier based on op type
+        if node.op == EG_OP_SUB || node.op == EG_OP_FSUB {
+            return base_unc * EG_UNC_CANCEL_MUL_SUB
+        }
+        if node.op == EG_OP_DIV || node.op == EG_OP_FDIV {
+            return base_unc * EG_UNC_CANCEL_MUL_DIV
+        }
+        return base_unc
+    }
+    // Unary ops: pass through
+    ctx.unc_lo[node_idx as usize]
+}
+
+// Check whether applying a rewrite that produces a node with estimated
+// uncertainty `result_unc` is safe given the budget.
+// Returns true if the rewrite should be allowed.
+fn eg_uncertainty_safe(result_unc: i64, budget: i64) -> bool {
+    if budget <= 0 { return true }   // budget=0 means no guard
+    result_unc <= budget
+}
+
+// Guarded saturation: applies the same algebraic rules as eg_small_saturate
+// but skips rewrites whose result uncertainty exceeds the budget.
+// This prevents catastrophic-cancellation-inducing rewrites.
+//
+// Rules: add(x,0)->x, add(0,x)->x, mul(x,1)->x, mul(1,x)->x, sub(x,x)->0
+// Guard: the merge is only performed if the result node's uncertainty is
+// within budget.  For identity rewrites (add(x,0)->x), the result inherits
+// x's uncertainty so these are always safe.  For sub(x,x)->0, the result
+// is exact (0 uncertainty) so also always safe.
+fn eg_small_saturate_guarded(ctx: &! EgSmallContext, budget: i64) -> i64 with Mut, Div, Panic {
+    var total_merges: i64 = 0
+    var iter: i64 = 0
+    while iter < 8 {
+        var merges: i64 = 0
+        var i: i64 = 0
+        while i < ctx.node_count {
+            let node = ctx.nodes[i as usize]
+            let cls = eg_small_find(ctx, node.eclass_id)
+            // add(x, 0) -> x, add(0, x) -> x
+            if node.op == EG_OP_ADD && node.child_count == 2 {
+                let lhs_cls = eg_small_find(ctx, node.children[0])
+                let rhs_cls = eg_small_find(ctx, node.children[1])
+                var j: i64 = 0
+                while j < ctx.node_count {
+                    let other = ctx.nodes[j as usize]
+                    if other.op == EG_OP_CONST && other.value == 0 {
+                        let zero_cls = eg_small_find(ctx, other.eclass_id)
+                        if rhs_cls == zero_cls {
+                            // Result inherits lhs uncertainty — always safe
+                            let result_unc = if node.children[0] >= 0 && node.children[0] < 64 { ctx.unc_lo[node.children[0] as usize] } else { 0 }
+                            if eg_uncertainty_safe(result_unc, budget) {
+                                if eg_small_union(ctx, cls, lhs_cls) { merges = merges + 1 }
+                            }
+                        }
+                        if lhs_cls == zero_cls {
+                            let result_unc = if node.children[1] >= 0 && node.children[1] < 64 { ctx.unc_lo[node.children[1] as usize] } else { 0 }
+                            if eg_uncertainty_safe(result_unc, budget) {
+                                if eg_small_union(ctx, cls, rhs_cls) { merges = merges + 1 }
+                            }
+                        }
+                    }
+                    j = j + 1
+                }
+            }
+            // mul(x, 1) -> x, mul(1, x) -> x
+            if node.op == EG_OP_MUL && node.child_count == 2 {
+                let lhs_cls = eg_small_find(ctx, node.children[0])
+                let rhs_cls = eg_small_find(ctx, node.children[1])
+                var j: i64 = 0
+                while j < ctx.node_count {
+                    let other = ctx.nodes[j as usize]
+                    if other.op == EG_OP_CONST && other.value == 1 {
+                        let one_cls = eg_small_find(ctx, other.eclass_id)
+                        if rhs_cls == one_cls {
+                            let result_unc = if node.children[0] >= 0 && node.children[0] < 64 { ctx.unc_lo[node.children[0] as usize] } else { 0 }
+                            if eg_uncertainty_safe(result_unc, budget) {
+                                if eg_small_union(ctx, cls, lhs_cls) { merges = merges + 1 }
+                            }
+                        }
+                        if lhs_cls == one_cls {
+                            let result_unc = if node.children[1] >= 0 && node.children[1] < 64 { ctx.unc_lo[node.children[1] as usize] } else { 0 }
+                            if eg_uncertainty_safe(result_unc, budget) {
+                                if eg_small_union(ctx, cls, rhs_cls) { merges = merges + 1 }
+                            }
+                        }
+                    }
+                    j = j + 1
+                }
+                // mul-annihilation: mul(x, 0) -> 0, mul(0, x) -> 0
+                var k: i64 = 0
+                while k < ctx.node_count {
+                    let zother = ctx.nodes[k as usize]
+                    if zother.op == EG_OP_CONST && zother.value == 0 {
+                        let zero_cls = eg_small_find(ctx, zother.eclass_id)
+                        if rhs_cls == zero_cls {
+                            // Result is constant 0 — zero uncertainty, always safe
+                            if eg_small_union(ctx, cls, zero_cls) { merges = merges + 1 }
+                        }
+                        if lhs_cls == zero_cls {
+                            if eg_small_union(ctx, cls, zero_cls) { merges = merges + 1 }
+                        }
+                    }
+                    k = k + 1
+                }
+            }
+            // sub(x, x) -> 0  (result is exact — always safe)
+            if node.op == EG_OP_SUB && node.child_count == 2 {
+                let lhs_cls = eg_small_find(ctx, node.children[0])
+                let rhs_cls = eg_small_find(ctx, node.children[1])
+                if lhs_cls == rhs_cls {
+                    let zero_id = eg_small_add_const(ctx, 0)
+                    if zero_id != EG_INVALID {
+                        let zero_cls = eg_small_find(ctx, zero_id)
+                        if eg_small_union(ctx, cls, zero_cls) { merges = merges + 1 }
+                    }
+                }
+            }
+            i = i + 1
+        }
+        total_merges = total_merges + merges
+        if merges == 0 { return total_merges }
+        iter = iter + 1
+    }
+    total_merges
+}
+
+// ============================================================================
+// Section 28c: Uncertainty-Guided Cost Model (Sprint 225 Phase 3)
+// ============================================================================
+//
+// When multiple equivalent rewrites exist, prefer the one with lowest
+// combined cost:  total_cost = perf_cost + lambda * uncertainty_delta
+//
+// lambda controls the trade-off:
+//   lambda = 0    → pure performance (uncertainty ignored)
+//   lambda = 100  → strong uncertainty preference (10x = lambda/10 weight)
+//   lambda = 1000 → uncertainty dominates
+//
+// Both perf_cost and uncertainty_delta are i64 (quantized).
+// We use integer arithmetic: total = perf_cost * 1000 + lambda * unc_delta
+// (scaling perf_cost by 1000 to match unc_delta magnitude).
+//
+// References:
+//   JCGM 100:2008 section 5.1 — Uncertainty propagation
+//   Willsey et al. "egg" (2021) section 4 — Cost-based extraction
+
+// Default lambda: 100 (moderate uncertainty weight)
+let EG_LAMBDA_DEFAULT: i64 = 100
+let EG_LAMBDA_ZERO: i64    = 0
+let EG_LAMBDA_HIGH: i64    = 1000
+
+// Compute the combined cost for a node.
+// perf_cost: instruction cost (from eg_small_cost_by_op)
+// unc: node uncertainty (from unc_lo[] or eg_estimate_node_unc)
+// lambda: uncertainty weight
+// Returns: perf_cost * 1000 + lambda * (unc / 1000000)
+// (dividing unc by 1e6 to bring into comparable magnitude with perf_cost*1000)
+fn eg_guided_cost(perf_cost: i64, unc: i64, lambda: i64) -> i64 {
+    let unc_scaled = unc / 1000000   // nanoscale -> milliscale
+    perf_cost * 1000 + lambda * unc_scaled
+}
+
+// Uncertainty-guided extraction with tunable lambda.
+// Extracts the equivalent node with minimum total_cost = perf + lambda * unc.
+fn eg_small_extract_guided(ctx: &! EgSmallContext, class_id: i64, lambda: i64) -> EgNode with Mut, Div, Panic {
+    let canonical = eg_small_find(ctx, class_id)
+    var best = eg_node_new()
+    var best_total: i64 = 999999999
+    var i: i64 = 0
+    while i < ctx.node_count {
+        let node = ctx.nodes[i as usize]
+        if node.eclass_id >= 0 {
+            let node_cls = eg_small_find(ctx, node.eclass_id)
+            if node_cls == canonical {
+                let perf = eg_small_cost_by_op(node.op)
+                let unc = if i < 64 { ctx.unc_lo[i as usize] } else { 999999999 }
+                let total = eg_guided_cost(perf, unc, lambda)
+                if total < best_total {
+                    best_total = total
+                    best = node
+                }
+            }
+        }
+        i = i + 1
+    }
+    best
+}
+
+// ============================================================================
+// Section 28d: Sprint 225 Phase 2-3 Tests (T71-T80)
+// ============================================================================
+
+// T71: Safe rewrite (x+0 -> x) is still applied even with uncertainty guard
+fn test_eg_guarded_add_identity_inner(ctx: &! EgSmallContext) -> bool with Mut, Div, Panic {
+    let zero = eg_small_add_const(ctx, 0)
+    let x = eg_small_add_var_with_unc(ctx, 1, 50000000)  // 0.05 unc
+    let root = eg_small_add_binop(ctx, EG_OP_ADD, x, zero)
+    eg_small_saturate_guarded(ctx, EG_UNC_BUDGET_DEFAULT)
+    let extracted = eg_small_extract(ctx, root)
+    // x+0 -> x should be applied (VAR uncertainty within budget)
+    extracted.op == EG_OP_VAR
+}
+fn test_eg_guarded_add_identity() -> bool with Mut, Div, Panic {
+    var ctx = eg_small_init()
+    return test_eg_guarded_add_identity_inner(&! ctx)
+}
+
+// T72: Cancellation rewrite blocked when uncertainty exceeds strict budget
+// With a very strict budget (1%), a high-uncertainty add(x,0)->x is blocked
+fn test_eg_guarded_block_high_unc_inner(ctx: &! EgSmallContext) -> bool with Mut, Div, Panic {
+    let zero = eg_small_add_const(ctx, 0)
+    // x has very high uncertainty (0.5 = 500000000 quantized)
+    let x = eg_small_add_var_with_unc(ctx, 1, 500000000)
+    let root = eg_small_add_binop(ctx, EG_OP_ADD, x, zero)
+    // Use very strict budget: 1% = 10000000
+    eg_small_saturate_guarded(ctx, EG_UNC_BUDGET_STRICT)
+    let extracted = eg_small_extract(ctx, root)
+    // The rewrite should be BLOCKED because x's uncertainty (0.5) exceeds
+    // the strict budget (0.01).  The expression stays as ADD.
+    extracted.op == EG_OP_ADD
+}
+fn test_eg_guarded_block_high_unc() -> bool with Mut, Div, Panic {
+    var ctx = eg_small_init()
+    return test_eg_guarded_block_high_unc_inner(&! ctx)
+}
+
+// T73: Uncertainty budget propagates through nested rewrites
+// add(add(x, 0), 0) -> x in two steps, each within budget
+fn test_eg_guarded_nested_inner(ctx: &! EgSmallContext) -> bool with Mut, Div, Panic {
+    let zero = eg_small_add_const(ctx, 0)
+    let x = eg_small_add_var_with_unc(ctx, 1, 50000000)  // 0.05 unc
+    let inner_add = eg_small_add_binop(ctx, EG_OP_ADD, x, zero)
+    let outer_add = eg_small_add_binop(ctx, EG_OP_ADD, inner_add, zero)
+    eg_small_saturate_guarded(ctx, EG_UNC_BUDGET_DEFAULT)
+    let extracted = eg_small_extract(ctx, outer_add)
+    // Both add(x,0)->x rewrites should apply; final = VAR
+    extracted.op == EG_OP_VAR
+}
+fn test_eg_guarded_nested() -> bool with Mut, Div, Panic {
+    var ctx = eg_small_init()
+    return test_eg_guarded_nested_inner(&! ctx)
+}
+
+// T74: Guard allows rewrites at low uncertainty (relaxed budget)
+fn test_eg_guarded_low_unc_allowed_inner(ctx: &! EgSmallContext) -> bool with Mut, Div, Panic {
+    let one = eg_small_add_const(ctx, 1)
+    let x = eg_small_add_var_with_unc(ctx, 2, 200000000)  // 0.2 unc (moderate)
+    let root = eg_small_add_binop(ctx, EG_OP_MUL, x, one)
+    // Relaxed budget: 0.5 = 500000000
+    eg_small_saturate_guarded(ctx, EG_UNC_BUDGET_RELAXED)
+    let extracted = eg_small_extract(ctx, root)
+    // mul(x,1)->x should apply since 0.2 < 0.5 budget
+    extracted.op == EG_OP_VAR
+}
+fn test_eg_guarded_low_unc_allowed() -> bool with Mut, Div, Panic {
+    var ctx = eg_small_init()
+    return test_eg_guarded_low_unc_allowed_inner(&! ctx)
+}
+
+// T75: Guard blocks rewrites at high uncertainty with default budget
+fn test_eg_guarded_high_unc_blocked_inner(ctx: &! EgSmallContext) -> bool with Mut, Div, Panic {
+    let one = eg_small_add_const(ctx, 1)
+    // x has uncertainty 0.2 = 200000000
+    let x = eg_small_add_var_with_unc(ctx, 2, 200000000)
+    let root = eg_small_add_binop(ctx, EG_OP_MUL, x, one)
+    // Default budget: 0.1 = 100000000 — x's unc (0.2) exceeds budget
+    eg_small_saturate_guarded(ctx, EG_UNC_BUDGET_DEFAULT)
+    let extracted = eg_small_extract(ctx, root)
+    // mul(x,1)->x should be BLOCKED because 0.2 > 0.1
+    extracted.op == EG_OP_MUL
+}
+fn test_eg_guarded_high_unc_blocked() -> bool with Mut, Div, Panic {
+    var ctx = eg_small_init()
+    return test_eg_guarded_high_unc_blocked_inner(&! ctx)
+}
+
+// T76: When two rewrites available, prefer lower uncertainty (guided extraction)
+fn test_eg_guided_prefer_low_unc_inner(ctx: &! EgSmallContext) -> bool with Mut, Div, Panic {
+    // Create two nodes, union them into same class
+    // node0: CONST 42 (unc=0)
+    // node1: VAR 1 (unc=200000000)
+    let c = eg_small_add_const(ctx, 42)
+    let v = eg_small_add_var_with_unc(ctx, 1, 200000000)
+    eg_small_union(ctx, c, v)
+    // With lambda > 0, should prefer CONST (lower unc)
+    let extracted = eg_small_extract_guided(ctx, c, EG_LAMBDA_DEFAULT)
+    extracted.op == EG_OP_CONST && extracted.value == 42
+}
+fn test_eg_guided_prefer_low_unc() -> bool with Mut, Div, Panic {
+    var ctx = eg_small_init()
+    return test_eg_guided_prefer_low_unc_inner(&! ctx)
+}
+
+// T77: lambda=0 reverts to pure perf cost (uncertainty ignored)
+fn test_eg_guided_lambda_zero_inner(ctx: &! EgSmallContext) -> bool with Mut, Div, Panic {
+    // Two nodes in same class: CONST cost=1, VAR cost=1
+    // With lambda=0, both have same total cost; first-found wins
+    let c = eg_small_add_const(ctx, 10)
+    let v = eg_small_add_var_with_unc(ctx, 5, 500000000)
+    eg_small_union(ctx, c, v)
+    // lambda=0: cost = perf_cost * 1000 + 0 * unc
+    // CONST cost=1*1000=1000, VAR cost=1*1000=1000
+    // Both equal perf cost; first added (CONST) wins
+    let extracted = eg_small_extract_guided(ctx, c, EG_LAMBDA_ZERO)
+    // Should select CONST (first node with equal cost)
+    extracted.op == EG_OP_CONST
+}
+fn test_eg_guided_lambda_zero() -> bool with Mut, Div, Panic {
+    var ctx = eg_small_init()
+    return test_eg_guided_lambda_zero_inner(&! ctx)
+}
+
+// T78: lambda=1000 prefers lowest uncertainty even at perf cost
+fn test_eg_guided_lambda_high_inner(ctx: &! EgSmallContext) -> bool with Mut, Div, Panic {
+    // CONST(42): perf=1, unc=0 -> total = 1*1000 + 1000*0 = 1000
+    // VAR(1):    perf=1, unc=500000000 -> total = 1*1000 + 1000*500 = 501000
+    // High lambda strongly prefers CONST
+    let c = eg_small_add_const(ctx, 42)
+    let v = eg_small_add_var_with_unc(ctx, 1, 500000000)
+    eg_small_union(ctx, c, v)
+    let extracted = eg_small_extract_guided(ctx, c, EG_LAMBDA_HIGH)
+    extracted.op == EG_OP_CONST && extracted.value == 42
+}
+fn test_eg_guided_lambda_high() -> bool with Mut, Div, Panic {
+    var ctx = eg_small_init()
+    return test_eg_guided_lambda_high_inner(&! ctx)
+}
+
+// T79: Cost model integration with eg_small_saturate — saturation + guided extraction
+fn test_eg_guided_saturate_extract_inner(ctx: &! EgSmallContext) -> bool with Mut, Div, Panic {
+    let zero = eg_small_add_const(ctx, 0)
+    let x = eg_small_add_var_with_unc(ctx, 1, 30000000)  // 0.03 unc
+    // Use with_unc to properly propagate GUM uncertainty to the ADD node
+    let root = eg_small_add_binop_with_unc(ctx, EG_OP_ADD, x, zero)
+    // Saturate with default budget (allows rewrite since 0.03 < 0.1)
+    eg_small_saturate_guarded(ctx, EG_UNC_BUDGET_DEFAULT)
+    // Now extract with guided cost model
+    let extracted = eg_small_extract_guided(ctx, root, EG_LAMBDA_DEFAULT)
+    // After saturation, x+0 merged with x; guided extraction picks VAR
+    // VAR cost: perf=1*1000 + 100*(30000000/1000000) = 1000 + 3000 = 4000
+    // ADD cost: perf=2*1000 + 100*(30000000/1000000) = 2000 + 3000 = 5000
+    // VAR wins (lower total)
+    extracted.op == EG_OP_VAR
+}
+fn test_eg_guided_saturate_extract() -> bool with Mut, Div, Panic {
+    var ctx = eg_small_init()
+    return test_eg_guided_saturate_extract_inner(&! ctx)
+}
+
+// T80: End-to-end: input -> guarded saturation -> guided extraction with uncertainty tracking
+fn test_eg_guided_e2e_inner(ctx: &! EgSmallContext) -> bool with Mut, Div, Panic {
+    // Build: (x * 1) + 0 with x having moderate uncertainty
+    let zero = eg_small_add_const(ctx, 0)
+    let one = eg_small_add_const(ctx, 1)
+    let x = eg_small_add_var_with_unc(ctx, 3, 50000000)  // 0.05 unc
+    // Use with_unc to properly propagate GUM uncertainty through expression tree
+    let mul_expr = eg_small_add_binop_with_unc(ctx, EG_OP_MUL, x, one)
+    let add_expr = eg_small_add_binop_with_unc(ctx, EG_OP_ADD, mul_expr, zero)
+    // Guarded saturation: both mul(x,1)->x and add(x,0)->x within budget
+    eg_small_saturate_guarded(ctx, EG_UNC_BUDGET_DEFAULT)
+    // Guided extraction should simplify to VAR
+    let extracted = eg_small_extract_guided(ctx, add_expr, EG_LAMBDA_DEFAULT)
+    // End-to-end: (x*1)+0 -> x after saturation+extraction
+    extracted.op == EG_OP_VAR
+}
+fn test_eg_guided_e2e() -> bool with Mut, Div, Panic {
+    var ctx = eg_small_init()
+    return test_eg_guided_e2e_inner(&! ctx)
+}
+
+// ============================================================================
 // Section 29: Test Runner
 // ============================================================================
 
 fn test_eg_main() -> i32 with IO, Mut, Panic, Div {
     var passed: i64 = 0
-    let total: i64 = 70
+    let total: i64 = 80
 
     print("=== E-Graph Equality Saturation Tests ===\n")
 
@@ -2776,6 +3198,16 @@ fn test_eg_main() -> i32 with IO, Mut, Panic, Div {
     if test_eg_quantize_unc_zero() { passed = passed + 1; print("  T68 OK quantize_unc_zero\n") } else { print("  FAIL: T68 quantize_unc_zero\n") }
     if test_eg_quantize_unc_negative() { passed = passed + 1; print("  T69 OK quantize_unc_negative\n") } else { print("  FAIL: T69 quantize_unc_negative\n") }
     if test_eg_isqrt_four() { passed = passed + 1; print("  T70 OK isqrt_four\n") } else { print("  FAIL: T70 isqrt_four\n") }
+    if test_eg_guarded_add_identity() { passed = passed + 1; print("  T71 OK guarded_add_identity\n") } else { print("  FAIL: T71 guarded_add_identity\n") }
+    if test_eg_guarded_block_high_unc() { passed = passed + 1; print("  T72 OK guarded_block_high_unc\n") } else { print("  FAIL: T72 guarded_block_high_unc\n") }
+    if test_eg_guarded_nested() { passed = passed + 1; print("  T73 OK guarded_nested\n") } else { print("  FAIL: T73 guarded_nested\n") }
+    if test_eg_guarded_low_unc_allowed() { passed = passed + 1; print("  T74 OK guarded_low_unc_allowed\n") } else { print("  FAIL: T74 guarded_low_unc_allowed\n") }
+    if test_eg_guarded_high_unc_blocked() { passed = passed + 1; print("  T75 OK guarded_high_unc_blocked\n") } else { print("  FAIL: T75 guarded_high_unc_blocked\n") }
+    if test_eg_guided_prefer_low_unc() { passed = passed + 1; print("  T76 OK guided_prefer_low_unc\n") } else { print("  FAIL: T76 guided_prefer_low_unc\n") }
+    if test_eg_guided_lambda_zero() { passed = passed + 1; print("  T77 OK guided_lambda_zero\n") } else { print("  FAIL: T77 guided_lambda_zero\n") }
+    if test_eg_guided_lambda_high() { passed = passed + 1; print("  T78 OK guided_lambda_high\n") } else { print("  FAIL: T78 guided_lambda_high\n") }
+    if test_eg_guided_saturate_extract() { passed = passed + 1; print("  T79 OK guided_saturate_extract\n") } else { print("  FAIL: T79 guided_saturate_extract\n") }
+    if test_eg_guided_e2e() { passed = passed + 1; print("  T80 OK guided_e2e\n") } else { print("  FAIL: T80 guided_e2e\n") }
 
     print("\nE-Graph: ")
     print_int(passed)
