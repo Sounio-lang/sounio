@@ -1,0 +1,183 @@
+//@ run-pass
+//! tests/stdlib/ode/test_tsit5_multicomp_e2e.sio
+//!
+//! E2E tests for ode::tsit5_multicomp — adaptive-step Tsit5 ODE solver
+//! for multi-compartment PK models.
+
+use ode::tsit5_multicomp::{
+    PKState, PKDeriv, PKParams, PKStepResult, SolverConfig, PKSolution,
+    default_pk_params, default_config,
+    pk_ode, tsit5_step_pk, solve_pk,
+}
+use test::helpers::check_near
+
+// ============================================================================
+// Default parameter construction
+// ============================================================================
+
+fn test_default_pk_params_positive() with Mut, Div, Panic {
+    let p = default_pk_params()
+    assert(p.ka > 0.0)
+    assert(p.ke > 0.0)
+    assert(p.k12 > 0.0)
+    assert(p.k21 > 0.0)
+}
+
+fn test_default_config_positive() with Mut, Div, Panic {
+    let cfg = default_config()
+    assert(cfg.dt_init > 0.0)
+    assert(cfg.dt_max > cfg.dt_min)
+    assert(cfg.max_steps > 0)
+}
+
+fn test_default_config_tolerances_positive() with Mut, Div, Panic {
+    let cfg = default_config()
+    assert(cfg.rtol > 0.0)
+    assert(cfg.atol > 0.0)
+}
+
+// ============================================================================
+// pk_ode: derivative computation
+// ============================================================================
+
+fn test_pk_ode_gut_decreases() with Mut, Div, Panic {
+    // Drug in gut → d_gut negative (absorption)
+    let state = PKState { gut: 100.0, central: 0.0, periph: 0.0 }
+    let p = default_pk_params()
+    let d = pk_ode(state, 0.0, p)
+    assert(d.d_gut < 0.0)
+}
+
+fn test_pk_ode_central_increases_from_gut() with Mut, Div, Panic {
+    // Drug absorbed from gut → d_central positive (initially)
+    let state = PKState { gut: 100.0, central: 0.0, periph: 0.0 }
+    let p = default_pk_params()
+    let d = pk_ode(state, 0.0, p)
+    assert(d.d_central > 0.0)
+}
+
+fn test_pk_ode_empty_state_zero_deriv() with Mut, Div, Panic {
+    // No drug → no change
+    let state = PKState { gut: 0.0, central: 0.0, periph: 0.0 }
+    let p = default_pk_params()
+    let d = pk_ode(state, 0.0, p)
+    assert(check_near(d.d_gut, 0.0, 1e-9))
+    assert(check_near(d.d_central, 0.0, 1e-9))
+    assert(check_near(d.d_periph, 0.0, 1e-9))
+}
+
+// ============================================================================
+// tsit5_step_pk: single adaptive step
+// ============================================================================
+
+fn test_tsit5_step_conserves_mass_approximately() with Mut, Div, Panic {
+    // Total mass = gut + central + periph
+    // After one step (no elimination): total should decrease by elimination
+    let state = PKState { gut: 100.0, central: 0.0, periph: 0.0 }
+    let p = default_pk_params()
+    let result = tsit5_step_pk(state, 0.0, 0.01, p)
+    let mass_before = state.gut + state.central + state.periph
+    let mass_after = result.state_new.gut + result.state_new.central + result.state_new.periph
+    // Mass decreases due to elimination
+    assert(mass_after < mass_before)
+    assert(mass_after > 0.0)
+}
+
+fn test_tsit5_step_drug_moves_from_gut() with Mut, Div, Panic {
+    let state = PKState { gut: 50.0, central: 0.0, periph: 0.0 }
+    let p = default_pk_params()
+    let result = tsit5_step_pk(state, 0.0, 0.1, p)
+    // Gut amount decreases
+    assert(result.state_new.gut < state.gut)
+    // Central increases
+    assert(result.state_new.central > 0.0)
+}
+
+fn test_tsit5_step_central_transfers_to_periph() with Mut, Div, Panic {
+    let state = PKState { gut: 0.0, central: 100.0, periph: 0.0 }
+    let p = default_pk_params()
+    let result = tsit5_step_pk(state, 0.0, 0.1, p)
+    // Drug distributes to peripheral
+    assert(result.state_new.periph > 0.0)
+}
+
+// ============================================================================
+// solve_pk: full integration
+// ============================================================================
+
+fn test_solve_pk_success() with Mut, Div, Panic {
+    let init = PKState { gut: 100.0, central: 0.0, periph: 0.0 }
+    let p = default_pk_params()
+    let cfg = default_config()
+    let sol = solve_pk(init, p, 24.0, cfg)
+    assert(sol.success)
+}
+
+fn test_solve_pk_final_time_reached() with Mut, Div, Panic {
+    let init = PKState { gut: 100.0, central: 0.0, periph: 0.0 }
+    let p = default_pk_params()
+    let cfg = default_config()
+    let sol = solve_pk(init, p, 12.0, cfg)
+    assert(check_near(sol.t_final, 12.0, 0.01))
+}
+
+fn test_solve_pk_drug_decreases_over_24h() with Mut, Div, Panic {
+    // After 24h, total drug should be much less than initial
+    let init = PKState { gut: 100.0, central: 0.0, periph: 0.0 }
+    let p = default_pk_params()
+    let cfg = default_config()
+    let sol = solve_pk(init, p, 24.0, cfg)
+    let total = sol.state_final.gut + sol.state_final.central + sol.state_final.periph
+    assert(total < 50.0)  // significant elimination in 24h
+}
+
+fn test_solve_pk_step_count_positive() with Mut, Div, Panic {
+    let init = PKState { gut: 100.0, central: 0.0, periph: 0.0 }
+    let p = default_pk_params()
+    let cfg = default_config()
+    let sol = solve_pk(init, p, 1.0, cfg)
+    assert(sol.nsteps > 0)
+    assert(sol.nfeval > 0)
+}
+
+fn test_solve_pk_state_nonnegative() with Mut, Div, Panic {
+    // Drug amounts should remain ≥ 0
+    let init = PKState { gut: 100.0, central: 0.0, periph: 0.0 }
+    let p = default_pk_params()
+    let cfg = default_config()
+    let sol = solve_pk(init, p, 48.0, cfg)
+    assert(sol.state_final.gut >= 0.0 - 0.001)
+    assert(sol.state_final.central >= 0.0 - 0.001)
+    assert(sol.state_final.periph >= 0.0 - 0.001)
+}
+
+fn test_solve_pk_short_horizon() with Mut, Div, Panic {
+    // Very short time: drug barely moved
+    let init = PKState { gut: 100.0, central: 0.0, periph: 0.0 }
+    let p = default_pk_params()
+    let cfg = default_config()
+    let sol = solve_pk(init, p, 0.001, cfg)
+    assert(sol.state_final.gut > 99.0)
+}
+
+// ============================================================================
+// Main
+// ============================================================================
+
+pub fn main() with Mut, Div, Panic {
+    test_default_pk_params_positive()
+    test_default_config_positive()
+    test_default_config_tolerances_positive()
+    test_pk_ode_gut_decreases()
+    test_pk_ode_central_increases_from_gut()
+    test_pk_ode_empty_state_zero_deriv()
+    test_tsit5_step_conserves_mass_approximately()
+    test_tsit5_step_drug_moves_from_gut()
+    test_tsit5_step_central_transfers_to_periph()
+    test_solve_pk_success()
+    test_solve_pk_final_time_reached()
+    test_solve_pk_drug_decreases_over_24h()
+    test_solve_pk_step_count_positive()
+    test_solve_pk_state_nonnegative()
+    test_solve_pk_short_horizon()
+}

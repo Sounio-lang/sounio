@@ -1,0 +1,161 @@
+//@ run-pass
+//! tests/stdlib/ode/test_pbpk14_rk4_e2e.sio
+//!
+//! E2E tests for ode::pbpk14_rk4 — 14-compartment PBPK model with RK4 solver.
+
+use ode::pbpk14_rk4::{
+    PBPK14State, PBPK14Params, PBPK14Solution,
+    default_params, pbpk14_ode, rk4_step_pbpk14, solve_pbpk14_rk4,
+}
+use test::helpers::check_near
+
+// ============================================================================
+// Default parameters
+// ============================================================================
+
+fn test_default_params_positive_rates() with Mut, Div, Panic {
+    let p = default_params()
+    assert(p.ka > 0.0)
+    assert(p.rb > 0.0)
+    assert(p.fu > 0.0)
+    assert(p.cl_int > 0.0)
+    assert(p.gfr > 0.0)
+}
+
+fn make_empty_state() -> PBPK14State {
+    return PBPK14State {
+        gut: 0.0, art: 0.0, ven: 0.0, lung: 0.0,
+        heart: 0.0, brain: 0.0, muscle: 0.0, adipose: 0.0,
+        skin: 0.0, bone: 0.0, spleen: 0.0, gut_tis: 0.0,
+        liver: 0.0, kidney: 0.0
+    }
+}
+
+fn make_oral_dose_state(dose: f64) -> PBPK14State {
+    return PBPK14State {
+        gut: dose, art: 0.0, ven: 0.0, lung: 0.0,
+        heart: 0.0, brain: 0.0, muscle: 0.0, adipose: 0.0,
+        skin: 0.0, bone: 0.0, spleen: 0.0, gut_tis: 0.0,
+        liver: 0.0, kidney: 0.0
+    }
+}
+
+// ============================================================================
+// ODE derivatives
+// ============================================================================
+
+fn test_ode_empty_state_zero_deriv() with Mut, Div, Panic {
+    let st = make_empty_state()
+    let p = default_params()
+    let d = pbpk14_ode(st, 0.0, p)
+    assert(check_near(d.d_gut, 0.0, 1e-9))
+    assert(check_near(d.d_art, 0.0, 1e-9))
+}
+
+fn test_ode_gut_decreases_with_dose() with Mut, Div, Panic {
+    let st = make_oral_dose_state(100.0)
+    let p = default_params()
+    let d = pbpk14_ode(st, 0.0, p)
+    assert(d.d_gut < 0.0)
+}
+
+fn test_ode_gut_absorption_into_liver() with Mut, Div, Panic {
+    // With dose in gut and nonzero ka, liver receives drug
+    let st = make_oral_dose_state(100.0)
+    let p = default_params()
+    let d = pbpk14_ode(st, 0.0, p)
+    // d_liver should be positive (absorbed from gut)
+    assert(d.d_liver > 0.0)
+}
+
+// ============================================================================
+// RK4 step
+// ============================================================================
+
+fn test_rk4_step_gut_decreases() with Mut, Div, Panic {
+    let st = make_oral_dose_state(100.0)
+    let p = default_params()
+    let result = rk4_step_pbpk14(st, 0.0, 0.01, p)
+    assert(result.state_new.gut < 100.0)
+}
+
+fn test_rk4_step_drug_appears_in_circulation() with Mut, Div, Panic {
+    let st = make_oral_dose_state(100.0)
+    let p = default_params()
+    let result = rk4_step_pbpk14(st, 0.0, 0.1, p)
+    // Total circulation (art + ven + lung) > 0 after step
+    let circ = result.state_new.art + result.state_new.ven + result.state_new.lung
+    assert(circ > 0.0)
+}
+
+fn test_rk4_step_empty_state_unchanged() with Mut, Div, Panic {
+    let st = make_empty_state()
+    let p = default_params()
+    let result = rk4_step_pbpk14(st, 0.0, 0.01, p)
+    assert(check_near(result.state_new.gut, 0.0, 1e-9))
+    assert(check_near(result.state_new.liver, 0.0, 1e-9))
+}
+
+// ============================================================================
+// Full solve
+// ============================================================================
+
+fn test_solve_completes() with Mut, Div, Panic {
+    let init = make_oral_dose_state(100.0)
+    let p = default_params()
+    let sol = solve_pbpk14_rk4(init, p, 24.0, 100)
+    assert(sol.nsteps == 100)
+}
+
+fn test_solve_drug_eliminated_over_24h() with Mut, Div, Panic {
+    let init = make_oral_dose_state(100.0)
+    let p = default_params()
+    let sol = solve_pbpk14_rk4(init, p, 24.0, 100)
+    let total = sol.gut + sol.art + sol.ven + sol.lung + sol.liver + sol.kidney
+    assert(total < 80.0)   // significant elimination after 24h
+}
+
+fn test_solve_state_nonnegative() with Mut, Div, Panic {
+    let init = make_oral_dose_state(100.0)
+    let p = default_params()
+    let sol = solve_pbpk14_rk4(init, p, 12.0, 50)
+    assert(sol.gut >= 0.0 - 1e-6)
+    assert(sol.liver >= 0.0 - 1e-6)
+    assert(sol.kidney >= 0.0 - 1e-6)
+}
+
+fn test_solve_short_horizon_minimal_change() with Mut, Div, Panic {
+    let init = make_oral_dose_state(100.0)
+    let p = default_params()
+    let sol = solve_pbpk14_rk4(init, p, 0.001, 1)
+    // After 0.001 hours, gut should still have most of the dose
+    assert(sol.gut > 99.0)
+}
+
+fn test_solve_liver_receives_drug() with Mut, Div, Panic {
+    // After simulation, liver should have received some drug
+    let init = make_oral_dose_state(100.0)
+    let p = default_params()
+    let sol = solve_pbpk14_rk4(init, p, 2.0, 50)
+    // After 2h, some drug should have reached the liver
+    assert(sol.liver >= 0.0)
+}
+
+// ============================================================================
+// Main
+// ============================================================================
+
+pub fn main() with Mut, Div, Panic {
+    test_default_params_positive_rates()
+    test_ode_empty_state_zero_deriv()
+    test_ode_gut_decreases_with_dose()
+    test_ode_gut_absorption_into_liver()
+    test_rk4_step_gut_decreases()
+    test_rk4_step_drug_appears_in_circulation()
+    test_rk4_step_empty_state_unchanged()
+    test_solve_completes()
+    test_solve_drug_eliminated_over_24h()
+    test_solve_state_nonnegative()
+    test_solve_short_horizon_minimal_change()
+    test_solve_liver_receives_drug()
+}

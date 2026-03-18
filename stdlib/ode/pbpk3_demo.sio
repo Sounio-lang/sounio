@@ -1,0 +1,138 @@
+// pbpk3_demo.sio - Working 3-Compartment Pharmacokinetic Demo
+//
+// A minimal 3-compartment PBPK model:
+//   Compartment 1 (central): C1 [mg]
+//   Compartment 2 (peripheral 1): C2 [mg]
+//   Compartment 3 (peripheral 2): C3 [mg]
+//
+// ODE system:
+//   dC1/dt = -(k10 + k12 + k13)*C1 + k21*C2 + k31*C3 + dose/V1
+//   dC2/dt = k12*C1 - k21*C2
+//   dC3/dt = k13*C1 - k31*C3
+//
+// With fixed parameters:
+//   k10 = 0.1  (central elimination [1/h])
+//   k12 = 0.2  (central to periph1 [1/h])
+//   k21 = 0.1  (periph1 to central [1/h])
+//   k13 = 0.05 (central to periph2 [1/h])
+//   k31 = 0.02 (periph2 to central [1/h])
+//   V1 = 10.0  (volume of central [L])
+//   dose = 100.0 [mg]
+//
+// Initial conditions: C1 = 10, C2 = 0, C3 = 0
+// Simulate for t=0 to t=24 hours in steps of 0.5h
+
+struct PBPKState3 {
+    c1: f64,
+    c2: f64,
+    c3: f64
+}
+
+struct PBPKDeriv3 {
+    dc1: f64,
+    dc2: f64,
+    dc3: f64
+}
+
+struct PBPKStepResult3 {
+    state_new: PBPKState3
+}
+
+// ODE function: dC/dt
+fn pbpk3_ode(st: PBPKState3, k10: f64, k12: f64, k21: f64, k13: f64, k31: f64) -> PBPKDeriv3 {
+    let dc1 = 0.0 - (k10 + k12 + k13) * st.c1 + k21 * st.c2 + k31 * st.c3
+    let dc2 = k12 * st.c1 - k21 * st.c2
+    let dc3 = k13 * st.c1 - k31 * st.c3
+
+    return PBPKDeriv3 {
+        dc1: dc1,
+        dc2: dc2,
+        dc3: dc3
+    }
+}
+
+// RK4 step
+fn rk4_step_pbpk3(st: PBPKState3, dt: f64, k10: f64, k12: f64, k21: f64, k13: f64, k31: f64) -> PBPKStepResult3 {
+    // Stage 1
+    let k1 = pbpk3_ode(st, k10, k12, k21, k13, k31)
+
+    // Stage 2
+    let st2 = PBPKState3 {
+        c1: st.c1 + 0.5 * dt * k1.dc1,
+        c2: st.c2 + 0.5 * dt * k1.dc2,
+        c3: st.c3 + 0.5 * dt * k1.dc3
+    }
+    let k2 = pbpk3_ode(st2, k10, k12, k21, k13, k31)
+
+    // Stage 3
+    let st3 = PBPKState3 {
+        c1: st.c1 + 0.5 * dt * k2.dc1,
+        c2: st.c2 + 0.5 * dt * k2.dc2,
+        c3: st.c3 + 0.5 * dt * k2.dc3
+    }
+    let k3 = pbpk3_ode(st3, k10, k12, k21, k13, k31)
+
+    // Stage 4
+    let st4 = PBPKState3 {
+        c1: st.c1 + dt * k3.dc1,
+        c2: st.c2 + dt * k3.dc2,
+        c3: st.c3 + dt * k3.dc3
+    }
+    let k4 = pbpk3_ode(st4, k10, k12, k21, k13, k31)
+
+    // Combine
+    return PBPKStepResult3 {
+        state_new: PBPKState3 {
+            c1: st.c1 + (dt / 6.0) * (k1.dc1 + 2.0*k2.dc1 + 2.0*k3.dc1 + k4.dc1),
+            c2: st.c2 + (dt / 6.0) * (k1.dc2 + 2.0*k2.dc2 + 2.0*k3.dc2 + k4.dc2),
+            c3: st.c3 + (dt / 6.0) * (k1.dc3 + 2.0*k2.dc3 + 2.0*k3.dc3 + k4.dc3)
+        }
+    }
+}
+
+// Solver: integrate from t=0 to t_end
+fn solve_pbpk3(init: PBPKState3, k10: f64, k12: f64, k21: f64, k13: f64, k31: f64, t_end: f64, n_steps: i64) -> PBPKState3 {
+    let dt = t_end / (n_steps as f64)
+    var st = init
+    var i: i64 = 0
+
+    while i < n_steps {
+        let result = rk4_step_pbpk3(st, dt, k10, k12, k21, k13, k31)
+        st = result.state_new
+        i = i + 1
+    }
+
+    return st
+}
+
+// Main demo
+fn main() {
+    // Parameters
+    let k10 = 0.1
+    let k12 = 0.2
+    let k21 = 0.1
+    let k13 = 0.05
+    let k31 = 0.02
+    let v1 = 10.0
+    let dose = 100.0
+
+    // Initial state: dose in central compartment
+    let init = PBPKState3 {
+        c1: dose / v1,
+        c2: 0.0,
+        c3: 0.0
+    }
+
+    // Solve from t=0 to t=24 hours in 48 steps (0.5h each)
+    let final = solve_pbpk3(init, k10, k12, k21, k13, k31, 24.0, 48)
+
+    // Print results
+    println("PBPK 3-Compartment Simulation (24h)")
+    println("===================================")
+    println("Final concentrations (mg):")
+    println("C1 (central):     ", final.c1)
+    println("C2 (peripheral1): ", final.c2)
+    println("C3 (peripheral2): ", final.c3)
+    println("")
+    println("Simulation complete.")
+}
