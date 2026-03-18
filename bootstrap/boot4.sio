@@ -106,6 +106,7 @@ var FLD_COUNT: i64 = 0
 var FN_PARAM_TYPE_SI: [i64; 16384] = [-1; 16384] // struct type index for each fn param
 var LOCAL_IS_SPTR: [i64; 8192] = [0; 8192]       // 1 if local is pointer-to-struct
 var LAST_LOCAL_IS_SPTR: i64 = 0
+var LAST_FOUND_SLOT: i64 = -1
 var LAST_FIELD_TYPE_SI: i64 = -1
 
 var ELF: [i8; 4194304] = [0; 4194304]
@@ -899,6 +900,11 @@ fn parse_expr(min_prec: i64) -> i64 with Mut, Panic, Div {
     } else if k == 31 {
         advance()
         left = parse_expr(0)
+        // Handle tuple expressions: (a, b, c) — keep first, skip rest
+        while cur_kind() == 37 {
+            advance()
+            parse_expr(0)
+        }
         expect(32)
     } else if k == 11 {
         advance()
@@ -1545,7 +1551,7 @@ fn emit_prologue() with Mut, Panic {
     emit(0x55)
     emit(0x48); emit(0x89); emit(0xE5)
     emit(0x48); emit(0x81); emit(0xEC)
-    emit_u32(131072)
+    emit_u32(4194304)  // 4MB frame for large structs (CodeBuffer=2MB, AstCompileCtx=250KB)
 }
 
 fn emit_epilogue() with Mut, Panic {
@@ -1650,6 +1656,7 @@ fn add_local_sptr(off: i64, len: i64, si: i64) -> i64 with Mut, Panic {
 fn find_local(off: i64, len: i64) -> i64 with Mut, Panic, Div {
     LAST_LOCAL_SI = -1
     LAST_LOCAL_IS_SPTR = 0
+    LAST_FOUND_SLOT = -1
     var i: i64 = LOCAL_COUNT - 1
     while i >= 0 {
         let lo = LOCAL_NAME_OFF[i as usize]
@@ -1664,6 +1671,7 @@ fn find_local(off: i64, len: i64) -> i64 with Mut, Panic, Div {
             if ok == 1 {
                 LAST_LOCAL_SI = LOCAL_STRUCT_IDX[i as usize]
                 LAST_LOCAL_IS_SPTR = LOCAL_IS_SPTR[i as usize]
+                LAST_FOUND_SLOT = LOCAL_SLOT[i as usize]
                 return LOCAL_SLOT[i as usize]
             }
         }
@@ -2338,7 +2346,20 @@ fn compile_node(node: i64) -> i64 with Mut, Panic, Div {
         var arg_slot2: i64 = 0
         var arg_slot3: i64 = 0
         while arg_node != -1 && argc < 4 {
-            compile_node(arg_node)
+            // For direct struct local args (NK_IDENT), pass address instead of value
+            var did_lea: i64 = 0
+            if ND_KIND[arg_node as usize] == 2 {
+                let av_off = ND_STR_OFF[arg_node as usize]
+                let av_len = ND_STR_LEN[arg_node as usize]
+                let av_slot = find_local(av_off, av_len)
+                if av_slot >= 0 && LAST_LOCAL_SI >= 0 && LAST_LOCAL_IS_SPTR == 0 {
+                    emit_lea_rax(av_slot)
+                    did_lea = 1
+                }
+            }
+            if did_lea == 0 {
+                compile_node(arg_node)
+            }
             let s = alloc_slot()
             emit_store_rax(s)
             if argc == 0 { arg_slot0 = s }
