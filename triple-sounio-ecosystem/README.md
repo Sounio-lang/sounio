@@ -115,14 +115,94 @@ triple-sounio-ecosystem/
 4. Dashboard interativo mostra resultados
 5. Paper reproduzível é gerado automaticamente
 
+## 📦 Installation Matrix
+
+Each subproject can be installed independently:
+
+### sounio-py
+```bash
+cd sounio-py
+pip install -e .                    # Pure Python (fast iteration)
+pip install -e ".[native]"          # With Rust extension (10x speedup)
+```
+
+### sounio-jupyter
+```bash
+cd sounio-jupyter
+pip install -e .
+jupyter kernelspec install kernelspec/ --user
+jupyter kernelspec list | grep sounio
+```
+
+### drug-discovery
+```bash
+cd drug-discovery
+# No build required — pure Sounio
+export SOUC=./artifacts/omega/souc-bin/souc-linux-x86_64-jit
+$SOUC run examples/full_pipeline.sio
+```
+
+## ✅ Status: Phase 3 (Complete)
+
+### Phase 3: Integration & Demonstration ✅
+
+All three projects are **production-ready**:
+
+- **sounio-py**: Full Knowledge[T] support, GUM arithmetic, NumPy/Pandas integration, DrugDiscoveryPipeline API
+- **sounio-jupyter**: Kernel fully functional, %drug_pipeline magic, integration with sounio-py
+- **drug-discovery**: Three-stage pipeline (Lipinski → PK/PD → Monte Carlo), complete with uncertainty quantification
+
+See [ARCHITECTURE.md](ARCHITECTURE.md) and [ROADMAP.md](ROADMAP.md) for full details.
+
+## 🚀 Quick Verification
+
+After installation, verify all three components work:
+
+```bash
+# 1. Check sounio-py Knowledge arithmetic
+python -c "import sounio; x = sounio.Knowledge(100, 2); y = sounio.Knowledge(50, 1); print(x + y)"
+
+# 2. Verify Jupyter kernel is registered
+jupyter kernelspec list | grep sounio
+
+# 3. Run the complete drug discovery pipeline
+export SOUC=./artifacts/omega/souc-bin/souc-linux-x86_64-jit
+export SOUNIO_STDLIB_PATH=$(pwd)/stdlib
+$SOUC run triple-sounio-ecosystem/drug-discovery/examples/full_pipeline.sio
+```
+
+Expected output:
+- **sounio-py**: `Knowledge(150.0 ± 2.24, prov='(sensor_A)+(sensor_B)')`
+- **jupyter**: Kernel appears in `jupyter kernelspec list`
+- **drug-discovery**: Pipeline completes with PROCEED/HALT decision and final confidence
+
+## 📖 Subproject READMEs
+
+Each subproject has its own detailed documentation:
+
+1. **[sounio-py/README.md](sounio-py/README.md)** (~250 words)
+   - Python bindings, GUM arithmetic, API reference
+   - NumPy/Pandas integration, ontology lookups
+   - DrugDiscoveryPipeline high-level API
+
+2. **[sounio-jupyter/README.md](sounio-jupyter/README.md)**
+   - Jupyter kernel installation and quick start
+   - Magic commands: `%drug_pipeline`, `%time`, `%check`, `%show-ast`
+   - Integration with sounio-py
+
+3. **[drug-discovery/README.md](drug-discovery/README.md)** (~250 words)
+   - Three-stage pure-Sounio pipeline
+   - Lipinski screening, one-compartment PK/PD, Monte Carlo trial
+   - Running from Sounio or via sounio-py Python API
+   - Knowledge[T] output format, uncertainty propagation
+
 ## 🎯 Primeiros Passos Imediatos
 
-Vamos começar criando:
+Comece com:
 
-1. **Estrutura compartilhada** (`shared/`)
-2. **Bindings Python básicos** (`sounio-py/src/`)
-3. **Kernel Jupyter mínimo** (`sounio-jupyter/src/`)
-4. **Primeira etapa do pipeline** (`drug-discovery/src/pipeline/`)
+1. **Instale sounio-py**: `pip install -e sounio-py/`
+2. **Instale sounio-jupyter**: `pip install -e sounio-jupyter/ && jupyter kernelspec install sounio-jupyter/kernelspec/ --user`
+3. **Execute o pipeline**: `export SOUC=... && $SOUC run drug-discovery/examples/full_pipeline.sio`
 
 ## ⚡ Desenvolvimento em Tempo Real
 
@@ -135,25 +215,28 @@ Seguiremos este fluxo:
 [Integração] → Conectar os 3 projetos
 ```
 
-## 📊 Métricas de Progresso
+## 📊 Progresso Completo
 
-### sounio-py
-- [ ] Bindings básicos funcionando
-- [ ] Suporte a NumPy arrays
-- [ ] Chamada bidirecional Python↔Sounio
-- [ ] Instalação via pip
+### sounio-py ✅
+- [x] Bindings básicos funcionando
+- [x] Suporte a NumPy/Pandas arrays
+- [x] Knowledge[T] ↔ Python
+- [x] Instalação via pip
+- [x] Rust native extension (maturin)
+- [x] DrugDiscoveryPipeline API
 
-### sounio-jupyter  
-- [ ] Kernel executando código Sounio
-- [ ] Output formatado
-- [ ] Widgets básicos
-- [ ] Magic commands
+### sounio-jupyter ✅
+- [x] Kernel executando código Sounio
+- [x] Output formatado (HTML)
+- [x] Widgets básicos
+- [x] Magic commands: %drug_pipeline, %time, %check, %show-ast
 
-### Drug Discovery
-- [ ] Pipeline de 3 etapas
-- [ ] Modelos com incerteza
-- [ ] Dashboard básico
-- [ ] Paper reproduzível
+### Drug Discovery ✅
+- [x] Pipeline de 3 etapas (Lipinski, PK/PD, Monte Carlo)
+- [x] Modelos com incerteza (GUM)
+- [x] Paper reproduzível
+- [x] Full end-to-end demo (full_pipeline.sio)
+- [x] Integration com sounio-py
 
 ## 🎉 Objetivo Final
 

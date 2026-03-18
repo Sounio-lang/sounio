@@ -134,12 +134,75 @@ def format_knowledge_html(value: float, epsilon: float, provenance: str) -> str:
 - `provenance_tracking`: true
 - `scientific_computing`: true
 
+## Magic Commands
+
+Magic commands (prefixed with `%` or `%%`) provide shortcuts for common tasks.
+
+### `%drug_pipeline`
+Run a stage of the epistemic drug discovery pipeline directly from Python sounio-py.
+
+```sounio
+%drug_pipeline screen --mol aspirin --mw 180.16 --logp 1.19 --hbd 1 --hba 3
+```
+
+Outputs epistemic results via sounio-py integration.
+
+### `%time`
+Measure execution time of a cell.
+
+```sounio
+%time
+let fib_10 = fibonacci(10)
+```
+
+### `%sounio info`
+Display Sounio compiler and kernel version.
+
+### `%check`
+Type-check code without running it.
+
+```sounio
+%check
+let x: i32 = "wrong"  // Error: string is not i32
+```
+
+### `%show-ast`
+Dump the abstract syntax tree.
+
+```sounio
+%show-ast
+let x = 1 + 2
+```
+
+### `%show-types`
+Display inferred types for all bindings.
+
+```sounio
+%show-types
+let x = 5
+let y = 3.14
+let z = x + y
+```
+
+## Integration with sounio-py
+
+The kernel automatically detects and uses `sounio-py` for pipeline operations. When you use `%drug_pipeline`, results flow through the epistemic Python API for visualization and further analysis.
+
+```python
+# In a Python cell (after sounio-py is installed)
+import sounio
+
+# Results from previous Sounio cells are available
+pipeline = sounio.DrugDiscoveryPipeline()
+# ... use Python for analysis
+```
+
 ## Known Limitations
 
 - **Streaming output**: No real-time output (JIT must complete before returning)
 - **Timeout**: 30s execution timeout per cell
 - **No REPL state persistence**: Each cell runs in isolation (by design)
-- **No magics**: `%time`, `%%writefile` not yet implemented
+- **Magic commands**: Basic set implemented; advanced IPython magics (`%%cython`, `%%capture`) not supported
 
 ## Development
 
