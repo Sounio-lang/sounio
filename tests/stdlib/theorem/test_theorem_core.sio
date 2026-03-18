@@ -1,0 +1,675 @@
+//@ run-pass
+// Test suite for stdlib/theorem/core.sio
+//
+// Tests the by-value ProofCtx API:
+//   - Proposition kind constants (PROP_EQ, PROP_LT, PROP_AND, etc.)
+//   - ThProp constructors
+//   - ProofCtx construction and manipulation
+//   - Inference rules: refl, symm, trans, modus ponens, and_intro/elim, axiom
+//   - Trust tracking: ctx_trust, ctx_is_trusted, deduplication
+//
+// Each test_* function returns 0 (pass) or 1 (fail).
+// main() returns total failure count (0 = all pass).
+
+use theorem::core::*
+
+// ---------------------------------------------------------------------------
+// Test 01: Proposition kind constants are distinct
+// ---------------------------------------------------------------------------
+fn test_prop_kinds_distinct() -> i32 {
+    if PROP_EQ() == PROP_LT()       { return 1 }
+    if PROP_AND() == PROP_OR()      { return 1 }
+    if PROP_IMPLIES() == PROP_NOT() { return 1 }
+    if PROP_FORALL() == PROP_EXISTS() { return 1 }
+    if PROP_TRUE() == PROP_FALSE()  { return 1 }
+    if PROP_CUSTOM() == PROP_EQ()   { return 1 }
+    if PROP_AND() == PROP_CUSTOM()  { return 1 }
+    return 0
+}
+
+// ---------------------------------------------------------------------------
+// Test 02: ThProp constructors set the correct kind and fields
+// ---------------------------------------------------------------------------
+fn test_th_prop_constructors() -> i32 {
+    let eq_p = th_prop_eq(1, 2)
+    if eq_p.kind != PROP_EQ() { return 1 }
+    if eq_p.lhs != 1 { return 1 }
+    if eq_p.rhs != 2 { return 1 }
+
+    let lt_p = th_prop_lt(3, 4)
+    if lt_p.kind != PROP_LT() { return 1 }
+    if lt_p.lhs != 3 { return 1 }
+    if lt_p.rhs != 4 { return 1 }
+
+    let and_p = th_prop_and(5, 6)
+    if and_p.kind != PROP_AND() { return 1 }
+    if and_p.lhs != 5 { return 1 }
+    if and_p.rhs != 6 { return 1 }
+
+    let or_p = th_prop_or(7, 8)
+    if or_p.kind != PROP_OR() { return 1 }
+
+    let not_p = th_prop_not(9)
+    if not_p.kind != PROP_NOT() { return 1 }
+    if not_p.lhs != 9 { return 1 }
+
+    let impl_p = th_prop_implies(10, 11)
+    if impl_p.kind != PROP_IMPLIES() { return 1 }
+    if impl_p.lhs != 10 { return 1 }
+    if impl_p.rhs != 11 { return 1 }
+
+    let custom_p = th_prop_custom(99)
+    if custom_p.kind != PROP_CUSTOM() { return 1 }
+    if custom_p.name_id != 99 { return 1 }
+
+    let true_p = th_prop_true()
+    if true_p.kind != PROP_TRUE() { return 1 }
+
+    let false_p = th_prop_false()
+    if false_p.kind != PROP_FALSE() { return 1 }
+
+    return 0
+}
+
+// ---------------------------------------------------------------------------
+// Test 03: ctx_new creates empty context
+// ---------------------------------------------------------------------------
+fn test_ctx_new() -> i32 {
+    let ctx = ctx_new()
+    if ctx_prop_count(ctx) != 0 { return 1 }
+    if ctx_trust_count(ctx) != 0 { return 1 }
+    return 0
+}
+
+// ---------------------------------------------------------------------------
+// Test 04: ctx_add_prop increments count, returns correct index
+// ---------------------------------------------------------------------------
+fn test_ctx_add_prop() -> i32 with Div, Panic, Mut {
+    var ctx = ctx_new()
+
+    var r1 = ctx_add_prop(ctx, th_prop_custom(10))
+    ctx = r1.ctx
+    if r1.idx != 0 { return 1 }
+    if ctx_prop_count(ctx) != 1 { return 1 }
+
+    var r2 = ctx_add_prop(ctx, th_prop_custom(20))
+    ctx = r2.ctx
+    if r2.idx != 1 { return 1 }
+    if ctx_prop_count(ctx) != 2 { return 1 }
+
+    var r3 = ctx_add_prop(ctx, th_prop_eq(5, 5))
+    ctx = r3.ctx
+    if r3.idx != 2 { return 1 }
+    if ctx_prop_count(ctx) != 3 { return 1 }
+
+    return 0
+}
+
+// ---------------------------------------------------------------------------
+// Test 05: ctx_get_prop retrieves stored proposition correctly
+// ---------------------------------------------------------------------------
+fn test_ctx_get_prop() -> i32 with Div, Panic, Mut {
+    var ctx = ctx_new()
+
+    var r = ctx_add_prop(ctx, th_prop_eq(7, 8))
+    ctx = r.ctx
+    let idx = r.idx
+
+    var gp = ctx_get_prop(ctx, idx)
+    ctx = gp.ctx
+    let p = gp.prop
+    if p.kind != PROP_EQ() { return 1 }
+    if p.lhs != 7 { return 1 }
+    if p.rhs != 8 { return 1 }
+
+    return 0
+}
+
+// ---------------------------------------------------------------------------
+// Test 06: ctx_get_prop with out-of-bounds index returns PROP_FALSE()
+// ---------------------------------------------------------------------------
+fn test_ctx_get_prop_oob() -> i32 with Div, Panic, Mut {
+    var ctx = ctx_new()
+    // No props added, index 0 is out of bounds
+    var gp = ctx_get_prop(ctx, 0)
+    let p = gp.prop
+    if p.kind != PROP_FALSE() { return 1 }
+
+    // Negative index also returns PROP_FALSE
+    var gp2 = gp.ctx
+    var gp3 = ctx_get_prop(gp2, 0 - 1)
+    let p2 = gp3.prop
+    if p2.kind != PROP_FALSE() { return 1 }
+
+    return 0
+}
+
+// ---------------------------------------------------------------------------
+// Test 07: ctx_trust adds an index, ctx_is_trusted finds it
+// ---------------------------------------------------------------------------
+fn test_ctx_trust_is_trusted() -> i32 with Div, Panic, Mut {
+    var ctx = ctx_new()
+
+    var r = ctx_add_prop(ctx, th_prop_custom(5))
+    ctx = r.ctx
+    let idx = r.idx
+
+    // Not trusted yet
+    var tb1 = ctx_is_trusted(ctx, idx)
+    ctx = tb1.ctx
+    if tb1.val == true { return 1 }
+
+    // Trust it
+    ctx = ctx_trust(ctx, idx)
+    var tb2 = ctx_is_trusted(ctx, idx)
+    if tb2.val == false { return 1 }
+    if ctx_trust_count(tb2.ctx) != 1 { return 1 }
+
+    return 0
+}
+
+// ---------------------------------------------------------------------------
+// Test 08: ctx_trust deduplication — adding same idx twice keeps count at 1
+// ---------------------------------------------------------------------------
+fn test_ctx_trust_dedup() -> i32 with Div, Panic, Mut {
+    var ctx = ctx_new()
+
+    var r = ctx_add_prop(ctx, th_prop_custom(5))
+    ctx = r.ctx
+    let idx = r.idx
+
+    ctx = ctx_trust(ctx, idx)
+    ctx = ctx_trust(ctx, idx)  // duplicate
+
+    if ctx_trust_count(ctx) != 1 { return 1 }
+    return 0
+}
+
+// ---------------------------------------------------------------------------
+// Test 09: th_axiom adds and trusts a proposition in one step
+// ---------------------------------------------------------------------------
+fn test_th_axiom() -> i32 with Div, Panic, Mut {
+    var ctx = ctx_new()
+
+    var r = th_axiom(ctx, th_prop_custom(42))
+    ctx = r.ctx
+    let idx = r.idx
+    if idx < 0 { return 1 }
+
+    var tb = ctx_is_trusted(ctx, idx)
+    ctx = tb.ctx
+    if tb.val == false { return 1 }
+    if ctx_trust_count(ctx) != 1 { return 1 }
+
+    // Verify stored proposition
+    var gp = ctx_get_prop(ctx, idx)
+    let p = gp.prop
+    if p.kind != PROP_CUSTOM() { return 1 }
+    if p.name_id != 42 { return 1 }
+
+    return 0
+}
+
+// ---------------------------------------------------------------------------
+// Test 10: th_refl proves x = x and trusts the result
+// ---------------------------------------------------------------------------
+fn test_th_refl() -> i32 with Div, Panic, Mut {
+    var ctx = ctx_new()
+
+    var r = th_refl(ctx, 99)
+    ctx = r.ctx
+    let idx = r.idx
+    if idx < 0 { return 1 }
+
+    var gp = ctx_get_prop(ctx, idx)
+    ctx = gp.ctx
+    let p = gp.prop
+    if p.kind != PROP_EQ() { return 1 }
+    if p.lhs != 99 { return 1 }
+    if p.rhs != 99 { return 1 }
+
+    var tb = ctx_is_trusted(ctx, idx)
+    if tb.val == false { return 1 }
+
+    return 0
+}
+
+// ---------------------------------------------------------------------------
+// Test 11: th_refl different values produce different proofs
+// ---------------------------------------------------------------------------
+fn test_th_refl_distinct() -> i32 with Div, Panic, Mut {
+    var ctx = ctx_new()
+
+    var r1 = th_refl(ctx, 1)
+    ctx = r1.ctx
+    let idx1 = r1.idx
+
+    var r2 = th_refl(ctx, 2)
+    ctx = r2.ctx
+    let idx2 = r2.idx
+
+    // Different propositions, different indices
+    if idx1 == idx2 { return 1 }
+
+    var gp1 = ctx_get_prop(ctx, idx1)
+    ctx = gp1.ctx
+    if gp1.prop.lhs != 1 { return 1 }
+
+    var gp2 = ctx_get_prop(ctx, idx2)
+    if gp2.prop.lhs != 2 { return 1 }
+
+    return 0
+}
+
+// ---------------------------------------------------------------------------
+// Test 12: th_symm derives b=a from trusted a=b
+// ---------------------------------------------------------------------------
+fn test_th_symm() -> i32 with Div, Panic, Mut {
+    var ctx = ctx_new()
+
+    // Axiom: a=b (terms 10, 20)
+    var r1 = th_axiom(ctx, th_prop_eq(10, 20))
+    ctx = r1.ctx
+    let ab = r1.idx
+
+    var r2 = th_symm(ctx, ab)
+    ctx = r2.ctx
+    let ba = r2.idx
+    if ba < 0 { return 1 }
+
+    var gp = ctx_get_prop(ctx, ba)
+    ctx = gp.ctx
+    let p = gp.prop
+    if p.kind != PROP_EQ() { return 1 }
+    if p.lhs != 20 { return 1 }
+    if p.rhs != 10 { return 1 }
+
+    var tb = ctx_is_trusted(ctx, ba)
+    if tb.val == false { return 1 }
+
+    return 0
+}
+
+// ---------------------------------------------------------------------------
+// Test 13: th_symm fails when proposition is not an equality
+// ---------------------------------------------------------------------------
+fn test_th_symm_wrong_kind() -> i32 with Div, Panic, Mut {
+    var ctx = ctx_new()
+
+    // Axiom with AND proposition (not EQ)
+    var r1 = th_axiom(ctx, th_prop_and(1, 2))
+    ctx = r1.ctx
+    let idx = r1.idx
+
+    var r2 = th_symm(ctx, idx)
+    let result = r2.idx
+    if result >= 0 { return 1 }  // should have failed
+
+    return 0
+}
+
+// ---------------------------------------------------------------------------
+// Test 14: th_symm fails when proposition is not trusted
+// ---------------------------------------------------------------------------
+fn test_th_symm_requires_trust() -> i32 with Div, Panic, Mut {
+    var ctx = ctx_new()
+
+    // Add without trusting
+    var r1 = ctx_add_prop(ctx, th_prop_eq(1, 2))
+    ctx = r1.ctx
+    let idx = r1.idx
+
+    var r2 = th_symm(ctx, idx)
+    let result = r2.idx
+    if result >= 0 { return 1 }  // should have failed
+
+    return 0
+}
+
+// ---------------------------------------------------------------------------
+// Test 15: th_trans derives a=c from trusted a=b and b=c
+// ---------------------------------------------------------------------------
+fn test_th_trans() -> i32 with Div, Panic, Mut {
+    var ctx = ctx_new()
+
+    var r1 = th_axiom(ctx, th_prop_eq(1, 2))
+    ctx = r1.ctx
+    let ab = r1.idx
+
+    var r2 = th_axiom(ctx, th_prop_eq(2, 3))
+    ctx = r2.ctx
+    let bc = r2.idx
+
+    var r3 = th_trans(ctx, ab, bc)
+    ctx = r3.ctx
+    let ac = r3.idx
+    if ac < 0 { return 1 }
+
+    var gp = ctx_get_prop(ctx, ac)
+    ctx = gp.ctx
+    let p = gp.prop
+    if p.kind != PROP_EQ() { return 1 }
+    if p.lhs != 1 { return 1 }
+    if p.rhs != 3 { return 1 }
+
+    var tb = ctx_is_trusted(ctx, ac)
+    if tb.val == false { return 1 }
+
+    return 0
+}
+
+// ---------------------------------------------------------------------------
+// Test 16: th_trans fails when middle terms don't match
+// ---------------------------------------------------------------------------
+fn test_th_trans_mismatch() -> i32 with Div, Panic, Mut {
+    var ctx = ctx_new()
+
+    var r1 = th_axiom(ctx, th_prop_eq(1, 2))
+    ctx = r1.ctx
+    let ab = r1.idx
+
+    // b is 99, not 2 — cannot chain
+    var r2 = th_axiom(ctx, th_prop_eq(99, 3))
+    ctx = r2.ctx
+    let bc = r2.idx
+
+    var r3 = th_trans(ctx, ab, bc)
+    let ac = r3.idx
+    if ac >= 0 { return 1 }  // should fail
+
+    return 0
+}
+
+// ---------------------------------------------------------------------------
+// Test 17: th_trans — symmetry + transitivity chain: a=b, b=a via symm => a=a
+// ---------------------------------------------------------------------------
+fn test_th_symm_trans_chain() -> i32 with Div, Panic, Mut {
+    var ctx = ctx_new()
+
+    // a=b
+    var r1 = th_axiom(ctx, th_prop_eq(1, 2))
+    ctx = r1.ctx
+    let ab = r1.idx
+
+    // b=a via symmetry
+    var r2 = th_symm(ctx, ab)
+    ctx = r2.ctx
+    let ba = r2.idx
+    if ba < 0 { return 1 }
+
+    // a=b + b=a => a=a via transitivity
+    var r3 = th_trans(ctx, ab, ba)
+    ctx = r3.ctx
+    let aa = r3.idx
+    if aa < 0 { return 1 }
+
+    var gp = ctx_get_prop(ctx, aa)
+    let p = gp.prop
+    if p.lhs != 1 { return 1 }
+    if p.rhs != 1 { return 1 }
+
+    return 0
+}
+
+// ---------------------------------------------------------------------------
+// Test 18: th_modus_ponens — P, P=>Q derives Q
+// ---------------------------------------------------------------------------
+fn test_th_modus_ponens() -> i32 with Div, Panic, Mut {
+    var ctx = ctx_new()
+
+    // P (custom 100)
+    let p_prop = th_prop_custom(100)
+    var r1 = ctx_add_prop(ctx, p_prop)
+    ctx = r1.ctx
+    let p_idx = r1.idx
+    ctx = ctx_trust(ctx, p_idx)
+
+    // Q (custom 200)
+    let q_prop = th_prop_custom(200)
+    var r2 = ctx_add_prop(ctx, q_prop)
+    ctx = r2.ctx
+    let q_idx = r2.idx
+
+    // P => Q (lhs = p_idx, rhs = q_idx)
+    let pq_prop = th_prop_implies(p_idx, q_idx)
+    var r3 = ctx_add_prop(ctx, pq_prop)
+    ctx = r3.ctx
+    let pq_idx = r3.idx
+    ctx = ctx_trust(ctx, pq_idx)
+
+    // Apply modus ponens
+    var r4 = th_modus_ponens(ctx, p_idx, pq_idx)
+    ctx = r4.ctx
+    let result = r4.idx
+    if result < 0 { return 1 }
+    if result != q_idx { return 1 }
+
+    var tb = ctx_is_trusted(ctx, q_idx)
+    if tb.val == false { return 1 }
+
+    return 0
+}
+
+// ---------------------------------------------------------------------------
+// Test 19: th_modus_ponens fails when P is not trusted
+// ---------------------------------------------------------------------------
+fn test_th_modus_ponens_untrusted_p() -> i32 with Div, Panic, Mut {
+    var ctx = ctx_new()
+
+    var r1 = ctx_add_prop(ctx, th_prop_custom(1))
+    ctx = r1.ctx
+    let p_idx = r1.idx
+    // NOT trusting p
+
+    var r2 = ctx_add_prop(ctx, th_prop_custom(2))
+    ctx = r2.ctx
+    let q_idx = r2.idx
+
+    var r3 = ctx_add_prop(ctx, th_prop_implies(p_idx, q_idx))
+    ctx = r3.ctx
+    let pq_idx = r3.idx
+    ctx = ctx_trust(ctx, pq_idx)
+
+    var r4 = th_modus_ponens(ctx, p_idx, pq_idx)
+    let result = r4.idx
+    if result >= 0 { return 1 }  // should fail
+
+    return 0
+}
+
+// ---------------------------------------------------------------------------
+// Test 20: th_and_intro + th_and_elim_l + th_and_elim_r round-trip
+// ---------------------------------------------------------------------------
+fn test_th_and_roundtrip() -> i32 with Div, Panic, Mut {
+    var ctx = ctx_new()
+
+    // Two axioms P and Q
+    var r1 = th_axiom(ctx, th_prop_custom(10))
+    ctx = r1.ctx
+    let p_idx = r1.idx
+
+    var r2 = th_axiom(ctx, th_prop_custom(20))
+    ctx = r2.ctx
+    let q_idx = r2.idx
+
+    // P /\ Q
+    var r3 = th_and_intro(ctx, p_idx, q_idx)
+    ctx = r3.ctx
+    let pq = r3.idx
+    if pq < 0 { return 1 }
+
+    // Verify conjunction is trusted
+    var tb0 = ctx_is_trusted(ctx, pq)
+    ctx = tb0.ctx
+    if tb0.val == false { return 1 }
+
+    // Conjunction proposition should be PROP_AND
+    var gp0 = ctx_get_prop(ctx, pq)
+    ctx = gp0.ctx
+    if gp0.prop.kind != PROP_AND() { return 1 }
+    if gp0.prop.lhs != p_idx { return 1 }
+    if gp0.prop.rhs != q_idx { return 1 }
+
+    // Eliminate left: recover P
+    var r4 = th_and_elim_l(ctx, pq)
+    ctx = r4.ctx
+    let left = r4.idx
+    if left != p_idx { return 1 }
+
+    // Eliminate right: recover Q
+    var r5 = th_and_elim_r(ctx, pq)
+    ctx = r5.ctx
+    let right = r5.idx
+    if right != q_idx { return 1 }
+
+    // Both trusted after elimination
+    var tb1 = ctx_is_trusted(ctx, left)
+    ctx = tb1.ctx
+    if tb1.val == false { return 1 }
+
+    var tb2 = ctx_is_trusted(ctx, right)
+    if tb2.val == false { return 1 }
+
+    return 0
+}
+
+// ---------------------------------------------------------------------------
+// Test 21: th_and_intro fails when P is not trusted
+// ---------------------------------------------------------------------------
+fn test_th_and_intro_requires_trust() -> i32 with Div, Panic, Mut {
+    var ctx = ctx_new()
+
+    var r1 = ctx_add_prop(ctx, th_prop_custom(1))
+    ctx = r1.ctx
+    let p_idx = r1.idx
+    // NOT trusting p
+
+    var r2 = th_axiom(ctx, th_prop_custom(2))
+    ctx = r2.ctx
+    let q_idx = r2.idx
+
+    var r3 = th_and_intro(ctx, p_idx, q_idx)
+    let pq = r3.idx
+    if pq >= 0 { return 1 }  // should fail
+
+    return 0
+}
+
+// ---------------------------------------------------------------------------
+// Test 22: th_and_elim_l fails when prop is not PROP_AND
+// ---------------------------------------------------------------------------
+fn test_th_and_elim_wrong_kind() -> i32 with Div, Panic, Mut {
+    var ctx = ctx_new()
+
+    // Axiom with OR (not AND)
+    var r = th_axiom(ctx, th_prop_or(1, 2))
+    ctx = r.ctx
+    let idx = r.idx
+
+    var r2 = th_and_elim_l(ctx, idx)
+    let result = r2.idx
+    if result >= 0 { return 1 }  // should fail
+
+    return 0
+}
+
+// ---------------------------------------------------------------------------
+// Test 23: multiple axioms accumulate in context
+// ---------------------------------------------------------------------------
+fn test_multiple_axioms() -> i32 with Div, Panic, Mut {
+    var ctx = ctx_new()
+
+    var r1 = th_axiom(ctx, th_prop_custom(1))
+    ctx = r1.ctx
+    var r2 = th_axiom(ctx, th_prop_custom(2))
+    ctx = r2.ctx
+    var r3 = th_axiom(ctx, th_prop_custom(3))
+    ctx = r3.ctx
+
+    if ctx_prop_count(ctx) != 3 { return 1 }
+    if ctx_trust_count(ctx) != 3 { return 1 }
+
+    return 0
+}
+
+// ---------------------------------------------------------------------------
+// Test 24: th_prop_new helper constructs with all fields
+// ---------------------------------------------------------------------------
+fn test_th_prop_new() -> i32 {
+    let p = th_prop_new(PROP_EQ(), 5, 6, 7)
+    if p.kind != PROP_EQ() { return 1 }
+    if p.lhs != 5 { return 1 }
+    if p.rhs != 6 { return 1 }
+    if p.name_id != 7 { return 1 }
+    return 0
+}
+
+// ---------------------------------------------------------------------------
+// Test 25: chain of refl + trans produces reflexive transitivity
+// ---------------------------------------------------------------------------
+fn test_refl_trans_chain() -> i32 with Div, Panic, Mut {
+    var ctx = ctx_new()
+
+    // x=x via refl
+    var r1 = th_refl(ctx, 5)
+    ctx = r1.ctx
+    let xx = r1.idx
+
+    // y=y via refl
+    var r2 = th_refl(ctx, 5)
+    ctx = r2.ctx
+    let yy = r2.idx
+
+    // x=x + x=x => x=x via trans (rhs of first = lhs of second = 5)
+    var r3 = th_trans(ctx, xx, yy)
+    ctx = r3.ctx
+    let result = r3.idx
+    if result < 0 { return 1 }
+
+    var gp = ctx_get_prop(ctx, result)
+    let p = gp.prop
+    if p.lhs != 5 { return 1 }
+    if p.rhs != 5 { return 1 }
+
+    return 0
+}
+
+// ---------------------------------------------------------------------------
+// RUNNER
+// ---------------------------------------------------------------------------
+
+fn run_tests() -> i32 with Mut, Div, Panic {
+    var fail = 0
+
+    if test_prop_kinds_distinct()          != 0 { fail = fail + 1 }
+    if test_th_prop_constructors()         != 0 { fail = fail + 1 }
+    if test_ctx_new()                      != 0 { fail = fail + 1 }
+    if test_ctx_add_prop()                 != 0 { fail = fail + 1 }
+    if test_ctx_get_prop()                 != 0 { fail = fail + 1 }
+    if test_ctx_get_prop_oob()             != 0 { fail = fail + 1 }
+    if test_ctx_trust_is_trusted()         != 0 { fail = fail + 1 }
+    if test_ctx_trust_dedup()              != 0 { fail = fail + 1 }
+    if test_th_axiom()                     != 0 { fail = fail + 1 }
+    if test_th_refl()                      != 0 { fail = fail + 1 }
+    if test_th_refl_distinct()             != 0 { fail = fail + 1 }
+    if test_th_symm()                      != 0 { fail = fail + 1 }
+    if test_th_symm_wrong_kind()           != 0 { fail = fail + 1 }
+    if test_th_symm_requires_trust()       != 0 { fail = fail + 1 }
+    if test_th_trans()                     != 0 { fail = fail + 1 }
+    if test_th_trans_mismatch()            != 0 { fail = fail + 1 }
+    if test_th_symm_trans_chain()          != 0 { fail = fail + 1 }
+    if test_th_modus_ponens()              != 0 { fail = fail + 1 }
+    if test_th_modus_ponens_untrusted_p()  != 0 { fail = fail + 1 }
+    if test_th_and_roundtrip()             != 0 { fail = fail + 1 }
+    if test_th_and_intro_requires_trust()  != 0 { fail = fail + 1 }
+    if test_th_and_elim_wrong_kind()       != 0 { fail = fail + 1 }
+    if test_multiple_axioms()              != 0 { fail = fail + 1 }
+    if test_th_prop_new()                  != 0 { fail = fail + 1 }
+    if test_refl_trans_chain()             != 0 { fail = fail + 1 }
+
+    return fail
+}
+
+fn main() -> i32 with Mut, Div, Panic {
+    return run_tests()
+}

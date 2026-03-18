@@ -1,0 +1,573 @@
+//@ run-pass
+// Test suite for stdlib/theorem/kernel.sio — pure value API
+//
+// The kernel.sio module provides two kinds of functions:
+//   1. Pure value functions: prop constructors, prop_eq_check, verify_ok/fail
+//      → These work correctly in JIT mode and are tested comprehensively here.
+//   2. &! ProofContext mutation functions: true_intro, refl, trusted, etc.
+//      → These require &! references on a ~490KB struct (ProofContext with 15
+//        arrays of 4096 elements). In JIT mode, &! mutations on large by-value
+//        structs are not visible after the call returns (known JIT limitation,
+//        see MEMORY.md "JIT &! reference bug"). Use theorem::core for the
+//        by-value ProofCtx API, which is tested in test_theorem_core.sio.
+//
+// This file tests all 10 PROP_* tag constants, all proposition constructors,
+// prop_eq_check structural comparison, verify_ok/verify_fail helpers, and
+// proof tag constants.
+//
+// Each test_* returns 0 (pass) or 1 (fail).
+// main() returns total failure count (0 = all pass).
+
+use theorem::kernel::*
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+fn abs_diff(a: f64, b: f64) -> f64 {
+    let d = a - b
+    if d < 0.0 { return 0.0 - d }
+    return d
+}
+
+fn near(a: f64, b: f64) -> bool {
+    return abs_diff(a, b) < 0.000001
+}
+
+// ---------------------------------------------------------------------------
+// SECTION A: PROP_* tag constants
+// ---------------------------------------------------------------------------
+
+// Test A1: All PROP_* constants are distinct from each other
+fn test_prop_tags_all_distinct() -> i32 {
+    if PROP_TRUE == PROP_FALSE    { return 1 }
+    if PROP_TRUE == PROP_AND      { return 1 }
+    if PROP_TRUE == PROP_OR       { return 1 }
+    if PROP_TRUE == PROP_IMPLIES  { return 1 }
+    if PROP_TRUE == PROP_NOT      { return 1 }
+    if PROP_TRUE == PROP_FORALL   { return 1 }
+    if PROP_TRUE == PROP_EXISTS   { return 1 }
+    if PROP_TRUE == PROP_EQ       { return 1 }
+    if PROP_TRUE == PROP_CUSTOM   { return 1 }
+    if PROP_FALSE == PROP_AND     { return 1 }
+    if PROP_FALSE == PROP_OR      { return 1 }
+    if PROP_FALSE == PROP_IMPLIES { return 1 }
+    if PROP_AND == PROP_OR        { return 1 }
+    if PROP_AND == PROP_IMPLIES   { return 1 }
+    if PROP_OR == PROP_NOT        { return 1 }
+    if PROP_FORALL == PROP_EXISTS { return 1 }
+    if PROP_EQ == PROP_CUSTOM     { return 1 }
+    return 0
+}
+
+// ---------------------------------------------------------------------------
+// SECTION B: Proposition constructors — tag and field verification
+// ---------------------------------------------------------------------------
+
+// Test B1: prop_true() → PROP_TRUE
+fn test_prop_true() -> i32 {
+    let p = prop_true()
+    if p.tag != PROP_TRUE { return 1 }
+    return 0
+}
+
+// Test B2: prop_false() → PROP_FALSE
+fn test_prop_false() -> i32 {
+    let p = prop_false()
+    if p.tag != PROP_FALSE { return 1 }
+    return 0
+}
+
+// Test B3: prop_and(l, r) → PROP_AND, left_id=l, right_id=r
+fn test_prop_and() -> i32 {
+    let p = prop_and(3, 7)
+    if p.tag != PROP_AND  { return 1 }
+    if p.left_id != 3     { return 1 }
+    if p.right_id != 7    { return 1 }
+    return 0
+}
+
+// Test B4: prop_or(l, r) → PROP_OR
+fn test_prop_or() -> i32 {
+    let p = prop_or(11, 22)
+    if p.tag != PROP_OR   { return 1 }
+    if p.left_id != 11    { return 1 }
+    if p.right_id != 22   { return 1 }
+    return 0
+}
+
+// Test B5: prop_implies(ant, con) → PROP_IMPLIES
+fn test_prop_implies() -> i32 {
+    let p = prop_implies(5, 6)
+    if p.tag != PROP_IMPLIES { return 1 }
+    if p.left_id != 5        { return 1 }
+    if p.right_id != 6       { return 1 }
+    return 0
+}
+
+// Test B6: prop_not(inner) → PROP_NOT, inner in left_id
+fn test_prop_not() -> i32 {
+    let p = prop_not(9)
+    if p.tag != PROP_NOT { return 1 }
+    if p.left_id != 9    { return 1 }
+    return 0
+}
+
+// Test B7: prop_forall(var, body) → PROP_FORALL, var in var_name, body in left_id
+fn test_prop_forall() -> i32 {
+    let p = prop_forall(42, 7)
+    if p.tag != PROP_FORALL { return 1 }
+    if p.var_name != 42     { return 1 }
+    if p.left_id != 7       { return 1 }
+    return 0
+}
+
+// Test B8: prop_exists(var, body) → PROP_EXISTS
+fn test_prop_exists() -> i32 {
+    let p = prop_exists(13, 5)
+    if p.tag != PROP_EXISTS { return 1 }
+    if p.var_name != 13     { return 1 }
+    if p.left_id != 5       { return 1 }
+    return 0
+}
+
+// Test B9: prop_eq(lhs, rhs) → PROP_EQ, values in eq_lhs/eq_rhs
+fn test_prop_eq() -> i32 {
+    let p = prop_eq(100, 200)
+    if p.tag != PROP_EQ  { return 1 }
+    if p.eq_lhs != 100   { return 1 }
+    if p.eq_rhs != 200   { return 1 }
+    return 0
+}
+
+// Test B10: prop_eq lhs != rhs (not self-referential unless same value)
+fn test_prop_eq_different_values() -> i32 {
+    let p = prop_eq(1, 2)
+    if p.eq_lhs == p.eq_rhs { return 1 }  // 1 != 2
+    let q = prop_eq(5, 5)
+    if q.eq_lhs != q.eq_rhs { return 1 }  // 5 == 5
+    return 0
+}
+
+// Test B11: prop_iff(p, q) → encoded as PROP_AND with predicate_id = 1
+fn test_prop_iff() -> i32 {
+    let p = prop_iff(10, 20)
+    if p.tag != PROP_AND     { return 1 }
+    if p.left_id != 10       { return 1 }
+    if p.right_id != 20      { return 1 }
+    if p.predicate_id != 1   { return 1 }
+    return 0
+}
+
+// Test B12: prop_custom(id) → PROP_CUSTOM, pred_id stored in predicate_id
+fn test_prop_custom() -> i32 {
+    let p = prop_custom(77)
+    if p.tag != PROP_CUSTOM  { return 1 }
+    if p.predicate_id != 77  { return 1 }
+    return 0
+}
+
+// Test B13: prop_custom(0) vs prop_custom(1) — different predicate_ids
+fn test_prop_custom_distinct() -> i32 {
+    let p0 = prop_custom(0)
+    let p1 = prop_custom(1)
+    if p0.predicate_id == p1.predicate_id { return 1 }
+    return 0
+}
+
+// ---------------------------------------------------------------------------
+// SECTION C: Proposition constructors — zeroed-out fields
+// ---------------------------------------------------------------------------
+
+// Test C1: prop_true has no meaningful sub-fields (all 0)
+fn test_prop_true_zeroed() -> i32 {
+    let p = prop_true()
+    if p.left_id != 0    { return 1 }
+    if p.right_id != 0   { return 1 }
+    if p.var_name != 0   { return 1 }
+    if p.eq_lhs != 0     { return 1 }
+    if p.eq_rhs != 0     { return 1 }
+    return 0
+}
+
+// Test C2: prop_not has right_id = 0 (only uses left_id for inner)
+fn test_prop_not_rhs_zero() -> i32 {
+    let p = prop_not(5)
+    if p.right_id != 0 { return 1 }
+    return 0
+}
+
+// Test C3: prop_eq has no left_id/right_id used (those fields are 0)
+fn test_prop_eq_fields_zero() -> i32 {
+    let p = prop_eq(3, 4)
+    if p.left_id != 0  { return 1 }
+    if p.right_id != 0 { return 1 }
+    return 0
+}
+
+// ---------------------------------------------------------------------------
+// SECTION D: prop_eq_check structural equality
+// ---------------------------------------------------------------------------
+
+// Test D1: identical propositions are equal
+fn test_prop_eq_check_identical() -> i32 {
+    let p1 = prop_and(3, 7)
+    let p2 = prop_and(3, 7)
+    if prop_eq_check(p1, p2) == false { return 1 }
+    return 0
+}
+
+// Test D2: different right_id → not equal
+fn test_prop_eq_check_diff_right() -> i32 {
+    let p1 = prop_and(3, 7)
+    let p2 = prop_and(3, 8)
+    if prop_eq_check(p1, p2) == true { return 1 }
+    return 0
+}
+
+// Test D3: different left_id → not equal
+fn test_prop_eq_check_diff_left() -> i32 {
+    let p1 = prop_or(1, 5)
+    let p2 = prop_or(2, 5)
+    if prop_eq_check(p1, p2) == true { return 1 }
+    return 0
+}
+
+// Test D4: different tag → not equal (even if other fields match)
+fn test_prop_eq_check_diff_tag() -> i32 {
+    let p1 = prop_and(3, 7)
+    let p2 = prop_or(3, 7)
+    if prop_eq_check(p1, p2) == true { return 1 }
+    return 0
+}
+
+// Test D5: prop_eq checked against itself via eq_lhs/eq_rhs fields
+fn test_prop_eq_check_eq_props() -> i32 {
+    let a = prop_eq(10, 20)
+    let b = prop_eq(10, 20)
+    let c = prop_eq(20, 10)  // swapped
+    if prop_eq_check(a, b) == false { return 1 }
+    if prop_eq_check(a, c) == true  { return 1 }
+    return 0
+}
+
+// Test D6: prop_not vs prop_not, same inner → equal
+fn test_prop_eq_check_not_same() -> i32 {
+    let p1 = prop_not(7)
+    let p2 = prop_not(7)
+    if prop_eq_check(p1, p2) == false { return 1 }
+    return 0
+}
+
+// Test D7: prop_not vs prop_not, different inner → not equal
+fn test_prop_eq_check_not_diff() -> i32 {
+    let p1 = prop_not(7)
+    let p2 = prop_not(8)
+    if prop_eq_check(p1, p2) == true { return 1 }
+    return 0
+}
+
+// Test D8: prop_forall with different var_name → not equal
+fn test_prop_eq_check_forall_var() -> i32 {
+    let p1 = prop_forall(1, 5)
+    let p2 = prop_forall(2, 5)
+    if prop_eq_check(p1, p2) == true { return 1 }
+    return 0
+}
+
+// Test D9: prop_custom with different predicate_id → not equal
+fn test_prop_eq_check_custom_id() -> i32 {
+    let p1 = prop_custom(100)
+    let p2 = prop_custom(200)
+    if prop_eq_check(p1, p2) == true { return 1 }
+    return 0
+}
+
+// Test D10: prop_iff (PROP_AND + predicate_id=1) vs plain prop_and → not equal
+fn test_prop_eq_check_iff_vs_and() -> i32 {
+    let iff_p = prop_iff(5, 6)
+    let and_p = prop_and(5, 6)  // predicate_id = 0
+    // iff has predicate_id=1, and has predicate_id=0 → not equal
+    if prop_eq_check(iff_p, and_p) == true { return 1 }
+    return 0
+}
+
+// ---------------------------------------------------------------------------
+// SECTION E: VerifyResult constructors (pure value, no ctx needed)
+// ---------------------------------------------------------------------------
+
+// Test E1: verify_ok — is_valid=true, confidence stored, reason=0
+fn test_verify_ok_basic() -> i32 {
+    let ok = verify_ok(0.8)
+    if ok.is_valid == false              { return 1 }
+    if near(ok.confidence, 0.8) == false { return 1 }
+    if ok.reason != 0                    { return 1 }
+    return 0
+}
+
+// Test E2: verify_ok(1.0) — fully verified
+fn test_verify_ok_full() -> i32 {
+    let ok = verify_ok(1.0)
+    if ok.is_valid == false               { return 1 }
+    if near(ok.confidence, 1.0) == false  { return 1 }
+    return 0
+}
+
+// Test E3: verify_ok(0.0) — zero confidence
+fn test_verify_ok_zero() -> i32 {
+    let ok = verify_ok(0.0)
+    if ok.is_valid == false               { return 1 }
+    if near(ok.confidence, 0.0) == false  { return 1 }
+    return 0
+}
+
+// Test E4: verify_fail — is_valid=false, reason stored
+fn test_verify_fail_reason1() -> i32 {
+    let f = verify_fail(1)
+    if f.is_valid == true { return 1 }
+    if f.reason != 1      { return 1 }
+    return 0
+}
+
+// Test E5: verify_fail(2) — prop_mismatch
+fn test_verify_fail_reason2() -> i32 {
+    let f = verify_fail(2)
+    if f.is_valid == true { return 1 }
+    if f.reason != 2      { return 1 }
+    return 0
+}
+
+// Test E6: verify_fail(3) — confidence_invalid
+fn test_verify_fail_reason3() -> i32 {
+    let f = verify_fail(3)
+    if f.is_valid == true { return 1 }
+    if f.reason != 3      { return 1 }
+    return 0
+}
+
+// Test E7: verify_ok confidence is distinct from verify_fail confidence
+fn test_verify_ok_vs_fail() -> i32 {
+    let ok = verify_ok(0.9)
+    let fail = verify_fail(1)
+    if ok.is_valid == false  { return 1 }
+    if fail.is_valid == true { return 1 }
+    return 0
+}
+
+// ---------------------------------------------------------------------------
+// SECTION F: Proof tag constants (pure values)
+// ---------------------------------------------------------------------------
+
+// Test F1: PROOF_REFL is defined and has a value
+fn test_proof_refl_defined() -> i32 {
+    let r = PROOF_REFL
+    // PROOF_REFL = 0, just check it's a valid i32
+    if r < 0 { return 1 }
+    return 0
+}
+
+// Test F2: PROOF_TRUSTED is defined and distinct from PROOF_REFL
+fn test_proof_trusted_distinct() -> i32 {
+    if PROOF_TRUSTED == PROOF_REFL { return 1 }
+    return 0
+}
+
+// Test F3: PROOF_ASSUME is distinct from PROOF_RUNTIME
+fn test_proof_assume_vs_runtime() -> i32 {
+    if PROOF_ASSUME == PROOF_RUNTIME { return 1 }
+    return 0
+}
+
+// Test F4: PROOF_AND_INTRO, PROOF_AND_ELIM_L, PROOF_AND_ELIM_R all distinct
+fn test_proof_and_tags_distinct() -> i32 {
+    if PROOF_AND_INTRO == PROOF_AND_ELIM_L { return 1 }
+    if PROOF_AND_INTRO == PROOF_AND_ELIM_R { return 1 }
+    if PROOF_AND_ELIM_L == PROOF_AND_ELIM_R { return 1 }
+    return 0
+}
+
+// Test F5: PROOF_OR_INTRO_L != PROOF_OR_INTRO_R != PROOF_OR_ELIM
+fn test_proof_or_tags_distinct() -> i32 {
+    if PROOF_OR_INTRO_L == PROOF_OR_INTRO_R { return 1 }
+    if PROOF_OR_INTRO_L == PROOF_OR_ELIM    { return 1 }
+    if PROOF_OR_INTRO_R == PROOF_OR_ELIM    { return 1 }
+    return 0
+}
+
+// Test F6: PROOF_IMPL_INTRO != PROOF_IMPL_ELIM
+fn test_proof_impl_tags_distinct() -> i32 {
+    if PROOF_IMPL_INTRO == PROOF_IMPL_ELIM { return 1 }
+    return 0
+}
+
+// Test F7: PROOF_SYM, PROOF_TRANS, PROOF_CONG, PROOF_SUBST all distinct
+fn test_proof_eq_tags_distinct() -> i32 {
+    if PROOF_SYM == PROOF_TRANS  { return 1 }
+    if PROOF_SYM == PROOF_CONG   { return 1 }
+    if PROOF_SYM == PROOF_SUBST  { return 1 }
+    if PROOF_TRANS == PROOF_CONG { return 1 }
+    return 0
+}
+
+// Test F8: PROOF_FORALL_INTRO != PROOF_FORALL_ELIM
+fn test_proof_forall_tags_distinct() -> i32 {
+    if PROOF_FORALL_INTRO == PROOF_FORALL_ELIM { return 1 }
+    return 0
+}
+
+// Test F9: PROOF_EXISTS_INTRO != PROOF_EXISTS_ELIM
+fn test_proof_exists_tags_distinct() -> i32 {
+    if PROOF_EXISTS_INTRO == PROOF_EXISTS_ELIM { return 1 }
+    return 0
+}
+
+// Test F10: PROOF_COMPOSE != PROOF_WEAKEN
+fn test_proof_compose_weaken_distinct() -> i32 {
+    if PROOF_COMPOSE == PROOF_WEAKEN { return 1 }
+    return 0
+}
+
+// ---------------------------------------------------------------------------
+// SECTION G: prop_tag_name (returns tag unchanged)
+// ---------------------------------------------------------------------------
+
+// Test G1: prop_tag_name returns the tag value passed in
+fn test_prop_tag_name_identity() -> i32 {
+    if prop_tag_name(0) != 0   { return 1 }
+    if prop_tag_name(5) != 5   { return 1 }
+    if prop_tag_name(9) != 9   { return 1 }
+    return 0
+}
+
+// ---------------------------------------------------------------------------
+// SECTION H: Proposition structural invariants
+// ---------------------------------------------------------------------------
+
+// Test H1: prop_and with same args on both sides
+fn test_prop_and_same_args() -> i32 {
+    let p = prop_and(5, 5)
+    if p.left_id != p.right_id { return 1 }
+    return 0
+}
+
+// Test H2: prop_or different args
+fn test_prop_or_diff_args() -> i32 {
+    let p = prop_or(1, 2)
+    if p.left_id == p.right_id { return 1 }
+    return 0
+}
+
+// Test H3: prop_implies antecedent = consequent → left_id == right_id
+fn test_prop_implies_same() -> i32 {
+    let p = prop_implies(3, 3)
+    if p.left_id != p.right_id { return 1 }
+    return 0
+}
+
+// Test H4: prop_forall and prop_exists have same structure (differ by tag)
+fn test_prop_forall_exists_structure() -> i32 {
+    let fa = prop_forall(1, 10)
+    let ex = prop_exists(1, 10)
+    // Same var_name and left_id, but different tags
+    if fa.var_name != ex.var_name { return 1 }
+    if fa.left_id != ex.left_id   { return 1 }
+    if fa.tag == ex.tag           { return 1 }  // must differ
+    return 0
+}
+
+// Test H5: prop_iff(a, b) and prop_iff(b, a) differ (not symmetric)
+fn test_prop_iff_not_symmetric() -> i32 {
+    let ab = prop_iff(1, 2)
+    let ba = prop_iff(2, 1)
+    if prop_eq_check(ab, ba) == true { return 1 }
+    return 0
+}
+
+// Test H6: prop_eq(a, b) and prop_eq(b, a) differ (symmetry is a proof step)
+fn test_prop_eq_not_symmetric() -> i32 {
+    let ab = prop_eq(1, 2)
+    let ba = prop_eq(2, 1)
+    if prop_eq_check(ab, ba) == true { return 1 }
+    return 0
+}
+
+// ---------------------------------------------------------------------------
+// RUNNER
+// ---------------------------------------------------------------------------
+
+fn run_tests() -> i32 with Mut, Div, Panic {
+    var fail = 0
+
+    // Section A: PROP_* tag constants
+    if test_prop_tags_all_distinct()       != 0 { fail = fail + 1 }
+
+    // Section B: proposition constructors
+    if test_prop_true()                    != 0 { fail = fail + 1 }
+    if test_prop_false()                   != 0 { fail = fail + 1 }
+    if test_prop_and()                     != 0 { fail = fail + 1 }
+    if test_prop_or()                      != 0 { fail = fail + 1 }
+    if test_prop_implies()                 != 0 { fail = fail + 1 }
+    if test_prop_not()                     != 0 { fail = fail + 1 }
+    if test_prop_forall()                  != 0 { fail = fail + 1 }
+    if test_prop_exists()                  != 0 { fail = fail + 1 }
+    if test_prop_eq()                      != 0 { fail = fail + 1 }
+    if test_prop_eq_different_values()     != 0 { fail = fail + 1 }
+    if test_prop_iff()                     != 0 { fail = fail + 1 }
+    if test_prop_custom()                  != 0 { fail = fail + 1 }
+    if test_prop_custom_distinct()         != 0 { fail = fail + 1 }
+
+    // Section C: zeroed-out fields
+    if test_prop_true_zeroed()             != 0 { fail = fail + 1 }
+    if test_prop_not_rhs_zero()            != 0 { fail = fail + 1 }
+    if test_prop_eq_fields_zero()          != 0 { fail = fail + 1 }
+
+    // Section D: prop_eq_check
+    if test_prop_eq_check_identical()      != 0 { fail = fail + 1 }
+    if test_prop_eq_check_diff_right()     != 0 { fail = fail + 1 }
+    if test_prop_eq_check_diff_left()      != 0 { fail = fail + 1 }
+    if test_prop_eq_check_diff_tag()       != 0 { fail = fail + 1 }
+    if test_prop_eq_check_eq_props()       != 0 { fail = fail + 1 }
+    if test_prop_eq_check_not_same()       != 0 { fail = fail + 1 }
+    if test_prop_eq_check_not_diff()       != 0 { fail = fail + 1 }
+    if test_prop_eq_check_forall_var()     != 0 { fail = fail + 1 }
+    if test_prop_eq_check_custom_id()      != 0 { fail = fail + 1 }
+    if test_prop_eq_check_iff_vs_and()     != 0 { fail = fail + 1 }
+
+    // Section E: VerifyResult constructors
+    if test_verify_ok_basic()              != 0 { fail = fail + 1 }
+    if test_verify_ok_full()               != 0 { fail = fail + 1 }
+    if test_verify_ok_zero()               != 0 { fail = fail + 1 }
+    if test_verify_fail_reason1()          != 0 { fail = fail + 1 }
+    if test_verify_fail_reason2()          != 0 { fail = fail + 1 }
+    if test_verify_fail_reason3()          != 0 { fail = fail + 1 }
+    if test_verify_ok_vs_fail()            != 0 { fail = fail + 1 }
+
+    // Section F: proof tag constants
+    if test_proof_refl_defined()           != 0 { fail = fail + 1 }
+    if test_proof_trusted_distinct()       != 0 { fail = fail + 1 }
+    if test_proof_assume_vs_runtime()      != 0 { fail = fail + 1 }
+    if test_proof_and_tags_distinct()      != 0 { fail = fail + 1 }
+    if test_proof_or_tags_distinct()       != 0 { fail = fail + 1 }
+    if test_proof_impl_tags_distinct()     != 0 { fail = fail + 1 }
+    if test_proof_eq_tags_distinct()       != 0 { fail = fail + 1 }
+    if test_proof_forall_tags_distinct()   != 0 { fail = fail + 1 }
+    if test_proof_exists_tags_distinct()   != 0 { fail = fail + 1 }
+    if test_proof_compose_weaken_distinct() != 0 { fail = fail + 1 }
+
+    // Section G: prop_tag_name
+    if test_prop_tag_name_identity()       != 0 { fail = fail + 1 }
+
+    // Section H: structural invariants
+    if test_prop_and_same_args()           != 0 { fail = fail + 1 }
+    if test_prop_or_diff_args()            != 0 { fail = fail + 1 }
+    if test_prop_implies_same()            != 0 { fail = fail + 1 }
+    if test_prop_forall_exists_structure() != 0 { fail = fail + 1 }
+    if test_prop_iff_not_symmetric()       != 0 { fail = fail + 1 }
+    if test_prop_eq_not_symmetric()        != 0 { fail = fail + 1 }
+
+    return fail
+}
+
+fn main() -> i32 with Mut, Div, Panic {
+    return run_tests()
+}

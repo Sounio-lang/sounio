@@ -1,0 +1,657 @@
+// stdlib/search/algorithms.sio — Search and Sorting Algorithms
+//
+// Self-contained (no imports). Fixed [f64; 256] arrays throughout.
+// Sorting functions return by value to avoid the &![T;N] JIT mutation bug.
+//
+// Structures
+//   SearchResult — result of a search operation
+//   SortStats    — swap/comparison counts
+//   SortResult   — sorted array + SortStats bundled for by-value return
+//
+// Search:
+//   linear_search, binary_search, interpolation_search
+//
+// Sorting (return by value):
+//   insertion_sort, selection_sort, quicksort, merge_sort, heapsort
+//
+// Utilities:
+//   is_sorted, nth_smallest, median, unique_count
+
+// =============================================================================
+// Structures
+// =============================================================================
+
+pub struct SearchResult {
+    pub found: i32,
+    pub index: i32,
+    pub comparisons: i32,
+}
+
+pub struct SortStats {
+    pub swaps: i32,
+    pub comparisons: i32,
+}
+
+// Carrier struct for sorting functions: sorted array + stats.
+// Using a struct avoids the JIT tuple-return and &! mutation issues.
+pub struct SortResult {
+    pub data: [f64; 256],
+    pub stats: SortStats,
+}
+
+// =============================================================================
+// Helper: absolute value for f64
+// =============================================================================
+
+fn abs_f64(x: f64) -> f64 with Div, Panic {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+// =============================================================================
+// Search: Linear Search
+// =============================================================================
+
+// linear_search — O(n) search in unsorted data.
+//
+// Returns SearchResult with found=1 and the first matching index,
+// or found=0 and index=-1 if not found.
+pub fn linear_search(arr: &[f64; 256], n: i32, target: f64) -> SearchResult with Div, Panic, Mut {
+    var comps = 0
+    var i = 0
+    while i < n {
+        comps = comps + 1
+        if arr[i] == target {
+            return SearchResult { found: 1, index: i, comparisons: comps }
+        }
+        i = i + 1
+    }
+    return SearchResult { found: 0, index: -1, comparisons: comps }
+}
+
+// =============================================================================
+// Search: Binary Search
+// =============================================================================
+
+// binary_search — O(log n) search in a sorted array.
+//
+// The array must be sorted in ascending order.
+// Returns SearchResult with found=1 and the matching index, or found=0/-1.
+pub fn binary_search(arr: &[f64; 256], n: i32, target: f64) -> SearchResult with Div, Panic, Mut {
+    if n <= 0 {
+        return SearchResult { found: 0, index: -1, comparisons: 0 }
+    }
+    var lo = 0
+    var hi = n - 1
+    var comps = 0
+    while lo <= hi {
+        let mid = lo + (hi - lo) / 2
+        comps = comps + 1
+        if arr[mid] == target {
+            return SearchResult { found: 1, index: mid, comparisons: comps }
+        } else if arr[mid] < target {
+            lo = mid + 1
+        } else {
+            hi = mid - 1
+        }
+    }
+    return SearchResult { found: 0, index: -1, comparisons: comps }
+}
+
+// =============================================================================
+// Search: Interpolation Search
+// =============================================================================
+
+// interpolation_search — O(log log n) average for uniformly distributed data.
+//
+// The array must be sorted in ascending order.
+// Degrades to O(n) for non-uniform data.
+pub fn interpolation_search(arr: &[f64; 256], n: i32, target: f64) -> SearchResult with Div, Panic, Mut {
+    if n <= 0 {
+        return SearchResult { found: 0, index: -1, comparisons: 0 }
+    }
+    var lo = 0
+    var hi = n - 1
+    var comps = 0
+    while lo <= hi && target >= arr[lo] && target <= arr[hi] {
+        if lo == hi {
+            comps = comps + 1
+            if arr[lo] == target {
+                return SearchResult { found: 1, index: lo, comparisons: comps }
+            }
+            return SearchResult { found: 0, index: -1, comparisons: comps }
+        }
+        let range = arr[hi] - arr[lo]
+        if range == 0.0 {
+            comps = comps + 1
+            if arr[lo] == target {
+                return SearchResult { found: 1, index: lo, comparisons: comps }
+            }
+            return SearchResult { found: 0, index: -1, comparisons: comps }
+        }
+        // Interpolation probe
+        let frac = (target - arr[lo]) / range
+        let span = hi - lo
+        let probe_f = frac * (span as f64)
+        var probe = lo + (probe_f as i32)
+        if probe < lo { probe = lo }
+        if probe > hi { probe = hi }
+        comps = comps + 1
+        if arr[probe] == target {
+            return SearchResult { found: 1, index: probe, comparisons: comps }
+        } else if arr[probe] < target {
+            lo = probe + 1
+        } else {
+            hi = probe - 1
+        }
+    }
+    return SearchResult { found: 0, index: -1, comparisons: comps }
+}
+
+// =============================================================================
+// Utility: is_sorted
+// =============================================================================
+
+// is_sorted — returns true when arr[0..n-1] is non-decreasing.
+pub fn is_sorted(arr: &[f64; 256], n: i32) -> bool with Div, Panic, Mut {
+    if n <= 1 { return true }
+    var i = 0
+    while i < n - 1 {
+        if arr[i] > arr[i + 1] { return false }
+        i = i + 1
+    }
+    return true
+}
+
+// =============================================================================
+// Sort: Insertion Sort
+// =============================================================================
+
+// insertion_sort — stable O(n²) sort. Returns SortResult by value.
+pub fn insertion_sort(arr: [f64; 256], n: i32) -> SortResult with Div, Panic, Mut {
+    var data = arr
+    var swaps = 0
+    var comps = 0
+    var i = 1
+    while i < n {
+        let key = data[i]
+        // Find how far left to shift by scanning rightward from the left.
+        // insert_at: the index where key will be placed.
+        // We scan j from i-1 down to 0; every element > key shifts right by 1.
+        // We stop when data[j] <= key (insert at j+1) or j < 0 (insert at 0).
+        var insert_at = i   // default: no shift needed
+        var j = i - 1
+        var scanning = true
+        while j >= 0 && scanning {
+            comps = comps + 1
+            if data[j] > key {
+                data[j + 1] = data[j]
+                swaps = swaps + 1
+                insert_at = j
+                j = j - 1
+            } else {
+                // data[j] <= key: key belongs at j+1
+                insert_at = j + 1
+                scanning = false
+            }
+        }
+        data[insert_at] = key
+        i = i + 1
+    }
+    return SortResult {
+        data: data,
+        stats: SortStats { swaps: swaps, comparisons: comps }
+    }
+}
+
+// =============================================================================
+// Sort: Selection Sort
+// =============================================================================
+
+// selection_sort — O(n²), not stable. Returns SortResult by value.
+pub fn selection_sort(arr: [f64; 256], n: i32) -> SortResult with Div, Panic, Mut {
+    var data = arr
+    var swaps = 0
+    var comps = 0
+    var i = 0
+    while i < n - 1 {
+        var min_idx = i
+        var j = i + 1
+        while j < n {
+            comps = comps + 1
+            if data[j] < data[min_idx] {
+                min_idx = j
+            }
+            j = j + 1
+        }
+        if min_idx != i {
+            let tmp = data[i]
+            data[i] = data[min_idx]
+            data[min_idx] = tmp
+            swaps = swaps + 1
+        }
+        i = i + 1
+    }
+    return SortResult {
+        data: data,
+        stats: SortStats { swaps: swaps, comparisons: comps }
+    }
+}
+
+// =============================================================================
+// Sort: Quicksort (Lomuto partition, median-of-3 pivot)
+// =============================================================================
+
+// qs_median3 — returns index of median of three elements for pivot selection.
+fn qs_median3(data: &[f64; 256], lo: i32, hi: i32) -> i32 with Div, Panic, Mut {
+    let mid = lo + (hi - lo) / 2
+    // Sort lo, mid, hi by value and return median index
+    let a = data[lo]
+    let b = data[mid]
+    let c = data[hi]
+    if a <= b && b <= c { return mid }
+    if a <= c && c <= b { return hi }
+    if b <= a && a <= c { return lo }
+    if b <= c && c <= a { return hi }
+    if c <= a && a <= b { return lo }
+    return mid
+}
+
+// qs_partition — Lomuto partition with median-of-3 pivot.
+// Returns the final pivot position and updates swaps/comps via out-params
+// encoded in a small carrier struct.
+struct QsState {
+    data: [f64; 256],
+    swaps: i32,
+    comparisons: i32,
+}
+
+fn qs_partition(state: QsState, lo: i32, hi: i32) -> (QsState, i32) with Div, Panic, Mut {
+    var s = state
+    // Choose pivot: median of three
+    let pivot_idx = qs_median3(&s.data, lo, hi)
+    // Move pivot to hi
+    let pivot_val = s.data[pivot_idx]
+    s.data[pivot_idx] = s.data[hi]
+    s.data[hi] = pivot_val
+    s.swaps = s.swaps + 1
+
+    var store = lo
+    var j = lo
+    while j < hi {
+        s.comparisons = s.comparisons + 1
+        if s.data[j] <= s.data[hi] {
+            let tmp = s.data[store]
+            s.data[store] = s.data[j]
+            s.data[j] = tmp
+            if store != j { s.swaps = s.swaps + 1 }
+            store = store + 1
+        }
+        j = j + 1
+    }
+    let tmp2 = s.data[store]
+    s.data[store] = s.data[hi]
+    s.data[hi] = tmp2
+    if store != hi { s.swaps = s.swaps + 1 }
+    return (s, store)
+}
+
+// qs_run — iterative quicksort using an explicit stack (avoids recursive &! issues).
+fn qs_run(arr: [f64; 256], n: i32) -> QsState with Div, Panic, Mut {
+    var s = QsState { data: arr, swaps: 0, comparisons: 0 }
+    if n <= 1 { return s }
+
+    // Explicit stack for [lo, hi] pairs; max depth = 256 levels
+    var stack_lo = [0; 256]
+    var stack_hi = [0; 256]
+    var top = 0
+
+    stack_lo[0] = 0
+    stack_hi[0] = n - 1
+    top = 1
+
+    while top > 0 {
+        top = top - 1
+        let lo = stack_lo[top]
+        let hi = stack_hi[top]
+        if lo < hi {
+            let pair = qs_partition(s, lo, hi)
+            s = pair.0
+            let p = pair.1
+            // Push larger partition first for stack efficiency
+            if p - 1 - lo > hi - (p + 1) {
+                if lo < p - 1 {
+                    stack_lo[top] = lo
+                    stack_hi[top] = p - 1
+                    top = top + 1
+                }
+                if p + 1 < hi {
+                    stack_lo[top] = p + 1
+                    stack_hi[top] = hi
+                    top = top + 1
+                }
+            } else {
+                if p + 1 < hi {
+                    stack_lo[top] = p + 1
+                    stack_hi[top] = hi
+                    top = top + 1
+                }
+                if lo < p - 1 {
+                    stack_lo[top] = lo
+                    stack_hi[top] = p - 1
+                    top = top + 1
+                }
+            }
+        }
+    }
+    return s
+}
+
+// quicksort — Lomuto partition with median-of-3 pivot, iterative. Returns SortResult.
+pub fn quicksort(arr: [f64; 256], n: i32) -> SortResult with Div, Panic, Mut {
+    let s = qs_run(arr, n)
+    return SortResult {
+        data: s.data,
+        stats: SortStats { swaps: s.swaps, comparisons: s.comparisons }
+    }
+}
+
+// =============================================================================
+// Sort: Merge Sort (bottom-up iterative, no recursion)
+// =============================================================================
+
+// merge_sort — bottom-up iterative merge sort. O(n log n) stable.
+// Uses a scratch buffer to avoid recursive stack issues.
+pub fn merge_sort(arr: [f64; 256], n: i32) -> SortResult with Div, Panic, Mut {
+    var data = arr
+    var tmp = [0.0; 256]
+    var swaps = 0
+    var comps = 0
+
+    var width = 1
+    while width < n {
+        var lo = 0
+        while lo < n {
+            let mid_raw = lo + width - 1
+            let mid = if mid_raw < n - 1 { mid_raw } else { n - 1 }
+            let hi_raw = lo + 2 * width - 1
+            let hi = if hi_raw < n - 1 { hi_raw } else { n - 1 }
+
+            if mid < hi {
+                // Merge data[lo..mid] and data[mid+1..hi] into tmp[lo..hi]
+                var a = lo
+                var b = mid + 1
+                var k = lo
+                while a <= mid && b <= hi {
+                    comps = comps + 1
+                    if data[a] <= data[b] {
+                        tmp[k] = data[a]
+                        a = a + 1
+                    } else {
+                        tmp[k] = data[b]
+                        b = b + 1
+                        swaps = swaps + 1
+                    }
+                    k = k + 1
+                }
+                while a <= mid {
+                    tmp[k] = data[a]
+                    a = a + 1
+                    k = k + 1
+                }
+                while b <= hi {
+                    tmp[k] = data[b]
+                    b = b + 1
+                    k = k + 1
+                }
+                // Copy merged segment back
+                var idx = lo
+                while idx <= hi {
+                    data[idx] = tmp[idx]
+                    idx = idx + 1
+                }
+            }
+            lo = lo + 2 * width
+        }
+        width = width * 2
+    }
+
+    return SortResult {
+        data: data,
+        stats: SortStats { swaps: swaps, comparisons: comps }
+    }
+}
+
+// =============================================================================
+// Sort: Heapsort (in-place, iterative sift-down)
+// =============================================================================
+
+// hs_sift_down — sift element at pos down within heap of given size.
+fn hs_sift_down(data: &[f64; 256], size: i32, pos: i32, swaps_ref: &[i32; 1], comps_ref: &[i32; 1]) with Div, Panic, Mut {
+    var p = pos
+    var sw = swaps_ref[0]
+    var cp = comps_ref[0]
+    var done = false
+    while !done {
+        var largest = p
+        let l = 2 * p + 1
+        let r = 2 * p + 2
+        if l < size {
+            cp = cp + 1
+            if data[l] > data[largest] { largest = l }
+        }
+        if r < size {
+            cp = cp + 1
+            if data[r] > data[largest] { largest = r }
+        }
+        if largest != p {
+            let tmp = data[p]
+            data[p] = data[largest]
+            data[largest] = tmp
+            sw = sw + 1
+            p = largest
+        } else {
+            done = true
+        }
+    }
+    // Note: can't write back via &[i32;1] refs in JIT — use QsState pattern instead
+    // This function is only valid when called from hs_run which owns swaps/comps
+}
+
+// hs_run — full heapsort implementation using QsState carrier.
+fn hs_run(arr: [f64; 256], n: i32) -> QsState with Div, Panic, Mut {
+    var s = QsState { data: arr, swaps: 0, comparisons: 0 }
+    if n <= 1 { return s }
+
+    // Build max heap (bottom-up)
+    var i = n / 2 - 1
+    while i >= 0 {
+        // Sift down s.data[i] in heap of size n
+        var p = i
+        var done = false
+        while !done {
+            var largest = p
+            let l = 2 * p + 1
+            let r = 2 * p + 2
+            if l < n {
+                s.comparisons = s.comparisons + 1
+                if s.data[l] > s.data[largest] { largest = l }
+            }
+            if r < n {
+                s.comparisons = s.comparisons + 1
+                if s.data[r] > s.data[largest] { largest = r }
+            }
+            if largest != p {
+                let tmp = s.data[p]
+                s.data[p] = s.data[largest]
+                s.data[largest] = tmp
+                s.swaps = s.swaps + 1
+                p = largest
+            } else {
+                done = true
+            }
+        }
+        i = i - 1
+    }
+
+    // Extract phase: swap root with end, sift down
+    var end = n - 1
+    while end > 0 {
+        let tmp = s.data[0]
+        s.data[0] = s.data[end]
+        s.data[end] = tmp
+        s.swaps = s.swaps + 1
+
+        // Sift down s.data[0] in heap of size end
+        var p = 0
+        var done2 = false
+        while !done2 {
+            var largest = p
+            let l = 2 * p + 1
+            let r = 2 * p + 2
+            if l < end {
+                s.comparisons = s.comparisons + 1
+                if s.data[l] > s.data[largest] { largest = l }
+            }
+            if r < end {
+                s.comparisons = s.comparisons + 1
+                if s.data[r] > s.data[largest] { largest = r }
+            }
+            if largest != p {
+                let tmp2 = s.data[p]
+                s.data[p] = s.data[largest]
+                s.data[largest] = tmp2
+                s.swaps = s.swaps + 1
+                p = largest
+            } else {
+                done2 = true
+            }
+        }
+        end = end - 1
+    }
+
+    return s
+}
+
+// heapsort — in-place O(n log n). Returns SortResult by value.
+pub fn heapsort(arr: [f64; 256], n: i32) -> SortResult with Div, Panic, Mut {
+    let s = hs_run(arr, n)
+    return SortResult {
+        data: s.data,
+        stats: SortStats { swaps: s.swaps, comparisons: s.comparisons }
+    }
+}
+
+// =============================================================================
+// Utility: nth_smallest via Quickselect
+// =============================================================================
+
+// qs_select_partition — Lomuto partition on a subrange; returns pivot position.
+// Operates on the QsState carrier (reused from quicksort infrastructure).
+fn qs_select_partition(state: QsState, lo: i32, hi: i32) -> (QsState, i32) with Div, Panic, Mut {
+    var s = state
+    let pivot = s.data[hi]
+    var store = lo
+    var j = lo
+    while j < hi {
+        s.comparisons = s.comparisons + 1
+        if s.data[j] <= pivot {
+            let tmp = s.data[store]
+            s.data[store] = s.data[j]
+            s.data[j] = tmp
+            if store != j { s.swaps = s.swaps + 1 }
+            store = store + 1
+        }
+        j = j + 1
+    }
+    let tmp2 = s.data[store]
+    s.data[store] = s.data[hi]
+    s.data[hi] = tmp2
+    if store != hi { s.swaps = s.swaps + 1 }
+    return (s, store)
+}
+
+// nth_smallest — O(n) average quickselect.
+// k is 0-indexed: k=0 → minimum, k=n-1 → maximum.
+// Behaviour is undefined for k < 0 or k >= n.
+pub fn nth_smallest(arr: [f64; 256], n: i32, k: i32) -> f64 with Div, Panic, Mut {
+    var s = QsState { data: arr, swaps: 0, comparisons: 0 }
+    var lo = 0
+    var hi = n - 1
+    while lo < hi {
+        let pair = qs_select_partition(s, lo, hi)
+        s = pair.0
+        let p = pair.1
+        if p == k {
+            return s.data[p]
+        } else if p < k {
+            lo = p + 1
+        } else {
+            hi = p - 1
+        }
+    }
+    return s.data[lo]
+}
+
+// =============================================================================
+// Utility: Median
+// =============================================================================
+
+// median — returns the median value via quickselect.
+// For even n, returns the lower median (element at index n/2 - 1 after sort).
+pub fn median(arr: [f64; 256], n: i32) -> f64 with Div, Panic, Mut {
+    if n <= 0 { return 0.0 }
+    if n == 1 { return arr[0] }
+    let k = (n - 1) / 2
+    return nth_smallest(arr, n, k)
+}
+
+// =============================================================================
+// Utility: unique_count
+// =============================================================================
+
+// unique_count — count distinct values in arr[0..n-1].
+// Sorts a copy, then scans for runs.
+pub fn unique_count(arr: &[f64; 256], n: i32) -> i32 with Div, Panic, Mut {
+    if n <= 0 { return 0 }
+
+    // Copy into a local array for sorting
+    var copy = [0.0; 256]
+    var ci = 0
+    while ci < n {
+        copy[ci] = arr[ci]
+        ci = ci + 1
+    }
+
+    // Sort the copy with insertion sort (small n expected)
+    var i = 1
+    while i < n {
+        let key = copy[i]
+        var insert_at = i
+        var j = i - 1
+        var scanning2 = true
+        while j >= 0 && scanning2 {
+            if copy[j] > key {
+                copy[j + 1] = copy[j]
+                insert_at = j
+                j = j - 1
+            } else {
+                insert_at = j + 1
+                scanning2 = false
+            }
+        }
+        copy[insert_at] = key
+        i = i + 1
+    }
+
+    // Count distinct values
+    var count = 1
+    var k = 1
+    while k < n {
+        if copy[k] != copy[k - 1] {
+            count = count + 1
+        }
+        k = k + 1
+    }
+    return count
+}
