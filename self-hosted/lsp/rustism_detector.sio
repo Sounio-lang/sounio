@@ -1,0 +1,369 @@
+// self-hosted::lsp::rustism_detector -- LSP detector for Rust-isms in Sounio code
+//
+// Integrates with the check_sounio.sh validator to detect Rust patterns
+// that shouldn't appear in Sounio code. Provides LSP diagnostics for:
+// - &mut instead of &!
+// - Vec instead of fixed arrays
+// - Rust method calls (.len(), .push(), etc.)
+// - Unnecessary semicolons
+// - Missing function effects
+// - Missing return statements
+//
+// Prefix: lspr_
+
+// ============================================================================
+// Section 1: RUSTISM KIND CONSTANTS
+// ============================================================================
+
+let LSPR_RUST_MUT_REF:      i64 = 1   // &mut instead of &!
+let LSPR_RUST_VEC:          i64 = 2   // Vec instead of [T; N]
+let LSPR_RUST_METHOD_CALL:  i64 = 3   // .len(), .push(), etc.
+let LSPR_UNNECESSARY_SEMI:  i64 = 4   // ; outside array literals
+let LSPR_MISSING_MUT_EFFECT:i64 = 5   // &! without 'with Mut'
+let LSPR_MISSING_DIV_EFFECT:i64 = 6   // / without 'with Div'
+let LSPR_MISSING_RETURN:    i64 = 7   // No return in non-void fn
+let LSPR_KNOWLEDGE_PATTERN: i64 = 8   // Info about Knowledge usage
+
+// ============================================================================
+// Section 2: SEVERITY CONSTANTS
+// ============================================================================
+
+let LSPR_SEV_ERROR:   i64 = 1
+let LSPR_SEV_WARNING: i64 = 2
+let LSPR_SEV_INFO:    i64 = 3
+
+// ============================================================================
+// Section 3: STRUCTS
+// ============================================================================
+
+struct LsprRange {
+    start_line: i64,
+    start_col:  i64,
+    end_line:   i64,
+    end_col:    i64,
+}
+
+struct LsprDetection {
+    kind:     i64,
+    severity: i64,
+    range:    LsprRange,
+    message:  string,
+    fix:      string,
+}
+
+struct LsprContext {
+    detections: [LsprDetection; 256],
+    count:      i64,
+    file_path:  string,
+}
+
+// ============================================================================
+// Section 4: VALIDATOR INTEGRATION
+// ============================================================================
+
+// Run the external check_sounio.sh validator and parse its output
+fn lspr_run_validator(file_path: string) -> LsprContext with IO, Panic {
+    var ctx = LsprContext {
+        detections: [],
+        count: 0,
+        file_path: file_path,
+    }
+    
+    // Build command to run validator
+    let validator_path = "check_sounio.sh"
+    
+    // Run validator and capture output
+    let cmd = ["bash", validator_path, file_path]
+    let output = sys_command(cmd)
+    
+    if output.exit_code == 0 {
+        // Parse warnings if any
+        lspr_parse_warnings(&!ctx, output.stdout)
+    } else {
+        // Parse errors and warnings
+        lspr_parse_errors(&!ctx, output.stdout)
+    }
+    
+    return ctx
+}
+
+// Parse error output from validator
+fn lspr_parse_errors(ctx: &!LsprContext, output: string) with Mut {
+    let lines = str_split(output, "\n")
+    var current_section = ""
+    var line_num = 0
+    
+    for line in lines {
+        line_num = line_num + 1
+        
+        // Skip empty lines
+        if str_trim(line) == "" {
+            continue
+        }
+        
+        // Detect section headers
+        if str_starts_with(line, "1. Checking for Rust methods") {
+            current_section = "methods"
+        } else if str_starts_with(line, "2. Checking for &mut") {
+            current_section = "mut_ref"
+        } else if str_starts_with(line, "3. Checking for Vec") {
+            current_section = "vec"
+        } else if str_starts_with(line, "4. Checking for semicolons") {
+            current_section = "semicolons"
+        } else if str_starts_with(line, "5. Checking function effects") {
+            current_section = "effects"
+        } else if str_starts_with(line, "6. Checking for return statements") {
+            current_section = "returns"
+        } else if str_starts_with(line, "7. Checking Knowledge type patterns") {
+            current_section = "knowledge"
+        }
+        
+        // Parse error lines
+        if str_contains(line, "Line ") && str_contains(line, ":") {
+            lspr_parse_error_line(ctx, line, current_section)
+        }
+        
+        // Parse warning lines
+        if str_contains(line, "⚠") {
+            lspr_parse_warning_line(ctx, line, current_section)
+        }
+    }
+}
+
+// Parse a single error line
+fn lspr_parse_error_line(ctx: &!LsprContext, line: string, section: string) with Mut {
+    // Extract line number and content
+    // Format: "Line X: content" or "  Line X: content"
+    let trimmed = str_trim(line)
+    
+    // Skip if it's a color code line
+    if str_starts_with(trimmed, "\033") {
+        return
+    }
+    
+    // Find line number
+    let line_str = str_after(trimmed, "Line ")
+    let colon_pos = str_find(line_str, ":")
+    
+    if colon_pos == -1 {
+        return
+    }
+    
+    let line_num_str = str_slice(line_str, 0, colon_pos)
+    let line_num = str_to_i64(line_num_str)
+    let content = str_slice(line_str, colon_pos + 1, str_len(line_str))
+    
+    // Create detection based on section
+    var detection: LsprDetection
+    
+    match section {
+        "methods" -> {
+            detection = LsprDetection {
+                kind: LSPR_RUST_METHOD_CALL,
+                severity: LSPR_SEV_ERROR,
+                range: lspr_create_range(line_num, content),
+                message: "Rust method call detected",
+                fix: "Use manual iteration instead of .len(), .push(), etc.",
+            }
+        }
+        "mut_ref" -> {
+            detection = LsprDetection {
+                kind: LSPR_RUST_MUT_REF,
+                severity: LSPR_SEV_ERROR,
+                range: lspr_create_range(line_num, content),
+                message: "&mut found (should be &!)",
+                fix: "Change &mut to &!",
+            }
+        }
+        "vec" -> {
+            detection = LsprDetection {
+                kind: LSPR_RUST_VEC,
+                severity: LSPR_SEV_ERROR,
+                range: lspr_create_range(line_num, content),
+                message: "Vec found (should be fixed array)",
+                fix: "Use [Type; Size] instead of Vec",
+            }
+        }
+        "semicolons" -> {
+            detection = LsprDetection {
+                kind: LSPR_UNNECESSARY_SEMI,
+                severity: LSPR_SEV_ERROR,
+                range: lspr_create_range(line_num, content),
+                message: "Unnecessary semicolon",
+                fix: "Remove semicolon (except in array literals [x; y])",
+            }
+        }
+        _ -> {
+            return
+        }
+    }
+    
+    // Add to context if we have space
+    if ctx.count < 256 {
+        ctx.detections[ctx.count] = detection
+        ctx.count = ctx.count + 1
+    }
+}
+
+// Parse warning lines
+fn lspr_parse_warning_line(ctx: &!LsprContext, line: string, section: string) with Mut {
+    // Look for warning patterns
+    if str_contains(line, "may need 'with Mut' effect") {
+        // Extract function name
+        let start = str_find(line, "Function '") + 9
+        let end = str_find_from(line, "'", start)
+        if start > 8 && end > start {
+            let func_name = str_slice(line, start, end)
+            
+            let detection = LsprDetection {
+                kind: LSPR_MISSING_MUT_EFFECT,
+                severity: LSPR_SEV_WARNING,
+                range: lspr_create_range(0, ""), // Line number unknown
+                message: str_concat("Function ", str_concat(func_name, " has &! parameter but may need 'with Mut' effect")),
+                fix: "Add 'with Mut' effect to function signature",
+            }
+            
+            if ctx.count < 256 {
+                ctx.detections[ctx.count] = detection
+                ctx.count = ctx.count + 1
+            }
+        }
+    } else if str_contains(line, "may need 'with Div' effect") {
+        // Similar parsing for Div effect warnings
+        let detection = LsprDetection {
+            kind: LSPR_MISSING_DIV_EFFECT,
+            severity: LSPR_SEV_WARNING,
+            range: lspr_create_range(0, ""),
+            message: "Function has division but may need 'with Div' effect",
+            fix: "Add 'with Div' effect to function signature",
+        }
+        
+        if ctx.count < 256 {
+            ctx.detections[ctx.count] = detection
+            ctx.count = ctx.count + 1
+        }
+    } else if str_contains(line, "No 'return' statements found") {
+        let detection = LsprDetection {
+            kind: LSPR_MISSING_RETURN,
+            severity: LSPR_SEV_WARNING,
+            range: lspr_create_range(0, ""),
+            message: "Function may need explicit return statement",
+            fix: "Add explicit return statement for non-void functions",
+        }
+        
+        if ctx.count < 256 {
+            ctx.detections[ctx.count] = detection
+            ctx.count = ctx.count + 1
+        }
+    }
+}
+
+// Parse warnings-only output
+fn lspr_parse_warnings(ctx: &!LsprContext, output: string) with Mut {
+    // Similar to parse_errors but only looks for warnings
+    lspr_parse_warning_line(ctx, output, "")
+}
+
+// Create a range for a detection
+fn lspr_create_range(line_num: i64, content: string) -> LsprRange {
+    // Simple range - start at beginning of line, end at end of line
+    // In a real implementation, we'd parse the exact column positions
+    LsprRange {
+        start_line: line_num - 1,  // Convert to 0-based
+        start_col: 0,
+        end_line: line_num - 1,
+        end_col: str_len(content),
+    }
+}
+
+// ============================================================================
+// Section 5: LSP DIAGNOSTICS INTEGRATION
+// ============================================================================
+
+// Convert rustism detections to LSP diagnostics
+fn lspr_to_lsp_diagnostics(ctx: &LsprContext) -> [LspdDiag; 256] {
+    var diags: [LspdDiag; 256]
+    var diag_count = 0
+    
+    for i in 0..ctx.count {
+        let detection = ctx.detections[i]
+        
+        // Convert severity
+        let severity = match detection.severity {
+            LSPR_SEV_ERROR -> LSPD_ERROR,
+            LSPR_SEV_WARNING -> LSPD_WARN,
+            LSPR_SEV_INFO -> LSPD_INFO,
+            _ -> LSPD_WARN,
+        }
+        
+        // Convert kind to code
+        let code = detection.kind
+        
+        // Create LSP range
+        let range = LspdRange {
+            start: LspdPosition {
+                line: detection.range.start_line,
+                col: detection.range.start_col,
+            },
+            end: LspdPosition {
+                line: detection.range.end_line,
+                col: detection.range.end_col,
+            },
+        }
+        
+        // Create diagnostic
+        let diag = LspdDiag {
+            severity: severity,
+            code: code,
+            source: "sounio-rustism-detector",
+            message: detection.message,
+            range: range,
+            related_count: 0,
+            related: [],
+        }
+        
+        if diag_count < 256 {
+            diags[diag_count] = diag
+            diag_count = diag_count + 1
+        }
+    }
+    
+    return diags
+}
+
+// ============================================================================
+// Section 6: PUBLIC API
+// ============================================================================
+
+// Main entry point for LSP integration
+fn lspr_check_file(file_path: string) -> [LspdDiag; 256] with IO, Panic {
+    let ctx = lspr_run_validator(file_path)
+    return lspr_to_lsp_diagnostics(&ctx)
+}
+
+// Quick check for CI/CD - returns true if file passes validation
+fn lspr_validate_file(file_path: string) -> bool with IO, Panic {
+    let validator_path = "check_sounio.sh"
+    let cmd = ["bash", validator_path, file_path]
+    let output = sys_command(cmd)
+    
+    // Return true if exit code is 0 (no errors)
+    return output.exit_code == 0
+}
+
+// Batch validation for CI/CD
+fn lspr_validate_files(file_paths: [string; 128], count: i64) -> (bool, i64) with IO, Panic {
+    var passed = 0
+    var failed = 0
+    
+    for i in 0..count {
+        let file_path = file_paths[i]
+        if lspr_validate_file(file_path) {
+            passed = passed + 1
+        } else {
+            failed = failed + 1
+        }
+    }
+    
+    return (failed == 0, failed)
+}

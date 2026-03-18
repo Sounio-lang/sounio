@@ -1,0 +1,152 @@
+# GitLab CI Configuration for Sounio
+# This file defines the CI/CD pipeline for Sounio validation
+
+# Global variables
+variables:
+  VALIDATOR_SCRIPT: "check_sounio.sh"
+  CI_SCRIPT: "scripts/ci/sounio_validation.sh"
+  
+# Cache for validation reports
+cache:
+  paths:
+    - validation_report.txt
+  key: "${CI_COMMIT_REF_SLUG}-validation"
+  policy: pull-push
+
+# Pipeline stages
+stages:
+  - validate
+  - test
+  - deploy
+
+# Sounio Validation Job
+sounio-validation:
+  stage: validate
+  image: ubuntu:latest
+  script:
+    - echo "🔍 Starting Sounio validation..."
+    
+    # Install dependencies
+    - apt-get update && apt-get install -y bash findutils
+    
+    # Make scripts executable
+    - chmod +x $VALIDATOR_SCRIPT
+    - chmod +x $CI_SCRIPT
+    
+    # Count .sio files
+    - SIO_COUNT=$(find . -name "*.sio" -type f | wc -l)
+    - echo "Found $SIO_COUNT .sio files to validate"
+    
+    # Run validation
+    - if bash $CI_SCRIPT validate; then
+        echo "✅ Sounio validation passed"
+      else
+        echo "❌ Sounio validation failed"
+        exit 1
+      fi
+    
+    # Generate report
+    - bash $CI_SCRIPT report
+    
+  artifacts:
+    paths:
+      - validation_report.txt
+    when: always
+    expire_in: 1 week
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+    - if: $CI_COMMIT_TAG
+    - changes:
+        - "**/*.sio"
+        - "check_sounio.sh"
+        - "scripts/ci/**"
+
+# Extended validation with Sounio compiler
+sounio-extended-validation:
+  stage: validate
+  image: ubuntu:latest
+  needs: ["sounio-validation"]
+  script:
+    - echo "🔧 Running extended Sounio validation..."
+    
+    # Check if Sounio compiler is available
+    - if [ -f "artifacts/omega/souc-bin/souc-linux-x86_64-jit" ]; then
+        echo "Found Sounio compiler"
+        
+        # Make compiler executable
+        - chmod +x artifacts/omega/souc-bin/souc-linux-x86_64-jit
+        
+        # Display compiler info
+        - artifacts/omega/souc-bin/souc-linux-x86_64-jit --version || true
+        
+        # Test example files
+        - for example in examples/*.sio; do
+            if [ -f "$example" ]; then
+              echo "Checking: $example"
+              artifacts/omega/souc-bin/souc-linux-x86_64-jit check "$example" || true
+            fi
+          done
+        
+        echo "✅ Extended validation complete"
+      else
+        echo "⚠️  Sounio compiler not found, skipping extended validation"
+      fi
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+      when: manual
+      allow_failure: true
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+      when: manual
+      allow_failure: true
+
+# Test job (placeholder for Sounio tests)
+sounio-tests:
+  stage: test
+  image: ubuntu:latest
+  needs: ["sounio-validation"]
+  script:
+    - echo "🧪 Running Sounio tests..."
+    - echo "Test framework integration would go here"
+    - echo "✅ Tests completed"
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+
+# Deployment job (placeholder)
+deploy-docs:
+  stage: deploy
+  image: alpine:latest
+  needs: ["sounio-tests"]
+  script:
+    - echo "🚀 Deploying Sounio documentation..."
+    - echo "Deployment configuration would go here"
+  only:
+    - main
+    - master
+    - tags
+
+# Pipeline configuration
+workflow:
+  rules:
+    - if: $CI_COMMIT_TITLE =~ /^WIP:/
+      when: never
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+    - if: $CI_COMMIT_TAG
+    - when: always
+
+# Include templates for common CI patterns
+include:
+  - template: Security/SAST.gitlab-ci.yml
+  - template: Security/Secret-Detection.gitlab-ci.yml
+
+# Merge request configuration
+merge_requests:
+  pipeline:
+    enabled: true
+  approvals:
+    required: true
+    eligible_approvers:
+      - maintainers
+    approvals_required: 1

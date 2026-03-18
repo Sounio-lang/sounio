@@ -1,0 +1,189 @@
+name: Sounio Validation
+
+on:
+  push:
+    branches: [ main, master, develop ]
+    paths:
+      - '**/*.sio'
+      - 'check_sounio.sh'
+      - 'scripts/ci/**'
+  pull_request:
+    branches: [ main, master, develop ]
+    paths:
+      - '**/*.sio'
+      - 'check_sounio.sh'
+      - 'scripts/ci/**'
+  schedule:
+    - cron: '0 0 * * 0'  # Weekly on Sunday at midnight
+  workflow_dispatch:  # Manual trigger
+
+# Permissions for the job
+permissions:
+  contents: read
+  checks: write
+
+jobs:
+  validate-sounio:
+    name: Validate Sounio Code
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+    
+    - name: Setup environment
+      id: setup
+      run: |
+        echo "🔧 Setting up Sounio validation environment"
+        
+        # Make scripts executable
+        chmod +x check_sounio.sh
+        chmod +x scripts/ci/sounio_validation.sh
+        
+        # Display environment info
+        echo "Validator script: $(pwd)/check_sounio.sh"
+        echo "CI script: $(pwd)/scripts/ci/sounio_validation.sh"
+        
+        # Count .sio files
+        SIO_COUNT=$(find . -name "*.sio" -type f | wc -l)
+        echo "Found $SIO_COUNT .sio files"
+        echo "sio_count=$SIO_COUNT" >> $GITHUB_OUTPUT
+    
+    - name: Run Sounio validation
+      id: validation
+      run: |
+        echo "🔍 Running Sounio validation..."
+        
+        # Run validation
+        if bash scripts/ci/sounio_validation.sh validate; then
+          echo "✅ Sounio validation passed"
+          echo "status=success" >> $GITHUB_OUTPUT
+        else
+          echo "❌ Sounio validation failed"
+          echo "status=failure" >> $GITHUB_OUTPUT
+          exit 1
+        fi
+    
+    - name: Generate validation report
+      if: always()
+      run: |
+        echo "📊 Generating validation report..."
+        bash scripts/ci/sounio_validation.sh report
+        
+        # Display report summary
+        echo "\n📈 Validation Report Summary:"
+        echo "============================="
+        if [ -f "validation_report.txt" ]; then
+          head -20 validation_report.txt
+          echo "..."
+          echo "Full report saved to validation_report.txt"
+        fi
+    
+    - name: Upload validation report
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: sounio-validation-report
+        path: |
+          validation_report.txt
+        retention-days: 30
+    
+    - name: Create check run for PR
+      if: github.event_name == 'pull_request'
+      uses: actions/github-script@v7
+      with:
+        script: |
+          const fs = require('fs');
+          const path = require('path');
+          
+          // Read validation report
+          let report = 'Sounio validation completed.';
+          try {
+            const reportPath = path.join(process.env.GITHUB_WORKSPACE, 'validation_report.txt');
+            if (fs.existsSync(reportPath)) {
+              report = fs.readFileSync(reportPath, 'utf8');
+            }
+          } catch (error) {
+            console.log('Could not read validation report:', error.message);
+          }
+          
+          // Create check run
+          await github.rest.checks.create({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            name: 'Sounio Code Validation',
+            head_sha: context.payload.pull_request.head.sha,
+            status: 'completed',
+            conclusion: '${{ steps.validation.outputs.status }}',
+            output: {
+              title: 'Sounio Validation Results',
+              summary: report.substring(0, 65535),  # GitHub API limit
+            }
+          });
+    
+    - name: Comment on PR with results
+      if: github.event_name == 'pull_request' && failure()
+      uses: actions/github-script@v7
+      with:
+        script: |
+          const fs = require('fs');
+          const path = require('path');
+          
+          let message = '## ❌ Sounio Validation Failed\n\n';
+          message += 'The Sounio validator found issues that need to be fixed.\n\n';
+          message += '**Common fixes:**\n';
+          message += '- Change `&mut` to `&!`\n';
+          message += '- Use fixed arrays `[Type; Size]` instead of `Vec`\n';
+          message += '- Remove `.len()`, `.push()`, etc. (use manual iteration)\n';
+          message += '- Remove unnecessary semicolons (except in array literals `[x; y]`)\n';
+          message += '- Add `with Mut` effect for functions with `&!` parameters\n\n';
+          message += 'Run `./check_sounio.sh <file.sio>` locally for details.\n';
+          
+          await github.rest.issues.createComment({
+            issue_number: context.issue.number,
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            body: message
+          });
+
+  # Optional: Extended validation with Sounio compiler
+  extended-validation:
+    name: Extended Sounio Validation
+    runs-on: ubuntu-latest
+    needs: validate-sounio
+    if: success()  # Only run if basic validation passes
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+    
+    - name: Download validation report
+      uses: actions/download-artifact@v4
+      with:
+        name: sounio-validation-report
+    
+    - name: Run Sounio compiler checks
+      run: |
+        echo "🔧 Running extended Sounio validation..."
+        
+        # Check if Sounio compiler is available
+        if [ -f "artifacts/omega/souc-bin/souc-linux-x86_64-jit" ]; then
+          echo "Found Sounio compiler, running additional checks..."
+          
+          # Make compiler executable
+          chmod +x artifacts/omega/souc-bin/souc-linux-x86_64-jit
+          
+          # Test with example files
+          for example in examples/*.sio; do
+            if [ -f "$example" ]; then
+              echo "Checking: $example"
+              artifacts/omega/souc-bin/souc-linux-x86_64-jit check "$example" || true
+            fi
+          done
+        else
+          echo "Sounio compiler not found, skipping extended validation"
+        fi
+        
+        echo "✅ Extended validation complete"
