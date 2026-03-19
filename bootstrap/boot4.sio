@@ -122,6 +122,7 @@ var LAST_LOCAL_IS_SPTR: i64 = 0
 var LAST_LOCAL_BOX_INNER: i64 = -1
 var LAST_FOUND_SLOT: i64 = -1
 var LAST_FIELD_TYPE_SI: i64 = -1
+var LAST_FIELD_LAYOUT: i64 = 0  // 0=stack(negative offsets), 1=BSS/heap(positive offsets)
 
 var ELF: [i8; 4194304] = [0; 4194304]
 var ELF_LEN: i64 = 0
@@ -2178,6 +2179,7 @@ fn compile_node(node: i64) -> i64 with Mut, Panic, Div {
         let fname_off = ND_STR_OFF[node as usize]
         let fname_len = ND_STR_LEN[node as usize]
         LAST_FIELD_TYPE_SI = -1
+        LAST_FIELD_LAYOUT = 0
         let obj_nk = ND_KIND[obj as usize]
         // Special case: (*ptr).field — compile inner of DEREF (skip the extra load),
         // then access field at [rax + offset]. The ptr IS the struct address.
@@ -2255,6 +2257,7 @@ fn compile_node(node: i64) -> i64 with Mut, Panic, Div {
                 if fi >= 0 {
                     if is_sptr == 4 {
                         // BSS/heap thin pointer (oversized struct): positive offsets from ptr
+                        LAST_FIELD_LAYOUT = 1
                         emit_load_rax(base_slot)
                         let fdisp_o = fi * 8
                         if fld_si >= 0 {
@@ -2265,6 +2268,7 @@ fn compile_node(node: i64) -> i64 with Mut, Panic, Div {
                         }
                     } else if is_sptr == 2 {
                         // Heap pointer (Box): positive offsets
+                        LAST_FIELD_LAYOUT = 1
                         emit_load_rax(base_slot)
                         let fdisp_h = fi * 8
                         if fld_si >= 0 {
@@ -2275,6 +2279,7 @@ fn compile_node(node: i64) -> i64 with Mut, Panic, Div {
                         }
                     } else if is_sptr == 1 {
                         // Stack pointer (&T): negative offsets
+                        LAST_FIELD_LAYOUT = 0
                         emit_load_rax(base_slot)
                         let fdisp = 0 - (fi * 8)
                         emit(0x48); emit(0x8B); emit(0x80); emit_u32(fdisp)
@@ -2288,13 +2293,16 @@ fn compile_node(node: i64) -> i64 with Mut, Panic, Div {
         } else {
             compile_node(obj)
             let lft_si = LAST_FIELD_TYPE_SI
+            let lft_layout = LAST_FIELD_LAYOUT
             LAST_FIELD_TYPE_SI = -1
             if lft_si >= 0 {
                 let fi2 = find_field_slot_offset(lft_si, fname_off, fname_len)
                 let fld_si2 = LAST_FIELD_TYPE_SI
                 if fi2 >= 0 {
-                    let fdisp2 = 0 - (fi2 * 8)
+                    let fdisp2 = if lft_layout == 1 { fi2 * 8 } else { 0 - (fi2 * 8) }
                     if fld_si2 >= 0 {
+                        // sub-struct field: return address (LEA or keep rax)
+                        LAST_FIELD_LAYOUT = lft_layout
                         if fdisp2 == 0 {
                             // rax already at sub-struct base
                         } else {
@@ -2885,6 +2893,43 @@ fn compile_node(node: i64) -> i64 with Mut, Panic, Div {
                     did_lea = 1
                 }
             }
+            if did_lea == 0 && ND_KIND[arg_node as usize] == 14 {
+                // NK_FIELD arg: if sub-struct of is_sptr=4 parent, copy to stack (negative-offset convention)
+                let fa_obj2 = ND_LEFT[arg_node as usize]
+                let fa_foff2 = ND_STR_OFF[arg_node as usize]
+                let fa_flen2 = ND_STR_LEN[arg_node as usize]
+                if ND_KIND[fa_obj2 as usize] == 2 {
+                    let fa_ooff2 = ND_STR_OFF[fa_obj2 as usize]
+                    let fa_olen2 = ND_STR_LEN[fa_obj2 as usize]
+                    let fa_oslot2 = find_local(fa_ooff2, fa_olen2)
+                    let fa_osi2 = LAST_LOCAL_SI
+                    let fa_osptr2 = LAST_LOCAL_IS_SPTR
+                    if fa_oslot2 >= 0 && fa_osi2 >= 0 && fa_osptr2 == 4 {
+                        let fa_fi2 = find_field_slot_offset(fa_osi2, fa_foff2, fa_flen2)
+                        let fa_fsi2 = LAST_FIELD_TYPE_SI
+                        if fa_fi2 >= 0 && fa_fsi2 >= 0 {
+                            let fa_fc2 = struct_total_slots(fa_fsi2)
+                            if fa_fc2 > 0 && fa_fc2 <= 64 {
+                                let cp_base2 = NEXT_SLOT
+                                var cpi2: i64 = 0
+                                while cpi2 < fa_fc2 { alloc_slot(); cpi2 = cpi2 + 1 }
+                                let bss_save2 = alloc_slot()
+                                emit_load_rax(fa_oslot2)
+                                emit_store_rax(bss_save2)
+                                cpi2 = 0
+                                while cpi2 < fa_fc2 {
+                                    emit_load_rax(bss_save2)
+                                    emit(0x48); emit(0x8B); emit(0x80); emit_u32((fa_fi2 + cpi2) * 8)
+                                    emit_store_rax(cp_base2 + cpi2)
+                                    cpi2 = cpi2 + 1
+                                }
+                                emit_lea_rax(cp_base2)
+                                did_lea = 1
+                            }
+                        }
+                    }
+                }
+            }
             if did_lea == 0 {
                 compile_node(arg_node)
             }
@@ -3363,12 +3408,34 @@ fn compile_node(node: i64) -> i64 with Mut, Panic, Div {
             let is_sptr_w = LAST_LOCAL_IS_SPTR
             if bs2 >= 0 && lsi2 >= 0 {
                 let fi3 = find_field_slot_offset(lsi2, fn_off2, fn_len2)
+                let fld_si3 = LAST_FIELD_TYPE_SI
                 if fi3 >= 0 {
                     if is_sptr_w == 4 {
-                        // Oversized thin ptr: mov [rcx + fi3*8], rax
-                        emit_load_rcx(bs2)
-                        emit_load_rax(val_s)
-                        emit(0x48); emit(0x89); emit(0x81); emit_u32(fi3 * 8)
+                        // Oversized thin ptr: write to BSS[fi3*8]
+                        let rhs_nk_w = ND_KIND[rhs as usize]
+                        if fld_si3 >= 0 && (rhs_nk_w == 12 || rhs_nk_w == 51) {
+                            let rhs_fc_w = struct_total_slots(fld_si3)
+                            if rhs_fc_w > 0 && rhs_fc_w <= 64 {
+                                // SRET: copy rhs_fc_w slots from SRET_BUF to BSS[fi3*8..]
+                                var sfc_w: i64 = 0
+                                while sfc_w < rhs_fc_w {
+                                    emit(0x48); emit(0xB9); emit_u64(0x700000 + sfc_w * 8)
+                                    emit(0x48); emit(0x8B); emit(0x00)
+                                    emit_load_rcx(bs2)
+                                    emit(0x48); emit(0x89); emit(0x81); emit_u32((fi3 + sfc_w) * 8)
+                                    sfc_w = sfc_w + 1
+                                }
+                            } else {
+                                emit_load_rcx(bs2)
+                                emit_load_rax(val_s)
+                                emit(0x48); emit(0x89); emit(0x81); emit_u32(fi3 * 8)
+                            }
+                        } else {
+                            // Scalar or ident: store val_s directly
+                            emit_load_rcx(bs2)
+                            emit_load_rax(val_s)
+                            emit(0x48); emit(0x89); emit(0x81); emit_u32(fi3 * 8)
+                        }
                     } else {
                         emit_load_rax(val_s)
                         emit_store_rax(bs2 + fi3)

@@ -80,11 +80,11 @@ import sounio
 
 # Run inline Sounio code
 result = sounio.run_code("""
-    fn main() with IO {
-        let mass = measure(78.5, uncertainty: 1.5)
-        let height = measure(1.75, uncertainty: 0.01)
+    pub fn main() with Mut, Div, Panic {
+        let mass:   f64 = 78.5
+        let height: f64 = 1.75
         let bmi = mass / (height * height)
-        print_knowledge(bmi)
+        assert(bmi > 20.0 && bmi < 30.0)
     }
 """)
 
@@ -103,10 +103,10 @@ import asyncio, sounio
 
 async def run_parallel():
     a, b = await asyncio.gather(
-        sounio.async_run_code('fn main() with IO { print_f64(1.0 + 2.0) }'),
-        sounio.async_run_code('fn main() with IO { print_f64(3.0 * 4.0) }'),
+        sounio.async_run_code('pub fn main() with Panic { assert(1 + 2 == 3) }'),
+        sounio.async_run_code('pub fn main() with Panic { assert(3 * 4 == 12) }'),
     )
-    print("a:", a.stdout.strip(), "  b:", b.stdout.strip())
+    print("a exit:", a.exit_code, "  b exit:", b.exit_code)
 
 asyncio.run(run_parallel())
 ```
