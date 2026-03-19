@@ -628,6 +628,107 @@ def test_python_magic_preamble():
         return False
 
 
+def test_report_builder():
+    """Test 13: ReportBuilder generates paper from epistemic data."""
+    try:
+        import sys, os, tempfile
+        here = os.path.dirname(os.path.abspath(__file__))
+        py_pkg = os.path.join(here, "sounio-py", "python")
+        if py_pkg not in sys.path:
+            sys.path.insert(0, py_pkg)
+
+        from sounio.report import ReportBuilder
+        from sounio.knowledge import Knowledge
+
+        rb = ReportBuilder("Test Report", author="Demo Suite", date="2026-03-19")
+        rb.add_section("Introduction", "This is a test of report generation.")
+        rb.add_knowledge_table("Measurements", {
+            "Temperature (°C)": Knowledge(36.5, 0.1, "thermometer"),
+            "Pressure (hPa)": Knowledge(1013.25, 2.5, "barometer"),
+        })
+
+        md = rb.to_markdown()
+        assert "# Test Report" in md
+        assert "Demo Suite" in md
+        assert "Temperature" in md
+        assert "36.5" in md
+        assert "± 0.1" in md
+
+        latex = rb.to_latex()
+        assert r"\documentclass" in latex
+        assert r"\begin{document}" in latex
+        assert "Temperature" in latex
+
+        # Save and verify
+        with tempfile.TemporaryDirectory() as tmpdir:
+            md_path = os.path.join(tmpdir, "report.md")
+            rb.save(md_path, format="markdown")
+            assert os.path.exists(md_path)
+            content = open(md_path).read()
+            assert "# Test Report" in content
+
+        # Test generate_paper() classmethod (with mock PipelineResult)
+        from dataclasses import dataclass, field
+        from typing import Optional
+
+        @dataclass
+        class MockSim:
+            efficacy_rate: Knowledge = Knowledge(0.72, 0.05, "sim")
+            adverse_rate: Knowledge = Knowledge(0.12, 0.02, "sim")
+            therapeutic_index: Knowledge = Knowledge(5.8, 0.4, "sim")
+            n_patients: int = 100
+            confidence: float = 0.88
+
+        @dataclass
+        class MockMol:
+            name: str = "TEST-1"
+
+        @dataclass
+        class MockPK:
+            half_life: Knowledge = Knowledge(4.62, 0.77, "pk")
+            cmax: Knowledge = Knowledge(220.0, 15.0, "pk")
+            auc: Knowledge = Knowledge(1850.0, 120.0, "pk")
+
+        @dataclass
+        class MockResult:
+            molecule: MockMol = field(default_factory=MockMol)
+            decision: str = "PROCEED"
+            confidence: float = 0.88
+            molecules_screened: int = 1
+            molecules_passed: int = 1
+            pk_fitted: int = 1
+            exit_code: int = 0
+            pk_params: MockPK = field(default_factory=MockPK)
+            simulation: MockSim = field(default_factory=MockSim)
+            provenance_chain: Optional[list] = None
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            paper_path = os.path.join(tmpdir, "paper.md")
+            rb2 = ReportBuilder.generate_paper(
+                [MockResult()],
+                title="Test Drug Discovery Paper",
+                author="Sounio",
+                output_path=paper_path,
+                output_format="markdown",
+            )
+            assert os.path.exists(paper_path)
+            paper_content = open(paper_path).read()
+            assert "Abstract" in paper_content
+            assert "Methods" in paper_content
+            assert "Results" in paper_content
+            assert "Discussion" in paper_content
+            assert "Conclusion" in paper_content
+            assert "TEST-1" in paper_content
+            assert "PROCEED" in paper_content
+
+        print("✅ Test 13 PASS: ReportBuilder paper generation correct")
+        return True
+    except Exception as e:
+        print(f"❌ Test 13 FAIL: {e}")
+        import traceback; traceback.print_exc()
+        return False
+
+
 def main():
     """Run all integration tests"""
     print("=" * 70)
@@ -648,6 +749,7 @@ def main():
         ("Test 10: Dashboard Flask app", test_dashboard_app),
         ("Test 11: Kernel client API", test_kernel_client_api),
         ("Test 12: %python magic", test_python_magic_preamble),
+        ("Test 13: Report/paper generation", test_report_builder),
     ]
 
     results = []

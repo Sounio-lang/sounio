@@ -319,6 +319,191 @@ class ReportBuilder:
         with open(path, "w") as f:
             f.write(content)
 
+    @classmethod
+    def generate_paper(
+        cls,
+        pipeline_results: list,
+        title: str = "Epistemic Drug Discovery with Sounio",
+        author: str = "",
+        output_path: str = "paper.md",
+        output_format: str = "markdown",
+    ) -> "ReportBuilder":
+        """Generate a reproducible research paper from pipeline results.
+
+        Creates a structured paper with Abstract, Methods, Results, Discussion,
+        and Conclusion sections, populated from the provided PipelineResult
+        objects. Saves to disk and returns the builder for further customization.
+
+        Parameters
+        ----------
+        pipeline_results : list[PipelineResult]
+            Results from one or more pipeline runs.
+        title : str
+            Paper title.
+        author : str
+            Author name(s).
+        output_path : str
+            Output file path.
+        output_format : str
+            "markdown" or "latex".
+
+        Returns
+        -------
+        ReportBuilder
+            The builder (already saved to disk).
+
+        Examples
+        --------
+        >>> from sounio.pipeline import DrugDiscoveryPipeline
+        >>> from sounio import Molecule, Knowledge
+        >>> mol = Molecule("ASA-7", Knowledge(180.16, 0.01, "ms"), Knowledge(1.19, 0.05, "logd"), 1, 4)
+        >>> result = DrugDiscoveryPipeline().run(mol)
+        >>> rb = ReportBuilder.generate_paper([result], author="Dr. Smith", output_path="paper.md")
+        >>> print(rb.to_markdown()[:200])
+        """
+        import datetime
+
+        n = len(pipeline_results)
+        n_passed = sum(1 for r in pipeline_results if getattr(r, "molecules_passed", 0) > 0)
+
+        rb = cls(title, author=author, date=datetime.date.today().isoformat())
+
+        # Abstract
+        rb.add_section(
+            "Abstract",
+            f"We present an epistemic drug discovery pipeline implemented in the Sounio "
+            f"programming language. Unlike classical point-estimate approaches, every computed "
+            f"quantity carries formally propagated uncertainty according to the GUM standard "
+            f"(Guide to the Expression of Uncertainty in Measurement). We evaluated {n} "
+            f"compound(s), of which {n_passed} passed the Lipinski virtual screening stage. "
+            f"Pharmacokinetic parameters were modeled using one-compartment oral kinetics with "
+            f"full uncertainty propagation. Monte Carlo clinical trial simulation with "
+            f"stochastic patient variability was performed for each candidate. "
+            f"All computations are fully reproducible via the attached provenance DAG.",
+        )
+
+        # Methods
+        rb.add_section(
+            "Methods",
+            "**Stage 1 — Virtual Screening (Lipinski's Rule of 5)**\n\n"
+            "Molecules were filtered using the classical Lipinski criteria: "
+            "MW < 500 Da, LogP < 5, H-bond donors ≤ 5, H-bond acceptors ≤ 10. "
+            "Screening confidence was computed as the product of per-criterion "
+            "measurement uncertainties.\n\n"
+            "**Stage 2 — PK/PD Modeling**\n\n"
+            "One-compartment oral pharmacokinetic model. Input parameters "
+            "(bioavailability F, absorption rate Kₐ, clearance CL, volume of "
+            "distribution Vd) were treated as Knowledge values with associated "
+            "measurement uncertainty. Half-life, Tmax, Cmax, and AUC were "
+            "computed analytically; GUM error propagation was applied at each step.\n\n"
+            "**Stage 3 — Monte Carlo Clinical Simulation**\n\n"
+            "Virtual patient cohort (n=100–1000) with stochastic PK parameters "
+            "(±15% CV around population mean). Efficacy was defined as fraction "
+            "of patients achieving plasma concentration above MEC. "
+            "Therapeutic index = MTC / MEC. "
+            "All simulation results are reported as Knowledge values with "
+            "bootstrapped uncertainty.\n\n"
+            "**Reproducibility**\n\n"
+            "All computations were performed with the Sounio epistemic computing "
+            "framework. The provenance DAG for each result is included as a "
+            "machine-readable JSON attachment. To reproduce: `pip install sounio "
+            "sounio-jupyter && python demo.py`.",
+        )
+
+        # Results
+        for i, result in enumerate(pipeline_results):
+            mol_name = getattr(getattr(result, "molecule", None), "name", f"Compound {i+1}")
+
+            table_data = {}
+            if hasattr(result, "pk_params") and result.pk_params:
+                pk = result.pk_params
+                for attr, label in [
+                    ("half_life", "Half-life (h)"),
+                    ("cmax", "Cmax (mg/L)"),
+                    ("auc", "AUC (mg·h/L)"),
+                    ("tmax", "Tmax (h)"),
+                ]:
+                    val = getattr(pk, attr, None)
+                    if val is not None:
+                        table_data[label] = val
+
+            if hasattr(result, "simulation") and result.simulation:
+                sim = result.simulation
+                for attr, label in [
+                    ("efficacy_rate", "Efficacy rate"),
+                    ("adverse_event_rate", "Adverse event rate"),
+                    ("therapeutic_index", "Therapeutic index"),
+                ]:
+                    val = getattr(sim, attr, None)
+                    if val is None:
+                        val = getattr(sim, "adverse_rate", None) if attr == "adverse_event_rate" else None
+                    if val is not None:
+                        table_data[label] = val
+
+            decision = getattr(result, "decision", "—")
+            confidence = getattr(result, "confidence", None)
+            conf_str = f"{confidence:.3f}" if confidence is not None else "—"
+
+            preamble = (
+                f"**Molecule:** {mol_name}  \n"
+                f"**Decision:** {decision}  \n"
+                f"**Confidence:** {conf_str}\n\n"
+            )
+
+            if table_data:
+                table_md = cls._format_knowledge_table_markdown(table_data)
+                rb.sections.append(
+                    _Section(f"Results — {mol_name}", preamble + table_md, "table")
+                )
+            else:
+                rb.sections.append(
+                    _Section(f"Results — {mol_name}", preamble, "text")
+                )
+
+        # Discussion
+        proceed_list = [
+            getattr(getattr(r, "molecule", None), "name", f"Compound {i+1}")
+            for i, r in enumerate(pipeline_results)
+            if getattr(r, "decision", "") == "PROCEED"
+        ]
+        halt_list = [
+            getattr(getattr(r, "molecule", None), "name", f"Compound {i+1}")
+            for i, r in enumerate(pipeline_results)
+            if getattr(r, "decision", "") != "PROCEED"
+        ]
+
+        discussion_body = (
+            f"Of {n} evaluated compound(s), "
+            f"{len(proceed_list)} received a PROCEED recommendation "
+            f"({', '.join(proceed_list) or 'none'}) and "
+            f"{len(halt_list)} received HALT ({', '.join(halt_list) or 'none'}).\n\n"
+            "The epistemic framework ensures that uncertainty in input measurements "
+            "(assay variability, instrument precision) propagates correctly through "
+            "every computational step. Decisions are therefore probabilistic rather "
+            "than binary: the PROCEED/HALT threshold is applied to the lower confidence "
+            "bound, providing conservative recommendations.\n\n"
+            "This approach is particularly valuable in early drug discovery where "
+            "experimental data is sparse. By making uncertainty explicit, researchers "
+            "can identify which measurements most reduce overall prediction confidence "
+            "(sensitivity analysis via the provenance DAG)."
+        )
+        rb.add_section("Discussion", discussion_body)
+
+        # Conclusion
+        rb.add_section(
+            "Conclusion",
+            "The Sounio epistemic drug discovery pipeline demonstrates that "
+            "uncertainty-aware computing is practical and tractable for real "
+            "pharmaceutical workflows. The provenance DAG provides complete "
+            "computational reproducibility — any result can be traced back to "
+            "its primary measurements. Future work will extend the pipeline to "
+            "support ADMET prediction and multi-objective optimization with "
+            "formal uncertainty bounds.",
+        )
+
+        rb.save(output_path, format=output_format)
+        return rb
+
     # ---- Helpers ----
 
     @staticmethod

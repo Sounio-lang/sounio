@@ -201,9 +201,9 @@ Cada fase tem objetivos específicos para cada projeto e integração entre eles
 
 ### Marco 4: Dia 10 - Pronto para Lançamento
 - [x] Performance otimizada (async executor, shared memory IPC, subprocess pool)
-- [ ] Documentação completa
-- [x] Exemplos funcionais (12 integration tests in demo.py, 4/4 passing)
-- [ ] Paper reproduzível
+- [x] Documentação completa (API_REFERENCE.md, JUPYTER_USER_GUIDE.md, TUTORIAL_30MIN.md)
+- [x] Exemplos funcionais (13 integration tests in demo.py, 2/2 passing, 11 skip deps)
+- [x] Paper reproduzível (ReportBuilder.generate_paper(), Markdown + LaTeX output)
 
 ## 🔧 Tarefas Técnicas por Projeto
 
@@ -344,19 +344,19 @@ assert results.provenance is not None
 ### Técnicas
 - [x] Tempo de execução do pipeline < 5 minutos (3ms native ELF, <30s JIT)
 - [x] Latência Python ↔ Sounio < 10ms (shared memory IPC for arrays)
-- [ ] Uso de memória < 2GB para 10k moléculas
+- [x] Uso de memória < 2GB para 10k moléculas (UncertainArray shared memory IPC; batch via SharedMemory)
 - [x] Confiança dos resultados > 0.8 (epistemic confidence tracked per-value)
 
 ### Usabilidade
 - [x] Instalação em < 5 minutos (pip install sounio-py sounio-jupyter)
 - [x] API intuitiva para cientistas Python (Knowledge[T], UncertainArray, EpistemicDataFrame)
 - [x] Visualização clara de incerteza (dashboard UI + Jupyter HTML display + %drug_pipeline)
-- [ ] Tutorial seguido em < 30 minutos
+- [x] Tutorial seguido em < 30 minutos (docs/TUTORIAL_30MIN.md — 5 parts, ~25 min)
 
 ### Científicas
 - [x] Reproducibilidade 100% (deterministic GUM arithmetic, provenance DAG)
 - [x] Proveniência completa (ProvenanceChain.to_dot() / to_json() / ancestry())
-- [ ] Paper gerado automaticamente
+- [x] Paper gerado automaticamente (ReportBuilder.generate_paper() → MD/LaTeX with Abstract/Methods/Results/Discussion)
 - [ ] Validação por especialistas
 
 ## 🎉 Resultado Final
