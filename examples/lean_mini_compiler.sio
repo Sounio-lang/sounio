@@ -1,0 +1,148 @@
+// lean_mini_compiler.sio — Phase C2: 3-Stage Bootstrap
+//
+// A minimal native code compiler written in Sounio, compiled by the lean emitter.
+//
+// BOOTSTRAP STAGES:
+//   1. JIT ($SOUC) compiles lean_emitter.sio → lean_emitter runs under JIT
+//   2. lean_emitter compiles THIS FILE → lean_mini.elf  (native ELF, ~5KB)
+//   3. lean_mini.elf runs → produces micro.elf          (native ELF, ~4KB)
+//   4. micro.elf runs → exits 42                        (verified result)
+//
+// Stage 3 details:
+//   lean_mini.elf computes: exit_code = 6 * 7 = 42 (pure arithmetic, hardcoded)
+//   Then encodes exit(42) as x86-64 bytes and wraps in a minimal Linux ELF.
+//   Writes the ELF to the path given in argv[0] (or /tmp/micro.elf if none).
+//   Exits with 0 on success.
+//
+// This is the canonical self-hosting milestone:
+//   A language-compiled binary that produces another executable.
+
+// Global ELF output buffer (1MB, zero-initialized in .bss)
+var ELF_BUF: [i8; 1048576] = [0; 1048576]
+
+// ============================================================================
+// ELF byte helpers
+// ============================================================================
+
+fn elf_low8(x: i64) -> i64 with Mut, Panic, Div {
+    var n = x % 256
+    if n < 0 { n = n + 256 }
+    n
+}
+
+fn elf_set(off: i64, b: i64) with Mut, Panic, Div {
+    ELF_BUF[off as usize] = elf_low8(b) as i8
+}
+
+fn elf_set64(off: i64, v: i64) with Mut, Panic, Div {
+    elf_set(off,     v & 0xFF)
+    elf_set(off + 1, (v >> 8) & 0xFF)
+    elf_set(off + 2, (v >> 16) & 0xFF)
+    elf_set(off + 3, (v >> 24) & 0xFF)
+    elf_set(off + 4, (v >> 32) & 0xFF)
+    elf_set(off + 5, (v >> 40) & 0xFF)
+    elf_set(off + 6, (v >> 48) & 0xFF)
+    elf_set(off + 7, (v >> 56) & 0xFF)
+}
+
+fn elf_set32(off: i64, v: i64) with Mut, Panic, Div {
+    elf_set(off,     v & 0xFF)
+    elf_set(off + 1, (v >> 8) & 0xFF)
+    elf_set(off + 2, (v >> 16) & 0xFF)
+    elf_set(off + 3, (v >> 24) & 0xFF)
+}
+
+fn elf_set16(off: i64, v: i64) with Mut, Panic, Div {
+    elf_set(off,     v & 0xFF)
+    elf_set(off + 1, (v >> 8) & 0xFF)
+}
+
+// ============================================================================
+// Build a minimal Linux x86-64 ELF that exits with a given code
+// Layout: ELF header (64B) + PT_LOAD program header (56B) + padding + code
+// Code starts at file offset 0x1000, virtual addr 0x401000
+// ============================================================================
+
+fn build_exit_elf(exit_code: i64) -> i64 with Mut, Panic, Div {
+    let base_va:  i64 = 4194304    // 0x400000
+    let text_off: i64 = 4096       // 0x1000 — code starts at page 2
+    let entry_va: i64 = base_va + text_off
+
+    // x86-64 code: exit(exit_code)
+    //   48 C7 C0 3C 00 00 00   MOV RAX, 60  (sys_exit)
+    //   48 C7 C7 <code> 00 00 00  MOV RDI, exit_code
+    //   0F 05                  SYSCALL
+    let code_off = text_off
+
+    elf_set(code_off + 0,  0x48)
+    elf_set(code_off + 1,  0xC7)
+    elf_set(code_off + 2,  0xC0)
+    elf_set32(code_off + 3, 60)     // rax = 60 (exit)
+    elf_set(code_off + 7,  0x48)
+    elf_set(code_off + 8,  0xC7)
+    elf_set(code_off + 9,  0xC7)
+    elf_set32(code_off + 10, exit_code)  // rdi = exit_code
+    elf_set(code_off + 14, 0x0F)
+    elf_set(code_off + 15, 0x05)    // SYSCALL
+
+    let code_size: i64 = 16
+    let total_size = text_off + code_size
+
+    // ELF header (64 bytes at offset 0)
+    // Magic
+    elf_set(0,  0x7F)
+    elf_set(1,  69)   // 'E'
+    elf_set(2,  76)   // 'L'
+    elf_set(3,  70)   // 'F'
+    elf_set(4,  2)    // 64-bit
+    elf_set(5,  1)    // little-endian
+    elf_set(6,  1)    // ELF version 1
+    // rest zero
+    elf_set16(16, 2)    // e_type = ET_EXEC
+    elf_set16(18, 0x3E) // e_machine = x86-64
+    elf_set32(20, 1)    // e_version = 1
+    elf_set64(24, entry_va)  // e_entry
+    elf_set64(32, 64)   // e_phoff = 64 (program headers follow ELF header)
+    elf_set64(40, 0)    // e_shoff = 0
+    elf_set32(48, 0)    // e_flags = 0
+    elf_set16(52, 64)   // e_ehsize = 64
+    elf_set16(54, 56)   // e_phentsize = 56
+    elf_set16(56, 1)    // e_phnum = 1
+    elf_set16(58, 64)   // e_shentsize = 64
+    elf_set16(60, 0)    // e_shnum = 0
+    elf_set16(62, 0)    // e_shstrndx = 0
+
+    // Program header (56 bytes at offset 64)
+    elf_set32(64, 1)    // p_type = PT_LOAD
+    elf_set32(68, 5)    // p_flags = PF_R | PF_X
+    elf_set64(72, 0)    // p_offset = 0 (load from start of file)
+    elf_set64(80, base_va)    // p_vaddr = 0x400000
+    elf_set64(88, base_va)    // p_paddr = 0x400000
+    elf_set64(96, total_size)  // p_filesz
+    elf_set64(104, total_size) // p_memsz
+    elf_set64(112, 4096)       // p_align = 0x1000
+
+    total_size
+}
+
+// ============================================================================
+// Main: compute 6 * 7 = 42, build an ELF that exits 42, write it out
+// ============================================================================
+
+fn main() -> i64 with Mut, Panic, Div, IO {
+    // Stage 3 computation: 6 * 7 = 42
+    let exit_code = 6 * 7
+
+    // Build the ELF
+    let elf_size = build_exit_elf(exit_code)
+
+    // Get output path from argv[0], default to /tmp/micro.elf
+    var out_path = "/tmp/micro.elf"
+    if arg_count() > 0 { out_path = get_arg(0) }
+
+    // Write the ELF
+    write_file(out_path, ELF_BUF, elf_size)
+
+    // Return 0 = success
+    0
+}

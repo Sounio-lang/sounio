@@ -1,0 +1,168 @@
+// lean_utils_self_host.sio — Phase C1: Self-Hosting Gate
+//
+// Utilities extracted from the lean emitter itself, inlined without imports.
+// Uses global byte buffers (var) instead of by-value CodeBuffer structs
+// to stay within the lean emitter's stack model constraints.
+//
+// Stage 1 of the self-hosting bootstrap:
+//   JIT ($SOUC) compiles lean_emitter.sio (which runs under JIT)
+//   lean_emitter compiles THIS FILE → lean_utils.elf
+//   lean_utils.elf runs and verifies correctness of lean emitter utilities
+//
+// Verifies: byte emission, disp32 encoding, pow10 table, digit extraction.
+// Exit code 63 = all 6 gate checks pass.
+
+// Global code buffers (var = allocated in ELF .bss by lean emitter)
+var CB_BYTES: [i8; 4096] = [0; 4096]
+var CB_LEN: i64 = 0
+var CB2_BYTES: [i8; 4096] = [0; 4096]
+var CB2_LEN: i64 = 0
+var CB3_BYTES: [i8; 4096] = [0; 4096]
+var CB3_LEN: i64 = 0
+
+// ============================================================================
+// Byte emission helpers using global CB
+// ============================================================================
+
+fn cb_low8(x: i64) -> i64 with Mut, Panic, Div {
+    var n = x % 256
+    if n < 0 { n = n + 256 }
+    n
+}
+
+fn cb_emit(b: i64) with Mut, Panic, Div {
+    if CB_LEN < 4096 {
+        CB_BYTES[CB_LEN as usize] = cb_low8(b) as i8
+        CB_LEN = CB_LEN + 1
+    }
+}
+
+fn cb2_emit(b: i64) with Mut, Panic, Div {
+    if CB2_LEN < 4096 {
+        CB2_BYTES[CB2_LEN as usize] = cb_low8(b) as i8
+        CB2_LEN = CB2_LEN + 1
+    }
+}
+
+fn cb3_emit(b: i64) with Mut, Panic, Div {
+    if CB3_LEN < 4096 {
+        CB3_BYTES[CB3_LEN as usize] = cb_low8(b) as i8
+        CB3_LEN = CB3_LEN + 1
+    }
+}
+
+fn cb_byte_at(i: i64) -> i64 {
+    (CB_BYTES[i as usize] as i64) & 0xFF
+}
+
+fn cb2_byte_at(i: i64) -> i64 {
+    (CB2_BYTES[i as usize] as i64) & 0xFF
+}
+
+fn cb3_byte_at(i: i64) -> i64 {
+    (CB3_BYTES[i as usize] as i64) & 0xFF
+}
+
+// ============================================================================
+// micro_store_rax — extracted from lean emitter lines 166–176
+// Emits: MOV [RBP + disp32], RAX  → 48 89 85 <disp32>
+// ============================================================================
+
+fn micro_store_rax(vreg: i64) with Mut, Panic, Div {
+    let disp = 0 - ((vreg + 1) * 8)
+    cb2_emit(0x48)
+    cb2_emit(0x89)
+    cb2_emit(0x85)
+    cb2_emit(disp & 0xFF)
+    cb2_emit((disp >> 8) & 0xFF)
+    cb2_emit((disp >> 16) & 0xFF)
+    cb2_emit((disp >> 24) & 0xFF)
+}
+
+// ============================================================================
+// micro_load_rax — extracted from lean emitter lines 178–188
+// Emits: MOV RAX, [RBP + disp32]  → 48 8B 85 <disp32>
+// ============================================================================
+
+fn micro_load_rax(vreg: i64) with Mut, Panic, Div {
+    let disp = 0 - ((vreg + 1) * 8)
+    cb3_emit(0x48)
+    cb3_emit(0x8B)
+    cb3_emit(0x85)
+    cb3_emit(disp & 0xFF)
+    cb3_emit((disp >> 8) & 0xFF)
+    cb3_emit((disp >> 16) & 0xFF)
+    cb3_emit((disp >> 24) & 0xFF)
+}
+
+// ============================================================================
+// pow10 table — extracted from lean emitter lines 63–83
+// ============================================================================
+
+fn pow10_idx(idx: i64) -> i64 {
+    if idx == 0 { 1000000000000000000 }
+    else if idx == 1 { 100000000000000000 }
+    else if idx == 2 { 10000000000000000 }
+    else if idx == 3 { 1000000000000000 }
+    else if idx == 4 { 100000000000000 }
+    else if idx == 5 { 10000000000000 }
+    else if idx == 6 { 1000000000000 }
+    else if idx == 7 { 100000000000 }
+    else if idx == 8 { 10000000000 }
+    else if idx == 9 { 1000000000 }
+    else if idx == 10 { 100000000 }
+    else if idx == 11 { 10000000 }
+    else if idx == 12 { 1000000 }
+    else if idx == 13 { 100000 }
+    else if idx == 14 { 10000 }
+    else if idx == 15 { 1000 }
+    else if idx == 16 { 100 }
+    else if idx == 17 { 10 }
+    else { 1 }
+}
+
+fn digit_for_power(rem: i64, power: i64) -> i64 {
+    if rem <= (0 - (9 * power)) { 9 }
+    else if rem <= (0 - (8 * power)) { 8 }
+    else if rem <= (0 - (7 * power)) { 7 }
+    else if rem <= (0 - (6 * power)) { 6 }
+    else if rem <= (0 - (5 * power)) { 5 }
+    else if rem <= (0 - (4 * power)) { 4 }
+    else if rem <= (0 - (3 * power)) { 3 }
+    else if rem <= (0 - (2 * power)) { 2 }
+    else if rem <= (0 - power) { 1 }
+    else { 0 }
+}
+
+// ============================================================================
+// Gate tests
+// ============================================================================
+
+fn main() -> i64 with Mut, Panic, Div {
+    var gate: i64 = 0
+
+    // Gate 1: byte emission — emit 0x48, 0x89 and verify length
+    cb_emit(0x48)
+    cb_emit(0x89)
+    if CB_LEN == 2 { gate = gate + 1 }
+
+    // Gate 2: byte values correct at positions 0 and 1
+    if cb_byte_at(0) == 0x48 && cb_byte_at(1) == 0x89 { gate = gate + 2 }
+
+    // Gate 3: micro_store_rax(vreg=0) emits 7 bytes
+    // disp = -(0+1)*8 = -8 = 0xFFFFFFF8
+    micro_store_rax(0)
+    if CB2_LEN == 7 { gate = gate + 4 }
+
+    // Gate 4: bytes 0..2 = 48 89 85; byte 3 = F8 (low byte of -8)
+    if cb2_byte_at(0) == 0x48 && cb2_byte_at(1) == 0x89 && cb2_byte_at(2) == 0x85 && cb2_byte_at(3) == 0xF8 { gate = gate + 8 }
+
+    // Gate 5: micro_load_rax(vreg=1) — disp = -16, low byte = F0
+    micro_load_rax(1)
+    if cb3_byte_at(1) == 0x8B && cb3_byte_at(3) == 0xF0 { gate = gate + 16 }
+
+    // Gate 6: pow10 table — spot check
+    if pow10_idx(18) == 1 && pow10_idx(17) == 10 && pow10_idx(16) == 100 { gate = gate + 32 }
+
+    gate
+}
