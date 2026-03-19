@@ -51,11 +51,11 @@ output. The computation completes in under 1 second. No data were fabricated.
 
 Uncertainty-aware analysis produces four qualitatively distinct findings:
 
-(i) *Bayesian genotype posterior*: The observed INR 3.5 is most consistent with intermediate metabolism. The posterior shifts to P(*1/*1 | INR) = 38.3%, P(*1/*3 | INR) = 60.4%, P(*3/*3 | INR) = 1.2%.
+(i) *Bayesian genotype posterior*: The observed INR 3.5 is most consistent with intermediate metabolism. The posterior shifts to P(*1/*1 | INR) = 38.0%, P(*1/*3 | INR) = 60.9%, P(*3/*3 | INR) = 1.1% (Python/scipy-verified; `papers/supplement_s2_python.py`).
 
-(ii) *Genotype-conditional risk*: For the poor-metabolizer phenotype (*3/*3; ke = 0.010 h⁻¹, t½ = 69 h), the predicted steady-state INR is 6.34 [expanded uncertainty U = 4.06; coverage factor k = 2.26 at ν_eff = 7.7]. P(INR > 5.0 | *3/*3) = 82.9%.
+(ii) *Genotype-conditional risk*: For the poor-metabolizer phenotype (*3/*3; ke = 0.010 h⁻¹, t½ = 69 h), the predicted steady-state INR is 6.34 [expanded uncertainty U = 4.17; coverage factor k = 2.32 at ν_eff = 7.7]. P(INR > 5.0 | *3/*3) = **77.3%**. The intermediate phenotype also carries non-negligible risk: P(INR > 5.0 | *1/*3) = **2.4%**.
 
-(iii) *Marginal risk*: Weighting by the posterior, P(lethal hemorrhage | INR_obs = 3.5) = **1.03%**, crossing the 1% clinical action threshold (Holbrook *et al.*, 2012).
+(iii) *Marginal risk*: Weighting by the posterior, P(lethal hemorrhage | INR_obs = 3.5) = **2.30%** (GUM first-order) or **6.12%** (Monte Carlo, N = 100,000), both well above the 1% clinical action threshold (Holbrook *et al.*, 2012). Monte Carlo validation shows GUM underestimates risk by a factor of ~2.7× due to the non-linearity of C_ss ∝ 1/ke.
 
 (iv) *Decision change*: Epistemic analysis recommends immediate dose reduction and urgent CYP2C9/VKORC1 genotyping. Point-estimate analysis recommends neither. Extrapolating to the subpopulation with INR 3.0–4.0 and no pharmacogenomic data, this decision change is estimated to prevent **1 fatal hemorrhagic event per 50 patients**.
 
@@ -91,7 +91,15 @@ Warfarin elimination rate constants (ke), apparent volumes of distribution (Vd),
 INR_ss = INR_baseline + slope × C_ss / (C_ss_50 + C_ss)
 ```
 
-simplified under the assumption of proportional response in the therapeutic range (slope calibrated to INR_ss = 2.5 at C_ss for the *1/*1 normal-metabolizer phenotype at 5 mg/day). **Limitation**: the linear PD approximation overestimates INR at supra-therapeutic concentrations; a sigmoidal Emax model (Holford, 1986) would predict lower INR_ss for *3/*3, yielding a LOWER P(lethal). The 82.9% genotype-conditional risk and 1.03% marginal risk are therefore **upper bounds**; any more physiologically faithful PD model would reduce but not eliminate the decision change. A sensitivity analysis (Supplementary Table S1) compares linear vs. Emax PD: under Emax with EC₅₀ = 1.0 mg/L and γ = 1.5, the *3/*3 predicted INR falls from 6.34 to 5.1, and P(lethal) falls from 1.03% to 0.6%. The decision change persists at a 0.5% action threshold but not at 1.0% — demonstrating that the PD model choice is material and that both models should be reported.
+simplified under the assumption of proportional response in the therapeutic range (slope calibrated to INR_ss = 2.5 at C_ss for the *1/*1 normal-metabolizer phenotype at 5 mg/day). **Limitation**: the linear PD approximation overestimates INR at supra-therapeutic concentrations; a sigmoidal Emax model (Holford, 1986) predicts lower INR_ss for *3/*3. Supplementary Table S1 (`examples/paper_validation.sio`, verified output) compares linear vs. Emax PD across two EC₅₀ values:
+
+| PD model | *3/*3 INR_pred | Reduction vs. linear |
+|----------|---------------|---------------------|
+| Linear | 6.34 | (reference) |
+| Emax (EC₅₀=1.0, γ=1.5) | **4.77** | −1.58 |
+| Emax (EC₅₀=1.5, γ=1.5) | **5.89** | −0.45 |
+
+With an aggressive Emax (EC₅₀ = 1.0), the *3/*3 predicted INR falls below the 5.0 lethal threshold, and P(lethal) drops from 2.3% to approximately 0.4% (Python supplement §3) — the decision change would NOT occur at 1% threshold. With a moderate Emax (EC₅₀ = 1.5), INR remains at 5.89, P(lethal) = 3.7%, and the decision change is preserved. **The PD model choice is material.** Neither EC₅₀ value is definitively correct for warfarin; published estimates range from 0.8 to 2.5 mg/L depending on the S/R-enantiomer ratio and patient population (Hamberg *et al.*, 2010). We report linear results as the primary analysis and Emax as sensitivity.
 
 Population CYP2C9 allele frequencies used as Bayesian priors are from PharmGKB (Caucasian European ancestry): *1/*1 = 0.790, *1/*3 = 0.183, *3/*3 = 0.027. **Simplification note**: the model omits CYP2C9*2 (frequency ~22% as *1/*2 heterozygote, intermediate metabolism) and VKORC1 -1639G>A (explaining ~25% of dose variability). Including *1/*2 would redistribute probability mass from *1/*1, increasing the marginal risk (because *1/*2 has ke ≈ 0.028 h⁻¹, intermediate between *1/*1 and *1/*3). Including VKORC1 would expand the genotype space from 3 to 9+ classes, widening the epistemic uncertainty and further strengthening the case for uncertainty propagation. The 3-phenotype model is a lower-bound demonstration; the full model would detect MORE decision changes, not fewer.
 
@@ -129,7 +137,11 @@ INR measurement uncertainty was Type A (n = 5 replicates; u_A = s/√n; ν = n-1
 
 Expanded uncertainty at 95% coverage: U = k · u_c where k = t_{0.975, ν_eff}.
 
-**Validation against Monte Carlo (GUM Supplement 1).** For the *3/*3 phenotype, the relative combined uncertainty u_c/INR_pred = 28%, which exceeds the ~10% threshold where first-order propagation is typically reliable (JCGM 101:2008). We validated the first-order result by Monte Carlo simulation (N = 100,000 draws from the joint parameter distribution). The Monte Carlo P(INR > 5.0 | *3/*3) was 79.4% vs. 82.9% from first-order — a 3.5 percentage point difference that does not change the qualitative conclusion. The marginal P(lethal) under Monte Carlo was 0.96% vs. 1.03% from first-order. First-order propagation is mildly conservative (overestimates risk by ~7%) for this scenario; we report first-order values throughout for GUM compliance but note that Monte Carlo produces qualitatively equivalent results.
+**Validation against Monte Carlo (GUM Supplement 1).** For the *3/*3 phenotype, the relative combined uncertainty u_c/INR_pred = 28%, which exceeds the ~10% threshold where first-order propagation is typically reliable (JCGM 101:2008). We validated the first-order result by Monte Carlo simulation (N = 100,000 draws from the joint parameter distribution; `papers/supplement_s2_python.py`).
+
+**Result: GUM first-order UNDERESTIMATES risk.** The Monte Carlo P(INR > 5.0 | *3/*3) was **84.0%** vs. 77.3% from first-order GUM — a 6.7 percentage point difference. The marginal P(lethal) under Monte Carlo was **6.1%** vs. 2.3% from first-order GUM. The discrepancy arises because C_ss ∝ 1/ke is highly non-linear; the INR distribution is right-skewed, and the first-order Taylor expansion misses the heavy right tail.
+
+**Critically, both methods exceed the 1% action threshold** — the clinical decision (REDUCE DOSE) is robust to the propagation method. However, the magnitude of the risk differs by a factor of ~2.7×. We report GUM first-order values throughout as the primary analysis (for ISO compliance and analytical transparency) but acknowledge that GUM underestimates the true risk. A production implementation should use Monte Carlo (GUM Supplement 1) for the risk quantification step.
 
 ### 2.4 Bayesian Genotype Inference
 
@@ -139,7 +151,7 @@ The likelihood P(INR_obs | genotype g) was modeled as:
 P(INR_obs | g) = N(INR_obs ; INR_pred(g), σ_total)
 ```
 
-where σ_total² = u_A² + u_PK²(g), combining measurement uncertainty (u_A = 0.3) with intra-individual pharmacokinetic variability (u_PK estimated from published coefficient of variation data; Hamberg *et al.*, 2010). With only ν = 4 degrees of freedom for the measurement component, a Student-t likelihood would be more appropriate than Normal; we verified that replacing the Normal likelihood with t(ν=4) changes the posterior by <1 percentage point and does not affect the risk classification. The posterior was computed via Bayes' theorem with normalization over the three phenotype classes.
+where σ_total² = u_A² + u_PK²(g), combining measurement uncertainty (u_A = 0.3) with intra-individual pharmacokinetic variability (u_PK estimated from published coefficient of variation data; Hamberg *et al.*, 2010). With only ν = 4 degrees of freedom for the measurement component, a Student-t likelihood would be more appropriate than Normal. We verified (`papers/supplement_s2_python.py` §4) that replacing the Normal likelihood with t(ν=4) shifts individual genotype posteriors substantially (up to 11 pp for *1/*1 and *1/*3, due to heavier tails favoring outlier observations) but the marginal P(lethal) changes from 2.30% to 1.89% — a 0.4 pp difference that does not affect the clinical decision (both exceed 1%). The posterior was computed via Bayes' theorem with normalization over the three phenotype classes.
 
 ### 2.5 Risk Quantification
 
@@ -191,21 +203,22 @@ A patient on warfarin 5 mg/day for >3 months (well beyond steady-state for all C
 
 **Genotype-conditional risk** (Table 2): For the poor-metabolizer phenotype, predicted INR_ss = 6.34 with GUM expanded uncertainty U = 4.06 (k = 2.26; ν_eff = 7.7). The upper confidence limit is 6.34 + 4.06 = 10.4; P(INR_ss > 5.0 | *3/*3) = **82.9%**.
 
-**Marginal lethal risk** (verified by running code):
+**Marginal lethal risk** (scipy-verified; `papers/supplement_s2_python.py`):
 ```
 P(INR > 5.0 | data) = P(*1/*1|data) × P(lethal|*1/*1)
-                    + P(*1/*3|data) × P(lethal|*1/*3)
-                    + P(*3/*3|data) × P(lethal|*3/*3)
-                    = 0.383 × 0.000
-                    + 0.604 × 0.00012
-                    + 0.012 × 0.829
-                    = 0.000000
-                    + 0.000072
-                    + 0.009948
-                    = 0.010020 → 1.03%
+                     + P(*1/*3|data) × P(lethal|*1/*3)
+                     + P(*3/*3|data) × P(lethal|*3/*3)
+
+GUM first-order:     = 0.380 × 0.000 + 0.609 × 0.0237 + 0.011 × 0.773
+                     = 0.000 + 0.01445 + 0.00850
+                     = 0.02295 → 2.30%
+
+Monte Carlo (N=100k): = 0.380 × 0.0002 + 0.609 × 0.0853 + 0.011 × 0.840
+                      = 0.0001 + 0.05193 + 0.00924
+                      = 0.06123 → 6.12%
 ```
 
-The *1/*3 contribution (0.007%) is negligible; the result is driven almost entirely by the *3/*3 tail, whose posterior probability (1.2%) is amplified by its overwhelming genotype-conditional risk (82.9%).
+Under GUM, the risk is shared between *1/*3 (1.45%) and *3/*3 (0.85%); the *1/*3 contribution is the dominant term, not *3/*3 — an important insight that the Sounio demo (with its approximate CDF) misses. Under Monte Carlo, the *1/*3 contribution rises to 5.2% due to the right-skewed INR distribution at intermediate metabolism. **Both methods exceed the 1% action threshold by a large margin.**
 
 This crosses the 1% clinical action threshold. **Uncertainty-aware recommendation: REDUCE DOSE. Order CYP2C9/VKORC1 genotyping. Recheck INR in 5–7 days.**
 
@@ -296,7 +309,7 @@ In each case, the mathematical structure is identical: measured biomarker → Ba
 
 This work presents a simulated clinical scenario parameterized from published data, not a retrospective or prospective study. Clinical validation — applying the framework to an existing warfarin registry (e.g., IWPC dataset, N ≈ 5,700; Swedish TDM registry, N ≈ 1,900) — is necessary to confirm the estimated 1/50 decision-change rate and associated mortality benefit. The steady-state pharmacodynamic model is simplified (linear INR-concentration relationship; an Emax model would be more physiologically faithful). VKORC1 genotype, which explains an additional 25% of warfarin dose variability, is not included; incorporating it would strengthen the effect by widening the epistemic uncertainty in the prior. A single INR measurement was used; serial measurements would tighten the posterior and potentially reduce the decision-change rate.
 
-The PBPK ODE integration uses forward Euler with dt = 0.001 h (24,000 steps). The stiffness ratio of the system (max eigenvalue ~240 h⁻¹ from lung blood flow/volume) places this near the stability boundary; convergence was verified by halving dt to 0.0005 h and confirming <0.5% change in all compartment concentrations. An implicit method (backward Euler, Radau IIA) would be more appropriate for production use.
+The PBPK ODE integration uses forward Euler with dt = 0.001 h (24,000 steps). Convergence was verified by halving dt to 0.0005 h (48,000 steps) in `examples/paper_validation.sio`: all compartment concentrations (plasma, liver, brain, kidney, muscle) agreed to **<0.01%** — well within convergence. The system is not as stiff as initial eigenvalue estimates suggested; the clamping of negative concentrations to zero acts as an implicit stabilizer. An implicit method would be more appropriate for production use but is unnecessary for the 3-significant-figure accuracy reported here.
 
 The Sounio implementation uses a JIT compiler; production clinical decision support would require compilation to native code or integration with existing clinical workflow platforms. The mathematical framework is language-independent and can be ported to any pharmacometric environment. Supplementary Material S2 provides a Python pseudocode implementation (~80 lines) of the Bayesian update + GUM propagation pipeline (excluding the PBPK ODE) for independent verification.
 
@@ -357,15 +370,15 @@ We call on pharmacometric software developers, regulatory agencies, and clinical
 
 **Table 1**: Warfarin pharmacokinetic parameters by CYP2C9 phenotype *(see Methods, §2.1)*
 
-**Table 2**: Genotype-conditional INR predictions with GUM expanded uncertainty (all values from running `examples/lethal_dose_sedenion.sio`)
+**Table 2**: Genotype-conditional INR predictions with GUM expanded uncertainty (scipy-verified; `papers/supplement_s2_python.py`)
 
-| Phenotype | INR_pred | u_c | ν_eff | k₉₅ | U (95%) | 95% CI upper | P(INR>5.0) |
-|-----------|----------|-----|-------|-----|---------|--------------|------------|
-| *1/*1 (normal) | 2.53 | 0.318 | 24.9 | 2.04 | 0.65 | 3.18 | < 0.001 |
-| *1/*3 (intermediate) | 3.67 | 0.670 | 16.9 | 2.04 | 1.37 | 5.04 | 0.012% |
-| *3/*3 (poor) | 6.34 | 1.796 | 7.7 | 2.26 | 4.06 | 10.40 | **82.9%** |
+| Phenotype | INR_pred | u_c | ν_eff | k₉₅ | U (95%) | 95% CI upper | P(INR>5.0) GUM | P(INR>5.0) MC |
+|-----------|----------|-----|-------|-----|---------|--------------|----------------|---------------|
+| *1/*1 (normal) | 2.53 | 0.318 | 24.9 | 2.06 | 0.655 | 3.18 | < 0.01% | 0.02% |
+| *1/*3 (intermediate) | 3.67 | 0.670 | 16.9 | 2.11 | 1.414 | 5.09 | **2.37%** | **8.53%** |
+| *3/*3 (poor) | 6.34 | 1.796 | 7.7 | 2.32 | 4.168 | 10.51 | **77.3%** | **84.0%** |
 
-*Note: u_c includes both pharmacokinetic uncertainty (Type B) and measurement uncertainty (Type A, u_A = 0.30, ν = 4). ν_eff computed via Welch-Satterthwaite. The *3/*3 upper 95% CI bound of 10.40 is non-physical but reflects genuine parameter uncertainty — the relevant quantity is P(INR > 5.0), not the bound itself.*
+*Note: GUM first-order underestimates tail risk due to non-linearity (C_ss ∝ 1/ke creates right-skewed INR distribution). MC values are from N = 100,000 parameter draws (Python supplement §2). The *1/*3 contribution to marginal risk is non-negligible (2.37% GUM, 8.53% MC) — an insight absent from the Sounio demo output, which uses a logistic CDF approximation with lower accuracy at |z| > 1.5.*
 
 **Table 3**: Sixteen-compartment sedenion PBPK steady-state concentrations (*3/*3 phenotype, 5 mg/day warfarin). Values are 24-hour ODE integration output from `examples/lethal_dose_sedenion.sio` using Euler integration (dt=0.001 h, n=24,000 steps; blood flow parameters from ICRP 89; Kp from Rodgers & Rowland 2006).
 

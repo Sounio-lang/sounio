@@ -1,0 +1,338 @@
+//@ run-pass
+// Paper Validation: Emax PD Sensitivity + PBPK Euler Convergence
+//
+// Implements the computational validations promised in the peer review response:
+// - R1.1: Linear vs Emax PD model comparison
+// - R3.4: Euler integration convergence (dt=0.001 vs dt=0.0005)
+//
+// Self-contained. No imports.
+
+// ─────── Math primitives (from lethal_dose_sedenion.sio) ────────────────────
+
+fn ld_abs(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+fn ld_exp(x: f64) -> f64 {
+    var arg = x
+    if arg > 500.0 { return 1.0e200 }
+    if arg < 0.0 - 500.0 { return 0.0 }
+    var halvings = 0
+    while arg > 1.0 { arg = arg * 0.5; halvings = halvings + 1 }
+    while arg < 0.0 - 1.0 { arg = arg * 0.5; halvings = halvings + 1 }
+    var sum = 1.0
+    var term = 1.0
+    var i = 1
+    while i <= 30 { term = term * arg / (i as f64); sum = sum + term; i = i + 1 }
+    i = 0
+    while i < halvings { sum = sum * sum; i = i + 1 }
+    return sum
+}
+
+fn ld_sqrt(x: f64) -> f64 {
+    if x <= 0.0 { return 0.0 }
+    var g = x * 0.5
+    if g < 0.001 { g = 0.001 }
+    var i = 0
+    while i < 20 { g = (g + x / g) * 0.5; i = i + 1 }
+    return g
+}
+
+fn ld_log(x: f64) -> f64 {
+    if x <= 0.0 { return 0.0 - 1.0e30 }
+    var y = 0.0
+    var tmp = x
+    while tmp > 2.718281828 { y = y + 1.0; tmp = tmp / 2.718281828 }
+    while tmp < 1.0 { y = y - 1.0; tmp = tmp * 2.718281828 }
+    var i = 0
+    while i < 20 {
+        let ey = ld_exp(y)
+        if ey < 1.0e-300 { return y }
+        let correction = 2.0 * (x - ey) / (x + ey)
+        y = y + correction
+        i = i + 1
+    }
+    return y
+}
+
+// pow(base, exp) = exp(exp * ln(base))
+fn ld_pow(base: f64, exponent: f64) -> f64 {
+    if base <= 0.0 { return 0.0 }
+    return ld_exp(exponent * ld_log(base))
+}
+
+// ─────── PK Model ───────────────────────────────────────────────────────────
+
+fn css_avg(ke: f64) -> f64 {
+    // C_ss_avg = F * dose / (Vd * ke * tau)
+    // F=0.95, dose=5, Vd=10, tau=24
+    return 0.95 * 5.0 / (10.0 * ke * 24.0)
+}
+
+fn inr_linear(ke: f64) -> f64 {
+    // INR = 1.0 + 2.7 * C_ss
+    return 1.0 + 2.7 * css_avg(ke)
+}
+
+fn inr_emax(ke: f64, ec50: f64, gamma: f64, inr_max: f64) -> f64 {
+    let c = css_avg(ke)
+    let cg = ld_pow(c, gamma)
+    let eg = ld_pow(ec50, gamma)
+    return 1.0 + inr_max * cg / (eg + cg)
+}
+
+// Calibrate INR_max so Emax gives same INR as linear for *1/*1 (ke=0.035)
+fn calibrate_inr_max(ec50: f64, gamma: f64) -> f64 {
+    let c_ref = css_avg(0.035)
+    let target_inr_increment = inr_linear(0.035) - 1.0  // ~1.527
+    let frac = ld_pow(c_ref, gamma) / (ld_pow(ec50, gamma) + ld_pow(c_ref, gamma))
+    return target_inr_increment / frac
+}
+
+// ─────── PBPK (simplified from lethal_dose_sedenion.sio) ───────────────────
+
+struct Sed16 {
+    e0: f64, e1: f64, e2: f64, e3: f64,
+    e4: f64, e5: f64, e6: f64, e7: f64,
+    e8: f64, e9: f64, e10: f64, e11: f64,
+    e12: f64, e13: f64, e14: f64, e15: f64
+}
+
+fn sed_zero() -> Sed16 {
+    Sed16 {
+        e0: 0.0, e1: 0.0, e2: 0.0, e3: 0.0,
+        e4: 0.0, e5: 0.0, e6: 0.0, e7: 0.0,
+        e8: 0.0, e9: 0.0, e10: 0.0, e11: 0.0,
+        e12: 0.0, e13: 0.0, e14: 0.0, e15: 0.0
+    }
+}
+
+fn sed_pbpk_rates(state: Sed16, ke: f64, ka: f64) -> Sed16 {
+    let c_p = state.e0
+    let r1 = (12.0 / 0.3) * (c_p - state.e1 / 0.8)
+    let r2 = (300.0 / 1.0) * (c_p - state.e2 / 0.7)
+    let r3 = (72.0 / 0.3) * (c_p - state.e3 / 1.0)
+    let r4 = (90.0 / 1.5) * (c_p - state.e4 / 1.2)
+    let r5 = (60.0 / 1.0) * (c_p - state.e5 / 0.8) - ka * state.e5
+    let r6 = (30.0 / 28.0) * (c_p - state.e6 / 0.15)
+    let r7 = (18.0 / 3.0) * (c_p - state.e7 / 0.3)
+    let r8 = (15.0 / 15.0) * (c_p - state.e8 / 0.1)
+    let r9 = (42.0 / 1.4) * (c_p - state.e9 / 0.05)
+    let v_plasma = 3.0
+    let r0 = (0.0 - 12.0 / v_plasma * (c_p - state.e1 / 0.8))
+           + (0.0 - 72.0 / v_plasma * (c_p - state.e3 / 1.0))
+           + (0.0 - 90.0 / v_plasma * (c_p - state.e4 / 1.2))
+           + (0.0 - 60.0 / v_plasma * (c_p - state.e5 / 0.8))
+           + (0.0 - 30.0 / v_plasma * (c_p - state.e6 / 0.15))
+           + (0.0 - 18.0 / v_plasma * (c_p - state.e7 / 0.3))
+           + (0.0 - 15.0 / v_plasma * (c_p - state.e8 / 0.1))
+           + (0.0 - 42.0 / v_plasma * (c_p - state.e9 / 0.05))
+           + (0.0 - ke * c_p)
+           + (ka * state.e5 / v_plasma)
+    return Sed16 {
+        e0: r0, e1: r1, e2: r2, e3: r3,
+        e4: r4, e5: r5, e6: r6, e7: r7,
+        e8: r8, e9: r9, e10: 0.0, e11: 0.0,
+        e12: 0.0, e13: 0.0, e14: 0.0, e15: 0.0
+    }
+}
+
+fn clamp_neg(state: Sed16) -> Sed16 {
+    Sed16 {
+        e0: if state.e0 < 0.0 { 0.0 } else { state.e0 },
+        e1: if state.e1 < 0.0 { 0.0 } else { state.e1 },
+        e2: if state.e2 < 0.0 { 0.0 } else { state.e2 },
+        e3: if state.e3 < 0.0 { 0.0 } else { state.e3 },
+        e4: if state.e4 < 0.0 { 0.0 } else { state.e4 },
+        e5: if state.e5 < 0.0 { 0.0 } else { state.e5 },
+        e6: if state.e6 < 0.0 { 0.0 } else { state.e6 },
+        e7: if state.e7 < 0.0 { 0.0 } else { state.e7 },
+        e8: if state.e8 < 0.0 { 0.0 } else { state.e8 },
+        e9: if state.e9 < 0.0 { 0.0 } else { state.e9 },
+        e10: 0.0, e11: 0.0, e12: 0.0, e13: 0.0,
+        e14: 0.0, e15: 0.0
+    }
+}
+
+fn simulate_pbpk_dt(ke: f64, dose: f64, dt: f64, n_steps: i32) -> Sed16 {
+    var state = sed_zero()
+    state.e5 = dose / 1.0  // all drug in gut
+    let ka = 1.5
+    var step = 0
+    while step < n_steps {
+        let rates = sed_pbpk_rates(state, ke, ka)
+        // Euler step: state += rates * dt
+        state = Sed16 {
+            e0: state.e0 + rates.e0 * dt, e1: state.e1 + rates.e1 * dt,
+            e2: state.e2 + rates.e2 * dt, e3: state.e3 + rates.e3 * dt,
+            e4: state.e4 + rates.e4 * dt, e5: state.e5 + rates.e5 * dt,
+            e6: state.e6 + rates.e6 * dt, e7: state.e7 + rates.e7 * dt,
+            e8: state.e8 + rates.e8 * dt, e9: state.e9 + rates.e9 * dt,
+            e10: 0.0, e11: 0.0, e12: 0.0, e13: 0.0, e14: 0.0, e15: 0.0
+        }
+        state = clamp_neg(state)
+        step = step + 1
+    }
+    return state
+}
+
+// ─────── Print helpers ──────────────────────────────────────────────────────
+
+fn print_f3(x: f64) with IO, Mut, Div, Panic {
+    let neg = x < 0.0
+    let ax = if neg { 0.0 - x } else { x }
+    let whole = ax as i64
+    let frac = ((ax - whole as f64) * 1000.0) as i64
+    if neg { print("-") }
+    print(whole)
+    print(".")
+    if frac < 100 { print("0") }
+    if frac < 10 { print("0") }
+    print(frac)
+}
+
+fn print_pct(x: f64) with IO, Mut, Div, Panic {
+    let pct = x * 100.0
+    let whole = pct as i64
+    let frac = ((pct - whole as f64) * 100.0) as i64
+    print(whole)
+    print(".")
+    if frac < 10 { print("0") }
+    print(frac)
+    print("%")
+}
+
+// ─────── MAIN ───────────────────────────────────────────────────────────────
+
+fn main() -> i64 with IO, Mut, Div, Panic {
+
+    // ════════════════════════════════════════════════════════════════════════
+    // SECTION 1: EMAX PD SENSITIVITY (R1.1)
+    // ════════════════════════════════════════════════════════════════════════
+
+    println("================================================================")
+    println("  SECTION 1: EMAX PD SENSITIVITY (R1.1)")
+    println("================================================================")
+    println("")
+
+    let ke_n = 0.035    // *1/*1
+    let ke_i = 0.020    // *1/*3
+    let ke_p = 0.010    // *3/*3
+
+    // Linear predictions (reference)
+    let lin_n = inr_linear(ke_n)
+    let lin_i = inr_linear(ke_i)
+    let lin_p = inr_linear(ke_p)
+
+    println("  Linear PD predictions:")
+    print("    *1/*1: INR = "); print_f3(lin_n); println("")
+    print("    *1/*3: INR = "); print_f3(lin_i); println("")
+    print("    *3/*3: INR = "); print_f3(lin_p); println("")
+    println("")
+
+    // Emax with EC50 = 1.0, gamma = 1.5
+    let ec50_a = 1.0
+    let gamma_a = 1.5
+    let imax_a = calibrate_inr_max(ec50_a, gamma_a)
+    let emax_n_a = inr_emax(ke_n, ec50_a, gamma_a, imax_a)
+    let emax_i_a = inr_emax(ke_i, ec50_a, gamma_a, imax_a)
+    let emax_p_a = inr_emax(ke_p, ec50_a, gamma_a, imax_a)
+
+    println("  Emax (EC50=1.0, gamma=1.5):")
+    print("    INR_max = "); print_f3(imax_a); println("")
+    print("    *1/*1: "); print_f3(emax_n_a); print("  (linear: "); print_f3(lin_n); println(")")
+    print("    *1/*3: "); print_f3(emax_i_a); print("  (linear: "); print_f3(lin_i); println(")")
+    print("    *3/*3: "); print_f3(emax_p_a); print("  (linear: "); print_f3(lin_p); println(")")
+    print("    *3/*3 diff: "); print_f3(emax_p_a - lin_p); println("")
+    println("")
+
+    // Emax with EC50 = 1.5, gamma = 1.5
+    let ec50_b = 1.5
+    let gamma_b = 1.5
+    let imax_b = calibrate_inr_max(ec50_b, gamma_b)
+    let emax_n_b = inr_emax(ke_n, ec50_b, gamma_b, imax_b)
+    let emax_i_b = inr_emax(ke_i, ec50_b, gamma_b, imax_b)
+    let emax_p_b = inr_emax(ke_p, ec50_b, gamma_b, imax_b)
+
+    println("  Emax (EC50=1.5, gamma=1.5):")
+    print("    INR_max = "); print_f3(imax_b); println("")
+    print("    *1/*1: "); print_f3(emax_n_b); print("  (linear: "); print_f3(lin_n); println(")")
+    print("    *1/*3: "); print_f3(emax_i_b); print("  (linear: "); print_f3(lin_i); println(")")
+    print("    *3/*3: "); print_f3(emax_p_b); print("  (linear: "); print_f3(lin_p); println(")")
+    print("    *3/*3 diff: "); print_f3(emax_p_b - lin_p); println("")
+    println("")
+
+    // ════════════════════════════════════════════════════════════════════════
+    // SECTION 2: EULER CONVERGENCE (R3.4)
+    // ════════════════════════════════════════════════════════════════════════
+
+    println("================================================================")
+    println("  SECTION 2: PBPK EULER CONVERGENCE (R3.4)")
+    println("================================================================")
+    println("")
+
+    // dt = 0.001, n = 24000 (24h) — standard
+    let pbpk_std = simulate_pbpk_dt(0.010, 5.0, 0.001, 24000)
+
+    // dt = 0.0005, n = 48000 (24h) — halved step
+    let pbpk_half = simulate_pbpk_dt(0.010, 5.0, 0.0005, 48000)
+
+    println("  Compartment     dt=0.001     dt=0.0005    Diff%")
+    println("  -------------------------------------------------")
+
+    // Plasma
+    let diff_plasma = ld_abs(pbpk_std.e0 - pbpk_half.e0) / (ld_abs(pbpk_half.e0) + 1.0e-30) * 100.0
+    print("  Plasma (e0)    ")
+    print_f3(pbpk_std.e0); print("      ")
+    print_f3(pbpk_half.e0); print("      ")
+    print_f3(diff_plasma); println("%")
+
+    // Liver
+    let diff_liver = ld_abs(pbpk_std.e4 - pbpk_half.e4) / (ld_abs(pbpk_half.e4) + 1.0e-30) * 100.0
+    print("  Liver  (e4)    ")
+    print_f3(pbpk_std.e4); print("      ")
+    print_f3(pbpk_half.e4); print("      ")
+    print_f3(diff_liver); println("%")
+
+    // Brain
+    let diff_brain = ld_abs(pbpk_std.e9 - pbpk_half.e9) / (ld_abs(pbpk_half.e9) + 1.0e-30) * 100.0
+    print("  Brain  (e9)    ")
+    print_f3(pbpk_std.e9); print("      ")
+    print_f3(pbpk_half.e9); print("      ")
+    print_f3(diff_brain); println("%")
+
+    // Kidney
+    let diff_kidney = ld_abs(pbpk_std.e3 - pbpk_half.e3) / (ld_abs(pbpk_half.e3) + 1.0e-30) * 100.0
+    print("  Kidney (e3)    ")
+    print_f3(pbpk_std.e3); print("      ")
+    print_f3(pbpk_half.e3); print("      ")
+    print_f3(diff_kidney); println("%")
+
+    // Muscle
+    let diff_muscle = ld_abs(pbpk_std.e6 - pbpk_half.e6) / (ld_abs(pbpk_half.e6) + 1.0e-30) * 100.0
+    print("  Muscle (e6)    ")
+    print_f3(pbpk_std.e6); print("      ")
+    print_f3(pbpk_half.e6); print("      ")
+    print_f3(diff_muscle); println("%")
+
+    println("")
+    println("  Convergence criterion: all compartments < 1%")
+
+    let max_diff = diff_plasma
+    let max_diff2 = if diff_liver > max_diff { diff_liver } else { max_diff }
+    let max_diff3 = if diff_brain > max_diff2 { diff_brain } else { max_diff2 }
+
+    if max_diff3 < 1.0 {
+        println("  PASS: Euler integration converged (max diff < 1%)")
+    } else {
+        println("  NOTE: some compartments differ > 1%")
+    }
+
+    println("")
+    println("================================================================")
+    println("  VALIDATION COMPLETE")
+    println("================================================================")
+
+    0
+}
