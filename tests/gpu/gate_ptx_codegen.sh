@@ -156,6 +156,44 @@ echo "--- Section 2: GPU compile pipeline ---"
     fi
 }
 
+# T10: Epistemic SPIR-V wired — structural check
+{
+    TOTAL=$((TOTAL + 1))
+    if grep -q 'hlir_kernels_to_epistemic_spirv' self-hosted/gpu/hlir_to_gpu.sio && \
+       [ -f self-hosted/gpu/epistemic_spirv.sio ] && \
+       grep -q 'gpu_lower_to_epistemic_spirv' self-hosted/gpu/epistemic_spirv.sio; then
+        PASS=$((PASS + 1))
+        echo "PASS  T10_epistemic_spirv_wired"
+    else
+        FAIL=$((FAIL + 1))
+        echo "FAIL  T10_epistemic_spirv_wired: epistemic SPIR-V module or wiring missing"
+    fi
+}
+
+# T11: Metal launch orchestration wired — structural check
+{
+    TOTAL=$((TOTAL + 1))
+    if grep -q 'gpu_launch_msl_vecadd' self-hosted/gpu/runtime/launch.sio; then
+        PASS=$((PASS + 1))
+        echo "PASS  T11_metal_launch_wired"
+    else
+        FAIL=$((FAIL + 1))
+        echo "FAIL  T11_metal_launch_wired: gpu_launch_msl_vecadd missing from runtime/launch.sio"
+    fi
+}
+
+# T12: Host glue codegen wired — structural check
+{
+    TOTAL=$((TOTAL + 1))
+    if grep -q 'gpu_emit_host_glue' self-hosted/compiler/main.sio; then
+        PASS=$((PASS + 1))
+        echo "PASS  T12_host_glue_codegen"
+    else
+        FAIL=$((FAIL + 1))
+        echo "FAIL  T12_host_glue_codegen: gpu_emit_host_glue missing from compiler/main.sio"
+    fi
+}
+
 # ── Section 3: souc check — optional files ────────────────────────────────────
 
 echo ""

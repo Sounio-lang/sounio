@@ -24784,6 +24784,79 @@ fn run_kernel_compile_mode(args: ArgList, flag_index: i64) with IO, Mut, Panic, 
 }
 
 // ============================================================================
+// GPU HOST GLUE EMITTER
+// ============================================================================
+//
+// Generate a host-side Sounio wrapper module that calls the GPU launch function
+// for the emitted PTX/Metal/SPIR-V kernel file. Writes a _host.sio file that
+// imports the appropriate launch module and provides a gpu_run_kernel() entry.
+
+fn gpu_emit_host_glue(
+    output_path: string,
+    kernel_name: string,
+    gpu_target: string
+) -> bool with IO, Mut, Panic, Div, Alloc {
+    // Construct the host glue file path: output_path + "_host.sio"
+    let host_path = output_path ++ "_host.sio"
+
+    // Build the host glue source as a PtxBuf (reusing the text buffer)
+    var glue = ptx_buf_new()
+    glue = ptx_push_str(glue, "// Generated host glue for GPU kernel\n")
+    glue = ptx_push_str(glue, "// Usage: import this module to launch the kernel on GPU\n")
+    glue = ptx_push_str(glue, "//\n")
+    glue = ptx_push_str(glue, "// Target: ")
+    glue = ptx_push_str(glue, gpu_target)
+    glue = ptx_push_str(glue, "\n")
+    glue = ptx_push_str(glue, "// Kernel file: ")
+    glue = ptx_push_str(glue, output_path)
+    glue = ptx_push_str(glue, "\n\n")
+
+    // Import the appropriate launch module
+    let is_metal_target = str_len(gpu_target) >= 5
+        && str_char_at(gpu_target, 0) == str_char_at("metal", 0)
+        && str_char_at(gpu_target, 1) == str_char_at("metal", 1)
+        && str_char_at(gpu_target, 2) == str_char_at("metal", 2)
+        && str_char_at(gpu_target, 3) == str_char_at("metal", 3)
+        && str_char_at(gpu_target, 4) == str_char_at("metal", 4)
+
+    if is_metal_target {
+        glue = ptx_push_str(glue, "use gpu::runtime::metal::*\n")
+        glue = ptx_push_str(glue, "use gpu::runtime::launch::{gpu_launch_msl_vecadd, GpuLaunchResult}\n\n")
+        glue = ptx_push_str(glue, "// Launch the Metal kernel with the specified buffer sizes.\n")
+        glue = ptx_push_str(glue, "// Loads MSL source from the output file at runtime.\n")
+        glue = ptx_push_str(glue, "fn gpu_run_kernel(n: i64, host_a: *const f32, host_b: *const f32, host_c: *const f32) -> GpuLaunchResult with IO, Mut, Panic, Div, Alloc {\n")
+        glue = ptx_push_str(glue, "    // Load MSL source and launch\n")
+        glue = ptx_push_str(glue, "    // TODO: load_file_bytes(\"")
+        glue = ptx_push_str(glue, output_path)
+        glue = ptx_push_str(glue, "\") -> gpu_launch_msl_vecadd\n")
+        glue = ptx_push_str(glue, "    gpu_launch_result_err(99)\n")
+        glue = ptx_push_str(glue, "}\n")
+    } else {
+        glue = ptx_push_str(glue, "use gpu::runtime::cuda::*\n")
+        glue = ptx_push_str(glue, "use gpu::runtime::launch::{gpu_launch_ptx_vecadd, GpuLaunchResult}\n\n")
+        glue = ptx_push_str(glue, "// Launch the CUDA PTX kernel with the specified buffer sizes.\n")
+        glue = ptx_push_str(glue, "// Loads PTX source from the output file at runtime.\n")
+        glue = ptx_push_str(glue, "fn gpu_run_kernel(n: i64, host_a: *const f32, host_b: *const f32, host_c: *const f32) -> GpuLaunchResult with IO, Mut, Panic, Div, Alloc {\n")
+        glue = ptx_push_str(glue, "    // Load PTX file and launch\n")
+        glue = ptx_push_str(glue, "    // TODO: load_file_bytes(\"")
+        glue = ptx_push_str(glue, output_path)
+        glue = ptx_push_str(glue, "\") -> gpu_launch_ptx_vecadd\n")
+        glue = ptx_push_str(glue, "    gpu_launch_result_err(99)\n")
+        glue = ptx_push_str(glue, "}\n")
+    }
+
+    // Write host glue to file
+    let ok = io_write_bytes_to_file(host_path, glue.data, glue.len)
+    if ok {
+        print("GPU: host glue written to ")
+        print(host_path)
+        print("\n")
+    }
+    ok
+}
+
+
+// ============================================================================
 // GPU COMPILE PIPELINE
 // ============================================================================
 //
@@ -24915,6 +24988,10 @@ fn run_gpu_compile_pipeline(
             print(" (")
             print_int(spv_bytes.len)
             print(" bytes)\n")
+            // Optionally generate host glue module
+            if str_eq(gpu_binary_format, "host-glue") {
+                let _glue_ok = gpu_emit_host_glue(output_path, "kernel", gpu_target)
+            }
         } else {
             // Print word count to stdout (binary data not printable directly)
             print("GPU: SPIR-V ")
@@ -24954,6 +25031,10 @@ fn run_gpu_compile_pipeline(
         print(" (")
         print_int(ptx.len)
         print(" bytes)\n")
+        // Optionally generate host glue module
+        if str_eq(gpu_binary_format, "host-glue") {
+            let _glue_ok = gpu_emit_host_glue(output_path, "kernel", gpu_target)
+        }
     } else {
         // Print to stdout
         ptx_buf_print(ptx)

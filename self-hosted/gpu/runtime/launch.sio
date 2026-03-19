@@ -966,3 +966,120 @@ fn gpu_launch_ptx_map(
 
     gpu_launch_result_ok(0.0)
 }
+
+
+// ============================================================================
+// Section 11: End-to-end Metal MSL kernel execution — vec_add pattern
+// ============================================================================
+//
+// Orchestrates the full lifecycle for a Metal kernel that operates on three
+// f32 shared-memory buffers (A, B, C_out) plus an element count N. This is
+// the Metal counterpart of gpu_launch_ptx_vecadd.
+//
+// Parameters:
+//   msl_data      — MSL source as [i8; 65536] buffer (from ptx.sio PtxBuf)
+//   msl_len       — valid byte count in msl_data
+//   kernel_name   — name of the kernel function in MSL (e.g. "vec_add")
+//   name_len      — byte count of kernel_name
+//   n             — number of f32 elements per buffer
+//   host_a        — pointer to host input array A (n * 4 bytes)
+//   host_b        — pointer to host input array B (n * 4 bytes)
+//   host_c_out    — pointer to host output array C (n * 4 bytes, written on return)
+//
+// Returns GpuLaunchResult with error_code == 0 on success.
+
+fn gpu_launch_msl_vecadd(
+    msl_data: [i8; 65536],
+    msl_len: i64,
+    kernel_name: [i8; 256],
+    name_len: i64,
+    n: i64,
+    host_a: *const f32,
+    host_b: *const f32,
+    host_c_out: *const f32
+) -> GpuLaunchResult with IO, Mut, Panic, Div, Alloc {
+    let byte_count: i64 = n * 4
+
+    // ── Step 1: Create Metal device ─────────────────────────────────────
+    let dev = metal_device_create()
+
+    // ── Step 2: Compile MSL source to library ───────────────────────────
+    let lib_result = metal_library_from_source(dev, msl_data, msl_len)
+    var dev2 = lib_result.0
+    var lib = lib_result.1
+    let lib_ok = lib_result.2
+    // lib_result.3 = err_buf [i8; 1024], lib_result.4 = err_len
+    if !lib_ok {
+        metal_library_drop(lib)
+        metal_device_drop(dev2)
+        return gpu_launch_result_err(1)
+    }
+
+    // ── Step 3: Create compute pipeline from kernel function ────────────
+    let pipe_result = metal_pipeline_create(dev2, lib, kernel_name, name_len)
+    var dev3 = pipe_result.0
+    var lib2 = pipe_result.1
+    let pipeline = pipe_result.2
+    let pipe_ok = pipe_result.3
+    // pipe_result.4 = err_buf [i8; 1024], pipe_result.5 = err_len
+    if !pipe_ok {
+        metal_pipeline_drop(pipeline)
+        metal_library_drop(lib2)
+        metal_device_drop(dev3)
+        return gpu_launch_result_err(2)
+    }
+
+    // ── Step 4: Create command queue ────────────────────────────────────
+    let q_result = metal_command_queue_create(dev3)
+    var dev4 = q_result.0
+    var queue = q_result.1
+
+    // ── Step 5: Allocate 3 shared-memory buffers (Apple Silicon unified memory)
+    let alloc_a = metal_buffer_alloc(dev4, byte_count, METAL_BUF_SHARED)
+    var dev5 = alloc_a.0
+    var buf_a = alloc_a.1
+
+    let alloc_b = metal_buffer_alloc(dev5, byte_count, METAL_BUF_SHARED)
+    var dev6 = alloc_b.0
+    var buf_b = alloc_b.1
+
+    let alloc_c = metal_buffer_alloc(dev6, byte_count, METAL_BUF_SHARED)
+    var dev7 = alloc_c.0
+    var buf_c = alloc_c.1
+
+    // ── Step 6: Bind buffers into the kernel slot array ─────────────────
+    var bufs: [MetalBuffer; 8] = [MetalBuffer { handle: 0, byte_len: 0, storage_mode: 0 }; 8]
+    bufs[0 as usize] = buf_a
+    bufs[1 as usize] = buf_b
+    bufs[2 as usize] = buf_c
+    let threads_per_group: i64 = 256
+
+    // ── Step 7: Dispatch kernel ─────────────────────────────────────────
+    let run_result = metal_run_kernel_1d(dev7, queue, pipeline, bufs, 3, n, threads_per_group)
+    var dev8 = run_result.0
+    var queue2 = run_result.1
+    var pipeline2 = run_result.2
+    var out_bufs = run_result.3
+    let run_ok = run_result.4
+
+    // ── Step 8: Copy result from buffer C back to host ──────────────────
+    buf_c = out_bufs[2 as usize]
+    buf_c = metal_buffer_copy_out(buf_c, host_c_out as &![i8], byte_count)
+
+    // ── Step 9: Cleanup (reverse allocation order) ──────────────────────
+    buf_a = out_bufs[0 as usize]
+    buf_b = out_bufs[1 as usize]
+    metal_buffer_drop(buf_c)
+    metal_buffer_drop(buf_b)
+    metal_buffer_drop(buf_a)
+    metal_pipeline_drop(pipeline2)
+    metal_command_queue_drop(queue2)
+    metal_library_drop(lib2)
+    metal_device_drop(dev8)
+
+    if run_ok {
+        gpu_launch_result_ok(0.0)
+    } else {
+        gpu_launch_result_err(3)
+    }
+}
