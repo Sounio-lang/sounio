@@ -27,6 +27,11 @@ var WIDE_LEN: i64 = 0
 // Closure LEA sentinel: 48 8D 05 <cidx_lo> <cidx_hi> 0xC1 0xBE (7 bytes, distinct from fn-ref 0xDA 0xBE)
 var CLOSURE_OFFSETS: [i64; 64] = [-1; 64]
 var CLOSURE_COUNT: i64 = 0
+// Closure body scope — globals so body expression compiler (recursive) only passes CodeBuffer.
+// [Name; 8] = 1,088 bytes: 8 × ir_empty_name() = trivial vs [Name; 512] = 66K IR nodes.
+var CL_BODY_NAMES: [Name; 8] = [ir_empty_name(); 8]
+var CL_BODY_SLOTS: [i64; 8] = [0; 8]
+var CL_BODY_COUNT: i64 = 0
 
 // Global ELF assembly buffer — must be global (not stack) to avoid stack overflow for large binaries
 var GLOBAL_ELF: [i8; 16777216] = [0; 16777216]
@@ -1783,14 +1788,93 @@ fn ast_expr_is_float(expr: &Expr, local_names: [Name; 512], local_types: [i64; 5
     false
 }
 
-// Sprint 234 Track A: Compile an ExprClosure to a synthetic function in WIDE_OUT.
-// Separated from ast_compile_expr to avoid inflating its stack frame — Cranelift JIT
-// allocates the full frame at function entry, so large local arrays here would slow EVERY
-// call to ast_compile_expr even for non-closure expressions.
-// Returns a CodeBuffer with a 7-byte closure LEA sentinel: 48 8D 05 <cidx_lo> <cidx_hi> 0xC1 0xBE
-// The post-pass in render_compile patches this to a real RIP-relative LEA.
+// Sprint 234 Track A: Minimal expression compiler for closure bodies.
+// Uses [Name; 8] (1,088 bytes) not [Name; 512] (69,632 bytes) — avoids Cranelift JIT IR explosion.
+// Handles: ExprIntLit, ExprBoolTrue/False, ExprIdent (closure param lookup), ExprBinary (int ops).
+// Closures are pure functions of their params — no outer frame locals captured (lambda-lifting).
+// Sprint 234 Track A: Closure body expression compiler.
+// Uses CL_BODY_NAMES/SLOTS/COUNT globals (set by ast_compile_closure_emit before call)
+// instead of [Name; 8] params — avoids Cranelift JIT IR explosion from large by-value
+// array copies at the two recursive call sites in ExprBinary.
+fn ast_compile_closure_body_expr(code: CodeBuffer, expr: &Expr
+) -> CodeBuffer with Mut, Panic, Div {
+    var c = code
+    if expr.kind == ExprKind::ExprIntLit {
+        c = emit_mov_rax_imm64(c, expr.int_val)
+        return c
+    }
+    if expr.kind == ExprKind::ExprBoolTrue {
+        c = emit_mov_rax_imm64(c, 1)
+        return c
+    }
+    if expr.kind == ExprKind::ExprBoolFalse {
+        c = emit_mov_rax_imm64(c, 0)
+        return c
+    }
+    if expr.kind == ExprKind::ExprIdent {
+        var found_slot: i64 = -9999
+        var ci = CL_BODY_COUNT - 1
+        while ci >= 0 {
+            if ir_name_eq(CL_BODY_NAMES[ci as usize], expr.name) {
+                found_slot = CL_BODY_SLOTS[ci as usize]
+                ci = -1
+            } else { ci = ci - 1 }
+        }
+        if found_slot >= 0 { c = micro_load_rax(c, found_slot) } else { c = emit_mov_rax_imm64(c, 0) }
+        return c
+    }
+    if expr.kind == ExprKind::ExprBinary {
+        let left_ref: &Option<Box<Expr>> = &expr.left
+        match *left_ref {
+            Some(le) => { c = ast_compile_closure_body_expr(c, &(*le)) }
+            _ => {}
+        }
+        c = emit_byte(c, 0x50)  // push rax (left)
+        let right_ref: &Option<Box<Expr>> = &expr.right
+        match *right_ref {
+            Some(re) => { c = ast_compile_closure_body_expr(c, &(*re)) }
+            _ => {}
+        }
+        c = emit_byte(c, 0x48); c = emit_byte(c, 0x89); c = emit_byte(c, 0xc1)  // mov rcx, rax (right)
+        c = emit_byte(c, 0x58)  // pop rax (left)
+        if expr.bin_op == BinaryOp::OpAdd {
+            c = emit_byte(c, 0x48); c = emit_byte(c, 0x01); c = emit_byte(c, 0xc8)
+        } else if expr.bin_op == BinaryOp::OpSub {
+            c = emit_byte(c, 0x48); c = emit_byte(c, 0x29); c = emit_byte(c, 0xc8)
+        } else if expr.bin_op == BinaryOp::OpMul {
+            c = emit_byte(c, 0x48); c = emit_byte(c, 0x0f); c = emit_byte(c, 0xaf); c = emit_byte(c, 0xc1)
+        } else if expr.bin_op == BinaryOp::OpEq {
+            c = emit_byte(c, 0x48); c = emit_byte(c, 0x39); c = emit_byte(c, 0xc8)
+            c = emit_byte(c, 0x0f); c = emit_byte(c, 0x94); c = emit_byte(c, 0xc0 as i64)
+            c = emit_byte(c, 0x48); c = emit_byte(c, 0x0f); c = emit_byte(c, 0xb6); c = emit_byte(c, 0xc0 as i64)
+        } else if expr.bin_op == BinaryOp::OpNe {
+            c = emit_byte(c, 0x48); c = emit_byte(c, 0x39); c = emit_byte(c, 0xc8)
+            c = emit_byte(c, 0x0f); c = emit_byte(c, 0x95); c = emit_byte(c, 0xc0 as i64)
+            c = emit_byte(c, 0x48); c = emit_byte(c, 0x0f); c = emit_byte(c, 0xb6); c = emit_byte(c, 0xc0 as i64)
+        } else if expr.bin_op == BinaryOp::OpLt {
+            c = emit_byte(c, 0x48); c = emit_byte(c, 0x39); c = emit_byte(c, 0xc8)
+            c = emit_byte(c, 0x0f); c = emit_byte(c, 0x9c); c = emit_byte(c, 0xc0 as i64)
+            c = emit_byte(c, 0x48); c = emit_byte(c, 0x0f); c = emit_byte(c, 0xb6); c = emit_byte(c, 0xc0 as i64)
+        } else if expr.bin_op == BinaryOp::OpGt {
+            c = emit_byte(c, 0x48); c = emit_byte(c, 0x39); c = emit_byte(c, 0xc8)
+            c = emit_byte(c, 0x0f); c = emit_byte(c, 0x9f); c = emit_byte(c, 0xc0 as i64)
+            c = emit_byte(c, 0x48); c = emit_byte(c, 0x0f); c = emit_byte(c, 0xb6); c = emit_byte(c, 0xc0 as i64)
+        } else if expr.bin_op == BinaryOp::OpLe {
+            c = emit_byte(c, 0x48); c = emit_byte(c, 0x39); c = emit_byte(c, 0xc8)
+            c = emit_byte(c, 0x0f); c = emit_byte(c, 0x9e); c = emit_byte(c, 0xc0 as i64)
+            c = emit_byte(c, 0x48); c = emit_byte(c, 0x0f); c = emit_byte(c, 0xb6); c = emit_byte(c, 0xc0 as i64)
+        } else if expr.bin_op == BinaryOp::OpGe {
+            c = emit_byte(c, 0x48); c = emit_byte(c, 0x39); c = emit_byte(c, 0xc8)
+            c = emit_byte(c, 0x0f); c = emit_byte(c, 0x9d); c = emit_byte(c, 0xc0 as i64)
+            c = emit_byte(c, 0x48); c = emit_byte(c, 0x0f); c = emit_byte(c, 0xb6); c = emit_byte(c, 0xc0 as i64)
+        }
+        return c
+    }
+    c = emit_mov_rax_imm64(c, 0)
+    c
+}
+
 fn ast_compile_closure_emit(code: CodeBuffer, expr: &Expr,
-    outer_names: [Name; 512], outer_slots: [i64; 512], outer_types: [i64; 512], outer_count: i64,
     ctx: &AstCompileCtx
 ) -> CodeBuffer with Mut, Panic, Div, IO {
     var c = code
@@ -1808,14 +1892,9 @@ fn ast_compile_closure_emit(code: CodeBuffer, expr: &Expr,
     cl_code = emit_byte(cl_code, cl_frame & 0xFF); cl_code = emit_byte(cl_code, (cl_frame >> 8) & 0xFF)
     cl_code = emit_byte(cl_code, (cl_frame >> 16) & 0xFF); cl_code = emit_byte(cl_code, (cl_frame >> 24) & 0xFF)
 
-    // Closure scope: start from caller's outer_names (already contains fn_names at negative slots
-    // and global_names at negative slots). Outer stack-local slots (positive) remain but are
-    // shadowed by closure params appended below (reverse-search finds params first).
-    // By-value copy — no ir_empty_name() initialization, just a runtime memcpy.
-    var cl_names = outer_names
-    var cl_slots = outer_slots
-    var cl_types = outer_types
-    var cl_lc = outer_count
+    // Populate CL_BODY_* globals (avoids [Name; 8] by-value copies in recursive body compiler).
+    // Reset from previous closure (single-file programs, sequential closure compilation).
+    CL_BODY_COUNT = 0
 
     // Spill closure params from ABI registers into stack slots (rdi, rsi, rdx, rcx, r8, r9 → slots 0..5)
     let cl_params_ref: &Option<Box<ClosureParamList>> = &expr.closure_params
@@ -1831,10 +1910,11 @@ fn ast_compile_closure_emit(code: CodeBuffer, expr: &Expr,
                 if ast_type_is_f64(cp_ty) { cp_type = 1 }
                 let cp_slot = cl_next_slot
                 cl_next_slot = cl_next_slot + 1
-                cl_names[cl_lc as usize] = cp_name
-                cl_slots[cl_lc as usize] = cp_slot
-                cl_types[cl_lc as usize] = cp_type
-                cl_lc = cl_lc + 1
+                if CL_BODY_COUNT < 8 {
+                    CL_BODY_NAMES[CL_BODY_COUNT as usize] = cp_name
+                    CL_BODY_SLOTS[CL_BODY_COUNT as usize] = cp_slot
+                    CL_BODY_COUNT = CL_BODY_COUNT + 1
+                }
                 // Load ABI register → rax
                 if cl_param_idx == 0 {
                     cl_code = emit_byte(cl_code, 0x48); cl_code = emit_byte(cl_code, 0x89); cl_code = emit_byte(cl_code, 0xf8)
@@ -1858,11 +1938,11 @@ fn ast_compile_closure_emit(code: CodeBuffer, expr: &Expr,
     }
     cl_code = code_set_ns(cl_code, cl_next_slot)
 
-    // Compile closure body expression → result in rax
+    // Compile closure body using globals-based expression compiler (no [Name; 8] copies in recursion)
     let cl_body_ref: &Option<Box<Expr>> = &expr.closure_body
     match *cl_body_ref {
         Some(cbe) => {
-            cl_code = ast_compile_expr(cl_code, &(*cbe), cl_names, cl_slots, cl_types, cl_lc, ctx)
+            cl_code = ast_compile_closure_body_expr(cl_code, &(*cbe))
         }
         _ => {
             cl_code = emit_byte(cl_code, 0x48); cl_code = emit_byte(cl_code, 0x31); cl_code = emit_byte(cl_code, 0xc0)
@@ -3386,9 +3466,9 @@ fn ast_compile_expr(code: CodeBuffer, expr: &Expr,
         }
         c
     } else if expr.kind == ExprKind::ExprClosure {
-        // Sprint 234 Track A: Delegate to a dedicated function to avoid inflating ast_compile_expr's stack frame.
-        // Pass outer scope arrays by value — runtime memcpy only, no ir_empty_name() initialization overhead.
-        c = ast_compile_closure_emit(c, expr, local_names, local_slots, local_types, local_count, ctx)
+        // Sprint 234 Track A: Lambda-lift closure to synthetic fn in WIDE_OUT.
+        // Uses [Name; 8] scope internally — avoids [Name; 512] Cranelift JIT IR explosion.
+        c = ast_compile_closure_emit(c, expr, ctx)
         c
     } else {
         c = emit_byte(c, 0x48)
@@ -4906,7 +4986,6 @@ fn main() -> i64 with IO, Mut, Panic, Div, Alloc {
                     if is_real_fn2 {
                         match *fdef_ref {
                             Some(fd) => {
-                                fn_offsets[fn_idx as usize] = WIDE_LEN
                                 let ns = str_from_bytes(itm.name.buf, itm.name.len)
                                 print("render_compile: fn=")
                                 print(ns)
@@ -4931,8 +5010,11 @@ fn main() -> i64 with IO, Mut, Panic, Div, Alloc {
                                 }
                                 code = ast_compile_fn_body(code, &(*fd), fn_count, &ctx)
                                 code = emit_byte(code, 0xc9); code = emit_byte(code, 0xc3)
-                                let fn_start = fn_offsets[fn_idx as usize]
                                 print(" post="); print_int(code.len)
+                                // Record fn offset AFTER closure flushes (during body compile) but BEFORE fn body flush.
+                                // Closures flushed during ast_compile_fn_body advance WIDE_LEN; fn's actual code follows.
+                                fn_offsets[fn_idx as usize] = WIDE_LEN
+                                let fn_start = fn_offsets[fn_idx as usize]
                                 wide_flush(code)
                                 let sz = WIDE_LEN - fn_start
                                 print(" off="); print_int(fn_start)
@@ -4958,7 +5040,6 @@ fn main() -> i64 with IO, Mut, Panic, Div, Alloc {
                                             let mcfd_r: &Option<Box<FnDef>> = &mcitm.fn_def
                                             match *mcfd_r {
                                                 Some(mcfd) => {
-                                                    fn_offsets[fn_idx as usize] = WIDE_LEN
                                                     let mcns = str_from_bytes(mcitm.name.buf, mcitm.name.len)
                                                     print("render_compile: method=")
                                                     print(mcns)
@@ -4981,6 +5062,8 @@ fn main() -> i64 with IO, Mut, Panic, Div, Alloc {
                                                     }
                                                     code = ast_compile_fn_body(code, &(*mcfd), fn_count, &ctx)
                                                     code = emit_byte(code, 0xc9); code = emit_byte(code, 0xc3)
+                                                    // Record offset after closure flushes, before method body flush
+                                                    fn_offsets[fn_idx as usize] = WIDE_LEN
                                                     let mc_start = fn_offsets[fn_idx as usize]
                                                     wide_flush(code)
                                                     let mcsz = WIDE_LEN - mc_start
