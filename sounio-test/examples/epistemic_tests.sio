@@ -1,0 +1,287 @@
+// Epistemic Test Examples for sounio-test
+//
+// Demonstrates testing with uncertainty propagation and provenance tracking
+
+use sounio_test::{create_test_framework, TestFramework, TestConfig, TestMetadata}
+
+// Create test framework instance
+let tf: TestFramework = create_test_framework()
+
+// ============================================================================
+// 1. EPISTEMIC VALUE CREATION
+// ============================================================================
+
+// Helper to create epistemic values
+fn create_measurement(value: f64, uncertainty: f64, source: string) -> Knowledge[f64] {
+    Knowledge(
+        value: value,
+        ε: uncertainty,
+        prov: source
+    )
+}
+
+// ============================================================================
+// 2. BASIC EPISTEMIC TESTS
+// ============================================================================
+
+fn test_epistemic_addition() -> TestResult {
+    // Create measurements with uncertainty
+    let temp1 = create_measurement(20.5, 0.1, "thermometer_1")
+    let temp2 = create_measurement(22.3, 0.2, "thermometer_2")
+    
+    // Add them
+    let sum = temp1 + temp2
+    
+    // Check value
+    let value_ok = tf.assert_eq_float(sum.value, 42.8, 0.000001, 
+        "Sum of temperatures should be correct")
+    
+    // Check uncertainty propagation (ε_total = sqrt(ε1² + ε2²))
+    let expected_uncertainty = sqrt(0.1*0.1 + 0.2*0.2)
+    let uncertainty_ok = tf.assert_eq_float(sum.ε, expected_uncertainty, 0.000001,
+        "Uncertainty should propagate correctly")
+    
+    // Check provenance
+    let provenance_ok = tf.assert(str_contains(sum.prov, "addition") || 
+                                 str_contains(sum.prov, "sum"),
+        "Provenance should mention addition")
+    
+    // Combine results
+    if value_ok.passed && uncertainty_ok.passed && provenance_ok.passed {
+        TestResult {
+            name: "test_epistemic_addition",
+            passed: true,
+            confidence: sum.ε,  // Use result's uncertainty as confidence
+            duration_ms: 0,
+            message: "Epistemic addition test passed",
+            provenance: "epistemic_test",
+            uncertainty_reason: "Inherited from input uncertainties",
+            metadata: TestMetadata {
+                tags: ["epistemic", "arithmetic"],
+                iterations: 1,
+                required_confidence: 0.7,
+                check_uncertainty: true,
+                check_provenance: true,
+            },
+        }
+    } else {
+        TestResult {
+            name: "test_epistemic_addition",
+            passed: false,
+            confidence: 0.0,
+            duration_ms: 0,
+            message: "Epistemic addition test failed",
+            provenance: "epistemic_test",
+            uncertainty_reason: "Test failure",
+            metadata: TestMetadata {
+                tags: ["epistemic", "arithmetic"],
+                iterations: 1,
+                required_confidence: 0.7,
+                check_uncertainty: true,
+                check_provenance: true,
+            },
+        }
+    }
+}
+
+fn test_epistemic_multiplication() -> TestResult {
+    // Measurements: length and width with uncertainty
+    let length = create_measurement(10.0, 0.1, "ruler_measurement")
+    let width = create_measurement(5.0, 0.05, "caliper_measurement")
+    
+    // Calculate area
+    let area = length * width
+    
+    // Check value
+    tf.assert_eq_float(area.value, 50.0, 0.000001, "Area should be 50.0")
+    
+    // For multiplication: relative uncertainty adds
+    // ε_area/area ≈ ε_length/length + ε_width/width
+    let expected_relative_uncertainty = (0.1/10.0) + (0.05/5.0)
+    let expected_uncertainty = 50.0 * expected_relative_uncertainty
+    
+    tf.assert_eq_float(area.ε, expected_uncertainty, 0.000001,
+        "Uncertainty should propagate correctly for multiplication")
+}
+
+// ============================================================================
+// 3. UNCERTAINTY PROPAGATION TESTS
+// ============================================================================
+
+fn test_uncertainty_never_decreases() -> TestResult {
+    // Uncertainty should never decrease through operations
+    // (unless we have additional information)
+    
+    let x = tf.generate_epistemic_float(0.0, 100.0, 0.5)
+    let y = tf.generate_epistemic_float(0.0, 100.0, 0.5)
+    
+    // Test various operations
+    let sum = x + y
+    let diff = x - y
+    let prod = x * y
+    
+    // For independent measurements, uncertainty should increase
+    // or stay the same for sum/diff
+    let sum_ok = sum.ε >= max(x.ε, y.ε)
+    let diff_ok = diff.ε >= max(x.ε, y.ε)
+    
+    // For product, relative uncertainty adds
+    let prod_relative_uncertainty = prod.ε / abs(prod.value)
+    let x_relative = x.ε / abs(x.value)
+    let y_relative = y.ε / abs(y.value)
+    let prod_ok = prod_relative_uncertainty >= max(x_relative, y_relative)
+    
+    tf.assert(sum_ok && diff_ok && prod_ok,
+        "Uncertainty should never decrease through operations")
+}
+
+fn test_high_confidence_operations() -> TestResult {
+    // Operations with high-confidence inputs should produce high-confidence outputs
+    
+    let high_conf_x = create_measurement(42.0, 0.95, "precise_instrument")
+    let high_conf_y = create_measurement(23.0, 0.92, "calibrated_sensor")
+    
+    let result = high_conf_x + high_conf_y
+    
+    // Result should have high confidence
+    tf.assert_confidence(result, 0.9, 
+        "High-confidence inputs should produce high-confidence output")
+}
+
+// ============================================================================
+// 4. PROVENANCE TRACKING TESTS
+// ============================================================================
+
+fn test_provenance_preserved() -> TestResult {
+    // Provenance should be preserved through operations
+    
+    let blood_pressure = create_measurement(120.0, 5.0, "sphygmomanometer_reading")
+    let heart_rate = create_measurement(72.0, 2.0, "pulse_oximeter")
+    
+    // Create a derived measurement
+    let rate_pressure_product = blood_pressure * heart_rate
+    
+    // Check that provenance mentions both sources
+    let has_bp = str_contains(rate_pressure_product.prov, "sphygmomanometer")
+    let has_hr = str_contains(rate_pressure_product.prov, "oximeter")
+    let has_mult = str_contains(rate_pressure_product.prov, "multiplication") ||
+                   str_contains(rate_pressure_product.prov, "product")
+    
+    tf.assert(has_bp && has_hr && has_mult,
+        "Provenance should track all sources and operations")
+}
+
+// ============================================================================
+// 5. SCIENTIFIC VALIDATION TESTS
+// ============================================================================
+
+fn test_physical_laws() -> TestResult {
+    // Test that computations obey physical laws
+    
+    // Ohm's Law: V = I * R
+    let current = create_measurement(2.0, 0.1, "ammeter")      // 2A ± 0.1A
+    let resistance = create_measurement(10.0, 0.5, "ohmmeter") // 10Ω ± 0.5Ω
+    
+    let voltage = current * resistance
+    
+    // Voltage should be 20V with propagated uncertainty
+    let expected_voltage = 20.0
+    let voltage_uncertainty = sqrt(
+        (0.1/2.0)*(0.1/2.0) + (0.5/10.0)*(0.5/10.0)
+    ) * expected_voltage
+    
+    tf.assert_eq_epistemic(voltage, 
+        create_measurement(expected_voltage, voltage_uncertainty, "ohms_law"),
+        0.000001, 0.000001,
+        "Ohm's Law should hold with uncertainty propagation")
+}
+
+fn test_conservation_laws() -> TestResult {
+    // Test conservation laws (e.g., mass, energy)
+    
+    let mass1 = create_measurement(50.0, 0.5, "scale_measurement")
+    let mass2 = create_measurement(30.0, 0.3, "scale_measurement")
+    
+    let total_mass = mass1 + mass2
+    
+    // Total mass should be sum of individual masses
+    // Uncertainty should propagate correctly
+    let expected_mass = 80.0
+    let expected_uncertainty = sqrt(0.5*0.5 + 0.3*0.3)
+    
+    tf.assert_eq_epistemic(total_mass,
+        create_measurement(expected_mass, expected_uncertainty, "mass_conservation"),
+        0.000001, 0.000001,
+        "Mass should be conserved with proper uncertainty")
+}
+
+// ============================================================================
+// 6. TEST RUNNER FOR EPISTEMIC TESTS
+// ============================================================================
+
+fn run_all_epistemic_tests() with IO {
+    println("🔬 Running Epistemic Tests")
+    println("========================\n")
+    
+    // Create test configuration for epistemic tests
+    let config = TestConfig {
+        min_confidence: 0.7,  // Lower threshold for epistemic tests
+        timeout_ms: 10000,
+        check_provenance: true,
+        check_uncertainty: true,
+        report_format: "console",
+        output_dir: ".",
+        verbose: true,
+    }
+    
+    // Create test runner
+    let runner = tf.create_test_runner(config)
+    
+    // Metadata for epistemic tests
+    let epistemic_metadata = TestMetadata {
+        tags: ["epistemic", "uncertainty", "provenance"],
+        iterations: 1,
+        required_confidence: 0.7,
+        check_uncertainty: true,
+        check_provenance: true,
+    }
+    
+    // Register all epistemic tests
+    tf.register_test(&!runner, "test_epistemic_addition", 
+        test_epistemic_addition, epistemic_metadata)
+    tf.register_test(&!runner, "test_epistemic_multiplication", 
+        test_epistemic_multiplication, epistemic_metadata)
+    tf.register_test(&!runner, "test_uncertainty_never_decreases", 
+        test_uncertainty_never_decreases, epistemic_metadata)
+    tf.register_test(&!runner, "test_high_confidence_operations", 
+        test_high_confidence_operations, epistemic_metadata)
+    tf.register_test(&!runner, "test_provenance_preserved", 
+        test_provenance_preserved, epistemic_metadata)
+    tf.register_test(&!runner, "test_physical_laws", 
+        test_physical_laws, epistemic_metadata)
+    tf.register_test(&!runner, "test_conservation_laws", 
+        test_conservation_laws, epistemic_metadata)
+    
+    // Run tests
+    tf.run_tests(&!runner)
+}
+
+// ============================================================================
+// 7. MAIN FUNCTION
+// ============================================================================
+
+fn main() with IO {
+    println("🎯 sounio-test Epistemic Examples")
+    println("================================\n")
+    
+    println("This example demonstrates testing with:")
+    println("  • Uncertainty propagation (ε)")
+    println("  • Provenance tracking")
+    println("  • Scientific validation")
+    println("  • Confidence-aware assertions\n")
+    
+    run_all_epistemic_tests()
+    
+    println("\n🔬 Epistemic testing enables scientifically rigorous validation!")
+    println("Every test result includes confidence levels and provenance.")
+}

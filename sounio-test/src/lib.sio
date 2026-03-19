@@ -1,0 +1,438 @@
+// sounio-test - Core Test Framework Library
+//
+// Provides testing utilities for Sounio with epistemic awareness
+
+// ============================================================================
+// 1. TYPES AND DATA STRUCTURES
+// ============================================================================
+
+// Test result with epistemic uncertainty
+struct TestResult {
+    name: string,
+    passed: bool,
+    confidence: f64,           // Confidence in test result
+    duration_ms: i64,
+    message: string,
+    provenance: string,
+    uncertainty_reason: string, // Why confidence < 1.0
+    metadata: TestMetadata,
+}
+
+struct TestMetadata {
+    tags: [string],
+    iterations: i64,           // For statistical tests
+    required_confidence: f64,
+    check_uncertainty: bool,
+    check_provenance: bool,
+}
+
+// Test suite configuration
+struct TestConfig {
+    min_confidence: f64,
+    timeout_ms: i64,
+    check_provenance: bool,
+    check_uncertainty: bool,
+    report_format: string,     // "console", "html", "json", "junit"
+    output_dir: string,
+    verbose: bool,
+}
+
+// Statistical test configuration
+struct StatisticalConfig {
+    iterations: i64,
+    confidence_level: f64,
+    tolerance: f64,
+    distribution: string,      // "normal", "uniform", "custom"
+}
+
+// ============================================================================
+// 2. ASSERTION FUNCTIONS
+// ============================================================================
+
+// Basic assertion
+fn assert(condition: bool, message: string) -> TestResult {
+    if condition {
+        TestResult {
+            name: "assert",
+            passed: true,
+            confidence: 1.0,
+            duration_ms: 0,
+            message: message,
+            provenance: "assertion",
+            uncertainty_reason: "",
+            metadata: TestMetadata {
+                tags: [],
+                iterations: 1,
+                required_confidence: 1.0,
+                check_uncertainty: false,
+                check_provenance: false,
+            },
+        }
+    } else {
+        TestResult {
+            name: "assert",
+            passed: false,
+            confidence: 1.0,
+            duration_ms: 0,
+            message: "Assertion failed: " + message,
+            provenance: "assertion",
+            uncertainty_reason: "",
+            metadata: TestMetadata {
+                tags: [],
+                iterations: 1,
+                required_confidence: 1.0,
+                check_uncertainty: false,
+                check_provenance: false,
+            },
+        }
+    }
+}
+
+// Assert equality with tolerance for floating point
+fn assert_eq_float(actual: f64, expected: f64, tolerance: f64, message: string) -> TestResult {
+    let diff = abs(actual - expected)
+    let condition = diff <= tolerance
+    
+    assert(condition, message + ". Expected: " + str(expected) + ", Got: " + str(actual))
+}
+
+// Assert equality for epistemic values
+fn assert_eq_epistemic(
+    actual: Knowledge[f64],
+    expected: Knowledge[f64],
+    value_tolerance: f64,
+    uncertainty_tolerance: f64,
+    message: string
+) -> TestResult {
+    // Check value equality
+    let value_result = assert_eq_float(actual.value, expected.value, value_tolerance,
+        message + " (value)")
+    
+    // Check uncertainty equality
+    let uncertainty_result = assert_eq_float(actual.ε, expected.ε, uncertainty_tolerance,
+        message + " (uncertainty)")
+    
+    // Check provenance contains expected
+    let provenance_ok = str_contains(actual.prov, expected.prov) || 
+                        str_contains(expected.prov, actual.prov)
+    let provenance_result = assert(provenance_ok, 
+        message + " (provenance). Actual: " + actual.prov + ", Expected: " + expected.prov)
+    
+    // Combine results
+    if value_result.passed && uncertainty_result.passed && provenance_result.passed {
+        TestResult {
+            name: "assert_eq_epistemic",
+            passed: true,
+            confidence: min(actual.ε, expected.ε),
+            duration_ms: 0,
+            message: message,
+            provenance: "epistemic_assertion",
+            uncertainty_reason: "Combined uncertainty from inputs",
+            metadata: TestMetadata {
+                tags: ["epistemic"],
+                iterations: 1,
+                required_confidence: 0.0,
+                check_uncertainty: true,
+                check_provenance: true,
+            },
+        }
+    } else {
+        TestResult {
+            name: "assert_eq_epistemic",
+            passed: false,
+            confidence: 0.0,
+            duration_ms: 0,
+            message: "Epistemic assertion failed: " + message,
+            provenance: "epistemic_assertion",
+            uncertainty_reason: "Assertion failure",
+            metadata: TestMetadata {
+                tags: ["epistemic"],
+                iterations: 1,
+                required_confidence: 0.0,
+                check_uncertainty: true,
+                check_provenance: true,
+            },
+        }
+    }
+}
+
+// Assert confidence level
+fn assert_confidence(value: Knowledge[f64], min_confidence: f64, message: string) -> TestResult {
+    let condition = value.ε >= min_confidence
+    
+    assert(condition, message + ". Confidence: " + str(value.ε) + ", Required: " + str(min_confidence))
+}
+
+// Assert statistical property
+fn assert_statistical(
+    actual: f64,
+    expected: f64,
+    tolerance: f64,
+    confidence: f64,
+    message: string
+) -> TestResult {
+    // Simplified statistical test
+    // In real implementation, would use proper statistical test
+    let diff = abs(actual - expected)
+    let condition = diff <= tolerance
+    
+    TestResult {
+        name: "assert_statistical",
+        passed: condition,
+        confidence: confidence,
+        duration_ms: 0,
+        message: message + ". Actual: " + str(actual) + ", Expected: " + str(expected),
+        provenance: "statistical_test",
+        uncertainty_reason: "Statistical uncertainty",
+        metadata: TestMetadata {
+            tags: ["statistical"],
+            iterations: 100,  // Default iterations
+            required_confidence: confidence,
+            check_uncertainty: true,
+            check_provenance: false,
+        },
+    }
+}
+
+// ============================================================================
+// 3. TEST RUNNER
+// ============================================================================
+
+struct TestRunner {
+    config: TestConfig,
+    tests: [TestFunction],
+    results: [TestResult],
+}
+
+struct TestFunction {
+    name: string,
+    function: fn() -> TestResult,
+    metadata: TestMetadata,
+}
+
+// Create test runner
+fn create_test_runner(config: TestConfig) -> TestRunner {
+    TestRunner {
+        config: config,
+        tests: [],
+        results: [],
+    }
+}
+
+// Register a test
+fn register_test(runner: &!TestRunner, name: string, test_fn: fn() -> TestResult, metadata: TestMetadata) with Mut {
+    let test_func = TestFunction {
+        name: name,
+        function: test_fn,
+        metadata: metadata,
+    }
+    
+    runner.tests = array_append(runner.tests, test_func)
+}
+
+// Run all tests
+fn run_tests(runner: &!TestRunner) with IO, Mut {
+    println("🧪 Running " + str(array_len(runner.tests)) + " tests")
+    println("================\n")
+    
+    var passed = 0
+    var failed = 0
+    var warnings = 0
+    var total_confidence: f64 = 0.0
+    
+    for test in runner.tests {
+        let start_time = current_time_ms()
+        
+        // Run test
+        let result = test.function()
+        
+        let duration = current_time_ms() - start_time
+        result.duration_ms = duration
+        
+        // Check if test meets confidence requirements
+        let meets_confidence = result.confidence >= runner.config.min_confidence
+        
+        // Determine status
+        if result.passed && meets_confidence {
+            passed = passed + 1
+            print_test_result(test.name, "✅", duration, result.confidence, result.message)
+        } else if result.passed && !meets_confidence {
+            warnings = warnings + 1
+            print_test_result(test.name, "⚠️ ", duration, result.confidence, 
+                result.message + " (low confidence: ε=" + str(result.confidence) + ")")
+        } else {
+            failed = failed + 1
+            print_test_result(test.name, "❌", duration, result.confidence, result.message)
+        }
+        
+        total_confidence = total_confidence + result.confidence
+        runner.results = array_append(runner.results, result)
+    }
+    
+    // Calculate average confidence
+    let avg_confidence = if array_len(runner.tests) > 0 then 
+        total_confidence / (array_len(runner.tests) as f64) else 0.0
+    
+    // Print summary
+    println("\n📊 Summary")
+    println("==========")
+    println("Total tests: " + str(array_len(runner.tests)))
+    println("Passed: " + str(passed) + " (ε≥" + str(runner.config.min_confidence) + ": " + str(passed) + ")")
+    println("Warnings: " + str(warnings) + " (low confidence)")
+    println("Failed: " + str(failed))
+    println("Average confidence: ε = " + str(avg_confidence))
+    
+    // Generate recommendations
+    if warnings > 0 || failed > 0 {
+        println("\n💡 Recommendations")
+        println("=================")
+        
+        if warnings > 0 {
+            println("• Improve uncertainty propagation in " + str(warnings) + " test(s)")
+            println("• Consider increasing sample size for statistical tests")
+        }
+        
+        if failed > 0 {
+            println("• Fix " + str(failed) + " failing test(s)")
+            println("• Review test logic and assumptions")
+        }
+        
+        if avg_confidence < 0.8 {
+            println("• Overall test confidence is low (ε = " + str(avg_confidence) + ")")
+            println("• Consider improving measurement precision or test design")
+        }
+    }
+}
+
+// Print individual test result
+fn print_test_result(name: string, status: string, duration: i64, confidence: f64, message: string) with IO {
+    let duration_str = if duration < 10 then " " + str(duration) else str(duration)
+    let confidence_str = str_with_precision(confidence, 2)
+    
+    println(status + " " + name + " (" + duration_str + "ms) ε=" + confidence_str)
+    if message != "" {
+        println("   " + message)
+    }
+}
+
+// ============================================================================
+// 4. TEST GENERATORS (for property-based testing)
+// ============================================================================
+
+// Generate random epistemic values
+fn generate_epistemic_float(min: f64, max: f64, max_uncertainty: f64) -> Knowledge[f64] {
+    let value = random_float(min, max)
+    let uncertainty = random_float(0.0, max_uncertainty)
+    
+    Knowledge(
+        value: value,
+        ε: uncertainty,
+        prov: "generated_test_data"
+    )
+}
+
+// Generate array of epistemic values
+fn generate_epistemic_array(size: i64, min: f64, max: f64, max_uncertainty: f64) -> Knowledge[f64] {
+    var result: Knowledge[f64] = []
+    
+    for i in 0..size {
+        result = array_append(result, generate_epistemic_float(min, max, max_uncertainty))
+    }
+    
+    result
+}
+
+// ============================================================================
+// 5. UTILITY FUNCTIONS
+// ============================================================================
+
+// Get current time in milliseconds
+fn current_time_ms() -> i64 {
+    // Implementation would use system time
+    0
+}
+
+// Random float in range
+fn random_float(min: f64, max: f64) -> f64 {
+    // Implementation would use random number generator
+    min + (max - min) * 0.5  // Placeholder
+}
+
+// Format float with precision
+fn str_with_precision(value: f64, precision: i64) -> string {
+    // Simplified implementation
+    str(value)
+}
+
+// Array operations
+fn array_append<T>(array: [T], element: T) -> [T] {
+    // Implementation would append element
+    var new_array: [T] = []
+    // Copy and append
+    return new_array
+}
+
+// ============================================================================
+// 6. PUBLIC API
+// ============================================================================
+
+// Main test framework API
+type TestFramework {
+    // Assertions
+    assert: fn(bool, string) -> TestResult,
+    assert_eq_float: fn(f64, f64, f64, string) -> TestResult,
+    assert_eq_epistemic: fn(Knowledge[f64], Knowledge[f64], f64, f64, string) -> TestResult,
+    assert_confidence: fn(Knowledge[f64], f64, string) -> TestResult,
+    assert_statistical: fn(f64, f64, f64, f64, string) -> TestResult,
+    
+    // Test runner
+    create_test_runner: fn(TestConfig) -> TestRunner,
+    register_test: fn(&!TestRunner, string, fn() -> TestResult, TestMetadata),
+    run_tests: fn(&!TestRunner),
+    
+    // Generators
+    generate_epistemic_float: fn(f64, f64, f64) -> Knowledge[f64],
+    generate_epistemic_array: fn(i64, f64, f64, f64) -> Knowledge[f64],
+}
+
+// Create test framework instance
+fn create_test_framework() -> TestFramework {
+    TestFramework {
+        assert: assert,
+        assert_eq_float: assert_eq_float,
+        assert_eq_epistemic: assert_eq_epistemic,
+        assert_confidence: assert_confidence,
+        assert_statistical: assert_statistical,
+        
+        create_test_runner: create_test_runner,
+        register_test: register_test,
+        run_tests: run_tests,
+        
+        generate_epistemic_float: generate_epistemic_float,
+        generate_epistemic_array: generate_epistemic_array,
+    }
+}
+
+// ============================================================================
+// 7. MACRO SUPPORT (Conceptual)
+// ============================================================================
+
+// These would be implemented as compiler macros
+
+// Macro for test functions
+// #[test]
+// fn my_test() {
+//     // Test code
+// }
+
+// Macro for statistical tests
+// #[test(iterations = 1000, confidence = 0.95)]
+// fn statistical_test() {
+//     // Statistical test code
+// }
+
+// Macro for property-based tests
+// #[property]
+// fn commutative_property(a: f64, b: f64) -> bool {
+//     a + b == b + a
+// }
