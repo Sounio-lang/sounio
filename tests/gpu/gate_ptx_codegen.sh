@@ -215,6 +215,26 @@ echo "--- Section 2: GPU compile pipeline ---"
     fi
 }
 
+# T14: Built-in kernel AD — kernel_autodiff structural + self-test
+{
+    TOTAL=$((TOTAL + 1))
+    if [ -f self-hosted/gpu/kernel_autodiff.sio ] && \
+       grep -q 'kad_generate_backward' self-hosted/gpu/kernel_autodiff.sio && \
+       grep -q 'kad_tape_backward' self-hosted/gpu/kernel_autodiff.sio; then
+        RESULT=$($SOUC run self-hosted/gpu/kernel_autodiff.sio 2>&1 | tail -1)
+        if echo "$RESULT" | grep -q "10/10 tests passed"; then
+            PASS=$((PASS + 1))
+            echo "PASS  T14_kernel_autodiff (10/10 self-tests)"
+        else
+            FAIL=$((FAIL + 1))
+            echo "FAIL  T14_kernel_autodiff: self-tests did not all pass: $RESULT"
+        fi
+    else
+        FAIL=$((FAIL + 1))
+        echo "FAIL  T14_kernel_autodiff: kernel_autodiff.sio missing or incomplete"
+    fi
+}
+
 # ── Section 3: souc check — optional files ────────────────────────────────────
 
 echo ""
