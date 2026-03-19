@@ -45,6 +45,8 @@ var GLOBAL_IS_FLOAT: [i64; 256] = [0; 256]     // 1 if element type is f64, 0 ot
 var GLOBAL_COUNT: i64 = 0
 var GLOBAL_TOTAL_SIZE: i64 = 0
 var GLOBAL_BASE_ABS: i64 = 0  // absolute VA of global_base_ptr storage
+// JIT Heisenbug workaround: MAIN_FN_IDX as global — JIT clobbers locals across str_eq calls.
+var MAIN_FN_IDX: i64 = -1
 
 fn wide_flush(code: CodeBuffer) with Mut, Panic, Div {
     var i: i64 = 0
@@ -4056,6 +4058,14 @@ fn main() -> i64 with IO, Mut, Panic, Div, Alloc {
         print("render_compile: parse_error\n")
         return 1
     }
+    // Force materialize prog.items before Phase 0 — JIT SRET heisenbug workaround:
+    // load_source_file returns Program via hidden SRET pointer; without an early read of
+    // prog.items, the JIT may reuse the SRET buffer before Phase 0/1 accesses it.
+    let prog_items_prefetch: &Option<Box<ItemList>> = &prog.items
+    match *prog_items_prefetch {
+        None => { print("render_compile: empty_program\n"); return 1 }
+        _ => {}
+    }
 
     // ---- AST-direct compilation (bypasses IR lowering + JIT Box bugs) ----
 
@@ -4197,7 +4207,7 @@ fn main() -> i64 with IO, Mut, Panic, Div, Alloc {
     var fn_names: [Name; 512] = [ir_empty_name(); 512]
     var fn_return_types: [i64; 512] = [0; 512]  // 0=i64, 1=f64, 10+=struct
     var fn_count: i64 = 0
-    var main_fn_idx: i64 = -1
+    MAIN_FN_IDX = -1  // reset global (global avoids JIT register-clobber heisenbug)
 
     let items_ref: &Option<Box<ItemList>> = &prog.items
     var item_cur = items_ref
@@ -4242,7 +4252,7 @@ fn main() -> i64 with IO, Mut, Panic, Div, Alloc {
                             _ => {}
                         }
                         let ns = str_from_bytes(itm.name.buf, itm.name.len)
-                        if str_eq(ns, "main") { main_fn_idx = fn_count }
+                        if str_eq(ns, "main") { MAIN_FN_IDX = fn_count }
                         fn_count = fn_count + 1
                     }
                     // else: global var — already collected by scan_source_globals
@@ -4300,6 +4310,11 @@ fn main() -> i64 with IO, Mut, Panic, Div, Alloc {
             }
             _ => break
         }
+    }
+    // Early check: if main not found, fail before builtin registration.
+    if MAIN_FN_IDX < 0 {
+        print("render_compile: no_main\n")
+        return 4
     }
     // Register builtins BEFORE source functions (builtins shadow source defs with same name)
     var print_int_idx = fn_count
@@ -4506,11 +4521,6 @@ fn main() -> i64 with IO, Mut, Panic, Div, Alloc {
     print("render_compile: fn_count=")
     print_int(fn_count)
     print(" (incl builtins)\n")
-
-    if main_fn_idx < 0 {
-        print("render_compile: no_main\n")
-        return 4
-    }
 
     // Second pass: emit builtins + compile source functions
     var code = code_buffer_new()
@@ -5191,7 +5201,7 @@ fn main() -> i64 with IO, Mut, Panic, Div, Alloc {
     }
     // call main
     let cs = WIDE_LEN + code.len
-    let moff = fn_offsets[main_fn_idx as usize]
+    let moff = fn_offsets[MAIN_FN_IDX as usize]
     let cd = moff - (cs + 5)
     code = emit_byte(code, 0xe8)
     code = emit_byte(code, cd & 0xFF)
