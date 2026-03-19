@@ -194,6 +194,27 @@ echo "--- Section 2: GPU compile pipeline ---"
     fi
 }
 
+# T13: Jacobian-Guided GUM (epistemic_autodiff) — structural + self-test
+{
+    TOTAL=$((TOTAL + 1))
+    if [ -f self-hosted/gpu/epistemic_autodiff.sio ] && \
+       grep -q 'jad_gum_combine' self-hosted/gpu/epistemic_autodiff.sio && \
+       grep -q 'jad_propagate_mul' self-hosted/gpu/epistemic_autodiff.sio; then
+        # Run self-tests
+        RESULT=$($SOUC run self-hosted/gpu/epistemic_autodiff.sio 2>&1 | tail -1)
+        if echo "$RESULT" | grep -q "12/12 tests passed"; then
+            PASS=$((PASS + 1))
+            echo "PASS  T13_jacobian_gum (12/12 self-tests)"
+        else
+            FAIL=$((FAIL + 1))
+            echo "FAIL  T13_jacobian_gum: self-tests did not all pass: $RESULT"
+        fi
+    else
+        FAIL=$((FAIL + 1))
+        echo "FAIL  T13_jacobian_gum: epistemic_autodiff.sio missing or incomplete"
+    fi
+}
+
 # ── Section 3: souc check — optional files ────────────────────────────────────
 
 echo ""
