@@ -1,0 +1,298 @@
+// stdlib/collections/native_vec — Large-slab vectors for native ELF programs
+//
+// Designed for programs compiled via the lean emitter to bare-metal ELF.
+// JIT malloc is broken (KNOWN_LIMITATIONS.md:68); these use fixed-size slabs
+// inside structs — no heap_alloc(), no FFI, safe under both JIT and native.
+//
+// NativeI64Vec: growable i64 array, capacity 65536
+// NativeF64Vec: growable f64 array, capacity 65536
+//
+// Quicksort included. Panic on out-of-bounds or overflow.
+
+let NATIVE_VEC_CAP: i64 = 65536
+
+// ============================================================================
+// NativeI64Vec
+// ============================================================================
+
+struct NativeI64Vec {
+    data: [i64; 65536],
+    len: i64,
+}
+
+impl NativeI64Vec {
+    fn new() -> NativeI64Vec {
+        NativeI64Vec { data: [0; 65536], len: 0 }
+    }
+
+    fn len(self: &NativeI64Vec) -> i64 {
+        self.len
+    }
+
+    fn is_empty(self: &NativeI64Vec) -> bool {
+        self.len == 0
+    }
+
+    fn push(self: &! NativeI64Vec, v: i64) with Mut, Panic {
+        if self.len >= NATIVE_VEC_CAP { panic("NativeI64Vec: capacity exceeded") }
+        self.data[self.len as usize] = v
+        self.len = self.len + 1
+    }
+
+    fn pop(self: &! NativeI64Vec) -> i64 with Mut, Panic {
+        if self.len == 0 { panic("NativeI64Vec: pop from empty") }
+        self.len = self.len - 1
+        self.data[self.len as usize]
+    }
+
+    fn get(self: &NativeI64Vec, i: i64) -> i64 with Panic {
+        if i < 0 || i >= self.len { panic("NativeI64Vec: index out of bounds") }
+        self.data[i as usize]
+    }
+
+    fn set(self: &! NativeI64Vec, i: i64, v: i64) with Mut, Panic {
+        if i < 0 || i >= self.len { panic("NativeI64Vec: index out of bounds") }
+        self.data[i as usize] = v
+    }
+
+    fn last(self: &NativeI64Vec) -> i64 with Panic {
+        if self.len == 0 { panic("NativeI64Vec: last on empty") }
+        self.data[(self.len - 1) as usize]
+    }
+
+    fn clear(self: &! NativeI64Vec) with Mut {
+        self.len = 0
+    }
+
+    fn swap(self: &! NativeI64Vec, i: i64, j: i64) with Mut, Panic {
+        if i < 0 || i >= self.len { panic("NativeI64Vec: swap index i out of bounds") }
+        if j < 0 || j >= self.len { panic("NativeI64Vec: swap index j out of bounds") }
+        let tmp = self.data[i as usize]
+        self.data[i as usize] = self.data[j as usize]
+        self.data[j as usize] = tmp
+    }
+
+    fn contains(self: &NativeI64Vec, v: i64) -> bool {
+        var i: i64 = 0
+        var found = false
+        while i < self.len {
+            if self.data[i as usize] == v { found = true }
+            i = i + 1
+        }
+        found
+    }
+
+    fn sum(self: &NativeI64Vec) -> i64 {
+        var s: i64 = 0
+        var i: i64 = 0
+        while i < self.len { s = s + self.data[i as usize]; i = i + 1 }
+        s
+    }
+
+    fn min(self: &NativeI64Vec) -> i64 with Mut, Panic, Div {
+        if self.len == 0 { panic("NativeI64Vec: min on empty") }
+        var m = self.data[0]
+        var i: i64 = 1
+        while i < self.len {
+            if self.data[i as usize] < m { m = self.data[i as usize] }
+            i = i + 1
+        }
+        m
+    }
+
+    fn max(self: &NativeI64Vec) -> i64 with Mut, Panic, Div {
+        if self.len == 0 { panic("NativeI64Vec: max on empty") }
+        var m = self.data[0]
+        var i: i64 = 1
+        while i < self.len {
+            if self.data[i as usize] > m { m = self.data[i as usize] }
+            i = i + 1
+        }
+        m
+    }
+
+    // Quicksort in-place (iterative, stack-based to avoid recursion depth limits)
+    fn sort(self: &! NativeI64Vec) with Mut, Panic, Div {
+        if self.len <= 1 { return }
+        // Iterative quicksort using an explicit stack of (lo, hi) pairs
+        var stack_lo: [i64; 64] = [0; 64]
+        var stack_hi: [i64; 64] = [0; 64]
+        var sp: i64 = 0
+        stack_lo[0] = 0
+        stack_hi[0] = self.len - 1
+        sp = 1
+        while sp > 0 {
+            sp = sp - 1
+            let lo = stack_lo[sp as usize]
+            let hi = stack_hi[sp as usize]
+            if lo >= hi { continue }
+            // Median-of-three pivot
+            let mid = lo + (hi - lo) / 2
+            if self.data[lo as usize] > self.data[mid as usize] {
+                let t = self.data[lo as usize]
+                self.data[lo as usize] = self.data[mid as usize]
+                self.data[mid as usize] = t
+            }
+            if self.data[lo as usize] > self.data[hi as usize] {
+                let t = self.data[lo as usize]
+                self.data[lo as usize] = self.data[hi as usize]
+                self.data[hi as usize] = t
+            }
+            if self.data[mid as usize] > self.data[hi as usize] {
+                let t = self.data[mid as usize]
+                self.data[mid as usize] = self.data[hi as usize]
+                self.data[hi as usize] = t
+            }
+            let pivot = self.data[mid as usize]
+            // Move pivot to hi-1
+            let t2 = self.data[mid as usize]
+            self.data[mid as usize] = self.data[(hi - 1) as usize]
+            self.data[(hi - 1) as usize] = t2
+            var i = lo
+            var j = hi - 1
+            while true {
+                i = i + 1
+                while self.data[i as usize] < pivot { i = i + 1 }
+                j = j - 1
+                while j > lo && self.data[j as usize] > pivot { j = j - 1 }
+                if i >= j { break }
+                let tmp = self.data[i as usize]
+                self.data[i as usize] = self.data[j as usize]
+                self.data[j as usize] = tmp
+            }
+            // Restore pivot
+            let tmp2 = self.data[i as usize]
+            self.data[i as usize] = self.data[(hi - 1) as usize]
+            self.data[(hi - 1) as usize] = tmp2
+            // Push sub-ranges (smaller first for stack efficiency)
+            if sp + 2 <= 64 {
+                if i - 1 - lo < hi - i {
+                    stack_lo[sp as usize] = lo
+                    stack_hi[sp as usize] = i - 1
+                    sp = sp + 1
+                    stack_lo[sp as usize] = i + 1
+                    stack_hi[sp as usize] = hi
+                    sp = sp + 1
+                } else {
+                    stack_lo[sp as usize] = i + 1
+                    stack_hi[sp as usize] = hi
+                    sp = sp + 1
+                    stack_lo[sp as usize] = lo
+                    stack_hi[sp as usize] = i - 1
+                    sp = sp + 1
+                }
+            }
+        }
+    }
+}
+
+// ============================================================================
+// NativeF64Vec
+// ============================================================================
+
+struct NativeF64Vec {
+    data: [f64; 65536],
+    len: i64,
+}
+
+impl NativeF64Vec {
+    fn new() -> NativeF64Vec {
+        NativeF64Vec { data: [0.0; 65536], len: 0 }
+    }
+
+    fn len(self: &NativeF64Vec) -> i64 {
+        self.len
+    }
+
+    fn is_empty(self: &NativeF64Vec) -> bool {
+        self.len == 0
+    }
+
+    fn push(self: &! NativeF64Vec, v: f64) with Mut, Panic {
+        if self.len >= NATIVE_VEC_CAP { panic("NativeF64Vec: capacity exceeded") }
+        self.data[self.len as usize] = v
+        self.len = self.len + 1
+    }
+
+    fn pop(self: &! NativeF64Vec) -> f64 with Mut, Panic {
+        if self.len == 0 { panic("NativeF64Vec: pop from empty") }
+        self.len = self.len - 1
+        self.data[self.len as usize]
+    }
+
+    fn get(self: &NativeF64Vec, i: i64) -> f64 with Panic {
+        if i < 0 || i >= self.len { panic("NativeF64Vec: index out of bounds") }
+        self.data[i as usize]
+    }
+
+    fn set(self: &! NativeF64Vec, i: i64, v: f64) with Mut, Panic {
+        if i < 0 || i >= self.len { panic("NativeF64Vec: index out of bounds") }
+        self.data[i as usize] = v
+    }
+
+    fn last(self: &NativeF64Vec) -> f64 with Panic {
+        if self.len == 0 { panic("NativeF64Vec: last on empty") }
+        self.data[(self.len - 1) as usize]
+    }
+
+    fn clear(self: &! NativeF64Vec) with Mut {
+        self.len = 0
+    }
+
+    fn swap(self: &! NativeF64Vec, i: i64, j: i64) with Mut, Panic {
+        if i < 0 || i >= self.len { panic("NativeF64Vec: swap index i out of bounds") }
+        if j < 0 || j >= self.len { panic("NativeF64Vec: swap index j out of bounds") }
+        let tmp = self.data[i as usize]
+        self.data[i as usize] = self.data[j as usize]
+        self.data[j as usize] = tmp
+    }
+
+    fn sum(self: &NativeF64Vec) -> f64 {
+        var s = 0.0
+        var i: i64 = 0
+        while i < self.len { s = s + self.data[i as usize]; i = i + 1 }
+        s
+    }
+
+    fn mean(self: &NativeF64Vec) -> f64 with Panic, Div {
+        if self.len == 0 { panic("NativeF64Vec: mean on empty") }
+        self.sum() / (self.len as f64)
+    }
+
+    fn min(self: &NativeF64Vec) -> f64 with Mut, Panic, Div {
+        if self.len == 0 { panic("NativeF64Vec: min on empty") }
+        var m = self.data[0]
+        var i: i64 = 1
+        while i < self.len {
+            if self.data[i as usize] < m { m = self.data[i as usize] }
+            i = i + 1
+        }
+        m
+    }
+
+    fn max(self: &NativeF64Vec) -> f64 with Mut, Panic, Div {
+        if self.len == 0 { panic("NativeF64Vec: max on empty") }
+        var m = self.data[0]
+        var i: i64 = 1
+        while i < self.len {
+            if self.data[i as usize] > m { m = self.data[i as usize] }
+            i = i + 1
+        }
+        m
+    }
+
+    // Sort ascending (insertion sort — simpler for f64, good for N<10K)
+    fn sort(self: &! NativeF64Vec) with Mut, Panic, Div {
+        var i: i64 = 1
+        while i < self.len {
+            let key = self.data[i as usize]
+            var j = i - 1
+            while j >= 0 && self.data[j as usize] > key {
+                self.data[(j + 1) as usize] = self.data[j as usize]
+                j = j - 1
+            }
+            self.data[(j + 1) as usize] = key
+            i = i + 1
+        }
+    }
+}
