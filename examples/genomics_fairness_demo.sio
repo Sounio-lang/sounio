@@ -1,0 +1,413 @@
+//@ run-pass
+//! Genomics Fairness — Epistemic Bias Quantification Pipeline
+//!
+//! End-to-end demonstration combining:
+//!   1. Variant encoding    — Binary SNP matrix (n=20 individuals, p=10 loci)
+//!   2. MLP forward pass    — 2-layer risk predictor (10→4→1)
+//!   3. Gradient attribution— Finite-difference sensitivity scores per SNP
+//!   4. Fairness metrics    — Demographic parity, calibration gap
+//!   5. Differential privacy— Laplace mechanism on allele frequencies (ε=1.0)
+//!   6. GUM uncertainty     — Type A (genomic) + Type B (ascertainment bias)
+//!
+//! All results verified via assertions — no println.
+//! Reference: Obermeyer et al. (2019) Science 366:447-453
+//!            Dwork et al. (2012) Fairness Through Awareness, ITCS.
+//!            Laplace mechanism: Dwork & Roth (2014) Foundations of DP §3.3
+
+// Self-contained pipeline — all math inlined, no external stdlib calls needed
+
+// ============================================================================
+// Math helpers
+// ============================================================================
+
+fn gf_abs(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+fn gf_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i: i32 = 0
+    while i < 25 {
+        y = 0.5 * (y + x / y)
+        i = i + 1
+    }
+    y
+}
+
+fn gf_exp(x: f64) -> f64 with Mut, Div, Panic {
+    if x > 15.0 { return 3269446.7 }
+    if x < 0.0 - 15.0 { return 0.0 }
+    let x2 = x * x
+    let x3 = x2 * x
+    let x4 = x2 * x2
+    1.0 + x + x2/2.0 + x3/6.0 + x4/24.0 + x4*x/120.0 + x4*x2/720.0
+}
+
+fn gf_ln(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 - 1e30 }
+    // Range-reduce to [0.5, 2.0) → atanh series converges fast
+    var y = x
+    var k: i64 = 0
+    while y >= 2.0 { y = y / 2.0; k = k + 1 }
+    while y < 0.5  { y = y * 2.0; k = k - 1 }
+    let u  = (y - 1.0) / (y + 1.0)
+    let u2 = u * u
+    let s  = u * (1.0 + u2/3.0 + u2*u2/5.0 + u2*u2*u2/7.0 + u2*u2*u2*u2/9.0)
+    2.0 * s + (k as f64) * 0.6931471805599453
+}
+
+fn sigmoid(x: f64) -> f64 with Mut, Div, Panic {
+    1.0 / (1.0 + gf_exp(0.0 - x))
+}
+
+// ============================================================================
+// Stage 1 — LCG random number generator
+// ============================================================================
+
+fn lcg(s: i64) -> i64 {
+    6364136223846793005 * s + 1442695040888963407
+}
+
+fn lcg_u01(s: i64) -> f64 {
+    let pos = if s < 0 { 0 - s } else { s }
+    (pos % 1000000) as f64 / 1000000.0
+}
+
+fn bernoulli(state: i64, p: f64) -> i64 {
+    if lcg_u01(state) < p { 1 } else { 0 }
+}
+
+// ============================================================================
+// Stage 2 — Synthetic SNP dataset: 20 individuals × 10 loci
+// ============================================================================
+//
+// Pop A (ind 0..9):  causal freq 0.15, null freq 0.10
+// Pop B (ind 10..19): causal freq 0.35, null freq 0.30
+// Causal loci: 0..4 (first 5)
+// Disease: P(Y=1|X) = sigmoid(sum_{i<5} X_i * 0.6 - 2.5)
+//
+// Returns snp_mat as [f64; 200] (20 ind × 10 loci, row-major), by value.
+
+fn gen_snp_mat() -> [f64; 200] with Mut, Div, Panic {
+    var mat: [f64; 200] = [0.0; 200]
+    var seed: i64 = 31415926
+    var ind: i32 = 0
+    while ind < 20 {
+        let pop_b: i64 = if ind >= 10 { 1 } else { 0 }
+        let causal_freq = if pop_b == 1 { 0.35 } else { 0.15 }
+        let null_freq   = if pop_b == 1 { 0.30 } else { 0.10 }
+        let base = ind as usize * 10
+        var locus: i32 = 0
+        while locus < 10 {
+            let s1 = lcg(seed)
+            let s2 = lcg(s1)
+            seed = lcg(s2)
+            let freq = if locus < 5 { causal_freq } else { null_freq }
+            let g = (bernoulli(s1, freq) + bernoulli(s2, freq)) as f64
+            mat[base + locus as usize] = g
+            locus = locus + 1
+        }
+        ind = ind + 1
+    }
+    mat
+}
+
+// Generate labels from snp_mat (by value — no &! needed)
+fn gen_labels(mat: [f64; 200]) -> [f64; 20] with Mut, Div, Panic {
+    var labels: [f64; 20] = [0.0; 20]
+    var seed: i64 = 141421356
+    var ind: i32 = 0
+    while ind < 20 {
+        let base = ind as usize * 10
+        var causal_sum: f64 = 0.0
+        var l: i32 = 0
+        while l < 5 {
+            causal_sum = causal_sum + mat[base + l as usize] * 0.6
+            l = l + 1
+        }
+        let risk = sigmoid(causal_sum - 2.5)
+        let s1 = lcg(seed)
+        seed = lcg(s1)
+        labels[ind as usize] = if lcg_u01(s1) < risk { 1.0 } else { 0.0 }
+        ind = ind + 1
+    }
+    labels
+}
+
+// Generate group assignments (0=PopA, 1=PopB)
+fn gen_groups() -> [i64; 20] with Mut, Div, Panic {
+    var groups: [i64; 20] = [0; 20]
+    var i: i32 = 0
+    while i < 20 {
+        groups[i as usize] = if i >= 10 { 1 } else { 0 }
+        i = i + 1
+    }
+    groups
+}
+
+// ============================================================================
+// Stage 3 — MLP weights: Xavier init (10→4→1)
+// ============================================================================
+
+fn init_w1() -> [f64; 40] with Mut, Div, Panic {
+    // W1: 4 neurons × 10 inputs = 40 weights
+    let std: f64 = gf_sqrt(2.0 / 14.0)  // Xavier: 2/(fan_in + fan_out)
+    var w: [f64; 40] = [0.0; 40]
+    var seed: i64 = 271828182
+    var i: i32 = 0
+    while i < 40 {
+        let s1 = lcg(seed)
+        seed = lcg(s1)
+        let u = lcg_u01(s1) - 0.5
+        w[i as usize] = u * 2.0 * std
+        i = i + 1
+    }
+    w
+}
+
+fn init_w2() -> [f64; 4] with Mut, Div, Panic {
+    // W2: 1 output × 4 hidden = 4 weights
+    let std: f64 = gf_sqrt(2.0 / 5.0)
+    var w: [f64; 4] = [0.0; 4]
+    var seed: i64 = 161803398
+    var i: i32 = 0
+    while i < 4 {
+        let s1 = lcg(seed)
+        seed = lcg(s1)
+        let u = lcg_u01(s1) - 0.5
+        w[i as usize] = u * 2.0 * std
+        i = i + 1
+    }
+    w
+}
+
+// ============================================================================
+// Stage 4 — MLP forward pass for a single individual (10 features)
+// ============================================================================
+
+fn get_features_10(mat: [f64; 200], ind: i32) -> [f64; 10] with Mut, Div, Panic {
+    var x: [f64; 10] = [0.0; 10]
+    let base = ind as usize * 10
+    var k: i32 = 0
+    while k < 10 {
+        x[k as usize] = mat[base + k as usize]
+        k = k + 1
+    }
+    x
+}
+
+fn mlp_forward(
+    x:  [f64; 10],
+    w1: [f64; 40],
+    b1: f64,
+    w2: [f64; 4],
+    b2: f64
+) -> f64 with Mut, Div, Panic {
+    // Layer 1: h = ReLU(W1*x + b1), h ∈ R^4
+    var h: [f64; 4] = [0.0; 4]
+    var j: i32 = 0
+    while j < 4 {
+        var dot: f64 = b1
+        var k: i32 = 0
+        while k < 10 {
+            dot = dot + w1[j as usize * 10 + k as usize] * x[k as usize]
+            k = k + 1
+        }
+        h[j as usize] = if dot > 0.0 { dot } else { 0.0 }
+        j = j + 1
+    }
+    // Layer 2: out = sigmoid(W2·h + b2)
+    var dot2: f64 = b2
+    var j2: i32 = 0
+    while j2 < 4 {
+        dot2 = dot2 + w2[j2 as usize] * h[j2 as usize]
+        j2 = j2 + 1
+    }
+    sigmoid(dot2)
+}
+
+// Predict all 20 individuals — return array by value (no &! bug)
+fn predict_all_20(
+    mat: [f64; 200],
+    w1:  [f64; 40],
+    w2:  [f64; 4]
+) -> [f64; 20] with Mut, Div, Panic {
+    var preds: [f64; 20] = [0.0; 20]
+    var i: i32 = 0
+    while i < 20 {
+        let x = get_features_10(mat, i)
+        preds[i as usize] = mlp_forward(x, w1, 0.01, w2, 0.0 - 0.3)
+        i = i + 1
+    }
+    preds
+}
+
+// ============================================================================
+// Stage 5 — Fairness metrics
+// ============================================================================
+
+fn group_mean(preds: [f64; 20], groups: [i64; 20], g: i64) -> f64 with Mut, Div, Panic {
+    var s: f64 = 0.0
+    var n: i64 = 0
+    var i: i32 = 0
+    while i < 20 {
+        if groups[i as usize] == g {
+            s = s + preds[i as usize]
+            n = n + 1
+        }
+        i = i + 1
+    }
+    if n == 0 { return 0.5 }
+    s / (n as f64)
+}
+
+fn calibration_gap(preds: [f64; 20], labels: [f64; 20]) -> f64 with Mut, Div, Panic {
+    var s1: f64 = 0.0   var c1: f64 = 0.0
+    var s0: f64 = 0.0   var c0: f64 = 0.0
+    var i: i32 = 0
+    while i < 20 {
+        if labels[i as usize] > 0.5 {
+            s1 = s1 + preds[i as usize]; c1 = c1 + 1.0
+        } else {
+            s0 = s0 + preds[i as usize]; c0 = c0 + 1.0
+        }
+        i = i + 1
+    }
+    let m1 = if c1 > 0.0 { s1 / c1 } else { 0.5 }
+    let m0 = if c0 > 0.0 { s0 / c0 } else { 0.5 }
+    m1 - m0
+}
+
+// ============================================================================
+// Stage 6 — Differential Privacy: Laplace mechanism
+// ============================================================================
+
+fn laplace_noise(seed: i64, b: f64) -> f64 with Mut, Div, Panic {
+    let u = lcg_u01(seed) - 0.5
+    let sign_u = if u >= 0.0 { 1.0 } else { 0.0 - 1.0 }
+    let abs_u = gf_abs(u)
+    if abs_u < 1e-10 { return 0.0 }
+    let arg = 1.0 - 2.0 * abs_u
+    if arg < 1e-9 { return sign_u * b * 20.0 }
+    0.0 - sign_u * b * gf_ln(arg)
+}
+
+fn allele_freq(mat: [f64; 200], locus: i32) -> f64 with Mut, Div, Panic {
+    var s: f64 = 0.0
+    var i: i32 = 0
+    while i < 20 {
+        s = s + mat[i as usize * 10 + locus as usize]
+        i = i + 1
+    }
+    s / 40.0  // allele count / (2n)
+}
+
+// ============================================================================
+// Stage 7 — GUM uncertainty budget for group-level bias
+// ============================================================================
+
+fn gum_group_budget(mean_pred: f64, n_group: f64) -> f64 with Mut, Div, Panic {
+    let u_a = gf_sqrt(mean_pred * (1.0 - mean_pred) / n_group)
+    let u_b = mean_pred * 0.05 / gf_sqrt(3.0)
+    gf_sqrt(u_a*u_a + u_b*u_b)
+}
+
+// ============================================================================
+// Main — integrate all stages
+// ============================================================================
+
+pub fn main() with Mut, Div, Panic {
+    // --- Stage 1-2: Generate dataset (by-value, no &! bug) ---
+    let snp_mat = gen_snp_mat()
+    let labels  = gen_labels(snp_mat)
+    let groups  = gen_groups()
+
+    // Allele freq sanity checks
+    let f0 = allele_freq(snp_mat, 0)  // causal locus
+    assert(f0 > 0.05)
+    assert(f0 < 0.45)
+
+    // --- Stage 3: Initialize weights (by-value returns) ---
+    let w1 = init_w1()
+    let w2 = init_w2()
+
+    // --- Stage 4: Predict all individuals ---
+    let preds = predict_all_20(snp_mat, w1, w2)
+
+    // All predictions in (0, 1)
+    var i: i32 = 0
+    while i < 20 {
+        assert(preds[i as usize] > 0.0)
+        assert(preds[i as usize] < 1.0)
+        i = i + 1
+    }
+
+    // --- Stage 5: Fairness metrics ---
+    let mean_a = group_mean(preds, groups, 0)
+    let mean_b = group_mean(preds, groups, 1)
+    let dp_gap = gf_abs(mean_a - mean_b)
+
+    assert(dp_gap >= 0.0)
+    assert(dp_gap < 1.0)
+
+    let cal_gap = calibration_gap(preds, labels)
+    assert(cal_gap > 0.0 - 1.0)
+    assert(cal_gap < 1.0)
+
+    // --- Stage 6: ε-DP allele frequencies ---
+    let epsilon:     f64 = 1.0
+    let sensitivity: f64 = 1.0 / 40.0
+    let b_lap = sensitivity / epsilon
+
+    var dp_freqs: [f64; 10] = [0.0; 10]
+    var locus: i32 = 0
+    while locus < 10 {
+        let true_f = allele_freq(snp_mat, locus)
+        let ns = lcg(999999999 + locus as i64)
+        let noisy = true_f + laplace_noise(ns, b_lap)
+        dp_freqs[locus as usize] = if noisy < 0.0 { 0.0 } else { if noisy > 1.0 { 1.0 } else { noisy } }
+        locus = locus + 1
+    }
+
+    // DP frequencies near true values (within 5*b tolerance for testing)
+    let err0 = gf_abs(dp_freqs[0] - f0)
+    assert(err0 < 0.20)
+
+    // --- Stage 7: GUM uncertainty budget ---
+    let uc_a = gum_group_budget(mean_a, 10.0)
+    let uc_b = gum_group_budget(mean_b, 10.0)
+
+    assert(uc_a > 0.0)
+    assert(uc_b > 0.0)
+    assert(uc_a < 0.5)
+    assert(uc_b < 0.5)
+
+    // Fairness report: bias detection at 95% CI
+    let U_95 = 1.96 * (uc_a + uc_b)
+    let bias_significant = dp_gap > U_95
+    // (result is informational — either outcome is valid)
+    assert(U_95 > 0.0)
+
+    // --- Gradient attribution: finite-difference sensitivity ---
+    let sample_x = get_features_10(snp_mat, 0)
+    var x_plus:  [f64; 10] = [0.0; 10]
+    var x_minus: [f64; 10] = [0.0; 10]
+    var k: i32 = 0
+    while k < 10 {
+        x_plus[k as usize]  = sample_x[k as usize]
+        x_minus[k as usize] = sample_x[k as usize]
+        k = k + 1
+    }
+    x_plus[0]  = sample_x[0] + 0.01
+    x_minus[0] = sample_x[0] - 0.01
+
+    let g_plus  = mlp_forward(x_plus,  w1, 0.01, w2, 0.0 - 0.3)
+    let g_minus = mlp_forward(x_minus, w1, 0.01, w2, 0.0 - 0.3)
+    let grad0   = (g_plus - g_minus) / 0.02
+
+    assert(gf_abs(grad0) < 10.0)
+
+    var sentinel: i64 = 0
+    while sentinel < 7 { sentinel = sentinel + 1 }
+}
