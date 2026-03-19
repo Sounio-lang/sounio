@@ -28,6 +28,21 @@ This report demonstrates the Sounio epistemic computing pipeline, combining PubC
 | Estimated Plasma Concentration | 10 | ± 1.0198 | 10.20% | (prescribed_dose_mg)/(pk_vd_estimate) |
 
 
+## Pipeline Results
+
+| Parameter | Value | Uncertainty | Rel. Unc. | Provenance |
+|-----------|-------|-------------|-----------|------------|
+| lipinski_screen | 1 | ± 0.94 | 94.00% | lipinski_screen |
+| pk_half_life | 4.62 | ± 0.767 | 16.60% | pk_half_life |
+| pk_tmax | 1.98 | ± 0.446 | 22.53% | pk_tmax |
+| pk_cmax | 6.315 | ± 0.322 | 5.10% | pk_cmax |
+| pk_auc | 56.666 | ± 0.776 | 1.37% | pk_auc |
+| trial_efficacy | 0 | ± 0.95 | 0.00% | trial_efficacy |
+| trial_adverse | 0 | ± 0.95 | 0.00% | trial_adverse |
+| therapeutic_index | 4 | ± 0.9 | 22.50% | therapeutic_index |
+| pipeline_decision | 0.221 | ± 0.221 | 100.00% | pipeline_decision |
+
+
 ## Methodology
 
 All epistemic calculations use the Guide to the Expression of Uncertainty in Measurement (GUM) standard. Relative uncertainties are propagated through arithmetic operations using:  

@@ -1,0 +1,234 @@
+// Epistemic DDI (Drug-Drug Interaction) Simulator
+//
+// Demonstrates Sounio's unique value: epistemic uncertainty propagation
+// through pharmacokinetic simulation using GUM (Guide to Uncertainty in
+// Measurement) methodology.
+//
+// Scenario: Patient on warfarin-like Drug A (anticoagulant) co-administered
+// with Div, Mut, Panic, fluconazole-like Drug B (CYP inhibitor) that reduces Drug A clearance
+// by 50%. We propagate measurement uncertainty to detect toxic exposure risk.
+//
+// Model: One-compartment PK, C(t) = (dose/Vd) * exp(-ke * t)
+
+// --- Epistemic parameter: value + uncertainty ---
+
+struct EpiParam {
+    value: f64,
+    uncertainty: f64
+}
+
+// --- Inline math helpers (self-contained, no imports) ---
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 {
+        return 0.0 - x
+    }
+    return x
+}
+
+// Newton's method sqrt: 8 iterations for f64 precision
+fn sqrt_f64(x: f64) -> f64 with Div, Panic, Mut {
+    if x <= 0.0 { return 0.0 }
+    var guess = x
+    if x > 1.0 { guess = x / 2.0 }
+    else { guess = 1.0 }
+    var i: i64 = 0
+    while i < 12 {
+        guess = 0.5 * (guess + x / guess)
+        i = i + 1
+    }
+    return guess
+}
+
+// Taylor series exp(x) with Div, Mut, Panic, range reduction: exp(x) = exp(r) * 2^n
+// where r = x - n*ln2, |r| < 0.5*ln2
+fn exp_f64(x: f64) -> f64 with Div, Panic, Mut {
+    let ln2 = 0.693147180559945
+    // Range reduction: find integer n such that r = x - n*ln2 is small
+    var n_int: i64 = 0
+    var remainder = x
+    if x > 0.0 {
+        while remainder > 0.5 * ln2 {
+            remainder = remainder - ln2
+            n_int = n_int + 1
+        }
+    } else {
+        while remainder < 0.0 - 0.5 * ln2 {
+            remainder = remainder + ln2
+            n_int = n_int - 1
+        }
+    }
+    // Taylor series for exp(r) where |r| < 0.35
+    let r = remainder
+    let r2 = r * r
+    let r3 = r2 * r
+    let r4 = r3 * r
+    let r5 = r4 * r
+    let r6 = r5 * r
+    let r7 = r6 * r
+    let r8 = r7 * r
+    let r9 = r8 * r
+    let r10 = r9 * r
+    let exp_r = 1.0 + r + r2 / 2.0 + r3 / 6.0 + r4 / 24.0 + r5 / 120.0
+             + r6 / 720.0 + r7 / 5040.0 + r8 / 40320.0 + r9 / 362880.0
+             + r10 / 3628800.0
+    // Multiply by 2^n
+    var result = exp_r
+    var j: i64 = 0
+    if n_int > 0 {
+        while j < n_int {
+            result = result * 2.0
+            j = j + 1
+        }
+    } else {
+        let neg_n = 0 - n_int
+        while j < neg_n {
+            result = result / 2.0
+            j = j + 1
+        }
+    }
+    return result
+}
+
+// --- One-compartment PK model ---
+// C(t) = (dose / Vd) * exp(-ke * t)
+
+fn pk_concentration(dose: f64, vd: f64, ke: f64, t: f64) -> f64 with Div, Panic, Mut {
+    let c0 = dose / vd
+    let decay = exp_f64(0.0 - ke * t)
+    return c0 * decay
+}
+
+// --- GUM uncertainty propagation ---
+// For C = (dose/Vd) * exp(-ke * t):
+//   dC/d(dose) = (1/Vd) * exp(-ke*t)     = C / dose
+//   dC/d(ke)   = -(dose*t/Vd) * exp(-ke*t) = -C * t
+//
+// RSS: u(C) = sqrt( (dC/d_dose * u_dose)^2 + (dC/d_ke * u_ke)^2 )
+
+fn propagate_uncertainty(conc: f64, dose: f64, u_dose: f64,
+                         ke: f64, u_ke: f64, t: f64) -> f64 with Div, Panic, Mut {
+    let sens_dose = conc / dose
+    let sens_ke = conc * t
+    let term_dose = sens_dose * u_dose
+    let term_ke = sens_ke * u_ke
+    return sqrt_f64(term_dose * term_dose + term_ke * term_ke)
+}
+
+// --- Print a fixed-point f64 approximation via integer conversion ---
+// Prints value with Div, Mut, Panic, 2 decimal places
+
+fn print_f64_2dp(x: f64) with Div, Panic, IO, Mut {
+    let neg = x < 0.0
+    var val = x
+    if neg { val = 0.0 - x }
+    // Multiply by 100, round, then split
+    let scaled = val * 100.0 + 0.5
+    var int_part: i64 = 0
+    var rem = scaled
+    while rem >= 1.0 {
+        rem = rem - 1.0
+        int_part = int_part + 1
+    }
+    let whole = int_part / 100
+    let frac = int_part - whole * 100
+    if neg { println("-") }
+    println(whole)
+    println(".")
+    if frac < 10 { println("0") }
+    println(frac)
+}
+
+// --- Simulation entry ---
+
+fn run_simulation(dose_val: f64, dose_unc: f64,
+                  ke_val: f64, ke_unc: f64,
+                  vd: f64, t: f64, label: i64) -> EpiParam with Div, Panic, IO, Mut {
+    let conc = pk_concentration(dose_val, vd, ke_val, t)
+    let unc = propagate_uncertainty(conc, dose_val, dose_unc, ke_val, ke_unc, t)
+    let result = EpiParam { value: conc, uncertainty: unc }
+    return result
+}
+
+fn main() with Div, Panic, IO, Mut {
+    println("=== Epistemic DDI Simulator ===")
+    println("")
+
+    // PK parameters
+    let vd = 10.0
+    let t = 12.0
+
+    // Drug A alone: warfarin-like
+    let dose_a = 5.0
+    let u_dose_a = 0.25
+    let ke_alone = 0.1
+    let u_ke_alone = 0.01
+
+    // Drug A + Drug B (CYP inhibitor halves clearance)
+    let ke_ddi = 0.05
+    let u_ke_ddi = 0.005
+
+    // Toxic threshold
+    let toxic_threshold = 8.0
+
+    // --- Simulate Drug A alone ---
+    let alone = run_simulation(dose_a, u_dose_a, ke_alone, u_ke_alone, vd, t, 0)
+    let alone_upper_ci = alone.value + 2.0 * alone.uncertainty
+
+    println("Drug A alone:")
+    println("  C(12h) value (mg/L):")
+    println(alone.value)
+    println("  C(12h) uncertainty (mg/L):")
+    println(alone.uncertainty)
+    println("  Upper 95% CI (mg/L):")
+    println(alone_upper_ci)
+    if alone_upper_ci > toxic_threshold {
+        println("  Status: RISK - upper CI exceeds toxic threshold")
+    } else {
+        println("  Status: SAFE")
+    }
+
+    println("")
+
+    // --- Simulate Drug A + Drug B (DDI) ---
+    let ddi = run_simulation(dose_a, u_dose_a, ke_ddi, u_ke_ddi, vd, t, 1)
+    let ddi_upper_ci = ddi.value + 2.0 * ddi.uncertainty
+
+    println("Drug A + Drug B (DDI):")
+    println("  C(12h) value (mg/L):")
+    println(ddi.value)
+    println("  C(12h) uncertainty (mg/L):")
+    println(ddi.uncertainty)
+    println("  Upper 95% CI (mg/L):")
+    println(ddi_upper_ci)
+    if ddi_upper_ci > toxic_threshold {
+        println("  Status: RISK - DDI causes toxic exposure!")
+    } else {
+        println("  Status: SAFE")
+    }
+
+    println("")
+
+    // --- Summary ---
+    println("=== Summary ===")
+
+    // Clearance reduction: 50%
+    println("Clearance reduction: 50%")
+
+    // Concentration ratio
+    let ratio = ddi.value / alone.value
+    println("Concentration increase factor:")
+    println(ratio)
+
+    println("Toxic threshold (mg/L):")
+    println(toxic_threshold)
+
+    // Analytical check:
+    // Drug A alone: C = (5/10) * exp(-0.1*12) = 0.5 * exp(-1.2) = 0.5 * 0.3012 = 0.1506
+    // Drug A+B:     C = (5/10) * exp(-0.05*12) = 0.5 * exp(-0.6) = 0.5 * 0.5488 = 0.2744
+    println("")
+    println("Expected: Drug A alone ~0.15 mg/L (SAFE)")
+    println("Expected: Drug A+B    ~0.27 mg/L (depends on uncertainty)")
+    println("The DDI increases exposure but at these doses both remain below toxic threshold.")
+    println("Key insight: uncertainty propagation reveals the CONFIDENCE in safety margins.")
+}

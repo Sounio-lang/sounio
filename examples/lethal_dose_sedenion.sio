@@ -1,0 +1,647 @@
+// Epistemic Warfarin Dosing Decision
+//
+// A patient on warfarin with UNKNOWN CYP2C9 genotype.
+// Standard clinical decision: "INR is 3.5, in range, continue dose."
+// Epistemic decision: "P(lethal INR>5) > 1%, REDUCE DOSE."
+//
+// This program demonstrates why uncertainty-aware computing saves lives.
+//
+// References:
+//   - Gage et al. (2008) NEJM: CYP2C9 genotype-guided warfarin dosing
+//   - JCGM 100:2008 (GUM): Evaluation of measurement data
+//   - Holford (1986): Clinical PK of warfarin and its metabolites
+
+// ============================================================================
+// PART 1: MATH HELPERS (all self-contained, no imports)
+// ============================================================================
+
+fn ld_abs(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+fn ld_exp(x: f64) -> f64 {
+    // Taylor series for exp(x), 30 terms
+    // Argument reduction: exp(x) = exp(r) * 2^n where r = x - n*ln2
+    var arg = x
+    var scale = 1.0
+    // Clamp to prevent overflow
+    if arg > 500.0 { return 1.0e200 }
+    if arg < 0.0 - 500.0 { return 0.0 }
+    // Reduce range to [-1, 1] by repeated halving
+    var halvings = 0
+    while arg > 1.0 {
+        arg = arg * 0.5
+        halvings = halvings + 1
+    }
+    while arg < 0.0 - 1.0 {
+        arg = arg * 0.5
+        halvings = halvings + 1
+    }
+    // Taylor series on reduced argument
+    var sum = 1.0
+    var term = 1.0
+    var i = 1
+    while i <= 30 {
+        term = term * arg / (i as f64)
+        sum = sum + term
+        i = i + 1
+    }
+    // Undo halvings: exp(x) = exp(x/2^n)^(2^n)
+    i = 0
+    while i < halvings {
+        sum = sum * sum
+        i = i + 1
+    }
+    return sum
+}
+
+fn ld_sqrt(x: f64) -> f64 {
+    if x <= 0.0 { return 0.0 }
+    var guess = x * 0.5
+    if guess < 0.001 { guess = 0.001 }
+    var i = 0
+    while i < 20 {
+        guess = (guess + x / guess) * 0.5
+        i = i + 1
+    }
+    return guess
+}
+
+fn ld_log(x: f64) -> f64 {
+    // Natural logarithm via Newton's method: find y such that exp(y) = x
+    // Initial guess: scale to [1,e] range
+    if x <= 0.0 { return 0.0 - 1.0e30 }
+    var y = 0.0
+    // Rough initial guess using repeated squaring
+    var tmp = x
+    while tmp > 2.718281828 {
+        y = y + 1.0
+        tmp = tmp / 2.718281828
+    }
+    while tmp < 1.0 {
+        y = y - 1.0
+        tmp = tmp * 2.718281828
+    }
+    // Halley's method iterations
+    var i = 0
+    while i < 20 {
+        let ey = ld_exp(y)
+        if ey < 1.0e-300 { return y }
+        let correction = 2.0 * (x - ey) / (x + ey)
+        y = y + correction
+        i = i + 1
+    }
+    return y
+}
+
+fn ld_pi() -> f64 {
+    return 3.14159265358979323846
+}
+
+fn normal_pdf(x: f64, mu: f64, sigma: f64) -> f64 {
+    // (1/(sigma*sqrt(2*pi))) * exp(-0.5*((x-mu)/sigma)^2)
+    let z = (x - mu) / sigma
+    let coeff = 1.0 / (sigma * ld_sqrt(2.0 * ld_pi()))
+    return coeff * ld_exp(0.0 - 0.5 * z * z)
+}
+
+// ============================================================================
+// PART 2: SEDENION TYPE (16 compartments = 16 organs)
+// ============================================================================
+// Sedenion: 16-dimensional hypercomplex number, here used as a 16-organ
+// PBPK state vector. Each component = drug concentration in one organ.
+//
+// e0=Plasma, e1=Heart, e2=Lung, e3=Kidney, e4=Liver, e5=Gut,
+// e6=Muscle, e7=Skin, e8=Fat, e9=Brain, e10=Bone, e11=Spleen,
+// e12=Pancreas, e13=Thyroid, e14=Adrenal, e15=Gonads
+
+struct Sed16 {
+    e0: f64, e1: f64, e2: f64, e3: f64,
+    e4: f64, e5: f64, e6: f64, e7: f64,
+    e8: f64, e9: f64, e10: f64, e11: f64,
+    e12: f64, e13: f64, e14: f64, e15: f64
+}
+
+fn sed_zero() -> Sed16 {
+    Sed16 {
+        e0: 0.0, e1: 0.0, e2: 0.0, e3: 0.0,
+        e4: 0.0, e5: 0.0, e6: 0.0, e7: 0.0,
+        e8: 0.0, e9: 0.0, e10: 0.0, e11: 0.0,
+        e12: 0.0, e13: 0.0, e14: 0.0, e15: 0.0
+    }
+}
+
+fn sed_add(a: Sed16, b: Sed16) -> Sed16 {
+    Sed16 {
+        e0: a.e0 + b.e0, e1: a.e1 + b.e1,
+        e2: a.e2 + b.e2, e3: a.e3 + b.e3,
+        e4: a.e4 + b.e4, e5: a.e5 + b.e5,
+        e6: a.e6 + b.e6, e7: a.e7 + b.e7,
+        e8: a.e8 + b.e8, e9: a.e9 + b.e9,
+        e10: a.e10 + b.e10, e11: a.e11 + b.e11,
+        e12: a.e12 + b.e12, e13: a.e13 + b.e13,
+        e14: a.e14 + b.e14, e15: a.e15 + b.e15
+    }
+}
+
+fn sed_scale(a: Sed16, s: f64) -> Sed16 {
+    Sed16 {
+        e0: a.e0 * s, e1: a.e1 * s,
+        e2: a.e2 * s, e3: a.e3 * s,
+        e4: a.e4 * s, e5: a.e5 * s,
+        e6: a.e6 * s, e7: a.e7 * s,
+        e8: a.e8 * s, e9: a.e9 * s,
+        e10: a.e10 * s, e11: a.e11 * s,
+        e12: a.e12 * s, e13: a.e13 * s,
+        e14: a.e14 * s, e15: a.e15 * s
+    }
+}
+
+// ============================================================================
+// PART 3: EPISTEMIC PK PARAMETERS
+// ============================================================================
+
+struct EpiPK {
+    ke: f64,
+    ke_unc: f64,
+    ke_dof: i32,
+    vd: f64,
+    vd_unc: f64,
+    dose: f64,
+    dose_unc: f64,
+    ka: f64,
+    f_bio: f64,
+    inr_per_conc: f64
+}
+
+// ============================================================================
+// PART 4: GENOTYPE-SPECIFIC PK
+// ============================================================================
+// Warfarin PK from Gage et al. 2008, Holford 1986
+// Vd ~ 10 L (highly protein-bound, low Vd)
+// inr_per_conc: INR response ~ 0.5 per mg/L at steady state
+
+fn params_normal() -> EpiPK {
+    // CYP2C9 *1/*1: normal metabolizer (79% of population)
+    // ke = 0.693 / t1/2 = 0.693 / 20h = 0.035/h
+    // inr_per_conc calibrated: Css~0.56 mg/L, want INR~2.5 => (2.5-1)/0.56 = 2.7
+    EpiPK {
+        ke: 0.035, ke_unc: 0.005, ke_dof: 10,
+        vd: 10.0, vd_unc: 1.5,
+        dose: 5.0, dose_unc: 0.1,
+        ka: 1.5, f_bio: 0.95,
+        inr_per_conc: 2.7
+    }
+}
+
+fn params_intermediate() -> EpiPK {
+    // CYP2C9 *1/*3: intermediate metabolizer (18% of population)
+    // ke = 0.693 / 35h = 0.020/h
+    // Css~0.99 mg/L => INR~1+2.7*0.99 = 3.67
+    EpiPK {
+        ke: 0.020, ke_unc: 0.004, ke_dof: 8,
+        vd: 10.0, vd_unc: 1.5,
+        dose: 5.0, dose_unc: 0.1,
+        ka: 1.5, f_bio: 0.95,
+        inr_per_conc: 2.7
+    }
+}
+
+fn params_poor() -> EpiPK {
+    // CYP2C9 *3/*3: poor metabolizer (3% of population)
+    // ke = 0.693 / 69h = 0.010/h
+    // Css~1.98 mg/L => INR~1+2.7*1.98 = 6.35 (LETHAL RANGE)
+    EpiPK {
+        ke: 0.010, ke_unc: 0.003, ke_dof: 5,
+        vd: 10.0, vd_unc: 1.5,
+        dose: 5.0, dose_unc: 0.1,
+        ka: 1.5, f_bio: 0.95,
+        inr_per_conc: 2.7
+    }
+}
+
+// Steady-state concentration for oral dosing at interval tau=24h:
+// Css_avg = (F * dose) / (Vd * ke * tau)
+// But for accumulation ratio: Css = (F * dose / Vd) * (1 / (1 - exp(-ke*tau))) / tau * (1/ke)
+// Simplification for daily dosing: Css_avg = F * dose / (Vd * ke * 24)
+// This gives mg/L average concentration over dosing interval
+fn steady_state_conc(p: EpiPK) -> f64 {
+    // Accumulation factor: R = 1/(1 - exp(-ke*tau))
+    let tau = 24.0
+    let r_acc = 1.0 / (1.0 - ld_exp(0.0 - p.ke * tau))
+    // Css_avg = F * dose * r_acc / (Vd * ke * tau)
+    // But simpler: Css_avg = F * dose / (Vd * ke * tau) * ...
+    // For narrow TI drugs, use: Css_avg = (F * dose) / (CL * tau) where CL = Vd * ke
+    let cl = p.vd * p.ke
+    return p.f_bio * p.dose / (cl * tau)
+}
+
+// Predicted INR from concentration via linear PD model:
+// INR = 1.0 + inr_per_conc * Css
+// (baseline INR = 1.0 without warfarin)
+fn predicted_inr(p: EpiPK) -> f64 {
+    let css = steady_state_conc(p)
+    return 1.0 + p.inr_per_conc * css
+}
+
+// ============================================================================
+// PART 5: GUM UNCERTAINTY PROPAGATION
+// ============================================================================
+
+// Uncertainty in Css via first-order Taylor (GUM):
+// u(Css) = Css * sqrt( (u_dose/dose)^2 + (u_ke/ke)^2 + (u_vd/vd)^2 )
+fn gum_css_uncertainty(p: EpiPK) -> f64 {
+    let css = steady_state_conc(p)
+    let rd = p.dose_unc / p.dose
+    let rk = p.ke_unc / p.ke
+    let rv = p.vd_unc / p.vd
+    return css * ld_sqrt(rd * rd + rk * rk + rv * rv)
+}
+
+// Uncertainty in INR: u(INR) = inr_per_conc * u(Css)
+fn gum_inr_uncertainty(p: EpiPK) -> f64 {
+    return p.inr_per_conc * gum_css_uncertainty(p)
+}
+
+// Welch-Satterthwaite effective degrees of freedom
+// For combined uncertainty from multiple sources
+fn welch_satterthwaite_dof(p: EpiPK) -> f64 {
+    let css = steady_state_conc(p)
+    let u_css = gum_css_uncertainty(p)
+    if u_css < 1.0e-15 { return 100.0 }
+    // Variance contributions
+    let rd = p.dose_unc / p.dose
+    let rk = p.ke_unc / p.ke
+    let rv = p.vd_unc / p.vd
+    let u4 = u_css * u_css * u_css * u_css
+    // Each component's contribution to effective dof
+    let c_dose = css * rd
+    let c_ke = css * rk
+    let c_vd = css * rv
+    // Assume dose has 100 dof (well-calibrated), vd has 15 dof
+    let dof_dose = 100.0
+    let dof_ke = p.ke_dof as f64
+    let dof_vd = 15.0
+    let sum_terms = (c_dose * c_dose * c_dose * c_dose) / dof_dose
+                  + (c_ke * c_ke * c_ke * c_ke) / dof_ke
+                  + (c_vd * c_vd * c_vd * c_vd) / dof_vd
+    if sum_terms < 1.0e-30 { return 100.0 }
+    return u4 / sum_terms
+}
+
+// Coverage factor k for 95% confidence
+// Approximation from Student's t-distribution
+fn coverage_factor_95(dof: f64) -> f64 {
+    if dof < 1.0 { return 12.71 }
+    if dof < 2.0 { return 4.30 }
+    if dof < 3.0 { return 3.18 }
+    if dof < 4.0 { return 2.78 }
+    if dof < 5.0 { return 2.57 }
+    if dof < 7.0 { return 2.45 }
+    if dof < 10.0 { return 2.26 }
+    if dof < 15.0 { return 2.13 }
+    if dof < 30.0 { return 2.04 }
+    return 1.96
+}
+
+// ============================================================================
+// PART 6: BAYESIAN GENOTYPE UPDATE
+// ============================================================================
+
+fn genotype_likelihood(obs_inr: f64, obs_unc: f64, predicted: f64, pred_unc: f64) -> f64 {
+    // Combined uncertainty: sqrt(observation^2 + prediction^2)
+    let combined_sigma = ld_sqrt(obs_unc * obs_unc + pred_unc * pred_unc)
+    return normal_pdf(obs_inr, predicted, combined_sigma)
+}
+
+struct Posterior3 {
+    p_normal: f64,
+    p_intermediate: f64,
+    p_poor: f64
+}
+
+fn bayes_posterior(obs_inr: f64, obs_unc: f64, p_norm: EpiPK, p_inter: EpiPK, p_poor: EpiPK) -> Posterior3 {
+    // Priors (population frequency)
+    let prior_n = 0.79
+    let prior_i = 0.18
+    let prior_p = 0.03
+
+    // Predicted INR and uncertainty for each genotype
+    let pred_n = predicted_inr(p_norm)
+    let pred_i = predicted_inr(p_inter)
+    let pred_p = predicted_inr(p_poor)
+    let unc_n = gum_inr_uncertainty(p_norm)
+    let unc_i = gum_inr_uncertainty(p_inter)
+    let unc_p = gum_inr_uncertainty(p_poor)
+
+    // Likelihoods
+    let l_n = genotype_likelihood(obs_inr, obs_unc, pred_n, unc_n)
+    let l_i = genotype_likelihood(obs_inr, obs_unc, pred_i, unc_i)
+    let l_p = genotype_likelihood(obs_inr, obs_unc, pred_p, unc_p)
+
+    // Evidence (normalizer)
+    let evidence = l_n * prior_n + l_i * prior_i + l_p * prior_p
+
+    if evidence < 1.0e-30 {
+        return Posterior3 { p_normal: prior_n, p_intermediate: prior_i, p_poor: prior_p }
+    }
+
+    return Posterior3 {
+        p_normal: l_n * prior_n / evidence,
+        p_intermediate: l_i * prior_i / evidence,
+        p_poor: l_p * prior_p / evidence
+    }
+}
+
+// ============================================================================
+// PART 7: RISK ASSESSMENT
+// ============================================================================
+
+// Normal CDF approximation via logistic function
+// Phi(x) ~ 1/(1 + exp(-1.7*x - 0.73*x^3))
+fn normal_cdf_approx(x: f64) -> f64 {
+    let arg = 0.0 - 1.7 * x - 0.73 * x * x * x
+    return 1.0 / (1.0 + ld_exp(arg))
+}
+
+// P(INR > threshold | genotype) = 1 - Phi((threshold - predicted) / u_INR)
+fn p_lethal_given_genotype(p: EpiPK, threshold: f64) -> f64 {
+    let pred = predicted_inr(p)
+    let u_inr = gum_inr_uncertainty(p)
+    if u_inr < 1.0e-15 {
+        if pred > threshold { return 1.0 }
+        return 0.0
+    }
+    let z = (threshold - pred) / u_inr
+    return 1.0 - normal_cdf_approx(z)
+}
+
+// Total P(lethal) = Sum P(lethal|g) * P(g|obs)
+fn total_p_lethal(post: Posterior3, p_norm: EpiPK, p_inter: EpiPK, p_poor: EpiPK, threshold: f64) -> f64 {
+    let r_n = p_lethal_given_genotype(p_norm, threshold)
+    let r_i = p_lethal_given_genotype(p_inter, threshold)
+    let r_p = p_lethal_given_genotype(p_poor, threshold)
+    return r_n * post.p_normal + r_i * post.p_intermediate + r_p * post.p_poor
+}
+
+// ============================================================================
+// PART 8: SEDENION PBPK SIMULATION (16-organ model)
+// ============================================================================
+// Simplified flow-based PBPK: each organ exchanges with plasma (e0)
+// via blood flow fraction (Qi/Qtotal) and partition coefficient (Kp).
+//
+// dC_organ/dt = (Qi/V_organ) * (C_plasma - C_organ/Kp_organ)
+// dC_plasma/dt = -sum_organs[(Qi/V_plasma) * (C_plasma - C_organ/Kp)] - ke*C_plasma
+//              + ka * C_gut  (absorption from gut)
+
+fn sed_pbpk_rates(state: Sed16, ke: f64, ka: f64) -> Sed16 {
+    // Blood flow fractions (fraction of cardiac output ~5 L/min = 300 L/h)
+    // Simplified: use fractional flows * total flow
+    let qt = 300.0  // L/h cardiac output
+    // Organ volumes (L) and blood flows (L/h) and Kp values
+    // Heart(e1): V=0.3, Q=12, Kp=0.8
+    // Lung(e2): V=1.0, Q=300(total), Kp=0.7
+    // Kidney(e3): V=0.3, Q=72, Kp=1.0
+    // Liver(e4): V=1.5, Q=90, Kp=1.2 (metabolizing organ)
+    // Gut(e5): V=1.0, Q=60, Kp=0.8 (absorption site)
+    // Muscle(e6): V=28.0, Q=30, Kp=0.15
+    // Skin(e7): V=3.0, Q=18, Kp=0.3
+    // Fat(e8): V=15.0, Q=15, Kp=0.1
+    // Brain(e9): V=1.4, Q=42, Kp=0.05
+
+    let c_p = state.e0  // plasma concentration
+
+    // Rates for each organ: dC/dt = (Q/V) * (Cp - C/Kp)
+    let r1 = (12.0 / 0.3) * (c_p - state.e1 / 0.8)
+    let r2 = (300.0 / 1.0) * (c_p - state.e2 / 0.7)
+    let r3 = (72.0 / 0.3) * (c_p - state.e3 / 1.0)
+    let r4 = (90.0 / 1.5) * (c_p - state.e4 / 1.2)
+    let r5 = (60.0 / 1.0) * (c_p - state.e5 / 0.8) - ka * state.e5
+    let r6 = (30.0 / 28.0) * (c_p - state.e6 / 0.15)
+    let r7 = (18.0 / 3.0) * (c_p - state.e7 / 0.3)
+    let r8 = (15.0 / 15.0) * (c_p - state.e8 / 0.1)
+    let r9 = (42.0 / 1.4) * (c_p - state.e9 / 0.05)
+
+    // Plasma rate: exchange with all organs + elimination + gut absorption
+    let v_plasma = 3.0  // L
+    let r0 = (0.0 - 12.0 / v_plasma * (c_p - state.e1 / 0.8))
+           + (0.0 - 72.0 / v_plasma * (c_p - state.e3 / 1.0))
+           + (0.0 - 90.0 / v_plasma * (c_p - state.e4 / 1.2))
+           + (0.0 - 60.0 / v_plasma * (c_p - state.e5 / 0.8))
+           + (0.0 - 30.0 / v_plasma * (c_p - state.e6 / 0.15))
+           + (0.0 - 18.0 / v_plasma * (c_p - state.e7 / 0.3))
+           + (0.0 - 15.0 / v_plasma * (c_p - state.e8 / 0.1))
+           + (0.0 - 42.0 / v_plasma * (c_p - state.e9 / 0.05))
+           + (0.0 - ke * c_p)
+           + (ka * state.e5 / v_plasma)
+
+    return Sed16 {
+        e0: r0, e1: r1, e2: r2, e3: r3,
+        e4: r4, e5: r5, e6: r6, e7: r7,
+        e8: r8, e9: r9, e10: 0.0, e11: 0.0,
+        e12: 0.0, e13: 0.0, e14: 0.0, e15: 0.0
+    }
+}
+
+fn sed_euler_step(state: Sed16, ke: f64, ka: f64, dt: f64) -> Sed16 {
+    let rates = sed_pbpk_rates(state, ke, ka)
+    return sed_add(state, sed_scale(rates, dt))
+}
+
+fn simulate_pbpk(ke: f64, dose: f64) -> Sed16 {
+    // Initial state: all drug in gut (compartment e5), as mg/L in gut volume
+    var state = sed_zero()
+    state.e5 = dose / 1.0  // dose/V_gut = 5mg / 1L = 5 mg/L
+
+    let ka = 1.5  // absorption rate constant, /h
+    let dt = 0.001  // small step for stiff system
+    let n_steps = 24000  // 24h at dt=0.001
+
+    var step = 0
+    while step < n_steps {
+        state = sed_euler_step(state, ke, ka, dt)
+        // Clamp negatives to zero (numerical artifact)
+        if state.e0 < 0.0 { state.e0 = 0.0 }
+        if state.e1 < 0.0 { state.e1 = 0.0 }
+        if state.e2 < 0.0 { state.e2 = 0.0 }
+        if state.e3 < 0.0 { state.e3 = 0.0 }
+        if state.e4 < 0.0 { state.e4 = 0.0 }
+        if state.e5 < 0.0 { state.e5 = 0.0 }
+        if state.e6 < 0.0 { state.e6 = 0.0 }
+        if state.e7 < 0.0 { state.e7 = 0.0 }
+        if state.e8 < 0.0 { state.e8 = 0.0 }
+        if state.e9 < 0.0 { state.e9 = 0.0 }
+        step = step + 1
+    }
+    return state
+}
+
+// ============================================================================
+// PART 9: MAIN - THE DECISION
+// ============================================================================
+
+fn main() with IO, Mut, Div, Panic {
+    println("================================================================")
+    println("  EPISTEMIC WARFARIN DOSING DECISION")
+    println("  Sounio Language: Where uncertainty saves lives")
+    println("================================================================")
+    println("")
+
+    // --- Patient data ---
+    let obs_inr = 3.5
+    let obs_unc = 0.3
+    let obs_dof = 4
+
+    println("PATIENT DATA:")
+    println("  Warfarin 5mg PO daily")
+    println("  Observed INR:")
+    println(obs_inr)
+    println("  Measurement uncertainty (GUM Type A, n=5):")
+    println(obs_unc)
+    println("  CYP2C9 genotype: UNKNOWN")
+    println("")
+
+    // --- Genotype-specific parameters ---
+    let p_norm = params_normal()
+    let p_inter = params_intermediate()
+    let p_poor = params_poor()
+
+    // --- Predicted INR for each genotype ---
+    println("PREDICTED INR BY GENOTYPE:")
+    println("")
+    let inr_n = predicted_inr(p_norm)
+    let inr_i = predicted_inr(p_inter)
+    let inr_p = predicted_inr(p_poor)
+    let unc_n = gum_inr_uncertainty(p_norm)
+    let unc_i = gum_inr_uncertainty(p_inter)
+    let unc_p = gum_inr_uncertainty(p_poor)
+
+    println("  *1/*1 (normal, 79%):  INR =")
+    println(inr_n)
+    println("    uncertainty:")
+    println(unc_n)
+
+    println("  *1/*3 (intermediate, 18%):  INR =")
+    println(inr_i)
+    println("    uncertainty:")
+    println(unc_i)
+
+    println("  *3/*3 (poor, 3%):  INR =")
+    println(inr_p)
+    println("    uncertainty:")
+    println(unc_p)
+    println("")
+
+    // --- Bayesian genotype update ---
+    let post = bayes_posterior(obs_inr, obs_unc, p_norm, p_inter, p_poor)
+
+    println("BAYESIAN POSTERIOR (given observed INR = 3.5):")
+    println("  P(*1/*1 | INR=3.5):")
+    println(post.p_normal)
+    println("  P(*1/*3 | INR=3.5):")
+    println(post.p_intermediate)
+    println("  P(*3/*3 | INR=3.5):")
+    println(post.p_poor)
+    println("")
+
+    // --- GUM expanded uncertainty ---
+    let dof_n = welch_satterthwaite_dof(p_norm)
+    let dof_i = welch_satterthwaite_dof(p_inter)
+    let dof_p = welch_satterthwaite_dof(p_poor)
+    let k_n = coverage_factor_95(dof_n)
+    let k_i = coverage_factor_95(dof_i)
+    let k_p = coverage_factor_95(dof_p)
+
+    println("GUM EXPANDED UNCERTAINTY (95% coverage):")
+    println("  Normal:       U(INR) = k * u(INR)")
+    println("    dof_eff:")
+    println(dof_n)
+    println("    k95:")
+    println(k_n)
+    println("    U_INR:")
+    println(k_n * unc_n)
+
+    println("  Intermediate: U(INR)")
+    println("    dof_eff:")
+    println(dof_i)
+    println("    k95:")
+    println(k_i)
+    println("    U_INR:")
+    println(k_i * unc_i)
+
+    println("  Poor:         U(INR)")
+    println("    dof_eff:")
+    println(dof_p)
+    println("    k95:")
+    println(k_p)
+    println("    U_INR:")
+    println(k_p * unc_p)
+    println("")
+
+    // --- Risk assessment ---
+    let lethal_threshold = 5.0
+    let r_n = p_lethal_given_genotype(p_norm, lethal_threshold)
+    let r_i = p_lethal_given_genotype(p_inter, lethal_threshold)
+    let r_p = p_lethal_given_genotype(p_poor, lethal_threshold)
+    let p_lethal = total_p_lethal(post, p_norm, p_inter, p_poor, lethal_threshold)
+
+    println("RISK ASSESSMENT: P(INR > 5.0 = lethal hemorrhage)")
+    println("  P(lethal | *1/*1):")
+    println(r_n)
+    println("  P(lethal | *1/*3):")
+    println(r_i)
+    println("  P(lethal | *3/*3):")
+    println(r_p)
+    println("")
+    println("  TOTAL P(lethal) = Sum P(lethal|g) * P(g|INR=3.5):")
+    println(p_lethal)
+    println("")
+
+    // --- Sedenion PBPK for worst case ---
+    println("SEDENION 16-ORGAN PBPK (*3/*3 poor metabolizer, 24h):")
+    let pbpk = simulate_pbpk(0.010, 5.0)
+    println("  Plasma (e0) mg/L:")
+    println(pbpk.e0)
+    println("  Liver  (e4) mg/L:")
+    println(pbpk.e4)
+    println("  Brain  (e9) mg/L:")
+    println(pbpk.e9)
+    println("  Kidney (e3) mg/L:")
+    println(pbpk.e3)
+    println("  Muscle (e6) mg/L:")
+    println(pbpk.e6)
+    println("  Gut    (e5) mg/L:")
+    println(pbpk.e5)
+    println("")
+
+    // --- THE DECISION ---
+    println("================================================================")
+    println("  THE CLINICAL DECISION")
+    println("================================================================")
+    println("")
+    println("  POINT ESTIMATE (standard clinical practice):")
+    println("    INR = 3.5, target range 2.0-4.0")
+    println("    Decision: CONTINUE CURRENT DOSE")
+    println("")
+    println("  EPISTEMIC ANALYSIS (Sounio uncertainty-aware):")
+    println("    P(lethal hemorrhage INR>5.0):")
+    println(p_lethal)
+
+    if p_lethal > 0.01 {
+        println("    >>> P(lethal) > 1% <<<")
+        println("    Decision: REDUCE DOSE + ORDER CYP2C9 GENOTYPING")
+        println("")
+        println("  Without uncertainty analysis: patient stays on 5mg")
+        println("  With Sounio epistemic computing: risk detected, dose adjusted")
+    } else {
+        println("    P(lethal) < 1%")
+        println("    Decision: CONTINUE DOSE (risk acceptable)")
+    }
+
+    println("")
+    println("================================================================")
+    println("  This is why Sounio exists.")
+    println("  Point estimates kill. Uncertainty saves.")
+    println("================================================================")
+}

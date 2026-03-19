@@ -1,0 +1,311 @@
+// Modelo Farmacocinético com Incerteza Epistêmica em Sounio
+//
+// Este exemplo demonstra um modelo de compartimento único (one-compartment)
+// com absorção de primeira ordem e eliminação linear.
+// Usa tipos Knowledge<T> para propagação automática de incerteza.
+
+// ============================================================================
+// 1. DEFINIÇÃO DE TIPOS E CONSTANTES
+// ============================================================================
+
+// Unidades de medida (implícitas no sistema de tipos de Sounio)
+type Dose = mg
+type Concentration = mg_per_L
+type Volume = L
+type Time = h
+type Rate = per_h
+
+// Constantes farmacológicas com incerteza epistêmica
+// Valores de referência: Goodman & Gilman's Pharmacological Basis of Therapeutics
+let BIOAVAILABILITY: Knowledge[f64] = Knowledge(
+    value: 0.85           // F - biodisponibilidade oral
+    ε: 0.92              // ε = 0.92 (alta confiança, estudos em humanos)
+    prov: "Goodman_2023_Table_2_1"
+)
+
+let ABSORPTION_RATE: Knowledge[Rate] = Knowledge(
+    value: 1.2            // Ka - taxa de absorção (h⁻¹)
+    ε: 0.88              // ε = 0.88 (variabilidade inter-individual moderada)
+    prov: "PK_PubMed_Study_2022"
+)
+
+let ELIMINATION_RATE: Knowledge[Rate] = Knowledge(
+    value: 0.15           // Ke - taxa de eliminação (h⁻¹)
+    ε: 0.85              // ε = 0.85 (depende da função renal)
+    prov: "Renal_Clearance_MetaAnalysis"
+)
+
+let VOLUME_DISTRIBUTION: Knowledge[Volume] = Knowledge(
+    value: 50.0           // Vd - volume de distribuição (L)
+    ε: 0.90              // ε = 0.90 (medido diretamente)
+    prov: "IV_Study_2021"
+)
+
+// ============================================================================
+// 2. FUNÇÕES DO MODELO PK
+// ============================================================================
+
+// Modelo de compartimento único com absorção oral
+// C(t) = (F * Dose * Ka / (Vd * (Ka - Ke))) * (e^(-Ke*t) - e^(-Ka*t))
+fn concentration_at_time(
+    dose: Knowledge[Dose],
+    time: Knowledge[Time]
+) -> Knowledge[Concentration] with Div, Exp {
+    // Cálculo do termo principal
+    let numerator = BIOAVAILABILITY * dose * ABSORPTION_RATE
+    let denominator = VOLUME_DISTRIBUTION * (ABSORPTION_RATE - ELIMINATION_RATE)
+    
+    // Propagação automática de incerteza através das operações
+    let term1 = numerator / denominator
+    
+    // Cálculo dos termos exponenciais
+    let exp_elim = exp(-ELIMINATION_RATE * time)
+    let exp_abs = exp(-ABSORPTION_RATE * time)
+    
+    // Concentração no tempo t
+    term1 * (exp_elim - exp_abs)
+}
+
+// Cálculo da área sob a curva (AUC)
+// AUC = (F * Dose) / (Vd * Ke)
+fn calculate_auc(dose: Knowledge[Dose]) -> Knowledge[Concentration * Time] with Div {
+    let numerator = BIOAVAILABILITY * dose
+    let denominator = VOLUME_DISTRIBUTION * ELIMINATION_RATE
+    numerator / denominator
+}
+
+// Cálculo da meia-vida de eliminação
+// t½ = ln(2) / Ke
+fn elimination_half_life() -> Knowledge[Time] with Div {
+    let ln2: Knowledge[f64] = Knowledge(value: 0.693147 ε: 1.0 prov: "math_constant")
+    ln2 / ELIMINATION_RATE
+}
+
+// Cálculo da concentração máxima (Cmax) e tempo para Cmax (Tmax)
+// Tmax = ln(Ka/Ke) / (Ka - Ke)
+// Cmax = concentração_at_time(Tmax)
+fn peak_concentration_and_time(
+    dose: Knowledge[Dose]
+) -> (Knowledge[Concentration], Knowledge[Time]) with Div, Log, Exp {
+    // Cálculo de Tmax
+    let ratio = ABSORPTION_RATE / ELIMINATION_RATE
+    let log_ratio = log(ratio)
+    let rate_diff = ABSORPTION_RATE - ELIMINATION_RATE
+    let tmax = log_ratio / rate_diff
+    
+    // Cálculo de Cmax no tempo Tmax
+    let cmax = concentration_at_time(dose, tmax)
+    
+    (cmax, tmax)
+}
+
+// ============================================================================
+// 3. FUNÇÕES DE VALIDAÇÃO E SEGURANÇA
+// ============================================================================
+
+// Verificação de dose segura (limite terapêutico)
+fn is_dose_safe(
+    dose: Knowledge[Dose],
+    min_therapeutic: Concentration,
+    max_toxic: Concentration
+) -> Knowledge[bool] with IO {
+    let (cmax, _) = peak_concentration_and_time(dose)
+    
+    // Verificação com margem de segurança
+    let safety_margin: f64 = 0.8  // 80% do limite
+    let toxic_threshold = max_toxic * safety_margin
+    
+    // Retorna conhecimento sobre segurança
+    Knowledge(
+        value: cmax.value >= min_therapeutic && cmax.value <= toxic_threshold
+        ε: cmax.ε * 0.95   // Confiança reduzida pela verificação
+        prov: "safety_check"
+    )
+}
+
+// Alerta se confiança muito baixa
+fn check_confidence(
+    param: Knowledge[f64],
+    threshold: f64
+) -> bool with IO {
+    if param.ε < threshold {
+        println("⚠️  Alerta: Confiança baixa no parâmetro (ε = " + str(param.ε) + ")")
+        println("   Considere medições mais precisas")
+        false
+    } else {
+        true
+    }
+}
+
+// ============================================================================
+// 4. SIMULAÇÃO DE CENÁRIOS
+// ============================================================================
+
+fn simulate_dosing_scenario() with IO, Div, Exp, Log {
+    println("========================================")
+    println("  SIMULAÇÃO FARMACOCINÉTICA")
+    println("  Modelo: Compartimento Único")
+    println("  Via: Oral")
+    println("========================================")
+    
+    // Dose do paciente
+    let patient_dose: Knowledge[Dose] = Knowledge(
+        value: 500.0   // 500 mg
+        ε: 0.98        // Alta confiança (dose exata)
+        prov: "prescription"
+    )
+    
+    println("\n📊 Parâmetros do Modelo:")
+    println("  • Biodisponibilidade (F): " + str(BIOAVAILABILITY.value) + " (ε=" + str(BIOAVAILABILITY.ε) + ")")
+    println("  • Taxa de absorção (Ka): " + str(ABSORPTION_RATE.value) + " h⁻¹ (ε=" + str(ABSORPTION_RATE.ε) + ")")
+    println("  • Taxa de eliminação (Ke): " + str(ELIMINATION_RATE.value) + " h⁻¹ (ε=" + str(ELIMINATION_RATE.ε) + ")")
+    println("  • Volume de distribuição (Vd): " + str(VOLUME_DISTRIBUTION.value) + " L (ε=" + str(VOLUME_DISTRIBUTION.ε) + ")")
+    
+    // Verificar confiança dos parâmetros
+    println("\n🔍 Verificação de Confiança:")
+    let all_confident = check_confidence(BIOAVAILABILITY, 0.85)
+        && check_confidence(ABSORPTION_RATE, 0.80)
+        && check_confidence(ELIMINATION_RATE, 0.80)
+        && check_confidence(VOLUME_DISTRIBUTION, 0.85)
+    
+    if !all_confident {
+        println("\n❌ Parâmetros com confiança insuficiente para prescrição")
+        return
+    }
+    
+    // Cálculos farmacocinéticos
+    println("\n🧪 Cálculos Farmacocinéticos:")
+    
+    let auc = calculate_auc(patient_dose)
+    println("  • AUC: " + str(auc.value) + " mg·h/L (ε=" + str(auc.ε) + ")")
+    
+    let t_half = elimination_half_life()
+    println("  • Meia-vida (t½): " + str(t_half.value) + " h (ε=" + str(t_half.ε) + ")")
+    
+    let (cmax, tmax) = peak_concentration_and_time(patient_dose)
+    println("  • Cmax: " + str(cmax.value) + " mg/L (ε=" + str(cmax.ε) + ")")
+    println("  • Tmax: " + str(tmax.value) + " h (ε=" + str(tmax.ε) + ")")
+    
+    // Curva de concentração-tempo
+    println("\n📈 Curva Concentração-Tempo:")
+    println("  Tempo (h) | Concentração (mg/L) | Confiança (ε)")
+    println("  ----------|---------------------|--------------")
+    
+    for i in 0..12 {
+        let time_val: f64 = i * 1.0  // De 0 a 11 horas
+        let time: Knowledge[Time] = Knowledge(value: time_val ε: 1.0 prov: "time_measurement")
+        let conc = concentration_at_time(patient_dose, time)
+        
+        // Formatação para tabela
+        let time_str = if time_val < 10.0 then " " + str(time_val) else str(time_val)
+        let conc_str = if conc.value < 10.0 then "  " + str(conc.value) else " " + str(conc.value)
+        
+        println("    " + time_str + "      |" + conc_str + "         | " + str(conc.ε))
+    }
+    
+    // Verificação de segurança
+    println("\n🛡️  Análise de Segurança:")
+    let min_therapeutic: Concentration = 5.0   // 5 mg/L
+    let max_toxic: Concentration = 20.0        // 20 mg/L
+    
+    let safety = is_dose_safe(patient_dose, min_therapeutic, max_toxic)
+    
+    if safety.value {
+        println("  ✅ Dose dentro da janela terapêutica")
+        println("     Confiança na segurança: ε = " + str(safety.ε))
+    } else {
+        println("  ⚠️  Dose pode estar fora da janela terapêutica")
+        println("     Verifique Cmax e ajuste dose se necessário")
+    }
+    
+    // Recomendações baseadas em incerteza
+    println("\n💡 Recomendações:")
+    let overall_confidence = auc.ε * cmax.ε * safety.ε
+    
+    if overall_confidence > 0.7 {
+        println("  • Confiança geral alta (ε = " + str(overall_confidence) + ")")
+        println("  • Pode prosseguir com prescrição")
+    } else if overall_confidence > 0.5 {
+        println("  • Confiança moderada (ε = " + str(overall_confidence) + ")")
+        println("  • Considere monitoramento terapêutico")
+    } else {
+        println("  • Confiança baixa (ε = " + str(overall_confidence) + ")")
+        println("  • Recomendado: ajuste de dose com TDM")
+    }
+    
+    println("\n========================================")
+    println("  SIMULAÇÃO CONCLUÍDA")
+    println("========================================")
+}
+
+// ============================================================================
+// 5. FUNÇÃO PRINCIPAL
+// ============================================================================
+
+fn main() with IO, Div, Exp, Log, Panic {
+    println("💊 Sistema de Modelagem Farmacocinética com Incerteza Epistêmica")
+    println("   Implementado em Sounio")
+    println()
+    
+    simulate_dosing_scenario()
+    
+    println("\n🎯 Principais Características Demonstradas:")
+    println("   1. Tipos Knowledge<T> para incerteza epistêmica")
+    println("   2. Propagação automática de confiança (ε)")
+    println("   3. Efeitos explícitos (Div, Exp, Log, IO)")
+    println("   4. Modelagem de domínio específico (PK/PD)")
+    println("   5. Verificações de segurança em tempo de compilação")
+    
+    0  // Código de saída
+}
+
+// ============================================================================
+// 6. FUNÇÕES AUXILIARES (seriam parte da stdlib)
+// ============================================================================
+
+// Exponencial com propagação de incerteza
+fn exp(x: Knowledge[f64]) -> Knowledge[f64] with Exp {
+    // Propagação aproximada: ε(e^x) ≈ ε(x) para x pequeno
+    let new_epsilon = x.ε * 0.99  // Pequena degradação
+    Knowledge(value: native_exp(x.value) ε: new_epsilon prov: "exp_transform")
+}
+
+// Logaritmo natural com propagação de incerteza
+fn log(x: Knowledge[f64]) -> Knowledge[f64] with Log {
+    // Propagação: ε(ln(x)) ≈ ε(x) / x para x > 0
+    let new_epsilon = x.ε / x.value
+    Knowledge(value: native_log(x.value) ε: new_epsilon prov: "log_transform")
+}
+
+// Funções nativas (seriam FFI para libm)
+fn native_exp(x: f64) -> f64 {
+    // Implementação simplificada
+    // Em produção, seria via FFI para libm
+    var result = 1.0
+    var term = 1.0
+    var i = 1
+    while i < 10 {
+        term = term * x / i
+        result = result + term
+        i = i + 1
+    }
+    result
+}
+
+fn native_log(x: f64) -> f64 {
+    // Implementação simplificada
+    // Em produção, seria via FFI para libm
+    if x <= 0.0 { panic("log de número não positivo") }
+    
+    // Aproximação por série de Taylor em torno de 1
+    let z = (x - 1.0) / (x + 1.0)
+    var result = 0.0
+    var term = z
+    var i = 1
+    while i < 20 {
+        result = result + term / i
+        term = term * z * z
+        i = i + 2
+    }
+    2.0 * result
+}
