@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.tutorials.scientific-computing
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.tutorials.scientific-computing
+-->
+
 # Scientific Computing with Sounio: Numerical Methods Using First-Class Functions
 
 Sounio's first-class function references let you write generic numerical algorithms that work on *any* function -- differentiation, integration, root-finding, and optimization -- with compile-time effect tracking that prevents silent numerical bugs.

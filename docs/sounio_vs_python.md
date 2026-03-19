@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.sounio-vs-python
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.sounio-vs-python
+-->
+
 # Sounio vs Python: Side-by-Side Comparison
 
 A practical comparison showing how common programming tasks look in Python and Sounio. Each example highlights the key differences in syntax, type systems, and safety guarantees.

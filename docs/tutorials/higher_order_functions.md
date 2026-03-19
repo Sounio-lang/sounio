@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.tutorials.higher-order-functions
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.tutorials.higher-order-functions
+-->
+
 # Higher-Order Functions in Sounio Without Closures
 
 Sounio supports first-class function references: you can store named functions in variables, pass them as arguments, and return them from other functions. Closure *literals* (`|x| x + 1`) are currently blocked, but named function references cover the most important higher-order patterns: map, filter, fold, any, all, and sort-by-comparator.

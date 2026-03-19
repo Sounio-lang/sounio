@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.stdlib.linalg.blas-ffi
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A3
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.stdlib.linalg.blas-ffi
+-->
+
 # BLAS FFI Performance
 
 ## Overview
@@ -183,11 +192,11 @@ The small overhead comes from FFI call overhead and Sounio's runtime checks.
 
 | File | Description |
 |------|-------------|
-| [`blas_ffi.sio`](../../stdlib/linalg/blas_ffi.sio) | FFI bindings to BLAS/LAPACK |
-| [`blas_fallback.sio`](../../stdlib/linalg/blas_fallback.sio) | Pure-Sounio fallback implementations |
-| [`epistemic_matrix.sio`](../../stdlib/linalg/epistemic_matrix.sio) | EpistemicMatrix with BLAS dispatch |
-| [`blas_ffi_test.sio`](../../tests/stdlib/linalg/blas_ffi_test.sio) | Integration tests |
-| [`blas_benchmark.sio`](../../tests/stdlib/linalg/blas_benchmark.sio) | Performance benchmarks |
+| [`blas_ffi.sio`](../../../stdlib/linalg/blas_ffi.sio) | FFI bindings to BLAS/LAPACK |
+| [`blas_fallback.sio`](../../../stdlib/linalg/blas_fallback.sio) | Pure-Sounio fallback implementations |
+| [`epistemic_matrix.sio`](../../../stdlib/linalg/epistemic_matrix.sio) | EpistemicMatrix with BLAS dispatch |
+| [`blas_ffi_test.sio`](../../../tests/stdlib/linalg/blas_ffi_test.sio) | Integration tests |
+| [`blas_benchmark.sio`](../../../tests/stdlib/linalg/blas_benchmark.sio) | Performance benchmarks |
 
 ## License
 

@@ -6,10 +6,14 @@ cd "$ROOT_DIR"
 
 fail=0
 
+has_real_ripgrep() {
+  command -v rg >/dev/null 2>&1 && rg --version 2>/dev/null | grep -qi '^ripgrep '
+}
+
 matches_pattern() {
   local pattern="$1"
   local file="$2"
-  if command -v rg >/dev/null 2>&1; then
+  if has_real_ripgrep; then
     rg -n -- "$pattern" "$file" >/dev/null 2>&1
   else
     grep -n -E -- "$pattern" "$file" >/dev/null 2>&1
