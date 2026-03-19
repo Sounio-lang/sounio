@@ -2052,6 +2052,86 @@ fn hlir_kernels_to_epistemic_ptx(module: HlirModule) -> PtxBuf with Mut, Panic, 
     combined
 }
 
+// Map GpuOpcode enum value → SPIR-V opcode tag used by gpu_lower_to_spirv.
+// These constants match the GPU_OP_* values in spv_lower_single_op.
+// Using enum comparisons (not raw indices) to survive future GpuOpcode reordering.
+fn gpu_opcode_to_spirv_tag(op: GpuOpcode) -> i64 {
+    if op == GpuOpcode::GpuGetTid        { return 0  }
+    if op == GpuOpcode::GpuAdd           { return 3  }
+    if op == GpuOpcode::GpuSub           { return 4  }
+    if op == GpuOpcode::GpuMul           { return 5  }
+    if op == GpuOpcode::GpuDiv           { return 6  }
+    if op == GpuOpcode::GpuBarrierSync   { return 8  }
+    if op == GpuOpcode::GpuShflDown      { return 9  }
+    if op == GpuOpcode::GpuLoadGlobal    { return 13 }
+    if op == GpuOpcode::GpuStoreGlobal   { return 14 }
+    if op == GpuOpcode::GpuSetpLt        { return 21 }
+    if op == GpuOpcode::GpuSetpLe        { return 22 }
+    if op == GpuOpcode::GpuSetpEq        { return 23 }
+    if op == GpuOpcode::GpuSetpGe        { return 24 }
+    -1
+}
+
+// Map GpuType enum value → SPIR-V type tag used by gpu_lower_to_spirv.
+fn gpu_type_to_spirv_tag(ty: GpuType) -> i64 {
+    if ty == GpuType::GpuF32 { return 0 }
+    if ty == GpuType::GpuF64 { return 1 }
+    if ty == GpuType::GpuI32 { return 2 }
+    if ty == GpuType::GpuI64 { return 3 }
+    if ty == GpuType::GpuU32 { return 4 }
+    if ty == GpuType::GpuU64 { return 5 }
+    0
+}
+
+// Extract all kernel functions from an HlirModule and lower each to SPIR-V binary.
+// Returns a single SpvBuf containing all kernels concatenated.
+// Does NOT require GPU hardware — validates code generation only.
+fn hlir_kernels_to_spirv(module: HlirModule) -> SpvBuf with Mut, Panic, Div, Alloc {
+    var combined = spv_buf_new()
+    let kcount = hlir_extract_kernel_count(module)
+    if kcount == 0 {
+        return combined
+    }
+    var ki: i64 = 0
+    while ki < kcount {
+        let fidx = hlir_get_kernel_index(module, ki)
+        if fidx >= 0 {
+            let func = module.functions[fidx as usize]
+            let gpu_kernel = hlir_function_to_gpu_kernel(func)
+
+            // Flatten GpuKernelIr ops into the flat arrays expected by gpu_lower_to_spirv
+            var ops_opcodes: [i64; 256] = [0; 256]
+            var ops_dst:     [i64; 256] = [0; 256]
+            var ops_src_a:   [i64; 256] = [0; 256]
+            var ops_src_b:   [i64; 256] = [0; 256]
+            var ops_types:   [i64; 256] = [0; 256]
+            var op_count: i64 = 0
+            while op_count < gpu_kernel.op_count && op_count < 256 {
+                let op = gpu_kernel.ops[op_count as usize]
+                ops_opcodes[op_count as usize] = gpu_opcode_to_spirv_tag(op.opcode)
+                ops_dst[op_count as usize]     = op.dst_reg
+                ops_src_a[op_count as usize]   = op.lhs_reg
+                ops_src_b[op_count as usize]   = op.rhs_reg
+                ops_types[op_count as usize]   = gpu_type_to_spirv_tag(op.ty)
+                op_count = op_count + 1
+            }
+
+            let kname = name_to_string(gpu_kernel.kernel_name)
+            let spv = gpu_lower_to_spirv(kname, gpu_kernel.param_count,
+                          ops_opcodes, ops_dst, ops_src_a, ops_src_b, ops_types, op_count)
+
+            // Append this kernel's words to combined output
+            var wi: i64 = 0
+            while wi < spv.word_count {
+                combined = spv_push_word(combined, spv.words[wi as usize])
+                wi = wi + 1
+            }
+        }
+        ki = ki + 1
+    }
+    combined
+}
+
 // Extract all kernel functions and lower to Metal MSL.
 fn hlir_kernels_to_metal(module: HlirModule) -> MetalBuf with Mut, Panic, Div, Alloc {
     var combined = metal_buf_new()

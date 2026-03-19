@@ -117,7 +117,7 @@ echo "--- Section 2: GPU compile pipeline ---"
 #     of compiler/main.sio; validate via grep instead)
 {
     TOTAL=$((TOTAL + 1))
-    # Verify run_gpu_compile_pipeline is wired in compiler/main.sio
+    # Verify run_gpu_compile_pipeline is wired in compiler/main.sio with PTX+Metal+SPIR-V
     if grep -q "run_gpu_compile_pipeline" self-hosted/compiler/main.sio && \
        grep -q 'use hlir::lower:.*hlir_lower_module' self-hosted/compiler/main.sio && \
        grep -q 'use gpu::hlir_to_gpu:.*hlir_kernels_to_ptx' self-hosted/compiler/main.sio; then
@@ -126,6 +126,33 @@ echo "--- Section 2: GPU compile pipeline ---"
     else
         FAIL=$((FAIL + 1))
         echo "FAIL  T6_gpu_pipeline_wired: run_gpu_compile_pipeline or imports missing from compiler/main.sio"
+    fi
+}
+
+# T8: SPIR-V dispatch wired — structural check
+{
+    TOTAL=$((TOTAL + 1))
+    # Verify hlir_kernels_to_spirv is imported and dispatched in compiler/main.sio
+    if grep -q 'hlir_kernels_to_spirv' self-hosted/compiler/main.sio && \
+       grep -q 'use gpu::spirv:.*spv_to_bytes' self-hosted/compiler/main.sio && \
+       grep -q 'hlir_kernels_to_spirv' self-hosted/gpu/hlir_to_gpu.sio; then
+        PASS=$((PASS + 1))
+        echo "PASS  T8_spirv_dispatch_wired"
+    else
+        FAIL=$((FAIL + 1))
+        echo "FAIL  T8_spirv_dispatch_wired: hlir_kernels_to_spirv missing from main.sio or hlir_to_gpu.sio"
+    fi
+}
+
+# T9: --gpu-target all dispatch wired — structural check
+{
+    TOTAL=$((TOTAL + 1))
+    if grep -q 'str_eq(gpu_target, "all")' self-hosted/compiler/main.sio; then
+        PASS=$((PASS + 1))
+        echo "PASS  T9_gpu_target_all_wired"
+    else
+        FAIL=$((FAIL + 1))
+        echo "FAIL  T9_gpu_target_all_wired: --gpu-target all dispatch not found in main.sio"
     fi
 }
 

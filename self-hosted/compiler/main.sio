@@ -72,9 +72,10 @@ use compiler::ontology::mod::{ontology_resolve_curie, ontology_search_text, onto
 // GPU pipeline imports — HLIR lowering + multi-target codegen
 use hlir::ir::*
 use hlir::lower::{hlir_lower_module}
-use gpu::hlir_to_gpu::{hlir_extract_kernel_count, hlir_kernels_to_ptx, hlir_kernels_to_epistemic_ptx, hlir_kernels_to_tuned_ptx, hlir_kernels_to_fused_ptx, hlir_kernels_to_metal}
+use gpu::hlir_to_gpu::{hlir_extract_kernel_count, hlir_kernels_to_ptx, hlir_kernels_to_epistemic_ptx, hlir_kernels_to_tuned_ptx, hlir_kernels_to_fused_ptx, hlir_kernels_to_metal, hlir_kernels_to_spirv}
 use gpu::ptx::{PtxBuf, ptx_buf_print, ptx_to_string}
 use gpu::metal::{MetalBuf, metal_buf_print}
+use gpu::spirv::{SpvBuf, SpvBytes, spv_buf_new, spv_to_bytes, gpu_lower_to_spirv}
 
 // ============================================================================
 // STRING UTILITIES
@@ -24841,16 +24842,85 @@ fn run_gpu_compile_pipeline(
     print(" kernel(s) found\n")
 
     // Determine output format from target prefix
-    // "metal-*" → MSL; "spirv-*" / "vulkan-*" → SPIR-V (future); default → PTX
+    // "metal-*"          → MSL
+    // "spirv-*"/"vulkan-"→ SPIR-V binary
+    // "all"              → PTX + Metal + SPIR-V (three output files)
+    // default            → PTX
+
+    // --gpu-target all: emit all three backends
+    if str_eq(gpu_target, "all") {
+        // PTX
+        let ptx_all = hlir_kernels_to_ptx(hlir_module)
+        let ptx_path = if str_len(output_path) > 0 { output_path ++ ".ptx" } else { "out.ptx" }
+        let ptx_ok = io_write_bytes_to_file(ptx_path, ptx_all.data, ptx_all.len)
+        if ptx_ok { print("GPU: PTX written to ") } else { print("GPU: WARN PTX write failed: ") }
+        print(ptx_path)
+        print("\n")
+
+        // Metal MSL — print to stdout (no file write available for MetalBuf)
+        let metal_all = hlir_kernels_to_metal(hlir_module)
+        metal_buf_print(metal_all)
+
+        // SPIR-V binary
+        let spv_all = hlir_kernels_to_spirv(hlir_module)
+        let spv_bytes_all = spv_to_bytes(spv_all)
+        let spv_path = if str_len(output_path) > 0 { output_path ++ ".spv" } else { "out.spv" }
+        let spv_ok = io_write_bytes_to_file(spv_path, spv_bytes_all.data, spv_bytes_all.len)
+        if spv_ok { print("GPU: SPIR-V written to ") } else { print("GPU: WARN SPIR-V write failed: ") }
+        print(spv_path)
+        print("\n")
+
+        return 0
+    }
+
+    // Metal/MSL
     if str_len(gpu_target) >= 5 && str_char_at(gpu_target, 0) == str_char_at("metal", 0)
                                  && str_char_at(gpu_target, 1) == str_char_at("metal", 1)
                                  && str_char_at(gpu_target, 2) == str_char_at("metal", 2)
                                  && str_char_at(gpu_target, 3) == str_char_at("metal", 3)
                                  && str_char_at(gpu_target, 4) == str_char_at("metal", 4) {
-        // Metal/MSL output — print to stdout (file write path uses same PtxBuf pattern)
         let metal = hlir_kernels_to_metal(hlir_module)
         metal_buf_print(metal)
         print("GPU: Metal MSL emitted\n")
+        return 0
+    }
+
+    // SPIR-V / Vulkan
+    let is_spirv = str_len(gpu_target) >= 5
+                   && str_char_at(gpu_target, 0) == str_char_at("spirv", 0)
+                   && str_char_at(gpu_target, 1) == str_char_at("spirv", 1)
+                   && str_char_at(gpu_target, 2) == str_char_at("spirv", 2)
+                   && str_char_at(gpu_target, 3) == str_char_at("spirv", 3)
+                   && str_char_at(gpu_target, 4) == str_char_at("spirv", 4)
+    let is_vulkan = str_len(gpu_target) >= 6
+                    && str_char_at(gpu_target, 0) == str_char_at("vulkan", 0)
+                    && str_char_at(gpu_target, 1) == str_char_at("vulkan", 1)
+                    && str_char_at(gpu_target, 2) == str_char_at("vulkan", 2)
+                    && str_char_at(gpu_target, 3) == str_char_at("vulkan", 3)
+                    && str_char_at(gpu_target, 4) == str_char_at("vulkan", 4)
+                    && str_char_at(gpu_target, 5) == str_char_at("vulkan", 5)
+    if is_spirv || is_vulkan {
+        let spv = hlir_kernels_to_spirv(hlir_module)
+        let spv_bytes = spv_to_bytes(spv)
+        if str_len(output_path) > 0 {
+            let spv_write_ok = io_write_bytes_to_file(output_path, spv_bytes.data, spv_bytes.len)
+            if !spv_write_ok {
+                print("GPU: failed to write SPIR-V to ")
+                print(output_path)
+                print("\n")
+                return 1
+            }
+            print("GPU: SPIR-V written to ")
+            print(output_path)
+            print(" (")
+            print_int(spv_bytes.len)
+            print(" bytes)\n")
+        } else {
+            // Print word count to stdout (binary data not printable directly)
+            print("GPU: SPIR-V ")
+            print_int(spv.word_count)
+            print(" words emitted\n")
+        }
         return 0
     }
 
