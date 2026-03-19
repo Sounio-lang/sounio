@@ -235,6 +235,27 @@ echo "--- Section 2: GPU compile pipeline ---"
     fi
 }
 
+# T15: CUDA Tile IR backend — structural + self-test
+{
+    TOTAL=$((TOTAL + 1))
+    if [ -f self-hosted/gpu/cuda_tile.sio ] && \
+       grep -q 'gpu_lower_to_cuda_tile' self-hosted/gpu/cuda_tile.sio && \
+       grep -q 'gpu_lower_to_cuda_tile' self-hosted/compiler/main.sio && \
+       grep -q 'hlir_kernels_to_cuda_tile' self-hosted/gpu/hlir_to_gpu.sio; then
+        RESULT=$($SOUC run self-hosted/gpu/cuda_tile.sio 2>&1 | tail -1)
+        if echo "$RESULT" | grep -q "ALL 10 PASS"; then
+            PASS=$((PASS + 1))
+            echo "PASS  T15_cuda_tile_ir (10/10 self-tests)"
+        else
+            FAIL=$((FAIL + 1))
+            echo "FAIL  T15_cuda_tile_ir: self-tests did not all pass: $RESULT"
+        fi
+    else
+        FAIL=$((FAIL + 1))
+        echo "FAIL  T15_cuda_tile_ir: cuda_tile.sio or pipeline wiring missing"
+    fi
+}
+
 # ── Section 3: souc check — optional files ────────────────────────────────────
 
 echo ""

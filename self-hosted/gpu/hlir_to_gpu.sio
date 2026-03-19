@@ -2199,6 +2199,55 @@ fn hlir_kernels_to_metal(module: HlirModule) -> MetalBuf with Mut, Panic, Div, A
     combined
 }
 
+// Extract all kernel functions and lower to CUDA Tile IR (MLIR dialect text).
+// Returns a TileBuf containing all kernels as cuda_tile.module blocks.
+fn hlir_kernels_to_cuda_tile(module: HlirModule) -> TileBuf with Mut, Panic, Div, Alloc {
+    var combined = tile_buf_new()
+    let kcount = hlir_extract_kernel_count(module)
+    if kcount == 0 {
+        return combined
+    }
+    var ki: i64 = 0
+    while ki < kcount {
+        let fidx = hlir_get_kernel_index(module, ki)
+        if fidx >= 0 {
+            let func = module.functions[fidx as usize]
+            let gpu_kernel = hlir_function_to_gpu_kernel(func)
+
+            // Flatten GpuKernelIr ops into flat arrays for gpu_lower_to_cuda_tile
+            var ops_opcodes: [i64; 256] = [0; 256]
+            var ops_dst:     [i64; 256] = [0; 256]
+            var ops_src_a:   [i64; 256] = [0; 256]
+            var ops_src_b:   [i64; 256] = [0; 256]
+            var ops_types:   [i64; 256] = [0; 256]
+            var op_count: i64 = 0
+            while op_count < gpu_kernel.op_count && op_count < 256 {
+                let op = gpu_kernel.ops[op_count as usize]
+                ops_opcodes[op_count as usize] = gpu_opcode_to_spirv_tag(op.opcode)
+                ops_dst[op_count as usize]     = op.dst_reg
+                ops_src_a[op_count as usize]   = op.lhs_reg
+                ops_src_b[op_count as usize]   = op.rhs_reg
+                ops_types[op_count as usize]   = gpu_type_to_spirv_tag(op.ty)
+                op_count = op_count + 1
+            }
+
+            let kname = name_to_string(gpu_kernel.kernel_name)
+            let tile = gpu_lower_to_cuda_tile(kname, gpu_kernel.param_count,
+                           ops_opcodes, ops_dst, ops_src_a, ops_src_b, ops_types, op_count)
+
+            // Append this kernel's text to combined output
+            var ti: i64 = 0
+            while ti < tile.len {
+                combined.data[(combined.len + ti) as usize] = tile.data[ti as usize]
+                ti = ti + 1
+            }
+            combined.len = combined.len + tile.len
+        }
+        ki = ki + 1
+    }
+    combined
+}
+
 // ============================================================================
 // Section 30 — Source-level GPU builtin lowering
 // ============================================================================
