@@ -15,7 +15,17 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$REPO_ROOT"
 
-PINNED_BIN="artifacts/omega/souc-bin/souc-linux-x86_64"
+PINNED_BIN="${PINNED_BIN:-artifacts/omega/souc-bin/souc-linux-x86_64}"
+if [ ! -x "$PINNED_BIN" ]; then
+  JIT_FALLBACK="artifacts/omega/souc-bin/souc-linux-x86_64-jit"
+  if [ -x "$JIT_FALLBACK" ]; then
+    echo "bootstrap_concat: pinned binary not found at $PINNED_BIN, falling back to $JIT_FALLBACK"
+    PINNED_BIN="$JIT_FALLBACK"
+  else
+    echo "bootstrap_concat: no usable souc binary found (checked $PINNED_BIN and $JIT_FALLBACK)" >&2
+    exit 1
+  fi
+fi
 OUTPUT_DIR="build"
 OUTPUT_FILE="$OUTPUT_DIR/bootstrap_stage1.sio"
 ARTIFACT_DIR="artifacts/omega"
@@ -121,7 +131,10 @@ FILES=(
   self-hosted/ir/dce.sio
   self-hosted/ir/tailcall.sio
   self-hosted/ir/const_prop.sio
+  self-hosted/ir/opt_strategy.sio
+  self-hosted/ir/profile.sio
   self-hosted/ir/egraph.sio
+  self-hosted/ir/opt_cleanup.sio
   self-hosted/ir/loop_opt.sio
   self-hosted/ir/auto_vectorize.sio
   self-hosted/ir/memory_analysis.sio
@@ -132,6 +145,7 @@ FILES=(
   # ── 8. HLIR (High-Level IR) ─────────────────────────────────────
   self-hosted/hlir/ir.sio
   self-hosted/hlir/builder.sio
+  self-hosted/hlir/opt_strategy.sio
   self-hosted/hlir/lower.sio
   self-hosted/hlir/mod.sio
 
@@ -139,11 +153,17 @@ FILES=(
   self-hosted/native/mod.sio
   self-hosted/native/regs.sio
   self-hosted/native/encode.sio
+  self-hosted/native/runtime_context.sio
+  self-hosted/native/target_policy.sio
   self-hosted/native/frame.sio
   self-hosted/native/reloc.sio
   self-hosted/native/abi.sio
   self-hosted/native/lower_hir.sio
   self-hosted/native/elf.sio
+  self-hosted/native/machine_ir.sio
+  self-hosted/native/gc.sio
+  self-hosted/native/stack_maps.sio
+  self-hosted/native/peephole.sio
   self-hosted/native/codegen.sio
   self-hosted/native/lower_ir.sio
   self-hosted/native/riscv.sio
@@ -219,6 +239,7 @@ FILES=(
   self-hosted/gpu/lower_to_ptx.sio
   self-hosted/gpu/ptx_advanced.sio
   self-hosted/gpu/kernel_ir.sio
+  self-hosted/gpu/opt/autotune.sio
   self-hosted/gpu/hlir_to_gpu.sio
   self-hosted/gpu/epistemic_kernels.sio
   self-hosted/gpu/epistemic_ptx.sio
@@ -242,7 +263,6 @@ FILES=(
   self-hosted/gpu/opt/fusion.sio
   self-hosted/gpu/opt/divergence.sio
   self-hosted/gpu/opt/async_pipeline.sio
-  self-hosted/gpu/opt/autotune.sio
 
   # ── 20. GPU kernels + advanced ──────────────────────────────────
   self-hosted/gpu/kernels/bio.sio
@@ -271,7 +291,10 @@ FILES=(
   self-hosted/lsp/goto_def.sio
 
   # ── 23. I/O helpers + module loader ─────────────────────────────
+  self-hosted/interop/contract.sio
   self-hosted/io/file_write.sio
+  stdlib/compiler/ontology/model.sio
+  stdlib/compiler/ontology/cache.sio
   self-hosted/compiler/module_loader.sio
   self-hosted/test_stubs_bootstrap.sio
 
@@ -554,7 +577,9 @@ if [ "$BOOTSTRAP_PROFILE" = "full" ]; then
 
     if [ "$BOOTSTRAP_FULL_INCLUDE_EXPERIMENTAL" != "1" ]; then
       case "$f" in
-        self-hosted/gpu/opt/*.sio|\
+        self-hosted/gpu/opt/optimizer.sio|\
+        self-hosted/gpu/opt/divergence.sio|\
+        self-hosted/gpu/opt/async_pipeline.sio|\
         self-hosted/gpu/kernels/*.sio|\
         self-hosted/gpu/autodiff/*.sio|\
         self-hosted/gpu/multi/*.sio|\

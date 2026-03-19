@@ -10,7 +10,7 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$REPO_ROOT"
 
-PINNED_BIN="artifacts/omega/souc-bin/souc-linux-x86_64"
+PINNED_BIN="${PINNED_BIN:-artifacts/omega/souc-bin/souc-linux-x86_64}"
 OUTPUT_DIR="build"
 OUTPUT_FILE="$OUTPUT_DIR/bootstrap_knowledge_tests.sio"
 ARTIFACT_DIR="artifacts/omega"
@@ -57,8 +57,14 @@ for f in "${FILES[@]}"; do
 done
 
 if [ ! -x "$PINNED_BIN" ]; then
-  echo "ABORT: pinned binary missing or not executable at $PINNED_BIN"
-  exit 1
+  JIT_FALLBACK="artifacts/omega/souc-bin/souc-linux-x86_64-jit"
+  if [ -x "$JIT_FALLBACK" ]; then
+    echo "knowledge_bootstrap: pinned binary not found at $PINNED_BIN, falling back to $JIT_FALLBACK"
+    PINNED_BIN="$JIT_FALLBACK"
+  else
+    echo "ABORT: no usable souc binary found (checked $PINNED_BIN and $JIT_FALLBACK)"
+    exit 1
+  fi
 fi
 
 TOTAL_LINES=0

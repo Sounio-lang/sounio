@@ -23,23 +23,23 @@ var SRC: [i8; 2097152] = [0; 2097152]
 var SRC_LEN: i64 = 0
 var SRC_BUF: i64 = 0
 
-var TK_KIND: [i64; 131072] = [0; 131072]
-var TK_START: [i64; 131072] = [0; 131072]
-var TK_END: [i64; 131072] = [0; 131072]
-var TK_IVAL: [i64; 131072] = [0; 131072]
+var TK_KIND: [i64; 524288] = [0; 524288]
+var TK_START: [i64; 524288] = [0; 524288]
+var TK_END: [i64; 524288] = [0; 524288]
+var TK_IVAL: [i64; 524288] = [0; 524288]
 var TK_COUNT: i64 = 0
 
 var POOL: [i8; 524288] = [0; 524288]
 var POOL_POS: i64 = 0
 
-var ND_KIND: [i64; 131072] = [0; 131072]
-var ND_IVAL: [i64; 131072] = [0; 131072]
-var ND_LEFT: [i64; 131072] = [-1; 131072]
-var ND_RIGHT: [i64; 131072] = [-1; 131072]
-var ND_EXTRA: [i64; 131072] = [-1; 131072]
-var ND_EXTRA2: [i64; 131072] = [-1; 131072]
-var ND_STR_OFF: [i64; 131072] = [0; 131072]
-var ND_STR_LEN: [i64; 131072] = [0; 131072]
+var ND_KIND: [i64; 262144] = [0; 262144]
+var ND_IVAL: [i64; 262144] = [0; 262144]
+var ND_LEFT: [i64; 262144] = [-1; 262144]
+var ND_RIGHT: [i64; 262144] = [-1; 262144]
+var ND_EXTRA: [i64; 262144] = [-1; 262144]
+var ND_EXTRA2: [i64; 262144] = [-1; 262144]
+var ND_STR_OFF: [i64; 262144] = [0; 262144]
+var ND_STR_LEN: [i64; 262144] = [0; 262144]
 var ND_COUNT: i64 = 0
 
 var FN_NAME_OFF: [i64; 2048] = [0; 2048]
@@ -72,7 +72,9 @@ var PRINT_INT_OFF: i64 = 0
 var FN_CODE_OFF: [i64; 2048] = [0; 2048]
 var FN_IMPL_SI: [i64; 2048] = [-1; 2048]
 var FN_RET_SI: [i64; 2048] = [-1; 2048]
+var FN_RET_BOX_INNER_SI: [i64; 2048] = [-1; 2048]  // for fns returning Option<Box<T>>: T's index
 var CURRENT_FN_RET_SI: i64 = -1
+var CURRENT_IMPL_SI: i64 = -1
 
 var FIX_OFF: [i64; 8192] = [0; 8192]
 var FIX_TARGET: [i64; 8192] = [0; 8192]
@@ -107,11 +109,16 @@ var FLD_NAME_OFF: [i64; 8192] = [0; 8192]
 var FLD_NAME_LEN: [i64; 8192] = [0; 8192]
 var FLD_TYPE_SI: [i64; 8192] = [-1; 8192]       // struct type index for each field (-1 if scalar)
 var FLD_SLOT_COUNT: [i64; 8192] = [0; 8192]     // number of 8-byte slots per field (set during parsing)
+var FLD_TYPE_NAME_OFF: [i64; 8192] = [0; 8192]  // pool offset of field type name (for re-resolution)
+var FLD_TYPE_NAME_LEN: [i64; 8192] = [0; 8192]  // length of field type name
+var FLD_BOX_INNER_SI: [i64; 8192] = [-1; 8192]  // for Option<Box<T>> fields: struct index of T
 var FLD_COUNT: i64 = 0
 
 var FN_PARAM_TYPE_SI: [i64; 16384] = [-1; 16384] // struct type index for each fn param
 var LOCAL_IS_SPTR: [i64; 8192] = [0; 8192]       // 1 if local is pointer-to-struct
+var LOCAL_BOX_INNER_SI: [i64; 8192] = [-1; 8192] // for &Option<Box<T>>: struct index of T
 var LAST_LOCAL_IS_SPTR: i64 = 0
+var LAST_LOCAL_BOX_INNER: i64 = -1
 var LAST_FOUND_SLOT: i64 = -1
 var LAST_FIELD_TYPE_SI: i64 = -1
 
@@ -500,7 +507,7 @@ fn expect(kind: i64) with Mut, Panic {
 
 fn new_node(kind: i64, ival: i64) -> i64 with Mut, Panic {
     let idx = ND_COUNT
-    if idx >= 131072 {
+    if idx >= 262144 {
         print("NODE OVERFLOW idx=")
         print_int(idx)
         print("\n")
@@ -1065,12 +1072,30 @@ fn parse_stmt() -> i64 with Mut, Panic, Div {
         let name_len = tok_ident_len()
         advance()
         var struct_si: i64 = -1
+        var is_ref_type: i64 = 0  // 1 if type annotation had & prefix
+        var box_inner_hint: i64 = -1
         if cur_kind() == 38 {
             advance()
+            // Skip leading & or &! in type annotations
+            if cur_kind() == 15 { advance(); is_ref_type = 1 }
+            else if cur_kind() == 70 { advance(); is_ref_type = 1 }
             if cur_kind() == 1 {
                 let toff = tok_pool_off()
                 let tlen = tok_ident_len()
                 struct_si = find_struct_b4(toff, tlen)
+                // If type is &StructName, treat as pointer-to-struct (not value)
+                if struct_si >= 0 && is_ref_type == 1 {
+                    // Store struct_si in box_inner_hint for type tracking,
+                    // but clear struct_si so codegen doesn't allocate full struct
+                    box_inner_hint = struct_si
+                    struct_si = -1
+                }
+                // Detect Option<Box<T>> or Box<T> in type annotation
+                if struct_si < 0 && box_inner_hint < 0 {
+                    if pool_match(toff, tlen, "Option") || pool_match(toff, tlen, "Box") {
+                        box_inner_hint = extract_option_box_inner_at()
+                    }
+                }
             }
             skip_type_expr()
         }
@@ -1082,6 +1107,7 @@ fn parse_stmt() -> i64 with Mut, Panic, Div {
         ND_STR_OFF[node as usize] = name_off
         ND_STR_LEN[node as usize] = name_len
         ND_LEFT[node as usize] = init
+        ND_EXTRA2[node as usize] = box_inner_hint
         return node
     }
     if k == 56 {
@@ -1208,6 +1234,12 @@ fn parse_fn_def() with Mut, Panic, Div {
             let rt_len = tok_ident_len()
             let rt_si = find_struct_b4(rt_off, rt_len)
             FN_RET_SI[fn_idx as usize] = rt_si
+            // Detect Option<Box<T>> or Box<T> return type
+            if rt_si < 0 {
+                if pool_match(rt_off, rt_len, "Option") || pool_match(rt_off, rt_len, "Box") {
+                    FN_RET_BOX_INNER_SI[fn_idx as usize] = extract_option_box_inner_at()
+                }
+            }
         }
         skip_type_expr()
     }
@@ -1218,8 +1250,49 @@ fn parse_fn_def() with Mut, Panic, Div {
     FN_COUNT = FN_COUNT + 1
 }
 
+// Extract T from Option<Box<T>> or Box<T> type expression.
+// Assumes current token is already past Option/Box ident.
+// Peeks ahead, does NOT consume tokens (saves/restores POS).
+fn extract_option_box_inner_at() -> i64 with Mut, Panic, Div {
+    let save_pos = POS
+    advance()  // skip Option or Box
+    var result: i64 = -1
+    if cur_kind() == 25 {
+        advance()  // skip <
+        if cur_kind() == 1 {
+            let inner_off = tok_pool_off()
+            let inner_len = tok_ident_len()
+            if pool_match(inner_off, inner_len, "Box") {
+                advance()  // skip Box
+                if cur_kind() == 25 {
+                    advance()  // skip <
+                    if cur_kind() == 1 {
+                        let si_off = tok_pool_off()
+                        let si_len = tok_ident_len()
+                        result = find_struct_b4(si_off, si_len)
+                    }
+                }
+            } else {
+                result = find_struct_b4(inner_off, inner_len)
+            }
+        }
+    }
+    POS = save_pos
+    result
+}
+
 fn parse_struct_decl() with Mut, Panic, Div {
     advance()
+    // Skip if already parsed (from pre_scan_structs)
+    let check_off = tok_pool_off()
+    let check_len = tok_ident_len()
+    let existing = find_struct_b4(check_off, check_len)
+    if existing >= 0 {
+        // Already parsed — skip the struct body
+        advance()
+        skip_braces()
+        return 0
+    }
     let si = ST_COUNT
     ST_NAME_OFF[si as usize] = tok_pool_off()
     ST_NAME_LEN[si as usize] = tok_ident_len()
@@ -1276,15 +1349,46 @@ fn parse_struct_decl() with Mut, Panic, Div {
                     }
                     if fld_slots < 1 { fld_slots = 1 }
                 } else {
+                    var box_inner: i64 = -1
                     if cur_kind() == 1 {
                         let ftoff = tok_pool_off()
                         let ftlen = tok_ident_len()
+                        FLD_TYPE_NAME_OFF[(fi_base + fc - 1) as usize] = ftoff
+                        FLD_TYPE_NAME_LEN[(fi_base + fc - 1) as usize] = ftlen
                         fld_si = find_struct_b4(ftoff, ftlen)
                         if fld_si >= 0 {
                             fld_slots = struct_total_slots(fld_si)
                         }
+                        // Detect Option<Box<StructName>> pattern
+                        if fld_si < 0 && (pool_match(ftoff, ftlen, "Option") || pool_match(ftoff, ftlen, "Box")) {
+                            // Peek ahead for <Box<StructName>> or <StructName>
+                            let save_pos = POS
+                            advance()  // skip Option/Box
+                            if cur_kind() == 25 {
+                                advance()  // skip <
+                                if cur_kind() == 1 {
+                                    let inner_off = tok_pool_off()
+                                    let inner_len = tok_ident_len()
+                                    if pool_match(inner_off, inner_len, "Box") {
+                                        advance()  // skip Box
+                                        if cur_kind() == 25 {
+                                            advance()  // skip <
+                                            if cur_kind() == 1 {
+                                                let si_off = tok_pool_off()
+                                                let si_len = tok_ident_len()
+                                                box_inner = find_struct_b4(si_off, si_len)
+                                            }
+                                        }
+                                    } else {
+                                        box_inner = find_struct_b4(inner_off, inner_len)
+                                    }
+                                }
+                            }
+                            POS = save_pos  // restore position for skip_type_expr
+                        }
                     }
                     skip_type_expr()
+                    FLD_BOX_INNER_SI[(fi_base + fc - 1) as usize] = box_inner
                 }
             }
             FLD_TYPE_SI[(fi_base + fc - 1) as usize] = fld_si
@@ -1501,6 +1605,57 @@ fn pre_scan_imports() with Mut, Panic, Div {
     }
 }
 
+// Two-pass struct collection: scan all tokens for struct declarations
+// to build the struct table BEFORE parsing function bodies.
+// This ensures forward-referenced struct types (e.g., ItemList from imports)
+// are available during type annotation parsing.
+fn pre_scan_structs() with Mut, Panic, Div {
+    let saved_pos = POS
+    POS = 0
+    while cur_kind() != 0 {
+        if cur_kind() == 58 {
+            parse_struct_decl()
+        } else if cur_kind() == 33 {
+            skip_braces()
+        } else {
+            advance()
+        }
+    }
+    POS = saved_pos
+    // Second pass: re-resolve unresolved field types now that all structs are known.
+    // Run multiple iterations to handle transitive dependencies.
+    var changed: i64 = 1
+    var iter: i64 = 0
+    while changed > 0 && iter < 10 {
+        changed = 0
+        var fi: i64 = 0
+        while fi < FLD_COUNT {
+            let ftype = FLD_TYPE_SI[fi as usize]
+            if ftype < 0 && FLD_TYPE_NAME_LEN[fi as usize] > 0 {
+                let tn_off = FLD_TYPE_NAME_OFF[fi as usize]
+                let tn_len = FLD_TYPE_NAME_LEN[fi as usize]
+                let resolved_si = find_struct_b4(tn_off, tn_len)
+                if resolved_si >= 0 {
+                    FLD_TYPE_SI[fi as usize] = resolved_si
+                    let new_slots = struct_total_slots(resolved_si)
+                    if FLD_SLOT_COUNT[fi as usize] != new_slots {
+                        FLD_SLOT_COUNT[fi as usize] = new_slots
+                        changed = changed + 1
+                    }
+                }
+            } else if ftype >= 0 {
+                let new_slots = struct_total_slots(ftype)
+                if FLD_SLOT_COUNT[fi as usize] != new_slots {
+                    FLD_SLOT_COUNT[fi as usize] = new_slots
+                    changed = changed + 1
+                }
+            }
+            fi = fi + 1
+        }
+        iter = iter + 1
+    }
+}
+
 fn skip_to_next_top_level() with Mut, Panic, Div {
     while cur_kind() != 0 && cur_kind() != 50 && cur_kind() != 58 && cur_kind() != 51 && cur_kind() != 52 && cur_kind() != 59 && cur_kind() != 60 {
         if cur_kind() == 33 {
@@ -1711,6 +1866,7 @@ fn add_local_sptr(off: i64, len: i64, si: i64) -> i64 with Mut, Panic {
 
 fn find_local(off: i64, len: i64) -> i64 with Mut, Panic, Div {
     LAST_LOCAL_SI = -1
+    LAST_LOCAL_BOX_INNER = -1
     LAST_LOCAL_IS_SPTR = 0
     LAST_FOUND_SLOT = -1
     var i: i64 = LOCAL_COUNT - 1
@@ -1727,6 +1883,7 @@ fn find_local(off: i64, len: i64) -> i64 with Mut, Panic, Div {
             if ok == 1 {
                 LAST_LOCAL_SI = LOCAL_STRUCT_IDX[i as usize]
                 LAST_LOCAL_IS_SPTR = LOCAL_IS_SPTR[i as usize]
+                LAST_LOCAL_BOX_INNER = LOCAL_BOX_INNER_SI[i as usize]
                 LAST_FOUND_SLOT = LOCAL_SLOT[i as usize]
                 return LOCAL_SLOT[i as usize]
             }
@@ -1987,6 +2144,15 @@ fn compile_node(node: i64) -> i64 with Mut, Panic, Div {
                 let fi2 = find_field_slot_offset(si3, fn2, fl2)
                 if fi2 >= 0 {
                     emit_lea_rax(bs2 + fi2)
+                    // Propagate Box inner type for Option<Box<T>> fields
+                    let raw_fi2 = find_field_b4(si3, fn2, fl2)
+                    if raw_fi2 >= 0 {
+                        let fbase2 = ST_FIELD_FIRST[si3 as usize]
+                        let bi2 = FLD_BOX_INNER_SI[(fbase2 + raw_fi2) as usize]
+                        if bi2 >= 0 {
+                            LAST_FIELD_TYPE_SI = bi2
+                        }
+                    }
                 } else {
                     emit_mov_rax_imm(0)
                 }
@@ -2004,6 +2170,59 @@ fn compile_node(node: i64) -> i64 with Mut, Panic, Div {
         let fname_len = ND_STR_LEN[node as usize]
         LAST_FIELD_TYPE_SI = -1
         let obj_nk = ND_KIND[obj as usize]
+        // Special case: (*ptr).field — compile inner of DEREF (skip the extra load),
+        // then access field at [rax + offset]. The ptr IS the struct address.
+        if obj_nk == 46 {
+            let deref_inner2 = ND_LEFT[obj as usize]
+            // Try to get struct type from inner expression
+            var known_si: i64 = -1
+            if ND_KIND[deref_inner2 as usize] == 2 {
+                let di_off = ND_STR_OFF[deref_inner2 as usize]
+                let di_len = ND_STR_LEN[deref_inner2 as usize]
+                find_local(di_off, di_len)
+                known_si = LAST_LOCAL_SI
+                // Also check LOCAL_BOX_INNER_SI for match bindings
+                if known_si < 0 && LAST_LOCAL_BOX_INNER >= 0 {
+                    known_si = LAST_LOCAL_BOX_INNER
+                }
+            }
+            compile_node(deref_inner2)  // rax = ptr to struct data
+            // Use known struct type, or fallback to searching all structs
+            var dfi: i64 = -1
+            if known_si >= 0 {
+                dfi = find_field_slot_offset(known_si, fname_off, fname_len)
+            }
+            // Try CURRENT_IMPL_SI as priority hint
+            if dfi < 0 && CURRENT_IMPL_SI >= 0 {
+                dfi = find_field_slot_offset(CURRENT_IMPL_SI, fname_off, fname_len)
+            }
+            if dfi < 0 {
+                var dsi: i64 = 0
+                while dsi < ST_COUNT && dfi < 0 {
+                    dfi = find_field_slot_offset(dsi, fname_off, fname_len)
+                    if dfi < 0 { dsi = dsi + 1 }
+                }
+            }
+            if dfi >= 0 {
+                let dfld_si = LAST_FIELD_TYPE_SI
+                let ddisp = dfi * 8
+                if dfld_si >= 0 {
+                    if ddisp > 0 {
+                        emit(0x48); emit(0x8D); emit(0x80); emit_u32(ddisp)
+                    }
+                } else {
+                    if ddisp == 0 {
+                        emit(0x48); emit(0x8B); emit(0x00)
+                    } else {
+                        emit(0x48); emit(0x8B); emit(0x80); emit_u32(ddisp)
+                    }
+                }
+                LAST_FIELD_TYPE_SI = dfld_si
+            } else {
+                emit_mov_rax_imm(0)
+            }
+            return 0
+        }
         if obj_nk == 2 {
             let voff = ND_STR_OFF[obj as usize]
             let vlen = ND_STR_LEN[obj as usize]
@@ -2013,8 +2232,30 @@ fn compile_node(node: i64) -> i64 with Mut, Panic, Div {
             if base_slot >= 0 && si2 >= 0 {
                 let fi = find_field_slot_offset(si2, fname_off, fname_len)
                 let fld_si = LAST_FIELD_TYPE_SI
+                // Propagate FLD_BOX_INNER_SI for Option<Box<T>> fields
+                if fld_si < 0 {
+                    let raw_fi_check = find_field_b4(si2, fname_off, fname_len)
+                    if raw_fi_check >= 0 {
+                        let fb_check = ST_FIELD_FIRST[si2 as usize]
+                        let bi_check = FLD_BOX_INNER_SI[(fb_check + raw_fi_check) as usize]
+                        if bi_check >= 0 {
+                            LAST_FIELD_TYPE_SI = bi_check
+                        }
+                    }
+                }
                 if fi >= 0 {
-                    if is_sptr == 1 {
+                    if is_sptr == 2 {
+                        // Heap pointer (Box): positive offsets
+                        emit_load_rax(base_slot)
+                        let fdisp_h = fi * 8
+                        if fld_si >= 0 {
+                            if fdisp_h > 0 { emit(0x48); emit(0x8D); emit(0x80); emit_u32(fdisp_h) }
+                        } else {
+                            if fdisp_h == 0 { emit(0x48); emit(0x8B); emit(0x00) }
+                            else { emit(0x48); emit(0x8B); emit(0x80); emit_u32(fdisp_h) }
+                        }
+                    } else if is_sptr == 1 {
+                        // Stack pointer (&T): negative offsets
                         emit_load_rax(base_slot)
                         let fdisp = 0 - (fi * 8)
                         emit(0x48); emit(0x8B); emit(0x80); emit_u32(fdisp)
@@ -2048,7 +2289,40 @@ fn compile_node(node: i64) -> i64 with Mut, Panic, Div {
                         }
                     }
                 } else { emit_mov_rax_imm(0) }
-            } else { emit_mov_rax_imm(0) }
+            } else {
+                // Fallback: try CURRENT_IMPL_SI first, then search all structs
+                var found_fi: i64 = -1
+                if CURRENT_IMPL_SI >= 0 {
+                    found_fi = find_field_slot_offset(CURRENT_IMPL_SI, fname_off, fname_len)
+                }
+                if found_fi < 0 {
+                    var search_si: i64 = 0
+                    while search_si < ST_COUNT && found_fi < 0 {
+                        found_fi = find_field_slot_offset(search_si, fname_off, fname_len)
+                        if found_fi < 0 { search_si = search_si + 1 }
+                    }
+                }
+                if found_fi >= 0 {
+                    let fld_si3 = LAST_FIELD_TYPE_SI
+                    let fdisp3 = found_fi * 8
+                    if fld_si3 >= 0 {
+                        if fdisp3 == 0 {
+                            // rax at sub-struct base
+                        } else {
+                            emit(0x48); emit(0x8D); emit(0x80); emit_u32(fdisp3)
+                        }
+                    } else {
+                        if fdisp3 == 0 {
+                            emit(0x48); emit(0x8B); emit(0x00)
+                        } else {
+                            emit(0x48); emit(0x8B); emit(0x80); emit_u32(fdisp3)
+                        }
+                    }
+                    LAST_FIELD_TYPE_SI = fld_si3
+                } else {
+                    emit_mov_rax_imm(0)
+                }
+            }
         }
         return 0
     }
@@ -2210,6 +2484,7 @@ fn compile_node(node: i64) -> i64 with Mut, Panic, Div {
                         ci_box = ci_box + 1
                     }
                     emit_load_rax(ptr_save) // return pointer
+                    LAST_FIELD_TYPE_SI = slit_si  // propagate struct type for let/var handler
                 } else {
                     // Non-struct: just allocate 8 bytes and store
                     compile_node(arg0)
@@ -2254,6 +2529,84 @@ fn compile_node(node: i64) -> i64 with Mut, Panic, Div {
             emit_load_rax(s1)
             emit(0x48); emit(0x89); emit(0xC6)
             emit(0x48); emit(0x0F); emit(0xB6); emit(0x04); emit(0x37)
+            return 0
+        }
+
+        // str_from_bytes(buf, len) → null-terminate and return buf pointer
+        if pool_match(c_off, c_len, "str_from_bytes") {
+            let sfb_arg0 = ND_EXTRA[node as usize]
+            var sfb_arg1: i64 = -1
+            if sfb_arg0 != -1 { sfb_arg1 = ND_EXTRA[sfb_arg0 as usize] }
+            let sfb_s0 = alloc_slot()
+            let sfb_s1 = alloc_slot()
+            if sfb_arg0 != -1 { compile_node(sfb_arg0); emit_store_rax(sfb_s0) }
+            if sfb_arg1 != -1 { compile_node(sfb_arg1); emit_store_rax(sfb_s1) }
+            // buf[len] = 0 (null-terminate)
+            emit_load_rax(sfb_s0)  // rax = buf pointer
+            emit_load_rcx(sfb_s1)  // rcx = len
+            emit(0xC6); emit(0x04); emit(0x08); emit(0x00)  // mov byte [rax+rcx], 0
+            // return buf pointer
+            emit_load_rax(sfb_s0)
+            return 0
+        }
+
+        // str_eq(a, b) → compare null-terminated strings, return 1 if equal
+        if pool_match(c_off, c_len, "str_eq") {
+            let seq_arg0 = ND_EXTRA[node as usize]
+            var seq_arg1: i64 = -1
+            if seq_arg0 != -1 { seq_arg1 = ND_EXTRA[seq_arg0 as usize] }
+            let seq_s0 = alloc_slot()
+            let seq_s1 = alloc_slot()
+            if seq_arg0 != -1 { compile_node(seq_arg0); emit_store_rax(seq_s0) }
+            if seq_arg1 != -1 { compile_node(seq_arg1); emit_store_rax(seq_s1) }
+            emit_load_rax(seq_s0)
+            emit(0x48); emit(0x89); emit(0xC7)  // mov rdi, rax
+            emit_load_rax(seq_s1)
+            emit(0x48); emit(0x89); emit(0xC6)  // mov rsi, rax
+            emit(0x31); emit(0xC0)              // xor eax, eax (result = 0 = not equal)
+            // loop: compare bytes
+            emit(0x8A); emit(0x0F)              // mov cl, [rdi]
+            emit(0x3A); emit(0x0E)              // cmp cl, [rsi]
+            emit(0x75); emit(0x0A)              // jne done (not equal)
+            emit(0x84); emit(0xC9)              // test cl, cl
+            emit(0x74); emit(0x04)              // je equal (both null)
+            emit(0x48); emit(0xFF); emit(0xC7)  // inc rdi
+            emit(0x48); emit(0xFF); emit(0xC6)  // inc rsi
+            emit(0xEB); emit(0xEE)              // jmp loop
+            // equal:
+            emit(0xB0); emit(0x01)              // mov al, 1
+            // done:
+            return 0
+        }
+
+        // read_byte(ptr, idx) → return byte at ptr[idx]
+        if pool_match(c_off, c_len, "read_byte") {
+            let rb_arg0 = ND_EXTRA[node as usize]
+            var rb_arg1: i64 = -1
+            if rb_arg0 != -1 { rb_arg1 = ND_EXTRA[rb_arg0 as usize] }
+            let rb_s0 = alloc_slot()
+            let rb_s1 = alloc_slot()
+            if rb_arg0 != -1 { compile_node(rb_arg0); emit_store_rax(rb_s0) }
+            if rb_arg1 != -1 { compile_node(rb_arg1); emit_store_rax(rb_s1) }
+            emit_load_rax(rb_s0)
+            emit(0x48); emit(0x89); emit(0xC7)  // mov rdi, rax
+            emit_load_rax(rb_s1)
+            emit(0x48); emit(0x0F); emit(0xB6); emit(0x04); emit(0x07)  // movzx rax, byte [rdi+rax]
+            return 0
+        }
+
+        // print_char(ch) → write single byte to stdout
+        if pool_match(c_off, c_len, "print_char") {
+            let pc_arg = ND_EXTRA[node as usize]
+            if pc_arg != -1 { compile_node(pc_arg) }
+            let pc_s = alloc_slot()
+            emit_store_rax(pc_s)
+            emit_lea_rax(pc_s)
+            emit(0x48); emit(0x89); emit(0xC6)  // mov rsi, rax
+            emit(0xBA); emit_u32(1)              // mov edx, 1
+            emit(0xBF); emit_u32(1)              // mov edi, 1
+            emit(0xB8); emit_u32(1)              // mov eax, SYS_write
+            emit(0x0F); emit(0x05)               // syscall
             return 0
         }
 
@@ -2531,7 +2884,15 @@ fn compile_node(node: i64) -> i64 with Mut, Panic, Div {
                 emit_load_rax(callee_slot)
                 emit(0xFF); emit(0xD0)  // CALL rax
             } else {
-                // Unknown callee — emit NOP call
+                // Unknown callee — print name bytes
+                print("WARN_FN '")
+                var wi: i64 = 0
+                while wi < c_len && wi < 40 {
+                    print_int(POOL[(c_off + wi) as usize])
+                    print(" ")
+                    wi = wi + 1
+                }
+                print("'\n")
                 emit(0xE8)
                 emit_u32(0)
             }
@@ -2582,6 +2943,7 @@ fn compile_node(node: i64) -> i64 with Mut, Panic, Div {
         let name_len = ND_STR_LEN[node as usize]
         let init = ND_LEFT[node as usize]
         var struct_si = ND_IVAL[node as usize]
+        let box_inner_hint = ND_EXTRA2[node as usize]  // from &Option<Box<T>> annotation
         // Infer struct type from callee return type when no type annotation
         if struct_si < 0 && init != -1 {
             let init_nk_infer = ND_KIND[init as usize]
@@ -2695,10 +3057,90 @@ fn compile_node(node: i64) -> i64 with Mut, Panic, Div {
                 }
             } else {
                 if init != -1 { compile_node(init) }
-                let slot = add_local(name_off, name_len)
-                if init != -1 { emit_store_rax(slot) }
+                let box_si = LAST_FIELD_TYPE_SI
+                LAST_FIELD_TYPE_SI = -1
+                if box_si >= 0 {
+                    // Box::new result: track as heap-pointer-to-struct (is_sptr=2)
+                    let slot = add_local_sptr(name_off, name_len, box_si)
+                    LOCAL_IS_SPTR[LOCAL_COUNT as usize - 1] = 2
+                    if init != -1 { emit_store_rax(slot) }
+                } else {
+                    // Check if init is an ident that's a struct pointer — inherit type
+                    var inherit_si: i64 = -1
+                    var inherit_sptr: i64 = 0
+                    if init != -1 && ND_KIND[init as usize] == 2 {
+                        let ioff = ND_STR_OFF[init as usize]
+                        let ilen2 = ND_STR_LEN[init as usize]
+                        find_local(ioff, ilen2)
+                        if LAST_LOCAL_SI >= 0 && LAST_LOCAL_IS_SPTR > 0 {
+                            inherit_si = LAST_LOCAL_SI
+                            inherit_sptr = LAST_LOCAL_IS_SPTR
+                        }
+                    }
+                    if inherit_si >= 0 {
+                        let slot = add_local_sptr(name_off, name_len, inherit_si)
+                        LOCAL_IS_SPTR[LOCAL_COUNT as usize - 1] = inherit_sptr
+                        if init != -1 { emit_store_rax(slot) }
+                    } else {
+                        let slot = add_local(name_off, name_len)
+                        if init != -1 { emit_store_rax(slot) }
+                    }
+                }
             }
         }
+        // Set LOCAL_BOX_INNER_SI for the just-created local
+        if LOCAL_COUNT > 0 {
+            var final_bi: i64 = box_inner_hint
+            // Also inherit from source ident's LOCAL_BOX_INNER_SI
+            if final_bi < 0 && init != -1 && ND_KIND[init as usize] == 2 {
+                let bi_off = ND_STR_OFF[init as usize]
+                let bi_len = ND_STR_LEN[init as usize]
+                find_local(bi_off, bi_len)
+                if LAST_LOCAL_BOX_INNER >= 0 {
+                    final_bi = LAST_LOCAL_BOX_INNER
+                }
+            }
+            // Also check LAST_FIELD_TYPE_SI from &struct.field
+            if final_bi < 0 && LAST_FIELD_TYPE_SI >= 0 {
+                final_bi = LAST_FIELD_TYPE_SI
+            }
+            // Also check FN_RET_BOX_INNER_SI for function call return types
+            if final_bi < 0 && init != -1 {
+                let init_nk_bi = ND_KIND[init as usize]
+                if init_nk_bi == 12 {
+                    // Regular call: name in ND_LEFT
+                    let callee_bi = ND_LEFT[init as usize]
+                    if callee_bi != -1 {
+                        let cbi_off = ND_STR_OFF[callee_bi as usize]
+                        let cbi_len = ND_STR_LEN[callee_bi as usize]
+                        let cbi_fn = find_fn_by_name(cbi_off, cbi_len)
+                        if cbi_fn >= 0 {
+                            final_bi = FN_RET_BOX_INNER_SI[cbi_fn as usize]
+                        }
+                    }
+                } else if init_nk_bi == 51 {
+                    // Method call: name in ND_STR_OFF[init], qualify with all structs
+                    let mbi_off = ND_STR_OFF[init as usize]
+                    let mbi_len = ND_STR_LEN[init as usize]
+                    var mbi_si: i64 = 0
+                    while mbi_si < ST_COUNT && final_bi < 0 {
+                        let msn_off = ST_NAME_OFF[mbi_si as usize]
+                        let msn_len = ST_NAME_LEN[mbi_si as usize]
+                        let mq_off = pool_concat_colon(msn_off, msn_len, mbi_off, mbi_len)
+                        let mq_len = msn_len + 2 + mbi_len
+                        let mbi_fn = find_fn_by_name(mq_off, mq_len)
+                        if mbi_fn >= 0 {
+                            final_bi = FN_RET_BOX_INNER_SI[mbi_fn as usize]
+                        }
+                        mbi_si = mbi_si + 1
+                    }
+                }
+            }
+            if final_bi >= 0 {
+                LOCAL_BOX_INNER_SI[(LOCAL_COUNT - 1) as usize] = final_bi
+            }
+        }
+        LAST_FIELD_TYPE_SI = -1
         return 0
     }
     if kind == 42 {
@@ -2923,7 +3365,89 @@ fn compile_node(node: i64) -> i64 with Mut, Panic, Div {
         return 0
     }
     if kind == 44 {
-        compile_node(ND_LEFT[node as usize])
+        // Determine Box inner type from scrutinee for Some bindings
+        var match_box_si: i64 = -1
+        let scr_nd = ND_LEFT[node as usize]
+        // Common pattern: match *ptr { Some(x) => ... } where ptr is &Option<Box<T>>
+        // Scrutinee is DEREF(ident) → check if ident's struct type has an Option<Box<T>> field
+        // OR scrutinee is a field access → check field's FLD_BOX_INNER_SI
+        if ND_KIND[scr_nd as usize] == 46 {
+            let scr_inner = ND_LEFT[scr_nd as usize]
+            if ND_KIND[scr_inner as usize] == 2 {
+                let sc_off = ND_STR_OFF[scr_inner as usize]
+                let sc_len = ND_STR_LEN[scr_inner as usize]
+                find_local(sc_off, sc_len)
+                let scr_si = LAST_LOCAL_SI
+                // Check LOCAL_BOX_INNER_SI first (from type annotation)
+                if LAST_LOCAL_BOX_INNER >= 0 {
+                    match_box_si = LAST_LOCAL_BOX_INNER
+                } else if scr_si >= 0 && LAST_LOCAL_IS_SPTR == 2 {
+                    match_box_si = scr_si
+                }
+            }
+        } else if ND_KIND[scr_nd as usize] == 14 {
+            // Field access: check FLD_BOX_INNER_SI
+            let f_obj = ND_LEFT[scr_nd as usize]
+            let f_off = ND_STR_OFF[scr_nd as usize]
+            let f_len = ND_STR_LEN[scr_nd as usize]
+            if ND_KIND[f_obj as usize] == 2 {
+                let fo_off = ND_STR_OFF[f_obj as usize]
+                let fo_len = ND_STR_LEN[f_obj as usize]
+                find_local(fo_off, fo_len)
+                let fo_si = LAST_LOCAL_SI
+                if fo_si >= 0 {
+                    let fi_idx = find_field_b4(fo_si, f_off, f_len)
+                    if fi_idx >= 0 {
+                        let fld_base = ST_FIELD_FIRST[fo_si as usize]
+                        match_box_si = FLD_BOX_INNER_SI[(fld_base + fi_idx) as usize]
+                    }
+                }
+            }
+        } else if ND_KIND[scr_nd as usize] == 2 {
+            // Plain ident: if it's a Box pointer, use its type
+            let sc2_off = ND_STR_OFF[scr_nd as usize]
+            let sc2_len = ND_STR_LEN[scr_nd as usize]
+            find_local(sc2_off, sc2_len)
+            if LAST_LOCAL_SI >= 0 && LAST_LOCAL_IS_SPTR == 2 {
+                match_box_si = LAST_LOCAL_SI
+            }
+        }
+        // Check if scrutinee is a function/method call with known Box return type
+        if match_box_si < 0 {
+            let scr_nk = ND_KIND[scr_nd as usize]
+            if scr_nk == 12 {
+                let scr_callee = ND_LEFT[scr_nd as usize]
+                if scr_callee != -1 {
+                    let scf_off = ND_STR_OFF[scr_callee as usize]
+                    let scf_len = ND_STR_LEN[scr_callee as usize]
+                    let scf_fn = find_fn_by_name(scf_off, scf_len)
+                    if scf_fn >= 0 {
+                        match_box_si = FN_RET_BOX_INNER_SI[scf_fn as usize]
+                    }
+                }
+            } else if scr_nk == 51 {
+                let scm_off = ND_STR_OFF[scr_nd as usize]
+                let scm_len = ND_STR_LEN[scr_nd as usize]
+                var scm_si: i64 = 0
+                while scm_si < ST_COUNT && match_box_si < 0 {
+                    let scmsn_off = ST_NAME_OFF[scm_si as usize]
+                    let scmsn_len = ST_NAME_LEN[scm_si as usize]
+                    let scmq_off = pool_concat_colon(scmsn_off, scmsn_len, scm_off, scm_len)
+                    let scmq_len = scmsn_len + 2 + scm_len
+                    let scm_fn = find_fn_by_name(scmq_off, scmq_len)
+                    if scm_fn >= 0 && FN_RET_BOX_INNER_SI[scm_fn as usize] >= 0 {
+                        match_box_si = FN_RET_BOX_INNER_SI[scm_fn as usize]
+                    }
+                    scm_si = scm_si + 1
+                }
+            }
+        }
+        compile_node(scr_nd)
+        // Also check LAST_FIELD_TYPE_SI set during scrutinee compilation
+        if match_box_si < 0 && LAST_FIELD_TYPE_SI >= 0 {
+            match_box_si = LAST_FIELD_TYPE_SI
+        }
+        LAST_FIELD_TYPE_SI = -1
         let scr_slot = alloc_slot()
         emit_store_rax(scr_slot)
         // Use global MFPOOL for fixup positions (avoids local array stack-direction bug)
@@ -2944,7 +3468,13 @@ fn compile_node(node: i64) -> i64 with Mut, Panic, Div {
                 emit(0x0F); emit(0x85)
                 skip_pos = CODE_LEN; emit_u32(0)
             } else if arm_type == 2 {
-                // Some(binding): skip arm if scrutinee == 0 (None)
+                // None (parser assigns 2 to None/tk68): skip if non-zero
+                emit_load_rax(scr_slot)
+                emit(0x48); emit(0x85); emit(0xC0)   // test rax, rax
+                emit(0x0F); emit(0x85)                // JNE skip (skip if non-zero/Some)
+                skip_pos = CODE_LEN; emit_u32(0)
+            } else if arm_type == 3 {
+                // Some (parser assigns 3 to Some/tk67): skip if zero
                 emit_load_rax(scr_slot)
                 emit(0x48); emit(0x85); emit(0xC0)   // test rax, rax
                 emit(0x0F); emit(0x84)                // JE skip (skip if zero/None)
@@ -2954,15 +3484,15 @@ fn compile_node(node: i64) -> i64 with Mut, Panic, Div {
                 let blen2 = ND_STR_LEN[arm as usize]
                 if blen2 > 0 {
                     emit_load_rax(scr_slot)
-                    let bslot2 = add_local(boff2, blen2)
-                    emit_store_rax(bslot2)
+                    if match_box_si >= 0 {
+                        let bslot2 = add_local_sptr(boff2, blen2, match_box_si)
+                        LOCAL_IS_SPTR[LOCAL_COUNT as usize - 1] = 2  // heap pointer
+                        emit_store_rax(bslot2)
+                    } else {
+                        let bslot2 = add_local(boff2, blen2)
+                        emit_store_rax(bslot2)
+                    }
                 }
-            } else if arm_type == 3 {
-                // None: skip arm if scrutinee != 0 (Some)
-                emit_load_rax(scr_slot)
-                emit(0x48); emit(0x85); emit(0xC0)   // test rax, rax
-                emit(0x0F); emit(0x85)                // JNE skip (skip if non-zero/Some)
-                skip_pos = CODE_LEN; emit_u32(0)
             }
             compile_node(body)
             emit(0xE9)
@@ -3044,7 +3574,19 @@ fn compile_node(node: i64) -> i64 with Mut, Panic, Div {
         if mc_as1 >= 0 { emit_load_rax(mc_as1); emit(0x48); emit(0x89); emit(0xC6) }
         if mc_as2 >= 0 { emit_load_rax(mc_as2); emit(0x48); emit(0x89); emit(0xC2) }
         if mc_as3 >= 0 { emit_load_rax(mc_as3); emit(0x48); emit(0x89); emit(0xC1) }
-        let mc_fn_idx = find_fn_by_name(mc_q_off, mc_q_len)
+        var mc_fn_idx = find_fn_by_name(mc_q_off, mc_q_len)
+        // Fallback: if method not found, try all structs as potential receivers
+        if mc_fn_idx < 0 {
+            var try_si: i64 = 0
+            while try_si < ST_COUNT && mc_fn_idx < 0 {
+                let try_sn_off = ST_NAME_OFF[try_si as usize]
+                let try_sn_len = ST_NAME_LEN[try_si as usize]
+                let try_q_off = pool_concat_colon(try_sn_off, try_sn_len, meth_off, meth_len)
+                let try_q_len = try_sn_len + 2 + meth_len
+                mc_fn_idx = find_fn_by_name(try_q_off, try_q_len)
+                try_si = try_si + 1
+            }
+        }
         emit(0xE8)
         let mc_fix_pos = CODE_LEN
         emit_u32(0)
@@ -3188,8 +3730,10 @@ fn compile_fn(fn_idx: i64) with Mut, Panic, Div {
     }
     let body = FN_BODY_NODE[fn_idx as usize]
     CURRENT_FN_RET_SI = FN_RET_SI[fn_idx as usize]
+    CURRENT_IMPL_SI = FN_IMPL_SI[fn_idx as usize]
     compile_node(body)
     CURRENT_FN_RET_SI = -1
+    CURRENT_IMPL_SI = -1
     emit_epilogue()
     // Patch prologue frame size: NEXT_SLOT * 8, rounded up to 16-byte alignment
     let frame_bytes = ((NEXT_SLOT + 1) / 2) * 16
@@ -3374,6 +3918,7 @@ fn main() -> i64 with IO, Mut, Panic, Div {
     print("\n")
 
     print("parsing...\n")
+    pre_scan_structs()
     parse_program()
     print("fns=")
     print_int(FN_COUNT)
@@ -3427,6 +3972,10 @@ fn main() -> i64 with IO, Mut, Panic, Div {
     print("patching...\n")
     patch_calls(17)
 
+    print("patching...")
+    print(" FIX_COUNT=")
+    print_int(FIX_COUNT)
+    print("\n")
     print("writing elf main_fn=")
     print_int(main_fn)
     print(" CODE_LEN=")
