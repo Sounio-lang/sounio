@@ -122,6 +122,7 @@ var LAST_LOCAL_IS_SPTR: i64 = 0
 var LAST_LOCAL_BOX_INNER: i64 = -1
 var LAST_FOUND_SLOT: i64 = -1
 var LAST_FIELD_TYPE_SI: i64 = -1
+var LAST_FIELD_SLOT_COUNT: i64 = 1  // slot count of last found field (1=scalar, >1=sub-struct)
 var LAST_FIELD_LAYOUT: i64 = 0  // 0=stack(negative offsets), 1=BSS/heap(positive offsets)
 
 var ELF: [i8; 4194304] = [0; 4194304]
@@ -607,6 +608,7 @@ fn find_field_slot_offset(si: i64, fname_off: i64, fname_len: i64) -> i64 with M
             }
             if ok == 1 {
                 LAST_FIELD_TYPE_SI = FLD_TYPE_SI[fj as usize]
+                LAST_FIELD_SLOT_COUNT = FLD_SLOT_COUNT[fj as usize]
                 return slot_off
             }
         }
@@ -614,6 +616,7 @@ fn find_field_slot_offset(si: i64, fname_off: i64, fname_len: i64) -> i64 with M
         i = i + 1
     }
     LAST_FIELD_TYPE_SI = -1
+    LAST_FIELD_SLOT_COUNT = 1
     -1
 }
 
@@ -2260,7 +2263,8 @@ fn compile_node(node: i64) -> i64 with Mut, Panic, Div {
                         LAST_FIELD_LAYOUT = 1
                         emit_load_rax(base_slot)
                         let fdisp_o = fi * 8
-                        if fld_si >= 0 {
+                        // Use sub-struct test: fld_si >= 0 OR slot_count > 1 (e.g. FLD_TYPE_SI unresolved but still multi-slot)
+                        if fld_si >= 0 || LAST_FIELD_SLOT_COUNT > 1 {
                             if fdisp_o > 0 { emit(0x48); emit(0x8D); emit(0x80); emit_u32(fdisp_o) }
                         } else {
                             if fdisp_o == 0 { emit(0x48); emit(0x8B); emit(0x00) }
@@ -3756,9 +3760,91 @@ fn compile_node(node: i64) -> i64 with Mut, Panic, Div {
             let mc_vlen = ND_STR_LEN[mc_obj as usize]
             let mc_base = find_local(mc_voff, mc_vlen)
             mc_obj_si = LAST_LOCAL_SI
+            let mc_is_sptr = LAST_LOCAL_IS_SPTR
             if mc_base >= 0 && mc_obj_si >= 0 {
+                let mc_fc0 = struct_total_slots(mc_obj_si)
+                if mc_is_sptr == 4 && mc_fc0 > 0 && mc_fc0 <= 64 {
+                    // Oversized local passed as self: load BSS ptr, copy fields to stack
+                    let mc_cp0 = NEXT_SLOT
+                    var mc_cpi0: i64 = 0
+                    while mc_cpi0 < mc_fc0 { alloc_slot(); mc_cpi0 = mc_cpi0 + 1 }
+                    let mc_bss0 = alloc_slot()
+                    emit_load_rax(mc_base)
+                    emit_store_rax(mc_bss0)
+                    mc_cpi0 = 0
+                    while mc_cpi0 < mc_fc0 {
+                        emit_load_rax(mc_bss0)
+                        emit(0x48); emit(0x8B); emit(0x80); emit_u32(mc_cpi0 * 8)
+                        emit_store_rax(mc_cp0 + mc_cpi0)
+                        mc_cpi0 = mc_cpi0 + 1
+                    }
+                    mc_self_slot = alloc_slot()
+                    emit_lea_rax(mc_cp0)
+                    emit_store_rax(mc_self_slot)
+                } else {
+                    mc_self_slot = alloc_slot()
+                    emit_lea_rax(mc_base)
+                    emit_store_rax(mc_self_slot)
+                }
+            }
+        } else if mc_obj_nk == 14 {
+            // NK_FIELD: check if sub-struct of is_sptr=4 parent → copy to stack
+            let mc_fa_obj = ND_LEFT[mc_obj as usize]
+            let mc_fa_foff = ND_STR_OFF[mc_obj as usize]
+            let mc_fa_flen = ND_STR_LEN[mc_obj as usize]
+            var mc_copied: i64 = 0
+            if ND_KIND[mc_fa_obj as usize] == 2 {
+                let mc_fo_off = ND_STR_OFF[mc_fa_obj as usize]
+                let mc_fo_len = ND_STR_LEN[mc_fa_obj as usize]
+                let mc_fo_slot = find_local(mc_fo_off, mc_fo_len)
+                let mc_fo_si = LAST_LOCAL_SI
+                let mc_fo_sptr = LAST_LOCAL_IS_SPTR
+                if mc_fo_slot >= 0 && mc_fo_si >= 0 && mc_fo_sptr == 4 {
+                    let mc_fi = find_field_slot_offset(mc_fo_si, mc_fa_foff, mc_fa_flen)
+                    var mc_fsi = LAST_FIELD_TYPE_SI
+                    // FLD_TYPE_SI may be unresolved (-1); infer field type from method name
+                    if mc_fi >= 0 && mc_fsi < 0 {
+                        var try_si2: i64 = 0
+                        while try_si2 < ST_COUNT && mc_fsi < 0 {
+                            let try_sn_off2 = ST_NAME_OFF[try_si2 as usize]
+                            let try_sn_len2 = ST_NAME_LEN[try_si2 as usize]
+                            let try_q_off2 = pool_concat_colon(try_sn_off2, try_sn_len2, meth_off, meth_len)
+                            let try_q_len2 = try_sn_len2 + 2 + meth_len
+                            if find_fn_by_name(try_q_off2, try_q_len2) >= 0 {
+                                mc_fsi = try_si2
+                            }
+                            try_si2 = try_si2 + 1
+                        }
+                    }
+                    if mc_fi >= 0 && mc_fsi >= 0 {
+                        let mc_ffc = struct_total_slots(mc_fsi)
+                        if mc_ffc > 0 && mc_ffc <= 64 {
+                            let mc_cp_base = NEXT_SLOT
+                            var mc_cpi: i64 = 0
+                            while mc_cpi < mc_ffc { alloc_slot(); mc_cpi = mc_cpi + 1 }
+                            let mc_bss_save = alloc_slot()
+                            emit_load_rax(mc_fo_slot)
+                            emit_store_rax(mc_bss_save)
+                            mc_cpi = 0
+                            while mc_cpi < mc_ffc {
+                                emit_load_rax(mc_bss_save)
+                                emit(0x48); emit(0x8B); emit(0x80); emit_u32((mc_fi + mc_cpi) * 8)
+                                emit_store_rax(mc_cp_base + mc_cpi)
+                                mc_cpi = mc_cpi + 1
+                            }
+                            mc_obj_si = mc_fsi
+                            mc_self_slot = alloc_slot()
+                            emit_lea_rax(mc_cp_base)
+                            emit_store_rax(mc_self_slot)
+                            mc_copied = 1
+                        }
+                    }
+                }
+            }
+            if mc_copied == 0 {
+                compile_node(mc_obj)
+                mc_obj_si = LAST_FIELD_TYPE_SI
                 mc_self_slot = alloc_slot()
-                emit_lea_rax(mc_base)
                 emit_store_rax(mc_self_slot)
             }
         } else {

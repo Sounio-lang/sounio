@@ -22,6 +22,12 @@ use parser::parser::{parser_last_error_count}
 var WIDE_OUT: [i8; 16777216] = [0; 16777216]
 var WIDE_LEN: i64 = 0
 
+// Sprint 234 Track A: Closure registry
+// CLOSURE_OFFSETS[i] = WIDE_LEN offset where closure i's code starts
+// Closure LEA sentinel: 48 8D 05 <cidx_lo> <cidx_hi> 0xC1 0xBE (7 bytes, distinct from fn-ref 0xDA 0xBE)
+var CLOSURE_OFFSETS: [i64; 64] = [-1; 64]
+var CLOSURE_COUNT: i64 = 0
+
 // Global ELF assembly buffer — must be global (not stack) to avoid stack overflow for large binaries
 var GLOBAL_ELF: [i8; 16777216] = [0; 16777216]
 
@@ -1777,6 +1783,110 @@ fn ast_expr_is_float(expr: &Expr, local_names: [Name; 512], local_types: [i64; 5
     false
 }
 
+// Sprint 234 Track A: Compile an ExprClosure to a synthetic function in WIDE_OUT.
+// Separated from ast_compile_expr to avoid inflating its stack frame — Cranelift JIT
+// allocates the full frame at function entry, so large local arrays here would slow EVERY
+// call to ast_compile_expr even for non-closure expressions.
+// Returns a CodeBuffer with a 7-byte closure LEA sentinel: 48 8D 05 <cidx_lo> <cidx_hi> 0xC1 0xBE
+// The post-pass in render_compile patches this to a real RIP-relative LEA.
+fn ast_compile_closure_emit(code: CodeBuffer, expr: &Expr,
+    outer_names: [Name; 512], outer_slots: [i64; 512], outer_types: [i64; 512], outer_count: i64,
+    ctx: &AstCompileCtx
+) -> CodeBuffer with Mut, Panic, Div, IO {
+    var c = code
+    let cl_idx = CLOSURE_COUNT
+    CLOSURE_COUNT = CLOSURE_COUNT + 1
+
+    // Build a fresh CodeBuffer for the closure function body
+    var cl_code = code_buffer_new()
+    cl_code = lctx_set_level(cl_code, -1)
+    let cl_frame: i64 = 32768
+    // Prologue: push rbp; mov rbp,rsp; sub rsp,cl_frame
+    cl_code = emit_byte(cl_code, 0x55)
+    cl_code = emit_byte(cl_code, 0x48); cl_code = emit_byte(cl_code, 0x89); cl_code = emit_byte(cl_code, 0xe5)
+    cl_code = emit_byte(cl_code, 0x48); cl_code = emit_byte(cl_code, 0x81); cl_code = emit_byte(cl_code, 0xec)
+    cl_code = emit_byte(cl_code, cl_frame & 0xFF); cl_code = emit_byte(cl_code, (cl_frame >> 8) & 0xFF)
+    cl_code = emit_byte(cl_code, (cl_frame >> 16) & 0xFF); cl_code = emit_byte(cl_code, (cl_frame >> 24) & 0xFF)
+
+    // Closure scope: start from caller's outer_names (already contains fn_names at negative slots
+    // and global_names at negative slots). Outer stack-local slots (positive) remain but are
+    // shadowed by closure params appended below (reverse-search finds params first).
+    // By-value copy — no ir_empty_name() initialization, just a runtime memcpy.
+    var cl_names = outer_names
+    var cl_slots = outer_slots
+    var cl_types = outer_types
+    var cl_lc = outer_count
+
+    // Spill closure params from ABI registers into stack slots (rdi, rsi, rdx, rcx, r8, r9 → slots 0..5)
+    let cl_params_ref: &Option<Box<ClosureParamList>> = &expr.closure_params
+    var cl_param_cur = cl_params_ref
+    var cl_param_idx: i64 = 0
+    var cl_next_slot: i64 = 0
+    while true {
+        match *cl_param_cur {
+            Some(cpl) => {
+                let cp_name = (*cpl).head.name
+                let cp_ty: &TypeExpr = &(*cpl).head.ty
+                var cp_type: i64 = 0
+                if ast_type_is_f64(cp_ty) { cp_type = 1 }
+                let cp_slot = cl_next_slot
+                cl_next_slot = cl_next_slot + 1
+                cl_names[cl_lc as usize] = cp_name
+                cl_slots[cl_lc as usize] = cp_slot
+                cl_types[cl_lc as usize] = cp_type
+                cl_lc = cl_lc + 1
+                // Load ABI register → rax
+                if cl_param_idx == 0 {
+                    cl_code = emit_byte(cl_code, 0x48); cl_code = emit_byte(cl_code, 0x89); cl_code = emit_byte(cl_code, 0xf8)
+                } else if cl_param_idx == 1 {
+                    cl_code = emit_byte(cl_code, 0x48); cl_code = emit_byte(cl_code, 0x89); cl_code = emit_byte(cl_code, 0xf0)
+                } else if cl_param_idx == 2 {
+                    cl_code = emit_byte(cl_code, 0x48); cl_code = emit_byte(cl_code, 0x89); cl_code = emit_byte(cl_code, 0xd0)
+                } else if cl_param_idx == 3 {
+                    cl_code = emit_byte(cl_code, 0x48); cl_code = emit_byte(cl_code, 0x89); cl_code = emit_byte(cl_code, 0xc8)
+                } else if cl_param_idx == 4 {
+                    cl_code = emit_byte(cl_code, 0x4c); cl_code = emit_byte(cl_code, 0x89); cl_code = emit_byte(cl_code, 0xc0)
+                } else if cl_param_idx == 5 {
+                    cl_code = emit_byte(cl_code, 0x4c); cl_code = emit_byte(cl_code, 0x89); cl_code = emit_byte(cl_code, 0xc8)
+                }
+                cl_code = micro_store_rax(cl_code, cp_slot)
+                cl_param_idx = cl_param_idx + 1
+                cl_param_cur = &(*cpl).tail
+            }
+            _ => break
+        }
+    }
+    cl_code = code_set_ns(cl_code, cl_next_slot)
+
+    // Compile closure body expression → result in rax
+    let cl_body_ref: &Option<Box<Expr>> = &expr.closure_body
+    match *cl_body_ref {
+        Some(cbe) => {
+            cl_code = ast_compile_expr(cl_code, &(*cbe), cl_names, cl_slots, cl_types, cl_lc, ctx)
+        }
+        _ => {
+            cl_code = emit_byte(cl_code, 0x48); cl_code = emit_byte(cl_code, 0x31); cl_code = emit_byte(cl_code, 0xc0)
+        }
+    }
+    // Epilogue: leave; ret
+    cl_code = emit_byte(cl_code, 0xc9)
+    cl_code = emit_byte(cl_code, 0xc3)
+
+    // Flush closure function to WIDE_OUT (placed before the enclosing function's code)
+    CLOSURE_OFFSETS[cl_idx as usize] = WIDE_LEN
+    wide_flush(cl_code)
+
+    // Emit closure LEA sentinel in caller's CodeBuffer: 48 8D 05 <cidx_lo> <cidx_hi> 0xC1 0xBE
+    c = emit_byte(c, 0x48)
+    c = emit_byte(c, 0x8D)
+    c = emit_byte(c, 0x05)
+    c = emit_byte(c, cl_idx & 0xFF)
+    c = emit_byte(c, (cl_idx >> 8) & 0xFF)
+    c = emit_byte(c, 0xC1 as i64)
+    c = emit_byte(c, 0xBE as i64)
+    c
+}
+
 fn ast_compile_expr(code: CodeBuffer, expr: &Expr,
     local_names: [Name; 512], local_slots: [i64; 512], local_types: [i64; 512], local_count: i64,
     ctx: &AstCompileCtx
@@ -3274,6 +3384,11 @@ fn ast_compile_expr(code: CodeBuffer, expr: &Expr,
             c.bytes[(m_ep + 3) as usize] = ((m_end_disp >> 24) & 0xFF) as i8
             m_pi = m_pi + 1
         }
+        c
+    } else if expr.kind == ExprKind::ExprClosure {
+        // Sprint 234 Track A: Delegate to a dedicated function to avoid inflating ast_compile_expr's stack frame.
+        // Pass outer scope arrays by value — runtime memcpy only, no ir_empty_name() initialization overhead.
+        c = ast_compile_closure_emit(c, expr, local_names, local_slots, local_types, local_count, ctx)
         c
     } else {
         c = emit_byte(c, 0x48)
@@ -4936,6 +5051,30 @@ fn main() -> i64 with IO, Mut, Panic, Div, Alloc {
             }
         }
         li = li + 1
+    }
+
+    // Sprint 234 Track A: Patch closure LEA sentinels
+    // Pattern: 0x48 0x8D 0x05 <cidx_lo> <cidx_hi> 0xC1 0xBE
+    var cpi: i64 = 0
+    while cpi < WIDE_LEN - 6 {
+        if WIDE_OUT[cpi as usize] == (0x48 as i8) &&
+           WIDE_OUT[(cpi + 1) as usize] == (0x8D as i8) &&
+           WIDE_OUT[(cpi + 2) as usize] == (0x05 as i8) &&
+           WIDE_OUT[(cpi + 5) as usize] == (0xC1 as i8) &&
+           WIDE_OUT[(cpi + 6) as usize] == (0xBE as i8) {
+            let cl_lo = WIDE_OUT[(cpi + 3) as usize] as i64
+            let cl_hi = WIDE_OUT[(cpi + 4) as usize] as i64
+            let cl_idx2 = (cl_lo & 0xFF) | ((cl_hi & 0xFF) << 8)
+            if cl_idx2 >= 0 && cl_idx2 < CLOSURE_COUNT {
+                let cl_target = CLOSURE_OFFSETS[cl_idx2 as usize]
+                let cl_disp = cl_target - (cpi + 7)
+                WIDE_OUT[(cpi + 3) as usize] = (cl_disp & 0xFF) as i8
+                WIDE_OUT[(cpi + 4) as usize] = ((cl_disp >> 8) & 0xFF) as i8
+                WIDE_OUT[(cpi + 5) as usize] = ((cl_disp >> 16) & 0xFF) as i8
+                WIDE_OUT[(cpi + 6) as usize] = ((cl_disp >> 24) & 0xFF) as i8
+            }
+        }
+        cpi = cpi + 1
     }
 
     // Inline trampoline: save RSP to saved_rsp; call main; mov edi,eax; mov eax,60; syscall
