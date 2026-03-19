@@ -96,6 +96,7 @@ var MB_GL_OFF: [i64; 1024] = [0; 1024]
 var MB_GL_SZ: [i64; 1024] = [0; 1024]
 var MB_GL_COUNT: i64 = 0
 var MB_BSS_TOTAL: i64 = 0
+var OVERSIZED_BSS_OFF: i64 = 0   // cumulative BSS bytes claimed for oversized struct locals
 var MB_SRC_BUF_GADDR: i64 = 0
 var MB_SRC_LEN_GADDR: i64 = 0
 
@@ -1840,16 +1841,24 @@ fn add_local(off: i64, len: i64) -> i64 with Mut, Panic {
 
 fn add_local_struct(off: i64, len: i64, si: i64, fc: i64) -> i64 with Mut, Panic {
     let idx = LOCAL_COUNT
-    let base = NEXT_SLOT
     LOCAL_NAME_OFF[idx as usize] = off
     LOCAL_NAME_LEN[idx as usize] = len
-    LOCAL_SLOT[idx as usize] = base
     LOCAL_STRUCT_IDX[idx as usize] = si
-    LOCAL_IS_SPTR[idx as usize] = 0
     LOCAL_COUNT = LOCAL_COUNT + 1
-    var ai: i64 = 0
-    while ai < fc { let ds = alloc_slot(); ai = ai + 1 }
-    base
+    if fc > 64 {
+        // Oversized struct: 1-slot thin pointer (is_sptr=4); backing store is BSS
+        let slot = alloc_slot()
+        LOCAL_SLOT[idx as usize] = slot
+        LOCAL_IS_SPTR[idx as usize] = 4
+        slot
+    } else {
+        let base = NEXT_SLOT
+        LOCAL_SLOT[idx as usize] = base
+        LOCAL_IS_SPTR[idx as usize] = 0
+        var ai: i64 = 0
+        while ai < fc { let ds = alloc_slot(); ai = ai + 1 }
+        base
+    }
 }
 
 fn add_local_sptr(off: i64, len: i64, si: i64) -> i64 with Mut, Panic {
@@ -2244,7 +2253,17 @@ fn compile_node(node: i64) -> i64 with Mut, Panic, Div {
                     }
                 }
                 if fi >= 0 {
-                    if is_sptr == 2 {
+                    if is_sptr == 4 {
+                        // BSS/heap thin pointer (oversized struct): positive offsets from ptr
+                        emit_load_rax(base_slot)
+                        let fdisp_o = fi * 8
+                        if fld_si >= 0 {
+                            if fdisp_o > 0 { emit(0x48); emit(0x8D); emit(0x80); emit_u32(fdisp_o) }
+                        } else {
+                            if fdisp_o == 0 { emit(0x48); emit(0x8B); emit(0x00) }
+                            else { emit(0x48); emit(0x8B); emit(0x80); emit_u32(fdisp_o) }
+                        }
+                    } else if is_sptr == 2 {
                         // Heap pointer (Box): positive offsets
                         emit_load_rax(base_slot)
                         let fdisp_h = fi * 8
@@ -2419,6 +2438,32 @@ fn compile_node(node: i64) -> i64 with Mut, Panic, Div {
         let avoff = ND_STR_OFF[arr_nd as usize]
         let avlen = ND_STR_LEN[arr_nd as usize]
         var asz: i64 = 1
+        if ND_KIND[arr_nd as usize] == 14 {
+            // Field array: obj.field[idx] — compute &obj.field[0] into rcx
+            let fobj_nd_r = ND_LEFT[arr_nd as usize]
+            let fobj_off_r = ND_STR_OFF[fobj_nd_r as usize]
+            let fobj_len_r = ND_STR_LEN[fobj_nd_r as usize]
+            let fld_off_r = ND_STR_OFF[arr_nd as usize]
+            let fld_len_r = ND_STR_LEN[arr_nd as usize]
+            let farr_slot = find_local(fobj_off_r, fobj_len_r)
+            let farr_si = LAST_LOCAL_SI
+            let farr_sptr = LAST_LOCAL_IS_SPTR
+            if farr_slot >= 0 && farr_si >= 0 && farr_sptr == 4 {
+                let ffi_r = find_field_slot_offset(farr_si, fld_off_r, fld_len_r)
+                if ffi_r >= 0 {
+                    emit_load_rax(farr_slot)
+                    emit(0x48); emit(0x8D); emit(0x88); emit_u32(ffi_r * 8)
+                    asz = 8
+                } else { emit(0x48); emit(0x31); emit(0xC9) }
+            } else if farr_slot >= 0 && farr_si >= 0 {
+                let ffi_r2 = find_field_slot_offset(farr_si, fld_off_r, fld_len_r)
+                if ffi_r2 >= 0 {
+                    let fadisp = 0 - ((farr_slot + ffi_r2 + 1) * 8)
+                    emit(0x48); emit(0x8D); emit(0x8D); emit_u32(fadisp)
+                    asz = 8
+                } else { emit(0x48); emit(0x31); emit(0xC9) }
+            } else { emit(0x48); emit(0x31); emit(0xC9) }
+        } else {
         let aslot = find_local(avoff, avlen)
         if aslot >= 0 {
             let adisp = 0 - ((aslot + 1) * 8)
@@ -2432,6 +2477,7 @@ fn compile_node(node: i64) -> i64 with Mut, Panic, Div {
             } else {
                 emit(0x48); emit(0x31); emit(0xC9)
             }
+        }
         }
         let idx_save = alloc_slot()
         emit(0x48); emit(0x89); emit(0x8D); emit_u32(0 - ((idx_save + 1) * 8))
@@ -2910,19 +2956,36 @@ fn compile_node(node: i64) -> i64 with Mut, Panic, Div {
                 if inner != -1 {
                     let ink = ND_KIND[inner as usize]
                     if ink == 2 {
-                        // Trailing NK_IDENT of struct local → SRET stores
+                        // Trailing NK_IDENT of struct local → SRET stores (or thin ptr return)
                         let soff = ND_STR_OFF[inner as usize]
                         let slen = ND_STR_LEN[inner as usize]
                         let sslot = find_local(soff, slen)
                         let ssi = LAST_LOCAL_SI
+                        let ssptr = LAST_LOCAL_IS_SPTR
                         if sslot >= 0 && ssi >= 0 {
+                            if ssptr == 4 {
+                                // Oversized: return BSS ptr directly in rax
+                                emit_load_rax(sslot)
+                                return 0
+                            }
                             let sfc = struct_total_slots(ssi)
                             emit_stack_to_sret_copy(sslot, sfc)
                             emit_mov_rax_imm(0)
                             return 0
                         }
                     } else if ink == 47 {
-                        // Trailing NK_STRUCT_LIT → SRET stores directly
+                        // Trailing NK_STRUCT_LIT → SRET stores (or BSS ptr for oversized)
+                        let sret_fc = if CURRENT_FN_RET_SI >= 0 { struct_total_slots(CURRENT_FN_RET_SI) } else { 0 }
+                        if sret_fc > 64 {
+                            let bss_addr_r = 0x700000 + MB_BSS_TOTAL + OVERSIZED_BSS_OFF
+                            OVERSIZED_BSS_OFF = OVERSIZED_BSS_OFF + sret_fc * 8
+                            let ptr_slot_r = alloc_slot()
+                            emit_mov_rax_imm(bss_addr_r)
+                            emit_store_rax(ptr_slot_r)
+                            compile_struct_lit_into_ptr(inner, ptr_slot_r, 0)
+                            emit_load_rax(ptr_slot_r)
+                            return 0
+                        }
                         compile_sret_from_struct_lit(inner, 0)
                         emit_mov_rax_imm(0)
                         return 0
@@ -2963,7 +3026,16 @@ fn compile_node(node: i64) -> i64 with Mut, Panic, Div {
         if struct_si >= 0 && init != -1 && ND_KIND[init as usize] == 47 {
             let fc2 = struct_total_slots(struct_si)
             let bslot2 = add_local_struct(name_off, name_len, struct_si, fc2)
-            compile_struct_lit_into(init, bslot2)
+            if fc2 > 64 {
+                // Oversized: claim BSS, store ptr in bslot2, write struct lit fields to BSS
+                let bss_addr = 0x700000 + MB_BSS_TOTAL + OVERSIZED_BSS_OFF
+                OVERSIZED_BSS_OFF = OVERSIZED_BSS_OFF + fc2 * 8
+                emit_mov_rax_imm(bss_addr)
+                emit_store_rax(bslot2)
+                compile_struct_lit_into_ptr(init, bslot2, 0)
+            } else {
+                compile_struct_lit_into(init, bslot2)
+            }
             return 0
         }
         if init != -1 && ND_KIND[init as usize] == 50 {
@@ -3015,7 +3087,29 @@ fn compile_node(node: i64) -> i64 with Mut, Panic, Div {
                 let bslot3 = add_local_struct(name_off, name_len, struct_si, fc3)
                 if init != -1 {
                     let init_nk3 = ND_KIND[init as usize]
-                    if init_nk3 == 2 {
+                    if fc3 > 64 {
+                        // Oversized struct thin ptr — just copy pointer or receive from callee
+                        if init_nk3 == 2 {
+                            let src_off3 = ND_STR_OFF[init as usize]
+                            let src_len3 = ND_STR_LEN[init as usize]
+                            let src_slot3 = find_local(src_off3, src_len3)
+                            if src_slot3 >= 0 {
+                                emit_load_rax(src_slot3)
+                                emit_store_rax(bslot3)
+                            }
+                        } else if init_nk3 == 47 {
+                            // Struct literal for oversized: claim BSS, write fields via ptr
+                            let bss_addr3 = 0x700000 + MB_BSS_TOTAL + OVERSIZED_BSS_OFF
+                            OVERSIZED_BSS_OFF = OVERSIZED_BSS_OFF + fc3 * 8
+                            emit_mov_rax_imm(bss_addr3)
+                            emit_store_rax(bslot3)
+                            compile_struct_lit_into_ptr(init, bslot3, 0)
+                        } else {
+                            // Function call or other expr: callee returns thin ptr in rax
+                            compile_node(init)
+                            emit_store_rax(bslot3)
+                        }
+                    } else if init_nk3 == 2 {
                         let src_off3 = ND_STR_OFF[init as usize]
                         let src_len3 = ND_STR_LEN[init as usize]
                         let src_slot3 = find_local(src_off3, src_len3)
@@ -3190,6 +3284,32 @@ fn compile_node(node: i64) -> i64 with Mut, Panic, Div {
             let avoff2 = ND_STR_OFF[arr_nd2 as usize]
             let avlen2 = ND_STR_LEN[arr_nd2 as usize]
             var asz2: i64 = 1
+            if ND_KIND[arr_nd2 as usize] == 14 {
+                // Field array write: obj.field[idx] = val
+                let fobj_nd_w = ND_LEFT[arr_nd2 as usize]
+                let fobj_off_w = ND_STR_OFF[fobj_nd_w as usize]
+                let fobj_len_w = ND_STR_LEN[fobj_nd_w as usize]
+                let fld_off_w = ND_STR_OFF[arr_nd2 as usize]
+                let fld_len_w = ND_STR_LEN[arr_nd2 as usize]
+                let warr_slot = find_local(fobj_off_w, fobj_len_w)
+                let warr_si = LAST_LOCAL_SI
+                let warr_sptr = LAST_LOCAL_IS_SPTR
+                if warr_slot >= 0 && warr_si >= 0 && warr_sptr == 4 {
+                    let ffi_w = find_field_slot_offset(warr_si, fld_off_w, fld_len_w)
+                    if ffi_w >= 0 {
+                        emit_load_rax(warr_slot)
+                        emit(0x48); emit(0x8D); emit(0x88); emit_u32(ffi_w * 8)
+                        asz2 = 8
+                    } else { emit(0x48); emit(0x31); emit(0xC9) }
+                } else if warr_slot >= 0 && warr_si >= 0 {
+                    let ffi_w2 = find_field_slot_offset(warr_si, fld_off_w, fld_len_w)
+                    if ffi_w2 >= 0 {
+                        let wadisp = 0 - ((warr_slot + ffi_w2 + 1) * 8)
+                        emit(0x48); emit(0x8D); emit(0x8D); emit_u32(wadisp)
+                        asz2 = 8
+                    } else { emit(0x48); emit(0x31); emit(0xC9) }
+                } else { emit(0x48); emit(0x31); emit(0xC9) }
+            } else {
             let aslot2 = find_local(avoff2, avlen2)
             if aslot2 >= 0 {
                 let adisp2 = 0 - ((aslot2 + 1) * 8)
@@ -3203,6 +3323,7 @@ fn compile_node(node: i64) -> i64 with Mut, Panic, Div {
                 } else {
                     emit(0x48); emit(0x31); emit(0xC9)
                 }
+            }
             }
             let base_save = alloc_slot()
             emit(0x48); emit(0x89); emit(0x8D); emit_u32(0 - ((base_save + 1) * 8))
@@ -3239,11 +3360,19 @@ fn compile_node(node: i64) -> i64 with Mut, Panic, Div {
             let v_len2 = ND_STR_LEN[obj_nd as usize]
             let bs2 = find_local(v_off2, v_len2)
             let lsi2 = LAST_LOCAL_SI
+            let is_sptr_w = LAST_LOCAL_IS_SPTR
             if bs2 >= 0 && lsi2 >= 0 {
                 let fi3 = find_field_slot_offset(lsi2, fn_off2, fn_len2)
                 if fi3 >= 0 {
-                    emit_load_rax(val_s)
-                    emit_store_rax(bs2 + fi3)
+                    if is_sptr_w == 4 {
+                        // Oversized thin ptr: mov [rcx + fi3*8], rax
+                        emit_load_rcx(bs2)
+                        emit_load_rax(val_s)
+                        emit(0x48); emit(0x89); emit(0x81); emit_u32(fi3 * 8)
+                    } else {
+                        emit_load_rax(val_s)
+                        emit_store_rax(bs2 + fi3)
+                    }
                 }
             }
         }
@@ -3259,12 +3388,19 @@ fn compile_node(node: i64) -> i64 with Mut, Panic, Div {
         if val != -1 {
             let val_nk = ND_KIND[val as usize]
             if val_nk == 2 {
-                // NK_IDENT: check if struct local → SRET stores
+                // NK_IDENT: check if struct local → SRET stores (or thin ptr return)
                 let rv_off = ND_STR_OFF[val as usize]
                 let rv_len = ND_STR_LEN[val as usize]
                 let rv_slot = find_local(rv_off, rv_len)
                 let rv_si = LAST_LOCAL_SI
+                let rv_sptr = LAST_LOCAL_IS_SPTR
                 if rv_slot >= 0 && rv_si >= 0 {
+                    if rv_sptr == 4 {
+                        // Oversized: return BSS ptr directly in rax
+                        emit_load_rax(rv_slot)
+                        emit_epilogue()
+                        return 0
+                    }
                     let rv_fc = struct_total_slots(rv_si)
                     emit_stack_to_sret_copy(rv_slot, rv_fc)
                     emit_mov_rax_imm(0)
@@ -3272,7 +3408,19 @@ fn compile_node(node: i64) -> i64 with Mut, Panic, Div {
                     return 0
                 }
             } else if val_nk == 47 && CURRENT_FN_RET_SI >= 0 {
-                // NK_STRUCT_LIT: write fields directly to SRET_BUF
+                // NK_STRUCT_LIT: write fields to SRET_BUF (or BSS for oversized)
+                let rv_fc2 = struct_total_slots(CURRENT_FN_RET_SI)
+                if rv_fc2 > 64 {
+                    let bss_addr_rv = 0x700000 + MB_BSS_TOTAL + OVERSIZED_BSS_OFF
+                    OVERSIZED_BSS_OFF = OVERSIZED_BSS_OFF + rv_fc2 * 8
+                    let ptr_slot_rv = alloc_slot()
+                    emit_mov_rax_imm(bss_addr_rv)
+                    emit_store_rax(ptr_slot_rv)
+                    compile_struct_lit_into_ptr(val, ptr_slot_rv, 0)
+                    emit_load_rax(ptr_slot_rv)
+                    emit_epilogue()
+                    return 0
+                }
                 compile_sret_from_struct_lit(val, 0)
                 emit_mov_rax_imm(0)
                 emit_epilogue()
@@ -3683,6 +3831,57 @@ fn compile_struct_lit_into(node: i64, bslot: i64) with Mut, Panic, Div {
     }
 }
 
+// Emit stores from NK_STRUCT_LIT into a BSS/heap thin pointer (is_sptr=4).
+// ptr_slot is a 1-slot local holding the base address.
+// base_fi is the cumulative slot offset for nested structs.
+fn compile_struct_lit_into_ptr(node: i64, ptr_slot: i64, base_fi: i64) with Mut, Panic, Div {
+    var fni = ND_EXTRA[node as usize]
+    while fni != -1 {
+        let fi = ND_IVAL[fni as usize]
+        let fval = ND_LEFT[fni as usize]
+        if fi >= 0 {
+            let fval_nk = ND_KIND[fval as usize]
+            if fval_nk == 47 {
+                // Nested struct literal: recurse with adjusted base
+                compile_struct_lit_into_ptr(fval, ptr_slot, base_fi + fi)
+            } else if fval_nk == 12 || fval_nk == 51 {
+                // Function call: check if it returns a struct via SRET
+                var call_fc: i64 = 0
+                let callee_nd2 = ND_LEFT[fval as usize]
+                let call_off2 = ND_STR_OFF[callee_nd2 as usize]
+                let call_len2 = ND_STR_LEN[callee_nd2 as usize]
+                let call_fn2 = find_fn_by_name(call_off2, call_len2)
+                if call_fn2 >= 0 {
+                    let ret_si2 = FN_RET_SI[call_fn2 as usize]
+                    if ret_si2 >= 0 { call_fc = struct_total_slots(ret_si2) }
+                }
+                compile_node(fval)
+                if call_fc > 0 && call_fc <= 64 {
+                    // SRET: data is in SRET_BUF; copy fc slots to BSS ptr + field offset
+                    var si2: i64 = 0
+                    while si2 < call_fc {
+                        emit(0x48); emit(0xB9); emit_u64(0x700000 + si2 * 8)
+                        emit(0x48); emit(0x8B); emit(0x01)
+                        emit_load_rcx(ptr_slot)
+                        emit(0x48); emit(0x89); emit(0x81); emit_u32((base_fi + fi + si2) * 8)
+                        si2 = si2 + 1
+                    }
+                } else {
+                    // Scalar or oversized return: write rax to field slot
+                    emit_load_rcx(ptr_slot)
+                    emit(0x48); emit(0x89); emit(0x81); emit_u32((base_fi + fi) * 8)
+                }
+            } else {
+                compile_node(fval)
+                // rax = value; rcx = ptr; mov [rcx + (base_fi+fi)*8], rax
+                emit_load_rcx(ptr_slot)
+                emit(0x48); emit(0x89); emit(0x81); emit_u32((base_fi + fi) * 8)
+            }
+        }
+        fni = ND_RIGHT[fni as usize]
+    }
+}
+
 fn compile_fn(fn_idx: i64) with Mut, Panic, Div {
     FN_CODE_OFF[fn_idx as usize] = CODE_LEN
     locals_reset()
@@ -3695,6 +3894,7 @@ fn compile_fn(fn_idx: i64) with Mut, Panic, Div {
         var s0: i64 = 0
         if p0si >= 0 {
             s0 = add_local_sptr(FN_PARAM_NAME_OFF[pbase as usize], FN_PARAM_NAME_LEN[pbase as usize], p0si)
+            if struct_total_slots(p0si) > 64 { LOCAL_IS_SPTR[(LOCAL_COUNT - 1) as usize] = 4 }
         } else {
             s0 = add_local(FN_PARAM_NAME_OFF[pbase as usize], FN_PARAM_NAME_LEN[pbase as usize])
         }
@@ -3706,6 +3906,7 @@ fn compile_fn(fn_idx: i64) with Mut, Panic, Div {
         var s1: i64 = 0
         if p1si >= 0 {
             s1 = add_local_sptr(FN_PARAM_NAME_OFF[(pbase + 1) as usize], FN_PARAM_NAME_LEN[(pbase + 1) as usize], p1si)
+            if struct_total_slots(p1si) > 64 { LOCAL_IS_SPTR[(LOCAL_COUNT - 1) as usize] = 4 }
         } else {
             s1 = add_local(FN_PARAM_NAME_OFF[(pbase + 1) as usize], FN_PARAM_NAME_LEN[(pbase + 1) as usize])
         }
@@ -3717,6 +3918,7 @@ fn compile_fn(fn_idx: i64) with Mut, Panic, Div {
         var s2: i64 = 0
         if p2si >= 0 {
             s2 = add_local_sptr(FN_PARAM_NAME_OFF[(pbase + 2) as usize], FN_PARAM_NAME_LEN[(pbase + 2) as usize], p2si)
+            if struct_total_slots(p2si) > 64 { LOCAL_IS_SPTR[(LOCAL_COUNT - 1) as usize] = 4 }
         } else {
             s2 = add_local(FN_PARAM_NAME_OFF[(pbase + 2) as usize], FN_PARAM_NAME_LEN[(pbase + 2) as usize])
         }
@@ -3728,6 +3930,7 @@ fn compile_fn(fn_idx: i64) with Mut, Panic, Div {
         var s3: i64 = 0
         if p3si >= 0 {
             s3 = add_local_sptr(FN_PARAM_NAME_OFF[(pbase + 3) as usize], FN_PARAM_NAME_LEN[(pbase + 3) as usize], p3si)
+            if struct_total_slots(p3si) > 64 { LOCAL_IS_SPTR[(LOCAL_COUNT - 1) as usize] = 4 }
         } else {
             s3 = add_local(FN_PARAM_NAME_OFF[(pbase + 3) as usize], FN_PARAM_NAME_LEN[(pbase + 3) as usize])
         }
@@ -3814,7 +4017,7 @@ fn write_elf(entry_fn: i64) with Mut, Panic, Div {
     elf_emit_u64(total_size)
     elf_emit_u64(0x1000)
 
-    let bss_size = if MB_BSS_TOTAL > 0 { MB_BSS_TOTAL + 4096 } else { 4096 }
+    let bss_size = if MB_BSS_TOTAL > 0 { MB_BSS_TOTAL + OVERSIZED_BSS_OFF + 4096 } else { OVERSIZED_BSS_OFF + 4096 }
     elf_emit_u32(1)
     elf_emit_u32(6)
     elf_emit_u64(total_size)
