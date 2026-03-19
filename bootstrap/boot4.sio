@@ -3092,26 +3092,39 @@ fn compile_node(node: i64) -> i64 with Mut, Panic, Div {
             let ptr_slot = add_local(name_off, name_len)
             // For large arrays (> 256 elements), use a loop-based init to avoid code bloat
             if arr_count > 256 {
-                // Allocate capped number of slots (256 max) so frame doesn't blow up
-                var ai2: i64 = 0
-                while ai2 < 256 {
-                    alloc_slot()
-                    ai2 = ai2 + 1
-                }
-                let data_disp2 = 0 - ((ptr_slot + 2) * 8)
-                emit(0x48); emit(0x8D); emit(0x85); emit_u32(data_disp2)
+                // Use BSS allocation to avoid ptr_slot corruption by stack data
+                // Stack approach put data at slot S+1 while ptr_slot is at S;
+                // writing data[8] overwrites ptr_slot (1 slot = 8 bytes offset).
+                let arr_bss_addr = 0x700000 + MB_BSS_TOTAL + OVERSIZED_BSS_OFF
+                OVERSIZED_BSS_OFF = OVERSIZED_BSS_OFF + arr_count
+                // Align OVERSIZED_BSS_OFF to 8 bytes
+                let arr_rem = OVERSIZED_BSS_OFF - (OVERSIZED_BSS_OFF / 8) * 8
+                if arr_rem != 0 { OVERSIZED_BSS_OFF = OVERSIZED_BSS_OFF + (8 - arr_rem) }
+                // Store BSS base address in ptr_slot
+                emit_mov_rax_imm(arr_bss_addr)
                 emit_store_rax(ptr_slot)
-                // Evaluate fill value once
-                let fill_slot = alloc_slot()
-                compile_node(ND_LEFT[init as usize])
-                emit_store_rax(fill_slot)
-                // Counter in rcx, loop over 256 elements
-                var li: i64 = 0
-                while li < 256 {
-                    let ldisp = 0 - ((ptr_slot + 2 + li) * 8)
-                    emit_load_rax(fill_slot)
-                    emit(0x48); emit(0x89); emit(0x85); emit_u32(ldisp)
-                    li = li + 1
+                // BSS is zero-initialized by OS; only emit fill loop for non-zero fill
+                let fill_nd2 = ND_LEFT[init as usize]
+                let fill_nk2 = ND_KIND[fill_nd2 as usize]
+                let fill_v2 = ND_IVAL[fill_nd2 as usize]
+                if fill_nk2 != 4 || fill_v2 != 0 {
+                    // compile fill value into al (rax low byte)
+                    compile_node(fill_nd2)
+                    // mov rdi, arr_bss_addr  (48 BF imm64)
+                    emit(0x48); emit(0xBF); emit_u64(arr_bss_addr)
+                    // xor rcx, rcx
+                    emit(0x48); emit(0x31); emit(0xC9)
+                    // loop: mov byte [rdi+rcx], al  (88 04 0F)
+                    let loop_st2 = CODE_LEN
+                    emit(0x88); emit(0x04); emit(0x0F)
+                    // inc rcx  (48 FF C1)
+                    emit(0x48); emit(0xFF); emit(0xC1)
+                    // cmp rcx, arr_count  (48 81 F9 imm32)
+                    emit(0x48); emit(0x81); emit(0xF9); emit_u32(arr_count)
+                    // jl loop_st2  (7C rel8)
+                    let jl_off2 = CODE_LEN
+                    let jl_rel2 = loop_st2 - (jl_off2 + 2)
+                    emit(0x7C); emit(jl_rel2)
                 }
             } else {
                 var ai: i64 = 0
