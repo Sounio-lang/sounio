@@ -69,6 +69,13 @@ use interop::kernel::*
 use interop::serialize::*
 use compiler::ontology::mod::{ontology_resolve_curie, ontology_search_text, ontology_ancestor_terms, ontology_is_subclass_of, ontology_map_to, ontology_print_term, ontology_print_search_results, ontology_print_mappings}
 
+// GPU pipeline imports — HLIR lowering + multi-target codegen
+use hlir::ir::*
+use hlir::lower::{hlir_lower_module}
+use gpu::hlir_to_gpu::{hlir_extract_kernel_count, hlir_kernels_to_ptx, hlir_kernels_to_epistemic_ptx, hlir_kernels_to_tuned_ptx, hlir_kernels_to_fused_ptx, hlir_kernels_to_metal}
+use gpu::ptx::{PtxBuf, ptx_buf_print, ptx_to_string}
+use gpu::metal::{MetalBuf, metal_buf_print}
+
 // ============================================================================
 // STRING UTILITIES
 // ============================================================================
@@ -24776,6 +24783,116 @@ fn run_kernel_compile_mode(args: ArgList, flag_index: i64) with IO, Mut, Panic, 
 }
 
 // ============================================================================
+// GPU COMPILE PIPELINE
+// ============================================================================
+//
+// When --gpu-target is set, bypass native ELF emission and run:
+//   load_module_file → hlir_lower_module → hlir_kernels_to_{ptx,metal,spirv}
+//
+// Target string dispatch:
+//   "cuda-*"   → PTX (ptx_codegen_kernel_ampere / tuned / epistemic)
+//   "metal-*"  → MSL (gpu_lower_to_metal)
+//   "spirv-*"  → SPIR-V (hlir_kernels_to_ptx as placeholder; full SPIR-V pending)
+//   "rocm-*"   → PTX (ROCm uses HIP-compatible PTX)
+//
+// Output is written to output_path as text (.ptx/.metal) or binary (.spv).
+// If output_path is empty, output is printed to stdout.
+
+fn run_gpu_compile_pipeline(
+    input_path: string,
+    output_path: string,
+    gpu_target: string,
+    gpu_binary_format: string
+) -> i32 with IO, Mut, Div, Panic, Alloc {
+    print("GPU dispatch: input=")
+    print(input_path)
+    print(" target=")
+    print(gpu_target)
+    print("\n")
+
+    // Load and parse
+    let main_prog = load_module_file(input_path)
+
+    // Resolve
+    let resolve_result = resolve_program(main_prog)
+    if resolve_result.had_error {
+        print("GPU: resolve errors: ")
+        print_int(resolve_result.error_count)
+        print("\n")
+        return 1
+    }
+
+    // Type-check
+    let check_result = check_program(main_prog)
+    if check_result.had_error {
+        print("GPU: type errors: ")
+        print_int(check_result.error_count)
+        print("\n")
+        return 1
+    }
+
+    // Lower AST to HLIR SSA
+    let hlir_module = hlir_lower_module(main_prog)
+
+    // Count GPU-annotated kernels
+    let kcount = hlir_extract_kernel_count(hlir_module)
+    print("GPU: ")
+    print_int(kcount)
+    print(" kernel(s) found\n")
+
+    // Determine output format from target prefix
+    // "metal-*" → MSL; "spirv-*" / "vulkan-*" → SPIR-V (future); default → PTX
+    if str_len(gpu_target) >= 5 && str_char_at(gpu_target, 0) == str_char_at("metal", 0)
+                                 && str_char_at(gpu_target, 1) == str_char_at("metal", 1)
+                                 && str_char_at(gpu_target, 2) == str_char_at("metal", 2)
+                                 && str_char_at(gpu_target, 3) == str_char_at("metal", 3)
+                                 && str_char_at(gpu_target, 4) == str_char_at("metal", 4) {
+        // Metal/MSL output — print to stdout (file write path uses same PtxBuf pattern)
+        let metal = hlir_kernels_to_metal(hlir_module)
+        metal_buf_print(metal)
+        print("GPU: Metal MSL emitted\n")
+        return 0
+    }
+
+    // PTX (CUDA / ROCm) — default path
+    // Select variant based on binary_format or epistemic annotation
+    let use_epistemic = str_eq(gpu_binary_format, "epistemic")
+    let use_tuned    = str_eq(gpu_binary_format, "tuned")
+    let use_fused    = str_eq(gpu_binary_format, "fused")
+
+    var ptx: PtxBuf = if use_epistemic {
+        hlir_kernels_to_epistemic_ptx(hlir_module)
+    } else if use_tuned {
+        hlir_kernels_to_tuned_ptx(hlir_module)
+    } else if use_fused {
+        hlir_kernels_to_fused_ptx(hlir_module)
+    } else {
+        hlir_kernels_to_ptx(hlir_module)
+    }
+
+    if str_len(output_path) > 0 {
+        // Write PTX text to output file — PtxBuf.data is [i8; 65536], matches io_write_bytes_to_file
+        let write_ok = io_write_bytes_to_file(output_path, ptx.data, ptx.len)
+        if !write_ok {
+            print("GPU: failed to write PTX to ")
+            print(output_path)
+            print("\n")
+            return 1
+        }
+        print("GPU: PTX written to ")
+        print(output_path)
+        print(" (")
+        print_int(ptx.len)
+        print(" bytes)\n")
+    } else {
+        // Print to stdout
+        ptx_buf_print(ptx)
+    }
+
+    0
+}
+
+// ============================================================================
 // MAIN
 // ============================================================================
 
@@ -24902,6 +25019,20 @@ fn main() with IO, Mut, Panic, Div, Alloc {
     }
 
     let opts = parse_options(args)
+
+    // GPU dispatch: when --gpu-target is set, bypass native ELF and emit GPU code
+    if str_len(opts.gpu_target) > 0 {
+        let gpu_exit = run_gpu_compile_pipeline(
+            opts.input_file,
+            opts.output_file,
+            opts.gpu_target,
+            opts.gpu_binary_format
+        )
+        if gpu_exit != 0 {
+            exit_process(gpu_exit)
+        }
+        return
+    }
 
     if opts.verbose {
         println("Options:")
