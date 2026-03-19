@@ -1472,7 +1472,7 @@ fn hlir_bin_op_type(bin_op: i64) -> GpuType {
 }
 
 // Append a single GPU op to a GpuKernelIr. Returns the kernel with op appended.
-fn gpu_kernel_append_op(kernel: GpuKernelIr, op: GpuOp) -> GpuKernelIr with Mut {
+fn gpu_kernel_append_op(kernel: GpuKernelIr, op: GpuOp) -> GpuKernelIr with Mut, Panic {
     var k = kernel
     if k.op_count < 1024 {
         k.ops[k.op_count as usize] = op
@@ -1847,19 +1847,11 @@ fn gpu_emit_epistemic_shadow_unary(
         abs_val.ty = GpuType::GpuF64
         k = gpu_kernel_append_op(k, abs_val)
 
-        // Step 2: tmp2 = 2.0 * abs(val)
-        var two_const = gpu_op_new()
-        two_const.opcode = GpuOpcode::GpuConst
-        two_const.dst_reg = eps_dst + 1001
-        two_const.imm_i64 = 2
-        two_const.ty = GpuType::GpuF64
-        k = gpu_kernel_append_op(k, two_const)
-
         var mul_two = gpu_op_new()
-        mul_two.opcode = GpuOpcode::GpuMul
+        mul_two.opcode = GpuOpcode::GpuMulImm
         mul_two.dst_reg = eps_dst + 1002
-        mul_two.lhs_reg = eps_dst + 1001
-        mul_two.rhs_reg = eps_dst + 1000
+        mul_two.lhs_reg = eps_dst + 1000
+        mul_two.rhs_imm = 2
         mul_two.ty = GpuType::GpuF64
         k = gpu_kernel_append_op(k, mul_two)
 
@@ -1871,12 +1863,13 @@ fn gpu_emit_epistemic_shadow_unary(
         div_eps.rhs_reg = eps_dst + 1002
         div_eps.ty = GpuType::GpuF64
         k = gpu_kernel_append_op(k, div_eps)
-    } else if op.opcode == GpuOpcode::GpuAbs || op.opcode == GpuOpcode::GpuNeg {
-        // eps passthrough: uncertainty unchanged by abs/neg
+    } else if op.opcode == GpuOpcode::GpuAbs {
+        // eps passthrough: uncertainty unchanged by abs
         var copy_eps = gpu_op_new()
-        copy_eps.opcode = GpuOpcode::GpuCopy
+        copy_eps.opcode = GpuOpcode::GpuMulImm
         copy_eps.dst_reg = eps_dst
-        copy_eps.src_reg = eps_src
+        copy_eps.lhs_reg = eps_src
+        copy_eps.rhs_imm = 1
         copy_eps.ty = GpuType::GpuF64
         k = gpu_kernel_append_op(k, copy_eps)
     }
@@ -1911,9 +1904,8 @@ fn hlir_function_to_epistemic_gpu_kernel(func: HlirFunction) -> GpuKernelIr with
            op.opcode == GpuOpcode::GpuMul || op.opcode == GpuOpcode::GpuDiv {
             kernel = gpu_emit_epistemic_shadow_binary(kernel, op, shadow_offset)
         }
-        // Unary ops: sqrt, abs, neg (Sprint 30)
-        if op.opcode == GpuOpcode::GpuSqrt || op.opcode == GpuOpcode::GpuAbs ||
-           op.opcode == GpuOpcode::GpuNeg {
+        // Unary ops: sqrt, abs
+        if op.opcode == GpuOpcode::GpuSqrt || op.opcode == GpuOpcode::GpuAbs {
             kernel = gpu_emit_epistemic_shadow_unary(kernel, op, shadow_offset)
         }
 
@@ -2119,7 +2111,7 @@ let HLIR_GPU_BUILTIN_SYNC_THREADS: i64 = 7
 //   dst_reg     — destination virtual register for the result (-1 for void ops)
 //
 // Returns the kernel with one GpuOp appended (or unchanged if tag unknown).
-fn hlir_lower_gpu_builtins(kernel: GpuKernelIr, builtin_tag: i64, dst_reg: i64) -> GpuKernelIr with Mut {
+fn hlir_lower_gpu_builtins(kernel: GpuKernelIr, builtin_tag: i64, dst_reg: i64) -> GpuKernelIr with Mut, Panic {
     var k = kernel
     if builtin_tag == HLIR_GPU_BUILTIN_TID_X {
         // gpu.thread_id.x → GpuGetTid axis=0
@@ -2204,7 +2196,7 @@ fn hlir_lower_gpu_builtins(kernel: GpuKernelIr, builtin_tag: i64, dst_reg: i64) 
 //   num_params + 4 → global_idx  (result)
 //
 // Returns the kernel with prologue ops appended.
-fn hlir_emit_kernel_prologue(kernel: GpuKernelIr, num_params: i64) -> GpuKernelIr with Mut {
+fn hlir_emit_kernel_prologue(kernel: GpuKernelIr, num_params: i64) -> GpuKernelIr with Mut, Panic {
     var k = kernel
     let r_tid: i64 = num_params + 0
     let r_bid: i64 = num_params + 1

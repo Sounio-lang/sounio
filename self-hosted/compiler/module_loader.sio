@@ -1165,13 +1165,20 @@ fn load_multimodule_ir_traced(main_path: string, trace: &! LoadMultimoduleIrTrac
         return multimodule_ir_error("type_check_failed")
     }
     trace.typechecked_modules = 1
-    let seed_lower_result = load_multimodule_lower_program_traced(programs[0], seed_epistemic, 0, &! trace)
-    if seed_lower_result.had_error {
+    var seed_lower_had_error = false
+    var merged_module = ir_empty_module()
+    {
+        let seed_lower_result = load_multimodule_lower_program_traced(programs[0], seed_epistemic, 0, &! trace)
+        seed_lower_had_error = seed_lower_result.had_error
+        if !seed_lower_had_error {
+            merged_module = seed_lower_result.module
+        }
+    }
+    if seed_lower_had_error {
         print("IR lowering failed for module 0\n")
         return multimodule_ir_error("ir_lowering_failed")
     }
     trace.merged_modules = 1
-    var merged_module = seed_lower_result.module
 
     i = 1
     while i < loaded {
@@ -1185,15 +1192,23 @@ fn load_multimodule_ir_traced(main_path: string, trace: &! LoadMultimoduleIrTrac
             return multimodule_ir_error("type_check_failed")
         }
         trace.typechecked_modules = trace.typechecked_modules + 1
-        let lower_result = load_multimodule_lower_program_traced(programs[i], epistemic, i, &! trace)
-        if lower_result.had_error {
+        var lower_had_error = false
+        var lowered_module = ir_empty_module()
+        {
+            let lower_result = load_multimodule_lower_program_traced(programs[i], epistemic, i, &! trace)
+            lower_had_error = lower_result.had_error
+            if !lower_had_error {
+                lowered_module = lower_result.module
+            }
+        }
+        if lower_had_error {
             print("IR lowering failed for module ")
             print_int(i)
             print("\n")
             return multimodule_ir_error("ir_lowering_failed")
         }
         trace.last_stage = "merge"
-        merged_module = ir_merge_modules(merged_module, lower_result.module)
+        merged_module = ir_merge_modules(merged_module, lowered_module)
         trace.merged_modules = trace.merged_modules + 1
         i = i + 1
     }
@@ -1467,6 +1482,34 @@ fn native_streaming_diag_enabled() -> bool with IO, Mut, Panic, Div {
     str_eq(read_env("SOUNIO_NATIVE_STREAM_DIAG"), "1")
 }
 
+fn thin_copy_huge_to_small(src: [i8; 16777216], len: i64) -> [i8; 131072] with Mut, Panic, Div {
+    var out: [i8; 131072] = [0; 131072]
+    var i: i64 = 0
+    while i < len && i < 131072 {
+        out[i as usize] = src[i as usize]
+        i = i + 1
+    }
+    out
+}
+
+fn thin_read_small_file(path: string) -> (bool, [i8; 131072], i64) with IO, Mut, Panic, Div {
+    let len = file_size(path)
+    if len <= 0 || len > 131072 || !file_exists(path) {
+        return (false, [0; 131072], 0)
+    }
+    let wide: [i8; 16777216] = read_file(path)
+    let narrow = thin_copy_huge_to_small(wide, len)
+    (true, narrow, len)
+}
+
+fn thin_native_compile_result_from_wide(bytes: [i8; 16777216], len: i64, format_id: i64) -> NativeCompileResult with Mut, Panic, Div {
+    if len <= 0 || len > 131072 {
+        return native_compile_result_error(ERR_BACKEND_NOT_IMPLEMENTED(), "streaming_native_binary_too_large")
+    }
+    let narrow = thin_copy_huge_to_small(bytes, len)
+    native_compile_result_ok(narrow, len, format_id)
+}
+
 fn compile_singlemodule_native_streaming_result_from_program(
     main_path: string,
     prog: &Program,
@@ -1542,7 +1585,7 @@ fn compile_singlemodule_native_streaming_result_from_program(
 
     nc = compile_module_streaming_finish(nc, full_module)
     let elf = finalize_compiled_elf(nc, 4194304)
-    native_compile_result_ok(elf.bytes, elf.len, FORMAT_ELF64())
+    thin_native_compile_result_from_wide(elf.bytes, elf.len, FORMAT_ELF64())
 }
 
 fn compile_multimodule_native_maybe_streaming(main_path: string, target_spec: NativeTargetSpec) -> (bool, NativeCompileResult) with IO, Mut, Div, Panic, Alloc {
@@ -1578,13 +1621,13 @@ struct ModuleSummary {
     fn_strategies: [i64; 256],
 }
 
-struct ModuleGraphNode {
+struct ThinModuleGraphNode {
     file_path: string,
     source_hash: i64,
 }
 
-struct ModuleGraph {
-    nodes: [ModuleGraphNode; 64],
+struct ThinModuleGraph {
+    nodes: [ThinModuleGraphNode; 64],
     count: i64,
     registry: ModuleRegistry,
     had_error: bool,
@@ -1651,15 +1694,15 @@ fn thin_empty_module_summary() -> ModuleSummary {
     }
 }
 
-fn thin_empty_module_graph_node() -> ModuleGraphNode {
-    ModuleGraphNode {
+fn thin_empty_module_graph_node() -> ThinModuleGraphNode {
+    ThinModuleGraphNode {
         file_path: "",
         source_hash: 0,
     }
 }
 
-fn thin_empty_module_graph() -> ModuleGraph {
-    ModuleGraph {
+fn thin_empty_module_graph() -> ThinModuleGraph {
+    ThinModuleGraph {
         nodes: [thin_empty_module_graph_node(); 64],
         count: 0,
         registry: module_registry_new(),
@@ -1812,7 +1855,7 @@ fn thin_cache_mode_can_write(cache_mode: string) -> bool with Mut, Panic, Div {
 }
 
 fn thin_cache_path(cache_dir: string, kind: string, digest: i64, ext: string) -> string with Mut, Panic, Div {
-    cache_dir + "/" + kind + "_" + int_to_string(digest) + ext
+    cache_dir + "/" + kind + "_" + io_trace_i64_string(digest) + ext
 }
 
 fn thin_try_write_ir_cache(path: string, module: &IrModule, stats: &! ThinCacheStats) -> bool with IO, Mut, Panic, Div, Alloc {
@@ -1828,13 +1871,12 @@ fn thin_try_write_ir_cache(path: string, module: &IrModule, stats: &! ThinCacheS
 }
 
 fn thin_try_read_ir_cache(path: string, stats: &! ThinCacheStats) -> (bool, IrModule) with IO, Mut, Panic, Div, Alloc {
-    let len = file_size(path)
-    if len <= 0 || len > 131072 || !file_exists(path) {
+    let read_pair = thin_read_small_file(path)
+    if !read_pair.0 {
         return (false, ir_empty_module())
     }
-    let stage: [i8; 131072] = read_file(path)
-    (*stats).persistent_bytes = (*stats).persistent_bytes + len
-    let restored = deserialize_ir_module(stage, len)
+    (*stats).persistent_bytes = (*stats).persistent_bytes + read_pair.2
+    let restored = deserialize_ir_module(read_pair.1, read_pair.2)
     if restored.fn_count <= 0 {
         return (false, ir_empty_module())
     }
@@ -1842,23 +1884,22 @@ fn thin_try_read_ir_cache(path: string, stats: &! ThinCacheStats) -> (bool, IrMo
 }
 
 fn thin_try_read_ir_cache_no_stats(path: string) -> (bool, IrModule) with IO, Mut, Panic, Div, Alloc {
-    let len = file_size(path)
-    if len <= 0 || len > 131072 || !file_exists(path) {
+    let read_pair = thin_read_small_file(path)
+    if !read_pair.0 {
         return (false, ir_empty_module())
     }
-    let stage: [i8; 131072] = read_file(path)
-    let restored = deserialize_ir_module(stage, len)
+    let restored = deserialize_ir_module(read_pair.1, read_pair.2)
     if restored.fn_count <= 0 {
         return (false, ir_empty_module())
     }
     (true, restored)
 }
 
-fn thin_try_write_binary_cache(path: string, bytes: [i8; 131072], len: i64, stats: &! ThinCacheStats) -> bool with IO, Mut {
+fn thin_try_write_binary_cache(path: string, bytes: [i8; 16777216], len: i64, stats: &! ThinCacheStats) -> bool with IO, Mut {
     if len <= 0 {
         return false
     }
-    let ok = write_file(path, bytes, len) == 0
+    let ok = io_write_huge_binary(path, bytes, len)
     if ok {
         (*stats).persistent_bytes = (*stats).persistent_bytes + len
     }
@@ -1866,16 +1907,15 @@ fn thin_try_write_binary_cache(path: string, bytes: [i8; 131072], len: i64, stat
 }
 
 fn thin_try_read_binary_cache(path: string, stats: &! ThinCacheStats) -> (bool, [i8; 131072], i64) with IO, Mut, Panic, Div {
-    let len = file_size(path)
-    if len <= 0 || len > 131072 || !file_exists(path) {
+    let read_pair = thin_read_small_file(path)
+    if !read_pair.0 {
         return (false, [0; 131072], 0)
     }
-    let bytes: [i8; 131072] = read_file(path)
-    (*stats).persistent_bytes = (*stats).persistent_bytes + len
-    (true, bytes, len)
+    (*stats).persistent_bytes = (*stats).persistent_bytes + read_pair.2
+    (true, read_pair.1, read_pair.2)
 }
 
-fn thin_cache_skip_ws(buf: [i8; 65536], len: i64, pos: i64) -> i64 with Mut, Panic, Div {
+fn thin_cache_skip_ws(buf: [i8; 131072], len: i64, pos: i64) -> i64 with Mut, Panic, Div {
     var p = pos
     while p < len {
         let ch = buf[p as usize] as i64
@@ -1888,7 +1928,7 @@ fn thin_cache_skip_ws(buf: [i8; 65536], len: i64, pos: i64) -> i64 with Mut, Pan
     p
 }
 
-fn thin_cache_read_token(buf: [i8; 65536], len: i64, pos: i64) -> (string, i64) with Mut, Panic, Div {
+fn thin_cache_read_token(buf: [i8; 131072], len: i64, pos: i64) -> (string, i64) with Mut, Panic, Div {
     var p = thin_cache_skip_ws(buf, len, pos)
     var out: [i8; 256] = [0; 256]
     var out_len: i64 = 0
@@ -1937,8 +1977,32 @@ fn thin_try_write_summary_cache(path: string, summary: ModuleSummary, stats: &! 
 // parse_i64: thin wrapper — parse a decimal string to i64, returning 0 on failure.
 // Used by thin-cache readers that write/read integer tokens as plain decimal strings.
 fn parse_i64(s: string) -> i64 with Mut, Div {
-    let pair = parse_i64_decimal(s)
-    if pair.0 { pair.1 } else { 0 }
+    let len = str_len(s)
+    if len <= 0 {
+        return 0
+    }
+
+    var idx: i64 = 0
+    var sign: i64 = 1
+    if str_char_at(s, 0) == 45 {
+        sign = 0 - 1
+        idx = 1
+        if len == 1 {
+            return 0
+        }
+    }
+
+    var value: i64 = 0
+    while idx < len {
+        let ch = str_char_at(s, idx) as i64
+        if ch < 48 || ch > 57 {
+            return 0
+        }
+        value = value * 10 + (ch - 48)
+        idx = idx + 1
+    }
+
+    if sign < 0 { 0 - value } else { value }
 }
 
 fn thin_try_read_summary_cache(
@@ -1948,11 +2012,12 @@ fn thin_try_read_summary_cache(
     source_hash: i64,
     stats: &! ThinCacheStats
 ) -> (bool, ModuleSummary) with IO, Mut, Panic, Div {
-    let len = file_size(path)
-    if len <= 0 || len > 65536 || !file_exists(path) {
+    let read_pair = thin_read_small_file(path)
+    if !read_pair.0 {
         return (false, thin_empty_module_summary())
     }
-    let bytes = read_file(path)
+    let bytes = read_pair.1
+    let len = read_pair.2
     (*stats).persistent_bytes = (*stats).persistent_bytes + len
     var pos: i64 = 0
     let count_tok = thin_cache_read_token(bytes, len, pos)
@@ -2026,11 +2091,12 @@ fn thin_try_write_unit_cache(path: string, unit: CompiledUnit, stats: &! ThinCac
 }
 
 fn thin_try_read_unit_cache(path: string, stats: &! ThinCacheStats) -> (bool, CompiledUnit) with IO, Mut, Panic, Div {
-    let len = file_size(path)
-    if len <= 0 || len > 65536 || !file_exists(path) {
+    let read_pair = thin_read_small_file(path)
+    if !read_pair.0 {
         return (false, thin_empty_compiled_unit())
     }
-    let bytes = read_file(path)
+    let bytes = read_pair.1
+    let len = read_pair.2
     (*stats).persistent_bytes = (*stats).persistent_bytes + len
     var pos: i64 = 0
     let m0 = thin_cache_read_token(bytes, len, pos)
@@ -2164,7 +2230,7 @@ fn thin_collect_imports_from_items(
     }
 }
 
-fn thin_load_module_graph(main_path: string) -> ModuleGraph with IO, Mut, Panic, Div, Alloc {
+fn thin_load_module_graph(main_path: string) -> ThinModuleGraph with IO, Mut, Panic, Div, Alloc {
     print("[thinlink] graph:start ")
     print(main_path)
     print("\n")
@@ -2243,7 +2309,7 @@ fn thin_module_summary_lookup_any(summary: ModuleSummary, fn_name: Name) -> (boo
 }
 
 fn thin_load_or_build_module_summary(
-    graph: ModuleGraph,
+    graph: ThinModuleGraph,
     module_idx: i64,
     target_spec: NativeTargetSpec,
     optimize: bool,
@@ -2432,7 +2498,7 @@ fn thin_load_profile_if_requested(
 }
 
 fn thin_build_import_plans(
-    graph: ModuleGraph,
+    graph: ThinModuleGraph,
     summaries: [ModuleSummary; 64],
     owner_module: i64,
     import_map: ThinImportMap,
@@ -2477,7 +2543,7 @@ fn thin_build_import_plans(
 }
 
 fn thin_build_compiled_unit(
-    graph: ModuleGraph,
+    graph: ThinModuleGraph,
     summaries: [ModuleSummary; 64],
     module_idx: i64,
     import_map: ThinImportMap,
@@ -3416,7 +3482,7 @@ fn compile_multimodule_native_advanced(
         }
         nc = compile_module_streaming_finish(nc, &final_module)
         let elf = finalize_compiled_elf(nc, 4194304)
-        final_result = native_compile_result_ok(elf.bytes, elf.len, FORMAT_ELF64())
+        final_result = thin_native_compile_result_from_wide(elf.bytes, elf.len, FORMAT_ELF64())
         if str_len(cache_dir) > 0 && thin_cache_mode_can_write(cache_mode) {
             let _ = thin_try_write_binary_cache(link_cache_path, elf.bytes, elf.len, &! cache_stats_accum)
         }
