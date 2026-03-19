@@ -35,7 +35,7 @@ It converts existing CI and self-host gate outputs into a claim-backed evidence 
   - `scripts/fast_gate.sh`
   - `scripts/e2e_gate.sh` (called by `fast_gate.sh`)
   - `scripts/check_feature_matrix.sh`
-  - `scripts/selfhost_zero_fallback_gate.sh`
+  - `scripts/selfhost/selfhost_zero_fallback_gate.sh`
   - `scripts/selfhost_driver_output_gate.sh`
   - `scripts/poseidon_gate.sh`
 - Primary CI mapping:
@@ -76,7 +76,7 @@ Required acceptance criteria:
 | Fast regression gate completion | `bash scripts/fast_gate.sh` | `[fast-gate] ok` | Marker present |
 | End-to-end backend checks | `bash scripts/e2e_gate.sh` | `[e2e] ok` | Marker present |
 | Feature matrix checks | `bash scripts/check_feature_matrix.sh` | `[feature-matrix] ok` | Marker present |
-| Self-host strict zero fallback summary | `bash scripts/selfhost_zero_fallback_gate.sh` | `SELFHOST_ZERO_GATE_SUMMARY pass=<n> fail=<m>` | `fail=0` |
+| Self-host strict zero fallback summary | `bash scripts/selfhost/selfhost_zero_fallback_gate.sh` | `SELFHOST_ZERO_GATE_SUMMARY pass=<n> fail=<m>` | `fail=0` |
 | Self-host driver output smoke | `bash scripts/selfhost_driver_output_gate.sh` | `SELFHOST_DRIVER_OUTPUT_GATE_SUMMARY pass=<n> fail=<m>` | `fail=0` |
 | Parse-all report completeness | same as above | `PASS [parse-all-report] ...` | Pass marker present |
 | Parse-all shard completeness | same as above | `PASS [parse-all-shards] ...` | Pass marker present |
@@ -92,7 +92,7 @@ Required acceptance criteria:
 |---|---|---|---|
 | `C1` | Sounio build/test path is reproducible on public runners | `.github/workflows/ci.yml` `fast-gate`; `scripts/fast_gate.sh` | `[fast-gate] ok` |
 | `C2` | Multi-backend pipeline is exercised (native, LLVM when available, GPU compile smoke + runtime attestation gate) | `scripts/e2e_gate.sh`, CI `fast-gate` | `[e2e] native build + run`, `[e2e] llvm ...` or skip marker, `[e2e] gpu backend compile smoke`, `[e2e] gpu runtime attestation gate`, `[e2e] ok` |
-| `C3` | Self-host path passes strict no-fallback corpus gate | `scripts/selfhost_zero_fallback_gate.sh`, CI `selfhost-zero-fallback` | `PASS [full-selfhost] ...`, `PASS [parse-all-report] ...`, `PASS [parse-all-shards] ...`, `SELFHOST_ZERO_GATE_SUMMARY ... fail=0` |
+| `C3` | Self-host path passes strict no-fallback corpus gate | `scripts/selfhost/selfhost_zero_fallback_gate.sh`, CI `selfhost-zero-fallback` | `PASS [full-selfhost] ...`, `PASS [parse-all-report] ...`, `PASS [parse-all-shards] ...`, `SELFHOST_ZERO_GATE_SUMMARY ... fail=0` |
 | `C3b` | Self-host driver can emit decodable bytecode artifacts (bootstrap subset) | `scripts/selfhost_driver_output_gate.sh` | `PASS [ret_42] ...`, `PASS [print_boot] ...`, `SELFHOST_DRIVER_OUTPUT_GATE_SUMMARY ... fail=0` |
 | `C4` | Ontology mismatch diagnostics are enforced in end-to-end checks | `scripts/e2e_gate.sh` ontology cross-check | presence of `semantic distance` diagnostic in failure path check |
 | `C5` | Self-host/non-self-host parity is regression-tested | `scripts/poseidon_gate.sh`, `scripts/poseidon_compat_matrix.txt` | `PASS [<case_id>] baseline and candidate match (...)`, `Summary: PASS=<n> FAIL=0` |
@@ -113,7 +113,7 @@ mkdir -p "$ARTIFACT_ROOT"
 bash scripts/fast_gate.sh | tee "$ARTIFACT_ROOT/fast_gate.log"
 bash scripts/check_feature_matrix.sh | tee "$ARTIFACT_ROOT/feature_matrix.log"
 WORK_DIR="$ARTIFACT_ROOT/selfhost-zero" \
-  bash scripts/selfhost_zero_fallback_gate.sh | tee "$ARTIFACT_ROOT/selfhost_zero_gate.log"
+  bash scripts/selfhost/selfhost_zero_fallback_gate.sh | tee "$ARTIFACT_ROOT/selfhost_zero_gate.log"
 WORK_DIR="$ARTIFACT_ROOT/selfhost-driver-output" \
   bash scripts/selfhost_driver_output_gate.sh | tee "$ARTIFACT_ROOT/selfhost_driver_output_gate.log"
 WORK_DIR="$ARTIFACT_ROOT/poseidon-public" \
@@ -157,7 +157,7 @@ rg -n "Summary: PASS=.* FAIL=0" "$ARTIFACT_ROOT/poseidon_public.log" "$ARTIFACT_
 ### 5) CI mapping for paper appendix
 
 - `fast-gate` job output (`.github/workflows/ci.yml`) -> `C1`, `C2`
-- `selfhost-zero-fallback` job output and uploaded artifact `selfhost-zero-fallback-${{ runner.os }}` -> `C3`
+- `selfhost-zero-fallback` job output and uploaded artifact `selfhost-zero-fallback-${{ runner.os }}` -> `C3` (runs `scripts/selfhost/selfhost_zero_fallback_gate.sh`)
 - `joss-smoke` job output -> `C1`, compile-fail behavior support for `C4`
 
 ## Threats to Validity

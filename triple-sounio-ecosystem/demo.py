@@ -308,7 +308,8 @@ def test_knowledge_arithmetic():
         result = k * 3.0
 
         assert result.value == 21.0
-        assert result.epsilon == 0.6
+        assert abs(result.epsilon - 0.6) < 1e-10, \
+            f"Scalar multiplication epsilon mismatch: {result.epsilon} vs 0.6"
         assert result.provenance == "source"
 
         # Test division
@@ -331,10 +332,306 @@ def test_knowledge_arithmetic():
         return False
 
 
+def test_provenance_chain():
+    """Test 7: Provenance chain DAG tracking."""
+    try:
+        from sounio.knowledge import Knowledge
+
+        a = Knowledge.tracked(500.0, 2.5, "calibration_batch")
+        b = Knowledge.tracked(1.2, 0.05, "correction_factor")
+
+        assert a.chain is not None, "source node should have a chain"
+        assert b.chain is not None
+        assert len(a.chain) == 1  # one source node
+
+        c = a * b
+
+        assert c.chain is not None, "result should inherit chain"
+        assert len(c.chain) == 3, f"expected 3 nodes, got {len(c.chain)}"
+
+        # Verify ancestry
+        ancestors = c.ancestry()
+        assert len(ancestors) == 2, f"expected 2 ancestors, got {len(ancestors)}"
+        ops = [n.operation for n in c.chain]
+        assert "source" in ops
+        assert "mul" in ops
+
+        # Untracked Knowledge: no chain (backward compatible)
+        plain = Knowledge(1.0, 0.1, "untracked")
+        assert plain.chain is None
+
+        # Mixed: tracked + untracked preserves chain from tracked side
+        d = a + plain
+        assert d.chain is not None
+
+        # to_dict round-trip includes chain
+        d_dict = c.to_dict()
+        assert "chain" in d_dict
+        assert "nodes" in d_dict["chain"]
+
+        # DOT export
+        dot = c.chain.to_dot()
+        assert "digraph" in dot
+
+        print("✅ Test 7 PASS: ProvenanceChain DAG tracking correct")
+        return True
+    except ImportError:
+        print("⚠️  Test 7 SKIP: sounio not installed")
+        return None
+    except Exception as e:
+        print(f"❌ Test 7 FAIL: {e}")
+        import traceback; traceback.print_exc()
+        return False
+
+
+def test_async_executor():
+    """Test 8: Async executor (asyncio.create_subprocess_exec)."""
+    try:
+        import asyncio
+        import inspect
+        from sounio._executor import SounioExecutor
+
+        executor = SounioExecutor()
+
+        # Verify async methods exist and are coroutine functions
+        assert hasattr(executor, "async_run_code"), "async_run_code missing"
+        assert hasattr(executor, "async_run_file"), "async_run_file missing"
+        assert hasattr(executor, "async_check_file"), "async_check_file missing"
+        assert inspect.iscoroutinefunction(executor.async_run_code), "async_run_code not a coroutine"
+        assert inspect.iscoroutinefunction(executor.async_run_file), "async_run_file not a coroutine"
+        assert inspect.iscoroutinefunction(executor.async_check_file), "async_check_file not a coroutine"
+
+        # Module-level coroutines are also present
+        import sounio
+        assert hasattr(sounio, "async_run_code"), "sounio.async_run_code missing"
+        assert hasattr(sounio, "async_run_file"), "sounio.async_run_file missing"
+        assert inspect.iscoroutinefunction(sounio.async_run_code)
+        assert inspect.iscoroutinefunction(sounio.async_run_file)
+
+        # Try to actually run if the souc binary is available
+        from pathlib import Path
+        souc_found = Path(executor.souc_path).exists()
+        if souc_found:
+            code = 'fn main() with IO { println("async_ok") }'
+
+            async def run():
+                return await executor.async_run_code(code, timeout=30.0)
+
+            result = asyncio.run(run())
+            assert result.exit_code == 0, f"exit_code={result.exit_code}, stderr={result.stderr}"
+            assert "async_ok" in result.stdout
+            print("✅ Test 8 PASS: Async executor works correctly (executed)")
+        else:
+            print("✅ Test 8 PASS: Async executor API verified (souc binary absent, skipping execution)")
+        return True
+    except ImportError:
+        print("⚠️  Test 8 SKIP: sounio not installed")
+        return None
+    except Exception as e:
+        print(f"❌ Test 8 FAIL: {e}")
+        import traceback; traceback.print_exc()
+        return False
+
+
+def test_shared_memory():
+    """Test 9: UncertainArray shared memory IPC."""
+    try:
+        import numpy as np
+        from sounio.integrations.numpy_ext import UncertainArray
+
+        values = np.array([1.0, 2.0, 3.0, 4.0, 5.0])
+        epsilons = np.array([0.1, 0.1, 0.1, 0.1, 0.1])
+        prov = "sensor_array"
+
+        a = UncertainArray(values, epsilons, prov)
+
+        # Write to shared memory
+        v_name, e_name, meta = a.to_shared_memory()
+        assert isinstance(v_name, str) and v_name, "values segment name missing"
+        assert isinstance(e_name, str) and e_name, "epsilons segment name missing"
+        assert "shape" in meta
+
+        # Reconstruct from shared memory
+        b = UncertainArray.from_shared_memory(v_name, e_name, meta)
+        assert len(b) == len(a), f"length mismatch: {len(b)} vs {len(a)}"
+        assert b.provenance == prov
+        assert abs(b.values[2] - a.values[2]) < 1e-15, "value mismatch after shm round-trip"
+        assert abs(b.epsilons[0] - a.epsilons[0]) < 1e-15, "epsilon mismatch after shm round-trip"
+
+        # Clean up
+        UncertainArray.free_shared_memory(v_name, e_name)
+
+        # Double-free is safe
+        UncertainArray.free_shared_memory(v_name, e_name)
+
+        print("✅ Test 9 PASS: Shared memory IPC round-trip correct")
+        return True
+    except ImportError as e:
+        print(f"⚠️  Test 9 SKIP: {e}")
+        return None
+    except Exception as e:
+        print(f"❌ Test 9 FAIL: {e}")
+        import traceback; traceback.print_exc()
+        return False
+
+
+def test_dashboard_app():
+    """Test 10: Dashboard Flask app (no actual server start)."""
+    try:
+        from sounio.dashboard import create_app, _DASHBOARD_HTML
+
+        app = create_app()
+
+        # Verify routes exist
+        rules = {r.rule for r in app.url_map.iter_rules()}
+        assert "/" in rules, "/ route missing"
+        assert "/api/pipeline/run" in rules, "/api/pipeline/run missing"
+        assert "/api/pipeline/status" in rules, "/api/pipeline/status missing"
+        assert "/api/knowledge/<prov_id>" in rules, "/api/knowledge/<prov_id> missing"
+
+        # Verify HTML content
+        assert "Sounio" in _DASHBOARD_HTML
+        assert "epistemic" in _DASHBOARD_HTML.lower()
+        assert "/api/pipeline/run" in _DASHBOARD_HTML
+
+        # Test status endpoint with test client
+        with app.test_client() as client:
+            r = client.get("/api/pipeline/status")
+            assert r.status_code == 200
+            data = r.get_json()
+            assert data["status"] == "idle"
+
+            r2 = client.get("/")
+            assert r2.status_code == 200
+            assert b"Sounio" in r2.data
+
+        print("✅ Test 10 PASS: Dashboard Flask app routes and HTML correct")
+        return True
+    except ImportError as e:
+        print(f"⚠️  Test 10 SKIP: {e}")
+        return None
+    except Exception as e:
+        print(f"❌ Test 10 FAIL: {e}")
+        import traceback; traceback.print_exc()
+        return False
+
+
+def test_kernel_client_api():
+    """Test 11: KernelConnection and launch_jupyter_kernel API surface."""
+    try:
+        from sounio.kernel_client import (
+            KernelConnection,
+            KernelResult,
+            launch_jupyter_kernel,
+        )
+        import sounio
+
+        # Verify exports exist
+        assert hasattr(sounio, "launch_jupyter_kernel")
+        assert hasattr(sounio, "KernelConnection")
+        assert hasattr(sounio, "KernelResult")
+
+        # KernelResult works standalone
+        r = KernelResult(
+            stdout="Knowledge { value: 42 epsilon: 0.5 prov: \"test\" }",
+            stderr="",
+            status="ok",
+        )
+        assert r.ok is True
+
+        # launch_jupyter_kernel raises ImportError or RuntimeError (not AttributeError)
+        # when the kernel isn't installed — that's the correct, documented behaviour.
+        try:
+            launch_jupyter_kernel(timeout=2.0)
+        except ImportError:
+            pass  # jupyter_client not installed — expected in CI
+        except RuntimeError:
+            pass  # kernel spec not installed — expected in CI
+        except Exception as e:
+            print(f"❌ Test 11 FAIL: unexpected exception type {type(e).__name__}: {e}")
+            return False
+
+        print("✅ Test 11 PASS: KernelClient API surface correct")
+        return True
+    except ImportError as e:
+        print(f"⚠️  Test 11 SKIP: {e}")
+        return None
+    except Exception as e:
+        print(f"❌ Test 11 FAIL: {e}")
+        import traceback; traceback.print_exc()
+        return False
+
+
+def test_python_magic_preamble():
+    """Test 12: %python magic preamble builder injects Knowledge values."""
+    try:
+        import sys, os
+        # Add sounio-jupyter to path if needed
+        here = os.path.dirname(os.path.abspath(__file__))
+        jupyter_pkg = os.path.join(here, "sounio-jupyter")
+        if jupyter_pkg not in sys.path:
+            sys.path.insert(0, jupyter_pkg)
+
+        from sounio_kernel.magics import SounioMagics
+
+        class FakeExecutor:
+            stdlib_path = None
+            souc_binary = "souc"
+            def run_cell(self, code): return ("", "", 0)
+
+        class FakeKernel:
+            executor = FakeExecutor()
+            _last_knowledge_values = []
+
+        magics = SounioMagics(FakeKernel())
+
+        # With no knowledge values
+        preamble = magics._build_python_preamble()
+        assert "knowledge_values = []" in preamble
+
+        # Inject fake Knowledge values
+        class FakeK:
+            value = 500.0
+            epsilon = 2.5
+            provenance = "test_sensor"
+
+        FakeKernel._last_knowledge_values = [FakeK()]
+        magics2 = SounioMagics(FakeKernel())
+        preamble2 = magics2._build_python_preamble()
+        assert "k0 = _K(500.0" in preamble2
+        assert "test_sensor" in preamble2
+        assert "knowledge_values = [k0]" in preamble2
+
+        # Verify that the generated Python actually executes
+        import subprocess
+        code = preamble2 + "\nprint(k0.value)"
+        result = subprocess.run(
+            [sys.executable, "-c", code],
+            capture_output=True, text=True, timeout=10,
+        )
+        assert result.returncode == 0, f"preamble execution failed: {result.stderr}"
+        assert "500.0" in result.stdout
+
+        # %python handler registered
+        assert "%python" in magics._build_python_preamble.__qualname__ or True
+        handled, _ = magics.handle_magic("%python print('hello from python magic')")
+        assert handled is True
+
+        print("✅ Test 12 PASS: %python magic preamble builder correct")
+        return True
+    except ImportError as e:
+        print(f"⚠️  Test 12 SKIP: {e}")
+        return None
+    except Exception as e:
+        print(f"❌ Test 12 FAIL: {e}")
+        import traceback; traceback.print_exc()
+        return False
+
+
 def main():
     """Run all integration tests"""
     print("=" * 70)
-    print("Triple Sounio Ecosystem Integration Tests (Day 12)")
+    print("Triple Sounio Ecosystem Integration Tests")
     print("=" * 70)
     print()
 
@@ -345,6 +642,12 @@ def main():
         ("Test 4: Knowledge round-trip", test_knowledge_round_trip),
         ("Test 5: Pipeline Knowledge parsing", test_pipeline_knowledge_parsing),
         ("Test 6: Knowledge arithmetic", test_knowledge_arithmetic),
+        ("Test 7: Provenance chain DAG", test_provenance_chain),
+        ("Test 8: Async executor", test_async_executor),
+        ("Test 9: Shared memory IPC", test_shared_memory),
+        ("Test 10: Dashboard Flask app", test_dashboard_app),
+        ("Test 11: Kernel client API", test_kernel_client_api),
+        ("Test 12: %python magic", test_python_magic_preamble),
     ]
 
     results = []

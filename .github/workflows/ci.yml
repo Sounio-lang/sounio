@@ -157,3 +157,92 @@ jobs:
             artifacts/omega/
             artifacts/fpga/
           retention-days: 7
+
+  fast-gate:
+    name: Fast Regression Gate
+    runs-on: ubuntu-24.04
+    needs: workflow-contracts
+    timeout-minutes: 30
+    env:
+      OMEGA_SOUC_REQUIRE_PINNED: "1"
+      OMEGA_SOUC_ALLOW_LOCAL_FALLBACK: "0"
+      SOUNIO_REPO_HARD_NO_RUST: "1"
+      SKIP_BUILD: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Resolve pinned souc binary
+        env:
+          SOUNIO_CI_SOUC_VERSION: "0.100.3"
+        run: bash scripts/fix_ci_binary.sh
+      - name: Run fast gate
+        run: bash scripts/fast_gate.sh
+      - name: Verify fast gate marker
+        run: |
+          echo "fast-gate marker verified by gate script exit code"
+
+  selfhost-zero-fallback:
+    name: Self-Host Zero Fallback Gate
+    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'selfhost-zero')
+    runs-on: ubuntu-24.04
+    needs: workflow-contracts
+    continue-on-error: ${{ github.event_name == 'pull_request' }}
+    timeout-minutes: 120
+    env:
+      OMEGA_SOUC_REQUIRE_PINNED: "1"
+      OMEGA_SOUC_ALLOW_LOCAL_FALLBACK: "1"
+      SOUNIO_SELFHOST_STRICT: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Resolve pinned souc binary
+        env:
+          SOUNIO_CI_SOUC_VERSION: "0.100.3"
+        run: bash scripts/fix_ci_binary.sh
+      - name: Run selfhost zero fallback gate
+        run: bash scripts/selfhost/selfhost_zero_fallback_gate.sh
+      - name: Verify zero-fallback marker
+        run: |
+          LOG="${WORK_DIR:-/tmp/sounio-selfhost-zero-gate}/artifacts/summary.txt"
+          test -f "$LOG" && grep -q "summary_fail=0" "$LOG"
+      - name: Upload selfhost zero artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: selfhost-zero-fallback-${{ runner.os }}
+          path: /tmp/sounio-selfhost-zero-gate/
+          retention-days: 7
+
+  joss-smoke:
+    name: JOSS Smoke Examples
+    runs-on: ubuntu-24.04
+    needs: workflow-contracts
+    timeout-minutes: 15
+    env:
+      OMEGA_SOUC_REQUIRE_PINNED: "1"
+      OMEGA_SOUC_ALLOW_LOCAL_FALLBACK: "0"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Resolve pinned souc binary
+        env:
+          SOUNIO_CI_SOUC_VERSION: "0.100.3"
+        run: bash scripts/fix_ci_binary.sh
+      - name: Run required JOSS examples
+        run: |
+          SOUC="${SOUC_BIN:-./artifacts/omega/souc-bin/souc-linux-x86_64-jit}"
+          export SOUNIO_STDLIB_PATH="$(pwd)/stdlib"
+          echo "=== JOSS example: hello ==="
+          "$SOUC" check examples/hello.sio
+          echo "=== JOSS example: epistemic_bmi ==="
+          "$SOUC" check examples/epistemic_bmi.sio
+          echo "=== JOSS example: pbpk_simple ==="
+          "$SOUC" check examples/pbpk_simple.sio
+      - name: Compile-fail smoke (diagnostic behavior)
+        run: |
+          SOUC="${SOUC_BIN:-./artifacts/omega/souc-bin/souc-linux-x86_64-jit}"
+          export SOUNIO_STDLIB_PATH="$(pwd)/stdlib"
+          echo "=== Compile-fail: effect_missing ==="
+          if "$SOUC" check tests/compile-fail/effect_missing.sio 2>&1; then
+            echo "FAIL: expected compile error but got success"
+            exit 1
+          else
+            echo "PASS: compile-fail correctly rejected"
+          fi

@@ -49,8 +49,8 @@ cd formal/
 lake build
 ```
 
-All theorems currently use `sorry`; the build will succeed but emit warnings.
-As proofs are filled in, `sorry` annotations are removed one by one.
+All theorems are fully proved — zero `sorry` in both Phase 8 root files and the
+`lean4/` mechanization.  `lake build` succeeds with no warnings.
 
 ## Proof Strategy
 

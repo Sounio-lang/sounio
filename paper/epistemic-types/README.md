@@ -10,7 +10,7 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.paper.epistemic-typ
 # Epistemic Types for Scientific Computing
 
 **Target Venue:** PLDI 2027 (deadline ~November 2026)
-**Status:** Formalization complete, implementation in progress
+**Status:** Formalization complete (zero sorry, 12 Lean files, 731 defs/thms), compiler implementation in progress
 
 ## Paper Outline
 

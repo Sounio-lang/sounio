@@ -14,8 +14,8 @@ Key theorems:
 4. Shared references (`&T`) to linear values do not consume the linear
    resource; only exclusive access (`&!T`) does.
 
-All admitted lemmas are marked `sorry` with a strategy comment explaining
-the intended proof path.
+All lemmas are fully proved (zero sorry).  Strategy comments describe
+the proof approach used.
 -/
 
 namespace Sounio.LinearTypes

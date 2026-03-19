@@ -45,6 +45,7 @@ class SounioMagics:
             "%ontology_resolve": self.magic_ontology_resolve,
             "%clinical_normalize": self.magic_clinical_normalize,
             "%drug_pipeline": self.magic_drug_pipeline,
+            "%python": self.magic_python,
         }
 
         if magic_name not in handlers:
@@ -419,6 +420,69 @@ Or use the souc binary directly."""
 
         except Exception as e:
             return f"Error executing drug pipeline: {str(e)}"
+
+    def magic_python(self, line: str) -> str:
+        """Execute Python code with Sounio Knowledge values injected into scope.
+
+        Knowledge values from the last Sounio execution are available as
+        ``k0``, ``k1``, ... and as the list ``knowledge_values``.
+
+        Usage
+        -----
+            %python import math; print(math.pi)
+            %python print(k0.value, k0.provenance)  # k0 is first Knowledge value
+            %python print([k.confidence for k in knowledge_values])
+
+        For multi-line Python, use %%python (cell magic) — write the magic on
+        the first line and the code in the rest of the cell.
+        """
+        code = line.strip()
+        if not code:
+            return "Usage: %python <python code>  (or %%python for multi-line)"
+
+        preamble = self._build_python_preamble()
+        full_code = preamble + "\n" + code
+
+        import subprocess
+
+        result = subprocess.run(
+            [sys.executable, "-c", full_code],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+
+        out = result.stdout
+        if result.returncode != 0 and result.stderr:
+            out += ("\n" if out else "") + "[stderr]\n" + result.stderr
+        return out if out.strip() else "(no output)"
+
+    def _build_python_preamble(self) -> str:
+        """Build a Python preamble injecting last Sounio Knowledge values."""
+        last_knowledge = getattr(self.kernel, "_last_knowledge_values", [])
+        lines = [
+            "try:",
+            "    from sounio.knowledge import Knowledge as _K",
+            "except ImportError:",
+            "    class _K:",
+            "        def __init__(self, v, e, p=''):",
+            "            self.value=v; self.epsilon=e; self.provenance=p",
+            "            self.relative_uncertainty = abs(e/v) if v else 0",
+            "            self.confidence = max(0, min(1, 1-self.relative_uncertainty))",
+            "        def __repr__(self):",
+            "            return f'Knowledge({self.value} \\u00b1 {self.epsilon})'",
+        ]
+        if last_knowledge:
+            for i, kv in enumerate(last_knowledge):
+                lines.append(
+                    f"k{i} = _K({kv.value!r}, {kv.epsilon!r}, {kv.provenance!r})"
+                )
+            lines.append(
+                f"knowledge_values = [{', '.join(f'k{i}' for i in range(len(last_knowledge)))}]"
+            )
+        else:
+            lines.append("knowledge_values = []")
+        return "\n".join(lines) + "\n"
 
     def _format_drug_pipeline_output(
         self,

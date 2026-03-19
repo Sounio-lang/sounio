@@ -9,6 +9,7 @@ using the canonical souc format:
 
 from __future__ import annotations
 
+import asyncio
 import os
 import re
 import subprocess
@@ -272,6 +273,115 @@ class SounioExecutor:
             errors=proc.stderr,
             ast=ast_dump,
             types=types_dump,
+        )
+
+    # ---- Async API --------------------------------------------------------
+
+    async def async_run_file(self, path: str, timeout: float = 60.0) -> ExecutionResult:
+        """Async version of run_file using asyncio subprocesses.
+
+        Parameters
+        ----------
+        path : str
+            Path to the ``.sio`` file.
+        timeout : float
+            Maximum seconds to wait (default 60).
+        """
+        env = self._build_env()
+        proc = await asyncio.create_subprocess_exec(
+            self.souc_path, "run", path,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=env,
+        )
+        try:
+            stdout_bytes, stderr_bytes = await asyncio.wait_for(
+                proc.communicate(), timeout=timeout
+            )
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.communicate()
+            raise
+        stdout = stdout_bytes.decode()
+        stderr = stderr_bytes.decode()
+        return ExecutionResult(
+            stdout=stdout,
+            stderr=stderr,
+            exit_code=proc.returncode,
+            knowledge_values=self._parse_knowledge(stdout),
+        )
+
+    async def async_run_code(self, code: str, timeout: float = 60.0) -> ExecutionResult:
+        """Async version of run_code.
+
+        Parameters
+        ----------
+        code : str
+            Sounio source code to run.
+        timeout : float
+            Maximum seconds to wait (default 60).
+        """
+        with tempfile.NamedTemporaryFile(
+            suffix=".sio", mode="w", delete=False
+        ) as fh:
+            fh.write(code)
+            tmp_path = fh.name
+        try:
+            return await self.async_run_file(tmp_path, timeout=timeout)
+        finally:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+
+    async def async_check_file(
+        self,
+        path: str,
+        show_ast: bool = False,
+        show_types: bool = False,
+        timeout: float = 30.0,
+    ) -> CheckResult:
+        """Async version of check_file.
+
+        Parameters
+        ----------
+        path : str
+            Path to the ``.sio`` file.
+        show_ast : bool
+            Pass ``--show-ast`` to the compiler.
+        show_types : bool
+            Pass ``--show-types`` to the compiler.
+        timeout : float
+            Maximum seconds to wait (default 30).
+        """
+        cmd = [self.souc_path, "check", path]
+        if show_ast:
+            cmd.append("--show-ast")
+        if show_types:
+            cmd.append("--show-types")
+
+        env = self._build_env()
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=env,
+        )
+        try:
+            stdout_bytes, stderr_bytes = await asyncio.wait_for(
+                proc.communicate(), timeout=timeout
+            )
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.communicate()
+            raise
+        stdout = stdout_bytes.decode()
+        stderr = stderr_bytes.decode()
+        return CheckResult(
+            success=proc.returncode == 0,
+            errors=stderr,
+            ast=stdout if show_ast else None,
+            types=stdout if show_types else None,
         )
 
     # ---- Convenience repr ------------------------------------------------

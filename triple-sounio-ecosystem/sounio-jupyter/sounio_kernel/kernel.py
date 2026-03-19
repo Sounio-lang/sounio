@@ -44,6 +44,8 @@ class SounioKernel(Kernel):
         # Track execution state
         self.execution_count = 0
         self.variables: Dict[str, Any] = {}
+        # Last parsed Knowledge values — made available to %python magic
+        self._last_knowledge_values: list = []
 
     def do_execute(
         self,
@@ -74,6 +76,10 @@ class SounioKernel(Kernel):
         try:
             output, errors, exitcode = self.executor.run_cell(code)
             success = exitcode == 0
+
+            # Parse and store Knowledge values for %python magic
+            if output:
+                self._last_knowledge_values = self._extract_knowledge_values(output)
 
             if not silent:
                 if output:
@@ -225,6 +231,29 @@ class SounioKernel(Kernel):
             "text": error,
         }
         self.send_response(self.iopub_socket, "stream", stream_content)
+
+    def _extract_knowledge_values(self, output: str) -> list:
+        """Parse Knowledge values from souc stdout for %python magic injection."""
+        import re
+        pattern = (
+            r'Knowledge\s*\{\s*value:\s*([\d.e+-]+)\s+'
+            r'epsilon:\s*([\d.e+-]+)\s+'
+            r'prov:\s*"([^"]*)"\s*\}'
+        )
+        results = []
+        for v, e, prov in re.findall(pattern, output):
+            try:
+                # Use a simple namespace object so kernel.py doesn't depend on sounio-py
+                class _K:
+                    pass
+                k = _K()
+                k.value = float(v)
+                k.epsilon = float(e)
+                k.provenance = prov
+                results.append(k)
+            except ValueError:
+                pass
+        return results
 
     def _format_epistemic_output(self, output: str) -> str:
         """Format Knowledge values in output with HTML coloring."""

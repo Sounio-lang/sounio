@@ -7,7 +7,7 @@ extension (sounio._sounio_native) is available it is preferred for performance.
 from __future__ import annotations
 
 import math
-from typing import Union
+from typing import List, Optional, Union
 
 
 _Numeric = Union[float, int, "Knowledge"]
@@ -31,9 +31,20 @@ class Knowledge:
     Multiplication         : ε = |a·b| · sqrt((εa/a)² + (εb/b)²)
     Division               : ε = |a/b| · sqrt((εa/a)² + (εb/b)²)
     Scalar multiplication  : ε = |factor| · εa
+
+    Provenance chain tracking
+    -------------------------
+    Use Knowledge.tracked() to create a Knowledge value with full DAG tracking.
+    All arithmetic on tracked values automatically extends the chain.
+
+    >>> a = Knowledge.tracked(500.0, 2.5, "calibration")
+    >>> b = Knowledge.tracked(1.2, 0.05, "correction")
+    >>> c = a * b
+    >>> print(c.chain.summary())
+    ProvenanceChain: 3 nodes (2 sources, 1 operations)
     """
 
-    __slots__ = ("value", "epsilon", "provenance")
+    __slots__ = ("value", "epsilon", "provenance", "_chain", "_node_id")
 
     def __init__(
         self,
@@ -44,16 +55,62 @@ class Knowledge:
         self.value = float(value)
         self.epsilon = float(epsilon)
         self.provenance = str(provenance)
+        self._chain = None   # Optional[ProvenanceChain]
+        self._node_id = None  # Optional[str]
 
-    # ---- Arithmetic -------------------------------------------------------
+    # ------------------------------------------------------------------
+    # Factory: tracked Knowledge with provenance chain
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def tracked(
+        cls,
+        value: float,
+        epsilon: float = 0.0,
+        provenance: str = "",
+        **metadata,
+    ) -> "Knowledge":
+        """Create a Knowledge value with full provenance chain tracking.
+
+        All subsequent arithmetic on this value (and any value derived from it)
+        will record an entry in the provenance DAG.
+
+        Parameters
+        ----------
+        value, epsilon, provenance : same as __init__
+        **metadata : extra fields stored in the root ProvenanceNode.
+        """
+        from .provenance import ProvenanceChain
+
+        k = cls(value, epsilon, provenance)
+        chain = ProvenanceChain()
+        node = chain.add_source(provenance, value, epsilon, **metadata)
+        k._chain = chain
+        k._node_id = node.id
+        return k
+
+    # ------------------------------------------------------------------
+    # Arithmetic
+    # ------------------------------------------------------------------
 
     def __add__(self, other: _Numeric) -> "Knowledge":
         if isinstance(other, Knowledge):
-            return Knowledge(
+            result = Knowledge(
                 self.value + other.value,
                 math.sqrt(self.epsilon**2 + other.epsilon**2),
                 f"({self.provenance})+({other.provenance})",
             )
+            if self._chain is not None or other._chain is not None:
+                from .provenance import _merge_chains
+                result._chain, result._node_id = _merge_chains(
+                    self._chain, self._node_id,
+                    other._chain, other._node_id,
+                    label=result.provenance,
+                    operation="add",
+                    value=result.value,
+                    epsilon=result.epsilon,
+                )
+            return result
         other = float(other)
         return Knowledge(self.value + other, self.epsilon, self.provenance)
 
@@ -62,11 +119,22 @@ class Knowledge:
 
     def __sub__(self, other: _Numeric) -> "Knowledge":
         if isinstance(other, Knowledge):
-            return Knowledge(
+            result = Knowledge(
                 self.value - other.value,
                 math.sqrt(self.epsilon**2 + other.epsilon**2),
                 f"({self.provenance})-({other.provenance})",
             )
+            if self._chain is not None or other._chain is not None:
+                from .provenance import _merge_chains
+                result._chain, result._node_id = _merge_chains(
+                    self._chain, self._node_id,
+                    other._chain, other._node_id,
+                    label=result.provenance,
+                    operation="sub",
+                    value=result.value,
+                    epsilon=result.epsilon,
+                )
+            return result
         other = float(other)
         return Knowledge(self.value - other, self.epsilon, self.provenance)
 
@@ -77,22 +145,40 @@ class Knowledge:
     def __mul__(self, other: _Numeric) -> "Knowledge":
         if isinstance(other, Knowledge):
             val = self.value * other.value
-            rel_a = self.epsilon / self.value if self.value != 0.0 else 0.0
-            rel_b = other.epsilon / other.value if other.value != 0.0 else 0.0
-            # Use absolute values for relative uncertainty
             rel_a = self.epsilon / abs(self.value) if self.value != 0.0 else 0.0
             rel_b = other.epsilon / abs(other.value) if other.value != 0.0 else 0.0
-            return Knowledge(
+            result = Knowledge(
                 val,
                 abs(val) * math.sqrt(rel_a**2 + rel_b**2),
                 f"({self.provenance})*({other.provenance})",
             )
+            if self._chain is not None or other._chain is not None:
+                from .provenance import _merge_chains
+                result._chain, result._node_id = _merge_chains(
+                    self._chain, self._node_id,
+                    other._chain, other._node_id,
+                    label=result.provenance,
+                    operation="mul",
+                    value=result.value,
+                    epsilon=result.epsilon,
+                )
+            return result
         factor = float(other)
-        return Knowledge(
+        result = Knowledge(
             self.value * factor,
             self.epsilon * abs(factor),
             self.provenance,
         )
+        if self._chain is not None:
+            from .provenance import _unary_chain
+            result._chain, result._node_id = _unary_chain(
+                self._chain, self._node_id,
+                label=f"{self.provenance}*{factor}",
+                operation="scale",
+                value=result.value,
+                epsilon=result.epsilon,
+            )
+        return result
 
     def __rmul__(self, other: _Numeric) -> "Knowledge":
         return self.__mul__(other)
@@ -104,19 +190,40 @@ class Knowledge:
             val = self.value / other.value
             rel_a = self.epsilon / abs(self.value) if self.value != 0.0 else 0.0
             rel_b = other.epsilon / abs(other.value) if other.value != 0.0 else 0.0
-            return Knowledge(
+            result = Knowledge(
                 val,
                 abs(val) * math.sqrt(rel_a**2 + rel_b**2),
                 f"({self.provenance})/({other.provenance})",
             )
+            if self._chain is not None or other._chain is not None:
+                from .provenance import _merge_chains
+                result._chain, result._node_id = _merge_chains(
+                    self._chain, self._node_id,
+                    other._chain, other._node_id,
+                    label=result.provenance,
+                    operation="div",
+                    value=result.value,
+                    epsilon=result.epsilon,
+                )
+            return result
         divisor = float(other)
         if divisor == 0.0:
             raise ZeroDivisionError("Knowledge division by zero scalar")
-        return Knowledge(
+        result = Knowledge(
             self.value / divisor,
             self.epsilon / abs(divisor),
             self.provenance,
         )
+        if self._chain is not None:
+            from .provenance import _unary_chain
+            result._chain, result._node_id = _unary_chain(
+                self._chain, self._node_id,
+                label=f"{self.provenance}/{divisor}",
+                operation="scale",
+                value=result.value,
+                epsilon=result.epsilon,
+            )
+        return result
 
     def __rtruediv__(self, other: _Numeric) -> "Knowledge":
         if self.value == 0.0:
@@ -127,12 +234,30 @@ class Knowledge:
         return Knowledge(val, abs(val) * rel, self.provenance)
 
     def __neg__(self) -> "Knowledge":
-        return Knowledge(-self.value, self.epsilon, f"-({self.provenance})")
+        result = Knowledge(-self.value, self.epsilon, f"-({self.provenance})")
+        if self._chain is not None:
+            from .provenance import _unary_chain
+            result._chain, result._node_id = _unary_chain(
+                self._chain, self._node_id,
+                label=result.provenance, operation="neg",
+                value=result.value, epsilon=result.epsilon,
+            )
+        return result
 
     def __abs__(self) -> "Knowledge":
-        return Knowledge(abs(self.value), self.epsilon, f"|{self.provenance}|")
+        result = Knowledge(abs(self.value), self.epsilon, f"|{self.provenance}|")
+        if self._chain is not None:
+            from .provenance import _unary_chain
+            result._chain, result._node_id = _unary_chain(
+                self._chain, self._node_id,
+                label=result.provenance, operation="abs",
+                value=result.value, epsilon=result.epsilon,
+            )
+        return result
 
-    # ---- Comparison (by central value) ------------------------------------
+    # ------------------------------------------------------------------
+    # Comparison (by central value)
+    # ------------------------------------------------------------------
 
     def __eq__(self, other: object) -> bool:
         if isinstance(other, Knowledge):
@@ -162,7 +287,9 @@ class Knowledge:
     def __hash__(self) -> int:
         return hash((self.value, self.epsilon, self.provenance))
 
-    # ---- Derived properties -----------------------------------------------
+    # ------------------------------------------------------------------
+    # Derived properties
+    # ------------------------------------------------------------------
 
     @property
     def relative_uncertainty(self) -> float:
@@ -184,14 +311,40 @@ class Knowledge:
         """Multiply by a scalar without adding new uncertainty."""
         return Knowledge(self.value * factor, self.epsilon * abs(factor), self.provenance)
 
-    # ---- Serialization helpers --------------------------------------------
+    # ------------------------------------------------------------------
+    # Provenance chain access
+    # ------------------------------------------------------------------
+
+    @property
+    def chain(self):
+        """The ProvenanceChain for this value, or None if not tracked."""
+        return self._chain
+
+    def ancestry(self) -> List:
+        """Return all ancestor ProvenanceNodes (empty list if not tracked)."""
+        if self._chain is None or self._node_id is None:
+            return []
+        return self._chain.ancestors_of(self._node_id)
+
+    # ------------------------------------------------------------------
+    # Serialization helpers
+    # ------------------------------------------------------------------
 
     def to_dict(self) -> dict:
-        return {"value": self.value, "epsilon": self.epsilon, "provenance": self.provenance}
+        d = {"value": self.value, "epsilon": self.epsilon, "provenance": self.provenance}
+        if self._chain is not None:
+            d["chain"] = self._chain.to_dict()
+            d["node_id"] = self._node_id
+        return d
 
     @classmethod
     def from_dict(cls, d: dict) -> "Knowledge":
-        return cls(d["value"], d.get("epsilon", 0.0), d.get("provenance", ""))
+        k = cls(d["value"], d.get("epsilon", 0.0), d.get("provenance", ""))
+        if "chain" in d:
+            from .provenance import ProvenanceChain
+            k._chain = ProvenanceChain.from_dict(d["chain"])
+            k._node_id = d.get("node_id")
+        return k
 
     def to_sounio_format(self) -> str:
         """Serialize to canonical Sounio output format.
@@ -254,7 +407,9 @@ class Knowledge:
             raise ValueError(f"Cannot parse Knowledge from: {text}")
         return cls(float(match.group(1)), float(match.group(2)), match.group(3))
 
-    # ---- Representation ---------------------------------------------------
+    # ------------------------------------------------------------------
+    # Representation
+    # ------------------------------------------------------------------
 
     def __repr__(self) -> str:
         return (

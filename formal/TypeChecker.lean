@@ -12,8 +12,8 @@ CSUR 2021), with extensions for:
   - Probabilistic subtype compatibility (Bayesian threshold)
   - Dimensional units (compile-time dimensional analysis)
 
-All theorems are `sorry`-admitted stubs for Phase 8.  The intended proof
-strategy is described in each theorem's docstring.
+All theorems are fully proved (zero sorry).  Proof strategies are
+described in each theorem's docstring.
 -/
 
 namespace Sounio.TypeChecker

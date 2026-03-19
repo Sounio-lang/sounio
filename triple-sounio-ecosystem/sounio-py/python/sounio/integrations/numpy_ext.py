@@ -6,6 +6,8 @@ of the sounio package works without numpy installed.
 
 from __future__ import annotations
 
+import json
+from multiprocessing.shared_memory import SharedMemory
 from typing import TYPE_CHECKING, List, Optional, Union
 
 try:
@@ -195,6 +197,110 @@ class UncertainArray:
         epsilons = [k.epsilon for k in knowledges]
         prov = knowledges[0].provenance
         return cls(values, epsilons, prov)
+
+    # ---- Shared memory ----------------------------------------------------
+
+    def to_shared_memory(self) -> tuple:
+        """Write values and epsilons to POSIX shared memory blocks (zero-copy IPC).
+
+        Both blocks are created as new named segments. The caller is responsible
+        for releasing them when done by calling
+        :meth:`UncertainArray.free_shared_memory`.
+
+        Returns
+        -------
+        tuple of (values_shm_name, epsilons_shm_name, meta_json)
+            Pass these three strings to :meth:`from_shared_memory` in another
+            process to reconstruct the array without copying data through the OS.
+
+        Examples
+        --------
+        >>> a = UncertainArray([1.0, 2.0, 3.0], [0.1, 0.1, 0.1], "sensor")
+        >>> names = a.to_shared_memory()
+        >>> b = UncertainArray.from_shared_memory(*names)
+        >>> UncertainArray.free_shared_memory(*names[:2])
+        """
+        if not _HAS_NUMPY:
+            raise ImportError("numpy is required for shared memory support")
+
+        # Ensure contiguous float64 arrays so nbytes is reliable.
+        values = np.ascontiguousarray(self.values, dtype=np.float64)
+        epsilons = np.ascontiguousarray(self.epsilons, dtype=np.float64)
+
+        # Guard against zero-byte segments (SharedMemory requires size > 0).
+        v_shm = SharedMemory(create=True, size=max(values.nbytes, 8))
+        e_shm = SharedMemory(create=True, size=max(epsilons.nbytes, 8))
+
+        v_buf = np.ndarray(values.shape, dtype=np.float64, buffer=v_shm.buf)
+        e_buf = np.ndarray(epsilons.shape, dtype=np.float64, buffer=e_shm.buf)
+        v_buf[:] = values
+        e_buf[:] = epsilons
+
+        meta = json.dumps({
+            "shape": list(values.shape),
+            "dtype": "float64",
+            "provenance": self.provenance,
+        })
+
+        v_name = v_shm.name
+        e_name = e_shm.name
+
+        # Close local handles — the OS keeps the segments alive until unlinked.
+        v_shm.close()
+        e_shm.close()
+
+        return v_name, e_name, meta
+
+    @classmethod
+    def from_shared_memory(
+        cls,
+        values_shm_name: str,
+        epsilons_shm_name: str,
+        meta_json: str,
+    ) -> "UncertainArray":
+        """Reconstruct an UncertainArray from shared memory (zero-copy read).
+
+        Copies the data out of the shared segments before returning so the
+        caller does not need to keep them alive.
+
+        Parameters
+        ----------
+        values_shm_name, epsilons_shm_name : str
+            Segment names returned by :meth:`to_shared_memory`.
+        meta_json : str
+            JSON metadata string returned by :meth:`to_shared_memory`.
+        """
+        if not _HAS_NUMPY:
+            raise ImportError("numpy is required for shared memory support")
+
+        meta = json.loads(meta_json)
+        shape = tuple(meta["shape"])
+
+        v_shm = SharedMemory(name=values_shm_name, create=False)
+        e_shm = SharedMemory(name=epsilons_shm_name, create=False)
+
+        # .copy() so we own the data after closing the segments.
+        values = np.ndarray(shape, dtype=np.float64, buffer=v_shm.buf).copy()
+        epsilons = np.ndarray(shape, dtype=np.float64, buffer=e_shm.buf).copy()
+
+        v_shm.close()
+        e_shm.close()
+
+        return cls(values, epsilons, meta.get("provenance", ""))
+
+    @staticmethod
+    def free_shared_memory(values_shm_name: str, epsilons_shm_name: str) -> None:
+        """Unlink shared memory segments created by :meth:`to_shared_memory`.
+
+        Safe to call even if the segments have already been unlinked.
+        """
+        for name in (values_shm_name, epsilons_shm_name):
+            try:
+                shm = SharedMemory(name=name, create=False)
+                shm.close()
+                shm.unlink()
+            except FileNotFoundError:
+                pass
 
     # ---- Representation ---------------------------------------------------
 

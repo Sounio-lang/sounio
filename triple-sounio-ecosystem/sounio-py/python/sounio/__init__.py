@@ -40,6 +40,12 @@ except ImportError:
 from .knowledge import Knowledge as PureKnowledge  # noqa: F401
 
 # ---------------------------------------------------------------------------
+# Provenance chain
+# ---------------------------------------------------------------------------
+
+from .provenance import ProvenanceChain, ProvenanceNode  # noqa: F401
+
+# ---------------------------------------------------------------------------
 # Executor
 # ---------------------------------------------------------------------------
 
@@ -111,6 +117,32 @@ def check_file(path: str, **kwargs) -> CheckResult:
     return get_executor().check_file(path, **kwargs)
 
 
+async def async_run_file(path: str, timeout: float = 60.0) -> ExecutionResult:
+    """Async JIT-run a .sio file. See :meth:`SounioExecutor.async_run_file`."""
+    return await get_executor().async_run_file(path, timeout=timeout)
+
+
+async def async_run_code(code: str, timeout: float = 60.0) -> ExecutionResult:
+    """Async run inline Sounio code. See :meth:`SounioExecutor.async_run_code`."""
+    return await get_executor().async_run_code(code, timeout=timeout)
+
+
+# ---------------------------------------------------------------------------
+# Kernel client
+# ---------------------------------------------------------------------------
+
+from .kernel_client import KernelConnection, KernelResult, launch_jupyter_kernel  # noqa: F401
+
+# ---------------------------------------------------------------------------
+# Dashboard
+# ---------------------------------------------------------------------------
+
+try:
+    from .dashboard import serve_dashboard, create_app  # noqa: F401
+    _HAS_DASHBOARD = True
+except ImportError:
+    _HAS_DASHBOARD = False
+
 # ---------------------------------------------------------------------------
 # Optional integrations
 # ---------------------------------------------------------------------------
@@ -146,6 +178,9 @@ __all__ = [
     # Core
     "Knowledge",
     "PureKnowledge",
+    # Provenance
+    "ProvenanceChain",
+    "ProvenanceNode",
     # Executor
     "SounioExecutor",
     "ExecutionResult",
@@ -173,12 +208,21 @@ __all__ = [
     # Report generation
     "report",
     "ReportBuilder",
+    # Kernel client
+    "KernelConnection",
+    "KernelResult",
+    "launch_jupyter_kernel",
+    # Dashboard
+    "serve_dashboard",
+    "create_app",
     # Convenience
     "get_executor",
     "reset_executor",
     "run_file",
     "run_code",
     "check_file",
+    "async_run_file",
+    "async_run_code",
     # Meta
     "__version__",
     "_NATIVE",
