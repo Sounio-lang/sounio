@@ -14,8 +14,12 @@ if [[ ${#WORKFLOWS[@]} -eq 0 ]]; then
   exit 0
 fi
 
+has_real_ripgrep() {
+  command -v rg >/dev/null 2>&1 && rg --version 2>/dev/null | grep -qi '^ripgrep '
+}
+
 workflow_script_refs() {
-  if command -v rg >/dev/null 2>&1; then
+  if has_real_ripgrep; then
     rg -No "(?:\\./)?scripts/[A-Za-z0-9_./-]+" "${WORKFLOWS[@]}"
   else
     grep -H -o -E "(\\./)?scripts/[A-Za-z0-9_./-]+" "${WORKFLOWS[@]}"

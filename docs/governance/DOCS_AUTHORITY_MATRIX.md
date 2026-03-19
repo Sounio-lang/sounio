@@ -23,7 +23,6 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | Topic ID | Authority | Repo doc | Website slug | Owner | Locales |
 | --- | --- | --- | --- | --- | --- |
 | repo.contributor.codebase-overview | repo_only | docs/codebase_overview.md | - | A5 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
-| repo.docs.ai-prompt-templates | repo_only | docs/AI_PROMPT_TEMPLATES.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.api.epistemic-api | repo_only | docs/api/EPISTEMIC_API.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.architects-guide | repo_only | docs/ARCHITECTS_GUIDE.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.architecture.async-runtime | repo_only | docs/architecture/ASYNC_RUNTIME.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -47,7 +46,6 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.archived.roadmap-proximos-passos | archived | docs/archived/ROADMAP_PROXIMOS_PASSOS.md | - | A7 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.archived.roadmap-v0.5.0-part3 | archived | docs/archived/ROADMAP_v0.5.0_PART3.md | - | A7 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.archived.strategic-growth-plan | archived | docs/archived/STRATEGIC_GROWTH_PLAN.md | - | A7 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
-| repo.docs.bug-fixes-suggestions | repo_only | docs/BUG_FIXES_SUGGESTIONS.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.compiler.architecture | repo_only | docs/compiler/ARCHITECTURE.md | - | A4 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.compiler.debugging-guide | repo_only | docs/compiler/DEBUGGING_GUIDE.md | - | A4 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.compiler.effect-dispatch-integration | repo_only | docs/compiler/EFFECT_DISPATCH_INTEGRATION.md | - | A4 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -76,7 +74,6 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.features.smt-integration-guide | repo_only | docs/features/SMT_INTEGRATION_GUIDE.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.features.visual-showcase-integration | repo_only | docs/features/VISUAL_SHOWCASE_INTEGRATION.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.getting-started | repo_only | docs/GETTING_STARTED.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
-| repo.docs.glm-4.7-integration | repo_only | docs/GLM_4.7_INTEGRATION.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.glossary | repo_only | docs/GLOSSARY.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.guide.installation | repo_only | docs/guide/installation.md | - | A5 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.guide.minimum-viable-sounio | repo_only | docs/guide/MINIMUM_VIABLE_SOUNIO.md | - | A5 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -114,6 +111,8 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.implementation.test-triage-report | historical | docs/implementation/test_triage_report.md | - | A7 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.implementation.tooling-summary | repo_only | docs/implementation/TOOLING_SUMMARY.md | - | A7 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.implementation.ui-type-deignore-candidates | historical | docs/implementation/UI_TYPE_DEIGNORE_CANDIDATES.md | - | A7 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.llm-programming-guide | repo_only | docs/LLM_PROGRAMMING_GUIDE.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.migration-2026-03-16 | repo_only | docs/MIGRATION_2026_03_16.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.qnn-performance-guide | repo_only | docs/QNN_PERFORMANCE_GUIDE.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.qnn.api.comparison-guide | repo_only | docs/qnn/api/COMPARISON_GUIDE.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.qnn.architecture-deep-dive | repo_only | docs/qnn/ARCHITECTURE_DEEP_DIVE.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -135,9 +134,15 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.research.research-validation-summary | repo_only | docs/research/RESEARCH_VALIDATION_SUMMARY.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.self-hosted-hypercomplex | historical | docs/research/self_hosted_hypercomplex.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.while-loop-bug-investigation | historical | docs/research/WHILE_LOOP_BUG_INVESTIGATION.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
-| repo.docs.selfhost-omega-todos | repo_only | docs/SELFHOST_OMEGA_TODOS.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.sounio-vs-python | repo_only | docs/sounio_vs_python.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.stdlib.linalg.blas-ffi | repo_only | docs/stdlib/linalg/BLAS_FFI.md | - | A3 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.stdlib.stdlib-language-limitations | repo_only | docs/stdlib/STDLIB_LANGUAGE_LIMITATIONS.md | - | A3 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.stdlib.stdlib-module-organization | repo_only | docs/stdlib/STDLIB_MODULE_ORGANIZATION.md | - | A3 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.tutorials.data-processing | repo_only | docs/tutorials/data_processing.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.tutorials.higher-order-functions | repo_only | docs/tutorials/higher_order_functions.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.tutorials.scientific-computing | repo_only | docs/tutorials/scientific_computing.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.type-theory.closure-type-theory | repo_only | docs/type-theory/CLOSURE_TYPE_THEORY.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.validation.integration-guide | repo_only | docs/validation/INTEGRATION_GUIDE.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.website-features | repo_only | docs/WEBSITE_FEATURES.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.examples.graphics.readme | repo_only | examples/graphics/README.md | - | A5 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.examples.pbpk.readme | repo_only | examples/pbpk/README.md | - | A5 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
