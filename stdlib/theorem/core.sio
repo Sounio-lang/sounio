@@ -1,0 +1,423 @@
+//! stdlib/theorem/core.sio
+//!
+//! Proof context and theorem prover foundation kernel.
+//! Lightweight arena-based propositions with Div, Mut, Panic, inference rules.
+//! Distinct from kernel.sio: simpler API, i32-based, self-contained.
+//!
+//! Ownership model: by-value passing. All context-mutating functions consume
+//! the ProofCtx and return it alongside the result via a result struct.
+
+// ============================================================================
+// PROPOSITION KINDS
+// ============================================================================
+
+fn PROP_EQ() -> i32 { 1 }
+fn PROP_LT() -> i32 { 2 }
+fn PROP_AND() -> i32 { 3 }
+fn PROP_OR() -> i32 { 4 }
+fn PROP_NOT() -> i32 { 5 }
+fn PROP_IMPLIES() -> i32 { 6 }
+fn PROP_FORALL() -> i32 { 7 }
+fn PROP_EXISTS() -> i32 { 8 }
+fn PROP_CUSTOM() -> i32 { 9 }
+fn PROP_TRUE() -> i32 { 10 }
+fn PROP_FALSE() -> i32 { 11 }
+
+// ============================================================================
+// CORE TYPES
+// ============================================================================
+
+struct ThProp {
+    kind: i32,
+    lhs: i32,
+    rhs: i32,
+    name_id: i32,
+}
+
+struct ProofCtx {
+    pk: [i32; 256],       // prop kinds
+    pl: [i32; 256],       // prop lhs
+    pr: [i32; 256],       // prop rhs
+    pn: [i32; 256],       // prop name_id
+    prop_count: i32,
+    trusted: [i32; 256],  // indices of proven propositions
+    trust_count: i32,
+    terms: [i64; 256],    // term values
+    term_count: i32,
+}
+
+// Result struct for functions that return ctx + an index
+struct ThResult {
+    ctx: ProofCtx,
+    idx: i32,
+}
+
+// Result struct for functions that return ctx + a proposition
+struct ThPropResult {
+    ctx: ProofCtx,
+    prop: ThProp,
+}
+
+// Result struct for functions that return ctx + a bool
+struct ThBoolResult {
+    ctx: ProofCtx,
+    val: bool,
+}
+
+// ============================================================================
+// PROPOSITION CONSTRUCTORS
+// ============================================================================
+
+fn th_prop_new(kind: i32, lhs: i32, rhs: i32, name_id: i32) -> ThProp {
+    return ThProp { kind: kind, lhs: lhs, rhs: rhs, name_id: name_id }
+}
+
+fn th_prop_eq(a: i32, b: i32) -> ThProp {
+    return th_prop_new(PROP_EQ(), a, b, 0)
+}
+
+fn th_prop_lt(a: i32, b: i32) -> ThProp {
+    return th_prop_new(PROP_LT(), a, b, 0)
+}
+
+fn th_prop_and(a: i32, b: i32) -> ThProp {
+    return th_prop_new(PROP_AND(), a, b, 0)
+}
+
+fn th_prop_or(a: i32, b: i32) -> ThProp {
+    return th_prop_new(PROP_OR(), a, b, 0)
+}
+
+fn th_prop_not(a: i32) -> ThProp {
+    return th_prop_new(PROP_NOT(), a, 0, 0)
+}
+
+fn th_prop_implies(a: i32, b: i32) -> ThProp {
+    return th_prop_new(PROP_IMPLIES(), a, b, 0)
+}
+
+fn th_prop_custom(id: i32) -> ThProp {
+    return th_prop_new(PROP_CUSTOM(), 0, 0, id)
+}
+
+fn th_prop_true() -> ThProp {
+    return th_prop_new(PROP_TRUE(), 0, 0, 0)
+}
+
+fn th_prop_false() -> ThProp {
+    return th_prop_new(PROP_FALSE(), 0, 0, 0)
+}
+
+// ============================================================================
+// CONTEXT CONSTRUCTION
+// ============================================================================
+
+fn ctx_new() -> ProofCtx {
+    return ProofCtx {
+        pk: [0; 256],
+        pl: [0; 256],
+        pr: [0; 256],
+        pn: [0; 256],
+        prop_count: 0,
+        trusted: [0; 256],
+        trust_count: 0,
+        terms: [0; 256],
+        term_count: 0,
+    }
+}
+
+// ============================================================================
+// CONTEXT OPERATIONS (by-value passing)
+// ============================================================================
+
+fn ctx_add_prop(ctx: ProofCtx, p: ThProp) -> ThResult with Div, Panic, Mut {
+    var c = ctx
+    let idx = c.prop_count
+    if idx >= 256 { return ThResult { ctx: c, idx: 0 - 1 } }
+    c.pk[idx] = p.kind
+    c.pl[idx] = p.lhs
+    c.pr[idx] = p.rhs
+    c.pn[idx] = p.name_id
+    c.prop_count = idx + 1
+    return ThResult { ctx: c, idx: idx }
+}
+
+fn ctx_get_prop(ctx: ProofCtx, idx: i32) -> ThPropResult {
+    if idx < 0 { return ThPropResult { ctx: ctx, prop: th_prop_false() } }
+    if idx >= ctx.prop_count { return ThPropResult { ctx: ctx, prop: th_prop_false() } }
+    let p = ThProp {
+        kind: ctx.pk[idx],
+        lhs: ctx.pl[idx],
+        rhs: ctx.pr[idx],
+        name_id: ctx.pn[idx],
+    }
+    return ThPropResult { ctx: ctx, prop: p }
+}
+
+fn ctx_is_trusted(ctx: ProofCtx, idx: i32) -> ThBoolResult {
+    var i = 0
+    while i < ctx.trust_count {
+        if ctx.trusted[i] == idx { return ThBoolResult { ctx: ctx, val: true } }
+        i = i + 1
+    }
+    return ThBoolResult { ctx: ctx, val: false }
+}
+
+fn ctx_trust(ctx: ProofCtx, idx: i32) -> ProofCtx with Div, Panic, Mut {
+    var c = ctx
+    if c.trust_count >= 256 { return c }
+    // Don't double-add
+    var i = 0
+    while i < c.trust_count {
+        if c.trusted[i] == idx { return c }
+        i = i + 1
+    }
+    c.trusted[c.trust_count] = idx
+    c.trust_count = c.trust_count + 1
+    return c
+}
+
+fn ctx_prop_count(ctx: ProofCtx) -> i32 {
+    return ctx.prop_count
+}
+
+fn ctx_trust_count(ctx: ProofCtx) -> i32 {
+    return ctx.trust_count
+}
+
+// ============================================================================
+// INFERENCE RULES (by-value passing)
+// ============================================================================
+
+// Reflexivity: x = x
+fn th_refl(ctx: ProofCtx, x: i32) -> ThResult with Div, Panic, Mut {
+    let p = th_prop_eq(x, x)
+    var r = ctx_add_prop(ctx, p)
+    let idx = r.idx
+    let c = ctx_trust(r.ctx, idx)
+    return ThResult { ctx: c, idx: idx }
+}
+
+// Symmetry: a=b => b=a
+fn th_symm(ctx: ProofCtx, eq_idx: i32) -> ThResult with Div, Panic, Mut {
+    var gp = ctx_get_prop(ctx, eq_idx)
+    let p = gp.prop
+    if p.kind != PROP_EQ() { return ThResult { ctx: gp.ctx, idx: 0 - 1 } }
+    var tb = ctx_is_trusted(gp.ctx, eq_idx)
+    if tb.val == false { return ThResult { ctx: tb.ctx, idx: 0 - 1 } }
+    let np = th_prop_eq(p.rhs, p.lhs)
+    var r = ctx_add_prop(tb.ctx, np)
+    let idx = r.idx
+    let c = ctx_trust(r.ctx, idx)
+    return ThResult { ctx: c, idx: idx }
+}
+
+// Transitivity: a=b, b=c => a=c
+fn th_trans(ctx: ProofCtx, ab_idx: i32, bc_idx: i32) -> ThResult with Div, Panic, Mut {
+    var gab = ctx_get_prop(ctx, ab_idx)
+    let ab = gab.prop
+    var gbc = ctx_get_prop(gab.ctx, bc_idx)
+    let bc = gbc.prop
+    if ab.kind != PROP_EQ() { return ThResult { ctx: gbc.ctx, idx: 0 - 1 } }
+    if bc.kind != PROP_EQ() { return ThResult { ctx: gbc.ctx, idx: 0 - 1 } }
+    var tb1 = ctx_is_trusted(gbc.ctx, ab_idx)
+    if tb1.val == false { return ThResult { ctx: tb1.ctx, idx: 0 - 1 } }
+    var tb2 = ctx_is_trusted(tb1.ctx, bc_idx)
+    if tb2.val == false { return ThResult { ctx: tb2.ctx, idx: 0 - 1 } }
+    if ab.rhs != bc.lhs { return ThResult { ctx: tb2.ctx, idx: 0 - 1 } }
+    let np = th_prop_eq(ab.lhs, bc.rhs)
+    var r = ctx_add_prop(tb2.ctx, np)
+    let idx = r.idx
+    let c = ctx_trust(r.ctx, idx)
+    return ThResult { ctx: c, idx: idx }
+}
+
+// Modus ponens: p, p=>q => q
+fn th_modus_ponens(ctx: ProofCtx, p_idx: i32, pq_idx: i32) -> ThResult with Div, Panic, Mut {
+    var gp = ctx_get_prop(ctx, p_idx)
+    var gpq = ctx_get_prop(gp.ctx, pq_idx)
+    let pq = gpq.prop
+    if pq.kind != PROP_IMPLIES() { return ThResult { ctx: gpq.ctx, idx: 0 - 1 } }
+    var tb1 = ctx_is_trusted(gpq.ctx, p_idx)
+    if tb1.val == false { return ThResult { ctx: tb1.ctx, idx: 0 - 1 } }
+    var tb2 = ctx_is_trusted(tb1.ctx, pq_idx)
+    if tb2.val == false { return ThResult { ctx: tb2.ctx, idx: 0 - 1 } }
+    // pq.lhs should reference the same proposition index as p_idx
+    if pq.lhs != p_idx { return ThResult { ctx: tb2.ctx, idx: 0 - 1 } }
+    // Trust the consequent
+    let c = ctx_trust(tb2.ctx, pq.rhs)
+    return ThResult { ctx: c, idx: pq.rhs }
+}
+
+// And introduction: p, q => p AND q
+fn th_and_intro(ctx: ProofCtx, p_idx: i32, q_idx: i32) -> ThResult with Div, Panic, Mut {
+    var tb1 = ctx_is_trusted(ctx, p_idx)
+    if tb1.val == false { return ThResult { ctx: tb1.ctx, idx: 0 - 1 } }
+    var tb2 = ctx_is_trusted(tb1.ctx, q_idx)
+    if tb2.val == false { return ThResult { ctx: tb2.ctx, idx: 0 - 1 } }
+    let np = th_prop_and(p_idx, q_idx)
+    var r = ctx_add_prop(tb2.ctx, np)
+    let idx = r.idx
+    let c = ctx_trust(r.ctx, idx)
+    return ThResult { ctx: c, idx: idx }
+}
+
+// And elimination left: p AND q => p
+fn th_and_elim_l(ctx: ProofCtx, pq_idx: i32) -> ThResult with Div, Panic, Mut {
+    var gpq = ctx_get_prop(ctx, pq_idx)
+    let pq = gpq.prop
+    if pq.kind != PROP_AND() { return ThResult { ctx: gpq.ctx, idx: 0 - 1 } }
+    var tb = ctx_is_trusted(gpq.ctx, pq_idx)
+    if tb.val == false { return ThResult { ctx: tb.ctx, idx: 0 - 1 } }
+    let c = ctx_trust(tb.ctx, pq.lhs)
+    return ThResult { ctx: c, idx: pq.lhs }
+}
+
+// And elimination right: p AND q => q
+fn th_and_elim_r(ctx: ProofCtx, pq_idx: i32) -> ThResult with Div, Panic, Mut {
+    var gpq = ctx_get_prop(ctx, pq_idx)
+    let pq = gpq.prop
+    if pq.kind != PROP_AND() { return ThResult { ctx: gpq.ctx, idx: 0 - 1 } }
+    var tb = ctx_is_trusted(gpq.ctx, pq_idx)
+    if tb.val == false { return ThResult { ctx: tb.ctx, idx: 0 - 1 } }
+    let c = ctx_trust(tb.ctx, pq.rhs)
+    return ThResult { ctx: c, idx: pq.rhs }
+}
+
+// Axiom: trust without proof
+fn th_axiom(ctx: ProofCtx, p: ThProp) -> ThResult with Div, Panic, Mut {
+    var r = ctx_add_prop(ctx, p)
+    let idx = r.idx
+    let c = ctx_trust(r.ctx, idx)
+    return ThResult { ctx: c, idx: idx }
+}
+
+// ============================================================================
+// INLINE TESTS
+// ============================================================================
+
+// Test: reflexivity proves x = x
+fn test_refl() -> bool with Div, Panic, Mut {
+    var ctx = ctx_new()
+    var r = th_refl(ctx, 42)
+    ctx = r.ctx
+    let idx = r.idx
+    if idx < 0 { return false }
+    var gp = ctx_get_prop(ctx, idx)
+    ctx = gp.ctx
+    let p = gp.prop
+    if p.kind != PROP_EQ() { return false }
+    if p.lhs != 42 { return false }
+    if p.rhs != 42 { return false }
+    var tb = ctx_is_trusted(ctx, idx)
+    if tb.val == false { return false }
+    return true
+}
+
+// Test: symmetry + transitivity chain
+fn test_symm_trans() -> bool with Div, Panic, Mut {
+    var ctx = ctx_new()
+    // Axiom: a = b (terms 1, 2)
+    var r1 = th_axiom(ctx, th_prop_eq(1, 2))
+    ctx = r1.ctx
+    let ab = r1.idx
+    // Symmetry: b = a
+    var r2 = th_symm(ctx, ab)
+    ctx = r2.ctx
+    let ba = r2.idx
+    if ba < 0 { return false }
+    var gp1 = ctx_get_prop(ctx, ba)
+    ctx = gp1.ctx
+    let p_ba = gp1.prop
+    if p_ba.lhs != 2 { return false }
+    if p_ba.rhs != 1 { return false }
+
+    // Axiom: b = c (terms 2, 3)
+    var r3 = th_axiom(ctx, th_prop_eq(2, 3))
+    ctx = r3.ctx
+    let bc = r3.idx
+    // Transitivity: a=b, b=c => a=c
+    var r4 = th_trans(ctx, ab, bc)
+    ctx = r4.ctx
+    let ac = r4.idx
+    if ac < 0 { return false }
+    var gp2 = ctx_get_prop(ctx, ac)
+    ctx = gp2.ctx
+    let p_ac = gp2.prop
+    if p_ac.lhs != 1 { return false }
+    if p_ac.rhs != 3 { return false }
+    var tb = ctx_is_trusted(ctx, ac)
+    if tb.val == false { return false }
+    return true
+}
+
+// Test: modus ponens
+fn test_modus_ponens() -> bool with Div, Panic, Mut {
+    var ctx = ctx_new()
+    // Add proposition P (custom 100)
+    let p_prop = th_prop_custom(100)
+    var r1 = ctx_add_prop(ctx, p_prop)
+    ctx = r1.ctx
+    let p_idx = r1.idx
+    ctx = ctx_trust(ctx, p_idx)
+
+    // Add proposition Q (custom 200)
+    let q_prop = th_prop_custom(200)
+    var r2 = ctx_add_prop(ctx, q_prop)
+    ctx = r2.ctx
+    let q_idx = r2.idx
+
+    // Add P => Q (lhs = p_idx, rhs = q_idx)
+    let pq_prop = th_prop_implies(p_idx, q_idx)
+    var r3 = ctx_add_prop(ctx, pq_prop)
+    ctx = r3.ctx
+    let pq_idx = r3.idx
+    ctx = ctx_trust(ctx, pq_idx)
+
+    // Apply modus ponens
+    var r4 = th_modus_ponens(ctx, p_idx, pq_idx)
+    ctx = r4.ctx
+    let result = r4.idx
+    if result < 0 { return false }
+    if result != q_idx { return false }
+    var tb = ctx_is_trusted(ctx, q_idx)
+    if tb.val == false { return false }
+    return true
+}
+
+// Test: and_intro + and_elim round-trip
+fn test_and_roundtrip() -> bool with Div, Panic, Mut {
+    var ctx = ctx_new()
+    // Two axioms
+    var r1 = th_axiom(ctx, th_prop_custom(10))
+    ctx = r1.ctx
+    let p_idx = r1.idx
+    var r2 = th_axiom(ctx, th_prop_custom(20))
+    ctx = r2.ctx
+    let q_idx = r2.idx
+
+    // Conjunction
+    var r3 = th_and_intro(ctx, p_idx, q_idx)
+    ctx = r3.ctx
+    let pq = r3.idx
+    if pq < 0 { return false }
+
+    // Eliminate left
+    var r4 = th_and_elim_l(ctx, pq)
+    ctx = r4.ctx
+    let left = r4.idx
+    if left != p_idx { return false }
+    var tb1 = ctx_is_trusted(ctx, left)
+    ctx = tb1.ctx
+    if tb1.val == false { return false }
+
+    // Eliminate right
+    var r5 = th_and_elim_r(ctx, pq)
+    ctx = r5.ctx
+    let right = r5.idx
+    if right != q_idx { return false }
+    var tb2 = ctx_is_trusted(ctx, right)
+    if tb2.val == false { return false }
+
+    return true
+}

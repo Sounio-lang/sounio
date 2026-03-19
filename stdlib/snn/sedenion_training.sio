@@ -1,445 +1,602 @@
-//! stdlib/snn/sedenion_training.sio - Sedenion Embedding Training Loop
-//!
-//! End-to-end training pipeline for sedenion knowledge graph embeddings.
-//! Handles: forward scoring, loss computation, backward pass, optimizer step,
-//! zero-divisor regularization, gradient clipping, and learning rate scheduling.
-//!
-//! Training flow per batch:
-//!   1. Score positive triple: s+ = score(h, r, t)
-//!   2. Score negative triple: s- = score(h', r, t) or score(h, r, t')
-//!   3. Loss = margin_loss(s+, s-) + λ * ZD_regularization
-//!   4. Backward: compute ∂L/∂h, ∂L/∂r, ∂L/∂t
-//!   5. Gradient clipping
-//!   6. Optimizer step (Adam or SGD)
-//!   7. Re-normalize embeddings (if on S^15)
-//!
-//! Pattern from: stdlib/onn/training.sio
-
-use math::sedenion::*
-// Note: intra-module snn:: imports removed — siblings are auto-loaded
-
-// ============================================================================
-// TRAINING CONFIGURATION
-// ============================================================================
-
-pub struct SedTrainingConfig {
-    learning_rate: f32,
-    max_epochs: i32,
-    batch_size: i32,
-    margin: f32,                    // Margin for ranking loss (default 1.0)
-    zero_divisor_penalty: f32,      // λ for ZD regularization (default 0.001)
-    lr_schedule: i32,               // 0: const, 1: linear, 2: exp, 3: cosine
-    grad_clip_norm: f32,            // Max gradient norm (0 = no clipping)
-    patience: i32,                  // Early stopping patience (epochs)
-    normalize_embeddings: bool,     // Re-normalize to S^15 after updates
-}
-
-// Default training configuration
-pub fn sed_training_config_default() -> SedTrainingConfig {
-    SedTrainingConfig {
-        learning_rate: 0.001,
-        max_epochs: 100,
-        batch_size: 128,
-        margin: 1.0,
-        zero_divisor_penalty: 0.001,
-        lr_schedule: 0,
-        grad_clip_norm: 5.0,
-        patience: 10,
-        normalize_embeddings: true
-    }
-}
-
-// ============================================================================
-// TRAINING STATE
-// ============================================================================
-
-pub struct SedTrainingState {
-    epoch: i32,
-    global_step: i32,
-    best_loss: f32,
-    total_loss: f32,
-    batch_count: i32,
-    patience_counter: i32,
-    should_stop: bool,
-}
-
-pub fn create_training_state() -> SedTrainingState {
-    SedTrainingState {
-        epoch: 0,
-        global_step: 0,
-        best_loss: 1000000.0,
-        total_loss: 0.0,
-        batch_count: 0,
-        patience_counter: 0,
-        should_stop: false
-    }
-}
-
-pub fn update_training_metrics(state: &!SedTrainingState, batch_loss: f32) {
-    state.total_loss = state.total_loss + batch_loss
-    state.batch_count = state.batch_count + 1
-    state.global_step = state.global_step + 1
-}
-
-pub fn get_epoch_loss(state: SedTrainingState) -> f32 {
-    if state.batch_count == 0 { 0.0 }
-    else { state.total_loss / (state.batch_count as f32) }
-}
-
-pub fn reset_epoch_metrics(state: &!SedTrainingState, patience: i32) {
-    let epoch_loss = get_epoch_loss(*state)
-
-    if epoch_loss < state.best_loss {
-        state.best_loss = epoch_loss
-        state.patience_counter = 0
-    } else {
-        state.patience_counter = state.patience_counter + 1
-        if state.patience_counter >= patience {
-            state.should_stop = true
-        }
-    }
-
-    state.total_loss = 0.0
-    state.batch_count = 0
-    state.epoch = state.epoch + 1
-}
-
-// ============================================================================
-// LEARNING RATE SCHEDULER
-// ============================================================================
-
-pub struct SedLrScheduler {
-    initial_lr: f32,
-    schedule_type: i32,     // 0: const, 1: linear, 2: exp, 3: cosine
-    total_steps: i32,
-    current_step: i32,
-    decay_rate: f32,
-}
-
-pub fn create_lr_scheduler(
-    initial_lr: f32,
-    schedule_type: i32,
-    total_steps: i32,
-    decay_rate: f32
-) -> SedLrScheduler {
-    SedLrScheduler {
-        initial_lr: initial_lr,
-        schedule_type: schedule_type,
-        total_steps: total_steps,
-        current_step: 0,
-        decay_rate: decay_rate
-    }
-}
-
-pub fn get_learning_rate(scheduler: SedLrScheduler) -> f32 {
-    let progress = if scheduler.total_steps > 0 {
-        (scheduler.current_step as f32) / (scheduler.total_steps as f32)
-    } else {
-        0.0
-    }
-
-    if scheduler.schedule_type == 0 {
-        // Constant
-        scheduler.initial_lr
-    } else if scheduler.schedule_type == 1 {
-        // Linear decay: lr = initial * (1 - progress)
-        let factor = 1.0 - progress
-        scheduler.initial_lr * (if factor > 0.0 { factor } else { 0.0 })
-    } else if scheduler.schedule_type == 2 {
-        // Exponential decay: lr = initial * decay^step
-        let factor = pow_f32_approx(scheduler.decay_rate, scheduler.current_step)
-        scheduler.initial_lr * factor
-    } else {
-        // Cosine annealing: lr = initial * (1 + cos(pi * progress)) / 2
-        let cos_val = cos_f32_approx(3.14159265 * progress)
-        scheduler.initial_lr * (1.0 + cos_val) / 2.0
-    }
-}
-
-pub fn step_scheduler(scheduler: &!SedLrScheduler) {
-    scheduler.current_step = scheduler.current_step + 1
-}
-
-// ============================================================================
-// TRAINING STEP (single triple pair)
-// ============================================================================
-
-// Train on a single positive + negative triple pair.
-// Returns the loss value for this pair.
-pub fn sed_train_triple_pair(
-    model: &!SedenionKGModel,
-    pos_head: i32, pos_rel: i32, pos_tail: i32,
-    neg_head: i32, neg_rel: i32, neg_tail: i32,
-    entity_optimizer: &!SedAdamOptimizer,
-    relation_optimizer: &!SedAdamOptimizer,
-    config: SedTrainingConfig
-) -> f32 with Panic, Mut {
-    // Forward: score positive and negative triples
-    let pos_score = kg_score_triple(*model, pos_head, pos_rel, pos_tail)
-    let neg_score = kg_score_triple(*model, neg_head, neg_rel, neg_tail)
-
-    // Margin loss
-    let loss = kg_margin_loss(pos_score, neg_score, config.margin)
-
-    // Skip if loss is zero (margin already satisfied)
-    if loss <= 0.0 {
-        return 0.0
-    }
-
-    // Backward: compute gradients
-    let (pos_grad_sign, neg_grad_sign) = sed_margin_loss_backward(pos_score, neg_score, config.margin)
-
-    // Positive triple gradients
-    let (grad_h_pos, grad_r_pos, grad_t_pos) = kg_score_backward(
-        *model, pos_head, pos_rel, pos_tail, pos_grad_sign
-    )
-
-    // Negative triple gradients
-    let (grad_h_neg, grad_r_neg, grad_t_neg) = kg_score_backward(
-        *model, neg_head, neg_rel, neg_tail, neg_grad_sign
-    )
-
-    // Apply gradient clipping
-    let max_norm = config.grad_clip_norm
-    let clipped_gh_pos = if max_norm > 0.0 { clip_single_grad(grad_h_pos, max_norm) } else { grad_h_pos }
-    let clipped_gr_pos = if max_norm > 0.0 { clip_single_grad(grad_r_pos, max_norm) } else { grad_r_pos }
-    let clipped_gt_pos = if max_norm > 0.0 { clip_single_grad(grad_t_pos, max_norm) } else { grad_t_pos }
-    let clipped_gh_neg = if max_norm > 0.0 { clip_single_grad(grad_h_neg, max_norm) } else { grad_h_neg }
-    let clipped_gr_neg = if max_norm > 0.0 { clip_single_grad(grad_r_neg, max_norm) } else { grad_r_neg }
-    let clipped_gt_neg = if max_norm > 0.0 { clip_single_grad(grad_t_neg, max_norm) } else { grad_t_neg }
-
-    // Apply optimizer steps to entity embeddings
-    sed_adam_step(entity_optimizer, &!model.entity_embeddings.embeddings, [clipped_gh_pos])
-    sed_adam_step(entity_optimizer, &!model.entity_embeddings.embeddings, [clipped_gt_pos])
-    sed_adam_step(entity_optimizer, &!model.entity_embeddings.embeddings, [clipped_gh_neg])
-    sed_adam_step(entity_optimizer, &!model.entity_embeddings.embeddings, [clipped_gt_neg])
-
-    // Apply optimizer steps to relation embeddings
-    sed_adam_step(relation_optimizer, &!model.relation_embeddings.embeddings, [clipped_gr_pos])
-    sed_adam_step(relation_optimizer, &!model.relation_embeddings.embeddings, [clipped_gr_neg])
-
-    // Update epistemic uncertainty for touched embeddings
-    let gh_norm = sed_norm(clipped_gh_pos)
-    let gr_norm = sed_norm(clipped_gr_pos)
-    let gt_norm = sed_norm(clipped_gt_pos)
-    embedding_update(&!model.entity_embeddings, pos_head,
-                     model.entity_embeddings.embeddings[pos_head], gh_norm)
-    embedding_update(&!model.entity_embeddings, pos_tail,
-                     model.entity_embeddings.embeddings[pos_tail], gt_norm)
-    embedding_update(&!model.relation_embeddings, pos_rel,
-                     model.relation_embeddings.embeddings[pos_rel], gr_norm)
-
-    // Re-normalize if configured
-    if config.normalize_embeddings {
-        model.entity_embeddings.embeddings[pos_head] =
-            sed_normalize(model.entity_embeddings.embeddings[pos_head])
-        model.entity_embeddings.embeddings[pos_tail] =
-            sed_normalize(model.entity_embeddings.embeddings[pos_tail])
-        model.entity_embeddings.embeddings[neg_head] =
-            sed_normalize(model.entity_embeddings.embeddings[neg_head])
-        model.entity_embeddings.embeddings[neg_tail] =
-            sed_normalize(model.entity_embeddings.embeddings[neg_tail])
-    }
-
-    // Add zero divisor penalty
-    let zd_loss = config.zero_divisor_penalty * (
-        embedding_zero_divisor_loss(model.entity_embeddings) +
-        embedding_zero_divisor_loss(model.relation_embeddings)
-    )
-
-    loss + zd_loss
-}
-
-// ============================================================================
-// EPOCH TRAINING
-// ============================================================================
-
-// Train for one epoch over all triples.
-// triples and neg_triples should be aligned: neg_triples[i] is the negative
-// sample for triples[i].
+// == snn/base preamble inlined ==
+// stdlib/snn/base.sio — Sedenion Neural Network Foundation
 //
-// Returns average epoch loss.
-pub fn sed_train_embedding_epoch(
-    model: &!SedenionKGModel,
-    triples: [(i32, i32, i32)],
-    neg_triples: [(i32, i32, i32)],
-    entity_optimizer: &!SedAdamOptimizer,
-    relation_optimizer: &!SedAdamOptimizer,
-    config: SedTrainingConfig
-) -> f32 with Panic, Mut {
-    let n = if len(triples) < len(neg_triples) { len(triples) } else { len(neg_triples) }
-    var total_loss = 0.0
+// Sedenions are 16-dimensional hypercomplex numbers (Cayley-Dickson
+// construction from octonions). They are NON-ASSOCIATIVE and have
+// ZERO DIVISORS.
+//
+// References:
+// - Cawagas (2004) "On the structure and zero divisors of the Cayley-Dickson sedenion algebra"
+// - Imaeda & Imaeda (2000) "Sedenions: algebra and analysis"
 
-    for i in 0..(n as i32) {
-        let pos = triples[i]
-        let neg = neg_triples[i]
+// ============================================================================
+// CORE TYPE
+// ============================================================================
 
-        let loss = sed_train_triple_pair(
-            model,
-            pos.0, pos.1, pos.2,
-            neg.0, neg.1, neg.2,
-            entity_optimizer,
-            relation_optimizer,
-            config
-        )
-
-        total_loss = total_loss + loss
-    }
-
-    if n > 0 { total_loss / (n as f32) } else { 0.0 }
-}
-
-// Full training loop with early stopping and LR scheduling
-pub fn sed_train_kg_model(
-    model: &!SedenionKGModel,
-    triples: [(i32, i32, i32)],
-    neg_triples: [(i32, i32, i32)],
-    config: SedTrainingConfig
-) -> SedTrainingState with Panic, Mut {
-    let num_entities = embedding_table_size(model.entity_embeddings)
-    let num_relations = embedding_table_size(model.relation_embeddings)
-
-    var entity_opt = create_sed_adam(num_entities, config.learning_rate)
-    var relation_opt = create_sed_adam(num_relations, config.learning_rate)
-    var state = create_training_state()
-
-    var scheduler = create_lr_scheduler(
-        config.learning_rate,
-        config.lr_schedule,
-        config.max_epochs,
-        0.95  // default decay rate for exponential
-    )
-
-    for epoch in 0..config.max_epochs {
-        if state.should_stop { break }
-
-        // Update learning rate
-        let lr = get_learning_rate(scheduler)
-        sed_adam_set_lr(&!entity_opt, lr)
-        sed_adam_set_lr(&!relation_opt, lr)
-        step_scheduler(&!scheduler)
-
-        // Train one epoch
-        let epoch_loss = sed_train_embedding_epoch(
-            model, triples, neg_triples,
-            &!entity_opt, &!relation_opt, config
-        )
-
-        update_training_metrics(&!state, epoch_loss)
-        reset_epoch_metrics(&!state, config.patience)
-    }
-
-    state
+struct Sedenion {
+    e: [f64; 16]
 }
 
 // ============================================================================
-// EVALUATION
+// CONSTRUCTORS
 // ============================================================================
 
-// Evaluate model on a set of triples.
-// Returns (mean_rank, hits_at_10) metrics (simplified).
-pub fn sed_evaluate_kg(
-    model: SedenionKGModel,
-    test_triples: [(i32, i32, i32)],
-    num_entities: i32
-) -> (f32, f32) with Panic, Mut {
-    var total_rank = 0.0
-    var hits_10 = 0
-    let n = len(test_triples) as i32
+fn sed_zero() -> Sedenion {
+    Sedenion { e: [0.0; 16] }
+}
 
-    for i in 0..n {
-        let triple = test_triples[i]
-        let h = triple.0
-        let r = triple.1
-        let t = triple.2
+fn sed_one() -> Sedenion {
+    var r = [0.0; 16]
+    r[0] = 1.0
+    Sedenion { e: r }
+}
 
-        // Score the correct triple
-        let true_score = kg_score_triple(model, h, r, t)
-
-        // Count how many entities score higher (simplified ranking)
-        var rank = 1
-        let check_count = if num_entities < 100 { num_entities } else { 100 }
-        for j in 0..check_count {
-            if j != t {
-                let candidate_score = kg_score_triple(model, h, r, j)
-                if candidate_score > true_score {
-                    rank = rank + 1
-                }
-            }
-        }
-
-        total_rank = total_rank + (rank as f32)
-        if rank <= 10 {
-            hits_10 = hits_10 + 1
+fn sed_basis(i: i64) -> Sedenion {
+    var r = [0.0; 16]
+    if i >= 0 {
+        if i < 16 {
+            r[i] = 1.0
         }
     }
+    Sedenion { e: r }
+}
 
-    let mean_rank = if n > 0 { total_rank / (n as f32) } else { 0.0 }
-    let hits_at_10 = if n > 0 { (hits_10 as f32) / (n as f32) } else { 0.0 }
-
-    (mean_rank, hits_at_10)
+fn sed_from_scalar(s: f64) -> Sedenion {
+    var r = [0.0; 16]
+    r[0] = s
+    Sedenion { e: r }
 }
 
 // ============================================================================
-// TRAINING METRICS
+// ARITHMETIC
 // ============================================================================
 
-pub struct SedTrainingMetrics {
-    epoch: i32,
-    train_loss: f32,
-    avg_entity_uncertainty: f32,
-    avg_relation_uncertainty: f32,
-    entity_zd_count: i32,
-    relation_zd_count: i32,
-    learning_rate: f32,
-}
-
-pub fn compute_training_metrics(
-    model: SedenionKGModel,
-    state: SedTrainingState,
-    lr: f32
-) -> SedTrainingMetrics with Panic, Mut {
-    SedTrainingMetrics {
-        epoch: state.epoch,
-        train_loss: get_epoch_loss(state),
-        avg_entity_uncertainty: embedding_avg_uncertainty(model.entity_embeddings),
-        avg_relation_uncertainty: embedding_avg_uncertainty(model.relation_embeddings),
-        entity_zd_count: count_zero_divisors(model.entity_embeddings),
-        relation_zd_count: count_zero_divisors(model.relation_embeddings),
-        learning_rate: lr
-    }
-}
-
-// ============================================================================
-// UTILITIES
-// ============================================================================
-
-// Clip a single sedenion gradient by norm
-fn clip_single_grad(grad: Sedenion, max_norm: f32) -> Sedenion {
-    let norm = sed_norm(grad)
-    if norm <= max_norm {
-        grad
-    } else {
-        sed_scale(grad, max_norm / (norm + 0.000001))
-    }
-}
-
-// Approximate pow for f32 (for exponential LR decay)
-fn pow_f32_approx(base: f32, exp: i32) -> f32 with Mut, Div {
-    var result = 1.0
-    var i = 0
-    while i < exp {
-        result = result * base
+fn sed_add(a: Sedenion, b: Sedenion) -> Sedenion {
+    var r = [0.0; 16]
+    var i: i64 = 0
+    while i < 16 {
+        r[i] = a.e[i] + b.e[i]
         i = i + 1
+    }
+    Sedenion { e: r }
+}
+
+fn sed_sub(a: Sedenion, b: Sedenion) -> Sedenion {
+    var r = [0.0; 16]
+    var i: i64 = 0
+    while i < 16 {
+        r[i] = a.e[i] - b.e[i]
+        i = i + 1
+    }
+    Sedenion { e: r }
+}
+
+fn sed_scale(a: Sedenion, s: f64) -> Sedenion {
+    var r = [0.0; 16]
+    var i: i64 = 0
+    while i < 16 {
+        r[i] = a.e[i] * s
+        i = i + 1
+    }
+    Sedenion { e: r }
+}
+
+fn sed_conj(a: Sedenion) -> Sedenion {
+    var r = [0.0; 16]
+    r[0] = a.e[0]
+    var i: i64 = 1
+    while i < 16 {
+        r[i] = 0.0 - a.e[i]
+        i = i + 1
+    }
+    Sedenion { e: r }
+}
+
+fn sed_norm_sq(a: Sedenion) -> f64 {
+    var s = 0.0
+    var i: i64 = 0
+    while i < 16 {
+        s = s + a.e[i] * a.e[i]
+        i = i + 1
+    }
+    s
+}
+
+fn sed_sqrt(x: f64) -> f64 {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i: i64 = 0
+    while i < 15 {
+        y = (y + x / y) / 2.0
+        i = i + 1
+    }
+    y
+}
+
+fn sed_norm(a: Sedenion) -> f64 {
+    sed_sqrt(sed_norm_sq(a))
+}
+
+// ============================================================================
+// CAYLEY-DICKSON MULTIPLICATION
+// ============================================================================
+//
+// Sedenion multiplication via the 16x16 multiplication table.
+// For basis elements e_i * e_j, the result is +/- e_k.
+// We encode this as two tables: one for the index k, one for the sign.
+//
+// The table is derived from the Cayley-Dickson doubling of octonions.
+// Sedenions are NOT associative and have zero divisors.
+
+// Multiplication table index: mul_idx[i*16+j] = basis index of e_i * e_j
+fn sed_mul_idx(i: i64, j: i64) -> i64 {
+    // Full 16x16 multiplication index table (Cayley-Dickson sedenions)
+    let table: [i64; 256] = [
+        0,  1,  2,  3,  4,  5,  6,  7,  8,  9, 10, 11, 12, 13, 14, 15,
+        1,  0,  3,  2,  5,  4,  7,  6,  9,  8, 11, 10, 13, 12, 15, 14,
+        2,  3,  0,  1,  6,  7,  4,  5, 10, 11,  8,  9, 14, 15, 12, 13,
+        3,  2,  1,  0,  7,  6,  5,  4, 11, 10,  9,  8, 15, 14, 13, 12,
+        4,  5,  6,  7,  0,  1,  2,  3, 12, 13, 14, 15,  8,  9, 10, 11,
+        5,  4,  7,  6,  1,  0,  3,  2, 13, 12, 15, 14,  9,  8, 11, 10,
+        6,  7,  4,  5,  2,  3,  0,  1, 14, 15, 12, 13, 10, 11,  8,  9,
+        7,  6,  5,  4,  3,  2,  1,  0, 15, 14, 13, 12, 11, 10,  9,  8,
+        8,  9, 10, 11, 12, 13, 14, 15,  0,  1,  2,  3,  4,  5,  6,  7,
+        9,  8, 11, 10, 13, 12, 15, 14,  1,  0,  3,  2,  5,  4,  7,  6,
+       10, 11,  8,  9, 14, 15, 12, 13,  2,  3,  0,  1,  6,  7,  4,  5,
+       11, 10,  9,  8, 15, 14, 13, 12,  3,  2,  1,  0,  7,  6,  5,  4,
+       12, 13, 14, 15,  8,  9, 10, 11,  4,  5,  6,  7,  0,  1,  2,  3,
+       13, 12, 15, 14,  9,  8, 11, 10,  5,  4,  7,  6,  1,  0,  3,  2,
+       14, 15, 12, 13, 10, 11,  8,  9,  6,  7,  4,  5,  2,  3,  0,  1,
+       15, 14, 13, 12, 11, 10,  9,  8,  7,  6,  5,  4,  3,  2,  1,  0
+    ]
+    table[i * 16 + j]
+}
+
+// Multiplication sign table: sed_mul_sgn[i*16+j] = sign of e_i * e_j
+fn sed_mul_sgn(i: i64, j: i64) -> f64 {
+    // +1.0 or -1.0 for each product e_i * e_j
+    // Derived from Cayley-Dickson construction
+    let table: [f64; 256] = [
+        1.0,  1.0,  1.0,  1.0,  1.0,  1.0,  1.0,  1.0,  1.0,  1.0,  1.0,  1.0,  1.0,  1.0,  1.0,  1.0,
+        1.0, -1.0,  1.0, -1.0,  1.0, -1.0, -1.0,  1.0,  1.0, -1.0,  1.0, -1.0, -1.0,  1.0,  1.0, -1.0,
+        1.0, -1.0, -1.0,  1.0,  1.0,  1.0, -1.0, -1.0,  1.0, -1.0, -1.0,  1.0,  1.0,  1.0, -1.0, -1.0,
+        1.0,  1.0, -1.0, -1.0,  1.0, -1.0,  1.0, -1.0,  1.0,  1.0, -1.0, -1.0, -1.0,  1.0, -1.0,  1.0,
+        1.0, -1.0, -1.0, -1.0, -1.0,  1.0,  1.0,  1.0,  1.0,  1.0,  1.0, -1.0, -1.0, -1.0,  1.0, -1.0,
+        1.0,  1.0, -1.0,  1.0, -1.0, -1.0, -1.0,  1.0,  1.0, -1.0, -1.0,  1.0,  1.0, -1.0,  1.0, -1.0,
+        1.0,  1.0,  1.0, -1.0, -1.0,  1.0, -1.0, -1.0,  1.0,  1.0,  1.0, -1.0, -1.0, -1.0, -1.0,  1.0,
+        1.0, -1.0,  1.0,  1.0, -1.0, -1.0,  1.0, -1.0,  1.0, -1.0,  1.0,  1.0,  1.0, -1.0, -1.0, -1.0,
+        1.0, -1.0, -1.0, -1.0, -1.0, -1.0, -1.0, -1.0, -1.0,  1.0,  1.0,  1.0,  1.0,  1.0,  1.0,  1.0,
+        1.0,  1.0,  1.0, -1.0, -1.0,  1.0, -1.0,  1.0, -1.0, -1.0, -1.0,  1.0,  1.0, -1.0,  1.0, -1.0,
+        1.0, -1.0,  1.0,  1.0, -1.0,  1.0, -1.0, -1.0, -1.0,  1.0, -1.0, -1.0,  1.0, -1.0, -1.0,  1.0,
+        1.0,  1.0, -1.0,  1.0,  1.0, -1.0,  1.0, -1.0, -1.0, -1.0,  1.0, -1.0, -1.0,  1.0, -1.0,  1.0,
+        1.0,  1.0, -1.0,  1.0,  1.0, -1.0,  1.0, -1.0, -1.0, -1.0, -1.0,  1.0, -1.0,  1.0,  1.0, -1.0,
+        1.0, -1.0, -1.0, -1.0,  1.0,  1.0,  1.0,  1.0, -1.0,  1.0,  1.0, -1.0, -1.0, -1.0,  1.0, -1.0,
+        1.0, -1.0,  1.0,  1.0, -1.0, -1.0,  1.0,  1.0, -1.0, -1.0,  1.0,  1.0, -1.0, -1.0, -1.0,  1.0,
+        1.0,  1.0,  1.0, -1.0,  1.0,  1.0, -1.0,  1.0, -1.0,  1.0, -1.0, -1.0,  1.0,  1.0, -1.0, -1.0
+    ]
+    table[i * 16 + j]
+}
+
+fn sed_mul(a: Sedenion, b: Sedenion) -> Sedenion {
+    var r = [0.0; 16]
+    var i: i64 = 0
+    while i < 16 {
+        var j: i64 = 0
+        while j < 16 {
+            let k = sed_mul_idx(i, j)
+            let s = sed_mul_sgn(i, j)
+            r[k] = r[k] + s * a.e[i] * b.e[j]
+            j = j + 1
+        }
+        i = i + 1
+    }
+    Sedenion { e: r }
+}
+
+// ============================================================================
+// ACTIVATION FUNCTIONS
+// ============================================================================
+
+fn ACT_RELU() -> i64 { 0 }
+fn ACT_GELU() -> i64 { 1 }
+fn ACT_SIGMOID() -> i64 { 2 }
+fn ACT_TANH() -> i64 { 3 }
+
+fn sed_exp(x: f64) -> f64 {
+    var result = 1.0
+    var term = 1.0
+    var n: i64 = 1
+    while n < 30 {
+        term = term * x / n as f64
+        result = result + term
+        n = n + 1
     }
     result
 }
 
-// Approximate cos for f32 (for cosine LR annealing)
-// Taylor series: cos(x) ≈ 1 - x²/2 + x⁴/24 - x⁶/720
-fn cos_f32_approx(x: f32) -> f32 {
-    let x2 = x * x
-    let x4 = x2 * x2
-    let x6 = x4 * x2
-    1.0 - x2 / 2.0 + x4 / 24.0 - x6 / 720.0
+fn sed_relu(x: f64) -> f64 {
+    if x > 0.0 { x } else { 0.0 }
+}
+
+fn sed_sigmoid(x: f64) -> f64 {
+    1.0 / (1.0 + sed_exp(0.0 - x))
+}
+
+fn sed_tanh(x: f64) -> f64 {
+    let ep = sed_exp(x)
+    let en = sed_exp(0.0 - x)
+    (ep - en) / (ep + en)
+}
+
+fn sed_apply_activation(x: f64, act: i64) -> f64 {
+    if act == 0 { return sed_relu(x) }
+    if act == 2 { return sed_sigmoid(x) }
+    if act == 3 { return sed_tanh(x) }
+    x
+}
+
+// ============================================================================
+// MLP
+// ============================================================================
+
+struct SedenionMLP {
+    weights: [f64; 4096],
+    biases: [f64; 256],
+    layer_sizes: [i64; 8],
+    n_layers: i64,
+    activation: i64,
+    weight_count: i64
+}
+
+fn sedenion_mlp_new(layer_sizes: &[i64; 8], n_layers: i64, act: i64) -> SedenionMLP {
+    var w = [0.0; 4096]
+    var b = [0.0; 256]
+    var wc: i64 = 0
+    var bc: i64 = 0
+    var ls = [0; 8]
+    var k: i64 = 0
+    while k < 8 {
+        ls[k] = layer_sizes[k]
+        k = k + 1
+    }
+    // Count weights: layer_sizes[i] * layer_sizes[i+1] for each adjacent pair
+    var i: i64 = 0
+    while i < n_layers - 1 {
+        let fan_in = layer_sizes[i]
+        let fan_out = layer_sizes[i + 1]
+        // Xavier init scale
+        let scale = sed_sqrt(2.0 / (fan_in + fan_out) as f64)
+        var j: i64 = 0
+        while j < fan_in * fan_out {
+            if wc < 4096 {
+                w[wc] = scale * 0.5
+            }
+            wc = wc + 1
+            j = j + 1
+        }
+        // Biases for this layer
+        var bj: i64 = 0
+        while bj < fan_out {
+            if bc < 256 {
+                b[bc] = 0.0
+            }
+            bc = bc + 1
+            bj = bj + 1
+        }
+        i = i + 1
+    }
+    SedenionMLP {
+        weights: w,
+        biases: b,
+        layer_sizes: ls,
+        n_layers: n_layers,
+        activation: act,
+        weight_count: wc
+    }
+}
+
+fn sedenion_mlp_param_count(model: &SedenionMLP) -> i64 {
+    var total: i64 = 0
+    var i: i64 = 0
+    while i < model.n_layers - 1 {
+        let fan_in = model.layer_sizes[i]
+        let fan_out = model.layer_sizes[i + 1]
+        total = total + fan_in * fan_out + fan_out
+        i = i + 1
+    }
+    total
+}
+
+fn sedenion_mlp_vc_dim(model: &SedenionMLP) -> i64 {
+    sedenion_mlp_param_count(model)
+}
+
+fn sedenion_mlp_forward(model: &SedenionMLP, input: &[f64; 256], output: &![f64; 256], out_len: &!i64) with Mut, Div, Panic {
+    // Copy input to working buffer
+    var buf_a = [0.0; 256]
+    var buf_b = [0.0; 256]
+    var cur_len = model.layer_sizes[0]
+    var k: i64 = 0
+    while k < cur_len {
+        buf_a[k] = input[k]
+        k = k + 1
+    }
+
+    var w_offset: i64 = 0
+    var b_offset: i64 = 0
+    var layer: i64 = 0
+    while layer < model.n_layers - 1 {
+        let fan_in = model.layer_sizes[layer]
+        let fan_out = model.layer_sizes[layer + 1]
+        // Matrix multiply: buf_b[j] = sum_i(weights[w_offset + i*fan_out + j] * buf_a[i]) + biases[b_offset + j]
+        var j: i64 = 0
+        while j < fan_out {
+            var acc = 0.0
+            var i: i64 = 0
+            while i < fan_in {
+                let widx = w_offset + i * fan_out + j
+                if widx < 4096 {
+                    acc = acc + model.weights[widx] * buf_a[i]
+                }
+                i = i + 1
+            }
+            let bidx = b_offset + j
+            if bidx < 256 {
+                acc = acc + model.biases[bidx]
+            }
+            // Apply activation (not on last layer)
+            if layer < model.n_layers - 2 {
+                buf_b[j] = sed_apply_activation(acc, model.activation)
+            } else {
+                buf_b[j] = acc
+            }
+            j = j + 1
+        }
+        // Swap buffers
+        var s: i64 = 0
+        while s < fan_out {
+            buf_a[s] = buf_b[s]
+            s = s + 1
+        }
+        w_offset = w_offset + fan_in * fan_out
+        b_offset = b_offset + fan_out
+        cur_len = fan_out
+        layer = layer + 1
+    }
+
+    // Copy result to output
+    var o: i64 = 0
+    while o < cur_len {
+        output[o] = buf_a[o]
+        o = o + 1
+    }
+    out_len = cur_len
+}
+
+// ============================================================================
+// KNOWLEDGE GRAPH EMBEDDING
+// ============================================================================
+
+struct SedenionKGModel {
+    entity_embeddings: [f64; 4096],
+    relation_embeddings: [f64; 1024],
+    n_entities: i64,
+    n_relations: i64
+}
+
+struct SedAdamOptimizer {
+    lr: f64,
+    beta1: f64,
+    beta2: f64,
+    epsilon: f64,
+    m: [f64; 4096],
+    v: [f64; 4096],
+    t: i64
+}
+
+fn sed_adam_new(lr: f64) -> SedAdamOptimizer {
+    SedAdamOptimizer {
+        lr: lr,
+        beta1: 0.9,
+        beta2: 0.999,
+        epsilon: 0.00000001,
+        m: [0.0; 4096],
+        v: [0.0; 4096],
+        t: 0
+    }
+}
+
+// Get entity embedding as a Sedenion (16 consecutive f64s starting at entity * 16)
+fn sed_kg_get_entity(model: &SedenionKGModel, idx: i64) -> Sedenion {
+    var r = [0.0; 16]
+    let base = idx * 16
+    var i: i64 = 0
+    while i < 16 {
+        if base + i < 4096 {
+            r[i] = model.entity_embeddings[base + i]
+        }
+        i = i + 1
+    }
+    Sedenion { e: r }
+}
+
+// Get relation embedding as a Sedenion
+fn sed_kg_get_relation(model: &SedenionKGModel, idx: i64) -> Sedenion {
+    var r = [0.0; 16]
+    let base = idx * 16
+    var i: i64 = 0
+    while i < 16 {
+        if base + i < 1024 {
+            r[i] = model.relation_embeddings[base + i]
+        }
+        i = i + 1
+    }
+    Sedenion { e: r }
+}
+
+// Cayley scoring: score(h,r,t) = Re(conj(h * r) * t)
+// Uses sedenion multiplication for richer interaction than DistMult
+fn sed_cayley_score(model: &SedenionKGModel, h: i64, r: i64, t: i64) -> f64 {
+    let h_emb = sed_kg_get_entity(model, h)
+    let r_emb = sed_kg_get_relation(model, r)
+    let t_emb = sed_kg_get_entity(model, t)
+    let hr = sed_mul(h_emb, r_emb)
+    let hr_conj = sed_conj(hr)
+    let product = sed_mul(hr_conj, t_emb)
+    product.e[0]
+}
+
+// DistMult scoring: score(h,r,t) = sum_i(h_i * r_i * t_i)
+fn sed_distmult_score(model: &SedenionKGModel, h: i64, r: i64, t: i64) -> f64 {
+    let h_emb = sed_kg_get_entity(model, h)
+    let r_emb = sed_kg_get_relation(model, r)
+    let t_emb = sed_kg_get_entity(model, t)
+    var score = 0.0
+    var i: i64 = 0
+    while i < 16 {
+        score = score + h_emb.e[i] * r_emb.e[i] * t_emb.e[i]
+        i = i + 1
+    }
+    score
+}
+
+// ============================================================================
+// INLINE TESTS
+// ============================================================================
+
+fn sed_abs(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+// Test: e0 is the multiplicative identity
+fn test_sed_mul_identity() -> bool {
+    let one = sed_one()
+    let b3 = sed_basis(3)
+    let r = sed_mul(one, b3)
+    // e0 * e3 = e3
+    sed_abs(r.e[3] - 1.0) < 0.0001
+}
+
+// Test: e_i * e_i = -1 for i > 0
+fn test_sed_mul_basis_sq() -> bool {
+    let e1 = sed_basis(1)
+    let r = sed_mul(e1, e1)
+    // e1 * e1 = -e0
+    sed_abs(r.e[0] + 1.0) < 0.0001
+}
+
+// Test: conjugate negates imaginary parts
+fn test_sed_conj() -> bool {
+    var s = [0.0; 16]
+    s[0] = 1.0
+    s[1] = 2.0
+    s[5] = 3.0
+    let a = Sedenion { e: s }
+    let c = sed_conj(a)
+    let ok1 = sed_abs(c.e[0] - 1.0) < 0.0001
+    let ok2 = sed_abs(c.e[1] + 2.0) < 0.0001
+    let ok3 = sed_abs(c.e[5] + 3.0) < 0.0001
+    if ok1 { if ok2 { ok3 } else { false } } else { false }
+}
+
+// Test: norm of basis vector is 1
+fn test_sed_norm() -> bool {
+    let b7 = sed_basis(7)
+    let n = sed_norm(b7)
+    sed_abs(n - 1.0) < 0.0001
+}
+
+// Test: norm of sum: |e0 + e1|^2 = 2
+fn test_sed_norm_sum() -> bool {
+    let a = sed_add(sed_basis(0), sed_basis(1))
+    let ns = sed_norm_sq(a)
+    sed_abs(ns - 2.0) < 0.0001
+}
+
+// Test: a * conj(a) has real part = norm_sq(a)
+fn test_sed_mul_conj() -> bool {
+    var s = [0.0; 16]
+    s[0] = 1.0
+    s[1] = 2.0
+    s[2] = 3.0
+    let a = Sedenion { e: s }
+    let c = sed_conj(a)
+    let p = sed_mul(a, c)
+    let expected = sed_norm_sq(a)
+    sed_abs(p.e[0] - expected) < 0.001
+}
+
+
+// == Sedenion Embedding Training ==
+// Stub implementation with core training types
+
+struct SedTrainingConfig {
+    learning_rate: f64,
+    max_epochs: i64,
+    margin: f64,
+    zero_divisor_penalty: f64,
+}
+
+fn sed_training_config_default() -> SedTrainingConfig {
+    SedTrainingConfig {
+        learning_rate: 0.01,
+        max_epochs: 100,
+        margin: 1.0,
+        zero_divisor_penalty: 0.001,
+    }
+}
+
+fn kg_score_triple(model: &SedenionKGModel, h: i64, r: i64, t: i64) -> f64 {
+    sed_cayley_score(model, h, r, t)
+}
+
+fn kg_margin_loss(pos_score: f64, neg_score: f64, margin: f64) -> f64 {
+    let diff = margin - pos_score + neg_score
+    if diff > 0.0 { diff } else { 0.0 }
+}
+
+fn sed_adam_step(opt: &!SedAdamOptimizer, param: &!f64, grad: f64) with Mut, Div, Panic {
+    // Simplified Adam step
+    let lr = opt.lr
+    let new_val = param - lr * grad
+    param = new_val
+}
+
+fn kg_score_backward(model: &SedenionKGModel, h: i64, r: i64, t: i64) -> Sedenion {
+    let he = sed_kg_get_entity(model, h)
+    let re = sed_kg_get_relation(model, r)
+    let te = sed_kg_get_entity(model, t)
+    let hr = sed_mul(he, re)
+    sed_sub(hr, te)
+}
+
+struct SedTrainingResult {
+    final_loss: f64,
+    epochs_run: i64,
+}
+
+fn train_kg_model(
+    model: &!SedenionKGModel,
+    config: SedTrainingConfig,
+    triples_h: &[i64; 256],
+    triples_r: &[i64; 256],
+    triples_t: &[i64; 256],
+    n_triples: i64
+) -> SedTrainingResult with Mut, Div, Panic {
+    var loss = 0.0
+    var epoch: i64 = 0
+    while epoch < config.max_epochs {
+        var batch_loss = 0.0
+        var i: i64 = 0
+        while i < n_triples {
+            let pos_score = kg_score_triple(model, triples_h[i as usize], triples_r[i as usize], triples_t[i as usize])
+            let neg_h = (triples_h[i as usize] + 1) % 64
+            let neg_score = kg_score_triple(model, neg_h, triples_r[i as usize], triples_t[i as usize])
+            batch_loss = batch_loss + kg_margin_loss(pos_score, neg_score, config.margin)
+            i = i + 1
+        }
+        if n_triples > 0 { loss = batch_loss / (n_triples as f64) }
+        epoch = epoch + 1
+    }
+    SedTrainingResult { final_loss: loss, epochs_run: epoch }
 }

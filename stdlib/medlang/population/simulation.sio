@@ -1,1 +1,268 @@
-//! simulation (disabled)
+// stdlib/medlang/population/simulation.sio
+//
+// Population PK simulation — Sounio
+//
+// Monte Carlo simulation with between-subject parameter variability.
+// Uses a simple linear congruential PRNG for reproducibility.
+
+// ============================================================================
+// Helpers
+// ============================================================================
+
+fn ps_abs(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+fn ps_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i = 0
+    while i < 15 {
+        y = 0.5 * (y + x / y)
+        i = i + 1
+    }
+    y
+}
+
+fn ps_exp(x: f64) -> f64 with Mut, Div, Panic {
+    var xc = x
+    if xc > 20.0 { xc = 20.0 }
+    if xc < -20.0 { xc = -20.0 }
+    var result = 1.0
+    var term = 1.0
+    var i = 1
+    while i <= 30 {
+        term = term * xc / i as f64
+        result = result + term
+        i = i + 1
+    }
+    if result < 1.0e-15 { result = 1.0e-15 }
+    result
+}
+
+fn ps_ln(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return -50.0 }
+    var v = x
+    var adjust = 0.0
+    while v > 2.0 {
+        v = v / 2.0
+        adjust = adjust + 0.6931471805599453
+    }
+    while v < 0.5 {
+        v = v * 2.0
+        adjust = adjust - 0.6931471805599453
+    }
+    let u = (v - 1.0) / (v + 1.0)
+    let u2 = u * u
+    var term = u
+    var sum = u
+    var k = 1
+    while k <= 20 {
+        term = term * u2
+        sum = sum + term / (2 * k + 1) as f64
+        k = k + 1
+    }
+    2.0 * sum + adjust
+}
+
+// ============================================================================
+// Simple LCG PRNG (linear congruential generator)
+// Returns value in [0, 1)
+// ============================================================================
+
+struct PsRng {
+    state: i64,
+}
+
+fn ps_rng_new(seed: i64) -> PsRng {
+    PsRng { state: seed }
+}
+
+fn ps_rng_next(rng: &!PsRng) -> f64 with Mut, Panic {
+    // LCG parameters (Numerical Recipes)
+    rng.state = rng.state * 1103515245 + 12345
+    // Mask to positive
+    var v = rng.state
+    if v < 0 { v = 0 - v }
+    let bits = v % 1000000
+    bits as f64 / 1000000.0
+}
+
+// ============================================================================
+// Box-Muller transform: generate normal(0,1) from two uniforms
+// ============================================================================
+
+fn ps_normal(rng: &!PsRng) -> f64 with Mut, Div, Panic {
+    var u1 = ps_rng_next(rng)
+    if u1 < 1.0e-10 { u1 = 1.0e-10 }
+    let u2 = ps_rng_next(rng)
+    // z = sqrt(-2*ln(u1)) * cos(2*pi*u2)
+    let r = ps_sqrt(0.0 - 2.0 * ps_ln(u1))
+    // cos approximation via Taylor
+    let angle = 6.28318530717959 * u2
+    var cos_val = 1.0
+    var term = 1.0
+    var i = 1
+    while i <= 12 {
+        term = 0.0 - term * angle * angle / ((2 * i - 1) as f64 * (2 * i) as f64)
+        cos_val = cos_val + term
+        i = i + 1
+    }
+    r * cos_val
+}
+
+// ============================================================================
+// Population simulation
+//
+// params: population mean parameters (theta)
+// omega: between-subject variability (variance of log-normal distribution)
+// n_subjects: number of virtual subjects to simulate
+// out: output array, out[subj * n_params + p] = individual parameter value
+// Returns: n_subjects * n_params stored
+//
+// Log-normal variability: individual_p = theta_p * exp(eta_p)
+//   where eta_p ~ N(0, omega_p)
+// ============================================================================
+
+fn pop_simulate(params: &[f64; 16], omega: &[f64; 16], n_subjects: i32, n_params: i32, out: &![f64; 256]) -> i32 with Mut, Div, Panic {
+    if n_subjects <= 0 { return 0 }
+    if n_params <= 0 { return 0 }
+
+    var np = n_params
+    if np > 16 { np = 16 }
+    var ns = n_subjects
+    if ns * np > 256 { ns = 256 / np }
+
+    var rng = ps_rng_new(42)
+    var subj = 0
+    while subj < ns {
+        var p = 0
+        while p < np {
+            let eta = ps_normal(&!rng) * ps_sqrt(omega[p])
+            // Log-normal: individual = theta * exp(eta)
+            let individual = params[p] * ps_exp(eta)
+            let idx = subj * np + p
+            if idx < 256 {
+                out[idx] = individual
+            }
+            p = p + 1
+        }
+        subj = subj + 1
+    }
+    ns * np
+}
+
+// ============================================================================
+// Summary statistics: compute mean and SD across subjects for each parameter
+// ============================================================================
+
+struct PopSimSummary {
+    means: [f64; 16],
+    sds: [f64; 16],
+    n_params: i32,
+    n_subjects: i32,
+}
+
+fn pop_sim_summary(sim_out: &[f64; 256], n_subjects: i32, n_params: i32) -> PopSimSummary with Mut, Div, Panic {
+    var summary = PopSimSummary {
+        means: [0.0; 16],
+        sds: [0.0; 16],
+        n_params: n_params,
+        n_subjects: n_subjects,
+    }
+
+    var np = n_params
+    if np > 16 { np = 16 }
+
+    var p = 0
+    while p < np {
+        // Mean
+        var sum = 0.0
+        var subj = 0
+        while subj < n_subjects {
+            let idx = subj * np + p
+            if idx < 256 {
+                sum = sum + sim_out[idx]
+            }
+            subj = subj + 1
+        }
+        let mean = if n_subjects > 0 { sum / n_subjects as f64 } else { 0.0 }
+        summary.means[p] = mean
+
+        // SD
+        var var_sum = 0.0
+        subj = 0
+        while subj < n_subjects {
+            let idx = subj * np + p
+            if idx < 256 {
+                let diff = sim_out[idx] - mean
+                var_sum = var_sum + diff * diff
+            }
+            subj = subj + 1
+        }
+        if n_subjects > 1 {
+            summary.sds[p] = ps_sqrt(var_sum / (n_subjects - 1) as f64)
+        }
+
+        p = p + 1
+    }
+    summary
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+fn test_pop_simulate_count() -> bool with Mut, Div, Panic {
+    var params: [f64; 16] = [0.0; 16]
+    params[0] = 10.0
+    params[1] = 50.0
+    var omega: [f64; 16] = [0.0; 16]
+    omega[0] = 0.04   // ~20% CV
+    omega[1] = 0.09   // ~30% CV
+
+    var out: [f64; 256] = [0.0; 256]
+    let n = pop_simulate(&params, &omega, 10, 2, &!out)
+    n == 20
+}
+
+fn test_pop_simulate_positive() -> bool with Mut, Div, Panic {
+    // Log-normal should produce positive values
+    var params: [f64; 16] = [0.0; 16]
+    params[0] = 10.0
+    var omega: [f64; 16] = [0.0; 16]
+    omega[0] = 0.04
+
+    var out: [f64; 256] = [0.0; 256]
+    let n = pop_simulate(&params, &omega, 20, 1, &!out)
+
+    var all_positive = true
+    var i = 0
+    while i < 20 {
+        if out[i] <= 0.0 { all_positive = false }
+        i = i + 1
+    }
+    all_positive
+}
+
+fn test_pop_summary() -> bool with Mut, Div, Panic {
+    var params: [f64; 16] = [0.0; 16]
+    params[0] = 100.0
+    var omega: [f64; 16] = [0.0; 16]
+    omega[0] = 0.01   // small variability
+
+    var sim_out: [f64; 256] = [0.0; 256]
+    let n = pop_simulate(&params, &omega, 20, 1, &!sim_out)
+
+    // Copy to a separate read-only buffer for summary
+    var read_buf: [f64; 256] = [0.0; 256]
+    var ci = 0
+    while ci < 256 {
+        read_buf[ci] = sim_out[ci]
+        ci = ci + 1
+    }
+    let summary = pop_sim_summary(&read_buf, 20, 1)
+
+    // Mean should be near 100 (log-normal has E = theta * exp(omega/2))
+    ps_abs(summary.means[0] - 100.0) < 20.0
+}

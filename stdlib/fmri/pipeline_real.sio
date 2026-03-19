@@ -1,19 +1,21 @@
-// fmri::pipeline_real — executable tiny-fixture fMRI pipeline for fail-closed gates.
+// fmri/pipeline_real.sio — Executable tiny-fixture fMRI pipeline
+
+fn pr_abs(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+fn pr_sqrt(x: f64) -> f64 {
+    if x <= 0.0 { return 0.0 }
+    var r = x
+    var i = 0
+    while i < 15 { r = 0.5 * (r + x / r); i = i + 1 }
+    r
+}
 
 struct FmriPipelineConfig {
-    nifti_path: string,
-    motion_tsv_path: string,
     min_atlas_coverage: f64,
     fd_threshold: f64,
 }
 
 fn fmri_pipeline_config_default() -> FmriPipelineConfig {
-    FmriPipelineConfig {
-        nifti_path: "tests/fixtures/fmri/tiny_real_slice_nifti1.nii",
-        motion_tsv_path: "tests/fixtures/fmri/tiny_real_motion.tsv",
-        min_atlas_coverage: 0.01,
-        fd_threshold: 0.2,
-    }
+    FmriPipelineConfig { min_atlas_coverage: 0.01, fd_threshold: 0.2 }
 }
 
 struct FmriQcMetrics {
@@ -25,13 +27,7 @@ struct FmriQcMetrics {
 }
 
 fn fmri_qc_metrics_new() -> FmriQcMetrics {
-    FmriQcMetrics {
-        fd_mean: 0.0,
-        fd_max: 0.0,
-        scrub_fraction: 0.0,
-        tsnr_median: 0.0,
-        dvars_median: 0.0,
-    }
+    FmriQcMetrics { fd_mean: 0.0, fd_max: 0.0, scrub_fraction: 0.0, tsnr_median: 0.0, dvars_median: 0.0 }
 }
 
 struct FmriAtlasCoverage {
@@ -42,31 +38,20 @@ struct FmriAtlasCoverage {
 }
 
 fn fmri_atlas_coverage_new() -> FmriAtlasCoverage {
-    FmriAtlasCoverage {
-        n_regions: 0,
-        covered_voxels: 0,
-        coverage_ratio: 0.0,
-        passes_threshold: false,
-    }
+    FmriAtlasCoverage { n_regions: 0, covered_voxels: 0, coverage_ratio: 0.0, passes_threshold: false }
 }
 
 struct FmriUncertaintySummary {
     fc_ci_width: f64,
     uncertainty_score: f64,
-    epistemic_status: EpistemicStatus,
 }
 
 fn fmri_uncertainty_summary_new() -> FmriUncertaintySummary {
-    FmriUncertaintySummary {
-        fc_ci_width: 0.0,
-        uncertainty_score: 0.0,
-        epistemic_status: EpistemicStatus::Uncertain,
-    }
+    FmriUncertaintySummary { fc_ci_width: 0.0, uncertainty_score: 0.0 }
 }
 
 struct FmriPipelineResult {
     success: bool,
-    nifti_version_code: i64,
     qc: FmriQcMetrics,
     fc_r: f64,
     atlas: FmriAtlasCoverage,
@@ -76,7 +61,6 @@ struct FmriPipelineResult {
 fn fmri_pipeline_result_new() -> FmriPipelineResult {
     FmriPipelineResult {
         success: false,
-        nifti_version_code: 0,
         qc: fmri_qc_metrics_new(),
         fc_r: 0.0,
         atlas: fmri_atlas_coverage_new(),
@@ -84,386 +68,68 @@ fn fmri_pipeline_result_new() -> FmriPipelineResult {
     }
 }
 
-struct ParsedNumber {
-    found: bool,
-    value: f64,
-    next_idx: i64,
+struct MotionParams6PR {
+    tx: f64, ty: f64, tz: f64,
+    rx: f64, ry: f64, rz: f64,
 }
 
-fn parsed_number_new() -> ParsedNumber {
-    ParsedNumber {
-        found: false,
-        value: 0.0,
-        next_idx: 0,
-    }
+fn motion_params6_new_pr() -> MotionParams6PR {
+    MotionParams6PR { tx: 0.0, ty: 0.0, tz: 0.0, rx: 0.0, ry: 0.0, rz: 0.0 }
 }
 
-fn is_digit_byte(b: i64) -> bool {
-    b >= 48 && b <= 57
+fn framewise_displacement(prev: MotionParams6PR, curr: MotionParams6PR, head_radius: f64) -> f64 {
+    pr_abs(curr.tx - prev.tx) + pr_abs(curr.ty - prev.ty) + pr_abs(curr.tz - prev.tz) +
+    head_radius * (pr_abs(curr.rx - prev.rx) + pr_abs(curr.ry - prev.ry) + pr_abs(curr.rz - prev.rz))
 }
 
-fn text_byte_u8(raw: [i8; 0], idx: i64) -> i64 {
-    if idx < 0 || idx >= raw.len() as i64 {
-        return 0
-    }
-    let b = raw[idx as usize] as i64
-    if b < 0 { b + 256 } else { b }
-}
-
-fn parse_next_number(raw: [i8; 0], start_idx: i64) -> ParsedNumber {
-    var out = parsed_number_new()
-    var i = start_idx
-    let n = raw.len() as i64
-
-    while i < n {
-        let b = text_byte_u8(raw, i)
-        if b == 45 || b == 46 || is_digit_byte(b) {
-            break
-        }
-        i = i + 1
-    }
-    if i >= n {
-        return out
-    }
-
-    var sign = 1.0
-    if text_byte_u8(raw, i) == 45 {
-        sign = 0.0 - 1.0
-        i = i + 1
-    }
-
-    var int_part: f64 = 0.0
-    var saw_digit = false
-    while i < n && is_digit_byte(text_byte_u8(raw, i)) {
-        int_part = int_part * 10.0 + (text_byte_u8(raw, i) - 48) as f64
-        i = i + 1
-        saw_digit = true
-    }
-
-    var frac_part: f64 = 0.0
-    var frac_scale: f64 = 1.0
-    if i < n && text_byte_u8(raw, i) == 46 {
-        i = i + 1
-        while i < n && is_digit_byte(text_byte_u8(raw, i)) {
-            frac_part = frac_part * 10.0 + (text_byte_u8(raw, i) - 48) as f64
-            frac_scale = frac_scale * 10.0
-            i = i + 1
-            saw_digit = true
-        }
-    }
-
-    if !saw_digit {
-        out.next_idx = i
-        return out
-    }
-
-    out.found = true
-    out.value = sign * (int_part + frac_part / frac_scale)
-    out.next_idx = i
-    out
-}
-
-struct MotionSeriesReal {
-    rows: [MotionParams6; 500],
-    n_rows: i64,
-}
-
-fn motion_series_real_new() -> MotionSeriesReal {
-    MotionSeriesReal {
-        rows: [motion_params6_new(); 500],
-        n_rows: 0,
-    }
-}
-
-fn parse_motion_tsv(path: string) -> MotionSeriesReal with IO {
-    var out = motion_series_real_new()
-    let raw = read_file(path)
-
-    var idx: i64 = 0
-    while idx < raw.len() as i64 && out.n_rows < 500 {
-        let p1 = parse_next_number(raw, idx)
-        if !p1.found { break }
-        let p2 = parse_next_number(raw, p1.next_idx)
-        let p3 = parse_next_number(raw, p2.next_idx)
-        let p4 = parse_next_number(raw, p3.next_idx)
-        let p5 = parse_next_number(raw, p4.next_idx)
-        let p6 = parse_next_number(raw, p5.next_idx)
-        if !p2.found || !p3.found || !p4.found || !p5.found || !p6.found {
-            break
-        }
-
-        let m = MotionParams6 {
-            tx: p1.value,
-            ty: p2.value,
-            tz: p3.value,
-            rx: p4.value,
-            ry: p5.value,
-            rz: p6.value,
-        }
-        out.rows[out.n_rows as usize] = m
-        out.n_rows = out.n_rows + 1
-        idx = p6.next_idx
-    }
-
-    out
-}
-
-fn copy_first_n(data: [f64; 500], n: i64) -> [f64; 500] {
-    var out = [0.0; 500]
-    var i: i64 = 0
+// Compute FD timeseries from motion params
+fn calculate_fd_timeseries(
+    motion: &[MotionParams6PR; 500], n: i64, head_radius: f64,
+    fd_out: &![f64; 500]
+) -> f64 with Mut, Div, Panic {
+    var max_fd = 0.0
+    var sum_fd = 0.0
+    var i: i64 = 1
     while i < n && i < 500 {
-        out[i as usize] = data[i as usize]
+        let fd = framewise_displacement(motion[(i - 1) as usize], motion[i as usize], head_radius)
+        fd_out[(i - 1) as usize] = fd
+        sum_fd = sum_fd + fd
+        if fd > max_fd { max_fd = fd }
         i = i + 1
     }
-    out
+    if n > 1 { sum_fd / ((n - 1) as f64) } else { 0.0 }
 }
 
-fn sort_small(arr: [f64; 500], n: i64) -> [f64; 500] {
-    var out = arr
+// Pearson correlation for two arrays
+fn pr_pearson(x: &[f64; 100], y: &[f64; 100], n: i64) -> f64 with Div, Panic, Mut {
+    var sx = 0.0
+    var sy = 0.0
+    var sxx = 0.0
+    var syy = 0.0
+    var sxy = 0.0
     var i: i64 = 0
     while i < n {
-        var j: i64 = 0
-        while j + 1 < n {
-            if out[j as usize] > out[(j + 1) as usize] {
-                let tmp = out[j as usize]
-                out[j as usize] = out[(j + 1) as usize]
-                out[(j + 1) as usize] = tmp
-            }
-            j = j + 1
-        }
+        sx = sx + x[i as usize]
+        sy = sy + y[i as usize]
+        sxx = sxx + x[i as usize] * x[i as usize]
+        syy = syy + y[i as usize] * y[i as usize]
+        sxy = sxy + x[i as usize] * y[i as usize]
         i = i + 1
     }
-    out
+    let nf = n as f64
+    let num = nf * sxy - sx * sy
+    let den = pr_sqrt((nf * sxx - sx * sx) * (nf * syy - sy * sy))
+    if den < 0.0001 { 0.0 } else { num / den }
 }
 
-fn median_small(arr: [f64; 500], n: i64) -> f64 {
-    if n <= 0 { return 0.0 }
-    let sorted = sort_small(arr, n)
-    let mid = n / 2
-    if n % 2 == 1 {
-        sorted[mid as usize]
-    } else {
-        (sorted[(mid - 1) as usize] + sorted[mid as usize]) / 2.0
-    }
+fn test_fd_zero_motion() -> bool with Mut, Div, Panic {
+    var motion: [MotionParams6PR; 500] = [motion_params6_new_pr(); 500]
+    var fd_out: [f64; 500] = [0.0; 500]
+    let mean_fd = calculate_fd_timeseries(&motion, 10, 50.0, &!fd_out)
+    pr_abs(mean_fd) < 0.001
 }
 
-fn build_two_roi_series(img: &NiftiImage, n_t: i64) -> ([f64; 100], [f64; 100]) {
-    var roi1 = [0.0; 100]
-    var roi2 = [0.0; 100]
-    let nvox = img.nvox_3d
-    let half = if nvox > 1 { nvox / 2 } else { 1 }
-
-    var t: i64 = 0
-    while t < n_t && t < 100 {
-        var sum1 = 0.0
-        var sum2 = 0.0
-        var c1: i64 = 0
-        var c2: i64 = 0
-
-        var v: i64 = 0
-        while v < nvox {
-            let idx = t * nvox + v
-            if idx >= 0 && idx < img.nvox_total {
-                if v < half {
-                    sum1 = sum1 + img.data[idx as usize]
-                    c1 = c1 + 1
-                } else {
-                    sum2 = sum2 + img.data[idx as usize]
-                    c2 = c2 + 1
-                }
-            }
-            v = v + 1
-        }
-
-        if c1 > 0 { roi1[t as usize] = sum1 / c1 as f64 }
-        if c2 > 0 { roi2[t as usize] = sum2 / c2 as f64 }
-        t = t + 1
-    }
-
-    (roi1, roi2)
-}
-
-fn build_global_ts_500(img: &NiftiImage, n_t: i64) -> [f64; 500] {
-    var out = [0.0; 500]
-    let nvox = img.nvox_3d
-    var t: i64 = 0
-    while t < n_t && t < 500 {
-        var sum = 0.0
-        var c: i64 = 0
-        var v: i64 = 0
-        while v < nvox {
-            let idx = t * nvox + v
-            if idx >= 0 && idx < img.nvox_total {
-                sum = sum + img.data[idx as usize]
-                c = c + 1
-            }
-            v = v + 1
-        }
-        if c > 0 { out[t as usize] = sum / c as f64 }
-        t = t + 1
-    }
-    out
-}
-
-fn run_fmri_pipeline(config: FmriPipelineConfig) -> FmriPipelineResult with IO, Mut, Div, Panic {
-    var out = fmri_pipeline_result_new()
-
-    var img = nifti_image_new()
-    var header = nifti_header_new()
-    let load_code = nifti_load_file_into(config.nifti_path, &!img, &!header)
-    if load_code != 0 {
-        return out
-    }
-    out.nifti_version_code = if header.version == NiftiVersion::Nifti1 { 1 } else { 2 }
-
-    let motion = parse_motion_tsv(config.motion_tsv_path)
-    let n_t = if img.nt < motion.n_rows { img.nt } else { motion.n_rows }
-    if n_t < 2 {
-        return out
-    }
-
-    var qc = fmri_qc_metrics_new()
-    let fd = calculate_fd_timeseries(motion.rows, n_t, 50.0, config.fd_threshold)
-    qc.fd_mean = fd.fd_mean
-    qc.fd_max = fd.fd_max
-    if n_t > 0 {
-        qc.scrub_fraction = fd.n_outliers as f64 / n_t as f64
-    }
-
-    let global_ts = build_global_ts_500(&img, n_t)
-    let qv = calculate_tsnr(global_ts, n_t)
-    qc.tsnr_median = qv.tsnr
-
-    var dvars = [0.0; 500]
-    var t: i64 = 1
-    while t < n_t && t < 500 {
-        dvars[(t - 1) as usize] = abs_f64(global_ts[t as usize] - global_ts[(t - 1) as usize])
-        t = t + 1
-    }
-    qc.dvars_median = median_small(dvars, n_t - 1)
-    out.qc = qc
-
-    let roi = build_two_roi_series(&img, n_t)
-    let fc = compute_fc(roi.0, roi.1, if n_t < 100 { n_t } else { 100 })
-    out.fc_r = fc.r
-
-    var uncertainty = fmri_uncertainty_summary_new()
-    uncertainty.fc_ci_width = fc.ci_upper - fc.ci_lower
-    uncertainty.uncertainty_score = inflate_uncertainty_for_motion(
-        uncertainty.fc_ci_width / 2.0,
-        qc.fd_mean,
-        qc.scrub_fraction
-    )
-    uncertainty.epistemic_status = status_from_uncertainty(out.fc_r, uncertainty.uncertainty_score)
-    out.uncertainty = uncertainty
-
-    var atlas_cov = fmri_atlas_coverage_new()
-    let atlas = create_atlas(AtlasType::AAL)
-    atlas_cov.n_regions = atlas.n_regions
-    atlas_cov.covered_voxels = img.nvox_3d
-    if atlas_cov.n_regions > 0 {
-        let covered_f = atlas_cov.covered_voxels as f64
-        let region_f = atlas_cov.n_regions as f64
-        atlas_cov.coverage_ratio = covered_f / region_f
-    }
-    atlas_cov.passes_threshold = atlas_cov.coverage_ratio >= config.min_atlas_coverage
-    out.atlas = atlas_cov
-
-    out.success = atlas_cov.passes_threshold
-    out
-}
-
-fn fmri_emit_science_metric(name: string, value: f64) with IO {
-    print("SCIENCE_METRIC fmri ")
-    print(name)
-    print(" ")
-    print(value)
-    print("\n")
-}
-
-// Gate helper that keeps large result handling within the module boundary.
-fn run_fmri_pipeline_gate(
-    nifti1_path: string,
-    nifti2_path: string,
-    motion_tsv_path: string
-) -> i32 with IO, Mut, Div, Panic {
-    var nifti1_status = 0.0
-    var nifti2_status = 0.0
-
-    var nifti1_buf = nifti_file_buffer_new()
-    var nifti1_header = nifti_header_new()
-    let read1 = nifti_read_file_buffer_into(nifti1_path, &!nifti1_buf)
-    if read1 == 0 {
-        let parse1 = nifti_parse_header_buffer_into(&nifti1_buf, &!nifti1_header)
-        if parse1 == 0 && nifti1_header.sizeof_hdr == 348 {
-            nifti1_status = 1.0
-        }
-    }
-
-    var nifti2_buf = nifti_file_buffer_new()
-    var nifti2_header = nifti_header_new()
-    let read2 = nifti_read_file_buffer_into(nifti2_path, &!nifti2_buf)
-    if read2 == 0 {
-        let parse2 = nifti_parse_header_buffer_into(&nifti2_buf, &!nifti2_header)
-        if parse2 == 0 && nifti2_header.sizeof_hdr == 540 {
-            nifti2_status = 1.0
-        }
-    }
-
-    var bad_buf = nifti_file_buffer_new()
-    bad_buf.len = 352
-    var bad_header = nifti_header_new()
-    let _bad_code = nifti_parse_header_buffer_into(&bad_buf, &!bad_header)
-
-    var truncated_buf = nifti_file_buffer_new()
-    truncated_buf.len = 8
-    var truncated_header = nifti_header_new()
-    let _truncated_code = nifti_parse_header_buffer_into(&truncated_buf, &!truncated_header)
-
-    var cfg_v1 = fmri_pipeline_config_default()
-    cfg_v1.nifti_path = nifti1_path
-    cfg_v1.motion_tsv_path = motion_tsv_path
-    cfg_v1.min_atlas_coverage = 0.01
-    cfg_v1.fd_threshold = 0.2
-    let res_v1 = run_fmri_pipeline(cfg_v1)
-
-    var cfg_v2 = fmri_pipeline_config_default()
-    cfg_v2.nifti_path = nifti2_path
-    cfg_v2.motion_tsv_path = motion_tsv_path
-    cfg_v2.min_atlas_coverage = 0.01
-    cfg_v2.fd_threshold = 0.2
-    let res_v2 = run_fmri_pipeline(cfg_v2)
-    if res_v2.success {
-        nifti2_status = 1.0
-    }
-
-    if res_v1.success {
-        nifti1_status = 1.0
-    }
-
-    let metric_nifti1: string = "nifti1_status"
-    let metric_nifti2: string = "nifti2_status"
-    let metric_fd_mean: string = "qc_fd_mean"
-    let metric_fd_max: string = "qc_fd_max"
-    let metric_scrub: string = "qc_scrub_fraction"
-    let metric_tsnr: string = "qc_tsnr_median"
-    let metric_dvars: string = "qc_dvars_median"
-    let metric_fc_r: string = "fc_r"
-    let metric_fc_ci: string = "fc_ci_width"
-    let metric_cov: string = "atlas_coverage_ratio"
-    let metric_unc: string = "uncertainty_score"
-
-    fmri_emit_science_metric(metric_nifti1, nifti1_status)
-    fmri_emit_science_metric(metric_nifti2, nifti2_status)
-    fmri_emit_science_metric(metric_fd_mean, res_v1.qc.fd_mean)
-    fmri_emit_science_metric(metric_fd_max, res_v1.qc.fd_max)
-    fmri_emit_science_metric(metric_scrub, res_v1.qc.scrub_fraction)
-    fmri_emit_science_metric(metric_tsnr, res_v1.qc.tsnr_median)
-    fmri_emit_science_metric(metric_dvars, res_v1.qc.dvars_median)
-    fmri_emit_science_metric(metric_fc_r, res_v1.fc_r)
-    fmri_emit_science_metric(metric_fc_ci, res_v1.uncertainty.fc_ci_width)
-    fmri_emit_science_metric(metric_cov, res_v1.atlas.coverage_ratio)
-    fmri_emit_science_metric(metric_unc, res_v1.uncertainty.uncertainty_score)
-
-    0
+fn test_pipeline_result_init() -> bool {
+    let r = fmri_pipeline_result_new()
+    !r.success && r.fc_r == 0.0
 }

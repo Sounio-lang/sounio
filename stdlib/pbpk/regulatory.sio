@@ -1,1 +1,190 @@
-//! regulatory (disabled)
+// pbpk/regulatory.sio — FDA/EMA Regulatory PK Metrics & Bioequivalence
+//
+// Computes standard pharmacokinetic metrics (AUC, Cmax, Tmax, half-life)
+// and bioequivalence assessment per FDA Guidance for Industry (2003)
+// and EMA Guideline on Bioequivalence (CPMP/EWP/QWP/1401/98 Rev. 1).
+//
+// References:
+// - FDA Guidance: "Bioavailability and Bioequivalence Studies"
+// - EMA: CPMP/EWP/QWP/1401/98 Rev. 1
+// - Gabrielsson & Weiner (2016): "Pharmacokinetic and Pharmacodynamic Data Analysis"
+
+extern "C" {
+    fn log(x: f64) -> f64;
+    fn fabs(x: f64) -> f64;
+}
+
+fn reg_abs(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+// ============================================================================
+// REGULATORY REPORT
+// ============================================================================
+
+pub struct RegulatoryReport {
+    auc: f64,        // Area under the curve (mg*h/L), trapezoidal rule
+    cmax: f64,       // Maximum concentration (mg/L)
+    tmax: f64,       // Time of maximum concentration (h)
+    half_life: f64,  // Terminal elimination half-life (h)
+    bioavail: f64,   // Relative bioavailability (fraction, 0-1)
+    clearance: f64,  // Apparent clearance CL/F (L/h)
+}
+
+// ============================================================================
+// PK METRIC COMPUTATION
+// ============================================================================
+// Computes standard NCA (Non-Compartmental Analysis) metrics.
+// conc: concentration-time profile (mg/L)
+// time: time points (h)
+// n: number of data points
+
+pub fn reg_compute_pk_metrics(conc: &[f64; 256], time: &[f64; 256], n: i32) -> RegulatoryReport {
+    if n < 2 {
+        return RegulatoryReport {
+            auc: 0.0, cmax: 0.0, tmax: 0.0,
+            half_life: 0.0, bioavail: 0.0, clearance: 0.0,
+        }
+    }
+
+    // AUC by linear trapezoidal rule
+    var auc = 0.0
+    var i: i32 = 0
+    while i < n - 1 {
+        let dt = time[(i + 1) as usize] - time[i as usize]
+        let avg_c = (conc[i as usize] + conc[(i + 1) as usize]) * 0.5
+        auc = auc + dt * avg_c
+        i = i + 1
+    }
+
+    // Cmax and Tmax
+    var cmax = conc[0]
+    var tmax = time[0]
+    i = 1
+    while i < n {
+        if conc[i as usize] > cmax {
+            cmax = conc[i as usize]
+            tmax = time[i as usize]
+        }
+        i = i + 1
+    }
+
+    // Terminal half-life: find the terminal elimination phase
+    // Use last 3 points (or fewer) where concentration is declining
+    // half_life = ln(2) / lambda_z where lambda_z is the terminal rate constant
+    var half_life = 0.0
+    if n >= 3 {
+        let c1 = conc[(n - 3) as usize]
+        let c2 = conc[(n - 1) as usize]
+        let t1 = time[(n - 3) as usize]
+        let t2 = time[(n - 1) as usize]
+        if c1 > 0.0 && c2 > 0.0 && c2 < c1 && t2 > t1 {
+            let lambda_z = (log(c1) - log(c2)) / (t2 - t1)
+            if lambda_z > 0.0 {
+                half_life = 0.693147180559945 / lambda_z
+            }
+        }
+    }
+
+    // Apparent clearance CL/F = Dose / AUC
+    // (Dose not given here; use clearance = 1/AUC as proxy for unit dose)
+    var clearance = 0.0
+    if auc > 0.0 {
+        clearance = 1.0 / auc
+    }
+
+    RegulatoryReport {
+        auc: auc,
+        cmax: cmax,
+        tmax: tmax,
+        half_life: half_life,
+        bioavail: 1.0,    // Relative to self; caller sets via ratio
+        clearance: clearance,
+    }
+}
+
+// ============================================================================
+// BIOEQUIVALENCE ASSESSMENT
+// ============================================================================
+
+// Compute test/reference AUC ratio
+pub fn reg_bioequivalence_ratio(test_auc: f64, ref_auc: f64) -> f64 {
+    if ref_auc <= 0.0 {
+        return 0.0
+    }
+    test_auc / ref_auc
+}
+
+// Check if ratio is within bounds (FDA: 80-125% rule)
+pub fn reg_within_bounds(ratio: f64, lo: f64, hi: f64) -> bool {
+    ratio >= lo && ratio <= hi
+}
+
+// FDA standard bioequivalence check (80-125%)
+pub fn reg_fda_bioequivalent(test_auc: f64, ref_auc: f64) -> bool {
+    let ratio = reg_bioequivalence_ratio(test_auc, ref_auc)
+    reg_within_bounds(ratio, 0.80, 1.25)
+}
+
+// EMA standard bioequivalence check (same 80-125% for AUC)
+pub fn reg_ema_bioequivalent(test_auc: f64, ref_auc: f64) -> bool {
+    let ratio = reg_bioequivalence_ratio(test_auc, ref_auc)
+    reg_within_bounds(ratio, 0.80, 1.25)
+}
+
+// Narrower therapeutic index drugs (90-111% per FDA)
+pub fn reg_nti_bioequivalent(test_auc: f64, ref_auc: f64) -> bool {
+    let ratio = reg_bioequivalence_ratio(test_auc, ref_auc)
+    reg_within_bounds(ratio, 0.90, 1.11)
+}
+
+// ============================================================================
+// INLINE TESTS
+// ============================================================================
+
+//@ run-pass
+fn test_pk_metrics_basic() -> i32 {
+    var conc: [f64; 256] = [0.0; 256]
+    var time: [f64; 256] = [0.0; 256]
+    // Simple triangular profile: 0, 10, 5, 1
+    time[0] = 0.0
+    time[1] = 1.0
+    time[2] = 2.0
+    time[3] = 4.0
+    conc[0] = 0.0
+    conc[1] = 10.0
+    conc[2] = 5.0
+    conc[3] = 1.0
+    let r = reg_compute_pk_metrics(&conc, &time, 4)
+    // Cmax should be 10
+    if reg_abs(r.cmax - 10.0) > 0.001 { return 1 }
+    // Tmax should be 1.0
+    if reg_abs(r.tmax - 1.0) > 0.001 { return 2 }
+    // AUC should be positive
+    if r.auc <= 0.0 { return 3 }
+    0
+}
+
+//@ run-pass
+fn test_bioequivalence_ratio() -> i32 {
+    let ratio = reg_bioequivalence_ratio(100.0, 100.0)
+    if reg_abs(ratio - 1.0) > 0.001 { return 1 }
+    let r2 = reg_bioequivalence_ratio(90.0, 100.0)
+    if reg_abs(r2 - 0.9) > 0.001 { return 2 }
+    0
+}
+
+//@ run-pass
+fn test_within_bounds() -> i32 {
+    if !reg_within_bounds(1.0, 0.8, 1.25) { return 1 }
+    if reg_within_bounds(0.5, 0.8, 1.25) { return 2 }
+    if reg_within_bounds(1.5, 0.8, 1.25) { return 3 }
+    0
+}
+
+//@ run-pass
+fn test_fda_bioequivalent() -> i32 {
+    if !reg_fda_bioequivalent(100.0, 100.0) { return 1 }
+    if reg_fda_bioequivalent(50.0, 100.0) { return 2 }
+    0
+}

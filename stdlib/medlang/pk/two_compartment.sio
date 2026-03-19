@@ -1,1 +1,210 @@
-//! two_compartment (disabled)
+// stdlib/medlang/pk/two_compartment.sio
+//
+// Two-compartment pharmacokinetic model — Sounio
+//
+// Bi-exponential: C(t) = A*exp(-alpha*t) + B*exp(-beta*t)
+// where alpha, beta are eigenvalues of the micro-constant matrix
+
+// ============================================================================
+// Helpers
+// ============================================================================
+
+fn pk2_abs(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+fn pk2_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i = 0
+    while i < 15 {
+        y = 0.5 * (y + x / y)
+        i = i + 1
+    }
+    y
+}
+
+fn pk2_exp(x: f64) -> f64 with Mut, Div, Panic {
+    var xc = x
+    if xc > 20.0 { xc = 20.0 }
+    if xc < -20.0 { xc = -20.0 }
+    var result = 1.0
+    var term = 1.0
+    var i = 1
+    while i <= 30 {
+        term = term * xc / i as f64
+        result = result + term
+        i = i + 1
+    }
+    if result < 1.0e-15 { result = 1.0e-15 }
+    result
+}
+
+// ============================================================================
+// Two-compartment parameters
+// ============================================================================
+
+struct TwoCompParams {
+    k10: f64,   // elimination rate from central (1/h)
+    k12: f64,   // transfer rate central -> peripheral (1/h)
+    k21: f64,   // transfer rate peripheral -> central (1/h)
+    v1: f64,    // volume of central compartment (L)
+    dose: f64,  // IV bolus dose (mg)
+}
+
+fn two_comp_params_new(k10: f64, k12: f64, k21: f64, v1: f64, dose: f64) -> TwoCompParams {
+    TwoCompParams {
+        k10: k10,
+        k12: k12,
+        k21: k21,
+        v1: v1,
+        dose: dose,
+    }
+}
+
+// ============================================================================
+// Eigenvalues: alpha/beta from micro-constants
+// alpha + beta = k10 + k12 + k21
+// alpha * beta = k10 * k21
+// alpha = 0.5 * (sum + sqrt(sum^2 - 4*prod))
+// beta  = 0.5 * (sum - sqrt(sum^2 - 4*prod))
+// ============================================================================
+
+struct AlphaBeta {
+    alpha: f64,
+    beta: f64,
+}
+
+fn two_comp_alpha_beta(p: TwoCompParams) -> AlphaBeta with Mut, Div, Panic {
+    let sum = p.k10 + p.k12 + p.k21
+    let prod = p.k10 * p.k21
+    let disc = sum * sum - 4.0 * prod
+    let sq = pk2_sqrt(disc)
+    AlphaBeta {
+        alpha: 0.5 * (sum + sq),
+        beta: 0.5 * (sum - sq),
+    }
+}
+
+// ============================================================================
+// Bi-exponential coefficients A, B
+// A = (dose / V1) * (alpha - k21) / (alpha - beta)
+// B = (dose / V1) * (k21 - beta) / (alpha - beta)
+// ============================================================================
+
+struct BiExpCoeff {
+    a_coeff: f64,
+    b_coeff: f64,
+    alpha: f64,
+    beta: f64,
+}
+
+fn two_comp_coefficients(p: TwoCompParams) -> BiExpCoeff with Mut, Div, Panic {
+    let ab = two_comp_alpha_beta(p)
+    let diff = ab.alpha - ab.beta
+    if pk2_abs(diff) < 1.0e-15 {
+        return BiExpCoeff {
+            a_coeff: 0.0,
+            b_coeff: 0.0,
+            alpha: ab.alpha,
+            beta: ab.beta,
+        }
+    }
+    if p.v1 < 1.0e-15 {
+        return BiExpCoeff {
+            a_coeff: 0.0,
+            b_coeff: 0.0,
+            alpha: ab.alpha,
+            beta: ab.beta,
+        }
+    }
+    let c0 = p.dose / p.v1
+    BiExpCoeff {
+        a_coeff: c0 * (ab.alpha - p.k21) / diff,
+        b_coeff: c0 * (p.k21 - ab.beta) / diff,
+        alpha: ab.alpha,
+        beta: ab.beta,
+    }
+}
+
+// ============================================================================
+// Concentration: C(t) = A*exp(-alpha*t) + B*exp(-beta*t)
+// ============================================================================
+
+fn two_comp_conc(p: TwoCompParams, t: f64) -> f64 with Mut, Div, Panic {
+    let c = two_comp_coefficients(p)
+    c.a_coeff * pk2_exp(0.0 - c.alpha * t) + c.b_coeff * pk2_exp(0.0 - c.beta * t)
+}
+
+// ============================================================================
+// AUC (0 to inf) = A/alpha + B/beta
+// ============================================================================
+
+fn two_comp_auc(p: TwoCompParams) -> f64 with Mut, Div, Panic {
+    let c = two_comp_coefficients(p)
+    if c.alpha < 1.0e-15 { return 0.0 }
+    if c.beta < 1.0e-15 { return 0.0 }
+    c.a_coeff / c.alpha + c.b_coeff / c.beta
+}
+
+// ============================================================================
+// Terminal half-life: ln(2)/beta
+// ============================================================================
+
+fn two_comp_terminal_half_life(p: TwoCompParams) -> f64 with Mut, Div, Panic {
+    let ab = two_comp_alpha_beta(p)
+    if ab.beta < 1.0e-15 { return 0.0 }
+    0.6931471805599453 / ab.beta
+}
+
+// ============================================================================
+// Concentration time-course
+// ============================================================================
+
+fn two_comp_profile(p: TwoCompParams, dt: f64, n: i32, out: &![f64; 256]) -> i32 with Mut, Div, Panic {
+    var i = 0
+    var count = n
+    if count > 256 { count = 256 }
+    while i < count {
+        let t = i as f64 * dt
+        out[i] = two_comp_conc(p, t)
+        i = i + 1
+    }
+    count
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+fn test_two_comp_alpha_beta() -> bool with Mut, Div, Panic {
+    // k10=0.5, k12=0.3, k21=0.2, V1=10, dose=100
+    let p = two_comp_params_new(0.5, 0.3, 0.2, 10.0, 100.0)
+    let ab = two_comp_alpha_beta(p)
+    // sum = 1.0, prod = 0.1
+    // alpha = 0.5*(1 + sqrt(1 - 0.4)) = 0.5*(1 + 0.7746) = 0.8873
+    // beta  = 0.5*(1 - 0.7746) = 0.1127
+    pk2_abs(ab.alpha - 0.8873) < 0.01 && pk2_abs(ab.beta - 0.1127) < 0.01
+}
+
+fn test_two_comp_conc_at_zero() -> bool with Mut, Div, Panic {
+    let p = two_comp_params_new(0.5, 0.3, 0.2, 10.0, 100.0)
+    // C(0) = A + B = dose/V1 = 10
+    let c0 = two_comp_conc(p, 0.0)
+    pk2_abs(c0 - 10.0) < 0.1
+}
+
+fn test_two_comp_decay() -> bool with Mut, Div, Panic {
+    let p = two_comp_params_new(0.5, 0.3, 0.2, 10.0, 100.0)
+    let c0 = two_comp_conc(p, 0.0)
+    let c10 = two_comp_conc(p, 10.0)
+    let c50 = two_comp_conc(p, 50.0)
+    // Concentration should decrease monotonically
+    c0 > c10 && c10 > c50 && c50 > 0.0
+}
+
+fn test_two_comp_auc_positive() -> bool with Mut, Div, Panic {
+    let p = two_comp_params_new(0.5, 0.3, 0.2, 10.0, 100.0)
+    let auc = two_comp_auc(p)
+    auc > 0.0
+}

@@ -1,1 +1,251 @@
-//! one_compartment (disabled)
+// stdlib/medlang/pk/one_compartment.sio
+//
+// One-compartment pharmacokinetic models — Sounio
+//
+// IV bolus: C(t) = (dose/Vd) * exp(-ke*t)
+// Oral (Bateman): C(t) = (F*dose*ka)/(Vd*(ka-ke)) * [exp(-ke*t) - exp(-ka*t)]
+// AUC: F*dose / (Vd*ke)
+// Half-life: 0.693 / ke
+
+// ============================================================================
+// Helpers
+// ============================================================================
+
+fn pk1_abs(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+fn pk1_exp(x: f64) -> f64 with Mut, Div, Panic {
+    // exp(x) via Taylor series, clamped to [-20, 20]
+    var xc = x
+    if xc > 20.0 { xc = 20.0 }
+    if xc < -20.0 { xc = -20.0 }
+    var result = 1.0
+    var term = 1.0
+    var i = 1
+    while i <= 30 {
+        term = term * xc / i as f64
+        result = result + term
+        i = i + 1
+    }
+    if result < 1.0e-15 { result = 1.0e-15 }
+    result
+}
+
+fn pk1_ln(x: f64) -> f64 with Mut, Div, Panic {
+    // ln(x) via series expansion around 1
+    if x <= 0.0 { return -50.0 }
+    // Reduce to [0.5, 2) range
+    var v = x
+    var adjust = 0.0
+    while v > 2.0 {
+        v = v / 2.0
+        adjust = adjust + 0.6931471805599453
+    }
+    while v < 0.5 {
+        v = v * 2.0
+        adjust = adjust - 0.6931471805599453
+    }
+    // Series: ln(v) = 2 * sum( ((v-1)/(v+1))^(2k+1) / (2k+1) )
+    let u = (v - 1.0) / (v + 1.0)
+    let u2 = u * u
+    var term = u
+    var sum = u
+    var k = 1
+    while k <= 20 {
+        term = term * u2
+        sum = sum + term / (2 * k + 1) as f64
+        k = k + 1
+    }
+    2.0 * sum + adjust
+}
+
+// ============================================================================
+// One-compartment parameter struct
+// ============================================================================
+
+struct OneCompParams {
+    ka: f64,      // absorption rate constant (1/h)
+    ke: f64,      // elimination rate constant (1/h)
+    vd: f64,      // volume of distribution (L)
+    dose: f64,    // dose amount (mg)
+    f_bio: f64,   // bioavailability fraction (0-1)
+}
+
+fn one_comp_params_new(ka: f64, ke: f64, vd: f64, dose: f64, f_bio: f64) -> OneCompParams {
+    OneCompParams {
+        ka: ka,
+        ke: ke,
+        vd: vd,
+        dose: dose,
+        f_bio: f_bio,
+    }
+}
+
+// ============================================================================
+// IV bolus: C(t) = (dose / Vd) * exp(-ke * t)
+// ============================================================================
+
+fn one_comp_iv_conc(p: OneCompParams, t: f64) -> f64 with Mut, Div, Panic {
+    if p.vd < 1.0e-15 { return 0.0 }
+    let c0 = p.dose / p.vd
+    c0 * pk1_exp(0.0 - p.ke * t)
+}
+
+// ============================================================================
+// Oral absorption (Bateman equation):
+// C(t) = (F * dose * ka) / (Vd * (ka - ke)) * [exp(-ke*t) - exp(-ka*t)]
+// ============================================================================
+
+fn one_comp_oral_conc(p: OneCompParams, t: f64) -> f64 with Mut, Div, Panic {
+    if p.vd < 1.0e-15 { return 0.0 }
+    let diff = p.ka - p.ke
+    if pk1_abs(diff) < 1.0e-12 {
+        // ka ≈ ke: degenerate case, L'Hopital limit
+        // C(t) = (F * dose * ka / Vd) * t * exp(-ke*t)
+        return (p.f_bio * p.dose * p.ka / p.vd) * t * pk1_exp(0.0 - p.ke * t)
+    }
+    let coeff = (p.f_bio * p.dose * p.ka) / (p.vd * diff)
+    let exp_ke = pk1_exp(0.0 - p.ke * t)
+    let exp_ka = pk1_exp(0.0 - p.ka * t)
+    coeff * (exp_ke - exp_ka)
+}
+
+// ============================================================================
+// AUC (area under curve, 0 to infinity): F * dose / (Vd * ke)
+// ============================================================================
+
+fn one_comp_auc(p: OneCompParams) -> f64 with Div, Panic {
+    if p.vd < 1.0e-15 { return 0.0 }
+    if p.ke < 1.0e-15 { return 0.0 }
+    (p.f_bio * p.dose) / (p.vd * p.ke)
+}
+
+// ============================================================================
+// Half-life: t1/2 = ln(2) / ke = 0.693147 / ke
+// ============================================================================
+
+fn one_comp_half_life(p: OneCompParams) -> f64 with Div, Panic {
+    if p.ke < 1.0e-15 { return 0.0 }
+    0.6931471805599453 / p.ke
+}
+
+// ============================================================================
+// Time of maximum concentration (oral):
+// tmax = ln(ka/ke) / (ka - ke)
+// ============================================================================
+
+fn one_comp_tmax(p: OneCompParams) -> f64 with Mut, Div, Panic {
+    let diff = p.ka - p.ke
+    if pk1_abs(diff) < 1.0e-12 { return 0.0 }
+    if p.ke < 1.0e-15 { return 0.0 }
+    if p.ka < 1.0e-15 { return 0.0 }
+    pk1_ln(p.ka / p.ke) / diff
+}
+
+// ============================================================================
+// Maximum concentration (oral): Cmax = C(tmax)
+// ============================================================================
+
+fn one_comp_cmax(p: OneCompParams) -> f64 with Mut, Div, Panic {
+    let tmax = one_comp_tmax(p)
+    one_comp_oral_conc(p, tmax)
+}
+
+// ============================================================================
+// Clearance: CL = ke * Vd
+// ============================================================================
+
+fn one_comp_clearance(p: OneCompParams) -> f64 {
+    p.ke * p.vd
+}
+
+// ============================================================================
+// Multiple dosing steady-state trough (IV):
+// Css_trough = (dose/Vd) * exp(-ke*tau) / (1 - exp(-ke*tau))
+// ============================================================================
+
+fn one_comp_ss_trough(p: OneCompParams, tau: f64) -> f64 with Mut, Div, Panic {
+    if p.vd < 1.0e-15 { return 0.0 }
+    let exp_ke_tau = pk1_exp(0.0 - p.ke * tau)
+    let denom = 1.0 - exp_ke_tau
+    if pk1_abs(denom) < 1.0e-15 { return 0.0 }
+    (p.dose / p.vd) * exp_ke_tau / denom
+}
+
+// ============================================================================
+// Concentration time-course into output array (IV)
+// ============================================================================
+
+fn one_comp_iv_profile(p: OneCompParams, dt: f64, n: i32, out: &![f64; 256]) -> i32 with Mut, Div, Panic {
+    var i = 0
+    var count = n
+    if count > 256 { count = 256 }
+    while i < count {
+        let t = i as f64 * dt
+        out[i] = one_comp_iv_conc(p, t)
+        i = i + 1
+    }
+    count
+}
+
+// ============================================================================
+// Concentration time-course into output array (oral)
+// ============================================================================
+
+fn one_comp_oral_profile(p: OneCompParams, dt: f64, n: i32, out: &![f64; 256]) -> i32 with Mut, Div, Panic {
+    var i = 0
+    var count = n
+    if count > 256 { count = 256 }
+    while i < count {
+        let t = i as f64 * dt
+        out[i] = one_comp_oral_conc(p, t)
+        i = i + 1
+    }
+    count
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+fn test_one_comp_iv() -> bool with Mut, Div, Panic {
+    // 100 mg IV, Vd = 10 L, ke = 0.1/h
+    let p = one_comp_params_new(0.0, 0.1, 10.0, 100.0, 1.0)
+    // C(0) = 100/10 = 10 mg/L
+    let c0 = one_comp_iv_conc(p, 0.0)
+    // C(6.93) ≈ 5 mg/L (one half-life)
+    let c_half = one_comp_iv_conc(p, 6.931)
+    pk1_abs(c0 - 10.0) < 0.01 && pk1_abs(c_half - 5.0) < 0.1
+}
+
+fn test_one_comp_oral_bateman() -> bool with Mut, Div, Panic {
+    // ka=1.0, ke=0.1, Vd=10L, dose=100mg, F=1.0
+    let p = one_comp_params_new(1.0, 0.1, 10.0, 100.0, 1.0)
+    // At t=0, C=0 (no absorption yet)
+    let c0 = one_comp_oral_conc(p, 0.0)
+    // At some time t, C > 0
+    let c5 = one_comp_oral_conc(p, 5.0)
+    pk1_abs(c0) < 0.01 && c5 > 0.0
+}
+
+fn test_one_comp_auc() -> bool with Mut, Div, Panic {
+    // AUC = F*dose/(Vd*ke) = 1*100/(10*0.1) = 100
+    let p = one_comp_params_new(1.0, 0.1, 10.0, 100.0, 1.0)
+    let auc = one_comp_auc(p)
+    pk1_abs(auc - 100.0) < 0.01
+}
+
+fn test_one_comp_half_life() -> bool with Mut, Div, Panic {
+    // t1/2 = 0.693/0.1 = 6.93 h
+    let p = one_comp_params_new(1.0, 0.1, 10.0, 100.0, 1.0)
+    let t12 = one_comp_half_life(p)
+    pk1_abs(t12 - 6.931) < 0.01
+}
+
+fn test_one_comp_clearance() -> bool with Mut, Div, Panic {
+    // CL = ke * Vd = 0.1 * 10 = 1.0 L/h
+    let p = one_comp_params_new(1.0, 0.1, 10.0, 100.0, 1.0)
+    let cl = one_comp_clearance(p)
+    pk1_abs(cl - 1.0) < 0.01
+}

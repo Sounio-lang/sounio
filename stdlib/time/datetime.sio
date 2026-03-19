@@ -1,1 +1,221 @@
-//! datetime (disabled)
+// stdlib/time/datetime — Date and time arithmetic
+//
+// Proleptic Gregorian calendar. Unix epoch = 1970-01-01T00:00:00.
+// All functions are pure Sounio — zero FFI.
+
+struct DateTime {
+    year: i32,
+    month: i32,
+    day: i32,
+    hour: i32,
+    minute: i32,
+    second: i32
+}
+
+fn dt_new(y: i32, m: i32, d: i32, h: i32, min: i32, s: i32) -> DateTime {
+    DateTime { year: y, month: m, day: d, hour: h, minute: min, second: s }
+}
+
+fn dt_is_leap_year(year: i32) -> bool with Div, Panic {
+    if year - (year / 4) * 4 != 0 { return false }
+    if year - (year / 100) * 100 != 0 { return true }
+    if year - (year / 400) * 400 != 0 { return false }
+    true
+}
+
+fn dt_days_in_month(year: i32, month: i32) -> i32 with Div, Panic {
+    if month == 1 { return 31 }
+    if month == 2 {
+        if dt_is_leap_year(year) { return 29 }
+        return 28
+    }
+    if month == 3 { return 31 }
+    if month == 4 { return 30 }
+    if month == 5 { return 31 }
+    if month == 6 { return 30 }
+    if month == 7 { return 31 }
+    if month == 8 { return 31 }
+    if month == 9 { return 30 }
+    if month == 10 { return 31 }
+    if month == 11 { return 30 }
+    if month == 12 { return 31 }
+    0
+}
+
+fn dt_day_of_year(dt: DateTime) -> i32 with Mut, Div, Panic {
+    var total: i32 = 0
+    var m: i32 = 1
+    while m < dt.month {
+        total = total + dt_days_in_month(dt.year, m)
+        m = m + 1
+    }
+    total + dt.day
+}
+
+// Seconds since 1970-01-01T00:00:00 UTC
+fn dt_to_unix(dt: DateTime) -> i64 with Mut, Div, Panic {
+    // Count days from 1970 to dt.year
+    var days: i64 = 0
+    if dt.year > 1970 {
+        var y: i32 = 1970
+        while y < dt.year {
+            if dt_is_leap_year(y) {
+                days = days + 366
+            } else {
+                days = days + 365
+            }
+            y = y + 1
+        }
+    }
+    if dt.year < 1970 {
+        var y: i32 = dt.year
+        while y < 1970 {
+            if dt_is_leap_year(y) {
+                days = days - 366
+            } else {
+                days = days - 365
+            }
+            y = y + 1
+        }
+    }
+    // Add days within the year
+    var m: i32 = 1
+    while m < dt.month {
+        days = days + dt_days_in_month(dt.year, m) as i64
+        m = m + 1
+    }
+    days = days + (dt.day - 1) as i64
+    days * 86400 + dt.hour as i64 * 3600 + dt.minute as i64 * 60 + dt.second as i64
+}
+
+// Convert unix timestamp back to DateTime
+fn dt_from_unix(ts: i64) -> DateTime with Mut, Div, Panic {
+    var rem = ts
+    // Handle negative timestamps
+    var negative = false
+    if rem < 0 {
+        negative = true
+        rem = 0 - rem
+    }
+
+    var total_days = rem / 86400
+    var day_secs = rem - total_days * 86400
+
+    if negative {
+        if day_secs > 0 {
+            total_days = total_days + 1
+            day_secs = 86400 - day_secs
+        }
+        total_days = 0 - total_days
+    }
+
+    // Find year from total_days relative to 1970-01-01
+    var year: i32 = 1970
+    if total_days >= 0 {
+        var running: i64 = 0
+        var done = false
+        while !done {
+            var yr_days: i64 = 365
+            if dt_is_leap_year(year) { yr_days = 366 }
+            if running + yr_days > total_days {
+                done = true
+            } else {
+                running = running + yr_days
+                year = year + 1
+            }
+        }
+        total_days = total_days - running
+    } else {
+        var running: i64 = 0
+        while running + total_days < 0 {
+            year = year - 1
+            var yr_days: i64 = 365
+            if dt_is_leap_year(year) { yr_days = 366 }
+            running = running + yr_days
+        }
+        total_days = total_days + running
+    }
+
+    // Find month and day
+    var month: i32 = 1
+    var remaining_days = total_days as i32
+    var found = false
+    while !found {
+        let dim = dt_days_in_month(year, month)
+        if remaining_days < dim {
+            found = true
+        } else {
+            remaining_days = remaining_days - dim
+            month = month + 1
+        }
+    }
+    let day = remaining_days + 1
+
+    let hour = (day_secs / 3600) as i32
+    let minute = ((day_secs - hour as i64 * 3600) / 60) as i32
+    let second = (day_secs - hour as i64 * 3600 - minute as i64 * 60) as i32
+
+    DateTime { year: year, month: month, day: day, hour: hour, minute: minute, second: second }
+}
+
+fn dt_add_seconds(dt: DateTime, secs: i64) -> DateTime with Mut, Div, Panic {
+    let unix = dt_to_unix(dt)
+    dt_from_unix(unix + secs)
+}
+
+fn dt_diff_seconds(a: DateTime, b: DateTime) -> i64 with Mut, Div, Panic {
+    let ua = dt_to_unix(a)
+    let ub = dt_to_unix(b)
+    ua - ub
+}
+
+// =============================================================================
+// Tests
+// =============================================================================
+
+fn test_leap_year() -> bool with Div, Panic {
+    dt_is_leap_year(2000) && dt_is_leap_year(2024) && !dt_is_leap_year(1900) && !dt_is_leap_year(2023)
+}
+
+fn test_days_in_month() -> bool with Div, Panic {
+    dt_days_in_month(2024, 2) == 29 && dt_days_in_month(2023, 2) == 28 && dt_days_in_month(2023, 7) == 31
+}
+
+fn test_unix_epoch() -> bool with Mut, Div, Panic {
+    let epoch = dt_new(1970, 1, 1, 0, 0, 0)
+    dt_to_unix(epoch) == 0
+}
+
+fn test_unix_roundtrip() -> bool with Mut, Div, Panic {
+    let dt = dt_new(2024, 3, 15, 10, 30, 45)
+    let ts = dt_to_unix(dt)
+    let rt = dt_from_unix(ts)
+    rt.year == 2024 && rt.month == 3 && rt.day == 15 && rt.hour == 10 && rt.minute == 30 && rt.second == 45
+}
+
+fn test_add_seconds() -> bool with Mut, Div, Panic {
+    let dt = dt_new(2024, 12, 31, 23, 59, 50)
+    let dt2 = dt_add_seconds(dt, 20)
+    dt2.year == 2025 && dt2.month == 1 && dt2.day == 1 && dt2.hour == 0 && dt2.minute == 0 && dt2.second == 10
+}
+
+fn test_diff_seconds() -> bool with Mut, Div, Panic {
+    let a = dt_new(1970, 1, 1, 0, 1, 0)
+    let b = dt_new(1970, 1, 1, 0, 0, 0)
+    dt_diff_seconds(a, b) == 60
+}
+
+fn test_day_of_year() -> bool with Mut, Div, Panic {
+    let dt = dt_new(2024, 3, 1, 0, 0, 0)
+    dt_day_of_year(dt) == 61
+}
+
+fn main() with IO, Mut, Div, Panic {
+    if test_leap_year() { print("datetime leap_year: PASS\n") } else { print("datetime leap_year: FAIL\n") }
+    if test_days_in_month() { print("datetime days_in_month: PASS\n") } else { print("datetime days_in_month: FAIL\n") }
+    if test_unix_epoch() { print("datetime unix_epoch: PASS\n") } else { print("datetime unix_epoch: FAIL\n") }
+    if test_unix_roundtrip() { print("datetime unix_roundtrip: PASS\n") } else { print("datetime unix_roundtrip: FAIL\n") }
+    if test_add_seconds() { print("datetime add_seconds: PASS\n") } else { print("datetime add_seconds: FAIL\n") }
+    if test_diff_seconds() { print("datetime diff_seconds: PASS\n") } else { print("datetime diff_seconds: FAIL\n") }
+    if test_day_of_year() { print("datetime day_of_year: PASS\n") } else { print("datetime day_of_year: FAIL\n") }
+}

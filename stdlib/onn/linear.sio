@@ -1,1 +1,226 @@
-//! linear (disabled)
+// stdlib/onn/linear.sio
+//
+// Octonion Neural Network — Linear Layer — Sounio
+//
+// Octonion-valued linear transformation.
+// Each octonion has 8 real components (e0..e7).
+// Weight matrix stored flat: weights[out_idx * in_size * 8 + in_idx * 8 + comp]
+// Max: in_size * out_size * 8 <= 2048
+
+// ============================================================================
+// Helpers
+// ============================================================================
+
+fn onn_abs(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+fn onn_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i = 0
+    while i < 15 {
+        y = 0.5 * (y + x / y)
+        i = i + 1
+    }
+    y
+}
+
+// ============================================================================
+// Octonion multiplication (Cayley-Dickson)
+// o = (a0, a1, a2, a3, a4, a5, a6, a7)
+// Stored as 8 consecutive f64s in an array
+// ============================================================================
+
+fn oct_mul(a: &[f64; 8], b: &[f64; 8], out: &![f64; 8]) with Mut, Panic {
+    // Cayley-Dickson: split into two quaternions
+    // a = (p, q), b = (r, s) where p,q,r,s are quaternions
+    // a*b = (p*r - conj(s)*q, s*p + q*conj(r))
+    // For simplicity, use the full multiplication table
+    // e_i * e_j table for octonions (Fano plane)
+    out[0] = a[0]*b[0] - a[1]*b[1] - a[2]*b[2] - a[3]*b[3] - a[4]*b[4] - a[5]*b[5] - a[6]*b[6] - a[7]*b[7]
+    out[1] = a[0]*b[1] + a[1]*b[0] + a[2]*b[3] - a[3]*b[2] + a[4]*b[5] - a[5]*b[4] - a[6]*b[7] + a[7]*b[6]
+    out[2] = a[0]*b[2] - a[1]*b[3] + a[2]*b[0] + a[3]*b[1] + a[4]*b[6] + a[5]*b[7] - a[6]*b[4] - a[7]*b[5]
+    out[3] = a[0]*b[3] + a[1]*b[2] - a[2]*b[1] + a[3]*b[0] + a[4]*b[7] - a[5]*b[6] + a[6]*b[5] - a[7]*b[4]
+    out[4] = a[0]*b[4] - a[1]*b[5] - a[2]*b[6] - a[3]*b[7] + a[4]*b[0] + a[5]*b[1] + a[6]*b[2] + a[7]*b[3]
+    out[5] = a[0]*b[5] + a[1]*b[4] - a[2]*b[7] + a[3]*b[6] - a[4]*b[1] + a[5]*b[0] - a[6]*b[3] + a[7]*b[2]
+    out[6] = a[0]*b[6] + a[1]*b[7] + a[2]*b[4] - a[3]*b[5] - a[4]*b[2] + a[5]*b[3] + a[6]*b[0] - a[7]*b[1]
+    out[7] = a[0]*b[7] - a[1]*b[6] + a[2]*b[5] + a[3]*b[4] - a[4]*b[3] - a[5]*b[2] + a[6]*b[1] + a[7]*b[0]
+}
+
+fn oct_norm(a: &[f64; 8]) -> f64 with Mut, Div, Panic {
+    var sum = 0.0
+    var i = 0
+    while i < 8 {
+        sum = sum + a[i] * a[i]
+        i = i + 1
+    }
+    onn_sqrt(sum)
+}
+
+// ============================================================================
+// Linear layer
+// weights: flat array of octonion weight coefficients
+//   Layout: weights[(out * in_size + in) * 8 + comp]
+// bias: octonion bias per output unit, bias[out * 8 + comp]
+// in_size: number of octonion input units
+// out_size: number of octonion output units
+// ============================================================================
+
+struct OnnLinear {
+    weights: [f64; 2048],
+    bias: [f64; 128],
+    in_size: i32,
+    out_size: i32,
+}
+
+fn onn_linear_new(in_size: i32, out_size: i32) -> OnnLinear {
+    OnnLinear {
+        weights: [0.0; 2048],
+        bias: [0.0; 128],
+        in_size: in_size,
+        out_size: out_size,
+    }
+}
+
+// Initialize weights with small values
+fn onn_linear_init(layer: &!OnnLinear, scale: f64) with Mut, Div, Panic {
+    // Simple deterministic init: weight[i] = scale * ((i % 17) - 8) / 8
+    var i = 0
+    let total = layer.in_size * layer.out_size * 8
+    while i < total && i < 2048 {
+        let v = ((i % 17) - 8) as f64 / 8.0
+        layer.weights[i] = scale * v
+        i = i + 1
+    }
+}
+
+// ============================================================================
+// Forward pass
+// input: flat array of octonion inputs, input[in_idx * 8 + comp]
+// output: flat array of octonion outputs, output[out_idx * 8 + comp]
+//
+// For each output unit j:
+//   output[j] = bias[j] + sum_i( weight[j,i] * input[i] )
+// where * is octonion multiplication
+// ============================================================================
+
+fn onn_linear_forward(
+    layer: &OnnLinear,
+    input: &[f64; 256],
+    output: &![f64; 256]
+) with Mut, Div, Panic {
+    var j = 0
+    while j < layer.out_size && j * 8 < 256 {
+        // Start with bias
+        var c = 0
+        while c < 8 {
+            let out_idx = j * 8 + c
+            if out_idx < 256 {
+                let bias_idx = j * 8 + c
+                if bias_idx < 128 {
+                    output[out_idx] = layer.bias[bias_idx]
+                } else {
+                    output[out_idx] = 0.0
+                }
+            }
+            c = c + 1
+        }
+
+        // Accumulate weighted inputs
+        var i = 0
+        while i < layer.in_size {
+            // Extract weight octonion
+            var w: [f64; 8] = [0.0; 8]
+            var wc = 0
+            while wc < 8 {
+                let widx = (j * layer.in_size + i) * 8 + wc
+                if widx < 2048 {
+                    w[wc] = layer.weights[widx]
+                }
+                wc = wc + 1
+            }
+
+            // Extract input octonion
+            var inp: [f64; 8] = [0.0; 8]
+            var ic = 0
+            while ic < 8 {
+                let iidx = i * 8 + ic
+                if iidx < 256 {
+                    inp[ic] = input[iidx]
+                }
+                ic = ic + 1
+            }
+
+            // Multiply
+            var prod: [f64; 8] = [0.0; 8]
+            oct_mul(&w, &inp, &!prod)
+
+            // Accumulate
+            c = 0
+            while c < 8 {
+                let out_idx = j * 8 + c
+                if out_idx < 256 {
+                    output[out_idx] = output[out_idx] + prod[c]
+                }
+                c = c + 1
+            }
+
+            i = i + 1
+        }
+
+        j = j + 1
+    }
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+fn test_oct_mul_identity() -> bool with Mut, Div, Panic {
+    // Multiply by identity octonion (1, 0, 0, 0, 0, 0, 0, 0)
+    var a: [f64; 8] = [0.0; 8]
+    a[0] = 3.0
+    a[1] = 1.0
+    a[2] = 4.0
+    a[3] = 1.5
+    a[4] = 2.0
+    a[5] = 0.5
+    a[6] = 1.0
+    a[7] = 0.7
+
+    var id: [f64; 8] = [0.0; 8]
+    id[0] = 1.0
+
+    var out: [f64; 8] = [0.0; 8]
+    oct_mul(&a, &id, &!out)
+
+    onn_abs(out[0] - 3.0) < 0.01 && onn_abs(out[1] - 1.0) < 0.01 &&
+    onn_abs(out[2] - 4.0) < 0.01 && onn_abs(out[7] - 0.7) < 0.01
+}
+
+fn test_oct_norm() -> bool with Mut, Div, Panic {
+    var a: [f64; 8] = [0.0; 8]
+    a[0] = 1.0
+    a[1] = 1.0
+    // norm = sqrt(2) ≈ 1.4142
+    let n = oct_norm(&a)
+    onn_abs(n - 1.4142) < 0.01
+}
+
+fn test_linear_forward_zero_input() -> bool with Mut, Div, Panic {
+    // Zero input should produce bias only
+    var layer = onn_linear_new(2, 1)
+    layer.bias[0] = 5.0
+
+    var input: [f64; 256] = [0.0; 256]
+    var output: [f64; 256] = [0.0; 256]
+    onn_linear_forward(&layer, &input, &!output)
+
+    onn_abs(output[0] - 5.0) < 0.01
+}
+
+fn test_linear_dimensions() -> bool with Mut, Div, Panic {
+    let layer = onn_linear_new(4, 2)
+    layer.in_size == 4 && layer.out_size == 2
+}

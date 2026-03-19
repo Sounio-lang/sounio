@@ -1,1 +1,329 @@
-//! multifractal (disabled)
+// stdlib/fractal/multifractal.sio
+//
+// Multifractal analysis — Sounio
+//
+// Detrended Fluctuation Analysis (DFA) and Hurst exponent estimation.
+// Multifractal DFA (MF-DFA) for characterizing scaling behavior.
+
+// ============================================================================
+// Helpers
+// ============================================================================
+
+fn mf_abs(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+fn mf_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i = 0
+    while i < 15 {
+        y = 0.5 * (y + x / y)
+        i = i + 1
+    }
+    y
+}
+
+fn mf_ln(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return -50.0 }
+    var v = x
+    var adjust = 0.0
+    while v > 2.0 {
+        v = v / 2.0
+        adjust = adjust + 0.6931471805599453
+    }
+    while v < 0.5 {
+        v = v * 2.0
+        adjust = adjust - 0.6931471805599453
+    }
+    let u = (v - 1.0) / (v + 1.0)
+    let u2 = u * u
+    var term = u
+    var sum = u
+    var k = 1
+    while k <= 20 {
+        term = term * u2
+        sum = sum + term / (2 * k + 1) as f64
+        k = k + 1
+    }
+    2.0 * sum + adjust
+}
+
+fn mf_pow(base: f64, exp: f64) -> f64 with Mut, Div, Panic {
+    // base^exp = exp(exp * ln(base))
+    if base <= 0.0 { return 0.0 }
+    let lnb = mf_ln(base)
+    // Inline exp
+    var xc = exp * lnb
+    if xc > 20.0 { xc = 20.0 }
+    if xc < -20.0 { xc = -20.0 }
+    var result = 1.0
+    var term = 1.0
+    var i = 1
+    while i <= 30 {
+        term = term * xc / i as f64
+        result = result + term
+        i = i + 1
+    }
+    if result < 1.0e-15 { result = 1.0e-15 }
+    result
+}
+
+// ============================================================================
+// Cumulative sum (profile) of mean-subtracted signal
+// Y(i) = sum_{k=1}^{i} (x_k - mean)
+// ============================================================================
+
+fn mf_cumsum(data: &[f64; 256], n: i32, profile: &![f64; 256]) with Mut, Div, Panic {
+    // Compute mean
+    var sum = 0.0
+    var i = 0
+    while i < n {
+        sum = sum + data[i]
+        i = i + 1
+    }
+    let mean = if n > 0 { sum / n as f64 } else { 0.0 }
+
+    // Cumulative sum
+    var cumul = 0.0
+    i = 0
+    while i < n {
+        cumul = cumul + (data[i] - mean)
+        profile[i] = cumul
+        i = i + 1
+    }
+}
+
+// ============================================================================
+// Linear detrend within a segment: fit y = a + b*x, return variance of residuals
+// ============================================================================
+
+fn mf_detrend_variance(profile: &[f64; 256], start: i32, seg_len: i32) -> f64 with Mut, Div, Panic {
+    if seg_len < 2 { return 0.0 }
+
+    // Linear regression: y = a + b*x
+    // b = (n*sum(xy) - sum(x)*sum(y)) / (n*sum(x^2) - (sum(x))^2)
+    var sx = 0.0
+    var sy = 0.0
+    var sxy = 0.0
+    var sx2 = 0.0
+    var i = 0
+    while i < seg_len {
+        let x = i as f64
+        let y = profile[start + i]
+        sx = sx + x
+        sy = sy + y
+        sxy = sxy + x * y
+        sx2 = sx2 + x * x
+        i = i + 1
+    }
+
+    let nf = seg_len as f64
+    let denom = nf * sx2 - sx * sx
+    if mf_abs(denom) < 1.0e-15 { return 0.0 }
+
+    let b = (nf * sxy - sx * sy) / denom
+    let a = (sy - b * sx) / nf
+
+    // Variance of residuals
+    var var_sum = 0.0
+    i = 0
+    while i < seg_len {
+        let fitted = a + b * i as f64
+        let resid = profile[start + i] - fitted
+        var_sum = var_sum + resid * resid
+        i = i + 1
+    }
+    var_sum / nf
+}
+
+// ============================================================================
+// DFA fluctuation function F(s) for a given segment size s
+// F(s) = sqrt( (1/N_s) * sum of segment variances )
+// ============================================================================
+
+fn mf_dfa_fluctuation(profile: &[f64; 256], n: i32, seg_len: i32) -> f64 with Mut, Div, Panic {
+    if seg_len < 2 { return 0.0 }
+    let n_seg = n / seg_len
+    if n_seg <= 0 { return 0.0 }
+
+    var sum_var = 0.0
+    var s = 0
+    while s < n_seg {
+        let start = s * seg_len
+        sum_var = sum_var + mf_detrend_variance(profile, start, seg_len)
+        s = s + 1
+    }
+
+    mf_sqrt(sum_var / n_seg as f64)
+}
+
+// ============================================================================
+// MF-DFA: generalized fluctuation function for order q
+// F_q(s) = [ (1/N_s) * sum( F_s^q ) ]^(1/q)
+// For q=2, this is standard DFA.
+// ============================================================================
+
+fn mf_dfa(data: &[f64; 256], n: i32, q: f64) -> f64 with Mut, Div, Panic {
+    if n < 8 { return 0.0 }
+
+    // Compute profile
+    var profile: [f64; 256] = [0.0; 256]
+    mf_cumsum(data, n, &!profile)
+
+    // Use segment size = n/4 as representative scale
+    let seg_len = n / 4
+    if seg_len < 2 { return 0.0 }
+    let n_seg = n / seg_len
+    if n_seg <= 0 { return 0.0 }
+
+    if mf_abs(q) < 1.0e-10 {
+        // q ≈ 0: geometric mean of variances
+        var log_sum = 0.0
+        var s = 0
+        while s < n_seg {
+            let start = s * seg_len
+            let v = mf_detrend_variance(&profile, start, seg_len)
+            if v > 1.0e-30 {
+                log_sum = log_sum + mf_ln(v)
+            }
+            s = s + 1
+        }
+        return mf_sqrt(mf_pow(2.71828182845904523, log_sum / n_seg as f64))
+    }
+
+    // General q
+    var sum_fq = 0.0
+    var s = 0
+    while s < n_seg {
+        let start = s * seg_len
+        let v = mf_detrend_variance(&profile, start, seg_len)
+        if v > 1.0e-30 {
+            sum_fq = sum_fq + mf_pow(v, q / 2.0)
+        }
+        s = s + 1
+    }
+
+    let avg = sum_fq / n_seg as f64
+    if avg < 1.0e-30 { return 0.0 }
+    mf_pow(avg, 1.0 / q)
+}
+
+// ============================================================================
+// Hurst exponent estimation via DFA
+// H = slope of log(F(s)) vs log(s) over multiple scales
+// H ~ 0.5: random walk, H > 0.5: persistent, H < 0.5: anti-persistent
+// ============================================================================
+
+fn mf_hurst_exponent(data: &[f64; 256], n: i32) -> f64 with Mut, Div, Panic {
+    if n < 16 { return 0.5 }
+
+    // Compute profile
+    var profile: [f64; 256] = [0.0; 256]
+    mf_cumsum(data, n, &!profile)
+
+    // Use 4 scales: n/16, n/8, n/4, n/2
+    var log_s: [f64; 4] = [0.0; 4]
+    var log_f: [f64; 4] = [0.0; 4]
+    var n_scales = 0
+
+    var scale = 4
+    while scale <= 7 {
+        // seg_len = n / 2^scale -> but we use n/16, n/8, n/4, n/2
+        var seg_len = n / 2
+        if scale == 4 { seg_len = n / 16 }
+        if scale == 5 { seg_len = n / 8 }
+        if scale == 6 { seg_len = n / 4 }
+        if scale == 7 { seg_len = n / 2 }
+
+        if seg_len >= 4 {
+            let f_s = mf_dfa_fluctuation(&profile, n, seg_len)
+            if f_s > 1.0e-30 {
+                log_s[n_scales] = mf_ln(seg_len as f64)
+                log_f[n_scales] = mf_ln(f_s)
+                n_scales = n_scales + 1
+            }
+        }
+        scale = scale + 1
+    }
+
+    if n_scales < 2 { return 0.5 }
+
+    // Linear regression: log_f = H * log_s + c
+    var sx = 0.0
+    var sy = 0.0
+    var sxy = 0.0
+    var sx2 = 0.0
+    var i = 0
+    while i < n_scales {
+        sx = sx + log_s[i]
+        sy = sy + log_f[i]
+        sxy = sxy + log_s[i] * log_f[i]
+        sx2 = sx2 + log_s[i] * log_s[i]
+        i = i + 1
+    }
+    let nf = n_scales as f64
+    let denom = nf * sx2 - sx * sx
+    if mf_abs(denom) < 1.0e-15 { return 0.5 }
+
+    let h = (nf * sxy - sx * sy) / denom
+
+    // Clamp to reasonable range
+    if h < 0.0 { return 0.0 }
+    if h > 2.0 { return 2.0 }
+    h
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+fn test_dfa_constant() -> bool with Mut, Div, Panic {
+    // Constant signal: fluctuation should be near 0
+    var data: [f64; 256] = [0.0; 256]
+    var i = 0
+    while i < 64 {
+        data[i] = 5.0
+        i = i + 1
+    }
+    let f = mf_dfa(&data, 64, 2.0)
+    f < 0.1
+}
+
+fn test_hurst_random_walk() -> bool with Mut, Div, Panic {
+    // Simple deterministic "random-like" signal
+    var data: [f64; 256] = [0.0; 256]
+    var i = 0
+    var val = 0.0
+    while i < 128 {
+        // Pseudo-random increments
+        val = val + ((i * 7 + 3) % 11) as f64 - 5.0
+        data[i] = val
+        i = i + 1
+    }
+    let h = mf_hurst_exponent(&data, 128)
+    // Should be some positive value
+    h > 0.0 && h < 2.0
+}
+
+fn test_dfa_q2_positive() -> bool with Mut, Div, Panic {
+    var data: [f64; 256] = [0.0; 256]
+    var i = 0
+    while i < 32 {
+        data[i] = (i % 5) as f64
+        i = i + 1
+    }
+    let f = mf_dfa(&data, 32, 2.0)
+    f >= 0.0
+}
+
+fn test_cumsum_sums() -> bool with Mut, Div, Panic {
+    var data: [f64; 256] = [0.0; 256]
+    data[0] = 1.0
+    data[1] = 2.0
+    data[2] = 3.0
+    // mean = 2.0, cumsum: -1, -1, 0
+    var profile: [f64; 256] = [0.0; 256]
+    mf_cumsum(&data, 3, &!profile)
+    mf_abs(profile[0] - (-1.0)) < 0.01 && mf_abs(profile[2]) < 0.01
+}

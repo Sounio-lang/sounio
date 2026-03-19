@@ -1,1 +1,249 @@
-//! reasoner (disabled)
+// stdlib/ontology/reasoner.sio — Forward-chaining reasoner
+//
+// RDFS-style reasoning: transitive subclass inference, domain/range inference.
+// Operates on OntModel + OntCache, producing an enriched OntCache.
+
+// ============================================================================
+// TYPES (duplicated for standalone compilation)
+// ============================================================================
+
+struct Triple {
+    subj: i32,
+    pred: i32,
+    obj: i32
+}
+
+struct OntCache {
+    triples: [Triple; 512],
+    count: i32,
+    subj_idx: [i32; 512],
+    pred_idx: [i32; 512]
+}
+
+struct OntClass {
+    id: i32,
+    parent: i32,
+    name_hash: i64
+}
+
+struct OntProperty {
+    id: i32,
+    domain: i32,
+    range: i32,
+    name_hash: i64
+}
+
+struct OntModel {
+    classes: [OntClass; 128],
+    class_count: i32,
+    props: [OntProperty; 128],
+    prop_count: i32
+}
+
+// Well-known predicate IDs for reasoning
+let PRED_SUBCLASS: i32 = 1
+let PRED_TYPE: i32 = 2
+let PRED_DOMAIN: i32 = 3
+let PRED_RANGE: i32 = 4
+
+// ============================================================================
+// HELPER: add triple if not present
+// ============================================================================
+
+fn cache_try_add(c: OntCache, s: i32, p: i32, o: i32) -> OntCache {
+    if c.count >= 512 {
+        return c
+    }
+    // Check for duplicates
+    var i: i32 = 0
+    while i < c.count {
+        let t = c.triples[i]
+        if t.subj == s {
+            if t.pred == p {
+                if t.obj == o {
+                    return c
+                }
+            }
+        }
+        i = i + 1
+    }
+    var result = c
+    let idx = result.count
+    result.triples[idx] = Triple { subj: s, pred: p, obj: o }
+    result.subj_idx[idx] = s
+    result.pred_idx[idx] = p
+    result.count = result.count + 1
+    result
+}
+
+// ============================================================================
+// RDFS SUBCLASS REASONING
+// ============================================================================
+
+// Infer transitive subclass triples from the model's class hierarchy.
+// For each class C with parent P, adds (C, SUBCLASS, P).
+// Then forward-chains: if (A, SUBCLASS, B) and (B, SUBCLASS, C), add (A, SUBCLASS, C).
+// Fixed-point iteration (max 64 rounds).
+fn reasoner_rdfs_subclass(model: OntModel, cache: OntCache) -> OntCache {
+    var result = cache
+
+    // Phase 1: seed direct subclass triples from model
+    var ci: i32 = 0
+    while ci < model.class_count {
+        let cls = model.classes[ci]
+        if cls.parent >= 0 {
+            result = cache_try_add(result, cls.id, PRED_SUBCLASS, cls.parent)
+        }
+        ci = ci + 1
+    }
+
+    // Phase 2: forward-chain transitive closure
+    var round: i32 = 0
+    while round < 64 {
+        var added: i32 = 0
+        let snap_count = result.count
+
+        var i: i32 = 0
+        while i < snap_count {
+            let t1 = result.triples[i]
+            if t1.pred == PRED_SUBCLASS {
+                // t1: (A, subclass, B) — look for (B, subclass, C)
+                var j: i32 = 0
+                while j < snap_count {
+                    let t2 = result.triples[j]
+                    if t2.pred == PRED_SUBCLASS {
+                        if t2.subj == t1.obj {
+                            // Infer (A, subclass, C)
+                            let old_count = result.count
+                            result = cache_try_add(result, t1.subj, PRED_SUBCLASS, t2.obj)
+                            if result.count > old_count {
+                                added = added + 1
+                            }
+                        }
+                    }
+                    j = j + 1
+                }
+            }
+            i = i + 1
+        }
+
+        if added == 0 {
+            return result
+        }
+        round = round + 1
+    }
+    result
+}
+
+// ============================================================================
+// DOMAIN/RANGE REASONING
+// ============================================================================
+
+// If (S, P, O) exists and property P has domain D, infer (S, TYPE, D).
+// If property P has range R, infer (O, TYPE, R).
+fn reasoner_domain_range(model: OntModel, cache: OntCache) -> OntCache {
+    var result = cache
+
+    var i: i32 = 0
+    while i < result.count {
+        let t = result.triples[i]
+        let pred_id = t.pred
+
+        // Find this predicate in the model
+        var pi: i32 = 0
+        while pi < model.prop_count {
+            let prop = model.props[pi]
+            if prop.id == pred_id {
+                // Domain inference: subject has type domain
+                if prop.domain >= 0 {
+                    result = cache_try_add(result, t.subj, PRED_TYPE, prop.domain)
+                }
+                // Range inference: object has type range
+                if prop.range >= 0 {
+                    result = cache_try_add(result, t.obj, PRED_TYPE, prop.range)
+                }
+            }
+            pi = pi + 1
+        }
+        i = i + 1
+    }
+    result
+}
+
+// ============================================================================
+// TESTS
+// ============================================================================
+
+fn test_subclass_direct() -> bool {
+    // Thing(1) <- Animal(2) <- Dog(3)
+    var classes = [OntClass { id: 0, parent: -1, name_hash: 0 }; 128]
+    var props = [OntProperty { id: 0, domain: 0, range: 0, name_hash: 0 }; 128]
+    classes[0] = OntClass { id: 1, parent: -1, name_hash: 100 }
+    classes[1] = OntClass { id: 2, parent: 1, name_hash: 200 }
+    classes[2] = OntClass { id: 3, parent: 2, name_hash: 300 }
+    let model = OntModel { classes: classes, class_count: 3, props: props, prop_count: 0 }
+
+    var triples = [Triple { subj: 0, pred: 0, obj: 0 }; 512]
+    var subj_idx = [0; 512]
+    var pred_idx = [0; 512]
+    let cache = OntCache { triples: triples, count: 0, subj_idx: subj_idx, pred_idx: pred_idx }
+
+    let result = reasoner_rdfs_subclass(model, cache)
+    // Should have: (2,SC,1), (3,SC,2), (3,SC,1)
+    result.count == 3
+}
+
+fn test_subclass_transitive() -> bool {
+    var classes = [OntClass { id: 0, parent: -1, name_hash: 0 }; 128]
+    var props = [OntProperty { id: 0, domain: 0, range: 0, name_hash: 0 }; 128]
+    classes[0] = OntClass { id: 1, parent: -1, name_hash: 100 }
+    classes[1] = OntClass { id: 2, parent: 1, name_hash: 200 }
+    classes[2] = OntClass { id: 3, parent: 2, name_hash: 300 }
+    let model = OntModel { classes: classes, class_count: 3, props: props, prop_count: 0 }
+
+    var triples = [Triple { subj: 0, pred: 0, obj: 0 }; 512]
+    var subj_idx = [0; 512]
+    var pred_idx = [0; 512]
+    let cache = OntCache { triples: triples, count: 0, subj_idx: subj_idx, pred_idx: pred_idx }
+
+    let result = reasoner_rdfs_subclass(model, cache)
+
+    // Check (3, SUBCLASS, 1) exists — transitive
+    var found = false
+    var i: i32 = 0
+    while i < result.count {
+        let t = result.triples[i]
+        if t.subj == 3 {
+            if t.pred == PRED_SUBCLASS {
+                if t.obj == 1 {
+                    found = true
+                }
+            }
+        }
+        i = i + 1
+    }
+    found
+}
+
+fn test_domain_range() -> bool {
+    var classes = [OntClass { id: 0, parent: -1, name_hash: 0 }; 128]
+    var props = [OntProperty { id: 0, domain: 0, range: 0, name_hash: 0 }; 128]
+    classes[0] = OntClass { id: 1, parent: -1, name_hash: 100 }  // Person
+    classes[1] = OntClass { id: 2, parent: -1, name_hash: 200 }  // City
+    // property "livesIn": domain=Person(1), range=City(2)
+    props[0] = OntProperty { id: 50, domain: 1, range: 2, name_hash: 500 }
+    let model = OntModel { classes: classes, class_count: 2, props: props, prop_count: 1 }
+
+    // Triple: (Alice=10, livesIn=50, London=20)
+    var triples = [Triple { subj: 0, pred: 0, obj: 0 }; 512]
+    var subj_idx = [0; 512]
+    var pred_idx = [0; 512]
+    triples[0] = Triple { subj: 10, pred: 50, obj: 20 }
+    subj_idx[0] = 10
+    pred_idx[0] = 50
+    let cache = OntCache { triples: triples, count: 1, subj_idx: subj_idx, pred_idx: pred_idx }
+
+    let result = reasoner_domain_range(model, cache)
+    // Should infer (10, TYPE, 1) and (20, TYPE, 2)
+    result.count == 3
+}

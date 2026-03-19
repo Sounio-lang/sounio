@@ -1,370 +1,575 @@
-//! stdlib/snn/sedenion_embedding.sio - Sedenion Embedding Tables & KG Models
-//!
-//! Embedding tables mapping discrete IDs to sedenion-valued vectors on S^15.
-//! Supports knowledge graph embedding (SedenionE) with three scoring functions:
-//!   - CayleyProduct: non-commutative rotation via Cayley-Dickson product
-//!   - DistMult: symmetric bilinear via component-wise product
-//!   - Bilinear: trilinear component-wise scoring
-//!
-//! Epistemic integration: Each embedding carries uncertainty that decreases
-//! as the embedding is trained (GUM-style uncertainty propagation).
-//!
-//! References:
-//!   - QuatE (Zhang et al., 2019): arXiv:1904.10281
-//!   - DistMult (Yang et al., 2015): arXiv:1412.6575
-//!   - GUM (JCGM 100:2008): Uncertainty propagation
-
-use math::sedenion::*
-// Note: intra-module snn:: imports removed — siblings are auto-loaded
-
-// ============================================================================
-// EPISTEMIC TYPES
-// ============================================================================
-
-// Sedenion value with associated uncertainty (GUM-style)
-pub struct KnowledgeSedenion {
-    value: Sedenion,
-    uncertainty: f32,       // Standard uncertainty (scalar, >= 0)
-    confidence: f32,        // Confidence level [0, 1]
-}
-
-// Scalar knowledge value (for scores)
-pub struct KnowledgeF32 {
-    value: f32,
-    uncertainty: f32,
-}
-
-// Construct a KnowledgeSedenion with default confidence
-pub fn knowledge_sed(value: Sedenion, uncertainty: f32) -> KnowledgeSedenion {
-    KnowledgeSedenion {
-        value: value,
-        uncertainty: if uncertainty < 0.0 { 0.0 } else { uncertainty },
-        confidence: 1.0 - uncertainty  // simple mapping: low uncertainty = high confidence
-    }
-}
-
-// Construct from value only (zero uncertainty = full knowledge)
-pub fn knowledge_sed_certain(value: Sedenion) -> KnowledgeSedenion {
-    KnowledgeSedenion {
-        value: value,
-        uncertainty: 0.0,
-        confidence: 1.0
-    }
-}
-
-// ============================================================================
-// EMBEDDING TABLE
-// ============================================================================
-
-// Lookup table mapping integer IDs to sedenion embeddings.
-// Optionally normalizes embeddings to lie on S^15 (unit 15-sphere).
-pub struct SedenionEmbeddingTable {
-    embeddings: [Sedenion],
-    uncertainties: [f32],       // Per-embedding uncertainty
-    num_entries: i32,
-    normalize: bool,
-}
-
-// Initialize embedding table with pseudo-random points on S^15.
+// == snn/base preamble inlined ==
+// stdlib/snn/base.sio — Sedenion Neural Network Foundation
 //
-// Initialization uses a deterministic hash-based scheme to generate
-// diverse points. Each embedding starts with high uncertainty (1.0)
-// that decreases during training.
-pub fn create_embedding_table(
-    num_entries: i32,
-    normalize: bool
-) -> SedenionEmbeddingTable with Panic, Mut {
-    var embeddings: [Sedenion] = []
-    var uncertainties: [f32] = []
-
-    for i in 0..num_entries {
-        // Deterministic pseudo-random initialization
-        // Hash-based to ensure reproducibility
-        let seed = (i * 2654435761 + 1013904223) as f32  // Knuth multiplicative hash
-        let inv = 1.0 / 65536.0
-
-        let s = sed(
-            ((seed as i32 * 73 + 17) % 65536) as f32 * inv - 0.5,
-            ((seed as i32 * 179 + 31) % 65536) as f32 * inv - 0.5,
-            ((seed as i32 * 283 + 47) % 65536) as f32 * inv - 0.5,
-            ((seed as i32 * 389 + 61) % 65536) as f32 * inv - 0.5,
-            ((seed as i32 * 491 + 79) % 65536) as f32 * inv - 0.5,
-            ((seed as i32 * 599 + 89) % 65536) as f32 * inv - 0.5,
-            ((seed as i32 * 701 + 97) % 65536) as f32 * inv - 0.5,
-            ((seed as i32 * 811 + 103) % 65536) as f32 * inv - 0.5,
-            ((seed as i32 * 907 + 113) % 65536) as f32 * inv - 0.5,
-            ((seed as i32 * 1013 + 127) % 65536) as f32 * inv - 0.5,
-            ((seed as i32 * 1117 + 139) % 65536) as f32 * inv - 0.5,
-            ((seed as i32 * 1223 + 151) % 65536) as f32 * inv - 0.5,
-            ((seed as i32 * 1327 + 163) % 65536) as f32 * inv - 0.5,
-            ((seed as i32 * 1433 + 173) % 65536) as f32 * inv - 0.5,
-            ((seed as i32 * 1543 + 181) % 65536) as f32 * inv - 0.5,
-            ((seed as i32 * 1657 + 191) % 65536) as f32 * inv - 0.5
-        )
-
-        let emb = if normalize { sed_normalize(s) } else { s }
-        embeddings = embeddings ++ [emb]
-        uncertainties = uncertainties ++ [1.0]  // High initial uncertainty
-    }
-
-    SedenionEmbeddingTable {
-        embeddings: embeddings,
-        uncertainties: uncertainties,
-        num_entries: num_entries,
-        normalize: normalize
-    }
-}
-
-// Look up an embedding by ID, returning value with uncertainty
-pub fn embedding_lookup(table: SedenionEmbeddingTable, id: i32) -> KnowledgeSedenion with Panic {
-    KnowledgeSedenion {
-        value: table.embeddings[id],
-        uncertainty: table.uncertainties[id],
-        confidence: 1.0 - table.uncertainties[id]
-    }
-}
-
-// Look up raw embedding value (without epistemic wrapper)
-pub fn embedding_lookup_raw(table: SedenionEmbeddingTable, id: i32) -> Sedenion with Panic {
-    table.embeddings[id]
-}
-
-// Update an embedding and reduce its uncertainty
-// grad_norm indicates how much signal was received (higher = more information)
-pub fn embedding_update(
-    table: &!SedenionEmbeddingTable,
-    id: i32,
-    new_value: Sedenion,
-    grad_norm: f32
-) with Panic, Mut {
-    let emb = if table.normalize { sed_normalize(new_value) } else { new_value }
-    table.embeddings[id] = emb
-
-    // Reduce uncertainty: more gradient signal = more confidence
-    // Decay formula: u_new = u_old * (1 / (1 + alpha * |grad|))
-    let alpha = 0.1
-    let decay = 1.0 / (1.0 + alpha * grad_norm)
-    let new_unc = table.uncertainties[id] * decay
-    table.uncertainties[id] = if new_unc < 0.001 { 0.001 } else { new_unc }
-}
-
-// Get number of entries in table
-pub fn embedding_table_size(table: SedenionEmbeddingTable) -> i32 {
-    table.num_entries
-}
-
-// Get average uncertainty across all embeddings
-pub fn embedding_avg_uncertainty(table: SedenionEmbeddingTable) -> f32 with Panic, Mut {
-    var total = 0.0
-    for i in 0..table.num_entries {
-        total = total + table.uncertainties[i]
-    }
-    total / (table.num_entries as f32)
-}
-
-// ============================================================================
-// SCORING FUNCTION ENUM
-// ============================================================================
-
-// Scoring functions for knowledge graph triple evaluation
-pub enum SedScoringFn {
-    // Cayley-Dickson product: score = <h * r, t>
-    // Non-commutative, captures asymmetric relations
-    // 120 rotation planes in 16D (vs 3 in quaternions)
-    CayleyProduct,
-
-    // DistMult: score = <h * r, t> via Cayley-Dickson
-    // Same computation as CayleyProduct (provided for API clarity)
-    DistMult,
-
-    // Bilinear: score = sum(h_i * r_i * t_i)
-    // Symmetric in h and t, suitable for symmetric relations
-    Bilinear,
-}
-
-// ============================================================================
-// KNOWLEDGE GRAPH MODEL
-// ============================================================================
-
-// SedenionE: Knowledge graph embedding model using sedenion-valued embeddings.
+// Sedenions are 16-dimensional hypercomplex numbers (Cayley-Dickson
+// construction from octonions). They are NON-ASSOCIATIVE and have
+// ZERO DIVISORS.
 //
-// Entities and relations are represented as sedenions (16D hypercomplex numbers).
-// The Cayley-Dickson product enables richer rotational modeling than quaternions:
-// - Quaternions (4D): 3 independent rotation planes
-// - Octonions (8D): 21 rotation planes (non-associative)
-// - Sedenions (16D): 120 rotation planes (non-associative, zero divisors)
-//
-// Zero divisors are handled by the training loop via regularization.
-pub struct SedenionKGModel {
-    entity_embeddings: SedenionEmbeddingTable,
-    relation_embeddings: SedenionEmbeddingTable,
-    scoring: SedScoringFn,
-}
+// References:
+// - Cawagas (2004) "On the structure and zero divisors of the Cayley-Dickson sedenion algebra"
+// - Imaeda & Imaeda (2000) "Sedenions: algebra and analysis"
 
-// Create a knowledge graph embedding model
-pub fn create_kg_model(
-    num_entities: i32,
-    num_relations: i32,
-    scoring: SedScoringFn
-) -> SedenionKGModel with Panic, Mut {
-    SedenionKGModel {
-        entity_embeddings: create_embedding_table(num_entities, true),
-        relation_embeddings: create_embedding_table(num_relations, false),
-        scoring: scoring
-    }
-}
+// ============================================================================
+// CORE TYPE
+// ============================================================================
 
-// Score a knowledge graph triple (head_id, relation_id, tail_id)
-pub fn kg_score_triple(
-    model: SedenionKGModel,
-    head_id: i32,
-    rel_id: i32,
-    tail_id: i32
-) -> f32 with Panic {
-    let h = embedding_lookup_raw(model.entity_embeddings, head_id)
-    let r = embedding_lookup_raw(model.relation_embeddings, rel_id)
-    let t = embedding_lookup_raw(model.entity_embeddings, tail_id)
-
-    match model.scoring {
-        SedScoringFn::CayleyProduct => sed_cayley_score(h, r, t),
-        SedScoringFn::DistMult => sed_distmult_score(h, r, t),
-        SedScoringFn::Bilinear => sed_bilinear_score(h, r, t),
-    }
-}
-
-// Score a triple with epistemic uncertainty propagation (GUM-style)
-//
-// Propagates uncertainty from entity/relation embeddings to the final score.
-// Uses first-order (linear) uncertainty propagation:
-//   u_score^2 = u_h^2 * ||d(score)/dh||^2 + u_r^2 * ||d(score)/dr||^2 + u_t^2 * ||d(score)/dt||^2
-//
-// Simplified approximation for Cayley scoring:
-//   u_score ≈ sqrt(u_h^2 * ||r*t||^2 + u_r^2 * ||h*t||^2 + u_t^2 * ||h*r||^2)
-pub fn kg_score_triple_epistemic(
-    model: SedenionKGModel,
-    head_id: i32,
-    rel_id: i32,
-    tail_id: i32
-) -> KnowledgeF32 with Panic {
-    let hk = embedding_lookup(model.entity_embeddings, head_id)
-    let rk = embedding_lookup(model.relation_embeddings, rel_id)
-    let tk = embedding_lookup(model.entity_embeddings, tail_id)
-
-    let h = hk.value
-    let r = rk.value
-    let t = tk.value
-
-    // Compute score
-    let score = match model.scoring {
-        SedScoringFn::CayleyProduct => sed_cayley_score(h, r, t),
-        SedScoringFn::DistMult => sed_distmult_score(h, r, t),
-        SedScoringFn::Bilinear => sed_bilinear_score(h, r, t),
-    }
-
-    // First-order uncertainty propagation
-    // Sensitivity coefficients (approximate magnitudes)
-    let hr = sed_mul(h, r)
-    let rt = sed_mul(r, t)
-    let ht_norm_sq = sed_dot(h, t) * sed_dot(h, t)  // simplified
-
-    let u_h = hk.uncertainty
-    let u_r = rk.uncertainty
-    let u_t = tk.uncertainty
-
-    let sens_h_sq = sed_norm_sq(rt)
-    let sens_r_sq = sed_norm_sq(h) * sed_norm_sq(t)  // approximate
-    let sens_t_sq = sed_norm_sq(hr)
-
-    let u_score_sq = u_h * u_h * sens_h_sq + u_r * u_r * sens_r_sq + u_t * u_t * sens_t_sq
-    let u_score = u_score_sq.sqrt()
-
-    KnowledgeF32 {
-        value: score,
-        uncertainty: u_score
-    }
-}
-
-// Margin-based ranking loss
-pub fn kg_margin_loss(pos_score: f32, neg_score: f32, margin: f32) -> f32 {
-    sed_margin_loss(pos_score, neg_score, margin)
+struct Sedenion {
+    e: [f64; 16]
 }
 
 // ============================================================================
-// SCORING BACKWARD (delegates to sedenion_backward module)
+// CONSTRUCTORS
 // ============================================================================
 
-// Compute gradients for a scored triple
-// Returns (grad_head, grad_relation, grad_tail)
-pub fn kg_score_backward(
-    model: SedenionKGModel,
-    head_id: i32,
-    rel_id: i32,
-    tail_id: i32,
-    grad_score: f32
-) -> (Sedenion, Sedenion, Sedenion) with Panic {
-    let h = embedding_lookup_raw(model.entity_embeddings, head_id)
-    let r = embedding_lookup_raw(model.relation_embeddings, rel_id)
-    let t = embedding_lookup_raw(model.entity_embeddings, tail_id)
-
-    match model.scoring {
-        SedScoringFn::CayleyProduct => sed_cayley_score_backward(grad_score, h, r, t),
-        SedScoringFn::DistMult => sed_cayley_score_backward(grad_score, h, r, t),
-        SedScoringFn::Bilinear => sed_bilinear_score_backward(grad_score, h, r, t),
-    }
+fn sed_zero() -> Sedenion {
+    Sedenion { e: [0.0; 16] }
 }
 
-// ============================================================================
-// ZERO DIVISOR UTILITIES
-// ============================================================================
+fn sed_one() -> Sedenion {
+    var r = [0.0; 16]
+    r[0] = 1.0
+    Sedenion { e: r }
+}
 
-// Count how many embeddings in a table are near zero divisors
-pub fn count_zero_divisors(table: SedenionEmbeddingTable) -> i32 with Panic, Mut {
-    var count = 0
-    for i in 0..table.num_entries {
-        if sed_is_zero_divisor(table.embeddings[i]) {
-            count = count + 1
+fn sed_basis(i: i64) -> Sedenion {
+    var r = [0.0; 16]
+    if i >= 0 {
+        if i < 16 {
+            r[i] = 1.0
         }
     }
-    count
+    Sedenion { e: r }
 }
 
-// Compute zero-divisor regularization loss for an embedding table.
-// Penalizes embeddings whose putative inverse doesn't produce identity.
+fn sed_from_scalar(s: f64) -> Sedenion {
+    var r = [0.0; 16]
+    r[0] = s
+    Sedenion { e: r }
+}
+
+// ============================================================================
+// ARITHMETIC
+// ============================================================================
+
+fn sed_add(a: Sedenion, b: Sedenion) -> Sedenion {
+    var r = [0.0; 16]
+    var i: i64 = 0
+    while i < 16 {
+        r[i] = a.e[i] + b.e[i]
+        i = i + 1
+    }
+    Sedenion { e: r }
+}
+
+fn sed_sub(a: Sedenion, b: Sedenion) -> Sedenion {
+    var r = [0.0; 16]
+    var i: i64 = 0
+    while i < 16 {
+        r[i] = a.e[i] - b.e[i]
+        i = i + 1
+    }
+    Sedenion { e: r }
+}
+
+fn sed_scale(a: Sedenion, s: f64) -> Sedenion {
+    var r = [0.0; 16]
+    var i: i64 = 0
+    while i < 16 {
+        r[i] = a.e[i] * s
+        i = i + 1
+    }
+    Sedenion { e: r }
+}
+
+fn sed_conj(a: Sedenion) -> Sedenion {
+    var r = [0.0; 16]
+    r[0] = a.e[0]
+    var i: i64 = 1
+    while i < 16 {
+        r[i] = 0.0 - a.e[i]
+        i = i + 1
+    }
+    Sedenion { e: r }
+}
+
+fn sed_norm_sq(a: Sedenion) -> f64 {
+    var s = 0.0
+    var i: i64 = 0
+    while i < 16 {
+        s = s + a.e[i] * a.e[i]
+        i = i + 1
+    }
+    s
+}
+
+fn sed_sqrt(x: f64) -> f64 {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i: i64 = 0
+    while i < 15 {
+        y = (y + x / y) / 2.0
+        i = i + 1
+    }
+    y
+}
+
+fn sed_norm(a: Sedenion) -> f64 {
+    sed_sqrt(sed_norm_sq(a))
+}
+
+// ============================================================================
+// CAYLEY-DICKSON MULTIPLICATION
+// ============================================================================
 //
-// loss = (1/n) * sum_i ||e_i * inv(e_i) - 1||^2
-pub fn embedding_zero_divisor_loss(table: SedenionEmbeddingTable) -> f32 with Panic, Mut {
-    var total_loss = 0.0
-    for i in 0..table.num_entries {
-        let e = table.embeddings[i]
-        let norm_sq = sed_norm_sq(e)
-        if norm_sq > 0.0000001 {
-            let inv = sed_putative_inv(e)
-            let product = sed_mul(e, inv)
-            let diff = sed_sub(product, sed_one())
-            total_loss = total_loss + sed_norm_sq(diff)
+// Sedenion multiplication via the 16x16 multiplication table.
+// For basis elements e_i * e_j, the result is +/- e_k.
+// We encode this as two tables: one for the index k, one for the sign.
+//
+// The table is derived from the Cayley-Dickson doubling of octonions.
+// Sedenions are NOT associative and have zero divisors.
+
+// Multiplication table index: mul_idx[i*16+j] = basis index of e_i * e_j
+fn sed_mul_idx(i: i64, j: i64) -> i64 {
+    // Full 16x16 multiplication index table (Cayley-Dickson sedenions)
+    let table: [i64; 256] = [
+        0,  1,  2,  3,  4,  5,  6,  7,  8,  9, 10, 11, 12, 13, 14, 15,
+        1,  0,  3,  2,  5,  4,  7,  6,  9,  8, 11, 10, 13, 12, 15, 14,
+        2,  3,  0,  1,  6,  7,  4,  5, 10, 11,  8,  9, 14, 15, 12, 13,
+        3,  2,  1,  0,  7,  6,  5,  4, 11, 10,  9,  8, 15, 14, 13, 12,
+        4,  5,  6,  7,  0,  1,  2,  3, 12, 13, 14, 15,  8,  9, 10, 11,
+        5,  4,  7,  6,  1,  0,  3,  2, 13, 12, 15, 14,  9,  8, 11, 10,
+        6,  7,  4,  5,  2,  3,  0,  1, 14, 15, 12, 13, 10, 11,  8,  9,
+        7,  6,  5,  4,  3,  2,  1,  0, 15, 14, 13, 12, 11, 10,  9,  8,
+        8,  9, 10, 11, 12, 13, 14, 15,  0,  1,  2,  3,  4,  5,  6,  7,
+        9,  8, 11, 10, 13, 12, 15, 14,  1,  0,  3,  2,  5,  4,  7,  6,
+       10, 11,  8,  9, 14, 15, 12, 13,  2,  3,  0,  1,  6,  7,  4,  5,
+       11, 10,  9,  8, 15, 14, 13, 12,  3,  2,  1,  0,  7,  6,  5,  4,
+       12, 13, 14, 15,  8,  9, 10, 11,  4,  5,  6,  7,  0,  1,  2,  3,
+       13, 12, 15, 14,  9,  8, 11, 10,  5,  4,  7,  6,  1,  0,  3,  2,
+       14, 15, 12, 13, 10, 11,  8,  9,  6,  7,  4,  5,  2,  3,  0,  1,
+       15, 14, 13, 12, 11, 10,  9,  8,  7,  6,  5,  4,  3,  2,  1,  0
+    ]
+    table[i * 16 + j]
+}
+
+// Multiplication sign table: sed_mul_sgn[i*16+j] = sign of e_i * e_j
+fn sed_mul_sgn(i: i64, j: i64) -> f64 {
+    // +1.0 or -1.0 for each product e_i * e_j
+    // Derived from Cayley-Dickson construction
+    let table: [f64; 256] = [
+        1.0,  1.0,  1.0,  1.0,  1.0,  1.0,  1.0,  1.0,  1.0,  1.0,  1.0,  1.0,  1.0,  1.0,  1.0,  1.0,
+        1.0, -1.0,  1.0, -1.0,  1.0, -1.0, -1.0,  1.0,  1.0, -1.0,  1.0, -1.0, -1.0,  1.0,  1.0, -1.0,
+        1.0, -1.0, -1.0,  1.0,  1.0,  1.0, -1.0, -1.0,  1.0, -1.0, -1.0,  1.0,  1.0,  1.0, -1.0, -1.0,
+        1.0,  1.0, -1.0, -1.0,  1.0, -1.0,  1.0, -1.0,  1.0,  1.0, -1.0, -1.0, -1.0,  1.0, -1.0,  1.0,
+        1.0, -1.0, -1.0, -1.0, -1.0,  1.0,  1.0,  1.0,  1.0,  1.0,  1.0, -1.0, -1.0, -1.0,  1.0, -1.0,
+        1.0,  1.0, -1.0,  1.0, -1.0, -1.0, -1.0,  1.0,  1.0, -1.0, -1.0,  1.0,  1.0, -1.0,  1.0, -1.0,
+        1.0,  1.0,  1.0, -1.0, -1.0,  1.0, -1.0, -1.0,  1.0,  1.0,  1.0, -1.0, -1.0, -1.0, -1.0,  1.0,
+        1.0, -1.0,  1.0,  1.0, -1.0, -1.0,  1.0, -1.0,  1.0, -1.0,  1.0,  1.0,  1.0, -1.0, -1.0, -1.0,
+        1.0, -1.0, -1.0, -1.0, -1.0, -1.0, -1.0, -1.0, -1.0,  1.0,  1.0,  1.0,  1.0,  1.0,  1.0,  1.0,
+        1.0,  1.0,  1.0, -1.0, -1.0,  1.0, -1.0,  1.0, -1.0, -1.0, -1.0,  1.0,  1.0, -1.0,  1.0, -1.0,
+        1.0, -1.0,  1.0,  1.0, -1.0,  1.0, -1.0, -1.0, -1.0,  1.0, -1.0, -1.0,  1.0, -1.0, -1.0,  1.0,
+        1.0,  1.0, -1.0,  1.0,  1.0, -1.0,  1.0, -1.0, -1.0, -1.0,  1.0, -1.0, -1.0,  1.0, -1.0,  1.0,
+        1.0,  1.0, -1.0,  1.0,  1.0, -1.0,  1.0, -1.0, -1.0, -1.0, -1.0,  1.0, -1.0,  1.0,  1.0, -1.0,
+        1.0, -1.0, -1.0, -1.0,  1.0,  1.0,  1.0,  1.0, -1.0,  1.0,  1.0, -1.0, -1.0, -1.0,  1.0, -1.0,
+        1.0, -1.0,  1.0,  1.0, -1.0, -1.0,  1.0,  1.0, -1.0, -1.0,  1.0,  1.0, -1.0, -1.0, -1.0,  1.0,
+        1.0,  1.0,  1.0, -1.0,  1.0,  1.0, -1.0,  1.0, -1.0,  1.0, -1.0, -1.0,  1.0,  1.0, -1.0, -1.0
+    ]
+    table[i * 16 + j]
+}
+
+fn sed_mul(a: Sedenion, b: Sedenion) -> Sedenion {
+    var r = [0.0; 16]
+    var i: i64 = 0
+    while i < 16 {
+        var j: i64 = 0
+        while j < 16 {
+            let k = sed_mul_idx(i, j)
+            let s = sed_mul_sgn(i, j)
+            r[k] = r[k] + s * a.e[i] * b.e[j]
+            j = j + 1
         }
+        i = i + 1
     }
-    total_loss / (table.num_entries as f32)
+    Sedenion { e: r }
 }
 
 // ============================================================================
-// ANALOGY OPERATIONS
+// ACTIVATION FUNCTIONS
 // ============================================================================
 
-// Sedenion analogy: a is to b as c is to ?
-// Computes: normalize(c * b^(-1) * a) ... but with safe inverse
-// Falls back to additive analogy: normalize(c - b + a) if inverse fails
-pub fn sed_analogy(a: Sedenion, b: Sedenion, c: Sedenion) -> Sedenion with Panic {
-    // Try multiplicative analogy (preferred for non-commutative space)
-    let b_inv = sed_putative_inv(b)
-    let product = sed_mul(b, b_inv)
-    if sed_is_approx_one(product) {
-        // b is invertible: use multiplicative analogy
-        let ratio = sed_mul(a, b_inv)
-        sed_normalize(sed_mul(c, ratio))
-    } else {
-        // b is near zero divisor: fall back to additive
-        let diff = sed_sub(a, b)
-        sed_normalize(sed_add(c, diff))
+fn ACT_RELU() -> i64 { 0 }
+fn ACT_GELU() -> i64 { 1 }
+fn ACT_SIGMOID() -> i64 { 2 }
+fn ACT_TANH() -> i64 { 3 }
+
+fn sed_exp(x: f64) -> f64 {
+    var result = 1.0
+    var term = 1.0
+    var n: i64 = 1
+    while n < 30 {
+        term = term * x / n as f64
+        result = result + term
+        n = n + 1
     }
+    result
+}
+
+fn sed_relu(x: f64) -> f64 {
+    if x > 0.0 { x } else { 0.0 }
+}
+
+fn sed_sigmoid(x: f64) -> f64 {
+    1.0 / (1.0 + sed_exp(0.0 - x))
+}
+
+fn sed_tanh(x: f64) -> f64 {
+    let ep = sed_exp(x)
+    let en = sed_exp(0.0 - x)
+    (ep - en) / (ep + en)
+}
+
+fn sed_apply_activation(x: f64, act: i64) -> f64 {
+    if act == 0 { return sed_relu(x) }
+    if act == 2 { return sed_sigmoid(x) }
+    if act == 3 { return sed_tanh(x) }
+    x
+}
+
+// ============================================================================
+// MLP
+// ============================================================================
+
+struct SedenionMLP {
+    weights: [f64; 4096],
+    biases: [f64; 256],
+    layer_sizes: [i64; 8],
+    n_layers: i64,
+    activation: i64,
+    weight_count: i64
+}
+
+fn sedenion_mlp_new(layer_sizes: &[i64; 8], n_layers: i64, act: i64) -> SedenionMLP {
+    var w = [0.0; 4096]
+    var b = [0.0; 256]
+    var wc: i64 = 0
+    var bc: i64 = 0
+    var ls = [0; 8]
+    var k: i64 = 0
+    while k < 8 {
+        ls[k] = layer_sizes[k]
+        k = k + 1
+    }
+    // Count weights: layer_sizes[i] * layer_sizes[i+1] for each adjacent pair
+    var i: i64 = 0
+    while i < n_layers - 1 {
+        let fan_in = layer_sizes[i]
+        let fan_out = layer_sizes[i + 1]
+        // Xavier init scale
+        let scale = sed_sqrt(2.0 / (fan_in + fan_out) as f64)
+        var j: i64 = 0
+        while j < fan_in * fan_out {
+            if wc < 4096 {
+                w[wc] = scale * 0.5
+            }
+            wc = wc + 1
+            j = j + 1
+        }
+        // Biases for this layer
+        var bj: i64 = 0
+        while bj < fan_out {
+            if bc < 256 {
+                b[bc] = 0.0
+            }
+            bc = bc + 1
+            bj = bj + 1
+        }
+        i = i + 1
+    }
+    SedenionMLP {
+        weights: w,
+        biases: b,
+        layer_sizes: ls,
+        n_layers: n_layers,
+        activation: act,
+        weight_count: wc
+    }
+}
+
+fn sedenion_mlp_param_count(model: &SedenionMLP) -> i64 {
+    var total: i64 = 0
+    var i: i64 = 0
+    while i < model.n_layers - 1 {
+        let fan_in = model.layer_sizes[i]
+        let fan_out = model.layer_sizes[i + 1]
+        total = total + fan_in * fan_out + fan_out
+        i = i + 1
+    }
+    total
+}
+
+fn sedenion_mlp_vc_dim(model: &SedenionMLP) -> i64 {
+    sedenion_mlp_param_count(model)
+}
+
+fn sedenion_mlp_forward(model: &SedenionMLP, input: &[f64; 256], output: &![f64; 256], out_len: &!i64) with Mut, Div, Panic {
+    // Copy input to working buffer
+    var buf_a = [0.0; 256]
+    var buf_b = [0.0; 256]
+    var cur_len = model.layer_sizes[0]
+    var k: i64 = 0
+    while k < cur_len {
+        buf_a[k] = input[k]
+        k = k + 1
+    }
+
+    var w_offset: i64 = 0
+    var b_offset: i64 = 0
+    var layer: i64 = 0
+    while layer < model.n_layers - 1 {
+        let fan_in = model.layer_sizes[layer]
+        let fan_out = model.layer_sizes[layer + 1]
+        // Matrix multiply: buf_b[j] = sum_i(weights[w_offset + i*fan_out + j] * buf_a[i]) + biases[b_offset + j]
+        var j: i64 = 0
+        while j < fan_out {
+            var acc = 0.0
+            var i: i64 = 0
+            while i < fan_in {
+                let widx = w_offset + i * fan_out + j
+                if widx < 4096 {
+                    acc = acc + model.weights[widx] * buf_a[i]
+                }
+                i = i + 1
+            }
+            let bidx = b_offset + j
+            if bidx < 256 {
+                acc = acc + model.biases[bidx]
+            }
+            // Apply activation (not on last layer)
+            if layer < model.n_layers - 2 {
+                buf_b[j] = sed_apply_activation(acc, model.activation)
+            } else {
+                buf_b[j] = acc
+            }
+            j = j + 1
+        }
+        // Swap buffers
+        var s: i64 = 0
+        while s < fan_out {
+            buf_a[s] = buf_b[s]
+            s = s + 1
+        }
+        w_offset = w_offset + fan_in * fan_out
+        b_offset = b_offset + fan_out
+        cur_len = fan_out
+        layer = layer + 1
+    }
+
+    // Copy result to output
+    var o: i64 = 0
+    while o < cur_len {
+        output[o] = buf_a[o]
+        o = o + 1
+    }
+    out_len = cur_len
+}
+
+// ============================================================================
+// KNOWLEDGE GRAPH EMBEDDING
+// ============================================================================
+
+struct SedenionKGModel {
+    entity_embeddings: [f64; 4096],
+    relation_embeddings: [f64; 1024],
+    n_entities: i64,
+    n_relations: i64
+}
+
+struct SedAdamOptimizer {
+    lr: f64,
+    beta1: f64,
+    beta2: f64,
+    epsilon: f64,
+    m: [f64; 4096],
+    v: [f64; 4096],
+    t: i64
+}
+
+fn sed_adam_new(lr: f64) -> SedAdamOptimizer {
+    SedAdamOptimizer {
+        lr: lr,
+        beta1: 0.9,
+        beta2: 0.999,
+        epsilon: 0.00000001,
+        m: [0.0; 4096],
+        v: [0.0; 4096],
+        t: 0
+    }
+}
+
+// Get entity embedding as a Sedenion (16 consecutive f64s starting at entity * 16)
+fn sed_kg_get_entity(model: &SedenionKGModel, idx: i64) -> Sedenion {
+    var r = [0.0; 16]
+    let base = idx * 16
+    var i: i64 = 0
+    while i < 16 {
+        if base + i < 4096 {
+            r[i] = model.entity_embeddings[base + i]
+        }
+        i = i + 1
+    }
+    Sedenion { e: r }
+}
+
+// Get relation embedding as a Sedenion
+fn sed_kg_get_relation(model: &SedenionKGModel, idx: i64) -> Sedenion {
+    var r = [0.0; 16]
+    let base = idx * 16
+    var i: i64 = 0
+    while i < 16 {
+        if base + i < 1024 {
+            r[i] = model.relation_embeddings[base + i]
+        }
+        i = i + 1
+    }
+    Sedenion { e: r }
+}
+
+// Cayley scoring: score(h,r,t) = Re(conj(h * r) * t)
+// Uses sedenion multiplication for richer interaction than DistMult
+fn sed_cayley_score(model: &SedenionKGModel, h: i64, r: i64, t: i64) -> f64 {
+    let h_emb = sed_kg_get_entity(model, h)
+    let r_emb = sed_kg_get_relation(model, r)
+    let t_emb = sed_kg_get_entity(model, t)
+    let hr = sed_mul(h_emb, r_emb)
+    let hr_conj = sed_conj(hr)
+    let product = sed_mul(hr_conj, t_emb)
+    product.e[0]
+}
+
+// DistMult scoring: score(h,r,t) = sum_i(h_i * r_i * t_i)
+fn sed_distmult_score(model: &SedenionKGModel, h: i64, r: i64, t: i64) -> f64 {
+    let h_emb = sed_kg_get_entity(model, h)
+    let r_emb = sed_kg_get_relation(model, r)
+    let t_emb = sed_kg_get_entity(model, t)
+    var score = 0.0
+    var i: i64 = 0
+    while i < 16 {
+        score = score + h_emb.e[i] * r_emb.e[i] * t_emb.e[i]
+        i = i + 1
+    }
+    score
+}
+
+// ============================================================================
+// INLINE TESTS
+// ============================================================================
+
+fn sed_abs(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+// Test: e0 is the multiplicative identity
+fn test_sed_mul_identity() -> bool {
+    let one = sed_one()
+    let b3 = sed_basis(3)
+    let r = sed_mul(one, b3)
+    // e0 * e3 = e3
+    sed_abs(r.e[3] - 1.0) < 0.0001
+}
+
+// Test: e_i * e_i = -1 for i > 0
+fn test_sed_mul_basis_sq() -> bool {
+    let e1 = sed_basis(1)
+    let r = sed_mul(e1, e1)
+    // e1 * e1 = -e0
+    sed_abs(r.e[0] + 1.0) < 0.0001
+}
+
+// Test: conjugate negates imaginary parts
+fn test_sed_conj() -> bool {
+    var s = [0.0; 16]
+    s[0] = 1.0
+    s[1] = 2.0
+    s[5] = 3.0
+    let a = Sedenion { e: s }
+    let c = sed_conj(a)
+    let ok1 = sed_abs(c.e[0] - 1.0) < 0.0001
+    let ok2 = sed_abs(c.e[1] + 2.0) < 0.0001
+    let ok3 = sed_abs(c.e[5] + 3.0) < 0.0001
+    if ok1 { if ok2 { ok3 } else { false } } else { false }
+}
+
+// Test: norm of basis vector is 1
+fn test_sed_norm() -> bool {
+    let b7 = sed_basis(7)
+    let n = sed_norm(b7)
+    sed_abs(n - 1.0) < 0.0001
+}
+
+// Test: norm of sum: |e0 + e1|^2 = 2
+fn test_sed_norm_sum() -> bool {
+    let a = sed_add(sed_basis(0), sed_basis(1))
+    let ns = sed_norm_sq(a)
+    sed_abs(ns - 2.0) < 0.0001
+}
+
+// Test: a * conj(a) has real part = norm_sq(a)
+fn test_sed_mul_conj() -> bool {
+    var s = [0.0; 16]
+    s[0] = 1.0
+    s[1] = 2.0
+    s[2] = 3.0
+    let a = Sedenion { e: s }
+    let c = sed_conj(a)
+    let p = sed_mul(a, c)
+    let expected = sed_norm_sq(a)
+    sed_abs(p.e[0] - expected) < 0.001
+}
+
+
+// == Sedenion Embedding Tables & KG Models ==
+// Clean Sounio implementation using base.sio types
+
+fn sed_bilinear_score(model: &SedenionKGModel, h: i64, r: i64, t: i64) -> f64 {
+    // Bilinear score: sum of h_i * r_i * t_i
+    let he = sed_kg_get_entity(model, h)
+    let re = sed_kg_get_relation(model, r)
+    let te = sed_kg_get_entity(model, t)
+    var score = 0.0
+    var i: i64 = 0
+    while i < 16 {
+        score = score + he.c[i as usize] * re.c[i as usize] * te.c[i as usize]
+        i = i + 1
+    }
+    score
+}
+
+fn sed_margin_loss(pos_score: f64, neg_score: f64, margin: f64) -> f64 {
+    let diff = margin - pos_score + neg_score
+    if diff > 0.0 { diff } else { 0.0 }
+}
+
+fn sed_cayley_score_backward(model: &SedenionKGModel, h: i64, r: i64, t: i64) -> Sedenion {
+    // Approximate gradient of Cayley score w.r.t. head embedding
+    let re = sed_kg_get_relation(model, r)
+    let te = sed_kg_get_entity(model, t)
+    let hr = sed_mul(sed_kg_get_entity(model, h), re)
+    sed_sub(hr, te)
+}
+
+fn sed_bilinear_score_backward(model: &SedenionKGModel, h: i64, r: i64, t: i64) -> Sedenion {
+    let re = sed_kg_get_relation(model, r)
+    let te = sed_kg_get_entity(model, t)
+    var grad = sed_zero()
+    var i: i64 = 0
+    while i < 16 {
+        grad.c[i as usize] = re.c[i as usize] * te.c[i as usize]
+        i = i + 1
+    }
+    grad
+}
+
+fn sed_margin_loss_backward(pos_score: f64, neg_score: f64, margin: f64) -> f64 {
+    let diff = margin - pos_score + neg_score
+    if diff > 0.0 { 0.0 - 1.0 } else { 0.0 }
 }

@@ -1,0 +1,221 @@
+// connectivity/mod.sio — Connectivity Analysis (Correlation Matrices)
+//
+// Pearson correlation, partial correlation for functional connectivity.
+// Used in neuroimaging (fMRI), systems biology, and network analysis.
+//
+// References:
+// - Fisher (1921): "On the probable error of a coefficient of correlation"
+// - Marrelec et al. (2006): "Partial correlation for functional brain interactivity"
+
+extern "C" {
+    fn sqrt(x: f64) -> f64;
+    fn fabs(x: f64) -> f64;
+}
+
+fn conn_abs(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+fn conn_sqrt(x: f64) -> f64 {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y
+}
+
+// ============================================================================
+// CONNECTIVITY MATRIX (max 32x32)
+// ============================================================================
+
+pub struct ConnMatrix {
+    data: [f64; 1024],  // Flat storage for up to 32x32 matrix
+    n: i32,             // Number of variables (rows/cols)
+}
+
+pub fn conn_matrix_new(n: i32) -> ConnMatrix {
+    ConnMatrix { data: [0.0; 1024], n: n }
+}
+
+fn conn_matrix_get(m: &ConnMatrix, r: i32, c: i32) -> f64 {
+    m.data[(r * m.n + c) as usize]
+}
+
+// ============================================================================
+// PEARSON CORRELATION
+// ============================================================================
+// r = sum((x_i - mean_x)(y_i - mean_y)) / sqrt(sum((x_i-mx)^2) * sum((y_i-my)^2))
+
+pub fn conn_pearson(x: &[f64; 256], y: &[f64; 256], n: i32) -> f64 {
+    if n < 2 {
+        return 0.0
+    }
+
+    // Compute means
+    var sum_x = 0.0
+    var sum_y = 0.0
+    var i: i32 = 0
+    while i < n {
+        sum_x = sum_x + x[i as usize]
+        sum_y = sum_y + y[i as usize]
+        i = i + 1
+    }
+    let mean_x = sum_x / (n as f64)
+    let mean_y = sum_y / (n as f64)
+
+    // Cross-products and squared deviations
+    var sum_xy = 0.0
+    var sum_xx = 0.0
+    var sum_yy = 0.0
+    i = 0
+    while i < n {
+        let dx = x[i as usize] - mean_x
+        let dy = y[i as usize] - mean_y
+        sum_xy = sum_xy + dx * dy
+        sum_xx = sum_xx + dx * dx
+        sum_yy = sum_yy + dy * dy
+        i = i + 1
+    }
+
+    let denom = conn_sqrt(sum_xx * sum_yy)
+    if denom <= 0.0 {
+        return 0.0
+    }
+
+    sum_xy / denom
+}
+
+// ============================================================================
+// PARTIAL CORRELATION
+// ============================================================================
+// Partial correlation between variables i and j, controlling for all others.
+// Uses the simple two-residual approach for a pair given a conditioning variable.
+//
+// data: flat array [var0_obs0, var0_obs1, ..., var1_obs0, ...]
+//       variable k, observation t = data[k * n_obs + t]
+// n_vars: number of variables
+// n_obs: number of observations
+// i, j: the two variables to correlate
+//
+// Implementation: regress i and j on all other variables, correlate residuals.
+// Simplified: only conditions on one other variable (the one with highest
+// correlation to both) to keep within fixed-array constraints.
+
+pub fn conn_partial(data: &[f64; 4096], n_vars: i32, n_obs: i32, i: i32, j: i32) -> f64 {
+    if n_obs < 3 || n_vars < 2 || i == j {
+        return 0.0
+    }
+
+    // Extract variable i and j into local arrays
+    var xi: [f64; 256] = [0.0; 256]
+    var xj: [f64; 256] = [0.0; 256]
+    let cap = if n_obs < 256 { n_obs } else { 256 }
+
+    var t: i32 = 0
+    while t < cap {
+        xi[t as usize] = data[(i * n_obs + t) as usize]
+        xj[t as usize] = data[(j * n_obs + t) as usize]
+        t = t + 1
+    }
+
+    // If only 2 variables, just return Pearson
+    if n_vars == 2 {
+        return conn_pearson(&xi, &xj, cap)
+    }
+
+    // Find best conditioning variable (highest mean absolute correlation)
+    var best_k: i32 = 0
+    var best_score = 0.0 - 1.0
+    var k: i32 = 0
+    while k < n_vars {
+        if k != i && k != j {
+            var xk: [f64; 256] = [0.0; 256]
+            t = 0
+            while t < cap {
+                xk[t as usize] = data[(k * n_obs + t) as usize]
+                t = t + 1
+            }
+            let ri = conn_abs(conn_pearson(&xi, &xk, cap))
+            let rj = conn_abs(conn_pearson(&xj, &xk, cap))
+            let score = ri + rj
+            if score > best_score {
+                best_score = score
+                best_k = k
+            }
+        }
+        k = k + 1
+    }
+
+    // Extract conditioning variable
+    var xc: [f64; 256] = [0.0; 256]
+    t = 0
+    while t < cap {
+        xc[t as usize] = data[(best_k * n_obs + t) as usize]
+        t = t + 1
+    }
+
+    // Compute Pearson correlations r_ik, r_jk, r_ij
+    let r_ij = conn_pearson(&xi, &xj, cap)
+    let r_ik = conn_pearson(&xi, &xc, cap)
+    let r_jk = conn_pearson(&xj, &xc, cap)
+
+    // Partial correlation formula:
+    // r_ij.k = (r_ij - r_ik * r_jk) / sqrt((1 - r_ik^2)(1 - r_jk^2))
+    let num = r_ij - r_ik * r_jk
+    let denom = conn_sqrt((1.0 - r_ik * r_ik) * (1.0 - r_jk * r_jk))
+    if denom <= 0.0 {
+        return 0.0
+    }
+
+    num / denom
+}
+
+// ============================================================================
+// INLINE TESTS
+// ============================================================================
+
+//@ run-pass
+fn test_pearson_perfect() -> i32 {
+    var x: [f64; 256] = [0.0; 256]
+    var y: [f64; 256] = [0.0; 256]
+    var i: i32 = 0
+    while i < 10 {
+        x[i as usize] = (i as f64)
+        y[i as usize] = (i as f64) * 2.0 + 1.0
+        i = i + 1
+    }
+    let r = conn_pearson(&x, &y, 10)
+    // Perfect positive correlation
+    if conn_abs(r - 1.0) > 0.001 { return 1 }
+    0
+}
+
+//@ run-pass
+fn test_pearson_negative() -> i32 {
+    var x: [f64; 256] = [0.0; 256]
+    var y: [f64; 256] = [0.0; 256]
+    var i: i32 = 0
+    while i < 10 {
+        x[i as usize] = (i as f64)
+        y[i as usize] = 0.0 - (i as f64)
+        i = i + 1
+    }
+    let r = conn_pearson(&x, &y, 10)
+    if conn_abs(r + 1.0) > 0.001 { return 1 }
+    0
+}
+
+//@ run-pass
+fn test_conn_matrix_new() -> i32 {
+    let m = conn_matrix_new(5)
+    if m.n != 5 { return 1 }
+    0
+}

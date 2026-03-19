@@ -1,1 +1,132 @@
-//! prop (disabled)
+//! stdlib/test/prop.sio — Property-based testing
+//!
+//! Lightweight property testing using an LCG PRNG.
+//! Generates random values and tests properties over them.
+
+// ============================================================================
+// PRNG — Linear Congruential Generator
+// ============================================================================
+
+struct PropRng {
+    state: i64,
+}
+
+fn prop_rng_new(seed: i64) -> PropRng {
+    // Ensure non-zero state
+    let s = if seed == 0 { 2862933555777941757 } else { seed }
+    PropRng { state: s }
+}
+
+fn prop_rng_next(rng: PropRng) -> PropRng {
+    // LCG: state = state * 6364136223846793005 + 1442695040888963407
+    // These are Knuth's LCG constants
+    let new_state = rng.state * 6364136223846793005 + 1442695040888963407
+    PropRng { state: new_state }
+}
+
+fn prop_rng_value(rng: PropRng) -> i64 {
+    return rng.state
+}
+
+fn prop_rng_range(rng: PropRng, lo: i64, hi: i64) -> PropRng with Div, Panic {
+    let next = prop_rng_next(rng)
+    // We need the value in [lo, hi] but we store it externally
+    // Return advanced rng; caller extracts with prop_range_value
+    return next
+}
+
+// Extract a value in [lo, hi] from current rng state
+fn prop_range_value(rng: PropRng, lo: i64, hi: i64) -> i64 with Mut, Div, Panic {
+    if hi <= lo { return lo }
+    let range = hi - lo + 1
+    // Use absolute value of state
+    var raw = rng.state
+    if raw < 0 { raw = 0 - raw }
+    if raw < 0 { raw = 1 }
+    let val = lo + (raw % range)
+    return val
+}
+
+// ============================================================================
+// PROPERTY CHECKING
+// ============================================================================
+
+// Property function IDs (callers define what each ID means)
+fn PROP_ADD_COMMUTATIVE() -> i32 { 1 }
+fn PROP_ABS_NON_NEGATIVE() -> i32 { 2 }
+
+// Test commutativity of addition: a + b == b + a
+fn prop_test_add_commutative(a: i64, b: i64) -> bool {
+    (a + b) == (b + a)
+}
+
+// Test abs(x) >= 0 (using i64 manual abs)
+fn prop_test_abs_non_negative(x: i64) -> bool {
+    var v = x
+    if v < 0 { v = 0 - v }
+    // Edge case: i64 min value overflows; skip it
+    if x < 0 && v < 0 { return true }
+    v >= 0
+}
+
+// Run property-based test with given parameters.
+// test_fn_id selects which property to test:
+//   PROP_ADD_COMMUTATIVE (1) — tests a + b == b + a
+//   PROP_ABS_NON_NEGATIVE (2) — tests abs(x) >= 0
+// Returns number of failures.
+fn prop_check_i64(seed: i64, iterations: i32, lo: i64, hi: i64, test_fn_id: i32) -> i32 with Mut, Div, Panic {
+    var rng = prop_rng_new(seed)
+    var failures: i32 = 0
+    var i: i32 = 0
+
+    while i < iterations {
+        rng = prop_rng_next(rng)
+        let a = prop_range_value(rng, lo, hi)
+        rng = prop_rng_next(rng)
+        let b = prop_range_value(rng, lo, hi)
+
+        var passed = true
+
+        if test_fn_id == 1 {
+            passed = prop_test_add_commutative(a, b)
+        }
+        if test_fn_id == 2 {
+            passed = prop_test_abs_non_negative(a)
+        }
+
+        if !passed {
+            failures = failures + 1
+        }
+
+        i = i + 1
+    }
+
+    return failures
+}
+
+// ============================================================================
+// TEST — property checks
+// ============================================================================
+
+fn prop_test_all() -> i32 with Mut, Div, Panic {
+    // Test addition commutativity over 100 random pairs
+    let fail1 = prop_check_i64(42, 100, -1000, 1000, 1)
+    if fail1 != 0 { return 1 }
+
+    // Test abs non-negative over 100 random values
+    let fail2 = prop_check_i64(99, 100, -1000, 1000, 2)
+    if fail2 != 0 { return 2 }
+
+    // Test with different seed
+    let fail3 = prop_check_i64(12345, 200, -10000, 10000, 1)
+    if fail3 != 0 { return 3 }
+
+    // Verify PRNG is deterministic
+    let r1 = prop_rng_new(42)
+    let r2 = prop_rng_new(42)
+    let r1b = prop_rng_next(r1)
+    let r2b = prop_rng_next(r2)
+    if prop_rng_value(r1b) != prop_rng_value(r2b) { return 4 }
+
+    return 0
+}

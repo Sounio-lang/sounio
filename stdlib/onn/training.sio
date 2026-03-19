@@ -1,1 +1,245 @@
-//! training (disabled)
+// stdlib/onn/training.sio
+//
+// Octonion Neural Network — Training Loop — Sounio
+//
+// Training loop skeleton: forward pass, loss computation, backward step.
+// Uses finite-difference gradient approximation (no autograd).
+
+// ============================================================================
+// Helpers
+// ============================================================================
+
+fn tr_abs(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+fn tr_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i = 0
+    while i < 15 {
+        y = 0.5 * (y + x / y)
+        i = i + 1
+    }
+    y
+}
+
+// ============================================================================
+// Training state
+// ============================================================================
+
+struct TrainState {
+    epoch: i32,
+    step: i32,
+    loss_history: [f64; 256],  // loss at each step
+    n_losses: i32,
+}
+
+fn train_state_new() -> TrainState {
+    TrainState {
+        epoch: 0,
+        step: 0,
+        loss_history: [0.0; 256],
+        n_losses: 0,
+    }
+}
+
+fn train_record_loss(ts: &!TrainState, loss: f64) with Mut, Panic {
+    if ts.n_losses < 256 {
+        ts.loss_history[ts.n_losses] = loss
+        ts.n_losses = ts.n_losses + 1
+    }
+    ts.step = ts.step + 1
+}
+
+// ============================================================================
+// MSE Loss over octonion outputs
+// pred, target: [n * 8] octonion arrays
+// n: number of octonion elements
+// ============================================================================
+
+fn onn_mse_loss(pred: &[f64; 256], target: &[f64; 256], n: i32) -> f64 with Mut, Div, Panic {
+    let total = n * 8
+    if total <= 0 { return 0.0 }
+    var count = total
+    if count > 256 { count = 256 }
+    var sum = 0.0
+    var i = 0
+    while i < count {
+        let diff = pred[i] - target[i]
+        sum = sum + diff * diff
+        i = i + 1
+    }
+    sum / count as f64
+}
+
+// ============================================================================
+// MSE gradient: d(MSE)/d(pred) = 2*(pred - target) / n
+// ============================================================================
+
+fn onn_mse_grad(pred: &[f64; 256], target: &[f64; 256], n: i32, grad: &![f64; 256]) with Mut, Div, Panic {
+    let total = n * 8
+    if total <= 0 { return }
+    var count = total
+    if count > 256 { count = 256 }
+    let scale = 2.0 / count as f64
+    var i = 0
+    while i < count {
+        grad[i] = scale * (pred[i] - target[i])
+        i = i + 1
+    }
+}
+
+// ============================================================================
+// Finite-difference gradient for a single parameter
+// Perturb param by epsilon, measure loss change
+// ============================================================================
+
+fn fd_gradient_single(
+    params: &![f64; 2048],
+    idx: i32,
+    epsilon: f64,
+    input: &[f64; 256],
+    target: &[f64; 256],
+    n_out: i32,
+    forward_fn_id: i32
+) -> f64 with Mut, Div, Panic {
+    // Simple central difference: (L(p+eps) - L(p-eps)) / (2*eps)
+    // Since we can't pass function pointers, we compute a simple linear model:
+    // output[i] = sum(params[j] * input[j*8+i]) as a stand-in
+    if epsilon < 1.0e-15 { return 0.0 }
+
+    let orig = params[idx]
+
+    // Forward with +epsilon
+    params[idx] = orig + epsilon
+    var pred_plus: [f64; 256] = [0.0; 256]
+    var i = 0
+    while i < n_out * 8 && i < 256 {
+        pred_plus[i] = params[idx] * input[i]
+        i = i + 1
+    }
+    let loss_plus = onn_mse_loss(&pred_plus, target, n_out)
+
+    // Forward with -epsilon
+    params[idx] = orig - epsilon
+    var pred_minus: [f64; 256] = [0.0; 256]
+    i = 0
+    while i < n_out * 8 && i < 256 {
+        pred_minus[i] = params[idx] * input[i]
+        i = i + 1
+    }
+    let loss_minus = onn_mse_loss(&pred_minus, target, n_out)
+
+    // Restore
+    params[idx] = orig
+
+    (loss_plus - loss_minus) / (2.0 * epsilon)
+}
+
+// ============================================================================
+// Simple training step: compute gradients via finite differences, update
+// ============================================================================
+
+fn onn_train_step_fd(
+    params: &![f64; 2048],
+    n_params: i32,
+    lr: f64,
+    epsilon: f64,
+    input: &[f64; 256],
+    target: &[f64; 256],
+    n_out: i32
+) -> f64 with Mut, Div, Panic {
+    // Compute current loss
+    var pred: [f64; 256] = [0.0; 256]
+    var i = 0
+    while i < n_out * 8 && i < 256 {
+        // Simple linear model: pred[i] = params[0] * input[i]
+        pred[i] = params[0] * input[i]
+        i = i + 1
+    }
+    let loss = onn_mse_loss(&pred, target, n_out)
+
+    // Gradient and update for each parameter
+    var p = 0
+    while p < n_params && p < 2048 {
+        let grad = fd_gradient_single(params, p, epsilon, input, target, n_out, 0)
+        params[p] = params[p] - lr * grad
+        p = p + 1
+    }
+
+    loss
+}
+
+// ============================================================================
+// Run training for n_epochs
+// ============================================================================
+
+fn onn_train_loop(
+    params: &![f64; 2048],
+    n_params: i32,
+    lr: f64,
+    n_epochs: i32,
+    input: &[f64; 256],
+    target: &[f64; 256],
+    n_out: i32,
+    state: &!TrainState
+) with Mut, Div, Panic {
+    var epoch = 0
+    while epoch < n_epochs {
+        let loss = onn_train_step_fd(params, n_params, lr, 1.0e-5, input, target, n_out)
+        train_record_loss(state, loss)
+        state.epoch = epoch + 1
+        epoch = epoch + 1
+    }
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+fn test_mse_zero_diff() -> bool with Mut, Div, Panic {
+    var a: [f64; 256] = [0.0; 256]
+    a[0] = 1.0
+    a[1] = 2.0
+    var b: [f64; 256] = [0.0; 256]
+    b[0] = 1.0
+    b[1] = 2.0
+    let loss = onn_mse_loss(&a, &b, 1)
+    tr_abs(loss) < 0.01
+}
+
+fn test_mse_nonzero() -> bool with Mut, Div, Panic {
+    var a: [f64; 256] = [0.0; 256]
+    a[0] = 1.0
+    var b: [f64; 256] = [0.0; 256]
+    b[0] = 2.0
+    let loss = onn_mse_loss(&a, &b, 1)
+    // (1-2)^2 / 8 = 0.125
+    tr_abs(loss - 0.125) < 0.01
+}
+
+fn test_training_loss_decreases() -> bool with Mut, Div, Panic {
+    // Simple 1-param linear model: target = 3.0 * input
+    var params: [f64; 2048] = [0.0; 2048]
+    params[0] = 1.0   // Start far from optimal
+
+    var input: [f64; 256] = [0.0; 256]
+    input[0] = 1.0
+
+    var target: [f64; 256] = [0.0; 256]
+    target[0] = 3.0
+
+    var state = train_state_new()
+    onn_train_loop(&!params, 1, 0.01, 10, &input, &target, 1, &!state)
+
+    // Loss should decrease
+    state.n_losses >= 2 && state.loss_history[0] > state.loss_history[state.n_losses - 1]
+}
+
+fn test_train_state_tracking() -> bool with Mut, Panic {
+    var state = train_state_new()
+    train_record_loss(&!state, 1.5)
+    train_record_loss(&!state, 0.8)
+    state.n_losses == 2 && tr_abs(state.loss_history[0] - 1.5) < 0.01
+}

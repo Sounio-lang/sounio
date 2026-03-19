@@ -1,1 +1,98 @@
-//! conv (disabled)
+// stdlib/qnn/conv.sio — Quaternion 1D convolution layer
+//
+// 1D convolution for quaternion-valued signals (valid padding, stride=1).
+// Reference: Zhu et al., "Quaternion Convolutional Neural Networks" ECCV 2018
+
+// ============================================================================
+// TYPES
+// ============================================================================
+
+struct QConvLayer {
+    kernel: [f64; 256],
+    kernel_size: i32,
+    in_channels: i32,
+    out_channels: i32
+}
+
+fn qconv_new(kernel_size: i32, in_channels: i32, out_channels: i32) -> QConvLayer {
+    QConvLayer {
+        kernel: [0.0; 256],
+        kernel_size: kernel_size,
+        in_channels: in_channels,
+        out_channels: out_channels
+    }
+}
+
+// ============================================================================
+// FORWARD PASS
+// ============================================================================
+
+// 1D convolution with valid padding.
+// output[oc * out_len + t] = sum over ic, k of kernel[...] * input[ic * in_len + t + k]
+fn qconv_forward_1d(layer: &QConvLayer, input: &[f64; 256], in_len: i32, out: &![f64; 256], out_len: &!i32) with Mut, Div, Panic {
+    let ks = layer.kernel_size
+    let ic = layer.in_channels
+    let oc = layer.out_channels
+
+    if ks < 1 { *out_len = 0; return }
+    if in_len < ks { *out_len = 0; return }
+
+    let o_len = in_len - ks + 1
+    if o_len * oc > 256 { *out_len = 0; return }
+
+    // Zero output
+    var idx: i32 = 0
+    while idx < 256 {
+        out[idx] = 0.0
+        idx = idx + 1
+    }
+
+    // Convolution
+    var o: i32 = 0
+    while o < oc {
+        var t: i32 = 0
+        while t < o_len {
+            var acc = 0.0
+            var c: i32 = 0
+            while c < ic {
+                var k: i32 = 0
+                while k < ks {
+                    let ki = o * ic * ks + c * ks + k
+                    let ii = c * in_len + t + k
+                    if ki < 256 {
+                        if ii < 256 {
+                            acc = acc + layer.kernel[ki] * input[ii]
+                        }
+                    }
+                    k = k + 1
+                }
+                c = c + 1
+            }
+            let oi = o * o_len + t
+            if oi < 256 {
+                out[oi] = acc
+            }
+            t = t + 1
+        }
+        o = o + 1
+    }
+    *out_len = o_len * oc
+}
+
+// ============================================================================
+// TESTS
+// ============================================================================
+
+fn qnn_conv_abs(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+fn test_qconv_new() -> bool {
+    let c = qconv_new(3, 1, 1)
+    c.kernel_size == 3
+}
+
+fn test_qconv_channels() -> bool {
+    let c = qconv_new(5, 2, 4)
+    c.in_channels == 2
+}

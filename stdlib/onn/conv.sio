@@ -1,1 +1,172 @@
-//! conv (disabled)
+// stdlib/onn/conv.sio
+//
+// Octonion Neural Network — 1D Convolution — Sounio
+//
+// 1D octonion convolution layer for sequence processing.
+// Each position has 8 octonion components.
+// Max sequence length: 32 positions (32 * 8 = 256 values)
+// Max kernel size: 8
+
+// ============================================================================
+// Helpers
+// ============================================================================
+
+fn conv_abs(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+// Octonion multiplication (inline for conv)
+fn conv_oct_mul(a: &[f64; 8], b: &[f64; 8], out: &![f64; 8]) with Mut, Div, Panic {
+    out[0] = a[0]*b[0] - a[1]*b[1] - a[2]*b[2] - a[3]*b[3] - a[4]*b[4] - a[5]*b[5] - a[6]*b[6] - a[7]*b[7]
+    out[1] = a[0]*b[1] + a[1]*b[0] + a[2]*b[3] - a[3]*b[2] + a[4]*b[5] - a[5]*b[4] - a[6]*b[7] + a[7]*b[6]
+    out[2] = a[0]*b[2] - a[1]*b[3] + a[2]*b[0] + a[3]*b[1] + a[4]*b[6] + a[5]*b[7] - a[6]*b[4] - a[7]*b[5]
+    out[3] = a[0]*b[3] + a[1]*b[2] - a[2]*b[1] + a[3]*b[0] + a[4]*b[7] - a[5]*b[6] + a[6]*b[5] - a[7]*b[4]
+    out[4] = a[0]*b[4] - a[1]*b[5] - a[2]*b[6] - a[3]*b[7] + a[4]*b[0] + a[5]*b[1] + a[6]*b[2] + a[7]*b[3]
+    out[5] = a[0]*b[5] + a[1]*b[4] - a[2]*b[7] + a[3]*b[6] - a[4]*b[1] + a[5]*b[0] - a[6]*b[3] + a[7]*b[2]
+    out[6] = a[0]*b[6] + a[1]*b[7] + a[2]*b[4] - a[3]*b[5] - a[4]*b[2] + a[5]*b[3] + a[6]*b[0] - a[7]*b[1]
+    out[7] = a[0]*b[7] - a[1]*b[6] + a[2]*b[5] + a[3]*b[4] - a[4]*b[3] - a[5]*b[2] + a[6]*b[1] + a[7]*b[0]
+}
+
+// ============================================================================
+// 1D Octonion Convolution Layer
+// kernel: conv weights, kernel[k_pos * 8 + comp]
+// bias: octonion bias, bias[comp]
+// kernel_size: number of positions in kernel (max 8)
+// ============================================================================
+
+struct OnnConv1d {
+    kernel: [f64; 64],    // kernel_size * 8 components (max kernel_size=8)
+    bias: [f64; 8],       // octonion bias
+    kernel_size: i32,     // kernel width
+}
+
+fn onn_conv1d_new(kernel_size: i32) -> OnnConv1d {
+    OnnConv1d {
+        kernel: [0.0; 64],
+        bias: [0.0; 8],
+        kernel_size: kernel_size,
+    }
+}
+
+fn onn_conv1d_init(layer: &!OnnConv1d, scale: f64) with Mut, Div, Panic {
+    var i = 0
+    let total = layer.kernel_size * 8
+    while i < total && i < 64 {
+        let v = ((i % 13) - 6) as f64 / 6.0
+        layer.kernel[i] = scale * v
+        i = i + 1
+    }
+}
+
+// ============================================================================
+// Forward pass: valid convolution (no padding)
+// input: [seq_len * 8] octonion sequence
+// output: [(seq_len - kernel_size + 1) * 8] output sequence
+// seq_len: number of input positions
+// Returns: number of output positions
+// ============================================================================
+
+fn onn_conv1d_forward(
+    layer: &OnnConv1d,
+    input: &[f64; 256],
+    seq_len: i32,
+    output: &![f64; 256]
+) -> i32 with Mut, Div, Panic {
+    let out_len = seq_len - layer.kernel_size + 1
+    if out_len <= 0 { return 0 }
+
+    var pos = 0
+    while pos < out_len && pos * 8 < 256 {
+        // Initialize with bias
+        var c = 0
+        while c < 8 {
+            let oidx = pos * 8 + c
+            if oidx < 256 {
+                output[oidx] = layer.bias[c]
+            }
+            c = c + 1
+        }
+
+        // Convolve: sum over kernel positions
+        var k = 0
+        while k < layer.kernel_size {
+            let in_pos = pos + k
+
+            // Extract kernel octonion at position k
+            var kern: [f64; 8] = [0.0; 8]
+            var kc = 0
+            while kc < 8 {
+                let kidx = k * 8 + kc
+                if kidx < 64 {
+                    kern[kc] = layer.kernel[kidx]
+                }
+                kc = kc + 1
+            }
+
+            // Extract input octonion at position in_pos
+            var inp: [f64; 8] = [0.0; 8]
+            var ic = 0
+            while ic < 8 {
+                let iidx = in_pos * 8 + ic
+                if iidx < 256 {
+                    inp[ic] = input[iidx]
+                }
+                ic = ic + 1
+            }
+
+            // Octonion multiply
+            var prod: [f64; 8] = [0.0; 8]
+            conv_oct_mul(&kern, &inp, &!prod)
+
+            // Accumulate
+            c = 0
+            while c < 8 {
+                let oidx = pos * 8 + c
+                if oidx < 256 {
+                    output[oidx] = output[oidx] + prod[c]
+                }
+                c = c + 1
+            }
+
+            k = k + 1
+        }
+
+        pos = pos + 1
+    }
+    out_len
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+fn test_conv1d_output_length() -> bool with Mut, Div, Panic {
+    let layer = onn_conv1d_new(3)
+    var input: [f64; 256] = [0.0; 256]
+    var output: [f64; 256] = [0.0; 256]
+    // seq_len=10, kernel=3 => output=8
+    let out_len = onn_conv1d_forward(&layer, &input, 10, &!output)
+    out_len == 8
+}
+
+fn test_conv1d_zero_kernel() -> bool with Mut, Div, Panic {
+    // Zero kernel + zero bias => zero output
+    let layer = onn_conv1d_new(3)
+    var input: [f64; 256] = [0.0; 256]
+    input[0] = 1.0
+    input[8] = 2.0
+    var output: [f64; 256] = [0.0; 256]
+    let out_len = onn_conv1d_forward(&layer, &input, 5, &!output)
+    conv_abs(output[0]) < 0.01 && out_len == 3
+}
+
+fn test_conv1d_bias_only() -> bool with Mut, Div, Panic {
+    // Zero kernel, nonzero bias
+    var layer = onn_conv1d_new(1)
+    layer.bias[0] = 7.0
+    var input: [f64; 256] = [0.0; 256]
+    var output: [f64; 256] = [0.0; 256]
+    let out_len = onn_conv1d_forward(&layer, &input, 4, &!output)
+    // Each output position should have bias[0] = 7.0
+    conv_abs(output[0] - 7.0) < 0.01 && conv_abs(output[8] - 7.0) < 0.01 && out_len == 4
+}

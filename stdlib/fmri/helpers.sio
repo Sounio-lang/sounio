@@ -1,0 +1,218 @@
+// stdlib/fmri/helpers.sio — fMRI Math Helpers
+//
+// Math utilities and types for fMRI preprocessing and connectivity analysis.
+//
+// References:
+// - Fisher (1921) "On the probable error of a coefficient of correlation"
+// - Power et al. (2012) "Spurious but systematic correlations..."
+
+// ============================================================================
+// MATH HELPERS
+// ============================================================================
+
+fn fmri_sqrt(x: f64) -> f64 {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i: i64 = 0
+    while i < 15 {
+        y = (y + x / y) / 2.0
+        i = i + 1
+    }
+    y
+}
+
+fn fmri_abs(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+fn fmri_exp(x: f64) -> f64 {
+    // Handle overflow/underflow
+    if x > 700.0 { return fmri_exp(350.0) * fmri_exp(x - 350.0) }
+    if x < -700.0 { return 0.0 }
+    var result = 1.0
+    var term = 1.0
+    var n: i64 = 1
+    while n < 30 {
+        term = term * x / n as f64
+        result = result + term
+        n = n + 1
+    }
+    result
+}
+
+fn fmri_log(x: f64) -> f64 {
+    // Natural logarithm via Newton's method on y where exp(y) = x
+    if x <= 0.0 { return 0.0 - 1000.0 }
+    // Initial guess using range reduction
+    var y = 0.0
+    var xr = x
+    // Bring x into [0.5, 2] range by factoring out powers of e
+    while xr > 2.0 {
+        xr = xr / 2.718281828459045
+        y = y + 1.0
+    }
+    while xr < 0.5 {
+        xr = xr * 2.718281828459045
+        y = y - 1.0
+    }
+    // Newton: y_{n+1} = y_n + (x - exp(y_n)) / exp(y_n)
+    // Start with series approximation for xr near 1
+    y = y + (xr - 1.0)
+    var i: i64 = 0
+    while i < 15 {
+        let ey = fmri_exp(y)
+        if ey > 0.0 {
+            y = y + (x - ey) / ey
+        }
+        i = i + 1
+    }
+    y
+}
+
+// ============================================================================
+// FISHER Z TRANSFORM
+// ============================================================================
+
+// Fisher Z transform: z = 0.5 * ln((1+r)/(1-r))  (arctanh)
+fn fisher_z(r: f64) -> f64 {
+    let rc = if r > 0.9999 { 0.9999 } else if r < -0.9999 { -0.9999 } else { r }
+    0.5 * fmri_log((1.0 + rc) / (1.0 - rc))
+}
+
+// Inverse Fisher Z: r = (exp(2z)-1)/(exp(2z)+1)  (tanh)
+fn fisher_z_inv(z: f64) -> f64 {
+    let e2z = fmri_exp(2.0 * z)
+    (e2z - 1.0) / (e2z + 1.0)
+}
+
+// Standard error of Fisher Z: SE = 1/sqrt(n-3)
+fn fisher_z_se(n: i64) -> f64 {
+    if n > 3 {
+        1.0 / fmri_sqrt((n - 3) as f64)
+    } else {
+        1.0
+    }
+}
+
+// ============================================================================
+// EPISTEMIC STATUS
+// ============================================================================
+
+struct EpistemicStatus {
+    valid: i64,
+    confidence: f64,
+    n_obs: i64
+}
+
+fn epistemic_status_new(valid: i64, confidence: f64, n: i64) -> EpistemicStatus {
+    EpistemicStatus {
+        valid: valid,
+        confidence: confidence,
+        n_obs: n
+    }
+}
+
+fn epistemic_is_valid(s: EpistemicStatus) -> bool {
+    s.valid == 1
+}
+
+// ============================================================================
+// MOTION PARAMETERS
+// ============================================================================
+
+struct MotionParams6 {
+    tx: f64,
+    ty: f64,
+    tz: f64,
+    rx: f64,
+    ry: f64,
+    rz: f64
+}
+
+fn motion_params_zero() -> MotionParams6 {
+    MotionParams6 {
+        tx: 0.0,
+        ty: 0.0,
+        tz: 0.0,
+        rx: 0.0,
+        ry: 0.0,
+        rz: 0.0
+    }
+}
+
+fn motion_magnitude(m: MotionParams6) -> f64 {
+    fmri_sqrt(
+        m.tx * m.tx + m.ty * m.ty + m.tz * m.tz +
+        m.rx * m.rx + m.ry * m.ry + m.rz * m.rz
+    )
+}
+
+// ============================================================================
+// INLINE TESTS
+// ============================================================================
+
+// Test: fisher_z round-trip: fisher_z_inv(fisher_z(r)) ≈ r
+fn test_fisher_z_roundtrip() -> bool {
+    let r = 0.75
+    let z = fisher_z(r)
+    let r2 = fisher_z_inv(z)
+    fmri_abs(r2 - r) < 0.001
+}
+
+// Test: fisher_z(0) = 0
+fn test_fisher_z_zero() -> bool {
+    let z = fisher_z(0.0)
+    fmri_abs(z) < 0.001
+}
+
+// Test: fisher_z_inv(0) = 0
+fn test_fisher_z_inv_zero() -> bool {
+    let r = fisher_z_inv(0.0)
+    fmri_abs(r) < 0.001
+}
+
+// Test: motion_magnitude of zero motion is 0
+fn test_motion_zero() -> bool {
+    let m = motion_params_zero()
+    let mag = motion_magnitude(m)
+    fmri_abs(mag) < 0.0001
+}
+
+// Test: motion_magnitude of unit translation
+fn test_motion_unit() -> bool {
+    let m = MotionParams6 {
+        tx: 1.0,
+        ty: 0.0,
+        tz: 0.0,
+        rx: 0.0,
+        ry: 0.0,
+        rz: 0.0
+    }
+    let mag = motion_magnitude(m)
+    fmri_abs(mag - 1.0) < 0.0001
+}
+
+// Test: fisher_z_se decreases with sample size
+fn test_fisher_z_se_decreasing() -> bool {
+    let se1 = fisher_z_se(10)
+    let se2 = fisher_z_se(100)
+    se2 < se1
+}
+
+// Test: fmri_exp(0) = 1
+fn test_fmri_exp_zero() -> bool {
+    fmri_abs(fmri_exp(0.0) - 1.0) < 0.0001
+}
+
+// Test: fmri_log(e) ≈ 1
+fn test_fmri_log_e() -> bool {
+    let e = 2.718281828459045
+    fmri_abs(fmri_log(e) - 1.0) < 0.001
+}
+
+// Test: fmri_log(exp(x)) ≈ x round-trip
+fn test_log_exp_roundtrip() -> bool {
+    let x = 2.5
+    let r = fmri_log(fmri_exp(x))
+    fmri_abs(r - x) < 0.01
+}

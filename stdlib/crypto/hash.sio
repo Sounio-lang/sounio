@@ -1,1 +1,291 @@
-//! hash (disabled)
+//! stdlib/crypto/hash.sio — SHA-256 (FIPS 180-4)
+//!
+//! Pure Sounio implementation. Fixed arrays only, no heap.
+//!
+//! References:
+//!   FIPS 180-4 — Secure Hash Standard (SHA-256), NIST, 2015
+//!
+//! NOTE: All hash state words are 32-bit unsigned values stored in i64.
+//!       Every arithmetic result is masked with 0xFFFFFFFF to enforce
+//!       32-bit wrap-around on Sounio's 64-bit signed i64.
+
+// ============================================================================
+// TYPES
+// ============================================================================
+
+struct Sha256State {
+    h: [i64; 8],
+    block: [u8; 64],
+    block_len: i32,
+    total_len: i64,
+}
+
+// ============================================================================
+// FIPS 180-4 section 4.2.2 — K constants
+// First 32 bits of fractional parts of cube roots of first 64 primes.
+// ============================================================================
+
+fn sha256_k_table() -> [i64; 64] {
+    let k: [i64; 64] = [
+        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5,
+        0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+        0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3,
+        0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+        0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc,
+        0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+        0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
+        0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+        0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13,
+        0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+        0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3,
+        0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+        0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5,
+        0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+        0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208,
+        0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2
+    ]
+    return k
+}
+
+// ============================================================================
+// BIT OPERATION HELPERS
+// ============================================================================
+
+fn hash_rotr32(x: i64, n: i32) -> i64 {
+    let xm = x & 0xFFFFFFFF
+    let right = (xm >> n) & 0xFFFFFFFF
+    let left  = (xm << (32 - n)) & 0xFFFFFFFF
+    return (left | right) & 0xFFFFFFFF
+}
+
+fn hash_shr32(x: i64, n: i32) -> i64 {
+    return (x & 0xFFFFFFFF) >> n
+}
+
+// ============================================================================
+// FIPS 180-4 section 4.1.2 — Boolean functions
+// ============================================================================
+
+fn hash_ch(x: i64, y: i64, z: i64) -> i64 {
+    return ((x & y) ^ ((x ^ 0xFFFFFFFF) & 0xFFFFFFFF & z)) & 0xFFFFFFFF
+}
+
+fn hash_maj(x: i64, y: i64, z: i64) -> i64 {
+    return ((x & y) ^ (x & z) ^ (y & z)) & 0xFFFFFFFF
+}
+
+fn hash_sigma0(x: i64) -> i64 {
+    return (hash_rotr32(x, 2) ^ hash_rotr32(x, 13) ^ hash_rotr32(x, 22)) & 0xFFFFFFFF
+}
+
+fn hash_sigma1(x: i64) -> i64 {
+    return (hash_rotr32(x, 6) ^ hash_rotr32(x, 11) ^ hash_rotr32(x, 25)) & 0xFFFFFFFF
+}
+
+fn hash_gamma0(x: i64) -> i64 {
+    return (hash_rotr32(x, 7) ^ hash_rotr32(x, 18) ^ hash_shr32(x, 3)) & 0xFFFFFFFF
+}
+
+fn hash_gamma1(x: i64) -> i64 {
+    return (hash_rotr32(x, 17) ^ hash_rotr32(x, 19) ^ hash_shr32(x, 10)) & 0xFFFFFFFF
+}
+
+// ============================================================================
+// BLOCK COMPRESSION — FIPS 180-4 section 6.2.2
+// ============================================================================
+
+fn sha256_compress(state: &![i64; 8], block: &[u8; 64]) with Mut, Panic, Div {
+    let k = sha256_k_table()
+
+    // Message schedule W[0..63]
+    var w: [i64; 64] = [0; 64]
+
+    // W[0..15]: big-endian 32-bit words from block bytes
+    var i: i32 = 0
+    while i < 16 {
+        let b0 = block[i * 4 + 0] as i64
+        let b1 = block[i * 4 + 1] as i64
+        let b2 = block[i * 4 + 2] as i64
+        let b3 = block[i * 4 + 3] as i64
+        w[i] = ((b0 << 24) | (b1 << 16) | (b2 << 8) | b3) & 0xFFFFFFFF
+        i = i + 1
+    }
+
+    // W[16..63]
+    var t: i32 = 16
+    while t < 64 {
+        let g1 = hash_gamma1(w[t - 2])
+        let g0 = hash_gamma0(w[t - 15])
+        w[t] = (g1 + w[t - 7] + g0 + w[t - 16]) & 0xFFFFFFFF
+        t = t + 1
+    }
+
+    // Working variables
+    var a = state[0]
+    var b = state[1]
+    var c = state[2]
+    var d = state[3]
+    var e = state[4]
+    var f = state[5]
+    var g = state[6]
+    var hh = state[7]
+
+    // 64 rounds
+    var r: i32 = 0
+    while r < 64 {
+        let t1 = (hh + hash_sigma1(e) + hash_ch(e, f, g) + k[r] + w[r]) & 0xFFFFFFFF
+        let t2 = (hash_sigma0(a) + hash_maj(a, b, c)) & 0xFFFFFFFF
+        hh = g
+        g = f
+        f = e
+        e = (d + t1) & 0xFFFFFFFF
+        d = c
+        c = b
+        b = a
+        a = (t1 + t2) & 0xFFFFFFFF
+        r = r + 1
+    }
+
+    // Update chaining values
+    state[0] = (state[0] + a) & 0xFFFFFFFF
+    state[1] = (state[1] + b) & 0xFFFFFFFF
+    state[2] = (state[2] + c) & 0xFFFFFFFF
+    state[3] = (state[3] + d) & 0xFFFFFFFF
+    state[4] = (state[4] + e) & 0xFFFFFFFF
+    state[5] = (state[5] + f) & 0xFFFFFFFF
+    state[6] = (state[6] + g) & 0xFFFFFFFF
+    state[7] = (state[7] + hh) & 0xFFFFFFFF
+}
+
+// ============================================================================
+// PUBLIC API
+// ============================================================================
+
+fn sha256_init() -> Sha256State {
+    let h: [i64; 8] = [
+        0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
+        0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19
+    ]
+    let buf: [u8; 64] = [0; 64]
+    Sha256State {
+        h: h,
+        block: buf,
+        block_len: 0,
+        total_len: 0,
+    }
+}
+
+fn sha256_update(state: Sha256State, data: &[u8; 256], data_len: i32) -> Sha256State with Mut, Panic, Div {
+    var s = state
+    var pos: i32 = 0
+
+    while pos < data_len {
+        s.block[s.block_len] = data[pos]
+        s.block_len = s.block_len + 1
+        s.total_len = s.total_len + 1
+        pos = pos + 1
+
+        if s.block_len == 64 {
+            sha256_compress(&!s.h, &s.block)
+            s.block_len = 0
+            var bi: i32 = 0
+            while bi < 64 {
+                s.block[bi] = 0
+                bi = bi + 1
+            }
+        }
+    }
+
+    return s
+}
+
+fn sha256_finalize(state: Sha256State, out: &![u8; 32]) with Mut, Div, Panic {
+    var s = state
+
+    let bit_len: i64 = s.total_len * 8
+
+    // Append 0x80
+    s.block[s.block_len] = 0x80 as u8
+    s.block_len = s.block_len + 1
+
+    // If not enough room for 8-byte length, compress and reset
+    if s.block_len > 56 {
+        while s.block_len < 64 {
+            s.block[s.block_len] = 0
+            s.block_len = s.block_len + 1
+        }
+        sha256_compress(&!s.h, &s.block)
+        s.block_len = 0
+        var bi: i32 = 0
+        while bi < 64 {
+            s.block[bi] = 0
+            bi = bi + 1
+        }
+    }
+
+    // Pad to byte 56
+    while s.block_len < 56 {
+        s.block[s.block_len] = 0
+        s.block_len = s.block_len + 1
+    }
+
+    // Append 64-bit big-endian message bit length
+    s.block[56] = ((bit_len >> 56) & 0xFF) as u8
+    s.block[57] = ((bit_len >> 48) & 0xFF) as u8
+    s.block[58] = ((bit_len >> 40) & 0xFF) as u8
+    s.block[59] = ((bit_len >> 32) & 0xFF) as u8
+    s.block[60] = ((bit_len >> 24) & 0xFF) as u8
+    s.block[61] = ((bit_len >> 16) & 0xFF) as u8
+    s.block[62] = ((bit_len >>  8) & 0xFF) as u8
+    s.block[63] = ((bit_len      ) & 0xFF) as u8
+
+    // Final compression
+    sha256_compress(&!s.h, &s.block)
+
+    // Serialize H0..H7 as big-endian bytes into out
+    var wi: i32 = 0
+    while wi < 8 {
+        let word = s.h[wi]
+        out[wi * 4 + 0] = ((word >> 24) & 0xFF) as u8
+        out[wi * 4 + 1] = ((word >> 16) & 0xFF) as u8
+        out[wi * 4 + 2] = ((word >>  8) & 0xFF) as u8
+        out[wi * 4 + 3] = ((word      ) & 0xFF) as u8
+        wi = wi + 1
+    }
+}
+
+// One-shot hash convenience
+fn sha256_hash(data: &[u8; 256], data_len: i32, out: &![u8; 32]) with Mut, Div, Panic {
+    var s = sha256_init()
+    s = sha256_update(s, data, data_len)
+    sha256_finalize(s, out)
+}
+
+// ============================================================================
+// TEST — SHA-256 of empty string
+// Expected: e3b0c442 98fc1c14 9afbf4c8 996fb924
+//           27ae41e4 649b934c a495991b 7852b855
+// ============================================================================
+
+fn sha256_test_empty() -> i32 with Mut, Div, Panic {
+    var data: [u8; 256] = [0; 256]
+    var digest: [u8; 32] = [0; 32]
+    sha256_hash(&data, 0, &!digest)
+
+    // Check first 4 bytes: e3 b0 c4 42
+    let expected: [i32; 32] = [
+        0xe3, 0xb0, 0xc4, 0x42, 0x98, 0xfc, 0x1c, 0x14,
+        0x9a, 0xfb, 0xf4, 0xc8, 0x99, 0x6f, 0xb9, 0x24,
+        0x27, 0xae, 0x41, 0xe4, 0x64, 0x9b, 0x93, 0x4c,
+        0xa4, 0x95, 0x99, 0x1b, 0x78, 0x52, 0xb8, 0x55
+    ]
+
+    var i: i32 = 0
+    while i < 32 {
+        if (digest[i] as i32) != expected[i] {
+            return 1
+        }
+        i = i + 1
+    }
+    return 0
+}

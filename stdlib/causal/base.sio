@@ -1,0 +1,416 @@
+//! stdlib/causal/base.sio
+//!
+//! Causal inference foundation: DAG-based causal models with d-separation.
+//! Implements Pearl's Bayes-ball algorithm for conditional independence testing.
+
+// ============================================================================
+// CORE TYPES
+// ============================================================================
+
+struct CausalGraph {
+    adj: [i32; 1024],   // flattened 32x32 adjacency matrix: adj[i*32+j]=1 if i->j
+    n_nodes: i32,        // max 32
+}
+
+struct CausalBeta {
+    alpha: f64,
+    beta_param: f64,
+}
+
+struct EpistemicSummary {
+    mean: f64,
+    variance: f64,
+    n_obs: i32,
+}
+
+// ============================================================================
+// GRAPH CONSTRUCTION
+// ============================================================================
+
+fn cg_new(n: i32) -> CausalGraph {
+    if n > 32 { return CausalGraph { adj: [0; 1024], n_nodes: 32 } }
+    return CausalGraph { adj: [0; 1024], n_nodes: n }
+}
+
+fn cg_idx(from: i32, to: i32) -> i32 {
+    return from * 32 + to
+}
+
+fn cg_add_edge(g: &!CausalGraph, from: i32, to: i32) with Panic, Div, Mut {
+    if from < 0 { return }
+    if to < 0 { return }
+    if from >= g.n_nodes { return }
+    if to >= g.n_nodes { return }
+    g.adj[cg_idx(from, to)] = 1
+}
+
+fn cg_has_edge(g: &CausalGraph, from: i32, to: i32) -> bool {
+    if from < 0 { return false }
+    if to < 0 { return false }
+    if from >= g.n_nodes { return false }
+    if to >= g.n_nodes { return false }
+    return g.adj[cg_idx(from, to)] == 1
+}
+
+// ============================================================================
+// GRAPH QUERIES
+// ============================================================================
+
+fn cg_parents(g: &CausalGraph, node: i32, out: &![i32; 32], count: &!i32) with Panic, Div, Mut {
+    var c = 0
+    var i = 0
+    while i < g.n_nodes {
+        if g.adj[cg_idx(i, node)] == 1 {
+            if c < 32 {
+                out[c] = i
+                c = c + 1
+            }
+        }
+        i = i + 1
+    }
+    *count = c
+}
+
+fn cg_children(g: &CausalGraph, node: i32, out: &![i32; 32], count: &!i32) with Panic, Div, Mut {
+    var c = 0
+    var j = 0
+    while j < g.n_nodes {
+        if g.adj[cg_idx(node, j)] == 1 {
+            if c < 32 {
+                out[c] = j
+                c = c + 1
+            }
+        }
+        j = j + 1
+    }
+    *count = c
+}
+
+// BFS descendant check
+fn cat_is_descendant(g: &CausalGraph, ancestor: i32, target: i32) -> bool {
+    if ancestor == target { return true }
+    // BFS queue
+    var queue: [i32; 64] = [0; 64]
+    var visited: [i32; 32] = [0; 32]
+    var head = 0
+    var tail = 0
+    queue[tail] = ancestor
+    tail = tail + 1
+    visited[ancestor] = 1
+
+    while head < tail {
+        let cur = queue[head]
+        head = head + 1
+        var j = 0
+        while j < g.n_nodes {
+            if g.adj[cg_idx(cur, j)] == 1 {
+                if j == target { return true }
+                if visited[j] == 0 {
+                    visited[j] = 1
+                    if tail < 64 {
+                        queue[tail] = j
+                        tail = tail + 1
+                    }
+                }
+            }
+            j = j + 1
+        }
+    }
+    return false
+}
+
+fn cat_is_ancestor(g: &CausalGraph, node: i32, target: i32) -> bool {
+    return cat_is_descendant(g, node, target)
+}
+
+// ============================================================================
+// SET OPERATIONS
+// ============================================================================
+
+fn cat_in_set(val: i32, set: &[i32; 32], count: i32) -> bool {
+    var i = 0
+    while i < count {
+        if set[i] == val { return true }
+        i = i + 1
+    }
+    return false
+}
+
+// ============================================================================
+// D-SEPARATION (Pearl's Bayes-Ball Algorithm)
+// ============================================================================
+//
+// Two nodes X and Y are d-separated by set Z iff no active path exists.
+// Bayes-ball: visit from X, track direction (from parent vs from child),
+// apply blocking rules based on Z membership.
+
+// Internal: check if node has any child that is a descendant-or-member of Z
+fn has_descendant_in_z(g: &CausalGraph, node: i32, z_set: &[i32; 32], z_count: i32) -> bool {
+    // Check if node itself is in Z
+    if cat_in_set(node, z_set, z_count) { return true }
+    // Check descendants
+    var i = 0
+    while i < z_count {
+        if cat_is_descendant(g, node, z_set[i]) { return true }
+        i = i + 1
+    }
+    return false
+}
+
+// d-separation test: returns true if X and Y are d-separated given Z
+fn cat_d_separated(g: &CausalGraph, x: i32, y: i32, z_set: &[i32; 32], z_count: i32) -> bool {
+    // Bayes-ball: BFS from x, tracking (node, direction)
+    // direction: 0 = visiting from parent (came down), 1 = visiting from child (came up)
+    // Queue entries: node * 2 + direction
+    var queue: [i32; 256] = [0; 256]
+    var visited: [i32; 256] = [0; 256]  // visited[node*2+dir]
+    var head = 0
+    var tail = 0
+
+    // Start: send ball from x in both directions
+    // Visit x's children (as if from parent, direction=0)
+    var j = 0
+    while j < g.n_nodes {
+        if g.adj[cg_idx(x, j)] == 1 {
+            let key = j * 2 + 0
+            if visited[key] == 0 {
+                visited[key] = 1
+                queue[tail] = key
+                tail = tail + 1
+            }
+        }
+        j = j + 1
+    }
+    // Visit x's parents (as if from child, direction=1)
+    j = 0
+    while j < g.n_nodes {
+        if g.adj[cg_idx(j, x)] == 1 {
+            let key = j * 2 + 1
+            if visited[key] == 0 {
+                visited[key] = 1
+                queue[tail] = key
+                tail = tail + 1
+            }
+        }
+        j = j + 1
+    }
+
+    while head < tail {
+        let entry = queue[head]
+        head = head + 1
+        let node = entry / 2
+        let dir = entry - node * 2
+
+        if node == y { return false }  // reached Y => not d-separated
+
+        let in_z = cat_in_set(node, z_set, z_count)
+
+        if dir == 0 {
+            // Arrived from parent (ball going down)
+            if in_z == false {
+                // Not conditioned: pass through to children
+                var c = 0
+                while c < g.n_nodes {
+                    if g.adj[cg_idx(node, c)] == 1 {
+                        let key = c * 2 + 0
+                        if key < 256 {
+                            if visited[key] == 0 {
+                                visited[key] = 1
+                                queue[tail] = key
+                                tail = tail + 1
+                            }
+                        }
+                    }
+                    c = c + 1
+                }
+                // Also pass up to parents (non-collider)
+                c = 0
+                while c < g.n_nodes {
+                    if g.adj[cg_idx(c, node)] == 1 {
+                        let key = c * 2 + 1
+                        if key < 256 {
+                            if visited[key] == 0 {
+                                visited[key] = 1
+                                queue[tail] = key
+                                tail = tail + 1
+                            }
+                        }
+                    }
+                    c = c + 1
+                }
+            }
+            // If in Z: ball is blocked (non-collider conditioned)
+        }
+
+        if dir == 1 {
+            // Arrived from child (ball going up)
+            if in_z == false {
+                // Non-collider, not conditioned: pass to parents
+                var c = 0
+                while c < g.n_nodes {
+                    if g.adj[cg_idx(c, node)] == 1 {
+                        let key = c * 2 + 1
+                        if key < 256 {
+                            if visited[key] == 0 {
+                                visited[key] = 1
+                                queue[tail] = key
+                                tail = tail + 1
+                            }
+                        }
+                    }
+                    c = c + 1
+                }
+            }
+            if in_z {
+                // Collider conditioned on: pass to parents AND children
+                var c = 0
+                while c < g.n_nodes {
+                    if g.adj[cg_idx(c, node)] == 1 {
+                        let key = c * 2 + 1
+                        if key < 256 {
+                            if visited[key] == 0 {
+                                visited[key] = 1
+                                queue[tail] = key
+                                tail = tail + 1
+                            }
+                        }
+                    }
+                    c = c + 1
+                }
+                c = 0
+                while c < g.n_nodes {
+                    if g.adj[cg_idx(node, c)] == 1 {
+                        let key = c * 2 + 0
+                        if key < 256 {
+                            if visited[key] == 0 {
+                                visited[key] = 1
+                                queue[tail] = key
+                                tail = tail + 1
+                            }
+                        }
+                    }
+                    c = c + 1
+                }
+            }
+        }
+    }
+    return true  // ball never reached y
+}
+
+// ============================================================================
+// HELPERS
+// ============================================================================
+
+fn causal_clamp01(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 }
+    if x > 1.0 { return 1.0 }
+    return x
+}
+
+fn causal_sqrt(x: f64) -> f64 {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    return y
+}
+
+// ============================================================================
+// BETA DISTRIBUTION FOR CAUSAL ESTIMATION
+// ============================================================================
+
+fn causal_beta_new(alpha: f64, beta_p: f64) -> CausalBeta {
+    var a = alpha
+    var b = beta_p
+    if a < 0.0001 { a = 0.0001 }
+    if b < 0.0001 { b = 0.0001 }
+    return CausalBeta { alpha: a, beta_param: b }
+}
+
+fn causal_beta_mean(cb: CausalBeta) -> f64 {
+    return cb.alpha / (cb.alpha + cb.beta_param)
+}
+
+fn causal_beta_variance(cb: CausalBeta) -> f64 {
+    let n = cb.alpha + cb.beta_param
+    return (cb.alpha * cb.beta_param) / (n * n * (n + 1.0))
+}
+
+// ============================================================================
+// EPISTEMIC SUMMARY
+// ============================================================================
+
+fn epistemic_summary_new(mean: f64, variance: f64, n: i32) -> EpistemicSummary {
+    return EpistemicSummary { mean: mean, variance: variance, n_obs: n }
+}
+
+// ============================================================================
+// INLINE TESTS
+// ============================================================================
+
+// Test: chain X->Y->Z, X and Z are d-separated given {Y}
+fn test_chain_dsep() -> bool with Panic, Div, Mut {
+    var g = cg_new(3)
+    cg_add_edge(&!g, 0, 1)  // X -> Y
+    cg_add_edge(&!g, 1, 2)  // Y -> Z
+
+    var z_set: [i32; 32] = [0; 32]
+    z_set[0] = 1  // condition on Y
+    let sep = cat_d_separated(&g, 0, 2, &z_set, 1)
+    if sep == false { return false }
+
+    // Without conditioning, should NOT be d-separated
+    let not_sep = cat_d_separated(&g, 0, 2, &z_set, 0)
+    if not_sep { return false }
+
+    return true
+}
+
+// Test: collider X->Z<-Y, X and Y NOT d-separated given {Z}
+fn test_collider_dsep() -> bool with Panic, Div, Mut {
+    var g = cg_new(3)
+    cg_add_edge(&!g, 0, 2)  // X -> Z
+    cg_add_edge(&!g, 1, 2)  // Y -> Z
+
+    // Without conditioning: X and Y should be d-separated (collider blocks)
+    var empty: [i32; 32] = [0; 32]
+    let sep_empty = cat_d_separated(&g, 0, 1, &empty, 0)
+    if sep_empty == false { return false }
+
+    // Conditioning on Z opens the collider: NOT d-separated
+    var z_set: [i32; 32] = [0; 32]
+    z_set[0] = 2
+    let sep_z = cat_d_separated(&g, 0, 1, &z_set, 1)
+    if sep_z { return false }
+
+    return true
+}
+
+// Test: Beta distribution mean and variance
+fn test_beta_stats() -> bool with Panic, Mut, Div {
+    let b = causal_beta_new(2.0, 3.0)
+    let m = causal_beta_mean(b)
+    let v = causal_beta_variance(b)
+
+    // mean = 2/(2+3) = 0.4
+    let m_err = m - 0.4
+    var m_abs = m_err
+    if m_abs < 0.0 { m_abs = 0.0 - m_abs }
+    if m_abs > 0.001 { return false }
+
+    // variance = 2*3 / (25*6) = 6/150 = 0.04
+    let v_err = v - 0.04
+    var v_abs = v_err
+    if v_abs < 0.0 { v_abs = 0.0 - v_abs }
+    if v_abs > 0.001 { return false }
+
+    return true
+}

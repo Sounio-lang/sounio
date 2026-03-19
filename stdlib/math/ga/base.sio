@@ -1,0 +1,648 @@
+// stdlib::math::ga::base — Self-contained Geometric Algebra foundation
+//
+// Implements Clifford algebras Cl(p,q,r) up to 5 dimensions (2^5 = 32 blades).
+// Reference: Dorst, Fontijne, Mann — "Geometric Algebra for Computer Science"
+//
+// Basis blades are indexed by bitmap:
+//   0 = scalar, 1 = e1, 2 = e2, 3 = e12, 4 = e3, 5 = e13, 6 = e23, 7 = e123, ...
+// The coefficient of blade i is stored at coeffs[i].
+
+// ============================================================================
+// Algebra signature
+// ============================================================================
+
+struct AlgebraSignature {
+    p: i64,       // positive basis vectors (e_i^2 = +1)
+    q: i64,       // negative basis vectors (e_j^2 = -1)
+    r: i64        // degenerate basis vectors (e_k^2 = 0)
+}
+
+// ============================================================================
+// Multivector
+// ============================================================================
+
+struct Multivector {
+    coeffs: [f64; 32],
+    n_coeffs: i64
+}
+
+// ============================================================================
+// Bit manipulation helpers (must precede callers)
+// ============================================================================
+
+fn ga_popcount(x: i64) -> i64 {
+    var count: i64 = 0
+    var v: i64 = x
+    while v > 0 {
+        count = count + (v % 2)
+        v = v / 2
+    }
+    count
+}
+
+fn ga_grade(blade: i64) -> i64 {
+    ga_popcount(blade)
+}
+
+fn ga_bit(n: i64) -> i64 {
+    var result: i64 = 1
+    var i: i64 = 0
+    while i < n {
+        result = result * 2
+        i = i + 1
+    }
+    result
+}
+
+fn ga_has_bit(mask: i64, bit: i64) -> bool {
+    (mask / ga_bit(bit)) % 2 == 1
+}
+
+// ============================================================================
+// Metric helpers
+// ============================================================================
+
+fn ga_dim(sig: AlgebraSignature) -> i64 {
+    sig.p + sig.q + sig.r
+}
+
+fn ga_algebra_dim(sig: AlgebraSignature) -> i64 with Panic, Div, Mut {
+    var result: i64 = 1
+    var i: i64 = 0
+    let d = ga_dim(sig)
+    while i < d {
+        result = result * 2
+        i = i + 1
+    }
+    result
+}
+
+// Metric factor for basis vector e_i squaring with itself.
+// In Cl(p,q,r): first p vectors square to +1, next q to -1, next r to 0.
+fn ga_metric_factor(sig: AlgebraSignature, vector_index: i64) -> i64 {
+    if vector_index < sig.p {
+        1
+    } else if vector_index < sig.p + sig.q {
+        0 - 1
+    } else {
+        0
+    }
+}
+
+// ============================================================================
+// Common signatures
+// ============================================================================
+
+fn ga_sig_euclidean3d() -> AlgebraSignature {
+    AlgebraSignature { p: 3, q: 0, r: 0 }
+}
+
+fn ga_sig_pga3d() -> AlgebraSignature {
+    AlgebraSignature { p: 3, q: 0, r: 1 }
+}
+
+fn ga_sig_cga() -> AlgebraSignature {
+    AlgebraSignature { p: 4, q: 1, r: 0 }
+}
+
+fn ga_sig_quaternion() -> AlgebraSignature {
+    AlgebraSignature { p: 0, q: 2, r: 0 }
+}
+
+// ============================================================================
+// Constructors
+// ============================================================================
+
+fn ga_zero() -> Multivector {
+    Multivector { coeffs: [0.0; 32], n_coeffs: 32 }
+}
+
+fn ga_scalar(v: f64) -> Multivector with Panic, Div, Mut {
+    var mv = ga_zero()
+    mv.coeffs[0 as usize] = v
+    mv
+}
+
+fn ga_basis(i: i64) -> Multivector with Panic, Div, Mut {
+    var mv = ga_zero()
+    if i >= 0 && i < 32 {
+        mv.coeffs[i as usize] = 1.0
+    }
+    mv
+}
+
+// ============================================================================
+// Component access
+// ============================================================================
+
+fn ga_get(mv: Multivector, index: i64) -> f64 {
+    if index >= 0 && index < 32 {
+        mv.coeffs[index as usize]
+    } else {
+        0.0
+    }
+}
+
+fn ga_set(mv: &! Multivector, index: i64, value: f64) with Panic, Div, Mut {
+    if index >= 0 && index < 32 {
+        mv.coeffs[index as usize] = value
+    }
+}
+
+// ============================================================================
+// THE CORE: Blade product sign computation
+// ============================================================================
+
+// Count transpositions needed to sort the combined blade a*b into canonical order.
+// Uses the standard algorithm: for each set bit j in b, count how many set bits
+// in a are at positions above j. This gives the number of anticommutation swaps.
+fn ga_canonical_reorder_sign(a: i64, b: i64) -> i64 with Panic, Div, Mut {
+    var sum: i64 = 0
+    // For each bit position j in b, count bits in a above position j.
+    // Equivalent: shift a right, AND with b, popcount — summed over shifts.
+    var i: i64 = a / 2   // a >> 1
+    while i > 0 {
+        sum = sum + ga_popcount(i & b)
+        i = i / 2
+    }
+    if sum % 2 == 0 { 1 } else { 0 - 1 }
+}
+
+// Full blade product sign including metric.
+// Algorithm:
+//   1. Compute anticommutation sign from reordering
+//   2. For each shared basis vector (in a AND b):
+//      - If that vector has degenerate metric (r-type), return 0
+//      - If that vector has negative metric (q-type), flip sign
+//   3. Return final sign: +1, -1, or 0
+fn ga_blade_product_sign(a: i64, b: i64, sig: AlgebraSignature) -> i64 with Panic, Div, Mut {
+    var sign = ga_canonical_reorder_sign(a, b)
+
+    let shared = a & b
+    let dim = ga_dim(sig)
+    var i: i64 = 0
+    while i < dim {
+        if ga_has_bit(shared, i) {
+            let mf = ga_metric_factor(sig, i)
+            if mf == 0 {
+                return 0
+            }
+            sign = sign * mf
+        }
+        i = i + 1
+    }
+    sign
+}
+
+// ============================================================================
+// Geometric product — the fundamental operation
+// ============================================================================
+// For each pair of basis blades (i, j):
+//   result[i XOR j] += coeffs[i] * coeffs[j] * blade_product_sign(i, j, sig)
+
+fn ga_geometric_product(sig: AlgebraSignature, a: Multivector, b: Multivector) -> Multivector with Panic, Div, Mut {
+    var result = ga_zero()
+    let n = ga_algebra_dim(sig)
+
+    var i: i64 = 0
+    while i < n {
+        if a.coeffs[i as usize] != 0.0 {
+            var j: i64 = 0
+            while j < n {
+                if b.coeffs[j as usize] != 0.0 {
+                    let sign = ga_blade_product_sign(i, j, sig)
+                    if sign != 0 {
+                        let result_blade = i ^ j
+                        let coeff = a.coeffs[i as usize] * b.coeffs[j as usize] * (sign as f64)
+                        result.coeffs[result_blade as usize] = result.coeffs[result_blade as usize] + coeff
+                    }
+                }
+                j = j + 1
+            }
+        }
+        i = i + 1
+    }
+    result
+}
+
+// ============================================================================
+// Outer (wedge) product
+// ============================================================================
+// Keep only terms where grade(result_blade) == grade(a_blade) + grade(b_blade)
+
+fn ga_outer_product(sig: AlgebraSignature, a: Multivector, b: Multivector) -> Multivector with Panic, Div, Mut {
+    var result = ga_zero()
+    let n = ga_algebra_dim(sig)
+
+    var i: i64 = 0
+    while i < n {
+        if a.coeffs[i as usize] != 0.0 {
+            let ga = ga_grade(i)
+            var j: i64 = 0
+            while j < n {
+                if b.coeffs[j as usize] != 0.0 {
+                    let gb = ga_grade(j)
+                    let result_blade = i ^ j
+                    let gr = ga_grade(result_blade)
+                    if gr == ga + gb {
+                        let sign = ga_canonical_reorder_sign(i, j)
+                        let coeff = a.coeffs[i as usize] * b.coeffs[j as usize] * (sign as f64)
+                        result.coeffs[result_blade as usize] = result.coeffs[result_blade as usize] + coeff
+                    }
+                }
+                j = j + 1
+            }
+        }
+        i = i + 1
+    }
+    result
+}
+
+// ============================================================================
+// Inner product (left contraction)
+// ============================================================================
+// Keep only terms where grade(result_blade) == |grade(a_blade) - grade(b_blade)|
+
+fn ga_inner_product(sig: AlgebraSignature, a: Multivector, b: Multivector) -> Multivector with Panic, Div, Mut {
+    var result = ga_zero()
+    let n = ga_algebra_dim(sig)
+
+    var i: i64 = 0
+    while i < n {
+        if a.coeffs[i as usize] != 0.0 {
+            let ga = ga_grade(i)
+            var j: i64 = 0
+            while j < n {
+                if b.coeffs[j as usize] != 0.0 {
+                    let gb = ga_grade(j)
+                    let result_blade = i ^ j
+                    let gr = ga_grade(result_blade)
+                    let target = if ga > gb { ga - gb } else { gb - ga }
+                    if gr == target && (ga > 0 || gb > 0) {
+                        let sign = ga_blade_product_sign(i, j, sig)
+                        if sign != 0 {
+                            let coeff = a.coeffs[i as usize] * b.coeffs[j as usize] * (sign as f64)
+                            result.coeffs[result_blade as usize] = result.coeffs[result_blade as usize] + coeff
+                        }
+                    }
+                }
+                j = j + 1
+            }
+        }
+        i = i + 1
+    }
+    result
+}
+
+// ============================================================================
+// Reverse: reverses order of basis vectors in each blade
+// ============================================================================
+// For a grade-k blade: sign = (-1)^(k*(k-1)/2)
+// grade 0: +1, grade 1: +1, grade 2: -1, grade 3: -1, grade 4: +1, ...
+
+fn ga_reverse(a: Multivector) -> Multivector with Panic, Div, Mut {
+    var result = ga_zero()
+    var i: i64 = 0
+    while i < 32 {
+        let k = ga_grade(i)
+        let exp = (k * (k - 1)) / 2
+        let sign = if exp % 2 == 0 { 1.0 } else { 0.0 - 1.0 }
+        result.coeffs[i as usize] = a.coeffs[i as usize] * sign
+        i = i + 1
+    }
+    result
+}
+
+// ============================================================================
+// Grade selection
+// ============================================================================
+
+fn ga_grade_select(a: Multivector, grade: i64) -> Multivector with Panic, Div, Mut {
+    var result = ga_zero()
+    var i: i64 = 0
+    while i < 32 {
+        if ga_grade(i) == grade {
+            result.coeffs[i as usize] = a.coeffs[i as usize]
+        }
+        i = i + 1
+    }
+    result
+}
+
+// ============================================================================
+// Arithmetic
+// ============================================================================
+
+fn ga_add(a: Multivector, b: Multivector) -> Multivector with Panic, Div, Mut {
+    var result = ga_zero()
+    var i: i64 = 0
+    while i < 32 {
+        result.coeffs[i as usize] = a.coeffs[i as usize] + b.coeffs[i as usize]
+        i = i + 1
+    }
+    result
+}
+
+fn ga_sub(a: Multivector, b: Multivector) -> Multivector with Panic, Div, Mut {
+    var result = ga_zero()
+    var i: i64 = 0
+    while i < 32 {
+        result.coeffs[i as usize] = a.coeffs[i as usize] - b.coeffs[i as usize]
+        i = i + 1
+    }
+    result
+}
+
+fn ga_scale(a: Multivector, s: f64) -> Multivector with Panic, Div, Mut {
+    var result = ga_zero()
+    var i: i64 = 0
+    while i < 32 {
+        result.coeffs[i as usize] = a.coeffs[i as usize] * s
+        i = i + 1
+    }
+    result
+}
+
+// ============================================================================
+// Norm squared: scalar part of a * reverse(a)
+// ============================================================================
+
+fn ga_norm_squared(sig: AlgebraSignature, a: Multivector) -> f64 with Panic, Div, Mut {
+    let rev_a = ga_reverse(a)
+    let product = ga_geometric_product(sig, a, rev_a)
+    product.coeffs[0 as usize]
+}
+
+// ============================================================================
+// Dual: multiply by pseudoscalar
+// ============================================================================
+
+fn ga_dual(sig: AlgebraSignature, a: Multivector) -> Multivector with Panic, Div, Mut {
+    let n = ga_algebra_dim(sig)
+    // Pseudoscalar index = 2^dim - 1 (all bits set)
+    let ps_idx = n - 1
+    let ps = ga_basis(ps_idx)
+    let ps_rev = ga_reverse(ps)
+    ga_geometric_product(sig, a, ps_rev)
+}
+
+// ============================================================================
+// Helper: approximate equality for tests
+// ============================================================================
+
+fn ga_abs(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+fn ga_approx_eq(a: f64, b: f64) -> bool {
+    ga_abs(a - b) < 0.000001
+}
+
+// ============================================================================
+// Inline tests
+// ============================================================================
+
+// Test 1: Geometric product of two vectors in R^3 gives scalar + bivector
+// e1 * e2 = e12 (bivector), so product should have coeffs[3] = 1.0
+fn test_vector_product_r3() -> bool with Panic, Div, Mut {
+    let sig = ga_sig_euclidean3d()
+    let e1 = ga_basis(1)   // e1 = bitmap 0b01
+    let e2 = ga_basis(2)   // e2 = bitmap 0b10
+    let result = ga_geometric_product(sig, e1, e2)
+    // e1 * e2 = e12 (blade index 3 = 0b11), coefficient should be +1
+    ga_approx_eq(result.coeffs[3 as usize], 1.0)
+}
+
+// Test 2: e1*e1 = +1 in Euclidean 3D
+fn test_e1_squared_euclidean() -> bool with Panic, Div, Mut {
+    let sig = ga_sig_euclidean3d()
+    let e1 = ga_basis(1)
+    let result = ga_geometric_product(sig, e1, e1)
+    // e1^2 = +1 (scalar), so coeffs[0] = 1.0
+    ga_approx_eq(result.coeffs[0 as usize], 1.0)
+}
+
+// Test 3: Quaternion algebra Cl(0,2): e1*e2 product
+// In Cl(0,2): e1^2 = -1, e2^2 = -1
+// e1*e2 = e12 (blade 3)
+fn test_quaternion_e1e2() -> bool with Panic, Div, Mut {
+    let sig = ga_sig_quaternion()
+    let e1 = ga_basis(1)
+    let e2 = ga_basis(2)
+    let result = ga_geometric_product(sig, e1, e2)
+    // e1*e2 = e12
+    ga_approx_eq(result.coeffs[3 as usize], 1.0)
+}
+
+// Test 4: Quaternion i*j=k, j*k=i, k*i=j
+// In Cl(0,2): i=e1, j=e2, k=e12
+// i*j = e1*e2 = e12 = k  => coeffs[3] = 1.0
+fn test_quaternion_ijk() -> bool with Panic, Div, Mut {
+    let sig = ga_sig_quaternion()
+    let i_q = ga_basis(1)   // e1
+    let j_q = ga_basis(2)   // e2
+    let k_q = ga_basis(3)   // e12
+
+    // i*j = k
+    let ij = ga_geometric_product(sig, i_q, j_q)
+    let ij_ok = ga_approx_eq(ij.coeffs[3 as usize], 1.0)
+
+    // j*k = e2*e12
+    // canonical_reorder_sign(2, 3): a=2=0b10, b=3=0b11
+    //   i = a/2 = 1 = 0b01, popcount(1 & 3) = popcount(1) = 1, sum=1
+    //   i = 1/2 = 0, stop. sign = -1
+    // shared = 2 & 3 = 2 = 0b10, bit 1 set => metric_factor(sig, 1) = -1
+    // total sign = (-1)*(-1) = +1
+    // result blade = 2 ^ 3 = 1 (e1)
+    // So j*k = +e1 = i
+    let jk = ga_geometric_product(sig, j_q, k_q)
+    let jk_ok = ga_approx_eq(jk.coeffs[1 as usize], 1.0)
+
+    // k*i = e12*e1
+    // canonical_reorder_sign(3, 1): a=3=0b11, b=1=0b01
+    //   i = 3/2 = 1 = 0b01, popcount(1 & 1) = 1, sum=1
+    //   i = 1/2 = 0, stop. sign = -1
+    // shared = 3 & 1 = 1 = 0b01, bit 0 set => metric_factor(sig, 0) = -1
+    // total sign = (-1)*(-1) = +1
+    // result blade = 3 ^ 1 = 2 (e2)
+    // So k*i = +e2 = j
+    let ki = ga_geometric_product(sig, k_q, i_q)
+    let ki_ok = ga_approx_eq(ki.coeffs[2 as usize], 1.0)
+
+    ij_ok && jk_ok && ki_ok
+}
+
+// Test 5: Reverse of a bivector negates it
+// reverse(e12) = e21 = -e12
+fn test_reverse_bivector() -> bool with Panic, Div, Mut {
+    let bv = ga_basis(3)   // e12
+    let rev = ga_reverse(bv)
+    // grade 2: sign = (-1)^(2*1/2) = (-1)^1 = -1
+    ga_approx_eq(rev.coeffs[3 as usize], 0.0 - 1.0)
+}
+
+// Test 6: Reverse of a vector leaves it unchanged
+fn test_reverse_vector() -> bool with Panic, Div, Mut {
+    let v = ga_basis(1)   // e1
+    let rev = ga_reverse(v)
+    // grade 1: sign = (-1)^(1*0/2) = (-1)^0 = +1
+    ga_approx_eq(rev.coeffs[1 as usize], 1.0)
+}
+
+// Test 7: Norm squared of unit vector e1 in Euclidean 3D = +1
+fn test_norm_squared_euclidean() -> bool with Panic, Div, Mut {
+    let sig = ga_sig_euclidean3d()
+    let e1 = ga_basis(1)
+    let ns = ga_norm_squared(sig, e1)
+    ga_approx_eq(ns, 1.0)
+}
+
+// Test 8: Norm squared of e1 in Cl(0,2) (quaternion) = -1
+// e1^2 = -1, reverse(e1) = e1, so e1 * reverse(e1) = e1*e1 = -1
+fn test_norm_squared_negative() -> bool with Panic, Div, Mut {
+    let sig = ga_sig_quaternion()
+    let e1 = ga_basis(1)
+    let ns = ga_norm_squared(sig, e1)
+    ga_approx_eq(ns, 0.0 - 1.0)
+}
+
+// Test 9: Outer product of e1 and e2 gives e12
+fn test_outer_product() -> bool with Panic, Div, Mut {
+    let sig = ga_sig_euclidean3d()
+    let e1 = ga_basis(1)
+    let e2 = ga_basis(2)
+    let result = ga_outer_product(sig, e1, e2)
+    ga_approx_eq(result.coeffs[3 as usize], 1.0)
+}
+
+// Test 10: Outer product of e1 with itself is zero (e1 ^ e1 = 0)
+fn test_outer_product_self_zero() -> bool with Panic, Div, Mut {
+    let sig = ga_sig_euclidean3d()
+    let e1 = ga_basis(1)
+    let result = ga_outer_product(sig, e1, e1)
+    ga_approx_eq(result.coeffs[0 as usize], 0.0) && ga_approx_eq(result.coeffs[1 as usize], 0.0)
+}
+
+// Test 11: Inner product of two orthogonal vectors is zero
+fn test_inner_product_orthogonal() -> bool with Panic, Div, Mut {
+    let sig = ga_sig_euclidean3d()
+    let e1 = ga_basis(1)
+    let e2 = ga_basis(2)
+    let result = ga_inner_product(sig, e1, e2)
+    ga_approx_eq(result.coeffs[0 as usize], 0.0)
+}
+
+// Test 12: Inner product e1 . e1 = 1 in Euclidean space
+fn test_inner_product_same() -> bool with Panic, Div, Mut {
+    let sig = ga_sig_euclidean3d()
+    let e1 = ga_basis(1)
+    let result = ga_inner_product(sig, e1, e1)
+    ga_approx_eq(result.coeffs[0 as usize], 1.0)
+}
+
+// Test 13: Grade selection extracts correct grade
+fn test_grade_select() -> bool with Panic, Div, Mut {
+    let sig = ga_sig_euclidean3d()
+    let e1 = ga_basis(1)
+    let e2 = ga_basis(2)
+    // v = e1 + e2 (pure grade-1)
+    let v = ga_add(e1, e2)
+    // Add a scalar part: mv = 3.0 + e1 + e2
+    let s = ga_scalar(3.0)
+    let mv = ga_add(s, v)
+    // Extract grade 0
+    let g0 = ga_grade_select(mv, 0)
+    let g0_ok = ga_approx_eq(g0.coeffs[0 as usize], 3.0)
+    // Extract grade 1
+    let g1 = ga_grade_select(mv, 1)
+    let g1_ok = ga_approx_eq(g1.coeffs[1 as usize], 1.0) && ga_approx_eq(g1.coeffs[2 as usize], 1.0)
+    g0_ok && g1_ok
+}
+
+// Test 14: Geometric product of vectors gives scalar + bivector
+// (ae1 + be2) * (ce1 + de2) = ac*e1e1 + ad*e1e2 + bc*e2e1 + bd*e2e2
+//                            = (ac + bd)*1 + (ad - bc)*e12
+fn test_vector_product_components() -> bool with Panic, Div, Mut {
+    let sig = ga_sig_euclidean3d()
+    // v1 = 2*e1 + 3*e2
+    var v1 = ga_zero()
+    v1.coeffs[1 as usize] = 2.0
+    v1.coeffs[2 as usize] = 3.0
+    // v2 = 4*e1 + 5*e2
+    var v2 = ga_zero()
+    v2.coeffs[1 as usize] = 4.0
+    v2.coeffs[2 as usize] = 5.0
+    let result = ga_geometric_product(sig, v1, v2)
+    // scalar part = 2*4 + 3*5 = 8 + 15 = 23
+    let scalar_ok = ga_approx_eq(result.coeffs[0 as usize], 23.0)
+    // bivector e12 part = 2*5 - 3*4 = 10 - 12 = -2
+    let bv_ok = ga_approx_eq(result.coeffs[3 as usize], 0.0 - 2.0)
+    scalar_ok && bv_ok
+}
+
+// Test 15: Degenerate metric — e0^2 = 0 in PGA
+fn test_degenerate_pga() -> bool with Panic, Div, Mut {
+    let sig = ga_sig_pga3d()  // Cl(3,0,1): e1^2=1, e2^2=1, e3^2=1, e4^2=0
+    // e4 is the degenerate basis vector (index 3, bitmap 8 = 2^3)
+    let e4 = ga_basis(8)   // bitmap 0b1000
+    let result = ga_geometric_product(sig, e4, e4)
+    // e4^2 = 0
+    ga_approx_eq(result.coeffs[0 as usize], 0.0)
+}
+
+// Test 16: Popcount correctness
+fn test_popcount() -> bool {
+    ga_popcount(0) == 0 &&
+    ga_popcount(1) == 1 &&
+    ga_popcount(3) == 2 &&
+    ga_popcount(7) == 3 &&
+    ga_popcount(15) == 4 &&
+    ga_popcount(31) == 5
+}
+
+// Test 17: Algebra dimensions
+fn test_algebra_dim() -> bool with Panic, Div, Mut {
+    let sig3 = ga_sig_euclidean3d()
+    let sig4 = ga_sig_pga3d()
+    let sig5 = ga_sig_cga()
+    ga_dim(sig3) == 3 && ga_algebra_dim(sig3) == 8 &&
+    ga_dim(sig4) == 4 && ga_algebra_dim(sig4) == 16 &&
+    ga_dim(sig5) == 5 && ga_algebra_dim(sig5) == 32
+}
+
+// Test 18: Add and subtract
+fn test_add_sub() -> bool with Panic, Div, Mut {
+    let a = ga_scalar(5.0)
+    let b = ga_scalar(3.0)
+    let sum = ga_add(a, b)
+    let diff = ga_sub(a, b)
+    ga_approx_eq(sum.coeffs[0 as usize], 8.0) && ga_approx_eq(diff.coeffs[0 as usize], 2.0)
+}
+
+// Test 19: Scale
+fn test_scale() -> bool with Panic, Div, Mut {
+    let e1 = ga_basis(1)
+    let scaled = ga_scale(e1, 7.0)
+    ga_approx_eq(scaled.coeffs[1 as usize], 7.0)
+}
+
+// Test 20: Quaternion i^2 = j^2 = k^2 = -1
+fn test_quaternion_squares() -> bool with Panic, Div, Mut {
+    let sig = ga_sig_quaternion()
+    let i_q = ga_basis(1)
+    let j_q = ga_basis(2)
+    let k_q = ga_basis(3)
+
+    let i2 = ga_geometric_product(sig, i_q, i_q)
+    let j2 = ga_geometric_product(sig, j_q, j_q)
+    let k2 = ga_geometric_product(sig, k_q, k_q)
+
+    // i^2 = e1^2 = -1
+    let i2_ok = ga_approx_eq(i2.coeffs[0 as usize], 0.0 - 1.0)
+    // j^2 = e2^2 = -1
+    let j2_ok = ga_approx_eq(j2.coeffs[0 as usize], 0.0 - 1.0)
+    // k^2 = e12^2 = e1*e2*e1*e2 = -e1*e1*e2*e2 = -(-1)(-1) = -1
+    let k2_ok = ga_approx_eq(k2.coeffs[0 as usize], 0.0 - 1.0)
+
+    i2_ok && j2_ok && k2_ok
+}

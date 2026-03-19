@@ -1,1 +1,130 @@
-//! training (disabled)
+// stdlib/qnn/training.sio — QNN training loop
+//
+// Training configuration and epoch-level training loop for quaternion networks.
+
+// ============================================================================
+// HELPERS
+// ============================================================================
+
+fn qtrain_abs(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+fn qtrain_i32_to_f64(n: i32) -> f64 {
+    var result = 0.0
+    var i: i32 = 0
+    if n > 0 {
+        while i < n {
+            result = result + 1.0
+            i = i + 1
+        }
+    }
+    result
+}
+
+// ============================================================================
+// TYPES
+// ============================================================================
+
+struct QTrainConfig {
+    lr: f64,
+    epochs: i32,
+    batch_size: i32
+}
+
+struct QTrainResult {
+    final_loss: f64,
+    epochs_run: i32
+}
+
+// ============================================================================
+// CONSTRUCTORS
+// ============================================================================
+
+fn qtrain_config_new(lr: f64, epochs: i32, batch_size: i32) -> QTrainConfig {
+    QTrainConfig { lr: lr, epochs: epochs, batch_size: batch_size }
+}
+
+fn qtrain_config_default() -> QTrainConfig {
+    QTrainConfig { lr: 0.001, epochs: 10, batch_size: 32 }
+}
+
+// ============================================================================
+// TRAINING
+// ============================================================================
+
+// Single epoch: SGD on simple linear model (MSE loss).
+// weights: model parameters, data: flattened input, labels: targets.
+fn qtrain_epoch(config: QTrainConfig, weights: &![f64; 4096], data: &[f64; 4096], labels: &[f64; 256], n_samples: i32) -> f64 with Mut, Div, Panic {
+    if n_samples < 1 { return 0.0 }
+
+    let lr = config.lr
+    let bs = config.batch_size
+    var total_loss = 0.0
+    var n_batches: i32 = 0
+
+    var start: i32 = 0
+    while start < n_samples {
+        var end = start + bs
+        if end > n_samples { end = n_samples }
+        let batch_n = end - start
+
+        var batch_loss = 0.0
+        var si: i32 = start
+        while si < end {
+            var pred = 0.0
+            var j: i32 = 0
+            while j < 16 {
+                let data_idx = si * 16 + j
+                if data_idx < 4096 {
+                    if j < 4096 {
+                        pred = pred + weights[j] * data[data_idx]
+                    }
+                }
+                j = j + 1
+            }
+
+            if si < 256 {
+                let diff = pred - labels[si]
+                batch_loss = batch_loss + diff * diff
+
+                j = 0
+                while j < 16 {
+                    let data_idx = si * 16 + j
+                    if data_idx < 4096 {
+                        if j < 4096 {
+                            let grad = 2.0 * diff * data[data_idx]
+                            weights[j] = weights[j] - lr * grad
+                        }
+                    }
+                    j = j + 1
+                }
+            }
+            si = si + 1
+        }
+
+        let batch_nf = qtrain_i32_to_f64(batch_n)
+        if batch_nf > 0.0 {
+            total_loss = total_loss + batch_loss / batch_nf
+        }
+        n_batches = n_batches + 1
+        start = end
+    }
+
+    let nb_f = qtrain_i32_to_f64(n_batches)
+    if nb_f > 0.0 { total_loss / nb_f } else { total_loss }
+}
+
+// ============================================================================
+// TESTS
+// ============================================================================
+
+fn test_qtrain_config() -> bool {
+    let c = qtrain_config_default()
+    c.epochs == 10
+}
+
+fn test_qtrain_lr() -> bool {
+    let c = qtrain_config_default()
+    qtrain_abs(c.lr - 0.001) < 0.0001
+}

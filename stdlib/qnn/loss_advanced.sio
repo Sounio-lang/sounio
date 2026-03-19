@@ -1,1 +1,153 @@
-//! loss_advanced (disabled)
+// stdlib/qnn/loss_advanced.sio — Advanced loss functions for QNN
+//
+// Cross-entropy and KL divergence for quaternion neural network training.
+
+// ============================================================================
+// HELPERS
+// ============================================================================
+
+fn qloss_abs(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+fn qloss_log(x: f64) -> f64 {
+    if x <= 0.0 { return 0.0 - 100.0 }
+    if x < 0.001 { return 0.0 - 100.0 }
+
+    var val = x
+    var exp_count = 0.0
+    while val > 2.0 {
+        val = val / 2.0
+        exp_count = exp_count + 1.0
+    }
+    while val < 0.5 {
+        val = val * 2.0
+        exp_count = exp_count - 1.0
+    }
+
+    let u = val - 1.0
+    var result = 0.0
+    var term = u
+    result = result + term
+    term = term * u
+    result = result - term / 2.0
+    term = term * u
+    result = result + term / 3.0
+    term = term * u
+    result = result - term / 4.0
+    term = term * u
+    result = result + term / 5.0
+    term = term * u
+    result = result - term / 6.0
+    term = term * u
+    result = result + term / 7.0
+    term = term * u
+    result = result - term / 8.0
+
+    result + exp_count * 0.6931471806
+}
+
+fn qloss_i32_to_f64(n: i32) -> f64 {
+    var result = 0.0
+    var i: i32 = 0
+    if n > 0 {
+        while i < n {
+            result = result + 1.0
+            i = i + 1
+        }
+    }
+    result
+}
+
+// ============================================================================
+// LOSS FUNCTIONS
+// ============================================================================
+
+// Cross-entropy loss: -sum(target[i] * log(pred[i])) / n
+fn qnn_cross_entropy(pred: &[f64; 64], target: &[f64; 64], n: i32) -> f64 with Mut, Div, Panic {
+    if n < 1 { return 0.0 }
+    var sum = 0.0
+    var i: i32 = 0
+    while i < n {
+        if i < 64 {
+            let p = pred[i]
+            let t = target[i]
+            var p_safe = p
+            if p_safe < 1.0e-10 { p_safe = 1.0e-10 }
+            if p_safe > 1.0 - 1.0e-10 { p_safe = 1.0 - 1.0e-10 }
+            sum = sum - t * qloss_log(p_safe)
+        }
+        i = i + 1
+    }
+    let nf = qloss_i32_to_f64(n)
+    if nf < 1.0 { return sum }
+    sum / nf
+}
+
+// KL divergence: sum(p[i] * log(p[i] / q[i])) / n
+fn qnn_kl_divergence(p: &[f64; 64], q: &[f64; 64], n: i32) -> f64 with Mut, Div, Panic {
+    if n < 1 { return 0.0 }
+    var sum = 0.0
+    var i: i32 = 0
+    while i < n {
+        if i < 64 {
+            let pi = p[i]
+            let qi = q[i]
+            if pi > 1.0e-10 {
+                var q_safe = qi
+                if q_safe < 1.0e-10 { q_safe = 1.0e-10 }
+                sum = sum + pi * (qloss_log(pi) - qloss_log(q_safe))
+            }
+        }
+        i = i + 1
+    }
+    let nf = qloss_i32_to_f64(n)
+    if nf < 1.0 { return sum }
+    sum / nf
+}
+
+// Mean squared error: sum((pred[i] - target[i])^2) / n
+fn qnn_mse(pred: &[f64; 64], target: &[f64; 64], n: i32) -> f64 with Mut, Div, Panic {
+    if n < 1 { return 0.0 }
+    var sum = 0.0
+    var i: i32 = 0
+    while i < n {
+        if i < 64 {
+            let diff = pred[i] - target[i]
+            sum = sum + diff * diff
+        }
+        i = i + 1
+    }
+    let nf = qloss_i32_to_f64(n)
+    if nf < 1.0 { return sum }
+    sum / nf
+}
+
+// ============================================================================
+// TESTS
+// ============================================================================
+
+fn test_mse_zero() -> bool {
+    var a = [0.0; 64]
+    a[0] = 1.0
+    a[1] = 2.0
+    let loss = qnn_mse(&a, &a, 2)
+    qloss_abs(loss) < 0.001
+}
+
+fn test_mse_nonzero() -> bool {
+    var pred = [0.0; 64]
+    var target = [0.0; 64]
+    pred[0] = 1.0
+    target[0] = 2.0
+    let loss = qnn_mse(&pred, &target, 1)
+    qloss_abs(loss - 1.0) < 0.001
+}
+
+fn test_kl_same() -> bool {
+    var p = [0.0; 64]
+    p[0] = 0.5
+    p[1] = 0.5
+    let kl = qnn_kl_divergence(&p, &p, 2)
+    qloss_abs(kl) < 0.01
+}

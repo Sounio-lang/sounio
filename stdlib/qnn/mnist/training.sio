@@ -1,1 +1,130 @@
-//! training (disabled)
+// stdlib/qnn/mnist/training.sio — MNIST training loop
+//
+// Simple SGD training step on a QMnistModel with MnistBatch.
+
+// ============================================================================
+// TYPES (duplicated for standalone check)
+// ============================================================================
+
+struct MnistBatch {
+    images: [f64; 4096],
+    labels: [i32; 64],
+    batch_size: i32
+}
+
+struct QMnistModel {
+    conv: [f64; 1024],
+    fc: [f64; 4096],
+    n_classes: i32
+}
+
+// ============================================================================
+// HELPERS
+// ============================================================================
+
+fn qmt_abs(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+fn qmt_i32_to_f64(n: i32) -> f64 {
+    var r = 0.0
+    var i: i32 = 0
+    if n > 0 {
+        while i < n {
+            r = r + 1.0
+            i = i + 1
+        }
+    }
+    r
+}
+
+// ============================================================================
+// TRAINING
+// ============================================================================
+
+// Single training step: compute forward pass (simple linear model on fc weights),
+// MSE loss, and gradient descent update. Returns average loss.
+fn qmnist_train_step(model: &QMnistModel, batch: &MnistBatch, lr: f64, grad_out: &![f64; 4096]) -> f64 with Mut, Div, Panic {
+    let bs = batch.batch_size
+    if bs < 1 { return 0.0 }
+    let nc = model.n_classes
+    if nc < 1 { return 0.0 }
+
+    // Zero gradients
+    var gi: i32 = 0
+    while gi < 4096 {
+        grad_out[gi] = 0.0
+        gi = gi + 1
+    }
+
+    var total_loss = 0.0
+
+    // For each sample in batch
+    var s: i32 = 0
+    while s < bs {
+        // Forward: logits[c] = sum_j(fc[c*64+j] * image[s*64+j])
+        // Compute logits for each class
+        var max_logit = 0.0 - 1.0e10
+        var pred_class: i32 = 0
+
+        var c: i32 = 0
+        while c < nc {
+            if c >= 10 { c = nc }
+            var logit = 0.0
+            var j: i32 = 0
+            while j < 64 {
+                let fc_idx = c * 64 + j
+                let img_idx = s * 64 + j
+                if fc_idx < 4096 {
+                    if img_idx < 4096 {
+                        logit = logit + model.fc[fc_idx] * batch.images[img_idx]
+                    }
+                }
+                j = j + 1
+            }
+            if logit > max_logit {
+                max_logit = logit
+                pred_class = c
+            }
+
+            // MSE loss: (logit - target)^2 where target = 1 if c==label else 0
+            var target = 0.0
+            if c == batch.labels[s] {
+                target = 1.0
+            }
+            let diff = logit - target
+            total_loss = total_loss + diff * diff
+
+            // Accumulate gradient: dL/dw = 2 * diff * x
+            j = 0
+            while j < 64 {
+                let fc_idx = c * 64 + j
+                let img_idx = s * 64 + j
+                if fc_idx < 4096 {
+                    if img_idx < 4096 {
+                        grad_out[fc_idx] = grad_out[fc_idx] + 2.0 * diff * batch.images[img_idx]
+                    }
+                }
+                j = j + 1
+            }
+
+            c = c + 1
+        }
+        s = s + 1
+    }
+
+    let bsf = qmt_i32_to_f64(bs)
+    if bsf > 0.0 { total_loss / bsf } else { total_loss }
+}
+
+// ============================================================================
+// TESTS
+// ============================================================================
+
+fn test_train_step_zero() -> bool {
+    let model = QMnistModel { conv: [0.0; 1024], fc: [0.0; 4096], n_classes: 10 }
+    let batch = MnistBatch { images: [0.0; 4096], labels: [0; 64], batch_size: 0 }
+    var grads = [0.0; 4096]
+    let loss = qmnist_train_step(&model, &batch, 0.01, &!grads)
+    qmt_abs(loss) < 0.001
+}

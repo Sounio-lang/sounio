@@ -1,1 +1,217 @@
-//! activation (disabled)
+// stdlib/qnn/activation.sio — Quaternion activation functions
+//
+// Component-wise activation functions for quaternion-valued neurons.
+// References:
+//   - Parcollet et al. (2019) "Quaternion Recurrent Neural Networks"
+//   - Zhu et al. (2018) "Quaternion Convolutional Neural Networks"
+
+// ============================================================================
+// MATH HELPERS
+// ============================================================================
+
+fn qnn_abs(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+// Taylor series exp: sum_{k=0}^{15} x^k / k!
+// Range-reduced for numerical stability.
+fn qnn_exp(x: f64) -> f64 {
+    if x > 20.0 { return qnn_exp(x / 2.0) * qnn_exp(x / 2.0) }
+    if x < 0.0 - 20.0 { return 1.0 / qnn_exp(0.0 - x) }
+
+    var sum = 1.0
+    var term = 1.0
+    term = term * x / 1.0
+    sum = sum + term
+    term = term * x / 2.0
+    sum = sum + term
+    term = term * x / 3.0
+    sum = sum + term
+    term = term * x / 4.0
+    sum = sum + term
+    term = term * x / 5.0
+    sum = sum + term
+    term = term * x / 6.0
+    sum = sum + term
+    term = term * x / 7.0
+    sum = sum + term
+    term = term * x / 8.0
+    sum = sum + term
+    term = term * x / 9.0
+    sum = sum + term
+    term = term * x / 10.0
+    sum = sum + term
+    term = term * x / 11.0
+    sum = sum + term
+    term = term * x / 12.0
+    sum = sum + term
+    term = term * x / 13.0
+    sum = sum + term
+    term = term * x / 14.0
+    sum = sum + term
+    term = term * x / 15.0
+    sum = sum + term
+    sum
+}
+
+fn qnn_sqrt(x: f64) -> f64 {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y
+}
+
+// ============================================================================
+// QUATERNION TYPE
+// ============================================================================
+
+struct Quaternion {
+    w: f64,
+    x: f64,
+    y: f64,
+    z: f64
+}
+
+fn quaternion_new(w: f64, x: f64, y: f64, z: f64) -> Quaternion {
+    Quaternion { w: w, x: x, y: y, z: z }
+}
+
+fn quaternion_zero() -> Quaternion {
+    Quaternion { w: 0.0, x: 0.0, y: 0.0, z: 0.0 }
+}
+
+fn quaternion_norm(q: Quaternion) -> f64 {
+    qnn_sqrt(q.w * q.w + q.x * q.x + q.y * q.y + q.z * q.z)
+}
+
+// ============================================================================
+// ACTIVATION FUNCTIONS
+// ============================================================================
+
+// Component-wise ReLU: max(0, component)
+fn quat_relu(q: Quaternion) -> Quaternion {
+    var rw = 0.0
+    var rx = 0.0
+    var ry = 0.0
+    var rz = 0.0
+    if q.w > 0.0 { rw = q.w }
+    if q.x > 0.0 { rx = q.x }
+    if q.y > 0.0 { ry = q.y }
+    if q.z > 0.0 { rz = q.z }
+    Quaternion { w: rw, x: rx, y: ry, z: rz }
+}
+
+// Component-wise sigmoid: 1 / (1 + exp(-x))
+fn qnn_sigmoid_scalar(x: f64) -> f64 {
+    1.0 / (1.0 + qnn_exp(0.0 - x))
+}
+
+fn quat_sigmoid(q: Quaternion) -> Quaternion {
+    Quaternion {
+        w: qnn_sigmoid_scalar(q.w),
+        x: qnn_sigmoid_scalar(q.x),
+        y: qnn_sigmoid_scalar(q.y),
+        z: qnn_sigmoid_scalar(q.z)
+    }
+}
+
+// Component-wise tanh: (exp(2x) - 1) / (exp(2x) + 1)
+fn qnn_tanh_scalar(x: f64) -> f64 {
+    let e2x = qnn_exp(2.0 * x)
+    (e2x - 1.0) / (e2x + 1.0)
+}
+
+fn quat_tanh(q: Quaternion) -> Quaternion {
+    Quaternion {
+        w: qnn_tanh_scalar(q.w),
+        x: qnn_tanh_scalar(q.x),
+        y: qnn_tanh_scalar(q.y),
+        z: qnn_tanh_scalar(q.z)
+    }
+}
+
+// Leaky ReLU with alpha parameter
+fn qnn_leaky_relu_scalar(x: f64, alpha: f64) -> f64 {
+    if x > 0.0 { x } else { alpha * x }
+}
+
+fn quat_leaky_relu(q: Quaternion, alpha: f64) -> Quaternion {
+    Quaternion {
+        w: qnn_leaky_relu_scalar(q.w, alpha),
+        x: qnn_leaky_relu_scalar(q.x, alpha),
+        y: qnn_leaky_relu_scalar(q.y, alpha),
+        z: qnn_leaky_relu_scalar(q.z, alpha)
+    }
+}
+
+// Split activation: tanh on real, sigmoid on imaginary
+fn quat_split_activation(q: Quaternion) -> Quaternion {
+    Quaternion {
+        w: qnn_tanh_scalar(q.w),
+        x: qnn_sigmoid_scalar(q.x),
+        y: qnn_sigmoid_scalar(q.y),
+        z: qnn_sigmoid_scalar(q.z)
+    }
+}
+
+// Quaternion normalization
+fn quat_normalize(q: Quaternion) -> Quaternion {
+    let n = quaternion_norm(q)
+    if n < 1.0e-15 { return quaternion_zero() }
+    Quaternion {
+        w: q.w / n,
+        x: q.x / n,
+        y: q.y / n,
+        z: q.z / n
+    }
+}
+
+// ============================================================================
+// TESTS
+// ============================================================================
+
+fn test_quat_relu() -> bool {
+    let q = quaternion_new(1.0, 0.0 - 2.0, 3.0, 0.0 - 0.5)
+    let r = quat_relu(q)
+    qnn_abs(r.w - 1.0) < 0.001
+}
+
+fn test_quat_relu_clamp() -> bool {
+    let q = quaternion_new(0.0 - 5.0, 2.0, 0.0 - 3.0, 0.0)
+    let r = quat_relu(q)
+    qnn_abs(r.w) < 0.001
+}
+
+fn test_sigmoid_half() -> bool {
+    let q = quaternion_new(0.0, 0.0, 0.0, 0.0)
+    let s = quat_sigmoid(q)
+    qnn_abs(s.w - 0.5) < 0.01
+}
+
+fn test_tanh_zero() -> bool {
+    let q = quaternion_new(0.0, 0.0, 0.0, 0.0)
+    let t = quat_tanh(q)
+    qnn_abs(t.w) < 0.01
+}
+
+fn test_exp_zero() -> bool {
+    qnn_abs(qnn_exp(0.0) - 1.0) < 0.01
+}
+
+fn test_exp_one() -> bool {
+    qnn_abs(qnn_exp(1.0) - 2.718) < 0.1
+}
+
+fn test_norm_unit() -> bool {
+    let q = quaternion_new(1.0, 0.0, 0.0, 0.0)
+    qnn_abs(quaternion_norm(q) - 1.0) < 0.001
+}

@@ -1,1 +1,172 @@
-//! random (disabled)
+//! stdlib/crypto/random.sio — CSPRNG (xoshiro256** based)
+//!
+//! Deterministic pseudorandom number generator suitable for cryptographic
+//! seeding and random byte generation. Uses xoshiro256** algorithm.
+//!
+//! By-value state passing to avoid borrow checker issues.
+//!
+//! SOTA: Blackman & Vigna (2021) — "Scrambled Linear Pseudorandom Number Generators"
+
+// ============================================================================
+// TYPES
+// ============================================================================
+
+struct CryptoRng {
+    state: [i64; 4],
+}
+
+// ============================================================================
+// HELPERS
+// ============================================================================
+
+// Rotate left 64-bit
+fn crng_rotl64(x: i64, k: i32) -> i64 {
+    return (x << k) | ((x >> (64 - k)) & ((1 << k) - 1))
+}
+
+// SplitMix64 for seed expansion (Vigna, 2015)
+fn crng_splitmix64(z: i64) -> i64 {
+    var x = z + (-7046029254386353131)
+    x = (x ^ (x >> 30)) * (-4658895280553007687)
+    x = (x ^ (x >> 27)) * (-7723592293110705685)
+    return x ^ (x >> 31)
+}
+
+// ============================================================================
+// CONSTRUCTION
+// ============================================================================
+
+fn crypto_rng_new(seed: i64) -> CryptoRng {
+    // Expand single seed into 4 state words via SplitMix64
+    let z0 = seed
+    let s0 = crng_splitmix64(z0)
+    let z1 = z0 + (-7046029254386353131)
+    let s1 = crng_splitmix64(z1)
+    let z2 = z1 + (-7046029254386353131)
+    let s2 = crng_splitmix64(z2)
+    let z3 = z2 + (-7046029254386353131)
+    let s3 = crng_splitmix64(z3)
+
+    let st: [i64; 4] = [s0, s1, s2, s3]
+    CryptoRng { state: st }
+}
+
+// ============================================================================
+// GENERATION — xoshiro256**
+// ============================================================================
+
+fn crypto_rng_next(rng: CryptoRng) -> CryptoRng {
+    let s0 = rng.state[0]
+    let s1 = rng.state[1]
+    let s2 = rng.state[2]
+    let s3 = rng.state[3]
+
+    // xoshiro256** step
+    let t = s1 << 17
+
+    var ns2 = s2 ^ s0
+    var ns3 = s3 ^ s1
+    var ns1 = s1 ^ ns2
+    var ns0 = s0 ^ ns3
+
+    ns2 = ns2 ^ t
+    ns3 = crng_rotl64(ns3, 45)
+
+    let st: [i64; 4] = [ns0, ns1, ns2, ns3]
+    CryptoRng { state: st }
+}
+
+// Extract the current output value (xoshiro256** scrambler)
+fn crypto_rng_value(rng: CryptoRng) -> i64 {
+    let s1 = rng.state[1]
+    let result_star = crng_rotl64(s1 * 5, 7) * 9
+    return result_star
+}
+
+fn crypto_random_bytes(rng: CryptoRng, out: &![u8; 256], n: i32) -> CryptoRng with Mut, Div, Panic {
+    var r = rng
+    var i: i32 = 0
+    while i < n {
+        r = crypto_rng_next(r)
+        let val = crypto_rng_value(r)
+
+        // Extract up to 8 bytes from each 64-bit value
+        var j: i32 = 0
+        while j < 8 && (i + j) < n {
+            out[i + j] = ((val >> (j * 8)) & 0xFF) as u8
+            j = j + 1
+        }
+        i = i + 8
+    }
+    return r
+}
+
+// Uniform f64 in [0.0, 1.0) from current state
+fn crypto_rng_uniform(rng: CryptoRng) -> f64 with Mut, Div, Panic {
+    let val = crypto_rng_value(rng)
+    // Use upper 53 bits for double precision mantissa
+    // Mask to positive 53-bit integer, then divide by 2^53
+    var raw = val
+    if raw < 0 { raw = 0 - raw }
+    if raw < 0 { raw = 1 }
+    // Mask to 53 bits: (1 << 53) - 1 = 9007199254740991
+    let bits = raw & 9007199254740991
+    let divisor = 9007199254740992.0
+    return (bits as f64) / divisor
+}
+
+// ============================================================================
+// TEST — deterministic output for known seed
+// ============================================================================
+
+fn crypto_rng_test() -> i32 with Mut, Div, Panic {
+    // Test 1: deterministic — same seed produces same output
+    let r1 = crypto_rng_new(42)
+    let r2 = crypto_rng_new(42)
+    let r1a = crypto_rng_next(r1)
+    let r2a = crypto_rng_next(r2)
+    let v1 = crypto_rng_value(r1a)
+    let v2 = crypto_rng_value(r2a)
+    if v1 != v2 { return 1 }
+
+    // Test 2: different seeds produce different output
+    let r3 = crypto_rng_new(99)
+    let r3a = crypto_rng_next(r3)
+    let v3 = crypto_rng_value(r3a)
+    if v1 == v3 { return 2 }
+
+    // Test 3: sequential calls produce different values
+    let r4a = crypto_rng_next(r1)
+    let r4b = crypto_rng_next(r4a)
+    let va = crypto_rng_value(r4a)
+    let vb = crypto_rng_value(r4b)
+    if va == vb { return 3 }
+
+    // Test 4: crypto_random_bytes fills buffer
+    var buf: [u8; 256] = [0; 256]
+    let r5 = crypto_rng_new(123)
+    let r5a = crypto_random_bytes(r5, &!buf, 16)
+
+    // Check at least some bytes are non-zero
+    var any_nonzero = false
+    var k: i32 = 0
+    while k < 16 {
+        if buf[k] != 0 {
+            any_nonzero = true
+        }
+        k = k + 1
+    }
+    if !any_nonzero { return 4 }
+
+    // Test 5: crypto_random_bytes is deterministic
+    var buf2: [u8; 256] = [0; 256]
+    let r6 = crypto_rng_new(123)
+    let r6a = crypto_random_bytes(r6, &!buf2, 16)
+    var m: i32 = 0
+    while m < 16 {
+        if buf[m] != buf2[m] { return 5 }
+        m = m + 1
+    }
+
+    return 0
+}

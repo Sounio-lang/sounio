@@ -1,0 +1,135 @@
+// medlang/policy/mod.sio — Therapeutic Drug Monitoring & Dosing Policy
+//
+// Dose adjustment based on observed drug concentrations.
+// Implements simple proportional TDM (Therapeutic Drug Monitoring).
+//
+// References:
+// - Kang & Lee (2009): "Overview of TDM of aminoglycosides"
+// - Winter (2010): "Basic Clinical Pharmacokinetics", 5th ed.
+
+fn pol_abs(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+// ============================================================================
+// DOSING POLICY
+// ============================================================================
+
+pub struct DosingPolicy {
+    target_min: f64,     // Minimum therapeutic concentration (mg/L)
+    target_max: f64,     // Maximum therapeutic concentration (mg/L)
+    adjust_factor: f64,  // Proportional adjustment factor (e.g. 0.5 for cautious)
+}
+
+pub fn dosing_policy_new(target_min: f64, target_max: f64, adjust_factor: f64) -> DosingPolicy {
+    DosingPolicy {
+        target_min: target_min,
+        target_max: target_max,
+        adjust_factor: adjust_factor,
+    }
+}
+
+// ============================================================================
+// DOSE ADJUSTMENT
+// ============================================================================
+// Adjusts dose based on current concentration relative to target range.
+//
+// - If current_conc < target_min: increase dose proportionally
+// - If current_conc > target_max: decrease dose proportionally
+// - If within range: no change
+//
+// The adjust_factor controls how aggressively the dose is changed.
+// factor=1.0 means full linear correction; 0.5 means half-step.
+
+pub fn policy_adjust_dose(policy: DosingPolicy, current_conc: f64, current_dose: f64) -> f64 {
+    if current_dose <= 0.0 {
+        return 0.0
+    }
+
+    let target_mid = (policy.target_min + policy.target_max) * 0.5
+
+    // Within therapeutic window: no adjustment
+    if current_conc >= policy.target_min && current_conc <= policy.target_max {
+        return current_dose
+    }
+
+    // Below target: increase dose
+    if current_conc < policy.target_min {
+        if current_conc <= 0.0 {
+            // No measurable level: double the dose
+            return current_dose * 2.0
+        }
+        let ratio = target_mid / current_conc
+        let adjustment = 1.0 + (ratio - 1.0) * policy.adjust_factor
+        return current_dose * adjustment
+    }
+
+    // Above target: decrease dose
+    let ratio = target_mid / current_conc
+    let adjustment = 1.0 + (ratio - 1.0) * policy.adjust_factor
+    // Never reduce below 10% of current dose
+    var new_dose = current_dose * adjustment
+    let floor = current_dose * 0.1
+    if new_dose < floor {
+        new_dose = floor
+    }
+    new_dose
+}
+
+// Check if concentration is within therapeutic window
+pub fn policy_in_range(policy: DosingPolicy, conc: f64) -> bool {
+    conc >= policy.target_min && conc <= policy.target_max
+}
+
+// Check if concentration is critically high (>2x target_max)
+pub fn policy_is_toxic(policy: DosingPolicy, conc: f64) -> bool {
+    conc > policy.target_max * 2.0
+}
+
+// ============================================================================
+// INLINE TESTS
+// ============================================================================
+
+//@ run-pass
+fn test_policy_in_range_no_change() -> i32 {
+    let p = dosing_policy_new(10.0, 20.0, 0.5)
+    let dose = policy_adjust_dose(p, 15.0, 100.0)
+    // Within range: dose should stay at 100
+    if pol_abs(dose - 100.0) > 0.001 { return 1 }
+    0
+}
+
+//@ run-pass
+fn test_policy_below_range_increase() -> i32 {
+    let p = dosing_policy_new(10.0, 20.0, 1.0)
+    let dose = policy_adjust_dose(p, 5.0, 100.0)
+    // Below target_min: dose should increase
+    if dose <= 100.0 { return 1 }
+    0
+}
+
+//@ run-pass
+fn test_policy_above_range_decrease() -> i32 {
+    let p = dosing_policy_new(10.0, 20.0, 1.0)
+    let dose = policy_adjust_dose(p, 30.0, 100.0)
+    // Above target_max: dose should decrease
+    if dose >= 100.0 { return 1 }
+    0
+}
+
+//@ run-pass
+fn test_policy_in_range_check() -> i32 {
+    let p = dosing_policy_new(10.0, 20.0, 0.5)
+    if !policy_in_range(p, 15.0) { return 1 }
+    if policy_in_range(p, 5.0) { return 2 }
+    if policy_in_range(p, 25.0) { return 3 }
+    0
+}
+
+//@ run-pass
+fn test_policy_toxic() -> i32 {
+    let p = dosing_policy_new(10.0, 20.0, 0.5)
+    if policy_is_toxic(p, 30.0) { return 1 }  // 30 < 40 (2x20)
+    if !policy_is_toxic(p, 50.0) { return 2 }  // 50 > 40
+    0
+}

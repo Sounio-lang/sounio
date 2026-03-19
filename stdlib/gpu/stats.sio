@@ -1,1 +1,303 @@
-//! stats (disabled)
+// stdlib/gpu/stats.sio — Parallel-style statistical reductions
+//
+// Sum, mean, variance, min, max, histogram operations on fixed arrays.
+// Designed for GPU-style data-parallel patterns (single-thread emulation).
+//
+// Reference: Harris, "Optimizing Parallel Reduction in CUDA" NVIDIA 2007
+
+// =============================================================================
+// Math Helpers
+// =============================================================================
+
+fn stats_abs(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+fn stats_sqrt(x: f64) -> f64 {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i = 0
+    while i < 10 {
+        y = 0.5 * (y + x / y)
+        i = i + 1
+    }
+    return y
+}
+
+// =============================================================================
+// Stats Result
+// =============================================================================
+
+struct GpuStats {
+    mean: f64,
+    variance: f64,
+    min: f64,
+    max: f64,
+    n: i32
+}
+
+// =============================================================================
+// Reduction Operations
+// =============================================================================
+
+fn gpu_sum(data: &[f64; 256], n: i32) -> f64 {
+    var acc = 0.0
+    var i = 0
+    while i < n {
+        if i < 256 {
+            acc = acc + data[i]
+        }
+        i = i + 1
+    }
+    return acc
+}
+
+fn gpu_mean(data: &[f64; 256], n: i32) -> f64 {
+    if n <= 0 { return 0.0 }
+    return gpu_sum(data, n) / (n as f64)
+}
+
+fn gpu_variance(data: &[f64; 256], n: i32) -> f64 {
+    if n <= 1 { return 0.0 }
+    let m = gpu_mean(data, n)
+
+    var acc = 0.0
+    var i = 0
+    while i < n {
+        if i < 256 {
+            let d = data[i] - m
+            acc = acc + d * d
+        }
+        i = i + 1
+    }
+    return acc / ((n - 1) as f64)
+}
+
+fn gpu_stddev(data: &[f64; 256], n: i32) -> f64 {
+    return stats_sqrt(gpu_variance(data, n))
+}
+
+fn gpu_min(data: &[f64; 256], n: i32) -> f64 {
+    if n <= 0 { return 0.0 }
+    var result = data[0]
+    var i = 1
+    while i < n {
+        if i < 256 && data[i] < result {
+            result = data[i]
+        }
+        i = i + 1
+    }
+    return result
+}
+
+fn gpu_max(data: &[f64; 256], n: i32) -> f64 {
+    if n <= 0 { return 0.0 }
+    var result = data[0]
+    var i = 1
+    while i < n {
+        if i < 256 && data[i] > result {
+            result = data[i]
+        }
+        i = i + 1
+    }
+    return result
+}
+
+// Compute all stats at once
+fn gpu_compute_stats(data: &[f64; 256], n: i32) -> GpuStats {
+    if n <= 0 {
+        return GpuStats { mean: 0.0, variance: 0.0, min: 0.0, max: 0.0, n: 0 }
+    }
+
+    var s = 0.0
+    var mn = data[0]
+    var mx = data[0]
+    var i = 0
+    while i < n {
+        if i < 256 {
+            s = s + data[i]
+            if data[i] < mn { mn = data[i] }
+            if data[i] > mx { mx = data[i] }
+        }
+        i = i + 1
+    }
+
+    let m = s / (n as f64)
+
+    var var_acc = 0.0
+    i = 0
+    while i < n {
+        if i < 256 {
+            let d = data[i] - m
+            var_acc = var_acc + d * d
+        }
+        i = i + 1
+    }
+
+    var v = 0.0
+    if n > 1 {
+        v = var_acc / ((n - 1) as f64)
+    }
+
+    return GpuStats { mean: m, variance: v, min: mn, max: mx, n: n }
+}
+
+// =============================================================================
+// Histogram
+// =============================================================================
+
+// Compute histogram: bin data[0..n] into nbins equally-spaced bins over [lo, hi]
+fn gpu_histogram(data: &[f64; 256], n: i32, lo: f64, hi: f64, nbins: i32, hist: &![i32; 256]) with Mut, Div, Panic {
+    // Zero histogram
+    var i = 0
+    while i < nbins {
+        if i < 256 { hist[i] = 0 }
+        i = i + 1
+    }
+
+    if nbins <= 0 { return }
+    let range = hi - lo
+    if range <= 0.0 { return }
+
+    i = 0
+    while i < n {
+        if i < 256 {
+            let val = data[i]
+            var bin = ((val - lo) / range * (nbins as f64)) as i32
+            if bin < 0 { bin = 0 }
+            if bin >= nbins { bin = nbins - 1 }
+            if bin < 256 {
+                hist[bin] = hist[bin] + 1
+            }
+        }
+        i = i + 1
+    }
+}
+
+// =============================================================================
+// Additional Reductions
+// =============================================================================
+
+// Dot product: sum(a[i] * b[i])
+fn gpu_dot(a: &[f64; 256], b: &[f64; 256], n: i32) -> f64 {
+    var acc = 0.0
+    var i = 0
+    while i < n {
+        if i < 256 {
+            acc = acc + a[i] * b[i]
+        }
+        i = i + 1
+    }
+    return acc
+}
+
+// L2 norm: sqrt(sum(x[i]^2))
+fn gpu_norm_l2(data: &[f64; 256], n: i32) -> f64 {
+    var acc = 0.0
+    var i = 0
+    while i < n {
+        if i < 256 {
+            acc = acc + data[i] * data[i]
+        }
+        i = i + 1
+    }
+    return stats_sqrt(acc)
+}
+
+// L1 norm: sum(|x[i]|)
+fn gpu_norm_l1(data: &[f64; 256], n: i32) -> f64 {
+    var acc = 0.0
+    var i = 0
+    while i < n {
+        if i < 256 {
+            acc = acc + stats_abs(data[i])
+        }
+        i = i + 1
+    }
+    return acc
+}
+
+// =============================================================================
+// Tests
+// =============================================================================
+
+fn test_gpu_sum() -> i32 {
+    var data = [0.0; 256]
+    data[0] = 1.0
+    data[1] = 2.0
+    data[2] = 3.0
+
+    let s = gpu_sum(&data, 3)
+    if stats_abs(s - 6.0) > 0.001 { return 1 }
+    return 0
+}
+
+fn test_gpu_mean() -> i32 {
+    var data = [0.0; 256]
+    data[0] = 2.0
+    data[1] = 4.0
+    data[2] = 6.0
+
+    let m = gpu_mean(&data, 3)
+    if stats_abs(m - 4.0) > 0.001 { return 1 }
+    return 0
+}
+
+fn test_gpu_min_max() -> i32 {
+    var data = [0.0; 256]
+    data[0] = 5.0
+    data[1] = 1.0
+    data[2] = 9.0
+    data[3] = 3.0
+
+    let mn = gpu_min(&data, 4)
+    let mx = gpu_max(&data, 4)
+    if stats_abs(mn - 1.0) > 0.001 { return 1 }
+    if stats_abs(mx - 9.0) > 0.001 { return 2 }
+    return 0
+}
+
+fn test_gpu_variance() -> i32 {
+    // [2, 4, 6]: mean=4, var = ((2-4)^2 + (4-4)^2 + (6-4)^2) / 2 = 4
+    var data = [0.0; 256]
+    data[0] = 2.0
+    data[1] = 4.0
+    data[2] = 6.0
+
+    let v = gpu_variance(&data, 3)
+    if stats_abs(v - 4.0) > 0.01 { return 1 }
+    return 0
+}
+
+fn test_gpu_histogram() -> i32 {
+    var data = [0.0; 256]
+    data[0] = 0.5
+    data[1] = 1.5
+    data[2] = 2.5
+    data[3] = 0.8
+
+    var hist = [0; 256]
+    gpu_histogram(&data, 4, 0.0, 3.0, 3, &!hist)
+
+    // bin 0: [0,1) => 0.5, 0.8 => 2
+    // bin 1: [1,2) => 1.5 => 1
+    // bin 2: [2,3) => 2.5 => 1
+    if hist[0] != 2 { return 1 }
+    if hist[1] != 1 { return 2 }
+    if hist[2] != 1 { return 3 }
+    return 0
+}
+
+fn test_gpu_stats() -> i32 {
+    var data = [0.0; 256]
+    data[0] = 1.0
+    data[1] = 2.0
+    data[2] = 3.0
+
+    let st = gpu_compute_stats(&data, 3)
+    if stats_abs(st.mean - 2.0) > 0.001 { return 1 }
+    if stats_abs(st.min - 1.0) > 0.001 { return 2 }
+    if stats_abs(st.max - 3.0) > 0.001 { return 3 }
+    return 0
+}

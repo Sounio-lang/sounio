@@ -1,1 +1,217 @@
-//! estimation (disabled)
+// stdlib/medlang/population/estimation.sio
+//
+// Population parameter estimation — Sounio
+//
+// Naive pooled estimation: compute mean and variance of observations
+// to estimate population-level PK parameters.
+
+// ============================================================================
+// Helpers
+// ============================================================================
+
+fn pe_abs(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+fn pe_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i = 0
+    while i < 15 {
+        y = 0.5 * (y + x / y)
+        i = i + 1
+    }
+    y
+}
+
+// ============================================================================
+// Population estimate structure
+// theta: fixed-effect parameters (means)
+// omega: between-subject variability (variances)
+// sigma: residual variability
+// ============================================================================
+
+struct PopEstimate {
+    theta: [f64; 16],    // fixed effects
+    omega: [f64; 16],    // random effect variances
+    sigma: f64,          // residual error variance
+    n_params: i32,       // number of parameters estimated
+}
+
+fn pop_estimate_new() -> PopEstimate {
+    PopEstimate {
+        theta: [0.0; 16],
+        omega: [0.0; 16],
+        sigma: 0.0,
+        n_params: 0,
+    }
+}
+
+// ============================================================================
+// Naive pooled estimation
+// Treats all observations as from a single "average" subject.
+// Computes mean and variance of observation blocks.
+//
+// observations: flat array of observations
+// n_obs: total number of observations
+// n_params: number of parameters to extract (divides observations into blocks)
+// ============================================================================
+
+fn pop_naive_pooled(observations: &[f64; 256], n_obs: i32, n_params: i32) -> PopEstimate with Mut, Div, Panic {
+    var est = pop_estimate_new()
+    if n_params <= 0 { return est }
+    if n_obs <= 0 { return est }
+
+    var np = n_params
+    if np > 16 { np = 16 }
+    est.n_params = np
+
+    // Block size: how many observations per parameter
+    let block_size = n_obs / np
+
+    if block_size < 1 {
+        // Fewer observations than parameters: just copy what we have
+        var i = 0
+        while i < n_obs && i < np {
+            est.theta[i] = observations[i]
+            i = i + 1
+        }
+        return est
+    }
+
+    // For each parameter block, compute mean (theta) and variance (omega)
+    var p = 0
+    while p < np {
+        let start = p * block_size
+        var end_idx = start + block_size
+        if end_idx > n_obs { end_idx = n_obs }
+
+        // Mean
+        var sum = 0.0
+        var count = 0
+        var i = start
+        while i < end_idx {
+            sum = sum + observations[i]
+            count = count + 1
+            i = i + 1
+        }
+        let mean = if count > 0 { sum / count as f64 } else { 0.0 }
+        est.theta[p] = mean
+
+        // Variance (unbiased: divide by n-1)
+        var var_sum = 0.0
+        i = start
+        while i < end_idx {
+            let diff = observations[i] - mean
+            var_sum = var_sum + diff * diff
+            i = i + 1
+        }
+        if count > 1 {
+            est.omega[p] = var_sum / (count - 1) as f64
+        } else {
+            est.omega[p] = 0.0
+        }
+
+        p = p + 1
+    }
+
+    // Residual sigma: overall variance of residuals from block means
+    var resid_sum = 0.0
+    var total_count = 0
+    p = 0
+    while p < np {
+        let start = p * block_size
+        var end_idx = start + block_size
+        if end_idx > n_obs { end_idx = n_obs }
+        var i = start
+        while i < end_idx {
+            let diff = observations[i] - est.theta[p]
+            resid_sum = resid_sum + diff * diff
+            total_count = total_count + 1
+            i = i + 1
+        }
+        p = p + 1
+    }
+    if total_count > np {
+        est.sigma = resid_sum / (total_count - np) as f64
+    }
+
+    est
+}
+
+// ============================================================================
+// Coefficient of variation (CV%) for each parameter
+// CV = sqrt(omega) / |theta| * 100
+// ============================================================================
+
+fn pop_cv_percent(est: &PopEstimate, cv_out: &![f64; 16]) with Mut, Div, Panic {
+    var i = 0
+    while i < est.n_params {
+        if pe_abs(est.theta[i]) > 1.0e-15 {
+            cv_out[i] = pe_sqrt(est.omega[i]) / pe_abs(est.theta[i]) * 100.0
+        } else {
+            cv_out[i] = 0.0
+        }
+        i = i + 1
+    }
+}
+
+// ============================================================================
+// Standard error of mean for each parameter
+// SE = sqrt(omega / n_subjects)
+// ============================================================================
+
+fn pop_standard_error(est: &PopEstimate, n_subjects: i32, se_out: &![f64; 16]) with Mut, Div, Panic {
+    if n_subjects <= 0 { return }
+    var i = 0
+    while i < est.n_params {
+        se_out[i] = pe_sqrt(est.omega[i] / n_subjects as f64)
+        i = i + 1
+    }
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+fn test_pooled_constant() -> bool with Mut, Div, Panic {
+    // All observations = 5.0, one parameter
+    var obs: [f64; 256] = [0.0; 256]
+    var i = 0
+    while i < 10 {
+        obs[i] = 5.0
+        i = i + 1
+    }
+    let est = pop_naive_pooled(&obs, 10, 1)
+    pe_abs(est.theta[0] - 5.0) < 0.01 && est.omega[0] < 0.01
+}
+
+fn test_pooled_two_params() -> bool with Mut, Div, Panic {
+    // First 5 obs around 10.0, next 5 around 20.0
+    var obs: [f64; 256] = [0.0; 256]
+    obs[0] = 9.0
+    obs[1] = 10.0
+    obs[2] = 11.0
+    obs[3] = 10.0
+    obs[4] = 10.0
+    obs[5] = 19.0
+    obs[6] = 20.0
+    obs[7] = 21.0
+    obs[8] = 20.0
+    obs[9] = 20.0
+    let est = pop_naive_pooled(&obs, 10, 2)
+    pe_abs(est.theta[0] - 10.0) < 0.5 && pe_abs(est.theta[1] - 20.0) < 0.5
+}
+
+fn test_pooled_variance() -> bool with Mut, Div, Panic {
+    // Known variance dataset
+    var obs: [f64; 256] = [0.0; 256]
+    obs[0] = 1.0
+    obs[1] = 2.0
+    obs[2] = 3.0
+    obs[3] = 4.0
+    obs[4] = 5.0
+    let est = pop_naive_pooled(&obs, 5, 1)
+    // Mean = 3.0, var = 2.5 (unbiased)
+    pe_abs(est.theta[0] - 3.0) < 0.01 && pe_abs(est.omega[0] - 2.5) < 0.01
+}

@@ -1,1 +1,189 @@
-//! cache (disabled)
+// stdlib/ontology/cache.sio — Ontology triple cache
+//
+// In-memory RDF-like triple store with subject and predicate indices.
+// Fixed-capacity: 512 triples, O(n) scan with index hints.
+
+// ============================================================================
+// TYPES
+// ============================================================================
+
+struct Triple {
+    subj: i32,
+    pred: i32,
+    obj: i32
+}
+
+struct OntCache {
+    triples: [Triple; 512],
+    count: i32,
+    subj_idx: [i32; 512],
+    pred_idx: [i32; 512]
+}
+
+// ============================================================================
+// CONSTRUCTORS
+// ============================================================================
+
+fn triple_new(s: i32, p: i32, o: i32) -> Triple {
+    Triple { subj: s, pred: p, obj: o }
+}
+
+fn cache_new() -> OntCache {
+    var triples = [Triple { subj: 0, pred: 0, obj: 0 }; 512]
+    var subj_idx = [0; 512]
+    var pred_idx = [0; 512]
+    OntCache {
+        triples: triples,
+        count: 0,
+        subj_idx: subj_idx,
+        pred_idx: pred_idx
+    }
+}
+
+// ============================================================================
+// OPERATIONS
+// ============================================================================
+
+// Add a triple to the cache (returns updated cache by value)
+fn cache_add(c: OntCache, s: i32, p: i32, o: i32) -> OntCache {
+    var result = c
+    if result.count >= 512 {
+        return result
+    }
+
+    // Check for duplicates
+    var i: i32 = 0
+    while i < result.count {
+        let t = result.triples[i]
+        if t.subj == s {
+            if t.pred == p {
+                if t.obj == o {
+                    return result
+                }
+            }
+        }
+        i = i + 1
+    }
+
+    let idx = result.count
+    result.triples[idx] = Triple { subj: s, pred: p, obj: o }
+    result.subj_idx[idx] = s
+    result.pred_idx[idx] = p
+    result.count = result.count + 1
+    result
+}
+
+// Look up triples by subject, writing matches into output arrays
+fn cache_lookup_subj(c: OntCache, subj: i32, out: &![Triple; 64], out_count: &!i32) with Mut, Div, Panic {
+    *out_count = 0
+    var i: i32 = 0
+    while i < c.count {
+        if c.subj_idx[i] == subj {
+            let oc = *out_count
+            if oc < 64 {
+                out[oc] = c.triples[i]
+                *out_count = oc + 1
+            }
+        }
+        i = i + 1
+    }
+}
+
+// Look up triples by predicate
+fn cache_lookup_pred(c: OntCache, pred: i32, out: &![Triple; 64], out_count: &!i32) with Mut, Div, Panic {
+    *out_count = 0
+    var i: i32 = 0
+    while i < c.count {
+        if c.pred_idx[i] == pred {
+            let oc = *out_count
+            if oc < 64 {
+                out[oc] = c.triples[i]
+                *out_count = oc + 1
+            }
+        }
+        i = i + 1
+    }
+}
+
+// Look up triples by subject and predicate
+fn cache_lookup_sp(c: OntCache, subj: i32, pred: i32, out: &![Triple; 64], out_count: &!i32) with Mut, Div, Panic {
+    *out_count = 0
+    var i: i32 = 0
+    while i < c.count {
+        if c.subj_idx[i] == subj {
+            if c.pred_idx[i] == pred {
+                let oc = *out_count
+                if oc < 64 {
+                    out[oc] = c.triples[i]
+                    *out_count = oc + 1
+                }
+            }
+        }
+        i = i + 1
+    }
+}
+
+// Return number of triples in cache
+fn cache_count(c: OntCache) -> i32 {
+    c.count
+}
+
+// Check if a specific triple exists
+fn cache_contains(c: OntCache, s: i32, p: i32, o: i32) -> bool {
+    var i: i32 = 0
+    while i < c.count {
+        let t = c.triples[i]
+        if t.subj == s {
+            if t.pred == p {
+                if t.obj == o {
+                    return true
+                }
+            }
+        }
+        i = i + 1
+    }
+    false
+}
+
+// ============================================================================
+// TESTS
+// ============================================================================
+
+fn test_cache_empty() -> bool {
+    let c = cache_new()
+    cache_count(c) == 0
+}
+
+fn test_cache_add_one() -> bool {
+    let c = cache_new()
+    let c2 = cache_add(c, 1, 2, 3)
+    cache_count(c2) == 1
+}
+
+fn test_cache_add_dup() -> bool {
+    let c = cache_new()
+    let c2 = cache_add(c, 1, 2, 3)
+    let c3 = cache_add(c2, 1, 2, 3)
+    cache_count(c3) == 1
+}
+
+fn test_cache_add_multi() -> bool {
+    let c = cache_new()
+    let c2 = cache_add(c, 1, 2, 3)
+    let c3 = cache_add(c2, 4, 5, 6)
+    let c4 = cache_add(c3, 1, 7, 8)
+    cache_count(c4) == 3
+}
+
+fn test_cache_contains() -> bool {
+    let c = cache_new()
+    let c2 = cache_add(c, 10, 20, 30)
+    let c3 = cache_add(c2, 40, 50, 60)
+    cache_contains(c3, 10, 20, 30)
+}
+
+fn test_cache_not_contains() -> bool {
+    let c = cache_new()
+    let c2 = cache_add(c, 10, 20, 30)
+    cache_contains(c2, 10, 20, 99) == false
+}

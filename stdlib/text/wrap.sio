@@ -1,1 +1,117 @@
-//! wrap (disabled)
+// stdlib/text/wrap — Word wrapping
+//
+// Breaks text at word boundaries to fit within a given column width.
+// Inserts newline (0x0A) characters at break points.
+//
+// Uses struct wrapper for output to work around JIT &!array limitation.
+
+struct WrapResult {
+    data: [u8; 512],
+    len: i32
+}
+
+fn wrap_result_new() -> WrapResult {
+    WrapResult { data: [0; 512], len: 0 }
+}
+
+fn text_wrap(input: &[u8; 256], in_len: i32, width: i32, out: &!WrapResult) with Mut, Panic, Div {
+    if in_len <= 0 || width <= 0 {
+        out.len = 0
+        return
+    }
+
+    var oi: i32 = 0
+    var col: i32 = 0
+    var i: i32 = 0
+
+    while i < in_len && oi < 510 {
+        var word_start = i
+        var word_end = i
+        while word_end < in_len && input[word_end] != 32 && input[word_end] != 10 {
+            word_end = word_end + 1
+        }
+        let word_len = word_end - word_start
+
+        if input[i] == 10 {
+            out.data[oi] = 10
+            oi = oi + 1
+            col = 0
+            i = i + 1
+        } else if input[i] == 32 {
+            if col > 0 && oi < 511 {
+                out.data[oi] = 32
+                oi = oi + 1
+                col = col + 1
+            }
+            i = i + 1
+        } else if word_len > 0 {
+            if col > 0 && col + word_len > width {
+                if oi > 0 && out.data[oi - 1] == 32 {
+                    out.data[oi - 1] = 10
+                } else {
+                    out.data[oi] = 10
+                    oi = oi + 1
+                }
+                col = 0
+            }
+
+            var j: i32 = word_start
+            while j < word_end && oi < 512 {
+                out.data[oi] = input[j]
+                oi = oi + 1
+                col = col + 1
+                j = j + 1
+            }
+            i = word_end
+        } else {
+            i = i + 1
+        }
+    }
+
+    out.len = oi
+}
+
+// By-value variant that avoids the &! limitation entirely
+fn text_wrap_val(input: &[u8; 256], in_len: i32, width: i32) -> WrapResult with Mut, Panic, Div {
+    var result = wrap_result_new()
+    text_wrap(input, in_len, width, &!result)
+    result
+}
+
+// =============================================================================
+// Tests
+// =============================================================================
+
+fn test_short_unchanged() -> bool with Mut, Panic, Div {
+    var input: [u8; 256] = [0; 256]
+    // "hello"
+    input[0] = 104
+    input[1] = 101
+    input[2] = 108
+    input[3] = 108
+    input[4] = 111
+
+    let r = text_wrap_val(&input, 5, 80)
+    r.len == 5 && r.data[0] == 104 && r.data[4] == 111
+}
+
+fn test_wrap_at_boundary() -> bool with Mut, Panic, Div {
+    var input: [u8; 256] = [0; 256]
+    // "aaa bbb"
+    input[0] = 97
+    input[1] = 97
+    input[2] = 97
+    input[3] = 32
+    input[4] = 98
+    input[5] = 98
+    input[6] = 98
+
+    let r = text_wrap_val(&input, 7, 4)
+    // Should be "aaa\nbbb"
+    r.data[0] == 97 && r.data[3] == 10 && r.data[4] == 98
+}
+
+fn main() with IO, Mut, Panic, Div {
+    if test_short_unchanged() { print("wrap short_unchanged: PASS\n") } else { print("wrap short_unchanged: FAIL\n") }
+    if test_wrap_at_boundary() { print("wrap boundary: PASS\n") } else { print("wrap boundary: FAIL\n") }
+}

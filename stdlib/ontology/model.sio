@@ -1,1 +1,205 @@
-//! model (disabled)
+// stdlib/ontology/model.sio — Ontology class/property model
+//
+// Lightweight ontology model with classes (single inheritance) and properties
+// (domain/range). Supports transitive subclass queries.
+
+// ============================================================================
+// TYPES
+// ============================================================================
+
+struct OntClass {
+    id: i32,
+    parent: i32,       // -1 = no parent (root)
+    name_hash: i64
+}
+
+struct OntProperty {
+    id: i32,
+    domain: i32,       // class id for domain
+    range: i32,        // class id for range
+    name_hash: i64
+}
+
+struct OntModel {
+    classes: [OntClass; 128],
+    class_count: i32,
+    props: [OntProperty; 128],
+    prop_count: i32
+}
+
+// ============================================================================
+// CONSTRUCTORS
+// ============================================================================
+
+fn model_new() -> OntModel {
+    var classes = [OntClass { id: 0, parent: -1, name_hash: 0 }; 128]
+    var props = [OntProperty { id: 0, domain: 0, range: 0, name_hash: 0 }; 128]
+    OntModel {
+        classes: classes,
+        class_count: 0,
+        props: props,
+        prop_count: 0
+    }
+}
+
+// ============================================================================
+// CLASS OPERATIONS
+// ============================================================================
+
+fn model_add_class(m: OntModel, id: i32, parent: i32, name_hash: i64) -> OntModel {
+    var result = m
+    if result.class_count >= 128 {
+        return result
+    }
+    let idx = result.class_count
+    result.classes[idx] = OntClass { id: id, parent: parent, name_hash: name_hash }
+    result.class_count = result.class_count + 1
+    result
+}
+
+// Find class index by id, returns -1 if not found
+fn model_find_class(m: OntModel, id: i32) -> i32 {
+    var i: i32 = 0
+    while i < m.class_count {
+        if m.classes[i].id == id {
+            return i
+        }
+        i = i + 1
+    }
+    return -1
+}
+
+// Get parent class id for a given class id, returns -1 if root or not found
+fn model_parent_of(m: OntModel, class_id: i32) -> i32 {
+    let idx = model_find_class(m, class_id)
+    if idx < 0 {
+        return -1
+    }
+    m.classes[idx].parent
+}
+
+// Transitive subclass check: is child a (transitive) subclass of parent?
+// Walks up the parent chain from child. Max depth 128 to prevent cycles.
+fn model_is_subclass(m: OntModel, child: i32, parent: i32) -> bool {
+    if child == parent {
+        return true
+    }
+    var current = child
+    var depth: i32 = 0
+    while depth < 128 {
+        let p = model_parent_of(m, current)
+        if p < 0 {
+            return false
+        }
+        if p == parent {
+            return true
+        }
+        current = p
+        depth = depth + 1
+    }
+    false
+}
+
+// ============================================================================
+// PROPERTY OPERATIONS
+// ============================================================================
+
+fn model_add_property(m: OntModel, id: i32, domain: i32, range: i32, name_hash: i64) -> OntModel {
+    var result = m
+    if result.prop_count >= 128 {
+        return result
+    }
+    let idx = result.prop_count
+    result.props[idx] = OntProperty { id: id, domain: domain, range: range, name_hash: name_hash }
+    result.prop_count = result.prop_count + 1
+    result
+}
+
+// Find property by id, returns -1 if not found
+fn model_find_property(m: OntModel, id: i32) -> i32 {
+    var i: i32 = 0
+    while i < m.prop_count {
+        if m.props[i].id == id {
+            return i
+        }
+        i = i + 1
+    }
+    return -1
+}
+
+// Get domain class id for a property
+fn model_property_domain(m: OntModel, prop_id: i32) -> i32 {
+    let idx = model_find_property(m, prop_id)
+    if idx < 0 {
+        return -1
+    }
+    m.props[idx].domain
+}
+
+// Get range class id for a property
+fn model_property_range(m: OntModel, prop_id: i32) -> i32 {
+    let idx = model_find_property(m, prop_id)
+    if idx < 0 {
+        return -1
+    }
+    m.props[idx].range
+}
+
+// ============================================================================
+// TESTS
+// ============================================================================
+
+fn test_model_empty() -> bool {
+    let m = model_new()
+    m.class_count == 0
+}
+
+fn test_model_add_class() -> bool {
+    let m = model_new()
+    let m2 = model_add_class(m, 1, -1, 100)
+    m2.class_count == 1
+}
+
+fn test_model_subclass_self() -> bool {
+    let m = model_new()
+    let m2 = model_add_class(m, 1, -1, 100)
+    model_is_subclass(m2, 1, 1)
+}
+
+fn test_model_subclass_direct() -> bool {
+    let m = model_new()
+    let m2 = model_add_class(m, 1, -1, 100)
+    let m3 = model_add_class(m2, 2, 1, 200)
+    model_is_subclass(m3, 2, 1)
+}
+
+fn test_model_subclass_transitive() -> bool {
+    let m = model_new()
+    let m2 = model_add_class(m, 1, -1, 100)   // root: Thing
+    let m3 = model_add_class(m2, 2, 1, 200)    // Animal -> Thing
+    let m4 = model_add_class(m3, 3, 2, 300)    // Dog -> Animal
+    model_is_subclass(m4, 3, 1)                 // Dog is subclass of Thing
+}
+
+fn test_model_not_subclass() -> bool {
+    let m = model_new()
+    let m2 = model_add_class(m, 1, -1, 100)
+    let m3 = model_add_class(m2, 2, -1, 200)
+    model_is_subclass(m3, 1, 2) == false
+}
+
+fn test_model_property() -> bool {
+    let m = model_new()
+    let m2 = model_add_class(m, 1, -1, 100)
+    let m3 = model_add_class(m2, 2, -1, 200)
+    let m4 = model_add_property(m3, 10, 1, 2, 1000)
+    m4.prop_count == 1
+}
+
+fn test_model_property_domain() -> bool {
+    let m = model_new()
+    let m2 = model_add_class(m, 1, -1, 100)
+    let m3 = model_add_class(m2, 2, -1, 200)
+    let m4 = model_add_property(m3, 10, 1, 2, 1000)
+    model_property_domain(m4, 10) == 1
+}

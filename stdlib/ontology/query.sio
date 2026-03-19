@@ -1,1 +1,207 @@
-//! query (disabled)
+// stdlib/ontology/query.sio — SPARQL-like query engine
+//
+// Pattern-matching query over an OntCache triple store.
+// Variables represented as -1 in subject/predicate/object positions.
+
+// ============================================================================
+// TYPES (duplicated from cache.sio for standalone compilation)
+// ============================================================================
+
+struct Triple {
+    subj: i32,
+    pred: i32,
+    obj: i32
+}
+
+struct OntCache {
+    triples: [Triple; 512],
+    count: i32,
+    subj_idx: [i32; 512],
+    pred_idx: [i32; 512]
+}
+
+struct QueryPattern {
+    subj: i32,      // -1 = variable
+    pred: i32,      // -1 = variable
+    obj: i32        // -1 = variable
+}
+
+struct QueryResult {
+    bindings: [i32; 32],
+    count: i32
+}
+
+// ============================================================================
+// QUERY ENGINE
+// ============================================================================
+
+// Match a single pattern against the cache.
+// Variable positions (-1) match anything and produce bindings.
+// Bindings are stored as [subj, pred, obj] triples in results.
+fn query_match(cache: OntCache, pattern: QueryPattern, results: &![QueryResult; 64], count: &!i32) with Mut, Div, Panic {
+    *count = 0
+    var i: i32 = 0
+    while i < cache.count {
+        let t = cache.triples[i]
+
+        // Check subject match
+        var subj_ok = false
+        if pattern.subj < 0 {
+            subj_ok = true
+        } else if pattern.subj == t.subj {
+            subj_ok = true
+        }
+
+        // Check predicate match
+        var pred_ok = false
+        if pattern.pred < 0 {
+            pred_ok = true
+        } else if pattern.pred == t.pred {
+            pred_ok = true
+        }
+
+        // Check object match
+        var obj_ok = false
+        if pattern.obj < 0 {
+            obj_ok = true
+        } else if pattern.obj == t.obj {
+            obj_ok = true
+        }
+
+        if subj_ok {
+            if pred_ok {
+                if obj_ok {
+                    let c = *count
+                    if c < 64 {
+                        // Store bindings: positions 0,1,2 = subj, pred, obj
+                        var bindings = [0; 32]
+                        bindings[0] = t.subj
+                        bindings[1] = t.pred
+                        bindings[2] = t.obj
+                        results[c] = QueryResult { bindings: bindings, count: 3 }
+                        *count = c + 1
+                    }
+                }
+            }
+        }
+        i = i + 1
+    }
+}
+
+// Count matches without storing results
+fn query_count(cache: OntCache, pattern: QueryPattern) -> i32 {
+    var n: i32 = 0
+    var i: i32 = 0
+    while i < cache.count {
+        let t = cache.triples[i]
+
+        var subj_ok = false
+        if pattern.subj < 0 {
+            subj_ok = true
+        } else if pattern.subj == t.subj {
+            subj_ok = true
+        }
+
+        var pred_ok = false
+        if pattern.pred < 0 {
+            pred_ok = true
+        } else if pattern.pred == t.pred {
+            pred_ok = true
+        }
+
+        var obj_ok = false
+        if pattern.obj < 0 {
+            obj_ok = true
+        } else if pattern.obj == t.obj {
+            obj_ok = true
+        }
+
+        if subj_ok {
+            if pred_ok {
+                if obj_ok {
+                    n = n + 1
+                }
+            }
+        }
+        i = i + 1
+    }
+    n
+}
+
+// Helper: create pattern with all wildcards
+fn pattern_all_wild() -> QueryPattern {
+    QueryPattern { subj: -1, pred: -1, obj: -1 }
+}
+
+// Helper: create pattern matching a specific subject
+fn pattern_subj(s: i32) -> QueryPattern {
+    QueryPattern { subj: s, pred: -1, obj: -1 }
+}
+
+// Helper: create pattern matching a specific predicate
+fn pattern_pred(p: i32) -> QueryPattern {
+    QueryPattern { subj: -1, pred: p, obj: -1 }
+}
+
+// Helper: create exact pattern
+fn pattern_exact(s: i32, p: i32, o: i32) -> QueryPattern {
+    QueryPattern { subj: s, pred: p, obj: o }
+}
+
+// ============================================================================
+// TESTS
+// ============================================================================
+
+fn make_test_cache() -> OntCache {
+    var triples = [Triple { subj: 0, pred: 0, obj: 0 }; 512]
+    var subj_idx = [0; 512]
+    var pred_idx = [0; 512]
+    var c = OntCache {
+        triples: triples,
+        count: 0,
+        subj_idx: subj_idx,
+        pred_idx: pred_idx
+    }
+    // Add some triples: (1, isA, 10), (2, isA, 10), (1, hasName, 20)
+    c.triples[0] = Triple { subj: 1, pred: 100, obj: 10 }
+    c.subj_idx[0] = 1
+    c.pred_idx[0] = 100
+    c.triples[1] = Triple { subj: 2, pred: 100, obj: 10 }
+    c.subj_idx[1] = 2
+    c.pred_idx[1] = 100
+    c.triples[2] = Triple { subj: 1, pred: 200, obj: 20 }
+    c.subj_idx[2] = 1
+    c.pred_idx[2] = 200
+    c.count = 3
+    c
+}
+
+fn test_query_all_wild() -> bool {
+    let c = make_test_cache()
+    let p = pattern_all_wild()
+    query_count(c, p) == 3
+}
+
+fn test_query_by_subj() -> bool {
+    let c = make_test_cache()
+    let p = pattern_subj(1)
+    query_count(c, p) == 2
+}
+
+fn test_query_by_pred() -> bool {
+    let c = make_test_cache()
+    let p = pattern_pred(100)
+    query_count(c, p) == 2
+}
+
+fn test_query_exact() -> bool {
+    let c = make_test_cache()
+    let p = pattern_exact(2, 100, 10)
+    query_count(c, p) == 1
+}
+
+fn test_query_no_match() -> bool {
+    let c = make_test_cache()
+    let p = pattern_exact(99, 99, 99)
+    query_count(c, p) == 0
+}

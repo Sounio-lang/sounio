@@ -1,1 +1,102 @@
-//\! linear (disabled)
+// stdlib/qnn/linear.sio — Quaternion linear (fully-connected) layer
+//
+// Dense matrix-vector multiplication for QNN forward pass.
+// Weights stored as flat f64 array, quaternion structure applied at usage.
+//
+// Reference: Parcollet et al., "Quaternion Neural Networks" ICLR 2019
+
+// ============================================================================
+// TYPES
+// ============================================================================
+
+struct QLinearLayer {
+    weights: [f64; 1024],
+    bias: [f64; 64],
+    in_size: i32,
+    out_size: i32
+}
+
+fn qlinear_new(in_size: i32, out_size: i32) -> QLinearLayer {
+    QLinearLayer {
+        weights: [0.0; 1024],
+        bias: [0.0; 64],
+        in_size: in_size,
+        out_size: out_size
+    }
+}
+
+// ============================================================================
+// FORWARD PASS
+// ============================================================================
+
+// Dense forward: out[j] = sum_i(weights[j * in_size + i] * input[i]) + bias[j]
+fn qlinear_forward(layer: &QLinearLayer, input: &[f64; 256], out: &![f64; 256], out_len: &!i32) with Mut, Div, Panic {
+    let in_sz = layer.in_size
+    let out_sz = layer.out_size
+
+    if in_sz > 256 { *out_len = 0; return }
+    if out_sz > 256 { *out_len = 0; return }
+    if in_sz * out_sz > 1024 { *out_len = 0; return }
+
+    var j: i32 = 0
+    while j < out_sz {
+        var acc = 0.0
+        var i: i32 = 0
+        while i < in_sz {
+            let idx = j * in_sz + i
+            if idx < 1024 {
+                acc = acc + layer.weights[idx] * input[i]
+            }
+            i = i + 1
+        }
+        if j < 64 {
+            out[j] = acc + layer.bias[j]
+        } else {
+            out[j] = acc
+        }
+        j = j + 1
+    }
+    *out_len = out_sz
+}
+
+// Forward with fused ReLU activation
+fn qlinear_forward_relu(layer: &QLinearLayer, input: &[f64; 256], out: &![f64; 256], out_len: &!i32) with Mut, Div, Panic {
+    qlinear_forward(layer, input, out, out_len)
+    let n = *out_len
+    var j: i32 = 0
+    while j < n {
+        if out[j] < 0.0 {
+            out[j] = 0.0
+        }
+        j = j + 1
+    }
+}
+
+// Initialize weights with simple deterministic pattern
+fn qlinear_init_weights(layer: &!QLinearLayer, scale: f64) with Mut, Div, Panic {
+    var idx: i32 = 0
+    while idx < 1024 {
+        let raw = ((idx * 7 + 13) % 100) - 50
+        layer.weights[idx] = scale * raw / 50.0
+        idx = idx + 1
+    }
+    var b: i32 = 0
+    while b < 64 {
+        layer.bias[b] = 0.0
+        b = b + 1
+    }
+}
+
+// ============================================================================
+// TESTS
+// ============================================================================
+
+fn test_qlinear_new() -> bool {
+    let layer = qlinear_new(4, 2)
+    layer.in_size == 4
+}
+
+fn test_qlinear_out_size() -> bool {
+    let layer = qlinear_new(4, 8)
+    layer.out_size == 8
+}

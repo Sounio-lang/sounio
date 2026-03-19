@@ -1,1 +1,106 @@
-//! async_profile (disabled)
+// stdlib/profile/async_profile — Lightweight function profiler
+//
+// Records start/end timestamps per function ID. Up to 256 entries.
+// By-value struct — no heap, no closures.
+
+struct ProfileEntry {
+    fn_id: i32,
+    start_ns: i64,
+    end_ns: i64
+}
+
+struct Profiler {
+    entries: [ProfileEntry; 256],
+    count: i32,
+    active: bool
+}
+
+fn profile_entry_new() -> ProfileEntry {
+    ProfileEntry { fn_id: 0, start_ns: 0, end_ns: 0 }
+}
+
+fn profiler_new() -> Profiler {
+    Profiler {
+        entries: [ProfileEntry { fn_id: 0, start_ns: 0, end_ns: 0 }; 256],
+        count: 0,
+        active: true
+    }
+}
+
+fn profiler_start(p: Profiler, fn_id: i32, now_ns: i64) -> Profiler with Mut, Panic, Div {
+    if !p.active { return p }
+    if p.count >= 256 { return p }
+    var result = p
+    let idx = result.count
+    result.entries[idx] = ProfileEntry { fn_id: fn_id, start_ns: now_ns, end_ns: 0 }
+    result.count = idx + 1
+    result
+}
+
+fn profiler_end(p: Profiler, fn_id: i32, now_ns: i64) -> Profiler with Mut, Panic, Div {
+    if !p.active { return p }
+    // Find the last entry with matching fn_id and end_ns == 0
+    var result = p
+    var i: i32 = result.count - 1
+    while i >= 0 {
+        if result.entries[i].fn_id == fn_id && result.entries[i].end_ns == 0 {
+            result.entries[i] = ProfileEntry {
+                fn_id: fn_id,
+                start_ns: result.entries[i].start_ns,
+                end_ns: now_ns
+            }
+            return result
+        }
+        i = i - 1
+    }
+    result
+}
+
+fn profiler_total_ns(p: Profiler, fn_id: i32) -> i64 with Mut, Panic, Div {
+    var total: i64 = 0
+    var i: i32 = 0
+    while i < p.count {
+        if p.entries[i].fn_id == fn_id && p.entries[i].end_ns > 0 {
+            total = total + (p.entries[i].end_ns - p.entries[i].start_ns)
+        }
+        i = i + 1
+    }
+    total
+}
+
+fn profiler_count(p: Profiler, fn_id: i32) -> i32 with Mut, Panic, Div {
+    var n: i32 = 0
+    var i: i32 = 0
+    while i < p.count {
+        if p.entries[i].fn_id == fn_id && p.entries[i].end_ns > 0 {
+            n = n + 1
+        }
+        i = i + 1
+    }
+    n
+}
+
+// =============================================================================
+// Tests
+// =============================================================================
+
+fn test_profiler_basic() -> bool with Mut, Panic, Div {
+    var p = profiler_new()
+    p = profiler_start(p, 1, 1000)
+    p = profiler_end(p, 1, 2000)
+    profiler_total_ns(p, 1) == 1000
+}
+
+fn test_profiler_multiple() -> bool with Mut, Panic, Div {
+    var p = profiler_new()
+    p = profiler_start(p, 1, 100)
+    p = profiler_end(p, 1, 300)
+    p = profiler_start(p, 1, 500)
+    p = profiler_end(p, 1, 900)
+    profiler_total_ns(p, 1) == 600 && profiler_count(p, 1) == 2
+}
+
+fn main() with IO, Mut, Panic, Div {
+    if test_profiler_basic() { print("profiler basic: PASS\n") } else { print("profiler basic: FAIL\n") }
+    if test_profiler_multiple() { print("profiler multiple: PASS\n") } else { print("profiler multiple: FAIL\n") }
+}

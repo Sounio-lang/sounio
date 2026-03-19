@@ -1,1 +1,241 @@
-//! attention (disabled)
+// stdlib/onn/attention.sio
+//
+// Octonion-valued attention mechanism — Sounio
+//
+// Each position in the sequence is an octonion (8 components).
+// Attention scores computed via octonion inner product.
+// Max sequence length: 16 positions.
+
+// ============================================================================
+// Helpers
+// ============================================================================
+
+fn att_abs(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+fn att_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i = 0
+    while i < 15 {
+        y = 0.5 * (y + x / y)
+        i = i + 1
+    }
+    y
+}
+
+fn att_exp(x: f64) -> f64 with Mut, Div, Panic {
+    var xc = x
+    if xc > 20.0 { xc = 20.0 }
+    if xc < -20.0 { xc = -20.0 }
+    var result = 1.0
+    var term = 1.0
+    var i = 1
+    while i <= 30 {
+        term = term * xc / i as f64
+        result = result + term
+        i = i + 1
+    }
+    if result < 1.0e-15 { result = 1.0e-15 }
+    result
+}
+
+// ============================================================================
+// Octonion inner product (real part of conj(a) * b)
+// = sum of a[i]*b[i] for i=0..7
+// ============================================================================
+
+fn oct_inner(a: &[f64; 8], b: &[f64; 8]) -> f64 with Mut, Div, Panic {
+    var sum = 0.0
+    var i = 0
+    while i < 8 {
+        sum = sum + a[i] * b[i]
+        i = i + 1
+    }
+    sum
+}
+
+// ============================================================================
+// Attention layer
+// Computes: output = softmax(Q*K^T / sqrt(d)) * V
+// where Q, K, V are linear projections of the input sequence.
+// For simplicity, we use the input directly as Q, K, V (self-attention).
+// ============================================================================
+
+struct OnnAttention {
+    wq: [f64; 512],     // query weights: [8 * 8] per position (max 8 output dims)
+    wk: [f64; 512],     // key weights
+    wv: [f64; 512],     // value weights
+    d_model: i32,       // dimension (number of octonion components = 8)
+}
+
+fn onn_attention_new() -> OnnAttention {
+    OnnAttention {
+        wq: [0.0; 512],
+        wk: [0.0; 512],
+        wv: [0.0; 512],
+        d_model: 8,
+    }
+}
+
+// Initialize with identity-like projections
+fn onn_attention_init_identity(att: &!OnnAttention) with Mut, Div, Panic {
+    // Set diagonal of each 8x8 weight matrix to 1.0
+    var i = 0
+    while i < 8 {
+        let idx = i * 8 + i
+        att.wq[idx] = 1.0
+        att.wk[idx] = 1.0
+        att.wv[idx] = 1.0
+        i = i + 1
+    }
+}
+
+// ============================================================================
+// Softmax over attention scores for one query position
+// scores: [seq_len] attention scores
+// out: [seq_len] softmax weights
+// ============================================================================
+
+fn att_softmax(scores: &[f64; 16], seq_len: i32, out: &![f64; 16]) with Mut, Div, Panic {
+    // Find max for numerical stability
+    var max_s = scores[0]
+    var i = 1
+    while i < seq_len {
+        if scores[i] > max_s { max_s = scores[i] }
+        i = i + 1
+    }
+
+    // Compute exp(score - max) and sum
+    var sum = 0.0
+    i = 0
+    while i < seq_len {
+        let e = att_exp(scores[i] - max_s)
+        out[i] = e
+        sum = sum + e
+        i = i + 1
+    }
+
+    // Normalize
+    if sum > 1.0e-15 {
+        i = 0
+        while i < seq_len {
+            out[i] = out[i] / sum
+            i = i + 1
+        }
+    }
+}
+
+// ============================================================================
+// Forward pass (self-attention, identity projections for simplicity)
+// input: [seq_len * 8] octonion sequence
+// output: [seq_len * 8] attended sequence
+// seq_len: number of positions (max 16)
+// ============================================================================
+
+fn onn_attention_forward(
+    att: &OnnAttention,
+    input: &[f64; 256],
+    seq_len: i32,
+    output: &![f64; 256]
+) with Mut, Div, Panic {
+    var slen = seq_len
+    if slen > 16 { slen = 16 }
+    let scale = 1.0 / att_sqrt(att.d_model as f64)
+
+    // For each query position
+    var q = 0
+    while q < slen {
+        // Extract query octonion
+        var q_oct: [f64; 8] = [0.0; 8]
+        var c = 0
+        while c < 8 {
+            let idx = q * 8 + c
+            if idx < 256 { q_oct[c] = input[idx] }
+            c = c + 1
+        }
+
+        // Compute attention scores: dot(query, key) for each key position
+        var scores: [f64; 16] = [0.0; 16]
+        var k = 0
+        while k < slen {
+            var k_oct: [f64; 8] = [0.0; 8]
+            c = 0
+            while c < 8 {
+                let idx = k * 8 + c
+                if idx < 256 { k_oct[c] = input[idx] }
+                c = c + 1
+            }
+            scores[k] = oct_inner(&q_oct, &k_oct) * scale
+            k = k + 1
+        }
+
+        // Softmax
+        var weights: [f64; 16] = [0.0; 16]
+        att_softmax(&scores, slen, &!weights)
+
+        // Weighted sum of values
+        c = 0
+        while c < 8 {
+            let oidx = q * 8 + c
+            if oidx < 256 {
+                var sum = 0.0
+                var v = 0
+                while v < slen {
+                    let vidx = v * 8 + c
+                    if vidx < 256 {
+                        sum = sum + weights[v] * input[vidx]
+                    }
+                    v = v + 1
+                }
+                output[oidx] = sum
+            }
+            c = c + 1
+        }
+
+        q = q + 1
+    }
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+fn test_softmax_uniform() -> bool with Mut, Div, Panic {
+    // Equal scores should give uniform weights
+    var scores: [f64; 16] = [0.0; 16]
+    scores[0] = 1.0
+    scores[1] = 1.0
+    scores[2] = 1.0
+    var out: [f64; 16] = [0.0; 16]
+    att_softmax(&scores, 3, &!out)
+    // Each should be ~1/3
+    att_abs(out[0] - 0.3333) < 0.01 && att_abs(out[1] - 0.3333) < 0.01
+}
+
+fn test_softmax_dominant() -> bool with Mut, Div, Panic {
+    // One very high score should dominate
+    var scores: [f64; 16] = [0.0; 16]
+    scores[0] = 10.0
+    scores[1] = 0.0
+    scores[2] = 0.0
+    var out: [f64; 16] = [0.0; 16]
+    att_softmax(&scores, 3, &!out)
+    out[0] > 0.99
+}
+
+fn test_attention_single_position() -> bool with Mut, Div, Panic {
+    // Single position: output = input (attention to self)
+    var att = onn_attention_new()
+    onn_attention_init_identity(&!att)
+
+    var input: [f64; 256] = [0.0; 256]
+    input[0] = 3.0
+    input[1] = 1.0
+    var output: [f64; 256] = [0.0; 256]
+
+    onn_attention_forward(&att, &input, 1, &!output)
+
+    att_abs(output[0] - 3.0) < 0.01 && att_abs(output[1] - 1.0) < 0.01
+}

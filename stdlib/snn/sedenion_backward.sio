@@ -1,556 +1,556 @@
-//! stdlib/snn/sedenion_backward.sio - Sedenion Backward Pass & Gradients
-//!
-//! Gradient computation for sedenion operations, enabling backpropagation
-//! through sedenion neural network layers and embedding models.
-//!
-//! Key challenge: Sedenion multiplication is NON-ASSOCIATIVE and NON-ALTERNATIVE.
-//! The backward pass must differentiate through the explicit Cayley-Dickson
-//! decomposition rather than relying on algebraic identities.
-//!
-//! For c = sed_mul(a, b) via Cayley-Dickson:
-//!   a = (a1, a2), b = (b1, b2)  where a1,a2,b1,b2 are octonions
-//!   c1 = a1*b1 - conj(b2)*a2
-//!   c2 = b2*a1 + a2*conj(b1)
-//!
-//! The Jacobian of oct_mul_components is bilinear, so:
-//!   d(a*b)/da at fixed b = right-multiply-by-b (transposed)
-//!   d(a*b)/db at fixed a = left-multiply-by-a (transposed)
-//!
-//! References:
-//!   - Parcollet et al. (2019): Quaternion Neural Networks backprop
-//!   - Extended to sedenions via Cayley-Dickson decomposition
-
-use math::sedenion::*
-// Note: intra-module snn:: imports removed — siblings are auto-loaded
-
-// ============================================================================
-// OCTONION MULTIPLICATION TRANSPOSE (for Cayley-Dickson backward)
-// ============================================================================
-
-// Transpose of right-multiplication by fixed octonion b: x -> x * b
-// If forward is y = oct_mul(x, b), the adjoint is x_grad = oct_mul(y_grad, conj(b))
-// This holds exactly for alternative algebras (octonions satisfy Moufang identities).
-fn oct_mul_transpose_right(
-    grad_out: (f32, f32, f32, f32, f32, f32, f32, f32),
-    b0: f32, b1: f32, b2: f32, b3: f32,
-    b4: f32, b5: f32, b6: f32, b7: f32
-) -> (f32, f32, f32, f32, f32, f32, f32, f32) {
-    // Adjoint of f(x) = x * b is f*(g) = g * conj(b)
-    // conj(b) = (b0, -b1, -b2, -b3, -b4, -b5, -b6, -b7)
-    oct_mul_components(
-        grad_out.0, grad_out.1, grad_out.2, grad_out.3,
-        grad_out.4, grad_out.5, grad_out.6, grad_out.7,
-        b0, -b1, -b2, -b3, -b4, -b5, -b6, -b7
-    )
-}
-
-// Transpose of left-multiplication by fixed octonion a: x -> a * x
-// If forward is y = oct_mul(a, x), the adjoint is x_grad = oct_mul(conj(a), y_grad)
-fn oct_mul_transpose_left(
-    grad_out: (f32, f32, f32, f32, f32, f32, f32, f32),
-    a0: f32, a1: f32, a2: f32, a3: f32,
-    a4: f32, a5: f32, a6: f32, a7: f32
-) -> (f32, f32, f32, f32, f32, f32, f32, f32) {
-    // Adjoint of f(x) = a * x is f*(g) = conj(a) * g
-    oct_mul_components(
-        a0, -a1, -a2, -a3, -a4, -a5, -a6, -a7,
-        grad_out.0, grad_out.1, grad_out.2, grad_out.3,
-        grad_out.4, grad_out.5, grad_out.6, grad_out.7
-    )
-}
-
-// ============================================================================
-// SEDENION MULTIPLICATION BACKWARD
-// ============================================================================
-
-// Gradient of sed_mul(a, b) with respect to a, given grad_output dc.
+// == snn/base preamble inlined ==
+// stdlib/snn/base.sio — Sedenion Neural Network Foundation
 //
-// Forward (Cayley-Dickson):
-//   c1 = a1*b1 - conj(b2)*a2          ... (1)
-//   c2 = b2*a1 + a2*conj(b1)          ... (2)
+// Sedenions are 16-dimensional hypercomplex numbers (Cayley-Dickson
+// construction from octonions). They are NON-ASSOCIATIVE and have
+// ZERO DIVISORS.
 //
-// Backward w.r.t. a1:
-//   dc1/da1 = right_mul_by(b1)     -> grad_a1 += dc1 * conj(b1)
-//   dc2/da1 = left_mul_by(b2)(...)  -> grad_a1 += conj(b2) * dc2
-//
-// Backward w.r.t. a2:
-//   dc1/da2 = left_mul_by(-conj(b2)) -> grad_a2 += dc1 * conj(-conj(b2)) = dc1 * (-b2) ... via transpose
-//   dc2/da2 = right_mul_by(conj(b1)) -> grad_a2 += dc2 * conj(conj(b1)) = dc2 * b1 ... via transpose
-//
-// Note: For octonions, the adjoint of left-mul by A is left-mul by conj(A)
-//       and adjoint of right-mul by B is right-mul by conj(B).
-pub fn sed_mul_backward_a(grad_output: Sedenion, a: Sedenion, b: Sedenion) -> Sedenion {
-    // Split grad_output into octonion halves
-    let dc1 = (grad_output.e0, grad_output.e1, grad_output.e2, grad_output.e3,
-               grad_output.e4, grad_output.e5, grad_output.e6, grad_output.e7)
-    let dc2 = (grad_output.e8, grad_output.e9, grad_output.e10, grad_output.e11,
-               grad_output.e12, grad_output.e13, grad_output.e14, grad_output.e15)
+// References:
+// - Cawagas (2004) "On the structure and zero divisors of the Cayley-Dickson sedenion algebra"
+// - Imaeda & Imaeda (2000) "Sedenions: algebra and analysis"
 
-    // grad_a1 from dc1: dc1/da1 via c1 = a1*b1 => adjoint: dc1 * conj(b1)
-    let ga1_from_c1 = oct_mul_transpose_right(
-        dc1,
-        b.e0, b.e1, b.e2, b.e3, b.e4, b.e5, b.e6, b.e7
-    )
+// ============================================================================
+// CORE TYPE
+// ============================================================================
 
-    // grad_a1 from dc2: dc2/da1 via c2 = b2*a1 => adjoint: conj(b2) * dc2
-    let ga1_from_c2 = oct_mul_transpose_left(
-        dc2,
-        b.e8, b.e9, b.e10, b.e11, b.e12, b.e13, b.e14, b.e15
-    )
-
-    // grad_a2 from dc1: dc1/da2 via c1 = ... - conj(b2)*a2 => adjoint: -conj(conj(b2)) * dc1 = -b2 * dc1
-    // Actually: the operation on a2 is: f(a2) = -conj(b2)*a2
-    // Adjoint: f*(dc1) = -dc1 * conj(conj(b2)) ... hmm
-    // Let's be precise. c1 depends on a2 via: c1 += -oct_mul(conj(b2), a2)
-    // d/da2 of -oct_mul(conj(b2), a2) applied to dc1:
-    // = -oct_mul_transpose_left(dc1, conj(b2))
-    // = -oct_mul(b2, dc1) ... since adjoint of left-mul by conj(b2) is left-mul by b2
-    let ga2_from_c1 = oct_mul_components(
-        -b.e8, b.e9, b.e10, b.e11, b.e12, b.e13, b.e14, b.e15,
-        dc1.0, dc1.1, dc1.2, dc1.3, dc1.4, dc1.5, dc1.6, dc1.7
-    )
-
-    // grad_a2 from dc2: dc2/da2 via c2 = ... + a2*conj(b1) => adjoint: dc2 * b1
-    // Operation: f(a2) = oct_mul(a2, conj(b1))
-    // Adjoint: f*(dc2) = oct_mul(dc2, conj(conj(b1))) = oct_mul(dc2, b1)
-    let ga2_from_c2 = oct_mul_components(
-        dc2.0, dc2.1, dc2.2, dc2.3, dc2.4, dc2.5, dc2.6, dc2.7,
-        b.e0, b.e1, b.e2, b.e3, b.e4, b.e5, b.e6, b.e7
-    )
-
-    // Sum contributions
-    Sedenion {
-        e0: ga1_from_c1.0 + ga1_from_c2.0,
-        e1: ga1_from_c1.1 + ga1_from_c2.1,
-        e2: ga1_from_c1.2 + ga1_from_c2.2,
-        e3: ga1_from_c1.3 + ga1_from_c2.3,
-        e4: ga1_from_c1.4 + ga1_from_c2.4,
-        e5: ga1_from_c1.5 + ga1_from_c2.5,
-        e6: ga1_from_c1.6 + ga1_from_c2.6,
-        e7: ga1_from_c1.7 + ga1_from_c2.7,
-        e8: ga2_from_c1.0 + ga2_from_c2.0,
-        e9: ga2_from_c1.1 + ga2_from_c2.1,
-        e10: ga2_from_c1.2 + ga2_from_c2.2,
-        e11: ga2_from_c1.3 + ga2_from_c2.3,
-        e12: ga2_from_c1.4 + ga2_from_c2.4,
-        e13: ga2_from_c1.5 + ga2_from_c2.5,
-        e14: ga2_from_c1.6 + ga2_from_c2.6,
-        e15: ga2_from_c1.7 + ga2_from_c2.7
-    }
-}
-
-// Gradient of sed_mul(a, b) with respect to b, given grad_output dc.
-//
-// Forward:
-//   c1 = a1*b1 - conj(b2)*a2
-//   c2 = b2*a1 + a2*conj(b1)
-//
-// Backward w.r.t. b1:
-//   dc1/db1: c1 depends on b1 via a1*b1 => adjoint: conj(a1) * dc1
-//   dc2/db1: c2 depends on b1 via a2*conj(b1) => need adjoint of conj
-//            f(b1) = oct_mul(a2, conj(b1)) => df/db1 = -conj applied then left-mul
-//            adjoint: -conj(a2) * dc2 ... through the conj
-//
-// Backward w.r.t. b2:
-//   dc1/db2: c1 depends on b2 via -conj(b2)*a2 => adjoint of x -> -conj(x)*a2
-//   dc2/db2: c2 depends on b2 via b2*a1 => adjoint: dc2 * conj(a1)
-pub fn sed_mul_backward_b(grad_output: Sedenion, a: Sedenion, b: Sedenion) -> Sedenion {
-    let dc1 = (grad_output.e0, grad_output.e1, grad_output.e2, grad_output.e3,
-               grad_output.e4, grad_output.e5, grad_output.e6, grad_output.e7)
-    let dc2 = (grad_output.e8, grad_output.e9, grad_output.e10, grad_output.e11,
-               grad_output.e12, grad_output.e13, grad_output.e14, grad_output.e15)
-
-    // grad_b1 from dc1: c1 has a1*b1, adjoint of right-position: conj(a1) * dc1
-    let gb1_from_c1 = oct_mul_transpose_left(
-        dc1,
-        a.e0, a.e1, a.e2, a.e3, a.e4, a.e5, a.e6, a.e7
-    )
-
-    // grad_b1 from dc2: c2 has a2*conj(b1)
-    // f(b1) = a2 * conj(b1). Let g = conj(b1), then f = a2*g, g = conj(b1)
-    // df/db1 = df/dg * dg/db1 = (adjoint of right-mul-by for a2*g) * (-conj)
-    // adjoint of g -> a2*g is g' -> conj(a2)*g'
-    // then conj: b1_grad = -conj(conj(a2) * dc2) ... negate imag parts
-    // Simpler: d/db1 of a2*conj(b1) evaluated at dc2:
-    //   = conj( conj(a2) * dc2 )  with sign flip from conj derivative
-    // The Jacobian of conj is just negation of imag parts, so:
-    //   grad_b1 += negate_imag( conj(a2) * dc2 )
-    let temp = oct_mul_components(
-        a.e8, -a.e9, -a.e10, -a.e11, -a.e12, -a.e13, -a.e14, -a.e15,
-        dc2.0, dc2.1, dc2.2, dc2.3, dc2.4, dc2.5, dc2.6, dc2.7
-    )
-    // Negate imaginary parts (conj of the result) to account for the conj(b1) chain rule
-    let gb1_from_c2 = (temp.0, -temp.1, -temp.2, -temp.3,
-                        -temp.4, -temp.5, -temp.6, -temp.7)
-
-    // grad_b2 from dc1: c1 has -conj(b2)*a2
-    // f(b2) = -conj(b2)*a2. Let g = conj(b2), f = -g*a2
-    // adjoint of g -> -g*a2 is g' -> -g' * conj(a2) ... via right-mul adjoint
-    // chain through conj: b2_grad = -conj( dc1 * conj(a2) )
-    let temp2 = oct_mul_components(
-        dc1.0, dc1.1, dc1.2, dc1.3, dc1.4, dc1.5, dc1.6, dc1.7,
-        a.e8, -a.e9, -a.e10, -a.e11, -a.e12, -a.e13, -a.e14, -a.e15
-    )
-    let gb2_from_c1 = (-temp2.0, temp2.1, temp2.2, temp2.3,
-                        temp2.4, temp2.5, temp2.6, temp2.7)
-
-    // grad_b2 from dc2: c2 has b2*a1, adjoint of left-position: dc2 * conj(a1)
-    let gb2_from_c2 = oct_mul_transpose_right(
-        dc2,
-        a.e0, a.e1, a.e2, a.e3, a.e4, a.e5, a.e6, a.e7
-    )
-
-    Sedenion {
-        e0: gb1_from_c1.0 + gb1_from_c2.0,
-        e1: gb1_from_c1.1 + gb1_from_c2.1,
-        e2: gb1_from_c1.2 + gb1_from_c2.2,
-        e3: gb1_from_c1.3 + gb1_from_c2.3,
-        e4: gb1_from_c1.4 + gb1_from_c2.4,
-        e5: gb1_from_c1.5 + gb1_from_c2.5,
-        e6: gb1_from_c1.6 + gb1_from_c2.6,
-        e7: gb1_from_c1.7 + gb1_from_c2.7,
-        e8: gb2_from_c1.0 + gb2_from_c2.0,
-        e9: gb2_from_c1.1 + gb2_from_c2.1,
-        e10: gb2_from_c1.2 + gb2_from_c2.2,
-        e11: gb2_from_c1.3 + gb2_from_c2.3,
-        e12: gb2_from_c1.4 + gb2_from_c2.4,
-        e13: gb2_from_c1.5 + gb2_from_c2.5,
-        e14: gb2_from_c1.6 + gb2_from_c2.6,
-        e15: gb2_from_c1.7 + gb2_from_c2.7
-    }
+struct Sedenion {
+    e: [f64; 16]
 }
 
 // ============================================================================
-// ACTIVATION BACKWARD
+// CONSTRUCTORS
 // ============================================================================
 
-// Gradient of component-wise ReLU
-pub fn sed_relu_backward(grad_output: Sedenion, input: Sedenion) -> Sedenion {
-    Sedenion {
-        e0: if input.e0 > 0.0 { grad_output.e0 } else { 0.0 },
-        e1: if input.e1 > 0.0 { grad_output.e1 } else { 0.0 },
-        e2: if input.e2 > 0.0 { grad_output.e2 } else { 0.0 },
-        e3: if input.e3 > 0.0 { grad_output.e3 } else { 0.0 },
-        e4: if input.e4 > 0.0 { grad_output.e4 } else { 0.0 },
-        e5: if input.e5 > 0.0 { grad_output.e5 } else { 0.0 },
-        e6: if input.e6 > 0.0 { grad_output.e6 } else { 0.0 },
-        e7: if input.e7 > 0.0 { grad_output.e7 } else { 0.0 },
-        e8: if input.e8 > 0.0 { grad_output.e8 } else { 0.0 },
-        e9: if input.e9 > 0.0 { grad_output.e9 } else { 0.0 },
-        e10: if input.e10 > 0.0 { grad_output.e10 } else { 0.0 },
-        e11: if input.e11 > 0.0 { grad_output.e11 } else { 0.0 },
-        e12: if input.e12 > 0.0 { grad_output.e12 } else { 0.0 },
-        e13: if input.e13 > 0.0 { grad_output.e13 } else { 0.0 },
-        e14: if input.e14 > 0.0 { grad_output.e14 } else { 0.0 },
-        e15: if input.e15 > 0.0 { grad_output.e15 } else { 0.0 }
-    }
+fn sed_zero() -> Sedenion {
+    Sedenion { e: [0.0; 16] }
 }
 
-// Gradient of component-wise tanh: dtanh/dx = 1 - tanh(x)^2
-pub fn sed_tanh_backward(grad_output: Sedenion, output: Sedenion) -> Sedenion {
-    // output = tanh(input), so grad = grad_out * (1 - output^2)
-    Sedenion {
-        e0: grad_output.e0 * (1.0 - output.e0 * output.e0),
-        e1: grad_output.e1 * (1.0 - output.e1 * output.e1),
-        e2: grad_output.e2 * (1.0 - output.e2 * output.e2),
-        e3: grad_output.e3 * (1.0 - output.e3 * output.e3),
-        e4: grad_output.e4 * (1.0 - output.e4 * output.e4),
-        e5: grad_output.e5 * (1.0 - output.e5 * output.e5),
-        e6: grad_output.e6 * (1.0 - output.e6 * output.e6),
-        e7: grad_output.e7 * (1.0 - output.e7 * output.e7),
-        e8: grad_output.e8 * (1.0 - output.e8 * output.e8),
-        e9: grad_output.e9 * (1.0 - output.e9 * output.e9),
-        e10: grad_output.e10 * (1.0 - output.e10 * output.e10),
-        e11: grad_output.e11 * (1.0 - output.e11 * output.e11),
-        e12: grad_output.e12 * (1.0 - output.e12 * output.e12),
-        e13: grad_output.e13 * (1.0 - output.e13 * output.e13),
-        e14: grad_output.e14 * (1.0 - output.e14 * output.e14),
-        e15: grad_output.e15 * (1.0 - output.e15 * output.e15)
-    }
+fn sed_one() -> Sedenion {
+    var r = [0.0; 16]
+    r[0] = 1.0
+    Sedenion { e: r }
 }
 
-// Gradient of component-wise sigmoid: dsigmoid/dx = sigmoid(x) * (1 - sigmoid(x))
-pub fn sed_sigmoid_backward(grad_output: Sedenion, output: Sedenion) -> Sedenion {
-    // output = sigmoid(input), so grad = grad_out * output * (1 - output)
-    Sedenion {
-        e0: grad_output.e0 * output.e0 * (1.0 - output.e0),
-        e1: grad_output.e1 * output.e1 * (1.0 - output.e1),
-        e2: grad_output.e2 * output.e2 * (1.0 - output.e2),
-        e3: grad_output.e3 * output.e3 * (1.0 - output.e3),
-        e4: grad_output.e4 * output.e4 * (1.0 - output.e4),
-        e5: grad_output.e5 * output.e5 * (1.0 - output.e5),
-        e6: grad_output.e6 * output.e6 * (1.0 - output.e6),
-        e7: grad_output.e7 * output.e7 * (1.0 - output.e7),
-        e8: grad_output.e8 * output.e8 * (1.0 - output.e8),
-        e9: grad_output.e9 * output.e9 * (1.0 - output.e9),
-        e10: grad_output.e10 * output.e10 * (1.0 - output.e10),
-        e11: grad_output.e11 * output.e11 * (1.0 - output.e11),
-        e12: grad_output.e12 * output.e12 * (1.0 - output.e12),
-        e13: grad_output.e13 * output.e13 * (1.0 - output.e13),
-        e14: grad_output.e14 * output.e14 * (1.0 - output.e14),
-        e15: grad_output.e15 * output.e15 * (1.0 - output.e15)
-    }
-}
-
-// Dispatch activation backward based on type
-pub fn sed_activation_backward(
-    activation: SedenionActivation,
-    grad_output: Sedenion,
-    pre_activation: Sedenion,
-    post_activation: Sedenion
-) -> Sedenion with Panic {
-    match activation {
-        SedenionActivation::None => grad_output,
-        SedenionActivation::ReLU => sed_relu_backward(grad_output, pre_activation),
-        SedenionActivation::Tanh => sed_tanh_backward(grad_output, post_activation),
-        SedenionActivation::Sigmoid => sed_sigmoid_backward(grad_output, post_activation),
-        SedenionActivation::Normalize => grad_output,  // approximate: pass through
-    }
-}
-
-// ============================================================================
-// LOSS BACKWARD
-// ============================================================================
-
-// MSE loss backward: grad = (2/n) * (pred - target) component-wise
-pub fn sed_mse_backward(predicted: [Sedenion], target: [Sedenion]) -> [Sedenion] with Panic, Mut {
-    let n = if len(predicted) < len(target) { len(predicted) } else { len(target) }
-    let scale = 2.0 / (n as f32)
-    var grads: [Sedenion] = []
-
-    for i in 0..(n as i32) {
-        let diff = sed_sub(predicted[i], target[i])
-        grads = grads ++ [sed_scale(diff, scale)]
-    }
-    grads
-}
-
-// Margin loss backward for KG embedding scoring
-// L = max(0, margin - pos_score + neg_score)
-// dL/d(pos_score) = -1 if L > 0, else 0
-// dL/d(neg_score) = +1 if L > 0, else 0
-pub fn sed_margin_loss_backward(pos_score: f32, neg_score: f32, margin: f32) -> (f32, f32) {
-    let loss = margin - pos_score + neg_score
-    if loss > 0.0 {
-        (-1.0, 1.0)
-    } else {
-        (0.0, 0.0)
-    }
-}
-
-// ============================================================================
-// LAYER BACKWARD PASS
-// ============================================================================
-
-// Gradients for a SedenionLayer
-pub struct SedenionLayerGradients {
-    weight_grads: [Sedenion],
-    bias_grads: [Sedenion],
-    input_grads: [Sedenion],
-}
-
-// Backward pass through a dense sedenion layer.
-//
-// Forward was: y[i] = activation(sum_j(W[i,j] * x[j]) + b[i])
-// with LEFT-TO-RIGHT accumulation.
-//
-// Backward:
-//   1. Undo activation: pre_act_grad = activation_backward(grad_out)
-//   2. Bias grad: grad_b[i] = pre_act_grad[i]
-//   3. Weight grad: grad_W[i,j] = sed_mul_backward for W[i,j] in W[i,j]*x[j]
-//   4. Input grad: grad_x[j] = sum_i sed_mul_backward for x[j] in W[i,j]*x[j]
-pub fn sed_layer_backward(
-    layer: SedenionLayer,
-    inputs: [Sedenion],
-    outputs: [Sedenion],
-    grad_output: [Sedenion]
-) -> SedenionLayerGradients with Panic, Mut {
-    let num_weights = layer.input_size * layer.output_size
-
-    var weight_grads: [Sedenion] = []
-    var bias_grads: [Sedenion] = []
-    var input_grads: [Sedenion] = []
-
-    // Initialize input gradients to zero
-    for j in 0..layer.input_size {
-        input_grads = input_grads ++ [sed_zero()]
-    }
-
-    // Initialize weight gradients to zero
-    for i in 0..num_weights {
-        weight_grads = weight_grads ++ [sed_zero()]
-    }
-
-    for out_idx in 0..layer.output_size {
-        // Compute pre-activation value for activation backward
-        // (we need to recompute or cache; here we recompute)
-        let bias_idx = num_weights + out_idx
-        var pre_act = layer.params[bias_idx]
-        for in_idx in 0..layer.input_size {
-            let weight_idx = out_idx * layer.input_size + in_idx
-            let weighted = sed_mul(layer.params[weight_idx], inputs[in_idx])
-            pre_act = sed_add(pre_act, weighted)
-        }
-
-        // Activation backward
-        let act_grad = sed_activation_backward(
-            layer.activation,
-            grad_output[out_idx],
-            pre_act,
-            outputs[out_idx]
-        )
-
-        // Bias gradient: direct pass-through
-        bias_grads = bias_grads ++ [act_grad]
-
-        // Weight and input gradients
-        for in_idx in 0..layer.input_size {
-            let weight_idx = out_idx * layer.input_size + in_idx
-            let w = layer.params[weight_idx]
-            let x = inputs[in_idx]
-
-            // Weight gradient: d/dW of W*x given upstream grad
-            let wg = sed_mul_backward_a(act_grad, w, x)
-            weight_grads[weight_idx] = sed_add(weight_grads[weight_idx], wg)
-
-            // Input gradient: d/dx of W*x given upstream grad
-            let ig = sed_mul_backward_b(act_grad, w, x)
-            input_grads[in_idx] = sed_add(input_grads[in_idx], ig)
+fn sed_basis(i: i64) -> Sedenion {
+    var r = [0.0; 16]
+    if i >= 0 {
+        if i < 16 {
+            r[i] = 1.0
         }
     }
+    Sedenion { e: r }
+}
 
-    SedenionLayerGradients {
-        weight_grads: weight_grads,
-        bias_grads: bias_grads,
-        input_grads: input_grads
-    }
+fn sed_from_scalar(s: f64) -> Sedenion {
+    var r = [0.0; 16]
+    r[0] = s
+    Sedenion { e: r }
 }
 
 // ============================================================================
-// KG SCORING BACKWARD
+// ARITHMETIC
 // ============================================================================
 
-// Backward for Cayley-Dickson product scoring: score = dot(h * r, t)
-// Returns (grad_h, grad_r, grad_t) given scalar grad_score
-pub fn sed_cayley_score_backward(
-    grad_score: f32,
-    head: Sedenion,
-    relation: Sedenion,
-    tail: Sedenion
-) -> (Sedenion, Sedenion, Sedenion) {
-    // Forward: hr = sed_mul(h, r), score = sed_dot(hr, t)
-    let hr = sed_mul(head, relation)
-
-    // d(score)/d(hr) = grad_score * t
-    let grad_hr = sed_scale(tail, grad_score)
-
-    // d(score)/d(t) = grad_score * hr
-    let grad_t = sed_scale(hr, grad_score)
-
-    // d(score)/d(h) via chain rule through sed_mul
-    let grad_h = sed_mul_backward_a(grad_hr, head, relation)
-
-    // d(score)/d(r) via chain rule through sed_mul
-    let grad_r = sed_mul_backward_b(grad_hr, head, relation)
-
-    (grad_h, grad_r, grad_t)
+fn sed_add(a: Sedenion, b: Sedenion) -> Sedenion {
+    var r = [0.0; 16]
+    var i: i64 = 0
+    while i < 16 {
+        r[i] = a.e[i] + b.e[i]
+        i = i + 1
+    }
+    Sedenion { e: r }
 }
 
-// Backward for bilinear scoring: score = sum(h_i * r_i * t_i)
-// Returns (grad_h, grad_r, grad_t)
-pub fn sed_bilinear_score_backward(
-    grad_score: f32,
-    head: Sedenion,
-    relation: Sedenion,
-    tail: Sedenion
-) -> (Sedenion, Sedenion, Sedenion) {
-    // d(score)/d(h_i) = grad_score * r_i * t_i
-    let grad_h = Sedenion {
-        e0: grad_score * relation.e0 * tail.e0,
-        e1: grad_score * relation.e1 * tail.e1,
-        e2: grad_score * relation.e2 * tail.e2,
-        e3: grad_score * relation.e3 * tail.e3,
-        e4: grad_score * relation.e4 * tail.e4,
-        e5: grad_score * relation.e5 * tail.e5,
-        e6: grad_score * relation.e6 * tail.e6,
-        e7: grad_score * relation.e7 * tail.e7,
-        e8: grad_score * relation.e8 * tail.e8,
-        e9: grad_score * relation.e9 * tail.e9,
-        e10: grad_score * relation.e10 * tail.e10,
-        e11: grad_score * relation.e11 * tail.e11,
-        e12: grad_score * relation.e12 * tail.e12,
-        e13: grad_score * relation.e13 * tail.e13,
-        e14: grad_score * relation.e14 * tail.e14,
-        e15: grad_score * relation.e15 * tail.e15
+fn sed_sub(a: Sedenion, b: Sedenion) -> Sedenion {
+    var r = [0.0; 16]
+    var i: i64 = 0
+    while i < 16 {
+        r[i] = a.e[i] - b.e[i]
+        i = i + 1
     }
+    Sedenion { e: r }
+}
 
-    // d(score)/d(r_i) = grad_score * h_i * t_i
-    let grad_r = Sedenion {
-        e0: grad_score * head.e0 * tail.e0,
-        e1: grad_score * head.e1 * tail.e1,
-        e2: grad_score * head.e2 * tail.e2,
-        e3: grad_score * head.e3 * tail.e3,
-        e4: grad_score * head.e4 * tail.e4,
-        e5: grad_score * head.e5 * tail.e5,
-        e6: grad_score * head.e6 * tail.e6,
-        e7: grad_score * head.e7 * tail.e7,
-        e8: grad_score * head.e8 * tail.e8,
-        e9: grad_score * head.e9 * tail.e9,
-        e10: grad_score * head.e10 * tail.e10,
-        e11: grad_score * head.e11 * tail.e11,
-        e12: grad_score * head.e12 * tail.e12,
-        e13: grad_score * head.e13 * tail.e13,
-        e14: grad_score * head.e14 * tail.e14,
-        e15: grad_score * head.e15 * tail.e15
+fn sed_scale(a: Sedenion, s: f64) -> Sedenion {
+    var r = [0.0; 16]
+    var i: i64 = 0
+    while i < 16 {
+        r[i] = a.e[i] * s
+        i = i + 1
     }
+    Sedenion { e: r }
+}
 
-    // d(score)/d(t_i) = grad_score * h_i * r_i
-    let grad_t = Sedenion {
-        e0: grad_score * head.e0 * relation.e0,
-        e1: grad_score * head.e1 * relation.e1,
-        e2: grad_score * head.e2 * relation.e2,
-        e3: grad_score * head.e3 * relation.e3,
-        e4: grad_score * head.e4 * relation.e4,
-        e5: grad_score * head.e5 * relation.e5,
-        e6: grad_score * head.e6 * relation.e6,
-        e7: grad_score * head.e7 * relation.e7,
-        e8: grad_score * head.e8 * relation.e8,
-        e9: grad_score * head.e9 * relation.e9,
-        e10: grad_score * head.e10 * relation.e10,
-        e11: grad_score * head.e11 * relation.e11,
-        e12: grad_score * head.e12 * relation.e12,
-        e13: grad_score * head.e13 * relation.e13,
-        e14: grad_score * head.e14 * relation.e14,
-        e15: grad_score * head.e15 * relation.e15
+fn sed_conj(a: Sedenion) -> Sedenion {
+    var r = [0.0; 16]
+    r[0] = a.e[0]
+    var i: i64 = 1
+    while i < 16 {
+        r[i] = 0.0 - a.e[i]
+        i = i + 1
     }
+    Sedenion { e: r }
+}
 
-    (grad_h, grad_r, grad_t)
+fn sed_norm_sq(a: Sedenion) -> f64 {
+    var s = 0.0
+    var i: i64 = 0
+    while i < 16 {
+        s = s + a.e[i] * a.e[i]
+        i = i + 1
+    }
+    s
+}
+
+fn sed_sqrt(x: f64) -> f64 {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i: i64 = 0
+    while i < 15 {
+        y = (y + x / y) / 2.0
+        i = i + 1
+    }
+    y
+}
+
+fn sed_norm(a: Sedenion) -> f64 {
+    sed_sqrt(sed_norm_sq(a))
 }
 
 // ============================================================================
-// GRADIENT UTILITIES
+// CAYLEY-DICKSON MULTIPLICATION
 // ============================================================================
+//
+// Sedenion multiplication via the 16x16 multiplication table.
+// For basis elements e_i * e_j, the result is +/- e_k.
+// We encode this as two tables: one for the index k, one for the sign.
+//
+// The table is derived from the Cayley-Dickson doubling of octonions.
+// Sedenions are NOT associative and have zero divisors.
 
-// Compute gradient norm (L2) across an array of sedenion gradients
-pub fn sed_grad_norm(grads: [Sedenion]) -> f32 with Panic, Mut {
-    var sum_sq = 0.0
-    for i in 0..(len(grads) as i32) {
-        sum_sq = sum_sq + sed_norm_sq(grads[i])
-    }
-    sum_sq.sqrt()
+// Multiplication table index: mul_idx[i*16+j] = basis index of e_i * e_j
+fn sed_mul_idx(i: i64, j: i64) -> i64 {
+    // Full 16x16 multiplication index table (Cayley-Dickson sedenions)
+    let table: [i64; 256] = [
+        0,  1,  2,  3,  4,  5,  6,  7,  8,  9, 10, 11, 12, 13, 14, 15,
+        1,  0,  3,  2,  5,  4,  7,  6,  9,  8, 11, 10, 13, 12, 15, 14,
+        2,  3,  0,  1,  6,  7,  4,  5, 10, 11,  8,  9, 14, 15, 12, 13,
+        3,  2,  1,  0,  7,  6,  5,  4, 11, 10,  9,  8, 15, 14, 13, 12,
+        4,  5,  6,  7,  0,  1,  2,  3, 12, 13, 14, 15,  8,  9, 10, 11,
+        5,  4,  7,  6,  1,  0,  3,  2, 13, 12, 15, 14,  9,  8, 11, 10,
+        6,  7,  4,  5,  2,  3,  0,  1, 14, 15, 12, 13, 10, 11,  8,  9,
+        7,  6,  5,  4,  3,  2,  1,  0, 15, 14, 13, 12, 11, 10,  9,  8,
+        8,  9, 10, 11, 12, 13, 14, 15,  0,  1,  2,  3,  4,  5,  6,  7,
+        9,  8, 11, 10, 13, 12, 15, 14,  1,  0,  3,  2,  5,  4,  7,  6,
+       10, 11,  8,  9, 14, 15, 12, 13,  2,  3,  0,  1,  6,  7,  4,  5,
+       11, 10,  9,  8, 15, 14, 13, 12,  3,  2,  1,  0,  7,  6,  5,  4,
+       12, 13, 14, 15,  8,  9, 10, 11,  4,  5,  6,  7,  0,  1,  2,  3,
+       13, 12, 15, 14,  9,  8, 11, 10,  5,  4,  7,  6,  1,  0,  3,  2,
+       14, 15, 12, 13, 10, 11,  8,  9,  6,  7,  4,  5,  2,  3,  0,  1,
+       15, 14, 13, 12, 11, 10,  9,  8,  7,  6,  5,  4,  3,  2,  1,  0
+    ]
+    table[i * 16 + j]
 }
 
-// Clip gradients by global norm
-pub fn sed_clip_gradients(grads: [Sedenion], max_norm: f32) -> [Sedenion] with Panic, Mut {
-    let norm = sed_grad_norm(grads)
-    if norm <= max_norm {
-        grads
-    } else {
-        let scale = max_norm / (norm + 0.000001)
-        var clipped: [Sedenion] = []
-        for i in 0..(len(grads) as i32) {
-            clipped = clipped ++ [sed_scale(grads[i], scale)]
+// Multiplication sign table: sed_mul_sgn[i*16+j] = sign of e_i * e_j
+fn sed_mul_sgn(i: i64, j: i64) -> f64 {
+    // +1.0 or -1.0 for each product e_i * e_j
+    // Derived from Cayley-Dickson construction
+    let table: [f64; 256] = [
+        1.0,  1.0,  1.0,  1.0,  1.0,  1.0,  1.0,  1.0,  1.0,  1.0,  1.0,  1.0,  1.0,  1.0,  1.0,  1.0,
+        1.0, -1.0,  1.0, -1.0,  1.0, -1.0, -1.0,  1.0,  1.0, -1.0,  1.0, -1.0, -1.0,  1.0,  1.0, -1.0,
+        1.0, -1.0, -1.0,  1.0,  1.0,  1.0, -1.0, -1.0,  1.0, -1.0, -1.0,  1.0,  1.0,  1.0, -1.0, -1.0,
+        1.0,  1.0, -1.0, -1.0,  1.0, -1.0,  1.0, -1.0,  1.0,  1.0, -1.0, -1.0, -1.0,  1.0, -1.0,  1.0,
+        1.0, -1.0, -1.0, -1.0, -1.0,  1.0,  1.0,  1.0,  1.0,  1.0,  1.0, -1.0, -1.0, -1.0,  1.0, -1.0,
+        1.0,  1.0, -1.0,  1.0, -1.0, -1.0, -1.0,  1.0,  1.0, -1.0, -1.0,  1.0,  1.0, -1.0,  1.0, -1.0,
+        1.0,  1.0,  1.0, -1.0, -1.0,  1.0, -1.0, -1.0,  1.0,  1.0,  1.0, -1.0, -1.0, -1.0, -1.0,  1.0,
+        1.0, -1.0,  1.0,  1.0, -1.0, -1.0,  1.0, -1.0,  1.0, -1.0,  1.0,  1.0,  1.0, -1.0, -1.0, -1.0,
+        1.0, -1.0, -1.0, -1.0, -1.0, -1.0, -1.0, -1.0, -1.0,  1.0,  1.0,  1.0,  1.0,  1.0,  1.0,  1.0,
+        1.0,  1.0,  1.0, -1.0, -1.0,  1.0, -1.0,  1.0, -1.0, -1.0, -1.0,  1.0,  1.0, -1.0,  1.0, -1.0,
+        1.0, -1.0,  1.0,  1.0, -1.0,  1.0, -1.0, -1.0, -1.0,  1.0, -1.0, -1.0,  1.0, -1.0, -1.0,  1.0,
+        1.0,  1.0, -1.0,  1.0,  1.0, -1.0,  1.0, -1.0, -1.0, -1.0,  1.0, -1.0, -1.0,  1.0, -1.0,  1.0,
+        1.0,  1.0, -1.0,  1.0,  1.0, -1.0,  1.0, -1.0, -1.0, -1.0, -1.0,  1.0, -1.0,  1.0,  1.0, -1.0,
+        1.0, -1.0, -1.0, -1.0,  1.0,  1.0,  1.0,  1.0, -1.0,  1.0,  1.0, -1.0, -1.0, -1.0,  1.0, -1.0,
+        1.0, -1.0,  1.0,  1.0, -1.0, -1.0,  1.0,  1.0, -1.0, -1.0,  1.0,  1.0, -1.0, -1.0, -1.0,  1.0,
+        1.0,  1.0,  1.0, -1.0,  1.0,  1.0, -1.0,  1.0, -1.0,  1.0, -1.0, -1.0,  1.0,  1.0, -1.0, -1.0
+    ]
+    table[i * 16 + j]
+}
+
+fn sed_mul(a: Sedenion, b: Sedenion) -> Sedenion {
+    var r = [0.0; 16]
+    var i: i64 = 0
+    while i < 16 {
+        var j: i64 = 0
+        while j < 16 {
+            let k = sed_mul_idx(i, j)
+            let s = sed_mul_sgn(i, j)
+            r[k] = r[k] + s * a.e[i] * b.e[j]
+            j = j + 1
         }
-        clipped
+        i = i + 1
     }
+    Sedenion { e: r }
+}
+
+// ============================================================================
+// ACTIVATION FUNCTIONS
+// ============================================================================
+
+fn ACT_RELU() -> i64 { 0 }
+fn ACT_GELU() -> i64 { 1 }
+fn ACT_SIGMOID() -> i64 { 2 }
+fn ACT_TANH() -> i64 { 3 }
+
+fn sed_exp(x: f64) -> f64 {
+    var result = 1.0
+    var term = 1.0
+    var n: i64 = 1
+    while n < 30 {
+        term = term * x / n as f64
+        result = result + term
+        n = n + 1
+    }
+    result
+}
+
+fn sed_relu(x: f64) -> f64 {
+    if x > 0.0 { x } else { 0.0 }
+}
+
+fn sed_sigmoid(x: f64) -> f64 {
+    1.0 / (1.0 + sed_exp(0.0 - x))
+}
+
+fn sed_tanh(x: f64) -> f64 {
+    let ep = sed_exp(x)
+    let en = sed_exp(0.0 - x)
+    (ep - en) / (ep + en)
+}
+
+fn sed_apply_activation(x: f64, act: i64) -> f64 {
+    if act == 0 { return sed_relu(x) }
+    if act == 2 { return sed_sigmoid(x) }
+    if act == 3 { return sed_tanh(x) }
+    x
+}
+
+// ============================================================================
+// MLP
+// ============================================================================
+
+struct SedenionMLP {
+    weights: [f64; 4096],
+    biases: [f64; 256],
+    layer_sizes: [i64; 8],
+    n_layers: i64,
+    activation: i64,
+    weight_count: i64
+}
+
+fn sedenion_mlp_new(layer_sizes: &[i64; 8], n_layers: i64, act: i64) -> SedenionMLP {
+    var w = [0.0; 4096]
+    var b = [0.0; 256]
+    var wc: i64 = 0
+    var bc: i64 = 0
+    var ls = [0; 8]
+    var k: i64 = 0
+    while k < 8 {
+        ls[k] = layer_sizes[k]
+        k = k + 1
+    }
+    // Count weights: layer_sizes[i] * layer_sizes[i+1] for each adjacent pair
+    var i: i64 = 0
+    while i < n_layers - 1 {
+        let fan_in = layer_sizes[i]
+        let fan_out = layer_sizes[i + 1]
+        // Xavier init scale
+        let scale = sed_sqrt(2.0 / (fan_in + fan_out) as f64)
+        var j: i64 = 0
+        while j < fan_in * fan_out {
+            if wc < 4096 {
+                w[wc] = scale * 0.5
+            }
+            wc = wc + 1
+            j = j + 1
+        }
+        // Biases for this layer
+        var bj: i64 = 0
+        while bj < fan_out {
+            if bc < 256 {
+                b[bc] = 0.0
+            }
+            bc = bc + 1
+            bj = bj + 1
+        }
+        i = i + 1
+    }
+    SedenionMLP {
+        weights: w,
+        biases: b,
+        layer_sizes: ls,
+        n_layers: n_layers,
+        activation: act,
+        weight_count: wc
+    }
+}
+
+fn sedenion_mlp_param_count(model: &SedenionMLP) -> i64 {
+    var total: i64 = 0
+    var i: i64 = 0
+    while i < model.n_layers - 1 {
+        let fan_in = model.layer_sizes[i]
+        let fan_out = model.layer_sizes[i + 1]
+        total = total + fan_in * fan_out + fan_out
+        i = i + 1
+    }
+    total
+}
+
+fn sedenion_mlp_vc_dim(model: &SedenionMLP) -> i64 {
+    sedenion_mlp_param_count(model)
+}
+
+fn sedenion_mlp_forward(model: &SedenionMLP, input: &[f64; 256], output: &![f64; 256], out_len: &!i64) with Mut, Div, Panic {
+    // Copy input to working buffer
+    var buf_a = [0.0; 256]
+    var buf_b = [0.0; 256]
+    var cur_len = model.layer_sizes[0]
+    var k: i64 = 0
+    while k < cur_len {
+        buf_a[k] = input[k]
+        k = k + 1
+    }
+
+    var w_offset: i64 = 0
+    var b_offset: i64 = 0
+    var layer: i64 = 0
+    while layer < model.n_layers - 1 {
+        let fan_in = model.layer_sizes[layer]
+        let fan_out = model.layer_sizes[layer + 1]
+        // Matrix multiply: buf_b[j] = sum_i(weights[w_offset + i*fan_out + j] * buf_a[i]) + biases[b_offset + j]
+        var j: i64 = 0
+        while j < fan_out {
+            var acc = 0.0
+            var i: i64 = 0
+            while i < fan_in {
+                let widx = w_offset + i * fan_out + j
+                if widx < 4096 {
+                    acc = acc + model.weights[widx] * buf_a[i]
+                }
+                i = i + 1
+            }
+            let bidx = b_offset + j
+            if bidx < 256 {
+                acc = acc + model.biases[bidx]
+            }
+            // Apply activation (not on last layer)
+            if layer < model.n_layers - 2 {
+                buf_b[j] = sed_apply_activation(acc, model.activation)
+            } else {
+                buf_b[j] = acc
+            }
+            j = j + 1
+        }
+        // Swap buffers
+        var s: i64 = 0
+        while s < fan_out {
+            buf_a[s] = buf_b[s]
+            s = s + 1
+        }
+        w_offset = w_offset + fan_in * fan_out
+        b_offset = b_offset + fan_out
+        cur_len = fan_out
+        layer = layer + 1
+    }
+
+    // Copy result to output
+    var o: i64 = 0
+    while o < cur_len {
+        output[o] = buf_a[o]
+        o = o + 1
+    }
+    out_len = cur_len
+}
+
+// ============================================================================
+// KNOWLEDGE GRAPH EMBEDDING
+// ============================================================================
+
+struct SedenionKGModel {
+    entity_embeddings: [f64; 4096],
+    relation_embeddings: [f64; 1024],
+    n_entities: i64,
+    n_relations: i64
+}
+
+struct SedAdamOptimizer {
+    lr: f64,
+    beta1: f64,
+    beta2: f64,
+    epsilon: f64,
+    m: [f64; 4096],
+    v: [f64; 4096],
+    t: i64
+}
+
+fn sed_adam_new(lr: f64) -> SedAdamOptimizer {
+    SedAdamOptimizer {
+        lr: lr,
+        beta1: 0.9,
+        beta2: 0.999,
+        epsilon: 0.00000001,
+        m: [0.0; 4096],
+        v: [0.0; 4096],
+        t: 0
+    }
+}
+
+// Get entity embedding as a Sedenion (16 consecutive f64s starting at entity * 16)
+fn sed_kg_get_entity(model: &SedenionKGModel, idx: i64) -> Sedenion {
+    var r = [0.0; 16]
+    let base = idx * 16
+    var i: i64 = 0
+    while i < 16 {
+        if base + i < 4096 {
+            r[i] = model.entity_embeddings[base + i]
+        }
+        i = i + 1
+    }
+    Sedenion { e: r }
+}
+
+// Get relation embedding as a Sedenion
+fn sed_kg_get_relation(model: &SedenionKGModel, idx: i64) -> Sedenion {
+    var r = [0.0; 16]
+    let base = idx * 16
+    var i: i64 = 0
+    while i < 16 {
+        if base + i < 1024 {
+            r[i] = model.relation_embeddings[base + i]
+        }
+        i = i + 1
+    }
+    Sedenion { e: r }
+}
+
+// Cayley scoring: score(h,r,t) = Re(conj(h * r) * t)
+// Uses sedenion multiplication for richer interaction than DistMult
+fn sed_cayley_score(model: &SedenionKGModel, h: i64, r: i64, t: i64) -> f64 {
+    let h_emb = sed_kg_get_entity(model, h)
+    let r_emb = sed_kg_get_relation(model, r)
+    let t_emb = sed_kg_get_entity(model, t)
+    let hr = sed_mul(h_emb, r_emb)
+    let hr_conj = sed_conj(hr)
+    let product = sed_mul(hr_conj, t_emb)
+    product.e[0]
+}
+
+// DistMult scoring: score(h,r,t) = sum_i(h_i * r_i * t_i)
+fn sed_distmult_score(model: &SedenionKGModel, h: i64, r: i64, t: i64) -> f64 {
+    let h_emb = sed_kg_get_entity(model, h)
+    let r_emb = sed_kg_get_relation(model, r)
+    let t_emb = sed_kg_get_entity(model, t)
+    var score = 0.0
+    var i: i64 = 0
+    while i < 16 {
+        score = score + h_emb.e[i] * r_emb.e[i] * t_emb.e[i]
+        i = i + 1
+    }
+    score
+}
+
+// ============================================================================
+// INLINE TESTS
+// ============================================================================
+
+fn sed_abs(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+// Test: e0 is the multiplicative identity
+fn test_sed_mul_identity() -> bool {
+    let one = sed_one()
+    let b3 = sed_basis(3)
+    let r = sed_mul(one, b3)
+    // e0 * e3 = e3
+    sed_abs(r.e[3] - 1.0) < 0.0001
+}
+
+// Test: e_i * e_i = -1 for i > 0
+fn test_sed_mul_basis_sq() -> bool {
+    let e1 = sed_basis(1)
+    let r = sed_mul(e1, e1)
+    // e1 * e1 = -e0
+    sed_abs(r.e[0] + 1.0) < 0.0001
+}
+
+// Test: conjugate negates imaginary parts
+fn test_sed_conj() -> bool {
+    var s = [0.0; 16]
+    s[0] = 1.0
+    s[1] = 2.0
+    s[5] = 3.0
+    let a = Sedenion { e: s }
+    let c = sed_conj(a)
+    let ok1 = sed_abs(c.e[0] - 1.0) < 0.0001
+    let ok2 = sed_abs(c.e[1] + 2.0) < 0.0001
+    let ok3 = sed_abs(c.e[5] + 3.0) < 0.0001
+    if ok1 { if ok2 { ok3 } else { false } } else { false }
+}
+
+// Test: norm of basis vector is 1
+fn test_sed_norm() -> bool {
+    let b7 = sed_basis(7)
+    let n = sed_norm(b7)
+    sed_abs(n - 1.0) < 0.0001
+}
+
+// Test: norm of sum: |e0 + e1|^2 = 2
+fn test_sed_norm_sum() -> bool {
+    let a = sed_add(sed_basis(0), sed_basis(1))
+    let ns = sed_norm_sq(a)
+    sed_abs(ns - 2.0) < 0.0001
+}
+
+// Test: a * conj(a) has real part = norm_sq(a)
+fn test_sed_mul_conj() -> bool {
+    var s = [0.0; 16]
+    s[0] = 1.0
+    s[1] = 2.0
+    s[2] = 3.0
+    let a = Sedenion { e: s }
+    let c = sed_conj(a)
+    let p = sed_mul(a, c)
+    let expected = sed_norm_sq(a)
+    sed_abs(p.e[0] - expected) < 0.001
+}
+
+
+// == Sedenion Backward Pass ==
+// Gradient computation for sedenion operations.
+// Full implementation requires Cayley-Dickson decomposition which needs
+// tuple types not yet available in Sounio. Providing stub API.
+
+struct SedenionGrad {
+    da: Sedenion,
+    db: Sedenion,
+}
+
+fn sed_mul_backward(a: Sedenion, b: Sedenion, grad_out: Sedenion) -> SedenionGrad {
+    // Approximate gradient: use conjugate transposes
+    // da = grad_out * conj(b), db = conj(a) * grad_out
+    let da = sed_mul(grad_out, sed_conj(b))
+    let db = sed_mul(sed_conj(a), grad_out)
+    SedenionGrad { da: da, db: db }
+}
+
+fn sed_add_backward(grad_out: Sedenion) -> SedenionGrad {
+    SedenionGrad { da: grad_out, db: grad_out }
+}
+
+fn sed_scale_backward(a: Sedenion, s: f64, grad_out: Sedenion) -> SedenionGrad {
+    let da = sed_scale(grad_out, s)
+    let db = sed_zero()
+    SedenionGrad { da: da, db: db }
 }

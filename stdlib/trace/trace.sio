@@ -1,0 +1,133 @@
+// trace/mod.sio — Lightweight Execution Tracing
+//
+// Structured span-based tracing for profiling and diagnostics.
+// Fixed-capacity tracer (128 spans) with nanosecond timestamps.
+//
+// Inspired by: Tokio tracing, OpenTelemetry spans
+
+// ============================================================================
+// TRACE SPAN
+// ============================================================================
+
+pub struct TraceSpan {
+    id: i64,         // Unique span ID
+    parent_id: i64,  // Parent span ID (0 = root)
+    start_ns: i64,   // Start timestamp (nanoseconds)
+    end_ns: i64,     // End timestamp (0 = still open)
+    tag: i32,        // User-defined tag/category
+}
+
+fn span_zero() -> TraceSpan {
+    TraceSpan { id: 0, parent_id: 0, start_ns: 0, end_ns: 0, tag: 0 }
+}
+
+// ============================================================================
+// TRACER
+// ============================================================================
+
+pub struct Tracer {
+    spans: [TraceSpan; 128],
+    count: i32,
+}
+
+pub fn tracer_new() -> Tracer {
+    var spans: [TraceSpan; 128] = [span_zero(); 128]
+    Tracer { spans: spans, count: 0 }
+}
+
+// Begin a new span. Returns (updated tracer, span ID).
+// ID is assigned as count + 1 (1-based).
+pub fn tracer_begin(t: Tracer, parent: i64, tag: i32, now: i64) -> (Tracer, i64) {
+    var out = t
+    if out.count >= 128 {
+        // Tracer full, return with ID = -1
+        return (out, 0 - 1)
+    }
+    let idx = out.count
+    let new_id = (idx as i64) + 1
+    out.spans[idx as usize] = TraceSpan {
+        id: new_id,
+        parent_id: parent,
+        start_ns: now,
+        end_ns: 0,
+        tag: tag,
+    }
+    out.count = idx + 1
+    (out, new_id)
+}
+
+// End a span by setting its end timestamp.
+pub fn tracer_end(t: Tracer, id: i64, now: i64) -> Tracer {
+    var out = t
+    // Find span by ID
+    var i: i32 = 0
+    while i < out.count {
+        if out.spans[i as usize].id == id {
+            out.spans[i as usize] = TraceSpan {
+                id: out.spans[i as usize].id,
+                parent_id: out.spans[i as usize].parent_id,
+                start_ns: out.spans[i as usize].start_ns,
+                end_ns: now,
+                tag: out.spans[i as usize].tag,
+            }
+            return out
+        }
+        i = i + 1
+    }
+    out
+}
+
+// Get duration of a span in nanoseconds (0 if not ended or not found)
+pub fn tracer_span_duration(t: &Tracer, id: i64) -> i64 {
+    var i: i32 = 0
+    while i < t.count {
+        if t.spans[i as usize].id == id {
+            let s = t.spans[i as usize].start_ns
+            let e = t.spans[i as usize].end_ns
+            if e > s { return e - s }
+            return 0
+        }
+        i = i + 1
+    }
+    0
+}
+
+// ============================================================================
+// INLINE TESTS
+// ============================================================================
+
+//@ run-pass
+fn test_tracer_new() -> i32 {
+    let t = tracer_new()
+    if t.count != 0 { return 1 }
+    0
+}
+
+//@ run-pass
+fn test_tracer_begin_end() -> i32 {
+    let t0 = tracer_new()
+    let r1 = tracer_begin(t0, 0, 42, 1000)
+    let t1 = r1.0
+    let id = r1.1
+    if id != 1 { return 1 }
+    if t1.count != 1 { return 2 }
+    let t2 = tracer_end(t1, id, 2000)
+    let dur = tracer_span_duration(&t2, id)
+    if dur != 1000 { return 3 }
+    0
+}
+
+//@ run-pass
+fn test_tracer_multiple_spans() -> i32 {
+    let t0 = tracer_new()
+    let r1 = tracer_begin(t0, 0, 1, 100)
+    let r2 = tracer_begin(r1.0, r1.1, 2, 200)
+    if r2.1 != 2 { return 1 }
+    let t3 = tracer_end(r2.0, r2.1, 300)
+    let t4 = tracer_end(t3, r1.1, 400)
+    let dur1 = tracer_span_duration(&t4, 1)
+    let dur2 = tracer_span_duration(&t4, 2)
+    if dur1 != 300 { return 2 }
+    if dur2 != 100 { return 3 }
+    0
+}

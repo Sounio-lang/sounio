@@ -1,1 +1,342 @@
-//! gff (disabled)
+// stdlib/genomics/io/gff.sio
+//
+// GFF3 format parser — Sounio
+//
+// GFF3 (General Feature Format v3) for genome annotations.
+// Each line: seqid source type start end score strand phase attributes
+// Tab-delimited. We parse from a byte buffer using hashed string IDs.
+
+// ============================================================================
+// Helpers
+// ============================================================================
+
+fn gff_abs(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+// ============================================================================
+// GFF Feature type constants
+// ============================================================================
+
+fn gff_type_gene() -> i32 { 1 }
+fn gff_type_mrna() -> i32 { 2 }
+fn gff_type_exon() -> i32 { 3 }
+fn gff_type_cds() -> i32 { 4 }
+fn gff_type_utr5() -> i32 { 5 }
+fn gff_type_utr3() -> i32 { 6 }
+fn gff_type_intron() -> i32 { 7 }
+fn gff_type_region() -> i32 { 8 }
+fn gff_type_other() -> i32 { 0 }
+
+// Strand constants
+fn gff_strand_plus() -> i32 { 1 }
+fn gff_strand_minus() -> i32 { -1 }
+fn gff_strand_none() -> i32 { 0 }
+
+// ============================================================================
+// GFF Feature structure
+// ============================================================================
+
+struct GffFeature {
+    seqid_hash: i64,      // hash of sequence ID string
+    source_hash: i64,     // hash of source string
+    ftype: i32,           // feature type (gene, mRNA, exon, CDS, etc.)
+    start: i64,           // 1-based start coordinate
+    end: i64,             // 1-based end coordinate (inclusive)
+    score: f64,           // score (NaN if '.')
+    strand: i32,          // +1, -1, or 0
+}
+
+fn gff_feature_new() -> GffFeature {
+    GffFeature {
+        seqid_hash: 0,
+        source_hash: 0,
+        ftype: 0,
+        start: 0,
+        end: 0,
+        score: 0.0,
+        strand: 0,
+    }
+}
+
+// ============================================================================
+// String hashing (DJB2 hash)
+// Operates on byte buffer from start to end (exclusive)
+// ============================================================================
+
+fn gff_hash_bytes(buf: &[i32; 1024], start: i32, end_pos: i32) -> i64 with Mut, Div, Panic {
+    var hash: i64 = 5381
+    var i = start
+    while i < end_pos {
+        let c = buf[i]
+        hash = hash * 33 + c as i64
+        i = i + 1
+    }
+    hash
+}
+
+// ============================================================================
+// Parse integer from byte buffer
+// ============================================================================
+
+fn gff_parse_int(buf: &[i32; 1024], start: i32, end_pos: i32) -> i64 with Mut, Div, Panic {
+    var result: i64 = 0
+    var neg = false
+    var i = start
+    if i < end_pos && buf[i] == 45 { // '-'
+        neg = true
+        i = i + 1
+    }
+    while i < end_pos {
+        let c = buf[i]
+        if c >= 48 && c <= 57 { // '0'-'9'
+            result = result * 10 + (c - 48) as i64
+        }
+        i = i + 1
+    }
+    if neg { 0 - result } else { result }
+}
+
+// ============================================================================
+// Parse float from byte buffer (simple: integer.fraction)
+// ============================================================================
+
+fn gff_parse_float(buf: &[i32; 1024], start: i32, end_pos: i32) -> f64 with Mut, Div, Panic {
+    // Check for '.' (missing value)
+    if end_pos - start == 1 && buf[start] == 46 { return 0.0 }
+
+    var neg = false
+    var i = start
+    if i < end_pos && buf[i] == 45 {
+        neg = true
+        i = i + 1
+    }
+
+    var int_part = 0.0
+    while i < end_pos && buf[i] != 46 {
+        let c = buf[i]
+        if c >= 48 && c <= 57 {
+            int_part = int_part * 10.0 + (c - 48) as f64
+        }
+        i = i + 1
+    }
+
+    var frac_part = 0.0
+    if i < end_pos && buf[i] == 46 {
+        i = i + 1
+        var divisor = 10.0
+        while i < end_pos {
+            let c = buf[i]
+            if c >= 48 && c <= 57 {
+                frac_part = frac_part + (c - 48) as f64 / divisor
+                divisor = divisor * 10.0
+            }
+            i = i + 1
+        }
+    }
+
+    let val = int_part + frac_part
+    if neg { 0.0 - val } else { val }
+}
+
+// ============================================================================
+// Classify feature type from byte buffer
+// ============================================================================
+
+fn gff_classify_type(buf: &[i32; 1024], start: i32, end_pos: i32) -> i32 with Mut, Div, Panic {
+    let len = end_pos - start
+    if len < 2 { return gff_type_other() }
+
+    // Check first char for quick dispatch
+    let c0 = buf[start]
+    let c1 = buf[start + 1]
+
+    // "gene" = 103,101,110,101
+    if len == 4 && c0 == 103 && c1 == 101 { return gff_type_gene() }
+    // "mRNA" = 109,82,78,65
+    if len == 4 && c0 == 109 && c1 == 82 { return gff_type_mrna() }
+    // "exon" = 101,120,111,110
+    if len == 4 && c0 == 101 && c1 == 120 { return gff_type_exon() }
+    // "CDS" = 67,68,83
+    if len == 3 && c0 == 67 && c1 == 68 { return gff_type_cds() }
+
+    gff_type_other()
+}
+
+// ============================================================================
+// Parse a single GFF3 line from byte buffer
+// buf: line bytes as i32 array (ASCII codes)
+// line_len: number of bytes in the line
+// Returns a GffFeature
+//
+// GFF3 format: seqid\tsource\ttype\tstart\tend\tscore\tstrand\tphase\tattributes
+// ============================================================================
+
+fn gff_parse_line(buf: &[i32; 1024], line_len: i32) -> GffFeature with Mut, Div, Panic {
+    var feat = gff_feature_new()
+    if line_len <= 0 { return feat }
+
+    // Skip comment lines
+    if buf[0] == 35 { return feat } // '#'
+
+    // Find tab positions (up to 8 tabs for 9 fields)
+    var tabs: [i32; 9] = [-1; 9]
+    var n_tabs = 0
+    var i = 0
+    while i < line_len && n_tabs < 9 {
+        if buf[i] == 9 { // TAB
+            tabs[n_tabs] = i
+            n_tabs = n_tabs + 1
+        }
+        i = i + 1
+    }
+
+    if n_tabs < 7 { return feat } // Need at least 8 fields
+
+    // Field boundaries: field_k is from (tabs[k-1]+1) to tabs[k]
+    // Field 0 (seqid): 0 to tabs[0]
+    feat.seqid_hash = gff_hash_bytes(buf, 0, tabs[0])
+
+    // Field 1 (source): tabs[0]+1 to tabs[1]
+    feat.source_hash = gff_hash_bytes(buf, tabs[0] + 1, tabs[1])
+
+    // Field 2 (type): tabs[1]+1 to tabs[2]
+    feat.ftype = gff_classify_type(buf, tabs[1] + 1, tabs[2])
+
+    // Field 3 (start): tabs[2]+1 to tabs[3]
+    feat.start = gff_parse_int(buf, tabs[2] + 1, tabs[3])
+
+    // Field 4 (end): tabs[3]+1 to tabs[4]
+    feat.end = gff_parse_int(buf, tabs[3] + 1, tabs[4])
+
+    // Field 5 (score): tabs[4]+1 to tabs[5]
+    feat.score = gff_parse_float(buf, tabs[4] + 1, tabs[5])
+
+    // Field 6 (strand): tabs[5]+1 to tabs[6]
+    let strand_pos = tabs[5] + 1
+    if strand_pos < line_len {
+        if buf[strand_pos] == 43 { feat.strand = gff_strand_plus() }    // '+'
+        if buf[strand_pos] == 45 { feat.strand = gff_strand_minus() }   // '-'
+    }
+
+    feat
+}
+
+// ============================================================================
+// Feature length
+// ============================================================================
+
+fn gff_feature_length(f: &GffFeature) -> i64 {
+    if f.end >= f.start { f.end - f.start + 1 } else { 0 }
+}
+
+// ============================================================================
+// Check if two features overlap
+// ============================================================================
+
+fn gff_features_overlap(a: &GffFeature, b: &GffFeature) -> bool {
+    a.seqid_hash == b.seqid_hash && a.start <= b.end && b.start <= a.end
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+fn test_gff_parse_int_simple() -> bool with Mut, Div, Panic {
+    // "1234" as bytes: 49, 50, 51, 52
+    var buf: [i32; 1024] = [0; 1024]
+    buf[0] = 49
+    buf[1] = 50
+    buf[2] = 51
+    buf[3] = 52
+    let v = gff_parse_int(&buf, 0, 4)
+    v == 1234
+}
+
+fn test_gff_parse_float_simple() -> bool with Mut, Div, Panic {
+    // "3.14" as bytes: 51, 46, 49, 52
+    var buf: [i32; 1024] = [0; 1024]
+    buf[0] = 51
+    buf[1] = 46
+    buf[2] = 49
+    buf[3] = 52
+    let v = gff_parse_float(&buf, 0, 4)
+    gff_abs(v - 3.14) < 0.01
+}
+
+fn test_gff_classify_gene() -> bool with Mut, Div, Panic {
+    // "gene" as bytes: 103, 101, 110, 101
+    var buf: [i32; 1024] = [0; 1024]
+    buf[0] = 103
+    buf[1] = 101
+    buf[2] = 110
+    buf[3] = 101
+    let t = gff_classify_type(&buf, 0, 4)
+    t == gff_type_gene()
+}
+
+fn test_gff_parse_line() -> bool with Mut, Div, Panic {
+    // "chr1\tRefSeq\tgene\t100\t500\t0.5\t+\t.\tID=gene1"
+    // Encoded as ASCII:
+    var buf: [i32; 1024] = [0; 1024]
+    // chr1
+    buf[0] = 99; buf[1] = 104; buf[2] = 114; buf[3] = 49
+    buf[4] = 9 // TAB
+    // RefSeq
+    buf[5] = 82; buf[6] = 101; buf[7] = 102; buf[8] = 83; buf[9] = 101; buf[10] = 113
+    buf[11] = 9 // TAB
+    // gene
+    buf[12] = 103; buf[13] = 101; buf[14] = 110; buf[15] = 101
+    buf[16] = 9 // TAB
+    // 100
+    buf[17] = 49; buf[18] = 48; buf[19] = 48
+    buf[20] = 9 // TAB
+    // 500
+    buf[21] = 53; buf[22] = 48; buf[23] = 48
+    buf[24] = 9 // TAB
+    // 0.5
+    buf[25] = 48; buf[26] = 46; buf[27] = 53
+    buf[28] = 9 // TAB
+    // +
+    buf[29] = 43
+    buf[30] = 9 // TAB
+    // .
+    buf[31] = 46
+    buf[32] = 9 // TAB (8th tab, for attributes)
+    // ID=gene1
+    buf[33] = 73; buf[34] = 68; buf[35] = 61
+
+    let feat = gff_parse_line(&buf, 36)
+
+    feat.ftype == gff_type_gene() &&
+    feat.start == 100 &&
+    feat.end == 500 &&
+    feat.strand == gff_strand_plus() &&
+    gff_abs(feat.score - 0.5) < 0.01
+}
+
+fn test_gff_feature_length() -> bool with Mut, Div, Panic {
+    var feat = gff_feature_new()
+    feat.start = 100
+    feat.end = 200
+    gff_feature_length(&feat) == 101
+}
+
+fn test_gff_overlap() -> bool with Mut, Div, Panic {
+    var a = gff_feature_new()
+    a.seqid_hash = 42
+    a.start = 100
+    a.end = 200
+
+    var b = gff_feature_new()
+    b.seqid_hash = 42
+    b.start = 150
+    b.end = 250
+
+    var c = gff_feature_new()
+    c.seqid_hash = 42
+    c.start = 300
+    c.end = 400
+
+    gff_features_overlap(&a, &b) && !gff_features_overlap(&a, &c)
+}

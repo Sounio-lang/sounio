@@ -1,1 +1,274 @@
-//! diagnostics (disabled)
+// bayes/diagnostics.sio — MCMC Convergence Diagnostics
+//
+// Gelman-Rubin R-hat, Effective Sample Size, Geweke diagnostic.
+//
+// References:
+// - Gelman & Rubin (1992): "Inference from iterative simulation using multiple sequences"
+// - Geweke (1992): "Evaluating the accuracy of sampling-based approaches"
+// - Vehtari et al. (2021): "Rank-normalization, folding, and localization" (split R-hat)
+
+extern "C" {
+    fn sqrt(x: f64) -> f64;
+    fn fabs(x: f64) -> f64;
+}
+
+fn diag_abs(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+fn diag_sqrt(x: f64) -> f64 {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y
+}
+
+// ============================================================================
+// GELMAN-RUBIN R-HAT
+// ============================================================================
+// chains is a flat array: chain[c] sample[s] at index c * chain_len + s
+// n_chains: number of chains (max 8)
+// chain_len: samples per chain
+// R-hat near 1.0 indicates convergence; >1.1 suggests non-convergence.
+
+pub fn bayes_rhat(chains: &[f64; 1024], n_chains: i32, chain_len: i32) -> f64 {
+    if n_chains < 2 || chain_len < 2 {
+        return 0.0 - 1.0
+    }
+
+    let m = n_chains as f64
+    let n = chain_len as f64
+
+    // Compute per-chain means
+    var chain_means: [f64; 8] = [0.0; 8]
+    var c: i32 = 0
+    while c < n_chains {
+        var sum = 0.0
+        var s: i32 = 0
+        while s < chain_len {
+            let idx = c * chain_len + s
+            sum = sum + chains[idx as usize]
+            s = s + 1
+        }
+        chain_means[c as usize] = sum / n
+        c = c + 1
+    }
+
+    // Grand mean
+    var grand_sum = 0.0
+    c = 0
+    while c < n_chains {
+        grand_sum = grand_sum + chain_means[c as usize]
+        c = c + 1
+    }
+    let grand_mean = grand_sum / m
+
+    // Between-chain variance B
+    var b_sum = 0.0
+    c = 0
+    while c < n_chains {
+        let d = chain_means[c as usize] - grand_mean
+        b_sum = b_sum + d * d
+        c = c + 1
+    }
+    let big_b = n * b_sum / (m - 1.0)
+
+    // Within-chain variance W (mean of per-chain variances)
+    var w_sum = 0.0
+    c = 0
+    while c < n_chains {
+        var svar = 0.0
+        var s: i32 = 0
+        while s < chain_len {
+            let idx = c * chain_len + s
+            let d = chains[idx as usize] - chain_means[c as usize]
+            svar = svar + d * d
+            s = s + 1
+        }
+        w_sum = w_sum + svar / (n - 1.0)
+        c = c + 1
+    }
+    let big_w = w_sum / m
+
+    // Pooled variance estimate
+    let var_hat = (1.0 - 1.0 / n) * big_w + big_b / n
+
+    if big_w <= 0.0 {
+        return 0.0 - 1.0
+    }
+
+    // R-hat = sqrt(var_hat / W)
+    diag_sqrt(var_hat / big_w)
+}
+
+// ============================================================================
+// EFFECTIVE SAMPLE SIZE (ESS)
+// ============================================================================
+// Uses autocorrelation-based ESS estimate.
+// ESS = n / (1 + 2 * sum(autocorrelations))
+// Truncates when autocorrelation goes negative.
+
+pub fn bayes_ess(chain: &[f64; 256], n: i32) -> f64 {
+    if n < 4 {
+        return 0.0
+    }
+
+    // Compute mean
+    var sum = 0.0
+    var i: i32 = 0
+    while i < n {
+        sum = sum + chain[i as usize]
+        i = i + 1
+    }
+    let mean = sum / (n as f64)
+
+    // Compute variance (lag 0 autocorrelation)
+    var var_sum = 0.0
+    i = 0
+    while i < n {
+        let d = chain[i as usize] - mean
+        var_sum = var_sum + d * d
+        i = i + 1
+    }
+    let variance = var_sum / (n as f64)
+
+    if variance <= 0.0 {
+        return 0.0
+    }
+
+    // Sum autocorrelations at increasing lags, stop when negative
+    var tau = 1.0
+    let max_lag = n / 2
+    var lag: i32 = 1
+    while lag < max_lag {
+        var ac = 0.0
+        i = 0
+        while i < n - lag {
+            ac = ac + (chain[i as usize] - mean) * (chain[(i + lag) as usize] - mean)
+            i = i + 1
+        }
+        let rho = ac / (variance * (n as f64))
+
+        if rho < 0.0 {
+            lag = max_lag  // break
+        } else {
+            tau = tau + 2.0 * rho
+            lag = lag + 1
+        }
+    }
+
+    if tau <= 0.0 {
+        return (n as f64)
+    }
+
+    (n as f64) / tau
+}
+
+// ============================================================================
+// GEWEKE DIAGNOSTIC
+// ============================================================================
+// Compares first 10% of chain to last 50% using a Z-test.
+// |Z| < 1.96 suggests convergence at 5% significance.
+
+pub fn bayes_geweke(chain: &[f64; 256], n: i32) -> f64 {
+    if n < 20 {
+        return 0.0
+    }
+
+    // First 10%
+    let n_a = n / 10
+    if n_a < 2 { return 0.0 }
+    var sum_a = 0.0
+    var i: i32 = 0
+    while i < n_a {
+        sum_a = sum_a + chain[i as usize]
+        i = i + 1
+    }
+    let mean_a = sum_a / (n_a as f64)
+
+    var var_a = 0.0
+    i = 0
+    while i < n_a {
+        let d = chain[i as usize] - mean_a
+        var_a = var_a + d * d
+        i = i + 1
+    }
+    var_a = var_a / (n_a as f64)
+
+    // Last 50%
+    let n_b = n / 2
+    if n_b < 2 { return 0.0 }
+    let start_b = n - n_b
+    var sum_b = 0.0
+    i = start_b
+    while i < n {
+        sum_b = sum_b + chain[i as usize]
+        i = i + 1
+    }
+    let mean_b = sum_b / (n_b as f64)
+
+    var var_b = 0.0
+    i = start_b
+    while i < n {
+        let d = chain[i as usize] - mean_b
+        var_b = var_b + d * d
+        i = i + 1
+    }
+    var_b = var_b / (n_b as f64)
+
+    // Z-score
+    let denom = diag_sqrt(var_a / (n_a as f64) + var_b / (n_b as f64))
+    if denom <= 0.0 {
+        return 0.0
+    }
+
+    (mean_a - mean_b) / denom
+}
+
+// ============================================================================
+// INLINE TESTS
+// ============================================================================
+
+//@ run-pass
+fn test_rhat_identical_chains() -> i32 {
+    // Identical chains should have R-hat = 1.0
+    var chains: [f64; 1024] = [0.0; 1024]
+    var i: i32 = 0
+    while i < 128 {
+        let val = (i as f64) * 0.01
+        chains[i as usize] = val          // chain 0
+        chains[(128 + i) as usize] = val  // chain 1
+        i = i + 1
+    }
+    let rhat = bayes_rhat(&chains, 2, 128)
+    // For identical chains, R-hat should be very close to 1.0
+    if diag_abs(rhat - 1.0) > 0.01 { return 1 }
+    0
+}
+
+//@ run-pass
+fn test_ess_constant_chain() -> i32 {
+    // Constant chain: variance = 0, ESS = 0
+    var chain: [f64; 256] = [5.0; 256]
+    let ess = bayes_ess(&chain, 100)
+    if ess != 0.0 { return 1 }
+    0
+}
+
+//@ run-pass
+fn test_geweke_constant_chain() -> i32 {
+    var chain: [f64; 256] = [3.0; 256]
+    let z = bayes_geweke(&chain, 100)
+    // Constant chain: geweke should be 0
+    if diag_abs(z) > 0.001 { return 1 }
+    0
+}

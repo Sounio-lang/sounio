@@ -1,1 +1,177 @@
-//! optimizer (disabled)
+// stdlib/onn/optimizer.sio
+//
+// Octonion Neural Network — SGD + Momentum Optimizer — Sounio
+//
+// Standard SGD with optional momentum for octonion parameters.
+// All parameters stored as flat f64 arrays.
+
+// ============================================================================
+// Helpers
+// ============================================================================
+
+fn opt_abs(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+// ============================================================================
+// SGD optimizer state
+// params: current parameter values
+// grads: parameter gradients
+// velocity: momentum buffer
+// ============================================================================
+
+struct OnnSGD {
+    lr: f64,             // learning rate
+    momentum: f64,       // momentum coefficient (0 = vanilla SGD)
+    velocity: [f64; 2048],  // momentum buffer
+    n_params: i32,       // total number of scalar parameters
+}
+
+fn onn_sgd_new(lr: f64, momentum: f64, n_params: i32) -> OnnSGD {
+    OnnSGD {
+        lr: lr,
+        momentum: momentum,
+        velocity: [0.0; 2048],
+        n_params: n_params,
+    }
+}
+
+// ============================================================================
+// SGD step: params -= lr * grad (with momentum)
+// v = momentum * v + grad
+// params -= lr * v
+// ============================================================================
+
+ fn onn_sgd_step(
+    opt: &!OnnSGD,
+    params: &![f64; 2048],
+    grads: &[f64; 2048]
+) with Mut, Div, Panic {
+    var i = 0
+    while i < opt.n_params && i < 2048 {
+        // Update velocity
+        opt.velocity[i] = opt.momentum * opt.velocity[i] + grads[i]
+        // Update parameters
+        params[i] = params[i] - opt.lr * opt.velocity[i]
+        i = i + 1
+    }
+}
+
+// ============================================================================
+// SGD step with weight decay (L2 regularization)
+// grad_eff = grad + weight_decay * param
+// ============================================================================
+
+fn onn_sgd_step_decay(
+    opt: &!OnnSGD,
+    params: &![f64; 2048],
+    grads: &[f64; 2048],
+    weight_decay: f64
+) with Mut, Div, Panic {
+    var i = 0
+    while i < opt.n_params && i < 2048 {
+        let grad_eff = grads[i] + weight_decay * params[i]
+        opt.velocity[i] = opt.momentum * opt.velocity[i] + grad_eff
+        params[i] = params[i] - opt.lr * opt.velocity[i]
+        i = i + 1
+    }
+}
+
+// ============================================================================
+// Zero gradients
+// ============================================================================
+
+fn onn_zero_grad(grads: &![f64; 2048], n: i32) with Mut, Div, Panic {
+    var i = 0
+    while i < n && i < 2048 {
+        grads[i] = 0.0
+        i = i + 1
+    }
+}
+
+// ============================================================================
+// Gradient clipping by norm
+// If ||grad|| > max_norm, scale grad by max_norm / ||grad||
+// ============================================================================
+
+fn onn_clip_grad_norm(grads: &![f64; 2048], n: i32, max_norm: f64) with Mut, Div, Panic {
+    var norm_sq = 0.0
+    var i = 0
+    while i < n && i < 2048 {
+        norm_sq = norm_sq + grads[i] * grads[i]
+        i = i + 1
+    }
+
+    // Inline sqrt
+    var norm = 0.0
+    if norm_sq > 0.0 {
+        var y = norm_sq
+        var j = 0
+        while j < 15 {
+            y = 0.5 * (y + norm_sq / y)
+            j = j + 1
+        }
+        norm = y
+    }
+
+    if norm > max_norm {
+        let scale = max_norm / norm
+        i = 0
+        while i < n && i < 2048 {
+            grads[i] = grads[i] * scale
+            i = i + 1
+        }
+    }
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+fn test_sgd_vanilla() -> bool with Mut, Div, Panic {
+    // Vanilla SGD: param -= lr * grad
+    var opt = onn_sgd_new(0.1, 0.0, 3)
+    var params: [f64; 2048] = [0.0; 2048]
+    params[0] = 5.0
+    params[1] = 3.0
+    params[2] = 1.0
+    var grads: [f64; 2048] = [0.0; 2048]
+    grads[0] = 1.0
+    grads[1] = 2.0
+    grads[2] = 0.5
+
+    onn_sgd_step(&!opt, &!params, &grads)
+
+    // params[0] = 5 - 0.1*1 = 4.9
+    opt_abs(params[0] - 4.9) < 0.01 &&
+    opt_abs(params[1] - 2.8) < 0.01 &&
+    opt_abs(params[2] - 0.95) < 0.01
+}
+
+fn test_sgd_momentum() -> bool with Mut, Div, Panic {
+    // With momentum: v = 0.9*v + grad, param -= lr*v
+    var opt = onn_sgd_new(0.1, 0.9, 1)
+    var params: [f64; 2048] = [0.0; 2048]
+    params[0] = 10.0
+    var grads: [f64; 2048] = [0.0; 2048]
+    grads[0] = 2.0
+
+    // Step 1: v = 0 + 2 = 2, param = 10 - 0.1*2 = 9.8
+    onn_sgd_step(&!opt, &!params, &grads)
+    let after1 = params[0]
+
+    // Step 2: v = 0.9*2 + 2 = 3.8, param = 9.8 - 0.1*3.8 = 9.42
+    onn_sgd_step(&!opt, &!params, &grads)
+    let after2 = params[0]
+
+    opt_abs(after1 - 9.8) < 0.01 && opt_abs(after2 - 9.42) < 0.01
+}
+
+fn test_clip_grad() -> bool with Mut, Div, Panic {
+    var grads: [f64; 2048] = [0.0; 2048]
+    grads[0] = 3.0
+    grads[1] = 4.0
+    // norm = 5.0, clip to 2.5 => scale = 0.5
+    onn_clip_grad_norm(&!grads, 2, 2.5)
+    opt_abs(grads[0] - 1.5) < 0.01 && opt_abs(grads[1] - 2.0) < 0.01
+}

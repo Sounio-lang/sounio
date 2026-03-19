@@ -1,1 +1,170 @@
-//! recurrent (disabled)
+// stdlib/qnn/recurrent.sio — Quaternion GRU cell
+//
+// Gated Recurrent Unit for quaternion-valued sequences.
+// Reference: Parcollet et al. (2019) "Quaternion Recurrent Neural Networks"
+
+// ============================================================================
+// HELPERS
+// ============================================================================
+
+fn qgru_exp(x: f64) -> f64 {
+    var v = x
+    if v > 20.0 { v = 20.0 }
+    if v < 0.0 - 20.0 { v = 0.0 - 20.0 }
+    var sum = 1.0
+    var term = 1.0
+    term = term * v / 1.0
+    sum = sum + term
+    term = term * v / 2.0
+    sum = sum + term
+    term = term * v / 3.0
+    sum = sum + term
+    term = term * v / 4.0
+    sum = sum + term
+    term = term * v / 5.0
+    sum = sum + term
+    term = term * v / 6.0
+    sum = sum + term
+    term = term * v / 7.0
+    sum = sum + term
+    term = term * v / 8.0
+    sum = sum + term
+    term = term * v / 9.0
+    sum = sum + term
+    term = term * v / 10.0
+    sum = sum + term
+    sum
+}
+
+fn qgru_sigmoid(x: f64) -> f64 {
+    1.0 / (1.0 + qgru_exp(0.0 - x))
+}
+
+fn qgru_tanh(x: f64) -> f64 {
+    let e2x = qgru_exp(2.0 * x)
+    (e2x - 1.0) / (e2x + 1.0)
+}
+
+// ============================================================================
+// TYPES
+// ============================================================================
+
+struct QGRUCell {
+    wz: [f64; 256],
+    wr: [f64; 256],
+    wh: [f64; 256],
+    dim: i32
+}
+
+// ============================================================================
+// CONSTRUCTORS
+// ============================================================================
+
+fn qgru_new(dim: i32) -> QGRUCell {
+    QGRUCell {
+        wz: [0.0; 256],
+        wr: [0.0; 256],
+        wh: [0.0; 256],
+        dim: dim
+    }
+}
+
+// ============================================================================
+// FORWARD STEP
+// ============================================================================
+
+// Single GRU step:
+//   z = sigmoid(Wz * [x, h_prev])   -- update gate
+//   r = sigmoid(Wr * [x, h_prev])   -- reset gate
+//   h_cand = tanh(Wh * [x, r * h_prev])
+//   h_out = (1 - z) * h_prev + z * h_cand
+fn qgru_step(cell: &QGRUCell, x: &[f64; 64], h_prev: &[f64; 64], h_out: &![f64; 64]) with Mut, Div, Panic {
+    let d = cell.dim
+    if d < 1 { return }
+    if d > 32 { return }
+
+    var i: i32 = 0
+    while i < d {
+        var z_sum = 0.0
+        var r_sum = 0.0
+        var j: i32 = 0
+        while j < d {
+            let w_idx = i * d * 2 + j
+            if w_idx < 256 {
+                if j < 64 {
+                    z_sum = z_sum + cell.wz[w_idx] * x[j]
+                    r_sum = r_sum + cell.wr[w_idx] * x[j]
+                }
+            }
+            j = j + 1
+        }
+        j = 0
+        while j < d {
+            let w_idx = i * d * 2 + d + j
+            if w_idx < 256 {
+                if j < 64 {
+                    z_sum = z_sum + cell.wz[w_idx] * h_prev[j]
+                    r_sum = r_sum + cell.wr[w_idx] * h_prev[j]
+                }
+            }
+            j = j + 1
+        }
+
+        let z_gate = qgru_sigmoid(z_sum)
+        let r_gate = qgru_sigmoid(r_sum)
+
+        var h_sum = 0.0
+        j = 0
+        while j < d {
+            let w_idx = i * d * 2 + j
+            if w_idx < 256 {
+                if j < 64 {
+                    h_sum = h_sum + cell.wh[w_idx] * x[j]
+                }
+            }
+            j = j + 1
+        }
+        j = 0
+        while j < d {
+            let w_idx = i * d * 2 + d + j
+            if w_idx < 256 {
+                if j < 64 {
+                    h_sum = h_sum + cell.wh[w_idx] * (r_gate * h_prev[j])
+                }
+            }
+            j = j + 1
+        }
+
+        let h_cand = qgru_tanh(h_sum)
+
+        if i < 64 {
+            h_out[i] = (1.0 - z_gate) * h_prev[i] + z_gate * h_cand
+        }
+        i = i + 1
+    }
+}
+
+// ============================================================================
+// TESTS
+// ============================================================================
+
+fn qgru_abs(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+fn test_qgru_new() -> bool {
+    let cell = qgru_new(4)
+    cell.dim == 4
+}
+
+fn test_qgru_zero_weights() -> bool {
+    let cell = qgru_new(2)
+    var x = [0.0; 64]
+    var h = [0.0; 64]
+    h[0] = 1.0
+    h[1] = 2.0
+    var out = [0.0; 64]
+    qgru_step(&cell, &x, &h, &!out)
+    // z=sigmoid(0)=0.5, h_cand=tanh(0)=0 => out = 0.5*h_prev
+    qgru_abs(out[0] - 0.5) < 0.1
+}

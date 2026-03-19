@@ -1,1 +1,256 @@
-//! fft (disabled)
+// stdlib/gpu/fft.sio — Cooley-Tukey FFT (radix-2 DIT)
+//
+// In-place FFT on fixed-size arrays of complex numbers (real/imag pairs).
+// Includes bit-reversal permutation, forward and inverse transforms.
+//
+// Reference: Cooley & Tukey, "An algorithm for the machine calculation
+//            of complex Fourier series" Math. Comp. 1965
+
+// =============================================================================
+// Math Helpers
+// =============================================================================
+
+fn fft_abs(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+fn fft_sin(x: f64) -> f64 {
+    let pi = 3.141592653589793
+    var y = x
+    while y > pi { y = y - 2.0 * pi }
+    while y < 0.0 - pi { y = y + 2.0 * pi }
+
+    let x2 = y * y
+    var sum = y
+    var term = y
+    term = term * (0.0 - x2) / (2.0 * 3.0)
+    sum = sum + term
+    term = term * (0.0 - x2) / (4.0 * 5.0)
+    sum = sum + term
+    term = term * (0.0 - x2) / (6.0 * 7.0)
+    sum = sum + term
+    term = term * (0.0 - x2) / (8.0 * 9.0)
+    sum = sum + term
+    term = term * (0.0 - x2) / (10.0 * 11.0)
+    sum = sum + term
+    term = term * (0.0 - x2) / (12.0 * 13.0)
+    sum = sum + term
+    return sum
+}
+
+fn fft_cos(x: f64) -> f64 {
+    let pi = 3.141592653589793
+    var y = x
+    while y > pi { y = y - 2.0 * pi }
+    while y < 0.0 - pi { y = y + 2.0 * pi }
+
+    let x2 = y * y
+    var sum = 1.0
+    var term = 1.0
+    term = term * (0.0 - x2) / (1.0 * 2.0)
+    sum = sum + term
+    term = term * (0.0 - x2) / (3.0 * 4.0)
+    sum = sum + term
+    term = term * (0.0 - x2) / (5.0 * 6.0)
+    sum = sum + term
+    term = term * (0.0 - x2) / (7.0 * 8.0)
+    sum = sum + term
+    term = term * (0.0 - x2) / (9.0 * 10.0)
+    sum = sum + term
+    term = term * (0.0 - x2) / (11.0 * 12.0)
+    sum = sum + term
+    return sum
+}
+
+// =============================================================================
+// Bit-Reversal Permutation
+// =============================================================================
+
+// Reverse the lowest log2(n) bits of index
+fn fft_bit_reverse(index: i32, log2n: i32) -> i32 {
+    var result = 0
+    var val = index
+    var i = 0
+    while i < log2n {
+        result = result * 2 + (val - (val / 2) * 2)
+        val = val / 2
+        i = i + 1
+    }
+    return result
+}
+
+// In-place bit-reversal permutation on real and imag arrays
+fn fft_bit_reverse_permute(real: &![f64; 256], imag: &![f64; 256], n: i32, log2n: i32) with Mut, Div, Panic {
+    var i = 0
+    while i < n {
+        let j = fft_bit_reverse(i, log2n)
+        if j > i && i < 256 && j < 256 {
+            // Swap real[i] <-> real[j]
+            let tr = real[i]
+            real[i] = real[j]
+            real[j] = tr
+            // Swap imag[i] <-> imag[j]
+            let ti = imag[i]
+            imag[i] = imag[j]
+            imag[j] = ti
+        }
+        i = i + 1
+    }
+}
+
+// =============================================================================
+// FFT Forward (Cooley-Tukey radix-2 DIT)
+// =============================================================================
+
+// Compute log2 of a power-of-two integer
+fn fft_log2(n: i32) -> i32 {
+    var val = n
+    var count = 0
+    while val > 1 {
+        val = val / 2
+        count = count + 1
+    }
+    return count
+}
+
+// In-place forward FFT. n must be a power of 2, n <= 256.
+fn fft_forward(real: &![f64; 256], imag: &![f64; 256], n: i32) with Mut, Div, Panic {
+    if n <= 1 { return }
+    let log2n = fft_log2(n)
+
+    // Bit-reversal permutation
+    fft_bit_reverse_permute(real, imag, n, log2n)
+
+    // Butterfly stages
+    let pi = 3.141592653589793
+    var stage = 1
+    while stage <= log2n {
+        let m = 1
+        // m = 2^stage
+        var block_size = 1
+        var s = 0
+        while s < stage {
+            block_size = block_size * 2
+            s = s + 1
+        }
+        let half = block_size / 2
+
+        var k = 0
+        while k < n {
+            var j = 0
+            while j < half {
+                let angle = 0.0 - 2.0 * pi * (j as f64) / (block_size as f64)
+                let wr = fft_cos(angle)
+                let wi = fft_sin(angle)
+
+                let idx_top = k + j
+                let idx_bot = k + j + half
+
+                if idx_top < 256 && idx_bot < 256 {
+                    let tr = wr * real[idx_bot] - wi * imag[idx_bot]
+                    let ti = wr * imag[idx_bot] + wi * real[idx_bot]
+
+                    real[idx_bot] = real[idx_top] - tr
+                    imag[idx_bot] = imag[idx_top] - ti
+                    real[idx_top] = real[idx_top] + tr
+                    imag[idx_top] = imag[idx_top] + ti
+                }
+                j = j + 1
+            }
+            k = k + block_size
+        }
+        stage = stage + 1
+    }
+}
+
+// =============================================================================
+// FFT Inverse
+// =============================================================================
+
+// In-place inverse FFT: conjugate, forward FFT, conjugate, scale by 1/n
+fn fft_inverse(real: &![f64; 256], imag: &![f64; 256], n: i32) with Mut, Div, Panic {
+    // Conjugate
+    var i = 0
+    while i < n {
+        if i < 256 {
+            imag[i] = 0.0 - imag[i]
+        }
+        i = i + 1
+    }
+
+    // Forward FFT
+    fft_forward(real, imag, n)
+
+    // Conjugate and scale
+    let inv_n = 1.0 / (n as f64)
+    i = 0
+    while i < n {
+        if i < 256 {
+            real[i] = real[i] * inv_n
+            imag[i] = 0.0 - imag[i] * inv_n
+        }
+        i = i + 1
+    }
+}
+
+// =============================================================================
+// Tests
+// =============================================================================
+
+fn test_fft_bit_reverse() -> i32 {
+    // For n=8 (log2n=3): bit_reverse(1,3)=4, bit_reverse(3,3)=6
+    let r1 = fft_bit_reverse(1, 3)
+    if r1 != 4 { return 1 }
+    let r3 = fft_bit_reverse(3, 3)
+    if r3 != 6 { return 2 }
+    return 0
+}
+
+fn test_fft_roundtrip() -> i32 {
+    // FFT then IFFT should recover original signal
+    var real = [0.0; 256]
+    var imag = [0.0; 256]
+
+    // Simple signal: [1, 2, 3, 4]
+    real[0] = 1.0
+    real[1] = 2.0
+    real[2] = 3.0
+    real[3] = 4.0
+
+    fft_forward(&!real, &!imag, 4)
+    fft_inverse(&!real, &!imag, 4)
+
+    // Should recover [1, 2, 3, 4]
+    if fft_abs(real[0] - 1.0) > 0.01 { return 1 }
+    if fft_abs(real[1] - 2.0) > 0.01 { return 2 }
+    if fft_abs(real[2] - 3.0) > 0.01 { return 3 }
+    if fft_abs(real[3] - 4.0) > 0.01 { return 4 }
+    return 0
+}
+
+fn test_fft_dc_component() -> i32 {
+    // FFT of constant signal [c,c,c,c] => DC = 4c, rest = 0
+    var real = [0.0; 256]
+    var imag = [0.0; 256]
+    real[0] = 5.0
+    real[1] = 5.0
+    real[2] = 5.0
+    real[3] = 5.0
+
+    fft_forward(&!real, &!imag, 4)
+
+    // DC component = sum = 20
+    if fft_abs(real[0] - 20.0) > 0.01 { return 1 }
+    // All other bins should be ~0
+    if fft_abs(real[1]) > 0.01 { return 2 }
+    if fft_abs(real[2]) > 0.01 { return 3 }
+    return 0
+}
+
+fn test_fft_log2() -> i32 {
+    if fft_log2(8) != 3 { return 1 }
+    if fft_log2(16) != 4 { return 2 }
+    if fft_log2(256) != 8 { return 3 }
+    return 0
+}

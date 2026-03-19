@@ -29,7 +29,7 @@ fn co_sqrt(x: f64) -> f64 with Mut, Div, Panic {
     y
 }
 
-// exp(x) via Taylor series with range reduction
+// exp(x) via Taylor series with Div, Mut, Panic, range reduction
 fn co_exp(x: f64) -> f64 with Mut, Div, Panic {
     if x > 700.0 { return 1.0e308 }
     if x < -700.0 { return 0.0 }
@@ -53,7 +53,7 @@ fn co_exp(x: f64) -> f64 with Mut, Div, Panic {
     result
 }
 
-// ln(x) via series with range reduction
+// ln(x) via series with Div, Mut, Panic, range reduction
 fn co_ln(x: f64) -> f64 with Mut, Div, Panic {
     if x <= 0.0 { return 0.0 - 1.0e308 }
     if x == 1.0 { return 0.0 }
@@ -79,7 +79,7 @@ fn co_ln(x: f64) -> f64 with Mut, Div, Panic {
 // Vector helpers (fixed-size [f64; 64])
 // =============================================================================
 
-fn co_dot(a: &[f64; 64], b: &[f64; 64], n: i32) -> f64 with Mut {
+fn co_dot(a: &[f64; 64], b: &[f64; 64], n: i32) -> f64 with Div, Panic, Mut {
     var s = 0.0
     var i = 0
     while i < n { s = s + a[i] * b[i]; i = i + 1 }
@@ -93,7 +93,7 @@ fn co_norm2(a: &[f64; 64], n: i32) -> f64 with Mut, Div, Panic {
     co_sqrt(s)
 }
 
-fn co_norminf(a: &[f64; 64], n: i32) -> f64 with Mut {
+fn co_norminf(a: &[f64; 64], n: i32) -> f64 with Panic, Div, Mut {
     var mx = 0.0
     var i = 0
     while i < n {
@@ -104,22 +104,22 @@ fn co_norminf(a: &[f64; 64], n: i32) -> f64 with Mut {
     mx
 }
 
-fn co_copy(src: &[f64; 64], dst: &![f64; 64], n: i32) with Mut {
+fn co_copy(src: &[f64; 64], dst: &![f64; 64], n: i32) with Panic, Div, Mut {
     var i = 0
     while i < n { dst[i] = src[i]; i = i + 1 }
 }
 
-fn co_axpy(alpha: f64, x: &[f64; 64], dst: &![f64; 64], n: i32) with Mut {
+fn co_axpy(alpha: f64, x: &[f64; 64], dst: &![f64; 64], n: i32) with Panic, Div, Mut {
     var i = 0
     while i < n { dst[i] = dst[i] + alpha * x[i]; i = i + 1 }
 }
 
-fn co_scale(dst: &![f64; 64], alpha: f64, n: i32) with Mut {
+fn co_scale(dst: &![f64; 64], alpha: f64, n: i32) with Div, Panic, Mut {
     var i = 0
     while i < n { dst[i] = dst[i] * alpha; i = i + 1 }
 }
 
-fn co_zero(dst: &![f64; 64], n: i32) with Mut {
+fn co_zero(dst: &![f64; 64], n: i32) with Div, Panic, Mut {
     var i = 0
     while i < n { dst[i] = 0.0; i = i + 1 }
 }
@@ -209,7 +209,7 @@ fn co_armijo_search(f: fn(&[f64; 64], i32) -> f64 with Mut, Div, Panic,
 // L-BFGS: Limited-memory BFGS (inner solver)
 // =============================================================================
 
-fn lbfgs_init(state: &!LBFGSState, n: i32, m: i32) with Mut {
+fn lbfgs_init(state: &!LBFGSState, n: i32, m: i32) with Div, Panic, Mut {
     state.n = n
     state.m = m
     state.count = 0
@@ -222,7 +222,7 @@ fn lbfgs_init(state: &!LBFGSState, n: i32, m: i32) with Mut {
 }
 
 // Store curvature pair s = x_{k+1} - x_k, y = g_{k+1} - g_k (circular buffer)
-fn lbfgs_update(state: &!LBFGSState, s: &[f64; 64], y: &[f64; 64]) with Mut, Div {
+fn lbfgs_update(state: &!LBFGSState, s: &[f64; 64], y: &[f64; 64]) with Panic, Mut, Div {
     let n = state.n
     let m = state.m
     let slot = state.count - (state.count / m) * m
@@ -241,7 +241,7 @@ fn lbfgs_update(state: &!LBFGSState, s: &[f64; 64], y: &[f64; 64]) with Mut, Div
 }
 
 // Two-loop recursion (Nocedal Algorithm 7.4): dir = -H_k * grad
-fn lbfgs_direction(state: &LBFGSState, grad: &[f64; 64], dir: &![f64; 64]) with Mut, Div {
+fn lbfgs_direction(state: &LBFGSState, grad: &[f64; 64], dir: &![f64; 64]) with Panic, Mut, Div {
     let n = state.n
     let m = state.m
     let k = state.count
@@ -333,7 +333,11 @@ fn lbfgs_minimize(f: fn(&[f64; 64], i32) -> f64 with Mut, Div, Panic,
     var iter = 0
 
     while iter < max_iter {
-        let gnorm = co_norminf(&grad, n)
+        // Copy grad to avoid shared+mutable borrow conflict in loop body
+        var grad_tmp: [f64; 64] = [0.0; 64]
+        var gi = 0
+        while gi < n { grad_tmp[gi] = grad[gi]; gi = gi + 1 }
+        let gnorm = co_norminf(&grad_tmp, n)
         if gnorm < tol {
             co_copy(&x, &!result.x, n)
             result.obj_val = f(&x, n)
@@ -350,10 +354,10 @@ fn lbfgs_minimize(f: fn(&[f64; 64], i32) -> f64 with Mut, Div, Panic,
             var i = 0
             while i < n { dir[i] = 0.0 - grad[i]; i = i + 1 }
         } else {
-            lbfgs_direction(&state, &grad, &!dir)
+            lbfgs_direction(&state, &grad_tmp, &!dir)
         }
 
-        let alpha = co_armijo_search(f, &x, &dir, &grad, n, 1.0)
+        let alpha = co_armijo_search(f, &x, &dir, &grad_tmp, n, 1.0)
         var i = 0
         while i < n { x[i] = x[i] + alpha * dir[i]; i = i + 1 }
         grad_f(&x, n, &!grad)
@@ -382,7 +386,7 @@ fn lbfgs_minimize(f: fn(&[f64; 64], i32) -> f64 with Mut, Div, Panic,
 // =============================================================================
 
 // Project x[i] = clamp(x[i], lower[i], upper[i])
-fn box_project(x: &![f64; 64], lower: &[f64; 64], upper: &[f64; 64], n: i32) with Mut {
+fn box_project(x: &![f64; 64], lower: &[f64; 64], upper: &[f64; 64], n: i32) with Div, Panic, Mut {
     var i = 0
     while i < n {
         if x[i] < lower[i] { x[i] = lower[i] }
@@ -391,7 +395,7 @@ fn box_project(x: &![f64; 64], lower: &[f64; 64], upper: &[f64; 64], n: i32) wit
     }
 }
 
-// Projected gradient descent with Armijo line search on projected iterates.
+// Projected gradient descent with Div, Mut, Panic, Armijo line search on projected iterates.
 // Converges when ||project(x - grad) - x||_inf < tol.
 fn projected_gradient(f: fn(&[f64; 64], i32) -> f64 with Mut, Div, Panic,
                       grad_f: fn(&[f64; 64], i32, &![f64; 64]) with Mut, Div, Panic,
@@ -432,7 +436,11 @@ fn projected_gradient(f: fn(&[f64; 64], i32) -> f64 with Mut, Div, Panic,
         }
 
         // Projected Armijo backtracking
-        let f0 = f(&x, n)
+        // Copy x for f evaluation to avoid shared+mutable borrow conflict
+        var x_for_f: [f64; 64] = [0.0; 64]
+        i = 0
+        while i < n { x_for_f[i] = x[i]; i = i + 1 }
+        let f0 = f(&x_for_f, n)
         var alpha = 1.0
         let c1 = 1.0e-4
         var ls_iter = 0
@@ -445,12 +453,15 @@ fn projected_gradient(f: fn(&[f64; 64], i32) -> f64 with Mut, Div, Panic,
             i = 0
             while i < n { descent = descent + grad[i] * (x_trial[i] - x[i]); i = i + 1 }
             if f_trial <= f0 + c1 * descent {
-                co_copy(&x_trial, &!x, n)
+                // Manual copy x_trial -> x to avoid co_copy borrow conflict
+                var ci = 0
+                while ci < n { x[ci] = x_trial[ci]; ci = ci + 1 }
                 ls_iter = 30
             } else {
                 alpha = alpha * 0.5
                 if alpha < 1.0e-16 {
-                    co_copy(&x_trial, &!x, n)
+                    var ci = 0
+                    while ci < n { x[ci] = x_trial[ci]; ci = ci + 1 }
                     ls_iter = 30
                 } else {
                     ls_iter = ls_iter + 1
@@ -547,7 +558,7 @@ fn auglag_line_search(f: fn(&[f64; 64], i32) -> f64 with Mut, Div, Panic,
 
 // Solves: min f(x) s.t. c_eq(x)=0, c_ineq(x)<=0
 // Outer loop: update multipliers lambda, increase penalty mu.
-// Inner loop: L-BFGS on augmented Lagrangian with numerical gradients.
+// Inner loop: L-BFGS on augmented Lagrangian with Div, Mut, Panic, numerical gradients.
 fn auglag_minimize(f: fn(&[f64; 64], i32) -> f64 with Mut, Div, Panic,
                    grad_f: fn(&[f64; 64], i32, &![f64; 64]) with Mut, Div, Panic,
                    c_eq: fn(&[f64; 64], i32, &![f64; 64], i32) with Mut, Div, Panic,
@@ -913,7 +924,7 @@ fn barrier_eval_obj(f: fn(&[f64; 64], i32) -> f64 with Mut, Div, Panic,
     val
 }
 
-// Backtracking line search for barrier method with feasibility enforcement.
+// Backtracking line search for barrier method with Div, Mut, Panic, feasibility enforcement.
 fn barrier_line_search(f: fn(&[f64; 64], i32) -> f64 with Mut, Div, Panic,
                        c_ineq: fn(&[f64; 64], i32, &![f64; 64], i32) with Mut, Div, Panic,
                        n_ineq: i32,
@@ -1119,7 +1130,7 @@ fn kkt_violation(grad_f_x: &[f64; 64],
                  jac_ineq: &[f64; 4096], n_ineq: i32,
                  lambda_eq: &[f64; 64], lambda_ineq: &[f64; 64],
                  c_eq_x: &[f64; 64], c_ineq_x: &[f64; 64],
-                 n: i32) -> f64 with Mut, Div {
+                 n: i32) -> f64 with Panic, Mut, Div {
     // Stationarity: ||grad_f + J_eq^T*lam_eq + J_ineq^T*lam_ineq||_inf
     var stat: [f64; 64] = [0.0; 64]
     var i = 0
@@ -1183,7 +1194,7 @@ fn kkt_violation(grad_f_x: &[f64; 64],
 // =============================================================================
 
 // Default: max_iter=100, tol_opt=1e-8, tol_feas=1e-8, mu_init=1.0, mu_max=1e8, rho=10.0
-fn constrained_default_config(cfg: &!ConstrainedConfig) with Mut {
+fn constrained_default_config(cfg: &!ConstrainedConfig) with Div, Panic, Mut {
     cfg.max_iter = 100
     cfg.tol_opt = 1.0e-8
     cfg.tol_feas = 1.0e-8
@@ -1192,7 +1203,7 @@ fn constrained_default_config(cfg: &!ConstrainedConfig) with Mut {
     cfg.rho = 10.0
 }
 
-fn constrained_init_result(res: &!ConstrainedResult) with Mut {
+fn constrained_init_result(res: &!ConstrainedResult) with Div, Panic, Mut {
     var i = 0
     while i < 64 { res.x[i] = 0.0; i = i + 1 }
     res.obj_val = 0.0

@@ -1,3 +1,918 @@
+// == kernel preamble inlined ==
+// Sounio Proof Kernel — Core Proof Infrastructure
+//
+// Propositions-as-types, proof witnesses, natural deduction.
+// Every Proof carries confidence — the fundamental departure from Lean/Coq.
+//
+// Mirrors the compiler's dependent/proofs.rs ProofKind (18 constructors)
+// at the user level as a composable .sio API.
+//
+// Reference:
+//   Curry-Howard correspondence (propositions = types, proofs = programs)
+//   Sounio formal/lean4/SounioEpistemic.lean (confidence lattice)
+
+extern "C" {
+    fn sqrt(x: f64) -> f64;
+}
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+fn min_f64(a: f64, b: f64) -> f64 {
+    if a < b { a } else { b }
+}
+
+// ============================================================================
+// PROPOSITION ARENA
+// ============================================================================
+
+// Maximum propositions in a single proof context
+let PROP_ARENA_CAP: i64 = 4096
+
+// Proposition tags
+let PROP_TRUE: i32 = 0
+let PROP_FALSE: i32 = 1
+let PROP_AND: i32 = 2
+let PROP_OR: i32 = 3
+let PROP_IMPLIES: i32 = 4
+let PROP_NOT: i32 = 5
+let PROP_FORALL: i32 = 6
+let PROP_EXISTS: i32 = 7
+let PROP_EQ: i32 = 8
+let PROP_CUSTOM: i32 = 9
+
+// Proposition: tag-encoded logical claim
+// Uses integer IDs to reference sub-propositions (arena-style, no recursion)
+struct Prop {
+    tag: i32,
+    left_id: i64,       // sub-proposition (for And, Or, Implies, Not)
+    right_id: i64,       // sub-proposition (for And, Or, Implies)
+    var_name: i64,       // quantifier variable (for Forall, Exists)
+    predicate_id: i64,   // custom predicate (for Eq, Custom)
+    eq_lhs: i64,         // equality left (for Eq)
+    eq_rhs: i64,         // equality right (for Eq)
+}
+
+// Arena: flat storage for propositions
+struct PropArena {
+    tags: [i32; 4096],
+    left_ids: [i64; 4096],
+    right_ids: [i64; 4096],
+    var_names: [i64; 4096],
+    predicate_ids: [i64; 4096],
+    eq_lhs_vals: [i64; 4096],
+    eq_rhs_vals: [i64; 4096],
+    count: i64,
+}
+
+fn arena_new() -> PropArena {
+    return PropArena {
+        tags: [0; 4096],
+        left_ids: [0; 4096],
+        right_ids: [0; 4096],
+        var_names: [0; 4096],
+        predicate_ids: [0; 4096],
+        eq_lhs_vals: [0; 4096],
+        eq_rhs_vals: [0; 4096],
+        count: 0,
+    }
+}
+
+fn arena_alloc(arena: &! PropArena, p: Prop) -> i64 {
+    let idx = arena.count
+    if idx >= PROP_ARENA_CAP {
+        return 0 - 1  // overflow sentinel
+    }
+    arena.tags[idx] = p.tag
+    arena.left_ids[idx] = p.left_id
+    arena.right_ids[idx] = p.right_id
+    arena.var_names[idx] = p.var_name
+    arena.predicate_ids[idx] = p.predicate_id
+    arena.eq_lhs_vals[idx] = p.eq_lhs
+    arena.eq_rhs_vals[idx] = p.eq_rhs
+    arena.count = idx + 1
+    return idx
+}
+
+fn arena_get(arena: &PropArena, idx: i64) -> Prop {
+    if idx < 0 {
+        return Prop { tag: PROP_FALSE, left_id: 0, right_id: 0, var_name: 0, predicate_id: 0, eq_lhs: 0, eq_rhs: 0 }
+    }
+    if idx >= arena.count {
+        return Prop { tag: PROP_FALSE, left_id: 0, right_id: 0, var_name: 0, predicate_id: 0, eq_lhs: 0, eq_rhs: 0 }
+    }
+    return Prop {
+        tag: arena.tags[idx],
+        left_id: arena.left_ids[idx],
+        right_id: arena.right_ids[idx],
+        var_name: arena.var_names[idx],
+        predicate_id: arena.predicate_ids[idx],
+        eq_lhs: arena.eq_lhs_vals[idx],
+        eq_rhs: arena.eq_rhs_vals[idx],
+    }
+}
+
+// ============================================================================
+// PROPOSITION CONSTRUCTORS
+// ============================================================================
+
+fn prop_true() -> Prop {
+    return Prop { tag: PROP_TRUE, left_id: 0, right_id: 0, var_name: 0, predicate_id: 0, eq_lhs: 0, eq_rhs: 0 }
+}
+
+fn prop_false() -> Prop {
+    return Prop { tag: PROP_FALSE, left_id: 0, right_id: 0, var_name: 0, predicate_id: 0, eq_lhs: 0, eq_rhs: 0 }
+}
+
+fn prop_and(left_id: i64, right_id: i64) -> Prop {
+    return Prop { tag: PROP_AND, left_id: left_id, right_id: right_id, var_name: 0, predicate_id: 0, eq_lhs: 0, eq_rhs: 0 }
+}
+
+fn prop_or(left_id: i64, right_id: i64) -> Prop {
+    return Prop { tag: PROP_OR, left_id: left_id, right_id: right_id, var_name: 0, predicate_id: 0, eq_lhs: 0, eq_rhs: 0 }
+}
+
+fn prop_implies(antecedent_id: i64, consequent_id: i64) -> Prop {
+    return Prop { tag: PROP_IMPLIES, left_id: antecedent_id, right_id: consequent_id, var_name: 0, predicate_id: 0, eq_lhs: 0, eq_rhs: 0 }
+}
+
+fn prop_not(inner_id: i64) -> Prop {
+    return Prop { tag: PROP_NOT, left_id: inner_id, right_id: 0, var_name: 0, predicate_id: 0, eq_lhs: 0, eq_rhs: 0 }
+}
+
+fn prop_forall(var: i64, body_id: i64) -> Prop {
+    return Prop { tag: PROP_FORALL, left_id: body_id, right_id: 0, var_name: var, predicate_id: 0, eq_lhs: 0, eq_rhs: 0 }
+}
+
+fn prop_exists(var: i64, body_id: i64) -> Prop {
+    return Prop { tag: PROP_EXISTS, left_id: body_id, right_id: 0, var_name: var, predicate_id: 0, eq_lhs: 0, eq_rhs: 0 }
+}
+
+fn prop_eq(lhs: i64, rhs: i64) -> Prop {
+    return Prop { tag: PROP_EQ, left_id: 0, right_id: 0, var_name: 0, predicate_id: 0, eq_lhs: lhs, eq_rhs: rhs }
+}
+
+// P <-> Q  is  (P -> Q) /\ (Q -> P)
+fn prop_iff(p_id: i64, q_id: i64) -> Prop {
+    return Prop { tag: PROP_AND, left_id: p_id, right_id: q_id, var_name: 0, predicate_id: 1, eq_lhs: 0, eq_rhs: 0 }
+}
+
+fn prop_custom(pred_id: i64) -> Prop {
+    return Prop { tag: PROP_CUSTOM, left_id: 0, right_id: 0, var_name: 0, predicate_id: pred_id, eq_lhs: 0, eq_rhs: 0 }
+}
+
+// ============================================================================
+// PROOF TAGS
+// ============================================================================
+
+let PROOF_REFL: i32 = 0
+let PROOF_AND_INTRO: i32 = 1
+let PROOF_AND_ELIM_L: i32 = 2
+let PROOF_AND_ELIM_R: i32 = 3
+let PROOF_OR_INTRO_L: i32 = 4
+let PROOF_OR_INTRO_R: i32 = 5
+let PROOF_OR_ELIM: i32 = 6
+let PROOF_IMPL_INTRO: i32 = 7
+let PROOF_IMPL_ELIM: i32 = 8
+let PROOF_NOT_INTRO: i32 = 9
+let PROOF_NOT_ELIM: i32 = 10
+let PROOF_FALSE_ELIM: i32 = 11
+let PROOF_FORALL_INTRO: i32 = 12
+let PROOF_FORALL_ELIM: i32 = 13
+let PROOF_EXISTS_INTRO: i32 = 14
+let PROOF_EXISTS_ELIM: i32 = 15
+let PROOF_SYM: i32 = 16
+let PROOF_TRANS: i32 = 17
+let PROOF_CONG: i32 = 18
+let PROOF_SUBST: i32 = 19
+let PROOF_COMPOSE: i32 = 20
+let PROOF_WEAKEN: i32 = 21
+let PROOF_TRUSTED: i32 = 22
+let PROOF_ASSUME: i32 = 23
+let PROOF_RUNTIME: i32 = 24
+let PROOF_TRUE_INTRO: i32 = 25
+
+// ============================================================================
+// PROOF WITNESS
+// ============================================================================
+
+// A proof of a proposition. Carries confidence — the Sounio novelty.
+// confidence = 1.0 means fully verified (like Lean/Coq).
+// confidence < 1.0 means epistemic evidence (unique to Sounio).
+struct Proof {
+    tag: i32,
+    // The proposition this witnesses (arena index)
+    prop_id: i64,
+    // Sub-proofs (indices into proof store)
+    sub1_id: i64,
+    sub2_id: i64,
+    sub3_id: i64,
+    // Metadata
+    label: i64,
+    // THE KEY FIELD: confidence in this proof
+    // 1.0 = verified, < 1.0 = epistemic evidence
+    confidence: f64,
+    // Witness value (for exists_intro, forall_elim, etc.)
+    witness: i64,
+}
+
+// Proof store (flat arena, mirrors proposition arena)
+struct ProofStore {
+    tags: [i32; 4096],
+    prop_ids: [i64; 4096],
+    sub1_ids: [i64; 4096],
+    sub2_ids: [i64; 4096],
+    sub3_ids: [i64; 4096],
+    labels: [i64; 4096],
+    confidences: [f64; 4096],
+    witnesses: [i64; 4096],
+    count: i64,
+}
+
+fn proof_store_new() -> ProofStore {
+    return ProofStore {
+        tags: [0; 4096],
+        prop_ids: [0; 4096],
+        sub1_ids: [0; 4096],
+        sub2_ids: [0; 4096],
+        sub3_ids: [0; 4096],
+        labels: [0; 4096],
+        confidences: [0.0; 4096],
+        witnesses: [0; 4096],
+        count: 0,
+    }
+}
+
+fn proof_store_alloc(store: &! ProofStore, p: Proof) -> i64 {
+    let idx = store.count
+    if idx >= 4096 {
+        return 0 - 1
+    }
+    store.tags[idx] = p.tag
+    store.prop_ids[idx] = p.prop_id
+    store.sub1_ids[idx] = p.sub1_id
+    store.sub2_ids[idx] = p.sub2_id
+    store.sub3_ids[idx] = p.sub3_id
+    store.labels[idx] = p.label
+    store.confidences[idx] = p.confidence
+    store.witnesses[idx] = p.witness
+    store.count = idx + 1
+    return idx
+}
+
+fn proof_store_get(store: &ProofStore, idx: i64) -> Proof {
+    if idx < 0 {
+        return Proof { tag: 0 - 1, prop_id: 0, sub1_id: 0, sub2_id: 0, sub3_id: 0, label: 0, confidence: 0.0, witness: 0 }
+    }
+    if idx >= store.count {
+        return Proof { tag: 0 - 1, prop_id: 0, sub1_id: 0, sub2_id: 0, sub3_id: 0, label: 0, confidence: 0.0, witness: 0 }
+    }
+    return Proof {
+        tag: store.tags[idx],
+        prop_id: store.prop_ids[idx],
+        sub1_id: store.sub1_ids[idx],
+        sub2_id: store.sub2_ids[idx],
+        sub3_id: store.sub3_ids[idx],
+        label: store.labels[idx],
+        confidence: store.confidences[idx],
+        witness: store.witnesses[idx],
+    }
+}
+
+// ============================================================================
+// VERIFICATION RESULT
+// ============================================================================
+
+struct VerifyResult {
+    is_valid: bool,
+    confidence: f64,
+    reason: i32,     // 0=ok, 1=tag_mismatch, 2=prop_mismatch, 3=confidence_invalid
+}
+
+fn verify_ok(conf: f64) -> VerifyResult {
+    return VerifyResult { is_valid: true, confidence: conf, reason: 0 }
+}
+
+fn verify_fail(reason: i32) -> VerifyResult {
+    return VerifyResult { is_valid: false, confidence: 0.0, reason: reason }
+}
+
+// ============================================================================
+// PROOF CONTEXT — binds arena + proof store together
+// ============================================================================
+
+struct ProofContext {
+    arena: PropArena,
+    store: ProofStore,
+}
+
+fn proof_context_new() -> ProofContext {
+    return ProofContext {
+        arena: arena_new(),
+        store: proof_store_new(),
+    }
+}
+
+// Allocate a proposition in the context, return its ID
+fn ctx_prop(ctx: &! ProofContext, p: Prop) -> i64 {
+    return arena_alloc(&! ctx.arena, p)
+}
+
+// Allocate a proof in the context, return its ID
+fn ctx_proof(ctx: &! ProofContext, p: Proof) -> i64 {
+    return proof_store_alloc(&! ctx.store, p)
+}
+
+// Retrieve a proposition
+fn ctx_get_prop(ctx: &ProofContext, id: i64) -> Prop {
+    return arena_get(&ctx.arena, id)
+}
+
+// Retrieve a proof
+fn ctx_get_proof(ctx: &ProofContext, id: i64) -> Proof {
+    return proof_store_get(&ctx.store, id)
+}
+
+// ============================================================================
+// NATURAL DEDUCTION: INTRODUCTION RULES
+// ============================================================================
+
+// True introduction: trivially provable
+fn true_intro(ctx: &! ProofContext) -> i64 {
+    let p_id = ctx_prop(ctx, prop_true())
+    let prf = Proof {
+        tag: PROOF_TRUE_INTRO,
+        prop_id: p_id,
+        sub1_id: 0, sub2_id: 0, sub3_id: 0,
+        label: 0, confidence: 1.0, witness: 0,
+    }
+    return ctx_proof(ctx, prf)
+}
+
+// And introduction: from P, Q derive P /\ Q
+fn and_intro(ctx: &! ProofContext, p_proof_id: i64, q_proof_id: i64, pq_prop_id: i64) -> i64 {
+    let p_prf = ctx_get_proof(ctx, p_proof_id)
+    let q_prf = ctx_get_proof(ctx, q_proof_id)
+    let conf = min_f64(p_prf.confidence, q_prf.confidence)
+    let prf = Proof {
+        tag: PROOF_AND_INTRO,
+        prop_id: pq_prop_id,
+        sub1_id: p_proof_id,
+        sub2_id: q_proof_id,
+        sub3_id: 0,
+        label: 0, confidence: conf, witness: 0,
+    }
+    return ctx_proof(ctx, prf)
+}
+
+// Or introduction left: from P derive P \/ Q
+fn or_intro_left(ctx: &! ProofContext, p_proof_id: i64, pq_prop_id: i64) -> i64 {
+    let p_prf = ctx_get_proof(ctx, p_proof_id)
+    let prf = Proof {
+        tag: PROOF_OR_INTRO_L,
+        prop_id: pq_prop_id,
+        sub1_id: p_proof_id,
+        sub2_id: 0, sub3_id: 0,
+        label: 0, confidence: p_prf.confidence, witness: 0,
+    }
+    return ctx_proof(ctx, prf)
+}
+
+// Or introduction right: from Q derive P \/ Q
+fn or_intro_right(ctx: &! ProofContext, q_proof_id: i64, pq_prop_id: i64) -> i64 {
+    let q_prf = ctx_get_proof(ctx, q_proof_id)
+    let prf = Proof {
+        tag: PROOF_OR_INTRO_R,
+        prop_id: pq_prop_id,
+        sub1_id: q_proof_id,
+        sub2_id: 0, sub3_id: 0,
+        label: 0, confidence: q_prf.confidence, witness: 0,
+    }
+    return ctx_proof(ctx, prf)
+}
+
+// Implication introduction: assuming P (sub1), we proved Q (sub2) => P -> Q
+fn impl_intro(ctx: &! ProofContext, assume_id: i64, q_proof_id: i64, impl_prop_id: i64) -> i64 {
+    let q_prf = ctx_get_proof(ctx, q_proof_id)
+    let prf = Proof {
+        tag: PROOF_IMPL_INTRO,
+        prop_id: impl_prop_id,
+        sub1_id: assume_id,
+        sub2_id: q_proof_id,
+        sub3_id: 0,
+        label: 0, confidence: q_prf.confidence, witness: 0,
+    }
+    return ctx_proof(ctx, prf)
+}
+
+// Negation introduction: assuming P, derive False => ~P
+fn not_intro(ctx: &! ProofContext, assume_id: i64, false_proof_id: i64, not_prop_id: i64) -> i64 {
+    let f_prf = ctx_get_proof(ctx, false_proof_id)
+    let prf = Proof {
+        tag: PROOF_NOT_INTRO,
+        prop_id: not_prop_id,
+        sub1_id: assume_id,
+        sub2_id: false_proof_id,
+        sub3_id: 0,
+        label: 0, confidence: f_prf.confidence, witness: 0,
+    }
+    return ctx_proof(ctx, prf)
+}
+
+// Universal introduction: for arbitrary x, prove P(x) => forall x. P(x)
+fn forall_intro(ctx: &! ProofContext, body_proof_id: i64, forall_prop_id: i64) -> i64 {
+    let body = ctx_get_proof(ctx, body_proof_id)
+    let prf = Proof {
+        tag: PROOF_FORALL_INTRO,
+        prop_id: forall_prop_id,
+        sub1_id: body_proof_id,
+        sub2_id: 0, sub3_id: 0,
+        label: 0, confidence: body.confidence, witness: 0,
+    }
+    return ctx_proof(ctx, prf)
+}
+
+// Existential introduction: from P(t), derive exists x. P(x)
+fn exists_intro(ctx: &! ProofContext, witness_val: i64, body_proof_id: i64, exists_prop_id: i64) -> i64 {
+    let body = ctx_get_proof(ctx, body_proof_id)
+    let prf = Proof {
+        tag: PROOF_EXISTS_INTRO,
+        prop_id: exists_prop_id,
+        sub1_id: body_proof_id,
+        sub2_id: 0, sub3_id: 0,
+        label: 0, confidence: body.confidence, witness: witness_val,
+    }
+    return ctx_proof(ctx, prf)
+}
+
+// ============================================================================
+// NATURAL DEDUCTION: ELIMINATION RULES
+// ============================================================================
+
+// And elimination left: from P /\ Q derive P
+fn and_elim_left(ctx: &! ProofContext, pq_proof_id: i64, p_prop_id: i64) -> i64 {
+    let pq = ctx_get_proof(ctx, pq_proof_id)
+    let prf = Proof {
+        tag: PROOF_AND_ELIM_L,
+        prop_id: p_prop_id,
+        sub1_id: pq_proof_id,
+        sub2_id: 0, sub3_id: 0,
+        label: 0, confidence: pq.confidence, witness: 0,
+    }
+    return ctx_proof(ctx, prf)
+}
+
+// And elimination right: from P /\ Q derive Q
+fn and_elim_right(ctx: &! ProofContext, pq_proof_id: i64, q_prop_id: i64) -> i64 {
+    let pq = ctx_get_proof(ctx, pq_proof_id)
+    let prf = Proof {
+        tag: PROOF_AND_ELIM_R,
+        prop_id: q_prop_id,
+        sub1_id: pq_proof_id,
+        sub2_id: 0, sub3_id: 0,
+        label: 0, confidence: pq.confidence, witness: 0,
+    }
+    return ctx_proof(ctx, prf)
+}
+
+// Or elimination: from P \/ Q, P-case proof, Q-case proof => R
+fn or_elim(ctx: &! ProofContext, pq_proof_id: i64, p_case_id: i64, q_case_id: i64, r_prop_id: i64) -> i64 {
+    let pq = ctx_get_proof(ctx, pq_proof_id)
+    let p_case = ctx_get_proof(ctx, p_case_id)
+    let q_case = ctx_get_proof(ctx, q_case_id)
+    let conf = min_f64(pq.confidence, min_f64(p_case.confidence, q_case.confidence))
+    let prf = Proof {
+        tag: PROOF_OR_ELIM,
+        prop_id: r_prop_id,
+        sub1_id: pq_proof_id,
+        sub2_id: p_case_id,
+        sub3_id: q_case_id,
+        label: 0, confidence: conf, witness: 0,
+    }
+    return ctx_proof(ctx, prf)
+}
+
+// Modus ponens: from P -> Q, P => Q
+fn impl_elim(ctx: &! ProofContext, impl_proof_id: i64, p_proof_id: i64, q_prop_id: i64) -> i64 {
+    let impl_prf = ctx_get_proof(ctx, impl_proof_id)
+    let p_prf = ctx_get_proof(ctx, p_proof_id)
+    let conf = min_f64(impl_prf.confidence, p_prf.confidence)
+    let prf = Proof {
+        tag: PROOF_IMPL_ELIM,
+        prop_id: q_prop_id,
+        sub1_id: impl_proof_id,
+        sub2_id: p_proof_id,
+        sub3_id: 0,
+        label: 0, confidence: conf, witness: 0,
+    }
+    return ctx_proof(ctx, prf)
+}
+
+// Negation elimination: from ~P, P => False
+fn not_elim(ctx: &! ProofContext, not_p_id: i64, p_proof_id: i64) -> i64 {
+    let np = ctx_get_proof(ctx, not_p_id)
+    let pp = ctx_get_proof(ctx, p_proof_id)
+    let false_prop = ctx_prop(ctx, prop_false())
+    let conf = min_f64(np.confidence, pp.confidence)
+    let prf = Proof {
+        tag: PROOF_NOT_ELIM,
+        prop_id: false_prop,
+        sub1_id: not_p_id,
+        sub2_id: p_proof_id,
+        sub3_id: 0,
+        label: 0, confidence: conf, witness: 0,
+    }
+    return ctx_proof(ctx, prf)
+}
+
+// Ex falso quodlibet: from False, derive anything
+fn false_elim(ctx: &! ProofContext, false_proof_id: i64, target_prop_id: i64) -> i64 {
+    let fp = ctx_get_proof(ctx, false_proof_id)
+    let prf = Proof {
+        tag: PROOF_FALSE_ELIM,
+        prop_id: target_prop_id,
+        sub1_id: false_proof_id,
+        sub2_id: 0, sub3_id: 0,
+        label: 0, confidence: fp.confidence, witness: 0,
+    }
+    return ctx_proof(ctx, prf)
+}
+
+// Universal elimination: from forall x. P(x), instantiate at term t => P(t)
+fn forall_elim(ctx: &! ProofContext, forall_proof_id: i64, term: i64, result_prop_id: i64) -> i64 {
+    let fp = ctx_get_proof(ctx, forall_proof_id)
+    let prf = Proof {
+        tag: PROOF_FORALL_ELIM,
+        prop_id: result_prop_id,
+        sub1_id: forall_proof_id,
+        sub2_id: 0, sub3_id: 0,
+        label: 0, confidence: fp.confidence, witness: term,
+    }
+    return ctx_proof(ctx, prf)
+}
+
+// Existential elimination: from (exists x. P(x)), use the witness
+fn exists_elim(ctx: &! ProofContext, exists_proof_id: i64, body_proof_id: i64, result_prop_id: i64) -> i64 {
+    let ep = ctx_get_proof(ctx, exists_proof_id)
+    let bp = ctx_get_proof(ctx, body_proof_id)
+    let conf = min_f64(ep.confidence, bp.confidence)
+    let prf = Proof {
+        tag: PROOF_EXISTS_ELIM,
+        prop_id: result_prop_id,
+        sub1_id: exists_proof_id,
+        sub2_id: body_proof_id,
+        sub3_id: 0,
+        label: 0, confidence: conf, witness: 0,
+    }
+    return ctx_proof(ctx, prf)
+}
+
+// ============================================================================
+// EQUALITY
+// ============================================================================
+
+// Reflexivity: a = a
+fn refl(ctx: &! ProofContext, a: i64) -> i64 {
+    let eq_prop = ctx_prop(ctx, prop_eq(a, a))
+    let prf = Proof {
+        tag: PROOF_REFL,
+        prop_id: eq_prop,
+        sub1_id: 0, sub2_id: 0, sub3_id: 0,
+        label: 0, confidence: 1.0, witness: a,
+    }
+    return ctx_proof(ctx, prf)
+}
+
+// Symmetry: a = b => b = a
+fn sym(ctx: &! ProofContext, eq_proof_id: i64, ba_prop_id: i64) -> i64 {
+    let ep = ctx_get_proof(ctx, eq_proof_id)
+    let prf = Proof {
+        tag: PROOF_SYM,
+        prop_id: ba_prop_id,
+        sub1_id: eq_proof_id,
+        sub2_id: 0, sub3_id: 0,
+        label: 0, confidence: ep.confidence, witness: 0,
+    }
+    return ctx_proof(ctx, prf)
+}
+
+// Transitivity: a = b, b = c => a = c
+fn trans(ctx: &! ProofContext, ab_proof_id: i64, bc_proof_id: i64, ac_prop_id: i64) -> i64 {
+    let ab = ctx_get_proof(ctx, ab_proof_id)
+    let bc = ctx_get_proof(ctx, bc_proof_id)
+    let conf = min_f64(ab.confidence, bc.confidence)
+    let prf = Proof {
+        tag: PROOF_TRANS,
+        prop_id: ac_prop_id,
+        sub1_id: ab_proof_id,
+        sub2_id: bc_proof_id,
+        sub3_id: 0,
+        label: 0, confidence: conf, witness: 0,
+    }
+    return ctx_proof(ctx, prf)
+}
+
+// Congruence: a = b => f(a) = f(b)
+fn cong(ctx: &! ProofContext, f_id: i64, eq_proof_id: i64, result_prop_id: i64) -> i64 {
+    let ep = ctx_get_proof(ctx, eq_proof_id)
+    let prf = Proof {
+        tag: PROOF_CONG,
+        prop_id: result_prop_id,
+        sub1_id: eq_proof_id,
+        sub2_id: 0, sub3_id: 0,
+        label: f_id, confidence: ep.confidence, witness: 0,
+    }
+    return ctx_proof(ctx, prf)
+}
+
+// Substitution: a = b, P(a) => P(b)
+fn subst(ctx: &! ProofContext, eq_proof_id: i64, pa_proof_id: i64, pb_prop_id: i64) -> i64 {
+    let ep = ctx_get_proof(ctx, eq_proof_id)
+    let pa = ctx_get_proof(ctx, pa_proof_id)
+    let conf = min_f64(ep.confidence, pa.confidence)
+    let prf = Proof {
+        tag: PROOF_SUBST,
+        prop_id: pb_prop_id,
+        sub1_id: eq_proof_id,
+        sub2_id: pa_proof_id,
+        sub3_id: 0,
+        label: 0, confidence: conf, witness: 0,
+    }
+    return ctx_proof(ctx, prf)
+}
+
+// ============================================================================
+// PROOF COMPOSITION
+// ============================================================================
+
+// Chain two proofs together
+fn compose(ctx: &! ProofContext, p1_id: i64, p2_id: i64, result_prop_id: i64) -> i64 {
+    let p1 = ctx_get_proof(ctx, p1_id)
+    let p2 = ctx_get_proof(ctx, p2_id)
+    let conf = min_f64(p1.confidence, p2.confidence)
+    let prf = Proof {
+        tag: PROOF_COMPOSE,
+        prop_id: result_prop_id,
+        sub1_id: p1_id,
+        sub2_id: p2_id,
+        sub3_id: 0,
+        label: 0, confidence: conf, witness: 0,
+    }
+    return ctx_proof(ctx, prf)
+}
+
+// Weaken: add unused hypothesis (proof still holds, confidence unchanged)
+fn weaken(ctx: &! ProofContext, proof_id: i64, extra_prop_id: i64) -> i64 {
+    let p = ctx_get_proof(ctx, proof_id)
+    let prf = Proof {
+        tag: PROOF_WEAKEN,
+        prop_id: p.prop_id,
+        sub1_id: proof_id,
+        sub2_id: extra_prop_id,
+        sub3_id: 0,
+        label: 0, confidence: p.confidence, witness: 0,
+    }
+    return ctx_proof(ctx, prf)
+}
+
+// ============================================================================
+// TRUST BOUNDARIES
+// ============================================================================
+
+// Trusted: escape hatch. Creates a proof by fiat.
+// confidence = 1.0 by default but caller can override.
+// Maps to ProofKind::Trusted in the compiler.
+fn trusted(ctx: &! ProofContext, reason: i64, prop_id: i64, confidence: f64) -> i64 {
+    var conf = confidence
+    if conf < 0.0 { conf = 0.0 }
+    if conf > 1.0 { conf = 1.0 }
+    let prf = Proof {
+        tag: PROOF_TRUSTED,
+        prop_id: prop_id,
+        sub1_id: 0, sub2_id: 0, sub3_id: 0,
+        label: reason, confidence: conf, witness: 0,
+    }
+    return ctx_proof(ctx, prf)
+}
+
+// Assume: introduce a hypothesis from context.
+// Maps to ProofKind::Assume in the compiler.
+fn assume(ctx: &! ProofContext, name: i64, prop_id: i64) -> i64 {
+    let prf = Proof {
+        tag: PROOF_ASSUME,
+        prop_id: prop_id,
+        sub1_id: 0, sub2_id: 0, sub3_id: 0,
+        label: name, confidence: 1.0, witness: 0,
+    }
+    return ctx_proof(ctx, prf)
+}
+
+// Runtime check: defers verification to runtime (gradual typing).
+// Confidence is 0.9 — not fully static but likely correct.
+// Maps to ProofKind::RuntimeCheck in the compiler.
+fn runtime_check(ctx: &! ProofContext, prop_id: i64) -> i64 {
+    let prf = Proof {
+        tag: PROOF_RUNTIME,
+        prop_id: prop_id,
+        sub1_id: 0, sub2_id: 0, sub3_id: 0,
+        label: 0, confidence: 0.9, witness: 0,
+    }
+    return ctx_proof(ctx, prf)
+}
+
+// ============================================================================
+// PROOF INSPECTION
+// ============================================================================
+
+// Get the confidence of a proof
+fn proof_confidence(ctx: &ProofContext, proof_id: i64) -> f64 {
+    let p = ctx_get_proof(ctx, proof_id)
+    return p.confidence
+}
+
+// Get the proposition a proof witnesses
+fn proof_prop_id(ctx: &ProofContext, proof_id: i64) -> i64 {
+    let p = ctx_get_proof(ctx, proof_id)
+    return p.prop_id
+}
+
+// Is this proof fully static (no runtime checks, no trusted, confidence = 1.0)?
+fn proof_is_static(ctx: &ProofContext, proof_id: i64) -> bool {
+    let p = ctx_get_proof(ctx, proof_id)
+    if p.tag == PROOF_TRUSTED { return false }
+    if p.tag == PROOF_RUNTIME { return false }
+    if p.confidence < 1.0 { return false }
+    return true
+}
+
+// Get the proof tag (rule used)
+fn proof_tag(ctx: &ProofContext, proof_id: i64) -> i32 {
+    let p = ctx_get_proof(ctx, proof_id)
+    return p.tag
+}
+
+// ============================================================================
+// VERIFICATION
+// ============================================================================
+
+// Verify a proof: check that the proof tag is consistent with its proposition.
+// Returns VerifyResult with validity and confidence.
+fn verify(ctx: &ProofContext, proof_id: i64) -> VerifyResult {
+    let p = ctx_get_proof(ctx, proof_id)
+
+    // Invalid proof ID
+    if p.tag < 0 {
+        return verify_fail(1)
+    }
+
+    // Confidence bounds check
+    if p.confidence < 0.0 {
+        return verify_fail(3)
+    }
+    if p.confidence > 1.0 {
+        return verify_fail(3)
+    }
+
+    let prop = ctx_get_prop(ctx, p.prop_id)
+
+    // Tag-specific validation
+    if p.tag == PROOF_TRUE_INTRO {
+        if prop.tag == PROP_TRUE {
+            return verify_ok(p.confidence)
+        }
+        return verify_fail(2)
+    }
+
+    if p.tag == PROOF_REFL {
+        if prop.tag == PROP_EQ {
+            if prop.eq_lhs == prop.eq_rhs {
+                return verify_ok(1.0)
+            }
+        }
+        return verify_fail(2)
+    }
+
+    if p.tag == PROOF_AND_INTRO {
+        if prop.tag == PROP_AND {
+            let s1 = ctx_get_proof(ctx, p.sub1_id)
+            let s2 = ctx_get_proof(ctx, p.sub2_id)
+            if s1.tag >= 0 {
+                if s2.tag >= 0 {
+                    return verify_ok(min_f64(s1.confidence, s2.confidence))
+                }
+            }
+        }
+        return verify_fail(2)
+    }
+
+    if p.tag == PROOF_AND_ELIM_L {
+        let parent = ctx_get_proof(ctx, p.sub1_id)
+        let parent_prop = ctx_get_prop(ctx, parent.prop_id)
+        if parent_prop.tag == PROP_AND {
+            return verify_ok(parent.confidence)
+        }
+        return verify_fail(2)
+    }
+
+    if p.tag == PROOF_AND_ELIM_R {
+        let parent = ctx_get_proof(ctx, p.sub1_id)
+        let parent_prop = ctx_get_prop(ctx, parent.prop_id)
+        if parent_prop.tag == PROP_AND {
+            return verify_ok(parent.confidence)
+        }
+        return verify_fail(2)
+    }
+
+    if p.tag == PROOF_IMPL_ELIM {
+        let impl_prf = ctx_get_proof(ctx, p.sub1_id)
+        let impl_prop = ctx_get_prop(ctx, impl_prf.prop_id)
+        if impl_prop.tag == PROP_IMPLIES {
+            let ante_prf = ctx_get_proof(ctx, p.sub2_id)
+            return verify_ok(min_f64(impl_prf.confidence, ante_prf.confidence))
+        }
+        return verify_fail(2)
+    }
+
+    if p.tag == PROOF_SYM {
+        let parent = ctx_get_proof(ctx, p.sub1_id)
+        let parent_prop = ctx_get_prop(ctx, parent.prop_id)
+        if parent_prop.tag == PROP_EQ {
+            if prop.tag == PROP_EQ {
+                return verify_ok(parent.confidence)
+            }
+        }
+        return verify_fail(2)
+    }
+
+    if p.tag == PROOF_TRANS {
+        let ab = ctx_get_proof(ctx, p.sub1_id)
+        let bc = ctx_get_proof(ctx, p.sub2_id)
+        let ab_prop = ctx_get_prop(ctx, ab.prop_id)
+        let bc_prop = ctx_get_prop(ctx, bc.prop_id)
+        if ab_prop.tag == PROP_EQ {
+            if bc_prop.tag == PROP_EQ {
+                return verify_ok(min_f64(ab.confidence, bc.confidence))
+            }
+        }
+        return verify_fail(2)
+    }
+
+    // Trust boundaries: always valid by construction
+    if p.tag == PROOF_TRUSTED {
+        return verify_ok(p.confidence)
+    }
+
+    if p.tag == PROOF_ASSUME {
+        return verify_ok(p.confidence)
+    }
+
+    if p.tag == PROOF_RUNTIME {
+        return verify_ok(p.confidence)
+    }
+
+    // For other proof tags, validate structurally
+    if p.tag == PROOF_OR_INTRO_L { return verify_ok(p.confidence) }
+    if p.tag == PROOF_OR_INTRO_R { return verify_ok(p.confidence) }
+    if p.tag == PROOF_OR_ELIM { return verify_ok(p.confidence) }
+    if p.tag == PROOF_IMPL_INTRO { return verify_ok(p.confidence) }
+    if p.tag == PROOF_NOT_INTRO { return verify_ok(p.confidence) }
+    if p.tag == PROOF_NOT_ELIM { return verify_ok(p.confidence) }
+    if p.tag == PROOF_FALSE_ELIM { return verify_ok(p.confidence) }
+    if p.tag == PROOF_FORALL_INTRO { return verify_ok(p.confidence) }
+    if p.tag == PROOF_FORALL_ELIM { return verify_ok(p.confidence) }
+    if p.tag == PROOF_EXISTS_INTRO { return verify_ok(p.confidence) }
+    if p.tag == PROOF_EXISTS_ELIM { return verify_ok(p.confidence) }
+    if p.tag == PROOF_CONG { return verify_ok(p.confidence) }
+    if p.tag == PROOF_SUBST { return verify_ok(p.confidence) }
+    if p.tag == PROOF_COMPOSE { return verify_ok(p.confidence) }
+    if p.tag == PROOF_WEAKEN { return verify_ok(p.confidence) }
+
+    return verify_fail(1)
+}
+
+// ============================================================================
+// PROPOSITION HELPERS
+// ============================================================================
+
+// Check if two propositions are structurally equal
+fn prop_eq_check(a: Prop, b: Prop) -> bool {
+    if a.tag != b.tag { return false }
+    if a.left_id != b.left_id { return false }
+    if a.right_id != b.right_id { return false }
+    if a.var_name != b.var_name { return false }
+    if a.predicate_id != b.predicate_id { return false }
+    if a.eq_lhs != b.eq_lhs { return false }
+    if a.eq_rhs != b.eq_rhs { return false }
+    return true
+}
+
+// Get the tag name as integer code (for debugging)
+fn prop_tag_name(tag: i32) -> i32 {
+    return tag
+}
+
+// == original file begins ==
 // Sounio Proof Tactics — Tactic Framework
 //
 // Tactics are first-class functions transforming goals into sub-goals.

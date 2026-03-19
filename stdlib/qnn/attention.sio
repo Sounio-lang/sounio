@@ -1,1 +1,183 @@
-//! attention (disabled)
+// stdlib/qnn/attention.sio — Quaternion scaled dot-product attention
+//
+// Scaled dot-product attention with quaternion-valued Q/K/V matrices.
+// attention(Q,K,V) = softmax(QK^T / sqrt(d)) V
+// Reference: Tay et al. (2019) "Quaternion Knowledge Graph Embeddings"
+
+// ============================================================================
+// HELPERS
+// ============================================================================
+
+fn qatt_abs(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+fn qatt_sqrt(x: f64) -> f64 {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y
+}
+
+fn qatt_exp(x: f64) -> f64 {
+    var v = x
+    if v > 20.0 { v = 20.0 }
+    if v < 0.0 - 20.0 { v = 0.0 - 20.0 }
+    var sum = 1.0
+    var term = 1.0
+    var k: i32 = 1
+    while k <= 15 {
+        term = term * v / k
+        sum = sum + term
+        k = k + 1
+    }
+    sum
+}
+
+// ============================================================================
+// ATTENTION
+// ============================================================================
+
+// Scaled dot-product attention over flat arrays.
+// q, k, v: [seq_len * dim] flattened matrices
+// out: [seq_len * dim] attention output
+fn qnn_attention(q: &[f64; 256], k: &[f64; 256], v: &[f64; 256], seq_len: i32, dim: i32, out: &![f64; 256]) with Mut, Div, Panic {
+    if seq_len < 1 { return }
+    if dim < 1 { return }
+    if seq_len * dim > 256 { return }
+    if seq_len * seq_len > 256 { return }
+
+    // Convert dim to f64 for sqrt
+    var dim_f = 0.0
+    var di: i32 = 0
+    while di < dim {
+        dim_f = dim_f + 1.0
+        di = di + 1
+    }
+    let scale = qatt_sqrt(dim_f)
+    if scale < 0.0001 { return }
+
+    // Compute attention scores: scores[i][j] = dot(q[i], k[j]) / sqrt(dim)
+    var scores = [0.0; 256]
+
+    var i: i32 = 0
+    while i < seq_len {
+        var j: i32 = 0
+        while j < seq_len {
+            var dot = 0.0
+            var d: i32 = 0
+            while d < dim {
+                let qi = i * dim + d
+                let ki = j * dim + d
+                if qi < 256 {
+                    if ki < 256 {
+                        dot = dot + q[qi] * k[ki]
+                    }
+                }
+                d = d + 1
+            }
+            let sidx = i * seq_len + j
+            if sidx < 256 {
+                scores[sidx] = dot / scale
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    // Softmax per row
+    var ri: i32 = 0
+    while ri < seq_len {
+        // Find max for numerical stability
+        var max_val = 0.0 - 1.0e10
+        var cj: i32 = 0
+        while cj < seq_len {
+            let idx = ri * seq_len + cj
+            if idx < 256 {
+                if scores[idx] > max_val {
+                    max_val = scores[idx]
+                }
+            }
+            cj = cj + 1
+        }
+
+        // Exp and sum
+        var exp_sum = 0.0
+        cj = 0
+        while cj < seq_len {
+            let idx = ri * seq_len + cj
+            if idx < 256 {
+                let ev = qatt_exp(scores[idx] - max_val)
+                scores[idx] = ev
+                exp_sum = exp_sum + ev
+            }
+            cj = cj + 1
+        }
+
+        // Normalize
+        if exp_sum > 1.0e-15 {
+            cj = 0
+            while cj < seq_len {
+                let idx = ri * seq_len + cj
+                if idx < 256 {
+                    scores[idx] = scores[idx] / exp_sum
+                }
+                cj = cj + 1
+            }
+        }
+        ri = ri + 1
+    }
+
+    // Weighted sum: out[i] = sum_j(scores[i][j] * v[j])
+    var oi: i32 = 0
+    while oi < seq_len {
+        var d: i32 = 0
+        while d < dim {
+            var sum = 0.0
+            var j: i32 = 0
+            while j < seq_len {
+                let sidx = oi * seq_len + j
+                let vidx = j * dim + d
+                if sidx < 256 {
+                    if vidx < 256 {
+                        sum = sum + scores[sidx] * v[vidx]
+                    }
+                }
+                j = j + 1
+            }
+            let out_idx = oi * dim + d
+            if out_idx < 256 {
+                out[out_idx] = sum
+            }
+            d = d + 1
+        }
+        oi = oi + 1
+    }
+}
+
+// ============================================================================
+// TESTS
+// ============================================================================
+
+fn test_attention_single() -> bool {
+    // seq_len=1, dim=2: trivial case, output = V
+    var q = [0.0; 256]
+    var k = [0.0; 256]
+    var v = [0.0; 256]
+    q[0] = 1.0
+    q[1] = 0.0
+    k[0] = 1.0
+    k[1] = 0.0
+    v[0] = 5.0
+    v[1] = 3.0
+    var out = [0.0; 256]
+    qnn_attention(&q, &k, &v, 1, 2, &!out)
+    qatt_abs(out[0] - 5.0) < 0.1
+}

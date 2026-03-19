@@ -1,1 +1,186 @@
-//! integrate (disabled)
+// stdlib/medlang/integrate.sio
+//
+// Numerical integration methods — Sounio
+//
+// Trapezoidal rule and Simpson's rule for AUC computation
+// and general numerical quadrature on fixed arrays.
+
+// ============================================================================
+// Helpers
+// ============================================================================
+
+fn integ_abs(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+// ============================================================================
+// Trapezoidal rule
+// Integrates uniformly-spaced data: sum of (y[i] + y[i+1])/2 * dt
+// y: data array, dt: spacing, n: number of points (n >= 2)
+// ============================================================================
+
+fn integrate_trapezoidal(y: &[f64; 256], dt: f64, n: i32) -> f64 with Mut, Div, Panic {
+    if n < 2 { return 0.0 }
+    var count = n
+    if count > 256 { count = 256 }
+    var sum = 0.0
+    var i = 0
+    while i < count - 1 {
+        sum = sum + (y[i] + y[i + 1]) * 0.5 * dt
+        i = i + 1
+    }
+    sum
+}
+
+// ============================================================================
+// Simpson's 1/3 rule (composite)
+// Requires n to be odd (even number of intervals).
+// If n is even, falls back to trapezoidal for the last interval.
+// ============================================================================
+
+fn integrate_simpson(y: &[f64; 256], dt: f64, n: i32) -> f64 with Mut, Div, Panic {
+    if n < 2 { return 0.0 }
+    var count = n
+    if count > 256 { count = 256 }
+
+    // Need at least 3 points for Simpson
+    if count < 3 {
+        return (y[0] + y[1]) * 0.5 * dt
+    }
+
+    // Make effective count odd (even number of intervals)
+    var n_eff = count
+    var leftover = 0
+    if n_eff % 2 == 0 {
+        // Even count means odd intervals, use one fewer point for Simpson
+        n_eff = n_eff - 1
+        leftover = 1
+    }
+
+    // Simpson's 1/3: integral = (dt/3) * [y0 + 4*y1 + 2*y2 + 4*y3 + ... + yn]
+    var sum = y[0] + y[n_eff - 1]
+    var i = 1
+    while i < n_eff - 1 {
+        if i % 2 == 1 {
+            sum = sum + 4.0 * y[i]
+        } else {
+            sum = sum + 2.0 * y[i]
+        }
+        i = i + 1
+    }
+    var result = sum * dt / 3.0
+
+    // Add trapezoidal for leftover interval
+    if leftover == 1 {
+        result = result + (y[n_eff - 1] + y[n_eff]) * 0.5 * dt
+    }
+
+    result
+}
+
+// ============================================================================
+// Trapezoidal with non-uniform spacing
+// times: time points, y: values, n: number of points
+// ============================================================================
+
+fn integrate_trapezoidal_nonuniform(times: &[f64; 256], y: &[f64; 256], n: i32) -> f64 with Mut, Div, Panic {
+    if n < 2 { return 0.0 }
+    var count = n
+    if count > 256 { count = 256 }
+    var sum = 0.0
+    var i = 0
+    while i < count - 1 {
+        let dt_i = times[i + 1] - times[i]
+        sum = sum + (y[i] + y[i + 1]) * 0.5 * dt_i
+        i = i + 1
+    }
+    sum
+}
+
+// ============================================================================
+// Cumulative trapezoidal (running AUC)
+// Fills cum_out[i] with AUC from 0 to t[i]
+// ============================================================================
+
+fn integrate_cumulative(y: &[f64; 256], dt: f64, n: i32, cum_out: &![f64; 256]) -> i32 with Mut, Div, Panic {
+    if n < 1 { return 0 }
+    var count = n
+    if count > 256 { count = 256 }
+    cum_out[0] = 0.0
+    var i = 1
+    while i < count {
+        cum_out[i] = cum_out[i - 1] + (y[i - 1] + y[i]) * 0.5 * dt
+        i = i + 1
+    }
+    count
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+fn test_trapezoidal_constant() -> bool with Mut, Div, Panic {
+    // Integrate f(x) = 5.0 over [0, 10] with dt=1.0, n=11 points
+    // AUC should be 50.0
+    var y: [f64; 256] = [0.0; 256]
+    var i = 0
+    while i < 11 {
+        y[i] = 5.0
+        i = i + 1
+    }
+    let result = integrate_trapezoidal(&y, 1.0, 11)
+    integ_abs(result - 50.0) < 0.01
+}
+
+fn test_trapezoidal_linear() -> bool with Mut, Div, Panic {
+    // Integrate f(x) = x over [0, 10] with dt=1.0, n=11 points
+    // AUC should be 50.0
+    var y: [f64; 256] = [0.0; 256]
+    var i = 0
+    while i < 11 {
+        y[i] = i as f64
+        i = i + 1
+    }
+    let result = integrate_trapezoidal(&y, 1.0, 11)
+    integ_abs(result - 50.0) < 0.01
+}
+
+fn test_simpson_constant() -> bool with Mut, Div, Panic {
+    // Integrate f(x) = 3.0 over [0, 10] with dt=1.0, n=11 points
+    // AUC should be 30.0
+    var y: [f64; 256] = [0.0; 256]
+    var i = 0
+    while i < 11 {
+        y[i] = 3.0
+        i = i + 1
+    }
+    let result = integrate_simpson(&y, 1.0, 11)
+    integ_abs(result - 30.0) < 0.01
+}
+
+fn test_simpson_quadratic() -> bool with Mut, Div, Panic {
+    // Integrate f(x) = x^2 over [0, 4] with dt=0.5, n=9 points
+    // Exact = 64/3 ≈ 21.333
+    var y: [f64; 256] = [0.0; 256]
+    var i = 0
+    while i < 9 {
+        let x = i as f64 * 0.5
+        y[i] = x * x
+        i = i + 1
+    }
+    let result = integrate_simpson(&y, 0.5, 9)
+    integ_abs(result - 21.333) < 0.1
+}
+
+fn test_cumulative() -> bool with Mut, Div, Panic {
+    var y: [f64; 256] = [0.0; 256]
+    var i = 0
+    while i < 5 {
+        y[i] = 2.0
+        i = i + 1
+    }
+    var cum: [f64; 256] = [0.0; 256]
+    let n = integrate_cumulative(&y, 1.0, 5, &!cum)
+    // cum[0] = 0, cum[1] = 2, cum[2] = 4, cum[3] = 6, cum[4] = 8
+    integ_abs(cum[0]) < 0.01 && integ_abs(cum[4] - 8.0) < 0.01
+}

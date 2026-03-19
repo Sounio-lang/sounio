@@ -1,1 +1,285 @@
-//! multi_compartment (disabled)
+// stdlib/medlang/pk/multi_compartment.sio
+//
+// Generic n-compartment PK model with RK4 solver — Sounio
+//
+// Solves dC/dt = K*C where K is the rate matrix.
+// Max 8 compartments. Uses fixed arrays throughout.
+
+// ============================================================================
+// Helpers
+// ============================================================================
+
+fn mc_abs(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+fn mc_exp(x: f64) -> f64 with Mut, Div, Panic {
+    var xc = x
+    if xc > 20.0 { xc = 20.0 }
+    if xc < -20.0 { xc = -20.0 }
+    var result = 1.0
+    var term = 1.0
+    var i = 1
+    while i <= 30 {
+        term = term * xc / i as f64
+        result = result + term
+        i = i + 1
+    }
+    if result < 1.0e-15 { result = 1.0e-15 }
+    result
+}
+
+// ============================================================================
+// Multi-compartment model
+// rates[i*8+j] = rate constant from compartment j to compartment i
+// For elimination: rates[i*8+i] is negative (outflow = sum of all k_ij for j!=i + k_i0)
+// volumes[i] = volume of compartment i
+// ============================================================================
+
+struct MultiCompModel {
+    rates: [f64; 64],       // 8x8 rate matrix (row-major)
+    volumes: [f64; 8],      // volumes per compartment
+    n_comp: i32,            // number of compartments (max 8)
+    dose: f64,              // dose amount
+    dose_comp: i32,         // compartment receiving dose (0-indexed)
+}
+
+fn multi_comp_model_new(n_comp: i32) -> MultiCompModel {
+    MultiCompModel {
+        rates: [0.0; 64],
+        volumes: [1.0; 8],
+        n_comp: n_comp,
+        dose: 0.0,
+        dose_comp: 0,
+    }
+}
+
+// Set transfer rate from compartment `from` to compartment `to`
+fn multi_comp_set_rate(m: &!MultiCompModel, from: i32, to: i32, rate: f64) with Mut, Div, Panic {
+    if from >= 0 && from < 8 && to >= 0 && to < 8 {
+        m.rates[to * 8 + from] = rate
+    }
+}
+
+// Set elimination rate from compartment `comp` (k_i0)
+fn multi_comp_set_elim(m: &!MultiCompModel, comp: i32, rate: f64) with Mut, Div, Panic {
+    if comp >= 0 && comp < 8 {
+        // Store elimination on the diagonal as negative
+        // The diagonal will be: -(sum of outgoing rates)
+        // We accumulate it during derivative computation
+        m.rates[comp * 8 + comp] = 0.0 - rate
+    }
+}
+
+fn multi_comp_set_volume(m: &!MultiCompModel, comp: i32, vol: f64) with Mut, Div, Panic {
+    if comp >= 0 && comp < 8 {
+        m.volumes[comp] = vol
+    }
+}
+
+// ============================================================================
+// Compute derivatives: dA/dt for each compartment amount
+// state[i] = amount in compartment i
+// deriv[i] = dA_i/dt = sum_j(k_ij * A_j) + k_ii_diag * A_i
+// ============================================================================
+
+fn mc_compute_deriv(model: &MultiCompModel, state: &[f64; 8], deriv: &![f64; 8]) with Mut, Div, Panic {
+    var i = 0
+    while i < model.n_comp {
+        var d = 0.0
+        // Off-diagonal: inflow from other compartments
+        var j = 0
+        while j < model.n_comp {
+            if j != i {
+                let rate = model.rates[i * 8 + j]
+                d = d + rate * state[j]
+            }
+            j = j + 1
+        }
+        // Diagonal: total outflow (negative)
+        // Sum of all rates leaving compartment i
+        var out_rate = 0.0
+        var k = 0
+        while k < model.n_comp {
+            if k != i {
+                out_rate = out_rate + model.rates[k * 8 + i]
+            }
+            k = k + 1
+        }
+        // Add elimination (stored as negative on diagonal)
+        let elim = model.rates[i * 8 + i]
+        d = d - (out_rate) * state[i] + elim * state[i]
+        deriv[i] = d
+        i = i + 1
+    }
+}
+
+// ============================================================================
+// RK4 step
+// ============================================================================
+
+fn mc_rk4_step(model: &MultiCompModel, state: &![f64; 8], dt: f64) with Mut, Div, Panic {
+    var k1: [f64; 8] = [0.0; 8]
+    var k2: [f64; 8] = [0.0; 8]
+    var k3: [f64; 8] = [0.0; 8]
+    var k4: [f64; 8] = [0.0; 8]
+    var tmp: [f64; 8] = [0.0; 8]
+
+    // k1 = f(state)
+    mc_compute_deriv(model, state, &!k1)
+
+    // tmp = state + 0.5*dt*k1
+    var i = 0
+    while i < model.n_comp {
+        tmp[i] = state[i] + 0.5 * dt * k1[i]
+        i = i + 1
+    }
+    mc_compute_deriv(model, &tmp, &!k2)
+
+    // tmp = state + 0.5*dt*k2
+    i = 0
+    while i < model.n_comp {
+        tmp[i] = state[i] + 0.5 * dt * k2[i]
+        i = i + 1
+    }
+    mc_compute_deriv(model, &tmp, &!k3)
+
+    // tmp = state + dt*k3
+    i = 0
+    while i < model.n_comp {
+        tmp[i] = state[i] + dt * k3[i]
+        i = i + 1
+    }
+    mc_compute_deriv(model, &tmp, &!k4)
+
+    // state += (dt/6) * (k1 + 2*k2 + 2*k3 + k4)
+    i = 0
+    while i < model.n_comp {
+        state[i] = state[i] + (dt / 6.0) * (k1[i] + 2.0 * k2[i] + 2.0 * k3[i] + k4[i])
+        if state[i] < 0.0 { state[i] = 0.0 }
+        i = i + 1
+    }
+}
+
+// ============================================================================
+// Simulate: run RK4 from t=0 to t_end, store concentrations (amount/volume)
+// at each dt step in conc_out. Returns number of time steps stored.
+// conc_out stores concentrations for compartment 0 (central).
+// ============================================================================
+
+fn multi_comp_simulate(model: MultiCompModel, t_end: f64, dt: f64, conc_out: &![f64; 256]) -> i32 with Mut, Div, Panic {
+    var state: [f64; 8] = [0.0; 8]
+    // Initial dose in dose_comp
+    if model.dose_comp >= 0 && model.dose_comp < 8 {
+        state[model.dose_comp] = model.dose
+    }
+
+    var t = 0.0
+    var step = 0
+    while t <= t_end && step < 256 {
+        // Store concentration (amount / volume) for central compartment (0)
+        if model.volumes[0] > 1.0e-15 {
+            conc_out[step] = state[0] / model.volumes[0]
+        } else {
+            conc_out[step] = 0.0
+        }
+        mc_rk4_step(&model, &!state, dt)
+        t = t + dt
+        step = step + 1
+    }
+    step
+}
+
+// ============================================================================
+// Simulate all compartments: store amount in each compartment
+// out[step * 8 + comp] = amount at that step
+// ============================================================================
+
+fn multi_comp_simulate_all(model: MultiCompModel, t_end: f64, dt: f64, out: &![f64; 2048]) -> i32 with Mut, Div, Panic {
+    var state: [f64; 8] = [0.0; 8]
+    if model.dose_comp >= 0 && model.dose_comp < 8 {
+        state[model.dose_comp] = model.dose
+    }
+
+    var t = 0.0
+    var step = 0
+    var max_steps = 256
+    while t <= t_end && step < max_steps {
+        var c = 0
+        while c < model.n_comp && c < 8 {
+            let idx = step * 8 + c
+            if idx < 2048 {
+                out[idx] = state[c]
+            }
+            c = c + 1
+        }
+        mc_rk4_step(&model, &!state, dt)
+        t = t + dt
+        step = step + 1
+    }
+    step
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+fn test_multi_comp_one_comp() -> bool with Mut, Div, Panic {
+    // Set up a one-compartment model via the generic framework
+    // k10 = 0.1, V1 = 10, dose = 100
+    var model = multi_comp_model_new(1)
+    model.dose = 100.0
+    model.dose_comp = 0
+    model.volumes[0] = 10.0
+    // Elimination: k10 = 0.1 (stored as negative on diagonal)
+    model.rates[0] = -0.1
+
+    var conc: [f64; 256] = [0.0; 256]
+    let steps = multi_comp_simulate(model, 10.0, 0.1, &!conc)
+
+    // C(0) = 100/10 = 10
+    let c0 = conc[0]
+    // Should decay
+    let c_last = conc[steps - 1]
+    mc_abs(c0 - 10.0) < 0.1 && c_last < c0 && steps > 0
+}
+
+fn test_multi_comp_two_comp() -> bool with Mut, Div, Panic {
+    // Two-compartment: k10=0.5, k12=0.3, k21=0.2
+    var model = multi_comp_model_new(2)
+    model.dose = 100.0
+    model.dose_comp = 0
+    model.volumes[0] = 10.0
+    model.volumes[1] = 20.0
+    // Diagonal (elimination from comp 0)
+    model.rates[0] = -0.5
+    // Off-diagonal transfers
+    model.rates[1 * 8 + 0] = 0.3   // comp 0 -> comp 1
+    model.rates[0 * 8 + 1] = 0.2   // comp 1 -> comp 0
+
+    var conc: [f64; 256] = [0.0; 256]
+    let steps = multi_comp_simulate(model, 20.0, 0.1, &!conc)
+
+    // Initial concentration > 0, decays
+    conc[0] > 0.0 && conc[steps - 1] < conc[0] && steps > 0
+}
+
+fn test_multi_comp_mass_conservation_closed() -> bool with Mut, Div, Panic {
+    // Closed system (no elimination): total mass should be conserved
+    var model = multi_comp_model_new(2)
+    model.dose = 100.0
+    model.dose_comp = 0
+    model.volumes[0] = 1.0
+    model.volumes[1] = 1.0
+    // No elimination (diagonal = 0)
+    model.rates[1 * 8 + 0] = 0.3   // comp 0 -> comp 1
+    model.rates[0 * 8 + 1] = 0.2   // comp 1 -> comp 0
+
+    var out: [f64; 2048] = [0.0; 2048]
+    let steps = multi_comp_simulate_all(model, 10.0, 0.1, &!out)
+
+    // Check mass at last step
+    let last = steps - 1
+    let total = out[last * 8 + 0] + out[last * 8 + 1]
+    mc_abs(total - 100.0) < 1.0
+}

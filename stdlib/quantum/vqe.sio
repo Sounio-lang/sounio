@@ -1,1 +1,345 @@
-//! vqe (disabled)
+// stdlib/quantum/vqe.sio — Variational Quantum Eigensolver
+//
+// Classical simulation of VQE for small molecules (max 4 qubits = 16 amplitudes).
+// Implements parameterized quantum circuits with Rx, Ry, Rz, CNOT gates.
+// Reference: Peruzzo et al. (2014) Nature Communications 5:4213
+
+// ============================================================================
+// MATH HELPERS
+// ============================================================================
+
+fn vqe_abs(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+fn vqe_sqrt(x: f64) -> f64 {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y
+}
+
+fn vqe_sin(x: f64) -> f64 {
+    var v = x
+    while v > 3.14159265 { v = v - 6.28318530 }
+    while v < 0.0 - 3.14159265 { v = v + 6.28318530 }
+    let v2 = v * v
+    let v3 = v2 * v
+    let v5 = v3 * v2
+    let v7 = v5 * v2
+    let v9 = v7 * v2
+    v - v3 / 6.0 + v5 / 120.0 - v7 / 5040.0 + v9 / 362880.0
+}
+
+fn vqe_cos(x: f64) -> f64 {
+    vqe_sin(x + 1.5707963268)
+}
+
+// ============================================================================
+// QUANTUM STATE
+// ============================================================================
+
+struct QubitState {
+    real: [f64; 16],
+    imag: [f64; 16],
+    n_amplitudes: i32
+}
+
+// Helper: 2^n_qubits
+fn vqe_state_size(n_qubits: i32) -> i32 {
+    var n: i32 = 1
+    var q: i32 = 0
+    while q < n_qubits {
+        n = n * 2
+        q = q + 1
+    }
+    if n > 16 { n = 16 }
+    n
+}
+
+fn vqe_state_zero(n_qubits: i32) -> QubitState {
+    let n_amp = vqe_state_size(n_qubits)
+    var state = QubitState {
+        real: [0.0; 16],
+        imag: [0.0; 16],
+        n_amplitudes: n_amp
+    }
+    state.real[0] = 1.0
+    state
+}
+
+// ============================================================================
+// SINGLE-QUBIT GATES
+// ============================================================================
+
+// Rx(angle) = [[cos(a/2), -i*sin(a/2)], [-i*sin(a/2), cos(a/2)]]
+fn vqe_apply_rx(state: QubitState, qubit: i32, angle: f64) -> QubitState {
+    var result = state
+    let n = state.n_amplitudes
+    let c = vqe_cos(angle / 2.0)
+    let s = vqe_sin(angle / 2.0)
+    let mask = 1 << qubit
+
+    var i: i32 = 0
+    while i < n {
+        if (i & mask) == 0 {
+            let j = i | mask
+            if j < 16 {
+                let r0 = state.real[i]
+                let i0 = state.imag[i]
+                let r1 = state.real[j]
+                let i1 = state.imag[j]
+                result.real[i] = c * r0 + s * i1
+                result.imag[i] = c * i0 - s * r1
+                result.real[j] = s * i0 + c * r1
+                result.imag[j] = 0.0 - s * r0 + c * i1
+            }
+        }
+        i = i + 1
+    }
+    result
+}
+
+// Ry(angle) = [[cos(a/2), -sin(a/2)], [sin(a/2), cos(a/2)]]
+fn vqe_apply_ry(state: QubitState, qubit: i32, angle: f64) -> QubitState {
+    var result = state
+    let n = state.n_amplitudes
+    let c = vqe_cos(angle / 2.0)
+    let s = vqe_sin(angle / 2.0)
+    let mask = 1 << qubit
+
+    var i: i32 = 0
+    while i < n {
+        if (i & mask) == 0 {
+            let j = i | mask
+            if j < 16 {
+                let r0 = state.real[i]
+                let i0 = state.imag[i]
+                let r1 = state.real[j]
+                let i1 = state.imag[j]
+                result.real[i] = c * r0 - s * r1
+                result.imag[i] = c * i0 - s * i1
+                result.real[j] = s * r0 + c * r1
+                result.imag[j] = s * i0 + c * i1
+            }
+        }
+        i = i + 1
+    }
+    result
+}
+
+// Rz(angle) = [[exp(-ia/2), 0], [0, exp(ia/2)]]
+fn vqe_apply_rz(state: QubitState, qubit: i32, angle: f64) -> QubitState {
+    var result = state
+    let n = state.n_amplitudes
+    let c = vqe_cos(angle / 2.0)
+    let s = vqe_sin(angle / 2.0)
+
+    var i: i32 = 0
+    while i < n {
+        if i < 16 {
+            if (i & (1 << qubit)) == 0 {
+                let r = state.real[i]
+                let im = state.imag[i]
+                result.real[i] = c * r + s * im
+                result.imag[i] = c * im - s * r
+            } else {
+                let r = state.real[i]
+                let im = state.imag[i]
+                result.real[i] = c * r - s * im
+                result.imag[i] = c * im + s * r
+            }
+        }
+        i = i + 1
+    }
+    result
+}
+
+// CNOT: flips target qubit if control qubit is |1>
+fn vqe_apply_cnot(state: QubitState, control: i32, target: i32) -> QubitState {
+    var result = state
+    let n = state.n_amplitudes
+    let ctrl_mask = 1 << control
+    let tgt_mask = 1 << target
+
+    var i: i32 = 0
+    while i < n {
+        if (i & ctrl_mask) != 0 {
+            if (i & tgt_mask) == 0 {
+                let j = i | tgt_mask
+                if j < 16 {
+                    let tr = result.real[i]
+                    let ti = result.imag[i]
+                    result.real[i] = result.real[j]
+                    result.imag[i] = result.imag[j]
+                    result.real[j] = tr
+                    result.imag[j] = ti
+                }
+            }
+        }
+        i = i + 1
+    }
+    result
+}
+
+// ============================================================================
+// EXPECTATION VALUE
+// ============================================================================
+
+// <psi|H|psi> for diagonal Hamiltonian
+fn vqe_expectation(state: QubitState, hamiltonian: &[f64; 256], n: i32) -> f64 {
+    var sum = 0.0
+    let amp = state.n_amplitudes
+    var i: i32 = 0
+    while i < amp {
+        if i < 16 {
+            if i < n {
+                if i < 256 {
+                    let prob = state.real[i] * state.real[i] + state.imag[i] * state.imag[i]
+                    sum = sum + prob * hamiltonian[i]
+                }
+            }
+        }
+        i = i + 1
+    }
+    sum
+}
+
+// ============================================================================
+// VQE OPTIMIZATION
+// ============================================================================
+
+// Evaluate ansatz circuit with given parameters and return energy
+fn vqe_eval_circuit(params: &![f64; 32], n_params: i32, n_qubits: i32, hamiltonian: &[f64; 256], n_amp: i32) -> f64 with Mut, Div, Panic {
+    var state = vqe_state_zero(n_qubits)
+
+    // First Ry layer
+    var p: i32 = 0
+    var q: i32 = 0
+    while q < n_qubits {
+        if p < n_params {
+            if p < 32 {
+                state = vqe_apply_ry(state, q, params[p])
+                p = p + 1
+            }
+        }
+        q = q + 1
+    }
+
+    // CNOT chain entanglement
+    q = 0
+    while q < n_qubits - 1 {
+        state = vqe_apply_cnot(state, q, q + 1)
+        q = q + 1
+    }
+
+    // Second Ry layer
+    q = 0
+    while q < n_qubits {
+        if p < n_params {
+            if p < 32 {
+                state = vqe_apply_ry(state, q, params[p])
+                p = p + 1
+            }
+        }
+        q = q + 1
+    }
+
+    vqe_expectation(state, hamiltonian, n_amp)
+}
+
+// Parameter-shift gradient descent VQE optimizer.
+// Returns best energy found.
+fn vqe_optimize(params: &![f64; 32], n_params: i32, n_qubits: i32, hamiltonian: &[f64; 256]) -> f64 with Mut, Div, Panic {
+    if n_params < 1 { return 0.0 }
+    if n_qubits < 1 { return 0.0 }
+    if n_qubits > 4 { return 0.0 }
+
+    let n_amp = vqe_state_size(n_qubits)
+    let lr = 0.1
+    let n_iters: i32 = 50
+    let shift = 1.5707963268
+
+    var best_energy = 1.0e10
+    var iter: i32 = 0
+
+    while iter < n_iters {
+        var grads = [0.0; 32]
+        var k: i32 = 0
+        while k < n_params {
+            if k < 32 {
+                let old_val = params[k]
+                params[k] = old_val + shift
+                let e_plus = vqe_eval_circuit(params, n_params, n_qubits, hamiltonian, n_amp)
+                params[k] = old_val - shift
+                let e_minus = vqe_eval_circuit(params, n_params, n_qubits, hamiltonian, n_amp)
+                params[k] = old_val
+                grads[k] = (e_plus - e_minus) / 2.0
+            }
+            k = k + 1
+        }
+
+        k = 0
+        while k < n_params {
+            if k < 32 {
+                params[k] = params[k] - lr * grads[k]
+            }
+            k = k + 1
+        }
+
+        let energy = vqe_eval_circuit(params, n_params, n_qubits, hamiltonian, n_amp)
+        if energy < best_energy {
+            best_energy = energy
+        }
+        iter = iter + 1
+    }
+    best_energy
+}
+
+// ============================================================================
+// TESTS
+// ============================================================================
+
+fn test_state_zero() -> bool {
+    let s = vqe_state_zero(2)
+    vqe_abs(s.real[0] - 1.0) < 0.001
+}
+
+fn test_state_amplitudes() -> bool {
+    let s = vqe_state_zero(2)
+    s.n_amplitudes == 4
+}
+
+fn test_ry_pi() -> bool {
+    // Ry(pi) on |0> gives |1>
+    let s = vqe_state_zero(1)
+    let s2 = vqe_apply_ry(s, 0, 3.14159265)
+    vqe_abs(s2.real[1]) > 0.9
+}
+
+fn test_expectation_ground() -> bool {
+    // H = diag(-1, 1), state = |0>
+    var h = [0.0; 256]
+    h[0] = 0.0 - 1.0
+    h[1] = 1.0
+    let s = vqe_state_zero(1)
+    let e = vqe_expectation(s, &h, 2)
+    vqe_abs(e - (0.0 - 1.0)) < 0.01
+}
+
+fn test_sin_zero() -> bool {
+    vqe_abs(vqe_sin(0.0)) < 0.001
+}
+
+fn test_cos_zero() -> bool {
+    vqe_abs(vqe_cos(0.0) - 1.0) < 0.01
+}
