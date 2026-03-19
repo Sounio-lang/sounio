@@ -256,6 +256,75 @@ echo "--- Section 2: GPU compile pipeline ---"
     fi
 }
 
+# ── Section 2b: Boundary-Breaking GPU Novelties (Sprints 248-250) ─────────────────
+
+echo ""
+echo "--- Section 2b: Boundary-Breaking Novelties (T16-T18) ---"
+
+# T16: Epistemic Kernel Fusion (Novelty 4) — provenance+uncertainty-guided DAG fusion
+{
+    TOTAL=$((TOTAL + 1))
+    if [ -f self-hosted/gpu/opt/epistemic_fusion.sio ] && \
+       grep -q 'epfuse_build_graph' self-hosted/gpu/opt/epistemic_fusion.sio && \
+       grep -q 'epfuse_score_edge' self-hosted/gpu/opt/epistemic_fusion.sio && \
+       grep -q 'hlir_kernels_to_epistemic_fused_ptx' self-hosted/gpu/hlir_to_gpu.sio; then
+        RESULT=$($SOUC run self-hosted/gpu/opt/epistemic_fusion.sio 2>&1 | tail -1)
+        if echo "$RESULT" | grep -q "10/10 self-tests passed"; then
+            PASS=$((PASS + 1))
+            echo "PASS  T16_epistemic_fusion (10/10 self-tests)"
+        else
+            FAIL=$((FAIL + 1))
+            echo "FAIL  T16_epistemic_fusion: self-tests did not all pass: $RESULT"
+        fi
+    else
+        FAIL=$((FAIL + 1))
+        echo "FAIL  T16_epistemic_fusion: epistemic_fusion.sio or pipeline wiring missing"
+    fi
+}
+
+# T17: Speculative Epistemic Execution (Novelty 5) — uncertainty-threshold skip guards
+{
+    TOTAL=$((TOTAL + 1))
+    if [ -f self-hosted/gpu/speculative.sio ] && \
+       grep -q 'spec_classify_kernels' self-hosted/gpu/speculative.sio && \
+       grep -q 'spec_emit_branch_guard' self-hosted/gpu/speculative.sio && \
+       grep -q 'hlir_kernels_to_speculative_ptx' self-hosted/gpu/hlir_to_gpu.sio; then
+        RESULT=$($SOUC run self-hosted/gpu/speculative.sio 2>&1 | tail -1)
+        if echo "$RESULT" | grep -q "10/10 self-tests passed"; then
+            PASS=$((PASS + 1))
+            echo "PASS  T17_speculative_execution (10/10 self-tests)"
+        else
+            FAIL=$((FAIL + 1))
+            echo "FAIL  T17_speculative_execution: self-tests did not all pass: $RESULT"
+        fi
+    else
+        FAIL=$((FAIL + 1))
+        echo "FAIL  T17_speculative_execution: speculative.sio or pipeline wiring missing"
+    fi
+}
+
+# T18: Provenance-Aware DAG Scheduler (Novelty 6) — information-flow parallelism
+{
+    TOTAL=$((TOTAL + 1))
+    if [ -f self-hosted/gpu/dag_scheduler.sio ] && \
+       grep -q 'dag_build' self-hosted/gpu/dag_scheduler.sio && \
+       grep -q 'dag_topo_sort' self-hosted/gpu/dag_scheduler.sio && \
+       grep -q 'dag_assign_streams' self-hosted/gpu/dag_scheduler.sio && \
+       grep -q 'hlir_kernels_to_dag_scheduled_ptx' self-hosted/gpu/hlir_to_gpu.sio; then
+        RESULT=$($SOUC run self-hosted/gpu/dag_scheduler.sio 2>&1 | tail -1)
+        if echo "$RESULT" | grep -q "10/10 self-tests passed"; then
+            PASS=$((PASS + 1))
+            echo "PASS  T18_dag_scheduler (10/10 self-tests)"
+        else
+            FAIL=$((FAIL + 1))
+            echo "FAIL  T18_dag_scheduler: self-tests did not all pass: $RESULT"
+        fi
+    else
+        FAIL=$((FAIL + 1))
+        echo "FAIL  T18_dag_scheduler: dag_scheduler.sio or pipeline wiring missing"
+    fi
+}
+
 # ── Section 3: souc check — optional files ────────────────────────────────────
 
 echo ""
