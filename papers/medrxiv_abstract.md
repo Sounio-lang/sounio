@@ -201,7 +201,7 @@ A patient on warfarin 5 mg/day for >3 months (well beyond steady-state for all C
 
 *Note: for *1/*3, σ_total = √(0.3² + 0.5²) = 0.583; likelihood reflects this combined uncertainty.*
 
-**Genotype-conditional risk** (Table 2): For the poor-metabolizer phenotype, predicted INR_ss = 6.34 with GUM expanded uncertainty U = 4.06 (k = 2.26; ν_eff = 7.7). The upper confidence limit is 6.34 + 4.06 = 10.4; P(INR_ss > 5.0 | *3/*3) = **82.9%**.
+**Genotype-conditional risk** (Table 2): For the poor-metabolizer phenotype, predicted INR_ss = 6.34 with GUM expanded uncertainty U = 4.17 (k = 2.32; ν_eff = 7.7). The upper confidence limit is 6.34 + 4.17 = 10.51; P(INR_ss > 5.0 | *3/*3) = **77.3%**.
 
 **Marginal lethal risk** (scipy-verified; `papers/supplement_s2_python.py`):
 ```
