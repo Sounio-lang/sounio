@@ -2633,92 +2633,364 @@ fn hlir_kernels_to_dag_scheduled_ptx(module: HlirModule) -> PtxBuf with Mut, Pan
 }
 
 // ============================================================================
-// Section 30 — Host Glue Emission (IREE-inspired metadata descriptor)
+// Section 30 — Production Host Glue Emission (IREE-inspired metadata descriptor)
 // ============================================================================
 //
-// DAG + speculative host glue emitters generate structured .sio launch wrappers
-// that reference SOUNIO_DAG / SOUNIO_SPEC metadata comments in the emitted PTX.
+// Production-grade DAG + speculative host glue emitters that:
+//   1. Parse SOUNIO_* metadata from the emitted PTX buffer
+//   2. Generate functional Sounio host wrappers with real multi-stream dispatch
+//
 // Inspired by IREE's FlatBuffer kernel descriptor pattern (OSDI '25):
 // compiler emits structured metadata, runtime acts as descriptor interpreter.
 //
-// The generated _dag_host.sio / _spec_host.sio files are standalone modules
-// that import gpu::runtime::cuda and gpu::runtime::launch, then provide
-// a single entry function (gpu_dag_run / gpu_spec_run) for host-side dispatch.
+// Metadata protocol (embedded as PTX comments by the deep-wired novelty functions):
+//   // SOUNIO_DAG stream_count=N
+//   // SOUNIO_STREAM kernel=K stream=S
+//   // SOUNIO_DEP from=A to=B
+//   // SOUNIO_SPEC_PLAN coarse=C refinement=R threshold=T
+//   // SOUNIO_SPEC_GUARD kernel=K
 
-// Emit DAG host glue file with multi-stream launch metadata.
-// Builds a PtxBuf containing the .sio host wrapper source, then writes it.
+// ----------------------------------------------------------------------------
+// PTX Metadata Parser — scans PtxBuf.data for SOUNIO_* comment lines
+// ----------------------------------------------------------------------------
+
+// Check if ptx.data[pos..pos+len] matches a given prefix string.
+fn ptx_meta_match(ptx: PtxBuf, pos: i64, prefix: string, prefix_len: i64) -> bool {
+    if pos + prefix_len > ptx.len { return false }
+    var j: i64 = 0
+    while j < prefix_len {
+        let pc = ptx.data[(pos + j) as usize] as i64
+        let tc = str_char_at(prefix, j) as i64
+        if pc != tc { return false }
+        j = j + 1
+    }
+    true
+}
+
+// Parse a decimal integer starting at ptx.data[pos]. Returns (value, chars_consumed).
+fn ptx_meta_parse_int(ptx: PtxBuf, pos: i64) -> (i64, i64) {
+    var num: i64 = 0
+    var count: i64 = 0
+    var p = pos
+    while p < ptx.len && p < pos + 10 {
+        let ch = ptx.data[p as usize] as i64
+        if ch >= 48 && ch <= 57 {
+            num = num * 10 + (ch - 48)
+            count = count + 1
+            p = p + 1
+        } else {
+            break
+        }
+    }
+    (num, count)
+}
+
+// Scan PTX for "// SOUNIO_DAG stream_count=" and return stream count.
+fn ptx_meta_dag_stream_count(ptx: PtxBuf) -> i64 {
+    let prefix = "// SOUNIO_DAG stream_count="
+    let prefix_len: i64 = 27
+    var i: i64 = 0
+    while i < ptx.len - prefix_len {
+        if ptx_meta_match(ptx, i, prefix, prefix_len) {
+            let result = ptx_meta_parse_int(ptx, i + prefix_len)
+            return result.0
+        }
+        i = i + 1
+    }
+    0
+}
+
+// Scan PTX for all "// SOUNIO_STREAM kernel=K stream=S" entries.
+// Populates stream_ids[kernel_idx] = stream_id. Returns number of entries found.
+fn ptx_meta_stream_assignments(ptx: PtxBuf, stream_ids: &! [i64; 64]) -> i64 with Mut {
+    let prefix = "// SOUNIO_STREAM kernel="
+    let prefix_len: i64 = 24
+    var found: i64 = 0
+    var i: i64 = 0
+    while i < ptx.len - prefix_len {
+        if ptx_meta_match(ptx, i, prefix, prefix_len) {
+            let k_result = ptx_meta_parse_int(ptx, i + prefix_len)
+            let kernel_idx = k_result.0
+            // Skip past "kernel=N stream="
+            var scan_pos = i + prefix_len + k_result.1
+            // Advance past " stream="
+            let stream_prefix = " stream="
+            let sp_len: i64 = 8
+            if ptx_meta_match(ptx, scan_pos, stream_prefix, sp_len) {
+                let s_result = ptx_meta_parse_int(ptx, scan_pos + sp_len)
+                if kernel_idx >= 0 && kernel_idx < 64 {
+                    stream_ids[kernel_idx as usize] = s_result.0
+                    found = found + 1
+                }
+            }
+        }
+        i = i + 1
+    }
+    found
+}
+
+// Scan PTX for all "// SOUNIO_DEP from=A to=B" entries.
+// Populates dep_from[i], dep_to[i]. Returns number of dependencies found.
+fn ptx_meta_dependencies(ptx: PtxBuf, dep_from: &! [i64; 256], dep_to: &! [i64; 256]) -> i64 with Mut {
+    let prefix = "// SOUNIO_DEP from="
+    let prefix_len: i64 = 19
+    var found: i64 = 0
+    var i: i64 = 0
+    while i < ptx.len - prefix_len {
+        if ptx_meta_match(ptx, i, prefix, prefix_len) {
+            let from_result = ptx_meta_parse_int(ptx, i + prefix_len)
+            var scan_pos = i + prefix_len + from_result.1
+            let to_prefix = " to="
+            let tp_len: i64 = 4
+            if ptx_meta_match(ptx, scan_pos, to_prefix, tp_len) {
+                let to_result = ptx_meta_parse_int(ptx, scan_pos + tp_len)
+                if found < 256 {
+                    dep_from[found as usize] = from_result.0
+                    dep_to[found as usize] = to_result.0
+                    found = found + 1
+                }
+            }
+        }
+        i = i + 1
+    }
+    found
+}
+
+// Scan PTX for "// SOUNIO_SPEC_PLAN coarse=C refinement=R".
+// Returns (coarse_count, refinement_count).
+fn ptx_meta_spec_plan(ptx: PtxBuf) -> (i64, i64) {
+    let prefix = "// SOUNIO_SPEC_PLAN coarse="
+    let prefix_len: i64 = 27
+    var i: i64 = 0
+    while i < ptx.len - prefix_len {
+        if ptx_meta_match(ptx, i, prefix, prefix_len) {
+            let c_result = ptx_meta_parse_int(ptx, i + prefix_len)
+            var scan_pos = i + prefix_len + c_result.1
+            let ref_prefix = " refinement="
+            let rp_len: i64 = 12
+            if ptx_meta_match(ptx, scan_pos, ref_prefix, rp_len) {
+                let r_result = ptx_meta_parse_int(ptx, scan_pos + rp_len)
+                return (c_result.0, r_result.0)
+            }
+        }
+        i = i + 1
+    }
+    (0, 0)
+}
+
+// Scan PTX for all "// SOUNIO_SPEC_GUARD kernel=K" entries.
+// Populates guard_kernels[i] = kernel_idx. Returns count.
+fn ptx_meta_spec_guards(ptx: PtxBuf, guard_kernels: &! [i64; 64]) -> i64 with Mut {
+    let prefix = "// SOUNIO_SPEC_GUARD kernel="
+    let prefix_len: i64 = 28
+    var found: i64 = 0
+    var i: i64 = 0
+    while i < ptx.len - prefix_len {
+        if ptx_meta_match(ptx, i, prefix, prefix_len) {
+            let k_result = ptx_meta_parse_int(ptx, i + prefix_len)
+            if found < 64 {
+                guard_kernels[found as usize] = k_result.0
+                found = found + 1
+            }
+        }
+        i = i + 1
+    }
+    found
+}
+
+// ----------------------------------------------------------------------------
+// Production DAG Host Glue Emitter
+// ----------------------------------------------------------------------------
+
+// Emit production DAG host glue file with multi-stream launch.
+// Parses SOUNIO_DAG metadata from PTX, generates functional .sio code.
 fn gpu_emit_dag_host_glue(ptx: PtxBuf, output_path: string) -> bool with IO, Mut, Panic, Div, Alloc {
     let host_path = output_path ++ "_dag_host.sio"
 
+    // Phase 1: Parse metadata from the PTX buffer
+    let stream_count = ptx_meta_dag_stream_count(ptx)
+    var stream_ids: [i64; 64] = [0; 64]
+    let kernel_count = ptx_meta_stream_assignments(ptx, &! stream_ids)
+    var dep_from: [i64; 256] = [0; 256]
+    var dep_to: [i64; 256] = [0; 256]
+    let dep_count = ptx_meta_dependencies(ptx, &! dep_from, &! dep_to)
+
+    // Phase 2: Build the host glue source
     var glue = ptx_buf_new()
     glue = ptx_push_str(glue, "// Generated DAG-scheduled host glue — multi-stream kernel dispatch\n")
     glue = ptx_push_str(glue, "// Source: Sounio provenance-aware DAG scheduler\n")
     glue = ptx_push_str(glue, "// Pattern: IREE-inspired metadata descriptor (OSDI '25)\n")
-    glue = ptx_push_str(glue, "//\n")
-    glue = ptx_push_str(glue, "// Metadata protocol (embedded in PTX comments):\n")
-    glue = ptx_push_str(glue, "//   // SOUNIO_DAG stream_count=N\n")
-    glue = ptx_push_str(glue, "//   // SOUNIO_STREAM kernel=K stream=S\n")
-    glue = ptx_push_str(glue, "//   // SOUNIO_DEP from=A to=B\n")
-    glue = ptx_push_str(glue, "\n")
+    glue = ptx_push_str(glue, "// Parsed metadata: stream_count=")
+    glue = gpu_push_i64(glue, stream_count)
+    glue = ptx_push_str(glue, " kernels=")
+    glue = gpu_push_i64(glue, kernel_count)
+    glue = ptx_push_str(glue, " deps=")
+    glue = gpu_push_i64(glue, dep_count)
+    glue = ptx_push_str(glue, "\n\n")
     glue = ptx_push_str(glue, "use gpu::runtime::cuda::*\n")
-    glue = ptx_push_str(glue, "use gpu::runtime::launch::{gpu_launch_ptx_map, GpuLaunchConfig, GpuLaunchResult}\n")
-    glue = ptx_push_str(glue, "\n")
-    glue = ptx_push_str(glue, "// Multi-stream DAG dispatch.\n")
-    glue = ptx_push_str(glue, "// Reads SOUNIO_DAG metadata from the PTX file to determine:\n")
-    glue = ptx_push_str(glue, "//   1. Number of CUDA streams to create\n")
-    glue = ptx_push_str(glue, "//   2. Per-kernel stream assignments\n")
-    glue = ptx_push_str(glue, "//   3. Dependency edges → stream synchronization points\n")
+    glue = ptx_push_str(glue, "use gpu::runtime::launch::{gpu_launch_ptx_map, GpuLaunchConfig, GpuLaunchResult}\n\n")
+
+    // Phase 3: Emit gpu_dag_run function
     glue = ptx_push_str(glue, "fn gpu_dag_run(\n")
+    glue = ptx_push_str(glue, "    ptx: PtxBuf,\n")
     glue = ptx_push_str(glue, "    n: i64,\n")
     glue = ptx_push_str(glue, "    buf_in: *const f32,\n")
     glue = ptx_push_str(glue, "    buf_out: *const f32\n")
     glue = ptx_push_str(glue, ") -> GpuLaunchResult with IO, Mut, Panic, Div, Alloc {\n")
-    glue = ptx_push_str(glue, "    // Stream lifecycle:\n")
-    glue = ptx_push_str(glue, "    //   let (s0, _) = cuda_stream_create(CU_STREAM_DEFAULT)\n")
-    glue = ptx_push_str(glue, "    //   let (s1, _) = cuda_stream_create(CU_STREAM_DEFAULT)\n")
-    glue = ptx_push_str(glue, "    //   ...\n")
-    glue = ptx_push_str(glue, "    // Per-kernel dispatch:\n")
-    glue = ptx_push_str(glue, "    //   let cfg_K = GpuLaunchConfig { block_dim: 256, shared_mem_bytes: 0, stream_handle: s_K }\n")
-    glue = ptx_push_str(glue, "    //   let r_K = gpu_launch_ptx_map(ptx, \"kernel_K\", n, buf_in, buf_out, cfg_K)\n")
-    glue = ptx_push_str(glue, "    // Dependency sync:\n")
-    glue = ptx_push_str(glue, "    //   cuda_stream_synchronize(s_I)  // before kernel J where DEP from=I to=J\n")
-    glue = ptx_push_str(glue, "    gpu_launch_result_err(501)  // Placeholder: parse SOUNIO_DAG metadata for runtime dispatch\n")
+
+    // Phase 4: Emit stream creation
+    var si: i64 = 0
+    while si < stream_count && si < 16 {
+        glue = ptx_push_str(glue, "    let s")
+        glue = gpu_push_i64(glue, si)
+        glue = ptx_push_str(glue, " = cuda_stream_create_bare()\n")
+        si = si + 1
+    }
+    glue = ptx_push_str(glue, "\n")
+
+    // Phase 5: Emit kernel launches with stream assignments and dependency syncs
+    var ki: i64 = 0
+    while ki < kernel_count && ki < 64 {
+        // Check if this kernel has incoming dependencies that need sync
+        var di: i64 = 0
+        while di < dep_count {
+            if dep_to[di as usize] == ki {
+                let from_kernel = dep_from[di as usize]
+                let from_stream = stream_ids[from_kernel as usize]
+                glue = ptx_push_str(glue, "    // DEP: kernel ")
+                glue = gpu_push_i64(glue, from_kernel)
+                glue = ptx_push_str(glue, " -> kernel ")
+                glue = gpu_push_i64(glue, ki)
+                glue = ptx_push_str(glue, "\n")
+                glue = ptx_push_str(glue, "    cuda_stream_synchronize_bare(s")
+                glue = gpu_push_i64(glue, from_stream)
+                glue = ptx_push_str(glue, ")\n")
+            }
+            di = di + 1
+        }
+
+        // Emit launch for this kernel
+        let stream_id = stream_ids[ki as usize]
+        glue = ptx_push_str(glue, "    let cfg_")
+        glue = gpu_push_i64(glue, ki)
+        glue = ptx_push_str(glue, " = GpuLaunchConfig { block_dim: 256, shared_mem_bytes: 0, stream_handle: s")
+        glue = gpu_push_i64(glue, stream_id)
+        glue = ptx_push_str(glue, " }\n")
+        glue = ptx_push_str(glue, "    let r_")
+        glue = gpu_push_i64(glue, ki)
+        glue = ptx_push_str(glue, " = gpu_launch_ptx_map(ptx, \"kernel_")
+        glue = gpu_push_i64(glue, ki)
+        glue = ptx_push_str(glue, "\", n, buf_in, buf_out, cfg_")
+        glue = gpu_push_i64(glue, ki)
+        glue = ptx_push_str(glue, ")\n\n")
+
+        ki = ki + 1
+    }
+
+    // Phase 6: Emit stream synchronization + cleanup
+    si = 0
+    while si < stream_count && si < 16 {
+        glue = ptx_push_str(glue, "    cuda_stream_synchronize_bare(s")
+        glue = gpu_push_i64(glue, si)
+        glue = ptx_push_str(glue, ")\n")
+        si = si + 1
+    }
+    si = 0
+    while si < stream_count && si < 16 {
+        glue = ptx_push_str(glue, "    cuda_stream_destroy_bare(s")
+        glue = gpu_push_i64(glue, si)
+        glue = ptx_push_str(glue, ")\n")
+        si = si + 1
+    }
+    glue = ptx_push_str(glue, "\n    gpu_launch_result_ok(0.0)\n")
     glue = ptx_push_str(glue, "}\n")
 
     let ok = io_write_bytes_to_file(host_path, glue.data, glue.len)
     ok
 }
 
-// Emit speculative host glue file with epsilon-threshold skip guards.
+// ----------------------------------------------------------------------------
+// Production Speculative Host Glue Emitter
+// ----------------------------------------------------------------------------
+
+// Emit production speculative host glue file with epsilon-threshold skip guards.
+// Parses SOUNIO_SPEC metadata from PTX, generates conditional launch code.
 fn gpu_emit_spec_host_glue(ptx: PtxBuf, output_path: string) -> bool with IO, Mut, Panic, Div, Alloc {
     let host_path = output_path ++ "_spec_host.sio"
 
+    // Phase 1: Parse metadata
+    let plan = ptx_meta_spec_plan(ptx)
+    let coarse_count = plan.0
+    let refinement_count = plan.1
+    var guard_kernels: [i64; 64] = [0; 64]
+    let guard_count = ptx_meta_spec_guards(ptx, &! guard_kernels)
+
+    // Phase 2: Build the host glue source
     var glue = ptx_buf_new()
     glue = ptx_push_str(glue, "// Generated speculative host glue — uncertainty-threshold skip guards\n")
     glue = ptx_push_str(glue, "// Source: Sounio speculative epistemic execution engine\n")
-    glue = ptx_push_str(glue, "//\n")
-    glue = ptx_push_str(glue, "// Metadata protocol (embedded in PTX comments):\n")
-    glue = ptx_push_str(glue, "//   // SOUNIO_SPEC_PLAN coarse=C refinement=R threshold=T\n")
-    glue = ptx_push_str(glue, "//   // SOUNIO_SPEC_GUARD kernel=K\n")
-    glue = ptx_push_str(glue, "\n")
+    glue = ptx_push_str(glue, "// Parsed metadata: coarse=")
+    glue = gpu_push_i64(glue, coarse_count)
+    glue = ptx_push_str(glue, " refinement=")
+    glue = gpu_push_i64(glue, refinement_count)
+    glue = ptx_push_str(glue, " guards=")
+    glue = gpu_push_i64(glue, guard_count)
+    glue = ptx_push_str(glue, "\n\n")
     glue = ptx_push_str(glue, "use gpu::runtime::cuda::*\n")
-    glue = ptx_push_str(glue, "use gpu::runtime::launch::{gpu_launch_ptx_map, GpuLaunchConfig, GpuLaunchResult}\n")
-    glue = ptx_push_str(glue, "\n")
-    glue = ptx_push_str(glue, "// Speculative dispatch: skip refinement kernels when uncertainty is below threshold.\n")
+    glue = ptx_push_str(glue, "use gpu::runtime::launch::{gpu_launch_ptx_map, GpuLaunchConfig, GpuLaunchResult}\n\n")
+
+    // Phase 3: Emit gpu_spec_run function
     glue = ptx_push_str(glue, "fn gpu_spec_run(\n")
+    glue = ptx_push_str(glue, "    ptx: PtxBuf,\n")
     glue = ptx_push_str(glue, "    n: i64,\n")
     glue = ptx_push_str(glue, "    epsilon: f64,\n")
     glue = ptx_push_str(glue, "    buf_in: *const f32,\n")
     glue = ptx_push_str(glue, "    buf_out: *const f32\n")
     glue = ptx_push_str(glue, ") -> GpuLaunchResult with IO, Mut, Panic, Div, Alloc {\n")
-    glue = ptx_push_str(glue, "    // Coarse kernels: always execute\n")
-    glue = ptx_push_str(glue, "    //   let r_coarse = gpu_launch_ptx_map(ptx, \"kernel_coarse\", n, ...)\n")
-    glue = ptx_push_str(glue, "    //\n")
-    glue = ptx_push_str(glue, "    // Refinement kernels: conditional on epsilon threshold\n")
-    glue = ptx_push_str(glue, "    //   if epsilon > 1.0e-6 {\n")
-    glue = ptx_push_str(glue, "    //     let r_ref = gpu_launch_ptx_map(ptx, \"kernel_refine\", n, ...)\n")
-    glue = ptx_push_str(glue, "    //   }\n")
-    glue = ptx_push_str(glue, "    gpu_launch_result_err(502)  // Placeholder: parse SOUNIO_SPEC metadata for runtime dispatch\n")
+    glue = ptx_push_str(glue, "    let cfg = GpuLaunchConfig { block_dim: 256, shared_mem_bytes: 0, stream_handle: 0 }\n\n")
+
+    // Phase 4: Emit coarse kernel launches (unconditional)
+    let total_kernels = coarse_count + refinement_count
+    var ki: i64 = 0
+    while ki < total_kernels && ki < 64 {
+        // Check if this kernel is a guarded refinement kernel
+        var is_guarded = false
+        var gi: i64 = 0
+        while gi < guard_count {
+            if guard_kernels[gi as usize] == ki {
+                is_guarded = true
+            }
+            gi = gi + 1
+        }
+
+        if is_guarded {
+            // Refinement kernel: conditional on epsilon
+            glue = ptx_push_str(glue, "    // Refinement kernel ")
+            glue = gpu_push_i64(glue, ki)
+            glue = ptx_push_str(glue, " — guarded by epsilon threshold\n")
+            glue = ptx_push_str(glue, "    if epsilon > 1.0e-6 {\n")
+            glue = ptx_push_str(glue, "        let r_")
+            glue = gpu_push_i64(glue, ki)
+            glue = ptx_push_str(glue, " = gpu_launch_ptx_map(ptx, \"kernel_")
+            glue = gpu_push_i64(glue, ki)
+            glue = ptx_push_str(glue, "\", n, buf_in, buf_out, cfg)\n")
+            glue = ptx_push_str(glue, "    }\n\n")
+        } else {
+            // Coarse kernel: always execute
+            glue = ptx_push_str(glue, "    // Coarse kernel ")
+            glue = gpu_push_i64(glue, ki)
+            glue = ptx_push_str(glue, " — unconditional\n")
+            glue = ptx_push_str(glue, "    let r_")
+            glue = gpu_push_i64(glue, ki)
+            glue = ptx_push_str(glue, " = gpu_launch_ptx_map(ptx, \"kernel_")
+            glue = gpu_push_i64(glue, ki)
+            glue = ptx_push_str(glue, "\", n, buf_in, buf_out, cfg)\n\n")
+        }
+
+        ki = ki + 1
+    }
+
+    glue = ptx_push_str(glue, "    gpu_launch_result_ok(0.0)\n")
     glue = ptx_push_str(glue, "}\n")
 
     let ok = io_write_bytes_to_file(host_path, glue.data, glue.len)

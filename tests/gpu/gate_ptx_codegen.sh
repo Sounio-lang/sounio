@@ -325,6 +325,65 @@ echo "--- Section 2b: Boundary-Breaking Novelties (T16-T18) ---"
     fi
 }
 
+echo ""
+echo "--- Section 2c: Deep Novelties (T19-T21) ---"
+
+# T19: Warp-Vote Epistemic Fast-Path (Novelty 7) — vote.sync.ballot dual-path PTX
+{
+    TOTAL=$((TOTAL + 1))
+    if [ -f self-hosted/gpu/opt/warp_vote_fastpath.sio ] && \
+       grep -q 'wv_emit_ballot_check' self-hosted/gpu/opt/warp_vote_fastpath.sio && \
+       grep -q 'wv_emit_epsilon_check' self-hosted/gpu/opt/warp_vote_fastpath.sio; then
+        RESULT=$($SOUC run self-hosted/gpu/opt/warp_vote_fastpath.sio 2>&1 | tail -1)
+        if echo "$RESULT" | grep -q "10/10 self-tests passed"; then
+            PASS=$((PASS + 1))
+            echo "PASS  T19_warp_vote_fastpath (10/10 self-tests)"
+        else
+            FAIL=$((FAIL + 1))
+            echo "FAIL  T19_warp_vote_fastpath: self-tests did not all pass: $RESULT"
+        fi
+    else
+        FAIL=$((FAIL + 1))
+        echo "FAIL  T19_warp_vote_fastpath: warp_vote_fastpath.sio missing"
+    fi
+}
+
+# T20: Entropy-Gated Kernel Dispatch (Novelty 8) — H(epsilon) variant selection
+{
+    TOTAL=$((TOTAL + 1))
+    if [ -f self-hosted/gpu/opt/entropy_dispatch.sio ] && \
+       grep -q 'ed_shannon_entropy' self-hosted/gpu/opt/entropy_dispatch.sio && \
+       grep -q 'ed_decide_variant' self-hosted/gpu/opt/entropy_dispatch.sio; then
+        RESULT=$($SOUC run self-hosted/gpu/opt/entropy_dispatch.sio 2>&1 | tail -1)
+        if echo "$RESULT" | grep -q "10/10 self-tests passed"; then
+            PASS=$((PASS + 1))
+            echo "PASS  T20_entropy_dispatch (10/10 self-tests)"
+        else
+            FAIL=$((FAIL + 1))
+            echo "FAIL  T20_entropy_dispatch: self-tests did not all pass: $RESULT"
+        fi
+    else
+        FAIL=$((FAIL + 1))
+        echo "FAIL  T20_entropy_dispatch: entropy_dispatch.sio missing"
+    fi
+}
+
+# T21: Production PTX metadata parser (structural check)
+{
+    TOTAL=$((TOTAL + 1))
+    if grep -q 'ptx_meta_dag_stream_count' self-hosted/gpu/hlir_to_gpu.sio && \
+       grep -q 'ptx_meta_stream_assignments' self-hosted/gpu/hlir_to_gpu.sio && \
+       grep -q 'ptx_meta_dependencies' self-hosted/gpu/hlir_to_gpu.sio && \
+       grep -q 'ptx_meta_spec_plan' self-hosted/gpu/hlir_to_gpu.sio && \
+       grep -q 'ptx_meta_spec_guards' self-hosted/gpu/hlir_to_gpu.sio; then
+        PASS=$((PASS + 1))
+        echo "PASS  T21_ptx_metadata_parser (5/5 parser functions present)"
+    else
+        FAIL=$((FAIL + 1))
+        echo "FAIL  T21_ptx_metadata_parser: production metadata parser functions missing"
+    fi
+}
+
 # ── Section 3: souc check — optional files ────────────────────────────────────
 
 echo ""
