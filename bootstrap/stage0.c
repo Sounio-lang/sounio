@@ -344,7 +344,7 @@ typedef struct Item Item;
 enum ExprKind {
     EX_INT, EX_FLOAT, EX_BOOL, EX_STRING, EX_IDENT, EX_BINARY, EX_UNARY,
     EX_CALL, EX_METHOD_CALL, EX_FIELD, EX_INDEX, EX_IF, EX_WHILE, EX_BLOCK,
-    EX_RETURN, EX_BREAK, EX_ASSIGN, EX_STRUCT_LIT, EX_ARRAY_LIT, EX_ARRAY_REPEAT,
+    EX_RETURN, EX_BREAK, EX_CONTINUE, EX_ASSIGN, EX_STRUCT_LIT, EX_ARRAY_LIT, EX_ARRAY_REPEAT,
     EX_CAST, EX_REF, EX_DEREF, EX_MATCH, EX_TUPLE, EX_CLOSURE, EX_RANGE,
 };
 
@@ -449,6 +449,7 @@ static void *arena_alloc(int size) {
 static void skip_type(void);
 static Expr *parse_expr(void);
 static Block *parse_block(void);
+static Expr *parse_postfix(Expr *e);
 
 static int g_gt_pending = 0; /* for >> handling in nested generics */
 
@@ -596,6 +597,7 @@ static Expr *parse_primary(void) {
 
     if (tk()==TK_RETURN) { e->kind=EX_RETURN; next(); if (tk()!=TK_RBRACE&&tk()!=TK_EOF&&tk()!=TK_SEMICOLON) e->left=parse_expr(); return e; }
     if (tk()==TK_BREAK) { e->kind=EX_BREAK; next(); return e; }
+    if (tk()==TK_CONTINUE) { e->kind=EX_CONTINUE; next(); return e; }
 
     if (tk()==TK_IF) {
         e->kind = EX_IF; next();
@@ -689,8 +691,8 @@ static Expr *parse_primary(void) {
     }
 
     /* unary operators */
-    if (tk()==TK_MINUS) { e->kind=EX_UNARY; e->op=0; next(); e->left=parse_primary(); return e; }
-    if (tk()==TK_BANG) { e->kind=EX_UNARY; e->op=1; next(); e->left=parse_primary(); return e; }
+    if (tk()==TK_MINUS) { e->kind=EX_UNARY; e->op=0; next(); e->left=parse_postfix(parse_primary()); return e; }
+    if (tk()==TK_BANG) { e->kind=EX_UNARY; e->op=1; next(); e->left=parse_postfix(parse_primary()); return e; }
     if (tk()==TK_AMP) {
         e->kind=EX_REF; next();
         if (eat(TK_BANG)) e->op = 1; /* &! */
@@ -730,8 +732,12 @@ static Expr *parse_primary(void) {
             e->kind = EX_CALL; e->args = parse_arglist();
             return e;
         }
-        /* Check for struct literal: Name { field: val, ... } */
-        if (tk()==TK_LBRACE && e->name.buf[0]>='A' && e->name.buf[0]<='Z') {
+        /* Check for struct literal: Name { field: val, ... }
+         * Disambiguate from block: require { IDENT : pattern.
+         * This prevents SRC_LEN { return 0 } from being parsed as a struct literal. */
+        if (tk()==TK_LBRACE && e->name.buf[0]>='A' && e->name.buf[0]<='Z' &&
+            g_tp + 2 < g_token_count &&
+            g_tokens[g_tp+1].kind==TK_IDENT && g_tokens[g_tp+2].kind==TK_COLON) {
             /* Struct literal */
             e->kind = EX_STRUCT_LIT; next();
             FieldInit **ftail = &e->fields;
@@ -1381,6 +1387,18 @@ static void emit_inline_print(const char *str, int len) {
     emit(0x0F); emit(0x05);
 }
 
+/* Emit an inline string constant and return its address in rax */
+static void emit_inline_string_ptr(const char *str, int len) {
+    /* jmp over string data (including null terminator) */
+    emit(0xEB); emit((uint8_t)(len + 1)); /* JMP rel8 */
+    int str_start = g_code_len;
+    for (int i = 0; i < len; i++) emit((uint8_t)str[i]);
+    emit(0); /* null terminator */
+    /* lea rax, [rip - offset] — point back to string data */
+    int32_t rip_off = -(g_code_len + 7 - str_start);
+    emit(0x48); emit(0x8D); emit(0x05); emit32(rip_off);
+}
+
 /* ================================================================
  * AST-DIRECT CODE GENERATION
  * ================================================================ */
@@ -1511,8 +1529,8 @@ static void compile_expr(Expr *e, Locals *loc) {
         break;
     }
     case EX_STRING:
-        emit_inline_print(e->str_buf, e->str_len);
-        emit_mov_rax_imm64(0);
+        /* Return pointer to inline string data (null-terminated) */
+        emit_inline_string_ptr(e->str_buf, e->str_len);
         break;
     case EX_IDENT: {
         for (int i = loc->count-1; i >= 0; i--) {
@@ -1801,6 +1819,12 @@ static void compile_expr(Expr *e, Locals *loc) {
             emit(0xE9); /* JMP rel32 */
             g_break_patches[g_loop_depth][g_break_count[g_loop_depth]++] = g_code_len;
             emit32(0);
+        }
+        break;
+    case EX_CONTINUE:
+        if (g_loop_depth >= 0) {
+            int32_t cont_back = g_loop_top[g_loop_depth] - (g_code_len + 5);
+            emit(0xE9); emit32(cont_back); /* JMP back to loop top */
         }
         break;
     case EX_BLOCK:
@@ -2345,6 +2369,14 @@ int main(int argc, char **argv) {
     g_fn_ret_type[g_fn_count] = 0;
     int str_char_at_idx = g_fn_count++;
 
+    g_fn_names[g_fn_count] = name_from("init_imp_fname_ptr");
+    g_fn_ret_type[g_fn_count] = 0;
+    int init_imp_fname_ptr_idx = g_fn_count++;
+
+    g_fn_names[g_fn_count] = name_from("append_source_file");
+    g_fn_ret_type[g_fn_count] = 0;
+    int append_source_file_idx = g_fn_count++;
+
     /* Collect user functions */
     for (Item *it = program; it; it = it->next) {
         if (it->kind == ITEM_FN && it->fn && g_fn_count < MAX_FUNCS) {
@@ -2407,8 +2439,35 @@ int main(int argc, char **argv) {
     emit(0x0F); emit(0x05); /* syscall */
     emit_leave(); emit_ret();
     EMIT_STUB(read_byte_idx, "read_byte");
-    EMIT_STUB(str_len_idx, "str_len");
-    EMIT_STUB(str_char_at_idx, "str_char_at");
+
+    /*
+     * str_len(s: i64) -> i64: count bytes until null terminator
+     * rdi = pointer to null-terminated string
+     */
+    g_fn_offsets[str_len_idx] = g_code_len;
+    emit(0x48); emit(0x89); emit(0xF8); /* mov rax, rdi */
+    { int sl_top = g_code_len;
+      emit(0x80); emit(0x38); emit(0x00); /* cmp byte [rax], 0 */
+      emit(0x74); emit(0x05);             /* je done (+5: skip inc+jmp) */
+      emit(0x48); emit(0xFF); emit(0xC0); /* inc rax (3 bytes) */
+      int8_t sl_back = (int8_t)(sl_top - (g_code_len + 2));
+      emit(0xEB); emit((uint8_t)sl_back); /* jmp sl_top (2 bytes) */
+    }
+    /* done: rax = ptr to null byte; length = rax - rdi */
+    emit(0x48); emit(0x29); emit(0xF8); /* sub rax, rdi */
+    emit_ret();
+    fprintf(stderr, "stage0: builtin=str_len off=%d sz=%d\n",
+            g_fn_offsets[str_len_idx], g_code_len - g_fn_offsets[str_len_idx]);
+
+    /*
+     * str_char_at(s: i64, i: i64) -> i64: return byte at s[i]
+     * rdi = string pointer, rsi = index
+     */
+    g_fn_offsets[str_char_at_idx] = g_code_len;
+    emit(0x48); emit(0x0F); emit(0xBE); emit(0x04); emit(0x37); /* movsx rax, byte [rdi + rsi] */
+    emit_ret();
+    fprintf(stderr, "stage0: builtin=str_char_at off=%d sz=%d\n",
+            g_fn_offsets[str_char_at_idx], g_code_len - g_fn_offsets[str_char_at_idx]);
 
     /*
      * arg_count() -> i64: return [saved_rsp] (argc from Linux ELF entry)
@@ -2593,8 +2652,105 @@ int main(int argc, char **argv) {
     EMIT_X87_TRIG(sin_idx, "sin", 0xd9, 0xfe);
     EMIT_X87_TRIG(cos_idx, "cos", 0xd9, 0xff);
 
+    /*
+     * init_imp_fname_ptr() — load mmap'd pointer of IMP_FNAME_BUF into IMP_FNAME_PTR
+     * IMP_FNAME_BUF is a [i8; 512] global → data section slot has mmap'd pointer
+     * IMP_FNAME_PTR is an i64 global → data section slot has the scalar value
+     */
+    {
+        int gi_buf = find_global(name_from("IMP_FNAME_BUF"));
+        int gi_ptr = find_global(name_from("IMP_FNAME_PTR"));
+        g_fn_offsets[init_imp_fname_ptr_idx] = g_code_len;
+        if (gi_buf >= 0 && gi_ptr >= 0) {
+            /* mov rax, [rip + IMP_FNAME_BUF_offset] — load mmap'd buf pointer */
+            emit(0x48); emit(0x8B); emit(0x05);
+            emit32(g_global_offsets[gi_buf] - (g_code_len + 4));
+            /* mov [rip + IMP_FNAME_PTR_offset], rax — store into IMP_FNAME_PTR */
+            emit(0x48); emit(0x89); emit(0x05);
+            emit32(g_global_offsets[gi_ptr] - (g_code_len + 4));
+        }
+        emit_ret();
+        fprintf(stderr, "stage0: builtin=init_imp_fname_ptr off=%d sz=%d\n",
+                g_fn_offsets[init_imp_fname_ptr_idx],
+                g_code_len - g_fn_offsets[init_imp_fname_ptr_idx]);
+    }
+
+    /*
+     * append_source_file(path_ptr: i64) — open file, read contents, append to SRC, update SRC_LEN
+     * rdi = pointer to null-terminated file path
+     * SRC is a [i8; 2097152] global → data section slot has mmap'd pointer
+     * SRC_LEN is an i64 global → data section slot has the scalar value
+     */
+    {
+        int gi_src = find_global(name_from("SRC"));
+        int gi_src_len = find_global(name_from("SRC_LEN"));
+        g_fn_offsets[append_source_file_idx] = g_code_len;
+        if (gi_src >= 0 && gi_src_len >= 0) {
+            emit_push_rbp(); emit_mov_rbp_rsp(); emit_sub_rsp(384);
+            /* [rbp-8] = path_ptr (rdi), [rbp-16] = fd, [rbp-24] = file_size,
+               [rbp-32] = SRC ptr, [rbp-40] = SRC_LEN value, [rbp-320..rbp-176] = stat buf */
+            emit(0x48); emit(0x89); emit(0x7D); emit(0xF8); /* mov [rbp-8], rdi */
+
+            /* stat(path, &statbuf) to get file size */
+            /* rdi already = path */
+            emit(0x48); emit(0x8D); emit(0xB5); emit32(-320); /* lea rsi, [rbp-320] */
+            emit(0xB8); emit32(4); /* mov eax, 4 (sys_stat) */
+            emit(0x0F); emit(0x05); /* syscall */
+            /* file_size = [rbp-320+48] = [rbp-272] */
+            emit(0x48); emit(0x8B); emit(0x85); emit32(-272); /* mov rax, [rbp-272] */
+            emit(0x48); emit(0x89); emit(0x45); emit(0xE8); /* mov [rbp-24], rax (file_size) */
+
+            /* open(path, O_RDONLY=0) */
+            emit(0x48); emit(0x8B); emit(0x7D); emit(0xF8); /* mov rdi, [rbp-8] (path) */
+            emit(0x48); emit(0x31); emit(0xF6); /* xor rsi, rsi (O_RDONLY) */
+            emit(0xB8); emit32(2); /* mov eax, 2 (sys_open) */
+            emit(0x0F); emit(0x05); /* syscall */
+            emit(0x48); emit(0x89); emit(0x45); emit(0xF0); /* mov [rbp-16], rax (fd) */
+            /* if fd < 0, skip read */
+            emit(0x48); emit(0x83); emit(0xF8); emit(0x00); /* cmp rax, 0 */
+            emit(0x0F); emit(0x8C); int skip_patch = g_code_len; emit32(0); /* jl skip */
+
+            /* load SRC mmap'd pointer */
+            emit(0x48); emit(0x8B); emit(0x05);
+            emit32(g_global_offsets[gi_src] - (g_code_len + 4));
+            emit(0x48); emit(0x89); emit(0x45); emit(0xE0); /* mov [rbp-32], rax (SRC ptr) */
+
+            /* load SRC_LEN */
+            emit(0x48); emit(0x8B); emit(0x05);
+            emit32(g_global_offsets[gi_src_len] - (g_code_len + 4));
+            emit(0x48); emit(0x89); emit(0x45); emit(0xD8); /* mov [rbp-40], rax (SRC_LEN) */
+
+            /* read(fd, SRC + SRC_LEN, file_size) */
+            emit(0x48); emit(0x8B); emit(0x7D); emit(0xF0); /* mov rdi, [rbp-16] (fd) */
+            emit(0x48); emit(0x8B); emit(0x75); emit(0xE0); /* mov rsi, [rbp-32] (SRC ptr) */
+            emit(0x48); emit(0x03); emit(0x75); emit(0xD8); /* add rsi, [rbp-40] (+ SRC_LEN) */
+            emit(0x48); emit(0x8B); emit(0x55); emit(0xE8); /* mov rdx, [rbp-24] (file_size) */
+            emit(0xB8); emit32(0); /* mov eax, 0 (sys_read) */
+            emit(0x0F); emit(0x05); /* syscall */
+            /* rax = bytes_read; update SRC_LEN += bytes_read */
+            emit(0x48); emit(0x01); emit(0x45); emit(0xD8); /* add [rbp-40], rax */
+            emit(0x48); emit(0x8B); emit(0x45); emit(0xD8); /* mov rax, [rbp-40] (new SRC_LEN) */
+            emit(0x48); emit(0x89); emit(0x05);
+            emit32(g_global_offsets[gi_src_len] - (g_code_len + 4)); /* store to SRC_LEN */
+
+            /* close(fd) */
+            emit(0x48); emit(0x8B); emit(0x7D); emit(0xF0); /* mov rdi, [rbp-16] (fd) */
+            emit(0xB8); emit32(3); /* mov eax, 3 (sys_close) */
+            emit(0x0F); emit(0x05); /* syscall */
+
+            /* skip: */
+            patch32(skip_patch, g_code_len - (skip_patch + 4));
+            emit_leave(); emit_ret();
+        } else {
+            emit_mov_rax_imm64(0); emit_ret();
+        }
+        fprintf(stderr, "stage0: builtin=append_source_file off=%d sz=%d\n",
+                g_fn_offsets[append_source_file_idx],
+                g_code_len - g_fn_offsets[append_source_file_idx]);
+    }
+
     /* Compile user functions */
-    int fi = 15; /* skip builtin slots (print_int, print_f64, sqrt, sin, cos, fabs, print, arg_count, get_arg, read_file, file_size, write_file, read_byte, str_len, str_char_at) */
+    int fi = 17; /* skip builtin slots (print_int, print_f64, sqrt, sin, cos, fabs, print, arg_count, get_arg, read_file, file_size, write_file, read_byte, str_len, str_char_at, init_imp_fname_ptr, append_source_file) */
     for (Item *it = program; it; it = it->next) {
         if (it->kind == ITEM_FN && it->fn && fi < MAX_FUNCS) {
             g_fn_offsets[fi] = g_code_len;
