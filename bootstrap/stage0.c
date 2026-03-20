@@ -1423,6 +1423,18 @@ static void emit_inline_print(const char *str, int len) {
     emit(0x0F); emit(0x05);
 }
 
+/* Embed a null-terminated string in the code stream and put a pointer to it in rax */
+static void emit_string_ptr(const char *str, int len) {
+    /* jmp over string+null */
+    emit(0xEB); emit((uint8_t)(len + 1)); /* JMP rel8 over string data + null */
+    int str_start = g_code_len;
+    for (int i = 0; i < len; i++) emit((uint8_t)str[i]);
+    emit(0x00); /* null terminator */
+    /* lea rax, [rip - offset] */
+    int32_t rip_off = -(g_code_len + 7 - str_start);
+    emit(0x48); emit(0x8D); emit(0x05); emit32(rip_off);
+}
+
 /* ================================================================
  * AST-DIRECT CODE GENERATION
  * ================================================================ */
@@ -1553,8 +1565,8 @@ static void compile_expr(Expr *e, Locals *loc) {
         break;
     }
     case EX_STRING:
-        emit_inline_print(e->str_buf, e->str_len);
-        emit_mov_rax_imm64(0);
+        /* Return pointer to embedded null-terminated string in rax */
+        emit_string_ptr(e->str_buf, e->str_len);
         break;
     case EX_IDENT: {
         for (int i = loc->count-1; i >= 0; i--) {
@@ -2539,10 +2551,10 @@ int main(int argc, char **argv) {
     /* strlen loop: */
     int strlen_top = g_code_len;
     emit(0x80); emit(0x38); emit(0x00); /* cmp byte [rax], 0 */
-    emit(0x74); emit(0x04); /* je done */
-    emit(0x48); emit(0xFF); emit(0xC0); /* inc rax */
+    emit(0x74); emit(0x05); /* je done (+5: skip inc+jmp) */
+    emit(0x48); emit(0xFF); emit(0xC0); /* inc rax (3 bytes) */
     int8_t sback = (int8_t)(strlen_top - (g_code_len + 2));
-    emit(0xEB); emit((uint8_t)sback); /* jmp strlen_top */
+    emit(0xEB); emit((uint8_t)sback); /* jmp strlen_top (2 bytes) */
     /* done: rax = pointer to null byte; length = rax - rdi */
     emit(0x48); emit(0x8B); emit(0x7D); emit(0xF8); /* mov rdi, [rbp-8] (restore ptr) */
     emit(0x48); emit(0x89); emit(0xC2); /* mov rdx, rax (end) */
@@ -2553,8 +2565,38 @@ int main(int argc, char **argv) {
     emit(0x0F); emit(0x05); /* syscall */
     emit_leave(); emit_ret();
     EMIT_STUB(read_byte_idx, "read_byte");
-    EMIT_STUB(str_len_idx, "str_len");
-    EMIT_STUB(str_char_at_idx, "str_char_at");
+
+    /*
+     * str_len(s: string) -> i64 — return length of null-terminated string
+     * rdi = pointer to null-terminated string
+     * Returns length (not counting null) in rax
+     */
+    g_fn_offsets[str_len_idx] = g_code_len;
+    emit_push_rbp(); emit_mov_rbp_rsp();
+    /* rdi = string ptr; scan for null byte */
+    emit(0x48); emit(0x89); emit(0xF8); /* mov rax, rdi */
+    {
+        int sl_top = g_code_len;
+        emit(0x80); emit(0x38); emit(0x00); /* cmp byte [rax], 0 */
+        emit(0x74); emit(0x05);             /* je done (+5: skip inc+jmp) */
+        emit(0x48); emit(0xFF); emit(0xC0); /* inc rax (3 bytes) */
+        int8_t sl_back = (int8_t)(sl_top - (g_code_len + 2));
+        emit(0xEB); emit((uint8_t)sl_back); /* jmp sl_top (2 bytes) */
+    }
+    /* done: rax = ptr to null; length = rax - rdi */
+    emit(0x48); emit(0x29); emit(0xF8); /* sub rax, rdi */
+    emit_leave(); emit_ret();
+
+    /*
+     * str_char_at(s: string, i: i64) -> i64 — return byte at index i
+     * rdi = string ptr, rsi = index
+     * Returns byte (zero-extended to i64) in rax
+     */
+    g_fn_offsets[str_char_at_idx] = g_code_len;
+    emit_push_rbp(); emit_mov_rbp_rsp();
+    /* rax = zero-extend byte at [rdi + rsi] */
+    emit(0x48); emit(0x0F); emit(0xB6); emit(0x04); emit(0x37); /* movzx rax, byte [rdi+rsi] */
+    emit_leave(); emit_ret();
 
     /*
      * arg_count() -> i64: return [saved_rsp] (argc from Linux ELF entry)

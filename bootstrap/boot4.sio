@@ -94,6 +94,7 @@ var MB_GL_NS: [i64; 1024] = [0; 1024]
 var MB_GL_NE: [i64; 1024] = [0; 1024]
 var MB_GL_OFF: [i64; 1024] = [0; 1024]
 var MB_GL_SZ: [i64; 1024] = [0; 1024]
+var MB_GL_ELEM_SI: [i64; 1024] = [-1; 1024]  // struct type index for struct-array elements
 var MB_GL_COUNT: i64 = 0
 var MB_BSS_TOTAL: i64 = 0
 var OVERSIZED_BSS_OFF: i64 = 0   // cumulative BSS bytes claimed for oversized struct locals
@@ -1959,6 +1960,22 @@ fn mb_collect_globals() with Mut, Panic, Div {
                             let b0 = source_byte(tns)
                             let b1 = source_byte(tns + 1)
                             if b0 == 105 && b1 == 56 { sz = 1 }
+                            if b0 == 117 && b1 == 56 { sz = 1 }
+                        }
+                        // Check if element type is a struct — use struct_total_slots for elem size
+                        if sz == 8 {
+                            let etype_pool_off = POOL_POS
+                            var ei: i64 = 0
+                            while ei < tne - tns {
+                                pool_add(source_byte(tns + ei))
+                                ei = ei + 1
+                            }
+                            let etype_pool_len = tne - tns
+                            let etype_si = find_struct_b4(etype_pool_off, etype_pool_len)
+                            if etype_si >= 0 {
+                                sz = struct_total_slots(etype_si) * 8
+                                MB_GL_ELEM_SI[gi as usize] = etype_si
+                            }
                         }
                         ti = ti + 1
                     }
@@ -2476,6 +2493,7 @@ fn compile_node(node: i64) -> i64 with Mut, Panic, Div {
                 } else { emit(0x48); emit(0x31); emit(0xC9) }
             } else { emit(0x48); emit(0x31); emit(0xC9) }
         } else {
+        var idx_gl_elem_si: i64 = -1
         let aslot = find_local(avoff, avlen)
         if aslot >= 0 {
             let adisp = 0 - ((aslot + 1) * 8)
@@ -2486,6 +2504,7 @@ fn compile_node(node: i64) -> i64 with Mut, Panic, Div {
                 let gaaddr = 0x700000 + MB_GL_OFF[agi as usize]
                 emit(0x48); emit(0xB9); emit_u64(gaaddr)
                 asz = MB_GL_SZ[agi as usize]
+                idx_gl_elem_si = MB_GL_ELEM_SI[agi as usize]
             } else {
                 emit(0x48); emit(0x31); emit(0xC9)
             }
@@ -2498,6 +2517,19 @@ fn compile_node(node: i64) -> i64 with Mut, Panic, Div {
         if asz == 1 {
             emit(0x48); emit(0x01); emit(0xC1)
             emit(0x48); emit(0x0F); emit(0xB6); emit(0x01)
+        } else if asz > 8 {
+            // Struct-typed array element: compute base + idx * asz, return pointer
+            // imul rax, asz  (48 69 C0 imm32)
+            emit(0x48); emit(0x69); emit(0xC0); emit_u32(asz)
+            // add rcx, rax
+            emit(0x48); emit(0x01); emit(0xC1)
+            // mov rax, rcx  (return pointer to element)
+            emit(0x48); emit(0x89); emit(0xC8)
+            // Set LAST_FIELD_TYPE_SI so NK_FIELD can use it
+            if idx_gl_elem_si >= 0 {
+                LAST_FIELD_TYPE_SI = idx_gl_elem_si
+                LAST_FIELD_LAYOUT = 1  // positive offsets (BSS/heap-style)
+            }
         } else {
             emit(0x48); emit(0xC1); emit(0xE0); emit(0x03)
             emit(0x48); emit(0x01); emit(0xC1)
@@ -3070,6 +3102,12 @@ fn compile_node(node: i64) -> i64 with Mut, Panic, Div {
                         struct_si = ret_si_infer
                     }
                 }
+            } else if init_nk_infer == 47 {
+                // NK_STRUCT_LIT: struct index stored in IVAL
+                let slit_si_infer = ND_IVAL[init as usize]
+                if slit_si_infer >= 0 {
+                    struct_si = slit_si_infer
+                }
             }
         }
         if struct_si >= 0 && init != -1 && ND_KIND[init as usize] == 47 {
@@ -3338,14 +3376,32 @@ fn compile_node(node: i64) -> i64 with Mut, Panic, Div {
                 }
             }
         } else if tk2 == 13 {
-            compile_node(rhs)
-            let val_save = alloc_slot()
-            emit_store_rax(val_save)
             let arr_nd2 = ND_LEFT[target as usize]
             let idx_nd2 = ND_RIGHT[target as usize]
             let avoff2 = ND_STR_OFF[arr_nd2 as usize]
             let avlen2 = ND_STR_LEN[arr_nd2 as usize]
             var asz2: i64 = 1
+            var asgn_gl_elem_si: i64 = -1
+            // Check if RHS is a struct ident (for multi-slot copy)
+            var rhs_struct_slot: i64 = -1
+            var rhs_struct_fc: i64 = 0
+            if ND_KIND[rhs as usize] == 2 {
+                let rhs_id_off = ND_STR_OFF[rhs as usize]
+                let rhs_id_len = ND_STR_LEN[rhs as usize]
+                let rhs_local = find_local(rhs_id_off, rhs_id_len)
+                if rhs_local >= 0 && LAST_LOCAL_SI >= 0 && LAST_LOCAL_IS_SPTR == 0 {
+                    rhs_struct_slot = rhs_local
+                    rhs_struct_fc = struct_total_slots(LAST_LOCAL_SI)
+                }
+            }
+            // Compile RHS for scalar case (struct multi-slot handled separately below)
+            if rhs_struct_fc <= 1 {
+                compile_node(rhs)
+            }
+            let val_save = alloc_slot()
+            if rhs_struct_fc <= 1 {
+                emit_store_rax(val_save)
+            }
             if ND_KIND[arr_nd2 as usize] == 14 {
                 // Field array write: obj.field[idx] = val
                 let fobj_nd_w = ND_LEFT[arr_nd2 as usize]
@@ -3382,6 +3438,7 @@ fn compile_node(node: i64) -> i64 with Mut, Panic, Div {
                     let gaaddr2 = 0x700000 + MB_GL_OFF[agi2 as usize]
                     emit(0x48); emit(0xB9); emit_u64(gaaddr2)
                     asz2 = MB_GL_SZ[agi2 as usize]
+                    asgn_gl_elem_si = MB_GL_ELEM_SI[agi2 as usize]
                 } else {
                     emit(0x48); emit(0x31); emit(0xC9)
                 }
@@ -3393,15 +3450,33 @@ fn compile_node(node: i64) -> i64 with Mut, Panic, Div {
             emit(0x48); emit(0x8B); emit(0x8D); emit_u32(0 - ((base_save + 1) * 8))
             if asz2 == 1 {
                 emit(0x48); emit(0x01); emit(0xC1)
+            } else if asz2 > 8 {
+                // Struct element: compute base + idx * asz2
+                emit(0x48); emit(0x69); emit(0xC0); emit_u32(asz2)  // imul rax, asz2
+                emit(0x48); emit(0x01); emit(0xC1)                   // add rcx, rax
             } else {
                 emit(0x48); emit(0xC1); emit(0xE0); emit(0x03)
                 emit(0x48); emit(0x01); emit(0xC1)
             }
-            emit(0x48); emit(0x8B); emit(0x95); emit_u32(0 - ((val_save + 1) * 8))
-            if asz2 == 1 {
-                emit(0x88); emit(0x11)
+            // Now rcx = destination address
+            if asz2 > 8 && rhs_struct_fc > 1 {
+                // Multi-slot struct copy from local stack slots to [rcx]
+                let dst_save = alloc_slot()
+                emit(0x48); emit(0x89); emit(0x8D); emit_u32(0 - ((dst_save + 1) * 8))
+                var sci: i64 = 0
+                while sci < rhs_struct_fc {
+                    emit_load_rax(rhs_struct_slot + sci)
+                    emit(0x48); emit(0x8B); emit(0x8D); emit_u32(0 - ((dst_save + 1) * 8))
+                    emit(0x48); emit(0x89); emit(0x81); emit_u32(sci * 8)  // mov [rcx + sci*8], rax
+                    sci = sci + 1
+                }
             } else {
-                emit(0x48); emit(0x89); emit(0x11)
+                emit(0x48); emit(0x8B); emit(0x95); emit_u32(0 - ((val_save + 1) * 8))
+                if asz2 == 1 {
+                    emit(0x88); emit(0x11)
+                } else {
+                    emit(0x48); emit(0x89); emit(0x11)
+                }
             }
         } else if tk2 == 46 {
             // *ptr = value — store through pointer
@@ -3456,6 +3531,22 @@ fn compile_node(node: i64) -> i64 with Mut, Panic, Div {
                     } else {
                         emit_load_rax(val_s)
                         emit_store_rax(bs2 + fi3)
+                    }
+                }
+            } else if ND_KIND[obj_nd as usize] == 13 {
+                // arr[idx].field = val — struct array field write
+                // Compile NK_INDEX to get pointer to element
+                compile_node(obj_nd)
+                let elem_ptr_save = alloc_slot()
+                emit_store_rax(elem_ptr_save)
+                // Use LAST_FIELD_TYPE_SI set by NK_INDEX for struct arrays
+                let idx_elem_si = LAST_FIELD_TYPE_SI
+                if idx_elem_si >= 0 {
+                    let fi_aw = find_field_slot_offset(idx_elem_si, fn_off2, fn_len2)
+                    if fi_aw >= 0 {
+                        emit_load_rcx(elem_ptr_save)
+                        emit_load_rax(val_s)
+                        emit(0x48); emit(0x89); emit(0x81); emit_u32(fi_aw * 8)
                     }
                 }
             }
