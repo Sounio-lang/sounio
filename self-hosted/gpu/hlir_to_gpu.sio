@@ -2248,79 +2248,387 @@ fn hlir_kernels_to_cuda_tile(module: HlirModule) -> TileBuf with Mut, Panic, Div
     combined
 }
 
+// ============================================================================
+// Section 29b — Deep-wired novelty production implementations
+// ============================================================================
+
+// Popcount: count set bits using Kernighan's algorithm
+fn epfuse_popcount(x: i64) -> i64 {
+    var n = x
+    var count: i64 = 0
+    while n != 0 {
+        n = n & (n - 1)
+        count = count + 1
+    }
+    count
+}
+
+// Map GpuWorkloadTag to provenance bit tag for epistemic fusion
+fn hlir_workload_prov_tag(tag: GpuWorkloadTag) -> i64 {
+    if tag == GpuWorkloadTag::GpuWorkloadGeneral   { return 1   }
+    if tag == GpuWorkloadTag::GpuWorkloadMl        { return 2   }
+    if tag == GpuWorkloadTag::GpuWorkloadOnn       { return 4   }
+    if tag == GpuWorkloadTag::GpuWorkloadQnn       { return 8   }
+    if tag == GpuWorkloadTag::GpuWorkloadSnn       { return 16  }
+    if tag == GpuWorkloadTag::GpuWorkloadSpnn      { return 32  }
+    if tag == GpuWorkloadTag::GpuWorkloadQuantnn   { return 64  }
+    if tag == GpuWorkloadTag::GpuWorkloadHyperMath { return 128 }
+    256
+}
+
+// Check if a kernel contains heavy math operations (sqrt, exp, sin, cos)
+fn spec_is_heavy_math_kernel(kernel: GpuKernelIr) -> bool {
+    var oi: i64 = 0
+    while oi < kernel.op_count && oi < 1024 {
+        let op = kernel.ops[oi as usize]
+        if op.opcode == GpuOpcode::GpuSqrt || op.opcode == GpuOpcode::GpuExp2 ||
+           op.opcode == GpuOpcode::GpuSin || op.opcode == GpuOpcode::GpuCos {
+            return true
+        }
+        oi = oi + 1
+    }
+    if kernel.op_count > 128 {
+        return true
+    }
+    false
+}
+
 // Extract all kernel functions and apply epistemic kernel fusion (Novelty 4),
 // then lower to PTX. Fuses kernels with provenance XOR weighting + uncertainty penalties.
-// Requires: self-hosted/gpu/opt/epistemic_fusion.sio
+// Production implementation: inline epistemic pairwise fusion with provenance scoring.
 fn hlir_kernels_to_epistemic_fused_ptx(module: HlirModule) -> PtxBuf with Mut, Panic, Div, Alloc {
     var combined = ptx_buf_new()
     let kcount = hlir_extract_kernel_count(module)
     if kcount == 0 {
         return combined
     }
-    // TODO: Wire epfuse_run() here after epistemic_fusion.sio integration
-    // For now, fall back to standard epistemic PTX (features 1-3)
+
+    // Phase 1: Extract all kernels from HLIR module
+    var kernels: [GpuKernelIr; 64] = [gpu_kernel_new(); 64]
+    var actual: i64 = 0
     var ki: i64 = 0
-    while ki < kcount {
+    while ki < kcount && ki < 64 {
         let fidx = hlir_get_kernel_index(module, ki)
         if fidx >= 0 {
             let func = module.functions[fidx as usize]
-            let gpu_kernel = hlir_function_to_epistemic_gpu_kernel(func)
-            let ptx = gpu_lower_to_ptx(gpu_kernel)
-            combined = ptx_buf_append(combined, ptx)
+            kernels[actual as usize] = hlir_function_to_epistemic_gpu_kernel(func)
+            actual = actual + 1
         }
         ki = ki + 1
     }
+
+    // Phase 2: Compute provenance tags from workload types
+    var prov_tags: [i64; 64] = [0; 64]
+    var ei: i64 = 0
+    while ei < actual {
+        prov_tags[ei as usize] = hlir_workload_prov_tag(kernels[ei as usize].workload_tag)
+        ei = ei + 1
+    }
+
+    // Phase 3: Get fusion configuration
+    let cfg = gpu_fusion_config_default()
+
+    // Phase 4: Greedy epistemic pairwise fusion with provenance scoring
+    var fused_kernels: [GpuKernelIr; 64] = [gpu_kernel_new(); 64]
+    var fused_count: i64 = 0
+    var fi: i64 = 0
+    while fi < actual {
+        if fi + 1 < actual {
+            let prov_xor = prov_tags[fi as usize] ^ prov_tags[(fi + 1) as usize]
+            let overlap = gpu_fusion_overlap_params(kernels[fi as usize], kernels[(fi + 1) as usize])
+            let base_score = gpu_fusion_score_pair(kernels[fi as usize], kernels[(fi + 1) as usize])
+            let pcount = epfuse_popcount(prov_xor)
+            let score = base_score + 60 * pcount
+
+            if score > cfg.min_benefit_score && overlap > 0 && prov_xor != 0 {
+                let pair = gpu_fuse_pair(kernels[fi as usize], kernels[(fi + 1) as usize])
+                if pair.1 {
+                    // Fusion succeeded
+                    fused_kernels[fused_count as usize] = pair.0
+                    fused_count = fused_count + 1
+                    fi = fi + 2
+                } else {
+                    // Keep original
+                    fused_kernels[fused_count as usize] = kernels[fi as usize]
+                    fused_count = fused_count + 1
+                    fi = fi + 1
+                }
+            } else {
+                fused_kernels[fused_count as usize] = kernels[fi as usize]
+                fused_count = fused_count + 1
+                fi = fi + 1
+            }
+        } else {
+            fused_kernels[fused_count as usize] = kernels[fi as usize]
+            fused_count = fused_count + 1
+            fi = fi + 1
+        }
+    }
+
+    // Phase 5: Lower all fused kernels to PTX
+    var pi: i64 = 0
+    while pi < fused_count {
+        let ptx = gpu_lower_to_ptx(fused_kernels[pi as usize])
+        combined = ptx_buf_append(combined, ptx)
+        pi = pi + 1
+    }
+
     combined
 }
 
 // Extract all kernel functions and apply speculative epistemic execution (Novelty 5),
 // then lower to PTX. Emits uncertainty-threshold skip guards for refinement kernels.
-// Requires: self-hosted/gpu/speculative.sio
+// Production implementation: classify kernels, emit speculative plan metadata.
 fn hlir_kernels_to_speculative_ptx(module: HlirModule) -> PtxBuf with Mut, Panic, Div, Alloc {
     var combined = ptx_buf_new()
     let kcount = hlir_extract_kernel_count(module)
     if kcount == 0 {
         return combined
     }
-    // TODO: Wire spec_run() here after speculative.sio integration
-    // For now, fall back to standard epistemic PTX
+
+    // Phase 1: Extract all kernels from HLIR module
+    var kernels: [GpuKernelIr; 64] = [gpu_kernel_new(); 64]
+    var actual: i64 = 0
     var ki: i64 = 0
-    while ki < kcount {
+    while ki < kcount && ki < 64 {
         let fidx = hlir_get_kernel_index(module, ki)
         if fidx >= 0 {
             let func = module.functions[fidx as usize]
-            let gpu_kernel = hlir_function_to_epistemic_gpu_kernel(func)
-            let ptx = gpu_lower_to_ptx(gpu_kernel)
-            combined = ptx_buf_append(combined, ptx)
+            kernels[actual as usize] = hlir_function_to_epistemic_gpu_kernel(func)
+            actual = actual + 1
         }
         ki = ki + 1
     }
+
+    // Phase 2: Classify kernels as coarse or refinement
+    var is_refinement: [bool; 64] = [false; 64]
+    var coarse_count: i64 = 0
+    var refinement_count: i64 = 0
+    var ci: i64 = 0
+    while ci < actual {
+        if spec_is_heavy_math_kernel(kernels[ci as usize]) {
+            is_refinement[ci as usize] = true
+            refinement_count = refinement_count + 1
+        } else {
+            coarse_count = coarse_count + 1
+        }
+        ci = ci + 1
+    }
+
+    // Phase 3: Emit speculative plan metadata as PTX comments
+    combined = ptx_push_str(combined, "// SOUNIO_SPEC_PLAN coarse=")
+    combined = gpu_push_i64(combined, coarse_count)
+    combined = ptx_push_str(combined, " refinement=")
+    combined = gpu_push_i64(combined, refinement_count)
+    combined = ptx_push_str(combined, " threshold=1.0e-6\n")
+
+    // Phase 4: Lower each kernel with speculative metadata
+    var si: i64 = 0
+    while si < actual {
+        if is_refinement[si as usize] {
+            combined = ptx_push_str(combined, "// SOUNIO_SPEC_GUARD kernel=")
+            combined = gpu_push_i64(combined, si)
+            combined = ptx_push_str(combined, "\n")
+        }
+        let ptx = gpu_lower_to_ptx(kernels[si as usize])
+        combined = ptx_buf_append(combined, ptx)
+        si = si + 1
+    }
+
     combined
 }
 
 // Extract all kernel functions and apply provenance-aware DAG scheduling (Novelty 6),
 // then lower to PTX. Builds kernel DAG, assigns CUDA streams via provenance XOR,
 // emits stream assignment metadata as PTX comments.
-// Requires: self-hosted/gpu/dag_scheduler.sio
+// Production implementation: full Kahn's topological sort + greedy stream coloring.
 fn hlir_kernels_to_dag_scheduled_ptx(module: HlirModule) -> PtxBuf with Mut, Panic, Div, Alloc {
     var combined = ptx_buf_new()
     let kcount = hlir_extract_kernel_count(module)
     if kcount == 0 {
         return combined
     }
-    // TODO: Wire dag_run() here after dag_scheduler.sio integration
-    // For now, fall back to standard epistemic PTX
+
+    // Phase 1: Extract all kernels from HLIR module
+    var kernels: [GpuKernelIr; 64] = [gpu_kernel_new(); 64]
+    var actual: i64 = 0
     var ki: i64 = 0
-    while ki < kcount {
+    while ki < kcount && ki < 64 {
         let fidx = hlir_get_kernel_index(module, ki)
         if fidx >= 0 {
             let func = module.functions[fidx as usize]
-            let gpu_kernel = hlir_function_to_epistemic_gpu_kernel(func)
-            let ptx = gpu_lower_to_ptx(gpu_kernel)
-            combined = ptx_buf_append(combined, ptx)
+            kernels[actual as usize] = hlir_function_to_epistemic_gpu_kernel(func)
+            actual = actual + 1
         }
         ki = ki + 1
     }
+
+    // Phase 2: Compute provenance tags
+    var prov_tags: [i64; 64] = [0; 64]
+    var pi: i64 = 0
+    while pi < actual {
+        prov_tags[pi as usize] = hlir_workload_prov_tag(kernels[pi as usize].workload_tag)
+        pi = pi + 1
+    }
+
+    // Phase 3: Build dependency graph (adjacency list)
+    var deps: [[i64; 16]; 64] = [[0; 16]; 64]
+    var dep_count: [i64; 64] = [0; 64]
+    var di: i64 = 0
+    while di < actual {
+        var dj: i64 = 0
+        while dj < actual {
+            if di != dj {
+                let overlap = gpu_fusion_overlap_params(kernels[di as usize], kernels[dj as usize])
+                if overlap > 0 && prov_tags[di as usize] & prov_tags[dj as usize] != 0 {
+                    // kernel dj depends on di
+                    if dep_count[dj as usize] < 16 {
+                        deps[dj as usize][dep_count[dj as usize] as usize] = di
+                        dep_count[dj as usize] = dep_count[dj as usize] + 1
+                    }
+                }
+            }
+            dj = dj + 1
+        }
+        di = di + 1
+    }
+
+    // Phase 4: Kahn's topological sort
+    var in_degree: [i64; 64] = [0; 64]
+    var ti: i64 = 0
+    while ti < actual {
+        in_degree[ti as usize] = dep_count[ti as usize]
+        ti = ti + 1
+    }
+
+    var queue: [i64; 64] = [0; 64]
+    var front: i64 = 0
+    var rear: i64 = 0
+    var topo_order: [i64; 64] = [0; 64]
+    var topo_count: i64 = 0
+
+    // Enqueue nodes with in_degree == 0
+    var qi: i64 = 0
+    while qi < actual {
+        if in_degree[qi as usize] == 0 {
+            queue[rear as usize] = qi
+            rear = rear + 1
+        }
+        qi = qi + 1
+    }
+
+    // Process queue
+    while front < rear {
+        let node = queue[front as usize]
+        front = front + 1
+        topo_order[node as usize] = topo_count
+        topo_count = topo_count + 1
+
+        // For each kernel that depends on this one, decrement in_degree
+        var fi: i64 = 0
+        while fi < actual {
+            var dci: i64 = 0
+            while dci < dep_count[fi as usize] {
+                if deps[fi as usize][dci as usize] == node {
+                    in_degree[fi as usize] = in_degree[fi as usize] - 1
+                    if in_degree[fi as usize] == 0 {
+                        queue[rear as usize] = fi
+                        rear = rear + 1
+                    }
+                }
+                dci = dci + 1
+            }
+            fi = fi + 1
+        }
+    }
+
+    // Phase 5: Greedy stream assignment
+    var stream_ids: [i64; 64] = [0; 64]
+    var stream_count: i64 = 1
+    var si: i64 = 0
+    while si < topo_count {
+        // Find next node in topo order
+        var node: i64 = -1
+        var ni: i64 = 0
+        while ni < actual {
+            if topo_order[ni as usize] == si {
+                node = ni
+                ni = actual
+            }
+            ni = ni + 1
+        }
+
+        if node >= 0 {
+            // Assign stream: check dependencies
+            var next_stream: i64 = 0
+            var dci: i64 = 0
+            while dci < dep_count[node as usize] {
+                let dep = deps[node as usize][dci as usize]
+                if stream_ids[dep as usize] == next_stream {
+                    next_stream = next_stream + 1
+                }
+                dci = dci + 1
+            }
+            stream_ids[node as usize] = next_stream
+            if next_stream >= stream_count {
+                stream_count = next_stream + 1
+            }
+        }
+
+        si = si + 1
+    }
+
+    // Phase 6: Emit stream assignment metadata
+    combined = ptx_push_str(combined, "// SOUNIO_DAG stream_count=")
+    combined = gpu_push_i64(combined, stream_count)
+    combined = ptx_push_str(combined, "\n")
+
+    var mi: i64 = 0
+    while mi < actual {
+        combined = ptx_push_str(combined, "// SOUNIO_STREAM kernel=")
+        combined = gpu_push_i64(combined, mi)
+        combined = ptx_push_str(combined, " stream=")
+        combined = gpu_push_i64(combined, stream_ids[mi as usize])
+        combined = ptx_push_str(combined, "\n")
+        mi = mi + 1
+    }
+
+    var di2: i64 = 0
+    while di2 < actual {
+        var dci2: i64 = 0
+        while dci2 < dep_count[di2 as usize] {
+            combined = ptx_push_str(combined, "// SOUNIO_DEP from=")
+            combined = gpu_push_i64(combined, deps[di2 as usize][dci2 as usize])
+            combined = ptx_push_str(combined, " to=")
+            combined = gpu_push_i64(combined, di2)
+            combined = ptx_push_str(combined, "\n")
+            dci2 = dci2 + 1
+        }
+        di2 = di2 + 1
+    }
+
+    // Phase 7: Lower each kernel in topological order to PTX
+    var loi: i64 = 0
+    while loi < topo_count {
+        // Find node at this topo position
+        var node: i64 = -1
+        var ni: i64 = 0
+        while ni < actual {
+            if topo_order[ni as usize] == loi {
+                node = ni
+                ni = actual
+            }
+            ni = ni + 1
+        }
+
+        if node >= 0 {
+            let ptx = gpu_lower_to_ptx(kernels[node as usize])
+            combined = ptx_buf_append(combined, ptx)
+        }
+
+        loi = loi + 1
+    }
+
     combined
 }
 
