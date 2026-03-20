@@ -47,6 +47,9 @@ var GLOBAL_TOTAL_SIZE: i64 = 0
 var GLOBAL_BASE_ABS: i64 = 0  // absolute VA of global_base_ptr storage
 // JIT Heisenbug workaround: MAIN_FN_IDX as global — JIT clobbers locals across str_eq calls.
 var MAIN_FN_IDX: i64 = -1
+// Source buffer for lex_to_parser (local to lean driver — avoids cross-module BSS issues)
+var LEAN_SOURCE: [i8; 1048576] = [0; 1048576]
+var LEAN_SOURCE_LEN: i64 = 0
 
 fn wide_flush(code: CodeBuffer) with Mut, Panic, Div {
     var i: i64 = 0
@@ -159,10 +162,12 @@ fn f64_bits(v: f64) -> i64 with Mut, Panic, Div {
 }
 
 fn load_source_file(path: string) -> Program with IO, Mut, Div, Panic, Alloc {
-    let data = read_file(path)
-    let size = file_size(path)
-    // Use lex_to_parser (boot4-safe: scalar-only, no Cursor/ScanResult structs)
-    let token_count = lex_to_parser(data, size, 0)
+    // LTP_SOURCE already populated by scan_source_globals (avoids 1MB stack copy)
+    print("lex: start\n")
+    let token_count = lex_to_parser(LTP_N, 0)
+    print("lex: tokens=")
+    print_int(token_count)
+    print("\n")
     parse_program_preloaded(token_count)
 }
 
@@ -962,6 +967,140 @@ fn ast_emit_inline_print_str(code: CodeBuffer, str_buf: [i8; 128], str_len: i64)
 }
 
 // ============================================================================
+// find_eigenform(op_addr, initial, tolerance, max_iter) → f64
+//
+// Banach fixed-point iteration: x* where Op(x*) = x*.
+// Native x86-64 builtin for cybernetic eigenform computation.
+//
+// ABI (lean driver convention — all args as i64 bit patterns):
+//   rdi = op_addr  (absolute code address of fn(f64)->f64)
+//   rsi = initial  (f64 bit pattern)
+//   rdx = tolerance (f64 bit pattern)
+//   rcx = max_iter (i64)
+//   Return: rax = eigenform value (f64 bit pattern)
+//
+// Uses callee-saved r12 (op_addr), r13 (max_iter), r14 (counter).
+// Calls op(x) via CALL r12 with x passed in rdi as bit pattern.
+// ============================================================================
+fn ast_emit_find_eigenform_builtin(code: CodeBuffer) -> CodeBuffer with Mut, Panic, Div {
+    var c = code
+
+    // ---- PROLOGUE ----
+    c = emit_byte(c, 0x55)                                                      // push rbp
+    c = emit_byte(c, 0x48); c = emit_byte(c, 0x89); c = emit_byte(c, 0xe5)     // mov rbp, rsp
+    c = emit_byte(c, 0x48); c = emit_byte(c, 0x83); c = emit_byte(c, 0xec); c = emit_byte(c, 0x30) // sub rsp, 48
+
+    // Save callee-saved registers
+    c = emit_byte(c, 0x53)                            // push rbx
+    c = emit_byte(c, 0x41); c = emit_byte(c, 0x54)   // push r12
+    c = emit_byte(c, 0x41); c = emit_byte(c, 0x55)   // push r13
+    c = emit_byte(c, 0x41); c = emit_byte(c, 0x56)   // push r14
+
+    // ---- SETUP: save arguments ----
+    // r12 = op function address
+    c = emit_byte(c, 0x49); c = emit_byte(c, 0x89); c = emit_byte(c, 0xFC)     // mov r12, rdi
+
+    // Convert initial from i64 bit pattern → f64, store at [rbp-8]
+    c = emit_byte(c, 0x66); c = emit_byte(c, 0x48); c = emit_byte(c, 0x0f)
+    c = emit_byte(c, 0x6e); c = emit_byte(c, 0xC6)                             // movq xmm0, rsi
+    c = emit_byte(c, 0xF2); c = emit_byte(c, 0x0f); c = emit_byte(c, 0x11)
+    c = emit_byte(c, 0x45); c = emit_byte(c, 0xF8)                             // movsd [rbp-8], xmm0
+
+    // Convert tolerance from i64 bit pattern → f64, store at [rbp-16]
+    c = emit_byte(c, 0x66); c = emit_byte(c, 0x48); c = emit_byte(c, 0x0f)
+    c = emit_byte(c, 0x6e); c = emit_byte(c, 0xC2)                             // movq xmm0, rdx
+    c = emit_byte(c, 0xF2); c = emit_byte(c, 0x0f); c = emit_byte(c, 0x11)
+    c = emit_byte(c, 0x45); c = emit_byte(c, 0xF0)                             // movsd [rbp-16], xmm0
+
+    // r13 = max_iter
+    c = emit_byte(c, 0x49); c = emit_byte(c, 0x89); c = emit_byte(c, 0xCD)     // mov r13, rcx
+    // r14 = 0 (iteration counter)
+    c = emit_byte(c, 0x45); c = emit_byte(c, 0x31); c = emit_byte(c, 0xF6)     // xor r14d, r14d
+
+    // ---- LOOP START ----
+    let loop_start = c.len
+
+    // Check: i >= max_iter → done
+    c = emit_byte(c, 0x4D); c = emit_byte(c, 0x39); c = emit_byte(c, 0xEE)     // cmp r14, r13
+    let jge_site = c.len
+    c = emit_byte(c, 0x7D); c = emit_byte(c, 0x00)                             // jge return_x (patch)
+
+    // Call op(x): load x from [rbp-8], pass as bit pattern in rdi
+    c = emit_byte(c, 0xF2); c = emit_byte(c, 0x0f); c = emit_byte(c, 0x10)
+    c = emit_byte(c, 0x45); c = emit_byte(c, 0xF8)                             // movsd xmm0, [rbp-8]
+    c = emit_byte(c, 0x66); c = emit_byte(c, 0x48); c = emit_byte(c, 0x0f)
+    c = emit_byte(c, 0x7e); c = emit_byte(c, 0xC7)                             // movq rdi, xmm0
+    c = emit_byte(c, 0x41); c = emit_byte(c, 0xFF); c = emit_byte(c, 0xD4)     // call r12
+
+    // rax = op(x) as bit pattern → convert to xmm1
+    c = emit_byte(c, 0x66); c = emit_byte(c, 0x48); c = emit_byte(c, 0x0f)
+    c = emit_byte(c, 0x6e); c = emit_byte(c, 0xC8)                             // movq xmm1, rax
+    // Save new_x at [rbp-24]
+    c = emit_byte(c, 0xF2); c = emit_byte(c, 0x0f); c = emit_byte(c, 0x11)
+    c = emit_byte(c, 0x4D); c = emit_byte(c, 0xE8)                             // movsd [rbp-24], xmm1
+
+    // Compute diff = new_x - x
+    c = emit_byte(c, 0xF2); c = emit_byte(c, 0x0f); c = emit_byte(c, 0x10)
+    c = emit_byte(c, 0x45); c = emit_byte(c, 0xF8)                             // movsd xmm0, [rbp-8]
+    c = emit_byte(c, 0xF2); c = emit_byte(c, 0x0f); c = emit_byte(c, 0x5C)
+    c = emit_byte(c, 0xC8)                                                      // subsd xmm1, xmm0
+
+    // Absolute value: clear sign bit via AND with 0x7FFFFFFFFFFFFFFF
+    c = emit_byte(c, 0x66); c = emit_byte(c, 0x48); c = emit_byte(c, 0x0f)
+    c = emit_byte(c, 0x7e); c = emit_byte(c, 0xC8)                             // movq rax, xmm1
+    c = emit_byte(c, 0x48); c = emit_byte(c, 0xBB)                             // mov rbx, imm64
+    c = emit_byte(c, 0xFF); c = emit_byte(c, 0xFF); c = emit_byte(c, 0xFF); c = emit_byte(c, 0xFF)
+    c = emit_byte(c, 0xFF); c = emit_byte(c, 0xFF); c = emit_byte(c, 0xFF); c = emit_byte(c, 0x7F) // 0x7FFFFFFFFFFFFFFF
+    c = emit_byte(c, 0x48); c = emit_byte(c, 0x21); c = emit_byte(c, 0xD8)     // and rax, rbx
+    c = emit_byte(c, 0x66); c = emit_byte(c, 0x48); c = emit_byte(c, 0x0f)
+    c = emit_byte(c, 0x6e); c = emit_byte(c, 0xC8)                             // movq xmm1, rax
+
+    // Update x := new_x (before convergence check)
+    c = emit_byte(c, 0xF2); c = emit_byte(c, 0x0f); c = emit_byte(c, 0x10)
+    c = emit_byte(c, 0x45); c = emit_byte(c, 0xE8)                             // movsd xmm0, [rbp-24]
+    c = emit_byte(c, 0xF2); c = emit_byte(c, 0x0f); c = emit_byte(c, 0x11)
+    c = emit_byte(c, 0x45); c = emit_byte(c, 0xF8)                             // movsd [rbp-8], xmm0
+
+    // Compare |diff| <= tolerance
+    c = emit_byte(c, 0x66); c = emit_byte(c, 0x0F); c = emit_byte(c, 0x2E)
+    c = emit_byte(c, 0x4D); c = emit_byte(c, 0xF0)                             // ucomisd xmm1, [rbp-16]
+    let jbe_site = c.len
+    c = emit_byte(c, 0x76); c = emit_byte(c, 0x00)                             // jbe return_x (patch)
+
+    // i++
+    c = emit_byte(c, 0x49); c = emit_byte(c, 0xFF); c = emit_byte(c, 0xC6)     // inc r14
+
+    // jmp loop_start
+    let jmp_back_site = c.len
+    let back_disp = loop_start - (jmp_back_site + 2)
+    c = emit_byte(c, 0xEB); c = emit_byte(c, back_disp & 0xFF)                 // jmp loop_start
+
+    // ---- RETURN: x is in [rbp-8], return as bit pattern in rax ----
+    let return_pos = c.len
+
+    c = emit_byte(c, 0xF2); c = emit_byte(c, 0x0f); c = emit_byte(c, 0x10)
+    c = emit_byte(c, 0x45); c = emit_byte(c, 0xF8)                             // movsd xmm0, [rbp-8]
+    c = emit_byte(c, 0x66); c = emit_byte(c, 0x48); c = emit_byte(c, 0x0f)
+    c = emit_byte(c, 0x7e); c = emit_byte(c, 0xC0)                             // movq rax, xmm0
+
+    // Restore callee-saved registers (reverse order)
+    c = emit_byte(c, 0x41); c = emit_byte(c, 0x5E)   // pop r14
+    c = emit_byte(c, 0x41); c = emit_byte(c, 0x5D)   // pop r13
+    c = emit_byte(c, 0x41); c = emit_byte(c, 0x5C)   // pop r12
+    c = emit_byte(c, 0x5B)                            // pop rbx
+
+    // leave + ret
+    c = emit_byte(c, 0xC9)                            // leave
+    c = emit_byte(c, 0xC3)                            // ret
+
+    // ---- PATCH forward jumps ----
+    c.bytes[(jge_site + 1) as usize] = ((return_pos - (jge_site + 2)) & 0xFF) as i8
+    c.bytes[(jbe_site + 1) as usize] = ((return_pos - (jbe_site + 2)) & 0xFF) as i8
+
+    c
+}
+
+// ============================================================================
 // Struct registry context for AST-direct compiler
 // ============================================================================
 
@@ -1210,11 +1349,30 @@ fn scan_byte(buf: [i8; 1048576], pos: i64) -> i64 with Mut, Panic {
     (buf[pos as usize] as i64) & 0xFF
 }
 
+// Tiny function: populate LEAN_SOURCE from read_file result (keeps frame small)
+fn populate_lean_source(path: string) with IO, Mut, Panic, Div {
+    let raw = read_file(path)
+    let src_size = file_size(path)
+    var csi: i64 = 0
+    while csi < src_size {
+        LEAN_SOURCE[csi as usize] = raw[csi as usize]
+        csi = csi + 1
+    }
+    LEAN_SOURCE_LEN = src_size
+}
+
 fn scan_source_globals(path: string) with IO, Mut, Panic, Div {
     GLOBAL_COUNT = 0
     GLOBAL_TOTAL_SIZE = 0
     let raw = read_file(path)
     let src_size = file_size(path)
+    // Copy source into LTP_SOURCE for lex_to_parser (same raw data, avoids second read_file)
+    var csi: i64 = 0
+    while csi < src_size {
+        LTP_SOURCE[csi as usize] = raw[csi as usize]
+        csi = csi + 1
+    }
+    LTP_N = src_size
     var pos: i64 = 0
     while pos < src_size - 4 {
         // Check for line starting with "var " (v=118, a=97, r=114, space=32)
@@ -4120,6 +4278,7 @@ fn main() -> i64 with IO, Mut, Panic, Div, Alloc {
 
     // Scan source for global variable declarations before parsing
     scan_source_globals(source_path)
+    // LTP_SOURCE + LTP_N already populated by scan_source_globals
     print("render_compile: globals=")
     print_int(GLOBAL_COUNT)
     print(" total_bytes=")
@@ -4613,6 +4772,29 @@ fn main() -> i64 with IO, Mut, Panic, Div, Alloc {
     fn_return_types[fn_count as usize] = 0
     fn_count = fn_count + 1
 
+    // find_eigenform(op_addr, initial, tolerance, max_iter) → f64
+    // Banach fixed-point iteration for cybernetic eigenform computation
+    var find_eigenform_idx = fn_count
+    var fename = ir_empty_name()
+    fename.buf[0 as usize] = 102 as i8   // f
+    fename.buf[1 as usize] = 105 as i8   // i
+    fename.buf[2 as usize] = 110 as i8   // n
+    fename.buf[3 as usize] = 100 as i8   // d
+    fename.buf[4 as usize] = 95 as i8    // _
+    fename.buf[5 as usize] = 101 as i8   // e
+    fename.buf[6 as usize] = 105 as i8   // i
+    fename.buf[7 as usize] = 103 as i8   // g
+    fename.buf[8 as usize] = 101 as i8   // e
+    fename.buf[9 as usize] = 110 as i8   // n
+    fename.buf[10 as usize] = 102 as i8  // f
+    fename.buf[11 as usize] = 111 as i8  // o
+    fename.buf[12 as usize] = 114 as i8  // r
+    fename.buf[13 as usize] = 109 as i8  // m
+    fename.len = 14
+    fn_names[fn_count as usize] = fename
+    fn_return_types[fn_count as usize] = 1  // returns f64
+    fn_count = fn_count + 1
+
     // Populate ctx with function info
     var cfi: i64 = 0
     while cfi < fn_count {
@@ -5092,6 +5274,17 @@ fn main() -> i64 with IO, Mut, Panic, Div, Alloc {
     wide_flush(code)
     print("render_compile: builtin=source_byte off=")
     print_int(fn_offsets[source_byte_idx as usize])
+    print("\n")
+
+    // Emit find_eigenform builtin
+    fn_offsets[find_eigenform_idx as usize] = WIDE_LEN
+    code = code_buffer_new()
+    code = ast_emit_find_eigenform_builtin(code)
+    wide_flush(code)
+    print("render_compile: builtin=find_eigenform off=")
+    print_int(fn_offsets[find_eigenform_idx as usize])
+    print(" sz=")
+    print_int(WIDE_LEN - fn_offsets[find_eigenform_idx as usize])
     print("\n")
 
     item_cur = items_ref
