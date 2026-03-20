@@ -26,12 +26,12 @@
  * LIMITS
  * ================================================================ */
 #define MAX_CODE      (1024*1024)  /* 1 MB code output */
-#define MAX_FUNCS     512
-#define MAX_STRUCTS   128
-#define MAX_FIELDS    512
-#define MAX_LOCALS    512
-#define MAX_TOKENS    (1024*1024)
-#define MAX_SOURCE    (1024*1024)  /* 1 MB source */
+#define MAX_FUNCS     1024
+#define MAX_STRUCTS   512
+#define MAX_FIELDS    4096
+#define MAX_LOCALS    1024
+#define MAX_TOKENS    (2*1024*1024)
+#define MAX_SOURCE    (4*1024*1024)  /* 4 MB source (multi-module) */
 #define MAX_NAME      128
 #define MAX_PARAMS    16
 #define MAX_FWD       256
