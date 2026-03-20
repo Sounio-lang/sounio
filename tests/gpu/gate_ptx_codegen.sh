@@ -384,6 +384,24 @@ echo "--- Section 2c: Deep Novelties (T19-T21) ---"
     fi
 }
 
+# T22: Epistemic GPU Showcase — practical utility demonstration
+{
+    TOTAL=$((TOTAL + 1))
+    if [ -f examples/gpu_epistemic_showcase.sio ]; then
+        RESULT=$($SOUC run examples/gpu_epistemic_showcase.sio 2>&1 | tail -1)
+        if echo "$RESULT" | grep -q "10/10 tests passed"; then
+            PASS=$((PASS + 1))
+            echo "PASS  T22_epistemic_showcase (10/10 tests)"
+        else
+            FAIL=$((FAIL + 1))
+            echo "FAIL  T22_epistemic_showcase: $RESULT"
+        fi
+    else
+        FAIL=$((FAIL + 1))
+        echo "FAIL  T22_epistemic_showcase: showcase file missing"
+    fi
+}
+
 # ── Section 3: souc check — optional files ────────────────────────────────────
 
 echo ""
