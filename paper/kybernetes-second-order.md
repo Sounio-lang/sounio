@@ -315,6 +315,92 @@ The `ln_approx` uses argument reduction to [0.5, 2.0] via repeated halving/doubl
 
 The mutual information approximation via Taylor series for −ln(1−x) is the least accurate for r close to 1.0 (where MI → ∞). The implementation caps the return value at 3.0 for r² > 0.99. This is sufficient for the coupling module's purpose (distinguishing "high" from "low" mutual information) but would not be suitable for quantitative MI estimation in information-theoretic applications.
 
+### 5.2 Code Excerpts
+
+To illustrate the by-value return pattern and effect tracking that characterize the implementation, we reproduce two key functions.
+
+**Bridge 1: Observed eigenform search.** Each iteration calls `make_observation`, threading the perturbed observer through the loop. The returned `ObservedEigenform` carries the observer's accumulated drift as part of the result — the cost of observation is inseparable from the observation itself.
+
+```sounio
+pub fn observe_eigenform(
+    obs: Observer,
+    op: fn(f64) -> f64,
+    initial: f64,
+    tolerance: f64,
+    max_iter: i64
+) -> ObservedEigenform with Mut, Div, Panic {
+    var o = obs
+    var x = initial
+    var converged = false
+    var residual = 1.0
+    var i = 0
+
+    while i < max_iter {
+        let new_x = op(x)
+        let diff = if new_x > x { new_x - x } else { x - new_x }
+
+        // Each iteration IS an observation — observer is perturbed
+        let measurement = make_observation(o, new_x, diff)
+        o = measurement.observer
+
+        if diff < tolerance {
+            converged = true
+            residual = diff
+            break
+        }
+        x = new_x
+        i = i + 1
+    }
+
+    let drift = blind_spot(o)
+    let total_var = residual + drift * drift
+
+    ObservedEigenform {
+        value: x,
+        variance: total_var,
+        observer_drift: drift,
+        iterations: i,
+        converged: converged,
+    }
+}
+```
+
+Note the effect annotation `with Mut, Div, Panic`: the type system records that this function mutates state (`Mut`), performs division (`Div`), and may fail (`Panic`). These are not incidental — they are the computational cost of observation made explicit.
+
+**Bridge 7: Self-observation.** The system applies an observer to its own aggregate state. The observer cannot inspect the system without accumulating drift, which changes the system's viability assessment, which changes what the next observation will see.
+
+```sounio
+pub fn observe_self(
+    state: CyberneticState,
+    obs: Observer
+) -> CyberneticState with Mut, Div, Panic {
+    var s = state
+    let measurement = make_observation(obs, s.eigenform_value, s.eigenform_variance)
+    s.eigenform_variance = measurement.variance
+    s.observer_drift = blind_spot(measurement.observer)
+
+    // Re-evaluate distinction based on new uncertainty
+    let ef = ObservedEigenform {
+        value: s.eigenform_value,
+        variance: s.eigenform_variance,
+        observer_drift: s.observer_drift,
+        iterations: 0,
+        converged: s.eigenform_variance < 1.0,
+    }
+    s.distinction_value = eigenform_as_distinction(ef)
+
+    // Excessive drift compromises viability
+    if s.observer_drift > DRIFT_VIABILITY_LIMIT {
+        s.is_viable = false
+    }
+
+    s.recursion_depth = s.recursion_depth + 1
+    s
+}
+```
+
+The by-value return pattern (`var s = state; ... s`) makes every state transition explicit. The old state is never mutated — a new state is constructed and returned. This corresponds directly to the theoretical distinction between organization (invariant across transitions) and structure (changed by each transition).
+
 ---
 
 ## 6. Related Work
@@ -416,7 +502,7 @@ We have shown that nine foundational theories of second-order cybernetics can be
 
 A note on falsifiability is warranted. The 41-round convergence of a Pask conversation is a consequence of specific parameter choices (initial values 10 and 90, variance 1.0, adaptive trust weight 0.1 + 0.4 × agreement, convergence threshold 0.01). Change any parameter, and the number changes. The specific number is not a prediction about reality — there is no empirical data on how many rounds real conversations take to converge, and any such data would depend on what "a round" means in context. What IS falsifiable are the *structural* predictions: that dual-model conversations converge monotonically, that adaptive trust accelerates convergence, that model accuracy correlates with agreement, and that high-variance starts require more rounds than low-variance starts. These dynamics are preserved across parameterizations and constitute the real theoretical content. The specific numbers provide reproducible benchmarks against which variations can be measured.
 
-The code is available. The tests are runnable. The loop closes.
+The code is available at `stdlib/cybernetic/` in the Sounio repository (10 modules, 4 test files, 2 examples). The tests are runnable with `$SOUC run tests/run-pass/second_order_proof.sio`. The loop closes.
 
 ---
 
@@ -467,3 +553,62 @@ Kazil, J., Masad, D., and Crooks, A. (2020). "Utilizing Python for agent-based m
 North, M. J., Collier, N. T., Ozik, J., et al. (2013). "Complex adaptive systems modeling with Repast Simphony." *Complex Adaptive Systems Modeling*, 1(3).
 
 Abramsky, S. and Coecke, B. (2004). "A categorical semantics of quantum protocols." In *Proc. LICS*, IEEE.
+
+---
+
+## Appendix A: Sketch of Luhmann Extension
+
+Section 7.4 identified Luhmann's social autopoiesis as the most significant theoretical extension. This appendix sketches the concrete data structures that would implement it, to demonstrate feasibility within the existing architecture.
+
+**Communication as component.** In Luhmann's theory, the unit of social systems is not a person but a *communication* — an event that selects information, utterance, and understanding simultaneously. We model this as:
+
+```sounio
+pub struct Communication {
+    sender_id: i64,
+    receiver_id: i64,
+    theme_id: i64,          // what the communication is "about"
+    code_value: i64,         // binary code: 0 = negative pole, 1 = positive pole
+    code_system: i64,        // which functional system (0=science, 1=law, 2=economy, ...)
+    timestamp: i64,
+}
+```
+
+**Production as meaning-connection.** One communication "produces" the next when it makes the next communication possible — when the receiver's understanding becomes the next sender's information. The adjacency matrix `relations[i*16+j] = 1` from `autopoiesis.sio` would mean "communication i makes communication j possible."
+
+**Binary codes as distinctions.** Each functional subsystem operates with a binary code that IS a Spencer-Brown distinction:
+
+```sounio
+// Science: true / false
+let science_code = form_marked()  // true = MARKED, false = UNMARKED
+
+// Law: legal / illegal
+let law_code = form_marked()
+
+// Economy: payment / non-payment
+let economy_code = form_marked()
+```
+
+Functional differentiation is the claim that each subsystem is autopoietic *under its own code*. The `check_closure` function from `autopoiesis.sio` would verify that the communications within a subsystem (those sharing a `code_system` value) form at least one production cycle. A subsystem that fails closure detection is not functionally differentiated — it depends on another subsystem's communications to sustain itself.
+
+**Structural coupling between subsystems.** When a legal communication (code_system=1) triggers a scientific communication (code_system=0), the two subsystems are structurally coupled. The `coupling.sio` module can track this: the Pearson correlation between legal-communication frequency and scientific-communication frequency measures how tightly coupled the subsystems are.
+
+**What this adds to the recursive loop.** The current loop treats autopoiesis as a single-level phenomenon. Luhmann's extension adds a second level: the autopoiesis of communication systems composed of communications that are themselves observed (by observers who are themselves communication participants). The recursive depth increases by one — and `observe_self` becomes more theoretically adequate, because the system observing itself IS a communication about the system, which is itself a component of the system.
+
+This sketch requires approximately 200 additional lines of Sounio: a `communication.sio` module (~100 lines) and extensions to `second_order.sio` for the subsystem-level bridges (~100 lines). The existing `autopoiesis.sio`, `distinction.sio`, and `coupling.sio` modules would be reused without modification.
+
+---
+
+## Appendix B: Future-Work Milestone — Eigenform of Viability
+
+The most important open problem identified in this paper (Section 7.3) is achieving *recursive self-application*: the system computing the eigenform of its own viability function.
+
+**The concrete target:** Define a function `viability_step: fn(f64) -> f64` that takes a scalar representation of the CyberneticState (e.g., a weighted sum of its fields), runs one iteration of the composition loop (observe → eigenform → distinction → autopoiesis → variety → coupling → conversation → learning → languaging), and returns the updated scalar. Then call `find_eigenform(viability_step, initial_state_scalar, tolerance, max_iter)`.
+
+If this converges, the system has found a *stable self-description* — a state that, when observed and processed through all nine theories, reproduces itself. This IS the eigenform of the cybernetic loop. If it diverges, the system cannot sustain self-observation — the drift from recursive observation exceeds the system's capacity to compensate.
+
+**Technical requirements:**
+1. Compress `CyberneticState` (11 fields) into a single `f64` via a reversible encoding (e.g., weighted sum with known coefficients, decodable via modular arithmetic on the integer part and fraction part)
+2. Implement `viability_step` as a named function (Sounio supports first-class function references but not closures over state — the state must be passed through the scalar encoding)
+3. Pass `viability_step` to `find_eigenform` and observe convergence
+
+The estimated implementation effort is ~150 lines. Success would demonstrate that second-order cybernetics is not merely *about* self-reference — it *is* self-reference, computed and verified.
