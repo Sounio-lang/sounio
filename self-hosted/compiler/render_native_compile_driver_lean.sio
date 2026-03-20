@@ -161,10 +161,294 @@ fn f64_bits(v: f64) -> i64 with Mut, Panic, Div {
     (sign << 63) | (exp << 52) | mant
 }
 
+// Scalar-only lex_to_parser for boot4 native compilation.
+// Reads LEAN_SOURCE[0..source_len], tokenizes, populates PARSER_TOKENS via parser_set_token_at.
+// Avoids LexerState and complex structs that trigger boot4 IS_SPTR=4 codegen bugs.
+
+fn ltp_is_alpha(c: i64) -> bool { (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || c == 95 }
+fn ltp_is_digit(c: i64) -> bool { c >= 48 && c <= 57 }
+fn ltp_is_alnum(c: i64) -> bool { ltp_is_alpha(c) || ltp_is_digit(c) }
+fn ltp_is_ws(c: i64) -> bool { c == 32 || c == 9 || c == 13 }
+
+fn ltp_emit(idx: i64, kind: i64, start: i64, end: i64, line: i64, col: i64) with Mut, Panic {
+    let tok = Token::with_kind(kind, start, end, line, col)
+    parser_set_token_at(idx, tok)
+}
+
+// Match keyword from LEAN_SOURCE[start..end] and return TokenKind discriminant.
+// Returns 120 (Ident) if not a keyword.
+fn ltp_keyword(start: i64, len: i64) -> i64 with Mut, Panic {
+    if len == 2 {
+        let a = LEAN_SOURCE[start as usize] as i64; let b = LEAN_SOURCE[(start + 1) as usize] as i64
+        if a == 102 && b == 110 { return 7 }        // fn
+        if a == 105 && b == 102 { return 17 }       // if
+        if a == 105 && b == 110 { return 26 }       // in
+        if a == 97 && b == 115 { return 27 }        // as
+        if a == 105 && b == 115 { return 34 }       // is
+    }
+    if len == 3 {
+        let a = LEAN_SOURCE[start as usize] as i64; let b = LEAN_SOURCE[(start + 1) as usize] as i64
+        let c = LEAN_SOURCE[(start + 2) as usize] as i64
+        if a == 108 && b == 101 && c == 116 { return 8 }     // let
+        if a == 118 && b == 97 && c == 114 { return 9 }      // var
+        if a == 109 && b == 117 && c == 116 { return 10 }    // mut
+        if a == 117 && b == 115 && c == 101 { return 5 }     // use
+        if a == 112 && b == 117 && c == 98 { return 29 }     // pub
+        if a == 102 && b == 111 && c == 114 { return 20 }    // for
+        if a == 114 && b == 101 && c == 102 { return 50 }    // ref
+        if a == 100 && b == 121 && c == 110 { return 51 }    // dyn
+        if a == 66 && b == 111 && c == 120 { return 52 }     // Box
+    }
+    if len == 4 {
+        let a = LEAN_SOURCE[start as usize] as i64; let b = LEAN_SOURCE[(start + 1) as usize] as i64
+        let c = LEAN_SOURCE[(start + 2) as usize] as i64; let d = LEAN_SOURCE[(start + 3) as usize] as i64
+        if a == 116 && b == 114 && c == 117 && d == 101 { return 32 }     // true
+        if a == 119 && b == 105 && c == 116 && d == 104 { return 42 }     // with
+        if a == 101 && b == 108 && c == 115 && d == 101 { return 18 }     // else
+        if a == 101 && b == 110 && c == 117 && d == 109 { return 14 }     // enum
+        if a == 105 && b == 109 && c == 112 && d == 108 { return 16 }     // impl
+        if a == 108 && b == 111 && c == 111 && d == 112 { return 22 }     // loop
+        if a == 116 && b == 121 && c == 112 && d == 101 { return 12 }     // type
+        if a == 115 && b == 101 && c == 108 && d == 102 { return 30 }     // self
+        if a == 83 && b == 101 && c == 108 && d == 102 { return 31 }      // Self
+        if a == 100 && b == 114 && c == 111 && d == 112 { return 49 }     // drop
+        if a == 99 && b == 111 && c == 112 && d == 121 { return 48 }      // copy
+        if a == 109 && b == 111 && c == 118 && d == 101 { return 47 }     // move
+        if a == 78 && b == 111 && c == 110 && d == 101 { return 120 }     // None (as Ident, handled by match)
+        if a == 83 && b == 111 && c == 109 && d == 101 { return 120 }     // Some (as Ident, handled by match)
+    }
+    if len == 5 {
+        let a = LEAN_SOURCE[start as usize] as i64; let b = LEAN_SOURCE[(start + 1) as usize] as i64
+        let c = LEAN_SOURCE[(start + 2) as usize] as i64; let d = LEAN_SOURCE[(start + 3) as usize] as i64
+        let e = LEAN_SOURCE[(start + 4) as usize] as i64
+        if a == 102 && b == 97 && c == 108 && d == 115 && e == 101 { return 33 }  // false
+        if a == 119 && b == 104 && c == 105 && d == 108 && e == 101 { return 21 }  // while
+        if a == 98 && b == 114 && c == 101 && d == 97 && e == 107 { return 23 }   // break
+        if a == 109 && b == 97 && c == 116 && d == 99 && e == 104 { return 19 }   // match
+        if a == 116 && b == 114 && c == 97 && d == 105 && e == 116 { return 15 }  // trait
+        if a == 99 && b == 111 && c == 110 && d == 115 && e == 116 { return 11 }  // const
+        if a == 119 && b == 104 && c == 101 && d == 114 && e == 101 { return 28 } // where
+    }
+    if len == 6 {
+        let a = LEAN_SOURCE[start as usize] as i64; let b = LEAN_SOURCE[(start + 1) as usize] as i64
+        let c = LEAN_SOURCE[(start + 2) as usize] as i64; let d = LEAN_SOURCE[(start + 3) as usize] as i64
+        let e = LEAN_SOURCE[(start + 4) as usize] as i64; let f = LEAN_SOURCE[(start + 5) as usize] as i64
+        if a == 114 && b == 101 && c == 116 && d == 117 && e == 114 && f == 110 { return 25 }  // return
+        if a == 115 && b == 116 && c == 114 && d == 117 && e == 99 && f == 116 { return 13 }   // struct
+        if a == 109 && b == 111 && c == 100 && d == 117 && e == 108 && f == 101 { return 3 }   // module
+        if a == 108 && b == 105 && c == 110 && d == 101 && e == 97 && f == 114 { return 45 }   // linear
+        if a == 97 && b == 102 && c == 102 && d == 105 && e == 110 && f == 101 { return 46 }   // affine
+        if a == 101 && b == 120 && c == 116 && d == 101 && e == 114 && f == 110 { return 36 }  // extern
+        if a == 115 && b == 116 && c == 97 && d == 116 && e == 105 && f == 99 { return 37 }    // static
+        if a == 117 && b == 110 && c == 115 && d == 97 && e == 102 && f == 101 { return 35 }   // unsafe
+    }
+    if len == 8 {
+        let a = LEAN_SOURCE[start as usize] as i64; let b = LEAN_SOURCE[(start + 1) as usize] as i64
+        if a == 99 && b == 111 {  // continue
+            let c = LEAN_SOURCE[(start + 2) as usize] as i64
+            if c == 110 { return 24 }
+        }
+    }
+    120  // Ident
+}
+
+fn lex_to_parser(source_len: i64, file_id: i64) -> i64 with Mut, Div, Panic {
+    var pos: i64 = 0
+    var line: i64 = 1
+    var col: i64 = 1
+    var tc: i64 = 0  // token count
+
+    while pos < source_len {
+        let ch = LEAN_SOURCE[pos as usize] as i64
+
+        // Skip whitespace (not newline)
+        if ltp_is_ws(ch) { pos = pos + 1; col = col + 1; continue }
+
+        // Newline
+        if ch == 10 { pos = pos + 1; line = line + 1; col = 1; continue }
+
+        // Line comment: //
+        if ch == 47 && pos + 1 < source_len && (LEAN_SOURCE[(pos + 1) as usize] as i64) == 47 {
+            while pos < source_len && (LEAN_SOURCE[pos as usize] as i64) != 10 { pos = pos + 1 }
+            continue
+        }
+
+        // Block comment: /* ... */
+        if ch == 47 && pos + 1 < source_len && (LEAN_SOURCE[(pos + 1) as usize] as i64) == 42 {
+            pos = pos + 2; col = col + 2
+            var depth: i64 = 1
+            while pos < source_len && depth > 0 {
+                let cc = LEAN_SOURCE[pos as usize] as i64
+                if cc == 47 && pos + 1 < source_len && (LEAN_SOURCE[(pos + 1) as usize] as i64) == 42 {
+                    depth = depth + 1; pos = pos + 2; col = col + 2
+                } else if cc == 42 && pos + 1 < source_len && (LEAN_SOURCE[(pos + 1) as usize] as i64) == 47 {
+                    depth = depth - 1; pos = pos + 2; col = col + 2
+                } else {
+                    if cc == 10 { line = line + 1; col = 1 } else { col = col + 1 }
+                    pos = pos + 1
+                }
+            }
+            continue
+        }
+
+        // Identifier or keyword
+        if ltp_is_alpha(ch) {
+            let start = pos
+            let start_col = col
+            while pos < source_len && ltp_is_alnum(LEAN_SOURCE[pos as usize] as i64) { pos = pos + 1; col = col + 1 }
+            let len = pos - start
+            let kind = ltp_keyword(start, len)
+            // For identifiers, also set text in token
+            var tok = Token::with_kind(kind, start, pos, line, start_col)
+            if kind == 120 {
+                // Copy identifier text
+                var ti: i64 = 0
+                while ti < len && ti < 256 { tok.text[ti as usize] = LEAN_SOURCE[(start + ti) as usize]; ti = ti + 1 }
+                tok.text_len = len
+            }
+            parser_set_token_at(tc, tok)
+            tc = tc + 1
+            continue
+        }
+
+        // Integer literal
+        if ltp_is_digit(ch) {
+            let start = pos
+            let start_col = col
+            var kind: i64 = 121  // IntLit
+            // Check hex/bin/oct prefix
+            if ch == 48 && pos + 1 < source_len {
+                let next = LEAN_SOURCE[(pos + 1) as usize] as i64
+                if next == 120 || next == 88 { kind = 126; pos = pos + 2; col = col + 2 }  // HexLit
+                else if next == 98 || next == 66 { kind = 127; pos = pos + 2; col = col + 2 }  // BinLit
+                else if next == 111 || next == 79 { kind = 128; pos = pos + 2; col = col + 2 }  // OctLit
+            }
+            while pos < source_len && (ltp_is_alnum(LEAN_SOURCE[pos as usize] as i64) || (LEAN_SOURCE[pos as usize] as i64) == 46 || (LEAN_SOURCE[pos as usize] as i64) == 95) {
+                if (LEAN_SOURCE[pos as usize] as i64) == 46 { kind = 122 }  // FloatLit
+                pos = pos + 1; col = col + 1
+            }
+            var tok = Token::with_kind(kind, start, pos, line, start_col)
+            // Copy text and parse integer value
+            var ti: i64 = 0
+            var val: i64 = 0
+            while ti < pos - start && ti < 256 {
+                tok.text[ti as usize] = LEAN_SOURCE[(start + ti) as usize]
+                let d = LEAN_SOURCE[(start + ti) as usize] as i64
+                if d >= 48 && d <= 57 && kind == 121 { val = val * 10 + (d - 48) }
+                ti = ti + 1
+            }
+            tok.text_len = pos - start
+            tok.int_value = val
+            parser_set_token_at(tc, tok)
+            tc = tc + 1
+            continue
+        }
+
+        // String literal
+        if ch == 34 {
+            let start = pos
+            let start_col = col
+            pos = pos + 1; col = col + 1
+            var tok = Token::with_kind(123, start, start, line, start_col)  // StringLit
+            var si: i64 = 0
+            while pos < source_len && (LEAN_SOURCE[pos as usize] as i64) != 34 {
+                let sc = LEAN_SOURCE[pos as usize] as i64
+                if sc == 92 && pos + 1 < source_len {
+                    let esc = LEAN_SOURCE[(pos + 1) as usize] as i64
+                    if esc == 110 { if si < 256 { tok.text[si as usize] = 10 as i8; si = si + 1 } }
+                    else if esc == 116 { if si < 256 { tok.text[si as usize] = 9 as i8; si = si + 1 } }
+                    else if esc == 92 { if si < 256 { tok.text[si as usize] = 92 as i8; si = si + 1 } }
+                    else if esc == 34 { if si < 256 { tok.text[si as usize] = 34 as i8; si = si + 1 } }
+                    else if esc == 48 { if si < 256 { tok.text[si as usize] = 0 as i8; si = si + 1 } }
+                    else { if si < 256 { tok.text[si as usize] = esc as i8; si = si + 1 } }
+                    pos = pos + 2; col = col + 2
+                } else {
+                    if si < 256 { tok.text[si as usize] = sc as i8; si = si + 1 }
+                    if sc == 10 { line = line + 1; col = 1 } else { col = col + 1 }
+                    pos = pos + 1
+                }
+            }
+            if pos < source_len { pos = pos + 1; col = col + 1 }  // skip closing "
+            tok.end = pos
+            tok.text_len = si
+            parser_set_token_at(tc, tok)
+            tc = tc + 1
+            continue
+        }
+
+        // Two-char operators
+        if pos + 1 < source_len {
+            let next = LEAN_SOURCE[(pos + 1) as usize] as i64
+            var two_kind: i64 = -1
+            if ch == 45 && next == 62 { two_kind = 155 }      // ->
+            else if ch == 61 && next == 62 { two_kind = 156 }  // =>
+            else if ch == 61 && next == 61 { two_kind = 143 }  // ==
+            else if ch == 33 && next == 61 { two_kind = 144 }  // !=
+            else if ch == 60 && next == 61 { two_kind = 145 }  // <=
+            else if ch == 62 && next == 61 { two_kind = 146 }  // >=
+            else if ch == 38 && next == 38 { two_kind = 147 }  // &&
+            else if ch == 124 && next == 124 { two_kind = 148 } // ||
+            else if ch == 60 && next == 60 { two_kind = 149 }  // <<
+            else if ch == 62 && next == 62 { two_kind = 150 }  // >>
+            else if ch == 58 && next == 58 { two_kind = 159 }  // ::
+            else if ch == 38 && next == 33 { two_kind = 160 }  // &!
+            else if ch == 43 && next == 43 { two_kind = 161 }  // ++
+            else if ch == 46 && next == 46 { two_kind = 157 }  // ..
+            if two_kind >= 0 {
+                ltp_emit(tc, two_kind, pos, pos + 2, line, col)
+                tc = tc + 1; pos = pos + 2; col = col + 2; continue
+            }
+        }
+
+        // Single-char tokens
+        var one_kind: i64 = -1
+        if ch == 40 { one_kind = 171 }       // (
+        else if ch == 41 { one_kind = 172 }   // )
+        else if ch == 123 { one_kind = 173 }  // {
+        else if ch == 125 { one_kind = 174 }  // }
+        else if ch == 91 { one_kind = 175 }   // [
+        else if ch == 93 { one_kind = 176 }   // ]
+        else if ch == 59 { one_kind = 177 }   // ;
+        else if ch == 58 { one_kind = 178 }   // :
+        else if ch == 44 { one_kind = 179 }   // ,
+        else if ch == 46 { one_kind = 180 }   // .
+        else if ch == 43 { one_kind = 129 }   // +
+        else if ch == 45 { one_kind = 130 }   // -
+        else if ch == 42 { one_kind = 131 }   // *
+        else if ch == 47 { one_kind = 132 }   // /
+        else if ch == 37 { one_kind = 133 }   // %
+        else if ch == 61 { one_kind = 134 }   // =
+        else if ch == 60 { one_kind = 135 }   // <
+        else if ch == 62 { one_kind = 136 }   // >
+        else if ch == 33 { one_kind = 137 }   // !
+        else if ch == 38 { one_kind = 138 }   // &
+        else if ch == 124 { one_kind = 139 }  // |
+        else if ch == 94 { one_kind = 140 }   // ^
+        else if ch == 126 { one_kind = 141 }  // ~
+        else if ch == 63 { one_kind = 142 }   // ?
+        else if ch == 64 { one_kind = 181 }   // @
+        else if ch == 35 { one_kind = 182 }   // #
+        else if ch == 95 { one_kind = 183 }   // _ (but also valid ident start)
+        if one_kind >= 0 {
+            ltp_emit(tc, one_kind, pos, pos + 1, line, col)
+            tc = tc + 1; pos = pos + 1; col = col + 1; continue
+        }
+
+        // Unknown character: skip
+        pos = pos + 1; col = col + 1
+    }
+
+    // Emit EOF token
+    ltp_emit(tc, 0, pos, pos, line, col)
+    tc = tc + 1
+
+    tc
+}
+
 fn load_source_file(path: string) -> Program with IO, Mut, Div, Panic, Alloc {
-    // LTP_SOURCE already populated by scan_source_globals (avoids 1MB stack copy)
+    // LEAN_SOURCE already populated by scan_source_globals (avoids 1MB stack copy)
     print("lex: start\n")
-    let token_count = lex_to_parser(LTP_N, 0)
+    let token_count = lex_to_parser(LEAN_SOURCE_LEN, 0)
     print("lex: tokens=")
     print_int(token_count)
     print("\n")
@@ -1366,13 +1650,13 @@ fn scan_source_globals(path: string) with IO, Mut, Panic, Div {
     GLOBAL_TOTAL_SIZE = 0
     let raw = read_file(path)
     let src_size = file_size(path)
-    // Copy source into LTP_SOURCE for lex_to_parser (same raw data, avoids second read_file)
+    // Copy source into LEAN_SOURCE for lex_to_parser (same raw data, avoids second read_file)
     var csi: i64 = 0
     while csi < src_size {
-        LTP_SOURCE[csi as usize] = raw[csi as usize]
+        LEAN_SOURCE[csi as usize] = raw[csi as usize]
         csi = csi + 1
     }
-    LTP_N = src_size
+    LEAN_SOURCE_LEN = src_size
     var pos: i64 = 0
     while pos < src_size - 4 {
         // Check for line starting with "var " (v=118, a=97, r=114, space=32)
@@ -4278,7 +4562,7 @@ fn main() -> i64 with IO, Mut, Panic, Div, Alloc {
 
     // Scan source for global variable declarations before parsing
     scan_source_globals(source_path)
-    // LTP_SOURCE + LTP_N already populated by scan_source_globals
+    // LEAN_SOURCE + LEAN_SOURCE_LEN already populated by scan_source_globals
     print("render_compile: globals=")
     print_int(GLOBAL_COUNT)
     print(" total_bytes=")

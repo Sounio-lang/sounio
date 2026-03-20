@@ -125,6 +125,23 @@ var LAST_FIELD_TYPE_SI: i64 = -1
 var LAST_FIELD_SLOT_COUNT: i64 = 1  // slot count of last found field (1=scalar, >1=sub-struct)
 var LAST_FIELD_LAYOUT: i64 = 0  // 0=stack(negative offsets), 1=BSS/heap(positive offsets)
 
+// Enum variant tables for resolving EnumName::Variant → discriminant integer
+var EN_NAME_OFF: [i64; 256] = [0; 256]     // enum name pool offset
+var EN_NAME_LEN: [i64; 256] = [0; 256]     // enum name pool length
+var EN_VAR_BASE: [i64; 256] = [0; 256]     // first variant index in EV_ arrays
+var EN_VAR_COUNT: [i64; 256] = [0; 256]    // number of variants
+var EN_COUNT: i64 = 0
+
+var EV_NAME_OFF: [i64; 4096] = [0; 4096]   // variant name pool offset
+var EV_NAME_LEN: [i64; 4096] = [0; 4096]   // variant name pool length
+var EV_DISC: [i64; 4096] = [0; 4096]       // discriminant value
+var EV_COUNT: i64 = 0
+
+// Qualified name lookup: "EnumName::Variant" → discriminant
+// Returns -1 if not found, else discriminant value (which may be 0!)
+// Uses a separate found flag in EV_LOOKUP_FOUND.
+var EV_LOOKUP_FOUND: i64 = 0
+
 var ELF: [i8; 4194304] = [0; 4194304]
 var ELF_LEN: i64 = 0
 
@@ -1679,10 +1696,56 @@ fn parse_program() with Mut, Panic, Div {
         } else if k == 58 {
             parse_struct_decl()
         } else if k == 59 {
-            // enum: skip entire declaration
-            advance()
-            if cur_kind() == 1 { advance() }
-            skip_braces()
+            // enum: parse variant names and assign discriminants
+            advance()  // skip 'enum' keyword
+            if cur_kind() == 1 {
+                let ename_off = tok_pool_off()
+                let ename_len = tok_ident_len()
+                let eidx = EN_COUNT
+                EN_NAME_OFF[eidx as usize] = ename_off
+                EN_NAME_LEN[eidx as usize] = ename_len
+                EN_VAR_BASE[eidx as usize] = EV_COUNT
+                advance()  // skip enum name
+                if cur_kind() == 33 {  // '{'
+                    advance()
+                    var disc: i64 = 0
+                    while cur_kind() != 34 && cur_kind() != 0 {
+                        if cur_kind() == 1 {
+                            let voff = tok_pool_off()
+                            let vlen = tok_ident_len()
+                            if EV_COUNT < 4096 {
+                                EV_NAME_OFF[EV_COUNT as usize] = voff
+                                EV_NAME_LEN[EV_COUNT as usize] = vlen
+                                EV_DISC[EV_COUNT as usize] = disc
+                                EV_COUNT = EV_COUNT + 1
+                                disc = disc + 1
+                            }
+                            advance()
+                        } else if cur_kind() == 37 {
+                            advance()  // skip comma
+                        } else if cur_kind() == 31 {
+                            // Variant with data: e.g. Some(T) — skip parens
+                            advance()
+                            var pdepth: i64 = 1
+                            while pdepth > 0 && cur_kind() != 0 {
+                                if cur_kind() == 31 { pdepth = pdepth + 1 }
+                                else if cur_kind() == 32 { pdepth = pdepth - 1 }
+                                if pdepth > 0 { advance() }
+                            }
+                            if cur_kind() == 32 { advance() }
+                        } else {
+                            advance()  // skip comments, etc.
+                        }
+                    }
+                    EN_VAR_COUNT[eidx as usize] = disc
+                    EN_COUNT = EN_COUNT + 1
+                    if cur_kind() == 34 { advance() }  // skip '}'
+                } else {
+                    skip_braces()
+                }
+            } else {
+                skip_braces()
+            }
         } else if k == 60 {
             // impl: collect fn definitions inside
             advance()
@@ -1925,6 +1988,68 @@ fn find_fn_by_name(off: i64, len: i64) -> i64 with Mut, Panic, Div {
     -1
 }
 
+// Look up enum variant by qualified name "EnumName::Variant" in pool at (off, len).
+// Sets EV_LOOKUP_FOUND=1 and returns discriminant if found, else sets EV_LOOKUP_FOUND=0 and returns 0.
+fn find_enum_variant(off: i64, len: i64) -> i64 with Mut, Panic, Div {
+    EV_LOOKUP_FOUND = 0
+    // Find "::" separator in the qualified name
+    var sep: i64 = -1
+    var si: i64 = 0
+    while si < len - 1 {
+        if POOL[(off + si) as usize] == 58 && POOL[(off + si + 1) as usize] == 58 {
+            sep = si
+            break
+        }
+        si = si + 1
+    }
+    if sep < 0 { return 0 }
+    // enum_name = pool[off..off+sep], variant_name = pool[off+sep+2..off+len]
+    let en_off = off
+    let en_len = sep
+    let vn_off = off + sep + 2
+    let vn_len = len - sep - 2
+    if en_len <= 0 || vn_len <= 0 { return 0 }
+    // Find enum by name
+    var ei: i64 = 0
+    while ei < EN_COUNT {
+        let eo = EN_NAME_OFF[ei as usize]
+        let el = EN_NAME_LEN[ei as usize]
+        if el == en_len {
+            var ok: i64 = 1
+            var j: i64 = 0
+            while j < en_len {
+                if POOL[(eo + j) as usize] != POOL[(en_off + j) as usize] { ok = 0; break }
+                j = j + 1
+            }
+            if ok == 1 {
+                // Found enum; search variants
+                let base = EN_VAR_BASE[ei as usize]
+                let count = EN_VAR_COUNT[ei as usize]
+                var vi: i64 = 0
+                while vi < count {
+                    let vo = EV_NAME_OFF[(base + vi) as usize]
+                    let vl = EV_NAME_LEN[(base + vi) as usize]
+                    if vl == vn_len {
+                        var ok2: i64 = 1
+                        var k: i64 = 0
+                        while k < vn_len {
+                            if POOL[(vo + k) as usize] != POOL[(vn_off + k) as usize] { ok2 = 0; break }
+                            k = k + 1
+                        }
+                        if ok2 == 1 {
+                            EV_LOOKUP_FOUND = 1
+                            return EV_DISC[(base + vi) as usize]
+                        }
+                    }
+                    vi = vi + 1
+                }
+            }
+        }
+        ei = ei + 1
+    }
+    0
+}
+
 // ============================================================================
 // Global variable collection
 // ============================================================================
@@ -2110,7 +2235,13 @@ fn compile_node(node: i64) -> i64 with Mut, Panic, Div {
                     FN_LEA_FIX_TARGET[FN_LEA_FIX_COUNT as usize] = fn_idx
                     FN_LEA_FIX_COUNT = FN_LEA_FIX_COUNT + 1
                 } else {
-                    emit_mov_rax_imm(0)
+                    // Check if this is an enum variant (e.g. TokenKind::Eof)
+                    let ev_disc = find_enum_variant(voff, vlen)
+                    if EV_LOOKUP_FOUND == 1 {
+                        emit_mov_rax_imm(ev_disc)
+                    } else {
+                        emit_mov_rax_imm(0)
+                    }
                 }
             }
         }
@@ -4313,6 +4444,11 @@ fn main() -> i64 with IO, Mut, Panic, Div {
     print("parsing...\n")
     pre_scan_structs()
     parse_program()
+    print("enums=")
+    print_int(EN_COUNT)
+    print(" variants=")
+    print_int(EV_COUNT)
+    print("\n")
     print("fns=")
     print_int(FN_COUNT)
     print(" structs=")
