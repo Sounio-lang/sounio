@@ -2633,7 +2633,100 @@ fn hlir_kernels_to_dag_scheduled_ptx(module: HlirModule) -> PtxBuf with Mut, Pan
 }
 
 // ============================================================================
-// Section 30 — Source-level GPU builtin lowering
+// Section 30 — Host Glue Emission (IREE-inspired metadata descriptor)
+// ============================================================================
+//
+// DAG + speculative host glue emitters generate structured .sio launch wrappers
+// that reference SOUNIO_DAG / SOUNIO_SPEC metadata comments in the emitted PTX.
+// Inspired by IREE's FlatBuffer kernel descriptor pattern (OSDI '25):
+// compiler emits structured metadata, runtime acts as descriptor interpreter.
+//
+// The generated _dag_host.sio / _spec_host.sio files are standalone modules
+// that import gpu::runtime::cuda and gpu::runtime::launch, then provide
+// a single entry function (gpu_dag_run / gpu_spec_run) for host-side dispatch.
+
+// Emit DAG host glue file with multi-stream launch metadata.
+// Builds a PtxBuf containing the .sio host wrapper source, then writes it.
+fn gpu_emit_dag_host_glue(ptx: PtxBuf, output_path: string) -> bool with IO, Mut, Panic, Div, Alloc {
+    let host_path = output_path ++ "_dag_host.sio"
+
+    var glue = ptx_buf_new()
+    glue = ptx_push_str(glue, "// Generated DAG-scheduled host glue — multi-stream kernel dispatch\n")
+    glue = ptx_push_str(glue, "// Source: Sounio provenance-aware DAG scheduler\n")
+    glue = ptx_push_str(glue, "// Pattern: IREE-inspired metadata descriptor (OSDI '25)\n")
+    glue = ptx_push_str(glue, "//\n")
+    glue = ptx_push_str(glue, "// Metadata protocol (embedded in PTX comments):\n")
+    glue = ptx_push_str(glue, "//   // SOUNIO_DAG stream_count=N\n")
+    glue = ptx_push_str(glue, "//   // SOUNIO_STREAM kernel=K stream=S\n")
+    glue = ptx_push_str(glue, "//   // SOUNIO_DEP from=A to=B\n")
+    glue = ptx_push_str(glue, "\n")
+    glue = ptx_push_str(glue, "use gpu::runtime::cuda::*\n")
+    glue = ptx_push_str(glue, "use gpu::runtime::launch::{gpu_launch_ptx_map, GpuLaunchConfig, GpuLaunchResult}\n")
+    glue = ptx_push_str(glue, "\n")
+    glue = ptx_push_str(glue, "// Multi-stream DAG dispatch.\n")
+    glue = ptx_push_str(glue, "// Reads SOUNIO_DAG metadata from the PTX file to determine:\n")
+    glue = ptx_push_str(glue, "//   1. Number of CUDA streams to create\n")
+    glue = ptx_push_str(glue, "//   2. Per-kernel stream assignments\n")
+    glue = ptx_push_str(glue, "//   3. Dependency edges → stream synchronization points\n")
+    glue = ptx_push_str(glue, "fn gpu_dag_run(\n")
+    glue = ptx_push_str(glue, "    n: i64,\n")
+    glue = ptx_push_str(glue, "    buf_in: *const f32,\n")
+    glue = ptx_push_str(glue, "    buf_out: *const f32\n")
+    glue = ptx_push_str(glue, ") -> GpuLaunchResult with IO, Mut, Panic, Div, Alloc {\n")
+    glue = ptx_push_str(glue, "    // Stream lifecycle:\n")
+    glue = ptx_push_str(glue, "    //   let (s0, _) = cuda_stream_create(CU_STREAM_DEFAULT)\n")
+    glue = ptx_push_str(glue, "    //   let (s1, _) = cuda_stream_create(CU_STREAM_DEFAULT)\n")
+    glue = ptx_push_str(glue, "    //   ...\n")
+    glue = ptx_push_str(glue, "    // Per-kernel dispatch:\n")
+    glue = ptx_push_str(glue, "    //   let cfg_K = GpuLaunchConfig { block_dim: 256, shared_mem_bytes: 0, stream_handle: s_K }\n")
+    glue = ptx_push_str(glue, "    //   let r_K = gpu_launch_ptx_map(ptx, \"kernel_K\", n, buf_in, buf_out, cfg_K)\n")
+    glue = ptx_push_str(glue, "    // Dependency sync:\n")
+    glue = ptx_push_str(glue, "    //   cuda_stream_synchronize(s_I)  // before kernel J where DEP from=I to=J\n")
+    glue = ptx_push_str(glue, "    gpu_launch_result_err(501)  // Placeholder: parse SOUNIO_DAG metadata for runtime dispatch\n")
+    glue = ptx_push_str(glue, "}\n")
+
+    let ok = io_write_bytes_to_file(host_path, glue.data, glue.len)
+    ok
+}
+
+// Emit speculative host glue file with epsilon-threshold skip guards.
+fn gpu_emit_spec_host_glue(ptx: PtxBuf, output_path: string) -> bool with IO, Mut, Panic, Div, Alloc {
+    let host_path = output_path ++ "_spec_host.sio"
+
+    var glue = ptx_buf_new()
+    glue = ptx_push_str(glue, "// Generated speculative host glue — uncertainty-threshold skip guards\n")
+    glue = ptx_push_str(glue, "// Source: Sounio speculative epistemic execution engine\n")
+    glue = ptx_push_str(glue, "//\n")
+    glue = ptx_push_str(glue, "// Metadata protocol (embedded in PTX comments):\n")
+    glue = ptx_push_str(glue, "//   // SOUNIO_SPEC_PLAN coarse=C refinement=R threshold=T\n")
+    glue = ptx_push_str(glue, "//   // SOUNIO_SPEC_GUARD kernel=K\n")
+    glue = ptx_push_str(glue, "\n")
+    glue = ptx_push_str(glue, "use gpu::runtime::cuda::*\n")
+    glue = ptx_push_str(glue, "use gpu::runtime::launch::{gpu_launch_ptx_map, GpuLaunchConfig, GpuLaunchResult}\n")
+    glue = ptx_push_str(glue, "\n")
+    glue = ptx_push_str(glue, "// Speculative dispatch: skip refinement kernels when uncertainty is below threshold.\n")
+    glue = ptx_push_str(glue, "fn gpu_spec_run(\n")
+    glue = ptx_push_str(glue, "    n: i64,\n")
+    glue = ptx_push_str(glue, "    epsilon: f64,\n")
+    glue = ptx_push_str(glue, "    buf_in: *const f32,\n")
+    glue = ptx_push_str(glue, "    buf_out: *const f32\n")
+    glue = ptx_push_str(glue, ") -> GpuLaunchResult with IO, Mut, Panic, Div, Alloc {\n")
+    glue = ptx_push_str(glue, "    // Coarse kernels: always execute\n")
+    glue = ptx_push_str(glue, "    //   let r_coarse = gpu_launch_ptx_map(ptx, \"kernel_coarse\", n, ...)\n")
+    glue = ptx_push_str(glue, "    //\n")
+    glue = ptx_push_str(glue, "    // Refinement kernels: conditional on epsilon threshold\n")
+    glue = ptx_push_str(glue, "    //   if epsilon > 1.0e-6 {\n")
+    glue = ptx_push_str(glue, "    //     let r_ref = gpu_launch_ptx_map(ptx, \"kernel_refine\", n, ...)\n")
+    glue = ptx_push_str(glue, "    //   }\n")
+    glue = ptx_push_str(glue, "    gpu_launch_result_err(502)  // Placeholder: parse SOUNIO_SPEC metadata for runtime dispatch\n")
+    glue = ptx_push_str(glue, "}\n")
+
+    let ok = io_write_bytes_to_file(host_path, glue.data, glue.len)
+    ok
+}
+
+// ============================================================================
+// Section 31 — Source-level GPU builtin lowering
 // ============================================================================
 //
 // Maps source-level GPU builtin tags to GpuOp emissions in a GpuKernelIr.
