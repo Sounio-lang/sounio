@@ -1199,6 +1199,168 @@ static void emit_print_int_builtin(void) {
 }
 
 /* ================================================================
+ * EMIT PRINT_F64 BUILTIN
+ * ================================================================ */
+static void emit_print_f64_builtin(void) {
+    /*
+     * print_f64(x: f64) — outputs sign + integer + '.' + 6 fractional digits + '\n'
+     * f64 arrives as bit pattern in rdi (Sounio passes f64 as i64).
+     * Uses: movq xmm0, rdi to recover f64; cvttsd2si for integer extraction;
+     *       multiply fractional by 1e6 for 6-digit itoa. No libc, bare sys_write.
+     * Proven working: 1.5→"1.500000", sqrt(2)→"1.414213" (native ELF gate).
+     */
+    static const uint8_t pf_code[] = {
+        /* prologue */
+        0x55, 0x48, 0x89, 0xe5,                         /* push rbp; mov rbp, rsp */
+        0x48, 0x83, 0xec, 0x50,                         /* sub rsp, 80 */
+        /* movq xmm0, rdi — recover f64 from integer register */
+        0x66, 0x48, 0x0f, 0x6e, 0xc7,
+        /* movq rax, xmm0 — get bits for sign check */
+        0x66, 0x48, 0x0f, 0x7e, 0xc0,
+        /* test rax, rax — check sign bit */
+        0x48, 0x85, 0xc0,
+        /* jns skip_neg (patched below) */
+        0x79, 0x00, /* placeholder */
+    };
+    for (size_t i = 0; i < sizeof(pf_code); i++) emit(pf_code[i]);
+    int jns_patch = g_code_len - 1; /* location of jns displacement byte */
+
+    /* Negative path: print '-', clear sign bit, reload xmm0 */
+    static const uint8_t neg_path[] = {
+        0xc6, 0x45, 0xff, 0x2d,                         /* mov byte [rbp-1], '-' */
+        0x48, 0x8d, 0x75, 0xff,                         /* lea rsi, [rbp-1] */
+        0xba, 0x01, 0x00, 0x00, 0x00,                   /* mov edx, 1 */
+        0xbf, 0x01, 0x00, 0x00, 0x00,                   /* mov edi, 1 */
+        0xb8, 0x01, 0x00, 0x00, 0x00,                   /* mov eax, 1 */
+        0x0f, 0x05,                                     /* syscall (write '-') */
+        /* and rax, 0x7FFFFFFFFFFFFFFF — clear sign bit */
+        0x48, 0x25, 0xff, 0xff, 0xff, 0xff,
+        0xff, 0xff, 0xff, 0x7f,
+        /* movq xmm0, rax — reload absolute value */
+        0x66, 0x48, 0x0f, 0x6e, 0xc0,
+    };
+    for (size_t i = 0; i < sizeof(neg_path); i++) emit(neg_path[i]);
+
+    /* Patch jns displacement */
+    g_code[jns_patch] = (uint8_t)(g_code_len - (jns_patch + 1));
+
+    /* Integer part: cvttsd2si rax, xmm0 */
+    emit(0xf2); emit(0x48); emit(0x0f); emit(0x2c); emit(0xc0);
+    /* Save xmm0 to [rbp-48] for fractional computation */
+    emit(0xf2); emit(0x0f); emit(0x11); emit(0x45); emit(0xd0);
+    /* Save integer part to [rbp-56] */
+    emit(0x48); emit(0x89); emit(0x45); emit(0xc8);
+
+    /* itoa loop (right-to-left into [rbp-19..rbp-10]) */
+    emit(0x4c); emit(0x8d); emit(0x55); emit(0xf7); /* lea r10, [rbp-9] */
+    emit(0x48); emit(0x85); emit(0xc0);             /* test rax, rax */
+    emit(0x75); emit(0x09);                          /* jnz digit_loop */
+    /* zero: dec r10; mov byte [r10], '0'; jmp do_write */
+    emit(0x49); emit(0xff); emit(0xca);
+    emit(0x41); emit(0xc6); emit(0x02); emit(0x30);
+    int jz_int = g_code_len;
+    emit(0xeb); emit(0x00);
+
+    int dl_int = g_code_len;
+    emit(0x31); emit(0xd2);                          /* xor edx, edx */
+    emit(0x48); emit(0xc7); emit(0xc1);             /* mov rcx, 10 */
+    emit(0x0a); emit(0x00); emit(0x00); emit(0x00);
+    emit(0x48); emit(0xf7); emit(0xf1);             /* div rcx */
+    emit(0x80); emit(0xc2); emit(0x30);             /* add dl, '0' */
+    emit(0x49); emit(0xff); emit(0xca);             /* dec r10 */
+    emit(0x41); emit(0x88); emit(0x12);             /* mov [r10], dl */
+    emit(0x48); emit(0x85); emit(0xc0);             /* test rax, rax */
+    { int8_t b = (int8_t)(dl_int - (g_code_len + 2));
+      emit(0x75); emit((uint8_t)b); }
+
+    g_code[jz_int + 1] = (uint8_t)(g_code_len - (jz_int + 2));
+
+    /* sys_write(1, r10, (rbp-9)-r10) */
+    emit(0x4c); emit(0x89); emit(0xd6);             /* mov rsi, r10 */
+    emit(0x48); emit(0x8d); emit(0x55); emit(0xf7); /* lea rdx, [rbp-9] */
+    emit(0x4c); emit(0x29); emit(0xd2);             /* sub rdx, r10 */
+    emit(0xbf); emit32(1); emit(0xb8); emit32(1);
+    emit(0x0f); emit(0x05);
+
+    /* Print decimal point */
+    emit(0xc6); emit(0x45); emit(0xfe); emit(0x2e);
+    emit(0x48); emit(0x8d); emit(0x75); emit(0xfe);
+    emit(0xba); emit32(1); emit(0xbf); emit32(1);
+    emit(0xb8); emit32(1); emit(0x0f); emit(0x05);
+
+    /* Restore for fractional part */
+    emit(0x48); emit(0x8b); emit(0x45); emit(0xc8);             /* mov rax, [rbp-56] */
+    emit(0xf2); emit(0x0f); emit(0x10); emit(0x45); emit(0xd0); /* movsd xmm0, [rbp-48] */
+    emit(0xf2); emit(0x48); emit(0x0f); emit(0x2a); emit(0xc8); /* cvtsi2sd xmm1, rax */
+    emit(0xf2); emit(0x0f); emit(0x5c); emit(0xc1);             /* subsd xmm0, xmm1 */
+    /* mov rax, 1e6 (IEEE 754 LE) */
+    emit(0x48); emit(0xb8);
+    emit(0x00); emit(0x00); emit(0x00); emit(0x00);
+    emit(0x80); emit(0x84); emit(0x2e); emit(0x41);
+    emit(0x66); emit(0x48); emit(0x0f); emit(0x6e); emit(0xd0); /* movq xmm2, rax */
+    emit(0xf2); emit(0x0f); emit(0x59); emit(0xc2);             /* mulsd xmm0, xmm2 */
+    emit(0xf2); emit(0x48); emit(0x0f); emit(0x2c); emit(0xc8); /* cvttsd2si rcx, xmm0 */
+
+    /* Extract 6 fractional digits from rcx via itoa (unrolled) */
+    static const uint8_t frac_digits[] = {
+        /* digit 0: rcx / 100000 */
+        0x48, 0x89, 0xc8,                               /* mov rax, rcx */
+        0x31, 0xd2,                                     /* xor edx, edx */
+        0xb9, 0xa0, 0x86, 0x01, 0x00,                   /* mov ecx, 100000 */
+        0x48, 0xf7, 0xf1,                               /* div rcx */
+        0x04, 0x30,                                     /* add al, '0' */
+        0x88, 0x45, 0xf7,                               /* mov [rbp-9], al */
+        /* digit 1: rdx / 10000 */
+        0x48, 0x89, 0xd0,                               /* mov rax, rdx */
+        0x31, 0xd2,
+        0xb9, 0x10, 0x27, 0x00, 0x00,                   /* mov ecx, 10000 */
+        0x48, 0xf7, 0xf1,
+        0x04, 0x30,
+        0x88, 0x45, 0xf8,                               /* mov [rbp-8], al */
+        /* digit 2: rdx / 1000 */
+        0x48, 0x89, 0xd0,
+        0x31, 0xd2,
+        0xb9, 0xe8, 0x03, 0x00, 0x00,                   /* mov ecx, 1000 */
+        0x48, 0xf7, 0xf1,
+        0x04, 0x30,
+        0x88, 0x45, 0xf9,                               /* mov [rbp-7], al */
+        /* digit 3: rdx / 100 */
+        0x48, 0x89, 0xd0,
+        0x31, 0xd2,
+        0xb9, 0x64, 0x00, 0x00, 0x00,                   /* mov ecx, 100 */
+        0x48, 0xf7, 0xf1,
+        0x04, 0x30,
+        0x88, 0x45, 0xfa,                               /* mov [rbp-6], al */
+        /* digit 4: rdx / 10 */
+        0x48, 0x89, 0xd0,
+        0x31, 0xd2,
+        0xb9, 0x0a, 0x00, 0x00, 0x00,                   /* mov ecx, 10 */
+        0x48, 0xf7, 0xf1,
+        0x04, 0x30,
+        0x88, 0x45, 0xfb,                               /* mov [rbp-5], al */
+        /* digit 5: rdx is last digit */
+        0x80, 0xc2, 0x30,                               /* add dl, '0' */
+        0x88, 0x55, 0xfc,                               /* mov [rbp-4], dl */
+        /* sys_write(1, [rbp-9], 6) */
+        0x48, 0x8d, 0x75, 0xf7,                         /* lea rsi, [rbp-9] */
+        0xba, 0x06, 0x00, 0x00, 0x00,                   /* mov edx, 6 */
+        0xbf, 0x01, 0x00, 0x00, 0x00,
+        0xb8, 0x01, 0x00, 0x00, 0x00,
+        0x0f, 0x05,
+        /* Print newline */
+        0xc6, 0x45, 0xfd, 0x0a,                         /* mov byte [rbp-3], '\n' */
+        0x48, 0x8d, 0x75, 0xfd,                         /* lea rsi, [rbp-3] */
+        0xba, 0x01, 0x00, 0x00, 0x00,
+        0xbf, 0x01, 0x00, 0x00, 0x00,
+        0xb8, 0x01, 0x00, 0x00, 0x00,
+        0x0f, 0x05,
+        /* epilogue */
+        0xc9, 0xc3,                                     /* leave; ret */
+    };
+    for (size_t i = 0; i < sizeof(frac_digits); i++) emit(frac_digits[i]);
+}
+
+/* ================================================================
  * EMIT INLINE STRING PRINT
  * ================================================================ */
 static void emit_inline_print(const char *str, int len) {
@@ -1975,6 +2137,10 @@ int main(int argc, char **argv) {
     g_fn_ret_type[g_fn_count] = 0;
     int print_int_idx = g_fn_count++;
 
+    g_fn_names[g_fn_count] = name_from("print_f64");
+    g_fn_ret_type[g_fn_count] = 0;
+    int print_f64_idx = g_fn_count++;
+
     g_fn_names[g_fn_count] = name_from("print");
     g_fn_ret_type[g_fn_count] = 0;
     int print_idx = g_fn_count++;
@@ -2201,8 +2367,14 @@ int main(int argc, char **argv) {
     fprintf(stderr, "stage0: builtin=print_int off=%d sz=%d\n",
             g_fn_offsets[print_int_idx], g_code_len - g_fn_offsets[print_int_idx]);
 
+    /* Emit print_f64 builtin */
+    g_fn_offsets[print_f64_idx] = g_code_len;
+    emit_print_f64_builtin();
+    fprintf(stderr, "stage0: builtin=print_f64 off=%d sz=%d\n",
+            g_fn_offsets[print_f64_idx], g_code_len - g_fn_offsets[print_f64_idx]);
+
     /* Compile user functions */
-    int fi = 10; /* skip all builtin slots (print_int, print, arg_count, get_arg, read_file, file_size, write_file, read_byte, str_len, str_char_at) */
+    int fi = 11; /* skip all builtin slots (print_int, print_f64, print, arg_count, get_arg, read_file, file_size, write_file, read_byte, str_len, str_char_at) */
     for (Item *it = program; it; it = it->next) {
         if (it->kind == ITEM_FN && it->fn && fi < MAX_FUNCS) {
             g_fn_offsets[fi] = g_code_len;
