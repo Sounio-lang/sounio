@@ -32,7 +32,11 @@ This paper fills that gap. We present a library of ten modules in the Sounio pro
 
 5. **Practitioner access.** A worked example models a therapy session as a Pask conversation with Bateson learning level interventions, demonstrating that the library is usable outside the theoretical community.
 
-### 1.2 Scope and limitations
+### 1.2 Structural vs. parametric predictions
+
+A distinction is necessary. This library produces specific numbers (41 rounds to convergence, 17 eigenform iterations, drift = 0.75 after 15 observations). These numbers depend on parameter choices and are not predictions about empirical reality. What IS predicted — and what IS falsifiable — are *structural* properties: that variance is monotonically non-decreasing, that circular networks pass closure checks and linear ones do not, that adaptive trust accelerates convergence, that learning escalates when lower levels stagnate. These structural predictions hold across parameterizations and constitute the theoretical content. The specific numbers are reproducible benchmarks for comparison across implementations.
+
+### 1.3 Scope and limitations
 
 This paper presents a *formalization*, not a simulation. The modules implement the mathematical core of each theory — eigenform iteration, organizational closure, precision-weighted Bayesian update, Shannon entropy — but do not simulate the full dynamics of biological or social systems. We address the relationship between formalization and simulation in Section 7.
 
@@ -155,7 +159,9 @@ The function `converse` executes one round in three phases:
 2. **Q observes P:** Symmetric update using P's (now modified) stated value.
 3. **Metrics:** Model accuracy (how well each participant knows the other), agreement, convergence.
 
-**Adaptive trust.** Following Reviewer 1's observation that Pask's theory implies trust should increase with agreement history, the model weight is adaptive: `weight = 0.1 + 0.4 * agreement_value`. Participants who have agreed before shift their beliefs more readily toward their cross-models.
+**Adaptive trust.** Pask's theory implies that trust should increase with agreement history: participants who have reached understanding before are more willing to revise their beliefs in subsequent exchanges. The model weight is therefore adaptive: `weight = 0.1 + 0.4 * agreement_value`, ranging from 0.1 (no prior agreement — cautious) to 0.5 (full agreement — open).
+
+**Limitation: scalar values, not procedures.** We acknowledge an important simplification. In Pask's full theory, what converges in a conversation is not a scalar value but a *procedure* — an executable specification of how to reproduce a concept (Pask's Lp and Lp*). Our implementation captures the *dynamics* of convergence (precision-weighted approach, adaptive trust, dual modeling) but not the *content* of what converges, which in Pask's formulation should be a reconstructable method, not a number. Extending the conversation module to operate on procedural representations (e.g., Sounio function references as "concepts") is future work.
 
 **Verification.** P starts at 10.0, Q at 90.0. After 41 rounds, agreement > 0.9, shared understanding ∈ (10, 90), and model accuracy < 5.0 (both participants know each other's beliefs well).
 
@@ -290,6 +296,25 @@ Sounio's effect system (`with Mut, Div, Panic`) tracks which operations are epis
 
 A native x86-64 JIT builtin (`ast_emit_find_eigenform_builtin`, ~150 bytes) implements Banach fixed-point iteration with indirect function calls via `CALL r12`, demonstrating that the theory can be compiled to efficient machine code.
 
+### 5.1 Numerical Approximations and Error Bounds
+
+Several modules use Taylor series or iterative approximations where Sounio's standard library does not provide transcendental functions. Table 4 documents each approximation, its valid range, iteration count, and estimated maximum relative error.
+
+| Function | Module | Method | Valid range | Iterations | Max rel. error |
+|----------|--------|--------|-------------|------------|----------------|
+| `sqrt_approx` | coupling | Newton (Heron) with scale-down | x ∈ (0, 10¹²) | 8 + scale | < 10⁻¹² for x < 10⁶ |
+| `sqrt_f64` | observer | Newton (Heron), no scale-down | x ∈ (0, 10⁶) | 8 | < 10⁻¹² |
+| `ln_approx` | variety | Argument reduction to [0.5, 2] + Taylor (8 terms) | x ∈ (0, ∞) | 8 terms | < 10⁻⁸ for x ∈ [0.5, 10⁶] |
+| `log2_approx` | variety | `ln_approx(x) / ln(2)` | x ∈ (0, ∞) | via ln_approx | < 10⁻⁸ |
+| `shannon_entropy` | variety | Sum of `−p log₂ p` via `log2_approx` | p ∈ (0, 1] | per-bin | < 10⁻⁷ (accumulated) |
+| `mutual_information` | coupling | Taylor: −ln(1−x) ≈ x + x²/2 + x³/3 + x⁴/4 | r² ∈ [0, 0.99) | 4 terms | < 5% for r < 0.9; saturates at r → 1 |
+
+The `sqrt_approx` in `coupling.sio` uses a scale-down strategy for large inputs: the input is repeatedly divided by 10⁶ (tracking the scale factor) until it falls below 10⁶, then Newton iteration is applied to the reduced value. This ensures convergence within 8 iterations for any positive input up to ~10¹². For the typical usage (Pearson correlation denominators involving sums of squares over 64 entries), inputs are in the range 10⁰–10⁶, well within the method's accuracy.
+
+The `ln_approx` uses argument reduction to [0.5, 2.0] via repeated halving/doubling (adding/subtracting ln 2 = 0.693147...), then applies the series ln(x) = 2 Σ t^(2k+1)/(2k+1) where t = (x−1)/(x+1). Eight terms provide ~8 digits of accuracy for the reduced argument. Accumulated error in Shannon entropy computation (which sums multiple ln calls) is bounded by the number of non-zero bins times the per-call error, giving < 10⁻⁷ for distributions with up to 32 bins.
+
+The mutual information approximation via Taylor series for −ln(1−x) is the least accurate for r close to 1.0 (where MI → ∞). The implementation caps the return value at 3.0 for r² > 0.99. This is sufficient for the coupling module's purpose (distinguishing "high" from "low" mutual information) but would not be suitable for quantitative MI estimation in information-theoretic applications.
+
 ---
 
 ## 6. Related Work
@@ -301,6 +326,8 @@ A native x86-64 JIT builtin (`ast_emit_find_eigenform_builtin`, ~150 bytes) impl
 **Algebraic cybernetics.** Kauffman (2003, 2005) provided mathematical formalization of eigenforms and Laws of Form in papers. Our work makes these formalizations executable — the algebraic identities are verified by running code, not by reading proofs.
 
 **Observer-dependent computation.** The concept of observer-dependent types appears in the quantum computing literature (Abramsky and Coecke, 2004) and in some dependent type theories. Our approach is simpler and more practical: the observer is a runtime value whose drift accumulates with each observation, enforced by the type system's requirement to accept the updated observer.
+
+**Agent-based modeling frameworks.** NetLogo (Wilensky, 1999), Mesa (Kazil et al., 2020), and Repast (North et al., 2013) are the dominant computational tools in applied cybernetics and systems science. These frameworks simulate *specific systems* — a population of agents following behavioral rules in an environment. Our work is complementary: it formalizes the *theory* applicable to any system, not the dynamics of a particular system. A NetLogo model of organizational autopoiesis would encode specific production rules; our module encodes the *definition* of organizational closure (cycle detection) and lets the user supply the production rules. The two approaches can be composed: an ABM could use our variety module to check whether its agents collectively satisfy Ashby's Law, or our conversation module to model agent-agent dialogue.
 
 **No prior work, to our knowledge, implements all nine theories in a single framework, composes them into a recursive loop, or demonstrates computational self-observation with measurable cost.**
 
@@ -316,19 +343,68 @@ The advantage of formalization is composability. Because each module exports a w
 
 ### 7.2 The Recursive Loop as Theoretical Claim
 
-The construction of the loop Observer → Eigenform → Distinction → ... → Observer is a theoretical claim, not merely a programming exercise. It asserts that these nine theories are not independent but are aspects of a single recursive structure. Each bridge function makes a specific identification:
+The construction of the loop Observer → Eigenform → Distinction → ... → Observer is a theoretical claim, not merely a programming exercise. It asserts that these nine theories are not independent but are aspects of a single recursive structure. Each bridge function makes a specific ontological identification that we now defend:
 
-- `eigenform_as_distinction`: "An eigenform IS a distinction" (convergent patterns create the marked/unmarked boundary)
-- `assess_viability`: "Autopoiesis REQUIRES requisite variety" (Ashby's Law explains why some systems maintain closure and others don't)
-- `diagnose_conversation`: "Conversation failure prescribes learning" (Bateson's hierarchy is the treatment for Pask's stalls)
+- **`observe_eigenform`: "Eigenform search IS observation."** Every iteration of Op(x) is an act of looking at x and computing what comes next. The observer's drift accumulates because each iteration is a measurement with cost. This is not a metaphor: the iteration literally calls `make_observation` at each step, and the returned variance includes both the mathematical residual and the observer's accumulated bias.
 
-These identifications are falsifiable. If a theorist disagrees that eigenform convergence should be classified as MARKED (rather than, say, AUTONOMOUS), they can change `eigenform_as_distinction` and observe the consequences.
+- **`eigenform_as_distinction`: "An eigenform IS a distinction."** A converged eigenform creates a boundary in state space: points inside its basin of attraction converge to x*, points outside do not. This boundary IS a Spencer-Brown distinction — it severs the space into "inside" (MARKED) and "outside" (UNMARKED). A divergent operator draws no such boundary (UNMARKED). An operator near bifurcation (contraction rate approaching 1.0) is at the boundary of its own boundary — self-referential, hence AUTONOMOUS. This classification follows Kauffman (2005, §4), who explicitly connects eigenforms to distinctions in the Laws of Form.
 
-### 7.3 What Self-Observation Costs
+- **`assess_viability`: "Autopoiesis REQUIRES requisite variety."** An autopoietic system maintains organizational closure through production cycles. Each cycle must respond to environmental perturbation with appropriate compensatory production. If the system's internal variety (number of distinct production states) is less than the environment's variety minus the outcome variety, some perturbations cannot be compensated — the system will lose closure and die. Ashby's Law is the mathematical reason autopoiesis is possible (or not). The bridge computes `viable = alive AND has_requisite_variety`.
+
+- **`coupling_is_conversation`: "Conversation IS structural coupling through models."** Maturana and Varela define structural coupling as recurrent mutual perturbation leading to congruence. Pask's conversation adds a specific *mechanism* for this coupling: each participant maintains a model of the other. When coupling congruence is high AND conversational agreement is high, the systems are engaged in the specific form of coupling that Pask describes. The thresholds are configurable (Table 3) precisely because the boundary between "mere coupling" and "conversation" is a matter of degree, not kind.
+
+- **`diagnose_conversation`: "Conversation failure prescribes learning."** When a Pask conversation stalls (agreement stops improving), the participants need to change something. Bateson's hierarchy provides the prescription: first adjust parameters within the current model (L1), then switch to a different model class (L2), then restructure the epistemological frame (L3). The agreement level maps directly to the severity of the stall: minor disagreement (>0.7) → L1; significant (0.3-0.7) → L2; fundamental (<0.3) → L3.
+
+- **`can_learn_in_language`: "Learning happens IN language."** Maturana insisted that learning is not separate from languaging — it occurs within the consensual domain of coordinated action. If the domain is unstable (no shared ground), there is nothing to learn from. If the learner is in double bind (all levels blocked), learning is impossible regardless of domain stability. The bridge checks both conditions.
+
+- **`observe_self`: "The system can observe itself, at a cost."** See Section 7.3 for a detailed discussion of what this means and what it does not mean.
+
+These identifications are falsifiable. If a theorist disagrees that eigenform convergence should be classified as MARKED (rather than, say, AUTONOMOUS), they can change `eigenform_as_distinction` and observe the consequences downstream. The recursive loop makes disagreements *testable* rather than merely debatable.
+
+### 7.3 What Self-Observation Costs — and What It Cannot Yet Do
 
 The function `observe_self` adds measurable drift to the system state. After two recursive observations, `drift > 0`. This is not a metaphor — it is a numerical result. The system's ability to observe itself degrades its own accuracy, which affects subsequent observations, which adds more drift. This is precisely von Foerster's point: self-observation is not free.
 
 The `DRIFT_VIABILITY_LIMIT` constant (currently 5.0) determines when accumulated drift compromises the system's ability to assess its own viability. When drift exceeds this limit, `observe_self` sets `is_viable = false`. The system has observed itself into a state where it can no longer trust its own observations.
+
+**Limitation acknowledged.** We distinguish between two senses of self-observation:
+
+1. **Instrumental self-observation:** The system reads its own state variables (eigenform value, coupling congruence, etc.) through an observer, accumulating drift. This is what `observe_self` currently implements. It captures the *cost* of self-observation — drift is measurable and consequential — but the operation is structurally equivalent to reading a dashboard.
+
+2. **Recursive self-application:** The system re-runs its own composition loop on its own state — using its own eigenform search to find the eigenform of its own viability function, computing its own variety over its own component states, assessing whether its own conversation with itself converges. This is the stronger sense in which von Foerster meant self-observation: the system's operation applied recursively to itself.
+
+The current implementation achieves (1) but not (2). Achieving (2) would require the composition loop to be a first-class value that can be passed to `find_eigenform` as the operator — effectively computing the eigenform of the cybernetic loop itself. This is technically feasible in Sounio (which supports first-class function references) but would require the `CyberneticState` to be compressed into a scalar representation suitable for eigenform iteration. We regard this as the most important direction for future work: a system that not only observes itself at a cost, but *computes its own fixed points*. The current implementation is a step toward this goal — it demonstrates the cost mechanism — but does not yet achieve the full recursive structure that von Foerster's theory demands.
+
+### 7.4 Luhmann's Social Autopoiesis
+
+The paper cites Luhmann (1984) for observer-inclusion but does not implement his most distinctive contribution: the autopoiesis of *communication systems*. Luhmann argued that social systems are not composed of people but of communications, and that each functional subsystem (science, law, economy, art) is autopoietic with its own binary code (true/false, legal/illegal, payment/non-payment, beautiful/ugly).
+
+The current autopoiesis module implements biological autopoiesis in Maturana and Varela's sense: components are material entities, production relations are physical processes, organizational closure is circular self-production. Extending this to Luhmann's social autopoiesis would require:
+
+- Components as *communications* (typed messages with sender, receiver, and theme)
+- Production relations as *meaning-connections* (one communication makes the next possible)
+- Binary codes as *distinction operators* from the `distinction.sio` module applied to communications
+- Functional differentiation as *multiple autopoietic subsystems* each with their own closure
+
+This is a natural extension of the existing architecture — the `distinction` module already provides the binary code mechanism, and the `autopoiesis` module already provides the closure detector — but the integration requires a higher-order module where the "components" in the adjacency matrix are communication events rather than material entities. We regard this as the most theoretically significant extension for the *Kybernetes* audience.
+
+### 7.5 Scalability
+
+The current implementation uses fixed-size arrays determined at compile time: the autopoiesis module supports 16 components (16×16 adjacency matrix = 256 entries), the variety module supports 32 environment/regulator bins and 8 outcome bins, the coupling module stores 64 history entries, and the languaging module supports 32 actions. These limits reflect Sounio's current restriction to statically-sized arrays (dynamic allocation is planned but not yet available in the JIT runtime).
+
+For the theoretical contribution of this paper, these limits are sufficient — the recursive loop, the bridge functions, and the self-observation mechanism are independent of array size. For practical applications, the limits may be constraining: an organization with 100 departments cannot be modeled in a 16-component autopoietic system. Three mitigation strategies exist:
+
+1. **Hierarchical decomposition.** Model the organization as a network of autopoietic *subsystems*, each with ≤16 components, coupled via the coupling module. This is theoretically natural: Luhmann's functional differentiation is precisely the claim that complex systems decompose into autopoietic subsystems.
+
+2. **Increased array sizes.** Sounio supports arrays up to `[i64; 65536]` at the language level. Increasing the adjacency matrix to 64×64 (4,096 entries) would support most organizational models. The DFS cycle detection scales as O(V + E), which remains efficient.
+
+3. **Future dynamic allocation.** When Sounio's runtime supports heap allocation (planned for the self-hosting milestone), the fixed-size constraint will be lifted entirely.
+
+### 7.6 Executable Theory as Methodology
+
+The term "executable theory" in our title requires clarification. We mean something specific: the theory's axioms are encoded as program invariants (e.g., "calling is idempotent" becomes `assert(eval_form(form_mark(form_mark(x))) == eval_form(form_mark(x)))`), and *running the program constitutes a test of the axioms*. If the program runs without assertion failure, the axioms hold for the tested inputs. If it crashes, an axiom is violated.
+
+This is weaker than formal verification (which proves axioms for all inputs) but stronger than verbal argument (which proves nothing for any input). It occupies the same epistemic position as computational physics: the simulation is not a proof, but it produces falsifiable predictions that constrain the theory. We believe this methodology — encoding theoretical commitments as runtime invariants in a purpose-built language — is applicable beyond cybernetics to any field with well-articulated but computationally untested axioms.
 
 ---
 
@@ -336,7 +412,9 @@ The `DRIFT_VIABILITY_LIMIT` constant (currently 5.0) determines when accumulated
 
 Second-order cybernetics has waited seventy years for a computational medium. The tools of the field — verbal argument, diagrams, qualitative assessment — are valuable but insufficient for the kind of precise, reproducible, falsifiable work that a mature science requires.
 
-We have shown that nine foundational theories of second-order cybernetics can be implemented as executable code, composed into a single recursive structure, and verified through numerical tests. The system can observe itself, with measurable cost. The 41-round convergence of a Pask conversation is not a metaphor; it is a computed value that changes when you change the parameters.
+We have shown that nine foundational theories of second-order cybernetics can be implemented as executable code, composed into a single recursive structure, and verified through numerical tests. The system can observe itself, with measurable cost.
+
+A note on falsifiability is warranted. The 41-round convergence of a Pask conversation is a consequence of specific parameter choices (initial values 10 and 90, variance 1.0, adaptive trust weight 0.1 + 0.4 × agreement, convergence threshold 0.01). Change any parameter, and the number changes. The specific number is not a prediction about reality — there is no empirical data on how many rounds real conversations take to converge, and any such data would depend on what "a round" means in context. What IS falsifiable are the *structural* predictions: that dual-model conversations converge monotonically, that adaptive trust accelerates convergence, that model accuracy correlates with agreement, and that high-variance starts require more rounds than low-variance starts. These dynamics are preserved across parameterizations and constitute the real theoretical content. The specific numbers provide reproducible benchmarks against which variations can be measured.
 
 The code is available. The tests are runnable. The loop closes.
 
@@ -381,3 +459,11 @@ Varela, F. J. (1975). "A calculus for self-reference." *International Journal of
 von Foerster, H. (1979). "Cybernetics of cybernetics." In K. Krippendorff (Ed.), *Communication and Control in Society*. Gordon and Breach.
 
 von Foerster, H. (1981). *Observing Systems*. Intersystems Publications.
+
+Wilensky, U. (1999). *NetLogo*. Center for Connected Learning and Computer-Based Modeling, Northwestern University.
+
+Kazil, J., Masad, D., and Crooks, A. (2020). "Utilizing Python for agent-based modeling: The Mesa framework." In *Social, Cultural, and Behavioral Modeling* (SBP-BRiMS), Springer.
+
+North, M. J., Collier, N. T., Ozik, J., et al. (2013). "Complex adaptive systems modeling with Repast Simphony." *Complex Adaptive Systems Modeling*, 1(3).
+
+Abramsky, S. and Coecke, B. (2004). "A categorical semantics of quantum protocols." In *Proc. LICS*, IEEE.
