@@ -310,7 +310,7 @@ The combined penalty $P = P_s + P_b + P_r$ feeds into a speedup estimator: for s
 
 **Hardware benchmarks.** This preprint reports structural correctness and programmer effort reduction. Wall-clock benchmarks on NVIDIA Ampere (A5000, sm_86) and Ada Lovelace (L4, RTX 4000 Ada, sm_89) hardware are in progress and will be reported in the full paper.
 
-**Higher-order covariance.** The current covariance support is limited to $N \leq 8$ variables due to shared memory constraints. For larger systems, a tiled covariance approach (analogous to CUTLASS tiled GEMM) could extend to hundreds of correlated variables.
+**Higher-order covariance (resolved).** Tiled covariance propagation extends support to $N = 128$ correlated variables via CUTLASS-style upper-triangular tile blocking. The $N \times N$ covariance matrix is partitioned into $T \times T$ tiles (where $T$ auto-tunes per SM architecture: 64 on Hopper sm\_90, 48 on Ada Lovelace sm\_89, 32 on Ampere sm\_86). Each tile fits in shared memory independently; results accumulate via tree reduction. For $N = 64$: 3 upper-triangular tiles at 4,224 bytes each. For $N = 128$: 10 tiles. The per-tile J$\cdot\Sigma_{\text{tile}}\cdot$J$^\top$ computation reuses the same propagation kernel as the monolithic $N \leq 8$ case.
 
 ---
 

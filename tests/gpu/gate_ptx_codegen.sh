@@ -465,6 +465,26 @@ echo "--- Section 2d: Limitation Resolution (T23-T25) ---"
     fi
 }
 
+# T26: Tiled Covariance (CUTLASS-style blocking, N=128)
+{
+    TOTAL=$((TOTAL + 1))
+    if [ -f self-hosted/gpu/opt/tiled_covariance.sio ] && \
+       grep -q 'tc_propagate_tile' self-hosted/gpu/opt/tiled_covariance.sio && \
+       grep -q 'tc_build_plan' self-hosted/gpu/opt/tiled_covariance.sio; then
+        RESULT=$($SOUC run self-hosted/gpu/opt/tiled_covariance.sio 2>&1 | tail -1)
+        if echo "$RESULT" | grep -q "10/10 self-tests passed"; then
+            PASS=$((PASS + 1))
+            echo "PASS  T26_tiled_covariance (10/10 self-tests)"
+        else
+            FAIL=$((FAIL + 1))
+            echo "FAIL  T26_tiled_covariance: $RESULT"
+        fi
+    else
+        FAIL=$((FAIL + 1))
+        echo "FAIL  T26_tiled_covariance: tiled_covariance.sio missing"
+    fi
+}
+
 # ── Section 3: souc check — optional files ────────────────────────────────────
 
 echo ""
