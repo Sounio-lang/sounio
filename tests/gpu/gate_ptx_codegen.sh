@@ -402,6 +402,69 @@ echo "--- Section 2c: Deep Novelties (T19-T21) ---"
     fi
 }
 
+echo ""
+echo "--- Section 2d: Limitation Resolution (T23-T25) ---"
+
+# T23: Second-Order GUM Shadow Lanes (Limitation 1 — Hessian correction)
+{
+    TOTAL=$((TOTAL + 1))
+    if [ -f self-hosted/gpu/opt/second_order_gum.sio ] && \
+       grep -q 'so_compute_hessian_correction' self-hosted/gpu/opt/second_order_gum.sio && \
+       grep -q 'so_compute_first_order' self-hosted/gpu/opt/second_order_gum.sio; then
+        RESULT=$($SOUC run self-hosted/gpu/opt/second_order_gum.sio 2>&1 | tail -1)
+        if echo "$RESULT" | grep -q "10/10 self-tests passed"; then
+            PASS=$((PASS + 1))
+            echo "PASS  T23_second_order_gum (10/10 self-tests)"
+        else
+            FAIL=$((FAIL + 1))
+            echo "FAIL  T23_second_order_gum: $RESULT"
+        fi
+    else
+        FAIL=$((FAIL + 1))
+        echo "FAIL  T23_second_order_gum: second_order_gum.sio missing"
+    fi
+}
+
+# T24: Covariance Matrix GPU Shadow Lanes (Limitation 2 — correlation support)
+{
+    TOTAL=$((TOTAL + 1))
+    if [ -f self-hosted/gpu/opt/covariance_shadow.sio ] && \
+       grep -q 'cs_propagate_nd' self-hosted/gpu/opt/covariance_shadow.sio && \
+       grep -q 'cs_tri_index' self-hosted/gpu/opt/covariance_shadow.sio; then
+        RESULT=$($SOUC run self-hosted/gpu/opt/covariance_shadow.sio 2>&1 | tail -1)
+        if echo "$RESULT" | grep -q "10/10 self-tests passed"; then
+            PASS=$((PASS + 1))
+            echo "PASS  T24_covariance_shadow (10/10 self-tests)"
+        else
+            FAIL=$((FAIL + 1))
+            echo "FAIL  T24_covariance_shadow: $RESULT"
+        fi
+    else
+        FAIL=$((FAIL + 1))
+        echo "FAIL  T24_covariance_shadow: covariance_shadow.sio missing"
+    fi
+}
+
+# T25: Warp Divergence Cost Model (Limitation 3 — quantified penalty)
+{
+    TOTAL=$((TOTAL + 1))
+    if [ -f self-hosted/gpu/opt/divergence_cost.sio ] && \
+       grep -q 'dc_compute_penalty' self-hosted/gpu/opt/divergence_cost.sio && \
+       grep -q 'dc_estimate_speedup' self-hosted/gpu/opt/divergence_cost.sio; then
+        RESULT=$($SOUC run self-hosted/gpu/opt/divergence_cost.sio 2>&1 | tail -1)
+        if echo "$RESULT" | grep -q "10/10 self-tests passed"; then
+            PASS=$((PASS + 1))
+            echo "PASS  T25_divergence_cost (10/10 self-tests)"
+        else
+            FAIL=$((FAIL + 1))
+            echo "FAIL  T25_divergence_cost: $RESULT"
+        fi
+    else
+        FAIL=$((FAIL + 1))
+        echo "FAIL  T25_divergence_cost: divergence_cost.sio missing"
+    fi
+}
+
 # ── Section 3: souc check — optional files ────────────────────────────────────
 
 echo ""

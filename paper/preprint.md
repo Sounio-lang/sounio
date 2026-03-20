@@ -282,15 +282,35 @@ The epistemic GPU stack comprises 9,122 lines of Sounio across 10 self-hosted mo
 
 ---
 
-## 7. Limitations and Future Work
+## 7. Resolved Limitations
 
-**First-order approximation.** GUM propagation is a first-order (linear) approximation. For highly nonlinear functions or large uncertainties, GUM Supplement 1 [18] recommends Monte Carlo validation. Our shadow lanes could be extended with interval arithmetic for conservative bounds.
+Three limitations identified in earlier versions of this work have been addressed:
 
-**Correlation.** The current implementation assumes uncorrelated inputs (GUM Eq. 10 without covariance terms). Extending to correlated inputs (GUM Eq. 13) would require a covariance matrix shadow structure, increasing memory overhead from $O(n)$ to $O(n^2)$.
+**Second-order GUM propagation (resolved).** The shadow lane emitter now supports optional Hessian correction terms. For $y = f(x)$, the second-order variance is:
+
+$$u^2(y) = (f'(x))^2 \cdot u^2(x) + \tfrac{1}{2} (f''(x))^2 \cdot u^4(x)$$
+
+A curvature threshold gates activation: the correction is applied only when $|f''(x)| \cdot u^2(x)$ exceeds a configurable tolerance, avoiding unnecessary computation for near-linear operations. For the benchmark $y = x^2$ at $x = 3.0, u(x) = 0.1$: the first-order variance is 0.36, the Hessian correction is 0.0002 (0.056% improvement), and the combined variance is 0.3602 — matching the analytical second-order Taylor expansion.
+
+**Covariance matrix GPU propagation (resolved).** The compiler now supports correlated inputs via an upper-triangular covariance shadow structure in shared memory. For $N$ correlated variables, the full GUM Eq. 13 propagation is:
+
+$$u^2(y) = \sum_i \left(\frac{\partial f}{\partial x_i}\right)^2 u^2(x_i) + 2 \sum_{i < j} \frac{\partial f}{\partial x_i} \frac{\partial f}{\partial x_j} u(x_i, x_j)$$
+
+Storage is upper-triangular: $N(N+1)/2$ entries, capped at $N = 8$ variables (36 entries, 288 bytes in f64) to fit within GPU shared memory alongside kernel data. The cross-term contribution $2 j_0 j_1 \sigma_{01}$ is computed per-element and added to the diagonal-only result.
+
+**Warp divergence cost model (resolved).** An analytical cost model quantifies the penalty of the dual-path warp-vote mechanism. The model comprises three components:
+
+- *Serialization penalty*: $P_s = 1.0 + d/100$ where $d$ is the divergence percentage (0% → 1.0x, 100% → 2.0x)
+- *Ballot overhead*: $P_b = n_b \cdot c_b / C_k$ where $n_b$ = number of ballots, $c_b$ = ballot cost in cycles (~2 on SM 8.x), $C_k$ = typical kernel cycles
+- *Reconvergence cost*: $P_r = L \cdot d/100 \cdot 0.01$ where $L$ = instruction distance between diverge and reconverge points
+
+The combined penalty $P = P_s + P_b + P_r$ feeds into a speedup estimator: for shadow lane overhead of 2.0x and 10% divergence, the predicted speedup is approximately 1.7x. The model populates the `estimated_speedup` field in `WarpVotePlan`, enabling cost-aware decisions about whether to apply the dual-path optimization.
+
+### 7.1 Remaining Future Work
 
 **Hardware benchmarks.** This preprint reports structural correctness and programmer effort reduction. Wall-clock benchmarks on NVIDIA Ampere (A5000, sm_86) and Ada Lovelace (L4, RTX 4000 Ada, sm_89) hardware are in progress and will be reported in the full paper.
 
-**Warp divergence.** The dual-path warp-vote mechanism introduces potential divergence at the ballot branch. In practice, data uncertainty tends to be spatially coherent (nearby elements have similar uncertainty), so most warps take the same path. Quantifying the divergence penalty under various uncertainty distributions is future work.
+**Higher-order covariance.** The current covariance support is limited to $N \leq 8$ variables due to shared memory constraints. For larger systems, a tiled covariance approach (analogous to CUTLASS tiled GEMM) could extend to hundreds of correlated variables.
 
 ---
 
