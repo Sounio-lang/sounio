@@ -161,8 +161,9 @@ fn f64_bits(v: f64) -> i64 with Mut, Panic, Div {
 fn load_source_file(path: string) -> Program with IO, Mut, Div, Panic, Alloc {
     let data = read_file(path)
     let size = file_size(path)
-    let state = lex(data, size, 0)
-    parse_program_preloaded(state.token_count)
+    // Use lex_to_parser (boot4-safe: scalar-only, no Cursor/ScanResult structs)
+    let token_count = lex_to_parser(data, size, 0)
+    parse_program_preloaded(token_count)
 }
 
 // ============================================================================
@@ -835,7 +836,7 @@ fn ast_emit_print_f64_builtin(code: CodeBuffer) -> CodeBuffer with Mut, Panic, D
     c = emit_byte(c, 0x49); c = emit_byte(c, 0x89); c = emit_byte(c, 0xc0)
     c = emit_byte(c, 0x41); c = emit_byte(c, 0x89); c = emit_byte(c, 0xc0)
     c = emit_byte(c, 0x41); c = emit_byte(c, 0x80); c = emit_byte(c, 0xc0); c = emit_byte(c, 0x30)
-    c = emit_byte(c, 0x41); c = emit_byte(c, 0x88); c = emit_byte(c, 0x02)
+    c = emit_byte(c, 0x45); c = emit_byte(c, 0x88); c = emit_byte(c, 0x02)
     c = emit_byte(c, 0x48); c = emit_byte(c, 0x8d); c = emit_byte(c, 0x75); c = emit_byte(c, 0xd8)
     c = emit_byte(c, 0xba); c = emit_byte(c, 0x01); c = emit_byte(c, 0x00); c = emit_byte(c, 0x00); c = emit_byte(c, 0x00)
     c = emit_byte(c, 0xbf); c = emit_byte(c, 0x01); c = emit_byte(c, 0x00); c = emit_byte(c, 0x00); c = emit_byte(c, 0x00)
@@ -847,19 +848,52 @@ fn ast_emit_print_f64_builtin(code: CodeBuffer) -> CodeBuffer with Mut, Panic, D
     c = emit_byte(c, 0xbf); c = emit_byte(c, 0x01); c = emit_byte(c, 0x00); c = emit_byte(c, 0x00); c = emit_byte(c, 0x00)
     c = emit_byte(c, 0xb8); c = emit_byte(c, 0x01); c = emit_byte(c, 0x00); c = emit_byte(c, 0x00); c = emit_byte(c, 0x00)
     c = emit_byte(c, 0x0f); c = emit_byte(c, 0x05)
-    c = emit_byte(c, 0xf2); c = emit_byte(c, 0x4c); c = emit_byte(c, 0x0f); c = emit_byte(c, 0x2a); c = emit_byte(c, 0xc0)
+    c = emit_byte(c, 0xf2); c = emit_byte(c, 0x48); c = emit_byte(c, 0x0f); c = emit_byte(c, 0x2a); c = emit_byte(c, 0xc8)
     c = emit_byte(c, 0xf2); c = emit_byte(c, 0x0f); c = emit_byte(c, 0x5c); c = emit_byte(c, 0xc1)
-    c = emit_byte(c, 0x48); c = emit_byte(c, 0xb8); c = emit_byte(c, 0x00); c = emit_byte(c, 0x00); c = emit_byte(c, 0x84); c = emit_byte(c, 0x2e)
-    c = emit_byte(c, 0x41); c = emit_byte(c, 0x00); c = emit_byte(c, 0x00); c = emit_byte(c, 0x00)
+    c = emit_byte(c, 0x48); c = emit_byte(c, 0xb8); c = emit_byte(c, 0x00); c = emit_byte(c, 0x00); c = emit_byte(c, 0x00); c = emit_byte(c, 0x00)
+    c = emit_byte(c, 0x80); c = emit_byte(c, 0x84); c = emit_byte(c, 0x2e); c = emit_byte(c, 0x41)
     c = emit_byte(c, 0x66); c = emit_byte(c, 0x48); c = emit_byte(c, 0x0f); c = emit_byte(c, 0x6e); c = emit_byte(c, 0xd0)
     c = emit_byte(c, 0xf2); c = emit_byte(c, 0x0f); c = emit_byte(c, 0x59); c = emit_byte(c, 0xc2)
     c = emit_byte(c, 0xf2); c = emit_byte(c, 0x48); c = emit_byte(c, 0x0f); c = emit_byte(c, 0x2c); c = emit_byte(c, 0xc8)
-    c = emit_byte(c, 0xc6); c = emit_byte(c, 0x45); c = emit_byte(c, 0xf7); c = emit_byte(c, 0x30)
-    c = emit_byte(c, 0xc6); c = emit_byte(c, 0x45); c = emit_byte(c, 0xf8); c = emit_byte(c, 0x30)
-    c = emit_byte(c, 0xc6); c = emit_byte(c, 0x45); c = emit_byte(c, 0xf9); c = emit_byte(c, 0x30)
-    c = emit_byte(c, 0xc6); c = emit_byte(c, 0x45); c = emit_byte(c, 0xfa); c = emit_byte(c, 0x30)
-    c = emit_byte(c, 0xc6); c = emit_byte(c, 0x45); c = emit_byte(c, 0xfb); c = emit_byte(c, 0x30)
-    c = emit_byte(c, 0xc6); c = emit_byte(c, 0x45); c = emit_byte(c, 0xfc); c = emit_byte(c, 0x30)
+    // Extract 6 fractional digits from rcx (= frac * 1e6)
+    // digit 0: rcx / 100000
+    c = emit_byte(c, 0x48); c = emit_byte(c, 0x89); c = emit_byte(c, 0xc8) // mov rax, rcx
+    c = emit_byte(c, 0x31); c = emit_byte(c, 0xd2)                         // xor edx, edx
+    c = emit_byte(c, 0xb9); c = emit_byte(c, 0xa0); c = emit_byte(c, 0x86); c = emit_byte(c, 0x01); c = emit_byte(c, 0x00) // mov ecx, 100000
+    c = emit_byte(c, 0x48); c = emit_byte(c, 0xf7); c = emit_byte(c, 0xf1) // div rcx
+    c = emit_byte(c, 0x04); c = emit_byte(c, 0x30)                         // add al, '0'
+    c = emit_byte(c, 0x88); c = emit_byte(c, 0x45); c = emit_byte(c, 0xf7) // mov [rbp-9], al
+    // digit 1: rdx / 10000
+    c = emit_byte(c, 0x48); c = emit_byte(c, 0x89); c = emit_byte(c, 0xd0) // mov rax, rdx
+    c = emit_byte(c, 0x31); c = emit_byte(c, 0xd2)                         // xor edx, edx
+    c = emit_byte(c, 0xb9); c = emit_byte(c, 0x10); c = emit_byte(c, 0x27); c = emit_byte(c, 0x00); c = emit_byte(c, 0x00) // mov ecx, 10000
+    c = emit_byte(c, 0x48); c = emit_byte(c, 0xf7); c = emit_byte(c, 0xf1) // div rcx
+    c = emit_byte(c, 0x04); c = emit_byte(c, 0x30)                         // add al, '0'
+    c = emit_byte(c, 0x88); c = emit_byte(c, 0x45); c = emit_byte(c, 0xf8) // mov [rbp-8], al
+    // digit 2: rdx / 1000
+    c = emit_byte(c, 0x48); c = emit_byte(c, 0x89); c = emit_byte(c, 0xd0)
+    c = emit_byte(c, 0x31); c = emit_byte(c, 0xd2)
+    c = emit_byte(c, 0xb9); c = emit_byte(c, 0xe8); c = emit_byte(c, 0x03); c = emit_byte(c, 0x00); c = emit_byte(c, 0x00)
+    c = emit_byte(c, 0x48); c = emit_byte(c, 0xf7); c = emit_byte(c, 0xf1)
+    c = emit_byte(c, 0x04); c = emit_byte(c, 0x30)
+    c = emit_byte(c, 0x88); c = emit_byte(c, 0x45); c = emit_byte(c, 0xf9) // mov [rbp-7], al
+    // digit 3: rdx / 100
+    c = emit_byte(c, 0x48); c = emit_byte(c, 0x89); c = emit_byte(c, 0xd0)
+    c = emit_byte(c, 0x31); c = emit_byte(c, 0xd2)
+    c = emit_byte(c, 0xb9); c = emit_byte(c, 0x64); c = emit_byte(c, 0x00); c = emit_byte(c, 0x00); c = emit_byte(c, 0x00)
+    c = emit_byte(c, 0x48); c = emit_byte(c, 0xf7); c = emit_byte(c, 0xf1)
+    c = emit_byte(c, 0x04); c = emit_byte(c, 0x30)
+    c = emit_byte(c, 0x88); c = emit_byte(c, 0x45); c = emit_byte(c, 0xfa) // mov [rbp-6], al
+    // digit 4: rdx / 10
+    c = emit_byte(c, 0x48); c = emit_byte(c, 0x89); c = emit_byte(c, 0xd0)
+    c = emit_byte(c, 0x31); c = emit_byte(c, 0xd2)
+    c = emit_byte(c, 0xb9); c = emit_byte(c, 0x0a); c = emit_byte(c, 0x00); c = emit_byte(c, 0x00); c = emit_byte(c, 0x00)
+    c = emit_byte(c, 0x48); c = emit_byte(c, 0xf7); c = emit_byte(c, 0xf1)
+    c = emit_byte(c, 0x04); c = emit_byte(c, 0x30)
+    c = emit_byte(c, 0x88); c = emit_byte(c, 0x45); c = emit_byte(c, 0xfb) // mov [rbp-5], al
+    // digit 5: rdx is the last digit
+    c = emit_byte(c, 0x80); c = emit_byte(c, 0xc2); c = emit_byte(c, 0x30) // add dl, '0'
+    c = emit_byte(c, 0x88); c = emit_byte(c, 0x55); c = emit_byte(c, 0xfc) // mov [rbp-4], dl
     c = emit_byte(c, 0x48); c = emit_byte(c, 0x8d); c = emit_byte(c, 0x75); c = emit_byte(c, 0xf7)
     c = emit_byte(c, 0xba); c = emit_byte(c, 0x06); c = emit_byte(c, 0x00); c = emit_byte(c, 0x00); c = emit_byte(c, 0x00)
     c = emit_byte(c, 0xbf); c = emit_byte(c, 0x01); c = emit_byte(c, 0x00); c = emit_byte(c, 0x00); c = emit_byte(c, 0x00)
