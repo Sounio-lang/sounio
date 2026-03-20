@@ -1,5 +1,13 @@
 //! stdlib/cybernetic/bateson.sio
-//! Bateson's Learning Levels (L0-L3)
+//! Bateson's Hierarchical Learning Levels (1972)
+//!
+//! L0: Fixed stimulus-response (zero learning)
+//! L1: Parameter adjustment via EMA (learning within a model)
+//! L2: Model switching (learning to learn — changing parameter sets)
+//! L3: Epistemological restructuring (learning about learning to learn)
+//!
+//! Hierarchy is enforced: L1 failure triggers L2, L2 failure triggers L3.
+//! Double bind: L1 failing + L2 blocked + L3 frozen.
 
 pub struct LearningContext {
     level: i64,
@@ -9,14 +17,26 @@ pub struct LearningContext {
     param_counts: [i64; 8],
     available_sets: i64,
     meta_frame: i64,
+    frame_count: i64,
     double_bind_count: i64,
+    l1_fail_count: i64,
+    l2_fail_count: i64,
+    l1_threshold: f64,
+    last_improvement: f64,
 }
 
 pub struct LearningEvent {
     changed: bool,
     level_engaged: i64,
+    model_switched: bool,
+    frame_restructured: bool,
+    double_bind: bool,
     context: LearningContext,
 }
+
+// ============================================================================
+// Constructor
+// ============================================================================
 
 pub fn bateson_new() -> LearningContext {
     LearningContext {
@@ -27,21 +47,65 @@ pub fn bateson_new() -> LearningContext {
         param_counts: [0; 8],
         available_sets: 255,
         meta_frame: 0,
+        frame_count: 0,
         double_bind_count: 0,
+        l1_fail_count: 0,
+        l2_fail_count: 0,
+        l1_threshold: 0.01,
+        last_improvement: 0.0,
     }
 }
+
+// ============================================================================
+// Helpers
+// ============================================================================
+
+fn abs_f64_b(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+fn make_event(ctx: LearningContext, level: i64) -> LearningEvent {
+    LearningEvent {
+        changed: false,
+        level_engaged: level,
+        model_switched: false,
+        frame_restructured: false,
+        double_bind: false,
+        context: ctx,
+    }
+}
+
+// ============================================================================
+// L1: Parameter adjustment (learning within a model)
+// ============================================================================
 
 pub fn level_one_update(ctx: LearningContext, stimulus: i64, outcome: f64) -> LearningEvent with Mut, Div, Panic {
     var s = ctx
     let idx = s.active_param_set * 8 + (stimulus % 8)
     let old_val = s.params[idx as usize]
-    s.params[idx as usize] = old_val * 0.9 + outcome * 0.1
-    LearningEvent {
-        changed: true,
-        level_engaged: 1,
-        context: s,
+    let new_val = old_val * 0.9 + outcome * 0.1
+    s.params[idx as usize] = new_val
+    s.param_counts[s.active_param_set as usize] = s.param_counts[s.active_param_set as usize] + 1
+
+    let improvement = abs_f64_b(new_val - old_val)
+    s.last_improvement = improvement
+    s.level = 1
+
+    // Track L1 failure (stagnation)
+    if improvement < s.l1_threshold {
+        s.l1_fail_count = s.l1_fail_count + 1
+    } else {
+        s.l1_fail_count = 0
     }
+
+    var evt = make_event(s, 1)
+    evt.changed = true
+    evt
 }
+
+// ============================================================================
+// L2: Model switching (learning to learn)
+// ============================================================================
 
 pub fn level_two_switch(ctx: LearningContext, threshold: f64) -> LearningEvent with Mut, Div, Panic {
     var s = ctx
@@ -54,23 +118,120 @@ pub fn level_two_switch(ctx: LearningContext, threshold: f64) -> LearningEvent w
         if next_set >= 8 {
             next_set = 0
         }
-        let bit = 1 << (next_set as i64)
+        let bit = 1 << next_set
         if (s.available_sets & bit) != 0 {
-            s.active_param_set = next_set
-            switched = true
-            break
+            if next_set != s.active_param_set {
+                s.active_param_set = next_set
+                switched = true
+                break
+            }
         }
         next_set = next_set + 1
         checked = checked + 1
     }
 
-    LearningEvent {
-        changed: switched,
-        level_engaged: 2,
-        context: s,
+    s.level = 2
+    if switched {
+        s.l1_fail_count = 0
+        s.l2_fail_count = 0
+    } else {
+        s.l2_fail_count = s.l2_fail_count + 1
     }
+
+    var evt = make_event(s, 2)
+    evt.changed = switched
+    evt.model_switched = switched
+    evt
 }
 
+// ============================================================================
+// L3: Epistemological restructuring
+// ============================================================================
+
+pub fn level_three_restructure(ctx: LearningContext) -> LearningEvent with Mut, Div, Panic {
+    var s = ctx
+    // Clear all parameter sets
+    var i: i64 = 0
+    loop {
+        if i >= 64 { break }
+        s.params[i as usize] = 0.0
+        i = i + 1
+    }
+    i = 0
+    loop {
+        if i >= 8 { break }
+        s.param_counts[i as usize] = 0
+        i = i + 1
+    }
+    // Reset L2 resources
+    s.available_sets = 255
+    s.active_param_set = 0
+    s.l1_fail_count = 0
+    s.l2_fail_count = 0
+    s.meta_frame = s.meta_frame + 1
+    s.frame_count = s.frame_count + 1
+    s.level = 3
+
+    var evt = make_event(s, 3)
+    evt.changed = true
+    evt.frame_restructured = true
+    evt
+}
+
+// ============================================================================
+// Double bind detection
+// ============================================================================
+
+/// Double bind = L1 stagnating + L2 blocked (no available sets) + L3 frozen (too many restructures)
 pub fn detect_double_bind(ctx: LearningContext) -> bool with Div, Panic {
-    ctx.available_sets == 0
+    let l1_stuck = ctx.l1_fail_count >= 3
+    let l2_blocked = ctx.available_sets == 0
+    let l3_frozen = ctx.frame_count > 3
+    l1_stuck & l2_blocked & l3_frozen
+}
+
+// ============================================================================
+// Main entry point: hierarchical learning state machine
+// ============================================================================
+
+/// The main learning function. Applies hierarchical learning:
+/// 1. Try L1 (parameter update)
+/// 2. If L1 stagnates (3+ consecutive failures) -> trigger L2
+/// 3. If L2 fails (no available sets) -> trigger L3
+/// 4. If L3 is frozen -> detect double bind
+pub fn learn(ctx: LearningContext, stimulus: i64, outcome: f64) -> LearningEvent with Mut, Div, Panic {
+    // Step 1: L1 update
+    var evt = level_one_update(ctx, stimulus, outcome)
+    var s = evt.context
+
+    // Step 2: Check if L1 has stagnated
+    if s.l1_fail_count >= 3 {
+        // Try L2: switch model
+        let l2_evt = level_two_switch(s, s.l1_threshold)
+        s = l2_evt.context
+
+        if l2_evt.model_switched {
+            // L2 succeeded
+            var result = make_event(s, 2)
+            result.changed = true
+            result.model_switched = true
+            return result
+        }
+
+        // L2 failed: try L3
+        if s.l2_fail_count >= 2 {
+            // Check for double bind first
+            if detect_double_bind(s) {
+                s.double_bind_count = s.double_bind_count + 1
+                var db_evt = make_event(s, 3)
+                db_evt.double_bind = true
+                return db_evt
+            }
+            // L3 restructure
+            let l3_evt = level_three_restructure(s)
+            return l3_evt
+        }
+    }
+
+    evt
 }

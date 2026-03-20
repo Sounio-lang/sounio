@@ -1,5 +1,10 @@
 //! stdlib/cybernetic/coupling.sio
-//! Structural coupling between two systems (Maturana/Varela)
+//!
+//! Structural Coupling (Maturana/Varela)
+//!
+//! Two systems coupled through recurrent mutual perturbation.
+//! Congruence measured via Pearson correlation on output histories.
+//! Mutual information estimated from correlation coefficient.
 
 pub struct Coupling {
     system_a_id: i64,
@@ -10,6 +15,12 @@ pub struct Coupling {
     b_history: [f64; 64],
     mean_error: f64,
     error_variance: f64,
+    // Running sums for Pearson correlation
+    sum_a: f64,
+    sum_b: f64,
+    sum_a2: f64,
+    sum_b2: f64,
+    sum_ab: f64,
 }
 
 pub fn coupling_new(a_id: i64, b_id: i64) -> Coupling {
@@ -22,21 +33,66 @@ pub fn coupling_new(a_id: i64, b_id: i64) -> Coupling {
         b_history: [0.0; 64],
         mean_error: 0.0,
         error_variance: 0.0,
+        sum_a: 0.0,
+        sum_b: 0.0,
+        sum_a2: 0.0,
+        sum_b2: 0.0,
+        sum_ab: 0.0,
     }
 }
 
+/// Record one coupling step. Updates circular buffers, running sums,
+/// and computes Pearson correlation as congruence metric.
 pub fn couple_step(c: Coupling, a_val: f64, b_val: f64) -> Coupling with Mut, Div, Panic {
     var s = c
     let idx = s.history_len % 64
+
+    // If buffer has wrapped, subtract the old values from running sums
+    if s.history_len >= 64 {
+        let old_a = s.a_history[idx as usize]
+        let old_b = s.b_history[idx as usize]
+        s.sum_a = s.sum_a - old_a
+        s.sum_b = s.sum_b - old_b
+        s.sum_a2 = s.sum_a2 - old_a * old_a
+        s.sum_b2 = s.sum_b2 - old_b * old_b
+        s.sum_ab = s.sum_ab - old_a * old_b
+    }
+
+    // Store new values
     s.a_history[idx as usize] = a_val
     s.b_history[idx as usize] = b_val
 
+    // Add to running sums
+    s.sum_a = s.sum_a + a_val
+    s.sum_b = s.sum_b + b_val
+    s.sum_a2 = s.sum_a2 + a_val * a_val
+    s.sum_b2 = s.sum_b2 + b_val * b_val
+    s.sum_ab = s.sum_ab + a_val * b_val
+
+    // Update mean error via EMA
     let diff = a_val - b_val
     let abs_diff = if diff > 0.0 { diff } else { 0.0 - diff }
-
     s.mean_error = s.mean_error * 0.95 + abs_diff * 0.05
-    s.congruence_value = 1.0 / (1.0 + s.mean_error)
+
     s.history_len = s.history_len + 1
+
+    // Compute Pearson correlation: r = (n*Σab - Σa*Σb) / sqrt((n*Σa² - (Σa)²)(n*Σb² - (Σb)²))
+    let n_f = if s.history_len < 64 { s.history_len as f64 } else { 64.0 }
+    if n_f > 1.0 {
+        let num = n_f * s.sum_ab - s.sum_a * s.sum_b
+        let denom_a = n_f * s.sum_a2 - s.sum_a * s.sum_a
+        let denom_b = n_f * s.sum_b2 - s.sum_b * s.sum_b
+
+        if denom_a > 0.0001 && denom_b > 0.0001 {
+            let denom = sqrt_approx(denom_a * denom_b)
+            if denom > 0.0001 {
+                let r = num / denom
+                // Clamp to [0, 1] (we care about positive correlation)
+                s.congruence_value = if r < 0.0 { 0.0 } else { if r > 1.0 { 1.0 } else { r } }
+            }
+        }
+    }
+
     s
 }
 
@@ -46,4 +102,28 @@ pub fn congruence(c: Coupling) -> f64 {
 
 pub fn prediction_error(c: Coupling) -> f64 {
     c.mean_error
+}
+
+/// Mutual information estimated from Pearson r:
+/// MI ≈ -0.5 * ln(1 - r²) using Taylor: ln(1-x) ≈ -x - x²/2 - x³/3 - x⁴/4
+pub fn mutual_information(c: Coupling) -> f64 with Div, Panic {
+    let r = c.congruence_value
+    let r2 = r * r
+    if r2 > 0.99 { return 3.0 }
+    // Taylor series for -ln(1-x) = x + x²/2 + x³/3 + x⁴/4
+    let x = r2
+    let neg_ln = x + x * x / 2.0 + x * x * x / 3.0 + x * x * x * x / 4.0
+    0.5 * neg_ln
+}
+
+fn sqrt_approx(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y
 }

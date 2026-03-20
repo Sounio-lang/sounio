@@ -1,17 +1,31 @@
 //! stdlib/cybernetic/conversation.sio
-//! Pask's conversation theory: dual modeling with Bayesian updates
+//!
+//! Pask's Conversation Theory (1975) — Knowledge Through Dialogue
+//!
+//! Core principle: each participant maintains TWO models:
+//!   1. Their own belief (p_value)
+//!   2. Their model of the other's belief (p_model_of_q)
+//! These are SEPARATE and update independently via observation.
+//! Agreement = convergence of cross-models, not averaging of values.
 
 pub struct Conversation {
     p_id: i64,
     q_id: i64,
     topic_id: i64,
+    // Actual beliefs
     p_value: f64,
     p_variance: f64,
     q_value: f64,
     q_variance: f64,
-    p_model_of_q: f64,
-    q_model_of_p: f64,
+    // Cross-models (the core of Pask's theory)
+    p_model_of_q: f64,       // P's estimate of what Q believes
+    p_model_of_q_var: f64,   // P's confidence in that estimate
+    q_model_of_p: f64,       // Q's estimate of what P believes
+    q_model_of_p_var: f64,   // Q's confidence in that estimate
+    // Metrics
     agreement_value: f64,
+    model_accuracy_p: f64,   // |p_model_of_q - q_value|
+    model_accuracy_q: f64,   // |q_model_of_p - p_value|
     rounds: i64,
     converged: bool,
     convergence_threshold: f64,
@@ -27,8 +41,12 @@ pub fn conversation_new(p_id: i64, q_id: i64, topic_id: i64) -> Conversation {
         q_value: 0.0,
         q_variance: 1.0,
         p_model_of_q: 0.0,
+        p_model_of_q_var: 100.0,    // initially very uncertain about other
         q_model_of_p: 0.0,
+        q_model_of_p_var: 100.0,
         agreement_value: 0.0,
+        model_accuracy_p: 0.0,
+        model_accuracy_q: 0.0,
         rounds: 0,
         converged: false,
         convergence_threshold: 0.01,
@@ -41,41 +59,70 @@ pub fn set_models(conv: Conversation, p_val: f64, p_var: f64, q_val: f64, q_var:
     s.p_variance = p_var
     s.q_value = q_val
     s.q_variance = q_var
+    // Initial cross-models: P guesses Q is at Q's stated value (uncertain)
     s.p_model_of_q = q_val
+    s.p_model_of_q_var = q_var + 10.0
     s.q_model_of_p = p_val
+    s.q_model_of_p_var = p_var + 10.0
     s
 }
 
+/// One round of Pask conversation with proper dual modeling.
+///
+/// Phase 1: P observes Q's stated value and updates its cross-model.
+///          P then shifts own belief toward what it thinks Q believes.
+/// Phase 2: Q observes P's (now updated) stated value similarly.
+/// Phase 3: Compute agreement, model accuracy, convergence.
 pub fn converse(conv: Conversation) -> Conversation with Mut, Div, Panic {
     var s = conv
 
-    let p_prec = 1.0 / s.p_variance
-    let q_prec = 1.0 / s.q_variance
-    let total_prec = p_prec + q_prec
+    // ---- PHASE 1: P updates ----
+    // P observes Q's stated value (q_value) and updates p_model_of_q
+    let p_model_prec = 1.0 / (s.p_model_of_q_var + 0.001)
+    let q_stated_prec = 1.0 / (s.q_variance + 0.001)
+    let p_total_prec = p_model_prec + q_stated_prec
 
-    let p_new = (s.p_value * p_prec + s.q_value * q_prec) / total_prec
-    let q_new = (s.q_value * q_prec + s.p_value * p_prec) / total_prec
+    // Precision-weighted update of P's model of Q
+    s.p_model_of_q = (s.p_model_of_q * p_model_prec + s.q_value * q_stated_prec) / p_total_prec
+    s.p_model_of_q_var = 1.0 / p_total_prec
 
-    s.p_value = p_new
-    s.q_value = q_new
+    // P shifts own belief toward its model of Q (weighted by relative confidence)
+    let p_own_prec = 1.0 / (s.p_variance + 0.001)
+    let p_model_weight = 0.3
+    s.p_value = s.p_value * (1.0 - p_model_weight) + s.p_model_of_q * p_model_weight
+    s.p_variance = s.p_variance * 0.99  // slight certainty gain from dialogue
 
-    s.p_model_of_q = s.q_value
-    s.q_model_of_p = s.p_value
+    // ---- PHASE 2: Q updates ----
+    // Q observes P's (now updated) stated value and updates q_model_of_p
+    let q_model_prec = 1.0 / (s.q_model_of_p_var + 0.001)
+    let p_stated_prec = 1.0 / (s.p_variance + 0.001)
+    let q_total_prec = q_model_prec + p_stated_prec
 
-    let diff = s.p_value - s.q_value
-    let abs_diff = if diff > 0.0 { diff } else { 0.0 - diff }
+    s.q_model_of_p = (s.q_model_of_p * q_model_prec + s.p_value * p_stated_prec) / q_total_prec
+    s.q_model_of_p_var = 1.0 / q_total_prec
 
+    let q_model_weight = 0.3
+    s.q_value = s.q_value * (1.0 - q_model_weight) + s.q_model_of_p * q_model_weight
+    s.q_variance = s.q_variance * 0.99
+
+    // ---- PHASE 3: Metrics ----
+    let diff_pq = s.p_value - s.q_value
+    let abs_diff = if diff_pq > 0.0 { diff_pq } else { 0.0 - diff_pq }
+
+    // Model accuracy: how well does P know Q's actual belief?
+    let err_p = s.p_model_of_q - s.q_value
+    s.model_accuracy_p = if err_p > 0.0 { err_p } else { 0.0 - err_p }
+    let err_q = s.q_model_of_p - s.p_value
+    s.model_accuracy_q = if err_q > 0.0 { err_q } else { 0.0 - err_q }
+
+    // Agreement based on value convergence
     let abs_p = if s.p_value > 0.0 { s.p_value } else { 0.0 - s.p_value }
     let abs_q = if s.q_value > 0.0 { s.q_value } else { 0.0 - s.q_value }
     var denom = 0.001
-    if abs_p > denom {
-        denom = abs_p
-    }
-    if abs_q > denom {
-        denom = abs_q
-    }
-
+    if abs_p > denom { denom = abs_p }
+    if abs_q > denom { denom = abs_q }
     s.agreement_value = 1.0 - abs_diff / denom
+
     s.converged = abs_diff < s.convergence_threshold
     s.rounds = s.rounds + 1
     s
@@ -89,6 +136,18 @@ pub fn has_converged(conv: Conversation) -> bool {
     conv.converged
 }
 
+/// Shared understanding: midpoint of converged beliefs.
 pub fn shared_understanding(conv: Conversation) -> f64 with Div, Panic {
     (conv.p_value + conv.q_value) / 2.0
+}
+
+/// How well do participants model each other? Lower = better.
+pub fn model_accuracy(conv: Conversation) -> f64 with Div, Panic {
+    (conv.model_accuracy_p + conv.model_accuracy_q) / 2.0
+}
+
+/// Asymmetry: do they know each other equally well?
+pub fn conversation_asymmetry(conv: Conversation) -> f64 {
+    let diff = conv.model_accuracy_p - conv.model_accuracy_q
+    if diff > 0.0 { diff } else { 0.0 - diff }
 }

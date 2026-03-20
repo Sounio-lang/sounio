@@ -1,5 +1,9 @@
 //! stdlib/cybernetic/variety.sio
-//! Ashby's Law of Requisite Variety
+//! Ashby's Law of Requisite Variety (1956)
+//!
+//! Variety = log2(cardinality of distinct states)
+//! Shannon entropy H = -Sum p*log2(p) for frequency distributions
+//! Ashby's Law: reg_variety >= env_variety - outcome_variety
 
 pub struct VarietySystem {
     env_states: [i64; 32],
@@ -11,6 +15,9 @@ pub struct VarietySystem {
     env_variety: f64,
     reg_variety: f64,
     outcome_variety: f64,
+    env_entropy: f64,
+    reg_entropy: f64,
+    variety_deficit: f64,
 }
 
 pub fn variety_new() -> VarietySystem {
@@ -24,6 +31,9 @@ pub fn variety_new() -> VarietySystem {
         env_variety: 0.0,
         reg_variety: 0.0,
         outcome_variety: 0.0,
+        env_entropy: 0.0,
+        reg_entropy: 0.0,
+        variety_deficit: 0.0,
     }
 }
 
@@ -43,40 +53,144 @@ pub fn record_reg_state(vs: VarietySystem, state: i64) -> VarietySystem with Mut
     s
 }
 
-pub fn compute_variety(vs: VarietySystem) -> VarietySystem with Mut, Div, Panic {
+pub fn record_outcome(vs: VarietySystem, state: i64) -> VarietySystem with Mut, Panic {
     var s = vs
-    var env_v: f64 = 0.0
-    var reg_v: f64 = 0.0
-    var out_v: f64 = 0.0
-    var i: i64 = 0
-
-    i = 0
-    loop {
-        if i >= 32 { break }
-        if s.env_states[i as usize] > 0 {
-            env_v = env_v + 1.0
-        }
-        if s.reg_states[i as usize] > 0 {
-            reg_v = reg_v + 1.0
-        }
-        i = i + 1
-    }
-
-    i = 0
-    loop {
-        if i >= 8 { break }
-        if s.outcome_states[i as usize] > 0 {
-            out_v = out_v + 1.0
-        }
-        i = i + 1
-    }
-
-    s.env_variety = env_v
-    s.reg_variety = reg_v
-    s.outcome_variety = out_v
+    let idx = state % 8
+    s.outcome_states[idx as usize] = s.outcome_states[idx as usize] + 1
+    s.outcome_total = s.outcome_total + 1
     s
 }
 
-pub fn has_requisite_variety(vs: VarietySystem) -> bool with Div, Panic {
-    vs.reg_variety >= vs.env_variety
+// ============================================================================
+// Helpers: log2 approximation and Shannon entropy
+// ============================================================================
+
+/// ln(x) via Taylor series around 1: ln(x) = 2 * sum( ((x-1)/(x+1))^(2k+1) / (2k+1) )
+/// Valid for x > 0. Uses argument reduction for large x.
+fn ln_approx(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    // Argument reduction: factor out powers of 2
+    var val = x
+    var extra = 0.0
+    let ln2 = 0.6931471805599453
+    loop {
+        if val <= 2.0 { break }
+        val = val / 2.0
+        extra = extra + ln2
+    }
+    loop {
+        if val >= 0.5 { break }
+        val = val * 2.0
+        extra = extra - ln2
+    }
+    // Taylor: ln(val) = 2 * sum( t^(2k+1) / (2k+1) ) where t = (val-1)/(val+1)
+    let t = (val - 1.0) / (val + 1.0)
+    let t2 = t * t
+    var term = t
+    var result = t
+    // 8 terms for good accuracy
+    term = term * t2
+    result = result + term / 3.0
+    term = term * t2
+    result = result + term / 5.0
+    term = term * t2
+    result = result + term / 7.0
+    term = term * t2
+    result = result + term / 9.0
+    term = term * t2
+    result = result + term / 11.0
+    term = term * t2
+    result = result + term / 13.0
+    term = term * t2
+    result = result + term / 15.0
+    result * 2.0 + extra
+}
+
+/// log2(x) = ln(x) / ln(2)
+fn log2_approx(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    let ln2 = 0.6931471805599453
+    ln_approx(x) / ln2
+}
+
+/// Shannon entropy: H = -Sum (freq_i / total) * log2(freq_i / total)
+/// Works on first n entries of a 32-element frequency array.
+fn shannon_entropy(freqs: [i64; 32], total: i64, n: i64) -> f64 with Mut, Div, Panic {
+    if total <= 0 { return 0.0 }
+    let total_f = total as f64
+    var h = 0.0
+    var i: i64 = 0
+    loop {
+        if i >= n { break }
+        if freqs[i as usize] > 0 {
+            let p = (freqs[i as usize] as f64) / total_f
+            h = h - p * log2_approx(p)
+        }
+        i = i + 1
+    }
+    h
+}
+
+/// Count distinct nonzero slots in a 32-element array up to n entries.
+fn count_distinct(arr: [i64; 32], n: i64) -> i64 with Mut, Div, Panic {
+    var count: i64 = 0
+    var i: i64 = 0
+    loop {
+        if i >= n { break }
+        if arr[i as usize] > 0 {
+            count = count + 1
+        }
+        i = i + 1
+    }
+    count
+}
+
+/// Count distinct nonzero slots in an 8-element array up to n entries.
+fn count_distinct_8(arr: [i64; 8], n: i64) -> i64 with Mut, Div, Panic {
+    var count: i64 = 0
+    var i: i64 = 0
+    loop {
+        if i >= n { break }
+        if arr[i as usize] > 0 {
+            count = count + 1
+        }
+        i = i + 1
+    }
+    count
+}
+
+// ============================================================================
+// Core: compute variety (log2 cardinality) + entropy + deficit
+// ============================================================================
+
+pub fn compute_variety(vs: VarietySystem) -> VarietySystem with Mut, Div, Panic {
+    var s = vs
+
+    // Cardinality counts
+    let env_card = count_distinct(s.env_states, 32)
+    let reg_card = count_distinct(s.reg_states, 32)
+    let out_card = count_distinct_8(s.outcome_states, 8)
+
+    // Variety = log2(cardinality), or 0 if cardinality <= 0
+    s.env_variety = if env_card > 0 { log2_approx(env_card as f64) } else { 0.0 }
+    s.reg_variety = if reg_card > 0 { log2_approx(reg_card as f64) } else { 0.0 }
+    s.outcome_variety = if out_card > 0 { log2_approx(out_card as f64) } else { 0.0 }
+
+    // Shannon entropy for env and reg
+    s.env_entropy = shannon_entropy(s.env_states, s.env_total, 32)
+    s.reg_entropy = shannon_entropy(s.reg_states, s.reg_total, 32)
+
+    // Ashby deficit: reg must have >= env - outcome variety
+    s.variety_deficit = s.reg_variety - (s.env_variety - s.outcome_variety)
+    s
+}
+
+/// Ashby's Law: requisite variety iff reg_variety >= env_variety - outcome_variety
+pub fn has_requisite_variety(vs: VarietySystem) -> bool {
+    vs.variety_deficit >= 0.0
+}
+
+/// Return the variety deficit (positive means sufficient, negative means insufficient)
+pub fn variety_deficit(vs: VarietySystem) -> f64 {
+    vs.variety_deficit
 }

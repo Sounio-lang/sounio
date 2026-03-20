@@ -1,37 +1,129 @@
 //! stdlib/cybernetic/autopoiesis.sio
-//! Self-producing systems (Maturana/Varela 1972)
+//!
+//! Autopoiesis — Self-producing systems (Maturana/Varela 1972)
+//!
+//! An autopoietic system is a network of production processes that produces
+//! the very components constituting the network. Organizational closure
+//! (circular production) is the defining property.
+//!
+//! Production relations stored in a 16x16 adjacency matrix.
+//! Organizational closure verified via DFS cycle detection.
 
 pub struct AutopoieticSystem {
     component_count: i64,
+    relations: [i64; 256],           // 16x16 flattened: relations[i*16+j]=1 means i produces j
+    component_values: [f64; 16],
+    component_variances: [f64; 16],
+    component_active: [i64; 16],     // 1=active, 0=inactive
+    boundary_permeability: f64,
     alive: bool,
     generation: i64,
     total_perturbation: f64,
+    structural_drift_val: f64,
 }
 
 pub fn system_new(permeability: f64) -> AutopoieticSystem {
     AutopoieticSystem {
         component_count: 0,
-        alive: true,
+        relations: [0; 256],
+        component_values: [0.0; 16],
+        component_variances: [0.0; 16],
+        component_active: [0; 16],
+        boundary_permeability: permeability,
+        alive: false,
         generation: 0,
         total_perturbation: 0.0,
+        structural_drift_val: 0.0,
     }
 }
 
-pub fn add_component(sys: AutopoieticSystem, produced_by: i64, produces: i64, value: f64, variance: f64) -> AutopoieticSystem with Mut, Panic {
+/// Add a component with production relation: produced_by → this → produces
+pub fn add_component(sys: AutopoieticSystem, produced_by: i64, produces: i64, value: f64, variance: f64) -> AutopoieticSystem with Mut, Div, Panic {
     var s = sys
-    s.component_count = s.component_count + 1
+    let idx = s.component_count
+    if idx >= 16 { return s }
+
+    s.component_active[idx as usize] = 1
+    s.component_values[idx as usize] = value
+    s.component_variances[idx as usize] = variance
+
+    // Record production relation: produced_by → idx
+    if produced_by >= 0 && produced_by < 16 {
+        s.relations[(produced_by * 16 + idx) as usize] = 1
+    }
+    // Record production relation: idx → produces
+    if produces >= 0 && produces < 16 {
+        s.relations[(idx * 16 + produces) as usize] = 1
+    }
+
+    s.component_count = idx + 1
+    s.alive = check_closure(s)
     s
 }
 
-pub fn produce_cycle(sys: AutopoieticSystem) -> AutopoieticSystem with Mut {
+/// Run one production cycle: each active producer propagates to targets.
+/// Values average with GUM variance propagation.
+pub fn produce_cycle(sys: AutopoieticSystem) -> AutopoieticSystem with Mut, Div, Panic {
     var s = sys
+    var new_values: [f64; 16] = s.component_values
+    var new_vars: [f64; 16] = s.component_variances
+
+    var i = 0
+    while i < s.component_count {
+        if s.component_active[i as usize] == 1 {
+            var j = 0
+            while j < s.component_count {
+                if s.relations[(i * 16 + j) as usize] == 1 && s.component_active[j as usize] == 1 {
+                    let vi = s.component_values[i as usize]
+                    let vj = s.component_values[j as usize]
+                    let old_vj = vj
+                    new_values[j as usize] = (vi + vj) / 2.0
+                    new_vars[j as usize] = (s.component_variances[i as usize] + s.component_variances[j as usize]) / 4.0
+
+                    let delta = new_values[j as usize] - old_vj
+                    let abs_d = if delta < 0.0 { 0.0 - delta } else { delta }
+                    s.structural_drift_val = s.structural_drift_val + abs_d
+                }
+                j = j + 1
+            }
+        }
+        i = i + 1
+    }
+
+    s.component_values = new_values
+    s.component_variances = new_vars
     s.generation = s.generation + 1
     s
 }
 
-pub fn perturb(sys: AutopoieticSystem, value: f64, variance: f64) -> AutopoieticSystem with Mut {
+/// Perturb from environment. Affects structure (values) NOT organization (relations).
+pub fn perturb(sys: AutopoieticSystem, value: f64, variance: f64) -> AutopoieticSystem with Mut, Div, Panic {
     var s = sys
-    s.total_perturbation = s.total_perturbation + value
+    let scaled = value * s.boundary_permeability
+    let abs_scaled = if scaled < 0.0 { 0.0 - scaled } else { scaled }
+    s.total_perturbation = s.total_perturbation + abs_scaled
+
+    if s.component_count > 0 {
+        let per_comp = scaled / (s.component_count as f64)
+        var i = 0
+        while i < s.component_count {
+            if s.component_active[i as usize] == 1 {
+                s.component_values[i as usize] = s.component_values[i as usize] + per_comp
+                s.component_variances[i as usize] = s.component_variances[i as usize] + variance * s.boundary_permeability
+            }
+            i = i + 1
+        }
+    }
+    s
+}
+
+/// Deactivate a component and recheck closure.
+pub fn deactivate_component(sys: AutopoieticSystem, id: i64) -> AutopoieticSystem with Mut, Div, Panic {
+    var s = sys
+    if id >= 0 && id < 16 {
+        s.component_active[id as usize] = 0
+        s.alive = check_closure(s)
+    }
     s
 }
 
@@ -44,5 +136,58 @@ pub fn generation(sys: AutopoieticSystem) -> i64 {
 }
 
 pub fn structural_drift(sys: AutopoieticSystem) -> f64 {
-    sys.total_perturbation
+    sys.structural_drift_val + sys.total_perturbation
+}
+
+/// DFS cycle detection on the active component subgraph.
+/// For each active component, search for a path back to itself.
+/// A cycle = organizational closure = autopoiesis.
+fn check_closure(sys: AutopoieticSystem) -> bool with Mut, Div, Panic {
+    var start = 0
+    while start < sys.component_count {
+        if sys.component_active[start as usize] == 0 {
+            start = start + 1
+            continue
+        }
+
+        var stack: [i64; 16] = [-1; 16]
+        var stack_top = 0
+        var visited: [i64; 16] = [0; 16]
+        visited[start as usize] = 1
+
+        // Push direct successors of start
+        var j = 0
+        while j < sys.component_count {
+            if sys.relations[(start * 16 + j) as usize] == 1 && sys.component_active[j as usize] == 1 {
+                if j == start { return true }
+                if stack_top < 16 {
+                    stack[stack_top as usize] = j
+                    stack_top = stack_top + 1
+                }
+            }
+            j = j + 1
+        }
+
+        // DFS
+        while stack_top > 0 {
+            stack_top = stack_top - 1
+            let node = stack[stack_top as usize]
+            if visited[node as usize] == 1 { continue }
+            visited[node as usize] = 1
+
+            var k = 0
+            while k < sys.component_count {
+                if sys.relations[(node * 16 + k) as usize] == 1 && sys.component_active[k as usize] == 1 {
+                    if k == start { return true }
+                    if visited[k as usize] == 0 && stack_top < 16 {
+                        stack[stack_top as usize] = k
+                        stack_top = stack_top + 1
+                    }
+                }
+                k = k + 1
+            }
+        }
+        start = start + 1
+    }
+    false
 }

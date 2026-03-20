@@ -1,5 +1,13 @@
 //! stdlib/cybernetic/languaging.sio
-//! Maturana's Languaging: consensual domain coordination
+//! Maturana's Languaging: coordination of consensual coordination of action (1988)
+//!
+//! Languaging is NOT symbolic representation. It is:
+//! 1. A feedback loop where agents adjust actions based on the OTHER's history
+//! 2. A consensual domain that grows/shrinks based on coordination success
+//! 3. Distinction-making in the domain (linguistic marks)
+//!
+//! "Languaging is living in the coordination of consensual coordinations
+//!  of actions." — Maturana (1988)
 
 pub struct LanguagingPair {
     a_action_prefs: [f64; 32],
@@ -8,7 +16,18 @@ pub struct LanguagingPair {
     num_actions: i64,
     rounds: i64,
     consensus_count: i64,
+    a_last_action: i64,
+    b_last_action: i64,
+    coordination_streak: i64,
+    max_streak: i64,
+    domain_stability: f64,
+    distinction_count: i64,
+    distinction_pairs: [i64; 32],
 }
+
+// ============================================================================
+// Constructor
+// ============================================================================
 
 pub fn languaging_new(num_actions: i64) -> LanguagingPair with Mut, Div, Panic {
     var pair = LanguagingPair {
@@ -18,8 +37,18 @@ pub fn languaging_new(num_actions: i64) -> LanguagingPair with Mut, Div, Panic {
         num_actions: num_actions,
         rounds: 0,
         consensus_count: 0,
+        a_last_action: 0,
+        b_last_action: 0,
+        coordination_streak: 0,
+        max_streak: 0,
+        domain_stability: 0.0,
+        distinction_count: 0,
+        distinction_pairs: [0; 32],
     }
-    let init_val = 1.0 / (num_actions as f64)
+    // Initialize uniform preferences
+    var n = num_actions
+    if n < 1 { n = 1 }
+    let init_val = 1.0 / (n as f64)
     var i: i64 = 0
     loop {
         if i >= num_actions { break }
@@ -30,27 +59,115 @@ pub fn languaging_new(num_actions: i64) -> LanguagingPair with Mut, Div, Panic {
     pair
 }
 
-pub fn languaging_step(pair: LanguagingPair, a_action: i64, b_action: i64) -> LanguagingPair with Mut, Panic {
+// ============================================================================
+// Core: one round of languaging
+// ============================================================================
+
+/// Core operation: one round of languaging between two agents.
+///
+/// 1. Check consensus (a_action == b_action)
+/// 2. If consensual: boost both agents' prefs via EMA, increment streak
+/// 3. If not consensual: decay prefs, reset streak
+/// 4. Each agent adjusts toward the OTHER's last action (Maturana's feedback)
+/// 5. Update domain_stability
+/// 6. If streak > 3: draw linguistic distinction
+pub fn languaging_step(pair: LanguagingPair, a_action: i64, b_action: i64) -> LanguagingPair with Mut, Div, Panic {
     var s = pair
     let matched = a_action == b_action
 
     if matched {
-        s.action_freq[a_action as usize] = s.action_freq[a_action as usize] + 1
+        // Consensus: boost both agents' prefs for the shared action
+        let idx = a_action % s.num_actions
+        s.action_freq[idx as usize] = s.action_freq[idx as usize] + 1
         s.consensus_count = s.consensus_count + 1
+
+        // EMA boost for both agents on the consensus action
+        let a_old = s.a_action_prefs[idx as usize]
+        s.a_action_prefs[idx as usize] = a_old * 0.95 + 0.05
+        let b_old = s.b_action_prefs[idx as usize]
+        s.b_action_prefs[idx as usize] = b_old * 0.95 + 0.05
+
+        // Feedback: boost the OTHER's pref for the consensus action
+        // (responding to the other's coordination)
+        s.a_action_prefs[idx as usize] = s.a_action_prefs[idx as usize] + 0.02
+        s.b_action_prefs[idx as usize] = s.b_action_prefs[idx as usize] + 0.02
+
+        s.coordination_streak = s.coordination_streak + 1
+        if s.coordination_streak > s.max_streak {
+            s.max_streak = s.coordination_streak
+        }
+    } else {
+        // No consensus: decay both agents' prefs for their own actions
+        let a_idx = a_action % s.num_actions
+        let b_idx = b_action % s.num_actions
+        let a_old = s.a_action_prefs[a_idx as usize]
+        s.a_action_prefs[a_idx as usize] = a_old * 0.95
+        let b_old = s.b_action_prefs[b_idx as usize]
+        s.b_action_prefs[b_idx as usize] = b_old * 0.95
+
+        // Reset streak
+        s.coordination_streak = 0
     }
 
-    let boost = if matched { 0.05 } else { 0.0 }
-    s.a_action_prefs[a_action as usize] = s.a_action_prefs[a_action as usize] * 0.95 + boost
-    s.b_action_prefs[b_action as usize] = s.b_action_prefs[b_action as usize] * 0.95 + boost
+    // Maturana's core insight: each agent adjusts toward the OTHER's last action
+    // This is what makes it languaging rather than mere signaling
+    if s.rounds > 0 {
+        let other_a = s.b_last_action % s.num_actions
+        let other_b = s.a_last_action % s.num_actions
+        let a_toward = s.a_action_prefs[other_a as usize]
+        s.a_action_prefs[other_a as usize] = a_toward * 0.97 + 0.03
+        let b_toward = s.b_action_prefs[other_b as usize]
+        s.b_action_prefs[other_b as usize] = b_toward * 0.97 + 0.03
+    }
 
+    // Record last actions for next round's feedback
+    s.a_last_action = a_action
+    s.b_last_action = b_action
     s.rounds = s.rounds + 1
+
+    // Domain stability = streak / max(rounds, 1)
+    let denom = if s.rounds > 0 { s.rounds as f64 } else { 1.0 }
+    s.domain_stability = (s.coordination_streak as f64) / denom
+
+    // If streak > 3: automatically draw a linguistic distinction
+    if s.coordination_streak > 3 {
+        if matched {
+            s = linguistic_mark(s, a_action, b_action)
+        }
+    }
+
     s
 }
 
+// ============================================================================
+// Distinction-making in the consensual domain
+// ============================================================================
+
+/// Draw a distinction (linguistic mark) in the consensual domain.
+/// Records (action_a, action_b) as a distinction pair.
+pub fn linguistic_mark(pair: LanguagingPair, action_a: i64, action_b: i64) -> LanguagingPair with Mut, Panic {
+    var s = pair
+    // Check if we have room (16 pairs = 32 slots)
+    if s.distinction_count >= 16 {
+        return s
+    }
+    let base = s.distinction_count * 2
+    s.distinction_pairs[base as usize] = action_a
+    s.distinction_pairs[(base + 1) as usize] = action_b
+    s.distinction_count = s.distinction_count + 1
+    s
+}
+
+// ============================================================================
+// Queries
+// ============================================================================
+
+/// Has a consensual domain formed? (consensus_count >= threshold)
 pub fn has_consensual_domain(pair: LanguagingPair, threshold: i64) -> bool {
     pair.consensus_count >= threshold
 }
 
+/// Size of the consensual domain: count of actions with freq > 0
 pub fn domain_size(pair: LanguagingPair) -> i64 {
     var count: i64 = 0
     var i: i64 = 0
@@ -62,4 +179,9 @@ pub fn domain_size(pair: LanguagingPair) -> i64 {
         i = i + 1
     }
     count
+}
+
+/// Return domain stability metric
+pub fn domain_stability(pair: LanguagingPair) -> f64 {
+    pair.domain_stability
 }
