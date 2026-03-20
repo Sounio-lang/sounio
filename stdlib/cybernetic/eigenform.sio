@@ -1,0 +1,214 @@
+//! stdlib/cybernetic/eigenform.sio
+//!
+//! Eigenform Theory (von Foerster 1976, Kauffman 2003)
+//!
+//! An eigenform is a fixed point of an operator: if Op(x*) = x*, then x*
+//! is an eigenform of Op. This is the mathematical definition of an object
+//! as a stable pattern in observation.
+//!
+//! Key insight (Kauffman): eigenforms are isomorphic to Y combinators and
+//! Scott reflexive domains in type theory. Every observer creates eigenforms
+//! through recursive observation.
+//!
+//! # Example
+//!
+//! ```sounio
+//! use cybernetic::eigenform::{find_eigenform, is_eigenform, compute_eigenbehavior}
+//!
+//! fn averaging_observer(x: f64) -> f64 {
+//!     (x + 20.0) / 2.0
+//! }
+//!
+//! let result = find_eigenform(averaging_observer, 0.0, 0.001, 100)
+//! assert(result.converged)
+//! assert(result.value > 19.9 && result.value < 20.1)
+//! ```
+
+// ============================================================================
+// EIGENFORM RESULT
+// ============================================================================
+
+/// Result of eigenform search via fixed-point iteration.
+pub struct EigenformResult {
+    /// The fixed point x* where Op(x*) = x*
+    value: f64,
+
+    /// Variance (uncertainty) in the eigenform value
+    variance: f64,
+
+    /// Number of iterations until convergence
+    iterations: i64,
+
+    /// Did iteration converge within tolerance?
+    converged: bool,
+
+    /// Final residual |Op(x) - x|
+    residual: f64,
+}
+
+/// Eigenbehavior: stability analysis of an eigenform.
+///
+/// Kauffman's extension: given Op(x*) = x*, measure how quickly
+/// perturbations decay (Lyapunov-style analysis).
+pub struct Eigenbehavior {
+    /// The eigenform itself
+    eigenform: EigenformResult,
+
+    /// Convergence rate: |Op'(x*)| (slope of Op near x*)
+    convergence_rate: f64,
+
+    /// Stability radius: how far you can perturb before losing attraction
+    stability_radius: f64,
+
+    /// Is this eigenform globally stable?
+    is_stable: bool,
+}
+
+// ============================================================================
+// EIGENFORM SEARCH
+// ============================================================================
+
+/// Find an eigenform (fixed point) of an operation via Banach iteration.
+///
+/// Starting from initial, repeatedly apply Op until |Op(x) - x| < tolerance
+/// or max_iter is reached.
+///
+/// This is the core of object formation: continuous observation produces
+/// stable forms (eigenforms) that resist perturbation.
+pub fn find_eigenform(
+    op: fn(f64) -> f64,
+    initial: f64,
+    tolerance: f64,
+    max_iter: i64
+) -> EigenformResult with Mut, Div, Panic {
+    var x = initial
+    var prev_x = initial
+    var i = 0i64
+    var converged = false
+    var residual = 1.0
+
+    while i < max_iter {
+        let new_x = op(x)
+        let diff = if new_x > x { new_x - x } else { x - new_x }
+
+        if diff < tolerance {
+            converged = true
+            residual = diff
+            break
+        }
+
+        prev_x = x
+        x = new_x
+        i = i + 1
+    }
+
+    EigenformResult {
+        value: x,
+        variance: residual,
+        iterations: i,
+        converged: converged,
+        residual: residual,
+    }
+}
+
+/// Check if a value IS an eigenform of the given operation.
+pub fn is_eigenform(op: fn(f64) -> f64, candidate: f64, tolerance: f64) -> bool with Div {
+    let result = op(candidate)
+    let diff = if result > candidate { result - candidate } else { candidate - result }
+    diff < tolerance
+}
+
+/// Compute full eigenbehavior (eigenform + stability analysis).
+///
+/// Measures the slope of Op near the eigenform via finite difference.
+pub fn compute_eigenbehavior(
+    op: fn(f64) -> f64,
+    initial: f64,
+    tolerance: f64,
+    max_iter: i64,
+    delta: i64
+) -> Eigenbehavior with Mut, Div, Panic {
+    let eigenform = find_eigenform(op, initial, tolerance, max_iter)
+
+    if !eigenform.converged {
+        return Eigenbehavior {
+            eigenform: eigenform,
+            convergence_rate: 1.0,
+            stability_radius: 0.0,
+            is_stable: false,
+        }
+    }
+
+    // Estimate convergence rate: slope of Op near x*
+    let eps = 0.0001
+    let f_plus = op(eigenform.value + eps)
+    let f_minus = op(eigenform.value - eps)
+    let slope = if eps > 0.0 {
+        (f_plus - f_minus) / (2.0 * eps)
+    } else {
+        0.0
+    }
+
+    // Stability: |slope| < 1 → stable (attractive)
+    let abs_slope = if slope < 0.0 { 0.0 - slope } else { slope }
+    let is_stable = abs_slope < 1.0
+
+    // Stability radius (rough estimate): how far can you perturb?
+    let stability_radius = if abs_slope > 0.001 {
+        tolerance / (1.0 - abs_slope)
+    } else {
+        tolerance
+    }
+
+    Eigenbehavior {
+        eigenform: eigenform,
+        convergence_rate: abs_slope,
+        stability_radius: stability_radius,
+        is_stable: is_stable,
+    }
+}
+
+/// Meta-eigenform: is the eigenform-finding process itself stable?
+///
+/// Compute eigenforms starting from two slightly perturbed initial values.
+/// If the results converge to the same value, the process is (second-order) stable.
+pub fn meta_eigenform(
+    op: fn(f64) -> f64,
+    initial: f64,
+    tolerance: f64,
+    max_iter: i64
+) -> EigenformResult with Mut, Div, Panic {
+    let result1 = find_eigenform(op, initial, tolerance, max_iter)
+    let perturbed = initial + 0.001
+    let result2 = find_eigenform(op, perturbed, tolerance, max_iter)
+
+    let diff = if result2.value > result1.value {
+        result2.value - result1.value
+    } else {
+        result1.value - result2.value
+    }
+
+    EigenformResult {
+        value: result1.value,
+        variance: diff,
+        iterations: result1.iterations + result2.iterations,
+        converged: result1.converged && result2.converged && (diff < tolerance),
+        residual: result1.residual,
+    }
+}
+
+// ============================================================================
+// HELPERS
+// ============================================================================
+
+fn estimate_stability(op: fn(f64) -> f64, x: f64) -> f64 with Div, Panic {
+    let eps = 0.0001
+    let f_plus = op(x + eps)
+    let f_minus = op(x - eps)
+    let slope = if eps > 0.0 {
+        (f_plus - f_minus) / (2.0 * eps)
+    } else {
+        0.0
+    }
+    if slope < 0.0 { 0.0 - slope } else { slope }
+}

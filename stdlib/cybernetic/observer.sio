@@ -1,0 +1,238 @@
+//! stdlib/cybernetic/observer.sio
+//!
+//! Observer-Inclusion — The Core Principle of Second-Order Cybernetics
+//!
+//! Heinz von Foerster's fundamental insight: the observer is always
+//! part of the system being observed. There is no "view from nowhere."
+//!
+//! Consequences enforced by this module:
+//! 1. Observation ALWAYS returns Knowledge (never bare values)
+//! 2. Every observation perturbs the observer (drift accumulates)
+//! 3. Observers have blind spots (cannot observe their own observation)
+//! 4. Meta-observation (observing an observer) compounds uncertainty
+//!
+//! Niklas Luhmann (1984) extended this: a system cannot observe its own
+//! observation operation in the moment of observing. The distinction used
+//! to observe is itself unobservable FROM WITHIN that observation.
+
+// ============================================================================
+// OBSERVER
+// ============================================================================
+
+/// An observer embedded in the system it observes.
+pub struct Observer {
+    /// Unique identifier
+    id: i64,
+
+    /// Observer's own epistemic state
+    state_value: f64,
+    state_variance: f64,
+
+    /// Number of observations performed
+    observation_count: i64,
+
+    /// Accumulated observer drift — systematic bias
+    drift: f64,
+
+    /// Drift rate: how much drift accumulates per observation
+    drift_rate: f64,
+
+    /// Precision budget (graded effect): total precision available
+    precision_budget: f64,
+
+    /// Initial precision budget (for computing exhaustion ratio)
+    initial_budget: f64,
+}
+
+/// Result of an observation: the updated observer + the measurement
+pub struct Observation {
+    /// Updated observer state (drift increased, budget consumed)
+    observer: Observer,
+
+    /// Observed value
+    value: f64,
+
+    /// Total variance (measurement + drift + budget penalty)
+    variance: f64,
+}
+
+// ============================================================================
+// CONSTRUCTORS
+// ============================================================================
+
+/// Create a new observer with given drift rate.
+pub fn observer_new(id: i64, drift_rate: f64) -> Observer {
+    Observer {
+        id: id,
+        state_value: 0.0,
+        state_variance: 0.0,
+        observation_count: 0,
+        drift: 0.0,
+        drift_rate: drift_rate,
+        precision_budget: 1000.0,
+        initial_budget: 1000.0,
+    }
+}
+
+/// Create an observer with specific precision budget.
+pub fn observer_with_budget(id: i64, drift_rate: f64, budget: f64) -> Observer {
+    Observer {
+        id: id,
+        state_value: 0.0,
+        state_variance: 0.0,
+        observation_count: 0,
+        drift: 0.0,
+        drift_rate: drift_rate,
+        precision_budget: budget,
+        initial_budget: budget,
+    }
+}
+
+// ============================================================================
+// OBSERVATION — The core operation
+// ============================================================================
+
+/// Observe a system value. Returns an Observation with updated observer + reading.
+///
+/// The returned variance is NEVER just measurement_variance. It always includes:
+/// - measurement_variance: inherent instrument noise
+/// - observer drift: systematic accumulated bias
+/// - budget penalty: additional noise when precision budget is low
+///
+/// This enforces von Foerster's principle: observation is not passive.
+pub fn make_observation(
+    obs: Observer,
+    system_value: f64,
+    measurement_variance: f64
+) -> Observation with Mut, Div, Panic {
+    var o = obs
+
+    // 1. Observation perturbs the observer
+    o.observation_count = o.observation_count + 1
+    o.drift = o.drift + o.drift_rate
+
+    // 2. Consume precision budget
+    o.precision_budget = o.precision_budget - measurement_variance
+    if o.precision_budget < 0.0 {
+        o.precision_budget = 0.0
+    }
+
+    // 3. Compute budget exhaustion penalty
+    let budget_ratio = if o.initial_budget > 0.0 {
+        o.precision_budget / o.initial_budget
+    } else {
+        0.0
+    }
+    let budget_penalty = if budget_ratio > 0.01 {
+        0.0
+    } else {
+        (1.0 - budget_ratio) * measurement_variance
+    }
+
+    // 4. Combined uncertainty: measurement + drift + budget penalty
+    let total_variance = measurement_variance + o.drift * o.drift + budget_penalty
+
+    // 5. Update observer's self-model
+    o.state_value = system_value
+    o.state_variance = total_variance
+
+    Observation {
+        observer: o,
+        value: system_value,
+        variance: total_variance,
+    }
+}
+
+// ============================================================================
+// META-OBSERVATION — Observing an observer
+// ============================================================================
+
+/// Second-order observation: an observer observing another observer.
+///
+/// The outer observer sees the inner observer's state, but with
+/// compounded uncertainty (uncertainty about uncertainty).
+pub fn observe_observer(outer: Observer, observed_obs: Observer) -> Observation with Mut, Div, Panic {
+    let obs_uncertainty = observed_obs.state_variance + observed_obs.drift * observed_obs.drift
+    make_observation(outer, observed_obs.state_value, obs_uncertainty)
+}
+
+// ============================================================================
+// BLIND SPOTS — Luhmann's unobservable distinctions
+// ============================================================================
+
+/// The observer's blind spot: accumulated drift it cannot self-correct.
+pub fn blind_spot(obs: Observer) -> f64 {
+    obs.drift
+}
+
+/// The relative blind spot: drift as fraction of total uncertainty.
+pub fn relative_blind_spot(obs: Observer) -> f64 with Div, Panic {
+    let total = obs.state_variance + obs.drift * obs.drift
+    if total < 0.0000001 {
+        return 0.0
+    }
+    (obs.drift * obs.drift) / total
+}
+
+/// Budget exhaustion ratio: how much precision remains.
+pub fn precision_remaining(obs: Observer) -> f64 with Div, Panic {
+    if obs.initial_budget < 0.0000001 {
+        return 0.0
+    }
+    obs.precision_budget / obs.initial_budget
+}
+
+// ============================================================================
+// OBSERVER COMPARISON
+// ============================================================================
+
+/// Agreement between two observers: do they see the same thing?
+pub fn observer_agreement(a: Observer, b: Observer) -> f64 with Div, Panic {
+    let value_diff = abs_f64(a.state_value - b.state_value)
+    let combined_std = sqrt_f64(a.state_variance + b.state_variance)
+    if combined_std < 0.0000001 {
+        if value_diff < 0.0000001 { return 1.0 }
+        return 0.0
+    }
+    let z = value_diff / combined_std
+    let z2 = z * z / 2.0
+    if z2 > 10.0 {
+        0.0
+    } else if z2 > 3.0 {
+        0.01
+    } else {
+        1.0 - z2 + z2 * z2 / 2.0 - z2 * z2 * z2 / 6.0
+    }
+}
+
+/// Informative disagreement: how much we learn from observer divergence.
+pub fn informative_disagreement(a: Observer, b: Observer) -> f64 with Div, Panic {
+    let agreement = observer_agreement(a, b)
+    let avg_uncertainty = (a.state_variance + b.state_variance) / 2.0
+    if avg_uncertainty < 0.0000001 {
+        return 1.0 - agreement
+    }
+    (1.0 - agreement) / sqrt_f64(avg_uncertainty)
+}
+
+// ============================================================================
+// HELPERS
+// ============================================================================
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+fn sqrt_f64(x: f64) -> f64 {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y
+}
