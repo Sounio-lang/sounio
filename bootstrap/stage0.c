@@ -1043,7 +1043,7 @@ static Item *parse_program(void) {
             expect(TK_RBRACE);
         }
         else if (tk()==TK_MODULE) { item->kind = ITEM_MODULE; next(); while (tk()!=TK_EOF && tk()!=TK_FN && tk()!=TK_STRUCT && tk()!=TK_ENUM && tk()!=TK_IMPL && tk()!=TK_USE && tk()!=TK_PUB && tk()!=TK_TYPE) next(); continue; }
-        else if (tk()==TK_USE) { item->kind = ITEM_USE; while (tk()!=TK_EOF && tk()!=TK_FN && tk()!=TK_STRUCT && tk()!=TK_ENUM && tk()!=TK_IMPL && tk()!=TK_USE && tk()!=TK_PUB && tk()!=TK_TYPE) next(); continue; }
+        else if (tk()==TK_USE) { item->kind = ITEM_USE; next(); while (tk()!=TK_EOF && tk()!=TK_FN && tk()!=TK_STRUCT && tk()!=TK_ENUM && tk()!=TK_IMPL && tk()!=TK_USE && tk()!=TK_PUB && tk()!=TK_TYPE) next(); continue; }
         else if (tk()==TK_TYPE) { item->kind = ITEM_TYPE; while (tk()!=TK_LBRACE && tk()!=TK_EOF) next(); if (tk()==TK_LBRACE) { int depth=1; next(); while(depth>0&&tk()!=TK_EOF){if(tk()==TK_LBRACE)depth++;if(tk()==TK_RBRACE)depth--;next();} } continue; }
         else { next(); continue; }
         *tail = item; tail = &item->next;
@@ -1439,6 +1439,63 @@ static int g_break_patches[16][MAX_BREAKS];
 static int g_break_count[16];
 static int g_loop_depth = -1;
 
+/* Determine if an expression produces an f64 value */
+static int expr_is_float(Expr *e, Locals *loc) {
+    if (!e) return 0;
+    if (e->kind == EX_FLOAT) return 1;
+    if (e->kind == EX_IDENT) {
+        for (int i = loc->count-1; i >= 0; i--) {
+            if (name_eq(loc->names[i], e->name)) return loc->types[i] == 1;
+        }
+    }
+    if (e->kind == EX_BINARY) return expr_is_float(e->left, loc) || expr_is_float(e->right, loc);
+    if (e->kind == EX_UNARY) return expr_is_float(e->left, loc);
+    if (e->kind == EX_CALL) {
+        if (name_is(e->name, "sqrt") || name_is(e->name, "sin") ||
+            name_is(e->name, "cos") || name_is(e->name, "exp") ||
+            name_is(e->name, "log") || name_is(e->name, "fabs")) return 1;
+        /* Check user function return type */
+        int fi = find_fn(e->name);
+        if (fi >= 0 && g_fn_ret_type[fi] == 1) return 1;
+    }
+    if (e->kind == EX_CAST && name_is(e->cast_type, "f64")) return 1;
+    if (e->kind == EX_CAST && name_is(e->cast_type, "i64")) return 0;
+    if (e->kind == EX_IF) return expr_is_float(e->left, loc);
+    return 0;
+}
+
+/* Emit SSE2 binary op: rax=left, rcx=right → result in rax */
+static void emit_f64_binop(int op) {
+    /* movq xmm0, rax */
+    emit(0x66); emit(0x48); emit(0x0f); emit(0x6e); emit(0xc0);
+    /* movq xmm1, rcx */
+    emit(0x66); emit(0x48); emit(0x0f); emit(0x6e); emit(0xc9);
+    switch (op) {
+    case OP_ADD: emit(0xf2); emit(0x0f); emit(0x58); emit(0xc1); break; /* addsd xmm0, xmm1 */
+    case OP_SUB: emit(0xf2); emit(0x0f); emit(0x5c); emit(0xc1); break; /* subsd xmm0, xmm1 */
+    case OP_MUL: emit(0xf2); emit(0x0f); emit(0x59); emit(0xc1); break; /* mulsd xmm0, xmm1 */
+    case OP_DIV: emit(0xf2); emit(0x0f); emit(0x5e); emit(0xc1); break; /* divsd xmm0, xmm1 */
+    }
+    /* movq rax, xmm0 */
+    emit(0x66); emit(0x48); emit(0x0f); emit(0x7e); emit(0xc0);
+}
+
+/* Emit SSE2 comparison: rax=left, rcx=right → result (0 or 1) in rax */
+static void emit_f64_cmp(int op) {
+    emit(0x66); emit(0x48); emit(0x0f); emit(0x6e); emit(0xc0); /* movq xmm0, rax */
+    emit(0x66); emit(0x48); emit(0x0f); emit(0x6e); emit(0xc9); /* movq xmm1, rcx */
+    emit(0x66); emit(0x0f); emit(0x2f); emit(0xc1);             /* comisd xmm0, xmm1 */
+    emit(0xb8); emit(0x00); emit(0x00); emit(0x00); emit(0x00); /* mov eax, 0 (preserves flags) */
+    switch (op) {
+    case OP_EQ: emit(0x0f); emit(0x94); emit(0xc0); break;     /* sete al */
+    case OP_NE: emit(0x0f); emit(0x95); emit(0xc0); break;     /* setne al */
+    case OP_LT: emit(0x0f); emit(0x92); emit(0xc0); break;     /* setb al (below for unsigned/float) */
+    case OP_LE: emit(0x0f); emit(0x96); emit(0xc0); break;     /* setbe al */
+    case OP_GT: emit(0x0f); emit(0x97); emit(0xc0); break;     /* seta al */
+    case OP_GE: emit(0x0f); emit(0x93); emit(0xc0); break;     /* setae al */
+    }
+}
+
 static void compile_expr(Expr *e, Locals *loc) {
     if (!e) return;
     switch (e->kind) {
@@ -1501,12 +1558,19 @@ static void compile_expr(Expr *e, Locals *loc) {
             emit_mov_rax_imm64(1);
             break;
         }
+        {
+        int is_float = expr_is_float(e->left, loc) || expr_is_float(e->right, loc);
         compile_expr(e->left, loc);
         emit_push_rax();
         compile_expr(e->right, loc);
         emit(0x48); emit(0x89); emit(0xC1); /* mov rcx, rax */
         emit(0x58); /* pop rax (left) */
         /* now rax=left, rcx=right */
+        if (is_float && (e->op == OP_ADD || e->op == OP_SUB || e->op == OP_MUL || e->op == OP_DIV)) {
+            emit_f64_binop(e->op);
+        } else if (is_float && (e->op >= OP_EQ && e->op <= OP_GE)) {
+            emit_f64_cmp(e->op);
+        } else
         switch (e->op) {
         case OP_ADD: emit(0x48); emit(0x01); emit(0xC8); break; /* add rax,rcx */
         case OP_SUB: emit(0x48); emit(0x29); emit(0xC8); break; /* sub rax,rcx */
@@ -1531,6 +1595,7 @@ static void compile_expr(Expr *e, Locals *loc) {
                     emit(0x48); emit(0x0F); emit(0xB6); emit(0xC0); break;
         case OP_GE: emit(0x48); emit(0x39); emit(0xC8); emit(0x0F); emit(0x9D); emit(0xC0);
                     emit(0x48); emit(0x0F); emit(0xB6); emit(0xC0); break;
+        }
         }
         break;
     }
@@ -1820,9 +1885,16 @@ static void compile_expr(Expr *e, Locals *loc) {
     }
     case EX_CAST:
         compile_expr(e->left, loc);
-        /* as i8 → AND 0xFF; as usize → nop; as i64 → nop */
         if (name_is(e->cast_type, "i8") || name_is(e->cast_type, "u8")) {
             emit(0x48); emit(0x25); emit32(0xFF); /* and rax, 0xFF */
+        } else if (name_is(e->cast_type, "f64")) {
+            /* i64 → f64: cvtsi2sd xmm0, rax; movq rax, xmm0 */
+            emit(0xf2); emit(0x48); emit(0x0f); emit(0x2a); emit(0xc0);
+            emit(0x66); emit(0x48); emit(0x0f); emit(0x7e); emit(0xc0);
+        } else if (name_is(e->cast_type, "i64") && expr_is_float(e->left, loc)) {
+            /* f64 → i64: movq xmm0, rax; cvttsd2si rax, xmm0 */
+            emit(0x66); emit(0x48); emit(0x0f); emit(0x6e); emit(0xc0);
+            emit(0xf2); emit(0x48); emit(0x0f); emit(0x2c); emit(0xc0);
         }
         break;
     case EX_REF:
@@ -1864,6 +1936,10 @@ static void compile_block(Block *b, Locals *loc) {
             /* read_file returns a byte buffer pointer */
             if (s->expr && s->expr->kind == EX_CALL && name_is(s->expr->name, "read_file")) {
                 vtype = 3;
+            }
+            /* f64 type inference */
+            if (s->expr && expr_is_float(s->expr, loc)) {
+                vtype = 1;
             }
             loc->types[loc->count] = vtype;
             loc->count++;
@@ -1974,7 +2050,7 @@ static void compile_function(FnDef *fn) {
         emit_store_rax(slot);
         loc.names[loc.count] = p->name;
         loc.slots[loc.count] = slot;
-        loc.types[loc.count] = p->is_byte_array ? 3 : 0;
+        loc.types[loc.count] = p->is_byte_array ? 3 : name_is(p->type_name, "f64") ? 1 : 0;
         loc.count++;
     }
     /* Body */
@@ -2097,6 +2173,82 @@ int main(int argc, char **argv) {
     fclose(f);
     fprintf(stderr, "stage0: source=%s (%d bytes)\n", argv[1], g_src_len);
 
+    /* Preprocess imports: scan for `use` lines, load referenced files */
+    {
+        /* Determine base directory from input file path */
+        char basedir[512] = ".";
+        { const char *sl = strrchr(argv[1], '/');
+          if (sl) { int n = (int)(sl - argv[1]); if (n > 510) n = 510;
+                     memcpy(basedir, argv[1], (size_t)n); basedir[n] = 0; } }
+
+        /* Search paths: basedir, self-hosted/, stdlib/ */
+        const char *search_paths[] = { basedir, "self-hosted", "stdlib", NULL };
+        char imported[64][256]; int imported_count = 0;
+
+        int pass = 0;
+        while (pass < 5) { /* max 5 import passes to handle transitive deps */
+            int found_new = 0;
+            int p = 0;
+            while (p < g_src_len) {
+                /* Find lines starting with 'use ' */
+                if (p == 0 || g_src[p-1] == '\n') {
+                    if (g_src_len - p > 4 && strncmp(&g_src[p], "use ", 4) == 0) {
+                        /* Extract module path: use foo::bar::* → foo/bar */
+                        char modpath[256] = {0};
+                        int mp = 0, sp = p + 4;
+                        while (sp < g_src_len && g_src[sp] != '\n' && g_src[sp] != '{' &&
+                               !(g_src[sp] == ':' && sp+1 < g_src_len && g_src[sp+1] == ':' &&
+                                 sp+2 < g_src_len && g_src[sp+2] == '*') &&
+                               !(g_src[sp] == ':' && sp+1 < g_src_len && g_src[sp+1] == ':' &&
+                                 sp+2 < g_src_len && g_src[sp+2] == '{') &&
+                               mp < 254) {
+                            if (g_src[sp] == ':' && sp+1 < g_src_len && g_src[sp+1] == ':') {
+                                modpath[mp++] = '/'; sp += 2;
+                            } else {
+                                modpath[mp++] = g_src[sp++];
+                            }
+                        }
+                        modpath[mp] = 0;
+                        /* Skip if empty or already imported */
+                        if (mp > 0) {
+                            int dup = 0;
+                            for (int i = 0; i < imported_count; i++)
+                                if (strcmp(imported[i], modpath) == 0) { dup = 1; break; }
+                            if (!dup && imported_count < 64) {
+                                strcpy(imported[imported_count++], modpath);
+                                /* Try to find and load the file */
+                                for (int si = 0; search_paths[si]; si++) {
+                                    char filepath[768];
+                                    snprintf(filepath, sizeof(filepath), "%s/%s.sio", search_paths[si], modpath);
+                                    FILE *mf = fopen(filepath, "r");
+                                    if (!mf) {
+                                        /* Try mod.sio inside directory */
+                                        snprintf(filepath, sizeof(filepath), "%s/%s/mod.sio", search_paths[si], modpath);
+                                        mf = fopen(filepath, "r");
+                                    }
+                                    if (mf) {
+                                        /* Append a newline separator */
+                                        if (g_src_len < MAX_SOURCE-1) g_src[g_src_len++] = '\n';
+                                        int nr = (int)fread(&g_src[g_src_len], 1, (size_t)(MAX_SOURCE - g_src_len - 1), mf);
+                                        fclose(mf);
+                                        g_src_len += nr;
+                                        g_src[g_src_len] = 0;
+                                        fprintf(stderr, "stage0: import %s (%s, %d bytes)\n", modpath, filepath, nr);
+                                        found_new = 1;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                p++;
+            }
+            if (!found_new) break;
+            pass++;
+        }
+    }
+
     /* Lex */
     lex_all();
     fprintf(stderr, "stage0: tokens=%d\n", g_token_count);
@@ -2141,6 +2293,22 @@ int main(int argc, char **argv) {
     g_fn_ret_type[g_fn_count] = 0;
     int print_f64_idx = g_fn_count++;
 
+    g_fn_names[g_fn_count] = name_from("sqrt");
+    g_fn_ret_type[g_fn_count] = 0;
+    int sqrt_idx = g_fn_count++;
+
+    g_fn_names[g_fn_count] = name_from("sin");
+    g_fn_ret_type[g_fn_count] = 0;
+    int sin_idx = g_fn_count++;
+
+    g_fn_names[g_fn_count] = name_from("cos");
+    g_fn_ret_type[g_fn_count] = 0;
+    int cos_idx = g_fn_count++;
+
+    g_fn_names[g_fn_count] = name_from("fabs");
+    g_fn_ret_type[g_fn_count] = 0;
+    int fabs_idx = g_fn_count++;
+
     g_fn_names[g_fn_count] = name_from("print");
     g_fn_ret_type[g_fn_count] = 0;
     int print_idx = g_fn_count++;
@@ -2181,7 +2349,7 @@ int main(int argc, char **argv) {
     for (Item *it = program; it; it = it->next) {
         if (it->kind == ITEM_FN && it->fn && g_fn_count < MAX_FUNCS) {
             g_fn_names[g_fn_count] = it->fn->name;
-            g_fn_ret_type[g_fn_count] = 0; /* TODO: detect return type */
+            g_fn_ret_type[g_fn_count] = name_is(it->fn->return_type, "f64") ? 1 : 0;
             if (name_is(it->fn->name, "main")) g_main_fn_idx = g_fn_count;
             g_fn_count++;
         }
@@ -2373,8 +2541,60 @@ int main(int argc, char **argv) {
     fprintf(stderr, "stage0: builtin=print_f64 off=%d sz=%d\n",
             g_fn_offsets[print_f64_idx], g_code_len - g_fn_offsets[print_f64_idx]);
 
+    /* Emit math builtins: sqrt, sin, cos, fabs
+     * All follow same pattern: movq xmm0, rdi; <op> xmm0, xmm0; movq rax, xmm0; ret
+     * sin/cos use x87 FPU (fsin/fcos via sub rsp,8; movsd [rsp], xmm0; fld qword [rsp]; fsin; fstp qword [rsp]; movsd xmm0, [rsp]; add rsp,8)
+     */
+    #define EMIT_SSE2_UNARY(idx, name_str, op1, op2, op3, op4) do { \
+        g_fn_offsets[idx] = g_code_len; \
+        /* movq xmm0, rdi */ \
+        emit(0x66); emit(0x48); emit(0x0f); emit(0x6e); emit(0xc7); \
+        /* SSE2 op xmm0, xmm0 */ \
+        emit(op1); emit(op2); emit(op3); emit(op4); \
+        /* movq rax, xmm0 */ \
+        emit(0x66); emit(0x48); emit(0x0f); emit(0x7e); emit(0xc0); \
+        emit_ret(); \
+        fprintf(stderr, "stage0: builtin=%s off=%d sz=%d\n", name_str, \
+                g_fn_offsets[idx], g_code_len - g_fn_offsets[idx]); \
+    } while(0)
+
+    /* sqrtsd xmm0, xmm0 = F2 0F 51 C0 */
+    EMIT_SSE2_UNARY(sqrt_idx, "sqrt", 0xf2, 0x0f, 0x51, 0xc0);
+
+    /* fabs: andpd xmm0, [mask] — clear sign bit. Simpler: movq rax,xmm0; btr rax,63; movq xmm0,rax */
+    g_fn_offsets[fabs_idx] = g_code_len;
+    emit(0x66); emit(0x48); emit(0x0f); emit(0x6e); emit(0xc7); /* movq xmm0, rdi */
+    emit(0x66); emit(0x48); emit(0x0f); emit(0x7e); emit(0xc0); /* movq rax, xmm0 */
+    emit(0x48); emit(0x0f); emit(0xba); emit(0xf0); emit(0x3f); /* btr rax, 63 */
+    emit(0x66); emit(0x48); emit(0x0f); emit(0x6e); emit(0xc0); /* movq xmm0, rax */
+    emit(0x66); emit(0x48); emit(0x0f); emit(0x7e); emit(0xc0); /* movq rax, xmm0 */
+    emit_ret();
+    fprintf(stderr, "stage0: builtin=fabs off=%d sz=%d\n",
+            g_fn_offsets[fabs_idx], g_code_len - g_fn_offsets[fabs_idx]);
+
+    /* sin: use x87 FPU — sub rsp,8; movsd [rsp],xmm0; fld [rsp]; fsin; fstp [rsp]; movsd xmm0,[rsp]; add rsp,8 */
+    #define EMIT_X87_TRIG(idx, name_str, fop1, fop2) do { \
+        g_fn_offsets[idx] = g_code_len; \
+        emit(0x66); emit(0x48); emit(0x0f); emit(0x6e); emit(0xc7); /* movq xmm0, rdi */ \
+        emit(0x48); emit(0x83); emit(0xec); emit(0x08);             /* sub rsp, 8 */ \
+        emit(0xf2); emit(0x0f); emit(0x11); emit(0x04); emit(0x24); /* movsd [rsp], xmm0 */ \
+        emit(0xdd); emit(0x04); emit(0x24);                         /* fld qword [rsp] */ \
+        emit(fop1); emit(fop2);                                     /* fsin/fcos */ \
+        emit(0xdd); emit(0x1c); emit(0x24);                         /* fstp qword [rsp] */ \
+        emit(0xf2); emit(0x0f); emit(0x10); emit(0x04); emit(0x24); /* movsd xmm0, [rsp] */ \
+        emit(0x48); emit(0x83); emit(0xc4); emit(0x08);             /* add rsp, 8 */ \
+        emit(0x66); emit(0x48); emit(0x0f); emit(0x7e); emit(0xc0); /* movq rax, xmm0 */ \
+        emit_ret(); \
+        fprintf(stderr, "stage0: builtin=%s off=%d sz=%d\n", name_str, \
+                g_fn_offsets[idx], g_code_len - g_fn_offsets[idx]); \
+    } while(0)
+
+    /* fsin = D9 FE; fcos = D9 FF */
+    EMIT_X87_TRIG(sin_idx, "sin", 0xd9, 0xfe);
+    EMIT_X87_TRIG(cos_idx, "cos", 0xd9, 0xff);
+
     /* Compile user functions */
-    int fi = 11; /* skip all builtin slots (print_int, print_f64, print, arg_count, get_arg, read_file, file_size, write_file, read_byte, str_len, str_char_at) */
+    int fi = 15; /* skip builtin slots (print_int, print_f64, sqrt, sin, cos, fabs, print, arg_count, get_arg, read_file, file_size, write_file, read_byte, str_len, str_char_at) */
     for (Item *it = program; it; it = it->next) {
         if (it->kind == ITEM_FN && it->fn && fi < MAX_FUNCS) {
             g_fn_offsets[fi] = g_code_len;
