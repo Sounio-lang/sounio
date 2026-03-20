@@ -1955,10 +1955,19 @@ fn mb_collect_globals() with Mut, Panic, Div {
                     if TK_KIND[ti as usize] == 1 {
                         let tns = TK_START[ti as usize]
                         let tne = TK_END[ti as usize]
-                        if tne - tns == 2 {
+                        let elem_len = tne - tns
+                        if elem_len == 2 {
                             let b0 = source_byte(tns)
                             let b1 = source_byte(tns + 1)
                             if b0 == 105 && b1 == 56 { sz = 1 }
+                        }
+                        // Check if element type is a struct — compute element size
+                        if sz == 8 {
+                            let elem_pool_off = TK_IVAL[ti as usize]
+                            let elem_si = find_struct_b4(elem_pool_off, elem_len)
+                            if elem_si >= 0 {
+                                sz = struct_total_slots(elem_si) * 8
+                            }
                         }
                         ti = ti + 1
                     }
@@ -2496,12 +2505,21 @@ fn compile_node(node: i64) -> i64 with Mut, Panic, Div {
         compile_node(idx_nd)
         emit(0x48); emit(0x8B); emit(0x8D); emit_u32(0 - ((idx_save + 1) * 8))
         if asz == 1 {
+            // Byte array: base + index → load byte
             emit(0x48); emit(0x01); emit(0xC1)
             emit(0x48); emit(0x0F); emit(0xB6); emit(0x01)
-        } else {
+        } else if asz == 8 {
+            // 8-byte element: index * 8 → load qword
             emit(0x48); emit(0xC1); emit(0xE0); emit(0x03)
             emit(0x48); emit(0x01); emit(0xC1)
             emit(0x48); emit(0x8B); emit(0x01)
+        } else {
+            // Struct-typed element: index * asz → LEA to element base
+            // imul rax, rax, asz (48 69 C0 <imm32>)
+            emit(0x48); emit(0x69); emit(0xC0); emit_u32(asz)
+            emit(0x48); emit(0x01); emit(0xC1) // add rcx, rax
+            // For struct elements, return address (LEA) not value (MOV)
+            emit(0x48); emit(0x89); emit(0xC8) // mov rax, rcx — return element base address
         }
         return 0
     }
