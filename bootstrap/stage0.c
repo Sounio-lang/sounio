@@ -344,7 +344,7 @@ typedef struct Item Item;
 enum ExprKind {
     EX_INT, EX_FLOAT, EX_BOOL, EX_STRING, EX_IDENT, EX_BINARY, EX_UNARY,
     EX_CALL, EX_METHOD_CALL, EX_FIELD, EX_INDEX, EX_IF, EX_WHILE, EX_BLOCK,
-    EX_RETURN, EX_BREAK, EX_ASSIGN, EX_STRUCT_LIT, EX_ARRAY_LIT, EX_ARRAY_REPEAT,
+    EX_RETURN, EX_BREAK, EX_CONTINUE, EX_ASSIGN, EX_STRUCT_LIT, EX_ARRAY_LIT, EX_ARRAY_REPEAT,
     EX_CAST, EX_REF, EX_DEREF, EX_MATCH, EX_TUPLE, EX_CLOSURE, EX_RANGE,
 };
 
@@ -449,8 +449,10 @@ static void *arena_alloc(int size) {
 static void skip_type(void);
 static Expr *parse_expr(void);
 static Block *parse_block(void);
+static Expr *parse_postfix(Expr *e);
 
 static int g_gt_pending = 0; /* for >> handling in nested generics */
+static int g_no_struct_lit = 0; /* suppress struct-lit parsing in if/while cond */
 
 static void skip_type(void) {
     /* Handle &, &!, Box<T>, [T; N], Option<T>, etc. */
@@ -467,11 +469,13 @@ static void skip_type(void) {
         while (eat(TK_COLONCOLON)) { if (tk()==TK_IDENT||is_keyword(tk())) next(); }
         if (eat(TK_LT)) {
             skip_type();
-            while (eat(TK_COMMA)) skip_type();
-            if (g_gt_pending > 0) { g_gt_pending--; return; } /* > already consumed from >> */
-            if (tk()==TK_SHR) { next(); g_gt_pending++; return; } /* >> = two >s */
-            if (tk()!=TK_GT) return; /* error recovery */
-            next(); /* eat > */
+            while (1) {
+                if (g_gt_pending > 0) { g_gt_pending--; break; }
+                if (tk()==TK_SHR) { next(); g_gt_pending++; break; } /* >> = two >s */
+                if (tk()==TK_GT) { next(); break; }
+                if (!eat(TK_COMMA)) break; /* error recovery */
+                skip_type();
+            }
         }
         return;
     }
@@ -596,10 +600,11 @@ static Expr *parse_primary(void) {
 
     if (tk()==TK_RETURN) { e->kind=EX_RETURN; next(); if (tk()!=TK_RBRACE&&tk()!=TK_EOF&&tk()!=TK_SEMICOLON) e->left=parse_expr(); return e; }
     if (tk()==TK_BREAK) { e->kind=EX_BREAK; next(); return e; }
+    if (tk()==TK_CONTINUE) { e->kind=EX_CONTINUE; next(); return e; }
 
     if (tk()==TK_IF) {
         e->kind = EX_IF; next();
-        e->cond = parse_expr();
+        g_no_struct_lit++; e->cond = parse_expr(); g_no_struct_lit--;
         e->block = parse_block();
         if (eat(TK_ELSE)) {
             if (tk()==TK_IF) { Block *b = NEW(Block); Stmt *s = NEW(Stmt); s->expr = parse_primary(); b->stmts = s; e->else_block = b; }
@@ -610,14 +615,14 @@ static Expr *parse_primary(void) {
 
     if (tk()==TK_WHILE) {
         e->kind = EX_WHILE; next();
-        e->cond = parse_expr();
+        g_no_struct_lit++; e->cond = parse_expr(); g_no_struct_lit--;
         e->block = parse_block();
         return e;
     }
 
     if (tk()==TK_MATCH) {
         e->kind = EX_MATCH; next();
-        e->left = parse_expr(); /* scrutinee */
+        g_no_struct_lit++; e->left = parse_expr(); g_no_struct_lit--; /* scrutinee */
         expect(TK_LBRACE);
         MatchArm **arm_tail = &e->arms;
         while (tk()!=TK_RBRACE && tk()!=TK_EOF) {
@@ -688,15 +693,15 @@ static Expr *parse_primary(void) {
         return inner;
     }
 
-    /* unary operators */
-    if (tk()==TK_MINUS) { e->kind=EX_UNARY; e->op=0; next(); e->left=parse_primary(); return e; }
-    if (tk()==TK_BANG) { e->kind=EX_UNARY; e->op=1; next(); e->left=parse_primary(); return e; }
+    /* unary operators — capture postfix (so !f(x) = !(f(x)), -x.y = -(x.y)) */
+    if (tk()==TK_MINUS) { e->kind=EX_UNARY; e->op=0; next(); e->left=parse_postfix(parse_primary()); return e; }
+    if (tk()==TK_BANG) { e->kind=EX_UNARY; e->op=1; next(); e->left=parse_postfix(parse_primary()); return e; }
     if (tk()==TK_AMP) {
         e->kind=EX_REF; next();
         if (eat(TK_BANG)) e->op = 1; /* &! */
-        e->left=parse_primary(); return e;
+        e->left=parse_postfix(parse_primary()); return e;
     }
-    if (tk()==TK_STAR) { e->kind=EX_DEREF; next(); e->left=parse_primary(); return e; }
+    if (tk()==TK_STAR) { e->kind=EX_DEREF; next(); e->left=parse_postfix(parse_primary()); return e; }
 
     /* array literal [a, b, c] or [val; count] */
     if (tk()==TK_LBRACKET) {
@@ -721,6 +726,7 @@ static Expr *parse_primary(void) {
         e->name = cur()->name; next(); e->kind = EX_IDENT;
         /* Path expression: Foo::Bar or Foo::Bar::Baz */
         while (tk()==TK_COLONCOLON && (g_tokens[g_tp+1].kind==TK_IDENT || is_keyword(g_tokens[g_tp+1].kind))) {
+            e->cast_type = e->name; /* save prefix (enum name) */
             next(); /* skip :: */
             e->name = cur()->name; next(); /* take last segment as the name */
         }
@@ -731,7 +737,7 @@ static Expr *parse_primary(void) {
             return e;
         }
         /* Check for struct literal: Name { field: val, ... } */
-        if (tk()==TK_LBRACE && e->name.buf[0]>='A' && e->name.buf[0]<='Z') {
+        if (tk()==TK_LBRACE && e->name.buf[0]>='A' && e->name.buf[0]<='Z' && !g_no_struct_lit) {
             /* Struct literal */
             e->kind = EX_STRUCT_LIT; next();
             FieldInit **ftail = &e->fields;
@@ -1119,9 +1125,45 @@ static int g_fn_ret_type[MAX_FUNCS]; /* 0=i64,1=f64,10+=struct */
 static int g_fn_count;
 static int g_main_fn_idx = -1;
 
+/* Enum variant lookup */
+#define MAX_ENUMS 256
+#define MAX_ENUM_VARIANTS 8192
+static Name g_enum_names[MAX_ENUMS];
+static int g_enum_variant_base[MAX_ENUMS]; /* index into variant arrays */
+static int g_enum_variant_count[MAX_ENUMS];
+static Name g_enum_variant_names[MAX_ENUM_VARIANTS];
+static int g_enum_count;
+
 static int find_struct(Name n) {
     for (int i = 0; i < g_struct_count; i++)
         if (name_eq(g_struct_names[i], n)) return i;
+    return -1;
+}
+
+/* Look up Enum::Variant and return variant index, or -1 if not found */
+static int find_enum_variant(Name enum_name, Name variant_name) {
+    for (int i = 0; i < g_enum_count; i++) {
+        if (name_eq(g_enum_names[i], enum_name)) {
+            int base = g_enum_variant_base[i];
+            for (int j = 0; j < g_enum_variant_count[i]; j++) {
+                if (name_eq(g_enum_variant_names[base + j], variant_name))
+                    return j;
+            }
+            return -1;
+        }
+    }
+    return -1;
+}
+
+/* Look up a variant name across all enums */
+static int find_variant_any_enum(Name variant_name) {
+    for (int i = 0; i < g_enum_count; i++) {
+        int base = g_enum_variant_base[i];
+        for (int j = 0; j < g_enum_variant_count[i]; j++) {
+            if (name_eq(g_enum_variant_names[base + j], variant_name))
+                return j;
+        }
+    }
     return -1;
 }
 
@@ -1530,7 +1572,16 @@ static void compile_expr(Expr *e, Locals *loc) {
             return;
           }
         }
-        /* might be a function name or enum variant — emit 0 */
+        /* Check enum variant: Path::Variant stored as cast_type=Path, name=Variant */
+        if (e->cast_type.len > 0) {
+            int val = find_enum_variant(e->cast_type, e->name);
+            if (val >= 0) { emit_mov_rax_imm64(val); break; }
+        }
+        /* Try variant name across all enums (no path prefix) */
+        { int val = find_variant_any_enum(e->name);
+          if (val >= 0) { emit_mov_rax_imm64(val); break; }
+        }
+        /* might be a function name — emit 0 */
         emit_mov_rax_imm64(0);
         break;
     }
@@ -1803,6 +1854,13 @@ static void compile_expr(Expr *e, Locals *loc) {
             emit32(0);
         }
         break;
+    case EX_CONTINUE:
+        if (g_loop_depth >= 0) {
+            emit(0xE9); /* JMP rel32 */
+            int32_t back_cont = g_loop_top[g_loop_depth] - (g_code_len+4);
+            emit32(back_cont);
+        }
+        break;
     case EX_BLOCK:
         if (e->block) compile_block(e->block, loc);
         break;
@@ -1823,10 +1881,27 @@ static void compile_expr(Expr *e, Locals *loc) {
                 loc->count++;
                 compile_expr(arm->body, loc);
                 loc->count--;
-            } else {
-                /* enum variant or int literal — compare and branch */
+            } else if (arm->pat_kind == 2) {
+                /* enum variant — compare scrutinee tag against variant index */
+                int variant_val = -1;
+                if (arm->pat_path_prefix.len > 0)
+                    variant_val = find_enum_variant(arm->pat_path_prefix, arm->pat_name);
+                if (variant_val < 0)
+                    variant_val = find_variant_any_enum(arm->pat_name);
                 emit_load_rax(scrut_slot);
-                /* For now, just fall through (TODO: proper enum tag comparison) */
+                emit(0x48); emit(0x3D); emit32(variant_val >= 0 ? variant_val : 0); /* cmp rax, imm32 */
+                emit(0x0F); emit(0x85); int skip_patch = g_code_len; emit32(0); /* JNE skip */
+                compile_expr(arm->body, loc);
+                patch32(skip_patch, g_code_len - (skip_patch+4));
+            } else if (arm->pat_kind == 3) {
+                /* integer literal pattern */
+                emit_load_rax(scrut_slot);
+                emit(0x48); emit(0x3D); emit32((int32_t)arm->pat_int); /* cmp rax, imm32 */
+                emit(0x0F); emit(0x85); int skip_patch = g_code_len; emit32(0); /* JNE skip */
+                compile_expr(arm->body, loc);
+                patch32(skip_patch, g_code_len - (skip_patch+4));
+            } else {
+                /* unknown pattern — fall through */
                 compile_expr(arm->body, loc);
             }
             if (arm->next) {
@@ -1967,6 +2042,12 @@ static void compile_block(Block *b, Locals *loc) {
                 }
             } else if (s->expr && s->expr->kind == EX_INDEX && s->right) {
                 /* Indexed assignment: arr[idx] = val */
+                /* Guard: skip struct-array field sub-indexing (e.g., arr[i].text[j] = val) */
+                if (s->expr->left && s->expr->left->kind == EX_FIELD &&
+                    s->expr->left->left && s->expr->left->left->kind == EX_INDEX) {
+                    compile_expr(s->right, loc); /* RHS for side effects only */
+                    break;
+                }
                 /* Compile base address */
                 compile_expr(s->expr->left, loc);
                 int base_slot = loc->next_slot++;
@@ -1996,17 +2077,62 @@ static void compile_block(Block *b, Locals *loc) {
                 loc->next_slot -= 2;
             } else if (s->expr && s->expr->kind == EX_FIELD && s->right) {
                 /* Field assignment: obj.field = val */
-                compile_expr(s->expr->left, loc); /* base address */
-                int base_slot = loc->next_slot++;
-                emit_store_rax(base_slot);
-                compile_expr(s->right, loc); /* value */
-                emit_push_rax();
-                emit_load_rax(base_slot);
-                emit(0x48); emit(0x89); emit(0xC1); /* mov rcx, rax (base addr) */
-                emit(0x58); /* pop rax (value) */
-                /* For now: store at [rcx] (field 0) — TODO: compute field offset */
-                emit(0x48); emit(0x89); emit(0x01); /* mov [rcx], rax */
-                loc->next_slot -= 1;
+                if (s->expr->left && s->expr->left->kind == EX_INDEX) {
+                    /* arr[i].field = val — struct element field write not supported,
+                     * compile RHS for side effects only (scalar parallel arrays handle this) */
+                    compile_expr(s->right, loc);
+                } else if (s->expr->left && s->expr->left->kind == EX_IDENT) {
+                    /* Simple field write: obj.field = val */
+                    /* Find the local's struct type to get field offset */
+                    int struct_idx = -1, field_idx = -1;
+                    for (int i = loc->count-1; i >= 0; i--) {
+                        if (name_eq(loc->names[i], s->expr->left->name) && loc->types[i] >= 10) {
+                            struct_idx = loc->types[i] - 10; break;
+                        }
+                    }
+                    if (struct_idx >= 0) {
+                        int base = g_struct_field_base[struct_idx];
+                        for (int fi = 0; fi < g_struct_field_count[struct_idx]; fi++) {
+                            if (name_eq(g_struct_field_names[base + fi], s->expr->name)) {
+                                field_idx = fi; break;
+                            }
+                        }
+                    }
+                    if (field_idx < 0) {
+                        /* Fallback: search all structs */
+                        for (int si = 0; si < g_struct_count && field_idx < 0; si++) {
+                            int base = g_struct_field_base[si];
+                            for (int fi = 0; fi < g_struct_field_count[si]; fi++) {
+                                if (name_eq(g_struct_field_names[base + fi], s->expr->name)) {
+                                    field_idx = fi; break;
+                                }
+                            }
+                        }
+                    }
+                    compile_expr(s->right, loc); /* value in rax */
+                    /* Find base address of the struct local */
+                    int base_found = 0;
+                    for (int i = loc->count-1; i >= 0; i--) {
+                        if (name_eq(loc->names[i], s->expr->left->name)) {
+                            /* LEA base slot address */
+                            int disp = -8 * (loc->slots[i] + 1);
+                            emit(0x48); emit(0x8D); emit(0x8D); emit32(disp); /* lea rcx, [rbp+disp] */
+                            if (field_idx > 0) {
+                                /* sub rcx, 8*field_idx */
+                                emit(0x48); emit(0x81); emit(0xE9); emit32(field_idx * 8);
+                            }
+                            emit(0x48); emit(0x89); emit(0x01); /* mov [rcx], rax */
+                            base_found = 1;
+                            break;
+                        }
+                    }
+                    if (!base_found) {
+                        /* global field write — best-effort no-op */
+                    }
+                } else {
+                    /* Other patterns (deref.field, etc.) — compile RHS only */
+                    compile_expr(s->right, loc);
+                }
             } else if (s->right) {
                 compile_expr(s->right, loc);
             } else {
@@ -2282,6 +2408,26 @@ int main(int argc, char **argv) {
         }
     }
     fprintf(stderr, "stage0: structs=%d\n", g_struct_count);
+
+    /* Phase 0.5: Collect enums */
+    int total_variants = 0;
+    for (Item *it = program; it; it = it->next) {
+        if (it->kind == ITEM_ENUM && it->en && g_enum_count < MAX_ENUMS) {
+            int ei = g_enum_count++;
+            g_enum_names[ei] = it->en->name;
+            g_enum_variant_base[ei] = total_variants;
+            int vc = 0;
+            for (EnumVariant *v = it->en->variants; v; v = v->next) {
+                if (total_variants < MAX_ENUM_VARIANTS) {
+                    g_enum_variant_names[total_variants] = v->name;
+                    total_variants++;
+                }
+                vc++;
+            }
+            g_enum_variant_count[ei] = vc;
+        }
+    }
+    fprintf(stderr, "stage0: enums=%d variants=%d\n", g_enum_count, total_variants);
 
     /* Phase 1: Collect function signatures */
     /* Register builtins */

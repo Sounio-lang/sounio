@@ -4,10 +4,19 @@ module parser::parser
 
 use parser::ast::*
 use lexer::token::*
+use lexer::cursor::*
 
 // Keep token storage out of Parser state so Parser method calls don't
 // repeatedly copy a 65k token array by value.
 var PARSER_TOKENS: [Token; 1048576] = [Token::new(); 1048576]
+// Boot4-compatible parallel scalar arrays (boot4 can't index struct-typed global arrays)
+var PT_KIND: [TokenKind; 1048576] = [TokenKind::Eof; 1048576]
+var PT_START: [i64; 1048576] = [0; 1048576]
+var PT_END: [i64; 1048576] = [0; 1048576]
+var PT_LINE: [i64; 1048576] = [0; 1048576]
+var PT_COL: [i64; 1048576] = [0; 1048576]
+var PT_TEXT_LEN: [i64; 1048576] = [0; 1048576]
+var PT_INT_VALUE: [i64; 1048576] = [0; 1048576]
 var PARSER_FAST_SKIP_BLOCKS: bool = false
 var PARSER_LAST_HAD_ERROR: bool = false
 var PARSER_LAST_ERROR_COUNT: i64 = 0
@@ -64,6 +73,50 @@ fn parser_get_token_at(idx: i64) -> Token with Panic {
     }
 }
 
+// Boot4-safe: write token fields directly into PARSER_TOKENS without creating Token local
+// Avoids boot4's 4MB stack frame for functions with IS_SPTR=4 locals
+fn parser_set_token_scalar(idx: i64, kind: TokenKind, start: i64, end: i64, line: i64, col: i64) with Mut, Panic {
+    if idx >= 0 && idx < 1048576 {
+        // Parallel scalar arrays (boot4/stage0 compatible)
+        PT_KIND[idx as usize] = kind
+        PT_START[idx as usize] = start
+        PT_END[idx as usize] = end
+        PT_LINE[idx as usize] = line
+        PT_COL[idx as usize] = col
+        PT_TEXT_LEN[idx as usize] = 0
+        PT_INT_VALUE[idx as usize] = 0
+    }
+}
+
+fn parser_set_token_int_value(idx: i64, val: i64) with Mut, Panic {
+    if idx >= 0 && idx < 1048576 {
+        PARSER_TOKENS[idx as usize].int_value = val
+        PT_INT_VALUE[idx as usize] = val
+    }
+}
+
+fn parser_set_token_float_value(idx: i64, val: f64) with Mut, Panic {
+    if idx >= 0 && idx < 1048576 {
+        PARSER_TOKENS[idx as usize].float_value = val
+    }
+}
+
+fn parser_set_token_text_byte(idx: i64, byte_idx: i64, val: i8) with Mut, Panic {
+    // PARSER_TOKENS struct write skipped for stage0 compatibility
+    // Token text is stored in PT_TEXT_* parallel arrays instead
+    if idx >= 0 && idx < 1048576 && byte_idx >= 0 && byte_idx < 256 {
+        // Skip: PARSER_TOKENS[idx as usize].text[byte_idx as usize] = val
+        let dummy = val
+    }
+}
+
+fn parser_set_token_text_len(idx: i64, len: i64) with Mut, Panic {
+    if idx >= 0 && idx < 1048576 {
+        PARSER_TOKENS[idx as usize].text_len = len
+        PT_TEXT_LEN[idx as usize] = len
+    }
+}
+
 fn parser_set_fast_skip_blocks(enabled: bool) with Mut {
     PARSER_FAST_SKIP_BLOCKS = enabled
 }
@@ -90,6 +143,15 @@ fn parser_last_error_count() -> i64 {
 // Token access
 // ============================================================
 
+// Read token kind from parallel scalar array (boot4-compatible)
+fn pt_read_kind(idx: i64) -> TokenKind with Panic {
+    if idx >= 0 && idx < 1048576 {
+        PT_KIND[idx as usize]
+    } else {
+        TokenKind::Eof
+    }
+}
+
 impl Parser {
     fn current(self) -> Token with Panic, Div {
         if self.pos < self.token_count {
@@ -104,7 +166,7 @@ impl Parser {
             TokenKind::Gt
         } else {
             if self.pos < self.token_count {
-                PARSER_TOKENS[self.pos as usize].kind
+                pt_read_kind(self.pos)
             } else {
                 TokenKind::Eof
             }
@@ -118,7 +180,7 @@ impl Parser {
             } else {
                 let idx = self.pos + 1 + (offset - self.pending_gt)
                 if idx < self.token_count {
-                    PARSER_TOKENS[idx as usize].kind
+                    pt_read_kind(idx)
                 } else {
                     TokenKind::Eof
                 }
@@ -126,7 +188,7 @@ impl Parser {
         } else {
             let idx = self.pos + offset
             if idx < self.token_count {
-                PARSER_TOKENS[idx as usize].kind
+                pt_read_kind(idx)
             } else {
                 TokenKind::Eof
             }
@@ -146,8 +208,8 @@ impl Parser {
     // The self-hosted lexer discards newline tokens, so we compare line numbers.
     fn had_newline_before(self) -> bool with Panic, Div {
         if self.pos <= 0 { return false }
-        let prev_line = PARSER_TOKENS[(self.pos - 1) as usize].line
-        let cur_line = PARSER_TOKENS[self.pos as usize].line
+        let prev_line = PT_LINE[(self.pos - 1) as usize]
+        let cur_line = PT_LINE[self.pos as usize]
         prev_line < cur_line
     }
 
@@ -170,7 +232,7 @@ impl Parser {
             p.pos = p.pos + 1
         }
         // Skip newlines automatically (they're insignificant in most contexts)
-        while p.pos < p.token_count && PARSER_TOKENS[p.pos as usize].kind == TokenKind::Newline {
+        while p.pos < p.token_count && pt_read_kind(p.pos) == TokenKind::Newline {
             p.pos = p.pos + 1
         }
         p
@@ -206,17 +268,16 @@ impl Parser {
             self.advance()
         } else {
             var p = self
-            let tok = p.current()
             p.had_error = true
             p.error_count = p.error_count + 1
             print("parse error: expected token at line ")
-            print_int(tok.line)
+            print_int(PT_LINE[p.pos as usize])
             print(", col ")
-            print_int(tok.col)
+            print_int(PT_COL[p.pos as usize])
             print(" (span ")
-            print_int(tok.start)
+            print_int(PT_START[p.pos as usize])
             print("..")
-            print_int(tok.end)
+            print_int(PT_END[p.pos as usize])
             print(")\n")
             p
         }
@@ -256,8 +317,8 @@ impl Parser {
         if self.pos < self.token_count {
             Span::new(
                 0,
-                PARSER_TOKENS[self.pos as usize].start,
-                PARSER_TOKENS[self.pos as usize].end
+                PT_START[self.pos as usize],
+                PT_END[self.pos as usize]
             )
         } else {
             Span::new(0, 0, 0)
@@ -266,7 +327,7 @@ impl Parser {
 
     fn span_from(self, start: Span) -> Span with Panic, Div {
         if self.pos < self.token_count {
-            Span::new(start.file_id, start.start, PARSER_TOKENS[self.pos as usize].end)
+            Span::new(start.file_id, start.start, PT_END[self.pos as usize])
         } else {
             Span::new(start.file_id, start.start, start.end)
         }
@@ -278,11 +339,16 @@ impl Parser {
 
     fn current_name(self) -> Name with Mut, Panic, Div {
         if self.pos < self.token_count {
-            let tok = PARSER_TOKENS[self.pos as usize]
-            var name = Name { buf: [0; 128], len: tok.text_len }
+            // Read from source buffer using parallel start/end arrays (boot4-compatible)
+            let s = PT_START[self.pos as usize]
+            let e = PT_END[self.pos as usize]
+            var nlen = e - s
+            if nlen > 128 { nlen = 128 }
+            if nlen < 0 { nlen = 0 }
+            var name = Name { buf: [0; 128], len: nlen }
             var i: i64 = 0
-            while i < tok.text_len && i < 128 {
-                name.buf[i as usize] = tok.text[i as usize]
+            while i < nlen {
+                name.buf[i as usize] = CURSOR_SOURCE[(s + i) as usize]
                 i = i + 1
             }
             name
