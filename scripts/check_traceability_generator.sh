@@ -23,9 +23,9 @@ if [[ ! -f "$REPORT" ]]; then
   exit 1
 fi
 
-if rg -n '\bn/a\b' "$REPORT" >/dev/null 2>&1; then
+if grep -n '\bn/a\b' "$REPORT" >/dev/null 2>&1; then
   echo "Traceability report contains unresolved evidence markers (n/a): $REPORT"
-  rg -n '\bn/a\b' "$REPORT"
+  grep -n '\bn/a\b' "$REPORT"
   exit 1
 fi
 

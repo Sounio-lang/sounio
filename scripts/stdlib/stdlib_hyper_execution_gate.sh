@@ -180,7 +180,7 @@ RESULTS_TSV="$TMP_DIR/results.tsv"
 OUT_DIR="$TMP_DIR/out"
 mkdir -p "$OUT_DIR"
 
-rg -n '^[[:space:]]*//@[[:space:]]*ignore([[:space:]].*)?$' "${REQUIRED_TESTS[@]}" >"$IGNORE_HITS" || true
+grep -En '^[[:space:]]*//@[[:space:]]*ignore([[:space:]].*)?$' "${REQUIRED_TESTS[@]}" >"$IGNORE_HITS" || true
 
 run_one() {
   local test_path="$1"
@@ -210,7 +210,7 @@ run_one() {
   elif [[ $run_rc -ne 0 ]]; then
     status="fail"
     reason="run_failed"
-  elif ! rg -q "$marker" "$out_file"; then
+  elif ! grep -q "$marker" "$out_file"; then
     status="fail"
     reason="missing_marker"
   else

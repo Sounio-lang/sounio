@@ -19,25 +19,25 @@ This is the editor-in-chief acceptance snapshot generated from `docs/governance/
 
 ## Scope Summary
 
-- Total governed topics: 195
-- Repo-backed topics: 153
+- Total governed topics: 201
+- Repo-backed topics: 159
 - Website-backed topics: 55
 - Dual-canon topics: 13
 - Authority count `archived`: 7
 - Authority count `dual`: 13
 - Authority count `historical`: 30
-- Authority count `repo_only`: 103
+- Authority count `repo_only`: 109
 - Authority count `website_only`: 42
 
 ## Ownership Summary
 
 - A0: 1 topics
 - A1: 1 topics
-- A2: 73 topics
+- A2: 76 topics
 - A3: 8 topics
 - A4: 22 topics
 - A5: 17 topics
-- A6: 34 topics
+- A6: 37 topics
 - A7: 39 topics
 
 ## Locale Acceptance
@@ -52,13 +52,16 @@ This is the editor-in-chief acceptance snapshot generated from `docs/governance/
 - repo.frontdoor.docs-index: docs/governance/DOCS_AUTHORITY_MATRIX.md
 - repo.governance.acceptance-report: docs/governance/topic-registry.v1.json, docs/governance/DOCS_AUTHORITY_MATRIX.md
 - repo.governance.authority-matrix: docs/governance/topic-registry.v1.json
+- repo.paper.168-theorem-preprint: paper/reproduce.sh, scripts/paper/paper_repro_gate.sh
 - repo.paper.cpt-psp.outline: paper/reproduce.sh, scripts/paper/paper_repro_gate.sh
 - repo.paper.epistemic-types.benchmarks.external-baselines-summary: paper/reproduce.sh, scripts/paper/paper_repro_gate.sh
 - repo.paper.epistemic-types.benchmarks.l4-gemm-summary: paper/reproduce.sh, scripts/paper/paper_repro_gate.sh
 - repo.paper.epistemic-types.benchmarks.nvidia-l4-benchmarks: paper/reproduce.sh, scripts/paper/paper_repro_gate.sh
 - repo.paper.epistemic-types.readme: paper/reproduce.sh, scripts/paper/paper_repro_gate.sh
+- repo.paper.kybernetes-second-order: paper/reproduce.sh, scripts/paper/paper_repro_gate.sh
 - repo.paper.oopsla2027.outline: paper/reproduce.sh, scripts/paper/paper_repro_gate.sh
 - repo.paper.paper: paper/reproduce.sh, scripts/paper/paper_repro_gate.sh
+- repo.paper.preprint: paper/reproduce.sh, scripts/paper/paper_repro_gate.sh
 - repo.paper.readme: paper/reproduce.sh, scripts/paper/paper_repro_gate.sh, scripts/paper/paper_submission_pack.sh
 - repo.paper.sounio-arxiv-draft: paper/reproduce.sh, scripts/paper/paper_repro_gate.sh
 - website.docs.gpu: artifacts/omega/gpu_runtime_attest_gate.v1.json

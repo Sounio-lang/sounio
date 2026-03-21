@@ -25,7 +25,7 @@ line_of() {
     return
   fi
   local hit
-  hit="$(rg -n "$pattern" "$file" -S | head -n1 || true)"
+  hit="$(grep -in "$pattern" "$file" | head -n1 || true)"
   if [[ -z "$hit" ]]; then
     echo "n/a"
   else

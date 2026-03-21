@@ -18,7 +18,7 @@ PATTERN='cd compiler|working-directory:\s*compiler|ROOT_DIR/compiler|compiler/ta
 TMP="$(mktemp)"
 trap 'rm -f "$TMP"' EXIT
 
-if rg -n "$PATTERN" "${FILES[@]}" >"$TMP"; then
+if grep -En "$PATTERN" "${FILES[@]}" >"$TMP"; then
   echo "Legacy compiler path references detected in critical files:"
   cat "$TMP"
   exit 1

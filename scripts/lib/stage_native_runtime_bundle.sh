@@ -64,7 +64,7 @@ sounio_native_runtime_baked_path() {
   local release_root=""
   release_root="$(
     strings "$souc_bin" \
-      | rg -m1 -o '/tmp/sounio-release-build\.[^/[:space:]]+' \
+      | grep -m1 -oE '/tmp/sounio-release-build\.[^/[:space:]]+' \
       || true
   )"
 

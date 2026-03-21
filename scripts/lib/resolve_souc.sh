@@ -124,14 +124,14 @@ sounio_probe_gpu_backend() {
   rc=$?
   set -e
 
-  if [[ $rc -eq 0 && -s "$out_path" ]] && rg -q '\.entry' "$out_path" >/dev/null 2>&1; then
+  if [[ $rc -eq 0 && -s "$out_path" ]] && grep -q '\.entry' "$out_path" >/dev/null 2>&1; then
     rm -rf "$tmp_dir"
     return 0
   fi
 
-  if rg -qi "gpu backend not enabled|not built with gpu support|not built with gpu feature" "$log_path" >/dev/null 2>&1; then
+  if grep -qi "gpu backend not enabled\|not built with gpu support\|not built with gpu feature" "$log_path" >/dev/null 2>&1; then
     _SOUNIO_GPU_PROBE_REASON="gpu_backend_unavailable"
-  elif rg -qi "unknown gpu target|unsupported gpu target|rocm unavailable|hip unavailable|amdgpu unavailable|target unavailable" "$log_path" >/dev/null 2>&1; then
+  elif grep -qi "unknown gpu target\|unsupported gpu target\|rocm unavailable\|hip unavailable\|amdgpu unavailable\|target unavailable" "$log_path" >/dev/null 2>&1; then
     _SOUNIO_GPU_PROBE_REASON="target_unavailable"
   else
     _SOUNIO_GPU_PROBE_REASON="gpu_probe_failed_rc_${rc}"
