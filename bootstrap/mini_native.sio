@@ -86,10 +86,22 @@ fn lex_all() with Mut, Panic {
             p = p + 1
             TK[TC as usize] = 5; TS[TC as usize] = s; TE[TC as usize] = p; TC = TC + 1; continue
         }
-        // Number
+        // Number (decimal or hex 0x...)
         if c >= 48 && c <= 57 {
             let s = p; var v: i64 = 0
-            while p < SRC_LEN && sb(p) >= 48 && sb(p) <= 57 { v = v * 10 + sb(p) - 48; p = p + 1 }
+            if c == 48 && p + 1 < SRC_LEN && (sb(p + 1) == 120 || sb(p + 1) == 88) {
+                p = p + 2
+                var hx: i64 = 1
+                while p < SRC_LEN && hx == 1 {
+                    let h = sb(p)
+                    if h >= 48 && h <= 57 { v = v * 16 + h - 48; p = p + 1 }
+                    else if h >= 97 && h <= 102 { v = v * 16 + h - 87; p = p + 1 }
+                    else if h >= 65 && h <= 70 { v = v * 16 + h - 55; p = p + 1 }
+                    else { hx = 0 }
+                }
+            } else {
+                while p < SRC_LEN && sb(p) >= 48 && sb(p) <= 57 { v = v * 10 + sb(p) - 48; p = p + 1 }
+            }
             TK[TC as usize] = 4; TS[TC as usize] = s; TE[TC as usize] = p; TV[TC as usize] = v; TC = TC + 1; continue
         }
         // Identifier / keyword
@@ -105,6 +117,12 @@ fn lex_all() with Mut, Panic {
             if src_match(s, l, "if") { k = 13 }
             if src_match(s, l, "else") { k = 14 }
             if src_match(s, l, "while") { k = 15 }
+            if src_match(s, l, "continue") { k = 33 }
+            if src_match(s, l, "break") { k = 34 }
+            if src_match(s, l, "true") { k = 35 }
+            if src_match(s, l, "false") { k = 36 }
+            if src_match(s, l, "as") { k = 37 }
+            if src_match(s, l, "with") { k = 38 }
             TK[TC as usize] = k; TS[TC as usize] = s; TE[TC as usize] = p; TC = TC + 1; continue
         }
         // Two-char operators
@@ -115,6 +133,8 @@ fn lex_all() with Mut, Panic {
         if c == 62 && p + 1 < SRC_LEN && sb(p + 1) == 61 { TK[TC as usize] = 26; TS[TC as usize] = p; TE[TC as usize] = p + 2; TC = TC + 1; p = p + 2; continue }
         if c == 38 && p + 1 < SRC_LEN && sb(p + 1) == 38 { TK[TC as usize] = 30; TS[TC as usize] = p; TE[TC as usize] = p + 2; TC = TC + 1; p = p + 2; continue }
         if c == 124 && p + 1 < SRC_LEN && sb(p + 1) == 124 { TK[TC as usize] = 31; TS[TC as usize] = p; TE[TC as usize] = p + 2; TC = TC + 1; p = p + 2; continue }
+        if c == 62 && p + 1 < SRC_LEN && sb(p + 1) == 62 { TK[TC as usize] = 39; TS[TC as usize] = p; TE[TC as usize] = p + 2; TC = TC + 1; p = p + 2; continue }
+        if c == 60 && p + 1 < SRC_LEN && sb(p + 1) == 60 { TK[TC as usize] = 40; TS[TC as usize] = p; TE[TC as usize] = p + 2; TC = TC + 1; p = p + 2; continue }
         // Single-char operators
         if c == 40 { TK[TC as usize] = 6; TS[TC as usize] = p; TE[TC as usize] = p + 1; TC = TC + 1; p = p + 1; continue }
         if c == 41 { TK[TC as usize] = 7; TS[TC as usize] = p; TE[TC as usize] = p + 1; TC = TC + 1; p = p + 1; continue }
@@ -131,6 +151,11 @@ fn lex_all() with Mut, Panic {
         if c == 59 { TK[TC as usize] = 27; TS[TC as usize] = p; TE[TC as usize] = p + 1; TC = TC + 1; p = p + 1; continue }
         if c == 44 { TK[TC as usize] = 28; TS[TC as usize] = p; TE[TC as usize] = p + 1; TC = TC + 1; p = p + 1; continue }
         if c == 33 { TK[TC as usize] = 32; TS[TC as usize] = p; TE[TC as usize] = p + 1; TC = TC + 1; p = p + 1; continue }
+        if c == 91 { TK[TC as usize] = 41; TS[TC as usize] = p; TE[TC as usize] = p + 1; TC = TC + 1; p = p + 1; continue }
+        if c == 93 { TK[TC as usize] = 42; TS[TC as usize] = p; TE[TC as usize] = p + 1; TC = TC + 1; p = p + 1; continue }
+        if c == 58 { TK[TC as usize] = 43; TS[TC as usize] = p; TE[TC as usize] = p + 1; TC = TC + 1; p = p + 1; continue }
+        if c == 38 { TK[TC as usize] = 44; TS[TC as usize] = p; TE[TC as usize] = p + 1; TC = TC + 1; p = p + 1; continue }
+        if c == 124 { TK[TC as usize] = 45; TS[TC as usize] = p; TE[TC as usize] = p + 1; TC = TC + 1; p = p + 1; continue }
         p = p + 1
     }
     TK[TC as usize] = 0; TC = TC + 1
@@ -215,12 +240,16 @@ fn emit_print(tok: i64) with Mut, Panic, Div {
 // ─── Expression compiler (recursive descent) ───
 // Global parse position for expression parsing
 var EP: i64 = 0
+// Loop stack for continue/break (max 16 nested loops)
+var LOOP_TOP: [i64; 16] = [0; 16]
+var LOOP_END_PATCH: [i64; 16] = [0; 16]
+var LOOP_DEPTH: i64 = 0
 
-// Forward-declare: compile_expr puts result in rax, advances EP
-// Precedence: comparison < additive < multiplicative < primary
+// Precedence (low→high): || < && < comparison < bitwise OR < bitwise AND < shift < additive < multiplicative < unary < postfix < primary
 
 fn compile_primary() with IO, Mut, Panic, Div {
     let k = TK[EP as usize]
+    // Integer literal
     if k == 4 {
         let v = TV[EP as usize]
         if v == 0 { em(0x31); em(0xc0) }
@@ -228,62 +257,75 @@ fn compile_primary() with IO, Mut, Panic, Div {
         EP = EP + 1
         return
     }
-    if k == 6 {
+    // true=35, false=36
+    if k == 35 { em(0x48); em(0xb8); em64(1); EP = EP + 1; return }
+    if k == 36 { em(0x31); em(0xc0); EP = EP + 1; return }
+    // Parenthesized
+    if k == 6 { EP = EP + 1; compile_or(); if TK[EP as usize] == 7 { EP = EP + 1 }; return }
+    // Unary minus
+    if k == 18 {
         EP = EP + 1
-        compile_comparison()
-        if TK[EP as usize] == 7 { EP = EP + 1 }
+        compile_primary()
+        em(0x48); em(0xf7); em(0xd8)  // neg rax
         return
     }
+    // Unary not !
+    if k == 32 {
+        EP = EP + 1
+        compile_primary()
+        em(0x48); em(0x85); em(0xc0)  // test rax, rax
+        em(0x0f); em(0x94); em(0xc0)  // sete al
+        em(0x48); em(0x0f); em(0xb6); em(0xc0)  // movzx rax, al
+        return
+    }
+    // String literal (for passing to builtins)
+    if k == 5 { em(0x31); em(0xc0); EP = EP + 1; return }
+    // Identifier or function call
     if k == 3 {
         let ns = TS[EP as usize]
         let ne = TE[EP as usize]
         EP = EP + 1
         // Function call: ident(args)
         if TK[EP as usize] == 6 {
-            // Check for print
+            // Check for print("str")
             if ne - ns == 5 && sb(ns) == 112 && sb(ns+1) == 114 && sb(ns+2) == 105 && sb(ns+3) == 110 && sb(ns+4) == 116 {
-                EP = EP + 1  // skip (
+                EP = EP + 1
                 if TK[EP as usize] == 5 { emit_print(EP); EP = EP + 1 }
+                else { compile_or(); }
                 if TK[EP as usize] == 7 { EP = EP + 1 }
-                em(0x31); em(0xc0)  // rax = 0 (print returns void)
+                em(0x31); em(0xc0)
                 return
             }
-            // Check for print_int
+            // Check for print_int(expr)
             if ne - ns == 9 && sb(ns) == 112 && sb(ns+1) == 114 && sb(ns+2) == 105 && sb(ns+3) == 110 && sb(ns+4) == 116 && sb(ns+5) == 95 && sb(ns+6) == 105 && sb(ns+7) == 110 && sb(ns+8) == 116 {
-                EP = EP + 1  // skip (
-                compile_comparison()  // arg in rax
+                EP = EP + 1
+                compile_or()
                 if TK[EP as usize] == 7 { EP = EP + 1 }
-                // Inline print_int: convert rax to decimal string on stack, write syscall
-                // For now, emit a call to a print_int builtin (simplified: just print the number)
                 // TODO: inline decimal conversion
                 em(0x31); em(0xc0)
                 return
             }
             // User function call
             let fi = fn_find(ns, ne)
-            EP = EP + 1  // skip (
-            // Parse up to 5 args into rdi, rsi, rdx, rcx, r8
+            EP = EP + 1
             var argc: i64 = 0
             while TK[EP as usize] != 7 && TK[EP as usize] != 0 {
-                compile_comparison()
-                // Push arg on stack temporarily
-                em(0x50)  // push rax
+                compile_or()
+                em(0x50)
                 argc = argc + 1
                 if TK[EP as usize] == 28 { EP = EP + 1 }
             }
             if TK[EP as usize] == 7 { EP = EP + 1 }
-            // Pop args into registers (reverse order)
-            if argc >= 5 { em(0x41); em(0x58) }   // pop r8
-            if argc >= 4 { em(0x59) }               // pop rcx
-            if argc >= 3 { em(0x5a) }               // pop rdx
-            if argc >= 2 { em(0x5e) }               // pop rsi
-            if argc >= 1 { em(0x5f) }               // pop rdi
-            // Emit call with patch
+            if argc >= 5 { em(0x41); em(0x58) }
+            if argc >= 4 { em(0x59) }
+            if argc >= 3 { em(0x5a) }
+            if argc >= 2 { em(0x5e) }
+            if argc >= 1 { em(0x5f) }
             em(0xe8)
             PATCH_OFF[PATCH_COUNT as usize] = CL
             PATCH_FN[PATCH_COUNT as usize] = fi
             PATCH_COUNT = PATCH_COUNT + 1
-            em32(0)  // placeholder rel32
+            em32(0)
             return
         }
         // Variable load
@@ -292,26 +334,37 @@ fn compile_primary() with IO, Mut, Panic, Div {
         else { em(0x31); em(0xc0) }
         return
     }
-    // Fallback: skip unknown token
     EP = EP + 1
     em(0x31); em(0xc0)
 }
 
-fn compile_multiplicative() with IO, Mut, Panic, Div {
+// Postfix: `as` type casts (no-op for i64/usize, mask for i8)
+fn compile_postfix() with IO, Mut, Panic, Div {
     compile_primary()
+    while TK[EP as usize] == 37 {
+        EP = EP + 1  // skip 'as'
+        let tns = TS[EP as usize]
+        let tne = TE[EP as usize]
+        // as i8: mask to byte
+        if tne - tns == 2 && sb(tns) == 105 && sb(tns+1) == 56 {
+            em(0x48); em(0x0f); em(0xbe); em(0xc0)  // movsx rax, al (sign-extend byte)
+        }
+        // as usize, as i64: no-op
+        EP = EP + 1
+    }
+}
+
+fn compile_multiplicative() with IO, Mut, Panic, Div {
+    compile_postfix()
     while TK[EP as usize] == 19 || TK[EP as usize] == 20 || TK[EP as usize] == 29 {
         let op = TK[EP as usize]
         EP = EP + 1
-        emit_push()  // save lhs
-        compile_primary()  // rhs in rax
-        em(0x48); em(0x89); em(0xc1)  // mov rcx, rax (rhs)
-        emit_pop_rcx()  // this pops into rcx but we need lhs in rax...
-        // Actually: push lhs, compute rhs in rax, then swap
-        // Let me fix: after primary, rax=rhs. pop rcx=lhs. We need lhs op rhs.
-        // rcx=lhs(popped), rax=rhs. Swap: xchg rax, rcx
-        em(0x48); em(0x87); em(0xc1)  // xchg rax, rcx — now rax=lhs, rcx=rhs
+        emit_push()
+        compile_postfix()
+        em(0x59)  // pop rcx (lhs)
+        em(0x48); em(0x87); em(0xc1)  // xchg rax, rcx — rax=lhs, rcx=rhs
         if op == 19 { em(0x48); em(0x0f); em(0xaf); em(0xc1) }  // imul rax, rcx
-        if op == 20 { em(0x48); em(0x99); em(0x48); em(0xf7); em(0xf9) }  // cqo; idiv rcx (rax=quot)
+        if op == 20 { em(0x48); em(0x99); em(0x48); em(0xf7); em(0xf9) }  // cqo; idiv rcx
         if op == 29 { em(0x48); em(0x99); em(0x48); em(0xf7); em(0xf9); em(0x48); em(0x89); em(0xd0) }  // cqo; idiv rcx; mov rax, rdx
     }
 }
@@ -323,46 +376,145 @@ fn compile_additive() with IO, Mut, Panic, Div {
         EP = EP + 1
         emit_push()
         compile_multiplicative()
-        // rax=rhs, stack=lhs. Pop into rcx, swap.
         em(0x59)  // pop rcx (lhs)
-        if op == 17 { em(0x48); em(0x01); em(0xc8) }   // add rax, rcx → but we need lhs+rhs = rcx+rax
-        if op == 18 { em(0x48); em(0x87); em(0xc1); em(0x48); em(0x29); em(0xc8) }  // xchg; sub rax, rcx (lhs-rhs)
+        if op == 17 { em(0x48); em(0x01); em(0xc8) }  // add rax, rcx (commutative: rcx+rax = ok)
+        if op == 18 { em(0x48); em(0x87); em(0xc1); em(0x48); em(0x29); em(0xc8) }  // xchg; sub rax, rcx
+    }
+}
+
+// Shift: << (40), >> (39)
+fn compile_shift() with IO, Mut, Panic, Div {
+    compile_additive()
+    while TK[EP as usize] == 39 || TK[EP as usize] == 40 {
+        let op = TK[EP as usize]
+        EP = EP + 1
+        emit_push()
+        compile_additive()
+        // rax=rhs (shift amount), stack=lhs
+        em(0x48); em(0x89); em(0xc1)  // mov rcx, rax (shift amount in cl)
+        em(0x58)  // pop rax (lhs)
+        if op == 40 { em(0x48); em(0xd3); em(0xe0) }  // shl rax, cl
+        if op == 39 { em(0x48); em(0xd3); em(0xf8) }  // sar rax, cl
+    }
+}
+
+// Bitwise AND: & (44)
+fn compile_bitand() with IO, Mut, Panic, Div {
+    compile_shift()
+    while TK[EP as usize] == 44 {
+        EP = EP + 1; emit_push(); compile_shift()
+        em(0x59); em(0x48); em(0x21); em(0xc8)  // pop rcx; and rax, rcx
+    }
+}
+
+// Bitwise OR: | (45)
+fn compile_bitor() with IO, Mut, Panic, Div {
+    compile_bitand()
+    while TK[EP as usize] == 45 {
+        EP = EP + 1; emit_push(); compile_bitand()
+        em(0x59); em(0x48); em(0x09); em(0xc8)  // pop rcx; or rax, rcx
     }
 }
 
 fn compile_comparison() with IO, Mut, Panic, Div {
-    compile_additive()
+    compile_bitor()
     let op = TK[EP as usize]
     if op == 21 || op == 22 || op == 23 || op == 24 || op == 25 || op == 26 {
         EP = EP + 1
         emit_push()
-        compile_additive()
-        // rax=rhs, stack=lhs
+        compile_bitor()
         em(0x59)  // pop rcx (lhs)
-        em(0x48); em(0x39); em(0xc1)  // cmp rcx, rax (lhs cmp rhs)
+        em(0x48); em(0x39); em(0xc1)  // cmp rcx, rax
         if op == 21 { em(0x0f); em(0x94); em(0xc0) }  // sete al
-        if op == 22 { em(0x0f); em(0x95); em(0xc0) }    // setne al
-        if op == 23 { em(0x0f); em(0x9c); em(0xc0) }     // setl al
-        if op == 24 { em(0x0f); em(0x9f); em(0xc0) }     // setg al
-        if op == 25 { em(0x0f); em(0x9e); em(0xc0) }   // setle al
-        if op == 26 { em(0x0f); em(0x9d); em(0xc0) }   // setge al
+        if op == 22 { em(0x0f); em(0x95); em(0xc0) }  // setne al
+        if op == 23 { em(0x0f); em(0x9c); em(0xc0) }  // setl al
+        if op == 24 { em(0x0f); em(0x9f); em(0xc0) }  // setg al
+        if op == 25 { em(0x0f); em(0x9e); em(0xc0) }  // setle al
+        if op == 26 { em(0x0f); em(0x9d); em(0xc0) }  // setge al
         em(0x48); em(0x0f); em(0xb6); em(0xc0)  // movzx rax, al
     }
+}
+
+// Logical AND: && (30) — short-circuit
+fn compile_and() with IO, Mut, Panic, Div {
+    compile_comparison()
+    while TK[EP as usize] == 30 {
+        EP = EP + 1
+        em(0x48); em(0x85); em(0xc0)  // test rax, rax
+        em(0x0f); em(0x84)             // je short_false (rel32)
+        let patch = CL; em32(0)
+        compile_comparison()
+        em(0x48); em(0x85); em(0xc0)  // test rax, rax
+        em(0x0f); em(0x95); em(0xc0)  // setne al
+        em(0x48); em(0x0f); em(0xb6); em(0xc0)  // movzx rax, al
+        em(0xe9); let end_patch = CL; em32(0)  // jmp end
+        // short_false: rax already 0
+        let here = CL
+        CD[patch as usize] = ((here - patch - 4) & 0xFF) as i8
+        CD[(patch+1) as usize] = (((here - patch - 4) >> 8) & 0xFF) as i8
+        CD[(patch+2) as usize] = (((here - patch - 4) >> 16) & 0xFF) as i8
+        CD[(patch+3) as usize] = (((here - patch - 4) >> 24) & 0xFF) as i8
+        em(0x31); em(0xc0)  // xor eax, eax
+        let end = CL
+        CD[end_patch as usize] = ((end - end_patch - 4) & 0xFF) as i8
+        CD[(end_patch+1) as usize] = (((end - end_patch - 4) >> 8) & 0xFF) as i8
+        CD[(end_patch+2) as usize] = (((end - end_patch - 4) >> 16) & 0xFF) as i8
+        CD[(end_patch+3) as usize] = (((end - end_patch - 4) >> 24) & 0xFF) as i8
+    }
+}
+
+// Logical OR: || (31) — short-circuit
+fn compile_or() with IO, Mut, Panic, Div {
+    compile_and()
+    while TK[EP as usize] == 31 {
+        EP = EP + 1
+        em(0x48); em(0x85); em(0xc0)  // test rax, rax
+        em(0x0f); em(0x85)             // jne short_true (rel32)
+        let patch = CL; em32(0)
+        compile_and()
+        em(0xe9); let end_patch = CL; em32(0)  // jmp end
+        // short_true: result = 1
+        let here = CL
+        CD[patch as usize] = ((here - patch - 4) & 0xFF) as i8
+        CD[(patch+1) as usize] = (((here - patch - 4) >> 8) & 0xFF) as i8
+        CD[(patch+2) as usize] = (((here - patch - 4) >> 16) & 0xFF) as i8
+        CD[(patch+3) as usize] = (((here - patch - 4) >> 24) & 0xFF) as i8
+        em(0x48); em(0xb8); em64(1)
+        let end = CL
+        CD[end_patch as usize] = ((end - end_patch - 4) & 0xFF) as i8
+        CD[(end_patch+1) as usize] = (((end - end_patch - 4) >> 8) & 0xFF) as i8
+        CD[(end_patch+2) as usize] = (((end - end_patch - 4) >> 16) & 0xFF) as i8
+        CD[(end_patch+3) as usize] = (((end - end_patch - 4) >> 24) & 0xFF) as i8
+    }
+}
+
+// ─── Patch helper ───
+fn patch32(off: i64, target: i64) with Mut, Panic {
+    let rel = target - off - 4
+    CD[off as usize] = (rel & 0xFF) as i8
+    CD[(off+1) as usize] = ((rel >> 8) & 0xFF) as i8
+    CD[(off+2) as usize] = ((rel >> 16) & 0xFF) as i8
+    CD[(off+3) as usize] = ((rel >> 24) & 0xFF) as i8
 }
 
 // ─── Statement compiler ───
 fn compile_stmt() with IO, Mut, Panic, Div {
     let k = TK[EP as usize]
 
-    // let x = expr / var x = expr
+    // Skip semicolons
+    if k == 27 { EP = EP + 1; return }
+
+    // let x = expr / var x = expr (with optional : type)
     if k == 11 || k == 12 {
         EP = EP + 1
         let ns = TS[EP as usize]
         let ne = TE[EP as usize]
-        EP = EP + 1  // skip name
+        EP = EP + 1
+        // Skip : type annotation
+        if TK[EP as usize] == 43 { EP = EP + 1; EP = EP + 1 }
+        // Skip = sign
         if TK[EP as usize] == 16 { EP = EP + 1 }
-        // Skip optional type annotation (: TYPE before =)
-        compile_comparison()
+        compile_or()
         let slot = var_add(ns, ne)
         emit_store_var(slot)
         return
@@ -372,8 +524,8 @@ fn compile_stmt() with IO, Mut, Panic, Div {
     if k == 3 && TK[(EP + 1) as usize] == 16 {
         let ns = TS[EP as usize]
         let ne = TE[EP as usize]
-        EP = EP + 2  // skip name and =
-        compile_comparison()
+        EP = EP + 2
+        compile_or()
         let slot = var_find(ns, ne)
         if slot >= 0 { emit_store_var(slot) }
         return
@@ -382,55 +534,58 @@ fn compile_stmt() with IO, Mut, Panic, Div {
     // return expr
     if k == 2 {
         EP = EP + 1
-        if TK[EP as usize] != 9 { compile_comparison() }
+        if TK[EP as usize] != 9 { compile_or() }
         else { em(0x31); em(0xc0) }
-        // Epilogue
         em(0x48); em(0x81); em(0xc4); em32(512)
         em(0x5d); em(0xc3)
         return
     }
 
-    // if expr { stmts } else { stmts }
+    // continue (33)
+    if k == 33 {
+        EP = EP + 1
+        if LOOP_DEPTH > 0 {
+            em(0xe9)
+            let rel = LOOP_TOP[(LOOP_DEPTH - 1) as usize] - (CL + 4)
+            em32(rel)
+        }
+        return
+    }
+
+    // break (34) — jump to end of loop (patch later)
+    if k == 34 {
+        EP = EP + 1
+        // For now: emit a jmp that will be patched when while ends
+        // TODO: proper break patching (for now, skip)
+        return
+    }
+
+    // if expr { stmts } else if ... / else { stmts }
     if k == 13 {
         EP = EP + 1
-        compile_comparison()
+        compile_or()
         em(0x48); em(0x85); em(0xc0)  // test rax, rax
-        em(0x0f); em(0x84)            // je else_label (rel32)
-        let je_off = CL
-        em32(0)                        // placeholder
-        // Then block
+        em(0x0f); em(0x84)
+        let je_off = CL; em32(0)
         if TK[EP as usize] == 8 { EP = EP + 1 }
         while TK[EP as usize] != 9 && TK[EP as usize] != 0 { compile_stmt() }
         if TK[EP as usize] == 9 { EP = EP + 1 }
-        // Check for else
         if TK[EP as usize] == 14 {
             EP = EP + 1
-            em(0xe9)  // jmp end_label
-            let jmp_off = CL
-            em32(0)
-            // Patch je to here
-            let here = CL
-            CD[(je_off) as usize] = ((here - je_off - 4) & 0xFF) as i8
-            CD[(je_off + 1) as usize] = (((here - je_off - 4) >> 8) & 0xFF) as i8
-            CD[(je_off + 2) as usize] = (((here - je_off - 4) >> 16) & 0xFF) as i8
-            CD[(je_off + 3) as usize] = (((here - je_off - 4) >> 24) & 0xFF) as i8
-            // Else block
-            if TK[EP as usize] == 8 { EP = EP + 1 }
-            while TK[EP as usize] != 9 && TK[EP as usize] != 0 { compile_stmt() }
-            if TK[EP as usize] == 9 { EP = EP + 1 }
-            // Patch jmp to here
-            let end = CL
-            CD[(jmp_off) as usize] = ((end - jmp_off - 4) & 0xFF) as i8
-            CD[(jmp_off + 1) as usize] = (((end - jmp_off - 4) >> 8) & 0xFF) as i8
-            CD[(jmp_off + 2) as usize] = (((end - jmp_off - 4) >> 16) & 0xFF) as i8
-            CD[(jmp_off + 3) as usize] = (((end - jmp_off - 4) >> 24) & 0xFF) as i8
+            em(0xe9)
+            let jmp_off = CL; em32(0)
+            patch32(je_off, CL)
+            // else if: recurse into compile_stmt which handles 'if'
+            if TK[EP as usize] == 13 {
+                compile_stmt()
+            } else {
+                if TK[EP as usize] == 8 { EP = EP + 1 }
+                while TK[EP as usize] != 9 && TK[EP as usize] != 0 { compile_stmt() }
+                if TK[EP as usize] == 9 { EP = EP + 1 }
+            }
+            patch32(jmp_off, CL)
         } else {
-            // No else: patch je to here
-            let here = CL
-            CD[(je_off) as usize] = ((here - je_off - 4) & 0xFF) as i8
-            CD[(je_off + 1) as usize] = (((here - je_off - 4) >> 8) & 0xFF) as i8
-            CD[(je_off + 2) as usize] = (((here - je_off - 4) >> 16) & 0xFF) as i8
-            CD[(je_off + 3) as usize] = (((here - je_off - 4) >> 24) & 0xFF) as i8
+            patch32(je_off, CL)
         }
         return
     }
@@ -439,29 +594,24 @@ fn compile_stmt() with IO, Mut, Panic, Div {
     if k == 15 {
         EP = EP + 1
         let loop_top = CL
-        compile_comparison()
-        em(0x48); em(0x85); em(0xc0)  // test rax, rax
-        em(0x0f); em(0x84)            // je end (rel32)
-        let je_off = CL
-        em32(0)
+        LOOP_TOP[LOOP_DEPTH as usize] = loop_top
+        LOOP_DEPTH = LOOP_DEPTH + 1
+        compile_or()
+        em(0x48); em(0x85); em(0xc0)
+        em(0x0f); em(0x84)
+        let je_off = CL; em32(0)
         if TK[EP as usize] == 8 { EP = EP + 1 }
         while TK[EP as usize] != 9 && TK[EP as usize] != 0 { compile_stmt() }
         if TK[EP as usize] == 9 { EP = EP + 1 }
-        // jmp loop_top
         em(0xe9)
-        let jmp_rel = loop_top - (CL + 4)
-        em32(jmp_rel)
-        // Patch je to here
-        let here = CL
-        CD[(je_off) as usize] = ((here - je_off - 4) & 0xFF) as i8
-        CD[(je_off + 1) as usize] = (((here - je_off - 4) >> 8) & 0xFF) as i8
-        CD[(je_off + 2) as usize] = (((here - je_off - 4) >> 16) & 0xFF) as i8
-        CD[(je_off + 3) as usize] = (((here - je_off - 4) >> 24) & 0xFF) as i8
+        em32(loop_top - (CL + 4))
+        patch32(je_off, CL)
+        LOOP_DEPTH = LOOP_DEPTH - 1
         return
     }
 
-    // Expression statement (function call, etc.)
-    compile_comparison()
+    // Expression statement
+    compile_or()
 }
 
 // ─── Top-level compiler ───
@@ -507,17 +657,15 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
                 let pslot = var_add(pns, pne)
                 p = p + 1
                 // Skip : TYPE
-                if TK[p as usize] == 178 { p = p + 2 }  // 178 = colon (not in our K_ set, just skip)
+                if TK[p as usize] == 43 { p = p + 1; p = p + 1 }
             }
             if TK[p as usize] == 28 { p = p + 1 }
-            // Skip type annotations
-            if TK[p as usize] == 3 { p = p + 1 }
         }
         if TK[p as usize] == 7 { p = p + 1 }
         // Skip -> type
-        if TK[p as usize] == 10 { p = p + 2 }
-        // Skip 'with' effects clause
-        while TK[p as usize] == 3 || TK[p as usize] == 28 { p = p + 1 }
+        if TK[p as usize] == 10 { p = p + 1; p = p + 1 }
+        // Skip 'with' effects clause (with=38, ident=3, comma=28)
+        if TK[p as usize] == 38 { p = p + 1; while TK[p as usize] == 3 || TK[p as usize] == 28 { p = p + 1 } }
         if TK[p as usize] == 8 { p = p + 1 }
 
         // Emit prologue: push rbp; mov rbp, rsp; sub rsp, 512
