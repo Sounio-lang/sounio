@@ -1,0 +1,490 @@
+//@ run-pass
+//@ expect-stdout: ALL 8 TESTS PASSED
+//@ expect-stdout: Failed: 0
+// Octonion-Labeled Graph Theory — Basic Test Suite
+//
+// Tests for the core oct_graph construction:
+//   1. OctGraph construction + edge labeling
+//   2. Left-associative path product
+//   3. Right-associative path product
+//   4. Balanced path product
+//   5. NORM INVARIANCE: all parenthesizations give same norm
+//   6. Non-associativity: different parenthesizations give different results
+//   7. Angular deviation is non-zero for non-associative paths
+//   8. Associator field computation
+//
+// All functions inlined (tests cannot import stdlib).
+// Reference: Baez, "The Octonions", Bull. AMS 2002
+
+// ============================================================================
+// MATH HELPERS
+// ============================================================================
+
+fn abs_f64(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+
+fn sqrt_f64(x: f64) -> f64 with Mut, Panic, Div {
+    if x <= 0.0 { return 0.0 }
+    var r = x
+    var i = 0
+    while i < 20 { r = 0.5 * (r + x / r); i = i + 1 }
+    r
+}
+
+fn approx_eq(a: f64, b: f64, tol: f64) -> bool { abs_f64(a - b) < tol }
+
+// ============================================================================
+// OCTONION (inlined from hypercomplex/octonion.sio)
+// ============================================================================
+
+struct Oct { e: [f64; 8] }
+
+fn oct_zero() -> Oct { Oct { e: [0.0; 8] } }
+
+fn oct_real(r: f64) -> Oct with Mut, Panic {
+    var o = Oct { e: [0.0; 8] }
+    o.e[0] = r
+    o
+}
+
+fn oct_unit(idx: i64) -> Oct with Mut, Panic {
+    var o = Oct { e: [0.0; 8] }
+    if idx >= 0 && idx < 8 { o.e[idx as usize] = 1.0 }
+    o
+}
+
+fn oct_add(a: Oct, b: Oct) -> Oct with Mut, Panic, Div {
+    var r = oct_zero()
+    var i: i64 = 0
+    while i < 8 { r.e[i as usize] = a.e[i as usize] + b.e[i as usize]; i = i + 1 }
+    r
+}
+
+fn oct_sub(a: Oct, b: Oct) -> Oct with Mut, Panic, Div {
+    var r = oct_zero()
+    var i: i64 = 0
+    while i < 8 { r.e[i as usize] = a.e[i as usize] - b.e[i as usize]; i = i + 1 }
+    r
+}
+
+fn oct_scale(o: Oct, s: f64) -> Oct with Mut, Panic, Div {
+    var r = oct_zero()
+    var i: i64 = 0
+    while i < 8 { r.e[i as usize] = o.e[i as usize] * s; i = i + 1 }
+    r
+}
+
+fn oct_conjugate(o: Oct) -> Oct with Mut, Panic, Div {
+    var r = oct_zero()
+    r.e[0] = o.e[0]
+    var i: i64 = 1
+    while i < 8 { r.e[i as usize] = 0.0 - o.e[i as usize]; i = i + 1 }
+    r
+}
+
+fn oct_norm_sq(o: Oct) -> f64 with Mut, Panic, Div {
+    var s: f64 = 0.0
+    var i: i64 = 0
+    while i < 8 { s = s + o.e[i as usize] * o.e[i as usize]; i = i + 1 }
+    s
+}
+
+fn oct_norm(o: Oct) -> f64 with Mut, Panic, Div { sqrt_f64(oct_norm_sq(o)) }
+
+fn oct_fano_index(i: i64, j: i64) -> i64 with Mut, Panic, Div {
+    if i == j { return 0 }
+    var triples: [i64; 21] = [0; 21]
+    triples[0] = 1; triples[1] = 2; triples[2] = 4
+    triples[3] = 2; triples[4] = 3; triples[5] = 5
+    triples[6] = 3; triples[7] = 4; triples[8] = 6
+    triples[9] = 4; triples[10] = 5; triples[11] = 7
+    triples[12] = 5; triples[13] = 6; triples[14] = 1
+    triples[15] = 6; triples[16] = 7; triples[17] = 2
+    triples[18] = 7; triples[19] = 1; triples[20] = 3
+    var t: i64 = 0
+    while t < 7 {
+        let a = triples[(t * 3) as usize]
+        let b = triples[(t * 3 + 1) as usize]
+        let c = triples[(t * 3 + 2) as usize]
+        if (i == a && j == b) || (i == b && j == c) || (i == c && j == a) {
+            if i == a && j == b { return c }
+            if i == b && j == c { return a }
+            return b
+        }
+        if (i == b && j == a) || (i == c && j == b) || (i == a && j == c) {
+            if i == b && j == a { return c }
+            if i == c && j == b { return a }
+            return b
+        }
+        t = t + 1
+    }
+    0
+}
+
+fn oct_fano_sign(i: i64, j: i64) -> f64 with Mut, Panic, Div {
+    if i == j { return -1.0 }
+    if i == 0 || j == 0 { return 1.0 }
+    var triples: [i64; 21] = [0; 21]
+    triples[0] = 1; triples[1] = 2; triples[2] = 4
+    triples[3] = 2; triples[4] = 3; triples[5] = 5
+    triples[6] = 3; triples[7] = 4; triples[8] = 6
+    triples[9] = 4; triples[10] = 5; triples[11] = 7
+    triples[12] = 5; triples[13] = 6; triples[14] = 1
+    triples[15] = 6; triples[16] = 7; triples[17] = 2
+    triples[18] = 7; triples[19] = 1; triples[20] = 3
+    var t: i64 = 0
+    while t < 7 {
+        let a = triples[(t * 3) as usize]
+        let b = triples[(t * 3 + 1) as usize]
+        let c = triples[(t * 3 + 2) as usize]
+        if (i == a && j == b) || (i == b && j == c) || (i == c && j == a) { return 1.0 }
+        if (i == b && j == a) || (i == c && j == b) || (i == a && j == c) { return -1.0 }
+        t = t + 1
+    }
+    0.0
+}
+
+fn oct_mul(a: Oct, b: Oct) -> Oct with Mut, Panic, Div {
+    var result = oct_zero()
+    var i: i64 = 0
+    while i < 8 {
+        var j: i64 = 0
+        while j < 8 {
+            let coeff = a.e[i as usize] * b.e[j as usize]
+            if i == 0 && j == 0 {
+                result.e[0] = result.e[0] + coeff
+            } else if i == 0 {
+                result.e[j as usize] = result.e[j as usize] + coeff
+            } else if j == 0 {
+                result.e[i as usize] = result.e[i as usize] + coeff
+            } else if i == j {
+                result.e[0] = result.e[0] - coeff
+            } else {
+                let k = oct_fano_index(i, j)
+                let sign = oct_fano_sign(i, j)
+                result.e[k as usize] = result.e[k as usize] + sign * coeff
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    result
+}
+
+fn oct_associator(a: Oct, b: Oct, c: Oct) -> Oct with Mut, Panic, Div {
+    let ab = oct_mul(a, b)
+    let bc = oct_mul(b, c)
+    oct_sub(oct_mul(ab, c), oct_mul(a, bc))
+}
+
+// ============================================================================
+// OCTGRAPH (inlined from stdlib/hypercomplex_graph/oct_graph.sio)
+// ============================================================================
+
+struct OctGraph {
+    n: i32
+    adj: [i32; 1024]
+    lab0: [f64; 1024]
+    lab1: [f64; 1024]
+    lab2: [f64; 1024]
+    lab3: [f64; 1024]
+    lab4: [f64; 1024]
+    lab5: [f64; 1024]
+    lab6: [f64; 1024]
+    lab7: [f64; 1024]
+}
+
+fn og_new(n: i32) -> OctGraph {
+    OctGraph {
+        n: n, adj: [0; 1024],
+        lab0: [0.0; 1024], lab1: [0.0; 1024], lab2: [0.0; 1024], lab3: [0.0; 1024],
+        lab4: [0.0; 1024], lab5: [0.0; 1024], lab6: [0.0; 1024], lab7: [0.0; 1024],
+    }
+}
+
+fn og_idx(u: i32, v: i32) -> i32 { u * 32 + v }
+
+fn og_get_label(g: OctGraph, u: i32, v: i32) -> Oct with Mut, Panic {
+    let idx = og_idx(u, v) as usize
+    var o = Oct { e: [0.0; 8] }
+    o.e[0] = g.lab0[idx]; o.e[1] = g.lab1[idx]; o.e[2] = g.lab2[idx]; o.e[3] = g.lab3[idx]
+    o.e[4] = g.lab4[idx]; o.e[5] = g.lab5[idx]; o.e[6] = g.lab6[idx]; o.e[7] = g.lab7[idx]
+    o
+}
+
+fn og_add_edge(g: OctGraph, u: i32, v: i32, label: Oct) -> OctGraph with Mut, Panic, Div {
+    var result = g
+    let idx = og_idx(u, v) as usize
+    result.adj[idx] = 1
+    result.lab0[idx] = label.e[0]; result.lab1[idx] = label.e[1]
+    result.lab2[idx] = label.e[2]; result.lab3[idx] = label.e[3]
+    result.lab4[idx] = label.e[4]; result.lab5[idx] = label.e[5]
+    result.lab6[idx] = label.e[6]; result.lab7[idx] = label.e[7]
+    result
+}
+
+fn og_add_undirected(g: OctGraph, u: i32, v: i32, label: Oct) -> OctGraph with Mut, Panic, Div {
+    var r = og_add_edge(g, u, v, label)
+    r = og_add_edge(r, v, u, oct_conjugate(label))
+    r
+}
+
+// ============================================================================
+// PATH PRODUCT FUNCTIONS
+// ============================================================================
+
+fn og_path_left(g: OctGraph, path: [i32; 8], len: i32) -> Oct with Mut, Panic, Div {
+    if len < 2 { return oct_real(1.0) }
+    var acc = og_get_label(g, path[0], path[1])
+    var i: i32 = 2
+    while i < len {
+        let edge = og_get_label(g, path[(i - 1) as usize], path[i as usize])
+        acc = oct_mul(acc, edge)
+        i = i + 1
+    }
+    acc
+}
+
+fn og_path_right(g: OctGraph, path: [i32; 8], len: i32) -> Oct with Mut, Panic, Div {
+    if len < 2 { return oct_real(1.0) }
+    let last = len - 2
+    var acc = og_get_label(g, path[last as usize], path[(len - 1) as usize])
+    var i: i32 = last - 1
+    while i >= 0 {
+        let edge = og_get_label(g, path[i as usize], path[(i + 1) as usize])
+        acc = oct_mul(edge, acc)
+        i = i - 1
+    }
+    acc
+}
+
+fn og_path_balanced_range(g: OctGraph, path: [i32; 8], lo: i32, hi: i32) -> Oct with Mut, Panic, Div {
+    let n_edges = hi - lo
+    if n_edges <= 0 { return oct_real(1.0) }
+    if n_edges == 1 { return og_get_label(g, path[lo as usize], path[(lo + 1) as usize]) }
+    let mid = lo + n_edges / 2
+    let left = og_path_balanced_range(g, path, lo, mid)
+    let right = og_path_balanced_range(g, path, mid, hi)
+    oct_mul(left, right)
+}
+
+fn og_path_balanced(g: OctGraph, path: [i32; 8], len: i32) -> Oct with Mut, Panic, Div {
+    if len < 2 { return oct_real(1.0) }
+    og_path_balanced_range(g, path, 0, len - 1)
+}
+
+// ============================================================================
+// TEST FUNCTIONS
+// ============================================================================
+
+// Test 1: Graph construction — build K4 with basis element labels
+fn test_graph_construction() -> bool with IO, Mut, Panic, Div {
+    var g = og_new(4)
+    let e1 = oct_unit(1)
+    let e2 = oct_unit(2)
+    let e3 = oct_unit(3)
+    g = og_add_undirected(g, 0, 1, e1)
+    g = og_add_undirected(g, 1, 2, e2)
+    g = og_add_undirected(g, 2, 3, e3)
+
+    // Check edges exist
+    let has_01 = g.adj[og_idx(0, 1) as usize] == 1
+    let has_10 = g.adj[og_idx(1, 0) as usize] == 1
+    let has_12 = g.adj[og_idx(1, 2) as usize] == 1
+
+    // Check label(0,1) = e1
+    let lab = og_get_label(g, 0, 1)
+    let lab_ok = approx_eq(lab.e[1], 1.0, 0.001) && approx_eq(lab.e[0], 0.0, 0.001)
+
+    has_01 && has_10 && has_12 && lab_ok
+}
+
+// Test 2: Left-associative path product on a chain 0→1→2→3
+fn test_path_left() -> bool with IO, Mut, Panic, Div {
+    var g = og_new(4)
+    g = og_add_edge(g, 0, 1, oct_unit(1))  // e1
+    g = og_add_edge(g, 1, 2, oct_unit(2))  // e2
+    g = og_add_edge(g, 2, 3, oct_unit(4))  // e4 (using Fano triple (1,2,4))
+
+    var path: [i32; 8] = [0; 8]
+    path[0] = 0; path[1] = 1; path[2] = 2; path[3] = 3
+
+    let result = og_path_left(g, path, 4)
+    // (e1*e2)*e4 = e3*e4 = e7 (Fano plane)
+    let norm = oct_norm(result)
+    // Norm should be 1 (product of unit octonions)
+    approx_eq(norm, 1.0, 0.001)
+}
+
+// Test 3: Right-associative path product
+fn test_path_right() -> bool with IO, Mut, Panic, Div {
+    var g = og_new(4)
+    g = og_add_edge(g, 0, 1, oct_unit(1))
+    g = og_add_edge(g, 1, 2, oct_unit(2))
+    g = og_add_edge(g, 2, 3, oct_unit(4))
+
+    var path: [i32; 8] = [0; 8]
+    path[0] = 0; path[1] = 1; path[2] = 2; path[3] = 3
+
+    let result = og_path_right(g, path, 4)
+    // e1*(e2*e4) = e1*e6
+    let norm = oct_norm(result)
+    approx_eq(norm, 1.0, 0.001)
+}
+
+// Test 4: Balanced path product
+fn test_path_balanced() -> bool with IO, Mut, Panic, Div {
+    var g = og_new(4)
+    g = og_add_edge(g, 0, 1, oct_unit(1))
+    g = og_add_edge(g, 1, 2, oct_unit(2))
+    g = og_add_edge(g, 2, 3, oct_unit(4))
+
+    var path: [i32; 8] = [0; 8]
+    path[0] = 0; path[1] = 1; path[2] = 2; path[3] = 3
+
+    let result = og_path_balanced(g, path, 4)
+    let norm = oct_norm(result)
+    approx_eq(norm, 1.0, 0.001)
+}
+
+// Test 5: NORM INVARIANCE — THE THEOREM
+// All three parenthesizations give the same norm
+fn test_norm_invariance() -> bool with IO, Mut, Panic, Div {
+    var g = og_new(4)
+    g = og_add_edge(g, 0, 1, oct_unit(1))
+    g = og_add_edge(g, 1, 2, oct_unit(2))
+    g = og_add_edge(g, 2, 3, oct_unit(4))
+
+    var path: [i32; 8] = [0; 8]
+    path[0] = 0; path[1] = 1; path[2] = 2; path[3] = 3
+
+    let norm_l = oct_norm(og_path_left(g, path, 4))
+    let norm_r = oct_norm(og_path_right(g, path, 4))
+    let norm_b = oct_norm(og_path_balanced(g, path, 4))
+
+    let tol = 1e-6
+    let lr_ok = abs_f64(norm_l - norm_r) < tol
+    let lb_ok = abs_f64(norm_l - norm_b) < tol
+    lr_ok && lb_ok
+}
+
+// Test 6: NON-ASSOCIATIVITY — different parenthesizations give different RESULTS
+// Must use basis elements from DIFFERENT Fano triples to avoid accidental associativity.
+// Fano triples: (1,2,4)(2,3,5)(3,4,6)(4,5,7)(5,6,1)(6,7,2)(7,1,3)
+// Using e1, e3, e5 — each pair comes from a different triple.
+// e1*e3 = e7 (from (7,1,3)); e3*e5 = e2 (from (2,3,5))
+// Left:  (e1*e3)*e5 = e7*e5 = -e4
+// Right: e1*(e3*e5) = e1*e2 = e4
+// These differ by sign → non-associativity confirmed!
+fn test_non_associativity() -> bool with IO, Mut, Panic, Div {
+    var g = og_new(4)
+    g = og_add_edge(g, 0, 1, oct_unit(1))  // e1
+    g = og_add_edge(g, 1, 2, oct_unit(3))  // e3
+    g = og_add_edge(g, 2, 3, oct_unit(5))  // e5
+
+    var path: [i32; 8] = [0; 8]
+    path[0] = 0; path[1] = 1; path[2] = 2; path[3] = 3
+
+    let left = og_path_left(g, path, 4)
+    let right = og_path_right(g, path, 4)
+
+    // The results should DIFFER (non-associativity)
+    let diff = oct_sub(left, right)
+    oct_norm(diff) > 0.1
+}
+
+// Test 7: Angular deviation is non-zero (using e1, e3, e5)
+fn test_angular_deviation() -> bool with IO, Mut, Panic, Div {
+    var g = og_new(4)
+    g = og_add_edge(g, 0, 1, oct_unit(1))  // e1
+    g = og_add_edge(g, 1, 2, oct_unit(3))  // e3
+    g = og_add_edge(g, 2, 3, oct_unit(5))  // e5
+
+    var path: [i32; 8] = [0; 8]
+    path[0] = 0; path[1] = 1; path[2] = 2; path[3] = 3
+
+    let left = og_path_left(g, path, 4)
+    let right = og_path_right(g, path, 4)
+
+    let nl = oct_norm(left)
+    let nr = oct_norm(right)
+    if nl < 1e-12 || nr < 1e-12 { return false }
+
+    let ul = oct_scale(left, 1.0 / nl)
+    let ur = oct_scale(right, 1.0 / nr)
+
+    var dot: f64 = 0.0
+    var i: i64 = 0
+    while i < 8 { dot = dot + ul.e[i as usize] * ur.e[i as usize]; i = i + 1 }
+
+    // dot should NOT be exactly +1.0 (they point in different directions)
+    // For (e1,e3,e5): left=-e4, right=e4, so dot=-1 (antiparallel = max deviation)
+    abs_f64(dot - 1.0) > 0.01
+}
+
+// Test 8: Associator [e1, e3, e5] is non-zero
+fn test_associator_field() -> bool with IO, Mut, Panic, Div {
+    // Use elements from different Fano triples
+    let a = oct_unit(1)  // e1
+    let b = oct_unit(3)  // e3
+    let c = oct_unit(5)  // e5
+    let assoc = oct_associator(a, b, c)
+    let assoc_norm = oct_norm(assoc)
+
+    // [e1, e3, e5] should be non-zero
+    assoc_norm > 0.1
+}
+
+// ============================================================================
+// MAIN
+// ============================================================================
+
+fn main() -> i32 with IO, Mut, Panic, Div {
+    println("=== Octonion-Labeled Graph Tests ===")
+    println("")
+
+    var passed = 0
+    var failed = 0
+
+    print("Test 1: graph construction + edge labels... ")
+    if test_graph_construction() { println("PASS"); passed = passed + 1 }
+    else { println("FAIL"); failed = failed + 1 }
+
+    print("Test 2: left-associative path product...... ")
+    if test_path_left() { println("PASS"); passed = passed + 1 }
+    else { println("FAIL"); failed = failed + 1 }
+
+    print("Test 3: right-associative path product..... ")
+    if test_path_right() { println("PASS"); passed = passed + 1 }
+    else { println("FAIL"); failed = failed + 1 }
+
+    print("Test 4: balanced path product.............. ")
+    if test_path_balanced() { println("PASS"); passed = passed + 1 }
+    else { println("FAIL"); failed = failed + 1 }
+
+    print("Test 5: NORM INVARIANCE (the theorem)...... ")
+    if test_norm_invariance() { println("PASS"); passed = passed + 1 }
+    else { println("FAIL"); failed = failed + 1 }
+
+    print("Test 6: non-associativity (diff results)... ")
+    if test_non_associativity() { println("PASS"); passed = passed + 1 }
+    else { println("FAIL"); failed = failed + 1 }
+
+    print("Test 7: angular deviation non-zero......... ")
+    if test_angular_deviation() { println("PASS"); passed = passed + 1 }
+    else { println("FAIL"); failed = failed + 1 }
+
+    print("Test 8: associator field non-zero.......... ")
+    if test_associator_field() { println("PASS"); passed = passed + 1 }
+    else { println("FAIL"); failed = failed + 1 }
+
+    println("")
+    print("Passed: "); println(passed)
+    print("Failed: "); println(failed)
+
+    if failed > 0 {
+        println("SOME TESTS FAILED")
+        return 1
+    }
+    println("ALL 8 TESTS PASSED")
+    return 0
+}

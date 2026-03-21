@@ -1,0 +1,656 @@
+//@ run-pass
+// brain_associator_demo.sio — Clinical Brain Network Analysis
+//
+// Demonstrates the full pipeline:
+//   1. Create synthetic brain FC matrices mimicking ASD and ADHD connectivity
+//   2. Threshold → binary graph
+//   3. Compute Laplacian spectral embedding (8 eigenvectors)
+//   4. Encode edges as octonion labels (spectral difference vectors)
+//   5. Compute associator field
+//   6. Compare ASD vs ADHD vs Control
+//
+// The encoding: for edge (u,v), the octonion label is the normalized
+// difference of spectral coordinates: (φ₁(u)-φ₁(v), ..., φ₈(u)-φ₈(v)) / norm.
+// This captures how u and v differ in the graph's spectral geometry.
+//
+// Clinical prediction:
+//   ASD (local over-connectivity, long-range under-connectivity) →
+//     fewer distinct spectral directions → more Fano-line coincidences →
+//     higher zero-associator fraction (more "safe corridors")
+//   ADHD (diffuse over-connectivity, excess short-range) →
+//     more uniform spectral spread → fewer coincidences →
+//     lower zero fraction, higher associator energy
+
+// ============================================================================
+// MATH + OCTONION (inlined)
+// ============================================================================
+
+fn abs_f64(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+
+fn sqrt_f64(x: f64) -> f64 with Mut, Panic, Div {
+    if x <= 0.0 { return 0.0 }
+    var r = x
+    var i = 0
+    while i < 20 { r = 0.5 * (r + x / r); i = i + 1 }
+    r
+}
+
+struct Oct { e: [f64; 8] }
+fn oct_zero() -> Oct { Oct { e: [0.0; 8] } }
+
+fn oct_sub(a: Oct, b: Oct) -> Oct with Mut, Panic, Div {
+    var r = oct_zero()
+    var i: i64 = 0
+    while i < 8 { r.e[i as usize] = a.e[i as usize] - b.e[i as usize]; i = i + 1 }
+    r
+}
+
+fn oct_scale(o: Oct, s: f64) -> Oct with Mut, Panic, Div {
+    var r = oct_zero()
+    var i: i64 = 0
+    while i < 8 { r.e[i as usize] = o.e[i as usize] * s; i = i + 1 }
+    r
+}
+
+fn oct_norm_sq(o: Oct) -> f64 with Mut, Panic, Div {
+    var s: f64 = 0.0
+    var i: i64 = 0
+    while i < 8 { s = s + o.e[i as usize] * o.e[i as usize]; i = i + 1 }
+    s
+}
+
+fn oct_norm(o: Oct) -> f64 with Mut, Panic, Div { sqrt_f64(oct_norm_sq(o)) }
+
+fn oct_conjugate(o: Oct) -> Oct with Mut, Panic, Div {
+    var r = oct_zero()
+    r.e[0] = o.e[0]
+    var i: i64 = 1
+    while i < 8 { r.e[i as usize] = 0.0 - o.e[i as usize]; i = i + 1 }
+    r
+}
+
+fn oct_fano_index(i: i64, j: i64) -> i64 with Mut, Panic, Div {
+    if i == j { return 0 }
+    var t: [i64; 21] = [0; 21]
+    t[0]=1;t[1]=2;t[2]=4; t[3]=2;t[4]=3;t[5]=5; t[6]=3;t[7]=4;t[8]=6
+    t[9]=4;t[10]=5;t[11]=7; t[12]=5;t[13]=6;t[14]=1; t[15]=6;t[16]=7;t[17]=2
+    t[18]=7;t[19]=1;t[20]=3
+    var k: i64 = 0
+    while k < 7 {
+        let a=t[(k*3) as usize]; let b=t[(k*3+1) as usize]; let c=t[(k*3+2) as usize]
+        if (i==a&&j==b)||(i==b&&j==c)||(i==c&&j==a) {
+            if i==a&&j==b {return c}; if i==b&&j==c {return a}; return b
+        }
+        if (i==b&&j==a)||(i==c&&j==b)||(i==a&&j==c) {
+            if i==b&&j==a {return c}; if i==c&&j==b {return a}; return b
+        }
+        k=k+1
+    }
+    0
+}
+
+fn oct_fano_sign(i: i64, j: i64) -> f64 with Mut, Panic, Div {
+    if i==j {return -1.0}; if i==0||j==0 {return 1.0}
+    var t: [i64; 21] = [0; 21]
+    t[0]=1;t[1]=2;t[2]=4; t[3]=2;t[4]=3;t[5]=5; t[6]=3;t[7]=4;t[8]=6
+    t[9]=4;t[10]=5;t[11]=7; t[12]=5;t[13]=6;t[14]=1; t[15]=6;t[16]=7;t[17]=2
+    t[18]=7;t[19]=1;t[20]=3
+    var k: i64 = 0
+    while k < 7 {
+        let a=t[(k*3) as usize]; let b=t[(k*3+1) as usize]; let c=t[(k*3+2) as usize]
+        if (i==a&&j==b)||(i==b&&j==c)||(i==c&&j==a) {return 1.0}
+        if (i==b&&j==a)||(i==c&&j==b)||(i==a&&j==c) {return -1.0}
+        k=k+1
+    }
+    0.0
+}
+
+fn oct_mul(a: Oct, b: Oct) -> Oct with Mut, Panic, Div {
+    var result = oct_zero()
+    var i: i64 = 0
+    while i < 8 {
+        var j: i64 = 0
+        while j < 8 {
+            let coeff = a.e[i as usize] * b.e[j as usize]
+            if i==0&&j==0 { result.e[0] = result.e[0] + coeff }
+            else if i==0 { result.e[j as usize] = result.e[j as usize] + coeff }
+            else if j==0 { result.e[i as usize] = result.e[i as usize] + coeff }
+            else if i==j { result.e[0] = result.e[0] - coeff }
+            else {
+                let k = oct_fano_index(i, j)
+                let sign = oct_fano_sign(i, j)
+                result.e[k as usize] = result.e[k as usize] + sign * coeff
+            }
+            j=j+1
+        }
+        i=i+1
+    }
+    result
+}
+
+fn oct_associator(a: Oct, b: Oct, c: Oct) -> Oct with Mut, Panic, Div {
+    let ab = oct_mul(a, b)
+    let bc = oct_mul(b, c)
+    oct_sub(oct_mul(ab, c), oct_mul(a, bc))
+}
+
+// ============================================================================
+// BRAIN GRAPH (8 ROIs — represents major brain networks)
+// ============================================================================
+//
+// 8 ROIs map to 8 functional networks:
+//   0: Default Mode Network (DMN)
+//   1: Frontoparietal (executive)
+//   2: Salience (anterior insula, dACC)
+//   3: Dorsal Attention
+//   4: Ventral Attention
+//   5: Somatomotor
+//   6: Visual
+//   7: Limbic
+//
+// Using 8 ROIs maps naturally to octonion dimensions.
+
+struct BrainGraph {
+    n: i32
+    adj: [i32; 64]         // 8x8 adjacency
+    fc: [f64; 64]          // 8x8 correlation matrix
+    // Spectral embedding: 8 eigenvector values per node (8x8)
+    spec: [f64; 64]
+    // Octonion edge labels (per-component, 8x8 each)
+    lab0: [f64; 64]
+    lab1: [f64; 64]
+    lab2: [f64; 64]
+    lab3: [f64; 64]
+    lab4: [f64; 64]
+    lab5: [f64; 64]
+    lab6: [f64; 64]
+    lab7: [f64; 64]
+}
+
+fn bg_new() -> BrainGraph {
+    BrainGraph {
+        n: 8, adj: [0; 64], fc: [0.0; 64], spec: [0.0; 64],
+        lab0: [0.0; 64], lab1: [0.0; 64], lab2: [0.0; 64], lab3: [0.0; 64],
+        lab4: [0.0; 64], lab5: [0.0; 64], lab6: [0.0; 64], lab7: [0.0; 64],
+    }
+}
+
+fn bg_idx(u: i32, v: i32) -> i32 { u * 8 + v }
+
+// ============================================================================
+// STEP 1: Create synthetic FC matrices
+// ============================================================================
+//
+// ASD pattern: strong local clusters (DMN, visual), weak long-range
+// ADHD pattern: diffuse connectivity, excess short-range, weak executive
+// Control: balanced connectivity
+
+fn make_asd_fc() -> BrainGraph with Mut, Panic, Div {
+    var g = bg_new()
+    // ASD: strong DMN internal (0), weak DMN-executive (0-1) link
+    // Strong visual cluster (6-7), weak salience (2)
+    // Local over-connectivity within modules, long-range under-connectivity
+
+    // DMN-DMN (strong)
+    g.fc[bg_idx(0,5) as usize] = 0.6; g.fc[bg_idx(5,0) as usize] = 0.6
+    g.fc[bg_idx(0,7) as usize] = 0.5; g.fc[bg_idx(7,0) as usize] = 0.5
+
+    // Visual-somatomotor cluster (strong local)
+    g.fc[bg_idx(5,6) as usize] = 0.7; g.fc[bg_idx(6,5) as usize] = 0.7
+    g.fc[bg_idx(6,7) as usize] = 0.4; g.fc[bg_idx(7,6) as usize] = 0.4
+
+    // Attention networks (moderate)
+    g.fc[bg_idx(3,4) as usize] = 0.5; g.fc[bg_idx(4,3) as usize] = 0.5
+
+    // WEAK long-range connections (ASD signature)
+    g.fc[bg_idx(0,1) as usize] = 0.15; g.fc[bg_idx(1,0) as usize] = 0.15  // DMN-executive
+    g.fc[bg_idx(1,2) as usize] = 0.2; g.fc[bg_idx(2,1) as usize] = 0.2   // exec-salience
+    g.fc[bg_idx(2,3) as usize] = 0.1; g.fc[bg_idx(3,2) as usize] = 0.1   // salience-attention
+
+    // Self-connections (diagonal = 1)
+    var i: i32 = 0
+    while i < 8 { g.fc[bg_idx(i, i) as usize] = 1.0; i = i + 1 }
+    g
+}
+
+fn make_adhd_fc() -> BrainGraph with Mut, Panic, Div {
+    var g = bg_new()
+    // ADHD: diffuse connectivity, excess short-range, weak executive control
+    // Many moderate connections, few strong ones
+
+    // Diffuse moderate connections (ADHD signature)
+    g.fc[bg_idx(0,1) as usize] = 0.35; g.fc[bg_idx(1,0) as usize] = 0.35
+    g.fc[bg_idx(0,2) as usize] = 0.3; g.fc[bg_idx(2,0) as usize] = 0.3
+    g.fc[bg_idx(0,5) as usize] = 0.35; g.fc[bg_idx(5,0) as usize] = 0.35
+    g.fc[bg_idx(1,2) as usize] = 0.3; g.fc[bg_idx(2,1) as usize] = 0.3
+    g.fc[bg_idx(1,3) as usize] = 0.3; g.fc[bg_idx(3,1) as usize] = 0.3
+    g.fc[bg_idx(2,4) as usize] = 0.35; g.fc[bg_idx(4,2) as usize] = 0.35
+    g.fc[bg_idx(3,4) as usize] = 0.4; g.fc[bg_idx(4,3) as usize] = 0.4
+    g.fc[bg_idx(3,6) as usize] = 0.3; g.fc[bg_idx(6,3) as usize] = 0.3
+    g.fc[bg_idx(4,5) as usize] = 0.35; g.fc[bg_idx(5,4) as usize] = 0.35
+    g.fc[bg_idx(5,6) as usize] = 0.4; g.fc[bg_idx(6,5) as usize] = 0.4
+    g.fc[bg_idx(5,7) as usize] = 0.3; g.fc[bg_idx(7,5) as usize] = 0.3
+    g.fc[bg_idx(6,7) as usize] = 0.35; g.fc[bg_idx(7,6) as usize] = 0.35
+
+    // Self-connections
+    var i: i32 = 0
+    while i < 8 { g.fc[bg_idx(i, i) as usize] = 1.0; i = i + 1 }
+    g
+}
+
+fn make_control_fc() -> BrainGraph with Mut, Panic, Div {
+    var g = bg_new()
+    // Control: balanced — moderate local, moderate long-range
+
+    g.fc[bg_idx(0,1) as usize] = 0.4; g.fc[bg_idx(1,0) as usize] = 0.4   // DMN-exec
+    g.fc[bg_idx(0,5) as usize] = 0.35; g.fc[bg_idx(5,0) as usize] = 0.35
+    g.fc[bg_idx(1,2) as usize] = 0.45; g.fc[bg_idx(2,1) as usize] = 0.45  // exec-salience
+    g.fc[bg_idx(2,3) as usize] = 0.4; g.fc[bg_idx(3,2) as usize] = 0.4   // salience-dorsal
+    g.fc[bg_idx(3,4) as usize] = 0.45; g.fc[bg_idx(4,3) as usize] = 0.45  // attention pair
+    g.fc[bg_idx(4,5) as usize] = 0.35; g.fc[bg_idx(5,4) as usize] = 0.35
+    g.fc[bg_idx(5,6) as usize] = 0.5; g.fc[bg_idx(6,5) as usize] = 0.5   // motor-visual
+    g.fc[bg_idx(6,7) as usize] = 0.3; g.fc[bg_idx(7,6) as usize] = 0.3
+    g.fc[bg_idx(0,7) as usize] = 0.3; g.fc[bg_idx(7,0) as usize] = 0.3   // DMN-limbic
+
+    var i: i32 = 0
+    while i < 8 { g.fc[bg_idx(i, i) as usize] = 1.0; i = i + 1 }
+    g
+}
+
+// ============================================================================
+// STEP 2: Threshold FC → binary adjacency
+// ============================================================================
+
+fn bg_threshold(g: BrainGraph, thresh: f64) -> BrainGraph with Mut, Panic, Div {
+    var result = g
+    var u: i32 = 0
+    while u < 8 {
+        var v: i32 = 0
+        while v < 8 {
+            if u != v && g.fc[bg_idx(u, v) as usize] >= thresh {
+                result.adj[bg_idx(u, v) as usize] = 1
+            }
+            v = v + 1
+        }
+        u = u + 1
+    }
+    result
+}
+
+// ============================================================================
+// STEP 3: Spectral embedding via power iteration
+// ============================================================================
+// Compute 8 approximate eigenvectors of the Laplacian using deflated
+// power iteration. Store in spec[node*8 + eigvec_idx].
+
+fn bg_compute_laplacian(g: BrainGraph) -> [f64; 64] with Mut, Panic, Div {
+    var lap: [f64; 64] = [0.0; 64]
+    var i: i32 = 0
+    while i < 8 {
+        // Degree
+        var deg: f64 = 0.0
+        var j: i32 = 0
+        while j < 8 {
+            deg = deg + (g.adj[bg_idx(i, j) as usize] as f64)
+            j = j + 1
+        }
+        // Fill row
+        j = 0
+        while j < 8 {
+            if i == j {
+                lap[bg_idx(i, j) as usize] = deg
+            } else {
+                lap[bg_idx(i, j) as usize] = 0.0 - (g.adj[bg_idx(i, j) as usize] as f64)
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    lap
+}
+
+// Simple power iteration for dominant eigenvector of a matrix
+fn power_iter(mat: [f64; 64], n: i32, iters: i32, result: [f64; 8]) -> [f64; 8] with Mut, Panic, Div {
+    var v = result  // initial vector
+    var iter: i32 = 0
+    while iter < iters {
+        // w = mat * v
+        var w: [f64; 8] = [0.0; 8]
+        var i: i32 = 0
+        while i < n {
+            var s: f64 = 0.0
+            var j: i32 = 0
+            while j < n {
+                s = s + mat[bg_idx(i, j) as usize] * v[j as usize]
+                j = j + 1
+            }
+            w[i as usize] = s
+            i = i + 1
+        }
+        // Normalize
+        var norm: f64 = 0.0
+        i = 0
+        while i < n { norm = norm + w[i as usize] * w[i as usize]; i = i + 1 }
+        norm = sqrt_f64(norm)
+        if norm > 1e-12 {
+            i = 0
+            while i < n { w[i as usize] = w[i as usize] / norm; i = i + 1 }
+        }
+        v = w
+        iter = iter + 1
+    }
+    v
+}
+
+// Deflate matrix: remove component along eigenvector v with eigenvalue lambda
+fn deflate(mat: [f64; 64], n: i32, v: [f64; 8], lambda: f64) -> [f64; 64] with Mut, Panic, Div {
+    var result = mat
+    var i: i32 = 0
+    while i < n {
+        var j: i32 = 0
+        while j < n {
+            result[bg_idx(i, j) as usize] = result[bg_idx(i, j) as usize] - lambda * v[i as usize] * v[j as usize]
+            j = j + 1
+        }
+        i = i + 1
+    }
+    result
+}
+
+fn bg_spectral_embed(g: BrainGraph) -> BrainGraph with Mut, Panic, Div {
+    var result = g
+    let lap = bg_compute_laplacian(g)
+    var mat = lap
+
+    // Extract 8 eigenvectors via deflated power iteration
+    var eig: i32 = 0
+    while eig < 8 {
+        // Init with pseudo-random vector based on eigenvector index
+        var init: [f64; 8] = [0.0; 8]
+        var i: i32 = 0
+        while i < 8 {
+            // Simple deterministic init: sin-like pattern
+            let val = (((i + 1) * (eig + 1) * 7 + 3) % 17) as f64 / 17.0
+            init[i as usize] = val - 0.5
+            i = i + 1
+        }
+
+        // Power iterate
+        let v = power_iter(mat, 8, 50, init)
+
+        // Compute eigenvalue: lambda = v^T M v
+        var lambda: f64 = 0.0
+        i = 0
+        while i < 8 {
+            var s: f64 = 0.0
+            var j: i32 = 0
+            while j < 8 {
+                s = s + mat[bg_idx(i, j) as usize] * v[j as usize]
+                j = j + 1
+            }
+            lambda = lambda + v[i as usize] * s
+            i = i + 1
+        }
+
+        // Store eigenvector: spec[node * 8 + eig] = v[node]
+        i = 0
+        while i < 8 {
+            result.spec[(i * 8 + eig) as usize] = v[i as usize]
+            i = i + 1
+        }
+
+        // Deflate
+        mat = deflate(mat, 8, v, lambda)
+        eig = eig + 1
+    }
+    result
+}
+
+// ============================================================================
+// STEP 4: Encode edges as octonion labels
+// ============================================================================
+// For edge (u,v): label = normalize(spec[u] - spec[v])
+// The octonion encodes how u and v differ spectrally.
+
+fn bg_get_spectral_oct(g: BrainGraph, node: i32) -> Oct with Mut, Panic, Div {
+    var o = Oct { e: [0.0; 8] }
+    var i: i32 = 0
+    while i < 8 {
+        o.e[i as usize] = g.spec[(node * 8 + i) as usize]
+        i = i + 1
+    }
+    o
+}
+
+fn bg_encode_labels(g: BrainGraph) -> BrainGraph with Mut, Panic, Div {
+    var result = g
+    var u: i32 = 0
+    while u < 8 {
+        var v: i32 = 0
+        while v < 8 {
+            if g.adj[bg_idx(u, v) as usize] == 1 {
+                let su = bg_get_spectral_oct(g, u)
+                let sv = bg_get_spectral_oct(g, v)
+                var diff = oct_sub(su, sv)
+                let n = oct_norm(diff)
+                if n > 1e-12 {
+                    diff = oct_scale(diff, 1.0 / n)
+                }
+                let idx = bg_idx(u, v) as usize
+                result.lab0[idx] = diff.e[0]; result.lab1[idx] = diff.e[1]
+                result.lab2[idx] = diff.e[2]; result.lab3[idx] = diff.e[3]
+                result.lab4[idx] = diff.e[4]; result.lab5[idx] = diff.e[5]
+                result.lab6[idx] = diff.e[6]; result.lab7[idx] = diff.e[7]
+            }
+            v = v + 1
+        }
+        u = u + 1
+    }
+    result
+}
+
+fn bg_get_label(g: BrainGraph, u: i32, v: i32) -> Oct with Mut, Panic, Div {
+    let idx = bg_idx(u, v) as usize
+    var o = Oct { e: [0.0; 8] }
+    o.e[0]=g.lab0[idx]; o.e[1]=g.lab1[idx]; o.e[2]=g.lab2[idx]; o.e[3]=g.lab3[idx]
+    o.e[4]=g.lab4[idx]; o.e[5]=g.lab5[idx]; o.e[6]=g.lab6[idx]; o.e[7]=g.lab7[idx]
+    o
+}
+
+// ============================================================================
+// STEP 5: Associator field
+// ============================================================================
+
+struct BrainAssocStats {
+    count: i32
+    mean_norm: f64
+    max_norm: f64
+    energy: f64
+    zero_count: i32
+    edge_count: i32
+    eta: f64
+}
+
+fn bg_compute_stats(g: BrainGraph) -> BrainAssocStats with Mut, Panic, Div {
+    var count: i32 = 0
+    var sum_n: f64 = 0.0
+    var max_n: f64 = 0.0
+    var sum_sq: f64 = 0.0
+    var zeros: i32 = 0
+    var edges: i32 = 0
+
+    // Count edges
+    var u: i32 = 0
+    while u < 8 {
+        var v: i32 = 0
+        while v < 8 {
+            if g.adj[bg_idx(u, v) as usize] == 1 { edges = edges + 1 }
+            v = v + 1
+        }
+        u = u + 1
+    }
+
+    // Compute associators over all length-3 directed paths
+    u = 0
+    while u < 8 {
+        var v: i32 = 0
+        while v < 8 {
+            if g.adj[bg_idx(u, v) as usize] == 1 && u != v {
+                var w: i32 = 0
+                while w < 8 {
+                    if g.adj[bg_idx(v, w) as usize] == 1 && v != w && w != u {
+                        var x: i32 = 0
+                        while x < 8 {
+                            if g.adj[bg_idx(w, x) as usize] == 1 && w != x && x != v {
+                                let a = bg_get_label(g, u, v)
+                                let b = bg_get_label(g, v, w)
+                                let c = bg_get_label(g, w, x)
+                                let assoc = oct_associator(a, b, c)
+                                let n = oct_norm(assoc)
+                                count = count + 1
+                                sum_n = sum_n + n
+                                sum_sq = sum_sq + n * n
+                                if n > max_n { max_n = n }
+                                if n < 1e-9 { zeros = zeros + 1 }
+                            }
+                            x = x + 1
+                        }
+                    }
+                    w = w + 1
+                }
+            }
+            v = v + 1
+        }
+        u = u + 1
+    }
+
+    let mean = if count > 0 { sum_n / (count as f64) } else { 0.0 }
+    // Compute eta = <k>^2 / N
+    let avg_deg = (edges as f64) / 8.0
+    let eta = avg_deg * avg_deg / 8.0
+
+    BrainAssocStats {
+        count: count,
+        mean_norm: mean,
+        max_norm: max_n,
+        energy: sum_sq,
+        zero_count: zeros,
+        edge_count: edges,
+        eta: eta,
+    }
+}
+
+// ============================================================================
+// PRINT HELPERS
+// ============================================================================
+
+fn print_f4(x: f64) with IO, Mut, Panic, Div {
+    if x < 0.0 { print("-"); print_f4(0.0 - x); return }
+    let ip = x as i64
+    let fp = ((x - (ip as f64)) * 10000.0 + 0.5) as i64
+    print(ip); print(".")
+    if fp < 10 { print("000") }
+    else if fp < 100 { print("00") }
+    else if fp < 1000 { print("0") }
+    print(fp)
+}
+
+fn print_stats(name: i32, s: BrainAssocStats) with IO, Mut, Panic, Div {
+    if name == 1 { print("  ASD     ") }
+    else if name == 2 { print("  ADHD    ") }
+    else if name == 3 { print("  Control ") }
+    else { print("  ???     ") }
+
+    print("| edges="); print(s.edge_count)
+    print(" eta="); print_f4(s.eta)
+    print(" | triples="); print(s.count)
+    print(" mean="); print_f4(s.mean_norm)
+    print(" max="); print_f4(s.max_norm)
+    print(" zeros="); print(s.zero_count)
+
+    // Zero fraction
+    if s.count > 0 {
+        print(" ("); print_f4((s.zero_count as f64) / (s.count as f64) * 100.0); print("%)")
+    }
+    println("")
+}
+
+// ============================================================================
+// MAIN
+// ============================================================================
+
+fn main() -> i32 with IO, Mut, Panic, Div {
+    println("================================================================")
+    println("  BRAIN CONNECTIVITY ASSOCIATOR FIELD ANALYSIS")
+    println("  Pipeline: FC matrix -> threshold -> spectral embed -> ")
+    println("            octonion labels -> associator field")
+    println("================================================================")
+    println("")
+
+    let thresh = 0.25
+
+    // --- ASD ---
+    println("Processing ASD brain network...")
+    var g_asd = make_asd_fc()
+    g_asd = bg_threshold(g_asd, thresh)
+    g_asd = bg_spectral_embed(g_asd)
+    g_asd = bg_encode_labels(g_asd)
+    let s_asd = bg_compute_stats(g_asd)
+
+    // --- ADHD ---
+    println("Processing ADHD brain network...")
+    var g_adhd = make_adhd_fc()
+    g_adhd = bg_threshold(g_adhd, thresh)
+    g_adhd = bg_spectral_embed(g_adhd)
+    g_adhd = bg_encode_labels(g_adhd)
+    let s_adhd = bg_compute_stats(g_adhd)
+
+    // --- Control ---
+    println("Processing Control brain network...")
+    var g_ctrl = make_control_fc()
+    g_ctrl = bg_threshold(g_ctrl, thresh)
+    g_ctrl = bg_spectral_embed(g_ctrl)
+    g_ctrl = bg_encode_labels(g_ctrl)
+    let s_ctrl = bg_compute_stats(g_ctrl)
+
+    println("")
+    println("--- Associator Field Comparison ---")
+    println("")
+    print_stats(1, s_asd)
+    print_stats(2, s_adhd)
+    print_stats(3, s_ctrl)
+
+    println("")
+    println("--- Phase Classification (eta_c ~ 1.41 for N=8) ---")
+    println("")
+    let eta_c = 3.75 - 14.62 / sqrt_f64(8.0)
+
+    print("  eta_c(N=8) = "); print_f4(eta_c); println("")
+    println("")
+
+    print("  ASD:     eta="); print_f4(s_asd.eta)
+    if s_asd.eta > eta_c { println("  -> SPHERICAL (eta > eta_c)") }
+    else { println("  -> HYPERBOLIC (eta < eta_c)") }
+
+    print("  ADHD:    eta="); print_f4(s_adhd.eta)
+    if s_adhd.eta > eta_c { println("  -> SPHERICAL (eta > eta_c)") }
+    else { println("  -> HYPERBOLIC (eta < eta_c)") }
+
+    print("  Control: eta="); print_f4(s_ctrl.eta)
+    if s_ctrl.eta > eta_c { println("  -> SPHERICAL (eta > eta_c)") }
+    else { println("  -> HYPERBOLIC (eta < eta_c)") }
+
+    println("")
+    println("--- Clinical Interpretation ---")
+    println("")
+    println("  The associator field measures ORDER-DEPENDENCE in")
+    println("  neural signal propagation. Higher mean associator norm")
+    println("  = signal cascades are more sensitive to processing order.")
+    println("")
+    println("  Zero-associator fraction = proportion of 'safe corridors'")
+    println("  where signal order does not matter (algebraically associative).")
+    println("")
+    println("================================================================")
+
+    0
+}

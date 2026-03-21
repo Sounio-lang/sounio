@@ -9,6 +9,8 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.examples.visual.rea
 
 # Sounio Visual Examples
 
+> **Setup:** `SOUC=./artifacts/omega/souc-bin/souc-linux-x86_64-jit` (all commands below use `$SOUC`)
+
 **Beautiful scientific visualization using ASCII art + ANSI colors**
 
 This directory showcases Sounio's unique capabilities for **visual scientific computing** using nothing but terminal output. No GUI libraries needed - just Unicode box drawing and ANSI escape codes!
@@ -27,7 +29,7 @@ Pure ASCII visualization of 8×8 octonion basis multiplication.
 
 **Run:**
 ```bash
-cargo run --bin souc -- run examples/visual/01_octonion_multiplication_table.sio
+$SOUC run examples/visual/01_octonion_multiplication_table.sio
 ```
 
 **What makes this unique:** Sounio is the **only language with native octonion types**, enabling direct computation of 8D hypercomplex algebra without external libraries.
@@ -52,7 +54,7 @@ Neuroimaging visualization with octonion neural network processing.
 
 **Run:**
 ```bash
-cargo run --bin souc -- run examples/visual/02_fmri_octonion_activation.sio
+$SOUC run examples/visual/02_fmri_octonion_activation.sio
 ```
 
 ---
@@ -76,7 +78,7 @@ Deep learning architecture comparison with training curves.
 
 **Run:**
 ```bash
-cargo run --bin souc -- run examples/visual/03_octonion_network_efficiency.sio
+$SOUC run examples/visual/03_octonion_network_efficiency.sio
 ```
 
 ---
@@ -112,7 +114,7 @@ let reset = "\x1b[0m"
 
 **Run:**
 ```bash
-cargo run --bin souc -- run examples/visual/05_color_demo.sio
+$SOUC run examples/visual/05_color_demo.sio
 ```
 
 **Note:** Your terminal will render these as actual colors, not escape sequences!
@@ -144,7 +146,7 @@ cargo run --bin souc -- run examples/visual/05_color_demo.sio
 
 **Run:**
 ```bash
-cargo run --bin souc -- run examples/visual/06_octonion_color_table.sio
+$SOUC run examples/visual/06_octonion_color_table.sio
 ```
 
 ---
@@ -171,7 +173,7 @@ cargo run --bin souc -- run examples/visual/06_octonion_color_table.sio
 
 **Run:**
 ```bash
-cargo run --bin souc -- run examples/visual/07_epistemic_uncertainty_bars.sio
+$SOUC run examples/visual/07_epistemic_uncertainty_bars.sio
 ```
 
 ---
@@ -196,7 +198,7 @@ cargo run --bin souc -- run examples/visual/07_epistemic_uncertainty_bars.sio
 
 **Run:**
 ```bash
-cargo run --bin souc -- run examples/visual/08_climate_ensemble_color.sio
+$SOUC run examples/visual/08_climate_ensemble_color.sio
 ```
 
 ---
@@ -223,7 +225,7 @@ cargo run --bin souc -- run examples/visual/08_climate_ensemble_color.sio
 
 **Run:**
 ```bash
-cargo run --bin souc -- run examples/visual/09_pkpd_color_curves.sio
+$SOUC run examples/visual/09_pkpd_color_curves.sio
 ```
 
 ---
@@ -253,7 +255,7 @@ cargo run --bin souc -- run examples/visual/09_pkpd_color_curves.sio
 
 **Run:**
 ```bash
-cargo run --bin souc -- run examples/visual/10_kalman_filter_color.sio
+$SOUC run examples/visual/10_kalman_filter_color.sio
 ```
 
 ---
@@ -397,12 +399,12 @@ All examples run in **< 1 second** on modern hardware:
 
 3. **Disable paging** for full output:
    ```bash
-   cargo run --bin souc -- run example.sio | cat
+   $SOUC run example.sio | cat
    ```
 
 4. **Capture output** preserving colors:
    ```bash
-   cargo run --bin souc -- run example.sio | ansi2html > output.html
+   $SOUC run example.sio | ansi2html > output.html
    ```
 
 ### SSH Sessions
@@ -412,7 +414,7 @@ These examples work perfectly over SSH - no X11 forwarding needed!
 ```bash
 ssh user@remote
 cd sounio
-cargo run --bin souc -- run examples/visual/06_octonion_color_table.sio
+$SOUC run examples/visual/06_octonion_color_table.sio
 ```
 
 ---

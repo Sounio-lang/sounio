@@ -1,0 +1,538 @@
+//@ run-pass
+// cayley_dickson_hessian_tower.sio
+//
+// THE EXPERIMENT: Does the Mandelbrot Hessian null-space dimension
+// track the associator structure across the Cayley-Dickson tower?
+//
+// Prediction:
+//   Quaternion (dim 4):  0 null dims (associative → full rank)
+//   Octonion (dim 8):    ? null dims (non-associative, no zero divisors)
+//   Sedenion (dim 16):   11 null dims (observed; 11 = 1848/168)
+//
+// If the pattern holds, it connects Mandelbrot dynamics to PSL(2,7).
+
+fn hc_abs(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+fn hc_sqrt(x: f64) -> f64 with Mut, Panic, Div {
+    if x <= 0.0 { return 0.0 }
+    var r = x
+    var i = 0
+    while i < 25 { r = 0.5 * (r + x / r); i = i + 1 }
+    r
+}
+
+// ============================================================================
+// QUATERNION (dim 4) — associative, norm-multiplicative
+// ============================================================================
+
+fn q_mul(a: [f64; 4], b: [f64; 4]) -> [f64; 4] with Mut, Panic, Div {
+    // (a0+a1i+a2j+a3k)(b0+b1i+b2j+b3k)
+    var r: [f64; 4] = [0.0; 4]
+    r[0] = a[0]*b[0] - a[1]*b[1] - a[2]*b[2] - a[3]*b[3]
+    r[1] = a[0]*b[1] + a[1]*b[0] + a[2]*b[3] - a[3]*b[2]
+    r[2] = a[0]*b[2] - a[1]*b[3] + a[2]*b[0] + a[3]*b[1]
+    r[3] = a[0]*b[3] + a[1]*b[2] - a[2]*b[1] + a[3]*b[0]
+    r
+}
+
+fn q_add(a: [f64; 4], b: [f64; 4]) -> [f64; 4] with Mut, Panic, Div {
+    var r: [f64; 4] = [0.0; 4]
+    r[0]=a[0]+b[0]; r[1]=a[1]+b[1]; r[2]=a[2]+b[2]; r[3]=a[3]+b[3]
+    r
+}
+
+fn q_norm_sq(a: [f64; 4]) -> f64 with Mut, Panic, Div {
+    a[0]*a[0] + a[1]*a[1] + a[2]*a[2] + a[3]*a[3]
+}
+
+fn q_orbit_nsq(c: [f64; 4], iters: i32) -> f64 with Mut, Panic, Div {
+    var z: [f64; 4] = [0.0; 4]
+    var n = 0
+    while n < iters {
+        z = q_add(q_mul(z, z), c)
+        if q_norm_sq(z) > 100.0 { return q_norm_sq(z) }
+        n = n + 1
+    }
+    q_norm_sq(z)
+}
+
+fn q_hess_diag(c: [f64; 4], iters: i32, idx: i32) -> f64 with Mut, Panic, Div {
+    let eps = 0.0001
+    let f0 = q_orbit_nsq(c, iters)
+    var cp = c; cp[idx as usize] = cp[idx as usize] + eps
+    let fp = q_orbit_nsq(cp, iters)
+    var cm = c; cm[idx as usize] = cm[idx as usize] - eps
+    let fm = q_orbit_nsq(cm, iters)
+    (fp - 2.0 * f0 + fm) / (eps * eps)
+}
+
+// ============================================================================
+// OCTONION (dim 8) — non-associative, norm-multiplicative
+// ============================================================================
+// Cayley-Dickson: O = (Q, Q), (a,b)(c,d) = (ac - conj(d)b, da + b*conj(c))
+
+fn q_conj(a: [f64; 4]) -> [f64; 4] with Mut, Panic, Div {
+    var r: [f64; 4] = [0.0; 4]
+    r[0] = a[0]; r[1] = 0.0 - a[1]; r[2] = 0.0 - a[2]; r[3] = 0.0 - a[3]
+    r
+}
+
+fn q_sub(a: [f64; 4], b: [f64; 4]) -> [f64; 4] with Mut, Panic, Div {
+    var r: [f64; 4] = [0.0; 4]
+    r[0]=a[0]-b[0]; r[1]=a[1]-b[1]; r[2]=a[2]-b[2]; r[3]=a[3]-b[3]
+    r
+}
+
+fn o_mul(a: [f64; 8], b: [f64; 8]) -> [f64; 8] with Mut, Panic, Div {
+    var aq: [f64; 4] = [a[0], a[1], a[2], a[3]]
+    var bq: [f64; 4] = [a[4], a[5], a[6], a[7]]
+    var cq: [f64; 4] = [b[0], b[1], b[2], b[3]]
+    var dq: [f64; 4] = [b[4], b[5], b[6], b[7]]
+    let real = q_sub(q_mul(aq, cq), q_mul(q_conj(dq), bq))
+    let imag = q_add(q_mul(dq, aq), q_mul(bq, q_conj(cq)))
+    var r: [f64; 8] = [0.0; 8]
+    var i = 0
+    while i < 4 { r[i] = real[i]; r[i+4] = imag[i]; i = i + 1 }
+    r
+}
+
+fn o_add(a: [f64; 8], b: [f64; 8]) -> [f64; 8] with Mut, Panic, Div {
+    var r: [f64; 8] = [0.0; 8]
+    var i = 0
+    while i < 8 { r[i] = a[i] + b[i]; i = i + 1 }
+    r
+}
+
+fn o_norm_sq(a: [f64; 8]) -> f64 with Mut, Panic, Div {
+    var s: f64 = 0.0
+    var i = 0
+    while i < 8 { s = s + a[i] * a[i]; i = i + 1 }
+    s
+}
+
+fn o_orbit_nsq(c: [f64; 8], iters: i32) -> f64 with Mut, Panic, Div {
+    var z: [f64; 8] = [0.0; 8]
+    var n = 0
+    while n < iters {
+        z = o_add(o_mul(z, z), c)
+        if o_norm_sq(z) > 100.0 { return o_norm_sq(z) }
+        n = n + 1
+    }
+    o_norm_sq(z)
+}
+
+fn o_hess_diag(c: [f64; 8], iters: i32, idx: i32) -> f64 with Mut, Panic, Div {
+    let eps = 0.0001
+    let f0 = o_orbit_nsq(c, iters)
+    var cp = c; cp[idx as usize] = cp[idx as usize] + eps
+    let fp = o_orbit_nsq(cp, iters)
+    var cm = c; cm[idx as usize] = cm[idx as usize] - eps
+    let fm = o_orbit_nsq(cm, iters)
+    (fp - 2.0 * f0 + fm) / (eps * eps)
+}
+
+// ============================================================================
+// SEDENION (dim 16) — non-associative, HAS zero divisors
+// ============================================================================
+
+fn o_conj(a: [f64; 8]) -> [f64; 8] with Mut, Panic, Div {
+    var r: [f64; 8] = [0.0; 8]
+    r[0] = a[0]
+    var i = 1
+    while i < 8 { r[i] = 0.0 - a[i]; i = i + 1 }
+    r
+}
+
+fn o_sub(a: [f64; 8], b: [f64; 8]) -> [f64; 8] with Mut, Panic, Div {
+    var r: [f64; 8] = [0.0; 8]
+    var i = 0
+    while i < 8 { r[i] = a[i] - b[i]; i = i + 1 }
+    r
+}
+
+fn s_mul(p: [f64; 16], q: [f64; 16]) -> [f64; 16] with Mut, Panic, Div {
+    var a: [f64; 8] = [0.0; 8]; var b: [f64; 8] = [0.0; 8]
+    var c: [f64; 8] = [0.0; 8]; var d: [f64; 8] = [0.0; 8]
+    var i = 0
+    while i < 8 { a[i]=p[i]; b[i]=p[i+8]; c[i]=q[i]; d[i]=q[i+8]; i=i+1 }
+    let real = o_sub(o_mul(a, c), o_mul(o_conj(d), b))
+    let imag = o_add(o_mul(d, a), o_mul(b, o_conj(c)))
+    var r: [f64; 16] = [0.0; 16]
+    i = 0
+    while i < 8 { r[i] = real[i]; r[i+8] = imag[i]; i = i + 1 }
+    r
+}
+
+fn s_add(a: [f64; 16], b: [f64; 16]) -> [f64; 16] with Mut, Panic, Div {
+    var r: [f64; 16] = [0.0; 16]
+    var i = 0
+    while i < 16 { r[i] = a[i] + b[i]; i = i + 1 }
+    r
+}
+
+fn s_norm_sq(a: [f64; 16]) -> f64 with Mut, Panic, Div {
+    var s: f64 = 0.0
+    var i = 0
+    while i < 16 { s = s + a[i] * a[i]; i = i + 1 }
+    s
+}
+
+fn s_orbit_nsq(c: [f64; 16], iters: i32) -> f64 with Mut, Panic, Div {
+    var z: [f64; 16] = [0.0; 16]
+    var n = 0
+    while n < iters {
+        z = s_add(s_mul(z, z), c)
+        if s_norm_sq(z) > 100.0 { return s_norm_sq(z) }
+        n = n + 1
+    }
+    s_norm_sq(z)
+}
+
+fn s_hess_diag(c: [f64; 16], iters: i32, idx: i32) -> f64 with Mut, Panic, Div {
+    let eps = 0.0001
+    let f0 = s_orbit_nsq(c, iters)
+    var cp = c; cp[idx as usize] = cp[idx as usize] + eps
+    let fp = s_orbit_nsq(cp, iters)
+    var cm = c; cm[idx as usize] = cm[idx as usize] - eps
+    let fm = s_orbit_nsq(cm, iters)
+    (fp - 2.0 * f0 + fm) / (eps * eps)
+}
+
+// ============================================================================
+// MAIN: THE TOWER EXPERIMENT
+// ============================================================================
+
+fn pr_f64(x: f64) with IO, Mut, Panic, Div {
+    if x < 0.0 { print("-"); pr_f64(0.0 - x); return }
+    let ip = x as i64
+    let fp = ((x - (ip as f64)) * 100.0 + 0.5) as i64
+    print(ip); print("."); if fp < 10 { print("0") }; print(fp)
+}
+
+fn main() -> i32 with IO, Mut, Panic, Div {
+    println("================================================================")
+    println("  CAYLEY-DICKSON HESSIAN TOWER — MIXED DIRECTIONS")
+    println("  Using multi-component c to activate algebraic structure")
+    println("  Q (dim 4) → O (dim 8) → S (dim 16)")
+    println("================================================================")
+
+    let iters = 10
+
+    // ==================================================================
+    // QUATERNION: mixed directions (all components active)
+    // ==================================================================
+    println("")
+    println("=== QUATERNION (dim 4, associative) ===")
+
+    // c = 0.25*(e1 + e2 + e3), normalized to ~0.43
+    var cq1: [f64; 4] = [0.0, 0.25, 0.25, 0.25]
+    var cq2: [f64; 4] = [0.1, 0.3, 0.1, 0.3]  // asymmetric
+    var cq3: [f64; 4] = [0.2, 0.2, 0.2, 0.2]  // fully symmetric
+
+    println("  c = e1+e2+e3 (symmetric imag):")
+    var nulls: i32 = 0
+    var i: i32 = 0
+    while i < 4 {
+        let d = q_hess_diag(cq1, iters, i)
+        if hc_abs(d) < 0.01 { nulls = nulls + 1 }
+        i = i + 1
+    }
+    print("    null = "); print(nulls); println("/4")
+
+    println("  c = 0.1e0+0.3e1+0.1e2+0.3e3 (asymmetric):")
+    nulls = 0; i = 0
+    while i < 4 {
+        let d = q_hess_diag(cq2, iters, i)
+        if hc_abs(d) < 0.01 { nulls = nulls + 1 }
+        i = i + 1
+    }
+    print("    null = "); print(nulls); println("/4")
+
+    println("  c = 0.2*(e0+e1+e2+e3) (all equal):")
+    nulls = 0; i = 0
+    while i < 4 {
+        let d = q_hess_diag(cq3, iters, i)
+        if hc_abs(d) < 0.01 { nulls = nulls + 1 }
+        i = i + 1
+    }
+    print("    null = "); print(nulls); println("/4")
+
+    // ==================================================================
+    // OCTONION: mixed directions
+    // ==================================================================
+    println("")
+    println("=== OCTONION (dim 8, non-associative, no zero divisors) ===")
+
+    // All 7 imaginary components active
+    var co1: [f64; 8] = [0.0, 0.19, 0.19, 0.19, 0.19, 0.19, 0.19, 0.19]
+    // Fano line (1,2,4) — these three generate a quaternion subalgebra
+    var co2: [f64; 8] = [0.0, 0.29, 0.29, 0.0, 0.29, 0.0, 0.0, 0.0]
+    // Non-Fano triple (1,2,3) — non-associative
+    var co3: [f64; 8] = [0.0, 0.29, 0.29, 0.29, 0.0, 0.0, 0.0, 0.0]
+    // Full: all 8 components
+    var co4: [f64; 8] = [0.18, 0.18, 0.18, 0.18, 0.18, 0.18, 0.18, 0.18]
+
+    println("  c = all 7 imag (uniform):")
+    nulls = 0; i = 0
+    while i < 8 {
+        let d = o_hess_diag(co1, iters, i)
+        if hc_abs(d) < 0.01 { nulls = nulls + 1 }
+        i = i + 1
+    }
+    print("    null = "); print(nulls); println("/8")
+
+    println("  c = Fano line (1,2,4) — ASSOCIATIVE triple:")
+    nulls = 0; i = 0
+    while i < 8 {
+        let d = o_hess_diag(co2, iters, i)
+        if hc_abs(d) < 0.01 { nulls = nulls + 1 }
+        i = i + 1
+    }
+    print("    null = "); print(nulls); println("/8")
+
+    println("  c = Non-Fano (1,2,3) — NON-ASSOCIATIVE triple:")
+    nulls = 0; i = 0
+    while i < 8 {
+        let d = o_hess_diag(co3, iters, i)
+        if hc_abs(d) < 0.01 { nulls = nulls + 1 }
+        i = i + 1
+    }
+    print("    null = "); print(nulls); println("/8")
+
+    println("  c = all 8 components (full):")
+    nulls = 0; i = 0
+    while i < 8 {
+        let d = o_hess_diag(co4, iters, i)
+        if hc_abs(d) < 0.01 { nulls = nulls + 1 }
+        i = i + 1
+    }
+    print("    null = "); print(nulls); println("/8")
+
+    // ==================================================================
+    // SEDENION: mixed directions — ZD-aligned vs non-ZD
+    // ==================================================================
+    println("")
+    println("=== SEDENION (dim 16, HAS zero divisors) ===")
+
+    // ZD-aligned: e1+e10 (known zero-divisor direction)
+    var cs1: [f64; 16] = [0.0; 16]
+    cs1[1] = 0.354; cs1[10] = 0.354
+
+    // ZD partner: e4-e15 (the OTHER side of the zero divisor)
+    var cs2: [f64; 16] = [0.0; 16]
+    cs2[4] = 0.354; cs2[15] = -0.354
+
+    // Non-ZD cross: e1+e9 (crosses halves but NOT a ZD pair)
+    var cs3: [f64; 16] = [0.0; 16]
+    cs3[1] = 0.354; cs3[9] = 0.354
+
+    // Oct-only mixed: e1+e2+e3 (stays in octonion subalgebra)
+    var cs4: [f64; 16] = [0.0; 16]
+    cs4[1] = 0.29; cs4[2] = 0.29; cs4[3] = 0.29
+
+    // Sed-only mixed: e8+e9+e10 (stays in sedenion half)
+    var cs5: [f64; 16] = [0.0; 16]
+    cs5[8] = 0.29; cs5[9] = 0.29; cs5[10] = 0.29
+
+    // Full 16: all components active
+    var cs6: [f64; 16] = [0.0; 16]
+    i = 0
+    while i < 16 { cs6[i as usize] = 0.125; i = i + 1 }
+
+    // Brain-like (ASD profile, normalized)
+    var cs7: [f64; 16] = [0.0; 16]
+    cs7[0]=0.10; cs7[1]=0.05; cs7[2]=0.30; cs7[3]=0.08
+    cs7[4]=0.03; cs7[5]=0.07; cs7[6]=0.10; cs7[7]=0.13
+    cs7[8]=-0.10; cs7[9]=0.20; cs7[10]=0.40; cs7[11]=0.07
+    cs7[12]=0.05; cs7[13]=0.23; cs7[14]=0.03; cs7[15]=0.01
+
+    println("  c = e1+e10 (ZD-aligned):")
+    nulls = 0; i = 0
+    while i < 16 {
+        let d = s_hess_diag(cs1, iters, i)
+        if hc_abs(d) < 0.01 { nulls = nulls + 1 }
+        i = i + 1
+    }
+    print("    null = "); print(nulls); println("/16")
+
+    println("  c = e4-e15 (ZD partner):")
+    nulls = 0; i = 0
+    while i < 16 {
+        let d = s_hess_diag(cs2, iters, i)
+        if hc_abs(d) < 0.01 { nulls = nulls + 1 }
+        i = i + 1
+    }
+    print("    null = "); print(nulls); println("/16")
+
+    println("  c = e1+e9 (cross-half, NOT ZD):")
+    nulls = 0; i = 0
+    while i < 16 {
+        let d = s_hess_diag(cs3, iters, i)
+        if hc_abs(d) < 0.01 { nulls = nulls + 1 }
+        i = i + 1
+    }
+    print("    null = "); print(nulls); println("/16")
+
+    println("  c = e1+e2+e3 (oct-only mixed):")
+    nulls = 0; i = 0
+    while i < 16 {
+        let d = s_hess_diag(cs4, iters, i)
+        if hc_abs(d) < 0.01 { nulls = nulls + 1 }
+        i = i + 1
+    }
+    print("    null = "); print(nulls); println("/16")
+
+    println("  c = e8+e9+e10 (sed-only mixed):")
+    nulls = 0; i = 0
+    while i < 16 {
+        let d = s_hess_diag(cs5, iters, i)
+        if hc_abs(d) < 0.01 { nulls = nulls + 1 }
+        i = i + 1
+    }
+    print("    null = "); print(nulls); println("/16")
+
+    println("  c = all 16 (uniform):")
+    nulls = 0; i = 0
+    while i < 16 {
+        let d = s_hess_diag(cs6, iters, i)
+        if hc_abs(d) < 0.01 { nulls = nulls + 1 }
+        i = i + 1
+    }
+    print("    null = "); print(nulls); println("/16")
+
+    println("  c = ASD brain profile:")
+    nulls = 0; i = 0
+    while i < 16 {
+        let d = s_hess_diag(cs7, iters, i)
+        if hc_abs(d) < 0.01 { nulls = nulls + 1 }
+        i = i + 1
+    }
+    print("    null = "); print(nulls); println("/16")
+
+    // ==================================================================
+    // ANISOTROPY SWEEP: same "brain-like" direction at each level
+    // ==================================================================
+    println("")
+    println("=== ANISOTROPY ACROSS THE TOWER ===")
+    println("  Same direction pattern, projected to each algebra dim")
+    println("  Measuring max/min eigenvalue ratio (anisotropy)")
+    println("")
+
+    // Quaternion: project brain profile to dim 4
+    var cqa: [f64; 4] = [0.10, 0.30, 0.08, 0.13]
+    // Normalize to 0.5
+    var qn: f64 = 0.0
+    i = 0
+    while i < 4 { qn = qn + cqa[i as usize] * cqa[i as usize]; i = i + 1 }
+    qn = hc_sqrt(qn)
+    i = 0
+    while i < 4 { cqa[i as usize] = cqa[i as usize] * 0.5 / qn; i = i + 1 }
+
+    var q_max: f64 = 0.0
+    var q_min: f64 = 1.0e30
+    i = 0
+    while i < 4 {
+        let d = hc_abs(q_hess_diag(cqa, iters, i))
+        if d > q_max { q_max = d }
+        if d > 0.001 && d < q_min { q_min = d }
+        i = i + 1
+    }
+    let q_aniso = if q_min > 0.001 { q_max / q_min } else { 0.0 }
+    print("  Q (dim 4):  anisotropy = "); pr_f64(q_aniso)
+    print("  max="); pr_f64(q_max); print("  min="); pr_f64(q_min); println("")
+
+    // Octonion: project to dim 8
+    var coa: [f64; 8] = [0.10, 0.30, 0.08, 0.13, 0.03, 0.07, 0.10, 0.20]
+    var on: f64 = 0.0
+    i = 0
+    while i < 8 { on = on + coa[i as usize] * coa[i as usize]; i = i + 1 }
+    on = hc_sqrt(on)
+    i = 0
+    while i < 8 { coa[i as usize] = coa[i as usize] * 0.5 / on; i = i + 1 }
+
+    var o_max: f64 = 0.0
+    var o_min: f64 = 1.0e30
+    i = 0
+    while i < 8 {
+        let d = hc_abs(o_hess_diag(coa, iters, i))
+        if d > o_max { o_max = d }
+        if d > 0.001 && d < o_min { o_min = d }
+        i = i + 1
+    }
+    let o_aniso = if o_min > 0.001 { o_max / o_min } else { 0.0 }
+    print("  O (dim 8):  anisotropy = "); pr_f64(o_aniso)
+    print("  max="); pr_f64(o_max); print("  min="); pr_f64(o_min); println("")
+
+    // Sedenion: full dim 16 (ASD profile from before)
+    var s_max: f64 = 0.0
+    var s_min: f64 = 1.0e30
+    i = 0
+    while i < 16 {
+        let d = hc_abs(s_hess_diag(cs7, iters, i))
+        if d > s_max { s_max = d }
+        if d > 0.001 && d < s_min { s_min = d }
+        i = i + 1
+    }
+    let s_aniso = if s_min > 0.001 { s_max / s_min } else { 0.0 }
+    print("  S (dim 16): anisotropy = "); pr_f64(s_aniso)
+    print("  max="); pr_f64(s_max); print("  min="); pr_f64(s_min); println("")
+
+    println("")
+    println("  PREDICTION: anisotropy should INCREASE with dim")
+    println("  because non-associativity creates directional")
+    println("  inhomogeneity in the curvature landscape.")
+    println("")
+    let grows = q_aniso < o_aniso && o_aniso < s_aniso
+    if grows {
+        println("  RESULT: Q < O < S — CONFIRMED!")
+        println("  Non-associativity increases curvature anisotropy.")
+    } else {
+        println("  RESULT: pattern does NOT hold monotonically.")
+        print("  Q="); pr_f64(q_aniso); print(" O="); pr_f64(o_aniso); print(" S="); pr_f64(s_aniso); println("")
+    }
+
+    // ==================================================================
+    // SECOND TEST: Fano-associative vs non-Fano direction (octonion)
+    // ==================================================================
+    println("")
+    println("=== FANO LINE vs NON-FANO (octonion only) ===")
+    println("  Associative triple (1,2,4) vs non-associative (1,2,3)")
+    println("  Same norm, different algebraic character")
+    println("")
+
+    // Already computed above: co2 = Fano(1,2,4), co3 = nonFano(1,2,3)
+    var fano_max: f64 = 0.0
+    var fano_min: f64 = 1.0e30
+    i = 0
+    while i < 8 {
+        let d = hc_abs(o_hess_diag(co2, iters, i))
+        if d > fano_max { fano_max = d }
+        if d > 0.001 && d < fano_min { fano_min = d }
+        i = i + 1
+    }
+    let fano_aniso = if fano_min > 0.001 { fano_max / fano_min } else { 0.0 }
+
+    var nfano_max: f64 = 0.0
+    var nfano_min: f64 = 1.0e30
+    i = 0
+    while i < 8 {
+        let d = hc_abs(o_hess_diag(co3, iters, i))
+        if d > nfano_max { nfano_max = d }
+        if d > 0.001 && d < nfano_min { nfano_min = d }
+        i = i + 1
+    }
+    let nfano_aniso = if nfano_min > 0.001 { nfano_max / nfano_min } else { 0.0 }
+
+    print("  Fano (1,2,4):     aniso = "); pr_f64(fano_aniso); println("")
+    print("  Non-Fano (1,2,3): aniso = "); pr_f64(nfano_aniso); println("")
+
+    if nfano_aniso > fano_aniso {
+        println("  Non-Fano > Fano — non-associativity increases anisotropy!")
+    } else {
+        println("  Fano >= Non-Fano — no clear associativity effect.")
+    }
+
+    println("")
+    println("================================================================")
+
+    0
+}

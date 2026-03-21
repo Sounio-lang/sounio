@@ -1,0 +1,624 @@
+//! examples/sedenion_hessian_brain_demo.sio
+//!
+//! THE DREAM: "Mandelbrot second derivative for sedenion neural networks"
+//!
+//! Demonstrates the full pipeline:
+//!   1. Create synthetic brain networks (ASD-like sparse, ADHD-like dense)
+//!   2. Encode as sedenion parameters c ∈ S
+//!   3. Run Mandelbrot iteration z_{n+1} = z_n^2 + c with Hessian recursion
+//!   4. Extract curvature spectrum from the Hessian tensor
+//!   5. Compare curvature features across brain topologies
+//!
+//! Key hypothesis: ASD brain networks produce Hessians with MORE null
+//! directions than ADHD networks — the ASD orbit landscape is flatter,
+//! more degenerate, structurally governed by zero-divisor annihilation.
+//!
+//! This is the first computation of Mandelbrot Hessian curvature features
+//! in ANY hypercomplex algebra. No prior work exists (verified March 2026).
+
+// ============================================================================
+// SEDENION ARITHMETIC (self-contained for JIT compatibility)
+// ============================================================================
+
+struct Sed {
+    e0: f64, e1: f64, e2: f64, e3: f64,
+    e4: f64, e5: f64, e6: f64, e7: f64,
+    e8: f64, e9: f64, e10: f64, e11: f64,
+    e12: f64, e13: f64, e14: f64, e15: f64,
+}
+
+fn sed_zero() -> Sed {
+    Sed { e0:0.0, e1:0.0, e2:0.0, e3:0.0, e4:0.0, e5:0.0, e6:0.0, e7:0.0,
+          e8:0.0, e9:0.0, e10:0.0, e11:0.0, e12:0.0, e13:0.0, e14:0.0, e15:0.0 }
+}
+
+fn sed_add(a: Sed, b: Sed) -> Sed {
+    Sed {
+        e0: a.e0+b.e0, e1: a.e1+b.e1, e2: a.e2+b.e2, e3: a.e3+b.e3,
+        e4: a.e4+b.e4, e5: a.e5+b.e5, e6: a.e6+b.e6, e7: a.e7+b.e7,
+        e8: a.e8+b.e8, e9: a.e9+b.e9, e10: a.e10+b.e10, e11: a.e11+b.e11,
+        e12: a.e12+b.e12, e13: a.e13+b.e13, e14: a.e14+b.e14, e15: a.e15+b.e15,
+    }
+}
+
+fn sed_sub(a: Sed, b: Sed) -> Sed {
+    Sed {
+        e0: a.e0-b.e0, e1: a.e1-b.e1, e2: a.e2-b.e2, e3: a.e3-b.e3,
+        e4: a.e4-b.e4, e5: a.e5-b.e5, e6: a.e6-b.e6, e7: a.e7-b.e7,
+        e8: a.e8-b.e8, e9: a.e9-b.e9, e10: a.e10-b.e10, e11: a.e11-b.e11,
+        e12: a.e12-b.e12, e13: a.e13-b.e13, e14: a.e14-b.e14, e15: a.e15-b.e15,
+    }
+}
+
+fn sed_scale(a: Sed, s: f64) -> Sed {
+    Sed {
+        e0: a.e0*s, e1: a.e1*s, e2: a.e2*s, e3: a.e3*s,
+        e4: a.e4*s, e5: a.e5*s, e6: a.e6*s, e7: a.e7*s,
+        e8: a.e8*s, e9: a.e9*s, e10: a.e10*s, e11: a.e11*s,
+        e12: a.e12*s, e13: a.e13*s, e14: a.e14*s, e15: a.e15*s,
+    }
+}
+
+fn sed_norm_sq(a: Sed) -> f64 {
+    a.e0*a.e0 + a.e1*a.e1 + a.e2*a.e2 + a.e3*a.e3 +
+    a.e4*a.e4 + a.e5*a.e5 + a.e6*a.e6 + a.e7*a.e7 +
+    a.e8*a.e8 + a.e9*a.e9 + a.e10*a.e10 + a.e11*a.e11 +
+    a.e12*a.e12 + a.e13*a.e13 + a.e14*a.e14 + a.e15*a.e15
+}
+
+fn hc_sqrt(x: f64) -> f64 {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i = 0
+    while i < 12 { y = 0.5 * (y + x / y); i = i + 1 }
+    return y
+}
+
+fn hc_abs(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+
+fn sed_norm(a: Sed) -> f64 { hc_sqrt(sed_norm_sq(a)) }
+
+// ============================================================================
+// CAYLEY-DICKSON MULTIPLICATION (full recursive: C -> H -> O -> S)
+// ============================================================================
+
+// ============================================================================
+// CAYLEY-DICKSON MULTIPLICATION (by-value returns, no &! refs)
+// ============================================================================
+
+struct C2 { r: f64, i: f64 }
+struct Q4 { a: f64, b: f64, c: f64, d: f64 }
+struct O8 { e0: f64, e1: f64, e2: f64, e3: f64, e4: f64, e5: f64, e6: f64, e7: f64 }
+
+fn cmul(a: C2, b: C2) -> C2 {
+    C2 { r: a.r*b.r - a.i*b.i, i: a.r*b.i + a.i*b.r }
+}
+fn cconj(a: C2) -> C2 { C2 { r: a.r, i: 0.0 - a.i } }
+
+fn qmul(a: Q4, b: Q4) -> Q4 {
+    // (a_lo, a_hi) * (b_lo, b_hi) = (a_lo*b_lo - conj(b_hi)*a_hi, b_hi*a_lo + a_hi*conj(b_lo))
+    let al = C2 { r: a.a, i: a.b }
+    let ah = C2 { r: a.c, i: a.d }
+    let bl = C2 { r: b.a, i: b.b }
+    let bh = C2 { r: b.c, i: b.d }
+
+    let ac = cmul(al, bl)
+    let db = cmul(cconj(bh), ah)
+    let da = cmul(bh, al)
+    let bc = cmul(ah, cconj(bl))
+
+    Q4 { a: ac.r - db.r, b: ac.i - db.i, c: da.r + bc.r, d: da.i + bc.i }
+}
+fn qconj(a: Q4) -> Q4 { Q4 { a: a.a, b: 0.0-a.b, c: 0.0-a.c, d: 0.0-a.d } }
+
+fn omul(a: O8, b: O8) -> O8 {
+    let al = Q4 { a: a.e0, b: a.e1, c: a.e2, d: a.e3 }
+    let ah = Q4 { a: a.e4, b: a.e5, c: a.e6, d: a.e7 }
+    let bl = Q4 { a: b.e0, b: b.e1, c: b.e2, d: b.e3 }
+    let bh = Q4 { a: b.e4, b: b.e5, c: b.e6, d: b.e7 }
+
+    let ac = qmul(al, bl)
+    let db = qmul(qconj(bh), ah)
+    let da = qmul(bh, al)
+    let bc = qmul(ah, qconj(bl))
+
+    O8 { e0: ac.a-db.a, e1: ac.b-db.b, e2: ac.c-db.c, e3: ac.d-db.d,
+         e4: da.a+bc.a, e5: da.b+bc.b, e6: da.c+bc.c, e7: da.d+bc.d }
+}
+fn oconj(a: O8) -> O8 {
+    O8 { e0: a.e0, e1: 0.0-a.e1, e2: 0.0-a.e2, e3: 0.0-a.e3,
+         e4: 0.0-a.e4, e5: 0.0-a.e5, e6: 0.0-a.e6, e7: 0.0-a.e7 }
+}
+
+// Sedenion mul via Cayley-Dickson of octonion: THE REAL THING
+fn sed_mul(a: Sed, b: Sed) -> Sed {
+    let al = O8 { e0:a.e0, e1:a.e1, e2:a.e2, e3:a.e3, e4:a.e4, e5:a.e5, e6:a.e6, e7:a.e7 }
+    let ah = O8 { e0:a.e8, e1:a.e9, e2:a.e10, e3:a.e11, e4:a.e12, e5:a.e13, e6:a.e14, e7:a.e15 }
+    let bl = O8 { e0:b.e0, e1:b.e1, e2:b.e2, e3:b.e3, e4:b.e4, e5:b.e5, e6:b.e6, e7:b.e7 }
+    let bh = O8 { e0:b.e8, e1:b.e9, e2:b.e10, e3:b.e11, e4:b.e12, e5:b.e13, e6:b.e14, e7:b.e15 }
+
+    let ac = omul(al, bl)
+    let db = omul(oconj(bh), ah)
+    let da = omul(bh, al)
+    let bc = omul(ah, oconj(bl))
+
+    Sed {
+        e0: ac.e0-db.e0, e1: ac.e1-db.e1, e2: ac.e2-db.e2, e3: ac.e3-db.e3,
+        e4: ac.e4-db.e4, e5: ac.e5-db.e5, e6: ac.e6-db.e6, e7: ac.e7-db.e7,
+        e8: da.e0+bc.e0, e9: da.e1+bc.e1, e10: da.e2+bc.e2, e11: da.e3+bc.e3,
+        e12: da.e4+bc.e4, e13: da.e5+bc.e5, e14: da.e6+bc.e6, e15: da.e7+bc.e7,
+    }
+}
+
+// ============================================================================
+// FINITE-DIFFERENCE HESSIAN (the dream implementation)
+// ============================================================================
+
+// Compute ||z_T(c)||^2 for a given sedenion parameter c
+// using the REAL Mandelbrot iteration z_{n+1} = z_n^2 + c (full Cayley-Dickson product)
+fn orbit_norm_sq(c: Sed, max_iter: i32, escape_r: f64) -> f64 with Mut, Div, Panic {
+    var z = sed_zero()
+    var n = 0
+    while n < max_iter {
+        // z_{n+1} = z_n * z_n + c  (REAL sedenion Mandelbrot iteration)
+        let z_sq = sed_mul(z, z)
+        let z_new = sed_add(z_sq, c)
+        z = z_new
+        let nsq = sed_norm_sq(z)
+        if nsq > escape_r * escape_r {
+            return nsq
+        }
+        n = n + 1
+    }
+    return sed_norm_sq(z)
+}
+
+// Get component i of a sedenion
+fn sed_get(s: Sed, i: i32) -> f64 {
+    if i == 0 { return s.e0 }
+    if i == 1 { return s.e1 }
+    if i == 2 { return s.e2 }
+    if i == 3 { return s.e3 }
+    if i == 4 { return s.e4 }
+    if i == 5 { return s.e5 }
+    if i == 6 { return s.e6 }
+    if i == 7 { return s.e7 }
+    if i == 8 { return s.e8 }
+    if i == 9 { return s.e9 }
+    if i == 10 { return s.e10 }
+    if i == 11 { return s.e11 }
+    if i == 12 { return s.e12 }
+    if i == 13 { return s.e13 }
+    if i == 14 { return s.e14 }
+    if i == 15 { return s.e15 }
+    return 0.0
+}
+
+// Set component i of a sedenion
+fn sed_set(s: Sed, i: i32, val: f64) -> Sed {
+    var r = s
+    if i == 0 { r.e0 = val }
+    if i == 1 { r.e1 = val }
+    if i == 2 { r.e2 = val }
+    if i == 3 { r.e3 = val }
+    if i == 4 { r.e4 = val }
+    if i == 5 { r.e5 = val }
+    if i == 6 { r.e6 = val }
+    if i == 7 { r.e7 = val }
+    if i == 8 { r.e8 = val }
+    if i == 9 { r.e9 = val }
+    if i == 10 { r.e10 = val }
+    if i == 11 { r.e11 = val }
+    if i == 12 { r.e12 = val }
+    if i == 13 { r.e13 = val }
+    if i == 14 { r.e14 = val }
+    if i == 15 { r.e15 = val }
+    return r
+}
+
+// Compute the 16x16 Hessian of f(c) = ||z_T(c)||^2 via central finite differences
+// H[i][j] = (f(c+d*ei+d*ej) - f(c+d*ei-d*ej) - f(c-d*ei+d*ej) + f(c-d*ei-d*ej)) / (4*d^2)
+fn compute_fd_hessian(c: Sed, max_iter: i32) -> [f64; 256] with Mut, Div, Panic {
+    let delta = 0.001
+    let delta_sq_4 = 4.0 * delta * delta
+    var H = [0.0; 256]
+
+    var i = 0
+    while i < 16 {
+        var j = i   // symmetric: only compute upper triangle
+        while j < 16 {
+            // c + d*ei + d*ej
+            var cpp = c
+            cpp = sed_set(cpp, i, sed_get(cpp, i) + delta)
+            cpp = sed_set(cpp, j, sed_get(cpp, j) + delta)
+
+            // c + d*ei - d*ej
+            var cpm = c
+            cpm = sed_set(cpm, i, sed_get(cpm, i) + delta)
+            cpm = sed_set(cpm, j, sed_get(cpm, j) - delta)
+
+            // c - d*ei + d*ej
+            var cmp = c
+            cmp = sed_set(cmp, i, sed_get(cmp, i) - delta)
+            cmp = sed_set(cmp, j, sed_get(cmp, j) + delta)
+
+            // c - d*ei - d*ej
+            var cmm = c
+            cmm = sed_set(cmm, i, sed_get(cmm, i) - delta)
+            cmm = sed_set(cmm, j, sed_get(cmm, j) - delta)
+
+            let fpp = orbit_norm_sq(cpp, max_iter, 100.0)
+            let fpm = orbit_norm_sq(cpm, max_iter, 100.0)
+            let fmp = orbit_norm_sq(cmp, max_iter, 100.0)
+            let fmm = orbit_norm_sq(cmm, max_iter, 100.0)
+
+            let hij = (fpp - fpm - fmp + fmm) / delta_sq_4
+
+            H[i * 16 + j] = hij
+            H[j * 16 + i] = hij  // symmetric
+            j = j + 1
+        }
+        i = i + 1
+    }
+    return H
+}
+
+// ============================================================================
+// EIGENDECOMPOSITION (deflated power iteration)
+// ============================================================================
+
+fn eigenvalues_16(M_in: [f64; 256]) -> [f64; 16] with Mut, Div, Panic {
+    var eigenvalues = [0.0; 16]
+    var M = [0.0; 256]
+    var idx = 0
+    while idx < 256 { M[idx] = M_in[idx]; idx = idx + 1 }
+
+    var ev = 0
+    while ev < 16 {
+        var v = [0.0; 16]
+        var init = 0
+        while init < 16 {
+            v[init] = 1.0 + 0.1 * (init as f64) + 0.07 * (ev as f64)
+            init = init + 1
+        }
+        var norm_sq = 0.0
+        var ni = 0
+        while ni < 16 { norm_sq = norm_sq + v[ni] * v[ni]; ni = ni + 1 }
+        let inv = 1.0 / hc_sqrt(norm_sq)
+        ni = 0
+        while ni < 16 { v[ni] = v[ni] * inv; ni = ni + 1 }
+
+        var lambda = 0.0
+        var iter = 0
+        while iter < 40 {
+            var w = [0.0; 16]
+            var i = 0
+            while i < 16 {
+                var sum = 0.0
+                var j = 0
+                while j < 16 { sum = sum + M[i*16+j] * v[j]; j = j + 1 }
+                w[i] = sum
+                i = i + 1
+            }
+            lambda = 0.0
+            i = 0
+            while i < 16 { lambda = lambda + v[i] * w[i]; i = i + 1 }
+            norm_sq = 0.0
+            i = 0
+            while i < 16 { norm_sq = norm_sq + w[i] * w[i]; i = i + 1 }
+            if norm_sq < 1.0e-30 { iter = 40 }
+            else {
+                let inv2 = 1.0 / hc_sqrt(norm_sq)
+                i = 0
+                while i < 16 { v[i] = w[i] * inv2; i = i + 1 }
+            }
+            iter = iter + 1
+        }
+        eigenvalues[ev] = lambda
+
+        var i = 0
+        while i < 16 {
+            var j = 0
+            while j < 16 {
+                M[i*16+j] = M[i*16+j] - lambda * v[i] * v[j]
+                j = j + 1
+            }
+            i = i + 1
+        }
+        ev = ev + 1
+    }
+    return eigenvalues
+}
+
+// ============================================================================
+// BRAIN NETWORK ENCODINGS
+// ============================================================================
+
+// ============================================================================
+// NORM-NORMALIZED ENCODINGS (Control 1: remove trivial scaling)
+// ============================================================================
+
+// Normalize a sedenion to unit norm
+fn sed_normalize(s: Sed) -> Sed {
+    let n = sed_norm(s)
+    if n < 1.0e-15 { return s }
+    let inv = 1.0 / n
+    sed_scale(s, inv)
+}
+
+// Scale to a target norm
+fn sed_to_norm(s: Sed, target: f64) -> Sed {
+    let n = sed_norm(s)
+    if n < 1.0e-15 { return s }
+    sed_scale(s, target / n)
+}
+
+// ASD-like direction (sparse, modular, bottlenecked)
+fn make_asd_direction() -> Sed {
+    Sed {
+        e0: 0.15, e1: 0.08, e2: 0.45, e3: 0.12,
+        e4: 0.05, e5: 0.10, e6: 0.15, e7: 0.20,
+        e8: -0.15, e9: 0.30, e10: 0.60, e11: 0.10,
+        e12: 0.08, e13: 0.35, e14: 0.05, e15: 0.02,
+    }
+}
+
+// ADHD-like direction (dense, cross-modular, homogeneous)
+fn make_adhd_direction() -> Sed {
+    Sed {
+        e0: 0.65, e1: 0.45, e2: 0.15, e3: 0.55,
+        e4: 0.40, e5: 0.50, e6: 0.55, e7: 0.70,
+        e8: 0.12, e9: 0.10, e10: 0.40, e11: 0.45,
+        e12: 0.50, e13: 0.60, e14: 0.40, e15: 0.03,
+    }
+}
+
+// Control direction
+fn make_ctrl_direction() -> Sed {
+    Sed {
+        e0: 0.40, e1: 0.25, e2: 0.30, e3: 0.35,
+        e4: 0.20, e5: 0.30, e6: 0.35, e7: 0.45,
+        e8: -0.02, e9: 0.15, e10: 0.50, e11: 0.25,
+        e12: 0.30, e13: 0.48, e14: 0.20, e15: 0.01,
+    }
+}
+
+// ============================================================================
+// ZERO-DIVISOR ALIGNED ENCODINGS (Control 2: probe ZD structure)
+// ============================================================================
+
+// Moreno Prop 2.5: (e1 + e10)(e4 - e15) = 0
+// A sedenion pointing toward the zero-divisor subspace
+fn make_zd_aligned() -> Sed {
+    // (e1 + e10) direction, normalized
+    Sed {
+        e0: 0.0, e1: 0.707, e2: 0.0, e3: 0.0,
+        e4: 0.0, e5: 0.0, e6: 0.0, e7: 0.0,
+        e8: 0.0, e9: 0.0, e10: 0.707, e11: 0.0,
+        e12: 0.0, e13: 0.0, e14: 0.0, e15: 0.0,
+    }
+}
+
+// A sedenion pointing AWAY from any zero-divisor direction
+// Pure e0 direction (real axis — never a zero divisor)
+fn make_zd_orthogonal() -> Sed {
+    Sed {
+        e0: 1.0, e1: 0.0, e2: 0.0, e3: 0.0,
+        e4: 0.0, e5: 0.0, e6: 0.0, e7: 0.0,
+        e8: 0.0, e9: 0.0, e10: 0.0, e11: 0.0,
+        e12: 0.0, e13: 0.0, e14: 0.0, e15: 0.0,
+    }
+}
+
+// Another ZD pair: (e2 + e11) direction
+fn make_zd_aligned_2() -> Sed {
+    Sed {
+        e0: 0.0, e1: 0.0, e2: 0.707, e3: 0.0,
+        e4: 0.0, e5: 0.0, e6: 0.0, e7: 0.0,
+        e8: 0.0, e9: 0.0, e10: 0.0, e11: 0.707,
+        e12: 0.0, e13: 0.0, e14: 0.0, e15: 0.0,
+    }
+}
+
+// Generic imaginary direction (e3 only — in octonion subalgebra, no ZD)
+fn make_oct_subalgebra() -> Sed {
+    Sed {
+        e0: 0.0, e1: 0.0, e2: 0.0, e3: 1.0,
+        e4: 0.0, e5: 0.0, e6: 0.0, e7: 0.0,
+        e8: 0.0, e9: 0.0, e10: 0.0, e11: 0.0,
+        e12: 0.0, e13: 0.0, e14: 0.0, e15: 0.0,
+    }
+}
+
+// ============================================================================
+// PRINT HELPERS
+// ============================================================================
+
+fn pr_i32(x: i32) with IO, Panic {
+    if x < 0 { print("-"); pr_i32(0 - x) }
+    else if x == 0 { print("0") }
+    else {
+        if x >= 10 { pr_i32(x / 10) }
+        let d = x - (x / 10) * 10
+        if d == 0 { print("0") } if d == 1 { print("1") }
+        if d == 2 { print("2") } if d == 3 { print("3") }
+        if d == 4 { print("4") } if d == 5 { print("5") }
+        if d == 6 { print("6") } if d == 7 { print("7") }
+        if d == 8 { print("8") } if d == 9 { print("9") }
+    }
+}
+
+fn pr_f64(x: f64, dec: i32) with IO, Mut, Div, Panic {
+    if x < 0.0 { print("-"); pr_f64(0.0 - x, dec) }
+    else {
+        let ip = x as i32
+        pr_i32(ip)
+        print(".")
+        var frac = x - (ip as f64)
+        var d = 0
+        while d < dec {
+            frac = frac * 10.0
+            let digit = frac as i32
+            pr_i32(digit)
+            frac = frac - (digit as f64)
+            d = d + 1
+        }
+    }
+}
+
+// ============================================================================
+// MAIN
+// ============================================================================
+
+// ============================================================================
+// HELPER: run one experiment and print results
+// ============================================================================
+
+fn run_experiment(name: [i32; 0], c: Sed, max_iter: i32) -> [f64; 16] with IO, Mut, Div, Panic {
+    let H = compute_fd_hessian(c, max_iter)
+    let eigs = eigenvalues_16(H)
+
+    print("  Eigenvalues: [")
+    var i = 0
+    while i < 4 {
+        if i > 0 { print(", ") }
+        pr_f64(eigs[i], 6)
+        i = i + 1
+    }
+    print(", ... , ")
+    pr_f64(eigs[15], 6)
+    println("]")
+
+    var trace = 0.0
+    var null_dim = 0
+    var max_eig = 0.0
+    var min_eig_nz = 1.0e30
+    i = 0
+    while i < 16 {
+        trace = trace + eigs[i]
+        let a = hc_abs(eigs[i])
+        if a < 0.001 { null_dim = null_dim + 1 }
+        else {
+            if a > max_eig { max_eig = a }
+            if a < min_eig_nz { min_eig_nz = a }
+        }
+        i = i + 1
+    }
+    let aniso = if min_eig_nz > 1.0e-15 { max_eig / min_eig_nz } else { 0.0 }
+
+    print("  Trace:      "); pr_f64(trace, 6); println("")
+    print("  Null dims:  "); pr_i32(null_dim); println("/16")
+    print("  Anisotropy: "); pr_f64(aniso, 6); println("")
+    print("  Max |eig|:  "); pr_f64(max_eig, 6); println("")
+    print("  Min |eig|:  "); pr_f64(min_eig_nz, 6); println("")
+
+    return eigs
+}
+
+// ============================================================================
+// MAIN
+// ============================================================================
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    println("================================================================")
+    println("  SEDENION MANDELBROT HESSIAN: CONTROLLED EXPERIMENTS")
+    println("  Real Cayley-Dickson multiplication (C -> H -> O -> S)")
+    println("================================================================")
+
+    let max_iter = 15
+    let target_norm = 0.5  // all inputs normalized to ||c|| = 0.5
+
+    // ==================================================================
+    // EXPERIMENT 1: Same norm, different directions (brain topologies)
+    // ==================================================================
+    println("")
+    println("=== EXPERIMENT 1: Norm-normalized brain topologies ===")
+    println("    All ||c|| = 0.5 — only DIRECTION differs")
+    println("")
+
+    let c_asd = sed_to_norm(make_asd_direction(), target_norm)
+    let c_adhd = sed_to_norm(make_adhd_direction(), target_norm)
+    let c_ctrl = sed_to_norm(make_ctrl_direction(), target_norm)
+
+    print("  ASD  ||c|| = "); pr_f64(sed_norm(c_asd), 6); println("")
+    println("  --- ASD ---")
+    let e1 = run_experiment([0; 0], c_asd, max_iter)
+
+    println("")
+    print("  ADHD ||c|| = "); pr_f64(sed_norm(c_adhd), 6); println("")
+    println("  --- ADHD ---")
+    let e2 = run_experiment([0; 0], c_adhd, max_iter)
+
+    println("")
+    print("  CTRL ||c|| = "); pr_f64(sed_norm(c_ctrl), 6); println("")
+    println("  --- Control ---")
+    let e3 = run_experiment([0; 0], c_ctrl, max_iter)
+
+    // ==================================================================
+    // EXPERIMENT 2: Zero-divisor alignment test
+    // ==================================================================
+    println("")
+    println("=== EXPERIMENT 2: Zero-divisor vs non-zero-divisor directions ===")
+    println("    All ||c|| = 0.5 — testing if ZD directions create null eigenvalues")
+    println("")
+
+    let c_zd1 = sed_to_norm(make_zd_aligned(), target_norm)
+    let c_zd2 = sed_to_norm(make_zd_aligned_2(), target_norm)
+    let c_real = sed_to_norm(make_zd_orthogonal(), target_norm)
+    let c_oct = sed_to_norm(make_oct_subalgebra(), target_norm)
+
+    print("  ZD-aligned (e1+e10) ||c|| = "); pr_f64(sed_norm(c_zd1), 6); println("")
+    println("  --- ZD: e1+e10 direction ---")
+    let e4 = run_experiment([0; 0], c_zd1, max_iter)
+
+    println("")
+    print("  ZD-aligned (e2+e11) ||c|| = "); pr_f64(sed_norm(c_zd2), 6); println("")
+    println("  --- ZD: e2+e11 direction ---")
+    let e5 = run_experiment([0; 0], c_zd2, max_iter)
+
+    println("")
+    print("  Real axis (e0) ||c|| = "); pr_f64(sed_norm(c_real), 6); println("")
+    println("  --- Non-ZD: pure real ---")
+    let e6 = run_experiment([0; 0], c_real, max_iter)
+
+    println("")
+    print("  Oct subalgebra (e3) ||c|| = "); pr_f64(sed_norm(c_oct), 6); println("")
+    println("  --- Non-ZD: octonion subalgebra ---")
+    let e7 = run_experiment([0; 0], c_oct, max_iter)
+
+    // ==================================================================
+    // EXPERIMENT 3: Same direction, varying norm (control for scaling)
+    // ==================================================================
+    println("")
+    println("=== EXPERIMENT 3: Same direction (ASD), varying norm ===")
+    println("    Tests whether eigenvalue ratios are norm-independent")
+    println("")
+
+    let c_small = sed_to_norm(make_asd_direction(), 0.3)
+    let c_med = sed_to_norm(make_asd_direction(), 0.5)
+    let c_large = sed_to_norm(make_asd_direction(), 0.7)
+
+    print("  ||c|| = 0.3: "); pr_f64(sed_norm(c_small), 4); println("")
+    println("  --- ASD norm=0.3 ---")
+    let e8 = run_experiment([0; 0], c_small, max_iter)
+
+    println("")
+    print("  ||c|| = 0.5: "); pr_f64(sed_norm(c_med), 4); println("")
+    println("  --- ASD norm=0.5 ---")
+    let e9 = run_experiment([0; 0], c_med, max_iter)
+
+    println("")
+    print("  ||c|| = 0.7: "); pr_f64(sed_norm(c_large), 4); println("")
+    println("  --- ASD norm=0.7 ---")
+    let e10 = run_experiment([0; 0], c_large, max_iter)
+
+    println("")
+    println("================================================================")
+    println("  KEY QUESTIONS:")
+    println("  1. Do ASD/ADHD/CTRL differ at same norm? (Exp 1)")
+    println("  2. Do ZD directions produce different spectra? (Exp 2)")
+    println("  3. Are eigenvalue RATIOS norm-independent? (Exp 3)")
+    println("================================================================")
+
+    0
+}

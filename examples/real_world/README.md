@@ -76,16 +76,17 @@ These examples demonstrate Sounio's ability to solve real scientific problems th
 
 ## Running the Examples
 
-All examples require the JIT feature:
+All examples use the checked JIT binary:
 
 ```bash
-cargo run --bin souc --features jit -- run examples/real_world/01_dose_uncertainty.sio
-cargo run --bin souc --features jit -- run examples/real_world/02_pbpk_oral_absorption.sio
-cargo run --bin souc --features jit -- run examples/real_world/03_trial_sample_size.sio
-cargo run --bin souc --features jit -- run examples/real_world/04_gum_measurement_simple.sio
-cargo run --bin souc --features jit -- run examples/real_world/05_pkpd_data_analysis.sio
-cargo run --bin souc --features jit -- run examples/real_world/06_climate_ensemble.sio
-cargo run --bin souc --features jit -- run examples/real_world/07_sensor_fusion.sio
+SOUC=./artifacts/omega/souc-bin/souc-linux-x86_64-jit
+$SOUC run examples/real_world/01_dose_uncertainty.sio
+$SOUC run examples/real_world/02_pbpk_oral_absorption.sio
+$SOUC run examples/real_world/03_trial_sample_size.sio
+$SOUC run examples/real_world/04_gum_measurement_simple.sio
+$SOUC run examples/real_world/05_pkpd_data_analysis.sio
+$SOUC run examples/real_world/06_climate_ensemble.sio
+$SOUC run examples/real_world/07_sensor_fusion.sio
 ```
 
 ## Key Features Demonstrated

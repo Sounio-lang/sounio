@@ -1,0 +1,527 @@
+//@ run-pass
+// sedenion_unitarity_break.sio — Where Unitarity Dies
+//
+// The Cayley-Dickson tower:
+//   R (1D)  → norm multiplicative ✓  associative ✓
+//   C (2D)  → norm multiplicative ✓  associative ✓  commutative ✓
+//   H (4D)  → norm multiplicative ✓  associative ✓  commutative ✗
+//   O (8D)  → norm multiplicative ✓  associative ✗  → LAST normed division algebra
+//   S (16D) → norm multiplicative ✗  associative ✗  → ZERO DIVISORS appear
+//
+// At the octonion level: ||path product|| is invariant under reparenthesization.
+//   (We proved this in Lean — path_product_norm_invariant)
+//
+// At the sedenion level: THIS BREAKS.
+//   Different parenthesizations give different norms.
+//   And zero divisors create "annihilation paths" where the product is zero
+//   even though no individual factor is zero.
+//
+// In physics language:
+//   Octonions → unitarity preserved (probability conservation)
+//   Sedenions → unitarity violated (probability can be created or destroyed)
+//
+// This program measures EXACTLY where and how much unitarity breaks.
+
+// ============================================================================
+// MATH
+// ============================================================================
+
+fn abs_f64(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+fn sqrt_f64(x: f64) -> f64 with Mut, Panic, Div {
+    if x <= 0.0 { return 0.0 }
+    var r = x
+    var i = 0
+    while i < 20 { r = 0.5 * (r + x / r); i = i + 1 }
+    r
+}
+
+// ============================================================================
+// OCTONION (for comparison)
+// ============================================================================
+
+struct Oct { e: [f64; 8] }
+fn oct_zero() -> Oct { Oct { e: [0.0; 8] } }
+fn oct_unit(idx: i64) -> Oct with Mut, Panic {
+    var o = Oct { e: [0.0; 8] }
+    if idx >= 0 && idx < 8 { o.e[idx as usize] = 1.0 }
+    o
+}
+fn oct_sub(a: Oct, b: Oct) -> Oct with Mut, Panic, Div {
+    var r = oct_zero()
+    var i: i64 = 0
+    while i < 8 { r.e[i as usize] = a.e[i as usize] - b.e[i as usize]; i = i + 1 }
+    r
+}
+fn oct_norm_sq(o: Oct) -> f64 with Mut, Panic, Div {
+    var s: f64 = 0.0
+    var i: i64 = 0
+    while i < 8 { s = s + o.e[i as usize] * o.e[i as usize]; i = i + 1 }
+    s
+}
+fn oct_norm(o: Oct) -> f64 with Mut, Panic, Div { sqrt_f64(oct_norm_sq(o)) }
+fn oct_conjugate(o: Oct) -> Oct with Mut, Panic, Div {
+    var r = oct_zero()
+    r.e[0] = o.e[0]
+    var i: i64 = 1
+    while i < 8 { r.e[i as usize] = 0.0 - o.e[i as usize]; i = i + 1 }
+    r
+}
+fn oct_add(a: Oct, b: Oct) -> Oct with Mut, Panic, Div {
+    var r = oct_zero()
+    var i: i64 = 0
+    while i < 8 { r.e[i as usize] = a.e[i as usize] + b.e[i as usize]; i = i + 1 }
+    r
+}
+fn oct_fano_index(i: i64, j: i64) -> i64 with Mut, Panic, Div {
+    if i == j { return 0 }
+    var t: [i64; 21] = [0; 21]
+    t[0]=1;t[1]=2;t[2]=4; t[3]=2;t[4]=3;t[5]=5; t[6]=3;t[7]=4;t[8]=6
+    t[9]=4;t[10]=5;t[11]=7; t[12]=5;t[13]=6;t[14]=1; t[15]=6;t[16]=7;t[17]=2
+    t[18]=7;t[19]=1;t[20]=3
+    var k: i64 = 0
+    while k < 7 {
+        let a=t[(k*3) as usize]; let b=t[(k*3+1) as usize]; let c=t[(k*3+2) as usize]
+        if (i==a&&j==b)||(i==b&&j==c)||(i==c&&j==a) {
+            if i==a&&j==b {return c}; if i==b&&j==c {return a}; return b
+        }
+        if (i==b&&j==a)||(i==c&&j==b)||(i==a&&j==c) {
+            if i==b&&j==a {return c}; if i==c&&j==b {return a}; return b
+        }
+        k=k+1
+    }
+    0
+}
+fn oct_fano_sign(i: i64, j: i64) -> f64 with Mut, Panic, Div {
+    if i==j {return -1.0}; if i==0||j==0 {return 1.0}
+    var t: [i64; 21] = [0; 21]
+    t[0]=1;t[1]=2;t[2]=4; t[3]=2;t[4]=3;t[5]=5; t[6]=3;t[7]=4;t[8]=6
+    t[9]=4;t[10]=5;t[11]=7; t[12]=5;t[13]=6;t[14]=1; t[15]=6;t[16]=7;t[17]=2
+    t[18]=7;t[19]=1;t[20]=3
+    var k: i64 = 0
+    while k < 7 {
+        let a=t[(k*3) as usize]; let b=t[(k*3+1) as usize]; let c=t[(k*3+2) as usize]
+        if (i==a&&j==b)||(i==b&&j==c)||(i==c&&j==a) {return 1.0}
+        if (i==b&&j==a)||(i==c&&j==b)||(i==a&&j==c) {return -1.0}
+        k=k+1
+    }
+    0.0
+}
+fn oct_mul(a: Oct, b: Oct) -> Oct with Mut, Panic, Div {
+    var result = oct_zero()
+    var i: i64 = 0
+    while i < 8 {
+        var j: i64 = 0
+        while j < 8 {
+            let coeff = a.e[i as usize] * b.e[j as usize]
+            if i==0&&j==0 { result.e[0] = result.e[0] + coeff }
+            else if i==0 { result.e[j as usize] = result.e[j as usize] + coeff }
+            else if j==0 { result.e[i as usize] = result.e[i as usize] + coeff }
+            else if i==j { result.e[0] = result.e[0] - coeff }
+            else {
+                let k = oct_fano_index(i, j)
+                let sign = oct_fano_sign(i, j)
+                result.e[k as usize] = result.e[k as usize] + sign * coeff
+            }
+            j=j+1
+        }
+        i=i+1
+    }
+    result
+}
+
+// ============================================================================
+// SEDENION (16D, Cayley-Dickson doubling of octonions)
+// ============================================================================
+
+struct Sed { e: [f64; 16] }
+fn sed_zero() -> Sed { Sed { e: [0.0; 16] } }
+
+fn sed_unit(idx: i64) -> Sed with Mut, Panic {
+    var s = Sed { e: [0.0; 16] }
+    if idx >= 0 && idx < 16 { s.e[idx as usize] = 1.0 }
+    s
+}
+
+fn sed_norm_sq(s: Sed) -> f64 with Mut, Panic, Div {
+    var sum: f64 = 0.0
+    var i: i64 = 0
+    while i < 16 { sum = sum + s.e[i as usize] * s.e[i as usize]; i = i + 1 }
+    sum
+}
+
+fn sed_norm(s: Sed) -> f64 with Mut, Panic, Div { sqrt_f64(sed_norm_sq(s)) }
+
+fn sed_sub(a: Sed, b: Sed) -> Sed with Mut, Panic, Div {
+    var r = sed_zero()
+    var i: i64 = 0
+    while i < 16 { r.e[i as usize] = a.e[i as usize] - b.e[i as usize]; i = i + 1 }
+    r
+}
+
+fn sed_add(a: Sed, b: Sed) -> Sed with Mut, Panic, Div {
+    var r = sed_zero()
+    var i: i64 = 0
+    while i < 16 { r.e[i as usize] = a.e[i as usize] + b.e[i as usize]; i = i + 1 }
+    r
+}
+
+// Cayley-Dickson: split sedenion into two octonions
+fn sed_to_oct_pair(s: Sed) -> (Oct, Oct) with Mut, Panic, Div {
+    var a = oct_zero()
+    var b = oct_zero()
+    var i: i64 = 0
+    while i < 8 {
+        a.e[i as usize] = s.e[i as usize]
+        b.e[i as usize] = s.e[(i + 8) as usize]
+        i = i + 1
+    }
+    (a, b)
+}
+
+fn sed_from_oct_pair(a: Oct, b: Oct) -> Sed with Mut, Panic, Div {
+    var s = sed_zero()
+    var i: i64 = 0
+    while i < 8 {
+        s.e[i as usize] = a.e[i as usize]
+        s.e[(i + 8) as usize] = b.e[i as usize]
+        i = i + 1
+    }
+    s
+}
+
+// Cayley-Dickson multiplication: (a,b)*(c,d) = (ac - d̄b, da + bc̄)
+fn sed_mul(p: Sed, q: Sed) -> Sed with Mut, Panic, Div {
+    let pp = sed_to_oct_pair(p)
+    let qp = sed_to_oct_pair(q)
+    let a = pp.0; let b = pp.1
+    let c = qp.0; let d = qp.1
+    let d_conj = oct_conjugate(d)
+    let c_conj = oct_conjugate(c)
+    let real_part = oct_sub(oct_mul(a, c), oct_mul(d_conj, b))
+    let imag_part = oct_add(oct_mul(d, a), oct_mul(b, c_conj))
+    sed_from_oct_pair(real_part, imag_part)
+}
+
+fn sed_associator(a: Sed, b: Sed, c: Sed) -> Sed with Mut, Panic, Div {
+    let ab = sed_mul(a, b)
+    let bc = sed_mul(b, c)
+    sed_sub(sed_mul(ab, c), sed_mul(a, bc))
+}
+
+// ============================================================================
+// PRINT HELPERS
+// ============================================================================
+
+fn print_f4(x: f64) with IO, Mut, Panic, Div {
+    if x < 0.0 { print("-"); print_f4(0.0 - x); return }
+    let ip = x as i64
+    let fp = ((x - (ip as f64)) * 10000.0 + 0.5) as i64
+    print(ip); print(".")
+    if fp < 10 { print("000") }
+    else if fp < 100 { print("00") }
+    else if fp < 1000 { print("0") }
+    print(fp)
+}
+
+// ============================================================================
+// EXPERIMENT 1: Zero Divisors — Signal Annihilation
+// ============================================================================
+
+fn test_zero_divisors() with IO, Mut, Panic, Div {
+    println("=== EXPERIMENT 1: Zero Divisors (Signal Annihilation) ===")
+    println("")
+    println("  The Moreno pair: (e1 + e10)(e4 - e15) = 0")
+    println("  Two nonzero sedenions whose product is EXACTLY zero.")
+    println("")
+
+    // z = e1 + e10
+    var z = sed_zero()
+    z.e[1] = 1.0; z.e[10] = 1.0
+
+    // w = e4 - e15
+    var w = sed_zero()
+    w.e[4] = 1.0; w.e[15] = -1.0
+
+    let product = sed_mul(z, w)
+    let prod_norm = sed_norm(product)
+
+    print("  ||z|| = "); print_f4(sed_norm(z)); println("")
+    print("  ||w|| = "); print_f4(sed_norm(w)); println("")
+    print("  ||z*w|| = "); print_f4(prod_norm); println("")
+
+    if prod_norm < 1e-9 {
+        println("")
+        println("  CONFIRMED: z*w = 0 despite ||z|| > 0 and ||w|| > 0")
+        println("  This is IMPOSSIBLE in R, C, H, or O.")
+        println("  Unitarity breaks: probability can be annihilated.")
+    }
+
+    // Check: does octonion norm multiplicativity hold?
+    print("  ||z||*||w|| = "); print_f4(sed_norm(z) * sed_norm(w)); println("")
+    print("  ||z*w|| / (||z||*||w||) = "); print_f4(prod_norm / (sed_norm(z) * sed_norm(w))); println("")
+    println("")
+}
+
+// ============================================================================
+// EXPERIMENT 2: Norm Non-Invariance Under Reparenthesization
+// ============================================================================
+
+fn test_norm_noninvariance() with IO, Mut, Panic, Div {
+    println("=== EXPERIMENT 2: Norm Non-Invariance (Unitarity Violation) ===")
+    println("")
+    println("  For octonions: ||(ab)c|| = ||a(bc)|| ALWAYS (theorem)")
+    println("  For sedenions: ||(ab)c|| != ||a(bc)|| in general")
+    println("")
+
+    // Pick three sedenion basis elements from different octonionic halves
+    let a = sed_unit(1)   // e1 (octonionic part)
+    let b = sed_unit(10)  // e10 (sedenion extension)
+    let c = sed_unit(4)   // e4 (octonionic part)
+
+    let ab = sed_mul(a, b)
+    let bc = sed_mul(b, c)
+    let left = sed_mul(ab, c)    // (a*b)*c
+    let right = sed_mul(a, bc)   // a*(b*c)
+
+    let norm_left = sed_norm(left)
+    let norm_right = sed_norm(right)
+
+    print("  a = e1, b = e10, c = e4")
+    println("")
+    print("  ||(ab)c|| = "); print_f4(norm_left); println("")
+    print("  ||a(bc)|| = "); print_f4(norm_right); println("")
+    print("  Difference: "); print_f4(abs_f64(norm_left - norm_right)); println("")
+
+    if abs_f64(norm_left - norm_right) < 1e-9 {
+        println("  Norms are EQUAL (this triple is accidentally norm-preserving)")
+    } else {
+        println("  Norms DIFFER — unitarity VIOLATED")
+    }
+    println("")
+
+    // Try multiple triples to find norm violations
+    println("  Scanning all (i, j, k) with i in 1..7, j in 8..15, k in 1..7:")
+    println("")
+    var violations: i32 = 0
+    var total: i32 = 0
+    var max_diff: f64 = 0.0
+
+    var i: i64 = 1
+    while i <= 7 {
+        var j: i64 = 8
+        while j <= 15 {
+            var k: i64 = 1
+            while k <= 7 {
+                let sa = sed_unit(i)
+                let sb = sed_unit(j)
+                let sc = sed_unit(k)
+                let sab = sed_mul(sa, sb)
+                let sbc = sed_mul(sb, sc)
+                let sl = sed_mul(sab, sc)
+                let sr = sed_mul(sa, sbc)
+                let nl = sed_norm(sl)
+                let nr = sed_norm(sr)
+                let diff = abs_f64(nl - nr)
+                total = total + 1
+                if diff > 1e-9 {
+                    violations = violations + 1
+                    if diff > max_diff { max_diff = diff }
+                }
+                k = k + 1
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    print("  Total triples: "); println(total)
+    print("  Norm violations: "); println(violations)
+    print("  Max |Delta norm|: "); print_f4(max_diff); println("")
+    println("")
+
+    if violations > 0 {
+        println("  UNITARITY IS VIOLATED in sedenion algebra.")
+        println("  The norm of a path product DEPENDS on parenthesization.")
+        println("  This is the algebraic boundary of quantum mechanics.")
+    } else {
+        println("  No norm violations found for basis cross-half triples.")
+        println("  The violation may require non-basis elements.")
+    }
+    println("")
+}
+
+// ============================================================================
+// EXPERIMENT 3: Associator Spectrum — Octonion vs Sedenion
+// ============================================================================
+
+fn test_associator_spectrum() with IO, Mut, Panic, Div {
+    println("=== EXPERIMENT 3: Associator Spectrum Comparison ===")
+    println("")
+    println("  Octonions: ||[ei,ej,ek]|| in {0, 2} EXACTLY (binary)")
+    println("  Sedenions: ||[ei,ej,ek]|| = ??? (what values appear?)")
+    println("")
+
+    // Sedenion associator norms for basis elements
+    // Scan cross-half triples: i in 1..7, j in 8..15, k in 1..7
+    var distinct: [f64; 32] = [0.0; 32]
+    var n_distinct: i32 = 0
+    var total: i32 = 0
+    var zeros: i32 = 0
+
+    var i: i64 = 1
+    while i <= 7 {
+        var j: i64 = 8
+        while j <= 15 {
+            var k: i64 = 1
+            while k <= 7 {
+                let sa = sed_unit(i)
+                let sb = sed_unit(j)
+                let sc = sed_unit(k)
+                let assoc = sed_associator(sa, sb, sc)
+                let n = sed_norm(assoc)
+                total = total + 1
+                if n < 1e-9 { zeros = zeros + 1 }
+
+                // Track distinct values
+                var found = false
+                var d: i32 = 0
+                while d < n_distinct {
+                    if abs_f64(distinct[d as usize] - n) < 1e-6 { found = true }
+                    d = d + 1
+                }
+                if !found && n_distinct < 32 {
+                    distinct[n_distinct as usize] = n
+                    n_distinct = n_distinct + 1
+                }
+
+                k = k + 1
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    print("  Cross-half triples (i<8, j>=8, k<8): "); println(total)
+    print("  Zeros: "); println(zeros)
+    print("  Distinct norm values: "); println(n_distinct)
+    println("")
+
+    var d: i32 = 0
+    while d < n_distinct {
+        print("    ||assoc|| = "); print_f4(distinct[d as usize]); println("")
+        d = d + 1
+    }
+
+    println("")
+    if n_distinct > 2 {
+        println("  SEDENION ASSOCIATOR IS NOT BINARY.")
+        println("  Unlike octonions ({0, 2}), sedenions have INTERMEDIATE values.")
+        println("  The sharp algebraic dichotomy dissolves at dimension 16.")
+    } else {
+        println("  Sedenion associator is also binary (same as octonion).")
+    }
+    println("")
+}
+
+// ============================================================================
+// EXPERIMENT 4: Zero-Divisor Proximity in Associator
+// ============================================================================
+
+fn test_zero_div_proximity() with IO, Mut, Panic, Div {
+    println("=== EXPERIMENT 4: Zero-Divisor Proximity ===")
+    println("")
+    println("  How close do sedenion associators get to zero-divisor subspace?")
+    println("  The Moreno subspace: span{e1+e10, e4-e15}")
+    println("")
+
+    // Project each associator onto the zero-divisor direction
+    // ZD direction: (e1 + e10) normalized
+    var zd_dir = sed_zero()
+    zd_dir.e[1] = 1.0 / sqrt_f64(2.0)
+    zd_dir.e[10] = 1.0 / sqrt_f64(2.0)
+
+    var total: i32 = 0
+    var sum_proj: f64 = 0.0
+    var max_proj: f64 = 0.0
+
+    var i: i64 = 1
+    while i <= 7 {
+        var j: i64 = 8
+        while j <= 15 {
+            var k: i64 = 1
+            while k <= 7 {
+                let sa = sed_unit(i)
+                let sb = sed_unit(j)
+                let sc = sed_unit(k)
+                let assoc = sed_associator(sa, sb, sc)
+                let n = sed_norm(assoc)
+
+                if n > 1e-9 {
+                    // Project onto ZD direction
+                    var proj: f64 = 0.0
+                    var c: i64 = 0
+                    while c < 16 {
+                        proj = proj + assoc.e[c as usize] * zd_dir.e[c as usize]
+                        c = c + 1
+                    }
+                    let abs_proj = abs_f64(proj) / n  // normalized projection
+                    total = total + 1
+                    sum_proj = sum_proj + abs_proj
+                    if abs_proj > max_proj { max_proj = abs_proj }
+                }
+                k = k + 1
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    if total > 0 {
+        print("  Nonzero associators: "); println(total)
+        print("  Mean |projection onto ZD|: "); print_f4(sum_proj / (total as f64)); println("")
+        print("  Max |projection onto ZD|:  "); print_f4(max_proj); println("")
+        println("")
+        if max_proj > 0.5 {
+            println("  SIGNIFICANT zero-divisor alignment detected.")
+            println("  Non-associativity in sedenions is CORRELATED with")
+            println("  the zero-divisor structure — the two breakdowns are linked.")
+        } else {
+            println("  Low zero-divisor alignment.")
+            println("  Non-associativity and zero divisors are largely independent.")
+        }
+    }
+    println("")
+}
+
+// ============================================================================
+// MAIN
+// ============================================================================
+
+fn main() -> i32 with IO, Mut, Panic, Div {
+    println("================================================================")
+    println("  WHERE UNITARITY DIES: The Sedenion Boundary")
+    println("  Cayley-Dickson level 4: S = O x O (16 dimensions)")
+    println("================================================================")
+    println("")
+
+    test_zero_divisors()
+    test_norm_noninvariance()
+    test_associator_spectrum()
+    test_zero_div_proximity()
+
+    println("================================================================")
+    println("  SUMMARY: The Algebraic Hierarchy of Physics")
+    println("")
+    println("  R  (1D):  Everything works. Classical mechanics.")
+    println("  C  (2D):  Complex amplitudes. Quantum mechanics.")
+    println("  H  (4D):  Non-commutative. SU(2) gauge. Weak force.")
+    println("  O  (8D):  Non-associative. Order matters. Unitarity holds.")
+    println("             Binary associator {0,2}. 7 copies of SU(2).")
+    println("             168 = |PSL(2,7)|. Last normed division algebra.")
+    println("  S  (16D): Zero divisors. Norm non-multiplicative.")
+    println("             Unitarity breaks. Signal annihilation paths.")
+    println("             The algebraic boundary of quantum mechanics.")
+    println("================================================================")
+
+    0
+}

@@ -869,7 +869,7 @@ Demonstrates all four scientific visualization modules in sequence:
 ```bash
 # Run the showcase
 cd examples/graphics/demos
-cargo run -- run phase6_showcase.sio
+$SOUC run phase6_showcase.sio
 ```
 
 ---
@@ -1069,7 +1069,7 @@ Demonstrates all four network/graph modules:
 
 ```bash
 # Run the showcase
-cargo run --features jit -- run examples/graphics/demos/phase7_showcase.sio
+$SOUC run examples/graphics/demos/phase7_showcase.sio
 ```
 
 ---

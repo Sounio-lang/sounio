@@ -94,18 +94,25 @@ This directory contains comprehensive examples demonstrating Sounio's features.
 ## Running Examples
 
 ```bash
+# Set up the compiler binary
+SOUC=./artifacts/omega/souc-bin/souc-linux-x86_64-jit
+export SOUNIO_STDLIB_PATH=$(pwd)/stdlib
+
 # Check syntax
-cargo run -p souc -- check examples/arithmetic.sio
+$SOUC check examples/arithmetic.sio
 
 # Run with JIT
-cargo run -p souc --features jit -- run examples/async_demo.sio
+$SOUC run examples/async_demo.sio
 
 # Compile to native
-cargo run -p souc -- build examples/autodiff/gradient.sio -o gradient
+$SOUC build examples/autodiff/gradient.sio --backend native -o gradient
 
-# With GPU support
-cargo run -p souc --features gpu -- run examples/gpu/matrix_mul.sio
+# With GPU support (requires souc-linux-x86_64-gpu binary)
+SOUC_GPU=./artifacts/omega/souc-bin/souc-linux-x86_64-gpu
+$SOUC_GPU run examples/gpu/matrix_mul.sio
 ```
+
+> **For curated scientific examples by research domain**, see [SCIENTIFIC_INDEX.md](SCIENTIFIC_INDEX.md).
 
 ## Contributing Examples
 
