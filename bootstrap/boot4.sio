@@ -138,6 +138,23 @@ var LAST_FIELD_TYPE_SI: i64 = -1
 var LAST_FIELD_SLOT_COUNT: i64 = 1  // slot count of last found field (1=scalar, >1=sub-struct)
 var LAST_FIELD_LAYOUT: i64 = 0  // 0=stack(negative offsets), 1=BSS/heap(positive offsets)
 
+// Enum variant tables for resolving EnumName::Variant → discriminant integer
+var EN_NAME_OFF: [i64; 256] = [0; 256]     // enum name pool offset
+var EN_NAME_LEN: [i64; 256] = [0; 256]     // enum name pool length
+var EN_VAR_BASE: [i64; 256] = [0; 256]     // first variant index in EV_ arrays
+var EN_VAR_COUNT: [i64; 256] = [0; 256]    // number of variants
+var EN_COUNT: i64 = 0
+
+var EV_NAME_OFF: [i64; 4096] = [0; 4096]   // variant name pool offset
+var EV_NAME_LEN: [i64; 4096] = [0; 4096]   // variant name pool length
+var EV_DISC: [i64; 4096] = [0; 4096]       // discriminant value
+var EV_COUNT: i64 = 0
+
+// Qualified name lookup: "EnumName::Variant" → discriminant
+// Returns -1 if not found, else discriminant value (which may be 0!)
+// Uses a separate found flag in EV_LOOKUP_FOUND.
+var EV_LOOKUP_FOUND: i64 = 0
+
 var ELF: [i8; 4194304] = [0; 4194304]
 var ELF_LEN: i64 = 0
 
@@ -2091,6 +2108,68 @@ fn find_fn_by_name(off: i64, len: i64) -> i64 with Mut, Panic, Div {
     -1
 }
 
+// Look up enum variant by qualified name "EnumName::Variant" in pool at (off, len).
+// Sets EV_LOOKUP_FOUND=1 and returns discriminant if found, else sets EV_LOOKUP_FOUND=0 and returns 0.
+fn find_enum_variant(off: i64, len: i64) -> i64 with Mut, Panic, Div {
+    EV_LOOKUP_FOUND = 0
+    // Find "::" separator in the qualified name
+    var sep: i64 = -1
+    var si: i64 = 0
+    while si < len - 1 {
+        if POOL[(off + si) as usize] == 58 && POOL[(off + si + 1) as usize] == 58 {
+            sep = si
+            break
+        }
+        si = si + 1
+    }
+    if sep < 0 { return 0 }
+    // enum_name = pool[off..off+sep], variant_name = pool[off+sep+2..off+len]
+    let en_off = off
+    let en_len = sep
+    let vn_off = off + sep + 2
+    let vn_len = len - sep - 2
+    if en_len <= 0 || vn_len <= 0 { return 0 }
+    // Find enum by name
+    var ei: i64 = 0
+    while ei < EN_COUNT {
+        let eo = EN_NAME_OFF[ei as usize]
+        let el = EN_NAME_LEN[ei as usize]
+        if el == en_len {
+            var ok: i64 = 1
+            var j: i64 = 0
+            while j < en_len {
+                if POOL[(eo + j) as usize] != POOL[(en_off + j) as usize] { ok = 0; break }
+                j = j + 1
+            }
+            if ok == 1 {
+                // Found enum; search variants
+                let base = EN_VAR_BASE[ei as usize]
+                let count = EN_VAR_COUNT[ei as usize]
+                var vi: i64 = 0
+                while vi < count {
+                    let vo = EV_NAME_OFF[(base + vi) as usize]
+                    let vl = EV_NAME_LEN[(base + vi) as usize]
+                    if vl == vn_len {
+                        var ok2: i64 = 1
+                        var k: i64 = 0
+                        while k < vn_len {
+                            if POOL[(vo + k) as usize] != POOL[(vn_off + k) as usize] { ok2 = 0; break }
+                            k = k + 1
+                        }
+                        if ok2 == 1 {
+                            EV_LOOKUP_FOUND = 1
+                            return EV_DISC[(base + vi) as usize]
+                        }
+                    }
+                    vi = vi + 1
+                }
+            }
+        }
+        ei = ei + 1
+    }
+    0
+}
+
 // ============================================================================
 // Global variable collection
 // ============================================================================
@@ -3547,6 +3626,32 @@ fn compile_node(node: i64) -> i64 with Mut, Panic, Div {
                 }
             }
         } else if tk2 == 13 {
+            // For struct-typed array elements, compile RHS to get a pointer
+            // (not a value) so rep movsq can copy from it.
+            var rhs_is_struct_local: i64 = 0
+            if ND_KIND[rhs as usize] == 2 {
+                let rhs_off = ND_STR_OFF[rhs as usize]
+                let rhs_len = ND_STR_LEN[rhs as usize]
+                let rhs_slot = find_local(rhs_off, rhs_len)
+                if rhs_slot >= 0 && LAST_LOCAL_SI >= 0 && LAST_LOCAL_IS_SPTR == 0 {
+                    // Local multi-slot struct: emit LEA instead of LOAD
+                    emit_lea_rax(rhs_slot)
+                    rhs_is_struct_local = 1
+                } else if rhs_slot >= 0 && LAST_LOCAL_IS_SPTR == 1 {
+                    // IS_SPTR=1: already a pointer, just load it
+                    emit_load_rax(rhs_slot)
+                    rhs_is_struct_local = 1
+                } else if rhs_slot >= 0 && LAST_LOCAL_IS_SPTR == 4 {
+                    // IS_SPTR=4: BSS pointer, just load it
+                    emit_load_rax(rhs_slot)
+                    rhs_is_struct_local = 1
+                }
+            }
+            if rhs_is_struct_local == 0 {
+                compile_node(rhs)
+            }
+            let val_save = alloc_slot()
+            emit_store_rax(val_save)
             let arr_nd2 = ND_LEFT[target as usize]
             let idx_nd2 = ND_RIGHT[target as usize]
             let avoff2 = ND_STR_OFF[arr_nd2 as usize]
@@ -3620,34 +3725,31 @@ fn compile_node(node: i64) -> i64 with Mut, Panic, Div {
             compile_node(idx_nd2)
             emit(0x48); emit(0x8B); emit(0x8D); emit_u32(0 - ((base_save + 1) * 8))
             if asz2 == 1 {
+                // Byte array: base + index
                 emit(0x48); emit(0x01); emit(0xC1)
-            } else if asz2 > 8 {
-                // Struct element: compute base + idx * asz2
-                emit(0x48); emit(0x69); emit(0xC0); emit_u32(asz2)  // imul rax, asz2
-                emit(0x48); emit(0x01); emit(0xC1)                   // add rcx, rax
-            } else {
+            } else if asz2 == 8 {
+                // i64 array: index * 8
                 emit(0x48); emit(0xC1); emit(0xE0); emit(0x03)
                 emit(0x48); emit(0x01); emit(0xC1)
-            }
-            // Now rcx = destination address
-            if asz2 > 8 && rhs_struct_fc > 1 {
-                // Multi-slot struct copy from local stack slots to [rcx]
-                let dst_save = alloc_slot()
-                emit(0x48); emit(0x89); emit(0x8D); emit_u32(0 - ((dst_save + 1) * 8))
-                var sci: i64 = 0
-                while sci < rhs_struct_fc {
-                    emit_load_rax(rhs_struct_slot + sci)
-                    emit(0x48); emit(0x8B); emit(0x8D); emit_u32(0 - ((dst_save + 1) * 8))
-                    emit(0x48); emit(0x89); emit(0x81); emit_u32(sci * 8)  // mov [rcx + sci*8], rax
-                    sci = sci + 1
-                }
             } else {
-                emit(0x48); emit(0x8B); emit(0x95); emit_u32(0 - ((val_save + 1) * 8))
-                if asz2 == 1 {
-                    emit(0x88); emit(0x11)
-                } else {
-                    emit(0x48); emit(0x89); emit(0x11)
-                }
+                // Struct-typed array: index * asz2
+                emit(0x48); emit(0x69); emit(0xC0); emit_u32(asz2)  // imul rax, rax, asz2
+                emit(0x48); emit(0x01); emit(0xC1)                   // add rcx, rax
+            }
+            emit(0x48); emit(0x8B); emit(0x95); emit_u32(0 - ((val_save + 1) * 8))
+            if asz2 == 1 {
+                emit(0x88); emit(0x11)                    // mov [rcx], dl (byte)
+            } else if asz2 > 8 {
+                // Struct copy: rdx = source ptr, rcx = target addr
+                // Copy asz2/8 qwords using rep movsq
+                let dest_save = alloc_slot()
+                emit(0x48); emit(0x89); emit(0x8D); emit_u32(0 - ((dest_save + 1) * 8))  // save rcx (dest)
+                emit(0x48); emit(0x89); emit(0xD6)        // mov rsi, rdx (source)
+                emit(0x48); emit(0x89); emit(0xCF)        // mov rdi, rcx (dest)
+                emit(0x48); emit(0xC7); emit(0xC1); emit_u32(asz2 / 8) // mov rcx, count
+                emit(0xF3); emit(0x48); emit(0xA5)        // rep movsq
+            } else {
+                emit(0x48); emit(0x89); emit(0x11)        // mov [rcx], rdx (qword)
             }
         } else if tk2 == 46 {
             // *ptr = value — store through pointer
@@ -4566,6 +4668,11 @@ fn main() -> i64 with IO, Mut, Panic, Div {
     pre_scan_structs()
     pre_scan_enums()
     parse_program()
+    print("enums=")
+    print_int(EN_COUNT)
+    print(" variants=")
+    print_int(EV_COUNT)
+    print("\n")
     print("fns=")
     print_int(FN_COUNT)
     print(" structs=")
