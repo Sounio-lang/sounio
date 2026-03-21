@@ -416,7 +416,7 @@ The by-value return pattern (`var s = state; ... s`) makes every state transitio
 
 ## 6. Related Work
 
-**Computational autopoiesis.** There is a substantial tradition of computational autopoiesis, reviewed comprehensively by McMullin (2004). The lineage begins with Varela, Maturana, and Uribe's (1974) tessellation automaton — a 2D cellular model where "molecules" self-organize into bounded structures. Subsequent work (Suzuki and Ikegami, 2004; Oka *et al.*, 2009) explored reaction-diffusion and particle-based models. McMullin's own SCL (Substrate-Conscious Language) implemented autopoietic dynamics in a spatial substrate. These are simulations of specific autopoietic *mechanisms* in particular physical substrates. Our work differs in level of abstraction: we implement the *theory* of organizational closure — production relations as a directed graph, closure as cycle existence — as abstract operations applicable to any system, not a specific spatial model. The DFS cycle detection in our `check_closure` formalizes the *definition* of autopoiesis; McMullin's tessellation automaton demonstrates a *realization* of it. The two approaches are complementary.
+**Computational autopoiesis.** There is a substantial tradition of computational autopoiesis, reviewed comprehensively by McMullin (2004). The lineage begins with Varela, Maturana, and Uribe's (1974) tessellation automaton — a 2D cellular model where "molecules" self-organize into bounded structures. Subsequent work (Suzuki and Ikegami, 2009) explored reaction-diffusion and particle-based models. McMullin's own SCL (Substrate-Conscious Language) implemented autopoietic dynamics in a spatial substrate. These are simulations of specific autopoietic *mechanisms* in particular physical substrates. Our work differs in level of abstraction: we implement the *theory* of organizational closure — production relations as a directed graph, closure as cycle existence — as abstract operations applicable to any system, not a specific spatial model. The DFS cycle detection in our `check_closure` formalizes the *definition* of autopoiesis; McMullin's tessellation automaton demonstrates a *realization* of it. The two approaches are complementary.
 
 **Conversation Theory software.** Pask's own THOUGHTSTICKER system (Pask, 1975) and its successor CASTE were direct software implementations of Conversation Theory, used in educational contexts. Pangaro's thesis (1987) documents these as working systems capable of modeling Lp/Lp* procedural descriptions. Pangaro (2002) and Dubberly and Pangaro (2015) developed interaction models and design frameworks based on CT. Our conversation module does not attempt to replace THOUGHTSTICKER's procedural modeling — we acknowledge in §2.7 that our implementation uses scalar values, not Pask's procedural Lp/Lp*. Our contribution is different: we compose conversation with eight other frameworks (observer-inclusion, variety, learning levels, etc.) into a recursive architecture, which THOUGHTSTICKER does not attempt.
 
@@ -559,7 +559,7 @@ Abramsky, S. and Coecke, B. (2004), "A categorical semantics of quantum protocol
 
 Ashby, W.R. (1956), *An Introduction to Cybernetics*, Chapman and Hall, London.
 
-Bateson, G. (1972), *Steps to an Ecology of Mind*, University of Chicago Press, Chicago, IL.
+Bateson, G. (1972), *Steps to an Ecology of Mind*, Chandler Publishing Company, San Francisco, CA.
 
 Cormen, T.H., Leiserson, C.E., Rivest, R.L. and Stein, C. (2009), *Introduction to Algorithms*, 3rd ed., MIT Press, Cambridge, MA.
 
@@ -567,7 +567,7 @@ Dubberly, H. and Pangaro, P. (2015), "Cybernetics and design: conversations for 
 
 Glanville, R. (1997), "The value of being unmanageable: variety and creativity in cyberspace", in *Global Village '97*, Vienna.
 
-Kauffman, L.H. (2003), "Eigenforms — objects as tokens for eigenbehaviors", *Cybernetics & Human Knowing*, Vol. 10 No. 3-4, pp. 73-89.
+Kauffman, L.H. (2003), "Eigenforms — objects as tokens for eigenbehaviors", *Cybernetics & Human Knowing*, Vol. 10 No. 3-4, pp. 73-90.
 
 Kauffman, L.H. (2005), "Eigenform", *Kybernetes*, Vol. 34 No. 1/2, pp. 129-150.
 
@@ -589,11 +589,9 @@ Miranda, M.D. and Abades, S. (2024), "Exploring the theoretical and practical im
 
 North, M.J., Collier, N.T., Ozik, J. *et al.* (2013), "Complex adaptive systems modeling with Repast Simphony", *Complex Adaptive Systems Modeling*, Vol. 1 No. 3.
 
-Oka, M., Hashimoto, T. and Ikegami, T. (2009), "Self-organization of autopoietic dynamics in an artificial chemistry", *Artificial Life*, Vol. 15 No. 4, pp. 373-393.
-
 Oksas, A. (2025), "Where George Spencer-Brown went wrong — re-entry recalculated", *Kybernetes*, Vol. 54 No. 8, pp. 4300-4327.
 
-Pangaro, P. (1987), *Conversation Theory as a Tool for Educational Design*, PhD thesis, Brunel University, London.
+Pangaro, P. (1987), *An Examination and Confirmation of a Macro Theory of Conversations through a Realization of the Protologic Lp by Microscopic Simulation*, PhD thesis, Brunel University, London.
 
 Pangaro, P. (2002), "New order from old: the rise of second-order cybernetics and its implications for machine intelligence", in *Proceedings of the American Society for Cybernetics Conference*, Vancouver.
 
@@ -603,7 +601,7 @@ Pask, G. (1976), *Conversation Theory: Applications in Education and Epistemolog
 
 Spencer-Brown, G. (1969), *Laws of Form*, Allen and Unwin, London.
 
-Suzuki, K. and Ikegami, T. (2004), "Shapes and self-movement in protocell systems", *Artificial Life*, Vol. 10 No. 2, pp. 129-141.
+Suzuki, K. and Ikegami, T. (2009), "Shapes and self-movement in protocell systems", *Artificial Life*, Vol. 15 No. 1, pp. 59-70.
 
 Varela, F.J. (1975), "A calculus for self-reference", *International Journal of General Systems*, Vol. 2 No. 1, pp. 5-24.
 
