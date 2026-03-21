@@ -15,7 +15,7 @@ Biomaterials and Regenerative Medicine Post-Graduate Program,
 Pontifícia Universidade Católica de São Paulo (PUC-SP), Sorocaba, SP, Brazil
 Faculdade São Leopoldo Mandic, Campinas, SP, Brazil
 
-D.C.A. ORCID: 0000-0002-8596-5097
+D.C.A. ORCID: 0009-0001-8671-8878
 
 March 2026
 

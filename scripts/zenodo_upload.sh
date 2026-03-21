@@ -61,7 +61,7 @@ METADATA='{
     "creators": [
       {
         "name": "Agourakis, Demetrios C.",
-        "orcid": "0000-0002-8596-5097",
+        "orcid": "0009-0001-8671-8878",
         "affiliation": "Pontifícia Universidade Católica de São Paulo (PUC-SP); Faculdade São Leopoldo Mandic"
       }
     ],
