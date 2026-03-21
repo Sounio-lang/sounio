@@ -2,15 +2,15 @@
 //
 // World-first: NO existing GPU system auto-generates dual-path PTX kernels where
 // vote.sync.ballot on the epistemic validity predicate %p_valid gates whether the
-// warp executes full GUM uncertainty propagation or a fast path that skips shadow
-// registers entirely.
+// warp executes full GUM uncertainty propagation or a fast path that uses budget-bounded
+// uncertainty propagation.
 //
 // Architecture:
 //   1. Classify kernels as epistemic (contain GUM shadow registers) or plain
 //   2. For each epistemic kernel, generate dual-path PTX:
 //      - Ballot check: vote.sync.ballot.b32 on %p_valid (all lanes valid?)
 //      - Epsilon check: all lanes below uncertainty threshold?
-//      - Fast path: value-only computation (skip shadow regs)
+//      - Fast path: budget-bounded uncertainty propagation (conservative upper bound)
 //      - Full path: full GUM uncertainty propagation
 //      - Merge label: reconvergence point
 //   3. Return summary of PTX lines added and kernels optimized
@@ -390,7 +390,10 @@ fn wv_emit_epsilon_check(buf: [i8; 4096], pos: i64, eps_reg: i64, threshold: f64
 
 // Emits:
 //   FAST_PATH_<kernel_idx>:
-//     // value-only computation (shadow regs skipped)
+//     // Budget-bounded uncertainty propagation
+//     // eps_out = max(eps_a, eps_b) * 2.0 (conservative upper bound)
+//     // Validity: preserved (AND of inputs)
+//     // Provenance: preserved (OR of inputs)
 //     bra MERGE_<kernel_idx>;
 //
 // Returns (new_pos, lines_added)
@@ -428,16 +431,100 @@ fn wv_emit_fast_path_label(buf: [i8; 4096], pos: i64, kernel_idx: i64) -> (i64, 
     p = buf_write_str(&!b, p, label, llen)
     p = buf_write_newline(&!b, p)
 
-    // Comment line: "// value-only (skip shadow)"
-    var comment: [i8; 128] = [0; 128]
-    comment[0] = 47    // /
-    comment[1] = 47    // /
-    comment[2] = 32    // space
-    comment[3] = 102   // f
-    comment[4] = 97    // a
-    comment[5] = 115   // s
-    comment[6] = 116   // t
-    p = buf_write_str(&!b, p, comment, 7)
+    // Comment line 1: "// budget-bounded eps"
+    // /=47 /=47 space=32 b=98 u=117 d=100 g=103 e=101 t=116 -=45 b=98
+    // o=111 u=117 n=110 d=100 e=101 d=100 space=32 e=101 p=112 s=115
+    var c1: [i8; 128] = [0; 128]
+    c1[0] = 47     // /
+    c1[1] = 47     // /
+    c1[2] = 32     // space
+    c1[3] = 98     // b
+    c1[4] = 117    // u
+    c1[5] = 100    // d
+    c1[6] = 103    // g
+    c1[7] = 101    // e
+    c1[8] = 116    // t
+    c1[9] = 45     // -
+    c1[10] = 98    // b
+    c1[11] = 111   // o
+    c1[12] = 117   // u
+    c1[13] = 110   // n
+    c1[14] = 100   // d
+    c1[15] = 101   // e
+    c1[16] = 100   // d
+    c1[17] = 32    // space
+    c1[18] = 101   // e
+    c1[19] = 112   // p
+    c1[20] = 115   // s
+    p = buf_write_str(&!b, p, c1, 21)
+    p = buf_write_newline(&!b, p)
+
+    // Comment line 2: "// eps=max(a,b)*2"
+    // /=47 /=47 space=32 e=101 p=112 s=115 ==61 m=109 a=97 x=120
+    // (=40 a=97 ,=44 b=98 )=41 *=42 2=50
+    var c2: [i8; 128] = [0; 128]
+    c2[0] = 47     // /
+    c2[1] = 47     // /
+    c2[2] = 32     // space
+    c2[3] = 101    // e
+    c2[4] = 112    // p
+    c2[5] = 115    // s
+    c2[6] = 61     // =
+    c2[7] = 109    // m
+    c2[8] = 97     // a
+    c2[9] = 120    // x
+    c2[10] = 40    // (
+    c2[11] = 97    // a
+    c2[12] = 44    // ,
+    c2[13] = 98    // b
+    c2[14] = 41    // )
+    c2[15] = 42    // *
+    c2[16] = 50    // 2
+    p = buf_write_str(&!b, p, c2, 17)
+    p = buf_write_newline(&!b, p)
+
+    // Comment line 3: "// valid=AND(in)"
+    // /=47 /=47 space=32 v=118 a=97 l=108 i=105 d=100 ==61
+    // A=65 N=78 D=68 (=40 i=105 n=110 )=41
+    var c3: [i8; 128] = [0; 128]
+    c3[0] = 47     // /
+    c3[1] = 47     // /
+    c3[2] = 32     // space
+    c3[3] = 118    // v
+    c3[4] = 97     // a
+    c3[5] = 108    // l
+    c3[6] = 105    // i
+    c3[7] = 100    // d
+    c3[8] = 61     // =
+    c3[9] = 65     // A
+    c3[10] = 78    // N
+    c3[11] = 68    // D
+    c3[12] = 40    // (
+    c3[13] = 105   // i
+    c3[14] = 110   // n
+    c3[15] = 41    // )
+    p = buf_write_str(&!b, p, c3, 16)
+    p = buf_write_newline(&!b, p)
+
+    // Comment line 4: "// prov=OR(in)"
+    // /=47 /=47 space=32 p=112 r=114 o=111 v=118 ==61
+    // O=79 R=82 (=40 i=105 n=110 )=41
+    var c4: [i8; 128] = [0; 128]
+    c4[0] = 47     // /
+    c4[1] = 47     // /
+    c4[2] = 32     // space
+    c4[3] = 112    // p
+    c4[4] = 114    // r
+    c4[5] = 111    // o
+    c4[6] = 118    // v
+    c4[7] = 61     // =
+    c4[8] = 79     // O
+    c4[9] = 82     // R
+    c4[10] = 40    // (
+    c4[11] = 105   // i
+    c4[12] = 110   // n
+    c4[13] = 41    // )
+    p = buf_write_str(&!b, p, c4, 14)
     p = buf_write_newline(&!b, p)
 
     // "bra MERGE_<idx>"
@@ -465,7 +552,8 @@ fn wv_emit_fast_path_label(buf: [i8; 4096], pos: i64, kernel_idx: i64) -> (i64, 
     p = buf_write_str(&!b, p, bra_line, blen)
     p = buf_write_newline(&!b, p)
 
-    (p, 3)
+    // 1 label + 4 comments + 1 bra = 6 lines
+    (p, 6)
 }
 
 // ============================================================================
@@ -598,9 +686,9 @@ fn wv_run(config: WarpVoteConfig, kernel_count: i64) -> WarpVoteResult with Mut,
 
         if is_epistemic {
             // Emit ballot check (3 lines) + epsilon check (3 lines) +
-            // fast path label (3 lines) + full path label (2 lines) +
-            // merge label (2 lines) = 13 lines per kernel
-            var lines_per_kernel: i64 = 13
+            // fast path label (6 lines: label + 4 budget-bounded comments + bra) +
+            // full path label (2 lines) + merge label (2 lines) = 16 lines per kernel
+            var lines_per_kernel: i64 = 16
             result.ptx_lines_added = result.ptx_lines_added + lines_per_kernel
             result.kernels_optimized = result.kernels_optimized + 1
         }

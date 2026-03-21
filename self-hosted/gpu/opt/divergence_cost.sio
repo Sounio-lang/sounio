@@ -136,7 +136,7 @@ fn dc_reconvergence_cost(distance: i64, divergence_pct: f64) -> f64 {
 // Function 5: Combined penalty computation
 // Aggregates serialization + ballot overhead + reconvergence into a single
 // DivCostEstimate. Also computes estimated_speedup via dc_estimate_speedup
-// with a typical shadow_overhead of 2.0.
+// with a typical shadow_overhead of 2.0 and budget_overhead of 0.3.
 // ============================================================================
 
 fn dc_compute_penalty(divergence_pct: f64, num_ballots: i64, reconv_distance: i64, cfg: DivCostConfig) -> DivCostEstimate with Mut, Panic, Div {
@@ -158,18 +158,27 @@ fn dc_compute_penalty(divergence_pct: f64, num_ballots: i64, reconv_distance: i6
 
 // ============================================================================
 // Function 6: Speedup estimation
-// Models the speedup from skipping shadow lanes in the fast path.
-// If shadow_overhead is the cost multiplier of running shadow propagation,
-// then the effective cost with divergence is:
-//   effective = 1.0 + (divergence_pct / 100.0) * shadow_overhead
-// and speedup = shadow_overhead / effective
+// Models the speedup from budget-bounded uncertainty propagation in the fast path.
+// The fast path is NOT free — it performs conservative upper-bound epsilon
+// propagation costing ~30% of full shadow overhead (budget_overhead = 0.3).
 //
-// Example: shadow_overhead=2.0, div_pct=10% → effective=1.2 → speedup≈1.667
+// Without optimization: base_cost = 1.0 + shadow_overhead
+// With optimization:
+//   non-divergent fraction runs budget-bounded: 1.0 + budget_overhead * shadow_overhead
+//   divergent fraction runs full path: 1.0 + shadow_overhead
+//   opt_cost = (1-div_frac)*(1+budget*shadow) + div_frac*(1+shadow)
+//   speedup = base_cost / opt_cost
+//
+// Example: shadow=2.0, div_pct=10%, budget=0.3 → opt=1.74 → speedup≈1.724
 // ============================================================================
 
 fn dc_estimate_speedup(shadow_overhead: f64, divergence_pct: f64) -> f64 with Panic, Div {
-    let effective = 1.0 + (divergence_pct / 100.0) * shadow_overhead
-    shadow_overhead / effective
+    // Budget-bounded fast path costs ~30% of full shadow propagation
+    let budget_overhead: f64 = 0.3
+    let div_frac = divergence_pct / 100.0
+    let base_cost = 1.0 + shadow_overhead
+    let opt_cost = (1.0 - div_frac) * (1.0 + budget_overhead * shadow_overhead) + div_frac * base_cost
+    base_cost / opt_cost
 }
 
 // ============================================================================

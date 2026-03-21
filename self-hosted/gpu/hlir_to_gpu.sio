@@ -744,8 +744,8 @@ fn hlir_gpu_emit_shadow_add(s: HlirToGpuState, blk: GpuBlockEntry, result: i64, 
     b = gpu_block_add_op(b, gpu_op_make(GpuOpcodeSqrt, GpuTypeF32, eps_res, sum, -1, -1))
     // valid_res = valid_l AND valid_r
     b = gpu_block_add_op(b, gpu_op_make(GpuOpcodeAnd, GpuTypeBool, valid_res, valid_l, valid_r, -1))
-    // prov_res = prov_l XOR prov_r
-    b = gpu_block_add_op(b, gpu_op_make(GpuOpcodeXor, GpuTypeI64, prov_res, prov_l, prov_r, -1))
+    // prov_res = prov_l OR prov_r (monotonic union)
+    b = gpu_block_add_op(b, gpu_op_make(GpuOpcodeOr, GpuTypeI64, prov_res, prov_l, prov_r, -1))
 
     // Record new shadow for result
     if st.shadow_count < 8192 {
@@ -830,8 +830,8 @@ fn hlir_gpu_emit_shadow_mul(s: HlirToGpuState, blk: GpuBlockEntry, result: i64, 
     b = gpu_block_add_op(b, gpu_op_make(GpuOpcodeAdd, GpuTypeF32, eps_res, term1, term2, -1))
     // valid_res = valid_l AND valid_r
     b = gpu_block_add_op(b, gpu_op_make(GpuOpcodeAnd, GpuTypeBool, valid_res, valid_l, valid_r, -1))
-    // prov_res = prov_l XOR prov_r
-    b = gpu_block_add_op(b, gpu_op_make(GpuOpcodeXor, GpuTypeI64, prov_res, prov_l, prov_r, -1))
+    // prov_res = prov_l OR prov_r (monotonic union)
+    b = gpu_block_add_op(b, gpu_op_make(GpuOpcodeOr, GpuTypeI64, prov_res, prov_l, prov_r, -1))
 
     // Record shadow
     if st.shadow_count < 8192 {
@@ -848,6 +848,12 @@ fn hlir_gpu_emit_shadow_mul(s: HlirToGpuState, blk: GpuBlockEntry, result: i64, 
 
     (st, b)
 }
+
+// Validity semantics:
+//   - Binary ops (add, sub, mul): valid_out = valid_a AND valid_b
+//   - Division: valid_out = valid_a AND valid_b AND (|b| > near_zero)
+//   - Sqrt: valid_out = valid_a (TODO: add a >= 0 domain check)
+//   - General: valid means "GUM uncertainty computation is well-defined for this result"
 
 // Emit uncertainty propagation for div: eps_c = (|lhs|*eps_rhs + |rhs|*eps_lhs) / rhs^2
 // Includes near-zero denominator guard via validity predicate
@@ -940,8 +946,8 @@ fn hlir_gpu_emit_shadow_div(s: HlirToGpuState, blk: GpuBlockEntry, result: i64, 
     // valid_res = valid_l AND valid_r AND denom_safe
     b = gpu_block_add_op(b, gpu_op_make(GpuOpcodeAnd, GpuTypeBool, valid_res, valid_l, valid_r, -1))
     b = gpu_block_add_op(b, gpu_op_make(GpuOpcodeAnd, GpuTypeBool, valid_res, valid_res, denom_safe, -1))
-    // prov_res = prov_l XOR prov_r
-    b = gpu_block_add_op(b, gpu_op_make(GpuOpcodeXor, GpuTypeI64, prov_res, prov_l, prov_r, -1))
+    // prov_res = prov_l OR prov_r (monotonic union)
+    b = gpu_block_add_op(b, gpu_op_make(GpuOpcodeOr, GpuTypeI64, prov_res, prov_l, prov_r, -1))
 
     // Record shadow
     if st.shadow_count < 8192 {
@@ -1056,7 +1062,7 @@ fn hlir_gpu_emit_shadow_fma(s: HlirToGpuState, blk: GpuBlockEntry, result: i64, 
     b = gpu_block_add_op(b, gpu_op_make(GpuOpcodeAnd, GpuTypeBool, valid_ab, valid_a, valid_b, -1))
     b = gpu_block_add_op(b, gpu_op_make(GpuOpcodeAnd, GpuTypeBool, valid_res, valid_ab, valid_c, -1))
 
-    // Step 4: provenance = prov_a XOR prov_b XOR prov_c
+    // Step 4: provenance = prov_a OR prov_b OR prov_c (monotonic union)
     let prov_ab_r = hlir_gpu_alloc_value(st)
     st = prov_ab_r.0
     let prov_ab = prov_ab_r.1
@@ -1065,8 +1071,8 @@ fn hlir_gpu_emit_shadow_fma(s: HlirToGpuState, blk: GpuBlockEntry, result: i64, 
     st = prov_res_r.0
     let prov_res = prov_res_r.1
 
-    b = gpu_block_add_op(b, gpu_op_make(GpuOpcodeXor, GpuTypeI64, prov_ab, prov_a, prov_b, -1))
-    b = gpu_block_add_op(b, gpu_op_make(GpuOpcodeXor, GpuTypeI64, prov_res, prov_ab, prov_c, -1))
+    b = gpu_block_add_op(b, gpu_op_make(GpuOpcodeOr, GpuTypeI64, prov_ab, prov_a, prov_b, -1))
+    b = gpu_block_add_op(b, gpu_op_make(GpuOpcodeOr, GpuTypeI64, prov_res, prov_ab, prov_c, -1))
 
     // Record shadow
     if st.shadow_count < 8192 {
@@ -1838,6 +1844,8 @@ fn gpu_emit_epistemic_shadow_unary(
     let eps_src = op.src_reg + shadow_offset
 
     if op.opcode == GpuOpcode::GpuSqrt {
+        // TODO: Add domain check: valid_res = valid_a AND (a >= 0.0)
+        // Currently only propagates inherited validity without domain constraint.
         // eps_sqrt = eps_in / (2 * |val|)
         // Step 1: tmp1 = abs(val)
         var abs_val = gpu_op_new()
