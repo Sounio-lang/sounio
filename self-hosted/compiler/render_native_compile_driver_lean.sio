@@ -87,10 +87,20 @@ fn mp_set_int_value(idx: i64, val: i64) with Mut, Panic {
     if idx >= 0 && idx < 65536 { MP_INT_VALUE[idx as usize] = val }
 }
 
+// Boot4-safe helpers (replaces imported is_digit/is_ident_start/is_ident_continue)
+fn ltp_is_digit(ch: i8) -> bool { ch >= 48 && ch <= 57 }
+fn ltp_is_hex_digit(ch: i8) -> bool {
+    (ch >= 48 && ch <= 57) || (ch >= 97 && ch <= 102) || (ch >= 65 && ch <= 70)
+}
+fn ltp_is_bin_digit(ch: i8) -> bool { ch == 48 || ch == 49 }
+fn ltp_is_alpha(ch: i8) -> bool {
+    (ch >= 97 && ch <= 122) || (ch >= 65 && ch <= 90) || ch == 95
+}
+fn ltp_is_alnum(ch: i8) -> bool { ltp_is_alpha(ch) || ltp_is_digit(ch) }
+
 fn ltp_scan_string() with Mut, Div, Panic {
     let ss = LTP_POS
     let sl = LTP_LINE
-    let sc = LTP_COL
     LTP_POS = LTP_POS + 1; LTP_COL = LTP_COL + 1
     while LTP_POS < LTP_N && ltp_byte(LTP_POS) != 34 {
         if ltp_byte(LTP_POS) == 92 { LTP_POS = LTP_POS + 1; LTP_COL = LTP_COL + 1 }
@@ -98,46 +108,39 @@ fn ltp_scan_string() with Mut, Div, Panic {
         LTP_POS = LTP_POS + 1; LTP_COL = LTP_COL + 1
     }
     if LTP_POS < LTP_N { LTP_POS = LTP_POS + 1; LTP_COL = LTP_COL + 1 }
-    mp_set_token(LTP_TC, 123, ss, LTP_POS, sl)
-    var si: i64 = 0
-    let sm = LTP_POS - ss - 2
-    let sx = if sm > 255 { 255 } else { sm }
-    while si < sx { 0); si = si + 1 }
-    0
+    mp_set_token(LTP_TC, 123, ss, LTP_POS, sl)  // 123 = StringLit
+    MP_INT_VALUE[LTP_TC as usize] = 0
     LTP_TC = LTP_TC + 1
 }
 
 fn ltp_scan_number(ch: i8) with Mut, Div, Panic {
     let ns = LTP_POS
     let nl = LTP_LINE
-    let nc = LTP_COL
-    var nk = TokenKind::IntLit
+    var nk: i64 = 121  // IntLit
     if ch == 48 && LTP_POS + 1 < LTP_N && (ltp_byte(LTP_POS + 1) == 120 || ltp_byte(LTP_POS + 1) == 88) {
-        nk = TokenKind::HexLit; LTP_POS = LTP_POS + 2
-        while LTP_POS < LTP_N && is_hex_digit(ltp_byte(LTP_POS)) { LTP_POS = LTP_POS + 1 }
+        LTP_POS = LTP_POS + 2
+        while LTP_POS < LTP_N && (ltp_is_hex_digit(ltp_byte(LTP_POS)) || ltp_byte(LTP_POS) == 95) { LTP_POS = LTP_POS + 1 }
     } else if ch == 48 && LTP_POS + 1 < LTP_N && (ltp_byte(LTP_POS + 1) == 98 || ltp_byte(LTP_POS + 1) == 66) {
-        nk = TokenKind::BinLit; LTP_POS = LTP_POS + 2
-        while LTP_POS < LTP_N && is_bin_digit(ltp_byte(LTP_POS)) { LTP_POS = LTP_POS + 1 }
+        LTP_POS = LTP_POS + 2
+        while LTP_POS < LTP_N && (ltp_is_bin_digit(ltp_byte(LTP_POS)) || ltp_byte(LTP_POS) == 95) { LTP_POS = LTP_POS + 1 }
     } else {
-        while LTP_POS < LTP_N && is_digit(ltp_byte(LTP_POS)) { LTP_POS = LTP_POS + 1 }
-        if LTP_POS < LTP_N && ltp_byte(LTP_POS) == 46 && LTP_POS + 1 < LTP_N && is_digit(ltp_byte(LTP_POS + 1)) {
-            nk = TokenKind::FloatLit; LTP_POS = LTP_POS + 1
-            while LTP_POS < LTP_N && is_digit(ltp_byte(LTP_POS)) { LTP_POS = LTP_POS + 1 }
+        while LTP_POS < LTP_N && (ltp_is_digit(ltp_byte(LTP_POS)) || ltp_byte(LTP_POS) == 95) { LTP_POS = LTP_POS + 1 }
+        if LTP_POS < LTP_N && ltp_byte(LTP_POS) == 46 && LTP_POS + 1 < LTP_N && ltp_is_digit(ltp_byte(LTP_POS + 1)) {
+            nk = 122  // FloatLit
+            LTP_POS = LTP_POS + 1
+            while LTP_POS < LTP_N && (ltp_is_digit(ltp_byte(LTP_POS)) || ltp_byte(LTP_POS) == 95) { LTP_POS = LTP_POS + 1 }
         }
     }
     LTP_COL = LTP_COL + (LTP_POS - ns)
-    let nv = parse_numeric(ns, LTP_POS, nk)
-    // nk is TokenKind for number — IntLit=121, FloatLit=122
-    // Under boot4, enum values ARE i64, so nk stores the discriminant directly
-    mp_set_token(LTP_TC, nk as i64, ns, LTP_POS, nl)
-    if !nv.is_float { mp_set_int_value(LTP_TC, nv.int_val) }
+    mp_set_token(LTP_TC, nk, ns, LTP_POS, nl)
+    if nk == 121 { mp_set_int_value(LTP_TC, mc_parse_int(ns, LTP_POS)) }
+    else { mc_parse_float_parts(LTP_TC, ns, LTP_POS) }
     LTP_TC = LTP_TC + 1
 }
 
 // keyword_lookup_cs: look up keyword from LEAN_SOURCE at offset `start` with length `len`
-// Returns TokenKind::Ident if no keyword match.
-fn keyword_lookup_cs(start: i64, len: i64) -> TokenKind with Panic {
-    // Helper: read byte from LEAN_SOURCE
+// Returns raw integer token kind matching MC_TK_* constants. Boot4-safe (no TokenKind enum).
+fn keyword_lookup_cs(start: i64, len: i64) -> i64 with Panic {
     let b0 = if len > 0 { ltp_byte(start) } else { 0 as i8 }
     let b1 = if len > 1 { ltp_byte(start + 1) } else { 0 as i8 }
     let b2 = if len > 2 { ltp_byte(start + 2) } else { 0 as i8 }
@@ -146,145 +149,135 @@ fn keyword_lookup_cs(start: i64, len: i64) -> TokenKind with Panic {
     let b5 = if len > 5 { ltp_byte(start + 5) } else { 0 as i8 }
     let b6 = if len > 6 { ltp_byte(start + 6) } else { 0 as i8 }
     let b7 = if len > 7 { ltp_byte(start + 7) } else { 0 as i8 }
-    // Length 2: fn, if, in, as
+    // Length 2: fn=7, if=17, in=120(ident), as=27
     if len == 2 {
-        if b0 == 102 as i8 && b1 == 110 as i8 { return TokenKind::Fn }
-        if b0 == 105 as i8 && b1 == 102 as i8 { return TokenKind::If }
-        if b0 == 105 as i8 && b1 == 110 as i8 { return TokenKind::In }
-        if b0 == 97 as i8 && b1 == 115 as i8 { return TokenKind::As }
+        if b0 == 102 && b1 == 110 { return 7 }
+        if b0 == 105 && b1 == 102 { return 17 }
+        if b0 == 105 && b1 == 110 { return 120 }
+        if b0 == 97 && b1 == 115 { return 27 }
     }
-    // Length 3: let, var, mut, for, pub, use, ref, dyn, box
+    // Length 3: let=8, var=9, for=21, pub=120(ident), use=120(ident)
     if len == 3 {
-        if b0 == 108 as i8 && b1 == 101 as i8 && b2 == 116 as i8 { return TokenKind::Let }
-        if b0 == 118 as i8 && b1 == 97 as i8 && b2 == 114 as i8 { return TokenKind::Var }
-        if b0 == 109 as i8 && b1 == 117 as i8 && b2 == 116 as i8 { return TokenKind::Mut }
-        if b0 == 102 as i8 && b1 == 111 as i8 && b2 == 114 as i8 { return TokenKind::For }
-        if b0 == 112 as i8 && b1 == 117 as i8 && b2 == 98 as i8 { return TokenKind::Pub }
-        if b0 == 117 as i8 && b1 == 115 as i8 && b2 == 101 as i8 { return TokenKind::Use }
+        if b0 == 108 && b1 == 101 && b2 == 116 { return 8 }
+        if b0 == 118 && b1 == 97 && b2 == 114 { return 9 }
+        if b0 == 102 && b1 == 111 && b2 == 114 { return 21 }
+        if b0 == 112 && b1 == 117 && b2 == 98 { return 120 }
+        if b0 == 117 && b1 == 115 && b2 == 101 { return 120 }
     }
-    // Length 4: else, enum, impl, with, self, true, type, loop, move, copy, drop
+    // Length 4: else=18, enum=120, impl=120, with=42, self=120, true=32, type=120, loop=21
     if len == 4 {
-        if b0 == 101 as i8 && b1 == 108 as i8 && b2 == 115 as i8 && b3 == 101 as i8 { return TokenKind::Else }
-        if b0 == 101 as i8 && b1 == 110 as i8 && b2 == 117 as i8 && b3 == 109 as i8 { return TokenKind::Enum }
-        if b0 == 105 as i8 && b1 == 109 as i8 && b2 == 112 as i8 && b3 == 108 as i8 { return TokenKind::Impl }
-        if b0 == 119 as i8 && b1 == 105 as i8 && b2 == 116 as i8 && b3 == 104 as i8 { return TokenKind::With }
-        if b0 == 115 as i8 && b1 == 101 as i8 && b2 == 108 as i8 && b3 == 102 as i8 { return TokenKind::SelfLower }
-        if b0 == 116 as i8 && b1 == 114 as i8 && b2 == 117 as i8 && b3 == 101 as i8 { return TokenKind::True }
-        if b0 == 116 as i8 && b1 == 121 as i8 && b2 == 112 as i8 && b3 == 101 as i8 { return TokenKind::Type }
-        if b0 == 108 as i8 && b1 == 111 as i8 && b2 == 111 as i8 && b3 == 112 as i8 { return TokenKind::Loop }
+        if b0 == 101 && b1 == 108 && b2 == 115 && b3 == 101 { return 18 }
+        if b0 == 101 && b1 == 110 && b2 == 117 && b3 == 109 { return 120 }
+        if b0 == 105 && b1 == 109 && b2 == 112 && b3 == 108 { return 120 }
+        if b0 == 119 && b1 == 105 && b2 == 116 && b3 == 104 { return 42 }
+        if b0 == 115 && b1 == 101 && b2 == 108 && b3 == 102 { return 120 }
+        if b0 == 116 && b1 == 114 && b2 == 117 && b3 == 101 { return 32 }
+        if b0 == 116 && b1 == 121 && b2 == 112 && b3 == 101 { return 120 }
+        if b0 == 108 && b1 == 111 && b2 == 111 && b3 == 112 { return 21 }
+        if b0 == 78 && b1 == 111 && b2 == 110 && b3 == 101 { return 120 }
+        if b0 == 83 && b1 == 111 && b2 == 109 && b3 == 101 { return 120 }
     }
-    // Length 5: while, break, match, false, trait, const
+    // Length 5: while=21, break=23, match=120, false=33, trait=120, const=120
     if len == 5 {
-        if b0 == 119 as i8 && b1 == 104 as i8 && b2 == 105 as i8 && b3 == 108 as i8 && b4 == 101 as i8 { return TokenKind::While }
-        if b0 == 98 as i8 && b1 == 114 as i8 && b2 == 101 as i8 && b3 == 97 as i8 && b4 == 107 as i8 { return TokenKind::Break }
-        if b0 == 109 as i8 && b1 == 97 as i8 && b2 == 116 as i8 && b3 == 99 as i8 && b4 == 104 as i8 { return TokenKind::Match }
-        if b0 == 102 as i8 && b1 == 97 as i8 && b2 == 108 as i8 && b3 == 115 as i8 && b4 == 101 as i8 { return TokenKind::False }
-        if b0 == 116 as i8 && b1 == 114 as i8 && b2 == 97 as i8 && b3 == 105 as i8 && b4 == 116 as i8 { return TokenKind::Trait }
-        if b0 == 99 as i8 && b1 == 111 as i8 && b2 == 110 as i8 && b3 == 115 as i8 && b4 == 116 as i8 { return TokenKind::Const }
+        if b0 == 119 && b1 == 104 && b2 == 105 && b3 == 108 && b4 == 101 { return 21 }
+        if b0 == 98 && b1 == 114 && b2 == 101 && b3 == 97 && b4 == 107 { return 23 }
+        if b0 == 109 && b1 == 97 && b2 == 116 && b3 == 99 && b4 == 104 { return 120 }
+        if b0 == 102 && b1 == 97 && b2 == 108 && b3 == 115 && b4 == 101 { return 33 }
+        if b0 == 116 && b1 == 114 && b2 == 97 && b3 == 105 && b4 == 116 { return 120 }
+        if b0 == 99 && b1 == 111 && b2 == 110 && b3 == 115 && b4 == 116 { return 120 }
     }
-    // Length 6: return, struct, module, extern, static, effect, unsafe
+    // Length 6: return=25, struct=200, module=120, extern=120, static=120, effect=120, unsafe=120, linear=120
     if len == 6 {
-        if b0 == 114 as i8 && b1 == 101 as i8 && b2 == 116 as i8 && b3 == 117 as i8 && b4 == 114 as i8 && b5 == 110 as i8 { return TokenKind::Return }
-        if b0 == 115 as i8 && b1 == 116 as i8 && b2 == 114 as i8 && b3 == 117 as i8 && b4 == 99 as i8 && b5 == 116 as i8 { return TokenKind::Struct }
-        if b0 == 109 as i8 && b1 == 111 as i8 && b2 == 100 as i8 && b3 == 117 as i8 && b4 == 108 as i8 && b5 == 101 as i8 { return TokenKind::Module }
-        if b0 == 101 as i8 && b1 == 120 as i8 && b2 == 116 as i8 && b3 == 101 as i8 && b4 == 114 as i8 && b5 == 110 as i8 { return TokenKind::Extern }
-        if b0 == 115 as i8 && b1 == 116 as i8 && b2 == 97 as i8 && b3 == 116 as i8 && b4 == 105 as i8 && b5 == 99 as i8 { return TokenKind::Static }
-        if b0 == 101 as i8 && b1 == 102 as i8 && b2 == 102 as i8 && b3 == 101 as i8 && b4 == 99 as i8 && b5 == 116 as i8 { return TokenKind::Effect }
-        if b0 == 117 as i8 && b1 == 110 as i8 && b2 == 115 as i8 && b3 == 97 as i8 && b4 == 102 as i8 && b5 == 101 as i8 { return TokenKind::Unsafe }
-        if b0 == 108 as i8 && b1 == 105 as i8 && b2 == 110 as i8 && b3 == 101 as i8 && b4 == 97 as i8 && b5 == 114 as i8 { return TokenKind::Linear }
+        if b0 == 114 && b1 == 101 && b2 == 116 && b3 == 117 && b4 == 114 && b5 == 110 { return 25 }
+        if b0 == 115 && b1 == 116 && b2 == 114 && b3 == 117 && b4 == 99 && b5 == 116 { return 200 }
+        if b0 == 109 && b1 == 111 && b2 == 100 && b3 == 117 && b4 == 108 && b5 == 101 { return 120 }
+        if b0 == 101 && b1 == 120 && b2 == 116 && b3 == 101 && b4 == 114 && b5 == 110 { return 120 }
+        if b0 == 115 && b1 == 116 && b2 == 97 && b3 == 116 && b4 == 105 && b5 == 99 { return 120 }
+        if b0 == 101 && b1 == 102 && b2 == 102 && b3 == 101 && b4 == 99 && b5 == 116 { return 120 }
+        if b0 == 117 && b1 == 110 && b2 == 115 && b3 == 97 && b4 == 102 && b5 == 101 { return 120 }
+        if b0 == 108 && b1 == 105 && b2 == 110 && b3 == 101 && b4 == 97 && b5 == 114 { return 120 }
     }
-    // Length 7: handler, perform, resume, affine
-    if len == 7 {
-        if b0 == 104 as i8 && b1 == 97 as i8 && b2 == 110 as i8 && b3 == 100 as i8 && b4 == 108 as i8 && b5 == 101 as i8 && b6 == 114 as i8 { return TokenKind::Handler }
-    }
-    // Length 8: continue
+    // Length 8: continue=24
     if len == 8 {
-        if b0 == 99 as i8 && b1 == 111 as i8 && b2 == 110 as i8 && b3 == 116 as i8 && b4 == 105 as i8 && b5 == 110 as i8 && b6 == 117 as i8 && b7 == 101 as i8 { return TokenKind::Continue }
+        if b0 == 99 && b1 == 111 && b2 == 110 && b3 == 116 && b4 == 105 && b5 == 110 && b6 == 117 && b7 == 101 { return 24 }
     }
-    TokenKind::Ident
+    120  // Ident
 }
 
 fn ltp_scan_ident() with Mut, Div, Panic {
     let is = LTP_POS
     let il = LTP_LINE
-    let ic = LTP_COL
-    while LTP_POS < LTP_N && is_ident_continue(ltp_byte(LTP_POS)) { LTP_POS = LTP_POS + 1 }
+    while LTP_POS < LTP_N && ltp_is_alnum(ltp_byte(LTP_POS)) { LTP_POS = LTP_POS + 1 }
     let ilen = LTP_POS - is
     LTP_COL = LTP_COL + ilen
     let kind = keyword_lookup_cs(is, ilen)
-    mp_set_token(LTP_TC, kind as i64, is, LTP_POS, il)
-    if kind == TokenKind::Ident {
-        var ti: i64 = 0
-        let tl = if ilen > 255 { 255 } else { ilen }
-        while ti < tl { 0); ti = ti + 1 }
-        0
-    }
+    mp_set_token(LTP_TC, kind, is, LTP_POS, il)
+    MP_INT_VALUE[LTP_TC as usize] = 0
     LTP_TC = LTP_TC + 1
 }
 
 fn ltp_scan_op(ch: i8) -> i64 with Mut, Div, Panic {
     var m: i64 = 0
-    var k = TokenKind::Error
+    var k: i64 = 1  // 1 = Error
     var a: i64 = 1
     let c1 = if LTP_POS + 1 < LTP_N { ltp_byte(LTP_POS + 1) } else { 0 as i8 }
     let c2 = if LTP_POS + 2 < LTP_N { ltp_byte(LTP_POS + 2) } else { 0 as i8 }
-    if m == 0 && ch == 46 && c1 == 46 && c2 == 46 { k = TokenKind::DotDotDot; a = 3; m = 1 }
-    if m == 0 && ch == 46 && c1 == 46 && c2 == 61 { k = TokenKind::DotDotEq; a = 3; m = 1 }
-    if m == 0 && ch == 60 && c1 == 60 && c2 == 61 { k = TokenKind::ShlEq; a = 3; m = 1 }
-    if m == 0 && ch == 62 && c1 == 62 && c2 == 61 { k = TokenKind::ShrEq; a = 3; m = 1 }
-    if m == 0 && ch == 61 && c1 == 61 { k = TokenKind::EqEq; a = 2; m = 1 }
-    if m == 0 && ch == 33 && c1 == 61 { k = TokenKind::BangEq; a = 2; m = 1 }
-    if m == 0 && ch == 60 && c1 == 61 { k = TokenKind::LtEq; a = 2; m = 1 }
-    if m == 0 && ch == 62 && c1 == 61 { k = TokenKind::GtEq; a = 2; m = 1 }
-    if m == 0 && ch == 38 && c1 == 38 { k = TokenKind::AmpAmp; a = 2; m = 1 }
-    if m == 0 && ch == 124 && c1 == 124 { k = TokenKind::PipePipe; a = 2; m = 1 }
-    if m == 0 && ch == 60 && c1 == 60 { k = TokenKind::Shl; a = 2; m = 1 }
-    if m == 0 && ch == 62 && c1 == 62 { k = TokenKind::Shr; a = 2; m = 1 }
-    if m == 0 && ch == 43 && c1 == 61 { k = TokenKind::PlusEq; a = 2; m = 1 }
-    if m == 0 && ch == 45 && c1 == 61 { k = TokenKind::MinusEq; a = 2; m = 1 }
-    if m == 0 && ch == 42 && c1 == 61 { k = TokenKind::StarEq; a = 2; m = 1 }
-    if m == 0 && ch == 47 && c1 == 61 { k = TokenKind::SlashEq; a = 2; m = 1 }
-    if m == 0 && ch == 37 && c1 == 61 { k = TokenKind::PercentEq; a = 2; m = 1 }
-    if m == 0 && ch == 124 && c1 == 61 { k = TokenKind::PipeEq; a = 2; m = 1 }
-    if m == 0 && ch == 94 && c1 == 61 { k = TokenKind::CaretEq; a = 2; m = 1 }
-    if m == 0 && ch == 38 && c1 == 61 { k = TokenKind::AmpEq; a = 2; m = 1 }
-    if m == 0 && ch == 45 && c1 == 62 { k = TokenKind::Arrow; a = 2; m = 1 }
-    if m == 0 && ch == 61 && c1 == 62 { k = TokenKind::FatArrow; a = 2; m = 1 }
-    if m == 0 && ch == 60 && c1 == 45 { k = TokenKind::LeftArrow; a = 2; m = 1 }
-    if m == 0 && ch == 46 && c1 == 46 { k = TokenKind::DotDot; a = 2; m = 1 }
-    if m == 0 && ch == 58 && c1 == 58 { k = TokenKind::ColonColon; a = 2; m = 1 }
-    if m == 0 && ch == 38 && c1 == 33 { k = TokenKind::AmpBang; a = 2; m = 1 }
-    if m == 0 && ch == 43 && c1 == 43 { k = TokenKind::PlusPlus; a = 2; m = 1 }
-    if m == 0 && ch == 43 && c1 == 45 { k = TokenKind::PlusMinus; a = 2; m = 1 }
-    if m == 0 && ch == 43 { k = TokenKind::Plus; m = 1 }
-    if m == 0 && ch == 45 { k = TokenKind::Minus; m = 1 }
-    if m == 0 && ch == 42 { k = TokenKind::Star; m = 1 }
-    if m == 0 && ch == 47 { k = TokenKind::Slash; m = 1 }
-    if m == 0 && ch == 37 { k = TokenKind::Percent; m = 1 }
-    if m == 0 && ch == 61 { k = TokenKind::Eq; m = 1 }
-    if m == 0 && ch == 60 { k = TokenKind::Lt; m = 1 }
-    if m == 0 && ch == 62 { k = TokenKind::Gt; m = 1 }
-    if m == 0 && ch == 33 { k = TokenKind::Bang; m = 1 }
-    if m == 0 && ch == 38 { k = TokenKind::Amp; m = 1 }
-    if m == 0 && ch == 124 { k = TokenKind::Pipe; m = 1 }
-    if m == 0 && ch == 94 { k = TokenKind::Caret; m = 1 }
-    if m == 0 && ch == 126 { k = TokenKind::Tilde; m = 1 }
-    if m == 0 && ch == 63 { k = TokenKind::Question; m = 1 }
-    if m == 0 && ch == 40 { k = TokenKind::LParen; m = 1 }
-    if m == 0 && ch == 41 { k = TokenKind::RParen; m = 1 }
-    if m == 0 && ch == 123 { k = TokenKind::LBrace; m = 1 }
-    if m == 0 && ch == 125 { k = TokenKind::RBrace; m = 1 }
-    if m == 0 && ch == 91 { k = TokenKind::LBracket; m = 1 }
-    if m == 0 && ch == 93 { k = TokenKind::RBracket; m = 1 }
-    if m == 0 && ch == 59 { k = TokenKind::Semi; m = 1 }
-    if m == 0 && ch == 58 { k = TokenKind::Colon; m = 1 }
-    if m == 0 && ch == 44 { k = TokenKind::Comma; m = 1 }
-    if m == 0 && ch == 46 { k = TokenKind::Dot; m = 1 }
-    if m == 0 && ch == 64 { k = TokenKind::At; m = 1 }
-    if m == 0 && ch == 35 { k = TokenKind::Hash; m = 1 }
-    if m == 0 && ch == 95 { k = TokenKind::Underscore; m = 1 }
+    // 3-char operators (must check before 2-char)
+    if m == 0 && ch == 60 && c1 == 60 && c2 == 61 { k = 167; a = 3; m = 1 }   // <<=  ShlEq
+    if m == 0 && ch == 62 && c1 == 62 && c2 == 61 { k = 168; a = 3; m = 1 }   // >>=  ShrEq
+    // 2-char operators
+    if m == 0 && ch == 61 && c1 == 61 { k = 143; a = 2; m = 1 }   // ==   EqEq
+    if m == 0 && ch == 33 && c1 == 61 { k = 144; a = 2; m = 1 }   // !=   BangEq
+    if m == 0 && ch == 60 && c1 == 61 { k = 145; a = 2; m = 1 }   // <=   LtEq
+    if m == 0 && ch == 62 && c1 == 61 { k = 146; a = 2; m = 1 }   // >=   GtEq
+    if m == 0 && ch == 38 && c1 == 38 { k = 147; a = 2; m = 1 }   // &&   AmpAmp
+    if m == 0 && ch == 124 && c1 == 124 { k = 148; a = 2; m = 1 } // ||   PipePipe
+    if m == 0 && ch == 60 && c1 == 60 { k = 149; a = 2; m = 1 }   // <<   Shl
+    if m == 0 && ch == 62 && c1 == 62 { k = 150; a = 2; m = 1 }   // >>   Shr
+    if m == 0 && ch == 43 && c1 == 61 { k = 151; a = 2; m = 1 }   // +=   PlusEq
+    if m == 0 && ch == 45 && c1 == 61 { k = 152; a = 2; m = 1 }   // -=   MinusEq
+    if m == 0 && ch == 42 && c1 == 61 { k = 153; a = 2; m = 1 }   // *=   StarEq
+    if m == 0 && ch == 47 && c1 == 61 { k = 154; a = 2; m = 1 }   // /=   SlashEq
+    if m == 0 && ch == 37 && c1 == 61 { k = 162; a = 2; m = 1 }   // %=   PercentEq
+    if m == 0 && ch == 124 && c1 == 61 { k = 157; a = 2; m = 1 }  // |=   PipeEq
+    if m == 0 && ch == 94 && c1 == 61 { k = 158; a = 2; m = 1 }   // ^=   CaretEq
+    if m == 0 && ch == 38 && c1 == 61 { k = 165; a = 2; m = 1 }   // &=   AmpEq
+    if m == 0 && ch == 45 && c1 == 62 { k = 155; a = 2; m = 1 }   // ->   Arrow
+    if m == 0 && ch == 61 && c1 == 62 { k = 156; a = 2; m = 1 }   // =>   FatArrow
+    if m == 0 && ch == 58 && c1 == 58 { k = 159; a = 2; m = 1 }   // ::   ColonColon
+    if m == 0 && ch == 38 && c1 == 33 { k = 160; a = 2; m = 1 }   // &!   AmpBang
+    if m == 0 && ch == 43 && c1 == 43 { k = 161; a = 2; m = 1 }   // ++   PlusPlus
+    // 1-char operators
+    if m == 0 && ch == 43 { k = 129; m = 1 }   // +   Plus
+    if m == 0 && ch == 45 { k = 130; m = 1 }   // -   Minus
+    if m == 0 && ch == 42 { k = 131; m = 1 }   // *   Star
+    if m == 0 && ch == 47 { k = 132; m = 1 }   // /   Slash
+    if m == 0 && ch == 37 { k = 133; m = 1 }   // %   Percent
+    if m == 0 && ch == 61 { k = 134; m = 1 }   // =   Eq
+    if m == 0 && ch == 60 { k = 135; m = 1 }   // <   Lt
+    if m == 0 && ch == 62 { k = 136; m = 1 }   // >   Gt
+    if m == 0 && ch == 33 { k = 137; m = 1 }   // !   Bang
+    if m == 0 && ch == 38 { k = 138; m = 1 }   // &   Amp
+    if m == 0 && ch == 124 { k = 139; m = 1 }  // |   Pipe
+    if m == 0 && ch == 94 { k = 140; m = 1 }   // ^   Caret
+    if m == 0 && ch == 126 { k = 141; m = 1 }  // ~   Tilde
+    if m == 0 && ch == 63 { k = 142; m = 1 }   // ?   Question
+    if m == 0 && ch == 40 { k = 171; m = 1 }   // (   LParen
+    if m == 0 && ch == 41 { k = 172; m = 1 }   // )   RParen
+    if m == 0 && ch == 123 { k = 173; m = 1 }  // {   LBrace
+    if m == 0 && ch == 125 { k = 174; m = 1 }  // }   RBrace
+    if m == 0 && ch == 91 { k = 175; m = 1 }   // [   LBracket
+    if m == 0 && ch == 93 { k = 176; m = 1 }   // ]   RBracket
+    if m == 0 && ch == 59 { k = 177; m = 1 }   // ;   Semi
+    if m == 0 && ch == 58 { k = 178; m = 1 }   // :   Colon
+    if m == 0 && ch == 44 { k = 179; m = 1 }   // ,   Comma
+    if m == 0 && ch == 46 { k = 180; m = 1 }   // .   Dot
+    if m == 0 && ch == 64 { k = 181; m = 1 }   // @   At
+    if m == 0 && ch == 35 { k = 182; m = 1 }   // #   Hash
+    if m == 0 && ch == 95 { k = 183; m = 1 }   // _   Underscore
     if m == 1 {
-        mp_set_token(LTP_TC, k as i64, LTP_POS, LTP_POS + a, LTP_LINE)
+        mp_set_token(LTP_TC, k, LTP_POS, LTP_POS + a, LTP_LINE)
+        MP_INT_VALUE[LTP_TC as usize] = 0
         LTP_TC = LTP_TC + 1; LTP_POS = LTP_POS + a; LTP_COL = LTP_COL + a
     }
     m
@@ -313,8 +306,8 @@ fn lean_lex_to_parser() -> i64 with Mut, Div, Panic {
             continue
         }
         if ch == 34 { ltp_scan_string(); continue }
-        if is_digit(ch) { ltp_scan_number(ch); continue }
-        if is_ident_start(ch) { ltp_scan_ident(); continue }
+        if ltp_is_digit(ch) { ltp_scan_number(ch); continue }
+        if ltp_is_alpha(ch) { ltp_scan_ident(); continue }
         if ltp_scan_op(ch) == 1 { continue }
         if ch == 39 {
             let cs = LTP_POS; LTP_POS = LTP_POS + 1
@@ -322,12 +315,14 @@ fn lean_lex_to_parser() -> i64 with Mut, Div, Panic {
             if LTP_POS < LTP_N { LTP_POS = LTP_POS + 1 }
             if LTP_POS < LTP_N && ltp_byte(LTP_POS) == 39 { LTP_POS = LTP_POS + 1 }
             LTP_COL = LTP_COL + (LTP_POS - cs)
-            mp_set_token(LTP_TC, 130, cs, LTP_POS, LTP_LINE)
+            mp_set_token(LTP_TC, 124, cs, LTP_POS, LTP_LINE)  // 124 = CharLit
+            MP_INT_VALUE[LTP_TC as usize] = 0
             LTP_TC = LTP_TC + 1; continue
         }
         LTP_POS = LTP_POS + 1; LTP_COL = LTP_COL + 1
     }
-    mp_set_token(LTP_TC, 0, LTP_POS, LTP_POS, LTP_LINE)
+    mp_set_token(LTP_TC, 0, LTP_POS, LTP_POS, LTP_LINE)  // 0 = Eof
+    MP_INT_VALUE[LTP_TC as usize] = 0
     LTP_TC = LTP_TC + 1
     LTP_TC
 }
@@ -456,9 +451,12 @@ fn parser_last_error_count() -> i64 {
 
 fn load_and_parse(path: string) -> i64 with IO, Mut, Div, Panic, Alloc {
     // LEAN_SOURCE already populated by scan_source_globals (same-module global)
-    // Skip lean_lex_to_parser() — it uses TokenKind enum which boot4 miscompiles.
-    // Mini-compiler has its own boot4-safe lexer (mc_lex).
-    print("load_and_parse: skipping to mini-compiler\n")
+    // lean_lex_to_parser() is boot4-safe: writes directly to MP_* scalar arrays,
+    // no TokenKind enum, no Token structs, no struct-typed function arguments.
+    let tc = lean_lex_to_parser()
+    print("load_and_parse: lexed tokens=")
+    print_int(tc)
+    print("\n")
     0
 }
 
@@ -7161,8 +7159,8 @@ fn mini_compile(output_path: string) -> i64 with IO, Mut, Panic, Div, Alloc {
     // Ensure LTP_N is set for ltp_byte() (used by string comparison helpers)
     LTP_N = LEAN_SOURCE_LEN
 
-    // Lex source into MP_* arrays using boot4-safe lexer (no TokenKind enum)
-    MC_TC = mc_lex()
+    // MP_* arrays already populated by lean_lex_to_parser() in load_and_parse()
+    MC_TC = LTP_TC
     print("mini_compile: tokens=")
     print_int(MC_TC)
     print("\n")
