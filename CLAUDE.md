@@ -102,7 +102,11 @@ Components: lexer, parser, ast, check, types, effects, hir, hlir,
 
 ## LLM Offload
 
-**Providers**: Grok (`grok`), GLM-5 (`glm`), MiniMax (`minimax`), DeepSeek (`deepseek`), Ollama (`local`)
+**Providers**: Grok (`grok`), GLM-5 (`glm`), MiniMax M2.7 (`minimax`, Anthropic SDK compatible), DeepSeek (`deepseek`), Ollama (`local`)
+
+**Routing config**: `.claude/offload-routing.md` — provider table, MiniMax SDK setup, routing rules
+
+**MiniMax note**: Supports Anthropic messages API via `ANTHROPIC_BASE_URL=https://api.minimax.io/anthropic`. Models: M2.7 (204K ctx), M2.5, M2.1, M2. Supports tools, streaming, thinking.
 
 ```bash
 llm-offload -t expand -p grok       # outline → prose

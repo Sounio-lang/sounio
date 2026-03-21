@@ -9,6 +9,8 @@ source_of_truth: docs/governance/topic-registry.v1.json#website.docs.getting-sta
 
 # Getting Started with Sounio
 
+> **Other guides**: [Scientists' Quick Start](../QUICK_START_GUIDE.md) | [LLM Quick Start](SOUNIO_QUICK_START.md) | [Conservative contract](MINIMUM_VIABLE_SOUNIO.md)
+
 Welcome to **Sounio**, a programming language and research platform for scientific code that needs explicit uncertainty, provenance, and gate-backed validation.
 
 This guide is intentionally conservative. It reflects the repository state validated on March 9, 2026.

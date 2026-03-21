@@ -6,7 +6,7 @@
 - `docs/LLM_PROGRAMMING_GUIDE.md` (examples and idioms)
 - `compiler/docs/KNOWN_LIMITATIONS.md` (what is not implemented)
 - `docs/MV_CORE_CHECKLIST.md` (definition of “real” core)
-- `spec/LANGUAGE_SPECIFICATION.md` (draft spec; may be ahead of implementation)
+- `docs/spec/LANGUAGE_SPECIFICATION.md` (draft spec; may be ahead of implementation)
 
 ## Canonical “truth” for syntax
 

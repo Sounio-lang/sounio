@@ -15,7 +15,7 @@ Make changes to the type system and effect checker without drifting toward Rust 
 
 - Read `CLAUDE.md` for Sounio-native syntax constraints.
 - Check `compiler/docs/KNOWN_LIMITATIONS.md` before implementing surface syntax the compiler doesn’t support yet.
-- Treat `spec/LANGUAGE_SPECIFICATION.md` as aspirational when it disagrees with the compiler.
+- Treat `docs/spec/LANGUAGE_SPECIFICATION.md` as aspirational when it disagrees with the compiler.
 
 ### 2) Identify what layer you’re changing
 

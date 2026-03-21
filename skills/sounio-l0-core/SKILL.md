@@ -25,6 +25,6 @@ description: "L0 epistemic core of Sounio: language identity, epistemic invarian
 ## References
 - `docs/MV_CORE_CHECKLIST.md`
 - `stdlib/epistemic/SEMANTICS.md`
-- `spec/LANGUAGE_SPECIFICATION.md`
+- `docs/spec/LANGUAGE_SPECIFICATION.md`
 - `.claude/commands/sounio-effects.md`
 - `.claude/commands/sounio-units.md`

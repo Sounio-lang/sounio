@@ -9,6 +9,8 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.quick-start-gu
 
 # Sounio Quick Start Guide
 
+> **Other guides**: [LLM Quick Start](guide/SOUNIO_QUICK_START.md) (for AI assistants) | [General Getting Started](guide/getting-started.md) | [Conservative contract](guide/MINIMUM_VIABLE_SOUNIO.md)
+
 ## For Scientists & Domain Experts (Non-Programmers)
 
 ### The 5-Minute Introduction

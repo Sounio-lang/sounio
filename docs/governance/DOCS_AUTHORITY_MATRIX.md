@@ -65,6 +65,8 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.contributor-guide.benchmark-results | repo_only | docs/contributor-guide/BENCHMARK_RESULTS.md | - | A5 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.contributor-guide.developer-workflow | repo_only | docs/contributor-guide/DEVELOPER_WORKFLOW.md | - | A5 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.contributor-guide.style-guide | repo_only | docs/contributor-guide/STYLE_GUIDE.md | - | A5 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.cybernetics-api-reference | repo_only | docs/CYBERNETICS_API_REFERENCE.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.cybernetics-theory | repo_only | docs/CYBERNETICS_THEORY.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.faq | repo_only | docs/FAQ.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.feature-flags | repo_only | docs/FEATURE_FLAGS.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.features.epistemic-tensor-core | historical | docs/features/EPISTEMIC_TENSOR_CORE.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -75,6 +77,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.features.visual-showcase-integration | repo_only | docs/features/VISUAL_SHOWCASE_INTEGRATION.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.getting-started | repo_only | docs/GETTING_STARTED.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.glossary | repo_only | docs/GLOSSARY.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.gpu.gpu-programming-guide | repo_only | docs/gpu/GPU_PROGRAMMING_GUIDE.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.guide.installation | repo_only | docs/guide/installation.md | - | A5 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.guide.minimum-viable-sounio | repo_only | docs/guide/MINIMUM_VIABLE_SOUNIO.md | - | A5 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.guide.programming | repo_only | docs/guide/programming.md | - | A5 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -153,13 +156,16 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.frontdoor.readme | repo_only | README.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.governance.acceptance-report | repo_only | docs/governance/DOCS_ACCEPTANCE_REPORT.md | - | A0 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.governance.authority-matrix | repo_only | docs/governance/DOCS_AUTHORITY_MATRIX.md | - | A1 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.paper.168-theorem-preprint | repo_only | paper/168-theorem-preprint.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.paper.cpt-psp.outline | repo_only | paper/cpt-psp/outline.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.paper.epistemic-types.benchmarks.external-baselines-summary | repo_only | paper/epistemic-types/benchmarks/external_baselines_summary.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.paper.epistemic-types.benchmarks.l4-gemm-summary | repo_only | paper/epistemic-types/benchmarks/l4_gemm_summary.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.paper.epistemic-types.benchmarks.nvidia-l4-benchmarks | repo_only | paper/epistemic-types/benchmarks/NVIDIA_L4_BENCHMARKS.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.paper.epistemic-types.readme | repo_only | paper/epistemic-types/README.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.paper.kybernetes-second-order | repo_only | paper/kybernetes-second-order.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.paper.oopsla2027.outline | repo_only | paper/oopsla2027/outline.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.paper.paper | repo_only | paper/paper.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.paper.preprint | repo_only | paper/preprint.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.paper.readme | repo_only | paper/README.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.paper.sounio-arxiv-draft | repo_only | paper/sounio_arxiv_draft.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | website.blog.covid-kernel-and-clinical-safety | website_only | - | blog/covid-kernel-and-clinical-safety | A2 | en:present, pt:english_only, el:english_only, zh:english_only, ja:english_only, es:english_only |
@@ -195,7 +201,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | website.docs.language.traits | website_only | - | language/traits | A2 | en:present, pt:present, el:present, zh:present, ja:present, es:present |
 | website.docs.language.variables | website_only | - | language/variables | A2 | en:present, pt:present, el:present, zh:present, ja:present, es:present |
 | website.docs.spec | website_only | - | spec | A3 | en:present, pt:present, el:present, zh:present, ja:present, es:present |
-| website.docs.spec.language-spec | dual | spec/LANGUAGE_SPECIFICATION.md | spec/language-spec | A3 | en:present, pt:present, el:present, zh:present, ja:present, es:present |
+| website.docs.spec.language-spec | dual | docs/spec/LANGUAGE_SPECIFICATION.md | spec/language-spec | A3 | en:present, pt:present, el:present, zh:present, ja:present, es:present |
 | website.docs.stdlib | dual | docs/stdlib/STDLIB_REFERENCE.md | stdlib | A3 | en:present, pt:present, el:present, zh:present, ja:present, es:present |
 | website.docs.stdlib-reference | website_only | - | stdlib-reference | A2 | en:present, pt:present, el:present, zh:present, ja:present, es:present |
 | website.docs.tooling.index | website_only | - | tooling/index | A5 | en:present, pt:present, el:present, zh:present, ja:present, es:present |

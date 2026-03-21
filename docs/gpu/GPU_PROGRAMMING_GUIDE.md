@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.gpu.gpu-programming-guide
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.gpu.gpu-programming-guide
+-->
+
 # GPU Programming Guide
 
 Sounio GPU computing is a first-class part of the language. Kernels are declared with the `kernel fn` syntax, type-checked with the same bidirectional inference as the rest of the language, and lowered through a dedicated GPU IR pipeline (HLIR → GpuKernelIr) to three backends: PTX (CUDA), Metal (MSL), and SPIR-V (Vulkan/OpenCL). Epistemic uncertainty — `Knowledge<T>` and GUM-compliant shadow registers — propagates transparently through kernel execution.

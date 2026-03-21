@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.cybernetics-theory
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.cybernetics-theory
+-->
+
 # Second-Order Cybernetics in Sounio
 
 Sounio is the first programming language to formalize second-order cybernetics

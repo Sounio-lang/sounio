@@ -2,6 +2,95 @@
 
 All notable changes to the Sounio programming language and compiler are documented in this file. Sounio follows semantic versioning and this changelog is maintained for each release.
 
+## [1.0.0-beta.6] - 2026-03-21
+
+### Release — Enums, Cybernetics, Connectomics, and 168-Theorem
+
+768 commits since beta.5. Major language features (enum/match), two new stdlib domains (cybernetics, computational psychiatry), connectome pipeline for Paper 4, and submission of the 168-theorem paper.
+
+### Added
+
+**Language Features**
+- Enum declarations, `Enum::Variant` syntax, and match expressions in boot4, lean driver, and self-hosted codegen
+- First-class function references (`let f = square`): `IrLoadFnRef`/`IrCallIndirect` ABI, lambda-lifting in lean emitter (Sprint 228)
+- `Observe` effect (ID 13) — von Foerster's observer-inclusion principle
+- f64 float literals with integer-only IEEE 754 conversion in bootstrap
+- Reference types: `&expr` (address-of) and `*expr` (dereference) in bootstrap
+- Struct declarations, field read/write, 6-parameter ABI in bootstrap
+- Frame size increased to 4096 in bootstrap
+
+**Standard Library**
+- Second-order cybernetics: 9-module integration (distinction, eigenform, observer, variety, bateson, languaging, autopoiesis) with native eigenform builtin
+- Computational psychiatry: 41 pub fn, 1,507 lines — double bind, schismogenesis, logical types, homeostatic loops, diagnostic eigenform, epistemic assessment
+- Connectome data ingestion pipeline for Paper 4 (ABIDE-I, ADHD-200 targets)
+- Neuroscience modules: `stdlib/neuro/{ct,eeg,fmri,meg}.sio`
+- Functional calculus: higher-order numerical computing (Sprint 230)
+- Epistemic stdlib expansion: 40+ modules across 5 rounds (Sprint 230)
+- Epistemic inference engine: PK fitting + NN backward pass (Sprint 226)
+- NativeVec: growable slab-backed arrays for native ELF
+- Profiler: synchronous wall-clock profiler (redesign)
+- Stdlib test coverage sprints 231-237: crypto, causal inference, stochastic SDEs, graph algorithms, complex arithmetic, DP, fairness, utilities, search, theorem, constants, dynamical systems, units, genomics, science, msgpack, iter, logic, ontology/connectivity, gpu, medlang, analysis, interop, e2e integration
+
+**Optimizer (Sprints 223-247)**
+- GUM-guided epistemic e-graph saturation (Sprint 225 Phases 2+3): T61-T70 + T009-T018 all PASS
+- 25 new Boolean/algebraic rewrite blocks (EG-FD): T1004-T1147
+  - Blocks EG-EJ: XNOR/complement-AND/OR identities
+  - Blocks EK-EN: double-complement, add-sub symmetric collapse
+  - Blocks EO-ER: complement-AND/XOR-AND patterns
+  - Blocks ES-EV: AND-XOR add-to-OR, cross-sub collapse
+  - Blocks EW-EZ: complement XOR-to-copy, OR-complement-AND XOR
+  - Blocks FA-FD: OR-XOR subsumption, AND-XOR annihilation, NOT-XOR recovery, XOR decomposition
+- All sprint gates: 11/18 PASS per gate, FAIL=0 (remaining NOT_RUN = JIT OOM, known limitation)
+
+**GPU**
+- Epistemic SPIR-V: GUM uncertainty for Vulkan kernels
+- Metal kernel launch support
+- Jacobian-guided GUM: AD-computed sensitivity coefficients for exact uncertainty propagation
+- Epistemic GPU pipeline showcase (Sprint 239)
+- `tc_propagate_tiled` tiled tensor core propagation
+
+**Native Compilation**
+- `print_f64` builtin: real digit extraction for native ELF binaries
+- Native epistemic PK binary: bare-metal science (Sprint 233)
+- Closure lambda-lifting in lean emitter (Sprint 234)
+- Formal closure type theory specification (Sprint 232)
+
+**Bootstrap**
+- `mini_native.sio` achieves self-hosting milestone
+- boot4: generics `>>` disambiguation, impl block parsing, expanded node limits
+
+**Documentation**
+- Second-order cybernetics: theory guide + API reference
+- Release policy document (`docs/RELEASE_POLICY.md`)
+
+**Papers**
+- 168-theorem paper submitted to Advances in Applied Clifford Algebras (2026-03-21)
+- Kybernetes preprint: Second-Order Cybernetics as Executable Theory
+- 6 advanced clinical computational psychiatry scenarios
+
+### Changed
+
+- Cybernetic modules rewritten from stubs to real implementations (deep rewrite of 7 modules)
+- Cybernetic composition layer: 9 theories unified into 1 recursive structure
+- All peer review revisions addressed (R1, R2, R3)
+
+### Fixed
+
+- ORCID corrected across all papers: `0000-0002-8596-5097` → `0009-0001-8671-8878`
+- 5 fabricated/incorrect references removed from GPU preprint
+- Struct field access direction + stmt/expr disambiguation in compiler
+- f64 struct field type propagation in mini-compiler
+- Import resolution: local buffer for `str_from_bytes`
+- `sqrt`/`div` domain validity and entropy normalization in GPU
+- `print_f64` bytecode bugs (Sprint 235)
+- 4th/5th parameter passing + array address return in bootstrap
+- boot4 `SRET` guard for oversized struct returns
+
+### Notes
+
+- The checked-in JIT artifact reports `souc 1.0.0-beta.4`. The binary is not rebuilt for every changelog entry. See `docs/RELEASE_POLICY.md` for artifact policy.
+- JIT memory explosion (Cranelift OOM at 14-35GB RSS) remains unfixable from Sounio source. Affects `--native-compile` on self-hosted compiler. `--check` and `--ir-dump` work fine.
+
 ## [1.0.0-beta.5] - 2026-03-04
 
 ### Release — Darwin Atlas Real Ingestion and Strict Parity

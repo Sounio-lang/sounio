@@ -56,7 +56,7 @@ Start with these current-state maps before diving into older deep reports:
 
 ## Specification
 
-- [Language Specification](../spec/LANGUAGE_SPECIFICATION.md)
+- [Language Specification](spec/LANGUAGE_SPECIFICATION.md)
 
 ## Important reading rule
 

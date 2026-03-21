@@ -60,7 +60,7 @@ export SOUNIO_STDLIB_PATH="$(pwd)/stdlib"
 
 Expected results:
 
-- `--version` reports `souc 1.0.0-beta.4` on the checked-in JIT artifact in this repo snapshot
+- `--version` reports `souc 1.0.0-beta.4` on the checked-in JIT artifact (source version is 1.0.0-beta.6; binary is not rebuilt for every changelog entry)
 - `examples/hello.sio`, `covid_2020_kernel.sio`, and `vancomycin_propagation.sio` pass `check`
 - `vancomycin_low_conf.sio` fails with the expected confidence-bound type error
 

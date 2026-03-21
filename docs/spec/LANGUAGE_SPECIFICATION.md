@@ -2,20 +2,20 @@
 topic_id: website.docs.spec.language-spec
 authority: dual
 audience: users
-last_validated: 2026-03-07
-validated_by: A3
+last_validated: 2026-03-21
+validated_by: A1
 source_of_truth: docs/governance/topic-registry.v1.json#website.docs.spec.language-spec
 -->
 
 # The Sounio Programming Language
 
-## Language Specification v1.0.0
+## Language Specification v1.0.0-beta.6
 
 **Author**: Demetrios Chiuratto Agourakis
 **Status**: Release Candidate
-**Last Updated**: 2026-01-29
+**Last Updated**: 2026-03-21
 
-> Note: This spec is aspirational in places. For the compiler’s current behavior and supported syntax, see `compiler/docs/KNOWN_LIMITATIONS.md`, `docs/MV_CORE_CHECKLIST.md`, and the runnable fixtures under `tests/`.
+> Note: Lambda/closure literals (Section 4.7) are specified but not yet implemented — use named function references instead (`let f = square`). All other features in this spec are implemented and tested. For the compiler’s current behavior and supported syntax, see `docs/compiler/KNOWN_LIMITATIONS.md`, `docs/MV_CORE_CHECKLIST.md`, and the runnable fixtures under `tests/`.
 
 ---
 
@@ -681,10 +681,10 @@ let max = if a > b { a } else { b }
 
 ```sio
 let description = match value {
-    0 -> "zero",
-    1 -> "one",
-    n if n < 0 -> "negative",
-    _ -> "other",
+    0 => "zero",
+    1 => "one",
+    n if n < 0 => "negative",
+    _ => "other",
 }
 ```
 
@@ -695,9 +695,31 @@ let result = add(1, 2)
 let chained = obj.method().another()
 ```
 
-### 4.7 Lambda Expressions
+### 4.7 Lambda Expressions and Function References
+
+> **Implementation status**: Lambda/closure literals (`|x| x + 1`) are specified but **not yet implemented**. The compiler supports named function references as an alternative. See `docs/compiler/KNOWN_LIMITATIONS.md`.
+
+#### 4.7.1 Named Function References (Implemented)
 
 ```sio
+fn square(x: i64) -> i64 { x * x }
+
+fn apply(f: fn(i64) -> i64, val: i64) -> i64 {
+    f(val)
+}
+
+fn main() -> i64 {
+    let f = square         // f is a function reference
+    apply(f, 5)            // returns 25
+}
+```
+
+Function references support higher-order programming: functions can be stored in variables, passed as arguments, and called indirectly.
+
+#### 4.7.2 Lambda Expressions (Planned, Not Yet Implemented)
+
+```sio
+// These are SPECIFIED but do NOT compile yet:
 let add = |a: int, b: int| -> int { a + b }
 let double = |x| x * 2          // Type inferred
 ```

@@ -9,6 +9,8 @@ source_of_truth: docs/governance/topic-registry.v1.json#website.docs.stdlib
 
 # Sounio STDLIB Reference (Executable Snapshot)
 
+> **Looking for function signatures?** See [STDLIB_API_REFERENCE.md](STDLIB_API_REFERENCE.md) — auto-generated reference with 1,900+ pub fn organized by module.
+
 This document tracks the **current executable STDLIB contract** for reliability work.
 Values below are sourced from machine-generated artifacts, not aspirational specs.
 
