@@ -5296,6 +5296,7 @@ var MC_SF_NAME_LEN: [i64; 512] = [0; 512]    // length of field name
 var MC_SF_OFFSET: [i64; 512] = [0; 512]      // slot offset of field within struct
 var MC_SF_FLAT_SIZE: [i64; 512] = [0; 512]   // flat size of field (1 for scalars, N for nested structs)
 var MC_SF_TYPE_STRUCT: [i64; 512] = [0; 512]  // struct index if field is a struct type, else -1 (set at scan time)
+var MC_SF_IS_F64: [i64; 512] = [0; 512]      // 1 if field type is f64, 0 otherwise
 var MC_SF_TOTAL: i64 = 0
 
 // --- Local variable type tracking (parallel to MC_LOC_*) ---
@@ -6298,6 +6299,7 @@ fn mc_parse_expr_prec(min_prec: i64) with Mut, Panic, Div {
         // Brute-force: find field across all structs
         var dot_off: i64 = -1
         var dot_flat: i64 = 1
+        var dot_is_f64: i64 = 0
         var dsi: i64 = 0
         while dsi < MC_ST_COUNT {
             let dfi = mc_find_struct_field(dsi, fs, fl)
@@ -6305,6 +6307,7 @@ fn mc_parse_expr_prec(min_prec: i64) with Mut, Panic, Div {
                 let dfb = MC_ST_FIELD_BASE[dsi as usize]
                 dot_off = MC_SF_OFFSET[(dfb + dfi) as usize]
                 dot_flat = MC_SF_FLAT_SIZE[(dfb + dfi) as usize]
+                dot_is_f64 = MC_SF_IS_F64[(dfb + dfi) as usize]
                 dsi = MC_ST_COUNT
             }
             dsi = dsi + 1
@@ -6316,6 +6319,12 @@ fn mc_parse_expr_prec(min_prec: i64) with Mut, Panic, Div {
                 } else {
                     we(0x48); we(0x8b); we(0x80)  // mov rax, [rax + disp32]
                     we32(dot_off * 8)
+                }
+                // Propagate f64 type from struct field
+                if dot_is_f64 == 1 {
+                    MC_EXPR_IS_F64 = 1
+                    // rax has the IEEE 754 bit pattern; move to xmm0
+                    we(0x66); we(0x48); we(0x0f); we(0x6e); we(0xc0)  // movq xmm0, rax
                 }
             } else {
                 if dot_off > 0 {
@@ -6859,8 +6868,32 @@ fn mc_scan_structs() with Mut, Panic, Div {
                         mc_skip_type()
                     }
                 }
+                // Check if field type is f64
+                var field_is_f64: i64 = 0
+                if field_struct < 0 && field_flat == 1 {
+                    // Re-check type name for "f64"
+                    let fts = MC_SF_NAME_START[fi as usize]  // reuse for type check
+                    // Actually check the type token we just parsed
+                    // The type was at ts,tl — check if it's "f64" (102, 54, 52)
+                    if mc_peek() == MC_TK_COMMA() || mc_peek() == MC_TK_RBRACE() {
+                        // Type already consumed; check ts/tl from above
+                        // Note: ts/tl are out of scope here, so check via flat_off tracking
+                        // Instead, peek back at the source bytes at the type token position
+                        let ft_pos = MC_POS - 1
+                        if ft_pos >= 0 && ft_pos < MC_TC {
+                            let fts2 = MP_START[ft_pos as usize]
+                            let fte2 = MP_END[ft_pos as usize]
+                            if fte2 - fts2 == 3 {
+                                if ltp_byte(fts2) == 102 && ltp_byte(fts2 + 1) == 54 && ltp_byte(fts2 + 2) == 52 {
+                                    field_is_f64 = 1
+                                }
+                            }
+                        }
+                    }
+                }
                 MC_SF_FLAT_SIZE[fi as usize] = field_flat
                 MC_SF_TYPE_STRUCT[fi as usize] = field_struct
+                MC_SF_IS_F64[fi as usize] = field_is_f64
                 MC_SF_TOTAL = MC_SF_TOTAL + 1
                 flat_off = flat_off + field_flat
                 fc = fc + 1
