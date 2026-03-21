@@ -1,0 +1,1291 @@
+// lean_single.sio — Single-file Sounio→native ELF compiler
+// Supports: multi-function, global arrays, array indexing, recursion,
+//           var/let, while, if/else/else-if, print/print_int, return,
+//           arithmetic (+,-,*,/,%), comparisons, &&, ||
+// Compiled by: boot4_clean.elf (single-file mode)
+// Usage: boot4_clean.elf lean_single.sio lean_single.elf
+//        lean_single.elf input.sio output.elf
+
+// ============================================================================
+// GLOBALS
+// ============================================================================
+var BSS_PAD_1: i64 = 0
+var BSS_PAD_2: i64 = 0
+var SRC: [i8; 1048576] = [0; 1048576]
+var SRC_LEN: i64 = 0
+// Current token: [kind, start, end, ival]
+var TOKENS: [i64; 4] = [0; 4]
+// Output code buffer
+var CODE: [i8; 1048576] = [0; 1048576]
+var CODE_LEN: i64 = 0
+// Local variable table — max 32 vars per function
+var LV_NS: [i64; 32] = [0; 32]
+var LV_NL: [i64; 32] = [0; 32]
+var LV_SLOT: [i64; 32] = [0; 32]
+var LV_COUNT: i64 = 0
+var NEXT_SLOT: i64 = 1
+// Function table — max 128 functions
+var FN_NS: [i64; 128] = [0; 128]
+var FN_NL: [i64; 128] = [0; 128]
+var FN_NPARAMS: [i64; 128] = [0; 128]
+var FN_PNAMES: [i64; 512] = [0; 512]
+var FN_PLENS: [i64; 512] = [0; 512]
+var FN_LEXPOS: [i64; 128] = [0; 128]
+var FN_CODEOFF: [i64; 128] = [0; 128]
+var FN_COUNT: i64 = 0
+// Global array table — max 64 arrays
+var GA_NS: [i64; 64] = [0; 64]
+var GA_NL: [i64; 64] = [0; 64]
+var GA_SIZE: [i64; 64] = [0; 64]
+var GA_BSSOFF: [i64; 64] = [0; 64]
+var GA_STRIDE: [i64; 64] = [0; 64]
+var GA_COUNT: i64 = 0
+var BSS_NEXT: i64 = 0
+// Call fixup table — max 4096 call sites
+var CALL_SITE: [i64; 4096] = [0; 4096]
+var CALL_TARGET: [i64; 4096] = [0; 4096]
+var CALL_COUNT: i64 = 0
+// Streaming lexer position
+var LEX_POS: i64 = 0
+// Loop start stack for 'continue'
+var LOOP_STACK: [i64; 16] = [0; 16]
+var LOOP_DEPTH: i64 = 0
+
+// ============================================================================
+// TOKEN KINDS (functions — boot4 doesn't init non-zero globals)
+// ============================================================================
+fn TK_EOF() -> i64 { 0 }
+fn TK_FN() -> i64 { 1 }
+fn TK_IDENT() -> i64 { 2 }
+fn TK_LPAREN() -> i64 { 3 }
+fn TK_RPAREN() -> i64 { 4 }
+fn TK_ARROW() -> i64 { 5 }
+fn TK_LBRACE() -> i64 { 6 }
+fn TK_RBRACE() -> i64 { 7 }
+fn TK_SEMI() -> i64 { 8 }
+fn TK_INT() -> i64 { 9 }
+fn TK_RETURN() -> i64 { 10 }
+fn TK_COLON() -> i64 { 11 }
+fn TK_COMMA() -> i64 { 12 }
+fn TK_PRINT() -> i64 { 13 }
+fn TK_STRING() -> i64 { 14 }
+fn TK_LET() -> i64 { 15 }
+fn TK_VAR() -> i64 { 16 }
+fn TK_EQ() -> i64 { 17 }
+fn TK_PLUS() -> i64 { 18 }
+fn TK_MINUS() -> i64 { 19 }
+fn TK_STAR() -> i64 { 20 }
+fn TK_IF() -> i64 { 21 }
+fn TK_ELSE() -> i64 { 22 }
+fn TK_WHILE() -> i64 { 23 }
+fn TK_LT() -> i64 { 24 }
+fn TK_GT() -> i64 { 25 }
+fn TK_EQEQ() -> i64 { 26 }
+fn TK_BANGEQ() -> i64 { 27 }
+fn TK_LTEQ() -> i64 { 28 }
+fn TK_GTEQ() -> i64 { 29 }
+fn TK_PRINT_INT() -> i64 { 30 }
+fn TK_SLASH() -> i64 { 31 }
+fn TK_LBRACKET() -> i64 { 32 }
+fn TK_RBRACKET() -> i64 { 33 }
+fn TK_PERCENT() -> i64 { 34 }
+fn TK_AMPAMP() -> i64 { 35 }
+fn TK_PIPEPIPE() -> i64 { 36 }
+fn TK_SHR() -> i64 { 37 }
+fn TK_SHL() -> i64 { 38 }
+fn TK_AMP() -> i64 { 39 }
+fn TK_PIPE() -> i64 { 40 }
+fn TK_AS() -> i64 { 41 }
+fn TK_CONTINUE() -> i64 { 42 }
+
+// ============================================================================
+// HELPERS
+// ============================================================================
+fn src_byte(i: i64) -> i64 with Mut, Panic {
+    if i >= 0 && i < SRC_LEN { (SRC[i as usize] as i64) & 0xFF } else { 0 }
+}
+fn ce(b: i64) with Mut, Panic {
+    CODE[CODE_LEN as usize] = b as i8
+    CODE_LEN = CODE_LEN + 1
+}
+fn ce32(v: i64) with Mut, Panic {
+    ce(v & 0xFF); ce((v >> 8) & 0xFF); ce((v >> 16) & 0xFF); ce((v >> 24) & 0xFF)
+}
+fn ce64(v: i64) with Mut, Panic {
+    ce32(v & 0xFFFFFFFF); ce32((v >> 32) & 0xFFFFFFFF)
+}
+fn is_ws(c: i64) -> i64 { if c == 32 || c == 9 || c == 13 || c == 10 { 1 } else { 0 } }
+fn is_digit(c: i64) -> i64 { if c >= 48 && c <= 57 { 1 } else { 0 } }
+fn is_alpha(c: i64) -> i64 { if (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || c == 95 { 1 } else { 0 } }
+fn is_alnum(c: i64) -> i64 { if is_alpha(c) == 1 || is_digit(c) == 1 { 1 } else { 0 } }
+fn is_hex(c: i64) -> i64 { if (c >= 48 && c <= 57) || (c >= 97 && c <= 102) || (c >= 65 && c <= 70) { 1 } else { 0 } }
+fn hex_val(c: i64) -> i64 { if c >= 97 { return c - 87 }; if c >= 65 { return c - 55 }; return c - 48 }
+
+// ============================================================================
+// STREAMING LEXER — one token at a time into TOKENS[0..3]
+// ============================================================================
+fn lex_next() with Mut, Panic, Div {
+    while LEX_POS < SRC_LEN {
+        let c = src_byte(LEX_POS)
+        if is_ws(c) == 1 { LEX_POS = LEX_POS + 1; continue }
+        // Line comment
+        if c == 47 && LEX_POS + 1 < SRC_LEN && src_byte(LEX_POS+1) == 47 {
+            LEX_POS = LEX_POS + 2
+            while LEX_POS < SRC_LEN && src_byte(LEX_POS) != 10 { LEX_POS = LEX_POS + 1 }
+            continue
+        }
+        // String
+        if c == 34 {
+            let ss = LEX_POS; LEX_POS = LEX_POS + 1
+            while LEX_POS < SRC_LEN && src_byte(LEX_POS) != 34 { if src_byte(LEX_POS) == 92 { LEX_POS = LEX_POS + 1 }; LEX_POS = LEX_POS + 1 }
+            if LEX_POS < SRC_LEN { LEX_POS = LEX_POS + 1 }
+            TOKENS[0] = TK_STRING(); TOKENS[1] = ss + 1; TOKENS[2] = LEX_POS - 1; TOKENS[3] = 0; return
+        }
+        // Hex number: 0x...
+        if c == 48 && LEX_POS + 1 < SRC_LEN && (src_byte(LEX_POS+1) == 120 || src_byte(LEX_POS+1) == 88) {
+            let ns = LEX_POS; LEX_POS = LEX_POS + 2; var hval: i64 = 0
+            while LEX_POS < SRC_LEN && is_hex(src_byte(LEX_POS)) == 1 { hval = hval * 16 + hex_val(src_byte(LEX_POS)); LEX_POS = LEX_POS + 1 }
+            TOKENS[0] = TK_INT(); TOKENS[1] = ns; TOKENS[2] = LEX_POS; TOKENS[3] = hval; return
+        }
+        // Decimal number
+        if is_digit(c) == 1 {
+            let dns = LEX_POS; var val: i64 = 0
+            while LEX_POS < SRC_LEN && is_digit(src_byte(LEX_POS)) == 1 { val = val * 10 + (src_byte(LEX_POS) - 48); LEX_POS = LEX_POS + 1 }
+            TOKENS[0] = TK_INT(); TOKENS[1] = dns; TOKENS[2] = LEX_POS; TOKENS[3] = val; return
+        }
+        // Ident/keyword
+        if is_alpha(c) == 1 {
+            let is2 = LEX_POS
+            while LEX_POS < SRC_LEN && is_alnum(src_byte(LEX_POS)) == 1 { LEX_POS = LEX_POS + 1 }
+            let il = LEX_POS - is2
+            var kind: i64 = TK_IDENT()
+            if il == 2 && src_byte(is2) == 102 && src_byte(is2+1) == 110 { kind = TK_FN() }
+            if il == 2 && src_byte(is2) == 105 && src_byte(is2+1) == 102 { kind = TK_IF() }
+            if il == 3 && src_byte(is2) == 108 && src_byte(is2+1) == 101 && src_byte(is2+2) == 116 { kind = TK_LET() }
+            if il == 3 && src_byte(is2) == 118 && src_byte(is2+1) == 97 && src_byte(is2+2) == 114 { kind = TK_VAR() }
+            if il == 4 && src_byte(is2) == 101 && src_byte(is2+1) == 108 && src_byte(is2+2) == 115 && src_byte(is2+3) == 101 { kind = TK_ELSE() }
+            if il == 5 && src_byte(is2) == 112 && src_byte(is2+1) == 114 && src_byte(is2+2) == 105 && src_byte(is2+3) == 110 { if src_byte(is2+4) == 116 { kind = TK_PRINT() } }
+            if il == 5 && src_byte(is2) == 119 && src_byte(is2+1) == 104 && src_byte(is2+2) == 105 && src_byte(is2+3) == 108 { if src_byte(is2+4) == 101 { kind = TK_WHILE() } }
+            if il == 6 && src_byte(is2) == 114 && src_byte(is2+1) == 101 && src_byte(is2+2) == 116 && src_byte(is2+3) == 117 { if src_byte(is2+4) == 114 && src_byte(is2+5) == 110 { kind = TK_RETURN() } }
+            if il == 2 && src_byte(is2) == 97 && src_byte(is2+1) == 115 { kind = TK_AS() }
+            if il == 8 && src_byte(is2) == 99 && src_byte(is2+1) == 111 && src_byte(is2+2) == 110 && src_byte(is2+3) == 116 { if src_byte(is2+4) == 105 && src_byte(is2+5) == 110 && src_byte(is2+6) == 117 && src_byte(is2+7) == 101 { kind = TK_CONTINUE() } }
+            if il == 9 && src_byte(is2) == 112 && src_byte(is2+1) == 114 && src_byte(is2+2) == 105 && src_byte(is2+3) == 110 { if src_byte(is2+4) == 116 && src_byte(is2+5) == 95 && src_byte(is2+6) == 105 && src_byte(is2+7) == 110 { if src_byte(is2+8) == 116 { kind = TK_PRINT_INT() } } }
+            TOKENS[0] = kind; TOKENS[1] = is2; TOKENS[2] = LEX_POS; TOKENS[3] = 0; return
+        }
+        // 2-char ops
+        var m2: i64 = 0
+        let c1 = if LEX_POS+1 < SRC_LEN { src_byte(LEX_POS+1) } else { 0 }
+        if m2==0 && c==45 && c1==62 { TOKENS[0]=TK_ARROW(); TOKENS[1]=LEX_POS; TOKENS[2]=LEX_POS+2; LEX_POS=LEX_POS+2; m2=1 }
+        if m2==0 && c==61 && c1==61 { TOKENS[0]=TK_EQEQ(); TOKENS[1]=LEX_POS; TOKENS[2]=LEX_POS+2; LEX_POS=LEX_POS+2; m2=1 }
+        if m2==0 && c==33 && c1==61 { TOKENS[0]=TK_BANGEQ(); TOKENS[1]=LEX_POS; TOKENS[2]=LEX_POS+2; LEX_POS=LEX_POS+2; m2=1 }
+        if m2==0 && c==60 && c1==61 { TOKENS[0]=TK_LTEQ(); TOKENS[1]=LEX_POS; TOKENS[2]=LEX_POS+2; LEX_POS=LEX_POS+2; m2=1 }
+        if m2==0 && c==62 && c1==61 { TOKENS[0]=TK_GTEQ(); TOKENS[1]=LEX_POS; TOKENS[2]=LEX_POS+2; LEX_POS=LEX_POS+2; m2=1 }
+        if m2==0 && c==62 && c1==62 { TOKENS[0]=TK_SHR(); TOKENS[1]=LEX_POS; TOKENS[2]=LEX_POS+2; LEX_POS=LEX_POS+2; m2=1 }
+        if m2==0 && c==60 && c1==60 { TOKENS[0]=TK_SHL(); TOKENS[1]=LEX_POS; TOKENS[2]=LEX_POS+2; LEX_POS=LEX_POS+2; m2=1 }
+        if m2==0 && c==38 && c1==38 { TOKENS[0]=TK_AMPAMP(); TOKENS[1]=LEX_POS; TOKENS[2]=LEX_POS+2; LEX_POS=LEX_POS+2; m2=1 }
+        if m2==0 && c==124 && c1==124 { TOKENS[0]=TK_PIPEPIPE(); TOKENS[1]=LEX_POS; TOKENS[2]=LEX_POS+2; LEX_POS=LEX_POS+2; m2=1 }
+        if m2==1 { TOKENS[3]=0; return }
+        // 1-char ops
+        var k1: i64 = -1
+        if c==40 { k1=TK_LPAREN() }
+        if c==41 { k1=TK_RPAREN() }
+        if c==123 { k1=TK_LBRACE() }
+        if c==125 { k1=TK_RBRACE() }
+        if c==59 { k1=TK_SEMI() }
+        if c==58 { k1=TK_COLON() }
+        if c==44 { k1=TK_COMMA() }
+        if c==61 { k1=TK_EQ() }
+        if c==43 { k1=TK_PLUS() }
+        if c==45 { k1=TK_MINUS() }
+        if c==42 { k1=TK_STAR() }
+        if c==47 { k1=TK_SLASH() }
+        if c==60 { k1=TK_LT() }
+        if c==62 { k1=TK_GT() }
+        if c==91 { k1=TK_LBRACKET() }
+        if c==93 { k1=TK_RBRACKET() }
+        if c==37 { k1=TK_PERCENT() }
+        if c==38 { k1=TK_AMP() }
+        if c==124 { k1=TK_PIPE() }
+        if k1 >= 0 { TOKENS[0]=k1; TOKENS[1]=LEX_POS; TOKENS[2]=LEX_POS+1; TOKENS[3]=0; LEX_POS=LEX_POS+1; return }
+        LEX_POS = LEX_POS + 1
+    }
+    TOKENS[0] = TK_EOF(); TOKENS[1] = LEX_POS; TOKENS[2] = LEX_POS; TOKENS[3] = 0
+}
+
+// ============================================================================
+// TOKEN ACCESSORS
+// ============================================================================
+fn ctk() -> i64 with Mut, Panic { TOKENS[0] }
+fn ctk_start() -> i64 with Mut, Panic { TOKENS[1] }
+fn ctk_end() -> i64 with Mut, Panic { TOKENS[2] }
+fn ctk_ival() -> i64 with Mut, Panic { TOKENS[3] }
+fn eat() with Mut, Panic, Div { lex_next() }
+fn eat_expect(k: i64) with Mut, Panic, Div { if ctk() == k { lex_next() } }
+
+// ============================================================================
+// LOOKUP HELPERS
+// ============================================================================
+fn find_var(ns: i64, nl: i64) -> i64 with Mut, Panic {
+    var i: i64 = 0
+    while i < LV_COUNT {
+        if LV_NL[i as usize] == nl {
+            var eq: i64 = 1
+            var j: i64 = 0
+            while j < nl {
+                if src_byte(LV_NS[i as usize] + j) != src_byte(ns + j) { eq = 0 }
+                j = j + 1
+            }
+            if eq == 1 { return LV_SLOT[i as usize] }
+        }
+        i = i + 1
+    }
+    -1
+}
+
+fn find_fn(ns: i64, nl: i64) -> i64 with Mut, Panic {
+    var i: i64 = 0
+    while i < FN_COUNT {
+        if FN_NL[i as usize] == nl {
+            var eq: i64 = 1
+            var j: i64 = 0
+            while j < nl {
+                if src_byte(FN_NS[i as usize] + j) != src_byte(ns + j) { eq = 0 }
+                j = j + 1
+            }
+            if eq == 1 { return i }
+        }
+        i = i + 1
+    }
+    -1
+}
+
+fn ga_addr(gi: i64) -> i64 with Mut, Panic {
+    var base: i64 = 0x600000
+    var off: i64 = GA_BSSOFF[gi as usize]
+    return base + off
+}
+
+fn find_global_arr(ns: i64, nl: i64) -> i64 with Mut, Panic {
+    var i: i64 = 0
+    while i < GA_COUNT {
+        if GA_NL[i as usize] == nl {
+            var eq: i64 = 1
+            var j: i64 = 0
+            while j < nl {
+                if src_byte(GA_NS[i as usize] + j) != src_byte(ns + j) { eq = 0 }
+                j = j + 1
+            }
+            if eq == 1 { return i }
+        }
+        i = i + 1
+    }
+    -1
+}
+
+// ============================================================================
+// PASS 1: SCAN FUNCTIONS AND GLOBAL ARRAYS
+// ============================================================================
+fn scan_fns() with Mut, Panic, Div {
+    LEX_POS = 0
+    FN_COUNT = 0
+    GA_COUNT = 0
+    BSS_NEXT = 1048584  // reserve 8 (saved_rsp) + 1048576 (read_buf)
+    lex_next()
+    while ctk() != TK_EOF() {
+        if ctk() == TK_FN() {
+            eat()
+            let ns = ctk_start()
+            let nl = ctk_end() - ctk_start()
+            let fi = FN_COUNT
+            FN_NS[fi as usize] = ns
+            FN_NL[fi as usize] = nl
+            eat()  // name
+            eat_expect(TK_LPAREN())
+            // Parse params
+            var pc: i64 = 0
+            while ctk() != TK_RPAREN() && ctk() != TK_EOF() {
+                if ctk() == TK_IDENT() {
+                    let pns = ctk_start()
+                    let pnl = ctk_end() - ctk_start()
+                    FN_PNAMES[(fi * 4 + pc) as usize] = pns
+                    FN_PLENS[(fi * 4 + pc) as usize] = pnl
+                    pc = pc + 1
+                }
+                eat()
+                if ctk() == TK_COLON() { eat(); eat() }
+                if ctk() == TK_COMMA() { eat() }
+            }
+            FN_NPARAMS[fi as usize] = pc
+            eat_expect(TK_RPAREN())
+            // Skip to {
+            while ctk() != TK_LBRACE() && ctk() != TK_EOF() { eat() }
+            let body_pos = LEX_POS
+            FN_LEXPOS[fi as usize] = body_pos
+            eat_expect(TK_LBRACE())
+            // Skip body (match braces)
+            var depth: i64 = 1
+            while depth > 0 {
+                if ctk() == TK_LBRACE() { depth = depth + 1 }
+                if ctk() == TK_RBRACE() { depth = depth - 1 }
+                if depth > 0 { eat() }
+                if ctk() == TK_EOF() { depth = 0 }
+            }
+            eat()  // closing }
+            FN_COUNT = FN_COUNT + 1
+        } else if ctk() == TK_VAR() {
+            eat()  // var
+            let vns = ctk_start()
+            let vnl = ctk_end() - ctk_start()
+            eat()  // name
+            if ctk() == TK_COLON() {
+                eat()  // :
+                if ctk() == TK_LBRACKET() {
+                    eat()  // [
+                    let tns = ctk_start()
+                    let tnl = ctk_end() - ctk_start()
+                    var stride: i64 = 8
+                    if tnl == 2 && src_byte(tns) == 105 && src_byte(tns+1) == 56 { stride = 1 }
+                    eat()  // type name
+                    if ctk() == TK_SEMI() {
+                        eat()  // ;
+                        let sz = TOKENS[3]
+                        eat()  // size
+                        eat_expect(TK_RBRACKET())
+                        // Skip optional = [0; N] initializer
+                        if ctk() == TK_EQ() {
+                            eat()  // =
+                            eat_expect(TK_LBRACKET())
+                            while ctk() != TK_RBRACKET() && ctk() != TK_EOF() { eat() }
+                            eat_expect(TK_RBRACKET())
+                        }
+                        GA_NS[GA_COUNT as usize] = vns
+                        GA_NL[GA_COUNT as usize] = vnl
+                        GA_SIZE[GA_COUNT as usize] = sz
+                        GA_BSSOFF[GA_COUNT as usize] = BSS_NEXT
+                        GA_STRIDE[GA_COUNT as usize] = stride
+                        BSS_NEXT = BSS_NEXT + (sz * stride)
+                        GA_COUNT = GA_COUNT + 1
+                    }
+                } else {
+                    // Scalar global: var NAME: type [= expr]
+                    eat()  // type name
+                    // Skip = initializer
+                    if ctk() == TK_EQ() {
+                        eat()  // =
+                        while ctk() != TK_EOF() && ctk() != TK_FN() && ctk() != TK_VAR() && ctk() != TK_LET() { eat() }
+                    }
+                    GA_NS[GA_COUNT as usize] = vns
+                    GA_NL[GA_COUNT as usize] = vnl
+                    GA_SIZE[GA_COUNT as usize] = 1
+                    GA_BSSOFF[GA_COUNT as usize] = BSS_NEXT
+                    GA_STRIDE[GA_COUNT as usize] = 8
+                    BSS_NEXT = BSS_NEXT + 8
+                    GA_COUNT = GA_COUNT + 1
+                }
+            }
+        } else if ctk() == TK_LET() {
+            // Skip top-level let declarations
+            while ctk() != TK_EOF() && ctk() != TK_FN() && ctk() != TK_VAR() { eat() }
+        } else {
+            eat()
+        }
+    }
+}
+
+// ============================================================================
+// CODEGEN PRIMITIVES
+// ============================================================================
+fn cg_mov_rax_imm(v: i64) with Mut, Panic { ce(0x48); ce(0xB8); ce64(v) }
+fn cg_emit_disp(slot: i64) with Mut, Panic {
+    // Emit 4-byte displacement for [rbp - slot*8]
+    // Avoid runtime arithmetic — use lookup
+    if slot == 0  { ce(0x00); ce(0x00); ce(0x00); ce(0x00) }
+    if slot == 1  { ce(0xF8); ce(0xFF); ce(0xFF); ce(0xFF) }
+    if slot == 2  { ce(0xF0); ce(0xFF); ce(0xFF); ce(0xFF) }
+    if slot == 3  { ce(0xE8); ce(0xFF); ce(0xFF); ce(0xFF) }
+    if slot == 4  { ce(0xE0); ce(0xFF); ce(0xFF); ce(0xFF) }
+    if slot == 5  { ce(0xD8); ce(0xFF); ce(0xFF); ce(0xFF) }
+    if slot == 6  { ce(0xD0); ce(0xFF); ce(0xFF); ce(0xFF) }
+    if slot == 7  { ce(0xC8); ce(0xFF); ce(0xFF); ce(0xFF) }
+    if slot == 8  { ce(0xC0); ce(0xFF); ce(0xFF); ce(0xFF) }
+    if slot == 9  { ce(0xB8); ce(0xFF); ce(0xFF); ce(0xFF) }
+    if slot == 10 { ce(0xB0); ce(0xFF); ce(0xFF); ce(0xFF) }
+    if slot == 11 { ce(0xA8); ce(0xFF); ce(0xFF); ce(0xFF) }
+    if slot == 12 { ce(0xA0); ce(0xFF); ce(0xFF); ce(0xFF) }
+    if slot == 13 { ce(0x98); ce(0xFF); ce(0xFF); ce(0xFF) }
+    if slot == 14 { ce(0x90); ce(0xFF); ce(0xFF); ce(0xFF) }
+    if slot == 15 { ce(0x88); ce(0xFF); ce(0xFF); ce(0xFF) }
+    if slot == 16 { ce(0x80); ce(0xFF); ce(0xFF); ce(0xFF) }
+    if slot > 16 { ce32(0 - (slot * 8)) }
+}
+fn cg_store(slot: i64) with Mut, Panic { ce(0x48); ce(0x89); ce(0x85); cg_emit_disp(slot) }
+fn cg_load(slot: i64) with Mut, Panic { ce(0x48); ce(0x8B); ce(0x85); cg_emit_disp(slot) }
+fn cg_push() with Mut, Panic { ce(0x50) }
+fn cg_pop_rcx() with Mut, Panic { ce(0x59) }
+
+// ============================================================================
+// FUNCTION CALL CODEGEN
+// ============================================================================
+fn cg_fn_call(fi: i64) with Mut, Panic, Div {
+    eat()  // (
+    var nargs: i64 = 0
+    if ctk() != TK_RPAREN() {
+        cg_binexpr()
+        cg_push()
+        nargs = 1
+        while ctk() == TK_COMMA() {
+            eat()
+            cg_binexpr()
+            cg_push()
+            nargs = nargs + 1
+        }
+    }
+    eat_expect(TK_RPAREN())
+    // Pop args into registers (reverse: last pushed = first popped)
+    if nargs >= 4 { ce(0x59) }  // pop rcx (arg3)
+    if nargs >= 3 { ce(0x5A) }  // pop rdx (arg2)
+    if nargs >= 2 { ce(0x5E) }  // pop rsi (arg1)
+    if nargs >= 1 { ce(0x5F) }  // pop rdi (arg0)
+    // call rel32 (placeholder)
+    let site = CODE_LEN + 1
+    ce(0xE8); ce32(0)
+    CALL_SITE[CALL_COUNT as usize] = site
+    CALL_TARGET[CALL_COUNT as usize] = fi
+    CALL_COUNT = CALL_COUNT + 1
+}
+
+// ============================================================================
+// BUILTIN FUNCTION SUPPORT (arg_count, get_arg, read_file, file_size, write_file)
+// ============================================================================
+fn check_builtin(ns: i64, nl: i64) -> i64 with Mut, Panic {
+    // arg_count (9): 97 114 103 95 99 111 117 110 116
+    if nl == 9 && src_byte(ns) == 97 && src_byte(ns+1) == 114 {
+        if src_byte(ns+2) == 103 && src_byte(ns+3) == 95 {
+            if src_byte(ns+4) == 99 && src_byte(ns+5) == 111 {
+                if src_byte(ns+6) == 117 && src_byte(ns+7) == 110 {
+                    if src_byte(ns+8) == 116 { return 0 }
+                }
+            }
+        }
+    }
+    // get_arg (7): 103 101 116 95 97 114 103
+    if nl == 7 && src_byte(ns) == 103 && src_byte(ns+1) == 101 {
+        if src_byte(ns+2) == 116 && src_byte(ns+3) == 95 {
+            if src_byte(ns+4) == 97 && src_byte(ns+5) == 114 {
+                if src_byte(ns+6) == 103 { return 1 }
+            }
+        }
+    }
+    // read_file (9): 114 101 97 100 95 102 105 108 101
+    if nl == 9 && src_byte(ns) == 114 && src_byte(ns+1) == 101 {
+        if src_byte(ns+2) == 97 && src_byte(ns+3) == 100 {
+            if src_byte(ns+4) == 95 && src_byte(ns+5) == 102 {
+                if src_byte(ns+6) == 105 && src_byte(ns+7) == 108 {
+                    if src_byte(ns+8) == 101 { return 2 }
+                }
+            }
+        }
+    }
+    // file_size (9): 102 105 108 101 95 115 105 122 101
+    if nl == 9 && src_byte(ns) == 102 && src_byte(ns+1) == 105 {
+        if src_byte(ns+2) == 108 && src_byte(ns+3) == 101 {
+            if src_byte(ns+4) == 95 && src_byte(ns+5) == 115 {
+                if src_byte(ns+6) == 105 && src_byte(ns+7) == 122 {
+                    if src_byte(ns+8) == 101 { return 3 }
+                }
+            }
+        }
+    }
+    // read_byte (9): 114 101 97 100 95 98 121 116 101
+    if nl == 9 && src_byte(ns) == 114 && src_byte(ns+1) == 101 {
+        if src_byte(ns+2) == 97 && src_byte(ns+3) == 100 {
+            if src_byte(ns+4) == 95 && src_byte(ns+5) == 98 {
+                if src_byte(ns+6) == 121 && src_byte(ns+7) == 116 {
+                    if src_byte(ns+8) == 101 { return 5 }
+                }
+            }
+        }
+    }
+    // write_file (10): 119 114 105 116 101 95 102 105 108 101
+    if nl == 10 && src_byte(ns) == 119 && src_byte(ns+1) == 114 {
+        if src_byte(ns+2) == 105 && src_byte(ns+3) == 116 {
+            if src_byte(ns+4) == 101 && src_byte(ns+5) == 95 {
+                if src_byte(ns+6) == 102 && src_byte(ns+7) == 105 {
+                    if src_byte(ns+8) == 108 && src_byte(ns+9) == 101 { return 4 }
+                }
+            }
+        }
+    }
+    -1
+}
+
+fn cg_bi_arg_count() with Mut, Panic {
+    cg_mov_rax_imm(0x600000)
+    ce(0x48); ce(0x8B); ce(0x00)              // mov rax, [rax]
+    ce(0x48); ce(0x8B); ce(0x00)              // mov rax, [rax]
+    ce(0x48); ce(0xFF); ce(0xC8)              // dec rax
+}
+
+fn cg_bi_get_arg() with Mut, Panic {
+    // rdi = n
+    ce(0x57)                                   // push rdi
+    cg_mov_rax_imm(0x600000)
+    ce(0x48); ce(0x8B); ce(0x00)              // mov rax, [rax]
+    ce(0x59)                                   // pop rcx
+    ce(0x48); ce(0x8D); ce(0x44); ce(0xC8); ce(0x10)  // lea rax, [rax+rcx*8+16]
+    ce(0x48); ce(0x8B); ce(0x00)              // mov rax, [rax]
+}
+
+fn cg_bi_read_file() with Mut, Panic {
+    // rdi = path
+    ce(0x31); ce(0xF6)                        // xor esi, esi
+    ce(0x31); ce(0xD2)                        // xor edx, edx
+    ce(0xB8); ce32(2)                         // mov eax, 2 (open)
+    ce(0x0F); ce(0x05)                        // syscall
+    ce(0x89); ce(0xC7)                        // mov edi, eax (fd)
+    cg_mov_rax_imm(0x600008)                  // read_buf address
+    ce(0x48); ce(0x89); ce(0xC6)              // mov rsi, rax
+    ce(0xBA); ce32(1048576)                   // mov edx, 1048576
+    ce(0x31); ce(0xC0)                        // xor eax, eax (read)
+    ce(0x0F); ce(0x05)                        // syscall
+    ce(0xB8); ce32(3)                         // mov eax, 3 (close)
+    ce(0x0F); ce(0x05)                        // syscall
+    cg_mov_rax_imm(0x600008)                  // return buf addr
+}
+
+fn cg_bi_file_size() with Mut, Panic {
+    // rdi = path
+    ce(0x31); ce(0xF6); ce(0x31); ce(0xD2)   // xor esi/edx
+    ce(0xB8); ce32(2); ce(0x0F); ce(0x05)    // open → fd in rax
+    ce(0x89); ce(0xC7)                        // mov edi, eax
+    ce(0x31); ce(0xF6)                        // xor esi (offset=0)
+    ce(0xBA); ce32(2)                         // SEEK_END
+    ce(0xB8); ce32(8); ce(0x0F); ce(0x05)    // lseek → size in rax
+    ce(0x50)                                   // push rax
+    ce(0xB8); ce32(3); ce(0x0F); ce(0x05)    // close
+    ce(0x58)                                   // pop rax (size)
+}
+
+fn cg_bi_read_byte() with Mut, Panic {
+    // rdi = offset into read_buf
+    cg_mov_rax_imm(0x600008)                  // read_buf base
+    ce(0x48); ce(0x01); ce(0xF8)              // add rax, rdi
+    ce(0x48); ce(0x0F); ce(0xB6); ce(0x00)   // movzx rax, byte [rax]
+}
+
+fn cg_bi_write_file() with Mut, Panic {
+    // rdi=path, rsi=data, rdx=len
+    ce(0x56); ce(0x52)                        // push rsi, push rdx
+    ce(0xBE); ce32(577)                       // O_WRONLY|O_CREAT|O_TRUNC
+    ce(0xBA); ce32(493)                       // 0755
+    ce(0xB8); ce32(2); ce(0x0F); ce(0x05)    // open → fd
+    ce(0x89); ce(0xC7)                        // mov edi, eax
+    ce(0x5A); ce(0x5E)                        // pop rdx, pop rsi
+    ce(0xB8); ce32(1); ce(0x0F); ce(0x05)    // write
+    ce(0xB8); ce32(3); ce(0x0F); ce(0x05)    // close
+}
+
+fn cg_builtin(bi: i64) with Mut, Panic, Div {
+    eat()  // (
+    var nargs: i64 = 0
+    if ctk() != TK_RPAREN() {
+        cg_binexpr()
+        cg_push()
+        nargs = 1
+        while ctk() == TK_COMMA() {
+            eat()
+            cg_binexpr()
+            cg_push()
+            nargs = nargs + 1
+        }
+    }
+    eat_expect(TK_RPAREN())
+    if nargs >= 3 { ce(0x5A) }
+    if nargs >= 2 { ce(0x5E) }
+    if nargs >= 1 { ce(0x5F) }
+    if bi == 0 { cg_bi_arg_count() }
+    if bi == 1 { cg_bi_get_arg() }
+    if bi == 2 { cg_bi_read_file() }
+    if bi == 3 { cg_bi_file_size() }
+    if bi == 4 { cg_bi_write_file() }
+    if bi == 5 { cg_bi_read_byte() }
+}
+
+// ============================================================================
+// EXPRESSION CODEGEN — result in rax
+// ============================================================================
+fn cg_expr() with Mut, Panic, Div {
+    // Unary minus
+    if ctk() == TK_MINUS() {
+        eat()
+        cg_mov_rax_imm(0)
+        cg_push()
+        cg_expr()
+        ce(0x48); ce(0x89); ce(0xC2)  // mov rdx, rax
+        cg_pop_rcx()
+        ce(0x48); ce(0x29); ce(0xD1); ce(0x48); ce(0x89); ce(0xC8)  // sub rcx,rdx; mov rax,rcx
+        return
+    }
+    // Integer literal
+    if ctk() == TK_INT() {
+        cg_mov_rax_imm(ctk_ival()); eat(); return
+    }
+    // Ident: variable load, array load, or function call
+    if ctk() == TK_IDENT() {
+        let ns = ctk_start()
+        let nl = ctk_end() - ctk_start()
+        eat()
+        // Array/pointer load: NAME[expr]
+        if ctk() == TK_LBRACKET() {
+            let ai = find_global_arr(ns, nl)
+            eat()  // [
+            cg_binexpr()  // index → rax
+            eat_expect(TK_RBRACKET())
+            if ai >= 0 {
+                cg_push()
+                let addr = ga_addr(ai)
+                cg_mov_rax_imm(addr)
+                cg_pop_rcx()
+                let stride = GA_STRIDE[ai as usize]
+                if stride == 1 {
+                    ce(0x48); ce(0x0F); ce(0xB6); ce(0x04); ce(0x08)  // movzx rax, byte [rax+rcx]
+                } else {
+                    ce(0x48); ce(0x8B); ce(0x04); ce(0xC8)  // mov rax, [rax+rcx*8]
+                }
+            } else {
+                // Pointer indexing: local var is a pointer, load byte
+                let pslot = find_var(ns, nl)
+                cg_push()  // save index
+                cg_load(pslot)  // rax = pointer
+                cg_pop_rcx()   // rcx = index
+                ce(0x48); ce(0x0F); ce(0xB6); ce(0x04); ce(0x08)  // movzx rax, byte [rax+rcx]
+            }
+            return
+        }
+        // Function call or builtin: NAME(args)
+        if ctk() == TK_LPAREN() {
+            let bi = check_builtin(ns, nl)
+            if bi >= 0 { cg_builtin(bi); return }
+            let fi = find_fn(ns, nl)
+            cg_fn_call(fi)
+            return
+        }
+        // Variable load (local first, then global)
+        let slot = find_var(ns, nl)
+        if slot >= 0 { cg_load(slot); return }
+        // Global: scalar → load value, array → load address
+        let gi = find_global_arr(ns, nl)
+        if gi >= 0 {
+            let gaddr = ga_addr(gi)
+            cg_mov_rax_imm(gaddr)
+            if GA_SIZE[gi as usize] == 1 {
+                ce(0x48); ce(0x8B); ce(0x00)  // mov rax, [rax] — scalar value
+            }
+        }
+        return
+    }
+    // Parenthesized expression
+    if ctk() == TK_LPAREN() { eat(); cg_binexpr(); eat_expect(TK_RPAREN()); return }
+    // If-expression: if cond { expr } else { expr }
+    if ctk() == TK_IF() { eat(); cg_if_stmt(); return }
+    eat()  // skip unknown
+}
+
+// Level 3 (highest arith): *, /, %, >>, <<
+fn cg_binexpr_mul() with Mut, Panic, Div {
+    cg_expr()
+    while ctk() == TK_AS() { eat(); eat() }
+    while ctk() == TK_STAR() || ctk() == TK_SLASH() || ctk() == TK_PERCENT() || ctk() == TK_SHR() || ctk() == TK_SHL() {
+        let op = ctk()
+        eat()
+        cg_push()
+        cg_expr()
+        ce(0x48); ce(0x89); ce(0xC2)
+        cg_pop_rcx()
+        if op == TK_STAR()  { ce(0x48); ce(0x89); ce(0xC8); ce(0x48); ce(0xF7); ce(0xE2) }
+        if op == TK_SLASH() { ce(0x52); ce(0x48); ce(0x89); ce(0xC8); ce(0x48); ce(0x99); ce(0x59); ce(0x48); ce(0xF7); ce(0xF9) }
+        if op == TK_PERCENT() { ce(0x52); ce(0x48); ce(0x89); ce(0xC8); ce(0x48); ce(0x99); ce(0x59); ce(0x48); ce(0xF7); ce(0xF9); ce(0x48); ce(0x89); ce(0xD0) }
+        if op == TK_SHR() { ce(0x48); ce(0x89); ce(0xC8); ce(0x48); ce(0x89); ce(0xD1); ce(0x48); ce(0xD3); ce(0xE8) }
+        if op == TK_SHL() { ce(0x48); ce(0x89); ce(0xC8); ce(0x48); ce(0x89); ce(0xD1); ce(0x48); ce(0xD3); ce(0xE0) }
+        while ctk() == TK_AS() { eat(); eat() }
+    }
+}
+
+// Level 2: +, -, comparisons, &, |
+fn cg_binexpr_arith() with Mut, Panic, Div {
+    cg_binexpr_mul()
+    while ctk() == TK_PLUS() || ctk() == TK_MINUS() || ctk() == TK_LT() || ctk() == TK_GT() || ctk() == TK_EQEQ() || ctk() == TK_BANGEQ() || ctk() == TK_LTEQ() || ctk() == TK_GTEQ() || ctk() == TK_AMP() || ctk() == TK_PIPE() {
+        let op = ctk()
+        eat()
+        cg_push()
+        cg_binexpr_mul()
+        ce(0x48); ce(0x89); ce(0xC2)
+        cg_pop_rcx()
+        if op == TK_PLUS()  { ce(0x48); ce(0x01); ce(0xD1); ce(0x48); ce(0x89); ce(0xC8) }
+        if op == TK_MINUS() { ce(0x48); ce(0x29); ce(0xD1); ce(0x48); ce(0x89); ce(0xC8) }
+        if op == TK_LT()     { ce(0x48); ce(0x39); ce(0xD1); ce(0x0F); ce(0x9C); ce(0xC0); ce(0x48); ce(0x0F); ce(0xB6); ce(0xC0) }
+        if op == TK_GT()     { ce(0x48); ce(0x39); ce(0xD1); ce(0x0F); ce(0x9F); ce(0xC0); ce(0x48); ce(0x0F); ce(0xB6); ce(0xC0) }
+        if op == TK_EQEQ()   { ce(0x48); ce(0x39); ce(0xD1); ce(0x0F); ce(0x94); ce(0xC0); ce(0x48); ce(0x0F); ce(0xB6); ce(0xC0) }
+        if op == TK_BANGEQ() { ce(0x48); ce(0x39); ce(0xD1); ce(0x0F); ce(0x95); ce(0xC0); ce(0x48); ce(0x0F); ce(0xB6); ce(0xC0) }
+        if op == TK_LTEQ()   { ce(0x48); ce(0x39); ce(0xD1); ce(0x0F); ce(0x9E); ce(0xC0); ce(0x48); ce(0x0F); ce(0xB6); ce(0xC0) }
+        if op == TK_GTEQ()   { ce(0x48); ce(0x39); ce(0xD1); ce(0x0F); ce(0x9D); ce(0xC0); ce(0x48); ce(0x0F); ce(0xB6); ce(0xC0) }
+        if op == TK_AMP() { ce(0x48); ce(0x21); ce(0xD1); ce(0x48); ce(0x89); ce(0xC8) }
+        if op == TK_PIPE() { ce(0x48); ce(0x09); ce(0xD1); ce(0x48); ce(0x89); ce(0xC8) }
+        while ctk() == TK_AS() { eat(); eat() }
+    }
+}
+
+// Full binary expression: arith (&&/|| arith)*
+fn cg_binexpr() with Mut, Panic, Div {
+    cg_binexpr_arith()
+    while ctk() == TK_AMPAMP() || ctk() == TK_PIPEPIPE() {
+        let op = ctk()
+        eat()
+        cg_push()
+        cg_binexpr_arith()
+        ce(0x48); ce(0x89); ce(0xC2)  // mov rdx, rax
+        cg_pop_rcx()
+        // Logical && : test rcx; setnz cl; test rdx; setnz dl; and cl,dl; movzx rax,cl
+        if op == TK_AMPAMP() { ce(0x48); ce(0x85); ce(0xC9); ce(0x0F); ce(0x95); ce(0xC1); ce(0x48); ce(0x85); ce(0xD2); ce(0x0F); ce(0x95); ce(0xC2); ce(0x20); ce(0xD1); ce(0x48); ce(0x0F); ce(0xB6); ce(0xC1) }
+        // Logical || : test rcx; setnz cl; test rdx; setnz dl; or cl,dl; movzx rax,cl
+        if op == TK_PIPEPIPE() { ce(0x48); ce(0x85); ce(0xC9); ce(0x0F); ce(0x95); ce(0xC1); ce(0x48); ce(0x85); ce(0xD2); ce(0x0F); ce(0x95); ce(0xC2); ce(0x08); ce(0xD1); ce(0x48); ce(0x0F); ce(0xB6); ce(0xC1) }
+    }
+}
+
+// ============================================================================
+// ARRAY STORE CODEGEN: NAME[expr] = expr
+// ============================================================================
+fn cg_arr_store(ai: i64) with Mut, Panic, Div {
+    eat()  // [
+    cg_binexpr()  // index → rax
+    eat_expect(TK_RBRACKET())
+    eat_expect(TK_EQ())
+    cg_push()  // save index
+    cg_binexpr()  // value → rax
+    // mov rdx, rax (value)
+    ce(0x48); ce(0x89); ce(0xC2)
+    // pop rcx (index)
+    ce(0x59)
+    // movabs rax, base_addr
+    let addr = ga_addr(ai)
+    cg_mov_rax_imm(addr)
+    let stride = GA_STRIDE[ai as usize]
+    if stride == 1 {
+        ce(0x88); ce(0x14); ce(0x08)  // mov [rax+rcx], dl (byte store)
+    } else {
+        ce(0x48); ce(0x89); ce(0x14); ce(0xC8)  // mov [rax+rcx*8], rdx
+    }
+}
+
+// ============================================================================
+// PRINT STRING CODEGEN (called with current token = string)
+// ============================================================================
+fn cg_print_str() with Mut, Panic, Div {
+    let jmp_site = CODE_LEN
+    ce(0xEB); ce(0x00)  // jmp over string data
+    let str_start = CODE_LEN
+    var si: i64 = 0
+    let ps = ctk_start()
+    let pl = ctk_end() - ctk_start()
+    while si < pl {
+        let ch = src_byte(ps + si)
+        if ch == 92 && si + 1 < pl {
+            let nc = src_byte(ps + si + 1)
+            if nc == 110 { ce(10) }
+            else if nc == 116 { ce(9) }
+            else if nc == 92 { ce(92) }
+            else { ce(ch) }
+            si = si + 2
+        } else { ce(ch); si = si + 1 }
+    }
+    let str_end = CODE_LEN
+    let slen = str_end - str_start
+    CODE[(jmp_site + 1) as usize] = slen as i8
+    let rip_after = CODE_LEN + 7
+    let disp = str_start - rip_after
+    ce(0x48); ce(0x8D); ce(0x35); ce32(disp)  // lea rsi, [rip+disp]
+    ce(0xBA); ce32(slen)                        // mov edx, len
+    ce(0xBF); ce32(1)                           // mov edi, 1
+    ce(0xB8); ce32(1)                           // mov eax, 1 (write)
+    ce(0x0F); ce(0x05)                          // syscall
+    eat()  // skip string token
+}
+
+// ============================================================================
+// PRINT_INT CODEGEN — itoa + write (rax = value)
+// ============================================================================
+fn cg_print_int_code() with Mut, Panic {
+    ce(0x48); ce(0x83); ce(0xEC); ce(32)              // sub rsp, 32
+    ce(0x4C); ce(0x8D); ce(0x44); ce(0x24); ce(30)   // lea r8, [rsp+30]
+    ce(0x45); ce(0x31); ce(0xC9)                       // xor r9d, r9d
+    ce(0x48); ce(0x85); ce(0xC0)                       // test rax, rax
+    ce(0x79); ce(0x06)                                 // jns +6
+    ce(0x48); ce(0xF7); ce(0xD8)                       // neg rax
+    ce(0x41); ce(0xB1); ce(0x01)                       // mov r9b, 1
+    ce(0x48); ce(0x85); ce(0xC0)                       // test rax, rax
+    ce(0x75); ce(0x09)                                 // jnz loop
+    ce(0x41); ce(0xC6); ce(0x00); ce(0x30)            // mov byte [r8], '0'
+    ce(0x49); ce(0xFF); ce(0xC8)                       // dec r8
+    let jz_site = CODE_LEN
+    ce(0xEB); ce(0x00)                                 // jmp done
+    let loop_top = CODE_LEN
+    ce(0x31); ce(0xD2)                                 // xor edx, edx
+    ce(0x48); ce(0xC7); ce(0xC1); ce32(10)            // mov rcx, 10
+    ce(0x48); ce(0xF7); ce(0xF1)                       // div rcx
+    ce(0x80); ce(0xC2); ce(0x30)                       // add dl, '0'
+    ce(0x41); ce(0x88); ce(0x10)                       // mov [r8], dl
+    ce(0x49); ce(0xFF); ce(0xC8)                       // dec r8
+    ce(0x48); ce(0x85); ce(0xC0)                       // test rax, rax
+    let back = loop_top - (CODE_LEN + 2)
+    ce(0x75); ce(back & 0xFF)                          // jnz loop
+    ce(0x45); ce(0x84); ce(0xC9)                       // test r9b, r9b
+    ce(0x74); ce(0x07)                                 // jz nosign
+    ce(0x41); ce(0xC6); ce(0x00); ce(0x2D)            // mov byte [r8], '-'
+    ce(0x49); ce(0xFF); ce(0xC8)                       // dec r8
+    let done_pos = CODE_LEN
+    CODE[(jz_site + 1) as usize] = ((done_pos - jz_site - 2) & 0xFF) as i8
+    ce(0x49); ce(0xFF); ce(0xC0)                       // inc r8
+    ce(0x4C); ce(0x89); ce(0xC6)                       // mov rsi, r8
+    ce(0x48); ce(0x8D); ce(0x54); ce(0x24); ce(31)   // lea rdx, [rsp+31]
+    ce(0x4C); ce(0x29); ce(0xC2)                       // sub rdx, r8
+    ce(0xBF); ce32(1); ce(0xB8); ce32(1); ce(0x0F); ce(0x05)  // write(1, rsi, rdx)
+    ce(0x48); ce(0x83); ce(0xC4); ce(32)              // add rsp, 32
+}
+
+// ============================================================================
+// WHILE STATEMENT CODEGEN
+// ============================================================================
+fn cg_while_stmt() with Mut, Panic, Div {
+    let loop_start = CODE_LEN
+    LOOP_STACK[LOOP_DEPTH as usize] = loop_start
+    LOOP_DEPTH = LOOP_DEPTH + 1
+    cg_binexpr()
+    ce(0x48); ce(0x85); ce(0xC0)  // test rax, rax
+    let jz_site = CODE_LEN
+    ce(0x0F); ce(0x84); ce32(0)   // jz end (placeholder)
+    eat_expect(TK_LBRACE())
+    while ctk() != TK_RBRACE() && ctk() != TK_EOF() {
+        cg_stmt()
+        if ctk() == TK_SEMI() { eat() }
+    }
+    eat_expect(TK_RBRACE())
+    LOOP_DEPTH = LOOP_DEPTH - 1
+    let jmp_back = loop_start - (CODE_LEN + 5)
+    ce(0xE9); ce32(jmp_back)  // jmp loop_start
+    let end_pos = CODE_LEN
+    let jz_rel = end_pos - (jz_site + 6)
+    CODE[(jz_site + 2) as usize] = (jz_rel & 0xFF) as i8
+    CODE[(jz_site + 3) as usize] = ((jz_rel >> 8) & 0xFF) as i8
+    CODE[(jz_site + 4) as usize] = ((jz_rel >> 16) & 0xFF) as i8
+    CODE[(jz_site + 5) as usize] = ((jz_rel >> 24) & 0xFF) as i8
+}
+
+// ============================================================================
+// IF/ELSE STATEMENT CODEGEN
+// ============================================================================
+fn cg_if_stmt() with Mut, Panic, Div {
+    cg_binexpr()
+    ce(0x48); ce(0x85); ce(0xC0)  // test rax, rax
+    let jz_site = CODE_LEN
+    ce(0x0F); ce(0x84); ce32(0)   // jz else/end
+    eat_expect(TK_LBRACE())
+    while ctk() != TK_RBRACE() && ctk() != TK_EOF() { cg_stmt(); if ctk() == TK_SEMI() { eat() } }
+    eat_expect(TK_RBRACE())
+    if ctk() == TK_ELSE() {
+        eat()
+        let jmp_site = CODE_LEN
+        ce(0xE9); ce32(0)  // jmp past else
+        let else_start = CODE_LEN
+        let jz_rel = else_start - (jz_site + 6)
+        CODE[(jz_site+2) as usize] = (jz_rel & 0xFF) as i8
+        CODE[(jz_site+3) as usize] = ((jz_rel >> 8) & 0xFF) as i8
+        CODE[(jz_site+4) as usize] = ((jz_rel >> 16) & 0xFF) as i8
+        CODE[(jz_site+5) as usize] = ((jz_rel >> 24) & 0xFF) as i8
+        if ctk() == TK_IF() {
+            eat(); cg_if_stmt()  // else if → recurse
+        } else {
+            eat_expect(TK_LBRACE())
+            while ctk() != TK_RBRACE() && ctk() != TK_EOF() { cg_stmt(); if ctk() == TK_SEMI() { eat() } }
+            eat_expect(TK_RBRACE())
+        }
+        let after_else = CODE_LEN
+        let jmp_rel = after_else - (jmp_site + 5)
+        CODE[(jmp_site+1) as usize] = (jmp_rel & 0xFF) as i8
+        CODE[(jmp_site+2) as usize] = ((jmp_rel >> 8) & 0xFF) as i8
+        CODE[(jmp_site+3) as usize] = ((jmp_rel >> 16) & 0xFF) as i8
+        CODE[(jmp_site+4) as usize] = ((jmp_rel >> 24) & 0xFF) as i8
+    } else {
+        let end_pos = CODE_LEN
+        let jz_rel2 = end_pos - (jz_site + 6)
+        CODE[(jz_site+2) as usize] = (jz_rel2 & 0xFF) as i8
+        CODE[(jz_site+3) as usize] = ((jz_rel2 >> 8) & 0xFF) as i8
+        CODE[(jz_site+4) as usize] = ((jz_rel2 >> 16) & 0xFF) as i8
+        CODE[(jz_site+5) as usize] = ((jz_rel2 >> 24) & 0xFF) as i8
+    }
+}
+
+// ============================================================================
+// STATEMENT CODEGEN
+// ============================================================================
+fn cg_stmt() with Mut, Panic, Div {
+    // var/let name [: type] = expr
+    if ctk() == TK_VAR() || ctk() == TK_LET() {
+        eat()
+        let dns = ctk_start()
+        let dnl = ctk_end() - ctk_start()
+        eat()  // name
+        if ctk() == TK_COLON() { eat(); eat() }  // skip : type
+        eat_expect(TK_EQ())
+        cg_binexpr()
+        let nslot = NEXT_SLOT
+        NEXT_SLOT = NEXT_SLOT + 1
+        LV_NS[LV_COUNT as usize] = dns
+        LV_NL[LV_COUNT as usize] = dnl
+        LV_SLOT[LV_COUNT as usize] = nslot
+        LV_COUNT = LV_COUNT + 1
+        cg_store(nslot)
+        return
+    }
+    // IDENT: assignment, array store, or function call
+    if ctk() == TK_IDENT() {
+        let ns = ctk_start()
+        let nl = ctk_end() - ctk_start()
+        eat()
+        if ctk() == TK_LBRACKET() {
+            let ai = find_global_arr(ns, nl)
+            eat()  // [
+            cg_binexpr()  // index → rax
+            eat_expect(TK_RBRACKET())
+            if ctk() == TK_EQ() {
+                // Array store: NAME[expr] = expr
+                eat_expect(TK_EQ())
+                cg_push()  // save index
+                cg_binexpr()  // value → rax
+                ce(0x48); ce(0x89); ce(0xC2)  // mov rdx, rax
+                ce(0x59)  // pop rcx (index)
+                let sa = ga_addr(ai)
+                cg_mov_rax_imm(sa)
+                let ss = GA_STRIDE[ai as usize]
+                if ss == 1 { ce(0x88); ce(0x14); ce(0x08) }
+                else { ce(0x48); ce(0x89); ce(0x14); ce(0xC8) }
+            } else {
+                // Array load as bare expression
+                cg_push()
+                let la = ga_addr(ai)
+                cg_mov_rax_imm(la)
+                cg_pop_rcx()
+                let ls = GA_STRIDE[ai as usize]
+                if ls == 1 { ce(0x48); ce(0x0F); ce(0xB6); ce(0x04); ce(0x08) }
+                else { ce(0x48); ce(0x8B); ce(0x04); ce(0xC8) }
+            }
+            return
+        }
+        if ctk() == TK_LPAREN() {
+            let bi = check_builtin(ns, nl)
+            if bi >= 0 { cg_builtin(bi); return }
+            let fi = find_fn(ns, nl)
+            cg_fn_call(fi)
+            return
+        }
+        let slot = find_var(ns, nl)
+        if slot >= 0 && ctk() == TK_EQ() { eat(); cg_binexpr(); cg_store(slot); return }
+        if slot >= 0 {
+            // Bare variable expression (implicit return like `x*x`, `i+1`, `mid`)
+            cg_load(slot)
+            while ctk() == TK_AS() { eat(); eat() }
+            var bop: i64 = 0
+            while ctk() == TK_STAR() || ctk() == TK_SLASH() || ctk() == TK_PERCENT() || ctk() == TK_SHR() || ctk() == TK_SHL() {
+                bop = ctk(); eat(); cg_push(); cg_expr()
+                ce(0x48); ce(0x89); ce(0xC2); cg_pop_rcx()
+                if bop == TK_STAR()    { ce(0x48); ce(0x89); ce(0xC8); ce(0x48); ce(0xF7); ce(0xE2) }
+                if bop == TK_SLASH()   { ce(0x52); ce(0x48); ce(0x89); ce(0xC8); ce(0x48); ce(0x99); ce(0x59); ce(0x48); ce(0xF7); ce(0xF9) }
+                if bop == TK_PERCENT() { ce(0x52); ce(0x48); ce(0x89); ce(0xC8); ce(0x48); ce(0x99); ce(0x59); ce(0x48); ce(0xF7); ce(0xF9); ce(0x48); ce(0x89); ce(0xD0) }
+                if bop == TK_SHR()     { ce(0x48); ce(0x89); ce(0xC8); ce(0x48); ce(0x89); ce(0xD1); ce(0x48); ce(0xD3); ce(0xE8) }
+                if bop == TK_SHL()     { ce(0x48); ce(0x89); ce(0xC8); ce(0x48); ce(0x89); ce(0xD1); ce(0x48); ce(0xD3); ce(0xE0) }
+                while ctk() == TK_AS() { eat(); eat() }
+            }
+            while ctk() == TK_PLUS() || ctk() == TK_MINUS() || ctk() == TK_LT() || ctk() == TK_GT() || ctk() == TK_EQEQ() || ctk() == TK_BANGEQ() || ctk() == TK_LTEQ() || ctk() == TK_GTEQ() || ctk() == TK_AMP() || ctk() == TK_PIPE() {
+                bop = ctk(); eat(); cg_push(); cg_binexpr_mul()
+                ce(0x48); ce(0x89); ce(0xC2); cg_pop_rcx()
+                if bop == TK_PLUS()   { ce(0x48); ce(0x01); ce(0xD1); ce(0x48); ce(0x89); ce(0xC8) }
+                if bop == TK_MINUS()  { ce(0x48); ce(0x29); ce(0xD1); ce(0x48); ce(0x89); ce(0xC8) }
+                if bop == TK_LT()     { ce(0x48); ce(0x39); ce(0xD1); ce(0x0F); ce(0x9C); ce(0xC0); ce(0x48); ce(0x0F); ce(0xB6); ce(0xC0) }
+                if bop == TK_GT()     { ce(0x48); ce(0x39); ce(0xD1); ce(0x0F); ce(0x9F); ce(0xC0); ce(0x48); ce(0x0F); ce(0xB6); ce(0xC0) }
+                if bop == TK_EQEQ()   { ce(0x48); ce(0x39); ce(0xD1); ce(0x0F); ce(0x94); ce(0xC0); ce(0x48); ce(0x0F); ce(0xB6); ce(0xC0) }
+                if bop == TK_BANGEQ() { ce(0x48); ce(0x39); ce(0xD1); ce(0x0F); ce(0x95); ce(0xC0); ce(0x48); ce(0x0F); ce(0xB6); ce(0xC0) }
+                if bop == TK_LTEQ()   { ce(0x48); ce(0x39); ce(0xD1); ce(0x0F); ce(0x9E); ce(0xC0); ce(0x48); ce(0x0F); ce(0xB6); ce(0xC0) }
+                if bop == TK_GTEQ()   { ce(0x48); ce(0x39); ce(0xD1); ce(0x0F); ce(0x9D); ce(0xC0); ce(0x48); ce(0x0F); ce(0xB6); ce(0xC0) }
+                if bop == TK_AMP()    { ce(0x48); ce(0x21); ce(0xD1); ce(0x48); ce(0x89); ce(0xC8) }
+                if bop == TK_PIPE()   { ce(0x48); ce(0x09); ce(0xD1); ce(0x48); ce(0x89); ce(0xC8) }
+                while ctk() == TK_AS() { eat(); eat() }
+            }
+            while ctk() == TK_AMPAMP() || ctk() == TK_PIPEPIPE() {
+                bop = ctk(); eat(); cg_push(); cg_binexpr_arith()
+                ce(0x48); ce(0x89); ce(0xC2); cg_pop_rcx()
+                if bop == TK_AMPAMP()   { ce(0x48); ce(0x85); ce(0xC9); ce(0x0F); ce(0x95); ce(0xC1); ce(0x48); ce(0x85); ce(0xD2); ce(0x0F); ce(0x95); ce(0xC2); ce(0x20); ce(0xD1); ce(0x48); ce(0x0F); ce(0xB6); ce(0xC1) }
+                if bop == TK_PIPEPIPE() { ce(0x48); ce(0x85); ce(0xC9); ce(0x0F); ce(0x95); ce(0xC1); ce(0x48); ce(0x85); ce(0xD2); ce(0x0F); ce(0x95); ce(0xC2); ce(0x08); ce(0xD1); ce(0x48); ce(0x0F); ce(0xB6); ce(0xC1) }
+            }
+            return
+        }
+        // Global scalar assignment
+        let gi = find_global_arr(ns, nl)
+        if gi >= 0 && ctk() == TK_EQ() {
+            eat()
+            cg_binexpr()
+            // mov rdx, rax; movabs rax, addr; mov [rax], rdx
+            ce(0x48); ce(0x89); ce(0xC2)
+            let gaddr = ga_addr(gi)
+            cg_mov_rax_imm(gaddr)
+            ce(0x48); ce(0x89); ce(0x10)  // mov [rax], rdx
+        }
+        return
+    }
+    // return [expr]
+    if ctk() == TK_RETURN() {
+        eat()
+        // Only parse expression if next token is NOT } or ;
+        if ctk() != TK_RBRACE() && ctk() != TK_SEMI() && ctk() != TK_EOF() {
+            cg_binexpr()
+        }
+        ce(0xC9); ce(0xC3)  // leave; ret
+        return
+    }
+    // print("string")
+    if ctk() == TK_PRINT() {
+        eat(); eat_expect(TK_LPAREN())
+        if ctk() == TK_STRING() { cg_print_str() }
+        eat_expect(TK_RPAREN())
+        return
+    }
+    // print_int(expr)
+    if ctk() == TK_PRINT_INT() {
+        eat(); eat_expect(TK_LPAREN())
+        cg_binexpr()
+        eat_expect(TK_RPAREN())
+        cg_print_int_code()
+        return
+    }
+    // continue
+    if ctk() == TK_CONTINUE() {
+        eat()
+        let tgt = LOOP_STACK[(LOOP_DEPTH - 1) as usize]
+        let rel = tgt - (CODE_LEN + 5)
+        ce(0xE9); ce32(rel)
+        return
+    }
+    // while
+    if ctk() == TK_WHILE() { eat(); cg_while_stmt(); return }
+    // if
+    if ctk() == TK_IF() { eat(); cg_if_stmt(); return }
+    // bare expression
+    if ctk() != TK_RBRACE() && ctk() != TK_EOF() && ctk() != TK_SEMI() {
+        cg_binexpr()
+    }
+}
+
+// ============================================================================
+// COMPILE ONE FUNCTION
+// ============================================================================
+fn compile_fn(fi: i64) with Mut, Panic, Div {
+    FN_CODEOFF[fi as usize] = CODE_LEN
+    LV_COUNT = 0
+    NEXT_SLOT = 1
+    LOOP_DEPTH = 0
+    let nparams = FN_NPARAMS[fi as usize]
+    var pi: i64 = 0
+    while pi < nparams {
+        LV_NS[pi as usize] = FN_PNAMES[(fi * 4 + pi) as usize]
+        LV_NL[pi as usize] = FN_PLENS[(fi * 4 + pi) as usize]
+        LV_SLOT[pi as usize] = pi + 1
+        pi = pi + 1
+    }
+    LV_COUNT = nparams
+    NEXT_SLOT = nparams + 1
+    // Prologue
+    ce(0x55)                                    // push rbp
+    ce(0x48); ce(0x89); ce(0xE5)               // mov rbp, rsp
+    ce(0x48); ce(0x81); ce(0xEC); ce32(256)    // sub rsp, 256
+    // Store params from registers
+    if nparams >= 1 { ce(0x48); ce(0x89); ce(0xBD); ce32(0 - 8) }   // mov [rbp-8], rdi
+    if nparams >= 2 { ce(0x48); ce(0x89); ce(0xB5); ce32(0 - 16) }  // mov [rbp-16], rsi
+    if nparams >= 3 { ce(0x48); ce(0x89); ce(0x95); ce32(0 - 24) }  // mov [rbp-24], rdx
+    if nparams >= 4 { ce(0x48); ce(0x89); ce(0x8D); ce32(0 - 32) }  // mov [rbp-32], rcx
+    // Seek lexer to function body
+    LEX_POS = FN_LEXPOS[fi as usize]
+    lex_next()
+    // Compile body
+    while ctk() != TK_RBRACE() && ctk() != TK_EOF() {
+        cg_stmt()
+        if ctk() == TK_SEMI() { eat() }
+    }
+    // Epilogue: leave; ret (rax preserved for implicit returns)
+    ce(0xC9); ce(0xC3)            // leave; ret
+}
+
+// ============================================================================
+// CALL PATCHING
+// ============================================================================
+fn patch_call(ci: i64) with Mut, Panic {
+    let site = CALL_SITE[ci as usize]
+    let tgt = CALL_TARGET[ci as usize]
+    let rel = FN_CODEOFF[tgt as usize] - (site + 4)
+    CODE[site as usize] = (rel & 0xFF) as i8
+    CODE[(site + 1) as usize] = ((rel >> 8) & 0xFF) as i8
+    CODE[(site + 2) as usize] = ((rel >> 16) & 0xFF) as i8
+    CODE[(site + 3) as usize] = ((rel >> 24) & 0xFF) as i8
+}
+
+fn is_main_fn(fi: i64) -> i64 with Mut, Panic {
+    if FN_NL[fi as usize] != 4 { return 0 }
+    if src_byte(FN_NS[fi as usize]) != 109 { return 0 }
+    if src_byte(FN_NS[fi as usize] + 1) != 97 { return 0 }
+    if src_byte(FN_NS[fi as usize] + 2) != 105 { return 0 }
+    if src_byte(FN_NS[fi as usize] + 3) != 110 { return 0 }
+    1
+}
+
+fn write_trampoline(mi: i64) with Mut, Panic {
+    let moff = FN_CODEOFF[mi as usize]
+    // _start: save rsp to BSS[0], then call main, then exit
+    // movabs rax, 0x600000 (10 bytes)
+    CODE[0] = 0x48 as i8; CODE[1] = 0xB8 as i8
+    CODE[2] = 0 as i8; CODE[3] = 0 as i8; CODE[4] = 0x60 as i8; CODE[5] = 0 as i8
+    CODE[6] = 0 as i8; CODE[7] = 0 as i8; CODE[8] = 0 as i8; CODE[9] = 0 as i8
+    // mov [rax], rsp (3 bytes)
+    CODE[10] = 0x48 as i8; CODE[11] = 0x89 as i8; CODE[12] = 0x20 as i8
+    // call main (5 bytes)
+    let rel = moff - 18  // next_instr at offset 18
+    CODE[13] = 0xE8 as i8
+    CODE[14] = (rel & 0xFF) as i8
+    CODE[15] = ((rel >> 8) & 0xFF) as i8
+    CODE[16] = ((rel >> 16) & 0xFF) as i8
+    CODE[17] = ((rel >> 24) & 0xFF) as i8
+    // mov edi, eax (2 bytes)
+    CODE[18] = 0x89 as i8; CODE[19] = 0xC7 as i8
+    // mov eax, 60 (5 bytes)
+    CODE[20] = 0xB8 as i8; CODE[21] = 60 as i8; CODE[22] = 0 as i8; CODE[23] = 0 as i8; CODE[24] = 0 as i8
+    // syscall (2 bytes)
+    CODE[25] = 0x0F as i8; CODE[26] = 0x05 as i8
+}
+
+// ============================================================================
+// ELF WRITER — 2 segments (code RX + BSS RW)
+// ============================================================================
+var ELF: [i8; 1048576] = [0; 1048576]
+var ELF_LEN: i64 = 0
+fn elf_emit(b: i64) with Mut, Panic { ELF[ELF_LEN as usize] = b as i8; ELF_LEN = ELF_LEN + 1 }
+fn elf_emit32(v: i64) with Mut, Panic { elf_emit(v&0xFF); elf_emit((v>>8)&0xFF); elf_emit((v>>16)&0xFF); elf_emit((v>>24)&0xFF) }
+fn elf_emit64(v: i64) with Mut, Panic { elf_emit32(v&0xFFFFFFFF); elf_emit32((v>>32)&0xFFFFFFFF) }
+
+fn build_elf() with Mut, Panic, Div {
+    ELF_LEN = 0
+    let hdr: i64 = 176  // 64 + 56 + 56
+    let entry = 0x400000 + hdr
+    // ELF header
+    elf_emit(0x7F); elf_emit(69); elf_emit(76); elf_emit(70)
+    elf_emit(2); elf_emit(1); elf_emit(1); elf_emit(0)
+    var pi: i64 = 0; while pi < 8 { elf_emit(0); pi = pi + 1 }
+    elf_emit(2); elf_emit(0)              // ET_EXEC
+    elf_emit(0x3E); elf_emit(0)           // x86-64
+    elf_emit32(1)                          // version
+    elf_emit64(entry)                      // e_entry
+    elf_emit64(64)                         // e_phoff
+    elf_emit64(0)                          // e_shoff
+    elf_emit32(0)                          // e_flags
+    elf_emit(64); elf_emit(0)              // e_ehsize
+    elf_emit(56); elf_emit(0)              // e_phentsize
+    elf_emit(2); elf_emit(0)               // e_phnum = 2
+    elf_emit(0); elf_emit(0)
+    elf_emit(0); elf_emit(0)
+    elf_emit(0); elf_emit(0)
+    // PT_LOAD #1: code (RX)
+    elf_emit32(1)                          // PT_LOAD
+    elf_emit32(5)                          // PF_X|PF_R
+    elf_emit64(0)                          // p_offset
+    elf_emit64(0x400000)                   // p_vaddr
+    elf_emit64(0x400000)                   // p_paddr
+    let total = hdr + CODE_LEN
+    elf_emit64(total)                      // p_filesz
+    elf_emit64(total)                      // p_memsz
+    elf_emit64(0x1000)                     // p_align
+    // PT_LOAD #2: BSS (RW)
+    elf_emit32(1)                          // PT_LOAD
+    elf_emit32(6)                          // PF_W|PF_R
+    elf_emit64(0)                          // p_offset
+    elf_emit64(0x600000)                   // p_vaddr
+    elf_emit64(0x600000)                   // p_paddr
+    elf_emit64(0)                          // p_filesz (no file data)
+    let bss_size = BSS_NEXT + 4096
+    elf_emit64(bss_size)                   // p_memsz
+    elf_emit64(0x1000)                     // p_align
+    // Emit code
+    var ci: i64 = 0
+    while ci < CODE_LEN { elf_emit((CODE[ci as usize] as i64) & 0xFF); ci = ci + 1 }
+}
+
+// ============================================================================
+// MAIN
+// ============================================================================
+fn main() -> i64 with Mut, Panic, Div {
+    let argc = arg_count()
+    if argc < 2 { print("Usage: lean_single <source> <output>\n"); return 1 }
+    let source_path = get_arg(0)
+    let output_path = get_arg(1)
+
+    let raw = read_file(source_path)
+    let size = file_size(source_path)
+    var ri: i64 = 0
+    while ri < size { SRC[ri as usize] = raw[ri as usize]; ri = ri + 1 }
+    SRC_LEN = size
+
+    scan_fns()
+    print("lean_single: ")
+    print_int(FN_COUNT)
+    print(" fns, ")
+    print_int(GA_COUNT)
+    print(" arrays, BSS=")
+    print_int(BSS_NEXT)
+    print("\n")
+
+    // Reserve 27 bytes for _start trampoline (saves rsp + call main + exit)
+    CODE_LEN = 27
+    CALL_COUNT = 0
+
+    // Pass 2: compile each function
+    var fi: i64 = 0
+    while fi < FN_COUNT {
+        compile_fn(fi)
+        fi = fi + 1
+    }
+
+    // Pass 3: patch call sites (INLINE — can't use function call for patching!)
+    fi = 0
+    while fi < CALL_COUNT {
+        var p_site = CALL_SITE[fi as usize]
+        var p_tgt = CALL_TARGET[fi as usize]
+        var p_rel = FN_CODEOFF[p_tgt as usize] - (p_site + 4)
+        CODE[p_site as usize] = (p_rel & 0xFF) as i8
+        CODE[(p_site + 1) as usize] = ((p_rel >> 8) & 0xFF) as i8
+        CODE[(p_site + 2) as usize] = ((p_rel >> 16) & 0xFF) as i8
+        CODE[(p_site + 3) as usize] = ((p_rel >> 24) & 0xFF) as i8
+        fi = fi + 1
+    }
+
+    // Write _start trampoline (call main → exit)
+    var main_idx: i64 = 0
+    fi = 0
+    while fi < FN_COUNT {
+        if is_main_fn(fi) == 1 { main_idx = fi }
+        fi = fi + 1
+    }
+    write_trampoline(main_idx)
+
+    print("lean_single: code=")
+    print_int(CODE_LEN)
+    print(" bytes\n")
+
+    build_elf()
+    write_file(output_path, ELF, ELF_LEN)
+    print("lean_single: ok\n")
+    0
+}
